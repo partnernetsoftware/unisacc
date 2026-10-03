@@ -594,3 +594,33 @@ def _tokens(self, spec):
 
 
 Run.tokens = _tokens
+
+
+
+# ---- K2 round 3, enc field chains: per-element formatted sequence names ------
+# opts mapseq {"NAME{col}": {"over": PATH, "parts": [...]}}: one sequence per element x
+#   of PATH, named NAME formatted over x.  A part {"splice": COL} appends the
+#   sequences named in x[COL] (a list; built earlier in this mapseq or in env); a part
+#   {"where": {col: VALUE}, "acts": [...]} (where optional) appends acts formatted
+#   over x (a whole-cell "{col}" keeps the value's type).
+_mapseq0 = Run.mapseq
+
+
+def _mapseq_each(self, spec, facts, bd):
+    out = _mapseq0(self, {k: v for k, v in spec.items() if "{" not in k}, facts, bd)
+    cell = lambda c, x: (x[c[1:-1]] if re.fullmatch(r"\{\w+\}", c) else c.format(**x)) if isinstance(c, str) else c
+    for key, d in ((k, v) for k, v in spec.items() if "{" in k):
+        for x in _path(facts, d["over"]):
+            acts = []
+            for part in d["parts"]:
+                if "splice" in part:
+                    for n in x[part["splice"]]:
+                        acts.extend(out[n] if n in out else self.env[n])
+                elif all(x.get(c) == v for c, v in part.get("where", {}).items()):
+                    acts.extend(tuple(cell(c, x) for c in a) for a in part["acts"])
+            out[key.format(**x)] = acts
+    return out
+
+
+Run.mapseq = _mapseq_each
+# ---- end K2 round 3 enc field chains ------------------------------------------

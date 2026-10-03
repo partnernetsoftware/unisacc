@@ -447,5 +447,91 @@ def main(argv):
     return 1 if bad else 0
 
 
+def _fieldchain():
+    """Field-chain recorder for image headers: domain items only.  Each field row is
+    (width, value int|register name, lead = the literal-byte / computation item
+    names that precede it); `tail` is the lead after the last field."""
+    class C:
+        def __init__(self):
+            self.rows, self.lead = [], []
+        def lit(self, bs):
+            self.lead += ["byte%d" % b for b in bs]
+        def comp(self, name):
+            self.lead.append(name)
+        def field(self, w, v, endian="little"):
+            self.rows.append(dict(width=w, value=v, src="const" if isinstance(v, int) else "reg",
+                                  endian=endian, lead=self.lead))
+            self.lead = []
+    return C()
+
+
+def _rows(name, rows):
+    import json
+    out = ["@%s\ti:int\twidth:int\tsrc:str\tvalue:json\tendian:str\tlead:json" % name]
+    for i, r in enumerate(rows):
+        out.append("\t%d\t%d\t%s\t%s\t%s\t%s" % (i, r["width"], r["src"], json.dumps(r["value"]), r["endian"],
+                                                json.dumps(r["lead"], separators=(",", ":"))))
+    return out
+
+
+def pefields():
+    """PE32+ header and import-directory field schema (unisa/image/pe.py)."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from unisa.image import pe
+    n = len(pe.IMPORTS); iat = 40 + 8 * (n + 1); off = iat + 8 * (n + 1)
+    names = []
+    for name in pe.IMPORTS:
+        raw = b"\0\0" + name.encode() + b"\0"; raw += b"\0" * (len(raw) % 2)
+        names.append((off, raw)); off += len(raw)
+    dlloff = off; off += len(pe.DLL) + 1; cfg = (off + 7) & -8; idlen = cfg + pe.LOADCFG
+    consts = dict(DATA=1 << 40, RELOCS=4 << 40, SORTED=5 << 40, TEXT_RVA=pe.TEXT_RVA, IMAGEBASE=pe.IMAGEBASE,
+                  HDR_FILE=pe.HDR_FILE, section_minus_one=pe.SECT_ALIGN - 1, section_mask=-pe.SECT_ALIGN,
+                  file_minus_one=pe.FILE_ALIGN - 1, file_mask=-pe.FILE_ALIGN,
+                  import_vsize=(idlen + pe.SECT_ALIGN - 1) & -pe.SECT_ALIGN,
+                  import_fsize=(idlen + pe.FILE_ALIGN - 1) & -pe.FILE_ALIGN,
+                  cookie_at=cfg + pe.COOKIE_FIELD, cfg=cfg, iat=iat, dlloff=dlloff)
+    out = ["=%s\tint\t%d" % kv for kv in consts.items()]
+    used = set()
+    for arch in sorted(pe.MACHINE):
+        c = _fieldchain()
+        c.lit(b"MZ" + bytes(58)); c.field(4, 64); c.lit(b"PE\0\0")
+        for w, v in [(2, pe.MACHINE[arch]), (2, 4), (4, 0), (4, 0), (4, 0), (2, 240), (2, 0x22)]: c.field(w, v)
+        c.comp("entry-value")
+        for w, v in [(2, 0x20B), (1, 14), (1, 0), (4, "pe_tf"), (4, 0), (4, 0), (4, "pe_entry"), (4, pe.TEXT_RVA), (8, pe.IMAGEBASE), (4, pe.SECT_ALIGN), (4, pe.FILE_ALIGN),
+                     (2, 4), (2, 0), (2, 0), (2, 0), (2, 4), (2, 0), (4, 0), (4, "pe_img"), (4, pe.HDR_FILE), (4, 0), (2, 3), (2, 0x8160), (8, 0x100000), (8, 0x1000), (8, 0x100000), (8, 0x1000), (4, 0), (4, 16)]:
+            c.field(w, v)
+        c.comp("directory-values")
+        dirs = {1: ("pe_rd", 40), 5: ("pe_rr", "pe_rlsize"), 10: ("pe_cfg", pe.LOADCFG), 12: ("pe_iat", (n + 1) * 8)}
+        for i in range(16):
+            c.field(4, dirs.get(i, (0, 0))[0]); c.field(4, dirs.get(i, (0, 0))[1])
+        for name, rva, vs, fo, fs, flags in [(b".text", pe.TEXT_RVA, "endo", pe.HDR_FILE, "pe_tf", 0x60000020), (b".rdata", "pe_rd", idlen, "pe_rf", (idlen + 511) & -512, 0x40000040),
+                                             (b".data", "pe_dt", "pe_dvs", "pe_df", "pe_datafile", 0xC0000040), (b".reloc", "pe_rr", "pe_rlsize", "pe_relf", None, 0x42000040)]:
+            if fs is None: c.comp("reloc-align"); fs = "pe_rsize"
+            c.lit(name.ljust(8, b"\0"))
+            for w, v in [(4, vs), (4, rva), (4, fs), (4, fo), (4, 0), (4, 0), (2, 0), (2, 0), (4, flags)]: c.field(w, v)
+        out += _rows("header_" + arch, c.rows) + _rows("header_tail_" + arch, [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+        used |= {x for r in c.rows + [dict(lead=c.lead)] for x in r["lead"]}
+    c = _fieldchain()
+    c.comp("import-values")
+    for w, v in [(4, "pe_int"), (4, 0), (4, 0), (4, "pe_dll"), (4, "pe_iat")]: c.field(w, v)
+    c.lit(bytes(20))
+    for _ in range(2):
+        for offset, raw in names:
+            c.comp("name-value%d" % offset); c.field(8, "pe_name")
+        c.field(8, 0)
+    for offset, raw in names: c.lit(raw)
+    c.lit(pe.DLL + b"\0" + bytes(cfg - (dlloff + len(pe.DLL) + 1)))
+    c.field(4, pe.LOADCFG); c.lit(bytes(pe.COOKIE_FIELD - 4)); c.field(8, "pe_cookie"); c.lit(bytes(pe.LOADCFG - pe.COOKIE_FIELD - 8))
+    out += _rows("imports", c.rows) + _rows("imports_tail", [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+    used |= {x for r in c.rows + [dict(lead=c.lead)] for x in r["lead"]}
+    out += ["@bytes\tv:int"] + ["\t%d" % int(x[4:]) for x in sorted(used) if x.startswith("byte")]
+    out += ["@names\toffset:int"] + ["\t%d" % o for o, _ in names]
+    return out
+
+
+TABLES.append(("enc-pe", ["unisa/image/pe.py", "exec/facts/export.py"], pefields))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
