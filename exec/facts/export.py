@@ -1365,5 +1365,60 @@ def k2unitlocations():
 TABLES.append(("k2-unitlocations", ["exec/facts/export.py"], k2unitlocations))
 
 
+def k2membercontrol():
+    """Member/assignment domain values; transitions and fresh labels remain in parse2 TSVs."""
+    for d in ("exec", "exec/parse2"):
+        if str(ROOT / d) not in sys.path:
+            sys.path.insert(0, str(ROOT / d))
+    G = _module("exec/parse2/gen2.py", "k2membercontrol_gen2")
+    textrows = lambda name: [ln.split("\t", 1) for ln in (ROOT / ("exec/parse2/membercontrol-" + name + ".tsv")).read_text().splitlines()[1:]]
+    consts = {n: getattr(G, n) for n in ("SBB", "MEMBER_STRIDE", "MOF", "MSZ", "MPT", "MBS", "MAR", "BFW", "BFO", "BFS", "SHAPE_IDS", "SHAPE", "SSZ", "DBL", "FLT", "BOOL")}
+    consts["ARR"] = G.E.ARR
+    tokens = dict(G.E.TK, identifier=G.E.TK_ID)
+    classes = {name: [tokens[token]] for name, token in textrows("tokens")}
+    sources = [(code, size, uns) for _, code, size, uns, _ in G.TYINT]
+    sources += [(G.FLT, 4, 0), (G.DBL, 8, 0), (G.BOOL, 1, 0)]
+    types = [dict(name=name, code=code, wide=[1] if size >= 8 else [],
+                  narrow=[] if size >= 8 else [dict(values=sorted({v for v, width, signedness in sources
+                                                               if width <= size and signedness == uns}))])
+             for name, code, size, uns, _ in G.TYINT]
+    operators = [ln.split("\t") for ln in (ROOT / "exec/parse2/membercontrol-operators.tsv").read_text().splitlines()[1:]]
+    assert operators == [["part0", "f_part0_1061_MB_b_1", "MB.ld"],
+                         ["part2", "f_part2_1090_PX_b_1", "PX.ld"]]
+    source_fresh = (ROOT / "exec/parse2/membercontrol-fresh.tsv").read_text().splitlines()
+    manifest_fresh = (ROOT / "exec/parse2/membercontrol-manifest-fresh.tsv").read_text().splitlines()
+    expected = [source_fresh[0]]
+    after_choice = False
+    for row in source_fresh[1:]:
+        cells = row.split("\t")
+        if cells[0] == "part2":
+            if cells[1] in ("plain", "warnings"):
+                after_choice = True
+                cells[0] = "part2.choice"
+            else:
+                cells[0] = "part2.tail" if after_choice else "part2.head"
+        expected.append("\t".join(cells))
+    assert manifest_fresh == expected
+    casops = [dict(op=op, token=tokens[op + "="]) for op in G.E.CASOPS]
+    templates = {name: G.TEMPL[json.loads(spec)[0]] for name, spec in textrows("template")}
+    assert set(templates) == {"template0", "template1"}
+    names = [name for source in ("text", "stack", "template") for name, _ in textrows(source)]
+    compact = lambda value: json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+    return ["=consts\tjson\t" + compact(consts),
+            "=classes\tjson\t" + compact(classes),
+            "=types\tjson\t" + compact(types),
+            "=casops\tjson\t" + compact(casops),
+            "=seqnames\tjson\t" + compact(names),
+            "=push_text\tjson\t" + compact(templates["template0"]),
+            "=pop1_text\tjson\t" + compact(templates["template1"])]
+
+
+TABLES.append(("k2-membercontrol", ["exec/parse2/gen2.py", "exec/parse2/membercontrol-template.tsv",
+                                    "exec/parse2/membercontrol-tokens.tsv", "exec/parse2/membercontrol-operators.tsv",
+                                    "exec/parse2/membercontrol-fresh.tsv", "exec/parse2/membercontrol-manifest-fresh.tsv",
+                                    "exec/parse2/membercontrol-text.tsv", "exec/parse2/membercontrol-stack.tsv",
+                                    "exec/parse2/tape-templates.tsv", "exec/facts/export.py"], k2membercontrol))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
