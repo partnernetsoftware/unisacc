@@ -570,3 +570,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   --errors 7ea0e979, --warnings --errors 3a7edf34, --locations a4c6fa73 (first try exit 142 with no output, single rerun
   green), gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
   Next: (e) gen-manifest.tsv: segments as unconditional blocks in build() order; top env = E.results makes _publish go.
+- Round 44 (step (e), first block): new exec/parse2/gen-manifest.tsv (base build/parse2base.py, flags locations
+  warnings errors; not yet run by gen.py). gen2.build runs it for the consecutive stretch fnscope, body1, ladders
+  (call opts flags warnings=false, as segment ladders had), body2, membercontrol, starlookup: call gen2 rows binding
+  seg_NAME=@str:1 (existing call op/opts only). export.py rerun, facts committed.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Next blocks, in build() order: early, constexpr, statics, startup-run, global0..5 (their env publish needs merge),
+  callcontrol-begin/truth/finish, then the locations/warnings/errors tail; _libraryexports + librarymodule stay a
+  marked transitional Python call (blocked on cdx).

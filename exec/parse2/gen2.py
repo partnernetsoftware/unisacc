@@ -327,13 +327,7 @@ def build(locations=False, warnings=False, errors=False):
     global_control("global1", warnings)   # + call shape typedef-shape (gen2-manifest)
     global_control("global3", warnings)   # + call shape global-type (gen2-manifest)
     global_control("global5", warnings)   # + call shape global-binding (gen2-manifest)
-    segment("fnscope", warnings)   # gen2-manifest block fnscope
-    segment("body1", warnings)   # gen2-manifest block body1
-    segment("ladders")
-    segment("body2", warnings)   # gen2-manifest block body2
-    assemble.run(Path(__file__).resolve().parent / 'membercontrol-manifest.tsv', E, P, dict(warnings=warnings), {})
-    # statement `*E = e` / `*E ...;`: E's value is the address
-    segment("starlookup", warnings)   # gen2-manifest block starlookup
+    assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})   # fnscope..starlookup
     import assemble
     call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
                             dict(warnings=warnings), dict(warnings=warnings))
