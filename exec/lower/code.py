@@ -34,10 +34,8 @@ def install(E, arch="x86_64", os_="lnx"):
                  dict(target=target, ids=ids, process_flag='true' if os_=='lnx' else 'false',
                       **{'reg_'+k: v for k, v in regmap.items()}))
     from finite_rules import install as install_rules
-    if arch=='arm64':
-        from armfuse import install as install_armfuse, immediate
-        install_armfuse(E,ids,OP,KIND,ARG)
-        immediate(E,ids,OP,KIND,ARG,TXT)
+    assemble.run(Path(__file__).parent/'armfuse-manifest.tsv', E, P, dict(arm64=arch=='arm64'),
+                 dict(ids=ids, idmapu={'id_'+n: v for n, v in ids.items()}))
     scratch = 'x16' if arch == 'arm64' else 'r11'
     assert scratch not in set(regmap.values()), 'callm scratch aliases tape register'
     assemble.run(Path(__file__).parent/'codedispatch-manifest.tsv', E, P, dict(win=os_=='win'),

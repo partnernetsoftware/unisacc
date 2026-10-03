@@ -73,9 +73,30 @@ def lowercode():
     return out
 
 
+
+def lowerarmfuse():
+    """ARM immediate fusion: TAPE SHAPE ops eligible under exec/lower/armfuse-shapes.tsv
+    (shape / exclude / read policy), with the operand positions read (was armfuse.py)."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from unisa.tape import SHAPE
+    pol = [x.split("\t") for x in (ROOT / "exec/lower/armfuse-shapes.tsv").read_text().splitlines() if x and not x.startswith("#")]
+    shapes = {tuple(v.split(",")) for k, v in pol if k == "shape"}
+    excl = {v for k, v in pol if k == "exclude"}
+    reads = {v for k, v in pol if k == "read"}
+    out = ["=none\tjson\t[]"]
+    out += ["@shapes\ti:int\top:str\treads:json\tfirst:json\trest:json"]
+    sel = [(o, sh) for o, sh in SHAPE.items() if sh in shapes and o not in excl]
+    for i, (o, sh) in enumerate(sel):
+        out.append("\t%d\t%s\t%s\t%s\t%s" % (i, _esc(o), json.dumps([j for j, k in enumerate(sh[1:], 1) if k in reads]),
+                                             json.dumps([1] if i == 0 else []), json.dumps([] if i == 0 else [1])))
+    return out
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
+    ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
 ]
 
