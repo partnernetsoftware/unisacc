@@ -49,8 +49,9 @@ def install(E,P,b,start,integers):
                 owner=key.split('.')[0]
                 bindings[key]=P('LI.fresh.'+key).fresh(kind).replace('LI.',owner+'.',1) if owner in ('S','CL','UD','FN') else P('LI.fresh.'+key).fresh(kind)
         rules(g,root,'libraryimports',bindings,sequences,classes,name)
+    from finite_rules import install_template
     def hook(name,original):
-        g.st[original]=g.st.pop(name);g.labels.add(original)
+        install_template(g,root,'libraryimports',{'hook':[{'name':name,'original':original}]},None,section='hook')
     section('head')
     from modelcandidates import install as install_candidates
     install_candidates(E)
@@ -67,9 +68,8 @@ def install(E,P,b,start,integers):
     # UD has collected source labels; reconstruct the tape with wrapper definitions.
     hook('UD.calls0','LI.original.calls0');section('wrap')
     # Residue: keys and states come from the integer-type list (dynamic facts).
-    P('LI.scalar').branch({code:'LI.integer.'+str(code) for _,code,_,_,_ in integers},'LI.other',[('RLD','li_base')])
-    for _,code,width,uns,_ in integers:
-        P('LI.integer.'+str(code)).a(('LDI','li_class',1),('LDI','li_width',width),('LDI','li_uns',uns)).goto('LI.match')
+    install_template(g,root,'libraryimports',{'integer':[{'code':code,'width':width,'uns':uns} for _,code,width,uns,_ in integers]},
+                     P('LI.scalar').fresh,section='scalar')
     for name in ('wrap2','scanbyte','scan','scanwordbyte','wrap3'):section(name)
     from librarydata import install as data_install
     data_install(E,P,b,integers)
