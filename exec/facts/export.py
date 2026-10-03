@@ -648,12 +648,23 @@ def k2gen2():
                    mid=[{}] if i + 1 < len(G.LEVELS) else [], last=[] if i + 1 < len(G.LEVELS) else [{}],
                    ops=[dict(op=o, key=G.TK[o], mode=lm.get(o, lm["*"])) for o in G.OPS[lv]])
               for i, lv in enumerate(G.LEVELS)]
+    tops = [o for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]
+    tyrows = []
+    for l in range(16):
+        for r in range(16):
+            tyrows.append(dict(t=l * 16 + r, u=G.AX.index(G.TYROW.get((G.AX[l], "+", G.AX[r]), "illegal")), tab=G.CKT))
+            for i, o in enumerate(tops):
+                tyrows.append(dict(t=i * 256 + l * 16 + r, tab=G.RST,
+                                   u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
+    syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
+    autonames = [dict(name=nm) for nm in G.E.autonames()]
     return ["=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
             "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
             "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
             "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
             "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
-            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=AXF64\tint\t%d" % G.AX.index("f64")]
+            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
+            "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
 TABLES = [

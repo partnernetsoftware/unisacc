@@ -541,33 +541,7 @@ def build(locations=False, warnings=False, errors=False):
     segment("staticauto")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     segment("startup-guard")   # POSSPAN from facts k2-gen2
-    p = P("START.ok")
-    tops = [o for lv in LEVELS for o in OPS[lv] if o not in SHORT]
-    for l in range(16):
-        for r in range(16):
-            ck = TYROW.get((AX[l], "+", AX[r]), "illegal")
-            p.a(("LDI", "t", l * 16 + r), ("LDI", "u", AX.index(ck)), ("STX", "t", CKT, "u"))
-            for i, o in enumerate(tops):
-                y = TYROW.get((AX[l], TYOP.get(o, o), AX[r]), "illegal")
-                p.a(("LDI", "t", i * 256 + l * 16 + r), ("LDI", "u", AX.index(y)), ("STX", "t", RST, "u"))
-    def init_actions(section, values=None, sequences=None):
-        return load_rules(Path(__file__).with_name("startup-actions.tsv"), sequences or {},
-                          domain=[0], bindings=values or {}, section=section)["actions"][0][1]
-    def intern_name(register, name):
-        p.a(*init_actions("intern", dict(register=register), dict(name=[("SBOUT",c) for c in name.encode()])))
-    def fixed_names(group):
-        for part,register,name in tape_rows("startup-names.tsv"):
-            if part == group: intern_name(register,name)
-    p.a(*init_actions("registers"))
-    fixed_names("head")
-    p.a(*init_actions("position"))
-    fixed_names("function")
-    for k, (nm, _, _) in enumerate(SYSCALLS, 1): intern_name("sy%d" % k,nm)
-    fixed_names("builtins")
-    for nm in E.autonames():
-        intern_name("t",nm)
-        p.a(*init_actions("auto",dict(AUT=E.AUT)))
-    env = structured_control("startup-run", False, sequence_bindings=dict(startup_data=p.acts, startup_header=O(E.HEADER)), export=True)
+    env = segment("startup-run")   # startup data from facts k2-gen2 (tyrows, syscalls, autonames)
     E.__dict__.setdefault("results", {}).update(lm_hstate=env["lm_hstate"], lm_hnext=env["lm_hnext"], lm_header=O(E.HEADER), lm_errors=errors)
     global_control("global0", warnings)
     import assemble   # K2 trace translation: enumtypes-manifest.tsv

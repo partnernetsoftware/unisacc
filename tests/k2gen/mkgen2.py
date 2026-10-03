@@ -114,4 +114,20 @@ ladder_rows("E", "UNARY", "fact:seg_ladder-E")
 reject_rows("E", "fact:seg_ladder-E-reject")
 ladder_rows("C", None, "fact:seg_ladder-C")
 reject_rows("C", "fact:seg_ladder-C-reject")
+# startup-run: startup_data built by mapseq (type table rows, init actions, interned names), header from facts
+_R = Path(__file__).resolve().parents[2] / "exec/parse2"
+_sa = {l.split("\t")[0]: _j.loads(l.split("\t")[4]) for l in (_R / "startup-actions.tsv").read_text().split("\n") if l and not l.startswith("#")}
+_names = [l.split("\t") for l in (_R / "startup-names.tsv").read_text().split("\n") if l and not l.startswith("#")]
+def _intern(reg, name):
+    return [["SBCLR"], ["@bytes", name], ["SBINTERN", reg]]
+def _lit(group):
+    return [{"acts": [a for g, reg, nm in _names if g == group for a in _intern(reg, nm)]}]
+assert _sa["auto"] == [["LDI","u",1],["STX","t",["constant","AUT"],"u"]]
+_sd = ([{"over": "tyrows", "acts": [["LDI", "t", "{t}"], ["LDI", "u", "{u}"], ["STX", "t", "{tab}", "u"]]}, {"acts": _sa["registers"]}]
+       + _lit("head") + [{"acts": _sa["position"]}] + _lit("function")
+       + [{"over": "syscalls", "acts": _intern("sy{i}", "{name}")}] + _lit("builtins")
+       + [{"over": "autonames", "acts": _intern("t", "{name}") + [["LDI", "u", 1], ["STX", "t", "$AUT", "u"]]}])
+L.append("let\t-\t-\tfact:seg_startup-run\tk2-gen2\t-\t-\t-\t" + _d({"mapseq": {"startup_data": _sd}}))
+L.append("call\tcontrol\t-\tfact:seg_startup-run\tk2-gen2\t-\t-\tcontrol_section=@str:startup-run,statement=@str:STMT,control_export=@str:1,extra=extra,seqb=seqb\t"
+         + _d({"let": {"extra": {}, "seqb": {"startup_data": "$startup_data", "startup_header": "@out:=HEADER"}}, "merge": True}))
 Path(__file__).resolve().parents[2].joinpath("exec/parse2/gen2-manifest.tsv").write_text("\n".join(L) + "\n")
