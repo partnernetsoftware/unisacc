@@ -22,7 +22,7 @@ import difflib, importlib.abc, importlib.util, inspect, itertools, json, os, run
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FOLD_MAX = 40
+FOLD_MAX = int(os.environ.get("K2_FOLD_MAX", 40))   # inspection only
 # the alias op is `let` once exec/assemble.py has it (op cap), `set` before
 LET = "let" if 'op == "let"' in (ROOT / "exec" / "assemble.py").read_text() else "set"
 OPS = {"install": "rows", "install_rows": "table", "install_template": "template"}
@@ -317,6 +317,8 @@ class Emitter:
                     # P4: a state name inside template facts becomes a template parameter
                     # `$k2L_<n>` bound from the manifest row with @str (whole-cell use only;
                     # a partial use breaks the graph and graphhash refuses it)
+                    if isinstance(v, str) and (v in owner or any(p[2] == v for p in pending)):
+                        raise Refuse("fresh label %r inside template facts" % v)
                     if isinstance(v, str) and v in self.states:
                         if set(v) & set(",\t\n{}\\"):
                             raise Refuse("state label %r not expressible as @str" % v)
