@@ -320,18 +320,7 @@ def build(locations=False, warnings=False, errors=False):
     import assemble
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
     start = env["ex_start"]   # gen-manifest: START or the located reader (tokenlocations)
-    _tl = assemble.load_facts('tokenlocations')['tokenlocations!']   # exec/facts/tokenlocations.tsv
-    if warnings:
-        assert locations
-        _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
-        assemble.run(Path(__file__).parent / 'returnwarnings-manifest.tsv', E, P, _flags, dict(_tokens, SBB=C["SBB"]))
-        assemble.run(Path(__file__).parent / "intwarnings-manifest.tsv", E, P, {},
-                     dict(TOKEN_POS=_tl['TOKEN_POS'], DBL=C["DBL"], FLT=C["FLT"], FPB=C["FPB"], SBB=C["SBB"]))
-        assemble.run(Path(__file__).parent / 'unusedwarnings-manifest.tsv', E, P, _flags,
-                     dict(_tokens, TIX=C["TIX"], UNDO_SIZE=C["UNDO_SIZE"]))
-        assemble.run(Path(__file__).parent / 'formatwarnings-manifest.tsv', E, P, {},
-                     dict(TOKEN_POS=_tl['TOKEN_POS'], NAME_TOKEN=assemble.load_facts('unusedwarnings')['NAME_TOKEN'],
-                          DBL=C["DBL"], FLT=C["FLT"], FPB=C["FPB"], SBB=C["SBB"]))
+    assert locations or not warnings
     if errors:
         _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors
         # librarymodule's no-main continuation: the errors message state that replaced the reject (named at creation,
