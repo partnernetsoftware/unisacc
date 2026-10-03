@@ -465,3 +465,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   helpers tok/expect/num/lab/vpush/vpop/newlab (generic -> exec/build/procs.py), gold()/PREC/BINSEL/IRSEL/optext,
   parse-constants facts, tyinfo/SZ asserts, sizes() (only gen2 __main__).
   Not rerun: decisionledger --seedpy --list (exec/parse/gen.py entry still present).
+- Round 34: 8f7af189 parse2base.tokens runs exec/parse/tokens2-manifest.tsv (manifest sits in exec/parse because
+  template stems resolve beside the manifest) with new facts k2-gen2-tokens (export.py k2gen2tokens: parse words +
+  type=extern/_Bool, parse2base.QUALIFIERS skipped) instead of E.tokenizer. sha SAME gen2 x3. Full graphhash run
+  in 6 shards started (results in .k2tmp/ghsum.txt / gh*.txt).
+  Next: E.tokenizer is now used only by export.py (k2unitstokens: tokenizer.__defaults__ for the skip list ->
+  move that tuple into parse-constants facts) -> delete tokenizer(); move P.tok/expect/num/lab/vpush/vpop/newlab
+  into build/procs.py make_P (needs TK, VS: take from parse-constants facts); move gold/PREC/BINSEL/IRSEL/optext,
+  constants and sizes into exec/build/parsebase.py, point importers (parse2base, gen2, export.py _module paths,
+  pipeline/run.py, manifests' `#! base parse/gen.py`) at it; then exec/parse/gen.py disappears from the ledger.
