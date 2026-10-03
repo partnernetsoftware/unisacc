@@ -661,6 +661,13 @@ def k2gen2():
     T = G.TYPE_TAPE
     widthparts = dict(
         store=dict(consts=dict(FLT=G.FLT), seqs=dict(store_float=acts(G.O(T["storen"] % 4)))),
+        elsz=dict(consts=dict(SBB=G.SBB, SSZ=G.SSZ, DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, UNS=G.UNS),
+                  seqs=dict(incomplete=acts(G.E.rej("not covered: incomplete struct")))),
+        naru=dict(consts=dict(BOOL=G.BOOL),
+                  rows=[dict(code=c, row=acts(G.O(T["mask"] % ((1 << (8 * z)) - 1)))) for _, c, z, u, _ in G.TYINT if u and z < 8]),
+        conv=dict(consts=dict(BOOL=G.BOOL, DBL=G.DBL, FLT=G.FLT, UNSIGNED_WIDE=G.UNS + 8),
+                  seqs=dict(save=acts(G.P("conv.facts").vpush("vt", "vb").acts), restore=acts(G.P("conv.facts").vpop("vt", "vb").acts)),
+                  suffixes=[dict(s=x) for x in ("d", "s", "i", "u")]),
         narrow=dict(consts=dict(UNSIGNED_WIDE=G.UNS + 8, DBL=G.DBL, BOOL=G.BOOL, TDN=G.E.TDN),
                     seqs=dict(uim=acts(G.O(G.UIM)), reject=acts(G.E.rej("not covered: width"))),
                     rows=[dict(code=vb, row=acts(G.O(T["mask"] % ((1 << (8 * size)) - 1) if uns else T["narrow"] % (size, size))))

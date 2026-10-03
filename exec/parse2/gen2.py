@@ -440,13 +440,7 @@ def build(locations=False, warnings=False, errors=False):
     shape_control("global-type")
     global_control("global5", warnings)
     shape_control("global-binding")
-    size_bindings = {key:P(state).fresh('b') for key,state in
-                     [('enum_test','ELSZ.enumraw'),('base_test','ELSZ.b0'),('struct_test','ELSZ.st'),
-                      ('void_test','ELSZ.b'),('double_test','ELSZ.s'),('float_test','ELSZ.sf'),
-                      ('bool_test','ELSZ.bool'),('unsigned_test','ELSZ.s2')]}
-    install_rules(g, os.path.dirname(__file__), 'width', section='element-size',
-                  bindings=dict(size_bindings, SBB=SBB, SSZ=SSZ, DBL=DBL, FLT=FLT, BOOL=BOOL, UNS=UNS),
-                  sequences=dict(incomplete=E.rej('not covered: incomplete struct')))
+    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_elsz=1))
     function_control("function0", warnings)
     shape_control("parameter-type")
     function_control("function2", warnings)
@@ -521,20 +515,7 @@ def build(locations=False, warnings=False, errors=False):
     return_control("qt3", dict(integer_end=current))
     b=update_control("id0")
     update_control("id1",dict(address_end=addr(P(b["f3"])).cur))
-    # Target dispatch is declared once; four conversion calls share the saved descriptor.
-    bindings = dict(BOOL=BOOL, DBL=DBL, FLT=FLT, UNSIGNED_WIDE=UNS + 8)
-    bindings.update((key, P(owner).fresh("b")) for key, owner in
-                    (("entry_test", "ASSIGNCV"), ("bool_test", "ACV.scalar"),
-                     ("double_test", "ACV.double"), ("float_test", "ACV.float"), ("unsigned_test", "ACV.int")))
-    install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="assign")
-    for suffix in ("d", "s", "i", "u"):
-        q = P("ACV." + suffix)
-        bindings.update(entry=q.cur, convert="TO." + suffix, resume=q.fresh("r"))
-        save = q.vpush("vt", "vb").acts
-        q.acts = []
-        restore = q.vpop("vt", "vb").acts
-        install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings,
-                      sequences={"save": save, "restore": restore}, section="convert")
+    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_conv=1))
     shape_control("update-entry")
     update_control("step-entry")
     pointer_ops={row[0] for row in tape_rows("update-pointer.tsv")}
@@ -556,16 +537,7 @@ def build(locations=False, warnings=False, errors=False):
         b=update_control("type-row",dict(type_current=current,type_code=code,type_axis=AX.index(name)))
         current=b["f28"]
     update_control("type-tail",dict(type_end=current))
-    bindings = dict(BOOL=BOOL, entry_test=P("NARU").fresh("b"), bool_test=P("NARU.1").fresh("b"))
-    install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned")
-    q = P("NARU.integer")
-    for _, code, size, uns, _ in (row for row in TYINT if row[3] and row[2] < 8):
-        bindings.update(current=q.cur, hit=q.fresh("h"), next=q.fresh("n"), test=q.fresh("b"), code=code)
-        install_rules(g, os.path.dirname(__file__), "width", bindings=bindings,
-                      sequences={"row": O(TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1))}, section="row")
-        q = P(bindings["next"])
-    bindings["current"] = q.cur
-    install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned-end")
+    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_naru=1))
     update_control("step0")
     shape_control("pointee-width")
     update_control("step1")
