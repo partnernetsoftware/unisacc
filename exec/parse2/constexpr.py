@@ -8,7 +8,7 @@ and casts remain unsupported. These are coverage limits, not C language rules.
 
 import csv
 from pathlib import Path
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, install_template
 
 
 def install(E, P, levels, ops, enum_values, enum_defined):
@@ -40,10 +40,8 @@ def install(E, P, levels, ops, enum_values, enum_defined):
                         sub="CE" + str(levels[i + 1]) if i + 1 < len(levels) else "CE.atom")
         emit("level", bindings)
         targets = {E.TK[op]: name + "." + op for op in ops[level]}
-        for key, target in targets.items(): E.g.on(bindings["dispatch"], [key], target, [], "r")
-        for state, row in load_rules(root / "constexpr-default.tsv", {},
-                domain=set(range(257)) - targets.keys(), bindings=bindings).items():
-            for key, (target, actions) in row.items(): E.g.on(state, [key], target, actions, "r")
+        install_template(E.g, root, "constexpr", {"level": [level], "op": [{"k": E.TK[op], "name": op} for op in ops[level]]},
+                         None, bindings=bindings, section="dispatch")
         for op in ops[level]:
             category, action, comparison, zero, nonzero = operators[op]
             operator = targets[E.TK[op]]
