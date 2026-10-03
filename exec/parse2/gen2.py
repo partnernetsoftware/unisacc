@@ -358,12 +358,7 @@ def build(locations=False, warnings=False, errors=False):
     assemble.run(Path(__file__).parent / "strings-token-span-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))
     from strings import initializer as string_initializer
     string_initializer(E, P, ESC)
-    E.prn()
-    E.numout()
-    import assemble   # K2 trace translation: floatconst-manifest.tsv
-    from types import SimpleNamespace
-    assemble.run(Path(__file__).resolve().parent / 'floatconst-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict())
-    E.autoscan()
+    segment("numeric")
     types()
     segment("typing")
     from constexpr import install as const_install
