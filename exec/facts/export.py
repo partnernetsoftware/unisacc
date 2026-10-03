@@ -726,5 +726,60 @@ TABLES.append(("enc-x86", ["unisa/catalog.py", "unisa/emit_x86.py", "unisa/image
                            "exec/facts/enc-x86win-ids.tsv", "exec/facts/enc-x86win-ops.tsv", "exec/facts/enc-x86win-rcs.tsv",
                            "exec/facts/enc-x86win-meta.tsv", "exec/facts/enc-tins-meta.tsv", "exec/facts/export.py"], x86entry))
 
+def armentry():
+    """ARM64 encoder entry (was exec/enc/arm.py): table bases, op specs (shape string ->
+    operand checks), ENCSPEC alu3/invcond values, register names, START words."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from unisa.catalog import ENCSPEC
+    from unisa.image.pe import IMPORTS
+    from exec.facts.load import facts as F
+    A = ENCSPEC["arm64"]
+    specs = {'mov': ('rr', 1), 'imm': ('ri', 2), 'mul64': ('rrr', 3), 'ret': ('', 4), 'nop': ('', 5), 'callr': ('r', 6),
+             'hostcall': ('rr', 60), 'hostaddr': ('ri', 61), 'load64': ('rri', 9), 'store64': ('rir', 10),
+             '.ld': ('rrii', 11), '.st': ('riri', 12), 'jump': ('l', 13), 'jumpz': ('rl', 14), 'call': ('l', 15),
+             'setreg': ('rv', 25), 'spinit': ('r', 26), 'gate': ('', 27), '.lea': ('rl', 28), 'setmem': ('ir', 29),
+             'argsave': ('iib', 30), 'argvget': ('rri', 31), '.zero': ('rii', 32), 'winsave': ('i', 33),
+             'winrest': ('ir', 34), 'winstdh': ('i', 35), 'winargs': ('iii', 36), 'itoa': ('iii', 37)}
+    specs.update({r['op']: (r['shape'], r['cls']) for r in F('enc-armint-specs')})
+    specs.update({r['op']: (r['shape'], r['cls']) for r in F('enc-armfp-specs')})
+    specs.update({k: ('rrr', 7) for k in A['alu3']})
+    specs.update({k: ('rrr', 8) for k in A['invcond']})
+    out = ["=OP\tint\t70000000", "=REG\tint\t71000000", "=BASE\tint\t72000000", "=LP\tint\t73000000", "=ZERO\tint\t0"]
+    out.append("=unknown\tjson\t%s" % json.dumps(sorted(set(range(257)) - set(range(1, len(specs) + 1)))))
+    meta = tuple(F("enc-tins-meta"))
+    out.append("=meta_classes\tjson\t%s" % json.dumps({"meta_" + k: [i] for i, k in enumerate(meta, 1)}))
+    codes = {'r': 1, 'i': 2, 'l': 3, 'b': 4}
+    out.append("@specs\ti:int\top:str\tn:int\tcls:int\tlpos:int\tbase:int\tspin:int\tchars:json\tlast:int\tlastsigned:int")
+    for i, (op, (shape, cls)) in enumerate(specs.items(), 1):
+        chars = []
+        for j, k in enumerate(shape):
+            chars.append(dict(i=j, p=j - 1, first=int(j == 0), ps=int(j > 0 and chars[-1]['signed']),
+                              isv=int(k == 'v'), code=codes.get(k, 0), signed=int(k == 'i' and op != 'imm')))
+        out.append("\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d" % (
+            i, op, len(shape), cls, shape.find('l'), A['alu3'].get(op, A['invcond'].get(op, 0)), int(op == 'spinit'),
+            json.dumps(chars, separators=(",", ":")), len(shape) - 1, int(bool(chars) and chars[-1]['signed'])))
+    out.append("@regs\tword:str\tn:int")
+    out += ["\tx%d\t%d" % (i, i + 1) for i in range(31)]
+    out.append("@metakeys\tword:str\tn:int")
+    out += ["\t%s\t%d" % (k, n) for n, k in enumerate(meta, 1)]
+    out.append("@imports\tword:str\tn:int")
+    out += ["\t%s\t%d" % (name, i + 1) for i, name in enumerate(IMPORTS)]
+    for name, rows in (("inputkeys", F('enc-arminput-keys')), ("headers", F('enc-armlayout-headers')),
+                       ("winkeys", F('enc-armwin-keys')), ("winreset", F('enc-armwin-reset'))):
+        out.append("@%s\tword:str" % name)
+        out += ["\t" + k for k in rows]
+    out.append("@targets\tkey:str\tword:str")
+    out += ["\t%s\t%s" % (r['key'], r['value']) for r in F('enc-armlayout-targets')]
+    out.append("@puts\ti:int\tp:int")
+    out += ["\t%d\t%d" % (i, i - 1) for i in range(4)]
+    return out
+
+
+TABLES.append(("enc-arm", ["unisa/catalog.py", "unisa/image/pe.py", "exec/facts/enc-armint-specs.tsv",
+                           "exec/facts/enc-armfp-specs.tsv", "exec/facts/enc-tins-meta.tsv", "exec/facts/enc-arminput-keys.tsv",
+                           "exec/facts/enc-armlayout-headers.tsv", "exec/facts/enc-armlayout-targets.tsv",
+                           "exec/facts/enc-armwin-keys.tsv", "exec/facts/enc-armwin-reset.tsv", "exec/facts/export.py"], armentry))
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

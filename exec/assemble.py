@@ -311,7 +311,7 @@ class Run:
                                bindings=bd, section=sec,
                                mode=o.get("mode", "r"), **kw)
         elif op == "call":
-            sub = Run(self.E, self.P, dict(self.flags, **o.get("flags", {})), dict(self.env, **(bd or {})))   # opts flags: literal overrides
+            sub = Run(self.E, self.P, dict(self.flags, **{k: any(self.flags[f] for f in v) if isinstance(v, list) else v for k, v in o.get("flags", {}).items()}), dict(self.env, **(bd or {})))   # opts flags: literal, or a list = any of these flags
             res = sub.run(self.root / (stem + "-manifest.tsv"))
             if o.get("merge"):   # opts merge: the sub-manifest's env flows back (segment chains)
                 self.env.update(res)
