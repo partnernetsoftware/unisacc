@@ -35,6 +35,15 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   with let keys=[c.byte] + domain_keys). printfcontrol translated (5 segments printfcontrol-0..4-manifest.tsv, facts
   printfcontrol*.tsv, env alphabet/section/warnings) and deleted; gen2.printf now runs manifests + strwalk.
   pgrep -f fails in this locale (illegal byte sequence): waiting loops on it end at once -> concurrent graphhash -> 142.
+- Round 7 end (17:05): rebased on origin/main (refusals conflict: drop both printfcontrol and memorylayout lines);
+  graphhash parse2 10/10; gates run directly (gate.sh --suite needs UNISACC_FFI_X86_PROVIDER): finite-template ok,
+  decision-ledger ok (ops 9/12), exec-r21-e3 48/3/0, exec-chain 287 equal + 1 not-covered, bad 0.
+  Wait loops: use `ps -eo pid,command | grep`, never pgrep -f. Helper scripts: .k2tmp/rec.sh (8-mode record),
+  cmp.sh (one-mode gen2 vs HEAD bytes), gates.sh.
+- Next for structured_control: its bindings are ~60 gen2 constants + extra; plan = k2-control facts (=NAME int per
+  constant) + control-manifest.tsv with env section/extra keys; fresh via control-fresh.tsv rows (owner=prefix or env
+  label -> needs `fresh:U:{x}` per row, or the `tape:` fresh with interp); stack sequences via @stack on a P holder
+  named control.<section><word_state>. Callers (gen2 ~40 sites, unarycontrol) pass section + extra as env.
 - Next (was): printf (part0..4 + strwalk/fmtwalk helpers + strings.wide_hooks) and structured_control (big binding
   dict of gen2 constants -> needs a k2-control facts file; control-fresh/text/reject/stack/classes tsvs already exist).
 
