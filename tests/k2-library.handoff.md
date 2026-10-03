@@ -72,3 +72,14 @@ graphhash --only exec/parse2, delete the three .py if identical.
   on rebased HEAD.
 - NEXT: librarytypes (frame via mapseq over dregs as in v3; b via env + classmap; integers -> ints template facts),
   libraryexports u64 -> modelinput manifest rows, then libraryimports/librarycallables/librarymodule/libraryexports/layoutfacts.
+
+## Round 5 (17:55-18:04)
+- tests/k2translate.py: `_partial` refuses $k2L/$k2F template parameters used inside a larger cell (committed).
+- DONE: librarytypes.py deleted -> librarytypes-manifest.tsv (env from libraryexports.py: b_*, isize, ints, E_ARR, gen2_DIM).
+  graphhash 10/10; 5 gates green after rebase.
+- u64: library* already call exec/modelinput-manifest.tsv via assemble.run lambdas; they become `call ../modelinput` rows
+  when each caller is a manifest. Note key bytes start with NUL (\0library/...): @bytes: has no unescape -> need a str fact
+  with \0 or an assemble escape (check _cell str unescape: `\0` is not handled, only \t \n).
+- valueranks.py still present on origin/main at 18:04; librarycallables imports LCSITERANK from it -> switch to
+  assemble.load_facts('valueranks') when converting librarycallables.
+- NEXT: libraryimports, librarycallables, librarymodule, libraryexports, layoutfacts; global_address submanifest.
