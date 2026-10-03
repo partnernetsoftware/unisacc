@@ -240,8 +240,9 @@ def build(image=False, object_mode=False):
     completion = {'done'+str(i): P('DONE').fresh('r') for i in range(3)}
     install_rules(g, HERE, 'x86-emit', section='done-write', bindings=completion)
     if image:
-        from elfimage import install as install_elf
-        install_elf(E, byte, OFF, LABD,image_format=image if isinstance(image,str) else "elf")
+        _fmt = image if isinstance(image, str) else "elf"
+        assemble.run(os.path.join(HERE, 'elfimage-manifest.tsv'), E, P, dict(pe=_fmt == 'pe', macho=_fmt == 'macho', direct_labels=False),
+                     dict(arch='x86_64', OFF=OFF, LABD=LABD))
         completion['done3'] = P('DONE').fresh('r')
     install_rules(g, HERE, 'x86-emit', section='done-image' if image else 'done-raw', bindings=completion)
     if object_mode:

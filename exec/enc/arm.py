@@ -150,9 +150,9 @@ def build(image=False, object_mode=False):
     assemble.run(here/'armwin-manifest.tsv', E, P, {}, env)
     assemble.run(here/'hostbridge-manifest.tsv', E, P, {'arm64': True}, env)
     if image:
-        from elfimage import install as install_elf
         LABELS = next(r['value'] for r in facts('enc-armbranch-bindings') if r['name'] == 'LABELS')
-        install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True,image_format=image if image in ('macho','pe') else 'elf')
+        assemble.run(here/'elfimage-manifest.tsv', E, P, dict(pe=image == 'pe', macho=image == 'macho', direct_labels=True),
+                     dict(arch='arm64', OFF=0, LABD=LABELS))
     if object_mode:
         SYM, PRESENT = (next(r['value'] for r in facts('enc-armlayout-bindings') if r['name'] == k) for k in ('SYM', 'PRESENT'))
         import assemble

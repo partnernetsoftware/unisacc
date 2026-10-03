@@ -595,5 +595,66 @@ def machofields():
 TABLES.append(("enc-macho", ["unisa/image/macho.py", "exec/facts/export.py"], machofields))
 
 
+def elffields():
+    """ELF program-header / dynamic-section field schema and the import/loader slot tables (unisa/image/elf.py, pe.py)."""
+    sys.path.insert(0, str(ROOT))
+    from unisa.image import elf
+    from unisa.image.pe import IMPORTS
+    out = ["=%s\tint\t%d" % kv for kv in dict(DATA=1 << 40, RELOCS=4 << 40, iat_size=8 * len(IMPORTS), VADDR=elf.VADDR,
+                                               dyn_doff=elf.VADDR + 32, fmt_elf=1, fmt_macho=2, fmt_pe=3).items()]
+    used = set()
+    def emit(name, c):
+        nonlocal used
+        out.extend(_rows(name, c.fields) + _rows(name + "_tail", [dict(width=0, value=0, src="none", endian="-", lead=c.lead)]))
+        used |= {x for r in c.fields + [dict(lead=c.lead)] for x in r["lead"]}
+    c = _fieldchain()
+    for i in range(len(IMPORTS)): c.field(8, "ml_imp_%d" % i)
+    emit("iat", c)
+    c = _fieldchain()
+    for i in range(4): c.field(8, "ml_dl_%d" % i)
+    emit("dlslots", c)
+    c = _fieldchain(); c.lit(bytes(32)); emit("dynslots", c)
+    for arch in sorted(elf.MACHINE):
+        out.append("=HDRS_%s\tint\t%d" % (arch, elf.HDRS(arch)))
+        def preamble(c, phnum):
+            c.lit(b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8))
+            for w, v in [(2, 2), (2, elf.MACHINE[arch]), (4, 1), (8, "entryva"), (8, elf.EHDR), (8, 0),
+                         (4, 0), (2, elf.EHDR), (2, elf.PHDR), (2, phnum), (2, 0), (2, 0), (2, 0)]: c.field(w, v)
+        def phdr(c, typ, flags, off, va, filesz, memsz, align):
+            for w, v in [(4, typ), (4, flags), (8, off), (8, va), (8, va), (8, filesz), (8, memsz), (8, align)]: c.field(w, v)
+        c = _fieldchain(); c.comp("header-init")
+        preamble(c, 2)
+        phdr(c, 1, 5, 0, elf.VADDR, "tend", "tend", elf.PAGE)
+        phdr(c, 1, 6, "doff", "data_va", "stored", "memlen", elf.PAGE)
+        emit("static_" + arch, c)
+        c = _fieldchain(); c.comp("dyn-init")
+        preamble(c, 4)
+        interp = b"/lib/ld-linux-aarch64.so.1" if arch == "arm64" else b"/lib64/ld-linux-x86-64.so.2"
+        phdr(c, 3, 4, 288, elf.VADDR + 288, len(interp) + 1, len(interp) + 1, 1)
+        phdr(c, 1, 5, 0, elf.VADDR, "tend", "tend", elf.PAGE)
+        phdr(c, 1, 6, "doff", "dyn_slots", "dyn_filesz", "dyn_memsz", elf.PAGE)
+        phdr(c, 2, 4, 608, elf.VADDR + 608, 176, 176, 8)
+        c.lit(interp + b"\0" + bytes(32 - len(interp) - 1))
+        c.lit(b"\0libc.so.6\0dlopen\0dlsym\0dlclose\0dlerror\0")
+        c.lit(bytes(24))
+        for nameoff in (11, 18, 24, 32):
+            c.field(4, nameoff); c.lit(bytes((0x12, 0, 0, 0))); c.field(8, 0); c.field(8, 0)
+        c.field(4, 1); c.field(4, 5)
+        c.lit(bytes(24))
+        for i in range(4):
+            c.comp("dynreloc%d" % (8 * i))
+            c.field(8, "dyn_reloc"); c.field(8, ((i + 1) << 32) | (1025 if arch == "arm64" else 6)); c.field(8, 0)
+        for tag, val in ((1, 1), (4, elf.VADDR + 480), (5, elf.VADDR + 320), (6, elf.VADDR + 360),
+                         (10, 40), (11, 24), (7, elf.VADDR + 512), (8, 96), (9, 24), (30, 8), (0, 0)):
+            c.field(8, tag); c.field(8, val)
+        emit("dyn_" + arch, c)
+    out += ["@relocs\toff:int"] + ["\t%d" % (8 * i) for i in range(4)]
+    out += ["@bytes\tv:int"] + ["\t%d" % int(x[4:]) for x in sorted(used) if x.startswith("byte")]
+    return out
+
+
+TABLES.append(("enc-elf", ["unisa/image/elf.py", "unisa/image/pe.py", "exec/facts/export.py"], elffields))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
