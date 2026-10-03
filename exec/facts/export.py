@@ -238,6 +238,38 @@ def _esc(s):
     return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
 
+def constexprentry():
+    """Integer-expression precedence and token classes for the E3 table."""
+    import csv
+    E = _module("exec/parse/gen.py", "exec_parse_gen_constexpr_facts")
+    levels = sorted(set(E.PREC.values()))
+    path = ROOT / "exec/parse2/constexpr-operators.tsv"
+    with path.open() as f:
+        opinfo = {r[0]: r[1:] for r in list(csv.reader(f, delimiter="\t"))[1:]}
+    level_rows = []
+    for i, level in enumerate(levels):
+        operators = []
+        for name in sorted(o for o, v in E.PREC.items() if v == level):
+            category, action, comparison, zero, nonzero = opinfo[name]
+            operators.append(dict(k=E.TK[name], name=name, category=category, action=action,
+                                  comparison=[] if comparison == "-" else [int(x) for x in comparison.split(",")],
+                                  zero=zero, nonzero=nonzero))
+        level_rows.append(dict(level=level,
+                               next=levels[i + 1] if i + 1 < len(levels) else ".atom",
+                               ops=operators))
+    tokens = dict(E.TK, identifier=E.TK_ID, number=E.TK_NUM, string=E.TK_STR)
+    # gen2 adds these two type words before it installs constexpr.
+    first = max(E.TK.values()) + 1
+    tokens.update({"type=extern": first, "type=_Bool": first + 1})
+    with (ROOT / "exec/parse2/constexpr-tokens.tsv").open() as f:
+        classes = {name: [tokens[token]] for name, token in list(csv.reader(f, delimiter="\t"))[1:]}
+    classes["typeword"] = sorted({tokens[w] for w in tokens if w.startswith("type")} |
+                                  {tokens[w] for w in ("struct", "union", "enum")})
+    return ["=levels\tjson\t" + json.dumps(level_rows, separators=(",", ":")),
+            "=classes\tjson\t" + json.dumps(classes, separators=(",", ":")),
+            "=SKIPS\tint\t" + str(7 * (1 << 26))]
+
+
 def structreturnexpr():
     E = _module("exec/parse/gen.py", "exec_parse_gen_facts")
     reason = "not covered: struct return expression outside local lvalue"
@@ -617,6 +649,17 @@ def ppgen():
                                                  for t in sorted(E.TARGETS)})]
 
 
+def tokenlocationsmap():
+    """Located-token record fields; actions remain in the stage template."""
+    import csv
+    with (ROOT / "exec/facts/tokenlocations.tsv").open() as f:
+        rows = {r[0]: r[1] for r in list(csv.reader(f, delimiter="\t"))[1:]}
+    names = json.loads(rows["MAP_FIELDS"])
+    assert len(names) == len(set(names)) and names
+    return ["=mapfields\tjson\t" + json.dumps(
+        [dict(i=i, register="diag_" + name) for i, name in enumerate(names)], separators=(",", ":"))]
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 def k2gen2():
     """parse2/gen2-manifest.tsv constants: POSSPAN, type words, tytail ckm/resd tables (from gen2.py constants)."""
@@ -838,6 +881,8 @@ TABLES = [
     ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),
     ("top-modelbindings-template", ["exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], modelbindingstemplate),
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
+    ("k2-tokenlocations-map", ["exec/facts/tokenlocations.tsv", "exec/facts/export.py"], tokenlocationsmap),
+    ("k2-constexpr", ["exec/parse/gen.py", "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], constexprentry),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
@@ -1235,6 +1280,38 @@ TABLES.append(("enc-arm", ["unisa/catalog.py", "unisa/image/pe.py", "exec/facts/
                            "exec/facts/enc-armfp-specs.tsv", "exec/facts/enc-tins-meta.tsv", "exec/facts/enc-arminput-keys.tsv",
                            "exec/facts/enc-armlayout-headers.tsv", "exec/facts/enc-armlayout-targets.tsv",
                            "exec/facts/enc-armwin-keys.tsv", "exec/facts/enc-armwin-reset.tsv", "exec/facts/export.py"], armentry))
+
+def k2strings():
+    """String rejection text and escape data from the existing domain declarations."""
+    import ast
+    records = [ln.split("\t", 2) for ln in (ROOT / "exec/facts/strings.tsv").read_text().splitlines()
+               if ln and not ln.startswith("#")]
+    reject = {name: json.loads(value) for kind, name, value in records if kind == "reject"}
+    tree = ast.parse((ROOT / "exec/parse2/gen2.py").read_text())
+    escape = next(ast.literal_eval(n.value) for n in tree.body
+                  if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ESC" for t in n.targets))
+    reserved = {ord(c) for c in "01234567x"}
+    entries = [{"byte": ord(k), "value": v} for k, v in escape.items() if ord(k) not in reserved]
+    parse_constants = dict(ln.split("\t", 1) for ln in (ROOT / "exec/facts/parse-constants.tsv").read_text().splitlines()
+                           if ln and not ln.startswith("#"))
+    compact = lambda value: json.dumps(value, separators=(",", ":"))
+    return ["=rej\tjson\t" + compact(reject), "=escape\tjson\t" + compact(entries),
+            "=escbytes\tjson\t" + compact([row["byte"] for row in entries]),
+            "=TK_STR\tint\t" + parse_constants["TK_STR"]]
+
+
+TABLES.append(("k2-strings", ["exec/facts/strings.tsv", "exec/parse2/gen2.py",
+                              "exec/facts/parse-constants.tsv", "exec/facts/export.py"], k2strings))
+
+
+def k2unitlocations():
+    """Storage key for located unit framing; transition actions stay in the manifest."""
+    return ["# Located unit map storage key; actions live in unitlocations-manifest.tsv.",
+            "=MAPS\tint\t" + str(49 << 40)]
+
+
+TABLES.append(("k2-unitlocations", ["exec/facts/export.py"], k2unitlocations))
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
