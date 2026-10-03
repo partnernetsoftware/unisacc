@@ -16,27 +16,14 @@ def install(E,P,start):
     rules(g,Path(__file__).parent,'librarymodule',section='read',bindings=dict(start=start))
     _template(E,'start')
     # Split only the declared startup output, preserving positioning/continuation.
-    header=list(E.O(E.HEADER)); hits=[]
-    for state,(mode,row) in list(g.st.items()):
-        for k,(n,q) in list(row.items()):
-            seq=list(g.seqs[q])
-            for i in range(len(seq)-len(header)+1):
-                if seq[i:i+len(header)]==header:hits.append((state,k,n,seq[:i],seq[i+len(header):]))
-    assert len({h[0] for h in hits})==1 and hits
-    state,k,n,before,after=hits[0]
-    for state,k,nn,bb,aa in hits:
-        assert (nn,bb,aa)==(n,before,after)
-    _template(E,'split',{'H':[dict(s=state,k=k,before=json.dumps([list(x) for x in bb])) for state,k,nn,bb,aa in hits]})
-    rules(g,Path(__file__).parent,'librarymodule',section='header',bindings=dict(next=n),sequences=dict(header=header,tail=after))
+    F=assemble.load_facts('k2-librarymodule'); R=E.results   # startup-run named results + header edge facts
+    _template(E,'split',{'H':[dict(s=R['lm_hstate'],k=k,before=json.dumps(F['hbefore'])) for k in range(*F['hdomain'])]})
+    rules(g,Path(__file__).parent,'librarymodule',section='header',bindings=dict(next=F['hnext']),sequences=dict(header=list(R['lm_header']),tail=[('PUSH',R['lm_hnext'])]))
     # Main requirement and init-tail are existing finite control points.
-    state=E.results['lm_main'];mode,row=g.st[state]   # gen2 global3 named result (global-results.tsv)
-    reject=None;normal=None;keys=[]
-    for k,(n,q) in list(row.items()):
-        if n!='END.ok':
-            actions=list(g.seqs[q])
-            assert normal is None or (normal,reject)==(n,actions)
-            normal,reject=n,actions;keys.append(k)
-    assert normal is not None
+    state=E.results['lm_main']   # gen2 global3 named result (global-results.tsv)
+    normal,reject,keys=F['mainnext'],E.rej(F['mainreason']),[k for k in range(*F['maindomain']) if k not in F['mainok']]
+    if R.get('lm_errors'):   # BOUNDARY: errors stage (block 3) re-targets the no-main reject to its own fresh message state
+        normal,reject={(n,tuple(g.seqs[q])) for k,(n,q) in g.st[state][1].items() if n!='END.ok'}.pop();reject=list(reject)
     _template(E,'main',{'state':[state],'key':keys})
     state=E.results['lm_initret']
     _template(E,'initmove',{'state':[state]});_template(E,'initend',{'state':[state]})

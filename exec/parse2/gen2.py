@@ -413,12 +413,12 @@ def shape_control(section):
                   sequences=sequences, classes=classes, section=section)
 
 
-def structured_control(section, warnings, extra=None, sequence_bindings=None):
+def structured_control(section, warnings, extra=None, sequence_bindings=None, export=False):
     """Structured control: exec/parse2/control-manifest.tsv (K2 sub-manifest)."""
     import assemble
     section += "-warnings" if warnings and section in ("block", "if") else ""
-    assemble.run(Path(__file__).resolve().parent / 'control-manifest.tsv', E, P, {},
-                 dict(control_section=section, statement="STMT.body" if warnings else "STMT",
+    return assemble.run(Path(__file__).resolve().parent / 'control-manifest.tsv', E, P, {},
+                 dict(control_export=export, control_section=section, statement="STMT.body" if warnings else "STMT",
                       extra=dict(extra or {}), seqb=dict(sequence_bindings or {})))
 
 
@@ -627,7 +627,8 @@ def build(locations=False, warnings=False, errors=False):
     for nm in E.autonames():
         intern_name("t",nm)
         p.a(*init_actions("auto",dict(AUT=E.AUT)))
-    structured_control("startup-run", False, sequence_bindings=dict(startup_data=p.acts, startup_header=O(E.HEADER)))
+    env = structured_control("startup-run", False, sequence_bindings=dict(startup_data=p.acts, startup_header=O(E.HEADER)), export=True)
+    E.__dict__.setdefault("results", {}).update(lm_hstate=env["lm_hstate"], lm_hnext=env["lm_hnext"], lm_header=O(E.HEADER), lm_errors=errors)
     global_control("global0", warnings)
     import assemble   # K2 trace translation: enumtypes-manifest.tsv
     assemble.run(Path(__file__).parent / 'enumtypes-manifest.tsv', E, P,
