@@ -101,6 +101,20 @@
   compilerpack also imports pp/gen.py for predefine_resources(): move that to a facts table first.
 - lex: not started (497 lines, argv flags parsed at import; Delta already in exec/build/graph.py).
 
+## Round 6 (16:57-17:10)
+- 67ce6e6f pp: build() body -> exec/pp/body-manifest.tsv over facts/pp-gen (export.py ppgen()): START init (table
+  start-byte.tsv), cli/text with autoinc variants, predefine chain foreach over predef.{target} (assemble: foreach
+  `over` is {NAME}-formatted), DSW template (dsw-template.tsv, domain_keys dswkeys), directive-action instances,
+  escape template, XE layout bindmap, calls autoinc/locations/sourcefacts. pp/gen.py 464 -> 257 lines: now argv,
+  facts loading (PREDEF/XOPS/... still read by export.py and compilerpack predefine_resources), G(), one
+  assemble.run, finish, json dump. Byte-equal: lnx default, osx --locations, win --shared, E2_AUTOINC=0.
+- 05ab9bee exec/build/gen.py: stage = the arg naming exec/<dir>/gen-manifest.tsv in either order, clear error
+  otherwise. The coordinator's merge failure (OUT taken as stage for nativeabi) happens when exec/nativeabi/gen-manifest.tsv
+  is absent: origin/main (17:05) has exec/nativeabi/gen.py + ordered.py and NOT my nativeabi commit, while the
+  branch's tests/graphhash.py already says `exec/build/gen.py nativeabi`. On this branch (rebased) full graphhash 55/55.
+- Remaining for pp entry: switch the 54 callers (positional target -> flags, E2_AUTOINC env -> flag, json separators
+  -> new hashes); compilerpack predefine_resources() -> facts. lex not started.
+
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
 - Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the
