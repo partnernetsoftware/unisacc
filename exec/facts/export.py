@@ -48,6 +48,221 @@ def _module(rel, name):
     return m
 
 
+def _gen2ns(tag):
+    """The parse2 domain constants and helpers export.py derives facts from (was the module level of
+    exec/parse2/gen2.py; E = exec/parse/gen.py, P = parse2base.install(E), paths under exec/parse2)."""
+    from types import SimpleNamespace
+    import json
+    import sys as _s, pathlib as _p
+    _s.path.insert(0, str(ROOT / "exec/facts"))
+    from load import facts as _facts
+    _LX = {r["name"]: r["value"] for r in _facts("libraryexports")}
+    _VR = {r["name"]: r["value"] for r in _facts("valueranks") if r["kind"] == "bank"}   # exec/facts/valueranks.tsv
+
+
+    TYPERANK, MEMBERRANK, RETURNRANK, PARAMRANK = (_LX[k] for k in ("TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK"))
+    import os
+    import re
+    import sys
+    from pathlib import Path
+
+    import importlib.util
+    E = _module("exec/parse/gen.py", tag + "_e3gen")
+
+    # Intrinsic names come from the product declaration, not a second hand list.
+    sys.path.insert(0, E.ROOT)
+    from unisa.front.parse import INTRINSIC, INTRINSIC6
+    SYSCALLS = ([(name, op, 3) for name, op in INTRINSIC.items()]
+                + [(name, op, 6) for name, op in INTRINSIC6.items()]
+                + [("__hostcall", "hostcall", 2)]
+                + [("__hostaddr%d" % i, "hostaddr%d" % i, 0) for i in range(4)])
+
+    O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
+    VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
+    UNDO_SIZE = 43
+    FPS_FIRST = 128  # disjoint primitive/signature/structure base-code ranges
+    FPS_RD, FPS_RB, FPS_VAR, FPS_PARAM, FPS_RSH, FPS_FN, FPS_COUNT, FPS_PSH = (i << 40 for i in range(55, 63))
+    # Shared rule/control entry points (reuse before adding a new state cluster):
+    # TSPEC/DSTARS: type specifiers and per-declarator pointer shape.
+    # FPDECL/PARAMS: function-pointer shape and balanced parameter scanning.
+    # FN.params: parameter declarations; definitions and block signatures share it.
+    # DIMS/DIMSAVE: dimensions and their object metadata; ELSZ: element size.
+    # DECLN/DECL, BIND/UNWIND: local allocation and scoped name restoration.
+    # ASSIGNCV, CKM/RESD: conversions and table-derived arithmetic type decisions.
+    # INITLIST/STRINGINIT: aggregate and string initialisation.
+    # These are existing helpers, not a claim that grammar duplication is gone.
+    sys.path.insert(0, str(ROOT / "exec/build"))
+    import parse2base as _base   # exec/build/parse2base.py: the parse2 executor (rank-slot P, DEFS, token additions)
+    P = _base.install(E)
+    DEFS = _base.DEFS
+    g = E.g
+    from finite_rules import install as install_rules, install_rows, install_template, load as load_rules
+
+    # Tape text uses JSON string escaping; PUSH/POP1 retain their shared E bindings.
+    # {name} prints W[name] in decimal; declared spans print input slices.
+    def tape_rows(filename):
+        with open(str(ROOT / "exec/parse2" / filename), encoding="utf-8") as source:
+            next(source)  # column names
+            return [line.rstrip("\n").split("\t") for line in source]
+
+
+    TEMPL = {}
+    for name, kind, value in tape_rows("tape-templates.tsv"):
+        assert name not in TEMPL and kind in ("literal", "binding"), name
+        TEMPL[name] = {"PUSH": E.PUSH, "POP1": E.POP1}[value] if kind == "binding" else json.loads(value)
+    SPANS = {name: (start, end) for name, start, end in tape_rows("tape-spans.tsv")}
+
+
+    def addr(p):
+        """Variable address selection: exec/parse2/addr-manifest.tsv (K2 sub-manifest)."""
+        import assemble
+        env = assemble.run((ROOT / "exec/parse2") / 'addr-manifest.tsv', E, P, {}, dict(entry=p.cur, pending=p.acts))
+        p.cur, p.acts = env['done'], []
+        return p
+
+
+    def emit(p, name):
+        """a template as output actions: literal text and slot prints"""
+        for part in re.split(r"(\{[^}]*\})", TEMPL[name]):
+            if not part:
+                continue
+            if part[0] == "{":
+                k = part[1:-1]
+                if k in SPANS:
+                    p.a(("SPAN2",) + SPANS[k])
+                else:
+                    p.num(k)
+            else:
+                p.o(part)
+        return p
+
+
+    # ---- declared data 2: the operator ladder (derived from weights/gold/prec.tsv) --------
+    LEVELS = sorted({v for v in E.PREC.values()})
+    OPS = {lv: sorted(o for o, v in E.PREC.items() if v == lv) for lv in LEVELS}
+    SHORT = {"&&", "||"}   # short-circuit: not in step 1
+
+
+    def bad(k):
+        return ("rej", "not covered: " + k)
+
+
+    def optail_facts(o):
+        """Operator domain data for one operator tail (facts k2-gen2 oprows via exec/facts/export.py):
+        offset in RST, selected mnemonics, pointer mode, comparison/invert flags, float opcodes."""
+        modes = {name: (pointer, int(compare), int(invert)) for name, pointer, compare, invert in tape_rows("operator-modes.tsv")}
+        pointer, compare, invert = modes.get(o, modes["*"])
+        split = lambda t: re.fullmatch(r"  (\S+) r0, (.*)\n", t).groups()
+        sop, sregs = split(E.optext(o))
+        uop, uregs = split(E.optext(o, True))
+        floats = []
+        for suffix, base in (("d", DBL), ("s", FLT)) if o in FOPS else ():
+            opcode = FPU[suffix + FOPS[o]]
+            floats.append(dict(sfx=suffix, fop=opcode.removesuffix("_rev"),
+                               fregs="r0, r1" if opcode.endswith("_rev") else "r1, r0", result=4 if compare else base))
+        one = lambda b: [{}] if b else []
+        return dict(op=o, offset=[x for lv in LEVELS for x in OPS[lv] if x not in SHORT].index(o) * 256,
+                    sop=sop, sregs=sregs, uop=uop, uregs=uregs, ptr=pointer, ptrn=one(pointer in ("add", "sub")),
+                    cmpl=one(compare), invl=one(invert), fl=one(floats), nf=one(not floats), floats=floats)
+
+
+    def strwalk(pre, body, done):
+        import assemble
+        assemble.run((ROOT / "exec/parse2") / 'strwalk-manifest.tsv', E, P, {}, dict(pre=pre, body=body, done=done))
+
+
+    sys.path.insert(0, str(ROOT / 'exec/facts')); from load import facts as _pffacts
+    PFKINDS = {r['name']: r['value'] for r in _pffacts('printfallback')}['KINDS']   # printfallback-manifest.tsv (K2 trace translation)
+    PFCONV = {ord(k): PFKINDS.index(v) for k,v in E.gold("pfconv") if k != "conv"}
+
+    HEX = "0123456789abcdef"
+    ESC = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63, "0": 0}
+
+
+    def fmtwalk(pre, on_byte, on_d, on_end):
+        """Decoded format scanning: exec/parse2/fmtwalk-manifest.tsv (K2 sub-manifest)."""
+        import assemble
+        assemble.run((ROOT / "exec/parse2") / 'fmtwalk-manifest.tsv', E, P, {},
+                     dict(pre=pre, on_byte=on_byte, on_d=on_d, on_end=on_end))
+        return pre + '.w'
+
+
+    def printf(warnings=False):
+        """printf family: exec/parse2/printf-manifest.tsv (K2 sub-manifest)."""
+        import assemble
+        assemble.run((ROOT / "exec/parse2") / 'printf-manifest.tsv', E, P, dict(warnings=warnings), dict(warnings=warnings))
+
+
+    UNS = E.UNS   # unsigned char/short/int/long: UNS + size
+    SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
+    STAG, SSZ = E.STAG, E.SSZ
+    STRUCT_MAX, MEMBER_STRIDE = 128, 256
+    MOF, MSZ, MPT, MBS, MAR, MFLAT = (i << 40 for i in range(1, 7))
+    BFW, BFO, BFS, TDE = (i << 40 for i in (8, 9, 10, 11))
+    FPB = E.FPB   # register-call function pointer
+    FPV = 68      # stacked variadic function pointer; carried by the ordinary base descriptor
+    DBL = E.DBL
+    # ---- declared data: the product's type tables (weights/gold/type.tsv, tyinfo.tsv) -------------
+    # binary() asks two rows: ck = type(t1 "+" t2), the common type the operands are converted to
+    # (its signedness picks the spelling, a width below 8 masks both), and res = type(t1 op t2), the
+    # result (unsigned below 8: masked).  E3 reads the same rows instead of re-deriving them.
+    AX = [f[0] for f in E.gold("tyinfo") if f[1].isdigit()]   # the type axis, in tyinfo's own order (16 names)
+    TYROW = {(f[0], f[1], f[2]): f[3] for f in E.gold("type")}
+    TYINFO = {f[0]: (int(f[1]), int(f[2]), int(f[3])) for f in E.gold("tyinfo") if f[1].isdigit()}   # t -> (size, uns, narrow)
+    # the integer rows of tyinfo as value-descriptor codes: an unsigned type is UNS + size (E3's encoding)
+    TYINT = [(t, (UNS if TYINFO[t][1] else 0) + TYINFO[t][0], TYINFO[t][0], TYINFO[t][1], TYINFO[t][2])
+             for t in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")]      # (t, vb, size, uns, narrow)
+    U32M = (1 << (8 * TYINFO["u32"][0])) - 1          # an unsigned int kept to 32 bits (measured), from tyinfo
+    TYPE_TAPE = {name: json.loads(text) for name, text in tape_rows("type-tape.tsv")}
+    UIM = TYPE_TAPE["mask"] % U32M
+    assert TYINFO["u32"][1] == 1
+    # the premises the derivations lean on, pinned: a table that changes shape must fail here, not silently
+    assert len(AX) == 16 and AX[-1] == "illegal"
+    assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
+    TYOP = {"&": "|", "<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
+    CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
+    CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
+    SAL = 37 * 10 ** 6
+    POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
+    TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
+    SFLAT = 16 * POSSPAN  # scalar slots in a struct/member
+    GUNIT = 15 * POSSPAN  # global symbol -> last declaration unit epoch
+    PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
+    GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
+    TAGLEVEL, TAGUNDO = 19 * POSSPAN, 20 * POSSPAN
+    ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
+    GIBLOB, GIEND = 5 * POSSPAN, 6 * POSSPAN  # initialiser tape and end token, produced once in source order
+    FNSTR = 18 * POSSPAN  # __func__ token byte position -> function-name blob
+    SKIPS = 7 * POSSPAN   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
+    GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = array length (0: scalar, -1: flexible)   # a struct's alignment (its widest member's)
+    ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
+    SHAPE = 7 << 40  # pointer object -> dimensions descriptor; separate from object ARR
+    SHAPE_IDS = 1 << 32  # fresh descriptor pool and member-link namespace; never interned IDs
+    # START limits token bytes to POSSPAN: interned source names are fewer than
+    # POSSPAN (each typed identifier costs >1 byte). sid is bounded by STRUCT_MAX.
+    # SH.NEW checks its monotone count < POSSPAN; DIMS caps rank at eight.
+    # Pool ARR lies near 2^32, DIM near 2^35; both remain below MOF=2^40.
+    # SHAPE links use v, or SHAPE_IDS + v*MEMBER_STRIDE + sid, in disjoint ranges.
+    DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
+    PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
+    FOPS = dict(tape_rows("operator-float.tsv"))   # arithmetic operator -> float mnemonic (declared, not a second hand list)
+    FPU = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
+    FLT = E.FLT   # f32 value descriptor; pointer depth keeps pointee types distinct
+    BOOL = 66  # distinct value kind; arithmetic maps to tyinfo u8
+    assert len({BOOL, DBL, FLT, FPB, FPV}) == 5 and FPV < SBB
+    TYPEW = {"type=_Bool": BOOL, "type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
+    TWORDS = tuple(TYPEW) + ("type=unsigned", "type=signed")
+    ENUM_FIRST = 69
+    ENUM_CAPACITY = FPS_FIRST - ENUM_FIRST
+    ENUM_STATE, TAG_EPOCH = 63 << 40, 64 << 40
+    assert FPS_PSH + SBB * 16 < ENUM_STATE < TAG_EPOCH
+    assert ENUM_CAPACITY > 0 and max([BOOL, DBL, FLT, FPB, FPV] + [code for _, code, *_ in TYINT]) < ENUM_FIRST
+    assert FPS_FIRST < SBB and SBB + STRUCT_MAX < 4096
+
+
+    return SimpleNamespace(**locals())
+
+
 def _ppsrc():
     """E2 source facts (was the module level of exec/pp/gen.py): layout names, byte classes, targets,
     the gold pp.tsv directive vocabulary, predefines.tsv, operators.tsv, autoinc trigger names."""
@@ -708,7 +923,7 @@ def k2gen2():
     for d in ("exec", "exec/parse2"):
         if str(ROOT / d) not in sys.path:
             sys.path.insert(0, str(ROOT / d))
-    G = _module("exec/parse2/gen2.py", "gen2")
+    G = _gen2ns("gen2")
     acts = lambda a: [list(x) for x in a]
     dump = lambda v: json.dumps(v)
     follow = dict(G.tape_rows("type-follow.tsv"))
@@ -944,7 +1159,7 @@ def k2unitstokens():
 TABLES = [
     ("k2-gen2-tokens", ["exec/parse/gen.py", "exec/build/parse2base.py", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
     ("k2-units-tokens", ["exec/parse/gen.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
-    ("k2-gen2", ["exec/parse2/gen2.py", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
+    ("k2-gen2", ["exec/parse/gen.py", "exec/build/parse2base.py", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
@@ -1354,13 +1569,10 @@ TABLES.append(("enc-arm", ["unisa/catalog.py", "unisa/image/pe.py", "exec/facts/
 
 def k2strings():
     """String rejection text and escape data from the existing domain declarations."""
-    import ast
     records = [ln.split("\t", 2) for ln in (ROOT / "exec/facts/strings.tsv").read_text().splitlines()
                if ln and not ln.startswith("#")]
     reject = {name: json.loads(value) for kind, name, value in records if kind == "reject"}
-    tree = ast.parse((ROOT / "exec/parse2/gen2.py").read_text())
-    escape = next(ast.literal_eval(n.value) for n in tree.body
-                  if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ESC" for t in n.targets))
+    escape = {json.loads(name): int(value) for kind, name, value in records if kind == "escape"}
     reserved = {ord(c) for c in "01234567x"}
     entries = [{"byte": ord(k), "value": v} for k, v in escape.items() if ord(k) not in reserved]
     parse_constants = dict(ln.split("\t", 1) for ln in (ROOT / "exec/facts/parse-constants.tsv").read_text().splitlines()
@@ -1371,7 +1583,7 @@ def k2strings():
             "=TK_STR\tint\t" + parse_constants["TK_STR"]]
 
 
-TABLES.append(("k2-strings", ["exec/facts/strings.tsv", "exec/parse2/gen2.py",
+TABLES.append(("k2-strings", ["exec/facts/strings.tsv",
                               "exec/facts/parse-constants.tsv", "exec/facts/export.py"], k2strings))
 
 
@@ -1389,7 +1601,7 @@ def k2membercontrol():
     for d in ("exec", "exec/parse2"):
         if str(ROOT / d) not in sys.path:
             sys.path.insert(0, str(ROOT / d))
-    G = _module("exec/parse2/gen2.py", "k2membercontrol_gen2")
+    G = _gen2ns("k2membercontrol_gen2")
     textrows = lambda name: [ln.split("\t", 1) for ln in (ROOT / ("exec/parse2/membercontrol-" + name + ".tsv")).read_text().splitlines()[1:]]
     consts = {n: getattr(G, n) for n in ("SBB", "MEMBER_STRIDE", "MOF", "MSZ", "MPT", "MBS", "MAR", "BFW", "BFO", "BFS", "SHAPE_IDS", "SHAPE", "SSZ", "DBL", "FLT", "BOOL")}
     consts["ARR"] = G.E.ARR
@@ -1432,7 +1644,7 @@ def k2membercontrol():
             "=pop1_text\tjson\t" + compact(templates["template1"])]
 
 
-TABLES.append(("k2-membercontrol", ["exec/parse2/gen2.py", "exec/parse2/membercontrol-template.tsv",
+TABLES.append(("k2-membercontrol", ["exec/parse/gen.py", "exec/build/parse2base.py", "exec/parse2/membercontrol-template.tsv",
                                     "exec/parse2/membercontrol-tokens.tsv", "exec/parse2/membercontrol-operators.tsv",
                                     "exec/parse2/membercontrol-fresh.tsv", "exec/parse2/membercontrol-manifest-fresh.tsv",
                                     "exec/parse2/membercontrol-text.tsv", "exec/parse2/membercontrol-stack.tsv",
@@ -1479,7 +1691,7 @@ TABLES.append(("k2-librarymodule-map", ["exec/facts/k2-librarymodule.tsv", "exec
 def k2libraryenv():
     """parse2 library export chain environment (was gen2._libraryexports/librarymodule.install, Python-built):
     lx (libraryexports phases), types/imports/callables child envs, librarymodule header and no-main reject."""
-    G = _module("exec/parse2/gen2.py", "k2libraryenv_gen2")
+    G = _gen2ns("k2libraryenv_gen2")
     E = G.E
     sys.path.insert(0, str(HERE)); from load import facts as F
     sys.path.insert(0, str(ROOT / "exec"))
@@ -1525,7 +1737,7 @@ def k2libraryenv():
             "=nomain\tjson\t" + dump(L(E.rej(mainreason))), "=ret\tjson\t" + dump(L(E.O('  ret\n')))]
 
 
-TABLES.append(("k2-libraryenv", ["exec/parse2/gen2.py", "exec/parse/gen.py", "exec/parse2/librarycallables-result.tsv",
+TABLES.append(("k2-libraryenv", ["exec/parse/gen.py", "exec/build/parse2base.py", "exec/parse/gen.py", "exec/parse2/librarycallables-result.tsv",
                "exec/facts/libraryexports.tsv", "exec/facts/librarycallables.tsv", "exec/facts/libraryimports.tsv",
                "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv", "exec/facts/valueranks.tsv",
                "exec/facts/k2-gen2.tsv", "exec/facts/k2-librarymodule-map.tsv", "exec/facts/export.py"], k2libraryenv))

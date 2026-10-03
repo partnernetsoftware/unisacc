@@ -75,7 +75,7 @@ exec/ 的构造器在构建时 import 以下 unisa/ 模块（19 个）：`unisa/
 | 2 | `exec/parse2/printfcontrol.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 2 | `exec/parse2/libraryvariadic.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 2 | `exec/parse2/librarytypes.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
-| 2 | `exec/parse2/librarymodule.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
+| 2 | `exec/parse2/librarymodule-manifest.tsv` (was `exec/parse2/librarymodule.py`) | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 2 | `exec/parse2/libraryimports.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 2 | `exec/parse2/constexpr.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 2 | `exec/nativeabi/ordered.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
