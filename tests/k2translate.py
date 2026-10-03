@@ -360,6 +360,8 @@ class Emitter:
                 retrow = len(out)
             dom = d.get("domain")
             if dom and dom != {"__range__": [0, 257]}:
+                if not isinstance(dom, dict):
+                    raise Refuse("explicit key-list domain (assemble takes only [lo,hi))")
                 o["domain"] = dom["__range__"]
             if op in ("template", "table") and d.get("mode", "r") != "r":
                 o["mode"] = d["mode"]
@@ -414,7 +416,8 @@ def emit(module, specs):
     if not runs:
         raise Refuse("install never called by the recorded generator runs")
     args = runs[0][1]["args"]
-    if any(t["args"] != args for _, t in runs):
+    nb = lambda a: {k: v for k, v in a.items() if not isinstance(v, bool)}   # bool args are mode flags (when)
+    if any(nb(t["args"]) != nb(args) for _, t in runs):
         raise Refuse("install arguments differ across modes")
     flags = sorted(set().union(*[m for m, _ in runs]))
     allmodes = {m for m, _ in runs}
