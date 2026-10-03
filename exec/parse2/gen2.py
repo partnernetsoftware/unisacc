@@ -452,35 +452,13 @@ def build(locations=False, warnings=False, errors=False):
     function_control("function8", warnings)
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
-    install_rules(g, os.path.dirname(__file__), "declaration", section="name")
-    # Scope record fields are declared once; bind/unwind share their layout bindings.
-    scope_bindings = {name: getattr(E, name) for name in
-                      ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
-    scope_bindings.update(VALUEBANK=_VR["VALUEBANK"], TYPERANK=TYPERANK, LOC=LOC, END_=END_, ENV=ENV, VLSIZE=VLSIZE, UNDO_SIZE=UNDO_SIZE, SHAPE=SHAPE, TDE=TDE)
-    for name, base, size in (("UNDO", E.UNDO, UNDO_SIZE), ("DIM", DIM, 8), ("PDB", PDB, 16)):
-        scope_bindings.update((name + "_" + str(i), base + i) for i in range(size))
-    scope_sequences = {name: row[0][1] for name, row in load_rules(
-        Path(__file__).with_name("scope-actions.tsv"), {}, domain=[0], bindings=scope_bindings).items()}
-    if warnings: scope_bindings["bind_return"] = P("BIND").fresh("r")
-    install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
-                  sequences=scope_sequences, section="bind-warnings" if warnings else "bind")
-    # Preserve fresh continuation identities; declaration semantics live in TSV.
-    p = P("DECL")
-    decl_bindings = dict(scope_bindings, after_bind=p.fresh("r"))
-    decl_bindings["after_local"] = p.fresh("r") if warnings else decl_bindings["after_bind"]
-    decl_bindings.update(after_frame=p.fresh("r"), array_test=p.fresh("b"),
-                         after_dims=P("DC.a").fresh("r"), frame_test=P("MAXF").fresh("b"))
-    for section in ("entry-warnings" if warnings else "entry", "body"):
-        install_rules(g, os.path.dirname(__file__), "declaration", bindings=decl_bindings, section=section)
+    scope = assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part1=1))['sb']
     import assemble   # K2 trace translation: vla-manifest.tsv
     from types import SimpleNamespace
     assemble.run(Path(__file__).resolve().parent / 'vla-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(DEP=VLDEP, ENUM=END_, FRAME=VLFRAME, SIZE=VLSIZE, UNS=UNS))
     # statements
     segment("dispatch-block", warnings)
-    scope_bindings["scope_compare"] = P("S.uw").fresh("b")
-    if warnings: scope_bindings["unbind_return"] = P("S.uw1").fresh("r")
-    install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
-                  sequences=scope_sequences, section="unwind-warnings" if warnings else "unwind")
+    assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part2=1, extra=scope))
 
     local_control("local0", warnings)
     shape_control("local-type")
