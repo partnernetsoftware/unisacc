@@ -29,20 +29,24 @@
 - 7 gates green after machodelta (0b1859b6) and after elfimage (554a0b5d).
 
 ## Remaining
-1. Entries: exec/enc/gen.py and exec/enc/arm.py still Python. Convert to exec/enc/gen-manifest.tsv / arm-manifest.tsv run
-   by exec/build/gen.py (see exec/lower/gen-manifest.tsv: `#! base`, `#! flags`, let rows). Flags: elf macho pe object.
-   gen.py pieces: START symbol interning (classes/ops/META/x86win keys), procs(), emit_rules pre/division/post,
-   x86-shell dispatch (install_rows per class), relax(), done-write/done-image/done-raw; arm.py: specs, contract
-   (armcontract sections put/check/signed/finish loops), armbase, manifests. START interning loops become foreach over
-   fact tables (ops, META, keys); check loops over specs become foreach over a spec fact table (shape string -> rows).
-2. Switch callers (enc lines only; R3-C edits the same scripts for other stages): tests/graphhash.py keys
-   ('exec/enc/gen.py', 'exec/enc/arm.py' -> 'exec/build/gen.py enc' / 'exec/build/gen.py arm'?), exec/pipeline/prepare.sh,
-   exec/c/*, exec/enc/*check.sh (pecheck.sh uses `exec/enc/$encoder`), tests/gate.sh rows.
-3. Re-run 7 gates after each change.
-4. Optional cleanup: remaining *-result.tsv sections no longer read; .k2enc/ scratch can be deleted.
+- Entries done (see rounds below). Optional cleanup: remaining *-result.tsv sections no longer read; .k2enc/ scratch.
 
 ## Round 2026-10-03 17:36 (be572e50)
 - exec/enc/gen-manifest.tsv done: `exec/build/gen.py enc OUT [--elf|--macho|--pe|--object]` byte-identical to gen.py in all 5 modes
   (.k2enc/cmp.sh OLD STAGE MODES). Facts enc-x86 (export.py x86entry). assemble.py: call opts flags, domain_at, seqenv.
 - Next: arm-manifest (stage dir clash: put it in exec/enc/arm/ or add a manifest-path arg to build/gen.py), callers, delete
   gen.py/arm.py and the now-unused x86-*-names/instances/sequences/bytes/reject/dispatch tsvs, graphhash full, 8 gates.
+
+## Round 2026-10-03 17:45 (after rebase onto 97d3bf2a)
+- exec/enc/arm-manifest.tsv done; driver form `exec/build/gen.py enc/arm OUT [--elf|--macho|--pe|--object]`
+  (build/gen.py: STAGE/SUB -> exec/STAGE/SUB-manifest.tsv). Facts enc-arm (export.py armentry: specs with per-char
+  check data first/ps/isv/code/signed). 5 modes byte-identical to arm.py before deletion.
+- assemble (coordinator-accepted generic opts): call flags (literal or list = any of these flags), domain_at, seqenv.
+- Callers switched: tests/graphhash.py + graphhash.tsv keys (hashes kept), exec/pipeline/prepare.sh, exec/c/{buildcompiler.sh,
+  winmemorycheck.sh,compilerpack.py}, exec/enc/*check.sh + librarysymbolscheck.py, exec/ffi/bridgecheck.py,
+  exec/lower/sparsecheck.sh, tests/{objectplancheck,objectpackcheck,modelobjectcheck,seedconstructmatrix}.py.
+  gen.py/arm.py and their private tsvs (x86-emit-instances/sequences/bytes/reject, x86-line-names/reject,
+  x86-operand-names, x86-shell-dispatch, armcontract-names) deleted.
+- Note: fresh labels are named by the owner's first dotted part only (parse/gen.py P.fresh), so fresh:P:CHECK:b equals
+  P("CHECK.x.y").fresh("b"); manifests use that.
+- exec/rules.md still lists exec/enc/gen.py and arm.py rows (doc table, not edited here).
