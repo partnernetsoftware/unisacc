@@ -3,6 +3,7 @@
 All generation, compilation and execution children have their own 60s bound.
 """
 import json,os,pathlib,struct,subprocess,sys,tempfile
+from concurrent.futures import ThreadPoolExecutor
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import run
 R=pathlib.Path(__file__).resolve().parents[2]
@@ -13,12 +14,17 @@ def call(args):
 with tempfile.TemporaryDirectory(prefix='parse-locations-') as td:
     t=pathlib.Path(td)
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
-    for name,script,flags in [('pp','build/gen.py',['pp','--locations']),('lex','build/gen.py',['lex','--locations']),
-                            ('typed','build/gen.py',['lex','--typed']),('parse','build/gen.py',['parse2','--locations']),
-                            ('plain','build/gen.py',['parse2'])]:
+    models=[('pp','build/gen.py',['pp','--locations']),('lex','build/gen.py',['lex','--locations']),
+            ('typed','build/gen.py',['lex','--typed']),('parse','build/gen.py',['parse2','--locations']),
+            ('plain','build/gen.py',['parse2'])]
+    def build_model(spec):
+        name,script,flags=spec
         call([sys.executable,R/'exec'/script,t/(name+'.json'),*flags])
         call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
         call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])
+    # Independent model builds write distinct files.  Keep each model's gen -> tbl -> net order.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(build_model,models))
     # Test-only model continuation reads every retained map field back out.
     # It replaces the grammar entry, not the location decoder being tested.
     sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'facts'));from load import facts as _facts
