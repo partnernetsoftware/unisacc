@@ -131,6 +131,7 @@ def fingerprint(jobs):
     def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     global_inputs = None
     inventories, family_tools = {}, {}
+    extra_trees = {}
     result = {}
     for name, command in jobs.items():
         entry = manifest.get('suites', {}).get(name)
@@ -140,7 +141,15 @@ def fingerprint(jobs):
         # ${MODEL_COM:-./unisacc.com} at list time, so the path differs between runs while the
         # job does not (its bytes are an executable input either way)
         mc = settings.get('MODEL_COM') or './unisacc.com'
-        audited = entry is not None and command == [mc if a == '{MODEL_COM}' else a for a in entry['command']]
+        declared_cmd = [mc if a == '{MODEL_COM}' else a for a in entry['command']] if entry else None
+        # 0.0.23 E: "match": "contains" -- the declared command is a contiguous run of the job's
+        # command; the job's full command stays in the identity, so a changed argument list (new
+        # test files in a shard, an env prefix) re-runs the job but no longer drops its declaration
+        if entry and entry.get('match') == 'contains':
+            k = len(declared_cmd)
+            audited = any(command[i:i+k] == declared_cmd for i in range(len(command)-k+1))
+        else:
+            audited = entry is not None and command == declared_cmd
         inventory, extra = {}, None
         if entry and entry.get('reviewed_trees'):
             for tree, reviewed in entry['reviewed_trees'].items():
@@ -180,7 +189,13 @@ def fingerprint(jobs):
                 if n.endswith('.py') and any(n.startswith(prefix+'/') for prefix in entry.get('code_trees', [])))
         inputs = []
         if entry:
-            inputs = sorted(set(entry['files']) | {n for n in names
+            tracked = set(names)
+            for prefix in entry.get('trees', []):   # declared trees outside the fingerprint pathspec (seed/, plans/...)
+                if prefix not in extra_trees:
+                    raw2 = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', prefix])
+                    extra_trees[prefix] = sorted(set(raw2.decode().split('\0')) - {''})
+                tracked.update(extra_trees[prefix])
+            inputs = sorted(set(entry['files']) | {n for n in tracked
                 if any(n.startswith(prefix+'/') for prefix in entry.get('trees', []))})
         if audited:
             identity = [common, command, {n:digest(n) for n in inputs}]
