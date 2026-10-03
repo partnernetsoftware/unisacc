@@ -45,7 +45,7 @@ def count():
     return {s: {'total': sum(v.values()), 'files': v} for s, v in sorted(stages.items())}
 
 # 0.0.23 K2 seedpy: seed-layer Python is only the generic tsv->weights converter and the seed build.
-SEED_WHITELIST = ('exec/finite_rules.py', 'exec/assemble.py', 'exec/facts/export.py',
+SEED_WHITELIST = ('exec/finite_rules.py', 'exec/assemble.py', 'exec/facts/export.py', 'exec/facts/load.py',
                   'exec/c/', 'exec/pipeline/', 'exec/build/',
                   'exec/lex/tbl.py', 'exec/lex/net.py', 'exec/lex/stage.py')   # executors / converters
 # check and reference-simulator tools: to move to the tests/ side, not counted
@@ -59,6 +59,7 @@ def seedpy():
         if SEED_TOOLS.search(rel): tools.append(rel); continue
         d = rel.split('/')[1] if rel.count('/') > 1 else '.'
         counts[d] = counts.get(d, 0) + 1
+        if '--list' in sys.argv: print('  stage    %s' % rel)
     for t in tools: print('  tool     %s' % t)
     for d, n in sorted(counts.items()): print('  %-10s %4d' % (d, n))
     print('seedpy  stage-specific .py under exec/ %d   (check/sim tools %d, not counted; report only)'
