@@ -10,7 +10,7 @@ _root=str(_pl.Path(__file__).resolve().parents[1])
 if _root not in _sys.path: _sys.path.append(_root)
 from exec.facts.load import facts
 # Bank constants (430.., V3 extras 632..): exec/facts/top-modelgraphequality-banks.tsv.
-globals().update({r['name']:r['bank']<<40 for r in facts('top-modelgraphequality-banks')})
+globals().update({r['name']:r['value'] for r in facts('top-modelgraphequality-banks')})
 assert not set(range(430,438)) & (set(range(350,358)) | set(range(400,408)) | set(range(410,414)))
 # Legacy FIELDS stride16, EDGES stride1025 and LAYOUT stride4 stay unchanged.
 # V3 extras: per-node [version,rank,format,natural,flags,known,origin];
@@ -24,8 +24,8 @@ def install(E,fail='DEAD'):
  from pathlib import Path
  from finite_rules import install as rules
  if 'MG.equal' in E.g.st:return
- from modelsignature import install as canonical_install
- canonical_install(E,fail)
+ import assemble
+ assemble.run(assemble.FACTS.parent/'modelsignature-manifest.tsv',E,E.P,{},dict(fail=fail))
  root=Path(__file__).parent
  bindings=dict(FIELDS=FIELDS,EDGES=EDGES,LAYOUT=LAYOUT,SIGID=SIGID,PAIRLEFT=PAIRLEFT,PAIRRIGHT=PAIRRIGHT,
                VISITED=VISITED,FRAME=FRAME,EXTRA=EXTRA,ENTRYEXTRA=ENTRYEXTRA,fail=fail)

@@ -4,7 +4,8 @@ import importlib.util,json,pathlib,struct,sys,tempfile,subprocess
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT/'tests'),str(ROOT)]
 from modeltypedcandidatescheck import U,d2,I,D,F,PTR,PAIR,sig,Files
-from modelsignature import install
+import assemble
+install=lambda E,fail='DEAD':assemble.run(assemble.FACTS.parent/'modelsignature-manifest.tsv',E,E.P,{},dict(fail=fail))  # modelsignature-manifest.tsv
 from exec.pp.sim import run,load
 spec=importlib.util.spec_from_file_location('canonicalbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 def canonical(blob):

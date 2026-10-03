@@ -20,7 +20,7 @@ fresh    `-` (None) | `P:NAME` (P(NAME).fresh, registered) | `U:NAME` / `S:NAME`
 seq,bind comma list of k=V; V is a fact path `a.b.0`, `@rej:TEXT`, `@bytes:TEXT`
          (`@bytes:=FACT` for a fact's text), `$NAME` (env), `fresh:SCOPE:KIND`;
          evaluated left to right
-opts     `-` or JSON: mode, domain ([lo,hi)), classes (fact path), overlay,
+opts     `-` or JSON: once (NAME: the rest of this manifest runs once per graph), mode, domain ([lo,hi)), classes (fact path), overlay,
          result (store the install's return in env under that name),
          export (list of bind names also stored in env, for later rows' `$NAME`),
          over/as (foreach)
@@ -226,7 +226,7 @@ class Run:
 
     def block(self, rows, depth, extra):
         i = 0
-        while i < len(rows):
+        while i < len(rows) and not self.done:
             d, row = rows[i]
             assert d == depth, rows[i]
             j = i + 1
@@ -244,6 +244,12 @@ class Run:
         if not _when(when, self.flags, facts):
             return
         o = {} if opts in ("", "-") else json.loads(opts)
+        if "once" in o:   # named result per graph: a manifest that already ran stops here
+            seen = self.E.g.__dict__.setdefault("once", set())
+            if o["once"] in seen:
+                self.done = True
+                return
+            seen.add(o["once"])
         for k, v in o.get("let", {}).items():
             facts[k] = [self.value(x, facts) for x in v] if isinstance(v, list) else self.value(v, facts)
         if stem.startswith("@"):
@@ -500,6 +506,7 @@ _init0 = Run.__init__
 def _init(self, *a, **k):
     _init0(self, *a, **k)
     self.accum = {}
+    self.done = False
 
 
 Run.__init__ = _init

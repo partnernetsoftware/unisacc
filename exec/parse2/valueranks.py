@@ -19,7 +19,9 @@ def install(E,P,b):
     from load import facts as _f
     _LX={r["name"]:r["value"] for r in _f("libraryexports")}
     RETURNRANK,PARAMRANK,MEMBERRANK,TYPERANK=(_LX[k] for k in ("RETURNRANK","PARAMRANK","MEMBERRANK","TYPERANK"))
-    import modelsignature,modelgraphequality,libraryexports,layoutfacts,libraryimports,librarycallables
+    import libraryexports,layoutfacts,libraryimports,librarycallables,types,assemble
+    modelsignature=types.SimpleNamespace(**assemble.load_facts('top-modelsignature-banks')['top-modelsignature-banks!'])  # exec/facts/top-modelsignature-banks.tsv
+    modelgraphequality=types.SimpleNamespace(**assemble.load_facts('top-modelgraphequality-banks')['top-modelgraphequality-banks!'])  # exec/facts/top-modelgraphequality-banks.tsv
     owned={VALUEBANK,NAMEDRETURN,LVSITERANK,LCSITERANK,COMMONBANK}
     for owner in (modelsignature,modelgraphequality,libraryexports,layoutfacts,libraryimports,librarycallables):
         assert not owned.intersection(v for k,v in vars(owner).items() if type(v) is int and v>=1<<40),owner.__name__

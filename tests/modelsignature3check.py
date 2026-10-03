@@ -138,8 +138,8 @@ def main():
  runtime,mode=sys.argv[1:3];assert mode in ('canonical','equal')
  spec=importlib.util.spec_from_file_location('sig3model',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
  if mode=='canonical':
-  from modelsignature import install
-  install(E);E.P('START').a(('SBCLR',),*[('SBOUT',c) for c in b'left'],('SBFIND','ms_blob'),('BLEN','ms_len','ms_blob')).call('MS.canonical').a(('INPUSH','ms_canon'),('LDI','ms_zero',0),('SPAN2','ms_zero','ms_canonlen'),('INPOP',)).goto('DONE')
+  import assemble
+  assemble.run(assemble.FACTS.parent/'modelsignature-manifest.tsv',E,E.P,{},dict(fail='DEAD'));E.P('START').a(('SBCLR',),*[('SBOUT',c) for c in b'left'],('SBFIND','ms_blob'),('BLEN','ms_len','ms_blob')).call('MS.canonical').a(('INPUSH','ms_canon'),('LDI','ms_zero',0),('SPAN2','ms_zero','ms_canonlen'),('INPOP',)).goto('DONE')
  else:
   from modelgraphequality import install
   install(E);p=E.P('START')

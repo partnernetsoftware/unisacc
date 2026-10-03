@@ -8,7 +8,7 @@ _root=str(_pl.Path(__file__).resolve().parents[1])
 if _root not in _sys.path: _sys.path.append(_root)
 from exec.facts.load import facts
 # Graph-table banks and wire constants: exec/facts/top-modelbindings-{banks,const}.tsv.
-globals().update({r['name']:r['bank']<<40 for r in facts('top-modelbindings-banks')})
+globals().update({r['name']:r['value'] for r in facts('top-modelbindings-banks')})
 _C={r['name']:r['value'] for r in facts('top-modelbindings-const')}
 STRIDE=_C['STRIDE']
 

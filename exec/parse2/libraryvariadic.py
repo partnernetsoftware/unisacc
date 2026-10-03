@@ -8,7 +8,9 @@ def install(E,P,b,integers):
     from libraryimports import BYNAME,FORMAT,IDS,PLAN,DISPATCH,CANON,RETKIND,RETWIDTH,SUPPORTED,NAMES as IMPORTNAMES
     from unresolved import DEFINED
     from libraryexports import SIGEPOCH
-    import modelsignature,modelcandidates,libraryimports,libraryexports
+    import libraryimports,libraryexports,types,assemble
+    modelsignature=types.SimpleNamespace(**assemble.load_facts('top-modelsignature-banks')['top-modelsignature-banks!'])  # exec/facts/top-modelsignature-banks.tsv
+    modelcandidates=types.SimpleNamespace(**assemble.load_facts('top-modelcandidates-banks')['top-modelcandidates-banks!'])  # exec/facts/top-modelcandidates-banks.tsv
     owned={SITEFN,SITEBIND,COUNT,DEPTH,BASE,SHAPE,NAMES,REQUESTS}
     for module in (modelsignature,modelcandidates,libraryimports,libraryexports):
         assert not owned.intersection(v for v in vars(module).values() if type(v) is int and v>=1<<40), module.__name__
@@ -28,7 +30,7 @@ def install(E,P,b,integers):
     root=Path(__file__).parent
     bindings={'i32':next(code for name,code,_,_,_ in integers if name=='i32')}
     for mn in ('libraryvariadic','libraryimports','libraryexports','valueranks','unresolved','modelsignature','modelcandidates'):
-        for k,v in vars(importlib.import_module(mn)).items():
+        for k,v in vars(dict(modelsignature=modelsignature,modelcandidates=modelcandidates).get(mn) or importlib.import_module(mn)).items():
             if type(v) is int and v>=1<<40:bindings[(mn+'.' if mn!='libraryvariadic' else '')+k]=v
     for k,v in b.items():
         if type(v) is int:bindings['b.'+k]=v
