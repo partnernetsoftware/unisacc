@@ -72,3 +72,12 @@
   (global-results.tsv pattern) for librarymodule (coordinator request). Fresh: ER_b/DP_b/UC_r are
   OWNER_KIND -> per-owner holders `=ER`,`=DP`,`=UC` (holder op). Stack: errors-stack via `table` with
   `"domain":"@labels"` (approved; .k2tmp/vr/asm.py) + decisionledger.allow line.
+
+## Round 6 (2026-10-03)
+- errors.py deleted -> errors-manifest.tsv + exec/facts/k2-errors.tsv (messages joined by reason, texts, position
+  acts; former errors-messages/-text/-position.tsv removed). assemble marked changes (approved): domain "@labels";
+  foreach over `$NAME` (dict from an earlier result=) with join {over,on,default}; fresh `split` (OWNER_KIND).
+  Exports lm_nomain_msg = groups["not covered: no main"] (ER.message61 in --errors) -> gen2 puts it in E.results.
+  parse2 graphhash 10/10; finite-template, decision-ledger, exec-errors green. exec-errors-warn printed no rc line
+  (not re-run). Allow justification appended to tests/decisionledger.allow.
+- Remaining: unitmode, layoutprovenance, units entry.
