@@ -4,7 +4,8 @@
 The shipped compiler runs networks plus a generic executor; the networks come from finite
 transition systems that exec/*/ constructors assemble at build time, mostly from .tsv
 declarations.  What remains as Python control is counted here, per stage: the call sites
-that create transitions directly -- `.on(`, `.branch(`, `.goto(` -- outside finite_rules.py,
+that create transitions directly -- `.on(`, `.branch(`, `.goto(` -- and the graph edits (state-table
+mutations: renames, hooks, aliases) outside finite_rules.py,
 the generic declaration expander.  Lines are not counted (formatting would game them).
 The counts may only fall: research/decision-ledger.json is the baseline; a rise fails unless
 tests/decisionledger.allow names the stage with a reason.  `--update` rewrites the baseline
@@ -22,8 +23,15 @@ def count():
         rel = p.relative_to(ROOT / 'exec')
         if rel.parts[0] in ('build', '__pycache__') or p.name == 'finite_rules.py' or '__pycache__' in rel.parts: continue
         stage = rel.parts[0] if len(rel.parts) > 1 else '(top)'
-        n = sum(1 for node in ast.walk(ast.parse(p.read_text(), str(p)))
+        tree = ast.parse(p.read_text(), str(p))
+        n = sum(1 for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in CALLS)
+        # 0.0.23 K (owner): graph edits written in Python count too -- renames/hooks/aliases done by
+        # mutating the state table (`X.st.pop(...)`, `X.st[...] = ...`, `del X.st[...]`)
+        def is_st(e): return isinstance(e, ast.Attribute) and e.attr == 'st'
+        n += sum(1 for node in ast.walk(tree)
+                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('pop', 'setdefault', 'update') and is_st(node.func.value))
+                 or (isinstance(node, (ast.Assign, ast.Delete)) and any(isinstance(t, ast.Subscript) and is_st(t.value) for t in node.targets)))
         if n: stages.setdefault(stage, {})[str(rel)] = n
     return {s: {'total': sum(v.values()), 'files': v} for s, v in sorted(stages.items())}
 
