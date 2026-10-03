@@ -232,8 +232,7 @@ def build(image=False, object_mode=False):
     assemble.run(os.path.join(HERE, 'fp-manifest.tsv'), E, P, {}, {})
     import assemble
     assemble.run(os.path.join(HERE, 'address-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ, OFF=OFF, LABD=LABD))
-    from hostbridge import install as install_hostbridge
-    install_hostbridge(E,'x86_64')
+    assemble.run(os.path.join(HERE, 'hostbridge-manifest.tsv'), E, P, {'arm64': False}, {})
     import assemble
     assemble.run(os.path.join(HERE, 'x86itoa-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ))
     assemble.run(os.path.join(HERE, 'x86win-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ))
