@@ -4,10 +4,9 @@ No reference layout or encoder is called at runtime. Format constants are read
 at generation; page rounding, symbol resolution and displacements are delta
 operations. This slice outputs text only; header data is not an image yet.
 """
-from unisa.image import elf, macho, pe
-from unisa.tape import DATA_BASE
-SYM, PRESENT, DEST, VALUE, NAMED, OPCODE, VALUE2 = (i * 10**6 for i in range(85, 92))
-
+from exec.facts.load import facts
+BINDINGS = {r['name']: r['value'] for r in facts('enc-address-bindings')}
+SYM, PRESENT, DEST, VALUE, NAMED, OPCODE, VALUE2 = (BINDINGS[k] for k in ('SYM', 'PRESENT', 'DEST', 'VALUE', 'NAMED', 'OPCODE', 'VALUE2'))
 
 def install(E, byte, KND, SZ, OFF, LABD):
     import json
@@ -20,16 +19,10 @@ def install(E, byte, KND, SZ, OFF, LABD):
     sequences.update({'byte'+value: byte(E.P('byte.binding'), int(value)).acts for value in
                       (root/'address-bytes.tsv').read_text().splitlines() if not value.startswith('#')})
     sequences['reject'] = E.rej('not covered: address or target declaration')
-    facts = dict(SYM=SYM, PRESENT=PRESENT, DEST=DEST, VALUE=VALUE, NAMED=NAMED,
-                 OPCODE=OPCODE, VALUE2=VALUE2, KND=KND, SZ=SZ, OFF=OFF, LABD=LABD, DATA_BASE=DATA_BASE)
-    idata = 40+16*(len(pe.IMPORTS)+1)+sum((len(n.encode())+4)&-2 for n in pe.IMPORTS)+len(pe.DLL)+1
-    idata = ((idata+7)&-8)+pe.LOADCFG
-    layouts = {tag: dict(text=base+m.HDRS('x86_64'), round=m.HDRS('x86_64')+m.PAGE-1, mask=-m.PAGE, base=base+(macho.DLPREFIX if tag=="osx" else 0))
-               for tag, m, base in [('lnx',elf,elf.VADDR), ('osx',macho,macho.VMADDR)]}
-    layouts['lnx_dyn'] = dict(text=elf.VADDR+784, round=784+elf.PAGE-1, mask=-elf.PAGE, base=elf.VADDR+32)
-    layouts['win'] = dict(text=pe.IMAGEBASE+pe.TEXT_RVA, round=pe.SECT_ALIGN-1, mask=-pe.SECT_ALIGN,
-        imports=pe.IMAGEBASE+pe.TEXT_RVA+40+8*(len(pe.IMPORTS)+1),
-        base=pe.IMAGEBASE+pe.TEXT_RVA+((idata+pe.SECT_ALIGN-1)&-pe.SECT_ALIGN))
+    facts_ = dict(BINDINGS, KND=KND, SZ=SZ, OFF=OFF, LABD=LABD)
+    layouts = {}
+    for r in facts('enc-address-layouts'):
+        layouts.setdefault(r['tag'], {})[r['name']] = r['value']
     for phase in ('pre', 'post'):
         if phase == 'post':
             memory_layout(E, 'DEAD.addr')
@@ -38,7 +31,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
             if line.startswith('#'): continue
             selected, section, values, names, prepare = line.split('\t')
             if selected != phase: continue
-            bindings = {**facts, **json.loads(values)}
+            bindings = {**facts_, **json.loads(values)}
             if section == 'posix': bindings.update(layouts[bindings['platform']])
             if section == 'windows': bindings.update(layouts['win'])
             bindings.update({name: E.P(owner).fresh(kind) for name, owner, kind in json.loads(names)})
