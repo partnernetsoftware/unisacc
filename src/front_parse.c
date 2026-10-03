@@ -1643,7 +1643,12 @@ int primary(void) {
            unsigned int, long, unsigned long that holds it -- so 0xffffffff
            is an unsigned int, and `s == 0xffffffff` compares in 32 bits. */
         if ((src[tpos[tp]] & 255) == 48) { if (tlen[tp] > 1) {
-            if (v > 2147483647) { if (v <= 4294967295) { cursize = 4; curuns = 1; } }
+            /* an explicit l/L suffix keeps it a long: 0xFFFFFFFFUL is 8 bytes (C99 6.4.4.1 lists
+               only long types for a suffixed constant) */
+            if (v > 2147483647) { if (v <= 4294967295) { int lsuf; lsuf = 0; k = 0;
+                while (k < tlen[tp]) { if ((src[tpos[tp] + k] & 255) == 108) lsuf = 1;
+                    if ((src[tpos[tp] + k] & 255) == 76) lsuf = 1; k = k + 1; }
+                if (lsuf == 0) { cursize = 4; curuns = 1; } } }
             /* past LLONG_MAX (it parsed to a negative long): unsigned long long, LL suffix
                or not (csmith seeds 108, 128, 168: p <= 0xAB4624F099C83E0CLL compared signed) */
             if (v < 0) { cursize = 8; curuns = 1; }
