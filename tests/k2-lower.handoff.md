@@ -85,6 +85,22 @@
   section I added to modelsignature-result.tsv) and point nativeabi/gen-manifest row 1 at theirs; recheck byte-equality.
 - tests/gatedeps.json excludes exec/build for the compilercheck family: now that exec/build holds sources, review.
 
+## Round 5 (16:53-16:58)
+- 00c14959 gatedeps: compilercheck `excluded_dirs` emptied (exec/build now holds sources; caches are ignored subdirs).
+  The family guard for exec/.gitignore is stale (file changed in round 4): `make gatedeps` (refresh_gatedeps.py) is
+  release-time, run it as the last commit before a release queue.
+- eb2e95a5 pp slice 1: build_autoinc + build_ftrim_libc -> exec/pp/autoinc-manifest.tsv over facts/pp-autoinc-gen
+  (export.py ppautoinc(): libneed closure, header names, chain labels, constant spellings). pp/gen.py calls it with
+  assemble.run (same pattern as sourcefacts/locations). Byte-equal; graphhash --only pp 16/16 ok.
+- pp entry plan (next): `#! flags locations shared-predefines osx win arm64 no-autoinc` (target from flags like lower;
+  E2_AUTOINC=0 callers -> --no-autoinc), facts producer for: START init acts (DIRV ids, pp-init, xe_init XPRB precs),
+  per-target predefine spellings, DSW cases + directive-action rows (DIRV x {0,1} with PPT section), escape list,
+  XOPS PREC_* layout; START edge as a `start-byte.tsv` row `START * CLI.FLAGS [["@","init"]]`; the old entry wrote
+  json with default separators -> new graphhash hashes (compare by parsed JSON once, then record). 54 caller refs
+  (tests/graphhash.py target x flags matrix, exec/pipeline/prepare.sh positional target, compilerpack tokenpp env).
+  compilerpack also imports pp/gen.py for predefine_resources(): move that to a facts table first.
+- lex: not started (497 lines, argv flags parsed at import; Delta already in exec/build/graph.py).
+
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
 - Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the
