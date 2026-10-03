@@ -38,11 +38,12 @@
   parse/gen.py prn()/numout()/fconv() primitives as manifests (states identical to the Python versions,
   .k2tmp/prntest.py). Reach them from another stage with `call ../parse/prn` (call resolves stem against the
   caller's dir; the sub-run root becomes exec/parse).
-- Next: opt gen-manifest. Needs: flags (positional 1/2 -> `#! flags o2`? build/gen.py has only --FLAG; switch
-  callers `exec/opt/gen.py OUT 2` -> `exec/build/gen.py opt OUT --o2`), freshrows for opt-gen-fresh groups /
-  analysis-names / peep-names / rounds-names (level column via where), START acts (peep table + opinfo
-  interning + startwords) exported as json facts per level and fed with `@acts:`, PA/PB/PR index bindings and
-  answer-targets template Y list as facts (export.py producer). Order of fresh allocation must match build().
+- 12602e22 opt done: exec/opt/gen-manifest.tsv (`#! flags o2`; callers `exec/build/gen.py opt OUT [--o2]`),
+  facts/opt-gen (start1/start2 acts, peepidx, Y) from export.py optgen(), name tables moved to
+  facts/opt-{analysis,peep,rounds}-names.tsv (header first) used by freshrows; rounds bindings carried with
+  `accumulate`. graphhash --only opt 0 bad; gate exec-chain ok (287 equal, 1 not-covered, 0 bad).
+- Next: nativeabi (+ordered.py), parse (base module for prune/lower/opt; its P class / tokenizer are the
+  generic primitives -> exec/build/), pp, lex; then allow/ledger update and full graphhash + gates.
 
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
