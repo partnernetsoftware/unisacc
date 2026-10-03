@@ -630,3 +630,19 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
      _base.twice() and E.sizes stderr live in gen2 __main__ -> check gen.py parse2 already does twice/sizes.
   Facts to add (export.py k2gen2): TK map/TK_* ids, FND, header_json (or lm_header seq), NAME_TOKEN, TOKEN_POS.
   Then (d): gen.py parse2 runs gen-manifest (top env = E.results, _publish disappears), and step 3 switches callers.
+- Round 48 (tail segments 1-3 of Round 47). gen-manifest after callcontrol-finish now has: call gen2 seg_offsetof
+  (flags all false); let ex_start=@str:START; three when-guarded call tokenlocations rows (locations&errors ER.token /
+  locations&warnings&!errors WU.token / locations&!warnings&!errors RET record=false; flags multi/record/ordinal via
+  call opts flags, ordinal_table=buildconst.TIX, result tl); let ex_start=$$tl:start (when locations); call diagnostics
+  (facts tokenlocations, binds tokenlocations!.SPLICES...); call returnwarnings/intwarnings/unusedwarnings/
+  formatwarnings (when warnings; NAME_TOKEN from facts unusedwarnings, TOKEN_POS from tokenlocations!). gen2.build
+  reads start = env["ex_start"]. export.py: _tk2(E) + buildconst TK/TK_ID/TK_NUM/TK_FNUM. No new op/opts key/prefix.
+  Commits 7fb35440, 06a83a14, 5ee5b247 (local, not pushed). sha SAME after each (actually run, bound 58, serial):
+  gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34, --locations a4c6fa73, gen.py parse2/units 6fc8d7f5,
+  units.py --locations 0137a215.
+  Next (design only, not run): 4 errors: call errors when errors result err; let lm_nomain_msg/lm_mainnext=
+  $$err:lm_nomain_msg + let {"mapseq":{"lm_mainreject":[]}} (empty-seq idiom of tokenlocations-manifest); Python still
+  copies those three into E.results until top env = E.results. 5 phase split: tail rows when fact:tail, phase-1 rows
+  !fact:tail; gen2.build runs gen-manifest again with dict(env, tail=1, ex_start=<_libraryexports ret>) (blocked
+  librarymodule stays the one Python call between). 6 unitmode lm_initret = $$global3:lm_initret; FND/header_json to
+  buildconst. Then 7 asserts, dead helpers, namespace_constants -> export.py.
