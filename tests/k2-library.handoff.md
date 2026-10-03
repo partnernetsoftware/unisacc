@@ -62,3 +62,13 @@ graphhash --only exec/parse2, delete the three .py if identical.
   escaped some other way (or a per-name fact), record all 8 modes, compare.
 - librarydata swap not yet measured on its own (needs libraryvariadic reverted only: restore .k2lib/wip data files + libraryimports.swapped.py).
 - global_address still in librarydata.py (gen2 addr); not moved yet.
+
+## Round 4 (17:42-17:54)
+- Mismatch found by graph JSON diff (gen2.py OUT.json old vs new, compare states/seqs): translator turned hookcall's
+  h.name into $k2L_0 but the template used it partially (LV.hook.{h.name}) -> template now takes $name/$proc/$hook/$original,
+  PUSH via ["constant","original"]. Same class of bug as librarydata hook. Translator should refuse partial uses.
+- DONE: libraryvariadic.py deleted (manifest), librarydata install -> manifest (librarydata.py keeps only global_address +
+  dead install; delete after global_address moves to a submanifest shared with gen2 addr). graphhash 10/10; 5 gates green
+  on rebased HEAD.
+- NEXT: librarytypes (frame via mapseq over dregs as in v3; b via env + classmap; integers -> ints template facts),
+  libraryexports u64 -> modelinput manifest rows, then libraryimports/librarycallables/librarymodule/libraryexports/layoutfacts.
