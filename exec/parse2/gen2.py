@@ -321,12 +321,7 @@ def build(locations=False, warnings=False, errors=False):
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
     start = env["ex_start"]   # gen-manifest: START or the located reader (tokenlocations)
     assert locations or not warnings
-    if errors:
-        _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors
-        # librarymodule's no-main continuation: the errors message state that replaced the reject (named at creation,
-        # errors-manifest.tsv lm_nomain_msg); the message state itself rejects, so the edge carries no actions.
-        _publish(_err)   # lm_nomain_msg
-        E.results.update(lm_mainnext=_err["lm_nomain_msg"], lm_mainreject=[])
+    _publish({k: env[k] for k in ("lm_nomain_msg", "lm_mainnext", "lm_mainreject") if k in env})   # gen-manifest errors rows (stopgap)
     start = _libraryexports(E, P, {name: C[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
          'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',
