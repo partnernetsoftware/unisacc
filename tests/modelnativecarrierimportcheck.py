@@ -57,7 +57,7 @@ def main():
   check(SOURCE,binding(0,0),False);check(SOURCE.replace('unsigned long long u','double other'),binding(),False)
   # Package construction seam: every target shares exactly one carrier model.
   ncmodel,nctbl,ncnet=t/'nc.json',t/'nc.tbl',t/'nc.net'
-  cmd(sys.executable,ROOT/'exec/nativeabi/gen.py',ncmodel);cmd(sys.executable,ROOT/'exec/c/tbl.py',ncmodel,nctbl);cmd(sys.executable,ROOT/'exec/c/net.py',nctbl,ncnet)
+  cmd(sys.executable,ROOT/'exec/build/gen.py','nativeabi',ncmodel);cmd(sys.executable,ROOT/'exec/c/tbl.py',ncmodel,nctbl);cmd(sys.executable,ROOT/'exec/c/net.py',nctbl,ncnet)
   ncfull=cmd(runtime,'--check-net',nctbl,ncnet).decode().strip()
   import compilerpack
   oldbuilt,oldbuild=compilerpack.built_model,compilerpack.build;calls=[];captured=[]

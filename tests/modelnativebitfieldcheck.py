@@ -80,7 +80,7 @@ def main():
   runtime=a.runtime or str(t/'run')
   if not a.runtime:cmd(ROOT/'tests/bound',20,'cc','-O2',ROOT/'exec/c/run.c','-o',runtime)
   model=a.model or t/'model.json'
-  if not a.model:cmd(sys.executable,ROOT/'exec/nativeabi/gen.py',model)
+  if not a.model:cmd(sys.executable,ROOT/'exec/build/gen.py','nativeabi',model)
   d=json.loads(model.read_text());loaded=load(d);tbl=t/'m.tbl';net=t/'m.net';cmd(sys.executable,ROOT/'exec/c/tbl.py',model,tbl);cmd(sys.executable,ROOT/'exec/c/net.py',tbl,net);full=cmd(runtime,'--check-net',tbl,net).decode().strip()
   mf=t/'routes';mf.write_text('test\tordered\tbytes\tbytes\tm.net\n');rd=t/'r';(rd/'cli').mkdir(parents=True);pkg=t/'pkg';inp=t/'input';passed=0;refused=0
   def check(original,target,expected=None):

@@ -22,8 +22,9 @@ def closure(h):
         # Byte-identical on every host: POSIX path spelling and case-sensitive part order
         # (Windows would spell backslashes and sort case-insensitively).
         for path in sorted((ROOT / directory).rglob('*'), key=lambda q: q.relative_to(ROOT).parts):
-            # Declared generated seed/cache output, never a construction input.
-            if path.relative_to(ROOT).parts[:2] == ('exec', 'build'):
+            # Declared generated seed/cache output (subdirectories of exec/build), never a construction
+            # input; files directly in exec/build (the K2 entry driver gen.py) are construction inputs.
+            if path.relative_to(ROOT).parts[:2] == ('exec', 'build') and len(path.relative_to(ROOT).parts) > 3:
                 continue
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
                 h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')

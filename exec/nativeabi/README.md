@@ -1,6 +1,6 @@
 # FFI_CARRIER prototype stage
 
-`python3 exec/nativeabi/gen.py OUT.json` constructs a finite delta accepting raw
+`python3 exec/build/gen.py nativeabi OUT.json` (exec/nativeabi/gen-manifest.tsv) constructs a finite delta accepting raw
 single-record USLSIG2 or complete ordered USLSIG3 bytes and the explicit `\0cli/target` ASCII resource.
 The six exact profiles and qualified mixed-union8 rule are in `rules.tsv`.
 

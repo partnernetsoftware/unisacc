@@ -285,6 +285,8 @@ class Run:
         tr = self.seqrows(o, facts)
         if tr is not None:
             sq = dict(tr, **(sq or {}))
+        if "seqfact" in o:   # {name: [[act...]...]} fact merged into the row's sequences
+            sq = dict({k: [tuple(a) for a in v] for k, v in _path(facts, o["seqfact"]).items()}, **(sq or {}))
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
         if op == "template":

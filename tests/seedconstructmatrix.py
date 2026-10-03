@@ -20,7 +20,7 @@ SHARED = (
     ("e4", "exec/build/gen.py", ("opt", "--o2")),
     ("o1", "exec/build/gen.py", ("opt",)),
     ("prune", "exec/build/gen.py", ("prune",)),
-    ("nativeabi", "exec/nativeabi/gen.py", ()),
+    ("nativeabi", "exec/build/gen.py", ("nativeabi",)),
 )
 FEATURES = (
     ("tokenpp", "exec/pp/gen.py", ("lnx/x86_64", "--shared-predefines")),

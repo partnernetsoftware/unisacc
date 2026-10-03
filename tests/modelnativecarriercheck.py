@@ -43,7 +43,7 @@ def main():
    p=subprocess.run(list(map(str,args)),capture_output=True,timeout=20);assert p.returncode==0,(args,p.returncode,p.stderr);return p.stdout
   runtime=pathlib.Path(sys.argv[1]) if len(sys.argv)>1 else t/'run'
   if len(sys.argv)==1:cmd(ROOT/'tests/bound',20,'cc','-O2',ROOT/'exec/c/run.c','-o',runtime)
-  model,tbl,net=t/'m.json',t/'m.tbl',t/'m.net';cmd(sys.executable,ROOT/'exec/nativeabi/gen.py',model)
+  model,tbl,net=t/'m.json',t/'m.tbl',t/'m.net';cmd(sys.executable,ROOT/'exec/build/gen.py','nativeabi',model)
   d=json.loads(model.read_text());loaded=load(d);cmd(sys.executable,ROOT/'exec/c/tbl.py',model,tbl);cmd(sys.executable,ROOT/'exec/c/net.py',tbl,net)
   full=cmd(runtime,'--check-net',tbl,net).decode().strip()
   routes=t/'routes';routes.write_text('carrier\tnativeabi\tbytes\tbytes\tm.net\n');rd=t/'resources';rd.mkdir();(rd/'cli').mkdir();(rd/'sentinel').write_bytes(b'x');pkg=t/'p';src=t/'input'

@@ -51,7 +51,7 @@ def main():
    arch=a.target.split('/')[1];assert platform.system()=='Darwin';invoke=['arch','-'+arch];flags=['-arch',arch]
    cmd('cc',*flags,'-std=c11','-DFACTS_ONLY',fixture,'-o',t/'facts');facts=json.loads(cmd(*invoke,t/'facts'));evidence['actual_layout']=facts;objects=graphs(facts)
    modelpath=a.model or t/'model.json'
-   if not a.model:cmd(sys.executable,ROOT/'exec/nativeabi/gen.py',modelpath)
+   if not a.model:cmd(sys.executable,ROOT/'exec/build/gen.py','nativeabi',modelpath)
    model=json.loads(modelpath.read_text());loaded=load(model);evidence['model_sha256']=hashlib.sha256(modelpath.read_bytes()).hexdigest();paths=[];rows=[]
    cmd('cc','-O2',ROOT/'exec/c/run.c','-o',t/'runtime')
    cmd(sys.executable,ROOT/'exec/c/tbl.py',modelpath,t/'model.tbl')

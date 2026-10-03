@@ -258,8 +258,79 @@ def modelbindingstemplate():
     return out
 
 
+_NATIVE_TRIE = r"""
+import csv, json, pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+rows = list(csv.DictReader(lines[:7], delimiter="\t"))
+profiles = {r["profile"] for r in rows}
+prefixes = {b""}
+for profile in profiles:
+    raw = profile.encode(); prefixes.update(raw[:i] for i in range(1, len(raw) + 1))
+names = {p: "NC.profile" + ("" if not p else "." + p.hex()) for p in prefixes}
+T = []
+for prefix in sorted(prefixes):
+    if prefix.decode() in profiles:
+        r = next(r for r in rows if r["profile"] == prefix.decode())
+        T.append(dict(name=names[prefix], leaf=[dict(im=int(r["integer_min_width"]), fp=int(r["homogeneous_fp_carrier_kind"]),
+                 ld=int(r["long_double_format"]), family=int(r["family"]))], inner=[]))
+    else:
+        T.append(dict(name=names[prefix], leaf=[], inner=[dict(choices=[dict(byte=p[len(prefix)], target=names[p])
+                 for p in prefixes if len(p) == len(prefix) + 1 and p.startswith(prefix)])]))
+print(json.dumps(T))
+"""
+
+
+def nativeabi():
+    """FFI carrier facts from exec/nativeabi/rules.tsv (was nativeabi/gen.py + ordered.py):
+    T = profile byte trie (state order = sorted prefixes; choice order = the original
+    PYTHONHASHSEED=0 iteration order of the prefix set, recorded by a seeded child), A = union16
+    recipes, extents/alignments classes, ordseq = the ordered `@` field/extra read sequences."""
+    import csv, json, os, subprocess
+    sys.path.insert(0, str(ROOT))
+    from exec.facts.load import facts
+    rules = ROOT / "exec/nativeabi/rules.tsv"
+    lines = rules.read_text().splitlines()
+    rows = list(csv.DictReader(lines[:7], delimiter="\t"))
+    decl = [x.split("\t") for x in lines[7:] if not x.startswith("#")]
+    leaf = {int(x[1]): "NSI".index(x[2]) for x in decl if x[0] == "leaf"}
+    joins = {(x[1], x[2]): x[3] for x in decl if x[0] == "merge"}
+    assert all(joins[a, b] == "NSI"[max("NSI".index(a), "NSI".index(b))] for a in "NSI" for b in "NSI")
+    recipes = {(int(x[1]), x[2]): x[3] for x in decl if x[0] == "recipe"}
+    assert len(recipes) == 8 and leaf == {1: 2, 2: 2, 3: 1}
+    assert {r["profile"] for r in rows} == {f"{o}/{a}" for o in ("osx", "lnx", "win") for a in ("arm64", "x86_64")} and len(rows) == 6
+    assert all(r["rule"] == "natural_scalar_union_v2" and int(r["mixed_width"]) == 8 for r in rows)
+    assert all(int(r["integer_min_width"]) in (1, 8) and int(r["homogeneous_fp_carrier_kind"]) in (1, 3) for r in rows)
+    assert {int(r["long_double_format"]) for r in rows} <= {2, 3, 4}
+    T = subprocess.run([sys.executable, "-c", _NATIVE_TRIE, str(rules)], env=dict(os.environ, PYTHONHASHSEED="0"),
+                       capture_output=True, check=True, text=True).stdout.strip()
+    A = [dict(al=al, recipes=[dict(cls=c, code=3 * "NSI".index(c[0]) + "NSI".index(c[1]), n=len(recipes[al, c]),
+         elems=[dict(off=i * al, kind=1 if k == "I" else 3, integer=int(k == "I")) for i, k in enumerate(recipes[al, c])])
+         for c in ("II", "IS", "SI", "SS")]) for al in (4, 8)]
+    ext = [int(x[1]) for x in decl if x[0] == "ordered_extent"]
+    ali = [int(x[1]) for x in decl if x[0] == "ordered_alignment"]
+    assert ext == list(range(1, 17)) and ali == [1, 2, 4, 8]
+    assert [x[1] for x in decl if x[0] == "ordered_anon_policy"] == ["invariant_integer_lanes"]
+    geq = {r["name"]: r["value"] for r in facts("top-modelgraphequality-banks")}
+    seq = {}
+    for ln in (ROOT / "exec/nativeabi/ordered-result.tsv").read_text().splitlines()[1:]:
+        for a in json.loads(ln.split("\t")[4]):
+            if a[0] == "@" and a[1] not in seq:
+                kind, index, reg, node = a[1].split()
+                if kind == "field":
+                    seq[a[1]] = [["ALUI", "mul", "nc_key", node, 16], ["ALUI", "add", "nc_key", "nc_key", int(index)], ["LDX", reg, "nc_key", geq["FIELDS"]]]
+                else:
+                    seq[a[1]] = [["ALUI", "mul", "nc_key", node, 8], ["ALUI", "add", "nc_key", "nc_key", int(index)], ["LDX", reg, "nc_key", geq["EXTRA"]]]
+    gf = [dict(section=a, name=b, prefix=c, kind=d) for a, b, c, d in (l.split("\t") for l in (ROOT / "exec/nativeabi/gen-fresh.tsv").read_text().splitlines()[1:])]
+    of = [dict(section=a, name=b, kind=c) for a, b, c in (l.split("\t") for l in (ROOT / "exec/nativeabi/ordered-fresh.tsv").read_text().splitlines()[1:])]
+    return ["=T\tjson\t" + T, "=A\tjson\t" + json.dumps(A), "=extents\tjson\t" + json.dumps(ext),
+            "=alignments\tjson\t" + json.dumps(ali), "=ordseq\tjson\t" + json.dumps(seq),
+            "=genfresh\tjson\t" + json.dumps(gf), "=ordfresh\tjson\t" + json.dumps(of),
+            "=reject\tjson\t" + json.dumps(facts("nativeabi-gen-reject"))]
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
+    ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
     ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),
     ("top-modelbindings-template", ["exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], modelbindingstemplate),
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),

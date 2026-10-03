@@ -56,7 +56,7 @@ shared() {
     b python3 exec/build/gen.py opt "$T/shared/e4.json" --o2
     b python3 exec/build/gen.py opt "$T/shared/o1.json"
     b python3 exec/build/gen.py prune "$T/shared/prune.json"
-    b python3 exec/nativeabi/gen.py "$T/shared/nativeabi.json"
+    b python3 exec/build/gen.py nativeabi "$T/shared/nativeabi.json"
     for s in e2 e1 e3 e4 o1 prune nativeabi; do
         b python3 exec/c/tbl.py "$T/shared/$s.json" "$T/shared/$s.tbl"
         b python3 exec/c/net.py "$T/shared/$s.tbl" "$T/shared/$s.net"

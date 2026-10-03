@@ -33,7 +33,7 @@ def _entries():
         add('exec/parse2/gen2.py', *(['--warnings'] * w + ['--errors'] * er + ['--locations'] * l))
     add('exec/parse2/units.py'); add('exec/parse2/units.py', '--locations')
     add('exec/build/gen.py opt'); add('exec/build/gen.py opt', '--o2')
-    add('exec/build/gen.py prune'); add('exec/nativeabi/gen.py')
+    add('exec/build/gen.py prune'); add('exec/build/gen.py nativeabi')
     for os_ in ((), ('--osx',), ('--win',)):
         for a in ((), ('--arm64',)):
             add('exec/build/gen.py lower', *(('--full',) + os_ + a))

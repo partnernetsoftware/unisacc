@@ -6,6 +6,7 @@ Runs exec/STAGE/gen-manifest.tsv through exec/assemble.py and writes the graph.
 Manifest header lines read here:
   #! base PATH            executor module (relative to exec/), loaded as E
   #! flags A B C          accepted --A/--B/--C; each becomes flags[A]=True/False
+  #! start NAME           start state (default START)
 Everything else (exclusive flags, env values, sub-manifests) is manifest rows.
 """
 import importlib.util, json, pathlib, sys
@@ -32,7 +33,7 @@ E = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(E)
 assemble.run(man, E, E.P, {n: "--" + n in args for n in names})
 E.g.finish()
-d = {'start': 'START', 'states': {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in E.g.st.items()},
+d = {'start': head.get('start', ['START'])[0], 'states': {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in E.g.st.items()},
      'seqs': [list(map(list, s)) for s in E.g.seqs]}
 pathlib.Path(out).write_text(json.dumps(d, separators=(',', ':')))
 print(stage + ' states', len(d['states']), file=sys.stderr)

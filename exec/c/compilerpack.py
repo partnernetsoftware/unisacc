@@ -237,7 +237,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                     if cols[0]==target+'/warn/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
         nativeabi=Path(shared_nativeabi).resolve() if shared_nativeabi is not None else built_model(
-            td,'nativeabi',here.parent/'nativeabi/gen.py',[])
+            td,'nativeabi',here.parent/'build/gen.py',['nativeabi'])
         for target in sorted(targets):
             rows.append('\t'.join([target+'/nativeabi','nativeabi','USLSIG2','USLNCAR1',str(nativeabi)]))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
