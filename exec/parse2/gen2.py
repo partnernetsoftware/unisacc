@@ -269,10 +269,8 @@ def namespace_constants():
 def _namespace_control(namespace, section, warnings):
     """function/global/local control: gen2-manifest segment ns-NAMESPACE-SECTION (fresh lets + control calls)."""
     env = segment("ns-%s-%s" % (namespace, section), warnings)
-    if namespace == "global":   # named results for later stages (librarymodule): global-results.tsv
-        for part, key, name in tape_rows("global-results.tsv"):
-            if part == section:
-                E.__dict__.setdefault("results", {})[name] = env[key]
+    if namespace == "global":   # named results for later stages (librarymodule): gen2-manifest lm_* let aliases
+        E.__dict__.setdefault("results", {}).update((k, v) for k, v in env.items() if k.startswith("lm_"))
 
 
 def function_control(section, warnings):

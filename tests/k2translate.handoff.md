@@ -554,3 +554,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Still Python-derived in build(): E.TK[...] keys, E.O(E.HEADER) (header_json/lm_header), E.gold('irsel') fpu,
   E.FND, _tl/_LX/_VR facts reads; _libraryexports internals (DIM, RETURNRANK/PARAMRANK, librarymodule -> cdx).
   Next: (c) E.results writers -> export/let alias rows.
+- Round 42 (step 2c, first slice): global-results.tsv deleted; gen2-manifest has one `let` row (guard
+  fact:seg_ns-global-global3, both modes, after the warnings fresh rows) aliasing lm_main/lm_initret/lm_tailret to the
+  global3 fresh labels; _namespace_control publishes env lm_* to E.results (stopgap until gen-manifest's top env IS
+  E.results). export.py rerun, facts committed. sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979,
+  --warnings --errors 3a7edf34, --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Left for (c): lm_hstate/lm_hnext (startup-run env), lm_header (fact), lm_errors (flag), fpcont (callcontrol-begin env),
+  lm_nomain_msg/lm_mainnext/lm_mainreject (errors env; lm_mainreject=[] -> let constant). librarymodule.py:23 comment
+  still names global-results.tsv (cdx file, left untouched).
