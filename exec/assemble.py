@@ -263,6 +263,9 @@ class Run:
         if op == "fresh":
             return self.fresh_table(stem, o)
         bd = self.bindings(o, bind, facts)
+        if op == "retarget":
+            return self.retarget(self.value(stem, facts), o)
+        bd = self.cells(bind, facts)
         for k in o.get("export", []):
             self.env[k] = bd[k]
         sq = self.cells(seq, facts)
@@ -315,6 +318,8 @@ class Run:
 # --- K2 round 2, enc/objectplan slice: generic additions -------------------------
 # value  `{NAME}` inside a cell is replaced by str(env[NAME]) (only names in env);
 #        `@out:TEXT` is the OUT byte sequence of TEXT.
+# op     retarget: stem = a state (value cell, e.g. `$NAME`); opts {"from": A,
+#        "to": B}: every row entry of that state whose target is A goes to B.
 # op     fresh: stem = TSV next to the manifest; opts {"cols": [key, kind, owner]
 #        column indices, "where": [[col, value], ...] (optional), "scope": "P" | "U",
 #        "owner": format over {owner} {key} (optional)}; allocates one label per
@@ -366,7 +371,14 @@ def _mapseq(self, spec, facts, bd):
     return out
 
 
-Run.interp, Run.fresh_table, Run.mapseq = _interp_impl, _fresh_table, _mapseq
+def _retarget(self, state, o):
+    row = self.E.g.st[state][1]
+    for k, (n, q) in list(row.items()):
+        if n == o["from"]:
+            row[k] = (o["to"], q)
+
+
+Run.interp, Run.fresh_table, Run.mapseq, Run.retarget = _interp_impl, _fresh_table, _mapseq, _retarget
 # --- end K2 round 2 enc/objectplan slice ---------------------------------------
 
 
