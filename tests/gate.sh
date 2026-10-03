@@ -112,7 +112,7 @@ job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # but 61 s be
 job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==3')
 job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
 job stages      ./tests/stages.sh examples/*.c tests/c/*.c
-for k in 1 2 3; do job exec-chain-$k env CHAINSHARD=$k/3 CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt) examples/*.c tests/c/*.c; done   # S-17: all C probes, historical floor, named parity debt; three shards keep each job well under 60 s
+for k in 1 2 3 4 5; do job exec-chain-$k env CHAINSHARD=$k/5 CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt) examples/*.c tests/c/*.c; done   # S-17: all C probes, historical floor, named parity debt; five shards keep each job under 60 s with --jobs 4 (three hit 142 in the 0.0.23 queue)
 job exec-macros python3 ./exec/pp/macrocheck.py
 job exec-pp-literals python3 ./exec/pp/literalcheck.py
 job exec-pp-pragmas python3 ./exec/pp/pragmacheck.py
