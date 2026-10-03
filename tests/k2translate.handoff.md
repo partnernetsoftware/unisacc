@@ -288,3 +288,13 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   (addr UD.gv -> resume), address (addr ADR.object + call gen2parts part_address), fnvalue/lookup-warn/lookup-body
   (segment upd-lookup, warnings-gated lets). sha SAME both modes. Left: startup/global-results glue, the remaining
   direct assemble.run calls in build() -> call rows, merge segments, exec/build/gen.py, callers, delete gen2.py.
+- Round 27: gen2parts part_startup/localdecl/update/positive, widthparts part_elsz/conv/naru, enumtypes -> `call` rows
+  placed at the start/end of the adjacent segment (sha SAME both modes). Blockers for deleting gen2.py (need the
+  coordinator/cdx, not this slice): (a) cdx-owned Python installs still called from build(): strings.initializer,
+  constexpr.install, membercontrol.install (takes shape_control + TEMPL), tokenlocations.install, libraryexports.install
+  (reads E.results written by gen2 glue: global-results.tsv, lm_hstate/lm_hnext/lm_header/lm_errors, fpcont,
+  lm_nomain_msg), layoutprovenance.parser; with no py op these need cdx manifests first. (b) executor mutations before any
+  row: E.WORDS/E.TK += type=extern/_Bool, E.tokenizer(qualifiers), E.prn/numout/autoscan, gen2's P subclass (rank slots
+  in vpush/vpop, DEFS twice-check) -> belong in a `#! base` executor module for parse2 (exec/parse2 base, cdx/owner call).
+  (c) sub-manifests fed Python constants (statics/initializers/vla/truth/booleans/conditional/offsetof/unary/...) ->
+  move constants into facts k2-gen2 then `call` rows; mechanical, next for this slice.

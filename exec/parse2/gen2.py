@@ -378,7 +378,6 @@ def build(locations=False, warnings=False, errors=False):
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
     import assemble
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_startup=1))
     segment("startup-marker")
     import assemble
     assemble.run(Path(__file__).parent / "strings-token-span-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))
@@ -417,9 +416,6 @@ def build(locations=False, warnings=False, errors=False):
     env = segment("startup-run")   # startup data from facts k2-gen2 (tyrows, syscalls, autonames)
     E.__dict__.setdefault("results", {}).update(lm_hstate=env["lm_hstate"], lm_hnext=env["lm_hnext"], lm_header=O(E.HEADER), lm_errors=errors)
     global_control("global0", warnings)
-    import assemble   # K2 trace translation: enumtypes-manifest.tsv
-    assemble.run(Path(__file__).parent / 'enumtypes-manifest.tsv', E, P,
-                 dict(locations=locations, warnings=warnings, errors=errors), {})
     # enum is a type specifier in both declarations and typedefs.
     global_control("global1", warnings)
     shape_control("typedef-shape")
@@ -427,7 +423,6 @@ def build(locations=False, warnings=False, errors=False):
     shape_control("global-type")
     global_control("global5", warnings)
     shape_control("global-binding")
-    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_elsz=1))
     function_control("function0", warnings)
     shape_control("parameter-type")
     function_control("function2", warnings)
@@ -455,7 +450,6 @@ def build(locations=False, warnings=False, errors=False):
     local_control("local4", warnings)
     shape_control("local-binding")
     local_control("local6", warnings)
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_localdecl=1))
     local_control("local8", warnings)
     segment("ret0")
     segment("if-loops", warnings)
@@ -466,13 +460,11 @@ def build(locations=False, warnings=False, errors=False):
                  dict(locations=locations, warnings=warnings, errors=errors), dict(enum_values=ENV, enum_defined=END_))
     segment("ret-qt")
     segment("upd-id")
-    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_conv=1))
     shape_control("update-entry")
     update_control("step-entry")
     segment("upd-compound")
     update_control("taxonomy")
     segment("upd-type")
-    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_naru=1))
     update_control("step0")
     shape_control("pointee-width")
     update_control("step1")
@@ -495,7 +487,6 @@ def build(locations=False, warnings=False, errors=False):
     segment("address")
     ordinary_control('deref', warnings)
     shape_control("dereference")
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_update=1))
     ordinary_control('id', warnings)
     segment("ord-update", warnings)
     ordinary_control('value', warnings)
@@ -503,7 +494,6 @@ def build(locations=False, warnings=False, errors=False):
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
     segment("upd-prefix")
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_positive=1))
     import assemble
     unit_span = int(re.search(r"^#define MAXTOK ([0-9]+)\b", Path(E.ROOT, "src/front_pp.c").read_text(), re.M).group(1))
     assemble.run(Path(__file__).resolve().parent / 'unarycontrol-manifest.tsv', E, P, dict(warnings=warnings),
