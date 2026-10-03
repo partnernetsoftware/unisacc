@@ -375,3 +375,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   errors continuation: errors stage must export the no-main retarget label + reject seq into E.results where it is
   created (today librarymodule.py:25-26 reads E.g.st[lm_main]); plain stays DEAD (/tmp/cdx23-k2library-handoff.txt).
   (3) libraryexports call (gen2.py ~492) -> call row after cdx delivers its manifest.
+  Done (2): librarymodule errors no-main continuation is now a named result: gen2 errors block puts
+  lm_mainnext=errors lm_nomain_msg (ER.message<n>) and lm_mainreject=[] (observed edge seq is empty: the message
+  state rejects) into E.results; librarymodule.py:25-26 reads them instead of E.g.st/E.g.seqs (one-line consumer swap
+  in cdx's file, call-site wiring only). Plain mode unchanged (facts mainnext DEAD + E.rej). sha SAME default 32fb8e3c,
+  --errors 7ea0e979, --warnings --errors 3a7edf34. cdx's librarymodule manifest can now take lm_mainnext/lm_mainreject.
+  Next: (b), then (1) when strings-initializer-manifest.tsv lands.

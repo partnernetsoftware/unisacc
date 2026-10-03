@@ -488,7 +488,9 @@ def build(locations=False, warnings=False, errors=False):
                           DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
     if errors:
         _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors
-        E.__dict__.setdefault("results", {})["lm_nomain_msg"] = _err["lm_nomain_msg"]   # librarymodule's no-main message state
+        # librarymodule's no-main continuation: the errors message state that replaced the reject (named at creation,
+        # errors-manifest.tsv lm_nomain_msg); the message state itself rejects, so the edge carries no actions.
+        E.__dict__.setdefault("results", {}).update(lm_nomain_msg=_err["lm_nomain_msg"], lm_mainnext=_err["lm_nomain_msg"], lm_mainreject=[])
     from libraryexports import install as libraryexports_install
     start = libraryexports_install(E, P, {name: globals()[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',

@@ -22,8 +22,8 @@ def install(E,P,start):
     # Main requirement and init-tail are existing finite control points.
     state=E.results['lm_main']   # gen2 global3 named result (global-results.tsv)
     normal,reject,keys=F['mainnext'],E.rej(F['mainreason']),[k for k in range(*F['maindomain']) if k not in F['mainok']]
-    if R.get('lm_errors'):   # BOUNDARY: errors stage (block 3) re-targets the no-main reject to its own fresh message state
-        normal,reject={(n,tuple(g.seqs[q])) for k,(n,q) in g.st[state][1].items() if n!='END.ok'}.pop();reject=list(reject)
+    if 'lm_mainnext' in R:   # errors stage named continuation (gen2 errors block: lm_mainnext/lm_mainreject), no graph read
+        normal,reject=R['lm_mainnext'],list(R['lm_mainreject'])
     _template(E,'main',{'state':[state],'key':keys})
     state=E.results['lm_initret']
     _template(E,'initmove',{'state':[state]});_template(E,'initend',{'state':[state]})
