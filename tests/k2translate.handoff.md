@@ -502,3 +502,10 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
   --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
   Not run: diagnosticcheck.py / locationcheck.py themselves. Next: (4) unitlocations (keep acc_state/acc_acts).
+- Round 37b: diagnosticcheck.py exit 0 (11 cases x 2 modes match reference). locationcheck.py: round-37 sys.path edit was
+  wrong (assemble.load_facts imports exec.facts.load -> ModuleNotFoundError 'exec'); now reads facts tokenlocations via
+  load.facts like the deleted module did; the import block verified alone (prints the 4 bank ids). Full locationcheck.py
+  hits bound 58 twice (exit 142, no output; it builds 3 gen2 graphs + tbl/net serially) -> needs sharding, not run green.
+  Step 4 (unitlocations) not started: acc_acts is the LS.tokens row's actions minus ACCEPT after sequence expansion
+  (word_unit/prefix_diag_textlen/text7 from the manifest mapseq/textrows); cdx's manifest returns nothing. Plan: a `let`
+  row in unitlocations-manifest with mapseq acc_acts = those parts (existing opts), result read by units.py.
