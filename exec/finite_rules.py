@@ -1,12 +1,35 @@
-"""Expand disjoint finite observation-transition rules; no language-specific decisions."""
+"""Expand disjoint finite observation-transition rules; no language-specific decisions.
+
+Parameterised template tables (STEM-template.tsv, installed by install_template):
+  columns  section  block  each  over  kind  a  b  c  d
+  - consecutive rows with the same (section, block) form a block; the block is
+    instantiated once per tuple of `each`, every row once per tuple of `over`
+    (both: comma-separated fact names, `-` for none; the product is taken in the
+    written order, first name slowest).  A name `x:y.f` iterates the list held in
+    field f of the current value of variable y (a dependent fact list).
+  - facts are passed by the caller as {name: [value, ...]}; a value is a scalar
+    or a dict.  `{name}` substitutes str(value), `{name.field}` str(value[field]),
+    in ANY column, including inside the JSON actions.
+  - `{fresh:TAG:KIND}` allocates one fresh label per block instance and TAG
+    through the caller's fresh(KIND) callback, in order of first appearance.
+  - kinds: `rule` a=state b=observation c=target d=JSON actions (same syntax as
+    the four-column tables; rows of one state must be contiguous in expansion);
+    graph edits applied after the block's rules, in row order:
+    `rename` a=OLD b=NEW (state renamed, every target OLD redirected to NEW),
+    `alias` a=STATE b=TARGET (STATE goes to TARGET on every observation),
+    `prepend` a=STATE d=JSON actions (actions run before every edge of STATE).
+No predicate lives here: substitution, product enumeration and graph edits only.
+"""
+import itertools
 import json
+import re
 from pathlib import Path
 
 
-def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None):
+def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None, lines=None):
     domain = set(domain)
     explicit, defaults = {}, {}
-    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+    for lineno, line in enumerate(path.read_text().splitlines() if lines is None else lines, 1):
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
@@ -106,3 +129,120 @@ def install(g, root, stem, bindings=None, sequences=None, classes=None, section=
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
     if count == 0:
         raise ValueError(f"{stem}: no rules for section {section}")
+
+
+_VAR = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\}")
+_FRESH = re.compile(r"\{fresh:([A-Za-z0-9_]+):([A-Za-z0-9_]+)\}")
+
+
+def _tuples(spec, facts, env, where):
+    if spec == "-":
+        yield dict(env)
+        return
+    names = spec.split(",")
+
+    def walk(i, scope):
+        if i == len(names):
+            yield dict(scope)
+            return
+        name, _, source = names[i].partition(":")
+        if source:
+            var, _, fld = source.partition(".")
+            if var not in scope or not isinstance(scope[var], dict) or fld not in scope[var]:
+                raise ValueError(f"{where}: unknown dependent fact {names[i]}")
+            values = scope[var][fld]
+        else:
+            if name not in facts:
+                raise ValueError(f"{where}: unknown fact list {name}")
+            values = facts[name]
+        for value in values:
+            yield from walk(i + 1, {**scope, name: value})
+    yield from walk(0, dict(env))
+
+
+def expand_template(path, facts, fresh, section=None):
+    """Return (four-column rule lines, graph edits) for one section of a template."""
+    rows, blocks = [], []
+    for lineno, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 9:
+            raise ValueError(f"{path}:{lineno}: expected nine template columns")
+        if section is not None and fields[0] != section:
+            continue
+        if blocks and blocks[-1][0] == tuple(fields[:2]):
+            if blocks[-1][1] != fields[2]:
+                raise ValueError(f"{path}:{lineno}: block with two `each` lists")
+            blocks[-1][2].append((lineno, fields[3:]))
+        else:
+            blocks.append((tuple(fields[:2]), fields[2], [(lineno, fields[3:])]))
+    out, edits = [], []
+    for (sec, name), each, body in blocks:
+        for env in _tuples(each, facts, {}, f"{path}:{sec}:{name}"):
+            labels = {}
+
+            def subst(text, scope, where):
+                def fr(m):
+                    if m.group(1) not in labels:
+                        labels[m.group(1)] = fresh(m.group(2))
+                    return labels[m.group(1)]
+
+                def var(m):
+                    if m.group(1) not in scope:
+                        raise ValueError(f"{where}: unbound variable {m.group(0)}")
+                    value = scope[m.group(1)]
+                    if m.group(2) is not None:
+                        if not isinstance(value, dict) or m.group(2) not in value:
+                            raise ValueError(f"{where}: no field {m.group(0)}")
+                        value = value[m.group(2)]
+                    return str(value)
+                return _VAR.sub(var, _FRESH.sub(fr, text))
+            for lineno, (over, kind, a, b, c, d) in body:
+                where = f"{path}:{lineno}"
+                for scope in _tuples(over, facts, env, where):
+                    a2, b2, c2, d2 = (subst(x, scope, where) for x in (a, b, c, d))
+                    if kind == "rule":
+                        out.append("\t".join((a2, b2, c2, d2)))
+                    elif kind in ("rename", "alias", "prepend"):
+                        edits.append((where, kind, a2, b2, d2))
+                    else:
+                        raise ValueError(f"{where}: unknown template kind {kind}")
+    return out, edits
+
+
+def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
+                     section=None, mode="r"):
+    path = Path(root) / (stem + "-template.tsv")
+    lines, edits = expand_template(path, facts, fresh, section)
+    if lines:
+        for state, row in load(path, sequences or {}, bindings=bindings, classes=classes,
+                               lines=lines).items():
+            for key, (target, actions) in row.items():
+                g.on(state, [key], target, actions, mode)
+                g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+    for where, kind, a, b, d in edits:
+        if kind == "alias":
+            g.on(a, range(257), b, [], mode)
+            continue
+        if a not in g.st:
+            raise ValueError(f"{where}: {kind} of absent state {a}")
+        if kind == "rename":
+            if b in g.st:
+                raise ValueError(f"{where}: rename onto existing state {b}")
+            items = [((b if n == a else n), v) for n, v in g.st.items()]
+            g.st.clear()
+            g.st.update(items)
+            if a in g.labels:
+                g.labels.discard(a)
+                g.labels.add(b)
+            for _, row in g.st.values():
+                for key, (target, seq) in list(row.items()):
+                    if target == a:
+                        row[key] = (b, seq)
+        else:
+            extra = [tuple(x) for x in json.loads(d)]
+            for key, (target, seq) in list(g.st[a][1].items()):
+                g.st[a][1][key] = (target, g.seq(extra + list(g.seqs[seq])))
+    if not lines and not edits:
+        raise ValueError(f"{stem}: no template rows for section {section}")
