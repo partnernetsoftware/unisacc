@@ -57,6 +57,10 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     (parallel): on every edge of every state, after each action matching
     pattern i (a prefix of its tuple; first matching pattern wins) the
     actions d[i] are inserted; b as for rewrite-tail.
+    `group-tail` a=JSON [OP, PREFIX] b as for rewrite-tail c=LABEL_PREFIX: on every
+    edge whose last action is (OP, S) with S starting with PREFIX, that action
+    is dropped and the target becomes LABEL_PREFIX<n>, n numbering the distinct
+    S in first-occurrence (graph) order; install_template returns {S: label}.
   - kind `fresh` emits nothing: its columns are only substituted, so a row
     `fresh  {fresh@row:TAG:KIND}` allocates a label at that point of row order
     (for chains that allocate a label before the edge that names it).
@@ -348,7 +352,7 @@ def expand_template(path, facts, fresh, section=None):
                     elif kind == "fresh":
                         if b2:
                             prev[b2] = a2
-                    elif kind in ("append", "split-at", "rewrite-tail", "insert-after", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
+                    elif kind in ("append", "split-at", "rewrite-tail", "insert-after", "group-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -398,6 +402,7 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             for key, (target, actions) in row.items():
                 g.on(state, [key], target, actions, modes.get(state, mode))
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+    groups = {}
     for where, kind, a, b, c, d in edits:
         if bindings is not None:
             a, b, c = (bindings[x[1:]] if x.startswith("$") and type(bindings.get(x[1:])) is str
@@ -433,6 +438,18 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                     if n and len(acts) >= n and all(
                             list(x[:len(p)]) == p for x, p in zip(acts[-n:], pattern)):
                         row[key] = (c or target, g.seq(acts[:-n] + replacement))
+            continue
+        if kind == "group-tail":
+            op, prefix = json.loads(a)
+            skip = set() if b in ("", "-") else set(b.split(","))
+            for name, (_, row) in list(g.st.items()):
+                if name in skip:
+                    continue
+                for key, (target, seq) in list(row.items()):
+                    acts = list(g.seqs[seq])
+                    if acts and acts[-1][0] == op and acts[-1][1].startswith(prefix):
+                        label = groups.setdefault(acts[-1][1], c + str(len(groups)))
+                        row[key] = (label, g.seq(acts[:-1]))
             continue
         if kind == "insert-after":
             patterns = json.loads(a)
@@ -544,3 +561,4 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                 g.st[a][1][key] = (target, g.seq(acts + extra if kind == "append" else extra + acts))
     if not lines and not edits:
         raise ValueError(f"{stem}: no template rows for section {section}")
+    return groups
