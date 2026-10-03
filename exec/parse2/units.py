@@ -23,8 +23,7 @@ def build(locations=False):
         E.WORDS.append(name);E.TK[name]=max(E.TK.values())+1
     import assemble;assemble.run(pathlib.Path(__file__).parents[1]/'parse/tokenizer-manifest.tsv',E,P,{});E.prn();E.fconv()
     import assemble;from finite_rules import install_template;install_template(g,pathlib.Path(__file__).parent,'units',dict(Q=assemble.load_facts('k2-units-tokens')['qualifiers']),None,section='qualifier')
-    from strings import token_span
-    token_span(E,P)
+    assemble.run(pathlib.Path(__file__).with_name('strings-token-span-manifest.tsv'),E,P,{},dict(TK_STR=E.TK_STR))
     selection=rows("builtin")
     builtin=[E.TK[word] for word in E.WORDS if any(word.startswith(prefix) and word!=exclude for prefix,exclude in selection)]
     tokens=dict(E.TK,identifier=TK_ID)

@@ -33,7 +33,7 @@
 
 ## Round 2026-10-03 17:36 (be572e50)
 - exec/enc/gen-manifest.tsv done: `exec/build/gen.py enc OUT [--elf|--macho|--pe|--object]` byte-identical to gen.py in all 5 modes
-  (.k2enc/cmp.sh OLD STAGE MODES). Facts enc-x86 (export.py x86entry). assemble.py: call opts flags, domain_at, seqenv.
+  (.k2enc cmp script (gone) OLD STAGE MODES). Facts enc-x86 (export.py x86entry). assemble.py: call opts flags, domain_at, seqenv.
 - Next: arm-manifest (stage dir clash: put it in exec/enc/arm/ or add a manifest-path arg to build/gen.py), callers, delete
   gen.py/arm.py and the now-unused x86-*-names/instances/sequences/bytes/reject/dispatch tsvs, graphhash full, 8 gates.
 

@@ -57,7 +57,7 @@
   NEXT/TN.checked asserts and the DL.read seq asserts dropped; reader chosen by flags (DL.read exactly when
   tokenlocations records tokens: warnings or errors). The translator refuses disjunctions, so the DL.read row
   is hand-split into `warnings` and `errors&!warnings` (recorded with 3 modes; gen2 implies locations).
-  parse2 graphhash 10/10 identical. Recorder script: .k2tmp/vr/rec.sh MODULE STEM (8 modes, sequential).
+  parse2 graphhash 10/10 identical. Recorder script: .archive/tests/k2gen/rec.sh MODULE STEM (8 modes, sequential).
 
 ## Round 5 (2026-10-03)
 - Gates on 70d634a2 tree: exec-unitparse, exec-errors, exec-r21-e3, exec-chain-1/2/3 all rc=0
