@@ -16,9 +16,13 @@ import assemble
 
 if len(sys.argv) < 3:
     sys.exit("usage: exec/build/gen.py STAGE OUT.json [--FLAG...]")
+def _stage(a):
+    return "/" not in a and not a.endswith(".json") and (ROOT / "exec" / a / "gen-manifest.tsv").is_file()
 stage, out, args = sys.argv[1], sys.argv[2], sys.argv[3:]
-if not (ROOT / "exec" / stage / "gen-manifest.tsv").is_file():   # OUT STAGE order (script OUT ARGS callers)
+if not _stage(stage) and _stage(out):   # OUT STAGE order (script OUT ARGS callers)
     stage, out = out, stage
+if not _stage(stage):
+    sys.exit("exec/build/gen.py: no stage manifest exec/%s/gen-manifest.tsv (args %s %s)" % (stage, sys.argv[1], sys.argv[2]))
 man = ROOT / "exec" / stage / "gen-manifest.tsv"
 head = {}
 for ln in man.read_text().split("\n"):
