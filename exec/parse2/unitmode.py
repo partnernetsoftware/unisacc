@@ -17,15 +17,25 @@ def install(E, P, start, definitions):
                 definitions[name, how] = definitions.pop((state, how))
         g.labels.add(name)
         return name
-    def hook(state, proc):
-        name = original(state)
-        P(state).call(proc).goto(name)
-        return name
-    p = P('UM.start')
-    for key, value in (('funit', 'um_unit'), ('object', 'um_object')):
-        p.a(('SBCLR',), *[('SBOUT', c) for c in ('\0cli/' + key).encode()],
-            ('SBFIND', 'um_blob'), ('BLEN', value, 'um_blob'))
-    p.goto(start)
+    # Stage control lives in unitmode-result.tsv (sections start, header, s2..s8);
+    # fresh labels are declared in unitmode-fresh.tsv and allocated in the original
+    # order on an unregistered scope. Python keeps only fact-dependent work: the FN
+    # row rewrite, original() renames, the header relocation (its matched rows and
+    # UM.header.resume continuations), and the END.ok initializer tail/target.
+    from pathlib import Path
+    from finite_rules import install as rules
+    class _Scope:
+        def __init__(self, cur): self.cur = cur
+    root = Path(__file__).parent
+    bindings = dict(start=start, DECL=DECL, DECL1=DECL+1, FND=E.FND,
+                    TK_extern=E.TK['type=extern'], TK_assign=E.TK['='])
+    sequences = dict(header=list(E.O(E.HEADER)))
+    fresh = [l.split('\t') for l in (root/'unitmode-fresh.tsv').read_text().splitlines()[1:]]
+    def section(name):
+        for part, key, kind, prefix in fresh:
+            if part == name: bindings[key] = E.P.fresh(_Scope(prefix), kind)
+        rules(g, root, 'unitmode', bindings, sequences, None, name)
+    section('start')
     # Move the fixed entry sequence from before the source to before __init_u.
     header = list(E.O(E.HEADER))
     matches = []
@@ -43,33 +53,11 @@ def install(E, P, start, definitions):
         g.labels.add(resume)
         g.st[state][1][key] = ('UM.header', g.seq(acts[:at] + [('PUSH', resume)]))
         g.on(resume, range(257), target, acts[at+len(header):], 'r')
-    P('UM.header').branch({0:'UM.header.emit'},'UM.header.unit',[('RLD','um_unit')])
-    P('UM.header.unit').o('.unit 2\n').ret()
-    P('UM.header.emit').o(E.HEADER).ret()
-    hook('FN.def1', 'UM.function')
-    P('UM.function').branch({0:'RET'},'UM.function.static',[('RLD','um_unit')])
-    P('UM.function.static').branch({1:'RET'},'UM.function.emit',[('CMPI','fstat_cur',1)])
-    P('UM.function.emit').o('.global ').a(('SPAN2','fns','fne')).o('\n').ret()
-    # librarydata already records the actual storage class in ld_decl.
-    storage = original('GV.storage')
-    P('GV.storage').a(('ALU','or','um_enabled','um_unit','um_object')).branch({0:storage},'UM.storage',[('RLD','um_enabled')])
-    P('UM.storage').a(('INTERN','um_id','fns','fne'),('LDX','um_decl','um_id',DECL)).branch({1:'UM.extern.test'},'UM.definition',[('CMPI','ld_decl',E.TK['type=extern'])])
-    P('UM.extern.test').branch({1:'UM.definition'},'UM.extern',[('CMPI','tk',E.TK['='])])
-    P('UM.extern').branch({0:'UM.extern.emit'},'GV.record',[('RLD','um_decl')])
-    P('UM.extern.emit').o('.extern g_').a(('SPAN2','fns','fne')).o('\n').a(('LDI','um_decl',1),('STX','um_id',DECL,'um_decl')).goto('GV.record')
-    P('UM.definition').a(('LDI','um_defined',2),('STX','um_id',DECL,'um_defined')).branch({0:storage},'UM.global.static',[('RLD','um_unit')])
-    P('UM.global.static').branch({1:storage},'UM.global.duplicate',[('CMPI','um_static',1)])
-    P('UM.global.duplicate').branch({2:storage},'UM.global.emit',[('RLD','um_decl')])
-    P('UM.global.emit').o('.global g_').a(('SPAN2','fns','fne')).o('\n').goto(storage)
-    record = original('GV.record')
-    P('GV.record').branch({0:record},'UM.gdef.test',[('RLD','um_unit')])
-    P('UM.gdef.test').branch({1:'UM.gdef.static'},record,[('CMPI','tk',E.TK['='])])
-    P('UM.gdef.static').branch({1:record},'UM.gdef.emit',[('CMPI','um_static',1)])
-    P('UM.gdef.emit').o('.gdef g_').a(('SPAN2','fns','fne')).o('\n').goto(record)
-    end = original('END')
-    P('END').branch({0:end},'UM.end',[('RLD','um_unit')])
-    P('UM.end').a(('LDX','t','mnid',E.FND)).branch({1:'UM.entry'},'UM.init',[('CMPI','t',1)])
-    P('UM.entry').o(E.HEADER).goto('UM.init')
+    section('header')
+    original('FN.def1'); section('s2')
+    original('GV.storage'); section('s3')
+    original('GV.record'); section('s4')
+    original('END')
     # Keep the existing initializer replay and footer; replace only its heading.
     init = list(E.O('__init:\n'))
     mode,row = g.st['END.ok']
@@ -78,26 +66,14 @@ def install(E, P, start, definitions):
         acts=list(g.seqs[seq]);assert acts[:len(init)]==init
         targets.add((target,tuple(acts[len(init):])))
     assert len(targets)==1
-    target, acts = targets.pop()
-    P('UM.init').o('.global __init_u\n__init_u:\n').a(*acts).goto(target)
+    bindings['init_target'], acts = targets.pop()
+    sequences['init_tail'] = list(acts)
+    section('s5')
     # cc interop (reference -c -b without -funit): an undefined prototyped
     # call becomes a __ccx_ thunk and an `extern` function defined here a
     # __ccw_ entry.  E3 builds neither: such objects are refused by name.
-    bodykind = original('FN.bodykind')
-    P('FN.bodykind').branch({0:bodykind},'UM.cc.unit',[('RLD','um_object')])
-    P('UM.cc.unit').branch({0:'UM.cc.extern'},bodykind,[('RLD','um_unit')])
-    P('UM.cc.extern').branch({1:'UM.cc.export'},bodykind,[('CMPI','ld_decl',E.TK['type=extern'])])
-    P('UM.cc.export').branch({},('rej','not covered: cc interop export (an extern function in a -c -b object)'))
+    original('FN.bodykind'); section('s6')
     # Undefined calls become declarations in source emission order.
-    error = original('UD.error')
-    P('UD.error').branch({0:'UM.cc.call'},'UM.unresolved',[('RLD','um_unit')])
-    P('UM.cc.call').branch({0:error},'UM.cc.thunk',[('RLD','um_object')])
-    P('UM.cc.thunk').branch({},('rej','not covered: cc interop call (an undefined function in a -c -b object)'))
-    P('UM.unresolved').a(('LDI','ud_one',1),('STX','ud_id',33<<40,'ud_one'),('ALUI','mul','um_extindex','um_extcount',2),('STX','um_extindex',DECL+1,'ud_start'),('ALUI','add','um_extindex','um_extindex',1),('STX','um_extindex',DECL+1,'ud_end'),('ALUI','add','um_extcount','um_extcount',1)).goto('UD.nextline')
-    ok = original('UD.ok')
-    P('UD.ok').branch({0:ok},'UM.externs',[('RLD','um_unit')])
-    P('UM.externs').a(('SPAN2','ud_zero','ud_len'),('LDI','um_exti',0)).goto('UM.externloop')
-    P('UM.externloop').branch({0:'UM.externline'},'UM.externfinish',[('CMP','um_exti','um_extcount')])
-    P('UM.externline').a(('ALUI','mul','um_extindex','um_exti',2),('LDX','um_exts','um_extindex',DECL+1),('ALUI','add','um_extindex','um_extindex',1),('LDX','um_exte','um_extindex',DECL+1)).o('.extern ').a(('SPAN2','um_exts','um_exte')).o('\n').a(('ALUI','add','um_exti','um_exti',1)).goto('UM.externloop')
-    P('UM.externfinish').a(('INPOP',)).ret()
+    original('UD.error'); section('s7')
+    original('UD.ok'); section('s8')
     return 'UM.start'
