@@ -36,6 +36,11 @@ def count():
                  or (isinstance(node, (ast.Assign, ast.Delete)) and any(isinstance(t, ast.Subscript) and is_st(t.value) for t in node.targets))
                  or (isinstance(node, ast.Assign) and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Subscript) and is_st(t.value.value) for t in node.targets))
                  or (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Subscript) and is_st(node.target.value)))
+        # edge rewrites inside a loop over the graph (`for ... in X.st.values(): row[key] = ...`)
+        def walks_graph(it): return any(is_st(x) for x in ast.walk(it))
+        for loop in [x for x in ast.walk(tree) if isinstance(x, ast.For) and walks_graph(x.iter)]:
+            n += sum(1 for x in ast.walk(loop) if isinstance(x, ast.Assign)
+                     and any(isinstance(t, ast.Subscript) and not is_st(t.value) for t in x.targets))
         if n: stages.setdefault(stage, {})[str(rel)] = n
     return {s: {'total': sum(v.values()), 'files': v} for s, v in sorted(stages.items())}
 
