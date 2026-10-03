@@ -187,6 +187,32 @@ class P(_procs.make_P(g, O, rej)):
         return self.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", slot, "lab"))
 
 
+# numeric_rules/prn/fconv: still called by exec/parse2/units.py:24 (E.prn(); E.fconv()), cdx file
+def numeric_rules(section, bindings=None, owner=None):
+    # Unique metadata instances also satisfy gen2's duplicate-definition guard.
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    bindings = dict(bindings or {}, DIG=DIG, TK_FNUM=TK_FNUM)
+    for line in (Path(HERE).parent / "facts" / "numeric-names.tsv").read_text().splitlines():
+        if not line.startswith("#"):
+            selected, name, prefix, kind = line.split("\t")
+            if selected == section:
+                bindings[name] = P((owner or prefix) + ".numeric_" + name).fresh(kind)
+    install_rules(g, HERE, "numeric", bindings=bindings, section=section)
+
+
+def prn():
+    # One declared decimal algorithm, instantiated at widths zero and six.
+    suffixes = ("", ".loop", ".out0", ".pad", ".sp", ".out", ".done") + tuple(".d%d" % i for i in range(20))
+    for name, width in (("PRN", 0), ("PRNW", 6)):
+        bindings = {"PRN" + suffix.replace(".", "_"): name + suffix for suffix in suffixes}
+        numeric_rules("prn", dict(bindings, width=width), owner=name)
+
+
+def fconv():
+    numeric_rules("fconv")
+
+
 def tyinfo():                 # stage tyinfo (weights/gold/tyinfo.tsv): type key -> (size, unsigned)
     return {f[0]: (int(f[1]), int(f[2])) for f in gold("tyinfo") if len(f) >= 3 and f[1].isdigit()}
 
