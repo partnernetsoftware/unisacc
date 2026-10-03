@@ -55,6 +55,13 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(ROOT, "exec"))
 from finite_rules import install as install_rules
 from finite_rules import install_template
+from exec.facts.load import facts
+
+# layout constants, byte classes, targets, reserved spellings: exec/facts/pp-*.tsv
+LAYOUT = {r["name"]: r["value"] for r in facts("pp-layout")}
+globals().update(LAYOUT)
+TARGETS = tuple(r["os"] + "/" + r["arch"] for r in facts("pp-targets"))
+_BYTES = {r["class"]: {c for a, b in r["ranges"] for c in range(a, b + 1)} for r in facts("pp-bytes")}
 
 _name, _fields, _heads, _rows = load_table(os.path.join(ROOT, "weights/gold/pp.tsv"))
 assert _name == "pp" and [n for n, _ in _fields] == ["dir", "defined"]
@@ -91,7 +98,7 @@ PREDEF = load_predefines()
 # puts in the delta.  Order is the reference's; trigger names are derived from
 # include/*.h by hdrneeded's line rule (a line opening `static` with `(` and
 # a `{` after it names the identifier before the first `(`).
-AUTOINC_ORDER = ("assert.h", "ctype.h", "stdlib.h", "string.h", "wchar.h", "stdio.h")
+AUTOINC_ORDER = tuple(facts("pp-autoinc"))
 
 
 def autoinc_map():
@@ -108,11 +115,10 @@ def autoinc_map():
 
 
 AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta without it
-AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
+# AIB: W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
 # -ftrim-libc (src/front_pp.c ftrim_libc_scan/ftrim_libc_define): W[LNSB + id] = 1 when
 # the identifier occurs anywhere in the unit (srcfind), kept apart from AIB so
 # the autoinc status compare is untouched; W[NEEDB + b] = 1 marks carried body b.
-LNSB, NEEDB = 71 * 10 ** 6, 70 * 10 ** 6
 
 
 def build_ftrim_libc(g):
@@ -182,27 +188,13 @@ def build_autoinc(g, locations=False):
 
 
 
-AL = set(range(97, 123)) | set(range(65, 91)) | {95}
-DI = set(range(48, 58))
+AL, DI = _BYTES["alpha"], _BYTES["digit"]
 ID = AL | DI
-SEGINF = 1000000000
 # W regions (addresses; plain named slots are strings)
-DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
-SPLB, IRLN, IRNL = 11 * 10 ** 7, 12 * 10 ** 7, 121 * 10 ** 6
 # #line records (R14-3): W[LDRAW+k] raw line, W[LDUSER+k] user line, W[LDNUM+k] N, W[LDNM+k] name blob or -1
-LDRAW, LDUSER, LDNUM, LDNM = 141 * 10 ** 6, 142 * 10 ** 6, 143 * 10 ** 6, 144 * 10 ** 6
-F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV, F_ACT, F_UP = 0, 1, 2, 3, 4, 5, 6, 7
-F_NP, F_P0, MAXP = 8, 9, 12         # function-like: parameter count, parameter ids; MAXP = the reference's MAXMPARAM (12) -- 8 refused sqlite's 9-parameter WAGGREGATE (R13-0b #29)
-F_HASH = F_P0 + MAXP     # 1: the body has `#` outside literals (s12)
-F_VAR = F_HASH + 1      # final parameter is __VA_ARGS__
-FSZ = F_VAR + 1
-ARGB, ARGE = 62 * 10 ** 6, 63 * 10 ** 6   # argument blobs; the argument frame's entry
 # s13: a function-like call's record, a stack (CL deep, CR the top's address):
 # the macro, the argument index, the registers a pre-expansion saves, and per
 # argument the raw blob and the fully expanded one
-CRB, CRS = 69 * 10 ** 6, 40
-C_ME, C_K, C_BDEP, C_PRE, C_EDEP, C_SEP, C_OST, C_SB, C_SB0 = 0, 1, 2, 3, 4, 5, 6, 7, 8
-C_RAW, C_EXP = 9, 9 + MAXP
 # F_FN: 0 object-like, 1 function-like (covered), 2 function-like not covered
 # (more than MAXP or malformed)
 
@@ -263,8 +255,6 @@ def sbconst(s):
 # A division by zero sets the value's
 # poison bit; && || ?: drop the poison of the operand they do not evaluate.
 # XUB uses a separate sparse region (IRNAME is 1 << 40); all its indexing is A64I.
-XOB, XVB, XPB, XPRB, XUB = 64 * 10 ** 6, 65 * 10 ** 6, 66 * 10 ** 6, 67 * 10 ** 6, 2 << 40
-IRPATH = 3 << 40   # IRPATH[region] = blob of the include's resolved path (nested quoted includes)
 # code: (spelling, prec, arity)
 XOPS = {}
 for line in (Path(HERE) / "operators.tsv").read_text().splitlines():
@@ -340,11 +330,11 @@ def target_predefines(target):
 def predefine_resources():
     return {b"\0predefines/" + (osname+"/"+arch).encode("ascii"):
             target_predefines(osname+"/"+arch)
-            for osname in ("lnx", "osx", "win") for arch in ("arm64", "x86_64")}
+            for osname, arch in (t.split("/") for t in sorted(TARGETS, key=lambda t: (t.split("/")[0], t.split("/")[1])))}
 
 
 def build(target="lnx/x86_64", locations=False, shared_predefines=False):
-    if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"):
+    if target not in TARGETS:
         raise ValueError("unsupported preprocessor target: "+target)
     target_os, target_arch = target.split("/")
     predef = PREDEF["os", target_os] + PREDEF["arch", target_arch] + PREDEF["common", "*"]
@@ -357,21 +347,12 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     for k, w in enumerate(DIRV):
         init += sbconst(w) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
                               ("LDI", "v", k + 1), ("STX", "a", 0, "v")]
-    init += sbconst("pragma") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
-                                 ("LDI", "v", 100), ("STX", "a", 0, "v")]
-    init += sbconst("line") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
-                               ("LDI", "v", 101), ("STX", "a", 0, "v")]   # #line (R14-3)
-    init += sbconst("error") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
-                                ("LDI", "v", 102), ("STX", "a", 0, "v")]
-    init += sbconst("_Pragma") + [("SBINTERN", "ID_PRAGMAOP")]
-    init += sbconst("push_macro") + [("SBINTERN", "ID_PUSHM")]
-    init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
-    for w, nm in (("0", "ID_0"), ("1", "ID_1"), ("defined", "ID_DEFD")):
-        init += sbconst(w) + [("SBINTERN", nm)]
-    init += sbconst("printf") + [("SBINTERN", "ID_PRINTF")]
-    init += sbconst("__VA_ARGS__") + [("SBINTERN", "ID_VA")]
-    init += sbconst("__LINE__") + [("SBINTERN", "ID_LINE")]   # the predefined macro (N17a)
-    init += sbconst("__FILE__") + [("SBINTERN", "ID_FILE")]   # (N17b)
+    for r in facts("pp-init"):   # reserved spellings: #pragma/#line/#error ids, interned names
+        if r["kind"] == "dir":
+            init += sbconst(r["word"]) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
+                                          ("LDI", "v", r["arg"]), ("STX", "a", 0, "v")]
+        else:
+            init += sbconst(r["word"]) + [("SBINTERN", r["arg"])]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
     g.els("START", "CLI.FLAGS", init)
     build_cli(g, locations)
@@ -383,7 +364,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     macro_layout = {'NEWB': NEWB, 'FSZ': FSZ, 'MACB': MACB, 'F_TO': F_TO, 'SEGINF': SEGINF, 'F_FROM': F_FROM, 'F_PREV': F_PREV, 'F_NAME': F_NAME, 'F_BODY': F_BODY, 'F_FN': F_FN, 'F_VAR': F_VAR}
     install_rules(g, HERE, "macro", macro_layout)
     install_rules(g, HERE, "pragma", dict(macro_layout, F_NP=F_NP,
-                  PMHEAD=1 << 44, PMSTACK=2 << 44))
+                  PMHEAD=PMHEAD, PMSTACK=PMSTACK))
 
     if AUTOINC:
         build_autoinc(g, locations)
@@ -397,7 +378,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     if shared_predefines:
         # One network per output format/autoinc mode; target data is supplied
         # as resources. The legacy default remains byte-for-byte unchanged.
-        install_rules(g, HERE, "shared-predefine", {"F_BODY": F_BODY, "PD_SEEN": 72 * 10 ** 6})
+        install_rules(g, HERE, "shared-predefine", {"F_BODY": F_BODY, "PD_SEEN": PD_SEEN})
     else:
         for k, nm in enumerate(predef):
             nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "OOBJ.start"

@@ -5,8 +5,9 @@ name length, name bytes); then exactly text-length preprocessed bytes.
 """
 from pathlib import Path
 from finite_rules import install as install_rules
+from exec.facts.load import facts
 
-IRNAME = 1 << 40
+IRNAME = {r["name"]: r["value"] for r in facts("pp-layout")}["IRNAME"]
 
 
 def install(g, spl, irln, irnl):
