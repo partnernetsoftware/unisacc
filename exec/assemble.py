@@ -184,6 +184,10 @@ class Run:
             return _out(v[5:], facts)
         if v.startswith("@fmt:"):
             return _fmt(v[5:], facts)
+        if v.startswith("@ref:"):
+            return _path(facts, _fmt(v[5:], facts))
+        if v.startswith("@seqmap:"):
+            return self.seqmap(*v[8:].rsplit(":", 1), facts=facts)
         if v.startswith("@acts:"):
             return [tuple(a) for a in _path(facts, v[6:])]
         if v.startswith("$"):
@@ -320,6 +324,11 @@ def run(manifest, E, P, flags, env=None):
 #   accumulate NAME  (bindings persist across rows sharing NAME).
 # opts let {NAME: VALUE | [VALUE...]} adds facts for this row (e.g. template facts);
 # a stem starting with `@` is a value (`@fmt:...`); op assert-present STATE.
+# foreach opts pre [[NAME, VALUE]...] evaluated per row in order (before chain next).
+# @ref:FMT  fact path after formatting;  @seqmap:LIST:TEMPLATE  for each x of the
+#   (formatted) fact path LIST, the actions of fact TEMPLATE (json list): an
+#   action ["OP", "{x}", ...] gets x substituted (whole-cell "{x}" keeps type),
+#   a string "$NAME" splices the env sequence NAME.
 # value forms: @fmt:FMT (str.format over facts), @acts:PATH (json list -> tuples).
 
 def _headerform(path):
@@ -351,6 +360,8 @@ def _foreach(self, o, body, depth, extra, facts):
     cur = ch and self.value(ch["start"], facts)
     for x in rows:
         ex = dict(extra, **{o.get("as", "it"): x})
+        for k, v in o.get("pre", []):
+            ex[k] = self.value(v, dict(facts, **ex))
         if ch:
             nxt = self.value(ch["next"], dict(facts, **ex))
             ex.update({ch["entry"]: cur, "next": nxt})
@@ -390,3 +401,17 @@ def _init(self, *a, **k):
 Run.__init__ = _init
 Run.foreach = _foreach
 Run.bindings = _bindings
+
+
+def _seqmap(self, lst, tmpl, facts):
+    out = []
+    for x in _path(facts, _fmt(lst, facts)):
+        for a in _path(facts, tmpl):
+            if isinstance(a, str):
+                out += self.env[a[1:]]
+            else:
+                out.append(tuple(x if c == "{x}" else c for c in a))
+    return out
+
+
+Run.seqmap = _seqmap

@@ -227,8 +227,8 @@ def build(image=False, object_mode=False):
     install_address(E, byte, KND, SZ, OFF, LABD)
     from hostbridge import install as install_hostbridge
     install_hostbridge(E,'x86_64')
-    from x86itoa import install as install_itoa
-    install_itoa(E,KND,SZ)
+    import assemble
+    assemble.run(os.path.join(HERE, 'x86itoa-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ))
     from x86win import install as install_win
     install_win(E, byte, KND, SZ)
     relax()

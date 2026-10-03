@@ -128,8 +128,7 @@ def build(image=False, object_mode=False):
         assemble.run(here/(stem+'-manifest.tsv'), E, P, dict(image=image), env)
     install_input(E,word)
     install_layout(E,word)
-    from armitoa import install as install_itoa
-    install_itoa(E,word)
+    assemble.run(here/'armitoa-manifest.tsv', E, P, {}, env)
     install_win(E,word)
     from hostbridge import install as install_hostbridge
     install_hostbridge(E,'arm64',word)
