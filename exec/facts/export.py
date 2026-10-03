@@ -684,6 +684,16 @@ def tokenlocationsmap():
 
 
 # (fact stem, inputs whose sha prefixes head the file, producer)
+def _namespace_constants(G):
+    """Layout constants the function/global/local control sections bind (facts k2-gen2 nsconst; was gen2.py)."""
+    E = G.E
+    f = dict(PIDS=G.PIDS, PDB=G.PDB, LOC=G.LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
+    f.update(("FN_PDB" + str(i), G.PDB + i) for i in range(16))
+    g = {name: getattr(G, name) for name in ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
+    g.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
+    return dict(function=f, globals=g, local=dict(SKIPS=G.SKIPS, PTR=E.PTR, BASE=E.BASE))
+
+
 def _tk2(E):
     """parse2's token ids: parse words plus type=extern/_Bool appended after max(TK) (parse2base.tokens)."""
     assert "type=extern" not in E.TK
@@ -836,7 +846,7 @@ def k2gen2():
             "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
             "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
             "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
-            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(G.namespace_constants()), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, "HEADER_JSON": json.dumps([list(a) for a in G.E.O(G.E.HEADER)]), **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
+            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(_namespace_constants(G)), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, "HEADER_JSON": json.dumps([list(a) for a in G.E.O(G.E.HEADER)]), **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
             "=shapeconst\tjson\t" + dump(shapeconst), "=shapeseqs\tjson\t" + dump(shapeseqs), "=shapeclasses\tjson\t" + dump(shapeclasses),
             "=retconst\tjson\t" + dump(retconst), "=retseqs\tjson\t" + dump(retseqs), "=retclasses\tjson\t" + dump(retclasses),
             "=retexpr0\tjson\t" + dump(retexpr0), "=retint\tjson\t" + dump([dict(code=c) for _, c, *_ in G.TYINT]), "=retfloat\tjson\t" + dump([dict(label=l, cv=v, base=b) for l, v, b in (("double", "d", G.DBL), ("single", "s", G.FLT))]), "=retcompound\tjson\t" + dump(retcompound),

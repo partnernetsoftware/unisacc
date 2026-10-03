@@ -225,81 +225,9 @@ assert ENUM_CAPACITY > 0 and max([BOOL, DBL, FLT, FPB, FPV] + [code for _, code,
 assert FPS_FIRST < SBB and SBB + STRUCT_MAX < 4096
 
 
-def width_dispatch(name, tape=None, masks=False):
-    """Value width dispatch: exec/parse2/width-manifest.tsv (K2 sub-manifest; tape/masks are facts widthd.NAME)."""
-    import assemble
-    assemble.run(Path(__file__).resolve().parent / 'width-manifest.tsv', E, P, {}, dict(width_name=name, width_load=int(name == "LOADV")))
-
-
-def shape_control(section):
-    """Shape descriptors: exec/parse2/shape-manifest.tsv (K2 sub-manifest; membercontrol still calls this)."""
-    import assemble
-    assemble.run(Path(__file__).resolve().parent / 'shape-manifest.tsv', E, P, {}, dict(shape_section=section))
-
-
-def structured_control(section, warnings, extra=None, sequence_bindings=None, export=False):
-    """Structured control: exec/parse2/control-manifest.tsv (K2 sub-manifest)."""
-    import assemble
-    section += "-warnings" if warnings and section in ("block", "if") else ""
-    return assemble.run(Path(__file__).resolve().parent / 'control-manifest.tsv', E, P, {},
-                 dict(control_export=export, control_section=section, statement="STMT.body" if warnings else "STMT",
-                      extra=dict(extra or {}), seqb=dict(sequence_bindings or {})))
-
-
-def segment(name, warnings=False, env=None):
-    """One transitional segment of exec/parse2/gen2-manifest.tsv (rows gated by env fact seg_NAME)."""
-    import assemble
-    return assemble.run(Path(__file__).resolve().parent / 'gen2-manifest.tsv', E, P, dict(warnings=warnings), dict(env or {}, **{"seg_" + name: 1}))
-
-
-def ordinary_control(section, warnings, extra=None):
-    """Ordinary control: gen2-manifest segment ord-SECTION (fresh lets, control calls); extra values arrive as env."""
-    return segment("ord-" + section, warnings, extra)
-
-
-def namespace_constants():
-    """Layout constants the function/global/local control sections bind (facts k2-gen2 nsconst)."""
-    f = dict(PIDS=PIDS, PDB=PDB, LOC=LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
-    f.update(("FN_PDB" + str(i), PDB + i) for i in range(16))
-    g = {name: globals()[name] for name in ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
-    g.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
-    return dict(function=f, globals=g, local=dict(SKIPS=SKIPS, PTR=E.PTR, BASE=E.BASE))
-
-
-def _namespace_control(namespace, section, warnings):
-    """function/global/local control: gen2-manifest segment ns-NAMESPACE-SECTION (fresh lets + control calls)."""
-    env = segment("ns-%s-%s" % (namespace, section), warnings)
-    if namespace == "global":   # named results for later stages (librarymodule): gen2-manifest lm_* let aliases
-        _publish(env)
-
-
 def _publish(env, names=()):
     """Stopgap until gen-manifest's top env is E.results: copy a sub-run's lm_* (and NAMES) results."""
     E.__dict__.setdefault("results", {}).update((k, v) for k, v in env.items() if k.startswith("lm_") or k in names)
-
-
-def function_control(section, warnings):
-    _namespace_control("function", section, warnings)
-
-
-def local_control(section, warnings):
-    _namespace_control("local", section, warnings)
-
-
-def return_control(section, extra=None):
-    """Return/expression control: exec/parse2/return-manifest.tsv (K2 sub-manifest); returns its bindings."""
-    import assemble
-    return assemble.run(Path(__file__).resolve().parent / 'return-manifest.tsv', E, P, {},
-                        dict(ret_section=section, ret_dispatch=int(section == "expr0"), extra=dict(extra or {})))["rb"]
-
-
-def update_control(section, extra=None):
-    """Lvalue update control: exec/parse2/update-manifest.tsv (K2 sub-manifest); returns its bindings."""
-    import assemble
-    x = dict(extra or {})
-    env = dict(upd_section=section, upd_dispatch=int(section == "id0"), extra=x, extra2={})
-    env.update((k, str(x.get(k, ""))) for k in ("op", "name", "suffix", "postfix", "prefixfix", "integer", "floating", "bits"))
-    return assemble.run(Path(__file__).resolve().parent / 'update-manifest.tsv', E, P, {}, env)["ub"]
 
 
 def build(locations=False, warnings=False, errors=False):
@@ -331,7 +259,6 @@ def build(locations=False, warnings=False, errors=False):
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
-
 
 
 def _libraryexports(E, P, b, start, integers):
