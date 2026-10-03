@@ -13,7 +13,8 @@ def install(E,P,b,start,integers):
     import assemble
     u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
     from finite_rules import install as rules, install_template
-    import librarycallables, layoutfacts, types
+    import librarycallables, types
+    layoutfacts=types.SimpleNamespace(**assemble.load_facts('layoutfacts')['layoutfacts!'])  # exec/facts/layoutfacts.tsv
     libraryimports=types.SimpleNamespace(**assemble.load_facts('libraryimports')['libraryimports!'])  # exec/facts/libraryimports.tsv
     modelsignature=types.SimpleNamespace(**assemble.load_facts('top-modelsignature-banks')['top-modelsignature-banks!'])  # exec/facts/top-modelsignature-banks.tsv
     modelgraphequality=types.SimpleNamespace(**assemble.load_facts('top-modelgraphequality-banks')['top-modelgraphequality-banks!'])  # exec/facts/top-modelgraphequality-banks.tsv
