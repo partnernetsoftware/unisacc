@@ -426,3 +426,10 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Next: block for function0..8 + parameter-declarators (no glue); star+upd-lookup block; then scope round trip;
   then (c)+(d) together (top-level env = E.results via exec/build/gen.py parse2). Tools: .k2tmp/chk.sh (export +
   default + --warnings --errors to .k2tmp/m0/m1.json), plus --errors to m2.json; want 32fb8e3c/3a7edf34/7ea0e979.
+  Round 32 final: blocks fnscope (function0/2/4/6, parameter-declarators [warnings=false], function8, then
+  `call scope` scope_part1 with result sc, dispatch-block, `call scope` scope_part2 extra=$$sc:sb: the sb round trip
+  is now inside the manifest) and starlookup (ord-star, upd-lookup). sha SAME default/--errors/--warnings --errors.
+  build() order now: tokens, early, constexpr (cdx), statics, startup-run+lm glue (c), global0/1/3/5 (global-results
+  glue, c), fnscope, body1, ladders, body2, membercontrol (cdx), starlookup, callcontrol begin/truth/finish (fpcont,
+  cb, fpu: c/facts), offsetof, locations/warnings/errors (tokenlocations constants: cdx), libraryexports (cdx), rest.
+  Next agent: global block once global-results glue becomes `export` (c) -> do (c)+(d) together.

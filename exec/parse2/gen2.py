@@ -323,19 +323,7 @@ def build(locations=False, warnings=False, errors=False):
     global_control("global1", warnings)   # + call shape typedef-shape (gen2-manifest)
     global_control("global3", warnings)   # + call shape global-type (gen2-manifest)
     global_control("global5", warnings)   # + call shape global-binding (gen2-manifest)
-    function_control("function0", warnings)   # + call shape parameter-type (gen2-manifest)
-    function_control("function2", warnings)   # + call shape parameter-dimensions (gen2-manifest)
-    function_control("function4", warnings)   # + call shape descriptor-storage (gen2-manifest)
-    function_control("function6", warnings)
-    segment("parameter-declarators")
-    function_control("function8", warnings)
-    # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
-    # DECLN: the name was saved in ips..ipe (the current token is after it)
-    scope = assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part1=1))['sb']
-    # statements
-    segment("dispatch-block", warnings)
-    assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part2=1, extra=scope))
-
+    segment("fnscope", warnings)   # gen2-manifest block fnscope
     segment("body1", warnings)   # gen2-manifest block body1
     segment("ladders")
     segment("body2", warnings)   # gen2-manifest block body2
@@ -346,8 +334,7 @@ def build(locations=False, warnings=False, errors=False):
                         ARR=E.ARR, SSZ=SSZ, DBL=DBL, FLT=FLT, BOOL=BOOL,
                         TYINT=TYINT), shape_control)
     # statement `*E = e` / `*E ...;`: E's value is the address
-    ordinary_control('star', warnings)
-    segment("upd-lookup", warnings)
+    segment("starlookup", warnings)   # gen2-manifest block starlookup
     import assemble
     call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
                             dict(warnings=warnings), dict(warnings=warnings))
