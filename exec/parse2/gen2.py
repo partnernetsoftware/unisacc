@@ -353,17 +353,13 @@ def build(locations=False, warnings=False, errors=False):
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
     import assemble
-    segment("startup-marker")
-    import assemble
-    assemble.run(Path(__file__).parent / "strings-token-span-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))
-    assemble.run(Path(__file__).parent / "strings-initializer-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))   # K2: strings initializer
+    segment("startup-marker")   # + call strings-token-span, strings-initializer (gen2-manifest)
     segment("numeric")
     types()
     segment("typing")
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
-    segment("statics-init")
-    strwalk("IC.string", "IC.string_byte", "IC.string_end")
+    segment("statics-init")   # + call strwalk IC.string (gen2-manifest)
     segment("staticauto")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     segment("startup-guard")   # POSSPAN from facts k2-gen2

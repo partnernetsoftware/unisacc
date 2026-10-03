@@ -394,3 +394,7 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Done (1) after rebase on origin/main (cdx dec08701): gen2 runs exec/parse2/strings-initializer-manifest.tsv
   (env TK_STR) in place of strings.initializer; initializer() removed from strings.py (walk/rules stay for cdx).
   sha SAME default/--errors/--warnings --errors.
+  (b) more: strings-token-span + strings-initializer -> call rows at end of segment startup-marker (facts
+  parse-constants TK_STR, as units-manifest does); strwalk IC.string -> call row at end of statics-init. sha SAME x3.
+  (c) note: export-to-E.results only takes effect when the top-level env IS E.results (exec/build/gen.py run);
+  under gen2.py each segment() has its own env, so (c) lands together with (d), not before.
