@@ -270,7 +270,12 @@ def _namespace_control(namespace, section, warnings):
     """function/global/local control: gen2-manifest segment ns-NAMESPACE-SECTION (fresh lets + control calls)."""
     env = segment("ns-%s-%s" % (namespace, section), warnings)
     if namespace == "global":   # named results for later stages (librarymodule): gen2-manifest lm_* let aliases
-        E.__dict__.setdefault("results", {}).update((k, v) for k, v in env.items() if k.startswith("lm_"))
+        _publish(env)
+
+
+def _publish(env, names=()):
+    """Stopgap until gen-manifest's top env is E.results: copy a sub-run's lm_* (and NAMES) results."""
+    E.__dict__.setdefault("results", {}).update((k, v) for k, v in env.items() if k.startswith("lm_") or k in names)
 
 
 def function_control(section, warnings):
@@ -315,7 +320,8 @@ def build(locations=False, warnings=False, errors=False):
     assemble.run(Path(__file__).resolve().parent / 'constexpr-manifest.tsv', E, P, {}, dict(enum_values=C["ENV"], enum_defined=C["END_"]))
     segment("statics")   # statics-init, staticauto, startup-guard (gen2-manifest block)
     env = segment("startup-run")   # startup data from facts k2-gen2 (tyrows, syscalls, autonames)
-    E.__dict__.setdefault("results", {}).update(lm_hstate=env["lm_hstate"], lm_hnext=env["lm_hnext"], lm_header=O(E.HEADER), lm_errors=errors)
+    _publish(env)   # lm_hstate, lm_hnext (control-manifest startup)
+    E.results.update(lm_header=O(E.HEADER), lm_errors=errors)
     global_control("global0", warnings)
     # enum is a type specifier in both declarations and typedefs.
     global_control("global1", warnings)   # + call shape typedef-shape (gen2-manifest)
@@ -331,7 +337,7 @@ def build(locations=False, warnings=False, errors=False):
     import assemble
     call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
                             dict(warnings=warnings), dict(warnings=warnings))
-    E.__dict__.setdefault("results", {})["fpcont"] = call_env["fpcont"]   # FS.CALLTYPE continuation (librarycallables)
+    _publish(call_env, ("fpcont",))   # FS.CALLTYPE continuation (librarycallables)
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
     import assemble
     assemble.run(Path(__file__).parent / "truth-conversions-manifest.tsv", E, P, {},
@@ -365,7 +371,8 @@ def build(locations=False, warnings=False, errors=False):
         _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors
         # librarymodule's no-main continuation: the errors message state that replaced the reject (named at creation,
         # errors-manifest.tsv lm_nomain_msg); the message state itself rejects, so the edge carries no actions.
-        E.__dict__.setdefault("results", {}).update(lm_nomain_msg=_err["lm_nomain_msg"], lm_mainnext=_err["lm_nomain_msg"], lm_mainreject=[])
+        _publish(_err)   # lm_nomain_msg
+        E.results.update(lm_mainnext=_err["lm_nomain_msg"], lm_mainreject=[])
     start = _libraryexports(E, P, {name: C[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
          'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',

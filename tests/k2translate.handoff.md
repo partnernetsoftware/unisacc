@@ -562,3 +562,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Left for (c): lm_hstate/lm_hnext (startup-run env), lm_header (fact), lm_errors (flag), fpcont (callcontrol-begin env),
   lm_nomain_msg/lm_mainnext/lm_mainreject (errors env; lm_mainreject=[] -> let constant). librarymodule.py:23 comment
   still names global-results.tsv (cdx file, left untouched).
+- Round 43 (step 2c, rest): every E.results writer in gen2.py goes through one helper _publish(env, names=()) that copies
+  a sub-run env's lm_* (plus listed names) -- global sections, startup-run (lm_hstate/lm_hnext), callcontrol-begin
+  (fpcont), errors (lm_nomain_msg). Still literal in Python: lm_header=O(E.HEADER), lm_errors=errors,
+  lm_mainnext=_err['lm_nomain_msg'], lm_mainreject=[] -> in gen-manifest these become a fact (header seq), the errors
+  flag, and let aliases. export.py rerun, facts committed. sha SAME (actually run, bound 58, serial): gen2 32fb8e3c,
+  --errors 7ea0e979, --warnings --errors 3a7edf34, --locations a4c6fa73 (first try exit 142 with no output, single rerun
+  green), gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Next: (e) gen-manifest.tsv: segments as unconditional blocks in build() order; top env = E.results makes _publish go.
