@@ -52,7 +52,9 @@ def install(E, P, warnings, templates, facts, shape_control):
     tyint = facts['TYINT']
     sources = [(code, size, uns) for _, code, size, uns, _ in tyint]
     sources += [(facts['FLT'], 4, 0), (facts['DBL'], 8, 0), (facts['BOOL'], 1, 0)]
-    P('AS.mask').branch({1:'AS.mask.target'}, 'AS.store', [('CMPI','lt',0)])
+    section('part3')
+    # Residue: the E.CASOPS operator states in section() and the AS.mask chain
+    # below are generated from operator and tyinfo facts.
     target = P('AS.mask.target')
     for name, code, size, uns, _ in tyint:
         next_target = target.fresh('b')
