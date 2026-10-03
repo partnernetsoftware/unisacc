@@ -4,11 +4,10 @@ one section run per configuration (d0: offset-table labels, d1: direct labels).
 objectplan-steps.tsv orders the steps per configuration: fresh labels (allocated in
 recorded order and bound as $name), state renames, and rule sections. Python binds only
 dynamic facts: table bases, the passed-in OFF/LABD/SYM/PRESENT addresses, and the tape
-header sequence (arch). Residue: the rename of wrapped states into OBJ.original.* --
-it creates states, which a table row cannot do.
+header sequence (arch). Wrapped states move into OBJ.original.* via objectplan-template.tsv (move-state).
 """
 import pathlib
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules, install_template
 OBJ_RELOCS = 250 << 40
 OBJ_NREL = 'obj_nrel'
 NAMES, IDS, SEEN, FLAGS, KIND, POS, STRINGS, SYMBOLS, TEXT, TAPE = (i << 40 for i in range(251,261))
@@ -29,7 +28,7 @@ def install(E, byte, OFF, LABD, SYM, PRESENT, arch='x86_64', direct_labels=False
         if f[1]=='fresh':bindings[f[2]]=E.P(f[4]).fresh(f[3])
         elif f[1]=='move':
             n='OBJ.original.'+f[2];assert n not in g.st
-            g.st[n]=g.st.pop(f[2]);g.labels.add(n)
+            install_template(g,root,'objectplan',{'s':[f[2]]},None,section='move');g.labels.add(n)
         else:
             assert f[1]=='rules',line
             install_rules(g,root,'objectplan',bindings,sequences,section=f[2])
