@@ -433,3 +433,27 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   glue, c), fnscope, body1, ladders, body2, membercontrol (cdx), starlookup, callcontrol begin/truth/finish (fpcont,
   cb, fpu: c/facts), offsetof, locations/warnings/errors (tokenlocations constants: cdx), libraryexports (cdx), rest.
   Next agent: global block once global-results glue becomes `export` (c) -> do (c)+(d) together.
+- Round 33 (branch worktree-agent-a884699b537892336 = 5cf1416e, origin/main already contained; no code change):
+  Baseline re-measured: gen2.py default 32fb8e3c (SAME); --errors / --warnings --errors were still running at stop.
+  STOP (task stop condition hit): exec/build/gen.py parse2 cannot run cdx's four Python installs in build order.
+  assemble ops are foreach/template/rows/table/call/let/label/assert-absent/holder(+fresh); none invokes Python
+  (py op banned by k2-boundary, ops capped). Base-import hooks (parse2base) run before the manifest, but constexpr
+  must sit between `early` and `statics`, membercontrol between body2 and starlookup, tokenlocations after offsetof,
+  libraryexports after errors: fresh order decides the sha, so they cannot be hoisted.
+  Their arguments are also gen2.py Python values: constexpr(LEVELS, OPS, ENV, END_); membercontrol(TEMPL, 20 layout
+  constants, shape_control callback - a callback, banned); tokenlocations(TIX, token_record) returns start and module
+  constants SPLICES/INCLUDE_*/TOKEN_POS read by later manifests; libraryexports(30 constants, start, TYINT) returns start.
+  Minimal plan (one cdx deliverable each, then (c)+(d) is mechanical):
+   1. cdx: constexpr-manifest.tsv (file exists untracked in cdx tree) taking LEVELS/OPS/ENV/END_ as facts (k2-gen2 or
+      prec facts); gen2 then `call constexpr` at end of block early.
+   2. cdx: membercontrol-manifest.tsv; shape_control callback -> `call shape` rows (as round 32 did for singles);
+      constants -> facts k2-gen2 nsconst.
+   3. cdx: tokenlocations-manifest.tsv exporting `start` via result=/export, and SPLICES/INCLUDE_*/TOKEN_POS -> facts.
+   4. cdx: libraryexports-manifest.tsv, result=start.
+  Then (c)+(d): exec/parse2/gen-manifest.tsv `#! base build/parse2base.py`, `#! flags locations warnings errors`,
+  `#! start $start`; top env = E.results, so global-results.tsv becomes `let lm_main=$global_global3_552_END_b_1`
+  (etc.) in the merged global block (alias let, allowed); lm_hstate/lm_hnext and fpcont already are env names of
+  their blocks -> plain names in the top env; lm_nomain_msg/lm_mainnext = let aliases in the errors call row's
+  result; lm_mainreject=[] and lm_errors -> flag `errors`, lm_header -> fact. Callers: graphhash key
+  `exec/build/gen.py parse2 [--flags]` (hash unchanged), checks + compilerpack closure as in 4ea3f5e8; delete gen2.py.
+  Tools: .k2tmp/chk.sh (three modes, prints exit + sha8).
