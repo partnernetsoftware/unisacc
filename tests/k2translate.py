@@ -51,18 +51,41 @@ def record(outdir, tag, gen, args, modules):
     sys.path.insert(0, str(ROOT / "exec"))
     sys.path.insert(0, str(genpath.parent))
     import finite_rules as fr
-    traces, stack, inner, graph = {}, [], [0], [None]
+    traces, stack, inner, graph, probe = {}, [], [0], [None], []
     for m in modules:
         p = (ROOT / m).resolve()
         t = traces[p.stem] = {"calls": [], "args": None, "refused": None, "path": str(p)}
         src = p.read_text()
-        for bad in ("g.st", ".st[", "g.labels", ".st.get", "in g.st"):
+        for bad in ("g.st", ".st[", ".st.get", "in g.st", "g.seqs"):
             if bad in src:
                 t["refused"] = "live graph read %r" % bad
 
     def note(why):
         if stack and not traces[stack[-1]]["refused"]:
             traces[stack[-1]]["refused"] = why
+
+    class RecSet(set):
+        # graph label set: additions under a module become `label` rows; reads refuse
+        def add(self, x):
+            if stack and not inner[0]:
+                traces[stack[-1]]["calls"].append(["label", [x]])
+            return set.add(self, x)
+
+        def update(self, *its):
+            items = [x for it in its for x in it]
+            if stack and not inner[0]:
+                traces[stack[-1]]["calls"].append(["label", items])
+            return set.update(self, items)
+
+        def __iter__(self):
+            if stack and not inner[0]:
+                note("live graph read: iterates g.labels")
+            return set.__iter__(self)
+
+        def __contains__(self, x):
+            if stack and not inner[0]:
+                note("live graph read: membership in g.labels")
+            return set.__contains__(self, x)
 
     def wrap(name, fn):
         def w(*a, **k):
@@ -75,17 +98,24 @@ def record(outdir, tag, gen, args, modules):
                 d.pop("g")
                 f = d.get("fresh")
                 if callable(f):
-                    used = []
+                    used, curs = [], []
                     def tf(kind, f=f):
                         used.append(kind)
-                        return f(kind)
+                        probe.append([])
+                        try:
+                            return f(kind)
+                        finally:
+                            pr = probe.pop()
+                            curs.append(pr[0][0] if len(pr) == 1 and pr[0][1] == kind else None)
                     sig.arguments["fresh"] = tf
                     r = fn(*sig.args, **sig.kwargs)
                     own = getattr(f, "__self__", None)
                     if used and own is not None and hasattr(own, "cur") and f.__name__ == "fresh":
                         d["fresh"] = "U:" + own.cur
+                    elif used and None not in curs and len(set(curs)) == 1:
+                        d["fresh"] = "U:" + curs[0]   # callback == one E.P.fresh on a fixed holder cur
                     elif used:
-                        note("template fresh callback invoked (%s)" % used[:3])
+                        note("template fresh callback invoked (%s; holder curs %s)" % (used[:3], sorted(set(map(str, curs)))[:3]))
                         d["fresh"] = None
                     else:
                         d["fresh"] = None
@@ -113,6 +143,8 @@ def record(outdir, tag, gen, args, modules):
                     of = P.fresh
                     def nf(self, h="k", of=of):
                         lab = of(self, h)
+                        if probe:
+                            probe[-1].append((self.cur, h))
                         if stack and not inner[0]:
                             traces[stack[-1]]["calls"].append(["fresh", self.cur, h, lab])
                         return lab
@@ -135,6 +167,11 @@ def record(outdir, tag, gen, args, modules):
                                         note("direct graph write %s.%s (not through finite_rules)" % (cls.__name__, _n))
                                     return _m(self, *a, **k)
                                 setattr(cls, meth, gw)
+            for v in b.values():
+                for gr in (v, getattr(v, "g", None)):
+                    labs = getattr(gr, "labels", None)
+                    if isinstance(labs, set) and not isinstance(labs, RecSet):
+                        gr.labels = RecSet(labs)
             if stack:
                 note("calls another stage module install (%s)" % stem)
             if t["args"] is not None:
@@ -248,6 +285,11 @@ class Emitter:
         for c in t["calls"]:
             if c[0] == "fresh":
                 pending.append(c[1:])
+                continue
+            if c[0] == "label":
+                if any(set(x) & set(",\t\n") for x in c[1]):
+                    raise Refuse("label name not expressible")
+                out.append(("label", ",".join(c[1]), "-", (), (), "{}", "null"))
                 continue
             _, name, d, r = c
             if "__opaque__" in json.dumps(d) or "__set__" in json.dumps(d):

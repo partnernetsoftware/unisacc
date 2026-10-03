@@ -714,8 +714,9 @@ def build(locations=False, warnings=False, errors=False):
                          after_dims=P("DC.a").fresh("r"), frame_test=P("MAXF").fresh("b"))
     for section in ("entry-warnings" if warnings else "entry", "body"):
         install_rules(g, os.path.dirname(__file__), "declaration", bindings=decl_bindings, section=section)
-    from vla import install as vla_install
-    vla_install(E,P,VLSIZE,VLFRAME,VLDEP,END_,bad,UNS)
+    import assemble   # K2 trace translation: vla-manifest.tsv
+    from types import SimpleNamespace
+    assemble.run(Path(__file__).resolve().parent / 'vla-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(DEP=VLDEP, ENUM=END_, FRAME=VLFRAME, SIZE=VLSIZE, UNS=UNS))
     # statements
     structured_control("dispatch", warnings)
     structured_control("block", warnings)
