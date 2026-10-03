@@ -119,6 +119,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   ladder+dispatch templates, startup-run, _namespace_control, ordinary_control; then single manifest;
   exec/parse/gen.py; librarymodule after lm_nomain_msg lands (block-3 branch).
 
+- Round 9 (2026-10-03): rounds 4-8 branch merged onto origin/main f09e59ea (clean, c28480fa); facts --check 0 differ,
+  parse2 graphhash 5/5 shards 0 bad, gates finite-template/decision-ledger/exec-r21-e3/exec-e3self/
+  exec-parse2-libimports/exec-chain-1..3 green. Next: optail (gen2.py:138) -- sequences come from load_rules over
+  operator-actions.tsv per op + E.optext/FPU float text: move per-op values (offset, modes, optext, float opcode text)
+  to facts k2-gen2 via export.py, then foreach over ops with `call control` rows.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
