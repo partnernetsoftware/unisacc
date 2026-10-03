@@ -366,8 +366,49 @@ def ppautoinc():
             "=headers\tjson\t" + json.dumps(HD), "=emits\tjson\t" + json.dumps(EM)]
 
 
+def ppgen():
+    """E2 delta facts (was exec/pp/gen.py build/build_xe): START init actions (directive ids from
+    weights/gold/pp.tsv, pp-init spellings, XE precedences), per-target predefine chains, the DSW
+    directive switch, directive-action instances (gold pp.tsv answers), simple escapes, PREC_* layout."""
+    import json
+    E = _module("exec/pp/gen.py", "exec_pp_gen_facts2")
+    from exec.facts.load import facts
+    init = []
+    for k, w in enumerate(E.DIRV):
+        init += E.sbconst(w) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", E.DIRB), ("LDI", "v", k + 1), ("STX", "a", 0, "v")]
+    for r in facts("pp-init"):
+        if r["kind"] == "dir":
+            init += E.sbconst(r["word"]) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", E.DIRB), ("LDI", "v", r["arg"]), ("STX", "a", 0, "v")]
+        else:
+            init += E.sbconst(r["word"]) + [("SBINTERN", r["arg"])]
+    init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + E.xe_init()
+    predef = {}
+    for t in E.TARGETS:
+        o, a = t.split("/")
+        names = E.PREDEF["os", o] + E.PREDEF["arch", a] + E.PREDEF["common", "*"]
+        assert len(set(names)) == len(names), "overlapping target predefinitions: " + t
+        predef[t] = [dict(entry="P3PD%d" % k, resume="P3PDR%d" % k, next="P3PD%d" % (k + 1) if k + 1 < len(names) else "OOBJ.start",
+                          name=E.sbconst(nm)) for k, nm in enumerate(names)]
+    cases = [dict(key=0, target="P3BLANK", acts=[["JUMP", "LS"]]), dict(key=100, target="PRAG", acts=[["RLD", "LIVE"]]),
+             dict(key=101, target="LDIR", acts=[["RLD", "LIVE"]]), dict(key=102, target="D_ERROR", acts=[["RLD", "LIVE"]])]
+    cases += [dict(key=k + 1, target="D_" + w, acts=[]) for k, w in enumerate(E.DIRV)]
+    for c in cases:
+        c["acts"] = json.dumps(c["acts"])   # spliced verbatim into the dsw template's JSON actions
+    acts = [dict(name="D_%s_a%d" % (w, fl), section=w + "/" + E.PPT[(w, fl)]) for w in E.DIRV for fl in (0, 1)]
+    from unisa.front.lex import ESC
+    esc = [{"code": ord(ch), "value": ord(v)} for ch, v in ESC.items() if ch not in "01234567x"]
+    prec = {"PREC_" + str(c): p for c, (_, p, _) in E.XOPS.items()}
+    prec["XOB_PREV"] = E.XOB - 1
+    return ["=init\tjson\t" + json.dumps(init), "=predef\tjson\t" + json.dumps(predef),
+            "=cases\tjson\t" + json.dumps(cases), "=dswkeys\tjson\t" + json.dumps(sorted(c["key"] for c in cases)), "=dactions\tjson\t" + json.dumps(acts),
+            "=esc\tjson\t" + json.dumps(esc), "=esckeys\tjson\t" + json.dumps([e["code"] for e in esc]),
+            "=xelayout\tjson\t" + json.dumps(prec), "=objname\tjson\t" + json.dumps(E.sbconst("__UNISA_OBJECT")),
+            "=location_line\tjson\t" + json.dumps([["ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1]])]
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
+    ("pp-gen", ["exec/pp/gen.py", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/pp/gen.py", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
     ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),

@@ -455,7 +455,7 @@ def _fmt(f, facts):
 
 
 def _foreach(self, o, body, depth, extra, facts):
-    rows = _path(facts, o["over"])
+    rows = _path(facts, _fmt(o["over"], facts) if "{" in o["over"] else o["over"])
     for col, allowed in o.get("where", {}).items():
         allowed = [_fmt(_section(a, self.flags), facts) for a in allowed]
         rows = [r for r in rows if r[col] in allowed]

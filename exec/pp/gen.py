@@ -56,8 +56,6 @@ sys.path.insert(0, ROOT)
 from unisa.tsvgold import load_table
 from pathlib import Path
 sys.path.insert(0, os.path.join(ROOT, "exec"))
-from finite_rules import install as install_rules
-from finite_rules import install_template
 from exec.facts.load import facts
 
 # layout constants, byte classes, targets, reserved spellings: exec/facts/pp-*.tsv
@@ -124,12 +122,6 @@ AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta w
 # the autoinc status compare is untouched; W[NEEDB + b] = 1 marks carried body b.
 
 
-def build_autoinc(g, locations=False):
-    """P2 autoinc + -ftrim-libc: exec/pp/autoinc-manifest.tsv over facts/pp-autoinc-gen."""
-    import assemble
-    from types import SimpleNamespace
-    assemble.run(Path(HERE) / "autoinc-manifest.tsv", SimpleNamespace(g=g), None, {})
-
 
 AL, DI = _BYTES["alpha"], _BYTES["digit"]
 ID = AL | DI
@@ -177,19 +169,6 @@ def xe_init():
     return a
 
 
-def build_xe(g):
-    layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'XUB']}
-    layout["XOB_PREV"] = XOB - 1
-    layout.update(("PREC_" + str(c), p) for c, (_, p, _) in XOPS.items())
-    from unisa.front.lex import ESC
-    simple = [{"code": ord(ch), "value": ord(value)} for ch, value in ESC.items() if ch not in '01234567x']
-    install_template(g, HERE, "escape", {"esc": simple}, None, section="escape", mode="b",
-                     domain=[e["code"] for e in simple])   # the rest of XCESC is literal-byte.tsv
-    install_rules(g, HERE, "literal", layout)
-    install_rules(g, HERE, "expression", layout)
-    install_rules(g, HERE, "reduce", layout)
-
-
 # ---- # and ## (docs/exec/e2-pp-delta.md s12) -------------------------------
 # HSCAN (at #define): F_HASH := 1 when the body has `#` outside literals.
 # HX (at expansion, `me` = the macro, arguments in ARGB): the body is
@@ -206,20 +185,6 @@ def build_xe(g):
 # (the reference re-tokenises concatenated spellings).
 # Vars: GLUE (1 ordinary paste, 2 comma/variadic special case), PSP (space
 # owed), LASTK (1 identifier/digit, 2 placemarker, 3 hash, 4 comma, 0 other).
-def build_hx(g):
-    install_rules(g, HERE, "hash", {name: globals()[name] for name in ['C_EXP', 'C_RAW', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_VAR']})
-
-
-
-def build_cli(g, locations=False):
-    layout = {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']}
-    # Without autoinc the ftrim-libc scan is absent; continue with forced includes.
-    layout['after_flags'] = "CLI.LN" if AUTOINC else "CLI.INC"
-    install_rules(g, HERE, "cli", layout,
-        {"location_line": [("ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1)]})   # every build: __LINE__ needs it (N17a)
-
-
-
 def target_predefines(target):
     """Ordered declaration bytes for the optional shared-target E2 variant."""
     target_os, target_arch = target.split("/")
@@ -244,84 +209,10 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
         raise ValueError("overlapping target predefinitions: " + target)
     g = G()
 
-    # ---- init: constant ids (built byte by byte, then interned) ---------
-    init = []
-    for k, w in enumerate(DIRV):
-        init += sbconst(w) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
-                              ("LDI", "v", k + 1), ("STX", "a", 0, "v")]
-    for r in facts("pp-init"):   # reserved spellings: #pragma/#line/#error ids, interned names
-        if r["kind"] == "dir":
-            init += sbconst(r["word"]) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
-                                          ("LDI", "v", r["arg"]), ("STX", "a", 0, "v")]
-        else:
-            init += sbconst(r["word"]) + [("SBINTERN", r["arg"])]
-    init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
-    g.els("START", "CLI.FLAGS", init)
-    build_cli(g, locations)
-
-    # Declared text normalisation; only layout and inter-stage links are bound here.
-    install_rules(g, HERE, "text", {"SPLB": SPLB, "after_comments": "AISTART" if AUTOINC else "P3START"})
-
-    # Macro history and definition rules; bindings describe record layout only.
-    macro_layout = {'NEWB': NEWB, 'FSZ': FSZ, 'MACB': MACB, 'F_TO': F_TO, 'SEGINF': SEGINF, 'F_FROM': F_FROM, 'F_PREV': F_PREV, 'F_NAME': F_NAME, 'F_BODY': F_BODY, 'F_FN': F_FN, 'F_VAR': F_VAR}
-    install_rules(g, HERE, "macro", macro_layout)
-    install_rules(g, HERE, "pragma", dict(macro_layout, F_NP=F_NP,
-                  PMHEAD=PMHEAD, PMSTACK=PMSTACK))
-
-    if AUTOINC:
-        build_autoinc(g, locations)
-
-    install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
-    install_rules(g, HERE, "object-predefine")
-    install_rules(g, HERE, "assembly", {"entry": "OOBJ.DEF", "resume": "OOBJ.RESUME",
-        "next": "CLI.U", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_OBJECT")}, section="predefine")
-    _IRNAME = {r["name"]: r["value"] for r in facts("pp-layout")}["IRNAME"]
-    install_rules(g, HERE, "linedir", {"LDRAW": LDRAW, "LDUSER": LDUSER, "LDNUM": LDNUM, "LDNM": LDNM, "IRNAME": _IRNAME, "F_FN": F_FN, "F_BODY": F_BODY, "FSZ": FSZ, "MACB": MACB})
-    if shared_predefines:
-        # One network per output format/autoinc mode; target data is supplied
-        # as resources. The legacy default remains byte-for-byte unchanged.
-        install_rules(g, HERE, "shared-predefine", {"F_BODY": F_BODY, "PD_SEEN": PD_SEEN})
-    else:
-        for k, nm in enumerate(predef):
-            nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "OOBJ.start"
-            install_rules(g, HERE, "assembly", {"entry": "P3PD%d" % k, "resume": "P3PDR%d" % k,
-                "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(nm)}, section="predefine")
-
-    cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")]), 101: ("LDIR", [("RLD", "LIVE")]),
-             102: ("D_ERROR", [("RLD", "LIVE")])}
-    cases.update((k + 1, ("D_" + w, [])) for k, w in enumerate(DIRV))
-    g.r("DSW", cases)
-    for w in DIRV:
-        st = "D_" + w
-        for fl in (0, 1):
-            name = st + "_a%d" % fl
-            links = {suffix or "entry": name + suffix for suffix in ("", "b", "c", "m", "n")}
-            links.update({key: globals()[key] for key in ['TAKEB', 'SEENB', 'F_TO', 'FSZ', 'MACB']})
-            install_rules(g, HERE, "directive-action", links, section=w + "/" + PPT[(w, fl)])
-
-    body_layout = {name: globals()[name] for name in ['F_BODY', 'F_FN', 'F_NP', 'F_P0', 'F_VAR', 'IRLN', 'IRNL', 'MAXP']}
-    # every include is recorded (name for the location envelope, resolved path for nested quoted
-    # includes, R13-0b #24): a quoted include inside a header is looked up beside that header,
-    # which the reference finds through its include-region table (front_pp.c hdr_find).
-    body_layout["include_body"] = "INC.body"
-    body_layout["IRPATH"] = IRPATH
-    install_rules(g, HERE, "directive-body", body_layout)
-    IRNAME = _IRNAME
-    install_rules(g, HERE, "include-location", {"IRNAME": IRNAME, "IRPATH": IRPATH})
-
-    install_rules(g, HERE, "rescan", dict({name: globals()[name] for name in ['LDRAW', 'LDUSER', 'LDNUM', 'LDNM', 'ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP', 'IRLN', 'IRNL', 'SPLB']}, IRNAME=IRNAME))   # IRLN/IRNL/SPLB/IRNAME: __LINE__/__FILE__ (N17a/b)
-    if locations:
-        import assemble   # diagnostic envelope: locations-manifest.tsv (K2 trace translation)
-        from types import SimpleNamespace
-        assemble.run(Path(HERE) / "locations-manifest.tsv", SimpleNamespace(g=g), None, {},
-                     dict(spl=SPLB, irln=IRLN, irnl=IRNL))
-    else:
-        install_rules(g, HERE, "assembly", section="accept")
-    build_xe(g)
-    build_hx(g)
-    import assemble   # E2 provenance envelope: sourcefacts-manifest.tsv (K2 trace translation)
+    import assemble   # exec/pp/body-manifest.tsv over facts/pp-gen (K2)
     from types import SimpleNamespace
-    assemble.run(Path(HERE) / "sourcefacts-manifest.tsv", SimpleNamespace(g=g), None, {})
+    assemble.run(Path(HERE) / "body-manifest.tsv", SimpleNamespace(g=g), None,
+                 dict(locations=locations, shared=shared_predefines, autoinc=AUTOINC), dict(target=target))
     g.finish()
     return g
 
