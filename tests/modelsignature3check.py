@@ -141,8 +141,8 @@ def main():
   import assemble
   assemble.run(assemble.FACTS.parent/'modelsignature-manifest.tsv',E,E.P,{},dict(fail='DEAD'));E.P('START').a(('SBCLR',),*[('SBOUT',c) for c in b'left'],('SBFIND','ms_blob'),('BLEN','ms_len','ms_blob')).call('MS.canonical').a(('INPUSH','ms_canon'),('LDI','ms_zero',0),('SPAN2','ms_zero','ms_canonlen'),('INPOP',)).goto('DONE')
  else:
-  from modelgraphequality import install
-  install(E);p=E.P('START')
+  import assemble
+  assemble.run(assemble.FACTS.parent/'modelgraphequality-manifest.tsv',E,E.P,{},dict(fail='DEAD'));p=E.P('START')
   for key,reg in ((b'left','mg_left_blob'),(b'right','mg_right_blob')):p.a(('SBCLR',),*[('SBOUT',c) for c in key],('SBFIND',reg),('BLEN',reg.replace('blob','len'),reg))
   p.call('MG.equal').a(('OUTW','mg_equal')).goto('DONE')
  E.P('DONE').a(('ACCEPT',)).goto('DONE');E.g.finish();d={'start':'START','states':{n:[m,{str(k):v for k,v in r.items()}] for n,(m,r) in E.g.st.items()},'seqs':[list(map(list,s)) for s in E.g.seqs]};loaded=load(d)

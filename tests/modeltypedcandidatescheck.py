@@ -4,7 +4,8 @@ import importlib.util,json,pathlib,struct,sys,tempfile,subprocess
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT)]
 spec=importlib.util.spec_from_file_location('candidatesbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
-from modelcandidates import install
+import assemble
+install=lambda E,fail='DEAD':assemble.run(assemble.FACTS.parent/'modelcandidates-manifest.tsv',E,E.P,{},dict(fail=fail))  # modelcandidates-manifest.tsv
 from exec.pp.sim import run,load
 U=lambda n:struct.pack('<Q',n)
 def rec(origin=0,ordinal=0,address=4096,name=b'host',supported=1,desc=(0,0,0,1,8,0),kind=0):

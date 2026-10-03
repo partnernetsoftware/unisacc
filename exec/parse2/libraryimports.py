@@ -21,8 +21,8 @@ def install(E,P,b,start,integers):
     from finite_rules import install as rules
     import unresolved,librarycallables,libraryexports
     g=E.g;root=Path(__file__).parent
-    from modelgraphequality import install as install_graph_equality
-    install_graph_equality(E)
+    import assemble
+    assemble.run(assemble.FACTS.parent/'modelgraphequality-manifest.tsv',E,E.P,{},dict(fail='DEAD'))
     rules(g,root,'libraryimports',section='read')
     bindings=dict(start=start,STRIDE=STRIDE,PRINTDIGITS=186 << 40,TK_ID=E.TK_ID,TK_SEMI=E.TK[';'],
                   FPS_FIRST=b['FPS_FIRST'],SBB=b['SBB'])
@@ -52,8 +52,7 @@ def install(E,P,b,start,integers):
     def hook(name,original):
         install_template(g,root,'libraryimports',{'hook':[{'name':name,'original':original}]},None,section='hook')
     section('head')
-    from modelcandidates import install as install_candidates
-    install_candidates(E)
+    assemble.run(assemble.FACTS.parent/'modelcandidates-manifest.tsv',E,E.P,{},dict(fail='DEAD'))
     section('parse')
     # A parsed typed native prototype is a real callable declaration; a forward
     # prototype needs the same stacked calling mode as its later definition.

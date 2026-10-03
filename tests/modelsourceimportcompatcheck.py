@@ -112,8 +112,8 @@ def fixtures():
 def main():
  runtime=sys.argv[1]
  spec=importlib.util.spec_from_file_location('compatmodel',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
- from modelgraphequality import install
- install(E);p=E.P('START')
+ import assemble
+ assemble.run(assemble.FACTS.parent/'modelgraphequality-manifest.tsv',E,E.P,{},dict(fail='DEAD'));p=E.P('START')
  for key,reg in ((b'left','mg_left_blob'),(b'right','mg_right_blob')):p.a(('SBCLR',),*[('SBOUT',c) for c in key],('SBFIND',reg),('BLEN',reg.replace('blob','len'),reg))
  # Every fixture executes both entry points repeatedly in one model invocation.
  # An equality call following compatibility must reset its mode every time.

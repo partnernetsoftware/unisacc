@@ -478,11 +478,15 @@ def _bindings(self, o, bind, facts):
     if isinstance(o.get("bindmap"), str):
         out.update(_path(facts, self.interp(o["bindmap"])))
     if isinstance(o.get("freshrows"), str):
-        lines = (self.root / o["freshrows"]).read_text().splitlines()
+        file, _, part = o["freshrows"].partition("@")   # FILE@PART keeps rows whose part/section column is PART
+        lines = (self.root / file).read_text().splitlines()
         col = {c: i for i, c in enumerate(lines[0].lstrip("# ").split("\t"))}
         ko, kk = col.get("owner", col.get("prefix")), col.get("key", col.get("name"))
+        kp = col.get("part", col.get("section"))
         for ln in lines[1:]:
             f = ln.split("\t")
+            if part and f[kp] != part:
+                continue
             out[f[kk]] = self.E.P.fresh(self.holder(f[ko]), f[col["kind"]])
     for spec in ([] if isinstance(o.get("freshrows"), str) else o.get("freshrows", [])):
         for i, r in enumerate(_path(facts, spec["over"])):

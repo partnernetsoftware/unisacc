@@ -40,8 +40,8 @@ def install(E):
         install_template(g,root,'modelbindings',tfacts,P('LBI.fresh').fresh,bindings,None,None,name)
     rules(g,root,'modelbindings',section='read')
     section('head')
-    from modelcandidates import install as install_candidates
-    install_candidates(E)
+    import assemble
+    assemble.run(assemble.FACTS.parent/'modelcandidates-manifest.tsv',E,E.P,{},dict(fail='DEAD'))
     section('present')
     template('present')
     section('header')

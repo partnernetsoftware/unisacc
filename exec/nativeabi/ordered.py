@@ -5,9 +5,10 @@ bitfield policies agree. BANK, modifiers and incomplete facts reject.
 """
 import json,pathlib
 from finite_rules import install as install_rules,install_template
-from modelgraphequality import EXTRA,ENTRYEXTRA,EDGES,LAYOUT
 # Additional values saved by NL's existing isolated recursive frame.
 from facts.load import facts
+_G={r['name']:r['value'] for r in facts('top-modelgraphequality-banks')}  # exec/facts/top-modelgraphequality-banks.tsv
+EXTRA,ENTRYEXTRA,EDGES,LAYOUT=_G['EXTRA'],_G['ENTRYEXTRA'],_G['EDGES'],_G['LAYOUT']
 REGS=tuple(facts('nativeabi-ordered-regs'))
 # ol_packed is deliberately NOT frame-saved: one packed node anywhere marks the whole object.
 def install(E,field,word,constword,blob,extents,alignments):

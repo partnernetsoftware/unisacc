@@ -8,9 +8,12 @@ separate: this stage proves its finite rule, not six-platform native execution.
 import csv,importlib.util,json,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT)]
-from modelgraphequality import install as graph_install,FIELDS,EDGES,LAYOUT
+import assemble
 from finite_rules import install as install_rules,install_template
 from facts.load import facts
+_G={r['name']:r['value'] for r in facts('top-modelgraphequality-banks')}  # exec/facts/top-modelgraphequality-banks.tsv
+FIELDS,EDGES,LAYOUT=_G['FIELDS'],_G['EDGES'],_G['LAYOUT']
+graph_install=lambda E:assemble.run(assemble.FACTS.parent/'modelgraphequality-manifest.tsv',E,E.P,{},dict(fail='DEAD'))
 from ordered import install as ordered_install,REGS as ORDERED_REGS
 _K={r['name']:r['value'] for r in facts('nativeabi-gen-regions')}
 SIGWIRE,SIGMARK,FRAME=_K['SIGWIRE'],_K['SIGMARK'],_K['FRAME']
