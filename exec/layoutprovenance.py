@@ -32,7 +32,8 @@ def _rules(E, P, section, bindings=None):
 
 
 def parser(E, P, start):
-    from modelinput import u64
+    import assemble
+    u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
     u64(E,'SF3.resource',RESOURCE,'sf3_flag','sf3_present','SF3.fail')
     _rules(E,P,'parser',dict(start=start))
     return 'SF3.start'
@@ -47,7 +48,8 @@ def units(E, P, locations=False):
     Kept in Python: the u64 resource helper and accept_gates (one gate per
     ACCEPT transition already installed, a fact-dependent state set).
     """
-    from modelinput import u64
+    import assemble
+    u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
     u64(E,'SFU.resource',RESOURCE,'sfu_flag','sfu_present','SFU.fail')
     _rules(E,P,'located' if locations else 'plain')
     return accept_gates(E,P,'SFU.accept')

@@ -20,7 +20,8 @@ def install(E,P,b,start):
  # resource reader u64, the bank-collision assert, and each hook's rename of the hooked
  # state to LF.original.* plus aliasing it to LF.entry.* (existing actions/observations
  # run after fact capture unchanged).
- from modelinput import u64
+ import assemble
+ u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
  from pathlib import Path
  from finite_rules import install as rules, install_template
  g=E.g;root=Path(__file__).parent

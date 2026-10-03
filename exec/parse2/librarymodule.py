@@ -3,7 +3,8 @@ Missing/zero preserves program output. __init is generated, zero-argument,
 soft-stack ABI, called once per mapping by the host's declared adapter.
 """
 from pathlib import Path
-from modelinput import u64
+import assemble
+u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
 import json
 from finite_rules import install as rules, install_template
 
