@@ -18,13 +18,13 @@ def init(p):
 def install(E,word):
     from pathlib import Path
     from finite_rules import install as install_rules
-    from memorylayout import install as memory_layout
+    import assemble
     bindings = dict(BINDINGS)
     sequences = {"word": word(E.P("word.binding")).acts}
     names = Path(__file__).with_name("armlayout-names.tsv").read_text().splitlines()
     for section in ("headers", "address"):
         if section == "address":
-            memory_layout(E, "FAIL", "length")
+            assemble.run(Path(__file__).with_name("memorylayout-manifest.tsv"), E, E.P, {}, {"fail": "FAIL", "code_size": "length"})
         for line in names:
             if not line.startswith("#"):
                 selected, name, prefix, kind = line.split("\t")

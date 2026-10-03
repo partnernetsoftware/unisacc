@@ -12,7 +12,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
     import json
     from pathlib import Path
     from finite_rules import install as install_rules
-    from memorylayout import install as memory_layout
+    import assemble
     root = Path(__file__).parent
     sequences = {name: [tuple(a) for a in json.loads(actions)] for name, actions in
                  (line.split('\t') for line in (root/'address-sequences.tsv').read_text().splitlines() if not line.startswith('#'))}
@@ -25,7 +25,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
         layouts.setdefault(r['tag'], {})[r['name']] = r['value']
     for phase in ('pre', 'post'):
         if phase == 'post':
-            memory_layout(E, 'DEAD.addr')
+            assemble.run(root/'memorylayout-manifest.tsv', E, E.P, {}, {'fail': 'DEAD.addr', 'code_size': 'endo'})
             install_rules(E.g, root, 'address', section='lnx-dynamic')
         for line in (root/'address-instances.tsv').read_text().splitlines():
             if line.startswith('#'): continue
