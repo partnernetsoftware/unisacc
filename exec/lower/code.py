@@ -233,8 +233,16 @@ def install(E, arch="x86_64", os_="lnx"):
             dict(labels, entry='SC.'+op+'.gate', WIN_HSTD=WIN_HSTD,
                  WIN_WRITTEN=WIN_WRITTEN, WIN_SAVE=WIN_SAVE, zero=0, eight=8),
             {name: E.O(value) for name,value in facts.items()})
-    from libraryexit import install as install_libraryexit
-    install_libraryexit(E, os_, regmap, SYSA)
+    from unisa.emit_x86 import SCR
+    from unisa.emit_arm import IP0
+    import assemble
+    scratch='x'+str(IP0) if regmap['r0'].startswith('x') else SCR
+    assert scratch not in regmap.values(), 'library zero scratch aliases tape register'
+    assemble.run(Path(__file__).parent/'libraryexit-manifest.tsv', E, P, dict(hosted=os_ in ('osx','lnx','win')),
+                 dict(SYSA=SYSA, fn=E.O('setreg '+regmap['r1']+', imm '), argv=E.O('setreg '+regmap['r0']+', addr '),
+                      zero=E.O(', '+scratch+'\n'), zeroinit=E.O('setreg '+scratch+', imm 0\n'), store=E.O('setmem '),
+                      call=E.O('hostcall '+regmap['r1']+', '+regmap['r0']+'\n'),
+                      retname=[('SBOUT',b) for b in regmap['r0'].encode()]))
     from librarymodule import install as install_librarymodule
     install_librarymodule(E, regmap)
     from libraryimports import install as install_libraryimports
