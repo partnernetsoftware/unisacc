@@ -11,7 +11,7 @@ Braced character-array strings use C string initialization, correcting the old r
 
 import json
 from pathlib import Path
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules, install_template
 
 
 def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS, bitfields):
@@ -41,5 +41,5 @@ def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT,
     sequences.update((name, E.rej(message)) for name, message in rows("reject"))
     classes = {name: [E.TK_STR if token == "string" else E.TK_ID if token == "identifier" else E.TK[token]] for name, token in rows("tokens")}
     # Compose the existing aggregate counter behind the declared string lookahead.
-    E.g.st["INITCOUNT.aggregate"] = E.g.st.pop("INITCOUNT")
+    install_template(E.g, root, "initializers", {}, None, section="hook")
     install_rules(E.g, root, "initializers", bindings=bindings, sequences=sequences, classes=classes, section="main")
