@@ -350,22 +350,23 @@ def build(locations=False, warnings=False, errors=False):
     segment("offsetof")
     start = "START"
     if locations:
-        from tokenlocations import install as location_install
-        start = location_install(E, P, TIX, "ER.token" if errors else "WU.token" if warnings else None)
-        import assemble, tokenlocations as _tl
+        _tl = assemble.load_facts('tokenlocations')['tokenlocations!']   # exec/facts/tokenlocations.tsv
+        _rec = "ER.token" if errors else "WU.token" if warnings else None
+        start = assemble.run(Path(__file__).parent / 'tokenlocations-manifest.tsv', E, P,   # K2: tokenlocations
+                             dict(multi=True, record=bool(_rec), ordinal=True),
+                             dict(ready="START", token_record=_rec or "RET", ordinal_table=TIX))['start']
         assemble.run(Path(__file__).parent / 'diagnostics-manifest.tsv', E, P, {},
-                     {k: getattr(_tl, k) for k in ('SPLICES', 'INCLUDE_LINE', 'INCLUDE_LINES', 'INCLUDE_NAME')})
+                     {k: _tl[k] for k in ('SPLICES', 'INCLUDE_LINE', 'INCLUDE_LINES', 'INCLUDE_NAME')})
     if warnings:
         assert locations
         _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
         assemble.run(Path(__file__).parent / 'returnwarnings-manifest.tsv', E, P, _flags, dict(_tokens, SBB=SBB))
         assemble.run(Path(__file__).parent / "intwarnings-manifest.tsv", E, P, {},
-                     dict(TOKEN_POS=_tl.TOKEN_POS, DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
+                     dict(TOKEN_POS=_tl['TOKEN_POS'], DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
         assemble.run(Path(__file__).parent / 'unusedwarnings-manifest.tsv', E, P, _flags,
                      dict(_tokens, TIX=TIX, UNDO_SIZE=UNDO_SIZE))
-        import tokenlocations as _tl
         assemble.run(Path(__file__).parent / 'formatwarnings-manifest.tsv', E, P, {},
-                     dict(TOKEN_POS=_tl.TOKEN_POS, NAME_TOKEN=assemble.load_facts('unusedwarnings')['NAME_TOKEN'],
+                     dict(TOKEN_POS=_tl['TOKEN_POS'], NAME_TOKEN=assemble.load_facts('unusedwarnings')['NAME_TOKEN'],
                           DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
     if errors:
         _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors

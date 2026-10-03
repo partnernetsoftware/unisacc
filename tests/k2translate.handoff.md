@@ -492,3 +492,13 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
   Not rerun: libraryimportscheck.py itself, gate closures that may list libraryexports.py/librarycallables.py.
   Next: (3) tokenlocations, (4) unitlocations (keep acc_state/acc_acts).
+- Round 37 (tokenlocations wired): gen2.py, unitlocations.py and diagnosticcheck.py run tokenlocations-manifest.tsv
+  directly (flags multi/record/ordinal; env ready/token_record/ordinal_table); the reader targets
+  (version2_target/multi_context/multi_prefix/read_entry/read_target) moved into flag-guarded `let` rows of the manifest,
+  and `!multi` lets give state0-3/14/18/19 placeholder DL.bad (unitlocations multi=False failed KeyError state0 without
+  them; cdx had only verified multi=True). Module constants SPLICES/INCLUDE_*/TOKEN_POS are read from facts
+  tokenlocations (assemble.load_facts) in gen2/diagnosticcheck/locationcheck. tokenlocations.py deleted.
+  export.py rerun (k2-gen2/k2-strings header hashes), facts committed.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Not run: diagnosticcheck.py / locationcheck.py themselves. Next: (4) unitlocations (keep acc_state/acc_acts).

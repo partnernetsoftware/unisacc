@@ -21,7 +21,10 @@ with tempfile.TemporaryDirectory(prefix='parse-locations-') as td:
         call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])
     # Test-only model continuation reads every retained map field back out.
     # It replaces the grammar entry, not the location decoder being tested.
-    from tokenlocations import SPLICES, INCLUDE_LINE, INCLUDE_LINES, INCLUDE_NAME
+    sys.path[:0]=[str(pathlib.Path(__file__).resolve().parents[1]),str(pathlib.Path(__file__).resolve().parents[1]/'facts')]
+    import assemble
+    SPLICES, INCLUDE_LINE, INCLUDE_LINES, INCLUDE_NAME = (assemble.load_facts('tokenlocations')['tokenlocations!'][k]
+        for k in ('SPLICES', 'INCLUDE_LINE', 'INCLUDE_LINES', 'INCLUDE_NAME'))   # exec/facts/tokenlocations.tsv
     probe=json.loads((t/'parse.json').read_text())
     def state(name,nxt,acts):
         ix=len(probe['seqs']);probe['seqs'].append(acts)

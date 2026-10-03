@@ -15,8 +15,9 @@ def rows(name):
 
 
 def install(E,P):
-    from tokenlocations import install as locations
-    locations(E,P,ready='LS.ready',multi=False)
+    import assemble
+    assemble.run(Path(__file__).parent / 'tokenlocations-manifest.tsv', E, P, dict(multi=False, record=False, ordinal=False),
+                 dict(ready='LS.ready', token_record='RET', ordinal_table=0))   # K2: tokenlocations
     install_template(E.g, Path(__file__).parent, "unitlocations", {}, None)
     bindings = dict(MAPS=MAPS)
     for prefix, kind, key in rows("fresh"):
