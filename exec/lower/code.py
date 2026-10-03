@@ -86,16 +86,16 @@ def install(E, arch="x86_64", os_="lnx"):
     # Materialise its target in an ISA-reserved scratch, then reuse callr.
     scratch = 'x16' if arch == 'arm64' else 'r11'
     assert scratch not in set(regmap.values()), 'callm scratch aliases tape register'
-    g.st['CM.original'] = g.st.pop('C.dispatch.base')
-    g.labels.add('CM.original')
-    P('C.dispatch.base').a(('CMP','op',ids['callm'])).branch({1:'CM.emit'},'CM.original')
-    (P('CM.emit').o('load64 '+scratch+', ').a(('COPYW','tok','a0')).call('PRINT')
-     .o(', ').a(('COPYW','tok','a1')).call('PRINT')
-     .o(' form='+enc['load64']+'\ncallr '+scratch+' form='+enc['callr']+'\n')
-     .goto('C.advance'))
+    from finite_rules import install_template
+    install_template(g, Path(__file__).parent, 'code', {}, None, section='callm')
+    callm = {'id:callm': ids['callm'], 'callm_test': P('C.dispatch.base').fresh('b'),
+             'callm_r0': P('CM.emit').fresh('r'), 'callm_r1': P('CM.emit').fresh('r')}
+    install_rules(g, Path(__file__).parent, 'code-entry', bindings=callm, section='callm',
+                  sequences=dict(callm_load=E.O('load64 '+scratch+', '), comma=E.O(', '),
+                                 callm_tail=E.O(' form='+enc['load64']+'\ncallr '+scratch+' form='+enc['callr']+'\n')))
     hostbindings={'id:'+name:value for name,value in ids.items()}
     if os_=='win':
-        P('CH.rejectwin').a(E.rej('not covered: Windows .hostcall/.hostaddr forwarding')).goto('DEAD')
+        install_rules(g,Path(__file__).parent,'code-host',section='rejectwin')
     hostbindings.update(test0=P('CH').fresh('b'),test1=P('CH').fresh('b'),
                         call='CH.call' if os_ in ('osx','lnx') else 'CH.rejectwin',
                         addr='CH.addr' if os_ in ('osx','lnx') else 'CH.rejectwin')
