@@ -131,10 +131,6 @@ def optail_facts(o):
                 cmpl=one(compare), invl=one(invert), fl=one(floats), nf=one(not floats), floats=floats)
 
 
-def tytail():
-    segment("tytail")   # gen2-manifest rows over facts k2-gen2 ckmrows/resdrows
-
-
 def strwalk(pre, body, done):
     import assemble
     assemble.run(Path(__file__).resolve().parent / 'strwalk-manifest.tsv', E, P, {}, dict(pre=pre, body=body, done=done))
@@ -316,16 +312,10 @@ def build(locations=False, warnings=False, errors=False):
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
     import assemble
-    segment("startup-marker")   # + call strings-token-span, strings-initializer (gen2-manifest)
-    segment("numeric")
-    segment("types")
-    segment("typing")
+    segment("early")   # startup-marker, numeric, types, typing (gen2-manifest block)
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
-    segment("statics-init")   # + call strwalk IC.string (gen2-manifest)
-    segment("staticauto")
-    # ---- declared data 3: the grammar, compiled to procedures ---------------------------
-    segment("startup-guard")   # POSSPAN from facts k2-gen2
+    segment("statics")   # statics-init, staticauto, startup-guard (gen2-manifest block)
     env = segment("startup-run")   # startup data from facts k2-gen2 (tyrows, syscalls, autonames)
     E.__dict__.setdefault("results", {}).update(lm_hstate=env["lm_hstate"], lm_hnext=env["lm_hnext"], lm_header=O(E.HEADER), lm_errors=errors)
     global_control("global0", warnings)

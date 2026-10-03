@@ -404,3 +404,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   ladder-E-reject, ladder-C, ladder-C-reject). types()/ladder() deleted (tytail() def now unused). sha SAME x3.
   Next: merge segments: replace the remaining gen2.py segment()/glue sequence by one top block, using the same
   recursive-call pattern; then (c)+(d) together.
+  Segment merge started: block `early` (startup-marker, numeric, types rows inlined, typing) and block `statics`
+  (statics-init, staticauto, startup-guard); the types block was flattened into `early` (no seg_types gate left).
+  RULES for the recursive `call gen2` pattern (coordinator): recursion depth at most 1 (a block row calls gen2 only
+  with a plain segment gate, never another block gate); every exit zeroes the caller's gate (bind seg_BLOCK=zero,
+  seg_X=one on each recursive row) because call inherits the parent env. Blocks now: early, statics, ladders.
+  tytail() def removed. sha SAME default/--errors/--warnings --errors.
