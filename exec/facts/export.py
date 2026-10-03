@@ -453,13 +453,13 @@ def _fieldchain():
     names that precede it); `tail` is the lead after the last field."""
     class C:
         def __init__(self):
-            self.rows, self.lead = [], []
+            self.fields, self.lead = [], []
         def lit(self, bs):
             self.lead += ["byte%d" % b for b in bs]
         def comp(self, name):
             self.lead.append(name)
         def field(self, w, v, endian="little"):
-            self.rows.append(dict(width=w, value=v, src="const" if isinstance(v, int) else "reg",
+            self.fields.append(dict(width=w, value=v, src="const" if isinstance(v, int) else "reg",
                                   endian=endian, lead=self.lead))
             self.lead = []
     return C()
@@ -510,8 +510,8 @@ def pefields():
             if fs is None: c.comp("reloc-align"); fs = "pe_rsize"
             c.lit(name.ljust(8, b"\0"))
             for w, v in [(4, vs), (4, rva), (4, fs), (4, fo), (4, 0), (4, 0), (2, 0), (2, 0), (4, flags)]: c.field(w, v)
-        out += _rows("header_" + arch, c.rows) + _rows("header_tail_" + arch, [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
-        used |= {x for r in c.rows + [dict(lead=c.lead)] for x in r["lead"]}
+        out += _rows("header_" + arch, c.fields) + _rows("header_tail_" + arch, [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+        used |= {x for r in c.fields + [dict(lead=c.lead)] for x in r["lead"]}
     c = _fieldchain()
     c.comp("import-values")
     for w, v in [(4, "pe_int"), (4, 0), (4, 0), (4, "pe_dll"), (4, "pe_iat")]: c.field(w, v)
@@ -523,8 +523,8 @@ def pefields():
     for offset, raw in names: c.lit(raw)
     c.lit(pe.DLL + b"\0" + bytes(cfg - (dlloff + len(pe.DLL) + 1)))
     c.field(4, pe.LOADCFG); c.lit(bytes(pe.COOKIE_FIELD - 4)); c.field(8, "pe_cookie"); c.lit(bytes(pe.LOADCFG - pe.COOKIE_FIELD - 8))
-    out += _rows("imports", c.rows) + _rows("imports_tail", [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
-    used |= {x for r in c.rows + [dict(lead=c.lead)] for x in r["lead"]}
+    out += _rows("imports", c.fields) + _rows("imports_tail", [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+    used |= {x for r in c.fields + [dict(lead=c.lead)] for x in r["lead"]}
     out += ["@bytes\tv:int"] + ["\t%d" % int(x[4:]) for x in sorted(used) if x.startswith("byte")]
     out += ["@names\toffset:int"] + ["\t%d" % o for o, _ in names]
     return out

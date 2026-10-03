@@ -63,4 +63,14 @@
   loop cannot concatenate a variable number of items into one action list; one rule per item changes the graph
   (graphhash red). Needs either (a) a generic assemble opt: mapseq part with a formatted key per element
   (e.g. "lead_{i}" over a field list, acts built from the item's hex bytes and from named result-tsv sections), with the
-  template splicing ["@","lead_{f.i}"]; or (b) accepting extra states (graph changes, new hashes). Decision needed.
+  template splicing ["@","lead_{f.i}"]; or (b) accepting extra states (graph changes, new hashes). Decision: (a).
+
+## Round 5: P4 rework done for pedelta (f2a54b75)
+- facts exec/facts/enc-pe.tsv written by exec/facts/export.py `pefields` (from unisa.image.pe): constants, tables
+  header_<arch>/imports (i, width, src const|reg, value, endian, lead = item names byteN / entry-value / name-valueN),
+  *_tail, bytes, names. No labels or action lists in facts.
+- exec/assemble.py block "enc field chains": mapseq key with {col} + {"over", "parts": [{"splice": COL} | {"where", "acts"}]}.
+- machodelta plan: same; writer MB.{endian}; copy section rows move into the template with $labelN -> {fresh:lN:k},
+  allocation order forced by `fresh {fresh:lN:k} -` rows (owner MH); p.call('MH.pad', ret=label5) -> rule to MH.pad
+  pushing {fresh:l5:r}; signature chain starts at {fresh:l6:r} (big-endian); signature-length becomes a mapseq computation.
+- editing exec/facts/export.py changes the input sha of every table: rerun `python3 exec/facts/export.py`.
