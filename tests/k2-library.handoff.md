@@ -83,3 +83,14 @@ graphhash --only exec/parse2, delete the three .py if identical.
 - valueranks.py still present on origin/main at 18:04; librarycallables imports LCSITERANK from it -> switch to
   assemble.load_facts('valueranks') when converting librarycallables.
 - NEXT: libraryimports, librarycallables, librarymodule, libraryexports, layoutfacts; global_address submanifest.
+
+## Round 6 (18:04-18:18)
+- DONE: libraryimports.py deleted -> libraryimports-manifest.tsv (hand-written; calls ../modelgraphequality,
+  ../modelcandidates, librarydata; fresh owner prefix via P:<owner>.fresh.<key>; constants from facts in callers).
+  New generic assemble opt `outseq` (O:TEXT sequence names in the stem's tables -> OUT bytes); libraryvariadic could
+  drop its @out:= cells and use it. parse2 graphhash 10/10, 5 gates green (lib-callable-model needed a rerun: 142 under load).
+- librarydata.py: install removed (dead); only global_address left -> next: librarydata-address submanifest, gen2 addr calls it.
+- The translator cannot record a module whose install runs nested manifests (they flatten); hand-write those.
+- NUL u64 key escape (json-typed fact "\u0000library/...") not done yet.
+- NEXT: global_address, librarycallables (FS.CALLTYPE live read), librarymodule (heavy live-graph reads: header split,
+  END.ok/END.x2 scans -> needs producers to export names; outside block 2 files), libraryexports, layoutfacts.
