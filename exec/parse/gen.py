@@ -108,32 +108,24 @@ def rej(k):
 # ---- the token reader: a byte trie over the dump's lines -------------------
 def tokenizer(qualifiers=("type=const", "type=volatile")):
     from pathlib import Path
-    from finite_rules import load as load_rules
+    from finite_rules import install_template
     spans = dict(line.split("\t") for line in Path(HERE, "token-prefixes.tsv").read_text().splitlines() if line and not line.startswith("#"))
-    def policy(section, state="NEXT", target="NX", token=TK_OTHER, domain=range(257), mode="b"):
-        rules = load_rules(Path(HERE, "token-policy.tsv"), {}, domain=domain,
-                           bindings=dict(state=state, target=target, token=token), section=section)
-        for name, row in rules.items():
-            for key, (nxt, acts) in row.items(): g.on(name, [key], nxt, acts, mode)
+    # Reader rows (entry, span, trie edges, qualifier/word, tail): token-template.tsv; the
+    # facts are the prefix nodes in sorted order with their kind-dependent row lists.
     pre = {""}
     for w in WORDS + list(spans) + list(qualifiers):
         for i in range(1, len(w) + 1):
             pre.add(w[:i])
-    policy("entry", mode="r")
+    N = []
     for p in sorted(pre):
         st = "NX" + p
         if p in spans:
-            policy("span", st, spans[p], mode="r")
+            N.append(dict(st=st, span=[dict(target=spans[p])], edges=[], q=[], w=[], tail=[]))
             continue
-        for b in range(256):
-            c = chr(b)
-            if p + c in pre:
-                g.on(st, [b], "NX" + p + c, [("ADV",)])
-        if p in qualifiers:   # declaration-only token, skipped by this reader
-            policy("qualifier", st, domain=[10])
-        elif p in TK:
-            policy("word", st, token=TK[p], domain=[10])
-        policy("tail", st)
+        N.append(dict(st=st, span=[], edges=[dict(b=b, to="NX" + p + chr(b)) for b in range(256) if p + chr(b) in pre],
+                      q=[1] if p in qualifiers else [], w=[dict(tok=TK[p])] if p not in qualifiers and p in TK else [],
+                      tail=[dict(tok=TK_OTHER)]))
+    install_template(g, HERE, "token", dict(N=N), None, mode="b")
     from finite_rules import install as install_rules
     bindings = {name: globals()[name] for name in ("TK_ID", "TK_STR", "TK_NUM", "TK_BADNUM")}
     # Derive each pre-multiply bound from the integer domain, never frozen answers.

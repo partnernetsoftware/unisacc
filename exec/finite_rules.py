@@ -22,20 +22,22 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     same depth; rows of greater depth nest inside it.  Each tuple of the loop
     runs its whole body (that row, its `=` rows, nested loops) in written order,
     so a chain can cross a per-fact variable-length loop.
-  - kinds: `rule` a=state b=observation c=target d=JSON actions (same syntax as
+  - kinds: `rule` (or `rule:MODE`, overriding the caller's mode for that state) a=state b=observation c=target d=JSON actions (same syntax as
     the four-column tables; rows of one state must be contiguous in expansion);
     graph edits applied after the block's rules, in row order:
     `rename` a=OLD b=NEW (state renamed, every target OLD redirected to NEW,
     every PUSH OLD argument in an action sequence rewritten to PUSH NEW),
     `alias` a=STATE b=TARGET (STATE goes to TARGET on every observation),
     `prepend` a=STATE d=JSON actions (actions run before every edge of STATE),
+    `redirect` a=STATE b=OBSERVATION c=TARGET d=JSON actions (replace one existing edge),
     `insert-edge` a=STATE b=KEY c=TARGET d=JSON actions (KEY must be absent),
     `fill-edge` a=STATE b=KEY c=TARGET d=JSON actions (existing KEY has precedence),
     `drop-edge` a=STATE b=KEY (KEY must exist),
     `set-mode` a=STATE b=OLD c=NEW (OLD must match).
     `copy-state` a=SOURCE b=NEW (shallow alias, no target rewriting),
-    `move-state` a=OLD b=NEW (move without target rewriting); `move` and `copy` are short
-    names for move-state and copy-state.
+    `move-state` a=OLD b=NEW (move without target rewriting); `move` is its short form;
+    `copy` a=NEW b=SOURCE is the destination-first hook form of `copy-state`;
+    `clone-push` a=SOURCE b=NEW c=EXPECTED_TARGET d=NEW_CONTINUATION.
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -136,15 +138,24 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
     return explicit
 
 
-def install(g, root, stem, bindings=None, sequences=None, classes=None, section=None):
+def install_rows(g, path, sequences=None, domain=range(257), bindings=None,
+                 classes=None, section=None, mode="r"):
+    rows = load(Path(path), sequences or {}, domain=domain, bindings=bindings,
+                classes=classes, section=section)
+    for state, row in rows.items():
+        for key, (target, actions) in row.items():
+            g.on(state, [key], target, actions, mode)
+            g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+    return len(rows)
+
+
+def install(g, root, stem, bindings=None, sequences=None, classes=None, section=None,
+            domain=range(257)):
     count = 0
     for suffix, mode in (("byte", "b"), ("result", "r")):
-        for state, row in load(Path(root) / (stem + "-" + suffix + ".tsv"),
-                                     sequences or {}, bindings=bindings, classes=classes, section=section).items():
-            count += 1
-            for key, (target, actions) in row.items():
-                g.on(state, [key], target, actions, mode)
-                g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+        count += install_rows(g, Path(root) / (stem + "-" + suffix + ".tsv"),
+                              sequences, domain=domain, bindings=bindings,
+                              classes=classes, section=section, mode=mode)
     if count == 0:
         raise ValueError(f"{stem}: no rules for section {section}")
 
@@ -221,7 +232,7 @@ def expand_template(path, facts, fresh, section=None):
             blocks[-1][2].append((lineno, fields[3:]))
         else:
             blocks.append((tuple(fields[:2]), fields[2], [(lineno, fields[3:])]))
-    out, edits = [], []
+    out, edits, modes = [], [], {}
     for (sec, name), each, body in blocks:
         for env in _tuples(each, facts, {}, f"{path}:{sec}:{name}"):
             labels, prev = {}, {}
@@ -265,30 +276,37 @@ def expand_template(path, facts, fresh, section=None):
                     rowlabels = {}
                     a2, b2, c2, d2 = (subst(x, scope, where, rowlabels) for x in (a, b, c, d))
                     prev.update(rowlabels)
-                    if kind == "rule":
+                    if kind == "rule" or kind.startswith("rule:"):
+                        if kind != "rule":
+                            modes[a2] = kind[5:]
                         out.append("\t".join((a2, b2, c2, d2)))
-                    elif kind in ("rename", "alias", "prepend", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "clone-push", "move", "copy"):
-                        kind = {"move": "move-state", "copy": "copy-state"}.get(kind, kind)   # short names used by some tables
+                    elif kind in ("rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "clone-push", "move", "copy"):
+                        kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
                         raise ValueError(f"{where}: unknown template kind {kind}")
             run(_loops(body, f"{path}"), env)
-    return out, edits
+    return out, edits, modes
 
 
 def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
                      section=None, mode="r", domain=range(257)):
     path = Path(root) / (stem + "-template.tsv")
-    lines, edits = expand_template(path, facts, fresh, section)
+    lines, edits, modes = expand_template(path, facts, fresh, section)
     if lines:
         for state, row in load(path, sequences or {}, domain, bindings=bindings, classes=classes,
                                lines=lines).items():
             for key, (target, actions) in row.items():
-                g.on(state, [key], target, actions, mode)
+                g.on(state, [key], target, actions, modes.get(state, mode))
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
     for where, kind, a, b, c, d in edits:
         if kind == "alias":
             g.on(a, range(257), b, [], mode)
+            continue
+        if kind == "copy":
+            if a in g.st or b not in g.st:
+                raise ValueError(f"{where}: copy precondition failed {b} -> {a}")
+            g.st[a] = g.st[b]
             continue
         if a not in g.st:
             raise ValueError(f"{where}: {kind} of absent state {a}")
@@ -296,6 +314,19 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             if b in g.st:
                 raise ValueError(f"{where}: {kind} onto existing state {b}")
             g.st[b] = g.st[a] if kind == "copy-state" else g.st.pop(a)
+            continue
+        if kind == "clone-push":
+            if b in g.st:
+                raise ValueError(f"{where}: clone onto existing state {b}")
+            smode, source = g.st[a]
+            copied = {}
+            for key, (target, seqid) in source.items():
+                acts = list(g.seqs[seqid])
+                if target != c or sum(x[0] == "PUSH" for x in acts) != 1:
+                    raise ValueError(f"{where}: clone-push precondition failed at {a}/{key}")
+                copied[key] = (target, g.seq([(x[0], d) if x[0] == "PUSH" else x for x in acts]))
+            g.st[b] = [smode, copied]
+            g.labels.add(d)
             continue
         if kind in ("insert-edge", "fill-edge", "drop-edge"):
             if not b.isdecimal() or not 0 <= int(b) <= 256:
@@ -339,6 +370,11 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                         pushes[seq] = (g.seq([(("PUSH", b) if x[0] == "PUSH" and x[1] == a else x) for x in acts])
                                        if any(x[0] == "PUSH" and x[1] == a for x in acts) else seq)
                     row[key] = ((b if target == a else target), pushes[seq])
+        elif kind == "redirect":
+            key = int(b) if b.isdecimal() else b
+            if key not in g.st[a][1]:
+                raise ValueError(f"{where}: redirect of absent edge {a} {key}")
+            g.st[a][1][key] = (c, g.seq([tuple(x) for x in json.loads(d)]))
         else:
             extra = [tuple(x) for x in json.loads(d)]
             for key, (target, seq) in list(g.st[a][1].items()):

@@ -56,10 +56,12 @@ def accept_gates(E, P, terminal):
         for key,(target,q) in list(row.items()):
             acts=list(g.seqs[q])
             if any(a[0]=='ACCEPT' for a in acts):accept_rows.append((name,key,target,acts))
+    # Gate rows, the redirect of each ACCEPT edge and SFU.oldaccept: layoutprovenance-template.tsv.
+    import json
+    from finite_rules import install_template
+    G=[]
     for index,(name,key,target,acts) in enumerate(accept_rows):
         assert acts[-1]==('ACCEPT',)
-        gate='SFU.acceptgate'+str(index)
-        P(gate).branch({1:terminal},'SFU.oldaccept',[('CMPI','sfu_flag',1)])
-        g.st[name][1][key]=(gate,g.seq(acts[:-1]))
-    P('SFU.oldaccept').a(('ACCEPT',)).goto('DEAD')
+        G.append(dict(index=index,name=name,key=key,acts=json.dumps([list(a) for a in acts[:-1]])))
+    install_template(g,Path(__file__).parent,'layoutprovenance',dict(G=G,terminal=[terminal]),E.P('SFU.fresh').fresh,section='gates')
     return 'SFU.start'
