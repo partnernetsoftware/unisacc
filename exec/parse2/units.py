@@ -40,6 +40,7 @@ def build(locations=False):
             if part==section:bindings[key]=P(prefix+".units_"+key).fresh(kind)
         install_rules(g,pathlib.Path(__file__).parent,"units",section=section,bindings=bindings,
                       classes=dict(classes,**(extra_classes or {})),sequences=sequences)
+        return bindings
     rules("main0")
     for i in range(4):
         rules("length",dict(length_byte="L"+str(i),length_step="L"+str(i)+"b",length_next="L"+str(i+1) if i<3 else "EXTENT",length_shift=8*i))
@@ -54,12 +55,16 @@ def build(locations=False):
         rules("trailer",dict(trailer_state="TRAIL"+str(i),trailer_next="TRAIL"+str(i+1)),dict(trailer_byte=[byte]))
     rules("main9")
     install_rules(g, pathlib.Path(__file__).parent, 'unit-labels', bindings=dict(ID=TK_ID, GOTO=E.TK['goto'], COLON=E.TK[':']), section='main')
-    rules("main12")
+    main12=rules("main12")
+    # Named results for the provenance gates: the accepting state and its actions before ACCEPT,
+    # read from the producing row (units-result.tsv main12 DONE; unitlocations LS.tokens when located).
+    accept=dict(acc_state="DONE",acc_acts=load_rules(pathlib.Path(__file__).with_name("units-result.tsv"),sequences,
+                bindings=main12,section="main12")["DONE"][0][1][:-1])
     if locations:
         from unitlocations import install
-        install(E,P)
+        accept=install(E,P)
     from layoutprovenance import units as source_provenance
-    start=source_provenance(E,P,locations)
+    start=source_provenance(E,P,locations,accept)
     g.finish()
     return {'start':start,'states':{n:[m,{str(k):v for k,v in r.items()}] for n,(m,r) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
 

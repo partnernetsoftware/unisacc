@@ -31,3 +31,6 @@ def install(E,P):
             dict(unit_word=word("unit"), offset_word=word(register)), domain=[0],
             section="prefix")["prefix"][0][1]
     install_rules(E.g, Path(__file__).parent, "unitlocations", bindings=bindings, sequences=sequences)
+    # named results: the accepting state of the located unit loop and its actions before ACCEPT (this row)
+    return dict(acc_state="LS.tokens", acc_acts=load_rules(Path(__file__).with_name("unitlocations-result.tsv"),
+                sequences, bindings=bindings)["LS.tokens"][0][1][:-1])

@@ -39,37 +39,28 @@ def parser(E, P, start):
     return 'SF3.start'
 
 
-def units(E, P, locations=False):
+def units(E, P, locations=False, accept=None):
     """Validate every unit before name isolation and conservatively merge proof.
 
     Whole-input prepass retains filename framing and old token payloads. A
     single unknown unit makes the merged source unknown, preventing provenance
     from leaking from one TU to another. Defaults keep the old wire untouched.
-    Kept in Python: the u64 resource helper and accept_gates (one gate per
-    ACCEPT transition already installed, a fact-dependent state set).
+    accept: named results of the producer (acc_state, acc_acts = its actions before ACCEPT);
+    one gate per key of that state, no graph walk.
     """
     import assemble
     u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
     u64(E,'SFU.resource',RESOURCE,'sfu_flag','sfu_present','SFU.fail')
     _rules(E,P,'located' if locations else 'plain')
-    return accept_gates(E,P,'SFU.accept')
+    return accept_gates(E,P,'SFU.accept',accept)
 
 
-def accept_gates(E, P, terminal):
-    """Fact-dependent: one gate per already-installed ACCEPT transition."""
-    g=E.g
-    accept_rows=[]
-    for name,(mode,row) in list(g.st.items()):
-        if name.startswith('SFU.'):continue
-        for key,(target,q) in list(row.items()):
-            acts=list(g.seqs[q])
-            if any(a[0]=='ACCEPT' for a in acts):accept_rows.append((name,key,target,acts))
-    # Gate rows, the redirect of each ACCEPT edge and SFU.oldaccept: layoutprovenance-template.tsv.
+def accept_gates(E, P, terminal, accept):
+    """One gate per key of the producer's accepting state (named results, no graph walk)."""
     import json
     from finite_rules import install_template
-    G=[]
-    for index,(name,key,target,acts) in enumerate(accept_rows):
-        assert acts[-1]==('ACCEPT',)
-        G.append(dict(index=index,name=name,key=key,acts=json.dumps([list(a) for a in acts[:-1]])))
-    install_template(g,Path(__file__).parent,'layoutprovenance',dict(G=G,terminal=[terminal]),E.P('SFU.fresh').fresh,section='gates')
+    acts=json.dumps([list(a) for a in accept['acc_acts']])
+    G=[dict(index=k,name=accept['acc_state'],key=k,acts=acts) for k in range(257)]
+    # Gate rows, the redirect of each ACCEPT edge and SFU.oldaccept: layoutprovenance-template.tsv.
+    install_template(E.g,Path(__file__).parent,'layoutprovenance',dict(G=G,terminal=[terminal]),E.P('SFU.fresh').fresh,section='gates')
     return 'SFU.start'

@@ -103,3 +103,37 @@
 - units entry (exec/build/gen.py units + units/gen-manifest) not started: units.py also writes g.st directly for the
   qualifier newline rows (load_rules + g.st[state][1][key]=...; use `table` op with units-byte.tsv@qualifier inside a
   foreach over units-qualifiers) and calls E.tokenizer/prn/fconv, strings.token_span, unitlocations.install.
+
+## Round 9 (2026-10-03) — layoutprovenance landed; units entry handed to a fresh agent
+- accept_gates no longer walks the graph: units.py / unitlocations.install return named results
+  acc_state (DONE | LS.tokens) and acc_acts (the producing row's actions before ACCEPT, read from that row of
+  units-result.tsv main12 / unitlocations-result.tsv with the same bindings; nothing copied into facts).
+  layoutprovenance.units(E,P,locations,accept) builds one gate per key 0..256. units graphhash identical (both
+  modes, hashes checked against tests/graphhash.tsv); gen2 8/8 identical in the same run.
+- layoutprovenance.py still exists: parser() (gen2:851, u64 + _rules 'parser') and units() (units.py). Both become
+  manifest rows when their callers do (gen2 driver; units entry).
+
+## Units entry — instructions for the next agent
+Goal: exec/parse2/units.py -> `exec/build/gen.py units` driven by exec/parse2/units-gen-manifest.tsv; delete units.py,
+layoutprovenance.py (units part) once graphhash identical.
+1. Callers to switch: tests/graphhash.py:34 (two entries; re-record keys with --write only after confirming the
+   hashes are unchanged: 6fc8d7f5... plain, 0137a215... --locations), tests/prepare.sh, exec/c/* (grep units.py),
+   gate checks (grep -rn "parse2/units" tests exec).
+2. Python-only steps in units.build, in order, each needing a manifest form:
+   a. qualifiers: append words to E.WORDS/E.TK, then E.tokenizer(); E.prn(); E.fconv() (see how exec/build/gen.py
+      runs other generators' prologues; gen2 calls E.tokenizer(qualifiers)).
+   b. qualifier newline rows: load_rules(units-byte.tsv, section qualifier, domain [10], bindings qualifier_state=NX<q>,
+      qualifier_token=TK[q]) written straight into g.st (overrides key 10) -> `table` row over units-byte.tsv
+      (overlay) in a foreach over units-qualifiers.
+   c. strings.token_span(E,P) (python helper; check whether a manifest exists for it).
+   d. rules(section, extra): freshrows units-fresh.tsv@section (P(prefix+".units_"+key) registered holder, kind),
+      STATIC binding; loops: length x4 (L0..L3 / EXTENT, shift 8i) -> foreach over a facts table; counters,
+      separators (units-*.tsv rows) -> foreach; trailer bytes -> foreach over the trailer json.
+   e. unit-labels main (ID, GOTO, COLON tokens) -> rows with tokens/classmap.
+   f. locations: unitlocations.install (python, returns accept); then layoutprovenance.units: u64 helper
+      (modelinput-manifest call row, see libraryresources-manifest.tsv) + layoutprovenance-result rows
+      ('plain'/'located') + gates template with G over keys (acc_state/acc_acts as named results: export them from
+      the producing rows with result=/export, not facts — coordinator P4 ruling).
+   g. g.finish() and the json dump are the generator driver's job (exec/build/gen.py).
+3. Verify with GRAPHHASH_JOBS=1 slot.sh python3 tests/graphhash.py --only exec/parse2 (units ~10 s per mode),
+   then gates exec-unitparse, exec-chain-1/2/3.
