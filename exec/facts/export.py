@@ -533,5 +533,67 @@ def pefields():
 TABLES.append(("enc-pe", ["unisa/image/pe.py", "exec/facts/export.py"], pefields))
 
 
+def machofields():
+    """Mach-O load commands and ad-hoc code-signature field schema (unisa/image/macho.py)."""
+    sys.path.insert(0, str(ROOT))
+    from unisa.image import macho as M
+    out = ["=%s\tint\t%d" % kv for kv in dict(DATA=1 << 40, VMADDR=M.VMADDR, STRTAB=M.STRTAB, page_minus_one=M.PAGE - 1,
+                                               page_mask=-M.PAGE, page4_minus_one=M.PAGE4 - 1, PAGE4=M.PAGE4,
+                                               signature_base=20 + 88 + len(M.IDENT), DLPREFIX=M.DLPREFIX,
+                                               DLBINDLEN=len(M.DLBIND)).items()]
+    used = set()
+    for arch in sorted(M.CPU):
+        out.append("=HDRS_%s\tint\t%d" % (arch, M.HDRS(arch)))
+        c = _fieldchain()
+        def fields(items, big=False):
+            for w, v in items: c.field(w, v, "big" if big else "little")
+        def name(v): c.lit(v.ljust(16, b"\0"))
+        def seg(n, va, vm, fo, fs, prot, ns):
+            fields([(4, M.LC_SEGMENT_64), (4, M.SEG + M.SECT * ns)]); name(n)
+            fields([(8, va), (8, vm), (8, fo), (8, fs), (4, prot), (4, prot), (4, ns), (4, 0)])
+        def sect(n, s, va, sz, off, flags):
+            name(n); name(s); fields([(8, va), (8, sz), (4, off), (4, 2), (4, 0), (4, 0), (4, flags), (4, 0), (4, 0), (4, 0)])
+        fields([(4, 0xFEEDFACF), (4, M.CPU[arch][0]), (4, M.CPU[arch][1]), (4, 2), (4, M.NCMDS), (4, M._cmdsz(arch)), (4, 0x200085), (4, 0)])
+        seg(b"__PAGEZERO", 0, M.VMADDR, 0, 0, 0, 0)
+        seg(b"__TEXT", M.VMADDR, "mh_text", 0, "mh_text", 5, 1)
+        sect(b"__text", b"__TEXT", M.VMADDR + M.HDRS(arch), "endo", M.HDRS(arch), 0x80000400)
+        seg(b"__DATA", "mh_datava", "mh_vm", "mh_text", "mh_data", 3, 2)
+        sect(b"__data", b"__DATA", "mh_datava", "mh_stored", "mh_text", 0)
+        sect(b"__bss", b"__DATA", "mh_bssva", "mh_bsslen", 0, 1)
+        seg(b"__LINKEDIT", "mh_linkva", "mh_linkvm", "mh_link", "mh_linksz", 1, 0)
+        fields([(4, M.LC_LOAD_DYLINKER), (4, 32), (4, 12)])
+        c.lit(M.DYLD.ljust(20, b"\0"))
+        lib = (M.LIBSYS + b"\0"); lib += bytes((-len(lib)) % 8)
+        fields([(4, M.LC_LOAD_DYLIB), (4, 24 + len(lib)), (4, 24), (4, 0), (4, 0x10000), (4, 0x10000)])
+        c.lit(lib)
+        fields([(4, M.LC_MAIN), (4, 24), (8, "mh_entry"), (8, 0), (4, M.LC_BUILD_VERSION), (4, 24), (4, 1), (4, 13 << 16), (4, 13 << 16), (4, 0)])
+        fields([(4, M.LC_DYLD_INFO_ONLY), (4, 48), (4, 0), (4, 0), (4, "mh_bindoff"), (4, len(M.DLBIND))] + [(4, 0)] * 6)
+        fields([(4, M.LC_SYMTAB), (4, 24), (4, "mh_link"), (4, 0), (4, "mh_link"), (4, M.STRTAB)])
+        fields([(4, M.LC_DYSYMTAB), (4, 80)] + [(4, 0)] * 18)
+        fields([(4, M.LC_CODE_SIGNATURE), (4, 16), (4, "mh_sigoff"), (4, "mh_siglen")])
+        c.lit(bytes(M.SLACK))
+        out += _rows("header_" + arch, c.fields) + _rows("header_tail_" + arch, [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+        used |= {x for r in c.fields + [dict(lead=c.lead)] for x in r["lead"]}
+        c = _fieldchain()
+        fields([(4, M.CS_MAGIC_EMBEDDED), (4, "mh_siglen"), (4, 1), (4, 0), (4, 20)], True)
+        c.comp("signature-length")
+        fields([(4, M.CS_MAGIC_CODEDIRECTORY), (4, "mh_cdlen"), (4, 0x20400), (4, M.CS_ADHOC), (4, 88 + len(M.IDENT)), (4, 88), (4, 0), (4, "mh_slots"), (4, "mh_sigoff"), (1, 32), (1, 2), (1, 0), (1, 12), (4, 0),
+                (4, 0), (4, 0), (4, 0), (8, 0), (8, 0), (8, "mh_text"), (8, M.CS_EXECSEG_MAIN_BINARY)], True)
+        c.lit(M.IDENT)
+        out += _rows("signature_" + arch, c.fields) + _rows("signature_tail_" + arch, [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+        used |= {x for r in c.fields + [dict(lead=c.lead)] for x in r["lead"]}
+    c = _fieldchain(); c.lit(bytes(M.DLPREFIX))
+    pre = c.lead
+    c = _fieldchain(); c.lit(M.DLBIND)
+    out += _rows("prefix", [dict(width=0, value=0, src="none", endian="-", lead=pre)])
+    out += _rows("binddata", [dict(width=0, value=0, src="none", endian="-", lead=c.lead)])
+    used |= set(pre) | set(c.lead)
+    out += ["@bytes\tv:int"] + ["\t%d" % int(x[4:]) for x in sorted(used) if x.startswith("byte")]
+    return out
+
+
+TABLES.append(("enc-macho", ["unisa/image/macho.py", "exec/facts/export.py"], machofields))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

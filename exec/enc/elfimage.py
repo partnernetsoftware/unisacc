@@ -59,8 +59,8 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         import assemble
         assemble.run(Path(__file__).with_name('pedelta-manifest.tsv'), E, P, {}, {'arch': arch})
     if image_format=='macho':
-        from machodelta import install as install_macho
-        install_macho(E,byte,arch)
+        import assemble
+        assemble.run(Path(__file__).with_name('machodelta-manifest.tsv'), E, P, {}, {'arch': arch})
     header = load_rules(Path(__file__).with_name('elfimage-result.tsv'), {},
                         bindings={'HDRS': elf.HDRS(arch), 'VADDR': elf.VADDR}, section='header-init')
     install_rules(g, Path(__file__).parent, 'elfimage', section='elfwrite',
