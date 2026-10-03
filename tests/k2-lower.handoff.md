@@ -1,121 +1,79 @@
-# K2 round 3 slice C (lower + stage entries) — handoff (2026-10-03, after round 1)
+# K2 slice C/block 5 (lower, prune, opt, nativeabi, pp, lex entries) — handoff (2026-10-03 17:25, branch head e53ab61f + this note)
 
-## Done
-- 7fffaf14 Part 1: exec/lower/code.py deleted; exec/lower/code-manifest.tsv = one `let` with
-  `{"bindmap": "codeenv.{target}"}` (assemble.py: bindmap string path is now `{NAME}`-interpolated)
-  + `call` of codeinit/armfuse/codedispatch/codeprep/codeabi/codelib/codeend.
-  Per-target env (reg_*, reloc_*, form_load64/callr, ids/idmap/idmapu, scratch, s0/s1, process_flag,
-  decoder bank constants IDS/ADDRESS/DESC/BKIND/SUPPORTED/WRITABLE/EXTENT/STRIDE, hosted=true) is the
-  json scalar `codeenv` in exec/facts/lower-code.tsv, written by exec/facts/export.py lowercode()
-  (scratch-alias asserts moved there). `hosted` was a private flag of code.py's sub-runs: now
-  `fact:hosted` in codeend/codelib/libraryexit/librarydata/libraryimports manifests.
-  gen-manifest `py code` -> `call code`. graphhash --only lower: 9 entries, 0 bad.
-  Gates: exec-lower ok, finite-template ok, decision-ledger RED (expected, see below).
-- decisionledger.py default run now also runs ops() (gate decision-ledger enforces --ops).
+Owner of block 5: pp and lex entries (and nativeabi). Rules: exec/k2-boundary.md; manifest ops in exec/assemble.py doc;
+generic entry driver exec/build/gen.py (`exec/build/gen.py STAGE OUT [--FLAG...]`, OUT/STAGE order either way; header
+lines `#! base PATH`, `#! flags ...`, `#! start NAME`). Verify every step byte-for-byte (old vs new output, cmp) and
+with `GRAPHHASH_JOBS=1 <scratchpad>/slot.sh python3 tests/graphhash.py [--only DIR]`; gates one per slot.sh call:
+finite-template, decision-ledger, exec-lower, exec-lexloc, exec-pploc, exec-chain, lib-callable-model.
 
-## Open
-- Decoder: exec/modelbindings.py was NOT yet a manifest on origin/main (16:25). code-manifest row 12 is
-  `py ../modelbindings` and assemble.py keeps a py branch marked TRANSITIONAL, decoder only. When the
-  decoder manifest lands: replace row 12 with `call` of it (stem relative to exec/lower, e.g. a
-  `../modelbindings` manifest needs call to accept a path or a lower-local wrapper manifest), delete
-  the py branch, decision-ledger goes green.
-- Part 2 started: exec/prune/gen-manifest.tsv (base parse/gen.py; rows prune main; label CLASS.r8).
-  `exec/build/gen.py prune OUT` == `exec/prune/gen.py OUT` byte-for-byte except the old trailing
-  newline. Still to do for prune: move the SCHEMA_SHA tape check into exec/prune/check.py (or a
-  facts digest), switch callers (tests/graphhash.py key + graphhash.tsv hash, exec/pipeline/prepare.sh,
-  exec/c/buildcompiler.sh, exec/prune/check.py, tests/seedconstruct{check,matrix}.py,
-  tests/modelobjectcheck.py, tests/modelcallbackgraphcheck.py uses PE.construct()), then delete gen.py.
-  Callers that read the prune stdout JSON summary: none found (check.py only checks rc).
-- Remaining entries untouched: lex (497 lines + lexsourcefacts/locations), pp (464), parse (334),
-  opt (184), nativeabi (89 + ordered.py). parse/gen.py is also the base module for prune/lower.
+## State (all on main after e53ab61f merges)
+- Done as manifests, old .py deleted, callers switched: lower code (code-manifest.tsv; per-target env = facts/lower-code
+  `codeenv`), prune, opt (`--o2`), nativeabi (`#! start NC.START`, calls ../modelgraphequality landed by the decoder agent;
+  facts/nativeabi from export.py nativeabi()). py op removed from assemble.py.
+- Generic primitives: exec/build/graph.py (G, Delta), exec/build/procs.py (make_P; parse/gen.py subclasses it).
+  exec/.gitignore = `build/*/` (files directly in exec/build are tracked). models.py closure includes exec/build/gen.py.
+  tests/gatedeps.json compilercheck excludes nothing now (its exec/.gitignore guard hash is stale -> `make gatedeps` at
+  release time only).
+- parse/gen.py is a library, not an entry (no parse manifest needed).
+- pp: exec/pp/gen.py (257 lines) is still the entry, but build() is: G(); assemble.run(body-manifest.tsv, flags
+  {locations, shared, autoinc}, env {target}); g.finish(). body-manifest calls autoinc-manifest, locations-manifest,
+  sourcefacts-manifest. Facts: facts/pp-gen (export.py ppgen(): init acts, predef.{target} chains, cases/dswkeys,
+  dactions, esc/esckeys, xelayout, objname, location_line), facts/pp-autoinc-gen (ppautoinc()). Both producers import
+  exec/pp/gen.py for its module-level facts (PREDEF, XOPS, DIRV/PPT from weights/gold/pp.tsv, autoinc_map, sbconst,
+  xe_init) -> keep those or move them into export.py before deleting gen.py.
+- lex: not started (exec/lex/gen.py 497 lines + lexsourcefacts.py + locations.py; Delta already in exec/build/graph.py;
+  decisionledger keep line: 3 sites = the unreachable-state sweep after the completeness check, gen.py:~411-417).
 
-## Round 2 (16:25-16:31)
-- 5d4b4e7b decision-ledger: `allowop py exec/lower/code-manifest.tsv ../modelbindings` in decisionledger.allow
-  (matched by manifest+stem); gate green, strict once the row is removed.
-- d13885d3 prune done: callers on `exec/build/gen.py prune`, exec/prune/gen.py deleted, SCHEMA_SHA tape guard in
-  exec/prune/check.py schema() (only runs with check.py now, not on every build), graphhash key renamed (068a6a14...).
-- uncommitted->committed: exec/parse/{prn,numout,fconv}-manifest.tsv + exec/facts/numeric-instances.tsv = the
-  parse/gen.py prn()/numout()/fconv() primitives as manifests (states identical to the Python versions,
-  .k2tmp/prntest.py). Reach them from another stage with `call ../parse/prn` (call resolves stem against the
-  caller's dir; the sub-run root becomes exec/parse).
-- 12602e22 opt done: exec/opt/gen-manifest.tsv (`#! flags o2`; callers `exec/build/gen.py opt OUT [--o2]`),
-  facts/opt-gen (start1/start2 acts, peepidx, Y) from export.py optgen(), name tables moved to
-  facts/opt-{analysis,peep,rounds}-names.tsv (header first) used by freshrows; rounds bindings carried with
-  `accumulate`. graphhash --only opt 0 bad; gate exec-chain ok (287 equal, 1 not-covered, 0 bad).
-- Next: nativeabi (+ordered.py), parse (base module for prune/lower/opt; its P class / tokenizer are the
-  generic primitives -> exec/build/), pp, lex; then allow/ledger update and full graphhash + gates.
+## Next: pp entry (exact steps)
+1. exec/pp/gen-manifest.tsv: `#! base pp/gen.py`? NO — the base must provide E.g/E.P; build/gen.py does `E.g.finish()` and
+   writes compact JSON. Make a tiny generic base: exec/build/gbase.py (g = G(); P = None) or give build/gen.py a
+   `#! base build/graph.py` mode where E.g = G(). Then gen-manifest rows: lets for target from flags (like
+   exec/lower/gen-manifest.tsv: `#! flags locations shared-predefines osx win arm64 no-autoinc`; target lnx/x86_64
+   default, `osx`/`win` exclusive, `arm64`), `let` autoinc (flag `no-autoinc` -> body flag), then `call body`.
+   body-manifest uses flags `shared` / `autoinc`: rename to `shared-predefines` and `!no-autoinc` (call passes the
+   entry's flags), and env `target`.
+   Only targets in facts/pp-targets are valid (old gen.py raised); the predef.{target} lookup fails otherwise.
+2. Output differences: old gen.py json.dump default separators and printed sizes; build/gen.py writes compact JSON
+   -> compare old vs new by parsed JSON (json.load equal, incl. key order) for every graphhash mode, then
+   `tests/graphhash.py --write --only pp` after renaming keys in tests/graphhash.py (target matrix x flags:
+   ('',) + lnx/x86_64, osx/arm64, win/x86_64 x --locations/--shared-predefines) to `exec/build/gen.py pp ...`.
+3. E2_AUTOINC=0 env -> `--no-autoinc` flag: callers exec/c/compilerpack.py (tokenpp built_model env E2_AUTOINC='0',
+   line ~183), tests/seedconstructmatrix.py tokenpp entry, any `E2_AUTOINC` grep hit.
+4. compilerpack imports exec/pp/gen.py for predefine_resources() (line ~165): export the resources
+   (b"\0predefines/OS/ARCH" -> NUL-joined names, from PREDEF via target_predefines) into a facts table and read it.
+5. Switch the ~54 callers (grep `pp/gen.py` in tests/ exec/ release/): positional target `exec/pp/gen.py OUT osx/arm64`
+   -> `exec/build/gen.py pp OUT --osx --arm64`; e.g. exec/pipeline/prepare.sh (`"$TARGET"`: map with a case like its
+   OSFLAG/ARCHFLAG lines), exec/pipeline/stages.tsv, exec/pp/*check.py, exec/parse2/*check.py (other owner's dir:
+   only the generator path/args), exec/c/{chain,buildcompiler}.sh, tests/modelsourcelayoutprovenancecheck.sh,
+   tests/queuecheck.py fixture name (actual-generator edit). Some callers read gen.py's stdout sizes: check.
+6. Move the module-level fact code still needed by export.py out of pp/gen.py (into export.py helpers), delete
+   exec/pp/gen.py, run export.py, full graphhash, gates exec-pploc, exec-chain, decision-ledger (drop the
+   `keep pp/gen.py` line in tests/decisionledger.allow; `python3 tests/decisionledger.py --update` lowers baseline).
 
-## Round 3 (16:31-16:40)
-- nativeabi blocked on its shared Python installers: gen.py -> modelgraphequality.install -> modelsignature.install
-  (-> modelinput.u64). Done first: exec/modelsignature-manifest.tsv and exec/modelgraphequality-manifest.tsv
-  (root exec/, beside their tables; env fail), facts/model-banks (sigbanks/geqbanks = bank<<40, sigfresh/geqfresh)
-  from export.py modelbanks(); MS.return ret row is section `ret` of modelsignature-result.tsv. States identical
-  to the Python installers (.k2tmp/mgtest.py, same P.n start). The Python 'already installed' guards
-  (`'MS.canonical' in g.st`) are live-graph reads and are NOT in the manifests: callers must call once.
-  modelsignature.py/modelgraphequality.py stay (parse2 valueranks/libraryexports/libraryvariadic, modelcandidates use them).
-- decisionledger ops() now also scans exec/*-manifest.tsv.
-- Next: nativeabi gen-manifest: `call ../modelgraphequality` (bind fail=@str:DEAD), the regions assert (drop: export-time),
-  rules.tsv-derived facts (trie T, recipes A, extents/alignments classes, ordered `@` sequences built by field())
-  via an export.py producer, freshrows from gen-fresh.tsv (owner {prefix}.fresh) / ordered-fresh.tsv (owner OL.fresh),
-  templates reject/trie/union16 and ordered header/write (fresh P:OL.recipeheader / P:OL.recipewrite / P:NC.fresh);
-  then parse, pp, lex, primitives -> exec/build/, rebase onto origin/main, full graphhash + gates.
-
-- 6fc17964 nativeabi done: exec/nativeabi/gen-manifest.tsv (`#! start NC.START`, build/gen.py reads it), gen.py and
-  ordered.py deleted, facts/nativeabi from export.py nativeabi() (the trie choice order is the PYTHONHASHSEED=0 set
-  order of the old code, recorded by a seeded child process), assemble opts `seqfact` (fact {name: acts} merged into
-  sequences). Byte-equal; graphhash --only nativeabi 0 bad. Callers: tests/model*native*check.py, compilerpack,
-  buildcompiler, seedconstructmatrix, graphhash.
-- exec/pipeline/models.py closure skipped all of exec/build (cache) -> exec/build/gen.py was not in the model cache
-  key; now only exec/build subdirectories are skipped. NOTE exec/build is .gitignored: new files there need `add -f`
-  (prefer un-ignoring files directly in exec/build before moving primitives there).
-- Gates after round 3: decision-ledger, finite-template, exec-lower ok. Rebased: origin/main had nothing new at 16:37.
-- Next: parse (P class/tokenizer -> generic module), pp, lex; then full graphhash + exec-lexloc/exec-pploc/exec-chain.
-
-## Round 4 (16:42-16:52)
-- 4c940917 generic primitives: exec/build/graph.py (G from pp/gen.py, Delta from lex/gen.py, verbatim) and
-  exec/build/procs.py (make_P(g, O, rej): the generic P core fresh/a/o/goto/label/call/ret/branch; parse/gen.py
-  subclasses it with tok/expect/num/lab/vpush/vpop/newlab). Loaded by path. exec/.gitignore now `build/*/`
-  (files directly in exec/build are tracked sources). Ledger: baseline 30 -> 14 (research/decision-ledger.json),
-  keep reasons for lex/parse/pp rewritten as pending-migration (lex sweep 3, parse 1, pp START/DSW 2 calls).
-- Full graphhash 55 entries 0 bad; gates exec-lexloc, exec-pploc, decision-ledger ok (exec-chain ok in round 2).
-- parse/gen.py is NOT an entry (its __main__ exits; parse2/gen2.py is the parser) -> no parse gen-manifest; it is the
-  base library. pp/gen.py (464 lines) and lex/gen.py (497) entries are still Python: next.
-- Coordinator: the decoder agent also converted modelsignature/modelgraphequality to manifests and deleted the .py.
-  When that lands: drop my exec/model{signature,graphequality}-manifest.tsv + facts/model-banks (+ the `ret`
-  section I added to modelsignature-result.tsv) and point nativeabi/gen-manifest row 1 at theirs; recheck byte-equality.
-- tests/gatedeps.json excludes exec/build for the compilercheck family: now that exec/build holds sources, review.
-
-## Round 5 (16:53-16:58)
-- 00c14959 gatedeps: compilercheck `excluded_dirs` emptied (exec/build now holds sources; caches are ignored subdirs).
-  The family guard for exec/.gitignore is stale (file changed in round 4): `make gatedeps` (refresh_gatedeps.py) is
-  release-time, run it as the last commit before a release queue.
-- eb2e95a5 pp slice 1: build_autoinc + build_ftrim_libc -> exec/pp/autoinc-manifest.tsv over facts/pp-autoinc-gen
-  (export.py ppautoinc(): libneed closure, header names, chain labels, constant spellings). pp/gen.py calls it with
-  assemble.run (same pattern as sourcefacts/locations). Byte-equal; graphhash --only pp 16/16 ok.
-- pp entry plan (next): `#! flags locations shared-predefines osx win arm64 no-autoinc` (target from flags like lower;
-  E2_AUTOINC=0 callers -> --no-autoinc), facts producer for: START init acts (DIRV ids, pp-init, xe_init XPRB precs),
-  per-target predefine spellings, DSW cases + directive-action rows (DIRV x {0,1} with PPT section), escape list,
-  XOPS PREC_* layout; START edge as a `start-byte.tsv` row `START * CLI.FLAGS [["@","init"]]`; the old entry wrote
-  json with default separators -> new graphhash hashes (compare by parsed JSON once, then record). 54 caller refs
-  (tests/graphhash.py target x flags matrix, exec/pipeline/prepare.sh positional target, compilerpack tokenpp env).
-  compilerpack also imports pp/gen.py for predefine_resources(): move that to a facts table first.
-- lex: not started (497 lines, argv flags parsed at import; Delta already in exec/build/graph.py).
-
-## Round 6 (16:57-17:10)
-- 67ce6e6f pp: build() body -> exec/pp/body-manifest.tsv over facts/pp-gen (export.py ppgen()): START init (table
-  start-byte.tsv), cli/text with autoinc variants, predefine chain foreach over predef.{target} (assemble: foreach
-  `over` is {NAME}-formatted), DSW template (dsw-template.tsv, domain_keys dswkeys), directive-action instances,
-  escape template, XE layout bindmap, calls autoinc/locations/sourcefacts. pp/gen.py 464 -> 257 lines: now argv,
-  facts loading (PREDEF/XOPS/... still read by export.py and compilerpack predefine_resources), G(), one
-  assemble.run, finish, json dump. Byte-equal: lnx default, osx --locations, win --shared, E2_AUTOINC=0.
-- 05ab9bee exec/build/gen.py: stage = the arg naming exec/<dir>/gen-manifest.tsv in either order, clear error
-  otherwise. The coordinator's merge failure (OUT taken as stage for nativeabi) happens when exec/nativeabi/gen-manifest.tsv
-  is absent: origin/main (17:05) has exec/nativeabi/gen.py + ordered.py and NOT my nativeabi commit, while the
-  branch's tests/graphhash.py already says `exec/build/gen.py nativeabi`. On this branch (rebased) full graphhash 55/55.
-- Remaining for pp entry: switch the 54 callers (positional target -> flags, E2_AUTOINC env -> flag, json separators
-  -> new hashes); compilerpack predefine_resources() -> facts. lex not started.
+## Next: lex (design)
+- argv flags parsed at import (--typed/--positions/--locations imply downwards, --sourcefacts, --check-declarations);
+  graphhash covers (), --typed, --positions, --locations, --sourcefacts, --check-declarations. Manifest flags the same;
+  implications as `let`/when rows or flag-conjunctions in `when`.
+- Delta is not G: no RET/DEAD finish, its own seq tuple rule, output written by lex/gen.py (check its JSON shape and
+  start state). build/gen.py assumes E.g with st/seqs/finish(): give Delta a finish() that does the existing
+  completeness check + unreachable sweep (that moves the 3 remaining ledger sites into exec/build/graph.py, honest only
+  if the sweep is stage-independent: it removes states unreachable from START — generic), or a `#! finish` header.
+- Rules come from exec/lex/*.tsv via install_section/install_rules/install_group (lex's own loader with domain(),
+  skip, in_domain_order) — check whether finite_rules.install covers them (domain lists via opts domain_keys) or
+  whether lex rows need a template. charclass/_check_decl is a build-time check of declared byte classes: move it to a
+  check script or export.py asserts. lexsourcefacts.py / locations.py are small installers -> sub-manifests.
+- Same procedure: record old outputs for all 6 modes first (PYTHONHASHSEED=0), convert piecewise with assemble.run
+  sub-manifests called from lex/gen.py (byte-equal at each step), then the entry + callers (grep `lex/gen.py`).
 
 ## Gotchas
-- gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
-- Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the
-  slot.sh path literally.
+- Do not edit the tree while graphhash/gates run (they import the generators). Commit before testing (pathspec commits).
+- gate.sh needs UNISACC_FFI_X86_PROVIDER set (any value) even for these suites.
+- Worktree guard: no `$VAR` as a command, no python heredoc text naming git, no compound git+loops; put Python in
+  .k2tmp/*.py (untracked scratch) and run it.
+- exec/facts/*.tsv headers carry input sha prefixes: after a rebase, conflicts in generated facts are resolved by
+  re-running `python3 exec/facts/export.py`; `export.py --check` must report 0 differ.
+- assemble template cells substitute str(value): JSON-valued template fields must be pre-serialised (pp dsw `acts`).
+  Templates demand complete states unless `domain_keys` limits the domain; foreach `pre` belongs on the foreach row.
+- Header-form facts (`# name<TAB>value`) give names directly and `STEM!` as a dict; bank tables now store value = bank<<40.
+- Set iteration order (hash-seed dependent) in old generators: record it under PYTHONHASHSEED=0 in the exporter
+  (see export.py _NATIVE_TRIE) rather than re-deriving.
