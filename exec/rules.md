@@ -91,5 +91,5 @@ exec/ 的构造器在构建时 import 以下 unisa/ 模块（19 个）：`unisa/
 | 1 | `exec/modelsignature.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 1 | `exec/enc/shacheck.py` | 测试工具：检查脚本内的探针图 |
 | 1 | `exec/enc/machodelta.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
-| 1 | `exec/enc/gen.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
-| 1 | `exec/enc/arm.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
+
+enc 入口（x86_64 与 ARM64）已是清单：`exec/build/gen.py enc|enc/arm OUT [--elf|--macho|--pe|--object]`，分别运行 exec/enc/gen-manifest.tsv 与 exec/enc/arm-manifest.tsv。
