@@ -5,7 +5,7 @@ lexing and parsing, so this wrapper gives every E3 consumer the same stream
 without adding five separate function-pointer/declarator cases.
 """
 from pathlib import Path
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules, install_template
 
 
 def install(E, ordinal_table, locations=False):
@@ -13,7 +13,8 @@ def install(E, ordinal_table, locations=False):
     # Location and static-object readers replace NEXT during construction.
     # Wrap their final entry, while their internal lexer entry stays TN.raw.
     assert "NEXT" in g.st and "TN.checked" not in g.st
-    g.st["TN.checked"] = g.st.pop("NEXT")
+    install_template(g, Path(__file__).parent, "parenfold", {},
+                     lambda kind: None, section="entry")
     peek = "TN.raw"
     if locations:
         # The located reader consumes an @position prefix before NX.  Clone
@@ -25,14 +26,13 @@ def install(E, ordinal_table, locations=False):
         reader = "DL.read" if "DL.read" in g.st else "TN.checked"
         mode, source = g.st[reader]
         assert mode == "r"
-        copied = {}
-        for key, (target, seqid) in source.items():
+        for target, seqid in source.values():
             acts = list(g.seqs[seqid])
             assert target == "DL.prefix" and acts[0] == ("MARK", "tpos")
             assert acts[1][0] == "PUSH" and len(acts) == 2
-            copied[key] = (target, g.seq([acts[0], ("PUSH", "PF.locdone")]))
-        g.st["PF.locraw"] = [mode, copied]
-        g.labels.add("PF.locdone")
+        install_template(g, Path(__file__).parent, "parenfold",
+                         dict(ctx=[dict(reader=reader)]), lambda kind: None,
+                         section="located")
         peek = "PF.locraw"
     TK = E.TK
     lp, rp, ident = TK["("], TK[")"], E.TK_ID

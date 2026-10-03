@@ -2,7 +2,7 @@
 import json
 import re
 from pathlib import Path
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules, install_template
 
 
 def install(E, P, warnings, templates, addr, facts, syscalls, fpu, phase, bindings=None):
@@ -50,28 +50,55 @@ def install(E, P, warnings, templates, addr, facts, syscalls, fpu, phase, bindin
         for k,_ in enumerate(syscalls,1):
             section('sysfind',find_entry='CL.b%d'%k,find_hit='CL.s%d'%k,find_next='CL.b%d'%(k+1) if k<len(syscalls) else 'CL.sj0',sys_register='sy%d'%k,sys_index=k)
         for k in range(6):
-            P('CL.sj%d'%k).branch({1:'CL.sj' if k<3 else 'CL.lj'},
-                'CL.sj%d'%(k+1) if k<5 else 'CL.b%d'%(len(syscalls)+1), [('CMP','v','sj%d'%k)])
+            entry = 'CL.sj%d' % k
+            sj = dict(entry=entry, hit='CL.sj' if k < 3 else 'CL.lj',
+                      next='CL.sj%d' % (k+1) if k < 5 else 'CL.b%d' % (len(syscalls)+1),
+                      register='sj%d' % k)
+            install_template(E.g, root, 'callcontrol-setjmp', dict(sj=[sj]), P(entry).fresh,
+                             section='sjscan')
         # These are tape-level continuations, not host libc calls.  The
         # reference allocates the two resume labels before parsing the buffer.
-        p=P('CL.sj').newlab('sj_resume').newlab('sj_end').expect('(').call('NEXT').call('EXPR').expect(')').call('SJ.depth')
-        p.o('  store64 [r0+0], r6\n  store64 [r0+8], r7\n').goto('SJ.save0')
+        p=P('CL.sj')
+        sj = dict(entry='CL.sj', open_ok=p.fresh('e'), open_test=p.fresh('b'),
+                  next_ret=p.fresh('r'), expr_ret=p.fresh('r'),
+                  close_ok=p.fresh('e'), close_test=p.fresh('b'),
+                  depth_ret=p.fresh('r'), open_token=E.TK['('], close_token=E.TK[')'])
+        install_template(E.g, root, 'callcontrol-setjmp',
+                         dict(sj=[sj]), p.fresh, sequences=sequences, section='save-entry')
         for k in range(5):
             following='SJ.save%d'%(k+1)
-            P('SJ.save%d'%k).branch({1:'SJ.saveemit%d'%k,2:'SJ.saveemit%d'%k},following,
-                [('CMPI','sj_depth',8*(k+1))])
-            P('SJ.saveemit%d'%k).o('  load64 r2, [r7+%d]\n  store64 [r0+%d], r2\n'%(8*k,24+8*k)).goto(following)
-        p=P('SJ.save5').o('  .lea r1, __unisacc_L').num('sj_resume').o('\n  store64 [r0+16], r1\n  imm r0, 0\n  jump __unisacc_L').num('sj_end').o('\n__unisacc_L').num('sj_resume').o(':\n  load64 r6, [r1+0]\n  load64 r7, [r1+8]\n').goto('SJ.restore0')
+            state='SJ.save%d'%k
+            sequences['sj_text']=E.O('  load64 r2, [r7+%d]\n  store64 [r0+%d], r2\n'%(8*k,24+8*k))
+            sj = dict(state=state, emit='SJ.saveemit%d'%k, next=following, threshold=8*(k+1))
+            install_template(E.g, root, 'callcontrol-setjmp', dict(sj=[sj]), P(state).fresh,
+                             sequences=sequences, section='sjframe')
+        p=P('SJ.save5')
+        save = dict(entry='SJ.save5', first_ret=p.fresh('r'), second_ret=p.fresh('r'),
+                    third_ret=p.fresh('r'))
+        install_template(E.g, root, 'callcontrol-setjmp',
+                         dict(save=[save]), p.fresh, sequences=sequences, section='restore-entry')
         for k in range(5):
             following='SJ.restore%d'%(k+1)
-            P('SJ.restore%d'%k).branch({1:'SJ.restoreemit%d'%k,2:'SJ.restoreemit%d'%k},following,
-                [('CMPI','sj_depth',8*(k+1))])
-            P('SJ.restoreemit%d'%k).o('  load64 r2, [r1+%d]\n  store64 [r7+%d], r2\n'%(24+8*k,8*k)).goto(following)
-        p=P('SJ.restore5').o('__unisacc_L').num('sj_end').o(':\n')
-        p.a(('LDI','vt',0),('LDI','vb',8)).call('NEXT').call('POSTIX').ret()
-        p=P('CL.lj').expect('(').call('NEXT').call('EXPR').o(E.PUSH).expect(',').call('NEXT').call('EXPR').expect(')')
-        p.o(E.POP1).o('  imm r2, 0\n  eq r2, r0, r2\n  add64 r0, r0, r2\n  load64 r5, [r1+16]\n  callr r5\n  imm r0, 0\n')
-        p.a(('LDI','vt',0),('LDI','vb',8)).call('NEXT').call('POSTIX').ret()
+            state='SJ.restore%d'%k
+            sequences['sj_text']=E.O('  load64 r2, [r1+%d]\n  store64 [r7+%d], r2\n'%(24+8*k,8*k))
+            sj = dict(state=state, emit='SJ.restoreemit%d'%k, next=following, threshold=8*(k+1))
+            install_template(E.g, root, 'callcontrol-setjmp', dict(sj=[sj]), P(state).fresh,
+                             sequences=sequences, section='sjframe')
+        p=P('SJ.restore5')
+        restore = dict(entry='SJ.restore5', first_ret=p.fresh('r'), second_ret=p.fresh('r'),
+                       third_ret=p.fresh('r'))
+        install_template(E.g, root, 'callcontrol-setjmp', dict(restore=[restore]), p.fresh,
+                         sequences=sequences, section='restore-tail')
+        p=P('CL.lj')
+        longjmp = dict(entry='CL.lj', open_ok=p.fresh('e'), open_test=p.fresh('b'),
+                       next1_ret=p.fresh('r'), expr1_ret=p.fresh('r'),
+                       comma_ok=p.fresh('e'), comma_test=p.fresh('b'),
+                       next2_ret=p.fresh('r'), expr2_ret=p.fresh('r'),
+                       close_ok=p.fresh('e'), close_test=p.fresh('b'),
+                       next3_ret=p.fresh('r'), postix_ret=p.fresh('r'),
+                       open_token=E.TK['('], comma_token=E.TK[','], close_token=E.TK[')'])
+        install_template(E.g, root, 'callcontrol-setjmp', dict(longjmp=[longjmp]), p.fresh,
+                         sequences=sequences, section='longjmp')
         section('part12')
         for k,(base,suffix) in enumerate(((b['DBL'],'d'),(b['FLT'],'s'))):
             sequences['text12']=E.O(formats['sqrt']%fpu[suffix+'sqrt'])

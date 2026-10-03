@@ -71,7 +71,7 @@ class P(E.P):
 E.P = P
 g = E.g
 from unresolved import install as ud_install
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, install_rows, install_template, load as load_rules
 
 # Tape text uses JSON string escaping; PUSH/POP1 retain their shared E bindings.
 # {name} prints W[name] in decimal; declared spans print input slices.
@@ -207,11 +207,10 @@ def ladder(prefix, bottom):
         bindings["ladder_dispatch"] = dispatch
         structured_control("ladder-read", False, dict(bindings, word_state=nm))
         targets = {TK[o]: nm + "." + o for o in OPS[lv]}
-        for key, target in targets.items():
-            g.on(dispatch, [key], target, [], "r")
-        for state, row in load_rules(Path(__file__).with_name("ladder-default.tsv"), {},
-                domain=set(range(257)) - targets.keys(), bindings=bindings).items():
-            for key, (target, actions) in row.items(): g.on(state, [key], target, actions, "r")
+        ctx = dict(dispatch=dispatch, operators=[dict(key=key, target=target)
+                                                for key, target in targets.items()])
+        install_template(g, os.path.dirname(__file__), "dispatch", dict(ctx=[ctx], op=ctx["operators"]),
+                         P(dispatch).fresh, section="ladder")
         for o in OPS[lv]:
             structured_control("ladder-" + modes.get(o, modes["*"]), False,
                                dict(bindings, ladder_operator=targets[TK[o]], ladder_tail="OPX." + o, word_state=targets[TK[o]]))
@@ -223,7 +222,9 @@ def ladder(prefix, bottom):
         tytail()
     for owner, state, message in tape_rows("ladder-reject.tsv"):
         if owner in ("all", prefix):
-            g.on(state, range(257), "DEAD", E.rej(message), "r")
+            install_rules(g, os.path.dirname(__file__), "ladder-reject",
+                          bindings=dict(reject_state=state), sequences=dict(reject=E.rej(message)),
+                          section="main")
 
 
 from printfallback import KINDS as PFKINDS, install as pf_install
@@ -245,9 +246,8 @@ def fmtwalk(pre, on_byte, on_d, on_end):
     rows = [('length', set(range(257))-PFCONV.keys(), bindings)] + [
         ('conversion', [byte], dict(bindings, kind=kind)) for byte,kind in PFCONV.items()]
     for section,domain,facts in rows:
-        for state,row in load_rules(Path(__file__).with_name('helpers-byte.tsv'), sequences,
-                                    domain=domain, bindings=facts, classes=classes, section=section).items():
-            for byte,(target,actions) in row.items(): g.on(state, [byte], target, actions)
+        install_rules(g, os.path.dirname(__file__), 'helpers', bindings=facts,
+                      sequences=sequences, classes=classes, section=section, domain=domain)
     return bindings['walk']
 
 
@@ -393,12 +393,11 @@ def types():
     targets = {TK[word]: "TS." + word for word in TWORDS}
     targets.update((TK_ID if word == "identifier" else TK[word], target)
                    for word, target in tape_rows("type-entry.tsv"))
-    for key, target in targets.items():
-        g.on(dispatch, [key], target, [], "r")
-    for state, row in load_rules(Path(__file__).with_name("type-default.tsv"),
-            {"reject": E.rej("not covered: type")}, domain=set(range(257)) - targets.keys(),
-            bindings=dict(type_dispatch=dispatch)).items():
-        for key, (target, actions) in row.items(): g.on(state, [key], target, actions, "r")
+    ctx = dict(dispatch=dispatch, operators=[dict(key=key, target=target)
+                                            for key, target in targets.items()])
+    install_template(g, os.path.dirname(__file__), "dispatch", dict(ctx=[ctx], op=ctx["operators"]),
+                     P(dispatch).fresh, sequences=dict(reject=E.rej("not covered: type")),
+                     section="type")
     structured_control("type-prefix", False)
     structured_control("structure", False)
     shape_control("member-shape")
@@ -535,10 +534,9 @@ def return_control(section, extra=None):
         dispatch = b["f48"]
         for domain, selected, additions in [(set(range(257))-compound.keys(), "expr0", {})] + [
                 ([key], "compound", dict(lp_dispatch=dispatch,operation=target)) for key,target in compound.items()]:
-            for state,row in load_rules(Path(__file__).with_name("return-dispatch.tsv"), sequences,
-                    domain=domain, bindings=dict(b,**additions), classes=classes, section=selected).items():
-                for key, (target, actions) in row.items():
-                    g.on(state, [key], target, actions, "r")
+            install_rows(g, Path(__file__).with_name("return-dispatch.tsv"), sequences,
+                         domain=domain, bindings=dict(b,**additions), classes=classes,
+                         section=selected)
     return b
 
 
@@ -578,10 +576,9 @@ def update_control(section, extra=None):
         compound={TK[o+"="]:"X.c"+o for o in E.CASOPS}
         for domain,selected,additions in [(set(range(257))-compound.keys(),"id0",{})]+[
                 ([key],"compound",dict(id_dispatch=b["f1"],operation=target)) for key,target in compound.items()]:
-            for state,row in load_rules(Path(__file__).with_name("update-dispatch.tsv"),sequences,
-                    domain=domain,bindings=dict(b,**additions),classes=classes,section=selected).items():
-                for key, (target, actions) in row.items():
-                    g.on(state, [key], target, actions, "r")
+            install_rows(g, Path(__file__).with_name("update-dispatch.tsv"), sequences,
+                         domain=domain, bindings=dict(b,**additions), classes=classes,
+                         section=selected)
     return b
 
 
@@ -596,10 +593,10 @@ def build(locations=False, warnings=False, errors=False):
     # decoder for lookahead; ordinary qualifier recursion must still pass
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
-    g.st["TN.raw"] = g.st["NEXT"]
-    del g.st["NX"][1][64]
-    for state,row in load_rules(Path(__file__).with_name("startup-entry.tsv"), {}, domain=[64]).items():
-        for key,(target,actions) in row.items(): g.on(state,[key],target,actions)
+    install_template(g, os.path.dirname(__file__), "stage-edits", {},
+                     P("NX").fresh, section="startup")
+    install_template(g, os.path.dirname(__file__), "stage-edits", {},
+                     lambda kind: None, section="startup-entry", mode="b", domain=[64])
     structured_control("startup-marker", False)
     from strings import token_span
     token_span(E, P)
@@ -823,11 +820,15 @@ def build(locations=False, warnings=False, errors=False):
     structured_control("sizeof3", False)
     ordinary_control('dispatch', warnings)
     structured_control("address", False)
-    addr(P("ADR.object")).goto("ADR.object.next")
+    object_address = addr(P("ADR.object"))
+    install_template(g, os.path.dirname(__file__), "stage-edits",
+                     dict(address=[dict(source=object_address.cur, target="ADR.object.next")]),
+                     object_address.fresh, section="address")
     ordinary_control('deref', warnings)
     shape_control("dereference")
-    for op in E.CASOPS:   # `*p += v` as an expression: the compound paths of the subscript walk
-        g.on('UD.load.b', [E.TK[op + '=']], 'LV.c' + op, [], 'r')
+    ops = [dict(key=E.TK[op + '='], target='LV.c' + op) for op in E.CASOPS]
+    install_template(g, os.path.dirname(__file__), "stage-edits", dict(op=ops),
+                     P("UD.load.b").fresh, section="update")
     ordinary_control('id', warnings)
     for tag, op in (("inc", "+"), ("dec", "-")):
         update=dict(word_state=tag, update_entry="ID."+tag, update_deref="UD."+tag, update_post="POST."+op)
@@ -922,7 +923,8 @@ def build(locations=False, warnings=False, errors=False):
     # EOF branch observes the reader byte, not the previous arithmetic result.
     mode, row = g.st['CP.restore']
     assert mode == 'r' and len(row) == 257
-    g.st['CP.restore'] = ('b', row)
+    install_template(g, os.path.dirname(__file__), "stage-edits", {},
+                     P("CP.restore").fresh, section="final")
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
