@@ -176,8 +176,10 @@ def record(outdir, tag, gen, args, modules):
                         gr.labels = RecSet(labs)
             if stack:
                 note("calls another stage module install (%s)" % stem)
-            if t["args"] is not None:
-                t["refused"] = t["refused"] or "install called twice"
+            # every call opens a segment; a module installed in several calls (phases)
+            # becomes one manifest per segment sharing exported env
+            t["segs"] = t.get("segs", 0) + 1
+            t["calls"].append(["seg", kw])
             t["args"] = kw
             stack.append(stem)
             try:
@@ -185,7 +187,10 @@ def record(outdir, tag, gen, args, modules):
             finally:
                 stack.pop()
             if r is not None and not isinstance(r, (str, int)):
-                t["refused"] = t["refused"] or "install returns a value (%s)" % type(r).__name__
+                if isinstance(r, dict) and "bindings" in inspect.signature(inst).parameters:
+                    r = None   # bindings dict handed back to the next phase: carried by exported env
+                else:
+                    t["refused"] = t["refused"] or "install returns a value (%s)" % type(r).__name__
             t["ret"] = r
             return r
         return w
@@ -260,7 +265,7 @@ class Emitter:
 
     def rows(self, t):
         """One mode's trace -> list of rows (cells are strings or ('lit', value))."""
-        args, owner, pending, out = t["args"], {}, [], []
+        args, owner, pending, out, current = t["args"], {}, [], [], {}
         self.states |= set(t.get("states", ()))
         ret, retrow = t.get("ret"), None
 
@@ -269,8 +274,11 @@ class Emitter:
                 if pending and pending[0][2] == v:
                     cur, kind, lab = pending.pop(0)
                     owner[lab] = k
+                    current[k] = lab
                     return "fresh:U:%s:%s" % (cur, kind), True
                 if v in owner:
+                    if current.get(owner[v]) != v:
+                        raise Refuse("exported name %s re-bound before label %s is used" % (owner[v], v))
                     return "$" + owner[v], False
                 if any(p[2] == v for p in pending):
                     raise Refuse("fresh allocation order differs from first use (%s)" % v)
@@ -287,6 +295,10 @@ class Emitter:
         for c in t["calls"]:
             if c[0] == "fresh":
                 pending.append(c[1:])
+                continue
+            if c[0] == "seg":
+                args = c[1]
+                out.append(("__seg__", str(c[1].get("phase", len([o for o in out if o[0] == "__seg__"]))), "-", (), (), "{}", "null"))
                 continue
             if c[0] == "label":
                 if any(set(x) & set(",\t\n") for x in c[1]):
@@ -310,15 +322,28 @@ class Emitter:
                     raise Refuse("install root %s outside %s" % (root, self.here))
                 stemcell = d["stem"]
             tf = None
-            params = {}
+            params, fparams = {}, []
             if op == "template" and d.get("facts"):
                 params = {}
                 def par(v):
                     # P4: a state name inside template facts becomes a template parameter
                     # `$k2L_<n>` bound from the manifest row with @str (whole-cell use only;
                     # a partial use breaks the graph and graphhash refuses it)
+                    if isinstance(v, str) and pending and pending[0][2] == v:
+                        # a fresh label inside template facts: allocated by this row's bind
+                        # cell (exported, so later rows can name it) and passed as `$k2F_<n>`
+                        cur, kind, lab = pending.pop(0)
+                        pn = "k2F_%d" % len(fparams)
+                        owner[lab] = pn
+                        current[pn] = lab
+                        fparams.append((pn, "fresh:U:%s:%s" % (cur, kind), True))
+                        return "$" + pn
+                    if isinstance(v, str) and v in owner and current.get(owner[v]) == v:
+                        pn = "k2F_%d" % len(fparams)
+                        fparams.append((pn, "$" + owner[v], False))
+                        return "$" + pn
                     if isinstance(v, str) and (v in owner or any(p[2] == v for p in pending)):
-                        raise Refuse("fresh label %r inside template facts" % v)
+                        raise Refuse("fresh label %r inside template facts (out of order)" % v)
                     if isinstance(v, str) and v in self.states:
                         if set(v) & set(",\t\n{}\\"):
                             raise Refuse("state label %r not expressible as @str" % v)
@@ -337,6 +362,10 @@ class Emitter:
             else:
                 tf_fresh = "-"
             exp, bind, seq = [], [], []
+            for pn, cellv, new in fparams:   # first: allocation order precedes the bindings'
+                bind.append((pn, cellv))
+                if new:
+                    exp.append(pn)
             for k, v in (d.get("bindings") or {}).items():
                 s, new = cell(k, v)
                 if new:
@@ -413,6 +442,8 @@ def emit(module, specs):
     for s in specs:
         fl, _, path = s.partition("=")
         t = json.loads(Path(path).read_text())
+        if t["refused"] == "install returns a value (dict)" and t.get("segs", 0) > 1:
+            t["refused"] = None   # (traces recorded before the phase-dict rule)
         if t["refused"] == "install never called in this mode":
             continue   # the caller guards the call; modes come from the runs that reach it
         if t["refused"]:
@@ -485,8 +516,21 @@ def emit(module, specs):
             c = lambda kv: "%s=%s" % (kv[0], kv[1] if isinstance(kv[1], str) else em.fact(json.loads(kv[1][1])))
             lines.append([op, st, sec, w, fstem + ("+" + tfc if tfc else ""), frc, ",".join(map(c, r[3])) or "-",
                           ",".join(map(c, r[4])) or "-", json.dumps(oo) if oo else "-"])
-    if len(lines) > FOLD_MAX:
-        raise Refuse("%d rows after folding (> %d)" % (len(lines), FOLD_MAX))
+    segs, cur = [], None
+    for ln in lines:
+        if ln[0] == "__seg__":
+            cur = [ln[1], []]
+            segs.append(cur)
+        elif cur is None:
+            cur = ["", []]
+            segs.append(cur)
+            cur[1].append(ln)
+        else:
+            cur[1].append(ln)
+    for name, ls in segs:
+        if len(ls) > FOLD_MAX:
+            raise Refuse("%d rows after folding (> %d) in segment %r" % (len(ls), FOLD_MAX, name))
+    lines = [ln for ln in lines if ln[0] != "__seg__"]
     if len(em.tfacts) > 16:
         raise Refuse("%d distinct template facts dicts (> 16)" % len(em.tfacts))
     for ln in lines:
@@ -497,12 +541,14 @@ def emit(module, specs):
             f.write("# written by tests/k2translate.py from %s (template facts)\n" % mod.relative_to(ROOT))
             for k, v in d.items():
                 f.write("=%s\tjson\t%s\n" % (k, json.dumps(v)))
-    man = here / (stem + "-manifest.tsv")
-    with open(man, "w") as f:
-        f.write("# op\tstem\tsection\twhen\tfacts\tfresh\tseq\tbind\topts\n")
-        f.write("# translated from %s.py by tests/k2translate.py (assembled by exec/assemble.py)\n" % stem)
-        for ln in lines:
-            f.write("\t".join(ln) + "\n")
+    for name, ls in segs:
+        man = here / ("%s%s-manifest.tsv" % (stem, "-" + name if len(segs) > 1 else ""))
+        with open(man, "w") as f:
+            f.write("# op\tstem\tsection\twhen\tfacts\tfresh\tseq\tbind\topts\n")
+            f.write("# translated from %s.py by tests/k2translate.py (assembled by exec/assemble.py)%s\n"
+                    % (stem, "; segment %s of %d, env exported by the previous segment" % (name, len(segs)) if len(segs) > 1 else ""))
+            for ln in ls:
+                f.write("\t".join(ln) + "\n")
     if em.facts or em.tables:
         with open(ROOT / "exec" / "facts" / (fstem + ".tsv"), "w") as f:
             f.write("# written by tests/k2translate.py from %s\n" % mod.relative_to(ROOT))
