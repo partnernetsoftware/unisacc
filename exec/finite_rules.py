@@ -51,7 +51,12 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `rewrite-tail` a=JSON action patterns c=TARGET (empty: keep) d=JSON actions:
     on every edge of every state whose action sequence ends with actions
     matching the patterns (each pattern a prefix of its action tuple), those
-    trailing actions are replaced by d and the target by c.
+    trailing actions are replaced by d and the target by c; b (`-` or empty:
+    none) is a comma-separated set of states left untouched.
+    `insert-after` a=JSON list of action patterns d=JSON list of action lists
+    (parallel): on every edge of every state, after each action matching
+    pattern i (a prefix of its tuple; first matching pattern wins) the
+    actions d[i] are inserted; b as for rewrite-tail.
   - kind `fresh` emits nothing: its columns are only substituted, so a row
     `fresh  {fresh@row:TAG:KIND}` allocates a label at that point of row order
     (for chains that allocate a label before the edge that names it).
@@ -343,7 +348,7 @@ def expand_template(path, facts, fresh, section=None):
                     elif kind == "fresh":
                         if b2:
                             prev[b2] = a2
-                    elif kind in ("append", "split-at", "rewrite-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
+                    elif kind in ("append", "split-at", "rewrite-tail", "insert-after", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -419,12 +424,33 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             pattern = json.loads(a)
             replacement = [tuple(x) for x in json.loads(d)]
             n = len(pattern)
-            for _, row in list(g.st.values()):
+            skip = set() if b in ("", "-") else set(b.split(","))
+            for name, (_, row) in list(g.st.items()):
+                if name in skip:
+                    continue
                 for key, (target, seq) in list(row.items()):
                     acts = list(g.seqs[seq])
                     if n and len(acts) >= n and all(
                             list(x[:len(p)]) == p for x, p in zip(acts[-n:], pattern)):
                         row[key] = (c or target, g.seq(acts[:-n] + replacement))
+            continue
+        if kind == "insert-after":
+            patterns = json.loads(a)
+            inserts = [[tuple(x) for x in xs] for xs in json.loads(d)]
+            if len(patterns) != len(inserts):
+                raise ValueError(f"{where}: insert-after needs one insertion per pattern")
+            skip = set() if b in ("", "-") else set(b.split(","))
+            for name, (_, row) in list(g.st.items()):
+                if name in skip:
+                    continue
+                for key, (target, seq) in list(row.items()):
+                    acts = []
+                    for x in g.seqs[seq]:
+                        acts.append(x)
+                        i = next((i for i, p in enumerate(patterns) if list(x[:len(p)]) == p), None)
+                        if i is not None:
+                            acts.extend(inserts[i])
+                    row[key] = (target, g.seq(acts))
             continue
         if kind == "copy":
             if a in g.st or b not in g.st:
