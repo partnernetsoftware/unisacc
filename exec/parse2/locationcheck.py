@@ -13,7 +13,7 @@ def call(args):
 with tempfile.TemporaryDirectory(prefix='parse-locations-') as td:
     t=pathlib.Path(td)
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
-    for name,script,flags in [('pp','pp/gen.py',['--locations']),('lex','lex/gen.py',['--locations']),
+    for name,script,flags in [('pp','build/gen.py',['pp','--locations']),('lex','lex/gen.py',['--locations']),
                             ('typed','lex/gen.py',['--typed']),('parse','parse2/gen2.py',['--locations']),
                             ('plain','parse2/gen2.py',[])]:
         call([sys.executable,R/'exec'/script,t/(name+'.json'),*flags])

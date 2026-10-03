@@ -10,7 +10,7 @@ u32=lambda x:struct.pack('<I',x)
 with tempfile.TemporaryDirectory(prefix='unit-locations-') as td:
  p=pathlib.Path(td)
  call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',p/'run'])
- for name,script,args in [('pp','pp/gen.py',['osx/arm64','--locations']),('lex','lex/gen.py',['--locations']),('units','parse2/units.py',['--locations']),('parse','parse2/gen2.py',['--warnings'])]:
+ for name,script,args in [('pp','build/gen.py',['pp','--osx','--arm64','--locations']),('lex','lex/gen.py',['--locations']),('units','parse2/units.py',['--locations']),('parse','parse2/gen2.py',['--warnings'])]:
   call([sys.executable,R/'exec'/script,p/(name+'.json'),*args]);call([sys.executable,R/'exec/c/tbl.py',p/(name+'.json'),p/(name+'.tbl')]);call([sys.executable,R/'exec/c/net.py',p/(name+'.tbl'),p/(name+'.net')])
  files=[p/'first-文件.c',p/'second.c'];files[0].write_text('static inline int h(int * restrict p){return *p;}\nint f(void){int unused;int n=0;return h(&n); }\n');files[1].write_text('int f(void);int main(void){return f();}\n')
  frames=[];maps=[];stream=b''

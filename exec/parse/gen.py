@@ -23,10 +23,10 @@ from load import facts as _facts  # noqa: E402
 # exec/build/gen.py (prune, lower) already loads its dependency by explicit path for the
 # same reason; this is that same pattern.
 _spec = importlib.util.spec_from_file_location(
-    "pp_gen", os.path.join(ROOT, "exec", "pp", "gen.py"))
-_pp = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_pp)
-G = _pp.G
+    "k2_build_graph_parse", os.path.join(ROOT, "exec", "build", "graph.py"))
+_bg = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_bg)
+G = _bg.G
 
 
 def gold(name):

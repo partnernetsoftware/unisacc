@@ -71,7 +71,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='e3-r21-') as td:
         t = pathlib.Path(td)
         call([os.environ.get('EXEC_CC', 'cc'), '-O2', R/'exec/c/run.c', '-o', t/'run'])
-        for name, script, flags in [('pp', 'pp/gen.py', []), ('lex', 'lex/gen.py', ['--typed']), ('parse', 'parse2/gen2.py', [])]:
+        for name, script, flags in [('pp', 'build/gen.py', ['pp']), ('lex', 'lex/gen.py', ['--typed']), ('parse', 'parse2/gen2.py', [])]:
             call([sys.executable, R/'exec'/script, t/(name+'.json'), *flags])
             call([sys.executable, R/'exec/c/tbl.py', t/(name+'.json'), t/(name+'.tbl')])
             call([sys.executable, R/'exec/c/net.py', t/(name+'.tbl'), t/(name+'.net')])
