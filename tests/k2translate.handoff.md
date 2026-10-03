@@ -388,3 +388,6 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Remaining (b): types() body, strwalk singles (statics-init IC.*), ladder(), shape pointee-width/sizeof-*/dereference/
   value-load and later, update_control singles (step-entry/taxonomy/step0/step1), global-results glue, scope sb
   round trip, then merge segments and drop seg_ gates.
+  (b) more: update_control step-entry/taxonomy/step0/step1, shape pointee-width/sizeof-type/sizeof-object/dereference/
+  value-load, strwalk SZ.l*/CE.l* -> call rows at the end of segments upd-id/upd-compound/upd-type/sizeof0/1/2/
+  ord-deref/upd-prefix (insert after a segment's trailing `.` body rows, else "body under call"). sha SAME x3.

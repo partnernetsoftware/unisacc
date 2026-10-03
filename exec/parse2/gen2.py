@@ -401,13 +401,8 @@ def build(locations=False, warnings=False, errors=False):
     segment("ret-qt0")
     segment("ret-qt")
     segment("upd-id")   # + call shape update-entry (gen2-manifest)
-    update_control("step-entry")
-    segment("upd-compound")
-    update_control("taxonomy")
-    segment("upd-type")
-    update_control("step0")
-    shape_control("pointee-width")
-    update_control("step1")
+    segment("upd-compound")   # + calls folded into gen2-manifest
+    segment("upd-type")   # + calls folded into gen2-manifest
     segment("upd-modes")
     segment("upd-var")
     ladder("E", "UNARY")
@@ -415,26 +410,20 @@ def build(locations=False, warnings=False, errors=False):
     ordinary_control('string', warnings)
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
-    segment("sizeof0")
-    shape_control("sizeof-type")
-    segment("sizeof1")
-    shape_control("sizeof-object")
-    segment("sizeof2")
-    strwalk("SZ.lwalk", "SZ.lbyte", "SZ.lend")
-    strwalk("CE.lwalk", "CE.lbyte", "CE.lend")   # sizeof("...") inside a constant expression
+    segment("sizeof0")   # + calls folded into gen2-manifest
+    segment("sizeof1")   # + calls folded into gen2-manifest
+    segment("sizeof2")   # + calls folded into gen2-manifest
     segment("sizeof3")
     ordinary_control('dispatch', warnings)
     segment("address")
-    ordinary_control('deref', warnings)
-    shape_control("dereference")
+    ordinary_control('deref', warnings)   # + calls folded into gen2-manifest
     ordinary_control('id', warnings)
     segment("ord-update", warnings)
     ordinary_control('value', warnings)
     ordinary_control('down', warnings)
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
-    segment("upd-prefix", warnings)
-    shape_control("value-load")
+    segment("upd-prefix", warnings)   # + calls folded into gen2-manifest
     ordinary_control('array', warnings)
     from membercontrol import install as member_control
     member_control(E, P, warnings, TEMPL,
