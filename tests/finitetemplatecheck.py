@@ -25,7 +25,10 @@ rows=['# section\tblock\teach\tover\tkind\ta\tb\tc\td',
  'm\tm\t-\t-\tcopy-state\tE\tE.copy\t\t',
  'm\tm\t-\t-\tmove-state\tE\tE.moved\t\t',
  'p\tp\t-\t-\tclone-push\tR\tR.copy\tW\tCONT',
- 'q\tq\t-\t-\tcopy\tE.dest\tE.copy\t\t']
+ 'q\tq\t-\t-\tcopy\tE.dest\tE.copy\t\t',
+ 'f\tf\t-\t-\tfresh\t{fresh@row:N:b}\t\t\t',
+ 'f\tf\t-\t-\trule\tF\t*\t{fresh@row:B:b}\t[["GOTO","{prev:N}"]]',
+ 't\tt\t-\t-\trewrite-tail\t[["ACCEPT"]]\t\tWRAP\t[["LDI","y",1]]']
 with tempfile.TemporaryDirectory() as d:
  (pathlib.Path(d)/'t-template.tsv').write_text('\n'.join(rows)+'\n')
  facts=dict(grp=[dict(g=1,els=[7,8]),dict(g=2,els=[])],Q=[dict(k=1,e=[5]),dict(k=2,e=[6,9])])
@@ -57,4 +60,10 @@ with tempfile.TemporaryDirectory() as d:
  assert z.st['R.copy'][1] is not z.st['R'][1]
  assert all(list(z.seqs[seq])==[('MARK','tpos'),('PUSH','CONT')]
             for _,seq in z.st['R.copy'][1].values())
+ out,_,_=F.expand_template(pathlib.Path(d)/'t-template.tsv',{},fresh,'f')
+ assert out==['F\t*\tT.b13\t[["GOTO","T.b12"]]'],out
+ w=type(M.g)();w.on('A',[0],'B',[('LDI','x',1),('ACCEPT',)],'r');w.on('A',[1],'B',[('ACCEPT',)],'r');w.on('C',[0],'B',[('ACCEPT',),('LDI','x',2)],'r')
+ F.install_template(w,d,'t',{},fresh,section='t')
+ assert w.st['A'][1][0][0]=='WRAP' and list(w.seqs[w.st['A'][1][0][1]])==[('LDI','x',1),('LDI','y',1)]
+ assert w.st['A'][1][1][0]=='WRAP' and w.st['C'][1][0][0]=='B'
 print('finite template check ok')

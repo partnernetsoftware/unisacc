@@ -2,7 +2,12 @@
 import json
 import re
 from pathlib import Path
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, install_template
+
+
+class _Holder:
+    def __init__(self, cur):
+        self.cur = cur
 
 
 def install(E, P, warnings, templates, facts, shape_control):
@@ -21,6 +26,10 @@ def install(E, P, warnings, templates, facts, shape_control):
     tokens=dict(E.TK,identifier=E.TK_ID)
     classes={name:[tokens[token]] for name,token in rows('tokens')}
     sections={line.split('\t')[0] for line in (root/'membercontrol-result.tsv').read_text().splitlines()[1:]}
+    def control(name, facts, cur):
+        holder = _Holder(cur)
+        install_template(E.g, root, 'membercontrol-control', facts,
+                         lambda k: E.P.fresh(holder, k), section=name)
     def section(name, **extra):
         b.update(extra)
         for part,mode,owner,kind,key in rows('fresh'):
@@ -29,16 +38,9 @@ def install(E, P, warnings, templates, facts, shape_control):
                 b[key]=p.fresh(kind)
         for part,state_key,load_state in rows('operators'):
             if part==name:
-                for op in E.CASOPS:
-                    # below a unary * (deref=1) the walk leaves `op=` to the caller: `*x.p += 2`
-                    check=b[state_key]+'.q'+op
-                    P(check).branch({1:check+'.l'},'LV.c'+op,[('CMPI','deref',1)])
-                    P(check+'.l').a(('LDI','deref',0)).goto(load_state)
-                    rules=load_rules(root/'membercontrol-operator-rule.tsv',{},domain=[tokens[op+'=']],
-                                     bindings=dict(entry=b[state_key],target='LV.c'+op,check=check))
-                    for state,row in rules.items():
-                        for key,(target,actions) in row.items():
-                            E.g.on(state,[key],target,actions,'r')
+                for op in E.CASOPS:   # one instance per operator: its entry edge follows its states
+                    control('operator', dict(entry=[b[state_key]], load=[load_state],
+                                             OP=[dict(op=op, token=tokens[op+'='])]), b[state_key])
         for mode in ('all','warnings' if warnings else 'plain'):
             if name+'.'+mode in sections:
                 install_rules(E.g,root,'membercontrol',bindings=b,sequences=sequences,classes=classes,section=name+'.'+mode)
@@ -53,24 +55,11 @@ def install(E, P, warnings, templates, facts, shape_control):
     sources = [(code, size, uns) for _, code, size, uns, _ in tyint]
     sources += [(facts['FLT'], 4, 0), (facts['DBL'], 8, 0), (facts['BOOL'], 1, 0)]
     section('part3')
-    # Residue: the E.CASOPS operator states in section() and the AS.mask chain
-    # below are generated from operator and tyinfo facts.
-    target = P('AS.mask.target')
-    for name, code, size, uns, _ in tyint:
-        next_target = target.fresh('b')
-        state = 'AS.mask.' + name
-        target.branch({1:state}, next_target, [('CMPI','lb',code)])
-        target.label(next_target)
-        if size >= 8:
-            P(state).goto('AS.store')
-            continue
-        P(state).branch({1:state+'.scalar'}, 'AS.needmask', [('CMPI','rvt',0)])
-        no_mask = sorted({v for v, width, signedness in sources
-                          if width <= size and signedness == uns})
-        rhs = P(state+'.scalar')
-        for value in no_mask:
-            next_rhs = rhs.fresh('b')
-            rhs.branch({1:'AS.store'}, next_rhs, [('CMPI','rvb',value)])
-            rhs.label(next_rhs)
-        rhs.goto('AS.needmask')
-    target.goto('AS.store')
+    # The E.CASOPS operator states in section() and the AS.mask chain below are
+    # membercontrol-control-template.tsv, instantiated from operator and tyinfo facts.
+    types = [dict(name=name, code=code,
+                  wide=[1] if size >= 8 else [],
+                  narrow=[] if size >= 8 else [dict(values=sorted(
+                      {v for v, width, signedness in sources if width <= size and signedness == uns}))])
+             for name, code, size, uns, _ in tyint]
+    control('mask', dict(T=types), 'AS.mask.target')

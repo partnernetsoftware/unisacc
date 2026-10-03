@@ -31,7 +31,9 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `prepend` a=STATE d=JSON actions (actions run before every edge of STATE),
     `redirect` a=STATE b=OBSERVATION c=TARGET d=JSON actions (replace one existing edge),
     `insert-edge` a=STATE b=KEY c=TARGET d=JSON actions (KEY must be absent),
-    `fill-edge` a=STATE b=KEY c=TARGET d=JSON actions (existing KEY has precedence),
+    `fill-edge` a=STATE b=KEY c=TARGET d=JSON actions (existing KEY has precedence;
+    an absent STATE is created with the caller's mode, holding only KEY),
+    `append` a=STATE d=JSON actions (actions run after every edge of STATE),
     `drop-edge` a=STATE b=KEY (KEY must exist),
     `set-mode` a=STATE b=OLD c=NEW (OLD must match).
     `copy-state` a=SOURCE b=NEW (shallow alias, no target rewriting),
@@ -42,6 +44,13 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `label` a=STATE (STATE joins the graph's return-label set);
     `copy-replace` a=SOURCE b=NEW c=JSON action d=JSON actions (copy SOURCE with every
     occurrence of the action c replaced by the actions d; c must occur in SOURCE).
+    `rewrite-tail` a=JSON action patterns c=TARGET (empty: keep) d=JSON actions:
+    on every edge of every state whose action sequence ends with actions
+    matching the patterns (each pattern a prefix of its action tuple), those
+    trailing actions are replaced by d and the target by c.
+  - kind `fresh` emits nothing: its columns are only substituted, so a row
+    `fresh  {fresh@row:TAG:KIND}` allocates a label at that point of row order
+    (for chains that allocate a label before the edge that names it).
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -284,7 +293,10 @@ def expand_template(path, facts, fresh, section=None):
                         if kind != "rule":
                             modes[a2] = kind[5:]
                         out.append("\t".join((a2, b2, c2, d2)))
-                    elif kind in ("rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
+                    elif kind == "fresh":
+                        if b2:
+                            prev[b2] = a2
+                    elif kind in ("append", "rewrite-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -310,12 +322,23 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
         if kind == "label":
             g.labels.add(a)
             continue
+        if kind == "rewrite-tail":
+            pattern = json.loads(a)
+            replacement = [tuple(x) for x in json.loads(d)]
+            n = len(pattern)
+            for _, row in list(g.st.values()):
+                for key, (target, seq) in list(row.items()):
+                    acts = list(g.seqs[seq])
+                    if n and len(acts) >= n and all(
+                            list(x[:len(p)]) == p for x, p in zip(acts[-n:], pattern)):
+                        row[key] = (c or target, g.seq(acts[:-n] + replacement))
+            continue
         if kind == "copy":
             if a in g.st or b not in g.st:
                 raise ValueError(f"{where}: copy precondition failed {b} -> {a}")
             g.st[a] = g.st[b]
             continue
-        if a not in g.st:
+        if a not in g.st and kind != "fill-edge":
             raise ValueError(f"{where}: {kind} of absent state {a}")
         if kind == "drop-state":
             del g.st[a]
@@ -352,7 +375,7 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             if not b.isdecimal() or not 0 <= int(b) <= 256:
                 raise ValueError(f"{where}: invalid edge key {b}")
             key = int(b)
-            present = key in g.st[a][1]
+            present = a in g.st and key in g.st[a][1]
             if kind == "drop-edge":
                 if not present:
                     raise ValueError(f"{where}: absent edge {a}/{key}")
@@ -365,7 +388,7 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                 row = load(path, sequences or {}, domain=[key], bindings=bindings,
                            lines=["\t".join((a, b, c, d))])
                 target, actions = row[a][key]
-                g.on(a, [key], target, actions, g.st[a][0])
+                g.on(a, [key], target, actions, g.st[a][0] if a in g.st else mode)
                 g.labels.update(x[1] for x in actions if x[0] == "PUSH")
             continue
         if kind == "set-mode":
@@ -398,6 +421,7 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
         else:
             extra = [tuple(x) for x in json.loads(d)]
             for key, (target, seq) in list(g.st[a][1].items()):
-                g.st[a][1][key] = (target, g.seq(extra + list(g.seqs[seq])))
+                acts = list(g.seqs[seq])
+                g.st[a][1][key] = (target, g.seq(acts + extra if kind == "append" else extra + acts))
     if not lines and not edits:
         raise ValueError(f"{stem}: no template rows for section {section}")
