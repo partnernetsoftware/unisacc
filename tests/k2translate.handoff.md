@@ -362,3 +362,10 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   chk.sh (export + both modes + --check), genchk.sh STAGE (exec/build/gen.py stage sha). Changing exec/build/* -> run
   graphhash for every gen.py stage locally (coordinator rule). Worktree guard: avoid heredocs mixing git; write
   Python edit scripts to .k2tmp/ and run them.
+- Round 32 (branch worktree-agent-aaa06feb4c0200862, rebased on origin/main, not pushed):
+  Done (a): layoutprovenance.parser -> exec/layoutprovenance-manifest.tsv (call modelinput with
+  top-layoutprovenance-const RESOURCE; rows layoutprovenance parser with freshrows layoutprovenance-fresh.tsv@parser,
+  bind start=$start); gen2.py runs it via assemble.run, start='SF3.start'; parser() deleted from layoutprovenance.py.
+  sha SAME default 32fb8e3c.. and --warnings --errors 3a7edf34.. (export.py rerun, facts committed).
+  NOT started: (b) remaining wrapper calls -> segments, (c) E.results producers -> export, (d) parse2base switch.
+  Note: gen2.py writes to argv[1] (not stdout); .k2tmp/chk.sh writes .k2tmp/m0.json/m1.json and shasums them.

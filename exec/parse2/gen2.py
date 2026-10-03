@@ -498,8 +498,8 @@ def build(locations=False, warnings=False, errors=False):
         ('SBB','MBS','MPT','MAR','MOF','BFW','MSZ','BFO','BFS','SHAPE_IDS','SHAPE')}))   # K2: layoutfacts
     start = 'LF.start'
     assemble.run(Path(__file__).parent / 'valueranks-manifest.tsv', E, P, _flags, dict())   # K2: valueranks
-    from layoutprovenance import parser as source_provenance
-    start = source_provenance(E, P, start)
+    assemble.run(Path(__file__).parents[1] / 'layoutprovenance-manifest.tsv', E, P, {}, dict(start=start))   # K2: layoutprovenance parser
+    start = 'SF3.start'
     assemble.run(Path(__file__).parent / 'parenfold-manifest.tsv', E, P, _flags, dict(ordinal_table=TIX))   # K2: parenfold
     assemble.run(Path(__file__).parent / 'unitmode-manifest.tsv', E, P, _flags,   # K2: unitmode
                  dict(start=start, FND=E.FND, TK_extern=E.TK['type=extern'], TK_assign=E.TK['='],

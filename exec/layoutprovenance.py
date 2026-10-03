@@ -31,12 +31,7 @@ def _rules(E, P, section, bindings=None):
     install(E.g,root,'layoutprovenance',bindings,None,None,section)
 
 
-def parser(E, P, start):
-    import assemble
-    u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
-    u64(E,'SF3.resource',RESOURCE,'sf3_flag','sf3_present','SF3.fail')
-    _rules(E,P,'parser',dict(start=start))
-    return 'SF3.start'
+# parser frame: exec/layoutprovenance-manifest.tsv (call ../layoutprovenance from gen2).
 
 
 def units(E, P, locations=False, accept=None):
