@@ -381,3 +381,10 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   in cdx's file, call-site wiring only). Plain mode unchanged (facts mainnext DEAD + E.rej). sha SAME default 32fb8e3c,
   --errors 7ea0e979, --warnings --errors 3a7edf34. cdx's librarymodule manifest can now take lm_mainnext/lm_mainreject.
   Next: (b), then (1) when strings-initializer-manifest.tsv lands.
+  (b) partial: 9 shape_control singles that directly follow a segment are now `call shape` rows appended at the end
+  of that segment in gen2-manifest.tsv (ns-global-global1/3/5 typedef-shape/global-type/global-binding,
+  ns-function-function0/2/4 parameter-type/parameter-dimensions/descriptor-storage, ns-local-local0/4
+  local-type/local-binding, upd-id update-entry). sha SAME default/--errors/--warnings --errors.
+  Remaining (b): types() body, strwalk singles (statics-init IC.*), ladder(), shape pointee-width/sizeof-*/dereference/
+  value-load and later, update_control singles (step-entry/taxonomy/step0/step1), global-results glue, scope sb
+  round trip, then merge segments and drop seg_ gates.
