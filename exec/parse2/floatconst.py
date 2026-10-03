@@ -21,9 +21,8 @@ def rows(name):
 def install(E, P):
     g = E.g
     # Preserve the original numeric-reader replacement boundary.
-    g.st['SPANNUM.integer'] = g.st.pop('SPANNUM')
-    del g.st['NUMF']
-    del g.st['NUMFL']
+    from finite_rules import install_template
+    install_template(g, Path(__file__).parent, "floatconst", {}, None, section="boundary")
     sequences = {name: E.rej(message) for name, message in rows("reject")}
     def rules(section, tag="", base=0, size=""):
         bindings = dict(A=A, D=D, TK_FNUM=E.TK_FNUM, pool_base=base, pool_size=size)
@@ -36,16 +35,13 @@ def install(E, P):
     # Register rejection identity before scanner defaults, preserving diagnostic order.
     rules("entry")
     # A single byte/value relation supplies hex and both decimal scanners.
+    # Facts: each scanner context and the digits of its radix with their spellings.
+    digits = [{"value": int(value), "bytes": [int(byte) for byte in encoded.split(",")]} for value, encoded in rows("digits")]
     for state, target, radix, extra in rows("digit-contexts"):
-        for value, encoded in rows("digits"):
-            if int(value) >= int(radix):
-                continue
-            digits = [int(byte) for byte in encoded.split(",")]
-            for name, row in load_rules(Path(__file__).with_name("floatconst-byte.tsv"),
-                    {"digit_extra": json.loads(extra)}, domain=digits, classes={"digit": digits},
-                    bindings=dict(digit_state=state, digit_target=target, digit=int(value)), section="digit").items():
-                for key, (target_state, actions) in row.items():
-                    g.on(name, [key], target_state, actions)
+        ctx = {"state": state, "target": target, "digits": [d for d in digits if d["value"] < int(radix)],
+               "extra": "".join("," + json.dumps(x) for x in json.loads(extra))}
+        install_template(g, Path(__file__).parent, "floatconst", {"ctx": [ctx]}, None, section="digit", mode="b",
+                         domain=[b for d in ctx["digits"] for b in d["bytes"]])
 
     rules("main0")
     for tag, base, size in (("A", A, "df_n"), ("D", D, "df_dn")):
