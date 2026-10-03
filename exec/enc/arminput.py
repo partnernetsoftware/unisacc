@@ -1,11 +1,12 @@
 """ARM input/setup rules live in arminput-*.tsv; META initialization stays dynamic."""
 from tins import META
-KEYS=75000000
-SEEN=76000000
+from exec.facts.load import facts
+CONST = {r['name']: r['value'] for r in facts('enc-arminput-bindings')}
+KEYS, SEEN = CONST['KEYS'], CONST['SEEN']
 
 
 def init(p):
-    for key in ('imm','reg','mem','addr','setreg','gate','jump','jumpz','call','true','false','svc0','svc80','svc','arm','winapi','arm19','arm26'):
+    for key in facts('enc-arminput-keys'):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','id_'+key))
     for n,key in enumerate(META,1):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','t'),('LDI','u',n),('STX','t',KEYS,'u'))
@@ -14,7 +15,7 @@ def init(p):
 def install(E,word):
     from pathlib import Path
     from finite_rules import install as install_rules
-    bindings = {"KEYS": KEYS, "SEEN": SEEN}
+    bindings = dict(CONST)
     for line in Path(__file__).with_name("arminput-names.tsv").read_text().splitlines():
         if not line.startswith("#"):
             name, prefix, kind = line.split("\t")
