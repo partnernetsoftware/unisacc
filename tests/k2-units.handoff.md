@@ -42,3 +42,12 @@
   result=+foreach over the returned tags. Also drop the g.st[tag] assert and the load_rules overlap assert.
 - Not started: valueranks importers -> facts (gen2.py:61,64,702 slots/VALUEBANK; librarycallables.py:13),
   parenfold, unitmode, layoutprovenance, units entry.
+
+## Round 3 (2026-10-03)
+- valueranks.py deleted: gen2 reads exec/facts/valueranks.tsv (_VR banks, _RANKOF, local _slots);
+  librarycallables/libraryvariadic read LCSITERANK/LVSITERANK from facts; libraryvariadic's bank
+  namespace for `valueranks.` comes from facts. parse2 graphhash 10/10 identical (one 142 rerun).
+- errors next: the `reasons` section is a `group-tail` template kind that returns {reason: tag}; the per-tag
+  message loop needs result=+foreach over that return. Fresh kinds `ER_b`/`DP_b`/`UC_r` (owner_kind) need
+  a per-owner holder form in assemble/translator. Then @labels (approved) with the errors-stack table row
+  + decisionledger.allow line.

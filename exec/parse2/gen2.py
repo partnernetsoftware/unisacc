@@ -19,6 +19,17 @@ import sys as _s, pathlib as _p
 _s.path.insert(0, str(_p.Path(__file__).resolve().parents[1] / "facts"))
 from load import facts as _facts
 _LX = {r["name"]: r["value"] for r in _facts("libraryexports")}
+_VR = {r["name"]: r["value"] for r in _facts("valueranks") if r["kind"] == "bank"}   # exec/facts/valueranks.tsv
+_RANKOF = {r["name"]: r["value"] for r in _facts("valueranks") if r["kind"] == "rank"}
+
+
+def _slots(items):   # each value slot is followed by its rank companion (valueranks facts)
+    result = []
+    for item in items:
+        result.append(item)
+        companion = _RANKOF.get(item)
+        if companion and companion not in items: result.append(companion)
+    return result
 TYPERANK, MEMBERRANK, RETURNRANK, PARAMRANK = (_LX[k] for k in ("TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK"))
 import os
 import re
@@ -58,11 +69,9 @@ DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges tw
 
 class P(E.P):
     def vpush(self,*items):
-        from valueranks import slots
-        return super().vpush(*slots(items))
+        return super().vpush(*_slots(items))
     def vpop(self,*items):
-        from valueranks import slots
-        return super().vpop(*slots(items))
+        return super().vpop(*_slots(items))
     def __init__(self, name):
         DEFS[name, "P"] = DEFS.get((name, "P"), 0) + 1
         super().__init__(name)
@@ -699,8 +708,7 @@ def build(locations=False, warnings=False, errors=False):
     # Scope record fields are declared once; bind/unwind share their layout bindings.
     scope_bindings = {name: getattr(E, name) for name in
                       ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
-    from valueranks import VALUEBANK
-    scope_bindings.update(VALUEBANK=VALUEBANK, TYPERANK=TYPERANK, LOC=LOC, END_=END_, ENV=ENV, VLSIZE=VLSIZE, UNDO_SIZE=UNDO_SIZE, SHAPE=SHAPE, TDE=TDE)
+    scope_bindings.update(VALUEBANK=_VR["VALUEBANK"], TYPERANK=TYPERANK, LOC=LOC, END_=END_, ENV=ENV, VLSIZE=VLSIZE, UNDO_SIZE=UNDO_SIZE, SHAPE=SHAPE, TDE=TDE)
     for name, base, size in (("UNDO", E.UNDO, UNDO_SIZE), ("DIM", DIM, 8), ("PDB", PDB, 16)):
         scope_bindings.update((name + "_" + str(i), base + i) for i in range(size))
     scope_sequences = {name: row[0][1] for name, row in load_rules(

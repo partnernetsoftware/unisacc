@@ -4,7 +4,7 @@ The host receives only final length-framed declarations; no source decisions.
 SITEFN,SITEBIND,COUNT,DEPTH,BASE,SHAPE,NAMES,REQUESTS=(i<<40 for i in range(400,408))
 def install(E,P,b,integers):
     from libraryexports import RETURNRANK, PARAMRANK
-    from valueranks import LVSITERANK
+    from load import facts as _vrf; LVSITERANK={r['name']:r['value'] for r in _vrf('valueranks') if r['kind']=='bank'}['LVSITERANK']   # exec/facts/valueranks.tsv
     from libraryimports import BYNAME,FORMAT,IDS,PLAN,DISPATCH,CANON,RETKIND,RETWIDTH,SUPPORTED,NAMES as IMPORTNAMES
     from unresolved import DEFINED
     from libraryexports import SIGEPOCH
@@ -29,8 +29,10 @@ def install(E,P,b,integers):
     import importlib
     root=Path(__file__).parent
     bindings={'i32':next(code for name,code,_,_,_ in integers if name=='i32')}
+    import types
+    valueranks=types.SimpleNamespace(**{r['name']:r['value'] for r in _vrf('valueranks') if r['kind']=='bank'})   # exec/facts/valueranks.tsv banks
     for mn in ('libraryvariadic','libraryimports','libraryexports','valueranks','unresolved','modelsignature','modelcandidates'):
-        for k,v in vars(dict(modelsignature=modelsignature,modelcandidates=modelcandidates).get(mn) or importlib.import_module(mn)).items():
+        for k,v in vars(dict(modelsignature=modelsignature,modelcandidates=modelcandidates,valueranks=valueranks).get(mn) or importlib.import_module(mn)).items():
             if type(v) is int and v>=1<<40:bindings[(mn+'.' if mn!='libraryvariadic' else '')+k]=v
     for k,v in b.items():
         if type(v) is int:bindings['b.'+k]=v

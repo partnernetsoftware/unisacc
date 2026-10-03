@@ -10,7 +10,7 @@ globals().update((_r['name'],_t(_r['value'])) for _r in _facts('librarycallables
 assert not set(range(440,446)) & (set(range(72,83))|set(range(300,358))|set(range(400,438)))
 def install(E,P,b,start):
  from libraryexports import RETURNRANK, PARAMRANK
- from valueranks import LCSITERANK
+ from load import facts as _vrf; LCSITERANK={r['name']:r['value'] for r in _vrf('valueranks') if r['kind']=='bank'}['LCSITERANK']   # exec/facts/valueranks.tsv
  import assemble
  u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
  from libraryimports import BYNAME,ADDRESS,FORMAT,SUPPORTED,TYPEDSIG,PLAN
