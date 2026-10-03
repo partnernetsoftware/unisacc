@@ -29,15 +29,16 @@ def install(E, P):
             if part == name: bindings[key] = E.P.fresh(_Scope(prefix), kind)
         rules(g, root, "objectdefinitions", bindings, None, None, name)
 
-    def rename(state, old):
-        g.st[old] = g.st.pop(state)
-        g.labels.add(old)
+    from finite_rules import install_template
 
-    rename("GV.record", "OD.original.GV.record")
+    def edit(part, **facts):
+        install_template(g, root, "objectdefinitions", facts, None, section=part)
+
+    edit("hook", h=[{"state": "GV.record", "old": "OD.original.GV.record"}])
     section("od.entry")
-    g.st["GV.record"] = g.st["OD.entry"]
+    edit("alias", h=[{"state": "GV.record", "entry": "OD.entry"}])
     section("od.rest")
-    rename("FN.def1", "FD.original.FN.def1")
+    edit("hook", h=[{"state": "FN.def1", "old": "FD.original.FN.def1"}])
     section("fd.entry")
-    g.st["FN.def1"] = g.st["FD.entry"]
+    edit("alias", h=[{"state": "FN.def1", "entry": "FD.entry"}])
     section("fd.rest")
