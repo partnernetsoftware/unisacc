@@ -39,6 +39,9 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `drop-state` a=STATE (STATE must exist; removed with its edges, no target rewriting);
     `copy` a=NEW b=SOURCE is the destination-first hook form of `copy-state`;
     `clone-push` a=SOURCE b=NEW c=EXPECTED_TARGET d=NEW_CONTINUATION.
+    `label` a=STATE (STATE joins the graph's return-label set);
+    `copy-replace` a=SOURCE b=NEW c=JSON action d=JSON actions (copy SOURCE with every
+    occurrence of the action c replaced by the actions d; c must occur in SOURCE).
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -281,7 +284,7 @@ def expand_template(path, facts, fresh, section=None):
                         if kind != "rule":
                             modes[a2] = kind[5:]
                         out.append("\t".join((a2, b2, c2, d2)))
-                    elif kind in ("rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "move", "copy"):
+                    elif kind in ("rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -304,6 +307,9 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
         if kind == "alias":
             g.on(a, range(257), b, [], mode)
             continue
+        if kind == "label":
+            g.labels.add(a)
+            continue
         if kind == "copy":
             if a in g.st or b not in g.st:
                 raise ValueError(f"{where}: copy precondition failed {b} -> {a}")
@@ -318,6 +324,16 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             if b in g.st:
                 raise ValueError(f"{where}: {kind} onto existing state {b}")
             g.st[b] = g.st[a] if kind == "copy-state" else g.st.pop(a)
+            continue
+        if kind == "copy-replace":
+            if b in g.st:
+                raise ValueError(f"{where}: copy onto existing state {b}")
+            old, new = tuple(json.loads(c)), [tuple(x) for x in json.loads(d)]
+            smode, source = g.st[a]
+            if not any(old in g.seqs[q] for _, q in source.values()):
+                raise ValueError(f"{where}: copy-replace action absent from {a}")
+            g.st[b] = (smode, {key: (target, g.seq([y for x in g.seqs[q] for y in (new if x == old else [x])]))
+                               for key, (target, q) in source.items()})
             continue
         if kind == "clone-push":
             if b in g.st:
