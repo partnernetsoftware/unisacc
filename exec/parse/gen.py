@@ -12,6 +12,8 @@ import importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(ROOT, "exec", "facts"))
+from load import facts as _facts  # noqa: E402
 # Loaded by path, not by name.  There are nine modules called `gen.py` under
 # exec/, and `from gen import G` after a sys.path insert resolves against
 # sys.modules first: measured, if another one has already been imported under
@@ -60,14 +62,14 @@ HEADER = ("_start:\n  call __init\n  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n
           "  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n")
 FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 
-WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
-         "(", ")", "{", "}", ";", ",", "=", "!", "~",
-         "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue",
-         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]", "...", "type=double", "type=float", ".", "->", "sizeof", "switch", "case", "default", "enum", "goto", "union"]
+_FW = {}
+for _r in _facts("parse-words"):
+    _FW.setdefault(_r["group"], []).append(_r["value"])
+WORDS = _FW["words_pre"] + [o + "=" for o in _FW["casops"]] + sorted(PREC) + _FW["words_post"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR, TK_FNUM = 100, 101, 102, 103, 104, 105
-CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
+CASOPS = tuple(_FW["casops"])
 GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 TDD, TDB = 15 * 10 ** 6, 16 * 10 ** 6  # a typedef name's pointer depth and base size (typedef char *va_list: 1, 1)
@@ -80,7 +82,7 @@ FRD, FRB = 12 * 10 ** 6, 13 * 10 ** 6  # per function: return pointer depth and 
 DPR = 18 * 10 ** 6  # DPR[f] = 1: f has a double parameter (an int argument would be converted: not covered)
 VAR = 17 * 10 ** 6  # VAR[f] = 1: f was defined `(..., ...)` (its parameters arrive on the stack)
 AUT, AUD = 19 * 10 ** 6, 20 * 10 ** 6  # AUT[v] = 1: v is a header function the reference auto-includes; AUD[v] = 2: defined here
-VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy is undefined there: measured)
+VANAMES = tuple(_FW["vanames"])   # the reference's builtins (va_copy is undefined there: measured)
 # struct layouts: STAG[tag] = sid (1..63); SSZ[sid] = size; member key v*64 + sid ->
 # MOF offset, MSZ size, MPT pointer depth, MBS base size.  Measured: each member is
 # aligned to its own size, the struct's size is rounded up to its largest member
@@ -92,7 +94,7 @@ SBB = 3840       # base code of a struct: SBB + sid (a local's BASE; its size is
                  # 3712 signatures and still keeps SBB + STRUCT_MAX (128) below 4096.
 STAG, SSZ, MOF, MSZ, MPT, MBS = (21 * 10 ** 6, 22 * 10 ** 6, 23 * 10 ** 6, 24 * 10 ** 6,
                                  25 * 10 ** 6, 26 * 10 ** 6)
-TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
+TWORDS = tuple(_FW["twords"])
 
 g = G()
 
