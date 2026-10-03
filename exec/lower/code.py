@@ -253,7 +253,7 @@ def install(E, arch="x86_64", os_="lnx"):
                       argv_add=E.O('\nadd64 '+s0+', '+s0+', '+s1+'\nload64 '), newline=E.O('\n'), load=E.O('load64 ')))
     from modelbindings import install as install_decoder
     from modelbindings import IDS, ADDRESS, DESC, KIND as BKIND, SUPPORTED, WRITABLE, EXTENT, STRIDE
-    from data import DEFINED
+    DEFINED = assemble.load_facts('lower-data')['DEFINED']
     install_decoder(E)
     hosted=dict(hosted=os_ in ('osx','lnx','win'))
     assemble.run(Path(__file__).parent/'libraryimports-manifest.tsv', E, P, hosted,

@@ -9,7 +9,7 @@ sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(ROOT/"exec"))
 spec=importlib.util.spec_from_file_location('lowerbase',ROOT/'exec/parse/gen.py')
 E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
-from data import install
+import assemble
 args=sys.argv[2:]
 full='--full' in args
 target=('win' if '--win' in args else 'osx' if '--osx' in args else 'lnx')+'/'+('arm64' if '--arm64' in args else 'x86_64')
@@ -17,7 +17,8 @@ if len(sys.argv)<2 or len(args)!=len(set(args)) or any(a not in ('--full','--arm
     sys.exit("usage: gen.py OUT.json [--full] [--arm64] [--osx|--win] [--object]")
 if '--win' in args and '--osx' in args:
     sys.exit("choose one OS")
-install(E,code_start="C.prelude" if full else "H.code",target=target)
+assemble.run(pathlib.Path(__file__).parent/"data-manifest.tsv",E,E.P,dict(win=target.startswith("win/")),
+             dict(target=target,os=target.split("/")[0],done="ACCEPTDATA",code_start="C.prelude" if full else "H.code"))
 if full:
     from code import install as install_code
     install_code(E,arch=target.split("/")[1],os_=target.split("/")[0])

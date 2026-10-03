@@ -97,6 +97,18 @@ def _section(s, flags):
     return re.sub(r"\{(\w+)\?([^}]*)\}", lambda m: m.group(2) if flags[m.group(1)] else "", s)
 
 
+# ---- K2 round 2 slice D/E (lower data): generic additions ------------------
+# value `@out:TEXT`: OUT byte sequence of TEXT after str-unescape (\n, \t) and
+#   `{NAME}` substitution from the row's facts/env (a literal comma is `\x2c`);
+# op `e`: call the executor primitive E.STEM() (no arguments), e.g. prn.
+def _out(text, facts):
+    t = re.sub(r"\{(\w+)\}", lambda m: str(facts[m.group(1)]), text)
+    t = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), t)
+    t = _cell("str", t)
+    return [("OUT", c) for c in t.encode()]
+# ---- end K2 round 2 additions -----------------------------------------------
+
+
 class Run:
     def __init__(self, E, P, flags, env):
         self.E, self.P, self.flags, self.env = E, P, flags, env
@@ -145,6 +157,8 @@ class Run:
             t = v[7:]
             t = str(_path(facts, t[1:])) if t.startswith("=") else t
             return [("SBOUT", c) for c in t.encode()]
+        if v.startswith("@out:"):
+            return _out(v[5:], facts)
         if v.startswith("$"):
             return self.env[v[1:]]
         if v.startswith("fresh:"):
@@ -227,6 +241,8 @@ class Run:
         elif op == "call":
             sub = Run(self.E, self.P, self.flags, dict(self.env, **(bd or {})))
             res = sub.run(self.root / (stem + "-manifest.tsv"))
+        elif op == "e":
+            res = getattr(self.E, stem)()
         elif op == "label":
             g.labels.update(stem.split(","))
         elif op == "assert-absent":
