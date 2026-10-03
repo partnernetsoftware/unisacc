@@ -20,17 +20,14 @@ def install(E,P,b,start):
   if module is not None and module.__name__!=__name__:
    assert not owned.intersection(v for v in vars(module).values() if type(v) is int and v>=1<<40),module.__name__
  g=E.g
- def hook(name,enabled):
-  old='LC.original.'+name;g.st[old]=g.st.pop(name);g.labels.add(old)
-  alias='LC.hook.'+name;P(alias).branch({1:enabled},old,[('CMPI','lc_enabled',1)]);g.st[name]=g.st[alias]
- # Stage control: librarycallables-result.tsv sections s1..s14, split around the
- # hook()/u64/state-alias statements below so the global fresh order is unchanged.
+ # Stage control: librarycallables-result.tsv sections s1..s14; parent-row edits (hooks,
+ # renames to LC.original.*, aliases) in librarycallables-template.tsv, interleaved below so the global fresh order is unchanged.
  # Python binds only dynamic facts: bank ids, b[...]/E descriptor codes, the start
  # continuation, the FS.CALLTYPE continuation (fpcont), and fresh labels allocated in
  # librarycallables-fresh.tsv order. Output text rows are ["@","out:TEXT"] sequences.
  import json
  from pathlib import Path
- from finite_rules import install as rules
+ from finite_rules import install as rules,install_template
  root=Path(__file__).parent
  fresh=[l.split('\t') for l in (root/'librarycallables-fresh.tsv').read_text().splitlines()[1:]]
  sequences={}
@@ -52,6 +49,13 @@ def install(E,P,b,start):
    if prefix not in owners:owners[prefix]=P(prefix+'.fresh.librarycallables.'+name)
    bindings[key]=owners[prefix].fresh(kind)
   rules(g,root,'librarycallables',bindings,sequences,classes,section=name)
+ class _Scope:
+  def __init__(self,cur):self.cur=cur
+ def tmpl(name,**facts):
+  install_template(g,root,'librarycallables',facts,lambda kind:E.P.fresh(_Scope('LC'),kind),section=name)
+ def move(old,new):tmpl('move',m=[dict(old=old,new=new)])
+ def hook(name,proc):move(name,'LC.original.'+name);tmpl('hookcall',h=[dict(name=name,proc=proc)])
+ def alias(new,src):tmpl('copy',c=[dict(new=new,src=src)])
  u64(E,'LC.resource',b'\0library/callables','lc_enabled','lc_present','LX.fail')
  u64(E,'LC.makeaddr',b'\0library/callablemake','lc_make','lc_makepresent','LX.fail')
  u64(E,'LC.calladdr',b'\0library/callablecall','lc_call','lc_callpresent','LX.fail')
@@ -63,7 +67,7 @@ def install(E,P,b,start):
  # Override the continuation immediately after FS.CALLTYPE, preserving parser stack.
  continuations={a[1] for name,(mode,row) in g.st.items() for nx,q in row.values() if nx=='FS.CALLTYPE' for a in g.seqs[q] if a[0]=='PUSH'}
  assert len(continuations)==1,continuations
- name=continuations.pop();old='LC.original.fpclassified';g.st[old]=g.st.pop(name);g.labels.add(old)
+ name=continuations.pop();move(name,'LC.original.fpclassified')
  section('s3',fpcont=name)
  hook('CL.ok','LC.named')
  section('s4')
@@ -80,17 +84,17 @@ def install(E,P,b,start):
  hook('S.rs','LC.structreturn')
  section('s8')
  # Force the final wrapper pass even when no native imports were registered.
- oldcalls='LC.original.calls0';g.st[oldcalls]=g.st.pop('UD.calls0');g.labels.add(oldcalls)
+ move('UD.calls0','LC.original.calls0')
  section('s9')
- g.st['UD.calls0']=g.st['LC.calls0select']
+ alias('UD.calls0','LC.calls0select')
  section('s10')
  # Emit source/native introductions only after final source-priority facts exist.
- old='LC.original.wrapend';g.st[old]=g.st.pop('LI.wrapend');g.labels.add(old)
+ move('LI.wrapend','LC.original.wrapend')
  section('s11')
- g.st['LI.wrapend']=g.st['LC.wrapendselect']
+ alias('LI.wrapend','LC.wrapendselect')
  section('s12')
- old='LC.original.outer';g.st[old]=g.st.pop('LX.outer');g.labels.add(old)
+ move('LX.outer','LC.original.outer')
  section('s13')
- g.st['LX.outer']=g.st['LC.outerselect']
+ alias('LX.outer','LC.outerselect')
  section('s14')
  return 'LC.start'
