@@ -262,10 +262,9 @@ class Run:
         res = None
         if op == "fresh":
             return self.fresh_table(stem, o)
-        bd = self.bindings(o, bind, facts)
         if op == "retarget":
             return self.retarget(self.value(stem, facts), o)
-        bd = self.cells(bind, facts)
+        bd = self.bindings(o, bind, facts)
         for k in o.get("export", []):
             self.env[k] = bd[k]
         sq = self.cells(seq, facts)
