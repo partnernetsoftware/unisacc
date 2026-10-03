@@ -3,163 +3,40 @@ No source allocator or host ABI classifier. Actual bit intervals stay separate
 from container extent. Anonymous SysV lanes qualify only if both known unnamed
 bitfield policies agree. BANK, modifiers and incomplete facts reject.
 """
+import json,pathlib
+from finite_rules import install as install_rules
 from modelgraphequality import EXTRA,ENTRYEXTRA,EDGES,LAYOUT
 # Additional values saved by NL's existing isolated recursive frame.
 REGS=('nl_bitoffset','nl_bitwidth','nl_entrykind','nl_entryalign','nl_cursor',
       'nl_accblo','nl_accbhi','nl_accanon','nl_acccount','nl_hcountchild')
 # ol_packed is deliberately NOT frame-saved: one packed node anywhere marks the whole object.
 def install(E,field,word,constword,blob,extents,alignments):
- P=E.P
- def extra(p,index,reg,node='ol_node'):
-  return p.a(('ALUI','mul','nc_key',node,8),('ALUI','add','nc_key','nc_key',index),('LDX',reg,'nc_key',EXTRA))
- def check(name,reg,value,nx):P(name).branch({1:nx},'NC.sourcefactsfail',[('LDI','ol_expect',value),('C64U',reg,'ol_expect')])
- P('OL.ncmeta').branch({1:'OL.ncmetaread'},'OL.return',[('CMPI','nc_version',3)])
- P('OL.ncmetaread').a(('COPYW','ol_node','nc_node'),('LDI','ol_packed',0)).call('OL.meta').ret()
- P('OL.return').ret()
- p=P('OL.meta')
- for i,reg in ((1,'ol_rank'),(2,'ol_format'),(3,'ol_natural'),(4,'ol_flags'),(5,'ol_known'),(6,'ol_origin')):extra(p,i,reg)
- field(p,3,'ol_kind','ol_node');field(p,6,'ol_alignment','ol_node').branch({(1,2):'OL.known'},'NC.sourcefactsfail',[('RLD','ol_origin')])
- check('OL.known','ol_known',3,'OL.flags');check('OL.flags','ol_flags',0,'OL.natural')
- # natural<alignment never; natural>alignment is an explicit packed layout, admitted only
- # for external (origin 2) aggregates. Source facts (origin 1) with pack stay refused.
- P('OL.natural').branch({1:'OL.fpmeta',2:'OL.packedkind'},'NC.sourcefactsfail',[('C64U','ol_natural','ol_alignment')])
- P('OL.packedkind').branch({5:'OL.packedorigin'},'NC.sourcefactsfail',[('RLD','ol_kind')])
- P('OL.packedorigin').branch({2:'OL.packedmark'},'NC.sourcefactsfail',[('RLD','ol_origin')])
- P('OL.packedmark').a(('LDI','ol_packed',1)).goto('OL.return')
- P('OL.fpmeta').branch({3:'OL.rank'},'OL.return',[('RLD','ol_kind')])
- P('OL.rank').branch({1:'OL.float',2:'OL.double',3:'OL.longdouble'},'NC.sourcefactsfail',[('RLD','ol_rank')])
- check('OL.float','ol_format',1,'OL.return');check('OL.double','ol_format',2,'OL.return')
- # long double: certified only where the target's long double IS IEEE64 and the
- # source stored it as F64. x87 and IEEE128 targets reject explicitly: a rank-3
- # value folded to F64 must never pass there.
- check('OL.longdouble','ol_format',2,'OL.longdoubletarget');check('OL.longdoubletarget','nc_ldformat',2,'OL.return')
- P('OL.validate').a(('COPYW','ol_node','nl_node')).call('OL.meta').branch({5:'OL.aggregate'},'OL.leaf',[('RLD','nl_kind')])
- P('OL.leaf').call('NL.validate').a(('LDI','nl_anon',0),('LDI','nl_hcount',0),('LDI','nl_blo',0),('LDI','nl_bhi',0),('LDI','ol_begin',0),('ALUI','mul','ol_end','nl_width',8)).call('OL.interval').a(('COPYW','nl_blo','ol_lo'),('COPYW','nl_bhi','ol_hi')).branch({3:'OL.leafhfa'},'OL.return',[('RLD','nl_kind')])
- P('OL.leafhfa').a(('LDI','nl_hcount',1)).ret()
- # Construct <=128-bit intervals bit-by-bit; never shift by64.
- P('OL.interval').a(('LDI','ol_lo',0),('LDI','ol_hi',0),('LDI','ol_bytes',0),('COPYW','ol_bit','ol_begin')).goto('OL.intervaltest')
- P('OL.intervaltest').branch({0:'OL.intervalbit'},'OL.return',[('C64U','ol_bit','ol_end')])
- P('OL.intervalbit').a(('ALUI','rem','ol_shift','ol_bit',64),('LDI','ol_one',1),('A64','shl','ol_one','ol_one','ol_shift'),('ALUI','div','ol_byte','ol_bit',8),('LDI','ol_byteone',1),('ALU','shl','ol_byteone','ol_byteone','ol_byte'),('ALU','or','ol_bytes','ol_bytes','ol_byteone')).branch({0:'OL.intervallow'},'OL.intervalhigh',[('CMPI','ol_bit',64)])
- P('OL.intervallow').a(('A64','or','ol_lo','ol_lo','ol_one')).goto('OL.intervalnext')
- P('OL.intervalhigh').a(('A64','or','ol_hi','ol_hi','ol_one')).goto('OL.intervalnext')
- P('OL.intervalnext').a(('ALUI','add','ol_bit','ol_bit',1)).goto('OL.intervaltest')
- P('OL.aggregate').branch({1:'OL.aggtag'},'NC.unsupported',[('CMPI','nl_depth',0)])
- P('OL.aggtag').branch({(1,2,3):'OL.aggalign'},'NC.unsupported',[('RLD','nl_tag')])
- P('OL.aggalign').branch({(1,2,4,8):'OL.aggwidth'},'NC.unsupported',[('RLD','nl_align')])
- P('OL.aggwidth').branch({extents:'OL.aggcount'},'NC.unsupported',[('RLD','nl_width')])
- field(P('OL.aggcount'),8,'nl_count','nl_node').branch({1:'NC.unsupported'},'OL.aggcountmax',[('CMPI','nl_count',0)])
- P('OL.aggcountmax').branch({2:'NC.unsupported'},'OL.aggstart',[('CMPI','nl_count',128)])
- field(P('OL.aggstart'),9,'nl_stride','nl_node').a(('COPYW','nl_parent','nl_node'),('LDI','nl_index',0),('LDI','nl_cursor',0),('LDI','nl_maxalign',1),('LDI','nl_accmask',0),('LDI','nl_accint',0),('LDI','nl_accfp',0),('LDI','nl_accblo',0),('LDI','nl_accbhi',0),('LDI','nl_accanon',0),('LDI','nl_acchfa',99),('LDI','nl_acccount',0)).goto('OL.loop')
- P('OL.loop').a(('ALUI','mul','nc_key','nl_parent',1025)).branch({3:'OL.arrayedge'},'OL.memberedge',[('RLD','nl_tag')])
- P('OL.arrayedge').a(('LDX','nl_child','nc_key',EDGES),('ALU','mul','nl_offset','nl_index','nl_stride'),('LDI','nl_entrykind',0)).goto('OL.childfields')
- p=P('OL.memberedge').a(('ALU','add','nc_key','nc_key','nl_index'),('LDX','nl_child','nc_key',EDGES),('COPYW','ol_entrykey','nc_key'),('ALUI','mul','nc_key','nc_key',3),('ALUI','add','nc_key','nc_key',1),('LDX','nl_entrykind','nc_key',ENTRYEXTRA),('ALUI','add','nc_key','nc_key',1),('LDX','nl_entryalign','nc_key',ENTRYEXTRA),('ALUI','mul','nc_key','ol_entrykey',4))
- for i,reg in enumerate(('nl_offset','nl_bitoffset','nl_bitwidth','nl_storage')):
-  if i:p.a(('ALUI','add','nc_key','nc_key',1))
-  p.a(('LDX',reg,'nc_key',LAYOUT))
- p.goto('OL.childfields')
- p=field(P('OL.childfields'),4,'nl_cwidth','nl_child');field(p,6,'nl_calign','nl_child').a(('COPYW','ol_node','nl_child')).call('OL.meta').branch({3:'OL.arraylayout'},'OL.entryalign',[('RLD','nl_tag')])
- P('OL.entryalign').branch({1:'OL.kind',0:'OL.packedentry'},'NC.unsupported',[('C64U','nl_entryalign','nl_calign')])
- # Reduced effective alignment: only inside a packed external object, only for ordinary
- # members; placement and the object's alignment then follow the effective alignment.
- P('OL.packedentry').branch({1:'OL.packedentrykind'},'NC.unsupported',[('CMPI','ol_packed',1)])
- P('OL.packedentrykind').branch({(0,4):'OL.packedentryalign'},'NC.unsupported',[('RLD','nl_entrykind')])
- P('OL.packedentryalign').a(('COPYW','nl_calign','nl_entryalign')).goto('OL.ordinary')
- P('OL.kind').branch({(0,4):'OL.ordinary',(1,2,3):'OL.bitfield'},'NC.unsupported',[('RLD','nl_entrykind')])
- P('OL.arraylayout').branch({1:'OL.ordinary'},'NC.unsupported',[('C64U','nl_stride','nl_cwidth')])
- P('OL.ordinary').a(('ALUI','mul','ol_begin','nl_offset',8),('ALUI','mul','ol_end','nl_cwidth',8),('ALU','add','ol_end','ol_end','ol_begin')).goto('OL.ordinarylayout')
- P('OL.ordinarylayout').branch({2:'OL.unionordinary'},'OL.structordinary',[('RLD','nl_tag')])
- P('OL.unionordinary').branch({1:'OL.childwalk'},'NC.unsupported',[('CMPI','nl_offset',0)])
- P('OL.structordinary').a(('ALUI','add','ol_expected','nl_cursor',7),('ALUI','div','ol_expected','ol_expected',8),('ALU','add','ol_expected','ol_expected','nl_calign'),('ALUI','sub','ol_expected','ol_expected',1),('ALU','div','ol_expected','ol_expected','nl_calign'),('ALU','mul','ol_expected','ol_expected','nl_calign')).branch({1:'OL.childwalk'},'NC.unsupported',[('C64U','nl_offset','ol_expected')])
- P('OL.childwalk').a(('COPYW','nl_node','nl_child')).call('NL.walk').goto('OL.childshift')
- P('OL.childshift').a(('ALUI','mul','ol_shift','nl_offset',8)).branch({1:'OL.childmerge'},'OL.childshiftbound',[('CMPI','ol_shift',0)])
- P('OL.childshiftbound').branch({0:'OL.childshiftlow'},'OL.childshifthigh',[('CMPI','ol_shift',64)])
- P('OL.childshiftlow').a(('LDI','ol_other',64),('ALU','sub','ol_other','ol_other','ol_shift'),('A64','shr','ol_carry','nl_blo','ol_other'),('A64','shl','nl_bhi','nl_bhi','ol_shift'),('A64','or','nl_bhi','nl_bhi','ol_carry'),('A64','shl','nl_blo','nl_blo','ol_shift')).goto('OL.childmerge')
- P('OL.childshifthigh').a(('ALUI','sub','ol_shift','ol_shift',64),('A64','shl','nl_bhi','nl_blo','ol_shift'),('LDI','nl_blo',0)).goto('OL.childmerge')
- P('OL.childmerge').a(('ALU','shl','nl_mask','nl_mask','nl_offset'),('ALU','shl','nl_imask','nl_imask','nl_offset'),('ALU','shl','nl_fmask','nl_fmask','nl_offset'),('ALU','shl','nl_anon','nl_anon','nl_offset'),('COPYW','nl_hcountchild','nl_hcount')).goto('OL.merge')
- # Placement is checked using the occupied bit cursor, not container ends.
- P('OL.bitfield').branch({(1,2,4,8):'OL.bitnatural'},'NC.unsupported',[('RLD','nl_cwidth')])
- P('OL.bitnatural').branch({1:'OL.bitstart'},'NC.unsupported',[('C64U','nl_calign','nl_cwidth')])
- P('OL.bitstart').a(('ALUI','mul','ol_begin','nl_offset',8),('ALU','add','ol_begin','ol_begin','nl_bitoffset'),('ALU','add','ol_end','ol_begin','nl_bitwidth')).branch({2:'OL.bitunion'},'OL.bitplace',[('RLD','nl_tag')])
- P('OL.bitunion').branch({1:'OL.bitunionoffset'},'NC.unsupported',[('CMPI','nl_offset',0)])
- P('OL.bitunionoffset').branch({1:'OL.bitplaced'},'NC.unsupported',[('CMPI','nl_bitoffset',0)])
- P('OL.bitplace').a(('ALUI','mul','ol_unit','nl_calign',8),('COPYW','ol_expected','nl_cursor')).branch({3:'OL.bitalign'},'OL.bitremaining',[('RLD','nl_entrykind')])
- P('OL.bitremaining').a(('ALU','rem','ol_remaining','nl_cursor','ol_unit'),('ALU','sub','ol_remaining','ol_unit','ol_remaining')).branch({2:'OL.bitalign'},'OL.bitcompare',[('C64U','nl_bitwidth','ol_remaining')])
- P('OL.bitalign').a(('ALU','add','ol_expected','nl_cursor','ol_unit'),('ALUI','sub','ol_expected','ol_expected',1),('ALU','div','ol_expected','ol_expected','ol_unit'),('ALU','mul','ol_expected','ol_expected','ol_unit')).goto('OL.bitcompare')
- P('OL.bitcompare').branch({1:'OL.bitplaced'},'NC.unsupported',[('C64U','ol_begin','ol_expected')])
- P('OL.bitplaced').a(('ALU','rem','ol_remainder','nl_offset','nl_calign')).branch({1:'OL.bitplacedkind'},'NC.unsupported',[('CMPI','ol_remainder',0)])
- P('OL.bitplacedkind').branch({3:'OL.barrier'},'OL.bitinterval',[('RLD','nl_entrykind')])
- P('OL.barrier').a(('COPYW','nl_cursor','ol_begin')).goto('OL.maxalign')
- P('OL.bitinterval').call('OL.interval').a(('COPYW','nl_blo','ol_lo'),('COPYW','nl_bhi','ol_hi'),('COPYW','nl_mask','ol_bytes'),('LDI','nl_imask',0),('LDI','nl_fmask',0),('LDI','nl_anon',0),('LDI','nl_hfa',0),('LDI','nl_hcountchild',0)).branch({2:'OL.anonymous'},'OL.named',[('RLD','nl_entrykind')])
- P('OL.named').a(('COPYW','nl_imask','nl_mask')).goto('OL.merge')
- P('OL.anonymous').a(('COPYW','nl_anon','nl_mask')).goto('OL.merge')
- P('OL.merge').branch({2:'OL.mergewrite'},'OL.overlap',[('RLD','nl_tag')])
- P('OL.overlap').a(('A64','and','ol_overlap','nl_accblo','nl_blo'),('A64','and','ol_overlap2','nl_accbhi','nl_bhi'),('A64','or','ol_overlap','ol_overlap','ol_overlap2')).branch({1:'OL.mergewrite'},'NC.unsupported',[('LDI','ol_zero',0),('C64U','ol_overlap','ol_zero')])
- P('OL.mergewrite').a(('A64','or','nl_accblo','nl_accblo','nl_blo'),('A64','or','nl_accbhi','nl_accbhi','nl_bhi'),('ALU','or','nl_accmask','nl_accmask','nl_mask'),('ALU','or','nl_accint','nl_accint','nl_imask'),('ALU','or','nl_accfp','nl_accfp','nl_fmask'),('ALU','or','nl_accanon','nl_accanon','nl_anon')).branch({1:'OL.hfaset'},'OL.hfacompare',[('CMPI','nl_acchfa',99)])
- P('OL.hfaset').a(('COPYW','nl_acchfa','nl_hfa')).goto('OL.hfacount')
- P('OL.hfacompare').branch({1:'OL.hfacount'},'OL.hfainvalid',[('C64U','nl_acchfa','nl_hfa')])
- P('OL.hfainvalid').a(('LDI','nl_acchfa',0)).goto('OL.hfacount')
- P('OL.hfacount').branch({2:'OL.hfaunioncount'},'OL.hfastructcount',[('RLD','nl_tag')])
- P('OL.hfastructcount').a(('ALU','add','nl_acccount','nl_acccount','nl_hcountchild')).goto('OL.cursor')
- P('OL.hfaunioncount').branch({2:'OL.hfasetcount'},'OL.cursor',[('C64U','nl_hcountchild','nl_acccount')])
- P('OL.hfasetcount').a(('COPYW','nl_acccount','nl_hcountchild')).goto('OL.cursor')
- P('OL.cursor').a(('ALUI','mul','ol_end','nl_offset',8)).branch({(1,2):'OL.cursorbit'},'OL.cursorordinary',[('RLD','nl_entrykind')])
- P('OL.cursorbit').a(('ALU','add','ol_end','ol_end','nl_bitoffset'),('ALU','add','ol_end','ol_end','nl_bitwidth')).goto('OL.cursormax')
- P('OL.cursorordinary').a(('ALUI','mul','ol_size','nl_cwidth',8),('ALU','add','ol_end','ol_end','ol_size')).goto('OL.cursormax')
- P('OL.cursormax').branch({2:'OL.cursorset'},'OL.maxalign',[('C64U','ol_end','nl_cursor')])
- P('OL.cursorset').a(('COPYW','nl_cursor','ol_end')).goto('OL.maxalign')
- P('OL.maxalign').branch({2:'OL.setalign'},'OL.next',[('C64U','nl_calign','nl_maxalign')])
- P('OL.setalign').a(('COPYW','nl_maxalign','nl_calign')).goto('OL.next')
- P('OL.next').a(('ALUI','add','nl_index','nl_index',1)).branch({1:'OL.endalign'},'OL.loop',[('C64U','nl_index','nl_count')])
- P('OL.endalign').branch({1:'OL.endextent'},'NC.unsupported',[('C64U','nl_align','nl_maxalign')])
- P('OL.endextent').a(('ALUI','add','ol_expected','nl_cursor',7),('ALUI','div','ol_expected','ol_expected',8),('ALU','add','ol_expected','ol_expected','nl_align'),('ALUI','sub','ol_expected','ol_expected',1),('ALU','div','ol_expected','ol_expected','nl_align'),('ALU','mul','ol_expected','ol_expected','nl_align')).branch({1:'OL.result'},'NC.unsupported',[('C64U','nl_width','ol_expected')])
- P('OL.result').a(('COPYW','nl_mask','nl_accmask'),('COPYW','nl_imask','nl_accint'),('COPYW','nl_fmask','nl_accfp'),('COPYW','nl_blo','nl_accblo'),('COPYW','nl_bhi','nl_accbhi'),('COPYW','nl_anon','nl_accanon'),('COPYW','nl_hfa','nl_acchfa'),('COPYW','nl_hcount','nl_acccount')).ret()
- # V3 aggregates become genuine natural struct carriers, retaining one object.
- P('OL.certify').a(('LDI','nl_level',0),('COPYW','nl_node','nc_node')).call('NL.walk').branch({1:'OL.family'},'OL.packedfamily',[('CMPI','ol_packed',0)])
- P('OL.family').branch({0:'OL.sysv',1:'OL.arm',2:'OL.gp'},'NC.unsupported',[('RLD','nc_family')])
- # Packed objects: AAPCS64 and Win64 copy composites by size, so the carrier is the
- # declared-alignment integer array (uint8[N] for pack(1)). SysV classifies unaligned
- # fields as MEMORY, which needs BANK: refused. Any FP leaf inside is refused (HFA open).
- P('OL.packedfamily').branch({(1,2):'OL.packedfp'},'NC.unsupported',[('RLD','nc_family')])
- P('OL.packedfp').branch({1:'OL.gp'},'NC.unsupported',[('CMPI','nl_fmask',0)])
- P('OL.sysv').a(('ALUI','and','ol_low','nl_imask',255),('ALUI','and','ol_high','nl_imask',65280),('ALUI','and','ol_anlow','nl_anon',255),('ALUI','and','ol_anhigh','nl_anon',65280)).goto('OL.anonlow')
- P('OL.anonlow').branch({1:'OL.anonhigh'},'OL.anonlowint',[('CMPI','ol_anlow',0)])
- P('OL.anonlowint').branch({1:'NC.policyfail'},'OL.anonhigh',[('CMPI','ol_low',0)])
- P('OL.anonhigh').branch({1:'OL.sysvclasses'},'OL.anonhighint',[('CMPI','ol_anhigh',0)])
- P('OL.anonhighint').branch({1:'NC.policyfail'},'OL.sysvclasses',[('CMPI','ol_high',0)])
- P('OL.sysvclasses').a(('LDI','ol_classlo',1),('LDI','ol_classhi',1)).branch({1:'OL.sysvlowfp'},'OL.sysvlowint',[('CMPI','ol_low',0)])
- P('OL.sysvlowint').a(('LDI','ol_classlo',2)).goto('OL.sysvhigh')
- P('OL.sysvlowfp').a(('ALUI','and','ol_fp','nl_fmask',255)).branch({1:'NC.unsupported'},'OL.sysvhigh',[('CMPI','ol_fp',0)])
- P('OL.sysvhigh').branch({2:'OL.sysvhighclass'},'OL.choose',[('CMPI','nc_width',8)])
- # CMPI equal=>1: for width16 continue, for small go choose.
- P('OL.sysvhighclass').branch({1:'OL.sysvhighfp'},'OL.sysvhighint',[('CMPI','ol_high',0)])
- P('OL.sysvhighint').a(('LDI','ol_classhi',2)).goto('OL.choose')
- P('OL.sysvhighfp').a(('ALUI','and','ol_fp','nl_fmask',65280)).branch({1:'NC.unsupported'},'OL.choose',[('CMPI','ol_fp',0)])
- P('OL.arm').branch({0:'OL.gp',4:'OL.hfa',8:'OL.hfa'},'NC.unsupported',[('RLD','nl_hfa')])
- P('OL.hfa').a(('ALU','mul','ol_size','nl_hfa','nl_hcount')).branch({1:'OL.hfacountbound'},'NC.unsupported',[('C64U','ol_size','nc_width')])
- P('OL.hfacountbound').branch({2:'NC.unsupported'},'OL.fp',[('CMPI','nl_hcount',4)])
- P('OL.fp').branch({1:'OL.fpaligned'},'NC.unsupported',[('C64U','nl_hfa','nc_alignment')])
- P('OL.fpaligned').a(('LDI','ol_classlo',1),('LDI','ol_classhi',1)).goto('OL.choose')
- P('OL.gp').a(('LDI','ol_classlo',2),('LDI','ol_classhi',2)).goto('OL.choose')
- P('OL.choose').a(('ALUI','mul','ol_code','ol_classlo',3),('ALU','add','ol_code','ol_code','ol_classhi')).goto('OL.widthrecipe')
- # The finite domain comes from rules.tsv; emission uses one bounded loop.
- P('OL.widthrecipe').branch({extents:'OL.recipealignment'},'NC.unsupported',[('RLD','nc_width')])
- P('OL.recipealignment').branch({alignments:'OL.recipedivides'},'NC.unsupported',[('RLD','nc_alignment')])
- P('OL.recipedivides').a(('ALU','rem','ol_remainder','nc_width','nc_alignment')).branch({1:'OL.recipelow'},'NC.unsupported',[('CMPI','ol_remainder',0)])
- P('OL.recipelow').branch({1:'OL.recipefpalign'},'OL.recipehigh',[('CMPI','ol_classlo',1)])
- P('OL.recipehigh').branch({2:'OL.recipehighclass'},'OL.recipeheader',[('CMPI','nc_width',8)])
- P('OL.recipehighclass').branch({1:'OL.recipefpalign'},'OL.recipeheader',[('CMPI','ol_classhi',1)])
- P('OL.recipefpalign').branch({(4,8):'OL.recipeheader'},'NC.unsupported',[('RLD','nc_alignment')])
+ """Stage control lives in ordered-result.tsv (section main: metadata, interval, aggregate
+ walk, family/recipe checks; section recipe: the emission loop). Python binds only dynamic
+ facts: graph constants, helper-built field reads, rules.tsv extents/alignments, fresh labels;
+ the recipe header/element writers stay here because they call the word/constword helpers."""
+ P=E.P;root=pathlib.Path(__file__).parent
+ fresh=[l.split('\t') for l in (root/'ordered-fresh.tsv').read_text().splitlines()[1:]]
+ bindings=dict(EXTRA=EXTRA,ENTRYEXTRA=ENTRYEXTRA,EDGES=EDGES,LAYOUT=LAYOUT)
+ classes=dict(extents=list(extents),alignments=list(alignments))
+ sequences={}
+ for line in (root/'ordered-result.tsv').read_text().splitlines()[1:]:
+  for action in json.loads(line.split('\t')[4]):
+   if action[0]=='@' and action[1] not in sequences:
+    kind,index,reg,node=action[1].split()
+    if kind=='field':sequences[action[1]]=field(P('OL.bindings'),int(index),reg,node).acts
+    else:sequences[action[1]]=[('ALUI','mul','nc_key',node,8),('ALUI','add','nc_key','nc_key',int(index)),('LDX',reg,'nc_key',EXTRA)]
+ def section(name):
+  p=P('OL.fresh')
+  for part,key,kind in fresh:
+   if part==name:bindings[key]=p.fresh(kind)
+  install_rules(E.g,root,'ordered',bindings,sequences,classes,name)
+ section('main')
  p=P('OL.recipeheader')
  for v in (0,0,0,5):constword(p,v)
  word(p,'nc_width');constword(p,0);word(p,'nc_alignment')
  p.a(('LDI','nc_v',1),('OUTW','nc_v'),('OLEN','nc_payloadcut'),('ALU','div','ol_emitcount','nc_width','nc_alignment'),('LDI','ol_emitindex',0),('LDI','ol_emitoffset',0));word(p,'ol_emitcount').goto('OL.recipeloop')
- P('OL.recipeloop').branch({1:'NC.cbfinish'},'OL.recipeelement',[('C64U','ol_emitindex','ol_emitcount')])
- P('OL.recipeelement').branch({0:'OL.recipelo'},'OL.recipehi',[('CMPI','ol_emitoffset',8)])
- P('OL.recipelo').a(('COPYW','ol_emitclass','ol_classlo')).goto('OL.recipekind')
- P('OL.recipehi').a(('COPYW','ol_emitclass','ol_classhi')).goto('OL.recipekind')
- P('OL.recipekind').branch({2:'OL.recipeinteger',1:'OL.recipefloat'},'NC.unsupported',[('RLD','ol_emitclass')])
- P('OL.recipeinteger').a(('LDI','ol_emitkind',1),('LDI','ol_emitunsigned',1)).goto('OL.recipewrite')
- P('OL.recipefloat').a(('LDI','ol_emitkind',3),('LDI','ol_emitunsigned',0)).goto('OL.recipewrite')
+ section('recipe')
  p=P('OL.recipewrite');word(p,'ol_emitoffset');constword(p,0);constword(p,0);word(p,'nc_alignment')
  for v in (0,0,0):constword(p,v)
  word(p,'ol_emitkind');word(p,'nc_alignment');word(p,'ol_emitunsigned');word(p,'nc_alignment')
