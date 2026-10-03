@@ -894,8 +894,10 @@ def build(locations=False, warnings=False, errors=False):
         int_warning_install(E, P, DBL, FLT, FPB, SBB)
         assemble.run(Path(__file__).parent / 'unusedwarnings-manifest.tsv', E, P, _flags,
                      dict(_tokens, TIX=TIX, UNDO_SIZE=UNDO_SIZE))
-        from formatwarnings import install as format_warning_install
-        format_warning_install(E, P, DBL, FLT, FPB, SBB)
+        import tokenlocations as _tl
+        assemble.run(Path(__file__).parent / 'formatwarnings-manifest.tsv', E, P, {},
+                     dict(TOKEN_POS=_tl.TOKEN_POS, NAME_TOKEN=assemble.load_facts('unusedwarnings')['NAME_TOKEN'],
+                          DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
     if errors:
         from errors import install as error_install
         error_install(E, P, warnings)

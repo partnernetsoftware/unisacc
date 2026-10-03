@@ -268,6 +268,8 @@ class Run:
             kw["classes"] = _path(facts, o["classes"])
         if "domain" in o:
             kw["domain"] = range(*o["domain"])
+        if "tokens" in o:
+            kw["classes"] = dict(kw.get("classes") or {}, **self.tokens(o["tokens"]))
         for k, v in o.get("classmap", {}).items():
             kw["classes"] = dict(kw.get("classes") or {})
             x = self.value(v, facts)
@@ -282,11 +284,8 @@ class Run:
         for k in o.get("export", []):
             self.env[k] = bd[k]
         sq = self.cells(seq, facts)
-        if "textrows" in o:
-            tr = {}
-            for ln in (self.root / o["textrows"]).read_text().splitlines()[1:]:
-                name, value = ln.split("\t")
-                tr[name] = self.E.O(json.loads(value))
+        tr = self.seqrows(o, facts)
+        if tr is not None:
             sq = dict(tr, **(sq or {}))
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
@@ -519,3 +518,48 @@ def _seqmap(self, lst, tmpl, facts):
 
 
 Run.seqmap = _seqmap
+
+
+# seq tables next to the manifest (header line skipped, rows `name<TAB>json`):
+#   textrows FILE -> E.O(text); bufrows FILE -> SBOUT bytes;
+#   stackrows [FILE, HOLDER] -> P(HOLDER).METHOD(*slots).acts for json [METHOD, slots];
+#   msgrows [FILE, FACT, PREFIX] -> SBOUT bytes as PREFIX+name, and facts[FACT] = names.
+def _seqrows(self, o, facts):
+    if not any(k in o for k in ("textrows", "bufrows", "stackrows", "msgrows")):
+        return None
+    sq = {}
+    def rows(f):
+        return [ln.split("\t") for ln in (self.root / f).read_text().splitlines()[1:]]
+    for name, value in rows(o["textrows"]) if "textrows" in o else []:
+        sq[name] = self.E.O(json.loads(value))
+    for name, value in rows(o["bufrows"]) if "bufrows" in o else []:
+        sq[name] = [("SBOUT", c) for c in json.loads(value).encode()]
+    if "stackrows" in o:
+        p = self.P(o["stackrows"][1])
+        for name, value in rows(o["stackrows"][0]):
+            method, slots = json.loads(value)
+            p.acts = []
+            sq[name] = getattr(p, method)(*slots).acts
+    if "msgrows" in o:
+        file, fact, prefix = o["msgrows"]
+        names = []
+        for name, value in rows(file):
+            names.append(name)
+            sq[prefix + name] = [("SBOUT", c) for c in json.loads(value).encode()]
+        facts[fact] = names
+    return sq
+
+
+Run.seqrows = _seqrows
+
+
+# opts tokens {class: token} or FILE (rows `class<TAB>token`, header skipped):
+#   one-element classes of token codes (identifier/number/string or E.TK[token]).
+def _tokens(self, spec):
+    if isinstance(spec, str):
+        spec = dict(ln.split("\t") for ln in (self.root / spec).read_text().splitlines()[1:])
+    lit = {"number": self.E.TK_NUM, "string": self.E.TK_STR, "identifier": self.E.TK_ID}
+    return {k: [lit[t] if t in lit else self.E.TK[t]] for k, t in spec.items()}
+
+
+Run.tokens = _tokens
