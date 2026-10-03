@@ -319,15 +319,8 @@ def build(locations=False, warnings=False, errors=False):
     _publish(env, ("fpcont",))   # callcontrol-begin (merged): FS.CALLTYPE continuation (librarycallables)
     import assemble
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
-    start = "START"
-    if locations:
-        _tl = assemble.load_facts('tokenlocations')['tokenlocations!']   # exec/facts/tokenlocations.tsv
-        _rec = "ER.token" if errors else "WU.token" if warnings else None
-        start = assemble.run(Path(__file__).parent / 'tokenlocations-manifest.tsv', E, P,   # K2: tokenlocations
-                             dict(multi=True, record=bool(_rec), ordinal=True),
-                             dict(ready="START", token_record=_rec or "RET", ordinal_table=C["TIX"]))['start']
-        assemble.run(Path(__file__).parent / 'diagnostics-manifest.tsv', E, P, {},
-                     {k: _tl[k] for k in ('SPLICES', 'INCLUDE_LINE', 'INCLUDE_LINES', 'INCLUDE_NAME')})
+    start = env["ex_start"]   # gen-manifest: START or the located reader (tokenlocations)
+    _tl = assemble.load_facts('tokenlocations')['tokenlocations!']   # exec/facts/tokenlocations.tsv
     if warnings:
         assert locations
         _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
