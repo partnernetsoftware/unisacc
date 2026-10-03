@@ -213,16 +213,13 @@ def build(image=False, object_mode=False):
     dispatch_test = P('ARGS.d').fresh('b')
     install_rules(g, HERE, 'x86-shell', section='dispatch', bindings={'test': dispatch_test},
                   sequences={'reject': E.rej('not covered: an op outside the first encoder slice')})
-    from finite_rules import load as load_rules
+    from finite_rules import install_rows
     from pathlib import Path
     routes = [('route', (key,), {'entry': entry}) for key, entry in dispatch.items()]
     routes.append(('unknown', set(range(257)) - dispatch.keys(), {}))
     for section, domain, values in routes:
-        rows = load_rules(Path(HERE)/'x86-shell-result.tsv', {}, domain=domain, section=section,
-                          bindings={'test': dispatch_test, **values})
-        for state, row in rows.items():
-            for observation, (target, actions) in row.items():
-                g.on(state, [observation], target, actions, 'r')
+        install_rows(g, Path(HERE)/'x86-shell-result.tsv', domain=domain, section=section,
+                     bindings={'test': dispatch_test, **values}, mode='r')
     emit_rules('pre')
     emit_rules('division')
     emit_rules('post')
