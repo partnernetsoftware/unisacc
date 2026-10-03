@@ -53,7 +53,8 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
                   bindings={'state': p.cur}, sequences={'pending': p.acts})
     p=P('MI.dlslots')
     for i in range(4):p.a(('COPYW','lb_v','ml_dl_'+str(i)),('LDI','lb_n',8)).call('EI.bytes')
-    p.goto('EI.data')
+    install_rules(g, Path(__file__).parent, 'elfimage', section='iat-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
     if image_format=='pe':
         from pedelta import install as install_pe
         install_pe(E,byte,arch)
@@ -62,8 +63,8 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         install_macho(E,byte,arch)
     header = load_rules(Path(__file__).with_name('elfimage-result.tsv'), {},
                         bindings={'HDRS': elf.HDRS(arch), 'VADDR': elf.VADDR}, section='header-init')
-    P('EH.elfwrite').branch({1:'EH.elfwrite.dyn'},'EH.elfwrite.static',
-                             [('CMPI','host_dyn',1)])
+    install_rules(g, Path(__file__).parent, 'elfimage', section='elfwrite',
+                  bindings={'branch': P('EH.elfwrite').fresh('b')})
     def field(p,width,v):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('EI.bytes')
     def preamble(p,phnum,hdr):
@@ -109,7 +110,8 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
                   bindings={'state': p.cur}, sequences={'pending': p.acts})
     p=P('EI.dynslots')
     for _ in range(32):byte(p,0)
-    p.goto('EI.data')
+    install_rules(g, Path(__file__).parent, 'elfimage', section='iat-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
     labels = (('EI_pad_b0', 'EI', 'b'), ('EI_loop_b0', 'EI', 'b'),
               ('EI_bytes_b0', 'EI', 'b'))
     image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels})
