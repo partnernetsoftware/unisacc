@@ -131,10 +131,15 @@ def build(image=False, object_mode=False):
     classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     classes.update(FP_IDS)
     classes.update(hostcall=C_HOSTCALL,hostaddr=C_HOSTADDR)
-    from x86win import IDS as WIN_IDS
+    WIN_IDS = {r['name']: r['value'] for r in _facts('enc-x86win-ids')}
     classes.update(WIN_IDS)
-    from x86win import init as win_init, reset as win_reset, META as WIN_META
-    win_init(p)
+    WIN_META = tuple(_facts('enc-x86win-meta'))
+    from unisa.image.pe import IMPORTS as _WIMP
+    _wimp = _facts('enc-x86win-bindings')[0]['value']
+    for key in tuple(_facts('enc-x86win-ops')) + tuple(_facts('enc-x86win-rcs')):   # was x86win.init
+        p.a(('SBCLR',), [('SBOUT', c) for c in key.encode()], ('SBINTERN', 'wi_' + key))
+    for i, name in enumerate(_WIMP):
+        p.a(('SBCLR',), [('SBOUT', c) for c in name.encode()], ('SBINTERN', 't'), ('LDI', 'u', i + 1), ('STX', 't', _wimp, 'u'))
     classes.update({"itoa":C_ITOA, "gate": C_GATE, ".lea": C_LEA, "setmem": C_SETMEM, "argsave":C_ARGSAVE, "argvget":C_ARGVGET})
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
@@ -175,7 +180,7 @@ def build(image=False, object_mode=False):
     line_sequences = {name: E.rej(reason) for name, reason in
                       (line.rstrip('\n').split('\t') for line in
                        open(os.path.join(HERE, 'x86-line-reject.tsv')) if not line.startswith('#'))}
-    line_sequences['reset'] = win_reset(P('reset.binding')).acts
+    line_sequences['reset'] = [('LDI', 'gwin', 0)] + [('LDI', 'wm_' + k, 0) for k in WIN_META]   # was x86win.reset
     line_bindings.update({name: P(owner).fresh(kind) for part, name, owner, kind in line_names if part == 'line'})
     line_rules(section='line', bindings=line_bindings, sequences=line_sequences)
     for prefix in ('BRM', 'META'):
@@ -231,8 +236,7 @@ def build(image=False, object_mode=False):
     install_hostbridge(E,'x86_64')
     import assemble
     assemble.run(os.path.join(HERE, 'x86itoa-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ))
-    from x86win import install as install_win
-    install_win(E, byte, KND, SZ)
+    assemble.run(os.path.join(HERE, 'x86win-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ))
     relax()
     completion = {'done'+str(i): P('DONE').fresh('r') for i in range(3)}
     install_rules(g, HERE, 'x86-emit', section='done-write', bindings=completion)

@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory() as d:
  from unisa.lower import lower
  from unisa.tape import parse as tape_parse
  from tins import dump
- from x86win import OPS
+ sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2])); from exec.facts.load import facts; OPS=tuple(facts("enc-x86win-ops"))
  raw='_start:\n'+''.join('.sys '+op+', r0, r1, r2\n' for op in OPS)+'.sys6 mmap, r0, r1, r2, r3, r4, r5\nret\n'
  tp=lower(tape_parse(raw),'win/x86_64',_oracle('built'),drive='built')
  f.write_text(dump(tp,full=True));want,stats=assemble(tp)
