@@ -5,7 +5,7 @@ sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 from unisa.tape import parse
 from unisa.lower import lower
 from unisa.__main__ import _oracle
-from exec.enc.tins import parse as parse_tins
+from tests.enc.tins import parse as parse_tins
 
 
 def same(a,b):

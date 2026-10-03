@@ -2,7 +2,7 @@
 """Cross the former million-slot ARG/TXT boundary with real buffered code."""
 import pathlib, subprocess, sys, tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from exec.enc.tins import parse
+from tests.enc.tins import parse
 
 assert len(sys.argv) == 3, 'usage: largecodecheck.py RUN LOWER.net'
 count = 125010

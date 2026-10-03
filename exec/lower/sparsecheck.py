@@ -2,7 +2,7 @@
 """Large virtual zero region: arithmetic expectations, no large reference array."""
 import pathlib, struct, subprocess, sys, tempfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
-from exec.enc.tins import parse
+from tests.enc.tins import parse
 
 if len(sys.argv)!=6:raise SystemExit('RUN LOWER.tbl LOWER.json ELF.tbl ELF.json')
 run,lt,lj,et,ej=sys.argv[1:]

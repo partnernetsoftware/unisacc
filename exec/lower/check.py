@@ -6,7 +6,7 @@ import os,pathlib,subprocess,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 from unisa.tape import parse
 from unisa.lower import zero_last, SCRATCH, PRINTMAX, WIN_EXTRA, WIN_STACK
-from exec.enc.tins import parse as parse_header
+from tests.enc.tins import parse as parse_header
 
 
 def main():
