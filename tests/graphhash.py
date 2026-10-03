@@ -7,6 +7,7 @@ tests/bound.py 55 and records sha256(OUT).  Test infrastructure only.
   python3 tests/graphhash.py [--only DIR]...           compare with tests/graphhash.tsv
   python3 tests/graphhash.py --write [--only DIR]...   (re)record those entries
   python3 tests/graphhash.py --list
+  python3 tests/graphhash.py --only exec/parse2 --shard 1/3
 At most 3 generators run at once.  Exit 0 all equal, 1 mismatch/failure.
 """
 import hashlib, itertools, os, subprocess, sys, tempfile
@@ -65,6 +66,12 @@ def main(argv):
     write = '--write' in argv
     only = [argv[i + 1].rstrip('/') for i, a in enumerate(argv) if a == '--only']
     ents = [x for x in _entries() if not only or any(x[0].startswith(d + '/') or x[0].startswith('exec/' + d.split('exec/')[-1] + '/') or x[0].endswith(' ' + d.split('/')[-1]) for d in only)]
+    if '--shard' in argv:
+        shard = argv[argv.index('--shard') + 1]
+        part, total = (int(x) for x in shard.split('/'))
+        if total < 1 or part < 1 or part > total:
+            raise ValueError('expected --shard K/N with 1 <= K <= N')
+        ents = [entry for i, entry in enumerate(ents) if i % total == part - 1]
     if '--list' in argv:
         for g, a in ents: print(key(g, a))
         return 0
