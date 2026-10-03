@@ -40,7 +40,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   decision-ledger ok (ops 9/12), exec-r21-e3 48/3/0, exec-chain 287 equal + 1 not-covered, bad 0.
   Wait loops: use `ps -eo pid,command | grep`, never pgrep -f. Helper scripts: .k2tmp/rec.sh (8-mode record),
   cmp.sh (one-mode gen2 vs HEAD bytes), gates.sh.
-- Next for structured_control: its bindings are ~60 gen2 constants + extra; plan = k2-control facts (=NAME int per
+- DONE 17:17: gen2.structured_control -> control-manifest.tsv (one rows row) + facts k2-control.tsv (consts, seqs =
+  text/reject/stack acts, classes computed after build's TK additions + E.tokenizer). assemble generic: bindmap list,
+  freshrows {"file","lookup","holder"} (where formats over facts only for file rows), opts seqfact (fact dicts of acts).
+  gen2 shim passes env control_section (+-warnings), statement, extra, seqb. Callers next: `call control` rows.
+- (old plan) Next for structured_control: its bindings are ~60 gen2 constants + extra; plan = k2-control facts (=NAME int per
   constant) + control-manifest.tsv with env section/extra keys; fresh via control-fresh.tsv rows (owner=prefix or env
   label -> needs `fresh:U:{x}` per row, or the `tape:` fresh with interp); stack sequences via @stack on a P holder
   named control.<section><word_state>. Callers (gen2 ~40 sites, unarycontrol) pass section + extra as env.

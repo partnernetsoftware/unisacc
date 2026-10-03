@@ -286,8 +286,12 @@ class Run:
         tr = self.seqrows(o, facts)
         if tr is not None:
             sq = dict(tr, **(sq or {}))
-        if "seqfact" in o:   # {name: [[act...]...]} fact merged into the row's sequences
+        if isinstance(o.get("seqfact"), str):   # {name: [[act...]...]} fact merged into the row's sequences
             sq = dict({k: [tuple(a) for a in v] for k, v in _path(facts, o["seqfact"]).items()}, **(sq or {}))
+        for sf in o.get("seqfact", []) if isinstance(o.get("seqfact"), list) else []:
+            # a list: fact dicts {name: acts} merged in order over the sequences, acts deep-tupled
+            t = lambda x: tuple(map(t, x)) if isinstance(x, list) else x
+            sq = dict(sq or {}, **{k: [t(a) for a in v] for k, v in _path(facts, sf).items()})
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
         if op == "template":
@@ -472,8 +476,9 @@ def _foreach(self, o, body, depth, extra, facts):
 def _bindings(self, o, bind, facts):
     acc = o.get("accumulate")
     out = dict(self.accum.setdefault(acc, {})) if acc else {}
-    if isinstance(o.get("bindmap"), str):
-        out.update(_path(facts, self.interp(o["bindmap"])))
+    for bm in ([o["bindmap"]] if isinstance(o.get("bindmap"), str) else
+               o["bindmap"] if isinstance(o.get("bindmap"), list) else []):   # a list merges several fact dicts
+        out.update(_path(facts, self.interp(bm)))
     if isinstance(o.get("freshrows"), str):
         file, _, part = o["freshrows"].partition("@")   # FILE@PART keeps rows whose part/section column is PART
         lines = (self.root / file).read_text().splitlines()
@@ -486,10 +491,25 @@ def _bindings(self, o, bind, facts):
                 continue
             out[f[kk]] = self.E.P.fresh(self.holder(f[ko]), f[col["kind"]])
     for spec in ([] if isinstance(o.get("freshrows"), str) else o.get("freshrows", [])):
-        for i, r in enumerate(_path(facts, spec["over"])):
+        # "file": a header-line TSV next to the manifest instead of "over" (its "where" formats over
+        # the facts only); "lookup": an owner naming a binding so far (or a fact) becomes its value;
+        # "holder": allocate through an unregistered holder (no P construction per row)
+        if "file" in spec:
+            ls = (self.root / spec["file"]).read_text().splitlines()
+            hd = ls[0].lstrip("# ").split("\t")
+            src = [dict(zip(hd, ln.split("\t"))) for ln in ls[1:] if ln and not ln.startswith("#")]
+        else:
+            src = _path(facts, spec["over"])
+        for i, r in enumerate(src):
             ctx = dict(facts, i=i, **r)
-            if all(str(r[c]) == _fmt(v, ctx) for c, v in spec.get("where", {}).items()):
-                out[_fmt(spec["key"], ctx)] = self.E.P(_fmt(spec["owner"], ctx)).fresh(_fmt(spec["kind"], ctx))
+            wctx = dict(facts, i=i) if "file" in spec else ctx
+            if all(str(r[c]) == _fmt(v, wctx) for c, v in spec.get("where", {}).items()):
+                owner = _fmt(spec["owner"], ctx)
+                if spec.get("lookup"):
+                    owner = out.get(owner, owner)
+                kind = _fmt(spec["kind"], ctx)
+                out[_fmt(spec["key"], ctx)] = (self.E.P.fresh(self.holder(owner), kind) if spec.get("holder")
+                                               else self.E.P(owner).fresh(kind))
     cells = self.cells(bind, facts)
     if cells is None and not out and not acc and "bindmap" not in o:
         return None

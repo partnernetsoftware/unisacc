@@ -426,36 +426,12 @@ def shape_control(section):
 
 
 def structured_control(section, warnings, extra=None, sequence_bindings=None):
+    """Structured control: exec/parse2/control-manifest.tsv (K2 sub-manifest)."""
+    import assemble
     section += "-warnings" if warnings and section in ("block", "if") else ""
-    p = P("control." + section + (extra or {}).get("word_state", ""))
-    bindings = dict(TYPERANK=TYPERANK, MEMBERRANK=MEMBERRANK, RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK, SHAPE=SHAPE, VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, ARR=E.ARR, TDIM=TDIM, FPB=FPB, FPV=FPV,
-                    UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
-                    statement="STMT.body" if warnings else "STMT")
-    bindings.update((name, globals()[name]) for name in
-                    ("STAG", "TAGLEVEL", "TAGUNDO", "ETAG", "SBB", "SSZ", "SAL", "SMN", "SMEM", "SFLAT",
-                     "MOF", "MSZ", "MPT", "MBS", "MAR", "MFLAT", "MEMBER_STRIDE", "BFW", "BFO", "BFS", "TDE"))
-    bindings.update(STRUCT_LIMIT=STRUCT_MAX + 1, MEMBER_MASK=-MEMBER_STRIDE,
-                    TAGUNDO1=TAGUNDO + 1, TAGUNDO2=TAGUNDO + 2, TAGUNDO3=TAGUNDO + 3)
-    bindings.update(TDN=E.TDN, TDB=E.TDB, TDD=E.TDD, UNS=UNS, UNSIGNED_CHAR=UNS + 1, UNSIGNED_SHORT=UNS + 2)
-    bindings.update(STATICF=35 << 40)   # STATICF[label id] = 1 for a file-scope static function (unresolved.py reads it)
-    bindings.update(extra or {})
-    for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
-        if part == section:
-            p.cur = bindings.get(prefix, prefix)
-            bindings[key] = p.fresh(kind)
-    sequences = {name: O(re.split(r"(\{[^}]*\})", TEMPL[template])[int(fragment)])
-                 for name, template, fragment in tape_rows("control-text.tsv")}
-    sequences.update((name, E.rej(message)) for name, message in tape_rows("control-reject.tsv"))
-    for name, method, slots in tape_rows("control-stack.tsv"):
-        p.acts = []
-        sequences[name] = getattr(p, method)(*slots.split(",")).acts
-    tokens = dict(TK, identifier=TK_ID, number=TK_NUM, string=E.TK_STR, floating=E.TK_FNUM)
-    sequences.update(sequence_bindings or {})
-    classes = {name: [AX.index("f32"), AX.index("f64")] if kind == "float_axes" else
-               [TK[token] for token in TWORDS] if kind == "typewords" else [tokens[value]]
-               for name, kind, value in tape_rows("control-classes.tsv")}
-    install_rules(g, os.path.dirname(__file__), "control", bindings=bindings,
-                  sequences=sequences, classes=classes, section=section)
+    assemble.run(Path(__file__).resolve().parent / 'control-manifest.tsv', E, P, {},
+                 dict(control_section=section, statement="STMT.body" if warnings else "STMT",
+                      extra=dict(extra or {}), seqb=dict(sequence_bindings or {})))
 
 
 def ordinary_control(section, warnings, extra=None):
