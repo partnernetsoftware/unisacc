@@ -600,3 +600,33 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   librarymodule (cdx), layoutfacts/valueranks/layoutprovenance/parenfold/unitmode/objectdefinitions/structreturnexpr/
   forward/gen2parts, CP.restore assert). Python-only inputs there: _rec choice (ER.token/WU.token/RET by flags -> when
   rows), header_json (E.HEADER), E.TK keys, E.FND, NAME_TOKEN/TOKEN_POS facts, start threading.
+- Round 47 (handoff for the tail; no code change, nothing run). State at c5942f79: gen2.build = tokens, lm_header/lm_errors,
+  ONE assemble.run(gen-manifest.tsv) for early..callcontrol-finish, _publish(env[startup|global0|1|3|5]) and
+  _publish(env, fpcont), then the tail below still in Python.
+  Dead helpers in gen2.py (grep exec/ tests/: no callers; tests/k2gen/mk*.py only text-match old source):
+  function_control, local_control, _namespace_control, width_dispatch, shape_control, structured_control,
+  ordinary_control, return_control, update_control. segment() is still used by build (offsetof). namespace_constants is
+  used by export.py k2gen2 (nsconst) -> move into export.py before gen2.py goes.
+  Tail, in order (each -> one gen-manifest row unless noted):
+   1 segment(offsetof)                      call gen2, seg_offsetof=@str:1, flags all false
+   2 locations: tokenlocations-manifest     flags multi/record/ordinal; record = errors|warnings, token_record =
+                                            ER.token (errors) / WU.token (warnings only) / RET -> two-three when-guarded
+                                            call rows (when errors / warnings&!errors / locations&!warnings&!errors),
+                                            ordinal_table=buildconst.TIX, ready=@str:START, result -> start
+     diagnostics-manifest                   binds SPLICES/INCLUDE_LINE/INCLUDE_LINES/INCLUDE_NAME from facts
+                                            tokenlocations (header-form, key tokenlocations!) -- when locations
+   3 warnings: returnwarnings (TK/TK_ID/TK_NUM/TK_FNUM, SBB), intwarnings (TOKEN_POS, DBL/FLT/FPB/SBB),
+     unusedwarnings (tokens, TIX, UNDO_SIZE), formatwarnings (TOKEN_POS, NAME_TOKEN from facts unusedwarnings)
+     -> E.TK/TK_* need a fact (k2-gen2-tokens has parse words; add TK dict + TK_ID/NUM/FNUM to buildconst)
+   4 errors: errors-manifest with flags; publish lm_nomain_msg; lm_mainnext alias + lm_mainreject=[] -> let row
+   5 _libraryexports (+ librarymodule.install, unresolved.DEFINED, librarycallables-result out: cells) -- cdx;
+     keep as the one marked transitional Python call between two gen-manifest runs (split manifest with a flag or
+     run gen-manifest in two phases like libraryexports pre/mid/post/tail)
+   6 layoutfacts (start + b_* from buildconst), valueranks, ../layoutprovenance (start), parenfold (TIX),
+     unitmode (FND=E.FND, TK_extern, TK_assign, header_json=E.HEADER as json, lm_initret from E.results),
+     objectdefinitions (TKEQ), structreturnexpr, forward (fps_fn, start -> ret), gen2parts (part_final=1)
+     -> start threading: LF.start/SF3.start/UM.start are literal strings (@str:), forward result -> #! start
+   7 Python asserts: g.st[CP.restore] shape (mode r, 257 entries) -> assert-absent present or drop with note;
+     _base.twice() and E.sizes stderr live in gen2 __main__ -> check gen.py parse2 already does twice/sizes.
+  Facts to add (export.py k2gen2): TK map/TK_* ids, FND, header_json (or lm_header seq), NAME_TOKEN, TOKEN_POS.
+  Then (d): gen.py parse2 runs gen-manifest (top env = E.results, _publish disappears), and step 3 switches callers.
