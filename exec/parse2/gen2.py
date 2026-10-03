@@ -888,8 +888,7 @@ def build(locations=False, warnings=False, errors=False):
     assemble.run(Path(__file__).parent / 'valueranks-manifest.tsv', E, P, _flags, dict())   # K2: valueranks
     from layoutprovenance import parser as source_provenance
     start = source_provenance(E, P, start)
-    from parenfold import install as parenfold_install
-    parenfold_install(E, TIX, locations)
+    assemble.run(Path(__file__).parent / 'parenfold-manifest.tsv', E, P, _flags, dict(ordinal_table=TIX))   # K2: parenfold
     from unitmode import install as unitmode_install
     start = unitmode_install(E, P, start, DEFS)
     assemble.run(Path(__file__).parent / 'objectdefinitions-manifest.tsv', E, P, _flags, dict(TKEQ=E.TK["="]))

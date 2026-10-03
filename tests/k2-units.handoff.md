@@ -51,3 +51,10 @@
   message loop needs result=+foreach over that return. Fresh kinds `ER_b`/`DP_b`/`UC_r` (owner_kind) need
   a per-owner holder form in assemble/translator. Then @labels (approved) with the errors-stack table row
   + decisionledger.allow line.
+
+## Round 4 (2026-10-03)
+- parenfold.py deleted -> parenfold-manifest.tsv (+ k2-parenfold{,-f1}.tsv). Live reads removed: the
+  NEXT/TN.checked asserts and the DL.read seq asserts dropped; reader chosen by flags (DL.read exactly when
+  tokenlocations records tokens: warnings or errors). The translator refuses disjunctions, so the DL.read row
+  is hand-split into `warnings` and `errors&!warnings` (recorded with 3 modes; gen2 implies locations).
+  parse2 graphhash 10/10 identical. Recorder script: .k2tmp/vr/rec.sh MODULE STEM (8 modes, sequential).
