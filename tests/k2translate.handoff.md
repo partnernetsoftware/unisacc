@@ -679,3 +679,20 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   in exec/build/gen.py using gen2ns(); re-key graphhash rows 43-50 + tests/graphhash.py entries; switch callers
   exec/pipeline/prepare.sh:12, exec/pipeline/stages.tsv:16, exec/parse2/{libraryimportscheck,errorcheck,
   returnwarningcheck}.py; then delete gen2.py and drop it from export TABLES inputs.
+- Round 51 (step 1 of the gen2 removal; base = d59b2cea rebased on origin/main 44f57735, facts conflicts taken
+  --theirs + export.py rerun). gen-manifest after the errors let: call libraryexports (flags pre|mid|post|tail, bindmap
+  lx, start=$ex_start; tail adds module_start=@str:LMD.start, result lxt), librarytypes (bindmap types), libraryimports
+  (bindmap imports, start=$ex_start), libraryvariadic, librarycallables (bindmap callables, start=@str:LI.start, result
+  lc), librarymodule twice (when errors: normal=$lm_mainnext reject=$lm_mainreject / !errors: normal=@str:DEAD
+  reject=@acts:nomain; lm_hstate/hnext=$$startup:..., lm_main/initret/tailret=$$global3:..., lm_header=@acts:lm_header,
+  ret=@acts:ret), let ex_start=$$lxt:ret. All fact:tail / !fact:tail when-cells removed: ONE run. New facts table
+  k2-libraryenv (export.py k2libraryenv: lx, types, imports, callables, lm_header, nomain, ret) -- still reads
+  gen2.py (DIM, E) -> step 2. gen2.build: one assemble.run + start=env["ex_ret"]; _libraryexports, _publish and
+  exec/parse2/librarymodule.py deleted. No new op/opts key/value prefix (bindmap on call is existing _bindings).
+  Commit 4c664d00 (local, not pushed). sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979,
+  --warnings --errors 3a7edf34, --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  decisionledger --ops distinct 9 (cap 12) bad 0. Stale text mentions of librarymodule.py: exec/rules.md:78,
+  tests/k2translate.refusals.tsv:8 (not edited).
+  Next (design only): step 2 export.py drops gen2.py (k2gen2, k2strings ESC literal -> facts, k2membercontrol,
+  k2libraryenv: G.DIM=28*10**6 literal/fact); step 3 gen.py parse2 (needs `#! base build/parse2base.py` start $ex_ret;
+  parse2base.install must do _base.tokens + P; twice/sizes check); step 4 callers + delete gen2.py.
