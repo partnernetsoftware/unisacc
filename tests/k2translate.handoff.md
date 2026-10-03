@@ -325,3 +325,40 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   E.P(owner).fresh as numeric_rules) + DIG/TK_FNUM; prn twice (owner PRN/PRNW, PRN_* = name+suffix, width 0/6);
   autoscan = `rows autoscan` section auto, freshrows autoscan-names.tsv owner "{prefix}.autoscan_{name}", classes from
   TK. Not done yet. layoutprovenance.parser not started.
+- Round 31 (full state for the next agent; branch worktree-agent-a45d7679682b54f9d on origin/main f52787f3, not pushed):
+  Commits rounds 23-31: return/update loops, addr sites, compound/type-row/update-modes, ordinary/lookup, part calls,
+  parse2base, gen.py E.results channel, statics/initializers, typing/vla/conditional/offsetof, numeric/autoscan,
+  unarycontrol. Every step: sha SAME default + --warnings --errors, export --check 0 differ.
+  New this round: exec/parse/numeric-manifest.tsv (prn x2 owners PRN/PRNW with PRN_* bindmap + width, numout) and
+  exec/parse/autoscan-manifest.tsv (freshrows over the names tables; autoscan-names.tsv header moved to line 0 because
+  freshrows "file" reads line 0 as the header); gen2 segment numeric = call ../parse/numeric, floatconst,
+  ../parse/autoscan (call stems may be relative paths). unarycontrol -> two call rows at the end of segment upd-prefix
+  (env warnings via let wv true/false gated warnings/!warnings; segment upd-prefix now runs with the warnings flag);
+  MAXTOK exported in facts k2-gen2 unaryenv (src/front_pp.c added to k2-gen2 inputs).
+  WHAT REMAINS in gen2.py build() (read it top to bottom; ~150 lines):
+   1. cdx-owned Python installs (assigned to slices 2/3, skip): strings.initializer, constexpr.install,
+      membercontrol.install (passes shape_control + TEMPL), tokenlocations.install, libraryexports.install.
+   2. layoutprovenance.parser (ours, not started): exec/layoutprovenance.py; make it a sub-manifest + `call` row.
+   3. Remaining wrapper calls: types(), strwalk(), ladder(), shape_control(...), update_control(...) singles,
+      global/function/local_control (+ global-results.tsv glue into E.results), ordinary_control, scope-manifest
+      (returns sb, fed back as extra) -> fold into gen2-manifest segments as `call shape/update/...` rows; then merge
+      all segments into one ordered manifest (drop seg_ gates).
+   4. E.results producers -> `export` names (gen.py top-level env IS E.results since 60a5028f): global-results.tsv keys,
+      lm_hstate/lm_hnext (startup-run), fpcont (callcontrol-begin), lm_nomain_msg (errors); lm_header/lm_errors ->
+      facts / flag.
+   5. Python-fed manifests left: layoutfacts/unitmode/forward/objectdefinitions (env start, TK codes, header_json),
+      warnings-only manifests (tokenlocations constants), diagnostics (tokenlocations constants), callcontrol
+      begin/finish + truth-conversions (fpu from irsel gold -> facts).
+   6. Switch: `#! base build/parse2base.py` (make parse2base load exec/parse/gen.py as E, install P, tokens at import),
+      `#! flags warnings errors locations` (warnings/errors imply locations: express as rows or flags lists), add
+      exec/parse2/gen-manifest.tsv, run via exec/build/gen.py parse2; graphhash keys `exec/parse2/gen2.py ...` must keep
+      their hashes (switch tests/graphhash key commands, prepare.sh, exec/c/*, checks), then delete gen2.py and the
+      gen2 references in export.py (export imports gen2 as G for constants: move those constants into facts first).
+   7. Then exec/parse/gen.py (base for lower/nativeabi via #! base parse/gen.py): numeric/autoscan now have manifests;
+      remaining helpers -> facts/manifests.
+  Recipes: see rounds 23-30 (call return/update rows with all 8 update words as @str:; dict(b, k=v) = extra=$urb +
+  extra2; chains via foreach + .let x=$$res:key; addr = call addr entry=..,pending=nil facts k2-call; int env via let
+  literal; booleans via when fact:NAME after `.let NAME=it.col`). Tools (.k2tmp/, uncommitted, recreate): one.sh,
+  chk.sh (export + both modes + --check), genchk.sh STAGE (exec/build/gen.py stage sha). Changing exec/build/* -> run
+  graphhash for every gen.py stage locally (coordinator rule). Worktree guard: avoid heredocs mixing git; write
+  Python edit scripts to .k2tmp/ and run them.

@@ -442,13 +442,7 @@ def build(locations=False, warnings=False, errors=False):
     ordinary_control('down', warnings)
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
-    segment("upd-prefix")
-    import assemble
-    unit_span = int(re.search(r"^#define MAXTOK ([0-9]+)\b", Path(E.ROOT, "src/front_pp.c").read_text(), re.M).group(1))
-    assemble.run(Path(__file__).resolve().parent / 'unarycontrol-manifest.tsv', E, P, dict(warnings=warnings),
-                 dict(warnings=warnings, ucx=dict(TIX=TIX, MAXTOK=unit_span),
-                      ufacts=dict(DBL=DBL, FLT=FLT, BOOL=BOOL, UNS1=UNS+1, UNS3=UNS+3, UNS4=UNS+4, UNS8=UNS+8,
-                                  U32M=U32M, ENV=ENV, END_=END_, FNSTR=FNSTR, TIX=TIX, MAXTOK=unit_span)))
+    segment("upd-prefix", warnings)
     shape_control("value-load")
     ordinary_control('array', warnings)
     from membercontrol import install as member_control
