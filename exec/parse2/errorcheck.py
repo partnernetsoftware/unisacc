@@ -5,6 +5,7 @@ R=pathlib.Path(__file__).resolve().parents[2]
 warnings='--warnings' in sys.argv
 ref_flags=['-Wall'] if warnings else []
 sys.path.insert(0,str(R/'exec/c'));from pack import build
+from compilerpack import built_model
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import run
 
@@ -13,10 +14,8 @@ def call(args):
 with tempfile.TemporaryDirectory(prefix='parser-errors-') as td:
  t=pathlib.Path(td)
  call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
- for name,script,flags in [('pp','build/gen.py',['pp','--locations']),('lex','build/gen.py',['lex','--locations']),('parse','build/gen.py',['parse2','--errors']+(['--warnings'] if warnings else []))]:
-  call([sys.executable,R/'exec'/script,t/(name+'.json'),*flags])
-  call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
-  call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])
+ for name,script,flags in [('pp','build/gen.py',['pp','--locations']),('lex','build/gen.py',['lex','--locations']),('parse','build/gen.py',(['parse2','--warnings','--errors'] if warnings else ['parse2','--errors']))]:
+  built_model(t,name,R/'exec'/script,flags)   # shared content-keyed cache (compilerpack), digest-verified on hit
   call([t/'run','--check-net',t/(name+'.tbl'),t/(name+'.net')])
  route=t/'route.tsv';route.write_text('error\te2\tsource\tpp\tpp.net\nerror\te1\tpp\ttokens\tlex.net\nerror\te3\ttokens\ttape\tparse.net\n')
  resources=t/'cli';resources.mkdir();(resources/'error-limit').write_bytes(b'')

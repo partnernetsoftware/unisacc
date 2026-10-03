@@ -6,6 +6,7 @@ Both tape and complete diagnostic bytes must agree; every child is bounded.
 import os,pathlib,subprocess,sys,tempfile
 R=pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(R/'exec/c'));from refsource import source_text,compile_command
+from compilerpack import built_model
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import run
 
@@ -18,9 +19,7 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
     (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for name,script,flag in [('pp','build/gen.py','pp --locations'),('lex','build/gen.py','lex --locations'),('parse','build/gen.py','parse2 --warnings'),('plain','build/gen.py','parse2 --locations')]:
-        call([sys.executable,R/'exec'/script,t/(name+'.json'),*flag.split()])
-        call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
-        call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])
+        built_model(t,name,R/'exec'/script,flag.split())   # shared content-keyed cache (compilerpack), digest-verified on hit
     cases=[('empty','int f(void){}'),('void','void f(void){}'),('main',''),
            ('return','int f(void){return 1;}'),('if-only','int f(int x){if(x)return 1;}'),
            ('if-else','int f(int x){if(x)return 1;else return 2;}'),

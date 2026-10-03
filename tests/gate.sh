@@ -130,6 +130,10 @@ job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent E
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity
 job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering
+# Cold parse2 models (30-45 s each) moved out of the seven warning/error checks below:
+# warnprep fills the shared content-keyed cache (compilerpack.built_model, digest-checked
+# on hit); the checks still self-build on a miss, so queue order does not matter.
+for g in 0 1 2 3; do job exec-warnprep-$g python3 ./exec/parse2/warnprep.py $g; done
 job exec-errors python3 ./exec/parse2/errorcheck.py
 job exec-errors-warn python3 ./exec/parse2/errorcheck.py --warnings
 job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py  # first warning kind and FP conditions
