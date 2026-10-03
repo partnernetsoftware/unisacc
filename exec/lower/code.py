@@ -38,38 +38,11 @@ def install(E, arch="x86_64", os_="lnx"):
         from armfuse import install as install_armfuse, immediate
         install_armfuse(E,ids,OP,KIND,ARG)
         immediate(E,ids,OP,KIND,ARG,TXT)
-    dispatch_bindings = {'label'+str(i): P('C' if i==0 else 'CD').fresh('b')
-                         for i in range(10)}
-    dispatch_bindings.update({'id:'+name: value for name, value in ids.items()})
-    install_rules(g, Path(__file__).parent, 'code-entry', bindings=dispatch_bindings,
-                  section='dispatch-'+arch)
-    # callm carries a tape-stack address, not an extra argument register.
-    # Materialise its target in an ISA-reserved scratch, then reuse callr.
     scratch = 'x16' if arch == 'arm64' else 'r11'
     assert scratch not in set(regmap.values()), 'callm scratch aliases tape register'
-    from finite_rules import install_template
-    install_template(g, Path(__file__).parent, 'code', {}, None, section='callm')
-    callm = {'id:callm': ids['callm'], 'callm_test': P('C.dispatch.base').fresh('b'),
-             'callm_r0': P('CM.emit').fresh('r'), 'callm_r1': P('CM.emit').fresh('r')}
-    install_rules(g, Path(__file__).parent, 'code-entry', bindings=callm, section='callm',
-                  sequences=dict(callm_load=E.O('load64 '+scratch+', '), comma=E.O(', '),
-                                 callm_tail=E.O(' form='+enc['load64']+'\ncallr '+scratch+' form='+enc['callr']+'\n')))
-    hostbindings={'id:'+name:value for name,value in ids.items()}
-    if os_=='win':
-        install_rules(g,Path(__file__).parent,'code-host',section='rejectwin')
-    hostbindings.update(test0=P('CH').fresh('b'),test1=P('CH').fresh('b'),
-                        call='CH.call' if os_ in ('osx','lnx') else 'CH.rejectwin',
-                        addr='CH.addr' if os_ in ('osx','lnx') else 'CH.rejectwin')
-    install_rules(g,Path(__file__).parent,'code-host',section='entry',bindings=hostbindings)
-    if os_ in ('osx','lnx'):
-        hostbindings.update(test2=P('CH').fresh('b'),test3=P('CH').fresh('b'))
-        hostbindings.update({'ret'+str(i):P('CH').fresh('r') for i in range(4)})
-        install_rules(g,Path(__file__).parent,'code-host',section='supported',bindings=hostbindings,
-                      sequences=dict(calltext=E.O('hostcall '),addrtext=E.O('hostaddr '),comma=E.O(', ')))
-        for i in range(4):
-            install_rules(g,Path(__file__).parent,'code-host',section='bound',bindings=dict(
-                entry='CH.addr.'+str(i),test=P('CH').fresh('b'),value=ids[str(i)],
-                next='CH.addr.'+str(i+1) if i<3 else 'C.fail'))
+    assemble.run(Path(__file__).parent/'codedispatch-manifest.tsv', E, P, dict(win=os_=='win'),
+                 dict(arch=arch, ids=ids, idmap={'id:'+n: v for n, v in ids.items()}, scratch=scratch,
+                      form_load64=enc['load64'], form_callr=enc['callr']))
     # Generic output and fixed fusion/argument control; facts stay in their original maps.
     print_labels = (('PRINT', 'b'), ('ADDR', 'r'), ('GENERIC', 'r'), ('G', 'b'),
                     ('G', 'b'), ('G', 'r'), ('G', 'b'), ('G', 'r'),
