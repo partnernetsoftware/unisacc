@@ -53,3 +53,14 @@
   reloc-align/import-values/name-value/header-end/imports-end are now read only by the scratch generator (can be pruned).
 - next: machodelta (same pattern; its field() calls MB.big/MB.little, p.call(ret=label5) once), elfimage
   (iat/dlslots chains + header field chain), then entries.
+
+## P4 rework of pedelta (coordinator 2026-10-03): open
+- current enc-pedelta-{header,imports}-<arch> rows hold proc labels + action-list text: recorded transitions, violates P4.
+- target: facts = domain fields from unisa.image.pe via exec/facts/export.py: per field (name, width, endian kind,
+  value const|register), literal byte runs (hex) and named computations (entry-value, directory-values, reloc-align,
+  import-values, name-value(offset)) as separate items; template maps kind -> writer proc (EI.bytes / MB.little / MB.big).
+- blocker: one graph transition = all literal bytes + computations since the previous field + that field. A template
+  loop cannot concatenate a variable number of items into one action list; one rule per item changes the graph
+  (graphhash red). Needs either (a) a generic assemble opt: mapseq part with a formatted key per element
+  (e.g. "lead_{i}" over a field list, acts built from the item's hex bytes and from named result-tsv sections), with the
+  template splicing ["@","lead_{f.i}"]; or (b) accepting extra states (graph changes, new hashes). Decision needed.
