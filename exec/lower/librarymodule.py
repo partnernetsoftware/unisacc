@@ -1,7 +1,8 @@
 """Module lowering disables implicit first-function process setup."""
 from pathlib import Path
 from modelinput import u64
-from finite_rules import install as rules
+from finite_rules import install as rules, install_template
+T=lambda g,sec,facts={}:install_template(g,Path(__file__).parent,'librarymodule',facts,None,section=sec)
 
 def install(E, regmap):
     g=E.g
@@ -13,17 +14,17 @@ def install(E, regmap):
     s0,s1=scratches
     u64(E,'LMD.processread',b'\0library/process','library_process','lmd_hasprocess','C.fail')
 
-    g.st['LMD.original.prelude']=g.st.pop('C.prelude');g.labels.add('LMD.original.prelude')
+    T(g,'prelude')
     u64(E,'LMD.read',b'\0library/module','library_module','lmd_present','C.fail')
     u64(E,'LMD.symbolsread',b'\0library/symbols','lmd_symbols','lmd_hassymbols','C.fail')
     rules(g,Path(__file__).parent,'librarymodule',section='entry')
-    g.st['LMD.original.default']=g.st.pop('C.default');g.labels.add('LMD.original.default')
+    T(g,'default')
     rules(g,Path(__file__).parent,'librarymodule',section='default')
-    g.st['LMD.original.setup']=g.st.pop('C.setup');g.labels.add('LMD.original.setup')
+    T(g,'setup')
     rules(g,Path(__file__).parent,'librarymodule',section='setup')
     for name in ('DO.argc','DO.argv'):
         original='LMD.original.'+name
-        g.st[original]=g.st.pop(name);g.labels.add(original)
+        T(g,'process',{'name':[name]})
         rules(g,Path(__file__).parent,'librarymodule',section='process',bindings=dict(entry=name,select=name+'.module',original=original,check=name+'.process',emit='LMD.argc' if name=='DO.argc' else 'LMD.argv'))
     rules(g,Path(__file__).parent,'librarymodule',section='dynamic',bindings=dict(REG=REG),
           sequences=dict(base=E.O('setreg '+s0+', imm '),

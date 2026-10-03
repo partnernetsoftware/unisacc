@@ -4,8 +4,8 @@ match a writable USBIND1 data record and all four canonical ABI facts.
 Stage control lives in librarydata-byte/result.tsv (finite_rules), fresh labels in
 librarydata-fresh.tsv, pre-allocated per section in the original global order.
 Python binds dynamic facts: token ids (.libraryaddr, .lea), table bases, the
-os capability target. Residue: the renames of C.dispatch and LBI.emit into
-LBD.original.* (they create states, which a table row cannot do).
+os capability target. The wraps of C.dispatch and LBI.emit into
+LBD.original.* are move edits in librarydata-template.tsv.
 """
 from pathlib import Path
 def install(E,os_,ids):
@@ -22,7 +22,8 @@ def install(E,os_,ids):
   for sec,k,kind,prefix in fresh:
    if sec==name:b[k]=ps.setdefault(prefix,E.P(prefix)).fresh(kind)
   rules(g,root,'librarydata',b,section=name)
- g.st['LBD.original.dispatch']=g.st.pop('C.dispatch');g.labels.add('LBD.original.dispatch')
+ from finite_rules import install_template
+ install_template(g,root,'librarydata',{},None,section='dispatch')
  section('s1')
- g.st['LBD.original.emit']=g.st.pop('LBI.emit');g.labels.add('LBD.original.emit')
+ install_template(g,root,'librarydata',{},None,section='emit')
  for i in range(2,11):section('s%d'%i)

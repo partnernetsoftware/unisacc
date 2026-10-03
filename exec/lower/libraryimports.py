@@ -6,8 +6,8 @@ Ordinary .hostcall handling is untouched; only the dedicated token uses this rou
 Stage control (including the legacy LBI.checkdesc constructor helpers) lives in
 libraryimports-result.tsv (finite_rules); fresh labels in libraryimports-fresh.tsv,
 pre-allocated per section in the original global order. Python binds the
-.librarycall token, REG/DESC bases and the os capability target. Residue: the
-shared decoder install, the C.dispatch rename, and the three modelinput.u64
+.librarycall token, REG/DESC bases and the os capability target. The C.dispatch wrap is a
+move edit in libraryimports-template.tsv. Residue: the shared decoder install and the three modelinput.u64
 resource readers (they create fact-dependent states).
 """
 from pathlib import Path
@@ -26,7 +26,8 @@ def install(E, os_, ids):
         rules(g,root,'libraryimports',b,section=name)
     from modelbindings import install as install_decoder
     install_decoder(E)
-    g.st['LBI.original.dispatch']=g.st.pop('C.dispatch');g.labels.add('LBI.original.dispatch')
+    from finite_rules import install_template
+    install_template(g,root,'libraryimports',{},None,section='dispatch')
     section('s1')
     # Callable-only modules have no import binding table. Their explicit host
     # resources authorise the generic dispatcher, never named data resolution.
