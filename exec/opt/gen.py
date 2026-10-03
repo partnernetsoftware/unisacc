@@ -139,21 +139,16 @@ def peepround():
         bindings.update((prefix + "_" + name, index) for index, name in enumerate(values))
     bindings.update(PB_size=len(PB), PR_size=len(PR))
     install_rules(g, os.path.dirname(__file__), "peep", bindings=bindings)
-    # Materialize the current head order; target policy and fallback are declarations.
-    from finite_rules import load as load_rules
+    # Materialize the current head order; target policy and fallback are declarations
+    # (setup-template.tsv: one answer row per peep head, then the fallback default).
+    from finite_rules import install_template
     from pathlib import Path
     root = Path(__file__).parent
     targets = dict(line.split('\t') for line in
                    (root/'answer-targets.tsv').read_text().splitlines()
                    if line and not line.startswith('#'))
-    for index, name in enumerate(PY):
-        target = targets.get(name, targets['*']).format(name=name)
-        rows = load_rules(root/'setup-result.tsv', {}, domain=[index],
-                          bindings=dict(dispatch=bindings['PP_b85'], target=target), section='answer')
-        for state, row in rows.items():
-            for key, (next_state, acts) in row.items():
-                g.on(state, [key], next_state, acts, 'r')
-    install_rules(g, root, 'setup', bindings={'dispatch': bindings['PP_b85']}, section='fallback')
+    Y = [dict(i=index, target=targets.get(name, targets['*']).format(name=name)) for index, name in enumerate(PY)]
+    install_template(g, root, 'setup', dict(Y=Y), None, bindings={'dispatch': bindings['PP_b85']}, section='answer')
 
 
 def peep_start(p):
