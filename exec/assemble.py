@@ -197,6 +197,7 @@ class Run:
             return self.E.O(json.loads(v[6:]))
         if v.startswith("fresh:"):
             scope, kind = v[6:].rsplit(":", 1)
+            scope = _fmt(scope, facts) if "{" in scope else scope
             return self.fresh(scope)(kind)
         return _path(facts, v)
 
@@ -270,8 +271,9 @@ class Run:
         if op in ("holder", "fresh") and "cols" in o:   # fresh table (translator spells it `fresh`)
             return self.fresh_table(stem, o)
         bd = self.bindings(o, bind, facts)
-        for k in o.get("export", []):
-            self.env[k] = bd[k]
+        ex = o.get("export", [])
+        for k, b in (ex.items() if isinstance(ex, dict) else ((k, k) for k in ex)):
+            self.env[k] = bd[b]
         sq = self.cells(seq, facts)
         tr = self.seqrows(o, facts)
         if tr is not None:
@@ -297,6 +299,7 @@ class Run:
             if "exit" in o:
                 raise SystemExit(o["exit"])
             self.env.update(bd or {})
+            self.env.update(sq or {})
         elif op == "py":   # TRANSITIONAL (K2 boundary forbids): lower/code, lower/objectfacts; gate --ops is red until gone
             import importlib.util, sys
             if str(self.root) not in sys.path:
@@ -369,6 +372,10 @@ def _mapseq(self, spec, facts, bd):
             for y in x[a["over"]]:
                 for b in a["acts"]:
                     emit(acts, b, dict(x, **{a.get("as", "it"): y}))
+        elif isinstance(a, str) and a.startswith("$"):
+            acts.extend(self.env[a[1:]])
+        elif a[0] == "@out":
+            acts.extend(("OUT", c) for c in a[1].format(**x).encode())
         elif a[0] == "@bytes":
             acts.extend(("SBOUT", c) for c in a[1].format(**x).encode())
         else:
@@ -378,11 +385,12 @@ def _mapseq(self, spec, facts, bd):
     for name, parts in spec.items():
         acts = []
         for part in parts:
-            for x in (_path(facts, part["over"]) if "over" in part else [{}]):
+            for x in (_path(facts, part["over"]) if "over" in part else [facts]):
                 if any(str(x[c]) != _fmt(v, facts) for c, v in part.get("where", {}).items()):
                     continue
+                ctx = dict(facts, **x) if isinstance(x, dict) and x is not facts else facts
                 for a in part["acts"]:
-                    emit(acts, a, x)
+                    emit(acts, a, ctx)
         out[name] = acts
     return out
 
@@ -442,7 +450,7 @@ def _fmt(f, facts):
 def _foreach(self, o, body, depth, extra, facts):
     rows = _path(facts, o["over"])
     for col, allowed in o.get("where", {}).items():
-        allowed = [_section(a, self.flags) for a in allowed]
+        allowed = [_fmt(_section(a, self.flags), facts) for a in allowed]
         rows = [r for r in rows if r[col] in allowed]
     ch = o.get("chain")
     cur = ch and self.value(ch["start"], facts)

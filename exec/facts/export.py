@@ -115,14 +115,58 @@ def lowerabi():
                 sel = f[0] != "none" or (os_ == "win" and WINAPI.get(o) is not None and f[12] != "none")
                 rows.append("\t" + "\t".join([t, _esc(o), f[0], json.dumps(f[1:7]), f[7], f[8], f[9], f[10], f[11], f[12],
                                                  "none" if WINAPI.get(o) is None else WINAPI[o], enc.get(o, ""), str(int(sel))]))
-    return out + rows
+    # (op, mode) pairs of the selected ops, flattened (decision A): argument sources per
+    # exec/lower/code-abi-sources.tsv; mem arguments carry the immediates written before them.
+    from unisa import lower as L
+    src = [x.split("\t") for x in (ROOT / "exec/lower/code-abi-sources.tsv").read_text().splitlines()
+           if x and not x.startswith("#")]
+    sysa = {"SYSA%d" % i: L.SYSA + 8 * i for i in range(6)}
+    sel = ["@abisel\ttarget:str\top:str"]
+    om = ["@opmodes\ttarget:str\top:str\tmode:int\tprev:int\tfirst:json\tlast:json\tsyscall:json\thassysno:json\t"
+          "sysnoint:str\tnrreg:str\tret:str\tgate:str\tform:str\tcarry:str\twinapi:str\tsysnoval:str\tretconv:str\t"
+          "winimp:str\tmems:json\ttprev:json\ttrail:json"]
+    val = lambda v: "'" + v if v == "none" or v.startswith(tuple("0123456789")) else v
+    for os_ in ("lnx", "osx", "win"):
+        for arch in ("x86_64", "arm64"):
+            t = os_ + "/" + arch
+            abi = {r[0]: r[3:] for r in _gold("abi") if r[1:3] == [os_, arch]}
+            enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
+            for o, f in abi.items():
+                if not (f[0] != "none" or (os_ == "win" and WINAPI.get(o) is not None and f[12] != "none")):
+                    continue
+                sel.append("\t%s\t%s" % (t, _esc(o)))
+                for mode in range(5):
+                    sm = 5 if o == "syscall" and mode == 1 else mode
+                    sources = [(k, sysa[v] if v in sysa else int(v)) for m, sh, k, v in src if int(m) == sm and sh in ("*", f[10])]
+                    if not sources:
+                        raise ValueError("new Linux " + arch + " argument shape requires migration: " + f[10])
+                    mems, pend, prev = [], [], []
+                    for i, (k, v) in enumerate(sources):
+                        if f[1 + i] == "none":
+                            if os_ == "win":
+                                break
+                            raise ValueError("unsupported stack syscall argument")
+                        a = dict(idx=i, kind=k, value=v, reg=f[1 + i])
+                        if k == "imm":
+                            pend.append(a)
+                        else:
+                            mems.append(dict(a, imms=pend, prev=prev))
+                            pend, prev = [], [dict(idx=i)]
+                    om.append("\t" + "\t".join(_esc(x) for x in [
+                        t, o, str(mode), str(mode - 1), json.dumps([1] if mode == 0 else []), json.dumps([1] if mode == 4 else []),
+                        json.dumps([1] if o == "syscall" else []), json.dumps([1] if f[0] != "none" and o != "syscall" else []),
+                        str(int(f[0], 0)) if f[0] != "none" else "", f[9], f[7], f[8], enc.get(o, ""),
+                        "true" if os_ == "osx" else "false", "none" if WINAPI.get(o) is None else WINAPI[o],
+                        val(f[0]), val(f[11]), val(f[12]), json.dumps(mems),
+                        json.dumps(prev), json.dumps(pend)]))
+    return out + rows + sel + om + ["=none\tjson\t[]", "=zero\tint\t0", "=eight\tint\t8"]
 
 
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
-    ("lower-abi", ["unisa/catalog.py", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
+    ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
 ]
 
