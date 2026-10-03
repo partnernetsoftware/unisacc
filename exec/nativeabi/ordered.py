@@ -4,7 +4,7 @@ from container extent. Anonymous SysV lanes qualify only if both known unnamed
 bitfield policies agree. BANK, modifiers and incomplete facts reject.
 """
 import json,pathlib
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules,install_template
 from modelgraphequality import EXTRA,ENTRYEXTRA,EDGES,LAYOUT
 # Additional values saved by NL's existing isolated recursive frame.
 REGS=('nl_bitoffset','nl_bitwidth','nl_entrykind','nl_entryalign','nl_cursor',
@@ -13,8 +13,8 @@ REGS=('nl_bitoffset','nl_bitwidth','nl_entrykind','nl_entryalign','nl_cursor',
 def install(E,field,word,constword,blob,extents,alignments):
  """Stage control lives in ordered-result.tsv (section main: metadata, interval, aggregate
  walk, family/recipe checks; section recipe: the emission loop). Python binds only dynamic
- facts: graph constants, helper-built field reads, rules.tsv extents/alignments, fresh labels;
- the recipe header/element writers stay here because they call the word/constword helpers."""
+ facts: graph constants, helper-built field reads, rules.tsv extents/alignments, fresh labels.
+ The recipe header/element writers are MS.write64 call chains in ordered-template.tsv."""
  P=E.P;root=pathlib.Path(__file__).parent
  fresh=[l.split('\t') for l in (root/'ordered-fresh.tsv').read_text().splitlines()[1:]]
  bindings=dict(EXTRA=EXTRA,ENTRYEXTRA=ENTRYEXTRA,EDGES=EDGES,LAYOUT=LAYOUT)
@@ -32,12 +32,6 @@ def install(E,field,word,constword,blob,extents,alignments):
    if part==name:bindings[key]=p.fresh(kind)
   install_rules(E.g,root,'ordered',bindings,sequences,classes,name)
  section('main')
- p=P('OL.recipeheader')
- for v in (0,0,0,5):constword(p,v)
- word(p,'nc_width');constword(p,0);word(p,'nc_alignment')
- p.a(('LDI','nc_v',1),('OUTW','nc_v'),('OLEN','nc_payloadcut'),('ALU','div','ol_emitcount','nc_width','nc_alignment'),('LDI','ol_emitindex',0),('LDI','ol_emitoffset',0));word(p,'ol_emitcount').goto('OL.recipeloop')
+ install_template(E.g,root,'ordered',{},P('OL.recipeheader').fresh,section='header')
  section('recipe')
- p=P('OL.recipewrite');word(p,'ol_emitoffset');constword(p,0);constword(p,0);word(p,'nc_alignment')
- for v in (0,0,0):constword(p,v)
- word(p,'ol_emitkind');word(p,'nc_alignment');word(p,'ol_emitunsigned');word(p,'nc_alignment')
- p.a(('OUTW','nc_zero'));constword(p,0).a(('ALUI','add','ol_emitindex','ol_emitindex',1),('ALU','add','ol_emitoffset','ol_emitoffset','nc_alignment')).goto('OL.recipeloop')
+ install_template(E.g,root,'ordered',{},P('OL.recipewrite').fresh,section='write')
