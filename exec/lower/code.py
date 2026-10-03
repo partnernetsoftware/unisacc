@@ -30,35 +30,10 @@ def install(E, arch="x86_64", os_="lnx"):
     import assemble
     target = os_ + '/' + arch
     ids = {r['word']: 'idc' + str(r['i']) for r in assemble.load_facts('lower-code')['words'] if r['target'] == target}
-    assemble.run(Path(__file__).parent/'codeinit-manifest.tsv', E, P, {}, dict(target=target))
+    assemble.run(Path(__file__).parent/'codeinit-manifest.tsv', E, P, dict(win=os_=='win', arm64=arch=='arm64'),
+                 dict(target=target, ids=ids, process_flag='true' if os_=='lnx' else 'false',
+                      **{'reg_'+k: v for k, v in regmap.items()}))
     from finite_rules import install as install_rules
-    # Complete token/buffer traversal group; setup and dynamic dispatch follow below.
-    scan_labels = (('C', 'r'), ('C', 'b'), ('C', 'b'), ('C', 'b'),
-                   ('C', 'b'), ('C', 'r'), ('C', 'b'), ('C', 'b'),
-                   ('C', 'b'), ('C', 'b'), ('C', 'r'), ('C', 'b'))
-    scan_bindings = {'label'+str(i): P(owner).fresh(kind)
-                     for i, (owner, kind) in enumerate(scan_labels)}
-    scan_bindings.update(OP=OP, KIND=KIND, AC=AC, ARG=ARG, TXT=TXT,
-                         start_id=ids['_start:'])
-    install_rules(g, Path(__file__).parent, 'code-scan', bindings=scan_bindings,
-                  sequences={'newline': E.O('\n')})
-    # Target setup is a fixed declaration; layout and register facts remain bindings.
-    setup_section = 'win-'+arch if os_=='win' else 'posix'
-    setup_labels = {
-        'posix': (('C', 'b'), ('C', 'r'), ('C', 'r')),
-        'win-x86_64': (('C', 'r'), ('C', 'b'), ('C', 'r'), ('C', 'r'), ('C', 'r'), ('C', 'b')),
-        'win-arm64': (('C', 'r'), ('C', 'b'), ('C', 'r'), ('C', 'r'), ('C', 'r'), ('C', 'r'), ('C', 'b')),
-    }[setup_section]
-    entry_bindings = {'label'+str(i): P(owner).fresh(kind)
-                      for i, (owner, kind) in enumerate(setup_labels)}
-    entry_bindings.update(WIN_HSTD=WIN_HSTD, WIN_ARGVA=WIN_ARGVA,
-                          stack_end=WIN_EXTRA+WIN_STACK)
-    entry_sequences = {name: E.O(text) for name, text in (
-        ('winstdh', 'winstdh '), ('winargs', 'winargs '), ('argsave', 'argsave '),
-        ('newline', '\n'), ('comma', ', '), ('spinit', 'spinit '+regmap['r7']),
-        ('process_flags', ', '+('true' if os_=='lnx' else 'false')+'\n'))}
-    install_rules(g, Path(__file__).parent, 'code-entry', bindings=entry_bindings,
-                  sequences=entry_sequences, section=setup_section)
     if arch=='arm64':
         from armfuse import install as install_armfuse, immediate
         install_armfuse(E,ids,OP,KIND,ARG)

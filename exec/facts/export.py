@@ -54,6 +54,10 @@ def lowercode():
     words = list(dict.fromkeys(list(SHAPE) + ["r" + str(i) for i in range(8)] + [
         "0", "1", "2", "3", "4", "8", "-8", "_start:", "write", "exit",
         ".hostcall", ".hostaddr", ".librarycall", ".libraryaddr"]))
+    from unisa import lower as L
+    for n in ("WIN_HSTD", "WIN_WRITTEN", "WIN_SAVE", "WIN_ARGVA", "SYSA", "SYSFP", "SYSSP"):
+        out.append("=%s\tint\t%d" % (n, getattr(L, n)))
+    out.append("=WIN_STACK_END\tint\t%d" % (L.WIN_EXTRA + L.WIN_STACK))
     out.append("@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json")
     for os_ in ("lnx", "osx", "win"):
         for arch in ("x86_64", "arm64"):
@@ -70,7 +74,7 @@ def lowercode():
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
-    ("lower-code", ["unisa/tape.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
+    ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
 ]
 
 
