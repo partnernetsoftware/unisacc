@@ -248,6 +248,10 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](archive/plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
 
+### 5.0 种子层路线（主人定调 2026-10-03 19:51）
+
+0.0.24–0.0.27：K2 收尾 → 冻结 TSV/清单 DSL 并写语法与语义规格（opts 键与值前缀进门禁封顶；去掉 @stack getattr 回调、@fmt 的 str.format 依赖、=vN 不透明绑定；隐式顺序改表内显式规则；动作序列移出 facts；清死数据）→ 每个表条目与 DSL 操作配独立用例并量覆盖率（判对错不依赖 Python 产物或 graphhash）。约 0.0.28 起用 C 重写种子层，作为冻结规格的权威实现，最终完全不依赖 Python；Python 只留历史参照。详见 plans/v0.0.23.md「0.0.24–0.0.27 方向」。
+
 ### 5.1 libc 路线裁定（主人 2026-10-02）
 
 **反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。参考侧已随 v0.0.21 交付（[归档计划](archive/plans/v0.0.21.md) 第 4a 项），产品侧在 0.0.22。**补充裁定（主人 2026-10-02）**：不接受“Linux 静态 ELF 没有动态装载器所以不转发”——三个 OS 都要把动态装载做好：Linux 写最小动态 ELF（PT_INTERP 指向系统 ld.so，DT_NEEDED libc.so.6，四个 GLOB_DAT 槽绑定 dlopen/dlsym/dlclose/dlerror，与 macOS 的四个 eager bind 同形），Windows 把同样四个槽映射到 LoadLibraryA/GetProcAddress/FreeLibrary/GetLastError；于是 `__hostaddr0..3` + `__hostcall` 在六个目标上是同一条转发通道。只有用到转发的程序才写动态头，其余镜像字节不变。**方向澄清（主人 2026-10-02）**：反对自研 libc 的原因是它是大工程，**将来应做成外置的 libc 包，而不是内置在 unisacc.com 里**；“缺什么函数就补一个函数体编进去”的亡羊补牢做法是无底洞，停止。于是 0.0.21 的转发不是逐个函数写转发桩，而是**通用转发**：有原型、无定义、随带库也没有的外部函数，一律由编译器生成转发桩（0.0.19 R19-10 的 `fwd_stub` 机制，目前只在 macOS `-run` 下），扩展到写出的镜像与 Linux（借上面的四个 dl 槽）；随带头文件逐步收缩为声明，函数体只留纯计算且影响确定性的部分，最终外置。主人也说明静态与动态不是硬要求、产物体积暂不是关键，以实现与可维护为先。
