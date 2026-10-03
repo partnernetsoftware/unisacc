@@ -166,27 +166,7 @@ def optail(o):
 
 
 def tytail():
-    initials = {name: row[0][1] for name, row in load_rules(Path(__file__).with_name("operator-actions.tsv"),
-                {}, domain=[0], section="initial").items()}
-    current, initial = "CKM", initials["ckm"]
-    for width, mask in [(sz, (1 << (8 * sz)) - 1) for _, _, sz, un, _ in TYINT if un and sz < 8]:
-        hit, nxt = "CKM.m%d" % width, "CKM.k%d" % width
-        structured_control("ckm-row", False, dict(word_state=current, tail_current=current,
-            tail_test=P(current).fresh("b"), tail_hit=hit, tail_next=nxt, tail_axis=AX.index("u%d" % (8 * width))),
-            dict(tail_initial=initial, tail_mask=O(TYPE_TAPE["mask_pair"] % mask)))
-        current, initial = nxt, []
-    structured_control("ckm-final", False, dict(tail_current=current, tail_test=P(current).fresh("b"),
-        tail_axis=AX.index("u64")), dict(tail_initial=initial))
-    current, initial = "RESD", initials["resd"]
-    for name, code, size, unsigned, _ in TYINT:
-        hit, nxt = "RESD." + name, "RESD.n" + name
-        mask = O(TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1)) if unsigned and size < 8 else []
-        structured_control("resd-row", False, dict(word_state=current, tail_current=current,
-            tail_test=P(current).fresh("b"), tail_hit=hit, tail_mask_test=hit+".mask",
-            tail_next=nxt, tail_axis=AX.index(name), tail_code=code),
-            dict(tail_initial=initial, tail_mask=mask))
-        current, initial = nxt, []
-    structured_control("resd-final", False, dict(tail_current=current), dict(tail_initial=initial))
+    segment("tytail")   # gen2-manifest rows over facts k2-gen2 ckmrows/resdrows
 
 
 def strwalk(pre, body, done):
@@ -371,8 +351,7 @@ def types():
     shape_control("dimensions")
 
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
-    dispatch = P("TSPEC").fresh("b")
-    structured_control("type-entry", False, dict(type_dispatch=dispatch))
+    dispatch = segment("types-entry")["td"]
     targets = {TK[word]: "TS." + word for word in TWORDS}
     targets.update((TK_ID if word == "identifier" else TK[word], target)
                    for word, target in tape_rows("type-entry.tsv"))
@@ -421,7 +400,7 @@ def structured_control(section, warnings, extra=None, sequence_bindings=None, ex
 def segment(name, warnings=False):
     """One transitional segment of exec/parse2/gen2-manifest.tsv (rows gated by env fact seg_NAME)."""
     import assemble
-    assemble.run(Path(__file__).resolve().parent / 'gen2-manifest.tsv', E, P, dict(warnings=warnings), {"seg_" + name: 1})
+    return assemble.run(Path(__file__).resolve().parent / 'gen2-manifest.tsv', E, P, dict(warnings=warnings), {"seg_" + name: 1})
 
 
 def ordinary_control(section, warnings, extra=None):
