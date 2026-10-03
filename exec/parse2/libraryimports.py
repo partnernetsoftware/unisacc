@@ -69,6 +69,5 @@ def install(E,P,b,start,integers):
     install_template(g,root,'libraryimports',{'integer':[{'code':code,'width':width,'uns':uns} for _,code,width,uns,_ in integers]},
                      P('LI.scalar').fresh,section='scalar')
     for name in ('wrap2','scanbyte','scan','scanwordbyte','wrap3'):section(name)
-    from librarydata import install as data_install
-    data_install(E,P,b,integers)
+    assemble.run(root/'librarydata-manifest.tsv',E,P,{})
     return 'LI.start'
