@@ -71,6 +71,20 @@
 - Gates after round 3: decision-ledger, finite-template, exec-lower ok. Rebased: origin/main had nothing new at 16:37.
 - Next: parse (P class/tokenizer -> generic module), pp, lex; then full graphhash + exec-lexloc/exec-pploc/exec-chain.
 
+## Round 4 (16:42-16:52)
+- 4c940917 generic primitives: exec/build/graph.py (G from pp/gen.py, Delta from lex/gen.py, verbatim) and
+  exec/build/procs.py (make_P(g, O, rej): the generic P core fresh/a/o/goto/label/call/ret/branch; parse/gen.py
+  subclasses it with tok/expect/num/lab/vpush/vpop/newlab). Loaded by path. exec/.gitignore now `build/*/`
+  (files directly in exec/build are tracked sources). Ledger: baseline 30 -> 14 (research/decision-ledger.json),
+  keep reasons for lex/parse/pp rewritten as pending-migration (lex sweep 3, parse 1, pp START/DSW 2 calls).
+- Full graphhash 55 entries 0 bad; gates exec-lexloc, exec-pploc, decision-ledger ok (exec-chain ok in round 2).
+- parse/gen.py is NOT an entry (its __main__ exits; parse2/gen2.py is the parser) -> no parse gen-manifest; it is the
+  base library. pp/gen.py (464 lines) and lex/gen.py (497) entries are still Python: next.
+- Coordinator: the decoder agent also converted modelsignature/modelgraphequality to manifests and deleted the .py.
+  When that lands: drop my exec/model{signature,graphequality}-manifest.tsv + facts/model-banks (+ the `ret`
+  section I added to modelsignature-result.tsv) and point nativeabi/gen-manifest row 1 at theirs; recheck byte-equality.
+- tests/gatedeps.json excludes exec/build for the compilercheck family: now that exec/build holds sources, review.
+
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
 - Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the
