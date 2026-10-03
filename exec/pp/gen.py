@@ -124,71 +124,11 @@ AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta w
 # the autoinc status compare is untouched; W[NEEDB + b] = 1 marks carried body b.
 
 
-def build_ftrim_libc(g):
-    """-ftrim-libc after the autoinc scan: the default since R11-3 -- unless the
-    \\0cli/fno-trim-libc resource is present (non-empty) -- and no quoted
-    #include (the LQ* prescan, quotedinc's line rule), mark the roots'
-    closure, then every body reached by a seen key, then define __UN_<body>
-    for each marked body and __UNISA_FTRIM_LIBC.  Closures are the build-time
-    table of unisa/libneed.py; nothing is solved at run time."""
-    sys.path.insert(0, ROOT)
-    from unisa.libneed import table, roots, PREFIX
-    inc = os.path.join(ROOT, "include")
-    keys, closure, bodies = table(inc)
-    index = {b: i for i, b in enumerate(bodies)}
-    def marks(names):
-        out = []
-        for b in names:
-            out += [("LDI", "t", NEEDB + index[b]), ("LDI", "v", 1), ("STX", "t", 0, "v")]
-        return out
-    install_rules(g, HERE, "ftrim-libc", {"LNSB": LNSB}, {"roots": marks(roots(inc))})
-    for i, k in enumerate(keys):
-        install_rules(g, HERE, "ftrim-libc-key", {"entry": "LNK%d" % i, "test": "LNK%dr" % i,
-            "next": "LNK%d" % (i + 1) if i + 1 < len(keys) else "LNB0", "LNSB": LNSB},
-            {"name": sbconst(k), "mark": marks(closure[k])})
-    for j, b in enumerate(bodies):
-        nxt = "LNB%d" % (j + 1) if j + 1 < len(bodies) else "LNDEF"
-        install_rules(g, HERE, "ftrim-libc-body", {"entry": "LNB%d" % j, "test": "LNB%dr" % j,
-            "next": nxt, "define": "LNB%dd" % j, "slot": NEEDB + j})
-        install_rules(g, HERE, "assembly", {"entry": "LNB%dd" % j, "resume": "LNB%ddr" % j,
-            "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(PREFIX + b)}, section="predefine")
-    install_rules(g, HERE, "assembly", {"entry": "LNDEF", "resume": "LNDEFR",
-        "next": "AH0_0", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_FTRIM_LIBC")}, section="predefine")
-
-
 def build_autoinc(g, locations=False):
-    """P2 autoinc, first run only (RUN == 0), between decomment and P3.
-    One scan over x: every maximal identifier run followed (spaces, tabs,
-    newlines) by `(` is a call; the `(`'s matching `)` followed by `{` is a
-    definition; a call to printf sets RTP (991d337: stdio.h for any printf call).  Then, per header in AUTOINC_ORDER, a name of
-    autoinc_map() (printf excluded, as hdrneeded does) with status exactly
-    `called` pulls it in; the lines are emitted in prepend order (rtprintf's
-    stdio.h first, then the headers last-to-first) and x copied after."""
-    install_rules(g, HERE, "autoinc", {"AIB": AIB, "LNSB": LNSB}, classes={"identifier": ID})
-    build_ftrim_libc(g)
-    # per header: does some name have status exactly `called`?
-    amap = autoinc_map()
-    H = list(AUTOINC_ORDER)
-    for h, hn in enumerate(H):
-        names = [n for n in amap[hn] if n != "printf"]
-        nxt_h = "AH%d_0" % (h + 1) if h + 1 < len(H) else "AEM"
-        install_rules(g, HERE, "assembly", {"entry": "AH%d_0" % h, "first": "AH%d_n0" % h,
-            "last": "AH%d_n%d" % (h, len(names)), "next": nxt_h, "need": "NEED%d" % h}, section="header")
-        for k, nm in enumerate(names):
-            install_rules(g, HERE, "autoinc-name", {"entry": "AH%d_n%d" % (h, k),
-                "test": "AH%d_r%d" % (h, k), "found": nxt_h,
-                "next": "AH%d_n%d" % (h, k + 1), "need": "NEED%d" % h, "AIB": AIB},
-                {"name": sbconst(nm)})
-
-    def line(hn):
-        # AI_LINES is kept in every build, not only the located one: __LINE__ needs it (N17a)
-        return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()] + [("ALUI","add","AI_LINES","AI_LINES",1)]
-    install_rules(g, HERE, "autoinc-emit", {"entry": "AEM", "test": "AEMR",
-        "need": "RTP", "next": "AEM%d" % (len(H) - 1)}, {"line": line("stdio.h")})
-    for h in range(len(H) - 1, -1, -1):
-        install_rules(g, HERE, "autoinc-emit", {"entry": "AEM%d" % h, "test": "AEM%dr" % h,
-            "need": "NEED%d" % h, "next": "AEM%d" % (h - 1) if h else "ACP0"}, {"line": line(H[h])})
-
+    """P2 autoinc + -ftrim-libc: exec/pp/autoinc-manifest.tsv over facts/pp-autoinc-gen."""
+    import assemble
+    from types import SimpleNamespace
+    assemble.run(Path(HERE) / "autoinc-manifest.tsv", SimpleNamespace(g=g), None, {})
 
 
 AL, DI = _BYTES["alpha"], _BYTES["digit"]
