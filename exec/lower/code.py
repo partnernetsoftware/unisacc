@@ -48,27 +48,8 @@ def install(E, arch="x86_64", os_="lnx"):
     p=P('C.prelude')
     for i in range(8):p.a(('SBCLR',),('SBOUT',48+i),('SBINTERN','inum'+str(i)))
     for op in dict.fromkeys([*abi, 'exit_group']):p.a(('SBCLR',),[('SBOUT',c) for c in op.encode()],('SBINTERN','sysid_'+op))
-    from modelinput import u64
-    u64(E,'C.runargc',b'\0process/argc','run_argc','run_mode','C.fail')
-    u64(E,'C.runargv',b'\0process/argv','run_argv','run_hasargv','C.fail')
-    # Prelude controls consume the existing dynamic ABI-id init sequence.
-    prelude_bindings = {'label'+str(i): P('C').fresh(kind)
-                        for i, kind in enumerate('rbrbrr')}
-    prelude_bindings['entry'] = 'C.prelude.base'
-    prep_sequences = {'text'+str(i): E.O(text) for i, text in enumerate((
-        '@argc ', '\n@argv ', '\n', 'setmem ', ', ', 'mov '+regmap['r0']+', ',
-        ', '+regmap['r6']+'\nsetmem ', ', '+regmap['r7']+'\n', 'setreg '+regmap['r6']+', mem ',
-        ' role=fp\n', 'setreg '+regmap['r7']+', mem ', ' role=sp\n', 'itoa ',
-    ))}
-    install_rules(g, Path(__file__).parent, 'code-sysprep', bindings=prelude_bindings,
-                  sequences={**prep_sequences, 'init': p.acts}, section='prelude')
-    # Source spills, return copying, and print preparation precede dynamic ABI rules.
-    prep_bindings = {'label'+str(i): P('DO').fresh('r') for i in range(40)}
-    prep_bindings.update({'id:'+name: value for name, value in ids.items()})
-    prep_bindings.update(SYSFP=SYSFP, SYSSP=SYSSP)
-    prep_bindings.update({'SYSA'+str(i): SYSA+8*i for i in range(6)})
-    install_rules(g, Path(__file__).parent, 'code-sysprep', bindings=prep_bindings,
-                  sequences=prep_sequences, section='prepare')
+    assemble.run(Path(__file__).parent/'codeprep-manifest.tsv', E, P, {},
+                 dict(prelude_init=p.acts, idmap={'id:'+n: v for n, v in ids.items()}, **{'reg_'+k: v for k, v in regmap.items()}))
     # Finite source layouts are declarations; ABI register facts stay in current rows.
     source_rows = [line.split('\t') for line in
                    Path(__file__).with_name('code-abi-sources.tsv').read_text().splitlines()

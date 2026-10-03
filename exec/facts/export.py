@@ -58,6 +58,8 @@ def lowercode():
     for n in ("WIN_HSTD", "WIN_WRITTEN", "WIN_SAVE", "WIN_ARGVA", "SYSA", "SYSFP", "SYSSP"):
         out.append("=%s\tint\t%d" % (n, getattr(L, n)))
     out.append("=WIN_STACK_END\tint\t%d" % (L.WIN_EXTRA + L.WIN_STACK))
+    out += ["=SYSA%d\tint\t%d" % (i, L.SYSA + 8 * i) for i in range(6)]
+    out += ["=key_argc\tjson\t" + json.dumps("\0process/argc"), "=key_argv\tjson\t" + json.dumps("\0process/argv")]
     out.append("@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json")
     for os_ in ("lnx", "osx", "win"):
         for arch in ("x86_64", "arm64"):
