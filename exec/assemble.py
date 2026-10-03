@@ -106,7 +106,6 @@ def _section(s, flags):
 # ---- K2 round 2 slice D/E (lower data): generic additions ------------------
 # value `@out:TEXT`: OUT byte sequence of TEXT after str-unescape (\n, \t) and
 #   `{NAME}` substitution from the row's facts/env (a literal comma is `\x2c`);
-# op `e`: call the executor primitive E.STEM() (no arguments), e.g. prn.
 def _out(text, facts):
     if text.startswith("="):
         return [("OUT", c) for c in str(_path(facts, text[1:])).encode()]
@@ -306,8 +305,6 @@ class Run:
             mod = importlib.util.module_from_spec(sp)
             sp.loader.exec_module(mod)
             res = mod.install(self.E, **(bd or {}))
-        elif op == "e":   # TRANSITIONAL: lower/data E.prn
-            res = getattr(self.E, stem)()
         elif op == "label":
             g.labels.update(stem.split(","))
         elif op == "assert-absent":
