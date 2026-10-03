@@ -390,35 +390,10 @@ def local_control(section, warnings):
 
 
 def return_control(section, extra=None):
-    b = dict(SBB=SBB, SSZ=SSZ, CKT=CKT, expr_entry="E%d" % LEVELS[0], tail_entry="C%d" % LEVELS[0])
-    b.update(extra or {})
-    p = P("return.bindings." + section + "." + str(P.n))
-    for part, owner, kind, key in tape_rows("return-fresh.tsv"):
-        if part == section:
-            p.cur = owner
-            b[key] = p.fresh(kind)
-    sequences = {name: O(json.loads(value)) for name,value in tape_rows("return-text.tsv")}
-    sequences.update((name, O(re.split(r"(\{[^}]*\})", TEMPL[template])[int(index)]))
-                     for name,template,index in tape_rows("return-template.tsv"))
-    sequences.update((name, E.rej(message)) for name,message in tape_rows("return-reject.tsv"))
-    for name,method,slots in tape_rows("return-stack.tsv"):
-        p.acts = []
-        sequences[name] = getattr(p, method)(*slots.split(",")).acts
-    tokens = dict(TK, identifier=TK_ID)
-    classes = {name:[tokens[token]] for name,token in tape_rows("return-tokens.tsv")}
-    classes.update(typewords=[TK[w] for w in TWORDS], scalar_types=[BOOL,DBL,FLT], float_types=[DBL,FLT],
-                   axis_f64=[AX.index("f64")], axis_f32=[AX.index("f32")],
-                   operators=[TK[o] for o in ("=","++","--")] + [TK[o+"="] for o in E.CASOPS])
-    install_rules(g, os.path.dirname(__file__), "return", bindings=b, sequences=sequences, classes=classes, section=section)
-    if section == "expr0":
-        compound = {TK[o+"="]:"LV.c"+o for o in E.CASOPS}
-        dispatch = b["f48"]
-        for domain, selected, additions in [(set(range(257))-compound.keys(), "expr0", {})] + [
-                ([key], "compound", dict(lp_dispatch=dispatch,operation=target)) for key,target in compound.items()]:
-            install_rows(g, Path(__file__).with_name("return-dispatch.tsv"), sequences,
-                         domain=domain, bindings=dict(b,**additions), classes=classes,
-                         section=selected)
-    return b
+    """Return/expression control: exec/parse2/return-manifest.tsv (K2 sub-manifest); returns its bindings."""
+    import assemble
+    return assemble.run(Path(__file__).resolve().parent / 'return-manifest.tsv', E, P, {},
+                        dict(ret_section=section, ret_dispatch=int(section == "expr0"), extra=dict(extra or {})))["rb"]
 
 
 def update_control(section, extra=None):
