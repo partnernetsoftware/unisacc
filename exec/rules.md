@@ -40,7 +40,17 @@ the explicit classic fallback is not an automatic retry for model refusals.
 
 Each generated δ is checked against its table over the finite observation domain; the packaged product is then tested on source, tape, image, diagnostics and native execution. The current adopted route, coverage limits and release identity are tracked in [prd.md](../prd.md), [the package contract](c/PACKAGE.md) and the release receipts. Old candidate identities and fixed-control milestones are preserved in [the rule history](../archive/exec/rules-history-20261002.md).
 
-## 残余直接转移与理由（0.0.23 K，2026-10-03；tests/decisionledger.py 基线 131）
+## 残余直接改图与理由（0.0.23 K）
+
+**口径（2026-10-03 扩大）**：tests/decisionledger.py 现在统计 exec/*.py（finite_rules.py 除外）里所有直接改图的写法：`.on(` `.branch(` `.goto(`、lex 的 `Delta.put(`，以及对图对象的 `st`/`els`/`r`/`seqs`/`states`/`rows` 的写入（赋值、删除、pop/append/update 等）——改名、挂钩、别名这类 Python 图编辑都算在内，不能换个写法绕过。基线见 research/decision-ledger.json，只降不升。
+
+**理由**：每个仍被计数的文件都必须在 tests/decisionledger.allow 里有一行 `keep FILE CATEGORY reason`，门禁检查。类别：test-tool（检查脚本内部的探针图）、generic-assembly（通用组装：汇编器 P 的原语等，所有表都经它展开）、pending-migration（0.0.23 K 的欠账，用参数化模板迁移，不是被接受的残余）、cdx-pending。主人规则：“表行目标列不能由事实生成”不算理由，参数化模板（finite_rules.install_template）能表达事实生成的控制；保留必须说明为什么连模板也表达不了。
+
+## 构建期 import 的 unisa/ 模块：事实来源与可信基
+
+exec/ 的构造器在构建时 import 以下 unisa/ 模块：。它们不在决策代码账本的范围内，因为它们不直接改图，作用是：①**事实来源**：gold 真值表、目录（catalog）、编码规格、类型与目标事实等，通过绑定和事实列表进入声明表；②**参考实现的一部分**：经典 Python 路线，作为逐字节对拍的裁判之一；③**可信基**：它们给出的事实若有错，网络与表会“一致地错”，全域枚举发现不了——这一层由外部裁判、参考/产品/cc 三方对拍（declmatrix、csmithdiff）提供证据。论文 A（J 项）应把它们列入可信基，与 Python 构造器、枚举器并列。
+
+## 旧口径下的残余清单（历史，2026-10-03，仅统计 .on/.branch/.goto；现行口径与理由见上一节和 tests/decisionledger.allow）
 
 迁移方法：记录原 install 在真实生成器进程中发出的每条转移和新标签分配，机械写成声明表（STEM-result/byte/fresh.tsv），动态事实以绑定、序列、类传入；每片都证明迁移前后各生成器的转移图逐字节相同。下表是剩下的直接转移调用点：
 

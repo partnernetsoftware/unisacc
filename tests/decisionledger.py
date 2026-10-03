@@ -8,14 +8,16 @@ that create transitions directly -- `.on(`, `.branch(`, `.goto(` -- and the grap
 mutations: renames, hooks, aliases) outside finite_rules.py,
 the generic declaration expander.  Lines are not counted (formatting would game them).
 The counts may only fall: research/decision-ledger.json is the baseline; a rise fails unless
-tests/decisionledger.allow names the stage with a reason.  `--update` rewrites the baseline
+tests/decisionledger.allow has `rise STAGE reason`; every file still counted needs `keep FILE CATEGORY reason`.  `--update` rewrites the baseline
 (only after a reviewed decrease, or with an allow line).
 """
 import ast, json, pathlib, sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASE = ROOT / 'research/decision-ledger.json'
 ALLOW = ROOT / 'tests/decisionledger.allow'
-CALLS = ('on', 'branch', 'goto')
+CALLS = ('on', 'branch', 'goto', 'put')   # put: lex Delta.put writes a transition directly
+# attributes of a graph object that hold transitions or states: any write to them is a graph edit
+GRAPH_ATTRS = ('st', 'els', 'r', 'seqs', 'states', 'rows')
 
 def count():
     stages = {}
@@ -28,10 +30,12 @@ def count():
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in CALLS)
         # 0.0.23 K (owner): graph edits written in Python count too -- renames/hooks/aliases done by
         # mutating the state table (`X.st.pop(...)`, `X.st[...] = ...`, `del X.st[...]`)
-        def is_st(e): return isinstance(e, ast.Attribute) and e.attr == 'st'
+        def is_st(e): return isinstance(e, ast.Attribute) and e.attr in GRAPH_ATTRS
         n += sum(1 for node in ast.walk(tree)
-                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('pop', 'setdefault', 'update') and is_st(node.func.value))
-                 or (isinstance(node, (ast.Assign, ast.Delete)) and any(isinstance(t, ast.Subscript) and is_st(t.value) for t in node.targets)))
+                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('pop', 'setdefault', 'update', 'append', 'extend', 'insert', 'clear') and is_st(node.func.value))
+                 or (isinstance(node, (ast.Assign, ast.Delete)) and any(isinstance(t, ast.Subscript) and is_st(t.value) for t in node.targets))
+                 or (isinstance(node, ast.Assign) and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Subscript) and is_st(t.value.value) for t in node.targets))
+                 or (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Subscript) and is_st(node.target.value)))
         if n: stages.setdefault(stage, {})[str(rel)] = n
     return {s: {'total': sum(v.values()), 'files': v} for s, v in sorted(stages.items())}
 
@@ -42,7 +46,12 @@ def main():
         BASE.write_text(json.dumps({'note': 'direct transition call sites in exec/*.py (outside finite_rules.py), per stage; may only fall', 'stages': now, 'total': total}, indent=1) + '\n')
         print('decision-ledger: baseline written, total %d' % total); return 0
     base = json.loads(BASE.read_text())['stages']
-    allow = {l.split()[0] for l in (ALLOW.read_text().splitlines() if ALLOW.is_file() else []) if l.strip() and not l.startswith('#')}
+    lines = [l for l in (ALLOW.read_text().splitlines() if ALLOW.is_file() else []) if l.strip() and not l.startswith('#')]
+    allow = {l.split()[1] for l in lines if l.split()[0] == 'rise'}
+    keep = {l.split()[1]: l for l in lines if l.split()[0] == 'keep'}
+    # every file that still writes the graph in Python must say why (0.0.23 K: a reason per remaining site)
+    missing = sorted(f for v in now.values() for f in v['files'] if f not in keep)
+    for f in missing: print('  NO REASON  %s (add `keep %s CATEGORY reason` to tests/decisionledger.allow)' % (f, f))
     bad = 0
     for s, v in now.items():
         was = base.get(s, {}).get('total', 0)
@@ -51,7 +60,7 @@ def main():
         print('  %-10s %4d  (baseline %4d) %s' % (s, v['total'], was, mark))
     print('decision-ledger  stages %d   direct transition sites %d   (baseline %d)   rose %d'
           % (len(now), total, sum(v['total'] for v in base.values()), bad))
-    return 1 if bad else 0
+    return 1 if bad or missing else 0
 
 if __name__ == '__main__':
     sys.exit(main())
