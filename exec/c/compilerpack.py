@@ -27,7 +27,7 @@ def _keybase():
         from models import closure, ROOT
         names=set()
         sources=[p for d in ('exec/pp','exec/lex','exec/parse','exec/parse2','exec/nativeabi','unisa') for p in (ROOT/d).rglob('*.py')]
-        sources+=[ROOT/'exec/finite_rules.py',ROOT/'exec/modelsignature.py',ROOT/'exec/modelsignature-result.tsv',ROOT/'exec/modelsignature-byte.tsv',ROOT/'exec/modelsignature-fresh.tsv',ROOT/'exec/modelgraphequality.py',ROOT/'exec/c/tbl.py',ROOT/'exec/c/net.py']
+        sources+=[ROOT/'exec/finite_rules.py',ROOT/'exec/modelsignature.py',ROOT/'exec/modelsignature-result.tsv',ROOT/'exec/modelsignature-byte.tsv',ROOT/'exec/modelsignature-fresh.tsv',ROOT/'exec/modelgraphequality.py',ROOT/'exec/modelgraphequality-result.tsv',ROOT/'exec/modelgraphequality-byte.tsv',ROOT/'exec/modelgraphequality-fresh.tsv',ROOT/'exec/c/tbl.py',ROOT/'exec/c/net.py']
         for p in sorted(sources):
             for line in p.read_text(errors='replace').splitlines():
                 if 'environ' in line or 'getenv' in line:
