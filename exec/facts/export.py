@@ -659,6 +659,11 @@ def k2gen2():
     syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
     autonames = [dict(name=nm) for nm in G.E.autonames()]
     i32 = G.TYINFO["i32"][0]
+    btk = dict(G.TK)   # build() appends these two token codes before types() runs
+    for w in ("type=extern", "type=_Bool"):
+        btk[w] = max(btk.values()) + 1
+    typetargets = {btk[w]: "TS." + w for w in G.TWORDS}
+    typetargets.update((G.TK_ID if w == "identifier" else btk[w], t) for w, t in G.tape_rows("type-entry.tsv"))
     gen2parts = dict(
         localdecl=dict(classes=dict(identifier=[G.TK_ID], paren=[G.TK["("]]), seqs=dict(reject=acts(G.E.rej("not covered: declarator")))),
         longdouble=dict(consts=dict(DBL=G.DBL), classes=dict(double=[G.TK["type=double"]])),
@@ -666,7 +671,9 @@ def k2gen2():
                       classes=dict(promote=[G.BOOL] + [c for _, c, z, _, _ in G.TYINT if z < i32],
                                    arithmetic=[G.DBL, G.FLT] + [c for _, c, z, _, _ in G.TYINT if z >= i32]),
                       seqs=dict(reject=acts(G.E.rej("not covered: unary + requires arithmetic operand")))),
-        tentative=dict(consts=dict(TENTATIVE=764 << 40)))
+        tentative=dict(consts=dict(TENTATIVE=764 << 40)),
+        typeops=[dict(key=k, target=t) for k, t in typetargets.items()],
+        updateops=[dict(key=G.TK[o + "="], target="LV.c" + o) for o in G.E.CASOPS])
     scopeconst = {n: getattr(G.E, n) for n in ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
     scopeconst.update(VALUEBANK=G._VR["VALUEBANK"], TYPERANK=G.TYPERANK, LOC=G.LOC, END_=G.END_, ENV=G.ENV, VLSIZE=G.VLSIZE,
                       UNDO_SIZE=G.UNDO_SIZE, SHAPE=G.SHAPE, TDE=G.TDE)
@@ -823,7 +830,7 @@ def k2unitstokens():
 
 TABLES = [
     ("k2-units-tokens", ["exec/parse/gen.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
-    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/facts/export.py"], k2gen2),
+    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),

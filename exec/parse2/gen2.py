@@ -286,15 +286,7 @@ def types():
     shape_control("dimensions")
 
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
-    dispatch = segment("types-entry")["td"]
-    targets = {TK[word]: "TS." + word for word in TWORDS}
-    targets.update((TK_ID if word == "identifier" else TK[word], target)
-                   for word, target in tape_rows("type-entry.tsv"))
-    ctx = dict(dispatch=dispatch, operators=[dict(key=key, target=target)
-                                            for key, target in targets.items()])
-    install_template(g, os.path.dirname(__file__), "dispatch", dict(ctx=[ctx], op=ctx["operators"]),
-                     P(dispatch).fresh, sequences=dict(reject=E.rej("not covered: type")),
-                     section="type")
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_typedispatch=1, td=segment("types-entry")["td"]))
     segment("types-prefix")
     shape_control("member-shape")
     segment("types-typedef")
@@ -537,15 +529,10 @@ def build(locations=False, warnings=False, errors=False):
     segment("sizeof3")
     ordinary_control('dispatch', warnings)
     segment("address")
-    object_address = addr(P("ADR.object"))
-    install_template(g, os.path.dirname(__file__), "stage-edits",
-                     dict(address=[dict(source=object_address.cur, target="ADR.object.next")]),
-                     object_address.fresh, section="address")
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_address=1, adr=addr(P("ADR.object")).cur))
     ordinary_control('deref', warnings)
     shape_control("dereference")
-    ops = [dict(key=E.TK[op + '='], target='LV.c' + op) for op in E.CASOPS]
-    install_template(g, os.path.dirname(__file__), "stage-edits", dict(op=ops),
-                     P("UD.load.b").fresh, section="update")
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_update=1))
     ordinary_control('id', warnings)
     for tag, op in (("inc", "+"), ("dec", "-")):
         update=dict(word_state=tag, update_entry="ID."+tag, update_deref="UD."+tag, update_post="POST."+op)
@@ -646,8 +633,7 @@ def build(locations=False, warnings=False, errors=False):
     # EOF branch observes the reader byte, not the previous arithmetic result.
     mode, row = g.st['CP.restore']
     assert mode == 'r' and len(row) == 257
-    install_template(g, os.path.dirname(__file__), "stage-edits", {},
-                     P("CP.restore").fresh, section="final")
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_final=1))
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
