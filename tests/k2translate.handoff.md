@@ -711,3 +711,21 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   tests/k2gen/* (text-match only); libraryimportscheck.py does `import gen2; gen2.build()`.
   Next: step 3 gen.py parse2 (gen-manifest header `#! start $ex_ret`; parse2base needs tokens(E) before run --
   check whether gen.py base load does it; twice/sizes).
+- Round 53 (step 3). `exec/build/gen.py parse2 OUT [--locations] [--warnings] [--errors]` runs exec/parse2/gen-manifest.tsv
+  directly: old gen-manifest body git-mv'd to exec/parse2/body-manifest.tsv; new gen-manifest = headers (base
+  build/parse2base.py, flags, `#! start $ex_ret`) + one row `call body` with opts {"flags":{"locations":["locations",
+  "warnings","errors"]},"merge":true} (existing list-flag + merge opts; no new op/opts key/value prefix). Top env is
+  E.results (gen.py). gen.py: a base defining executor() is replaced by E.executor(); parse2base.executor() loads
+  parse/gen.py, install(E), tokens(E), asserts TN.raw absent. gen2.py still works (runs the same gen-manifest).
+  twice/sizes: gen.py does NEITHER (gen2 __main__ asserts parse2base.twice() empty and prints E.sizes) -- dropped on the
+  gen.py path; to keep, add to gen.py a generic `if hasattr(E,"check"): E.check()` hook or accept the loss (decide).
+  Commit 13602e3e (local). sha SAME (actually run, serial, bound 58): gen.py parse2 32fb8e3c, --errors 7ea0e979,
+  --warnings --errors 3a7edf34, --locations a4c6fa73 (first run FAIL:142, rerun alone ok), parse2/units 6fc8d7f5,
+  units.py --locations 0137a215.
+  NOT yet run: graphhash of every gen.py stage after the exec/build/gen.py change (pp/lex/opt/prune/nativeabi/lower/
+  enc) -- do it first next round, serially, per entry under bound 58.
+  Next: step 4 callers (Round 52 list + exec/c/compilerpack.py:189,191 + exec/parse2/errorcheck/locationcheck/
+  returnwarningcheck/r21check/unitlocationcheck (script 'parse2/gen2.py' -> 'build/gen.py' with 'parse2' first arg),
+  libraryimportscheck (gen2.build -> subprocess gen.py parse2 or parse2base.executor()+assemble.run), graphhash.tsv
+  rows 43-50 re-key, tests/graphhash.py:35, formats.md:78, parse/gen.py:245 message, tests/k2gen/* (archive), then
+  delete gen2.py; then task C (strings/unresolved/truth per /tmp/cdx23-handoff.txt).
