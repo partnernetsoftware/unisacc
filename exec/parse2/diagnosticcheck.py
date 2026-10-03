@@ -17,7 +17,9 @@ def probe_model():
     spec=importlib.util.spec_from_file_location('diag_grammar',R/'exec/parse/gen.py')
     E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
     from tokenlocations import install as locations
-    from diagnostics import install as diagnostics
+    import assemble, tokenlocations as _tl
+    diagnostics=lambda E,P: assemble.run(R/'exec/parse2/diagnostics-manifest.tsv',E,P,{},
+        {k:getattr(_tl,k) for k in ('SPLICES','INCLUDE_LINE','INCLUDE_LINES','INCLUDE_NAME')})
     P,g=E.P,E.g
     P('NEXT').goto('DEAD');P('NX').goto('DEAD')
     start=locations(E,P);diagnostics(E,P)

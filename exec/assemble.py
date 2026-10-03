@@ -247,7 +247,7 @@ class Run:
         op, stem, section, when, factn, fresh, seq, bind, opts = row
         facts = dict(self.env)
         for s in ([] if factn in ("", "-") else factn.split("+")):
-            facts.update(load_facts(s))
+            facts.update(load_facts(s[5:] if s.startswith("load:") else s))
         facts.update(extra)
         when = _state_when(when, self.E.g)
         if not _when(when, self.flags, facts):
@@ -282,6 +282,12 @@ class Run:
         for k in o.get("export", []):
             self.env[k] = bd[k]
         sq = self.cells(seq, facts)
+        if "textrows" in o:
+            tr = {}
+            for ln in (self.root / o["textrows"]).read_text().splitlines()[1:]:
+                name, value = ln.split("\t")
+                tr[name] = self.E.O(json.loads(value))
+            sq = dict(tr, **(sq or {}))
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
         if op == "template":
@@ -434,13 +440,8 @@ def _header_facts(stem, path):
     d = {stem: rows}
     if rows and isinstance(rows[0], dict) and set(rows[0]) == {"name", "value"}:
         d[stem + "!"] = {r["name"]: r["value"] for r in rows}
-        for ln in path.read_text().split("\n")[1:]:
-            if ln and not ln.startswith("#"):
-                k, v = ln.split("\t")[:2]
-                try:
-                    d.setdefault(k, json.loads(v))
-                except ValueError:
-                    d.setdefault(k, v)
+        for r in rows:
+            d.setdefault(r["name"], r["value"])
     return d
 
 
@@ -473,7 +474,11 @@ def _bindings(self, o, bind, facts):
     out = dict(self.accum.setdefault(acc, {})) if acc else {}
     if isinstance(o.get("bindmap"), str):
         out.update(_path(facts, o["bindmap"]))
-    for spec in o.get("freshrows", []):
+    if isinstance(o.get("freshrows"), str):
+        for ln in (self.root / o["freshrows"]).read_text().splitlines()[1:]:
+            owner, kind, key = ln.split("\t")
+            out[key] = self.E.P.fresh(self.holder(owner), kind)
+    for spec in ([] if isinstance(o.get("freshrows"), str) else o.get("freshrows", [])):
         for i, r in enumerate(_path(facts, spec["over"])):
             ctx = dict(facts, i=i, **r)
             if all(str(r[c]) == _fmt(v, ctx) for c, v in spec.get("where", {}).items()):

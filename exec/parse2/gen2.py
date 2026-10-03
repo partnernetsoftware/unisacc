@@ -883,8 +883,9 @@ def build(locations=False, warnings=False, errors=False):
     if locations:
         from tokenlocations import install as location_install
         start = location_install(E, P, TIX, "ER.token" if errors else "WU.token" if warnings else None)
-        from diagnostics import install as diagnostic_install
-        diagnostic_install(E, P)
+        import assemble, tokenlocations as _tl
+        assemble.run(Path(__file__).parent / 'diagnostics-manifest.tsv', E, P, {},
+                     {k: getattr(_tl, k) for k in ('SPLICES', 'INCLUDE_LINE', 'INCLUDE_LINES', 'INCLUDE_NAME')})
     if warnings:
         assert locations
         _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
