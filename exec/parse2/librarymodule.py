@@ -30,9 +30,7 @@ def install(E,P,start):
     _template(E,'split',{'H':[dict(s=state,k=k,before=json.dumps([list(x) for x in bb])) for state,k,nn,bb,aa in hits]})
     rules(g,Path(__file__).parent,'librarymodule',section='header',bindings=dict(next=n),sequences=dict(header=header,tail=after))
     # Main requirement and init-tail are existing finite control points.
-    candidates=[name for name,(mode,row) in g.st.items() if any(n=='END.ok' for n,q in row.values())]
-    assert len(candidates)==1,candidates
-    state=candidates[0];mode,row=g.st[state]
+    state=E.results['lm_main'];mode,row=g.st[state]   # gen2 global3 named result (global-results.tsv)
     reject=None;normal=None;keys=[]
     for k,(n,q) in list(row.items()):
         if n!='END.ok':
@@ -41,11 +39,9 @@ def install(E,P,start):
             normal,reject=n,actions;keys.append(k)
     assert normal is not None
     _template(E,'main',{'state':[state],'key':keys})
-    seq=list(g.seqs[next(iter(g.st['END.ok'][1].values()))[1]])
-    state=next(a[1] for a in reversed(seq) if a[0]=='PUSH')
+    state=E.results['lm_initret']
     _template(E,'initmove',{'state':[state]});_template(E,'initend',{'state':[state]})
-    seq=list(g.seqs[next(iter(g.st['END.x2'][1].values()))[1]])
-    tail=next(a[1] for a in reversed(seq) if a[0]=='PUSH')
+    tail=E.results['lm_tailret']
     rules(g,Path(__file__).parent,'librarymodule',section='finish',bindings=dict(tail=tail,normal=normal),sequences=dict(ret=E.O('  ret\n'),reject=reject))
     # __init is reserved only for explicit modules; source cannot counterfeit role.
     _template(E,'defmove');_template(E,'definition')

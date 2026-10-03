@@ -449,6 +449,10 @@ def _namespace_control(namespace, section, warnings, bindings):
     for part, mode, prefix, kind, key in tape_rows(namespace + "-fresh.tsv"):
         if part == section and mode in ("common", mode_ok):
             bindings[key] = P(prefix + "." + namespace + "_" + key).fresh(kind)
+    if namespace == "global":   # named results for later stages (librarymodule): global-results.tsv
+        for part, key, name in tape_rows("global-results.tsv"):
+            if part == section:
+                E.__dict__.setdefault("results", {})[name] = bindings[key]
     for owner, mode, rules in tape_rows(namespace + "-sections.tsv"):
         if owner == section and mode in ("common", mode_ok):
             structured_control(rules, False, bindings)
