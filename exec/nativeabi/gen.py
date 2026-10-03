@@ -55,13 +55,16 @@ def install(E):
  for profile in profiles:
   raw=profile.encode();prefixes.update(raw[:i] for i in range(1,len(raw)+1))
  names={p:'NC.profile'+('' if not p else '.'+p.hex()) for p in prefixes}
+ # Trie rows: gen-template.tsv section trie; facts keep the existing state order (sorted
+ # prefixes) and each node's choice order (iteration order of the prefix set).
+ T=[]
  for prefix in sorted(prefixes):
   if prefix.decode() in profiles:
-   P(names[prefix]).a(('LDI','nc_intminimum',policy[prefix.decode()][0]),('LDI','nc_fpcarrier',policy[prefix.decode()][1]),('LDI','nc_ldformat',ldformat[prefix.decode()]),('LDI','nc_family',int(next(r['family'] for r in rows if r['profile']==prefix.decode()))),('MARK','nc_pos')).branch({1:'NC.profileok'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
+   pr=prefix.decode()
+   T.append(dict(name=names[prefix],leaf=[dict(im=policy[pr][0],fp=policy[pr][1],ld=ldformat[pr],family=int(next(r['family'] for r in rows if r['profile']==pr)))],inner=[]))
   else:
-   choices={p[len(prefix)]:names[p] for p in prefixes if len(p)==len(prefix)+1 and p.startswith(prefix)}
-   P(names[prefix]).a(('MARK','nc_pos')).branch({0:names[prefix]+'.read'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
-   P(names[prefix]+'.read').a(('BYTE','nc_byte'),('ADV',)).branch(choices,'NC.targetfail',[('RLD','nc_byte')])
+   T.append(dict(name=names[prefix],leaf=[],inner=[dict(choices=[dict(byte=p[len(prefix)],target=names[p]) for p in prefixes if len(p)==len(prefix)+1 and p.startswith(prefix)])]))
+ install_template(E.g,root,'gen',dict(T=T),P('NC.fresh').fresh,section='trie')
  section('mid')
  # union16 recipe writers: rules.tsv recipe facts -> MS.write64 call chains (gen-template.tsv union16).
  A=[dict(al=al,recipes=[dict(cls=c,code=3*'NSI'.index(c[0])+'NSI'.index(c[1]),n=len(recipes[al,c]),
