@@ -225,85 +225,21 @@ assert ENUM_CAPACITY > 0 and max([BOOL, DBL, FLT, FPB, FPV] + [code for _, code,
 assert FPS_FIRST < SBB and SBB + STRUCT_MAX < 4096
 
 
-def _publish(env, names=()):
-    """Stopgap until gen-manifest's top env is E.results: copy a sub-run's lm_* (and NAMES) results."""
-    E.__dict__.setdefault("results", {}).update((k, v) for k, v in env.items() if k.startswith("lm_") or k in names)
-
-
 def build(locations=False, warnings=False, errors=False):
     import assemble
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     _base.tokens(E)
-    C = assemble.load_facts("k2-gen2")["buildconst"]   # gen2 module constants (export.py k2gen2)
     # The location/static readers replace NEXT later.  Keep the plain token
     # decoder for lookahead; ordinary qualifier recursion must still pass
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
-    E.__dict__.setdefault("results", {}).update(lm_header=O(E.HEADER), lm_errors=errors)
-    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})   # early..callcontrol-finish
-    for name in ("startup", "global0", "global1", "global3", "global5"):
-        _publish(env[name])   # lm_hstate/lm_hnext; global3 lm_main/lm_initret/lm_tailret
-    _publish(env, ("fpcont",))   # callcontrol-begin (merged): FS.CALLTYPE continuation (librarycallables)
-    import assemble
-    _flags = dict(locations=locations, warnings=warnings, errors=errors)
-    start = env["ex_start"]   # gen-manifest: START or the located reader (tokenlocations)
-    assert locations or not warnings
-    _publish({k: env[k] for k in ("lm_nomain_msg", "lm_mainnext", "lm_mainreject") if k in env})   # gen-manifest errors rows (stopgap)
-    start = _libraryexports(E, P, {name: C[name] for name in
-        ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
-         'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',
-         'SSZ','SAL','SMN','SMEM','MOF','MSZ','MPT','MBS','MAR','BFW','BFO','BFS')}, start, C["TYINT"])
-    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, _flags, dict(env, tail=1, ex_start=start))   # phase tail
+    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})
     start = env["ex_ret"]
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
 
-
-def _libraryexports(E, P, b, start, integers):
-    """K2: libraryexports-manifest.tsv phases pre/mid/post/tail around the child manifests
-    (librarytypes, libraryimports, libraryvariadic, librarycallables) and librarymodule."""
-    import assemble
-    from librarymodule import install as module_install
-    root = Path(__file__).resolve().parent
-    lx = {k: v for k, v in _LX.items() if type(v) is int and v >= 1 << 40}   # exec/facts/libraryexports.tsv
-    bints = {'b_' + k: v for k, v in b.items() if type(v) is int}
-    env = dict(constants=dict(lx, **{k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_VAR', 'FPS_RD', 'FPS_RB', 'FPS_RSH')}),
-               out_seqs={'out USLSIG2': E.O('USLSIG2\n'), 'out USLSIG3': E.O('USLSIG3\n'), 'out USLTAPE1': E.O('USLTAPE1\n'),
-                         'reject': E.rej('not covered: library signature resource or duplicate definition')},
-               start=start, tk_static=E.TK['type=static'], allkeys=list(range(257)))
-    def phase(name, **extra):
-        return assemble.run(root / 'libraryexports-manifest.tsv', E, P,
-                            {k: k == name for k in ('pre', 'mid', 'post', 'tail')}, dict(env, **extra))
-    phase('pre')
-    assemble.run(root / 'librarytypes-manifest.tsv', E, P, {}, dict(bints,
-        isize=next(size for name, code, size, uns, narrow in integers if name == 'i32'),
-        ints=[{'code': code, 'size': size, 'uns': int(uns)} for _, code, size, uns, _ in integers], E_ARR=E.ARR, gen2_DIM=DIM))
-    phase('mid')
-    assemble.run(root / 'libraryimports-manifest.tsv', E, P, {}, dict(bints, start=start,
-        TK_ID=E.TK_ID, TK_SEMI=E.TK[';'], FPB_FPV=[b['FPB'], b['FPV']], BOOL=[b['BOOL']],
-        ints2=[{'code': code, 'width': width, 'uns': uns} for _, code, width, uns, _ in integers]))
-    phase('post')
-    assemble.run(root / 'libraryvariadic-manifest.tsv', E, P, {})
-    li = assemble.load_facts('libraryimports')['libraryimports!']   # exec/facts/libraryimports.tsv
-    from unresolved import DEFINED
-    lc = dict({r['name']: r['value'] for r in _facts('librarycallables') if type(r['value']) is int and r['value'] >= 1 << 40},
-              RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK, LCSITERANK=_VR['LCSITERANK'],
-              **{k: li[k] for k in ('BYNAME', 'ADDRESS', 'FORMAT', 'SUPPORTED', 'TYPEDSIG', 'PLAN')},
-              REQUESTS=assemble.load_facts('libraryvariadic')['REQUESTS'], DEFINED=DEFINED, VARIADIC=_LX['VARIADIC'],
-              E_VAR=E.VAR, E_DBL=E.DBL, E_INT=E.SZ['int'], TK_SEMI=E.TK[';'],
-              **{'b_' + k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_RB', 'FPS_RD', 'FPS_RSH', 'FPS_VAR', 'SSZ', 'SBB')})
-    seqs = {}
-    for line in (root / 'librarycallables-result.tsv').read_text().splitlines()[1:]:
-        if line:
-            for a in json.loads(line.split('\t')[4]):
-                if a[0] == '@' and a[1].startswith('out:'):
-                    seqs[a[1]] = E.O(a[1][4:])
-    callable_start = assemble.run(root / 'librarycallables-manifest.tsv', E, P, {}, dict(constants=lc,
-        classes={'uns1': [E.UNS + 1], 'uns2': [E.UNS + 2], 'bool': [b['BOOL']], 'float': [b['FLT']]},
-        start='LI.start', fpcont=E.results['fpcont'], text_seqs=seqs))['ret']
-    return phase('tail', module_start=module_install(E, P, callable_start))['ret']
 
 if __name__ == "__main__":
     warnings = "--warnings" in sys.argv

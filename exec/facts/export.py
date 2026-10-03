@@ -1475,5 +1475,60 @@ TABLES.append(("k2-librarymodule-map", ["exec/facts/k2-librarymodule.tsv", "exec
                k2librarymodule))
 
 
+
+def k2libraryenv():
+    """parse2 library export chain environment (was gen2._libraryexports/librarymodule.install, Python-built):
+    lx (libraryexports phases), types/imports/callables child envs, librarymodule header and no-main reject."""
+    G = _module("exec/parse2/gen2.py", "k2libraryenv_gen2")
+    E = G.E
+    sys.path.insert(0, str(HERE)); from load import facts as F
+    sys.path.insert(0, str(ROOT / "exec"))
+    import assemble
+    C = assemble.load_facts("k2-gen2")["buildconst"]
+    b = {n: C[n] for n in ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
+         'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',
+         'SSZ','SAL','SMN','SMEM','MOF','MSZ','MPT','MBS','MAR','BFW','BFO','BFS')}
+    integers = C["TYINT"]
+    LX = {r["name"]: r["value"] for r in F("libraryexports")}
+    VR = {r["name"]: r["value"] for r in F("valueranks") if r["kind"] == "bank"}
+    lx = {k: v for k, v in LX.items() if type(v) is int and v >= 1 << 40}
+    bints = {'b_' + k: v for k, v in b.items() if type(v) is int}
+    L = lambda acts: [list(a) for a in acts]
+    lxenv = dict(constants=dict(lx, **{k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_VAR', 'FPS_RD', 'FPS_RB', 'FPS_RSH')}),
+                 out_seqs={'out USLSIG2': L(E.O('USLSIG2\n')), 'out USLSIG3': L(E.O('USLSIG3\n')), 'out USLTAPE1': L(E.O('USLTAPE1\n')),
+                           'reject': L(E.rej('not covered: library signature resource or duplicate definition'))},
+                 tk_static=E.TK['type=static'], allkeys=list(range(257)))
+    types = dict(bints, isize=next(size for name, code, size, uns, narrow in integers if name == 'i32'),
+                 ints=[{'code': code, 'size': size, 'uns': int(uns)} for _, code, size, uns, _ in integers], E_ARR=E.ARR, gen2_DIM=G.DIM)
+    imports = dict(bints, TK_ID=E.TK_ID, TK_SEMI=E.TK[';'], FPB_FPV=[b['FPB'], b['FPV']], BOOL=[b['BOOL']],
+                   ints2=[{'code': code, 'width': width, 'uns': uns} for _, code, width, uns, _ in integers])
+    li = assemble.load_facts('libraryimports')['libraryimports!']
+    U = {r['name']: r['value'] for r in F('unresolved')}
+    lc = dict({r['name']: r['value'] for r in F('librarycallables') if type(r['value']) is int and r['value'] >= 1 << 40},
+              RETURNRANK=LX['RETURNRANK'], PARAMRANK=LX['PARAMRANK'], LCSITERANK=VR['LCSITERANK'],
+              **{k: li[k] for k in ('BYNAME', 'ADDRESS', 'FORMAT', 'SUPPORTED', 'TYPEDSIG', 'PLAN')},
+              REQUESTS=assemble.load_facts('libraryvariadic')['REQUESTS'], DEFINED=U['DEFINED'], VARIADIC=LX['VARIADIC'],
+              E_VAR=E.VAR, E_DBL=E.DBL, E_INT=E.SZ['int'], TK_SEMI=E.TK[';'],
+              **{'b_' + k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_RB', 'FPS_RD', 'FPS_RSH', 'FPS_VAR', 'SSZ', 'SBB')})
+    seqs = {}
+    for line in (ROOT / 'exec/parse2/librarycallables-result.tsv').read_text().splitlines()[1:]:
+        if line:
+            for a in json.loads(line.split('\t')[4]):
+                if a[0] == '@' and a[1].startswith('out:'):
+                    seqs[a[1]] = L(E.O(a[1][4:]))
+    callables = dict(constants=lc, classes={'uns1': [E.UNS + 1], 'uns2': [E.UNS + 2], 'bool': [b['BOOL']], 'float': [b['FLT']]},
+                     text_seqs=seqs)
+    mainreason = assemble.load_facts('k2-librarymodule-map')['mainreason']
+    dump = lambda x: json.dumps(x, separators=(",", ":"), sort_keys=True)
+    return ["=lx\tjson\t" + dump(lxenv), "=types\tjson\t" + dump(types), "=imports\tjson\t" + dump(imports),
+            "=callables\tjson\t" + dump(callables), "=lm_header\tjson\t" + dump(L(E.O(E.HEADER))),
+            "=nomain\tjson\t" + dump(L(E.rej(mainreason))), "=ret\tjson\t" + dump(L(E.O('  ret\n')))]
+
+
+TABLES.append(("k2-libraryenv", ["exec/parse2/gen2.py", "exec/parse/gen.py", "exec/parse2/librarycallables-result.tsv",
+               "exec/facts/libraryexports.tsv", "exec/facts/librarycallables.tsv", "exec/facts/libraryimports.tsv",
+               "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv", "exec/facts/valueranks.tsv",
+               "exec/facts/k2-gen2.tsv", "exec/facts/k2-librarymodule-map.tsv", "exec/facts/export.py"], k2libraryenv))
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
