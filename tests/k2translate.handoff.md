@@ -59,6 +59,23 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sj_text/text12/text35 are cells). Scope (coordinator): cdx owns constexpr/truth/strings/tokenlocations/
   unitlocations/unresolved/membercontrol; this slice keeps only the ~40 gen2 structured_control sites -> call
   control rows, then gen2 driver itself.
+## gen2 driver: progress (round 1, 2026-10-03)
+- exec/parse2/gen2-manifest.tsv exists (written by tests/k2gen/mkgen2.py). Transitional form: rows gated by
+  `fact:seg_NAME`; gen2.py `segment(name, warnings)` runs the manifest with env {seg_NAME: 1}. 16 static
+  structured_control sites (types dimensions/prefix/typedef/tail, startup-marker, staticauto,
+  parameter-declarators, dispatch+block, if+switch+loops, sizeof0..3, address) are now `call control` rows
+  (empty extra/seqb via opts let). As Python between segments moves into rows, adjacent segments merge; at the
+  end one segment = the whole build and gen2.py runs it via exec/build/gen.py.
+- Remaining structured_control sites (need fresh/holder rows or extra dicts): optail install, tytail ckm/resd,
+  ladder, type-entry/type-word, startup-guard (POSSPAN), startup-run (seqb startup_data/startup_header),
+  _namespace_control (function/global/local sections), ordinary_control.
+- librarymodule.py: HEADER = seqb startup_header of startup-run; main requirement state = global3 fresh
+  `END b` (global_global3_552_END_b_1, edge to END.ok); END.ok PUSH = global_global3_553_END_r_1; END.x2 PUSH =
+  global_global3_555_END_r_1 (global-fresh.tsv rows 29-31+). Plan: global_control/global3 as a manifest that
+  exports these as results (lm_main, lm_initret, lm_tailret), startup-run exports lm_header; libraryexports
+  passes them to a librarymodule manifest by name. librarycallables (scope add): callcontrol-begin/finish
+  export the part2 FPCALL PUSH label as `fpcont`.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement

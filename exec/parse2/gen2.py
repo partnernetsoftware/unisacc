@@ -359,9 +359,9 @@ def types():
         q = P(bindings["next"])
     bindings["current"] = q.cur
     install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"reject": E.rej("not covered: width")}, section="finish")
-    structured_control("dimensions", False)
+    segment("types-dimensions")
     strwalk("DM.s", "DM.sb", "DM.se")
-    structured_control("dimensions-tail", False)
+    segment("types-dimensions-tail")
     # The bounded lookahead for a tentative incomplete array is a declared
     # transition graph.  Token codes are stable parser facts; the source row
     # set is exec/parse2/tentative-result.tsv.
@@ -381,16 +381,15 @@ def types():
     install_template(g, os.path.dirname(__file__), "dispatch", dict(ctx=[ctx], op=ctx["operators"]),
                      P(dispatch).fresh, sequences=dict(reject=E.rej("not covered: type")),
                      section="type")
-    structured_control("type-prefix", False)
-    structured_control("structure", False)
+    segment("types-prefix")
     shape_control("member-shape")
-    structured_control("type-typedef", False)
+    segment("types-typedef")
     follows = dict(tape_rows("type-follow.tsv"))
     for word, value in TYPEW.items():
         p = P("TS." + word)
         structured_control("type-word", False, dict(word_state=p.cur, word_return=p.fresh("r"),
                            type_value=value, type_rank_value=(1 if word=='type=float' else 2 if word=='type=double' else 0), word_follow=follows.get(word, follows["*"])))
-    structured_control("type-tail", False)
+    segment("types-tail")
     install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="long-double",
                   bindings=dict(DBL=DBL), classes=dict(double=[TK["type=double"]]))
 
@@ -421,6 +420,12 @@ def structured_control(section, warnings, extra=None, sequence_bindings=None):
     assemble.run(Path(__file__).resolve().parent / 'control-manifest.tsv', E, P, {},
                  dict(control_section=section, statement="STMT.body" if warnings else "STMT",
                       extra=dict(extra or {}), seqb=dict(sequence_bindings or {})))
+
+
+def segment(name, warnings=False):
+    """One transitional segment of exec/parse2/gen2-manifest.tsv (rows gated by env fact seg_NAME)."""
+    import assemble
+    assemble.run(Path(__file__).resolve().parent / 'gen2-manifest.tsv', E, P, dict(warnings=warnings), {"seg_" + name: 1})
 
 
 def ordinary_control(section, warnings, extra=None):
@@ -557,7 +562,7 @@ def build(locations=False, warnings=False, errors=False):
                      P("NX").fresh, section="startup")
     install_template(g, os.path.dirname(__file__), "stage-edits", {},
                      lambda kind: None, section="startup-entry", mode="b", domain=[64])
-    structured_control("startup-marker", False)
+    segment("startup-marker")
     from strings import token_span
     token_span(E, P)
     from strings import initializer as string_initializer
@@ -589,7 +594,7 @@ def build(locations=False, warnings=False, errors=False):
         BFW=BFW, BFO=BFO, BFS=BFS, SHAPE=SHAPE, SHAPE_IDS=SHAPE_IDS, MSZ=MSZ,
         PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM=DIM, DIM1=DIM + 1, DIM2=DIM + 2))
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
-    structured_control("ordinary-staticauto", False)
+    segment("staticauto")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     structured_control("startup-guard", False, dict(POSSPAN=POSSPAN))
     p = P("START.ok")
@@ -644,7 +649,7 @@ def build(locations=False, warnings=False, errors=False):
     function_control("function4", warnings)
     shape_control("descriptor-storage")
     function_control("function6", warnings)
-    structured_control("parameter-declarators", False)
+    segment("parameter-declarators")
     function_control("function8", warnings)
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
@@ -672,8 +677,7 @@ def build(locations=False, warnings=False, errors=False):
     from types import SimpleNamespace
     assemble.run(Path(__file__).resolve().parent / 'vla-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(DEP=VLDEP, ENUM=END_, FRAME=VLFRAME, SIZE=VLSIZE, UNS=UNS))
     # statements
-    structured_control("dispatch", warnings)
-    structured_control("block", warnings)
+    segment("dispatch-block", warnings)
     scope_bindings["scope_compare"] = P("S.uw").fresh("b")
     if warnings: scope_bindings["unbind_return"] = P("S.uw1").fresh("r")
     install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
@@ -693,9 +697,7 @@ def build(locations=False, warnings=False, errors=False):
     local_control("local8", warnings)
     return_control("ret0")
     return_control("ret1", dict(addr_end=addr(P("S.rs3")).cur))
-    structured_control("if", warnings)
-    structured_control("switch", warnings)
-    structured_control("loops", warnings)
+    segment("if-loops", warnings)
     return_control("expr0")
     for name,op in (("inc","+"),("dec","-")):
         return_control("update", dict(update_entry="LP."+name,update_target="POST."+op))
@@ -777,16 +779,16 @@ def build(locations=False, warnings=False, errors=False):
     ordinary_control('string', warnings)
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
-    structured_control("sizeof0", False)
+    segment("sizeof0")
     shape_control("sizeof-type")
-    structured_control("sizeof1", False)
+    segment("sizeof1")
     shape_control("sizeof-object")
-    structured_control("sizeof2", False)
+    segment("sizeof2")
     strwalk("SZ.lwalk", "SZ.lbyte", "SZ.lend")
     strwalk("CE.lwalk", "CE.lbyte", "CE.lend")   # sizeof("...") inside a constant expression
-    structured_control("sizeof3", False)
+    segment("sizeof3")
     ordinary_control('dispatch', warnings)
-    structured_control("address", False)
+    segment("address")
     object_address = addr(P("ADR.object"))
     install_template(g, os.path.dirname(__file__), "stage-edits",
                      dict(address=[dict(source=object_address.cur, target="ADR.object.next")]),
