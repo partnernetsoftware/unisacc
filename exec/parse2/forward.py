@@ -19,7 +19,7 @@ def install(E, P, start, fps_fn, definitions):
     # Python binds only dynamic facts (start label, FPS_FN bank, record banks) and
     # keeps the residue: renaming UD.error / LX.accept and moving their definitions.
     from pathlib import Path
-    from finite_rules import install as rules
+    from finite_rules import install as rules, install_template
     g = E.g
     root = Path(__file__).parent
     bindings = {"RECORDS": RECORDS, "SEEN": SEEN, "fps_fn": fps_fn, "start": start}
@@ -34,12 +34,12 @@ def install(E, P, start, fps_fn, definitions):
         rules(g, root, "forward", bindings, None, None, name)
 
     def rename(state):
+        # The move itself is declared in forward-template.tsv (one section per hook).
         original = "FW.original." + state
-        g.st[original] = g.st.pop(state)
+        install_template(g, root, "forward", {}, None, section=state)
         for how in ("P", "L"):
             if (state, how) in definitions:
                 definitions[original, how] = definitions.pop((state, how))
-        g.labels.add(original)
 
     section("s1")
     rename("UD.error")
