@@ -873,10 +873,11 @@ def build(locations=False, warnings=False, errors=False):
     from truth import conversions as scalar_conversions
     scalar_conversions(E, P, DBL, FLT, UNS + 8, fpu)
     call_control(E, P, warnings, TEMPL, addr, call_facts, SYSCALLS, fpu, "finish", call_bindings)
-    from offsetofcontrol import install as offsetof_install
-    offsetof_install(E, P, SBB, MEMBER_STRIDE, MOF, MSZ, MBS, MAR)
-    from setjmpcontrol import install as setjmp_install
-    setjmp_install(E, P)
+    import assemble
+    _flags = dict(locations=locations, warnings=warnings, errors=errors)
+    assemble.run(Path(__file__).parent / 'offsetofcontrol-manifest.tsv', E, P, _flags,
+                 dict(SBB=SBB, MEMBER_STRIDE=MEMBER_STRIDE, MOF=MOF, MSZ=MSZ, MBS=MBS, MAR=MAR))
+    assemble.run(Path(__file__).parent / 'setjmpcontrol-manifest.tsv', E, P, _flags)
     ud_install(E, P)
     start = "START"
     if locations:
@@ -913,8 +914,7 @@ def build(locations=False, warnings=False, errors=False):
     parenfold_install(E, TIX, locations)
     from unitmode import install as unitmode_install
     start = unitmode_install(E, P, start, DEFS)
-    from objectdefinitions import install as objectdefinitions_install
-    objectdefinitions_install(E, P)
+    assemble.run(Path(__file__).parent / 'objectdefinitions-manifest.tsv', E, P, _flags, dict(TKEQ=E.TK["="]))
     import assemble
     assemble.run(Path(__file__).parent / 'structreturnexpr-manifest.tsv', E, P,
                  dict(locations=locations, warnings=warnings, errors=errors))
