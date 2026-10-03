@@ -283,3 +283,8 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Note: changing export.py rewrites every facts header (sha of export.py) -> commit all exec/facts/*.tsv, not just
   k2-gen2 (6baca145 missed that; fixed in 8ab6ec3c). Left: ord update-address/down/address sites, lookup-warn,
   startup/global-results glue, then merge segments -> exec/build/gen.py, switch callers, delete gen2.py.
+- Round 26: rebased onto origin/main f52787f3 (facts regenerated at the conflict). ord update-address/update-result loop
+  -> foreach ordupd wrapping the existing segment rows (seg gate dropped, words set by `.let`, addr between), down
+  (addr UD.gv -> resume), address (addr ADR.object + call gen2parts part_address), fnvalue/lookup-warn/lookup-body
+  (segment upd-lookup, warnings-gated lets). sha SAME both modes. Left: startup/global-results glue, the remaining
+  direct assemble.run calls in build() -> call rows, merge segments, exec/build/gen.py, callers, delete gen2.py.

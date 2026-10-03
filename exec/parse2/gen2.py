@@ -493,20 +493,13 @@ def build(locations=False, warnings=False, errors=False):
     segment("sizeof3")
     ordinary_control('dispatch', warnings)
     segment("address")
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_address=1, adr=addr(P("ADR.object")).cur))
     ordinary_control('deref', warnings)
     shape_control("dereference")
     assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_update=1))
     ordinary_control('id', warnings)
-    for tag, op in (("inc", "+"), ("dec", "-")):
-        update=dict(word_state=tag, update_entry="ID."+tag, update_deref="UD."+tag, update_post="POST."+op)
-        bound=ordinary_control("update-address", warnings, update)
-        q=addr(P(bound["ordinary_update_address3"]))
-        ordinary_control("update-result", warnings, dict(update, resume=q.cur))
+    segment("ord-update", warnings)
     ordinary_control('value', warnings)
-    p = P("UD.gv")
-    addr(p)
-    ordinary_control('down', warnings, dict(resume=p.cur))
+    ordinary_control('down', warnings)
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
     segment("upd-prefix")
@@ -527,9 +520,7 @@ def build(locations=False, warnings=False, errors=False):
                         TYINT=TYINT), shape_control)
     # statement `*E = e` / `*E ...;`: E's value is the address
     ordinary_control('star', warnings)
-    update_control("fnvalue")
-    lookup_entry=update_control("lookup-warn")["f112"] if warnings else "LOOKUP"
-    update_control("lookup-body",dict(lookup_entry=lookup_entry))
+    segment("upd-lookup", warnings)
     import assemble
     call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
                             dict(warnings=warnings), dict(warnings=warnings))
