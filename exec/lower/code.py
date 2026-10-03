@@ -251,9 +251,16 @@ def install(E, arch="x86_64", os_="lnx"):
                  dict(REG=REG, base=E.O('setreg '+s0+', imm '), argc_load=E.O(', '+s0+', 0\n'),
                       argv_prefix=E.O('\nload64 '+s0+', '+s0+', 8\nsetreg '+s1+', imm 8\nmul64 '+s1+', '+s1+', '),
                       argv_add=E.O('\nadd64 '+s0+', '+s0+', '+s1+'\nload64 '), newline=E.O('\n'), load=E.O('load64 ')))
-    from libraryimports import install as install_libraryimports
-    install_libraryimports(E, os_, ids)
-    from librarydata import install as install_librarydata
-    install_librarydata(E, os_, ids)
+    from modelbindings import install as install_decoder
+    from modelbindings import IDS, ADDRESS, DESC, KIND as BKIND, SUPPORTED, WRITABLE, EXTENT, STRIDE
+    from data import DEFINED
+    install_decoder(E)
+    hosted=dict(hosted=os_ in ('osx','lnx','win'))
+    assemble.run(Path(__file__).parent/'libraryimports-manifest.tsv', E, P, hosted,
+                 dict(call=ids['.librarycall'], REG=REG, DESC=DESC))
+    assemble.run(Path(__file__).parent/'librarydata-manifest.tsv', E, P, hosted,
+                 dict(addr=ids['.libraryaddr'], lea=ids['.lea'], REG=REG, TXT=TXT, DEFINED=DEFINED, IDS=IDS,
+                      ADDRESS=ADDRESS, DESC=DESC, KIND=BKIND, SUPPORTED=SUPPORTED, WRITABLE=WRITABLE,
+                      EXTENT=EXTENT, STRIDE=STRIDE))
     install_rules(g, Path(__file__).parent, 'code-shell',
                   sequences={'reject': E.rej('not covered: '+os_+'/'+arch+' lowering')}, section='exit')

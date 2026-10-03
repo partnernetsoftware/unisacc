@@ -20,6 +20,7 @@ seq,bind comma list of k=V; V is a fact path `a.b.0`, `@rej:TEXT`, `@bytes:TEXT`
          evaluated left to right
 opts     `-` or JSON: mode, domain ([lo,hi)), classes (fact path), overlay,
          result (store the install's return in env under that name),
+         export (list of bind names also stored in env, for later rows' `$NAME`),
          over/as (foreach)
 
 Facts files (exec/facts/STEM.tsv, written by exec/facts/export.py):
@@ -208,20 +209,23 @@ class Run:
         if "domain" in o:
             kw["domain"] = range(*o["domain"])
         res = None
+        bd = self.cells(bind, facts)
+        for k in o.get("export", []):
+            self.env[k] = bd[k]
         if op == "template":
             res = install_template(g, self.root, stem, facts, self.fresh(fresh),
-                                   bindings=self.cells(bind, facts), sequences=self.cells(seq, facts),
+                                   bindings=bd, sequences=self.cells(seq, facts),
                                    section=sec, mode=o.get("mode", "r"),
                                    overlay=o.get("overlay", False), **kw)
         elif op == "rows":
-            res = install(g, self.root, stem, bindings=self.cells(bind, facts),
+            res = install(g, self.root, stem, bindings=bd,
                           sequences=self.cells(seq, facts), section=sec, **kw)
         elif op == "table":
             res = install_rows(g, self.root / stem, self.cells(seq, facts),
-                               bindings=self.cells(bind, facts), section=sec,
+                               bindings=bd, section=sec,
                                mode=o.get("mode", "r"), **kw)
         elif op == "call":
-            sub = Run(self.E, self.P, self.flags, dict(self.env, **(self.cells(bind, facts) or {})))
+            sub = Run(self.E, self.P, self.flags, dict(self.env, **(bd or {})))
             res = sub.run(self.root / (stem + "-manifest.tsv"))
         elif op == "label":
             g.labels.update(stem.split(","))
