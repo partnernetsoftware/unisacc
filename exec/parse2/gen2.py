@@ -376,14 +376,7 @@ def build(locations=False, warnings=False, errors=False):
                  dict(locations=locations, warnings=warnings, errors=errors), dict(BOOL=BOOL, DBL=DBL, FLT=FLT))
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
-    import assemble   # K2 trace translation: statics-manifest.tsv
-    from types import SimpleNamespace
-    assemble.run(Path(__file__).resolve().parent / 'statics-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(BOOL=BOOL, LOC=LOC, SIEND=SIEND, SINIT=SINIT, SKIPS=SKIPS, TIX=TIX))
-    assemble.run(Path(__file__).parent / "initializers-manifest.tsv", E, P, {}, dict(
-        SBB=SBB, LOC=LOC, SSZ=SSZ, SMN=SMN, SMEM=SMEM, MOF=MOF, MPT=MPT, MBS=MBS, MAR=MAR,
-        SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE, SKIPS=SKIPS, UCHAR=E.UNS + 1,
-        BFW=BFW, BFO=BFO, BFS=BFS, SHAPE=SHAPE, SHAPE_IDS=SHAPE_IDS, MSZ=MSZ,
-        PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM=DIM, DIM1=DIM + 1, DIM2=DIM + 2))
+    segment("statics-init")
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
     segment("staticauto")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------

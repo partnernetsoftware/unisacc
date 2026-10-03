@@ -310,3 +310,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   `export`/`result=` (global-results.tsv -> export names lm_main/lm_initret/...; startup-run lm_hstate/lm_hnext;
   callcontrol-begin fpcont; errors lm_nomain_msg), consumers keep reading E.results[name]. lm_header/lm_errors become
   facts/flags. Needs coordinator approval (touches the generic driver).
+- Round 29: 60a5028f exec/build/gen.py top-level Run env == E.results (approved data channel; enc/lex sha SAME). Producers
+  then switch from gen2 glue to `export` names when gen2 runs via gen.py (global-results.tsv keys, lm_hstate/lm_hnext,
+  fpcont, lm_nomain_msg; lm_header/lm_errors -> facts/flag) — do it together with the switch-over.
+  Next commit: statics + initializers -> segment statics-init (`call` rows; constants in facts k2-gen2 staticsenv/initenv;
+  JSON-dumped values gave the same graph). Same recipe for vla/truth/booleans/conditional/offsetof/unary/layoutfacts.
+  prn/numout/autoscan: not yet examined as sub-manifests (round budget).
