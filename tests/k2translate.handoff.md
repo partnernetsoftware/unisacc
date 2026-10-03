@@ -792,3 +792,18 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   4. Repoint `#! base parse/gen.py` in the 7 manifests (+ exec/parse/*-manifest.tsv comments), parse2base.executor,
      pipeline/run.py, procs doc, tests loading the path; delete exec/parse/gen.py; rerun export.py (commit facts);
      six modes + full serial gen.py graphhash (--shard, one at a time).
+
+## Round 57 (2026-10-04, cc background agent) — exec/parse/gen.py deleted; seedpy stage 0
+- 659fd390: exec/build/parsebase.py = generic base only (g=G(), O, rej, P(make_P)+tok/expect/num/lab/vpush/vpop/
+  newlab; every parse-constants row as a module attribute by a generic loop; WORDS/TK from facts parse-tokens;
+  CASOPS/VANAMES/TWORDS from parse-words). No gold, no asserts, no tokenizer/prn/fconv/numeric_rules/sizes
+  (no callers; deleted). export.py owns _gold, PREC/BINSEL/IRSEL/optext, tyinfo->TY/SZ/PSZ + both asserts
+  (_parse_e(tag) = parsebase + those), skip list literal _SKIP; new facts table parse-tokens (=WORDS, =TK).
+  `#! base parse/gen.py` -> `#! base build/parsebase.py` in 7 manifests; parse2base.executor, 10 tests/*check.py,
+  exec/parse2/diagnosticcheck.py repointed; stale `keep parse/gen.py` dropped from tests/decisionledger.allow.
+  export.py rerun: all facts header-only changes + new parse-tokens.tsv.
+- Evidence (actually run, serial): six modes = graphhash.tsv (32fb8e3c 7ea0e979 3a7edf34 a4c6fa73 6fc8d7f5
+  0137a215); full graphhash 26 shards x GRAPHHASH_JOBS=1 under bound 58: 51 entries, 0 bad;
+  decisionledger --seedpy: stage 0; --ops 9 (cap 12); transition sites 9 (baseline 10), rose 0.
+- Not run: the 10 tests/*check.py suites themselves (path repoint only; they use no removed attribute — grepped).
+- Remaining mentions of parse/gen.py are comments in exec/parse/*-manifest.tsv ("was ...") and docs.
