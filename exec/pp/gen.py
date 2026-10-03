@@ -415,8 +415,9 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
         install_rules(g, HERE, "assembly", section="accept")
     build_xe(g)
     build_hx(g)
-    from sourcefacts import install as sourcefacts_install
-    sourcefacts_install(g)
+    import assemble   # E2 provenance envelope: sourcefacts-manifest.tsv (K2 trace translation)
+    from types import SimpleNamespace
+    assemble.run(Path(HERE) / "sourcefacts-manifest.tsv", SimpleNamespace(g=g), None, {})
     g.finish()
     return g
 
