@@ -20,4 +20,7 @@ for seg, secs in segs:
             L.append(row.format(seg, "&!warnings", s, "STMT", LET))
         else:
             L.append(row.format(seg, "", s, "STMT", LET))
+L.append("call\tcontrol\t-\tfact:seg_startup-guard\tk2-gen2\t-\t-\tcontrol_section=@str:startup-guard,statement=@str:STMT,extra=extra,seqb=seqb\t" + '{"let":{"extra":{"POSSPAN":"POSSPAN"},"seqb":{}}}')
+L.append("foreach\t-\t-\tfact:seg_types-word\tk2-gen2\t-\t-\t-\t" + '{"over":"typewords","pre":[["word","it.word"]]}')
+L.append(".call\tcontrol\t-\t-\tk2-gen2\t-\t-\tcontrol_section=@str:type-word,statement=@str:STMT,extra=extra,seqb=seqb\t" + '{"let":{"extra":{"word_state":"@str:TS.{word}","word_return":"fresh:P:TS.{word}:r","type_value":"it.value","type_rank_value":"it.rank","word_follow":"it.follow"},"seqb":{}}}')
 Path(__file__).resolve().parents[2].joinpath("exec/parse2/gen2-manifest.tsv").write_text("\n".join(L) + "\n")

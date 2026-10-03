@@ -102,6 +102,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   ER.messageN state, so librarymodule keeps one boundary read there (lm_errors). Remaining before deleting
   librarymodule.py: that boundary + turning install() into a manifest (template/rows ops only now).
 
+- Round 6: startup-guard (POSSPAN) and the type-word loop (foreach over facts k2-gen2 typewords, fresh:P:TS.{word}:r
+  in let) are gen2-manifest rows; constants in exec/facts/k2-gen2.tsv. Single-mode recheck: .k2tmp/one.sh style
+  (PYTHONHASHSEED=0, sha256 vs tests/graphhash.tsv). Left: optail, tytail (TYINT loop: needs a facts table +
+  mask text via @fmt), ladder, type-entry (dispatch label used by the following template: export it),
+  startup-run, _namespace_control, ordinary_control.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement

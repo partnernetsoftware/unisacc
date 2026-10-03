@@ -384,11 +384,7 @@ def types():
     segment("types-prefix")
     shape_control("member-shape")
     segment("types-typedef")
-    follows = dict(tape_rows("type-follow.tsv"))
-    for word, value in TYPEW.items():
-        p = P("TS." + word)
-        structured_control("type-word", False, dict(word_state=p.cur, word_return=p.fresh("r"),
-                           type_value=value, type_rank_value=(1 if word=='type=float' else 2 if word=='type=double' else 0), word_follow=follows.get(word, follows["*"])))
+    segment("types-word")   # foreach facts k2-gen2 typewords
     segment("types-tail")
     install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="long-double",
                   bindings=dict(DBL=DBL), classes=dict(double=[TK["type=double"]]))
@@ -600,7 +596,7 @@ def build(locations=False, warnings=False, errors=False):
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
     segment("staticauto")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
-    structured_control("startup-guard", False, dict(POSSPAN=POSSPAN))
+    segment("startup-guard")   # POSSPAN from facts k2-gen2
     p = P("START.ok")
     tops = [o for lv in LEVELS for o in OPS[lv] if o not in SHORT]
     for l in range(16):
