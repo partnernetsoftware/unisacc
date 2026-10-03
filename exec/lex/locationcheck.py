@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix='lex-location-chain-') as td:
     t=pathlib.Path(td)
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for name,script,flags in [('pp','pp',['--locations']),('lex','lex',['--locations']),('pos','lex',['--positions'])]:
-        call([sys.executable,R/'exec'/script/'gen.py',t/(name+'.json'),*flags])
+        call([sys.executable,R/'exec/build/gen.py',script,t/(name+'.json'),*flags])
         call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
         call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])
     d=json.loads((t/'lex.json').read_text());d['states']['HALT']=['b',{}]

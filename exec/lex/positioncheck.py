@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix='lex-positions-') as td:
     call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for flag,name in [('--positions','positions'),('--typed','typed')]:
-        call([sys.executable,R/'exec/lex/gen.py',t/(name+'.json'),flag])
+        call([sys.executable,R/'exec/build/gen.py','lex',t/(name+'.json'),flag])
         call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
         call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])
     delta=json.loads((t/'positions.json').read_text())

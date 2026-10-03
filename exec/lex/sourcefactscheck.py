@@ -37,7 +37,7 @@ def check():
         models = {}
         for name, flags in [('plain', ['--sourcefacts']), ('positions', ['--positions']), ('locations', ['--locations'])]:
             path = pathlib.Path(td) / (name + '.json')
-            subprocess.run([sys.executable, str(HERE / 'gen.py'), str(path), *flags],
+            subprocess.run([sys.executable, str(HERE.parent / 'build' / 'gen.py'), 'lex', str(path), *flags],
                            check=True, stdout=subprocess.DEVNULL, timeout=25)
             models[name] = json.loads(path.read_text())
             assert models[name]['start'] == 'SF.start'

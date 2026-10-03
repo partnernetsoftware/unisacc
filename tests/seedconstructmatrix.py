@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("lnx/arm64", "lnx/x86_64", "osx/arm64", "osx/x86_64", "win/arm64", "win/x86_64")
 SHARED = (
     ("e2", "exec/build/gen.py", ("pp", "--shared-predefines")),
-    ("e1", "exec/lex/gen.py", ("--typed",)),
+    ("e1", "exec/build/gen.py", ("lex", "--typed")),
     ("e3", "exec/parse2/gen2.py", ()),
     ("e4", "exec/build/gen.py", ("opt", "--o2")),
     ("o1", "exec/build/gen.py", ("opt",)),
@@ -24,8 +24,8 @@ SHARED = (
 )
 FEATURES = (
     ("tokenpp", "exec/build/gen.py", ("pp", "--shared-predefines", "--no-autoinc")),
-    ("tokenlex", "exec/lex/gen.py", ()),
-    ("warnlex", "exec/lex/gen.py", ("--locations",)),
+    ("tokenlex", "exec/build/gen.py", ("lex",)),
+    ("warnlex", "exec/build/gen.py", ("lex", "--locations")),
     ("warnparse", "exec/parse2/gen2.py", ("--warnings", "--errors")),
     ("warnunits", "exec/parse2/units.py", ("--locations",)),
     ("errorparse", "exec/parse2/gen2.py", ("--errors",)),

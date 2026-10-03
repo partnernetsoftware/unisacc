@@ -26,9 +26,9 @@ def _entries():
         for f in ((), ('--locations',), ('--shared-predefines',), ('--locations', '--shared-predefines')):
             add('exec/build/gen.py pp', *(t + f))
     add('exec/build/gen.py pp', '--shared-predefines', '--no-autoinc')
-    # lex: --typed/--positions/--locations imply each other downwards; --sourcefacts; --check-declarations
-    for f in ((), ('--typed',), ('--positions',), ('--locations',), ('--sourcefacts',), ('--check-declarations',)):
-        add('exec/lex/gen.py', *f)
+    # lex: --typed/--positions/--locations imply each other downwards; --sourcefacts
+    for f in ((), ('--typed',), ('--positions',), ('--locations',), ('--sourcefacts',)):
+        add('exec/build/gen.py lex', *f)
     # parse2: warnings/errors imply locations; all 8 combinations are listed
     for w, er, l in itertools.product((0, 1), repeat=3):
         add('exec/parse2/gen2.py', *(['--warnings'] * w + ['--errors'] * er + ['--locations'] * l))

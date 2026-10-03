@@ -8,7 +8,7 @@ OUT=$1; TARGET=$2; NETWORK=$3; EXEC_CC=$4
 R=$(pwd)
 b() { "$_BOUND" 60 "$@"; }
 b "${EXEC_CC:-cc}" -O2 -o "$OUT/run" exec/c/run.c
-b python3 exec/lex/gen.py --typed "$OUT/e1.json"
+b python3 exec/build/gen.py lex "$OUT/e1.json" --typed
 b python3 exec/parse2/gen2.py "$OUT/e3.json"
 b python3 exec/build/gen.py opt "$OUT/e4.json" --o2
 b python3 exec/build/gen.py prune "$OUT/prune.json"

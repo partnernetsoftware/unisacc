@@ -176,7 +176,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         # and the plain E1 output, independently of image-target selection.
         for name,script,args,inp,out in [
                 ('tokenpp',here.parent/'build/gen.py',['pp','--shared-predefines','--no-autoinc'],'src.c','pp.text'),
-                ('tokenlex',here.parent/'lex/gen.py',[],'pp.text','tokens.plain')]:
+                ('tokenlex',here.parent/'build/gen.py',['lex'],'pp.text','tokens.plain')]:
             # Public token dump has no implicit header selection.
             n=built_model(td,name,script,args)
             rows.append('\t'.join(['tokens',name,inp,out,str(n)]))
@@ -185,7 +185,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         warning_models={}
         def warning_model(name,script,args):
             return built_model(td,name,script,args)
-        warning_models['e1']=warning_model('warnlex',here.parent/'lex/gen.py',['--locations'])
+        warning_models['e1']=warning_model('warnlex',here.parent/'build/gen.py',['lex','--locations'])
         warning_models['e3']=warning_model('warnparse',here.parent/'parse2/gen2.py',['--warnings','--errors'])
         located_units=warning_model('warnunits',here.parent/'parse2/units.py',['--locations'])
         quiet_parse=warning_model('errorparse',here.parent/'parse2/gen2.py',['--errors'])
