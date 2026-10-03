@@ -2,8 +2,11 @@
 UNILIB1 is not a host ABI. Code entries include internal labels. Data aliases
 are declared here and collision-checked in the delta, never guessed by C.
 """
+import sys
 from pathlib import Path
-SEEN = 12 << 40
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from exec.facts.load import facts
+SEEN = {r['name']: r['bank'] << 40 for r in facts('enc-librarysymbols-regions')}['SEEN']
 
 
 def install(E, OFF, LABD, direct_labels, completion):
