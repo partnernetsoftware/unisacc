@@ -361,7 +361,7 @@ def update_control(section, extra=None):
     """Lvalue update control: exec/parse2/update-manifest.tsv (K2 sub-manifest); returns its bindings."""
     import assemble
     x = dict(extra or {})
-    env = dict(upd_section=section, upd_dispatch=int(section == "id0"), extra=x)
+    env = dict(upd_section=section, upd_dispatch=int(section == "id0"), extra=x, extra2={})
     env.update((k, str(x.get(k, ""))) for k in ("op", "name", "suffix", "postfix", "prefixfix", "integer", "floating", "bits"))
     return assemble.run(Path(__file__).resolve().parent / 'update-manifest.tsv', E, P, {}, env)["ub"]
 
@@ -469,36 +469,14 @@ def build(locations=False, warnings=False, errors=False):
     assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_conv=1))
     shape_control("update-entry")
     update_control("step-entry")
-    pointer_ops={row[0] for row in tape_rows("update-pointer.tsv")}
-    for op in E.CASOPS:
-        b=update_control("compound0",dict(op=op))
-        b=update_control("compound1",dict(b,address_end=addr(P(b["f6"])).cur))
-        body=b["f7"]
-        if op not in pointer_ops:
-            b=update_control("compound-check",b)
-            body="X.c"+op+".i"
-        b=update_control("compound-body",dict(b,compound_body=body,compound_owner="LV" if op in pointer_ops else "X"))
-        assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_compound=1, cop=op))
-        update_control("compound-tail",b)
+    segment("upd-compound")
     update_control("taxonomy")
-    current="TAX.0"
-    for code,name in ((1,"i8"),(2,"i16"),(4,"i32"),(8,"i64"),(UNS+1,"u8"),(UNS+2,"u16"),(UNS+4,"u32"),(UNS+8,"u64"),
-                      (BOOL,"u8"),(0,"void"),(DBL,"f64"),(FLT,"f32"),(FPB,"ptr"),(FPV,"ptr")):
-        b=update_control("type-row",dict(type_current=current,type_code=code,type_axis=AX.index(name)))
-        current=b["f28"]
-    update_control("type-tail",dict(type_end=current))
+    segment("upd-type")
     assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_naru=1))
     update_control("step0")
     shape_control("pointee-width")
     update_control("step1")
-    for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
-        update_control("fp-test",dict(op=op))
-        for suffix,bits in tape_rows("update-float.tsv"):
-            update_control("fp-output",dict(op=op,suffix=suffix,bits=int(bits),floating=floating))
-    for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
-        b=update_control("post0",dict(name=name,op=op,postfix=postfix,integer=integer))
-        b=update_control("post1",dict(b,address_end=addr(P(b["f44"])).cur))
-        update_control("post-body",b)
+    segment("upd-modes")
     segment("upd-var")
     ladder("E", "UNARY")
     ladder("C", None)
@@ -531,8 +509,7 @@ def build(locations=False, warnings=False, errors=False):
     ordinary_control('down', warnings, dict(resume=p.cur))
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
-    for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
-        update_control("prefix",dict(name=prefixname,op=op,prefixfix=prefixfix))
+    segment("upd-prefix")
     assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_positive=1))
     import assemble
     unit_span = int(re.search(r"^#define MAXTOK ([0-9]+)\b", Path(E.ROOT, "src/front_pp.c").read_text(), re.M).group(1))
