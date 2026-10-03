@@ -6,13 +6,14 @@ from pathlib import Path
 from unisa.catalog import REGMAP
 from unisa.emit_x86 import NUM, WINARGS_BODY
 from unisa.image.pe import IMPORTS
-IDS={name:200+i for i,name in enumerate(('winsave','winrest','winstdh','winargs'))}
+from exec.facts.load import facts
+IDS={r['name']:r['value'] for r in facts('enc-x86win-ids')}
 # Per-instruction records, isolated from byte-addressed image storage.
-META=('catop','winimp','retconv','hstd','written','scr0','scr1')
-OPS=('exit','read','write','mmap','mprotect','munmap','close','open','lseek','unlink','rename')
-RCS=('none',"'none",'wcount','bool_inv','bool_neg','dword_sx')
+META=tuple(facts('enc-x86win-meta'))
+OPS=tuple(facts('enc-x86win-ops'))
+RCS=tuple(facts('enc-x86win-rcs'))
 FIELDS=('cls','a0','a1','a2')+tuple('wm_'+k for k in META)
-IMP=60<<40
+IMP=facts('enc-x86win-bindings')[0]['value']
 SEQUENCES={name:[tuple(a) for a in json.loads(actions)] for name,actions in
            (line.split('\t') for line in Path(__file__).with_name('x86win-sequences.tsv').read_text().splitlines() if not line.startswith('#'))}
 

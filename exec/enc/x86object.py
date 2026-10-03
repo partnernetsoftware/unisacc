@@ -7,7 +7,8 @@ x86object-template.tsv (move-state).
 """
 from pathlib import Path
 from finite_rules import install as install_rules, install_template
-RELOCS = 250 << 40
+from exec.facts.load import facts
+RELOCS = facts('enc-x86object-bindings')[0]['value']
 
 def install(E, byte, OFF, LABD, KND, TGT, SYM, PRESENT):
     g=E.g;root=Path(__file__).parent
@@ -21,5 +22,5 @@ def install(E, byte, OFF, LABD, KND, TGT, SYM, PRESENT):
             if part==name:bindings[key]=E.P.fresh(type('FreshScope',(),{'cur':prefix})(),kind)
         install_rules(g,root,'x86object',bindings,None,None,name)
     # Object addresses are section offsets, never executable-image virtual VAs.
-    for state,name in [('LAYOUT','s1'),('AD.label','s2'),('RIP','s3'),('WR.c','s4')]:
-        move(state);section(name)
+    for r in facts('enc-x86object-moves'):
+        move(r['state']);section(r['section'])
