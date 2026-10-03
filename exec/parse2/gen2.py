@@ -490,8 +490,7 @@ def build(locations=False, warnings=False, errors=False):
             b=update_control("compound-check",b)
             body="X.c"+op+".i"
         b=update_control("compound-body",dict(b,compound_body=body,compound_owner="LV" if op in pointer_ops else "X"))
-        install_rules(g,os.path.dirname(__file__),"functiontypes",section="compound",
-                      bindings=dict(wide="BC.wide"+op,test="BC.widetest"+op,narrow="BC.narrow"+op,store="BC.store"+op))
+        assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_compound=1, cop=op))
         update_control("compound-tail",b)
     update_control("taxonomy")
     current="TAX.0"
