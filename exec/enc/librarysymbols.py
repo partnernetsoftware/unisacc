@@ -7,7 +7,7 @@ SEEN = 12 << 40
 
 
 def install(E, OFF, LABD, direct_labels, completion):
-    from finite_rules import install as rules
+    from finite_rules import install as rules, install_template
     from modelinput import u64
     if direct_labels:
         from armlayout import SYM, PRESENT
@@ -20,13 +20,13 @@ def install(E, OFF, LABD, direct_labels, completion):
         if n=='RET': row[k]=('LIB.finish',q)
     u64(E,'LIB.resource',b'\0library/symbols','lib_flag','lib_present','LIB.fail')
     # Validate before any writer, including file-format writers with own tail.
-    g.st['LIB.imagebegin']=g.st.pop('ELF.begin')
+    install_template(g,Path(__file__).parent,'librarysymbols',{},None,section='move')
     # Stage control lives in librarysymbols-result.tsv (sections d0s1/d0s2 for offset-table
     # labels, d1s1/d1s2 for direct labels) around the finite scan section; fresh labels are
     # declared in librarysymbols-fresh.tsv and allocated in recorded order via E.P.fresh on
     # an unregistered scope. Python binds only dynamic facts: OFF, LABD, SYM, PRESENT, SEEN.
-    # Residue: the completion-row RET rewrite, the u64 resource reader and the rename of
-    # ELF.begin into LIB.imagebegin (state-creating, above).
+    # Residue: the completion-row RET rewrite, and the u64 resource reader; the move of ELF.begin
+    # into LIB.imagebegin is librarysymbols-template.tsv (move-state).
     prefix=(Path(__file__).with_name('librarysymbols-alias.tsv').read_text().strip().split('\t'))
     assert prefix==['data','g_','strip-prefix']
     class _Scope:
