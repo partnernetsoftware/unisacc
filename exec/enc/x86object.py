@@ -1,32 +1,25 @@
-"""ELF object address/undefined-call relocation capture, as delta actions."""
+"""ELF object address/undefined-call relocation capture, as delta actions.
+Stage control lives in x86object-result.tsv (finite_rules), sections s1-s4; fresh labels are
+pre-allocated in recorded order from x86object-fresh.tsv on an unregistered scope.
+Python binds only dynamic facts: RELOCS and the caller's LABD/TGT bank bases.
+Residue: move() renames LAYOUT, AD.label, RIP, WR.c to XO.original.* between the sections --
+it creates states, which a table row cannot do.
+"""
+from pathlib import Path
+from finite_rules import install as install_rules
 RELOCS = 250 << 40
 
 def install(E, byte, OFF, LABD, KND, TGT, SYM, PRESENT):
-    P,g=E.P,E.g
+    g=E.g;root=Path(__file__).parent
+    fresh=[l.split('\t') for l in (root/'x86object-fresh.tsv').read_text().splitlines()[1:]]
+    bindings=dict(RELOCS=RELOCS,LABD=LABD,TGT=TGT)
     def move(state):
         other='XO.original.'+state;assert other not in g.st
         g.st[other]=g.st.pop(state);g.labels.add(other);return other
+    def section(name):
+        for part,key,kind,prefix in fresh:
+            if part==name:bindings[key]=E.P.fresh(type('FreshScope',(),{'cur':prefix})(),kind)
+        install_rules(g,root,'x86object',bindings,None,None,name)
     # Object addresses are section offsets, never executable-image virtual VAs.
-    move('LAYOUT')
-    P('LAYOUT').a(('LDI','text_va',0),('LDI','data_va',1<<32),('LDI','data_shift',(1<<32)-256)).ret()
-    label=move('AD.label')
-    P('AD.label').a(('LDX','obj_lab','ad_v',LABD)).branch({0:'XO.undefinedaddr'},label,[('RLD','obj_lab')])
-    P('XO.undefinedaddr').a(('COPYW','obj_symid','ad_v'),('LDI','ad_v',0)).goto('AD.emit')
-    rip=move('RIP')
-    P('RIP').branch({0:'XO.ripvalue'},'XO.ripsymbol',[('RLD','obj_symid')])
-    P('XO.ripsymbol').a(('ALUI','add','obj_relsect','obj_symid',1000),('LDI','obj_reladd',-4)).goto('XO.riprecord')
-    P('XO.ripvalue').a(('LDI','obj_data_base',1<<32),('C64U','ad_v','obj_data_base')).branch({(1,2):'XO.ripdata'},'XO.ripbelow')
-    P('XO.ripbelow').a(('LDI','obj_hostbase',(1<<32)-32),('C64U','ad_v','obj_hostbase')).branch({0:rip},('rej','not covered: object host FFI slot'))
-    P('XO.ripdata').a(('A64I','sub','obj_reladd','ad_v',1<<32),('C64U','obj_reladd','obj_nzend')).branch({0:'XO.data'},'XO.bss')
-    P('XO.data').a(('LDI','obj_relsect',2)).goto('XO.ripadd')
-    P('XO.bss').a(('LDI','obj_relsect',3),('A64','sub','obj_reladd','obj_reladd','obj_nzend')).goto('XO.ripadd')
-    P('XO.ripadd').a(('A64I','sub','obj_reladd','obj_reladd',4)).goto('XO.riprecord')
-    P('XO.riprecord').a(('OLEN','obj_reloff'),('A64I','add','obj_reloff','obj_reloff',3),('LDI','obj_reltype',2)).call('XO.record').a(('OLEN','ad_v'),('A64I','add','ad_v','ad_v',7),('LDI','obj_symid',0)).goto(rip)
-    call=move('WR.c')
-    P('WR.c').a(('LDX','obj_callee','q',TGT),('LDX','obj_lab','obj_callee',LABD)).branch({0:'XO.call'},call,[('RLD','obj_lab')])
-    P('XO.call').a(('OLEN','obj_reloff'),('A64I','add','obj_reloff','obj_reloff',1),('LDI','obj_reltype',4),('ALUI','add','obj_relsect','obj_callee',1000),('LDI','obj_reladd',-4)).call('XO.record').a(('OUT',232),('OUT',0),('OUT',0),('OUT',0),('OUT',0)).goto('WR.nx')
-    P('XO.record').a(('CMPI','obj_nrel',262144)).branch({0:'XO.store'},('rej','not covered: object relocation capacity'))
-    p=P('XO.store').a(('A64I','mul','obj_relindex','obj_nrel',4))
-    for i,value in enumerate(['obj_reloff','obj_reltype','obj_relsect','obj_reladd']):
-        p.a(('A64I','add','obj_relcell','obj_relindex',i),('STX','obj_relcell',RELOCS,value))
-    p.a(('ALUI','add','obj_nrel','obj_nrel',1)).ret()
+    for state,name in [('LAYOUT','s1'),('AD.label','s2'),('RIP','s3'),('WR.c','s4')]:
+        move(state);section(name)
