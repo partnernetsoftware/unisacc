@@ -9,7 +9,7 @@ import csv,importlib.util,json,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT)]
 from modelgraphequality import install as graph_install,FIELDS,EDGES,LAYOUT
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules,install_template
 from ordered import install as ordered_install,REGS as ORDERED_REGS
 SIGWIRE,SIGMARK,FRAME=(i<<40 for i in range(480,483))
 
@@ -48,8 +48,7 @@ def install(E):
   for part,key,prefix,kind in fresh:
    if part==name:bindings[key]=P(prefix+'.fresh').fresh(kind)
   install_rules(E.g,root,'gen',bindings,{},{},name)
- P('NC.unsupported').a(E.rej('not covered: native ABI carrier rule')).goto('DEAD')
- P('NC.targetfail').a(E.rej('not covered: native ABI target profile')).goto('DEAD')
+ install_template(E.g,root,'gen',dict(reject=[dict(state='NC.unsupported',what='carrier rule'),dict(state='NC.targetfail',what='target profile')]),P('NC.fresh').fresh,section='reject')
  section('head')
  # Exact byte trie: no prefix, unknown suffix or absent-resource fallback.
  prefixes={b''}
