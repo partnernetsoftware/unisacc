@@ -111,7 +111,8 @@ def main():
         print('  %-10s %4d  (baseline %4d) %s' % (s, v['total'], was, mark))
     print('decision-ledger  stages %d   direct transition sites %d   (baseline %d)   rose %d'
           % (len(now), total, sum(v['total'] for v in base.values()), bad))
-    return 1 if bad or missing else 0
+    rc_ops = ops()   # the gate also enforces the K2 op cap / forbidden ops (--ops)
+    return 1 if bad or missing or rc_ops else 0
 
 if __name__ == '__main__':
     sys.exit(main())

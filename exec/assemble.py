@@ -114,8 +114,7 @@ def _out(text, facts):
     t = _cell("str", t)
     return [("OUT", c) for c in t.encode()]
 # value `@str:TEXT` literal string with `{NAME}` substitution; op `set`: store the bind cells in env;
-# op `fail`: exit with STEM as the message; op `py` (transitional, gate-red): call
-#   MODULE.install(E, **bind) for a stage constructor not yet migrated.
+# op `fail`: exit with STEM as the message;
 # ---- end K2 round 2 additions -----------------------------------------------
 
 
@@ -302,11 +301,9 @@ class Run:
                 raise SystemExit(o["exit"])
             self.env.update(bd or {})
             self.env.update(sq or {})
-        elif op == "py":   # TRANSITIONAL (K2 boundary forbids): lower/code, lower/objectfacts; gate --ops is red until gone
-            import importlib.util, sys
-            if str(self.root) not in sys.path:
-                sys.path.insert(0, str(self.root))
-            sp = importlib.util.spec_from_file_location(self.root.name + "_" + stem, self.root / (stem + ".py"))
+        elif op == "py":   # TRANSITIONAL (K2 boundary forbids): only lower/code -> ../modelbindings (decoder manifest pending)
+            import importlib.util
+            sp = importlib.util.spec_from_file_location("k2py_" + stem.replace("/", "_").replace(".", "_"), self.root / (stem + ".py"))
             mod = importlib.util.module_from_spec(sp)
             sp.loader.exec_module(mod)
             res = mod.install(self.E, **(bd or {}))
@@ -473,7 +470,7 @@ def _bindings(self, o, bind, facts):
     acc = o.get("accumulate")
     out = dict(self.accum.setdefault(acc, {})) if acc else {}
     if isinstance(o.get("bindmap"), str):
-        out.update(_path(facts, o["bindmap"]))
+        out.update(_path(facts, self.interp(o["bindmap"])))
     if isinstance(o.get("freshrows"), str):
         lines = (self.root / o["freshrows"]).read_text().splitlines()
         col = {c: i for i, c in enumerate(lines[0].lstrip("# ").split("\t"))}

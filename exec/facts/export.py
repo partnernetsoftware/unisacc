@@ -70,6 +70,35 @@ def lowercode():
                     os_, arch, i, _esc(w), json.dumps([j for j, k in enumerate(SHAPE.get(w, ())) if k == "r"]),
                     json.dumps([regmap[w]] if w in regmap else []),
                     json.dumps([" form=" + enc[w]] if w in enc else [])))
+    # Per-target env of the code route (was exec/lower/code.py env prep): code-manifest.tsv
+    # merges codeenv.<target> with bindmap.  Scratch registers are checked here, at export.
+    from unisa.emit_x86 import SCR, SCR2
+    from unisa.emit_arm import IP0, IP1
+    from exec.facts.load import facts
+    banks = {r["name"]: r["bank"] << 40 for r in facts("top-modelbindings-banks")}
+    stride = {r["name"]: r["value"] for r in facts("top-modelbindings-const")}["STRIDE"]
+    env = {}
+    for os_ in ("lnx", "osx", "win"):
+        for arch in ("x86_64", "arm64"):
+            regmap = {r[0]: r[2] for r in _gold("regmap") if r[1] == arch}
+            enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
+            reloc = {r[0]: r[2] for r in _gold("reloc") if r[1] == arch}
+            ids = {w: "idc" + str(i) for i, w in enumerate(words)}
+            scratch = "x16" if arch == "arm64" else "r11"
+            assert scratch not in set(regmap.values()), "callm scratch aliases tape register"
+            s0, s1 = ("x" + str(IP0), "x" + str(IP1)) if regmap["r0"].startswith("x") else (SCR, SCR2)
+            assert not {s0, s1} & set(regmap.values()), "process scratches alias tape values"
+            e = dict(target=os_ + "/" + arch, arch=arch, ids=ids, process_flag="true" if os_ == "lnx" else "false",
+                     idmapu={"id_" + n: v for n, v in ids.items()}, idmap={"id:" + n: v for n, v in ids.items()},
+                     scratch=scratch, form_load64=enc["load64"], form_callr=enc["callr"],
+                     s0=s0, s1=s1, hosted=True,
+                     IDS=banks["IDS"], ADDRESS=banks["ADDRESS"], DESC=banks["DESC"], BKIND=banks["KIND"],
+                     SUPPORTED=banks["SUPPORTED"], WRITABLE=banks["WRITABLE"], EXTENT=banks["EXTENT"],
+                     STRIDE=stride)
+            e.update({"reloc_" + k: v for k, v in reloc.items()})
+            e.update({"reg_" + k: v for k, v in regmap.items()})
+            env[os_ + "/" + arch] = e
+    out.append("=codeenv\tjson\t" + json.dumps(env, sort_keys=True))
     return out
 
 
@@ -167,7 +196,7 @@ TABLES = [
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
-    ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
+    ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
 ]
 
 
