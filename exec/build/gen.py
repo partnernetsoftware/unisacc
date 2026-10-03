@@ -7,6 +7,7 @@ Manifest header lines read here:
   #! base PATH            executor module (relative to exec/), loaded as E
   #! flags A B C          accepted --A/--B/--C; each becomes flags[A]=True/False
   #! start NAME           start state (default START)
+  #! graph CLASS          E.g = E.CLASS() (a base without its own g/P, e.g. build/graph.py)
 Everything else (exclusive flags, env values, sub-manifests) is manifest rows.
 """
 import importlib.util, json, pathlib, sys
@@ -37,6 +38,8 @@ if len(args) != len(set(args)) or any(not a.startswith("--") or a[2:] not in nam
 spec = importlib.util.spec_from_file_location(stage.replace("/", "_") + "base", ROOT / "exec" / head["base"][0])
 E = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(E)
+if "graph" in head:
+    E.g, E.P = getattr(E, head["graph"][0])(), getattr(E, "P", None)
 assemble.run(man, E, E.P, {n: "--" + n in args for n in names})
 E.g.finish()
 d = {'start': head.get('start', ['START'])[0], 'states': {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in E.g.st.items()},
