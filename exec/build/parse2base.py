@@ -54,7 +54,8 @@ def tokens(E):
     for w in ("type=extern", "type=_Bool"):
         E.WORDS.append(w)
         E.TK[w] = max(E.TK.values()) + 1
-    E.tokenizer(QUALIFIERS)
+    import assemble   # token reader: exec/parse/tokens2-manifest.tsv (facts k2-gen2-tokens)
+    assemble.run(pathlib.Path(__file__).resolve().parents[1] / 'parse' / 'tokens2-manifest.tsv', E, E.P, {}, {})
 
 
 def twice():
