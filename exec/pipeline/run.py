@@ -1,6 +1,6 @@
 """Chain the stages of exec/pipeline/stages.tsv on one C file.
 
-    python3 exec/pipeline/run.py [--ref-feed] [--gen] FILE.c
+    python3 exec/pipeline/run.py [--ref-feed] [--gen] [-I DIR] FILE.c
 
 Refuses to connect adjacent stages whose formats differ.  Each stage (and each
 reference / checker call) is bounded by 58 s.  Stops at the first reject or
@@ -100,8 +100,32 @@ def main():
     a = sys.argv[1:]
     feed = "--ref-feed" in a
     gen = "--gen" in a
-    src = [x for x in a if not x.startswith("--")][0]
-    src = os.path.abspath(src)
+    include_dirs = []
+    files = []
+    i = 0
+    while i < len(a):
+        arg = a[i]
+        if arg in ("--ref-feed", "--gen"):
+            pass
+        elif arg == "-I":
+            i += 1
+            if i >= len(a):
+                print("missing -I directory")
+                return 2
+            include_dirs.append(os.path.abspath(a[i]))
+        elif arg.startswith("-I") and len(arg) > 2:
+            include_dirs.append(os.path.abspath(arg[2:]))
+        elif arg.startswith("-"):
+            print("unknown option: " + arg)
+            return 2
+        else:
+            files.append(arg)
+        i += 1
+    if len(files) != 1:
+        print("expected one C source file")
+        return 2
+    src = os.path.abspath(files[0])
+    incflags = "".join(" -I " + shlex.quote(d) for d in include_dirs)
     rows = manifest()
     r, e = refs()
     if r != 0:
@@ -118,8 +142,9 @@ def main():
             return 2
         prev = s["out"]
     tmp = tempfile.mkdtemp(prefix="pipe_")
-    cur = os.path.join(tmp, "0.src.c")
-    open(cur, "wb").write(open(src, "rb").read())
+    # E2 resolves quoted includes relative to the source path.  Feeding a copy
+    # under tmp would silently change that search root and __FILE__ locations.
+    cur = src
     bad = check("src.c", cur)
     if bad:
         print("input is not src.c: %s" % bad)
@@ -131,7 +156,7 @@ def main():
             if not feed:
                 print("%s: stop -- input edge not connected (use --ref-feed)" % n)
                 return 1
-            r, o, e = sh(s["refin"].format(src=src))
+            r, o, e = sh(s["refin"].format(src=shlex.quote(src)) + incflags)
             cur = os.path.join(tmp, "%d.ref.%s" % (k, fmt))
             open(cur, "wb").write(o)
             print("%s: ref-fed %s from the reference (%s)" % (n, fmt, "exit %s" % r))
@@ -146,8 +171,14 @@ def main():
             if r != 0:
                 print("%s: gen failed (%s) %s" % (n, r, e[-200:]))
                 return 1
-        r, o, e = sh(s["exec"].format(delta=s["delta"], **{"in": cur}))
-        rr, ro, _ = sh(s["ref"].format(src=src))
+        cmd = s["exec"].format(delta=s["delta"], **{"in": shlex.quote(cur)})
+        if n == "E2":
+            cmd += " --source " + shlex.quote(src) + incflags
+        r, o, e = sh(cmd)
+        # The token dumper's command path does not accept -I.  Feed it the
+        # already checked E2 stream; this is also the exact text E1 consumed.
+        ref_input = cur if n == "E1" else src
+        rr, ro, _ = sh(s["ref"].format(src=shlex.quote(ref_input)) + (" -nostdinc" if n == "E1" else incflags))
         et = e.decode("latin-1").strip().split("\n")[0][:100]
         if et.startswith("REJECT "):
             et = et[7:]

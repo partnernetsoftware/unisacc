@@ -1,0 +1,4 @@
+#ifndef A_QUOTE_NEIGHBOR_H
+#define A_QUOTE_NEIGHBOR_H
+#define QUOTE_NEIGHBOR_VALUE 37
+#endif

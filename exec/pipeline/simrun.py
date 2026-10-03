@@ -1,6 +1,6 @@
 """The E2 executor (exec/pp/sim.py, unchanged) with the stage exit contract.
 
-    python3 exec/pipeline/simrun.py delta.json IN
+    python3 exec/pipeline/simrun.py delta.json IN [--source ORIGINAL.c] [-I DIR]
 
 exec/pp/sim.py's main writes only the diagnostic bytes of a reject, which are
 empty for E3's `not covered: ...`; here stderr is `REJECT <k>` then the
@@ -13,8 +13,31 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pp"))
 import sim  # noqa: E402
 
+source = sys.argv[2]
+include_dirs = []
+i = 3
+while i < len(sys.argv):
+    arg = sys.argv[i]
+    if arg == "--source":
+        i += 1
+        if i >= len(sys.argv):
+            sys.exit("simrun: missing --source path")
+        source = sys.argv[i]
+    elif arg == "-I":
+        i += 1
+        if i >= len(sys.argv):
+            sys.exit("simrun: missing -I directory")
+        include_dirs.append(sys.argv[i])
+    elif arg.startswith("-I") and len(arg) > 2:
+        include_dirs.append(arg[2:])
+    else:
+        sys.exit("simrun: unknown option " + arg)
+    i += 1
+files = sim.Files()
+if include_dirs:
+    files.cache[b"\0cli/include-dir"] = "\n".join(include_dirs).encode("utf-8")
 try:
-    res, val, _ = sim.run(json.load(open(sys.argv[1])), open(sys.argv[2], "rb").read(), sys.argv[2])
+    res, val, _ = sim.run(json.load(open(sys.argv[1])), open(sys.argv[2], "rb").read(), source, files)
 except (RuntimeError, OSError) as ex:     # a bad table or an unreadable file: 2, as exec/c/run.c
     sys.stderr.write("run: %s\n" % ex)
     sys.exit(2)
