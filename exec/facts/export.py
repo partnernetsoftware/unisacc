@@ -9,6 +9,7 @@ of lines in the facts format; the written file starts with one
   python3 exec/facts/export.py --check    exit 1 when a committed table differs
 """
 import hashlib
+import json
 import importlib.util
 import sys
 from pathlib import Path
@@ -75,7 +76,7 @@ def lowercode():
     from unisa.emit_x86 import SCR, SCR2
     from unisa.emit_arm import IP0, IP1
     from exec.facts.load import facts
-    banks = {r["name"]: r["bank"] << 40 for r in facts("top-modelbindings-banks")}
+    banks = {r["name"]: r["value"] for r in facts("top-modelbindings-banks")}
     stride = {r["name"]: r["value"] for r in facts("top-modelbindings-const")}["STRIDE"]
     env = {}
     for os_ in ("lnx", "osx", "win"):
@@ -244,9 +245,23 @@ def optgen():
     return out
 
 
+def modelbindingstemplate():
+    """USBIND magic chain, identifier byte classes, record kinds (from top-modelbindings-const)."""
+    sys.path.insert(0, str(HERE))
+    from load import facts
+    c = {r["name"]: r["value"] for r in facts("top-modelbindings-const")}
+    out = ["@magic\ti:int\tc:int\tnext:int"]
+    out += ["\t%d\t%d\t%d" % (i, ch, i + 1) for i, ch in enumerate(c["magic"].encode())]
+    L, D = list(c["letters"].encode()), list(c["digits"].encode())
+    out += ["@id\tletters:json\tdigits:json\tall:json", "\t%s\t%s\t%s" % tuple(json.dumps(x) for x in (L, D, L + D))]
+    out += ["=kind\tjson\t" + json.dumps(c["kind"])]
+    return out
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
     ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),
+    ("top-modelbindings-template", ["exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], modelbindingstemplate),
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),

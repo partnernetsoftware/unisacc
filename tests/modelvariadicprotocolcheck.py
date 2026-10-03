@@ -7,7 +7,10 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT/'tests'),str(ROOT)]
 from modeltypedcandidatescheck import U,I,F,D,PAIR,typed,wire3,normalized3,legacy3,rec
 from modeltypedcanonicalcheck import canonical
-from modelbindings import install,FORMAT,DISPATCH,PLAN,ARGC,VARIADIC,CANON,CANONLEN
+import assemble
+_MB=assemble.load_facts('top-modelbindings-banks')['top-modelbindings-banks!']
+FORMAT,DISPATCH,PLAN,ARGC,VARIADIC,CANON,CANONLEN=(_MB[k] for k in ('FORMAT','DISPATCH','PLAN','ARGC','VARIADIC','CANON','CANONLEN'))
+install=lambda E:assemble.run(assemble.FACTS.parent/'modelbindings-manifest.tsv',E,E.P,{})  # modelbindings-manifest.tsv
 from exec.pp.sim import run,load
 spec=importlib.util.spec_from_file_location('variadicprotocolbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 def signature(params=(F,I),var=1,mode=1,support=0,name=b'host'):
