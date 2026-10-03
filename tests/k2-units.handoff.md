@@ -58,3 +58,17 @@
   tokenlocations records tokens: warnings or errors). The translator refuses disjunctions, so the DL.read row
   is hand-split into `warnings` and `errors&!warnings` (recorded with 3 modes; gen2 implies locations).
   parse2 graphhash 10/10 identical. Recorder script: .k2tmp/vr/rec.sh MODULE STEM (8 modes, sequential).
+
+## Round 5 (2026-10-03)
+- Gates on 70d634a2 tree: exec-unitparse, exec-errors, exec-r21-e3, exec-chain-1/2/3 all rc=0
+  (chain: 97/97, 96 equal + 1 known, 95 equal + 1 not-covered; 0 bad).
+- errors design (not landed): the `reasons` section is finite_rules kind `group-tail` (an existing,
+  stage-blind graph pass: every edge whose last act is REJECT "not covered: ..." -> label ER.message<n>
+  in discovery order) returning {reason: label}. Needed in assemble: (1) `result=groups` already stores the
+  dict; (2) foreach over an env dict (`over: "$groups"`, rows {key, value}) with a facts join
+  messages[key] (message, identifier; default reason/0/recover 0) to drive the `message` rows +
+  `unknown.move/unknown` vs `plain` (split by a messages column, not a python if); (3) export one entry by
+  key: lm_nomain_msg = groups["not covered: <librarymodule no-main reason>"] into env/E.results
+  (global-results.tsv pattern) for librarymodule (coordinator request). Fresh: ER_b/DP_b/UC_r are
+  OWNER_KIND -> per-owner holders `=ER`,`=DP`,`=UC` (holder op). Stack: errors-stack via `table` with
+  `"domain":"@labels"` (approved; .k2tmp/vr/asm.py) + decisionledger.allow line.
