@@ -3,19 +3,17 @@ No text parser or symbol plan executes in the Python constructor. Stage control 
 objectfacts-byte.tsv / objectfacts-result.tsv (finite_rules). Python binds only dynamic
 facts: the SHAPE-derived prelude sequence, the interned directive key registers, the
 table bases, and fresh labels (objectfacts-fresh.tsv, created in recorded order).
-Residue: the rename of the wrapped states (START, WORD.end, R.second, HEAD, H.end) into
-OF.original.* -- it creates states, which a table row cannot do.
+The wrapped states (START, WORD.end, R.second, HEAD, H.end) move to OF.original.* via
+objectfacts-template.tsv (finite_rules move edits).
 """
 import pathlib
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules, install_template
 ORD, NAMES, GLOBAL, EXTERN, SHAPES = (i << 40 for i in range(240,245))
 
 def install(E):
     from unisa.tape import SHAPE
     g=E.g;root=pathlib.Path(__file__).parent
-    for state in ('START','WORD.end','R.second','HEAD','H.end'):
-        name='OF.original.'+state;assert name not in g.st
-        g.st[name]=g.st.pop(state);g.labels.add(name)
+    install_template(g,root,'objectfacts',{'wrapped':['START','WORD.end','R.second','HEAD','H.end']},None,section='wrap')
     start=E.P('START').a(('MARK','of_zero'),('LDI','of_count',0),('SBCLR',),[('SBOUT',c) for c in b'\0cli/funit'],('SBFIND','of_resource'),('BLEN','of_unit','of_resource'))
     words=list(SHAPE)+['.global','.extern','.bss','.str','.unit','.gdef']
     bindings=dict(ORD=ORD,NAMES=NAMES,GLOBAL=GLOBAL,EXTERN=EXTERN,SHAPES=SHAPES)
