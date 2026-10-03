@@ -851,8 +851,10 @@ def build(locations=False, warnings=False, errors=False):
     from layoutprovenance import parser as source_provenance
     start = source_provenance(E, P, start)
     assemble.run(Path(__file__).parent / 'parenfold-manifest.tsv', E, P, _flags, dict(ordinal_table=TIX))   # K2: parenfold
-    from unitmode import install as unitmode_install
-    start = unitmode_install(E, P, start, DEFS)
+    assemble.run(Path(__file__).parent / 'unitmode-manifest.tsv', E, P, _flags,   # K2: unitmode
+                 dict(start=start, FND=E.FND, TK_extern=E.TK['type=extern'], TK_assign=E.TK['='],
+                      header_json=json.dumps([list(a) for a in E.O(E.HEADER)]), lm_initret=E.results['lm_initret']))
+    start = 'UM.start'
     assemble.run(Path(__file__).parent / 'objectdefinitions-manifest.tsv', E, P, _flags, dict(TKEQ=E.TK["="]))
     import assemble
     assemble.run(Path(__file__).parent / 'structreturnexpr-manifest.tsv', E, P,

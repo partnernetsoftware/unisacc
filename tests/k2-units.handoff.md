@@ -81,3 +81,11 @@
   parse2 graphhash 10/10; finite-template, decision-ledger, exec-errors green. exec-errors-warn printed no rc line
   (not re-run). Allow justification appended to tests/decisionledger.allow.
 - Remaining: unitmode, layoutprovenance, units entry.
+
+## Round 7 (2026-10-03)
+- exec-errors-warn rc=0. unitmode.py deleted -> unitmode-manifest.tsv + exec/facts/k2-unitmode.tsv (DECL banks).
+  Dropped live reads: `assert name not in g.st`, the unique-HEADER-state assert (result unused), the END.ok scan:
+  init_target is the fixed state INITS, init_tail = JUMP x0, LDI dep 0, PUSH $lm_initret (gen2 global3 named
+  result). DEFS re-keying dropped (only feeds the "defined twice" count, unchanged). Caller env from gen2: start,
+  FND, TK_extern, TK_assign, header_json, lm_initret. parse2 graphhash 10/10.
+- Remaining: layoutprovenance (units graph ACCEPT walk), units entry.
