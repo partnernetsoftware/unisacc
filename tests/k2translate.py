@@ -308,9 +308,26 @@ class Emitter:
                     raise Refuse("install root %s outside %s" % (root, self.here))
                 stemcell = d["stem"]
             tf = None
+            params = {}
             if op == "template" and d.get("facts"):
-                self.p4(d["facts"], "template facts")
-                tf = self.tfact(d["facts"])
+                params = {}
+                def par(v):
+                    # P4: a state name inside template facts becomes a template parameter
+                    # `$k2L_<n>` bound from the manifest row with @str (whole-cell use only;
+                    # a partial use breaks the graph and graphhash refuses it)
+                    if isinstance(v, str) and v in self.states:
+                        if set(v) & set(",\t\n{}\\"):
+                            raise Refuse("state label %r not expressible as @str" % v)
+                        params.setdefault(v, "k2L_%d" % len(params))
+                        return "$" + params[v]
+                    if isinstance(v, list):
+                        return [par(x) for x in v]
+                    if isinstance(v, dict):
+                        return {k: par(x) for k, x in v.items()}
+                    return v
+                tfd = par(d["facts"])
+                self.p4(tfd, "template facts")
+                tf = self.tfact(tfd)
             if op == "template" and d.get("fresh"):
                 tf_fresh = d["fresh"]
             else:
@@ -321,6 +338,8 @@ class Emitter:
                 if new:
                     exp.append(k)
                 bind.append((k, s))
+            for lab, pn in params.items():
+                bind.append((pn, "@str:" + lab))
             for k, v in (d.get("sequences") or {}).items():
                 s, new = cell(k, v)
                 if new or isinstance(v, str):

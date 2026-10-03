@@ -616,8 +616,9 @@ def build(locations=False, warnings=False, errors=False):
     floatconst_install(E, P)
     E.autoscan()
     types()
-    from functiontypes import install as functiontypes_install
-    functiontypes_install(E, P, dict(FPS_FIRST=FPS_FIRST, SBB=SBB, FPS_RD=FPS_RD, FPS_RB=FPS_RB, FPS_VAR=FPS_VAR, FPS_PARAM=FPS_PARAM, FPS_RSH=FPS_RSH, FPS_FN=FPS_FN, FPS_COUNT=FPS_COUNT, FPS_PSH=FPS_PSH, SHAPE=SHAPE, ARR=E.ARR, DIM=DIM, PDB=PDB, FPB=FPB, FPV=FPV), TYINT)
+    import assemble   # K2 trace translation: functiontypes-manifest.tsv
+    from types import SimpleNamespace
+    assemble.run(Path(__file__).resolve().parent / 'functiontypes-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict())
     import assemble   # K2 trace translation: truth-manifest.tsv
     assemble.run(Path(__file__).parent / 'truth-manifest.tsv', E, P,
                  dict(locations=locations, warnings=warnings, errors=errors), dict(DBL=DBL, FLT=FLT))
