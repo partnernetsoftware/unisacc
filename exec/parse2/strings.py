@@ -1,6 +1,7 @@
 """Shared narrow/wide string spans, initialization and code-point walks in TSV."""
 from pathlib import Path
 from finite_rules import install as install_rules, install_template
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
 
 
 def rules(E, P, section, bindings=None, owner=None):
@@ -10,7 +11,7 @@ def rules(E, P, section, bindings=None, owner=None):
             selected, name, prefix, kind = line.split('\t')
             if selected == section:
                 bindings[name] = P((owner or prefix) + '.strings_' + name).fresh(kind)
-    sequences = {name: E.rej(text) for text, name in {'not covered: string prefix': 'reject0', 'not covered: truncated string token': 'reject1', 'not covered: truncated string escape': 'reject2', 'not covered: adjacent string prefix': 'reject3', 'not covered: string escape': 'reject4'}.items()}
+    sequences = {r['name']: E.rej(r['value']) for r in facts('strings') if r['kind'] == 'reject'}
     install_rules(E.g, Path(__file__).parent, 'strings', bindings=bindings,
                   sequences=sequences, section=section)
 
@@ -27,8 +28,7 @@ def initializer(E, P, esc):
 
 
 def walk(E, P, esc, pre, body, done):
-    bindings = {'walk'+suffix.replace('.', '_'): pre+suffix for suffix in
-                ('', '.w', '.es', '.gap', '.hex', '.hexend', '.oct', '.octstep', '.start', '.quote', '.setup', '.setup_test', '.wide', '.char', '.char_test', '.rawbyte', '.utf', '.cont', '.contstep', '.contstep_test', '.min', '.min_test', '.max', '.max_test', '.surrogate', '.surrogate_test', '.surrogateend', '.surrogateend_test', '.bad')}
+    bindings = {r['name']: pre + r['value'] for r in facts('strings') if r['kind'] == 'walk'}
     bindings.update(body=body, done=done)
     # Keep adjacent-prefix rejection before escape rejection for error-message numbering.
     rules(E, P, 'walk_head', bindings)

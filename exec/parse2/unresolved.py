@@ -8,9 +8,10 @@ except inside a block whose label is a file-scope static nobody calls
 emits such a function.  The block in hand is the last label line the scan
 passed (ud_cur).
 """
-DEFINED = 33 << 40
-REFERENCED = 34 << 40   # REFERENCED[id] = 1: some `call NAME` names it (first call scan)
-STATICF = 35 << 40      # STATICF[id] = 1: the parser saw `static` on this function definition
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+# REFERENCED[id]=1: some `call NAME` names it; STATICF[id]=1: `static` function definition
+_F = {r['name']: r['value'] for r in facts('unresolved')}
+DEFINED, REFERENCED, STATICF = _F['DEFINED'], _F['REFERENCED'], _F['STATICF']
 
 def install(E, P):
     import json
@@ -30,9 +31,9 @@ def install(E, P):
         install_rules(E.g, root, 'unresolved', bindings=bindings,
                       sequences=sequences, classes=classes, section=section)
     rules('head')
-    for i, char in enumerate(b'  call '):
+    for i, char in enumerate(_F['call_prefix'].encode()):
         rules('prefix', {'prefix':'UD.prefix'+str(i), 'match':'UD.match'+str(i),
-                        'next':'UD.prefix'+str(i+1) if i<6 else 'UD.name0',
+                        'next':'UD.prefix'+str(i+1) if i<6 else 'UD.name0',  # i<6: len(call_prefix)-1
                         # a line that does not start `  call`: at its first byte it may be a label
                         'prefix_miss':'UD.linestart' if i == 0 else 'UD.nextline'},
               {'char':[char]}, str(i))

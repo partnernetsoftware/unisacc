@@ -8,10 +8,10 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
     from finite_rules import install as install_rules, install_template
     # Same bounded ordinal namespace as the product; single-unit labels stay
     # unchanged. This is a declaration constant, not emitted reference code.
-    source=(pathlib.Path(E.ROOT)/'src/front_pp.c').read_text()
-    limits=re.findall(r'^#define MAXTOK ([0-9]+)\b',source,re.M)
-    assert len(limits)==1 and 0<int(limits[0])<(1<<25)
-    unit_span=int(limits[0])
+    import sys; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / 'facts')); from load import facts
+    fx = {r['name']: r['value'] for r in facts('statics')}
+    unit_span=fx['MAXTOK']
+    assert 0<unit_span<(1<<25)
     bindings = dict(TIX=TIX, SINIT=SINIT, SIEND=SIEND, LOC=LOC, SKIPS=SKIPS,
                     BASE=E.BASE, ARR=E.ARR, PTR=E.PTR, MAXTOK=unit_span)
     root = pathlib.Path(__file__).parent
@@ -19,8 +19,6 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
         if not line.startswith('#'):
             name, prefix, kind = line.split('\t')
             bindings[name] = P(prefix+'.statics_'+name).fresh(kind)
-    import sys; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / 'facts')); from load import facts
-    fx = {r['name']: r['value'] for r in facts('statics')}
     saved = tuple(fx['saved'])
     sequences = {'save': P('SC.saved_push').vpush(*saved).acts,
                  'restore': P('SC.saved_pop').vpop(*saved).acts}

@@ -2,8 +2,9 @@
 Storage remains unchanged. Pointer descriptors carry underlying identity only
 internally; call-site serialization emits rank zero for non-FP descriptors.
 """
-VALUEBANK,NAMEDRETURN,LVSITERANK,LCSITERANK,COMMONBANK=(i<<40 for i in range(647,652))
-RANKOF={'tb':'type_rank','fp_tb':'fp_rank','rb':'return_rank','vb':'value_rank','lb':'left_rank','rvb':'right_rank','svb':'sv_rank','cast_tb':'cast_rank','ivb':'iv_rank','qn_base':'qn_rank','bc_targetvb':'bc_target_rank'}
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+globals().update((r['name'],r['value']) for r in facts('valueranks') if r['kind']=='bank')
+RANKOF={r['name']:r['value'] for r in facts('valueranks') if r['kind']=='rank'}
 def slots(items):
     result=[]
     for item in items:
