@@ -125,6 +125,13 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   operator-actions.tsv per op + E.optext/FPU float text: move per-op values (offset, modes, optext, float opcode text)
   to facts k2-gen2 via export.py, then foreach over ops with `call control` rows.
 
+- Rounds 10-12 (8c032d05, on ad6bd94f): optail + tytail are gen2-manifest rows; facts k2-gen2 hold domain data only
+  (P4): oprows = gen2.optail_facts (offset, mnemonics sop/uop + regs, pointer mode, flag lists ptrn/cmpl/invl/fl/nf
+  as [{}]/[], floats), ckm/resd rows = labels/axis/masktext/first, INVTEXT from TYPE_TAPE. Sequences in rows:
+  let+mapseq over operator-actions acts ($CKT/$RST/{offset}), @out:=fact text; env lets ient/pct as gates.
+  0 action lists left in k2-gen2.tsv. parse2 graphhash 5/5 shards 0 bad; 8 gates green. Check: sh .k2tmp/one.sh.
+  Left: ladder+dispatch templates, startup-run, _namespace_control, ordinary_control; then one manifest.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
