@@ -23,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FOLD_MAX = 40
+# the alias op is `let` once exec/assemble.py has it (op cap), `set` before
+LET = "let" if 'op == "let"' in (ROOT / "exec" / "assemble.py").read_text() else "set"
 OPS = {"install": "rows", "install_rows": "table", "install_template": "template"}
 
 
@@ -351,7 +353,7 @@ class Emitter:
             raise Refuse("fresh labels allocated but never bound: %s" % pending[:3])
         if ret is not None and retrow is None:
             if isinstance(ret, str) and not any(ch in ret for ch in ",\t\n{}\\"):
-                out.append(("let", "-", "-", (), (("ret", "@str:" + ret),), "{}", "null"))
+                out.append((LET, "-", "-", (), (("ret", "@str:" + ret),), "{}", "null"))
             else:
                 raise Refuse("install return value %r not traceable" % (ret,))
         return out
