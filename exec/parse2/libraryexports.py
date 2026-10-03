@@ -73,8 +73,10 @@ def install(E,P,b,start,integers):
     section('union')
     hook('FN.def1','LX.definition')
     section('record')
-    from librarytypes import install as type_install
-    type_install(E,P,b,integers,UNION)
+    import assemble, gen2
+    assemble.run(root/'librarytypes-manifest.tsv',E,P,{},dict({'b_'+k:v for k,v in b.items() if type(v) is int},
+        isize=next(size for name,code,size,uns,narrow in integers if name=='i32'),
+        ints=[{'code':code,'size':size,'uns':int(uns)} for _,code,size,uns,_ in integers],E_ARR=E.ARR,gen2_DIM=gen2.DIM))
     # Import prototypes serialize through the same descriptor path. Names are
     # already-owned blobs; parser source offsets no longer need remain active.
     section('signature')
