@@ -71,3 +71,9 @@ def executor():
     tokens(E)
     assert "TN.raw" not in E.g.st
     return E
+
+
+def check(E):
+    """exec/build/gen.py base hook after the run: a procedure/label defined twice merges two states silently."""
+    t = twice()
+    assert not t, "defined twice: %r" % t

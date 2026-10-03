@@ -6,6 +6,7 @@ Runs exec/STAGE/gen-manifest.tsv (or exec/STAGE-manifest.tsv for STAGE = stage/s
 Manifest header lines read here:
   #! base PATH            executor module (relative to exec/), loaded as E
                           (if it defines executor(), E = E.executor())
+                          (if it defines check(E), it is called after the run)
   #! flags A B C          accepted --A/--B/--C; each becomes flags[A]=True/False
   #! start NAME           start state (default START)
   #! graph CLASS          E.g = E.CLASS() (a base without its own g/P, e.g. build/graph.py)
@@ -42,6 +43,7 @@ if len(args) != len(set(args)) or any(not a.startswith("--") or a[2:] not in nam
 spec = importlib.util.spec_from_file_location(stage.replace("/", "_") + "base", ROOT / "exec" / head["base"][0])
 E = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(E)
+BASE = E
 if hasattr(E, "executor"):   # a base that wraps another executor module returns it (build/parse2base.py)
     E = E.executor()
 if "graph" in head:
@@ -52,6 +54,8 @@ E.results = {}
 env = assemble.Run(E, E.P, {n: "--" + n in args for n in names}, E.results).run(man)
 start = head.get('start', ['START'])[0]
 start = env[start[1:]] if start.startswith('$') else start
+if hasattr(BASE, "check"):   # base hook after the run (build/parse2base.py: no name defined twice)
+    BASE.check(E)
 if "domains" in head:
     s = head["domains"][0]
     E.g.finish(start, {r["mode"]: r["values"] for r in assemble.load_facts(s)[s]})

@@ -729,3 +729,8 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   libraryimportscheck (gen2.build -> subprocess gen.py parse2 or parse2base.executor()+assemble.run), graphhash.tsv
   rows 43-50 re-key, tests/graphhash.py:35, formats.md:78, parse/gen.py:245 message, tests/k2gen/* (archive), then
   delete gen2.py; then task C (strings/unresolved/truth per /tmp/cdx23-handoff.txt).
+- Round 53b (coordinator ruling: keep twice, drop sizes). gen.py: a base module defining check(E) is called after the
+  run (BASE kept before the executor() swap); parse2base.check(E) asserts twice() empty. sizes not printed (ruled).
+  sha SAME after this change (actually run, serial, bound 58): 32fb8e3c / 7ea0e979 / 3a7edf34 / a4c6fa73 /
+  units 6fc8d7f5 / units --locations 0137a215. Still NOT run: graphhash of all gen.py stages -- first thing next
+  round (serial), then B and C.
