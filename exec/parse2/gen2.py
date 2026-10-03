@@ -924,8 +924,7 @@ def build(locations=False, warnings=False, errors=False):
     from layoutfacts import install as layoutfacts_install
     start = layoutfacts_install(E, P, {name: globals()[name] for name in
         ('SBB','MBS','MPT','MAR','MOF','BFW','MSZ','BFO','BFS','SHAPE_IDS','SHAPE')}, start)
-    from valueranks import install as valueranks_install
-    valueranks_install(E,P,dict(FPS_FN=FPS_FN,FPS_RB=FPS_RB,MBS=MBS,DBL=DBL,FLT=FLT))
+    assemble.run(Path(__file__).parent / 'valueranks-manifest.tsv', E, P, _flags, dict())   # K2: valueranks
     from layoutprovenance import parser as source_provenance
     start = source_provenance(E, P, start)
     from parenfold import install as parenfold_install
