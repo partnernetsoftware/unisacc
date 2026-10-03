@@ -243,9 +243,9 @@ def build(image=False, object_mode=False):
         assert image == 'elf'
         from address import SYM, PRESENT
         from objectplan import install as install_objectplan
-        from x86object import install as install_x86object
+        import assemble
         install_objectplan(E, byte, OFF, LABD, SYM, PRESENT)
-        install_x86object(E, byte, OFF, LABD, KND, TGT, SYM, PRESENT)
+        assemble.run(os.path.join(HERE, 'x86object-manifest.tsv'), E, P, {}, dict(LABD=LABD, TGT=TGT))
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

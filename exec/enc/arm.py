@@ -142,8 +142,8 @@ def build(image=False, object_mode=False):
         from objectplan import install as install_objectplan
         install_objectplan(E, _enc.byte, 0, LABELS, SYM, PRESENT,
                            arch='arm64', direct_labels=True)
-        from armobject import install as install_armobject
-        install_armobject(E, word)
+        from objectplan import OBJ_RELOCS
+        assemble.run(here/'armobject-manifest.tsv', E, P, {}, dict(OBJ_RELOCS=OBJ_RELOCS, LABELS=LABELS))
     contract(section='fail', sequences={'reject': E.rej('not covered: ARM64 operand or instruction')})
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}

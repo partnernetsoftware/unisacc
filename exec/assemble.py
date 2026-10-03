@@ -238,6 +238,10 @@ class Run:
         if not _when(when, self.flags, facts):
             return
         o = {} if opts in ("", "-") else json.loads(opts)
+        for k, v in o.get("let", {}).items():
+            facts[k] = [self.value(x, facts) for x in v] if isinstance(v, list) else self.value(v, facts)
+        if stem.startswith("@"):
+            stem = self.value(stem, facts)
         if op == "foreach":
             self.foreach(o, body, depth, extra, facts)
             return
@@ -286,6 +290,8 @@ class Run:
             g.labels.update(stem.split(","))
         elif op == "assert-absent":
             assert stem not in g.st, stem
+        elif op == "assert-present":
+            assert stem in g.st, stem
         elif op == "holder":
             k, _, name = fresh.partition(":")
             self.holders[stem] = self.P(name) if k == "P" else self.holder(name or stem)
@@ -312,6 +318,8 @@ def run(manifest, E, P, flags, env=None):
 #   freshrows [{"over": PATH, "key": FMT, "owner": FMT, "kind": FMT, "where": {col: FMT}}]
 #   allocate E.P(owner).fresh(kind) per row in row order ({i} = row index),
 #   accumulate NAME  (bindings persist across rows sharing NAME).
+# opts let {NAME: VALUE | [VALUE...]} adds facts for this row (e.g. template facts);
+# a stem starting with `@` is a value (`@fmt:...`); op assert-present STATE.
 # value forms: @fmt:FMT (str.format over facts), @acts:PATH (json list -> tuples).
 
 def _headerform(path):
