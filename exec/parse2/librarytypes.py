@@ -1,7 +1,11 @@
 """USLSIG2 recursive layout serializer, executed as ordinary delta actions.
 No host classification. Ordered member facts are the parser's actual layout.
 """
-FRAME = 80 << 40
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('librarytypes'))
 
 def install(E,P,b,integers,union_bank):
     regs=('d_depth','d_base','d_shape','d_array','d_arraybytes','d_class','d_width',

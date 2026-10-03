@@ -3,10 +3,11 @@ No host parser or signature guess. Default tape is unchanged. Metadata is a
 length-framed outer envelope; prune/lower see only its separated tape payload.
 """
 from pathlib import Path
-RECORDS, SEEN, VARIADIC, PARAMMARK, PARAMDEPTH, PARAMBASE, PARAMSHAPE, UNION = (i << 40 for i in range(72,80))
-SIGEPOCH = 81 << 40
-TYPERANK,MEMBERRANK,RETURNRANK,PARAMRANK,PREVEPOCH,PREVRETURN,RETURNPENDING=(i<<40 for i in range(640,647))
-RANK_BANKS=(TYPERANK,MEMBERRANK,RETURNRANK,PARAMRANK,PREVEPOCH,PREVRETURN,RETURNPENDING)
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('libraryexports'))
 
 def install(E,P,b,start,integers):
     from modelinput import u64

@@ -5,12 +5,11 @@ Candidate origins are selected by modelcandidates. Structural wire checks run
 before source parsing; support and ABI checks apply only to referenced externals.
 """
 from pathlib import Path
-NAMES, IDS, ADDRESS, ARGC, DESC, SEEN = (i << 40 for i in range(180,186))
-KIND, EXTENT, WRITABLE = (i << 40 for i in range(190,193))
-VARIADIC, SUPPORTED, USED = (i << 40 for i in range(310,313))
-STRIDE = 6150
-FORMAT, TYPEDSIG, DISPATCH, PLAN, CANON, RETKIND, RETWIDTH = (i << 40 for i in range(322,329))
-BYNAME = 329 << 40
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('libraryimports'))
 
 def install(E,P,b,start,integers):
     """Stage control lives in libraryimports-result.tsv / -byte.tsv (sections head, parse,

@@ -2,10 +2,12 @@
 Disabled resource follows the exact old states. Handles never use raw callr.
 SCRIPT/NATIVE origin is selected after final source definitions are known.
 """
-SIGKEY,SIGLIST,FNSEEN,FNNAME,FNSIG,FNID=(i<<40 for i in range(440,446))
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('librarycallables'))
 assert not set(range(440,446)) & (set(range(72,83))|set(range(300,358))|set(range(400,438)))
-SITE_SIG,SITE_KEY,SITE_FIXED,SITE_COUNT,SITE_DEPTH,SITE_BASE,SITE_SHAPE=(i<<40 for i in range(460,467))
-ALIASID,ALIASKEY,ALIASPLAN,ALIASRAW,ALIASEXTERNAL,CATALOGBLOB=(i<<40 for i in range(700,706))
 def install(E,P,b,start):
  from libraryexports import RETURNRANK, PARAMRANK
  from valueranks import LCSITERANK

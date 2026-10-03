@@ -11,7 +11,11 @@ import json
 from pathlib import Path
 from finite_rules import install as install_rules, load as load_rules
 
-A, D = 30 << 40, 31 << 40
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('floatconst'))
 
 
 def rows(name):

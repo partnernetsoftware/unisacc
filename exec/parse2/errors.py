@@ -4,7 +4,11 @@ keep their explicit reason, gain a position, and stop without recovery. Recovery
 scope, never its emitted tape (a nonzero error count prevents publication).
 """
 from tokenlocations import TOKEN_POS
-NAMES=50<<40
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('errors'))
 
 
 def install(E,P,warnings=False):

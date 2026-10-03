@@ -4,13 +4,11 @@ Enabled by explicit u64 \\0library/layoutfacts=1 or library symbols presence.
 Entry key = sid*128+ordinal; count/union/flatten/seen are keyed only by sid.
 """
 import sys
-COUNT,KIND,BASE,DEPTH,ARRAY,OFFSET,BITOFFSET,BITWIDTH,STORAGE,ALIGN,CHILD,MEMBER,SHAPE,SIGNED,UNION,FLATTEN,SEEN=(i<<40 for i in range(600,617))
-RESERVED_BANKS=tuple(i<<40 for i in range(600,620))
-ENTRY_STRIDE=128
-RECORD_LIMIT=128
-ENTRY_LIMIT=128
-ORDINARY,NAMED_BITFIELD,ANONYMOUS_BITFIELD,ZERO_WIDTH_BARRIER,ANONYMOUS_AGGREGATE=range(5)
-ENTRY_FIELDS=(('kind',KIND),('base',BASE),('depth',DEPTH),('array',ARRAY),('offset',OFFSET),('bitoffset',BITOFFSET),('bitwidth',BITWIDTH),('storage',STORAGE),('align',ALIGN),('child',CHILD),('member',MEMBER),('shape',SHAPE),('signed',SIGNED))
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('layoutfacts'))
 def entry_key(sid,ordinal):
  assert 1<=sid<=RECORD_LIMIT and 0<=ordinal<ENTRY_LIMIT
  return sid*ENTRY_STRIDE+ordinal

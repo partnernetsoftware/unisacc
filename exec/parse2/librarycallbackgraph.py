@@ -2,7 +2,11 @@
 Record-local first traversal IDs are registered before child descriptors.
 Only signature declaration facts are consumed; no callable bridge is claimed.
 """
-SIGWIREID,SIGWIREMARK,SIGFRAME=(i<<40 for i in range(420,423))
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('librarycallbackgraph'))
 assert not set(range(420,423)) & (set(range(72,83))|set(range(300,358))|set(range(400,414))|set(range(430,438)))
 def install(E,P,b,frame):
  import libraryexports

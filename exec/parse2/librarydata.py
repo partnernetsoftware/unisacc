@@ -1,8 +1,11 @@
 """Borrowed writable scalar data: declaration facts and address selection in δ.
 Only resource-enabled externs get deferred addresses; real definitions win later.
 """
-EXTERN, DEPTH, BASE, SHAPE = (i << 40 for i in range(193,197))
-USED = 197 << 40
+import sys as _s,pathlib as _p
+_s.path.insert(0,str(_p.Path(__file__).parents[1]/'facts'))
+from load import facts as _facts
+_t=lambda v:tuple(map(_t,v)) if isinstance(v,list) else v
+globals().update((_r['name'],_t(_r['value'])) for _r in _facts('librarydata'))
 
 class _Holder:
     def __init__(self,cur):self.cur=cur
