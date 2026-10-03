@@ -214,3 +214,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   containing `git` with loops/heredocs — put Python in .k2tmp/*.py files.
 - json facts are written raw (assemble json.loads without unescape); str facts are escaped.
 - Recorder guards: direct graph writes (g.on/state/seq outside finite_rules) and nested stage-module installs refuse.
+
+- Round 18 (finish-parse2 round 1): shape_control -> exec/parse2/shape-manifest.tsv (env shape_section; facts k2-gen2
+  shapeconst/shapeseqs/shapeclasses from export.py; labels via freshrows holder over shape-fresh.tsv). gen2.shape_control
+  is now a 3-line wrapper (membercontrol, cdx-owned, still receives it as a callback). sha SAME default +
+  --warnings --errors. Check tool: sh .k2tmp/one.sh [flags] (sha vs tests/graphhash.tsv). Next in build(): width_dispatch
+  /types() width loops, return_control/update_control (-> manifests like shape), conversions, scope/decl, then the
+  shape_control call sites become `call shape` rows; cdx calls (strings initializer, constexpr, membercontrol,
+  tokenlocations, layoutprovenance) stay Python until cdx exposes manifests -> blocks a single manifest.

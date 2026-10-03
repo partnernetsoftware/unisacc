@@ -658,12 +658,19 @@ def k2gen2():
                                    u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
     syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
     autonames = [dict(name=nm) for nm in G.E.autonames()]
+    shapeconst = {n: getattr(G, n) for n in ("POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE", "TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK")}
+    shapeconst.update(ARR=G.E.ARR, UNSIGNED_CHAR=G.UNS + 1)
+    shapeseqs = {n: acts(G.E.rej(r)) for n, r in G.tape_rows("shape-reject.tsv")}
+    for n, m, slots in G.tape_rows("shape-stack.tsv"):
+        shapeseqs[n] = acts(getattr(G.P("shape.facts"), m)(*slots.split(",")).acts)
+    shapeclasses = {n: [G.TK[t] for t in ts.split(",")] for n, ts in G.tape_rows("shape-tokens.tsv")}
     return ["=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
             "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
             "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
             "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
             "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
             "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(G.namespace_constants()), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
+            "=shapeconst\tjson\t" + dump(shapeconst), "=shapeseqs\tjson\t" + dump(shapeseqs), "=shapeclasses\tjson\t" + dump(shapeclasses),
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
@@ -722,7 +729,7 @@ def k2unitstokens():
 
 TABLES = [
     ("k2-units-tokens", ["exec/parse/gen.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
-    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/facts/export.py"], k2gen2),
+    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),

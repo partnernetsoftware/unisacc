@@ -334,22 +334,9 @@ def types():
 
 
 def shape_control(section):
-    bindings = {name: globals()[name] for name in
-                ("POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE", "TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK")}
-    bindings.update(ARR=E.ARR, UNSIGNED_CHAR=UNS + 1)
-    p = P("shape." + section)
-    for part, owner, kind, name in tape_rows("shape-fresh.tsv"):
-        if part == section:
-            p.cur = owner
-            bindings[name] = p.fresh(kind)
-    sequences = {name: E.rej(reason) for name, reason in tape_rows("shape-reject.tsv")}
-    for name, method, slots in tape_rows("shape-stack.tsv"):
-        p.acts = []
-        sequences[name] = getattr(p, method)(*slots.split(",")).acts
-    classes = {name: [TK[token] for token in tokens.split(",")]
-               for name, tokens in tape_rows("shape-tokens.tsv")}
-    install_rules(g, os.path.dirname(__file__), "shape", bindings=bindings,
-                  sequences=sequences, classes=classes, section=section)
+    """Shape descriptors: exec/parse2/shape-manifest.tsv (K2 sub-manifest; membercontrol still calls this)."""
+    import assemble
+    assemble.run(Path(__file__).resolve().parent / 'shape-manifest.tsv', E, P, {}, dict(shape_section=section))
 
 
 def structured_control(section, warnings, extra=None, sequence_bindings=None, export=False):
