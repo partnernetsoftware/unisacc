@@ -45,6 +45,21 @@
 - Next: nativeabi (+ordered.py), parse (base module for prune/lower/opt; its P class / tokenizer are the
   generic primitives -> exec/build/), pp, lex; then allow/ledger update and full graphhash + gates.
 
+## Round 3 (16:31-16:40)
+- nativeabi blocked on its shared Python installers: gen.py -> modelgraphequality.install -> modelsignature.install
+  (-> modelinput.u64). Done first: exec/modelsignature-manifest.tsv and exec/modelgraphequality-manifest.tsv
+  (root exec/, beside their tables; env fail), facts/model-banks (sigbanks/geqbanks = bank<<40, sigfresh/geqfresh)
+  from export.py modelbanks(); MS.return ret row is section `ret` of modelsignature-result.tsv. States identical
+  to the Python installers (.k2tmp/mgtest.py, same P.n start). The Python 'already installed' guards
+  (`'MS.canonical' in g.st`) are live-graph reads and are NOT in the manifests: callers must call once.
+  modelsignature.py/modelgraphequality.py stay (parse2 valueranks/libraryexports/libraryvariadic, modelcandidates use them).
+- decisionledger ops() now also scans exec/*-manifest.tsv.
+- Next: nativeabi gen-manifest: `call ../modelgraphequality` (bind fail=@str:DEAD), the regions assert (drop: export-time),
+  rules.tsv-derived facts (trie T, recipes A, extents/alignments classes, ordered `@` sequences built by field())
+  via an export.py producer, freshrows from gen-fresh.tsv (owner {prefix}.fresh) / ordered-fresh.tsv (owner OL.fresh),
+  templates reject/trie/union16 and ordered header/write (fresh P:OL.recipeheader / P:OL.recipewrite / P:NC.fresh);
+  then parse, pp, lex, primitives -> exec/build/, rebase onto origin/main, full graphhash + gates.
+
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
 - Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the

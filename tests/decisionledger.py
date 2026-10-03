@@ -78,7 +78,7 @@ def ops():
     """K2 table boundary (exec/k2-boundary.md): distinct manifest ops <= 12; no py/retarget op, no state: predicate."""
     root = pathlib.Path(__file__).resolve().parent.parent / 'exec'
     seen, bad = {}, []
-    for m in sorted(root.glob('*/*-manifest.tsv')):
+    for m in sorted(list(root.glob('*-manifest.tsv')) + list(root.glob('*/*-manifest.tsv'))):
         for n, ln in enumerate(m.read_text().split('\n'), 1):
             if not ln or ln.startswith('#'): continue
             f = ln.split('\t')
