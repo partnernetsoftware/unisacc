@@ -130,4 +130,27 @@ _sd = ([{"over": "tyrows", "acts": [["LDI", "t", "{t}"], ["LDI", "u", "{u}"], ["
 L.append("let\t-\t-\tfact:seg_startup-run\tk2-gen2\t-\t-\t-\t" + _d({"mapseq": {"startup_data": _sd}}))
 L.append("call\tcontrol\t-\tfact:seg_startup-run\tk2-gen2\t-\t-\tcontrol_section=@str:startup-run,statement=@str:STMT,control_export=@str:1,extra=extra,seqb=seqb\t"
          + _d({"let": {"extra": {}, "seqb": {"startup_data": "$startup_data", "startup_header": "@out:=HEADER"}}, "merge": True}))
+# function/global/local control: per section, fresh lets (file order) then control calls; mode rows gated by warnings
+def _tab(name):
+    ls = [l for l in (_R / name).read_text().split("\n") if l and not l.startswith("#")]
+    return [l.split("\t") for l in ls[1:]]
+_NSC = {"function": ["PIDS", "PDB", "LOC", "FND", "FRD", "FRB", "VAR"] + ["FN_PDB%d" % i for i in range(16)],
+        "global": ["LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS", "FND", "GMARK", "BASE", "ARR", "PTR"],
+        "local": ["SKIPS", "PTR", "BASE"]}
+for ns in ("function", "global", "local"):
+    fr, secs = _tab(ns + "-fresh.tsv"), _tab(ns + "-sections.tsv")
+    fk = "globals" if ns == "global" else ns
+    for sec in dict.fromkeys(r[0] for r in fr + secs):
+        for w, mode in (("&!warnings", "plain"), ("&warnings", "warnings")):
+            gate = "fact:seg_ns-%s-%s%s" % (ns, sec, w)
+            keys = []
+            for part, m, prefix, kind, key in fr:
+                if part == sec and m in ("common", mode):
+                    L.append("let\t-\t-\t%s\t-\t-\t-\t%s=fresh:P:%s.%s_%s:%s\t-" % (gate, key, prefix, ns, key, kind))
+                    keys.append(key)
+            extra = {n: "nsconst.%s.%s" % (fk, n) for n in _NSC[ns]}
+            extra.update({k: "$" + k for k in keys})
+            for owner, m, rules in secs:
+                if owner == sec and m in ("common", mode):
+                    cc(rules, extra, {}, gate)
 Path(__file__).resolve().parents[2].joinpath("exec/parse2/gen2-manifest.tsv").write_text("\n".join(L) + "\n")

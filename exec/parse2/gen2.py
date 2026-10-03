@@ -382,38 +382,34 @@ def ordinary_control(section, warnings, extra=None):
     return bindings
 
 
-def _namespace_control(namespace, section, warnings, bindings):
-    """Shared dispatch loop: function_control/global_control/local_control differ
-    only in their tsv prefix and starting bindings, not in this iteration shape."""
-    mode_ok = "warnings" if warnings else "plain"
-    for part, mode, prefix, kind, key in tape_rows(namespace + "-fresh.tsv"):
-        if part == section and mode in ("common", mode_ok):
-            bindings[key] = P(prefix + "." + namespace + "_" + key).fresh(kind)
+def namespace_constants():
+    """Layout constants the function/global/local control sections bind (facts k2-gen2 nsconst)."""
+    f = dict(PIDS=PIDS, PDB=PDB, LOC=LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
+    f.update(("FN_PDB" + str(i), PDB + i) for i in range(16))
+    g = {name: globals()[name] for name in ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
+    g.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
+    return dict(function=f, globals=g, local=dict(SKIPS=SKIPS, PTR=E.PTR, BASE=E.BASE))
+
+
+def _namespace_control(namespace, section, warnings):
+    """function/global/local control: gen2-manifest segment ns-NAMESPACE-SECTION (fresh lets + control calls)."""
+    env = segment("ns-%s-%s" % (namespace, section), warnings)
     if namespace == "global":   # named results for later stages (librarymodule): global-results.tsv
         for part, key, name in tape_rows("global-results.tsv"):
             if part == section:
-                E.__dict__.setdefault("results", {})[name] = bindings[key]
-    for owner, mode, rules in tape_rows(namespace + "-sections.tsv"):
-        if owner == section and mode in ("common", mode_ok):
-            structured_control(rules, False, bindings)
+                E.__dict__.setdefault("results", {})[name] = env[key]
 
 
 def function_control(section, warnings):
-    bindings = dict(PIDS=PIDS, PDB=PDB, LOC=LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
-    bindings.update(("FN_PDB" + str(i), PDB + i) for i in range(16))
-    _namespace_control("function", section, warnings, bindings)
+    _namespace_control("function", section, warnings)
 
 
 def global_control(section, warnings):
-    bindings = {name: globals()[name] for name in
-                ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
-    bindings.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
-    _namespace_control("global", section, warnings, bindings)
+    _namespace_control("global", section, warnings)
 
 
 def local_control(section, warnings):
-    bindings = dict(SKIPS=SKIPS, PTR=E.PTR, BASE=E.BASE)
-    _namespace_control("local", section, warnings, bindings)
+    _namespace_control("local", section, warnings)
 
 
 def return_control(section, extra=None):
