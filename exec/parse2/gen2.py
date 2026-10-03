@@ -457,24 +457,15 @@ def build(locations=False, warnings=False, errors=False):
     local_control("local6", warnings)
     assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_localdecl=1))
     local_control("local8", warnings)
-    return_control("ret0")
+    segment("ret0")
     return_control("ret1", dict(addr_end=addr(P("S.rs3")).cur))
     segment("if-loops", warnings)
-    return_control("expr0")
-    segment("ret-update")
-    return_control("qt0")
+    segment("ret-expr")
+    segment("ret-qt0")
     import assemble   # K2 trace translation: conditional-manifest.tsv
     assemble.run(Path(__file__).parent / 'conditional-manifest.tsv', E, P,
                  dict(locations=locations, warnings=warnings, errors=errors), dict(enum_values=ENV, enum_defined=END_))
-    return_control("qt1")
-    for label,cv,base in (("double","d",DBL),("single","s",FLT)):
-        return_control("floating", dict(float_entry="QT."+label,float_convert="TO."+cv,result_base=base))
-    return_control("qt2")
-    current="QT.scalar"
-    for _,code,*_ in TYINT:
-        b=return_control("integer", dict(integer_current=current,integer_code=code))
-        current=b["f92"]
-    return_control("qt3", dict(integer_end=current))
+    segment("ret-qt")
     b=update_control("id0")
     update_control("id1",dict(address_end=addr(P(b["f3"])).cur))
     assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_conv=1))

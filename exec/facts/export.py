@@ -764,7 +764,7 @@ def k2gen2():
             "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(G.namespace_constants()), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
             "=shapeconst\tjson\t" + dump(shapeconst), "=shapeseqs\tjson\t" + dump(shapeseqs), "=shapeclasses\tjson\t" + dump(shapeclasses),
             "=retconst\tjson\t" + dump(retconst), "=retseqs\tjson\t" + dump(retseqs), "=retclasses\tjson\t" + dump(retclasses),
-            "=retexpr0\tjson\t" + dump(retexpr0), "=retcompound\tjson\t" + dump(retcompound),
+            "=retexpr0\tjson\t" + dump(retexpr0), "=retint\tjson\t" + dump([dict(code=c) for _, c, *_ in G.TYINT]), "=retfloat\tjson\t" + dump([dict(label=l, cv=v, base=b) for l, v, b in (("double", "d", G.DBL), ("single", "s", G.FLT))]), "=retcompound\tjson\t" + dump(retcompound),
             "=updconst\tjson\t" + dump(updconst), "=updseqs\tjson\t" + dump(updseqs), "=updclasses\tjson\t" + dump(updclasses),
             "=updtmpl\tjson\t" + dump(updtmpl), "=updop\tjson\t" + dump(updop), "=updbool\tjson\t" + dump(updbool), "=updfp\tjson\t" + dump(updfp),
             "=updid0\tjson\t" + dump(updid0), "=updcompound\tjson\t" + dump(updcompound),
