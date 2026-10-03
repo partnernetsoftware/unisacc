@@ -265,3 +265,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   exec/build/gen.py, switch callers, delete gen2.py. Literal strings inside opts let must be `@str:` (bare = fact path).
   SCOPE (coordinator, 2026-10-03): this slice owns only exec/parse2/gen2.py and exec/parse/gen.py.
   librarymodule.py, librarycallables.py, libraryexports.py and unresolved.py belong to cdx: do not edit them.
+- Round 23: return_control("update") inc/dec loop -> gen2-manifest segment ret-update (2 `call return` rows; int env via
+  let literal `"rd":0` bound as ret_dispatch=rd, since "@str:0" would be a truthy string). sha SAME default +
+  --warnings --errors, export --check 0 differ. First `call return` rows: same pattern converts the other
+  return_control/update_control sites (ret0/qt*/floating loop; addr()-dependent sites need addr as a sub-manifest first).
+  Tools recreated in .k2tmp/ (uncommitted): one.sh (sha one mode), chk.sh (export + both modes + --check).
+  Always rerun export.py after editing gen2.py and commit facts/k2-gen2.tsv too (header hashes gen2.py).

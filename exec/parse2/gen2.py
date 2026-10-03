@@ -461,8 +461,7 @@ def build(locations=False, warnings=False, errors=False):
     return_control("ret1", dict(addr_end=addr(P("S.rs3")).cur))
     segment("if-loops", warnings)
     return_control("expr0")
-    for name,op in (("inc","+"),("dec","-")):
-        return_control("update", dict(update_entry="LP."+name,update_target="POST."+op))
+    segment("ret-update")
     return_control("qt0")
     import assemble   # K2 trace translation: conditional-manifest.tsv
     assemble.run(Path(__file__).parent / 'conditional-manifest.tsv', E, P,
