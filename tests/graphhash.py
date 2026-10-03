@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Golden hashes of every stage generator x every mode flag it honours (K2 step 0).
+
+Each entry runs `python3 GEN OUT ARGS...` with PYTHONHASHSEED=0 under
+tests/bound.py 55 and records sha256(OUT).  Test infrastructure only.
+
+  python3 tests/graphhash.py [--only DIR]...           compare with tests/graphhash.tsv
+  python3 tests/graphhash.py --write [--only DIR]...   (re)record those entries
+  python3 tests/graphhash.py --list
+At most 3 generators run at once.  Exit 0 all equal, 1 mismatch/failure.
+"""
+import hashlib, itertools, os, subprocess, sys, tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TSV = ROOT / 'tests' / 'graphhash.tsv'
+
+
+def _entries():
+    e = []
+    add = lambda gen, *args: e.append((gen, tuple(args)))
+    # pp: target positional, --locations, --shared-predefines
+    for t in ((), ('lnx/x86_64',), ('osx/arm64',), ('win/x86_64',)):
+        for f in ((), ('--locations',), ('--shared-predefines',), ('--locations', '--shared-predefines')):
+            add('exec/pp/gen.py', *(t + f))
+    # lex: --typed/--positions/--locations imply each other downwards; --sourcefacts; --check-declarations
+    for f in ((), ('--typed',), ('--positions',), ('--locations',), ('--sourcefacts',), ('--check-declarations',)):
+        add('exec/lex/gen.py', *f)
+    # parse2: warnings/errors imply locations; all 8 combinations are listed
+    for w, er, l in itertools.product((0, 1), repeat=3):
+        add('exec/parse2/gen2.py', *(['--warnings'] * w + ['--errors'] * er + ['--locations'] * l))
+    add('exec/parse2/units.py'); add('exec/parse2/units.py', '--locations')
+    add('exec/opt/gen.py', '1'); add('exec/opt/gen.py', '2')
+    add('exec/prune/gen.py'); add('exec/nativeabi/gen.py')
+    for os_ in ((), ('--osx',), ('--win',)):
+        for a in ((), ('--arm64',)):
+            add('exec/lower/gen.py', *(('--full',) + os_ + a))
+    add('exec/lower/gen.py')
+    add('exec/lower/gen.py', '--full', '--object'); add('exec/lower/gen.py', '--full', '--object', '--arm64')
+    for enc in ('exec/enc/gen.py', 'exec/enc/arm.py'):
+        for f in ((), ('--elf',), ('--macho',), ('--pe',), ('--object',)):
+            add(enc, *f)
+    return e
+
+
+def key(gen, args):
+    return gen + ' ' + ' '.join(args) if args else gen
+
+
+def run(gen, args, tmp):
+    out = Path(tmp) / (hashlib.sha1(key(gen, args).encode()).hexdigest() + '.json')
+    env = dict(os.environ, PYTHONHASHSEED='0')
+    p = subprocess.run([sys.executable, 'tests/bound.py', '55', sys.executable, gen, str(out), *args],
+                       cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if p.returncode or not out.exists():
+        return 'FAIL:%d:%s' % (p.returncode, p.stderr.decode(errors='replace').strip().splitlines()[-1:] or '')
+    h = hashlib.sha256(out.read_bytes()).hexdigest(); out.unlink()
+    return h
+
+
+def main(argv):
+    write = '--write' in argv
+    only = [argv[i + 1].rstrip('/') for i, a in enumerate(argv) if a == '--only']
+    ents = [x for x in _entries() if not only or any(x[0].startswith(d + '/') or x[0].startswith('exec/' + d.split('exec/')[-1] + '/') for d in only)]
+    if '--list' in argv:
+        for g, a in ents: print(key(g, a))
+        return 0
+    old = {}
+    if TSV.exists():
+        for ln in TSV.read_text().splitlines():
+            if ln and not ln.startswith('#'):
+                k, h = ln.split('\t'); old[k] = h
+    tmp = tempfile.mkdtemp(prefix='graphhash-', dir=os.environ.get('GRAPHHASH_TMP'))
+    with ThreadPoolExecutor(3) as ex:
+        res = dict(zip((key(*x) for x in ents), ex.map(lambda x: run(x[0], x[1], tmp), ents)))
+    bad = 0
+    for k, h in res.items():
+        if h.startswith('FAIL'):
+            bad += 1; print('FAIL\t' + k + '\t' + h)
+        elif not write and old.get(k) != h:
+            bad += 1; print('DIFF\t' + k + '\t' + str(old.get(k)) + ' -> ' + h)
+    if write and not bad:
+        old.update(res)
+        TSV.write_text('# tests/graphhash.py --write: sha256 of generator output, PYTHONHASHSEED=0\n'
+                       + ''.join('%s\t%s\n' % kv for kv in sorted(old.items())))
+    print('graphhash: %d entries, %d bad%s' % (len(res), bad, ' (written)' if write and not bad else ''))
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
