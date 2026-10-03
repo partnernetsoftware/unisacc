@@ -27,3 +27,18 @@
   producers must export names instead.
 - units.py -> exec/build/gen.py units + units/gen-manifest; callers: tests/graphhash.py lines 34, prepare.sh,
   exec/c/*, checks; re-record graphhash keys.
+
+## Round 2 (2026-10-03)
+- Gates finite-template + decision-ledger green (run with UNISACC_FFI_X86_PROVIDER=x via slot.sh).
+- @labels survey: the only users of "all labels as return domain" are G.finish's RET (exec/pp/gen.py:233,
+  generic graph primitive, parse/gen.py shares it) and errors-stack. So >=2 -> drafted assemble opts
+  `"domain": "@labels"` = sorted(g.labels)+["BOT"] (5 lines, script .k2tmp/vr/asm.py); reverted until
+  errors' manifest uses it (needs tests/decisionledger.allow line: converter-level label enumeration).
+- errors record (modes errors+locations, errors+warnings+locations; zsh: pass flags unquoted literally,
+  "$m" does not word-split): emit refuses "template fresh callback invoked (ER_b)": errors.py's
+  fresh(kind) splits OWNER_H into holder cur + kind. Fix: rewrite the errors template fresh kinds
+  as plain kinds per owner holder (`U:OWNER` fresh column per section) or make translator accept
+  `S:` split callbacks; also `groups` (reasons template return dict) drives the per-tag loop -> needs
+  result=+foreach over the returned tags. Also drop the g.st[tag] assert and the load_rules overlap assert.
+- Not started: valueranks importers -> facts (gen2.py:61,64,702 slots/VALUEBANK; librarycallables.py:13),
+  parenfold, unitmode, layoutprovenance, units entry.
