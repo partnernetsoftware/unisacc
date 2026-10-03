@@ -1,6 +1,6 @@
 """Shared narrow/wide string spans, initialization and code-point walks in TSV."""
 from pathlib import Path
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, install_template
 
 
 def rules(E, P, section, bindings=None, owner=None):
@@ -16,7 +16,7 @@ def rules(E, P, section, bindings=None, owner=None):
 
 
 def token_span(E, P):
-    del E.g.st['SPANSTR']
+    install_template(E.g, Path(__file__).parent, 'strings', {}, None, section='token_span_drop')
     rules(E, P, 'token_span')
 
 
@@ -35,9 +35,7 @@ def walk(E, P, esc, pre, body, done):
     # Only escape-map data is materialized here; digits/x retain their reserved forms.
     reserved = {int(byte) for line in Path(__file__).with_name('strings-escape-policy.tsv').read_text().splitlines()[1:]
                 for byte in line.split('\t')[1].split(',')}
-    for ch, value in esc.items():
-        if ord(ch) not in reserved:
-            for state, row in load_rules(Path(__file__).with_name('strings-byte.tsv'), {}, domain=[ord(ch)],
-                    bindings=dict(bindings, escape_value=value), section='walk_escape').items():
-                for byte, (target, actions) in row.items(): E.g.on(state, [byte], target, actions)
+    escape = [{'byte': ord(ch), 'value': value} for ch, value in esc.items() if ord(ch) not in reserved]
+    install_template(E.g, Path(__file__).parent, 'strings', {'escape': escape}, None, bindings=bindings,
+                     section='walk_escape', mode='b', domain=[e['byte'] for e in escape])
     rules(E, P, 'walk_tail', bindings, owner=pre.split('.')[0])
