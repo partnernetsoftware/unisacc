@@ -228,3 +228,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   table rows gated by env ret_dispatch/upd_dispatch; update mode words (op/name/suffix/postfix/prefixfix/integer/floating/
   bits, "" when absent) select @ref sequences (absent -> [] instead of missing; sha SAME). gen2 wrappers are 3-6 lines.
   Next: width_dispatch/types loops, conversion assign/convert/unsigned, scope/decl; then callers -> `call` rows.
+- Round 20: rebased onto c5b10e13 (export.py keeps both k2-units-tokens and k2-gen2; facts regenerated). width_dispatch ->
+  width-manifest.tsv (684c9fa4); types() store/narrow (8ea8bdf0) and build() element-size / NARU / assign conversions
+  (a1888ddb) -> widthparts-manifest.tsv rows gated by env part_*; TYINT loops are foreach chains (pre=hit, chain next,
+  body test) with accumulate bindings; sequences/consts in facts k2-gen2 widthd/widthparts. All sha SAME default +
+  --warnings --errors (one FAIL under load, rerun SAME). unresolved.py now belongs to cdx. Next: scope/decl
+  (scope-actions via load_rules -> facts), remaining inline install_rules/stage-edits in build(), then callers -> call rows.
