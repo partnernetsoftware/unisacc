@@ -24,7 +24,7 @@ def install(E,P,b,start):
  # run after fact capture unchanged).
  from modelinput import u64
  from pathlib import Path
- from finite_rules import install as rules
+ from finite_rules import install as rules, install_template
  g=E.g;root=Path(__file__).parent
  assert not set(RESERVED_BANKS).intersection(v for m in tuple(sys.modules.values()) if m is not None and m.__name__!=__name__ for v in vars(m).values() if type(v) is int and v>=1<<40)
  u64(E,'LF.resource',b'\0library/layoutfacts','lf_flag','lf_present','LF.fail')
@@ -40,8 +40,8 @@ def install(E,P,b,start):
   rules(g,root,'layoutfacts',bindings,None,None,name)
  section('s1')
  for part,state in (('s2','SB.go'),('s3','SB.memberput'),('s4','BF.padding'),('s5','SB.anonbegin'),('s6','SB.anonend')):
-  orig='LF.original.'+state;assert orig not in g.st
-  g.st[orig]=g.st.pop(state);g.labels.add(orig)
+  # hook: move state to LF.original.*, install the wrapper, re-enter via LF.entry.* (layoutfacts-template.tsv)
+  install_template(g,root,'layoutfacts',{'S':[state]},None,section='hook')
   section(part)
-  g.st[state]=g.st['LF.entry.'+state]
+  install_template(g,root,'layoutfacts',{'S':[state]},None,section='entry')
  return 'LF.start'
