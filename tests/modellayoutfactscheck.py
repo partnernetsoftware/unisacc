@@ -141,7 +141,7 @@ def main():
    cmd('cc','-w','-std=c99','-O2',t/'dump.c','-o',t/'dump')
    cmd('cc','-O2',ROOT/'exec/c/run.c','-o',t/'run')
    model=a.model or t/'e3.json'
-   if not a.model:cmd(sys.executable,ROOT/'exec/parse2/gen2.py',model)
+   if not a.model:cmd(sys.executable,ROOT/'exec/build/gen.py','parse2',model)
    d=json.loads(model.read_text())
    evidence['production_model_sha256']=hashlib.sha256(model.read_bytes()).hexdigest()
    original=load(d);test=instrument(d);m=t/'facts.json'

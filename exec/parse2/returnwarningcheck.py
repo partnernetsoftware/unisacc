@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
     source=source_text(R)
     (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
-    for name,script,flag in [('pp','build/gen.py','pp --locations'),('lex','build/gen.py','lex --locations'),('parse','parse2/gen2.py','--warnings'),('plain','parse2/gen2.py','--locations')]:
+    for name,script,flag in [('pp','build/gen.py','pp --locations'),('lex','build/gen.py','lex --locations'),('parse','build/gen.py','parse2 --warnings'),('plain','build/gen.py','parse2 --locations')]:
         call([sys.executable,R/'exec'/script,t/(name+'.json'),*flag.split()])
         call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
         call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])

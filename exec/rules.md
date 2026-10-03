@@ -56,7 +56,6 @@ exec/ 的构造器在构建时 import 以下 unisa/ 模块（19 个）：`unisa/
 
 | 调用点 | 文件 | 理由 |
 |---|---|---|
-| 11 | `exec/parse2/gen2.py` | cdx 暂存区中，待迁（0.0.23 K） |
 | 11 | `exec/parse/gen.py` | 未迁：经典 parse 阶段的 token 读取/格式化控制，待下一片 |
 | 10 | `exec/enc/hostbridge.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 9 | `exec/parse2/membercontrol.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |

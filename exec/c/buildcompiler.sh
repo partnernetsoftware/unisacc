@@ -52,7 +52,7 @@ shared() {
     for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
     b python3 exec/build/gen.py pp "$T/shared/e2.json" --shared-predefines
     b python3 exec/build/gen.py lex "$T/shared/e1.json" --typed
-    b python3 exec/parse2/gen2.py "$T/shared/e3.json"
+    b python3 exec/build/gen.py parse2 "$T/shared/e3.json"
     b python3 exec/build/gen.py opt "$T/shared/e4.json" --o2
     b python3 exec/build/gen.py opt "$T/shared/o1.json"
     b python3 exec/build/gen.py prune "$T/shared/prune.json"

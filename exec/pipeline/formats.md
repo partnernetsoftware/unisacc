@@ -75,7 +75,7 @@ record extents and splice positions before emitting anything. Declared lengths
 must fit nonnegative signed 32-bit input cursors. The lexer scans a bounded
 copy of the preprocessed text, so its offsets remain text-relative.
 
-`exec/parse2/gen2.py --locations` consumes tokens.locations. It retains the
+`exec/build/gen.py parse2 --locations` consumes tokens.locations. It retains the
 source text blob, forced/automatic line counts, splice offsets and include
 records for diagnostic use. It reads each token's position prefix before
 entering the ordinary token reader; parser token-buffer positions still point

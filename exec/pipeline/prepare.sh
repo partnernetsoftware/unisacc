@@ -9,7 +9,7 @@ R=$(pwd)
 b() { "$_BOUND" 60 "$@"; }
 b "${EXEC_CC:-cc}" -O2 -o "$OUT/run" exec/c/run.c
 b python3 exec/build/gen.py lex "$OUT/e1.json" --typed
-b python3 exec/parse2/gen2.py "$OUT/e3.json"
+b python3 exec/build/gen.py parse2 "$OUT/e3.json"
 b python3 exec/build/gen.py opt "$OUT/e4.json" --o2
 b python3 exec/build/gen.py prune "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac

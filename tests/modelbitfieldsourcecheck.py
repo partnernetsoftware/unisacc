@@ -23,7 +23,7 @@ def main():
    assert s.count(old)==1;s=s.replace(old,new);(t/'dump.c').write_bytes(s)
    cmd('cc','-w','-std=c99','-O2',t/'dump.c','-o',t/'dump');cmd('cc','-O2',ROOT/'exec/c/run.c','-o',t/'run')
    model=a.model or t/'e3.json'
-   if not a.model:cmd(sys.executable,ROOT/'exec/parse2/gen2.py',model)
+   if not a.model:cmd(sys.executable,ROOT/'exec/build/gen.py','parse2',model)
    evidence['model_sha256']=hashlib.sha256(model.read_bytes()).hexdigest()
    d=json.loads(model.read_text());loaded=load(d);cmd(sys.executable,ROOT/'exec/c/tbl.py',model,t/'e3.tbl');cmd(sys.executable,ROOT/'exec/c/net.py',t/'e3.tbl',t/'e3.net')
    evidence['full_domain']=cmd(t/'run','--check-net',t/'e3.tbl',t/'e3.net').decode().strip()

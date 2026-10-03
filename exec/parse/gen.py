@@ -242,4 +242,4 @@ def sizes(d):
 
 
 if __name__ == "__main__":
-    sys.exit("The retired E3 generator is no longer an entry point; use exec/parse2/gen2.py.")
+    sys.exit("The retired E3 generator is no longer an entry point; use exec/build/gen.py parse2.")

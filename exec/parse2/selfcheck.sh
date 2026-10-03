@@ -13,7 +13,7 @@ SELF="$T/unisacc-flat.c"
 b cc -O2 -o "$T/run" exec/c/run.c
 b python3 exec/build/gen.py pp "$T/pp.json" > "$T/gen.log" 2>&1
 b python3 exec/build/gen.py lex "$T/lex.json" --typed >> "$T/gen.log" 2>&1
-b python3 exec/parse2/gen2.py "$T/parse.json" >> "$T/gen.log" 2>&1
+b python3 exec/build/gen.py parse2 "$T/parse.json" >> "$T/gen.log" 2>&1
 for s in pp lex parse; do b python3 exec/c/tbl.py "$T/$s.json" "$T/$s.tbl"; done
 b "$T/run" "$T/pp.tbl" "$SELF" "$SELF" "$R/include" > "$T/pp"
 b "$T/run" "$T/lex.tbl" "$T/pp" "$SELF" > "$T/lex"

@@ -14,8 +14,8 @@ with tempfile.TemporaryDirectory(prefix='parse-locations-') as td:
     t=pathlib.Path(td)
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for name,script,flags in [('pp','build/gen.py',['pp','--locations']),('lex','build/gen.py',['lex','--locations']),
-                            ('typed','build/gen.py',['lex','--typed']),('parse','parse2/gen2.py',['--locations']),
-                            ('plain','parse2/gen2.py',[])]:
+                            ('typed','build/gen.py',['lex','--typed']),('parse','build/gen.py',['parse2','--locations']),
+                            ('plain','build/gen.py',['parse2'])]:
         call([sys.executable,R/'exec'/script,t/(name+'.json'),*flags])
         call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])
         call([sys.executable,R/'exec/c/net.py',t/(name+'.tbl'),t/(name+'.net')])

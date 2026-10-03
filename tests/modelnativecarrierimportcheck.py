@@ -33,7 +33,7 @@ def main():
    assert s.count(a)==1;s=s.replace(a,b);(t/'dump.c').write_bytes(s)
    cmd(ROOT/'tests/bound',20,'cc','-w','-std=c99','-O0',t/'dump.c','-o',dumper)
    cmd(ROOT/'tests/bound',20,'cc','-O2',ROOT/'exec/c/run.c','-o',runtime)
-   cmd(sys.executable,ROOT/'exec/parse2/gen2.py',model)
+   cmd(sys.executable,ROOT/'exec/build/gen.py','parse2',model)
   d=json.loads(model.read_text());loaded=load(d);tbl,net=t/'e3.tbl',t/'e3.net';cmd(sys.executable,ROOT/'exec/c/tbl.py',model,tbl);cmd(sys.executable,ROOT/'exec/c/net.py',tbl,net)
   full=cmd(runtime,'--check-net',tbl,net).decode().strip()
   route=t/'routes';route.write_text('parse\te3\ttokens\ttape\te3.net\n');rd=t/'resources';rd.mkdir();src,tok,pkg=t/'source.c',t/'tokens',t/'p'

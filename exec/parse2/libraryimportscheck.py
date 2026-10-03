@@ -6,7 +6,7 @@ import json,struct,sys,tempfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT/'exec/parse2'),str(ROOT/'exec/pp')]
-import gen2,sim
+import subprocess,sim
 U=lambda n:struct.pack('<Q',n)
 DESC=b''.join(U(n) for n in (0,0,0,1,8,0))
 TOKENS=b'type=long\nid=hostadd\n(\ntype=long\nid=a\n,\ntype=long\nid=b\n)\n;\ntype\nid=main\n(\ntype=void\n)\n{\nreturn\nid=hostadd\n(\nnum=10\n,\nnum=20\n)\n==\nnum=30\n?\nnum=0\n:\nnum=1\n;\n}\neof\n32 tokens\n'
@@ -15,7 +15,10 @@ def binding(desc=DESC,nargs=2,supported=1,kind=0,address=4096):
  return b'USBIND1\n'+U(1)+U(len(payload))+payload
 
 def build():
- return gen2.build()
+ with tempfile.TemporaryDirectory(prefix='libimports-') as td:
+  out=Path(td)/'parse.json'
+  subprocess.run([sys.executable,str(ROOT/'exec/build/gen.py'),'parse2',str(out)],check=True)
+  return json.loads(out.read_text())
 
 def check(delta):
  loaded=sim.load(delta)

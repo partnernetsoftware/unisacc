@@ -50,7 +50,7 @@ def _module(rel, name):
 
 def _gen2ns(tag):
     """The parse2 domain constants and helpers export.py derives facts from (was the module level of
-    exec/parse2/gen2.py; E = exec/parse/gen.py, P = parse2base.install(E), paths under exec/parse2)."""
+    exec/parse2/gen2.py (deleted); E = exec/parse/gen.py, P = parse2base.install(E), paths under exec/parse2)."""
     from types import SimpleNamespace
     import json
     import sys as _s, pathlib as _p

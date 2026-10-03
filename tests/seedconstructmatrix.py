@@ -16,7 +16,7 @@ TARGETS = ("lnx/arm64", "lnx/x86_64", "osx/arm64", "osx/x86_64", "win/arm64", "w
 SHARED = (
     ("e2", "exec/build/gen.py", ("pp", "--shared-predefines")),
     ("e1", "exec/build/gen.py", ("lex", "--typed")),
-    ("e3", "exec/parse2/gen2.py", ()),
+    ("e3", "exec/build/gen.py", ("parse2",)),
     ("e4", "exec/build/gen.py", ("opt", "--o2")),
     ("o1", "exec/build/gen.py", ("opt",)),
     ("prune", "exec/build/gen.py", ("prune",)),
@@ -26,9 +26,9 @@ FEATURES = (
     ("tokenpp", "exec/build/gen.py", ("pp", "--shared-predefines", "--no-autoinc")),
     ("tokenlex", "exec/build/gen.py", ("lex",)),
     ("warnlex", "exec/build/gen.py", ("lex", "--locations")),
-    ("warnparse", "exec/parse2/gen2.py", ("--warnings", "--errors")),
+    ("warnparse", "exec/build/gen.py", ("parse2", "--warnings", "--errors")),
     ("warnunits", "exec/parse2/units.py", ("--locations",)),
-    ("errorparse", "exec/parse2/gen2.py", ("--errors",)),
+    ("errorparse", "exec/build/gen.py", ("parse2", "--errors")),
     ("warnpp-shared", "exec/build/gen.py", ("pp", "--locations", "--shared-predefines")),
 )
 

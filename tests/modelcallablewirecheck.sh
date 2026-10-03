@@ -18,5 +18,5 @@ assert s.count(a)==1;s=s.replace(a,b);Path(sys.argv[2]).write_bytes(s)
 PYDUMP
 bound 20 cc -w -std=c99 -O0 "$T/dump.c" -o "$T/dump"
 bound 20 cc -O2 "$R/exec/c/run.c" -o "$T/run"
-bound 55 python3 "$R/exec/parse2/gen2.py" "$T/parse.json"   # gen2 alone is ~33 s
+bound 55 python3 "$R/exec/build/gen.py" parse2 "$T/parse.json"   # gen2 alone is ~33 s
 bound 55 python3 "$R/tests/modelcallablewirecheck.py" "$T/parse.json" "$T/run" "$T/dump"

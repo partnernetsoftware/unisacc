@@ -6,5 +6,5 @@ set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
-b python3 exec/parse2/gen2.py "$T/e3.json"
+b python3 exec/build/gen.py parse2 "$T/e3.json"
 b python3 exec/parse2/floatconstcheck.py "$T/e3.json" "$T/check"
