@@ -13,66 +13,41 @@ def install(E,P,b,frame,blob):
         g.st[old]=g.st.pop(name);g.labels.add(old)
         alias='L3.select.'+name
         P(alias).branch({3:v3},old,[('RLD','lx_wireversion')]);g.st[name]=g.st[alias]
-    def word(p,r):return p.a(('COPYW','lx_v',r)).call('LX.u64')
+    # Stage control lives in librarytypesv3-result.tsv / -byte.tsv (sections s0..s5);
+    # fresh labels are declared in librarytypesv3-fresh.tsv. Python binds only dynamic
+    # facts: layout-fact banks and limits (layoutfacts), MEMBERRANK, E.ARR, gen2.DIM, the
+    # parent's banks (b), and the parent's frame save/restore sequences. Residue: select
+    # (moves each V2 state aside behind a wire-version branch).
+    class _Scope:
+        a=E.P.a
+        def __init__(self,cur):self.cur=cur;self.acts=[]
+    from pathlib import Path
+    from finite_rules import install as rules
+    import libraryexports
+    root=Path(__file__).parent
+    bindings={'E.ARR':E.ARR,'gen2.DIM':gen2.DIM}
+    for prefix,mod in (('LF.',LF),('libraryexports.',libraryexports)):
+        for k,v in vars(mod).items():
+            if type(v) is int:bindings[prefix+k]=v
+    for k,v in b.items():
+        if type(v) is int:bindings['b.'+k]=v
+    def saved(op):
+        q=_Scope('L3');frame(q,op);return q.acts
+    sequences={'frame.STX':saved('STX'),'frame.LDX':saved('LDX')}
+    fresh=[l.split('\t') for l in (root/'librarytypesv3-fresh.tsv').read_text().splitlines()[1:]]
+    def section(name):
+        for part,key,kind in fresh:
+            if part==name:bindings[key]=E.P.fresh(_Scope(key.split('.')[0]),kind)
+        rules(g,root,'librarytypesv3',bindings,sequences,None,name)
     select('LTY.aggregatemembers','L3.aggregate')
-    # Shallow mode (pointee identity, one level): an aggregate pointee keeps its
-    # tag/width/alignment but emits no members; an incomplete one is class 6.
-    P('L3.aggregate').branch({1:'L3.shallowaggregate'},'L3.aggregateseen',[('CMPI','lx_shallow',1)])
-    P('L3.shallowaggregate').a(('LDX','d_seen','d_sid',LF.SEEN),('LDI','d_members',0)).branch({1:'LTY.arraycheck'},'L3.shallowunknown',[('CMPI','d_seen',1)])
-    P('L3.shallowunknown').a(('LDI','d_class',6),('LDI','d_width',0),('LDI','d_align',0),('LDI','d_tag',0)).goto('LTY.arraycheck')
-    P('L3.aggregateseen').a(('LDX','d_seen','d_sid',LF.SEEN)).branch({1:'L3.aggregatecount'},'LX.fail',[('CMPI','d_seen',1)])
-    P('L3.aggregatecount').a(('LDX','d_members','d_sid',LF.COUNT)).branch({2:'LX.fail'},'LTY.arraycheck',[('CMPI','d_members',LF.ENTRY_LIMIT)])
+    section('s0')
     select('LTY.struct','L3.struct')
-    p=P('L3.struct');word(p,'d_members').a(('LDI','d_i',0)).goto('L3.members')
-    P('L3.members').branch({0:'L3.member'},'LTY.out',[('CMP','d_i','d_members')])
-    p=P('L3.member').a(('A64I','mul','d_key','d_sid',LF.ENTRY_STRIDE),('A64','add','d_key','d_key','d_i'))
-    word(p,'d_i').a(('LDX','d_entrykind','d_key',LF.KIND),('OUTW','d_entrykind'))
-    for bank in (LF.ALIGN,LF.OFFSET,LF.BITOFFSET,LF.BITWIDTH,LF.STORAGE):
-        p.a(('LDX','lx_v','d_key',bank)).call('LX.u64')
-    frame(p,'STX')
-    p.a(('LDX','d_memberkey','d_key',LF.MEMBER),('LDX','lx_rank','d_memberkey',MEMBERRANK),('LDX','lx_depth','d_key',LF.DEPTH),('LDX','lx_base','d_key',LF.BASE),
-        ('LDX','lx_shape','d_key',LF.SHAPE),('LDX','lx_array','d_key',LF.ARRAY),
-        ('LDX','lx_arraybytes','d_key',LF.STORAGE),('LDI','lx_arraydimension',0),('LDI','lx_return',0)).call('LX.descriptor')
-    frame(p,'LDX').a(('ALUI','add','d_i','d_i',1)).goto('L3.members')
+    section('s1')
     select('LTY.array','L3.array')
-    # MAR is the product of dimensions. SHAPE owns rank and individual extents;
-    # preserve aggregate element topology even when LF.CHILD is nonzero.
-    P('L3.array').branch({1:'L3.flatarray'},'L3.shapearray',[('CMPI','d_shape',0)])
-    P('L3.flatarray').a(('COPYW','d_stride','d_width'),('COPYW','d_width','d_arraybytes'),('LDI','d_rank',0),('LDI','d_class',5),('LDI','d_tag',3)).goto('LTY.payload')
-    P('L3.shapearray').a(('LDX','d_rank','d_shape',E.ARR)).branch({2:'LX.fail'},'L3.shaperank',[('CMPI','d_rank',8)])
-    P('L3.shaperank').branch({0:'L3.shapedim'},'LX.fail',[('CMP','d_dim','d_rank')])
-    P('L3.shapedim').a(('A64I','mul','d_dimkey','d_shape',8),('A64','add','d_dimkey','d_dimkey','d_dim'),('LDX','d_array','d_dimkey',gen2.DIM)).branch({2:'L3.shapestride'},'LX.fail',[('CMPI','d_array',0)])
-    P('L3.shapestride').a(('COPYW','d_width','d_arraybytes'),('ALU','div','d_stride','d_width','d_array'),('LDI','d_class',5),('LDI','d_tag',3)).goto('LTY.payload')
+    section('s2')
     select('LTY.arraypayload','L3.arraypayload')
-    p=P('L3.arraypayload');word(p,'d_array');word(p,'d_stride')
-    frame(p,'STX')
-    p.a(('COPYW','lx_rank','d_fprank'),('COPYW','lx_depth','d_depth'),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),('COPYW','lx_arraybytes','d_stride'),('ALUI','add','lx_arraydimension','d_dim',1),('LDI','lx_array',0),('LDI','lx_return',0)).branch({0:'L3.arraymore'},'L3.arraychild',[('CMP','lx_arraydimension','d_rank')])
-    P('L3.arraymore').a(('LDI','lx_array',1)).goto('L3.arraychild')
-    p=P('L3.arraychild').call('LX.descriptor');frame(p,'LDX').goto('LTY.out')
-    # Pointer descriptors (data pointers, class 2) carry one shallow pointee
-    # descriptor under tag 5 in V3: scalars fully, aggregates as tag/extent, a
-    # further pointer level without its own pointee. No recursion, no cycles.
+    section('s3')
     select('LTY.payload','L3.payload')
-    P('L3.payload').branch({2:'L3.pointerpayload'},'L3.original.LTY.payload',[('RLD','d_class')])
-    P('L3.pointerpayload').branch({1:'L3.original.LTY.payload'},'L3.pointee',[('CMPI','lx_shallow',1)])
-    p=P('L3.pointee').a(('LDI','d_tag',5))
-    frame(p,'STX')
-    p.a(('LDI','lx_shallow',1),('ALUI','sub','lx_depth','d_depth',1),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),('COPYW','lx_rank','d_fprank'),
-        ('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
-    frame(p,'LDX').a(('LDI','lx_shallow',0)).goto('LTY.out')
+    section('s4')
     select('LTY.out','L3.out')
-    p=P('L3.out').a(('OCUT','d_payload','lx_zero'))
-    for r in ('d_depth','d_base','d_shape','d_class','d_width','d_unsigned','d_align'):word(p,r)
-    p.a(('LDI','d_format',0)).branch({1:'L3.fpformat'},'L3.nonfp',[('CMPI','d_class',3)])
-    P('L3.fpformat').a(('OUTW','d_fprank')).branch({4:'L3.fp32',8:'L3.fp64'},'LX.fail',[('RLD','d_width')])
-    P('L3.nonfp').a(('OUTW','lx_zero')).goto('L3.facts')
-    P('L3.fp32').a(('LDI','d_format',1)).goto('L3.facts')
-    P('L3.fp64').a(('LDI','d_format',2)).goto('L3.facts')
-    P('L3.facts').a(('OUTW','d_format')).branch({1:'L3.knowncheck'},'L3.unknownfacts',[('CMPI','sf3_status',1)])
-    # Complete stage provenance is about our storage policy, not system ABI.
-    # Unknown/incomplete types are never promoted solely by clean syntax.
-    P('L3.knowncheck').branch({6:'L3.unknownfacts'},'L3.knownfacts',[('RLD','d_class')])
-    P('L3.knownfacts').a(('COPYW','lx_v','d_align')).call('LX.u64').a(('OUTW','lx_zero'),('LDI','l3_known',3),('OUTW','l3_known'),('LDI','l3_origin',1),('OUTW','l3_origin')).goto('L3.factspayload')
-    P('L3.unknownfacts').a(('LDI','lx_v',0)).call('LX.u64').a(('OUTW','lx_zero'),('OUTW','lx_zero'),('OUTW','lx_zero')).goto('L3.factspayload')
-    p=P('L3.factspayload').a(('OUTW','d_tag'),('BLEN','lx_v','d_payload')).call('LX.u64')
-    blob(p,'d_payload').a(('OCUT','d_blob','lx_zero'));blob(p,'d_old');blob(p,'d_blob').a(('ALUI','sub','lx_recursion','lx_recursion',1)).ret()
+    section('s5')
