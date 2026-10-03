@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Independent SHA digest oracle; generated algorithm runs on both executors."""
 import hashlib,json,pathlib,subprocess,sys
-import arm,assemble
-E=arm.E
+import importlib.util
+ROOT=pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'exec'))
+import assemble
+# K2: exec/enc/arm.py is gone; load the same executor base the enc/arm manifest names (exec/build/gen.py loads it this way).
+_spec=importlib.util.spec_from_file_location('enc_armbase',ROOT/'exec'/'build'/'parsebase.py')
+E=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(E)
 assemble.run(pathlib.Path(__file__).with_name('sha256-manifest.tsv'),E,E.P,{})
 # Two calls on the same blob check per-call state reset and input restoration.
 E.P('START').a(('LDI','sh_zero',0),('XLEN','sh_end'),('BLOBSAVE','sh_blob','sh_zero','sh_end')).call('SHA256').call('SHA256').a(('ACCEPT',)).goto('DEAD')
