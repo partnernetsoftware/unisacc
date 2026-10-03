@@ -2,7 +2,7 @@
 No host compiler/encoder is called by this model generator.
 """
 from pathlib import Path
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, install_template
 from unisa.hostabi import ARM_FN, ARM_ARGV, ARM_BODY, X86_BODY, WIN_ARM_BODY, WIN_X86_BODY
 from unisa.catalog import REGMAP
 from unisa.emit_x86 import NUM
@@ -10,13 +10,9 @@ from unisa.emit_x86 import NUM
 
 def guard(E, entry, predicate, yes, accepted=(1,), no='HB.fail'):
     test=E.P(entry).fresh('b')
-    bindings=dict(entry=entry,test=test,yes=yes,no=no)
-    root=Path(__file__).parent
-    install_rules(E.g,root,'hostbridge',section='guard',bindings=bindings,sequences={'predicate':predicate})
-    for section,domain in [('guard-yes',accepted),('guard-no',set(range(257))-set(accepted))]:
-        rules=load_rules(root/'hostbridge-result.tsv',{},section=section,bindings=bindings,domain=domain)
-        for state,row in rules.items():
-            for key,(target,actions) in row.items():E.g.on(state,[key],target,actions,'r')
+    fact=dict(entry=entry,test=test,yes=yes,no=no,acc=','.join(map(str,sorted(accepted))))
+    install_template(E.g,Path(__file__).parent,'hostbridge',dict(g=[fact]),None,
+                     sequences={'predicate':predicate},section='guard')
 
 
 def install(E, arch, word=None):
@@ -42,40 +38,21 @@ def install(E, arch, word=None):
     u64(E,'HB.librarymunmap',b'\0library/munmap','hb_librarymunmap','hb_hasmunmap','HB.fail')
     guard(E,'HB.call.librarytarget',[('RLD','target_os')],'HB.call.libraryread',(1,3))
     install_rules(E.g,Path(__file__).parent,'hostbridge',section='library')
-    P('HB.fail').a(E.rej('not covered: foreign host ABI target or operands')).goto('DEAD')
-    p=P('HB.call.emit').a(('LDI','host_dyn',1))
-    if arch=='x86_64':
-        p.branch({1:'HB.call.emitwin'},'HB.call.emitposix',[('CMPI','target_os',3)])
-        p=P('HB.call.emitposix')
+    root=Path(__file__).parent
+    install_template(E.g,root,'hostbridge',{},None,sequences={'fail':E.rej('not covered: foreign host ABI target or operands')},section='fail')
     if arch=='arm64':
-        for base,arg in [(ARM_FN,'a0'),(ARM_ARGV,'a1')]:
-            p.a(('ALUI','shl','w',arg,16),('ALUI','or','w','w',base));word(p)
-        p.branch({1:'HB.call.armwin'},'HB.call.armposix',[('CMPI','target_os',3)])
-        p=P('HB.call.armposix')
-        for value in ARM_BODY:p.a(('LDI','w',value));word(p)
-        p.goto('LINE')
-        p=P('HB.call.armwin')
-        for value in WIN_ARM_BODY:p.a(('LDI','w',value));word(p)
-        p.goto('LINE')
-        p=P('HB.addr.emit').a(('LDI','host_dyn',1))
-        p.a(('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),
-            ('A64I','add','ad_v','ad_v',224)).call('AD.data').call('ADRP')
-        p.a(('ALUI','shl','w','a0',5),('ALU','or','w','w','a0'),('ALUI','or','w','w',0xF9400000))
-        word(p);p.goto('LINE')
+        bodies={'word':word(_Acts()).acts,
+                'body':[x for v in ARM_BODY for x in [('LDI','w',v)]+word(_Acts()).acts],
+                'winbody':[x for v in WIN_ARM_BODY for x in [('LDI','w',v)]+word(_Acts()).acts]}
+        install_template(E.g,root,'hostbridge',{},E.P('HB.call.emit').fresh,
+                         bindings=dict(armfn=ARM_FN,armargv=ARM_ARGV),sequences=bodies,section='arm')
     else:
-        for dest,arg in [(11,'a0'),(0,'a1')]:
-            p.a(('ALUI','sar','t',arg,3),('ALUI','shl','t','t',2),
-                ('ALUI','or','t','t',0x48|(dest>>3)),('OUTW','t'),('OUT',0x89),
-                ('ALUI','and','t',arg,7),('ALUI','shl','t','t',3),
-                ('ALUI','or','t','t',0xC0|(dest&7)),('OUTW','t'))
-        p.a([('OUT',b) for b in X86_BODY]).goto('NEXTL')
-        win=P('HB.call.emitwin')
-        # Operand prefix has no OS-specific rule; emit the identical moves.
-        for dest,arg in [(11,'a0'),(0,'a1')]:
-            win.a(('ALUI','sar','t',arg,3),('ALUI','shl','t','t',2),
-                ('ALUI','or','t','t',0x48|(dest>>3)),('OUTW','t'),('OUT',0x89),
-                ('ALUI','and','t',arg,7),('ALUI','shl','t','t',3),
-                ('ALUI','or','t','t',0xC0|(dest&7)),('OUTW','t'))
-        win.a([('OUT',b) for b in WIN_X86_BODY]).goto('NEXTL')
-        P('HB.addr.emit').a(('LDI','host_dyn',1),('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),
-            ('A64I','add','ad_v','ad_v',224),('LDI','ad_o',0x8B),('LDI','anamed',0)).goto('AD.store')
+        bodies={'body':[('OUT',b) for b in X86_BODY],'winbody':[('OUT',b) for b in WIN_X86_BODY]}
+        install_template(E.g,root,'hostbridge',{},E.P('HB.call.emit').fresh,sequences=bodies,section='x86')
+
+
+class _Acts:
+    """Collects the actions a word writer appends (no graph is touched)."""
+    def __init__(self): self.acts=[]
+    def a(self,*xs):
+        self.acts.extend(xs);return self
