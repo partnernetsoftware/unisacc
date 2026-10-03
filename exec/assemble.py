@@ -309,12 +309,6 @@ class Run:
                 raise SystemExit(o["exit"])
             self.env.update(bd or {})
             self.env.update(sq or {})
-        elif op == "py":   # TRANSITIONAL (K2 boundary forbids): only lower/code -> ../modelbindings (decoder manifest pending)
-            import importlib.util
-            sp = importlib.util.spec_from_file_location("k2py_" + stem.replace("/", "_").replace(".", "_"), self.root / (stem + ".py"))
-            mod = importlib.util.module_from_spec(sp)
-            sp.loader.exec_module(mod)
-            res = mod.install(self.E, **(bd or {}))
         elif op == "label":
             g.labels.update(stem.split(","))
         elif op == "assert-absent":
