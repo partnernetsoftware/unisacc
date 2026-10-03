@@ -27,6 +27,8 @@ _spec = importlib.util.spec_from_file_location(
 _bg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_bg)
 G = _bg.G
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "exec"))   # importers rely on these (were set by exec/pp/gen.py)
 
 
 def gold(name):
