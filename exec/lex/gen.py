@@ -42,7 +42,10 @@ sys.path.insert(0, ROOT)
 
 from pathlib import Path
 
-EOF = 256
+from exec.facts.load import facts  # noqa: E402
+
+_C = {r['name']: r['value'] for r in facts('lex-consts')}
+EOF = _C['EOF']
 _G = os.path.join(ROOT, "weights", "gold")
 # The token-ID contract is the declared parse/tok field order.
 _token_rows = [line.split("\t")[2:] for line in
@@ -278,8 +281,8 @@ def emit_kind(k, span=("S", None)):
     return acts + output_sequence("end")
 
 
-KID, KNUM, KSTR = 2, 3, 4
-ALLB = list(range(257))
+KID, KNUM, KSTR = _C['KID'], _C['KNUM'], _C['KSTR']
+ALLB = list(range(EOF + 1))
 
 head, LT = load_lex_table()
 CLASSES = sorted(set(c for c, _ in LT))
@@ -306,9 +309,9 @@ from finite_rules import load as load_byte_rules, install_template, prefix_facts
 KWKIND = {}
 for k, t in enumerate(TOKS):
     if isal(ord(t[0])):
-        KWKIND[t] = KID if k < 5 else k          # eof/type/id/num/str are token-class names
+        KWKIND[t] = KID if k < _C['CLASSNAMES'] else k          # eof/type/id/num/str are token-class names
 for t in TYPEKW:
-    KWKIND[t] = 1
+    KWKIND[t] = _C['TYPE']
 WORDS = set(KWKIND) | set(SKIPPAREN) | set(DROP) | set(CHARPFX) | set(STRPFX)
 IDROOT, IDPFX = prefix_facts(sorted(WORDS))
 OPROOT, OPPFX = prefix_facts([t if t in PUNCTS else None for t in TOKS])
@@ -383,14 +386,19 @@ def install_rules(filename, mode, domain, sequences=None, classes=None, skip=(),
 NUMEMIT = emit_kind(KNUM)  # character constants use the same token format
 
 install_section("dispatch")
-for filename, mode, domain in (("count-byte.tsv", "b", ALLB),
-                               ("count-result.tsv", "r", range(20)),
-                               ("count-stack.tsv", "t", ["BOT"] + ["D%d" % n for n in range(10)])):
-    install_rules(filename, mode, domain)
+def domain(v):
+    return range(v) if isinstance(v, int) else v
+
+
+def install_group(group):
+    for r in facts("lex-installs"):
+        if r["group"] == group:
+            install_rules(r["file"], r["mode"], domain(r["domain"]))
+
+
+install_group("count")
 install_section("ident")
-for filename, mode, domain in (("ident-byte.tsv", "b", ALLB),
-                               ("ident-stack.tsv", "t", ("BOT", "P"))):
-    install_rules(filename, mode, domain)
+install_group("ident")
 # entry action is inlined by dispatch, so NSTART is not installed
 install_rules("number.tsv", "b", ALLB, {"number": emit_kind(KNUM)}, skip=("NSTART",), in_domain_order=True)
 install_rules("literal.tsv", "b", ALLB,
@@ -406,9 +414,8 @@ if SOURCEFACTS:
     START = install_sourcefacts(D, START, FACTS)
 
 # ---- totality: every state total over what it reads -------------------------
-GAMMA = ["BOT", "P"] + ["D%d" % d for d in range(10)]
-RDOM = list(range(20))
-DOM = {"b": ALLB, "t": GAMMA, "r": RDOM}
+DOM = {r["mode"]: list(domain(r["values"])) for r in facts("lex-domains")}
+GAMMA, RDOM = DOM["t"], DOM["r"]
 # a state some transition names must exist
 named = set(nx for _, (m, row) in D.states.items() for nx, _ in row.values())
 named.discard("HALT")

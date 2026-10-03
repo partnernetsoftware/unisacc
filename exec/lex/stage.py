@@ -20,7 +20,9 @@ sys.path.insert(0, ROOT)
 
 from unisa.gold import Stage                     # noqa: E402
 
-GAMMA = ["BOT", "P"] + ["D%d" % d for d in range(10)]
+from exec.facts.load import facts  # noqa: E402
+
+GAMMA = [r["values"] for r in facts("lex-domains") if r["mode"] == "t"][0]
 
 
 def stage(d):
