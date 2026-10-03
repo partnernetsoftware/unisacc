@@ -106,6 +106,8 @@ def _section(s, flags):
 #   `{NAME}` substitution from the row's facts/env (a literal comma is `\x2c`);
 # op `e`: call the executor primitive E.STEM() (no arguments), e.g. prn.
 def _out(text, facts):
+    if text.startswith("="):
+        return [("OUT", c) for c in str(_path(facts, text[1:])).encode()]
     t = re.sub(r"\{(\w+)\}", lambda m: str(facts[m.group(1)]), text)
     t = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), t)
     t = _cell("str", t)
@@ -191,6 +193,14 @@ class Run:
             return self.seqmap(*v[8:].rsplit(":", 1), facts=facts)
         if v.startswith("@acts:"):
             return [tuple(a) for a in _path(facts, v[6:])]
+        if v.startswith("@stack:"):
+            h, m, slots = v[7:].split(":", 2)
+            h = self.holders[h]
+            h.acts = []
+            return getattr(h, m)(*slots.split("+")).acts
+        if v.startswith("$$"):
+            d, _, k = v[2:].partition(":")
+            return self.env[d][k]
         if v.startswith("$"):
             return self.env[v[1:]]
         if v.startswith("fresh:"):
@@ -258,6 +268,10 @@ class Run:
             kw["classes"] = _path(facts, o["classes"])
         if "domain" in o:
             kw["domain"] = range(*o["domain"])
+        for k, v in o.get("classmap", {}).items():
+            kw["classes"] = dict(kw.get("classes") or {})
+            x = self.value(v, facts)
+            kw["classes"][k] = x if isinstance(x, list) else [x]
         facts.update(o.get("with", {}))
         res = None
         if op == "fresh":
@@ -420,6 +434,13 @@ def _header_facts(stem, path):
     d = {stem: rows}
     if rows and isinstance(rows[0], dict) and set(rows[0]) == {"name", "value"}:
         d[stem + "!"] = {r["name"]: r["value"] for r in rows}
+        for ln in path.read_text().split("\n")[1:]:
+            if ln and not ln.startswith("#"):
+                k, v = ln.split("\t")[:2]
+                try:
+                    d.setdefault(k, json.loads(v))
+                except ValueError:
+                    d.setdefault(k, v)
     return d
 
 
@@ -450,7 +471,7 @@ def _foreach(self, o, body, depth, extra, facts):
 def _bindings(self, o, bind, facts):
     acc = o.get("accumulate")
     out = dict(self.accum.setdefault(acc, {})) if acc else {}
-    if "bindmap" in o:
+    if isinstance(o.get("bindmap"), str):
         out.update(_path(facts, o["bindmap"]))
     for spec in o.get("freshrows", []):
         for i, r in enumerate(_path(facts, spec["over"])):
@@ -461,6 +482,8 @@ def _bindings(self, o, bind, facts):
     if cells is None and not out and not acc and "bindmap" not in o:
         return None
     out.update(cells or {})
+    if isinstance(o.get("bindmap"), dict):
+        out.update({k: self.value(v, facts) for k, v in o["bindmap"].items()})
     if acc:
         self.accum[acc] = out
     return out

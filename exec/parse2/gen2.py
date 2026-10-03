@@ -887,12 +887,12 @@ def build(locations=False, warnings=False, errors=False):
         diagnostic_install(E, P)
     if warnings:
         assert locations
-        from returnwarnings import install as return_warning_install
-        return_warning_install(E, P, SBB)
+        _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
+        assemble.run(Path(__file__).parent / 'returnwarnings-manifest.tsv', E, P, _flags, dict(_tokens, SBB=SBB))
         from intwarnings import install as int_warning_install
         int_warning_install(E, P, DBL, FLT, FPB, SBB)
-        from unusedwarnings import install as unused_warning_install
-        unused_warning_install(E, P, TIX, UNDO_SIZE)
+        assemble.run(Path(__file__).parent / 'unusedwarnings-manifest.tsv', E, P, _flags,
+                     dict(_tokens, TIX=TIX, UNDO_SIZE=UNDO_SIZE))
         from formatwarnings import install as format_warning_install
         format_warning_install(E, P, DBL, FLT, FPB, SBB)
     if errors:

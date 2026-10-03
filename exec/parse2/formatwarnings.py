@@ -3,7 +3,8 @@ The format scanner preserves the existing warning policy, not full printf
 validation. Conversion identity comes from bytes, never from emitted tape.
 """
 from tokenlocations import TOKEN_POS
-from unusedwarnings import NAME_TOKEN
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+NAME_TOKEN = {r['name']: r['value'] for r in facts('unusedwarnings')}['NAME_TOKEN']
 
 def install(E,P,DBL,FLT,FPB,SBB):
     import json
