@@ -152,11 +152,11 @@ def build(image=False, object_mode=False):
         install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True,image_format=image if image in ('macho','pe') else 'elf')
     if object_mode:
         from armlayout import SYM, PRESENT
-        from objectplan import install as install_objectplan
-        install_objectplan(E, _enc.byte, 0, LABELS, SYM, PRESENT,
-                           arch='arm64', direct_labels=True)
-        from objectplan import OBJ_RELOCS
-        assemble.run(here/'armobject-manifest.tsv', E, P, {}, dict(OBJ_RELOCS=OBJ_RELOCS, LABELS=LABELS))
+        import assemble
+        assemble.run(Path(__file__).parent/'objectplan-manifest.tsv', E, E.P, dict(direct_labels=True),
+                     dict(OFF=0, LABD=LABELS, SYM=SYM, PRESENT=PRESENT, arch='arm64'))
+        assemble.run(here/'armobject-manifest.tsv', E, P, {},
+                     dict(OBJ_RELOCS=assemble.load_facts('enc-objectplan')['OBJ_RELOCS'], LABELS=LABELS))
     contract(section='fail', sequences={'reject': E.rej('not covered: ARM64 operand or instruction')})
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}

@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from exec.pp.sim import run
-spec=importlib.util.spec_from_file_location("eo",ROOT/"exec/enc/elfobject.py")
-module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+sys.path.insert(0,str(ROOT/"exec"))
+import assemble
 
 
 def fixture(arch,tape,work,runtime,bad=None):
@@ -31,7 +31,8 @@ def fixture(arch,tape,work,runtime,bad=None):
     for k,v in regs.items():p.a(("LDI",k,v))
     for key,values in {"text":text,"data":data,"strings":strings,"tape":tape,"symbols":[v for row in symbols for v in row],"relocs":[v for row in rels for v in row]}.items():
         for i,v in enumerate(values):p.a(("LDI","i",i),("LDI","v",v),("STX","i",regions[key],"v"))
-    p.call(module.install(E,regions,arch)).goto("DONE")
+    assemble.run(ROOT/"exec/enc/elfobject-manifest.tsv",E,E.P,{},dict(regions,arch=arch))
+    p.call("EO.write").goto("DONE")
     E.P("DONE").a(("ACCEPT",)).goto("DONE")
     E.g.finish()
     delta={"start":"START","states":{k:[m,{str(kk):v for kk,v in row.items()}] for k,(m,row) in E.g.st.items()},"seqs":E.g.seqs}

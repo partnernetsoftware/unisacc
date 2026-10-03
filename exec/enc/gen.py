@@ -242,9 +242,9 @@ def build(image=False, object_mode=False):
     if object_mode:
         assert image == 'elf'
         from address import SYM, PRESENT
-        from objectplan import install as install_objectplan
         import assemble
-        install_objectplan(E, byte, OFF, LABD, SYM, PRESENT)
+        assemble.run(os.path.join(HERE, 'objectplan-manifest.tsv'), E, E.P, dict(direct_labels=False),
+                     dict(OFF=OFF, LABD=LABD, SYM=SYM, PRESENT=PRESENT, arch='x86_64'))
         assemble.run(os.path.join(HERE, 'x86object-manifest.tsv'), E, P, {}, dict(LABD=LABD, TGT=TGT))
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}

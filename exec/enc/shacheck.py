@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Independent SHA digest oracle; generated algorithm runs on both executors."""
 import hashlib,json,pathlib,subprocess,sys
-from sha256delta import install
-import arm
+import arm,assemble
 E=arm.E
-install(E)
+assemble.run(pathlib.Path(__file__).with_name('sha256-manifest.tsv'),E,E.P,{})
 # Two calls on the same blob check per-call state reset and input restoration.
 E.P('START').a(('LDI','sh_zero',0),('XLEN','sh_end'),('BLOBSAVE','sh_blob','sh_zero','sh_end')).call('SHA256').call('SHA256').a(('ACCEPT',)).goto('DEAD')
 E.g.finish()

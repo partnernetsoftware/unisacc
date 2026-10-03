@@ -4,12 +4,13 @@ Templates/constants follow unisa.image.macho; that writer is not called.
 """
 from unisa.image import macho as M
 from elfimage import DATA
-from sha256delta import install as install_sha
+from pathlib import Path as _Path
+import assemble
 
 
 def install(E,byte,arch):
     P,g=E.P,E.g
-    install_sha(E)
+    assemble.run(_Path(__file__).with_name('sha256-manifest.tsv'), E, P, {})
     from pathlib import Path
     from finite_rules import install as install_rules, load as load_rules
     mh_bindings = dict(DATA=DATA, HDRS=M.HDRS(arch), VMADDR=M.VMADDR, STRTAB=M.STRTAB,

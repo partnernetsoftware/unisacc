@@ -172,6 +172,7 @@ class Run:
         return labels.__getitem__
 
     def value(self, v, facts):
+        v = self.interp(v)
         if v.startswith("@rej:"):
             return self.E.rej(v[5:])
         if v.startswith("@bytes:"):
@@ -257,20 +258,26 @@ class Run:
             kw["classes"] = _path(facts, o["classes"])
         if "domain" in o:
             kw["domain"] = range(*o["domain"])
+        facts.update(o.get("with", {}))
         res = None
+        if op == "fresh":
+            return self.fresh_table(stem, o)
         bd = self.bindings(o, bind, facts)
         for k in o.get("export", []):
             self.env[k] = bd[k]
+        sq = self.cells(seq, facts)
+        if "mapseq" in o:
+            sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
         if op == "template":
             res = install_template(g, self.root, stem, facts, self.fresh(fresh),
-                                   bindings=bd, sequences=self.cells(seq, facts),
+                                   bindings=bd, sequences=sq,
                                    section=sec, mode=o.get("mode", "r"),
                                    overlay=o.get("overlay", False), **kw)
         elif op == "rows":
             res = install(g, self.root, stem, bindings=bd,
-                          sequences=self.cells(seq, facts), section=sec, **kw)
+                          sequences=sq, section=sec, **kw)
         elif op == "table":
-            res = install_rows(g, self.root / stem, self.cells(seq, facts),
+            res = install_rows(g, self.root / stem, sq,
                                bindings=bd, section=sec,
                                mode=o.get("mode", "r"), **kw)
         elif op == "call":
@@ -303,6 +310,64 @@ class Run:
             raise ValueError("manifest op " + op)
         if "result" in o:
             self.env[o["result"]] = res
+
+
+# --- K2 round 2, enc/objectplan slice: generic additions -------------------------
+# value  `{NAME}` inside a cell is replaced by str(env[NAME]) (only names in env);
+#        `@out:TEXT` is the OUT byte sequence of TEXT.
+# op     fresh: stem = TSV next to the manifest; opts {"cols": [key, kind, owner]
+#        column indices, "where": [[col, value], ...] (optional), "scope": "P" | "U",
+#        "owner": format over {owner} {key} (optional)}; allocates one label per
+#        selected row in row order and stores it in env[key].
+# opts   with: literal JSON dict merged into the facts of this row.
+#        mapseq: {SEQ: [{"over": factpath, "acts": [[...], ...]}, ...]} builds
+#        sequence SEQ by instantiating each act per element: a cell "{f}" is the
+#        element's field f, "$N" a bind/env/fact value, other text formatted
+#        with the element's fields.
+def _interp_impl(self, v):
+    return re.sub(r"\{(\w+)\}", lambda m: str(self.env[m.group(1)]) if m.group(1) in self.env else m.group(0), v)
+
+
+def _fresh_table(self, stem, o):
+    ki, kd, ko = o["cols"]
+    w = o.get("where", [])
+    for ln in (self.root / stem).read_text().split("\n"):
+        f = ln.split("\t")
+        if not ln or ln.startswith("#") or any(f[c] != v for c, v in w):
+            continue
+        owner = o.get("owner", "{owner}").format(owner=f[ko], key=f[ki])
+        if o.get("scope", "U") == "P":
+            self.env[f[ki]] = self.P(owner).fresh(f[kd])
+        else:
+            self.env[f[ki]] = self.E.P.fresh(self.holder(owner), f[kd])
+
+
+def _mapseq(self, spec, facts, bd):
+    out = {}
+    for name, parts in spec.items():
+        acts = []
+        for part in parts:
+            for x in _path(facts, part["over"]):
+                for a in part["acts"]:
+                    t = []
+                    for c in a:
+                        m = re.fullmatch(r"\{(\w+)\}", c) if isinstance(c, str) else None
+                        if m:
+                            t.append(x[m.group(1)])
+                        elif isinstance(c, str) and c.startswith("$"):
+                            n = c[1:]
+                            t.append((bd or {})[n] if n in (bd or {}) else self.env[n] if n in self.env else facts[n])
+                        elif isinstance(c, str):
+                            t.append(c.format(**x))
+                        else:
+                            t.append(c)
+                    acts.append(tuple(t))
+        out[name] = acts
+    return out
+
+
+Run.interp, Run.fresh_table, Run.mapseq = _interp_impl, _fresh_table, _mapseq
+# --- end K2 round 2 enc/objectplan slice ---------------------------------------
 
 
 def run(manifest, E, P, flags, env=None):
