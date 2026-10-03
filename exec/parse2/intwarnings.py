@@ -3,7 +3,10 @@ This preserves the reference's syntactic lone-zero exemption and call flag;
 it is not a general C constant-expression or conversion checker.
 """
 from tokenlocations import TOKEN_POS
-MESSAGE=b'incompatible integer to pointer conversion [-Wint-conversion]'
+import sys,pathlib
+sys.path.insert(0,str(pathlib.Path(__file__).parents[1]/'facts'))
+from load import facts
+MESSAGE={r['name']:r['value'] for r in facts('intwarnings')}['message'].encode()
 
 def install(E,P,DBL,FLT,FPB,SBB):
     import json

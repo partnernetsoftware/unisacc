@@ -5,7 +5,10 @@ warnings, otherwise 1, and restores the input frame and stdout selection.
 All scratch registers and decimal digits are private to this routine.
 """
 from tokenlocations import SPLICES,INCLUDE_LINE,INCLUDE_LINES,INCLUDE_NAME
-DIGITS=39<<40
+import sys,pathlib
+sys.path.insert(0,str(pathlib.Path(__file__).parents[1]/'facts'))
+from load import facts
+DIGITS={r['name']:r['value'] for r in facts('diagnostics')}['DIGITS']
 
 
 def install(E,P):
