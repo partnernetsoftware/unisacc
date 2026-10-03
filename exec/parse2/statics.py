@@ -19,12 +19,14 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
         if not line.startswith('#'):
             name, prefix, kind = line.split('\t')
             bindings[name] = P(prefix+'.statics_'+name).fresh(kind)
-    saved = ('si_pos','si_lab','si_out','v','bd','tb','td','dar','dsz')
+    import sys; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / 'facts')); from load import facts
+    fx = {r['name']: r['value'] for r in facts('statics')}
+    saved = tuple(fx['saved'])
     sequences = {'save': P('SC.saved_push').vpush(*saved).acts,
                  'restore': P('SC.saved_pop').vpop(*saved).acts}
-    sequences.update({name: E.rej(text) for text, name in {'not covered: static declarator': 'reject0', 'not covered: expected ;': 'reject1', 'not covered: static array initializer': 'reject2'}.items()})
+    sequences.update({r['name']: E.rej(r['value']) for r in facts('statics') if r['kind'] == 'reject'})
     classes = {'TK_'+str(i): [E.TK[k]] for i,k in
-               enumerate(('eof','(','[','=',';',',','{'))}
+               enumerate(fx['tokens'])}
     classes.update(TK_ID=[E.TK_ID], TK_STR=[E.TK_STR])
     # A token walk caches source ordinals by position; rewinds reuse them.
     # BOOL is retained in the public signature; shared ELSZ/ASSIGNCV own its rules.

@@ -3,14 +3,8 @@ Binding records follow the existing shared-size scope undo records. Reads use
 reference primary()'s token-context rule, not generated tape liveness.
 """
 from tokenlocations import TOKEN_POS
-ACTIVE=40<<40
-PREVIOUS=41<<40
-USED=42<<40
-ELIGIBLE=43<<40
-NAME=44<<40
-POSITION=45<<40
-NAME_TOKEN=46<<40
-KIND=47<<40
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+globals().update((r['name'], r['value']) for r in facts('unusedwarnings'))
 
 def install(E,P,TIX,undo_size):
     import json

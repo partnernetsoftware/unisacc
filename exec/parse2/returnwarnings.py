@@ -2,7 +2,8 @@
 Enabled only by the development --warnings mode. The development CLI uses it with single- and multi-unit location maps.
 """
 from tokenlocations import TOKEN_POS
-MESSAGE=b'non-void function does not return a value in all control paths [-Wreturn-type]'
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+MESSAGE=facts('returnwarnings')[0].encode()
 
 
 def install(E,P,SBB):
