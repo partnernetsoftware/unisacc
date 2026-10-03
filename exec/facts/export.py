@@ -656,5 +656,75 @@ def elffields():
 TABLES.append(("enc-elf", ["unisa/image/elf.py", "unisa/image/pe.py", "exec/facts/export.py"], elffields))
 
 
+def x86entry():
+    """x86_64 encoder entry (was exec/enc/gen.py): table bases and class ids (local
+    constants of the encoder), ENCSPEC alu2/setcc/shiftext opcodes, emit_x86.NUM
+    register numbers, the words START interns, Win32 import names."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from unisa.catalog import ENCSPEC, REGMAP
+    from unisa.emit_x86 import NUM
+    from unisa.image.pe import IMPORTS
+    from exec.facts.load import facts as F
+    X86 = ENCSPEC["x86_64"]
+    const = dict(OPC=70, REGN=71, AOPC=72, ACC=73, LABD=74, KND=75, BLB=76, SZ=77, TGT=78, BRG=79, SHT=80,
+                 OFF=81, FIT=82, SHX=83, MSN=84)
+    const = {k: v * 10 ** 6 for k, v in const.items()}
+    cn = ("C_MOV C_IMM C_ALU C_MUL C_LD8 C_ST8 C_LD C_ST C_SET C_RET C_SHF C_CALLR C_PUSH C_POP C_NOP C_FRAME C_ZERO "
+          "C_SETREG C_SPINIT C_DIV C_MOD C_UDIV C_UMOD C_GATE C_LEA C_SETMEM C_ARGSAVE C_ARGVGET C_ITOA").split()
+    C = {n: i for i, n in enumerate(cn, 1)}
+    C.update(C_HOSTCALL=60, C_HOSTADDR=61)
+    const.update(C, SCR=11, SCR2=3, SPREG=NUM[REGMAP["x86_64"][7]], RAX=NUM["rax"], RDX=NUM["rdx"])
+    out = ["=%s\tint\t%d" % kv for kv in const.items()]
+    out.append("=division_registers\tjson\t%s" % json.dumps([NUM[r] for r in REGMAP["x86_64"][:7]]))
+    classes = {".div": C["C_DIV"], ".mod": C["C_MOD"], ".udiv": C["C_UDIV"], ".umod": C["C_UMOD"], "setreg": C["C_SETREG"],
+               "spinit": C["C_SPINIT"], ".zero": C["C_ZERO"], "push": C["C_PUSH"], "pop": C["C_POP"], "nop": C["C_NOP"],
+               ".frame": C["C_FRAME"], "callr": C["C_CALLR"], "mov": C["C_MOV"], "imm": C["C_IMM"], "mul64": C["C_MUL"],
+               "load64": C["C_LD8"], "store64": C["C_ST8"], ".ld": C["C_LD"], ".st": C["C_ST"], "ret": C["C_RET"]}
+    classes.update({r["op"]: r["id"] for r in F("enc-fp-ops")})
+    classes.update(hostcall=60, hostaddr=61)
+    classes.update({r["name"]: r["value"] for r in F("enc-x86win-ids")})
+    classes.update({"itoa": C["C_ITOA"], "gate": C["C_GATE"], ".lea": C["C_LEA"], "setmem": C["C_SETMEM"],
+                    "argsave": C["C_ARGSAVE"], "argvget": C["C_ARGVGET"]})
+    for op in X86["alu2"]:
+        classes[op] = C["C_ALU"]
+    for op in X86["setcc"]:
+        classes[op] = C["C_SET"]
+    for op in X86["shiftext"]:
+        classes[op] = C["C_SHF"]
+    out.append("=unknown\tjson\t%s" % json.dumps(sorted(set(range(257)) - set(classes.values()))))
+    out.append("@wi\tword:str")
+    out += ["\t" + k for k in tuple(F("enc-x86win-ops")) + tuple(F("enc-x86win-rcs"))]
+    out.append("@wimp\tword:str\tn:int")
+    out += ["\t%s\t%d" % (name, i + 1) for i, name in enumerate(IMPORTS)]
+    out.append("@classes\tword:str\tcls:int\taopc:json\tacc:json\tshx:json")
+    for op, c in classes.items():
+        out.append("\t%s\t%d\t%s\t%s\t%s" % (op, c, *(json.dumps([X86[t][op]] if op in X86[t] else [])
+                                                      for t in ("alu2", "setcc", "shiftext"))))
+    out.append("@regs\tword:str\tn:int")
+    out += ["\t%s\t%d" % (nm, n + 1) for nm, n in NUM.items()]
+    meta = tuple(F("enc-tins-meta"))
+    ids = [("imm", "tagimm"), ("reg", "tagreg"), ("role", "role"), ("form", "form"), ("reloc", "reloc"), ("rel32", "rel32")]
+    ids += [(w, w) for w in ("true", "false", "winapi", "carry",
+                             *[k for k in meta if k not in ("role", "form", "reloc", "carry", "winapi")])]
+    ids += [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2"),
+            ("win/x86_64", "target3")]
+    ids += [("@" + k, "h_" + k) for k in ("target", "data", "sym", "src_os", "data_len", "bss", "relocs", "argc", "argv")]
+    out.append("@ids\tword:str\tnm:str")
+    out += ["\t%s\t%s" % w for w in ids]
+    win = tuple(F("enc-x86win-meta"))
+    out.append("@metakeys\tkey:str\twin:int")
+    out += ["\t%s\t%d" % (k, k in win) for k in meta if k not in ("role", "form", "reloc", "carry")]
+    out.append("@winmeta\tk:str")
+    out += ["\t" + k for k in win]
+    out.append("@puts\ti:int")
+    out += ["\t%d" % i for i in range(4)]
+    return out
+
+
+TABLES.append(("enc-x86", ["unisa/catalog.py", "unisa/emit_x86.py", "unisa/image/pe.py", "exec/facts/enc-fp-ops.tsv",
+                           "exec/facts/enc-x86win-ids.tsv", "exec/facts/enc-x86win-ops.tsv", "exec/facts/enc-x86win-rcs.tsv",
+                           "exec/facts/enc-x86win-meta.tsv", "exec/facts/enc-tins-meta.tsv", "exec/facts/export.py"], x86entry))
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

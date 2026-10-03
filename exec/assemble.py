@@ -268,6 +268,8 @@ class Run:
             kw["domain"] = range(*o["domain"])
         if "domain_keys" in o:   # K2 translator: explicit key list (fact path), not a range
             kw["domain"] = _path(facts, o["domain_keys"])
+        if "domain_at" in o:   # one key: the int at a fact path
+            kw["domain"] = [_path(facts, o["domain_at"])]
         if "tokens" in o:
             kw["classes"] = dict(kw.get("classes") or {}, **self.tokens(o["tokens"]))
         for k, v in o.get("classmap", {}).items():
@@ -294,6 +296,8 @@ class Run:
             sq = dict(sq or {}, **{k: [t(a) for a in v] for k, v in _path(facts, sf).items()})
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
+        if "seqenv" in o:   # env sequences (stored by an earlier let) by a fact list of names
+            sq = dict({k: self.env[k] for k in _path(facts, o["seqenv"])}, **(sq or {}))
         if op == "template":
             res = install_template(g, self.root, stem, facts, self.fresh(fresh),
                                    bindings=bd, sequences=sq,
@@ -307,7 +311,7 @@ class Run:
                                bindings=bd, section=sec,
                                mode=o.get("mode", "r"), **kw)
         elif op == "call":
-            sub = Run(self.E, self.P, self.flags, dict(self.env, **(bd or {})))
+            sub = Run(self.E, self.P, dict(self.flags, **o.get("flags", {})), dict(self.env, **(bd or {})))   # opts flags: literal overrides
             res = sub.run(self.root / (stem + "-manifest.tsv"))
             if o.get("merge"):   # opts merge: the sub-manifest's env flows back (segment chains)
                 self.env.update(res)
