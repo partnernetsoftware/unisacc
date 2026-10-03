@@ -2,7 +2,7 @@
 import json
 import re
 from pathlib import Path
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, install_rows, install_template, load as load_rules
 
 
 def install(E, P, section, warnings, templates, facts, alphabet):
@@ -31,15 +31,17 @@ def install(E, P, section, warnings, templates, facts, alphabet):
         if part != section:
             continue
         letters = alphabet if digits == "HEX" else digits
+        spelled = dict(sequences, **{'advance.b': [('ADV',)], 'advance.r': []})
         for byte, (kind, _) in spellings.items():
-            spelling = {'raw': chr(byte), 'quoted': '\\' + chr(byte),
-                        'hex': '\\x' + letters[byte >> 4] + letters[byte & 15]}[kind]
-            actions = E.O(spelling) + ([('ADV',)] if mode == 'b' else [])
-            E.g.on(state, [byte], target, actions, mode)
+            spelled['spell.%s.%d' % (letters, byte)] = E.O(
+                {'raw': chr(byte), 'quoted': '\\' + chr(byte),
+                 'hex': '\\x' + letters[byte >> 4] + letters[byte & 15]}[kind])
+        install_template(E.g, root, 'printfcontrol-escape',
+                         {'esc': [dict(state=state, target=target, letters=letters, mode=mode)],
+                          'byte': [dict(b=byte) for byte in spellings]},
+                         None, sequences=spelled, section='escape', mode=mode, domain=range(256))
     if section == "part1":
-        for state, row in load_rules(root / "printfcontrol-spelling.tsv", {}, domain=range(256), section="append").items():
-            for byte, (target, actions) in row.items():
-                E.g.on(state, [byte], target, actions, "r")
+        install_rows(E.g, root / "printfcontrol-spelling.tsv", domain=range(256), section="append", mode="r")
     sections = {line.split('\t')[0] for line in (root / 'printfcontrol-result.tsv').read_text().splitlines() if line and not line.startswith('#')}
     for mode in ('all', 'warnings' if warnings else 'plain'):
         if section + '.' + mode not in sections:
