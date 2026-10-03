@@ -19,12 +19,13 @@ def install(E,P,b):
     for owner in (modelsignature,modelgraphequality,libraryexports,layoutfacts,libraryimports,librarycallables):
         assert not owned.intersection(v for k,v in vars(owner).items() if type(v) is int and v>=1<<40),owner.__name__
     g=E.g
-    def common(entry,left,right,dest):
-        P(entry).branch({2:entry+'.left'},entry+'.right',[('CMP',left,right)])
-        P(entry+'.left').a(('COPYW',dest,left)).ret()
-        P(entry+'.right').a(('COPYW',dest,right)).ret()
-    common('VR.binary','left_rank','sv_rank','value_rank')
-    common('VR.conditional','left_rank','value_rank','qt_common_rank')
+    from pathlib import Path
+    from finite_rules import install_template
+    root=Path(__file__).parent
+    holder=P('VR.fresh')  # unregistered: only names fresh labels
+    def declare(section):
+        install_template(g,root,'valueranks',{},holder.fresh,bindings=dict(FPS_FN=b['FPS_FN'],PARAMRANK=PARAMRANK),section=section)
+    declare('common')
     # Apply companions to the already-expanded ordinary actions, preserving all
     # observations, output, and continuation labels. No executor primitive.
     poolrank={E.BASE:VALUEBANK,E.FRB:NAMEDRETURN,b['MBS']:MEMBERRANK,b['FPS_RB']:RETURNRANK}
@@ -52,21 +53,7 @@ def install(E,P,b):
                 # Existing type-rank companions are already present.
                 if extra and source[ix+1:ix+1+len(extra)]!=extra:actions.extend(extra)
             row[key]=(n,g.seq(actions))
-    def hook(state,proc):
-        old='VR.original.'+state;assert old not in g.st
-        g.st[old]=g.st.pop(state);g.labels.add(old)
-        alias='VR.hook.'+state;P(alias).call(proc).goto(old);g.st[state]=g.st[alias]
-    # Conditional branch identities are computed before conversion temporaries.
-    hook('QT.original','VR.conditional')
-    hook('QT.merge','VR.qmerge')
-    P('VR.qmerge').a(('COPYW','value_rank','qt_common_rank')).ret()
-    hook('CL.typed','VR.fixed')
-    P('VR.fixed').a(('LDI','vr_fixedrank',0)).branch({1:'VR.namedfixed'},'VR.fixedsig',[('CMPI','call_sig',0)])
-    P('VR.namedfixed').a(('LDX','vr_sig','fid',b['FPS_FN'])).goto('VR.fixedindex')
-    P('VR.fixedsig').a(('COPYW','vr_sig','call_sig')).goto('VR.fixedindex')
-    P('VR.fixedindex').a(('ALUI','mul','vr_index','vr_sig',1024),('ALU','add','vr_index','vr_index','na'),('LDX','vr_fixedrank','vr_index',PARAMRANK)).ret()
-    # CL.typed owns a conversion target distinct from its saved source value.
-    old='VR.original.CL.a2';g.st[old]=g.st.pop('CL.a2');g.labels.add(old)
-    P('VR.a2').branch({1:'VR.a2fixed'},old,[('CMPI','vr_hasfixed',1)])
-    P('VR.a2fixed').a(('COPYW','value_rank','vr_fixedrank'),('LDI','vr_hasfixed',0)).goto(old)
-    g.st['CL.a2']=g.st['VR.a2']
+    # Hooks: each original moves to VR.original.*, an alias calls the rank
+    # procedure and continues there (valueranks-template.tsv, in graph order).
+    for section in ('h1','h2','h3','h4','h5','h6','h7'):declare(section)
+    g.labels.update('VR.original.'+s for s in ('QT.original','QT.merge','CL.typed','CL.a2'))
