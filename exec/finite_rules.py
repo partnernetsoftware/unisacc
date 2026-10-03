@@ -352,7 +352,7 @@ def expand_template(path, facts, fresh, section=None):
                     elif kind == "fresh":
                         if b2:
                             prev[b2] = a2
-                    elif kind in ("append", "split-at", "rewrite-tail", "insert-after", "group-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
+                    elif kind in ("append", "split-at", "rewrite-tail", "insert-after", "companion", "group-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -392,6 +392,47 @@ def rule_facts(path):
     return {state: sorted(rows, key=lambda r: r["keys"] != "*") for state, rows in out.items()}
 
 
+def _companions(g, rules):
+    """One pass over the graph: every action matching a rule (first match by
+    row order, null = any field) is followed by that rule's actions, `$k`
+    standing for the action's field k, unless they already follow it. An empty
+    pattern prepends to every edge. b = state globs skipped, c = state globs
+    required ('-' = all)."""
+    from fnmatch import fnmatch
+    globs = lambda v: [] if v in ("", "-") else v.split(",")
+    index, front = {}, []
+    for n, (pattern, b, c, acts) in enumerate(rules):
+        rule = (pattern, globs(b), globs(c), acts, n)
+        if not pattern:
+            front.append(rule)
+        else:
+            index.setdefault((pattern[0][0], pattern[0][1] if len(pattern[0]) > 1 else None), []).append(rule)
+    for name, (_, row) in list(g.st.items()):
+        ok = lambda r: not any(fnmatch(name, x) for x in r[1]) and (not r[2] or any(fnmatch(name, x) for x in r[2]))
+        head = [y for r in front if ok(r) for y in r[3]]
+        cache = {}
+        for key, (target, seq) in list(row.items()):
+            source = list(g.seqs[seq])
+            out = list(head)
+            for i, x in enumerate(source):
+                out.append(x)
+                cands = cache.get((x[0], x[1] if len(x) > 1 else None))
+                if cands is None:
+                    cands = [r for r in index.get((x[0], x[1] if len(x) > 1 else None), []) +
+                             index.get((x[0], None), []) if ok(r)]
+                    cands.sort(key=lambda r: r[4])
+                    cache[(x[0], x[1] if len(x) > 1 else None)] = cands
+                for pattern, _, _, acts, _ in cands:
+                    p = pattern[0]
+                    if len(x) >= len(p) and all(q is None or q == v for q, v in zip(p, x)):
+                        extra = [tuple(x[int(v[1:])] if type(v) is str and v[:1] == "$" else v for v in y)
+                                 for y in acts]
+                        if extra and source[i + 1:i + 1 + len(extra)] != extra:
+                            out.extend(extra)
+                        break
+            row[key] = (target, g.seq(out))
+
+
 def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
                      section=None, mode="r", domain=range(257), overlay=False):
     path = Path(root) / (stem + "-template.tsv")
@@ -403,7 +444,8 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                 g.on(state, [key], target, actions, modes.get(state, mode))
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
     groups = {}
-    for where, kind, a, b, c, d in edits:
+    pending = []
+    for ix, (where, kind, a, b, c, d) in enumerate(edits):
         if bindings is not None:
             a, b, c = (bindings[x[1:]] if x.startswith("$") and type(bindings.get(x[1:])) is str
                        else x for x in (a, b, c))
@@ -450,6 +492,12 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                     if acts and acts[-1][0] == op and acts[-1][1].startswith(prefix):
                         label = groups.setdefault(acts[-1][1], c + str(len(groups)))
                         row[key] = (label, g.seq(acts[:-1]))
+            continue
+        if kind == "companion":
+            pending.append((json.loads(a), b, c, [tuple(x) for x in json.loads(d)]))
+            if ix + 1 == len(edits) or edits[ix + 1][1] != "companion":
+                _companions(g, pending)
+                pending = []
             continue
         if kind == "insert-after":
             patterns = json.loads(a)
