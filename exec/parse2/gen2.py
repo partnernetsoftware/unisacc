@@ -102,23 +102,10 @@ SPANS = {name: (start, end) for name, start, end in tape_rows("tape-spans.tsv")}
 
 
 def addr(p):
-    """Bind variable address selection to shared templates and fresh continuations."""
-    bindings = dict(zip(('global','local','done','static','frame','auto'),
-                        (p.fresh(k) for k in ('ga','la','ad','sa','fa','auto'))))
-    bindings.update(entry=p.cur, entry_test=p.fresh('b'), GMARK=E.GMARK)
-    global_classic = bindings['global'] + '.classic'
-    from librarydata import global_address
-    global_address(E,P,bindings['global'],global_classic,bindings['done'])
-    global_out = emit(P(global_classic), 'gaddr')
-    bindings['local_test'] = P(bindings['local']).fresh('b')
-    bindings['static_return'] = P(bindings['static']).fresh('r')
-    bindings['frame_test'] = P(bindings['frame']).fresh('b')
-    auto_out = emit(P(bindings['auto']), 'addr')
-    bindings.update(global_end=global_out.cur, auto_end=auto_out.cur)
-    install_rules(g, os.path.dirname(__file__), 'helpers', bindings=bindings,
-                  sequences=dict(pending=p.acts, global_tail=global_out.acts, auto_tail=auto_out.acts,
-                                 static_prefix=O('  .lea r0, ls'), newline=O('\n')), section='address')
-    p.cur, p.acts = bindings['done'], []
+    """Variable address selection: exec/parse2/addr-manifest.tsv (K2 sub-manifest)."""
+    import assemble
+    env = assemble.run(Path(__file__).resolve().parent / 'addr-manifest.tsv', E, P, {}, dict(entry=p.cur, pending=p.acts))
+    p.cur, p.acts = env['done'], []
     return p
 
 

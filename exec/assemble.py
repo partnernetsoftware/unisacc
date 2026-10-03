@@ -129,6 +129,7 @@ class Run:
         return SimpleNamespace(cur=cur)
 
     def fresh(self, spec):
+        spec = self.interp(spec)   # `U:{entry}`: holder named by an env label
         if spec in ("", "-"):
             return None
         if spec == "none":
