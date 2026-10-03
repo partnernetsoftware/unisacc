@@ -397,46 +397,12 @@ def return_control(section, extra=None):
 
 
 def update_control(section, extra=None):
-    b = {name: globals()[name] for name in ("SBB", "UNS", "DBL", "FLT", "BOOL", "FPB", "FPV", "ENV", "END_", "LOC", "FPS_FN", "FPS_VAR")}
-    b.update((name, getattr(E, name)) for name in ("FND", "VAR", "PTR", "BASE", "ARR"))
-    b.update(("U"+str(size), UNS+size) for size in (1,2,4,8))
-    b.update(tail_entry="C%d" % LEVELS[0], axis_ptr=AX.index("ptr"), axis_struct=AX.index("struct"))
-    b.update(extra or {})
-    for key,template in tape_rows("update-states.tsv"):
-        b[key] = template.format(op=b.get("op",""), name=b.get("name",""), suffix=b.get("suffix",""))
-    p = P("update.bindings."+section+"."+str(P.n)+"."+b.get("op","")+"."+b.get("suffix",""))
-    for part,owner,kind,key in tape_rows("update-fresh.tsv"):
-        if part == section:
-            p.cur = b[owner[1:]] if owner.startswith("$") else owner
-            b[key] = p.fresh(kind)
-    texts = {name:json.loads(value) for name,value in tape_rows("update-text.tsv")}
-    sequences = {name:O(value) for name,value in texts.items()}
-    sequences.update((name,E.rej(message)) for name,message in tape_rows("update-reject.tsv"))
-    for name,template,index in tape_rows("update-template.tsv"):
-        template = b.get(template[1:]) if template.startswith("$") else template
-        if template is not None: sequences[name]=O(re.split(r"(\{[^}]*\})",TEMPL[template])[int(index)])
-    for name,method,slots in tape_rows("update-stack.tsv"):
-        p.acts = []
-        sequences[name] = getattr(p,method)(*slots.split(",")).acts
-    if "op" in b:
-        sequences["operator"] = O(E.optext(b["op"]))
-    if "integer" in b:
-        sequences["bool_step"] = O(texts["bool_step"] % b["integer"])
-    if "bits" in b:
-        sequences["fp_step"] = O(texts["fp_step"] % (b["bits"],FPU[b["suffix"]+b["floating"]]))
-    tokens=dict(TK,identifier=TK_ID)
-    classes={name:[tokens[token]] for name,token in tape_rows("update-tokens.tsv")}
-    classes.update(BOOL=[BOOL],float_types=[DBL,FLT],float_axes=[AX.index("f32"),AX.index("f64")],
-                   signed_narrow_codes=[code for _,code,size,uns,_ in TYINT if not uns and size < 8])
-    install_rules(g,os.path.dirname(__file__),"update",bindings=b,sequences=sequences,classes=classes,section=section)
-    if section == "id0":
-        compound={TK[o+"="]:"X.c"+o for o in E.CASOPS}
-        for domain,selected,additions in [(set(range(257))-compound.keys(),"id0",{})]+[
-                ([key],"compound",dict(id_dispatch=b["f1"],operation=target)) for key,target in compound.items()]:
-            install_rows(g, Path(__file__).with_name("update-dispatch.tsv"), sequences,
-                         domain=domain, bindings=dict(b,**additions), classes=classes,
-                         section=selected)
-    return b
+    """Lvalue update control: exec/parse2/update-manifest.tsv (K2 sub-manifest); returns its bindings."""
+    import assemble
+    x = dict(extra or {})
+    env = dict(upd_section=section, upd_dispatch=int(section == "id0"), extra=x)
+    env.update((k, str(x.get(k, ""))) for k in ("op", "name", "suffix", "postfix", "prefixfix", "integer", "floating", "bits"))
+    return assemble.run(Path(__file__).resolve().parent / 'update-manifest.tsv', E, P, {}, env)["ub"]
 
 
 def build(locations=False, warnings=False, errors=False):

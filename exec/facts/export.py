@@ -658,6 +658,38 @@ def k2gen2():
                                    u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
     syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
     autonames = [dict(name=nm) for nm in G.E.autonames()]
+    updconst = {n: getattr(G, n) for n in ("SBB", "UNS", "DBL", "FLT", "BOOL", "FPB", "FPV", "ENV", "END_", "LOC", "FPS_FN", "FPS_VAR")}
+    updconst.update((n, getattr(G.E, n)) for n in ("FND", "VAR", "PTR", "BASE", "ARR"))
+    updconst.update(("U" + str(z), G.UNS + z) for z in (1, 2, 4, 8))
+    updconst.update(tail_entry="C%d" % G.LEVELS[0], axis_ptr=G.AX.index("ptr"), axis_struct=G.AX.index("struct"))
+    texts = {n: json.loads(v) for n, v in G.tape_rows("update-text.tsv")}
+    updseqs = {n: acts(G.O(v)) for n, v in texts.items()}
+    updseqs.update((n, acts(G.E.rej(m))) for n, m in G.tape_rows("update-reject.tsv"))
+    for n, t, i in G.tape_rows("update-template.tsv"):
+        if not t.startswith("$"):
+            updseqs[n] = acts(G.O(G.re.split(r"(\{[^}]*\})", G.TEMPL[t])[int(i)]))
+    for n, m, slots in G.tape_rows("update-stack.tsv"):
+        updseqs[n] = acts(getattr(G.P("update.facts"), m)(*slots.split(",")).acts)
+    modes = G.tape_rows("update-modes.tsv")
+    updtmpl = {"": [[], [], []]}
+    for row in modes:
+        for t in (row[2], row[4]):
+            updtmpl[t] = [acts(G.O(x)) for x in G.re.split(r"(\{[^}]*\})", G.TEMPL[t])]
+    updop = {"": []}
+    updop.update((o, acts(G.O(G.E.optext(o)))) for o in sorted(set(G.E.CASOPS) | {r[1] for r in modes}))
+    updbool = {"": updseqs["bool_step"]}
+    updbool.update((r[5], acts(G.O(texts["bool_step"] % r[5]))) for r in modes)
+    updfp = {"||": updseqs["fp_step"]}
+    updfp.update(("%s|%s|%s" % (sf, r[6], bits), acts(G.O(texts["fp_step"] % (int(bits), G.FPU[sf + r[6]]))))
+                 for r in modes for sf, bits in G.tape_rows("update-float.tsv"))
+    tk = dict(G.TK, identifier=G.TK_ID)
+    for w in ("type=extern", "type=_Bool"):   # the token codes gen2 build() appends before any rows install
+        tk.setdefault(w, max(v for k, v in tk.items() if k != "identifier") + 1)
+    updclasses = {n: [tk[t]] for n, t in G.tape_rows("update-tokens.tsv")}
+    updclasses.update(BOOL=[G.BOOL], float_types=[G.DBL, G.FLT], float_axes=[G.AX.index("f32"), G.AX.index("f64")],
+                      signed_narrow_codes=[c for _, c, z, u, _ in G.TYINT if not u and z < 8])
+    updcompound = [dict(key=G.TK[o + "="], target="X.c" + o) for o in G.E.CASOPS]
+    updid0 = sorted(set(range(257)) - {c["key"] for c in updcompound})
     retconst = dict(SBB=G.SBB, SSZ=G.SSZ, CKT=G.CKT, expr_entry="E%d" % G.LEVELS[0], tail_entry="C%d" % G.LEVELS[0])
     retseqs = {n: acts(G.O(json.loads(v))) for n, v in G.tape_rows("return-text.tsv")}
     retseqs.update((n, acts(G.O(G.re.split(r"(\{[^}]*\})", G.TEMPL[t])[int(i)]))) for n, t, i in G.tape_rows("return-template.tsv"))
@@ -688,6 +720,9 @@ def k2gen2():
             "=shapeconst\tjson\t" + dump(shapeconst), "=shapeseqs\tjson\t" + dump(shapeseqs), "=shapeclasses\tjson\t" + dump(shapeclasses),
             "=retconst\tjson\t" + dump(retconst), "=retseqs\tjson\t" + dump(retseqs), "=retclasses\tjson\t" + dump(retclasses),
             "=retexpr0\tjson\t" + dump(retexpr0), "=retcompound\tjson\t" + dump(retcompound),
+            "=updconst\tjson\t" + dump(updconst), "=updseqs\tjson\t" + dump(updseqs), "=updclasses\tjson\t" + dump(updclasses),
+            "=updtmpl\tjson\t" + dump(updtmpl), "=updop\tjson\t" + dump(updop), "=updbool\tjson\t" + dump(updbool), "=updfp\tjson\t" + dump(updfp),
+            "=updid0\tjson\t" + dump(updid0), "=updcompound\tjson\t" + dump(updcompound),
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
@@ -746,7 +781,7 @@ def k2unitstokens():
 
 TABLES = [
     ("k2-units-tokens", ["exec/parse/gen.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
-    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/facts/export.py"], k2gen2),
+    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
