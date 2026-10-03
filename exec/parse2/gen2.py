@@ -365,15 +365,7 @@ def build(locations=False, warnings=False, errors=False):
     assemble.run(Path(__file__).resolve().parent / 'floatconst-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict())
     E.autoscan()
     types()
-    import assemble   # K2 trace translation: functiontypes-manifest.tsv
-    from types import SimpleNamespace
-    assemble.run(Path(__file__).resolve().parent / 'functiontypes-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict())
-    import assemble   # K2 trace translation: truth-manifest.tsv
-    assemble.run(Path(__file__).parent / 'truth-manifest.tsv', E, P,
-                 dict(locations=locations, warnings=warnings, errors=errors), dict(DBL=DBL, FLT=FLT))
-    import assemble   # K2 trace translation: booleans-manifest.tsv
-    assemble.run(Path(__file__).parent / 'booleans-manifest.tsv', E, P,
-                 dict(locations=locations, warnings=warnings, errors=errors), dict(BOOL=BOOL, DBL=DBL, FLT=FLT))
+    segment("typing")
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
     segment("statics-init")
@@ -403,9 +395,6 @@ def build(locations=False, warnings=False, errors=False):
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
     scope = assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part1=1))['sb']
-    import assemble   # K2 trace translation: vla-manifest.tsv
-    from types import SimpleNamespace
-    assemble.run(Path(__file__).resolve().parent / 'vla-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(DEP=VLDEP, ENUM=END_, FRAME=VLFRAME, SIZE=VLSIZE, UNS=UNS))
     # statements
     segment("dispatch-block", warnings)
     assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part2=1, extra=scope))
@@ -423,9 +412,6 @@ def build(locations=False, warnings=False, errors=False):
     segment("if-loops", warnings)
     segment("ret-expr")
     segment("ret-qt0")
-    import assemble   # K2 trace translation: conditional-manifest.tsv
-    assemble.run(Path(__file__).parent / 'conditional-manifest.tsv', E, P,
-                 dict(locations=locations, warnings=warnings, errors=errors), dict(enum_values=ENV, enum_defined=END_))
     segment("ret-qt")
     segment("upd-id")
     shape_control("update-entry")
@@ -491,11 +477,7 @@ def build(locations=False, warnings=False, errors=False):
                  dict(warnings=warnings), dict(warnings=warnings, cb=call_env['cb']))
     import assemble
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
-    assemble.run(Path(__file__).parent / 'offsetofcontrol-manifest.tsv', E, P, _flags,
-                 dict(SBB=SBB, MEMBER_STRIDE=MEMBER_STRIDE, MOF=MOF, MSZ=MSZ, MBS=MBS, MAR=MAR))
-    assemble.run(Path(__file__).parent / 'setjmpcontrol-manifest.tsv', E, P, _flags)
-    import assemble
-    assemble.run(Path(__file__).parent / "unresolved-manifest.tsv", E, P, {})
+    segment("offsetof")
     start = "START"
     if locations:
         from tokenlocations import install as location_install
