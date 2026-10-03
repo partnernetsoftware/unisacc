@@ -1212,7 +1212,14 @@ int unary(void) {
         if (curptr == 0) { if (curuns) { if (cursize == 4) zext(4); } }
         lvalue = 0; curptr = 0; return 0;
     }
-    if (p == P_UPLUS) { adv(); unary(); loadval(); lvalue = 0; return 0; }
+    if (p == P_UPLUS) { adv(); unary(); loadval(); lvalue = 0;
+        /* C99 6.5.3.3p2: unary + applies integer promotions.  In particular,
+           +uint16_t is int, so sizeof(+x) is 4 and assignment to uint32_t
+           must convert the promoted signed result. */
+        if (curptr == 0 && curflt == 0 && cursize < 4) {
+            cursize = 4; curelem = 4; curuns = 0; curbool = 0;
+        }
+        return 0; }
     if (p == P_PREINC) {                /* ++x is x += 1, and its value is the new x */
         int op; int e;
         op = cur(); adv();
