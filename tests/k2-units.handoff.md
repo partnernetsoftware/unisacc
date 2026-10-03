@@ -89,3 +89,17 @@
   result). DEFS re-keying dropped (only feeds the "defined twice" count, unchanged). Caller env from gen2: start,
   FND, TK_extern, TK_assign, header_json, lm_initret. parse2 graphhash 10/10.
 - Remaining: layoutprovenance (units graph ACCEPT walk), units entry.
+
+## Round 8 (2026-10-03) — layoutprovenance findings (nothing landed)
+- Probe (.k2tmp/vr/probe3.py wraps accept_gates): exactly one ACCEPT producer per mode, all 257 keys, identical acts:
+  plain -> DONE (units-result.tsv main12: [@text5, ACCEPT]); --locations -> LS.tokens (unitlocations-result.tsv:24,
+  DONE no longer accepts). Gate index = key (0..256) in both modes.
+- Plan without a graph walk and without new assemble opts: rewrite layoutprovenance-template.tsv `gates` to iterate a
+  key table (rows key 0..256, a domain fact) with scalar template facts acc_state / acc_acts: {G.index}->{G.key},
+  {G.name}->{acc_state}, {G.acts}->{acc_acts}. The producers name the state: units manifest exports acc_state=DONE
+  (plain) / LS.tokens (unitlocations); acc_acts = the producer row's actions minus ACCEPT (text5 OUT bytes; LS.tokens
+  row acts) — exported by the producing row (result=/@out), not copied into facts. Open question for coordinator:
+  whether exporting a row's action list as a named result is allowed (else facts duplicate the producer acts).
+- units entry (exec/build/gen.py units + units/gen-manifest) not started: units.py also writes g.st directly for the
+  qualifier newline rows (load_rules + g.st[state][1][key]=...; use `table` op with units-byte.tsv@qualifier inside a
+  foreach over units-qualifiers) and calls E.tokenizer/prn/fconv, strings.token_span, unitlocations.install.
