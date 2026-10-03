@@ -1445,5 +1445,25 @@ def k2truth():
 TABLES.append(("k2-truth", ["exec/parse2/scalar-outputs.tsv", "exec/facts/export.py"], k2truth))
 
 
+def k2librarymodule():
+    """Finite header and main-key domains; continuation labels stay in the manifest."""
+    source = {}
+    for line in (HERE / "k2-librarymodule.tsv").read_text().splitlines():
+        if line.startswith("="):
+            name, kind, value = line[1:].split("\t", 2)
+            source[name] = json.loads(value) if kind == "json" else value
+    lo, hi = source["hdomain"]
+    mlo, mhi = source["maindomain"]
+    ok = set(source["mainok"])
+    compact = lambda x: json.dumps(x, separators=(",", ":"))
+    return ["=hkeys\tjson\t" + compact(list(range(lo, hi))),
+            "=mainbad\tjson\t" + compact([k for k in range(mlo, mhi) if k not in ok]),
+            "=mainreason\tstr\t" + source["mainreason"]]
+
+
+TABLES.append(("k2-librarymodule-map", ["exec/facts/k2-librarymodule.tsv", "exec/facts/export.py"],
+               k2librarymodule))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
