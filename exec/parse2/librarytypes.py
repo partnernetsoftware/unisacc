@@ -55,5 +55,5 @@ def install(E,P,b,integers,union_bank):
     assemble.run(root/'librarycallbackgraph-manifest.tsv',E,P,{},{'b_'+k:v for k,v in b.items() if type(v) is int})
     section('tail')
 
-    from librarytypesv3 import install as v3_install
-    v3_install(E,P,b,frame,blob)
+    import gen2
+    assemble.run(root/'librarytypesv3-manifest.tsv',E,P,{},{'E_ARR':E.ARR,'gen2_DIM':gen2.DIM})
