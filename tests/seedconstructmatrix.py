@@ -27,7 +27,7 @@ FEATURES = (
     ("tokenlex", "exec/build/gen.py", ("lex",)),
     ("warnlex", "exec/build/gen.py", ("lex", "--locations")),
     ("warnparse", "exec/build/gen.py", ("parse2", "--warnings", "--errors")),
-    ("warnunits", "exec/parse2/units.py", ("--locations",)),
+    ("warnunits", "exec/build/gen.py", ("parse2/units", "--locations")),
     ("errorparse", "exec/build/gen.py", ("parse2", "--errors")),
     ("warnpp-shared", "exec/build/gen.py", ("pp", "--locations", "--shared-predefines")),
 )

@@ -187,7 +187,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
             return built_model(td,name,script,args)
         warning_models['e1']=warning_model('warnlex',here.parent/'build/gen.py',['lex','--locations'])
         warning_models['e3']=warning_model('warnparse',here.parent/'build/gen.py',['parse2','--warnings','--errors'])
-        located_units=warning_model('warnunits',here.parent/'parse2/units.py',['--locations'])
+        located_units=warning_model('warnunits',here.parent/'build/gen.py',['parse2/units','--locations'])
         quiet_parse=warning_model('errorparse',here.parent/'build/gen.py',['parse2','--errors'])
         ordinary=list(rows)
         warning_models['e2']=warning_model('warnpp-shared',here.parent/'build/gen.py',['pp','--locations','--shared-predefines'])

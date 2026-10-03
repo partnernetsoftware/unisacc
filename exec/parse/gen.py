@@ -187,7 +187,7 @@ class P(_procs.make_P(g, O, rej)):
         return self.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", slot, "lab"))
 
 
-# numeric_rules/prn/fconv: still called by exec/parse2/units.py:24 (E.prn(); E.fconv()), cdx file
+# numeric_rules/prn/fconv: no Python caller left (units uses exec/parse/{prn,fconv}-manifest.tsv); round 55
 def numeric_rules(section, bindings=None, owner=None):
     # Unique metadata instances also satisfy gen2's duplicate-definition guard.
     from pathlib import Path

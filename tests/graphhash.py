@@ -33,7 +33,7 @@ def _entries():
     # parse2: warnings/errors imply locations; all 8 combinations are listed
     for w, er, l in itertools.product((0, 1), repeat=3):
         add('exec/build/gen.py parse2', *(['--warnings'] * w + ['--errors'] * er + ['--locations'] * l))
-    add('exec/build/gen.py parse2/units'); add('exec/parse2/units.py', '--locations')
+    add('exec/build/gen.py parse2/units'); add('exec/build/gen.py parse2/units', '--locations')
     add('exec/build/gen.py opt'); add('exec/build/gen.py opt', '--o2')
     add('exec/build/gen.py prune'); add('exec/build/gen.py nativeabi')
     for os_ in ((), ('--osx',), ('--win',)):

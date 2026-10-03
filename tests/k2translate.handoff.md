@@ -750,3 +750,22 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   units 6fc8d7f5 / units --locations 0137a215. subtractsafety: dangling 0, instruction files ok (actually run).
   Not run: the switched check scripts themselves (errorcheck etc., model*check, chain.sh, buildcompiler.sh);
   full graphhash (coordinator runs at push).
+
+## Round 55 (2026-10-04, cc background agent)
+- units.py deleted: exec/parse2/units-manifest.tsv now covers --locations (call tokenlocations with
+  ready=LS.ready, token_record=RET, flags multi/record/ordinal false; call unitlocations merge:true -> env
+  acc_state/acc_acts; layoutprovenance rows section plain|located by flag; gatesk template acc from $acc_state /
+  $acc_acts when located). No new op/opts key. Callers re-keyed like 4ea3f5e8: graphhash.py/.tsv key
+  `exec/build/gen.py parse2/units --locations` (hash 0137a215 unchanged), compilerpack.py, unitlocationcheck.py,
+  modelsourcelayoutprovenancecheck.sh, seedconstructmatrix.py, PACKAGE.md, refusals.tsv.
+- layoutprovenance.py deleted: units() / accept_gates() had no caller left (parser() gone in gen2 deletion); its
+  constants are facts top-layoutprovenance-const, its rows layoutprovenance-{result,fresh,template}.tsv. rules.md row 0.
+- Evidence (actually run, serial, tests/bound 58, PYTHONHASHSEED=0): six modes vs tests/graphhash.tsv — see commit msg.
+- Not run: full gen.py graphhash (exec/build and parse/gen.py logic untouched; only a comment in parse/gen.py).
+- Next (design only): exec/parse/gen.py, base of 7 manifests (nativeabi, enc, enc/arm, opt, prune, lower,
+  parse2/units). Split: (a) generic -> exec/build: G instance, O, rej, P=make_P(g,O,rej) + vpush/vpop/newlab/num/lab
+  (slot names VS come from facts parse-constants, so the P methods are executor code over facts); sizes() is a
+  stats helper -> exec/build or tests. (b) facts via export.py: PREC/BINSEL/IRSEL/optext table (gold prec/binsel/
+  irsel), WORDS/TK (parse-words already), TY/SZ/PSZ (gold tyinfo) with the asserts moved into export.py.
+  (c) tokenizer()/numeric_rules/prn/fconv: check callers (`grep -rn 'E\.tokenizer\|E\.prn\|E\.fconv\|optext\|E\.TK\b'
+  exec`); units uses manifests already. Then repoint `#! base parse/gen.py` headers and run all gen.py graphhash.
