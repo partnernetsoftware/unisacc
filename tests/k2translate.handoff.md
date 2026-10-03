@@ -271,3 +271,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   return_control/update_control sites (ret0/qt*/floating loop; addr()-dependent sites need addr as a sub-manifest first).
   Tools recreated in .k2tmp/ (uncommitted): one.sh (sha one mode), chk.sh (export + both modes + --check).
   Always rerun export.py after editing gen2.py and commit facts/k2-gen2.tsv too (header hashes gen2.py).
+- Round 24: 6baca145 ret0/expr0/qt0-qt3 + floating foreach + integer chain -> `call return` rows (facts retint/retfloat;
+  chain = foreach{.call result=qr; .let qrb=$$qr:rb; .let qcur=$$qrb:f92}, no assemble change). Next commit: addr sites
+  ret1, id0/id1, variable0/1 -> `call addr` (facts k2-call for `nil`) + `$$addrenv:done`; update calls bind all 8 mode
+  words as `@str:` (empty). addr() is already addr-manifest.tsv; P(x) for addr is just entry=x.
+  Left: compound loop (CASOPS, pointer_ops), type-row chain, update-modes loops (fp/post/prefix), ord update-address/
+  down/address sites, lookup-warn, startup results/global-results glue, then merge segments -> exec/build/gen.py.
