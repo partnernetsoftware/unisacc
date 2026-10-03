@@ -260,6 +260,8 @@ class Run:
             kw["classes"] = _path(facts, o["classes"])
         if "domain" in o:
             kw["domain"] = range(*o["domain"])
+        if "domain_keys" in o:   # K2 translator: explicit key list (fact path), not a range
+            kw["domain"] = _path(facts, o["domain_keys"])
         if "tokens" in o:
             kw["classes"] = dict(kw.get("classes") or {}, **self.tokens(o["tokens"]))
         for k, v in o.get("classmap", {}).items():

@@ -612,8 +612,9 @@ def build(locations=False, warnings=False, errors=False):
     string_initializer(E, P, ESC)
     E.prn()
     E.numout()
-    from floatconst import install as floatconst_install
-    floatconst_install(E, P)
+    import assemble   # K2 trace translation: floatconst-manifest.tsv
+    from types import SimpleNamespace
+    assemble.run(Path(__file__).resolve().parent / 'floatconst-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict())
     E.autoscan()
     types()
     import assemble   # K2 trace translation: functiontypes-manifest.tsv

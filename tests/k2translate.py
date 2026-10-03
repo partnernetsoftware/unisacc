@@ -231,7 +231,7 @@ def _strings(v):
             yield from _strings(x)
 
 
-def _esc(s):
+def _esc(s):   # (json fact values are written raw: assemble json.loads them unescaped)
     return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
 
@@ -294,6 +294,8 @@ class Emitter:
                 out.append(("label", ",".join(c[1]), "-", (), (), "{}", "null"))
                 continue
             _, name, d, r = c
+            if isinstance(d.get("domain"), dict) and "__set__" in d["domain"]:
+                d = dict(d, domain=d["domain"]["__set__"])   # key set used as a domain: sorted list (graphhash checks order)
             if "__opaque__" in json.dumps(d) or "__set__" in json.dumps(d):
                 raise Refuse("non-data argument in %s (%s)" % (name, json.dumps(d)[json.dumps(d).find("__"):][:60]))
             op = OPS[name]
@@ -360,9 +362,10 @@ class Emitter:
                 retrow = len(out)
             dom = d.get("domain")
             if dom and dom != {"__range__": [0, 257]}:
-                if not isinstance(dom, dict):
-                    raise Refuse("explicit key-list domain (assemble takes only [lo,hi))")
-                o["domain"] = dom["__range__"]
+                if isinstance(dom, dict):
+                    o["domain"] = dom["__range__"]
+                else:
+                    o["domain_keys"] = ("lit", json.dumps(dom))
             if op in ("template", "table") and d.get("mode", "r") != "r":
                 o["mode"] = d["mode"]
             if d.get("overlay"):
@@ -463,6 +466,9 @@ def emit(module, specs):
         frc = oo.pop("_fresh", "-")
         if cl != "null":
             oo["classes"] = em.fact(json.loads(cl))
+        if isinstance(oo.get("domain_keys"), list):
+            em.p4(json.loads(oo["domain_keys"][1]), "domain keys")
+            oo["domain_keys"] = em.fact(json.loads(oo["domain_keys"][1]))
         if len(grp) >= 3 and not oo.get("export"):
             cols = [k for k, v in seq + bind if not isinstance(v, str)]
             tab = [{k: json.loads(v[1]) for k, v in r[0][3] + r[0][4] if not isinstance(v, str)} for r in grp]
@@ -488,7 +494,7 @@ def emit(module, specs):
         with open(ROOT / "exec" / "facts" / ("%s-f%d.tsv" % (fstem, i)), "w") as f:
             f.write("# written by tests/k2translate.py from %s (template facts)\n" % mod.relative_to(ROOT))
             for k, v in d.items():
-                f.write("=%s\tjson\t%s\n" % (k, _esc(json.dumps(v))))
+                f.write("=%s\tjson\t%s\n" % (k, json.dumps(v)))
     man = here / (stem + "-manifest.tsv")
     with open(man, "w") as f:
         f.write("# op\tstem\tsection\twhen\tfacts\tfresh\tseq\tbind\topts\n")
@@ -499,11 +505,11 @@ def emit(module, specs):
         with open(ROOT / "exec" / "facts" / (fstem + ".tsv"), "w") as f:
             f.write("# written by tests/k2translate.py from %s\n" % mod.relative_to(ROOT))
             for k, v in em.facts.items():
-                f.write("=%s\tjson\t%s\n" % (k, _esc(json.dumps(v))))
+                f.write("=%s\tjson\t%s\n" % (k, json.dumps(v)))
             for k, (cols, tab) in em.tables.items():
                 f.write("@%s\t%s\n" % (k, "\t".join(c + ":json" for c in cols)))
                 for r in tab:
-                    f.write("\t" + "\t".join(_esc(json.dumps(r[c])) for c in cols) + "\n")
+                    f.write("\t" + "\t".join(json.dumps(r[c]) for c in cols) + "\n")
     print(man, len(lines), "rows; env", sorted(args))
 
 
