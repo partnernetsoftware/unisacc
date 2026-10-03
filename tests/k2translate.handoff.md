@@ -369,3 +369,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sha SAME default 32fb8e3c.. and --warnings --errors 3a7edf34.. (export.py rerun, facts committed).
   NOT started: (b) remaining wrapper calls -> segments, (c) E.results producers -> export, (d) parse2base switch.
   Note: gen2.py writes to argv[1] (not stdout); .k2tmp/chk.sh writes .k2tmp/m0.json/m1.json and shasums them.
+  Coordinator add-on (priority before (b)): (1) strings.initializer -> call row at gen2.py string_initializer(E,P,ESC)
+  (~line 360) once cdx lands exec/parse2/strings-initializer-manifest.tsv on main (absent on origin/main at round 32
+  end -> blocked); keep head 2 fresh before strwalk, tail 7 after (/tmp/cdx23-k2strings-review.txt). (2) librarymodule
+  errors continuation: errors stage must export the no-main retarget label + reject seq into E.results where it is
+  created (today librarymodule.py:25-26 reads E.g.st[lm_main]); plain stays DEAD (/tmp/cdx23-k2library-handoff.txt).
+  (3) libraryexports call (gen2.py ~492) -> call row after cdx delivers its manifest.
