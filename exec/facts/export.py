@@ -629,26 +629,26 @@ def k2gen2():
     follow = dict(G.tape_rows("type-follow.tsv"))
     words = [dict(word=w, value=v, rank=(1 if w == "type=float" else 2 if w == "type=double" else 0),
                   follow=follow.get(w, follow["*"])) for w, v in G.TYPEW.items()]
-    initials = {name: row[0][1] for name, row in G.load_rules(ROOT / "exec/parse2/operator-actions.tsv",
-                {}, domain=[0], section="initial").items()}
-    ck, current, initial = [], "CKM", initials["ckm"]
+    ck, current, first = [], "CKM", [{}]
     for width, mask in [(sz, (1 << (8 * sz)) - 1) for _, _, sz, un, _ in G.TYINT if un and sz < 8]:
         nxt = "CKM.k%d" % width
         ck.append(dict(current=current, hit="CKM.m%d" % width, next=nxt, axis=G.AX.index("u%d" % (8 * width)),
-                       initial=acts(initial), mask=acts(G.O(G.TYPE_TAPE["mask_pair"] % mask))))
-        current, initial = nxt, []
-    ckf = dict(current=current, axis=G.AX.index("u64"), initial=acts(initial))
-    rs, current, initial = [], "RESD", initials["resd"]
+                       first=first, masktext=G.TYPE_TAPE["mask_pair"] % mask))
+        current, first = nxt, []
+    ckf = dict(current=current, axis=G.AX.index("u64"), first=first)
+    rs, current, first = [], "RESD", [{}]
     for name, code, size, unsigned, _ in G.TYINT:
         hit, nxt = "RESD." + name, "RESD.n" + name
-        mask = G.O(G.TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1)) if unsigned and size < 8 else []
-        rs.append(dict(current=current, hit=hit, next=nxt, axis=G.AX.index(name), code=code,
-                       initial=acts(initial), mask=acts(mask)))
-        current, initial = nxt, []
-    rsf = dict(current=current, initial=acts(initial))
+        rs.append(dict(current=current, hit=hit, next=nxt, axis=G.AX.index(name), code=code, first=first,
+                       masktext=G.TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if unsigned and size < 8 else ""))
+        current, first = nxt, []
+    rsf = dict(current=current, first=first)
     return ["=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
             "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
-            "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf)]
+            "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
+            "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
+            "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
+            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
 TABLES = [

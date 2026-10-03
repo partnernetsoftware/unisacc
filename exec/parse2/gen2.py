@@ -135,34 +135,23 @@ def bad(k):
     return ("rej", "not covered: " + k)
 
 
-def optail(o):
-    bn = "OPX." + o
+def optail_facts(o):
+    """Operator domain data for one operator tail (facts k2-gen2 oprows via exec/facts/export.py):
+    offset in RST, selected mnemonics, pointer mode, comparison/invert flags, float opcodes."""
     modes = {name: (pointer, int(compare), int(invert)) for name, pointer, compare, invert in tape_rows("operator-modes.tsv")}
     pointer, compare, invert = modes.get(o, modes["*"])
-    bindings = {name: bn + (suffix if suffix != "-" else "") for name, suffix in tape_rows("operator-states.tsv")}
-    bindings.update(CKT=CKT, RST=RST, operator_offset=[x for lv in LEVELS for x in OPS[lv] if x not in SHORT].index(o) * 256,
-                    axis_illegal=AX.index("illegal"), axis_f64=AX.index("f64"),
-                    integer_entry=bn + (".n" if pointer in ("add", "sub") else ".r"),
-                    pointer_compare_target=bn + ".r" if compare else "DEAD.pa")
-    sequences = {name: row[0][1] for name, row in load_rules(Path(__file__).with_name("operator-actions.tsv"), {},
-                 domain=[0], bindings=bindings, section="operator").items()}
-    sequences.update(operator_signed=O(E.optext(o)), operator_unsigned=O(E.optext(o, True)))
-    def install(section, suffix=""):
-        structured_control("operator-" + section, False, dict(bindings, word_state=bn + "." + section + suffix), sequences)
-    install("prefix")
-    if o in FOPS:
-        install("float-select")
-        for suffix, base in (("d", DBL), ("s", FLT)):
-            opcode = FPU[suffix + FOPS[o]]
-            sequences.update(float_opcode=O(TYPE_TAPE["float_operator"] % (opcode.removesuffix("_rev"),
-                             "r0, r1" if opcode.endswith("_rev") else "r1, r0")),
-                             float_invert=O(TYPE_TAPE["float_invert"]) if invert else [])
-            bindings.update(float_entry=bn + "." + suffix, float_convert="TO." + suffix, float_result=4 if compare else base)
-            install("float-body", suffix)
-    else:
-        install("float-reject")
-    install("pointer-" + pointer)
-    install("integer")
+    split = lambda t: re.fullmatch(r"  (\S+) r0, (.*)\n", t).groups()
+    sop, sregs = split(E.optext(o))
+    uop, uregs = split(E.optext(o, True))
+    floats = []
+    for suffix, base in (("d", DBL), ("s", FLT)) if o in FOPS else ():
+        opcode = FPU[suffix + FOPS[o]]
+        floats.append(dict(sfx=suffix, fop=opcode.removesuffix("_rev"),
+                           fregs="r0, r1" if opcode.endswith("_rev") else "r1, r0", result=4 if compare else base))
+    one = lambda b: [{}] if b else []
+    return dict(op=o, offset=[x for lv in LEVELS for x in OPS[lv] if x not in SHORT].index(o) * 256,
+                sop=sop, sregs=sregs, uop=uop, uregs=uregs, ptr=pointer, ptrn=one(pointer in ("add", "sub")),
+                cmpl=one(compare), invl=one(invert), fl=one(floats), nf=one(not floats), floats=floats)
 
 
 def tytail():
@@ -195,10 +184,7 @@ def ladder(prefix, bottom):
             structured_control("ladder-" + modes.get(o, modes["*"]), False,
                                dict(bindings, ladder_operator=targets[TK[o]], ladder_tail="OPX." + o, word_state=targets[TK[o]]))
     if prefix == "E":
-        for lv in LEVELS:
-            for o in OPS[lv]:
-                if o not in SHORT:
-                    optail(o)
+        segment("optail")
         tytail()
     for owner, state, message in tape_rows("ladder-reject.tsv"):
         if owner in ("all", prefix):
