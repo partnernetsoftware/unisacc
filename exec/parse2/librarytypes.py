@@ -51,8 +51,8 @@ def install(E,P,b,integers,union_bank):
     install_template(g,root,'librarytypes',{'I':[{'code':code,'size':size,'uns':int(uns)} for _,code,size,uns,_ in integers]},
                      lambda kind:E.P.fresh(_Scope('LTY'),kind),section='ints')
     section('mid')
-    from librarycallbackgraph import install as graph_install
-    graph_install(E,P,b,frame)
+    import assemble
+    assemble.run(root/'librarycallbackgraph-manifest.tsv',E,P,{},{'b_'+k:v for k,v in b.items() if type(v) is int})
     section('tail')
 
     from librarytypesv3 import install as v3_install
