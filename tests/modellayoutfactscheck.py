@@ -85,7 +85,7 @@ def parse_facts(data):
  assert at==len(data) and records and sum(len(r['entries']) for r in records.values())>0
  return records
 
-SBB=int(re.search(r'^SBB\s*=\s*(\d+)',(ROOT/'exec/parse/gen.py').read_text(),re.M).group(1))  # a struct's BASE code is SBB+sid (#27 moved it 1000->3840)
+SBB=int(re.search(r'"SBB":(\d+)',(ROOT/'exec/facts/k2-control.tsv').read_text()).group(1))  # a struct's BASE code is SBB+sid (#27 moved it 1000->3840)
 def expected():
  def entry(kind,base,offset,storage,alignment,bits=0,bitoffset=0,signed=0,named=1,array=0,child=0,shape=0,depth=0):
   return dict(zip(FIELDS,(kind,base,depth,array,offset,bitoffset,bits,storage,alignment,child,named,shape,signed)))
