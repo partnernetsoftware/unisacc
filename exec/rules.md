@@ -48,7 +48,7 @@ Each generated δ is checked against its table over the finite observation domai
 
 ## 构建期 import 的 unisa/ 模块：事实来源与可信基
 
-exec/ 的构造器在构建时 import 以下 unisa/ 模块：。它们不在决策代码账本的范围内，因为它们不直接改图，作用是：①**事实来源**：gold 真值表、目录（catalog）、编码规格、类型与目标事实等，通过绑定和事实列表进入声明表；②**参考实现的一部分**：经典 Python 路线，作为逐字节对拍的裁判之一；③**可信基**：它们给出的事实若有错，网络与表会“一致地错”，全域枚举发现不了——这一层由外部裁判、参考/产品/cc 三方对拍（declmatrix、csmithdiff）提供证据。论文 A（J 项）应把它们列入可信基，与 Python 构造器、枚举器并列。
+exec/ 的构造器在构建时 import 以下 unisa/ 模块（19 个）：`unisa/__main__`、`unisa/assemble`、`unisa/catalog`、`unisa/construct`、`unisa/driver`、`unisa/emit_arm`、`unisa/emit_x`、`unisa/front`、`unisa/front.pp`、`unisa/gold`、`unisa/hostabi`、`unisa/image`、`unisa/intnet`、`unisa/libneed`、`unisa/lower`、`unisa/prune`、`unisa/tape`、`unisa/tsvgold`、`unisa/uns`。它们不在决策代码账本的范围内，因为它们不直接改图，作用是：①**事实来源**：gold 真值表、目录（catalog）、编码规格、类型与目标事实等，通过绑定和事实列表进入声明表；②**参考实现的一部分**：经典 Python 路线，作为逐字节对拍的裁判之一；③**可信基**：它们给出的事实若有错，网络与表会“一致地错”，全域枚举发现不了——这一层由外部裁判、参考/产品/cc 三方对拍（declmatrix、csmithdiff）提供证据。论文 A（J 项）应把它们列入可信基，与 Python 构造器、枚举器并列。
 
 ## 旧口径下的残余清单（历史，2026-10-03，仅统计 .on/.branch/.goto；现行口径与理由见上一节和 tests/decisionledger.allow）
 
