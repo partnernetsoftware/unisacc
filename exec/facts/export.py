@@ -1420,5 +1420,21 @@ TABLES.append(("k2-membercontrol", ["exec/parse2/gen2.py", "exec/parse2/memberco
                                     "exec/parse2/tape-templates.tsv", "exec/facts/export.py"], k2membercontrol))
 
 
+def k2truth():
+    """Scalar truth opcodes from the declared output variants; actions remain in scalar TSVs."""
+    rows = [ln.split("\t") for ln in (ROOT / "exec/parse2/scalar-outputs.tsv").read_text().splitlines()[1:]]
+    variants = [(group, entry, argument) for group, entry, _, argument, _ in rows
+                if group in ("truth", "not")]
+    assert variants == [("truth", "FT.double", "64"), ("truth", "FT.float", "32"),
+                        ("not", "FN.double", "feq64"), ("not", "FN.float", "feq32"),
+                        ("not", "FN.integer", "eq")]
+    names = ("TRUTH64_OP", "TRUTH32_OP", "NOT64_OP", "NOT32_OP", "NOTINT_OP")
+    return ["=" + name + "\tstr\t" + ("feq" + argument if group == "truth" else argument)
+            for name, (group, _, argument) in zip(names, variants)]
+
+
+TABLES.append(("k2-truth", ["exec/parse2/scalar-outputs.tsv", "exec/facts/export.py"], k2truth))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
