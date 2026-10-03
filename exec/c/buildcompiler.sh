@@ -97,7 +97,11 @@ pack_models() {
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
     codec_flag=
     case ${PACK_COMPRESSED:-1} in 0) codec_flag=--legacy-package;; 1) codec_flag=--compressed;; *) echo "PACK_COMPRESSED must be 0 or 1" >&2; exit 2;; esac
-    b python3 exec/c/compilerpack.py $codec_flag --no-model-cache --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    # Fresh construction per candidate: the model cache lives inside this build's own
+    # directory (empty at the first pack-models), so a bounded run that stops part-way
+    # resumes from the models it already built instead of starting over (0.0.23: parse2
+    # pushed one pass past the 55 s bound).  Cache hits re-check the product digests.
+    UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py $codec_flag --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
     [ -s "$T/compiler.pkg" ]
     printf '%s\n' "$source_start" > "$T/compiler.pkg.source"   # the identity pack-driver seals with
     echo "model package: $T/compiler.pkg"
