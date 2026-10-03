@@ -27,7 +27,11 @@ def install(E, regions, arch="x86_64"):
     class _Scope:
         def __init__(self, cur): self.cur = cur
     root = Path(__file__).parent
-    bindings = dict(regions, machine=183 if arch == "arm64" else 62)
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from exec.facts.load import facts
+    machine = {r["arch"]: r["machine"] for r in facts("enc-elfobject-machine")}
+    bindings = dict(regions, machine=machine[arch])
     for line in (root / "elfobject-fresh.tsv").read_text().splitlines()[1:]:
         part, key, kind, prefix = line.split("\t")
         bindings[key] = E.P.fresh(_Scope(prefix), kind)

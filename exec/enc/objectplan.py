@@ -8,9 +8,14 @@ header sequence (arch). Wrapped states move into OBJ.original.* via objectplan-t
 """
 import pathlib
 from finite_rules import install as install_rules, install_template
-OBJ_RELOCS = 250 << 40
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from exec.facts.load import facts
+_BANK = {r['name']: r['bank'] << 40 for r in facts('enc-objectplan-regions')}
+OBJ_RELOCS = _BANK['OBJ_RELOCS']
 OBJ_NREL = 'obj_nrel'
-NAMES, IDS, SEEN, FLAGS, KIND, POS, STRINGS, SYMBOLS, TEXT, TAPE = (i << 40 for i in range(251,261))
+NAMES, IDS, SEEN, FLAGS, KIND, POS, STRINGS, SYMBOLS, TEXT, TAPE = (_BANK[n] for n in
+    ('NAMES','IDS','SEEN','FLAGS','KIND','POS','STRINGS','SYMBOLS','TEXT','TAPE'))
 
 def install(E, byte, OFF, LABD, SYM, PRESENT, arch='x86_64', direct_labels=False):
     from elfimage import DATA
