@@ -137,6 +137,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   gained section ladderop ({ctx.owner}.{op.op} target); rejects literal rows from ladder-reject.tsv (mapseq REJECT).
   sha SAME default + --warnings --errors. Left: startup-run, _namespace_control, ordinary_control; merge segments.
 
+- Round 14 (32a6fe75): f893b753 verified (parse2 graphhash 5/5 shards 0 bad -- shard 3 once 1 bad under load, rerun 0;
+  6 exec gates green). startup-run is a segment: let+mapseq startup_data over facts tyrows (type table, flat t/u/tab),
+  syscalls, autonames + literal init acts/names from startup-actions/startup-names (mkgen2); header @out:=HEADER;
+  control_export=@str:1 with call merge returns lm_hstate/lm_hnext. sha SAME default + --errors.
+  Left: _namespace_control, ordinary_control, merge segments into one manifest.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
