@@ -482,3 +482,13 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sha SAME (actually run, tests/bound 58, PYTHONHASHSEED=0): gen2 32fb8e3c, --errors 7ea0e979,
   --warnings --errors 3a7edf34, --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
   Next: (2) libraryexports-manifest into gen2.py call site, (3) tokenlocations, (4) unitlocations (keep acc_state/acc_acts).
+- Round 36 (libraryexports wired): gen2.py `_libraryexports` runs libraryexports-manifest.tsv phases pre/mid/post/tail
+  (flags pre/mid/post/tail, already in the manifest) around librarytypes/libraryimports/libraryvariadic/librarycallables
+  manifests and librarymodule.install; constants from facts libraryexports (gen2 _LX); ret from the tail `let ret`.
+  libraryexports.py deleted; its librarycallables glue moved into _libraryexports; libraryimportscheck.py dropped the
+  unused `import libraryexports`. Manifest: 13 freshrows gained existing opt "holder":true (same DEFS twice fix as r35).
+  Bank-ownership assert for RANK_BANKS stays in export.py BANK_OWNERS (facts-time). No new ops/opts.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Not rerun: libraryimportscheck.py itself, gate closures that may list libraryexports.py/librarycallables.py.
+  Next: (3) tokenlocations, (4) unitlocations (keep acc_state/acc_acts).

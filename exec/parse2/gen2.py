@@ -372,8 +372,7 @@ def build(locations=False, warnings=False, errors=False):
         # librarymodule's no-main continuation: the errors message state that replaced the reject (named at creation,
         # errors-manifest.tsv lm_nomain_msg); the message state itself rejects, so the edge carries no actions.
         E.__dict__.setdefault("results", {}).update(lm_nomain_msg=_err["lm_nomain_msg"], lm_mainnext=_err["lm_nomain_msg"], lm_mainreject=[])
-    from libraryexports import install as libraryexports_install
-    start = libraryexports_install(E, P, {name: globals()[name] for name in
+    start = _libraryexports(E, P, {name: globals()[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
          'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',
          'SSZ','SAL','SMN','SMEM','MOF','MSZ','MPT','MBS','MAR','BFW','BFO','BFS')}, start, TYINT)
@@ -404,6 +403,51 @@ def build(locations=False, warnings=False, errors=False):
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
 
+
+
+def _libraryexports(E, P, b, start, integers):
+    """K2: libraryexports-manifest.tsv phases pre/mid/post/tail around the child manifests
+    (librarytypes, libraryimports, libraryvariadic, librarycallables) and librarymodule."""
+    import assemble
+    from librarymodule import install as module_install
+    root = Path(__file__).resolve().parent
+    lx = {k: v for k, v in _LX.items() if type(v) is int and v >= 1 << 40}   # exec/facts/libraryexports.tsv
+    bints = {'b_' + k: v for k, v in b.items() if type(v) is int}
+    env = dict(constants=dict(lx, **{k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_VAR', 'FPS_RD', 'FPS_RB', 'FPS_RSH')}),
+               out_seqs={'out USLSIG2': E.O('USLSIG2\n'), 'out USLSIG3': E.O('USLSIG3\n'), 'out USLTAPE1': E.O('USLTAPE1\n'),
+                         'reject': E.rej('not covered: library signature resource or duplicate definition')},
+               start=start, tk_static=E.TK['type=static'], allkeys=list(range(257)))
+    def phase(name, **extra):
+        return assemble.run(root / 'libraryexports-manifest.tsv', E, P,
+                            {k: k == name for k in ('pre', 'mid', 'post', 'tail')}, dict(env, **extra))
+    phase('pre')
+    assemble.run(root / 'librarytypes-manifest.tsv', E, P, {}, dict(bints,
+        isize=next(size for name, code, size, uns, narrow in integers if name == 'i32'),
+        ints=[{'code': code, 'size': size, 'uns': int(uns)} for _, code, size, uns, _ in integers], E_ARR=E.ARR, gen2_DIM=DIM))
+    phase('mid')
+    assemble.run(root / 'libraryimports-manifest.tsv', E, P, {}, dict(bints, start=start,
+        TK_ID=E.TK_ID, TK_SEMI=E.TK[';'], FPB_FPV=[b['FPB'], b['FPV']], BOOL=[b['BOOL']],
+        ints2=[{'code': code, 'width': width, 'uns': uns} for _, code, width, uns, _ in integers]))
+    phase('post')
+    assemble.run(root / 'libraryvariadic-manifest.tsv', E, P, {})
+    li = assemble.load_facts('libraryimports')['libraryimports!']   # exec/facts/libraryimports.tsv
+    from unresolved import DEFINED
+    lc = dict({r['name']: r['value'] for r in _facts('librarycallables') if type(r['value']) is int and r['value'] >= 1 << 40},
+              RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK, LCSITERANK=_VR['LCSITERANK'],
+              **{k: li[k] for k in ('BYNAME', 'ADDRESS', 'FORMAT', 'SUPPORTED', 'TYPEDSIG', 'PLAN')},
+              REQUESTS=assemble.load_facts('libraryvariadic')['REQUESTS'], DEFINED=DEFINED, VARIADIC=_LX['VARIADIC'],
+              E_VAR=E.VAR, E_DBL=E.DBL, E_INT=E.SZ['int'], TK_SEMI=E.TK[';'],
+              **{'b_' + k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_RB', 'FPS_RD', 'FPS_RSH', 'FPS_VAR', 'SSZ', 'SBB')})
+    seqs = {}
+    for line in (root / 'librarycallables-result.tsv').read_text().splitlines()[1:]:
+        if line:
+            for a in json.loads(line.split('\t')[4]):
+                if a[0] == '@' and a[1].startswith('out:'):
+                    seqs[a[1]] = E.O(a[1][4:])
+    callable_start = assemble.run(root / 'librarycallables-manifest.tsv', E, P, {}, dict(constants=lc,
+        classes={'uns1': [E.UNS + 1], 'uns2': [E.UNS + 2], 'bool': [b['BOOL']], 'float': [b['FLT']]},
+        start='LI.start', fpcont=E.results['fpcont'], text_seqs=seqs))['ret']
+    return phase('tail', module_start=module_install(E, P, callable_start))['ret']
 
 if __name__ == "__main__":
     warnings = "--warnings" in sys.argv
