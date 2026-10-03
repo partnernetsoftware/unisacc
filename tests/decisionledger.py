@@ -11,7 +11,7 @@ The counts may only fall: research/decision-ledger.json is the baseline; a rise 
 tests/decisionledger.allow has `rise STAGE reason`; every file still counted needs `keep FILE CATEGORY reason`.  `--update` rewrites the baseline
 (only after a reviewed decrease, or with an allow line).
 """
-import ast, json, pathlib, sys
+import ast, json, pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASE = ROOT / 'research/decision-ledger.json'
 ALLOW = ROOT / 'tests/decisionledger.allow'
@@ -44,7 +44,29 @@ def count():
         if n: stages.setdefault(stage, {})[str(rel)] = n
     return {s: {'total': sum(v.values()), 'files': v} for s, v in sorted(stages.items())}
 
+# 0.0.23 K2 seedpy: seed-layer Python is only the generic tsv->weights converter and the seed build.
+SEED_WHITELIST = ('exec/finite_rules.py', 'exec/assemble.py', 'exec/facts/export.py',
+                  'exec/c/', 'exec/pipeline/', 'exec/build/',
+                  'exec/lex/tbl.py', 'exec/lex/net.py', 'exec/lex/stage.py')   # executors / converters
+# check and reference-simulator tools: to move to the tests/ side, not counted
+SEED_TOOLS = re.compile(r'(check|sim|compare|roundtrip|cut)\.py$')
+
+def seedpy():
+    counts, tools = {}, []
+    for f in sorted(ROOT.joinpath('exec').rglob('*.py')):
+        rel = f.relative_to(ROOT).as_posix()
+        if rel.startswith(SEED_WHITELIST): continue
+        if SEED_TOOLS.search(rel): tools.append(rel); continue
+        d = rel.split('/')[1] if rel.count('/') > 1 else '.'
+        counts[d] = counts.get(d, 0) + 1
+    for t in tools: print('  tool     %s' % t)
+    for d, n in sorted(counts.items()): print('  %-10s %4d' % (d, n))
+    print('seedpy  stage-specific .py under exec/ %d   (check/sim tools %d, not counted; report only)'
+          % (sum(counts.values()), len(tools)))
+    return 0
+
 def main():
+    if '--seedpy' in sys.argv: return seedpy()
     now = count()
     total = sum(v['total'] for v in now.values())
     if '--update' in sys.argv:
