@@ -29,6 +29,21 @@
 - Remaining entries untouched: lex (497 lines + lexsourcefacts/locations), pp (464), parse (334),
   opt (184), nativeabi (89 + ordered.py). parse/gen.py is also the base module for prune/lower.
 
+## Round 2 (16:25-16:31)
+- 5d4b4e7b decision-ledger: `allowop py exec/lower/code-manifest.tsv ../modelbindings` in decisionledger.allow
+  (matched by manifest+stem); gate green, strict once the row is removed.
+- d13885d3 prune done: callers on `exec/build/gen.py prune`, exec/prune/gen.py deleted, SCHEMA_SHA tape guard in
+  exec/prune/check.py schema() (only runs with check.py now, not on every build), graphhash key renamed (068a6a14...).
+- uncommitted->committed: exec/parse/{prn,numout,fconv}-manifest.tsv + exec/facts/numeric-instances.tsv = the
+  parse/gen.py prn()/numout()/fconv() primitives as manifests (states identical to the Python versions,
+  .k2tmp/prntest.py). Reach them from another stage with `call ../parse/prn` (call resolves stem against the
+  caller's dir; the sub-run root becomes exec/parse).
+- Next: opt gen-manifest. Needs: flags (positional 1/2 -> `#! flags o2`? build/gen.py has only --FLAG; switch
+  callers `exec/opt/gen.py OUT 2` -> `exec/build/gen.py opt OUT --o2`), freshrows for opt-gen-fresh groups /
+  analysis-names / peep-names / rounds-names (level column via where), START acts (peep table + opinfo
+  interning + startwords) exported as json facts per level and fed with `@acts:`, PA/PB/PR index bindings and
+  answer-targets template Y list as facts (export.py producer). Order of fresh allocation must match build().
+
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
 - Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the
