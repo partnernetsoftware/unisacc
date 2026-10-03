@@ -398,3 +398,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   parse-constants TK_STR, as units-manifest does); strwalk IC.string -> call row at end of statics-init. sha SAME x3.
   (c) note: export-to-E.results only takes effect when the top-level env IS E.results (exec/build/gen.py run);
   under gen2.py each segment() has its own env, so (c) lands together with (d), not before.
+  (b) more: types() -> gen2-manifest block gated fact:seg_types (width/widthparts/bitfields/strwalk/shape/gen2parts
+  calls; its segments via recursive `call gen2` with seg_types=zero,seg_X=one, since call inherits the parent env;
+  types-entry result te, td=$$te:td); ladder() -> block fact:seg_ladders (recursive calls ladder-E, optail, tytail,
+  ladder-E-reject, ladder-C, ladder-C-reject). types()/ladder() deleted (tytail() def now unused). sha SAME x3.
+  Next: merge segments: replace the remaining gen2.py segment()/glue sequence by one top block, using the same
+  recursive-call pattern; then (c)+(d) together.

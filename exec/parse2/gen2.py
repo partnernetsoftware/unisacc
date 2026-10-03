@@ -140,15 +140,6 @@ def strwalk(pre, body, done):
     assemble.run(Path(__file__).resolve().parent / 'strwalk-manifest.tsv', E, P, {}, dict(pre=pre, body=body, done=done))
 
 
-def ladder(prefix, bottom):
-    """Precedence ladder: gen2-manifest segments (levels, then E's operator tails, then rejects)."""
-    segment("ladder-" + prefix)
-    if prefix == "E":
-        segment("optail")
-        tytail()
-    segment("ladder-%s-reject" % prefix)
-
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'facts')); from load import facts as _pffacts
 PFKINDS = {r['name']: r['value'] for r in _pffacts('printfallback')}['KINDS']   # printfallback-manifest.tsv (K2 trace translation)
 PFCONV = {ord(k): PFKINDS.index(v) for k,v in E.gold("pfconv") if k != "conv"}
@@ -244,34 +235,6 @@ def width_dispatch(name, tape=None, masks=False):
     assemble.run(Path(__file__).resolve().parent / 'width-manifest.tsv', E, P, {}, dict(width_name=name, width_load=int(name == "LOADV")))
 
 
-def types():
-    width_dispatch("LOADV", "load", masks=True)
-    width_dispatch("LOADRAW", "load")
-    import assemble
-    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_store=1))
-    width_dispatch("STOREV0", "store")
-    import assemble   # K2 trace translation: bitfields-manifest.tsv
-    assemble.run(Path(__file__).parent / 'bitfields-manifest.tsv', E, P, {}, {})   # no mode rows
-    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_narrow=1))
-    segment("types-dimensions")
-    strwalk("DM.s", "DM.sb", "DM.se")
-    segment("types-dimensions-tail")
-    # The bounded lookahead for a tentative incomplete array is a declared
-    # transition graph.  Token codes are stable parser facts; the source row
-    # set is exec/parse2/tentative-result.tsv.
-    import assemble
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_tentative=1))
-    shape_control("dimensions")
-
-    # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_typedispatch=1, td=segment("types-entry")["td"]))
-    segment("types-prefix")
-    shape_control("member-shape")
-    segment("types-typedef")
-    segment("types-word")   # foreach facts k2-gen2 typewords
-    segment("types-tail")
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_longdouble=1))
-
 def shape_control(section):
     """Shape descriptors: exec/parse2/shape-manifest.tsv (K2 sub-manifest; membercontrol still calls this)."""
     import assemble
@@ -355,7 +318,7 @@ def build(locations=False, warnings=False, errors=False):
     import assemble
     segment("startup-marker")   # + call strings-token-span, strings-initializer (gen2-manifest)
     segment("numeric")
-    types()
+    segment("types")
     segment("typing")
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
@@ -400,8 +363,7 @@ def build(locations=False, warnings=False, errors=False):
     segment("upd-type")   # + calls folded into gen2-manifest
     segment("upd-modes")
     segment("upd-var")
-    ladder("E", "UNARY")
-    ladder("C", None)
+    segment("ladders")
     ordinary_control('string', warnings)
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
