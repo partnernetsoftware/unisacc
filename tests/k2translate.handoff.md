@@ -96,6 +96,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   passed. Next: print the old scan hits per mode to learn which state/key holds the header, then export that
   producer instead. lm_main facts (keys [*], next DEAD, reject "not covered: no main") are in the same diff.
 
+- Round 5: librarymodule header/main done (b0774b64): header state = startup_index exported by a gated row in
+  control-manifest (fact control_export); its row is expanded per key, so facts give domain [0,257]; main keys =
+  domain minus [1] (END.ok). Errors mode: the errors stage (block 3) re-targets the no-main reject to a fresh
+  ER.messageN state, so librarymodule keeps one boundary read there (lm_errors). Remaining before deleting
+  librarymodule.py: that boundary + turning install() into a manifest (template/rows ops only now).
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
