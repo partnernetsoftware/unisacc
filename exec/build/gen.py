@@ -43,7 +43,10 @@ E = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(E)
 if "graph" in head:
     E.g, E.P = getattr(E, head["graph"][0])(), getattr(E, "P", None)
-env = assemble.run(man, E, E.P, {n: "--" + n in args for n in names})
+# Driver data channel: the top-level run environment is E.results, so names a row stores with
+# export / result= are readable by executor code later in the same build (E.results[name]).
+E.results = {}
+env = assemble.Run(E, E.P, {n: "--" + n in args for n in names}, E.results).run(man)
 start = head.get('start', ['START'])[0]
 start = env[start[1:]] if start.startswith('$') else start
 if "domains" in head:
