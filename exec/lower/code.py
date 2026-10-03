@@ -42,31 +42,8 @@ def install(E, arch="x86_64", os_="lnx"):
     assert scratch not in set(regmap.values()), 'callm scratch aliases tape register'
     assemble.run(Path(__file__).parent/'codedispatch-manifest.tsv', E, P, dict(win=os_=='win'),
                  dict(arch=arch, ids=ids, idmap={'id:'+n: v for n, v in ids.items()}, scratch=scratch,
-                      form_load64=enc['load64'], form_callr=enc['callr']))
-    # Generic output and fixed fusion/argument control; facts stay in their original maps.
-    print_labels = (('PRINT', 'b'), ('ADDR', 'r'), ('GENERIC', 'r'), ('G', 'b'),
-                    ('G', 'b'), ('G', 'r'), ('G', 'b'), ('G', 'r'),
-                    ('G', 'b'), ('GN', 'b'), ('GN', 'b'), ('NEXTOP', 'b'),
-                    ('NX', 'b'), ('DO', 'r'), ('DO', 'b'), ('PF', 'b'),
-                    ('PF', 'b'), ('PF', 'b'), ('PF', 'b'), ('PF', 'r'),
-                    ('DO', 'r'), ('DO', 'b'), ('PL', 'b'), ('PL', 'b'),
-                    ('PL', 'b'), ('PL', 'b'), ('PL', 'r'), ('DO', 'r'),
-                    ('DO', 'r'), ('DO', 'r'), ('DO', 'r'), ('DO', 'r'),
-                    ('DO', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'),
-                    ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'),
-                    ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'),
-                    ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'))
-    print_bindings = {'label'+str(i): P(owner).fresh(kind)
-                      for i, (owner, kind) in enumerate(print_labels)}
-    print_bindings.update(OP=OP, KIND=KIND, ARG=ARG, TXT=TXT, REG=REG, FORM=FORM,
-                          ARGREG=ARGREG)
-    print_bindings.update({'id:'+name: value for name, value in ids.items()})
-    print_sequences = {'text'+str(i): E.O(text) for i, text in enumerate((
-        ' ', ', ', ' reloc='+reloc['jmp'], ' reloc='+reloc['jz'], ' reloc='+reloc['call'], '\n',
-        'push ', 'pop ', 'setreg ', ', mem ', ' role=argc', 'argvget ', ', ', ', ',
-    ) + tuple('mov '+regmap['r'+str(i)]+', ' for i in range(8)))}
-    install_rules(g, Path(__file__).parent, 'code-print', bindings=print_bindings,
-                  sequences=print_sequences)
+                      form_load64=enc['load64'], form_callr=enc['callr'],
+                      **{'reloc_'+k: v for k, v in reloc.items()}, **{'reg_'+k: v for k, v in regmap.items()}))
     # Wrapper around init, for the eight numeric spellings and syscall ids.
     p=P('C.prelude')
     for i in range(8):p.a(('SBCLR',),('SBOUT',48+i),('SBINTERN','inum'+str(i)))
