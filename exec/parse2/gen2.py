@@ -319,7 +319,6 @@ def build(locations=False, warnings=False, errors=False):
     _publish(env, ("fpcont",))   # callcontrol-begin (merged): FS.CALLTYPE continuation (librarycallables)
     import assemble
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
-    segment("offsetof")
     start = "START"
     if locations:
         _tl = assemble.load_facts('tokenlocations')['tokenlocations!']   # exec/facts/tokenlocations.tsv
