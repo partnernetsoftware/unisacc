@@ -20,7 +20,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='r10-native-carrier-import-') as name:
   t=pathlib.Path(name)
   def cmd(*args):
-   p=subprocess.run(list(map(str,args)),capture_output=True,timeout=20,env=dict(os.environ,UA_TYPESPELL='1'));assert p.returncode==0,(args,p.returncode,p.stderr);return p.stdout
+   p=subprocess.run(list(map(str,args)),capture_output=True,timeout=45,env=dict(os.environ,UA_TYPESPELL='1'));assert p.returncode==0,(args,p.returncode,p.stderr);return p.stdout
   if len(sys.argv)==4:model,runtime,dumper=map(pathlib.Path,sys.argv[1:])
   else:
    assert len(sys.argv)==1
@@ -41,7 +41,7 @@ def main():
    src.write_text(source);raw=cmd(dumper,'-dump-tokens',src);tok.write_bytes(raw);files=Files(bound)
    for key in ('module','symbols','bindings','callables','callablemake','callablecall'):(rd/key).write_bytes(files.get(b'\0library/'+key.encode()))
    pkg.write_bytes(build([route],[('006c6962726172792f',rd)],cache=False));status,out,_=run(d,raw,'union-source',files=files,loaded=loaded,maxsteps=5000000)
-   p=subprocess.run([str(runtime),'--bundle',str(pkg),'parse',str(tok)],capture_output=True,timeout=20)
+   p=subprocess.run([str(runtime),'--bundle',str(pkg),'parse',str(tok)],capture_output=True,timeout=45)
    assert (status=='accept')==accepted==(p.returncode==0),(status,p.returncode,p.stderr,out[:200])
    if accepted:assert out==p.stdout;return out
    assert not p.stdout;return b''

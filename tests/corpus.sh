@@ -21,8 +21,13 @@ KNOWN=$REPO/tests/corpus.knownfail
 if [ ! -d "$SRC" ]; then
     [ "${FETCH:-1}" = "1" ] || { echo "corpus absent (FETCH=0)"; exit 1; }
     echo "fetching c-testsuite into $DIR ..."
-    bound 30 git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$DIR" \
-        || { echo "clone failed -- corpus not tested"; exit 1; }
+    # Shards start together: clone to a private directory and rename into place, so
+    # one shard wins and the others use its tree (0.0.23 queue: "File exists" x3).
+    mkdir -p "$(dirname "$DIR")"; tmp=$(mktemp -d "$DIR.fetch.XXXXXX")
+    bound 30 git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$tmp/c" \
+        || { rm -rf "$tmp"; echo "clone failed -- corpus not tested"; exit 1; }
+    python3 -c 'import os,sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp/c" "$DIR" 2>/dev/null || [ -d "$SRC" ] || { rm -rf "$tmp"; echo "corpus fetch lost a race and found no tree"; exit 1; }
+    rm -rf "$tmp"
 fi
 
 pass=0; wrong=0; unsup=0; known=0; revived=0; slow=0
