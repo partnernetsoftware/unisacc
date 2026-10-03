@@ -12,7 +12,8 @@ globals().update((_r['name'],_t(_r['value'])) for _r in _facts('libraryexports')
 def install(E,P,b,start,integers):
     import assemble
     from finite_rules import install as rules, install_template
-    import librarycallables, types
+    import types
+    librarycallables=types.SimpleNamespace(__name__='librarycallables',**{r['name']:_t(r['value']) for r in _facts('librarycallables')})  # exec/facts/librarycallables.tsv
     layoutfacts=types.SimpleNamespace(**assemble.load_facts('layoutfacts')['layoutfacts!'])  # exec/facts/layoutfacts.tsv
     libraryimports=types.SimpleNamespace(**assemble.load_facts('libraryimports')['libraryimports!'])  # exec/facts/libraryimports.tsv
     modelsignature=types.SimpleNamespace(**assemble.load_facts('top-modelsignature-banks')['top-modelsignature-banks!'])  # exec/facts/top-modelsignature-banks.tsv
@@ -101,8 +102,24 @@ def install(E,P,b,start,integers):
     section('call')
     import assemble
     assemble.run(root/'libraryvariadic-manifest.tsv',E,P,{})
-    from librarycallables import install as callable_install
-    callable_start=callable_install(E,P,b,imports_start)
+    import json
+    _li=assemble.load_facts('libraryimports')['libraryimports!']  # exec/facts/libraryimports.tsv
+    _vr={r['name']:r['value'] for r in _facts('valueranks') if r['kind']=='bank'}  # exec/facts/valueranks.tsv
+    from unresolved import DEFINED
+    lc_constants=dict({k:v for k,v in vars(librarycallables).items() if type(v) is int and v>=1<<40},
+        RETURNRANK=RETURNRANK,PARAMRANK=PARAMRANK,LCSITERANK=_vr['LCSITERANK'],
+        **{k:_li[k] for k in ('BYNAME','ADDRESS','FORMAT','SUPPORTED','TYPEDSIG','PLAN')},
+        REQUESTS=assemble.load_facts('libraryvariadic')['REQUESTS'],DEFINED=DEFINED,VARIADIC=VARIADIC,
+        E_VAR=E.VAR,E_DBL=E.DBL,E_INT=E.SZ['int'],TK_SEMI=E.TK[';'],
+        **{'b_'+k:b[k] for k in ('FPS_FN','FPS_COUNT','FPS_RB','FPS_RD','FPS_RSH','FPS_VAR','SSZ','SBB')})
+    lc_classes={'uns1':[E.UNS+1],'uns2':[E.UNS+2],'bool':[b['BOOL']],'float':[b['FLT']]}
+    lc_seq={}
+    for line in (root/'librarycallables-result.tsv').read_text().splitlines()[1:]:
+        if line:
+            for a in json.loads(line.split('\t')[4]):
+                if a[0]=='@' and a[1].startswith('out:'):lc_seq[a[1]]=E.O(a[1][4:])
+    callable_start=assemble.run(root/'librarycallables-manifest.tsv',E,P,{},   # librarycallables-manifest.tsv
+        dict(constants=lc_constants,classes=lc_classes,start=imports_start,fpcont=E.results['fpcont'],text_seqs=lc_seq))['ret']
     module_start=module_install(E,P,callable_start)
     template('startok',{'module_start':[module_start],'key':range(257)})
     return 'LX.version'

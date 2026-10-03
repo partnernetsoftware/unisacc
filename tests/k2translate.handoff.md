@@ -474,3 +474,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   into build/procs.py make_P (needs TK, VS: take from parse-constants facts); move gold/PREC/BINSEL/IRSEL/optext,
   constants and sizes into exec/build/parsebase.py, point importers (parse2base, gen2, export.py _module paths,
   pipeline/run.py, manifests' `#! base parse/gen.py`) at it; then exec/parse/gen.py disappears from the ledger.
+- Round 35 (background agent, librarycallables wired): libraryexports.py runs exec/parse2/librarycallables-manifest.tsv
+  via assemble.run (constants from facts librarycallables/libraryimports/valueranks/libraryvariadic + E/b codes,
+  text_seqs from librarycallables-result.tsv out: cells) instead of librarycallables.install; librarycallables.py deleted.
+  Manifest fix: freshrows specs gained the existing "holder":true opt (without it each fresh row constructed
+  P(owner) and parse2base DEFS refused 'defined twice' for LC.fresh.librarycallables.s*). No new opts keys/ops.
+  sha SAME (actually run, tests/bound 58, PYTHONHASHSEED=0): gen2 32fb8e3c, --errors 7ea0e979,
+  --warnings --errors 3a7edf34, --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Next: (2) libraryexports-manifest into gen2.py call site, (3) tokenlocations, (4) unitlocations (keep acc_state/acc_acts).
