@@ -39,7 +39,7 @@ def _entries():
             add('exec/build/gen.py lower', *(('--full',) + os_ + a))
     add('exec/build/gen.py lower')
     add('exec/build/gen.py lower', '--full', '--object'); add('exec/build/gen.py lower', '--full', '--object', '--arm64')
-    for enc in ('exec/enc/gen.py', 'exec/enc/arm.py'):
+    for enc in ('exec/build/gen.py enc', 'exec/build/gen.py enc/arm'):
         for f in ((), ('--elf',), ('--macho',), ('--pe',), ('--object',)):
             add(enc, *f)
     return e

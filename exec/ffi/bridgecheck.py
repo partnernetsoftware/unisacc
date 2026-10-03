@@ -161,7 +161,7 @@ def main():
         d=Path(tmp);runner=d/'run';call(['cc','-O2',ROOT/'exec/c/run.c','-o',runner])
         oracle=_oracle('built')
         for arch,tag in [('arm64','arm'),('x86_64','x86')]:
-            enc=model(d,'enc-'+tag,'exec/enc/'+('arm.py' if arch=='arm64' else 'gen.py'))
+            enc=model(d,'enc-'+tag,'exec/build/gen.py',['enc/arm' if arch=='arm64' else 'enc'])
             low=model(d,'lower-'+tag,'exec/build/gen.py',['lower','--full','--osx']+(['--arm64'] if arch=='arm64' else []))
             encodings(d,runner,arch,enc);lowering(d,runner,arch,low,oracle);native_call(d,runner,arch,enc)
         complete(d,ua,oracle)

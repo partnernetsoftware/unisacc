@@ -48,6 +48,6 @@ def main():
     assert all(r.startswith('lnx/') for r in routes),'unfinished OS route advertised'
     for arch in ('x86_64','arm64'):
         assert ('object-lower-'+arch,'exec/build/gen.py',['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])) in calls
-        assert ('object-enc-'+arch,'exec/enc/'+('arm.py' if arch=='arm64' else 'gen.py'),['--object']) in calls
+        assert ('object-enc-'+arch,'exec/build/gen.py',['enc/arm' if arch=='arm64' else 'enc','--object']) in calls
     print('object pack declarations: 24 routes; original routes unchanged; stubbed construction only')
 if __name__=='__main__':main()

@@ -9,9 +9,9 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'exec/enc')]
 from exec.pp.sim import run
-spec=importlib.util.spec_from_file_location('objectgen',ROOT/'exec/enc/gen.py')
-gen=importlib.util.module_from_spec(spec);spec.loader.exec_module(gen)
-model=gen.build(image='elf',object_mode=True)
+with tempfile.TemporaryDirectory() as _d:
+    subprocess.run([sys.executable,ROOT/'exec/build/gen.py','enc',Path(_d)/'m.json','--object'],check=True,stderr=subprocess.DEVNULL)
+    model=json.loads((Path(_d)/'m.json').read_text())
 text=(b'@target lnx/x86_64\n@data 610000\n@data_len 24\n@bss 0\n'
       b'@sym g_export 256\n@sym local 272\n@obj_nzend 3\n'
       b'@obj_name local 0 0\n@obj_name g_export 1 0\n@obj_name _start 0 0\n'

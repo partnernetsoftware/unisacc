@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 b cc -O2 -o "$T/run" exec/c/run.c
-b python3 exec/enc/gen.py "$T/d.json"
+b python3 exec/build/gen.py enc "$T/d.json"
 b python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl"
 b python3 exec/c/net.py "$T/d.tbl" "$T/d.net"
 b "$T/run" --check-net "$T/d.tbl" "$T/d.net"

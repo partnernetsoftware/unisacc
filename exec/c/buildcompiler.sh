@@ -68,9 +68,9 @@ target() {
     os=${1%/*}; arch=${1#*/}; name=$os-$arch
     start "$name"; d="$T/$name"
     case $os in lnx) osflag=; image=elf;; osx) osflag=--osx; image=macho;; win) osflag=--win; image=pe;; esac
-    case $arch in arm64) archflag=--arm64; enc=arm.py;; x86_64) archflag=; enc=gen.py;; esac
+    case $arch in arm64) archflag=--arm64; enc=enc/arm;; x86_64) archflag=; enc=enc;; esac
     b python3 exec/build/gen.py lower "$d/lower.json" --full $osflag $archflag
-    b python3 "exec/enc/$enc" "$d/elf.json" "--$image"
+    b python3 exec/build/gen.py "$enc" "$d/elf.json" "--$image"
     for s in lower elf; do
         b python3 exec/c/tbl.py "$d/$s.json" "$d/$s.tbl"
         b python3 exec/c/net.py "$d/$s.tbl" "$d/$s.net"

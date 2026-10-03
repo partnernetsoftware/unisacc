@@ -43,7 +43,7 @@ def specs(group):
                      for arch in ("arm64", "x86_64")
                      for stage, script, args in (
                          ("lower", "exec/build/gen.py", ("lower", "--full", "--object") + (("--arm64",) if arch == "arm64" else ())),
-                         ("elf", "exec/enc/arm.py" if arch == "arm64" else "exec/enc/gen.py", ("--object",)),
+                         ("elf", "exec/build/gen.py", ("enc/arm" if arch == "arm64" else "enc", "--object")),
                      ))
     if group not in TARGETS:
         raise SystemExit("group must be shared, features, object, or one of " + ", ".join(TARGETS))
@@ -52,7 +52,7 @@ def specs(group):
     aflag = ("--arm64",) if arch == "arm64" else ()
     image = {"lnx": "elf", "osx": "macho", "win": "pe"}[osname]
     return (("lower", "exec/build/gen.py", ("lower", "--full",) + flags + aflag),
-            ("elf", "exec/enc/arm.py" if arch == "arm64" else "exec/enc/gen.py", ("--" + image,)))
+            ("elf", "exec/build/gen.py", ("enc/arm" if arch == "arm64" else "enc", "--" + image)))
 
 
 def run(deadline, *args, env=None):

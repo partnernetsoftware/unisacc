@@ -38,10 +38,10 @@ def check():
         d=pathlib.Path(name)
         command(['cc','-O2','-I',ROOT/'exec/c',ROOT/'exec/c/run.c','-o',d/'run'])
         for arch,script,reg,expected in [
-            ('x86_64','gen.py','rax',{'_start':0,'__init':2,'main':3,'end':9}),
-            ('arm64','arm.py','x0',{'_start':0,'__init':4,'main':16,'end':32})]:
+            ('x86_64','enc','rax',{'_start':0,'__init':2,'main':3,'end':9}),
+            ('arm64','enc/arm','x0',{'_start':0,'__init':4,'main':16,'end':32})]:
             js=d/(arch+'.json');tbl=d/(arch+'.tbl');net=d/(arch+'.net')
-            command([sys.executable,ROOT/'exec/enc'/script,js,'--elf'])
+            command([sys.executable,ROOT/'exec/build/gen.py',script,js,'--elf'])
             command([sys.executable,ROOT/'exec/c/tbl.py',js,tbl])
             command([sys.executable,ROOT/'exec/c/net.py',tbl,net])
             command([d/'run','--check-net',tbl,net])

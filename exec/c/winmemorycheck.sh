@@ -8,10 +8,10 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 ARCH=${1:-arm64}
-case $ARCH in arm64) FLAG=--arm64; ENCODER=arm.py;; x86_64) FLAG=; ENCODER=gen.py;; *) exit 2;; esac
+case $ARCH in arm64) FLAG=--arm64; ENCODER=enc/arm;; x86_64) FLAG=; ENCODER=enc;; *) exit 2;; esac
 b cc -O2 exec/c/run.c -o "$T/run"
 b python3 exec/build/gen.py lower "$T/lower.json" --full --win $FLAG
-b python3 "exec/enc/$ENCODER" "$T/elf.json" --pe
+b python3 exec/build/gen.py "$ENCODER" "$T/elf.json" --pe
 for s in lower elf; do
  b python3 exec/c/tbl.py "$T/$s.json" "$T/$s.tbl"
  b python3 exec/c/net.py "$T/$s.tbl" "$T/$s.net"

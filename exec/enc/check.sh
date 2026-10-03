@@ -12,7 +12,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" "$@"; }
 D=exec/enc
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "e5: cc failed"; exit 1; }
-b 60 python3 $D/gen.py "$T/d.json" 2>/dev/null || { echo "e5: gen failed"; exit 1; }
+b 60 python3 exec/build/gen.py enc "$T/d.json" 2>/dev/null || { echo "e5: gen failed"; exit 1; }
 b 60 python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl" || { echo "e5: tbl failed"; exit 1; }
 ok=0; bad=0
 # the expectations file: every line a comment or `br-NAME.txt OFFSET HEX`, one per br-* fixture, no other

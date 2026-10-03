@@ -14,9 +14,9 @@ b python3 exec/parse2/gen2.py "$OUT/e3.json"
 b python3 exec/build/gen.py opt "$OUT/e4.json" --o2
 b python3 exec/build/gen.py prune "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
-case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=arm.py;; *) ARCHFLAG=; ENCODER=gen.py;; esac
+case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=enc/arm;; *) ARCHFLAG=; ENCODER=enc;; esac
 b python3 exec/build/gen.py lower "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
-b python3 "exec/enc/$ENCODER" "$OUT/elf.json" "--$IMAGE"
+b python3 exec/build/gen.py "$ENCODER" "$OUT/elf.json" "--$IMAGE"
 MODEL=tbl
 case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
 STAGES=$(awk '!/^#/ && NF {print $1}' exec/pipeline/image-stages.tsv)
