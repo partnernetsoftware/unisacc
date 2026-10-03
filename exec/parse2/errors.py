@@ -65,11 +65,4 @@ def install(E,P,warnings=False):
     assert not set(stack)&set(g.st)
     install_rows(g,root/'errors-stack.tsv',domain=sorted(g.labels)+['BOT'],mode='t')
     # Track every input view in the complete graph, including the renderer.
-    for _,row in g.st.values():
-        for key,(nxt,seq) in list(row.items()):
-            acts=[]
-            for a in g.seqs[seq]:
-                acts.append(a)
-                if a[0] in ('INPUSH','INPUSHX','INPUSHXE'):acts.append(('ALUI','add','er_depth','er_depth',1))
-                elif a[0]=='INPOP':acts.append(('ALUI','sub','er_depth','er_depth',1))
-            row[key]=(nxt,g.seq(acts))
+    declare('depth')
