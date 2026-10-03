@@ -47,6 +47,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+_bgspec = __import__("importlib.util").util.spec_from_file_location("k2_build_graph_pp", os.path.join(ROOT, "exec", "build", "graph.py"))
+_build_graph = __import__("importlib.util").util.module_from_spec(_bgspec)
+_bgspec.loader.exec_module(_build_graph)
 EOF = 256
 
 sys.path.insert(0, ROOT)
@@ -199,48 +202,7 @@ ID = AL | DI
 # (more than MAXP or malformed)
 
 
-class G:
-    def __init__(self):
-        self.st = {}
-        self.seqs, self.seqix = [], {}
-        self.labels = set()
-        self.unreach = 0
-
-    def seq(self, acts):
-        acts = tuple(tuple(a) for a in acts)
-        if acts not in self.seqix:
-            self.seqix[acts] = len(self.seqs)
-            self.seqs.append(acts)
-        return self.seqix[acts]
-
-    def on(self, name, keys, nxt, acts=(), mode="b"):
-        if name not in self.st:
-            self.st[name] = [mode, {}]
-        assert self.st[name][0] == mode, name
-        row = self.st[name][1]
-        for k in keys:
-            if k not in row:
-                row[k] = (nxt, self.seq(acts))
-
-    def els(self, name, nxt, acts=(), mode="b"):
-        self.on(name, range(257), nxt, acts, mode)
-
-    def r(self, name, cases):          # a state that reads r
-        for keys, (nxt, acts) in cases.items():
-            self.on(name, keys if isinstance(keys, tuple) else (keys,), nxt, acts, "r")
-
-    def finish(self):
-        self.st["RET"] = ["t", {g: (g, self.seq([("POP",)])) for g in sorted(self.labels)}]
-        self.st["RET"][1]["BOT"] = ("DEAD", self.seq([("REJECT", "unreachable")]))
-        for name, (mode, row) in self.st.items():
-            if mode in "br":
-                for k in range(257):
-                    if k not in row:
-                        row[k] = ("DEAD", self.seq([("REJECT", "unreachable")]))
-                        self.unreach += 1
-        self.els("DEAD", "DEAD", [("REJECT", "unreachable")])
-
-
+G = _build_graph.G   # generic graph primitives (exec/build/graph.py)
 
 
 def sbconst(s):

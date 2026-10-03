@@ -188,33 +188,11 @@ def load_lex_table():
 
 
 # ---- the machine under construction ----------------------------------------
-class Delta:
-    def __init__(self):
-        self.states = {}          # name -> (mode, {value: (next, seqid)})
-        self.seqs = []            # action sequences (tuples)
-        self.seqix = {}
-        self.unreach = 0
-        self.st = self.states     # the graph view finite_rules edits
-        self.labels = set()
-
-    def seq(self, acts):
-        acts = tuple(tuple(a) if isinstance(a, list) else a for a in acts)
-        if acts not in self.seqix:
-            self.seqix[acts] = len(self.seqs)
-            self.seqs.append(acts)
-        return self.seqix[acts]
-
-    def state(self, name, mode):
-        if name not in self.states:
-            self.states[name] = (mode, {})
-        return self.states[name][1]
-
-    # thin adapter for exec/finite_rules.install_template
-    def on(self, name, keys, nxt, acts, mode):
-        row = self.state(name, mode)
-        for key in keys:
-            row[key] = (nxt, self.seq(acts))
-
+import importlib.util as _ilu
+_bgspec = _ilu.spec_from_file_location("k2_build_graph_lex", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "exec", "build", "graph.py"))
+_build_graph = _ilu.module_from_spec(_bgspec)
+_bgspec.loader.exec_module(_build_graph)
+Delta = _build_graph.Delta   # generic graph primitives (exec/build/graph.py)
 
 D = Delta()
 A = ("ADV",)
