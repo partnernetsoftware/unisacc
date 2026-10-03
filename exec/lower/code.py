@@ -130,29 +130,16 @@ def install(E, arch="x86_64", os_="lnx"):
     import assemble
     scratch='x'+str(IP0) if regmap['r0'].startswith('x') else SCR
     assert scratch not in regmap.values(), 'library zero scratch aliases tape register'
-    assemble.run(Path(__file__).parent/'libraryexit-manifest.tsv', E, P, dict(hosted=os_ in ('osx','lnx','win')),
-                 dict(SYSA=SYSA, fn=E.O('setreg '+regmap['r1']+', imm '), argv=E.O('setreg '+regmap['r0']+', addr '),
-                      zero=E.O(', '+scratch+'\n'), zeroinit=E.O('setreg '+scratch+', imm 0\n'), store=E.O('setmem '),
-                      call=E.O('hostcall '+regmap['r1']+', '+regmap['r0']+'\n'),
-                      retname=[('SBOUT',b) for b in regmap['r0'].encode()]))
     from unisa.emit_arm import IP1
     from unisa.emit_x86 import SCR2
     s0,s1=('x'+str(IP0),'x'+str(IP1)) if regmap['r0'].startswith('x') else (SCR,SCR2)
     assert not {s0,s1}&set(regmap.values()), 'process scratches alias tape values'
-    assemble.run(Path(__file__).parent/'librarymodule-manifest.tsv', E, P, {},
-                 dict(REG=REG, base=E.O('setreg '+s0+', imm '), argc_load=E.O(', '+s0+', 0\n'),
-                      argv_prefix=E.O('\nload64 '+s0+', '+s0+', 8\nsetreg '+s1+', imm 8\nmul64 '+s1+', '+s1+', '),
-                      argv_add=E.O('\nadd64 '+s0+', '+s0+', '+s1+'\nload64 '), newline=E.O('\n'), load=E.O('load64 ')))
+    hosted=dict(hosted=os_ in ('osx','lnx','win'))
+    assemble.run(Path(__file__).parent/'codelib-manifest.tsv', E, P, hosted,
+                 dict(scratch=scratch, s0=s0, s1=s1, **{'reg_'+k: v for k, v in regmap.items()}))
     from modelbindings import install as install_decoder
     from modelbindings import IDS, ADDRESS, DESC, KIND as BKIND, SUPPORTED, WRITABLE, EXTENT, STRIDE
-    DEFINED = assemble.load_facts('lower-data')['DEFINED']
     install_decoder(E)
-    hosted=dict(hosted=os_ in ('osx','lnx','win'))
-    assemble.run(Path(__file__).parent/'libraryimports-manifest.tsv', E, P, hosted,
-                 dict(call=ids['.librarycall'], REG=REG, DESC=DESC))
-    assemble.run(Path(__file__).parent/'librarydata-manifest.tsv', E, P, hosted,
-                 dict(addr=ids['.libraryaddr'], lea=ids['.lea'], REG=REG, TXT=TXT, DEFINED=DEFINED, IDS=IDS,
-                      ADDRESS=ADDRESS, DESC=DESC, KIND=BKIND, SUPPORTED=SUPPORTED, WRITABLE=WRITABLE,
-                      EXTENT=EXTENT, STRIDE=STRIDE))
-    install_rules(g, Path(__file__).parent, 'code-shell',
-                  sequences={'reject': E.rej('not covered: '+os_+'/'+arch+' lowering')}, section='exit')
+    assemble.run(Path(__file__).parent/'codeend-manifest.tsv', E, P, hosted,
+                 dict(ids=ids, target=target, IDS=IDS, ADDRESS=ADDRESS, DESC=DESC, BKIND=BKIND, SUPPORTED=SUPPORTED,
+                      WRITABLE=WRITABLE, EXTENT=EXTENT, STRIDE=STRIDE))
