@@ -5,12 +5,16 @@ Canonical validation precedes indexing. Top-level mode is excluded by the old
 contract; nested modes and every ABI layout fact remain significant. No host
 parser, graph isomorphism or callback execution. Budget exhaustion rejects.
 """
-FIELDS, EDGES, LAYOUT, SIGID, PAIRLEFT, PAIRRIGHT, VISITED, FRAME = (i<<40 for i in range(430,438))
+import sys as _sys, pathlib as _pl
+_root=str(_pl.Path(__file__).resolve().parents[1])
+if _root not in _sys.path: _sys.path.append(_root)
+from exec.facts.load import facts
+# Bank constants (430.., V3 extras 632..): exec/facts/top-modelgraphequality-banks.tsv.
+globals().update({r['name']:r['bank']<<40 for r in facts('top-modelgraphequality-banks')})
 assert not set(range(430,438)) & (set(range(350,358)) | set(range(400,408)) | set(range(410,414)))
 # Legacy FIELDS stride16, EDGES stride1025 and LAYOUT stride4 stay unchanged.
 # V3 extras: per-node [version,rank,format,natural,flags,known,origin];
 # per-entry [ordinal,kind,effective_alignment].
-EXTRA, ENTRYEXTRA = (i<<40 for i in range(632,634))
 assert not set(range(632,634)) & set(range(430,438))
 def install(E,fail='DEAD'):
  """Stage control lives in modelgraphequality-result.tsv (section pre). Python binds only the

@@ -3,9 +3,15 @@
 This is transport evidence about skipped syntax, not native ABI classification.
 The storage policy describes this compiler; nativeabi must still certify it.
 """
-MAGIC = b'USLFACT1\n'
-RESOURCE = b'\0library/sourcefacts'
-POLICY = 1
+import sys as _sys, pathlib as _pl
+_root=str(_pl.Path(__file__).resolve().parents[1])
+if _root not in _sys.path: _sys.path.append(_root)
+from exec.facts.load import facts
+# Frame constants: exec/facts/top-layoutprovenance-const.tsv.
+_C={r['name']:r['value'] for r in facts('top-layoutprovenance-const')}
+MAGIC=_C['MAGIC'].encode('latin-1')
+RESOURCE=_C['RESOURCE'].encode('latin-1')
+POLICY=_C['POLICY']
 
 
 from pathlib import Path

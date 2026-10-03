@@ -3,11 +3,14 @@ No source parsing or host-side ABI selection. Structural validation precedes dec
 Function typing is proved by E3; raw .librarycall is an explicitly trusted tape capability.
 """
 from pathlib import Path
-NAMES, IDS, ADDRESS, ARGC, DESC, SEEN = (i << 40 for i in range(190,196))
-KIND, EXTENT, WRITABLE = (i << 40 for i in range(196,199))
-VARIADIC, SUPPORTED = (i << 40 for i in range(313,315))
-FORMAT, TYPED, CANON, CANONLEN, DISPATCH, PLAN, RESULT_KIND, RESULT_WIDTH = (i << 40 for i in range(320,328))
-STRIDE=6150
+import sys as _sys, pathlib as _pl
+_root=str(_pl.Path(__file__).resolve().parents[1])
+if _root not in _sys.path: _sys.path.append(_root)
+from exec.facts.load import facts
+# Graph-table banks and wire constants: exec/facts/top-modelbindings-{banks,const}.tsv.
+globals().update({r['name']:r['bank']<<40 for r in facts('top-modelbindings-banks')})
+_C={r['name']:r['value'] for r in facts('top-modelbindings-const')}
+STRIDE=_C['STRIDE']
 
 def install(E):
     """Stage control lives in modelbindings-result.tsv (sections read, head, present, header,
@@ -24,17 +27,17 @@ def install(E):
                   EXTENT=EXTENT,WRITABLE=WRITABLE,VARIADIC=VARIADIC,SUPPORTED=SUPPORTED,FORMAT=FORMAT,
                   TYPED=TYPED,CANON=CANON,CANONLEN=CANONLEN,DISPATCH=DISPATCH,PLAN=PLAN,
                   RESULT_KIND=RESULT_KIND,RESULT_WIDTH=RESULT_WIDTH)
-    sequences={'librarypath':[('SBOUT',x) for x in b'\0library/bindings']}
+    sequences={'librarypath':[('SBOUT',x) for x in _C['librarypath'].encode('latin-1')]}
     def section(name):
         p=P('LBI.fresh')
         for part,key,kind in fresh:
             if part==name:bindings[key]=p.fresh(kind)
         rules(g,root,'modelbindings',bindings,sequences,None,name)
-    letters,digits=b'_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',b'0123456789'
-    facts=dict(magic=[dict(i=i,c=c,next=i+1) for i,c in enumerate(b'USBIND')],
-               id=[dict(letters=list(letters),digits=list(digits),all=list(letters+digits))],kind=[0,1])
+    letters,digits=_C['letters'].encode(),_C['digits'].encode()
+    tfacts=dict(magic=[dict(i=i,c=c,next=i+1) for i,c in enumerate(_C['magic'].encode())],
+               id=[dict(letters=list(letters),digits=list(digits),all=list(letters+digits))],kind=_C['kind'])
     def template(name):
-        install_template(g,root,'modelbindings',facts,P('LBI.fresh').fresh,bindings,None,None,name)
+        install_template(g,root,'modelbindings',tfacts,P('LBI.fresh').fresh,bindings,None,None,name)
     rules(g,root,'modelbindings',section='read')
     section('head')
     from modelcandidates import install as install_candidates

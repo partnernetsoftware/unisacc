@@ -4,12 +4,15 @@ variadic/mode/support, resultkind/resultwidth and ms_version=2/3. All scratch us
 V3 canonical begins USLSIG3\n; V2 canonical bytes retain their legacy framing.
 Input/output restored; SB scratch unspecified. Recursive base/shape become zero.
 """
-LIMIT, END, KIND, WIDTH, TAG, COUNT, INDEX, ALIGN = (i<<40 for i in range(350,358))
-# Separate banks from existing descriptor 350..357 and variadic 400..407.
-DEPTH, SIGCOUNT, SIGINDEX, SIGCALLBASE = (i<<40 for i in range(410,414))
+import sys as _sys, pathlib as _pl
+_root=str(_pl.Path(__file__).resolve().parents[1])
+if _root not in _sys.path: _sys.path.append(_root)
+from exec.facts.load import facts
+# Bank constants (descriptor 350.., depth 410.., V3 scratch 620..): exec/facts/top-modelsignature-banks.tsv.
+globals().update({r['name']:r['bank']<<40 for r in facts('top-modelsignature-banks')})
+_C={r['name']:r['value'] for r in facts('top-modelsignature-const')}
 assert not set(range(410,414)) & (set(range(350,358)) | set(range(400,408)))
 # V3 scratch is separate from legacy indexing and source LF banks 600..619.
-RANK, FORMAT, NATURAL, FLAGS, KNOWN, ORIGIN, ENTRYKIND, ENTRYALIGN, OFFSET, BITOFFSET, BITWIDTH, STORAGE = (i<<40 for i in range(620,632))
 assert not set(range(620,640)) & (set(range(350,358)) | set(range(400,408)) | set(range(410,414)) | set(range(430,438)) | set(range(600,620)))
 def install(E,fail='DEAD'):
  """Stage control lives in modelsignature-result.tsv (section main): framing, records,
@@ -24,7 +27,7 @@ def install(E,fail='DEAD'):
  install_rules(E.g,root,'modelsignature',dict(fail=fail),{},None,'head')
  P('MS.return').ret()
  from modelinput import u64
- u64(E,'MS.callablecap',b'\0library/callables','ms_callablecap','ms_callablepresent','MS.fail')
+ u64(E,'MS.callablecap',_C['callablecap'].encode('latin-1'),'ms_callablecap','ms_callablepresent','MS.fail')
  bindings={k:v for k,v in globals().items() if k.isupper() and type(v) is int}
  p=P('MS.fresh')
  for line in (root/'modelsignature-fresh.tsv').read_text().splitlines()[1:]:
