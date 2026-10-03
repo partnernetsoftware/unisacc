@@ -83,7 +83,6 @@ class P(E.P):
 
 E.P = P
 g = E.g
-from unresolved import install as ud_install
 from finite_rules import install as install_rules, install_rows, install_template, load as load_rules
 
 # Tape text uses JSON string escaping; PUSH/POP1 retain their shared E bindings.
@@ -494,8 +493,8 @@ def build(locations=False, warnings=False, errors=False):
     install_template(g, os.path.dirname(__file__), "stage-edits", {},
                      lambda kind: None, section="startup-entry", mode="b", domain=[64])
     segment("startup-marker")
-    from strings import token_span
-    token_span(E, P)
+    import assemble
+    assemble.run(Path(__file__).parent / "strings-token-span-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))
     from strings import initializer as string_initializer
     string_initializer(E, P, ESC)
     E.prn()
@@ -747,8 +746,9 @@ def build(locations=False, warnings=False, errors=False):
                             dict(warnings=warnings), dict(warnings=warnings))
     E.__dict__.setdefault("results", {})["fpcont"] = call_env["fpcont"]   # FS.CALLTYPE continuation (librarycallables)
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
-    from truth import conversions as scalar_conversions
-    scalar_conversions(E, P, DBL, FLT, UNS + 8, fpu)
+    import assemble
+    assemble.run(Path(__file__).parent / "truth-conversions-manifest.tsv", E, P, {},
+                 dict(DBL=DBL, FLT=FLT, UNSIGNED_WIDE=UNS + 8, **fpu))
     assemble.run(Path(__file__).resolve().parent / 'callcontrol-finish-manifest.tsv', E, P,
                  dict(warnings=warnings), dict(warnings=warnings, cb=call_env['cb']))
     import assemble
@@ -756,7 +756,8 @@ def build(locations=False, warnings=False, errors=False):
     assemble.run(Path(__file__).parent / 'offsetofcontrol-manifest.tsv', E, P, _flags,
                  dict(SBB=SBB, MEMBER_STRIDE=MEMBER_STRIDE, MOF=MOF, MSZ=MSZ, MBS=MBS, MAR=MAR))
     assemble.run(Path(__file__).parent / 'setjmpcontrol-manifest.tsv', E, P, _flags)
-    ud_install(E, P)
+    import assemble
+    assemble.run(Path(__file__).parent / "unresolved-manifest.tsv", E, P, {})
     start = "START"
     if locations:
         from tokenlocations import install as location_install
