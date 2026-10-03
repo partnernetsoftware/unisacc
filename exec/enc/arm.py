@@ -62,8 +62,12 @@ def build(image=False, object_mode=False):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','id_'+key))
     for n,key in enumerate(META,1):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','t'),('LDI','u',n),('STX','t',KEYS,'u'))
-    from armlayout import init as init_layout, install as install_layout
-    init_layout(p)
+    # armlayout START metadata (was armlayout.init)
+    p.a(('LDI','target_os',1),('SBCLR',),[('SBOUT',c) for c in b'_start'],('SBINTERN','id_entry'))
+    for key in facts('enc-armlayout-headers'):
+        p.a(('SBCLR',),[('SBOUT',c) for c in ('@'+key).encode()],('SBINTERN','h_'+key))
+    for key,value in ((r['key'],r['value']) for r in facts('enc-armlayout-targets')):
+        p.a(('SBCLR',),[('SBOUT',c) for c in value.encode()],('SBINTERN','target_'+key))
     for key in facts('enc-armwin-keys'):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','wi_'+key))
     for i,name in enumerate(IMPORTS):
@@ -141,7 +145,7 @@ def build(image=False, object_mode=False):
         assemble.run(here/(stem+'-manifest.tsv'), E, P, dict(image=image), env)
     env['meta_classes'] = {"meta_"+key: [index] for index, key in enumerate(META, 1)}
     assemble.run(here/'arminput-manifest.tsv', E, P, {}, env)
-    install_layout(E,word)
+    assemble.run(here/'armlayout-manifest.tsv', E, P, {}, env)
     assemble.run(here/'armitoa-manifest.tsv', E, P, {}, env)
     assemble.run(here/'armwin-manifest.tsv', E, P, {}, env)
     from hostbridge import install as install_hostbridge
@@ -151,7 +155,7 @@ def build(image=False, object_mode=False):
         LABELS = next(r['value'] for r in facts('enc-armbranch-bindings') if r['name'] == 'LABELS')
         install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True,image_format=image if image in ('macho','pe') else 'elf')
     if object_mode:
-        from armlayout import SYM, PRESENT
+        SYM, PRESENT = (next(r['value'] for r in facts('enc-armlayout-bindings') if r['name'] == k) for k in ('SYM', 'PRESENT'))
         import assemble
         assemble.run(Path(__file__).parent/'objectplan-manifest.tsv', E, E.P, dict(direct_labels=True),
                      dict(OFF=0, LABD=LABELS, SYM=SYM, PRESENT=PRESENT, arch='arm64'))
