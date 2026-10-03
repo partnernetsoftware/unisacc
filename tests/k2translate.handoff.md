@@ -222,3 +222,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   /types() width loops, return_control/update_control (-> manifests like shape), conversions, scope/decl, then the
   shape_control call sites become `call shape` rows; cdx calls (strings initializer, constexpr, membercontrol,
   tokenlocations, layoutprovenance) stay Python until cdx exposes manifests -> blocks a single manifest.
+- Round 19: af06a646 verified (full graphhash 51/0 bad; 10 gates green). return_control -> return-manifest.tsv (a185c79f),
+  update_control -> update-manifest.tsv (32e0e435): facts k2-gen2 ret*/upd* via export.py (export appends the build-time
+  token codes type=extern/_Bool for typewords); bindings returned via accumulate+keep env rb/ub; expr0/id0 dispatch =
+  table rows gated by env ret_dispatch/upd_dispatch; update mode words (op/name/suffix/postfix/prefixfix/integer/floating/
+  bits, "" when absent) select @ref sequences (absent -> [] instead of missing; sha SAME). gen2 wrappers are 3-6 lines.
+  Next: width_dispatch/types loops, conversion assign/convert/unsigned, scope/decl; then callers -> `call` rows.
