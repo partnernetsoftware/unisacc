@@ -1,0 +1,40 @@
+# section	block	each	over	kind	a	b	c	d
+# Installed as an overlay (exec/finite_rules.py): later rows override earlier edges in place.
+# dispatch: DISPATCH reads a byte; its class's lex.tsv row is constant (HANDLE, state DISPATCH)
+# or needs the next byte (PEEKCLASS: PEEK:class, then H:action re-reads the first byte).
+# A handler is the entry.tsv rows of its action restricted to the class; linked entries continue
+# in the identifier trie root (IDROOT), number.tsv NSTART, or the punctuator trie root (OPROOT).
+dispatch	order	-	-	rule	DISPATCH	*	HALT	[]
+dispatch	peek	PEEKCLASS	-	rule	DISPATCH	@{PEEKCLASS.name}	PEEK:{PEEKCLASS.name}	[["MARK","S"],["ADV"]]
+dispatch	handle	HANDLE	pk:HANDLE.peekstate	rule	PEEK:{pk.name}	*	HALT	[]
+dispatch	handle	HANDLE	p:HANDLE.peek	rule	PEEK:{p.cls}	@{p.col}	H:{p.act}	[["JUMP","S"]]
+dispatch	handle	HANDLE	e:HANDLE.plain	rule	{HANDLE.state}	@{HANDLE.cls}&{e.keys}	{e.target}	{e.actions}
+dispatch	handle	HANDLE	e:HANDLE.identifier	rule	{HANDLE.state}	@{HANDLE.cls}&{e.keys}	ID*	[["@","scan.start"],["@","scan.advance"]]
+dispatch	handle	HANDLE	.IDROOT	rule	{HANDLE.state}	{IDROOT.last}&@{HANDLE.cls}&{e.keys}	ID:{IDROOT.name}	[["@","scan.start"],["@","scan.advance"]]
+dispatch	handle	HANDLE	e:HANDLE.number	rule	{HANDLE.state}	@{HANDLE.cls}&{e.keys}	HALT	[]
+dispatch	handle	HANDLE	.NSTART	rule	{HANDLE.state}	@{HANDLE.cls}&{e.keys}&{NSTART.keys}	{NSTART.target}	{NSTART.actions}
+dispatch	handle	HANDLE	e:HANDLE.punctuator	rule	{HANDLE.state}	@{HANDLE.cls}&{e.keys}	HALT	[["@","punct.reject"]]
+dispatch	handle	HANDLE	.OPROOT	rule	{HANDLE.state}	{OPROOT.last}&@{HANDLE.cls}&{e.keys}	OP:{OPROOT.name}|{OPROOT.longest}	[["@","scan.start"],["@","scan.advance"],["@","accept.{OPROOT.word}"]]
+# ident: one state per prefix of the special words (IDPFX); a child prefix continues the trie,
+# any other identifier byte goes to ID*.  The end of the name: skipparen -> SKW:word, drop -> DISPATCH,
+# else the token (kind of the word, id otherwise); string/char prefixes before quote bytes.
+ident	trie	IDPFX	-	rule	ID:{IDPFX.name}	@identifier	ID*	[["ADV"]]
+ident	trie	IDPFX	-	rule	ID:{IDPFX.name}	92	UCN	[["MARK","B"],["ADV"]]
+ident	trie	IDPFX	s:IDPFX.ifskip	rule	ID:{IDPFX.name}	*	SKW:{IDPFX.name}	[["MARK","E"]]
+ident	trie	IDPFX	s:IDPFX.ifdrop	rule	ID:{IDPFX.name}	*	DISPATCH	[]
+ident	trie	IDPFX	s:IDPFX.iftoken	rule	ID:{IDPFX.name}	*	DISPATCH	[["@","tok.{IDPFX.kind}"]]
+ident	trie	IDPFX	r:IDPFX.children	rule	ID:{IDPFX.name}	{r.last}	ID:{r.name}	[["ADV"]]
+ident	trie	IDPFX	s:IDPFX.ifpfxch	rule	ID:{IDPFX.name}	39	CH	[["MARK","S"],["ADV"]]
+ident	trie	IDPFX	s:IDPFX.ifpfxstr	rule	ID:{IDPFX.name}	34	STR	[["ADV"]]
+ident	trie	IDPFX	s:IDPFX.ifskip	rule	SKW:{IDPFX.name}	@space	SKW:{IDPFX.name}	[["ADV"]]
+ident	trie	IDPFX	=	rule	SKW:{IDPFX.name}	40	ATT	[["PUSH","P"],["ADV"]]
+ident	trie	IDPFX	=	rule	SKW:{IDPFX.name}	*	DISPATCH	[["@","bounded.{IDPFX.kind}"]]
+ident	other	KID	-	rule	ID*	@identifier	ID*	[["ADV"]]
+ident	other	KID	-	rule	ID*	92	UCN	[["MARK","B"],["ADV"]]
+ident	other	KID	-	rule	ID*	*	DISPATCH	[["@","tok.{KID}"]]
+# punct: maximal munch as a trie over the punctuator prefixes (OPPFX); the state remembers the
+# longest punctuator read so far; no child: emit it, rewinding to its end unless the node is one.
+punct	trie	OPPFX	-	rule	OP:{OPPFX.name}|{OPPFX.longest}	*	DISPATCH	[["@","rewind.{OPPFX.word}"],["@","tok.{OPPFX.longest}"]]
+punct	trie	OPPFX	r:OPPFX.children	rule	OP:{OPPFX.name}|{OPPFX.longest}	{r.last}	OP:{r.name}|{r.longest}	[["@","scan.advance"],["@","accept.{r.word}"]]
+punct	root	-	-	rule	OP:	*	HALT	[["@","punct.reject"]]
+punct	root	-	OPROOT	rule	OP:	{OPROOT.last}	OP:{OPROOT.name}|{OPROOT.longest}	[["@","scan.start"],["@","scan.advance"],["@","accept.{OPROOT.word}"]]

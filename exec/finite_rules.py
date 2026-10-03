@@ -53,6 +53,14 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     (for chains that allocate a label before the edge that names it).
   - in graph edits, a column a/b/c of the form `$NAME` names the caller's state
     binding NAME (as in rule rows).
+Overlay tables (opt-in `overlay=True` of load/install_template): rows are applied
+in written order and a later row overrides an earlier edge in place (its key keeps
+its first position); a key field that is exactly `*` adds the still-absent keys of
+the domain in sorted order at that point; `A&B&...` is the intersection of key
+sets (`*` = the whole domain, `@class`, numbers, ranges; first operand's order);
+an empty intersection adds nothing; states need not be total (the caller checks).
+Fact helpers: prefix_facts(words) exposes the prefixes of a word list as trie
+facts; rule_facts(path) exposes the rows of a four-column table as facts.
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -61,7 +69,31 @@ import re
 from pathlib import Path
 
 
-def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None, lines=None):
+def _keyset(path, lineno, part, domain, classes):
+    if part == "*":
+        return sorted(domain, key=lambda k: (type(k) is str, k))
+    if part.startswith("@"):
+        name = part[1:]
+        if classes is None or name not in classes or not classes[name]:
+            raise ValueError(f"{path}:{lineno}: unknown or empty byte class")
+        return list(classes[name])
+    keys = []
+    for item in part.split(","):
+        if item in domain:
+            keys.append(item)
+            continue
+        bounds = item.split("-")
+        if len(bounds) not in (1, 2) or not all(x.isdecimal() for x in bounds):
+            raise ValueError(f"{path}:{lineno}: invalid byte range")
+        lo, hi = int(bounds[0]), int(bounds[-1])
+        if lo > hi or not set(range(lo, hi + 1)) <= domain:
+            raise ValueError(f"{path}:{lineno}: byte range outside domain")
+        keys.extend(range(lo, hi + 1))
+    return keys
+
+
+def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None, lines=None,
+         overlay=False):
     domain = set(domain)
     explicit, defaults = {}, {}
     for lineno, line in enumerate(path.read_text().splitlines() if lines is None else lines, 1):
@@ -97,6 +129,15 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                 actions.append(tuple(action))
         answer = target, actions
         row = explicit.setdefault(state, {})
+        if overlay:
+            if keys == "*":
+                chosen = [k for k in _keyset(path, lineno, "*", domain, classes) if k not in row]
+            else:
+                operands = [_keyset(path, lineno, part, domain, classes) for part in keys.split("&")]
+                chosen = [k for k in operands[0] if all(k in other for other in operands[1:])]
+            for key in chosen:
+                row[key] = answer
+            continue
         if keys == "*":
             if state in defaults:
                 raise ValueError(f"{path}:{lineno}: repeated default")
@@ -126,7 +167,7 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
     if not explicit and section is None:
         raise ValueError(f"{path}: empty rules")
     for state, row in explicit.items():
-        for key in sorted(domain - row.keys()):
+        for key in ([] if overlay else sorted(domain - row.keys())):
             if state not in defaults:
                 raise ValueError(f"{path}: incomplete state {state}")
             row[key] = defaults[state]
@@ -307,13 +348,44 @@ def expand_template(path, facts, fresh, section=None):
     return out, edits, modes
 
 
+def prefix_facts(words):
+    """Trie facts of an ordered word list (None entries are skipped): returns
+    (root, prefixes).  Every non-empty prefix is a dict -- name, last (code of its
+    final character), word ('yes' when it is itself a word, else 'no'), longest
+    (index in `words` of the longest word that is a prefix of it, -1 if none),
+    children (the prefix dicts one character longer, sorted by name); prefixes
+    are sorted by name, root is the dict of the empty prefix."""
+    names = sorted({w[:n] for w in words if w is not None for n in range(1, len(w) + 1)})
+    nodes = {"": {"name": "", "children": []}}
+    for name in names:
+        best = -1
+        for index, w in enumerate(words):
+            if w is not None and name.startswith(w) and (best < 0 or len(w) > len(words[best])):
+                best = index
+        nodes[name] = {"name": name, "last": ord(name[-1]), "word": "yes" if name in words else "no",
+                       "longest": best, "children": []}
+        nodes[name[:-1]]["children"].append(nodes[name])
+    return nodes[""], [nodes[name] for name in names]
+
+
+def rule_facts(path):
+    """Rows of a four-column table as facts {state: [{keys, target, actions}, ...]},
+    `*` rows of a state first (so an overlay install keeps explicit keys first)."""
+    out = {}
+    for line in Path(path).read_text().splitlines():
+        if line and not line.startswith("#"):
+            state, keys, target, actions = line.split("\t")
+            out.setdefault(state, []).append({"keys": keys, "target": target, "actions": actions})
+    return {state: sorted(rows, key=lambda r: r["keys"] != "*") for state, rows in out.items()}
+
+
 def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
-                     section=None, mode="r", domain=range(257)):
+                     section=None, mode="r", domain=range(257), overlay=False):
     path = Path(root) / (stem + "-template.tsv")
     lines, edits, modes = expand_template(path, facts, fresh, section)
     if lines:
         for state, row in load(path, sequences or {}, domain, bindings=bindings, classes=classes,
-                               lines=lines).items():
+                               lines=lines, overlay=overlay).items():
             for key, (target, actions) in row.items():
                 g.on(state, [key], target, actions, modes.get(state, mode))
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")

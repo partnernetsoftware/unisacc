@@ -191,6 +191,8 @@ class Delta:
         self.seqs = []            # action sequences (tuples)
         self.seqix = {}
         self.unreach = 0
+        self.st = self.states     # the graph view finite_rules edits
+        self.labels = set()
 
     def seq(self, acts):
         acts = tuple(tuple(a) if isinstance(a, list) else a for a in acts)
@@ -204,9 +206,11 @@ class Delta:
             self.states[name] = (mode, {})
         return self.states[name][1]
 
-    def put(self, name, key, nxt, acts):
-        row = self.state(name, "b")
-        row[key] = (nxt, self.seq(acts))
+    # thin adapter for exec/finite_rules.install_template
+    def on(self, name, keys, nxt, acts, mode):
+        row = self.state(name, mode)
+        for key in keys:
+            row[key] = (nxt, self.seq(acts))
 
 
 D = Delta()
@@ -292,16 +296,13 @@ for cl in CLASSES:
     rowconst[cl] = vals.pop() if len(vals) == 1 else None
 
 
-# ---- declared dispatch actions, linked to generated machine entries -----------
-def handler(action, byte):
-    target, actions = ENTRIES[action][byte]
-    if target in ENTRY_LINKS:
-        target, linked_actions = ENTRY_LINKS[target](byte)
-        return target, actions + linked_actions
-    return target, actions
+# ---- the declared machine pieces: facts for gen-template.tsv -----------------
+# The template expresses dispatch, the identifier trie and the punctuator trie;
+# Python only exposes domain facts: byte classes, lex.tsv rows, entry/number rows,
+# the word lists as trie prefixes, the token kinds and the output sequences.
+sys.path.insert(0, os.path.join(ROOT, "exec"))
+from finite_rules import load as load_byte_rules, install_template, prefix_facts, rule_facts  # noqa: E402
 
-
-# ---- identifiers: a trie over every word the lexer treats specially --------
 KWKIND = {}
 for k, t in enumerate(TOKS):
     if isal(ord(t[0])):
@@ -309,50 +310,63 @@ for k, t in enumerate(TOKS):
 for t in TYPEKW:
     KWKIND[t] = 1
 WORDS = set(KWKIND) | set(SKIPPAREN) | set(DROP) | set(CHARPFX) | set(STRPFX)
-PREFIXES = set(w[:n] for w in WORDS for n in range(1, len(w) + 1))
+IDROOT, IDPFX = prefix_facts(sorted(WORDS))
+OPROOT, OPPFX = prefix_facts([t if t in PUNCTS else None for t in TOKS])
 
 
-def idstate(w):
-    return "ID:" + w if w in PREFIXES else "ID*"
+def optional(present):
+    return [{}] if present else []
 
 
-def idnext(w, c):
-    """ident scan: in node w, the next byte c continues the name."""
-    acts = output_sequence("scan.start") if w == "" else []
-    nw = w + chr(c)
-    return (idstate(nw) if w != "*" else "ID*"), acts + output_sequence("scan.advance")
+IDFACTS = [dict(p, kind=KWKIND.get(p["name"], KID),
+                ifskip=optional(p["name"] in SKIPPAREN), ifdrop=optional(p["name"] in DROP),
+                iftoken=optional(p["name"] not in SKIPPAREN and p["name"] not in DROP),
+                ifpfxch=optional(p["name"] in CHARPFX), ifpfxstr=optional(p["name"] in STRPFX))
+           for p in IDPFX]
+
+ENTRY = rule_facts(Path(HERE) / "entry.tsv")
+assert set(ENTRY) == set(head), "entry actions must cover lex.tsv exactly"
+LINKS = ("@identifier", "@number", "@punctuator")
+assert all(r["actions"] == "[]" for rows in ENTRY.values() for r in rows if r["target"] in LINKS)
 
 
-def build_ident():
-    classes = {"skipparen": set(SKIPPAREN), "drop": set(DROP),
-               "pfxch": set(CHARPFX), "pfxstr": set(STRPFX)}
-    byteclasses = {"identifier": [c for c in ALLB if c != EOF and (isal(c) or isdi(c))],
-                   "space": WS_SKIP}
-    for w in sorted(PREFIXES) + ["*"]:
-        endings = load_byte_rules(Path(HERE) / "ident-end.tsv", {"token": emit_kind(KWKIND.get(w, KID))})
-        applicable = [row for role, row in endings.items() if role == "*" or w in classes[role]]
-        flow = load_byte_rules(Path(HERE) / "ident-flow.tsv",
-            {"bounded": emit_kind(KWKIND.get(w, KID), ("S", "E"))}, classes=byteclasses)
-        st = "ID:" + w if w != "*" else "ID*"
-        for c, (target, actions) in flow["continue"].items():
-            if target == "@child":
-                target = idstate(w + chr(c)) if w != "*" else "ID*"
-            elif target == "@end":
-                target, actions = next(row[c] for row in applicable if row[c][0] != "@next")
-                target = target.format(word=w)
-            D.put(st, c, target, actions)
-        if w in SKIPPAREN:
-            st = "SKW:" + w
-            for c, (target, actions) in flow["skip"].items():
-                D.put(st, c, st if target == "@self" else target, actions)
-    for filename, mode, domain in (("ident-byte.tsv", "b", ALLB),
-                                   ("ident-stack.tsv", "t", ("BOT", "P"))):
-        install_rules(filename, mode, domain)
+def handle(state, cls, act, peek=()):
+    rows = ENTRY[act]
+    return dict(state=state, cls=cls, act=act, peek=list(peek),
+                peekstate=[{"name": cls}] if peek else [],
+                plain=[r for r in rows if r["target"] not in LINKS],
+                identifier=[r for r in rows if r["target"] == "@identifier"],
+                number=[r for r in rows if r["target"] == "@number"],
+                punctuator=[r for r in rows if r["target"] == "@punctuator"])
 
 
-# ---- numbers: finite transition rules, not Python scanning branches ------------
-sys.path.insert(0, os.path.join(ROOT, "exec"))
-from finite_rules import load as load_byte_rules
+BYTECLASSES = {cl: [c for c in ALLB if charclass(c) == cl] for cl in CLASSES}
+HANDLE = [handle("DISPATCH", cl, rowconst[cl]) for cl in CLASSES if rowconst[cl] is not None]
+PEEKCLASS = [{"name": cl} for cl in CLASSES if rowconst[cl] is None]
+for cl in CLASSES:
+    if rowconst[cl] is None:            # lex.tsv row of cl, its columns by first byte
+        cols = sorted(CLASSES, key=lambda col: BYTECLASSES[col][0])
+        peek = [{"cls": cl, "col": col, "act": LT[(cl, col)]} for col in cols]
+        acts = list(dict.fromkeys(r["act"] for r in peek))
+        HANDLE += [handle("H:" + a, cl, a, peek if i == 0 else ()) for i, a in enumerate(acts)]
+
+SEQUENCES = {name: output_sequence(name) for name in ("scan.start", "scan.advance", "punct.reject")}
+SEQUENCES.update({"accept.yes": output_sequence("scan.accept"), "accept.no": [],
+                  "rewind.yes": [], "rewind.no": output_sequence("scan.rewind"),
+                  "eof": ([("MARK", "S")] + position("S") if POSITIONS else []) + output_sequence("eof")})
+for k in range(len(TOKS)):
+    SEQUENCES["tok.%d" % k] = emit_kind(k)
+    SEQUENCES["bounded.%d" % k] = emit_kind(k, ("S", "E"))
+FACTS = dict(HANDLE=HANDLE, PEEKCLASS=PEEKCLASS, IDROOT=IDROOT["children"],
+             NSTART=rule_facts(Path(HERE) / "number.tsv")["NSTART"],
+             OPROOT=OPROOT["children"], IDPFX=IDFACTS, OPPFX=OPPFX, KID=[KID])
+TEMPLATE_CLASSES = dict(BYTECLASSES, identifier=[c for c in ALLB if c != EOF and (isal(c) or isdi(c))],
+                        space=list(WS_SKIP))
+
+
+def install_section(section):
+    install_template(D, HERE, "gen", FACTS, None, sequences=SEQUENCES, classes=TEMPLATE_CLASSES,
+                     section=section, mode="b", overlay=True)
 
 
 def install_rules(filename, mode, domain, sequences=None, classes=None, skip=(), in_domain_order=False):
@@ -366,112 +380,23 @@ def install_rules(filename, mode, domain, sequences=None, classes=None, skip=(),
             out[observation] = target, D.seq(actions)
 
 
-NUMBER = load_byte_rules(Path(HERE) / "number.tsv", {"number": emit_kind(KNUM)})
 NUMEMIT = emit_kind(KNUM)  # character constants use the same token format
 
-
-def num_start(c):
-    return NUMBER["NSTART"][c]
-
-
-def build_num():
-    # entry action is inlined by dispatch, so NSTART is not installed
-    install_rules("number.tsv", "b", ALLB, {"number": emit_kind(KNUM)}, skip=("NSTART",), in_domain_order=True)
-
-
-# ---- literal/comment transitions share the finite rule loader -----------------
-def build_str():
-    install_rules("literal.tsv", "b", ALLB,
-        {"number": NUMEMIT, "string": [("JUMP", "E")] + emit_kind(KSTR)},
-        {"space": WS_SKIP})
-
-
-# ---- punctuators: maximal munch as a trie with a remembered last accept -----
-PPREF = set(t[:n] for t in PUNCTS for n in range(1, len(t) + 1))
-
-
-def munch(s):
-    """the reference algorithm on the literal string s: TOKV order, longest"""
-    best, bl = -1, 0
-    for k, t in enumerate(TOKS):
-        if t and not isal(ord(t[0])) and len(t) > bl and s.startswith(t):
-            best, bl = k, len(t)
-    return best, bl
-
-
-def opname(node, last):
-    return "OP:%s|%s" % (node, last)
-
-
-def op_step(node, c, pre):
-    """in trie node `node` (i past it), byte c"""
-    nxt = node + chr(c) if c != EOF else None
-    if nxt is not None and nxt in PPREF:
-        k, bl = munch(nxt)
-        acc = bl == len(nxt)
-        last = k
-        return opname(nxt, last), pre + output_sequence("scan.advance") + (output_sequence("scan.accept") if acc else [])
-    if node == "":
-        return "HALT", output_sequence("punct.reject")
-    k, bl = munch(node)
-    if bl == len(node):
-        return "DISPATCH", emit_kind(k)
-    return "DISPATCH", output_sequence("scan.rewind") + emit_kind(k)
-
-
-def build_op():
-    for node in sorted(PPREF):
-        k, bl = munch(node)
-        st = opname(node, k)
-        for c in ALLB:
-            nx, acts = op_step(node, c, [])
-            D.put(st, c, nx, acts)
-    for c in ALLB:
-        nx, acts = op_step("", c, output_sequence("scan.start"))
-        D.put("OP:", c, nx, acts)
-
-
-# ---- dispatch, the token count, halting -------------------------------------
-def build_dispatch():
-    for c in ALLB:
-        cl = charclass(c)
-        a = rowconst[cl]
-        if a is not None:
-            nx, acts = handler(a, c)
-            D.put("DISPATCH", c, nx, acts)
-        else:                              # this class needs the next byte
-            D.put("DISPATCH", c, "PEEK:" + cl, [("MARK", "S"), A])
-    for cl in CLASSES:
-        if rowconst[cl] is not None:
-            continue
-        st = "PEEK:" + cl
-        for p in ALLB:
-            a = LT[(cl, charclass(p))]
-            D.put(st, p, "H:" + a, [("JUMP", "S")])
-            # H:a -- the handler, re-reading its first byte
-            for c in ALLB:
-                if charclass(c) == cl:
-                    nx, acts = handler(a, c)
-                    D.put("H:" + a, c, nx, acts)
-    for filename, mode, domain in (("count-byte.tsv", "b", ALLB),
-                                   ("count-result.tsv", "r", range(20)),
-                                   ("count-stack.tsv", "t", ["BOT"] + ["D%d" % n for n in range(10)])):
-        install_rules(filename, mode, domain)
-
-
-ENTRIES = load_byte_rules(Path(HERE) / "entry.tsv", {
-    "eof": ([("MARK", "S")] + position("S") if POSITIONS else []) + output_sequence("eof")})
-assert set(ENTRIES) == set(head), "entry actions must cover lex.tsv exactly"
-ENTRY_LINKS = {"@identifier": lambda c: idnext("", c), "@number": num_start,
-               "@punctuator": lambda c: op_step("", c, output_sequence("scan.start"))}
-assert all(not target.startswith("@") or target in ENTRY_LINKS
-           for row in ENTRIES.values() for target, _ in row.values())
-
-build_dispatch()
-build_ident()
-build_num()
-build_str()
-build_op()
+install_section("dispatch")
+for filename, mode, domain in (("count-byte.tsv", "b", ALLB),
+                               ("count-result.tsv", "r", range(20)),
+                               ("count-stack.tsv", "t", ["BOT"] + ["D%d" % n for n in range(10)])):
+    install_rules(filename, mode, domain)
+install_section("ident")
+for filename, mode, domain in (("ident-byte.tsv", "b", ALLB),
+                               ("ident-stack.tsv", "t", ("BOT", "P"))):
+    install_rules(filename, mode, domain)
+# entry action is inlined by dispatch, so NSTART is not installed
+install_rules("number.tsv", "b", ALLB, {"number": emit_kind(KNUM)}, skip=("NSTART",), in_domain_order=True)
+install_rules("literal.tsv", "b", ALLB,
+              {"number": NUMEMIT, "string": [("JUMP", "E")] + emit_kind(KSTR)},
+              {"space": WS_SKIP})
+install_section("punct")
 START = "DISPATCH"
 if LOCATIONS:
     from locations import install
@@ -542,7 +467,7 @@ def stats():
                 dense_bytes=dense, sparse_bytes=sparse,
                 byte_classes_induced=K, classed_dense_bytes=classed,
                 full_obs_product_entries=full,
-                ident_trie_nodes=len(PREFIXES) + 1, punct_trie_nodes=len(PPREF) + 1,
+                ident_trie_nodes=len(IDPFX) + 1, punct_trie_nodes=len(OPPFX) + 1,
                 peek_classes=[c for c in CLASSES if rowconst[c] is None],
                 ), [cols[k] for k in cols]
 

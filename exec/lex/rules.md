@@ -15,7 +15,7 @@ weights. The production candidate evaluates those weights at runtime.
 | `iterate/kernel/typekw.tsv` | type keyword values |
 | `number.tsv`, `literal.tsv` | numeric and literal/comment transitions |
 | `ident-byte.tsv`, `ident-stack.tsv` | UCN and balanced-skip transitions |
-| `ident-flow.tsv`, `ident-end.tsv` | identifier continuation and ordered word-class actions |
+| `gen-template.tsv` | dispatch/peek/handler rows, identifier-prefix trie, punctuator munch trie (overlay template over facts) |
 | `entry.tsv` | dispatch action to entry/linked machine |
 | `output.tsv`, `spelling.tsv` | output sequences and spelling modes |
 | `count-*.tsv` | counter rendering and halt |
@@ -29,10 +29,12 @@ Named classes come from declarations. `@` action sequences are expanded at
 construction; `["observation", shift]` substitutes the finite input key
 shifted by 0..63. Neither operation runs language-specific host callbacks.
 
-`ident-end.tsv` is explicitly ordered: applicable word classes are tried in
-file order; `@next` proceeds to the next class. Its final rule emits a token.
-Other `@` targets name linked trie entries, child/end transitions or self.
-These are construction links, not runtime executor primitives.
+`gen-template.tsv` is installed as an overlay (later rows override earlier
+edges in place). Its facts are domain facts only: byte classes, lex.tsv rows,
+entry.tsv and number.tsv NSTART rows (linked targets `@identifier`, `@number`,
+`@punctuator` select the template rows that continue in that trie root), the
+word lists as trie prefixes (`finite_rules.prefix_facts`), token kinds and
+output sequences.
 
 ## Construction boundary
 
