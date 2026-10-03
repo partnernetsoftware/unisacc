@@ -66,8 +66,31 @@ def seedpy():
           % (sum(counts.values()), len(tools)))
     return 0
 
+OP_CAP, OP_FORBIDDEN = 12, ('py', 'retarget')
+
+def ops():
+    """K2 table boundary (exec/k2-boundary.md): distinct manifest ops <= 12; no py/retarget op, no state: predicate."""
+    root = pathlib.Path(__file__).resolve().parent.parent / 'exec'
+    seen, bad = {}, []
+    for m in sorted(root.glob('*/*-manifest.tsv')):
+        for n, ln in enumerate(m.read_text().split('\n'), 1):
+            if not ln or ln.startswith('#'): continue
+            f = ln.split('\t')
+            op = f[0].lstrip('.')
+            seen.setdefault(op, []).append('%s:%d' % (m.relative_to(root.parent), n))
+            if len(f) > 3 and any(t.lstrip('!').startswith('state:') for t in f[3].split('&')):
+                bad.append('state: predicate  %s:%d' % (m.relative_to(root.parent), n))
+    for op in OP_FORBIDDEN:
+        for where in seen.get(op, []): bad.append('forbidden op %s  %s' % (op, where))
+    for op, w in sorted(seen.items()): print('  %-14s %4d' % (op, len(w)))
+    if len(seen) > OP_CAP: bad.append('%d distinct ops > cap %d' % (len(seen), OP_CAP))
+    for b in bad: print('  BAD  ' + b)
+    print('decision-ledger --ops  distinct %d (cap %d)   bad %d' % (len(seen), OP_CAP, len(bad)))
+    return 1 if bad else 0
+
 def main():
     if '--seedpy' in sys.argv: return seedpy()
+    if '--ops' in sys.argv: return ops()
     now = count()
     total = sum(v['total'] for v in now.values())
     if '--update' in sys.argv:

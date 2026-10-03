@@ -115,6 +115,7 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     labels = (('EI_pad_b0', 'EI', 'b'), ('EI_loop_b0', 'EI', 'b'),
               ('EI_bytes_b0', 'EI', 'b'))
     image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels})
+    image_bindings['EI_loop_done'] = 'LIB.finish'   # librarysymbols-manifest validates, then returns
     install_rules(g, Path(__file__).parent, 'elfimage', bindings=image_bindings,
                   sequences=image_sequences, section='output-common')
     import assemble
@@ -123,4 +124,4 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     else:
         from address import SYM, PRESENT
     assemble.run(Path(__file__).with_name('librarysymbols-manifest.tsv'), E, P, dict(direct_labels=direct_labels),
-                 dict(OFF=OFF, LABD=LABD, SYM=SYM, PRESENT=PRESENT, completion=image_bindings['EI_loop_b0']))
+                 dict(OFF=OFF, LABD=LABD, SYM=SYM, PRESENT=PRESENT))

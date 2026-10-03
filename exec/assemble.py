@@ -4,7 +4,9 @@ A manifest `exec/<stage>/<name>-manifest.tsv` lists installs in row order:
 
   op  stem  section  when  facts  fresh  seq  bind  opts
 
-op       rows | table | template | call | label | assert-absent | holder | foreach
+op       rows | table | template | call | label | assert-absent | holder | foreach | let
+         (K2 cap: <= 12 names, checked by tests/decisionledger.py --ops; holder with
+         opts.cols = fresh table; assert-absent opts.present; let opts.exit)
          (a leading `.` per depth marks the body of the nearest `foreach` above)
 stem     the table stem next to the manifest (rows/template), a path (table),
          a sub-manifest stem (call), comma-separated names (label), a state
@@ -112,23 +114,9 @@ def _out(text, facts):
     t = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), t)
     t = _cell("str", t)
     return [("OUT", c) for c in t.encode()]
-# when term `state:NAME` / `!state:NAME`: NAME is (not) already a graph state
-#   (idempotent shared sub-constructors: skip when installed);
 # value `@str:TEXT` literal string with `{NAME}` substitution; op `set`: store the bind cells in env;
-# op `fail`: exit with STEM as the message; op `py`: transitional, call
+# op `fail`: exit with STEM as the message; op `py` (transitional, gate-red): call
 #   MODULE.install(E, **bind) for a stage constructor not yet migrated.
-def _state_when(w, g):
-    if "state:" not in w:
-        return w
-    out = []
-    for t in w.split("&"):
-        neg = t.startswith("!")
-        if t[neg:].startswith("state:"):
-            if (t[neg + 6:] in g.st) == neg:
-                return "fact:__never__"
-            continue
-        out.append(t)
-    return "&".join(out) or "-"
 # ---- end K2 round 2 additions -----------------------------------------------
 
 
@@ -254,7 +242,6 @@ class Run:
         for s in ([] if factn in ("", "-") else factn.split("+")):
             facts.update(load_facts(s[5:] if s.startswith("load:") else s))
         facts.update(extra)
-        when = _state_when(when, self.E.g)
         if not _when(when, self.flags, facts):
             return
         o = {} if opts in ("", "-") else json.loads(opts)
@@ -281,10 +268,8 @@ class Run:
             kw["classes"][k] = x if isinstance(x, list) else [x]
         facts.update(o.get("with", {}))
         res = None
-        if op == "fresh":
+        if op in ("holder", "fresh") and "cols" in o:   # fresh table (translator spells it `fresh`)
             return self.fresh_table(stem, o)
-        if op == "retarget":
-            return self.retarget(self.value(stem, facts), o)
         bd = self.bindings(o, bind, facts)
         for k in o.get("export", []):
             self.env[k] = bd[k]
@@ -309,11 +294,11 @@ class Run:
         elif op == "call":
             sub = Run(self.E, self.P, self.flags, dict(self.env, **(bd or {})))
             res = sub.run(self.root / (stem + "-manifest.tsv"))
-        elif op == "set":
+        elif op == "let":
+            if "exit" in o:
+                raise SystemExit(o["exit"])
             self.env.update(bd or {})
-        elif op == "fail":
-            raise SystemExit(stem)
-        elif op == "py":
+        elif op == "py":   # TRANSITIONAL (K2 boundary forbids): lower/code, lower/objectfacts; gate --ops is red until gone
             import importlib.util, sys
             if str(self.root) not in sys.path:
                 sys.path.insert(0, str(self.root))
@@ -321,14 +306,12 @@ class Run:
             mod = importlib.util.module_from_spec(sp)
             sp.loader.exec_module(mod)
             res = mod.install(self.E, **(bd or {}))
-        elif op == "e":
+        elif op == "e":   # TRANSITIONAL: lower/data E.prn
             res = getattr(self.E, stem)()
         elif op == "label":
             g.labels.update(stem.split(","))
         elif op == "assert-absent":
-            assert stem not in g.st, stem
-        elif op == "assert-present":
-            assert stem in g.st, stem
+            assert (stem in g.st) == bool(o.get("present")), stem
         elif op == "holder":
             k, _, name = fresh.partition(":")
             self.holders[stem] = self.P(name) if k == "P" else self.holder(name or stem)
@@ -343,8 +326,6 @@ class Run:
 # --- K2 round 2, enc/objectplan slice: generic additions -------------------------
 # value  `{NAME}` inside a cell is replaced by str(env[NAME]) (only names in env);
 #        `@out:TEXT` is the OUT byte sequence of TEXT.
-# op     retarget: stem = a state (value cell, e.g. `$NAME`); opts {"from": A,
-#        "to": B}: every row entry of that state whose target is A goes to B.
 # op     fresh: stem = TSV next to the manifest; opts {"cols": [key, kind, owner]
 #        column indices, "where": [[col, value], ...] (optional), "scope": "P" | "U",
 #        "owner": format over {owner} {key} (optional)}; allocates one label per
@@ -396,14 +377,7 @@ def _mapseq(self, spec, facts, bd):
     return out
 
 
-def _retarget(self, state, o):
-    row = self.E.g.st[state][1]
-    for k, (n, q) in list(row.items()):
-        if n == o["from"]:
-            row[k] = (o["to"], q)
-
-
-Run.interp, Run.fresh_table, Run.mapseq, Run.retarget = _interp_impl, _fresh_table, _mapseq, _retarget
+Run.interp, Run.fresh_table, Run.mapseq = _interp_impl, _fresh_table, _mapseq
 # --- end K2 round 2 enc/objectplan slice ---------------------------------------
 
 
