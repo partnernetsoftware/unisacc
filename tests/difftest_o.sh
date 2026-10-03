@@ -59,10 +59,10 @@ for f in "${FILES[@]}"; do
       # numbering and the path it was handed (the same "$f" both sides get)
       printf '#line 1 "%s"\n' "$f"
       cat "$f"; } > "$D/ref.c"
-    key="$CACHE/$( (cat "$D/ref.c"; echo "wait-status-v2 $CCV -O2") | shasum | cut -c1-40)"
+    key="$CACHE/$( (cat "$D/ref.c"; cat "$(dirname "$R/$f")"/*.h 2>/dev/null; echo "wait-status-v2 $CCV -O2") | shasum | cut -c1-40)"
     if [ -f "$key" ]; then cp "$key" "$D/want"
     else
-        if ! bound 20 "$CC" -w -std=c99 -O2 -o "$D/ref" "$D/ref.c" -lm > "$D/cc.out" 2> "$D/cc.err" || [ ! -s "$D/ref" ]; then
+        if ! bound 20 "$CC" -w -std=c99 -O2 -I "$(dirname "$R/$f")" -o "$D/ref" "$D/ref.c" -lm > "$D/cc.out" 2> "$D/cc.err" || [ ! -s "$D/ref" ]; then
             echo 'reference compile failed' > "$D/v"; exit 0; fi
         if ! (cd "$D" && run "$D/want" "$D/ref.err" ./ref); then
             echo 'reference run signaled/timed out' > "$D/v"; exit 0; fi

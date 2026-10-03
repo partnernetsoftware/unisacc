@@ -28,8 +28,10 @@ ALLOWED = {'x86_64': {2}, 'arm64': {275, 277}}          # PC32; ADR_PREL_PG_HI21
 MACHINE = {'x86_64': 62, 'arm64': 183}
 LLD = ['/opt/homebrew/opt/lld@21/bin/ld.lld', '/opt/homebrew/opt/lld/bin/ld.lld', 'ld.lld']
 EMUL = {'x86_64': 'elf_x86_64', 'arm64': 'aarch64elf'}
-WINIMPORTS = ('GetStdHandle', 'WriteFile', 'ReadFile', 'CloseHandle', 'CreateFileA', 'ExitProcess', 'GetCommandLineA',
-              'VirtualAlloc', 'VirtualProtect', 'VirtualFree', 'FlushInstructionCache', 'SetFilePointer', 'DeleteFileA', 'MoveFileExA')
+# The kernel32 names a COFF object imports: the one list the image writer owns
+# (a private copy went stale when 1828ea47 grew it 14 -> 22 names).
+sys.path.insert(0, str(ROOT))
+from unisa.image.pe import IMPORTS as WINIMPORTS
 
 
 def run(cmd, timeout=30, **kw):

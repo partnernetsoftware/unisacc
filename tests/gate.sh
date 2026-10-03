@@ -285,6 +285,8 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-packed-carrier-refusal python3 ./tests/modelpackednativecheck.py --target osx/x86_64
 fi
 job lib-ffi-provider python3 ./tests/libraryffiprovidercheck.py
+# parse2 JSON model (~32 s cold) shared by the five *-source checks; they self-build on a miss
+job lib-source-prep python3 ./tests/parse2json.py
 job lib-bitfield-source python3 ./tests/modelbitfieldsourcecheck.py
 job lib-layout-source python3 ./tests/modellayoutfactscheck.py
 job lib-sig3-host python3 ./tests/librarysignature3check.py

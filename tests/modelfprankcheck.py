@@ -82,7 +82,7 @@ def main():
   try:
    (t/'source.c').write_text(SOURCE);cmd('cc','-std=c99','-pedantic-errors','-fsyntax-only',t/'source.c');cmd(ROOT/'tests/build_ref.sh',t/'ref.c',t/'ref');s=(t/'ref.c').read_bytes();old=b'        if (tkind[i] == 2) { __write(1, "=", 1);';new=b'        if (L == 4 && TOKV[p] == 116 && TOKV[p+1] == 121 && TOKV[p+2] == 112 && TOKV[p+3] == 101 && getenv("UA_TYPESPELL")) { __write(1, "=", 1); __write(1, src + tpos[i], tlen[i]); }\n'+old;assert s.count(old)==1;(t/'dump.c').write_bytes(s.replace(old,new));cmd('cc','-w','-std=c99','-O2',t/'dump.c','-o',t/'dump');cmd('cc','-O2',ROOT/'exec/c/run.c','-o',t/'run')
    model=a.model or t/'e3.json'
-   if not a.model:cmd(sys.executable,ROOT/'exec/build/gen.py','parse2',model)
+   if not a.model:__import__('parse2json').fetch(model)
    e['model_sha256']=hashlib.sha256(model.read_bytes()).hexdigest();d=json.loads(model.read_text());loaded=load(d);raw=cmd(t/'dump','-dump-tokens',t/'source.c');(t/'tokens').write_bytes(raw)
    def simulate(ver):
     status,out,_=run(d,raw,'ranks',files=Files(ver),loaded=loaded,maxsteps=5000000);assert status=='accept',(status,out);return out
