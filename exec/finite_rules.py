@@ -44,6 +44,10 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `label` a=STATE (STATE joins the graph's return-label set);
     `copy-replace` a=SOURCE b=NEW c=JSON action d=JSON actions (copy SOURCE with every
     occurrence of the action c replaced by the actions d; c must occur in SOURCE).
+    `split-at` a=JSON action sequence b=RESUME c=TARGET: on every edge whose action
+    sequence contains a (first occurrence), the actions from a on are replaced by
+    PUSH RESUME and the target by TARGET; RESUME (a return label, mode r) takes on
+    every observation the first such edge's target and the actions after a.
     `rewrite-tail` a=JSON action patterns c=TARGET (empty: keep) d=JSON actions:
     on every edge of every state whose action sequence ends with actions
     matching the patterns (each pattern a prefix of its action tuple), those
@@ -339,7 +343,7 @@ def expand_template(path, facts, fresh, section=None):
                     elif kind == "fresh":
                         if b2:
                             prev[b2] = a2
-                    elif kind in ("append", "rewrite-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
+                    elif kind in ("append", "split-at", "rewrite-tail", "rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "copy-replace", "label", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -398,6 +402,18 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             continue
         if kind == "label":
             g.labels.add(a)
+            continue
+        if kind == "split-at":
+            cut = [tuple(x) for x in json.loads(a)]
+            n = len(cut)
+            for _, row in list(g.st.values()):
+                for key, (target, seq) in list(row.items()):
+                    acts = list(g.seqs[seq])
+                    at = next((i for i in range(len(acts) - n + 1) if acts[i:i + n] == cut), None)
+                    if n and at is not None:
+                        g.labels.add(b)
+                        row[key] = (c, g.seq(acts[:at] + [("PUSH", b)]))
+                        g.on(b, range(257), target, acts[at + n:], "r")
             continue
         if kind == "rewrite-tail":
             pattern = json.loads(a)
