@@ -11,7 +11,7 @@ b "${EXEC_CC:-cc}" -O2 -o "$OUT/run" exec/c/run.c
 b python3 exec/pp/gen.py "$OUT/e2.json" "$TARGET"
 b python3 exec/lex/gen.py --typed "$OUT/e1.json"
 b python3 exec/parse2/gen2.py "$OUT/e3.json"
-b python3 exec/opt/gen.py "$OUT/e4.json" 2
+b python3 exec/build/gen.py opt "$OUT/e4.json" --o2
 b python3 exec/build/gen.py prune "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
 case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=arm.py;; *) ARCHFLAG=; ENCODER=gen.py;; esac

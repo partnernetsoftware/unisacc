@@ -47,7 +47,7 @@ E="$D/elf-$ARCH"
 mkdir -p "$E"
 b ./exec/pipeline/elf.sh "$E" examples/hello.c examples/fib.c tests/c/b_strderef.c exec/c/run.c > "$E/build.log" 2>&1 || { cat "$E/build.log"; exit 1; }
 
-b python3 exec/opt/gen.py "$D/o1.json" 1
+b python3 exec/build/gen.py opt "$D/o1.json"
 b python3 exec/c/tbl.py "$D/o1.json" "$D/o1.tbl"
 b python3 exec/c/net.py "$D/o1.tbl" "$D/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$D/o1.net" --include include --kernels "$D/kernels" -o "$D/compiler.pkg" "$E/route.tsv"

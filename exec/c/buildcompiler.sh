@@ -53,8 +53,8 @@ shared() {
     b python3 exec/pp/gen.py "$T/shared/e2.json" --shared-predefines
     b python3 exec/lex/gen.py --typed "$T/shared/e1.json"
     b python3 exec/parse2/gen2.py "$T/shared/e3.json"
-    b python3 exec/opt/gen.py "$T/shared/e4.json" 2
-    b python3 exec/opt/gen.py "$T/shared/o1.json" 1
+    b python3 exec/build/gen.py opt "$T/shared/e4.json" --o2
+    b python3 exec/build/gen.py opt "$T/shared/o1.json"
     b python3 exec/build/gen.py prune "$T/shared/prune.json"
     b python3 exec/nativeabi/gen.py "$T/shared/nativeabi.json"
     for s in e2 e1 e3 e4 o1 prune nativeabi; do

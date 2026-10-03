@@ -25,7 +25,7 @@ fi
 hostcc() { if [ "$OS" = osx ]; then b cc -arch "$ARCH" "$@"; else b cc "$@"; fi; }
 TARGET=$OS/$ARCH; export TARGET
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
-b python3 exec/opt/gen.py "$T/o1.json" 1
+b python3 exec/build/gen.py opt "$T/o1.json"
 b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"

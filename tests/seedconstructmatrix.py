@@ -17,8 +17,8 @@ SHARED = (
     ("e2", "exec/pp/gen.py", ("--shared-predefines",)),
     ("e1", "exec/lex/gen.py", ("--typed",)),
     ("e3", "exec/parse2/gen2.py", ()),
-    ("e4", "exec/opt/gen.py", ("2",)),
-    ("o1", "exec/opt/gen.py", ("1",)),
+    ("e4", "exec/build/gen.py", ("opt", "--o2")),
+    ("o1", "exec/build/gen.py", ("opt",)),
     ("prune", "exec/build/gen.py", ("prune",)),
     ("nativeabi", "exec/nativeabi/gen.py", ()),
 )

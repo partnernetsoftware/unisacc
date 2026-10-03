@@ -32,7 +32,7 @@ def _entries():
     for w, er, l in itertools.product((0, 1), repeat=3):
         add('exec/parse2/gen2.py', *(['--warnings'] * w + ['--errors'] * er + ['--locations'] * l))
     add('exec/parse2/units.py'); add('exec/parse2/units.py', '--locations')
-    add('exec/opt/gen.py', '1'); add('exec/opt/gen.py', '2')
+    add('exec/build/gen.py opt'); add('exec/build/gen.py opt', '--o2')
     add('exec/build/gen.py prune'); add('exec/nativeabi/gen.py')
     for os_ in ((), ('--osx',), ('--win',)):
         for a in ((), ('--arm64',)):

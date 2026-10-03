@@ -12,7 +12,7 @@ b python3 exec/build/gen.py lower "$T/d.json"
 b python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl"
 b "$UA" -S examples/hello.c -o "$T/hello"
 b "$UA" -S examples/fib.c -o "$T/fib0"
-b python3 exec/opt/gen.py "$T/e4.json" 2
+b python3 exec/build/gen.py opt "$T/e4.json" --o2
 b python3 exec/c/tbl.py "$T/e4.json" "$T/e4.tbl"
 b "$T/run" "$T/e4.tbl" "$T/fib0" > "$T/fib"
 b python3 exec/lower/check.py "$T/run" "$T/d.tbl" "$T/d.json" "$T/hello" "$T/fib"

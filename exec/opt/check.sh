@@ -15,7 +15,7 @@ knownfail_load "$R/tests/difftest.knownfail" "$T/known.keys" || exit 1
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "e4: cc failed"; exit 1; }
 for L in 1 2; do
-    b 60 python3 exec/opt/gen.py "$T/e4_$L.json" $L 2>/dev/null || { echo "e4: gen -O$L failed"; exit 1; }
+    b 60 python3 exec/build/gen.py opt "$T/e4_$L.json" $([ "$L" = 2 ] && echo --o2) 2>/dev/null || { echo "e4: gen -O$L failed"; exit 1; }
     b 60 python3 exec/c/tbl.py "$T/e4_$L.json" "$T/e4_$L.tbl" || { echo "e4: tbl -O$L failed"; exit 1; }
 done
 eq=0; bad=0; skip=0; known=0

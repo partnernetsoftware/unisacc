@@ -191,8 +191,62 @@ def lowerabi():
     return out + rows + sel + om + ["=none\tjson\t[]", "=zero\tint\t0", "=eight\tint\t8"]
 
 
+def optgen():
+    """E4 optimiser START data and peep index facts (was exec/opt/gen.py build/peep_start/peepround):
+    start1/start2 = the START action list per level (interned start words, -O2 peep table and
+    opinfo classes, opinfo simple set), peepidx = PA_/PB_/PR_ column indices and sizes, Y = one
+    answer row per peep head with its target template (answer-targets.tsv)."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from exec.facts.load import facts
+    C = {r["name"]: r["value"] for r in facts("opt-gen-constants")}
+    pf = {}
+    for ln in (ROOT / "weights/gold/peep.tsv").read_text().splitlines():
+        f = ln.split("\t")
+        if ln.startswith("#field") or ln.startswith("#head"):
+            pf[f[1]] = f[2:]
+    PA, PB, PR, PY = pf["a"], pf["b"], pf["rel"], pf["y"]
+    def gold(name):   # field-wise `=>` filter, as exec/parse/gen.py gold()
+        return [f for f in (ln.split("\t") for ln in (ROOT / "weights/gold" / (name + ".tsv")).read_text(encoding="utf-8").splitlines()
+                            if not ln.startswith("#")) if "=>" not in f]
+    peep, opinfo = gold("peep"), gold("opinfo")
+    def word(w, reg):
+        return [["SBCLR"]] + [["SBOUT", c] for c in w.encode()] + [["SBINTERN", reg]]
+    out = []
+    for level in (1, 2):
+        acts = []
+        for w in facts("opt-gen-startwords"):
+            acts += word(w, "id_" + w.strip("."))
+        if level >= 2:
+            for f in peep:
+                if len(f) == 4 and f[0] in PA and f[1] in PB and f[2] in PR and f[3] in PY:
+                    k = (PA.index(f[0]) * len(PB) + PB.index(f[1])) * len(PR) + PR.index(f[2])
+                    acts += [["LDI", "q_t", k], ["LDI", "q_u", PY.index(f[3]) + 1], ["STX", "q_t", C["PEEPB"], "q_u"]]
+            for f in opinfo:
+                if len(f) == 4:
+                    acts += word(f[0], "q_t")
+                    if f[2] in PA:
+                        acts += [["LDI", "q_u", PA.index(f[2]) + 1], ["STX", "q_t", C["ACLSB"], "q_u"]]
+                    if f[3] in PB:
+                        acts += [["LDI", "q_u", PB.index(f[3]) + 1], ["STX", "q_t", C["BCLSB"], "q_u"]]
+        for f in opinfo:
+            if len(f) >= 2 and f[1] == "1":
+                acts += word(f[0], "t") + [["LDI", "u", 1], ["STX", "t", C["SIMPLE"], "u"]]
+        out.append("=start%d\tjson\t%s" % (level, json.dumps(acts)))
+    idx = {}
+    for prefix, values in (("PA", PA), ("PB", PB), ("PR", PR)):
+        idx.update((prefix + "_" + n, i) for i, n in enumerate(values))
+    idx.update(PB_size=len(PB), PR_size=len(PR))
+    out.append("=peepidx\tjson\t" + json.dumps(idx))
+    targets = dict(l.split("\t") for l in (ROOT / "exec/opt/answer-targets.tsv").read_text().splitlines()
+                   if l and not l.startswith("#"))
+    out.append("=Y\tjson\t" + json.dumps([dict(i=i, target=targets.get(n, targets["*"]).format(name=n)) for i, n in enumerate(PY)]))
+    return out
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
+    ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
