@@ -9,5 +9,6 @@ int main(void) {
     g = (h = 70000); printf("%lld\n", g);
     printf("%d\n", (c = 255) + 1 > 255);
     { long long w; unsigned u = 191; printf("%d %d\n", (w = -1) < u, ((w = -1) | 1) < u); }   /* seed 17: typed as the left operand */
+    { long long b = -1; unsigned long long z = 0; int c = 5; printf("%d %d\n", -6 < (b &= z), (c += 1) * 2); }   /* seed 307: compound assignment has the left type */
     return 0;
 }

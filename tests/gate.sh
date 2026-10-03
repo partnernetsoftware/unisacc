@@ -92,7 +92,7 @@ for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 python3 ./tests/declmatrix.py; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects)
 job decision-ledger python3 ./tests/decisionledger.py   # 0.0.23 I: build-time Python control (direct transition sites) may only fall
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
-for k in 1 2 3 4 5 6 7 8; do job csmithdiff-$k SEEDS=1-200 SHARD=$k/8 python3 ./tests/csmithdiff.py; done   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
+for k in $(seq 1 16); do job csmithdiff-$k SEEDS=1-500 SHARD=$k/16 python3 ./tests/csmithdiff.py; done   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
 # R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
 # regressions found after 0.0.16's local queue was green came from here
 # (ccrun8: a Python-route bit-field value; opt-run1: c-testsuite 00204).
@@ -463,7 +463,7 @@ if [ "$COM" = 1 ]; then
     fi
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
-    for k in 1 2 3 4 5 6 7 8; do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-200 SHARD=$k/8 python3 ./tests/csmithdiff.py; done
+    for k in $(seq 1 16); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/16 python3 ./tests/csmithdiff.py; done
     for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 python3 ./tests/declmatrix.py; done   # the same matrix on the product (found functions named r0..r7)
     job com-auditnet MODEL_COM="$PRODUCT" python3 ./tests/auditnet.py   # 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
     for k in 1 2 3; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/3 python3 ./tests/tapebinproduct.py; done   # one pass was 45-53 s

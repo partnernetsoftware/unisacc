@@ -3297,6 +3297,7 @@ int expr(void) {
             estore(e);
             curelem = e;
             if (ptrl) { curptr = 1; curelem = pel; }
+            else if (bl == 0 && e > 0 && e < BFTAG) { curptr = 0; cursize = e; curuns = tyuns(aax); }   /* `b &= u` has b's type (csmith seed 307: long long b; -6 < (b &= 0ull) compared unsigned) */
             return 0;
         }
         if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
