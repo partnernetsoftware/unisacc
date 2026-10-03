@@ -20,7 +20,8 @@ fresh    `-` (None) | `P:NAME` (P(NAME).fresh, registered) | `U:NAME` / `S:NAME`
 seq,bind comma list of k=V; V is a fact path `a.b.0`, `@rej:TEXT`, `@bytes:TEXT`
          (`@bytes:=FACT` for a fact's text), `$NAME` (env), `fresh:SCOPE:KIND`;
          evaluated left to right
-opts     `-` or JSON: once (NAME: the rest of this manifest runs once per graph), mode, domain ([lo,hi)), classes (fact path), overlay,
+opts     `-` or JSON: once (NAME: the rest of this manifest runs once per graph), mode, domain ([lo,hi), or "@labels": sorted(g.labels)+BOT, the stage-blind return
+         alphabet G.finish pops over), classes (fact path), overlay,
          result (store the install's return in env under that name),
          export (list of bind names also stored in env, for later rows' `$NAME`),
          over/as (foreach)
@@ -134,6 +135,8 @@ class Run:
             return None
         if spec == "none":
             return lambda k: None
+        if spec == "split":   # K2 marked change: template kind OWNER_KIND -> label OWNER.KIND<n>
+            return lambda k: self.E.P.fresh(self.holder(k.split("_")[0]), k.split("_")[1])
         kind, _, name = spec.partition(":")
         if spec.startswith("="):
             h = self.holders[spec[1:]]
@@ -267,7 +270,9 @@ class Run:
         kw = {}
         if "classes" in o:
             kw["classes"] = _path(facts, o["classes"])
-        if "domain" in o:
+        if o.get("domain") == "@labels":   # K2 marked change: the return alphabet, every label + BOT (as G.finish's RET)
+            kw["domain"] = sorted(g.labels) + ["BOT"]
+        elif "domain" in o:
             kw["domain"] = range(*o["domain"])
         if "domain_keys" in o:   # K2 translator: explicit key list (fact path), not a range
             kw["domain"] = _path(facts, o["domain_keys"])
@@ -475,7 +480,22 @@ def _fmt(f, facts):
 
 
 def _foreach(self, o, body, depth, extra, facts):
-    rows = _path(facts, _fmt(o["over"], facts) if "{" in o["over"] else o["over"])
+    if o["over"].startswith("$"):
+        # K2 marked change: over a dict an earlier row stored with result=NAME; rows {key, value}
+        # in its order; join {"over": PATH, "on": COL, "default": {col: value | "{key}"}} merges the
+        # first fact row whose COL equals key, else the default.
+        rows = [{"key": k, "value": v} for k, v in self.env[o["over"][1:]].items()]
+        j = o.get("join")
+        if j:
+            table = _path(facts, j["over"])
+            def match(r):
+                hit = [t for t in table if t[j["on"]] == r["key"]]
+                if hit:
+                    return dict(hit[0], **r)
+                return dict({c: v.format(**r) if isinstance(v, str) else v for c, v in j["default"].items()}, **r)
+            rows = [match(r) for r in rows]
+    else:
+        rows = _path(facts, _fmt(o["over"], facts) if "{" in o["over"] else o["over"])
     for col, allowed in o.get("where", {}).items():
         allowed = [_fmt(_section(a, self.flags), facts) for a in allowed]
         rows = [r for r in rows if r[col] in allowed]

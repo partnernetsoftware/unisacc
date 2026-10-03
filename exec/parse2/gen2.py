@@ -837,8 +837,8 @@ def build(locations=False, warnings=False, errors=False):
                      dict(TOKEN_POS=_tl.TOKEN_POS, NAME_TOKEN=assemble.load_facts('unusedwarnings')['NAME_TOKEN'],
                           DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
     if errors:
-        from errors import install as error_install
-        error_install(E, P, warnings)
+        _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors
+        E.__dict__.setdefault("results", {})["lm_nomain_msg"] = _err["lm_nomain_msg"]   # librarymodule's no-main message state
     from libraryexports import install as libraryexports_install
     start = libraryexports_install(E, P, {name: globals()[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
