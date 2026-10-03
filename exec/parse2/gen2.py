@@ -282,10 +282,6 @@ def function_control(section, warnings):
     _namespace_control("function", section, warnings)
 
 
-def global_control(section, warnings):
-    _namespace_control("global", section, warnings)
-
-
 def local_control(section, warnings):
     _namespace_control("local", section, warnings)
 
@@ -317,19 +313,10 @@ def build(locations=False, warnings=False, errors=False):
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
     E.__dict__.setdefault("results", {}).update(lm_header=O(E.HEADER), lm_errors=errors)
-    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})   # early..starlookup
+    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})   # early..callcontrol-finish
     for name in ("startup", "global0", "global1", "global3", "global5"):
         _publish(env[name])   # lm_hstate/lm_hnext; global3 lm_main/lm_initret/lm_tailret
-    import assemble
-    call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
-                            dict(warnings=warnings), dict(warnings=warnings))
-    _publish(call_env, ("fpcont",))   # FS.CALLTYPE continuation (librarycallables)
-    fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
-    import assemble
-    assemble.run(Path(__file__).parent / "truth-conversions-manifest.tsv", E, P, {},
-                 dict(DBL=C["DBL"], FLT=C["FLT"], UNSIGNED_WIDE=C["UNS"] + 8, **fpu))
-    assemble.run(Path(__file__).resolve().parent / 'callcontrol-finish-manifest.tsv', E, P,
-                 dict(warnings=warnings), dict(warnings=warnings, cb=call_env['cb']))
+    _publish(env, ("fpcont",))   # callcontrol-begin (merged): FS.CALLTYPE continuation (librarycallables)
     import assemble
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
     segment("offsetof")

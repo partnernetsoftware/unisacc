@@ -588,3 +588,15 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
   Next: callcontrol-begin, truth-conversions, callcontrol-finish into gen-manifest; then the locations/warnings/errors
   tail; librarymodule after truth is cdx.
+- Round 46 (step (e), third block): gen-manifest also runs callcontrol-begin (opts merge, so cb/fpcont reach the
+  finish call and the returned env), truth-conversions (binds DBL/FLT/UNSIGNED_WIDE from facts k2-gen2 buildconst and
+  every irsel fpu key from new fact k2-gen2 truthfpu; flags all false as before) and callcontrol-finish. First try
+  without the fpu binds failed KeyError s2d (scalar rows read the fpu op names from bindings). global_control removed
+  (no callers); function_control/local_control kept (other callers not checked). export.py: buildconst gains
+  UNSIGNED_WIDE, new truthfpu; rerun, facts committed.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Tail NOT moved yet (offsetof segment, locations/warnings/errors blocks with _tl/_rec, _libraryexports +
+  librarymodule (cdx), layoutfacts/valueranks/layoutprovenance/parenfold/unitmode/objectdefinitions/structreturnexpr/
+  forward/gen2parts, CP.restore assert). Python-only inputs there: _rec choice (ER.token/WU.token/RET by flags -> when
+  rows), header_json (E.HEADER), E.TK keys, E.FND, NAME_TOKEN/TOKEN_POS facts, start threading.
