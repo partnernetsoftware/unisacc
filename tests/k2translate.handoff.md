@@ -529,3 +529,20 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Next: (2) exec/parse2/gen-manifest.tsv (#! base build/parse2base.py, #! flags locations warnings errors) via
   exec/build/gen.py parse2; E.results producers -> export/let aliases (global-results, lm_*, fpcont), lm_header/lm_errors
   -> fact/flag; (3) switch graphhash keys/tests/exec scripts/compilerpack closure as in 4ea3f5e8, delete gen2.py.
+- Round 40 (step 2 survey only, no code change; design, nothing run): what blocks exec/parse2/gen-manifest.tsv
+  (#! base build/parse2base.py, #! flags locations warnings errors) under exec/build/gen.py parse2:
+  (a) gen2.build env values come from gen2 module globals (SBB/FPB/FPV/FPS_*/MOF..BFS/SHAPE*/TYINT/TIX/UNDO_SIZE/
+      ENV/END_/GSZ/GUNIT/SSZ/SAL/SMN/SMEM/ENUM_FIRST/DIM, E.TK[...], E.O(E.HEADER), E.gold('irsel') fpu) -> each must be
+      a facts k2-gen2 row (export.py) before rows can name them; TYINT-derived lists (librarytypes ints/ints2) too.
+  (b) _libraryexports still calls librarymodule.install (py) and imports unresolved.DEFINED; librarycallables
+      text_seqs are read from librarycallables-result.tsv out: cells in Python -> need a manifest row/fact.
+  (c) E.results writers: _namespace_control (global-results.tsv), lm_hstate/lm_hnext (startup-run env),
+      lm_header/lm_errors (-> fact / flag errors), fpcont (callcontrol-begin), lm_nomain_msg/lm_mainnext/lm_mainreject
+      (errors manifest; lm_mainreject=[] -> fact) -> `export`/let alias rows in gen-manifest; unitmode reads lm_initret.
+  (d) leftover Python: g.st['CP.restore'] assert, start threading (START/tokenlocations start/LF.start/SF3.start/UM.start
+      -> #! start $ret), _base.twice() assert and E.sizes stderr line (gen.py may already do the twice check: verify).
+  (e) gen2-manifest segments become unconditional blocks: drop fact:seg_* guards in the order build() calls them
+      (early, constexpr, statics, startup-run, ns-global-global0/1/3/5, fnscope, body1, ladders, body2, membercontrol,
+      starlookup, callcontrol-begin, truth-conversions, then the tail above); ns sections called from inside other
+      segments (ord-*, ret-*, ladder-*) keep their guards as call sub-sections.
+  Suggested order: (a) facts first (export.py, hash SAME by construction), then (c), then (b), then build the manifest.
