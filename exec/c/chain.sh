@@ -46,7 +46,7 @@ for name in $(cat "$T/known"); do
 done
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "chain: cc failed"; exit 1; }
-b 60 python3 exec/pp/gen.py "$T/e2.json" >/dev/null 2>&1 || { echo "chain: E2 gen failed"; exit 1; }
+b 60 python3 exec/build/gen.py pp "$T/e2.json" >/dev/null 2>&1 || { echo "chain: E2 gen failed"; exit 1; }
 b 60 python3 exec/lex/gen.py --typed "$T/e1.json" >/dev/null 2>&1 || { echo "chain: E1 gen failed"; exit 1; }
 b 60 python3 exec/parse2/gen2.py "$T/e3.json" >/dev/null 2>&1 || { echo "chain: E3 gen failed"; exit 1; }
 MODEL=tbl

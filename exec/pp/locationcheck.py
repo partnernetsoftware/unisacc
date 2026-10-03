@@ -46,7 +46,7 @@ __write(1,src,nsrc); }
     (t/'ref.c').write_text(source)
     call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
-    call([sys.executable,R/'exec/pp/gen.py',t/'pp.json','--locations'])
+    call([sys.executable,R/'exec/build/gen.py','pp',t/'pp.json','--locations'])
     call([sys.executable,R/'exec/c/tbl.py',t/'pp.json',t/'pp.tbl'])
     call([sys.executable,R/'exec/c/net.py',t/'pp.tbl',t/'pp.net'])
     delta=json.loads((t/'pp.json').read_text());loaded=sim.load(delta)

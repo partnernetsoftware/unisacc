@@ -109,7 +109,7 @@ with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
  call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
  for located in (False,True):
   q='loc' if located else 'plain'
-  call([sys.executable,R/'exec/pp/gen.py',t/(q+'.json'),*(['--locations'] if located else [])])
+  call([sys.executable,R/'exec/build/gen.py','pp',t/(q+'.json'),*(['--locations'] if located else [])])
   call([sys.executable,R/'exec/c/tbl.py',t/(q+'.json'),t/(q+'.tbl')])
   call([sys.executable,R/'exec/c/net.py',t/(q+'.tbl'),t/(q+'.net')])
   call([t/'run','--check-net',t/(q+'.tbl'),t/(q+'.net')])

@@ -55,7 +55,7 @@ if(mode)count=nwarn; for(i=0;i<4;i++)out[i]=(count>>(8*i))&255;__write(1,out,4);
     source=source.replace(anchor,'    if (getenv("UA_DIAG_POS")) { probe_diag(); return 2; }\n'+anchor)
     (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
-    call([sys.executable,R/'exec/pp/gen.py',t/'pp.json','--locations'])
+    call([sys.executable,R/'exec/build/gen.py','pp',t/'pp.json','--locations'])
     (t/'diag.json').write_text(json.dumps(probe_model(),separators=(',',':')))
     for name in ('pp','diag'):
         call([sys.executable,R/'exec/c/tbl.py',t/(name+'.json'),t/(name+'.tbl')])

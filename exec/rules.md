@@ -67,7 +67,7 @@ exec/ 的构造器在构建时 import 以下 unisa/ 模块（19 个）：`unisa/
 | 6 | `exec/parse2/errors.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 6 | `exec/modelbindings.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 5 | `exec/parse2/librarydata.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
-| 3 | `exec/pp/gen.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
+| 3 | `exec/pp/gen-manifest.tsv` (was `exec/pp/gen.py`) | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 3 | `exec/parse2/structreturnexpr.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 3 | `exec/parse2/libraryexports.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |
 | 3 | `exec/lower/code.py` | 依赖事实的改写：把已安装状态改名为 *.original.* 并挂接钩子，或按事实列表（整数类型、平台前缀、recipes）生成状态；表行的目标列不能由事实生成，所以留在 Python |

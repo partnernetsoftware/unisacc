@@ -21,10 +21,11 @@ TSV = ROOT / 'tests' / 'graphhash.tsv'
 def _entries():
     e = []
     add = lambda gen, *args: e.append((gen, tuple(args)))
-    # pp: target positional, --locations, --shared-predefines
-    for t in ((), ('lnx/x86_64',), ('osx/arm64',), ('win/x86_64',)):
+    # pp: target flags (lnx/x86_64 default), --locations, --shared-predefines, --no-autoinc
+    for t in ((), ('--osx', '--arm64'), ('--win',)):
         for f in ((), ('--locations',), ('--shared-predefines',), ('--locations', '--shared-predefines')):
-            add('exec/pp/gen.py', *(t + f))
+            add('exec/build/gen.py pp', *(t + f))
+    add('exec/build/gen.py pp', '--shared-predefines', '--no-autoinc')
     # lex: --typed/--positions/--locations imply each other downwards; --sourcefacts; --check-declarations
     for f in ((), ('--typed',), ('--positions',), ('--locations',), ('--sourcefacts',), ('--check-declarations',)):
         add('exec/lex/gen.py', *f)

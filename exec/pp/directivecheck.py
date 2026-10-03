@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix='pp-directives-') as td:
     call([os.environ.get('CC', 'cc'), '-O2', R/'exec/c/run.c', '-o', t/'run'])
     n = 0
     for mode in ([], ['--locations']):
-        call([sys.executable, R/'exec/pp/gen.py', t/'pp.json', *mode])
+        call([sys.executable, R/'exec/build/gen.py', 'pp', t/'pp.json', *mode])
         call([sys.executable, R/'exec/c/tbl.py', t/'pp.json', t/'pp.tbl'])
         call([sys.executable, R/'exec/c/net.py', t/'pp.tbl', t/'pp.net'])
         call([t/'run', '--check-net', t/'pp.tbl', t/'pp.net'])

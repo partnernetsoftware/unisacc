@@ -8,6 +8,7 @@ sys.path.insert(0, str(R))
 from unisa.front.pp import _pieces
 TARGET = ('osx' if sys.platform == 'darwin' else 'lnx') + '/' + (
     'arm64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64')
+TFLAGS = ['--osx'] * TARGET.startswith('osx/') + ['--arm64'] * TARGET.endswith('/arm64')
 
 def call(args):
     p = subprocess.run(list(map(str, args)), capture_output=True, timeout=15)
@@ -39,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='pp-pragma-') as td:
     t = pathlib.Path(td)
     call([os.environ.get('EXEC_CC', 'cc'), '-O2', R/'exec/c/run.c', '-o', t/'run'])
     for located in (False, True):
-        call([sys.executable, R/'exec/pp/gen.py', t/'pp.json', TARGET, *(['--locations'] if located else [])])
+        call([sys.executable, R/'exec/build/gen.py', 'pp', t/'pp.json', *TFLAGS, *(['--locations'] if located else [])])
         call([sys.executable, R/'exec/c/tbl.py', t/'pp.json', t/'pp.tbl'])
         call([sys.executable, R/'exec/c/net.py', t/'pp.tbl', t/'pp.net'])
         call([t/'run', '--check-net', t/'pp.tbl', t/'pp.net'])

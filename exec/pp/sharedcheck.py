@@ -14,22 +14,29 @@ HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[1]
 sys.path.insert(0,str(ROOT/'exec/c'))
 sys.path.insert(0,str(HERE))
 from pack import build as package, compressed_model, compact_q
-from gen import build, predefine_resources, sizes
+sys.path.insert(0,str(ROOT/'exec'))
+import assemble
+
+def predefine_resources():   # exec/facts/pp-gen.tsv predefres (from exec/pp/predefines.tsv)
+    return {b'\0predefines/'+k.encode():v.encode() for k,v in sorted(assemble.load_facts('pp-gen')['predefres'].items())}
 
 TARGETS=[o+'/'+a for o in ('lnx','osx','win') for a in ('arm64','x86_64')]
 
-def serialize(g,path):
-    path.write_text(json.dumps({'start':'START','states':{k:[m,{str(a):list(v) for a,v in row.items()}] for k,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}))
+def build(path,target='lnx/x86_64',locations=False,shared_predefines=False,autoinc=True):
+    o,a=target.split('/')
+    flags=['--'+o]*(o!='lnx')+['--arm64']*(a=='arm64')+['--locations']*locations+['--shared-predefines']*shared_predefines+['--no-autoinc']*(not autoinc)
+    call([sys.executable,ROOT/'exec/build/gen.py','pp',path,*flags],timeout=30)
+    return json.loads(path.read_text())
 
 def call(args,timeout=15,success=True):
     r=subprocess.run(list(map(str,args)),timeout=timeout,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     if success and r.returncode: raise AssertionError((args,r.returncode,r.stderr[:500]))
     return r
 
-def check(locations,output):
+def check(locations,output,autoinc=True):
     output.mkdir(parents=True,exist_ok=True)
     call(['cc','-O2',ROOT/'exec/c/run.c','-o',output/'run'],timeout=25)
-    shared=build(locations=locations,shared_predefines=True);serialize(shared,output/'shared.json')
+    shared=build(output/'shared.json',locations=locations,shared_predefines=True,autoinc=autoinc)
     for extension,tool in [('tbl','tbl.py'),('net','net.py')]:
         source=output/('shared.json' if extension=='tbl' else 'shared.tbl')
         call([sys.executable,ROOT/'exec/c'/tool,source,output/('shared.'+extension)])
@@ -47,15 +54,15 @@ def check(locations,output):
     records=[];old_bytes=0;old_compressed_bytes=0
     for target in TARGETS:
         selector.write_bytes(target.encode())
-        legacy=build(target,locations=locations);serialize(legacy,output/'legacy.json')
+        build(output/'legacy.json',target,locations=locations,autoinc=autoinc)
         call([sys.executable,ROOT/'exec/c/tbl.py',output/'legacy.json',output/'legacy.tbl'])
         call([sys.executable,ROOT/'exec/c/net.py',output/'legacy.tbl',output/'legacy.net'])
         old_text=(output/'legacy.net').read_bytes()
         old_bytes+=len(old_text)
         old_compressed_bytes+=len(compressed_model(compact_q(old_text),cache=False)[0])
         # Exact target argument independence is a construction-level check.
-        candidate=build(target,locations=locations,shared_predefines=True)
-        assert candidate.st==shared.st and candidate.seqs==shared.seqs, target
+        candidate=build(output/'candidate.json',target,locations=locations,shared_predefines=True,autoinc=autoinc)
+        assert candidate==shared, target
         for stem in ('legacy','shared'):
             manifest=output/(stem+'.tsv');manifest.write_text('pp\te2\tsrc.c\t'+('pp.locations' if locations else 'pp.text')+'\t'+stem+'.net\n')
             (output/(stem+'.pkg')).write_bytes(package([manifest],[('00',resources),('006864722f',ROOT/'include')]))
@@ -80,8 +87,8 @@ def check(locations,output):
         r=call([output/'run','--bundle',output/'bad.pkg','pp',source],success=False)
         assert r.returncode==1 and b'predefinition' in r.stderr,(bad,r.returncode,r.stderr)
     names.write_bytes(original)
-    result={'format':'located' if locations else 'plain','autoinc':os.environ.get('E2_AUTOINC','1')!='0',
-            'states':len(shared.st),'six_legacy_net_bytes':old_bytes,'shared_net_bytes':(output/'shared.net').stat().st_size,
+    result={'format':'located' if locations else 'plain','autoinc':autoinc,
+            'states':len(shared['states']),'six_legacy_net_bytes':old_bytes,'shared_net_bytes':(output/'shared.net').stat().st_size,
             'predefine_resource_bytes':sum(map(len,predefine_resources().values())),
             'six_legacy_p3_model_bytes':old_compressed_bytes,
             'shared_p3_model_bytes':len(compressed_model(compact_q((output/'shared.net').read_bytes()),cache=False)[0]),
@@ -90,5 +97,5 @@ def check(locations,output):
     print(json.dumps({k:v for k,v in result.items() if k!='equal'},sort_keys=True))
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--locations',action='store_true');ap.add_argument('--output',required=True,type=Path)
-    a=ap.parse_args();check(a.locations,a.output)
+    ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--locations',action='store_true');ap.add_argument('--no-autoinc',action='store_true');ap.add_argument('--output',required=True,type=Path)
+    a=ap.parse_args();check(a.locations,a.output,not a.no_autoinc)

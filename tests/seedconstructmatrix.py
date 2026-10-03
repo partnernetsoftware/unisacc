@@ -14,7 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("lnx/arm64", "lnx/x86_64", "osx/arm64", "osx/x86_64", "win/arm64", "win/x86_64")
 SHARED = (
-    ("e2", "exec/pp/gen.py", ("--shared-predefines",)),
+    ("e2", "exec/build/gen.py", ("pp", "--shared-predefines")),
     ("e1", "exec/lex/gen.py", ("--typed",)),
     ("e3", "exec/parse2/gen2.py", ()),
     ("e4", "exec/build/gen.py", ("opt", "--o2")),
@@ -23,13 +23,13 @@ SHARED = (
     ("nativeabi", "exec/build/gen.py", ("nativeabi",)),
 )
 FEATURES = (
-    ("tokenpp", "exec/pp/gen.py", ("lnx/x86_64", "--shared-predefines")),
+    ("tokenpp", "exec/build/gen.py", ("pp", "--shared-predefines", "--no-autoinc")),
     ("tokenlex", "exec/lex/gen.py", ()),
     ("warnlex", "exec/lex/gen.py", ("--locations",)),
     ("warnparse", "exec/parse2/gen2.py", ("--warnings", "--errors")),
     ("warnunits", "exec/parse2/units.py", ("--locations",)),
     ("errorparse", "exec/parse2/gen2.py", ("--errors",)),
-    ("warnpp-shared", "exec/pp/gen.py", ("--locations", "--shared-predefines")),
+    ("warnpp-shared", "exec/build/gen.py", ("pp", "--locations", "--shared-predefines")),
 )
 
 
@@ -77,8 +77,7 @@ def main(group):
         for name, generator, flags in specs(group):
             graph, table = d / (name + ".json"), d / (name + ".tbl")
             py, c = d / (name + ".py.net"), d / (name + ".c.net")
-            env = dict(os.environ, E2_AUTOINC="0") if name == "tokenpp" else None
-            run(deadline, sys.executable, generator, str(graph), *flags, env=env)
+            run(deadline, sys.executable, generator, str(graph), *flags)
             run(deadline, sys.executable, "exec/c/tbl.py", str(graph), str(table))
             run(deadline, sys.executable, "exec/c/net.py", str(table), str(py))
             run(deadline, str(cnet), str(table), str(c))

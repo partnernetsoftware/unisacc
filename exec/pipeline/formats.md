@@ -20,7 +20,7 @@ valid, 1 invalid with the reason on stderr).  `run.py` checks every stream.
 
 ## Preprocessor diagnostic envelope (development)
 
-`exec/pp/gen.py --locations` emits **pp.locations**, while its default remains
+`exec/build/gen.py pp --locations` emits **pp.locations**, while its default remains
 plain **pp.text**. The envelope is produced by model actions; the C/ASM host
 does not interpret its fields. The optional E1/E3 location modes consume it as described below. It is not
 yet connected to the compiler CLI route and does not make `-Wall` available.

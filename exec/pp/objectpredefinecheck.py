@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='e2-object-predefine-') as name:
         model = tmp / 'pp.json'
         table = tmp / 'pp.tbl'
         net = tmp / 'pp.net'
-        call(sys.executable, ROOT / 'exec/pp/gen.py', model, *mode)
+        call(sys.executable, ROOT / 'exec/build/gen.py', 'pp', model, *mode)
         call(sys.executable, ROOT / 'exec/c/tbl.py', model, table)
         call(sys.executable, ROOT / 'exec/c/net.py', table, net)
         call(runtime, '--check-net', table, net)

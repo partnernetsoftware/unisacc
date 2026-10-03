@@ -339,7 +339,7 @@ def compilercheck_closure_controls(queue, source_root, declaration_path=None):
                 edit('ignored-build-output-change',ignored,set())
                 ignored.unlink()
                 edit('checker',fixture/'exec/c/compilercheck.py',all_family|unknown)
-                edit('actual-generator',fixture/'exec/pp/gen.py',all_family|unknown)
+                edit('actual-generator',fixture/'exec/pp/gen-manifest.tsv',all_family|unknown)
                 edit('same-path-UA',ua,all_family|unknown)
                 edit('same-path-MODEL_COM',model,all_family|unknown)
                 edit('actual-awk-tool',awk,all_family)

@@ -160,27 +160,25 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
             rows[i]='\t'.join(cols)
         # Declare all target macro lists as resources; choosing and parsing
         # the list remains in the shared E2 delta. The driver supplies target.
-        # Load by source path, avoiding other stage generators named gen.
-        import importlib.util
-        spec=importlib.util.spec_from_file_location('exec_pp_predefines',here.parent/'pp/gen.py')
-        ppgen=importlib.util.module_from_spec(spec);spec.loader.exec_module(ppgen)
+        # The lists are facts (exec/facts/pp-gen.tsv predefres, from exec/pp/predefines.tsv).
+        sys.path.insert(0,str(here.parent))
+        import assemble
         predefines=Path(td)/'predefines';predefines.mkdir()
-        for key,value in ppgen.predefine_resources().items():
-            target=key[len(b'\0predefines/'):].decode('ascii')
-            path=predefines/target;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value)
+        for target,value in sorted(assemble.load_facts('pp-gen')['predefres'].items()):
+            path=predefines/target;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value.encode('ascii'))
         mounts.append(('00707265646566696e65732f',predefines))
         plain_pp=Path(shared_e2).resolve() if shared_e2 is not None else built_model(
-            td,'plainpp',here.parent/'pp/gen.py',['--shared-predefines'])
+            td,'plainpp',here.parent/'build/gen.py',['pp','--shared-predefines'])
         for i,row in enumerate(rows):
             cols=row.split('\t')
             if cols[1]=='e2': cols[4]=str(plain_pp);rows[i]='\t'.join(cols)
         # Public token dump uses the reference's fixed Linux/x86 predefines
         # and the plain E1 output, independently of image-target selection.
         for name,script,args,inp,out in [
-                ('tokenpp',here.parent/'pp/gen.py',['lnx/x86_64','--shared-predefines'],'src.c','pp.text'),
+                ('tokenpp',here.parent/'build/gen.py',['pp','--shared-predefines','--no-autoinc'],'src.c','pp.text'),
                 ('tokenlex',here.parent/'lex/gen.py',[],'pp.text','tokens.plain')]:
             # Public token dump has no implicit header selection.
-            n=built_model(td,name,script,args,dict(os.environ,E2_AUTOINC='0') if name=='tokenpp' else None)
+            n=built_model(td,name,script,args)
             rows.append('\t'.join(['tokens',name,inp,out,str(n)]))
         # Located warning routes share one lexer/parser; preprocessing keeps
         # target predefines. This construction never runs in the driver.
@@ -192,7 +190,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         located_units=warning_model('warnunits',here.parent/'parse2/units.py',['--locations'])
         quiet_parse=warning_model('errorparse',here.parent/'parse2/gen2.py',['--errors'])
         ordinary=list(rows)
-        warning_models['e2']=warning_model('warnpp-shared',here.parent/'pp/gen.py',['--locations','--shared-predefines'])
+        warning_models['e2']=warning_model('warnpp-shared',here.parent/'build/gen.py',['pp','--locations','--shared-predefines'])
         for target in sorted(targets):
             # Normal compilation also carries locations, without enabling
             # warnings. The same units model preserves file boundaries.

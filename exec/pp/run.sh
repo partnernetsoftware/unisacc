@@ -13,7 +13,7 @@ export E2REF=$T/ua_ref E2NOAUTO=$T/ua_noauto
 ready() {
     fresh $T/ua_ref $B ./tests/build_ref.sh $T/ua_ref.c $T/ua_ref -- $REFSRC &&
     fresh $T/ua_noauto $B exec/pp/mknoauto.sh $T/ua_ref.c $T/ua_noauto -- $T/ua_ref.c exec/pp/mknoauto.sh &&
-    fresh $T/d.json $B python3 exec/pp/gen.py $T/d.json -- exec/finite_rules.py exec/pp/*.py exec/pp/*.tsv weights/gold/pp.tsv $PYSRC $T/ua_ref.stamp
+    fresh $T/d.json $B python3 exec/build/gen.py pp $T/d.json -- exec/finite_rules.py exec/assemble.py exec/build/*.py exec/pp/*.py exec/pp/*.tsv exec/facts/pp-*.tsv weights/gold/pp.tsv $PYSRC $T/ua_ref.stamp
 }
 case "$1" in
 gen)      ready ;;
