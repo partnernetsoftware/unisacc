@@ -655,8 +655,39 @@ def main(argv):
                 print("facts differ: " + str(path.relative_to(ROOT)))
         else:
             path.write_text(text)
+    if check:
+        bad += _bank_owners()
     print("facts: %d tables, %d differ" % (len(TABLES), bad) if check else "facts: wrote %d tables" % len(TABLES))
     return 1 if bad else 0
+
+
+# Bank ownership (was runtime asserts in layoutfacts.py / libraryexports.py): an owner's bank
+# list must not be reused by any other stage's constant table (`# source: literal constants
+# formerly in ...` name/value tables, the stage constants).
+BANK_OWNERS = (("layoutfacts", "RESERVED_BANKS"), ("libraryexports", "RANK_BANKS"))
+
+
+def _bank_owners():
+    import json
+    consts = {}
+    for path in sorted(HERE.glob("*.tsv")):
+        lines = path.read_text().split("\n")
+        if len(lines) < 2 or not lines[1].startswith("# source: literal constants formerly in"):
+            continue
+        consts[path.stem] = {}
+        for ln in lines[2:]:
+            f = ln.split("\t")
+            if len(f) == 2 and not ln.startswith("#"):
+                consts[path.stem][f[0]] = json.loads(f[1]) if f[1][:1] in "[-0123456789" else f[1]
+    bad = 0
+    for owner, name in BANK_OWNERS:
+        owned = set(consts[owner][name])
+        for stem, d in consts.items():
+            hit = sorted(k for k, v in d.items() if stem != owner and type(v) is int and v in owned)
+            if hit:
+                bad += 1
+                print("bank owned by %s.%s reused in %s: %s" % (owner, name, stem, ", ".join(hit)))
+    return bad
 
 
 def _fieldchain():
