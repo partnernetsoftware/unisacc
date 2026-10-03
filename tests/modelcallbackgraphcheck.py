@@ -113,8 +113,7 @@ def main():
   for n in range(len(trunc)):assert check(trunc[:n])[0]=='reject'
   # Prune must retain unsupported public callback roots and validate full graphs.
   sys.path.insert(0,str(ROOT/'exec/prune'))
-  ps=importlib.util.spec_from_file_location('callbackprune',ROOT/'exec/prune/gen.py');PE=importlib.util.module_from_spec(ps);ps.loader.exec_module(PE)
-  pd=PE.construct();pl=load(pd);pm=t/'prune.json';pm.write_text(json.dumps(pd));pt=t/'prune.tbl';pn=t/'prune.net'
+  pm=t/'prune.json';cmd(sys.executable,ROOT/'exec/build/gen.py','prune',pm);pd=json.loads(pm.read_text());pl=load(pd);pt=t/'prune.tbl';pn=t/'prune.net'
   cmd(sys.executable,ROOT/'exec/c/tbl.py',pm,pt);cmd(sys.executable,ROOT/'exec/c/net.py',pt,pn);prunefull=cmd(runtime,'--check-net',pt,pn).decode().strip()
   routes=t/'prune-routes';routes.write_text('test\tprune\tbytes\tbytes\tprune.net\n')
   frame=b'  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  ret\n'

@@ -11,8 +11,13 @@ ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 from unisa.prune import prune_text
 
 def sha(x):return hashlib.sha256(x).hexdigest()
+# prune-*.tsv opcode/register facts were expanded from unisa.tape at this digest (was exec/prune/gen.py)
+SCHEMA_SHA='2008f75dfb75ecd52509ecb3e0b6536796691003451bbdffc28071d906e3cf42'
+def schema():
+ from unisa.tape import SHAPE,REGS
+ if sha(json.dumps({'shape':SHAPE,'regs':REGS},sort_keys=True,separators=(',',':')).encode())!=SCHEMA_SHA:raise SystemExit('prune table schema stale: review opcode/register facts')
 def main():
- ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--output',type=Path);ap.add_argument('--probes',type=Path);ap.add_argument('--calc',type=Path);ap.add_argument('--ua',type=Path,default=os.environ.get('PRUNE_UA'));ap.add_argument('--start',type=int,default=0);ap.add_argument('--count',type=int,default=10);ap.add_argument('--build',action='store_true');ns=ap.parse_args()
+ schema();ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--output',type=Path);ap.add_argument('--probes',type=Path);ap.add_argument('--calc',type=Path);ap.add_argument('--ua',type=Path,default=os.environ.get('PRUNE_UA'));ap.add_argument('--start',type=int,default=0);ap.add_argument('--count',type=int,default=10);ap.add_argument('--build',action='store_true');ns=ap.parse_args()
  if ns.output is None:
   import tempfile
   ns.output=Path(tempfile.mkdtemp(prefix='unisacc-prune-check-',dir='/tmp'))
@@ -30,7 +35,7 @@ def main():
   commands.append({'argv':list(map(str,cmd)),'rc':r.returncode,'seconds':round(time.monotonic()-started,4),'stdout_sha256':sha(r.stdout),'stderr':r.stderr.decode(errors='replace')});assert r.returncode==0,(cmd,r.returncode,r.stderr);return r
  d=ns.output/'prune.json';tbl=ns.output/'prune.tbl';net=ns.output/'prune.net';exe=ns.output/'executor';uexe=ns.output/'executor-unisacc'
  if ns.build:
-  run([sys.executable,ROOT/'exec/prune/gen.py',d]);run([sys.executable,ROOT/'exec/c/tbl.py',d,tbl]);run([sys.executable,ROOT/'exec/c/net.py',tbl,net]);run(['cc','-O2',ROOT/'exec/c/run.c','-o',exe],15)
+  run([sys.executable,ROOT/'exec/build/gen.py','prune',d]);run([sys.executable,ROOT/'exec/c/tbl.py',d,tbl]);run([sys.executable,ROOT/'exec/c/net.py',tbl,net]);run(['cc','-O2',ROOT/'exec/c/run.c','-o',exe],15)
   run(([Path('/bin/sh'),ns.ua] if ns.ua.suffix=='.com' else [ns.ua])+['-O0',ROOT/'exec/c/run.c','-o',uexe],15);run([exe,'--check-net',tbl,net]);run([uexe,'--check-net',tbl,net])
  if ns.probes is None:
   ns.probes=ns.output/'samples';ns.probes.mkdir(exist_ok=True)
@@ -69,6 +74,6 @@ def main():
    r=run([runner,model,p],5);assert r.stdout==expected,(p,runner,model,len(r.stdout),len(expected));assert r.stdout or not expected
    record['runs'].append({'executor':str(runner),'model':str(model),'rc':r.returncode,'bytes_equal':True,'sha256':sha(r.stdout)})
   records.append(record)
- receipt={'not_routed_or_shipped':True,'missing_input_rejected':True,'reference_sha256':sha((ROOT/'unisa/prune.py').read_bytes()),'schema_sha256':sha((ROOT/'unisa/tape.py').read_bytes()),'generator_sha256':sha((ROOT/'exec/prune/gen.py').read_bytes()),'ua_sha256':sha(ns.ua.read_bytes()),'models':{str(p):sha(p.read_bytes()) for p in [d,tbl,net]},'commands':commands,'cases':records}
+ receipt={'not_routed_or_shipped':True,'missing_input_rejected':True,'reference_sha256':sha((ROOT/'unisa/prune.py').read_bytes()),'schema_sha256':sha((ROOT/'unisa/tape.py').read_bytes()),'generator_sha256':sha((ROOT/'exec/prune/gen-manifest.tsv').read_bytes()+(ROOT/'exec/prune/prune-result.tsv').read_bytes()+(ROOT/'exec/prune/prune-byte.tsv').read_bytes()),'ua_sha256':sha(ns.ua.read_bytes()),'models':{str(p):sha(p.read_bytes()) for p in [d,tbl,net]},'commands':commands,'cases':records}
  out=ns.output/('receipt-%d.json'%ns.start);out.write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps({'receipt':str(out),'cases':len(records),'actual_runs':sum(len(x['runs']) for x in records)}))
 if __name__=='__main__':main()

@@ -19,7 +19,7 @@ SHARED = (
     ("e3", "exec/parse2/gen2.py", ()),
     ("e4", "exec/opt/gen.py", ("2",)),
     ("o1", "exec/opt/gen.py", ("1",)),
-    ("prune", "exec/prune/gen.py", ()),
+    ("prune", "exec/build/gen.py", ("prune",)),
     ("nativeabi", "exec/nativeabi/gen.py", ()),
 )
 FEATURES = (

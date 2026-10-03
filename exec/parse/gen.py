@@ -20,7 +20,7 @@ from load import facts as _facts  # noqa: E402
 # that name this line raises
 #     ImportError: cannot import name 'G' from 'gen' (.../exec/lex/gen.py)
 # It works today only because this module happens to reach the name first.
-# exec/prune/gen.py:12 already loads its dependency by explicit path for the
+# exec/build/gen.py (prune, lower) already loads its dependency by explicit path for the
 # same reason; this is that same pattern.
 _spec = importlib.util.spec_from_file_location(
     "pp_gen", os.path.join(ROOT, "exec", "pp", "gen.py"))

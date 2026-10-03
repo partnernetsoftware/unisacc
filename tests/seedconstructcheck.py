@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
         "seed/net.c")
     graph = work / "prune.json"
     table = work / "prune.tbl"
-    run("python3", "exec/prune/gen.py", str(graph))
+    run("python3", "exec/build/gen.py", "prune", str(graph))
     run("python3", "exec/c/tbl.py", str(graph), str(table))
     cases = [table]
     stack = work / "stack.tbl"
