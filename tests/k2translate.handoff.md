@@ -277,3 +277,9 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   words as `@str:` (empty). addr() is already addr-manifest.tsv; P(x) for addr is just entry=x.
   Left: compound loop (CASOPS, pointer_ops), type-row chain, update-modes loops (fp/post/prefix), ord update-address/
   down/address sites, lookup-warn, startup results/global-results glue, then merge segments -> exec/build/gen.py.
+- Round 25: 8ab6ec3c compound (foreach updcas; pointer gate = env np from `.let np=it.nptr`, when fact:np), type-row
+  chain (f28), update-modes fp-test/fp-output (nested foreach updfloat) + post0/post1/post-body, prefix -> rows.
+  update-manifest bindmap gains env extra2 (callers pass {}): `dict(b, k=v)` = extra=$urb + extra2={k:v}.
+  Note: changing export.py rewrites every facts header (sha of export.py) -> commit all exec/facts/*.tsv, not just
+  k2-gen2 (6baca145 missed that; fixed in 8ab6ec3c). Left: ord update-address/down/address sites, lookup-warn,
+  startup/global-results glue, then merge segments -> exec/build/gen.py, switch callers, delete gen2.py.
