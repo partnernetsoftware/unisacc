@@ -40,7 +40,7 @@ def install(E):
  def blob(p,r,n):return p.a(('INPUSH',r),('SPAN2','nc_zero',n),('INPOP',))
  def field(p,index,out='nc_v',node='nc_node'):return p.a(('ALUI','mul','nc_key',node,16),('ALUI','add','nc_key','nc_key',index),('LDX',out,'nc_key',FIELDS))
  # Stage control lives in gen-result.tsv (sections head/mid/tail); Python keeps only the profile
- # trie (states per rules.tsv profile prefix) and the union16 recipe writers (rules.tsv recipes).
+ # trie (states per rules.tsv profile prefix); union16 recipe writers are template chains.
  root=pathlib.Path(__file__).parent
  fresh=[l.split('\t') for l in (root/'gen-fresh.tsv').read_text().splitlines()[1:]]
  bindings=dict(FIELDS=FIELDS,EDGES=EDGES,FRAME=FRAME,SIGWIRE=SIGWIRE,SIGMARK=SIGMARK)
@@ -63,18 +63,11 @@ def install(E):
    P(names[prefix]).a(('MARK','nc_pos')).branch({0:names[prefix]+'.read'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
    P(names[prefix]+'.read').a(('BYTE','nc_byte'),('ADV',)).branch(choices,'NC.targetfail',[('RLD','nc_byte')])
  section('mid')
- for alignment in (4,8):
-  choices={3*'NSI'.index(c[0])+'NSI'.index(c[1]):'NC.recipe'+str(alignment)+c for c in ('II','IS','SI','SS')}
-  P('NC.union16recipes'+str(alignment)).branch(choices,'NC.unsupported',[('RLD','n16_code')])
-  for classes in ('II','IS','SI','SS'):
-   elements=recipes[alignment,classes];p=P('NC.recipe'+str(alignment)+classes)
-   for value in (0,0,0,5,16,0,alignment):constword(p,value)
-   p.a(('LDI','nc_v',1),('OUTW','nc_v'),('OLEN','nc_payloadcut'));constword(p,len(elements))
-   for index,cls in enumerate(elements):
-    for value in (index*alignment,0,0,alignment):constword(p,value)
-    for value in (0,0,0,1 if cls=='I' else 3,alignment,int(cls=='I'),alignment):constword(p,value)
-    p.a(('OUTW','nc_zero'));constword(p,0)
-   p.goto('NC.cbfinish')
+ # union16 recipe writers: rules.tsv recipe facts -> MS.write64 call chains (gen-template.tsv union16).
+ A=[dict(al=al,recipes=[dict(cls=c,code=3*'NSI'.index(c[0])+'NSI'.index(c[1]),n=len(recipes[al,c]),
+     elems=[dict(off=i*al,kind=1 if k=='I' else 3,integer=int(k=='I')) for i,k in enumerate(recipes[al,c])])
+     for c in ('II','IS','SI','SS')]) for al in (4,8)]
+ install_template(E.g,root,'gen',dict(A=A),P('NC.fresh').fresh,section='union16')
  section('tail')
  extents=tuple(int(x[1]) for x in declarations if x[0]=='ordered_extent')
  alignments=tuple(int(x[1]) for x in declarations if x[0]=='ordered_alignment')
