@@ -351,25 +351,35 @@ def _fresh_table(self, stem, o):
 
 
 def _mapseq(self, spec, facts, bd):
+    # a part without "over" emits its acts once; an act {"over": FIELD, "as": NAME,
+    # "acts": [...]} repeats per element of the current element's FIELD (depth 2);
+    # an act ["@bytes", TEXT] is one SBOUT per byte of the formatted TEXT.
+    def cell(c, x):
+        m = re.fullmatch(r"\{(\w+)\}", c) if isinstance(c, str) else None
+        if m:
+            return x[m.group(1)]
+        if isinstance(c, str) and c.startswith("$"):
+            n = c[1:]
+            return (bd or {})[n] if n in (bd or {}) else self.env[n] if n in self.env else facts[n]
+        return c.format(**x) if isinstance(c, str) else c
+
+    def emit(acts, a, x):
+        if isinstance(a, dict):
+            for y in x[a["over"]]:
+                for b in a["acts"]:
+                    emit(acts, b, dict(x, **{a.get("as", "it"): y}))
+        elif a[0] == "@bytes":
+            acts.extend(("SBOUT", c) for c in a[1].format(**x).encode())
+        else:
+            acts.append(tuple(cell(c, x) for c in a))
+
     out = {}
     for name, parts in spec.items():
         acts = []
         for part in parts:
-            for x in _path(facts, part["over"]):
+            for x in (_path(facts, part["over"]) if "over" in part else [{}]):
                 for a in part["acts"]:
-                    t = []
-                    for c in a:
-                        m = re.fullmatch(r"\{(\w+)\}", c) if isinstance(c, str) else None
-                        if m:
-                            t.append(x[m.group(1)])
-                        elif isinstance(c, str) and c.startswith("$"):
-                            n = c[1:]
-                            t.append((bd or {})[n] if n in (bd or {}) else self.env[n] if n in self.env else facts[n])
-                        elif isinstance(c, str):
-                            t.append(c.format(**x))
-                        else:
-                            t.append(c)
-                    acts.append(tuple(t))
+                    emit(acts, a, x)
         out[name] = acts
     return out
 
@@ -452,9 +462,12 @@ def _bindings(self, o, bind, facts):
     if isinstance(o.get("bindmap"), str):
         out.update(_path(facts, o["bindmap"]))
     if isinstance(o.get("freshrows"), str):
-        for ln in (self.root / o["freshrows"]).read_text().splitlines()[1:]:
-            owner, kind, key = ln.split("\t")
-            out[key] = self.E.P.fresh(self.holder(owner), kind)
+        lines = (self.root / o["freshrows"]).read_text().splitlines()
+        col = {c: i for i, c in enumerate(lines[0].lstrip("# ").split("\t"))}
+        ko, kk = col.get("owner", col.get("prefix")), col.get("key", col.get("name"))
+        for ln in lines[1:]:
+            f = ln.split("\t")
+            out[f[kk]] = self.E.P.fresh(self.holder(f[ko]), f[col["kind"]])
     for spec in ([] if isinstance(o.get("freshrows"), str) else o.get("freshrows", [])):
         for i, r in enumerate(_path(facts, spec["over"])):
             ctx = dict(facts, i=i, **r)
