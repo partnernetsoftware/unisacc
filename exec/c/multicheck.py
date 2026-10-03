@@ -6,13 +6,15 @@ def run(cmd,**kw):return subprocess.run(list(map(str,cmd)),capture_output=True,t
 def ok(cmd,**kw):
     r=run(cmd,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
 kind=os.environ.get('DRIVER_KIND','all'); assert kind in ('all','cc','ua','asm')
-part=os.environ.get('MULTI_PART','all'); assert part in ('all','tapes-m-forward','tapes-m-reverse','tapes-n-forward','tapes-n-reverse','isolation','static','frame')
+part=os.environ.get('MULTI_PART','all'); assert part in ('all','tapes-m-forward','tapes-m-reverse','tapes-n-forward','tapes-n-reverse','tapes-pool-forward','tapes-pool-reverse','isolation','static','frame')
 assert part!='frame' or kind in ('all','cc')
 drivers=[p/('driver-'+k) for k in ('cc','ua','asm') if kind in ('all',k)];count=0
-if part in ('all','tapes-m-forward','tapes-m-reverse','tapes-n-forward','tapes-n-reverse'):
-    pairs=[['tests/multi/m1.c','tests/multi/m2.c'],['tests/multi/n1.c','tests/multi/n2.c']]
+if part in ('all','tapes-m-forward','tapes-m-reverse','tapes-n-forward','tapes-n-reverse','tapes-pool-forward','tapes-pool-reverse'):
+    pairs=[['tests/multi/m1.c','tests/multi/m2.c'],['tests/multi/n1.c','tests/multi/n2.c'],
+           ['tests/multi/printfpool1.c','tests/multi/printfpool2.c']]
     if part.startswith('tapes-m'): pairs=pairs[:1]
-    if part.startswith('tapes-n'): pairs=pairs[1:]
+    if part.startswith('tapes-n'): pairs=pairs[1:2]
+    if part.startswith('tapes-pool'): pairs=pairs[2:3]
     for pair in pairs:
         orders=(pair,pair[::-1])
         if part.endswith('-forward'): orders=orders[:1]
@@ -84,4 +86,5 @@ if part in ('all','frame') and kind in ('all','cc'):
         path.write_bytes(bad);r=run([p/'run',p/'units.net',path]);assert r.returncode!=0 and not r.stdout
         verdict,_,_=sim.run(d,bad,'bad-frame',loaded=loaded);assert verdict!='accept'
     print('multi-unit:',count,'tape comparisons; bounded framing accepts/rejects on both executors')
+if part.startswith('tapes-'): assert count > 0, ('no tape comparisons', part)
 print('multi-unit backend:',kind,'part:',part,count,'tape comparisons')
