@@ -658,6 +658,13 @@ def k2gen2():
                                    u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
     syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
     autonames = [dict(name=nm) for nm in G.E.autonames()]
+    T = G.TYPE_TAPE
+    widthparts = dict(
+        store=dict(consts=dict(FLT=G.FLT), seqs=dict(store_float=acts(G.O(T["storen"] % 4)))),
+        narrow=dict(consts=dict(UNSIGNED_WIDE=G.UNS + 8, DBL=G.DBL, BOOL=G.BOOL, TDN=G.E.TDN),
+                    seqs=dict(uim=acts(G.O(G.UIM)), reject=acts(G.E.rej("not covered: width"))),
+                    rows=[dict(code=vb, row=acts(G.O(T["mask"] % ((1 << (8 * size)) - 1) if uns else T["narrow"] % (size, size))))
+                          for _, vb, size, uns, nar in G.TYINT if nar]))
     widthd = {}
     for wname, tape, masks in (("LOADV", "load", True), ("LOADRAW", "load", False), ("STOREV0", "store", False)):
         T = G.TYPE_TAPE
@@ -733,6 +740,7 @@ def k2gen2():
             "=updtmpl\tjson\t" + dump(updtmpl), "=updop\tjson\t" + dump(updop), "=updbool\tjson\t" + dump(updbool), "=updfp\tjson\t" + dump(updfp),
             "=updid0\tjson\t" + dump(updid0), "=updcompound\tjson\t" + dump(updcompound),
             "=widthd\tjson\t" + dump(widthd), "=widthconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, SBB=G.SBB)),
+            "=widthparts\tjson\t" + dump(widthparts),
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 

@@ -269,25 +269,12 @@ def width_dispatch(name, tape=None, masks=False):
 def types():
     width_dispatch("LOADV", "load", masks=True)
     width_dispatch("LOADRAW", "load")
-    bindings = dict(FLT=FLT, store_test=P("STOREV").fresh("b"), scalar_test=P("STF").fresh("b"))
-    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings,
-                  sequences={"store_float": O(TYPE_TAPE["storen"] % 4)}, section="store")
+    import assemble
+    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_store=1))
     width_dispatch("STOREV0", "store")
     import assemble   # K2 trace translation: bitfields-manifest.tsv
     assemble.run(Path(__file__).parent / 'bitfields-manifest.tsv', E, P, {}, {})   # no mode rows
-    bindings = {key: P(state).fresh("b") for key, state in
-                (("pointer_test", "NARROW"), ("wide_test", "NARROW.b"), ("unsigned_test", "NARROW.u"),
-                 ("double_test", "NARROW.dd"), ("bool_test", "NARROW.ui"))}
-    bindings.update(UNSIGNED_WIDE=UNS + 8, DBL=DBL, BOOL=BOOL, TDN=E.TDN)
-    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"uim": O(UIM)}, section="narrow")
-    q = P("NARROW.n")
-    for _, vb, size, uns, _ in (row for row in TYINT if row[4]):
-        bindings.update(current=q.cur, hit=q.fresh("w"), next=q.fresh("x"), test=q.fresh("b"), code=vb)
-        text = TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if uns else TYPE_TAPE["narrow"] % (size, size)
-        install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"row": O(text)}, section="row")
-        q = P(bindings["next"])
-    bindings["current"] = q.cur
-    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"reject": E.rej("not covered: width")}, section="finish")
+    assemble.run(Path(__file__).parent / 'widthparts-manifest.tsv', E, P, {}, dict(part_narrow=1))
     segment("types-dimensions")
     strwalk("DM.s", "DM.sb", "DM.se")
     segment("types-dimensions-tail")
