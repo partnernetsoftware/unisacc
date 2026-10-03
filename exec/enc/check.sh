@@ -2,7 +2,7 @@
 _BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 # exec/enc/check.sh -- E5's slices: the x86_64 encoder delta on the hand-written
-# fixtures, against unisa/assemble.py + emit_x86 through exec/enc/ref.py (which
+# fixtures, against unisa/assemble.py + emit_x86 through tests/enc/ref.py (which
 # fails unless every instruction encodes).  Both executors must agree with it;
 # the branch fixtures' bytes are also checked against hand-worked expectations
 # (br-expect.txt); the neg-* fixtures must be rejected, not encoded.
@@ -26,7 +26,7 @@ done
 for f in $(echo "$exp" | awk '{print $1}'); do [ -f "$D/$f" ] || { echo "  BAD expectation for a missing fixture: $f"; bad=$((bad+1)); }; done
 for F in $D/x86-*.txt $D/br-*.txt; do
     case $F in *br-expect.txt) continue ;; esac
-    b 60 python3 $D/ref.py "$F" > "$T/ref" || { echo "  BAD $F: the referee failed"; bad=$((bad+1)); continue; }
+    b 60 python3 tests/enc/ref.py "$F" > "$T/ref" || { echo "  BAD $F: the referee failed"; bad=$((bad+1)); continue; }
     b 60 "$T/run" "$T/d.tbl" "$F" > "$T/c"; rc=$?
     b 60 python3 exec/pp/sim.py "$T/d.json" "$F" > "$T/p"; rp=$?
     if [ -s "$T/ref" ] && [ $rc -eq 0 ] && [ $rp -eq 0 ] && cmp -s "$T/c" "$T/ref" && cmp -s "$T/p" "$T/ref"; then :; else

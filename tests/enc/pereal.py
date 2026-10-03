@@ -1,6 +1,7 @@
 """Real Windows PE from delta encoder/writer, with reference as referee."""
 import pathlib,subprocess,sys,os
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
+sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]/'exec'/'enc'))
 from unisa.__main__ import _oracle
 from unisa.driver import compile_file
 from unisa.lower import lower
