@@ -187,35 +187,6 @@ class P(_procs.make_P(g, O, rej)):
         return self.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", slot, "lab"))
 
 
-def numeric_rules(section, bindings=None, owner=None):
-    # Unique metadata instances also satisfy gen2's duplicate-definition guard.
-    from pathlib import Path
-    from finite_rules import install as install_rules
-    bindings = dict(bindings or {}, DIG=DIG, TK_FNUM=TK_FNUM)
-    for line in (Path(HERE).parent / "facts" / "numeric-names.tsv").read_text().splitlines():
-        if not line.startswith("#"):
-            selected, name, prefix, kind = line.split("\t")
-            if selected == section:
-                bindings[name] = P((owner or prefix) + ".numeric_" + name).fresh(kind)
-    install_rules(g, HERE, "numeric", bindings=bindings, section=section)
-
-
-def prn():
-    # One declared decimal algorithm, instantiated at widths zero and six.
-    suffixes = ("", ".loop", ".out0", ".pad", ".sp", ".out", ".done") + tuple(".d%d" % i for i in range(20))
-    for name, width in (("PRN", 0), ("PRNW", 6)):
-        bindings = {"PRN" + suffix.replace(".", "_"): name + suffix for suffix in suffixes}
-        numeric_rules("prn", dict(bindings, width=width), owner=name)
-
-
-def numout():
-    numeric_rules("numout")
-
-
-def fconv():
-    numeric_rules("fconv")
-
-
 def tyinfo():                 # stage tyinfo (weights/gold/tyinfo.tsv): type key -> (size, unsigned)
     return {f[0]: (int(f[1]), int(f[2])) for f in gold("tyinfo") if len(f) >= 3 and f[1].isdigit()}
 
@@ -235,43 +206,6 @@ FPB = _FC["FPB"]
 
 PUSH = _FC["PUSH"]
 POP1 = _FC["POP1"]
-
-
-def autonames():
-    """The reference's autoinc (src/front_pp.c): for each of these headers, a
-    raw line opening `static` with `NAME(` and `{` on it names a function;
-    if NAME is followed by `(` somewhere in the source and never by
-    `( ... ) {`, the whole header is prepended -- tokens the dump does not
-    show.  printf is the walker's own (exempt).  Read from include/, as the
-    reference reads it."""
-    out = []
-    for h in _FC["AUTOINC_HEADERS"]:
-        for ln in open(os.path.join(ROOT, "include", h), encoding="utf-8", errors="replace"):
-            ln = ln.rstrip("\n")
-            if len(ln) <= 7 or not ln.startswith("static") or "(" not in ln or "{" not in ln:
-                continue
-            b = ln[:ln.index("(")].rstrip(" ")
-            a = len(b)
-            while a > 0 and (b[a - 1].isalnum() or b[a - 1] == "_"):
-                a -= 1
-            if a < len(b) and b[a:] != "printf" and b[a:] not in out:
-                out.append(b[a:])
-    return out
-
-
-def autoscan():
-    from pathlib import Path
-    from finite_rules import install as install_rules
-    bindings = {"AUT": AUT, "AUD": AUD}
-    for line in Path(HERE, "autoscan-names.tsv").read_text().splitlines():
-        if not line.startswith("#"):
-            name, prefix, kind = line.split("\t")
-            bindings[name] = P(prefix + ".autoscan_" + name).fresh(kind)
-    classes = {name: [TK[token]] for name, token in (
-        ("eof", "eof"), ("lparen", "("), ("rparen", ")"), ("lbrace", "{"))}
-    classes["id"] = [TK_ID]
-    install_rules(g, HERE, "autoscan", bindings=bindings, classes=classes, section="auto",
-                  sequences={"reject_header": rej("not covered: the reference auto-includes a header")})
 
 
 def sizes(d):

@@ -18,6 +18,29 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
 
+def _autonames(E):
+    """The reference's autoinc (src/front_pp.c): for each of these headers, a
+    raw line opening `static` with `NAME(` and `{` on it names a function;
+    if NAME is followed by `(` somewhere in the source and never by
+    `( ... ) {`, the whole header is prepended -- tokens the dump does not
+    show.  printf is the walker's own (exempt).  Read from include/, as the
+    reference reads it."""
+    import os
+    out = []
+    for h in E._FC["AUTOINC_HEADERS"]:
+        for ln in open(os.path.join(E.ROOT, "include", h), encoding="utf-8", errors="replace"):
+            ln = ln.rstrip("\n")
+            if len(ln) <= 7 or not ln.startswith("static") or "(" not in ln or "{" not in ln:
+                continue
+            b = ln[:ln.index("(")].rstrip(" ")
+            a = len(b)
+            while a > 0 and (b[a - 1].isalnum() or b[a - 1] == "_"):
+                a -= 1
+            if a < len(b) and b[a:] != "printf" and b[a:] not in out:
+                out.append(b[a:])
+    return out
+
+
 def _module(rel, name):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     m = importlib.util.module_from_spec(spec)
@@ -700,7 +723,7 @@ def k2gen2():
                 tyrows.append(dict(t=i * 256 + l * 16 + r, tab=G.RST,
                                    u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
     syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
-    autonames = [dict(name=nm) for nm in G.E.autonames()]
+    autonames = [dict(name=nm) for nm in _autonames(G.E)]
     i32 = G.TYINFO["i32"][0]
     btk = dict(G.TK)   # build() appends these two token codes before types() runs
     for w in ("type=extern", "type=_Bool"):
