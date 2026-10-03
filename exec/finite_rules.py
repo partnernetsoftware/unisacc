@@ -12,10 +12,21 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     in ANY column, including inside the JSON actions.
   - `{fresh:TAG:KIND}` allocates one fresh label per block instance and TAG
     through the caller's fresh(KIND) callback, in order of first appearance.
+  - call chains: `{fresh@row:TAG:KIND}` allocates a NEW label for every row
+    instance (one tuple of a row), and `{prev:TAG}` names the label most
+    recently allocated for TAG in this block instance (it is substituted before
+    the row's own fresh@row, so `{prev:R}` -> MS.write64 PUSH `{fresh@row:R:r}`
+    continues a chain one call further).
+  - loop bodies: `over` may start with k dots (nesting depth k).  A row whose
+    spec is `=` belongs to the loop opened by the nearest earlier row of the
+    same depth; rows of greater depth nest inside it.  Each tuple of the loop
+    runs its whole body (that row, its `=` rows, nested loops) in written order,
+    so a chain can cross a per-fact variable-length loop.
   - kinds: `rule` a=state b=observation c=target d=JSON actions (same syntax as
     the four-column tables; rows of one state must be contiguous in expansion);
     graph edits applied after the block's rules, in row order:
-    `rename` a=OLD b=NEW (state renamed, every target OLD redirected to NEW),
+    `rename` a=OLD b=NEW (state renamed, every target OLD redirected to NEW,
+    every PUSH OLD argument in an action sequence rewritten to PUSH NEW),
     `alias` a=STATE b=TARGET (STATE goes to TARGET on every observation),
     `prepend` a=STATE d=JSON actions (actions run before every edge of STATE).
 No predicate lives here: substitution, product enumeration and graph edits only.
@@ -133,6 +144,32 @@ def install(g, root, stem, bindings=None, sequences=None, classes=None, section=
 
 _VAR = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\}")
 _FRESH = re.compile(r"\{fresh:([A-Za-z0-9_]+):([A-Za-z0-9_]+)\}")
+_ROWFRESH = re.compile(r"\{fresh@row:([A-Za-z0-9_]+):([A-Za-z0-9_]+)\}")
+_PREV = re.compile(r"\{prev:([A-Za-z0-9_]+)\}")
+
+
+def _loops(body, where):
+    """Group (lineno, fields) rows into nested loops by leading dots of `over`."""
+    root, stack = [], []          # stack of (depth, loop) ; loop = [spec, items]
+    for lineno, fields in body:
+        over = fields[0]
+        depth = len(over) - len(over.lstrip("."))
+        spec = over[depth:]
+        while stack and stack[-1][0] > depth:
+            stack.pop()
+        if spec == "=":
+            if not stack or stack[-1][0] != depth:
+                raise ValueError(f"{where}:{lineno}: `=` row without an open loop of depth {depth}")
+            stack[-1][1][1].append(("row", lineno, fields[1:]))
+            continue
+        if stack and stack[-1][0] == depth:
+            stack.pop()
+        if depth and (not stack or stack[-1][0] != depth - 1):
+            raise ValueError(f"{where}:{lineno}: nested loop without an enclosing loop")
+        loop = [spec, [("row", lineno, fields[1:])]]
+        (stack[-1][1][1] if stack else root).append(("loop", loop))
+        stack.append((depth, loop))
+    return root
 
 
 def _tuples(spec, facts, env, where):
@@ -180,9 +217,19 @@ def expand_template(path, facts, fresh, section=None):
     out, edits = [], []
     for (sec, name), each, body in blocks:
         for env in _tuples(each, facts, {}, f"{path}:{sec}:{name}"):
-            labels = {}
+            labels, prev = {}, {}
 
-            def subst(text, scope, where):
+            def subst(text, scope, where, rowlabels):
+                def pv(m):
+                    if m.group(1) not in prev:
+                        raise ValueError(f"{where}: no previous label for {m.group(0)}")
+                    return prev[m.group(1)]
+
+                def rf(m):
+                    if m.group(1) not in rowlabels:
+                        rowlabels[m.group(1)] = fresh(m.group(2))
+                    return rowlabels[m.group(1)]
+
                 def fr(m):
                     if m.group(1) not in labels:
                         labels[m.group(1)] = fresh(m.group(2))
@@ -197,17 +244,27 @@ def expand_template(path, facts, fresh, section=None):
                             raise ValueError(f"{where}: no field {m.group(0)}")
                         value = value[m.group(2)]
                     return str(value)
-                return _VAR.sub(var, _FRESH.sub(fr, text))
-            for lineno, (over, kind, a, b, c, d) in body:
-                where = f"{path}:{lineno}"
-                for scope in _tuples(over, facts, env, where):
-                    a2, b2, c2, d2 = (subst(x, scope, where) for x in (a, b, c, d))
+                return _VAR.sub(var, _FRESH.sub(fr, _ROWFRESH.sub(rf, _PREV.sub(pv, text))))
+
+            def run(items, scope):
+                for tag, *item in items:
+                    if tag == "loop":
+                        spec, inner = item[0]
+                        for sub in _tuples(spec, facts, scope, f"{path}:{sec}:{name}"):
+                            run(inner, sub)
+                        continue
+                    lineno, (kind, a, b, c, d) = item
+                    where = f"{path}:{lineno}"
+                    rowlabels = {}
+                    a2, b2, c2, d2 = (subst(x, scope, where, rowlabels) for x in (a, b, c, d))
+                    prev.update(rowlabels)
                     if kind == "rule":
                         out.append("\t".join((a2, b2, c2, d2)))
                     elif kind in ("rename", "alias", "prepend"):
                         edits.append((where, kind, a2, b2, d2))
                     else:
                         raise ValueError(f"{where}: unknown template kind {kind}")
+            run(_loops(body, f"{path}"), env)
     return out, edits
 
 
@@ -236,10 +293,14 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             if a in g.labels:
                 g.labels.discard(a)
                 g.labels.add(b)
+            pushes = {}
             for _, row in g.st.values():
                 for key, (target, seq) in list(row.items()):
-                    if target == a:
-                        row[key] = (b, seq)
+                    if seq not in pushes:
+                        acts = g.seqs[seq]
+                        pushes[seq] = (g.seq([(("PUSH", b) if x[0] == "PUSH" and x[1] == a else x) for x in acts])
+                                       if any(x[0] == "PUSH" and x[1] == a for x in acts) else seq)
+                    row[key] = ((b if target == a else target), pushes[seq])
         else:
             extra = [tuple(x) for x in json.loads(d)]
             for key, (target, seq) in list(g.st[a][1].items()):
