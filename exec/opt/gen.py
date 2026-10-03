@@ -40,25 +40,17 @@ _spec.loader.exec_module(E)
 g, P = E.g, E.P
 from finite_rules import install as install_rules
 
-SIMPLE = 32 * 10 ** 6            # SIMPLE[intern id of an op word] = 1 when opinfo says simple
+from facts.load import facts
 LEVEL = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-# -O2's per-round line facts (ol_prep) and block liveness (bl_split, bl_solve), by line / block index
-KK, RMM, WMM, TGG, BLOF, TSS, TEE, BSS = (41 * 10 ** 6, 42 * 10 ** 6, 43 * 10 ** 6, 44 * 10 ** 6,
-                                         45 * 10 ** 6, 46 * 10 ** 6, 47 * 10 ** 6, 48 * 10 ** 6)
-LABB = 100 * 10 ** 6             # LAB[round * 2e6 + intern id] = line + 1 of the first `name:` line (rounds < 10)
-LIVEB = 200 * 10 ** 6            # LIVE[(round * 6 + z) * 1e6 + block]
-LSS, LEE, WIDD, FRR, ISLAB = (51 * 10 ** 6, 52 * 10 ** 6, 53 * 10 ** 6, 54 * 10 ** 6, 55 * 10 ** 6)   # per line
-ZOKB = 59 * 10 ** 6              # ZOK[z]
-K_SIMPLE, K_LABEL, K_RET, K_JUMP, K_JUMPZ, K_CALL, K_FRAME, K_OTHER = range(8)
-MAXJ = 16                        # the pop is line i+2+cnt, cnt <= 16: at most line i+18
-WORDMAX = 15                     # ol_opi reads at most 15 bytes of the op word
+globals().update((r['name'], r['value']) for r in facts('opt-gen-constants'))   # memory regions, line kinds, limits
+FRESH = {}
+for _r in facts('opt-gen-fresh'):
+    FRESH.setdefault(_r['group'], []).append((_r['name'], _r['prefix'], _r['kind']))
 
 
 def procs():
     # Preserve downstream fresh names while the complete scan rules live in TSV.
-    bindings = {name: P(state).fresh("b") for name, state in (
-        ("word_limit", "SIM.k"), ("word_empty", "SIM.e2"),
-        ("word_simple", "SIM.f"), ("register_equal", "NMD.c"))}
+    bindings = {name: P(prefix).fresh(kind) for name, prefix, kind in FRESH['procs']}
     install_rules(g, os.path.dirname(__file__), "scans",
                   bindings=dict(bindings, WORDMAX=WORDMAX, SIMPLE=SIMPLE))
 
@@ -81,11 +73,7 @@ def analysis():
 
 def local():
     # Allocate the original branch/call names; all LOCAL control is declared in TSV.
-    bindings = {name: P(state).fresh(kind) for name, state, kind in (
-        ("bounds", "LOCAL", "b"), ("load32_dest", "LC", "b"),
-        ("load64_dest", "LC", "b"), ("base_register", "LC", "b"),
-        ("load_tail", "LC", "b"), ("dead_return", "LC", "r"),
-        ("dead_result", "LC", "b"), ("load_emit", "LC", "b"))}
+    bindings = {name: P(prefix).fresh(kind) for name, prefix, kind in FRESH['local']}
     install_rules(g, os.path.dirname(__file__), "local", bindings=bindings)
 
 
@@ -96,30 +84,18 @@ for _ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
     if _ln.startswith("#field") or _ln.startswith("#head"):
         PFIELDS[_f[1]] = _f[2:]
 PA, PB, PR, PY = PFIELDS["a"], PFIELDS["b"], PFIELDS["rel"], PFIELDS["y"]
-PEEPB, ACLSB, BCLSB = 300 * 10 ** 6, 301 * 10 ** 6, 302 * 10 ** 6   # PEEP[(a*|b| + b)*|rel| + rel] = y index + 1
 
 
 def parsers():
     # Preserve branch names and the shared PRN continuation; matching lives in TSV.
-    specs = (("PL_b1", "PL", "b"), ("PI_b2", "PI", "b"),
-             ("RR_b3", "RR", "b"), ("RR_b4", "RR", "b"),
-             ("RR_b5", "RR", "b"), ("RR_r6", "RR", "r"), ("RR_b7", "RR", "b"))
+    specs = FRESH['parsers']
     bindings = {name: P(prefix).fresh(kind) for name, prefix, kind in specs}
     install_rules(g, os.path.dirname(__file__), "parsers", bindings=bindings)
 
 
 def stfuse():
     # Keep the original fresh names and shared DEADQ/NAMES/PRN continuations.
-    specs = (("bounds", "STFUSE", "b"), ("window", "SF", "b"),
-             ("end", "SF", "b"), ("base", "SF", "b"),
-             ("value_alias", "SF", "b"), ("value_r2", "SF", "b"),
-             ("store_tail", "SF", "b"), ("dead_a_return", "SF", "r"),
-             ("dead_a", "SF", "b"), ("dead_r2_return", "SF", "r"),
-             ("dead_r2", "SF", "b"), ("store_emit", "SF", "b"),
-             ("print_st_return", "SF", "r"), ("print_store_return", "SF", "r"),
-             ("simple", "SF", "b"), ("names_a_return", "SF", "r"),
-             ("names_a", "SF", "b"), ("names_r2_return", "SF", "r"),
-             ("names_r2", "SF", "b"))
+    specs = FRESH['stfuse']
     bindings = {name: P(state).fresh(kind) for name, state, kind in specs}
     install_rules(g, os.path.dirname(__file__), "stfuse",
                   bindings=dict(bindings, LSS=LSS, KK=KK, K_SIMPLE=K_SIMPLE))
@@ -177,7 +153,7 @@ def build():
         stfuse()
         peepround()
     p = P("START")
-    for w in ("ret", "jump", "jumpz", "call", ".frame", "store64", ".st", "mov"):
+    for w in facts('opt-gen-startwords'):
         p.a(("SBCLR",), [("SBOUT", c) for c in w.encode()], ("SBINTERN", "id_" + w.strip(".")))
     if LEVEL >= 2:
         peep_start(p)
