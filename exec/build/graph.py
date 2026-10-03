@@ -76,3 +76,28 @@ class Delta:
         row = self.state(name, mode)
         for key in keys:
             row[key] = (nxt, self.seq(acts))
+
+    def finish(self, start, domains):
+        """Totality and reachability (was exec/lex/gen.py): every named state exists, every state is
+        total over its mode's domain (missing keys -> HALT with REJECT unreachable, counted), and
+        states unreachable from START are dropped.  domains: {mode: int n (range n) | [values]}."""
+        named = set(nx for _, row in self.states.values() for nx, _ in row.values())
+        named.discard("HALT")
+        missing = named - set(self.states)
+        assert not missing, missing
+        dom = {m: list(range(v) if isinstance(v, int) else v) for m, v in domains.items()}
+        for name, (mode, row) in self.states.items():
+            for v in dom[mode]:
+                if v not in row:
+                    row[v] = ("HALT", self.seq([("REJECT", "unreachable")]))
+                    self.unreach += 1
+        reach, todo = {start}, [start]
+        while todo:
+            s = todo.pop()
+            for nx, _ in self.states[s][1].values():
+                if nx != "HALT" and nx not in reach:
+                    reach.add(nx)
+                    todo.append(nx)
+        self.dead = sorted(set(self.states) - reach)
+        for s in self.dead:
+            del self.states[s]

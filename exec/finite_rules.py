@@ -201,6 +201,8 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                             not 0 <= value[1] <= 63):
                             raise ValueError(f"{path}: invalid observation substitution")
                         value = key << value[1]
+                        if value > (1 << 63) - 1:   # table immediates are signed i64: same u64 bits
+                            value -= 1 << 64
                     values.append(value)
                 expanded.append(tuple(values))
             row[key] = target, expanded
@@ -208,11 +210,15 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
 
 
 def install_rows(g, path, sequences=None, domain=range(257), bindings=None,
-                 classes=None, section=None, mode="r"):
+                 classes=None, section=None, mode="r", skip=(), ordered=False):
+    """skip: states not installed; ordered: keys written in domain order (else rule order)."""
     rows = load(Path(path), sequences or {}, domain=domain, bindings=bindings,
                 classes=classes, section=section)
     for state, row in rows.items():
-        for key, (target, actions) in row.items():
+        if state in skip:
+            continue
+        for key in (domain if ordered else list(row)):
+            target, actions = row[key]
             g.on(state, [key], target, actions, mode)
             g.labels.update(a[1] for a in actions if a[0] == "PUSH")
     return len(rows)

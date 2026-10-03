@@ -8,6 +8,9 @@ Manifest header lines read here:
   #! flags A B C          accepted --A/--B/--C; each becomes flags[A]=True/False
   #! start NAME           start state (default START)
   #! graph CLASS          E.g = E.CLASS() (a base without its own g/P, e.g. build/graph.py)
+  #! start $NAME          the start state is env[NAME] after the run
+  #! domains STEM         E.g.finish(start, {mode: values}) from header-form facts STEM (mode, values)
+  #! extra KEY STEM       output KEY = fact KEY of exec/facts/STEM.tsv
 Everything else (exclusive flags, env values, sub-manifests) is manifest rows.
 """
 import importlib.util, json, pathlib, sys
@@ -40,9 +43,17 @@ E = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(E)
 if "graph" in head:
     E.g, E.P = getattr(E, head["graph"][0])(), getattr(E, "P", None)
-assemble.run(man, E, E.P, {n: "--" + n in args for n in names})
-E.g.finish()
-d = {'start': head.get('start', ['START'])[0], 'states': {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in E.g.st.items()},
+env = assemble.run(man, E, E.P, {n: "--" + n in args for n in names})
+start = head.get('start', ['START'])[0]
+start = env[start[1:]] if start.startswith('$') else start
+if "domains" in head:
+    s = head["domains"][0]
+    E.g.finish(start, {r["mode"]: r["values"] for r in assemble.load_facts(s)[s]})
+else:
+    E.g.finish()
+d = {'start': start, 'states': {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in E.g.st.items()},
      'seqs': [list(map(list, s)) for s in E.g.seqs]}
+for k, s in (head["extra"][i:i + 2] for i in range(0, len(head.get("extra", [])), 2)):
+    d[k] = assemble.load_facts(s)[k]
 pathlib.Path(out).write_text(json.dumps(d, separators=(',', ':')))
 print(stage + ' states', len(d['states']), file=sys.stderr)

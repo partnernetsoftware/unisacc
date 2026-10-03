@@ -90,6 +90,150 @@ def _ppsrc():
     return E
 
 
+def lexgen():
+    """E1 lexer facts (was the module level of exec/lex/gen.py): token schema (weights/gold/parse.tsv tok),
+    type keywords, byte classes and GCC words (weights/gold/lexcls.tsv, lexword.tsv), lex.tsv dispatch
+    rows as HANDLE/PEEKCLASS, word and punctuator tries, output sequences per token format
+    (plain / typed / positions), template byte classes."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "exec"))
+    from unisa.tsvgold import load_table
+    from exec.facts.load import facts
+    from finite_rules import prefix_facts, rule_facts
+    here = ROOT / "exec" / "lex"
+    G = ROOT / "weights" / "gold"
+    C = {r["name"]: r["value"] for r in facts("lex-consts")}
+    EOF = C["EOF"]
+    rows = [l.split("\t")[2:] for l in (G / "parse.tsv").read_text().splitlines() if l.startswith("#field\ttok\t")]
+    assert len(rows) == 1 and rows[0], "missing or repeated token schema"
+    TOKS = tuple(rows[0])
+    assert len(TOKS) == len(set(TOKS)) and all(TOKS), "invalid token schema"
+    kw = [l.split("\t") for l in (ROOT / "iterate/kernel/typekw.tsv").read_text().splitlines() if l and not l.startswith("#")]
+    assert kw and all(len(r) == 2 and r[0] == "kw" and r[1] for r in kw)
+    TYPEKW = tuple(r[1] for r in kw)
+    assert len(TYPEKW) == len(set(TYPEKW)), "duplicate type keyword"
+    _, _, _, lcrows = load_table(str(G / "lexcls.tsv"))
+    _, _, _, lwrows = load_table(str(G / "lexword.tsv"))
+    CLS, WS = {}, []
+    for (bv,), lab in lcrows.items():
+        c = EOF if bv == "eof" else int(bv)
+        CLS[c] = lab["c"]
+        if lab["attws"] == "yes":
+            WS.append(c)
+    W = [(w, lab) for (w,), lab in lwrows.items()]
+    SKIPPAREN = tuple(w for w, l in W if l["gcc"] == "skipparen")
+    DROP = tuple(w for w, l in W if l["gcc"] == "drop")
+    CHARPFX = tuple(w for w, l in W if l["pfxch"] == "yes")
+    STRPFX = tuple(w for w, l in W if l["pfxstr"] == "yes")
+    isal = lambda c: c != EOF and CLS[c] == "A"
+    isdi = lambda c: c != EOF and CLS[c] == "d"
+    PUNCTS = [t for t in TOKS if t and not isal(ord(t[0]))]
+    head, LT = None, {}
+    for ln in (G / "lex.tsv").read_text(encoding="utf-8").splitlines(True):
+        f = ln.rstrip("\n").split("\t")
+        if f[0] == "#head":
+            head = f[3:]
+            continue
+        if ln.startswith("#") or len(f) < 3 or f[0] == "c":
+            continue
+        LT[(f[0], f[1])] = f[2]
+    CLASSES = sorted(set(c for c, _ in LT))
+    rowconst = {}
+    for cl in CLASSES:
+        vals = set(v for (a, b), v in LT.items() if a == cl)
+        rowconst[cl] = vals.pop() if len(vals) == 1 else None
+
+    def decl(path):
+        r = [l.split("\t") for l in path.read_text().splitlines() if l and not l.startswith("#")]
+        assert r and len({x[0] for x in r}) == len(r), path
+        return r
+    OUTPUT = {n: json.loads(a) for n, a in decl(here / "output.tsv")}
+    SPELLING = {}
+    for token, plain, typed in decl(here / "spelling.tsv"):
+        assert token in TOKS and plain in ("yes", "no") and typed in ("yes", "no")
+        SPELLING[token] = (plain == "yes", typed == "yes")
+
+    def outseq(seqname, **p):
+        res = []
+        for action in OUTPUT[seqname]:
+            v = [p[x[1:]] if isinstance(x, str) and x.startswith("$") else x for x in action]
+            if v[0] == "@bytes":
+                assert len(v) == 2 and isinstance(v[1], str)
+                res.extend(("OUT", ord(ch)) for ch in v[1])
+            else:
+                res.append(tuple(v))
+        return res
+
+    KID, KNUM, KSTR = C["KID"], C["KNUM"], C["KSTR"]
+    ALLB = list(range(EOF + 1))
+    KWKIND = {}
+    for k, t in enumerate(TOKS):
+        if isal(ord(t[0])):
+            KWKIND[t] = KID if k < C["CLASSNAMES"] else k
+    for t in TYPEKW:
+        KWKIND[t] = C["TYPE"]
+    WORDS = set(KWKIND) | set(SKIPPAREN) | set(DROP) | set(CHARPFX) | set(STRPFX)
+    IDROOT, IDPFX = prefix_facts(sorted(WORDS))
+    OPROOT, OPPFX = prefix_facts([t if t in PUNCTS else None for t in TOKS])
+    opt = lambda present: [{}] if present else []
+    IDFACTS = [dict(p, kind=KWKIND.get(p["name"], KID),
+                    ifskip=opt(p["name"] in SKIPPAREN), ifdrop=opt(p["name"] in DROP),
+                    iftoken=opt(p["name"] not in SKIPPAREN and p["name"] not in DROP),
+                    ifpfxch=opt(p["name"] in CHARPFX), ifpfxstr=opt(p["name"] in STRPFX)) for p in IDPFX]
+    ENTRY = rule_facts(here / "entry.tsv")
+    assert set(ENTRY) == set(head), "entry actions must cover lex.tsv exactly"
+    LINKS = ("@identifier", "@number", "@punctuator")
+    assert all(r["actions"] == "[]" for rs in ENTRY.values() for r in rs if r["target"] in LINKS)
+
+    def handle(state, cls, act, peek=()):
+        rs = ENTRY[act]
+        return dict(state=state, cls=cls, act=act, peek=list(peek), peekstate=[{"name": cls}] if peek else [],
+                    plain=[r for r in rs if r["target"] not in LINKS],
+                    identifier=[r for r in rs if r["target"] == "@identifier"],
+                    number=[r for r in rs if r["target"] == "@number"],
+                    punctuator=[r for r in rs if r["target"] == "@punctuator"])
+    BYTECLASSES = {cl: [c for c in ALLB if CLS[c] == cl] for cl in CLASSES}
+    HANDLE = [handle("DISPATCH", cl, rowconst[cl]) for cl in CLASSES if rowconst[cl] is not None]
+    PEEKCLASS = [{"name": cl} for cl in CLASSES if rowconst[cl] is None]
+    for cl in CLASSES:
+        if rowconst[cl] is None:
+            cols = sorted(CLASSES, key=lambda col: BYTECLASSES[col][0])
+            peek = [{"cls": cl, "col": col, "act": LT[(cl, col)]} for col in cols]
+            acts = list(dict.fromkeys(r["act"] for r in peek))
+            HANDLE += [handle("H:" + a, cl, a, peek if i == 0 else ()) for i, a in enumerate(acts)]
+
+    def sequences(typed, positions):
+        position = lambda reg: outseq("position", start=reg) if positions else []
+        def emit(k, span=("S", None)):
+            name = TOKS[k]
+            a = position(span[0]) + outseq("name", name=name)
+            if SPELLING.get(name, (False, False))[int(typed)]:
+                a += outseq("span2" if span[1] else "span", start=span[0], end=span[1])
+            return a + outseq("end")
+        S = {n: outseq(n) for n in ("scan.start", "scan.advance", "punct.reject")}
+        S.update({"accept.yes": outseq("scan.accept"), "accept.no": [], "rewind.yes": [], "rewind.no": outseq("scan.rewind"),
+                  "eof": ([("MARK", "S")] + position("S") if positions else []) + outseq("eof")})
+        for k in range(len(TOKS)):
+            S["tok.%d" % k] = emit(k)
+            S["bounded.%d" % k] = emit(k, ("S", "E"))
+        # number.tsv / literal.tsv sequences (were install_rules arguments)
+        S["number"] = emit(KNUM)
+        S["string"] = [("JUMP", "E")] + emit(KSTR)
+        return S
+    classes = dict(BYTECLASSES, identifier=[c for c in ALLB if c != EOF and (isal(c) or isdi(c))], space=list(WS))
+    out = ["=HANDLE\tjson\t" + json.dumps(HANDLE), "=PEEKCLASS\tjson\t" + json.dumps(PEEKCLASS),
+           "=IDROOT\tjson\t" + json.dumps(IDROOT["children"]),
+           "=NSTART\tjson\t" + json.dumps(rule_facts(here / "number.tsv")["NSTART"]),
+           "=OPROOT\tjson\t" + json.dumps(OPROOT["children"]), "=IDPFX\tjson\t" + json.dumps(IDFACTS),
+           "=OPPFX\tjson\t" + json.dumps(OPPFX), "=KID\tjson\t" + json.dumps([KID]),
+           "=classes\tjson\t" + json.dumps(classes), "=literalclasses\tjson\t" + json.dumps({"space": list(WS)}),
+           "=tok_names\tjson\t" + json.dumps(list(TOKS))]
+    for name, typed, positions in (("plain", False, False), ("typed", True, False), ("positions", True, True)):
+        out.append("=seq_%s\tjson\t%s" % (name, json.dumps(sequences(typed, positions))))
+    return out
+
+
 def _esc(s):
     return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
@@ -475,6 +619,7 @@ def ppgen():
 
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
+    ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
