@@ -241,7 +241,7 @@ def numeric_rules(section, bindings=None, owner=None):
     from pathlib import Path
     from finite_rules import install as install_rules
     bindings = dict(bindings or {}, DIG=DIG, TK_FNUM=TK_FNUM)
-    for line in Path(HERE, "numeric-names.tsv").read_text().splitlines():
+    for line in (Path(HERE).parent / "facts" / "numeric-names.tsv").read_text().splitlines():
         if not line.startswith("#"):
             selected, name, prefix, kind = line.split("\t")
             if selected == section:
