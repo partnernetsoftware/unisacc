@@ -43,3 +43,13 @@
   load_rules(...)['actions'][0][1] uses (entry-value, directory-values, reloc-align, import-values, name-value,
   signature-length) become literal act facts with bindings resolved via mapseq "$name".
 - then gen.py/arm.py entries -> manifests (touch only enc lines in shared caller scripts).
+
+## Round 4 (rebased on origin/main)
+- pedelta.py -> pedelta-manifest.tsv + pedelta-template.tsv: field chains recorded into facts
+  enc-pedelta-{header,imports}-<arch> (proc, pre = JSON text of the actions before the call); template block
+  `each tl` (one-element list holding the tail text, since template vars come only from each/over scope):
+  fresh row seeds prev:ret (literal or $entry via bindings), loop rule `{prev:ret} * {f.proc} {f.pre}["PUSH","{fresh@row:ret:r}"]]`,
+  then the old header-end/imports-end rules as `-` rows. pedelta-result.tsv sections entry-value/directory-values/
+  reloc-align/import-values/name-value/header-end/imports-end are now read only by the scratch generator (can be pruned).
+- next: machodelta (same pattern; its field() calls MB.big/MB.little, p.call(ret=label5) once), elfimage
+  (iat/dlslots chains + header field chain), then entries.
