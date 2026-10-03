@@ -231,7 +231,8 @@ def ladder(prefix, bottom):
                           section="main")
 
 
-from printfallback import KINDS as PFKINDS, install as pf_install
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'facts')); from load import facts as _pffacts
+PFKINDS = {r['name']: r['value'] for r in _pffacts('printfallback')}['KINDS']   # printfallback-manifest.tsv (K2 trace translation)
 PFCONV = {ord(k): PFKINDS.index(v) for k,v in E.gold("pfconv") if k != "conv"}
 
 HEX = "0123456789abcdef"
@@ -257,7 +258,8 @@ def fmtwalk(pre, on_byte, on_d, on_end):
 
 def printf(warnings=False):
     from printfcontrol import install as printf_control
-    pf_install(E, P)
+    import assemble
+    assemble.run(Path(__file__).resolve().parent / 'printfallback-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})
     printf_control(E, P, "part0", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
     strwalk("FMT.walk","FMT.byte","FMT.end")
     printf_control(E, P, "part1", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
@@ -623,9 +625,9 @@ def build(locations=False, warnings=False, errors=False):
                  dict(locations=locations, warnings=warnings, errors=errors), dict(BOOL=BOOL, DBL=DBL, FLT=FLT))
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
-    from statics import install as static_install
-    static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL)
-    import assemble
+    import assemble   # K2 trace translation: statics-manifest.tsv
+    from types import SimpleNamespace
+    assemble.run(Path(__file__).resolve().parent / 'statics-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(BOOL=BOOL, LOC=LOC, SIEND=SIEND, SINIT=SINIT, SKIPS=SKIPS, TIX=TIX))
     assemble.run(Path(__file__).parent / "initializers-manifest.tsv", E, P, {}, dict(
         SBB=SBB, LOC=LOC, SSZ=SSZ, SMN=SMN, SMEM=SMEM, MOF=MOF, MPT=MPT, MBS=MBS, MAR=MAR,
         SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE, SKIPS=SKIPS, UCHAR=E.UNS + 1,
@@ -931,8 +933,9 @@ def build(locations=False, warnings=False, errors=False):
     import assemble
     assemble.run(Path(__file__).parent / 'structreturnexpr-manifest.tsv', E, P,
                  dict(locations=locations, warnings=warnings, errors=errors))
-    from forward import install as forward_install
-    start = forward_install(E, P, start, FPS_FN, DEFS)
+    import assemble   # K2 trace translation: forward-manifest.tsv
+    from types import SimpleNamespace
+    start = assemble.run(Path(__file__).resolve().parent / 'forward-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(fps_fn=FPS_FN, start=start))['ret']
     # The compound-literal output splice walks a saved byte blob.  Its
     # EOF branch observes the reader byte, not the previous arithmetic result.
     mode, row = g.st['CP.restore']

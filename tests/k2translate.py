@@ -39,7 +39,11 @@ def _js(v):
         return {"__range__": [v.start, v.stop]}
     if isinstance(v, Path):
         return {"__path__": str(v)}
-    return v
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (set, frozenset)):
+        return {"__set__": sorted(map(_js, v), key=repr)}
+    return {"__opaque__": repr(v)[:80]}
 
 
 def record(outdir, tag, gen, args, modules):
@@ -47,7 +51,7 @@ def record(outdir, tag, gen, args, modules):
     sys.path.insert(0, str(ROOT / "exec"))
     sys.path.insert(0, str(genpath.parent))
     import finite_rules as fr
-    traces, stack, inner = {}, [], [0]
+    traces, stack, inner, graph = {}, [], [0], [None]
     for m in modules:
         p = (ROOT / m).resolve()
         t = traces[p.stem] = {"calls": [], "args": None, "refused": None, "path": str(p)}
@@ -77,12 +81,18 @@ def record(outdir, tag, gen, args, modules):
                         return f(kind)
                     sig.arguments["fresh"] = tf
                     r = fn(*sig.args, **sig.kwargs)
-                    if used:
+                    own = getattr(f, "__self__", None)
+                    if used and own is not None and hasattr(own, "cur") and f.__name__ == "fresh":
+                        d["fresh"] = "U:" + own.cur
+                    elif used:
                         note("template fresh callback invoked (%s)" % used[:3])
-                    d["fresh"] = None
+                        d["fresh"] = None
+                    else:
+                        d["fresh"] = None
                 else:
                     r = fn(*a, **k)
-                traces[stack[-1]]["calls"].append(["call", name, _js(d)])
+                graph[0] = a[0] if a else k.get("g")
+                traces[stack[-1]]["calls"].append(["call", name, _js(d), r if isinstance(r, (str, int)) else None])
                 return r
             finally:
                 inner[0] = 0
@@ -113,6 +123,20 @@ def record(outdir, tag, gen, args, modules):
                     kw[n] = v
                 elif inspect.isfunction(v) or inspect.ismethod(v):
                     t["refused"] = t["refused"] or "callback argument %s" % n
+            for v in b.values():
+                for gr in (v, getattr(v, "g", None)):
+                    cls = type(gr)
+                    if gr is not None and hasattr(cls, "on") and hasattr(cls, "state") and cls not in patched:
+                        patched.add(cls)
+                        for meth in ("on", "state", "seq"):
+                            if hasattr(cls, meth):
+                                def gw(self, *a, _m=getattr(cls, meth), _n=meth, **k):
+                                    if stack and not inner[0]:
+                                        note("direct graph write %s.%s (not through finite_rules)" % (cls.__name__, _n))
+                                    return _m(self, *a, **k)
+                                setattr(cls, meth, gw)
+            if stack:
+                note("calls another stage module install (%s)" % stem)
             if t["args"] is not None:
                 t["refused"] = t["refused"] or "install called twice"
             t["args"] = kw
@@ -121,8 +145,9 @@ def record(outdir, tag, gen, args, modules):
                 r = inst(*a, **k)
             finally:
                 stack.pop()
-            if r is not None:
+            if r is not None and not isinstance(r, (str, int)):
                 t["refused"] = t["refused"] or "install returns a value (%s)" % type(r).__name__
+            t["ret"] = r
             return r
         return w
     paths = {Path(t["path"]).stem: t["path"] for t in traces.values()}
@@ -147,10 +172,24 @@ def record(outdir, tag, gen, args, modules):
         if e.code not in (0, None):
             raise
     os.unlink(sys.argv[1])
+    st = set(getattr(graph[0], "st", None) or ())
     for stem, t in traces.items():
+        t["states"] = sorted(x for x in _strings(t["calls"]) if x in st)
         if t["args"] is None:
             t["refused"] = t["refused"] or "install never called in this mode"
         Path(outdir, "%s.%s.json" % (stem, tag)).write_text(json.dumps(t))
+
+
+def _strings(v):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, (list, tuple)):
+        for x in v:
+            yield from _strings(x)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield from _strings(k)
+            yield from _strings(x)
 
 
 def _esc(s):
@@ -160,6 +199,17 @@ def _esc(s):
 class Emitter:
     def __init__(self, here, stem):
         self.here, self.stem, self.facts, self.tables = here, stem, {}, {}
+        self.tfacts, self.states = [], set()
+
+    def p4(self, v, where):
+        hit = [x for x in _strings(v) if x in self.states]
+        if hit:
+            raise Refuse("P4: state label(s) %s inside %s data; must stay template rows" % (hit[:3], where))
+
+    def tfact(self, d):
+        if d not in self.tfacts:
+            self.tfacts.append(d)
+        return "%s-f%d" % (self.stem, self.tfacts.index(d) + 1)
 
     def fact(self, v):
         for k, x in self.facts.items():
@@ -172,6 +222,8 @@ class Emitter:
     def rows(self, t):
         """One mode's trace -> list of rows (cells are strings or ('lit', value))."""
         args, owner, pending, out = t["args"], {}, [], []
+        self.states |= set(t.get("states", ()))
+        ret, retrow = t.get("ret"), None
 
         def cell(k, v):
             if isinstance(v, str):
@@ -186,13 +238,20 @@ class Emitter:
             for n, a in args.items():
                 if a == v and type(a) == type(v) and not isinstance(v, bool):
                     return "$" + n, False
+            if isinstance(v, str) and v in self.states:
+                if any(ch in v for ch in ",\t\n{}\\"):
+                    raise Refuse("state label %r not expressible as @str" % v)
+                return "@str:" + v, False
+            self.p4(v, "binding/sequence " + k)
             return ("lit", json.dumps(v, sort_keys=True)), False
 
         for c in t["calls"]:
             if c[0] == "fresh":
                 pending.append(c[1:])
                 continue
-            _, name, d = c
+            _, name, d, r = c
+            if "__opaque__" in json.dumps(d) or "__set__" in json.dumps(d):
+                raise Refuse("non-data argument in %s (%s)" % (name, json.dumps(d)[json.dumps(d).find("__"):][:60]))
             op = OPS[name]
             if op == "table":
                 p = Path(d["path"]["__path__"]).resolve()
@@ -204,8 +263,14 @@ class Emitter:
                 if root != self.here:
                     raise Refuse("install root %s outside %s" % (root, self.here))
                 stemcell = d["stem"]
+            tf = None
             if op == "template" and d.get("facts"):
-                raise Refuse("template with a non-empty facts dict: not exercised yet")
+                self.p4(d["facts"], "template facts")
+                tf = self.tfact(d["facts"])
+            if op == "template" and d.get("fresh"):
+                tf_fresh = d["fresh"]
+            else:
+                tf_fresh = "-"
             exp, bind, seq = [], [], []
             for k, v in (d.get("bindings") or {}).items():
                 s, new = cell(k, v)
@@ -221,7 +286,15 @@ class Emitter:
             if exp:
                 o["export"] = exp
             if d.get("classes"):
+                self.p4(d["classes"], "classes")
                 o["classes"] = d["classes"]
+            if tf:
+                o["_tf"] = tf
+            if tf_fresh != "-":
+                o["_fresh"] = tf_fresh
+            if ret is not None and r == ret and retrow is None:
+                o["result"] = "ret"
+                retrow = len(out)
             dom = d.get("domain")
             if dom and dom != {"__range__": [0, 257]}:
                 o["domain"] = dom["__range__"]
@@ -234,6 +307,11 @@ class Emitter:
                         json.dumps(_js(o.get("classes")))))
         if pending:
             raise Refuse("fresh labels allocated but never bound: %s" % pending[:3])
+        if ret is not None and retrow is None:
+            if isinstance(ret, str) and not any(ch in ret for ch in ",\t\n{}\\"):
+                out.append(("set", "-", "-", (), (("ret", "@str:" + ret),), "{}", "null"))
+            else:
+                raise Refuse("install return value %r not traceable" % (ret,))
         return out
 
 
@@ -253,7 +331,14 @@ def _cube(modes, allmodes, flags):
 def emit(module, specs):
     mod = (ROOT / module).resolve()
     here, stem = mod.parent, mod.stem
-    em = Emitter(here, stem)
+    fstem = stem
+    fp = ROOT / "exec" / "facts" / (stem + ".tsv")
+    try:
+        if "tests/k2translate.py" not in fp.read_text().split("\n", 1)[0]:
+            fstem = "k2-" + stem   # never overwrite a hand/export-written facts file
+    except FileNotFoundError:
+        pass
+    em = Emitter(here, fstem)
     runs = []
     for s in specs:
         fl, _, path = s.partition("=")
@@ -263,6 +348,8 @@ def emit(module, specs):
         if t["refused"]:
             raise Refuse(t["refused"])
         runs.append((frozenset(x for x in fl.split(",") if x not in ("", "-")), t))
+    if not runs:
+        raise Refuse("install never called by the recorded generator runs")
     args = runs[0][1]["args"]
     if any(t["args"] != args for _, t in runs):
         raise Refuse("install arguments differ across modes")
@@ -306,6 +393,8 @@ def emit(module, specs):
     for grp in out:
         (op, st, sec, seq, bind, o, cl), w = grp[0]
         oo = json.loads(o)
+        tfc = oo.pop("_tf", None)
+        frc = oo.pop("_fresh", "-")
         if cl != "null":
             oo["classes"] = em.fact(json.loads(cl))
         if len(grp) >= 3 and not oo.get("export"):
@@ -315,18 +404,25 @@ def emit(module, specs):
             em.tables[tn] = (cols, tab)
             lines.append(["foreach", "-", "-", w, stem, "-", "-", "-", json.dumps({"over": tn, "as": "it"})])
             c = lambda kv: "%s=%s" % (kv[0], kv[1] if isinstance(kv[1], str) else "it." + kv[0])
-            lines.append(["." + op, st, sec, "-", stem, "-", ",".join(map(c, seq)) or "-",
+            lines.append(["." + op, st, sec, "-", fstem + ("+" + tfc if tfc else ""), frc, ",".join(map(c, seq)) or "-",
                           ",".join(map(c, bind)) or "-", json.dumps(oo) if oo else "-"])
             continue
         for r, w in grp:
             c = lambda kv: "%s=%s" % (kv[0], kv[1] if isinstance(kv[1], str) else em.fact(json.loads(kv[1][1])))
-            lines.append([op, st, sec, w, stem, "-", ",".join(map(c, r[3])) or "-",
+            lines.append([op, st, sec, w, fstem + ("+" + tfc if tfc else ""), frc, ",".join(map(c, r[3])) or "-",
                           ",".join(map(c, r[4])) or "-", json.dumps(oo) if oo else "-"])
     if len(lines) > FOLD_MAX:
         raise Refuse("%d rows after folding (> %d)" % (len(lines), FOLD_MAX))
-    if not em.facts and not em.tables:
-        for ln in lines:
-            ln[4] = "-"
+    if len(em.tfacts) > 16:
+        raise Refuse("%d distinct template facts dicts (> 16)" % len(em.tfacts))
+    for ln in lines:
+        parts = [x for x in ln[4].split("+") if x != fstem or em.facts or em.tables]
+        ln[4] = "+".join(parts) or "-"
+    for i, d in enumerate(em.tfacts, 1):
+        with open(ROOT / "exec" / "facts" / ("%s-f%d.tsv" % (fstem, i)), "w") as f:
+            f.write("# written by tests/k2translate.py from %s (template facts)\n" % mod.relative_to(ROOT))
+            for k, v in d.items():
+                f.write("=%s\tjson\t%s\n" % (k, _esc(json.dumps(v))))
     man = here / (stem + "-manifest.tsv")
     with open(man, "w") as f:
         f.write("# op\tstem\tsection\twhen\tfacts\tfresh\tseq\tbind\topts\n")
@@ -334,7 +430,7 @@ def emit(module, specs):
         for ln in lines:
             f.write("\t".join(ln) + "\n")
     if em.facts or em.tables:
-        with open(ROOT / "exec" / "facts" / (stem + ".tsv"), "w") as f:
+        with open(ROOT / "exec" / "facts" / (fstem + ".tsv"), "w") as f:
             f.write("# written by tests/k2translate.py from %s\n" % mod.relative_to(ROOT))
             for k, v in em.facts.items():
                 f.write("=%s\tjson\t%s\n" % (k, _esc(json.dumps(v))))
