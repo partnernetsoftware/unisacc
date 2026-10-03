@@ -1,26 +1,29 @@
-/* examples/win/argceil.c -- where the forward'"'"'s argument ceiling actually is.
+/* examples/win/refused/argceil.c -- the argument ceiling, measured and then
+ * pinned.
  *
- * A Windows forward with at most six integer/pointer arguments is emitted as
- * a direct host call; a seventh needs the libffi bridge that only macOS and
- * Linux have. Six is the documented number, but the Microsoft x64 calling
- * convention only has four register slots, so arguments five and six arrive
- * on the stack -- and this probe is what establishes whether the generated
- * call builds that stack frame correctly on Windows.
+ * Four arguments is what a Windows host call delivers, and this probe walks
+ * the ladder: 0, 1, 4, 5, 6, 7. The first four worked and still work
+ * (tick.c, vmem.c, outparam.c). The rest used to be emitted anyway and used
+ * to lose the arguments past the fourth in silence -- this file is where that
+ * was measured, on this machine, before the fix:
  *
- * Each call is followed by a flush, so a crash names the exact arity that
- * broke rather than leaving an empty line:
+ *   4 args  VirtualProtect     worked
+ *   5 args  SearchPathA        returned the right length, wrote nothing
+ *   6 args  CreateEventExA     returned a plausible handle, stack slots garbage
+ *   7 args  CreateFileA        no stub at all (fwd_emit stops at six)
  *
- *   4 args  VirtualProtect   measured working (vmem.c)
- *   5 args  SearchPathA      measured here
- *   6 args  CreateEventExA   measured here
- *   7 args  CreateFileA      refused at compile time (refused/createfile7.c)
+ * 0.0.23 turns the silent part into a refusal: src/fwdstub.c carries
+ * fwd_maxargs, the driver sets it from the -b target, and src/front_parse.c
+ * refuses a wider forward BY NAME. So this file no longer compiles, and that
+ * is the regression test:
  *
- * All four names are plain kernel32, so nothing here depends on which DLL a
- * forward searches -- this is purely about how the call is built.
+ *   unisacc: error: host function 'SearchPathA' takes 5 arguments, and this
+ *   target's host call delivers 4. ...
  *
- * Build and run:
- *   out/ua-ref-win.exe -b win/x86_64 -o argceil.exe examples/win/argceil.c
- *   ./argceil.exe
+ * Four-argument calls are not affected; vmem.c and outparam.c are the evidence
+ * that the ceiling did not move under the working ones.
+ *
+ *   out/ua-ref-win.exe -b win/x86_64 -o argceil.exe examples/win/refused/argceil.c
  */
 #include <stdio.h>
 

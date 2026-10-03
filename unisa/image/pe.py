@@ -21,10 +21,22 @@ HDR_FILE = 0x400            # file offset of the first section
 DLL = b"KERNEL32.dll"
 # Fixed order: the IAT slot for a name is its index, and lowering resolves
 # `__imp_<name>` to that slot's address.
+#
+# The first fourteen are what a bundled libc body needs to exist at all; the
+# eight after them are what the Windows POSIX layer needs and could not have
+# (0.0.23).  A forward cannot reach them -- a forward is capped at four
+# arguments by the Microsoft x64 call, and CreateProcessW alone takes ten --
+# so the import table is the only channel wide enough, which is why a
+# POSIX-shaped Windows program has to get its process and stdio names from
+# here.  Mirrored in src/back_encode.c (BK_IMPS / BK_NIMP) and pinned by
+# tests/consts_check.py.
 IMPORTS = ("GetStdHandle", "WriteFile", "ReadFile", "CloseHandle",
            "CreateFileA", "ExitProcess", "GetCommandLineA", "VirtualAlloc",
            "VirtualProtect", "VirtualFree", "FlushInstructionCache",
-           "SetFilePointer", "DeleteFileA", "MoveFileExA")
+           "SetFilePointer", "DeleteFileA", "MoveFileExA",
+           "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess",
+           "TerminateProcess", "SetStdHandle", "GetCurrentProcess",
+           "GetCurrentProcessId", "GetModuleFileNameW")
 
 
 _round = round_up

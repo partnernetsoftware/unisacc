@@ -43,9 +43,9 @@ int bk_relo(long off, int type, long target) {
     bknro = bknro + 1;
     return 1;
 }
-#define BK_NIMP 14                  /* pe.IMPORTS */
-#define BK_NIMPMAX 18               /* + LoadLibraryA GetProcAddress FreeLibrary GetLastError (R21-4a') */
-char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000LoadLibraryA\000GetProcAddress\000FreeLibrary\000GetLastError\000";
+#define BK_NIMP 22                  /* pe.IMPORTS */
+#define BK_NIMPMAX 26               /* + LoadLibraryA GetProcAddress FreeLibrary GetLastError (R21-4a') */
+char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000CreateProcessW\000WaitForSingleObject\000GetExitCodeProcess\000TerminateProcess\000SetStdHandle\000GetCurrentProcess\000GetCurrentProcessId\000GetModuleFileNameW\000LoadLibraryA\000GetProcAddress\000FreeLibrary\000GetLastError\000";
 long bk_imp[BK_NIMPMAX];               /* Windows: the IAT slot of each import */
 long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
 /* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]

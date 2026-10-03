@@ -524,7 +524,7 @@ int bkrel;                          /* the reloc answer for the branch being low
    in memory this process maps, instead of into an image on disk.  Nothing
    about the code changes -- the same encoders, the same tables -- only where
    text and data are placed and the fact that nobody writes a header. */
-long bk_impval[16];                 /* run mode on Windows: the real routines */
+long bk_impval[26];                 /* run mode on Windows: the real routines */
 int bk_runmode; long bk_runtext; long bk_rundata; long bk_runtsz; long bk_rundsz;
 int bkf_nr;                         /* the syscall-number register (abi nrreg) */
 int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;

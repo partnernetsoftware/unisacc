@@ -33,7 +33,7 @@ def verify(buf,arch="arm64"):
         a=u64(rva(ilt)+i*8);assert u64(rva(iat)+i*8)==a
         hint=rva(a);assert u16(hint)==0
         names.append(buf[hint+2:].split(b'\0',1)[0]);i+=1
-    assert len(names)==14 and names[0]==b'GetStdHandle' and names[-1]==b'MoveFileExA' and len(set(names))==14
+    assert names==[n.encode() for n in image.pe.IMPORTS], names
     cfg,sz=struct.unpack_from('<II',buf,o+112+80);assert sz==320
     cookie=u64(rva(cfg)+88)-ib;assert cookie%8==0
     assert sections[2][2]<=cookie<sections[2][2]+sections[2][1]

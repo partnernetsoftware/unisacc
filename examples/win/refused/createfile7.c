@@ -1,19 +1,16 @@
-/* examples/win/refused/createfile7.c -- MEASURED FAILURE: the sixth argument
- * is the wall.
+/* examples/win/refused/createfile7.c -- MEASURED FAILURE: two ceilings, not
+ * one.
  *
- * A forward with at most six integer/pointer arguments is emitted as a
- * direct host call. A seventh argument needs the libffi bridge, and that
- * bridge is compiled only for macOS and Linux. CreateFileA -- the way every
- * Win32 program obtains a file handle -- takes seven, so handle-based file
- * I/O, and everything built on it, is out of reach on Windows today.
+ * There are two of them, and this file is where the second one shows. A
+ * forward is generated for at most six arguments (src/fwdstub.c fwd_emit), and
+ * a target may deliver fewer: a Windows host call delivers four, so anything
+ * from five to six arguments is refused by name with a diagnostic, and seven
+ * or more never gets a stub at all and is reported as an undefined function.
  *
- * This is the same wall gui/window.c hits at twelve arguments, and it is the
- * reason a screen-capture pipeline cannot be assembled out of forwards even
- * after the DLL list is widened: GDI'"'"'s own entry points are wide too
- * (BitBlt is nine).
- *
- * Expected: the reference reports an undefined function, because the stub it
- * would need cannot be built.
+ * CreateFileA -- the way every Win32 program obtains a file handle -- takes
+ * seven, so handle-based file I/O is out of reach through a forward. It works
+ * inside the bundled libc, which is why posix.c can open a file: that call
+ * goes through the import table (pe.IMPORTS), which has no argument limit.
  *
  *   out/ua-ref-win.exe -b win/x86_64 -o createfile7.exe examples/win/refused/createfile7.c
  */

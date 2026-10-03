@@ -6343,6 +6343,25 @@ int fwd_stub(char *nm, int nl) {
     if (si < 0 || symnpk[si] < 0 || symvar[si] || (symstruct[si] >= 0 && symptr[si] == 0)) return 0;   /* a struct by value: not yet */
     np = symnpk[si]; f = sympkfirst[si];
     k = 0; while (k < np) { if (sympk[f + k] == 9) return 0; k = k + 1; }
+    /* A target that cannot deliver this many arguments refuses the forward by
+       name (src/fwdstub.c fwd_maxargs). Emitting the call anyway is what made
+       a 5-argument Windows forward return a right answer and write nothing. */
+    if (fwd_maxargs > 0 && np > fwd_maxargs) {
+        static char m0[] = "unisacc: error: host function '";
+        static char m1[] = "' takes ";
+        static char m2[] = " arguments, and this target's host call delivers ";
+        static char m3[] = ". Put the wide call in a bundled libc body, where it goes through the import table instead.\n";
+        char nb[8]; int q; int v;
+        q = 0; while (m0[q]) q = q + 1; __write(2, m0, q);
+        __write(2, nm, nl);
+        q = 0; while (m1[q]) q = q + 1; __write(2, m1, q);
+        v = np; q = 0; if (v >= 10) { nb[q] = 48 + (v / 10) % 10; q = q + 1; }
+        nb[q] = 48 + v % 10; q = q + 1; __write(2, nb, q);
+        q = 0; while (m2[q]) q = q + 1; __write(2, m2, q);
+        v = fwd_maxargs; q = 0; nb[q] = 48 + v % 10; q = q + 1; __write(2, nb, q);
+        q = 0; while (m3[q]) q = q + 1; __write(2, m3, q);
+        return 2;
+    }
     rw = symelem[si]; isvoid = rw == 0 && symptr[si] == 0 && symflt[si] == 0;
     if (isvoid == 0 && symptr[si] == 0 && symflt[si] == 0 && symretw[si]) rw = symretw[si];   /* int is 4, not the element width */
     {   int kk[64]; int ww[64]; int uu[64];
@@ -6542,9 +6561,13 @@ int undef_calls(void) {
                     ud_tab[h] = i + 8;        /* report each name once */
                     if (unitmode) {           /* defined in another unit: the linker's business */
                         if (nxtrn < 256) { xtrn_at[nxtrn] = i + 7; xtrn_len[nxtrn] = e - i - 7; nxtrn = nxtrn + 1; }
-                    } else { if (fwdrun && fwd_stub(out + i + 7, e - i - 7)) {
+                    } else { int fr; fr = fwdrun ? fwd_stub(out + i + 7, e - i - 7) : 0;
+                        /* fwd_stub: 1 a stub was queued, 2 refused by name and
+                           already reported, 0 not a forward at all. */
+                        if (fr == 1) {
                         /* forwarded to the host (R19-10): the driver compiles the stub */
-                    } else { if (objextern) {
+                        } else if (fr == 2) { bad = bad + 1;
+                        } else { if (objextern) {
                         if (ccx_check(out + i + 7, e - i - 7)) bad = bad + 1;
                         else { ccx_at[nccx] = i + 7; ccx_len[nccx] = e - i - 7; nccx = nccx + 1; }
                     } else {

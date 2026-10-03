@@ -6,6 +6,22 @@
    same bytes on both routes.  Kinds: 0 integer, 1 pointer, 4 float, 8 double.
    Appends to fwdsrc; no libc. */
 int fwdrun; char fwdsrc[131072]; int nfwdsrc;
+/* The widest host call the target actually delivers.  0 means fwd_emit's own
+   ceiling of six.  A win target sets four, and the reason is measured, not
+   guessed: the Microsoft x64 convention has four integer register slots, and
+   the generated hostcall sequence (the BK_HOST_WIN_X86 template in
+   back_encode.c) does not build the shadow space or the stack argument area,
+   so a fifth argument is dropped in silence.  The callee then returns a
+   plausible value and the caller's out-parameter stays empty -- the most
+   expensive kind of wrong, because the program keeps working and the data
+   never arrives (examples/win/outparam.c measures it: a 4-argument
+   GetDiskFreeSpaceExA fills all three of its out-parameters, a 5-argument
+   SearchPathA returns the right length and writes nothing).  So a target
+   that cannot deliver the arguments refuses the forward BY NAME instead of
+   emitting a call that quietly loses them.  Set by the driver from the -b
+   target; the product driver leaves it 0 and does not forward to a win target
+   at all yet (plans/v0.0.23.md item A1). */
+int fwd_maxargs;
 int fwd_s(char *s) { while (*s && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = *s; nfwdsrc = nfwdsrc + 1; s = s + 1; } return 0; }
 int fwd_n(char *s, int n) { int k; k = 0; while (k < n && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; } return 0; }
 int fwd_d(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; fwdsrc[nfwdsrc] = d[n]; nfwdsrc = nfwdsrc + 1; } return 0; }

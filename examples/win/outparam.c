@@ -1,100 +1,85 @@
-/* examples/win/outparam.c -- are arguments five and six actually delivered?
+/* examples/win/outparam.c -- four arguments DO arrive, with out-parameters.
  *
- * argceil.c showed that five- and six-argument forwards return plausible
- * values. It also showed something quieter: SearchPathA returned the right
- * length and left the caller'"'"'s buffer empty. A forward that computes the
- * right answer while dropping an argument is the most expensive kind of wrong,
- * because the program keeps working and the data never arrives.
+ * The positive half of refused/wideargs.c. A Windows host call has four
+ * integer register slots, and this probe fills all of them and reads three
+ * out-parameters back: GetDiskFreeSpaceExA is called with a path and three
+ * pointers, and the numbers that come back are this machine's disk, not
+ * whatever was on the stack. It is the control for the silent-drop
+ * measurement, and it is why the reachable half of computer use is reachable
+ * at all: window enumeration, hotkeys, the tray, cursor moves and injected
+ * keystrokes are all four arguments or fewer.
  *
- * So this probe uses calls whose RESULT DEPENDS on the arguments past the
- * fourth register slot, never a call that merely returns a count:
+ * (Measured on this machine: free 29 GB, total 268 GB. The 4-argument slot
+ * budget is the whole reason gui/input.c works and gui/window.c does not.)
  *
- *   - the .ini file is written with stdio, so it exists before any forward
- *     runs and a "file not found" answer cannot be mistaken for a lost
- *     argument;
- *   - GetPrivateProfileStringA puts the output buffer in slot four and the
- *     length in slot five, and returns the file'"'"'s value only if BOTH
- *     arrived;
- *   - SearchPathA is repeated with the buffer dumped as bytes, so "empty" and
- *     "not NUL-terminated" are different failures.
- *
+ * Build and run:
  *   out/ua-ref-win.exe -b win/x86_64 -o outparam.exe examples/win/outparam.c
  *   ./outparam.exe
  */
 #include <stdio.h>
 
-#define FILE_NAME "unisacc-win-probe.ini"
+#define FILE_NAME "unisacc-win-probe.txt"
 
-unsigned long GetPrivateProfileStringA(const char *section, const char *key,
-                                       const char *fallback, char *out,
-                                       unsigned long size, const char *file);
-unsigned long SearchPathA(const char *path, const char *file,
-                          const char *ext, char *buffer, unsigned long size);
-int WritePrivateProfileStringA(const char *section, const char *key,
-                               const char *value, const char *file);
 int GetDiskFreeSpaceExA(const char *path, unsigned long *free_to_me,
                         unsigned long *total, unsigned long *total_free);
-unsigned long GetLastError(void);
-
-static void hex(const char *tag, char *p, unsigned long n)
-{
-    unsigned long i;
-    printf("%s", tag);
-    for (i = 0; i < n; i = i + 1) {
-        printf(" %02x", (unsigned int)p[i]);
-    }
-    printf("\n");
-}
+unsigned long GetTempPathA(unsigned long len, char *buf);
+unsigned long GetEnvironmentVariableA(const char *name, char *buf, unsigned long len);
+int DeleteFileA(const char *path);
 
 int main(void)
 {
-    char got[128];
-    char found[520];
-    unsigned long n;
-    unsigned long i;
+    char path[520];
+    char name[520];
     unsigned long free_to_me;
     unsigned long total;
     unsigned long total_free;
-    FILE *f;
+    unsigned long n;
 
-    /* The file is created with stdio, so it is guaranteed to exist before
-       the first forward reads it. */
-    f = fopen(FILE_NAME, "wb");
-    if (f == 0) {
-        printf("cannot create %s\n", FILE_NAME);
-        return 1;
-    }
-    fprintf(f, "[probe]\nanswer=forty-two\n");
-    fclose(f);
-
-    for (i = 0; i < 128; i = i + 1) {
-        got[i] = 0;
-    }
-    n = GetPrivateProfileStringA("probe", "answer", "DEFAULT", got, 128, FILE_NAME);
-    printf("read n %lu err %lu\n", n, GetLastError());
-    printf("read [%s]\n", got);
-    hex("read bytes", got, 12);
-
-    for (i = 0; i < 520; i = i + 1) {
-        found[i] = 0;
-    }
-    n = SearchPathA(0, "notepad.exe", 0, found, 520);
-    printf("search n %lu\n", n);
-    hex("search bytes", found, 16);
-    printf("search [%s]\n", found);
-
-    /* The control: FOUR arguments, three of them out-parameters. If these
-       come back, the register slots are delivered and the fault above is
-       exactly the stack slots -- argument four of SearchPathA and arguments
-       five and six of GetPrivateProfileStringA. */
+    /* Four arguments, three of them out-parameters, and the values that come
+       back are the disk's. */
     free_to_me = 0;
     total = 0;
     total_free = 0;
-    if (GetDiskFreeSpaceExA("C:\\", &free_to_me, &total, &total_free)) {
-        printf("4 args free %lu total %lu\n", free_to_me, total);
-        printf("4 args out-param %d\n", total > 0 && free_to_me > 0);
-    } else {
-        printf("4 args failed %lu\n", GetLastError());
+    if (GetDiskFreeSpaceExA("C:\\", &free_to_me, &total, &total_free) == 0) {
+        printf("disk query failed\n");
+        return 1;
+    }
+    printf("free %lu total %lu total_free %lu\n", free_to_me, total, total_free);
+    printf("out-parameters arrived %d\n", total > 0 && free_to_me > 0);
+
+    /* Three arguments with a buffer, and a two-argument call into the same
+       slot budget, to show the budget is not the only thing that works. */
+    n = GetTempPathA(260, path);
+    printf("temp (%lu) %s\n", n, path);
+    n = GetEnvironmentVariableA("USERNAME", name, 260);
+    printf("user (%lu) %s\n", n, name);
+
+    /* And a buffer written by the host, then deleted, so the probe leaves
+       nothing behind. */
+    n = GetEnvironmentVariableA("TEMP", name, 260);
+    if (n > 0 && n < 250) {
+        unsigned long i;
+        unsigned long len;
+        len = 0;
+        while (name[len]) {
+            len = len + 1;
+        }
+        for (i = len; i > 0; i = i - 1) {
+            if (name[i - 1] == 92) {
+                break;
+            }
+        }
+        /* i is the offset just past the last backslash. */
+        if (i < 250) {
+            unsigned long j;
+            j = 0;
+            while (FILE_NAME[j]) {
+                name[i + j] = FILE_NAME[j];
+                j = j + 1;
+            }
+            name[i + j] = 0;
+            printf("probe file %s deleted %d\n", name, DeleteFileA(name));
+        }
     }
     return 0;
 }

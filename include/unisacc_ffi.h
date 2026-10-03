@@ -63,7 +63,13 @@ static int __uffi_ready;
 
 /* the four loader names: macOS/Linux dlopen dlsym dlclose dlerror; Windows
    (0.0.21 R21-4a') LoadLibraryA GetProcAddress FreeLibrary GetLastError, where
-   RTLD_DEFAULT (0) searches ucrtbase, kernel32, ws2_32, msvcrt in turn */
+   RTLD_DEFAULT (0) searches ucrtbase, kernel32, ws2_32, msvcrt in turn, then
+   the five names a Windows program could not reach before 0.0.23: nothing in a
+   forward names a DLL, so without user32 and gdi32 in this list EnumWindows,
+   RegisterHotKey, SendInput, GetDC, CreateCompatibleDC and every other GUI or
+   GDI entry point failed at run time with "no host function". Order matters
+   only for speed -- the first four are tried in their original order, so a
+   name that resolved before still resolves the same way. */
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
     long __u_args[10] = {0};
@@ -79,12 +85,13 @@ static void *uffi_dlopen(const char *__u_path, int __u_mode) {
 static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
     long __u_args[10] = {0};
 #ifdef _WIN32
-    void *__u_r; int __u_i; char *__u_dll[4];
+    void *__u_r; int __u_i; char *__u_dll[9];
     __u_dll[0] = "ucrtbase.dll"; __u_dll[1] = "kernel32.dll"; __u_dll[2] = "ws2_32.dll"; __u_dll[3] = "msvcrt.dll";
+    __u_dll[4] = "user32.dll"; __u_dll[5] = "gdi32.dll"; __u_dll[6] = "shell32.dll"; __u_dll[7] = "advapi32.dll"; __u_dll[8] = "dxgi.dll";
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     if (__u_handle) { __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name; return (void *)__hostcall(__hostaddr1(), __u_args); }
     __u_i = 0;
-    while (__u_i < 4) {
+    while (__u_i < 9) {
         __u_args[0] = (long)__u_dll[__u_i]; __u_args[1] = 0;
         __u_args[0] = __hostcall(__hostaddr0(), __u_args);
         if (__u_args[0]) { __u_args[1] = (long)__u_name; __u_r = (void *)__hostcall(__hostaddr1(), __u_args); if (__u_r) return __u_r; }
