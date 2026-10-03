@@ -10,6 +10,7 @@ tests/bound.py 55 and records sha256(OUT).  Test infrastructure only.
 At most 3 generators run at once.  Exit 0 all equal, 1 mismatch/failure.
 """
 import hashlib, itertools, os, subprocess, sys, tempfile
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def main(argv):
             if ln and not ln.startswith('#'):
                 k, h = ln.split('\t'); old[k] = h
     tmp = tempfile.mkdtemp(prefix='graphhash-', dir=os.environ.get('GRAPHHASH_TMP'))
-    with ThreadPoolExecutor(3) as ex:
+    with ThreadPoolExecutor(int(os.environ.get('GRAPHHASH_JOBS', '1'))) as ex:   # heat: 1 by default (slot.sh counts one slot)
         res = dict(zip((key(*x) for x in ents), ex.map(lambda x: run(x[0], x[1], tmp), ents)))
     bad = 0
     for k, h in res.items():
