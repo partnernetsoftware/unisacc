@@ -7,12 +7,15 @@ def install(E,P,b,frame,blob):
     from libraryexports import MEMBERRANK
     import gen2
     g=E.g
+    from finite_rules import install_template
+    from pathlib import Path
+    root=Path(__file__).parent
     def select(name,v3):
-        old='L3.original.'+name
-        assert old not in g.st
-        g.st[old]=g.st.pop(name);g.labels.add(old)
-        alias='L3.select.'+name
-        P(alias).branch({3:v3},old,[('RLD','lx_wireversion')]);g.st[name]=g.st[alias]
+        # Facts: the V2 state name, its V3 replacement and the wire version selecting it.
+        assert 'L3.original.'+name not in g.st
+        sel={'sel':[{'name':name,'v3':v3,'version':3}]}
+        install_template(g,root,'librarytypesv3',sel,None,section='move')
+        install_template(g,root,'librarytypesv3',sel,lambda h:E.P.fresh(_Scope('L3'),h),section='select')
     # Stage control lives in librarytypesv3-result.tsv / -byte.tsv (sections s0..s5);
     # fresh labels are declared in librarytypesv3-fresh.tsv. Python binds only dynamic
     # facts: layout-fact banks and limits (layoutfacts), MEMBERRANK, E.ARR, gen2.DIM, the
@@ -21,7 +24,6 @@ def install(E,P,b,frame,blob):
     class _Scope:
         a=E.P.a
         def __init__(self,cur):self.cur=cur;self.acts=[]
-    from pathlib import Path
     from finite_rules import install as rules
     import libraryexports
     root=Path(__file__).parent
