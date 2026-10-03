@@ -60,3 +60,14 @@ def tokens(E):
 
 def twice():
     return sorted(k for k, n in DEFS.items() if n > 1)
+
+
+def executor():
+    """exec/build/gen.py base hook: parse/gen.py (token reader, assembler, gold tables) with the parse2 P and tokens."""
+    spec = importlib.util.spec_from_file_location("e3gen", str(_ROOT / "parse" / "gen.py"))
+    E = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(E)
+    install(E)
+    tokens(E)
+    assert "TN.raw" not in E.g.st
+    return E

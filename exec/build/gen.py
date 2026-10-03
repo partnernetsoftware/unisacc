@@ -5,6 +5,7 @@
 Runs exec/STAGE/gen-manifest.tsv (or exec/STAGE-manifest.tsv for STAGE = stage/sub) through exec/assemble.py and writes the graph.
 Manifest header lines read here:
   #! base PATH            executor module (relative to exec/), loaded as E
+                          (if it defines executor(), E = E.executor())
   #! flags A B C          accepted --A/--B/--C; each becomes flags[A]=True/False
   #! start NAME           start state (default START)
   #! graph CLASS          E.g = E.CLASS() (a base without its own g/P, e.g. build/graph.py)
@@ -41,6 +42,8 @@ if len(args) != len(set(args)) or any(not a.startswith("--") or a[2:] not in nam
 spec = importlib.util.spec_from_file_location(stage.replace("/", "_") + "base", ROOT / "exec" / head["base"][0])
 E = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(E)
+if hasattr(E, "executor"):   # a base that wraps another executor module returns it (build/parse2base.py)
+    E = E.executor()
 if "graph" in head:
     E.g, E.P = getattr(E, head["graph"][0])(), getattr(E, "P", None)
 # Driver data channel: the top-level run environment is E.results, so names a row stores with
