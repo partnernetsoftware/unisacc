@@ -234,3 +234,27 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   body test) with accumulate bindings; sequences/consts in facts k2-gen2 widthd/widthparts. All sha SAME default +
   --warnings --errors (one FAIL under load, rerun SAME). unresolved.py now belongs to cdx. Next: scope/decl
   (scope-actions via load_rules -> facts), remaining inline install_rules/stage-edits in build(), then callers -> call rows.
+- Round 21 (state for a fresh agent): branch worktree-agent-ad6a0167ae17760f0 = origin/main c5b10e13 + 10 commits
+  (shape/return/update/width/widthparts x2/scope/gen2parts manifests + handoffs), not pushed; coordinator merges.
+  Sub-manifests now in exec/parse2/: shape-, return-, update-, width-, widthparts-, scope-, gen2parts-manifest.tsv.
+  Each is called from a thin gen2.py wrapper or inline `assemble.run(..., env)`; their constants/sequences/classes live
+  in facts k2-gen2 (keys shape*, ret*, upd*, widthd/widthconst, widthparts, scopeconst/scopeseqs, gen2parts), produced
+  by exec/facts/export.py k2gen2() (add a key there + its input tsv to the k2-gen2 TABLES input list; never hand-edit facts).
+  Patterns that worked (all sha SAME):
+   * P(name).fresh(k) == assemble `fresh:U:PREFIX:k` (label = prefix-before-dot + kind + global counter); keep order.
+   * per-row fresh tables: freshrows {"file": X-fresh.tsv, "where": {"section": "{env}"}, "holder": true[, "lookup": true]}.
+   * mutable binding dicts: opts accumulate NAME (+ keep NAME: env NAME, returned to the gen2 wrapper).
+   * TYINT-style loops (q=P(x); hit/next/test; q=P(next)): foreach over a facts row list with
+     pre [["hit","fresh:U:P:w"]], chain {entry: current, start, next: "fresh:U:P:x", result}, body bind test=fresh...
+   * vpush/vpop/rej/O(text) sequences are pure: compute in export.py with G.P("x.facts") (gen2 P keeps rank slots).
+   * when-gates are booleans only (no equality): the wrapper passes 0/1 env flags (ret_dispatch, part_*, ...).
+   * build-time token codes (type=extern/_Bool appended in build()) are re-derived in export (see retclasses).
+  Check loop per step: python3 .k2tmp/X.py (exact-match edits); python3 exec/facts/export.py; sh .k2tmp/one.sh;
+  sh .k2tmp/one.sh --warnings --errors (background; slot.sh; a lone FAIL = timeout under load, rerun); export --check;
+  commit with pathspec. .k2tmp/one.sh = PYTHONHASHSEED=0 gen2 one mode, sha vs tests/graphhash.tsv (recreate if lost).
+  Left in gen2.py build(): types dispatch template (td from segment types-entry), stage-edits address/update/final,
+  compound loop functiontypes install; then replace every wrapper call by `call STEM` rows in gen2-manifest segments,
+  merge segments, run gen2 via exec/build/gen.py (#! flags warnings errors locations), switch callers (graphhash keys
+  keep their hashes, prepare.sh, exec/c/*, checks), delete gen2.py. cdx-owned Python calls stay at the boundary
+  (strings.initializer, constexpr, membercontrol, tokenlocations, layoutprovenance.parser; unresolved.py is cdx's).
+  Then librarymodule/librarycallables/libraryexports to manifests; exec/parse/gen.py to exec/build + facts.
