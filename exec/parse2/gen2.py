@@ -577,7 +577,8 @@ def update_control(section, extra=None):
         sequences["fp_step"] = O(texts["fp_step"] % (b["bits"],FPU[b["suffix"]+b["floating"]]))
     tokens=dict(TK,identifier=TK_ID)
     classes={name:[tokens[token]] for name,token in tape_rows("update-tokens.tsv")}
-    classes.update(BOOL=[BOOL],float_types=[DBL,FLT],float_axes=[AX.index("f32"),AX.index("f64")])
+    classes.update(BOOL=[BOOL],float_types=[DBL,FLT],float_axes=[AX.index("f32"),AX.index("f64")],
+                   signed_narrow_codes=[code for _,code,size,uns,_ in TYINT if not uns and size < 8])
     install_rules(g,os.path.dirname(__file__),"update",bindings=b,sequences=sequences,classes=classes,section=section)
     if section == "id0":
         compound={TK[o+"="]:"X.c"+o for o in E.CASOPS}
