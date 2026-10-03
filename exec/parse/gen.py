@@ -55,12 +55,9 @@ def optext(op, u=False):
     return "  %s r0, %s\n" % (sp, "r0, r1" if rev else "r1, r0")
 
 
-HEADER = ("_start:\n  call __init\n  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n"
-          "  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n"
-          "  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n"
-          "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
-          "  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n")
-FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
+_FC = {r["name"]: r["value"] for r in _facts("parse-constants")}
+HEADER = _FC["HEADER"]
+FOOTER = _FC["FOOTER"]
 
 _FW = {}
 for _r in _facts("parse-words"):
@@ -68,32 +65,45 @@ for _r in _facts("parse-words"):
 WORDS = _FW["words_pre"] + [o + "=" for o in _FW["casops"]] + sorted(PREC) + _FW["words_post"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
-TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR, TK_FNUM = 100, 101, 102, 103, 104, 105
+TK_ID = _FC["TK_ID"]
+TK_NUM = _FC["TK_NUM"]
+TK_BADNUM = _FC["TK_BADNUM"]
+TK_OTHER = _FC["TK_OTHER"]
+TK_STR = _FC["TK_STR"]
+TK_FNUM = _FC["TK_FNUM"]
 CASOPS = tuple(_FW["casops"])
-GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
-LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
-TDD, TDB = 15 * 10 ** 6, 16 * 10 ** 6  # a typedef name's pointer depth and base size (typedef char *va_list: 1, 1)
-TDN = 8 * 10 ** 6  # TDN[v] = 1: v was declared a typedef name at file scope
-ARR = 14 * 10 ** 6  # ARR[v] = 1: the visible v is an array (its value is its address; PTR[v] = depth after decay)
-PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/store64)
-BASE = 11 * 10 ** 6  # BASE[v]: size of v's base type (int 4, char 1, long 8; 0 unknown), the scale of depth-1 +-
-CUNK = 0          # base size unknown (void, a typedef name): +- and dereference to depth 0 not covered
-FRD, FRB = 12 * 10 ** 6, 13 * 10 ** 6  # per function: return pointer depth and base size
-DPR = 18 * 10 ** 6  # DPR[f] = 1: f has a double parameter (an int argument would be converted: not covered)
-VAR = 17 * 10 ** 6  # VAR[f] = 1: f was defined `(..., ...)` (its parameters arrive on the stack)
-AUT, AUD = 19 * 10 ** 6, 20 * 10 ** 6  # AUT[v] = 1: v is a header function the reference auto-includes; AUD[v] = 2: defined here
+GMARK = _FC["GMARK"]
+LOC = _FC["LOC"]
+FND = _FC["FND"]
+UNDO = _FC["UNDO"]
+FR = _FC["FR"]
+DIG = _FC["DIG"]
+VS = _FC["VS"]
+TDD = _FC["TDD"]
+TDB = _FC["TDB"]
+TDN = _FC["TDN"]
+ARR = _FC["ARR"]
+PTR = _FC["PTR"]
+BASE = _FC["BASE"]
+CUNK = _FC["CUNK"]
+FRD = _FC["FRD"]
+FRB = _FC["FRB"]
+DPR = _FC["DPR"]
+VAR = _FC["VAR"]
+AUT = _FC["AUT"]
+AUD = _FC["AUD"]
 VANAMES = tuple(_FW["vanames"])   # the reference's builtins (va_copy is undefined there: measured)
 # struct layouts: STAG[tag] = sid (1..63); SSZ[sid] = size; member key v*64 + sid ->
 # MOF offset, MSZ size, MPT pointer depth, MBS base size.  Measured: each member is
 # aligned to its own size, the struct's size is rounded up to its largest member
 # (struct { char c; long x; short s; int *p; int i; }: c@0 x@8 s@16 p@24 i@32, size 40).
-SBB = 3840       # base code of a struct: SBB + sid (a local's BASE; its size is SSZ[sid]).
-                 # 1000 until 2026-09-30: the function-signature pool of the E3 parser lives in
-                 # [FPS_FIRST, SBB) and 872 codes ran out at thirty units, each with its own
-                 # renamed static copy of the libc bodies (R13-0b #27, sbase); 3840 leaves
-                 # 3712 signatures and still keeps SBB + STRUCT_MAX (128) below 4096.
-STAG, SSZ, MOF, MSZ, MPT, MBS = (21 * 10 ** 6, 22 * 10 ** 6, 23 * 10 ** 6, 24 * 10 ** 6,
-                                 25 * 10 ** 6, 26 * 10 ** 6)
+SBB = _FC["SBB"]
+STAG = _FC["STAG"]
+SSZ = _FC["SSZ"]
+MOF = _FC["MOF"]
+MSZ = _FC["MSZ"]
+MPT = _FC["MPT"]
+MBS = _FC["MBS"]
 TWORDS = tuple(_FW["twords"])
 
 g = G()
@@ -260,17 +270,20 @@ def tyinfo():                 # stage tyinfo (weights/gold/tyinfo.tsv): type key
 
 
 TY = tyinfo()
-CTY = {"char": "i8", "short": "i16", "int": "i32", "long": "i64"}   # the signed spellings in this slice
+CTY = _FC["CTY"]
 SZ = {c: TY[k][0] for c, k in CTY.items()}
 PSZ = TY["ptr"][0]
 assert SZ == {"char": 1, "short": 2, "int": 4, "long": 8} and PSZ == 8, (SZ, PSZ)   # measured widths
 assert not any(TY[k][1] for k in CTY.values())
 # Value descriptor tags shared with the current parser.
-UNS, DBL, FLT, FPB = 16, 64, 65, 67
+UNS = _FC["UNS"]
+DBL = _FC["DBL"]
+FLT = _FC["FLT"]
+FPB = _FC["FPB"]
 
 
-PUSH = "  .frame 8\n  store64 [r7+0], r0\n"
-POP1 = "  load64 r1, [r7+0]\n  .frame -8\n"
+PUSH = _FC["PUSH"]
+POP1 = _FC["POP1"]
 
 
 def autonames():
@@ -281,7 +294,7 @@ def autonames():
     show.  printf is the walker's own (exempt).  Read from include/, as the
     reference reads it."""
     out = []
-    for h in "assert.h ctype.h stdlib.h string.h wchar.h stdio.h".split():
+    for h in _FC["AUTOINC_HEADERS"]:
         for ln in open(os.path.join(ROOT, "include", h), encoding="utf-8", errors="replace"):
             ln = ln.rstrip("\n")
             if len(ln) <= 7 or not ln.startswith("static") or "(" not in ln or "{" not in ln:
