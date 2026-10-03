@@ -50,3 +50,5 @@
 - Note: fresh labels are named by the owner's first dotted part only (parse/gen.py P.fresh), so fresh:P:CHECK:b equals
   P("CHECK.x.y").fresh("b"); manifests use that.
 - exec/rules.md still lists exec/enc/gen.py and arm.py rows (doc table, not edited here).
+- Verified 2026-10-03 ~17:55: graphhash 55 entries 0 bad; gates finite-template, decision-ledger (ops 9/12), exec-arm, exec-elf,
+  exec-pex86, exec-machx86, exec-armwin, exec-chain-1/2/3 (288 equal, 1 not-covered, 0 bad) all rc=0.
