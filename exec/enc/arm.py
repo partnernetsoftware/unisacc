@@ -36,10 +36,11 @@ def build(image=False, object_mode=False):
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
              'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27),
              '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31),'.zero':('rii',32),'winsave':('i',33),'winrest':('ir',34),'winstdh':('i',35),'winargs':('iii',36),'itoa':('iii',37)}
-    from armint import SPECS, install as install_int
-    specs.update(SPECS)
-    from armfp import SPECS as FP_SPECS, install as install_fp
-    specs.update(FP_SPECS)
+    from exec.facts.load import facts
+    import assemble
+    here = Path(__file__).parent
+    specs.update({r['op']: (r['shape'], r['cls']) for r in facts('enc-armint-specs')})
+    specs.update({r['op']: (r['shape'], r['cls']) for r in facts('enc-armfp-specs')})
     specs.update({k: ('rrr', 7) for k in ENCSPEC['arm64']['alu3']})
     specs.update({k: ('rrr', 8) for k in ENCSPEC['arm64']['invcond']})
     p = P('START')
@@ -122,12 +123,9 @@ def build(image=False, object_mode=False):
                                     branch=P(state).fresh('b'),
                                     next='IMM.%d' % (halfword + 1) if halfword < 3 else 'RET',
                                     shift=16 * halfword, movk=0xF2800000 | (halfword << 21)))
-    from armmem import install
-    install(E,word)
-    from armbranch import install as install_branch
-    install_branch(E,word,image)
-    install_int(E,word)
-    install_fp(E,word)
+    env = {'word': word(P('word.binding')).acts}
+    for stem in ('armmem', 'armbranch', 'armint', 'armfp'):
+        assemble.run(here/(stem+'-manifest.tsv'), E, P, dict(image=image), env)
     install_input(E,word)
     install_layout(E,word)
     from armitoa import install as install_itoa
@@ -137,7 +135,7 @@ def build(image=False, object_mode=False):
     install_hostbridge(E,'arm64',word)
     if image:
         from elfimage import install as install_elf
-        from armbranch import LABELS
+        LABELS = next(r['value'] for r in facts('enc-armbranch-bindings') if r['name'] == 'LABELS')
         install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True,image_format=image if image in ('macho','pe') else 'elf')
     if object_mode:
         from armlayout import SYM, PRESENT

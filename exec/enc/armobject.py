@@ -10,9 +10,9 @@ internal calls retain their section-relative BL field; only unresolved calls rel
 """
 from pathlib import Path
 from finite_rules import install as install_rules, install_template
-from armbranch import LABELS
 from objectplan import OBJ_RELOCS
 from exec.facts.load import facts
+LABELS = next(r['value'] for r in facts('enc-armbranch-bindings') if r['name'] == 'LABELS')
 CONST = {r['name']: r['value'] for r in facts('enc-armobject-bindings')}
 DATA_BASE, UNDEF_BASE = CONST['DATA_BASE'], CONST['UNDEF_BASE']
 

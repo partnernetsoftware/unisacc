@@ -55,6 +55,9 @@ def load_facts(stem):
     path = FACTS / (stem + ".tsv")
     if path not in _cache:
         d, cols, cur = {}, None, None
+        if _headerform(path):
+            _cache[path] = _header_facts(stem, path)
+            return _cache[path]
         for ln in path.read_text().split("\n"):
             if not ln or ln.startswith("#"):
                 continue
@@ -94,7 +97,8 @@ def _when(w, flags, facts):
 def _section(s, flags):
     if s in ("", "-"):
         return None
-    return re.sub(r"\{(\w+)\?([^}]*)\}", lambda m: m.group(2) if flags[m.group(1)] else "", s)
+    return re.sub(r"\{(!?)(\w+)\?([^}]*)\}",
+                  lambda m: m.group(3) if bool(flags[m.group(2)]) != bool(m.group(1)) else "", s)
 
 
 # ---- K2 round 2 slice D/E (lower data): generic additions ------------------
@@ -178,6 +182,10 @@ class Run:
             return _cell("str", re.sub(r"\{(\w+)\}", lambda m: str(facts[m.group(1)]), v[5:]))
         if v.startswith("@out:"):
             return _out(v[5:], facts)
+        if v.startswith("@fmt:"):
+            return _fmt(v[5:], facts)
+        if v.startswith("@acts:"):
+            return [tuple(a) for a in _path(facts, v[6:])]
         if v.startswith("$"):
             return self.env[v[1:]]
         if v.startswith("fresh:"):
@@ -231,19 +239,18 @@ class Run:
             return
         o = {} if opts in ("", "-") else json.loads(opts)
         if op == "foreach":
-            for x in _path(facts, o["over"]):
-                self.block(body, depth + 1, dict(extra, **{o.get("as", "it"): x}))
+            self.foreach(o, body, depth, extra, facts)
             return
         assert not body, "body under " + op
         g = self.E.g
-        sec = _section(section, self.flags)
+        sec = self.value(section, facts) if section.startswith("@") else _section(section, self.flags)
         kw = {}
         if "classes" in o:
             kw["classes"] = _path(facts, o["classes"])
         if "domain" in o:
             kw["domain"] = range(*o["domain"])
         res = None
-        bd = self.cells(bind, facts)
+        bd = self.bindings(o, bind, facts)
         for k in o.get("export", []):
             self.env[k] = bd[k]
         if op == "template":
@@ -291,3 +298,87 @@ class Run:
 def run(manifest, E, P, flags, env=None):
     """Assemble MANIFEST onto E.g; returns the (updated) environment."""
     return Run(E, P, dict(flags), dict(env or {})).run(manifest)
+
+
+# ---- K2 round 2, slice enc/arm: generic additions -------------------------
+# Header-form fact tables (exec/facts/load.py format: `# col<TAB>col` then rows)
+# load as {STEM: [row dicts]}; a `name value` table also gives {STEM!: {name: value}}.
+# foreach opts:  where {col: [section-format...]}  keeps rows whose col is listed;
+#   chain {"entry": KEY, "start": VALUE, "next": VALUE, "result": NAME}
+#   is the row-driven section loop: each row's body sees KEY bound to the
+#   previous row's `next` (first row: `start`) and `next` evaluated once per
+#   row; the last `next` (or `start` when no rows) is stored in env[result].
+# bind opts:  bindmap PATH  (a {name: value} fact merged first),
+#   freshrows [{"over": PATH, "key": FMT, "owner": FMT, "kind": FMT, "where": {col: FMT}}]
+#   allocate E.P(owner).fresh(kind) per row in row order ({i} = row index),
+#   accumulate NAME  (bindings persist across rows sharing NAME).
+# value forms: @fmt:FMT (str.format over facts), @acts:PATH (json list -> tuples).
+
+def _headerform(path):
+    for ln in path.read_text().split("\n"):
+        if ln and not ln.startswith("#"):
+            return not (ln.startswith("=") or ln.startswith("@") or ln.startswith("\t"))
+    return False
+
+
+def _header_facts(stem, path):
+    from exec.facts.load import facts as header_facts
+    rows = header_facts(stem)
+    d = {stem: rows}
+    if rows and isinstance(rows[0], dict) and set(rows[0]) == {"name", "value"}:
+        d[stem + "!"] = {r["name"]: r["value"] for r in rows}
+    return d
+
+
+def _fmt(f, facts):
+    return f.format(**{k: v for k, v in facts.items() if isinstance(k, str) and k.isidentifier()})
+
+
+def _foreach(self, o, body, depth, extra, facts):
+    rows = _path(facts, o["over"])
+    for col, allowed in o.get("where", {}).items():
+        allowed = [_section(a, self.flags) for a in allowed]
+        rows = [r for r in rows if r[col] in allowed]
+    ch = o.get("chain")
+    cur = ch and self.value(ch["start"], facts)
+    for x in rows:
+        ex = dict(extra, **{o.get("as", "it"): x})
+        if ch:
+            nxt = self.value(ch["next"], dict(facts, **ex))
+            ex.update({ch["entry"]: cur, "next": nxt})
+            cur = nxt
+        self.block(body, depth + 1, ex)
+    if ch:
+        self.env[ch["result"]] = cur
+
+
+def _bindings(self, o, bind, facts):
+    acc = o.get("accumulate")
+    out = dict(self.accum.setdefault(acc, {})) if acc else {}
+    if "bindmap" in o:
+        out.update(_path(facts, o["bindmap"]))
+    for spec in o.get("freshrows", []):
+        for i, r in enumerate(_path(facts, spec["over"])):
+            ctx = dict(facts, i=i, **r)
+            if all(str(r[c]) == _fmt(v, ctx) for c, v in spec.get("where", {}).items()):
+                out[_fmt(spec["key"], ctx)] = self.E.P(_fmt(spec["owner"], ctx)).fresh(_fmt(spec["kind"], ctx))
+    cells = self.cells(bind, facts)
+    if cells is None and not out and not acc and "bindmap" not in o:
+        return None
+    out.update(cells or {})
+    if acc:
+        self.accum[acc] = out
+    return out
+
+
+_init0 = Run.__init__
+
+
+def _init(self, *a, **k):
+    _init0(self, *a, **k)
+    self.accum = {}
+
+
+Run.__init__ = _init
+Run.foreach = _foreach
+Run.bindings = _bindings
