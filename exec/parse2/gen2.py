@@ -260,25 +260,10 @@ assert ENUM_CAPACITY > 0 and max([BOOL, DBL, FLT, FPB, FPV] + [code for _, code,
 assert FPS_FIRST < SBB and SBB + STRUCT_MAX < 4096
 
 
-def width_dispatch(name, tape, masks=False):
-    bindings = {key: name + suffix for key, suffix in
-                (("entry", ""), ("base", ".b"), ("double", ".d"), ("float", ".f"),
-                 ("f32", ".f32"), ("wide", ".8"), ("number", ".n"), ("bool", ".bool"), ("integer", ".integer"))}
-    bindings.update((key + "_test", P(bindings[key]).fresh("b")) for key in ("entry", "base", "double", "float", "number"))
-    bindings.update(DBL=DBL, FLT=FLT, BOOL=BOOL, SBB=SBB, entry=name + ".enumraw")
-    seq = {"wide": O(TYPE_TAPE[tape + "8"]), "float": O(TYPE_TAPE[tape + "n"] % TYINFO["f32"][0]),
-           "bool": O(TYPE_TAPE[tape + "n"] % 1 + (TYPE_TAPE["mask"] % 255 if masks else ""))}
-    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences=seq, section="prefix")
-    q = P(bindings["integer"])
-    for _, vb, size, uns, _ in (row for row in TYINT if row[1] != 8):
-        bindings.update(current=q.cur, hit=q.fresh("w"), next=q.fresh("x"), test=q.fresh("b"), code=vb)
-        seq["row"] = O(TYPE_TAPE[tape + "8"] if size == 8 else TYPE_TAPE[tape + "n"] % size +
-                       (TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if masks and uns else ""))
-        install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences=seq, section="row")
-        q = P(bindings["next"])
-    bindings["current"] = q.cur
-    if name == "LOADV": bindings["tail_test"] = q.fresh("b")
-    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, section="aggregate" if name == "LOADV" else "reject")
+def width_dispatch(name, tape=None, masks=False):
+    """Value width dispatch: exec/parse2/width-manifest.tsv (K2 sub-manifest; tape/masks are facts widthd.NAME)."""
+    import assemble
+    assemble.run(Path(__file__).resolve().parent / 'width-manifest.tsv', E, P, {}, dict(width_name=name, width_load=int(name == "LOADV")))
 
 
 def types():
