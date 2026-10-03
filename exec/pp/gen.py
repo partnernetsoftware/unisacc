@@ -373,7 +373,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     install_rules(g, HERE, "object-predefine")
     install_rules(g, HERE, "assembly", {"entry": "OOBJ.DEF", "resume": "OOBJ.RESUME",
         "next": "CLI.U", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_OBJECT")}, section="predefine")
-    from locations import IRNAME as _IRNAME
+    _IRNAME = {r["name"]: r["value"] for r in facts("pp-layout")}["IRNAME"]
     install_rules(g, HERE, "linedir", {"LDRAW": LDRAW, "LDUSER": LDUSER, "LDNUM": LDNUM, "LDNM": LDNM, "IRNAME": _IRNAME, "F_FN": F_FN, "F_BODY": F_BODY, "FSZ": FSZ, "MACB": MACB})
     if shared_predefines:
         # One network per output format/autoinc mode; target data is supplied
@@ -404,13 +404,15 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     body_layout["include_body"] = "INC.body"
     body_layout["IRPATH"] = IRPATH
     install_rules(g, HERE, "directive-body", body_layout)
-    from locations import IRNAME
+    IRNAME = _IRNAME
     install_rules(g, HERE, "include-location", {"IRNAME": IRNAME, "IRPATH": IRPATH})
 
     install_rules(g, HERE, "rescan", dict({name: globals()[name] for name in ['LDRAW', 'LDUSER', 'LDNUM', 'LDNM', 'ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP', 'IRLN', 'IRNL', 'SPLB']}, IRNAME=IRNAME))   # IRLN/IRNL/SPLB/IRNAME: __LINE__/__FILE__ (N17a/b)
     if locations:
-        from locations import install
-        install(g, SPLB, IRLN, IRNL)
+        import assemble   # diagnostic envelope: locations-manifest.tsv (K2 trace translation)
+        from types import SimpleNamespace
+        assemble.run(Path(HERE) / "locations-manifest.tsv", SimpleNamespace(g=g), None, {},
+                     dict(spl=SPLB, irln=IRLN, irnl=IRNL))
     else:
         install_rules(g, HERE, "assembly", section="accept")
     build_xe(g)
