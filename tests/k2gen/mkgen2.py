@@ -153,4 +153,21 @@ for ns in ("function", "global", "local"):
             for owner, m, rules in secs:
                 if owner == sec and m in ("common", mode):
                     cc(rules, extra, {}, gate)
+# ordinary control: per section fresh lets + control calls; caller values (update_*, resume) arrive in env
+_ofr, _osec = _tab("ordinary-fresh.tsv"), _tab("ordinary-sections.tsv")
+_otext = {n: "@text:" + v for n, v in _tab("ordinary-text.tsv")}
+_UPD = ["word_state", "update_entry", "update_deref", "update_post"]
+_OEX = {"update-address": _UPD, "update-result": _UPD + ["resume"], "down": ["resume"]}
+for sec in dict.fromkeys(r[0] for r in _ofr + _osec):
+    for w, mode in (("&!warnings", "plain"), ("&warnings", "warnings")):
+        gate = "fact:seg_ord-%s%s" % (sec, w)
+        extra = {n: "ordconst." + n for n in ("DBL", "FLT", "GMARK", "bottom")}
+        extra.update({k: "$" + k for k in _OEX.get(sec, [])})
+        for part, m, owner, kind, key in _ofr:
+            if part == sec and m in ("common", mode):
+                L.append("let\t-\t-\t%s\t-\t-\t-\t%s=fresh:U:%s:%s\t-" % (gate, key, owner, kind))
+                extra[key] = "$" + key
+        for owner, m, rules in _osec:
+            if owner == sec and m in ("common", mode):
+                cc(rules, extra, _otext, gate)
 Path(__file__).resolve().parents[2].joinpath("exec/parse2/gen2-manifest.tsv").write_text("\n".join(L) + "\n")

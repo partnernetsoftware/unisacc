@@ -362,24 +362,15 @@ def structured_control(section, warnings, extra=None, sequence_bindings=None, ex
                       extra=dict(extra or {}), seqb=dict(sequence_bindings or {})))
 
 
-def segment(name, warnings=False):
+def segment(name, warnings=False, env=None):
     """One transitional segment of exec/parse2/gen2-manifest.tsv (rows gated by env fact seg_NAME)."""
     import assemble
-    return assemble.run(Path(__file__).resolve().parent / 'gen2-manifest.tsv', E, P, dict(warnings=warnings), {"seg_" + name: 1})
+    return assemble.run(Path(__file__).resolve().parent / 'gen2-manifest.tsv', E, P, dict(warnings=warnings), dict(env or {}, **{"seg_" + name: 1}))
 
 
 def ordinary_control(section, warnings, extra=None):
-    bindings=dict(DBL=DBL, FLT=FLT, GMARK=E.GMARK, bottom="C%d" % LEVELS[0])
-    bindings.update(extra or {})
-    p=P("ordinary.bindings."+section+bindings.get("word_state", ""))
-    for part, mode, owner, kind, key in tape_rows("ordinary-fresh.tsv"):
-        if part == section and mode in ("common", "warnings" if warnings else "plain"):
-            p.cur=owner;bindings[key]=p.fresh(kind)
-    sequences={name:O(json.loads(value)) for name,value in tape_rows("ordinary-text.tsv")}
-    for part, mode, rules in tape_rows("ordinary-sections.tsv"):
-        if part == section and mode in ("common", "warnings" if warnings else "plain"):
-            structured_control(rules, False, bindings, sequences)
-    return bindings
+    """Ordinary control: gen2-manifest segment ord-SECTION (fresh lets, control calls); extra values arrive as env."""
+    return segment("ord-" + section, warnings, extra)
 
 
 def namespace_constants():
