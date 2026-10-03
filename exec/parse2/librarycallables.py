@@ -12,7 +12,6 @@ def install(E,P,b,start):
  from libraryexports import RETURNRANK, PARAMRANK
  from load import facts as _vrf; LCSITERANK={r['name']:r['value'] for r in _vrf('valueranks') if r['kind']=='bank'}['LCSITERANK']   # exec/facts/valueranks.tsv
  import assemble
- u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
  _li=assemble.load_facts('libraryimports')['libraryimports!']  # exec/facts/libraryimports.tsv
  BYNAME,ADDRESS,FORMAT,SUPPORTED,TYPEDSIG,PLAN=(_li[k] for k in ('BYNAME','ADDRESS','FORMAT','SUPPORTED','TYPEDSIG','PLAN'))
  REQUESTS=assemble.load_facts('libraryvariadic')['REQUESTS']  # exec/facts/libraryvariadic.tsv
@@ -60,9 +59,7 @@ def install(E,P,b,start):
  def move(old,new):tmpl('move',m=[dict(old=old,new=new)])
  def hook(name,proc):move(name,'LC.original.'+name);tmpl('hookcall',h=[dict(name=name,proc=proc)])
  def alias(new,src):tmpl('copy',c=[dict(new=new,src=src)])
- u64(E,'LC.resource',b'\0library/callables','lc_enabled','lc_present','LX.fail')
- u64(E,'LC.makeaddr',b'\0library/callablemake','lc_make','lc_makepresent','LX.fail')
- u64(E,'LC.calladdr',b'\0library/callablecall','lc_call','lc_callpresent','LX.fail')
+ assemble.run(Path(__file__).resolve().parent/'libraryresources-manifest.tsv',E,E.P,dict(lx=0,lc=1,lmd=0),{})   # libraryresources-manifest.tsv
  section('s1')
  # Caller has proved MG.compatible for this final fixed normalized binding.
  # This helper touches only lc_* scratch and preserves every LI emission reg.

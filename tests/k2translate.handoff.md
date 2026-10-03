@@ -84,6 +84,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   facts: keys [*], reject = global_reject5). Next: libraryexports u64 -> ../modelinput rows; the remaining
   structured_control sites; E.results becomes manifest env once gen2 build is one manifest.
 
+- Round 3: the six u64 lambdas (libraryexports 2, librarycallables 3, librarymodule 1) -> call ../modelinput rows in
+  exec/parse2/libraryresources-manifest.tsv (flags lx|lc|lmd), keys in exec/facts/k2-libraryresources.tsv.
+  Next for librarymodule HEADER: the header sits in control-result.tsv startup-run row
+  $startup_index * NEXT [JUMP x0, @startup_header, PUSH startup_next]; export startup_index/startup_next
+  (control-manifest needs a gated export row for startup-run) and put k=*, next=NEXT, before=[JUMP x0] in facts.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement

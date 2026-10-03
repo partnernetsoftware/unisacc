@@ -11,7 +11,6 @@ globals().update((_r['name'],_t(_r['value'])) for _r in _facts('libraryexports')
 
 def install(E,P,b,start,integers):
     import assemble
-    u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
     from finite_rules import install as rules, install_template
     import librarycallables, types
     layoutfacts=types.SimpleNamespace(**assemble.load_facts('layoutfacts')['layoutfacts!'])  # exec/facts/layoutfacts.tsv
@@ -21,8 +20,7 @@ def install(E,P,b,start,integers):
     for owner in (modelsignature,modelgraphequality,libraryimports,librarycallables,layoutfacts):
         assert not set(RANK_BANKS).intersection(v for k,v in vars(owner).items() if type(v) is int and v>=1<<40), owner.__name__
     g=E.g
-    u64(E,'LX.resource',b'\0library/symbols','lx_flag','lx_present','LX.fail')
-    u64(E,'LX.versionresource',b'\0library/signatureversion','lx_wireversion','lx_versionpresent','LX.fail')
+    assemble.run(Path(__file__).resolve().parent/'libraryresources-manifest.tsv',E,E.P,dict(lx=1,lc=0,lmd=0),{})   # libraryresources-manifest.tsv
     # Stage control: libraryexports-result.tsv sections head/record/signature/storage/owner/
     # begin/ellipsis/capture/rankreturn/union/envelope/argument/call. Rewrites of
     # existing states (hooks, FN linkage, FN.pfpstacked, CL.namedquery, LX.startok,

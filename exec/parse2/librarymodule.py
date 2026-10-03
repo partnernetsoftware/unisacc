@@ -4,7 +4,6 @@ soft-stack ABI, called once per mapping by the host's declared adapter.
 """
 from pathlib import Path
 import assemble
-u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
 import json
 from finite_rules import install as rules, install_template
 
@@ -13,7 +12,7 @@ def _template(E,name,facts={}):
 
 def install(E,P,start):
     g=E.g
-    u64(E,'LMD.read',b'\0library/module','library_module','lmd_present','LX.fail')
+    assemble.run(Path(__file__).resolve().parent/'libraryresources-manifest.tsv',E,E.P,dict(lx=0,lc=0,lmd=1),{})   # libraryresources-manifest.tsv
     rules(g,Path(__file__).parent,'librarymodule',section='read',bindings=dict(start=start))
     _template(E,'start')
     # Split only the declared startup output, preserving positioning/continuation.
