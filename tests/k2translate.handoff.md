@@ -391,3 +391,6 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   (b) more: update_control step-entry/taxonomy/step0/step1, shape pointee-width/sizeof-type/sizeof-object/dereference/
   value-load, strwalk SZ.l*/CE.l* -> call rows at the end of segments upd-id/upd-compound/upd-type/sizeof0/1/2/
   ord-deref/upd-prefix (insert after a segment's trailing `.` body rows, else "body under call"). sha SAME x3.
+  Done (1) after rebase on origin/main (cdx dec08701): gen2 runs exec/parse2/strings-initializer-manifest.tsv
+  (env TK_STR) in place of strings.initializer; initializer() removed from strings.py (walk/rules stay for cdx).
+  sha SAME default/--errors/--warnings --errors.

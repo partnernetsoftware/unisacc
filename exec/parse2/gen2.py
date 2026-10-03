@@ -356,8 +356,7 @@ def build(locations=False, warnings=False, errors=False):
     segment("startup-marker")
     import assemble
     assemble.run(Path(__file__).parent / "strings-token-span-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))
-    from strings import initializer as string_initializer
-    string_initializer(E, P, ESC)
+    assemble.run(Path(__file__).parent / "strings-initializer-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))   # K2: strings initializer
     segment("numeric")
     types()
     segment("typing")

@@ -21,10 +21,7 @@ def token_span(E, P):
     rules(E, P, 'token_span')
 
 
-def initializer(E, P, esc):
-    rules(E, P, 'initializer_head')
-    walk(E, P, esc, 'SI.walk', 'SI.byte', 'SI.end')
-    rules(E, P, 'initializer_tail')
+# initializer: exec/parse2/strings-initializer-manifest.tsv (gen2 runs it).
 
 
 def walk(E, P, esc, pre, body, done):
