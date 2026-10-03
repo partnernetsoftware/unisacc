@@ -579,3 +579,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Next blocks, in build() order: early, constexpr, statics, startup-run, global0..5 (their env publish needs merge),
   callcontrol-begin/truth/finish, then the locations/warnings/errors tail; _libraryexports + librarymodule stay a
   marked transitional Python call (blocked on cdx).
+- Round 45 (step (e), second block): gen-manifest now runs early, constexpr (call constexpr, binds
+  enum_values/enum_defined from facts k2-gen2 buildconst.ENV/END_), statics, startup-run (result startup), global0/1/3/5
+  (result globalN) ahead of fnscope..starlookup; early/constexpr/statics/startup-run calls set flags
+  locations/warnings/errors false (they ran with warnings=False/no flags before). gen2.build sets lm_header/lm_errors
+  before the run and publishes env[startup|globalN] lm_* after it (stopgap). export.py rerun, facts committed.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Next: callcontrol-begin, truth-conversions, callcontrol-finish into gen-manifest; then the locations/warnings/errors
+  tail; librarymodule after truth is cdx.

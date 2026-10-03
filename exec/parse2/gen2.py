@@ -316,18 +316,10 @@ def build(locations=False, warnings=False, errors=False):
     # decoder for lookahead; ordinary qualifier recursion must still pass
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
-    segment("early")   # startup-marker, numeric, types, typing (gen2-manifest block)
-    assemble.run(Path(__file__).resolve().parent / 'constexpr-manifest.tsv', E, P, {}, dict(enum_values=C["ENV"], enum_defined=C["END_"]))
-    segment("statics")   # statics-init, staticauto, startup-guard (gen2-manifest block)
-    env = segment("startup-run")   # startup data from facts k2-gen2 (tyrows, syscalls, autonames)
-    _publish(env)   # lm_hstate, lm_hnext (control-manifest startup)
-    E.results.update(lm_header=O(E.HEADER), lm_errors=errors)
-    global_control("global0", warnings)
-    # enum is a type specifier in both declarations and typedefs.
-    global_control("global1", warnings)   # + call shape typedef-shape (gen2-manifest)
-    global_control("global3", warnings)   # + call shape global-type (gen2-manifest)
-    global_control("global5", warnings)   # + call shape global-binding (gen2-manifest)
-    assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})   # fnscope..starlookup
+    E.__dict__.setdefault("results", {}).update(lm_header=O(E.HEADER), lm_errors=errors)
+    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})   # early..starlookup
+    for name in ("startup", "global0", "global1", "global3", "global5"):
+        _publish(env[name])   # lm_hstate/lm_hnext; global3 lm_main/lm_initret/lm_tailret
     import assemble
     call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
                             dict(warnings=warnings), dict(warnings=warnings))
