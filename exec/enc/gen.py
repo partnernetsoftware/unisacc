@@ -45,7 +45,7 @@ from unisa.catalog import ENCSPEC   # noqa: E402  (generation time only)
 from unisa.emit_x86 import NUM      # noqa: E402
 from exec.facts.load import facts as _facts  # noqa: E402
 META_KEYS = tuple(_facts("enc-tins-meta"))
-from fp import FP_IDS, install as install_fp  # local delta generator, not an encoder oracle
+FP_IDS = {r["op"]: r["id"] for r in _facts("enc-fp-ops")}
 
 X86 = ENCSPEC["x86_64"]
 DIGIT = list(range(48, 58))
@@ -223,7 +223,8 @@ def build(image=False, object_mode=False):
     emit_rules('pre')
     emit_rules('division')
     emit_rules('post')
-    install_fp(E, byte)
+    import assemble
+    assemble.run(os.path.join(HERE, 'fp-manifest.tsv'), E, P, {}, {})
     import assemble
     assemble.run(os.path.join(HERE, 'address-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ, OFF=OFF, LABD=LABD))
     from hostbridge import install as install_hostbridge
