@@ -834,13 +834,14 @@ def build(locations=False, warnings=False, errors=False):
     update_control("fnvalue")
     lookup_entry=update_control("lookup-warn")["f112"] if warnings else "LOOKUP"
     update_control("lookup-body",dict(lookup_entry=lookup_entry))
-    from callcontrol import install as call_control
-    call_facts = dict(LOC=LOC, SBB=SBB, SSZ=SSZ, FPS_FN=FPS_FN, PDB=PDB, DBL=DBL, FLT=FLT, BOOL=BOOL, TIX=TIX)
+    import assemble
+    call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
+                            dict(warnings=warnings), dict(warnings=warnings))
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
-    call_bindings = call_control(E, P, warnings, TEMPL, addr, call_facts, SYSCALLS, fpu, "begin")
     from truth import conversions as scalar_conversions
     scalar_conversions(E, P, DBL, FLT, UNS + 8, fpu)
-    call_control(E, P, warnings, TEMPL, addr, call_facts, SYSCALLS, fpu, "finish", call_bindings)
+    assemble.run(Path(__file__).resolve().parent / 'callcontrol-finish-manifest.tsv', E, P,
+                 dict(warnings=warnings), dict(warnings=warnings, cb=call_env['cb']))
     import assemble
     _flags = dict(locations=locations, warnings=warnings, errors=errors)
     assemble.run(Path(__file__).parent / 'offsetofcontrol-manifest.tsv', E, P, _flags,

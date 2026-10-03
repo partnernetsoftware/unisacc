@@ -51,6 +51,14 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   `$$addrenv:done`), deleted. Next: callcontrol (seed3 landed; begin/finish phases share b -> one accumulate across
   two manifests needs env export of b, or one manifest with truth.conversions between as rows), then gen2's ~40
   structured_control sites -> call control.
+- DONE 18:15: callcontrol.py -> callcontrol-begin/-finish-manifest.tsv (.k2tmp/mkcall.py; facts k2-call.tsv),
+  deleted. truth.conversions stays between them in gen2 (truth is cdx's); begin keeps its accumulated bindings in
+  env `cb` (opts keep), finish starts from bindmap [cb, consts]. assemble generic: let builds dicts/lists
+  element-wise, freshrows lookup `$NAME` (strict), opts cellsfirst (fresh owners may name the row's cells), keep;
+  seqlist renamed from list-valued seqfact and the row's seq cells now win over seqlist facts (sticky texts
+  sj_text/text12/text35 are cells). Scope (coordinator): cdx owns constexpr/truth/strings/tokenlocations/
+  unitlocations/unresolved/membercontrol; this slice keeps only the ~40 gen2 structured_control sites -> call
+  control rows, then gen2 driver itself.
 - (old plan) Next for structured_control: its bindings are ~60 gen2 constants + extra; plan = k2-control facts (=NAME int per
   constant) + control-manifest.tsv with env section/extra keys; fresh via control-fresh.tsv rows (owner=prefix or env
   label -> needs `fresh:U:{x}` per row, or the `tape:` fresh with interp); stack sequences via @stack on a P holder

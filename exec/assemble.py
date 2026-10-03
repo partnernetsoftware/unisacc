@@ -251,8 +251,11 @@ class Run:
                 self.done = True
                 return
             seen.add(o["once"])
+        def lv(v):   # let: lists and dicts are built element-wise; non-strings are literal
+            return ([lv(x) for x in v] if isinstance(v, list) else {a: lv(x) for a, x in v.items()}
+                    if isinstance(v, dict) else self.value(v, facts) if isinstance(v, str) else v)
         for k, v in o.get("let", {}).items():
-            facts[k] = [self.value(x, facts) for x in v] if isinstance(v, list) else self.value(v, facts)
+            facts[k] = lv(v)
         if stem.startswith("@"):
             stem = self.value(stem, facts)
         if op == "foreach":
@@ -290,10 +293,14 @@ class Run:
             sq = dict(tr, **(sq or {}))
         if isinstance(o.get("seqfact"), str):   # {name: [[act...]...]} fact merged into the row's sequences
             sq = dict({k: [tuple(a) for a in v] for k, v in _path(facts, o["seqfact"]).items()}, **(sq or {}))
-        for sf in o.get("seqlist", []):
-            # seqlist: fact dicts {name: acts} merged in order over the sequences, acts deep-tupled
+        if "seqlist" in o:
+            # seqlist: fact dicts {name: acts} merged left to right (acts deep-tupled); the row's own
+            # seq cells win over them
             t = lambda x: tuple(map(t, x)) if isinstance(x, list) else x
-            sq = dict(sq or {}, **{k: [t(a) for a in v] for k, v in _path(facts, sf).items()})
+            base = {}
+            for sf in o["seqlist"]:
+                base.update({k: [t(a) for a in v] for k, v in _path(facts, sf).items()})
+            sq = dict(base, **(sq or {}))
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
         if "seqenv" in o:   # env sequences (stored by an earlier let) by a fact list of names
@@ -496,6 +503,9 @@ def _bindings(self, o, bind, facts):
             if part and f[kp] != part:
                 continue
             out[f[kk]] = self.E.P.fresh(self.holder(f[ko]), f[col["kind"]])
+    if o.get("cellsfirst"):
+        out.update(self.cells(bind, facts) or {})
+        bind = "-"
     for spec in ([] if isinstance(o.get("freshrows"), str) else o.get("freshrows", [])):
         # "file": a header-line TSV next to the manifest instead of "over" (its "where" formats over
         # the facts only); "lookup": an owner naming a binding so far (or a fact) becomes its value;
@@ -511,8 +521,8 @@ def _bindings(self, o, bind, facts):
             wctx = dict(facts, i=i) if "file" in spec else ctx
             if all(str(r[c]) == _fmt(v, wctx) for c, v in spec.get("where", {}).items()):
                 owner = _fmt(spec["owner"], ctx)
-                if spec.get("lookup"):
-                    owner = out.get(owner, owner)
+                if spec.get("lookup"):   # `$NAME` must be bound; a bare name falls back to itself
+                    owner = out[owner[1:]] if owner.startswith("$") else out.get(owner, owner)
                 kind = _fmt(spec["kind"], ctx)
                 out[_fmt(spec["key"], ctx)] = (self.E.P.fresh(self.holder(owner), kind) if spec.get("holder")
                                                else self.E.P(owner).fresh(kind))
@@ -524,6 +534,8 @@ def _bindings(self, o, bind, facts):
         out.update({k: self.value(v, facts) for k, v in o["bindmap"].items()})
     if acc:
         self.accum[acc] = out
+        if "keep" in o:   # keep NAME: the accumulated bindings also land in env[NAME] (a later manifest's bindmap)
+            self.env[o["keep"]] = dict(out)
     return out
 
 
