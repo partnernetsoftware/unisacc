@@ -18,7 +18,7 @@
       order or never bound, and > FOLD_MAX rows after folding.
 The caller runs assemble.run(manifest, E, P, flags, env=<install str/int kwargs>).
 """
-import difflib, importlib.abc, importlib.util, inspect, itertools, json, os, runpy, sys
+import difflib, importlib.abc, importlib.util, inspect, itertools, json, os, re, runpy, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -355,6 +355,7 @@ class Emitter:
                         return {k: par(x) for k, x in v.items()}
                     return v
                 tfd = par(d["facts"])
+                _partial(self.here / (stemcell + "-template.tsv"), d.get("section"), tfd)
                 self.p4(tfd, "template facts")
                 tf = self.tfact(tfd)
             if op == "template" and d.get("fresh"):
@@ -412,6 +413,26 @@ class Emitter:
             else:
                 raise Refuse("install return value %r not traceable" % (ret,))
         return out
+
+
+def _partial(path, section, tfd):
+    # a `$k2L/$k2F` parameter replaces a whole cell only: `LV.hook.{h.name}` would
+    # become `LV.hook.$k2L_0` (a new state), so such a template must be rewritten by hand
+    def val(ref):
+        v = tfd
+        for k in ref.split("."):
+            v = v[0] if isinstance(v, list) and v else v
+            v = v.get(k) if isinstance(v, dict) else None
+        return v
+    for ln in path.read_text().split("\n") if path.exists() else ():
+        f = ln.split("\t")
+        if ln.startswith("#") or f[0] != section:
+            continue
+        for c in f[1:]:
+            for ref in re.findall(r"\{([\w.]+)\}", c):
+                v = val(ref)
+                if isinstance(v, str) and v.startswith("$k2") and c != "{%s}" % ref:
+                    raise Refuse("template parameter in partial use %r (%s)" % (c, path.name))
 
 
 def _cube(modes, allmodes, flags):
