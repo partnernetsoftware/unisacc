@@ -24,7 +24,7 @@ if [ "$PART" != frame ]; then
     b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
 fi
 if { [ "$KIND" = all ] || [ "$KIND" = cc ]; } && { [ "$PART" = all ] || [ "$PART" = frame ]; }; then
-    b python3 exec/parse2/units.py "$T/units.json"
+    b python3 exec/build/gen.py parse2/units "$T/units.json"
     b python3 exec/c/tbl.py "$T/units.json" "$T/units.tbl"
     b python3 exec/c/net.py "$T/units.tbl" "$T/units.net"
     b "$T/run" --check-net "$T/units.tbl" "$T/units.net"
