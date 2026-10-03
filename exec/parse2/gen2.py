@@ -915,8 +915,9 @@ def build(locations=False, warnings=False, errors=False):
     start = unitmode_install(E, P, start, DEFS)
     from objectdefinitions import install as objectdefinitions_install
     objectdefinitions_install(E, P)
-    from structreturnexpr import install as structreturnexpr_install
-    structreturnexpr_install(E, P, errors)
+    import assemble
+    assemble.run(Path(__file__).parent / 'structreturnexpr-manifest.tsv', E, P,
+                 dict(locations=locations, warnings=warnings, errors=errors))
     from forward import install as forward_install
     start = forward_install(E, P, start, FPS_FN, DEFS)
     # The compound-literal output splice walks a saved byte blob.  Its
