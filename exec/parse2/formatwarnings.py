@@ -24,9 +24,8 @@ def install(E,P,DBL,FLT,FPB,SBB):
     tokens=dict(E.TK,string=E.TK_STR)
     classes={name:[tokens[token]] for name,token in rows('tokens')}
     install_rules(E.g,root,'formatwarnings',bindings=bindings,sequences=sequences,classes=classes,section="main")
-    from finite_rules import load as load_rules
-    for name,message in rows('messages'):
-        rules=load_rules(root/'formatwarnings-message-rule.tsv',
-                         {'message':[('SBOUT',byte) for byte in json.loads(message).encode()]},bindings={'entry':'WF.msg.'+name})
-        for state,row in rules.items():
-            for key,(target,acts) in row.items():E.g.on(state,[key],target,acts,'r')
+    from finite_rules import install_template
+    messages=rows('messages')
+    for name,message in messages:
+        sequences['message.'+name]=[('SBOUT',byte) for byte in json.loads(message).encode()]
+    install_template(E.g,root,'formatwarnings',{'m':[name for name,_ in messages]},None,sequences=sequences,section='message')
