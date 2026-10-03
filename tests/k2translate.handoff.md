@@ -90,6 +90,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   $startup_index * NEXT [JUMP x0, @startup_header, PUSH startup_next]; export startup_index/startup_next
   (control-manifest needs a gated export row for startup-run) and put k=*, next=NEXT, before=[JUMP x0] in facts.
 
+- Round 4 (reverted, WIP kept in .k2tmp/round4-header.diff + k2-librarymodule.tsv): exporting startup_index as the
+  header state fails in 8/10 modes with "redirect of absent edge START.r646 *": by the time librarymodule runs, the
+  header-bearing edge is no longer on the startup_index label (a later stage moved/re-keyed it), and in 2 modes it
+  passed. Next: print the old scan hits per mode to learn which state/key holds the header, then export that
+  producer instead. lm_main facts (keys [*], next DEAD, reject "not covered: no main") are in the same diff.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
