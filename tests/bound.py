@@ -14,17 +14,25 @@ def stop(process, code):
         except ProcessLookupError:
             pass
     send(process.pid, signal.SIGSTOP)
-    while True:
-        rows = subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid='], text=True).splitlines()
-        added = False
-        for row in rows:
-            pid, parent = map(int, row.split())
-            if parent in owned and pid not in owned:
-                owned.add(pid)
-                send(pid, signal.SIGSTOP)
-                added = True
-        if not added:
-            break
+    try:
+        while True:
+            rows = subprocess.check_output(
+                ['/bin/ps', '-axo', 'pid=,ppid='], text=True,
+                stderr=subprocess.DEVNULL,
+            ).splitlines()
+            added = False
+            for row in rows:
+                pid, parent = map(int, row.split())
+                if parent in owned and pid not in owned:
+                    owned.add(pid)
+                    send(pid, signal.SIGSTOP)
+                    added = True
+            if not added:
+                break
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        # A restricted host may deny ps. The child still owns a new process
+        # group, so kill that group even when descendant enumeration fails.
+        pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
