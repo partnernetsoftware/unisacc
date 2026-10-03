@@ -3,58 +3,8 @@ The pfconv truth table selects a routine. These templates preserve the
 reference fallback's ignored widths/precision and zero return, not libc's
 full printf contract. Declared printf still uses the ordinary call path.
 """
-KINDS=['int','u32','hex','HEX','oct','chr','str']
-SLEN='''__slen:
-  mov r2, r0
-  imm r1, 0
-__slen_top:
-  add64 r4, r2, r1
-  .ld r5, [r4+0], 1
-  jumpz r5, __slen_end
-  imm r5, 1
-  add64 r1, r1, r5
-  jump __slen_top
-__slen_end:
-  mov r0, r1
-  ret
-'''
-ITOAB='''.bss __xbuf 24
-__itoab:
-  .frame 16
-  store64 [r7+0], r1
-  store64 [r7+8], r2
-  mov r2, r0
-  .lea r1, __xbuf
-  imm r3, 24
-  add64 r1, r1, r3
-  imm r4, 0
-itoab_loop:
-  load64 r3, [r7+0]
-  .umod r5, r2, r3
-  .udiv r2, r2, r3
-  imm r3, 10
-  slt64 r0, r5, r3
-  jumpz r0, itoab_alpha
-  imm r3, 48
-  jump itoab_add
-itoab_alpha:
-  load64 r3, [r7+8]
-  imm r0, 10
-  sub64 r5, r5, r0
-itoab_add:
-  add64 r5, r5, r3
-  imm r3, 1
-  sub64 r1, r1, r3
-  .st [r1+0], r5, 1
-  add64 r4, r4, r3
-  jumpz r2, itoab_done
-  jump itoab_loop
-itoab_done:
-  .frame -16
-  mov r0, r1
-  mov r1, r4
-  ret
-'''
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+globals().update((r['name'], r['value']) for r in facts('printfallback'))
 def install(E, P):
     import json
     from pathlib import Path

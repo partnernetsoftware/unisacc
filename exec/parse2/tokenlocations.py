@@ -3,14 +3,8 @@ Parsing stays on the original token buffer, so rewinds and bounded input
 views keep their existing offsets. source_pos is a preprocessed-text offset;
 TOKEN_POS preserves it for a saved token-buffer position after later reads.
 """
-TOKEN_POS=34<<40
-SPLICES=35<<40
-INCLUDE_LINE=36<<40
-INCLUDE_LINES=37<<40
-INCLUDE_NAME=38<<40
-UNIT_MAP=48<<40
-MAP_STRIDE=1<<26
-MAP_FIELDS=('source','textlen','forced','auto','nsplice','ninclude','filename')
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
+globals().update((r['name'], tuple(r['value']) if type(r['value']) is list else r['value']) for r in facts('tokenlocations'))
 
 
 import json

@@ -6,6 +6,7 @@ without adding five separate function-pointer/declarator cases.
 """
 from pathlib import Path
 from finite_rules import install as install_rules, install_template
+import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent.parent / 'facts')); from load import facts
 
 
 def install(E, ordinal_table, locations=False):
@@ -36,13 +37,14 @@ def install(E, ordinal_table, locations=False):
         peek = "PF.locraw"
     TK = E.TK
     lp, rp, ident = TK["("], TK[")"], E.TK_ID
-    followers = tuple(TK[x] for x in ("(", "=", ";", ",", "[", ")"))
+    fx = {r['name']: r['value'] for r in facts('parenfold')}
+    followers = tuple(TK[x] for x in fx['followers'])
     # TYPEV's lexical class is one token in the reference.  The typed stream
     # spells each type word separately; qualifiers have already been skipped
     # by the shared E3 reader.
     types = {value for word, value in TK.items() if word == "type" or word.startswith("type=")}
     previous = types | {TK["*"]}
-    g.labels.update(("PF.got", "PF.id", "PF.close", "PF.follow", "PF.prevadj", "PF.prevtypedef"))
+    g.labels.update(tuple(fx['labels']))
     # The transition choices live in parenfold-result.tsv.  Python supplies
     # only the current token codes and the reader selected by the location mode.
     bindings = dict(peek=peek, ordinal_table=ordinal_table, TDN=E.TDN,
