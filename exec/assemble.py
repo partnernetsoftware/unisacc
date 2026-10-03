@@ -290,8 +290,8 @@ class Run:
             sq = dict(tr, **(sq or {}))
         if isinstance(o.get("seqfact"), str):   # {name: [[act...]...]} fact merged into the row's sequences
             sq = dict({k: [tuple(a) for a in v] for k, v in _path(facts, o["seqfact"]).items()}, **(sq or {}))
-        for sf in o.get("seqfact", []) if isinstance(o.get("seqfact"), list) else []:
-            # a list: fact dicts {name: acts} merged in order over the sequences, acts deep-tupled
+        for sf in o.get("seqlist", []):
+            # seqlist: fact dicts {name: acts} merged in order over the sequences, acts deep-tupled
             t = lambda x: tuple(map(t, x)) if isinstance(x, list) else x
             sq = dict(sq or {}, **{k: [t(a) for a in v] for k, v in _path(facts, sf).items()})
         if "mapseq" in o:
