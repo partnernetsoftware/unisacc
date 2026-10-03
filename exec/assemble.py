@@ -188,7 +188,7 @@ class Run:
             return getattr(h, m)(*slots.split("+")).acts
         if v.startswith("$$"):
             d, _, k = v[2:].partition(":")
-            return self.env[d][_fmt(k, facts) if "{" in k else k]
+            return self.env[d][_fmt(k, facts) if re.search(r"\{\w[\w\[\]]*\}", k) else k]
         if v.startswith("$"):
             return self.env[v[1:]]
         if v.startswith("@textf:"):
