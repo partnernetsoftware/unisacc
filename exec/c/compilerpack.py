@@ -149,8 +149,8 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         for target in sorted(targets & {'lnx/x86_64','lnx/arm64'}):
             arch=target.split('/')[1]
             object_models[target]={
-                'lower':built_model(td,'object-lower-'+arch,here.parent/'lower/gen.py',
-                                    ['--full','--object']+(['--arm64'] if arch=='arm64' else [])),
+                'lower':built_model(td,'object-lower-'+arch,here.parent/'build/gen.py',
+                                    ['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])),
                 'elf':built_model(td,'object-enc-'+arch,here.parent/'enc'/('arm.py' if arch=='arm64' else 'gen.py'),['--object'])}
         for i,row in enumerate(rows):
             cols=row.split('\t')

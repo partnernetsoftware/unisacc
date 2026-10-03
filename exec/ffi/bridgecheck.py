@@ -161,7 +161,7 @@ def main():
         oracle=_oracle('built')
         for arch,tag in [('arm64','arm'),('x86_64','x86')]:
             enc=model(d,'enc-'+tag,'exec/enc/'+('arm.py' if arch=='arm64' else 'gen.py'))
-            low=model(d,'lower-'+tag,'exec/lower/gen.py',['--full','--osx']+(['--arm64'] if arch=='arm64' else []))
+            low=model(d,'lower-'+tag,'exec/build/gen.py',['lower','--full','--osx']+(['--arm64'] if arch=='arm64' else []))
             encodings(d,runner,arch,enc);lowering(d,runner,arch,low,oracle);native_call(d,runner,arch,enc)
         complete(d,ua,oracle)
     print(f'bridgecheck PASS: both ISA table/net and actual native calls; {time.monotonic()-(DEADLINE-53):.2f}s',flush=True)

@@ -4,10 +4,10 @@ The data-only mode decodes raw E3/E4 `.str` and `.bss` directives, performs
 zero-last layout and emits a data header followed by unchanged tape code.
 
 ```
-python3 exec/lower/gen.py data.json
-python3 exec/lower/gen.py arm-data.json --arm64
-python3 exec/lower/gen.py full.json --full
-python3 exec/lower/gen.py darwin-arm.json --full --arm64 --osx
+python3 exec/build/gen.py lower data.json
+python3 exec/build/gen.py lower arm-data.json --arm64
+python3 exec/build/gen.py lower full.json --full
+python3 exec/build/gen.py lower darwin-arm.json --full --arm64 --osx
 ```
 
 `--full` also lowers Linux x86_64 instructions: register mapping, entry setup,

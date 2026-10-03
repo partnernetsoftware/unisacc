@@ -10,7 +10,7 @@ b() { "$_BOUND" 60 "$@"; }
 ARCH=${1:-arm64}
 case $ARCH in arm64) FLAG=--arm64; ENCODER=arm.py;; x86_64) FLAG=; ENCODER=gen.py;; *) exit 2;; esac
 b cc -O2 exec/c/run.c -o "$T/run"
-b python3 exec/lower/gen.py "$T/lower.json" --full --win $FLAG
+b python3 exec/build/gen.py lower "$T/lower.json" --full --win $FLAG
 b python3 "exec/enc/$ENCODER" "$T/elf.json" --pe
 for s in lower elf; do
  b python3 exec/c/tbl.py "$T/$s.json" "$T/$s.tbl"

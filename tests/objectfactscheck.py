@@ -17,7 +17,7 @@ def main():
   def cmd(args):
    r=subprocess.run(list(map(str,args)),capture_output=True,timeout=30);assert r.returncode==0,(args,r.stderr[-2000:]);return r.stdout
   model=t/'m.json';tbl=t/'m.tbl';net=t/'m.net';runtime=t/'run';src=t/'tape'
-  cmd([sys.executable,ROOT/'exec/lower/gen.py',model,'--object'])
+  cmd([sys.executable,ROOT/'exec/build/gen.py','lower',model,'--object'])
   d=json.loads(model.read_bytes())
   cmd(['cc','-O2','-o',runtime,ROOT/'exec/c/run.c'])
   cmd([sys.executable,ROOT/'exec/c/tbl.py',model,tbl]);cmd([sys.executable,ROOT/'exec/c/net.py',tbl,net]);cmd([runtime,'--check-net',tbl,net])

@@ -15,7 +15,7 @@ b python3 exec/opt/gen.py "$OUT/e4.json" 2
 b python3 exec/prune/gen.py "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
 case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=arm.py;; *) ARCHFLAG=; ENCODER=gen.py;; esac
-b python3 exec/lower/gen.py "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
+b python3 exec/build/gen.py lower "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
 b python3 "exec/enc/$ENCODER" "$OUT/elf.json" "--$IMAGE"
 MODEL=tbl
 case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac

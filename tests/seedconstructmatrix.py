@@ -42,7 +42,7 @@ def specs(group):
         return tuple((f"object-{arch}-{stage}", script, args)
                      for arch in ("arm64", "x86_64")
                      for stage, script, args in (
-                         ("lower", "exec/lower/gen.py", ("--full", "--object") + (("--arm64",) if arch == "arm64" else ())),
+                         ("lower", "exec/build/gen.py", ("lower", "--full", "--object") + (("--arm64",) if arch == "arm64" else ())),
                          ("elf", "exec/enc/arm.py" if arch == "arm64" else "exec/enc/gen.py", ("--object",)),
                      ))
     if group not in TARGETS:
@@ -51,7 +51,7 @@ def specs(group):
     flags = (("--osx",) if osname == "osx" else ("--win",) if osname == "win" else ())
     aflag = ("--arm64",) if arch == "arm64" else ()
     image = {"lnx": "elf", "osx": "macho", "win": "pe"}[osname]
-    return (("lower", "exec/lower/gen.py", ("--full",) + flags + aflag),
+    return (("lower", "exec/build/gen.py", ("lower", "--full",) + flags + aflag),
             ("elf", "exec/enc/arm.py" if arch == "arm64" else "exec/enc/gen.py", ("--" + image,)))
 
 

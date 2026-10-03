@@ -36,9 +36,9 @@ def _entries():
     add('exec/prune/gen.py'); add('exec/nativeabi/gen.py')
     for os_ in ((), ('--osx',), ('--win',)):
         for a in ((), ('--arm64',)):
-            add('exec/lower/gen.py', *(('--full',) + os_ + a))
-    add('exec/lower/gen.py')
-    add('exec/lower/gen.py', '--full', '--object'); add('exec/lower/gen.py', '--full', '--object', '--arm64')
+            add('exec/build/gen.py lower', *(('--full',) + os_ + a))
+    add('exec/build/gen.py lower')
+    add('exec/build/gen.py lower', '--full', '--object'); add('exec/build/gen.py lower', '--full', '--object', '--arm64')
     for enc in ('exec/enc/gen.py', 'exec/enc/arm.py'):
         for f in ((), ('--elf',), ('--macho',), ('--pe',), ('--object',)):
             add(enc, *f)
@@ -52,7 +52,7 @@ def key(gen, args):
 def run(gen, args, tmp):
     out = Path(tmp) / (hashlib.sha1(key(gen, args).encode()).hexdigest() + '.json')
     env = dict(os.environ, PYTHONHASHSEED='0')
-    p = subprocess.run([sys.executable, 'tests/bound.py', '55', sys.executable, gen, str(out), *args],
+    p = subprocess.run([sys.executable, 'tests/bound.py', '55', sys.executable, *gen.split(), str(out), *args],
                        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if p.returncode or not out.exists():
         return 'FAIL:%d:%s' % (p.returncode, p.stderr.decode(errors='replace').strip().splitlines()[-1:] or '')
@@ -63,7 +63,7 @@ def run(gen, args, tmp):
 def main(argv):
     write = '--write' in argv
     only = [argv[i + 1].rstrip('/') for i, a in enumerate(argv) if a == '--only']
-    ents = [x for x in _entries() if not only or any(x[0].startswith(d + '/') or x[0].startswith('exec/' + d.split('exec/')[-1] + '/') for d in only)]
+    ents = [x for x in _entries() if not only or any(x[0].startswith(d + '/') or x[0].startswith('exec/' + d.split('exec/')[-1] + '/') or x[0].endswith(' ' + d.split('/')[-1]) for d in only)]
     if '--list' in argv:
         for g, a in ents: print(key(g, a))
         return 0

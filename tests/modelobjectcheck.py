@@ -22,7 +22,7 @@ def main():
   cmd([ROOT/'tests/build_ref.sh',t/'ref.c',ref]);cmd(['cc','-O2','-o',runtime,ROOT/'exec/c/run.c'])
   routes=t/'routes';rows=[]
   for arch in ['x86_64','arm64']:
-   for stage,script,flags in [('prune','exec/prune/gen.py',[]),('lower','exec/lower/gen.py',['--full','--object']+(['--arm64'] if arch=='arm64' else [])),('elf','exec/enc/'+('gen.py' if arch=='x86_64' else 'arm.py'),['--object'])]:
+   for stage,script,flags in [('prune','exec/prune/gen.py',[]),('lower','exec/build/gen.py',['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])),('elf','exec/enc/'+('gen.py' if arch=='x86_64' else 'arm.py'),['--object'])]:
     base=t/(arch+'-'+stage);model=base.with_suffix('.json');table=base.with_suffix('.tbl');net=base.with_suffix('.net')
     cmd([sys.executable,ROOT/script,model,*flags]);cmd([sys.executable,ROOT/'exec/c/tbl.py',model,table]);cmd([sys.executable,ROOT/'exec/c/net.py',table,net]);cmd([runtime,'--check-net',table,net])
     rows.append('\t'.join(['lnx/'+arch+'/object/O0',stage,'target.text' if stage=='elf' else 'tape.text','tape.text' if stage=='prune' else 'target.text' if stage=='lower' else 'object.bytes',str(net)]))

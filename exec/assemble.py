@@ -106,6 +106,23 @@ def _out(text, facts):
     t = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), t)
     t = _cell("str", t)
     return [("OUT", c) for c in t.encode()]
+# when term `state:NAME` / `!state:NAME`: NAME is (not) already a graph state
+#   (idempotent shared sub-constructors: skip when installed);
+# value `@str:TEXT` literal string with `{NAME}` substitution; op `set`: store the bind cells in env;
+# op `fail`: exit with STEM as the message; op `py`: transitional, call
+#   MODULE.install(E, **bind) for a stage constructor not yet migrated.
+def _state_when(w, g):
+    if "state:" not in w:
+        return w
+    out = []
+    for t in w.split("&"):
+        neg = t.startswith("!")
+        if t[neg:].startswith("state:"):
+            if (t[neg + 6:] in g.st) == neg:
+                return "fact:__never__"
+            continue
+        out.append(t)
+    return "&".join(out) or "-"
 # ---- end K2 round 2 additions -----------------------------------------------
 
 
@@ -157,6 +174,8 @@ class Run:
             t = v[7:]
             t = str(_path(facts, t[1:])) if t.startswith("=") else t
             return [("SBOUT", c) for c in t.encode()]
+        if v.startswith("@str:"):
+            return _cell("str", re.sub(r"\{(\w+)\}", lambda m: str(facts[m.group(1)]), v[5:]))
         if v.startswith("@out:"):
             return _out(v[5:], facts)
         if v.startswith("$"):
@@ -207,6 +226,7 @@ class Run:
         for s in ([] if factn in ("", "-") else factn.split("+")):
             facts.update(load_facts(s))
         facts.update(extra)
+        when = _state_when(when, self.E.g)
         if not _when(when, self.flags, facts):
             return
         o = {} if opts in ("", "-") else json.loads(opts)
@@ -241,6 +261,18 @@ class Run:
         elif op == "call":
             sub = Run(self.E, self.P, self.flags, dict(self.env, **(bd or {})))
             res = sub.run(self.root / (stem + "-manifest.tsv"))
+        elif op == "set":
+            self.env.update(bd or {})
+        elif op == "fail":
+            raise SystemExit(stem)
+        elif op == "py":
+            import importlib.util, sys
+            if str(self.root) not in sys.path:
+                sys.path.insert(0, str(self.root))
+            sp = importlib.util.spec_from_file_location(self.root.name + "_" + stem, self.root / (stem + ".py"))
+            mod = importlib.util.module_from_spec(sp)
+            sp.loader.exec_module(mod)
+            res = mod.install(self.E, **(bd or {}))
         elif op == "e":
             res = getattr(self.E, stem)()
         elif op == "label":
