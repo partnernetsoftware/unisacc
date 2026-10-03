@@ -696,3 +696,18 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Next (design only): step 2 export.py drops gen2.py (k2gen2, k2strings ESC literal -> facts, k2membercontrol,
   k2libraryenv: G.DIM=28*10**6 literal/fact); step 3 gen.py parse2 (needs `#! base build/parse2base.py` start $ex_ret;
   parse2base.install must do _base.tokens + P; twice/sizes check); step 4 callers + delete gen2.py.
+- Round 52 (step 2). export.py no longer imports gen2.py: gen2's module block (constants, tape_rows, optail_facts,
+  load_rules, P=parse2base.install(E), TEMPL/SPANS, ...) is export.py _gen2ns(tag) (E = _module exec/parse/gen.py,
+  paths name exec/parse2 explicitly), used by k2gen2/k2membercontrol/k2libraryenv; ESC -> exec/facts/strings.tsv
+  `escape` rows (k2strings reads them, no ast). gen2.py now = E + P + g + build + __main__ (~50 lines). Fact bodies
+  unchanged (git diff of facts tsv: header/input lines only). rules.md:78 row renamed to librarymodule-manifest.tsv,
+  refusals.tsv librarymodule.py line removed. Commit fe81fa85 (local). sha SAME (actually run, serial, bound 58):
+  32fb8e3c / 7ea0e979 / 3a7edf34 / a4c6fa73 / units 6fc8d7f5 / units --locations 0137a215.
+  Step 4 caller list is wider than the coordinator's (grep, not changed yet): exec/parse2/{locationcheck,
+  unitlocationcheck,r21check}.py, selfcheck.sh, floatconstcheck.sh, exec/c/{chain,buildcompiler}.sh,
+  tests/{modelbitfieldsourcecheck,modelfprankcheck,modelfpvaluerankcheck,modelnativecarrierimportcheck,
+  modellayoutfactscheck,modelsourcefacts3check,seedconstructmatrix}.py, tests/{modelcallablevarwirecheck,
+  modelcallbacksourcecheck,modelcallablewirecheck,modelsourcelayoutprovenancecheck,unitparsecheck}.sh,
+  tests/k2gen/* (text-match only); libraryimportscheck.py does `import gen2; gen2.build()`.
+  Next: step 3 gen.py parse2 (gen-manifest header `#! start $ex_ret`; parse2base needs tokens(E) before run --
+  check whether gen.py base load does it; twice/sizes).
