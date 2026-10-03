@@ -457,3 +457,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   result; lm_mainreject=[] and lm_errors -> flag `errors`, lm_header -> fact. Callers: graphhash key
   `exec/build/gen.py parse2 [--flags]` (hash unchanged), checks + compilerpack closure as in 4ea3f5e8; delete gen2.py.
   Tools: .k2tmp/chk.sh (three modes, prints exit + sha8).
+- Round 33b (coordinator: exec/parse/gen.py while cdx delivers): a7a08506 removed dead numeric_rules/prn/numout/fconv/
+  autoscan (their manifests already own them; no callers) and moved autonames() into export.py as _autonames(E)
+  (feeds facts k2-gen2 =autonames). export.py rerun (header sha only), facts committed.
+  sha SAME: gen2 default 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34, gen.py parse2/units 6fc8d7f5.
+  Left in exec/parse/gen.py: tokenizer() (called by build/parse2base.py:57; tokenizer-manifest.tsv exists), P token
+  helpers tok/expect/num/lab/vpush/vpop/newlab (generic -> exec/build/procs.py), gold()/PREC/BINSEL/IRSEL/optext,
+  parse-constants facts, tyinfo/SZ asserts, sizes() (only gen2 __main__).
+  Not rerun: decisionledger --seedpy --list (exec/parse/gen.py entry still present).
