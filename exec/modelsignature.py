@@ -21,7 +21,7 @@ def install(E,fail='DEAD'):
  from finite_rules import install as install_rules
  P=E.P;root=pathlib.Path(__file__).parent
  if 'MS.canonical' in E.g.st:return
- P('MS.fail').a(E.rej('not covered: typed library signature')).goto(fail)
+ install_rules(E.g,root,'modelsignature',dict(fail=fail),{},None,'head')
  P('MS.return').ret()
  from modelinput import u64
  u64(E,'MS.callablecap',b'\0library/callables','ms_callablecap','ms_callablepresent','MS.fail')
