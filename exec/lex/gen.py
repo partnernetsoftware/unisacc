@@ -403,7 +403,7 @@ if LOCATIONS:
     START = install(D)
 if SOURCEFACTS:
     from lexsourcefacts import install as install_sourcefacts
-    START = install_sourcefacts(D, START)
+    START = install_sourcefacts(D, START, FACTS)
 
 # ---- totality: every state total over what it reads -------------------------
 GAMMA = ["BOT", "P"] + ["D%d" % d for d in range(10)]
