@@ -6,6 +6,9 @@ from finite_rules import install as install_rules, install_template
 from unisa.hostabi import ARM_FN, ARM_ARGV, ARM_BODY, X86_BODY, WIN_ARM_BODY, WIN_X86_BODY
 from unisa.catalog import REGMAP
 from unisa.emit_x86 import NUM
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from exec.facts.load import facts
 
 
 def guard(E, entry, predicate, yes, accepted=(1,), no='HB.fail'):
@@ -33,9 +36,8 @@ def install(E, arch, word=None):
         if op=='call':guard(E,'HB.call.value1',[('RLD','a1')],'HB.call.emit',allowed)
         else:guard(E,'HB.addr.value1',[('RLD','a1')],'HB.addr.emit',(0,1,2,3))
     from modelinput import u64
-    u64(E,'HB.libraryread',b'\0library/exit','hb_libraryexit','hb_hasexit','HB.fail')
-    u64(E,'HB.librarymmap',b'\0library/mmap','hb_librarymmap','hb_hasmmap','HB.fail')
-    u64(E,'HB.librarymunmap',b'\0library/munmap','hb_librarymunmap','hb_hasmunmap','HB.fail')
+    for r in facts('enc-hostbridge-resources'):
+        u64(E,r['entry'],b'\0'+r['resource'].encode(),r['value'],r['present'],'HB.fail')
     guard(E,'HB.call.librarytarget',[('RLD','target_os')],'HB.call.libraryread',(1,3))
     install_rules(E.g,Path(__file__).parent,'hostbridge',section='library')
     root=Path(__file__).parent

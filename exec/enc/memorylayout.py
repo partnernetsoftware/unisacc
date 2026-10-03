@@ -9,15 +9,14 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from modelinput import u64
 from unisa.tape import DATA_BASE
 from unisa.image.pe import DLL, IMPORTS
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from exec.facts.load import facts
 
 
 def install(E, fail, code_size='endo'):
     P=E.P
-    u64(E,'ML.mode',b'\0process/argc','ml_argc','memory_mode',fail)
-    u64(E,'ML.argv',b'\0process/argv','ml_argv','ml_hasargv',fail)
-    u64(E,'ML.text',b'\0memory/text','ml_text','ml_hast',fail)
-    u64(E,'ML.data',b'\0memory/data','ml_data','ml_hasd',fail)
-    u64(E,'ML.reserve',b'\0memory/reserve','ml_capacity','ml_hasreserve',fail)
+    for r in facts('enc-memorylayout-resources'):
+        u64(E,r['entry'],b'\0'+r['resource'].encode(),r['value'],r['present'],fail)
     from finite_rules import install as install_rules, load as load_rules
     root = Path(__file__).parent
     bindings = dict(fail=fail, DATA_BASE=DATA_BASE, code_size=code_size,
