@@ -61,7 +61,10 @@ python3 "$BOUND" 5 osascript -e "tell application \"Terminal\" to do script \"'$
     # invalidated every stored gate result three times (2026-09-29). With
     # TERM_SH_NOFALLBACK=1 a refused handoff is reported and retried instead.
     if [ "${TERM_SH_NOFALLBACK:-0}" = 1 ]; then echo 'term.sh: Terminal handoff refused; no fallback' >&2; exit 75; fi
-    exec python3 "$BOUND" "$TERM_SH_ALARM" "$@"; }
+    # Mark the fallback as inside: a caller that re-enters term.sh (gate.sh
+    # does) must not hand off again, or each refusal spawns another bound.py
+    # -- a ~750-deep chain on 2026-10-04 when Terminal refused handoffs.
+    TERM_SH_INSIDE=1 exec python3 "$BOUND" "$TERM_SH_ALARM" "$@"; }
 # One polling process streams output; no per-poll date/wc/tail subprocesses.
 python3 - "$d" "$deadline" <<'PYWATCH'
 import os, pathlib, signal, sys, time
