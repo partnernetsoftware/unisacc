@@ -258,3 +258,10 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   keep their hashes, prepare.sh, exec/c/*, checks), delete gen2.py. cdx-owned Python calls stay at the boundary
   (strings.initializer, constexpr, membercontrol, tokenlocations, layoutprovenance.parser; unresolved.py is cdx's).
   Then librarymodule/librarycallables/libraryexports to manifests; exec/parse/gen.py to exec/build + facts.
+- Round 22: 0882ce48 type dispatch template + stage-edits address/update/final (gen2parts template rows; CP.restore
+  state assert dropped, covered by sha), 10fa177b compound-loop functiontypes row (env cop). gen2.py build() now has no
+  direct install_* calls; what remains is wrapper calls + Python loops/glue between them (return integer chain, type-row
+  chain, CASOPS/update-modes loops, addr results) -> next: `call STEM` rows in gen2-manifest, merge segments, run via
+  exec/build/gen.py, switch callers, delete gen2.py. Literal strings inside opts let must be `@str:` (bare = fact path).
+  SCOPE (coordinator, 2026-10-03): this slice owns only exec/parse2/gen2.py and exec/parse/gen.py.
+  librarymodule.py, librarycallables.py, libraryexports.py and unresolved.py belong to cdx: do not edit them.
