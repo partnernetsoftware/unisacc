@@ -646,3 +646,18 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   !fact:tail; gen2.build runs gen-manifest again with dict(env, tail=1, ex_start=<_libraryexports ret>) (blocked
   librarymodule stays the one Python call between). 6 unitmode lm_initret = $$global3:lm_initret; FND/header_json to
   buildconst. Then 7 asserts, dead helpers, namespace_constants -> export.py.
+- Round 49 (tail segments 4, 5 (two-phase), 6, 7 + cleanup). gen-manifest: call errors (when errors, result err) +
+  let lm_nomain_msg/lm_mainnext=$$err:lm_nomain_msg with {"mapseq":{"lm_mainreject":[]}}; every phase-1 row now
+  carries !fact:tail; phase tail rows (when fact:tail): layoutfacts (start=$ex_start, b_* from buildconst), valueranks,
+  ../layoutprovenance (start=@str:LF.start), parenfold, unitmode (FND/HEADER_JSON/TK.type=extern/TK.= from buildconst,
+  lm_initret=$$global3:lm_initret), objectdefinitions, structreturnexpr, forward (result fw), let ex_ret=$$fw:ret,
+  assert-absent CP.restore present (r/257 shape check dropped), gen2parts part_final=@str:1. gen2.build: run 1,
+  _publish stopgaps (startup/globalN, fpcont, lm_nomain_msg/lm_mainnext/lm_mainreject), _libraryexports (BLOCKED:
+  librarymodule is Python, cdx), run 2 with dict(env, tail=1, ex_start=...), start=env["ex_ret"]. Removed 10 unused
+  helpers (the 9 of Round 47 + segment); namespace_constants is export.py _namespace_constants(G). buildconst gains
+  FND, HEADER_JSON. twice()/sizes stay in gen2 __main__ (gen.py parse2 not checked yet).
+  Commits 78c9c578, 5186767f, b75d4cfb (local, not pushed). sha SAME after each (actually run, bound 58, serial):
+  gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34, --locations a4c6fa73, gen.py parse2/units 6fc8d7f5,
+  units.py --locations 0137a215. decisionledger --ops: distinct 9 (cap 12), bad 0.
+  Next: when librarymodule is a manifest, replace _libraryexports with rows and merge the two phases (drop fact:tail);
+  then (d) gen.py parse2 runs gen-manifest directly (top env = E.results, _publish goes).
