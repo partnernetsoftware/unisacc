@@ -23,8 +23,22 @@ make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=osx/arm64
 make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=osx/x86_64
 make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=win/arm64
 make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=win/x86_64
-make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=pack UA=/absolute/private/seed
+make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=pack-prep-1 UA=/absolute/private/seed
+make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=pack-prep-2 UA=/absolute/private/seed
+make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=pack-prep-3 UA=/absolute/private/seed
+make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=pack-models UA=/absolute/private/seed
+make model-com MODEL_DIR=/tmp/my-container MODEL_STEP=pack-driver UA=/absolute/private/seed
 ```
+
+Pack is split into five steps because, after K2, constructing every model in one
+step no longer fits 55 s. `pack-prep-K` constructs group K of `compilerpack.py`
+`PREP_PARTS` (parse2 warnings, parse2 errors, the rest) into
+`MODEL_DIR/model-cache` and writes `MODEL_DIR/pack-prep-K.done`; `pack-models`
+runs with `--require-cached` (a model missing from the cache is an error, never a
+rebuild) and only packages; `pack-driver` wraps the package in the APE driver.
+The cache is per build directory and starts empty (`build_candidate.sh` removes
+it), so shipped models are still constructed afresh; every cache hit re-checks
+the stored digests. `MODEL_STEP=pack` (all five in one step) does not fit the bound.
 
 The documented sequence is serial (one CPU slot). If scheduling externally, use
 at most two distinct non-pack stages concurrently; never overlap pack or two
