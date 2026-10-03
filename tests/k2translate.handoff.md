@@ -132,6 +132,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   0 action lists left in k2-gen2.tsv. parse2 graphhash 5/5 shards 0 bad; 8 gates green. Check: sh .k2tmp/one.sh.
   Left: ladder+dispatch templates, startup-run, _namespace_control, ordinary_control; then one manifest.
 
+- Round 13 (f893b753): ladder -> segments ladder-E / ladder-E-reject / ladder-C / ladder-C-reject (gen2.ladder now only
+  calls segments + optail/tytail). Facts k2-gen2 ladder: [{lv,nxt,mid,last,ops:[{op,key=TK,mode}]}]; dispatch-template
+  gained section ladderop ({ctx.owner}.{op.op} target); rejects literal rows from ladder-reject.tsv (mapseq REJECT).
+  sha SAME default + --warnings --errors. Left: startup-run, _namespace_control, ordinary_control; merge segments.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
