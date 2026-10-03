@@ -22,7 +22,7 @@ def rows(name):
 
 
 def install(E,P,ordinal_table=None,token_record=None,ready="START",multi=True):
-    from finite_rules import install as install_rules, load as load_rules
+    from finite_rules import install as install_rules, load as load_rules, install_template
     g=E.g
     enabled={"main"} | ({"multi"} if multi else set()) | ({"record"} if token_record else set())
     bindings={name:globals()[name] for name in ("TOKEN_POS","SPLICES","INCLUDE_LINE","INCLUDE_LINES","INCLUDE_NAME","UNIT_MAP","MAP_STRIDE")}
@@ -49,7 +49,7 @@ def install(E,P,ordinal_table=None,token_record=None,ready="START",multi=True):
         install_rules(g,Path(__file__).parent,"tokenlocations",section=section,
                       bindings=dict(bindings,**(extra or {})),sequences=dict(sequences,**(seq or {})),classes=classes)
     # Replace only the ordinary token entry; all reader consumers share this decoder.
-    del g.st["NEXT"]
+    install_template(g,Path(__file__).parent,"tokenlocations",{},None)
     for part in ("main","multi","record"):
         if part in enabled:
             rules(part)

@@ -5,7 +5,7 @@ No declaration logic is duplicated here; units.py remains the scanner.
 """
 import json
 from pathlib import Path
-from finite_rules import install as install_rules, load as load_rules
+from finite_rules import install as install_rules, load as load_rules, install_template
 
 MAPS=49<<40
 
@@ -17,8 +17,7 @@ def rows(name):
 def install(E,P):
     from tokenlocations import install as locations
     locations(E,P,ready='LS.ready',multi=False)
-    for (name,) in rows("replace"):
-        del E.g.st[name]
+    install_template(E.g, Path(__file__).parent, "unitlocations", {}, None)
     bindings = dict(MAPS=MAPS)
     for prefix, kind, key in rows("fresh"):
         bindings[key] = P(prefix + ".unitlocations_" + key).fresh(kind)

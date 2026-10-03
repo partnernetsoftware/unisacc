@@ -5,7 +5,7 @@ still mean frame offsets or GMARK. No language primitive is added to run.c.
 
 def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
     import pathlib,re
-    from finite_rules import install as install_rules
+    from finite_rules import install as install_rules, install_template
     # Same bounded ordinal namespace as the product; single-unit labels stay
     # unchanged. This is a declaration constant, not emitted reference code.
     source=(pathlib.Path(E.ROOT)/'src/front_pp.c').read_text()
@@ -28,6 +28,6 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
     classes.update(TK_ID=[E.TK_ID], TK_STR=[E.TK_STR])
     # A token walk caches source ordinals by position; rewinds reuse them.
     # BOOL is retained in the public signature; shared ELSZ/ASSIGNCV own its rules.
-    del E.g.st['NEXT']
+    install_template(E.g, root, 'statics', {}, None)
     install_rules(E.g, root, 'statics', bindings=bindings,
                   sequences=sequences, classes=classes)
