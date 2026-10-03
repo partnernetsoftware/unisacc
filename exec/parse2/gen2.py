@@ -190,8 +190,8 @@ def tytail():
 
 
 def strwalk(pre, body, done):
-    from strings import walk
-    walk(E, P, ESC, pre, body, done)
+    import assemble
+    assemble.run(Path(__file__).resolve().parent / 'strwalk-manifest.tsv', E, P, {}, dict(pre=pre, body=body, done=done))
 
 
 def ladder(prefix, bottom):
@@ -244,21 +244,10 @@ def fmtwalk(pre, on_byte, on_d, on_end):
 
 
 def printf(warnings=False):
+    """printf family: exec/parse2/printf-manifest.tsv (K2 sub-manifest)."""
     import assemble
-    _flags = dict(warnings=warnings)   # printfallback/printfcontrol manifests key on warnings only
-    assemble.run(Path(__file__).resolve().parent / 'printfallback-manifest.tsv', E, P, _flags, {})
-    env = {}
-    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-0-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part0', warnings=warnings))
-    strwalk("FMT.walk","FMT.byte","FMT.end")
-    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-1-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part1', warnings=warnings))
-    fmtwalk("PF", "PF.b", "PF.d", "PF.end")
-    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-2-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part2', warnings=warnings))
-    strwalk("PL", "PL.cp", "PL.end")
-    from strings import rules as string_rules
-    string_rules(E, P, "wide_hooks")
-    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-3-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part3', warnings=warnings))
-    fmtwalk("PO", "PO.b", "PO.d", "PO.end")
-    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-4-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part4', warnings=warnings))
+    assemble.run(Path(__file__).resolve().parent / 'printf-manifest.tsv', E, P, dict(warnings=warnings), dict(warnings=warnings))
+
 
 UNS = E.UNS   # unsigned char/short/int/long: UNS + size
 SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)

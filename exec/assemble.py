@@ -309,6 +309,8 @@ class Run:
         elif op == "call":
             sub = Run(self.E, self.P, self.flags, dict(self.env, **(bd or {})))
             res = sub.run(self.root / (stem + "-manifest.tsv"))
+            if o.get("merge"):   # opts merge: the sub-manifest's env flows back (segment chains)
+                self.env.update(res)
         elif op == "let":
             if "exit" in o:
                 raise SystemExit(o["exit"])
