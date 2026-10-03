@@ -661,3 +661,21 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   units.py --locations 0137a215. decisionledger --ops: distinct 9 (cap 12), bad 0.
   Next: when librarymodule is a manifest, replace _libraryexports with rows and merge the two phases (drop fact:tail);
   then (d) gen.py parse2 runs gen-manifest directly (top env = E.results, _publish goes).
+- Round 50 (survey only, no code change; librarymodule manifest not yet on origin/main at 3ee0214f).
+  Ruling (coordinator): graphhash 8 gen2 rows re-key to `exec/build/gen.py parse2 [flags]` with unchanged hashes (as
+  4ea3f5e8), no thin entry; export.py's gen2 constants move to facts or exec/build/parse2base.py.
+  export.py reads gen2 in 3 places: k2gen2 (_module gen2, ~60 names: TYPEW, TYINT, TYPE_TAPE, AX, LEVELS, TEMPL, OPS,
+  CKT, TYROW/TYINFO/TWORDS, POSSPAN, layout banks MOF..SHAPE, FPS_*, PIDS/PDB/LOC/SKIPS, SYSCALLS, FNSTR, FPU, UIM/U32M,
+  VLSIZE/VLFRAME/VLDEP, _VR, plus helpers tape_rows, optail_facts, load_rules, O, P(...).vpush, E.rej), k2strings
+  (ast-parses gen2.py for ESC), k2membercontrol (_module gen2: layout banks, TYINT, E.TK). gen2 module-level code
+  (lines 17-227) depends on E (parse/gen.py), P = parse2base.install(E), and __file__-relative paths (tape_rows,
+  addr/strwalk/fmtwalk/printf manifests in exec/parse2) -> when moved to exec/build every Path(__file__) must name
+  exec/parse2 explicitly.
+  Plan (design only): (1) parse2base.gen2ns(): memoized function holding gen2.py's module-level block (constants +
+  tape_rows/optail_facts/printf helpers, paths fixed to exec/parse2), returning a namespace; gen2.py, export.py
+  (k2gen2, k2membercontrol) use it; ESC literal -> exec/facts/strings.tsv (escape rows) so k2strings stops parsing
+  gen2.py; check: export.py rerun leaves fact bodies identical (only input header lines change) + six sha modes.
+  (2) gen.py parse2 [flags]: build() body (two gen-manifest runs + _libraryexports until the librarymodule manifest)
+  in exec/build/gen.py using gen2ns(); re-key graphhash rows 43-50 + tests/graphhash.py entries; switch callers
+  exec/pipeline/prepare.sh:12, exec/pipeline/stages.tsv:16, exec/parse2/{libraryimportscheck,errorcheck,
+  returnwarningcheck}.py; then delete gen2.py and drop it from export TABLES inputs.
