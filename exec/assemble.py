@@ -301,6 +301,12 @@ class Run:
             for sf in o["seqlist"]:
                 base.update({k: [t(a) for a in v] for k, v in _path(facts, sf).items()})
             sq = dict(base, **(sq or {}))
+        if o.get("outseq"):   # every `["@", "O:TEXT"]` in STEM-result/-byte.tsv is OUT bytes of TEXT
+            sq = dict(sq or {}, **{a[1]: [("OUT", c) for c in a[1][2:].encode()]
+                                   for f in ("-result.tsv", "-byte.tsv") if (self.root / (stem + f)).exists()
+                                   for ln in (self.root / (stem + f)).read_text().splitlines()
+                                   if not ln.startswith("#") and ln.count("\t") >= 4
+                                   for a in json.loads(ln.split("\t")[4]) if a[:1] == ["@"] and a[1].startswith("O:")})
         if "mapseq" in o:
             sq = dict(sq or {}, **self.mapseq(o["mapseq"], facts, bd))
         if "seqenv" in o:   # env sequences (stored by an earlier let) by a fact list of names
@@ -351,6 +357,7 @@ class Run:
 #        "owner": format over {owner} {key} (optional)}; allocates one label per
 #        selected row in row order and stores it in env[key].
 # opts   with: literal JSON dict merged into the facts of this row.
+# opts   outseq: true -> `@ O:TEXT` sequence names in the stem's tables are OUT bytes of TEXT.
 #        mapseq: {SEQ: [{"over": factpath, "acts": [[...], ...]}, ...]} builds
 #        sequence SEQ by instantiating each act per element: a cell "{f}" is the
 #        element's field f, "$N" a bind/env/fact value, other text formatted

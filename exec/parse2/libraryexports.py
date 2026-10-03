@@ -13,7 +13,8 @@ def install(E,P,b,start,integers):
     import assemble
     u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
     from finite_rules import install as rules, install_template
-    import libraryimports, librarycallables, layoutfacts, types
+    import librarycallables, layoutfacts, types
+    libraryimports=types.SimpleNamespace(**assemble.load_facts('libraryimports')['libraryimports!'])  # exec/facts/libraryimports.tsv
     modelsignature=types.SimpleNamespace(**assemble.load_facts('top-modelsignature-banks')['top-modelsignature-banks!'])  # exec/facts/top-modelsignature-banks.tsv
     modelgraphequality=types.SimpleNamespace(**assemble.load_facts('top-modelgraphequality-banks')['top-modelgraphequality-banks!'])  # exec/facts/top-modelgraphequality-banks.tsv
     for owner in (modelsignature,modelgraphequality,libraryimports,librarycallables,layoutfacts):
@@ -85,8 +86,9 @@ def install(E,P,b,start,integers):
     section('envelope')
     rules(g,Path(__file__).parent,'libraryexports',section='write')
     from librarymodule import install as module_install
-    from libraryimports import install as imports_install
-    imports_start=imports_install(E,P,b,start,integers)
+    assemble.run(root/'libraryimports-manifest.tsv',E,P,{},dict({'b_'+k:v for k,v in b.items() if type(v) is int},start=start,
+        TK_ID=E.TK_ID,TK_SEMI=E.TK[';'],FPB_FPV=[b['FPB'],b['FPV']],BOOL=[b['BOOL']],
+        ints2=[{'code':code,'width':width,'uns':uns} for _,code,width,uns,_ in integers]));imports_start='LI.start'
     # Complete parameter capture is also needed by ordinary source calls.
     # The legacy first-eight cache default-promoted a ninth fixed float.
     # Extend only the missing ninth-and-later slots. First-eight source slots
