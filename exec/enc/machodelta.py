@@ -59,7 +59,8 @@ def install(E,byte,arch):
                   sequences={'pending': p.acts}, section='copy')
     p=P('MH.dataprefix')
     for _ in range(M.DLPREFIX):byte(p,0)
-    p.goto('MH.data')
+    install_rules(g, Path(__file__).parent, 'machodelta', section='prefix-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
     p=P('MH.binddata')
     for value in M.DLBIND:byte(p,value)
     p.a(('COPYW','mh_pad','mh_sigoff')).call('MH.pad',ret=mh_bindings['label5'])
