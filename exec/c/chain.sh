@@ -30,12 +30,19 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 for f in "$@"; do
     grep -Fxq "$f" "$T/inputs" || printf '%s\n' "$f" >> "$T/inputs"
 done
+# CHAINSHARD=k/n keeps every n-th distinct input (the gate runs the probe set as
+# shards so each job stays under the 60 s ceiling); the keep floor is checked
+# only for the files inside this shard.
+if [ -n "${CHAINSHARD:-}" ]; then
+    awk -v s="${CHAINSHARD%/*}" -v n="${CHAINSHARD#*/}" '(NR-1)%n==s-1' "$T/inputs" > "$T/inputs.k"
+    mv "$T/inputs.k" "$T/inputs"
+fi
 set -- $(cat "$T/inputs")
 CHAINKNOWN=${CHAINKNOWN:-exec/c/chain.knownfail}
 awk 'NF < 4 || $2 != "R14-8" || $3 != "P1" { exit 1 }' "$CHAINKNOWN" || { echo "chain: malformed knownfail"; exit 1; }
 python3 "$R/tests/knownfail.py" keys "$CHAINKNOWN" > "$T/known" || { echo "chain: malformed knownfail"; exit 1; }
 for name in $(cat "$T/known"); do
-    { grep -Fxq "tests/c/$name" "$T/inputs" || grep -Fxq "examples/$name" "$T/inputs"; } || { echo "chain: missing known probe $name"; exit 1; }
+    [ -n "${CHAINSHARD:-}" ] || { grep -Fxq "tests/c/$name" "$T/inputs" || grep -Fxq "examples/$name" "$T/inputs"; } || { echo "chain: missing known probe $name"; exit 1; }
 done
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "chain: cc failed"; exit 1; }
@@ -96,6 +103,7 @@ done
 lost=0
 if [ -n "${CHAINKEEP:-}" ]; then
     for k in $(cat "$CHAINKEEP"); do
+        [ -n "${CHAINSHARD:-}" ] && ! grep -Fxq "$k" "$T/inputs" && continue
         grep -qx "$k" "$T/equal" || { echo "  LOST $k"; lost=$((lost+1)); }
     done
 fi
