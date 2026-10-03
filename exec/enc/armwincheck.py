@@ -5,6 +5,7 @@ from unisa.__main__ import _oracle
 from unisa.lower import lower
 from unisa.tape import parse
 from unisa.assemble import assemble
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import dump
 
 def main():

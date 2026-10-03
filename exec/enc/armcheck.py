@@ -8,6 +8,7 @@ import sys
 import tempfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 from unisa.emit_arm import encode
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import run

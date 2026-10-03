@@ -54,7 +54,7 @@ def build(image=False, object_mode=False):
     for i in range(31):
         p.a(('SBCLR',), [('SBOUT', c) for c in ('x%d' % i).encode()],
             ('SBINTERN', 't'), ('LDI', 'u', i+1), ('STX', 't', REG, 'u'))
-    from tins import META
+    META = tuple(facts("enc-tins-meta"))
     from unisa.image.pe import IMPORTS
     # START metadata (was arminput.init / armwin.init / armwin.reset)
     KEYS, IMP = next(r['value'] for r in facts('enc-arminput-bindings') if r['name'] == 'KEYS'), next(r['value'] for r in facts('enc-armwin-bindings') if r['name'] == 'IMP')

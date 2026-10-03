@@ -15,6 +15,7 @@ from unisa.emit_x86 import encode as encode_x86
 from unisa.lower import TIns, lower
 from unisa.tape import parse as parse_tape
 from unisa.__main__ import _oracle
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse as parse_tins
 DEADLINE=0
 

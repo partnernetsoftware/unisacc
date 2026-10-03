@@ -44,7 +44,8 @@ sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from unisa.catalog import ENCSPEC   # noqa: E402  (generation time only)
 from unisa.emit_x86 import NUM      # noqa: E402
 from address import install as install_address
-from tins import META as META_KEYS
+from exec.facts.load import facts as _facts  # noqa: E402
+META_KEYS = tuple(_facts("enc-tins-meta"))
 from fp import FP_IDS, install as install_fp  # local delta generator, not an encoder oracle
 
 X86 = ENCSPEC["x86_64"]

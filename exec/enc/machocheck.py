@@ -7,6 +7,7 @@ from unisa import image
 from unisa.__main__ import _oracle
 from unisa.driver import compile_file
 from unisa.tape import DATA_BASE
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import dump
 
 def main():

@@ -1,6 +1,7 @@
 """Windows x86 setup: final RIP addresses after a shortening branch."""
 import pathlib,subprocess,sys,tempfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
 from unisa.assemble import assemble
 assert len(sys.argv)==4

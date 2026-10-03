@@ -14,6 +14,7 @@ from unisa.lower import lower
 from unisa.tape import DATA_BASE, parse
 from unisa.assemble import assemble
 from unisa import image
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import dump
 from exec.pp import sim
 

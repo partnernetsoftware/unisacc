@@ -8,8 +8,10 @@ refused, not dropped.  Meta: the keys lower.py sets (META below); a bool is
 `true`/`false`, a None meta value is `none` -- only in meta, where no label can
 be meant.  A bool operand (argsave's third) is `true`/`false` too.  Nothing here
 computes machine code, layout, offsets or short branches."""
-META = ("reloc", "form", "gate", "carry", "role", "catop", "sysno", "ret", "retconv", "winapi", "winimp",
-        "hstd", "scr0", "scr1", "written")
+import sys as _sys, pathlib as _pathlib
+if str(_pathlib.Path(__file__).resolve().parents[2]) not in _sys.path: _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[2]))
+from exec.facts.load import facts as _facts
+META = tuple(_facts("enc-tins-meta"))
 
 
 def _arg(v):

@@ -7,6 +7,7 @@ root=pathlib.Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(root/'exec/pp'),str(root/'exec/c'),str(root/'exec/enc'),str(root)]
 import sim
 from pack import build
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
 from unisa import image,assemble
 from unisa.image.pe import IMPORTS,DLL

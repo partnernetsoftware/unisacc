@@ -3,6 +3,7 @@ import pathlib,struct,subprocess,sys,tempfile,os
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 from unisa.assemble import assemble
 from unisa import image
+import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
 
 
