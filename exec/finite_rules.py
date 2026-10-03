@@ -36,6 +36,7 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `set-mode` a=STATE b=OLD c=NEW (OLD must match).
     `copy-state` a=SOURCE b=NEW (shallow alias, no target rewriting),
     `move-state` a=OLD b=NEW (move without target rewriting); `move` is its short form;
+    `drop-state` a=STATE (STATE must exist; removed with its edges, no target rewriting);
     `copy` a=NEW b=SOURCE is the destination-first hook form of `copy-state`;
     `clone-push` a=SOURCE b=NEW c=EXPECTED_TARGET d=NEW_CONTINUATION.
 No predicate lives here: substitution, product enumeration and graph edits only.
@@ -280,7 +281,7 @@ def expand_template(path, facts, fresh, section=None):
                         if kind != "rule":
                             modes[a2] = kind[5:]
                         out.append("\t".join((a2, b2, c2, d2)))
-                    elif kind in ("rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "clone-push", "move", "copy"):
+                    elif kind in ("rename", "alias", "prepend", "redirect", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "drop-state", "clone-push", "move", "copy"):
                         kind = {"move": "move-state"}.get(kind, kind)
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
@@ -310,6 +311,9 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
             continue
         if a not in g.st:
             raise ValueError(f"{where}: {kind} of absent state {a}")
+        if kind == "drop-state":
+            del g.st[a]
+            continue
         if kind in ("copy-state", "move-state"):
             if b in g.st:
                 raise ValueError(f"{where}: {kind} onto existing state {b}")
