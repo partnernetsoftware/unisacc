@@ -121,8 +121,8 @@ def record(outdir, tag, gen, args, modules):
                     kw[n] = v
                 elif isinstance(v, bool):
                     kw[n] = v
-                elif inspect.isfunction(v) or inspect.ismethod(v):
-                    t["refused"] = t["refused"] or "callback argument %s" % n
+                # callback arguments are allowed: their results are recorded as data in the
+                # calls; graph writes and fresh allocations made by them trip the guards
             for v in b.values():
                 for gr in (v, getattr(v, "g", None)):
                     cls = type(gr)
@@ -238,7 +238,7 @@ class Emitter:
             for n, a in args.items():
                 if a == v and type(a) == type(v) and not isinstance(v, bool):
                     return "$" + n, False
-            if isinstance(v, str) and v in self.states:
+            if isinstance(v, str):   # P4: names in bindings stay in the manifest, never in facts
                 if any(ch in v for ch in ",\t\n{}\\"):
                     raise Refuse("state label %r not expressible as @str" % v)
                 return "@str:" + v, False
@@ -279,7 +279,7 @@ class Emitter:
                 bind.append((k, s))
             for k, v in (d.get("sequences") or {}).items():
                 s, new = cell(k, v)
-                if new or (isinstance(v, str) and s[0] == "lit"):
+                if new or isinstance(v, str):
                     raise Refuse("label/string inside sequences (%s)" % k)
                 seq.append((k, s))
             o = {}
