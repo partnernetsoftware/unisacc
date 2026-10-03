@@ -31,3 +31,15 @@
 - a fresh whose owner is another fresh: `.let bind x=fresh:P:{entry}:r` then `fresh:P:{x}:b` in the next row.
 - names TSVs (section/name/owner/kind) -> exec/facts table + opts freshrows where {"section": ...}.
 - python generators for manifests were scratch (.k2enc/, uncommitted).
+
+## Round 3 (rebased: already on origin/main 9ecfe45e)
+- all 7 gates re-run after the last change (hostbridge 48ed2aa8): rc=0.
+- not converted: pedelta/machodelta/elfimage. They are field-emission chains: P.call(proc) = goto proc with the
+  pending acts + PUSH of a fresh ret label (P counter, owner prefix PE/MH), literal bytes are LDI ob/OUTW ob appended
+  to the pending acts. Plan: field schema as facts (rows: kind field|literal, width, value int|register name, big),
+  one template block per chain: `rule {prev:cur} * {fresh:ret:r}`-style per field row with the literal bytes folded
+  into the row's actions; first state = section entry, last label exported (result) for the following install
+  (header-end/imports-end/signature-end take state + pending). Verify fresh order against the P counter by graphhash.
+  load_rules(...)['actions'][0][1] uses (entry-value, directory-values, reloc-align, import-values, name-value,
+  signature-length) become literal act facts with bindings resolved via mapseq "$name".
+- then gen.py/arm.py entries -> manifests (touch only enc lines in shared caller scripts).
