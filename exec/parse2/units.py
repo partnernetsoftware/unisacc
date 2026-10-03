@@ -21,11 +21,8 @@ def build(locations=False):
     qualifiers=[row[0] for row in rows("qualifiers")]
     for name in qualifiers:
         E.WORDS.append(name);E.TK[name]=max(E.TK.values())+1
-    E.tokenizer();E.prn();E.fconv()
-    for name in qualifiers:
-        for state,row in load_rules(pathlib.Path(__file__).with_name("units-byte.tsv"),{},domain=[10],
-                bindings=dict(qualifier_state="NX"+name,qualifier_token=E.TK[name]),section="qualifier").items():
-            for key,(target,acts) in row.items():g.st[state][1][key]=(target,g.seq(acts))
+    import assemble;assemble.run(pathlib.Path(__file__).parents[1]/'parse/tokenizer-manifest.tsv',E,P,{});E.prn();E.fconv()
+    import assemble;from finite_rules import install_template;install_template(g,pathlib.Path(__file__).parent,'units',dict(Q=assemble.load_facts('k2-units-tokens')['qualifiers']),None,section='qualifier')
     from strings import token_span
     token_span(E,P)
     selection=rows("builtin")

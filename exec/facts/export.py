@@ -667,7 +667,61 @@ def k2gen2():
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
+def k2unitstokens():
+    """parse2/units-manifest.tsv tokenizer facts (was units.py E.WORDS/E.TK edits + E.tokenizer): word list
+    with token codes (units qualifiers appended after max(TK)), span prefixes with their reader, prefix-expanded
+    words (finite_rules.prefix_facts form; edges come from token-template.tsv rows), builtin codes, limits."""
+    if str(ROOT / "exec") not in sys.path:
+        sys.path.insert(0, str(ROOT / "exec"))
+    from finite_rules import prefix_facts
+    E = _module("exec/parse/gen.py", "k2units_parse")
+    rows = lambda f: [ln.split("\t") for ln in (ROOT / "exec/parse2" / f).read_text().splitlines()[1:]]
+    quals = [r[0] for r in rows("units-qualifiers.tsv")]
+    tk = dict(E.TK)
+    for q in quals:
+        tk[q] = max(tk.values()) + 1
+    words = E.WORDS + quals
+    spans = dict(ln.split("\t") for ln in (ROOT / "exec/parse/token-prefixes.tsv").read_text().splitlines()
+                 if ln and not ln.startswith("#"))
+    skip = E.tokenizer.__defaults__[0]   # the reader's own skipped qualifiers; units qualifiers are words
+    root, pre = prefix_facts(words + list(spans))
+    def node(n):
+        p = n["name"]
+        if p in spans:
+            return dict(name=p, span=[dict(reader=spans[p])], children=[], q=[], w=[], tail=[])
+        return dict(name=p, span=[], children=[dict(name=c["name"], last=c["last"]) for c in n["children"]],
+                    q=[1] if p in skip else [], w=[dict(tok=tk[p])] if p not in skip and p in tk else [],
+                    tail=[dict(tok=E.TK_OTHER)])
+    sel = rows("units-builtin.tsv")
+    builtin = [tk[w] for w in words if any(w.startswith(a) and w != b for a, b in sel)]
+    out = ["=N\tjson\t" + json.dumps([node(root)] + [node(n) for n in pre]),
+           "=builtin\tjson\t" + json.dumps(builtin),
+           "@qualifiers\tname:str\ttok:int"]
+    out += ["\t%s\t%d" % (q, tk[q]) for q in quals]
+    out.append("@tokens\tclass:str\ttok:int")
+    out += ["\t%s\t%d" % (c, E.TK_ID if t == "identifier" else tk[t]) for c, t in rows("units-tokens.tsv")]
+    out += ["=limit%d\tint\t%d" % (d, (2**64 - 1 - d) // 10) for d in range(10)]
+    classes = {c: [E.TK_ID if t == "identifier" else tk[t]] for c, t in rows("units-tokens.tsv")}
+    classes["builtin"] = builtin
+    out.append("=classes\tjson\t" + json.dumps(classes))
+    out += ["=%s\tstr\t%s" % (n, m) for n, m in rows("units-reject.tsv")]
+    out.append("@lengths\tbyte:str\tstep:str\tnext:str\tshift:int")
+    out += ["\tL%d\tL%db\t%s\t%d" % (i, i, "L%d" % (i + 1) if i < 3 else "EXTENT", 8 * i) for i in range(4)]
+    out.append("@counters\tsection:str\ttoken:str\tslot:str")
+    out += ["\t" + "\t".join(r) for r in rows("units-counters.tsv")]
+    out.append("@separators\tentry:str\tnext:str")
+    out += ["\t" + "\t".join(r) for r in rows("units-separators.tsv")]
+    out.append("@trailer\tstate:str\tnext:str\tbyte:int")
+    out += ["\tTRAIL%d\tTRAIL%d\t%d" % (i, i + 1, c) for i, c in enumerate(json.loads(rows("units-trailer.tsv")[0][0]))]
+    out.append("@keys\tkey:int")
+    out += ["\t%d" % k for k in range(257)]
+    out.append("=STATIC\tint\t%d" % (1 << 40))
+    out += ["=tk_goto\tint\t%d" % tk["goto"], "=tk_colon\tint\t%d" % tk[":"]]
+    return out
+
+
 TABLES = [
+    ("k2-units-tokens", ["exec/parse/gen.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
     ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),

@@ -137,3 +137,76 @@ layoutprovenance.py (units part) once graphhash identical.
    g. g.finish() and the json dump are the generator driver's job (exec/build/gen.py).
 3. Verify with GRAPHHASH_JOBS=1 slot.sh python3 tests/graphhash.py --only exec/parse2 (units ~10 s per mode),
    then gates exec-unitparse, exec-chain-1/2/3.
+
+## Round 10 (2026-10-03) — units entry design (nothing landed in exec/)
+- Base wait: origin/main lacked the layoutprovenance commit for the whole round (polled ~20 min).
+- Qualifier newline rows: a `table` op cannot replace them (G.on is first-wins; the tokenizer already set key 10
+  of NX<q>). Installing them before the tokenizer, or folding them into the trie facts as `w` rows, changes the
+  seq numbering: measured 6fc8d7f5... -> 3ee68396... (493 states differ only by seq index). The existing,
+  form-preserving mechanism is the template graph edit `redirect` (replace one existing edge in place, seq
+  allocated at that point = exactly the old g.st write): new exec/parse2/units-template.tsv section `qualifier`,
+  `Q` over a facts table of (name, tok): `redirect NX{Q.name} 10 RET [["ADV"],["LDI","tk",{Q.tok}]]`; drop the
+  `qualifier` row from units-byte.tsv. No new opts.
+- Blockers (assemble has no py op, so these must be manifests before units.py can go):
+  1. E.tokenizer(qualifiers): no manifest. Needs a facts producer (export.py TABLES, e.g. k2-units-tokens:
+     trie N for WORDS+token-prefixes+units-qualifiers, qualifier codes max(TK)+1.., builtin token list, tokread
+     limit0..9) and exec/parse/tokenizer-manifest.tsv (template token mode b over N, rows tokenread); a parse2
+     manifest reaches it with `call ../parse/tokenizer` (call stem is a path under the manifest dir).
+     E.TK is not mutated any more: `tokens`/builtin classes come from the facts via classmap.
+  2. strings.token_span: cdx draft exists only uncommitted in the main checkout
+     (exec/parse2/strings-token-span-manifest.tsv, exec/facts/k2-strings-token-span.tsv). Owner cdx.
+  3. unitlocations.install (+ tokenlocations.install): Python, owner cdx; --locations cannot be a manifest until
+     both are. Plain mode can go first only if graphhash keeps two generators (gen.py plain, units.py located) —
+     ask coordinator.
+  4. prn/fconv: existing exec/parse/{prn,fconv}-manifest.tsv via `call ../parse/prn` / `../parse/fconv`.
+- Coordinator rulings (round 10): (1) plain mode converts first (exec/build/gen.py parse2/units); --locations keeps
+  units.py until cdx lands unitlocations/tokenlocations; graphhash keeps both entries. (2) tokenizer facts = word
+  list, prefix-expanded list (finite_rules.prefix_facts form: name, last, children), token codes (qualifiers
+  max(TK)+1..), builtin list, limits; NO trie nodes with next-state fields — edges come from template rows
+  (NX{N.name} {c.last} -> NX{c.name}); spans (token-prefixes.tsv) as a span-prefix/reader fact pair. Key order per
+  node must stay: edges asc, 10, 256, then `*`. (3) redirect for qualifier newline rows approved.
+
+## Round 11 (2026-10-03)
+- Landed 43859d2b: exec/parse/tokenizer-manifest.tsv (template tokenfacts over facts k2-units-tokens + rows
+  tokenread); facts = N (prefix_facts form: name, children{name,last}, span{reader}, q, w{tok}, tail{tok}), builtin,
+  qualifiers(name,tok), tokens(class,tok), limit0..9. Note: units calls E.tokenizer() with the DEFAULT skip set
+  (const, volatile); the 5 units qualifiers are words (w rows) and then all 5 get the key-10 redirect
+  (exec/parse2/units-template.tsv section qualifier, Q over facts qualifiers). units-byte.tsv qualifier row removed.
+  units.py uses both already (interim); hashes 6fc8d7f5 / 0137a215 unchanged; export --check 0 differ.
+- Next: exec/parse2/units-manifest.tsv (#! base parse/gen.py, #! flags locations, plain only; locations ->
+  `let exit` until cdx's unitlocations lands): call ../parse/tokenizer, template units qualifier, call ../parse/prn,
+  call ../parse/fconv, call strings-token-span (coordinator lands it after the gen2 driver merge; rebase),
+  classes via classmap from facts tokens/builtin (E.TK no longer mutated), rules sections with freshrows
+  units-fresh.tsv@section, foreach length/counters/separators/trailer, unit-labels, main12 export acc_state/acc_acts,
+  modelinput call + layoutprovenance plain rows + gates template over a key table.
+
+## Round 12 (2026-10-03) — units-manifest design checks (nothing new landed)
+- strings-token-span not on origin/main yet (1f495b5d).
+- Manifest forms confirmed against assemble.py: classes via existing opts `classes` (one json fact dict incl.
+  builtin, from k2-units-tokens); rejects via `let` from facts into env then seq `reject0=@rej:{reject0}` (cdx
+  token-span pattern); texts via opts `textrows units-text.tsv`; fresh via freshrows list form
+  {"file":"units-fresh.tsv","where":{"section":"SEC"},"owner":"{prefix}.units_{key}","kind":"{kind}","key":"{key}"}
+  (E.P(owner).fresh = old P(...).fresh; the string form uses unregistered holders -> different labels);
+  length/counters/separators/trailer loops need fact tables (add to the k2-units-tokens producer from the
+  units-*.tsv files); layoutprovenance plain: call ../modelinput (key=@bytes:=RESOURCE, facts
+  top-layoutprovenance-const) + rows ../layoutprovenance section plain, freshrows from layoutprovenance-fresh.tsv
+  (old code: one P(prefix+'.fresh') per prefix; verify per-row E.P(owner) gives the same labels).
+- BLOCKER (coordinator): gates template `redirect ... {G.acts}` needs the producer's acts as JSON text. A named
+  result is a list of tuples; template substitution is str(value) (python repr, not JSON) and graph edits
+  (redirect) do not splice sequences. Options: (a) acc_acts json fact derived from units-text.tsv text5 (the
+  producing row's text; P4-borderline); (b) marked assemble change: list-valued template scalars json-dumped
+  (value-form change, no opts key); (c) redirect splices `["@", NAME]` sequences (finite_rules change).
+
+## Round 13 (2026-10-03)
+- Coordinator chose (b): finite_rules template var renders list values as JSON (marked change).
+- Landed 5e0c52c4: exec/parse2/units-manifest.tsv (generator .k2tmp/mk.py was scratch, not kept): plain mode via
+  `exec/build/gen.py parse2/units OUT`; `--locations` row is `let exit` (units.py keeps that mode). Order matches
+  units.py: tokenizer, prn, fconv, qualifier redirect, strings-token-span (call with TK_STR from parse-constants),
+  rules sections (freshrows file form, owner {prefix}.units_{key}), foreach lengths/counters/separators/trailer
+  over k2-units-tokens tables, unit-labels (tk_goto/tk_colon facts), main12, let textrows (text5 = producer acts),
+  modelinput call (RESOURCE from top-layoutprovenance-const), layoutprovenance plain rows (freshrows owner
+  {prefix}.fresh), template gatesk (each keys 0..256, over acc=[{state DONE, acts $text5}], terminal SFU.accept).
+  Hash 6fc8d7f5 identical (tested with cdx's strings-token-span draft copied, uncommitted).
+- Pending: strings-token-span on main (rebase); full graphhash for the finite_rules change (running); then switch
+  tests/graphhash.py plain entry to `exec/build/gen.py parse2/units`, prepare.sh/exec/c callers for plain; units.py
+  stays for --locations (layoutprovenance.units()/accept_gates stay until then; layoutprovenance.parser() for gen2).

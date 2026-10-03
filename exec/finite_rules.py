@@ -336,7 +336,8 @@ def expand_template(path, facts, fresh, section=None):
                         if not isinstance(value, dict) or m.group(2) not in value:
                             raise ValueError(f"{where}: no field {m.group(0)}")
                         value = value[m.group(2)]
-                    return str(value)
+                    # K2 marked change: a list value (e.g. a named action sequence) renders as JSON, not repr
+                    return json.dumps([list(x) if isinstance(x, tuple) else x for x in value]) if isinstance(value, list) else str(value)
                 return _VAR.sub(var, _FRESH.sub(fr, _ROWFRESH.sub(rf, _PREV.sub(pv, text))))
 
             def run(items, scope):
