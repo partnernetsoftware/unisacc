@@ -658,6 +658,15 @@ def k2gen2():
                                    u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
     syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
     autonames = [dict(name=nm) for nm in G.E.autonames()]
+    i32 = G.TYINFO["i32"][0]
+    gen2parts = dict(
+        localdecl=dict(classes=dict(identifier=[G.TK_ID], paren=[G.TK["("]]), seqs=dict(reject=acts(G.E.rej("not covered: declarator")))),
+        longdouble=dict(consts=dict(DBL=G.DBL), classes=dict(double=[G.TK["type=double"]])),
+        positive=dict(consts=dict(INT=i32),
+                      classes=dict(promote=[G.BOOL] + [c for _, c, z, _, _ in G.TYINT if z < i32],
+                                   arithmetic=[G.DBL, G.FLT] + [c for _, c, z, _, _ in G.TYINT if z >= i32]),
+                      seqs=dict(reject=acts(G.E.rej("not covered: unary + requires arithmetic operand")))),
+        tentative=dict(consts=dict(TENTATIVE=764 << 40)))
     scopeconst = {n: getattr(G.E, n) for n in ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
     scopeconst.update(VALUEBANK=G._VR["VALUEBANK"], TYPERANK=G.TYPERANK, LOC=G.LOC, END_=G.END_, ENV=G.ENV, VLSIZE=G.VLSIZE,
                       UNDO_SIZE=G.UNDO_SIZE, SHAPE=G.SHAPE, TDE=G.TDE)
@@ -755,6 +764,7 @@ def k2gen2():
             "=widthd\tjson\t" + dump(widthd), "=widthconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, SBB=G.SBB)),
             "=widthparts\tjson\t" + dump(widthparts),
             "=scopeconst\tjson\t" + dump(scopeconst), "=scopeseqs\tjson\t" + dump(scopeseqs),
+            "=gen2parts\tjson\t" + dump(gen2parts),
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 

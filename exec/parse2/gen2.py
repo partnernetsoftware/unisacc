@@ -281,9 +281,8 @@ def types():
     # The bounded lookahead for a tentative incomplete array is a declared
     # transition graph.  Token codes are stable parser facts; the source row
     # set is exec/parse2/tentative-result.tsv.
-    E.g.labels.update(("DM.tent.scan", "DM.tent.after"))
-    install_rules(g, os.path.dirname(__file__), "tentative",
-                  bindings=dict(TENTATIVE=764 << 40), section="main")
+    import assemble
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_tentative=1))
     shape_control("dimensions")
 
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
@@ -301,9 +300,7 @@ def types():
     segment("types-typedef")
     segment("types-word")   # foreach facts k2-gen2 typewords
     segment("types-tail")
-    install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="long-double",
-                  bindings=dict(DBL=DBL), classes=dict(double=[TK["type=double"]]))
-
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_longdouble=1))
 
 def shape_control(section):
     """Shape descriptors: exec/parse2/shape-manifest.tsv (K2 sub-manifest; membercontrol still calls this)."""
@@ -388,10 +385,8 @@ def build(locations=False, warnings=False, errors=False):
     # decoder for lookahead; ordinary qualifier recursion must still pass
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
-    install_template(g, os.path.dirname(__file__), "stage-edits", {},
-                     P("NX").fresh, section="startup")
-    install_template(g, os.path.dirname(__file__), "stage-edits", {},
-                     lambda kind: None, section="startup-entry", mode="b", domain=[64])
+    import assemble
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_startup=1))
     segment("startup-marker")
     import assemble
     assemble.run(Path(__file__).parent / "strings-token-span-manifest.tsv", E, P, {}, dict(TK_STR=E.TK_STR))
@@ -468,9 +463,7 @@ def build(locations=False, warnings=False, errors=False):
     local_control("local4", warnings)
     shape_control("local-binding")
     local_control("local6", warnings)
-    install_rules(g, os.path.dirname(__file__), "local-declarators",
-                  classes=dict(identifier=[TK_ID], paren=[TK["("]]),
-                  sequences=dict(reject=E.rej("not covered: declarator")), section="main")
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_localdecl=1))
     local_control("local8", warnings)
     return_control("ret0")
     return_control("ret1", dict(addr_end=addr(P("S.rs3")).cur))
@@ -567,11 +560,7 @@ def build(locations=False, warnings=False, errors=False):
     # address is evaluated once; its value kind then selects step/load/store.
     for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
         update_control("prefix",dict(name=prefixname,op=op,prefixfix=prefixfix))
-    install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="positive",
-                  bindings=dict(INT=TYINFO["i32"][0]),
-                  classes=dict(promote=[BOOL] + [code for _, code, size, _, _ in TYINT if size < TYINFO["i32"][0]],
-                               arithmetic=[DBL, FLT] + [code for _, code, size, _, _ in TYINT if size >= TYINFO["i32"][0]]),
-                  sequences=dict(reject=E.rej("not covered: unary + requires arithmetic operand")))
+    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_positive=1))
     import assemble
     unit_span = int(re.search(r"^#define MAXTOK ([0-9]+)\b", Path(E.ROOT, "src/front_pp.c").read_text(), re.M).group(1))
     assemble.run(Path(__file__).resolve().parent / 'unarycontrol-manifest.tsv', E, P, dict(warnings=warnings),
