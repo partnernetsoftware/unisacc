@@ -12,7 +12,8 @@ from modelgraphequality import install as graph_install,FIELDS,EDGES,LAYOUT
 from finite_rules import install as install_rules,install_template
 from facts.load import facts
 from ordered import install as ordered_install,REGS as ORDERED_REGS
-SIGWIRE,SIGMARK,FRAME=(i<<40 for i in range(480,483))
+_K={r['name']:r['value'] for r in facts('nativeabi-gen-regions')}
+SIGWIRE,SIGMARK,FRAME=_K['SIGWIRE'],_K['SIGMARK'],_K['FRAME']
 
 def install(E):
  P=E.P;graph_install(E)

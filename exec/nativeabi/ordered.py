@@ -7,8 +7,8 @@ import json,pathlib
 from finite_rules import install as install_rules,install_template
 from modelgraphequality import EXTRA,ENTRYEXTRA,EDGES,LAYOUT
 # Additional values saved by NL's existing isolated recursive frame.
-REGS=('nl_bitoffset','nl_bitwidth','nl_entrykind','nl_entryalign','nl_cursor',
-      'nl_accblo','nl_accbhi','nl_accanon','nl_acccount','nl_hcountchild')
+from facts.load import facts
+REGS=tuple(facts('nativeabi-ordered-regs'))
 # ol_packed is deliberately NOT frame-saved: one packed node anywhere marks the whole object.
 def install(E,field,word,constword,blob,extents,alignments):
  """Stage control lives in ordered-result.tsv (section main: metadata, interval, aggregate
