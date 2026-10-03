@@ -54,6 +54,7 @@ from unisa.tsvgold import load_table
 from pathlib import Path
 sys.path.insert(0, os.path.join(ROOT, "exec"))
 from finite_rules import install as install_rules
+from finite_rules import install_template
 
 _name, _fields, _heads, _rows = load_table(os.path.join(ROOT, "weights/gold/pp.tsv"))
 assert _name == "pp" and [n for n, _ in _fields] == ["dir", "defined"]
@@ -289,9 +290,9 @@ def build_xe(g):
     layout["XOB_PREV"] = XOB - 1
     layout.update(("PREC_" + str(c), p) for c, (_, p, _) in XOPS.items())
     from unisa.front.lex import ESC
-    for ch, value in ESC.items():
-        if ch not in '01234567x':
-            g.on('XCESC', [ord(ch)], 'XCHEND', [('ADV',), ('LDI', 'xr', ord(value))])
+    simple = [{"code": ord(ch), "value": ord(value)} for ch, value in ESC.items() if ch not in '01234567x']
+    install_template(g, HERE, "escape", {"esc": simple}, None, section="escape", mode="b",
+                     domain=[e["code"] for e in simple])   # the rest of XCESC is literal-byte.tsv
     install_rules(g, HERE, "literal", layout)
     install_rules(g, HERE, "expression", layout)
     install_rules(g, HERE, "reduce", layout)

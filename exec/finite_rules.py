@@ -28,7 +28,13 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `rename` a=OLD b=NEW (state renamed, every target OLD redirected to NEW,
     every PUSH OLD argument in an action sequence rewritten to PUSH NEW),
     `alias` a=STATE b=TARGET (STATE goes to TARGET on every observation),
-    `prepend` a=STATE d=JSON actions (actions run before every edge of STATE).
+    `prepend` a=STATE d=JSON actions (actions run before every edge of STATE),
+    `insert-edge` a=STATE b=KEY c=TARGET d=JSON actions (KEY must be absent),
+    `fill-edge` a=STATE b=KEY c=TARGET d=JSON actions (existing KEY has precedence),
+    `drop-edge` a=STATE b=KEY (KEY must exist),
+    `set-mode` a=STATE b=OLD c=NEW (OLD must match).
+    `copy-state` a=SOURCE b=NEW (shallow alias, no target rewriting),
+    `move-state` a=OLD b=NEW (move without target rewriting).
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -260,8 +266,8 @@ def expand_template(path, facts, fresh, section=None):
                     prev.update(rowlabels)
                     if kind == "rule":
                         out.append("\t".join((a2, b2, c2, d2)))
-                    elif kind in ("rename", "alias", "prepend"):
-                        edits.append((where, kind, a2, b2, d2))
+                    elif kind in ("rename", "alias", "prepend", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state"):
+                        edits.append((where, kind, a2, b2, c2, d2))
                     else:
                         raise ValueError(f"{where}: unknown template kind {kind}")
             run(_loops(body, f"{path}"), env)
@@ -269,21 +275,51 @@ def expand_template(path, facts, fresh, section=None):
 
 
 def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
-                     section=None, mode="r"):
+                     section=None, mode="r", domain=range(257)):
     path = Path(root) / (stem + "-template.tsv")
     lines, edits = expand_template(path, facts, fresh, section)
     if lines:
-        for state, row in load(path, sequences or {}, bindings=bindings, classes=classes,
+        for state, row in load(path, sequences or {}, domain, bindings=bindings, classes=classes,
                                lines=lines).items():
             for key, (target, actions) in row.items():
                 g.on(state, [key], target, actions, mode)
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
-    for where, kind, a, b, d in edits:
+    for where, kind, a, b, c, d in edits:
         if kind == "alias":
             g.on(a, range(257), b, [], mode)
             continue
         if a not in g.st:
             raise ValueError(f"{where}: {kind} of absent state {a}")
+        if kind in ("copy-state", "move-state"):
+            if b in g.st:
+                raise ValueError(f"{where}: {kind} onto existing state {b}")
+            g.st[b] = g.st[a] if kind == "copy-state" else g.st.pop(a)
+            continue
+        if kind in ("insert-edge", "fill-edge", "drop-edge"):
+            if not b.isdecimal() or not 0 <= int(b) <= 256:
+                raise ValueError(f"{where}: invalid edge key {b}")
+            key = int(b)
+            present = key in g.st[a][1]
+            if kind == "drop-edge":
+                if not present:
+                    raise ValueError(f"{where}: absent edge {a}/{key}")
+                del g.st[a][1][key]
+            else:
+                if present and kind == "insert-edge":
+                    raise ValueError(f"{where}: duplicate edge {a}/{key}")
+                if present:
+                    continue
+                row = load(path, sequences or {}, domain=[key], bindings=bindings,
+                           lines=["\t".join((a, b, c, d))])
+                target, actions = row[a][key]
+                g.on(a, [key], target, actions, g.st[a][0])
+                g.labels.update(x[1] for x in actions if x[0] == "PUSH")
+            continue
+        if kind == "set-mode":
+            if g.st[a][0] != b or c not in ("b", "r"):
+                raise ValueError(f"{where}: mode precondition failed for {a}")
+            g.st[a] = (c, g.st[a][1])
+            continue
         if kind == "rename":
             if b in g.st:
                 raise ValueError(f"{where}: rename onto existing state {b}")
