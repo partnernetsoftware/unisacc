@@ -136,7 +136,11 @@ def fingerprint(jobs):
         entry = manifest.get('suites', {}).get(name)
         if entry and 'family' in entry:
             entry = dict(manifest['families'][entry['family']], command=entry['command'], family=entry['family'])
-        audited = entry is not None and command == entry['command']
+        # a declared command may name the candidate as {MODEL_COM}: gate.sh expands
+        # ${MODEL_COM:-./unisacc.com} at list time, so the path differs between runs while the
+        # job does not (its bytes are an executable input either way)
+        mc = settings.get('MODEL_COM') or './unisacc.com'
+        audited = entry is not None and command == [mc if a == '{MODEL_COM}' else a for a in entry['command']]
         inventory, extra = {}, None
         if entry and entry.get('reviewed_trees'):
             for tree, reviewed in entry['reviewed_trees'].items():

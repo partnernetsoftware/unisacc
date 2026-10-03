@@ -39,6 +39,9 @@ def main(names):
     bad = 0
     for name in names:
         command, files, trees = declared(name)
+        mc = os.environ.get('MODEL_COM') or './unisacc.com'
+        command = [mc if a == '{MODEL_COM}' else a for a in command]
+        files = files | {'unisacc.com', 'unisacc.com.build.json'} if mc == './unisacc.com' else files
         with tempfile.NamedTemporaryFile('w', suffix='.sb', delete=False) as f:
             f.write(profile(files, trees)); sb = f.name
         r = subprocess.run([sys.executable, str(ROOT / 'tests/bound.py'), '55', 'sandbox-exec', '-f', sb] + command,

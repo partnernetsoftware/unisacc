@@ -48,6 +48,13 @@ def main():
                 else:
                     cur = digest(f)[1]
                 if cur and cur != sha: changed.append((fam, 'guard:' + n)); entry['guards'][n] = cur
+        # 0.0.23 E: per-suite guards (the audited lib-* declarations) follow HEAD too
+        for name, entry in d.get('suites', {}).items():
+            for n, sha in list(entry.get('guards', {}).items()):
+                f = pathlib.Path(tmp) / n
+                blob2 = None if f.is_file() else subprocess.run(['git', 'show', 'HEAD:' + n], cwd=R, capture_output=True, timeout=30)
+                cur = digest(f)[1] if f.is_file() else (hashlib.sha256(blob2.stdout).hexdigest() if blob2.returncode == 0 else None)
+                if cur and cur != sha: changed.append((name, 'guard:' + n)); entry['guards'][n] = cur
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
