@@ -236,37 +236,29 @@ ESC = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, "\\": 92, "'"
 
 
 def fmtwalk(pre, on_byte, on_d, on_end):
-    """Bind decoded format scanning to the current conversion catalog."""
-    bindings = {key:pre+'.'+suffix for key,suffix in
-                [('walk','w'),('percent','pc'),('width','width'),('precision','precision'),('length','length')]}
-    bindings.update(on_byte=on_byte, on_d=on_d, on_end=on_end)
-    classes = {name:json.loads(value) for name,value in tape_rows('helpers-classes.tsv')}
-    sequences = dict(reject=E.rej('not covered: printf conversion'))
-    install_rules(g, os.path.dirname(__file__), 'helpers', bindings=bindings, classes=classes,
-                  sequences=sequences, section='format')
-    rows = [('length', set(range(257))-PFCONV.keys(), bindings)] + [
-        ('conversion', [byte], dict(bindings, kind=kind)) for byte,kind in PFCONV.items()]
-    for section,domain,facts in rows:
-        install_rules(g, os.path.dirname(__file__), 'helpers', bindings=facts,
-                      sequences=sequences, classes=classes, section=section, domain=domain)
-    return bindings['walk']
+    """Decoded format scanning: exec/parse2/fmtwalk-manifest.tsv (K2 sub-manifest)."""
+    import assemble
+    assemble.run(Path(__file__).resolve().parent / 'fmtwalk-manifest.tsv', E, P, {},
+                 dict(pre=pre, on_byte=on_byte, on_d=on_d, on_end=on_end))
+    return pre + '.w'
 
 
 def printf(warnings=False):
-    from printfcontrol import install as printf_control
     import assemble
-    assemble.run(Path(__file__).resolve().parent / 'printfallback-manifest.tsv', E, P, dict(warnings=warnings), {})   # manifest has no mode rows; the flags were script globals
-    printf_control(E, P, "part0", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
+    _flags = dict(warnings=warnings)   # printfallback/printfcontrol manifests key on warnings only
+    assemble.run(Path(__file__).resolve().parent / 'printfallback-manifest.tsv', E, P, _flags, {})
+    env = {}
+    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-0-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part0', warnings=warnings))
     strwalk("FMT.walk","FMT.byte","FMT.end")
-    printf_control(E, P, "part1", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
+    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-1-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part1', warnings=warnings))
     fmtwalk("PF", "PF.b", "PF.d", "PF.end")
-    printf_control(E, P, "part2", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
+    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-2-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part2', warnings=warnings))
     strwalk("PL", "PL.cp", "PL.end")
     from strings import rules as string_rules
     string_rules(E, P, "wide_hooks")
-    printf_control(E, P, "part3", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
+    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-3-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part3', warnings=warnings))
     fmtwalk("PO", "PO.b", "PO.d", "PO.end")
-    printf_control(E, P, "part4", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
+    env = assemble.run(Path(__file__).resolve().parent / 'printfcontrol-4-manifest.tsv', E, P, _flags, dict(env, alphabet=HEX, section='part4', warnings=warnings))
 
 UNS = E.UNS   # unsigned char/short/int/long: UNS + size
 SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)

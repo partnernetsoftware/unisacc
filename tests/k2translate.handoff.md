@@ -31,7 +31,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   (template split leaves the leading \n in the tail). assemble.Run.fresh now interps `{NAME}` from env.
   gen2.addr is a 3-line shim calling the manifest; callers in callcontrol/unarycontrol should use
   `call addr` with bind entry=...,pending=... and read `$done` from the returned env (call op returns sub env as result).
-- Next: printf (part0..4 + strwalk/fmtwalk helpers + strings.wide_hooks) and structured_control (big binding
+- gen2.fmtwalk -> fmtwalk-manifest.tsv (hand-written; facts k2-fmtwalk.tsv: classes, lenkeys, conv rows; foreach over conv
+  with let keys=[c.byte] + domain_keys). printfcontrol translated (5 segments printfcontrol-0..4-manifest.tsv, facts
+  printfcontrol*.tsv, env alphabet/section/warnings) and deleted; gen2.printf now runs manifests + strwalk.
+  pgrep -f fails in this locale (illegal byte sequence): waiting loops on it end at once -> concurrent graphhash -> 142.
+- Next (was): printf (part0..4 + strwalk/fmtwalk helpers + strings.wide_hooks) and structured_control (big binding
   dict of gen2 constants -> needs a k2-control facts file; control-fresh/text/reject/stack/classes tsvs already exist).
 
 ## Next (coordinator decision: callbacks must NOT stay in the driver; gen2 itself will disappear)
