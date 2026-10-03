@@ -88,4 +88,30 @@ L.append('.foreach\t-\t-\t-\t-\t-\t-\t-\t{"over":"o.nf","as":"x"}')
 opx(sec="float-reject", dot="..")
 opx(sec="pointer-{ptr}")
 opx(sec="integer")
+# ladder (E then C): levels from facts k2-gen2 ladder; up/next labels built here; rejects from ladder-reject.tsv
+def ladder_rows(pf, bottom, gate):
+    L.append("foreach\t-\t-\t%s\tk2-gen2\t-\t-\t-\t" % gate + _d({"over": "ladder", "as": "L", "pre": [["lv", "L.lv"], ["nm", "@str:%s{lv}" % pf]]}))
+    for branch in ("mid", "last"):
+        L.append(".foreach\t-\t-\t-\t-\t-\t-\t-\t" + _d({"over": "L." + branch, "as": "x", "pre": [["n", "L.nxt"]]}))
+        if branch == "mid":
+            up, nx, sec = "@str:%s{n}" % pf, "@str:E{n}", "ladder-up"
+        else:
+            up, nx, sec = ("@str:" + bottom if bottom else None), "@str:UNARY", ("ladder-up" if bottom else "ladder-empty")
+        b = {"ladder_owner": "nm", "ladder_loop": "@str:{nm}.l", "ladder_up": up, "ladder_next": nx}
+        cc(sec, dict(b, word_state="nm"), {}, dot="..")
+        L.append("..let\t-\t-\t-\t-\t-\t-\tdisp=fresh:P:{nm}:b\t-")
+        b["ladder_dispatch"] = "$disp"
+        cc("ladder-read", dict(b, word_state="nm"), {}, dot="..")
+        L.append("..template\tdispatch\tladderop\t-\t-\tP:{disp}\t-\t-\t" + _d({"let": {"ctx": [{"dispatch": "$disp", "owner": "nm"}], "op": "L.ops"}}))
+        L.append("..foreach\t-\t-\t-\t-\t-\t-\t-\t" + _d({"over": "L.ops", "as": "q", "pre": [["o", "q.op"], ["mode", "q.mode"]]}))
+        L.append("..." + CC.format(w="-", s="ladder-{mode}") + _d({"let": {"extra": dict(b, ladder_operator="@str:{nm}.{o}", ladder_tail="@str:OPX.{o}", word_state="@str:{nm}.{o}"), "seqb": {}}}))
+_rej = [l.split("\t") for l in (Path(__file__).resolve().parents[2] / "exec/parse2/ladder-reject.tsv").read_text().split("\n")[1:] if l]
+def reject_rows(pf, gate):
+    for owner, state, message in _rej:
+        if owner in ("all", pf):
+            L.append("rows\tladder-reject\tmain\t%s\t-\t-\t-\treject_state=@str:%s\t" % (gate, state) + _d({"mapseq": {"reject": [{"acts": [["REJECT", message]]}]}}))
+ladder_rows("E", "UNARY", "fact:seg_ladder-E")
+reject_rows("E", "fact:seg_ladder-E-reject")
+ladder_rows("C", None, "fact:seg_ladder-C")
+reject_rows("C", "fact:seg_ladder-C-reject")
 Path(__file__).resolve().parents[2].joinpath("exec/parse2/gen2-manifest.tsv").write_text("\n".join(L) + "\n")

@@ -643,16 +643,21 @@ def k2gen2():
                        masktext=G.TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if unsigned and size < 8 else ""))
         current, first = nxt, []
     rsf = dict(current=current, first=first)
+    lm = dict(G.tape_rows("ladder-modes.tsv"))
+    ladder = [dict(lv=lv, nxt=G.LEVELS[i + 1] if i + 1 < len(G.LEVELS) else None,
+                   mid=[{}] if i + 1 < len(G.LEVELS) else [], last=[] if i + 1 < len(G.LEVELS) else [{}],
+                   ops=[dict(op=o, key=G.TK[o], mode=lm.get(o, lm["*"])) for o in G.OPS[lv]])
+              for i, lv in enumerate(G.LEVELS)]
     return ["=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
             "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
             "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
             "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
             "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
-            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=AXF64\tint\t%d" % G.AX.index("f64")]
+            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
 TABLES = [
-    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/facts/export.py"], k2gen2),
+    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),

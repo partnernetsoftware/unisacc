@@ -164,33 +164,12 @@ def strwalk(pre, body, done):
 
 
 def ladder(prefix, bottom):
-    """Instantiate the shared precedence ladder from current operator facts."""
-    modes = dict(tape_rows("ladder-modes.tsv"))
-    for i, lv in enumerate(LEVELS):
-        nm = "%s%d" % (prefix, lv)
-        up = "%s%d" % (prefix, LEVELS[i + 1]) if i + 1 < len(LEVELS) else bottom
-        bindings = dict(ladder_owner=nm, ladder_loop=nm + ".l", ladder_up=up,
-                        ladder_next="E%d" % LEVELS[i + 1] if i + 1 < len(LEVELS) else "UNARY")
-        structured_control("ladder-up" if up else "ladder-empty", False, dict(bindings, word_state=nm))
-        dispatch = P(nm).fresh("b")
-        bindings["ladder_dispatch"] = dispatch
-        structured_control("ladder-read", False, dict(bindings, word_state=nm))
-        targets = {TK[o]: nm + "." + o for o in OPS[lv]}
-        ctx = dict(dispatch=dispatch, operators=[dict(key=key, target=target)
-                                                for key, target in targets.items()])
-        install_template(g, os.path.dirname(__file__), "dispatch", dict(ctx=[ctx], op=ctx["operators"]),
-                         P(dispatch).fresh, section="ladder")
-        for o in OPS[lv]:
-            structured_control("ladder-" + modes.get(o, modes["*"]), False,
-                               dict(bindings, ladder_operator=targets[TK[o]], ladder_tail="OPX." + o, word_state=targets[TK[o]]))
+    """Precedence ladder: gen2-manifest segments (levels, then E's operator tails, then rejects)."""
+    segment("ladder-" + prefix)
     if prefix == "E":
         segment("optail")
         tytail()
-    for owner, state, message in tape_rows("ladder-reject.tsv"):
-        if owner in ("all", prefix):
-            install_rules(g, os.path.dirname(__file__), "ladder-reject",
-                          bindings=dict(reject_state=state), sequences=dict(reject=E.rej(message)),
-                          section="main")
+    segment("ladder-%s-reject" % prefix)
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'facts')); from load import facts as _pffacts
