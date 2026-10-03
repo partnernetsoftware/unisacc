@@ -14,7 +14,7 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     from pathlib import Path
     from finite_rules import install as install_rules, load as load_rules
     from unisa.image.pe import IMPORTS
-    from pedelta import RELOCS
+    RELOCS = 4 << 40   # PE relocation region (exec/facts/enc-pedelta.tsv RELOCS)
     image_bindings = dict(DATA=DATA, LABD=LABD, OFF=OFF, RELOCS=RELOCS,
                           format_os={'macho':2,'pe':3,'elf':1}[image_format],
                           writer={'macho':'MACHO','pe':'PE','elf':'EH.elfwrite'}[image_format],
@@ -56,8 +56,8 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     install_rules(g, Path(__file__).parent, 'elfimage', section='iat-end',
                   bindings={'state': p.cur}, sequences={'pending': p.acts})
     if image_format=='pe':
-        from pedelta import install as install_pe
-        install_pe(E,byte,arch)
+        import assemble
+        assemble.run(Path(__file__).with_name('pedelta-manifest.tsv'), E, P, {}, {'arch': arch})
     if image_format=='macho':
         from machodelta import install as install_macho
         install_macho(E,byte,arch)
