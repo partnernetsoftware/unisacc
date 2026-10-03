@@ -54,12 +54,25 @@ def build(image=False, object_mode=False):
     for i in range(31):
         p.a(('SBCLR',), [('SBOUT', c) for c in ('x%d' % i).encode()],
             ('SBINTERN', 't'), ('LDI', 'u', i+1), ('STX', 't', REG, 'u'))
-    from arminput import init, install as install_input
-    init(p)
+    from tins import META
+    from unisa.image.pe import IMPORTS
+    # START metadata (was arminput.init / armwin.init / armwin.reset)
+    KEYS, IMP = next(r['value'] for r in facts('enc-arminput-bindings') if r['name'] == 'KEYS'), next(r['value'] for r in facts('enc-armwin-bindings') if r['name'] == 'IMP')
+    for key in facts('enc-arminput-keys'):
+        p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','id_'+key))
+    for n,key in enumerate(META,1):
+        p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','t'),('LDI','u',n),('STX','t',KEYS,'u'))
     from armlayout import init as init_layout, install as install_layout
     init_layout(p)
-    from armwin import init as init_win, reset as reset_win, install as install_win
-    init_win(p)
+    for key in facts('enc-armwin-keys'):
+        p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','wi_'+key))
+    for i,name in enumerate(IMPORTS):
+        p.a(('SBCLR',),[('SBOUT',c) for c in name.encode()],('SBINTERN','t'),('LDI','u',i+1),('STX','t',IMP,'u'))
+
+    def reset_win(r):
+        for k in facts('enc-armwin-reset'):
+            r.a(('LDI','wm_'+k,0))
+        return r
     from finite_rules import install as install_rules
     from functools import partial
     contract = partial(install_rules, g, Path(__file__).parent, 'armcontract')
@@ -126,10 +139,11 @@ def build(image=False, object_mode=False):
     env = {'word': word(P('word.binding')).acts}
     for stem in ('armmem', 'armbranch', 'armint', 'armfp'):
         assemble.run(here/(stem+'-manifest.tsv'), E, P, dict(image=image), env)
-    install_input(E,word)
+    env['meta_classes'] = {"meta_"+key: [index] for index, key in enumerate(META, 1)}
+    assemble.run(here/'arminput-manifest.tsv', E, P, {}, env)
     install_layout(E,word)
     assemble.run(here/'armitoa-manifest.tsv', E, P, {}, env)
-    install_win(E,word)
+    assemble.run(here/'armwin-manifest.tsv', E, P, {}, env)
     from hostbridge import install as install_hostbridge
     install_hostbridge(E,'arm64',word)
     if image:
