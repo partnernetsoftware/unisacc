@@ -30,22 +30,27 @@ def edges(delta):
 
 def main():
     stage, what = sys.argv[1], sys.argv[2]
-    assert stage in ('pp', 'lex', 'parse2'), 'stages so far: pp, lex, parse2'
+    assert stage in ('pp', 'lex', 'parse2', 'lower', 'enc'), 'stages: pp, lex, parse2, lower, enc'
     X = xdir(); out = X / 'rowcov'; out.mkdir(parents=True, exist_ok=True)
     ppj = X / 'e2/d.json'
     # lex runs on the preprocessor's output, so a lex shard first runs pp; its delta is the product's e1 (--typed)
     dj = ppj if stage == 'pp' else out / (stage + '.json')
     lexj = out / 'lex.json'
+    lowerj = out / 'lower.json'
+    FLAGS = {'lex': ['--typed'], 'lower': ['--full'], 'enc': ['--elf']}
     def build(log=None):
         if subprocess.run(['sh', 'exec/pp/run.sh', 'gen'], cwd=ROOT, capture_output=True).returncode:
             sys.exit('rowcov: building the pp delta failed (exec/pp/run.sh gen)')
         if stage == 'parse2' and not log:     # parse2 reads the typed lexer's tokens
             r = subprocess.run([sys.executable, 'exec/build/gen.py', 'lex', str(lexj), '--typed'], cwd=ROOT, capture_output=True)
             if r.returncode: sys.exit('rowcov: gen.py lex failed')
+        if stage == 'enc' and not log:        # enc reads lower's full TIns text
+            r = subprocess.run([sys.executable, 'exec/build/gen.py', 'lower', str(lowerj), '--full'], cwd=ROOT, capture_output=True)
+            if r.returncode: sys.exit('rowcov: gen.py lower failed')
         if stage != 'pp' or log:
             target = out / (stage + ('.sidecar.json' if log else '.json'))
             env = dict(os.environ, UNISACC_ROW_LOG=str(log)) if log else os.environ
-            r = subprocess.run([sys.executable, 'exec/build/gen.py', stage, str(target)] + (['--typed'] if stage == 'lex' else []),
+            r = subprocess.run([sys.executable, 'exec/build/gen.py', stage, str(target)] + FLAGS.get(stage, []),
                                cwd=ROOT, env=env, capture_output=True)
             if r.returncode: sys.exit('rowcov: gen.py %s failed' % stage)
             return target
@@ -151,6 +156,13 @@ def main():
         delta = json.loads(dj.read_text())
         lexdelta = json.loads(lexj.read_text()) if stage == 'parse2' else delta
         if stage == 'parse2': loaded = sim.load(delta)
+    elif stage in ('lower', 'enc'):
+        # the tape comes from the reference (-S), the inputs these stages see in the product chain
+        delta = json.loads(dj.read_text()); loaded = sim.load(delta); names = loaded[0]
+        lowerdelta = json.loads(lowerj.read_text()) if stage == 'enc' else delta
+        lowerloaded = sim.load(lowerdelta) if stage == 'enc' else loaded
+        ua = os.environ.get('UA', '/tmp/ua_ref')
+        subprocess.run(['sh', '-c', 'UA=%s; . ./tests/lib.sh; ua_ready' % ua], cwd=ROOT, capture_output=True)
         # the typed lexer runs on the shared core simulator, whose cov keys are state indices in this order
         names = list(delta['states']) + (['HALT'] if 'HALT' not in delta['states'] else [])
     else:
@@ -161,7 +173,15 @@ def main():
     for f in mine:
         c = set()
         try:
-            if stage == 'pp':
+            if stage in ('lower', 'enc'):
+                tape = subprocess.run([str(ROOT / 'tests/bound'), '20', ua, '-S', f, '-o', '/dev/stdout'], cwd=ROOT, capture_output=True).stdout
+                if tape:
+                    if stage == 'lower':
+                        sim.run(delta, tape, f, sim.Files(), cov=c, maxsteps=200_000_000, loaded=loaded)
+                    else:
+                        res, tins, _ = sim.run(lowerdelta, tape, f, sim.Files(), maxsteps=200_000_000, loaded=lowerloaded)
+                        if res == 'accept': sim.run(delta, tins, f, sim.Files(), cov=c, maxsteps=200_000_000, loaded=loaded)
+            elif stage == 'pp':
                 sim.run(delta, open(f, 'rb').read(), f, sim.Files(), cov=c, maxsteps=20_000_000, loaded=loaded)
             else:
                 res, val, _ = sim.run(ppdelta, open(f, 'rb').read(), f, sim.Files(), maxsteps=20_000_000, loaded=pploaded)
