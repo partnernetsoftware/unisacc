@@ -15,7 +15,7 @@ Manifest header lines read here:
   #! extra KEY STEM       output KEY = fact KEY of exec/facts/STEM.tsv
 Everything else (exclusive flags, env values, sub-manifests) is manifest rows.
 """
-import importlib.util, json, pathlib, sys
+import importlib.util, json, os, pathlib, sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "exec"))
 import assemble
@@ -61,6 +61,9 @@ if "domains" in head:
     E.g.finish(start, {r["mode"]: r["values"] for r in assemble.load_facts(s)[s]})
 else:
     E.g.finish()
+if os.environ.get('UNISACC_ROW_LOG'):
+    from finite_rules import write_final_row_log
+    write_final_row_log(E.g)
 d = {'start': start, 'states': {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in E.g.st.items()},
      'seqs': [list(map(list, s)) for s in E.g.seqs]}
 for k, s in (head["extra"][i:i + 2] for i in range(0, len(head.get("extra", [])), 2)):

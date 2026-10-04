@@ -107,7 +107,7 @@ def _keyset(path, lineno, part, domain, classes):
 
 
 def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None, lines=None,
-         overlay=False, line_numbers=None):
+         overlay=False, line_numbers=None, provenance=None):
     domain = set(domain)
     explicit, defaults = {}, {}
     row_log = os.environ.get("UNISACC_ROW_LOG")
@@ -224,7 +224,9 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                     values.append(value)
                 expanded.append(tuple(values))
             row[key] = target, expanded
-    if row_log:
+    if provenance is not None and row_sources is not None:
+        provenance.update(row_sources)
+    elif row_log:
         root = Path(__file__).resolve().parent.parent
         source_path = Path(path).resolve()
         try:
@@ -238,17 +240,85 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
     return explicit
 
 
+class _TrackedRow(dict):
+    """Observe template edits only when provenance logging is enabled."""
+    def __init__(self, g, state, row):
+        super().__init__(row)
+        self.g, self.state = g, state
+
+    def __setitem__(self, key, edge):
+        super().__setitem__(key, edge)
+        origin = getattr(self.g, "_active_row_origin", None)
+        if origin is not None:
+            self.g._row_origins[self.state, key] = (edge, *origin)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        if hasattr(self.g, "_row_origins"):
+            self.g._row_origins.pop((self.state, key), None)
+
+
+def _track_row(g, state):
+    mode, row = g.st[state]
+    if isinstance(row, _TrackedRow) and row.state == state:
+        return
+    tracked = _TrackedRow(g, state, row)
+    g.st[state] = [mode, tracked] if isinstance(g.st[state], list) else (mode, tracked)
+    origin = getattr(g, "_active_row_origin", None)
+    if origin is not None:
+        for key, edge in tracked.items():
+            g._row_origins[state, key] = (edge, *origin)
+
+
+def _track_all_rows(g):
+    for state in list(g.st):
+        _track_row(g, state)
+
+
+def _row_origin(g, state, key, before, after, source, path):
+    """Remember the installed edge and its declaration; graph edits are audited at finish."""
+    if not os.environ.get("UNISACC_ROW_LOG"):
+        return
+    if (before is None or before != after or getattr(g, "states", None) is g.st or
+            (state, key) not in getattr(g, "_row_origins", {})):
+        if not hasattr(g, "_row_origins"):
+            g._row_origins = {}
+        g._row_origins[state, key] = (after, str(path), source)
+    _track_row(g, state)
+
+
+def write_final_row_log(g):
+    """Emit one owner per final live edge; edited edges get an explicit synthetic owner."""
+    row_log = os.environ.get("UNISACC_ROW_LOG")
+    if not row_log:
+        return
+    origins = getattr(g, "_row_origins", {})
+    with open(row_log, "w", encoding="utf-8") as out:
+        for state, (_, row) in g.st.items():
+            for key, edge in row.items():
+                actions = g.seqs[edge[1]]
+                if any(a and a[0] == "REJECT" and len(a) > 1 and a[1] == "unreachable" for a in actions):
+                    continue
+                remembered = origins.get((state, key))
+                path, line = (remembered[1], remembered[2]) if remembered and remembered[0] == edge else ("synthetic", 0)
+                out.write(f"{state}\t{key}\t{path}\t{line}\n")
+
+
 def install_rows(g, path, sequences=None, domain=range(257), bindings=None,
                  classes=None, section=None, mode="r", skip=(), ordered=False):
     """skip: states not installed; ordered: keys written in domain order (else rule order)."""
+    origins = {} if os.environ.get("UNISACC_ROW_LOG") else None
     rows = load(Path(path), sequences or {}, domain=domain, bindings=bindings,
-                classes=classes, section=section)
+                classes=classes, section=section, provenance=origins)
     for state, row in rows.items():
         if state in skip:
             continue
         for key in (domain if ordered else list(row)):
             target, actions = row[key]
+            before = g.st.get(state, (None, {}))[1].get(key)
             g.on(state, [key], target, actions, mode)
+            if origins is not None:
+                _row_origin(g, state, key, before, g.st[state][1][key], origins[state, key], path)
             g.labels.update(a[1] for a in actions if a[0] == "PUSH")
     return len(rows)
 
@@ -492,14 +562,27 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
     origins = []
     lines, edits, modes = expand_template(path, facts, fresh, section, origins=origins)
     if lines:
+        sources = {} if os.environ.get("UNISACC_ROW_LOG") else None
         for state, row in load(path, sequences or {}, domain, bindings=bindings, classes=classes,
-                               lines=lines, overlay=overlay, line_numbers=origins).items():
+                               lines=lines, overlay=overlay, line_numbers=origins,
+                               provenance=sources).items():
             for key, (target, actions) in row.items():
+                before = g.st.get(state, (None, {}))[1].get(key)
                 g.on(state, [key], target, actions, modes.get(state, mode))
+                if sources is not None:
+                    _row_origin(g, state, key, before, g.st[state][1][key], sources[state, key], path)
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+    if os.environ.get("UNISACC_ROW_LOG") and edits:
+        if not hasattr(g, "_row_origins"):
+            g._row_origins = {}
+        _track_all_rows(g)
     groups = {}
     pending = []
     for ix, (where, kind, a, b, c, d) in enumerate(edits):
+        if os.environ.get("UNISACC_ROW_LOG"):
+            _track_all_rows(g)  # states created by the preceding edit
+            edit_path, edit_line = where.rsplit(":", 1)
+            g._active_row_origin = (str(Path(edit_path)), int(edit_line))
         if bindings is not None:
             a, b, c = (bindings[x[1:]] if x.startswith("$") and type(bindings.get(x[1:])) is str
                        else x for x in (a, b, c))
@@ -664,4 +747,7 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                 g.st[a][1][key] = (target, g.seq(acts + extra if kind == "append" else extra + acts))
     if not lines and not edits:
         raise ValueError(f"{stem}: no template rows for section {section}")
+    if os.environ.get("UNISACC_ROW_LOG"):
+        _track_all_rows(g)
+        g._active_row_origin = None
     return groups
