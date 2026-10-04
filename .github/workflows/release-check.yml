@@ -222,3 +222,45 @@ jobs:
         with:
           name: demo-matrix
           path: matrix.json
+
+  winsuite-prepare:
+    # 0.0.25 X7: the Windows probes that needed the UTM VM (winposix, crossnative examples,
+    # forward/win.c) are built here and run on real Windows runners below.  The expected
+    # outputs come from this macOS runner's cc, as the local suites took them from the Mac.
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: reference compiler from this tree
+        run: python3 tests/bound.py 58 ./tests/build_ref.sh "$RUNNER_TEMP/ua.c" "$RUNNER_TEMP/ua"
+      - name: build the Windows probes and expected outputs
+        run: python3 tests/winsuite.py prepare winsuite "$RUNNER_TEMP/ua"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winsuite
+          path: winsuite
+
+  winsuite:
+    needs: winsuite-prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: win/x86_64 }
+          - { runner: windows-11-arm, target: win/arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: winsuite
+          path: winsuite
+      - name: run the probes on this Windows machine (${{ matrix.runner }})
+        run: python tests/winsuite.py run winsuite ${{ matrix.target }}
