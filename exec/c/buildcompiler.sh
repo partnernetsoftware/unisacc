@@ -9,6 +9,24 @@ case $step in all|shared|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pa
 [ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
 mkdir -p "$1"; T=$(cd "$1" && pwd)
 b() { python3 "$R/tests/bound.py" 50 "$@"; }
+# 0.0.25 B3: SEED_C=1 turns delta JSON -> table -> network into the C99 seed tools (seed/tbl.c,
+# seed/net.c) built by the installed previous release, unisacc.com, instead of exec/c/tbl.py and
+# net.py.  Both routes must give the same bytes (tests/seedconstructmatrix.py); default stays Python
+# until the switch is proven on whole candidates.
+tn() {   # tn JSON TBL NET
+    if [ "${SEED_C:-0}" = 1 ]; then
+        if [ ! -x "$T/seedbin/seed-net" ] || [ ! -x "$T/seedbin/seed-tbl" ]; then
+            mkdir -p "$T/seedbin"
+            b sh "$R/unisacc.com" "$R/seed/tbl.c" -o "$T/seedbin/seed-tbl"
+            b sh "$R/unisacc.com" "$R/seed/net.c" -o "$T/seedbin/seed-net"
+        fi
+        b "$T/seedbin/seed-tbl" "$1" "$2"
+        b "$T/seedbin/seed-net" "$2" "$3"
+    else
+        b python3 exec/c/tbl.py "$1" "$2"
+        b python3 exec/c/net.py "$2" "$3"
+    fi
+}
 # Reuse the model preparation identity/digest implementation. These are completion
 # records, not a result cache: requested stages always rebuild their own outputs.
 manifest() {
@@ -58,8 +76,7 @@ shared() {
     b python3 exec/build/gen.py prune "$T/shared/prune.json"
     b python3 exec/build/gen.py nativeabi "$T/shared/nativeabi.json"
     for s in e2 e1 e3 e4 o1 prune nativeabi; do
-        b python3 exec/c/tbl.py "$T/shared/$s.json" "$T/shared/$s.tbl"
-        b python3 exec/c/net.py "$T/shared/$s.tbl" "$T/shared/$s.net"
+        tn "$T/shared/$s.json" "$T/shared/$s.tbl" "$T/shared/$s.net"
     done
     manifest write shared
     echo 'completed compiler shared models and kernels'
@@ -72,8 +89,7 @@ target() {
     b python3 exec/build/gen.py lower "$d/lower.json" --full $osflag $archflag
     b python3 exec/build/gen.py "$enc" "$d/elf.json" "--$image"
     for s in lower elf; do
-        b python3 exec/c/tbl.py "$d/$s.json" "$d/$s.tbl"
-        b python3 exec/c/net.py "$d/$s.tbl" "$d/$s.net"
+        tn "$d/$s.json" "$d/$s.tbl" "$d/$s.net"
     done
     awk -v route="$os/$arch" '!/^#/ && NF {
         file=$4; if ($1=="e2" || $1=="e1" || $1=="e3" || $1=="e4" || $1=="prune") file="../shared/" file;
