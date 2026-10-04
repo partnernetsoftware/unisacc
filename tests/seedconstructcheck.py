@@ -34,11 +34,11 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     # 0.0.25 B4: the manifest -> delta step in C, one stage at a time (seed/gen.c); prune first
     cgen = work / "seed-gen"
     run("sh", str(ROOT / "unisacc.com"), "seed/gen.c", "-o", str(cgen))
-    for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ())):
+    for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",))):
         tag = stage + "".join(flags)
         ref = graph if stage == "prune" else work / (tag + ".py.json")
         if stage != "prune": run("python3", "exec/build/gen.py", stage, str(ref), *flags, timeout=50)
         c_json = work / (tag + ".c.json")
         run(str(cgen), stage, str(c_json), *flags, timeout=50)
         assert c_json.read_bytes() == ref.read_bytes(), "seed/gen.c %s delta differs from exec/build/gen.py" % stage
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2 and lex deltas byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex and lex --typed deltas byte-identical")
