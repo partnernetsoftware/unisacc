@@ -383,6 +383,25 @@ static long readlink(const char *__u_p, char *__u_buf, size_t __u_n) {
 #endif
 }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_ttyname
+static char *ttyname(int __u_fd) {             /* 0.0.24 D2: the terminal's path, or 0 with errno */
+    static char __u_tn[1024]; long __u_r;
+    if (!isatty(__u_fd)) return 0;
+#ifdef __APPLE__
+    __u_r = __fcntl(__u_fd, 50, (long)__u_tn);  /* F_GETPATH */
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; }
+#else
+    {   char __u_p[32]; int __u_k; int __u_d; char __u_dig[12];
+        { const char *__u_s; __u_s = "/proc/self/fd/"; for (__u_k = 0; __u_k < 14; __u_k = __u_k + 1) __u_p[__u_k] = __u_s[__u_k]; } __u_k = 0; __u_d = __u_fd;
+        do { __u_dig[__u_k] = (char)(48 + __u_d % 10); __u_d = __u_d / 10; __u_k = __u_k + 1; } while (__u_d);
+        __u_d = 14; while (__u_k) { __u_k = __u_k - 1; __u_p[__u_d] = __u_dig[__u_k]; __u_d = __u_d + 1; } __u_p[__u_d] = 0;
+        __u_r = readlink(__u_p, __u_tn, sizeof(__u_tn) - 1);
+        if (__u_r < 0) return 0;
+        __u_tn[__u_r] = 0; }
+#endif
+    return __u_tn;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_symlink
 static int symlink(const char *__u_old, const char *__u_new) {
 #if defined(__APPLE__) || defined(__x86_64__)
