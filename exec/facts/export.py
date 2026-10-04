@@ -1707,10 +1707,13 @@ def k2libraryenv():
     lx = {k: v for k, v in LX.items() if type(v) is int and v >= 1 << 40}
     bints = {'b_' + k: v for k, v in b.items() if type(v) is int}
     L = lambda acts: [list(a) for a in acts]
+    out_rows = [{'name': 'out ' + text.rstrip('\n'), 'kind': 'out', 'text': text}
+                for text in ('USLSIG2\n', 'USLSIG3\n', 'USLTAPE1\n')]
+    out_rows.append({'name': 'reject', 'kind': 'reject',
+                     'reason': 'not covered: library signature resource or duplicate definition'})
     lxenv = dict(constants=dict(lx, **{k: b[k] for k in ('FPS_FN', 'FPS_COUNT', 'FPS_VAR', 'FPS_RD', 'FPS_RB', 'FPS_RSH')}),
-                 out_seqs={'out USLSIG2': L(E.O('USLSIG2\n')), 'out USLSIG3': L(E.O('USLSIG3\n')), 'out USLTAPE1': L(E.O('USLTAPE1\n')),
-                           'reject': L(E.rej('not covered: library signature resource or duplicate definition'))},
-                 tk_static=E.TK['type=static'], allkeys=list(range(257)))
+                  out_names=[row['name'] for row in out_rows], out_rows=out_rows,
+                  tk_static=E.TK['type=static'], allkeys=list(range(257)))
     types = dict(bints, isize=next(size for name, code, size, uns, narrow in integers if name == 'i32'),
                  ints=[{'code': code, 'size': size, 'uns': int(uns)} for _, code, size, uns, _ in integers], E_ARR=E.ARR, gen2_DIM=G.DIM)
     imports = dict(bints, TK_ID=E.TK_ID, TK_SEMI=E.TK[';'], FPB_FPV=[b['FPB'], b['FPV']], BOOL=[b['BOOL']],
@@ -1728,14 +1731,14 @@ def k2libraryenv():
         if line:
             for a in json.loads(line.split('\t')[4]):
                 if a[0] == '@' and a[1].startswith('out:'):
-                    seqs[a[1]] = L(E.O(a[1][4:]))
+                    seqs[a[1]] = a[1][4:]
     callables = dict(constants=lc, classes={'uns1': [E.UNS + 1], 'uns2': [E.UNS + 2], 'bool': [b['BOOL']], 'float': [b['FLT']]},
-                     text_seqs=seqs)
+                     text_names=list(seqs), text_rows=[{'name': name, 'text': text} for name, text in seqs.items()])
     mainreason = assemble.load_facts('k2-librarymodule-map')['mainreason']
     dump = lambda x: json.dumps(x, separators=(",", ":"), sort_keys=True)
     return ["=lx\tjson\t" + dump(lxenv), "=types\tjson\t" + dump(types), "=imports\tjson\t" + dump(imports),
-            "=callables\tjson\t" + dump(callables), "=lm_header\tjson\t" + dump(L(E.O(E.HEADER))),
-            "=nomain\tjson\t" + dump(L(E.rej(mainreason))), "=ret\tjson\t" + dump(L(E.O('  ret\n')))]
+            "=callables\tjson\t" + dump(callables), "=lm_header_text\tjson\t" + dump(E.HEADER),
+            "=nomain_reason\tjson\t" + dump(mainreason), "=ret_text\tjson\t" + dump('  ret\n')]
 
 
 TABLES.append(("k2-libraryenv", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/build/parsebase.py", "exec/parse2/librarycallables-result.tsv",
