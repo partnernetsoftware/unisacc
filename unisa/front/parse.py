@@ -238,6 +238,7 @@ class Walker:
         base = None
         words = []
         self.saw_static = False
+        self.saw_extern = False
         while True:
             t = self.peek()
             if t.kind == "type":
