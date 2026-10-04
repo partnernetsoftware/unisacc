@@ -568,6 +568,134 @@ static void inspect_lets(const char *stage, const char *outpath, int argc, char 
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     value_write(out, env); if (fclose(out)) die("output close failed");
 }
+
+/* A template's `each` and `over` columns are finite products of fact lists.
+   This reader is intentionally stage-neutral: it expands declaration rows,
+   leaving graph installation and edits to the later constructor step. */
+typedef struct { char *block, *each, *over, *kind, *a, *b, *c, *d; int depth; } TRow;
+typedef struct { TRow *row; size_t n, cap; } TRows;
+typedef void (*TVisit)(Value *, void *);
+
+static Value *scope_add(Value *scope, const char *key, Value *value) {
+    Value *next = value_new(JOBJ); size_t i;
+    for (i = 0; i < scope->n; i++) value_put(next, scope->items[i].key, scope->items[i].value);
+    value_put(next, key, value);
+    return next;
+}
+static void tuple_walk(char *spec, Value *facts, Value *scope, TVisit visit, void *ctx) {
+    char *comma, *colon, *dot, *name, *source; Value *list; size_t i;
+    if (!strcmp(spec, "-") || !*spec) { visit(scope, ctx); return; }
+    comma = strchr(spec, ','); if (comma) *comma = 0;
+    colon = strchr(spec, ':');
+    if (colon) {
+        *colon = 0; name = spec; source = colon + 1;
+        dot = strchr(source, '.'); if (!dot) die("invalid dependent template fact");
+        *dot = 0; list = value_get(value_get(scope, source), dot + 1);
+    } else { name = spec; list = value_get(facts, name); }
+    if (!list || list->kind != JARR) die("unknown template fact list");
+    for (i = 0; i < list->n; i++) {
+        Value *next = scope_add(scope, name, list->items[i].value);
+        if (comma) tuple_walk(comma + 1, facts, next, visit, ctx);
+        else visit(next, ctx);
+    }
+    if (colon) { *colon = ':'; *dot = '.'; }
+    if (comma) *comma = ',';
+}
+static char *template_subst(const char *text, Value *scope) {
+    Buffer out = {0}; size_t i;
+    for (i = 0; text[i]; i++) {
+        if (text[i] == '{') {
+            const char *end = strchr(text + i + 1, '}'); char *path, *dot, number[64];
+            Value *value; const char *piece;
+            if (!end) die("unterminated template variable");
+            path = copy_n(text + i + 1, (size_t)(end - text - i - 1));
+            dot = strchr(path, '.'); if (dot) *dot++ = 0;
+            value = value_get(scope, path); if (dot) value = value_get(value, dot);
+            piece = value_scalar_text(value, number);
+            if (!piece) die("unbound template variable");
+            buf_add(&out, piece, strlen(piece)); free(path); i = (size_t)(end - text);
+        } else buf_char(&out, text[i]);
+    }
+    return out.s ? out.s : copy("");
+}
+typedef struct { TRows *rows; Value *facts; Buffer *out; size_t first, last; int depth; } TGroup;
+static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out,
+                            size_t first, size_t last, int depth);
+static void template_group_visit(Value *scope, void *arg) {
+    TGroup *g = arg; size_t i = g->first;
+    while (i < g->last) {
+        TRow *r = &g->rows->row[i];
+        if (r->depth == g->depth) {
+            char *a, *b, *c, *d;
+            if (strcmp(r->kind, "rule")) die("template graph edit not yet supported");
+            a = template_subst(r->a, scope); b = template_subst(r->b, scope);
+            c = template_subst(r->c, scope); d = template_subst(r->d, scope);
+            buf_add(g->out, a, strlen(a)); buf_char(g->out, '\t');
+            buf_add(g->out, b, strlen(b)); buf_char(g->out, '\t');
+            buf_add(g->out, c, strlen(c)); buf_char(g->out, '\t');
+            buf_add(g->out, d, strlen(d)); buf_char(g->out, '\n');
+            free(a); free(b); free(c); free(d); i++;
+        } else {
+            size_t end = i + 1;
+            if (r->depth != g->depth + 1) die("template loop depth jump");
+            while (end < g->last && g->rows->row[end].depth > g->depth) end++;
+            template_groups(g->rows, g->facts, scope, g->out, i, end, g->depth + 1);
+            i = end;
+        }
+    }
+}
+static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out,
+                            size_t first, size_t last, int depth) {
+    size_t i = first;
+    while (i < last) {
+        TRow *r = &rows->row[i]; size_t end = i + 1; TGroup group;
+        if (r->depth != depth || !strcmp(r->over, "=")) die("invalid template loop");
+        while (end < last && (rows->row[end].depth > depth ||
+               (rows->row[end].depth == depth && !strcmp(rows->row[end].over, "=")))) end++;
+        group = (TGroup){rows, facts, out, i, end, depth};
+        tuple_walk(r->over, facts, scope, template_group_visit, &group);
+        i = end;
+    }
+}
+static void template_block_visit(Value *scope, void *arg) {
+    TGroup *g = arg;
+    template_groups(g->rows, g->facts, scope, g->out, g->first, g->last, 0);
+}
+static void template_rows(TRows *rows, Value *facts, Buffer *out, size_t first, size_t last) {
+    TGroup group = {rows, facts, out, first, last, 0};
+    Value *scope = value_new(JOBJ);
+    tuple_walk(rows->row[first].each, facts, scope, template_block_visit, &group);
+}
+static void inspect_template(const char *stage, const char *section, const char *outpath) {
+    char path[1024]; FILE *f, *out; char *s; TRows rows = {0}; Buffer expanded = {0};
+    Value *facts = load_fact(!strcmp(stage, "lex") ? "lex-gen" : stage); size_t i;
+    if (snprintf(path, sizeof(path), "exec/%s/gen-template.tsv", stage) >= (int)sizeof(path)) die("template path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open template");
+    while ((s = line(f))) {
+        char *field[9]; int n; TRow *r; char *over;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("template column count");
+        if (strcmp(field[0], section)) { free(s); continue; }
+        if (rows.n == rows.cap) { rows.cap = rows.cap ? rows.cap * 2 : 32; rows.row = grow(rows.row, rows.cap, sizeof(*rows.row)); }
+        r = &rows.row[rows.n++];
+        over = field[3]; r->depth = 0; while (*over == '.') { r->depth++; over++; }
+        *r = (TRow){copy(field[1]), copy(field[2]), copy(over), copy(field[4]),
+                    copy(field[5]), copy(field[6]), copy(field[7]), copy(field[8]), r->depth};
+        free(s);
+    }
+    if (ferror(f) || fclose(f) || !rows.n) die("template read failed");
+    for (i = 0; i < rows.n;) {
+        size_t end = i + 1;
+        while (end < rows.n && !strcmp(rows.row[end].block, rows.row[i].block)) {
+            if (strcmp(rows.row[end].each, rows.row[i].each)) die("template block has two each lists");
+            end++;
+        }
+        template_rows(&rows, facts, &expanded, i, end); i = end;
+    }
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    if (expanded.n && fwrite(expanded.s, 1, expanded.n, out) != expanded.n) die("template write failed");
+    if (fclose(out)) die("template close failed");
+}
 static void inspect_fresh(const char *stage, const char *stem, const char *outpath, const char *initial) {
     char path[1024], *end; FILE *f, *out; char *s; int found = 0;
     fresh_count = strtoul(initial, &end, 10);
@@ -1108,6 +1236,9 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 5 && !strcmp(argv[1], "inspect-template")) {
+        inspect_template(argv[2], argv[3], argv[4]); return 0;
+    }
     if (argc >= 2 && !strcmp(argv[1], "opt") &&
         !(argc == 3 || (argc == 4 && !strcmp(argv[3], "--o2"))))
         die("opt accepts only --o2");
