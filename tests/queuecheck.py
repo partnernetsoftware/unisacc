@@ -259,7 +259,7 @@ with tempfile.TemporaryDirectory() as td:
     (cache/'e3.net').write_bytes(b'fixture'); del manifest['e3.net']
     (cache/'manifest.json').write_text(json.dumps(manifest)); assert not c.valid(cache,'1')
     seed=t/'source';seed.mkdir()
-    for d in ('exec','unisa','src','kernel','include','weights'): (seed/d).mkdir()
+    for d in ('exec','unisa','src','kernel','include','weights','seed'): (seed/d).mkdir()
     header=seed/'include/test.h';header.write_text('one')
     keywords=seed/'iterate/kernel/typekw.tsv'
     keywords.parent.mkdir(parents=True)

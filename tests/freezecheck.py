@@ -9,7 +9,7 @@ since then: once src/version.h carries the release number, a commit that changes
   tests/freezecheck.py [REPO]     exit 1 and name each offending commit
 """
 import subprocess, sys
-CLOSURE = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/')
+CLOSURE = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/', 'seed/')
 EXT = ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh')
 
 def git(repo, *a):

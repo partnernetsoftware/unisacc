@@ -11,10 +11,10 @@ mkdir -p "$1"; T=$(cd "$1" && pwd)
 b() { python3 "$R/tests/bound.py" 50 "$@"; }
 # 0.0.25 B3: SEED_C=1 turns delta JSON -> table -> network into the C99 seed tools (seed/tbl.c,
 # seed/net.c) built by the installed previous release, unisacc.com, instead of exec/c/tbl.py and
-# net.py.  Both routes must give the same bytes (tests/seedconstructmatrix.py); default stays Python
-# until the switch is proven on whole candidates.
+# net.py.  Both routes give the same bytes (tests/seedconstructmatrix.py; 0.0.25 B3 built byte-identical
+# candidates both ways).  Default since 0.0.26 B3': the C tools; SEED_C=0 keeps the Python pair.
 tn() {   # tn JSON TBL NET
-    if [ "${SEED_C:-0}" = 1 ]; then
+    if [ "${SEED_C:-1}" = 1 ]; then
         if [ ! -x "$T/seedbin/seed-net" ] || [ ! -x "$T/seedbin/seed-tbl" ]; then
             mkdir -p "$T/seedbin"
             b sh "$R/unisacc.com" "$R/seed/tbl.c" -o "$T/seedbin/seed-tbl"

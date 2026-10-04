@@ -18,7 +18,8 @@ def digest(path):
 def closure(h):
     """Conservative dependency closure: includes imported Python, embedded C
     templates, gold tables, carried headers and the inference verifier."""
-    for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights'):
+    # seed/: the C99 constructor tools that build tables and networks by default since 0.0.26 B3'
+    for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights', 'seed'):
         # Byte-identical on every host: POSIX path spelling and case-sensitive part order
         # (Windows would spell backslashes and sort case-insensitively).
         for path in sorted((ROOT / directory).rglob('*'), key=lambda q: q.relative_to(ROOT).parts):
