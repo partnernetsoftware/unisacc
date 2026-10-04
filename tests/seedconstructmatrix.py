@@ -32,12 +32,19 @@ FEATURES = (
     ("warnpp-shared", "exec/build/gen.py", ("pp", "--locations", "--shared-predefines")),
 )
 
+FEATURE_SHARDS = {"features-1": ("warnparse", "tokenpp", "tokenlex"),
+                  "features-2": ("errorparse", "warnlex"),
+                  "features-3": ("warnunits", "warnpp-shared")}
+assert sorted(n for v in FEATURE_SHARDS.values() for n in v) == sorted(x[0] for x in FEATURES)
 
 def specs(group):
     if group == "shared":
         return SHARED
     if group == "features":
         return FEATURES
+    # Three parse2-sized models (~30-35 s cold each) cannot share one 55 s job.
+    if group in FEATURE_SHARDS:
+        return tuple(x for x in FEATURES if x[0] in FEATURE_SHARDS[group])
     if group == "object":
         return tuple((f"object-{arch}-{stage}", script, args)
                      for arch in ("arm64", "x86_64")
