@@ -193,3 +193,13 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 **流水线（缩短总时长）**
 - 发版队列一开跑，不依赖它的步骤就并行做：release_prep 加 Apple 签名和公证（基本是等网络）、草稿 release、release-check（推送 rc 提交时就触发）、Windows qualification 和 company 签名。0.0.23 在队列还没跑完时，这几步就都完成了。
 - 公开发布仍然要等：本地队列 rc=0、Linux 全绿、crossnative 没有跳过，并且主人确认。
+
+## 17. 0.0.24 回顾（2026-10-04）
+
+总耗时约 8h22m（11:48→20:10）：开发 5h33m，三次封装 64 分，队列约 49 分，平台验证约 20 分。全文见 [research/r24-pipeline-retro.md](../research/r24-pipeline-retro.md)，改进作为流程项 P1–P7 写在 plans/v0.0.25.md。下次发版前对照：
+- **版本号提交之后只收修红的改动**：kill、ttyname 和参考侧的 extern 修复都是封版前十分钟进来的，引出了三次封装、首轮队列中断（66/568）和首轮 Windows 签名作废。
+- **改了头文件，就同批重生 kernel 和 exec/facts**：precheck 现在会跑 export --check。
+- **difftest 两条路线都要跑**：门禁带着 UA，只测 C 路线；difftest-py-1..4 补上了 Python 路线。前端一改，就扫描所有 knownfail 里复活的条目。
+- **不要用只带 target_commitish 的 PATCH 去改草稿 release 的目标提交**，这会把 tag_name 冲成 untagged，qualification 随即报 “seal must be exactly one existing owner draft”。要改就把 tag_name 一起带上。
+- **comboot 被看门狗杀掉后会留下锁**：每次重试前 rmdir 掉 comb-build/<stage>.lock。如果 stage2 还没完成，stage3 会拿主检出里的旧 unisacc.com 去构建，所以必须先删掉 stage3 目录（X6）。
+- **在独立工作树里续跑队列时**，不要直接改工作树里的文件（release.sh 会拒绝脏树）。先在 main 上提交修复，再在工作树里 `git checkout --detach <新提交>`，从 results.json 删掉失败的条目，然后用同一个 QUEUE_WORKTREE 续跑。
