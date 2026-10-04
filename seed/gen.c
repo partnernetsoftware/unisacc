@@ -1946,10 +1946,79 @@ static void pp_install_dsw(Graph *g) {
     }
     if (ferror(f) || fclose(f) || found != 1) die("pp dsw declaration missing");
 }
+static void pp_install_body_after_dsw(Graph *g) {
+    FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s; int active = 0;
+    int actions = 0, rows = 0, escape = 0, accept = 0;
+    if (!f) die("cannot open pp body manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp body column count");
+        if (!active && !strcmp(field[0], "template") && !strcmp(field[1], "dsw")) {
+            active = 1; free(s); continue;
+        }
+        if (!active) { free(s); continue; }
+        if (!strcmp(field[0], "call") && !strcmp(field[1], "sourcefacts")) { free(s); break; }
+        if (!strcmp(field[0], "foreach") && !strcmp(field[4], "pp-gen+pp-layout")) {
+            Value *facts = load_facts_expr(field[4]), *items = value_get(facts, "dactions");
+            char *body = line(f);
+            if (!items || items->kind != JARR || !body) die("invalid pp directive action loop");
+            for (size_t i = 0; i < items->n; i++) {
+                Value *ctx = load_facts_expr(field[4]), *bind = value_new(JOBJ);
+                Value *it = items->items[i].value;
+                char *bf[9]; char *local = copy(body);
+                if (fields_tab(local, bf, 9) != 9 || strcmp(bf[0], ".rows") ||
+                    strcmp(bf[1], "directive-action")) die("unsupported pp directive action body");
+                value_put(ctx, "it", it); value_put(ctx, "name", value_get(it, "name"));
+                value_put(ctx, "section", value_get(it, "section"));
+                direct_bindings(bind, bf[7], ctx);
+                pp_install_stem(g, bf[1], value_text(value_get(it, "section")), bind, NULL);
+                free(local);
+            }
+            actions++; free(body);
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "assembly") &&
+                   !strcmp(field[2], "accept")) {
+            pp_install_stem(g, "assembly", "accept", value_new(JOBJ), NULL); accept++;
+        } else if (!strcmp(field[0], "template") && !strcmp(field[1], "escape")) {
+            Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp escape options");
+            Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
+            Buffer lines = expand_template_file("exec/pp/escape-template.tsv", facts, field[2]);
+            FILE *table = buffer_file(&lines);
+            if (strcmp(value_text(value_get(opts, "mode")), "b")) die("pp escape mode changed");
+            install_delta_text(g, table, 'b', domain, NULL, NULL, 0, 0, NULL, "START");
+            if (fclose(table)) die("pp escape table close failed");
+            escape++;
+        } else if (!strcmp(field[0], "rows") &&
+                   (!strcmp(field[1], "directive-body") || !strcmp(field[1], "include-location") ||
+                    !strcmp(field[1], "rescan") || !strcmp(field[1], "literal") ||
+                    !strcmp(field[1], "expression") || !strcmp(field[1], "reduce") ||
+                    !strcmp(field[1], "hash"))) {
+            Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
+            Value *opts = !strcmp(field[8], "-") ? NULL : value_json(field[8], "pp row options");
+            Value *bindmap = opts ? value_get(opts, "bindmap") : NULL;
+            if (bindmap) {
+                Value *extra = value_path(facts, value_text(bindmap));
+                if (extra->kind != JOBJ) die("pp bindmap is not an object");
+                for (size_t i = 0; i < extra->n; i++)
+                    value_put(bind, extra->items[i].key, extra->items[i].value);
+            }
+            direct_bindings(bind, field[7], facts);
+            pp_install_stem(g, field[1], NULL, bind, NULL); rows++;
+        } else if (!strcmp(field[0], "call") && !strcmp(field[1], "locations")) {
+            /* No --locations flag in the default product route. */
+        } else if (!strcmp(field[0], ".rows")) {
+            /* Consumed with the preceding foreach declaration. */
+        } else die("unsupported pp body row after dsw");
+        free(s);
+    }
+    if (ferror(f) || fclose(f) || actions != 1 || rows != 7 || escape != 1 || accept != 1)
+        die("incomplete pp body after dsw");
+}
 static void inspect_pp_through_linedir(const char *outpath, int with_dsw) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, 0); pp_install_call_autoinc(&g); pp_install_body_before_dsw(&g);
     if (with_dsw) pp_install_dsw(&g);
+    if (with_dsw > 1) pp_install_body_after_dsw(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -2428,6 +2497,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-dsw")) {
         inspect_pp_through_linedir(argv[2], 1); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-body")) {
+        inspect_pp_through_linedir(argv[2], 2); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
