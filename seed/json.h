@@ -2,8 +2,8 @@
  *
  * Reads a whole document into a flat node array: objects keep their keys in document order
  * (Python dicts do, and the constructors' output depends on that order), arrays keep theirs.
- * Values: object, array, string, integer.  Floats, true/false/null are refused by name -- the
- * deltas and facts these tools read have none.  Strings are decoded to bytes; a \u escape above
+ * Values: object, array, string, integer, true/false (JBOOL, ival 1/0) and null (JNULL).  Floats are
+ * refused by name -- the deltas and facts these tools read have none.  Strings are decoded to bytes; a \u escape above
  * 0xFF becomes '?', which is what Python's .encode("latin-1", "replace") writes for it.
  * Every allocation is checked; an error prints where and exits 2.
  *
@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { JOBJ = 1, JARR, JSTR, JINT };
+enum { JOBJ = 1, JARR, JSTR, JINT, JBOOL, JNULL };   /* JBOOL: ival 1 true / 0 false (B4: lex facts) */
 typedef struct { int type; int kid, next, last; long key, klen; long str, slen; long long ival; } JNode;
 typedef struct { JNode *n; long nn, cap; char *buf; long blen, bcap; const char *src; long len, pos; const char *path; } JDoc;
 
@@ -139,6 +139,15 @@ static long jvalue(JDoc *d) {
         i = jnew(d, JSTR); d->n[i].str = at; d->n[i].slen = len;
         return i;
     }
+    case 't': case 'f': case 'n': {
+        static const char *lit[3] = {"true", "false", "null"};
+        int w = d->src[d->pos] == 't' ? 0 : d->src[d->pos] == 'f' ? 1 : 2;
+        long l = (long)strlen(lit[w]);
+        if (d->pos + l > d->len || memcmp(d->src + d->pos, lit[w], (size_t)l) != 0) jdie(d, "bad literal");
+        d->pos += l;
+        i = jnew(d, w == 2 ? JNULL : JBOOL); d->n[i].ival = w == 0;
+        return i;
+    }
     default: {
         long long v = 0; int neg = 0, digits = 0;
         if (d->src[d->pos] == '-') { neg = 1; d->pos++; }
@@ -146,7 +155,7 @@ static long jvalue(JDoc *d) {
             if (v > 922337203685477580LL) jdie(d, "integer overflow");
             v = v * 10 + (d->src[d->pos++] - '0'); digits++;
         }
-        if (!digits) jdie(d, "value expected (true/false/null and floats are not used here)");
+        if (!digits) jdie(d, "value expected (floats are not used here)");
         if (d->pos < d->len && (d->src[d->pos] == '.' || d->src[d->pos] == 'e' || d->src[d->pos] == 'E')) jdie(d, "float not supported");
         i = jnew(d, JINT); d->n[i].ival = neg ? -v : v;
         return i;
