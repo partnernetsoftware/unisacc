@@ -196,7 +196,7 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 
 ## 17. 0.0.24 回顾（2026-10-04）
 
-总耗时约 8h22m（11:48→20:10）：开发 5h33m，三次封装 64 分，队列约 49 分，平台验证约 20 分。全文见 [research/r24-pipeline-retro.md](../research/r24-pipeline-retro.md)，改进作为流程项 P1–P7 写在 plans/v0.0.25.md。下次发版前对照：
+总耗时约 8h22m（11:48→20:10）：开发 5h33m，三次封装 64 分，队列约 49 分，平台验证约 20 分。全文见 [research/r24-pipeline-retro.md](../research/r24-pipeline-retro.md)，改进作为流程项 P1–P7 写在 archive/plans/v0.0.25.md。下次发版前对照：
 - **版本号提交之后只收修红的改动**：kill、ttyname 和参考侧的 extern 修复都是封版前十分钟进来的，引出了三次封装、首轮队列中断（66/568）和首轮 Windows 签名作废。
 - **改了头文件，就同批重生 kernel 和 exec/facts**：precheck 现在会跑 export --check。
 - **difftest 两条路线都要跑**：门禁带着 UA，只测 C 路线；difftest-py-1..4 补上了 Python 路线。前端一改，就扫描所有 knownfail 里复活的条目。
