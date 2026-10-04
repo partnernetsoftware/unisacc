@@ -81,18 +81,24 @@ def main(group):
         # 0.0.25 B1: the seed constructor is built by unisacc.com (the installed previous release),
         # not by the system cc -- the self-hosting road uses our own compiler wherever it can
         run(deadline, "sh", str(ROOT / "unisacc.com"), "seed/net.c", "-o", str(cnet))
+        ctbl = d / "seed-tbl"                    # 0.0.25 B2: delta JSON -> flat table in C as well
+        run(deadline, "sh", str(ROOT / "unisacc.com"), "seed/tbl.c", "-o", str(ctbl))
         done = []
         for name, generator, flags in specs(group):
             graph, table = d / (name + ".json"), d / (name + ".tbl")
             py, c = d / (name + ".py.net"), d / (name + ".c.net")
             run(deadline, sys.executable, generator, str(graph), *flags)
             run(deadline, sys.executable, "exec/c/tbl.py", str(graph), str(table))
+            ctable = d / (name + ".c.tbl")
+            run(deadline, str(ctbl), str(graph), str(ctable))
+            if table.read_bytes() != ctable.read_bytes():
+                raise AssertionError(f"{group}/{name}: seed/tbl.c table differs from exec/c/tbl.py")
             run(deadline, sys.executable, "exec/c/net.py", str(table), str(py))
             run(deadline, str(cnet), str(table), str(c))
             if py.read_bytes() != c.read_bytes():
                 raise AssertionError(f"{group}/{name}: first differing network byte")
             done.append(f"{name}={c.stat().st_size}")
-        print(f"seed matrix {group}: {len(done)} byte-identical δ; " + " ".join(done))
+        print(f"seed matrix {group}: {len(done)} byte-identical tables and networks (seed/tbl.c, seed/net.c); " + " ".join(done))
 
 
 if __name__ == "__main__":
