@@ -89,6 +89,9 @@ job fat-3       ./tests/fat.sh $(echo "$FATC" | awk 'NR%3==0')
 job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done
 for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
+# The queue sets UA, so difftest-N runs the C reference route; the Python reference
+# (python3 -m unisa) went ungated and a_externarr stayed red there from f265108e to 890546ab.
+for k in 1 2 3 4; do job difftest-py-$k env -u UA -u UA_RUN SHARD=$k/4 ./tests/difftest.sh; done
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 python3 ./tests/declmatrix.py; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects)
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
 job decision-ledger python3 ./tests/decisionledger.py   # 0.0.23 I: build-time Python control (direct transition sites) may only fall
