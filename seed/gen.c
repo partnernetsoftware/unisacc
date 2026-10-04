@@ -740,8 +740,8 @@ static void template_rows(TRows *rows, Value *facts, Buffer *out, size_t first, 
     Value *scope = value_new(JOBJ);
     tuple_walk(rows->row[first].each, facts, scope, template_block_visit, &group);
 }
-static void inspect_template(const char *stage, const char *section, const char *outpath) {
-    char path[1024]; FILE *f, *out; char *s; TRows rows = {0}; Buffer expanded = {0};
+static Buffer expand_template_section(const char *stage, const char *section) {
+    char path[1024]; FILE *f; char *s; TRows rows = {0}; Buffer expanded = {0};
     Value *facts = load_fact(!strcmp(stage, "lex") ? "lex-gen" : stage); size_t i;
     if (snprintf(path, sizeof(path), "exec/%s/gen-template.tsv", stage) >= (int)sizeof(path)) die("template path too long");
     f = fopen(path, "rb"); if (!f) die("cannot open template");
@@ -766,7 +766,11 @@ static void inspect_template(const char *stage, const char *section, const char 
         }
         template_rows(&rows, facts, &expanded, i, end); i = end;
     }
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    return expanded;
+}
+static void inspect_template(const char *stage, const char *section, const char *outpath) {
+    Buffer expanded = expand_template_section(stage, section);
+    FILE *out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     if (expanded.n && fwrite(expanded.s, 1, expanded.n, out) != expanded.n) die("template write failed");
     if (fclose(out)) die("template close failed");
 }
@@ -1033,6 +1037,12 @@ static void install_delta_text(Graph *g, FILE *f, char mode, Value *domain, Valu
         }
     }
 }
+static FILE *buffer_file(const Buffer *b) {
+    FILE *f = tmpfile();
+    if (!f) die("cannot open temporary table");
+    if (b->n && fwrite(b->s, 1, b->n, f) != b->n) die("temporary table write failed");
+    rewind(f); return f;
+}
 static void output(FILE *f, const Graph *g);
 static Value *lex_sequences(void) {
     FILE *f = fopen("exec/lex/output-manifest.tsv", "rb"); char *s;
@@ -1048,13 +1058,42 @@ static Value *lex_sequences(void) {
     }
     die("missing lex output row"); return NULL;
 }
+static void inspect_delta_template(const char *section, const char *outpath) {
+    Graph g = {0}; Buffer rows = expand_template_section("lex", section);
+    Value *facts = load_fact("lex-gen"), *classes = value_get(facts, "classes");
+    Value *domain = numeric_domain(0, 257), *sequences = lex_sequences();
+    FILE *f = buffer_file(&rows), *out;
+    install_delta_text(&g, f, 'b', domain, classes, sequences, 1, 0, NULL);
+    if (fclose(f)) die("temporary table close failed");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
+static void install_lex_table(Graph *g, const char *stem, Value *opts,
+                              Value *facts, Value *sequences) {
+    Value *domain, *classes = NULL, *skip = NULL, *d, *dk;
+    char path[1024]; const char *mode; int ordered; FILE *f;
+    mode = value_text(value_get(opts, "mode"));
+    d = value_get(opts, "domain"); dk = value_get(opts, "domain_keys");
+    if (d) {
+        if (d->kind != JARR || d->n != 2 || d->items[0].value->kind != JINT ||
+            d->items[1].value->kind != JINT) die("invalid lex table domain");
+        domain = numeric_domain((int)d->items[0].value->number, (int)d->items[1].value->number);
+    } else if (dk) domain = value_path(facts, value_text(dk));
+    else domain = numeric_domain(0, 257);
+    d = value_get(opts, "classes"); if (d) classes = value_path(facts, value_text(d));
+    skip = value_get(opts, "skip"); d = value_get(opts, "ordered");
+    ordered = d && d->kind == JBOOL && d->number;
+    if (snprintf(path, sizeof(path), "exec/lex/%s", stem) >= (int)sizeof(path)) die("lex table path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open lex table");
+    install_delta_text(g, f, mode[0], domain, classes, sequences, 0, ordered, skip);
+    if (fclose(f)) die("lex table close failed");
+}
 static void inspect_delta_table(const char *stem, const char *outpath) {
-    Graph g = {0}; FILE *manifest = fopen("exec/lex/gen-manifest.tsv", "rb"), *f, *out;
+    Graph g = {0}; FILE *manifest = fopen("exec/lex/gen-manifest.tsv", "rb"), *out;
     char *s; int found = 0;
     if (!manifest) die("cannot open lex manifest");
     while ((s = line(manifest))) {
-        char *field[9]; int n; Value *opts, *facts, *domain, *classes = NULL, *skip = NULL, *d, *dk;
-        char path[1024]; const char *mode; int ordered;
+        char *field[9]; int n; Value *opts, *facts;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9); if (n != 9) die("lex manifest column count");
         if (strcmp(field[0], "table") || strcmp(field[1], stem) || !when_true(field[3], 0, NULL)) {
@@ -1062,26 +1101,80 @@ static void inspect_delta_table(const char *stem, const char *outpath) {
         }
         if (++found > 1) die("ambiguous lex table");
         opts = value_json(field[8], "lex table options"); facts = load_facts_expr(field[4]);
-        mode = value_text(value_get(opts, "mode"));
-        d = value_get(opts, "domain"); dk = value_get(opts, "domain_keys");
-        if (d) {
-            if (d->kind != JARR || d->n != 2 || d->items[0].value->kind != JINT ||
-                d->items[1].value->kind != JINT) die("invalid lex table domain");
-            domain = numeric_domain((int)d->items[0].value->number, (int)d->items[1].value->number);
-        } else if (dk) domain = value_path(facts, value_text(dk));
-        else domain = numeric_domain(0, 257);
-        d = value_get(opts, "classes"); if (d) classes = value_path(facts, value_text(d));
-        skip = value_get(opts, "skip"); d = value_get(opts, "ordered");
-        ordered = d && d->kind == JBOOL && d->number;
-        if (snprintf(path, sizeof(path), "exec/lex/%s", stem) >= (int)sizeof(path)) die("lex table path too long");
-        f = fopen(path, "rb"); if (!f) die("cannot open lex table");
-        install_delta_text(&g, f, mode[0], domain, classes, lex_sequences(), 0, ordered, skip);
-        if (fclose(f)) die("lex table close failed");
+        install_lex_table(&g, stem, opts, facts, lex_sequences());
         free(s);
     }
     if (ferror(manifest) || fclose(manifest) || found != 1) die("lex table not found");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
+}
+static void finish_lex(Graph *g) {
+    Value *facts = load_fact("lex-domains"), *rows = value_get(facts, "lex-domains");
+    size_t i, j; int *reach; size_t *todo, nreach = 0, ntodo = 0;
+    if (!rows || rows->kind != JARR) die("missing lex domains");
+    for (i = 0; i < g->n; i++) for (j = 0; j < g->state[i].n; j++) {
+        const char *target = g->state[i].edge[j].target; size_t k;
+        if (!strcmp(target, "HALT")) continue;
+        for (k = 0; k < g->n && strcmp(g->state[k].name, target); k++);
+        if (k == g->n) die("lex target state missing");
+    }
+    for (i = 0; i < g->n; i++) {
+        State *st = &g->state[i]; Value *domain = NULL;
+        for (j = 0; j < rows->n; j++) {
+            Value *row = rows->items[j].value, *mode = value_get(row, "mode");
+            if (mode && mode->kind == JSTR && mode->s[0] == st->mode) {
+                Value *v = value_get(row, "values");
+                domain = v->kind == JINT ? numeric_domain(0, (int)v->number) : v;
+                break;
+            }
+        }
+        if (!domain || domain->kind != JARR) die("lex mode lacks domain");
+        for (j = 0; j < domain->n; j++) {
+            char number[64]; const char *key = value_scalar_text(domain->items[j].value, number);
+            if (!edge_has(st, key)) edge_set(g, st->name, st->mode, key, "HALT", "[[\"REJECT\",\"unreachable\"]]");
+        }
+    }
+    reach = grow(NULL, g->n, sizeof(*reach)); memset(reach, 0, g->n * sizeof(*reach));
+    todo = grow(NULL, g->n, sizeof(*todo));
+    for (i = 0; i < g->n && strcmp(g->state[i].name, "DISPATCH"); i++);
+    if (i == g->n) die("lex start missing");
+    todo[ntodo++] = i; reach[i] = 1;
+    while (ntodo) {
+        State *st = &g->state[todo[--ntodo]];
+        for (j = 0; j < st->n; j++) {
+            size_t k; const char *target = st->edge[j].target;
+            if (!strcmp(target, "HALT")) continue;
+            for (k = 0; k < g->n && strcmp(g->state[k].name, target); k++);
+            if (k == g->n) die("lex target state missing after fill");
+            if (!reach[k]) { reach[k] = 1; todo[ntodo++] = k; }
+        }
+    }
+    for (i = 0, j = 0; i < g->n; i++) if (reach[i]) g->state[j++] = g->state[i];
+    g->n = j; free(reach); free(todo);
+}
+static void construct_lex(Graph *g) {
+    FILE *f = fopen("exec/lex/gen-manifest.tsv", "rb"); char *s; Value *sequences = lex_sequences();
+    if (!f) die("cannot open lex manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n; Value *opts, *facts;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("lex manifest column count");
+        if (!when_true(field[3], 0, NULL)) { free(s); continue; }
+        if (!strcmp(field[0], "table")) {
+            opts = value_json(field[8], "lex table options"); facts = load_facts_expr(field[4]);
+            install_lex_table(g, field[1], opts, facts, sequences);
+        } else if (!strcmp(field[0], "template")) {
+            Buffer lines = expand_template_section("lex", field[2]);
+            Value *domain = numeric_domain(0, 257), *classes;
+            FILE *rows = buffer_file(&lines);
+            facts = load_facts_expr(field[4]); classes = value_get(facts, "classes");
+            install_delta_text(g, rows, 'b', domain, classes, sequences, 1, 0, NULL);
+            if (fclose(rows)) die("lex template close failed");
+        } else if (strcmp(field[0], "let") && strcmp(field[0], "call")) die("unsupported lex manifest op");
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("lex manifest read failed");
+    finish_lex(g);
 }
 static void install_file(Graph *g, const char *path, char mode) {
     FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
@@ -1488,8 +1581,8 @@ static void manifest(Graph *g, const char *dir) {
     if (ferror(f) || fclose(f)) die("manifest read failed");
     if (rows != 1 || labels != 1) die("incomplete prune manifest");
 }
-static void output(FILE *f, const Graph *g) {
-    fputs("{\"start\":\"START\",\"states\":{", f);
+static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names) {
+    fputs("{\"start\":", f); quoted(f, start); fputs(",\"states\":{", f);
     for (size_t i = 0; i < g->n; i++) {
         const State *s = &g->state[i];
         if (i) fputc(',', f); quoted(f, s->name); fprintf(f, ":[\"%c\",{", s->mode);
@@ -1501,11 +1594,26 @@ static void output(FILE *f, const Graph *g) {
     }
     fputs("},\"seqs\":[", f);
     for (size_t i = 0; i < g->ns; i++) { if (i) fputc(',', f); fputs(g->seq[i], f); }
-    fputs("]}", f);
+    fputc(']', f);
+    if (tok_names) { fputs(",\"tok_names\":", f); value_write(f, tok_names); }
+    fputc('}', f);
     if (ferror(f)) die("write failed");
 }
+static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "lex")) {
+        Value *tok_names = value_get(load_fact("lex-gen"), "tok_names");
+        construct_lex(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "DISPATCH", tok_names);
+        if (fclose(out)) die("output close failed");
+        fprintf(stderr, "lex states %lu\n", (unsigned long)g.n);
+        return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "inspect-delta-template")) {
+        inspect_delta_template(argv[2], argv[3]); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-delta-table")) {
         inspect_delta_table(argv[2], argv[3]); return 0;
     }
