@@ -1550,6 +1550,65 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_autoinc(const char *stem, const char *outpath) {
+    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest) die("cannot open pp autoinc manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
+            Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
+            Value *opts = value_json(field[8], "pp autoinc options"), *sequences = mapseq_construct(opts, facts);
+            Value *classes = NULL, *classmap = value_get(opts, "classmap");
+            char path[1024];
+            direct_bindings(bindings, field[7], facts);
+            if (classmap) {
+                classes = value_new(JOBJ);
+                for (size_t j = 0; j < classmap->n; j++)
+                    value_put(classes, classmap->items[j].key,
+                              value_path(facts, value_text(classmap->items[j].value)));
+            }
+            for (int i = 0; i < 2; i++) {
+                if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
+                    die("pp autoinc path too long");
+                install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, classes);
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp autoinc row missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
+static void inspect_pp_locations(const char *outpath) {
+    FILE *manifest = fopen("exec/pp/locations-manifest.tsv", "rb"), *out;
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest) die("cannot open pp locations manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp locations manifest column count");
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], "location")) {
+            Value *facts = load_facts_expr("locations+pp-layout"), *bindings = value_new(JOBJ);
+            const char *names[] = {"SPLB", "IRLN", "IRNL", "IRNAME"};
+            char path[1024]; size_t j;
+            for (j = 0; j < 4; j++) value_put(bindings, names[j], value_get(facts, names[j]));
+            for (int i = 0; i < 2; i++) {
+                if (snprintf(path, sizeof(path), "exec/pp/location-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
+                    die("pp location path too long");
+                install_plain(&g, path, i ? 'r' : 'b', bindings, NULL);
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp locations row missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_template(const char *stem, const char *outpath) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; int found = 0;
@@ -1836,6 +1895,12 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-autoinc")) {
+        inspect_pp_autoinc(argv[2], argv[3]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-locations")) {
+        inspect_pp_locations(argv[2]); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-template")) {
         inspect_pp_template(argv[2], argv[3]); return 0;
     }
