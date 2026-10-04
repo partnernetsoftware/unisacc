@@ -80,11 +80,16 @@ def main():
         rows = {}
         for l in lines:
             st, key, path, line = l.split('\t')
-            r = rows.setdefault((path, int(line)), [0, None])
+            r = rows.setdefault((path, int(line)), [0, None, 0])
             if (st, key) in total and r[1] is None and (st, key) in hit: r[1] = wit.get('%s\t%s' % (st, key))
             r[0] += 1
+            if (st, key) in total: r[2] += 1          # edges that survive in the built delta
         covered = sum(1 for r in rows.values() if r[1])
-        (out / (stage + '.cov.tsv')).write_text(''.join('%s\t%d\t%d\t%s\n' % (p, ln, r[0], r[1] or '-') for (p, ln), r in sorted(rows.items())))
+        # uncovered rows split two ways: dead (none of its edges survives in the delta -- unreachable
+        # state or totalised away: a candidate for deletion) versus live (reachable, no probe takes it)
+        dead = sum(1 for r in rows.values() if not r[1] and r[2] == 0)
+        print('rowcov %s  uncovered %d = dead %d (no edge left in the delta) + live %d (needs a probe)' % (stage, len(rows) - covered, dead, len(rows) - covered - dead))
+        (out / (stage + '.cov.tsv')).write_text(''.join('%s\t%d\t%d\t%s\n' % (p, ln, r[0], r[1] or ('dead' if r[2] == 0 else '-')) for (p, ln), r in sorted(rows.items())))
         print('rowcov %s  rows %d   covered %d   (%.1f%%)   report %s' % (stage, len(rows), covered, 100.0 * covered / max(1, len(rows)), out / (stage + '.cov.tsv')))
         # ratchet: covered rows may only rise (tests/rowcov.baseline); raise the number when they do
         base = dict(l.split()[:2] for l in (ROOT / 'tests/rowcov.baseline').read_text().splitlines() if l and not l.startswith('#'))
