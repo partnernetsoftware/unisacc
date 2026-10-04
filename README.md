@@ -30,6 +30,10 @@ transitions, not from training. The classic reference is a separate route; its
 18 fact networks are constructed and checked, while its runtime queries DENSE
 answer tables enumerated from them.
 
+TSV tables are the construction and verification method used by this product,
+not a defining requirement of a neural-network-based compiler. Other network
+construction routes remain research possibilities, not shipped capabilities.
+
 ## Model product
 
 `make com` builds the model compiler from declarations, dynamic facts and

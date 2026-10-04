@@ -7,7 +7,7 @@
 
 | 主线 | 题目 | 回答的问题 | 正文 | 状态 | 编辑 |
 |---|---|---|---|---|---|
-| **Paper A** | neural-network-based compiler：给定表到网络的精确构造 | 有限控制表如何构造为网络；编译器实例与保证层次（§2.3） | [`unisacc-paper.md`](unisacc-paper.md) | 修订中 | cdx-unisacc 编辑，cc-unisacc 提供实现证据 |
+| **Paper A** | neural-network-based compiler；当前方法：给定表到网络的精确构造 | 网络承载编译阶段；表构造方法、工程实例与保证层次（§2.3） | [`unisacc-paper.md`](unisacc-paper.md) | 修订中 | cdx-unisacc 编辑，cc-unisacc 提供实现证据 |
 | **Paper B** | UJS：封闭 JavaScript 子集的构造式表网络 | 同一方法在第二门语言上是否成立 | [`ujs-paper.md`](ujs-paper.md) | 草稿 | csr |
 | **Paper C** | 把“确定性模型推理替代编译”推广为管道方法 | 为什么能推广、需要什么条件、能否机械化 | [`paper-c-intent.md`](paper-c-intent.md) | 意向书 | 待定 |
 | **Paper D** | 流水线上的可选内存安全节点：模型推断标注、确定性检查器验证、分级编译 | 不改一行 C99 能否拿到接近 Rust 的保证；保证从哪来、如何量化 | [`paper-d-intent.md`](paper-d-intent.md) | 意向书 | 待定 |
