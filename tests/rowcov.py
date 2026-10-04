@@ -30,33 +30,72 @@ def edges(delta):
 
 def main():
     stage, what = sys.argv[1], sys.argv[2]
-    assert stage in ('pp', 'lex'), 'stages so far: pp, lex'
+    assert stage in ('pp', 'lex', 'parse2'), 'stages so far: pp, lex, parse2'
     X = xdir(); out = X / 'rowcov'; out.mkdir(parents=True, exist_ok=True)
     ppj = X / 'e2/d.json'
     # lex runs on the preprocessor's output, so a lex shard first runs pp; its delta is the product's e1 (--typed)
-    dj = ppj if stage == 'pp' else out / 'lex.json'
+    dj = ppj if stage == 'pp' else out / (stage + '.json')
+    lexj = out / 'lex.json'
     def build(log=None):
         if subprocess.run(['sh', 'exec/pp/run.sh', 'gen'], cwd=ROOT, capture_output=True).returncode:
             sys.exit('rowcov: building the pp delta failed (exec/pp/run.sh gen)')
-        if stage == 'lex' or log:
+        if stage == 'parse2' and not log:     # parse2 reads the typed lexer's tokens
+            r = subprocess.run([sys.executable, 'exec/build/gen.py', 'lex', str(lexj), '--typed'], cwd=ROOT, capture_output=True)
+            if r.returncode: sys.exit('rowcov: gen.py lex failed')
+        if stage != 'pp' or log:
             target = out / (stage + ('.sidecar.json' if log else '.json'))
             env = dict(os.environ, UNISACC_ROW_LOG=str(log)) if log else os.environ
             r = subprocess.run([sys.executable, 'exec/build/gen.py', stage, str(target)] + (['--typed'] if stage == 'lex' else []),
                                cwd=ROOT, env=env, capture_output=True)
             if r.returncode: sys.exit('rowcov: gen.py %s failed' % stage)
             return target
+    def cached():
+        """delta + side table for this stage, rebuilt only when exec/ changes; atomic, so parallel shard jobs can share it"""
+        key = subprocess.run(['sh', '-c', 'git ls-files -s exec weights | git hash-object --stdin; git diff --stat -- exec weights | git hash-object --stdin'],
+                             cwd=ROOT, capture_output=True, text=True).stdout.replace('\n', '')
+        stamp = out / (stage + '.key')
+        try:
+            if stamp.read_text() == key and dj.exists() and (out / (stage + '.rows.tsv')).exists(): return
+        except FileNotFoundError:
+            pass
+        tmp = out / ('%s.%d.rows.tsv' % (stage, os.getpid()))
+        if stage != 'pp': build()
+        sc = build(tmp)
+        if sc.read_bytes() != dj.read_bytes(): sys.exit('rowcov: the side-table build changed the delta')
+        os.replace(tmp, out / (stage + '.rows.tsv')); stamp.write_text(key)
+    if what.startswith('gate'):
+        # gate shape for the slow stages: `STAGE gate K/N` = cached build + one shard + that shard's own
+        # row count against tests/rowcov.baseline (key STAGE/K/N); no cross-job merge is needed
+        k, n = map(int, what[4:].lstrip(':').split('/'))
+        cached()
+        r = subprocess.run([sys.executable, __file__, stage, '%d/%d' % (k, n)], cwd=ROOT)
+        if r.returncode: return r.returncode
+        seen = {tuple(e) for e in json.loads((out / ('%s-%d.json' % (stage, k))).read_text())['seen']}
+        total = edges(json.loads(dj.read_text()))
+        rowsof = {}
+        for l in (out / (stage + '.rows.tsv')).read_text().splitlines():
+            st, key, path, line = l.split('\t')
+            if path.startswith('synthetic'): continue
+            if (st, key) in seen and (st, key) in total: rowsof[(path, line)] = 1
+        got = len(rowsof)
+        base = dict(l.split()[:2] for l in (ROOT / 'tests/rowcov.baseline').read_text().splitlines() if l and not l.startswith('#'))
+        floor = int(base.get('%s/%d/%d' % (stage, k, n), 0))
+        print('rowcov %s shard %d/%d  rows reached %d (baseline %d)' % (stage, k, n, got, floor))
+        if got < floor: print('rowcov  FELL below the baseline'); return 1
+        if got > floor: print('rowcov  above the baseline: raise %s/%d/%d in tests/rowcov.baseline' % (stage, k, n))
+        return 0
     if what == 'all':
         # one gate run under 60 s: side table (~3 s), 8 shards 4 at a time (~15 s each), merge
         side = out / (stage + '.rows.tsv')
         side.unlink(missing_ok=True)
-        if stage == 'lex': build()
+        if stage != 'pp': build()
         sc = build(side)
         if sc.read_bytes() != dj.read_bytes():
             sys.exit('rowcov: the side-table build changed the delta')
         procs = []
         for k in range(1, 9):
             procs.append(subprocess.Popen([sys.executable, __file__, stage, '%d/8' % k], cwd=ROOT))
-            if len(procs) == 4: [p.wait() for p in procs]; procs = []
+            if len(procs) == (8 if stage == 'parse2' else 4): [p.wait() for p in procs]; procs = []   # parse2 shards take ~33 s
         [p.wait() for p in procs]
         sys.argv[3:] = ['8']; what = 'merge'
     if what == 'merge':
@@ -80,6 +119,7 @@ def main():
         rows = {}
         for l in lines:
             st, key, path, line = l.split('\t')
+            if path.startswith('synthetic'): continue     # template-edit edges with no declaring row
             r = rows.setdefault((path, int(line)), [0, None, 0])
             if (st, key) in total and r[1] is None and (st, key) in hit: r[1] = wit.get('%s\t%s' % (st, key))
             r[0] += 1
@@ -105,10 +145,12 @@ def main():
     if not dj.exists() or stage == 'pp': build()
     import sim
     ppdelta = json.loads(ppj.read_text()); pploaded = sim.load(ppdelta)
-    if stage == 'lex':
+    if stage in ('lex', 'parse2'):
         import importlib.util
         spec = importlib.util.spec_from_file_location('lexsim', ROOT / 'exec/lex/sim.py'); lexsim = importlib.util.module_from_spec(spec); spec.loader.exec_module(lexsim)
         delta = json.loads(dj.read_text())
+        lexdelta = json.loads(lexj.read_text()) if stage == 'parse2' else delta
+        if stage == 'parse2': loaded = sim.load(delta)
         # the typed lexer runs on the shared core simulator, whose cov keys are state indices in this order
         names = list(delta['states']) + (['HALT'] if 'HALT' not in delta['states'] else [])
     else:
@@ -123,7 +165,10 @@ def main():
                 sim.run(delta, open(f, 'rb').read(), f, sim.Files(), cov=c, maxsteps=20_000_000, loaded=loaded)
             else:
                 res, val, _ = sim.run(ppdelta, open(f, 'rb').read(), f, sim.Files(), maxsteps=20_000_000, loaded=pploaded)
-                if res == 'accept': lexsim.run(delta, val, cov=c, maxsteps=20_000_000)
+                if res == 'accept' and stage == 'lex': lexsim.run(delta, val, cov=c, maxsteps=20_000_000)
+                elif res == 'accept':
+                    res, tok, _ = lexsim.run(lexdelta, val, maxsteps=20_000_000)
+                    if res == 'accept': sim.run(delta, tok, f, sim.Files(), cov=c, maxsteps=200_000_000, loaded=loaded)
         except Exception:
             pass                                   # a rejected or failing input still took the edges it took
         for e in c - cov: first[e] = f        # the first probe that took an edge is its witness

@@ -422,6 +422,7 @@ job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
 job rowcov-pp python3 ./tests/rowcov.py pp all   # 0.0.25 T2: pp manifest rows reached by the probes; ratchet in tests/rowcov.baseline
 job rowcov-lex python3 ./tests/rowcov.py lex all   # 0.0.26 T2: lex manifest rows reached (on the preprocessor output); ratchet in tests/rowcov.baseline
+for k in $(seq 1 16); do job rowcov-parse2-$k python3 ./tests/rowcov.py parse2 gate$k/16; done   # 0.0.26 T2: each shard ratchets its own reached rows
 job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job freezecheck python3 ./tests/freezecheck.py   # 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
 job revivedscan python3 ./tests/revivedscan.py   # 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
