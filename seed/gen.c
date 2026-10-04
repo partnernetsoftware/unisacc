@@ -702,7 +702,7 @@ static void template_group_visit(Value *scope, void *arg) {
         TRow *r = &g->rows->row[i];
         if (r->depth == g->depth) {
             char *a, *b, *c, *d;
-            if (strcmp(r->kind, "rule")) die("template graph edit not yet supported");
+            if (strcmp(r->kind, "rule") && strcmp(r->kind, "rule:r")) die("template graph edit not yet supported");
             a = template_subst(r->a, scope); b = template_subst(r->b, scope);
             c = template_subst(r->c, scope); d = template_subst(r->d, scope);
             buf_add(g->out, a, strlen(a)); buf_char(g->out, '\t');
@@ -741,10 +741,8 @@ static void template_rows(TRows *rows, Value *facts, Buffer *out, size_t first, 
     Value *scope = value_new(JOBJ);
     tuple_walk(rows->row[first].each, facts, scope, template_block_visit, &group);
 }
-static Buffer expand_template_section(const char *stage, const char *section) {
-    char path[1024]; FILE *f; char *s; TRows rows = {0}; Buffer expanded = {0};
-    Value *facts = load_fact(!strcmp(stage, "lex") ? "lex-gen" : stage); size_t i;
-    if (snprintf(path, sizeof(path), "exec/%s/gen-template.tsv", stage) >= (int)sizeof(path)) die("template path too long");
+static Buffer expand_template_file(const char *path, Value *facts, const char *section) {
+    FILE *f; char *s; TRows rows = {0}; Buffer expanded = {0}; size_t i;
     f = fopen(path, "rb"); if (!f) die("cannot open template");
     while ((s = line(f))) {
         char *field[9]; int n; TRow *r; char *over;
@@ -767,6 +765,13 @@ static Buffer expand_template_section(const char *stage, const char *section) {
         }
         template_rows(&rows, facts, &expanded, i, end); i = end;
     }
+    return expanded;
+}
+static Buffer expand_template_section(const char *stage, const char *section) {
+    char path[1024]; Value *facts = load_fact(!strcmp(stage, "lex") ? "lex-gen" : stage);
+    if (snprintf(path, sizeof(path), "exec/%s/gen-template.tsv", stage) >= (int)sizeof(path))
+        die("template path too long");
+    Buffer expanded = expand_template_file(path, facts, section);
     return expanded;
 }
 static void inspect_template(const char *stage, const char *section, const char *outpath) {
@@ -1545,6 +1550,32 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_template(const char *stem, const char *outpath) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "template") && !strcmp(field[1], stem)) {
+            Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp template options");
+            Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
+            const char *mode = value_text(value_get(opts, "mode"));
+            char path[1024]; Buffer lines; FILE *rows;
+            if (snprintf(path, sizeof(path), "exec/pp/%s-template.tsv", stem) >= (int)sizeof(path))
+                die("pp template path too long");
+            lines = expand_template_file(path, facts, field[2]); rows = buffer_file(&lines);
+            install_delta_text(&g, rows, mode[0], domain, NULL, NULL, 0, 0, NULL, "START");
+            if (fclose(rows)) die("pp template close failed");
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp template row missing or repeated");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_assembly(const char *section, const char *outpath) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; Value *mapseq = NULL; int found = 0;
@@ -1805,6 +1836,9 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-template")) {
+        inspect_pp_template(argv[2], argv[3]); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-assembly")) {
         inspect_pp_assembly(argv[2], argv[3]); return 0;
     }
