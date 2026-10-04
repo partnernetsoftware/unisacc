@@ -96,5 +96,5 @@ for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
     cross=$((cross+1))
 done
 printf '  ok N1=N2=N3 on %s, cross %s/5  %s\n' "$H" "$cross" "$(shasum < "$T/N1" | cut -c1-16)"
-echo '  skip Windows self-build (not run; independent proofs: --windows win/arm64 and --windows win/x86_64)'
+echo '  skip Windows self-build (run in CI: release-check winsuite; by hand: --windows win/arm64 and --windows win/x86_64)'
 echo 'native bootstrap reached locally; Windows self-build unverified'

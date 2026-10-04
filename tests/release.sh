@@ -112,7 +112,7 @@ skip=re.compile(r'\bskip(?:ped)?\b',re.I)
 # Each notice is allowed only once, only in its owning suite; retain all other
 # text for omission checks and report the outstanding obligations explicitly.
 windows_run='  skip windows (-run needs the UTM machine started)'
-windows_boot='  skip Windows self-build (not run; independent proofs: --windows win/arm64 and --windows win/x86_64)'
+windows_boot='  skip Windows self-build (run in CI: release-check winsuite; by hand: --windows win/arm64 and --windows win/x86_64)'
 windows_ci_posix='  skip winposix (run in CI: release-check winsuite)'          # 0.0.25 X7
 windows_ci_fwd='  skip Windows images (run in CI: release-check winsuite)'
 outside={'run':windows_run, 'com-run':windows_run, 'nativeboot':windows_boot, 'winposix':windows_ci_posix, 'forward':windows_ci_fwd}

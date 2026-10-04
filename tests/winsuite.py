@@ -55,6 +55,17 @@ def prepare(out, ua):
             r = sh([ua, str(ROOT / 'tests/forward/win.c'), '-b', a, '-o', str(out / exe)])
             entries.append({'suite': 'forward', 'name': 'win', 'arch': a, 'exe': exe if not r.returncode else None,
                             'want': 'pid>0 1 tick>0 1 len 9', 'compile_error': r.stderr.decode()[:200] if r.returncode else None})
+        # nativeboot's Windows proof: the win image of the compiler rebuilds itself from the flat source
+        flat = out / 'unisacc.flat.c'
+        if subprocess.run(['python3', str(ROOT / 'tests/sourceflat.py'), str(flat)], cwd=ROOT, capture_output=True, timeout=60).returncode:
+            sys.exit('winsuite: sourceflat failed')
+        for a in ARCHES:
+            exe = 'selfbuild-%s.exe' % a.split('/')[1]
+            with open(out / exe, 'wb') as f:
+                r = subprocess.run([ua, str(flat), '-b', a], stdout=f, stderr=subprocess.PIPE, timeout=180)
+            entries.append({'suite': 'nativeboot', 'name': 'selfbuild', 'arch': a, 'kind': 'selfbuild',
+                            'exe': exe if not r.returncode else None, 'want': None,
+                            'compile_error': r.stderr.decode()[:200] if r.returncode else None})
     (out / 'manifest.json').write_text(json.dumps({'schema': 1, 'entries': entries}, indent=1) + '\n')
     bad = [e for e in entries if not e['exe']]
     print('winsuite prepare  %d probes for %s   compile failures %d' % (len(entries), ', '.join(ARCHES), len(bad)))
@@ -70,6 +81,18 @@ def run(out, arch=None):
     for e in entries:
         if not e['exe']:
             bad += 1; print('  FAIL %-11s %-16s %s (no executable)' % (e['suite'], e['name'], arch)); continue
+        if e.get('kind') == 'selfbuild':
+            img = (out / e['exe']).resolve()
+            with tempfile.TemporaryDirectory(prefix='winsuite-') as td:
+                try:
+                    r = subprocess.run([str(img), str((out / 'unisacc.flat.c').resolve()), '-b', arch], cwd=td,
+                                       stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+                    same = r.returncode == 0 and r.stdout == img.read_bytes()
+                except subprocess.TimeoutExpired:
+                    same = False
+            if same: ok += 1; print('  ok   nativeboot  %s rebuilt itself byte for byte' % arch)
+            else: bad += 1; print('  FAIL nativeboot  %s self-build differs or failed' % arch)
+            continue
         with tempfile.TemporaryDirectory(prefix='winsuite-') as td:
             try:
                 r = subprocess.run([str((out / e['exe']).resolve())], cwd=td, stdin=subprocess.DEVNULL,
