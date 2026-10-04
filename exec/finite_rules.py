@@ -78,6 +78,7 @@ No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
 import json
+import os
 import re
 from pathlib import Path
 
@@ -106,10 +107,17 @@ def _keyset(path, lineno, part, domain, classes):
 
 
 def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None, lines=None,
-         overlay=False):
+         overlay=False, line_numbers=None):
     domain = set(domain)
     explicit, defaults = {}, {}
-    for lineno, line in enumerate(path.read_text().splitlines() if lines is None else lines, 1):
+    row_log = os.environ.get("UNISACC_ROW_LOG")
+    row_sources = {} if row_log else None
+    default_sources = {} if row_log else None
+    source_lines = path.read_text().splitlines() if lines is None else lines
+    if line_numbers is not None and len(line_numbers) != len(source_lines):
+        raise ValueError(f"{path}: source line count differs from expanded rule count")
+    for generated_line, line in enumerate(source_lines, 1):
+        lineno = generated_line if line_numbers is None else line_numbers[generated_line - 1]
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
@@ -150,11 +158,15 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                 chosen = [k for k in operands[0] if all(k in other for other in operands[1:])]
             for key in chosen:
                 row[key] = answer
+                if row_sources is not None:
+                    row_sources[state, key] = lineno
             continue
         if keys == "*":
             if state in defaults:
                 raise ValueError(f"{path}:{lineno}: repeated default")
             defaults[state] = answer
+            if default_sources is not None:
+                default_sources[state] = lineno
             continue
         if keys.startswith("@"):
             name = keys[1:]
@@ -166,6 +178,8 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                 if part in row:
                     raise ValueError(f"{path}:{lineno}: overlapping symbol rules")
                 row[part] = answer
+                if row_sources is not None:
+                    row_sources[state, part] = lineno
                 continue
             bounds = part.split("-")
             if len(bounds) not in (1, 2) or not all(x.isdecimal() for x in bounds):
@@ -177,6 +191,8 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                 if key in row:
                     raise ValueError(f"{path}:{lineno}: overlapping byte rules")
                 row[key] = answer
+                if row_sources is not None:
+                    row_sources[state, key] = lineno
     if not explicit and section is None:
         raise ValueError(f"{path}: empty rules")
     for state, row in explicit.items():
@@ -184,6 +200,8 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
             if state not in defaults:
                 raise ValueError(f"{path}: incomplete state {state}")
             row[key] = defaults[state]
+            if row_sources is not None:
+                row_sources[state, key] = default_sources[state]
         for key, (target, actions) in row.items():
             expanded = []
             for action in actions:
@@ -206,6 +224,17 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                     values.append(value)
                 expanded.append(tuple(values))
             row[key] = target, expanded
+    if row_log:
+        root = Path(__file__).resolve().parent.parent
+        source_path = Path(path).resolve()
+        try:
+            source_name = str(source_path.relative_to(root))
+        except ValueError:
+            source_name = str(source_path)
+        with open(row_log, "a", encoding="utf-8") as out:
+            for state, row in explicit.items():
+                for key in row:
+                    out.write(f"{state}\t{key}\t{source_name}\t{row_sources[state, key]}\n")
     return explicit
 
 
@@ -290,7 +319,7 @@ def _tuples(spec, facts, env, where):
     yield from walk(0, dict(env))
 
 
-def expand_template(path, facts, fresh, section=None):
+def expand_template(path, facts, fresh, section=None, origins=None):
     """Return (four-column rule lines, graph edits) for one section of a template."""
     rows, blocks = [], []
     for lineno, line in enumerate(Path(path).read_text().splitlines(), 1):
@@ -356,6 +385,8 @@ def expand_template(path, facts, fresh, section=None):
                         if kind != "rule":
                             modes[a2] = kind[5:]
                         out.append("\t".join((a2, b2, c2, d2)))
+                        if origins is not None:
+                            origins.append(lineno)
                     elif kind == "fresh":
                         if b2:
                             prev[b2] = a2
@@ -458,10 +489,11 @@ def _companions(g, rules):
 def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
                      section=None, mode="r", domain=range(257), overlay=False):
     path = Path(root) / (stem + "-template.tsv")
-    lines, edits, modes = expand_template(path, facts, fresh, section)
+    origins = []
+    lines, edits, modes = expand_template(path, facts, fresh, section, origins=origins)
     if lines:
         for state, row in load(path, sequences or {}, domain, bindings=bindings, classes=classes,
-                               lines=lines, overlay=overlay).items():
+                               lines=lines, overlay=overlay, line_numbers=origins).items():
             for key, (target, actions) in row.items():
                 g.on(state, [key], target, actions, modes.get(state, mode))
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
@@ -592,7 +624,8 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                 if present:
                     continue
                 row = load(path, sequences or {}, domain=[key], bindings=bindings,
-                           lines=["\t".join((a, b, c, d))])
+                           lines=["\t".join((a, b, c, d))],
+                           line_numbers=[int(where.rsplit(":", 1)[1])])
                 target, actions = row[a][key]
                 g.on(a, [key], target, actions, g.st[a][0] if a in g.st else mode)
                 g.labels.update(x[1] for x in actions if x[0] == "PUSH")
