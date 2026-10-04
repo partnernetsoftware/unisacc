@@ -101,7 +101,7 @@
 | 隐式顺序：`ordered` | A:330 | 1 | 0 |
 | facts 里残留的动作序列（单元含 `[["OP",…` JSON） | — | — | 2489 处 / 27 文件（pp-autoinc-gen 1096、lex-gen 432、printfcontrol 274、k2-control 213、k2-gen2 142、k2-call 92 …） |
 | facts 里的 `"exit"` 动作 | — | 15 / 5 | 9 / 3（lower-code 6、k2-gen2 2、returnwarnings-text 1） |
-| 死数据：无清单或 py 引用的 facts 表 | — | — | 1：`nativeabi-ordered-regs.tsv` |
+| 死数据：无清单或 py 引用的 facts 表 | — | — | 0（`nativeabi-ordered-regs.tsv` 已于 T1f 删除） |
 | 死代码：`tape:` fresh、`fresh` op 名 | A:150, A:289 | `tape:` 0；op `fresh` 0 | — |
 
 下一步建议顺序：getattr 已在 T1a 去掉（@stack 8、stackrows 2 改成 export.py 写出的 facts `k2-stack` 加 `@acts:`；graph 头改为 build/graph.py 的 GRAPHS 显式表），下一步把 `=vN` 换成具名 fact，再把 fresh 分配改成显式序号，最后把 facts 动作序列迁回模板表。
