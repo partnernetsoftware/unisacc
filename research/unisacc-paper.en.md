@@ -62,16 +62,21 @@ The decomposition rests on a standard result of computation theory: a determinis
 
 **Syntax and semantics of the TSV table DSL.** A basic product-pipeline row has `state, observation, next, actions`, with a leading `section` in sectioned tables: an observation is a value, a finite set, or a `*` default, and actions form an ordered sequence. Parameterised template rows may refer to build-time facts and declare repeated expansion, continuation labels, and state hooks. The constructor instantiates those variables at build time; runtime Python does not evaluate them. Expansion gives exactly one transition for every state and key in the declared observation domain; duplicate explicit keys and missing defaults are rejected. Thus the DSL denotes a finite total function $G_s:(q,o)\mapsto(q',a^*)$. The constructor writes the complete `.tbl`, deterministically builds a threshold network $N_s$, and enumerates the domain to check $N_s=G_s$. This establishes equality with the table, not C99 correctness. The build-time Python expander, fact binding and packer belong to the trusted base; compilation decisions at runtime use the networks and generic executor.
 
+**Relationship to Paper E.** This paper studies exact construction of threshold networks from given finite control tables and a compiler implementation. It does not claim automatic synthesis of complete C99 control tables or a proof of their language semantics. Systematic construction of reliable tables from grammars, attribute rules, explicit context and state invariants is a separate research candidate, [Paper E](paper-e-intent.md), to be investigated through continued unisacc development. This paper remains responsible for documenting table provenance, the constructor trusted base, coverage boundaries and known defects; network–table equality does not establish C99 correctness.
+
+T2a assumes identical initialisation, observations, action catalogues and primitive semantics, complete interfaces, integer ranges and logical resource budgets, with coupled external inputs. Pointwise equality selects identical actions at each step; induction yields identical traces and acceptance, rejection or divergence. This argument does not establish that the C/assembly implementations satisfy the assumptions or consume identical physical resources.
+
 ### 2.3 Levels of assurance
 
 | Level | Content | Status |
 |---|---|---|
 | **T1** | Every released network equals its table on its whole domain (or declared observation domain) | Proved: constructive existence + full-domain enumeration |
 | **E** | Byte-level comparison with the classic reference on measured inputs; two named differences remain in v0.0.14 | Empirical evidence, scoped in §5.5 |
-| **T2** | The network compiler simulates the reference compiler over whole runs | Open: needs initial-state relation, state invariants, final-state match and divergence sensitivity |
+| **T2a** | Pointwise-equal controller substitution in the same executor | Conditional stepwise induction; implementation assumptions not mechanised |
+| **T2b** | The network compiler simulates an independent reference compiler over whole runs | Open: needs initial-state relation, state invariants, final-state match and divergence sensitivity |
 | **T3** | Compilation preserves the observable behaviour of the declared source language | Open: requires fixing the language subset, ABI and undefined behaviour first |
 
-T1 is the theorem-level result of this paper; E is engineering evidence; T2 and T3 are explicit open obligations.
+T1 is the theorem-level result of this paper; E is engineering evidence; the implementation bridge for T2a, T2b and T3 are explicit open obligations.
 
 ## 3 Weight Construction
 
@@ -190,7 +195,7 @@ Profiling showed that a program containing only `#include <stdio.h>` took 3.29M 
 
 **Threshold-prefix evaluation.** Thresholds within a bank are strictly increasing (the loader rejects anything else), so the units activated by an observation always form a prefix. The executor binary-searches the prefix length and accumulates only those differences — the same network and the same sum, with no answer table stored.
 
-**Declared returns.** Rows of a stack-keyed bank of the form "continuation k → k, sharing one action sequence" mean "pop and continue at the state the stack names". They depend on an unbounded continuation stack and, by §4.1, are not finite decisions. The constructor therefore records them as a declared return set and builds threshold units only for the remaining rows. The network–table check still compares every observation, returns included (1,549,292 in the parsing stage), and is fully equal before and after the change.
+**Declared returns.** Rows of a stack-keyed bank of the form "continuation k → k, sharing one action sequence" mean "pop and continue at the state the stack names". The continuation alphabet of a fixed stage is finite; unbounded stack height does not make the top observation an infinite decision. The constructor factors these rows into a declared return set and a generic pop action, building threshold units only for the remaining rows. The return fast path and threshold path together constitute the complete controller. The network–table check still compares every observation, returns included (1,549,292 in the parsing stage), and is fully equal before and after the change.
 
 With both changes, compiling `fib.c` and the compiler's own source dropped from 10.2× and 25.0× the classic route to 3.9× and 12.8× (§7.2).
 
@@ -425,7 +430,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 **Threats to validity.** Performance figures come from a single machine, and some platforms were executed under emulation; the rows of the speed table come from different product versions (Appendix A); coverage by c-testsuite and the probe corpus does not extrapolate to arbitrary C99 programs.
 
-**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../archive/plans/v0.0.20.md) and [v0.0.21](../archive/plans/v0.0.21.md). These are plans, not results. The v0.0.20 release took about 115 min from freeze to publish, about 50 min of it rework ([timeline review](pipeline-speed-review-0020.md)); the process fixes are v0.0.21 item 14b.
+**Where the open problems go.** the implementation bridge for T2a, T2b, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../archive/plans/v0.0.20.md) and [v0.0.21](../archive/plans/v0.0.21.md). These are plans, not results. The v0.0.20 release took about 115 min from freeze to publish, about 50 min of it rework ([timeline review](pipeline-speed-review-0020.md)); the process fixes are v0.0.21 item 14b.
 
 ## 9 Related Work
 

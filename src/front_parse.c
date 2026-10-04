@@ -1843,6 +1843,9 @@ int primary(void) {
         if (curptr) { if (symstruct[i] >= 0) { if (symkind[i] != 3) curelem = stsize[symstruct[i]]; } }
         curpd = 0; curbase = symbase[i];
         if (curptr) { curpd = symptrd[i]; if (curpd >= 2) curelem = 8; }
+        /* A scalar function-pointer object loads its pointer value, but
+           dereferencing that value yields a function designator, not data. */
+        if (symfp[i] && symptrd[i] == 1 && symkind[i] != 3 && symkind[i] != 5) curfn = 1;
         adv();
         lvalue = 1;
         if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
@@ -3212,7 +3215,7 @@ int cond(void) {
 
 int exprc(void) {                   /* the comma operator */
     expr();
-    while (cur() == tidx(",", 1)) { adv(); expr(); if (curptr) cursize = 8; }
+    while (cur() == tidx(",", 1)) { loadval(); adv(); expr(); if (curptr) cursize = 8; }
     return 0;
 }
 
@@ -5229,7 +5232,7 @@ int stmt_(void) {
         adv(); need(tidx("(", 1), "(");
         if (eat(tidx(";", 1)) == 0) {
             if (is_typeat(tp)) local_decl();
-            else { exprc(); need(tidx(";", 1), ";"); }
+            else { exprc(); loadval(); need(tidx(";", 1), ";"); }
         }
         top = newlab(); a = newlab(); c = newlab();
         elab("__unisacc_L", top); es(":\n");
@@ -5255,7 +5258,7 @@ int stmt_(void) {
         aftert = tp;
         elab("__unisacc_L", c); es(":\n");
         /* not after an error: the cursor is parked at EOF and stays there */
-        if (panic == 0) { if (stept != bodyt - 1) { tp = stept; exprc(); } }
+        if (panic == 0) { if (stept != bodyt - 1) { tp = stept; exprc(); loadval(); } }
         tp = aftert;
         elab("  @ctrl.jump __unisacc_L", top); ec(10);
         elab("__unisacc_L", a); es(":\n");
@@ -5404,7 +5407,7 @@ int stmt_(void) {
         return 0;
     }
     if (eat(vfind(TOKV, NTOKV, ";", 1))) return 0;
-    exprc();
+    exprc(); loadval();
     need(vfind(TOKV, NTOKV, ";", 1), ";");
     return 0;
 }

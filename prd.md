@@ -307,3 +307,7 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 - [prd-r17-notes-20261001.md](archive/prd-r17-notes-20261001.md)：0.0.17 开发期间写在 prd 末尾的 R17 实施记录（tape 链接属性、产品对象路线各片）。
 - [prd-notes-20261002.md](archive/prd-notes-20261002.md)：0.0.21 发布后从 §5/§6 移出的 R20-1/R20-3 实施记录、已修复问题与旧排期条目。
 - [prd-release-and-development-history-20261001.md](archive/prd-release-and-development-history-20261001.md)：逐版发布身份、R19 开发决定、旧结构测量与 R18/R19 实施回执。
+
+### V1：discarded-value 与 volatile 读取核查（进行中）
+
+按 C99 6.3.2.1/6.5.17 的求值语境修复逗号左操作数与表达式语句的读取；不把参考/产品 tape 相等当作正确性证明。保留赋值左值、取地址和 sizeof 的例外，增加系统 cc 可观察读取证据。仅本轮实现与核查后登记完成。
