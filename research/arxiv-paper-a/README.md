@@ -3,7 +3,7 @@
 LaTeX conversion of `research/unisacc-paper.en.md` for arXiv (primary cs.PL), pinned to repo commit `3b971ea`.
 
 - `main.tex` + `figures/` — arXiv source (pdflatex, TeX Live; tar these two for upload)
-- `main.pdf` — local build (22 pages)
+- `main.pdf` — local build (25 pages)
 - `abstract.txt` — arXiv metadata abstract (1,483 chars, under the 1,920 limit)
 
 Byline: Yunzuo Chen, PartnerNet Software Pty Ltd, Australia (wanjochan@partnernetsoftware.com).
