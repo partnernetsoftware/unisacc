@@ -1560,6 +1560,53 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_header(const char *outpath, size_t index) {
+    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *headers = value_get(facts, "headers");
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest || !headers || headers->kind != JARR || index >= headers->n) die("invalid pp header index");
+    value_put(facts, "it", headers->items[index].value);
+    {
+        Value *it = value_get(facts, "it"), *terminal = value_get(it, "terminal"); char next[64];
+        if (terminal->kind != JBOOL) die("invalid pp header terminal");
+        if (terminal->number) strcpy(next, "AEM");
+        else if (snprintf(next, sizeof(next), "AH%lld_0", value_get(it, "end")->number) >= (int)sizeof(next))
+            die("pp header successor too long");
+        value_put(facts, "header_next", value_string(next));
+    }
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        if (!strcmp(field[0], ".rows") && !strcmp(field[1], "assembly") &&
+            !strcmp(field[2], "header")) {
+            Value *bindings = value_new(JOBJ);
+            direct_bindings(bindings, field[7], facts);
+            install_section(&g, "exec/pp/assembly-byte.tsv", "header", 'b', bindings, NULL);
+            install_section(&g, "exec/pp/assembly-result.tsv", "header", 'r', bindings, NULL);
+            found++;
+        } else if (!strcmp(field[0], "..rows") && !strcmp(field[1], "autoinc-name")) {
+            Value *names = value_get(value_get(facts, "it"), "names"), *opts = value_json(field[8], "pp name options");
+            char path[1024];
+            for (size_t j = 0; j < names->n; j++) {
+                Value *bindings = value_new(JOBJ), *sequences;
+                value_put(facts, "n", names->items[j].value);
+                direct_bindings(bindings, field[7], facts);
+                sequences = mapseq_construct(opts, facts);
+                for (int k = 0; k < 2; k++) {
+                    if (snprintf(path, sizeof(path), "exec/pp/autoinc-name-%s.tsv", k ? "result" : "byte") >= (int)sizeof(path))
+                        die("pp name path too long");
+                    install_plain(&g, path, k ? 'r' : 'b', bindings, sequences);
+                }
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 2) die("pp header rows missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_body(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *bodies = value_get(facts, "bodies");
@@ -1979,6 +2026,11 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-header")) {
+        char *end; unsigned long index = strtoul(argv[2], &end, 10);
+        if (end == argv[2] || *end) die("invalid pp header index");
+        inspect_pp_header(argv[3], index); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-body")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
         if (end == argv[2] || *end) die("invalid pp body index");
