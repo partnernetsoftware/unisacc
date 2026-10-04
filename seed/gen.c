@@ -1545,6 +1545,63 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_assembly(const char *section, const char *outpath) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    Graph g = {0}; char *s; Value *mapseq = NULL; int found = 0;
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
+            mapseq = mapseq_construct(value_json(field[8], "pp output options"),
+                                      load_facts_expr(field[4]));
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "assembly") &&
+                   !strcmp(field[2], section)) {
+            Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
+            Value *sequences = value_new(JOBJ);
+            if (strcmp(field[8], "-") || !strcmp(field[3], "locations")) die("unsupported pp assembly row");
+            direct_bindings(bindings, field[7], facts);
+            if (mapseq && value_get(mapseq, "objname"))
+                value_put(sequences, "name", value_get(mapseq, "objname"));
+            install_section(&g, "exec/pp/assembly-byte.tsv", section, 'b', bindings, sequences);
+            install_section(&g, "exec/pp/assembly-result.tsv", section, 'r', bindings, sequences);
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp assembly row missing or repeated");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
+static void inspect_pp_rows(const char *stem, const char *outpath, int no_autoinc) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], stem) &&
+            when_true(field[3], no_autoinc, no_autoinc ? (char *[]){"--no-autoinc"} : NULL)) {
+            Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
+            char path[1024];
+            if (strcmp(field[2], "-") || strcmp(field[6], "-") || strcmp(field[8], "-"))
+                die("pp row has unsupported section, sequence, or options");
+            direct_bindings(bindings, field[7], facts);
+            for (int i = 0; i < 2; i++) {
+                if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
+                    die("pp row path too long");
+                install_plain(&g, path, i ? 'r' : 'b', bindings, NULL);
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp row missing or repeated");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_cli(const char *outpath, int no_autoinc) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; Value *sequences = NULL; char *s; int found = 0;
@@ -1748,6 +1805,13 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-assembly")) {
+        inspect_pp_assembly(argv[2], argv[3]); return 0;
+    }
+    if ((argc == 4 || (argc == 5 && !strcmp(argv[4], "--no-autoinc"))) &&
+        !strcmp(argv[1], "inspect-pp-rows")) {
+        inspect_pp_rows(argv[2], argv[3], argc == 5); return 0;
+    }
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
         !strcmp(argv[1], "inspect-pp-cli")) {
         inspect_pp_cli(argv[2], argc == 4); return 0;
