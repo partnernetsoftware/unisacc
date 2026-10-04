@@ -14,6 +14,10 @@ for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh" "CORE_ASM_ARCH=x86_64 exec
     if [ "$rc" -eq 142 ]; then echo "warm-up: $w cold pass timed out (${t}s); checking warm"; t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 )); fi
     echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
 done
+# 0.0.24: a header change (kill, ttyname) left exec/facts/pp-autoinc-gen.tsv stale; the candidate
+# had to be rebuilt.  Exported fact tables must match their generators before freezing.
+python3 tests/bound.py 30 python3 exec/facts/export.py --check > /tmp/precheck-ex.$$ 2>&1 || { tail -3 /tmp/precheck-ex.$$; echo "  FAIL: exported facts stale (run exec/facts/export.py, re-record graphhash)"; bad=1; }
+rm -f /tmp/precheck-ex.$$
 # 0.0.21 R21-14: the two reworks of the 0.0.20 release, caught before freezing
 python3 tests/bound.py 30 python3 tests/subtractsafety.py > /tmp/precheck-ss.$$ 2>&1 || { tail -3 /tmp/precheck-ss.$$; echo "  FAIL: subtract-safety (a live file names an archived one)"; bad=1; }
 rm -f /tmp/precheck-ss.$$
