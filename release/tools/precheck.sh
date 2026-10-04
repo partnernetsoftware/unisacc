@@ -14,6 +14,9 @@ for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh" "CORE_ASM_ARCH=x86_64 exec
     if [ "$rc" -eq 142 ]; then echo "warm-up: $w cold pass timed out (${t}s); checking warm"; t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 )); fi
     echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
 done
+# 0.0.25 P1: after the version commit only `fix:` commits may touch the product closure.
+python3 tests/bound.py 20 python3 tests/freezecheck.py > /tmp/precheck-fz.$$ 2>&1 || { cat /tmp/precheck-fz.$$; echo "  FAIL: new work inside the freeze window (move it to the next version, or mark a red fix with fix:)"; bad=1; }
+rm -f /tmp/precheck-fz.$$
 # 0.0.24: a header change (kill, ttyname) left exec/facts/pp-autoinc-gen.tsv stale; the candidate
 # had to be rebuilt.  Exported fact tables must match their generators before freezing.
 python3 tests/bound.py 30 python3 exec/facts/export.py --check > /tmp/precheck-ex.$$ 2>&1 || { tail -3 /tmp/precheck-ex.$$; echo "  FAIL: exported facts stale (run exec/facts/export.py, re-record graphhash)"; bad=1; }
