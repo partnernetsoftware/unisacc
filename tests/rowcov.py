@@ -60,6 +60,12 @@ def main():
         covered = sum(1 for r in rows.values() if r[1])
         (out / 'pp.cov.tsv').write_text(''.join('%s\t%d\t%d\t%s\n' % (p, ln, r[0], r[1] or '-') for (p, ln), r in sorted(rows.items())))
         print('rowcov pp  rows %d   covered %d   (%.1f%%)   report %s' % (len(rows), covered, 100.0 * covered / max(1, len(rows)), out / 'pp.cov.tsv'))
+        # ratchet: covered rows may only rise (tests/rowcov.baseline); raise the number when they do
+        base = dict(l.split()[:2] for l in (ROOT / 'tests/rowcov.baseline').read_text().splitlines() if l and not l.startswith('#'))
+        floor = int(base.get('pp', 0))
+        if covered < floor:
+            print('rowcov pp  FELL below the baseline %d: a probe stopped reaching rows it used to' % floor); return 1
+        if covered > floor: print('rowcov pp  above the baseline %d: raise it in tests/rowcov.baseline' % floor)
         return 0
     k, n = map(int, what.split('/'))
     if subprocess.run(['sh', 'exec/pp/run.sh', 'gen'], cwd=ROOT, capture_output=True).returncode:
