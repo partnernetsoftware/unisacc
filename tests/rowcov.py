@@ -156,6 +156,8 @@ def main():
         delta = json.loads(dj.read_text())
         lexdelta = json.loads(lexj.read_text()) if stage == 'parse2' else delta
         if stage == 'parse2': loaded = sim.load(delta)
+        # the typed lexer runs on the shared core simulator, whose cov keys are state indices in this order
+        names = list(delta['states']) + (['HALT'] if 'HALT' not in delta['states'] else [])
     elif stage in ('lower', 'enc'):
         # the tape comes from the reference (-S), the inputs these stages see in the product chain
         delta = json.loads(dj.read_text()); loaded = sim.load(delta); names = loaded[0]
@@ -163,8 +165,6 @@ def main():
         lowerloaded = sim.load(lowerdelta) if stage == 'enc' else loaded
         ua = os.environ.get('UA', '/tmp/ua_ref')
         subprocess.run(['sh', '-c', 'UA=%s; . ./tests/lib.sh; ua_ready' % ua], cwd=ROOT, capture_output=True)
-        # the typed lexer runs on the shared core simulator, whose cov keys are state indices in this order
-        names = list(delta['states']) + (['HALT'] if 'HALT' not in delta['states'] else [])
     else:
         delta, loaded, names = ppdelta, pploaded, pploaded[0]
     files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
