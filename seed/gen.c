@@ -1900,7 +1900,24 @@ static void pp_install_body_before_dsw(Graph *g) {
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "shared-predefine")) {
             /* This row belongs to --shared-predefines, not the default product route. */
         } else if (!strcmp(field[0], "foreach")) {
-            /* Target specific predefinitions are installed by the next body slice. */
+            Value *facts = load_facts_expr(field[4]);
+            Value *predef = value_get(value_get(facts, "predef"), "lnx/x86_64");
+            Value *opts = value_json("{\"mapseq\":{\"pname\":[{\"acts\":[[\"SBCLR\"],[\"@bytes\",\"{it[name]}\"]]}]}}", "pp predefine sequences");
+            if (!predef || predef->kind != JARR || strcmp(field[8], "{\"over\": \"predef.{target}\"}"))
+                die("unsupported pp target predefinitions");
+            for (size_t i = 0; i < predef->n; i++) {
+                Value *ctx = load_facts_expr("pp-gen+pp-layout"), *bind = value_new(JOBJ);
+                Value *seqs;
+                value_put(ctx, "it", predef->items[i].value);
+                value_put(bind, "name", value_get(predef->items[i].value, "name"));
+                value_put(bind, "entry", value_get(predef->items[i].value, "entry"));
+                value_put(bind, "resume", value_get(predef->items[i].value, "resume"));
+                value_put(bind, "next", value_get(predef->items[i].value, "next"));
+                value_put(bind, "F_BODY", value_get(ctx, "F_BODY"));
+                seqs = mapseq_construct(opts, ctx);
+                value_put(seqs, "name", value_get(seqs, "pname"));
+                pp_install_stem(g, "assembly", "predefine", bind, seqs);
+            }
             free(s); break;
         } else die("unsupported pp body row before dsw");
         free(s);
@@ -1908,9 +1925,31 @@ static void pp_install_body_before_dsw(Graph *g) {
     if (ferror(f) || fclose(f) || scans != 1 || obj != 1 || assembly != 1 || linedir != 1)
         die("incomplete pp body before dsw");
 }
-static void inspect_pp_through_linedir(const char *outpath) {
+static void pp_install_dsw(Graph *g) {
+    FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s; int found = 0;
+    if (!f) die("cannot open pp body manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp body column count");
+        if (!strcmp(field[0], "template") && !strcmp(field[1], "dsw")) {
+            Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp dsw options");
+            Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
+            Buffer lines = expand_template_file("exec/pp/dsw-template.tsv", facts, field[2]);
+            FILE *table = buffer_file(&lines);
+            if (strcmp(value_text(value_get(opts, "mode")), "r")) die("pp dsw mode changed");
+            install_delta_text(g, table, 'r', domain, NULL, NULL, 0, 0, NULL, "START");
+            if (fclose(table)) die("pp dsw table close failed");
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f) || found != 1) die("pp dsw declaration missing");
+}
+static void inspect_pp_through_linedir(const char *outpath, int with_dsw) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, 0); pp_install_call_autoinc(&g); pp_install_body_before_dsw(&g);
+    if (with_dsw) pp_install_dsw(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -2385,7 +2424,10 @@ int main(int argc, char **argv) {
         inspect_pp_through_autoinc(argv[2], argc == 4); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-linedir")) {
-        inspect_pp_through_linedir(argv[2]); return 0;
+        inspect_pp_through_linedir(argv[2], 0); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-dsw")) {
+        inspect_pp_through_linedir(argv[2], 1); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
