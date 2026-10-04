@@ -161,3 +161,33 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **precheck 的冷缓存**（0.0.23 F1）：第一遍超时只说明缓存是冷的，precheck 会自动再跑一遍热的，第二遍仍超时才判失败。
 - **发布后冒烟**：`gh workflow run release-smoke.yml -f tag=v$V -f sha256=<签后 sha>`，0.0.22 六格全绿，结果写进回执的 post_release_smoke。
 
+
+## 16. 0.0.23 回顾（2026-10-04）：K2 之后的第一次发版
+
+本版队列多跑了约六轮，假红远多于真问题。下面每条都实际踩过；下次发版前先逐条对照。
+
+**候选与闭包**
+- **构建候选前，闭包目录里不能有任何未跟踪文件**。provenance 的闭包按 rglob 收集 exec/、unisa/、src/、kernel/、include/、weights/ 下的文件，未跟踪的也算。0.0.23 有个遗留的临时 tsv 在 exec/parse2 里，候选建完才删，结果队列第 7 窗报“product inputs changed”，只好重建候选。构建前先跑一次 `git ls-files -o -- exec unisa src kernel include weights iterate`，输出必须为空。
+- **exec/build 下直接放的 *.py 是 K2 驱动，算构建输入**；生成的输出只能放在 exec/build/ 的子目录里。provenancecheck 和 queuecheck 的夹具已按此调整。gatequeue 的 reviewed_trees 清单现在只数 git ls-files 列出的文件，被忽略的生成物不再改变指纹。
+- **改了 include/*.h 之后要跑 `python3 -m unisa emit-kernel`**，否则 kernel 门禁会报 STALE。生成的 kernel 文件是产品输入，重新生成后必须重建候选。
+
+**打包与 comboot**
+- **pack-models 已拆成 pack-prep-1..3 加只打包的 pack-models**（ace7d6d3）。K2 之后 parse2 单次构造要 30–40 秒，整步放不进 55 秒。prep-1 和 prep-2 各约 40 秒，余量只有约 4 秒；parse2 再变慢就得在 gen.py 内部继续拆。
+- comboot 的 stage3 偶尔有一步撞上限时。步骤有完成标记，再跑一次 `comboot.py shard stage3` 就能从停下的地方接着做。
+
+**本地发版队列（tests/release.sh --com）**
+- **改了 tests/gatequeue.py，所有作业都会重跑**：每条依赖声明都包含它。只改 knownfail 或单个检查脚本时，只有声明了它的作业会重跑。
+- **已经失败的作业，续跑时不会自动重跑**。修好原因后，从 `$GATE_STATE/results.json` 删掉那一条（先备份），再续跑。
+- 驱动脚本必须把 rc=142（窗口超时）当作可以重试：大作业密集的那段时间里，窗口几乎每次都会超时，结果都记在 results.json 里，不会丢。连续超时的上限要设得很高（0.0.23 用的是 200）；设成 5 或 30 都中途停过。
+- **在 --jobs 4 下贴着上限的套件都要拆分或预热**：csmithdiff 拆成 40 片，exec-chain 拆成 5 片，seed-matrix-features 拆成 3 片；warnings/errors 套件改用 warnprep 预热，lib-*-source 用 lib-source-prep，exec-*self 用 selfprep，都是共享一份按内容哈希命名的模型缓存。新加套件时，单独跑超过 30 秒的就照此处理。
+- **任何 skip 都会被证据检查判为失败**（release: empty or skipped evidence）。新探针如果 include 同目录的头文件，difftest 和 difftest_o 编译参考副本时都要加 `-I "$(dirname "$f")"`。
+- **产品修好一个探针后，所有 knownfail 文件里的对应条目都要删**：difftest.com.knownfail、product-refusals.knownfail、ccrun.knownwrong、pyfront.knownfail。报 revived 是好消息，但仍然算红。
+- 发版期间 **Lima x86_64 要一直开着**（ccinterop 需要），**Windows 虚拟机也要先开**（winposix 需要）；任何一个没开，相应套件都会因为跳过而失败。
+
+**Linux 客机（tests/linux.sh）**
+- **全套用 8 GiB 的 minicon-lnx-aarch64，加 `JOBS=1`**。bigclosure 和 ape 的每个 python3 峰值要 3–4 GB，4 个作业并发会被 OOM 杀掉，日志里显示成“Python image build failed”。
+- **客机的 /tmp 是约 4 GB 的内存盘**。linux.sh 现在把客机端 TMPDIR 指向 `$HOME/unisa-tmp`（虚拟机磁盘）。失败的运行会把整棵树（约 2–4 GB）保留在 TMPDIR 里，下一轮开始前要清掉。
+
+**流水线（缩短总时长）**
+- 发版队列一开跑，不依赖它的步骤就并行做：release_prep 加 Apple 签名和公证（基本是等网络）、草稿 release、release-check（推送 rc 提交时就触发）、Windows qualification 和 company 签名。0.0.23 在队列还没跑完时，这几步就都完成了。
+- 公开发布仍然要等：本地队列 rc=0、Linux 全绿、crossnative 没有跳过，并且主人确认。
