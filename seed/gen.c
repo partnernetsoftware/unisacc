@@ -15,6 +15,14 @@ typedef struct { State *state; size_t n, cap; char **seq; size_t ns, cs; char **
 typedef struct { int key; char *target, *actions; } Rule;
 typedef struct { char *name; Rule *rule; size_t n, cap; char *def_target, *def_actions; } RuleState;
 typedef struct { RuleState *state; size_t n, cap; } RuleSet;
+/* Values preserve the insertion order of object keys, as assemble.load_facts does. */
+typedef struct Value Value;
+typedef struct { char *key; Value *value; } Member;
+struct Value {
+    int kind; /* JOBJ/JARR/JSTR/JINT */
+    char *s; long long number;
+    Member *items; size_t n, cap;
+};
 
 static void die(const char *why) { fprintf(stderr, "seed-gen: %s\n", why); exit(1); }
 static void *grow(void *p, size_t n, size_t unit) {
@@ -24,6 +32,57 @@ static void *grow(void *p, size_t n, size_t unit) {
 static char *copy(const char *s) {
     size_t n = strlen(s) + 1; char *p = malloc(n);
     if (!p) die("out of memory"); memcpy(p, s, n); return p;
+}
+static char *copy_n(const char *s, size_t n) {
+    char *p = grow(NULL, n + 1, 1);
+    memcpy(p, s, n); p[n] = 0; return p;
+}
+static Value *value_new(int kind) {
+    Value *v = grow(NULL, 1, sizeof(*v));
+    memset(v, 0, sizeof(*v)); v->kind = kind; return v;
+}
+static Value *value_string(const char *s) {
+    Value *v = value_new(JSTR); v->s = copy(s); return v;
+}
+static void value_put(Value *parent, const char *key, Value *child) {
+    size_t i;
+    if (parent->kind != JOBJ && parent->kind != JARR) die("value is not a container");
+    if (parent->kind == JOBJ) {
+        if (!key) die("missing object key");
+        for (i = 0; i < parent->n; i++) if (!strcmp(parent->items[i].key, key)) {
+            parent->items[i].value = child; return;
+        }
+    }
+    if (parent->n == parent->cap) {
+        parent->cap = parent->cap ? parent->cap * 2 : 8;
+        parent->items = grow(parent->items, parent->cap, sizeof(*parent->items));
+    }
+    parent->items[parent->n].key = key ? copy(key) : NULL;
+    parent->items[parent->n++].value = child;
+}
+static Value *value_get(Value *v, const char *key) {
+    size_t i;
+    if (!v || v->kind != JOBJ) return NULL;
+    for (i = 0; i < v->n; i++) if (!strcmp(v->items[i].key, key)) return v->items[i].value;
+    return NULL;
+}
+static Value *value_from_json(JDoc *d, int ix) {
+    JNode *n = &d->n[ix]; Value *v = value_new(n->type); int child;
+    if (n->type == JSTR) v->s = copy_n(d->buf + n->str, (size_t)n->slen);
+    else if (n->type == JINT) v->number = n->ival;
+    else if (n->type == JOBJ || n->type == JARR) {
+        for (child = jkid(d, ix); child >= 0; child = jnext(d, child)) {
+            JNode *c = &d->n[child];
+            char *key = n->type == JOBJ ? copy_n(d->buf + c->key, (size_t)c->klen) : NULL;
+            value_put(v, key, value_from_json(d, child)); free(key);
+        }
+    } else die("unsupported JSON value");
+    return v;
+}
+static Value *value_json(const char *s, const char *label) {
+    JDoc d; Value *v;
+    jparse_text(&d, s, (long)strlen(s), label);
+    v = value_from_json(&d, 0); jfree(&d); return v;
 }
 static char *line(FILE *f) {
     size_t n = 0, cap = 256; char *s = grow(NULL, cap, 1); int c;
@@ -50,6 +109,118 @@ static void quoted(FILE *f, const char *s) {
         else fputc(*p, f);
     }
     fputc('"', f);
+}
+static void value_write(FILE *f, const Value *v) {
+    size_t i;
+    switch (v->kind) {
+    case JSTR: quoted(f, v->s); break;
+    case JINT: fprintf(f, "%lld", v->number); break;
+    case JOBJ: case JARR:
+        fputc(v->kind == JOBJ ? '{' : '[', f);
+        for (i = 0; i < v->n; i++) {
+            if (i) fputc(',', f);
+            if (v->kind == JOBJ) { quoted(f, v->items[i].key); fputc(':', f); }
+            value_write(f, v->items[i].value);
+        }
+        fputc(v->kind == JOBJ ? '}' : ']', f); break;
+    default: die("unknown value kind");
+    }
+}
+static int fields_tab(char *s, char **field, int max) {
+    int n = 0; char *p = s;
+    while (n < max) {
+        char *tab = strchr(p, '\t');
+        field[n++] = p;
+        if (!tab) return n;
+        *tab = 0; p = tab + 1;
+    }
+    if (strchr(p, '\t')) die("too many TSV fields");
+    return n;
+}
+static Value *fact_cell(const char *type, const char *text) {
+    if (!strcmp(type, "json")) return value_json(text, "fact JSON cell");
+    if (!strcmp(type, "int")) {
+        char *end; long long n; Value *v;
+        errno = 0; n = strtoll(text, &end, 10);
+        if (errno || end == text || *end) die("invalid fact integer");
+        v = value_new(JINT); v->number = n; return v;
+    }
+    if (!strcmp(type, "str")) {
+        char *out = grow(NULL, strlen(text) + 1, 1); size_t j = 0, i;
+        for (i = 0; text[i]; i++) {
+            if (text[i] == '\\' && text[i + 1]) {
+                i++; out[j++] = text[i] == 't' ? '\t' : text[i] == 'n' ? '\n' : text[i];
+            } else out[j++] = text[i];
+        }
+        out[j] = 0;
+        { Value *v = value_string(out); free(out); return v; }
+    }
+    die("unknown fact cell type"); return NULL;
+}
+static Value *header_cell(const char *text) {
+    unsigned char c = (unsigned char)text[0];
+    if (c == '[' || c == '{' || c == '"' || (c >= '0' && c <= '9') ||
+        (c == '-' && text[1] >= '0' && text[1] <= '9'))
+        return value_json(text, "header fact cell");
+    return value_string(text);
+}
+static Value *load_fact(const char *stem) {
+    char path[1024]; FILE *f; char *s; Value *root = value_new(JOBJ);
+    char *header[128] = {0}, *types[128] = {0}; int nh = 0, typed = -1;
+    Value *table = NULL; char *table_name = NULL;
+    if (snprintf(path, sizeof(path), "exec/facts/%s.tsv", stem) >= (int)sizeof(path)) die("fact path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open fact table");
+    while ((s = line(f))) {
+        char *field[128]; int n, i;
+        if (!*s) { free(s); continue; }
+        if (typed < 0 && s[0] != '#') typed = s[0] == '=' || s[0] == '@' || s[0] == '\t' ? 1 : 0;
+        if (s[0] == '#') {
+            if (typed < 0 && nh == 0 && s[1] == ' ') {
+                char *h = copy(s + 2); nh = fields_tab(h, field, 128);
+                for (i = 0; i < nh; i++) header[i] = copy(field[i]); free(h);
+            }
+            free(s); continue;
+        }
+        n = fields_tab(s, field, 128);
+        if (!typed) {
+            Value *row = value_new(JOBJ);
+            if (n != nh || nh == 0) die("header fact column count");
+            if (!table) { table = value_new(JARR); value_put(root, stem, table); }
+            for (i = 0; i < n; i++) value_put(row, header[i], header_cell(field[i]));
+            value_put(table, NULL, row);
+        } else if (field[0][0] == '=') {
+            if (n != 3) die("scalar fact column count");
+            value_put(root, field[0] + 1, fact_cell(field[1], field[2]));
+        } else if (field[0][0] == '@') {
+            if (n < 2) die("fact table header count");
+            table_name = copy(field[0] + 1); table = value_new(JARR);
+            value_put(root, table_name, table); nh = n - 1;
+            for (i = 0; i < nh; i++) {
+                char *colon = strchr(field[i + 1], ':'); if (!colon) die("fact column type missing");
+                *colon = 0; header[i] = copy(field[i + 1]); types[i] = copy(colon + 1);
+            }
+        } else {
+            Value *row = value_new(JOBJ);
+            if (!table || field[0][0] || n != nh + 1) die("fact table row count");
+            for (i = 0; i < nh; i++) value_put(row, header[i], fact_cell(types[i], field[i + 1]));
+            value_put(table, NULL, row);
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("fact read failed");
+    if (typed < 0) die("empty fact table");
+    if (!typed && table && nh == 2 && !strcmp(header[0], "name") && !strcmp(header[1], "value")) {
+        Value *map = value_new(JOBJ); size_t i;
+        value_put(root, copy_n(stem, strlen(stem)), table);
+        for (i = 0; i < table->n; i++) {
+            Value *row = table->items[i].value, *name = value_get(row, "name"), *val = value_get(row, "value");
+            if (!name || name->kind != JSTR) die("invalid name/value fact");
+            value_put(map, name->s, val);
+            if (!value_get(root, name->s)) value_put(root, name->s, val);
+        }
+        { char key[1024]; if (snprintf(key, sizeof(key), "%s!", stem) >= (int)sizeof(key)) die("fact key too long"); value_put(root, key, map); }
+    }
+    return root;
 }
 static RuleState *rule_state(RuleSet *r, const char *name) {
     size_t i; RuleState *s;
@@ -232,6 +403,12 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-facts")) {
+        Value *v = load_fact(argv[2]);
+        out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
+        value_write(out, v); if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if ((argc != 3 && argc != 4) || strcmp(argv[1], "prune")) die("usage: seed-gen prune OUT.json [RULE_DIR]");
     manifest(&g, argc == 4 ? argv[3] : "exec/prune");
     finish(&g);
