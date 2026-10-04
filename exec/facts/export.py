@@ -868,37 +868,31 @@ def ppgen():
     import json
     E = _ppsrc()
     from exec.facts.load import facts
-    init = []
-    for k, w in enumerate(E.DIRV):
-        init += E.sbconst(w) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", E.DIRB), ("LDI", "v", k + 1), ("STX", "a", 0, "v")]
-    for r in facts("pp-init"):
-        if r["kind"] == "dir":
-            init += E.sbconst(r["word"]) + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", E.DIRB), ("LDI", "v", r["arg"]), ("STX", "a", 0, "v")]
-        else:
-            init += E.sbconst(r["word"]) + [("SBINTERN", r["arg"])]
-    init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + E.xe_init()
+    # Domain facts only.  The pp body manifest assembles the action recipes.
+    dirrows = [dict(word=w, arg=k + 1) for k, w in enumerate(E.DIRV)]
+    dirrows += [dict(word=r["word"], arg=r["arg"]) for r in facts("pp-init") if r["kind"] == "dir"]
+    internrows = [dict(word=r["word"], arg=r["arg"]) for r in facts("pp-init") if r["kind"] != "dir"]
+    xerows = [dict(slot=E.XPRB + c, precedence=p) for c, (_, p, _) in list(E.XOPS.items()) + [(0, (None, -1, 0))]]
     predef = {}
     for t in E.TARGETS:
         o, a = t.split("/")
         names = E.PREDEF["os", o] + E.PREDEF["arch", a] + E.PREDEF["common", "*"]
         assert len(set(names)) == len(names), "overlapping target predefinitions: " + t
         predef[t] = [dict(entry="P3PD%d" % k, resume="P3PDR%d" % k, next="P3PD%d" % (k + 1) if k + 1 < len(names) else "OOBJ.start",
-                          name=E.sbconst(nm)) for k, nm in enumerate(names)]
-    cases = [dict(key=0, target="P3BLANK", acts=[["JUMP", "LS"]]), dict(key=100, target="PRAG", acts=[["RLD", "LIVE"]]),
-             dict(key=101, target="LDIR", acts=[["RLD", "LIVE"]]), dict(key=102, target="D_ERROR", acts=[["RLD", "LIVE"]])]
-    cases += [dict(key=k + 1, target="D_" + w, acts=[]) for k, w in enumerate(E.DIRV)]
-    for c in cases:
-        c["acts"] = json.dumps(c["acts"])   # spliced verbatim into the dsw template's JSON actions
+                          name=nm) for k, nm in enumerate(names)]
+    # The first four switch rows are fixed in dsw-template.tsv.  Only the
+    # directive spelling/ordinal/target are facts.
+    cases = [dict(key=k + 1, target="D_" + w) for k, w in enumerate(E.DIRV)]
     acts = [dict(name="D_%s_a%d" % (w, fl), section=w + "/" + E.PPT[(w, fl)]) for w in E.DIRV for fl in (0, 1)]
     from unisa.front.lex import ESC
     esc = [{"code": ord(ch), "value": ord(v)} for ch, v in ESC.items() if ch not in "01234567x"]
     prec = {"PREC_" + str(c): p for c, (_, p, _) in E.XOPS.items()}
     prec["XOB_PREV"] = E.XOB - 1
-    return ["=init\tjson\t" + json.dumps(init), "=predef\tjson\t" + json.dumps(predef),
-            "=cases\tjson\t" + json.dumps(cases), "=dswkeys\tjson\t" + json.dumps(sorted(c["key"] for c in cases)), "=dactions\tjson\t" + json.dumps(acts),
+    return ["=dirrows\tjson\t" + json.dumps(dirrows), "=internrows\tjson\t" + json.dumps(internrows),
+            "=xerows\tjson\t" + json.dumps(xerows), "=predef\tjson\t" + json.dumps(predef),
+            "=cases\tjson\t" + json.dumps(cases), "=dswkeys\tjson\t" + json.dumps(sorted([0, 100, 101, 102] + [c["key"] for c in cases])), "=dactions\tjson\t" + json.dumps(acts),
             "=esc\tjson\t" + json.dumps(esc), "=esckeys\tjson\t" + json.dumps([e["code"] for e in esc]),
-            "=xelayout\tjson\t" + json.dumps(prec), "=objname\tjson\t" + json.dumps(E.sbconst("__UNISA_OBJECT")),
-            "=location_line\tjson\t" + json.dumps([["ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1]]),
+            "=xelayout\tjson\t" + json.dumps(prec),
             "=predefres\tjson\t" + json.dumps({t: "".join(n + "\0" for n in E.PREDEF["os", t.split("/")[0]] + E.PREDEF["arch", t.split("/")[1]] + E.PREDEF["common", "*"])
                                                  for t in sorted(E.TARGETS)})]
 
