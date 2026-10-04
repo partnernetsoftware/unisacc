@@ -664,6 +664,80 @@ static void install_plain(Graph *g, const char *path, char mode,
         }
     }
 }
+static void install_section(Graph *g, const char *path, const char *section,
+                            char mode, Value *bindings, Value *sequences) {
+    FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
+    if (!f) die("cannot open section rule file");
+    while ((s = line(f))) {
+        char *field[5]; int n; RuleState *st;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 5); if (n != 5) die("section rule column count");
+        if (strcmp(field[0], section)) { free(s); continue; }
+        if (!*field[1] || !*field[3]) die("empty section state or target");
+        st = rule_state(&rules, bound_name(field[1], bindings));
+        if (!strcmp(field[2], "*")) {
+            if (st->def_target) die("repeated section default");
+            st->def_target = copy(bound_name(field[3], bindings));
+            st->def_actions = copy(field[4]);
+        } else rule_keys(st, field[2], bound_name(field[3], bindings), field[4]);
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("section rule read failed");
+    for (size_t i = 0; i < rules.n; i++) {
+        RuleState *st = &rules.state[i]; char key[16];
+        for (size_t j = 0; j < st->n; j++) {
+            char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
+            number_text(st->rule[j].key, key);
+            edge_add(g, st->name, mode, key, st->rule[j].target, actions); free(actions);
+        }
+        for (int k = 0; k <= 256; k++) {
+            int found = 0;
+            for (size_t j = 0; j < st->n; j++) if (st->rule[j].key == k) { found = 1; break; }
+            if (!found) {
+                char *actions;
+                if (!st->def_target) die("incomplete section state");
+                actions = expand_actions(st->def_actions, bindings, sequences, k);
+                number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, actions);
+                free(actions);
+            }
+        }
+    }
+}
+static void install_prn_call(Graph *g) {
+    FILE *f = fopen("exec/parse/prn-manifest.tsv", "rb"); char *s;
+    Value *instances = NULL; char *factexpr = NULL, *bind = NULL, *opts_text = NULL;
+    int loops = 0, body = 0;
+    if (!f) die("cannot open called manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("called manifest column count");
+        if (!strcmp(field[0], "foreach")) {
+            Value *facts, *opts;
+            if (loops++ || strcmp(field[4], "numeric-instances")) die("unsupported foreach declaration");
+            facts = load_fact(field[4]); opts = value_json(field[8], "foreach options");
+            if (strcmp(value_text(value_get(opts, "over")), field[4])) die("unsupported foreach source");
+            instances = value_path(facts, field[4]);
+        } else if (!strcmp(field[0], ".rows")) {
+            if (body++ || strcmp(field[1], "numeric") || strcmp(field[2], "prn")) die("unsupported foreach body");
+            factexpr = copy(field[4]); bind = copy(field[7]); opts_text = copy(field[8]);
+        } else die("unsupported called DSL op");
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("called manifest read failed");
+    if (loops != 1 || body != 1 || !instances || instances->kind != JARR) die("incomplete called manifest");
+    for (size_t i = 0; i < instances->n; i++) {
+        Value *item = instances->items[i].value, *facts = load_facts_expr(factexpr);
+        Value *opts = value_json(opts_text, "called row options");
+        Value *bindings, *empty = value_new(JOBJ);
+        char *name = value_text(value_get(item, "name"));
+        value_put(facts, "name", value_string(name));
+        value_put(facts, "width", value_get(item, "width"));
+        bindings = fresh_bindings(opts, facts); direct_bindings(bindings, bind, facts);
+        install_section(g, "exec/parse/numeric-byte.tsv", "prn", 'b', bindings, empty);
+        install_section(g, "exec/parse/numeric-result.tsv", "prn", 'r', bindings, empty);
+    }
+}
 static void inspect_bound_rows(const char *stage, const char *stem, const char *outpath,
                                const char *initial) {
     char manifest_path[1024], path[1024], *end; FILE *f, *out; char *s; int found = 0;
@@ -760,6 +834,11 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-prn")) {
+        install_prn_call(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output(out, &g); if (fclose(out)) die("output close failed"); return 0;
+    }
     if (argc == 6 && !strcmp(argv[1], "inspect-bound-rows")) {
         inspect_bound_rows(argv[2], argv[3], argv[4], argv[5]); return 0;
     }
