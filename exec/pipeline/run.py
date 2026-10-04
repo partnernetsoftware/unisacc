@@ -10,6 +10,8 @@ declared not-yet-connected edge: without --ref-feed the chain stops there;
 with it, that stage is fed the reference's stream (reported `ref-fed`).
 Exit 0 when every stage run was accepted and equal to the reference.
 """
+import hashlib
+import models
 import os
 import shlex
 import subprocess
@@ -67,20 +69,25 @@ def refs():
 
 
 def gen_inputs(cmd):
-    """what a delta generator reads: its directory, exec/pp (the shared table
-    builder), unisa/ and the reference it may consult."""
-    d = os.path.dirname(shlex.split(cmd)[1])
-    fs = set()
-    for top in (d, "exec/pp", "unisa") + (("exec/parse",) if d.endswith("parse2") else ()):   # parse2 rows call exec/parse manifests (base exec/build/parsebase.py)
-        for dp, _, names in os.walk(os.path.join(ROOT, top)):
-            fs.update(os.path.relpath(os.path.join(dp, n), ROOT) for n in names
-                      if n.endswith((".py", ".tsv")))
-    fs.add("exec/finite_rules.py")
-    fs.add("weights/gold/pp.tsv")  # shared E2 builder reads the directive schema
-    if d.endswith("lex"):
-        fs.update("weights/gold/" + name + ".tsv" for name in ("lex", "lexcls", "lexword", "parse"))
-        fs.add("iterate/kernel/typekw.tsv")
-    return sorted(fs) + [os.path.join(X, "ua_ref.stamp")]
+    """Use the shared content closure, including K2 manifests and facts.
+
+    fresh already hashes the command. The digest file covers added/removed
+    inputs too; selecting directories from the entrypoint misses stage data.
+    """
+    digest = models.closure(hashlib.sha256(sys.version.encode())).hexdigest()
+    path = os.path.join(X, "pipe", "generator-closure-" + digest + ".sha256")
+    with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path),
+                                     delete=False) as f:
+        f.write(digest + "\n")
+        temporary = f.name
+    try:
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return [path, os.path.join(X, "ua_ref.stamp")]
 
 
 def check(fmt, path):
