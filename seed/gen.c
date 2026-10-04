@@ -1621,6 +1621,52 @@ static void inspect_pp_object_predefine(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
+static void pp_install_stem(Graph *g, const char *stem, const char *section,
+                            Value *bindings, Value *sequences) {
+    char path[1024];
+    for (int i = 0; i < 2; i++) {
+        if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
+            die("pp stem path too long");
+        if (section && strcmp(section, "-"))
+            install_section(g, path, section, i ? 'r' : 'b', bindings, sequences);
+        else install_plain(g, path, i ? 'r' : 'b', bindings, sequences);
+    }
+}
+static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    Graph g = {0}; Value *sequences = NULL; char *s; int start = 0, rows = 0;
+    char *flags[] = {"--no-autoinc"};
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "call")) { free(s); break; }
+        if (!when_true(field[3], no_autoinc, flags)) { free(s); continue; }
+        if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
+            sequences = mapseq_construct(value_json(field[8], "pp prefix options"), load_facts_expr(field[4]));
+        } else if (!strcmp(field[0], "table") && !strcmp(field[1], "start-byte.tsv")) {
+            FILE *table = fopen("exec/pp/start-byte.tsv", "rb");
+            if (!table || !sequences || start++) die("invalid pp prefix start");
+            install_delta_text(&g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
+            if (fclose(table)) die("pp start table close failed");
+        } else if (!strcmp(field[0], "rows") &&
+                   (!strcmp(field[1], "cli") || !strcmp(field[1], "text") ||
+                    !strcmp(field[1], "macro") || !strcmp(field[1], "pragma"))) {
+            Value *bindings = value_new(JOBJ), *facts = load_facts_expr(field[4]);
+            if (strcmp(field[2], "-") || strcmp(field[8], "-")) die("unsupported pp prefix row");
+            direct_bindings(bindings, field[7], facts);
+            pp_install_stem(&g, field[1], NULL, bindings,
+                            !strcmp(field[1], "cli") ? sequences : NULL);
+            rows++;
+        } else die("unsupported pp prefix manifest row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || start != 1 || rows != 4)
+        die("incomplete pp prefix");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_header(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *headers = value_get(facts, "headers");
@@ -1867,15 +1913,10 @@ static void inspect_pp_rows(const char *stem, const char *outpath, int no_autoin
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem) &&
             when_true(field[3], no_autoinc, no_autoinc ? (char *[]){"--no-autoinc"} : NULL)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
-            char path[1024];
             if (strcmp(field[2], "-") || strcmp(field[6], "-") || strcmp(field[8], "-"))
                 die("pp row has unsupported section, sequence, or options");
             direct_bindings(bindings, field[7], facts);
-            for (int i = 0; i < 2; i++) {
-                if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
-                    die("pp row path too long");
-                install_plain(&g, path, i ? 'r' : 'b', bindings, NULL);
-            }
+            pp_install_stem(&g, stem, NULL, bindings, NULL);
             found++;
         }
         free(s);
@@ -2087,6 +2128,10 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
+        !strcmp(argv[1], "inspect-pp-prefix")) {
+        inspect_pp_prefix(argv[2], argc == 4); return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-object-predefine")) {
         inspect_pp_object_predefine(argv[2]); return 0;
     }
