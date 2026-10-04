@@ -710,29 +710,38 @@ def optgen():
         return [f for f in (ln.split("\t") for ln in (ROOT / "weights/gold" / (name + ".tsv")).read_text(encoding="utf-8").splitlines()
                             if not ln.startswith("#")) if "=>" not in f]
     peep, opinfo = gold("peep"), gold("opinfo")
-    def word(w, reg):
-        return [["SBCLR"]] + [["SBOUT", c] for c in w.encode()] + [["SBINTERN", reg]]
-    out = []
-    for level in (1, 2):
-        acts = []
-        for w in facts("opt-gen-startwords"):
-            acts += word(w, "id_" + w.strip("."))
-        if level >= 2:
-            for f in peep:
-                if len(f) == 4 and f[0] in PA and f[1] in PB and f[2] in PR and f[3] in PY:
-                    k = (PA.index(f[0]) * len(PB) + PB.index(f[1])) * len(PR) + PR.index(f[2])
-                    acts += [["LDI", "q_t", k], ["LDI", "q_u", PY.index(f[3]) + 1], ["STX", "q_t", C["PEEPB"], "q_u"]]
-            for f in opinfo:
-                if len(f) == 4:
-                    acts += word(f[0], "q_t")
-                    if f[2] in PA:
-                        acts += [["LDI", "q_u", PA.index(f[2]) + 1], ["STX", "q_t", C["ACLSB"], "q_u"]]
-                    if f[3] in PB:
-                        acts += [["LDI", "q_u", PB.index(f[3]) + 1], ["STX", "q_t", C["BCLSB"], "q_u"]]
-        for f in opinfo:
-            if len(f) >= 2 and f[1] == "1":
-                acts += word(f[0], "t") + [["LDI", "u", 1], ["STX", "t", C["SIMPLE"], "u"]]
-        out.append("=start%d\tjson\t%s" % (level, json.dumps(acts)))
+    startwords = [dict(i=i, word=w, register="id_" + w.strip("."))
+                  for i, w in enumerate(facts("opt-gen-startwords"))]
+    peepinit = []
+    for f in peep:
+        if len(f) == 4 and f[0] in PA and f[1] in PB and f[2] in PR and f[3] in PY:
+            k = (PA.index(f[0]) * len(PB) + PB.index(f[1])) * len(PR) + PR.index(f[2])
+            peepinit.append(dict(i=len(peepinit), index=k, value=PY.index(f[3]) + 1,
+                                 bank=C["PEEPB"]))
+    opinfoinit = []
+    for f in opinfo:
+        if len(f) == 4:
+            opinfoinit.append(dict(i=len(opinfoinit), word=f[0],
+                                   has_a="yes" if f[2] in PA else "no",
+                                   a_value=PA.index(f[2]) + 1 if f[2] in PA else 0,
+                                   a_bank=C["ACLSB"],
+                                   has_b="yes" if f[3] in PB else "no",
+                                   b_value=PB.index(f[3]) + 1 if f[3] in PB else 0,
+                                   b_bank=C["BCLSB"]))
+    simplewords = []
+    for f in opinfo:
+        if len(f) >= 2 and f[1] == "1":
+            simplewords.append(dict(i=len(simplewords), word=f[0], bank=C["SIMPLE"]))
+    words = ["word_%d" % row["i"] for row in startwords]
+    simple = ["simple_%d" % row["i"] for row in simplewords]
+    startplans = [dict(name="start1", refs=words + simple),
+                  dict(name="start2", refs=words +
+                       ["peep_%d" % row["i"] for row in peepinit] +
+                       ["opinfo_%d" % row["i"] for row in opinfoinit] + simple)]
+    out = ["=%s\tjson\t%s" % (name, json.dumps(value)) for name, value in
+           (("startwords", startwords), ("peepinit", peepinit),
+            ("opinfoinit", opinfoinit), ("simplewords", simplewords),
+            ("startplans", startplans))]
     idx = {}
     for prefix, values in (("PA", PA), ("PB", PB), ("PR", PR)):
         idx.update((prefix + "_" + n, i) for i, n in enumerate(values))
@@ -1150,6 +1159,9 @@ def render(stem, inputs, producer):
 
 
 def main(argv):
+    if argv not in ([], ["--check"]):
+        print("usage: python3 exec/facts/export.py [--check]", file=sys.stderr)
+        return 2
     check = "--check" in argv
     bad = 0
     for stem, inputs, producer in TABLES:
