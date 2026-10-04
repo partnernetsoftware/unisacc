@@ -1600,6 +1600,27 @@ static void inspect_pp_emit(const char *outpath, size_t index) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
+static void inspect_pp_object_predefine(const char *outpath) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    Graph g = {0}; Value *empty = value_new(JOBJ); char *s; int found = 0;
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], "object-predefine")) {
+            if (strcmp(field[2], "-") || strcmp(field[4], "-") || strcmp(field[7], "-") ||
+                strcmp(field[8], "-")) die("unsupported pp object-predefine row");
+            install_plain(&g, "exec/pp/object-predefine-byte.tsv", 'b', empty, NULL);
+            install_plain(&g, "exec/pp/object-predefine-result.tsv", 'r', empty, NULL);
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp object-predefine row missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_header(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *headers = value_get(facts, "headers");
@@ -2066,6 +2087,9 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-object-predefine")) {
+        inspect_pp_object_predefine(argv[2]); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-emit")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
         if (end == argv[2] || *end) die("invalid pp emit index");
