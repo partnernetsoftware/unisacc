@@ -22,10 +22,12 @@ def closure(h):
         # Byte-identical on every host: POSIX path spelling and case-sensitive part order
         # (Windows would spell backslashes and sort case-insensitively).
         for path in sorted((ROOT / directory).rglob('*'), key=lambda q: q.relative_to(ROOT).parts):
-            # Declared generated seed/cache output (subdirectories of exec/build), never a construction
-            # input; files directly in exec/build (the K2 entry driver gen.py) are construction inputs.
-            if path.relative_to(ROOT).parts[:2] == ('exec', 'build') and len(path.relative_to(ROOT).parts) > 3:
-                continue
+            # Generated output under exec/build (its subdirectories and any non-.py file) is never a
+            # construction input; exec/build/*.py (gen.py, graph.py, procs.py, parsebase.py,
+            # parse2base.py) are.  exec/.gitignore keeps only these (0.0.24 T3).
+            rel = path.relative_to(ROOT).parts
+            if rel[:2] == ('exec', 'build') and (len(rel) > 3 or path.suffix != '.py'):
+                continue   # only the tracked drivers exec/build/*.py are inputs; anything else there is generated
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
                 h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
                 h.update(bytes.fromhex(digest(path)))
