@@ -140,7 +140,47 @@ The decomposition rests on a standard result of computation theory: a determinis
 
 \textbf{Relationship to Paper E.} This paper studies exact construction of threshold networks from given finite control tables and a compiler implementation. It does not claim automatic synthesis of complete C99 control tables or a proof of their language semantics. Systematic construction of reliable tables from grammars, attribute rules, explicit context and state invariants is a separate research candidate, Paper E (a research proposal, not a result), to be investigated through continued unisacc development. This paper remains responsible for documenting table provenance, the constructor trusted base, coverage boundaries and known defects; network–table equality does not establish C99 correctness.
 
-T2a assumes identical initialisation, observations, action catalogues and primitive semantics, complete interfaces, integer ranges and logical resource budgets, with coupled external inputs. Pointwise equality selects identical actions at each step; induction yields identical traces and acceptance, rejection or divergence. This argument does not establish that the C/assembly implementations satisfy the assumptions or consume identical physical resources.
+\paragraph{What the network replaces.}
+For a modelled stage, the controller maps a finite control state and observation to a next state and an action-sequence identifier. Stage semantics is carried jointly by the weights, declared-return data, action catalogue and constants. The catalogue and constants are declarations interpreted by the same generic executor; their language-specific information has not disappeared. Thus the replacement claim concerns runtime control selection by constructed networks. It does not assert that all compiler information is stored exclusively in numerical weights, nor that changing its representation reduces the information or maintenance required.
+
+\paragraph{Exact threshold construction.}
+Fix a state $q$ and a finite ordered observation domain $[l_q,h_q]\cap\mathbb Z$.
+Encode the table output as a vector $f_q(k)=(q',a)$, including a distinguished rejection sentinel.
+Let $b_q=f_q(l_q)$ and $w_t=f_q(t)-f_q(t-1)$.
+Then the threshold network
+\[
+ N_q(k)=b_q+\sum_{t=l_q+1}^{h_q}w_t\,\mathbf 1[k\ge t]
+\]
+equals $f_q(k)$ for every declared observation by telescoping.
+Zero differences can be omitted. A prefix-search implementation preserves this sum if it selects exactly the active thresholds and evaluates their signed weights without overflow.
+This is an existence and representation-equality result, not a semantic specification of the source language.
+
+\paragraph{Controller substitution (T2a).}
+This is a conditional proof sketch, not a Lean proof of the deployed C/assembly loops. Write a machine configuration as $c=(q,m,i,o,\sigma)$, where $m$ includes generic storage, stacks and any effect-response state, and $\sigma$ records the terminal status.
+Suppose two controllers agree for every observation reachable from a shared initial configuration.
+Assume the observation function, action catalogue, primitive semantics, strings and constants, initialization, terminal conventions and logical step budget are identical, and that the two evaluations satisfy their range and domain requirements.
+Then replacing one controller with the other preserves every finite configuration and observable event prefix.
+\emph{Proof sketch.} Equal configurations yield equal observations; pointwise controller equality yields the same next state and action sequence; the common action semantics yields equal successor configurations and events. Induct on the number of steps. Consequently both runs accept or reject with identical output at the same logical step, reach the same logical timeout, or have the same infinite execution prefixes.
+For effectful primitives, this statement is relative to the same input snapshot or coupled effect responses. It does not preserve wall-clock time, physical allocation success or total resident memory.
+
+\paragraph{Pipeline composition.}
+A finite sequence of substituted stages preserves the pipeline outcome when every stage's full interface is preserved: bytes, status and any provenance, flags, resources or metadata carried between stages. Induction on stage position composes the substitution result; a matching terminal error stops both pipelines. This does not require all stages to use the same network shape or numeric representation. It also does not imply bounded-memory online streaming.
+
+\paragraph{Declared-return factoring.}
+For a fixed stage, continuation symbols have a finite alphabet even if the continuation stack has unbounded height. The top-symbol observation therefore remains a finite decision.
+Rows with $f_q(k)=(k,a_q)$ may be factored into an explicit declared-return set $R_q$:
+\[
+ \widehat f_q(k)=\begin{cases}(k,a_q),&k\in R_q,\\N_q^{\rm rest}(k),&k\notin R_q.\end{cases}
+\]
+If the membership set and shared sequence match those rows and the residual network agrees on the complement, then $\widehat f_q=f_q$ on the entire declared domain.
+The deployed controller comprises the network and this factored primitive; the artifact checker must evaluate both paths.
+
+\paragraph{Independent semantic obligation (T2b and T3).}
+T2a compares controllers inside the same machine. Simulation of an independently implemented classical compiler (T2b) instead requires an initial-state relation, preserved semantic invariants, matching observable effects and terminal states, and appropriate progress/divergence obligations. Neither local table enumeration nor a self-hosting fixed point establishes that relation.
+Agreement with the source language (T3) is a further obligation. A wrong language rule is reproduced exactly by a correctly constructed network. Differential testing and combination matrices provide empirical evidence, not a full-language proof.
+
+\paragraph{A finite expansion, not an implementation claim.}
+A fixed stage has a finite catalogue of finite action sequences. It is therefore possible to introduce finitely many internal control states that emit one generic primitive at a time, preserving action order and the original observation. Hiding these internal states yields a finite microstep refinement of the original control step, provided primitive effects and termination are unchanged and the resource accounting charges the same original logical step. This explains why keeping action sequencing in a separate catalogue is a representation choice, not an impossibility of placing that sequencing in finite control. The current product does not perform this expansion, and the construction promises no size or performance improvement; primitive semantics and literal data still require an explicit account.
 
 \subsection{Levels of assurance}\label{levels-of-assurance}
 
@@ -390,7 +430,7 @@ Profiling showed that a program containing only \texttt{\#include\ \textless{}st
 
 \textbf{Threshold-prefix evaluation.} Thresholds within a bank are strictly increasing (the loader rejects anything else), so the units activated by an observation always form a prefix. The executor binary-searches the prefix length and accumulates only those differences --- the same network and the same sum, with no answer table stored.
 
-\textbf{Declared returns.} Rows of a stack-keyed bank of the form ``continuation k → k, sharing one action sequence'' mean ``pop and continue at the state the stack names''. The continuation alphabet of a fixed stage is finite; unbounded stack height does not make the top observation an infinite decision. The constructor factors these rows into a declared return set and a generic pop action, building threshold units only for the remaining rows. The return fast path and threshold path together constitute the complete controller. The network--table check still compares every observation, returns included (1,549,292 in the parsing stage), and is fully equal before and after the change.
+\textbf{Declared returns.} Rows of a stack-keyed bank of the form ``continuation k → k, sharing one action sequence'' mean ``pop and continue at the state the stack names''. The continuation alphabet of a fixed stage is finite; unbounded stack height does not make the top observation an infinite decision. The constructor factors these rows into a declared return set and a generic pop action, building threshold units only for the remaining rows. The return fast path and threshold path together constitute the complete controller. The finite-domain factoring argument in §2.2 applies to both paths; weights alone do not describe this controller. The network--table check still compares every observation, returns included (1,549,292 in the parsing stage), and is fully equal before and after the change.
 
 With both changes, compiling \texttt{fib.c} and the compiler's own source dropped from 10.2× and 25.0× the classic route to 3.9× and 12.8× (§7.2).
 
