@@ -13,7 +13,7 @@
  *      generated code uses a private convention -- arguments on a stack,
  *      r9 as the frame pointer, the caller pops -- while user32 expects the
  *      Microsoft x64 convention. Nothing in this compiler translates between
- *      them, which is what plans/v0.0.23.md item A1 (Windows forwarding: IAT,
+ *      them, which is what archive/plans/v0.0.23.md item A1 (Windows forwarding: IAT,
  *      Win64 hostcall) and A2 (cc interop) are about.
  *
  * So the missing piece for an agent harness is not "reach user32" but "call

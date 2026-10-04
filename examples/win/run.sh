@@ -3,7 +3,7 @@
 # reference compiler, and print the first lines of each one's output.
 #
 # The reference compiler is needed because the shipped model product refuses
-# every Win32 prototype on a win target (plans/v0.0.23.md item A1). On a
+# every Win32 prototype on a win target (archive/plans/v0.0.23.md item A1). On a
 # machine with no host cc, build one with the product itself:
 #
 #   bash tests/export_ref.sh out/unisacc-flat.c

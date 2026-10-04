@@ -386,7 +386,7 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 The latest release is **v0.0.22** (2026-10-03): signed `unisacc.com`
 2,019,920 B, SHA-256 `5d47aed6…`; receipt in
 [research/r22-release-acceptance.json](research/r22-release-acceptance.json).
-0.0.23 is in development ([plan](plans/v0.0.23.md)). Verification, platform gaps
+0.0.23 is in development ([plan](archive/plans/v0.0.23.md)). Verification, platform gaps
 and signing work are recorded in [prd](prd.md).
 
 The generated table above describes classic finite fact decisions; current

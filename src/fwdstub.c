@@ -20,7 +20,7 @@ int fwdrun; char fwdsrc[131072]; int nfwdsrc;
    that cannot deliver the arguments refuses the forward BY NAME instead of
    emitting a call that quietly loses them.  Set by the driver from the -b
    target; the product driver leaves it 0 and does not forward to a win target
-   at all yet (plans/v0.0.23.md item A1). */
+   at all yet (archive/plans/v0.0.23.md item A1). */
 int fwd_maxargs;
 int fwd_s(char *s) { while (*s && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = *s; nfwdsrc = nfwdsrc + 1; s = s + 1; } return 0; }
 int fwd_n(char *s, int n) { int k; k = 0; while (k < n && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; } return 0; }

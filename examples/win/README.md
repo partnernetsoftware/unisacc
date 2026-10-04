@@ -42,7 +42,7 @@ computer-use / KVM 能力**。
 | `gui/capture.c` | **编译期拒绝** | 拒绝 | 拒绝 | `BitBlt` 9 参，需 MS x64 宽调用 |
 
 "编译期拒绝"指 `unisacc: error: ...`。对**产品** `unisacc.com` 而言每一个 Win32 原型
-都是这样（0.0.22 的产品路线在 win 目标上不生成转发桩，见 `plans/v0.0.23.md` 的 A1）；
+都是这样（0.0.22 的产品路线在 win 目标上不生成转发桩，见 `archive/plans/v0.0.23.md` 的 A1）；
 参考路线（`out/ua-ref-win.exe`）能生成桩，所以下面所有测量都来自参考路线。
 
 ## 文件一览
