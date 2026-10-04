@@ -106,7 +106,8 @@ static Value *value_get(Value *v, const char *key) {
 static Value *value_from_json(JDoc *d, int ix) {
     JNode *n = &d->n[ix]; Value *v = value_new(n->type); int child;
     if (n->type == JSTR) v->s = copy_n(d->buf + n->str, (size_t)n->slen);
-    else if (n->type == JINT) v->number = n->ival;
+    else if (n->type == JINT || n->type == JBOOL) v->number = n->ival;
+    else if (n->type == JNULL) { /* null is a fact value, not a missing key */ }
     else if (n->type == JOBJ || n->type == JARR) {
         for (child = jkid(d, ix); child >= 0; child = jnext(d, child)) {
             JNode *c = &d->n[child];
@@ -212,6 +213,8 @@ static void value_write(FILE *f, const Value *v) {
     switch (v->kind) {
     case JSTR: quoted(f, v->s); break;
     case JINT: fprintf(f, "%lld", v->number); break;
+    case JBOOL: fputs(v->number ? "true" : "false", f); break;
+    case JNULL: fputs("null", f); break;
     case JOBJ: case JARR:
         fputc(v->kind == JOBJ ? '{' : '[', f);
         for (i = 0; i < v->n; i++) {
