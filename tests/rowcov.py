@@ -33,6 +33,22 @@ def main():
     assert stage == 'pp', 'only the pp slice exists so far'
     X = xdir(); out = X / 'rowcov'; out.mkdir(parents=True, exist_ok=True)
     dj = X / 'e2/d.json'
+    if what == 'all':
+        # one gate run under 60 s: side table (~3 s), 8 shards 4 at a time (~15 s each), merge
+        side = out / 'pp.rows.tsv'
+        side.unlink(missing_ok=True)
+        if subprocess.run(['sh', 'exec/pp/run.sh', 'gen'], cwd=ROOT, capture_output=True).returncode:
+            sys.exit('rowcov: building the pp delta failed (exec/pp/run.sh gen)')
+        r = subprocess.run([sys.executable, 'exec/build/gen.py', 'pp', str(out / 'pp.sidecar.json')], cwd=ROOT,
+                           env=dict(os.environ, UNISACC_ROW_LOG=str(side)), capture_output=True)
+        if r.returncode or (out / 'pp.sidecar.json').read_bytes() != dj.read_bytes():
+            sys.exit('rowcov: the side-table build failed or changed the delta')
+        procs = []
+        for k in range(1, 9):
+            procs.append(subprocess.Popen([sys.executable, __file__, 'pp', '%d/8' % k], cwd=ROOT))
+            if len(procs) == 4: [p.wait() for p in procs]; procs = []
+        [p.wait() for p in procs]
+        sys.argv[3:] = ['8']; what = 'merge'
     if what == 'merge':
         n = int(sys.argv[3]); seen = set()
         for k in range(1, n + 1):
