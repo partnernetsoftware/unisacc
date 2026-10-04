@@ -15,6 +15,7 @@ typedef struct { State *state; size_t n, cap; char **seq; size_t ns, cs; char **
 typedef struct { int key; char *target, *actions; } Rule;
 typedef struct { char *name; Rule *rule; size_t n, cap; char *def_target, *def_actions; } RuleState;
 typedef struct { RuleState *state; size_t n, cap; } RuleSet;
+typedef struct { char *s; size_t n, cap; } Buffer;
 /* Values preserve the insertion order of object keys, as assemble.load_facts does. */
 typedef struct Value Value;
 typedef struct { char *key; Value *value; } Member;
@@ -36,6 +37,42 @@ static char *copy(const char *s) {
 static char *copy_n(const char *s, size_t n) {
     char *p = grow(NULL, n + 1, 1);
     memcpy(p, s, n); p[n] = 0; return p;
+}
+static void buf_add(Buffer *b, const char *s, size_t n) {
+    if (n > SIZE_MAX - b->n - 1) die("buffer size overflow");
+    if (b->n + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 128;
+        while (cap < b->n + n + 1) { if (cap > SIZE_MAX / 2) die("buffer too large"); cap *= 2; }
+        b->s = grow(b->s, cap, 1); b->cap = cap;
+    }
+    memcpy(b->s + b->n, s, n); b->n += n; b->s[b->n] = 0;
+}
+static void buf_char(Buffer *b, char c) { buf_add(b, &c, 1); }
+static void buf_quote(Buffer *b, const char *s) {
+    const unsigned char *p = (const unsigned char *)s; char x[7];
+    buf_char(b, '"');
+    for (; *p; p++) {
+        if (*p == '"' || *p == '\\') { buf_char(b, '\\'); buf_char(b, (char)*p); }
+        else if (*p < 32) { snprintf(x, sizeof(x), "\\u%04x", (unsigned)*p); buf_add(b, x, 6); }
+        else buf_char(b, (char)*p);
+    }
+    buf_char(b, '"');
+}
+static void buf_value(Buffer *b, const Value *v) {
+    size_t i; char n[64];
+    switch (v->kind) {
+    case JSTR: buf_quote(b, v->s); break;
+    case JINT: snprintf(n, sizeof(n), "%lld", v->number); buf_add(b, n, strlen(n)); break;
+    case JOBJ: case JARR:
+        buf_char(b, v->kind == JOBJ ? '{' : '[');
+        for (i = 0; i < v->n; i++) {
+            if (i) buf_char(b, ',');
+            if (v->kind == JOBJ) { buf_quote(b, v->items[i].key); buf_char(b, ':'); }
+            buf_value(b, v->items[i].value);
+        }
+        buf_char(b, v->kind == JOBJ ? '}' : ']'); break;
+    default: die("unknown value kind");
+    }
 }
 static Value *value_new(int kind) {
     Value *v = grow(NULL, 1, sizeof(*v));
@@ -83,6 +120,60 @@ static Value *value_json(const char *s, const char *label) {
     JDoc d; Value *v;
     jparse_text(&d, s, (long)strlen(s), label);
     v = value_from_json(&d, 0); jfree(&d); return v;
+}
+static const char *value_text(Value *v) {
+    if (!v || v->kind != JSTR) die("expected string value");
+    return v->s;
+}
+static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) {
+    size_t i;
+    if (!action || action->kind != JARR || !action->n) die("invalid action");
+    buf_char(b, '[');
+    for (i = 0; i < action->n; i++) {
+        Value *v = action->items[i].value;
+        if (i) buf_char(b, ',');
+        if (v->kind == JARR && v->n == 2) {
+            const char *tag = value_text(v->items[0].value);
+            Value *arg = v->items[1].value;
+            if (!strcmp(tag, "constant")) {
+                Value *bound = value_get(bindings, value_text(arg));
+                if (!bound) die("unknown constant binding");
+                buf_value(b, bound); continue;
+            }
+            if (!strcmp(tag, "observation")) {
+                long long shift = arg->number, number;
+                Value q = {0};
+                if (arg->kind != JINT || shift < 0 || shift > 63 || key < 0) die("invalid observation substitution");
+                number = ((unsigned long long)key) << shift;
+                q.kind = JINT; q.number = number; buf_value(b, &q); continue;
+            }
+        }
+        buf_value(b, v);
+    }
+    buf_char(b, ']');
+}
+static char *expand_actions(const char *raw, Value *bindings, Value *sequences, int key) {
+    Value *v = value_json(raw, "rule actions"); Buffer b = {0}; size_t i, n = 0;
+    if (v->kind != JARR) die("action sequence is not a list");
+    buf_char(&b, '[');
+    for (i = 0; i < v->n; i++) {
+        Value *a = v->items[i].value; size_t j;
+        if (!a || a->kind != JARR || !a->n) die("invalid rule action");
+        if (!strcmp(value_text(a->items[0].value), "@")) {
+            Value *seqv;
+            if (a->n != 2) die("invalid named sequence");
+            seqv = value_get(sequences, value_text(a->items[1].value));
+            if (!seqv || seqv->kind != JARR) die("unknown named sequence");
+            for (j = 0; j < seqv->n; j++) {
+                if (n++) buf_char(&b, ',');
+                expanded_action(&b, seqv->items[j].value, bindings, key);
+            }
+        } else {
+            if (n++) buf_char(&b, ',');
+            expanded_action(&b, a, bindings, key);
+        }
+    }
+    buf_char(&b, ']'); return b.s;
 }
 static char *line(FILE *f) {
     size_t n = 0, cap = 256; char *s = grow(NULL, cap, 1); int c;
@@ -414,6 +505,51 @@ static void install_file(Graph *g, const char *path, char mode) {
         }
     }
 }
+/* Four-column form shared by opt/lower/parse rows. The caller supplies only
+   source facts and generated bindings; the row reader owns the rule order. */
+static const char *bound_name(const char *s, Value *bindings) {
+    return *s == '$' ? value_text(value_get(bindings, s + 1)) : s;
+}
+static void install_plain(Graph *g, const char *path, char mode,
+                          Value *bindings, Value *sequences) {
+    FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
+    if (!f) die("cannot open rule file");
+    while ((s = line(f))) {
+        char *field[4]; int n; RuleState *st;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 4); if (n != 4) die("plain rule column count");
+        if (!*field[0] || !*field[2]) die("empty rule state or target");
+        st = rule_state(&rules, bound_name(field[0], bindings));
+        if (!strcmp(field[1], "*")) {
+            if (st->def_target) die("repeated default rule");
+            st->def_target = copy(bound_name(field[2], bindings));
+            st->def_actions = copy(field[3]);
+        } else rule_keys(st, field[1], bound_name(field[2], bindings), field[3]);
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("rule read failed");
+    if (!rules.n) die("empty rule file");
+    for (size_t i = 0; i < rules.n; i++) {
+        RuleState *st = &rules.state[i]; char key[16];
+        for (size_t j = 0; j < st->n; j++) {
+            char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
+            number_text(st->rule[j].key, key);
+            edge_add(g, st->name, mode, key, st->rule[j].target, actions);
+            free(actions);
+        }
+        for (int k = 0; k <= 256; k++) {
+            int found = 0;
+            for (size_t j = 0; j < st->n; j++) if (st->rule[j].key == k) { found = 1; break; }
+            if (!found) {
+                char *actions;
+                if (!st->def_target) die("incomplete rule state");
+                actions = expand_actions(st->def_actions, bindings, sequences, k);
+                number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, actions);
+                free(actions);
+            }
+        }
+    }
+}
 static void finish(Graph *g) {
     const char *unreachable = "[[\"REJECT\",\"unreachable\"]]";
     size_t initial; char key[16];
@@ -480,6 +616,14 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 5 && !strcmp(argv[1], "inspect-rows")) {
+        Value *empty = value_new(JOBJ);
+        if (strcmp(argv[4], "b") && strcmp(argv[4], "r")) die("inspect-rows mode must be b or r");
+        install_plain(&g, argv[2], argv[4][0], empty, empty);
+        out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
+        output(out, &g); if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc >= 4 && !strcmp(argv[1], "inspect-let")) {
         inspect_lets(argv[2], argv[3], argc - 4, argv + 4); return 0;
     }
