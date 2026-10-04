@@ -440,6 +440,7 @@ job asmtext     ./tests/asmtext.sh   # R18-1/R18-2: -S -b lnx | unisacc as == -c
 job combo       python3 ./tests/combo.py "$UA" "${MODEL_COM:-./unisacc.com}"   # R19-7: construct x type x position; product = reference tape or refused by name
 job syscall6    ./tests/syscall6.sh   # R19-9 (3): generic system-call gate on osx/arm64, Rosetta x86_64, Lima lnx/arm64
 job forward     ./tests/forward.sh   # R19-10/R21-4a': prototyped undefined functions forward to the system libc (-run and images, six targets)
+job forward-multi ./tests/forwardmulti.sh   # 0.0.26 N5: forwarding across translation units (default run, -run, -o)
 job winposix    ./tests/winposix.sh   # R21-4a': Windows POSIX layer over kernel32 = macOS cc (win/arm64, win/x86_64 in the UTM VM; skipped when it is down)
 job ccinterop   ./tests/ccinterop.sh   # R21-1: -c objects call cc-compiled int/pointer functions (osx/arm64, lnx/arm64, lnx/x86_64); other signatures refused by name
 job linkunits   ./tests/linkunits.sh   # R17-2: units compiled alone (-c -b HOST -funit) and joined by the unisacc linker = cc = one-step
@@ -491,6 +492,7 @@ if [ "$COM" = 1 ]; then
         printf 'gate product: %s sha256 %s\n' "$PRODUCT" "$PRODUCT_SHA"
     fi
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
+    job com-forward-multi UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forwardmulti.sh   # 0.0.26 N5: the product failed here up to 0.0.25
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
