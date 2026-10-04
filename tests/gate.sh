@@ -229,6 +229,10 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
 fi
 job exec-memwinarm ./exec/c/winmemorycheck.sh arm64
 job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64
+# models.py cold is ~40 s of the 58 s cold selfcheck; warm the cache in its own jobs
+job exec-selfprep-table ./tests/selfprep.sh osx/arm64 0
+job exec-selfprep-x86 ./tests/selfprep.sh lnx/x86_64
+job exec-selfprep-arm ./tests/selfprep.sh lnx/arm64
 job exec-tableself env SELF_PART=stages NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-selfelf env SELF_PART=stages ./exec/pipeline/selfcheck.sh                    # current compiler source through seven deltas
 job exec-selfelf-package env SELF_PART=package ./exec/pipeline/selfcheck.sh
