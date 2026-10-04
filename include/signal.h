@@ -17,6 +17,9 @@ typedef int sig_atomic_t;
 #define SIGABRT 6
 #define SIGFPE  8
 #define SIGSEGV 11
+#define SIGHUP  1
+#define SIGQUIT 3
+#define SIGKILL 9
 #define SIGTERM 15
 #define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
 #define _UNISA_NSIG 32
@@ -44,6 +47,37 @@ static int raise(int __u_sig) {
     }
     __exit(128 + __u_sig);
     return 0;
+}
+#endif
+
+/* kill (0.0.24, cdsh request): send a signal to another process.  POSIX targets
+ * use the kernel call; signal 0 only checks that the process exists.  Windows
+ * (pid = the posix_spawn HANDLE, as in waitpid): any nonzero signal ends the
+ * process with exit code 128 + sig, which waitpid then reports; there is no
+ * delivery to a handler there. */
+#include <sys/types.h>
+#include <sys/_ret.h>
+#include <sys/_win.h>
+#if !__UNISA_FTRIM_LIBC || __UN_kill
+static int kill(pid_t __u_pid, int __u_sig) {
+#ifdef _WIN32
+    static long __u_t;
+    if (__u_pid <= 0 || __u_sig < 0 || __u_sig >= _UNISA_NSIG) { errno = EINVAL; return -1; }
+    if (__u_sig == 0) return 0;
+    if (!__u_t) __u_t = _ux_sym("TerminateProcess");
+    if (!(_ux_call(__u_t, (long)__u_pid, 128 + __u_sig, 0, 0) & 0xFFFFFFFFL)) return (int)_ux_fail();
+    return 0;
+#elif defined(__APPLE__)
+#if defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(0x2000000L + 37, (long)__u_pid, (long)__u_sig, 1, 0, 0));
+#else
+    return (int)_unisa_ret(__syscall6(37, (long)__u_pid, (long)__u_sig, 1, 0, 0));
+#endif
+#elif defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(62, (long)__u_pid, (long)__u_sig, 0, 0, 0));
+#else
+    return (int)_unisa_ret(__syscall6(129, (long)__u_pid, (long)__u_sig, 0, 0, 0));
+#endif
 }
 #endif
 #endif
