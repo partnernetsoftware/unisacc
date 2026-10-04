@@ -92,6 +92,8 @@ for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 python3 ./tests/declmatrix.py; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects)
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
 job decision-ledger python3 ./tests/decisionledger.py   # 0.0.23 I: build-time Python control (direct transition sites) may only fall
+job manifest-entries-pp python3 ./tests/manifestentries.py --stage pp
+job manifest-entries-lex python3 ./tests/manifestentries.py --stage lex
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
 for k in $(seq 1 40); do job csmithdiff-$k SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
@@ -450,6 +452,7 @@ job gate-infra python3 ./tests/queuecheck.py
 job exec-elfdata-bridge   python3 ./exec/enc/librarysymbolscheck.py
 job exec-lex-sourcefacts  python3 ./exec/lex/sourcefactscheck.py
 job exec-parse2-libimports python3 ./exec/parse2/libraryimportscheck.py
+for m in 0 1 2 3 4 5 6 7 8; do job fresh-order-$m python3 ./tests/freshordercheck.py $m; done   # T1d: global fresh order = tests/freshorder.tsv
 job lib-bindings-registry python3 ./tests/librarybindingscheck.py
 job tsv-build-account     python3 ./tests/tsvbuild_check.py
 # The five exec/pipeline/check_*_text.py format checkers have no caller in any

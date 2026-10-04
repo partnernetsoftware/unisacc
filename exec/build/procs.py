@@ -5,6 +5,30 @@ fresh class (its own fresh-label counter n) bound to graph g, text encoder O and
 """
 
 
+import os as _os
+
+# T1d (c): optional fresh-order recorder.  UNISACC_FRESH_LOG=PATH appends one row per fresh
+# "n<TAB>owner<TAB>kind<TAB>caller" at exit; unset (default) changes nothing.  caller is the Python
+# frame outside this module (file:line); the manifest line is not available here because
+# exec/assemble.py rows() drops line numbers when it parses a manifest.
+_LOG = _os.environ.get("UNISACC_FRESH_LOG")
+_ROWS = []
+if _LOG:
+    import atexit as _atexit, sys as _sys
+
+    def _flush():
+        with open(_LOG, "a") as f:
+            f.writelines(_ROWS)
+    _atexit.register(_flush)
+
+    def _record(n, owner, kind):
+        fr = _sys._getframe(2)
+        while fr and fr.f_code.co_filename == __file__:
+            fr = fr.f_back
+        where = "%s:%d" % (_os.path.relpath(fr.f_code.co_filename), fr.f_lineno) if fr else "-"
+        _ROWS.append("%d\t%s\t%s\t%s\n" % (n, owner, kind, where))
+
+
 def make_P(g, O, rej):
     class P:
         """Procedures as op lists; a label is a state; straight-line actions ride
@@ -17,6 +41,8 @@ def make_P(g, O, rej):
 
         def fresh(self, h="k"):
             P.n += 1
+            if _LOG:
+                _record(P.n, self.cur.split(".")[0], h)
             return "%s.%s%d" % (self.cur.split(".")[0], h, P.n)
 
         def a(self, *acts):
