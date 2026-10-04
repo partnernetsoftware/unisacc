@@ -154,7 +154,10 @@ def fingerprint(jobs):
         if entry and entry.get('reviewed_trees'):
             for tree, reviewed in entry['reviewed_trees'].items():
                 if tree not in inventories:
-                    paths = sorted(p for p in pathlib.Path(tree).rglob('*') if p.is_file() and
+                    # gitignored generated output (exec/build/* beyond the tracked *.py) is not a reviewed input
+                    visible = set(subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others',
+                        '--exclude-standard', '--', tree]).decode().split('\0')) - {''}
+                    paths = sorted(p for p in pathlib.Path(tree).rglob('*') if str(p) in visible and p.is_file() and
                         (tree in entry['all_files_trees'] or p.suffix in entry['inventory_suffixes']) and
                         not any(pathlib.Path(q)==p or pathlib.Path(q) in p.parents for q in entry.get('excluded_dirs', [])))
                     if any(not stat.S_ISREG(p.lstat().st_mode) for p in paths): raise SystemExit('nonregular reviewed input')
