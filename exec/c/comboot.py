@@ -299,8 +299,20 @@ def lock(path, name):
     lk.parent.mkdir(parents=True, exist_ok=True)
     try:
         lk.mkdir()
+        (lk / 'pid').write_text(str(os.getpid()))
         return lk
     except FileExistsError:
+        # 0.0.24 X6: a watchdog kill skips `finally`, so the directory outlives its owner.  The
+        # owner's pid is inside; when that process is gone the lock is stale and is taken over.
+        try:
+            owner = int((lk / 'pid').read_text())
+            os.kill(owner, 0)
+        except (FileNotFoundError, ValueError, ProcessLookupError):
+            for f in lk.iterdir(): f.unlink()
+            lk.rmdir()
+            return lock(path, name)
+        except PermissionError:
+            pass
         raise SystemExit(
             'comboot: %s is being built by another run (%s); '
             'invoke this shard again once it is done' % (name, lk))
@@ -363,6 +375,7 @@ def shard(name):
             build_model(model_dir)
             install(model_dir, STAGE2)
         finally:
+            for f in lk.iterdir(): f.unlink()
             lk.rmdir()
         if not STAGE2.exists():
             raise SystemExit('comboot-shard stage2: no %s after the build' % STAGE2)
@@ -382,6 +395,11 @@ def shard(name):
             # nothing to do: say so and return 0.  Failing here instead would be
             # wrong -- a pipeline that has not run yet is not a defect.
             return skipped('stage3', 'stage 2 (%s): run the stage2 shard' % shown(STAGE2))
+        # 0.0.24 X6: the main checkout's unisacc.com exists before stage 2 runs (it is the previous
+        # release), so existence is not enough -- stage 2 must be the one this seed built.
+        d = load()
+        if d.get('stage2', {}).get('built_by_sha256') != d.get('stage1', {}).get('sha256'):
+            return skipped('stage3', 'a stage 2 built by this seed (%s is not; run the stage2 shard)' % shown(STAGE2))
         model_dir = stage_dir(3)
         lk = lock(model_dir, 'stage 3')
         try:
@@ -389,6 +407,7 @@ def shard(name):
             build_model(model_dir)
             install(model_dir, STAGE3)
         finally:
+            for f in lk.iterdir(): f.unlink()
             lk.rmdir()
         if not STAGE3.exists():
             raise SystemExit('comboot-shard stage3: no %s after the build' % STAGE3)
