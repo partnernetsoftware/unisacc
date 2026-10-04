@@ -47,7 +47,7 @@ BASE = E
 if hasattr(E, "executor"):   # a base that wraps another executor module returns it (build/parse2base.py)
     E = E.executor()
 if "graph" in head:
-    E.g, E.P = getattr(E, head["graph"][0])(), getattr(E, "P", None)
+    E.g, E.P = E.GRAPHS[head["graph"][0]](), None
 # Driver data channel: the top-level run environment is E.results, so names a row stores with
 # export / result= are readable by executor code later in the same build (E.results[name]).
 E.results = {}

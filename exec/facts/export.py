@@ -1721,6 +1721,40 @@ def k2truth():
             for name, (group, _, argument) in zip(names, variants)]
 
 
+def k2stack():
+    """Value-stack spill/reload sequences (was the @stack cell and stackrows option: P.vpush/P.vpop
+    called on the executor).  Each value slot is followed by its rank companion (valueranks kind=rank,
+    as build/parse2base.py); push stores at VS+vsp and increments, pop reverses the slot order."""
+    sys.path.insert(0, str(HERE))
+    from load import facts as F
+    vs = {r["name"]: r["value"] for r in F("parse-constants")}["VS"]
+    rank = {r["name"]: r["value"] for r in F("valueranks") if r["kind"] == "rank"}
+    def acts(method, items):
+        slots = []
+        for item in items:
+            slots.append(item)
+            if rank.get(item) and rank[item] not in items:
+                slots.append(rank[item])
+        if method == "vpush":
+            return [a for x in slots for a in (["STX", "vsp", vs, x], ["ALUI", "add", "vsp", "vsp", 1])]
+        assert method == "vpop", method
+        return [a for x in reversed(slots) for a in (["ALUI", "sub", "vsp", "vsp", 1], ["LDX", x, "vsp", vs])]
+    out = []
+    for stem, file in STACKS:
+        for ln in (ROOT / file).read_text().splitlines()[1:]:
+            name, value = ln.split("\t")
+            method, items = json.loads(value)
+            out.append("=stack_%s_%s\tjson\t%s" % (stem, name, json.dumps(acts(method, items))))
+    return out
+
+
+STACKS = [("initializers", "exec/parse2/initializers-stack.tsv"), ("intwarnings", "exec/parse2/intwarnings-stack.tsv"),
+          ("returnwarnings", "exec/parse2/returnwarnings-stack.tsv"), ("formatwarnings", "exec/parse2/formatwarnings-stack.tsv"),
+          ("membercontrol", "exec/parse2/membercontrol-stack.tsv")]
+TABLES.append(("k2-stack", ["exec/facts/parse-constants.tsv", "exec/facts/valueranks.tsv"] + [f for _, f in STACKS]
+               + ["exec/facts/export.py"], k2stack))
+
+
 TABLES.append(("k2-truth", ["exec/parse2/scalar-outputs.tsv", "exec/facts/export.py"], k2truth))
 
 

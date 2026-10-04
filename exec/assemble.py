@@ -184,11 +184,6 @@ class Run:
         if v.startswith("@acts:"):
             t = lambda x: tuple(map(t, x)) if isinstance(x, list) else x
             return [t(a) for a in _path(facts, v[6:])]
-        if v.startswith("@stack:"):
-            h, m, slots = v[7:].split(":", 2)
-            h = self.holders[h]
-            h.acts = []
-            return getattr(h, m)(*slots.split("+")).acts
         if v.startswith("$$"):
             d, _, k = v[2:].partition(":")
             return self.env[d][_fmt(k, facts) if re.search(r"\{\w[\w\[\]]*\}", k) else k]
@@ -597,10 +592,9 @@ Run.seqmap = _seqmap
 
 # seq tables next to the manifest (header line skipped, rows `name<TAB>json`):
 #   textrows FILE -> E.O(text); bufrows FILE -> SBOUT bytes;
-#   stackrows [FILE, HOLDER] -> P(HOLDER).METHOD(*slots).acts for json [METHOD, slots];
 #   msgrows [FILE, FACT, PREFIX] -> SBOUT bytes as PREFIX+name, and facts[FACT] = names.
 def _seqrows(self, o, facts):
-    if not any(k in o for k in ("textrows", "bufrows", "stackrows", "msgrows")):
+    if not any(k in o for k in ("textrows", "bufrows", "msgrows")):
         return None
     sq = {}
     def rows(f):
@@ -609,12 +603,6 @@ def _seqrows(self, o, facts):
         sq[name] = self.E.O(json.loads(value))
     for name, value in rows(o["bufrows"]) if "bufrows" in o else []:
         sq[name] = [("SBOUT", c) for c in json.loads(value).encode()]
-    if "stackrows" in o:
-        p = self.P(o["stackrows"][1])
-        for name, value in rows(o["stackrows"][0]):
-            method, slots = json.loads(value)
-            p.acts = []
-            sq[name] = getattr(p, method)(*slots).acts
     if "msgrows" in o:
         file, fact, prefix = o["msgrows"]
         names = []

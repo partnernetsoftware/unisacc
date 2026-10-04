@@ -1,7 +1,7 @@
 # K2 清单 DSL 规格（0.0.24 T1 第一步：现状冻结）
 
 以代码为准：`exec/assemble.py`（下称 A）、`exec/finite_rules.py`（FR）、`exec/build/gen.py`（G）、`exec/facts/load.py`（L）。行号对应 982e3685。
-统计范围：`exec/**/*-manifest.tsv` 132 个，`exec/facts/*.tsv` 209 个。本文只描述现状，不改行为。
+统计范围：`exec/**/*-manifest.tsv` 132 个，`exec/facts/*.tsv` 210 个（T1a 起；A: 行号仍是 T1a 前的，A:187 以后减 5，A:599 以后减 6，A:617 以后减 12）。本文只描述现状，不改行为。
 
 ## 1. 清单头（G:7-15，解析 G:35-39）
 `#! KEY V...` 行只由 G 在入口清单读取（子清单里的头无效）。
@@ -11,7 +11,7 @@
 | `base PATH` | 执行器模块（相对 exec/）作为 E；有 `executor()` 则 E=E.executor()；有 `check(E)` 则跑后调用 | G:7-9,43-49,56 | 10 |
 | `flags A B` | 可接受 `--A`；flags[A]=是否给出 | G:10,40-42,52 | 12 |
 | `start NAME` / `start $NAME` | 起始状态（缺省 START）；`$` 取 env | G:11,13,53-54 | 4 |
-| `graph CLASS` | E.g=E.CLASS() | G:12,50-51 | 2 |
+| `graph NAME` | E.g=E.GRAPHS[NAME]()（build/graph.py 显式登记 G、Delta） | G:12,50 | 2 |
 | `domains STEM` | E.g.finish(start,{mode:values}) | G:14,57-59 | 1 |
 | `extra KEY STEM` | 输出加 KEY=fact | G:15,64-65 | 1 |
 
@@ -37,7 +37,7 @@
 | template | `install_template`（FR:443；模板语法 FR:3-78）；mode 缺省 r；overlay | A:319-323 | 263 |
 | foreach | 对 over 每元素以 `as`（缺省 it）跑体，见 §6 | A:264-266, A:482-514 | 95 |
 | table | `install_rows(g,root/stem,...)`；mode/skip/ordered | A:327-331, FR:212 | 54 |
-| holder | 声明持有者 `P:NAME` 或 U；opts.cur；带 opts.cols 时为 fresh 表（A:374-386） | A:289-290, A:346-350 | 21 |
+| holder | 声明持有者 `P:NAME` 或 U；opts.cur；带 opts.cols 时为 fresh 表（A:374-386） | A:289-290, A:346-350 | 19 |
 | assert-absent | 断言 stem 状态存在性 == opts.present | A:344-345 | 18 |
 | label | stem 逗号名加入 g.labels | A:342-343 | 15 |
 
@@ -54,8 +54,7 @@
 | `@fmt:F` | `str.format(**facts)` | A:178-179, A:478-479 | 231 |
 | `@ref:F` | 格式化后取 fact 路径 | A:180-181 | 49 |
 | `@seqmap:LIST:TMPL` | 对 LIST 每元素实例化动作模板 | A:182-183, A:584-596 | 5 |
-| `@acts:PATH` | JSON 列表转元组 | A:184-186 | 87 |
-| `@stack:H:M:S+S` | `getattr(holder,M)(*slots).acts` | A:187-191 | 8 |
+| `@acts:PATH` | JSON 列表转元组 | A:184-186 | 107（含 T1a 的 18 个 stack_*，facts k2-stack） |
 | `$$D:K` | env[D][K]，K 含 `{}` 时格式化 | A:192-194 | 75 |
 | `$NAME` | env[NAME] | A:195-196 | — |
 | `@textf:PATH` | E.O(fact) | A:197-198 | 52 |
@@ -69,7 +68,7 @@
 - 行控制：`once`(3) A:252-257；`let`(314) A:258-261；`with`(115) A:287；`exit`(14) A:338；`result`(38) A:353-354；`export`(110，列表或 dict) A:292-294；`merge`(11) A:335；`flags`(50) A:333。
 - 域与类：`classes`(216) A:271；`domain`(46，`[lo,hi]` 或 `"@labels"`) A:273-276；`domain_keys`(14) A:277；`domain_at`(5) A:279；`tokens`(5) A:281, A:633-638；`classmap`(82) A:283-286。
 - 安装参数：`mode`(28)、`overlay`(4) A:321-322；`skip`(1)、`ordered`(1) A:329-330。
-- 序列：`textrows`(16)、`bufrows`(1)、`stackrows`(2)、`msgrows`(1) A:602-627；`seqfact`(46) A:299；`seqlist`(162) A:301-307；`outseq`(12) A:309-314；`mapseq`(102) A:315, A:388-431, A:653-667；`seqenv`(40) A:317。
+- 序列：`textrows`(16)、`bufrows`(1)、`msgrows`(1) A:596-615；`seqfact`(46) A:299；`seqlist`(162) A:301-307；`outseq`(12) A:309-314；`mapseq`(102) A:315, A:388-431, A:653-667；`seqenv`(40) A:317。
 - 绑定（A:517-570）：`accumulate`(199)、`keep`(11)、`bindmap`(195，路径/列表/dict)、`freshrows`(209，`FILE@PART` 或规格列表：over/file/key/owner/kind/where/lookup/holder)、`cellsfirst`(87)。
 - foreach（A:482-514）：`over`(95)、`as`(63)、`where`(13)、`join`(1)、`chain`(14：entry/start/next/result)、`pre`(38)。
 - holder / fresh 表：`cur`(1) A:349；`cols`(8)、`where`、`scope`(1)、`owner`(1) A:374-386；`present`(2) A:345。
@@ -90,13 +89,10 @@
 - 缓存按路径（A:59, A:76）。
 
 ## 8. 待删除或待改的特性（T1 下一步清单）
-计数用 `re.findall` 对全部 132 个清单与 209 个 facts 文件逐文件统计（脚本见提交说明的复现命令）。
+计数用 `re.findall` 对全部 132 个清单与 210 个 facts 文件逐文件统计（脚本见提交说明的复现命令）。
 
 | 项 | 代码 | 清单 | facts |
 |---|---|---|---|
-| `@stack` 的 getattr | A:187-191 | 8 次 / 3 文件（initializers 4、intwarnings 2、returnwarnings 2） | 0 |
-| `stackrows` 的 getattr | A:612-617 | 2 / 2（formatwarnings、membercontrol） | 0 |
-| 另：G 的 `graph` 头 getattr | G:51 | 2 个头 | — |
 | `@fmt:` 依赖 str.format | A:178, A:478 | 231 / 21 | 0 |
 | 其它 `.format` 路径（`$$` 键、`fresh:` scope、foreach over/where/join、freshrows、mapseq、fresh 表 owner） | A:193, A:203, A:486-500, A:536-560, A:400-412, A:655-665, A:381 | 随宿主键计 | — |
 | `=vN` 绑定（翻译器生成的匿名标量 fact，以裸路径 `k=vN` 引用） | A:68-69, A:205 | 3796 / 19（libraryvariadic 1694、bitfields 350、functiontypes 276、librarydata 180、enumtypes 116 …） | 627 / 17（printfcontrol 282、libraryvariadic 121、k2-librarydata 61、bitfields 40、functiontypes 36 …） |
@@ -109,4 +105,4 @@
 | 死数据：无清单或 py 引用的 facts 表 | — | — | 1：`nativeabi-ordered-regs.tsv` |
 | 死代码：`tape:` fresh、`fresh` op 名 | A:150, A:289 | `tape:` 0；op `fresh` 0 | — |
 
-下一步建议顺序：先去 getattr（10 处），再把 `=vN` 换成具名 fact，再把 fresh 分配改成显式序号，最后把 facts 动作序列迁回模板表。
+下一步建议顺序：getattr 已在 T1a 去掉（@stack 8、stackrows 2 改成 export.py 写出的 facts `k2-stack` 加 `@acts:`；graph 头改为 build/graph.py 的 GRAPHS 显式表），下一步把 `=vN` 换成具名 fact，再把 fresh 分配改成显式序号，最后把 facts 动作序列迁回模板表。

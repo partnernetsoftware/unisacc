@@ -101,3 +101,6 @@ class Delta:
         self.dead = sorted(set(self.states) - reach)
         for s in self.dead:
             del self.states[s]
+
+
+GRAPHS = {"G": G, "Delta": Delta}   # `#! graph NAME` heads (exec/build/gen.py): NAME -> graph class
