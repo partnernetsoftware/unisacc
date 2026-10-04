@@ -125,6 +125,12 @@ static const char *value_text(Value *v) {
     if (!v || v->kind != JSTR) die("expected string value");
     return v->s;
 }
+static const char *value_scalar_text(Value *v, char number[64]) {
+    if (!v) return NULL;
+    if (v->kind == JSTR) return v->s;
+    if (v->kind == JINT) { snprintf(number, 64, "%lld", v->number); return number; }
+    die("expected scalar value"); return NULL;
+}
 static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) {
     size_t i;
     if (!action || action->kind != JARR || !action->n) die("invalid action");
@@ -412,7 +418,8 @@ static Value *fresh_bindings(Value *opts, Value *facts) {
                 for (j = 0; j < where->n; j++) {
                     Value *actual = value_get(row, where->items[j].key);
                     char *expect = interpolate(value_text(where->items[j].value), ctx);
-                    if (!actual || actual->kind != JSTR || strcmp(actual->s, expect)) match = 0;
+                    char number[64]; const char *text = value_scalar_text(actual, number);
+                    if (!text || strcmp(text, expect)) match = 0;
                     free(expect);
                 }
             }
@@ -443,6 +450,84 @@ static void direct_bindings(Value *bindings, const char *text, Value *facts) {
         if (!comma) break; p = comma + 1;
     }
     free(parts);
+}
+static Value *map_cell(Value *source, Value *ctx) {
+    const char *s; size_t n;
+    if (source->kind != JSTR) return source;
+    s = source->s; n = strlen(s);
+    if (n >= 3 && s[0] == '{' && s[n - 1] == '}' && !strchr(s + 1, '{')) {
+        char *key = copy_n(s + 1, n - 2); Value *v = value_get(ctx, key);
+        free(key); if (!v) die("unknown mapseq cell"); return v;
+    }
+    { char *text = interpolate(s, ctx); Value *v = value_string(text); free(text); return v; }
+}
+static Value *mapseq_construct(Value *opts, Value *facts) {
+    Value *spec = value_get(opts, "mapseq"), *out = value_new(JOBJ); size_t k;
+    if (!spec) return out;
+    if (spec->kind != JOBJ) die("mapseq is not an object");
+    for (k = 0; k < spec->n; k++) {
+        const char *namefmt = spec->items[k].key;
+        Value *decl = spec->items[k].value;
+        Value *rows = value_path(facts, value_text(value_get(decl, "over")));
+        Value *parts = value_get(decl, "parts"); size_t i;
+        if (rows->kind != JARR || !parts || parts->kind != JARR) die("invalid mapseq rows or parts");
+        for (i = 0; i < rows->n; i++) {
+            Value *row = rows->items[i].value, *ctx = value_new(JOBJ), *acts = value_new(JARR);
+            char *name; size_t j, p;
+            if (row->kind != JOBJ) die("mapseq row is not an object");
+            for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
+            for (j = 0; j < row->n; j++) value_put(ctx, row->items[j].key, row->items[j].value);
+            name = interpolate(namefmt, ctx);
+            for (p = 0; p < parts->n; p++) {
+                Value *part = parts->items[p].value;
+                Value *splice = value_get(part, "splice"), *where = value_get(part, "where");
+                Value *source = value_get(part, "acts"); int take = 1;
+                if (splice) {
+                    Value *refs = value_get(row, value_text(splice)); size_t r;
+                    if (!refs || refs->kind != JARR) die("mapseq splice is not a list");
+                    for (r = 0; r < refs->n; r++) {
+                        Value *named = value_get(out, value_text(refs->items[r].value)); size_t a;
+                        if (!named || named->kind != JARR) die("mapseq forward or unknown reference");
+                        for (a = 0; a < named->n; a++) value_put(acts, NULL, named->items[a].value);
+                    }
+                    continue;
+                }
+                if (where) {
+                    if (where->kind != JOBJ) die("mapseq where is not an object");
+                    for (j = 0; j < where->n; j++) {
+                        Value *actual = value_get(row, where->items[j].key);
+                        char *expected = interpolate(value_text(where->items[j].value), ctx);
+                        char number[64]; const char *text = value_scalar_text(actual, number);
+                        if (!text || strcmp(text, expected)) take = 0;
+                        free(expected);
+                    }
+                }
+                if (!take) continue;
+                if (!source || source->kind != JARR) die("mapseq acts is not a list");
+                for (j = 0; j < source->n; j++) {
+                    Value *input = source->items[j].value, *action; size_t c;
+                    if (input->kind != JARR || !input->n) die("invalid mapseq action");
+                    if (!strcmp(value_text(input->items[0].value), "@bytes")) {
+                        Value *value; const unsigned char *s;
+                        if (input->n != 2) die("invalid @bytes action");
+                        value = map_cell(input->items[1].value, ctx); s = (const unsigned char *)value_text(value);
+                        for (; *s; s++) {
+                            Value *byte = value_new(JINT); action = value_new(JARR);
+                            byte->number = *s;
+                            value_put(action, NULL, value_string("SBOUT")); value_put(action, NULL, byte);
+                            value_put(acts, NULL, action);
+                        }
+                        continue;
+                    }
+                    action = value_new(JARR);
+                    for (c = 0; c < input->n; c++) value_put(action, NULL, map_cell(input->items[c].value, ctx));
+                    value_put(acts, NULL, action);
+                }
+            }
+            value_put(out, name, acts); free(name);
+        }
+    }
+    return out;
 }
 static void let_bind(Value *env, const char *bind) {
     char *parts = copy(bind), *p = parts;
@@ -559,7 +644,7 @@ static void action_labels(Graph *g, const char *actions) {
     jparse_text(&d, actions, (long)strlen(actions), "prune action");
     if (d.n[0].type != JARR) die("action sequence is not an array");
     for (a = jkid(&d, 0); a >= 0; a = jnext(&d, a)) {
-        int op, arg;
+        int op = -1, arg;
         if (d.n[a].type != JARR || (op = jkid(&d, a)) < 0 || d.n[op].type != JSTR)
             die("invalid action entry");
         if (!jstris(&d, op, "PUSH")) continue;
@@ -619,6 +704,7 @@ static void install_file(Graph *g, const char *path, char mode) {
     }
 }
 static void output(FILE *f, const Graph *g);
+static void finish(Graph *g);
 /* Four-column form shared by opt/lower/parse rows. The caller supplies only
    source facts and generated bindings; the row reader owns the rule order. */
 static const char *bound_name(const char *s, Value *bindings) {
@@ -730,13 +816,67 @@ static void install_prn_call(Graph *g) {
         Value *item = instances->items[i].value, *facts = load_facts_expr(factexpr);
         Value *opts = value_json(opts_text, "called row options");
         Value *bindings, *empty = value_new(JOBJ);
-        char *name = value_text(value_get(item, "name"));
+        const char *name = value_text(value_get(item, "name"));
         value_put(facts, "name", value_string(name));
         value_put(facts, "width", value_get(item, "width"));
         bindings = fresh_bindings(opts, facts); direct_bindings(bindings, bind, facts);
         install_section(g, "exec/parse/numeric-byte.tsv", "prn", 'b', bindings, empty);
         install_section(g, "exec/parse/numeric-result.tsv", "prn", 'r', bindings, empty);
     }
+}
+static void construct_opt_o1(Graph *g) {
+    FILE *f = fopen("exec/opt/gen-manifest.tsv", "rb"); char *s;
+    Value *seqenv = value_new(JOBJ), *rounds = value_new(JOBJ), *empty = value_new(JOBJ);
+    int prn = 0, scans = 0, maps = 0, setup = 0, roundlet = 0, common = 0, one = 0;
+    fresh_count = 0;
+    if (!f) die("cannot open opt manifest");
+    while ((s = line(f))) {
+        char *field[9], path[1024]; int n;
+        Value *opts;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("opt manifest column count");
+        if (!when_true(field[3], 0, NULL)) { free(s); continue; }
+        opts = !strcmp(field[8], "-") ? value_new(JOBJ) : value_json(field[8], "opt manifest options");
+        if (!strcmp(field[0], "call") && !strcmp(field[1], "../parse/prn")) {
+            if (prn++) die("duplicate opt prn call");
+            install_prn_call(g);
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "scans")) {
+            Value *facts = load_facts_expr(field[4]), *bindings;
+            if (scans++ || strcmp(field[2], "-")) die("unsupported opt scans row");
+            bindings = fresh_bindings(opts, facts); direct_bindings(bindings, field[7], facts);
+            install_plain(g, "exec/opt/scans-byte.tsv", 'b', bindings, empty);
+            install_plain(g, "exec/opt/scans-result.tsv", 'r', bindings, empty);
+        } else if (!strcmp(field[0], "let") && value_get(opts, "mapseq")) {
+            Value *facts = load_facts_expr(field[4]); size_t i;
+            if (maps++) die("duplicate opt mapseq");
+            seqenv = mapseq_construct(opts, facts);
+            for (i = 0; i < seqenv->n; i++) if (!seqenv->items[i].value) die("empty mapped sequence");
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "setup")) {
+            Value *seq = value_new(JOBJ), *start1 = value_get(seqenv, "start1");
+            if (setup++ || strcmp(field[2], "start") || !start1 || strcmp(field[6], "data=$start1"))
+                die("unsupported opt setup row");
+            value_put(seq, "data", start1);
+            install_section(g, "exec/opt/setup-byte.tsv", "start", 'b', empty, seq);
+            install_section(g, "exec/opt/setup-result.tsv", "start", 'r', empty, seq);
+        } else if (!strcmp(field[0], "let") && value_get(opts, "freshrows")) {
+            Value *facts = load_facts_expr(field[4]);
+            if (roundlet++) die("duplicate opt rounds binding");
+            rounds = fresh_bindings(opts, facts); direct_bindings(rounds, field[7], facts);
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "rounds")) {
+            const char *section = field[2];
+            if (!strcmp(section, "common")) common++;
+            else if (!strcmp(section, "1")) one++;
+            else die("unsupported opt round section");
+            if (snprintf(path, sizeof(path), "exec/opt/rounds-byte.tsv") >= (int)sizeof(path)) die("rule path too long");
+            install_section(g, path, section, 'b', rounds, empty);
+            install_section(g, "exec/opt/rounds-result.tsv", section, 'r', rounds, empty);
+        } else die("unsupported enabled opt DSL op");
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("opt manifest read failed");
+    if (prn != 1 || scans != 1 || maps != 1 || setup != 1 || roundlet != 1 || common != 1 || one != 1)
+        die("incomplete opt O1 manifest");
+    finish(g);
 }
 static void inspect_bound_rows(const char *stage, const char *stem, const char *outpath,
                                const char *initial) {
@@ -834,6 +974,38 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc >= 2 && !strcmp(argv[1], "opt") && argc != 3)
+        die("opt O1 accepts no flags; --o2 is not covered yet");
+    if (argc == 3 && !strcmp(argv[1], "opt")) {
+        construct_opt_o1(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output(out, &g); if (fclose(out)) die("output close failed");
+        fprintf(stderr, "opt states %lu\n", (unsigned long)g.n);
+        return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "inspect-mapseq")) {
+        char path[1024], *s; FILE *f; int found = 0;
+        if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", argv[2]) >= (int)sizeof(path)) die("manifest path too long");
+        f = fopen(path, "rb"); if (!f) die("cannot open manifest");
+        while ((s = line(f))) {
+            char *field[9]; int n;
+            if (!*s || *s == '#') { free(s); continue; }
+            n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+            if (!strcmp(field[0], "let") && field[8][0] == '{') {
+                Value *opts = value_json(field[8], "manifest options");
+                if (value_get(opts, "mapseq")) {
+                    Value *facts = load_facts_expr(field[4]), *sequences = mapseq_construct(opts, facts);
+                    if (++found > 1) die("ambiguous mapseq row");
+                    out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
+                    value_write(out, sequences); if (fclose(out)) die("output close failed");
+                }
+            }
+            free(s);
+        }
+        if (ferror(f) || fclose(f)) die("manifest read failed");
+        if (!found) die("mapseq row not found");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-prn")) {
         install_prn_call(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
