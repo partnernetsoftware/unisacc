@@ -90,7 +90,9 @@ for f in $FILES; do
       # numbering and the path it was handed (the same "$f" both sides get)
       printf '#line 1 "%s"\n' "$f"
       cat "$f"; } > "$T/$b.ref.c"
-    if ! $CC -w -std=c99 -o "$D/$b" "$T/$b.ref.c" -lm 2>"$T/$b.cc"; then
+    # -I the probe's own directory: the shimmed copy lives in $T, so a quoted
+    # #include of a neighbour header (a_quote_neighbor.h) must still resolve
+    if ! $CC -w -std=c99 -I "$(dirname "$f")" -o "$D/$b" "$T/$b.ref.c" -lm 2>"$T/$b.cc"; then
         exit 0
     fi
     (cd "$D" && ./"$b" 2>/dev/null) > "$T/$b.want"; echo $? > "$T/$b.wcode"
