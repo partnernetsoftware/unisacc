@@ -464,13 +464,82 @@ static Value *map_cell(Value *source, Value *ctx) {
     }
     { char *text = interpolate(s, ctx); Value *v = value_string(text); free(text); return v; }
 }
+static int map_equal(Value *a, Value *b) {
+    if (!a || !b || a->kind != b->kind) return 0;
+    if (a->kind == JSTR) return !strcmp(a->s, b->s);
+    if (a->kind == JINT || a->kind == JBOOL) return a->number == b->number;
+    if (a->kind == JNULL) return 1;
+    die("unsupported mapseq predicate value"); return 0;
+}
+static void map_actions(Value *out, Value *actions, Value *ctx) {
+    size_t i, c;
+    if (!actions || actions->kind != JARR) die("invalid mapseq acts");
+    for (i = 0; i < actions->n; i++) {
+        Value *input = actions->items[i].value, *action;
+        if (input->kind != JARR || !input->n) die("invalid mapseq action");
+        if (!strcmp(value_text(input->items[0].value), "@out") ||
+            !strcmp(value_text(input->items[0].value), "@bytes")) {
+            int output = !strcmp(value_text(input->items[0].value), "@out");
+            Value *value; const unsigned char *s;
+            if (input->n != 2) die("invalid mapseq byte expansion");
+            value = map_cell(input->items[1].value, ctx);
+            s = (const unsigned char *)value_text(value);
+            for (; *s; s++) {
+                Value *byte = value_new(JINT); action = value_new(JARR); byte->number = *s;
+                value_put(action, NULL, value_string(output ? "OUT" : "SBOUT"));
+                value_put(action, NULL, byte); value_put(out, NULL, action);
+            }
+            continue;
+        }
+        action = value_new(JARR);
+        for (c = 0; c < input->n; c++)
+            value_put(action, NULL, map_cell(input->items[c].value, ctx));
+        value_put(out, NULL, action);
+    }
+}
+static void map_old_part(Value *out, Value *part, Value *facts) {
+    Value *over = value_get(part, "over"), *where = value_get(part, "where");
+    Value *rows = over ? value_path(facts, value_text(over)) : NULL;
+    size_t i, n = rows ? rows->n : 1;
+    if (rows && rows->kind != JARR) die("mapseq over is not a list");
+    for (i = 0; i < n; i++) {
+        Value *ctx = value_new(JOBJ); size_t j; int take = 1;
+        Value *item = rows ? rows->items[i].value : NULL;
+        for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
+        if (item) {
+            if (item->kind != JOBJ) die("mapseq item is not an object");
+            for (j = 0; j < item->n; j++) value_put(ctx, item->items[j].key, item->items[j].value);
+        }
+        if (where) {
+            if (where->kind != JOBJ) die("invalid mapseq where");
+            for (j = 0; j < where->n; j++) {
+                Value *actual = value_get(ctx, where->items[j].key);
+                Value *expect = where->items[j].value;
+                if (expect->kind == JSTR && actual && actual->kind == JINT) {
+                    char number[64];
+                    snprintf(number, sizeof(number), "%lld", actual->number);
+                    if (strcmp(number, expect->s)) take = 0;
+                } else if (!map_equal(actual, expect)) take = 0;
+            }
+        }
+        if (take) map_actions(out, value_get(part, "acts"), ctx);
+    }
+}
 static Value *mapseq_construct(Value *opts, Value *facts) {
-    Value *spec = value_get(opts, "mapseq"), *out = value_new(JOBJ); size_t k;
+    Value *spec = value_get(opts, "mapseq"), *out = value_new(JOBJ); size_t k; int pass;
     if (!spec) return out;
     if (spec->kind != JOBJ) die("mapseq is not an object");
-    for (k = 0; k < spec->n; k++) {
+    /* assemble.Run.mapseq first evaluates fixed names, then formatted names.
+       This insertion order is observable in the returned fact dictionary. */
+    for (pass = 0; pass < 2; pass++) for (k = 0; k < spec->n; k++) {
         const char *namefmt = spec->items[k].key;
         Value *decl = spec->items[k].value;
+        if (!!strchr(namefmt, '{') != pass) continue;
+        if (decl->kind == JARR) {
+            Value *acts = value_new(JARR); size_t p;
+            for (p = 0; p < decl->n; p++) map_old_part(acts, decl->items[p].value, facts);
+            value_put(out, namefmt, acts); continue;
+        }
         Value *rows = value_path(facts, value_text(value_get(decl, "over")));
         Value *parts = value_get(decl, "parts"); size_t i;
         if (rows->kind != JARR || !parts || parts->kind != JARR) die("invalid mapseq rows or parts");
@@ -499,10 +568,13 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
                     if (where->kind != JOBJ) die("mapseq where is not an object");
                     for (j = 0; j < where->n; j++) {
                         Value *actual = value_get(row, where->items[j].key);
-                        char *expected = interpolate(value_text(where->items[j].value), ctx);
-                        char number[64]; const char *text = value_scalar_text(actual, number);
-                        if (!text || strcmp(text, expected)) take = 0;
-                        free(expected);
+                        Value *expect = where->items[j].value;
+                        if (expect->kind == JSTR) {
+                            char *expected = interpolate(expect->s, ctx);
+                            char number[64]; const char *text = value_scalar_text(actual, number);
+                            if (!text || strcmp(text, expected)) take = 0;
+                            free(expected);
+                        } else if (!map_equal(actual, expect)) take = 0;
                     }
                 }
                 if (!take) continue;
@@ -510,14 +582,16 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
                 for (j = 0; j < source->n; j++) {
                     Value *input = source->items[j].value, *action; size_t c;
                     if (input->kind != JARR || !input->n) die("invalid mapseq action");
-                    if (!strcmp(value_text(input->items[0].value), "@bytes")) {
+                    if (!strcmp(value_text(input->items[0].value), "@bytes") ||
+                        !strcmp(value_text(input->items[0].value), "@out")) {
+                        int output = !strcmp(value_text(input->items[0].value), "@out");
                         Value *value; const unsigned char *s;
-                        if (input->n != 2) die("invalid @bytes action");
+                        if (input->n != 2) die("invalid byte expansion action");
                         value = map_cell(input->items[1].value, ctx); s = (const unsigned char *)value_text(value);
                         for (; *s; s++) {
                             Value *byte = value_new(JINT); action = value_new(JARR);
                             byte->number = *s;
-                            value_put(action, NULL, value_string("SBOUT")); value_put(action, NULL, byte);
+                            value_put(action, NULL, value_string(output ? "OUT" : "SBOUT")); value_put(action, NULL, byte);
                             value_put(acts, NULL, action);
                         }
                         continue;
@@ -1249,15 +1323,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "opt states %lu\n", (unsigned long)g.n);
         return 0;
     }
-    if (argc == 4 && !strcmp(argv[1], "inspect-mapseq")) {
+    if (argc >= 4 && !strcmp(argv[1], "inspect-mapseq")) {
         char path[1024], *s; FILE *f; int found = 0;
-        if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", argv[2]) >= (int)sizeof(path)) die("manifest path too long");
+        const char *sub = strchr(argv[2], ':');
+        if (sub) {
+            char *stage = copy_n(argv[2], (size_t)(sub - argv[2]));
+            if (snprintf(path, sizeof(path), "exec/%s/%s-manifest.tsv", stage, sub + 1) >= (int)sizeof(path))
+                die("manifest path too long");
+            free(stage);
+        } else if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", argv[2]) >= (int)sizeof(path))
+            die("manifest path too long");
         f = fopen(path, "rb"); if (!f) die("cannot open manifest");
         while ((s = line(f))) {
             char *field[9]; int n;
             if (!*s || *s == '#') { free(s); continue; }
             n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
-            if (!strcmp(field[0], "let") && field[8][0] == '{') {
+            if (!strcmp(field[0], "let") && field[8][0] == '{' &&
+                when_true(field[3], argc - 4, argv + 4)) {
                 Value *opts = value_json(field[8], "manifest options");
                 if (value_get(opts, "mapseq")) {
                     Value *facts = load_facts_expr(field[4]), *sequences = mapseq_construct(opts, facts);
