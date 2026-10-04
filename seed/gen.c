@@ -1545,6 +1545,35 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_cli(const char *outpath, int no_autoinc) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    Graph g = {0}; Value *sequences = NULL; char *s; int found = 0;
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
+            Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp output options");
+            sequences = mapseq_construct(opts, facts);
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "cli") &&
+                   !strcmp(field[3], no_autoinc ? "no-autoinc" : "!no-autoinc")) {
+            Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
+            char path[1024];
+            direct_bindings(bindings, field[7], facts);
+            for (int i = 0; i < 2; i++) {
+                if (snprintf(path, sizeof(path), "exec/pp/cli-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
+                    die("pp CLI path too long");
+                install_plain(&g, path, i ? 'r' : 'b', bindings, sequences);
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp CLI row missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void construct_opt(Graph *g, int o2) {
     FILE *f = fopen("exec/opt/gen-manifest.tsv", "rb"); char *s;
     Value *seqenv = value_new(JOBJ), *rounds = value_new(JOBJ), *empty = value_new(JOBJ);
@@ -1719,6 +1748,10 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
+        !strcmp(argv[1], "inspect-pp-cli")) {
+        inspect_pp_cli(argv[2], argc == 4); return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-start")) {
         inspect_pp_start(argv[2]); return 0;
     }
