@@ -18,6 +18,7 @@ def git(repo, *a):
 def product(path):
     if not path.startswith(CLOSURE) or not path.endswith(EXT): return False
     parts = path.split('/')
+    if parts[0] == 'seed' and parts[-1] not in ('tbl.c', 'net.c', 'json.h'): return False   # seed/gen.c is not on the build path
     return not (parts[:2] == ['exec', 'build'] and (len(parts) > 3 or not path.endswith('.py')))
 
 def main(repo):

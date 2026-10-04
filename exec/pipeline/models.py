@@ -27,6 +27,8 @@ def closure(h):
             # construction input; exec/build/*.py (gen.py, graph.py, procs.py, parsebase.py,
             # parse2base.py) are.  exec/.gitignore keeps only these (0.0.24 T3).
             rel = path.relative_to(ROOT).parts
+            if rel[0] == 'seed' and rel[-1] not in ('tbl.c', 'net.c', 'json.h'):
+                continue   # only the tools the build runs; seed/gen.c (B4) is not on the build path yet
             if rel[:2] == ('exec', 'build') and (len(rel) > 3 or path.suffix != '.py'):
                 continue   # only the tracked drivers exec/build/*.py are inputs; anything else there is generated
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
