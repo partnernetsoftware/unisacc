@@ -420,6 +420,7 @@ job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located
 job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
+job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 job tapebin-roundtrip python3 ./tests/tapebin.py
