@@ -63,6 +63,10 @@ fi
 # them red); every other red still fails.
 GUEST_MEM_KB=$(limactl shell "$VM" -- awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d '\r')
 GUEST_CLANG=$(limactl shell "$VM" -- sh -c 'command -v clang >/dev/null && echo yes || echo no' 2>/dev/null | tr -d '\r')
+# The guest runs FETCH=0, so the corpus travels in the tarball.  A checkout
+# without it (git worktree: /corpus/ is ignored) made diag and warn red with
+# "0 diagnosed" / "read nothing from cc" in 0.0.23 -- refuse up front instead.
+[ -d "$R/corpus/c-testsuite/tests/single-exec" ] || { echo "linux: $R/corpus is missing (copy it from the main checkout or run tests/corpus.sh with FETCH=1)"; exit 2; }
 LOGF=$(mktemp)
 tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     set -u
@@ -72,6 +76,9 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     tar -C \$W -xf -
     cd \$W
     export FETCH=0
+    # Guest /tmp is a RAM tmpfs (~4 GB); all.sh's preserved logs and the bigclosure/ape images
+    # filled it mid-run in 0.0.23 (27 false reds).  Work on the guest disk instead.
+    export TMPDIR=\$HOME/unisa-tmp; rm -rf \$TMPDIR; mkdir -p \$TMPDIR
     export SUITE_LIMIT='$LIMIT' TRY_ALARM='$TRY' JOBS='${JOBS:-4}'
     # Some suites take the probe list; run without it they test NOTHING --
     # closure printed 'identical 0 differ 0' and ccrun reported 90 lost
