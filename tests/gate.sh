@@ -426,6 +426,7 @@ job rowcov-lex python3 ./tests/rowcov.py lex all   # 0.0.26 T2: lex manifest row
 for k in $(seq 1 16); do job rowcov-parse2-$k python3 ./tests/rowcov.py parse2 gate$k/16; done   # 0.0.26 T2: each shard ratchets its own reached rows
 for st in lower enc; do for k in $(seq 1 8); do job rowcov-$st-$k python3 ./tests/rowcov.py $st gate$k/8; done; done   # 0.0.26 T2: lower (--full) and enc (--elf) rows, on tapes from the reference -S
 job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
+job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
 job freezecheck python3 ./tests/freezecheck.py   # 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
 job revivedscan python3 ./tests/revivedscan.py   # 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here
