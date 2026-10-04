@@ -94,7 +94,7 @@
 | 项 | 代码 | 清单 | facts |
 |---|---|---|---|
 | 其它 `.format` 路径（经 _fmt 的 `$$` 键、`fresh:` scope、foreach over/allowed/where、freshrows 已随 T1b 改用最小插值；仍直接调 str.format 的：foreach join default、mapseq、fresh 表 owner） | A:193, A:203, A:486-500, A:536-560, A:400-412, A:655-665, A:381 | 随宿主键计 | — |
-| `=vN` 绑定（翻译器生成的匿名标量 fact，以裸路径 `k=vN` 引用） | A:68-69, A:205 | 2085 / 17（bitfields 350、functiontypes 276、librarydata 180、enumtypes 116 …） | 489 / 15（printfcontrol 282、k2-librarydata 61、bitfields 40、functiontypes 36 …） |
+| `=vN` 绑定（翻译器生成的匿名标量 fact，以裸路径 `k=vN` 引用） | A:68-69, A:205 | 0 / 0（T1c 完成：16 个 stem 的 627 个定义全部改成具名 fact，tests/k2rename.py） 489 / 15（printfcontrol 282、k2-librarydata 61、bitfields 40、functiontypes 36 …） |
 | 隐式顺序：`fresh:` 单元按行序/单元序分配 | A:201-204, A:207-214 | 2439 / 59 | 0 |
 | 隐式顺序：`freshrows` 按行序分配 | A:524-561 | 209 / 41 | 0 |
 | 隐式顺序：`once` 截断余下行 | A:252-257 | 3 / 3 | 0 |
