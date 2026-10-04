@@ -135,6 +135,7 @@ class Walker:
         # `declspec` sets this; `enum E *e;` reaches do_global WITHOUT one,
         # so it has to exist from the start.
         self.saw_static = False
+        self.saw_extern = False
         # One Walker walks EVERY translation unit, so that a call in one file
         # can reach a definition in another without a linker.  The price is
         # that file-scope `static` must stop meaning "the whole program":
@@ -251,6 +252,9 @@ class Walker:
                 w = self.next().text
                 if w == "static":
                     self.saw_static = True
+                    continue
+                if w == "extern":
+                    self.saw_extern = True
                     continue
                 if w in ("const", "volatile", "register", "auto",
                          "extern", "inline"):
@@ -679,6 +683,7 @@ class Walker:
         if base is None:
             base = self.declspec()
         static = self.saw_static     # a nested declspec will clear it
+        extern = self.saw_extern
         if self.eat(";"):
             return
         while True:
@@ -709,7 +714,11 @@ class Walker:
                 ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
             size = ty.size(self.sc.structs)
             lab = "g_" + (self.mangle(name) if static else name)
-            self.em.t.string(lab, b"\x00" * max(1, size), align=8)
+            # A bare extern names an object but does not allocate it.  In
+            # particular, `extern char x[];` must not leave a one-byte x ahead
+            # of the later definition whose string supplies the real bound.
+            if not (extern and not init):
+                self.em.t.string(lab, b"\x00" * max(1, size), align=8)
             sym = self.sc.declare(name, ty, gkind, sym=lab)
             if init:
                 self.global_init(sym, ty)
@@ -2220,14 +2229,13 @@ class Walker:
                     self.em.zext(4)
             return t
         if p == "uplus":
-            # Unary `+` is a no-op but for the integer promotion, which the
-            # binary rules apply anyway -- so, like `neg`, it just yields its
-            # operand.  It shows up in real code mostly through `##` pastes
-            # and defensive macros: `60 + +3`.
+            # Unary `+` preserves the value but applies integer promotion.
+            # The result type matters to sizeof(+short), even without a
+            # subsequent binary operator.
             self.next()
             t = self.unary()
             self.load_if_lval()
-            return t
+            return I32 if t.kind in ("i8", "u8", "i16", "u16") else t
         if p == "not":
             self.next()
             t = self.unary()
