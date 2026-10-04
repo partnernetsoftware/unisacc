@@ -109,3 +109,5 @@ T1e：上述冻结统计中的 `pp-autoinc-gen` 已由 1096 处迁到 0；动作
 下一步建议顺序：getattr 已在 T1a 去掉（@stack 8、stackrows 2 改成 export.py 写出的 facts `k2-stack` 加 `@acts:`；graph 头改为 build/graph.py 的 GRAPHS 显式表），下一步把 `=vN` 换成具名 fact，再把 fresh 分配改成显式序号，最后把 facts 动作序列迁回模板表。
 
 - 2026-10-04 T1b2：assemble.py 里剩下的 7 处 str.format（fresh owner、mapseq、foreach join default）也改用 _fmt，assemble.py 不再调用 str.format。
+
+T1e 第三片：两架构 hostbridge guards、k2-errors、k2-gen2、k2-stack 的 facts 动作序列 197 → 0；动作归入既有模板/mapseq，facts 保留领域数据。E3 八变体与编码十变体整图哈希不变，DSL 仍为 9 op。

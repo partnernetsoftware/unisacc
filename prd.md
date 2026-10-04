@@ -321,3 +321,11 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 ### T1e：autoinc facts 动作迁回声明模板
 
 本片只迁 pp-autoinc-gen：函数名、库依赖闭包的槽偏移、头文件名与顺序作为事实；SBCLR/SBOUT、槽置位及 include 输出动作留在 autoinc 模板清单。状态名与续点格式由清单绑定，保持展开次序及 pp 全变体图字节不变，不扩充 DSL。 本片已验：动作序列 1096 → 0，13 个 pp 图哈希不变，export --check 28 表/0 differ，DSL 9 op/上限 12、无新增 opts 键或值前缀。
+
+### T1e 第二片：lex 输出与入口动作迁回模板
+
+lex-gen 只保留字符类、词法分类、token 与拼写属性、前缀树等领域数据。输出动作及入口/NSTART 的控制行由 lexer 声明模板提供，维持原输出、状态与动作序列编号。复用既有 mapseq 的动作展开规则，不增加 DSL op、opts 键或值前缀；以五种 lex 图哈希不变验收。
+
+### T1e 第三片：桥接、诊断与值栈动作归位
+
+将 hostbridge 两架构 guards、k2-errors、k2-gen2、k2-stack 的动作序列迁回声明模板；facts 只保留测试操作数、诊断属性、布局常量与槽位数据。保持相关整图哈希，使用既有 mapseq/模板机制，不增加 DSL op、opts 键或值前缀。

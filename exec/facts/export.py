@@ -939,7 +939,6 @@ def k2gen2():
         if str(ROOT / d) not in sys.path:
             sys.path.insert(0, str(ROOT / d))
     G = _gen2ns("gen2")
-    acts = lambda a: [list(x) for x in a]
     dump = lambda v: json.dumps(v)
     follow = dict(G.tape_rows("type-follow.tsv"))
     words = [dict(word=w, value=v, rank=(1 if w == "type=float" else 2 if w == "type=double" else 0),
@@ -980,12 +979,11 @@ def k2gen2():
     typetargets = {btk[w]: "TS." + w for w in G.TWORDS}
     typetargets.update((G.TK_ID if w == "identifier" else btk[w], t) for w, t in G.tape_rows("type-entry.tsv"))
     gen2parts = dict(
-        localdecl=dict(classes=dict(identifier=[G.TK_ID], paren=[G.TK["("]]), seqs=dict(reject=acts(G.E.rej("not covered: declarator")))),
+        localdecl=dict(classes=dict(identifier=[G.TK_ID], paren=[G.TK["("]])),
         longdouble=dict(consts=dict(DBL=G.DBL), classes=dict(double=[G.TK["type=double"]])),
         positive=dict(consts=dict(INT=i32),
                       classes=dict(promote=[G.BOOL] + [c for _, c, z, _, _ in G.TYINT if z < i32],
-                                   arithmetic=[G.DBL, G.FLT] + [c for _, c, z, _, _ in G.TYINT if z >= i32]),
-                      seqs=dict(reject=acts(G.E.rej("not covered: unary + requires arithmetic operand")))),
+                                   arithmetic=[G.DBL, G.FLT] + [c for _, c, z, _, _ in G.TYINT if z >= i32])),
         tentative=dict(consts=dict(TENTATIVE=764 << 40)),
         typeops=[dict(key=k, target=t) for k, t in typetargets.items()],
         updateops=[dict(key=G.TK[o + "="], target="LV.c" + o) for o in G.E.CASOPS])
@@ -994,54 +992,20 @@ def k2gen2():
                       UNDO_SIZE=G.UNDO_SIZE, SHAPE=G.SHAPE, TDE=G.TDE)
     for n, base, size in (("UNDO", G.E.UNDO, G.UNDO_SIZE), ("DIM", G.DIM, 8), ("PDB", G.PDB, 16)):
         scopeconst.update((n + "_" + str(i), base + i) for i in range(size))
-    scopeseqs = {n: acts(row[0][1]) for n, row in G.load_rules(ROOT / "exec/parse2/scope-actions.tsv", {}, domain=[0], bindings=scopeconst).items()}
-    T = G.TYPE_TAPE
     widthparts = dict(
-        store=dict(consts=dict(FLT=G.FLT), seqs=dict(store_float=acts(G.O(T["storen"] % 4)))),
-        elsz=dict(consts=dict(SBB=G.SBB, SSZ=G.SSZ, DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, UNS=G.UNS),
-                  seqs=dict(incomplete=acts(G.E.rej("not covered: incomplete struct")))),
-        naru=dict(consts=dict(BOOL=G.BOOL),
-                  rows=[dict(code=c, row=acts(G.O(T["mask"] % ((1 << (8 * z)) - 1)))) for _, c, z, u, _ in G.TYINT if u and z < 8]),
+        store=dict(consts=dict(FLT=G.FLT)),
+        elsz=dict(consts=dict(SBB=G.SBB, SSZ=G.SSZ, DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, UNS=G.UNS)),
+        naru=dict(consts=dict(BOOL=G.BOOL), rows=[dict(code=c) for _, c, z, u, _ in G.TYINT if u and z < 8]),
         conv=dict(consts=dict(BOOL=G.BOOL, DBL=G.DBL, FLT=G.FLT, UNSIGNED_WIDE=G.UNS + 8),
-                  seqs=dict(save=acts(G.P("conv.facts").vpush("vt", "vb").acts), restore=acts(G.P("conv.facts").vpop("vt", "vb").acts)),
                   suffixes=[dict(s=x) for x in ("d", "s", "i", "u")]),
         narrow=dict(consts=dict(UNSIGNED_WIDE=G.UNS + 8, DBL=G.DBL, BOOL=G.BOOL, TDN=G.E.TDN),
-                    seqs=dict(uim=acts(G.O(G.UIM)), reject=acts(G.E.rej("not covered: width"))),
-                    rows=[dict(code=vb, row=acts(G.O(T["mask"] % ((1 << (8 * size)) - 1) if uns else T["narrow"] % (size, size))))
-                          for _, vb, size, uns, nar in G.TYINT if nar]))
-    widthd = {}
-    for wname, tape, masks in (("LOADV", "load", True), ("LOADRAW", "load", False), ("STOREV0", "store", False)):
-        T = G.TYPE_TAPE
-        pre = dict(wide=acts(G.O(T[tape + "8"])), float=acts(G.O(T[tape + "n"] % G.TYINFO["f32"][0])),
-                   bool=acts(G.O(T[tape + "n"] % 1 + (T["mask"] % 255 if masks else ""))))
-        rws = [dict(code=vb, row=acts(G.O(T[tape + "8"] if size == 8 else T[tape + "n"] % size +
-                                           (T["mask"] % ((1 << (8 * size)) - 1) if masks and uns else ""))))
-               for _, vb, size, uns, _ in G.TYINT if vb != 8]
-        widthd[wname] = dict(prefix=pre, rows=rws)
+                    rows=[dict(code=vb) for _, vb, size, uns, nar in G.TYINT if nar]))
+    widthd = {wname: dict(rows=[dict(code=vb) for _, vb, *_ in G.TYINT if vb != 8])
+              for wname in ("LOADV", "LOADRAW", "STOREV0")}
     updconst = {n: getattr(G, n) for n in ("SBB", "UNS", "DBL", "FLT", "BOOL", "FPB", "FPV", "ENV", "END_", "LOC", "FPS_FN", "FPS_VAR")}
     updconst.update((n, getattr(G.E, n)) for n in ("FND", "VAR", "PTR", "BASE", "ARR"))
     updconst.update(("U" + str(z), G.UNS + z) for z in (1, 2, 4, 8))
     updconst.update(tail_entry="C%d" % G.LEVELS[0], axis_ptr=G.AX.index("ptr"), axis_struct=G.AX.index("struct"))
-    texts = {n: json.loads(v) for n, v in G.tape_rows("update-text.tsv")}
-    updseqs = {n: acts(G.O(v)) for n, v in texts.items()}
-    updseqs.update((n, acts(G.E.rej(m))) for n, m in G.tape_rows("update-reject.tsv"))
-    for n, t, i in G.tape_rows("update-template.tsv"):
-        if not t.startswith("$"):
-            updseqs[n] = acts(G.O(G.re.split(r"(\{[^}]*\})", G.TEMPL[t])[int(i)]))
-    for n, m, slots in G.tape_rows("update-stack.tsv"):
-        updseqs[n] = acts(getattr(G.P("update.facts"), m)(*slots.split(",")).acts)
-    modes = G.tape_rows("update-modes.tsv")
-    updtmpl = {"": [[], [], []]}
-    for row in modes:
-        for t in (row[2], row[4]):
-            updtmpl[t] = [acts(G.O(x)) for x in G.re.split(r"(\{[^}]*\})", G.TEMPL[t])]
-    updop = {"": []}
-    updop.update((o, acts(G.O(G.E.optext(o)))) for o in sorted(set(G.E.CASOPS) | {r[1] for r in modes}))
-    updbool = {"": updseqs["bool_step"]}
-    updbool.update((r[5], acts(G.O(texts["bool_step"] % r[5]))) for r in modes)
-    updfp = {"||": updseqs["fp_step"]}
-    updfp.update(("%s|%s|%s" % (sf, r[6], bits), acts(G.O(texts["fp_step"] % (int(bits), G.FPU[sf + r[6]]))))
-                 for r in modes for sf, bits in G.tape_rows("update-float.tsv"))
     tk = dict(G.TK, identifier=G.TK_ID)
     for w in ("type=extern", "type=_Bool"):   # the token codes gen2 build() appends before any rows install
         tk.setdefault(w, max(v for k, v in tk.items() if k != "identifier") + 1)
@@ -1051,11 +1015,6 @@ def k2gen2():
     updcompound = [dict(key=G.TK[o + "="], target="X.c" + o) for o in G.E.CASOPS]
     updid0 = sorted(set(range(257)) - {c["key"] for c in updcompound})
     retconst = dict(SBB=G.SBB, SSZ=G.SSZ, CKT=G.CKT, expr_entry="E%d" % G.LEVELS[0], tail_entry="C%d" % G.LEVELS[0])
-    retseqs = {n: acts(G.O(json.loads(v))) for n, v in G.tape_rows("return-text.tsv")}
-    retseqs.update((n, acts(G.O(G.re.split(r"(\{[^}]*\})", G.TEMPL[t])[int(i)]))) for n, t, i in G.tape_rows("return-template.tsv"))
-    retseqs.update((n, acts(G.E.rej(m))) for n, m in G.tape_rows("return-reject.tsv"))
-    for n, m, slots in G.tape_rows("return-stack.tsv"):
-        retseqs[n] = acts(getattr(G.P("return.facts"), m)(*slots.split(",")).acts)
     tk = dict(G.TK, identifier=G.TK_ID)
     for w in ("type=extern", "type=_Bool"):   # the token codes gen2 build() appends before any rows install
         tk.setdefault(w, max(v for k, v in tk.items() if k != "identifier") + 1)
@@ -1067,25 +1026,22 @@ def k2gen2():
     retexpr0 = sorted(set(range(257)) - {c["key"] for c in retcompound})
     shapeconst = {n: getattr(G, n) for n in ("POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE", "TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK")}
     shapeconst.update(ARR=G.E.ARR, UNSIGNED_CHAR=G.UNS + 1)
-    shapeseqs = {n: acts(G.E.rej(r)) for n, r in G.tape_rows("shape-reject.tsv")}
-    for n, m, slots in G.tape_rows("shape-stack.tsv"):
-        shapeseqs[n] = acts(getattr(G.P("shape.facts"), m)(*slots.split(",")).acts)
     shapeclasses = {n: [G.TK[t] for t in ts.split(",")] for n, ts in G.tape_rows("shape-tokens.tsv")}
-    return ["=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
+    return ["=VS\tint\t%d" % G.E.VS, "=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
             "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
             "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
             "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
             "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
-            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(_namespace_constants(G)), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, "HEADER_JSON": json.dumps([list(a) for a in G.E.O(G.E.HEADER)]), **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
-            "=shapeconst\tjson\t" + dump(shapeconst), "=shapeseqs\tjson\t" + dump(shapeseqs), "=shapeclasses\tjson\t" + dump(shapeclasses),
-            "=retconst\tjson\t" + dump(retconst), "=retseqs\tjson\t" + dump(retseqs), "=retclasses\tjson\t" + dump(retclasses),
+            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(_namespace_constants(G)), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
+            "=shapeconst\tjson\t" + dump(shapeconst), "=shapeclasses\tjson\t" + dump(shapeclasses),
+            "=retconst\tjson\t" + dump(retconst), "=retclasses\tjson\t" + dump(retclasses),
             "=retexpr0\tjson\t" + dump(retexpr0), "=retint\tjson\t" + dump([dict(code=c) for _, c, *_ in G.TYINT]), "=retfloat\tjson\t" + dump([dict(label=l, cv=v, base=b) for l, v, b in (("double", "d", G.DBL), ("single", "s", G.FLT))]), "=retcompound\tjson\t" + dump(retcompound),
-            "=updconst\tjson\t" + dump(updconst), "=updseqs\tjson\t" + dump(updseqs), "=updclasses\tjson\t" + dump(updclasses),
-            "=updtmpl\tjson\t" + dump(updtmpl), "=updop\tjson\t" + dump(updop), "=updbool\tjson\t" + dump(updbool), "=updfp\tjson\t" + dump(updfp),
+            "=updconst\tjson\t" + dump(updconst), "=updclasses\tjson\t" + dump(updclasses),
+           
             "=updid0\tjson\t" + dump(updid0), "=updcompound\tjson\t" + dump(updcompound), "=ordupd\tjson\t" + dump([dict(tag="inc", op="+"), dict(tag="dec", op="-")]), "=staticsenv\tjson\t" + dump({n: getattr(G, n) for n in ('BOOL', 'LOC', 'SIEND', 'SINIT', 'SKIPS', 'TIX')}), "=initenv\tjson\t" + dump(dict({n: getattr(G, n) for n in ('SBB', 'LOC', 'SSZ', 'SMN', 'SMEM', 'MOF', 'MPT', 'MBS', 'MAR', 'SFLAT', 'MFLAT', 'MEMBER_STRIDE', 'SKIPS', 'BFW', 'BFO', 'BFS', 'SHAPE', 'SHAPE_IDS', 'MSZ', 'DIM')}, UCHAR=G.E.UNS + 1, PTR=G.E.PTR, BASE=G.E.BASE, ARR=G.E.ARR, DIM1=G.DIM + 1, DIM2=G.DIM + 2)), "=k2env\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, VLDEP=G.VLDEP, END_=G.END_, VLFRAME=G.VLFRAME, VLSIZE=G.VLSIZE, UNS=G.UNS, ENV=G.ENV, SBB=G.SBB, MEMBER_STRIDE=G.MEMBER_STRIDE, MOF=G.MOF, MSZ=G.MSZ, MBS=G.MBS, MAR=G.MAR)), "=unaryenv\tjson\t" + dump((lambda mt: dict(ucx=dict(TIX=G.TIX, MAXTOK=mt), ufacts=dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, UNS1=G.UNS + 1, UNS3=G.UNS + 3, UNS4=G.UNS + 4, UNS8=G.UNS + 8, U32M=G.U32M, ENV=G.ENV, END_=G.END_, FNSTR=G.FNSTR, TIX=G.TIX, MAXTOK=mt)))(int(G.re.search(r"^#define MAXTOK ([0-9]+)\b", G.Path(G.E.ROOT, "src/front_pp.c").read_text(), G.re.M).group(1)))), "=updcas\tjson\t" + dump([dict(op=o, nptr=int(o not in {r[0] for r in G.tape_rows("update-pointer.tsv")}), owner="X" if o not in {r[0] for r in G.tape_rows("update-pointer.tsv")} else "LV") for o in G.E.CASOPS]), "=updtype\tjson\t" + dump([dict(code=c, axis=G.AX.index(n)) for c, n in ((1,"i8"),(2,"i16"),(4,"i32"),(8,"i64"),(G.UNS+1,"u8"),(G.UNS+2,"u16"),(G.UNS+4,"u32"),(G.UNS+8,"u64"),(G.BOOL,"u8"),(0,"void"),(G.DBL,"f64"),(G.FLT,"f32"),(G.FPB,"ptr"),(G.FPV,"ptr"))]), "=updmodes\tjson\t" + dump([dict(zip(("name","op","postfix","prefixname","prefixfix","integer","floating"), r)) for r in G.tape_rows("update-modes.tsv")]), "=updfloat\tjson\t" + dump([dict(suffix=s, bits=int(b)) for s, b in G.tape_rows("update-float.tsv")]),
             "=widthd\tjson\t" + dump(widthd), "=widthconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, SBB=G.SBB)),
             "=widthparts\tjson\t" + dump(widthparts),
-            "=scopeconst\tjson\t" + dump(scopeconst), "=scopeseqs\tjson\t" + dump(scopeseqs),
+            "=scopeconst\tjson\t" + dump(scopeconst),
             "=gen2parts\tjson\t" + dump(gen2parts),
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
@@ -1681,29 +1637,23 @@ def k2truth():
 
 
 def k2stack():
-    """Value-stack spill/reload sequences (was the @stack cell and stackrows option: P.vpush/P.vpop
-    called on the executor).  Each value slot is followed by its rank companion (valueranks kind=rank,
-    as build/parse2base.py); push stores at VS+vsp and increments, pop reverses the slot order."""
+    """Value-stack layout: ordered value/rank slots. Actions are declared by consumers."""
     sys.path.insert(0, str(HERE))
     from load import facts as F
     vs = {r["name"]: r["value"] for r in F("parse-constants")}["VS"]
     rank = {r["name"]: r["value"] for r in F("valueranks") if r["kind"] == "rank"}
-    def acts(method, items):
-        slots = []
-        for item in items:
-            slots.append(item)
-            if rank.get(item) and rank[item] not in items:
-                slots.append(rank[item])
-        if method == "vpush":
-            return [a for x in slots for a in (["STX", "vsp", vs, x], ["ALUI", "add", "vsp", "vsp", 1])]
-        assert method == "vpop", method
-        return [a for x in reversed(slots) for a in (["ALUI", "sub", "vsp", "vsp", 1], ["LDX", x, "vsp", vs])]
-    out = []
+    out = ["=VS\tint\t%d" % vs]
     for stem, file in STACKS:
         for ln in (ROOT / file).read_text().splitlines()[1:]:
             name, value = ln.split("\t")
             method, items = json.loads(value)
-            out.append("=stack_%s_%s\tjson\t%s" % (stem, name, json.dumps(acts(method, items))))
+            assert method in ("vpush", "vpop")
+            slots = [slot for item in items for slot in
+                     ([item, rank[item]] if rank.get(item) and rank[item] not in items else [item])]
+            if method == "vpop":
+                slots.reverse()
+            out.append("=stack_%s_%s\tjson\t%s" %
+                       (stem, name, json.dumps([dict(register=x) for x in slots])))
     return out
 
 
