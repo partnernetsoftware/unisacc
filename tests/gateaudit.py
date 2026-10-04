@@ -37,8 +37,15 @@ def profile(files, trees):
 
 def main(names):
     bad = 0
+    # 0.0.24 T6: audit the job's real command line (shard arguments, env prefix) when the plan has it;
+    # a "contains" declaration alone runs the script with no arguments, which proves nothing for shards
+    os.chdir(ROOT)
+    import gatequeue
+    try: planned = gatequeue.plan(True)
+    except Exception: planned = {}
     for name in names:
         command, files, trees = declared(name)
+        if name in planned: command = planned[name]
         mc = os.environ.get('MODEL_COM') or './unisacc.com'
         command = [mc if a == '{MODEL_COM}' else a for a in command]
         if command and '=' in command[0].split('/')[0]: command = ['env'] + command   # NAME=value prefixes (gate.sh job lines)

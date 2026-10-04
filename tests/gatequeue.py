@@ -184,7 +184,7 @@ def fingerprint(jobs):
             extra = family_tools[family]
             audited = audited and all(extra[1][t][0] != 'missing' for t in entry['tools'])
         if audited:
-            guards = entry['guards']
+            guards = entry.get('guards', {})   # no guards (fresh-order-*): not audited, global inputs
             audited = bool(guards) and all(digest(n)[-1] == sha for n,sha in guards.items())
             # Added Python modules must also lose the reviewed import closure.
             guarded = set(guards)
