@@ -414,11 +414,25 @@ def _companions(g, rules):
             front.append(rule)
         else:
             index.setdefault((pattern[0][0], pattern[0][1] if len(pattern[0]) > 1 else None), []).append(rule)
+    # The result for one edge depends only on which glob pairs the state name satisfies (its
+    # signature) and on the edge's seq, so it is memoised per (signature, seq).  Edges are still
+    # visited in the original order and each new combination still calls g.seq in that order, so
+    # sequence numbering and bytes are unchanged (0.0.24 T5: ~19 s of parse2 was this loop).
+    pairs = sorted({(tuple(r[1]), tuple(r[2])) for rs in [front] + list(index.values()) for r in rs})
+    per_sig = {}
     for name, (_, row) in list(g.st.items()):
-        ok = lambda r: not any(fnmatch(name, x) for x in r[1]) and (not r[2] or any(fnmatch(name, x) for x in r[2]))
-        head = [y for r in front if ok(r) for y in r[3]]
-        cache = {}
+        sig = tuple(not any(fnmatch(name, x) for x in b) and (not c or any(fnmatch(name, x) for x in c))
+                    for b, c in pairs)
+        okset = {pc for pc, v in zip(pairs, sig) if v}
+        if sig not in per_sig:
+            ok = lambda r: (tuple(r[1]), tuple(r[2])) in okset
+            per_sig[sig] = ([y for r in front if ok(r) for y in r[3]], {}, {}, ok)
+        head, cache, memo, ok = per_sig[sig]
         for key, (target, seq) in list(row.items()):
+            hit = memo.get(seq)
+            if hit is not None:
+                row[key] = (target, hit)
+                continue
             source = list(g.seqs[seq])
             out = list(head)
             for i, x in enumerate(source):
@@ -437,7 +451,8 @@ def _companions(g, rules):
                         if extra and source[i + 1:i + 1 + len(extra)] != extra:
                             out.extend(extra)
                         break
-            row[key] = (target, g.seq(out))
+            memo[seq] = new = g.seq(out)
+            row[key] = (target, new)
 
 
 def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None, classes=None,
