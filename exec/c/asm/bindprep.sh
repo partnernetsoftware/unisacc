@@ -22,6 +22,10 @@ case $ARCH in arm64|x86_64) ;; *) exit 2;; esac
 . ./exec/stamp.sh
 D="$X/bind-$ARCH"
 mkdir -p "$D"
+# prep.done marks a run that reached the end; a prep killed by its watchdog
+# leaves fresh route.tsv beside an old compiler.pkg, and verify must not take
+# that mix for a prepared directory (0.0.24, cdx diagnosis).
+rm -f "$D/prep.done"
 b() { "$_BOUND" 60 "$@"; }
 
 # The seed blob and the carried kernels are indexed by ISA, so each arch gets
@@ -52,4 +56,5 @@ b python3 exec/c/tbl.py "$D/o1.json" "$D/o1.tbl"
 b python3 exec/c/net.py "$D/o1.tbl" "$D/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$D/o1.net" --include include --kernels "$D/kernels" -o "$D/compiler.pkg" "$E/route.tsv"
 b "$EXEC_CC" -O2 exec/c/compiler.c -o "$D/compiler"
+: > "$D/prep.done"
 echo "bind prep $ARCH: blob, kernels, netcheck, o1 package, driver compiled in $D"

@@ -28,8 +28,8 @@ T="$D/elf-$ARCH"
 # queue happens to schedule verify first, prepare on demand: the second run
 # hits the content-addressed model cache and costs about 7 s.  A silent skip
 # would be worse -- an assert that never ran is not a pass.
-if [ ! -f "$D/compiler.pkg" ] || [ ! -f "$D/kernel.blob" ] || [ ! -f "$T/hello.macho" ]; then
-    echo "bind verify $ARCH: preparing first (artefacts absent, this job ran before bindprep)" >&2
+if [ ! -f "$D/prep.done" ]; then
+    echo "bind verify $ARCH: preparing first (no complete bindprep run in $D)" >&2
     "$R/exec/c/asm/bindprep.sh"
 fi
 [ -f "$D/compiler.pkg" ] || { echo "no prepared package at $D" >&2; exit 1; }
