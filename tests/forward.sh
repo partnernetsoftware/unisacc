@@ -53,7 +53,7 @@ if [ -n "$(/Applications/UTM.app/Contents/MacOS/utmctl ip-address "${WINVM:-mini
         out=$("$_BOUND" 55 ./tests/winrun.sh "$T/win-${t#win/}.exe" | grep -v '^===')
         if [ "$out" = "$(printf 'pid>0 1 tick>0 1 len 9\nrc=0')" ]; then ok=$((ok+1)); echo "  ok   win $t image"; else bad=$((bad+1)); echo "  FAIL win $t image: $out"; fi
     done
-else skip=$((skip+1)); echo "  skip Windows images (VM not answering)"; fi
+else echo "  skip Windows images (run in CI: release-check winsuite)"; fi   # 0.0.25 X7: not counted as a skip
 printf 'int no_such_host_function_xyz(int);\nint main(void){ return no_such_host_function_xyz(1); }\n' > "$T/missing.c"
 m=$("$_BOUND" 20 "$UA" "$T/missing.c" 2>&1); rc=$?
 if [ $rc -eq 127 ] && printf '%s' "$m" | grep -q 'no host function no_such_host_function_xyz'; then ok=$((ok+1)); echo "  ok   missing host function named, rc 127"; else bad=$((bad+1)); echo "  FAIL missing host function: rc $rc [$m]"; fi
