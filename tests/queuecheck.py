@@ -282,7 +282,7 @@ def compilercheck_closure_controls(queue, source_root, declaration_path=None):
     source_root=pathlib.Path(source_root)
     declaration=json.loads(pathlib.Path(declaration_path or source_root/'tests/gatedeps.json').read_text())
     family={n:dict(declaration['families'][e['family']],command=e['command'],family=e['family']) for n,e in declaration['suites'].items() if n.startswith('exec-driver-') and e['command'][0]=='./exec/c/compilercheck.sh'}
-    assert len(family)==6, 'compilercheck audited declarations missing'
+    assert len(family)==7, 'compilercheck audited declarations missing'   # core-build added by 0.0.23 E
     records=[]
     with tempfile.TemporaryDirectory(prefix='compilercheck-closure-controls-') as td:
         temp=pathlib.Path(td); fixture=temp/'source';fixture.mkdir()
