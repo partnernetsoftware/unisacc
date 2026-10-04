@@ -1,10 +1,11 @@
 # C99 seed constructor experiments
 
 `net.c` is a standalone C99 implementation of the current flat-table to
-threshold-network step. Build it with any C99 compiler:
+threshold-network step. Since 0.0.25 (self-hosting road B1) the gates build it with the previous release,
+`unisacc.com`, not the system cc; any C99 compiler still works:
 
 ```sh
-cc -std=c99 -O2 -I. -o seed-net seed/net.c
+sh ./unisacc.com seed/net.c -o seed-net
 ./seed-net stage.tbl stage.net
 ```
 

@@ -14,8 +14,7 @@ def run(*args, timeout=20):
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
     cnet = work / "seed-net"
-    run("cc", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror", "-o", str(cnet),
-        "seed/net.c")
+    run("sh", str(ROOT / "unisacc.com"), "seed/net.c", "-o", str(cnet))   # 0.0.25 B1: our compiler, not cc
     graph = work / "prune.json"
     table = work / "prune.tbl"
     run("python3", "exec/build/gen.py", "prune", str(graph))

@@ -78,8 +78,9 @@ def main(group):
     with tempfile.TemporaryDirectory(prefix="seed-matrix-") as tmp:
         d = Path(tmp)
         cnet = d / "seed-net"
-        run(deadline, "cc", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
-            "-o", str(cnet), "seed/net.c")
+        # 0.0.25 B1: the seed constructor is built by unisacc.com (the installed previous release),
+        # not by the system cc -- the self-hosting road uses our own compiler wherever it can
+        run(deadline, "sh", str(ROOT / "unisacc.com"), "seed/net.c", "-o", str(cnet))
         done = []
         for name, generator, flags in specs(group):
             graph, table = d / (name + ".json"), d / (name + ".tbl")
