@@ -493,7 +493,7 @@ int main(int argc, char **argv) {
     ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     static const unsigned char fwd_one=1;
-    int fwdwant = (runit || mode==0) && !fwd_second && nsources==1 && !tape_input && !linking
+    int fwdwant = (runit || mode==0) && !fwd_second && !tape_input && !linking
         && (!strncmp(target,"osx/",4) || !strncmp(target,"lnx/",4));
     if (fwdwant) { cli[NRI].name=(const unsigned char *)"\0cli/run-forward"; cli[NRI].n=16; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
     int fwd_restart = 0;
