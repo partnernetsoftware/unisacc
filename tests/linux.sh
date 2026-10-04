@@ -71,14 +71,38 @@ LOGF=$(mktemp)
 tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     set -u
     command -v cc >/dev/null || { echo 'linux: no cc in the VM'; exit 1; }
+    LOCK=\$HOME/.unisa-linux-lock
+    mkdir \"\$LOCK\" 2>/dev/null || { echo 'linux: another guest run owns the temporary tree'; exit 2; }
     W=\$HOME/unisa-linux
-    rm -rf \$W && mkdir -p \$W
+    export TMPDIR=\$HOME/unisa-tmp
+    LOG=\$HOME/unisa-linux-current.log
+    cleanup_guest() {
+        rc=\$?
+        trap - EXIT HUP INT TERM
+        if [ \"\$rc\" -ne 0 ]; then
+            if [ -f \"\$LOG\" ]; then
+                tail -c 1048576 \"\$LOG\" > \"\$HOME/unisa-linux-last-failure.log\"
+            else
+                echo \"linux: setup interrupted or failed, rc=\$rc\" > \"\$HOME/unisa-linux-last-failure.log\"
+            fi
+        fi
+        rm -rf \"\$W\" \"\$TMPDIR\"
+        rm -f \"\$LOG\"
+        rmdir \"\$LOCK\"
+        exit \"\$rc\"
+    }
+    trap cleanup_guest EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    rm -rf \"\$W\" \"\$TMPDIR\"
+    mkdir -p \"\$W\" \"\$TMPDIR\"
     tar -C \$W -xf -
     cd \$W
     export FETCH=0
     # Guest /tmp is a RAM tmpfs (~4 GB); all.sh's preserved logs and the bigclosure/ape images
     # filled it mid-run in 0.0.23 (27 false reds).  Work on the guest disk instead.
-    export TMPDIR=\$HOME/unisa-tmp; rm -rf \$TMPDIR; mkdir -p \$TMPDIR
+    # Dedicated guest scratch was cleaned before unpacking.
     export SUITE_LIMIT='$LIMIT' TRY_ALARM='$TRY' JOBS='${JOBS:-4}'
     # Some suites take the probe list; run without it they test NOTHING --
     # closure printed 'identical 0 differ 0' and ccrun reported 90 lost
@@ -90,9 +114,10 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
         native|crossnative|fat|ccrun|selfhost|closure|stages)
             P='examples/*.c tests/c/*.c';;
     esac
-    if [ '$what' = all ]; then ./tests/all.sh
+    { if [ '$what' = all ]; then ./tests/all.sh
     elif [ -n \"\$P\" ]; then sh -c \"./tests/$what.sh \$P\"
-    else ./tests/$what.sh; fi
+    else ./tests/$what.sh; fi; } 2>&1 | tee \"\$LOG\"
+    exit \${PIPESTATUS[0]}
 " 2>&1 | tee "$LOGF"
 rc=${PIPESTATUS[1]}
 if [ "$rc" -ne 0 ] && [ "${STRICT:-0}" != 1 ]; then

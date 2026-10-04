@@ -26,6 +26,10 @@ static int freeze_tree(pid_t root) {
     int failed = 0;
     if (!owned) { kill(-root, SIGKILL); kill(root, SIGKILL); return -1; }
     owned[0] = root;
+    sigset_t blocked, previous;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGTERM); sigaddset(&blocked, SIGINT); sigaddset(&blocked, SIGHUP);
+    sigprocmask(SIG_BLOCK, &blocked, &previous);
     kill(root, SIGSTOP);
     for (;;) {
         int added = 0;
@@ -51,6 +55,7 @@ static int freeze_tree(pid_t root) {
     kill(-root, SIGKILL);
     for (size_t i = 0; i < n; i++) kill(owned[i], SIGKILL);
     free(owned);
+    sigprocmask(SIG_SETMASK, &previous, NULL);
     if (failed) fprintf(stderr, "bound: could not fully enumerate descendants\n");
     return failed ? -1 : 0;
 }
@@ -78,7 +83,7 @@ int main(int argc, char **argv) {
     struct sigaction action;
     memset(&action, 0, sizeof action); action.sa_handler = interrupt;
     sigemptyset(&action.sa_mask);
-    sigaction(SIGALRM, &action, NULL); sigaction(SIGTERM, &action, NULL); sigaction(SIGINT, &action, NULL);
+    sigaction(SIGALRM, &action, NULL); sigaction(SIGTERM, &action, NULL); sigaction(SIGINT, &action, NULL); sigaction(SIGHUP, &action, NULL);
 #ifdef __linux__
     /* Adopt detached grandchildren when their command parent exits. */
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)) { perror("bound: subreaper"); return 2; }
@@ -86,7 +91,7 @@ int main(int argc, char **argv) {
     pid_t child = fork();
     if (child < 0) { perror("bound: fork"); return 2; }
     if (!child) {
-        signal(SIGALRM, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL);
+        signal(SIGALRM, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGHUP, SIG_DFL);
         if (setsid() < 0) { perror("bound: setsid"); _exit(127); }
         execvp(argv[first + 1], argv + first + 1);
         perror("bound: exec"); _exit(127);

@@ -24,6 +24,30 @@ if [ "$(uname -s)" != Darwin ] || [ "${TERM_SH:-1}" = 0 ] || [ -n "${TERM_SH_INS
 fi
 BOUND=$(cd "$(dirname "$0")" && pwd)/bound.py
 d=$(mktemp -d); q=""
+watcher=""
+cleanup() {
+    if [ -f "$d/cancel" ] && [ -s "$d/pid" ]; then
+        pid=$(cat "$d/pid")
+        case $pid in ''|*[!0-9]*) ;; *) kill -TERM "$pid" 2>/dev/null || :;; esac
+    fi
+    # Only the window ID returned by our own handoff is eligible for closing.
+    if [ -s "$d/window" ]; then
+        wid=$(cat "$d/window")
+        case $wid in ''|*[!0-9]*) ;; *)
+            python3 "$BOUND" 5 osascript -e "tell application \"Terminal\" to close (first window whose id is $wid) saving no" >/dev/null 2>&1 || :;;
+        esac
+    fi
+}
+interrupted() {
+    : > "$d/cancel"
+    trap '' HUP INT TERM
+    [ -z "$watcher" ] || { kill -TERM "$watcher" 2>/dev/null || :; wait "$watcher" 2>/dev/null || :; }
+    cleanup
+    exit "$1"
+}
+trap 'interrupted 129' HUP
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
 started=$(date +%s)
 deadline=$((started + TERM_SH_ALARM))
 for a in "$@"; do q="$q '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"; done
@@ -31,9 +55,10 @@ cat > "$d/run.sh" <<EOS
 #!/bin/sh
 cd '$(pwd)'
 TERM_SH_INSIDE=1; export TERM_SH_INSIDE
-if [ \$(date +%s) -ge $deadline ]; then echo 142 > '$d/rc'; exit 142; fi
+if [ -f '$d/cancel' ] || [ \$(date +%s) -ge $deadline ]; then echo 142 > '$d/rc'; exit 142; fi
 python3 '$BOUND' $TERM_SH_ALARM $q > '$d/out' 2>&1 &
 echo \$! > '$d/pid'
+if [ -f '$d/cancel' ]; then kill -TERM \$! 2>/dev/null || :; fi
 wait \$!
 echo \$? > '$d/rc.tmp' && mv '$d/rc.tmp' '$d/rc'
 EOS
@@ -55,7 +80,12 @@ done
 sed -i '' "2i\\
 . '$d/env'
 " "$d/run.sh"
-python3 "$BOUND" 5 osascript -e "tell application \"Terminal\" to do script \"'$d/run.sh'; exit\"" >/dev/null 2>&1 || {
+python3 "$BOUND" 5 osascript -e 'tell application "Terminal"' \
+    -e 'set ownedTab to do script ""' \
+    -e 'set ownedWindow to id of first window whose selected tab is ownedTab' \
+    -e "do script \"'$d/run.sh'; exit\" in ownedTab" \
+    -e 'return ownedWindow' -e 'end tell' > "$d/window" 2>/dev/null || {
+    cleanup
     rm -rf "$d"
     # A silent fallback changes the execution environment under a queue and
     # invalidated every stored gate result three times (2026-09-29). With
@@ -66,7 +96,7 @@ python3 "$BOUND" 5 osascript -e "tell application \"Terminal\" to do script \"'$
     # -- a ~750-deep chain on 2026-10-04 when Terminal refused handoffs.
     TERM_SH_INSIDE=1 exec python3 "$BOUND" "$TERM_SH_ALARM" "$@"; }
 # One polling process streams output; no per-poll date/wc/tail subprocesses.
-python3 - "$d" "$deadline" <<'PYWATCH'
+python3 - "$d" "$deadline" <<'PYWATCH' &
 import os, pathlib, signal, sys, time
 root = pathlib.Path(sys.argv[1]); deadline = float(sys.argv[2]); position = 0
 
@@ -88,12 +118,23 @@ def stop(rc):
         os.kill(int((root/'pid').read_text()), signal.SIGTERM)
     except (FileNotFoundError, ProcessLookupError):
         pass
+    # Give the watchdog time to kill and reap its group before closing its UI.
+    until = time.monotonic() + 3
+    try:
+        pid = int((root/'pid').read_text())
+        while time.monotonic() < until:
+            try: os.kill(pid, 0)
+            except ProcessLookupError: break
+            time.sleep(.02)
+    except FileNotFoundError:
+        pass
     drain()
     print(f'term.sh: stopped (rc {rc}; log: {root}/out)', file=sys.stderr)
     raise SystemExit(rc)
 
 signal.signal(signal.SIGINT, lambda *_: stop(130))
 signal.signal(signal.SIGTERM, lambda *_: stop(143))
+signal.signal(signal.SIGHUP, lambda *_: stop(129))
 while True:
     drain()
     try:
@@ -103,7 +144,11 @@ while True:
     if time.time() >= deadline: stop(142)
     time.sleep(.1)
 PYWATCH
+watcher=$!
+wait "$watcher"
 rc=$?
+watcher=""
+cleanup
 # Preserve failed logs for diagnosis; successful handoffs need no temporary tree.
 [ "$rc" != 0 ] || rm -rf "$d"
 exit "$rc"

@@ -7,6 +7,9 @@ import sys
 
 
 def stop(process, code):
+    # Cleanup must not be interrupted after descendants have been stopped.
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
     owned = {process.pid}
     def send(pid, sig):
         try:
@@ -52,10 +55,16 @@ def main():
         raise SystemExit(stop(process, 128 + sig))
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     try:
         rc = process.wait(timeout=int(sys.argv[1]))
     except subprocess.TimeoutExpired:
         return stop(process, 142)
+    # The direct child may exit while background children remain in its session.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     return rc if rc >= 0 else 128 - rc
 
 
