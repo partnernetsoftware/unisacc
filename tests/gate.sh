@@ -101,6 +101,7 @@ job manifest-entries-parse2 python3 ./tests/manifestentries.py --stage parse2
 job manifest-entries-enc python3 ./tests/manifestentries.py --stage enc
 job manifest-entries-enc-arm python3 ./tests/manifestentries.py --stage enc/arm
 job manifest-entries-lower python3 ./tests/manifestentries.py --stage lower
+job dsl-ops python3 ./tests/dslops.py   # T2: one independent contract and mutation for each manifest op
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
 for k in $(seq 1 40); do job csmithdiff-$k SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
