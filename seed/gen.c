@@ -1560,6 +1560,46 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_emit(const char *outpath, size_t index) {
+    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *emits = value_get(facts, "emits");
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest || !emits || emits->kind != JARR || index >= emits->n) die("invalid pp emit index");
+    value_put(facts, "it", emits->items[index].value);
+    {
+        Value *it = value_get(facts, "it"), *special = value_get(it, "special"), *terminal = value_get(it, "terminal");
+        char entry[64], test[64], need[64], next[64];
+        if (!special || !terminal || special->kind != JBOOL || terminal->kind != JBOOL) die("invalid pp emit facts");
+        if (special->number) { strcpy(entry, "AEM"); strcpy(test, "AEMR"); strcpy(need, "RTP"); }
+        else {
+            if (snprintf(entry, sizeof(entry), "AEM%lld", value_get(it, "id")->number) >= (int)sizeof(entry) ||
+                snprintf(test, sizeof(test), "AEM%lldr", value_get(it, "id")->number) >= (int)sizeof(test) ||
+                snprintf(need, sizeof(need), "NEED%lld", value_get(it, "id")->number) >= (int)sizeof(need)) die("pp emit name too long");
+        }
+        if (terminal->number) strcpy(next, "ACP0");
+        else if (snprintf(next, sizeof(next), "AEM%lld", value_get(it, "end")->number) >= (int)sizeof(next))
+            die("pp emit successor too long");
+        value_put(facts, "emit_entry", value_string(entry)); value_put(facts, "emit_test", value_string(test));
+        value_put(facts, "emit_need", value_string(need)); value_put(facts, "emit_next", value_string(next));
+    }
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        if (!strcmp(field[0], ".rows") && !strcmp(field[1], "autoinc-emit")) {
+            Value *bindings = value_new(JOBJ), *opts = value_json(field[8], "pp emit options");
+            Value *sequences = mapseq_construct(opts, facts);
+            direct_bindings(bindings, field[7], facts);
+            install_plain(&g, "exec/pp/autoinc-emit-byte.tsv", 'b', bindings, sequences);
+            install_plain(&g, "exec/pp/autoinc-emit-result.tsv", 'r', bindings, sequences);
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp emit row missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_header(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *headers = value_get(facts, "headers");
@@ -2026,6 +2066,11 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-emit")) {
+        char *end; unsigned long index = strtoul(argv[2], &end, 10);
+        if (end == argv[2] || *end) die("invalid pp emit index");
+        inspect_pp_emit(argv[3], index); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-header")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
         if (end == argv[2] || *end) die("invalid pp header index");
