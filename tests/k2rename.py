@@ -44,7 +44,9 @@ def name_of(key, cell=None):
 
 def plan(stem):
     facts = ROOT / 'exec/facts' / (stem + '.tsv')
-    mans = sorted(Path(p) for p in glob.glob(str(ROOT / 'exec/*' / (stem + '*-manifest.tsv'))))
+    mstem = stem[3:] if stem.startswith('k2-') else stem  # k2-X facts serve exec/*/X-manifest.tsv
+    mans = sorted(Path(p) for p in glob.glob(str(ROOT / 'exec/*' / (mstem + '*-manifest.tsv'))))
+    assert mans, 'no manifest for ' + stem
     lines = facts.read_text().split('\n')
     defs = [ln.split('\t', 1)[0][1:] for ln in lines if re.match(r'=v\d+\t', ln)]
     cells = {ln.split('\t')[0][1:]: ln.split('\t', 2)[2] for ln in lines if re.match(r'=v\d+\tjson\t', ln)}
