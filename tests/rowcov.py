@@ -40,6 +40,26 @@ def main():
         total = edges(json.loads(dj.read_text()))
         hit = seen & total
         print('rowcov pp  edges %d   taken %d   (%.1f%%)   probes: examples/*.c tests/c/*.c' % (len(total), len(hit), 100.0 * len(hit) / len(total)))
+        # Row level, once the side table exists (cdx, UNISACC_ROW_LOG: state, key, manifest_path, line;
+        # a synthesised edge names its main declaring row).  A row is covered when any edge it wrote
+        # was taken; its witness is the first probe that took one.
+        side = out / 'pp.rows.tsv'
+        try:
+            lines = side.read_text().splitlines()
+        except FileNotFoundError:
+            print('rowcov pp  row level: no side table yet (%s)' % side); return 0
+        wit = {}
+        for k in range(1, n + 1):
+            for e, f in json.loads((out / ('pp-%d.json' % k)).read_text()).get('witness', {}).items(): wit.setdefault(e, f)
+        rows = {}
+        for l in lines:
+            st, key, path, line = l.split('\t')
+            r = rows.setdefault((path, int(line)), [0, None])
+            if (st, key) in total and r[1] is None and (st, key) in hit: r[1] = wit.get('%s\t%s' % (st, key))
+            r[0] += 1
+        covered = sum(1 for r in rows.values() if r[1])
+        (out / 'pp.cov.tsv').write_text(''.join('%s\t%d\t%d\t%s\n' % (p, ln, r[0], r[1] or '-') for (p, ln), r in sorted(rows.items())))
+        print('rowcov pp  rows %d   covered %d   (%.1f%%)   report %s' % (len(rows), covered, 100.0 * covered / max(1, len(rows)), out / 'pp.cov.tsv'))
         return 0
     k, n = map(int, what.split('/'))
     if subprocess.run(['sh', 'exec/pp/run.sh', 'gen'], cwd=ROOT, capture_output=True).returncode:
@@ -47,7 +67,7 @@ def main():
     import sim
     delta = json.loads(dj.read_text()); loaded = sim.load(delta); names = loaded[0]
     files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
-    mine = files[k - 1::n]; cov = set(); ran = 0
+    mine = files[k - 1::n]; cov = set(); ran = 0; first = {}
     os.chdir(ROOT)
     for f in mine:
         c = set()
@@ -55,9 +75,12 @@ def main():
             sim.run(delta, open(f, 'rb').read(), f, sim.Files(), cov=c, maxsteps=20_000_000, loaded=loaded)
         except Exception:
             pass                                   # a rejected or failing input still took the edges it took
+        for e in c - cov: first[e] = f        # the first probe that took an edge is its witness
         cov |= c; ran += 1
-    seen = sorted({(names[q] if isinstance(q, int) else q, str(key)) for q, key in cov})
-    (out / ('pp-%d.json' % k)).write_text(json.dumps({'shard': what, 'files': ran, 'seen': seen}))
+    name = lambda q: names[q] if isinstance(q, int) else q
+    seen = sorted({(name(q), str(key)) for q, key in cov})
+    wit = {'%s\t%s' % (name(q), key): f for (q, key), f in first.items()}
+    (out / ('pp-%d.json' % k)).write_text(json.dumps({'shard': what, 'files': ran, 'seen': seen, 'witness': wit}))
     print('rowcov pp %s  files %d   edges taken %d' % (what, ran, len(seen)))
     return 0
 
