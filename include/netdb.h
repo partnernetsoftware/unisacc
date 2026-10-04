@@ -24,6 +24,15 @@ struct addrinfo { int ai_flags; int ai_family; int ai_socktype; int ai_protocol;
 #define AI_PASSIVE 1
 #define AI_NUMERICHOST 4
 #endif
+#ifndef _WIN32
+/* 0.0.25 N1: on Linux and macOS these are prototypes with no body, so both routes forward them to
+ * the system C library (src/fwdstub.c): real DNS -- A/AAAA, search domains, mDNS -- with the
+ * system's struct addrinfo, which the per-OS layout above matches.  Windows keeps the bundled
+ * numeric/localhost//etc/hosts resolver below (the product refuses forwarding there, prd 3.12). */
+int getaddrinfo(const char *__u_node, const char *__u_service, const struct addrinfo *__u_hints, struct addrinfo **__u_res);
+void freeaddrinfo(struct addrinfo *__u_ai);
+const char *gai_strerror(int __u_e);
+#else
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_hosts
 static int _unisa_hosts(const char *__u_name, struct in_addr *__u_out) {
     static char __u_buf[65536]; long __u_fd; long __u_n; long __u_i; long __u_ls; char __u_ip[64]; int __u_k;
@@ -74,5 +83,6 @@ static void freeaddrinfo(struct addrinfo *__u_ai) { free(__u_ai); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_gai_strerror
 static const char *gai_strerror(int __u_e) { return __u_e == EAI_NONAME ? "Name not resolved (no DNS resolver is bundled)" : "getaddrinfo failed"; }
+#endif
 #endif
 #endif
