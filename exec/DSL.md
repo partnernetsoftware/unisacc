@@ -51,7 +51,7 @@
 | `@bytes:T` / `@bytes:=PATH` | SBOUT 字节 | A:170-173 | 40 |
 | `@str:T` | 字符串，`{name}` 取 facts，反斜杠转义 | A:174-175, A:47-54 | 2276 |
 | `@out:T` / `@out:=PATH` | OUT 字节；`{name}`、`\xHH`、转义 | A:176-177, A:110-117 | 220 |
-| `@fmt:F` | `str.format(**facts)` | A:178-179, A:478-479 | 231 |
+| `@fmt:F` | 最小插值 _fmt：`{NAME}` 或 `{NAME[KEY]...}`（全数字 KEY 取下标，否则取 dict 键），`{{`/`}}` 为字面括号；无转换、无格式说明符（T1b，不再用 str.format） | A:178-179, A:473-492 | 231 |
 | `@ref:F` | 格式化后取 fact 路径 | A:180-181 | 49 |
 | `@seqmap:LIST:TMPL` | 对 LIST 每元素实例化动作模板 | A:182-183, A:584-596 | 5 |
 | `@acts:PATH` | JSON 列表转元组 | A:184-186 | 107（含 T1a 的 18 个 stack_*，facts k2-stack） |
@@ -93,8 +93,7 @@
 
 | 项 | 代码 | 清单 | facts |
 |---|---|---|---|
-| `@fmt:` 依赖 str.format | A:178, A:478 | 231 / 21 | 0 |
-| 其它 `.format` 路径（`$$` 键、`fresh:` scope、foreach over/where/join、freshrows、mapseq、fresh 表 owner） | A:193, A:203, A:486-500, A:536-560, A:400-412, A:655-665, A:381 | 随宿主键计 | — |
+| 其它 `.format` 路径（经 _fmt 的 `$$` 键、`fresh:` scope、foreach over/allowed/where、freshrows 已随 T1b 改用最小插值；仍直接调 str.format 的：foreach join default、mapseq、fresh 表 owner） | A:193, A:203, A:486-500, A:536-560, A:400-412, A:655-665, A:381 | 随宿主键计 | — |
 | `=vN` 绑定（翻译器生成的匿名标量 fact，以裸路径 `k=vN` 引用） | A:68-69, A:205 | 3796 / 19（libraryvariadic 1694、bitfields 350、functiontypes 276、librarydata 180、enumtypes 116 …） | 627 / 17（printfcontrol 282、libraryvariadic 121、k2-librarydata 61、bitfields 40、functiontypes 36 …） |
 | 隐式顺序：`fresh:` 单元按行序/单元序分配 | A:201-204, A:207-214 | 2439 / 59 | 0 |
 | 隐式顺序：`freshrows` 按行序分配 | A:524-561 | 209 / 41 | 0 |

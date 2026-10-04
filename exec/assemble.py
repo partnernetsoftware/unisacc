@@ -470,8 +470,25 @@ def _header_facts(stem, path):
     return d
 
 
+# @fmt interpolation (no str.format): {NAME} or {NAME[KEY]...}; an all-digit KEY indexes a list,
+# any other KEY is a dict key; {{ and }} are literal braces.  No conversions, no format specs.
+_FMT = re.compile(r"\{\{|\}\}|\{([A-Za-z_]\w*)((?:\[[^\[\]{}]+\])*)\}|[{}]")
+
+
+def _fmt_field(m, facts):
+    t = m.group(0)
+    if t in ("{{", "}}"):
+        return t[0]
+    if m.group(1) is None:
+        raise ValueError("@fmt: stray brace")
+    v = facts[m.group(1)]
+    for k in re.findall(r"\[([^\]]+)\]", m.group(2)):
+        v = v[int(k)] if k.isdigit() else v[k]
+    return str(v)
+
+
 def _fmt(f, facts):
-    return f.format(**{k: v for k, v in facts.items() if isinstance(k, str) and k.isidentifier()})
+    return _FMT.sub(lambda m: _fmt_field(m, facts), f)
 
 
 def _foreach(self, o, body, depth, extra, facts):
