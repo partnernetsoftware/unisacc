@@ -13,7 +13,7 @@ tests/k2rename-STEM.tsv (`vN<TAB>name`); otherwise the whole stem is refused.
 After --apply a graphhash mismatch restores both files and exits 1.
 Test infrastructure only.
 """
-import collections, glob, re, subprocess, sys
+import collections, glob, json, re, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,7 +33,11 @@ def refs(text):
     return out
 
 
-def name_of(key):
+def name_of(key, cell=None):
+    m = re.fullmatch(r'spell\.[^.]+\.(\d+)', key)
+    if m and cell:  # spell family: name by the decoded spelling of byte N
+        t = ''.join(chr(b) for _, b in json.loads(cell))
+        return 'spell_' + (t if t.isalnum() else 'x%02x' % int(m.group(1)))
     n = re.sub(r'[.@:]', '_', key)
     return n[4:] if n.startswith('out_') else n
 
@@ -43,6 +47,7 @@ def plan(stem):
     mans = sorted(Path(p) for p in glob.glob(str(ROOT / 'exec/*' / (stem + '*-manifest.tsv'))))
     lines = facts.read_text().split('\n')
     defs = [ln.split('\t', 1)[0][1:] for ln in lines if re.match(r'=v\d+\t', ln)]
+    cells = {ln.split('\t')[0][1:]: ln.split('\t', 2)[2] for ln in lines if re.match(r'=v\d+\tjson\t', ln)}
     taken = {ln.split('\t', 1)[0][1:] for ln in lines if ln[:1] in '=@' and not re.match(r'=v\d+\t', ln)}
     keys, count = collections.defaultdict(set), collections.Counter()
     for m in mans:
@@ -57,7 +62,7 @@ def plan(stem):
     stray = set(keys) - set(defs)
     if stray:
         raise SystemExit('refuse: references without definition: %s' % sorted(stray))
-    cand = {v: (name_of(next(iter(keys[v]))) if len(keys[v]) == 1 else None) for v in defs}
+    cand = {v: (name_of(next(iter(keys[v])), cells.get(v)) if len(keys[v]) == 1 else None) for v in defs}
     byname = collections.Counter(n for n in cand.values() if n)
     new, bad = {}, []
     for v in defs:
@@ -90,11 +95,11 @@ def rewrite(facts, mans, new, count):
     return texts
 
 
-def graphhash():
-    n = int(subprocess.check_output([sys.executable, 'tests/graphhash.py', '--only', 'exec/parse2', '--list'], cwd=ROOT, text=True).count('\n'))
+def graphhash(stage):
+    n = int(subprocess.check_output([sys.executable, 'tests/graphhash.py', '--only', stage, '--list'], cwd=ROOT, text=True).count('\n'))
     for k in range(1, n + 1):
         cmd = [sys.executable, 'tests/bound.py', '58', sys.executable, 'tests/graphhash.py',
-               '--only', 'exec/parse2', '--shard', '%d/%d' % (k, n)]
+               '--only', stage, '--shard', '%d/%d' % (k, n)]
         for attempt in (1, 2):  # FAIL:142 is a timeout, not a hash verdict: rerun that entry once
             p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
             sys.stdout.write(p.stdout + p.stderr); sys.stdout.flush()
@@ -119,7 +124,8 @@ def main(argv):
         return 0
     for p, (_, t2) in texts.items():
         p.write_text(t2)
-    if not graphhash():
+    stages = sorted({str(m.parent.relative_to(ROOT)) for m in mans})
+    if not all(graphhash(st) for st in stages):
         for p, (t, _) in texts.items():
             p.write_text(t)
         print('graphhash mismatch: %s restored' % stem)
