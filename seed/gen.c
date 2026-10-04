@@ -10,8 +10,8 @@
 #include "json.h"
 
 typedef struct { char *key, *target; int seq; } Edge;
-typedef struct { char *name; char mode; Edge *edge; size_t n, cap; } State;
-typedef struct { State *state; size_t n, cap; char **seq; size_t ns, cs; char **labels; size_t nl, cl; } Graph;
+typedef struct { char *name; char mode; Edge *edge; size_t n, cap; int *key_index; } State;
+typedef struct { State *state; size_t n, cap; size_t *state_index, index_cap; char **seq; size_t ns, cs, *seq_index, seq_index_cap; char **labels; size_t nl, cl; } Graph;
 typedef struct { int key; char *target, *actions; } Rule;
 typedef struct { char *name; Rule *rule; size_t n, cap; char *def_target, *def_actions; } RuleState;
 typedef struct { RuleState *state; size_t n, cap; } RuleSet;
@@ -63,6 +63,8 @@ static void buf_value(Buffer *b, const Value *v) {
     switch (v->kind) {
     case JSTR: buf_quote(b, v->s); break;
     case JINT: snprintf(n, sizeof(n), "%lld", v->number); buf_add(b, n, strlen(n)); break;
+    case JBOOL: buf_add(b, v->number ? "true" : "false", v->number ? 4 : 5); break;
+    case JNULL: buf_add(b, "null", 4); break;
     case JOBJ: case JARR:
         buf_char(b, v->kind == JOBJ ? '{' : '[');
         for (i = 0; i < v->n; i++) {
@@ -182,6 +184,16 @@ static char *expand_actions(const char *raw, Value *bindings, Value *sequences, 
     }
     buf_char(&b, ']'); return b.s;
 }
+static char *value_json_text(const Value *v);
+static int actions_depend_on_key(const char *raw, Value *sequences) {
+    if (strstr(raw, "observation")) return 1;
+    if (strstr(raw, "\"@\"") && sequences && sequences->n) {
+        char *text = value_json_text(sequences);
+        int found = strstr(text, "observation") != NULL;
+        free(text); return found;
+    }
+    return 0;
+}
 static char *line(FILE *f) {
     size_t n = 0, cap = 256; char *s = grow(NULL, cap, 1); int c;
     while ((c = fgetc(f)) != EOF && c != '\n') {
@@ -265,9 +277,14 @@ static Value *header_cell(const char *text) {
     return value_string(text);
 }
 static Value *load_fact(const char *stem) {
+    static struct { char *stem; Value *value; } *cache;
+    static size_t cache_n, cache_cap;
     char path[1024]; FILE *f; char *s; Value *root = value_new(JOBJ);
     char *header[128] = {0}, *types[128] = {0}; int nh = 0, typed = -1;
     Value *table = NULL; char *table_name = NULL;
+    size_t ci;
+    for (ci = 0; ci < cache_n; ci++)
+        if (!strcmp(cache[ci].stem, stem)) return cache[ci].value;
     if (snprintf(path, sizeof(path), "exec/facts/%s.tsv", stem) >= (int)sizeof(path)) die("fact path too long");
     f = fopen(path, "rb"); if (!f) die("cannot open fact table");
     while ((s = line(f))) {
@@ -320,6 +337,12 @@ static Value *load_fact(const char *stem) {
         }
         { char key[1024]; if (snprintf(key, sizeof(key), "%s!", stem) >= (int)sizeof(key)) die("fact key too long"); value_put(root, key, map); }
     }
+    if (cache_n == cache_cap) {
+        cache_cap = cache_cap ? cache_cap * 2 : 16;
+        cache = grow(cache, cache_cap, sizeof(*cache));
+    }
+    cache[cache_n].stem = copy(stem);
+    cache[cache_n++].value = root;
     return root;
 }
 static Value *load_facts_expr(const char *expr) {
@@ -852,23 +875,84 @@ static void rule_keys_classes(RuleState *s, const char *keys, const char *target
         }
     } else rule_keys(s, keys, target, actions);
 }
+static size_t name_hash(const char *name);
+static void action_labels(Graph *g, const char *actions);
+static void seq_index_grow(Graph *g) {
+    size_t cap = g->seq_index_cap ? g->seq_index_cap * 2 : 128;
+    size_t *slots = grow(NULL, cap, sizeof(*slots));
+    memset(slots, 0, cap * sizeof(*slots));
+    for (size_t i = 0; i < g->ns; i++) {
+        size_t h = name_hash(g->seq[i]) & (cap - 1);
+        while (slots[h]) h = (h + 1) & (cap - 1);
+        slots[h] = i + 1;
+    }
+    free(g->seq_index); g->seq_index = slots; g->seq_index_cap = cap;
+}
 static int seq(Graph *g, const char *actions) {
-    size_t i;
-    for (i = 0; i < g->ns; i++) if (!strcmp(g->seq[i], actions)) return (int)i;
+    size_t h;
+    if (!g->seq_index_cap || (g->ns + 1) * 2 >= g->seq_index_cap) seq_index_grow(g);
+    h = name_hash(actions) & (g->seq_index_cap - 1);
+    while (g->seq_index[h]) {
+        size_t i = g->seq_index[h] - 1;
+        if (!strcmp(g->seq[i], actions)) return (int)i;
+        h = (h + 1) & (g->seq_index_cap - 1);
+    }
     if (g->ns >= INT_MAX) die("too many sequences");
     if (g->ns == g->cs) { g->cs = g->cs ? g->cs * 2 : 64; g->seq = grow(g->seq, g->cs, sizeof(*g->seq)); }
-    g->seq[g->ns] = copy(actions); return (int)g->ns++;
+    g->seq[g->ns] = copy(actions); g->seq_index[h] = g->ns + 1;
+    action_labels(g, actions);
+    return (int)g->ns++;
+}
+static size_t name_hash(const char *name) {
+    size_t h = (size_t)2166136261u;
+    for (; *name; name++) h = (h ^ (unsigned char)*name) * (size_t)16777619u;
+    return h;
+}
+static void state_index_grow(Graph *g) {
+    size_t cap = g->index_cap ? g->index_cap * 2 : 128;
+    size_t *slots = grow(NULL, cap, sizeof(*slots));
+    memset(slots, 0, cap * sizeof(*slots));
+    for (size_t i = 0; i < g->n; i++) {
+        size_t h = name_hash(g->state[i].name) & (cap - 1);
+        while (slots[h]) h = (h + 1) & (cap - 1);
+        slots[h] = i + 1;
+    }
+    free(g->state_index); g->state_index = slots; g->index_cap = cap;
 }
 static State *graph_state(Graph *g, const char *name, char mode) {
-    size_t i; State *s;
-    for (i = 0; i < g->n; i++) if (!strcmp(g->state[i].name, name)) {
-        if (g->state[i].mode != mode) die("state mode conflict");
-        return &g->state[i];
+    size_t h; State *s;
+    if (!g->index_cap || (g->n + 1) * 2 >= g->index_cap) state_index_grow(g);
+    h = name_hash(name) & (g->index_cap - 1);
+    while (g->state_index[h]) {
+        s = &g->state[g->state_index[h] - 1];
+        if (!strcmp(s->name, name)) {
+            if (s->mode != mode) die("state mode conflict");
+            return s;
+        }
+        h = (h + 1) & (g->index_cap - 1);
     }
     if (g->n == g->cap) { g->cap = g->cap ? g->cap * 2 : 64; g->state = grow(g->state, g->cap, sizeof(*g->state)); }
-    s = &g->state[g->n++]; memset(s, 0, sizeof(*s)); s->name = copy(name); s->mode = mode; return s;
+    s = &g->state[g->n++]; memset(s, 0, sizeof(*s)); s->name = copy(name); s->mode = mode;
+    if (mode == 'b' || mode == 'r') {
+        s->key_index = grow(NULL, 257, sizeof(*s->key_index));
+        memset(s->key_index, 0, 257 * sizeof(*s->key_index));
+    }
+    g->state_index[h] = g->n;
+    return s;
+}
+static int numeric_key(const char *key) {
+    unsigned n = 0;
+    if (!*key) return -1;
+    for (; *key; key++) {
+        if (*key < '0' || *key > '9') return -1;
+        n = n * 10 + (unsigned)(*key - '0');
+        if (n > 256) return -1;
+    }
+    return (int)n;
 }
 static int edge_has(const State *s, const char *key) {
+    int n = numeric_key(key);
+    if (s->key_index && n >= 0) return s->key_index[n] != 0;
     size_t i; for (i = 0; i < s->n; i++) if (!strcmp(s->edge[i].key, key)) return 1; return 0;
 }
 static void label_add(Graph *g, const char *name) {
@@ -902,19 +986,25 @@ static int label_compare(const void *a, const void *b) {
 }
 static void edge_add(Graph *g, const char *name, char mode, const char *key, const char *target, const char *actions) {
     State *s = graph_state(g, name, mode); Edge *e;
-    action_labels(g, actions);
     if (edge_has(s, key)) return;
     if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 32; s->edge = grow(s->edge, s->cap, sizeof(*s->edge)); }
     e = &s->edge[s->n++]; e->key = copy(key); e->target = copy(target); e->seq = seq(g, actions);
+    { int n = numeric_key(key); if (s->key_index && n >= 0) s->key_index[n] = (int)s->n; }
 }
 static void edge_set(Graph *g, const char *name, char mode, const char *key,
                      const char *target, const char *actions) {
     State *s = graph_state(g, name, mode); size_t i; int id = seq(g, actions);
+    int n = numeric_key(key);
+    if (s->key_index && n >= 0 && s->key_index[n]) {
+        Edge *e = &s->edge[s->key_index[n] - 1];
+        e->target = copy(target); e->seq = id; return;
+    }
     for (i = 0; i < s->n; i++) if (!strcmp(s->edge[i].key, key)) {
         s->edge[i].target = copy(target); s->edge[i].seq = id; return;
     }
     if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 32; s->edge = grow(s->edge, s->cap, sizeof(*s->edge)); }
     s->edge[s->n++] = (Edge){copy(key), copy(target), id};
+    if (s->key_index && n >= 0) s->key_index[n] = (int)s->n;
 }
 typedef struct { char *key, *target, *actions; } DRule;
 typedef struct { char *name; DRule *rules; size_t n, cap; char *def_target, *def_actions; } DRow;
@@ -1370,6 +1460,8 @@ static void install_plain_classes(Graph *g, const char *path, char mode,
     if (!rules.n) die("empty rule file");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
+        int variable = actions_depend_on_key(st->def_actions, sequences);
+        char *fixed = variable ? NULL : expand_actions(st->def_actions, bindings, sequences, 0);
         for (size_t j = 0; j < st->n; j++) {
             char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
             number_text(st->rule[j].key, key);
@@ -1382,11 +1474,12 @@ static void install_plain_classes(Graph *g, const char *path, char mode,
             if (!found) {
                 char *actions;
                 if (!st->def_target) die("incomplete rule state");
-                actions = expand_actions(st->def_actions, bindings, sequences, k);
+                actions = variable ? expand_actions(st->def_actions, bindings, sequences, k) : fixed;
                 number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, actions);
-                free(actions);
+                if (variable) free(actions);
             }
         }
+        free(fixed);
     }
 }
 static void install_plain(Graph *g, const char *path, char mode,
@@ -1415,6 +1508,8 @@ static void install_section_classes(Graph *g, const char *path, const char *sect
     if (ferror(f) || fclose(f)) die("section rule read failed");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
+        int variable = actions_depend_on_key(st->def_actions, sequences);
+        char *fixed = variable ? NULL : expand_actions(st->def_actions, bindings, sequences, 0);
         for (size_t j = 0; j < st->n; j++) {
             char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
             number_text(st->rule[j].key, key);
@@ -1426,11 +1521,12 @@ static void install_section_classes(Graph *g, const char *path, const char *sect
             if (!found) {
                 char *actions;
                 if (!st->def_target) die("incomplete section state");
-                actions = expand_actions(st->def_actions, bindings, sequences, k);
+                actions = variable ? expand_actions(st->def_actions, bindings, sequences, k) : fixed;
                 number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, actions);
-                free(actions);
+                if (variable) free(actions);
             }
         }
+        free(fixed);
     }
 }
 static void install_section(Graph *g, const char *path, const char *section,
@@ -1664,6 +1760,92 @@ static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
     }
     if (ferror(manifest) || fclose(manifest) || start != 1 || rows != 4)
         die("incomplete pp prefix");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
+typedef struct { int depth; char *raw; char *field[9]; } PPRow;
+static Value *pp_env_copy(Value *env) {
+    Value *copy = value_new(JOBJ);
+    for (size_t i = 0; i < env->n; i++) value_put(copy, env->items[i].key, env->items[i].value);
+    return copy;
+}
+static int pp_fact_when(const char *when, Value *facts) {
+    int neg = *when == '!'; const char *key = when + neg;
+    Value *v;
+    if (strncmp(key, "fact:", 5)) die("unsupported pp fact condition");
+    v = value_get(facts, key + 5);
+    return !!(v && ((v->kind == JBOOL || v->kind == JINT) ? v->number : v->n)) != neg;
+}
+static void pp_autoinc_block(Graph *g, PPRow *rows, size_t lo, size_t hi, int depth, Value *env) {
+    for (size_t i = lo; i < hi;) {
+        PPRow *r = &rows[i]; char **f = r->field; size_t j = i + 1;
+        Value *facts = load_facts_expr(f[4]), *opts;
+        while (j < hi && rows[j].depth > depth) j++;
+        if (r->depth != depth) die("invalid pp manifest nesting");
+        for (size_t k = 0; k < env->n; k++) value_put(facts, env->items[k].key, env->items[k].value);
+        opts = !strcmp(f[8], "-") ? value_new(JOBJ) : value_json(f[8], "pp autoinc options");
+        if (!strcmp(f[0] + depth, "foreach")) {
+            Value *over = value_get(opts, "over"), *items = value_path(facts, value_text(over));
+            Value *as = value_get(opts, "as"), *pre = value_get(opts, "pre");
+            if (items->kind != JARR || j == i + 1) die("invalid pp foreach");
+            for (size_t n = 0; n < items->n; n++) {
+                Value *child = pp_env_copy(env), *ctx = pp_env_copy(facts);
+                value_put(child, as ? value_text(as) : "it", items->items[n].value);
+                value_put(ctx, as ? value_text(as) : "it", items->items[n].value);
+                if (pre) for (size_t p = 0; p < pre->n; p++) {
+                    Value *pair = pre->items[p].value;
+                    if (pair->kind != JARR || pair->n != 2) die("invalid pp foreach pre");
+                    value_put(child, value_text(pair->items[0].value),
+                              value_path(ctx, value_text(pair->items[1].value)));
+                }
+                pp_autoinc_block(g, rows, i + 1, j, depth + 1, child);
+            }
+        } else if (strncmp(f[3], "fact:", 5) && strncmp(f[3], "!fact:", 6) && strcmp(f[3], "-")) {
+            die("unsupported pp autoinc condition");
+        } else if (!strcmp(f[3], "-") || pp_fact_when(f[3], facts)) {
+            if (!strcmp(f[0] + depth, "let")) {
+                Value *b = value_new(JOBJ);
+                direct_bindings(b, f[7], facts);
+                for (size_t k = 0; k < b->n; k++) value_put(env, b->items[k].key, b->items[k].value);
+            } else if (!strcmp(f[0] + depth, "rows")) {
+                Value *bindings = value_new(JOBJ), *sequences = mapseq_construct(opts, facts);
+                Value *classmap = value_get(opts, "classmap"), *classes = NULL;
+                char path[1024];
+                direct_bindings(bindings, f[7], facts);
+                if (classmap) {
+                    classes = value_new(JOBJ);
+                    for (size_t k = 0; k < classmap->n; k++)
+                        value_put(classes, classmap->items[k].key,
+                                  value_path(facts, value_text(classmap->items[k].value)));
+                }
+                for (int k = 0; k < 2; k++) {
+                    if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", f[1], k ? "result" : "byte") >= (int)sizeof(path))
+                        die("pp autoinc path too long");
+                    if (strcmp(f[2], "-"))
+                        install_section_classes(g, path, f[2], k ? 'r' : 'b', bindings, sequences, classes);
+                    else install_plain_classes(g, path, k ? 'r' : 'b', bindings, sequences, classes);
+                }
+            } else die("unsupported pp autoinc op");
+        }
+        i = j;
+    }
+}
+static void inspect_pp_call_autoinc(const char *outpath) {
+    FILE *f = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    PPRow *rows = NULL; size_t n = 0, cap = 0; char *s; Graph g = {0};
+    Value *env = value_new(JOBJ);
+    if (!f) die("cannot open pp autoinc manifest");
+    while ((s = line(f))) {
+        PPRow *r; char *op; int cols, depth = 0;
+        if (!*s || *s == '#') { free(s); continue; }
+        if (n == cap) { cap = cap ? cap * 2 : 32; rows = grow(rows, cap, sizeof(*rows)); }
+        r = &rows[n++]; r->raw = s; cols = fields_tab(s, r->field, 9);
+        if (cols != 9) die("pp autoinc manifest column count");
+        op = r->field[0]; while (op[depth] == '.') depth++;
+        r->depth = depth;
+    }
+    if (ferror(f) || fclose(f)) die("pp autoinc manifest read failed");
+    pp_autoinc_block(&g, rows, 0, n, 0, env);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -2108,26 +2290,34 @@ static void manifest(Graph *g, const char *dir) {
     if (rows != 1 || labels != 1) die("incomplete prune manifest");
 }
 static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names) {
-    fputs("{\"start\":", f); quoted(f, start); fputs(",\"states\":{", f);
+    Buffer b = {0}; char number[32];
+    buf_add(&b, "{\"start\":", 9); buf_quote(&b, start); buf_add(&b, ",\"states\":{", 11);
     for (size_t i = 0; i < g->n; i++) {
         const State *s = &g->state[i];
-        if (i) fputc(',', f); quoted(f, s->name); fprintf(f, ":[\"%c\",{", s->mode);
+        if (i) buf_char(&b, ','); buf_quote(&b, s->name);
+        buf_add(&b, ":[\"", 3); buf_char(&b, s->mode); buf_add(&b, "\",{", 3);
         for (size_t j = 0; j < s->n; j++) {
-            if (j) fputc(',', f); quoted(f, s->edge[j].key); fputc(':', f);
-            fputc('[', f); quoted(f, s->edge[j].target); fprintf(f, ",%d]", s->edge[j].seq);
+            if (j) buf_char(&b, ','); buf_quote(&b, s->edge[j].key); buf_add(&b, ":[", 2);
+            buf_quote(&b, s->edge[j].target);
+            snprintf(number, sizeof(number), ",%d]", s->edge[j].seq);
+            buf_add(&b, number, strlen(number));
         }
-        fputs("}]", f);
+        buf_add(&b, "}]", 2);
     }
-    fputs("},\"seqs\":[", f);
-    for (size_t i = 0; i < g->ns; i++) { if (i) fputc(',', f); fputs(g->seq[i], f); }
-    fputc(']', f);
-    if (tok_names) { fputs(",\"tok_names\":", f); value_write(f, tok_names); }
-    fputc('}', f);
-    if (ferror(f)) die("write failed");
+    buf_add(&b, "},\"seqs\":[", 10);
+    for (size_t i = 0; i < g->ns; i++) { if (i) buf_char(&b, ','); buf_add(&b, g->seq[i], strlen(g->seq[i])); }
+    buf_char(&b, ']');
+    if (tok_names) { buf_add(&b, ",\"tok_names\":", 13); buf_value(&b, tok_names); }
+    buf_char(&b, '}');
+    if (fwrite(b.s, 1, b.n, f) != b.n || ferror(f)) die("write failed");
+    free(b.s);
 }
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
+        inspect_pp_call_autoinc(argv[2]); return 0;
+    }
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
         !strcmp(argv[1], "inspect-pp-prefix")) {
         inspect_pp_prefix(argv[2], argc == 4); return 0;
