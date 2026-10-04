@@ -458,6 +458,7 @@ static Value *map_cell(Value *source, Value *ctx) {
     const char *s; size_t n;
     if (source->kind != JSTR) return source;
     s = source->s; n = strlen(s);
+    if (n > 1 && s[0] == '$') return value_path(ctx, s + 1);
     if (n >= 3 && s[0] == '{' && s[n - 1] == '}' && !strchr(s + 1, '{')) {
         char *key = copy_n(s + 1, n - 2); Value *v = value_get(ctx, key);
         free(key); if (!v) die("unknown mapseq cell"); return v;
@@ -1059,6 +1060,28 @@ static Value *lex_sequences_flags(int argc, char **argv) {
     die("missing lex output row"); return NULL;
 }
 static Value *lex_sequences(void) { return lex_sequences_flags(0, NULL); }
+static void inspect_pp_start(const char *outpath) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *table, *out;
+    char *s; Value *sequences = NULL; Graph g = {0};
+    if (!manifest) die("cannot open pp body manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
+            Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp output options");
+            sequences = mapseq_construct(opts, facts);
+            free(s); break;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || !sequences) die("pp start sequences missing");
+    table = fopen("exec/pp/start-byte.tsv", "rb"); if (!table) die("cannot open pp start table");
+    install_delta_text(&g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
+    if (fclose(table)) die("pp start table close failed");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_delta_template(const char *section, const char *outpath) {
     Graph g = {0}; Buffer rows = expand_template_section("lex", section);
     Value *facts = load_fact("lex-gen"), *classes = value_get(facts, "classes");
@@ -1696,6 +1719,9 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-start")) {
+        inspect_pp_start(argv[2]); return 0;
+    }
     if (argc >= 3 && argc <= 7 && !strcmp(argv[1], "lex")) {
         Value *tok_names = value_get(load_fact("lex-gen"), "tok_names");
         const char *start = has_flag(argc - 3, argv + 3, "typed") ||
