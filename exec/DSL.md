@@ -105,3 +105,5 @@
 | 死代码：`tape:` fresh、`fresh` op 名 | A:150, A:289 | `tape:` 0；op `fresh` 0 | — |
 
 下一步建议顺序：getattr 已在 T1a 去掉（@stack 8、stackrows 2 改成 export.py 写出的 facts `k2-stack` 加 `@acts:`；graph 头改为 build/graph.py 的 GRAPHS 显式表），下一步把 `=vN` 换成具名 fact，再把 fresh 分配改成显式序号，最后把 facts 动作序列迁回模板表。
+
+- 2026-10-04 T1b2：assemble.py 里剩下的 7 处 str.format（fresh owner、mapseq、foreach join default）也改用 _fmt，assemble.py 不再调用 str.format。

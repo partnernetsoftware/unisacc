@@ -373,7 +373,7 @@ def _fresh_table(self, stem, o):
         f = ln.split("\t")
         if not ln or ln.startswith("#") or any(f[c] != v for c, v in w):
             continue
-        owner = o.get("owner", "{owner}").format(owner=f[ko], key=f[ki])
+        owner = _fmt(o.get("owner", "{owner}"), {"owner": f[ko], "key": f[ki]})
         if o.get("scope", "U") == "P":
             self.env[f[ki]] = self.P(owner).fresh(f[kd])
         else:
@@ -392,7 +392,7 @@ def _mapseq(self, spec, facts, bd):
         if isinstance(c, str) and c.startswith("$"):
             n = c[1:]
             return (bd or {})[n] if n in (bd or {}) else self.env[n] if n in self.env else facts[n]
-        return c.format(**x) if isinstance(c, str) else c
+        return _fmt(c, x) if isinstance(c, str) else c
 
     def emit(acts, a, x):
         if isinstance(a, dict):
@@ -402,9 +402,9 @@ def _mapseq(self, spec, facts, bd):
         elif isinstance(a, str) and a.startswith("$"):
             acts.extend(self.env[a[1:]])
         elif a[0] == "@out":
-            acts.extend(("OUT", c) for c in a[1].format(**x).encode())
+            acts.extend(("OUT", c) for c in _fmt(a[1], x).encode())
         elif a[0] == "@bytes":
-            acts.extend(("SBOUT", c) for c in a[1].format(**x).encode())
+            acts.extend(("SBOUT", c) for c in _fmt(a[1], x).encode())
         else:
             acts.append(tuple(cell(c, x) for c in a))
 
@@ -504,7 +504,7 @@ def _foreach(self, o, body, depth, extra, facts):
                 hit = [t for t in table if t[j["on"]] == r["key"]]
                 if hit:
                     return dict(hit[0], **r)
-                return dict({c: v.format(**r) if isinstance(v, str) else v for c, v in j["default"].items()}, **r)
+                return dict({c: _fmt(v, r) if isinstance(v, str) else v for c, v in j["default"].items()}, **r)
             rows = [match(r) for r in rows]
     else:
         rows = _path(facts, _fmt(o["over"], facts) if "{" in o["over"] else o["over"])
@@ -657,7 +657,7 @@ _mapseq0 = Run.mapseq
 
 def _mapseq_each(self, spec, facts, bd):
     out = _mapseq0(self, {k: v for k, v in spec.items() if "{" not in k}, facts, bd)
-    cell = lambda c, x: (x[c[1:-1]] if re.fullmatch(r"\{\w+\}", c) else c.format(**x)) if isinstance(c, str) else c
+    cell = lambda c, x: (x[c[1:-1]] if re.fullmatch(r"\{\w+\}", c) else _fmt(c, x)) if isinstance(c, str) else c
     for key, d in ((k, v) for k, v in spec.items() if "{" in k):
         for x in _path(facts, d["over"]):
             acts = []
@@ -667,7 +667,7 @@ def _mapseq_each(self, spec, facts, bd):
                         acts.extend(out[n] if n in out else self.env[n])
                 elif all(x.get(c) == v for c, v in part.get("where", {}).items()):
                     acts.extend(tuple(cell(c, x) for c in a) for a in part["acts"])
-            out[key.format(**x)] = acts
+            out[_fmt(key, x)] = acts
     return out
 
 
