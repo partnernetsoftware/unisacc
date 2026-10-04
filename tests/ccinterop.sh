@@ -8,7 +8,11 @@
 #   CCI_VM_ARM (default `default`), CCI_VM_X86 (default minicon-lnx-x86_64): Lima VMs
 #   STRICT=1: a skip is a failure
 here=$(cd "$(dirname "$0")" && pwd)
-UA=${UA:-/tmp/cci-ua}
+# default: the stamped reference build (lib.sh rebuilds it when stale); the old
+# unstamped /tmp/cci-ua default once ran a two-slice-old compiler: 8 false reds
+UA=${UA:-/tmp/ua_ref}
+R=$(cd "$here/.." && pwd)
+(cd "$R" && . ./tests/lib.sh && ua_ready) || exit 2
 P="$here/ccinterop"
 B="python3 $here/bound.py"
 tmp=$(mktemp -d /tmp/ccinterop.XXXXXX)
