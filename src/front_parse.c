@@ -1348,6 +1348,7 @@ int unary(void) {
                 }
             } }
             lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns; curflt = cflt; curbool = cb;
+            curfn = 0; curfnst = 0 - 1; /* the cast supplies its own type */
             curelem = cw;
             curpd = 0; curbase = cw;
             if (declptr) { curpd = cpd > 0 ? cpd : 1; if (curpd >= 2) curelem = 8; }

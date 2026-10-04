@@ -68,8 +68,8 @@ def main():
     if "--e3-tape" in sys.argv:
         path = Path(sys.argv[sys.argv.index("--e3-tape") + 1])
         vm = TraceVM(parse(path.read_text()))
-        vm.run()
-        assert vm.reads == [(0, 4)] * 6, (str(path), vm.reads)
+        result = vm.run()
+        assert vm.reads == [(0, 4)] * 6 and not vm.code_reads and result[1] == 0, (str(path), vm.reads, vm.code_reads, result)
         count += 1
     print("volatile comma: system-cc read; %d traces have exactly six reads (O0/O1/O2)" % count)
 

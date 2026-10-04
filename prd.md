@@ -308,6 +308,8 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 - [prd-notes-20261002.md](archive/prd-notes-20261002.md)：0.0.21 发布后从 §5/§6 移出的 R20-1/R20-3 实施记录、已修复问题与旧排期条目。
 - [prd-release-and-development-history-20261001.md](archive/prd-release-and-development-history-20261001.md)：逐版发布身份、R19 开发决定、旧结构测量与 R18/R19 实施回执。
 
-### V1：discarded-value 与 volatile 读取核查（进行中）
+### V1：discarded-value 与 volatile 读取核查（源码与表已验，候选待验）
 
-按 C99 6.3.2.1/6.5.17 的求值语境修复逗号左操作数与表达式语句的读取；不把参考/产品 tape 相等当作正确性证明。保留赋值左值、取地址和 sizeof 的例外，增加系统 cc 可观察读取证据。仅本轮实现与核查后登记完成。
+按 C99 6.3.2.1/6.5.17 修复逗号左操作数、表达式语句及 for 初始/步进语境的读取；取地址、sizeof 和函数设计ator不读对象或代码。系统 cc 优化后汇编确认 volatile 读取；独立 VM 追踪确认参考 O0/O1/O2 与最终 E3 对探针发生恰好六次对象读取，且不读函数代码。门禁为 volatile-comma / com-volatile-comma，不把 tape 相等单独当正确性证明。
+
+本地私有同源参考：difftest 四片 226 匹配、0 wrong；difftest_o 四片 678 匹配、0 wrong；ccrun 八片 212 匹配、14 既有 knownwrong、0 wrong；exec-chain 三片共 296 文件，295 相等、1 既有未覆盖、0 bad/lost。E3 八变体图基线已更新；普通版 9,543 状态、2,461,838 观测全域 net=table。新产品须重建后跑 com-volatile-comma，尚未计产品候选通过。
