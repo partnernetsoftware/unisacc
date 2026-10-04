@@ -1560,6 +1560,46 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_body(const char *outpath, size_t index) {
+    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *bodies = value_get(facts, "bodies");
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest || !bodies || bodies->kind != JARR || index >= bodies->n) die("invalid pp body index");
+    value_put(facts, "it", bodies->items[index].value);
+    {
+        Value *it = value_get(facts, "it"), *terminal = value_get(it, "terminal"); char next[64];
+        if (terminal->kind != JBOOL) die("invalid pp body terminal");
+        if (terminal->number) strcpy(next, "LNDEF");
+        else if (snprintf(next, sizeof(next), "LNB%lld", value_get(it, "end")->number) >= (int)sizeof(next))
+            die("pp body successor too long");
+        value_put(facts, "body_next", value_string(next));
+    }
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        if (!strcmp(field[0], ".rows") &&
+            (!strcmp(field[1], "ftrim-libc-body") ||
+             (!strcmp(field[1], "assembly") && !strcmp(field[2], "predefine")))) {
+            Value *bindings = value_new(JOBJ), *sequences = NULL;
+            Value *opts = !strcmp(field[8], "-") ? NULL : value_json(field[8], "pp body options");
+            char path[1024]; int assembly = !strcmp(field[1], "assembly");
+            direct_bindings(bindings, field[7], facts);
+            if (opts) sequences = mapseq_construct(opts, facts);
+            for (int i = 0; i < 2; i++) {
+                if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", field[1], i ? "result" : "byte") >= (int)sizeof(path))
+                    die("pp body path too long");
+                if (assembly) install_section(&g, path, "predefine", i ? 'r' : 'b', bindings, sequences);
+                else install_plain(&g, path, i ? 'r' : 'b', bindings, sequences);
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 2) die("pp body rows missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_key(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *keys = value_get(facts, "keys");
@@ -1939,6 +1979,11 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-body")) {
+        char *end; unsigned long index = strtoul(argv[2], &end, 10);
+        if (end == argv[2] || *end) die("invalid pp body index");
+        inspect_pp_body(argv[3], index); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-key")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
         if (end == argv[2] || *end) die("invalid pp key index");
