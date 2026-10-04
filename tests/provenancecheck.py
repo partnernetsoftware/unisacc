@@ -19,7 +19,8 @@ with tempfile.TemporaryDirectory() as td:
     asm=t/'exec/c/asm/test.S'; asm.write_text('assembly v1')
     source=t/'src/test.c'; source.write_text('source v1')
     generator=t/'exec/generator.py'; generator.write_text('generator v1')
-    output=t/'exec/build/ua_ref.c'; output.parent.mkdir(); output.write_text('generated v1')
+    output=t/'exec/build/ref/ua_ref.c'; output.parent.mkdir(parents=True);  # generated output lives in exec/build subdirectories; exec/build/*.py are K2 drivers (inputs)
+    output.write_text('generated v1')
     (t/'iterate/kernel/typekw.tsv').write_text('int\n')
     binary=t/'candidate'; binary.write_bytes(b'candidate v1'); binary.chmod(0o755)
     with patch.object(p, 'ROOT', t), patch.object(sys.modules['models'], 'ROOT', t), \
