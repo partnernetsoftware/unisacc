@@ -12,6 +12,7 @@ int main(void)
     a[0].v = 9;
     a[1].v = 17;
     s.p = a;
-    printf("%d %d\n", *take(&s), s.p == &a[1]);
+    int v = *take(&s);          /* sequenced: argument order is unspecified, and gcc evaluates right to left */
+    printf("%d %d\n", v, s.p == &a[1]);
     return 0;
 }
