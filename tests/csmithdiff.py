@@ -15,8 +15,8 @@ CSMITH = shutil.which('csmith') or sys.exit('csmithdiff: csmith not found (brew 
 INC = next(iter(sorted(pathlib.Path(CSMITH).resolve().parents[1].glob('include/csmith-*'))), None) or sys.exit('csmithdiff: csmith headers not found')
 OPTS = ['--no-packed-struct', '--no-bitfields', '--no-volatiles', '--max-funcs', '4', '--max-block-depth', '3']
 
-def run(cmd, timeout):
-    r = subprocess.run(BOUND + [str(timeout)] + cmd, capture_output=True)
+def run(cmd, timeout, cwd=None):
+    r = subprocess.run(BOUND + [str(timeout)] + cmd, capture_output=True, cwd=cwd)
     return r.returncode, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace')
 
 def launch(comp): return ['sh', comp] if comp.endswith('.com') else [comp]
@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='unisacc-csmith-') as td:
     d = pathlib.Path(td)
     for seed in range(lo, hi + 1)[k - 1::n]:
         src = d / ('s%d.c' % seed)
-        rc, out, _ = run([CSMITH, '--seed', str(seed)] + OPTS, 20)
+        rc, out, _ = run([CSMITH, '--seed', str(seed)] + OPTS, 20, cwd=d)   # csmith writes platform.info into its cwd
         if rc: print('csmithdiff FAIL generate', seed); bad += 1; continue
         src.write_text(out)
         rc, _, err = run(['cc', '-std=c99', '-w', '-I' + str(INC), '-o', str(d / 'ref'), str(src)], 30)
