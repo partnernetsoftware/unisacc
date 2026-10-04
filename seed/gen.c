@@ -222,6 +222,83 @@ static Value *load_fact(const char *stem) {
     }
     return root;
 }
+static int has_flag(int argc, char **argv, const char *name) {
+    int i; char flag[128];
+    if (snprintf(flag, sizeof(flag), "--%s", name) >= (int)sizeof(flag)) die("flag too long");
+    for (i = 0; i < argc; i++) if (!strcmp(argv[i], flag)) return 1;
+    return 0;
+}
+static int when_true(const char *when, int argc, char **argv) {
+    char *parts, *p;
+    if (!strcmp(when, "-") || !*when) return 1;
+    parts = copy(when); p = parts;
+    while (*p) {
+        char *amp = strchr(p, '&'); int neg = *p == '!', value;
+        if (amp) *amp = 0;
+        value = has_flag(argc, argv, p + neg);
+        if (value == neg) { free(parts); return 0; }
+        if (!amp) break; p = amp + 1;
+    }
+    free(parts); return 1;
+}
+static char *interpolate(const char *text, Value *env) {
+    size_t cap = strlen(text) + 64, n = 0, i; char *out = grow(NULL, cap, 1);
+    for (i = 0; text[i]; i++) {
+        const char *part = text + i; size_t len = 1; char number[64];
+        if (text[i] == '{') {
+            const char *end = strchr(text + i + 1, '}'); Value *v; char *key;
+            if (!end) die("unterminated interpolation");
+            key = copy_n(text + i + 1, (size_t)(end - text - i - 1));
+            v = value_get(env, key); free(key);
+            if (!v || (v->kind != JSTR && v->kind != JINT)) die("unknown interpolation fact");
+            if (v->kind == JINT) { snprintf(number, sizeof(number), "%lld", v->number); part = number; }
+            else part = v->s;
+            len = strlen(part); i = (size_t)(end - text);
+        }
+        if (n + len + 1 > cap) {
+            while (n + len + 1 > cap) { if (cap > SIZE_MAX / 2) die("interpolation too long"); cap *= 2; }
+            out = grow(out, cap, 1);
+        }
+        memcpy(out + n, part, len); n += len;
+    }
+    out[n] = 0; return out;
+}
+static void let_bind(Value *env, const char *bind) {
+    char *parts = copy(bind), *p = parts;
+    if (!strcmp(bind, "-") || !*bind) { free(parts); return; }
+    while (*p) {
+        char *comma = strchr(p, ','), *eq = strchr(p, '='); Value *v; char *s;
+        if (comma) *comma = 0;
+        if (!eq || eq == p || eq[1] == 0) die("invalid let binding");
+        *eq = 0;
+        if (strncmp(eq + 1, "@str:", 5)) die("unsupported let value");
+        s = interpolate(eq + 6, env); v = value_string(s); free(s);
+        value_put(env, p, v);
+        if (!comma) break; p = comma + 1;
+    }
+    free(parts);
+}
+/* Diagnostic entry for the first reusable manifest feature. It never skips an
+   operation in a real graph build: callers explicitly request only let rows. */
+static void inspect_lets(const char *stage, const char *outpath, int argc, char **argv) {
+    char path[1024]; FILE *f, *out; char *s; Value *env = value_new(JOBJ);
+    if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(path)) die("manifest path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+        if (!strcmp(field[0], "let") && when_true(field[3], argc, argv)) {
+            if (strcmp(field[4], "-") || strcmp(field[6], "-") || strcmp(field[8], "-"))
+                die("unsupported let facts/options");
+            let_bind(env, field[7]);
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("manifest read failed");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    value_write(out, env); if (fclose(out)) die("output close failed");
+}
 static RuleState *rule_state(RuleSet *r, const char *name) {
     size_t i; RuleState *s;
     for (i = 0; i < r->n; i++) if (!strcmp(r->state[i].name, name)) return &r->state[i];
@@ -403,6 +480,9 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc >= 4 && !strcmp(argv[1], "inspect-let")) {
+        inspect_lets(argv[2], argv[3], argc - 4, argv + 4); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-facts")) {
         Value *v = load_fact(argv[2]);
         out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
