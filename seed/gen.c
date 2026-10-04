@@ -887,6 +887,202 @@ static void edge_add(Graph *g, const char *name, char mode, const char *key, con
     if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 32; s->edge = grow(s->edge, s->cap, sizeof(*s->edge)); }
     e = &s->edge[s->n++]; e->key = copy(key); e->target = copy(target); e->seq = seq(g, actions);
 }
+static void edge_set(Graph *g, const char *name, char mode, const char *key,
+                     const char *target, const char *actions) {
+    State *s = graph_state(g, name, mode); size_t i; int id = seq(g, actions);
+    for (i = 0; i < s->n; i++) if (!strcmp(s->edge[i].key, key)) {
+        s->edge[i].target = copy(target); s->edge[i].seq = id; return;
+    }
+    if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 32; s->edge = grow(s->edge, s->cap, sizeof(*s->edge)); }
+    s->edge[s->n++] = (Edge){copy(key), copy(target), id};
+}
+typedef struct { char *key, *target, *actions; } DRule;
+typedef struct { char *name; DRule *rules; size_t n, cap; char *def_target, *def_actions; } DRow;
+typedef struct { DRow *rows; size_t n, cap; } DTable;
+static DRow *drow(DTable *t, const char *name) {
+    size_t i;
+    for (i = 0; i < t->n; i++) if (!strcmp(t->rows[i].name, name)) return &t->rows[i];
+    if (t->n == t->cap) { t->cap = t->cap ? t->cap * 2 : 32; t->rows = grow(t->rows, t->cap, sizeof(*t->rows)); }
+    memset(&t->rows[t->n], 0, sizeof(*t->rows));
+    t->rows[t->n].name = copy(name); return &t->rows[t->n++];
+}
+static DRule *drule(DRow *r, const char *key) {
+    size_t i;
+    for (i = 0; i < r->n; i++) if (!strcmp(r->rules[i].key, key)) return &r->rules[i];
+    if (r->n == r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->rules = grow(r->rules, r->cap, sizeof(*r->rules)); }
+    memset(&r->rules[r->n], 0, sizeof(*r->rules));
+    r->rules[r->n].key = copy(key); return &r->rules[r->n++];
+}
+static int domain_has(Value *domain, const char *key) {
+    size_t i; char number[64];
+    for (i = 0; i < domain->n; i++) {
+        const char *one = value_scalar_text(domain->items[i].value, number);
+        if (!strcmp(one, key)) return 1;
+    }
+    return 0;
+}
+static Value *numeric_domain(int lo, int hi) {
+    Value *v = value_new(JARR); int i;
+    if (lo < 0 || hi < lo || hi > 1000000) die("invalid numeric domain");
+    for (i = lo; i < hi; i++) { Value *n = value_new(JINT); n->number = i; value_put(v, NULL, n); }
+    return v;
+}
+static void keys_simple(Value *out, const char *text, Value *domain, Value *classes) {
+    char *work = copy(text), *part = work;
+    while (*part) {
+        char *comma = strchr(part, ','), *dash; size_t i;
+        if (comma) *comma = 0;
+        if (!strcmp(part, "*")) {
+            for (i = 0; i < domain->n; i++) {
+                char number[64];
+                const char *s = value_scalar_text(domain->items[i].value, number);
+                value_put(out, NULL, value_string(s));
+            }
+        } else if (*part == '@') {
+            Value *members = value_get(classes, part + 1);
+            if (!members || members->kind != JARR || !members->n) die("unknown key class");
+            for (i = 0; i < members->n; i++) {
+                char number[64]; const char *s = value_scalar_text(members->items[i].value, number);
+                if (!domain_has(domain, s)) die("key class outside domain");
+                value_put(out, NULL, value_string(s));
+            }
+        } else if (domain_has(domain, part)) value_put(out, NULL, value_string(part));
+        else if ((dash = strchr(part, '-')) != NULL) {
+            char *end; long lo, hi, k;
+            *dash = 0; lo = strtol(part, &end, 10); if (*end) die("invalid key range");
+            hi = strtol(dash + 1, &end, 10); if (*end || lo < 0 || hi < lo || hi > 1000000)
+                die("invalid key range");
+            for (k = lo; k <= hi; k++) {
+                char number[64]; snprintf(number, sizeof(number), "%ld", k);
+                if (!domain_has(domain, number)) die("key range outside domain");
+                value_put(out, NULL, value_string(number));
+            }
+        } else die("unknown observation key");
+        if (!comma) break; part = comma + 1;
+    }
+    free(work);
+}
+static Value *keys_expand(const char *text, Value *domain, Value *classes) {
+    char *work = copy(text), *amp = strchr(work, '&'); Value *out = value_new(JARR);
+    if (!amp) keys_simple(out, work, domain, classes);
+    else {
+        size_t i; Value *other;
+        *amp = 0; keys_simple(out, work, domain, classes);
+        other = keys_expand(amp + 1, domain, classes);
+        for (i = 0; i < out->n;) {
+            size_t j; int found = 0;
+            for (j = 0; j < other->n; j++)
+                if (!strcmp(value_text(out->items[i].value), value_text(other->items[j].value))) found = 1;
+            if (!found) { memmove(&out->items[i], &out->items[i + 1], (out->n - i - 1) * sizeof(*out->items)); out->n--; }
+            else i++;
+        }
+    }
+    free(work); return out;
+}
+static void drow_put(DRow *r, const char *key, const char *target, const char *actions,
+                     int overlay, int fill_only) {
+    DRule *slot = drule(r, key);
+    if (slot->target && !overlay && !fill_only) die("overlapping delta rules");
+    if (slot->target && fill_only) return;
+    slot->target = copy(target); slot->actions = copy(actions);
+}
+static void install_delta_text(Graph *g, FILE *f, char mode, Value *domain, Value *classes,
+                               Value *sequences, int overlay, int ordered, Value *skip) {
+    DTable table = {0}; char *s; size_t i, j;
+    while ((s = line(f))) {
+        char *field[4]; int n; DRow *r; Value *keys;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 4); if (n != 4) die("delta table column count");
+        r = drow(&table, field[0]);
+        if (!strcmp(field[1], "*") && !overlay) {
+            if (r->def_target) die("repeated delta default");
+            r->def_target = copy(field[2]); r->def_actions = copy(field[3]); free(s); continue;
+        }
+        keys = keys_expand(field[1], domain, classes);
+        for (i = 0; i < keys->n; i++) {
+            const char *key = value_text(keys->items[i].value);
+            drow_put(r, key, field[2], field[3], overlay, overlay && !strcmp(field[1], "*"));
+        }
+        free(s);
+    }
+    if (ferror(f)) die("delta table read failed");
+    for (i = 0; i < table.n; i++) {
+        DRow *r = &table.rows[i]; int omit = 0;
+        if (skip) for (j = 0; j < skip->n; j++) if (!strcmp(value_text(skip->items[j].value), r->name)) omit = 1;
+        if (omit) continue;
+        if (!overlay) for (j = 0; j < domain->n; j++) {
+            char number[64]; const char *key = value_scalar_text(domain->items[j].value, number);
+            DRule *slot = drule(r, key);
+            if (!slot->target) {
+                if (!r->def_target) die("incomplete delta state");
+                slot->target = r->def_target; slot->actions = r->def_actions;
+            }
+        }
+        if (ordered) {
+            for (j = 0; j < domain->n; j++) {
+                char number[64]; const char *key = value_scalar_text(domain->items[j].value, number);
+                DRule *rule = drule(r, key); char *acts;
+                if (!rule->target) die("ordered delta state incomplete");
+                acts = expand_actions(rule->actions, NULL, sequences, (int)domain->items[j].value->number);
+                edge_set(g, r->name, mode, key, rule->target, acts); free(acts);
+            }
+        } else for (j = 0; j < r->n; j++) {
+            DRule *rule = &r->rules[j]; char *acts = expand_actions(rule->actions, NULL, sequences,
+                                       mode == 't' ? -1 : atoi(rule->key));
+            edge_set(g, r->name, mode, rule->key, rule->target, acts); free(acts);
+        }
+    }
+}
+static void output(FILE *f, const Graph *g);
+static Value *lex_sequences(void) {
+    FILE *f = fopen("exec/lex/output-manifest.tsv", "rb"); char *s;
+    if (!f) die("cannot open lex output manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n; Value *opts, *facts, *sequences;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("lex output manifest columns");
+        if (!when_true(field[3], 0, NULL)) { free(s); continue; }
+        opts = value_json(field[8], "lex output options");
+        facts = load_facts_expr(field[4]); sequences = mapseq_construct(opts, facts);
+        fclose(f); free(s); return sequences;
+    }
+    die("missing lex output row"); return NULL;
+}
+static void inspect_delta_table(const char *stem, const char *outpath) {
+    Graph g = {0}; FILE *manifest = fopen("exec/lex/gen-manifest.tsv", "rb"), *f, *out;
+    char *s; int found = 0;
+    if (!manifest) die("cannot open lex manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n; Value *opts, *facts, *domain, *classes = NULL, *skip = NULL, *d, *dk;
+        char path[1024]; const char *mode; int ordered;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("lex manifest column count");
+        if (strcmp(field[0], "table") || strcmp(field[1], stem) || !when_true(field[3], 0, NULL)) {
+            free(s); continue;
+        }
+        if (++found > 1) die("ambiguous lex table");
+        opts = value_json(field[8], "lex table options"); facts = load_facts_expr(field[4]);
+        mode = value_text(value_get(opts, "mode"));
+        d = value_get(opts, "domain"); dk = value_get(opts, "domain_keys");
+        if (d) {
+            if (d->kind != JARR || d->n != 2 || d->items[0].value->kind != JINT ||
+                d->items[1].value->kind != JINT) die("invalid lex table domain");
+            domain = numeric_domain((int)d->items[0].value->number, (int)d->items[1].value->number);
+        } else if (dk) domain = value_path(facts, value_text(dk));
+        else domain = numeric_domain(0, 257);
+        d = value_get(opts, "classes"); if (d) classes = value_path(facts, value_text(d));
+        skip = value_get(opts, "skip"); d = value_get(opts, "ordered");
+        ordered = d && d->kind == JBOOL && d->number;
+        if (snprintf(path, sizeof(path), "exec/lex/%s", stem) >= (int)sizeof(path)) die("lex table path too long");
+        f = fopen(path, "rb"); if (!f) die("cannot open lex table");
+        install_delta_text(&g, f, mode[0], domain, classes, lex_sequences(), 0, ordered, skip);
+        if (fclose(f)) die("lex table close failed");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("lex table not found");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void install_file(Graph *g, const char *path, char mode) {
     FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
     if (!f) die("cannot open rule file");
@@ -1310,6 +1506,9 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-delta-table")) {
+        inspect_delta_table(argv[2], argv[3]); return 0;
+    }
     if (argc == 5 && !strcmp(argv[1], "inspect-template")) {
         inspect_template(argv[2], argv[3], argv[4]); return 0;
     }
