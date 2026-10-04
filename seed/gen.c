@@ -1460,8 +1460,9 @@ static void install_plain_classes(Graph *g, const char *path, char mode,
     if (!rules.n) die("empty rule file");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
-        int variable = actions_depend_on_key(st->def_actions, sequences);
-        char *fixed = variable ? NULL : expand_actions(st->def_actions, bindings, sequences, 0);
+        int variable = st->def_actions && actions_depend_on_key(st->def_actions, sequences);
+        char *fixed = (!st->def_actions || variable) ? NULL :
+                      expand_actions(st->def_actions, bindings, sequences, 0);
         for (size_t j = 0; j < st->n; j++) {
             char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
             number_text(st->rule[j].key, key);
@@ -1508,8 +1509,9 @@ static void install_section_classes(Graph *g, const char *path, const char *sect
     if (ferror(f) || fclose(f)) die("section rule read failed");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
-        int variable = actions_depend_on_key(st->def_actions, sequences);
-        char *fixed = variable ? NULL : expand_actions(st->def_actions, bindings, sequences, 0);
+        int variable = st->def_actions && actions_depend_on_key(st->def_actions, sequences);
+        char *fixed = (!st->def_actions || variable) ? NULL :
+                      expand_actions(st->def_actions, bindings, sequences, 0);
         for (size_t j = 0; j < st->n; j++) {
             char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
             number_text(st->rule[j].key, key);
@@ -1861,6 +1863,54 @@ static void inspect_pp_through_autoinc(const char *outpath, int no_autoinc) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, no_autoinc);
     if (!no_autoinc) pp_install_call_autoinc(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
+static void pp_install_body_before_dsw(Graph *g) {
+    FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s;
+    Value *seqenv = NULL;
+    int active = 0, scans = 0, obj = 0, assembly = 0, linedir = 0;
+    if (!f) die("cannot open pp body manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp body column count");
+        if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
+            seqenv = mapseq_construct(value_json(field[8], "pp body sequences"), load_facts_expr(field[4]));
+        }
+        if (!active && !strcmp(field[0], "call") && !strcmp(field[1], "autoinc")) {
+            active = 1; free(s); continue;
+        }
+        if (!active) { free(s); continue; }
+        if (!strcmp(field[0], "template") && !strcmp(field[1], "dsw")) { free(s); break; }
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], "directive-scan")) {
+            Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
+            direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL); scans++;
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "object-predefine")) {
+            pp_install_stem(g, field[1], NULL, value_new(JOBJ), NULL); obj++;
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "assembly") &&
+                   !strcmp(field[2], "predefine")) {
+            Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ), *seqs = value_new(JOBJ);
+            if (!seqenv || !value_get(seqenv, "objname")) die("pp object name sequence missing");
+            direct_bindings(bind, field[7], facts); value_put(seqs, "name", value_get(seqenv, "objname"));
+            pp_install_stem(g, field[1], field[2], bind, seqs); assembly++;
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "linedir")) {
+            Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
+            direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL); linedir++;
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "shared-predefine")) {
+            /* This row belongs to --shared-predefines, not the default product route. */
+        } else if (!strcmp(field[0], "foreach")) {
+            /* Target specific predefinitions are installed by the next body slice. */
+            free(s); break;
+        } else die("unsupported pp body row before dsw");
+        free(s);
+    }
+    if (ferror(f) || fclose(f) || scans != 1 || obj != 1 || assembly != 1 || linedir != 1)
+        die("incomplete pp body before dsw");
+}
+static void inspect_pp_through_linedir(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    pp_install_prefix(&g, 0); pp_install_call_autoinc(&g); pp_install_body_before_dsw(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -2333,6 +2383,9 @@ int main(int argc, char **argv) {
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
         !strcmp(argv[1], "inspect-pp-through-autoinc")) {
         inspect_pp_through_autoinc(argv[2], argc == 4); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-linedir")) {
+        inspect_pp_through_linedir(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
