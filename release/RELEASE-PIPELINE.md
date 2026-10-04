@@ -203,3 +203,9 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **不要用只带 target_commitish 的 PATCH 去改草稿 release 的目标提交**，这会把 tag_name 冲成 untagged，qualification 随即报 “seal must be exactly one existing owner draft”。要改就把 tag_name 一起带上。
 - **comboot 被看门狗杀掉后会留下锁**：每次重试前 rmdir 掉 comb-build/<stage>.lock。如果 stage2 还没完成，stage3 会拿主检出里的旧 unisacc.com 去构建，所以必须先删掉 stage3 目录（X6）。
 - **在独立工作树里续跑队列时**，不要直接改工作树里的文件（release.sh 会拒绝脏树）。先在 main 上提交修复，再在工作树里 `git checkout --detach <新提交>`，从 results.json 删掉失败的条目，然后用同一个 QUEUE_WORKTREE 续跑。
+
+## 18. 0.0.25 起的发版顺序（P4、P5、P7）
+
+1. **封完立即开队列（P5）**：candidate.json 封装、gatedeps、rc 标签一完成，就启动 `release/tools/queue.sh`。队列跑在自己的 detached 工作树里，所以收口文档、草稿 release、release_prep 和 Apple 签名、Windows qualification 与 company 签名都在队列运行期间做。
+2. **平台验证与队列并行（P4）**：队列开跑的同时，后台启动 Linux 全套（`LIMA_VM=minicon-lnx-aarch64 SUITE_LIMIT=55 JOBS=1 ./tests/linux.sh all`）。Windows 部分不再开虚拟机，以 release-check 的 winsuite 为准（X7），回执里写 release-check 的 run id。机器偏热时把 Linux 全套挪到队列之后，不要让两者都满载。
+3. **字节不变的重封沿用队列状态（P7）**：如果重封只改了不进产品字节的文件（例如 unisa/ 的 Python 前端），候选字节和 artifact_sha256 不变，只有 sources_sha256 会变。这时**在同一个 CAND 目录里重建**，让 queue.sh 沿用 CAND.queue 状态，release.sh 只重跑依赖声明命中改动文件的作业。换目录会改变 MODEL_COM 路径，指纹随之全变，整轮重跑。0.0.24 第三次封装就是换了目录（cand3），所以重跑了全部 568 项。
