@@ -1728,9 +1728,9 @@ static void pp_install_stem(Graph *g, const char *stem, const char *section,
         else install_plain(g, path, i ? 'r' : 'b', bindings, sequences);
     }
 }
-static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
-    Graph g = {0}; Value *sequences = NULL; char *s; int start = 0, rows = 0;
+static void pp_install_prefix(Graph *g, int no_autoinc) {
+    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb");
+    Value *sequences = NULL; char *s; int start = 0, rows = 0;
     char *flags[] = {"--no-autoinc"};
     if (!manifest) die("cannot open pp body manifest");
     while ((s = line(manifest))) {
@@ -1744,7 +1744,7 @@ static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
         } else if (!strcmp(field[0], "table") && !strcmp(field[1], "start-byte.tsv")) {
             FILE *table = fopen("exec/pp/start-byte.tsv", "rb");
             if (!table || !sequences || start++) die("invalid pp prefix start");
-            install_delta_text(&g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
+            install_delta_text(g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
             if (fclose(table)) die("pp start table close failed");
         } else if (!strcmp(field[0], "rows") &&
                    (!strcmp(field[1], "cli") || !strcmp(field[1], "text") ||
@@ -1752,7 +1752,7 @@ static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
             Value *bindings = value_new(JOBJ), *facts = load_facts_expr(field[4]);
             if (strcmp(field[2], "-") || strcmp(field[8], "-")) die("unsupported pp prefix row");
             direct_bindings(bindings, field[7], facts);
-            pp_install_stem(&g, field[1], NULL, bindings,
+            pp_install_stem(g, field[1], NULL, bindings,
                             !strcmp(field[1], "cli") ? sequences : NULL);
             rows++;
         } else die("unsupported pp prefix manifest row");
@@ -1760,6 +1760,10 @@ static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
     }
     if (ferror(manifest) || fclose(manifest) || start != 1 || rows != 4)
         die("incomplete pp prefix");
+}
+static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
+    Graph g = {0}; FILE *out;
+    pp_install_prefix(&g, no_autoinc);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -1830,9 +1834,9 @@ static void pp_autoinc_block(Graph *g, PPRow *rows, size_t lo, size_t hi, int de
         i = j;
     }
 }
-static void inspect_pp_call_autoinc(const char *outpath) {
-    FILE *f = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
-    PPRow *rows = NULL; size_t n = 0, cap = 0; char *s; Graph g = {0};
+static void pp_install_call_autoinc(Graph *g) {
+    FILE *f = fopen("exec/pp/autoinc-manifest.tsv", "rb");
+    PPRow *rows = NULL; size_t n = 0, cap = 0; char *s;
     Value *env = value_new(JOBJ);
     if (!f) die("cannot open pp autoinc manifest");
     while ((s = line(f))) {
@@ -1845,7 +1849,18 @@ static void inspect_pp_call_autoinc(const char *outpath) {
         r->depth = depth;
     }
     if (ferror(f) || fclose(f)) die("pp autoinc manifest read failed");
-    pp_autoinc_block(&g, rows, 0, n, 0, env);
+    pp_autoinc_block(g, rows, 0, n, 0, env);
+}
+static void inspect_pp_call_autoinc(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    pp_install_call_autoinc(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
+static void inspect_pp_through_autoinc(const char *outpath, int no_autoinc) {
+    Graph g = {0}; FILE *out;
+    pp_install_prefix(&g, no_autoinc);
+    if (!no_autoinc) pp_install_call_autoinc(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -2315,6 +2330,10 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
+        !strcmp(argv[1], "inspect-pp-through-autoinc")) {
+        inspect_pp_through_autoinc(argv[2], argc == 4); return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
     }
