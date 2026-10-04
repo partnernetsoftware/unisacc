@@ -666,7 +666,11 @@ def _mapseq_each(self, spec, facts, bd):
                     for n in x[part["splice"]]:
                         acts.extend(out[n] if n in out else self.env[n])
                 elif all(x.get(c) == v for c, v in part.get("where", {}).items()):
-                    acts.extend(tuple(cell(c, x) for c in a) for a in part["acts"])
+                    if any(isinstance(a, (dict, str)) or a[0] in ("@out", "@bytes") for a in part["acts"]):
+                        ctx = dict(facts, **x)
+                        acts.extend(_mapseq0(self, {"value": [dict(acts=part["acts"])]}, ctx, bd)["value"])
+                    else:
+                        acts.extend(tuple(cell(c, x) for c in a) for a in part["acts"])
             out[_fmt(key, x)] = acts
     return out
 

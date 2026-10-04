@@ -387,14 +387,14 @@ def _ppsrc():
 def lexgen():
     """E1 lexer facts (was the module level of exec/lex/gen.py): token schema (weights/gold/parse.tsv tok),
     type keywords, byte classes and GCC words (weights/gold/lexcls.tsv, lexword.tsv), lex.tsv dispatch
-    rows as HANDLE/PEEKCLASS, word and punctuator tries, output sequences per token format
-    (plain / typed / positions), template byte classes."""
+    rows as HANDLE/PEEKCLASS, word and punctuator tries, token names and spelling
+    properties, template byte classes. Executable output/entry recipes live in lexer templates."""
     import json
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "exec"))
     from unisa.tsvgold import load_table
     from exec.facts.load import facts
-    from finite_rules import prefix_facts, rule_facts
+    from finite_rules import prefix_facts
     here = ROOT / "exec" / "lex"
     G = ROOT / "weights" / "gold"
     C = {r["name"]: r["value"] for r in facts("lex-consts")}
@@ -442,22 +442,10 @@ def lexgen():
         r = [l.split("\t") for l in path.read_text().splitlines() if l and not l.startswith("#")]
         assert r and len({x[0] for x in r}) == len(r), path
         return r
-    OUTPUT = {n: json.loads(a) for n, a in decl(here / "output.tsv")}
     SPELLING = {}
     for token, plain, typed in decl(here / "spelling.tsv"):
         assert token in TOKS and plain in ("yes", "no") and typed in ("yes", "no")
         SPELLING[token] = (plain == "yes", typed == "yes")
-
-    def outseq(seqname, **p):
-        res = []
-        for action in OUTPUT[seqname]:
-            v = [p[x[1:]] if isinstance(x, str) and x.startswith("$") else x for x in action]
-            if v[0] == "@bytes":
-                assert len(v) == 2 and isinstance(v[1], str)
-                res.extend(("OUT", ord(ch)) for ch in v[1])
-            else:
-                res.append(tuple(v))
-        return res
 
     KID, KNUM, KSTR = C["KID"], C["KNUM"], C["KSTR"]
     ALLB = list(range(EOF + 1))
@@ -475,18 +463,12 @@ def lexgen():
                     ifskip=opt(p["name"] in SKIPPAREN), ifdrop=opt(p["name"] in DROP),
                     iftoken=opt(p["name"] not in SKIPPAREN and p["name"] not in DROP),
                     ifpfxch=opt(p["name"] in CHARPFX), ifpfxstr=opt(p["name"] in STRPFX)) for p in IDPFX]
-    ENTRY = rule_facts(here / "entry.tsv")
-    assert set(ENTRY) == set(head), "entry actions must cover lex.tsv exactly"
-    LINKS = ("@identifier", "@number", "@punctuator")
-    assert all(r["actions"] == "[]" for rs in ENTRY.values() for r in rs if r["target"] in LINKS)
+    assert set(head) == {"skip", "nl", "linecmt", "cmt", "ident", "num", "op", "str", "charlit", "bad"}
 
     def handle(state, cls, act, peek=()):
-        rs = ENTRY[act]
-        return dict(state=state, cls=cls, act=act, peek=list(peek), peekstate=[{"name": cls}] if peek else [],
-                    plain=[r for r in rs if r["target"] not in LINKS],
-                    identifier=[r for r in rs if r["target"] == "@identifier"],
-                    number=[r for r in rs if r["target"] == "@number"],
-                    punctuator=[r for r in rs if r["target"] == "@punctuator"])
+        return dict(state=state, cls=cls, act=act, peek=list(peek),
+                    peekstate=[{"name": cls}] if peek else [],
+                    **{name: opt(act == name) for name in head})
     BYTECLASSES = {cl: [c for c in ALLB if CLS[c] == cl] for cl in CLASSES}
     HANDLE = [handle("DISPATCH", cl, rowconst[cl]) for cl in CLASSES if rowconst[cl] is not None]
     PEEKCLASS = [{"name": cl} for cl in CLASSES if rowconst[cl] is None]
@@ -497,34 +479,16 @@ def lexgen():
             acts = list(dict.fromkeys(r["act"] for r in peek))
             HANDLE += [handle("H:" + a, cl, a, peek if i == 0 else ()) for i, a in enumerate(acts)]
 
-    def sequences(typed, positions):
-        position = lambda reg: outseq("position", start=reg) if positions else []
-        def emit(k, span=("S", None)):
-            name = TOKS[k]
-            a = position(span[0]) + outseq("name", name=name)
-            if SPELLING.get(name, (False, False))[int(typed)]:
-                a += outseq("span2" if span[1] else "span", start=span[0], end=span[1])
-            return a + outseq("end")
-        S = {n: outseq(n) for n in ("scan.start", "scan.advance", "punct.reject")}
-        S.update({"accept.yes": outseq("scan.accept"), "accept.no": [], "rewind.yes": [], "rewind.no": outseq("scan.rewind"),
-                  "eof": ([("MARK", "S")] + position("S") if positions else []) + outseq("eof")})
-        for k in range(len(TOKS)):
-            S["tok.%d" % k] = emit(k)
-            S["bounded.%d" % k] = emit(k, ("S", "E"))
-        # number.tsv / literal.tsv sequences (were install_rules arguments)
-        S["number"] = emit(KNUM)
-        S["string"] = [("JUMP", "E")] + emit(KSTR)
-        return S
+    tokens = [dict(kind=k, name=n, plain_spell=SPELLING.get(n, (False, False))[0],
+                   typed_spell=SPELLING.get(n, (False, False))[1]) for k, n in enumerate(TOKS)]
     classes = dict(BYTECLASSES, identifier=[c for c in ALLB if c != EOF and (isal(c) or isdi(c))], space=list(WS))
     out = ["=HANDLE\tjson\t" + json.dumps(HANDLE), "=PEEKCLASS\tjson\t" + json.dumps(PEEKCLASS),
            "=IDROOT\tjson\t" + json.dumps(IDROOT["children"]),
-           "=NSTART\tjson\t" + json.dumps(rule_facts(here / "number.tsv")["NSTART"]),
            "=OPROOT\tjson\t" + json.dumps(OPROOT["children"]), "=IDPFX\tjson\t" + json.dumps(IDFACTS),
            "=OPPFX\tjson\t" + json.dumps(OPPFX), "=KID\tjson\t" + json.dumps([KID]),
            "=classes\tjson\t" + json.dumps(classes), "=literalclasses\tjson\t" + json.dumps({"space": list(WS)}),
            "=tok_names\tjson\t" + json.dumps(list(TOKS))]
-    for name, typed, positions in (("plain", False, False), ("typed", True, False), ("positions", True, True)):
-        out.append("=seq_%s\tjson\t%s" % (name, json.dumps(sequences(typed, positions))))
+    out.append("=tokens\tjson\t" + json.dumps(tokens))
     return out
 
 
@@ -1212,7 +1176,7 @@ TABLES = [
     ("k2-gen2-tokens", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
     ("k2-units-tokens", ["exec/build/parsebase.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
     ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
-    ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
+    ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),

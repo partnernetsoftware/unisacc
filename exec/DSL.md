@@ -94,14 +94,14 @@
 | 项 | 代码 | 清单 | facts |
 |---|---|---|---|
 | 其它 `.format` 路径（经 _fmt 的 `$$` 键、`fresh:` scope、foreach over/allowed/where、freshrows 已随 T1b 改用最小插值；仍直接调 str.format 的：foreach join default、mapseq、fresh 表 owner） | A:193, A:203, A:486-500, A:536-560, A:400-412, A:655-665, A:381 | 随宿主键计 | — |
-| `=vN` 绑定（翻译器生成的匿名标量 fact，以裸路径 `k=vN` 引用） | A:68-69, A:205 | 3796 / 19（libraryvariadic 1694、bitfields 350、functiontypes 276、librarydata 180、enumtypes 116 …） | 627 / 17（printfcontrol 282、libraryvariadic 121、k2-librarydata 61、bitfields 40、functiontypes 36 …） |
+| `=vN` 绑定（翻译器生成的匿名标量 fact，以裸路径 `k=vN` 引用） | A:68-69, A:205 | 2085 / 17（bitfields 350、functiontypes 276、librarydata 180、enumtypes 116 …） | 489 / 15（printfcontrol 282、k2-librarydata 61、bitfields 40、functiontypes 36 …） |
 | 隐式顺序：`fresh:` 单元按行序/单元序分配 | A:201-204, A:207-214 | 2439 / 59 | 0 |
 | 隐式顺序：`freshrows` 按行序分配 | A:524-561 | 209 / 41 | 0 |
 | 隐式顺序：`once` 截断余下行 | A:252-257 | 3 / 3 | 0 |
 | 隐式顺序：`ordered` | A:330 | 1 | 0 |
 | facts 里残留的动作序列（单元含 `[["OP",…` JSON） | — | — | 2489 处 / 27 文件（pp-autoinc-gen 1096、lex-gen 432、printfcontrol 274、k2-control 213、k2-gen2 142、k2-call 92 …） |
 
-T1e：上述冻结统计中的 `pp-autoinc-gen` 已由 1096 处迁到 0；动作模板位于 `exec/pp/autoinc-manifest.tsv` 的 `mapseq` 声明。facts 只带函数/宏/头文件名、依赖槽偏移和有序列表的序号/区间/末项标记，状态名和动作不再由 facts 生产者给出。13 个 pp 图哈希保持原值；未扩展 op、opts 键或值前缀。其余表仍待逐片迁移。
+T1e：上述冻结统计中的 `pp-autoinc-gen` 已由 1096 处迁到 0；动作模板位于 `exec/pp/autoinc-manifest.tsv` 的 `mapseq` 声明。facts 只带函数/宏/头文件名、依赖槽偏移和有序列表的序号/区间/末项标记，状态名和动作不再由 facts 生产者给出。13 个 pp 图哈希保持原值；未扩展 op、opts 键或值前缀。lex-gen 的 432 个输出动作序列也已降为 0，连同入口与 NSTART 的转义 JSON 动作副本迁回 `exec/lex/output-manifest.tsv` / `gen-template.tsv`。facts 保留 token 名字、拼写属性、字节分类与前缀树。五种 lex 图哈希不变。动态命名 mapseq 复用同一已有动作展开器，未增加 op、opts 键或值前缀。其余表仍待逐片迁移。
 | facts 里的 `"exit"` 动作 | — | 15 / 5 | 9 / 3（lower-code 6、k2-gen2 2、returnwarnings-text 1） |
 | 死数据：无清单或 py 引用的 facts 表 | — | — | 0（`nativeabi-ordered-regs.tsv` 已于 T1f 删除） |
 | 死代码：`tape:` fresh、`fresh` op 名 | A:150, A:289 | `tape:` 0；op `fresh` 0 | — |
