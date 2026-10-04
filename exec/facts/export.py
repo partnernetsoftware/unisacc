@@ -864,40 +864,35 @@ def nativeabi():
 
 
 def ppautoinc():
-    """E2 autoinc + -ftrim-libc chains (was exec/pp/gen.py build_autoinc/build_ftrim_libc): the
-    libneed closure table (unisa/libneed.py over include/), autoinc header names (hdrneeded's line
-    rule), as rows with their chain labels and constant-spelling action lists."""
+    """Autoinc domain data: library names, closure slots and header order.
+
+    Ordinal intervals describe source-list order; state spelling and all action
+    recipes belong to exec/pp/autoinc-manifest.tsv, not this producer.
+    """
     import json
     E = _ppsrc()
     from unisa.libneed import table, roots, PREFIX
     inc = str(ROOT / "include")
     keys, closure, bodies = table(inc)
     index = {b: i for i, b in enumerate(bodies)}
-    def marks(names):
-        out = []
-        for b in names:
-            out += [("LDI", "t", E.NEEDB + index[b]), ("LDI", "v", 1), ("STX", "t", 0, "v")]
-        return out
-    K = [dict(entry="LNK%d" % i, test="LNK%dr" % i, next="LNK%d" % (i + 1) if i + 1 < len(keys) else "LNB0",
-              name=E.sbconst(k), mark=marks(closure[k])) for i, k in enumerate(keys)]
-    B = [dict(entry="LNB%d" % j, test="LNB%dr" % j, next="LNB%d" % (j + 1) if j + 1 < len(bodies) else "LNDEF",
-              define="LNB%dd" % j, resume="LNB%ddr" % j, slot=E.NEEDB + j, name=E.sbconst(PREFIX + b)) for j, b in enumerate(bodies)]
+    def slots(names):
+        return [dict(offset=E.NEEDB + index[b]) for b in names]
+    K = [dict(id=i, end=i + 1, terminal=i + 1 == len(keys),
+              name=k, slots=slots(closure[k])) for i, k in enumerate(keys)]
+    B = [dict(id=j, end=j + 1, terminal=j + 1 == len(bodies),
+              slot=E.NEEDB + j, name=PREFIX + b) for j, b in enumerate(bodies)]
     amap, H = E.autoinc_map(), list(E.AUTOINC_ORDER)
     HD = []
     for h, hn in enumerate(H):
         names = [n for n in amap[hn] if n != "printf"]
-        nxt = "AH%d_0" % (h + 1) if h + 1 < len(H) else "AEM"
-        HD.append(dict(entry="AH%d_0" % h, first="AH%d_n0" % h, last="AH%d_n%d" % (h, len(names)), next=nxt, need="NEED%d" % h,
-                       names=[dict(entry="AH%d_n%d" % (h, k), test="AH%d_r%d" % (h, k), found=nxt, next="AH%d_n%d" % (h, k + 1),
-                                   need="NEED%d" % h, name=E.sbconst(nm)) for k, nm in enumerate(names)]))
-    def line(hn):
-        return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()] + [("ALUI", "add", "AI_LINES", "AI_LINES", 1)]
-    EM = [dict(entry="AEM", test="AEMR", need="RTP", next="AEM%d" % (len(H) - 1), line=line("stdio.h"))]
-    EM += [dict(entry="AEM%d" % h, test="AEM%dr" % h, need="NEED%d" % h, next="AEM%d" % (h - 1) if h else "ACP0", line=line(H[h]))
+        HD.append(dict(id=h, end=h + 1, terminal=h + 1 == len(H), count=len(names),
+                       names=[dict(id=k, end=k + 1, name=nm) for k, nm in enumerate(names)]))
+    EM = [dict(special=True, id=len(H), end=len(H) - 1, terminal=False, header="stdio.h")]
+    EM += [dict(special=False, id=h, end=h - 1, terminal=h == 0, header=H[h])
            for h in range(len(H) - 1, -1, -1)]
-    return ["=idclass\tjson\t" + json.dumps(sorted(E.ID)), "=roots\tjson\t" + json.dumps(marks(roots(inc))),
+    return ["=idclass\tjson\t" + json.dumps(sorted(E.ID)), "=roots\tjson\t" + json.dumps(slots(roots(inc))),
             "=keys\tjson\t" + json.dumps(K), "=bodies\tjson\t" + json.dumps(B),
-            "=lndef\tjson\t" + json.dumps(E.sbconst("__UNISA_FTRIM_LIBC")),
+            "=lndef\tstr\t__UNISA_FTRIM_LIBC",
             "=headers\tjson\t" + json.dumps(HD), "=emits\tjson\t" + json.dumps(EM)]
 
 

@@ -100,6 +100,8 @@
 | 隐式顺序：`once` 截断余下行 | A:252-257 | 3 / 3 | 0 |
 | 隐式顺序：`ordered` | A:330 | 1 | 0 |
 | facts 里残留的动作序列（单元含 `[["OP",…` JSON） | — | — | 2489 处 / 27 文件（pp-autoinc-gen 1096、lex-gen 432、printfcontrol 274、k2-control 213、k2-gen2 142、k2-call 92 …） |
+
+T1e：上述冻结统计中的 `pp-autoinc-gen` 已由 1096 处迁到 0；动作模板位于 `exec/pp/autoinc-manifest.tsv` 的 `mapseq` 声明。facts 只带函数/宏/头文件名、依赖槽偏移和有序列表的序号/区间/末项标记，状态名和动作不再由 facts 生产者给出。13 个 pp 图哈希保持原值；未扩展 op、opts 键或值前缀。其余表仍待逐片迁移。
 | facts 里的 `"exit"` 动作 | — | 15 / 5 | 9 / 3（lower-code 6、k2-gen2 2、returnwarnings-text 1） |
 | 死数据：无清单或 py 引用的 facts 表 | — | — | 0（`nativeabi-ordered-regs.tsv` 已于 T1f 删除） |
 | 死代码：`tape:` fresh、`fresh` op 名 | A:150, A:289 | `tape:` 0；op `fresh` 0 | — |
