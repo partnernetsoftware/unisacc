@@ -810,19 +810,20 @@ def nativeabi():
     assert ext == list(range(1, 17)) and ali == [1, 2, 4, 8]
     assert [x[1] for x in decl if x[0] == "ordered_anon_policy"] == ["invariant_integer_lanes"]
     geq = {r["name"]: r["value"] for r in facts("top-modelgraphequality-banks")}
-    seq = {}
+    ordered = {}
     for ln in (ROOT / "exec/nativeabi/ordered-result.tsv").read_text().splitlines()[1:]:
         for a in json.loads(ln.split("\t")[4]):
-            if a[0] == "@" and a[1] not in seq:
+            if a[0] == "@" and a[1] not in ordered:
                 kind, index, reg, node = a[1].split()
-                if kind == "field":
-                    seq[a[1]] = [["ALUI", "mul", "nc_key", node, 16], ["ALUI", "add", "nc_key", "nc_key", int(index)], ["LDX", reg, "nc_key", geq["FIELDS"]]]
-                else:
-                    seq[a[1]] = [["ALUI", "mul", "nc_key", node, 8], ["ALUI", "add", "nc_key", "nc_key", int(index)], ["LDX", reg, "nc_key", geq["EXTRA"]]]
+                assert kind in ("field", "extra")
+                ordered[a[1]] = dict(name=a[1], index=int(index), reg=reg, node=node,
+                                     stride=16 if kind == "field" else 8,
+                                     bank=geq["FIELDS"] if kind == "field" else geq["EXTRA"])
     gf = [dict(section=a, name=b, prefix=c, kind=d) for a, b, c, d in (l.split("\t") for l in (ROOT / "exec/nativeabi/gen-fresh.tsv").read_text().splitlines()[1:])]
     of = [dict(section=a, name=b, kind=c) for a, b, c in (l.split("\t") for l in (ROOT / "exec/nativeabi/ordered-fresh.tsv").read_text().splitlines()[1:])]
     return ["=T\tjson\t" + T, "=A\tjson\t" + json.dumps(A), "=extents\tjson\t" + json.dumps(ext),
-            "=alignments\tjson\t" + json.dumps(ali), "=ordseq\tjson\t" + json.dumps(seq),
+            "=alignments\tjson\t" + json.dumps(ali), "=ordseq_names\tjson\t" + json.dumps(list(ordered)),
+             "=ordseq_rows\tjson\t" + json.dumps(list(ordered.values())),
             "=genfresh\tjson\t" + json.dumps(gf), "=ordfresh\tjson\t" + json.dumps(of),
             "=reject\tjson\t" + json.dumps(facts("nativeabi-gen-reject"))]
 
