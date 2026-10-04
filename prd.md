@@ -27,6 +27,7 @@
 | v0.0.22 | [archive/plans/v0.0.22.md](archive/plans/v0.0.22.md) — 已公开版本的两个产品错码修复（函数名 r0–r7、赋值表达式）、TDD 套件 declmatrix/csmithdiff/declshape 与参考 11 处修复、发版绑定 rc 标签与发布后冒烟、Windows dup/spawn | **已公开 2026-10-03**（signed sha256 5d47aed6…，[回执](research/r22-release-acceptance.json)） |
 | v0.0.23 | [archive/plans/v0.0.23.md](archive/plans/v0.0.23.md) — 产品追平余项（第二次顺延，本版了结或砍掉）、产品诊断定案、依赖声明、A2 实验、0.0.22 发版暴露的问题；R20-1 B 降级到 0.1.x | 未公开（主人 2026-10-04 决定删除草稿，内容并入 0.0.24） |
 | v0.0.24 | [archive/plans/v0.0.24.md](archive/plans/v0.0.24.md) — DSL 冻结规格与 T1 清理（facts 动作序列减 400 处）、逐条目契约六个阶段、门禁依赖声明收窄、kill/ttyname、Python 参考 extern 修复与 difftest-py 门禁 | **已公开 2026-10-04**（signed sha256 dca05a96…，[回执](research/r24-release-acceptance.json)） |
+| v0.0.25 | [plans/v0.0.25.md](plans/v0.0.25.md) — 0.0.24 复盘的流程项 P1–P7（冻结窗口拦截、复活扫描、facts 门禁等）、Windows 测试迁到 GitHub runner（X7，UTM 只排查）、T1e 收尾、T2 表行覆盖率、DNS 转发系统 libc（N1）、POSIX 缺口清单（N2） | 进行中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
