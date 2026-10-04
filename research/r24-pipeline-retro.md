@@ -4,7 +4,7 @@
 
 ## 0. 数据来源与口径
 
-- **git**：m4pro 上的 `/Users/wjc/repos/unisacc`，从 `abaa30fb`（11:50:18，plans/v0.0.24.md 第一次提交）到 `dd3a9372`（20:10:43，research/r24-release-acceptance.json 验收回执），共 108 个提交。作者和提交者都是 wanjochan，看不出 cc 和 cdx 谁提交的；cdx 的工作只能从提交说明里的“(cdx …)”或“cdx diagnosis”这类标注认出来。
+- **git**：m4pro 上的 `/Users/wjc/repos/unisacc`，从 `abaa30fb`（11:50:18，archive/plans/v0.0.24.md 第一次提交）到 `dd3a9372`（20:10:43，research/r24-release-acceptance.json 验收回执），共 108 个提交。作者和提交者都是 wanjochan，看不出 cc 和 cdx 谁提交的；cdx 的工作只能从提交说明里的“(cdx …)”或“cdx diagnosis”这类标注认出来。
 - **巡检快照**：盒子上 `/workspace/ceo/live/15m-20261004-*.md`，以及同一时刻的 `15m-agents-summary-*.txt` 和 `*-bottom-*.txt`，每份间隔约 15 分钟，覆盖 11:33 到 20:19。
 - **GitHub Actions**：盒子上的 gh（账号 mgttt）能读 `partnernetsoftware/unisacc`。用 `gh run list` 取了运行记录，UTC 已换算成 SGT。
 - **m4pro 上的文件时间戳**：`/tmp/r24-release/`（公证、签名产物）、`/tmp/seed-0.0.24{,b,c}`（三次封装的 seed）、`/tmp/unisacc-queue-22305f93` 和 `/tmp/unisacc-queue-42ae070a`（两次发版队列的工作树）。

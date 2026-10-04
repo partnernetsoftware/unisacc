@@ -2,7 +2,7 @@
 """winsuite: the Windows probes that used to need the UTM VM, split into prepare and run (0.0.25 X7).
 
   tests/winsuite.py prepare OUT UA   on a POSIX host: build every probe for win/arm64 and win/x86_64
-                                     and record the expected output, into OUT/manifest.json
+                                     and record the expected outputs in a manifest.json inside OUT
   tests/winsuite.py run OUT [ARCH]   on a Windows machine: run the probes for ARCH (default: this
                                      machine's architecture) and compare; exit 1 on any mismatch or missing exe
 
