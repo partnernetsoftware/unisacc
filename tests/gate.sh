@@ -420,6 +420,7 @@ job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located
 job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
+job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job freezecheck python3 ./tests/freezecheck.py   # 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
 job revivedscan python3 ./tests/revivedscan.py   # 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here

@@ -51,6 +51,8 @@ SEED_WHITELIST = ('exec/finite_rules.py', 'exec/assemble.py', 'exec/facts/export
 # check and reference-simulator tools: to move to the tests/ side, not counted
 SEED_TOOLS = re.compile(r'(check|sim|compare|roundtrip|cut)\.py$')
 
+SEEDPY_CAP, ASSEMBLE_CAP = 1, 679   # 2026-10-04 measured; ratchet down, never up
+
 def seedpy():
     counts, tools = {}, []
     for f in sorted(ROOT.joinpath('exec').rglob('*.py')):
@@ -62,9 +64,14 @@ def seedpy():
         if '--list' in sys.argv: print('  stage    %s' % rel)
     for t in tools: print('  tool     %s' % t)
     for d, n in sorted(counts.items()): print('  %-10s %4d' % (d, n))
-    print('seedpy  stage-specific .py under exec/ %d   (check/sim tools %d, not counted; report only)'
-          % (sum(counts.values()), len(tools)))
-    return 0
+    n = sum(counts.values())
+    # 0.0.25 X8: was report-only (always 0) and ungated.  Now a ratchet: may only fall.  assemble.py
+    # carries its own ceiling until k2-boundary P5 (<= ~400 lines) is met; lower both as they fall.
+    asm = len((ROOT / 'exec/assemble.py').read_text().splitlines())
+    bad = n > SEEDPY_CAP or asm > ASSEMBLE_CAP
+    print('seedpy  stage-specific .py under exec/ %d (cap %d)   assemble.py %d lines (cap %d, P5 target 400)   (check/sim tools %d, not counted)%s'
+          % (n, SEEDPY_CAP, asm, ASSEMBLE_CAP, len(tools), '   ROSE' if bad else ''))
+    return 1 if bad else 0
 
 OP_CAP, OP_FORBIDDEN = 12, ('py', 'retarget')
 
