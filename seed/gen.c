@@ -345,7 +345,7 @@ static Value *value_path(Value *root, const char *path) {
             if (end == p || *end || i >= v->n) die("invalid fact list index");
             v = v->items[i].value;
         } else v = value_get(v, p);
-        if (!v) die("unknown fact path");
+        if (!v) { fprintf(stderr, "unknown fact path: %s\n", path); die("unknown fact path"); }
         if (!dot) break; p = dot + 1;
     }
     free(parts); return v;
@@ -378,6 +378,16 @@ static int when_true(const char *when, int argc, char **argv) {
     }
     free(parts); return 1;
 }
+static Value *value_field(Value *env, const char *name) {
+    const char *open = strchr(name, '['); size_t n = strlen(name);
+    if (open && n && name[n - 1] == ']') {
+        char *root = copy_n(name, (size_t)(open - name));
+        char *key = copy_n(open + 1, n - (size_t)(open - name) - 2);
+        Value *v = value_get(value_get(env, root), key);
+        free(root); free(key); return v;
+    }
+    return value_get(env, name);
+}
 static char *interpolate(const char *text, Value *env) {
     size_t cap = strlen(text) + 64, n = 0, i; char *out = grow(NULL, cap, 1);
     for (i = 0; text[i]; i++) {
@@ -386,7 +396,7 @@ static char *interpolate(const char *text, Value *env) {
             const char *end = strchr(text + i + 1, '}'); Value *v; char *key;
             if (!end) die("unterminated interpolation");
             key = copy_n(text + i + 1, (size_t)(end - text - i - 1));
-            v = value_get(env, key); free(key);
+            v = value_field(env, key); free(key);
             if (!v || (v->kind != JSTR && v->kind != JINT)) die("unknown interpolation fact");
             if (v->kind == JINT) { snprintf(number, sizeof(number), "%lld", v->number); part = number; }
             else part = v->s;
@@ -445,10 +455,10 @@ static void direct_bindings(Value *bindings, const char *text, Value *facts) {
         if (comma) *comma = 0;
         if (!eq || eq == p || !eq[1]) die("invalid binding cell");
         *eq = 0;
-        if (!strncmp(eq + 1, "@str:", 5)) {
+        if (!strncmp(eq + 1, "@str:", 5) || !strncmp(eq + 1, "@fmt:", 5)) {
             char *s = interpolate(eq + 6, facts);
             v = value_string(s); free(s);
-        } else v = value_path(facts, eq + 1);
+        } else v = value_path(facts, eq[1] == '$' ? eq + 2 : eq + 1);
         value_put(bindings, p, v);
         if (!comma) break; p = comma + 1;
     }
@@ -460,7 +470,7 @@ static Value *map_cell(Value *source, Value *ctx) {
     s = source->s; n = strlen(s);
     if (n > 1 && s[0] == '$') return value_path(ctx, s + 1);
     if (n >= 3 && s[0] == '{' && s[n - 1] == '}' && !strchr(s + 1, '{')) {
-        char *key = copy_n(s + 1, n - 2); Value *v = value_get(ctx, key);
+        char *key = copy_n(s + 1, n - 2); Value *v = value_field(ctx, key);
         free(key); if (!v) die("unknown mapseq cell"); return v;
     }
     { char *text = interpolate(s, ctx); Value *v = value_string(text); free(text); return v; }
@@ -1550,6 +1560,40 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
 }
+static void inspect_pp_key(const char *outpath, size_t index) {
+    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *keys = value_get(facts, "keys");
+    Graph g = {0}; char *s; int found = 0;
+    if (!manifest || !keys || keys->kind != JARR || index >= keys->n) die("invalid pp key index");
+    value_put(facts, "it", keys->items[index].value);
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        if (!strcmp(field[0], ".rows") && !strcmp(field[1], "ftrim-libc-key")) {
+            Value *it = value_get(facts, "it"), *terminal = value_get(it, "terminal");
+            Value *bindings = value_new(JOBJ), *opts = value_json(field[8], "pp key options");
+            Value *sequences; char path[1024], next[64];
+            if (terminal->kind != JBOOL) die("invalid pp key terminal");
+            if (terminal->number) strcpy(next, "LNB0");
+            else if (snprintf(next, sizeof(next), "LNK%lld", value_get(it, "end")->number) >= (int)sizeof(next))
+                die("pp key successor too long");
+            value_put(facts, "key_next", value_string(next));
+            direct_bindings(bindings, field[7], facts);
+            sequences = mapseq_construct(opts, facts);
+            for (int i = 0; i < 2; i++) {
+                if (snprintf(path, sizeof(path), "exec/pp/ftrim-libc-key-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
+                    die("pp key path too long");
+                install_plain(&g, path, i ? 'r' : 'b', bindings, sequences);
+            }
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp key row missing");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
+}
 static void inspect_pp_autoinc(const char *stem, const char *outpath) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; int found = 0;
@@ -1895,6 +1939,11 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-pp-key")) {
+        char *end; unsigned long index = strtoul(argv[2], &end, 10);
+        if (end == argv[2] || *end) die("invalid pp key index");
+        inspect_pp_key(argv[3], index); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-autoinc")) {
         inspect_pp_autoinc(argv[2], argv[3]); return 0;
     }
