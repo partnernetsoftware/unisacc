@@ -614,6 +614,19 @@ static void rule_keys(RuleState *s, const char *keys, const char *target, const 
     }
     free(work);
 }
+static void rule_keys_classes(RuleState *s, const char *keys, const char *target,
+                              const char *actions, Value *classes) {
+    if (keys[0] == '@') {
+        Value *v = value_get(classes, keys + 1);
+        if (!v || v->kind != JARR || !v->n) die("unknown rule class");
+        for (size_t i = 0; i < v->n; i++) {
+            Value *item = v->items[i].value;
+            if (item->kind != JINT || item->number < 0 || item->number > 256)
+                die("invalid rule class member");
+            rule_add(s, (int)item->number, target, actions);
+        }
+    } else rule_keys(s, keys, target, actions);
+}
 static int seq(Graph *g, const char *actions) {
     size_t i;
     for (i = 0; i < g->ns; i++) if (!strcmp(g->seq[i], actions)) return (int)i;
@@ -710,8 +723,8 @@ static void finish(Graph *g);
 static const char *bound_name(const char *s, Value *bindings) {
     return *s == '$' ? value_text(value_get(bindings, s + 1)) : s;
 }
-static void install_plain(Graph *g, const char *path, char mode,
-                          Value *bindings, Value *sequences) {
+static void install_plain_classes(Graph *g, const char *path, char mode,
+                                  Value *bindings, Value *sequences, Value *classes) {
     FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
     if (!f) die("cannot open rule file");
     while ((s = line(f))) {
@@ -724,7 +737,7 @@ static void install_plain(Graph *g, const char *path, char mode,
             if (st->def_target) die("repeated default rule");
             st->def_target = copy(bound_name(field[2], bindings));
             st->def_actions = copy(field[3]);
-        } else rule_keys(st, field[1], bound_name(field[2], bindings), field[3]);
+        } else rule_keys_classes(st, field[1], bound_name(field[2], bindings), field[3], classes);
         free(s);
     }
     if (ferror(f) || fclose(f)) die("rule read failed");
@@ -750,8 +763,13 @@ static void install_plain(Graph *g, const char *path, char mode,
         }
     }
 }
-static void install_section(Graph *g, const char *path, const char *section,
-                            char mode, Value *bindings, Value *sequences) {
+static void install_plain(Graph *g, const char *path, char mode,
+                          Value *bindings, Value *sequences) {
+    install_plain_classes(g, path, mode, bindings, sequences, NULL);
+}
+static void install_section_classes(Graph *g, const char *path, const char *section,
+                                    char mode, Value *bindings, Value *sequences,
+                                    Value *classes) {
     FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
     if (!f) die("cannot open section rule file");
     while ((s = line(f))) {
@@ -765,7 +783,7 @@ static void install_section(Graph *g, const char *path, const char *section,
             if (st->def_target) die("repeated section default");
             st->def_target = copy(bound_name(field[3], bindings));
             st->def_actions = copy(field[4]);
-        } else rule_keys(st, field[2], bound_name(field[3], bindings), field[4]);
+        } else rule_keys_classes(st, field[2], bound_name(field[3], bindings), field[4], classes);
         free(s);
     }
     if (ferror(f) || fclose(f)) die("section rule read failed");
@@ -788,6 +806,10 @@ static void install_section(Graph *g, const char *path, const char *section,
             }
         }
     }
+}
+static void install_section(Graph *g, const char *path, const char *section,
+                            char mode, Value *bindings, Value *sequences) {
+    install_section_classes(g, path, section, mode, bindings, sequences, NULL);
 }
 static void install_prn_call(Graph *g) {
     FILE *f = fopen("exec/parse/prn-manifest.tsv", "rb"); char *s;
@@ -824,10 +846,100 @@ static void install_prn_call(Graph *g) {
         install_section(g, "exec/parse/numeric-result.tsv", "prn", 'r', bindings, empty);
     }
 }
-static void construct_opt_o1(Graph *g) {
+static void install_numout_call(Graph *g) {
+    FILE *f = fopen("exec/parse/numout-manifest.tsv", "rb"); char *s;
+    int rows = 0;
+    if (!f) die("cannot open numout manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9);
+        if (n != 9 || strcmp(field[0], "rows") || strcmp(field[1], "numeric") ||
+            strcmp(field[2], "numout") || strcmp(field[3], "-"))
+            die("unsupported numout manifest row");
+        {
+            Value *facts = load_facts_expr(field[4]);
+            Value *opts = value_json(field[8], "numout options");
+            Value *bindings = fresh_bindings(opts, facts);
+            Value *empty = value_new(JOBJ);
+            direct_bindings(bindings, field[7], facts);
+            install_section(g, "exec/parse/numeric-byte.tsv", "numout", 'b', bindings, empty);
+            install_section(g, "exec/parse/numeric-result.tsv", "numout", 'r', bindings, empty);
+        }
+        rows++;
+        free(s);
+    }
+    if (ferror(f) || fclose(f) || rows != 1) die("numout manifest read failed");
+}
+static Value *classes_for(Value *opts, Value *facts) {
+    Value *spec = value_get(opts, "classmap"), *classes = value_new(JOBJ);
+    if (!spec) return classes;
+    if (spec->kind != JOBJ) die("invalid classmap");
+    for (size_t i = 0; i < spec->n; i++) {
+        Value *source = value_path(facts, value_text(spec->items[i].value));
+        Value *array = value_new(JARR);
+        if (source->kind == JARR) array = source;
+        else value_put(array, NULL, source);
+        value_put(classes, spec->items[i].key, array);
+    }
+    return classes;
+}
+static void install_opt_rows(Graph *g, const char *stem, const char *section,
+                             Value *opts, Value *facts, const char *bind,
+                             Value *sequences, Value **exported) {
+    char path[1024]; Value *bindings = fresh_bindings(opts, facts);
+    Value *bindmap = value_get(opts, "bindmap"), *classes = classes_for(opts, facts);
+    if (bindmap) {
+        Value *map = value_path(facts, value_text(bindmap));
+        if (map->kind != JOBJ) die("bindmap is not an object");
+        for (size_t i = 0; i < map->n; i++) value_put(bindings, map->items[i].key, map->items[i].value);
+    }
+    direct_bindings(bindings, bind, facts);
+    if (exported) *exported = bindings;
+    for (int i = 0; i < 2; i++) {
+        if (snprintf(path, sizeof(path), "exec/opt/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
+            die("opt rule path too long");
+        if (section && strcmp(section, "-"))
+            install_section_classes(g, path, section, i ? 'r' : 'b', bindings, sequences, classes);
+        else install_plain_classes(g, path, i ? 'r' : 'b', bindings, sequences, classes);
+    }
+}
+static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
+    FILE *f = fopen("exec/opt/setup-template.tsv", "rb"); char *s; int rows = 0;
+    Value *y = value_get(facts, "Y");
+    if (!f || !y || y->kind != JARR) die("invalid opt answer template");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9);
+        if (n != 9 || strcmp(field[0], "answer") || strcmp(field[1], "answer") ||
+            strcmp(field[4], "rule") || strcmp(field[8], "[]")) die("unsupported opt answer template row");
+        if (!strcmp(field[3], "Y")) {
+            for (size_t i = 0; i < y->n; i++) {
+                Value *item = y->items[i].value;
+                char key[32]; const char *name = bound_name(field[5], bindings);
+                Value *ix = value_get(item, "i");
+                if (!ix || ix->kind != JINT) die("invalid opt answer index");
+                number_text((int)ix->number, key);
+                edge_add(g, name, 'r', key, value_text(value_get(item, "target")), "[]");
+            }
+        } else if (!strcmp(field[3], "-")) {
+            const char *name = bound_name(field[5], bindings);
+            for (int k = 0; k <= 256; k++) {
+                char key[16]; number_text(k, key);
+                edge_add(g, name, 'r', key, field[7], "[]");
+            }
+        } else die("unsupported opt answer iterator");
+        rows++; free(s);
+    }
+    if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
+}
+static void construct_opt(Graph *g, int o2) {
     FILE *f = fopen("exec/opt/gen-manifest.tsv", "rb"); char *s;
     Value *seqenv = value_new(JOBJ), *rounds = value_new(JOBJ), *empty = value_new(JOBJ);
-    int prn = 0, scans = 0, maps = 0, setup = 0, roundlet = 0, common = 0, one = 0;
+    int prn = 0, numout = 0, scans = 0, maps = 0, setup = 0, answer = 0;
+    int roundlet = 0, common = 0, level = 0, extra = 0;
+    char *flags[] = {"--o2"};
     fresh_count = 0;
     if (!f) die("cannot open opt manifest");
     while ((s = line(f))) {
@@ -835,27 +947,45 @@ static void construct_opt_o1(Graph *g) {
         Value *opts;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9); if (n != 9) die("opt manifest column count");
-        if (!when_true(field[3], 0, NULL)) { free(s); continue; }
+        if (!when_true(field[3], o2, flags)) { free(s); continue; }
         opts = !strcmp(field[8], "-") ? value_new(JOBJ) : value_json(field[8], "opt manifest options");
         if (!strcmp(field[0], "call") && !strcmp(field[1], "../parse/prn")) {
             if (prn++) die("duplicate opt prn call");
             install_prn_call(g);
+        } else if (!strcmp(field[0], "call") && !strcmp(field[1], "../parse/numout")) {
+            if (numout++) die("duplicate opt numout call");
+            install_numout_call(g);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "scans")) {
             Value *facts = load_facts_expr(field[4]), *bindings;
             if (scans++ || strcmp(field[2], "-")) die("unsupported opt scans row");
             bindings = fresh_bindings(opts, facts); direct_bindings(bindings, field[7], facts);
             install_plain(g, "exec/opt/scans-byte.tsv", 'b', bindings, empty);
             install_plain(g, "exec/opt/scans-result.tsv", 'r', bindings, empty);
+        } else if (!strcmp(field[0], "rows") && o2 &&
+                   (!strcmp(field[1], "analysis") || !strcmp(field[1], "local") ||
+                    !strcmp(field[1], "parsers") || !strcmp(field[1], "stfuse") ||
+                    !strcmp(field[1], "peep"))) {
+            Value *facts = load_facts_expr(field[4]); Value *bindings = NULL;
+            install_opt_rows(g, field[1], field[2], opts, facts, field[7], empty, &bindings);
+            if (!strcmp(field[1], "peep")) value_put(empty, "PP_b85", value_get(bindings, "PP_b85"));
+            extra++;
         } else if (!strcmp(field[0], "let") && value_get(opts, "mapseq")) {
             Value *facts = load_facts_expr(field[4]); size_t i;
             if (maps++) die("duplicate opt mapseq");
             seqenv = mapseq_construct(opts, facts);
             for (i = 0; i < seqenv->n; i++) if (!seqenv->items[i].value) die("empty mapped sequence");
+        } else if (!strcmp(field[0], "template") && !strcmp(field[1], "setup") && o2) {
+            Value *facts = load_facts_expr(field[4]); Value *bindings = value_new(JOBJ);
+            if (answer++ || strcmp(field[2], "answer") || strcmp(field[7], "dispatch=$PP_b85"))
+                die("unsupported opt answer declaration");
+            value_put(bindings, "dispatch", value_get(empty, "PP_b85"));
+            install_opt_answer(g, facts, bindings);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "setup")) {
-            Value *seq = value_new(JOBJ), *start1 = value_get(seqenv, "start1");
-            if (setup++ || strcmp(field[2], "start") || !start1 || strcmp(field[6], "data=$start1"))
+            Value *seq = value_new(JOBJ), *start = value_get(seqenv, o2 ? "start2" : "start1");
+            if (setup++ || strcmp(field[2], "start") || !start ||
+                strcmp(field[6], o2 ? "data=$start2" : "data=$start1"))
                 die("unsupported opt setup row");
-            value_put(seq, "data", start1);
+            value_put(seq, "data", start);
             install_section(g, "exec/opt/setup-byte.tsv", "start", 'b', empty, seq);
             install_section(g, "exec/opt/setup-result.tsv", "start", 'r', empty, seq);
         } else if (!strcmp(field[0], "let") && value_get(opts, "freshrows")) {
@@ -865,7 +995,7 @@ static void construct_opt_o1(Graph *g) {
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "rounds")) {
             const char *section = field[2];
             if (!strcmp(section, "common")) common++;
-            else if (!strcmp(section, "1")) one++;
+            else if (!strcmp(section, o2 ? "2" : "1")) level++;
             else die("unsupported opt round section");
             if (snprintf(path, sizeof(path), "exec/opt/rounds-byte.tsv") >= (int)sizeof(path)) die("rule path too long");
             install_section(g, path, section, 'b', rounds, empty);
@@ -874,8 +1004,9 @@ static void construct_opt_o1(Graph *g) {
         free(s);
     }
     if (ferror(f) || fclose(f)) die("opt manifest read failed");
-    if (prn != 1 || scans != 1 || maps != 1 || setup != 1 || roundlet != 1 || common != 1 || one != 1)
-        die("incomplete opt O1 manifest");
+    if (prn != 1 || numout != o2 || scans != 1 || maps != 1 || setup != 1 ||
+        answer != o2 || extra != (o2 ? 5 : 0) || roundlet != 1 || common != 1 || level != 1)
+        die("incomplete opt manifest");
     finish(g);
 }
 static void inspect_bound_rows(const char *stage, const char *stem, const char *outpath,
@@ -974,10 +1105,11 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
-    if (argc >= 2 && !strcmp(argv[1], "opt") && argc != 3)
-        die("opt O1 accepts no flags; --o2 is not covered yet");
-    if (argc == 3 && !strcmp(argv[1], "opt")) {
-        construct_opt_o1(&g);
+    if (argc >= 2 && !strcmp(argv[1], "opt") &&
+        !(argc == 3 || (argc == 4 && !strcmp(argv[3], "--o2"))))
+        die("opt accepts only --o2");
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "opt")) {
+        construct_opt(&g, argc == 4);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output(out, &g); if (fclose(out)) die("output close failed");
         fprintf(stderr, "opt states %lu\n", (unsigned long)g.n);
