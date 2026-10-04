@@ -313,6 +313,43 @@ static Value *load_fact(const char *stem) {
     }
     return root;
 }
+static Value *load_facts_expr(const char *expr) {
+    Value *merged = value_new(JOBJ); char *parts, *p;
+    if (!strcmp(expr, "-") || !*expr) return merged;
+    parts = copy(expr); p = parts;
+    while (*p) {
+        char *plus = strchr(p, '+'); Value *one; size_t i;
+        if (plus) *plus = 0;
+        one = load_fact(p);
+        for (i = 0; i < one->n; i++) value_put(merged, one->items[i].key, one->items[i].value);
+        if (!plus) break; p = plus + 1;
+    }
+    free(parts); return merged;
+}
+static Value *value_path(Value *root, const char *path) {
+    char *parts = copy(path), *p = parts; Value *v = root;
+    while (*p) {
+        char *dot = strchr(p, '.');
+        if (dot) *dot = 0;
+        if (v && v->kind == JARR) {
+            char *end; unsigned long i = strtoul(p, &end, 10);
+            if (end == p || *end || i >= v->n) die("invalid fact list index");
+            v = v->items[i].value;
+        } else v = value_get(v, p);
+        if (!v) die("unknown fact path");
+        if (!dot) break; p = dot + 1;
+    }
+    free(parts); return v;
+}
+static unsigned long fresh_count;
+static char *fresh_label(const char *owner, const char *kind) {
+    char name[1024]; const char *dot = strchr(owner, '.');
+    size_t prefix = dot ? (size_t)(dot - owner) : strlen(owner);
+    if (++fresh_count > 1000000) die("fresh label limit");
+    if (snprintf(name, sizeof(name), "%.*s.%s%lu", (int)prefix, owner, kind, fresh_count) >= (int)sizeof(name))
+        die("fresh label too long");
+    return copy(name);
+}
 static int has_flag(int argc, char **argv, const char *name) {
     int i; char flag[128];
     if (snprintf(flag, sizeof(flag), "--%s", name) >= (int)sizeof(flag)) die("flag too long");
@@ -354,6 +391,59 @@ static char *interpolate(const char *text, Value *env) {
     }
     out[n] = 0; return out;
 }
+static Value *fresh_bindings(Value *opts, Value *facts) {
+    Value *bindings = value_new(JOBJ), *specs = value_get(opts, "freshrows");
+    size_t s;
+    if (!specs) return bindings;
+    if (specs->kind != JARR) die("unsupported freshrows shape");
+    for (s = 0; s < specs->n; s++) {
+        Value *spec = specs->items[s].value;
+        Value *rows = value_path(facts, value_text(value_get(spec, "over")));
+        Value *where = value_get(spec, "where"); size_t i;
+        if (rows->kind != JARR) die("freshrows source is not a list");
+        for (i = 0; i < rows->n; i++) {
+            Value *row = rows->items[i].value, *ctx = value_new(JOBJ);
+            char *key, *owner, *kind, *label; size_t j; int match = 1;
+            if (row->kind != JOBJ) die("freshrows item is not an object");
+            for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
+            for (j = 0; j < row->n; j++) value_put(ctx, row->items[j].key, row->items[j].value);
+            if (where) {
+                if (where->kind != JOBJ) die("freshrows where is not an object");
+                for (j = 0; j < where->n; j++) {
+                    Value *actual = value_get(row, where->items[j].key);
+                    char *expect = interpolate(value_text(where->items[j].value), ctx);
+                    if (!actual || actual->kind != JSTR || strcmp(actual->s, expect)) match = 0;
+                    free(expect);
+                }
+            }
+            if (!match) continue;
+            key = interpolate(value_text(value_get(spec, "key")), ctx);
+            owner = interpolate(value_text(value_get(spec, "owner")), ctx);
+            kind = interpolate(value_text(value_get(spec, "kind")), ctx);
+            label = fresh_label(owner, kind);
+            value_put(bindings, key, value_string(label));
+            free(key); free(owner); free(kind); free(label);
+        }
+    }
+    return bindings;
+}
+static void direct_bindings(Value *bindings, const char *text, Value *facts) {
+    char *parts = copy(text), *p = parts;
+    if (!strcmp(text, "-") || !*text) { free(parts); return; }
+    while (*p) {
+        char *comma = strchr(p, ','), *eq = strchr(p, '='); Value *v;
+        if (comma) *comma = 0;
+        if (!eq || eq == p || !eq[1]) die("invalid binding cell");
+        *eq = 0;
+        if (!strncmp(eq + 1, "@str:", 5)) {
+            char *s = interpolate(eq + 6, facts);
+            v = value_string(s); free(s);
+        } else v = value_path(facts, eq + 1);
+        value_put(bindings, p, v);
+        if (!comma) break; p = comma + 1;
+    }
+    free(parts);
+}
 static void let_bind(Value *env, const char *bind) {
     char *parts = copy(bind), *p = parts;
     if (!strcmp(bind, "-") || !*bind) { free(parts); return; }
@@ -389,6 +479,29 @@ static void inspect_lets(const char *stage, const char *outpath, int argc, char 
     if (ferror(f) || fclose(f)) die("manifest read failed");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     value_write(out, env); if (fclose(out)) die("output close failed");
+}
+static void inspect_fresh(const char *stage, const char *stem, const char *outpath, const char *initial) {
+    char path[1024], *end; FILE *f, *out; char *s; int found = 0;
+    fresh_count = strtoul(initial, &end, 10);
+    if (end == initial || *end || fresh_count > 1000000) die("invalid initial fresh count");
+    if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(path)) die("manifest path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
+            Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "manifest options");
+            Value *bindings = fresh_bindings(opts, facts);
+            direct_bindings(bindings, field[7], facts);
+            if (++found > 1) die("ambiguous fresh manifest row");
+            out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+            value_write(out, bindings); if (fclose(out)) die("output close failed");
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("manifest read failed");
+    if (!found) die("fresh manifest row not found");
 }
 static RuleState *rule_state(RuleSet *r, const char *name) {
     size_t i; RuleState *s;
@@ -505,6 +618,7 @@ static void install_file(Graph *g, const char *path, char mode) {
         }
     }
 }
+static void output(FILE *f, const Graph *g);
 /* Four-column form shared by opt/lower/parse rows. The caller supplies only
    source facts and generated bindings; the row reader owns the rule order. */
 static const char *bound_name(const char *s, Value *bindings) {
@@ -549,6 +663,36 @@ static void install_plain(Graph *g, const char *path, char mode,
             }
         }
     }
+}
+static void inspect_bound_rows(const char *stage, const char *stem, const char *outpath,
+                               const char *initial) {
+    char manifest_path[1024], path[1024], *end; FILE *f, *out; char *s; int found = 0;
+    Graph g = {0}; Value *empty = value_new(JOBJ);
+    fresh_count = strtoul(initial, &end, 10);
+    if (end == initial || *end || fresh_count > 1000000) die("invalid initial fresh count");
+    if (snprintf(manifest_path, sizeof(manifest_path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(manifest_path))
+        die("manifest path too long");
+    f = fopen(manifest_path, "rb"); if (!f) die("cannot open manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+        if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
+            Value *facts, *opts, *bindings;
+            if (++found > 1 || strcmp(field[2], "-") || strcmp(field[6], "-")) die("unsupported bound row shape");
+            facts = load_facts_expr(field[4]); opts = value_json(field[8], "manifest options");
+            bindings = fresh_bindings(opts, facts); direct_bindings(bindings, field[7], facts);
+            if (snprintf(path, sizeof(path), "exec/%s/%s-byte.tsv", stage, stem) >= (int)sizeof(path)) die("rule path too long");
+            install_plain(&g, path, 'b', bindings, empty);
+            if (snprintf(path, sizeof(path), "exec/%s/%s-result.tsv", stage, stem) >= (int)sizeof(path)) die("rule path too long");
+            install_plain(&g, path, 'r', bindings, empty);
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("manifest read failed");
+    if (!found) die("bound row not found");
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output(out, &g); if (fclose(out)) die("output close failed");
 }
 static void finish(Graph *g) {
     const char *unreachable = "[[\"REJECT\",\"unreachable\"]]";
@@ -616,6 +760,12 @@ static void output(FILE *f, const Graph *g) {
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 6 && !strcmp(argv[1], "inspect-bound-rows")) {
+        inspect_bound_rows(argv[2], argv[3], argv[4], argv[5]); return 0;
+    }
+    if (argc == 6 && !strcmp(argv[1], "inspect-fresh")) {
+        inspect_fresh(argv[2], argv[3], argv[4], argv[5]); return 0;
+    }
     if (argc == 5 && !strcmp(argv[1], "inspect-rows")) {
         Value *empty = value_new(JOBJ);
         if (strcmp(argv[4], "b") && strcmp(argv[4], "r")) die("inspect-rows mode must be b or r");
