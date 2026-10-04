@@ -85,6 +85,9 @@ def main():
             r[0] += 1
             if (st, key) in total: r[2] += 1          # edges that survive in the built delta
         covered = sum(1 for r in rows.values() if r[1])
+        logged = {tuple(l.split('\t')[:2]) for l in lines}
+        orphan = len(total - logged)                # surviving edges the side table does not name (graph edits)
+        print('rowcov %s  surviving edges without a source row %d (0 = side table complete)' % (stage, orphan))
         # uncovered rows split two ways: dead (none of its edges survives in the delta -- unreachable
         # state or totalised away: a candidate for deletion) versus live (reachable, no probe takes it)
         dead = sum(1 for r in rows.values() if not r[1] and r[2] == 0)
