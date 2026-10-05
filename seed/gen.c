@@ -3802,6 +3802,31 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
     if (fclose(manifest) || row != last || installed != last - first)
         die("printfallback manifest range incomplete");
 }
+static void parse2_printfcontrol_part0(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/printfcontrol-0-manifest.tsv", "rb");
+    Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
+    Value *classes = value_get(facts, "classes"), *sequences; char *s;
+    int rows = 0;
+    if (!manifest || !classes) die("printfcontrol part0 inputs missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9 || rows++ || strcmp(f[0], "rows") ||
+            strcmp(f[1], "printfcontrol") || strcmp(f[2], "part0.all") ||
+            strcmp(f[4], "printfcontrol"))
+            die("printfcontrol part0 declaration changed");
+        sequences = mapseq_construct(value_json(f[8], "printfcontrol part0 options"), facts);
+        direct_bindings(bindings, f[7], facts);
+        install_section_classes(g, "exec/parse2/printfcontrol-byte.tsv", "part0.all", 'b',
+                                bindings, sequences, classes);
+        install_section_classes(g, "exec/parse2/printfcontrol-result.tsv", "part0.all", 'r',
+                                bindings, sequences, classes);
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || rows != 1)
+        die("printfcontrol part0 row missing");
+}
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
@@ -4350,7 +4375,7 @@ static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
-static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last) {
+static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last, int control0) {
     Graph g = {0}; FILE *out; char *entry;
     build_parse2_token_graph(&g);
     parse2_startup_edits(&g);
@@ -4378,6 +4403,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     parse2_unary_part6(&g);
     entry = parse2_printfallback_head(&g);
     parse2_printfallback_more(&g, entry, 2, last);
+    if (control0) parse2_printfcontrol_part0(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4463,13 +4489,16 @@ int main(int argc, char **argv) {
         inspect_parse2_printfallback_dispatch_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-body-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 4); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 4, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-bodies-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 16); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 16, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-full-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 17); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 0); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-part0-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
