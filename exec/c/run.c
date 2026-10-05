@@ -483,18 +483,22 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
    \0cli/attributes resource E3 reads: u32 count, then count x (u32 unit, u32 ordinal, u8 kind).
    No decision is made here: the records are passed through as E1 wrote them. */
 UNISA_RUNTIME_STATE Buf ATTRS; UNISA_RUNTIME_STATE int ATTR_UNIT; UNISA_RUNTIME_STATE int ATTR_SLOT = -1;
+static void attr_put(int c) {      /* bput is only in the runtime-library build */
+    if (ATTRS.n >= ATTRS.cap) { ATTRS.cap = ATTRS.cap ? ATTRS.cap * 2 : 256; ATTRS.b = xrealloc(ATTRS.b, ATTRS.cap); }
+    ATTRS.b[ATTRS.n++] = (unsigned char)c;
+}
 static unsigned attr_u32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (unsigned)p[3] << 24; }
 static int attr_strip(Buf *out) {
     if (out->n < 16 || memcmp(out->b, "USLATTR1", 8)) return 0;
     unsigned count = attr_u32(out->b + 8);
     long head = 16 + 5L * count;
     if (count > 1000000u || head > out->n) die("malformed USLATTR1 side-car");
-    if (ATTRS.n == 0) { for (int k = 0; k < 4; k++) bput(&ATTRS, 0, 0); }
+    if (ATTRS.n == 0) { for (int k = 0; k < 4; k++) attr_put(0); }
     unsigned total = attr_u32(ATTRS.b) + count;
     for (unsigned r = 0; r < count; r++) {
         const unsigned char *q = out->b + 16 + 5 * r;
-        for (int k = 0; k < 4; k++) bput(&ATTRS, (ATTR_UNIT >> (8 * k)) & 255, 0);
-        for (int k = 0; k < 5; k++) bput(&ATTRS, q[k], 0);
+        for (int k = 0; k < 4; k++) attr_put((ATTR_UNIT >> (8 * k)) & 255);
+        for (int k = 0; k < 5; k++) attr_put(q[k]);
     }
     for (int k = 0; k < 4; k++) ATTRS.b[k] = (total >> (8 * k)) & 255;
     memmove(out->b, out->b + head, out->n - head); out->n -= (int)head;
