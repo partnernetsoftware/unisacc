@@ -3243,7 +3243,8 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "operator-pointer-other") && strcmp(section, "operator-integer") &&
         strcmp(section, "ordinary-staticauto") && strcmp(section, "startup-guard") &&
         strcmp(section, "parameter-declarators") && strcmp(section, "sizeof0") &&
-        strcmp(section, "sizeof1") && strcmp(section, "sizeof2"))
+        strcmp(section, "sizeof1") && strcmp(section, "sizeof2") &&
+        strcmp(section, "sizeof3"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -5972,6 +5973,15 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "C");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "inspect-parse2-gen2-control-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, argv[2]);
+        finish(&g);
+        out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
         if (fclose(out)) die("output close failed");
         return 0;
