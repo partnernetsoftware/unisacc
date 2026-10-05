@@ -3734,6 +3734,25 @@ static void parse2_unary_compound(Graph *g) {
     install_section_classes(g, "exec/parse2/control-result.tsv", "compound", 'r',
                             bindings, sequences, classes);
 }
+static void parse2_unary_cast_void(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
+    char *s; int row = 0, found = 0;
+    if (!manifest) die("cannot open unarycontrol manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("unarycontrol manifest column count");
+        if (row++ < 3) { free(s); continue; }
+        if (strcmp(f[0], "rows") || strcmp(f[1], "width") ||
+            strcmp(f[2], "cast-void") || strcmp(f[4], "-"))
+            die("unarycontrol cast-void declaration changed");
+        found++; free(s); break;
+    }
+    if (fclose(manifest) || found != 1) die("unarycontrol cast-void missing");
+    install_section(g, "exec/parse2/width-byte.tsv", "cast-void", 'b', NULL, NULL);
+    install_section(g, "exec/parse2/width-result.tsv", "cast-void", 'r', NULL, NULL);
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3991,6 +4010,30 @@ static void inspect_parse2_unary_compound_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_unary_cast_void_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    parse2_unary_head(&g);
+    parse2_unary_compound(&g);
+    parse2_unary_cast_void(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -4046,6 +4089,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-compound-graph")) {
         inspect_parse2_unary_compound_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-cast-void-graph")) {
+        inspect_parse2_unary_cast_void_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;

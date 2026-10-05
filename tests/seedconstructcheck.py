@@ -433,6 +433,33 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                              "seqs": [list(map(list, seq)) for seq in e3_compound.g.seqs]}
         assert unary_compound_graph.read_bytes() == json.dumps(expected_compound, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 unary compound differs"
+        cast_void_graph = work / "parse2-unary-cast-void.c.json"
+        run(str(cgen), "inspect-parse2-unary-cast-void-graph", str(cast_void_graph))
+        e3_cast = parse2base.executor()
+        assemble.Run(e3_cast, e3_cast.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_cast, e3_cast.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_cast, e3_cast.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_cast, e3_cast.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_cast, e3_cast.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_cast, e3_cast.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_cast, e3_cast.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        cast_run = assemble.Run(e3_cast, e3_cast.P, {},
+                                {"warnings": False, "ucx": unaryenv["ucx"],
+                                 "ufacts": unaryenv["ufacts"]})
+        cast_run.root = unary_manifest.parent
+        for depth, row in cast_run.rows(unary_manifest)[:4]:
+            cast_run.one(row, [], depth, {})
+        e3_cast.g.finish()
+        expected_cast = {"start": "START",
+                         "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                    for name, (mode, row) in e3_cast.g.st.items()},
+                         "seqs": [list(map(list, seq)) for seq in e3_cast.g.seqs]}
+        assert cast_void_graph.read_bytes() == json.dumps(expected_cast, separators=(",", ":")).encode(), \
+            "seed/gen.c parse2 unary cast-void differs"
         actions_json = work / "parse2-actions.c.json"
         run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
         actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
@@ -499,4 +526,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
 if part in ("base", "all"):
     print("seed construct base: net/tbl and prune, opt, lex, pp, nativeabi byte-identical")
 if part in ("parse2", "all"):
-    print("seed construct parse2: token prelude through unary compound graph byte-identical")
+    print("seed construct parse2: token prelude through unary cast-void graph byte-identical")
