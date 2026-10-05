@@ -3035,10 +3035,79 @@ static void parse2_startup_edits(Graph *g) {
     if (ferror(templ) || fclose(templ) || copied != 1 || dropped != 1 || rule != 1)
         die("incomplete parse2 startup edits");
 }
+static void parse2_drop_state(Graph *g, const char *name) {
+    size_t i;
+    for (i = 0; i < g->n && strcmp(g->state[i].name, name); i++) {}
+    if (i == g->n) die("parse2 template state to drop missing");
+    memmove(g->state + i, g->state + i + 1, (g->n - i - 1) * sizeof(*g->state));
+    g->n--;
+    free(g->state_index); g->state_index = NULL; g->index_cap = 0;
+    state_index_grow(g);
+}
+static void parse2_string_span(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/strings-token-span-manifest.tsv", "rb");
+    FILE *templ; Value *facts = load_fact("k2-strings-token-span");
+    Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
+    Value *constants = load_fact("parse-constants");
+    char *s; int declared = 0, dropped = 0;
+    if (!manifest) die("cannot open parse2 string span manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("parse2 string span manifest column count");
+        if (declared == 0 && !strcmp(f[0], "let") && !strcmp(f[4], "k2-strings-token-span")) declared++;
+        else if (declared == 1 && !strcmp(f[0], "template") &&
+                 !strcmp(f[1], "strings") && !strcmp(f[2], "token_span_drop")) declared++;
+        else if (declared == 2 && !strcmp(f[0], "rows") &&
+                 !strcmp(f[1], "strings") && !strcmp(f[2], "token_span")) declared++;
+        else die("unexpected parse2 string span manifest row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || declared != 3)
+        die("incomplete parse2 string span manifest");
+    templ = fopen("exec/parse2/strings-template.tsv", "rb");
+    if (!templ) die("cannot open parse2 strings template");
+    while ((s = line(templ))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("parse2 strings template column count");
+        if (!strcmp(f[0], "token_span_drop")) {
+            if (dropped++ || strcmp(f[4], "drop-state")) die("invalid string span drop");
+            parse2_drop_state(g, f[5]);
+        }
+        free(s);
+    }
+    if (ferror(templ) || fclose(templ) || dropped != 1)
+        die("incomplete parse2 strings template");
+    for (int i = 0; i < 3; i++) {
+        char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR);
+        Value *reason; snprintf(name, sizeof(name), "reject%d", i);
+        reason = value_get(facts, name);
+        if (!reason || reason->kind != JSTR) die("missing string span rejection fact");
+        value_put(reject, NULL, value_string("REJECT"));
+        value_put(reject, NULL, reason);
+        value_put(acts, NULL, reject);
+        value_put(sequences, name, acts);
+    }
+    value_put(bindings, "TK_STR", value_get(constants, "TK_STR"));
+    install_section(g, "exec/parse2/strings-byte.tsv", "token_span", 'b', bindings, sequences);
+    install_section(g, "exec/parse2/strings-result.tsv", "token_span", 'r', bindings, sequences);
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
     parse2_startup_edits(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
+static void inspect_parse2_startup_strings_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_string_span(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -3050,6 +3119,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-graph")) {
         inspect_parse2_startup_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-strings-graph")) {
+        inspect_parse2_startup_strings_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
