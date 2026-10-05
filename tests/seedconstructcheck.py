@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "exec"))
 import assemble
 import finite_rules
 from build import parsebase as native_base
+from build import parse2base
 
 def run(*args, timeout=20):
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
@@ -41,6 +42,13 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     # 0.0.25 B4: the manifest -> delta step in C, one stage at a time (seed/gen.c); prune first
     cgen = work / "seed-gen"
     run("sh", str(ROOT / "unisacc.com"), "seed/gen.c", "-o", str(cgen))
+    # B4 parse2 first slice: the declared token vocabulary and its two E3
+    # additions must have the same insertion order and numbers in both seeds.
+    token_json = work / "parse2-tokens.c.json"
+    run(str(cgen), "inspect-parse2-tokens", str(token_json))
+    e3 = parse2base.executor()
+    expected_tokens = json.dumps({"WORDS": e3.WORDS, "TK": e3.TK}, separators=(",", ":")).encode()
+    assert token_json.read_bytes() == expected_tokens, "seed/gen.c parse2 token prelude differs"
     for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
         tag = stage + "".join(flags)
         ref = graph if stage == "prune" else work / (tag + ".py.json")
@@ -93,4 +101,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude byte-identical")
