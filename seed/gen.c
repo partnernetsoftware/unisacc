@@ -3312,7 +3312,7 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
     Value *bindings = value_new(JOBJ), *classes = value_get(facts, "retclasses");
     char *s; int action_row = 0, return_row = 0, header = 0;
     if (!actions || !manifest || !fresh || !classes ||
-        (strcmp(section, "ret0") && strcmp(section, "update")))
+        (strcmp(section, "ret0") && strcmp(section, "update") && strcmp(section, "expr0")))
         die("return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
@@ -3389,6 +3389,27 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse2/return-result.tsv", section, 'r',
                             bindings, sequences, classes);
+    if (!strcmp(section, "expr0")) {
+        Value *domain = value_get(facts, "retexpr0");
+        Value *compound = value_get(facts, "retcompound");
+        Value *dispatch = value_get(bindings, "f48");
+        if (!domain || domain->kind != JARR || !compound || compound->kind != JARR ||
+            !dispatch || dispatch->kind != JSTR)
+            die("return expression dispatch facts changed");
+        install_section_domain_classes(g, "exec/parse2/return-dispatch.tsv", "expr0", 'r',
+                                       bindings, sequences, classes, domain);
+        for (size_t i = 0; i < compound->n; i++) {
+            Value *item = compound->items[i].value, *one = value_new(JARR);
+            Value *key = value_get(item, "key"), *target = value_get(item, "target");
+            if (!key || key->kind != JINT || !target || target->kind != JSTR)
+                die("return compound dispatch fact changed");
+            value_put(bindings, "lp_dispatch", dispatch);
+            value_put(bindings, "operation", target);
+            value_put(one, NULL, key);
+            install_section_domain_classes(g, "exec/parse2/return-dispatch.tsv", "compound", 'r',
+                                           bindings, sequences, classes, one);
+        }
+    }
 }
 static void parse2_gen2_return(Graph *g, const char *section) {
     parse2_gen2_return_ex(g, section, NULL);
@@ -6062,6 +6083,15 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-expr0-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_return(&g, "expr0");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
