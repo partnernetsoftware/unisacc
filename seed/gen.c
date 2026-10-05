@@ -3695,6 +3695,68 @@ static void parse2_gen2_startup_guard(Graph *g) {
     value_put(extra, "POSSPAN", span);
     parse2_gen2_control_ex(g, "startup-guard", extra, NULL);
 }
+static void parse2_gen2_statics(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/statics-manifest.tsv", "rb");
+    FILE *outer = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    FILE *templ;
+    Value *facts = load_fact("k2-statics"), *genfacts = load_fact("k2-gen2");
+    Value *env = value_new(JOBJ), *sequences = NULL, *bindings;
+    char *s; int row = 0, found = 0, edits = 0;
+    if (!manifest || !outer) die("cannot open statics declarations");
+    while ((s = line(outer))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("gen2 manifest column count");
+        if (!strcmp(f[0], "call") && !strcmp(f[1], "statics") &&
+            !strcmp(f[3], "fact:seg_statics-init")) {
+            if (found++) die("duplicate statics call");
+            direct_bindings(env, f[7], genfacts);
+        }
+        free(s);
+    }
+    if (ferror(outer) || fclose(outer) || found != 1) die("missing statics call");
+    for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("statics manifest column count");
+        if (row == 0 && !strcmp(f[0], "let") && !strcmp(f[1], "-")) {
+            Value *opts = value_json(f[8], "statics sequences");
+            sequences = mapseq_construct(opts, facts);
+            for (size_t i = 0; i < sequences->n; i++)
+                value_put(facts, sequences->items[i].key, sequences->items[i].value);
+            row++;
+        } else if (row == 1 && !strcmp(f[0], "template") && !strcmp(f[1], "statics")) {
+            templ = fopen("exec/parse2/statics-template.tsv", "rb");
+            if (!templ) die("cannot open statics template");
+            char *tline;
+            while ((tline = line(templ))) {
+                char *t[9]; int tn;
+                if (!*tline || *tline == '#') { free(tline); continue; }
+                tn = fields_tab(tline, t, 9);
+                if (tn != 9 || strcmp(t[0], "replace") || strcmp(t[4], "drop-state") || edits++)
+                    die("unsupported statics template edit");
+                parse2_drop_state(g, t[5]);
+                free(tline);
+            }
+            if (ferror(templ) || fclose(templ) || edits != 1) die("incomplete statics template");
+            row++;
+        } else if (row == 2 && !strcmp(f[0], "rows") && !strcmp(f[1], "statics")) {
+            Value *sq = value_new(JOBJ); bindings = value_new(JOBJ);
+            direct_bindings_ex(sq, NULL, f[6], facts);
+            direct_bindings_ex(bindings, NULL, f[7], facts);
+            install_plain_classes(g, "exec/parse2/statics-byte.tsv", 'b',
+                                  bindings, sq, value_get(facts, "classes"));
+            install_plain_classes(g, "exec/parse2/statics-result.tsv", 'r',
+                                  bindings, sq, value_get(facts, "classes"));
+            row++;
+        } else die("unexpected statics manifest row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || row != 3) die("incomplete statics manifest");
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5739,6 +5801,15 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "ordinary-staticauto");
         parse2_gen2_startup_guard(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_statics(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
