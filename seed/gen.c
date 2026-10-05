@@ -3874,6 +3874,35 @@ static void parse2_gen2_initializers_main(Graph *g) {
     }
     if (ferror(manifest) || fclose(manifest) || row != 3) die("incomplete initializer main manifest");
 }
+static void parse2_string_walk_head(Graph *g, const char *pre, const char *body, const char *done);
+static void parse2_string_walk_escape(Graph *g, const char *pre, const char *body);
+static void parse2_string_walk_tail(Graph *g, const char *pre, const char *body, const char *done);
+static void parse2_gen2_statics_strwalk(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    Value *bindings = value_new(JOBJ), *facts = value_new(JOBJ);
+    char *s; int found = 0;
+    if (!manifest) die("cannot open gen2 statics declarations");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("gen2 statics call column count");
+        if (!strcmp(f[0], "call") && !strcmp(f[1], "strwalk") &&
+            !strcmp(f[3], "fact:seg_statics-init")) {
+            if (found++) die("duplicate gen2 statics walker");
+            direct_bindings(bindings, f[7], facts);
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || found != 1)
+        die("missing gen2 statics walker");
+    const char *pre = value_text(value_get(bindings, "pre"));
+    const char *body = value_text(value_get(bindings, "body"));
+    const char *done = value_text(value_get(bindings, "done"));
+    parse2_string_walk_head(g, pre, body, done);
+    parse2_string_walk_escape(g, pre, body);
+    parse2_string_walk_tail(g, pre, body, done);
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5918,6 +5947,20 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "ordinary-staticauto");
         parse2_gen2_startup_guard(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-init-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_statics(&g);
+        parse2_gen2_initializers_hook(&g);
+        parse2_gen2_initializers_main(&g);
+        parse2_gen2_statics_strwalk(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
