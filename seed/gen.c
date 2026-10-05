@@ -2877,10 +2877,13 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
         if (!strcmp(r->cell[0], "foreach")) {
             Value *over = value_get(opts, "over"), *as = value_get(opts, "as"), *items;
             Value *pre = value_get(opts, "pre");
+            char *over_path;
             if (!over || over->kind != JSTR) die("foreach without over");
             if (r->end == i + 1) die("foreach without body");
             if (over->s[0] == '$') die("foreach environment map is not yet covered");
-            items = value_path(facts, over->s);
+            over_path = strchr(over->s, '{') ? seed_fmt(over->s, facts) : copy(over->s);
+            items = value_path(facts, over_path);
+            free(over_path);
             if (items->kind != JARR) die("foreach over is not an array");
             for (size_t j = 0; j < items->n; j++) {
                 Value *next = seed_env_copy(extra);
