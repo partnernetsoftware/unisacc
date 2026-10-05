@@ -238,6 +238,25 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                        "seqs": [list(map(list, seq)) for seq in e3_branch.g.seqs]}
     assert branch_graph.read_bytes() == json.dumps(expected_branch, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 full startup branch differs"
+    numeric_graph = work / "parse2-numeric.c.json"
+    run(str(cgen), "inspect-parse2-numeric-graph", str(numeric_graph))
+    e3_numeric = parse2base.executor()
+    assemble.Run(e3_numeric, e3_numeric.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_numeric, e3_numeric.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    assemble.Run(e3_numeric, e3_numeric.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+        ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+    assemble.Run(e3_numeric, e3_numeric.P, {}, {}).run(initializer_manifest)
+    assemble.Run(e3_numeric, e3_numeric.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+    e3_numeric.g.finish()
+    expected_numeric = {"start": "START",
+                        "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                   for name, (mode, row) in e3_numeric.g.st.items()},
+                        "seqs": [list(map(list, seq)) for seq in e3_numeric.g.seqs]}
+    assert numeric_graph.read_bytes() == json.dumps(expected_numeric, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 numeric child differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
@@ -300,4 +319,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup-marker branch/action recipes byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup-marker and numeric child/action recipes byte-identical")

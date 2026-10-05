@@ -521,6 +521,60 @@ static Value *fresh_bindings_file(Value *opts, const char *root) {
     if (!header) die("empty freshrows table");
     return bindings;
 }
+static void numeric_file_bindings(Value *opts, Value *facts, Value *bindings) {
+    Value *specs = value_get(opts, "freshrows");
+    if (!specs || specs->kind != JARR || specs->n != 1)
+        die("numeric freshrows declaration missing");
+    Value *spec = specs->items[0].value, *where = value_get(spec, "where");
+    const char *file = value_text(value_get(spec, "file"));
+    char path[1024]; FILE *f; char *s; int header = 0;
+    if (snprintf(path, sizeof(path), "exec/parse/%s", file) >= (int)sizeof(path))
+        die("numeric freshrows path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open numeric freshrows");
+    while ((s = line(f))) {
+        char *field[4]; int n;
+        if (!*s) { free(s); continue; }
+        if (s[0] == '#') {
+            if (!header && strcmp(s, "# section\tbinding\tprefix\tkind"))
+                die("numeric freshrows header mismatch");
+            header = 1; free(s); continue;
+        }
+        n = fields_tab(s, field, 4);
+        if (n != 4 || !header) die("numeric freshrows column count");
+        if (where && where->kind == JOBJ) {
+            Value *selected = value_get(where, "section");
+            if (!selected || selected->kind != JSTR) die("numeric freshrows section missing");
+            if (strcmp(field[0], selected->s)) { free(s); continue; }
+        }
+        Value *ctx = value_new(JOBJ); char *key, *owner, *kind, *label;
+        for (size_t i = 0; i < facts->n; i++)
+            value_put(ctx, facts->items[i].key, facts->items[i].value);
+        value_put(ctx, "section", value_string(field[0]));
+        value_put(ctx, "binding", value_string(field[1]));
+        value_put(ctx, "prefix", value_string(field[2]));
+        value_put(ctx, "kind", value_string(field[3]));
+        key = interpolate(value_text(value_get(spec, "key")), ctx);
+        owner = interpolate(value_text(value_get(spec, "owner")), ctx);
+        kind = interpolate(value_text(value_get(spec, "kind")), ctx);
+        label = fresh_label(owner, kind);
+        value_put(bindings, key, value_string(label));
+        free(key); free(owner); free(kind); free(label); free(s);
+    }
+    if (ferror(f) || fclose(f) || !header) die("numeric freshrows read failed");
+}
+static void declared_bindmap(Value *opts, Value *facts, Value *bindings) {
+    Value *map = value_get(opts, "bindmap");
+    if (!map || map->kind != JOBJ) die("expected declared bindmap");
+    for (size_t i = 0; i < map->n; i++) {
+        Value *src = map->items[i].value, *value;
+        const char *s = value_text(src);
+        if (!strncmp(s, "@str:", 5)) {
+            char *expanded = interpolate(s + 5, facts);
+            value = value_string(expanded); free(expanded);
+        } else value = value_path(facts, s);
+        value_put(bindings, map->items[i].key, value);
+    }
+}
 static void direct_bindings_ex(Value *bindings, Value *sequences,
                                const char *text, Value *facts) {
     char *parts = copy(text), *p = parts;
@@ -3326,6 +3380,36 @@ static void parse2_string_initializer_tail(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || row != 4)
         die("incomplete string initializer tail");
 }
+static void parse2_numeric(Graph *g) {
+    FILE *manifest = fopen("exec/parse/numeric-manifest.tsv", "rb");
+    char *s; int rows = 0;
+    if (!manifest) die("cannot open numeric manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n; Value *facts, *opts, *bindings, *lets;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "numeric") ||
+            strcmp(f[4], "parse-constants") || rows >= 3)
+            die("unsupported numeric manifest row");
+        if (strcmp(f[2], rows < 2 ? "prn" : "numout"))
+            die("numeric section order changed");
+        facts = load_fact("parse-constants");
+        opts = value_json(f[8], "numeric manifest options");
+        lets = value_get(opts, "let");
+        if (lets && lets->kind == JOBJ)
+            for (size_t i = 0; i < lets->n; i++)
+                value_put(facts, lets->items[i].key, lets->items[i].value);
+        bindings = value_new(JOBJ);
+        numeric_file_bindings(opts, facts, bindings);
+        direct_bindings(bindings, f[7], facts);
+        declared_bindmap(opts, facts, bindings);
+        install_section(g, "exec/parse/numeric-byte.tsv", f[2], 'b', bindings, NULL);
+        install_section(g, "exec/parse/numeric-result.tsv", f[2], 'r', bindings, NULL);
+        rows++; free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || rows != 3)
+        die("incomplete numeric manifest");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3427,6 +3511,22 @@ static void inspect_parse2_startup_branch_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_numeric_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3458,6 +3558,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-branch-graph")) {
         inspect_parse2_startup_branch_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-numeric-graph")) {
+        inspect_parse2_numeric_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
