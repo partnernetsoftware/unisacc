@@ -8,6 +8,7 @@ be shared separately. Each window is <=55 s, leaving cleanup inside the 60 s
 outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
 import argparse, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
+from gatelayers import LAYERS, select as select_layers
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # comboot records its stages in ROOT/out/comboot/stages.json: a seed result from another
@@ -236,23 +237,35 @@ def resume(data, stamps, jobs, exclusive):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--state', type=pathlib.Path, required=True)
+    ap.add_argument('--state', type=pathlib.Path)
     ap.add_argument('--com', action='store_true')
     ap.add_argument('--jobs', type=int, default=2)
     ap.add_argument('--window', type=int, default=55)
     ap.add_argument('--suite', action='append', default=[])
+    layers = ap.add_mutually_exclusive_group()
+    layers.add_argument('--layer', choices=LAYERS, help='run exactly one diagnostic breadth layer')
+    layers.add_argument('--through-layer', choices=LAYERS,
+                        help='run this layer and all narrower layers')
+    ap.add_argument('--list-selection', action='store_true', help='print selected suite names without running')
     ap.add_argument('--exclusive-suite', action='append', default=[],
                     help='selected suite that must run alone (repeatable; prioritized)')
     args = ap.parse_args()
     if not 1 <= args.jobs <= 4 or not 5 <= args.window <= 55: ap.error('jobs 1..4; window 5..55')
+    if not args.list_selection and args.state is None:
+        ap.error('--state is required when running suites')
     os.chdir(ROOT)
-    if args.com:
+    if args.com and not args.list_selection:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
                         os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
     jobs = plan(args.com)
+    jobs = select_layers(jobs, args.layer, args.through_layer)
     if args.suite:
-        if len(set(args.suite)) != len(args.suite) or set(args.suite) - jobs.keys(): ap.error('duplicate/unknown suite')
+        if len(set(args.suite)) != len(args.suite) or set(args.suite) - jobs.keys():
+            ap.error('duplicate/unknown suite or suite outside selected layer')
         jobs = {n: jobs[n] for n in args.suite}
+    if args.list_selection:
+        print('\n'.join(jobs))
+        return
     exclusive = set(args.exclusive_suite)
     if len(exclusive) != len(args.exclusive_suite) or exclusive - jobs.keys():
         ap.error('duplicate/unknown exclusive suite (must belong to selected jobs)')
