@@ -9,6 +9,11 @@
 #include <string.h>
 #include "json.h"
 
+/* Python facts have unbounded integers.  E3's decimal magnitude limits use
+   the full uint64 range, while seed/json.h deliberately keeps JSON inputs in
+   signed range.  This internal value kind covers those typed TSV cells. */
+enum { JUINT = JNULL + 1 };
+
 typedef struct { char *key, *target; int seq; } Edge;
 typedef struct { char *name; char mode; Edge *edge; size_t n, cap; int *key_index; } State;
 typedef struct { State *state; size_t n, cap; size_t *state_index, index_cap; char **seq; size_t ns, cs, *seq_index, seq_index_cap; char **labels; size_t nl, cl; } Graph;
@@ -21,7 +26,7 @@ typedef struct Value Value;
 typedef struct { char *key; Value *value; } Member;
 struct Value {
     int kind; /* JOBJ/JARR/JSTR/JINT */
-    char *s; long long number;
+    char *s; long long number; unsigned long long unumber;
     Member *items; size_t n, cap;
 };
 
@@ -63,6 +68,7 @@ static void buf_value(Buffer *b, const Value *v) {
     switch (v->kind) {
     case JSTR: buf_quote(b, v->s); break;
     case JINT: snprintf(n, sizeof(n), "%lld", v->number); buf_add(b, n, strlen(n)); break;
+    case JUINT: snprintf(n, sizeof(n), "%llu", v->unumber); buf_add(b, n, strlen(n)); break;
     case JBOOL: buf_add(b, v->number ? "true" : "false", v->number ? 4 : 5); break;
     case JNULL: buf_add(b, "null", 4); break;
     case JOBJ: case JARR:
@@ -132,6 +138,7 @@ static const char *value_scalar_text(Value *v, char number[64]) {
     if (!v) return NULL;
     if (v->kind == JSTR) return v->s;
     if (v->kind == JINT) { snprintf(number, 64, "%lld", v->number); return number; }
+    if (v->kind == JUINT) { snprintf(number, 64, "%llu", v->unumber); return number; }
     die("expected scalar value"); return NULL;
 }
 static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) {
@@ -225,6 +232,7 @@ static void value_write(FILE *f, const Value *v) {
     switch (v->kind) {
     case JSTR: quoted(f, v->s); break;
     case JINT: fprintf(f, "%lld", v->number); break;
+    case JUINT: fprintf(f, "%llu", v->unumber); break;
     case JBOOL: fputs(v->number ? "true" : "false", f); break;
     case JNULL: fputs("null", f); break;
     case JOBJ: case JARR:
@@ -254,6 +262,12 @@ static Value *fact_cell(const char *type, const char *text) {
     if (!strcmp(type, "int")) {
         char *end; long long n; Value *v;
         errno = 0; n = strtoll(text, &end, 10);
+        if (errno == ERANGE && text[0] != '-') {
+            unsigned long long u;
+            errno = 0; u = strtoull(text, &end, 10);
+            if (errno || end == text || *end || text[0] == '+') die("invalid fact integer");
+            v = value_new(JUINT); v->unumber = u; return v;
+        }
         if (errno || end == text || *end) die("invalid fact integer");
         v = value_new(JINT); v->number = n; return v;
     }
@@ -420,8 +434,9 @@ static char *interpolate(const char *text, Value *env) {
             if (!end) die("unterminated interpolation");
             key = copy_n(text + i + 1, (size_t)(end - text - i - 1));
             v = value_field(env, key); free(key);
-            if (!v || (v->kind != JSTR && v->kind != JINT)) die("unknown interpolation fact");
+            if (!v || (v->kind != JSTR && v->kind != JINT && v->kind != JUINT)) die("unknown interpolation fact");
             if (v->kind == JINT) { snprintf(number, sizeof(number), "%lld", v->number); part = number; }
+            else if (v->kind == JUINT) { snprintf(number, sizeof(number), "%llu", v->unumber); part = number; }
             else part = v->s;
             len = strlen(part); i = (size_t)(end - text);
         }
@@ -561,6 +576,7 @@ static int map_equal(Value *a, Value *b) {
     if (!a || !b || a->kind != b->kind) return 0;
     if (a->kind == JSTR) return !strcmp(a->s, b->s);
     if (a->kind == JINT || a->kind == JBOOL) return a->number == b->number;
+    if (a->kind == JUINT) return a->unumber == b->unumber;
     if (a->kind == JNULL) return 1;
     die("unsupported mapseq predicate value"); return 0;
 }
@@ -805,10 +821,10 @@ static char *template_subst(const char *text, Value *scope) {
     return template_subst_ctx(text, scope, NULL, NULL, NULL, NULL);
 }
 typedef struct { TRows *rows; Value *facts; Buffer *out; size_t first, last; int depth;
-                 Value *labels, *prev; const char *fresh_owner; } TGroup;
+                 Value *labels, *prev, *modes; const char *fresh_owner; } TGroup;
 static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out,
                             size_t first, size_t last, int depth, Value *labels,
-                            Value *prev, const char *fresh_owner);
+                            Value *prev, Value *modes, const char *fresh_owner);
 static void template_group_visit(Value *scope, void *arg) {
     TGroup *g = arg; size_t i = g->first;
     while (i < g->last) {
@@ -822,6 +838,8 @@ static void template_group_visit(Value *scope, void *arg) {
             d = template_subst_ctx(r->d, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
             for (size_t j = 0; j < rowlabels->n; j++)
                 value_put(g->prev, rowlabels->items[j].key, rowlabels->items[j].value);
+            if (g->modes && !strcmp(r->kind, "rule:r"))
+                value_put(g->modes, a, value_string("r"));
             buf_add(g->out, a, strlen(a)); buf_char(g->out, '\t');
             buf_add(g->out, b, strlen(b)); buf_char(g->out, '\t');
             buf_add(g->out, c, strlen(c)); buf_char(g->out, '\t');
@@ -832,21 +850,21 @@ static void template_group_visit(Value *scope, void *arg) {
             if (r->depth != g->depth + 1) die("template loop depth jump");
             while (end < g->last && g->rows->row[end].depth > g->depth) end++;
             template_groups(g->rows, g->facts, scope, g->out, i, end, g->depth + 1,
-                            g->labels, g->prev, g->fresh_owner);
+                            g->labels, g->prev, g->modes, g->fresh_owner);
             i = end;
         }
     }
 }
 static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out,
                             size_t first, size_t last, int depth, Value *labels,
-                            Value *prev, const char *fresh_owner) {
+                            Value *prev, Value *modes, const char *fresh_owner) {
     size_t i = first;
     while (i < last) {
         TRow *r = &rows->row[i]; size_t end = i + 1; TGroup group;
         if (r->depth != depth || !strcmp(r->over, "=")) die("invalid template loop");
         while (end < last && (rows->row[end].depth > depth ||
                (rows->row[end].depth == depth && !strcmp(rows->row[end].over, "=")))) end++;
-        group = (TGroup){rows, facts, out, i, end, depth, labels, prev, fresh_owner};
+        group = (TGroup){rows, facts, out, i, end, depth, labels, prev, modes, fresh_owner};
         tuple_walk(r->over, facts, scope, template_group_visit, &group);
         i = end;
     }
@@ -855,16 +873,17 @@ static void template_block_visit(Value *scope, void *arg) {
     TGroup *g = arg;
     Value *labels = value_new(JOBJ), *prev = value_new(JOBJ);
     template_groups(g->rows, g->facts, scope, g->out, g->first, g->last, 0,
-                    labels, prev, g->fresh_owner);
+                    labels, prev, g->modes, g->fresh_owner);
 }
 static void template_rows(TRows *rows, Value *facts, Buffer *out, size_t first, size_t last,
-                          const char *fresh_owner) {
-    TGroup group = {rows, facts, out, first, last, 0, NULL, NULL, fresh_owner};
+                          const char *fresh_owner, Value *modes) {
+    TGroup group = {rows, facts, out, first, last, 0, NULL, NULL, modes, fresh_owner};
     Value *scope = value_new(JOBJ);
     tuple_walk(rows->row[first].each, facts, scope, template_block_visit, &group);
 }
 static Buffer expand_template_file_fresh(const char *path, Value *facts,
-                                         const char *section, const char *fresh_owner) {
+                                         const char *section, const char *fresh_owner,
+                                         Value *modes) {
     FILE *f; char *s; TRows rows = {0}; Buffer expanded = {0}; size_t i;
     f = fopen(path, "rb"); if (!f) die("cannot open template");
     while ((s = line(f))) {
@@ -886,12 +905,12 @@ static Buffer expand_template_file_fresh(const char *path, Value *facts,
             if (strcmp(rows.row[end].each, rows.row[i].each)) die("template block has two each lists");
             end++;
         }
-        template_rows(&rows, facts, &expanded, i, end, fresh_owner); i = end;
+        template_rows(&rows, facts, &expanded, i, end, fresh_owner, modes); i = end;
     }
     return expanded;
 }
 static Buffer expand_template_file(const char *path, Value *facts, const char *section) {
-    Buffer expanded = expand_template_file_fresh(path, facts, section, NULL);
+    Buffer expanded = expand_template_file_fresh(path, facts, section, NULL, NULL);
     return expanded;
 }
 static Buffer expand_template_section(const char *stage, const char *section) {
@@ -1385,6 +1404,7 @@ static int value_equal(const Value *a, const Value *b) {
     if (!a || !b || a->kind != b->kind || a->n != b->n) return 0;
     if (a->kind == JSTR) return !strcmp(a->s, b->s);
     if (a->kind == JINT || a->kind == JBOOL) return a->number == b->number;
+    if (a->kind == JUINT) return a->unumber == b->unumber;
     for (i = 0; i < a->n; i++) {
         if (a->kind == JOBJ && strcmp(a->items[i].key, b->items[i].key)) return 0;
         if (!value_equal(a->items[i].value, b->items[i].value)) return 0;
@@ -2792,7 +2812,7 @@ static void nativeabi_template_at(Graph *g, const char *path, const char *sectio
                                   const char *fresh_owner) {
     Value *facts = load_fact("nativeabi"), *seqs = value_new(JOBJ);
     Buffer expanded = expand_template_file_fresh(path, facts,
-                                                 section, fresh_owner);
+                                                 section, fresh_owner, NULL);
     FILE *f = tmpfile();
     if (!f) die("cannot create template stream");
     if (expanded.n && fwrite(expanded.s, 1, expanded.n, f) != expanded.n) die("template write failed");
@@ -2899,8 +2919,61 @@ static void inspect_parse2_tokens(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     value_write(out, result); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_token_graph(const char *outpath) {
+    FILE *manifest = fopen("exec/parse/tokens2-manifest.tsv", "rb"), *out;
+    Graph g = {0}; Value *facts = load_fact("k2-gen2-tokens"), *modes = value_new(JOBJ);
+    Value *sequences = value_new(JOBJ), *bindings; char *s; int template_seen = 0, rows_seen = 0;
+    if (!manifest) die("cannot open parse2 token manifest");
+    while ((s = line(manifest))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9);
+        if (n != 9) die("parse2 token manifest column count");
+        if (!strcmp(field[0], "template") && !strcmp(field[1], "tokenfacts")) {
+            Buffer expanded; FILE *rules;
+            if (template_seen++ || rows_seen || strcmp(field[2], "facts") ||
+                strcmp(field[4], "k2-gen2-tokens")) die("unexpected parse2 token template");
+            expanded = expand_template_file_fresh("exec/parse/tokenfacts-template.tsv",
+                                                  facts, "facts", NULL, modes);
+            rules = buffer_file(&expanded);
+            install_delta_text(&g, rules, 'b', numeric_domain(0, 257), NULL,
+                               sequences, 0, 0, NULL, "START");
+            if (fclose(rules)) die("parse2 token template close failed");
+            for (size_t i = 0; i < modes->n; i++) {
+                const char *name = modes->items[i].key; size_t j;
+                if (strcmp(value_text(modes->items[i].value), "r"))
+                    die("unsupported parse2 token mode");
+                for (j = 0; j < g.n; j++) if (!strcmp(g.state[j].name, name)) {
+                    g.state[j].mode = 'r'; break;
+                }
+                if (j == g.n) die("parse2 token mode state missing");
+            }
+            if (!modes->n) die("parse2 token mode overrides missing");
+            free(expanded.s);
+        } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "tokenread")) {
+            Value *rowfacts;
+            if (!template_seen || rows_seen++ || strcmp(field[4], "k2-gen2-tokens+parse-constants") ||
+                strcmp(field[6], "truncated=@rej:not covered: truncated token dump"))
+                die("unexpected parse2 token rows");
+            rowfacts = load_facts_expr(field[4]); bindings = value_new(JOBJ);
+            value_put(sequences, "truncated", value_json("[[\"REJECT\",\"not covered: truncated token dump\"]]", "token truncation"));
+            direct_bindings(bindings, field[7], rowfacts);
+            install_plain(&g, "exec/parse/tokenread-byte.tsv", 'b', bindings, sequences);
+            install_plain(&g, "exec/parse/tokenread-result.tsv", 'r', bindings, sequences);
+        } else die("unsupported parse2 token manifest row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || template_seen != 1 || rows_seen != 1)
+        die("incomplete parse2 token manifest");
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
+        inspect_parse2_token_graph(argv[2]); return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
     }

@@ -49,6 +49,15 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     e3 = parse2base.executor()
     expected_tokens = json.dumps({"WORDS": e3.WORDS, "TK": e3.TK}, separators=(",", ":")).encode()
     assert token_json.read_bytes() == expected_tokens, "seed/gen.c parse2 token prelude differs"
+    token_graph = work / "parse2-token-graph.c.json"
+    run(str(cgen), "inspect-parse2-token-graph", str(token_graph))
+    e3.g.finish()
+    expected_graph = {"start": "START",
+                      "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                 for name, (mode, row) in e3.g.st.items()},
+                      "seqs": [list(map(list, seq)) for seq in e3.g.seqs]}
+    assert token_graph.read_bytes() == json.dumps(expected_graph, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 tokenizer graph differs"
     for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
         tag = stage + "".join(flags)
         ref = graph if stage == "prune" else work / (tag + ".py.json")
@@ -101,4 +110,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph byte-identical")
