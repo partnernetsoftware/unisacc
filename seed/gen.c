@@ -3124,6 +3124,46 @@ static void parse2_startup_control(Graph *g) {
     install_section_classes(g, "exec/parse2/control-result.tsv", "startup-marker", 'r',
                             bindings, sequences, classes);
 }
+static void parse2_string_initializer_head(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
+    Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
+    char *s; int row = 0;
+    if (!manifest || !reasons || reasons->kind != JOBJ)
+        die("cannot read string initializer facts");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("string initializer manifest column count");
+        if (!row && (!strcmp(f[0], "let") && !strcmp(f[4], "k2-strings"))) {
+            row++;
+        } else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[1], "strings") &&
+                   !strcmp(f[2], "initializer_head") && !strcmp(f[4], "k2-strings")) {
+            for (int i = 0; i < 5; i++) {
+                char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
+                snprintf(name, sizeof(name), "reject%d", i);
+                reason = value_get(reasons, name);
+                if (!reason || reason->kind != JSTR) die("missing string initializer rejection fact");
+                value_put(reject, NULL, value_string("REJECT"));
+                value_put(reject, NULL, reason);
+                value_put(acts, NULL, reject);
+                value_put(sequences, name, acts);
+            }
+            direct_bindings_ex(bindings, sequences, f[7], facts);
+            install_section(g, "exec/parse2/strings-result.tsv", "initializer_head", 'r',
+                            bindings, sequences);
+            install_section(g, "exec/parse2/strings-byte.tsv", "initializer_head", 'b',
+                            bindings, sequences);
+            row++;
+        } else if (row == 2 && !strcmp(f[0], "call") && !strcmp(f[1], "strwalk")) {
+            free(s); break;
+        } else die("unexpected string initializer head row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || row != 2)
+        die("incomplete string initializer head");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3160,6 +3200,17 @@ static void inspect_parse2_startup_prefix_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_initializer_head_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3176,6 +3227,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-prefix-graph")) {
         inspect_parse2_startup_prefix_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-initializer-head-graph")) {
+        inspect_parse2_initializer_head_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;

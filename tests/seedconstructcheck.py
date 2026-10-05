@@ -118,6 +118,29 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                        "seqs": [list(map(list, seq)) for seq in e3_prefix.g.seqs]}
     assert prefix_graph.read_bytes() == json.dumps(expected_prefix, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 startup call order differs"
+    head_graph = work / "parse2-initializer-head.c.json"
+    run(str(cgen), "inspect-parse2-initializer-head-graph", str(head_graph))
+    e3_head = parse2base.executor()
+    assemble.Run(e3_head, e3_head.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_head, e3_head.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    assemble.Run(e3_head, e3_head.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+        ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+    initializer_manifest = ROOT / "exec/parse2/strings-initializer-manifest.tsv"
+    initializer = assemble.Run(e3_head, e3_head.P, {}, {})
+    initializer.root = initializer_manifest.parent
+    for depth, row in initializer.rows(initializer_manifest)[:2]:
+        assert depth == 0
+        initializer.one(row, [], depth, {})
+    e3_head.g.finish()
+    expected_head = {"start": "START",
+                     "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                for name, (mode, row) in e3_head.g.st.items()},
+                     "seqs": [list(map(list, seq)) for seq in e3_head.g.seqs]}
+    assert head_graph.read_bytes() == json.dumps(expected_head, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 string initializer head differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
@@ -180,4 +203,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup/control/string-span/action recipes byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup/control/string-span/initializer-head/action recipes byte-identical")
