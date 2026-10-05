@@ -221,3 +221,13 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **Linux 全套**跑 4 GiB 的 `default` 客机，结论认“only guest-known reds”那一行（bigclosure、ape 缺内存，warn 缺 clang）；跑完清掉客机里保留的 TMPDIR。
 - **Apple 签名可以和 Linux 全套并行**：它不占本机 CPU，约 2 分钟。
 - **公开后同步到 UNISA 入口仓**（0.0.28 U1）：`gh release create unisacc-v$V -R partnernetsoftware/unisa` 挂签名后的 unisacc.com、dmg 和 SHA256SUMS.txt（在文件所在目录里生成，文件名不能带路径），重新下载用 `shasum -c` 核对；然后在 unisa 仓的 releases/unisacc/README.md 加一行。二进制不进 git 历史。
+
+## 20. 0.0.28 回顾（2026-10-05）
+
+全文见 [research/r28-retrospective.md](../research/r28-retrospective.md)。要点：
+
+- **precheck 的契约层放在 comboot 之后、封存之前**：版本号提交后先 `make gatedeps`（否则 gate-infra 红），ape-version 要等 stage2 装上新产品。
+- **POSIX 宿主行为探针放 tests/forward，不放 tests/c**：tests/c 被 difftest-py、ccrun、fat、closure、chain 都消费，Windows 目标与 Python 对照组跑不了 environ/fork/exec。
+- **Python 路线的缺口各有清单**：pyfront.knownfail（fat）、difftest-py.knownfail（difftest-py）、ccrun.knownwrong（ccrun）；precheck 的本版号 knownfail 规则不看 pyfront。
+- **签名部署批准可能被网络吞掉**：批准后查 `pending_deployments` 长度为 0 再等。
+- **队列复用目前失效**（P7 实测 0%）：0.0.29 P7′ 修好之前，修一次红就要预计整轮重跑。

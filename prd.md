@@ -31,7 +31,8 @@
 | v0.0.25 | [archive/plans/v0.0.25.md](archive/plans/v0.0.25.md) — 0.0.24 复盘的流程项 P1–P7（冻结窗口拦截、复活扫描、facts 门禁等）、Windows 测试迁到 GitHub runner（X7，UTM 只排查）、T1e 收尾、T2 表行覆盖率、DNS 转发系统 libc（N1）、POSIX 缺口清单（N2） | **已公开 2026-10-04 23:23 SGT**（signed sha256 2c9822c9…，[回执](research/r25-release-acceptance.json)） |
 | v0.0.26 | [archive/plans/v0.0.26.md](archive/plans/v0.0.26.md) — 多文件转发（N5）、五阶段表行覆盖与九个 op 契约（T2）、平表和网络改由 C 工具生成（B3'）、seed/gen.c 通 lex | **已公开 2026-10-05**（signed sha256 5a188fd7…，[回执](research/r26-release-acceptance.json)） |
 | v0.0.27 | [archive/plans/v0.0.27.md](archive/plans/v0.0.27.md) — GitHub 全套矩阵能当证据（C1）、x86 迁真机（C2）、POSIX 头第一批（H1）、CPU 比率（O1）、seed/gen.c 通 pp 与 nativeabi（B4） | **已公开 2026-10-05**（signed sha256 3ff12714，回执 research/r27-release-acceptance.json） |
-| v0.0.28 | [plans/v0.0.28.md](plans/v0.0.28.md) | 计划中 |
+| v0.0.28 | [archive/plans/v0.0.28.md](archive/plans/v0.0.28.md) — -l 与变参宿主转发、构造/析构、environ、POSIX 头第二批、大结构体复制循环、sqlite 过参考前端、X8′ 合一、a_bighex | **已公开 2026-10-05**（signed sha256 32dd0ab7，回执 research/r28-release-acceptance.json） |
+| v0.0.29 | [plans/v0.0.29.md](plans/v0.0.29.md) | 计划中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；权重本体与推理速度的精确结构优化实验（§5.2）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |

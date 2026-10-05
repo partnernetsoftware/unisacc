@@ -36,6 +36,6 @@
 | 8 | 队列期间 make gatedeps 超过 58 s | 机器被队列占满 | 登记推迟到队列结束后统一做 | 0.0.28 R4：parse2 分片自动发现，不再逐片改 gate.sh/gatedeps |
 | 9 | 负载被别的会话推高 | minicon 会话开着 UTM 的 Windows 虚拟机 | 看门狗暂停；董秘去问政委 | 跨会话事项，不在本仓 |
 
-## 下一版要带上的（已写进 plans/v0.0.28.md）
+## 下一版要带上的（已写进 archive/plans/v0.0.28.md）
 
 R1 看门狗做进 queue.sh；R2 precheck 跑契约层；R3 workflow bound 参数静态检查；R4 parse2 分片自动发现；U1 把发行包抄到 partnernetsoftware/unisa。
