@@ -3314,7 +3314,8 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
     if (!actions || !manifest || !fresh || !classes ||
         (strcmp(section, "ret0") && strcmp(section, "ret1") &&
          strcmp(section, "update") && strcmp(section, "expr0") &&
-         strcmp(section, "qt0") && strcmp(section, "qt1")))
+         strcmp(section, "qt0") && strcmp(section, "qt1") &&
+         strcmp(section, "floating")))
         die("return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
@@ -6117,6 +6118,28 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-first-graph")) {
+        Value *floats = value_get(load_fact("k2-gen2"), "retfloat"), *extra = value_new(JOBJ);
+        Value *first, *label, *convert, *base; char entry[80], cvt[80];
+        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        first = floats->items[0].value;
+        label = value_get(first, "label"); convert = value_get(first, "cv"); base = value_get(first, "base");
+        if (!label || label->kind != JSTR || !convert || convert->kind != JSTR ||
+            !base || base->kind != JINT ||
+            snprintf(entry, sizeof(entry), "QT.%s", label->s) >= (int)sizeof(entry) ||
+            snprintf(cvt, sizeof(cvt), "TO.%s", convert->s) >= (int)sizeof(cvt))
+            die("return floating row invalid");
+        value_put(extra, "float_entry", value_string(entry));
+        value_put(extra, "float_convert", value_string(cvt));
+        value_put(extra, "result_base", base);
+        build_parse2_token_graph(&g);
+        parse2_gen2_return_ex(&g, "floating", extra);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
