@@ -452,7 +452,8 @@ job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sec
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
 job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
-job seed-construct python3 ./tests/seedconstructcheck.py   # C99 flat-table network construction equals Python bytes
+job seed-construct-base python3 ./tests/seedconstructcheck.py --part base     # C99 seed tools vs Python: net/tbl, prune, opt, lex, pp, nativeabi
+job seed-construct-parse2 python3 ./tests/seedconstructcheck.py --part parse2 # 0.0.27: split at ~38 s; the growing parse2 comparison
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
