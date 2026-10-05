@@ -1701,9 +1701,9 @@ static void install_plain(Graph *g, const char *path, char mode,
                           Value *bindings, Value *sequences) {
     install_plain_classes(g, path, mode, bindings, sequences, NULL);
 }
-static void install_section_classes(Graph *g, const char *path, const char *section,
-                                    char mode, Value *bindings, Value *sequences,
-                                    Value *classes) {
+static void install_section_domain_classes(Graph *g, const char *path, const char *section,
+                                           char mode, Value *bindings, Value *sequences,
+                                           Value *classes, Value *domain) {
     FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
     if (!f) die("cannot open section rule file");
     while ((s = line(f))) {
@@ -1731,8 +1731,11 @@ static void install_section_classes(Graph *g, const char *path, const char *sect
             number_text(st->rule[j].key, key);
             edge_add(g, st->name, mode, key, st->rule[j].target, actions); free(actions);
         }
-        for (int k = 0; k <= 256; k++) {
+        for (size_t di = 0; di < (domain ? domain->n : 257); di++) {
+            int k = domain ? (int)domain->items[di].value->number : (int)di;
             int found = 0;
+            if (domain && (domain->kind != JARR || domain->items[di].value->kind != JINT || k < 0 || k > 256))
+                die("invalid section domain");
             for (size_t j = 0; j < st->n; j++) if (st->rule[j].key == k) { found = 1; break; }
             if (!found) {
                 char *actions;
@@ -1744,6 +1747,11 @@ static void install_section_classes(Graph *g, const char *path, const char *sect
         }
         free(fixed);
     }
+}
+static void install_section_classes(Graph *g, const char *path, const char *section,
+                                    char mode, Value *bindings, Value *sequences,
+                                    Value *classes) {
+    install_section_domain_classes(g, path, section, mode, bindings, sequences, classes, NULL);
 }
 static void install_section(Graph *g, const char *path, const char *section,
                             char mode, Value *bindings, Value *sequences) {
@@ -3998,7 +4006,7 @@ static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
     }
     if (fclose(manifest) || row != 3) die("printfcontrol plain row missing");
 }
-static void parse2_fmtwalk_format(Graph *g) {
+static void parse2_fmtwalk_rows(Graph *g, int last) {
     FILE *outer = fopen("exec/parse2/printf-manifest.tsv", "rb");
     FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
     Value *ctx = value_new(JOBJ), *bindings = value_new(JOBJ);
@@ -4023,20 +4031,30 @@ static void parse2_fmtwalk_format(Graph *g) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9 || found++ || strcmp(f[0], "rows") ||
-            strcmp(f[1], "helpers") || strcmp(f[2], "format") ||
+        if (n != 9 || strcmp(f[0], "rows") ||
+            strcmp(f[1], "helpers") ||
+            strcmp(f[2], found ? "length" : "format") ||
             strcmp(f[4], "k2-fmtwalk"))
-            die("fmtwalk format declaration changed");
+            die("fmtwalk row declaration changed");
         for (size_t i = 0; i < facts->n; i++)
             value_put(ctx, facts->items[i].key, facts->items[i].value);
         direct_bindings(bindings, f[7], ctx);
-        install_section_classes(g, "exec/parse2/helpers-byte.tsv", "format", 'b',
-                                bindings, NULL, classes);
-        install_section_classes(g, "exec/parse2/helpers-result.tsv", "format", 'r',
-                                bindings, NULL, classes);
-        free(s); break;
+        Value *domain = found ? value_get(facts, "lenkeys") : NULL;
+        Value *sequences = value_new(JOBJ), *reject = value_new(JARR), *action = value_new(JARR);
+        if (strcmp(f[6], "reject=@rej:not covered: printf conversion"))
+            die("fmtwalk rejection declaration changed");
+        value_put(action, NULL, value_string("REJECT"));
+        value_put(action, NULL, value_string("not covered: printf conversion"));
+        value_put(reject, NULL, action);
+        value_put(sequences, "reject", reject);
+        install_section_domain_classes(g, "exec/parse2/helpers-byte.tsv", f[2], 'b',
+                                       bindings, sequences, classes, domain);
+        install_section_domain_classes(g, "exec/parse2/helpers-result.tsv", f[2], 'r',
+                                       bindings, sequences, classes, domain);
+        found++; free(s);
+        if (found == last) break;
     }
-    if (fclose(manifest) || found != 1) die("fmtwalk format row missing");
+    if (fclose(manifest) || found != last) die("fmtwalk rows missing");
 }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
@@ -4621,7 +4639,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
         Value *labels = parse2_printfcontrol_part1_all(&g);
         if (part1 > 1) parse2_printfcontrol_part1_plain(&g, labels);
     }
-    if (fmtwalk) parse2_fmtwalk_format(&g);
+    if (fmtwalk) parse2_fmtwalk_rows(&g, fmtwalk);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4732,6 +4750,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-fmtwalk-format-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 1); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-fmtwalk-length-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 2); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
