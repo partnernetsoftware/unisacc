@@ -110,7 +110,13 @@ def check():
     assert sorted(expected[::-1]) == expected
     assert sorted(expected[:-1]) != expected
     assert sorted(expected[:-1] + [expected[0]]) != expected
-    print('ci plan: legacy coverage kept; 6 file partitions, 2 SHARD families; selection controls ok')
+    # 0.0.28 R3: bound.py rejects limits over 60 s (release-check ccinterop-x86 was red three times with 120);
+    # runners stretch time with UNISACC_TIME_SCALE, never with a bigger literal
+    import re as _re
+    over = [(w.name, m.group(1)) for w in sorted((ROOT / '.github/workflows').glob('*.yml'))
+            for m in _re.finditer(r'tests/bound(?:\.py)? +(\d+)', w.read_text()) if not 1 <= int(m.group(1)) <= 60]
+    assert not over, 'workflow bound over 60 s (use UNISACC_TIME_SCALE): %s' % over
+    print('ci plan: legacy coverage kept; 6 file partitions, 2 SHARD families; selection controls ok; workflow bounds <= 60 s')
 
 
 if __name__ == '__main__':
