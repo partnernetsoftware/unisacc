@@ -2860,6 +2860,48 @@ static int manifest_when(const char *when, Value *flags, Value *facts) {
     }
     free(parts); return 1;
 }
+/* assemble.Run.foreach: an environment map is iterated in insertion order as
+   {key,value} rows.  An optional facts table supplies the first matching row
+   (or formatted defaults), with key/value winning on a name collision. */
+static Value *manifest_foreach_map(Value *over, Value *join, Value *facts, Value *env) {
+    Value *source = value_get(env, over->s + 1), *rows = value_new(JARR), *table = NULL;
+    if (!source || source->kind != JOBJ) die("foreach environment map is not an object");
+    if (join) {
+        Value *path = value_get(join, "over");
+        if (join->kind != JOBJ || !path || path->kind != JSTR) die("invalid foreach join");
+        table = value_path(facts, path->s);
+        if (table->kind != JARR) die("foreach join table is not an array");
+    }
+    for (size_t i = 0; i < source->n; i++) {
+        Value *row = value_new(JOBJ), *base = NULL;
+        value_put(row, "key", value_string(source->items[i].key));
+        value_put(row, "value", source->items[i].value);
+        if (join) {
+            Value *on = value_get(join, "on"), *defaults = value_get(join, "default");
+            if (!on || on->kind != JSTR || !defaults || defaults->kind != JOBJ)
+                die("invalid foreach join fields");
+            for (size_t j = 0; j < table->n; j++) {
+                Value *candidate = table->items[j].value, *key = value_get(candidate, on->s);
+                if (key && key->kind == JSTR && !strcmp(key->s, source->items[i].key)) {
+                    base = seed_env_copy(candidate); break;
+                }
+            }
+            if (!base) {
+                base = value_new(JOBJ);
+                for (size_t j = 0; j < defaults->n; j++) {
+                    Value *v = defaults->items[j].value;
+                    if (v->kind == JSTR) {
+                        char *s = seed_fmt(v->s, row);
+                        value_put(base, defaults->items[j].key, value_string(s)); free(s);
+                    } else value_put(base, defaults->items[j].key, v);
+                }
+            }
+            seed_update(base, row); row = base;
+        }
+        value_put(rows, NULL, row);
+    }
+    return rows;
+}
 /* Traverse a manifest block with the same source-order and foreach scopes as
    assemble.Run.block.  The callback will become the graph operation dispatcher;
    keeping traversal separate makes one iteration order serve all nine ops. */
@@ -2880,10 +2922,12 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             char *over_path;
             if (!over || over->kind != JSTR) die("foreach without over");
             if (r->end == i + 1) die("foreach without body");
-            if (over->s[0] == '$') die("foreach environment map is not yet covered");
-            over_path = strchr(over->s, '{') ? seed_fmt(over->s, facts) : copy(over->s);
-            items = value_path(facts, over_path);
-            free(over_path);
+            if (over->s[0] == '$') items = manifest_foreach_map(over, value_get(opts, "join"), facts, env);
+            else {
+                over_path = strchr(over->s, '{') ? seed_fmt(over->s, facts) : copy(over->s);
+                items = value_path(facts, over_path);
+                free(over_path);
+            }
             if (items->kind != JARR) die("foreach over is not an array");
             for (size_t j = 0; j < items->n; j++) {
                 Value *next = seed_env_copy(extra);
