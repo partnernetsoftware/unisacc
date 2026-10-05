@@ -66,6 +66,8 @@ for f in "$@"; do
     b 10 "$UA" "$f" -S -o - > "$T/ref" 2>/dev/null; rr=$?
     stage=""; rc=0; why=""
     in=$f
+    # 0.0.28 F1: E1's constructor/destructor records reach E3 through this file (exec/c/run.c)
+    export UNISA_ATTRIBUTES="$T/attributes"; rm -f "$UNISA_ATTRIBUTES"
     for s in e2 e1 e3; do
         case $s in
         e2) b 10 "$T/run" "$T/e2.$MODEL" "$in" "$f" "$R/include" > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;

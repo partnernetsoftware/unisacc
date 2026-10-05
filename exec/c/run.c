@@ -562,6 +562,15 @@ int main(int argc, char **argv) {
         const char *path = embedded ? getenv("UNISA_CONTAINER") : argv[2];
         package(path ? path : argv[0]);
     }
+    /* 0.0.28 F1: like the driver, ask E1 for its constructor/destructor side-car and hand the
+       stripped records to the next stage as \0cli/attributes (stage-by-stage runs pass the stripped
+       E1 output on disk, so the records travel in UNISA_ATTRIBUTES when the caller sets it) */
+    static const unsigned char f1one = 1; static ResourceInput sres[2];
+    sres[0].name = (const unsigned char *)"\0cli/f1"; sres[0].n = 7; sres[0].data = &f1one; sres[0].len = 1;
+    sres[1].name = (const unsigned char *)"\0cli/attributes"; sres[1].n = 15; sres[1].data = 0; sres[1].len = 0;
+    if (!RI) { RI = sres; NRI = 2; ATTR_SLOT = 1; }
+    { const char *ap = getenv("UNISA_ATTRIBUTES"); if (ap && *ap) { int an = 0; unsigned char *ab = readfile(ap, &an, 1);
+        if (ab) { ATTRS.b = ab; ATTRS.n = an; ATTRS.cap = an; sres[1].data = ab; sres[1].len = an; } } }
     Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
     if (bundled) {
         int rc = runroute(argv[routearg], &in, src); unpackage();
@@ -571,6 +580,10 @@ int main(int argc, char **argv) {
         for (int i = first; i < end; i++) {
             load(argv[i]);
             Buf out = {0}; int rc = execute(in.b, in.n, src, &out);
+            if (!rc && attr_strip(&out)) {
+                const char *ap = getenv("UNISA_ATTRIBUTES");
+                if (ap && *ap) { FILE *af = fopen(ap, "wb"); if (!af || fwrite(ATTRS.b, 1, ATTRS.n, af) != (size_t)ATTRS.n || fclose(af)) die("cannot write UNISA_ATTRIBUTES"); }
+            }
             unload(); free(in.b);
             if (rc) return rc;
             in.b = out.b; in.n = out.n;

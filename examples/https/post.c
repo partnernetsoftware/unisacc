@@ -8,8 +8,7 @@
  * Without an API key the server answers 401: the TLS round trip itself is what this shows.  The
  * response body libcurl writes stays in the HOST C library's stdout buffer, which nothing flushes
  * when the program exits (docs/host-interop.md); the status line below is unisacc's own printf.
- * Windows does not forward to host libraries yet.  0.0.28: -lcurl and the variadic forwards are on the C
- * reference route; the shipped unisacc.com gets them with its constructor support (plans/v0.0.28.md F1). */
+ * Windows does not forward to host libraries yet. */
 #include <stdio.h>
 void *curl_easy_init(void);
 int curl_easy_setopt(void *h, int opt, ...);

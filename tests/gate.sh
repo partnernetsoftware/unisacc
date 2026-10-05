@@ -503,6 +503,7 @@ if [ "$COM" = 1 ]; then
         printf 'gate product: %s sha256 %s\n' "$PRODUCT" "$PRODUCT_SHA"
     fi
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
+    job com-forward UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forward.sh   # 0.0.28 N1': posix2 (glob callback), var (variadic), host functions on the product
     job com-forward-multi UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forwardmulti.sh   # 0.0.26 N5: the product failed here up to 0.0.25
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"

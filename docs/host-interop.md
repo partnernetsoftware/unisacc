@@ -19,10 +19,6 @@ macOS, so including the header is enough.
 
 ## Other libraries: `-l NAME`
 
-> 0.0.28: `-l NAME` and variadic forwarding work on the C reference route. The shipped product gets
-> them with its constructor support (plans/v0.0.28.md F1); until then load the library yourself with
-> `dlopen(..., RTLD_NOW | RTLD_GLOBAL)` from `<dlfcn.h>` before the first call.
-
 The forwarder looks names up in the libraries already loaded into the process. `-l NAME` loads the
 host library `NAME` before `main` (macOS: `/usr/lib/libNAME.dylib`, then `libNAME.dylib`; Linux:
 `libNAME.so`, then `libNAME.so.0` to `.so.9`, all with `RTLD_GLOBAL`), and after that its functions
