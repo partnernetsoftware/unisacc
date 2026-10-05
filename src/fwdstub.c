@@ -80,3 +80,57 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
     fwd_s("}\n");
     return 1;
 }
+/* 0.0.28 N1': a variadic host function whose fixed arguments are integers or pointers (at most
+   five of them), such as curl_easy_setopt.  The stub takes four more long-sized arguments through
+   va_arg and hands all of them on: the callee reads only what it expects.  macOS arm64 passes
+   variadic arguments on the stack, so it goes through uffi_call with the fixed count; elsewhere
+   integer variadic arguments sit where fixed ones would, and __hostcall delivers them.  Floating-
+   point variadic arguments are not forwarded correctly by this stub (they would need their kinds). */
+int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rkind, int rw, int runs) {
+    int k; char *rt; int rk;
+    rt = fwd_ctype(rkind, rw, runs); rk = fwd_ukind(rkind, rw, runs);
+    if (rkind == 1) { rt = "void *"; rk = 5; }
+    if (np < 1 || np > 5 || rkind == 4 || rkind == 8) return 0;
+    k = 0; while (k < np) { if (kind[k] == 4 || kind[k] == 8) return 0; k = k + 1; }
+    if (nfwdsrc == 0) fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
+    fwd_s("#include <stdarg.h>\n");
+    fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
+    k = 0; while (k < np) { if (k) fwd_s(", "); fwd_s(fwd_ctype(kind[k], w[k], 0)); fwd_s(" a"); fwd_d(k); k = k + 1; }
+    fwd_s(", ...) {\n    static void *fn; long x[4]; va_list ap;");
+    if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
+    fwd_s("\n    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
+    fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
+    fwd_s("    va_start(ap, a"); fwd_d(np - 1); fwd_s("); x[0] = va_arg(ap, long); x[1] = va_arg(ap, long); x[2] = va_arg(ap, long); x[3] = va_arg(ap, long); va_end(ap);\n");
+    fwd_s("#if defined(__APPLE__) && defined(__aarch64__)\n    { int kinds[9]; void *vals[9];\n");
+    k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(kind[k], w[k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
+    k = 0; while (k < 4) { fwd_s("    kinds["); fwd_d(np + k); fwd_s("] = 3; vals["); fwd_d(np + k); fwd_s("] = &x["); fwd_d(k); fwd_s("];\n"); k = k + 1; }
+    fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np + 4); fwd_s(", "); fwd_d(np); fwd_s(", "); fwd_s(isvoid ? "0" : "&r"); fwd_s("); }\n");
+    fwd_s("#else\n    { long v[10];\n");
+    k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { fwd_s("(long)a"); fwd_d(k); } else if (k < np + 4) { fwd_s("x["); fwd_d(k - np); fwd_s("]"); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
+    if (isvoid) fwd_s("    __hostcall(fn, v); }\n");
+    else { fwd_s("    r = ("); fwd_s(rt); fwd_s(")__hostcall(fn, v); }\n"); }
+    fwd_s("#endif\n");
+    if (!isvoid) fwd_s("    return r;\n");
+    fwd_s("}\n");
+    return 1;
+}
+/* 0.0.28 N1': `-l NAME` loads that host library before main, so the functions a program
+   declares from it are forwarded by name like libc's.  A constructor in the stub unit tries the
+   usual names (macOS /usr/lib/libNAME.dylib, libNAME.dylib; Linux libNAME.so, then .so.0 .. .so.9)
+   with RTLD_NOW | RTLD_GLOBAL, and names the library when none loads. */
+char *fwd_libs[16]; int nfwd_libs;
+int fwd_emit_libs(void) {
+    int k;
+    if (nfwd_libs == 0) return 0;
+    fwd_s("#include <string.h>\nstatic int __unisa_loadlib(char *n) {\n    char b[300]; int k; int d;\n");
+    fwd_s("    if (strlen(n) > 200) return 0;\n#ifdef __APPLE__\n");
+    fwd_s("    strcpy(b, \"/usr/lib/lib\"); strcat(b, n); strcat(b, \".dylib\"); if (uffi_dlopen(b, 2 | 8)) return 1;\n");
+    fwd_s("    strcpy(b, \"lib\"); strcat(b, n); strcat(b, \".dylib\"); if (uffi_dlopen(b, 2 | 8)) return 1;\n#else\n");
+    fwd_s("    strcpy(b, \"lib\"); strcat(b, n); strcat(b, \".so\"); if (uffi_dlopen(b, 2 | 0x100)) return 1;\n");
+    fwd_s("    k = strlen(b); d = 0; while (d < 10) { b[k] = 46; b[k + 1] = 48 + d; b[k + 2] = 0; if (uffi_dlopen(b, 2 | 0x100)) return 1; d = d + 1; }\n#endif\n");
+    fwd_s("    write(2, \"unisacc: cannot load host library -l\", 36); write(2, n, strlen(n)); write(2, \"\\n\", 1); exit(127);\n    return 0;\n}\n");
+    fwd_s("__attribute__((constructor)) static void __unisa_libs(void) {\n");
+    k = 0; while (k < nfwd_libs) { fwd_s("    __unisa_loadlib(\""); fwd_s(fwd_libs[k]); fwd_s("\");\n"); k = k + 1; }
+    fwd_s("}\n");
+    return 1;
+}

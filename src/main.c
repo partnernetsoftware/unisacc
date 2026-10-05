@@ -26,6 +26,7 @@ int fe_units_fwd(char **inputs, int *ninput, char *t, int fwd) {
     fwd_maxargs = (t != 0 && t[0] == 119) ? 4 : 0;
     r1 = fe_units(inputs, *ninput, t);
     if (r1 && (fwdrun == 0 || nfwdsrc == 0)) { fwdrun = 0; return 1; }
+    if (fwdrun && nfwdsrc > 0) fwd_emit_libs();
     if (fwdrun && nfwdsrc > 0) {
         static char fwdpath[600]; char *td; int q; int fd2;
         if (*ninput >= 64) return 1;
@@ -152,6 +153,11 @@ int main(void) {
             /* -l and -L: the library is in the headers, so there is nothing
                to link and nothing to search.  -x c: the only language. */
             } else { if (a[1] == 108 || a[1] == 76) {
+                /* 0.0.28 N1': -l NAME (not m/c/dl/pthread/rt, which are the C library's) loads the
+                   host library before main so its functions forward (src/fwdstub.c fwd_emit_libs) */
+                char *ln; ln = a[2] ? a + 2 : (i + 1 < __argc() ? __argv(i + 1) : "");
+                if (a[1] == 108 && ln[0] && nfwd_libs < 16 && !strsame(ln, "m") && !strsame(ln, "c") && !strsame(ln, "dl")
+                    && !strsame(ln, "pthread") && !strsame(ln, "rt")) { fwd_libs[nfwd_libs] = ln; nfwd_libs = nfwd_libs + 1; }
                 if (a[2] == 0) i = i + 1;
             } else { if (a[1] == 120) {                    /* -x LANG */
                 if (a[2] == 0) i = i + 1;

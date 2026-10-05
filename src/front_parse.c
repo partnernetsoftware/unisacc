@@ -6395,8 +6395,16 @@ int fwd_stub(char *nm, int nl) {
             if (k == nl && (nl >= NAMEW || symname[si * NAMEW + nl] == 0)) break; }
         si = si - 1;
     }
-    if (si < 0 || symnpk[si] < 0 || symvar[si] || (symstruct[si] >= 0 && symptr[si] == 0)) return 0;   /* a struct by value: not yet */
+    if (si < 0 || symnpk[si] < 0 || (symstruct[si] >= 0 && symptr[si] == 0)) return 0;   /* a struct by value: not yet */
     np = symnpk[si]; f = sympkfirst[si];
+    if (symvar[si]) {                                  /* 0.0.28 N1': integer/pointer variadics (src/fwdstub.c) */
+        int kk[8]; int ww[8]; int vrw; int visvoid;
+        if (np > 5 || (fwd_maxargs > 0 && np + 4 > fwd_maxargs)) return 0;
+        k = 0; while (k < np) { kk[k] = sympk[f + k]; ww[k] = sympkw[f + k]; if (kk[k] == 9) return 0; k = k + 1; }
+        vrw = symelem[si]; visvoid = vrw == 0 && symptr[si] == 0 && symflt[si] == 0;
+        if (visvoid == 0 && symptr[si] == 0 && symflt[si] == 0 && symretw[si]) vrw = symretw[si];
+        return fwd_emit_var(nm, nl, np, kk, ww, visvoid, symptr[si] ? 1 : symflt[si], symptr[si] ? 8 : vrw, symuns[si]);
+    }
     k = 0; while (k < np) { if (sympk[f + k] == 9) return 0; k = k + 1; }
     /* A target that cannot deliver this many arguments refuses the forward by
        name (src/fwdstub.c fwd_maxargs). Emitting the call anyway is what made

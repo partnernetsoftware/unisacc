@@ -17,28 +17,30 @@ int main(void) { return sysconf(29) > 0 ? 0 : 1; }
 The bundled headers declare `getaddrinfo`, `dlopen`, `getpwuid`, `mmap` and others this way on Linux and
 macOS, so including the header is enough.
 
-## Other libraries: load them with RTLD_GLOBAL first
+## Other libraries: `-l NAME`
 
-The forwarder looks names up in the libraries already loaded into the process. To reach another
-library, load it with `RTLD_GLOBAL`; after that its functions are forwarded like libc's.
+The forwarder looks names up in the libraries already loaded into the process. `-l NAME` loads the
+host library `NAME` before `main` (macOS: `/usr/lib/libNAME.dylib`, then `libNAME.dylib`; Linux:
+`libNAME.so`, then `libNAME.so.0` to `.so.9`, all with `RTLD_GLOBAL`), and after that its functions
+are forwarded like libc's. `-lm`, `-lc`, `-ldl`, `-lpthread` and `-lrt` are the C library and load
+nothing. If no name loads, the program stops with `unisacc: cannot load host library -lNAME`.
 
 ```c
-#include <dlfcn.h>
 void *curl_easy_init(void);
-int main(void) {
-    dlopen("/usr/lib/libcurl.4.dylib", RTLD_NOW | RTLD_GLOBAL);   /* Linux: "libcurl.so.4" */
-    return curl_easy_init() ? 0 : 1;
-}
+int curl_easy_setopt(void *h, int opt, ...);
+int main(void) { void *h = curl_easy_init(); return curl_easy_setopt(h, 10002, "https://example.com"); }
+/* unisacc prog.c -lcurl */
 ```
 
 `examples/https/post.c` makes a complete HTTPS POST this way. Certificates are checked by libcurl
-against the system's trust store.
+against the system's trust store. Loading a library yourself with `dlopen(..., RTLD_NOW |
+RTLD_GLOBAL)` (from `<dlfcn.h>`) works too.
 
 ## What does not cross the boundary (yet)
 
-- **Variadic functions** (such as `curl_easy_setopt`) are not forwarded. On macOS arm64, variadic
-  arguments travel on the stack, so call them through `uffi_call` with the fixed-argument count
-  (see the example). On Linux, a plain prototype with the actual argument types works.
+- **Variadic functions** are forwarded when their fixed arguments are integers or pointers (at
+  most five) and the variable ones are integers or pointers too (up to four). Floating-point variadic
+  arguments, as in a host `printf("%f", x)`, are not passed correctly.
 - **Host stdio buffers.** A unisacc `FILE *` is a plain file descriptor, and its `fflush` does not
   reach the host C library. Output that a host library writes with its own `printf` or `fwrite` stays
   in the host's buffer until you flush it there. Call the host's `fflush(NULL)`:
