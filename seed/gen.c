@@ -3663,7 +3663,7 @@ static void parse2_autoscan(Graph *g) {
     install_section_classes(g, "exec/parse/autoscan-result.tsv", "auto", 'r',
                             bindings, sequences, classes);
 }
-static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
+static Value *parse2_unary_rows(Graph *g, const char *part, int row_index) {
     char section[64];
     if (snprintf(section, sizeof(section), "%s.all", part) >= (int)sizeof(section))
         die("unarycontrol section too long");
@@ -3734,6 +3734,7 @@ static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
         install_section_classes(g, "exec/parse2/unarycontrol-result.tsv", section, 'r',
                                 bindings, selected, classes);
     }
+    return bindings;
 }
 static void parse2_unary_head(Graph *g) { parse2_unary_rows(g, "part0", 1); }
 static void parse2_unary_part4(Graph *g) { parse2_unary_rows(g, "part4", 4); }
@@ -3742,6 +3743,10 @@ static void parse2_unary_float_s(Graph *g) { parse2_unary_rows(g, "convert_float
 static void parse2_unary_int_i(Graph *g) { parse2_unary_rows(g, "convert_int", 7); }
 static void parse2_unary_int_u(Graph *g) { parse2_unary_rows(g, "convert_int", 8); }
 static void parse2_unary_part6(Graph *g) { parse2_unary_rows(g, "part6", 9); }
+static char *parse2_unary_part8(Graph *g) {
+    Value *bindings = parse2_unary_rows(g, "part8", 11);
+    return copy(value_text(value_get(bindings, "f_part8_1216_U_r_1")));
+}
 static char *parse2_printfallback_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
     Value *sequences = NULL, *facts = value_new(JOBJ), *bindings = value_new(JOBJ);
@@ -4240,6 +4245,112 @@ static void parse2_fmtwalk_conversion(Graph *g, int call_row) {
                                        bindings, sequences, classes, domain);
     }
     free(bindcell);
+}
+static Value *parse2_manifest_out_sequence(const char *cell) {
+    Value *seq = value_new(JARR); const char *p = cell;
+    if (strncmp(p, "@out:", 5)) die("addr output sequence cell changed");
+    p += 5;
+    while (*p) {
+        int c = (unsigned char)*p++;
+        if (c == '\\') {
+            if (*p == 'n') { c = '\n'; p++; }
+            else if (*p == 't') { c = '\t'; p++; }
+            else if (*p == 'x') {
+                char hx[3] = {p[1], p[2], 0}; char *end;
+                if (!p[1] || !p[2]) die("short addr hex escape");
+                c = (int)strtol(hx, &end, 16);
+                if (*end) die("bad addr hex escape");
+                p += 3;
+            } else if (*p) c = (unsigned char)*p++;
+            else die("short addr escape");
+        }
+        Value *act = value_new(JARR), *byte = value_new(JINT);
+        byte->number = c;
+        value_put(act, NULL, value_string("OUT"));
+        value_put(act, NULL, byte);
+        value_put(seq, NULL, act);
+    }
+    return seq;
+}
+static void parse2_addr_out_bindings(Value *seqs, const char *cells) {
+    char *all = copy(cells), *p = all;
+    while (*p) {
+        char *comma = strchr(p, ','), *eq = strchr(p, '=');
+        if (comma) *comma = 0;
+        if (!eq || eq == p) die("addr sequence binding changed");
+        *eq = 0;
+        value_put(seqs, p, parse2_manifest_out_sequence(eq + 1));
+        if (!comma) break;
+        p = comma + 1;
+    }
+    free(all);
+}
+static void parse2_addr_template(Graph *g, const char *entry) {
+    FILE *manifest = fopen("exec/parse2/addr-manifest.tsv", "rb");
+    Value *env = value_new(JOBJ), *seqs = value_new(JOBJ), *bind = value_new(JOBJ);
+    Value *constants = load_fact("librarydata");
+    char *s; int row = 0; char *global, *done;
+    if (!manifest || !entry || !constants) die("addr template inputs missing");
+    value_put(env, "entry", value_string(entry));
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("addr manifest columns");
+        if (row == 0) {
+            if (strcmp(f[0], "let")) die("addr fresh declaration changed");
+            const char *keys[] = {"global", "local", "done", "static", "frame", "auto", "entry_test"};
+            const char *kinds[] = {"ga", "la", "ad", "sa", "fa", "auto", "b"};
+            for (size_t i = 0; i < 7; i++) {
+                char *label = fresh_label(entry, kinds[i]);
+                value_put(env, keys[i], value_string(label)); free(label);
+            }
+        } else if (row == 1) {
+            if (strcmp(f[0], "template") || strcmp(f[1], "librarydata") ||
+                strcmp(f[2], "address") || strcmp(f[4], "librarydata"))
+                die("addr template declaration changed");
+            global = copy(value_text(value_get(env, "global")));
+            done = copy(value_text(value_get(env, "done")));
+            Value *facts = value_new(JOBJ), *ents = value_new(JARR);
+            Value *classics = value_new(JARR), *dones = value_new(JARR);
+            char classic[1024];
+            if (snprintf(classic, sizeof(classic), "%s.classic", global) >= (int)sizeof(classic))
+                die("addr classic label too long");
+            value_put(ents, NULL, value_string(global));
+            value_put(classics, NULL, value_string(classic));
+            value_put(dones, NULL, value_string(done));
+            value_put(facts, "entry", ents);
+            value_put(facts, "classic", classics);
+            value_put(facts, "done", dones);
+            for (size_t i = 0; i < constants->n; i++) {
+                value_put(facts, constants->items[i].key, constants->items[i].value);
+                value_put(bind, constants->items[i].key, constants->items[i].value);
+            }
+            parse2_addr_out_bindings(seqs, f[6]);
+            Buffer expanded = expand_template_file_fresh("exec/parse2/librarydata-template.tsv",
+                                                         facts, "address", entry, NULL);
+            Buffer bound = {0}; FILE *table = buffer_file(&expanded); char *rule;
+            while ((rule = line(table))) {
+                char *c[4]; int cols = fields_tab(rule, c, 4);
+                if (cols != 4) die("addr template rule columns");
+                char *acts = expand_actions(c[3], bind, seqs, 0);
+                buf_add(&bound, c[0], strlen(c[0])); buf_char(&bound, '\t');
+                buf_add(&bound, c[1], strlen(c[1])); buf_char(&bound, '\t');
+                buf_add(&bound, c[2], strlen(c[2])); buf_char(&bound, '\t');
+                buf_add(&bound, acts, strlen(acts)); buf_char(&bound, '\n');
+                free(acts); free(rule);
+            }
+            if (ferror(table) || fclose(table)) die("addr template read failed");
+            table = buffer_file(&bound);
+            install_delta_text(g, table, 'r', numeric_domain(0, 257), NULL,
+                               NULL, 0, 0, NULL, "START");
+            if (fclose(table)) die("addr template install failed");
+            free(global); free(done);
+        }
+        row++; free(s);
+        if (row == 2) break;
+    }
+    if (fclose(manifest) || row != 2) die("addr template rows missing");
 }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
@@ -4835,7 +4946,11 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     if (fmtwalk > 11) parse2_fmtwalk_conversion(&g, 10);
     if (fmtwalk > 12) parse2_printfcontrol_escape(&g, 1, 4);
     if (fmtwalk > 13) parse2_printfcontrol_part(&g, 4);
-    if (fmtwalk > 14) parse2_unary_rows(&g, "part8", 11);
+    if (fmtwalk > 14) {
+        char *addr_entry = parse2_unary_part8(&g);
+        if (fmtwalk > 15) parse2_addr_template(&g, addr_entry);
+        free(addr_entry);
+    }
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4988,6 +5103,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-part8-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 15); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-addr-template-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 16); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
