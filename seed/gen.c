@@ -2833,6 +2833,32 @@ static ManifestRows manifest_rows(const char *path) {
     while (sp) rows.row[stack[--sp]].end = rows.n;
     return rows;
 }
+static int manifest_truth(Value *v) {
+    if (!v || v->kind == JNULL) return 0;
+    if (v->kind == JBOOL || v->kind == JINT) return v->number != 0;
+    if (v->kind == JUINT) return v->unumber != 0;
+    if (v->kind == JSTR || v->kind == JOBJ || v->kind == JARR) return v->n != 0;
+    die("invalid manifest truth value"); return 0;
+}
+static int manifest_when(const char *when, Value *flags, Value *facts) {
+    char *parts, *p;
+    if (!*when || !strcmp(when, "-")) return 1;
+    parts = copy(when); p = parts;
+    while (*p) {
+        char *amp = strchr(p, '&'); int neg = *p == '!', truth;
+        Value *v; const char *key = p + neg;
+        if (amp) *amp = 0;
+        if (!strncmp(key, "fact:", 5)) v = value_get(facts, key + 5);
+        else {
+            v = value_get(flags, key);
+            if (!v) die("unknown manifest flag");
+        }
+        truth = manifest_truth(v);
+        if (truth == neg) { free(parts); return 0; }
+        if (!amp) break; p = amp + 1;
+    }
+    free(parts); return 1;
+}
 static void inspect_manifest_rows(const char *path, const char *outpath) {
     ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
     FILE *out; size_t i;
@@ -2843,6 +2869,25 @@ static void inspect_manifest_rows(const char *path, const char *outpath) {
         value_put(row, NULL, depth); value_put(row, NULL, end);
         for (int c = 0; c < 9; c++) value_put(cells, NULL, value_string(rows.row[i].cell[c]));
         value_put(row, NULL, cells); value_put(all, NULL, row);
+    }
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    value_write(out, all); if (fclose(out)) die("output close failed");
+}
+static void inspect_manifest_when(const char *path, const char *facts_expr,
+                                  const char *flags_json, const char *outpath) {
+    ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
+    Value *flags = value_json(flags_json, "manifest flags");
+    Value *env = load_facts_expr(facts_expr); FILE *out;
+    for (size_t i = 0; i < rows.n; i++) {
+        Value *facts = value_new(JOBJ), *rowfacts = load_facts_expr(rows.row[i].cell[4]);
+        for (size_t j = 0; j < env->n; j++)
+            value_put(facts, env->items[j].key, env->items[j].value);
+        for (size_t j = 0; j < rowfacts->n; j++)
+            value_put(facts, rowfacts->items[j].key, rowfacts->items[j].value);
+        if (manifest_when(rows.row[i].cell[3], flags, facts)) {
+            Value *index = value_new(JINT); index->number = (long long)i;
+            value_put(all, NULL, index);
+        }
     }
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     value_write(out, all); if (fclose(out)) die("output close failed");
@@ -6013,6 +6058,9 @@ int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 4 && !strcmp(argv[1], "inspect-manifest-rows")) {
         inspect_manifest_rows(argv[2], argv[3]); return 0;
+    }
+    if (argc == 6 && !strcmp(argv[1], "inspect-manifest-when")) {
+        inspect_manifest_when(argv[2], argv[3], argv[4], argv[5]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-graph")) {
         build_parse2_token_graph(&g);
