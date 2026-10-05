@@ -170,13 +170,17 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
         if (us_fw_u64(b,n,&at,&sl) || sl>n-at) return -1;
         USForwardSig sig; memset(&sig,0,sizeof sig);
         int bad=us_forward_sig_decode(b+at,(size_t)sl,nm,(size_t)nl,&sig); at+=sl;
-        if (bad || sig.variadic || sig.structbyval || sig.ret.structbyval || sig.n>32) {
+        if (bad || sig.structbyval || sig.ret.structbyval || sig.n>32) {
             fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1;
         }
         int kk[33],ww[33],uu[33];
         for (int k=0;k<sig.n;k++) { kk[k]=sig.args[k].kind; ww[k]=sig.args[k].width; uu[k]=0; }
-        fwd_emit((char *)nm,(int)nl,sig.n,kk,ww,uu,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns);
+        int emitted = sig.variadic
+            ? fwd_emit_var((char *)nm,(int)nl,sig.n,kk,ww,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns)
+            : fwd_emit((char *)nm,(int)nl,sig.n,kk,ww,uu,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns);
+        if (!emitted) { fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1; }
     }
+    if (nfwdsrc > 0) fwd_emit_libs();
     snprintf(fwd_path,sizeof fwd_path,"/tmp/unisacc-forward-%lx.c",(unsigned long)(uintptr_t)&at);
     FILE *f=fopen(fwd_path,"wb"); if (!f) return -1;
     int werr=fwrite(fwdsrc,1,nfwdsrc,f)!=(size_t)nfwdsrc; werr|=fclose(f)!=0;
@@ -376,11 +380,16 @@ int main(int argc, char **argv) {
             if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--;   /* every -I, in order (R13-0b #22) */
         } else if (a[0]=='-' && a[1]=='I' && a[2]) { INCDIR = a+2;
             if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--; }
-        /* Same build-system compatibility as the reference product: no
-           external linker/search path, and only the C language. These
-           arguments are consumed, not interpreted as input file names. */
+        /* -l names are retained for host-library forwarding; -L and -x remain
+           accepted compatibility options.  None is an input file name. */
         else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
-            if (!a[2] && ++i >= argc) return clierror(defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
+            const char *value = a+2;
+            if (!*value) {
+                if (++i >= argc) return clierror(defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
+                value = argv[i];
+            }
+            if (a[1]=='l' && *value && nfwd_libs < 16 && strcmp(value,"m") && strcmp(value,"c") && strcmp(value,"dl")
+                && strcmp(value,"pthread") && strcmp(value,"rt")) fwd_libs[nfwd_libs++] = (char *)value;
         }
         else if (!strcmp(a,"-g") || !strncmp(a,"-std=",5)) {
             /* No separate debug information or dialect switch. */
