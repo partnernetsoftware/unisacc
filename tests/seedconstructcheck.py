@@ -871,7 +871,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             ("full", "inspect-parse2-gen2-operator-full-graph", 63),
         ):
             actual_path = work / f"parse2-gen2-operator-{name}.c.json"
-            run(str(cgen), command, str(actual_path))
+            run(str(cgen), command, str(actual_path), timeout=50)
             expected_graph = parse2base.executor()
             runner = assemble.Run(expected_graph, expected_graph.P, {}, {})
             runner.root = manifest.parent
