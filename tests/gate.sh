@@ -219,7 +219,10 @@ if [ "$(uname -s)" = Darwin ]; then
         job exec-bindverify-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindverify.sh
         job lib-bank-$a python3 ./tests/bankcheck.py --arch $a   # R12-1 BNK1 plan harness (was ungated; 7-10 s)
     done
-    job exec-container ./exec/c/containercheck.sh
+    # Fresh construction is exercised by comboot; this job inspects and runs
+    # the selected sealed container.  Building it again consumed the whole
+    # 60-second job budget before the assertions could start.
+    job exec-container env MODEL_COM="${MODEL_COM:-$R/unisacc.com}" ./exec/c/containercheck.sh
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 for part in build modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
