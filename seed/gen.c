@@ -4036,6 +4036,43 @@ static void parse2_printfcontrol_part2(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || rows != 1)
         die("printfcontrol part2 row missing");
 }
+static void parse2_printf_wide_hooks(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/printf-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
+    Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
+    char *s; int row = 0, found = 0;
+    if (!manifest || !reasons) die("printf wide hooks inputs missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("printf wide hooks columns");
+        if (row == 8) {
+            if (strcmp(f[0], "rows") || strcmp(f[1], "strings") ||
+                strcmp(f[2], "wide_hooks") || strcmp(f[4], "k2-strings"))
+                die("printf wide hooks declaration changed");
+            for (int i = 0; i < 5; i++) {
+                char key[16]; Value *reject = value_new(JARR), *action = value_new(JARR);
+                snprintf(key, sizeof(key), "reject%d", i);
+                Value *reason = value_get(reasons, key);
+                if (!reason || reason->kind != JSTR) die("printf rejection reason missing");
+                value_put(action, NULL, value_string("REJECT"));
+                value_put(action, NULL, reason);
+                value_put(reject, NULL, action);
+                value_put(sequences, key, reject);
+            }
+            value_put(bindings, "TK_STR", value_get(facts, "TK_STR"));
+            install_section_classes(g, "exec/parse2/strings-byte.tsv", "wide_hooks", 'b',
+                                    bindings, sequences, NULL);
+            install_section_classes(g, "exec/parse2/strings-result.tsv", "wide_hooks", 'r',
+                                    bindings, sequences, NULL);
+            found++;
+        }
+        row++; free(s);
+        if (row == 9) break;
+    }
+    if (fclose(manifest) || row != 9 || found != 1) die("printf wide hooks row missing");
+}
 static void parse2_fmtwalk_rows(Graph *g, int last) {
     FILE *outer = fopen("exec/parse2/printf-manifest.tsv", "rb");
     FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
@@ -4725,6 +4762,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     if (fmtwalk > 2) parse2_fmtwalk_conversion(&g);
     if (fmtwalk > 3) parse2_printfcontrol_part2(&g);
     if (fmtwalk > 4) parse2_printf_strwalk(&g, 7);
+    if (fmtwalk > 5) parse2_printf_wide_hooks(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4847,6 +4885,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printf-strwalk-pl-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 5); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printf-wide-hooks-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 6); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
