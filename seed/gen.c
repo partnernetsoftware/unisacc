@@ -4073,6 +4073,45 @@ static void parse2_printf_wide_hooks(Graph *g) {
     }
     if (fclose(manifest) || row != 9 || found != 1) die("printf wide hooks row missing");
 }
+static void parse2_printfcontrol_escape(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/printfcontrol-3-manifest.tsv", "rb");
+    char *s; int found = 0;
+    if (!manifest) die("printfcontrol escape manifest missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9 || strcmp(f[0], "template") || strcmp(f[1], "printfcontrol-escape") ||
+            strcmp(f[2], "escape") || strcmp(f[4], "printfcontrol+printfcontrol-f1"))
+            die("printfcontrol escape declaration changed");
+        Value *facts = load_facts_expr(f[4]), *bindings = value_new(JOBJ);
+        Value *opts = value_json(f[8], "printfcontrol escape options");
+        Value *sequences = textrows_construct("exec/parse2", opts);
+        Value *mapped = mapseq_construct(opts, facts);
+        Buffer expanded = expand_template_file("exec/parse2/printfcontrol-escape-template.tsv", facts, "escape");
+        Buffer bound = {0}; FILE *table = buffer_file(&expanded); char *rule;
+        for (size_t i = 0; i < mapped->n; i++)
+            value_put(sequences, mapped->items[i].key, mapped->items[i].value);
+        direct_bindings(bindings, f[7], facts);
+        while ((rule = line(table))) {
+            char *c[4]; int cols = fields_tab(rule, c, 4);
+            if (cols != 4) die("printfcontrol escape template columns");
+            buf_add(&bound, bound_name(c[0], bindings), strlen(bound_name(c[0], bindings)));
+            buf_char(&bound, '\t'); buf_add(&bound, c[1], strlen(c[1]));
+            buf_char(&bound, '\t');
+            buf_add(&bound, bound_name(c[2], bindings), strlen(bound_name(c[2], bindings)));
+            buf_char(&bound, '\t'); buf_add(&bound, c[3], strlen(c[3]));
+            buf_char(&bound, '\n'); free(rule);
+        }
+        if (ferror(table) || fclose(table)) die("printfcontrol escape template read failed");
+        table = buffer_file(&bound);
+        install_delta_text(g, table, 'r', numeric_domain(0, 256), NULL,
+                           sequences, 0, 0, NULL, "START");
+        if (fclose(table)) die("printfcontrol escape table close failed");
+        found++; free(s); break;
+    }
+    if (fclose(manifest) || found != 1) die("printfcontrol escape row missing");
+}
 static void parse2_fmtwalk_rows(Graph *g, int last) {
     FILE *outer = fopen("exec/parse2/printf-manifest.tsv", "rb");
     FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
@@ -4763,6 +4802,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     if (fmtwalk > 3) parse2_printfcontrol_part2(&g);
     if (fmtwalk > 4) parse2_printf_strwalk(&g, 7);
     if (fmtwalk > 5) parse2_printf_wide_hooks(&g);
+    if (fmtwalk > 6) parse2_printfcontrol_escape(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4888,6 +4928,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printf-wide-hooks-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 6); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-3-escape-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 7); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
