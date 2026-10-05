@@ -6068,6 +6068,21 @@ int main(int argc, char **argv) {
         if (fclose(out)) die("output close failed");
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-updates-graph")) {
+        Value *inc = value_new(JOBJ), *dec = value_new(JOBJ);
+        value_put(inc, "update_entry", value_string("LP.inc"));
+        value_put(inc, "update_target", value_string("POST.+"));
+        value_put(dec, "update_entry", value_string("LP.dec"));
+        value_put(dec, "update_target", value_string("POST.-"));
+        build_parse2_token_graph(&g);
+        parse2_gen2_return_ex(&g, "update", inc);
+        parse2_gen2_return_ex(&g, "update", dec);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-update-graph")) {
         Value *extra = value_new(JOBJ);
         value_put(extra, "update_entry", value_string("LP.inc"));
