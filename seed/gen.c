@@ -1627,40 +1627,6 @@ static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
     if (ferror(f) || fclose(f)) die("lex manifest read failed");
     finish_lex(g, start);
 }
-static void install_file(Graph *g, const char *path, char mode) {
-    FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
-    if (!f) die("cannot open rule file");
-    while ((s = line(f))) {
-        char *field[5], *p = s; int i; RuleState *st;
-        if (!*s || *s == '#') { free(s); continue; }
-        for (i = 0; i < 4; i++) { char *tab = strchr(p, '\t'); if (!tab) die("rule column count"); *tab = 0; field[i] = p; p = tab + 1; }
-        if (strchr(p, '\t')) die("rule column count"); field[4] = p;
-        if (strcmp(field[0], "main")) { free(s); continue; }
-        if (!*field[1] || !*field[3] || field[4][0] != '[') die("invalid prune rule");
-        st = rule_state(&rules, field[1]);
-        if (!strcmp(field[2], "*")) {
-            if (st->def_target) die("repeated default rule");
-            st->def_target = copy(field[3]); st->def_actions = copy(field[4]);
-        } else rule_keys(st, field[2], field[3], field[4]);
-        free(s);
-    }
-    if (ferror(f) || fclose(f)) die("rule read failed");
-    for (size_t i = 0; i < rules.n; i++) {
-        RuleState *st = &rules.state[i]; char key[16];
-        for (size_t j = 0; j < st->n; j++) {
-            number_text(st->rule[j].key, key);
-            edge_add(g, st->name, mode, key, st->rule[j].target, st->rule[j].actions);
-        }
-        for (int k = 0; k <= 256; k++) {
-            int found = 0;
-            for (size_t j = 0; j < st->n; j++) if (st->rule[j].key == k) { found = 1; break; }
-            if (!found) {
-                if (!st->def_target) die("incomplete rule state");
-                number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, st->def_actions);
-            }
-        }
-    }
-}
 static void output(FILE *f, const Graph *g);
 static void finish(Graph *g);
 /* Four-column form shared by opt/lower/parse rows. The caller supplies only
@@ -2766,36 +2732,6 @@ static void finish(Graph *g) {
     }
     for (int k = 0; k <= 256; k++) { number_text(k, key); edge_add(g, "DEAD", 'b', key, "DEAD", unreachable); }
 }
-static void manifest(Graph *g, const char *dir) {
-    char path[1024], rule[1024]; FILE *f; char *s; int rows = 0, labels = 0;
-    if (snprintf(path, sizeof(path), "%s/gen-manifest.tsv", dir) >= (int)sizeof(path)) die("manifest path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open manifest");
-    while ((s = line(f))) {
-        char *field[9], *p = s; int i;
-        if (!*s || *s == '#') { free(s); continue; }
-        for (i = 0; i < 8; i++) {
-            char *tab = strchr(p, '\t');
-            if (!tab) die("manifest column count");
-            *tab = 0; field[i] = p; p = tab + 1;
-        }
-        if (strchr(p, '\t')) die("manifest column count"); field[8] = p;
-        if (!strcmp(field[0], "rows")) {
-            if (rows++ || strcmp(field[1], "prune") || strcmp(field[2], "main")) die("unsupported rows declaration");
-            for (i = 3; i < 9; i++) if (strcmp(field[i], "-")) die("unsupported rows option");
-            if (snprintf(rule, sizeof(rule), "%s/%s-byte.tsv", dir, field[1]) >= (int)sizeof(rule)) die("rule path too long");
-            install_file(g, rule, 'b');
-            if (snprintf(rule, sizeof(rule), "%s/%s-result.tsv", dir, field[1]) >= (int)sizeof(rule)) die("rule path too long");
-            install_file(g, rule, 'r');
-        } else if (!strcmp(field[0], "label")) {
-            if (labels++ || strcmp(field[1], "CLASS.r8")) die("unsupported label declaration");
-            for (i = 2; i < 9; i++) if (strcmp(field[i], "-")) die("unsupported label option");
-            label_add(g, field[1]);
-        } else die("unsupported DSL op");
-        free(s);
-    }
-    if (ferror(f) || fclose(f)) die("manifest read failed");
-    if (rows != 1 || labels != 1) die("incomplete prune manifest");
-}
 /* Preserve the source order and nesting of a nine-column DSL manifest.
    end is the first row after this row's body, so the interpreter can skip a
    false foreach without scanning unrelated descendants. */
@@ -2991,6 +2927,42 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             visit(i, r, facts, opts, arg);
         }
     }
+}
+typedef struct { Graph *graph; const char *dir; unsigned rows, labels; } ManifestGraph;
+static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
+                                 Value *opts, void *arg) {
+    ManifestGraph *ctx = arg; char path[1024];
+    (void)index;
+    if (!strcmp(row->cell[0], "rows")) {
+        Value *bindings = seed_bind_cells(row->cell[7], facts, value_new(JOBJ));
+        for (int mode = 0; mode < 2; mode++) {
+            if (snprintf(path, sizeof(path), "%s/%s-%s.tsv", ctx->dir, row->cell[1],
+                         mode ? "result" : "byte") >= (int)sizeof(path)) die("manifest rule path too long");
+            install_section(ctx->graph, path, row->cell[2], mode ? 'r' : 'b', bindings, NULL);
+        }
+        ctx->rows++;
+    } else if (!strcmp(row->cell[0], "label")) {
+        char *names = copy(row->cell[1]), *p = names;
+        while (*p) {
+            char *comma = strchr(p, ','); if (comma) *comma = 0;
+            label_add(ctx->graph, p);
+            if (!comma) break; p = comma + 1;
+        }
+        free(names); ctx->labels++;
+    } else {
+        fprintf(stderr, "manifest op: %s\n", row->cell[0]);
+        die("manifest graph operation is not yet covered");
+    }
+    (void)opts;
+}
+static void manifest(Graph *graph, const char *dir) {
+    char path[1024]; ManifestRows rows; ManifestGraph ctx = {0};
+    Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
+    if (snprintf(path, sizeof(path), "%s/gen-manifest.tsv", dir) >= (int)sizeof(path))
+        die("manifest path too long");
+    rows = manifest_rows(path); ctx.graph = graph; ctx.dir = dir;
+    manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
+    if (!ctx.rows || !ctx.labels) die("manifest omitted rows or labels");
 }
 static void manifest_walk_trace(size_t index, ManifestRow *row, Value *facts,
                                 Value *opts, void *arg) {
