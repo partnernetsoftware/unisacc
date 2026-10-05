@@ -3409,6 +3409,38 @@ static void parse2_gen2_tytail(Graph *g) {
         parse2_gen2_control_ex(g, "resd-final", extra, seq);
     }
 }
+static void parse2_gen2_ladder_reject(Graph *g, const char *which) {
+    FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    char *s; int count = 0; char when[80];
+    if (snprintf(when, sizeof(when), "fact:seg_ladder-%s-reject", which) >= (int)sizeof(when))
+        die("gen2 ladder reject name too long");
+    if (strcmp(which, "E") && strcmp(which, "C")) die("unsupported ladder reject section");
+    if (!manifest) die("cannot open gen2 manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("gen2 ladder reject manifest columns");
+        if (!strcmp(f[3], when)) {
+            Value *bindings = value_new(JOBJ), *opts, *seq;
+            if (strcmp(f[0], "rows") || strcmp(f[1], "ladder-reject") ||
+                strcmp(f[2], "main") || strcmp(f[4], "-") || strcmp(f[7], "reject_state=@str:DEAD.short") &&
+                strcmp(f[7], "reject_state=@str:DEAD.pa") &&
+                strcmp(f[7], "reject_state=@str:DEAD.ty") &&
+                strcmp(f[7], "reject_state=@str:DEAD.ui"))
+                die("unsupported gen2 ladder reject row");
+            opts = value_json(f[8], "gen2 ladder reject options");
+            seq = mapseq_construct(opts, value_new(JOBJ));
+            direct_bindings_ex(bindings, seq, f[7], value_new(JOBJ));
+            install_section_classes(g, "exec/parse2/ladder-reject-result.tsv", "main", 'r',
+                                    bindings, seq, NULL);
+            count++;
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || count != (strcmp(which, "E") ? 3 : 4))
+        die("gen2 ladder reject rows changed");
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5329,6 +5361,25 @@ int main(int argc, char **argv) {
         parse2_gen2_type_words(&g);
         parse2_gen2_type_entry(&g);
         parse2_gen2_tytail(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-reject-e-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_ladder_reject(&g, "E");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-reject-ec-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_ladder_reject(&g, "E");
+        parse2_gen2_ladder_reject(&g, "C");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);

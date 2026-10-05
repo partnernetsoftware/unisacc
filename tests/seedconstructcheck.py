@@ -19,10 +19,10 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5"):
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6"):
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5")
+    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6")
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -798,6 +798,32 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c gen2 tytail differs at {first}: "
                                  f"C={tail_actual[first:first+100]!r} "
                                  f"Python={tail_expected[first:first+100]!r}")
+    if part == "parse2-6":
+        for name, command, flags in (
+            ("ladder-reject-e", "inspect-parse2-gen2-ladder-reject-e-graph",
+             {"seg_ladder-E-reject": 1}),
+            ("ladder-reject-ec", "inspect-parse2-gen2-ladder-reject-ec-graph",
+             {"seg_ladder-E-reject": 1, "seg_ladder-C-reject": 1}),
+        ):
+            actual_path = work / f"parse2-gen2-{name}.c.json"
+            run(str(cgen), command, str(actual_path))
+            expected_graph = parse2base.executor()
+            assemble.Run(expected_graph, expected_graph.P, {}, flags).run(
+                ROOT / "exec/parse2/gen2-manifest.tsv")
+            expected_graph.g.finish()
+            expected = json.dumps({
+                "start": "START",
+                "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                           for state, (mode, row) in expected_graph.g.st.items()},
+                "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
+            }, separators=(",", ":")).encode()
+            actual = actual_path.read_bytes()
+            if actual != expected:
+                first = next((i for i, (a, b) in enumerate(zip(actual, expected))
+                              if a != b), min(len(actual), len(expected)))
+                raise AssertionError(f"seed/gen.c gen2 {name} differs at {first}: "
+                                     f"C={actual[first:first+100]!r} "
+                                     f"Python={expected[first:first+100]!r}")
     if part == "parse2-3":
         initializer_manifest = ROOT / "exec/parse2/strings-initializer-manifest.tsv"
         float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
@@ -954,3 +980,5 @@ if part == "parse2-4":
     print("seed construct parse2-4: gen2 dimensions through type-word graphs byte-identical")
 if part == "parse2-5":
     print("seed construct parse2-5: gen2 type-entry and tytail graphs byte-identical")
+if part == "parse2-6":
+    print("seed construct parse2-6: gen2 ladder rejection graphs byte-identical")
