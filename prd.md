@@ -28,6 +28,8 @@
 | v0.0.23 | [archive/plans/v0.0.23.md](archive/plans/v0.0.23.md) — 产品追平余项（第二次顺延，本版了结或砍掉）、产品诊断定案、依赖声明、A2 实验、0.0.22 发版暴露的问题；R20-1 B 降级到 0.1.x | 未公开（主人 2026-10-04 决定删除草稿，内容并入 0.0.24） |
 | v0.0.24 | [archive/plans/v0.0.24.md](archive/plans/v0.0.24.md) — DSL 冻结规格与 T1 清理（facts 动作序列减 400 处）、逐条目契约六个阶段、门禁依赖声明收窄、kill/ttyname、Python 参考 extern 修复与 difftest-py 门禁 | **已公开 2026-10-04**（signed sha256 dca05a96…，[回执](research/r24-release-acceptance.json)） |
 | v0.0.25 | [archive/plans/v0.0.25.md](archive/plans/v0.0.25.md) — 0.0.24 复盘的流程项 P1–P7（冻结窗口拦截、复活扫描、facts 门禁等）、Windows 测试迁到 GitHub runner（X7，UTM 只排查）、T1e 收尾、T2 表行覆盖率、DNS 转发系统 libc（N1）、POSIX 缺口清单（N2） | **已公开 2026-10-04 23:23 SGT**（signed sha256 2c9822c9…，[回执](research/r25-release-acceptance.json)） |
+| v0.0.26 | [archive/plans/v0.0.26.md](archive/plans/v0.0.26.md) — 多文件转发（N5）、五阶段表行覆盖与九个 op 契约（T2）、平表和网络改由 C 工具生成（B3'）、seed/gen.c 通 lex | **已公开 2026-10-05**（signed sha256 5a188fd7…，[回执](research/r26-release-acceptance.json)） |
+| v0.0.27 | [plans/v0.0.27.md](plans/v0.0.27.md) | 计划中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；权重本体与推理速度的精确结构优化实验（§5.2）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
@@ -227,6 +229,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 ## 4. 质量体系
 
 - **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
+- **诊断分层**：[tests/GATE-LAYERS.md](tests/GATE-LAYERS.md) 把同一门禁清单按断言跨度分为 contract、stage、pipeline、platform；`gatequeue.py --layer/--through-layer` 只筛选日常排查范围，耗时仍由实测历史调度。`gate-layers` 校验全部套件均归类且四层并集等于原清单；未筛选的发布全量门禁保持原样。
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。
 - **reviewed trees**：`make gatedeps` 从 HEAD 的 `git archive`（umask 022）计算戳与 guards，作为发布前最后一提交。
