@@ -462,6 +462,7 @@ job seed-construct-parse2-6 python3 ./tests/seedconstructcheck.py --part parse2-
 job seed-construct-parse2-7 python3 ./tests/seedconstructcheck.py --part parse2-7 # 0.0.27: gen2 optail onward
 job seed-construct-parse2-8 python3 ./tests/seedconstructcheck.py --part parse2-8 # 0.0.27: gen2 pointer + full optail
 job seed-construct-parse2-10 python3 ./tests/seedconstructcheck.py --part parse2-10 # 0.0.27: gen2 statics onward
+job seed-construct-parse2-11 python3 ./tests/seedconstructcheck.py --part parse2-11 # 0.0.28: gen2 statics graph
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
