@@ -40,5 +40,11 @@ if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
     echo "  FAIL: UNISACC_FFI_X86_PROVIDER has no manifest.json (rebuild: release/RELEASE-PIPELINE.md section 9 step 5b)"; bad=1
 fi
 # 0.0.27 C2: the lnx/x86_64 ccinterop cells run on release-check ccinterop-x86, not a local Lima VM
+# 0.0.28 R2: the contract layer (ledger, freeze, gate layers, fresh-order, ...) before sealing --
+# 0.0.27 moved its rc twice for tool reds that only the queue found after the seal
+cq=$(mktemp -d "${TMPDIR:-/tmp}/precheck-contract.XXXXXX"); crc=75; w=0
+while [ "$crc" -eq 75 ] && [ "$w" -lt 6 ]; do w=$((w+1)); python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
+if [ "$crc" -ne 0 ]; then grep '^DONE' "$cq"/w*.log | grep -v ' rc=0 ' | cut -c1-200; tail -1 "$cq/w$w.log"; echo "  FAIL: contract layer (rc=$crc after $w windows; logs $cq)"; bad=1
+else echo "contract layer: passed in $w window(s)"; rm -rf "$cq"; fi
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
 exit $bad
