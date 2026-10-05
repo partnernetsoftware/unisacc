@@ -457,6 +457,7 @@ job seed-construct-parse2 python3 ./tests/seedconstructcheck.py --part parse2 # 
 job seed-construct-parse2-2 python3 ./tests/seedconstructcheck.py --part parse2-2 # 0.0.27: parse2 comparison split again at ~40 s
 job seed-construct-parse2-3 python3 ./tests/seedconstructcheck.py --part parse2-3 # 0.0.27: printf fallback formats, read from the manifest
 job seed-construct-parse2-4 python3 ./tests/seedconstructcheck.py --part parse2-4 # 0.0.27: gen2 families, starting with types-dimensions
+job seed-construct-parse2-5 python3 ./tests/seedconstructcheck.py --part parse2-5 # 0.0.27: gen2 type-entry onward
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
