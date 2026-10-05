@@ -3287,6 +3287,45 @@ static void parse2_string_walk_tail(Graph *g, const char *pre,
     if (ferror(manifest) || fclose(manifest) || row != 4)
         die("incomplete string walker tail");
 }
+static void parse2_string_initializer_tail(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
+    Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
+    char *s; int row = 0;
+    if (!manifest || !reasons || reasons->kind != JOBJ)
+        die("cannot read string initializer tail facts");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("string initializer tail manifest column count");
+        if (row == 0 && !strcmp(f[0], "let")) row++;
+        else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[2], "initializer_head")) row++;
+        else if (row == 2 && !strcmp(f[0], "call") && !strcmp(f[1], "strwalk")) row++;
+        else if (row == 3 && !strcmp(f[0], "rows") && !strcmp(f[1], "strings") &&
+                 !strcmp(f[2], "initializer_tail") && !strcmp(f[4], "k2-strings")) {
+            for (int i = 0; i < 5; i++) {
+                char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
+                snprintf(name, sizeof(name), "reject%d", i);
+                reason = value_get(reasons, name);
+                if (!reason || reason->kind != JSTR) die("missing string initializer tail rejection fact");
+                value_put(reject, NULL, value_string("REJECT"));
+                value_put(reject, NULL, reason);
+                value_put(acts, NULL, reject);
+                value_put(sequences, name, acts);
+            }
+            direct_bindings_ex(bindings, sequences, f[7], facts);
+            install_section(g, "exec/parse2/strings-byte.tsv", "initializer_tail", 'b',
+                            bindings, sequences);
+            install_section(g, "exec/parse2/strings-result.tsv", "initializer_tail", 'r',
+                            bindings, sequences);
+            row++;
+        } else die("unexpected string initializer tail row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || row != 4)
+        die("incomplete string initializer tail");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3373,6 +3412,21 @@ static void inspect_parse2_strwalk_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_startup_branch_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3401,6 +3455,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-strwalk-graph")) {
         inspect_parse2_strwalk_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-branch-graph")) {
+        inspect_parse2_startup_branch_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
