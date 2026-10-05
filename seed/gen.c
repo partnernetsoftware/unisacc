@@ -3902,7 +3902,7 @@ static void parse2_printfcontrol_append(Graph *g) {
     if (ferror(table) || fclose(table) || installed != 1)
         die("printfcontrol append row missing");
 }
-static void parse2_printfcontrol_part1_all(Graph *g) {
+static Value *parse2_printfcontrol_part1_all(Graph *g) {
     FILE *manifest = fopen("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
     Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
     Value *classes = value_get(facts, "classes"); char *s; int row = 0;
@@ -3933,6 +3933,44 @@ static void parse2_printfcontrol_part1_all(Graph *g) {
         if (row == 2) break;
     }
     if (fclose(manifest) || row != 2) die("printfcontrol part1 row missing");
+    return bindings;
+}
+static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
+    FILE *manifest = fopen("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
+    Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
+    Value *ctx = value_new(JOBJ), *classes = value_get(facts, "classes");
+    char *s; int row = 0;
+    if (!manifest || !classes || !prior) die("printfcontrol plain inputs missing");
+    for (size_t i = 0; i < facts->n; i++)
+        value_put(ctx, facts->items[i].key, facts->items[i].value);
+    for (size_t i = 0; i < prior->n; i++)
+        value_put(ctx, prior->items[i].key, prior->items[i].value);
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("printfcontrol plain manifest columns");
+        if (row == 2) {
+            Value *opts, *sequences, *mapped;
+            if (strcmp(f[0], "rows") || strcmp(f[1], "printfcontrol") ||
+                strcmp(f[2], "part1.plain") || strcmp(f[3], "!warnings") ||
+                strcmp(f[4], "printfcontrol"))
+                die("printfcontrol plain declaration changed");
+            opts = value_json(f[8], "printfcontrol plain options");
+            sequences = textrows_construct("exec/parse2", opts);
+            mapped = mapseq_construct(opts, facts);
+            for (size_t i = 0; i < mapped->n; i++)
+                value_put(sequences, mapped->items[i].key, mapped->items[i].value);
+            direct_bindings(bindings, f[7], ctx);
+            install_section_classes(g, "exec/parse2/printfcontrol-byte.tsv", "part1.plain", 'b',
+                                    bindings, sequences, classes);
+            install_section_classes(g, "exec/parse2/printfcontrol-result.tsv", "part1.plain", 'r',
+                                    bindings, sequences, classes);
+        }
+        row++; free(s);
+        if (row == 3) break;
+    }
+    if (fclose(manifest) || row != 3) die("printfcontrol plain row missing");
 }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
@@ -4512,7 +4550,10 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     parse2_printfallback_more(&g, entry, 2, last);
     if (control0) parse2_printfcontrol_part0(&g);
     if (append) parse2_printfcontrol_append(&g);
-    if (part1) parse2_printfcontrol_part1_all(&g);
+    if (part1) {
+        Value *labels = parse2_printfcontrol_part1_all(&g);
+        if (part1 > 1) parse2_printfcontrol_part1_plain(&g, labels);
+    }
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4614,6 +4655,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-part1-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-plain-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 2); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
