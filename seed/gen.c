@@ -3867,7 +3867,7 @@ static void parse2_printfcontrol_part0(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || rows != 1)
         die("printfcontrol part0 row missing");
 }
-static void parse2_printf_strwalk(Graph *g) {
+static void parse2_printf_strwalk(Graph *g, int call_row) {
     FILE *manifest = fopen("exec/parse2/printf-manifest.tsv", "rb");
     Value *bindings = value_new(JOBJ), *facts = value_new(JOBJ);
     char *s; int row = 0;
@@ -3877,15 +3877,16 @@ static void parse2_printf_strwalk(Graph *g) {
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9) die("printf manifest column count");
-        if (row == 3) {
+        if (row == call_row) {
             if (strcmp(f[0], "call") || strcmp(f[1], "strwalk"))
                 die("printf string walker declaration changed");
             direct_bindings(bindings, f[7], facts);
         }
         row++; free(s);
-        if (row == 4) break;
+        if (row == call_row + 1) break;
     }
-    if (fclose(manifest) || row != 4) die("printf string walker missing");
+    if (fclose(manifest) || row != call_row + 1 || !value_get(bindings, "pre"))
+        die("printf string walker missing");
     const char *pre = value_text(value_get(bindings, "pre"));
     const char *body = value_text(value_get(bindings, "body"));
     const char *done = value_text(value_get(bindings, "done"));
@@ -4714,7 +4715,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     entry = parse2_printfallback_head(&g);
     parse2_printfallback_more(&g, entry, 2, last);
     if (control0) parse2_printfcontrol_part0(&g);
-    if (strwalk) parse2_printf_strwalk(&g);
+    if (strwalk) parse2_printf_strwalk(&g, 3);
     if (append) parse2_printfcontrol_append(&g);
     if (part1) {
         Value *labels = parse2_printfcontrol_part1_all(&g);
@@ -4723,6 +4724,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     if (fmtwalk) parse2_fmtwalk_rows(&g, fmtwalk > 2 ? 2 : fmtwalk);
     if (fmtwalk > 2) parse2_fmtwalk_conversion(&g);
     if (fmtwalk > 3) parse2_printfcontrol_part2(&g);
+    if (fmtwalk > 4) parse2_printf_strwalk(&g, 7);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4842,6 +4844,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-2-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 4); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printf-strwalk-pl-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 5); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
