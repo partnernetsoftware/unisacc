@@ -383,6 +383,11 @@ static long readlink(const char *__u_p, char *__u_buf, size_t __u_n) {
 #endif
 }
 #endif
+/* 0.0.27 H1: the user and group ids forward to the system C library (pwd.h uses them) */
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
 #if !__UNISA_FTRIM_LIBC || __UN_ttyname
 static char *ttyname(int __u_fd) {             /* 0.0.24 D2: the terminal's path, or 0 with errno */
     static char __u_tn[1024]; long __u_r;
