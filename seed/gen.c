@@ -555,7 +555,8 @@ static void direct_bindings_ex(Value *bindings, Value *sequences,
             char *owner;
             if (!kind || !kind[1]) die("invalid fresh binding");
             *kind++ = 0;
-            if (strncmp(scope, "P:", 2)) die("unsupported fresh binding scope");
+            if (strncmp(scope, "P:", 2) && strncmp(scope, "U:", 2))
+                die("unsupported fresh binding scope");
             owner = interpolate(scope + 2, facts);
             label = fresh_label(owner, kind);
             v = value_string(label); free(label); free(owner); free(scope);
@@ -3164,6 +3165,50 @@ static void parse2_string_initializer_head(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || row != 2)
         die("incomplete string initializer head");
 }
+static void parse2_string_walk_head(Graph *g, const char *pre,
+                                    const char *body, const char *done) {
+    FILE *manifest = fopen("exec/parse2/strwalk-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
+    Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
+    char *s; int row = 0;
+    if (!manifest || !reasons || reasons->kind != JOBJ)
+        die("cannot read string walker facts");
+    value_put(facts, "pre", value_string(pre));
+    value_put(facts, "body", value_string(body));
+    value_put(facts, "done", value_string(done));
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("string walker manifest column count");
+        if (!row && !strcmp(f[0], "let") && !strcmp(f[4], "k2-strings")) row++;
+        else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[1], "strings") &&
+                 !strcmp(f[2], "walk_head") && !strcmp(f[4], "k2-strings")) {
+            for (int i = 0; i < 5; i++) {
+                char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
+                snprintf(name, sizeof(name), "reject%d", i);
+                reason = value_get(reasons, name);
+                if (!reason || reason->kind != JSTR) die("missing string walker rejection fact");
+                value_put(reject, NULL, value_string("REJECT"));
+                value_put(reject, NULL, reason);
+                value_put(acts, NULL, reject);
+                value_put(sequences, name, acts);
+            }
+            direct_bindings_ex(bindings, sequences, f[7], facts);
+            install_section(g, "exec/parse2/strings-byte.tsv", "walk_head", 'b',
+                            bindings, sequences);
+            install_section(g, "exec/parse2/strings-result.tsv", "walk_head", 'r',
+                            bindings, sequences);
+            row++;
+        } else if (row == 2 && !strcmp(f[0], "template") &&
+                   !strcmp(f[1], "strings") && !strcmp(f[2], "walk_escape")) {
+            free(s); break;
+        } else die("unexpected string walker head row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || row != 2)
+        die("incomplete string walker head");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3211,6 +3256,18 @@ static void inspect_parse2_initializer_head_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_strwalk_head_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3230,6 +3287,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-initializer-head-graph")) {
         inspect_parse2_initializer_head_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-strwalk-head-graph")) {
+        inspect_parse2_strwalk_head_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
