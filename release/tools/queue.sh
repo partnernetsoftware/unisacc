@@ -43,6 +43,16 @@ for i in $(seq 1 300); do
   env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"
   case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
+  # 0.0.28 R1 (owner rule): the 5-minute load at or above QUEUE_LOAD_MAX (6) for ten minutes pauses
+  # the queue at a window boundary until it falls below QUEUE_LOAD_RESUME (4); results are kept.
+  # Built in because the 0.0.27 external watcher missed once and killed the wrong PID once.
+  l5=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($3)}'); [ -n "$l5" ] || l5=$(awk '{print int($2)}' /proc/loadavg 2>/dev/null || echo 0)
+  if [ "$l5" -ge "${QUEUE_LOAD_MAX:-6}" ]; then hot=${hot:-$(date +%s)}; else hot=; fi
+  if [ -n "$hot" ] && [ $(( $(date +%s) - hot )) -ge "${QUEUE_LOAD_SECS:-600}" ]; then
+    echo "paused: 5-min load >= ${QUEUE_LOAD_MAX:-6} for ${QUEUE_LOAD_SECS:-600} s $(date +%H:%M:%S)" >> "$LOG"
+    while [ "$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($3)}')" -ge "${QUEUE_LOAD_RESUME:-4}" ]; do sleep 60; done
+    echo "resumed $(date +%H:%M:%S)" >> "$LOG"; hot=
+  fi
   [ $((i % 40)) -eq 0 ] && osascript -e 'tell application "Terminal" to close (every window whose busy is false)' >/dev/null 2>&1
 done
 echo "final rc=$rc" >> "$LOG"
