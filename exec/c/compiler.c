@@ -503,6 +503,11 @@ int main(int argc, char **argv) {
     if (objwant) { ARGRESOURCE(NRI,"\0cli/object",objres); NRI++; }
     if (funit) { ARGRESOURCE(NRI,"\0cli/funit",funitres); NRI++; }
     ARGRESOURCE(NRI,"\0cli/error-limit",errorlimit); NRI++;
+    /* 0.0.28 F1: ask E1 for its constructor/destructor side-car; run.c strips it and fills
+       \0cli/attributes (empty until a stage writes records) for E3 */
+    { static const unsigned char one=1; cli[NRI].name=(const unsigned char *)"\0cli/f1"; cli[NRI].n=7; cli[NRI].data=&one; cli[NRI].len=1; NRI++; }
+    free(ATTRS.b); ATTRS.b=0; ATTRS.n=0; ATTRS.cap=0; ATTR_UNIT=0;
+    ATTR_SLOT=NRI; cli[NRI].name=(const unsigned char *)"\0cli/attributes"; cli[NRI].n=15; cli[NRI].data=0; cli[NRI].len=0; NRI++;
     /* Target selection is input data; the E2 model chooses its declaration. */
     const char *predefine_target=mode==4 ? "lnx/x86_64" : target;
     cli[NRI].name=(const unsigned char *)"\0cli/target"; cli[NRI].n=11;
@@ -526,7 +531,7 @@ int main(int argc, char **argv) {
     else {
         char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/%sunit",target,warnings ? "warn/" : "");
         for (int j=0;j<nsources;j++) {
-            Buf unit={0}; unit.b=source_read(sources[j],&unit.n);
+            Buf unit={0}; unit.b=source_read(sources[j],&unit.n); ATTR_UNIT=j;
             rc=runroute(unitroute,&unit,sources[j]);
             if (rc) { free(unit.b); break; }
             int namelen=strlen(sources[j]);
@@ -560,7 +565,7 @@ int main(int argc, char **argv) {
         rc = tape_input ? runroute_from(route,level ? "e4" : "prune",&in,src) : runroute(route,&in,src);
     }
     if (!rc && fwd_restart) {                    /* compile again with the stubs as the last unit */
-        unpackage(); RI=0; NRI=0;
+        unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
         char **av=xrealloc(0,(argc+2)*sizeof(char *)); int j=0,put=0;
         for (int i=0;i<argc;i++) { av[j++]=argv[i]; if (!put && argv[i]==src) { av[j++]=fwd_path; put=1; } }
         av[j]=0; fwd_second=1;
@@ -595,7 +600,7 @@ int main(int argc, char **argv) {
         }
         }
     }
-    unpackage(); RI=0; NRI=0;
+    unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
     free(srcres.b); free(srcres.at);

@@ -476,6 +476,31 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
 }
 
 /* Route dispatch owns only byte-stream lifetimes, never compiler semantics. */
+/* 0.0.28 F1 (driver IO only): E1 run with \0cli/f1 prefixes its output with a USLATTR1 side-car
+   -- "USLATTR1", u32 count, u32 token_len, count x (u32 ordinal, u8 kind) -- before the ordinary
+   E1 bytes.  The driver strips it right after the stage that wrote it, so every later stage sees
+   the default E1 bytes, and collects the records, tagged with the unit they came from, into the
+   \0cli/attributes resource E3 reads: u32 count, then count x (u32 unit, u32 ordinal, u8 kind).
+   No decision is made here: the records are passed through as E1 wrote them. */
+UNISA_RUNTIME_STATE Buf ATTRS; UNISA_RUNTIME_STATE int ATTR_UNIT; UNISA_RUNTIME_STATE int ATTR_SLOT = -1;
+static unsigned attr_u32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (unsigned)p[3] << 24; }
+static int attr_strip(Buf *out) {
+    if (out->n < 16 || memcmp(out->b, "USLATTR1", 8)) return 0;
+    unsigned count = attr_u32(out->b + 8);
+    long head = 16 + 5L * count;
+    if (count > 1000000u || head > out->n) die("malformed USLATTR1 side-car");
+    if (ATTRS.n == 0) { for (int k = 0; k < 4; k++) bput(&ATTRS, 0, 0); }
+    unsigned total = attr_u32(ATTRS.b) + count;
+    for (unsigned r = 0; r < count; r++) {
+        const unsigned char *q = out->b + 16 + 5 * r;
+        for (int k = 0; k < 4; k++) bput(&ATTRS, (ATTR_UNIT >> (8 * k)) & 255, 0);
+        for (int k = 0; k < 5; k++) bput(&ATTRS, q[k], 0);
+    }
+    for (int k = 0; k < 4; k++) ATTRS.b[k] = (total >> (8 * k)) & 255;
+    memmove(out->b, out->b + head, out->n - head); out->n -= (int)head;
+    if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
+    return 1;
+}
 static int runroute_range(const char *route, const char *first_stage, const char *last_stage, Buf *in, const char *src) {
     int count = 0, ready = first_stage == 0, ended = last_stage == 0;
     for (int i = 0; i < PS; i++) {
@@ -495,6 +520,7 @@ static int runroute_range(const char *route, const char *first_stage, const char
         }
         loadbytes(bytes, len); free(owned); LB = 0;
         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
+        if (!rc) attr_strip(&out);
         unload(); free(in->b); in->b = out.b; in->n = out.n;
         if (rc) return rc;
         count++;
