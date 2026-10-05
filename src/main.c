@@ -54,6 +54,7 @@ int main(void) {
     char *outpath;
     int (*entry)(long, long);
     int objwant; int bgiven; int funit; int asmwant;
+    srcroom(0);
     asmwant = 0;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
     ninput = 0; objwant = 0; bgiven = 0; funit = 0;
@@ -356,6 +357,7 @@ int main(void) {
     srcpath = __argv(fi);
     fd = ropen(srcpath);
     if (fd < 0) return enoinput(srcpath);
+    srcroom(fdsize(fd));
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
     if (nsrc >= MAXSRC - 1) return emsg("unisacc: error: source too large", 0);

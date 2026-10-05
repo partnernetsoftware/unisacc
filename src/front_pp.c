@@ -7,16 +7,22 @@
  * Stage 1: the lexer.  `unisacc -tokens f.c` prints the token stream.
  */
 
-#define MAXSRC 8388608   /* 8 MB (0.0.21: the flattened self-source passed half of 4 MB, 2,140,736) */
-#define MAXTOK 2097152   /* about one token per two bytes of the 4 MB MAXSRC */
+/* 0.0.28 H1': the source buffers are sized at run time.  They start at 8 MB (0.0.21: the
+   flattened self-source passed half of 4 MB) and srcroom() widens them, before a unit is read,
+   to twice the input plus 1 MB -- the 9.2 MB SQLite amalgamation used to stop at "source too
+   large".  Static arrays of the old fixed size were about 112 MB of BSS. */
+int maxsrc = 8388608;
+int maxtok = 2097152;    /* about one token per four bytes of source */
+#define MAXSRC maxsrc
+#define MAXTOK maxtok
 
-char src[MAXSRC];
+char *src;
 int nsrc;
 int inf(int st, int *key, int head);
 
-int tkind[MAXTOK];      /* index into TOKV */
-int tpos[MAXTOK];       /* offset of the token text in src */
-int tlen[MAXTOK];
+int *tkind;             /* index into TOKV */
+int *tpos;              /* offset of the token text in src */
+int *tlen;
 int ntok;
 
 char tbuf[256];
@@ -173,7 +179,7 @@ int isal(int c) {
 int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 
 /* ---- the preprocessor: the pp table decides every directive [W-1] ----- */
-#define MAXMAC 2048
+#define MAXMAC 16384     /* 0.0.28 H1': 2048 stopped the SQLite amalgamation ("too many macro definitions") */
 /* A macro lives from its #define to its #undef, and a redefinition replaces
    it from THAT point on (C99 6.10.3.5).  This preprocessor used to process
    every directive first and expand the text with the FINAL table
@@ -230,7 +236,7 @@ int segpos[MAXSEG]; int nsegpos;   /* segment k+1 starts at segpos[k] */
 int pp_seg = 0 - 1;      /* -1: resolve against the table as it stands now
                             (while preprocessing, and after); otherwise the
                             segment of the text being expanded */
-int srcseg[MAXSRC];      /* the segment of each byte of src */
+int *srcseg;             /* the segment of each byte of src */
 int eseg;                /* the segment of what eput is writing */
 /* #pragma push_macro / pop_macro: the saved entry (or -1) per push */
 #define MAXPUSH 256
@@ -876,7 +882,7 @@ char incdir[16][512];                /* ...and the normalised text itself: a tem
                                         nothing (exec-driver-resources) */
 
 #define MAXINC MAXSRC    /* included source has the same limit as source */
-char incbuf[MAXINC];
+char *incbuf;
 char incpath[512];
 int nincl;
 
@@ -2025,9 +2031,25 @@ int decomment(void) {
        in turn rewrites text an earlier argument just put there, and
        `FF(d,a,b,c)` on `#define FF(a,b,c,d)` then writes the wrong variable
        (E-45 caught exactly that on the Python side). */
-char ebuf[MAXSRC]; int nebuf;
+char *ebuf; int nebuf;
 
-int ebseg[MAXSRC];       /* the segment each byte of ebuf came from */
+int *ebseg;              /* the segment each byte of ebuf came from */
+/* srcroom(N): buffers for a unit of N bytes.  Called before the unit is read, when no pointer
+   into the old buffers is held; a larger unit gets new buffers (the old ones are let go). */
+int srcroom(long need) {
+    long want; want = need * 2 + 1048576;
+    if (src != 0 && want <= maxsrc) return 0;
+    if (want > maxsrc) { maxsrc = (int)want; maxtok = maxsrc / 4; }
+    if (src != 0) { free(src); free(srcseg); free(tkind); free(tpos); free(tlen); free(incbuf); free(ebuf); free(ebseg); }
+    src = calloc(maxsrc, 1); srcseg = calloc(maxsrc, sizeof(int));
+    tkind = calloc(maxtok, sizeof(int)); tpos = calloc(maxtok, sizeof(int)); tlen = calloc(maxtok, sizeof(int));
+    incbuf = calloc(maxsrc, 1); ebuf = calloc(maxsrc, 1); ebseg = calloc(maxsrc, sizeof(int));
+    if (src == 0 || srcseg == 0 || tkind == 0 || tpos == 0 || tlen == 0 || incbuf == 0 || ebuf == 0 || ebseg == 0) {
+        __write(2, "unisacc: out of memory for the source buffers\n", 46); __exit(1); }
+    return 0;
+}
+/* the size of an open file, the read position put back at its start */
+long fdsize(int fd) { long n; n = __lseek(fd, 0, 2); __lseek(fd, 0, 0); return n < 0 ? 0 : n; }
 int eput(int c) {
     if (nebuf >= MAXSRC) { __write(2, "macro expansion overflow\n", 25); __exit(1); }
     ebuf[nebuf] = c; ebseg[nebuf] = eseg; nebuf = nebuf + 1;

@@ -5974,6 +5974,7 @@ int fe_load(char *path, char *t) {
     } else {
         fd = ropen(path);
         if (fd < 0) return enoinput(path);
+        srcroom(fdsize(fd));
         nsrc = __read(fd, src, MAXSRC);
         __close(fd);
     }
