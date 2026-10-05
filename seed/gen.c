@@ -4056,6 +4056,58 @@ static void parse2_fmtwalk_rows(Graph *g, int last) {
     }
     if (fclose(manifest) || found != last) die("fmtwalk rows missing");
 }
+static void parse2_fmtwalk_conversion(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-fmtwalk"), *classes = value_get(facts, "classes");
+    Value *conv = value_get(facts, "conv");
+    char *s, *bindcell = NULL; int row = 0;
+    if (!manifest || !classes || !conv || conv->kind != JARR) die("fmtwalk conversion inputs missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("fmtwalk conversion columns");
+        if (row == 2 && (strcmp(f[0], "foreach") || strcmp(f[4], "k2-fmtwalk") ||
+                         strcmp(f[8], "{\"over\":\"conv\",\"as\":\"c\"}")))
+            die("fmtwalk conversion loop changed");
+        if (row == 3) {
+            if (strcmp(f[0], ".rows") || strcmp(f[1], "helpers") ||
+                strcmp(f[2], "conversion") || strcmp(f[4], "k2-fmtwalk") ||
+                strcmp(f[6], "reject=@rej:not covered: printf conversion"))
+                die("fmtwalk conversion declaration changed");
+            bindcell = copy(f[7]);
+        }
+        row++; free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || row != 4 || !bindcell)
+        die("fmtwalk conversion rows missing");
+    for (size_t i = 0; i < conv->n; i++) {
+        Value *ctx = value_new(JOBJ), *bindings = value_new(JOBJ);
+        Value *domain = value_new(JARR), *sequences = value_new(JOBJ);
+        Value *reject = value_new(JARR), *action = value_new(JARR);
+        Value *item = conv->items[i].value, *byte = value_get(item, "byte");
+        if (!byte || byte->kind != JINT || !value_get(item, "kind"))
+            die("fmtwalk conversion fact changed");
+        for (size_t j = 0; j < facts->n; j++)
+            value_put(ctx, facts->items[j].key, facts->items[j].value);
+        value_put(ctx, "pre", value_string("PF"));
+        value_put(ctx, "on_byte", value_string("PF.b"));
+        value_put(ctx, "on_d", value_string("PF.d"));
+        value_put(ctx, "on_end", value_string("PF.end"));
+        value_put(ctx, "c", item);
+        direct_bindings(bindings, bindcell, ctx);
+        value_put(domain, NULL, byte);
+        value_put(action, NULL, value_string("REJECT"));
+        value_put(action, NULL, value_string("not covered: printf conversion"));
+        value_put(reject, NULL, action);
+        value_put(sequences, "reject", reject);
+        install_section_domain_classes(g, "exec/parse2/helpers-byte.tsv", "conversion", 'b',
+                                       bindings, sequences, classes, domain);
+        install_section_domain_classes(g, "exec/parse2/helpers-result.tsv", "conversion", 'r',
+                                       bindings, sequences, classes, domain);
+    }
+    free(bindcell);
+}
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
@@ -4639,7 +4691,8 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
         Value *labels = parse2_printfcontrol_part1_all(&g);
         if (part1 > 1) parse2_printfcontrol_part1_plain(&g, labels);
     }
-    if (fmtwalk) parse2_fmtwalk_rows(&g, fmtwalk);
+    if (fmtwalk) parse2_fmtwalk_rows(&g, fmtwalk > 2 ? 2 : fmtwalk);
+    if (fmtwalk > 2) parse2_fmtwalk_conversion(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4753,6 +4806,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-fmtwalk-length-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 2); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-fmtwalk-conversion-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 3); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
