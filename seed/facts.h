@@ -169,6 +169,24 @@ static Value *seed_eval(const char *cell, Value *facts, Value *env) {
     free(v); return out;
 }
 
+/* Run.one's lv(): opts.let values -- lists and objects recurse, strings are cells, other JSON stays */
+static Value *seed_eval_tree(Value *v, Value *facts, Value *env) {
+    Value *out; size_t i;
+    if (!v) return 0;
+    if (v->kind == JSTR) return seed_eval(v->s, facts, env);
+    if (v->kind != JARR && v->kind != JOBJ) return v;
+    out = value_new(v->kind);
+    for (i = 0; i < v->n; i++) value_put(out, v->items[i].key, seed_eval_tree(v->items[i].value, facts, env));
+    return out;
+}
+/* opts.let: each name is bound in order into facts, later lets seeing earlier ones */
+static void seed_let(Value *let, Value *facts, Value *env) {
+    size_t i;
+    if (!let) return;
+    if (let->kind != JOBJ) die("opts.let is not an object");
+    for (i = 0; i < let->n; i++) value_put(facts, let->items[i].key, seed_eval_tree(let->items[i].value, facts, env));
+}
+
 /* Run.cells: "a=CELL,b=CELL" -> ordered object; "" and "-" -> NULL */
 static Value *seed_bind_cells(const char *cells, Value *facts, Value *env) {
     Value *out; char *all, *p;

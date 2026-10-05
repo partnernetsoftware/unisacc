@@ -25,7 +25,9 @@ int main(void) {
         size_t n = strlen(line); if (n && line[n-1] == '\n') line[n-1] = 0;
         if (!t1) continue; *t1 = 0; t2 = strchr(t1 + 1, '\t'); if (!t2) continue; *t2 = 0;
         env = value_json(t1 + 1, "env"); facts = seed_facts_scope(env, line, 0);
-        b = seed_bind_cells(t2 + 1, facts, env);
+        if (!strncmp(t2 + 1, "LET:", 4)) { Value *let = value_json(t2 + 5, "let"); size_t i; seed_let(let, facts, env);
+            b = value_new(JOBJ); for (i = 0; i < let->n; i++) value_put(b, let->items[i].key, value_get(facts, let->items[i].key)); }
+        else b = seed_bind_cells(t2 + 1, facts, env);
         if (!b) puts("null"); else { buf_value(&out, b); puts(out.s); }
         fflush(stdout);
     }
@@ -37,7 +39,11 @@ def cases():
     seen = set()
     for m in sorted(ROOT.glob('exec/*/*manifest.tsv')):
         for depth, row in assemble.Run.rows(m):
-            factn, seq, bind = row[4], row[6], row[7]
+            factn, seq, bind, opts = row[4], row[6], row[7], row[8]
+            if opts not in ('', '-') and '"let"' in opts:
+                let = json.dumps(json.loads(opts)['let'], separators=(',', ':'))
+                if not any(g in let for g in GRAPH) and ('let', factn, let) not in seen:
+                    seen.add(('let', factn, let)); yield (str(m.relative_to(ROOT)), factn, 'LET:' + let)
             for cells in (bind, seq):
                 if cells in ('', '-') or any(g in cells for g in GRAPH): continue
                 key = (factn, cells)
@@ -57,7 +63,12 @@ def python(factn, cells, env=None):
         for s in [] if factn in ('', '-') else factn.split('+'):
             facts.update(assemble.load_facts(s[5:] if s.startswith('load:') else s))
         facts = dict(env or {}, **facts)
-        r = assemble.Run(None, None, {}, dict(env or {})).cells(cells, facts)
+        run = assemble.Run(None, None, {}, dict(env or {}))
+        if cells.startswith('LET:'):
+            def lv(v): return [lv(x) for x in v] if isinstance(v, list) else {a: lv(x) for a, x in v.items()} if isinstance(v, dict) else run.value(v, facts) if isinstance(v, str) else v
+            r = {}
+            for k, v in json.loads(cells[4:]).items(): facts[k] = r[k] = lv(v)
+        else: r = run.cells(cells, facts)
         return json.dumps(r, separators=(',', ':'), ensure_ascii=False)
     except Exception:
         return 'ERR'
