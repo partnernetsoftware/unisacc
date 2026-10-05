@@ -17,7 +17,10 @@ T=$(scratch)
 SELF="$T/unisacc.flat.c"
 bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 ok=0; bad=0
-cap() { grep -h "^#define $1 " src/*.c | awk '{print $3}'; }
+cap() {   # a numeric #define, or (0.0.28 H1': MAXSRC is the run-time maxsrc) the variable's initial value
+    v=$(grep -h "^#define $1 " src/*.c | awk '{print $3}')
+    case "$v" in ''|*[!0-9]*) v=$(grep -h "^int $v = " src/*.c | sed 's/.*= *\([0-9]*\).*/\1/');; esac
+    printf '%s' "$v"; }
 half() {   # half <what> <used> <limit>
     if [ "$2" -le $(( $3 / 2 )) ]; then ok=$((ok+1)); printf "  ok   %-26s %9s of %9s\n" "$1" "$2" "$3"
     else bad=$((bad+1)); printf "  FAIL %-26s %9s of %9s -- over half: raise the limit\n" "$1" "$2" "$3"; fi
