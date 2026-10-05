@@ -3228,7 +3228,9 @@ static void parse2_gen2_control(Graph *g, const char *section) {
     Value *facts = load_fact("k2-control"), *opts = NULL;
     Value *bindings = value_new(JOBJ), *sequences, *classes;
     char *s; int rows = 0, header = 0;
-    if (strcmp(section, "dimensions") && strcmp(section, "dimensions-tail"))
+    if (strcmp(section, "dimensions") && strcmp(section, "dimensions-tail") &&
+        strcmp(section, "type-prefix") && strcmp(section, "structure") &&
+        strcmp(section, "type-typedef") && strcmp(section, "type-tail"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -5105,6 +5107,45 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "dimensions");
         parse2_gen2_control(&g, "dimensions-tail");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-prefix-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_control(&g, "type-prefix");
+        parse2_gen2_control(&g, "structure");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-typedef-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_control(&g, "type-prefix");
+        parse2_gen2_control(&g, "structure");
+        parse2_gen2_control(&g, "type-typedef");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-tail-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_control(&g, "type-prefix");
+        parse2_gen2_control(&g, "structure");
+        parse2_gen2_control(&g, "type-typedef");
+        parse2_gen2_control(&g, "type-tail");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
