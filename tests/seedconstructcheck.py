@@ -742,7 +742,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
         printf_manifest = ROOT / "exec/parse2/printf-manifest.tsv"
         printf_all_run = assemble.Run(e3_printf_all, e3_printf_all.P, {}, {"warnings": False})
         printf_all_run.root = printf_manifest.parent
-        for depth, row in printf_all_run.rows(printf_manifest)[:3]:
+        for depth, row in printf_all_run.rows(printf_manifest)[:4]:
             printf_all_run.one(row, [], depth, {})
         append_manifest = ROOT / "exec/parse2/printfcontrol-1-manifest.tsv"
         append_run = assemble.Run(e3_printf_all, e3_printf_all.P, {"warnings": False}, {})
@@ -821,4 +821,4 @@ if part in ("parse2", "all"):
 if part in ("parse2-2", "all"):
     print("seed construct parse2-2: unary control through printfallback body graph byte-identical")
 if part == "parse2-3":
-    print("seed construct parse2-3: printfcontrol plain graph byte-identical")
+    print("seed construct parse2-3: printf strwalk and control plain graph byte-identical")

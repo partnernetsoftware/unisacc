@@ -3859,6 +3859,32 @@ static void parse2_printfcontrol_part0(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || rows != 1)
         die("printfcontrol part0 row missing");
 }
+static void parse2_printf_strwalk(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/printf-manifest.tsv", "rb");
+    Value *bindings = value_new(JOBJ), *facts = value_new(JOBJ);
+    char *s; int row = 0;
+    if (!manifest) die("cannot open printf manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("printf manifest column count");
+        if (row == 3) {
+            if (strcmp(f[0], "call") || strcmp(f[1], "strwalk"))
+                die("printf string walker declaration changed");
+            direct_bindings(bindings, f[7], facts);
+        }
+        row++; free(s);
+        if (row == 4) break;
+    }
+    if (fclose(manifest) || row != 4) die("printf string walker missing");
+    const char *pre = value_text(value_get(bindings, "pre"));
+    const char *body = value_text(value_get(bindings, "body"));
+    const char *done = value_text(value_get(bindings, "done"));
+    parse2_string_walk_head(g, pre, body, done);
+    parse2_string_walk_escape(g, pre, body);
+    parse2_string_walk_tail(g, pre, body, done);
+}
 static void parse2_printfcontrol_append(Graph *g) {
     FILE *manifest = fopen("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
     FILE *table = fopen("exec/parse2/printfcontrol-spelling.tsv", "rb");
@@ -4520,7 +4546,7 @@ static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
-static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last, int control0, int append, int part1) {
+static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last, int control0, int strwalk, int append, int part1) {
     Graph g = {0}; FILE *out; char *entry;
     build_parse2_token_graph(&g);
     parse2_startup_edits(&g);
@@ -4549,6 +4575,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     entry = parse2_printfallback_head(&g);
     parse2_printfallback_more(&g, entry, 2, last);
     if (control0) parse2_printfcontrol_part0(&g);
+    if (strwalk) parse2_printf_strwalk(&g);
     if (append) parse2_printfcontrol_append(&g);
     if (part1) {
         Value *labels = parse2_printfcontrol_part1_all(&g);
@@ -4639,25 +4666,28 @@ int main(int argc, char **argv) {
         inspect_parse2_printfallback_dispatch_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-body-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 4, 0, 0, 0); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 4, 0, 0, 0, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-bodies-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 16, 0, 0, 0); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 16, 0, 0, 0, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-full-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 0, 0, 0); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 0, 0, 0, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-part0-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 0, 0); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 0, 0, 0); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-strwalk-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 0, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-append-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 0); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 0); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-part1-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 1); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-plain-graph")) {
-        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 2); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
