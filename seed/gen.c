@@ -3313,7 +3313,8 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
     char *s; int action_row = 0, return_row = 0, header = 0;
     if (!actions || !manifest || !fresh || !classes ||
         (strcmp(section, "ret0") && strcmp(section, "ret1") &&
-         strcmp(section, "update") && strcmp(section, "expr0")))
+         strcmp(section, "update") && strcmp(section, "expr0") &&
+         strcmp(section, "qt0")))
         die("return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
@@ -6084,6 +6085,15 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt0-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_return(&g, "qt0");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
