@@ -3757,6 +3757,40 @@ static void parse2_gen2_statics(Graph *g) {
     }
     if (ferror(manifest) || fclose(manifest) || row != 3) die("incomplete statics manifest");
 }
+static void parse2_gen2_initializers_hook(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/initializers-manifest.tsv", "rb");
+    FILE *templ;
+    char *s;
+    int row = 0, edit = 0;
+    if (!manifest) die("cannot open initializers manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("initializers manifest column count");
+        if (row == 0 && !strcmp(f[0], "let") && !strcmp(f[1], "-")) row++;
+        else if (row == 1 && !strcmp(f[0], "template") &&
+                 !strcmp(f[1], "initializers") && !strcmp(f[2], "hook")) {
+            row++; free(s); break;
+        } else die("unexpected initializers hook row");
+        free(s);
+    }
+    if (fclose(manifest) || row != 2) die("incomplete initializers hook manifest");
+    templ = fopen("exec/parse2/initializers-template.tsv", "rb");
+    if (!templ) die("cannot open initializers template");
+    while ((s = line(templ))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("initializers template column count");
+        if (!strcmp(f[0], "hook")) {
+            if (strcmp(f[4], "move-state") || edit++) die("unsupported initializers hook edit");
+            pp_move_state(g, f[5], f[6]);
+        }
+        free(s);
+    }
+    if (ferror(templ) || fclose(templ) || edit != 1) die("incomplete initializers hook template");
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5801,6 +5835,18 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "ordinary-staticauto");
         parse2_gen2_startup_guard(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-initializers-hook-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_statics(&g);
+        parse2_gen2_initializers_hook(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
