@@ -3521,6 +3521,41 @@ static void parse2_float_digits(Graph *g) {
     }
     if (fclose(manifest) || digit != 3) die("incomplete floatconst digit manifest");
 }
+static void parse2_float_rows(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    Value *sequences = value_new(JOBJ); char *s; int row = 0, installed = 0;
+    if (!manifest) die("cannot open floatconst manifest");
+    for (int i = 0; i < 2; i++) {
+        Value *actions = value_new(JARR), *act = value_new(JARR); char key[16];
+        snprintf(key, sizeof(key), "reject%d", i);
+        value_put(act, NULL, value_string("REJECT"));
+        value_put(act, NULL, value_string(i ? "not covered: decimal floating suffix" :
+                                           "not covered: decimal floating constant"));
+        value_put(actions, NULL, act);
+        value_put(sequences, key, actions);
+    }
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("floatconst manifest column count");
+        if (row++ < 6) { free(s); continue; }
+        if (strcmp(f[0], "rows") || strcmp(f[1], "floatconst") ||
+            strcmp(f[4], "k2-floatconst") || strcmp(f[5], "-"))
+            die("unsupported floatconst row");
+        {
+            Value *facts = load_fact("k2-floatconst"), *bindings = value_new(JOBJ);
+            value_put(facts, "reject0", value_get(sequences, "reject0"));
+            value_put(facts, "reject1", value_get(sequences, "reject1"));
+            direct_bindings(bindings, f[7], facts);
+            install_section(g, "exec/parse2/floatconst-byte.tsv", f[2], 'b', bindings, sequences);
+            install_section(g, "exec/parse2/floatconst-result.tsv", f[2], 'r', bindings, sequences);
+        }
+        installed++; free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || installed != 10)
+        die("incomplete floatconst rows");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3692,6 +3727,26 @@ static void inspect_parse2_float_digits_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_float_rows_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3735,6 +3790,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-float-digits-graph")) {
         inspect_parse2_float_digits_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-float-rows-graph")) {
+        inspect_parse2_float_rows_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
