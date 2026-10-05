@@ -256,6 +256,8 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 ## 5. 路线
 
+- **0.0.x 收官（2026-10-05，主人：按规划早点做完）**：见 [plans/roadmap-0.0.x.md](plans/roadmap-0.0.x.md)。0.0.29 parse2 全部；0.0.30 enc/lower（七阶段 C 构造器齐）+ pthread/wctype/fenv；0.0.31 构建链不调用 Python（B5）= 0.0.x 完工，之后 0.1.x。只顺延、不砍（主人：POSIX/cosmocc 面的项可顺延不砍）。
+
 当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](archive/plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
 
 ### 5.0 种子层路线（主人定调 2026-10-03 19:51）
