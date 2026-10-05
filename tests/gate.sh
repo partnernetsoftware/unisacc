@@ -459,6 +459,7 @@ job seed-construct-parse2-3 python3 ./tests/seedconstructcheck.py --part parse2-
 job seed-construct-parse2-4 python3 ./tests/seedconstructcheck.py --part parse2-4 # 0.0.27: gen2 families, starting with types-dimensions
 job seed-construct-parse2-5 python3 ./tests/seedconstructcheck.py --part parse2-5 # 0.0.27: gen2 type-entry onward
 job seed-construct-parse2-6 python3 ./tests/seedconstructcheck.py --part parse2-6 # 0.0.27: gen2 ladder rejects onward
+job seed-construct-parse2-7 python3 ./tests/seedconstructcheck.py --part parse2-7 # 0.0.27: gen2 optail onward
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
