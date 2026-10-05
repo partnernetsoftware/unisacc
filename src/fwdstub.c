@@ -22,6 +22,10 @@ int fwdrun; char fwdsrc[131072]; int nfwdsrc;
    target; the product driver leaves it 0 and does not forward to a win target
    at all yet (archive/plans/v0.0.23.md item A1). */
 int fwd_maxargs;
+/* 0.0.28 N1' (glob's callback): a driver that knows a parameter's exact C declaration -- a function
+   pointer, which `void *` does not match -- puts it here, whole and named a<k> ("int (*a2)(char *, int)").
+   Read by fwd_emit and fwd_emit_var for parameter k, cleared after each stub; all 0 = the old bytes. */
+char *fwd_ptype[64];
 int fwd_s(char *s) { while (*s && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = *s; nfwdsrc = nfwdsrc + 1; s = s + 1; } return 0; }
 int fwd_n(char *s, int n) { int k; k = 0; while (k < n && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; } return 0; }
 int fwd_d(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; fwdsrc[nfwdsrc] = d[n]; nfwdsrc = nfwdsrc + 1; } return 0; }
@@ -43,6 +47,11 @@ int fwd_ukind(int kind, int w, int uns) {     /* UFFI_* from unisacc_ffi.h */
     if (w == 1) return uns ? 9 : 8;
     return uns ? 2 : 1;
 }
+int fwd_pdecl(int k, int kind, int w) {
+    if (k < 64 && fwd_ptype[k]) { fwd_s(fwd_ptype[k]); return 0; }
+    fwd_s(fwd_ctype(kind, w, 0)); fwd_s(" a"); fwd_d(k); return 0;
+}
+int fwd_pclear(void) { int k; k = 0; while (k < 64) { fwd_ptype[k] = 0; k = k + 1; } return 0; }
 int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, int rkind, int rw, int runs) {
     int k; char *rt; int rk;
     rt = fwd_ctype(rkind, rw, runs); rk = fwd_ukind(rkind, rw, runs);
@@ -55,7 +64,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
         k = 0; while (k < np) { if (kind[k] == 4 || kind[k] == 8) intonly = 0; k = k + 1; }
         if (intonly) {
             fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
-            k = 0; while (k < np) { if (k) fwd_s(", "); fwd_s(fwd_ctype(kind[k], w[k], 0)); fwd_s(" a"); fwd_d(k); k = k + 1; }
+            k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
             if (np == 0) fwd_s("void");
             fwd_s(") {\n    static void *fn; long v[10];\n");
             fwd_s("    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
@@ -64,11 +73,12 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
             if (isvoid) fwd_s("    __hostcall(fn, v);\n");
             else { fwd_s("    return ("); fwd_s(rt); fwd_s(")__hostcall(fn, v);\n"); }
             fwd_s("}\n");
+            fwd_pclear();
             return 1;
         }
     }
     fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
-    k = 0; while (k < np) { if (k) fwd_s(", "); fwd_s(fwd_ctype(kind[k], w[k], 0)); fwd_s(" a"); fwd_d(k); k = k + 1; }
+    k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
     if (np == 0) fwd_s("void");
     fwd_s(") {\n    static void *fn; int kinds[33]; void *vals[33];");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
@@ -78,6 +88,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
     fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np); fwd_s(", 0 - 1, "); fwd_s(isvoid ? "0" : "&r"); fwd_s(");\n");
     if (!isvoid) fwd_s("    return r;\n");
     fwd_s("}\n");
+    fwd_pclear();
     return 1;
 }
 /* 0.0.28 N1': a variadic host function whose fixed arguments are integers or pointers (at most
@@ -95,7 +106,7 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rk
     if (nfwdsrc == 0) fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
     fwd_s("#include <stdarg.h>\n");
     fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
-    k = 0; while (k < np) { if (k) fwd_s(", "); fwd_s(fwd_ctype(kind[k], w[k], 0)); fwd_s(" a"); fwd_d(k); k = k + 1; }
+    k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
     fwd_s(", ...) {\n    static void *fn; long x[4]; va_list ap;");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
     fwd_s("\n    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
@@ -112,6 +123,7 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rk
     fwd_s("#endif\n");
     if (!isvoid) fwd_s("    return r;\n");
     fwd_s("}\n");
+    fwd_pclear();
     return 1;
 }
 /* 0.0.28 N1': `-l NAME` loads that host library before main, so the functions a program
