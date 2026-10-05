@@ -20,6 +20,20 @@ def digest(path):
         for b in iter(lambda: f.read(1 << 20), b''): h.update(b)
     return [os.stat(path).st_mode, h.hexdigest()]
 
+def head_shas(paths):
+    """sha256 of each path's content at HEAD, for paths outside the extracted trees, in one
+    `git cat-file --batch` (0.0.28 R5: one `git show` per guard was 5,893 processes, 50 s)."""
+    paths = sorted(set(paths)); out = {}
+    if not paths: return out
+    r = subprocess.run(['git', 'cat-file', '--batch'], cwd=R, input=''.join('HEAD:%s\n' % q for q in paths).encode(),
+                       capture_output=True, timeout=60, check=True).stdout
+    i = 0
+    for q in paths:
+        j = r.index(b'\n', i); head = r[i:j].split(); i = j + 1
+        if head[-1] == b'missing': out[q] = None; continue
+        n = int(head[2]); out[q] = hashlib.sha256(r[i:i+n]).hexdigest(); i += n + 1
+    return out
+
 def stamp(v): return hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
 
 def main():
@@ -30,6 +44,8 @@ def main():
                            cwd=R, check=True, capture_output=True, timeout=60).stdout
         with tarfile.open(fileobj=io.BytesIO(blob)) as tf: tf.extractall(tmp, filter='fully_trusted')
         changed = []
+        guards = [n for e in list(d['families'].values()) + list(d.get('suites', {}).values()) for n in e.get('guards', {})]
+        outside = head_shas(n for n in guards if not (pathlib.Path(tmp) / n).is_file())
         for fam, entry in d['families'].items():
             rt = entry.get('reviewed_trees')
             if not rt: continue
@@ -42,18 +58,13 @@ def main():
                 if rt[tree] != s: changed.append((fam, tree)); rt[tree] = s
             for n, sha in list(entry.get('guards', {}).items()):
                 f = pathlib.Path(tmp) / n
-                if not f.is_file():
-                    blob2 = subprocess.run(['git', 'show', 'HEAD:' + n], cwd=R, capture_output=True, timeout=30)
-                    cur = hashlib.sha256(blob2.stdout).hexdigest() if blob2.returncode == 0 else None
-                else:
-                    cur = digest(f)[1]
+                cur = digest(f)[1] if f.is_file() else outside[n]
                 if cur and cur != sha: changed.append((fam, 'guard:' + n)); entry['guards'][n] = cur
         # 0.0.23 E: per-suite guards (the audited lib-* declarations) follow HEAD too
         for name, entry in d.get('suites', {}).items():
             for n, sha in list(entry.get('guards', {}).items()):
                 f = pathlib.Path(tmp) / n
-                blob2 = None if f.is_file() else subprocess.run(['git', 'show', 'HEAD:' + n], cwd=R, capture_output=True, timeout=30)
-                cur = digest(f)[1] if f.is_file() else (hashlib.sha256(blob2.stdout).hexdigest() if blob2.returncode == 0 else None)
+                cur = digest(f)[1] if f.is_file() else outside[n]
                 if cur and cur != sha: changed.append((name, 'guard:' + n)); entry['guards'][n] = cur
     # 0.0.28 R4: seed-construct parts come from seedconstructcheck.py --list; each is declared like
     # seed-construct-parse2 (same inputs), with its own command, and parts that left the list are dropped
