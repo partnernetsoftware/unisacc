@@ -153,6 +153,51 @@ int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)
    same bytes the reference front end writes. */
 #include "forwardsignature.h"
 #include "../../src/fwdstub.c"
+/* The callback graph carries a C function-pointer type.  Scalar pointees
+   are enough for glob's errfunc and similar host APIs; other graphs retain
+   the named refusal until their declaration can be printed exactly. */
+static const char *fwd_simple_type(const USForwardType *t) {
+    if (t->isvoid) return "void";
+    if (t->callback || t->structbyval) return 0;
+    if (t->kind==1) {
+        if (t->depth!=1) return 0;
+        switch (t->base) {
+            case 0: return "void *";
+            case 1: return "char *";
+            case 2: return "short *";
+            case 4: return "int *";
+            case 8: return "long *";
+            default: return 0;
+        }
+    }
+    if (t->kind==4) return "float";
+    if (t->kind==8) return "double";
+    if (t->kind==0) {
+        if (t->width==1) return t->uns ? "unsigned char" : "signed char";
+        if (t->width==2) return t->uns ? "unsigned short" : "short";
+        if (t->width==4) return t->uns ? "unsigned int" : "int";
+        if (t->width==8) return t->uns ? "unsigned long" : "long";
+    }
+    return 0;
+}
+static int fwd_callback_decl(const USForwardType *t,int index,char *out,size_t cap) {
+    USForwardCallback cb={0};
+    if (us_forward_callback_decode(t,&cb)) return 1;
+    const char *ret=fwd_simple_type(&cb.ret);
+    if (!ret) return 1;
+    int n=snprintf(out,cap,"%s (*a%d)(",ret,index);
+    if (n<0 || (size_t)n>=cap) return 1;
+    size_t at=(size_t)n;
+    for (int i=0;i<cb.n;i++) {
+        const char *type=fwd_simple_type(&cb.args[i]);
+        if (!type) return 1;
+        n=snprintf(out+at,cap-at,"%s%s",i ? ", " : "",type);
+        if (n<0 || (size_t)n>=cap-at) return 1;
+        at+=(size_t)n;
+    }
+    n=snprintf(out+at,cap-at,"%s)",cb.n ? "" : "void");
+    return n<0 || (size_t)n>=cap-at;
+}
 static int fwd_second;                           /* the recompile with the stubs: no side-car */
 static char fwd_path[600];
 static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1: stubs written; -1: error */
@@ -173,11 +218,19 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
         if (bad || sig.structbyval || sig.ret.structbyval || sig.n>32) {
             fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1;
         }
-        int kk[33],ww[33],uu[33];
+        int kk[33],ww[33],uu[33]; char cbdecl[33][256];
         for (int k=0;k<sig.n;k++) { kk[k]=sig.args[k].kind; ww[k]=sig.args[k].width; uu[k]=0; }
+        for (int k=0;k<sig.n;k++) if (sig.args[k].callback) {
+            if (fwd_callback_decl(&sig.args[k],k,cbdecl[k],sizeof cbdecl[k])) {
+                fwd_pclear();
+                fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1;
+            }
+            fwd_ptype[k]=cbdecl[k];
+        }
         int emitted = sig.variadic
             ? fwd_emit_var((char *)nm,(int)nl,sig.n,kk,ww,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns)
             : fwd_emit((char *)nm,(int)nl,sig.n,kk,ww,uu,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns);
+        fwd_pclear();
         if (!emitted) { fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1; }
     }
     if (nfwdsrc > 0) fwd_emit_libs();
