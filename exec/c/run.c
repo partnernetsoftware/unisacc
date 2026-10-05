@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <time.h>   /* clock_gettime for UNISA_STAGE_TIMES */
 
 /* Standalone runner default; product drivers may override at compile time. */
 #ifndef UNISA_DEFAULT_MAXSTEPS
@@ -523,7 +524,12 @@ static int runroute_range(const char *route, const char *first_stage, const char
             bytes = owned; len = PRAW[m];
         }
         loadbytes(bytes, len); free(owned); LB = 0;
+        struct timespec st0, st1; int timing = getenv("UNISA_STAGE_TIMES") != 0;
+        if (timing) clock_gettime(CLOCK_MONOTONIC, &st0);
         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
+        if (timing) { clock_gettime(CLOCK_MONOTONIC, &st1);   /* 0.0.28 F2: where a compile spends its time */
+            fprintf(stderr, "stage %s/%s %.3f s in %d out %d\n", route, STAGES[i].name,
+                    (st1.tv_sec - st0.tv_sec) + (st1.tv_nsec - st0.tv_nsec) / 1e9, in->n, out.n); }
         if (!rc) attr_strip(&out);
         unload(); free(in->b); in->b = out.b; in->n = out.n;
         if (rc) return rc;
