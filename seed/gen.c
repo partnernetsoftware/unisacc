@@ -3780,6 +3780,36 @@ static void parse2_printfallback_dispatch_int(Graph *g, const char *entry) {
     if (ferror(templ) || fclose(templ) || found != 1)
         die("printfallback dispatch template missing");
 }
+static void parse2_printfallback_body_int(Graph *g, const char *entry) {
+    FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
+    Value *sequences = NULL, *seqbindings = value_new(JOBJ);
+    Value *bindings = value_new(JOBJ), *ctx = value_new(JOBJ);
+    char *s; int row = 0;
+    if (!manifest) die("cannot open printfallback body manifest");
+    value_put(ctx, "PF_b1", value_string(entry));
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("printfallback manifest column count");
+        if (row == 0) {
+            if (strcmp(f[0], "let")) die("printfallback sequence declaration changed");
+            sequences = mapseq_construct(value_json(f[8], "printfallback sequences"), ctx);
+        } else if (row == 3) {
+            if (strcmp(f[0], "rows") || strcmp(f[1], "printfallback") ||
+                strcmp(f[2], "body") || strcmp(f[4], "k2-printfallback") || !sequences)
+                die("printfallback body declaration changed");
+            direct_bindings(seqbindings, f[6], sequences);
+            direct_bindings(bindings, f[7], ctx);
+        }
+        row++; free(s);
+        if (row == 4) break;
+    }
+    if (fclose(manifest) || row != 4 || !value_get(seqbindings, "body"))
+        die("printfallback body missing");
+    install_section(g, "exec/parse2/printfallback-byte.tsv", "body", 'b', bindings, seqbindings);
+    install_section(g, "exec/parse2/printfallback-result.tsv", "body", 'r', bindings, seqbindings);
+}
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
@@ -4328,6 +4358,39 @@ static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_printfallback_body_graph(const char *outpath) {
+    Graph g = {0}; FILE *out; char *entry;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    parse2_unary_head(&g);
+    parse2_unary_compound(&g);
+    parse2_unary_cast_void(&g);
+    parse2_unary_part4(&g);
+    parse2_unary_float_d(&g);
+    parse2_unary_float_s(&g);
+    parse2_unary_int_i(&g);
+    parse2_unary_int_u(&g);
+    parse2_unary_part6(&g);
+    entry = parse2_printfallback_head(&g);
+    parse2_printfallback_dispatch_int(&g, entry);
+    parse2_printfallback_body_int(&g, entry);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -4407,6 +4470,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-dispatch-graph")) {
         inspect_parse2_printfallback_dispatch_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-body-graph")) {
+        inspect_parse2_printfallback_body_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;

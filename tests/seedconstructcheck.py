@@ -676,6 +676,44 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c parse2 printfallback dispatch differs at {first}: "
                                  f"C={printf_dispatch_actual[first:first+100]!r} "
                                  f"Python={printf_dispatch_expected[first:first+100]!r}")
+        printf_body_graph = work / "parse2-printfallback-body.c.json"
+        run(str(cgen), "inspect-parse2-printfallback-body-graph", str(printf_body_graph))
+        e3_printf_body = parse2base.executor()
+        assemble.Run(e3_printf_body, e3_printf_body.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_printf_body, e3_printf_body.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_printf_body, e3_printf_body.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_printf_body, e3_printf_body.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_printf_body, e3_printf_body.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_printf_body, e3_printf_body.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_printf_body, e3_printf_body.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        printf_body_unary_run = assemble.Run(e3_printf_body, e3_printf_body.P, {},
+                               {"warnings": False, "ucx": unaryenv["ucx"],
+                                "ufacts": unaryenv["ufacts"]})
+        printf_body_unary_run.root = unary_manifest.parent
+        for depth, row in printf_body_unary_run.rows(unary_manifest)[:10]:
+            printf_body_unary_run.one(row, [], depth, {})
+        printf_manifest = ROOT / "exec/parse2/printfallback-manifest.tsv"
+        printf_body_run = assemble.Run(e3_printf_body, e3_printf_body.P, {}, {})
+        printf_body_run.root = printf_manifest.parent
+        for depth, row in printf_body_run.rows(printf_manifest)[:4]:
+            printf_body_run.one(row, [], depth, {})
+        e3_printf_body.g.finish()
+        expected_printf_body = {"start": "START",
+                                "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                           for name, (mode, row) in e3_printf_body.g.st.items()},
+                                "seqs": [list(map(list, seq)) for seq in e3_printf_body.g.seqs]}
+        printf_body_actual = printf_body_graph.read_bytes()
+        printf_body_expected = json.dumps(expected_printf_body, separators=(",", ":")).encode()
+        if printf_body_actual != printf_body_expected:
+            first = next((i for i, (a, b) in enumerate(zip(printf_body_actual, printf_body_expected))
+                          if a != b), min(len(printf_body_actual), len(printf_body_expected)))
+            raise AssertionError(f"seed/gen.c parse2 printfallback body differs at {first}: "
+                                 f"C={printf_body_actual[first:first+100]!r} "
+                                 f"Python={printf_body_expected[first:first+100]!r}")
     if part in ("base", "all"):
         for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
             tag = stage + "".join(flags)
@@ -734,4 +772,4 @@ if part in ("base", "all"):
 if part in ("parse2", "all"):
     print("seed construct parse2: token prelude through autoscan graph byte-identical")
 if part in ("parse2-2", "all"):
-    print("seed construct parse2-2: unary control through printfallback dispatch graph byte-identical")
+    print("seed construct parse2-2: unary control through printfallback body graph byte-identical")
