@@ -3316,7 +3316,7 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
          strcmp(section, "update") && strcmp(section, "expr0") &&
          strcmp(section, "qt0") && strcmp(section, "qt1") &&
          strcmp(section, "floating") && strcmp(section, "qt2") &&
-         strcmp(section, "integer")))
+         strcmp(section, "integer") && strcmp(section, "qt3")))
         die("return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
@@ -6150,6 +6150,24 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt-full-graph")) {
+        Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
+        Value *extra = value_new(JOBJ), *end;
+        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        build_parse2_token_graph(&g);
+        parse2_gen2_return(&g, "qt1");
+        for (size_t i = 0; i < floats->n; i++)
+            parse2_gen2_return_float(&g, floats->items[i].value);
+        parse2_gen2_return(&g, "qt2");
+        end = parse2_gen2_return_integers(&g);
+        value_put(extra, "integer_end", end);
+        parse2_gen2_return_ex(&g, "qt3", extra);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
