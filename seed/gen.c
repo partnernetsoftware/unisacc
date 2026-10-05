@@ -2893,7 +2893,8 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                         if (pair->kind != JARR || pair->n != 2 ||
                             pair->items[0].value->kind != JSTR || pair->items[1].value->kind != JSTR)
                             die("invalid foreach pre binding");
-                        scope = seed_facts_scope(env, r->cell[4], next);
+                        scope = seed_env_copy(facts);
+                        seed_update(scope, next);
                         v = seed_eval(pair->items[1].value->s, scope, env);
                         value_put(next, pair->items[0].value->s, v);
                     }
