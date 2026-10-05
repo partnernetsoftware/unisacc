@@ -252,4 +252,8 @@ static int strcoll(const char *__u_a, const char *__u_b) {
 }
 #endif
 
+/* 0.0.28 H4 (SQLite's shell): POSIX strdup, forwarded to the system C library on Linux and macOS */
+#ifndef _WIN32
+char *strdup(const char *__u_s);
+#endif
 #endif

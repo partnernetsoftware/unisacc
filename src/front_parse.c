@@ -5969,14 +5969,16 @@ int parenfold(void) {
             if (k && prev == tidx("*", 1) && j > 1) {
                 int pp; int p3; pp = tkind[j - 2]; p3 = j > 2 ? tkind[j - 3] : 0 - 1;
                 if (pp == T_NUM || pp == T_STR || pp == rp || pp == tidx("]", 1)) k = 0;
+                /* a name before the `*`: only a declaration context folds -- a type word, a storage or
+                   qualifier keyword, `struct`/`union`/`enum`, `;` `{` `}` or the start; after anything
+                   else (an operator, `(`, `,`, `return`, `case`, ...) the name is an operand (0.0.28 E18) */
                 if (pp == T_ID && j > 2) {
-                    char *ops[26]; int oi;
-                    ops[0] = "->"; ops[1] = "."; ops[2] = "="; ops[3] = "+"; ops[4] = "-"; ops[5] = "*"; ops[6] = "/";
-                    ops[7] = "%"; ops[8] = "<"; ops[9] = ">"; ops[10] = "&"; ops[11] = "|"; ops[12] = "^"; ops[13] = "?";
-                    ops[14] = ":"; ops[15] = "("; ops[16] = ","; ops[17] = "["; ops[18] = "!"; ops[19] = "~";
-                    ops[20] = "return"; ops[21] = "=="; ops[22] = "!="; ops[23] = "&&"; ops[24] = "||"; ops[25] = "<=";
-                    oi = 0; while (oi < 26) { if (p3 == tidx(ops[oi], blen(ops[oi]))) k = 0; oi = oi + 1; }
-                    if (p3 == tidx(">=", 2) || p3 == tidx("+=", 2) || p3 == tidx("-=", 2) || p3 == tidx("*=", 2)) k = 0;
+                    char *dw[12]; int di; int decl; decl = 0;
+                    dw[0] = "struct"; dw[1] = "union"; dw[2] = "enum"; dw[3] = "const"; dw[4] = "volatile"; dw[5] = "static";
+                    dw[6] = "extern"; dw[7] = "typedef"; dw[8] = "register"; dw[9] = "inline"; dw[10] = "restrict"; dw[11] = ";";
+                    if (p3 == T_TYPE || p3 == tidx("{", 1) || p3 == tidx("}", 1)) decl = 1;
+                    di = 0; while (di < 12) { if (p3 == tidx(dw[di], blen(dw[di]))) decl = 1; di = di + 1; }
+                    if (decl == 0) k = 0;
                 }
             }
             if (k) { k = 0;
@@ -5987,6 +5989,24 @@ int parenfold(void) {
                 j = j + 1; i = i + 3; continue;
             }
         } }
+        /* 0.0.28 H4: `static const char *(azHelp[]) = {...}` (SQLite's shell) -- a parenthesised
+           array declarator: `( identifier [ ... ] )` after a type word or a declarator `*`, followed
+           by `=` `;` `,` or `[`, loses its parentheses the same way.  Brackets hold no parentheses. */
+        if (tkind[i] == lp && i + 4 < ntok && j > 0 && tkind[i + 1] == T_ID && tkind[i + 2] == tidx("[", 1)) {
+            int e2; int ok2; e2 = i + 2; ok2 = 1;
+            while (e2 < ntok && tkind[e2] == tidx("[", 1)) {
+                e2 = e2 + 1; while (e2 < ntok && tkind[e2] != tidx("]", 1)) { if (tkind[e2] == lp || tkind[e2] == rp) ok2 = 0; e2 = e2 + 1; }
+                e2 = e2 + 1;
+            }
+            prev = tkind[j - 1];
+            if (ok2 && e2 < ntok && tkind[e2] == rp && (prev == T_TYPE || (prev == tidx("*", 1) && j > 1 && (tkind[j - 2] == T_TYPE || tkind[j - 2] == tidx("*", 1))))) {
+                nxt = kind(e2 + 1);
+                if (nxt == tidx("=", 1) || nxt == tidx(";", 1) || nxt == tidx(",", 1)) {
+                    k = i + 1; while (k < e2) { tkind[j] = tkind[k]; tpos[j] = tpos[k]; tlen[j] = tlen[k]; j = j + 1; k = k + 1; }
+                    i = e2 + 1; continue;
+                }
+            }
+        }
         tkind[j] = tkind[i]; tpos[j] = tpos[i]; tlen[j] = tlen[i];
         j = j + 1; i = i + 1;
     }
