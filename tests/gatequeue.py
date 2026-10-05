@@ -7,7 +7,7 @@ input invalidation. Model preparation may
 be shared separately. Each window is <=55 s, leaving cleanup inside the 60 s
 outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
-import argparse, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
+import argparse, re, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 from gatelayers import LAYERS, select as select_layers
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -78,6 +78,13 @@ def executable_inputs(settings):
             raise SystemExit(f'queue {key}: {error}; {hint}')
     return inputs
 
+def gate_runner():
+    """gate.sh without its job lines: the wrapper every job runs under (bound, output, ordering)."""
+    try: text = pathlib.Path('tests/gate.sh').read_text()
+    except FileNotFoundError: return 'missing'
+    keep = [l for l in text.splitlines() if not re.match(r'\s*(job |for .*; do .*job |\[ .*\] \|\| job )', l)]
+    return hashlib.sha256('\n'.join(keep).encode()).hexdigest()
+
 def fingerprint(jobs):
     """One tree inventory and one hash per file, shared by all suite stamps.
 
@@ -129,7 +136,10 @@ def fingerprint(jobs):
     # keep state inside the checkout (LOCATION_BOUND) still carry it.
     common = [provider_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
-              {n:digest(n) for n in ('tests/gatequeue.py', 'tests/gate.sh', 'tests/bound.py', declaration)}]
+              {n:digest(n) for n in ('tests/gatequeue.py', 'tests/bound.py')}, gate_runner()]
+    # 0.0.29 P7': gate.sh's job lines and gatedeps.json are no longer global identities -- a job's own
+    # command, declared inputs and guards are in its stamp already, so editing one job line or refreshing
+    # another suite's declaration keeps every other result (0.0.28 measured 0% reuse because of these two)
     def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     global_inputs = None
     inventories, family_tools = {}, {}

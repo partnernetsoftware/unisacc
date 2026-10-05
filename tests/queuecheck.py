@@ -195,7 +195,9 @@ with tempfile.TemporaryDirectory() as td:
         changed(private/'tests/bound.py', list(probe)) # shared watchdog
         changed(private/'tests/docscheck.py', ['docs','product-com'])
         changed(private/'tests/boundcheck.py', ['bound','product-com'])
-        changed(private/'tests/gatedeps.json', list(probe))
+        # 0.0.29 P7': the declaration file is no longer a global identity -- declared suites keep their
+        # results when their own entries are unchanged; only undeclared ones (global closure) rerun
+        changed(private/'tests/gatedeps.json', ['product-com'])
         changed(private/'src/product.c', ['product-com'])
         changed(private/'release/apeinspect.py', ['product-com'])
         footer_plan={'package-footer':['python3','./tests/packagefootercheck.py']}
