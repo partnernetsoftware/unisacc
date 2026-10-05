@@ -3236,7 +3236,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "resd-row") && strcmp(section, "resd-final") &&
         strcmp(section, "ladder-up") && strcmp(section, "ladder-read") &&
         strcmp(section, "ladder-and") && strcmp(section, "ladder-or") &&
-        strcmp(section, "ladder-operator"))
+        strcmp(section, "ladder-operator") && strcmp(section, "ladder-empty"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3453,7 +3453,7 @@ static Value *parse2_gen2_ladder_extra(const char *owner, const char *up,
         die("ladder loop name too long");
     value_put(extra, "ladder_owner", value_string(owner));
     value_put(extra, "ladder_loop", value_string(loop));
-    value_put(extra, "ladder_up", value_string(up));
+    value_put(extra, "ladder_up", up ? value_string(up) : value_new(JNULL));
     value_put(extra, "ladder_next", value_string(next));
     if (dispatch) value_put(extra, "ladder_dispatch", value_string(dispatch));
     if (op) {
@@ -3482,30 +3482,37 @@ static void parse2_gen2_ladder_dispatch(Graph *g, const char *owner,
     if (fclose(table)) die("ladder dispatch table close failed");
     free(expanded.s);
 }
-static void parse2_gen2_ladder_e(Graph *g) {
+static void parse2_gen2_ladder(Graph *g, char kind) {
     Value *facts = load_fact("k2-gen2"), *rows = value_get(facts, "ladder");
+    if (kind != 'E' && kind != 'C') die("unsupported gen2 ladder kind");
     if (!rows || rows->kind != JARR || rows->n != 10)
         die("gen2 ladder domain changed");
     for (size_t i = 0; i < rows->n; i++) {
         Value *item = rows->items[i].value, *lv = value_get(item, "lv");
         Value *nxt = value_get(item, "nxt"), *ops = value_get(item, "ops");
         Value *mid = value_get(item, "mid"), *last = value_get(item, "last");
-        char owner[32], up[32], *dispatch;
+        char owner[32], up[32], next[32], *dispatch;
+        const char *up_name, *next_name;
         if (!lv || lv->kind != JINT || !ops || ops->kind != JARR ||
             !mid || mid->kind != JARR || !last || last->kind != JARR ||
             (mid->n + last->n != 1)) die("invalid gen2 ladder row");
-        if (snprintf(owner, sizeof(owner), "E%lld", lv->number) >= (int)sizeof(owner))
+        if (snprintf(owner, sizeof(owner), "%c%lld", kind, lv->number) >= (int)sizeof(owner))
             die("ladder owner too long");
         if (mid->n) {
             if (!nxt || nxt->kind != JINT ||
-                snprintf(up, sizeof(up), "E%lld", nxt->number) >= (int)sizeof(up))
+                snprintf(up, sizeof(up), "%c%lld", kind, nxt->number) >= (int)sizeof(up) ||
+                snprintf(next, sizeof(next), "E%lld", nxt->number) >= (int)sizeof(next))
                 die("ladder next missing");
-        } else strcpy(up, "UNARY");
-        parse2_gen2_control_ex(g, "ladder-up",
-            parse2_gen2_ladder_extra(owner, up, up, NULL, NULL), NULL);
+            up_name = up; next_name = next;
+        } else {
+            up_name = kind == 'E' ? "UNARY" : NULL;
+            next_name = "UNARY";
+        }
+        parse2_gen2_control_ex(g, up_name ? "ladder-up" : "ladder-empty",
+            parse2_gen2_ladder_extra(owner, up_name, next_name, NULL, NULL), NULL);
         dispatch = fresh_label(owner, "b");
         parse2_gen2_control_ex(g, "ladder-read",
-            parse2_gen2_ladder_extra(owner, up, up, dispatch, NULL), NULL);
+            parse2_gen2_ladder_extra(owner, up_name, next_name, dispatch, NULL), NULL);
         parse2_gen2_ladder_dispatch(g, owner, dispatch, ops);
         for (size_t j = 0; j < ops->n; j++) {
             Value *op = ops->items[j].value, *name = value_get(op, "op");
@@ -3514,7 +3521,7 @@ static void parse2_gen2_ladder_e(Graph *g) {
                 snprintf(section, sizeof(section), "ladder-%s", mode->s) >= (int)sizeof(section))
                 die("invalid ladder operator fact");
             parse2_gen2_control_ex(g, section,
-                parse2_gen2_ladder_extra(owner, up, up, dispatch, name->s), NULL);
+                parse2_gen2_ladder_extra(owner, up_name, next_name, dispatch, name->s), NULL);
         }
         free(dispatch);
     }
@@ -5466,7 +5473,16 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-e-graph")) {
         build_parse2_token_graph(&g);
-        parse2_gen2_ladder_e(&g);
+        parse2_gen2_ladder(&g, 'E');
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-c-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_ladder(&g, 'C');
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);

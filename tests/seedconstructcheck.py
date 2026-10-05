@@ -806,6 +806,8 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
              {"seg_ladder-E-reject": 1, "seg_ladder-C-reject": 1}),
             ("ladder-e", "inspect-parse2-gen2-ladder-e-graph",
              {"seg_ladder-E": 1}),
+            ("ladder-c", "inspect-parse2-gen2-ladder-c-graph",
+             {"seg_ladder-C": 1}),
         ):
             actual_path = work / f"parse2-gen2-{name}.c.json"
             run(str(cgen), command, str(actual_path))
@@ -983,4 +985,4 @@ if part == "parse2-4":
 if part == "parse2-5":
     print("seed construct parse2-5: gen2 type-entry and tytail graphs byte-identical")
 if part == "parse2-6":
-    print("seed construct parse2-6: gen2 ladder E and rejection graphs byte-identical")
+    print("seed construct parse2-6: gen2 E/C ladders and rejection graphs byte-identical")
