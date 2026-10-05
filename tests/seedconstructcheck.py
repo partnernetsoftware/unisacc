@@ -730,6 +730,10 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
              {"seg_types-dimensions": 1, "seg_types-dimensions-tail": 1,
               "seg_types-prefix": 1, "seg_types-typedef": 1,
               "seg_types-tail": 1}),
+            ("type-word", "inspect-parse2-gen2-type-word-graph",
+             {"seg_types-dimensions": 1, "seg_types-dimensions-tail": 1,
+              "seg_types-prefix": 1, "seg_types-typedef": 1,
+              "seg_types-tail": 1, "seg_types-word": 1}),
         ):
             actual_path = work / f"parse2-gen2-{name}.c.json"
             run(str(cgen), command, str(actual_path))
@@ -903,4 +907,4 @@ if part in ("parse2-2", "all"):
 if part == "parse2-3":
     print("seed construct parse2-3: unary part10 graph byte-identical")
 if part == "parse2-4":
-    print("seed construct parse2-4: gen2 dimensions through type-tail graphs byte-identical")
+    print("seed construct parse2-4: gen2 dimensions through type-word graphs byte-identical")

@@ -3222,7 +3222,7 @@ static void parse2_startup_control(Graph *g) {
 }
 /* The first gen2 segment delegates to the control manifest.  Read its
    declaration and fresh-label table in source order, as assemble.Run does. */
-static void parse2_gen2_control(Graph *g, const char *section) {
+static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra) {
     FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
     FILE *fresh = fopen("exec/parse2/control-fresh.tsv", "rb");
     Value *facts = load_fact("k2-control"), *opts = NULL;
@@ -3230,7 +3230,8 @@ static void parse2_gen2_control(Graph *g, const char *section) {
     char *s; int rows = 0, header = 0;
     if (strcmp(section, "dimensions") && strcmp(section, "dimensions-tail") &&
         strcmp(section, "type-prefix") && strcmp(section, "structure") &&
-        strcmp(section, "type-typedef") && strcmp(section, "type-tail"))
+        strcmp(section, "type-typedef") && strcmp(section, "type-tail") &&
+        strcmp(section, "type-word"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3269,10 +3270,41 @@ static void parse2_gen2_control(Graph *g, const char *section) {
         free(s);
     }
     if (ferror(fresh) || fclose(fresh) || !header) die("control fresh read failed");
+    if (extra) {
+        if (extra->kind != JOBJ) die("control extra facts must be an object");
+        for (size_t i = 0; i < extra->n; i++)
+            value_put(bindings, extra->items[i].key, extra->items[i].value);
+    }
     install_section_classes(g, "exec/parse2/control-byte.tsv", section, 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse2/control-result.tsv", section, 'r',
                             bindings, sequences, classes);
+}
+static void parse2_gen2_control(Graph *g, const char *section) {
+    parse2_gen2_control_ex(g, section, NULL);
+}
+static void parse2_gen2_type_words(Graph *g) {
+    Value *facts = load_fact("k2-gen2"), *words = value_get(facts, "typewords");
+    if (!words || words->kind != JARR || words->n != 8)
+        die("gen2 type-word domain changed");
+    for (size_t i = 0; i < words->n; i++) {
+        Value *word = words->items[i].value, *extra = value_new(JOBJ);
+        Value *name = value_get(word, "word"), *value = value_get(word, "value");
+        Value *rank = value_get(word, "rank"), *follow = value_get(word, "follow");
+        char state[128], *ret;
+        if (!name || name->kind != JSTR || !value || !rank || !follow)
+            die("invalid gen2 type-word fact");
+        if (snprintf(state, sizeof(state), "TS.%s", name->s) >= (int)sizeof(state))
+            die("gen2 type-word name too long");
+        ret = fresh_label(state, "r");
+        value_put(extra, "word_state", value_string(state));
+        value_put(extra, "word_return", value_string(ret));
+        value_put(extra, "type_value", value);
+        value_put(extra, "type_rank_value", rank);
+        value_put(extra, "word_follow", follow);
+        parse2_gen2_control_ex(g, "type-word", extra);
+        free(ret);
+    }
 }
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
@@ -5146,6 +5178,21 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "structure");
         parse2_gen2_control(&g, "type-typedef");
         parse2_gen2_control(&g, "type-tail");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-word-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_control(&g, "type-prefix");
+        parse2_gen2_control(&g, "structure");
+        parse2_gen2_control(&g, "type-typedef");
+        parse2_gen2_control(&g, "type-tail");
+        parse2_gen2_type_words(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
