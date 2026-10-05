@@ -44,6 +44,14 @@ int curl_easy_getinfo(void *h, int info, long *out);
 #define setopt curl_easy_setopt
 #define getinfo curl_easy_getinfo
 #endif
+/* The body libcurl writes goes through the HOST C library's stdio, whose buffer the program's own
+   fflush cannot reach (a unisacc FILE * is just a descriptor).  Flush every host stream once, by
+   calling the host's fflush(NULL) through the host-call gate. */
+static void host_fflush_all(void) {
+    static void *fn; long a[10] = {0};
+    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "fflush");
+    if (fn) __hostcall(fn, a);
+}
 int main(void) {
     void *h, *hdr = 0; long code = 0; int rc;
 #ifdef __APPLE__
@@ -58,6 +66,7 @@ int main(void) {
     setopt(h, CURLOPT_POSTFIELDS, "{}");
     rc = curl_easy_perform(h);
     getinfo(h, CURLINFO_RESPONSE_CODE, &code);
+    host_fflush_all();                      /* libcurl wrote the body into the host libc's stdout buffer */
     printf("\nperform rc %d http %ld\n", rc, code);
     curl_easy_cleanup(h);
     return rc != 0;
