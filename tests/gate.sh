@@ -133,6 +133,7 @@ job exec-r21-e3 python3 ./exec/parse2/r21check.py   # R21: E3 on this week's ref
 job exec-pploc python3 ./exec/pp/locationcheck.py              # source-position metadata from actual preprocessing
 job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets against reference tpos
 job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location envelope
+job exec-f1-sidecar python3 ./exec/lex/f1sidecarcheck.py         # constructor/destructor mark framing
 job exec-objectplan python3 ./tests/objectplancheck.py         # ordered ELF symbol plan
 job exec-objectpack python3 ./tests/objectpackcheck.py         # target-scoped route declarations
 job exec-modelobject python3 ./tests/modelobjectcheck.py       # two ELF architectures against C reference
@@ -140,6 +141,7 @@ job exec-objectfacts python3 ./tests/objectfactscheck.py       # object tape fac
 job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent ET_REL layout oracle
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity
 job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
+job exec-f1-attributes python3 ./exec/parse2/f1attributescheck.py # marked definitions against reference tape
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering
 # Cold parse2 models (30-45 s each) moved out of the seven warning/error checks below:
 # warnprep fills the shared content-keyed cache (compilerpack.built_model, digest-checked
