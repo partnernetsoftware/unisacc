@@ -910,6 +910,10 @@ static size_t name_hash(const char *name) {
 }
 static void state_index_grow(Graph *g) {
     size_t cap = g->index_cap ? g->index_cap * 2 : 128;
+    while (cap <= (g->n + 1) * 2) {
+        if (cap > SIZE_MAX / 2) die("state index too large");
+        cap *= 2;
+    }
     size_t *slots = grow(NULL, cap, sizeof(*slots));
     memset(slots, 0, cap * sizeof(*slots));
     for (size_t i = 0; i < g->n; i++) {
@@ -2014,11 +2018,108 @@ static void pp_install_body_after_dsw(Graph *g) {
     if (ferror(f) || fclose(f) || actions != 1 || rows != 7 || escape != 1 || accept != 1)
         die("incomplete pp body after dsw");
 }
+static void pp_move_state(Graph *g, const char *from, const char *to) {
+    size_t i;
+    for (i = 0; i < g->n; i++) if (!strcmp(g->state[i].name, from)) break;
+    if (i == g->n) die("pp sourcefacts state to move missing");
+    for (size_t j = 0; j < g->n; j++) if (!strcmp(g->state[j].name, to))
+        die("pp sourcefacts destination exists");
+    {
+        State st = g->state[i];
+        memmove(g->state + i, g->state + i + 1, (g->n - i - 1) * sizeof(*g->state));
+        st.name = copy(to); g->state[g->n - 1] = st;
+    }
+    free(g->state_index); g->state_index = NULL; g->index_cap = 0;
+    state_index_grow(g);
+}
+static void pp_copy_state(Graph *g, const char *from, const char *to) {
+    State *old = find_state(g, from), *st;
+    size_t n = old->n;
+    char mode = old->mode;
+    if (g->n == g->cap) {
+        g->cap = g->cap ? g->cap * 2 : 64;
+        g->state = grow(g->state, g->cap, sizeof(*g->state));
+    }
+    st = graph_state(g, to, mode);
+    if (st->n) die("pp sourcefacts copy destination exists");
+    old = find_state(g, from); /* graph_state may have reallocated the state array */
+    if (st->cap < n) { st->cap = n; st->edge = grow(st->edge, n, sizeof(*st->edge)); }
+    for (size_t i = 0; i < n; i++) {
+        st->edge[i].key = copy(old->edge[i].key);
+        st->edge[i].target = copy(old->edge[i].target);
+        st->edge[i].seq = old->edge[i].seq;
+        if (st->key_index) {
+            int key = numeric_key(st->edge[i].key);
+            if (key >= 0) st->key_index[key] = (int)i + 1;
+        }
+    }
+    st->n = n;
+}
+static void pp_sourcefacts_edit(Graph *g, const char *section) {
+    FILE *f = fopen("exec/pp/sourcefacts-template.tsv", "rb"); char *s; int edits = 0;
+    if (!f) die("cannot open pp sourcefacts template");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9); if (n != 9) die("pp sourcefacts template column count");
+        if (strcmp(field[0], section)) { free(s); continue; }
+        if (strcmp(field[1], "entry") || strcmp(field[2], "-") || strcmp(field[3], "-"))
+            die("unsupported pp sourcefacts edit loop");
+        if (!strcmp(field[4], "move-state")) pp_move_state(g, field[5], field[6]);
+        else if (!strcmp(field[4], "label")) label_add(g, field[5]);
+        else if (!strcmp(field[4], "rewrite-tail")) {
+            if (strcmp(field[5], "[[\"ACCEPT\"]]") || *field[6] ||
+                strcmp(field[7], "SF.finish") || strcmp(field[8], "[]"))
+                die("unsupported pp sourcefacts tail rewrite");
+            {
+                size_t old_n = g->ns;
+                int *rewritten = grow(NULL, old_n, sizeof(*rewritten));
+                for (size_t i = 0; i < old_n; i++) rewritten[i] = -1;
+                for (size_t i = 0; i < g->n; i++) {
+                    State *st = &g->state[i];
+                    for (size_t j = 0; j < st->n; j++) {
+                        Edge *e = &st->edge[j]; int id = e->seq;
+                        if ((size_t)id >= old_n) die("sourcefacts sequence index changed");
+                        if (rewritten[id] == -1) {
+                            rewritten[id] = -2;
+                            if (strstr(g->seq[id], "\"ACCEPT\"")) {
+                                Value *acts = value_json(g->seq[id], "pp sourcefacts edge actions");
+                                if (acts->n) {
+                                    Value *last = acts->items[acts->n - 1].value;
+                                    if (last->kind == JARR && last->n == 1 &&
+                                        !strcmp(value_text(last->items[0].value), "ACCEPT")) {
+                                        acts->n--;
+                                        rewritten[id] = seq(g, value_json_text(acts));
+                                    }
+                                }
+                            }
+                        }
+                        if (rewritten[id] >= 0) {
+                            e->target = copy(field[7]); e->seq = rewritten[id];
+                        }
+                    }
+                }
+                free(rewritten);
+            }
+        } else if (!strcmp(field[4], "copy")) pp_copy_state(g, field[6], field[5]);
+        else die("unsupported pp sourcefacts edit");
+        edits++; free(s);
+    }
+    if (ferror(f) || fclose(f) || edits != (!strcmp(section, "pre") ? 3 : 1))
+        die("pp sourcefacts edits missing");
+}
+static void pp_install_sourcefacts(Graph *g) {
+    Value *empty = value_new(JOBJ);
+    pp_sourcefacts_edit(g, "pre");
+    pp_install_stem(g, "sourcefacts", NULL, empty, NULL);
+    pp_sourcefacts_edit(g, "post");
+}
 static void inspect_pp_through_linedir(const char *outpath, int with_dsw) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, 0); pp_install_call_autoinc(&g); pp_install_body_before_dsw(&g);
     if (with_dsw) pp_install_dsw(&g);
     if (with_dsw > 1) pp_install_body_after_dsw(&g);
+    if (with_dsw > 2) { pp_install_sourcefacts(&g); finish(&g); }
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output(out, &g); if (fclose(out)) die("output close failed");
 }
@@ -2500,6 +2601,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-body")) {
         inspect_pp_through_linedir(argv[2], 2); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "pp")) {
+        inspect_pp_through_linedir(argv[2], 3); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
