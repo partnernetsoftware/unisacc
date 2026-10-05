@@ -471,6 +471,9 @@ job seed-construct-parse2-16 python3 ./tests/seedconstructcheck.py --part parse2
 job seed-construct-parse2-17 python3 ./tests/seedconstructcheck.py --part parse2-17 # 0.0.28: gen2 sizeof0 control
 job seed-construct-parse2-18 python3 ./tests/seedconstructcheck.py --part parse2-18 # 0.0.28: gen2 sizeof-type shape
 job seed-construct-parse2-19 python3 ./tests/seedconstructcheck.py --part parse2-19 # 0.0.28: gen2 sizeof1 + sizeof-object
+job seed-construct-parse2-20 python3 ./tests/seedconstructcheck.py --part parse2-20 # 0.0.28: gen2 sizeof2 control
+job seed-construct-parse2-21 python3 ./tests/seedconstructcheck.py --part parse2-21 # 0.0.28: gen2 first strwalk
+job seed-construct-parse2-22 python3 ./tests/seedconstructcheck.py --part parse2-22 # 0.0.28: gen2 second strwalk, sizeof2 whole
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
