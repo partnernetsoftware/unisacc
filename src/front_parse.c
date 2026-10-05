@@ -70,13 +70,13 @@ int symstruct[MAXSYM];      /* index into the struct table, or -1 */
    header included by each unit registers its tags again.  Measured on the
    fb12-23 fixture: 128 refuses, 129 is the first refusal, and the real
    program needs more than that once its units are counted.  [R13-0c #33] */
-#define MAXSTRUCT 512
+#define MAXSTRUCT 2048  /* 0.0.28 H4 (SQLite) */
 /* MAXMEMB is the same kind of shared table, and it is the one miniz hits
    after the other two are raised: it is the TOTAL across every struct, not
-   per-struct (that is the separate `nown >= 256` check).  Measured: 500
+   per-struct (that is the separate `nown >= 4096` check).  Measured: 500
    members pass, 1000 refuse.  miniz reaches it because its members are
    registered once per unit as well.  [R13-0c #33] */
-#define MAXMEMB 4096
+#define MAXMEMB 32768   /* 0.0.28 H4: 4096 stopped the SQLite amalgamation ("too many members") */
 char stname[MAXSTRUCT * NAMEW];
 int stfirst[MAXSTRUCT]; int stcount[MAXSTRUCT];
 /* tags are block-scoped (C99 6.2.1): the block depth a tag was defined at,
@@ -1182,7 +1182,10 @@ int unary(void) {
         setkind(0); curuns = 0; cursize = 4; curelem = 4; return 0; }
     if (p == P_DEREF) {
         adv(); unary(); loadval();
-        if (curfn) { lvalue = 0; return 0; }     /* *fp is fp */
+        /* *fp is fp; but *pf of a POINTER to a function pointer (`LogFn *pf`, SQLite's
+           `*(&sqlite3Config.xLog) = xLog`) is the function pointer itself, an lvalue (0.0.28 H4) */
+        if (curfn && curpd >= 2) { lvalue = 1; curpd = curpd - 1; curptr = 1; cursize = 8; curelem = 8; return 0; }
+        if (curfn) { lvalue = 0; return 0; }
         if (curdim2 > 0) {                       /* *a of a[n][m] is an array row */
             cursize = curelem * curdim2;
             curdim2 = curdim3; curdim3 = 0;
@@ -3383,7 +3386,7 @@ int vlaback(int dep) {
    known once the body has been walked.  The control value goes to a frame
    slot first: the chain reloads it for every comparison, and the body may
    have clobbered every register by then. */
-long swval[256]; int swlab[256]; int nswv;
+long swval[4096]; int swlab[4096]; int nswv;   /* 0.0.28 H4: SQLite's yy_reduce has ~400 cases */
 int swdef[16]; int swslot[16]; int swsize[16]; int swuns[16]; int nsw;
 
 int patchnum(int at, int w, int v) {
@@ -3936,7 +3939,7 @@ int declspec(void) {                       /* -> element width */
 int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
-    int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
+    int own[4096]; int nown;   /* 0.0.28 H4: SQLite's sqlite3_api_routines has ~300 members */ int j; int bitpos; int bw; int isbf; int menum; int mflt;
     int flex; int marr;                   /* this member is `name[]`: a flexible array */
     int mdim2; int mdim3;                 /* the trailing dimensions of `name[n][k][j]` */
     int mfn;                              /* this member is a function pointer */
@@ -3984,7 +3987,7 @@ int stbody(int si) {
                 mbptrd[nmemb] = mbptrd[a];
                 if (stunion[mst]) { if (first == 0) mbskip[nmemb] = 1; }
                 first = 0;
-                if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
+                if (nown >= 4096) { __write(2, "too many members\n", 17); __exit(1); }
                 own[nown] = nmemb; nown = nown + 1;
                 nmemb = nmemb + 1;
                 stcount[si] = stcount[si] + 1;
@@ -4138,7 +4141,7 @@ int stbody(int si) {
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
             name_toolong(t);          /* the member's name goes in mbname */
-            if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
+            if (nown >= 4096) { __write(2, "too many members\n", 17); __exit(1); }
             own[nown] = nmemb; nown = nown + 1;
             nmemb = nmemb + 1;
             stcount[si] = stcount[si] + 1;
@@ -5323,7 +5326,7 @@ int stmt_(void) {
             else v = (int)v;
         } }
         if (nsw == 0) { err_tok(tp, "case outside switch"); return 0; }
-        if (nswv >= 256) { err_tok(tp, "switch case capacity exceeded"); return 0; }
+        if (nswv >= 4096) { err_tok(tp, "switch case capacity exceeded"); return 0; }
         lab = newlab();
         swval[nswv] = v; swlab[nswv] = lab; nswv = nswv + 1;
         elab("__unisacc_L", lab); es(":\n");
