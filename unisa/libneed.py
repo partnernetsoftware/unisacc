@@ -26,12 +26,12 @@ PREFIX = "__UN_"
 # Names the compiler itself references, not the source: the startup calls
 # exit after main returns whenever an exit function exists (src/front_parse.c
 # `__main_ret`), so its closure is needed whenever pruning is on.
-ROOTS = ("exit",)
+ROOTS = ("exit", "_unisa_environ_init")   # 0.0.28 H1': unistd.h's constructor fills environ before main
 MACRO_NAME_LIMIT = 63          # src/front_pp.c keeps NAMEW-1 = 63 bytes of a macro name (C99 5.2.4.1)
 IDENT = re.compile(r"[A-Za-z_]\w*")
-HEAD = re.compile(r"^static\b[^;{]*?\{", re.M)
+HEAD = re.compile(r"^(?:__attribute__\(\([^)]*\)\)\s*)?static\b[^;{]*?\{", re.M)   # 0.0.28: a constructor body too
 KEYWORDS = {"void", "char", "short", "int", "long", "float", "double", "signed", "unsigned",
-            "const", "volatile", "static", "inline", "struct", "union", "enum", "_Bool"}
+            "const", "volatile", "static", "inline", "struct", "union", "enum", "_Bool", "__attribute__"}
 CALLED = re.compile(r"([A-Za-z_]\w*)\s*\(")
 
 

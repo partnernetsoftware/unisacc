@@ -187,6 +187,13 @@ static char **_unisa_environ(void) {        /* the process environment, as geten
     return _unisa_envv;
 }
 #endif
+/* 0.0.28 H1': POSIX `environ`, a real variable so `extern char **environ;` in the program refers to
+   it (C99 6.2.2p4).  A constructor fills it before main (0.0.28 F1); -ftrim-libc keeps it as a root
+   (unisa/libneed.py ROOTS), since no name in the program keys a body only a startup hook uses. */
+static char **environ;
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_environ_init
+__attribute__((constructor)) static void _unisa_environ_init(void) { environ = _unisa_environ(); }
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_execv
 static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, _unisa_environ()); }
 #endif
