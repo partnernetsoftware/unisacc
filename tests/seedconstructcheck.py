@@ -579,6 +579,33 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                         "seqs": [list(map(list, seq)) for seq in e3_int.g.seqs]}
         assert int_graph.read_bytes() == json.dumps(expected_int, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 unary integer conversions differ"
+        part6_graph = work / "parse2-unary-part6.c.json"
+        run(str(cgen), "inspect-parse2-unary-part6-graph", str(part6_graph))
+        e3_part6 = parse2base.executor()
+        assemble.Run(e3_part6, e3_part6.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_part6, e3_part6.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_part6, e3_part6.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_part6, e3_part6.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_part6, e3_part6.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_part6, e3_part6.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_part6, e3_part6.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        part6_run = assemble.Run(e3_part6, e3_part6.P, {},
+                               {"warnings": False, "ucx": unaryenv["ucx"],
+                                "ufacts": unaryenv["ufacts"]})
+        part6_run.root = unary_manifest.parent
+        for depth, row in part6_run.rows(unary_manifest)[:10]:
+            part6_run.one(row, [], depth, {})
+        e3_part6.g.finish()
+        expected_part6 = {"start": "START",
+                          "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                     for name, (mode, row) in e3_part6.g.st.items()},
+                          "seqs": [list(map(list, seq)) for seq in e3_part6.g.seqs]}
+        assert part6_graph.read_bytes() == json.dumps(expected_part6, separators=(",", ":")).encode(), \
+            "seed/gen.c parse2 unary part6 differs"
     if part in ("base", "all"):
         for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
             tag = stage + "".join(flags)
@@ -637,4 +664,4 @@ if part in ("base", "all"):
 if part in ("parse2", "all"):
     print("seed construct parse2: token prelude through autoscan graph byte-identical")
 if part in ("parse2-2", "all"):
-    print("seed construct parse2-2: unary control through integer conversion graph byte-identical")
+    print("seed construct parse2-2: unary control through part6 graph byte-identical")
