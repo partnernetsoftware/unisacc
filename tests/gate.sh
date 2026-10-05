@@ -454,7 +454,9 @@ job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash mus
 job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
 # 0.0.28 R4: one job per part that seedconstructcheck.py --list names (C99 seed tools vs Python, byte for byte);
 # a new part needs no edit here or in gatedeps.json (refresh_gatedeps.py declares it from seed-construct-parse2)
-for p in $(python3 "$R/tests/seedconstructcheck.py" --list); do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
+scparts=$(python3 "$R/tests/seedconstructcheck.py" --list) || scparts=""
+[ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.py --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
+for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
