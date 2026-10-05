@@ -41,9 +41,10 @@ if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
 fi
 # 0.0.27 C2: the lnx/x86_64 ccinterop cells run on release-check ccinterop-x86, not a local Lima VM
 # 0.0.28 R2: the contract layer (ledger, freeze, gate layers, fresh-order, ...) before sealing --
-# 0.0.27 moved its rc twice for tool reds that only the queue found after the seal
+# 0.0.27 moved its rc twice for tool reds that only the queue found after the seal.
+# Measured 2026-10-05: 46 suites, 6 windows of 55 s at jobs 2, 192 s; the cap of 10 leaves room
 cq=$(mktemp -d "${TMPDIR:-/tmp}/precheck-contract.XXXXXX"); crc=75; w=0
-while [ "$crc" -eq 75 ] && [ "$w" -lt 6 ]; do w=$((w+1)); python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
+while [ "$crc" -eq 75 ] && [ "$w" -lt 10 ]; do w=$((w+1)); python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
 if [ "$crc" -ne 0 ]; then grep '^DONE' "$cq"/w*.log | grep -v ' rc=0 ' | cut -c1-200; tail -1 "$cq/w$w.log"; echo "  FAIL: contract layer (rc=$crc after $w windows; logs $cq)"; bad=1
 else echo "contract layer: passed in $w window(s)"; rm -rf "$cq"; fi
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
