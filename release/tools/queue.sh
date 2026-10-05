@@ -18,7 +18,9 @@ if [ ! -d "$W" ]; then
   for f in unisacc.com unisacc.com.build.json; do [ -f "$R/$f" ] && cp -p "$R/$f" "$W/$f"; done
   # 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
   # network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
-  if [ -d "$R/corpus/c-testsuite" ] && [ ! -e "$W/corpus/c-testsuite" ]; then mkdir -p "$W/corpus"; ln -s "$R/corpus/c-testsuite" "$W/corpus/c-testsuite"; fi
+  # 0.0.27: launched from an rc worktree, $R has no ignored corpus either -- take it from the main checkout
+  M=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+  for c in "$M"/corpus/*; do [ -e "$W/corpus/${c##*/}" ] || { mkdir -p "$W/corpus"; ln -s "$c" "$W/corpus/${c##*/}"; }; done
   # 0.0.21 R21-14: a stale build.json beside a new unisacc.com is rewritten by comboot mid-queue
   # and invalidates every job that declares it (0.0.20: six exec-driver results)
   if [ -f "$W/unisacc.com" ]; then
@@ -38,7 +40,7 @@ for i in $(seq 1 300); do
     [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
     sleep 2
   done
-  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$R/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
+  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"
   case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
   [ $((i % 40)) -eq 0 ] && osascript -e 'tell application "Terminal" to close (every window whose busy is false)' >/dev/null 2>&1
