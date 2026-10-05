@@ -3904,6 +3904,44 @@ static void parse2_gen2_statics_strwalk(Graph *g) {
     parse2_string_walk_escape(g, pre, body);
     parse2_string_walk_tail(g, pre, body, done);
 }
+static void parse2_gen2_shape_simple(Graph *g, const char *section) {
+    FILE *manifest = fopen("exec/parse2/shape-manifest.tsv", "rb");
+    FILE *fresh = fopen("exec/parse2/shape-fresh.tsv", "rb");
+    Value *facts = load_fact("k2-gen2"), *consts = value_get(facts, "shapeconst");
+    Value *classes = value_get(facts, "shapeclasses"), *bindings = value_new(JOBJ);
+    Value *sequences = value_new(JOBJ);
+    char *s; int rows = 0, labels = 0;
+    if (!manifest || !fresh || !consts || consts->kind != JOBJ ||
+        !classes || classes->kind != JOBJ) die("cannot read shape declarations");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "shape") ||
+            strcmp(f[4], "k2-gen2") || rows++) die("unsupported shape manifest");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || rows != 1) die("incomplete shape manifest");
+    for (size_t i = 0; i < consts->n; i++)
+        value_put(bindings, consts->items[i].key, consts->items[i].value);
+    while ((s = line(fresh))) {
+        char *f[4], *label; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 4);
+        if (n != 4) die("shape fresh column count");
+        if (!strcmp(f[0], section)) {
+            label = fresh_label(f[1], f[2]);
+            value_put(bindings, f[3], value_string(label));
+            free(label); labels++;
+        }
+        free(s);
+    }
+    if (ferror(fresh) || fclose(fresh) || !labels) die("shape fresh labels absent");
+    install_section_classes(g, "exec/parse2/shape-byte.tsv", section, 'b',
+                            bindings, sequences, classes);
+    install_section_classes(g, "exec/parse2/shape-result.tsv", section, 'r',
+                            bindings, sequences, classes);
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5929,6 +5967,16 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof0-full-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "sizeof0");
+        parse2_gen2_shape_simple(&g, "sizeof-type");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
