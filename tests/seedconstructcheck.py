@@ -101,6 +101,23 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                         "seqs": [list(map(list, seq)) for seq in e3_strings.g.seqs]}
     assert string_graph.read_bytes() == json.dumps(expected_strings, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 string span body call differs"
+    prefix_graph = work / "parse2-startup-prefix.c.json"
+    run(str(cgen), "inspect-parse2-startup-prefix-graph", str(prefix_graph))
+    e3_prefix = parse2base.executor()
+    assemble.Run(e3_prefix, e3_prefix.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_prefix, e3_prefix.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    assemble.Run(e3_prefix, e3_prefix.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+        ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+    e3_prefix.g.finish()
+    expected_prefix = {"start": "START",
+                       "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                  for name, (mode, row) in e3_prefix.g.st.items()},
+                       "seqs": [list(map(list, seq)) for seq in e3_prefix.g.seqs]}
+    assert prefix_graph.read_bytes() == json.dumps(expected_prefix, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 startup call order differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
