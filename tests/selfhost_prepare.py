@@ -2,6 +2,7 @@
 """Split fresh Python selfhost construction; no cached verdicts."""
 import hashlib,json,os,subprocess,sys
 from pathlib import Path
+SCALE = int(os.environ.get('UNISACC_TIME_SCALE', '1')) if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('UNISACC_TIME_SCALE', '1').isdigit() else 1   # 0.0.27 C1: tests/bound.py scale()
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'exec/pipeline')]
 from models import closure,digest
@@ -29,7 +30,7 @@ def main():
             print(image); return
         if mode!='image': raise ValueError('unknown selfhost preparation')
         cmd=[sys.executable,'-m','unisa','compile',str(tape),'--from-tape','-o',str(image),'--target','osx/arm64','--drive','built']
-    p=subprocess.run(cmd,cwd=ROOT,capture_output=True,timeout=45)
+    p=subprocess.run(cmd,cwd=ROOT,capture_output=True,timeout=45 * SCALE)
     if mode=='tape' and p.returncode==0: tape.write_bytes(p.stdout)
     else: sys.stdout.buffer.write(p.stdout)
     sys.stderr.buffer.write(p.stderr)

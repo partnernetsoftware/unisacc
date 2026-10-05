@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+SCALE = int(os.environ.get('UNISACC_TIME_SCALE', '1')) if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('UNISACC_TIME_SCALE', '1').isdigit() else 1   # 0.0.27 C1: tests/bound.py scale()
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = {'acceptance', 'vm', 'difftest', 'native', 'crossnative', 'fat',
@@ -34,7 +35,7 @@ def check():
         env = dict(os.environ, PATH=str(tmp / 'bin') + ':' + os.environ['PATH'],
                    CI_RECORD=str(record), JOBS='128')
         proc = subprocess.run(['bash', 'tests/all.sh'], cwd=ROOT, env=env,
-                              capture_output=True, text=True, timeout=15)
+                              capture_output=True, text=True, timeout=15 * SCALE)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         import json
         calls = [json.loads(line) for line in record.read_text().splitlines()]
