@@ -467,6 +467,7 @@ job seed-construct-parse2-12 python3 ./tests/seedconstructcheck.py --part parse2
 job seed-construct-parse2-13 python3 ./tests/seedconstructcheck.py --part parse2-13 # 0.0.28: gen2 initializers main rows
 job seed-construct-parse2-14 python3 ./tests/seedconstructcheck.py --part parse2-14 # 0.0.28: gen2 statics+initializers+strwalk
 job seed-construct-parse2-15 python3 ./tests/seedconstructcheck.py --part parse2-15 # 0.0.28: gen2 statics whole segment
+job seed-construct-parse2-16 python3 ./tests/seedconstructcheck.py --part parse2-16 # 0.0.28: gen2 parameter declarators
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
