@@ -3231,7 +3231,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra) 
     if (strcmp(section, "dimensions") && strcmp(section, "dimensions-tail") &&
         strcmp(section, "type-prefix") && strcmp(section, "structure") &&
         strcmp(section, "type-typedef") && strcmp(section, "type-tail") &&
-        strcmp(section, "type-word"))
+        strcmp(section, "type-word") && strcmp(section, "type-entry"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3305,6 +3305,12 @@ static void parse2_gen2_type_words(Graph *g) {
         parse2_gen2_control_ex(g, "type-word", extra);
         free(ret);
     }
+}
+static void parse2_gen2_type_entry(Graph *g) {
+    Value *extra = value_new(JOBJ); char *dispatch = fresh_label("TSPEC", "b");
+    value_put(extra, "type_dispatch", value_string(dispatch));
+    parse2_gen2_control_ex(g, "type-entry", extra);
+    free(dispatch);
 }
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
@@ -5193,6 +5199,22 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "type-typedef");
         parse2_gen2_control(&g, "type-tail");
         parse2_gen2_type_words(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-entry-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_control(&g, "type-prefix");
+        parse2_gen2_control(&g, "structure");
+        parse2_gen2_control(&g, "type-typedef");
+        parse2_gen2_control(&g, "type-tail");
+        parse2_gen2_type_words(&g);
+        parse2_gen2_type_entry(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
