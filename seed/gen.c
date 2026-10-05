@@ -4007,34 +4007,39 @@ static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
     }
     if (fclose(manifest) || row != 3) die("printfcontrol plain row missing");
 }
-static void parse2_printfcontrol_part2(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/printfcontrol-2-manifest.tsv", "rb");
+static void parse2_printfcontrol_part(Graph *g, int part) {
+    char path[128], section[32]; FILE *manifest;
     Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
     Value *classes = value_get(facts, "classes");
-    char *s; int rows = 0;
-    if (!manifest || !classes) die("printfcontrol part2 inputs missing");
+    char *s; int rows = 0, skipped = 0;
+    if (part != 2 && part != 3) die("unsupported printfcontrol part");
+    snprintf(path, sizeof(path), "exec/parse2/printfcontrol-%d-manifest.tsv", part);
+    snprintf(section, sizeof(section), "part%d.all", part);
+    manifest = fopen(path, "rb");
+    if (!manifest || !classes) die("printfcontrol part inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
+        if (part == 3 && skipped < 2) { skipped++; free(s); continue; }
         if (n != 9 || rows++ || strcmp(f[0], "rows") ||
-            strcmp(f[1], "printfcontrol") || strcmp(f[2], "part2.all") ||
+            strcmp(f[1], "printfcontrol") || strcmp(f[2], section) ||
             strcmp(f[4], "printfcontrol"))
-            die("printfcontrol part2 declaration changed");
-        Value *opts = value_json(f[8], "printfcontrol part2 options");
+            die("printfcontrol part declaration changed");
+        Value *opts = value_json(f[8], "printfcontrol part options");
         Value *sequences = textrows_construct("exec/parse2", opts);
         Value *mapped = mapseq_construct(opts, facts);
         for (size_t i = 0; i < mapped->n; i++)
             value_put(sequences, mapped->items[i].key, mapped->items[i].value);
         direct_bindings(bindings, f[7], facts);
-        install_section_classes(g, "exec/parse2/printfcontrol-byte.tsv", "part2.all", 'b',
+        install_section_classes(g, "exec/parse2/printfcontrol-byte.tsv", section, 'b',
                                 bindings, sequences, classes);
-        install_section_classes(g, "exec/parse2/printfcontrol-result.tsv", "part2.all", 'r',
+        install_section_classes(g, "exec/parse2/printfcontrol-result.tsv", section, 'r',
                                 bindings, sequences, classes);
         free(s);
     }
     if (ferror(manifest) || fclose(manifest) || rows != 1)
-        die("printfcontrol part2 row missing");
+        die("printfcontrol part row missing");
 }
 static void parse2_printf_wide_hooks(Graph *g) {
     FILE *manifest = fopen("exec/parse2/printf-manifest.tsv", "rb");
@@ -4802,10 +4807,11 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     }
     if (fmtwalk) parse2_fmtwalk_rows(&g, fmtwalk > 2 ? 2 : fmtwalk);
     if (fmtwalk > 2) parse2_fmtwalk_conversion(&g);
-    if (fmtwalk > 3) parse2_printfcontrol_part2(&g);
+    if (fmtwalk > 3) parse2_printfcontrol_part(&g, 2);
     if (fmtwalk > 4) parse2_printf_strwalk(&g, 7);
     if (fmtwalk > 5) parse2_printf_wide_hooks(&g);
     if (fmtwalk > 6) parse2_printfcontrol_escape(&g, fmtwalk > 7 ? 2 : 1);
+    if (fmtwalk > 8) parse2_printfcontrol_part(&g, 3);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4937,6 +4943,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-3-escape-both-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 8); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-3-rows-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 9); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
