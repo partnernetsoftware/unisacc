@@ -72,6 +72,21 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                         "seqs": [list(map(list, seq)) for seq in e3_startup.g.seqs]}
     assert startup_graph.read_bytes() == json.dumps(expected_startup, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 startup body call differs"
+    control_graph = work / "parse2-startup-control.c.json"
+    run(str(cgen), "inspect-parse2-startup-control-graph", str(control_graph))
+    e3_control = parse2base.executor()
+    assemble.Run(e3_control, e3_control.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_control, e3_control.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    e3_control.g.finish()
+    expected_control = {"start": "START",
+                        "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                   for name, (mode, row) in e3_control.g.st.items()},
+                        "seqs": [list(map(list, seq)) for seq in e3_control.g.seqs]}
+    assert control_graph.read_bytes() == json.dumps(expected_control, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 startup control body call differs"
     string_graph = work / "parse2-startup-strings.c.json"
     run(str(cgen), "inspect-parse2-startup-strings-graph", str(string_graph))
     e3_strings = parse2base.executor()
@@ -148,4 +163,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup/string-span/action recipes byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup/control/string-span/action recipes byte-identical")

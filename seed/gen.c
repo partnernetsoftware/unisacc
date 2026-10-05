@@ -3095,10 +3095,48 @@ static void parse2_string_span(Graph *g) {
     install_section(g, "exec/parse2/strings-byte.tsv", "token_span", 'b', bindings, sequences);
     install_section(g, "exec/parse2/strings-result.tsv", "token_span", 'r', bindings, sequences);
 }
+static void parse2_startup_control(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-control"), *opts = NULL;
+    Value *bindings = value_new(JOBJ), *sequences, *classes;
+    char *s; int declarations = 0;
+    if (!manifest) die("cannot open parse2 control manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("parse2 control manifest column count");
+        if (!declarations && !strcmp(f[0], "rows") && !strcmp(f[1], "control") &&
+            !strcmp(f[3], "!fact:control_export") && !strcmp(f[4], "k2-control"))
+            opts = value_json(f[8], "parse2 control options");
+        declarations++; free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || declarations != 2 || !opts)
+        die("unsupported parse2 control manifest");
+    /* The startup-marker section has no fresh labels.  Its named action
+       sequences still come from the same mapseq declaration as every other
+       control section; only the rows below consume them. */
+    sequences = mapseq_construct(opts, facts);
+    classes = value_get(facts, "classes");
+    if (!classes || classes->kind != JOBJ) die("parse2 control classes missing");
+    install_section_classes(g, "exec/parse2/control-byte.tsv", "startup-marker", 'b',
+                            bindings, sequences, classes);
+    install_section_classes(g, "exec/parse2/control-result.tsv", "startup-marker", 'r',
+                            bindings, sequences, classes);
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
     parse2_startup_edits(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
+static void inspect_parse2_startup_control_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -3119,6 +3157,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-graph")) {
         inspect_parse2_startup_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-control-graph")) {
+        inspect_parse2_startup_control_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-strings-graph")) {
         inspect_parse2_startup_strings_graph(argv[2]); return 0;
