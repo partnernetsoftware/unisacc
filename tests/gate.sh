@@ -454,6 +454,7 @@ job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash mus
 job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
 job seed-construct-base python3 ./tests/seedconstructcheck.py --part base     # C99 seed tools vs Python: net/tbl, prune, opt, lex, pp, nativeabi
 job seed-construct-parse2 python3 ./tests/seedconstructcheck.py --part parse2 # 0.0.27: split at ~38 s; the growing parse2 comparison
+job seed-construct-parse2-2 python3 ./tests/seedconstructcheck.py --part parse2-2 # 0.0.27: parse2 comparison split again at ~40 s
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
