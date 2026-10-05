@@ -19,10 +19,10 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19"):
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20"):
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12|parse2-13|parse2-14|parse2-15|parse2-16|parse2-17|parse2-18|parse2-19")
+    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12|parse2-13|parse2-14|parse2-15|parse2-16|parse2-17|parse2-18|parse2-19|parse2-20")
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -1116,6 +1116,33 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c sizeof1 full differs at {first}: "
                                  f"C={actual[first:first+100]!r} "
                                  f"Python={expected[first:first+100]!r}")
+    if part == "parse2-20":
+        actual_path = work / "parse2-gen2-sizeof2-control.c.json"
+        run(str(cgen), "inspect-parse2-gen2-sizeof2-control-graph", str(actual_path))
+        expected_graph = parse2base.executor()
+        runner = assemble.Run(expected_graph, expected_graph.P, {}, {"seg_sizeof2": 1})
+        manifest = ROOT / "exec/parse2/gen2-manifest.tsv"
+        runner.root = manifest.parent
+        for depth, row in runner.rows(manifest):
+            if row[0] == "call" and row[1] == "control" and row[3] == "fact:seg_sizeof2":
+                runner.one(row, [], depth, {})
+                break
+        else:
+            raise AssertionError("missing gen2 sizeof0 control call")
+        expected_graph.g.finish()
+        expected = json.dumps({
+            "start": "START",
+            "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                       for state, (mode, row) in expected_graph.g.st.items()},
+            "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
+        }, separators=(",", ":")).encode()
+        actual = actual_path.read_bytes()
+        if actual != expected:
+            first = next((i for i, (a, b) in enumerate(zip(actual, expected))
+                          if a != b), min(len(actual), len(expected)))
+            raise AssertionError(f"seed/gen.c sizeof2 control differs at {first}: "
+                                 f"C={actual[first:first+100]!r} "
+                                 f"Python={expected[first:first+100]!r}")
     if part == "parse2-17":
         actual_path = work / "parse2-gen2-sizeof0-control.c.json"
         run(str(cgen), "inspect-parse2-gen2-sizeof0-control-graph", str(actual_path))
@@ -1369,3 +1396,5 @@ if part == "parse2-18":
     print("seed construct parse2-18: sizeof0 control and shape graph byte-identical")
 if part == "parse2-19":
     print("seed construct parse2-19: sizeof1 control and shape graph byte-identical")
+if part == "parse2-20":
+    print("seed construct parse2-20: sizeof2 control graph byte-identical")
