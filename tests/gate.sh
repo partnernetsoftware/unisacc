@@ -427,6 +427,7 @@ job rowcov-pp python3 ./tests/rowcov.py pp all   # 0.0.25 T2: pp manifest rows r
 job rowcov-lex python3 ./tests/rowcov.py lex all   # 0.0.26 T2: lex manifest rows reached (on the preprocessor output); ratchet in tests/rowcov.baseline
 for k in $(seq 1 16); do job rowcov-parse2-$k python3 ./tests/rowcov.py parse2 gate$k/16; done   # 0.0.26 T2: each shard ratchets its own reached rows
 for st in lower enc; do for k in $(seq 1 8); do job rowcov-$st-$k python3 ./tests/rowcov.py $st gate$k/8; done; done   # 0.0.26 T2: lower (--full) and enc (--elf) rows, on tapes from the reference -S
+for st in lower enc; do job rowcov-$st-union python3 ./tests/rowcov.py $st union8; done   # 0.0.28 E22: the union may only rise, whatever the shards' redistribution
 job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
 job freezecheck python3 ./tests/freezecheck.py   # 0.0.25 P1: inside the freeze window only fix: commits touch the product closure

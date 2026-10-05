@@ -28,6 +28,20 @@ def edges(delta):
             total.add((name, str(k)))
     return total
 
+def probe_print(files):
+    """0.0.28 E22: what a shard's result depends on besides the delta -- its probe files and the reference."""
+    import hashlib
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f.encode() + b'\0')
+        try: h.update(hashlib.sha256((ROOT / f).read_bytes()).digest())
+        except FileNotFoundError: h.update(b'-')
+    ua = os.environ.get('UA', '/tmp/ua_ref')
+    try: h.update(hashlib.sha256(open(ua, 'rb').read()).digest())
+    except OSError: h.update(b'no-ua')
+    return h.hexdigest()
+
+
 def main():
     stage, what = sys.argv[1], sys.argv[2]
     assert stage in ('pp', 'lex', 'parse2', 'lower', 'enc'), 'stages: pp, lex, parse2, lower, enc'
@@ -89,6 +103,23 @@ def main():
         if got < floor: print('rowcov  FELL below the baseline'); return 1
         if got > floor: print('rowcov  above the baseline: raise %s/%d/%d in tests/rowcov.baseline' % (stage, k, n))
         return 0
+    if what.startswith('union'):
+        # 0.0.28 E22: the union ratchet (key STAGE in tests/rowcov.baseline) after the gate shards: their
+        # results are reused when probes and reference are unchanged, a stale or missing shard is rerun
+        n = int(what[5:] or 8)
+        cached()
+        files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
+        import time
+        def fresh(k):
+            try: return json.loads((out / ('%s-%d.json' % (stage, k))).read_text()).get('probes') == probe_print(files[k - 1::n])
+            except (FileNotFoundError, ValueError): return False
+        deadline = time.time() + 40           # in a queue the shard jobs may still be finishing: wait for them first
+        while time.time() < deadline and not all(fresh(k) for k in range(1, n + 1)): time.sleep(2)
+        for k in range(1, n + 1):
+            if not fresh(k):
+                r = subprocess.run([sys.executable, __file__, stage, '%d/%d' % (k, n)], cwd=ROOT)
+                if r.returncode: return r.returncode
+        sys.argv[3:] = [str(n)]; what = 'merge'
     if what == 'all':
         # one gate run under 60 s: side table (~3 s), 8 shards 4 at a time (~15 s each), merge
         side = out / (stage + '.rows.tsv')
@@ -196,7 +227,8 @@ def main():
     name = lambda q: names[q] if isinstance(q, int) else q
     seen = sorted({(name(q), str(key)) for q, key in cov})
     wit = {'%s\t%s' % (name(q), key): f for (q, key), f in first.items()}
-    (out / ('%s-%d.json' % (stage, k))).write_text(json.dumps({'shard': what, 'files': ran, 'seen': seen, 'witness': wit}))
+    (out / ('%s-%d.json' % (stage, k))).write_text(json.dumps({'shard': what, 'files': ran, 'seen': seen, 'witness': wit,
+                                                               'probes': probe_print(mine)}))
     print('rowcov %s %s  files %d   edges taken %d' % (stage, what, ran, len(seen)))
     return 0
 
