@@ -452,34 +452,9 @@ job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sec
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
 job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
-job seed-construct-base python3 ./tests/seedconstructcheck.py --part base     # C99 seed tools vs Python: net/tbl, prune, opt, lex, pp, nativeabi
-job seed-construct-parse2 python3 ./tests/seedconstructcheck.py --part parse2 # 0.0.27: split at ~38 s; the growing parse2 comparison
-job seed-construct-parse2-2 python3 ./tests/seedconstructcheck.py --part parse2-2 # 0.0.27: parse2 comparison split again at ~40 s
-job seed-construct-parse2-3 python3 ./tests/seedconstructcheck.py --part parse2-3 # 0.0.27: printf fallback formats, read from the manifest
-job seed-construct-parse2-4 python3 ./tests/seedconstructcheck.py --part parse2-4 # 0.0.27: gen2 families, starting with types-dimensions
-job seed-construct-parse2-5 python3 ./tests/seedconstructcheck.py --part parse2-5 # 0.0.27: gen2 type-entry onward
-job seed-construct-parse2-6 python3 ./tests/seedconstructcheck.py --part parse2-6 # 0.0.27: gen2 ladder rejects onward
-job seed-construct-parse2-7 python3 ./tests/seedconstructcheck.py --part parse2-7 # 0.0.27: gen2 optail onward
-job seed-construct-parse2-8 python3 ./tests/seedconstructcheck.py --part parse2-8 # 0.0.27: gen2 pointer + full optail
-job seed-construct-parse2-10 python3 ./tests/seedconstructcheck.py --part parse2-10 # 0.0.27: gen2 statics onward
-job seed-construct-parse2-11 python3 ./tests/seedconstructcheck.py --part parse2-11 # 0.0.28: gen2 statics graph
-job seed-construct-parse2-12 python3 ./tests/seedconstructcheck.py --part parse2-12 # 0.0.28: gen2 initializers hook
-job seed-construct-parse2-13 python3 ./tests/seedconstructcheck.py --part parse2-13 # 0.0.28: gen2 initializers main rows
-job seed-construct-parse2-14 python3 ./tests/seedconstructcheck.py --part parse2-14 # 0.0.28: gen2 statics+initializers+strwalk
-job seed-construct-parse2-15 python3 ./tests/seedconstructcheck.py --part parse2-15 # 0.0.28: gen2 statics whole segment
-job seed-construct-parse2-16 python3 ./tests/seedconstructcheck.py --part parse2-16 # 0.0.28: gen2 parameter declarators
-job seed-construct-parse2-17 python3 ./tests/seedconstructcheck.py --part parse2-17 # 0.0.28: gen2 sizeof0 control
-job seed-construct-parse2-18 python3 ./tests/seedconstructcheck.py --part parse2-18 # 0.0.28: gen2 sizeof-type shape
-job seed-construct-parse2-19 python3 ./tests/seedconstructcheck.py --part parse2-19 # 0.0.28: gen2 sizeof1 + sizeof-object
-job seed-construct-parse2-20 python3 ./tests/seedconstructcheck.py --part parse2-20 # 0.0.28: gen2 sizeof2 control
-job seed-construct-parse2-21 python3 ./tests/seedconstructcheck.py --part parse2-21 # 0.0.28: gen2 first strwalk
-job seed-construct-parse2-22 python3 ./tests/seedconstructcheck.py --part parse2-22 # 0.0.28: gen2 second strwalk, sizeof2 whole
-job seed-construct-parse2-23 python3 ./tests/seedconstructcheck.py --part parse2-23 # 0.0.28: gen2 sizeof3 control
-job seed-construct-parse2-24 python3 ./tests/seedconstructcheck.py --part parse2-24 # 0.0.28: gen2 address control
-job seed-construct-parse2-25 python3 ./tests/seedconstructcheck.py --part parse2-25 # 0.0.28: gen2 if control
-job seed-construct-parse2-26 python3 ./tests/seedconstructcheck.py --part parse2-26 # 0.0.28: gen2 switch control
-job seed-construct-parse2-27 python3 ./tests/seedconstructcheck.py --part parse2-27 # 0.0.28: gen2 loops control
-job seed-construct-parse2-28 python3 ./tests/seedconstructcheck.py --part parse2-28 # 0.0.28: gen2 if-loops family
+# 0.0.28 R4: one job per part that seedconstructcheck.py --list names (C99 seed tools vs Python, byte for byte);
+# a new part needs no edit here or in gatedeps.json (refresh_gatedeps.py declares it from seed-construct-parse2)
+for p in $(python3 "$R/tests/seedconstructcheck.py" --list); do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64

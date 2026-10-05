@@ -55,6 +55,18 @@ def main():
                 blob2 = None if f.is_file() else subprocess.run(['git', 'show', 'HEAD:' + n], cwd=R, capture_output=True, timeout=30)
                 cur = digest(f)[1] if f.is_file() else (hashlib.sha256(blob2.stdout).hexdigest() if blob2.returncode == 0 else None)
                 if cur and cur != sha: changed.append((name, 'guard:' + n)); entry['guards'][n] = cur
+    # 0.0.28 R4: seed-construct parts come from seedconstructcheck.py --list; each is declared like
+    # seed-construct-parse2 (same inputs), with its own command, and parts that left the list are dropped
+    parts = subprocess.run([sys.executable, str(R / 'tests/seedconstructcheck.py'), '--list'], cwd=R,
+                           capture_output=True, text=True, timeout=10, check=True).stdout.split()
+    tmpl = d['suites']['seed-construct-parse2']
+    want = {'seed-construct-' + q: q for q in parts}
+    for name in [n for n in d['suites'] if n.startswith('seed-construct-') and n not in want]:
+        del d['suites'][name]; changed.append((name, 'dropped'))
+    for name, q in want.items():
+        e = json.loads(json.dumps(tmpl)); e['command'] = ['python3', './tests/seedconstructcheck.py', '--part', q]
+        if name != 'seed-construct-parse2' and d['suites'].get(name) != e:
+            d['suites'][name] = e; changed.append((name, 'declared'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

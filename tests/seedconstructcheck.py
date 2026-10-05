@@ -19,10 +19,16 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25", "parse2-26", "parse2-27", "parse2-28", "parse2-29"):
+# 0.0.28 R4: the gate reads --list, so a new part is one entry here and nothing in gate.sh/gatedeps.json.
+# MANUAL parts stay out of the gate (parse2-9: the merged seg_ladders graph takes about 36 s).
+PARTS = ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25", "parse2-26", "parse2-27", "parse2-28", "parse2-29")
+MANUAL = ("parse2-9",)
+if sys.argv[1:] == ["--list"]:
+    print("\n".join(p for p in PARTS if p not in MANUAL)); raise SystemExit(0)
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in PARTS:
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12|parse2-13|parse2-14|parse2-15|parse2-16|parse2-17|parse2-18|parse2-19|parse2-20|parse2-21|parse2-22|parse2-23|parse2-24|parse2-25|parse2-26|parse2-27|parse2-28|parse2-29")
+    raise SystemExit("usage: seedconstructcheck.py --list | --part " + "|".join(PARTS))
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
