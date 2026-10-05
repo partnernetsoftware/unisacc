@@ -5953,6 +5953,22 @@ int main(int argc, char **argv) {
         if (fclose(out)) die("output close failed");
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-full-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_statics(&g);
+        parse2_gen2_initializers_hook(&g);
+        parse2_gen2_initializers_main(&g);
+        parse2_gen2_statics_strwalk(&g);
+        parse2_gen2_control(&g, "ordinary-staticauto");
+        parse2_gen2_startup_guard(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-init-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "dimensions");
