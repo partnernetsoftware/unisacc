@@ -3791,6 +3791,89 @@ static void parse2_gen2_initializers_hook(Graph *g) {
     }
     if (ferror(templ) || fclose(templ) || edit != 1) die("incomplete initializers hook template");
 }
+static Value *parse2_gen2_initializers_text(Value *text) {
+    Value *seq = value_new(JARR);
+    if (!text || text->kind != JSTR) die("initializer text fact missing");
+    for (size_t i = 0; i < text->n; i++) {
+        Value *act = value_new(JARR), *byte = value_new(JINT);
+        byte->number = (unsigned char)text->s[i];
+        value_put(act, NULL, value_string("OUT"));
+        value_put(act, NULL, byte);
+        value_put(seq, NULL, act);
+    }
+    return seq;
+}
+static Value *parse2_gen2_initializers_reject(const char *reason) {
+    Value *seq = value_new(JARR), *act = value_new(JARR);
+    value_put(act, NULL, value_string("REJECT"));
+    value_put(act, NULL, value_string(reason));
+    value_put(seq, NULL, act);
+    return seq;
+}
+static void parse2_gen2_initializers_main(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/initializers-manifest.tsv", "rb");
+    Value *facts = load_facts_expr("parse2-initializers+k2-stack");
+    Value *outer = load_fact("k2-gen2"), *env = value_get(outer, "initenv");
+    Value *mapseq = NULL, *classes = value_new(JOBJ), *bindings = value_new(JOBJ);
+    char *s; int row = 0;
+    if (!manifest || !env || env->kind != JOBJ) die("cannot read initializer declarations");
+    for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("initializer manifest column count");
+        if (row == 0 && !strcmp(f[0], "let")) {
+            Value *opts = value_json(f[8], "initializer sequences");
+            mapseq = mapseq_construct(opts, facts);
+            row++;
+        } else if (row == 1 && !strcmp(f[0], "template") && !strcmp(f[2], "hook")) row++;
+        else if (row == 2 && !strcmp(f[0], "rows") && !strcmp(f[1], "initializers") &&
+                 !strcmp(f[2], "main")) {
+            Value *opts = value_json(f[8], "initializer row options");
+            Value *tokenmap = value_get(opts, "tokens"), *tokens = value_get(load_fact("parse-tokens"), "TK");
+            Value *constants = load_fact("parse-constants");
+            Value *seqs = mapseq_construct(opts, facts);
+            char *cells = copy(f[6]), *p = cells;
+            if (!tokenmap || tokenmap->kind != JOBJ || !tokens || tokens->kind != JOBJ)
+                die("initializer token classes absent");
+            for (size_t i = 0; i < tokenmap->n; i++) {
+                const char *name = value_text(tokenmap->items[i].value);
+                Value *code = !strcmp(name, "identifier") ? value_get(constants, "TK_ID") :
+                              !strcmp(name, "string") ? value_get(constants, "TK_STR") :
+                              value_get(tokens, name);
+                Value *one = value_new(JARR);
+                if (!code || code->kind != JINT) die("initializer token code absent");
+                value_put(one, NULL, code); value_put(classes, tokenmap->items[i].key, one);
+            }
+            while (*p) {
+                char *comma = strchr(p, ','), *eq = strchr(p, '='), *val;
+                if (comma) *comma = 0;
+                if (!eq || eq == p) die("initializer sequence cell malformed");
+                *eq = 0; val = eq + 1;
+                if (val[0] == '$') {
+                    Value *v = value_get(mapseq, val + 1);
+                    if (!v) die("initializer sequence absent");
+                    value_put(seqs, p, v);
+                } else if (!strncmp(val, "@textf:", 7))
+                    value_put(seqs, p, parse2_gen2_initializers_text(value_path(facts, val + 7)));
+                else if (!strncmp(val, "@rej:", 5))
+                    value_put(seqs, p, parse2_gen2_initializers_reject(val + 5));
+                else die("unsupported initializer sequence cell");
+                if (!comma) break; p = comma + 1;
+            }
+            free(cells);
+            direct_bindings(bindings, f[7], facts);
+            install_section_classes(g, "exec/parse2/initializers-byte.tsv", "main", 'b',
+                                    bindings, seqs, classes);
+            install_section_classes(g, "exec/parse2/initializers-result.tsv", "main", 'r',
+                                    bindings, seqs, classes);
+            row++;
+        } else die("unexpected initializer main row");
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || row != 3) die("incomplete initializer main manifest");
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5835,6 +5918,19 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "ordinary-staticauto");
         parse2_gen2_startup_guard(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-initializers-main-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_statics(&g);
+        parse2_gen2_initializers_hook(&g);
+        parse2_gen2_initializers_main(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);

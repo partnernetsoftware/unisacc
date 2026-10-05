@@ -19,10 +19,10 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12"):
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13"):
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12")
+    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12|parse2-13")
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -960,6 +960,37 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c initializers hook differs at {first}: "
                                  f"C={actual[first:first+100]!r} "
                                  f"Python={expected[first:first+100]!r}")
+    if part == "parse2-13":
+        actual_path = work / "parse2-gen2-initializers-main.c.json"
+        run(str(cgen), "inspect-parse2-gen2-initializers-main-graph", str(actual_path))
+        expected_graph = parse2base.executor()
+        assemble.Run(expected_graph, expected_graph.P, {},
+                     {"seg_types-dimensions": 1, "seg_types-dimensions-tail": 1}).run(
+                         ROOT / "exec/parse2/gen2-manifest.tsv")
+        assemble.Run(expected_graph, expected_graph.P, {},
+                     assemble.load_facts("k2-gen2")["staticsenv"]).run(
+                         ROOT / "exec/parse2/statics-manifest.tsv")
+        runner = assemble.Run(expected_graph, expected_graph.P, {},
+                              assemble.load_facts("k2-gen2")["initenv"])
+        manifest = ROOT / "exec/parse2/initializers-manifest.tsv"
+        runner.root = manifest.parent
+        for depth, row in runner.rows(manifest):
+            assert depth == 0
+            runner.one(row, [], depth, {})
+        expected_graph.g.finish()
+        expected = json.dumps({
+            "start": "START",
+            "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                       for state, (mode, row) in expected_graph.g.st.items()},
+            "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
+        }, separators=(",", ":")).encode()
+        actual = actual_path.read_bytes()
+        if actual != expected:
+            first = next((i for i, (a, b) in enumerate(zip(actual, expected))
+                          if a != b), min(len(actual), len(expected)))
+            raise AssertionError(f"seed/gen.c initializers main differs at {first}: "
+                                 f"C={actual[first:first+100]!r} "
+                                 f"Python={expected[first:first+100]!r}")
     if part == "parse2-11":
         actual_path = work / "parse2-gen2-statics.c.json"
         run(str(cgen), "inspect-parse2-gen2-statics-graph", str(actual_path))
@@ -1151,3 +1182,5 @@ if part == "parse2-11":
     print("seed construct parse2-11: gen2 statics graph byte-identical")
 if part == "parse2-12":
     print("seed construct parse2-12: gen2 initializers hook graph byte-identical")
+if part == "parse2-13":
+    print("seed construct parse2-13: gen2 initializers main graph byte-identical")
