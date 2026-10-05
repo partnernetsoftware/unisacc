@@ -514,6 +514,33 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                             "seqs": [list(map(list, seq)) for seq in e3_float_d.g.seqs]}
         assert float_d_graph.read_bytes() == json.dumps(expected_float_d, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 unary float-d differs"
+        float_s_graph = work / "parse2-unary-float-s.c.json"
+        run(str(cgen), "inspect-parse2-unary-float-s-graph", str(float_s_graph))
+        e3_float_s = parse2base.executor()
+        assemble.Run(e3_float_s, e3_float_s.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_float_s, e3_float_s.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_float_s, e3_float_s.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_float_s, e3_float_s.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_float_s, e3_float_s.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_float_s, e3_float_s.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_float_s, e3_float_s.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        float_s_run = assemble.Run(e3_float_s, e3_float_s.P, {},
+                                   {"warnings": False, "ucx": unaryenv["ucx"],
+                                    "ufacts": unaryenv["ufacts"]})
+        float_s_run.root = unary_manifest.parent
+        for depth, row in float_s_run.rows(unary_manifest)[:7]:
+            float_s_run.one(row, [], depth, {})
+        e3_float_s.g.finish()
+        expected_float_s = {"start": "START",
+                            "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                       for name, (mode, row) in e3_float_s.g.st.items()},
+                            "seqs": [list(map(list, seq)) for seq in e3_float_s.g.seqs]}
+        assert float_s_graph.read_bytes() == json.dumps(expected_float_s, separators=(",", ":")).encode(), \
+            "seed/gen.c parse2 unary float-s differs"
         actions_json = work / "parse2-actions.c.json"
         run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
         actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
@@ -580,4 +607,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
 if part in ("base", "all"):
     print("seed construct base: net/tbl and prune, opt, lex, pp, nativeabi byte-identical")
 if part in ("parse2", "all"):
-    print("seed construct parse2: token prelude through unary float-d graph byte-identical")
+    print("seed construct parse2: token prelude through unary float-s graph byte-identical")
