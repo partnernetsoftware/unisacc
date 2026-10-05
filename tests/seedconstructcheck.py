@@ -719,8 +719,8 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
         float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
         unary_manifest = ROOT / "exec/parse2/unarycontrol-manifest.tsv"
         unaryenv = assemble.load_facts("k2-gen2")["unaryenv"]
-        printf_all_graph = work / "parse2-printfallback-bodies.c.json"
-        run(str(cgen), "inspect-parse2-printfallback-bodies-graph", str(printf_all_graph))
+        printf_all_graph = work / "parse2-printfallback-full.c.json"
+        run(str(cgen), "inspect-parse2-printfallback-full-graph", str(printf_all_graph))
         e3_printf_all = parse2base.executor()
         assemble.Run(e3_printf_all, e3_printf_all.P, {}, {"part_startup": 1}).run(
             ROOT / "exec/parse2/gen2parts-manifest.tsv")
@@ -742,7 +742,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
         printf_manifest = ROOT / "exec/parse2/printfallback-manifest.tsv"
         printf_all_run = assemble.Run(e3_printf_all, e3_printf_all.P, {}, {})
         printf_all_run.root = printf_manifest.parent
-        for depth, row in printf_all_run.rows(printf_manifest)[:16]:
+        for depth, row in printf_all_run.rows(printf_manifest)[:17]:
             printf_all_run.one(row, [], depth, {})
         e3_printf_all.g.finish()
         expected_printf_all = {"start": "START",
@@ -754,7 +754,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
         if actual != expected:
             first = next((i for i, (a, b) in enumerate(zip(actual, expected)) if a != b),
                          min(len(actual), len(expected)))
-            raise AssertionError(f"seed/gen.c parse2 printfallback bodies differ at {first}: "
+            raise AssertionError(f"seed/gen.c parse2 printfallback full call differs at {first}: "
                                  f"C={actual[first:first+100]!r} Python={expected[first:first+100]!r}")
     if part in ("base", "all"):
         for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
@@ -816,4 +816,4 @@ if part in ("parse2", "all"):
 if part in ("parse2-2", "all"):
     print("seed construct parse2-2: unary control through printfallback body graph byte-identical")
 if part == "parse2-3":
-    print("seed construct parse2-3: printfallback dispatch and body rows byte-identical")
+    print("seed construct parse2-3: printfallback full subcall byte-identical")

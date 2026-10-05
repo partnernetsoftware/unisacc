@@ -3738,7 +3738,7 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
     FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
     Value *sequences = NULL, *ctx = value_new(JOBJ);
     char *s; int row = 0, installed = 0;
-    if (!manifest || first < 2 || last > 16 || first >= last)
+    if (!manifest || first < 2 || last > 17 || first >= last)
         die("invalid printfallback manifest range");
     value_put(ctx, "PF_b1", value_string(entry));
     while ((s = line(manifest))) {
@@ -3785,14 +3785,15 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
             installed++;
         } else if (row >= first && row < last && !strcmp(f[0], "rows")) {
             Value *seqbindings = value_new(JOBJ), *bindings = value_new(JOBJ);
-            if (strcmp(f[1], "printfallback") || strcmp(f[2], "body") ||
+            if (strcmp(f[1], "printfallback") ||
+                (strcmp(f[2], "body") && strcmp(f[2], "tail")) ||
                 strcmp(f[4], "k2-printfallback") || !sequences)
-                die("printfallback body declaration changed");
+                die("printfallback row declaration changed");
             direct_bindings(seqbindings, f[6], sequences);
             direct_bindings(bindings, f[7], ctx);
             if (!value_get(seqbindings, "body")) die("printfallback body sequence missing");
-            install_section(g, "exec/parse2/printfallback-byte.tsv", "body", 'b', bindings, seqbindings);
-            install_section(g, "exec/parse2/printfallback-result.tsv", "body", 'r', bindings, seqbindings);
+            install_section(g, "exec/parse2/printfallback-byte.tsv", f[2], 'b', bindings, seqbindings);
+            install_section(g, "exec/parse2/printfallback-result.tsv", f[2], 'r', bindings, seqbindings);
             installed++;
         }
         row++; free(s);
@@ -4466,6 +4467,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-bodies-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 16); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-full-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
