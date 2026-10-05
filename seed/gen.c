@@ -3222,13 +3222,15 @@ static void parse2_startup_control(Graph *g) {
 }
 /* The first gen2 segment delegates to the control manifest.  Read its
    declaration and fresh-label table in source order, as assemble.Run does. */
-static void parse2_gen2_dimensions(Graph *g) {
+static void parse2_gen2_control(Graph *g, const char *section) {
     FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
     FILE *fresh = fopen("exec/parse2/control-fresh.tsv", "rb");
     Value *facts = load_fact("k2-control"), *opts = NULL;
     Value *bindings = value_new(JOBJ), *sequences, *classes;
     char *s; int rows = 0, header = 0;
-    if (!manifest || !fresh) die("cannot open gen2 dimensions declarations");
+    if (strcmp(section, "dimensions") && strcmp(section, "dimensions-tail"))
+        die("unsupported gen2 control section");
+    if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -3258,16 +3260,16 @@ static void parse2_gen2_dimensions(Graph *g) {
             if (strcmp(f[0], "section") || strcmp(f[1], "prefix") ||
                 strcmp(f[2], "kind") || strcmp(f[3], "key"))
                 die("control fresh header mismatch");
-        } else if (!strcmp(f[0], "dimensions")) {
+        } else if (!strcmp(f[0], section)) {
             label = fresh_label(f[1], f[2]);
             value_put(bindings, f[3], value_string(label)); free(label);
         }
         free(s);
     }
     if (ferror(fresh) || fclose(fresh) || !header) die("control fresh read failed");
-    install_section_classes(g, "exec/parse2/control-byte.tsv", "dimensions", 'b',
+    install_section_classes(g, "exec/parse2/control-byte.tsv", section, 'b',
                             bindings, sequences, classes);
-    install_section_classes(g, "exec/parse2/control-result.tsv", "dimensions", 'r',
+    install_section_classes(g, "exec/parse2/control-result.tsv", section, 'r',
                             bindings, sequences, classes);
 }
 static void parse2_string_initializer_head(Graph *g) {
@@ -5092,7 +5094,17 @@ int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-graph")) {
         build_parse2_token_graph(&g);
-        parse2_gen2_dimensions(&g);
+        parse2_gen2_control(&g, "dimensions");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-tail-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
