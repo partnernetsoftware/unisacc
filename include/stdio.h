@@ -14,6 +14,11 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 #define BUFSIZ 4096
+#ifdef __APPLE__
+#define FILENAME_MAX 1024   /* 0.0.28 H4: the host's value (SQLite sizes path buffers by it) */
+#else
+#define FILENAME_MAX 4096
+#endif
 
 typedef struct _UNISA_FILE FILE;
 /* A FILE* IS the descriptor cast to a pointer (fopen returns `(FILE *)(long)fd`),

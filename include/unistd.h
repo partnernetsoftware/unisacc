@@ -460,4 +460,18 @@ static char *getcwd(char *__u_buf, size_t __u_size) {
 #endif
 }
 #endif
+/* 0.0.28 H4 (SQLite's unix VFS): forwarded to the system C library on Linux and macOS */
+#ifndef _WIN32
+ssize_t pread(int __u_fd, void *__u_buf, size_t __u_n, off_t __u_off);
+ssize_t pwrite(int __u_fd, const void *__u_buf, size_t __u_n, off_t __u_off);
+int fchown(int __u_fd, uid_t __u_uid, gid_t __u_gid);
+long sysconf(int __u_name);
+#ifdef __APPLE__
+#define _SC_PAGESIZE 29
+#else
+#define _SC_PAGESIZE 30
+#endif
+#define _SC_PAGE_SIZE _SC_PAGESIZE
+ssize_t readlink(const char *__u_path, char *__u_buf, size_t __u_n);
+#endif
 #endif

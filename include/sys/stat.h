@@ -153,4 +153,8 @@ static int mkdir(const char *__u_p, mode_t __u_m) {
 #endif
 }
 #endif
+/* 0.0.28 H4: forwarded to the system C library on Linux and macOS */
+#ifndef _WIN32
+int fchmod(int __u_fd, mode_t __u_mode);
+#endif
 #endif

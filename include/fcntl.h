@@ -77,6 +77,26 @@ static int open(const char *__u_p, int __u_flags, int __u_mode) {
 }
 #endif
 #ifndef _WIN32
+/* 0.0.28 H4 (SQLite's locks): struct flock and the record-lock commands, per OS */
+#ifdef __APPLE__
+struct flock { off_t l_start; off_t l_len; pid_t l_pid; short l_type; short l_whence; };
+#define F_GETLK  7
+#define F_SETLK  8
+#define F_SETLKW 9
+#define F_RDLCK  1
+#define F_UNLCK  2
+#define F_WRLCK  3
+#else
+struct flock { short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l_pid; };
+#define F_GETLK  5
+#define F_SETLK  6
+#define F_SETLKW 7
+#define F_RDLCK  0
+#define F_WRLCK  1
+#define F_UNLCK  2
+#endif
+#endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_fcntl
 static int fcntl(int __u_fd, int __u_cmd, long __u_arg) {
     long __u_r; __u_r = __fcntl(__u_fd, __u_cmd, __u_arg);
