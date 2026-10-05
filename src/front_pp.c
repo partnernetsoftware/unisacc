@@ -12,9 +12,9 @@
    to twice the input plus 1 MB -- the 9.2 MB SQLite amalgamation used to stop at "source too
    large".  Static arrays of the old fixed size were about 112 MB of BSS. */
 int maxsrc = 8388608;
-int maxtok = 2097152;    /* about one token per four bytes of source */
+#define MAXTOK 2097152   /* the label stride per unit (front_parse.c slabel; exec/facts/export.py reads it) */
+int maxtok = MAXTOK;     /* the token capacity: about one token per four bytes of source, grown by srcroom */
 #define MAXSRC maxsrc
-#define MAXTOK maxtok
 
 char *src;
 int nsrc;
@@ -2845,7 +2845,7 @@ int lex(void) {
     strpfx = 0 - 1;
     while (1) {
         /* every branch below appends at most one token; none checked */
-        if (ntok >= MAXTOK - 2) { printf("too many tokens\n"); return 0 - 1; }
+        if (ntok >= maxtok - 2) { printf("too many tokens\n"); return 0 - 1; }
         key[0] = charclass(at(i));
         key[1] = charclass(at(i + 1));
         key[2] = 0; key[3] = 0;
