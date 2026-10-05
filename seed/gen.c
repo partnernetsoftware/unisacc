@@ -6156,6 +6156,40 @@ int main(int argc, char **argv) {
         if (fclose(out)) die("output close failed");
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-family-graph")) {
+        Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
+        Value *inc = value_new(JOBJ), *dec = value_new(JOBJ);
+        Value *address, *ret1 = value_new(JOBJ), *qt3 = value_new(JOBJ), *end;
+        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        value_put(inc, "update_entry", value_string("LP.inc"));
+        value_put(inc, "update_target", value_string("POST.+"));
+        value_put(dec, "update_entry", value_string("LP.dec"));
+        value_put(dec, "update_target", value_string("POST.-"));
+        build_parse2_token_graph(&g);
+        parse2_gen2_return(&g, "expr0");
+        parse2_gen2_return_ex(&g, "update", inc);
+        parse2_gen2_return_ex(&g, "update", dec);
+        parse2_gen2_return(&g, "ret0");
+        address = parse2_addr_template(&g, "S.rs3");
+        parse2_addr_auto(&g, "S.rs3", address);
+        parse2_addr_main(&g, address);
+        value_put(ret1, "addr_end", value_get(address, "done"));
+        parse2_gen2_return_ex(&g, "ret1", ret1);
+        parse2_gen2_return(&g, "qt0");
+        parse2_gen2_conditional(&g);
+        parse2_gen2_return(&g, "qt1");
+        for (size_t i = 0; i < floats->n; i++)
+            parse2_gen2_return_float(&g, floats->items[i].value);
+        parse2_gen2_return(&g, "qt2");
+        end = parse2_gen2_return_integers(&g);
+        value_put(qt3, "integer_end", end);
+        parse2_gen2_return_ex(&g, "qt3", qt3);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt-full-graph")) {
         Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
         Value *extra = value_new(JOBJ), *end;

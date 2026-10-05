@@ -21,7 +21,7 @@ def run(*args, timeout=20):
 
 # 0.0.28 R4: the gate reads --list, so a new part is one entry here and nothing in gate.sh/gatedeps.json.
 # MANUAL parts stay out of the gate (parse2-9: the merged seg_ladders graph takes about 36 s).
-PARTS = ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25", "parse2-26", "parse2-27", "parse2-28", "parse2-29", "parse2-30", "parse2-31", "parse2-32", "parse2-33", "parse2-34", "parse2-35", "parse2-36", "parse2-37", "parse2-38", "parse2-39", "parse2-40", "parse2-41", "parse2-42", "parse2-43")
+PARTS = ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25", "parse2-26", "parse2-27", "parse2-28", "parse2-29", "parse2-30", "parse2-31", "parse2-32", "parse2-33", "parse2-34", "parse2-35", "parse2-36", "parse2-37", "parse2-38", "parse2-39", "parse2-40", "parse2-41", "parse2-42", "parse2-43", "parse2-44")
 MANUAL = ("parse2-9",)
 if sys.argv[1:] == ["--list"]:
     print("\n".join(p for p in PARTS if p not in MANUAL)); raise SystemExit(0)
@@ -1203,6 +1203,30 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c address control differs at {first}: "
                                  f"C={actual[first:first+100]!r} "
                                  f"Python={expected[first:first+100]!r}")
+    if part == "parse2-44":
+        actual_path = work / "parse2-gen2-return-family.c.json"
+        run(str(cgen), "inspect-parse2-gen2-return-family-graph", str(actual_path))
+        expected_graph = parse2base.executor()
+        action_env = assemble.Run(expected_graph, expected_graph.P, {}, {}).run(
+            ROOT / "exec/parse2/gen2-actions-manifest.tsv")
+        segments = {"seg_ret-expr": 1, "seg_ret0": 1, "seg_ret-qt0": 1, "seg_ret-qt": 1}
+        assemble.Run(expected_graph, expected_graph.P,
+                     {"warnings": False}, dict(action_env, **segments)).run(
+                         ROOT / "exec/parse2/gen2-manifest.tsv")
+        expected_graph.g.finish()
+        expected = json.dumps({
+            "start": "START",
+            "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                       for state, (mode, row) in expected_graph.g.st.items()},
+            "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
+        }, separators=(",", ":")).encode()
+        actual = actual_path.read_bytes()
+        if actual != expected:
+            first = next((i for i, (a, b) in enumerate(zip(actual, expected))
+                          if a != b), min(len(actual), len(expected)))
+            raise AssertionError(f"seed/gen.c return family differs at {first}: "
+                                 f"C={actual[first:first+100]!r} "
+                                 f"Python={expected[first:first+100]!r}")
     if part == "parse2-43":
         actual_path = work / "parse2-gen2-return-qt-full.c.json"
         run(str(cgen), "inspect-parse2-gen2-return-qt-full-graph", str(actual_path))
@@ -2083,3 +2107,6 @@ if part == "parse2-42":
 
 if part == "parse2-43":
     print("seed construct parse2-43: return qt family graph byte-identical")
+
+if part == "parse2-44":
+    print("seed construct parse2-44: full return family graph byte-identical")
