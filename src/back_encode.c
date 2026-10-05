@@ -47,12 +47,9 @@ int bk_relo(long off, int type, long target) {
 #define BK_NIMPMAX 26               /* + LoadLibraryA GetProcAddress FreeLibrary GetLastError (R21-4a') */
 char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000CreateProcessW\000WaitForSingleObject\000GetExitCodeProcess\000TerminateProcess\000SetStdHandle\000GetCurrentProcess\000GetCurrentProcessId\000GetModuleFileNameW\000LoadLibraryA\000GetProcAddress\000FreeLibrary\000GetLastError\000";
 long bk_imp[BK_NIMPMAX];               /* Windows: the IAT slot of each import */
-long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
 /* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]
    says instruction i is a branch encoded in its short form; tjk[i] is that
    form's length (0: not a relaxable branch) and tjt[i] its target label. */
-char tshort[BK_MAXT]; char tfit[BK_MAXT]; int tjk[BK_MAXT]; int tjt[BK_MAXT];
-long tsz[BK_MAXT];
 
 int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
 int ow(unsigned long v) {           /* a 32-bit little-endian word */
@@ -1184,7 +1181,13 @@ int bk_x86(int i, long off) {
 }
 
 /* ---- the assembler: assemble.py ---------------------------------------- */
-char bktext[BK_MAXTEXT]; long bktlen;
+char *bktext; long bktlen; long bkcaptext;
+int bk_growtext(long need) {        /* 0.0.29 H4': the machine code grows like the tape (back_lower.c) */
+    long n; n = bkcaptext ? bkcaptext : BK_MAXTEXT;
+    while (n < need) n = n * 2;
+    if (n != bkcaptext) { bktext = (char *)bk_regrow((long)bktext, bkcaptext, n); bkcaptext = n; }
+    return 0;
+}
 char bkscr[8192];
 long bk_datava; long bk_entry;
 int bk_enc(int i, long off) { if (bkarch) return bk_arm(i, off); return bk_x86(i, off); }
@@ -1247,6 +1250,7 @@ int bk_assemble(void) {
         }
     }
     bktlen = off;
+    bk_growtext(off + 16);
     /* image.layout: where text and data land, known before encoding */
     bk_idata_layout();
     if (bk_objmode) {

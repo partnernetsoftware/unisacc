@@ -41,13 +41,38 @@ int bk_elf_hdrs(void) { return bk_dyn ? 784 : 176; }   /* ELF header bytes befor
 #define BK_HOST_ARCH 0
 #endif
 
-#define BK_MAXI 1048576              /* tape instructions */
-#define BK_MAXT 2097152              /* lowered instructions */
+#define BK_MAXI 1048576              /* tape instructions: the first capacity, doubled on demand (bk_growi) */
+#define BK_MAXT 2097152              /* lowered instructions: likewise (bk_growt) */
 #define BK_MAXN 262144              /* names: labels and data symbols */
 #define BK_NPOOL 2097152            /* their spellings */
 #define BK_MAXDATA 4194304          /* initialised data bytes (zeros are not stored) */
 #define BK_MAXZ 65536               /* zero runs */
-#define BK_MAXTEXT 8388608          /* machine code */
+#define BK_MAXTEXT 8388608          /* machine code: the first capacity (bk_growtext) */
+
+/* 0.0.29 H4': the tables that a large program outgrows -- tape and lowered instructions, machine
+   code -- are anonymous mappings doubled on demand, not fixed bss.  sqlite3.c + shell.c is 1.36 M
+   tape instructions against the old fixed 1 M, and 8x fixed tables (a gigabyte of bss) no longer
+   load on macOS.  A mapping is zero-filled like bss; the outgrown one is left mapped. */
+long bk_map(long n) {
+    long p;
+#ifdef _WIN32
+    p = __mmap(0, n, 0x3000, 4, 0, 0);
+#else
+    p = __mmap(0, n, 3, BK_MAP_ANON, 0 - 1, 0);
+#endif
+    if (p == 0 - 1 || p == 0) { __write(2, "back end: cannot map memory\n", 28); __exit(1); }
+    return p;
+}
+long bk_regrow(long old, long oldn, long newn) {
+    long p; long k; long *d; long *s; char *dc; char *sc;
+    p = bk_map(newn);
+    if (old == 0) return p;
+    d = (long *)p; s = (long *)old; k = 0;
+    while (k + 8 <= oldn) { d[k / 8] = s[k / 8]; k = k + 8; }
+    dc = (char *)p; sc = (char *)old;
+    while (k < oldn) { dc[k] = sc[k]; k = k + 1; }
+    return p;
+}
 
 /* ---- names ------------------------------------------------------------- */
 char bkpool[BK_NPOOL]; int bkpoolend;
@@ -254,9 +279,19 @@ long bk_nzlen(void) {
 #define BK_R 1                      /* a tape register, value 0..7 */
 #define BK_I 2                      /* an immediate */
 #define BK_N 3                      /* a name: label or data symbol */
-int bkop[BK_MAXI];
-int bkak[BK_MAXI * 8]; long bkav[BK_MAXI * 8];   /* up to 8: `.sys6` */
-int bkni;
+int *bkop;
+int *bkak; long *bkav;              /* up to 8 operands each: `.sys6` */
+int *bklab_first;                  /* per tape pc, the first label there (+4: lookahead reads pc + 3) */
+int bkni; long bkcapi;
+int bk_growi(void) {
+    long n; n = bkcapi ? bkcapi * 2 : BK_MAXI;
+    bkop = (int *)bk_regrow((long)bkop, bkcapi * 4, n * 4);
+    bkak = (int *)bk_regrow((long)bkak, bkcapi * 32, n * 32);
+    bkav = (long *)bk_regrow((long)bkav, bkcapi * 8 * sizeof(long), n * 8 * sizeof(long));
+    bklab_first = (int *)bk_regrow((long)bklab_first, (bkcapi + 4) * 4, (n + 4) * 4);
+    bkcapi = n;
+    return 0;
+}
 int bkentry;                        /* the _start label's pc */
 
 /* the tape's op names, in one packed list; an op is its index here */
@@ -363,6 +398,7 @@ int bk_parse(char *t, int n) {
     long value;
     if (n < 0) return bk_tape_bad();
     i = 0; bkni = 0; bkentry = 0 - 1;
+    if (bkcapi == 0) bk_growi();
     while (i < n) {
         e = i; while (e < n) { if (t[e] == 10) break; e = e + 1; }
         lineend = e;
@@ -476,7 +512,7 @@ int bk_parse(char *t, int n) {
         s0 = j; while (j < e && !bk_tape_space(t[j])) j = j + 1;
         op = bk_opof(t + s0, j - s0);
         if (op < 0) { __write(2, "back end: unknown tape op\n", 26); __exit(1); }
-        if (bkni >= BK_MAXI) { __write(2, "back end: tape too long\n", 24); __exit(1); }
+        if (bkni >= bkcapi) bk_growi();
         sh = bk_nth(BKSHAPE, op);
         na = 0;
         while (sh[na]) {
@@ -638,15 +674,40 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
 #define SK_REG 2
 #define SK_MEM 3
 #define SK_ADDR 4
-int tkop[BK_MAXT]; long tka[BK_MAXT * 4]; int tkk[BK_MAXT * 4]; int tkn;
+int *tkop; long *tka; int *tkk; int tkn;
 /* gate metadata: form, gate, catalog op, return register */
-int tkg_rc[BK_MAXT]; int tkg_wi[BK_MAXT];
+int *tkg_rc; int *tkg_wi;
 int bk_impof(int c);                /* the IAT slot `winimp` names */
 /* an op's index in one of catalog.ENCSPEC's tables, or -1 [I5] */
 int enc_ix(char *tab, int n, char *o) { int L; L = 0; while (o[L]) L = L + 1; return vfind(tab, n, o, L); }
-int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
+int *tkg_rel; int *tkg_form; int *tkg_gate; int *tkg_cop; int *tkg_ret;
+/* the assembler's per-instruction tables (back_encode.c), grown with these */
+long *toff;                         /* each lowered instruction's byte offset (+1: the end) */
+char *tshort; char *tfit; int *tjk; int *tjt; long *tsz;
+long bkcapt;
+int bk_growt(void) {
+    long n; long o; long L; n = bkcapt ? bkcapt * 2 : BK_MAXT; o = bkcapt; L = sizeof(long);
+    tkop = (int *)bk_regrow((long)tkop, o * 4, n * 4);
+    tka = (long *)bk_regrow((long)tka, o * 4 * L, n * 4 * L);
+    tkk = (int *)bk_regrow((long)tkk, o * 16, n * 16);
+    tkg_rc = (int *)bk_regrow((long)tkg_rc, o * 4, n * 4);
+    tkg_wi = (int *)bk_regrow((long)tkg_wi, o * 4, n * 4);
+    tkg_rel = (int *)bk_regrow((long)tkg_rel, o * 4, n * 4);
+    tkg_form = (int *)bk_regrow((long)tkg_form, o * 4, n * 4);
+    tkg_gate = (int *)bk_regrow((long)tkg_gate, o * 4, n * 4);
+    tkg_cop = (int *)bk_regrow((long)tkg_cop, o * 4, n * 4);
+    tkg_ret = (int *)bk_regrow((long)tkg_ret, o * 4, n * 4);
+    toff = (long *)bk_regrow((long)toff, (o + 1) * L, (n + 1) * L);
+    tshort = (char *)bk_regrow((long)tshort, o, n);
+    tfit = (char *)bk_regrow((long)tfit, o, n);
+    tjk = (int *)bk_regrow((long)tjk, o * 4, n * 4);
+    tjt = (int *)bk_regrow((long)tjt, o * 4, n * 4);
+    tsz = (long *)bk_regrow((long)tsz, o * L, n * L);
+    bkcapt = n;
+    return 0;
+}
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
-int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
+int bklab_next[BK_MAXN];
 long bk_scr0; long bk_scr1; long bk_plen; long bk_pbuf; long bk_argc; long bk_argv;
 long bk_sysa; long bk_sysfp; long bk_syssp; long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
 int bk_rmap[8];                     /* tape register -> machine register */
@@ -657,7 +718,7 @@ int bk_isccw(int j) {                /* a `__ccw_` label: cc interop inbound wra
     return p[0] == 95 && p[1] == 95 && p[2] == 99 && p[3] == 99 && p[4] == 119 && p[5] == 95;
 }
 int tk(int op, long a0, long a1, long a2, long a3) {
-    if (tkn >= BK_MAXT) { __write(2, "back end: lowered program too long\n", 35); __exit(1); }
+    if (tkn >= bkcapt) bk_growt();
     tkop[tkn] = op; tka[tkn * 4] = a0; tka[tkn * 4 + 1] = a1; tka[tkn * 4 + 2] = a2; tka[tkn * 4 + 3] = a3;
     tkk[tkn * 4] = BK_I; tkk[tkn * 4 + 1] = BK_I; tkk[tkn * 4 + 2] = BK_I; tkk[tkn * 4 + 3] = BK_I;
     tkg_rel[tkn] = 0 - 1; tkg_form[tkn] = 0; tkg_gate[tkn] = 0; tkg_cop[tkn] = 0 - 1; tkg_ret[tkn] = 0 - 1;
@@ -838,6 +899,7 @@ int bk_lower(void) {
         j = j + 1;
     }
     tkn = 0;
+    if (bkcapt == 0) bk_growt();
     /* for each tape pc, the labels that point at it: one chain per pc,
        built once -- a scan of every name per instruction is quadratic */
     j = 0; while (j <= bkni) { bklab_first[j] = 0 - 1; j = j + 1; }

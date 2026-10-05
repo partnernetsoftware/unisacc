@@ -2511,15 +2511,15 @@ int pf_call(int t) {
         return postfix();
     }
     if (isname(t, "va_arg", 6)) {           /* *ap as T, then ap += 8 */
-        int vw; int vp; int vfl;
+        int vw; int vp; int vfl; int vst; int vpd; int vuns;
         need(tidx("(", 1), "(");
         unary(); lvalue = 0;
         push();                                   /* &ap */
         es("  @mem.load r0, [r0+0]\n");
         push();                                   /* ap */
         need(tidx(",", 1), ",");
-        vw = declspec(); vp = declspecptr; vfl = declflt;
-        while (eatstar()) vp = 1;
+        vw = declspec(); vp = declspecptr; vfl = declflt; vst = declstruct; vpd = declspecpd; vuns = declunsigned;
+        while (eatstar()) { vp = 1; vpd = vpd + 1; }
         need(tidx(")", 1), ")");
         es("  @lit.imm r2, 8\n  @alu.add r0, r0, r2\n");
         es("  @mem.load r1, [r7+8]\n  @mem.store [r1+0], r0\n");   /* ap += 8 */
@@ -2529,6 +2529,10 @@ int pf_call(int t) {
         lvalue = 0; curelem = vw; curptr = vp;
         cursize = vw; if (vp) cursize = 8;
         curflt = vfl;
+        /* 0.0.29 H4': the type a cast would give -- `va_arg(ap, struct S *)->m` and
+           `*va_arg(ap, S *)` (sqlite3_config copies a struct through it) need the struct */
+        curuns = vuns; curfn = 0; curfnst = 0 - 1; curbase = vw; curpd = 0; curstruct = 0 - 1;
+        if (vp) { curpd = vpd > 0 ? vpd : 1; if (curpd < 2 && vst >= 0) { curstruct = vst; curelem = stsize[vst]; } }
         return postfix();
     }
     need(vfind(TOKV, NTOKV, "(", 1), "(");
@@ -6700,6 +6704,34 @@ int undef_calls(void) {
                     } } }
                 }
             } } } } } } } }
+        /* 0.0.29 H4': `  .lea rN, NAME` of a declared function nobody defines -- its address taken
+           (sqlite's aSyscall[] table holds gettimeofday) -- is a reference too.  Only calls were read,
+           so the address went unforwarded, the image resolved it to the wrong place, and the program
+           jumped through its code bytes; now it is forwarded, or reported, like a call. */
+        if (unitmode == 0 && e - i > 9 && out[i] == 32 && out[i + 1] == 32) {
+            int a; a = i + 2; if (out[a] == 46) a = a + 1;
+            if (e - a > 6 && out[a] == 108 && out[a + 1] == 101 && out[a + 2] == 97 && out[a + 3] == 32) {
+                a = a + 4; while (a < e && out[a] != 44) a = a + 1;
+                a = a + 1; while (a < e && out[a] == 32) a = a + 1;
+                if (a < e && ccx_sym(out + a, e - a) >= 0) {
+                    h = ud_block_at(i);
+                    if (h < 0 || ud_reach[h]) {
+                        h = ud_slot(a);
+                        if (ud_tab[h] == 0) {
+                            int fr; ud_tab[h] = a + 1;
+                            fr = fwdrun ? fwd_stub(out + a, e - a) : 0;
+                            if (fr == 2) bad = bad + 1;
+                            if (fr == 0 && objextern == 0) {
+                                __write(2, "unisacc: error: undefined function '", 36);
+                                __write(2, out + a, e - a);
+                                __write(2, "' (its address is taken)\n", 25);
+                                bad = bad + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         i = e + 1;
     }
     i = 0;
