@@ -281,6 +281,29 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                       "seqs": [list(map(list, seq)) for seq in e3_float.g.seqs]}
     assert float_boundary_graph.read_bytes() == json.dumps(expected_float, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 float boundary differs"
+    float_entry_graph = work / "parse2-float-entry.c.json"
+    run(str(cgen), "inspect-parse2-float-entry-graph", str(float_entry_graph))
+    e3_entry = parse2base.executor()
+    assemble.Run(e3_entry, e3_entry.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_entry, e3_entry.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    assemble.Run(e3_entry, e3_entry.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+        ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+    assemble.Run(e3_entry, e3_entry.P, {}, {}).run(initializer_manifest)
+    assemble.Run(e3_entry, e3_entry.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+    entry_run = assemble.Run(e3_entry, e3_entry.P, {}, {})
+    entry_run.root = float_manifest.parent
+    for depth, row in entry_run.rows(float_manifest)[:3]:
+        entry_run.one(row, [], depth, {})
+    e3_entry.g.finish()
+    expected_entry = {"start": "START",
+                      "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                 for name, (mode, row) in e3_entry.g.st.items()},
+                      "seqs": [list(map(list, seq)) for seq in e3_entry.g.seqs]}
+    assert float_entry_graph.read_bytes() == json.dumps(expected_entry, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 float entry differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
