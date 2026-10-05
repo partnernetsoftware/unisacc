@@ -152,8 +152,11 @@ def fingerprint(jobs):
         # a declared command may name the candidate as {MODEL_COM}: gate.sh expands
         # ${MODEL_COM:-./unisacc.com} at list time, so the path differs between runs while the
         # job does not (its bytes are an executable input either way)
-        mc = settings.get('MODEL_COM') or './unisacc.com'
-        declared_cmd = [mc if a == '{MODEL_COM}' else a for a in entry['command']] if entry else None
+        mc = settings.get('MODEL_COM') or str(ROOT / 'unisacc.com')
+        # 0.0.29 P7': {MODEL_COM} may stand inside an argument (UA={MODEL_COM}); every product suite was
+        # declared with the main checkout's absolute path, so in a release queue (MODEL_COM = the candidate)
+        # none of the 87 com- declarations matched and all of them hashed the whole tree
+        declared_cmd = [a.replace('{MODEL_COM}', mc) for a in entry['command']] if entry else None
         # 0.0.23 E: "match": "contains" -- the declared command is a contiguous run of the job's
         # command; the job's full command stays in the identity, so a changed argument list (new
         # test files in a shard, an env prefix) re-runs the job but no longer drops its declaration
