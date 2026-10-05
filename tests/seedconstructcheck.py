@@ -19,12 +19,10 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 1:
-    part = "all"
-elif len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2"):
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2"):
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py [--part base|parse2]")
+    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2")
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -377,6 +375,19 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                              "seqs": [list(map(list, seq)) for seq in e3_autoscan.g.seqs]}
         assert autoscan_graph.read_bytes() == json.dumps(expected_autoscan, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 autoscan child differs"
+        actions_json = work / "parse2-actions.c.json"
+        run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
+        actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
+        action_rows = [line.split("\t") for line in actions_manifest.read_text().splitlines()
+                       if line and not line.startswith("#")]
+        action_names = list(json.loads(action_rows[0][8])["mapseq"])
+        action_env = assemble.Run(e3, e3.P, {}, {}).run(actions_manifest)
+        expected_actions = {name: action_env[name] for name in action_names}
+        assert actions_json.read_bytes() == json.dumps(expected_actions, separators=(",", ":")).encode(), \
+            "seed/gen.c parse2 action recipes differ"
+    if part in ("parse2-2", "all"):
+        initializer_manifest = ROOT / "exec/parse2/strings-initializer-manifest.tsv"
+        float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
         unary_head_graph = work / "parse2-unary-head.c.json"
         run(str(cgen), "inspect-parse2-unary-head-graph", str(unary_head_graph))
         e3_unary = parse2base.executor()
@@ -541,16 +552,33 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                             "seqs": [list(map(list, seq)) for seq in e3_float_s.g.seqs]}
         assert float_s_graph.read_bytes() == json.dumps(expected_float_s, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 unary float-s differs"
-        actions_json = work / "parse2-actions.c.json"
-        run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
-        actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
-        action_rows = [line.split("\t") for line in actions_manifest.read_text().splitlines()
-                       if line and not line.startswith("#")]
-        action_names = list(json.loads(action_rows[0][8])["mapseq"])
-        action_env = assemble.Run(e3, e3.P, {}, {}).run(actions_manifest)
-        expected_actions = {name: action_env[name] for name in action_names}
-        assert actions_json.read_bytes() == json.dumps(expected_actions, separators=(",", ":")).encode(), \
-            "seed/gen.c parse2 action recipes differ"
+        int_graph = work / "parse2-unary-int.c.json"
+        run(str(cgen), "inspect-parse2-unary-int-graph", str(int_graph))
+        e3_int = parse2base.executor()
+        assemble.Run(e3_int, e3_int.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_int, e3_int.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_int, e3_int.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_int, e3_int.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_int, e3_int.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_int, e3_int.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_int, e3_int.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        int_run = assemble.Run(e3_int, e3_int.P, {},
+                               {"warnings": False, "ucx": unaryenv["ucx"],
+                                "ufacts": unaryenv["ufacts"]})
+        int_run.root = unary_manifest.parent
+        for depth, row in int_run.rows(unary_manifest)[:9]:
+            int_run.one(row, [], depth, {})
+        e3_int.g.finish()
+        expected_int = {"start": "START",
+                        "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                   for name, (mode, row) in e3_int.g.st.items()},
+                        "seqs": [list(map(list, seq)) for seq in e3_int.g.seqs]}
+        assert int_graph.read_bytes() == json.dumps(expected_int, separators=(",", ":")).encode(), \
+            "seed/gen.c parse2 unary integer conversions differ"
     if part in ("base", "all"):
         for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
             tag = stage + "".join(flags)
@@ -607,4 +635,6 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
 if part in ("base", "all"):
     print("seed construct base: net/tbl and prune, opt, lex, pp, nativeabi byte-identical")
 if part in ("parse2", "all"):
-    print("seed construct parse2: token prelude through unary float-s graph byte-identical")
+    print("seed construct parse2: token prelude through autoscan graph byte-identical")
+if part in ("parse2-2", "all"):
+    print("seed construct parse2-2: unary control through integer conversion graph byte-identical")

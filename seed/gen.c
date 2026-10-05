@@ -3698,6 +3698,8 @@ static void parse2_unary_head(Graph *g) { parse2_unary_rows(g, "part0", 1); }
 static void parse2_unary_part4(Graph *g) { parse2_unary_rows(g, "part4", 4); }
 static void parse2_unary_float_d(Graph *g) { parse2_unary_rows(g, "convert_float", 5); }
 static void parse2_unary_float_s(Graph *g) { parse2_unary_rows(g, "convert_float", 6); }
+static void parse2_unary_int_i(Graph *g) { parse2_unary_rows(g, "convert_int", 7); }
+static void parse2_unary_int_u(Graph *g) { parse2_unary_rows(g, "convert_int", 8); }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
@@ -4124,6 +4126,35 @@ static void inspect_parse2_unary_float_s_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_unary_int_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    parse2_unary_head(&g);
+    parse2_unary_compound(&g);
+    parse2_unary_cast_void(&g);
+    parse2_unary_part4(&g);
+    parse2_unary_float_d(&g);
+    parse2_unary_float_s(&g);
+    parse2_unary_int_i(&g);
+    parse2_unary_int_u(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -4191,6 +4222,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-float-s-graph")) {
         inspect_parse2_unary_float_s_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-int-graph")) {
+        inspect_parse2_unary_int_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
