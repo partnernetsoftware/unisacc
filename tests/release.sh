@@ -114,8 +114,9 @@ skip=re.compile(r'\bskip(?:ped)?\b',re.I)
 windows_run='  skip windows (-run needs the UTM machine started)'
 windows_boot='  skip Windows self-build (run in CI: release-check winsuite; by hand: --windows win/arm64 and --windows win/x86_64)'
 windows_ci_posix='  skip winposix (run in CI: release-check winsuite)'          # 0.0.25 X7
+ccinterop_ci='  skip lnx/x86_64 cells (run in CI: release-check ccinterop-x86)'   # 0.0.27 C2
 windows_ci_fwd='  skip Windows images (run in CI: release-check winsuite)'
-outside={'run':windows_run, 'com-run':windows_run, 'nativeboot':windows_boot, 'winposix':windows_ci_posix, 'forward':windows_ci_fwd}
+outside={'ccinterop':ccinterop_ci, 'run':windows_run, 'com-run':windows_run, 'nativeboot':windows_boot, 'winposix':windows_ci_posix, 'forward':windows_ci_fwd}
 unverified=[]
 for name in jobs:
     try:log=(p/(name+'.log')).read_text(errors='replace')

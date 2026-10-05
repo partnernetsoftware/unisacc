@@ -46,11 +46,27 @@ osx() {   # name a b
 }
 for pr in $PAIRS; do
     set -- $(echo "$pr" | tr : ' ')
-    if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then osx "$1" "$2" "$3"; else skip "$1 osx/arm64 (not an arm64 Mac)"; fi
+    if [ -n "${CCI_ONLY:-}" ]; then :          # a CI job for one Linux target checks only that target
+    elif [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then osx "$1" "$2" "$3"; else skip "$1 osx/arm64 (not an arm64 Mac)"; fi
 done
 
 # lnx/* inside Lima: link with the guest's cc, oracle is the guest's all-cc build
 lnx() {   # arch vm name a b
+    # 0.0.27 C2: on a Linux host of the same architecture (release-check's ubuntu-latest) the pair
+    # links and runs natively, no VM.  CCI_ONLY=ARCH restricts the run to that Linux target.
+    if [ -n "${CCI_ONLY:-}" ] && [ "$CCI_ONLY" != "$1" ]; then return; fi
+    if [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = "$1" ] || { [ "$1" = arm64 ] && [ "$(uname -m)" = aarch64 ]; }; }; then
+        d="$tmp/lnx-$1-$3"; mkdir -p "$d"
+        if ! $B 20 "$UA" -c -b "lnx/$1" "$P/$4.c" -o "$d/a.o"; then fail "$3 lnx/$1 (compile)"; return; fi
+        cp "$P/$4.c" "$d/a.c"; cp "$P/$5.c" "$d/b.c"
+        if (cd "$d" && cc -O1 -fno-stack-protector -c b.c && cc -nostdlib -nostartfiles -static -o p a.o b.o && ./p > got && cc -o r a.c b.c && ./r > want && cmp -s got want); then pass "$3 lnx/$1 (native host)"; else fail "$3 lnx/$1 (native host)"; fi
+        return
+    fi
+    # the x86_64 cells run on a real runner in release-check (job ccinterop-x86); locally they are a
+    # named CI obligation instead of a skip, and no x86 emulator has to be started for a release
+    if [ "$1" = x86_64 ] && [ "${CCI_X86_VIA_CI:-1}" = 1 ] && [ "$(limactl list --format '{{.Status}}' "$2" 2>/dev/null)" != Running ]; then
+        x86ci=1; return
+    fi
     if ! command -v limactl > /dev/null 2>&1; then skip "$3 lnx/$1 (no limactl)"; return; fi
     st=$($B 15 limactl list --format '{{.Status}}' "$2" 2>/dev/null)
     if [ "$st" != Running ]; then skip "$3 lnx/$1 (Lima VM $2 not running)"; return; fi
@@ -70,6 +86,7 @@ for pr in $PAIRS; do
     lnx x86_64 "${CCI_VM_X86:-minicon-lnx-x86_64}" "$1" "$2" "$3"
 done
 
+[ "${x86ci:-0}" = 1 ] && echo "  skip lnx/x86_64 cells (run in CI: release-check ccinterop-x86)"
 echo "ccinterop  ok $ok   wrong $wrong   skipped $skipped"
 [ $wrong -eq 0 ] || exit 1
 [ "${STRICT:-0}" = 1 ] && [ $skipped -ne 0 ] && exit 1
