@@ -1,4 +1,4 @@
-/* 0.0.28 E18: `(T)(x)` after a binary `*` whose left operand follows any operator stays a cast */
+/* 0.0.28 E18/E19 (postfix ++/--, an index): `(T)(x)` after a binary `*` whose left operand follows any operator stays a cast */
 #include <stdio.h>
 typedef long long i64;
 struct G { int a; int b; };
@@ -14,7 +14,8 @@ int main(void) {
     v <<= x * (i64)(g).a; w >>= x * (i64)(g).a - 4;
     i64 r1 = v << x * (i64)(g).a, r2 = w / x * (i64)(g).b;
     i64 r3 = (v ? x * (i64)(g).b : 0), r4 = (v, x * (i64)(g).a);
+    i64 r5 = x++ * (i64)(g).a, r6 = x-- * (i64)(g).b, r7 = "ab"[1] * (i64)(g).a;
     v /= x * (i64)(g).a; v %= x * (i64)(g).b; v &= x * (i64)(g).b; v |= x * (i64)(g).a; v ^= x * (i64)(g).a;
-    printf("%lld %lld %lld %lld %lld %lld %d %d %s%s\n", v, w, r1, r2, r3, r4, pick(1), pick(0), names[0], names[1]);
+    printf("%lld %lld %lld %lld %lld %lld %lld %lld %lld %d %d %s%s\n", v, w, r1, r2, r3, r4, r5, r6, r7, pick(1), pick(0), names[0], names[1]);
     return 0;
 }

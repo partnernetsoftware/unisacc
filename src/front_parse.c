@@ -5968,7 +5968,12 @@ int parenfold(void) {
                that itself follows an operator or `->`/`.` (so `T *(f)(void)` still folds). */
             if (k && prev == tidx("*", 1) && j > 1) {
                 int pp; int p3; pp = tkind[j - 2]; p3 = j > 2 ? tkind[j - 3] : 0 - 1;
-                if (pp == T_NUM || pp == T_STR || pp == rp || pp == tidx("]", 1)) k = 0;
+                /* the token before the `*` decides (0.0.28 E19, a positive rule): a type word, another `*`,
+                   `(` `,` `{` `}` `;` or the start leave the `*` a declarator (or a unary `*`, where the fold
+                   changes nothing); a name is handled below; anything else -- a number, string, `)`, `]`,
+                   a postfix `++`/`--` -- ends an operand, so the `*` is binary and the parentheses stay */
+                if (!(pp == T_TYPE || pp == tidx("*", 1) || pp == lp || pp == tidx(",", 1) || pp == tidx("{", 1)
+                      || pp == tidx("}", 1) || pp == tidx(";", 1) || pp == T_ID)) k = 0;
                 /* a name before the `*`: only a declaration context folds -- a type word, a storage or
                    qualifier keyword, `struct`/`union`/`enum`, `;` `{` `}` or the start; after anything
                    else (an operator, `(`, `,`, `return`, `case`, ...) the name is an operand (0.0.28 E18) */
