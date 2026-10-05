@@ -3240,7 +3240,8 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "operator-prefix") && strcmp(section, "operator-float-select") &&
         strcmp(section, "operator-float-body") && strcmp(section, "operator-float-reject") &&
         strcmp(section, "operator-pointer-add") && strcmp(section, "operator-pointer-sub") &&
-        strcmp(section, "operator-pointer-other") && strcmp(section, "operator-integer"))
+        strcmp(section, "operator-pointer-other") && strcmp(section, "operator-integer") &&
+        strcmp(section, "ordinary-staticauto") && strcmp(section, "startup-guard"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3686,6 +3687,13 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
         if (level > 4) parse2_gen2_control_ex(g, "operator-integer",
             parse2_gen2_operator_extra(integercall, ctx), seq);
     }
+}
+static void parse2_gen2_startup_guard(Graph *g) {
+    Value *facts = load_fact("k2-gen2"), *span = value_get(facts, "POSSPAN");
+    Value *extra = value_new(JOBJ);
+    if (!span || span->kind != JINT) die("gen2 startup guard span missing");
+    value_put(extra, "POSSPAN", span);
+    parse2_gen2_control_ex(g, "startup-guard", extra, NULL);
 }
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
@@ -5712,6 +5720,25 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-staticauto-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "ordinary-staticauto");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-guard-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "ordinary-staticauto");
+        parse2_gen2_startup_guard(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
