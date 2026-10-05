@@ -49,7 +49,7 @@ STAGE = set("""
 strconvert-host libneed apps-structure seed-construct seed-matrix-shared
 seed-matrix-object exec-bridge-linux warn diag target-package
 """.split())
-STAGE_PREFIX = ("exec-", "lib-", "rowcov-", "seed-matrix-features-",
+STAGE_PREFIX = ("exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
                 "warn-", "diag-", "referee-", "shared-e2-")
 
 

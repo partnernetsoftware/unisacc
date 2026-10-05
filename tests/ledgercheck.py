@@ -4,7 +4,7 @@
 0.0.25 sealed its candidate at 21:49 and recorded T2's second deferral at 21:53.  Since then precheck
 runs this on plans/v<next version>.md: every row of the item tables must carry a status marker
 〔...〕 whose text says 已完成, 顺延 or 跨版进行 (or 砍掉).  A row without one fails.
-  tests/ledgercheck.py [--final] [PLAN]   default: plans/v0.0.<version.h + 1>.md; --final (precheck) rejects 本版做/进行中
+  tests/ledgercheck.py [--final] [PLAN]   default: plans/v0.0.<version.h>.md until archived, then <version.h + 1>; --final (precheck) rejects 本版做/进行中
 """
 import pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,9 +13,11 @@ FINAL = r'已完成|顺延|跨版进行|砍掉'   # --final (precheck): '本版�
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     if args: plan = pathlib.Path(args[0])
-    else:   # the plan being released: one past src/version.h (precheck runs before the version commit)
-        ver = re.search(r'"0\.0\.(\d+)"', (ROOT / 'src/version.h').read_text()).group(1)
-        plan = ROOT / 'plans' / ('v0.0.%d.md' % (int(ver) + 1))
+    else:   # the plan being released: src/version.h's own plan while it is not yet archived
+        # (between the version commit and publishing), otherwise the next one (0.0.27 queue red)
+        ver = int(re.search(r'"0\.0\.(\d+)"', (ROOT / 'src/version.h').read_text()).group(1))
+        plan = ROOT / 'plans' / ('v0.0.%d.md' % ver)
+        if not plan.is_file(): plan = ROOT / 'plans' / ('v0.0.%d.md' % (ver + 1))
     try: text = plan.read_text()
     except FileNotFoundError:
         print('ledgercheck: no %s (nothing to settle)' % plan.name); return 0
