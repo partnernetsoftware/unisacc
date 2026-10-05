@@ -3244,7 +3244,8 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "ordinary-staticauto") && strcmp(section, "startup-guard") &&
         strcmp(section, "parameter-declarators") && strcmp(section, "sizeof0") &&
         strcmp(section, "sizeof1") && strcmp(section, "sizeof2") &&
-        strcmp(section, "sizeof3") && strcmp(section, "address"))
+        strcmp(section, "sizeof3") && strcmp(section, "address") &&
+        strcmp(section, "if"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
