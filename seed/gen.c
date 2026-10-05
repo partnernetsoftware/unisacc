@@ -3419,6 +3419,22 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
 static void parse2_gen2_return(Graph *g, const char *section) {
     parse2_gen2_return_ex(g, section, NULL);
 }
+static Value *parse2_gen2_return_integers(Graph *g) {
+    Value *ints = value_get(load_fact("k2-gen2"), "retint");
+    Value *current = value_string("QT.scalar");
+    if (!ints || ints->kind != JARR || ints->n != 8) die("return integer facts changed");
+    for (size_t i = 0; i < ints->n; i++) {
+        Value *extra = value_new(JOBJ), *code = value_get(ints->items[i].value, "code");
+        Value *bindings;
+        if (!code || code->kind != JINT) die("return integer code missing");
+        value_put(extra, "integer_current", current);
+        value_put(extra, "integer_code", code);
+        bindings = parse2_gen2_return_ex(g, "integer", extra);
+        current = value_get(bindings, "f92");
+        if (!current || current->kind != JSTR) die("return integer continuation missing");
+    }
+    return current;
+}
 static void parse2_gen2_return_float(Graph *g, Value *row) {
     Value *extra = value_new(JOBJ), *label = value_get(row, "label");
     Value *convert = value_get(row, "cv"), *base = value_get(row, "base");
@@ -6134,6 +6150,15 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-ints-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_return_integers(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
