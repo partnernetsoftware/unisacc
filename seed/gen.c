@@ -3304,6 +3304,86 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
 static void parse2_gen2_control(Graph *g, const char *section) {
     parse2_gen2_control_ex(g, section, NULL, NULL);
 }
+static void parse2_gen2_return(Graph *g, const char *section) {
+    FILE *actions = fopen("exec/parse2/gen2-actions-manifest.tsv", "rb");
+    FILE *manifest = fopen("exec/parse2/return-manifest.tsv", "rb");
+    FILE *fresh = fopen("exec/parse2/return-fresh.tsv", "rb");
+    Value *facts = load_fact("k2-gen2"), *recipes = NULL, *sequences = value_new(JOBJ);
+    Value *bindings = value_new(JOBJ), *classes = value_get(facts, "retclasses");
+    char *s; int action_row = 0, return_row = 0, header = 0;
+    if (!actions || !manifest || !fresh || !classes || strcmp(section, "ret0"))
+        die("return constructor input missing");
+    while ((s = line(actions))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9); if (n != 9 || strcmp(f[0], "let")) die("gen2 action declaration changed");
+        if (action_row == 0) {
+            Value *constants = value_get(facts, "scopeconst");
+            if (!constants || constants->kind != JOBJ) die("gen2 action constants missing");
+            for (size_t i = 0; i < constants->n; i++)
+                value_put(facts, constants->items[i].key, constants->items[i].value);
+            recipes = mapseq_construct(value_json(f[8], "gen2 action recipes"), facts);
+        }
+        else if (action_row == 1) {
+            Value *opts = value_json(f[8], "gen2 named actions");
+            Value *named = value_path(opts, "let.action_retseqs");
+            if (named->kind != JOBJ) die("gen2 return actions changed");
+            for (size_t i = 0; i < named->n; i++) {
+                const char *ref = value_text(named->items[i].value);
+                Value *seq;
+                if (strncmp(ref, "@ref:", 5)) die("gen2 return action reference changed");
+                seq = value_get(recipes, ref + 5);
+                if (!seq) die("gen2 return action recipe missing");
+                value_put(sequences, named->items[i].key, seq);
+            }
+        }
+        action_row++; free(s);
+        if (action_row == 2) break;
+    }
+    if (fclose(actions) || action_row != 2) die("gen2 return action declarations missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9); if (n != 9) die("return manifest column count");
+        if (return_row == 0 && (!strcmp(f[0], "rows") && !strcmp(f[1], "return") &&
+                                !strcmp(f[2], "@str:{ret_section}"))) {
+            Value *opts = value_json(f[8], "return options");
+            Value *bindmap = value_get(opts, "bindmap");
+            if (!bindmap || bindmap->kind != JARR || bindmap->n != 2 ||
+                strcmp(value_text(bindmap->items[0].value), "retconst") ||
+                strcmp(value_text(bindmap->items[1].value), "extra"))
+                die("return binding declaration changed");
+            return_row++;
+        }
+        free(s); if (return_row) break;
+    }
+    if (fclose(manifest) || return_row != 1) die("return row declaration missing");
+    {
+        Value *constant = value_get(facts, "retconst");
+        if (!constant || constant->kind != JOBJ) die("return constants missing");
+        for (size_t i = 0; i < constant->n; i++)
+            value_put(bindings, constant->items[i].key, constant->items[i].value);
+    }
+    while ((s = line(fresh))) {
+        char *f[4]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 4); if (n != 4) die("return fresh column count");
+        if (!header++) {
+            if (strcmp(f[0], "section") || strcmp(f[1], "owner") ||
+                strcmp(f[2], "kind") || strcmp(f[3], "key"))
+                die("return fresh header changed");
+        } else if (!strcmp(f[0], section)) {
+            char *label = fresh_label(f[1], f[2]);
+            value_put(bindings, f[3], value_string(label)); free(label);
+        }
+        free(s);
+    }
+    if (ferror(fresh) || fclose(fresh) || !header) die("return fresh rows missing");
+    install_section_classes(g, "exec/parse2/return-byte.tsv", section, 'b',
+                            bindings, sequences, classes);
+    install_section_classes(g, "exec/parse2/return-result.tsv", section, 'r',
+                            bindings, sequences, classes);
+}
 static void parse2_gen2_type_words(Graph *g) {
     Value *facts = load_fact("k2-gen2"), *words = value_get(facts, "typewords");
     if (!words || words->kind != JARR || words->n != 8)
@@ -5973,6 +6053,15 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return0-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_return(&g, "ret0");
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);

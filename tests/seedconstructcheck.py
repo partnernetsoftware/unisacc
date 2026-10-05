@@ -19,10 +19,10 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25", "parse2-26", "parse2-27", "parse2-28"):
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7", "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16", "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25", "parse2-26", "parse2-27", "parse2-28", "parse2-29"):
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12|parse2-13|parse2-14|parse2-15|parse2-16|parse2-17|parse2-18|parse2-19|parse2-20|parse2-21|parse2-22|parse2-23|parse2-24|parse2-25|parse2-26|parse2-27|parse2-28")
+    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4|parse2-5|parse2-6|parse2-7|parse2-8|parse2-9|parse2-10|parse2-11|parse2-12|parse2-13|parse2-14|parse2-15|parse2-16|parse2-17|parse2-18|parse2-19|parse2-20|parse2-21|parse2-22|parse2-23|parse2-24|parse2-25|parse2-26|parse2-27|parse2-28|parse2-29")
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -1197,6 +1197,34 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c address control differs at {first}: "
                                  f"C={actual[first:first+100]!r} "
                                  f"Python={expected[first:first+100]!r}")
+    if part == "parse2-29":
+        actual_path = work / "parse2-gen2-return0.c.json"
+        run(str(cgen), "inspect-parse2-gen2-return0-graph", str(actual_path))
+        expected_graph = parse2base.executor()
+        action_env = assemble.Run(expected_graph, expected_graph.P, {}, {}).run(
+            ROOT / "exec/parse2/gen2-actions-manifest.tsv")
+        runner = assemble.Run(expected_graph, expected_graph.P,
+                              {"warnings": False}, dict(action_env, seg_ret0=1))
+        runner.root = ROOT / "exec/parse2"
+        return_rows = [row for depth, row in runner.rows(ROOT / "exec/parse2/gen2-manifest.tsv")
+                       if depth == 0 and row[0] == "call" and row[1] == "return"
+                       and row[3] == "fact:seg_ret0"]
+        assert len(return_rows) == 2, "return segment declaration changed"
+        runner.one(return_rows[0], [], 0, {})
+        expected_graph.g.finish()
+        expected = json.dumps({
+            "start": "START",
+            "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                       for state, (mode, row) in expected_graph.g.st.items()},
+            "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
+        }, separators=(",", ":")).encode()
+        actual = actual_path.read_bytes()
+        if actual != expected:
+            first = next((i for i, (a, b) in enumerate(zip(actual, expected))
+                          if a != b), min(len(actual), len(expected)))
+            raise AssertionError(f"seed/gen.c return0 differs at {first}: "
+                                 f"C={actual[first:first+100]!r} "
+                                 f"Python={expected[first:first+100]!r}")
     if part == "parse2-28":
         actual_path = work / "parse2-gen2-if-loops.c.json"
         run(str(cgen), "inspect-parse2-gen2-if-loops-graph", str(actual_path))
@@ -1636,3 +1664,6 @@ if part == "parse2-27":
     print("seed construct parse2-27: loops control graph byte-identical")
 if part == "parse2-28":
     print("seed construct parse2-28: if-loops family graph byte-identical")
+
+if part == "parse2-29":
+    print("seed construct parse2-29: return0 graph byte-identical")
