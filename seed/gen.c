@@ -768,7 +768,8 @@ static void tuple_walk(char *spec, Value *facts, Value *scope, TVisit visit, voi
     if (colon) { *colon = ':'; *dot = '.'; }
     if (comma) *comma = ',';
 }
-static char *template_subst(const char *text, Value *scope) {
+static char *template_subst_ctx(const char *text, Value *scope, Value *labels,
+                                Value *rowlabels, Value *prev, const char *fresh_owner) {
     Buffer out = {0}; size_t i;
     for (i = 0; text[i]; i++) {
         if (text[i] == '{') {
@@ -776,8 +777,23 @@ static char *template_subst(const char *text, Value *scope) {
             Value *value; const char *piece;
             if (!end) die("unterminated template variable");
             path = copy_n(text + i + 1, (size_t)(end - text - i - 1));
-            dot = strchr(path, '.'); if (dot) *dot++ = 0;
-            value = value_get(scope, path); if (dot) value = value_get(value, dot);
+            if (!strncmp(path, "fresh:", 6) || !strncmp(path, "fresh@row:", 10)) {
+                int row = !strncmp(path, "fresh@row:", 10);
+                char *name = path + (row ? 10 : 6), *kind = strchr(name, ':');
+                Value *map = row ? rowlabels : labels;
+                if (!fresh_owner || !kind || !kind[1]) die("invalid template fresh label");
+                *kind++ = 0;
+                value = value_get(map, name);
+                if (!value) {
+                    char *label = fresh_label(fresh_owner, kind);
+                    value = value_string(label); value_put(map, name, value); free(label);
+                }
+            } else if (!strncmp(path, "prev:", 5)) {
+                value = value_get(prev, path + 5);
+            } else {
+                dot = strchr(path, '.'); if (dot) *dot++ = 0;
+                value = value_get(scope, path); if (dot) value = value_get(value, dot);
+            }
             piece = value_scalar_text(value, number);
             if (!piece) die("unbound template variable");
             buf_add(&out, piece, strlen(piece)); free(path); i = (size_t)(end - text);
@@ -785,18 +801,27 @@ static char *template_subst(const char *text, Value *scope) {
     }
     return out.s ? out.s : copy("");
 }
-typedef struct { TRows *rows; Value *facts; Buffer *out; size_t first, last; int depth; } TGroup;
+static char *template_subst(const char *text, Value *scope) {
+    return template_subst_ctx(text, scope, NULL, NULL, NULL, NULL);
+}
+typedef struct { TRows *rows; Value *facts; Buffer *out; size_t first, last; int depth;
+                 Value *labels, *prev; const char *fresh_owner; } TGroup;
 static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out,
-                            size_t first, size_t last, int depth);
+                            size_t first, size_t last, int depth, Value *labels,
+                            Value *prev, const char *fresh_owner);
 static void template_group_visit(Value *scope, void *arg) {
     TGroup *g = arg; size_t i = g->first;
     while (i < g->last) {
         TRow *r = &g->rows->row[i];
         if (r->depth == g->depth) {
-            char *a, *b, *c, *d;
+            char *a, *b, *c, *d; Value *rowlabels = value_new(JOBJ);
             if (strcmp(r->kind, "rule") && strcmp(r->kind, "rule:r")) die("template graph edit not yet supported");
-            a = template_subst(r->a, scope); b = template_subst(r->b, scope);
-            c = template_subst(r->c, scope); d = template_subst(r->d, scope);
+            a = template_subst_ctx(r->a, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
+            b = template_subst_ctx(r->b, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
+            c = template_subst_ctx(r->c, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
+            d = template_subst_ctx(r->d, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
+            for (size_t j = 0; j < rowlabels->n; j++)
+                value_put(g->prev, rowlabels->items[j].key, rowlabels->items[j].value);
             buf_add(g->out, a, strlen(a)); buf_char(g->out, '\t');
             buf_add(g->out, b, strlen(b)); buf_char(g->out, '\t');
             buf_add(g->out, c, strlen(c)); buf_char(g->out, '\t');
@@ -806,34 +831,40 @@ static void template_group_visit(Value *scope, void *arg) {
             size_t end = i + 1;
             if (r->depth != g->depth + 1) die("template loop depth jump");
             while (end < g->last && g->rows->row[end].depth > g->depth) end++;
-            template_groups(g->rows, g->facts, scope, g->out, i, end, g->depth + 1);
+            template_groups(g->rows, g->facts, scope, g->out, i, end, g->depth + 1,
+                            g->labels, g->prev, g->fresh_owner);
             i = end;
         }
     }
 }
 static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out,
-                            size_t first, size_t last, int depth) {
+                            size_t first, size_t last, int depth, Value *labels,
+                            Value *prev, const char *fresh_owner) {
     size_t i = first;
     while (i < last) {
         TRow *r = &rows->row[i]; size_t end = i + 1; TGroup group;
         if (r->depth != depth || !strcmp(r->over, "=")) die("invalid template loop");
         while (end < last && (rows->row[end].depth > depth ||
                (rows->row[end].depth == depth && !strcmp(rows->row[end].over, "=")))) end++;
-        group = (TGroup){rows, facts, out, i, end, depth};
+        group = (TGroup){rows, facts, out, i, end, depth, labels, prev, fresh_owner};
         tuple_walk(r->over, facts, scope, template_group_visit, &group);
         i = end;
     }
 }
 static void template_block_visit(Value *scope, void *arg) {
     TGroup *g = arg;
-    template_groups(g->rows, g->facts, scope, g->out, g->first, g->last, 0);
+    Value *labels = value_new(JOBJ), *prev = value_new(JOBJ);
+    template_groups(g->rows, g->facts, scope, g->out, g->first, g->last, 0,
+                    labels, prev, g->fresh_owner);
 }
-static void template_rows(TRows *rows, Value *facts, Buffer *out, size_t first, size_t last) {
-    TGroup group = {rows, facts, out, first, last, 0};
+static void template_rows(TRows *rows, Value *facts, Buffer *out, size_t first, size_t last,
+                          const char *fresh_owner) {
+    TGroup group = {rows, facts, out, first, last, 0, NULL, NULL, fresh_owner};
     Value *scope = value_new(JOBJ);
     tuple_walk(rows->row[first].each, facts, scope, template_block_visit, &group);
 }
-static Buffer expand_template_file(const char *path, Value *facts, const char *section) {
+static Buffer expand_template_file_fresh(const char *path, Value *facts,
+                                         const char *section, const char *fresh_owner) {
     FILE *f; char *s; TRows rows = {0}; Buffer expanded = {0}; size_t i;
     f = fopen(path, "rb"); if (!f) die("cannot open template");
     while ((s = line(f))) {
@@ -855,8 +886,12 @@ static Buffer expand_template_file(const char *path, Value *facts, const char *s
             if (strcmp(rows.row[end].each, rows.row[i].each)) die("template block has two each lists");
             end++;
         }
-        template_rows(&rows, facts, &expanded, i, end); i = end;
+        template_rows(&rows, facts, &expanded, i, end, fresh_owner); i = end;
     }
+    return expanded;
+}
+static Buffer expand_template_file(const char *path, Value *facts, const char *section) {
+    Buffer expanded = expand_template_file_fresh(path, facts, section, NULL);
     return expanded;
 }
 static Buffer expand_template_section(const char *stage, const char *section) {
@@ -2673,25 +2708,53 @@ static void inspect_nativeabi_modelinput(const char *outpath) {
     output_graph(out, &g, "START", NULL);
     if (fclose(out)) die("output close failed");
 }
-static void nativeabi_rows(Graph *g, const char *stem, const char *section,
-                           const char *factexpr, const char *bind, const char *opttext,
-                           Value *env) {
+static Value *nativeabi_rows(Graph *g, const char *stem, const char *section,
+                             const char *factexpr, const char *bind, const char *opttext,
+                             Value *env, Value *prior) {
     char path[1024]; Value *facts = load_facts_expr(factexpr);
     Value *opts = !strcmp(opttext, "-") ? value_new(JOBJ) : value_json(opttext, "nativeabi row options");
     Value *bindings, *seqs = value_new(JOBJ), *bindmap = value_get(opts, "bindmap");
+    Value *classes = NULL, *classmap = value_get(opts, "classmap"), *seqenv = value_get(opts, "seqenv");
     for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
-    bindings = value_get(opts, "freshrows") && value_get(opts, "freshrows")->kind == JSTR
-        ? fresh_bindings_file(opts, "exec") : fresh_bindings(opts, facts);
+    bindings = value_new(JOBJ);
+    if (prior) for (size_t i = 0; i < prior->n; i++)
+        value_put(bindings, prior->items[i].key, prior->items[i].value);
+    {
+        Value *fresh = value_get(opts, "freshrows") && value_get(opts, "freshrows")->kind == JSTR
+            ? fresh_bindings_file(opts, "exec") : fresh_bindings(opts, facts);
+        for (size_t i = 0; i < fresh->n; i++)
+            value_put(bindings, fresh->items[i].key, fresh->items[i].value);
+    }
     if (bindmap) {
         Value *map = value_path(facts, value_text(bindmap));
         if (map->kind != JOBJ) die("nativeabi bindmap is not an object");
         for (size_t i = 0; i < map->n; i++) value_put(bindings, map->items[i].key, map->items[i].value);
     }
     direct_bindings_ex(bindings, seqs, bind, facts);
+    if (seqenv) {
+        Value *names = value_path(facts, value_text(seqenv));
+        if (names->kind != JARR) die("nativeabi seqenv is not a list");
+        for (size_t i = 0; i < names->n; i++) {
+            const char *name = value_text(names->items[i].value);
+            Value *sequence = value_get(env, name);
+            if (!sequence) die("nativeabi sequence absent from env");
+            value_put(seqs, name, sequence);
+        }
+    }
+    if (classmap) {
+        if (classmap->kind != JOBJ) die("nativeabi classmap is not an object");
+        classes = value_new(JOBJ);
+        for (size_t i = 0; i < classmap->n; i++) {
+            Value *v = value_path(facts, value_text(classmap->items[i].value));
+            if (v->kind != JARR) { Value *one = value_new(JARR); value_put(one, NULL, v); v = one; }
+            value_put(classes, classmap->items[i].key, v);
+        }
+    }
     if (snprintf(path, sizeof(path), "exec/%s-byte.tsv", stem) >= (int)sizeof(path)) die("nativeabi rule path too long");
-    install_section(g, path, section, 'b', bindings, seqs);
+    install_section_classes(g, path, section, 'b', bindings, seqs, classes);
     if (snprintf(path, sizeof(path), "exec/%s-result.tsv", stem) >= (int)sizeof(path)) die("nativeabi rule path too long");
-    install_section(g, path, section, 'r', bindings, seqs);
+    install_section_classes(g, path, section, 'r', bindings, seqs, classes);
+    return bindings;
 }
 static void nativeabi_calls(Graph *g) {
     Value *env = value_new(JOBJ); FILE *f; char *s;
@@ -2701,7 +2764,7 @@ static void nativeabi_calls(Graph *g) {
         char *col[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, col, 9); if (n != 9) die("modelsignature row count");
-        if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env);
+        if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env, NULL);
         else if (!strcmp(col[0], "call") && !strcmp(col[1], "modelinput")) nativeabi_modelinput_call(g);
         else if (strcmp(col[0], "let")) die("unsupported modelsignature declaration");
         free(s);
@@ -2712,7 +2775,7 @@ static void nativeabi_calls(Graph *g) {
         char *col[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, col, 9); if (n != 9) die("modelgraphequality row count");
-        if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env);
+        if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env, NULL);
         else if (strcmp(col[0], "let") && strcmp(col[0], "call")) die("unsupported modelgraphequality declaration");
         free(s);
     }
@@ -2725,9 +2788,11 @@ static void inspect_nativeabi_calls(const char *outpath) {
     output_graph(out, &g, "START", NULL);
     if (fclose(out)) die("output close failed");
 }
-static void nativeabi_reject(Graph *g) {
+static void nativeabi_template_at(Graph *g, const char *path, const char *section,
+                                  const char *fresh_owner) {
     Value *facts = load_fact("nativeabi"), *seqs = value_new(JOBJ);
-    Buffer expanded = expand_template_file("exec/nativeabi/gen-template.tsv", facts, "reject");
+    Buffer expanded = expand_template_file_fresh(path, facts,
+                                                 section, fresh_owner);
     FILE *f = tmpfile();
     if (!f) die("cannot create template stream");
     if (expanded.n && fwrite(expanded.s, 1, expanded.n, f) != expanded.n) die("template write failed");
@@ -2736,17 +2801,51 @@ static void nativeabi_reject(Graph *g) {
     if (fclose(f)) die("template close failed");
     free(expanded.s);
 }
-static void inspect_nativeabi_head(const char *outpath) {
-    Graph g = {0}; FILE *out; Value *env = value_new(JOBJ);
-    nativeabi_calls(&g);
-    nativeabi_reject(&g);
-    nativeabi_rows(&g, "nativeabi/gen", "head",
-                   "nativeabi+top-modelgraphequality-banks+nativeabi-gen-regions",
-                   "FIELDS=FIELDS,EDGES=EDGES,FRAME=FRAME,SIGWIRE=SIGWIRE,SIGMARK=SIGMARK",
-                   "{\"accumulate\":\"nc\",\"freshrows\":[{\"over\":\"genfresh\",\"where\":{\"section\":\"head\"},\"key\":\"{name}\",\"owner\":\"{prefix}.fresh\",\"kind\":\"{kind}\"}]}", env);
+static void inspect_nativeabi_head(const char *outpath, int phase) {
+    Graph g = {0}; FILE *manifest, *out; char *linebuf;
+    Value *env = value_new(JOBJ), *nc = NULL, *ol = NULL;
+    int seen = 0, limit = phase + 4;
+    manifest = fopen("exec/nativeabi/gen-manifest.tsv", "rb");
+    if (!manifest) die("cannot open nativeabi manifest");
+    while ((linebuf = line(manifest))) {
+        char *col[9], path[1024]; int n;
+        if (!*linebuf || *linebuf == '#') { free(linebuf); continue; }
+        if (seen == limit) { free(linebuf); break; }
+        n = fields_tab(linebuf, col, 9);
+        if (n != 9) die("nativeabi manifest column count");
+        seen++;
+        if (!strcmp(col[0], "let")) {
+            Value *opts = value_json(col[8], "nativeabi let options");
+            Value *facts = load_facts_expr(col[4]), *seqs = mapseq_construct(opts, facts);
+            for (size_t i = 0; i < seqs->n; i++)
+                value_put(env, seqs->items[i].key, seqs->items[i].value);
+        } else if (!strcmp(col[0], "call")) {
+            if (strcmp(col[1], "../modelgraphequality"))
+                die("unsupported nativeabi call");
+            nativeabi_calls(&g);
+        } else if (!strcmp(col[0], "rows")) {
+            Value *opts = value_json(col[8], "nativeabi row options");
+            Value *acc = value_get(opts, "accumulate"), **prior;
+            if (!acc || acc->kind != JSTR) die("nativeabi row lacks accumulator");
+            if (!strcmp(acc->s, "nc")) prior = &nc;
+            else if (!strcmp(acc->s, "ol")) prior = &ol;
+            else die("unknown nativeabi accumulator");
+            if (snprintf(path, sizeof(path), "nativeabi/%s", col[1]) >= (int)sizeof(path))
+                die("nativeabi row path too long");
+            *prior = nativeabi_rows(&g, path, col[2], col[4], col[7], col[8], env, *prior);
+        } else if (!strcmp(col[0], "template")) {
+            if (strncmp(col[5], "P:", 2)) die("unsupported nativeabi fresh scope");
+            if (snprintf(path, sizeof(path), "exec/nativeabi/%s-template.tsv", col[1]) >= (int)sizeof(path))
+                die("nativeabi template path too long");
+            nativeabi_template_at(&g, path, col[2], col[5] + 2);
+        } else die("unsupported nativeabi manifest operation");
+        free(linebuf);
+    }
+    if (ferror(manifest) || fclose(manifest) || seen != limit)
+        die("nativeabi manifest incomplete");
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL);
+    output_graph(out, &g, phase >= 8 ? "NC.START" : "START", NULL);
     if (fclose(out)) die("output close failed");
 }
 static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names) {
@@ -2782,7 +2881,31 @@ int main(int argc, char **argv) {
         inspect_nativeabi_calls(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-head")) {
-        inspect_nativeabi_head(argv[2]); return 0;
+        inspect_nativeabi_head(argv[2], 0); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-trie")) {
+        inspect_nativeabi_head(argv[2], 1); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-mid")) {
+        inspect_nativeabi_head(argv[2], 2); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-union16")) {
+        inspect_nativeabi_head(argv[2], 3); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-tail")) {
+        inspect_nativeabi_head(argv[2], 4); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-ordered-main")) {
+        inspect_nativeabi_head(argv[2], 5); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-ordered-header")) {
+        inspect_nativeabi_head(argv[2], 6); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-ordered-recipe")) {
+        inspect_nativeabi_head(argv[2], 7); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "nativeabi")) {
+        inspect_nativeabi_head(argv[2], 8); return 0;
     }
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
         !strcmp(argv[1], "inspect-pp-through-autoinc")) {

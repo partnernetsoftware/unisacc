@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     # 0.0.25 B4: the manifest -> delta step in C, one stage at a time (seed/gen.c); prune first
     cgen = work / "seed-gen"
     run("sh", str(ROOT / "unisacc.com"), "seed/gen.c", "-o", str(cgen))
-    for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ())):
+    for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
         tag = stage + "".join(flags)
         ref = graph if stage == "prune" else work / (tag + ".py.json")
         if stage != "prune": run("python3", "exec/build/gen.py", stage, str(ref), *flags, timeout=50)
@@ -93,4 +93,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed and pp deltas byte-identical; nativeabi call graph/head byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head byte-identical")
