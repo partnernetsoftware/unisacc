@@ -2795,6 +2795,58 @@ static void manifest(Graph *g, const char *dir) {
     if (ferror(f) || fclose(f)) die("manifest read failed");
     if (rows != 1 || labels != 1) die("incomplete prune manifest");
 }
+/* Preserve the source order and nesting of a nine-column DSL manifest.
+   end is the first row after this row's body, so the interpreter can skip a
+   false foreach without scanning unrelated descendants. */
+typedef struct { char *cell[9]; size_t end; unsigned depth; } ManifestRow;
+typedef struct { ManifestRow *row; size_t n, cap; } ManifestRows;
+static ManifestRows manifest_rows(const char *path) {
+    ManifestRows rows = {0}; FILE *f = fopen(path, "rb"); char *s;
+    size_t stack[128], sp = 0;
+    if (!f) die("cannot open manifest");
+    while ((s = line(f))) {
+        ManifestRow *r; char *p; int col = 0, extra = 0;
+        if (!*s || *s == '#') { free(s); continue; }
+        if (rows.n == rows.cap) {
+            rows.cap = rows.cap ? rows.cap * 2 : 64;
+            rows.row = grow(rows.row, rows.cap, sizeof(*rows.row));
+        }
+        r = &rows.row[rows.n]; memset(r, 0, sizeof(*r));
+        p = s; while (*p == '.') { r->depth++; p++; }
+        if (r->depth >= 128 || (rows.n && r->depth > rows.row[rows.n - 1].depth + 1))
+            die("invalid manifest nesting");
+        while (sp && rows.row[stack[sp - 1]].depth >= r->depth)
+            rows.row[stack[--sp]].end = rows.n;
+        while (col < 9) {
+            char *tab = strchr(p, '\t');
+            r->cell[col++] = copy_n(p, tab ? (size_t)(tab - p) : strlen(p));
+            if (!tab) break;
+            if (col == 9) { extra = 1; break; }
+            p = tab + 1;
+        }
+        if (extra) die("manifest column count");
+        while (col < 9) r->cell[col++] = copy("-");
+        stack[sp++] = rows.n++;
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("manifest read failed");
+    while (sp) rows.row[stack[--sp]].end = rows.n;
+    return rows;
+}
+static void inspect_manifest_rows(const char *path, const char *outpath) {
+    ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
+    FILE *out; size_t i;
+    for (i = 0; i < rows.n; i++) {
+        Value *row = value_new(JARR), *cells = value_new(JARR);
+        Value *depth = value_new(JINT), *end = value_new(JINT);
+        depth->number = rows.row[i].depth; end->number = (long long)rows.row[i].end;
+        value_put(row, NULL, depth); value_put(row, NULL, end);
+        for (int c = 0; c < 9; c++) value_put(cells, NULL, value_string(rows.row[i].cell[c]));
+        value_put(row, NULL, cells); value_put(all, NULL, row);
+    }
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    value_write(out, all); if (fclose(out)) die("output close failed");
+}
 /* First nested nativeabi call: modelsignature -> modelinput.  This command
    exposes a small graph slice while the full nativeabi manifest interpreter
    is being assembled; it reads the same call row and result table as Python. */
@@ -5959,6 +6011,9 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 4 && !strcmp(argv[1], "inspect-manifest-rows")) {
+        inspect_manifest_rows(argv[2], argv[3]); return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "dimensions");
