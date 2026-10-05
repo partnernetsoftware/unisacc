@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 LOCATION_BOUND = ('com-comboot-',)
 # A job that consumes another's recorded state starts only after it passed (0.0.21 and 0.0.22:
 # the longest-first pick ran stage2 before seed -- "stage 2 recorded before stage 1").
-AFTER = {'rowcov-lower-union': 'rowcov-lower-8', 'rowcov-enc-union': 'rowcov-enc-8',   # 0.0.28 E22: reuse the shards
+AFTER = {'rowcov-lower-union': 'rowcov-lower-8', 'rowcov-parse2-union': 'rowcov-parse2-16', 'rowcov-enc-union': 'rowcov-enc-8',   # 0.0.28 E22: reuse the shards
          'com-comboot-stage2': 'com-comboot-seed', 'com-comboot-stage3': 'com-comboot-stage2',
          'com-comboot-fixedpoint': 'com-comboot-stage3'}
 
