@@ -209,3 +209,14 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 1. **封完立即开队列（P5）**：candidate.json 封装、gatedeps、rc 标签一完成，就启动 `release/tools/queue.sh`。队列跑在自己的 detached 工作树里，所以收口文档、草稿 release、release_prep 和 Apple 签名、Windows qualification 与 company 签名都在队列运行期间做。
 2. **（0.0.25 实测后修订：默认串行）** **平台验证与队列并行（P4）**：队列开跑的同时，后台启动 Linux 全套（`LIMA_VM=minicon-lnx-aarch64 SUITE_LIMIT=55 JOBS=1 ./tests/linux.sh all`）。Windows 部分不再开虚拟机，以 release-check 的 winsuite 为准（X7），回执里写 release-check 的 run id。0.0.25 把两者并行，负载到 9 以上，机器发热到有焦味，所以**默认先跑完队列，再跑 Linux 全套**；只有机器明确空闲、负载低于 3 时才并行。
 3. **字节不变的重封沿用队列状态（P7）**：如果重封只改了不进产品字节的文件（例如 unisa/ 的 Python 前端），候选字节和 artifact_sha256 不变，只有 sources_sha256 会变。这时**在同一个 CAND 目录里重建**，让 queue.sh 沿用 CAND.queue 状态，release.sh 只重跑依赖声明命中改动文件的作业。换目录会改变 MODEL_COM 路径，指纹随之全变，整轮重跑。0.0.24 第三次封装就是换了目录（cand3），所以重跑了全部 568 项。
+
+## 19. 0.0.27 回顾（2026-10-05）
+
+全文见 [research/r27-retrospective.md](../research/r27-retrospective.md)。版本号提交到公开用了 2 小时 29 分，其中返工约 1 小时。以后照下面几条做：
+
+- **封存前，release-check 和契约层都要先绿**。这一版 rc 挪了两次，都是封存后才暴露的工具红：ledgercheck 读错了计划，gate-layers 漏了分层，workflow 里的 bound 写成 120。只要不进产品闭包，用 fix: 修、重打 rc 是安全的：候选字节不变，队列按指纹复用结果。但这是返工，0.0.28 R2 改成在 precheck 里跑契约层。
+- **从 rc 工作树启动队列时，被 git 忽略的 corpus 不会跟着过去**。queue.sh 从 8ef0cdc1 起改为从主检出链接全部语料。
+- **负载看门狗要盯 queue.sh 本身的 PID**：同时启动会抢跑，取到外层 shell 的 PID 会把 queue.sh 留成孤儿。0.0.28 R1 把看门狗做进 queue.sh。
+- **队列期间不跑 make gatedeps**：机器满载时它跑不完 58 秒。门禁登记攒到队列结束后统一做。
+- **Linux 全套**跑 4 GiB 的 `default` 客机，结论认“only guest-known reds”那一行（bigclosure、ape 缺内存，warn 缺 clang）；跑完清掉客机里保留的 TMPDIR。
+- **Apple 签名可以和 Linux 全套并行**：它不占本机 CPU，约 2 分钟。

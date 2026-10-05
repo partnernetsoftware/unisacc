@@ -30,7 +30,8 @@
 | v0.0.24 | [archive/plans/v0.0.24.md](archive/plans/v0.0.24.md) — DSL 冻结规格与 T1 清理（facts 动作序列减 400 处）、逐条目契约六个阶段、门禁依赖声明收窄、kill/ttyname、Python 参考 extern 修复与 difftest-py 门禁 | **已公开 2026-10-04**（signed sha256 dca05a96…，[回执](research/r24-release-acceptance.json)） |
 | v0.0.25 | [archive/plans/v0.0.25.md](archive/plans/v0.0.25.md) — 0.0.24 复盘的流程项 P1–P7（冻结窗口拦截、复活扫描、facts 门禁等）、Windows 测试迁到 GitHub runner（X7，UTM 只排查）、T1e 收尾、T2 表行覆盖率、DNS 转发系统 libc（N1）、POSIX 缺口清单（N2） | **已公开 2026-10-04 23:23 SGT**（signed sha256 2c9822c9…，[回执](research/r25-release-acceptance.json)） |
 | v0.0.26 | [archive/plans/v0.0.26.md](archive/plans/v0.0.26.md) — 多文件转发（N5）、五阶段表行覆盖与九个 op 契约（T2）、平表和网络改由 C 工具生成（B3'）、seed/gen.c 通 lex | **已公开 2026-10-05**（signed sha256 5a188fd7…，[回执](research/r26-release-acceptance.json)） |
-| v0.0.27 | [plans/v0.0.27.md](plans/v0.0.27.md) | 计划中 |
+| v0.0.27 | [archive/plans/v0.0.27.md](archive/plans/v0.0.27.md) — GitHub 全套矩阵能当证据（C1）、x86 迁真机（C2）、POSIX 头第一批（H1）、CPU 比率（O1）、seed/gen.c 通 pp 与 nativeabi（B4） | **已公开 2026-10-05**（signed sha256 3ff12714，回执 research/r27-release-acceptance.json） |
+| v0.0.28 | [plans/v0.0.28.md](plans/v0.0.28.md) | 计划中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；权重本体与推理速度的精确结构优化实验（§5.2）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
@@ -233,6 +234,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - **诊断分层**：[tests/GATE-LAYERS.md](tests/GATE-LAYERS.md) 把同一门禁清单按断言跨度分为 contract、stage、pipeline、platform；`gatequeue.py --layer/--through-layer` 只筛选日常排查范围，耗时仍由实测历史调度。`gate-layers` 校验全部套件均归类且四层并集等于原清单；未筛选的发布全量门禁保持原样。
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。
+- **发版复盘**（0.0.27 起每版一份，research/r<N>-retrospective.md）：列出各环节耗时、问题与解决、要带进下一版的流程项；能持久化的规则写进 release/RELEASE-PIPELINE.md 的逐版回顾，流程项写进下一版计划（0.0.27 → v0.0.28 R1–R4）。
 - **reviewed trees**：`make gatedeps` 从 HEAD 的 `git archive`（umask 022）计算戳与 guards，作为发布前最后一提交。
 
 ### 开发与发布流水线（向 minicon 学习，v0.0.10 起实行；手册与脚本是权威，此处为索引）
