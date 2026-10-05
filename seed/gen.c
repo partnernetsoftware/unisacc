@@ -429,12 +429,19 @@ static char *interpolate(const char *text, Value *env) {
     size_t cap = strlen(text) + 64, n = 0, i; char *out = grow(NULL, cap, 1);
     for (i = 0; text[i]; i++) {
         const char *part = text + i; size_t len = 1; char number[64];
-        if (text[i] == '{') {
+        if ((text[i] == '{' && text[i + 1] == '{') ||
+            (text[i] == '}' && text[i + 1] == '}')) {
+            part = text + i; i++;
+        } else if (text[i] == '{') {
             const char *end = strchr(text + i + 1, '}'); Value *v; char *key;
             if (!end) die("unterminated interpolation");
             key = copy_n(text + i + 1, (size_t)(end - text - i - 1));
-            v = value_field(env, key); free(key);
-            if (!v || (v->kind != JSTR && v->kind != JINT && v->kind != JUINT)) die("unknown interpolation fact");
+            v = value_field(env, key);
+            if (!v || (v->kind != JSTR && v->kind != JINT && v->kind != JUINT)) {
+                fprintf(stderr, "seed-gen: missing interpolation fact %s\n", key);
+                die("unknown interpolation fact");
+            }
+            free(key);
             if (v->kind == JINT) { snprintf(number, sizeof(number), "%lld", v->number); part = number; }
             else if (v->kind == JUINT) { snprintf(number, sizeof(number), "%llu", v->unumber); part = number; }
             else part = v->s;
@@ -3130,7 +3137,15 @@ int main(int argc, char **argv) {
                 when_true(field[3], argc - 4, argv + 4)) {
                 Value *opts = value_json(field[8], "manifest options");
                 if (value_get(opts, "mapseq")) {
-                    Value *facts = load_facts_expr(field[4]), *sequences = mapseq_construct(opts, facts);
+                    Value *facts = load_facts_expr(field[4]), *bindmap = value_get(opts, "bindmap");
+                    Value *sequences;
+                    if (bindmap) {
+                        Value *source = value_path(facts, value_text(bindmap));
+                        if (source->kind != JOBJ) die("mapseq bindmap is not an object");
+                        for (size_t i = 0; i < source->n; i++)
+                            value_put(facts, source->items[i].key, source->items[i].value);
+                    }
+                    sequences = mapseq_construct(opts, facts);
                     if (++found > 1) die("ambiguous mapseq row");
                     out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
                     value_write(out, sequences); if (fclose(out)) die("output close failed");
