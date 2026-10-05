@@ -778,6 +778,26 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c gen2 type-entry differs at {first}: "
                                  f"C={actual[first:first+100]!r} "
                                  f"Python={expected[first:first+100]!r}")
+        tail_path = work / "parse2-gen2-tytail.c.json"
+        run(str(cgen), "inspect-parse2-gen2-tytail-graph", str(tail_path))
+        tail_graph = parse2base.executor()
+        tail_flags = dict(flags, seg_tytail=1)
+        assemble.Run(tail_graph, tail_graph.P, {}, tail_flags).run(
+            ROOT / "exec/parse2/gen2-manifest.tsv")
+        tail_graph.g.finish()
+        tail_expected = json.dumps({
+            "start": "START",
+            "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                       for state, (mode, row) in tail_graph.g.st.items()},
+            "seqs": [list(map(list, seq)) for seq in tail_graph.g.seqs],
+        }, separators=(",", ":")).encode()
+        tail_actual = tail_path.read_bytes()
+        if tail_actual != tail_expected:
+            first = next((i for i, (a, b) in enumerate(zip(tail_actual, tail_expected))
+                          if a != b), min(len(tail_actual), len(tail_expected)))
+            raise AssertionError(f"seed/gen.c gen2 tytail differs at {first}: "
+                                 f"C={tail_actual[first:first+100]!r} "
+                                 f"Python={tail_expected[first:first+100]!r}")
     if part == "parse2-3":
         initializer_manifest = ROOT / "exec/parse2/strings-initializer-manifest.tsv"
         float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
@@ -933,4 +953,4 @@ if part == "parse2-3":
 if part == "parse2-4":
     print("seed construct parse2-4: gen2 dimensions through type-word graphs byte-identical")
 if part == "parse2-5":
-    print("seed construct parse2-5: gen2 type-entry graph byte-identical")
+    print("seed construct parse2-5: gen2 type-entry and tytail graphs byte-identical")

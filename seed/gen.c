@@ -3222,7 +3222,7 @@ static void parse2_startup_control(Graph *g) {
 }
 /* The first gen2 segment delegates to the control manifest.  Read its
    declaration and fresh-label table in source order, as assemble.Run does. */
-static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra) {
+static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, Value *seqextra) {
     FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
     FILE *fresh = fopen("exec/parse2/control-fresh.tsv", "rb");
     Value *facts = load_fact("k2-control"), *opts = NULL;
@@ -3231,7 +3231,9 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra) 
     if (strcmp(section, "dimensions") && strcmp(section, "dimensions-tail") &&
         strcmp(section, "type-prefix") && strcmp(section, "structure") &&
         strcmp(section, "type-typedef") && strcmp(section, "type-tail") &&
-        strcmp(section, "type-word") && strcmp(section, "type-entry"))
+        strcmp(section, "type-word") && strcmp(section, "type-entry") &&
+        strcmp(section, "ckm-row") && strcmp(section, "ckm-final") &&
+        strcmp(section, "resd-row") && strcmp(section, "resd-final"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3247,6 +3249,11 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra) 
     if (ferror(manifest) || fclose(manifest) || rows != 2 || !opts)
         die("unsupported control manifest");
     sequences = mapseq_construct(opts, facts);
+    if (seqextra) {
+        if (seqextra->kind != JOBJ) die("control extra sequences must be an object");
+        for (size_t i = 0; i < seqextra->n; i++)
+            value_put(sequences, seqextra->items[i].key, seqextra->items[i].value);
+    }
     classes = value_get(facts, "classes");
     if (!classes || classes->kind != JOBJ) die("control classes missing");
     Value *consts = value_get(facts, "consts");
@@ -3281,7 +3288,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra) 
                             bindings, sequences, classes);
 }
 static void parse2_gen2_control(Graph *g, const char *section) {
-    parse2_gen2_control_ex(g, section, NULL);
+    parse2_gen2_control_ex(g, section, NULL, NULL);
 }
 static void parse2_gen2_type_words(Graph *g) {
     Value *facts = load_fact("k2-gen2"), *words = value_get(facts, "typewords");
@@ -3302,15 +3309,105 @@ static void parse2_gen2_type_words(Graph *g) {
         value_put(extra, "type_value", value);
         value_put(extra, "type_rank_value", rank);
         value_put(extra, "word_follow", follow);
-        parse2_gen2_control_ex(g, "type-word", extra);
+        parse2_gen2_control_ex(g, "type-word", extra, NULL);
         free(ret);
     }
 }
 static void parse2_gen2_type_entry(Graph *g) {
     Value *extra = value_new(JOBJ); char *dispatch = fresh_label("TSPEC", "b");
     value_put(extra, "type_dispatch", value_string(dispatch));
-    parse2_gen2_control_ex(g, "type-entry", extra);
+    parse2_gen2_control_ex(g, "type-entry", extra, NULL);
     free(dispatch);
+}
+static Value *parse2_gen2_tail_first(Value *item, const char *register_name) {
+    Value *first = value_get(item, "first"), *seq = value_new(JARR);
+    if (!first || first->kind != JARR || first->n > 1)
+        die("gen2 tail initial fact changed");
+    if (first->n) {
+        Value *action = value_new(JARR), *zero = value_new(JINT);
+        value_put(action, NULL, value_string("LDI"));
+        value_put(action, NULL, value_string(register_name));
+        zero->number = 0; value_put(action, NULL, zero);
+        value_put(seq, NULL, action);
+    }
+    return seq;
+}
+static Value *parse2_gen2_tail_mask(Value *item) {
+    Value *text = value_get(item, "masktext"), *seq = value_new(JARR);
+    if (!text || text->kind != JSTR) die("gen2 tail mask fact changed");
+    for (size_t i = 0; i < text->n; i++) {
+        Value *action = value_new(JARR), *byte = value_new(JINT);
+        value_put(action, NULL, value_string("OUT"));
+        byte->number = (unsigned char)text->s[i]; value_put(action, NULL, byte);
+        value_put(seq, NULL, action);
+    }
+    return seq;
+}
+static void parse2_gen2_tytail(Graph *g) {
+    Value *facts = load_fact("k2-gen2"), *ckm = value_get(facts, "ckmrows");
+    Value *resd = value_get(facts, "resdrows"), *final;
+    if (!ckm || ckm->kind != JARR || ckm->n != 3 ||
+        !resd || resd->kind != JARR || resd->n != 8)
+        die("gen2 tail row domains changed");
+    for (size_t i = 0; i < ckm->n; i++) {
+        Value *item = ckm->items[i].value, *extra = value_new(JOBJ), *seq = value_new(JOBJ);
+        Value *current = value_get(item, "current"), *hit = value_get(item, "hit");
+        Value *next = value_get(item, "next"), *axis = value_get(item, "axis");
+        char *test;
+        if (!current || !hit || !next || !axis) die("gen2 ckm row changed");
+        test = fresh_label(value_text(current), "b");
+        value_put(extra, "word_state", current);
+        value_put(extra, "tail_current", current);
+        value_put(extra, "tail_test", value_string(test));
+        value_put(extra, "tail_hit", hit); value_put(extra, "tail_next", next);
+        value_put(extra, "tail_axis", axis);
+        value_put(seq, "tail_initial", parse2_gen2_tail_first(item, "cku"));
+        value_put(seq, "tail_mask", parse2_gen2_tail_mask(item));
+        parse2_gen2_control_ex(g, "ckm-row", extra, seq); free(test);
+    }
+    final = value_get(facts, "ckmfinal");
+    if (!final || final->kind != JOBJ) die("gen2 ckm final changed");
+    {
+        Value *extra = value_new(JOBJ), *seq = value_new(JOBJ);
+        Value *current = value_get(final, "current"), *axis = value_get(final, "axis");
+        char *test;
+        if (!current || !axis) die("gen2 ckm final missing field");
+        test = fresh_label(value_text(current), "b");
+        value_put(extra, "tail_current", current);
+        value_put(extra, "tail_test", value_string(test));
+        value_put(extra, "tail_axis", axis);
+        value_put(seq, "tail_initial", parse2_gen2_tail_first(final, "cku"));
+        parse2_gen2_control_ex(g, "ckm-final", extra, seq); free(test);
+    }
+    for (size_t i = 0; i < resd->n; i++) {
+        Value *item = resd->items[i].value, *extra = value_new(JOBJ), *seq = value_new(JOBJ);
+        Value *current = value_get(item, "current"), *hit = value_get(item, "hit");
+        Value *next = value_get(item, "next"), *axis = value_get(item, "axis");
+        Value *code = value_get(item, "code"); char mask[128], *test;
+        if (!current || !hit || !next || !axis || !code) die("gen2 resd row changed");
+        if (snprintf(mask, sizeof(mask), "%s.mask", value_text(hit)) >= (int)sizeof(mask))
+            die("gen2 resd mask name too long");
+        test = fresh_label(value_text(current), "b");
+        value_put(extra, "word_state", current);
+        value_put(extra, "tail_current", current);
+        value_put(extra, "tail_test", value_string(test));
+        value_put(extra, "tail_hit", hit); value_put(extra, "tail_next", next);
+        value_put(extra, "tail_axis", axis);
+        value_put(extra, "tail_mask_test", value_string(mask));
+        value_put(extra, "tail_code", code);
+        value_put(seq, "tail_initial", parse2_gen2_tail_first(item, "vt"));
+        value_put(seq, "tail_mask", parse2_gen2_tail_mask(item));
+        parse2_gen2_control_ex(g, "resd-row", extra, seq); free(test);
+    }
+    final = value_get(facts, "resdfinal");
+    if (!final || final->kind != JOBJ || !value_get(final, "current"))
+        die("gen2 resd final changed");
+    {
+        Value *extra = value_new(JOBJ), *seq = value_new(JOBJ);
+        value_put(extra, "tail_current", value_get(final, "current"));
+        value_put(seq, "tail_initial", parse2_gen2_tail_first(final, "vt"));
+        parse2_gen2_control_ex(g, "resd-final", extra, seq);
+    }
 }
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
@@ -5215,6 +5312,23 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "type-tail");
         parse2_gen2_type_words(&g);
         parse2_gen2_type_entry(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-tytail-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "dimensions");
+        parse2_gen2_control(&g, "dimensions-tail");
+        parse2_gen2_control(&g, "type-prefix");
+        parse2_gen2_control(&g, "structure");
+        parse2_gen2_control(&g, "type-typedef");
+        parse2_gen2_control(&g, "type-tail");
+        parse2_gen2_type_words(&g);
+        parse2_gen2_type_entry(&g);
+        parse2_gen2_tytail(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
