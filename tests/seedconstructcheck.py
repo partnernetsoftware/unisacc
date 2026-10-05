@@ -406,6 +406,33 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                           "seqs": [list(map(list, seq)) for seq in e3_unary.g.seqs]}
         assert unary_head_graph.read_bytes() == json.dumps(expected_unary, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 unary head differs"
+        unary_compound_graph = work / "parse2-unary-compound.c.json"
+        run(str(cgen), "inspect-parse2-unary-compound-graph", str(unary_compound_graph))
+        e3_compound = parse2base.executor()
+        assemble.Run(e3_compound, e3_compound.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_compound, e3_compound.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_compound, e3_compound.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_compound, e3_compound.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_compound, e3_compound.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_compound, e3_compound.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_compound, e3_compound.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        compound_run = assemble.Run(e3_compound, e3_compound.P, {},
+                                    {"warnings": False, "ucx": unaryenv["ucx"],
+                                     "ufacts": unaryenv["ufacts"]})
+        compound_run.root = unary_manifest.parent
+        for depth, row in compound_run.rows(unary_manifest)[:3]:
+            compound_run.one(row, [], depth, {})
+        e3_compound.g.finish()
+        expected_compound = {"start": "START",
+                             "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                        for name, (mode, row) in e3_compound.g.st.items()},
+                             "seqs": [list(map(list, seq)) for seq in e3_compound.g.seqs]}
+        assert unary_compound_graph.read_bytes() == json.dumps(expected_compound, separators=(",", ":")).encode(), \
+            "seed/gen.c parse2 unary compound differs"
         actions_json = work / "parse2-actions.c.json"
         run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
         actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
@@ -472,4 +499,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
 if part in ("base", "all"):
     print("seed construct base: net/tbl and prune, opt, lex, pp, nativeabi byte-identical")
 if part in ("parse2", "all"):
-    print("seed construct parse2: token prelude through unary head graph byte-identical")
+    print("seed construct parse2: token prelude through unary compound graph byte-identical")

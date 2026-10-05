@@ -3686,6 +3686,54 @@ static void parse2_unary_head(Graph *g) {
                                 bindings, selected, classes);
     }
 }
+static void parse2_unary_compound(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
+    FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-control"), *bindings = value_new(JOBJ);
+    Value *genfacts = load_fact("k2-gen2");
+    Value *extra = value_path(genfacts, "unaryenv.ucx");
+    Value *consts = value_get(facts, "consts"), *sequences = NULL;
+    Value *classes = value_get(facts, "classes");
+    char *s; int rows = 0, declared = 0;
+    if (!manifest || !control || !consts || consts->kind != JOBJ ||
+        !extra || extra->kind != JOBJ || !classes)
+        die("unary compound inputs missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("unarycontrol manifest column count");
+        if (rows++ < 2) { free(s); continue; }
+        if (strcmp(f[0], "call") || strcmp(f[1], "control") ||
+            strcmp(f[4], "k2-unary") || strcmp(f[7], "control_section=@str:compound,statement=@str:STMT,extra=$ucx,seqb=empty"))
+            die("unary compound call changed");
+        free(s); break;
+    }
+    if (fclose(manifest) || rows != 3) die("unary compound call missing");
+    while ((s = line(control))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("control manifest column count");
+        if (!declared && !strcmp(f[0], "rows") && !strcmp(f[1], "control") &&
+            !strcmp(f[3], "!fact:control_export")) {
+            Value *opts = value_json(f[8], "unary compound control options");
+            sequences = mapseq_construct(opts, facts); declared++;
+        }
+        free(s);
+    }
+    if (ferror(control) || fclose(control) || declared != 1)
+        die("control manifest declaration missing");
+    for (size_t i = 0; i < consts->n; i++)
+        value_put(bindings, consts->items[i].key, consts->items[i].value);
+    for (size_t i = 0; i < extra->n; i++)
+        value_put(bindings, extra->items[i].key, extra->items[i].value);
+    value_put(bindings, "statement", value_string("STMT"));
+    install_section_classes(g, "exec/parse2/control-byte.tsv", "compound", 'b',
+                            bindings, sequences, classes);
+    install_section_classes(g, "exec/parse2/control-result.tsv", "compound", 'r',
+                            bindings, sequences, classes);
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3920,6 +3968,29 @@ static void inspect_parse2_unary_head_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_unary_compound_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    parse2_unary_head(&g);
+    parse2_unary_compound(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3972,6 +4043,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-head-graph")) {
         inspect_parse2_unary_head_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-compound-graph")) {
+        inspect_parse2_unary_compound_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
