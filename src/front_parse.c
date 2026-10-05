@@ -5959,6 +5959,23 @@ int parenfold(void) {
             nxt = kind(i + 3);
             k = 0;
             if (prev == T_TYPE || prev == tidx("*", 1)) k = 1;
+            /* 0.0.28 D3: after a BINARY `*` the parentheses are a cast or a grouping, never a
+               declarator: `x * (T)(y)`, `p->n * (i64)(g).b` (SQLite's pcache1).  The `*` is binary
+               when what precedes it ends an operand -- a number, string, `)` or `]`, or a name
+               that itself follows an operator or `->`/`.` (so `T *(f)(void)` still folds). */
+            if (k && prev == tidx("*", 1) && j > 1) {
+                int pp; int p3; pp = tkind[j - 2]; p3 = j > 2 ? tkind[j - 3] : 0 - 1;
+                if (pp == T_NUM || pp == T_STR || pp == rp || pp == tidx("]", 1)) k = 0;
+                if (pp == T_ID && j > 2) {
+                    char *ops[26]; int oi;
+                    ops[0] = "->"; ops[1] = "."; ops[2] = "="; ops[3] = "+"; ops[4] = "-"; ops[5] = "*"; ops[6] = "/";
+                    ops[7] = "%"; ops[8] = "<"; ops[9] = ">"; ops[10] = "&"; ops[11] = "|"; ops[12] = "^"; ops[13] = "?";
+                    ops[14] = ":"; ops[15] = "("; ops[16] = ","; ops[17] = "["; ops[18] = "!"; ops[19] = "~";
+                    ops[20] = "return"; ops[21] = "=="; ops[22] = "!="; ops[23] = "&&"; ops[24] = "||"; ops[25] = "<=";
+                    oi = 0; while (oi < 26) { if (p3 == tidx(ops[oi], blen(ops[oi]))) k = 0; oi = oi + 1; }
+                    if (p3 == tidx(">=", 2) || p3 == tidx("+=", 2) || p3 == tidx("-=", 2) || p3 == tidx("*=", 2)) k = 0;
+                }
+            }
             if (k) { k = 0;
                 if (nxt == lp || nxt == rp || nxt == tidx("=", 1) || nxt == tidx(";", 1)
                     || nxt == tidx(",", 1) || nxt == tidx("[", 1)) k = 1; }
