@@ -3879,31 +3879,33 @@ static void parse2_gen2_initializers_main(Graph *g) {
 static void parse2_string_walk_head(Graph *g, const char *pre, const char *body, const char *done);
 static void parse2_string_walk_escape(Graph *g, const char *pre, const char *body);
 static void parse2_string_walk_tail(Graph *g, const char *pre, const char *body, const char *done);
-static void parse2_gen2_statics_strwalk(Graph *g) {
+static void parse2_gen2_manifest_strwalk(Graph *g, const char *when, int ordinal, int count) {
     FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
     Value *bindings = value_new(JOBJ), *facts = value_new(JOBJ);
     char *s; int found = 0;
-    if (!manifest) die("cannot open gen2 statics declarations");
+    if (!manifest) die("cannot open gen2 string walk declarations");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("gen2 statics call column count");
+        if (n != 9) die("gen2 string walk column count");
         if (!strcmp(f[0], "call") && !strcmp(f[1], "strwalk") &&
-            !strcmp(f[3], "fact:seg_statics-init")) {
-            if (found++) die("duplicate gen2 statics walker");
-            direct_bindings(bindings, f[7], facts);
+            !strcmp(f[3], when)) {
+            if (found++ == ordinal) direct_bindings(bindings, f[7], facts);
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1)
-        die("missing gen2 statics walker");
+    if (ferror(manifest) || fclose(manifest) || found != count || ordinal < 0 || ordinal >= count)
+        die("gen2 string walker count changed");
     const char *pre = value_text(value_get(bindings, "pre"));
     const char *body = value_text(value_get(bindings, "body"));
     const char *done = value_text(value_get(bindings, "done"));
     parse2_string_walk_head(g, pre, body, done);
     parse2_string_walk_escape(g, pre, body);
     parse2_string_walk_tail(g, pre, body, done);
+}
+static void parse2_gen2_statics_strwalk(Graph *g) {
+    parse2_gen2_manifest_strwalk(g, "fact:seg_statics-init", 0, 1);
 }
 static void parse2_gen2_shape_simple(Graph *g, const char *section) {
     FILE *manifest = fopen("exec/parse2/shape-manifest.tsv", "rb");
@@ -5968,6 +5970,16 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-first-walk-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "sizeof2");
+        parse2_gen2_manifest_strwalk(&g, "fact:seg_sizeof2", 0, 2);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
