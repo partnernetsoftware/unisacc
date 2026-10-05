@@ -3304,14 +3304,15 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
 static void parse2_gen2_control(Graph *g, const char *section) {
     parse2_gen2_control_ex(g, section, NULL, NULL);
 }
-static void parse2_gen2_return(Graph *g, const char *section) {
+static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
     FILE *actions = fopen("exec/parse2/gen2-actions-manifest.tsv", "rb");
     FILE *manifest = fopen("exec/parse2/return-manifest.tsv", "rb");
     FILE *fresh = fopen("exec/parse2/return-fresh.tsv", "rb");
     Value *facts = load_fact("k2-gen2"), *recipes = NULL, *sequences = value_new(JOBJ);
     Value *bindings = value_new(JOBJ), *classes = value_get(facts, "retclasses");
     char *s; int action_row = 0, return_row = 0, header = 0;
-    if (!actions || !manifest || !fresh || !classes || strcmp(section, "ret0"))
+    if (!actions || !manifest || !fresh || !classes ||
+        (strcmp(section, "ret0") && strcmp(section, "update")))
         die("return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
@@ -3379,10 +3380,18 @@ static void parse2_gen2_return(Graph *g, const char *section) {
         free(s);
     }
     if (ferror(fresh) || fclose(fresh) || !header) die("return fresh rows missing");
+    if (extra) {
+        if (extra->kind != JOBJ) die("return extra bindings must be an object");
+        for (size_t i = 0; i < extra->n; i++)
+            value_put(bindings, extra->items[i].key, extra->items[i].value);
+    }
     install_section_classes(g, "exec/parse2/return-byte.tsv", section, 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse2/return-result.tsv", section, 'r',
                             bindings, sequences, classes);
+}
+static void parse2_gen2_return(Graph *g, const char *section) {
+    parse2_gen2_return_ex(g, section, NULL);
 }
 static void parse2_gen2_type_words(Graph *g) {
     Value *facts = load_fact("k2-gen2"), *words = value_get(facts, "typewords");
@@ -6053,6 +6062,18 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-update-graph")) {
+        Value *extra = value_new(JOBJ);
+        value_put(extra, "update_entry", value_string("LP.inc"));
+        value_put(extra, "update_target", value_string("POST.+"));
+        build_parse2_token_graph(&g);
+        parse2_gen2_return_ex(&g, "update", extra);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
