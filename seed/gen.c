@@ -2926,9 +2926,9 @@ static void inspect_parse2_tokens(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     value_write(out, result); if (fclose(out)) die("output close failed");
 }
-static void inspect_parse2_token_graph(const char *outpath) {
-    FILE *manifest = fopen("exec/parse/tokens2-manifest.tsv", "rb"), *out;
-    Graph g = {0}; Value *facts = load_fact("k2-gen2-tokens"), *modes = value_new(JOBJ);
+static void build_parse2_token_graph(Graph *g) {
+    FILE *manifest = fopen("exec/parse/tokens2-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-gen2-tokens"), *modes = value_new(JOBJ);
     Value *sequences = value_new(JOBJ), *bindings; char *s; int template_seen = 0, rows_seen = 0;
     if (!manifest) die("cannot open parse2 token manifest");
     while ((s = line(manifest))) {
@@ -2943,17 +2943,17 @@ static void inspect_parse2_token_graph(const char *outpath) {
             expanded = expand_template_file_fresh("exec/parse/tokenfacts-template.tsv",
                                                   facts, "facts", NULL, modes);
             rules = buffer_file(&expanded);
-            install_delta_text(&g, rules, 'b', numeric_domain(0, 257), NULL,
+            install_delta_text(g, rules, 'b', numeric_domain(0, 257), NULL,
                                sequences, 0, 0, NULL, "START");
             if (fclose(rules)) die("parse2 token template close failed");
             for (size_t i = 0; i < modes->n; i++) {
                 const char *name = modes->items[i].key; size_t j;
                 if (strcmp(value_text(modes->items[i].value), "r"))
                     die("unsupported parse2 token mode");
-                for (j = 0; j < g.n; j++) if (!strcmp(g.state[j].name, name)) {
-                    g.state[j].mode = 'r'; break;
+                for (j = 0; j < g->n; j++) if (!strcmp(g->state[j].name, name)) {
+                    g->state[j].mode = 'r'; break;
                 }
-                if (j == g.n) die("parse2 token mode state missing");
+                if (j == g->n) die("parse2 token mode state missing");
             }
             if (!modes->n) die("parse2 token mode overrides missing");
             free(expanded.s);
@@ -2965,13 +2965,80 @@ static void inspect_parse2_token_graph(const char *outpath) {
             rowfacts = load_facts_expr(field[4]); bindings = value_new(JOBJ);
             value_put(sequences, "truncated", value_json("[[\"REJECT\",\"not covered: truncated token dump\"]]", "token truncation"));
             direct_bindings(bindings, field[7], rowfacts);
-            install_plain(&g, "exec/parse/tokenread-byte.tsv", 'b', bindings, sequences);
-            install_plain(&g, "exec/parse/tokenread-result.tsv", 'r', bindings, sequences);
+            install_plain(g, "exec/parse/tokenread-byte.tsv", 'b', bindings, sequences);
+            install_plain(g, "exec/parse/tokenread-result.tsv", 'r', bindings, sequences);
         } else die("unsupported parse2 token manifest row");
         free(s);
     }
     if (ferror(manifest) || fclose(manifest) || template_seen != 1 || rows_seen != 1)
         die("incomplete parse2 token manifest");
+}
+static void inspect_parse2_token_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
+/* The first nested parse2 body call installs gen2's startup marker.  Execute
+   the stage-edits declaration on the token graph, in manifest order.  These
+   are graph operations, not C syntax decisions. */
+static void parse2_startup_edits(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/gen2parts-manifest.tsv", "rb");
+    FILE *templ; char *s; int declared = 0, copied = 0, dropped = 0, rule = 0;
+    if (!manifest) die("cannot open gen2parts manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("gen2parts manifest column count");
+        if (!strcmp(f[0], "template") && !strcmp(f[1], "stage-edits") &&
+            (!strcmp(f[2], "startup") || !strcmp(f[2], "startup-entry"))) declared++;
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || declared != 2)
+        die("parse2 startup edits not declared");
+    templ = fopen("exec/parse2/stage-edits-template.tsv", "rb");
+    if (!templ) die("cannot open parse2 stage edits");
+    while ((s = line(templ))) {
+        char *f[9]; int n; State *st;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("parse2 stage edit column count");
+        if (!strcmp(f[0], "startup") && !strcmp(f[4], "copy-state")) {
+            if (copied++ || strcmp(f[3], "-") || strcmp(f[7], "-") || strcmp(f[8], "-"))
+                die("invalid parse2 startup copy declaration");
+            pp_copy_state(g, f[5], f[6]);
+        } else if (!strcmp(f[0], "startup") && !strcmp(f[4], "drop-edge")) {
+            size_t i;
+            if (!copied || dropped++ || strcmp(f[3], "-")) die("invalid parse2 startup drop declaration");
+            st = find_state(g, f[5]);
+            for (i = 0; i < st->n && strcmp(st->edge[i].key, f[6]); i++) {}
+            if (i == st->n) die("parse2 startup edge to drop missing");
+            memmove(st->edge + i, st->edge + i + 1, (st->n - i - 1) * sizeof(*st->edge));
+            st->n--;
+            if (st->key_index) {
+                memset(st->key_index, 0, 257 * sizeof(*st->key_index));
+                for (i = 0; i < st->n; i++) {
+                    int key = numeric_key(st->edge[i].key);
+                    if (key >= 0) st->key_index[key] = (int)i + 1;
+                }
+            }
+        } else if (!strcmp(f[0], "startup-entry") && !strcmp(f[4], "rule")) {
+            if (!dropped || rule++ || strcmp(f[3], "-")) die("invalid parse2 startup rule declaration");
+            st = find_state(g, f[5]);
+            if (edge_has(st, f[6])) die("parse2 startup rule edge already exists");
+            edge_add(g, f[5], st->mode, f[6], f[7], f[8]);
+        }
+        free(s);
+    }
+    if (ferror(templ) || fclose(templ) || copied != 1 || dropped != 1 || rule != 1)
+        die("incomplete parse2 startup edits");
+}
+static void inspect_parse2_startup_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -2980,6 +3047,9 @@ int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
         inspect_parse2_token_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-startup-graph")) {
+        inspect_parse2_startup_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;

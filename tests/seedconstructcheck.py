@@ -58,6 +58,20 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                       "seqs": [list(map(list, seq)) for seq in e3.g.seqs]}
     assert token_graph.read_bytes() == json.dumps(expected_graph, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 tokenizer graph differs"
+    # First nested E3 body call: gen2parts startup edits copy the token reader,
+    # remove its old marker edge, then install the declared marker rule.
+    startup_graph = work / "parse2-startup-graph.c.json"
+    run(str(cgen), "inspect-parse2-startup-graph", str(startup_graph))
+    e3_startup = parse2base.executor()
+    assemble.Run(e3_startup, e3_startup.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    e3_startup.g.finish()
+    expected_startup = {"start": "START",
+                        "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                   for name, (mode, row) in e3_startup.g.st.items()},
+                        "seqs": [list(map(list, seq)) for seq in e3_startup.g.seqs]}
+    assert startup_graph.read_bytes() == json.dumps(expected_startup, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 startup body call differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
@@ -120,4 +134,4 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     head_c = work / "nativeabi-head.c.json"
     run(str(cgen), "inspect-nativeabi-head", str(head_c))
     assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/action recipes byte-identical")
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed, pp and nativeabi deltas byte-identical; nativeabi call graph/head and parse2 token prelude/tokenizer graph/startup edit/action recipes byte-identical")
