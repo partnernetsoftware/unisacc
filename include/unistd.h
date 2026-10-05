@@ -195,7 +195,7 @@ static char **environ;
 __attribute__((constructor)) static void _unisa_environ_init(void) { environ = _unisa_environ(); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execv
-static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, _unisa_environ()); }
+static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, environ); }   /* the current environ (POSIX), E20 */
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execvp
 #include <stdlib.h>
@@ -230,7 +230,7 @@ static int execl(const char *__u_path, const char *__u_a0, ...) {
     while (__u_v[__u_n - 1] && __u_n < 256) { __u_v[__u_n] = va_arg(__u_ap, char *); __u_n = __u_n + 1; }
     va_end(__u_ap);
     if (__u_v[__u_n - 1]) return (int)_unisa_ret(0 - 7);    /* E2BIG */
-    return execve(__u_path, __u_v, _unisa_environ());
+    return execve(__u_path, __u_v, environ);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execlp
