@@ -2,6 +2,7 @@
 """Compare the C99 table-to-network constructor with the Python oracle."""
 from pathlib import Path
 import json
+import importlib
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "exec"))
 import assemble
 import finite_rules
+from build import parsebase as native_base
 
 def run(*args, timeout=20):
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
@@ -67,4 +69,28 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     c_reject = work / "nativeabi-reject.c.tsv"
     run(str(cgen), "inspect-template", "nativeabi", "reject", str(c_reject))
     assert c_reject.read_bytes() == ("\n".join(rules) + "\n").encode(), "nativeabi reject template differs"
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed and pp deltas byte-identical; nativeabi mapseq/reject template equal")
+    def native_graph_bytes():
+        native_base.g.finish()
+        data = {"start": "START",
+                "states": {name: [mode, {str(key): value for key, value in edges.items()}]
+                           for name, (mode, edges) in native_base.g.st.items()},
+                "seqs": [list(map(list, seq)) for seq in native_base.g.seqs]}
+        return json.dumps(data, separators=(",", ":")).encode()
+    native_base = importlib.reload(native_base)
+    native_base.results = {}
+    assemble.Run(native_base, native_base.P, {}, {"fail": "DEAD"}).run(ROOT / "exec/modelgraphequality-manifest.tsv")
+    calls_expected = native_graph_bytes()
+    calls_c = work / "nativeabi-calls.c.json"
+    run(str(cgen), "inspect-nativeabi-calls", str(calls_c))
+    assert calls_c.read_bytes() == calls_expected, "nativeabi recursive call graph differs"
+    native_base = importlib.reload(native_base)
+    native_base.results = {}
+    runner = assemble.Run(native_base, native_base.P, {}, native_base.results)
+    runner.root = ROOT / "exec/nativeabi"
+    for depth, row in assemble.Run.rows(manifest)[:4]:
+        runner.one(row, [], depth, {})
+    head_expected = native_graph_bytes()
+    head_c = work / "nativeabi-head.c.json"
+    run(str(cgen), "inspect-nativeabi-head", str(head_c))
+    assert head_c.read_bytes() == head_expected, "nativeabi head graph differs"
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed and pp deltas byte-identical; nativeabi call graph/head byte-identical")

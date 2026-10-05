@@ -81,7 +81,7 @@ static Value *value_new(int kind) {
     memset(v, 0, sizeof(*v)); v->kind = kind; return v;
 }
 static Value *value_string(const char *s) {
-    Value *v = value_new(JSTR); v->s = copy(s); return v;
+    Value *v = value_new(JSTR); v->s = copy(s); v->n = strlen(s); return v;
 }
 static void value_put(Value *parent, const char *key, Value *child) {
     size_t i;
@@ -107,7 +107,7 @@ static Value *value_get(Value *v, const char *key) {
 }
 static Value *value_from_json(JDoc *d, int ix) {
     JNode *n = &d->n[ix]; Value *v = value_new(n->type); int child;
-    if (n->type == JSTR) v->s = copy_n(d->buf + n->str, (size_t)n->slen);
+    if (n->type == JSTR) { v->s = copy_n(d->buf + n->str, (size_t)n->slen); v->n = (size_t)n->slen; }
     else if (n->type == JINT || n->type == JBOOL) v->number = n->ival;
     else if (n->type == JNULL) { /* null is a fact value, not a missing key */ }
     else if (n->type == JOBJ || n->type == JARR) {
@@ -470,7 +470,37 @@ static Value *fresh_bindings(Value *opts, Value *facts) {
     }
     return bindings;
 }
-static void direct_bindings(Value *bindings, const char *text, Value *facts) {
+/* The manifest's string freshrows form is a row-ordered label table next to
+   the manifest.  Keep allocation in row order: P.fresh uses one graph-wide
+   counter, so sorting by key would change the generated network bytes. */
+static Value *fresh_bindings_file(Value *opts, const char *root) {
+    Value *bindings = value_new(JOBJ), *spec = value_get(opts, "freshrows");
+    char path[1024]; FILE *f; char *s; int header = 0;
+    if (!spec || spec->kind != JSTR) return bindings;
+    if (snprintf(path, sizeof(path), "%s/%s", root, spec->s) >= (int)sizeof(path))
+        die("freshrows path too long");
+    f = fopen(path, "rb"); if (!f) die("cannot open freshrows table");
+    while ((s = line(f))) {
+        char *field[3], *label; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 3);
+        if (n != 3) die("freshrows column count");
+        if (!header++) {
+            if (strcmp(field[0], "owner") || strcmp(field[1], "kind") || strcmp(field[2], "key"))
+                die("freshrows header mismatch");
+        } else {
+            label = fresh_label(field[0], field[1]);
+            value_put(bindings, field[2], value_string(label));
+            free(label);
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("freshrows read failed");
+    if (!header) die("empty freshrows table");
+    return bindings;
+}
+static void direct_bindings_ex(Value *bindings, Value *sequences,
+                               const char *text, Value *facts) {
     char *parts = copy(text), *p = parts;
     if (!strcmp(text, "-") || !*text) { free(parts); return; }
     while (*p) {
@@ -481,11 +511,40 @@ static void direct_bindings(Value *bindings, const char *text, Value *facts) {
         if (!strncmp(eq + 1, "@str:", 5) || !strncmp(eq + 1, "@fmt:", 5)) {
             char *s = interpolate(eq + 6, facts);
             v = value_string(s); free(s);
+        } else if (!strncmp(eq + 1, "@bytes:", 7)) {
+            Value *source = eq[8] == '=' ? value_path(facts, eq + 9) : NULL;
+            if (source && source->kind != JSTR) die("byte source is not text");
+            const unsigned char *bytes = (const unsigned char *)(source ? source->s : eq + 8);
+            size_t count = source ? source->n : strlen((const char *)bytes), i;
+            Value *actions = value_new(JARR);
+            if (!sequences) die("byte binding requires sequences");
+            for (i = 0; i < count; i++) {
+                Value *act = value_new(JARR), *byte = value_new(JINT);
+                byte->number = bytes[i];
+                value_put(act, NULL, value_string("SBOUT"));
+                value_put(act, NULL, byte);
+                value_put(actions, NULL, act);
+            }
+            value_put(sequences, p, actions);
+            if (!comma) break;
+            p = comma + 1; continue;
+        } else if (!strncmp(eq + 1, "fresh:", 6)) {
+            char *scope = copy(eq + 7), *kind = strrchr(scope, ':'), *label;
+            char *owner;
+            if (!kind || !kind[1]) die("invalid fresh binding");
+            *kind++ = 0;
+            if (strncmp(scope, "P:", 2)) die("unsupported fresh binding scope");
+            owner = interpolate(scope + 2, facts);
+            label = fresh_label(owner, kind);
+            v = value_string(label); free(label); free(owner); free(scope);
         } else v = value_path(facts, eq[1] == '$' ? eq + 2 : eq + 1);
         value_put(bindings, p, v);
         if (!comma) break; p = comma + 1;
     }
     free(parts);
+}
+static void direct_bindings(Value *bindings, const char *text, Value *facts) {
+    direct_bindings_ex(bindings, NULL, text, facts);
 }
 static Value *map_cell(Value *source, Value *ctx) {
     const char *s; size_t n;
@@ -1154,6 +1213,7 @@ static FILE *buffer_file(const Buffer *b) {
     rewind(f); return f;
 }
 static void output(FILE *f, const Graph *g);
+static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names);
 static Value *lex_sequences_flags(int argc, char **argv) {
     FILE *f = fopen("exec/lex/output-manifest.tsv", "rb"); char *s;
     if (!f) die("cannot open lex output manifest");
@@ -2563,6 +2623,132 @@ static void manifest(Graph *g, const char *dir) {
     if (ferror(f) || fclose(f)) die("manifest read failed");
     if (rows != 1 || labels != 1) die("incomplete prune manifest");
 }
+/* First nested nativeabi call: modelsignature -> modelinput.  This command
+   exposes a small graph slice while the full nativeabi manifest interpreter
+   is being assembled; it reads the same call row and result table as Python. */
+static void nativeabi_modelinput_call(Graph *g) {
+    FILE *f = fopen("exec/modelsignature-manifest.tsv", "rb");
+    char *s; int found = 0;
+    if (!f) die("cannot open modelsignature manifest");
+    while ((s = line(f))) {
+        char *field[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, field, 9);
+        if (n != 9) die("modelsignature manifest column count");
+        if (!strcmp(field[0], "call") && !strcmp(field[1], "modelinput")) {
+            Value *facts = load_facts_expr(field[4]);
+            Value *bindings = value_new(JOBJ), *sequences = value_new(JOBJ);
+            value_put(facts, "fail", value_string("DEAD"));
+            direct_bindings_ex(bindings, sequences, field[7], facts);
+            {
+                FILE *sub = fopen("exec/modelinput-manifest.tsv", "rb");
+                char *row; int subfound = 0;
+                if (!sub) die("cannot open modelinput manifest");
+                for (size_t i = 0; i < bindings->n; i++)
+                    value_put(facts, bindings->items[i].key, bindings->items[i].value);
+                while ((row = line(sub))) {
+                    char *col[9]; int cols;
+                    if (!*row || *row == '#') { free(row); continue; }
+                    cols = fields_tab(row, col, 9);
+                    if (cols != 9 || strcmp(col[0], "rows") || strcmp(col[1], "modelinput") || strcmp(col[2], "u64"))
+                        die("unsupported modelinput row");
+                    direct_bindings_ex(bindings, sequences, col[7], facts);
+                    subfound++;
+                    free(row);
+                }
+                if (ferror(sub) || fclose(sub) || subfound != 1) die("modelinput row not found");
+            }
+            install_section(g, "exec/modelinput-result.tsv", "u64", 'r', bindings, sequences);
+            found++;
+        }
+        free(s);
+    }
+    if (ferror(f) || fclose(f) || found != 1) die("modelinput call not found");
+}
+static void inspect_nativeabi_modelinput(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    nativeabi_modelinput_call(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL);
+    if (fclose(out)) die("output close failed");
+}
+static void nativeabi_rows(Graph *g, const char *stem, const char *section,
+                           const char *factexpr, const char *bind, const char *opttext,
+                           Value *env) {
+    char path[1024]; Value *facts = load_facts_expr(factexpr);
+    Value *opts = !strcmp(opttext, "-") ? value_new(JOBJ) : value_json(opttext, "nativeabi row options");
+    Value *bindings, *seqs = value_new(JOBJ), *bindmap = value_get(opts, "bindmap");
+    for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
+    bindings = value_get(opts, "freshrows") && value_get(opts, "freshrows")->kind == JSTR
+        ? fresh_bindings_file(opts, "exec") : fresh_bindings(opts, facts);
+    if (bindmap) {
+        Value *map = value_path(facts, value_text(bindmap));
+        if (map->kind != JOBJ) die("nativeabi bindmap is not an object");
+        for (size_t i = 0; i < map->n; i++) value_put(bindings, map->items[i].key, map->items[i].value);
+    }
+    direct_bindings_ex(bindings, seqs, bind, facts);
+    if (snprintf(path, sizeof(path), "exec/%s-byte.tsv", stem) >= (int)sizeof(path)) die("nativeabi rule path too long");
+    install_section(g, path, section, 'b', bindings, seqs);
+    if (snprintf(path, sizeof(path), "exec/%s-result.tsv", stem) >= (int)sizeof(path)) die("nativeabi rule path too long");
+    install_section(g, path, section, 'r', bindings, seqs);
+}
+static void nativeabi_calls(Graph *g) {
+    Value *env = value_new(JOBJ); FILE *f; char *s;
+    value_put(env, "fail", value_string("DEAD"));
+    f = fopen("exec/modelsignature-manifest.tsv", "rb"); if (!f) die("cannot open modelsignature manifest");
+    while ((s = line(f))) {
+        char *col[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, col, 9); if (n != 9) die("modelsignature row count");
+        if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env);
+        else if (!strcmp(col[0], "call") && !strcmp(col[1], "modelinput")) nativeabi_modelinput_call(g);
+        else if (strcmp(col[0], "let")) die("unsupported modelsignature declaration");
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("modelsignature read failed");
+    f = fopen("exec/modelgraphequality-manifest.tsv", "rb"); if (!f) die("cannot open modelgraphequality manifest");
+    while ((s = line(f))) {
+        char *col[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, col, 9); if (n != 9) die("modelgraphequality row count");
+        if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env);
+        else if (strcmp(col[0], "let") && strcmp(col[0], "call")) die("unsupported modelgraphequality declaration");
+        free(s);
+    }
+    if (ferror(f) || fclose(f)) die("modelgraphequality read failed");
+}
+static void inspect_nativeabi_calls(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    nativeabi_calls(&g); finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL);
+    if (fclose(out)) die("output close failed");
+}
+static void nativeabi_reject(Graph *g) {
+    Value *facts = load_fact("nativeabi"), *seqs = value_new(JOBJ);
+    Buffer expanded = expand_template_file("exec/nativeabi/gen-template.tsv", facts, "reject");
+    FILE *f = tmpfile();
+    if (!f) die("cannot create template stream");
+    if (expanded.n && fwrite(expanded.s, 1, expanded.n, f) != expanded.n) die("template write failed");
+    if (fflush(f) || fseek(f, 0, SEEK_SET)) die("template rewind failed");
+    install_delta_text(g, f, 'r', numeric_domain(0, 257), NULL, seqs, 0, 0, NULL, "START");
+    if (fclose(f)) die("template close failed");
+    free(expanded.s);
+}
+static void inspect_nativeabi_head(const char *outpath) {
+    Graph g = {0}; FILE *out; Value *env = value_new(JOBJ);
+    nativeabi_calls(&g);
+    nativeabi_reject(&g);
+    nativeabi_rows(&g, "nativeabi/gen", "head",
+                   "nativeabi+top-modelgraphequality-banks+nativeabi-gen-regions",
+                   "FIELDS=FIELDS,EDGES=EDGES,FRAME=FRAME,SIGWIRE=SIGWIRE,SIGMARK=SIGMARK",
+                   "{\"accumulate\":\"nc\",\"freshrows\":[{\"over\":\"genfresh\",\"where\":{\"section\":\"head\"},\"key\":\"{name}\",\"owner\":\"{prefix}.fresh\",\"kind\":\"{kind}\"}]}", env);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL);
+    if (fclose(out)) die("output close failed");
+}
 static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names) {
     Buffer b = {0}; char number[32];
     buf_add(&b, "{\"start\":", 9); buf_quote(&b, start); buf_add(&b, ",\"states\":{", 11);
@@ -2589,6 +2775,15 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-modelinput")) {
+        inspect_nativeabi_modelinput(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-calls")) {
+        inspect_nativeabi_calls(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-nativeabi-head")) {
+        inspect_nativeabi_head(argv[2]); return 0;
+    }
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--no-autoinc"))) &&
         !strcmp(argv[1], "inspect-pp-through-autoinc")) {
         inspect_pp_through_autoinc(argv[2], argc == 4); return 0;
