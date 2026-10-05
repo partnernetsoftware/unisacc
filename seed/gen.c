@@ -3209,6 +3209,41 @@ static void parse2_string_walk_head(Graph *g, const char *pre,
     if (ferror(manifest) || fclose(manifest) || row != 2)
         die("incomplete string walker head");
 }
+static void parse2_string_walk_escape(Graph *g, const char *pre,
+                                      const char *body) {
+    FILE *templ = fopen("exec/parse2/strings-template.tsv", "rb");
+    Value *facts = load_fact("k2-strings"), *escapes = value_get(facts, "escape");
+    Value *bindings = value_new(JOBJ);
+    char *s; int found = 0;
+    if (!templ || !escapes || escapes->kind != JARR)
+        die("cannot read string escape template facts");
+    value_put(facts, "pre", value_string(pre));
+    value_put(facts, "body", value_string(body));
+    direct_bindings(bindings, "walk_es=@str:{pre}.es,body=$body", facts);
+    while ((s = line(templ))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("string escape template column count");
+        if (!strcmp(f[0], "walk_escape")) {
+            if (found++ || strcmp(f[3], "escape") || strcmp(f[4], "rule"))
+                die("unsupported string escape declaration");
+            for (size_t i = 0; i < escapes->n; i++) {
+                Value *scope = value_new(JOBJ);
+                char *a, *b, *c, *d;
+                value_put(scope, "escape", escapes->items[i].value);
+                a = template_subst(f[5], scope); b = template_subst(f[6], scope);
+                c = template_subst(f[7], scope); d = template_subst(f[8], scope);
+                edge_add(g, bound_name(a, bindings), 'b', b,
+                         bound_name(c, bindings), d);
+                free(a); free(b); free(c); free(d);
+            }
+        }
+        free(s);
+    }
+    if (ferror(templ) || fclose(templ) || found != 1)
+        die("incomplete string escape template");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3268,6 +3303,19 @@ static void inspect_parse2_strwalk_head_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_strwalk_escape_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3290,6 +3338,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-strwalk-head-graph")) {
         inspect_parse2_strwalk_head_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-strwalk-escape-graph")) {
+        inspect_parse2_strwalk_escape_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
