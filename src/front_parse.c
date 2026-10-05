@@ -973,6 +973,20 @@ int stw(void) { if (curptr) return 8; return curelem; }
 int scopy(int n) {
     int k; int w;
     k = 0;
+    /* 0.0.28 F2: a copy past 256 bytes is a loop of 8-byte moves, the tail unrolled as before.  Fully
+       unrolled, a 20 KB struct copy was 20,000 tape lines a time: cdsh's tui.c (739 lines) made 3.6 MB
+       of tape and 16 units overflowed the output buffer.  r3-r5 are scratch here. */
+    if (n > 256) {
+        int top; int end; int n8; n8 = n - n % 8; top = newlab(); end = newlab();
+        es("  @lit.imm r3, 0\n  @lit.imm r4, "); en(n8); ec(10);
+        elab("__unisacc_L", top); es(":\n");
+        es("  @alu.lt r5, r3, r4\n"); elab("  @ctrl.jumpz r5, __unisacc_L", end); ec(10);
+        es("  @alu.add r5, r1, r3\n  @mem.load r2, [r5+0]\n  @alu.add r5, r0, r3\n  @mem.store [r5+0], r2\n");
+        es("  @lit.imm r5, 8\n  @alu.add r3, r3, r5\n");
+        elab("  @ctrl.jump __unisacc_L", top); ec(10);
+        elab("__unisacc_L", end); es(":\n");
+        k = n8;
+    }
     while (k < n) {
         w = 8;
         while (k + w > n) w = w / 2;
