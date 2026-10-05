@@ -3663,7 +3663,7 @@ static void parse2_autoscan(Graph *g) {
     install_section_classes(g, "exec/parse/autoscan-result.tsv", "auto", 'r',
                             bindings, sequences, classes);
 }
-static Value *parse2_unary_rows(Graph *g, const char *part, int row_index) {
+static Value *parse2_unary_rows(Graph *g, const char *part, int row_index, Value *prior) {
     char section[64];
     if (snprintf(section, sizeof(section), "%s.all", part) >= (int)sizeof(section))
         die("unarycontrol section too long");
@@ -3718,6 +3718,8 @@ static Value *parse2_unary_rows(Graph *g, const char *part, int row_index) {
         die("unarycontrol head fresh rows missing");
     for (size_t i = 0; i < ufacts->n; i++)
         value_put(bindings, ufacts->items[i].key, ufacts->items[i].value);
+    if (prior) for (size_t i = 0; i < prior->n; i++)
+        value_put(bindings, prior->items[i].key, prior->items[i].value);
     if (!bind_cell) die("unarycontrol row binding missing");
     direct_bindings(bindings, bind_cell, facts);
     free(bind_cell);
@@ -3736,15 +3738,15 @@ static Value *parse2_unary_rows(Graph *g, const char *part, int row_index) {
     }
     return bindings;
 }
-static void parse2_unary_head(Graph *g) { parse2_unary_rows(g, "part0", 1); }
-static void parse2_unary_part4(Graph *g) { parse2_unary_rows(g, "part4", 4); }
-static void parse2_unary_float_d(Graph *g) { parse2_unary_rows(g, "convert_float", 5); }
-static void parse2_unary_float_s(Graph *g) { parse2_unary_rows(g, "convert_float", 6); }
-static void parse2_unary_int_i(Graph *g) { parse2_unary_rows(g, "convert_int", 7); }
-static void parse2_unary_int_u(Graph *g) { parse2_unary_rows(g, "convert_int", 8); }
-static void parse2_unary_part6(Graph *g) { parse2_unary_rows(g, "part6", 9); }
+static void parse2_unary_head(Graph *g) { parse2_unary_rows(g, "part0", 1, NULL); }
+static void parse2_unary_part4(Graph *g) { parse2_unary_rows(g, "part4", 4, NULL); }
+static void parse2_unary_float_d(Graph *g) { parse2_unary_rows(g, "convert_float", 5, NULL); }
+static void parse2_unary_float_s(Graph *g) { parse2_unary_rows(g, "convert_float", 6, NULL); }
+static void parse2_unary_int_i(Graph *g) { parse2_unary_rows(g, "convert_int", 7, NULL); }
+static void parse2_unary_int_u(Graph *g) { parse2_unary_rows(g, "convert_int", 8, NULL); }
+static void parse2_unary_part6(Graph *g) { parse2_unary_rows(g, "part6", 9, NULL); }
 static char *parse2_unary_part8(Graph *g) {
-    Value *bindings = parse2_unary_rows(g, "part8", 11);
+    Value *bindings = parse2_unary_rows(g, "part8", 11, NULL);
     return copy(value_text(value_get(bindings, "f_part8_1216_U_r_1")));
 }
 static char *parse2_printfallback_head(Graph *g) {
@@ -5024,6 +5026,11 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
             Value *addr_env = parse2_addr_template(&g, addr_entry);
             if (fmtwalk > 16) parse2_addr_auto(&g, addr_entry, addr_env);
             if (fmtwalk > 17) parse2_addr_main(&g, addr_env);
+            if (fmtwalk > 18) {
+                Value *prior = value_new(JOBJ);
+                value_put(prior, "f_part9_1217_U_ad_1", value_get(addr_env, "done"));
+                parse2_unary_rows(&g, "part10", 14, prior);
+            }
         }
         free(addr_entry);
     }
@@ -5188,6 +5195,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-addr-complete-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 18); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-part10-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 19); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
