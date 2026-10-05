@@ -388,6 +388,7 @@ static Value *value_path(Value *root, const char *path) {
     }
     free(parts); return v;
 }
+#include "facts.h"
 static unsigned long fresh_count;
 static char *fresh_label(const char *owner, const char *kind) {
     char name[1024]; const char *dot = strchr(owner, '.');
@@ -2858,6 +2859,59 @@ static int manifest_when(const char *when, Value *flags, Value *facts) {
         if (!amp) break; p = amp + 1;
     }
     free(parts); return 1;
+}
+/* Traverse a manifest block with the same source-order and foreach scopes as
+   assemble.Run.block.  The callback will become the graph operation dispatcher;
+   keeping traversal separate makes one iteration order serve all nine ops. */
+typedef void (*ManifestVisit)(size_t, ManifestRow *, Value *, Value *, void *);
+static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
+                                Value *flags, Value *env, Value *extra,
+                                ManifestVisit visit, void *arg) {
+    for (size_t i = first; i < last; i = rows->row[i].end) {
+        ManifestRow *r = &rows->row[i];
+        Value *facts = seed_facts_scope(env, r->cell[4], extra);
+        Value *opts;
+        if (!manifest_when(r->cell[3], flags, facts)) continue;
+        opts = (!strcmp(r->cell[8], "-") || !*r->cell[8]) ? value_new(JOBJ) : value_json(r->cell[8], "manifest opts");
+        if (!strcmp(r->cell[0], "foreach")) {
+            Value *over = value_get(opts, "over"), *as = value_get(opts, "as"), *items;
+            if (!over || over->kind != JSTR) die("foreach without over");
+            if (r->end == i + 1) die("foreach without body");
+            if (over->s[0] == '$') die("foreach environment map is not yet covered");
+            items = value_path(facts, over->s);
+            if (items->kind != JARR) die("foreach over is not an array");
+            for (size_t j = 0; j < items->n; j++) {
+                Value *next = seed_env_copy(extra);
+                value_put(next, as && as->kind == JSTR ? as->s : "it", items->items[j].value);
+                manifest_walk_block(rows, i + 1, r->end, flags, env, next, visit, arg);
+            }
+        } else {
+            if (r->end != i + 1) die("body under non-foreach op");
+            visit(i, r, facts, opts, arg);
+        }
+    }
+}
+static void manifest_walk_trace(size_t index, ManifestRow *row, Value *facts,
+                                Value *opts, void *arg) {
+    Value *out = arg, *n = value_new(JINT);
+    (void)row; (void)facts; (void)opts;
+    n->number = (long long)index;
+    value_put(out, NULL, n);
+}
+static void inspect_manifest_walk(const char *path, const char *row_text,
+                                  const char *env_text, const char *flags_text,
+                                  const char *outpath) {
+    ManifestRows rows = manifest_rows(path);
+    Value *flags = value_json(flags_text, "manifest flags");
+    Value *env = value_json(env_text, "manifest env");
+    Value *trace = value_new(JARR);
+    char *end; unsigned long start = strtoul(row_text, &end, 10); FILE *out;
+    if (*end || start >= rows.n || strcmp(rows.row[start].cell[0], "foreach"))
+        die("manifest walk start must be a foreach row index");
+    manifest_walk_block(&rows, start, rows.row[start].end, flags, env, NULL,
+                        manifest_walk_trace, trace);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    value_write(out, trace); if (fclose(out)) die("output close failed");
 }
 static void inspect_manifest_rows(const char *path, const char *outpath) {
     ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
@@ -6061,6 +6115,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 6 && !strcmp(argv[1], "inspect-manifest-when")) {
         inspect_manifest_when(argv[2], argv[3], argv[4], argv[5]); return 0;
+    }
+    if (argc == 7 && !strcmp(argv[1], "inspect-manifest-walk")) {
+        inspect_manifest_walk(argv[2], argv[3], argv[4], argv[5], argv[6]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-graph")) {
         build_parse2_token_graph(&g);
