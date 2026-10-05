@@ -3416,6 +3416,38 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
 static void parse2_gen2_return(Graph *g, const char *section) {
     parse2_gen2_return_ex(g, section, NULL);
 }
+static void parse2_gen2_conditional(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/conditional-manifest.tsv", "rb");
+    Value *facts = load_fact("conditional"), *k2env = value_path(load_fact("k2-gen2"), "k2env");
+    Value *env = value_new(JOBJ), *sequences = value_new(JOBJ);
+    char *s; int rows = 0;
+    if (!manifest || !facts || !k2env || k2env->kind != JOBJ)
+        die("conditional manifest or facts missing");
+    value_put(env, "enum_values", value_get(k2env, "ENV"));
+    value_put(env, "enum_defined", value_get(k2env, "END_"));
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "conditional") ||
+            strcmp(f[4], "conditional")) die("conditional manifest row changed");
+        {
+            Value *opts = value_json(f[8], "conditional row options");
+            Value *class_name = value_get(opts, "classes"), *classes;
+            Value *bindings = value_new(JOBJ);
+            if (!class_name || class_name->kind != JSTR) die("conditional classes missing");
+            classes = value_path(facts, class_name->s);
+            direct_bindings(bindings, f[7], env);
+            install_section_classes(g, "exec/parse2/conditional-byte.tsv", f[2], 'b',
+                                    bindings, sequences, classes);
+            install_section_classes(g, "exec/parse2/conditional-result.tsv", f[2], 'r',
+                                    bindings, sequences, classes);
+        }
+        rows++; free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || rows != 11)
+        die("conditional manifest incomplete");
+}
 static void parse2_gen2_type_words(Graph *g) {
     Value *facts = load_fact("k2-gen2"), *words = value_get(facts, "typewords");
     if (!words || words->kind != JARR || words->n != 8)
@@ -6085,6 +6117,16 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt0-full-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_return(&g, "qt0");
+        parse2_gen2_conditional(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
