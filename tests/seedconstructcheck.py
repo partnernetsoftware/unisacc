@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Compare the C99 table-to-network constructor with the Python oracle."""
 from pathlib import Path
+import json
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "exec"))
+import assemble
+import finite_rules
 
 def run(*args, timeout=20):
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
@@ -41,4 +46,25 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
         c_json = work / (tag + ".c.json")
         run(str(cgen), stage, str(c_json), *flags, timeout=50)
         assert c_json.read_bytes() == ref.read_bytes(), "seed/gen.c %s delta differs from exec/build/gen.py" % stage
-print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed and pp deltas byte-identical")
+    # Native ABI is the next complete stage. Check its already shared DSL parts
+    # against the Python constructor before composing the recursive call graph.
+    manifest = ROOT / "exec/nativeabi/gen-manifest.tsv"
+    rows = [line.split("\t") for line in manifest.read_text().splitlines()
+            if line and not line.startswith("#")]
+    let = [row for row in rows if row[0] == "let" and "mapseq" in row[8]]
+    assert len(let) == 1, "nativeabi mapseq declaration changed"
+    runner = object.__new__(assemble.Run)
+    runner.env = {}
+    expected = runner.mapseq(json.loads(let[0][8])["mapseq"], assemble.load_facts(let[0][4]), {})
+    c_map = work / "nativeabi-mapseq.c.json"
+    run(str(cgen), "inspect-mapseq", "nativeabi", str(c_map))
+    assert c_map.read_bytes() == json.dumps(expected, separators=(",", ":")).encode(), "nativeabi mapseq differs"
+    rules, edits, modes = finite_rules.expand_template(ROOT / "exec/nativeabi/gen-template.tsv",
+                                                       assemble.load_facts("nativeabi"),
+                                                       lambda kind: (_ for _ in ()).throw(AssertionError(kind)),
+                                                       section="reject")
+    assert not edits and not modes
+    c_reject = work / "nativeabi-reject.c.tsv"
+    run(str(cgen), "inspect-template", "nativeabi", "reject", str(c_reject))
+    assert c_reject.read_bytes() == ("\n".join(rules) + "\n").encode(), "nativeabi reject template differs"
+print("seed net: prune and declared-return table byte-identical to Python; seed/gen.c prune, opt O1, opt --o2, lex, lex --typed and pp deltas byte-identical; nativeabi mapseq/reject template equal")
