@@ -3417,6 +3417,20 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
 static void parse2_gen2_return(Graph *g, const char *section) {
     parse2_gen2_return_ex(g, section, NULL);
 }
+static void parse2_gen2_return_float(Graph *g, Value *row) {
+    Value *extra = value_new(JOBJ), *label = value_get(row, "label");
+    Value *convert = value_get(row, "cv"), *base = value_get(row, "base");
+    char entry[80], cvt[80];
+    if (!label || label->kind != JSTR || !convert || convert->kind != JSTR ||
+        !base || base->kind != JINT ||
+        snprintf(entry, sizeof(entry), "QT.%s", label->s) >= (int)sizeof(entry) ||
+        snprintf(cvt, sizeof(cvt), "TO.%s", convert->s) >= (int)sizeof(cvt))
+        die("return floating row invalid");
+    value_put(extra, "float_entry", value_string(entry));
+    value_put(extra, "float_convert", value_string(cvt));
+    value_put(extra, "result_base", base);
+    parse2_gen2_return_ex(g, "floating", extra);
+}
 static void parse2_gen2_conditional(Graph *g) {
     FILE *manifest = fopen("exec/parse2/conditional-manifest.tsv", "rb");
     Value *facts = load_fact("conditional"), *k2env = value_path(load_fact("k2-gen2"), "k2env");
@@ -6124,22 +6138,23 @@ int main(int argc, char **argv) {
         if (fclose(out)) die("output close failed");
         return 0;
     }
-    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-first-graph")) {
-        Value *floats = value_get(load_fact("k2-gen2"), "retfloat"), *extra = value_new(JOBJ);
-        Value *first, *label, *convert, *base; char entry[80], cvt[80];
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-pair-graph")) {
+        Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
         if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
-        first = floats->items[0].value;
-        label = value_get(first, "label"); convert = value_get(first, "cv"); base = value_get(first, "base");
-        if (!label || label->kind != JSTR || !convert || convert->kind != JSTR ||
-            !base || base->kind != JINT ||
-            snprintf(entry, sizeof(entry), "QT.%s", label->s) >= (int)sizeof(entry) ||
-            snprintf(cvt, sizeof(cvt), "TO.%s", convert->s) >= (int)sizeof(cvt))
-            die("return floating row invalid");
-        value_put(extra, "float_entry", value_string(entry));
-        value_put(extra, "float_convert", value_string(cvt));
-        value_put(extra, "result_base", base);
         build_parse2_token_graph(&g);
-        parse2_gen2_return_ex(&g, "floating", extra);
+        for (size_t i = 0; i < floats->n; i++)
+            parse2_gen2_return_float(&g, floats->items[i].value);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-first-graph")) {
+        Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
+        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        build_parse2_token_graph(&g);
+        parse2_gen2_return_float(&g, floats->items[0].value);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
