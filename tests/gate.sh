@@ -477,6 +477,9 @@ job seed-construct-parse2-22 python3 ./tests/seedconstructcheck.py --part parse2
 job seed-construct-parse2-23 python3 ./tests/seedconstructcheck.py --part parse2-23 # 0.0.28: gen2 sizeof3 control
 job seed-construct-parse2-24 python3 ./tests/seedconstructcheck.py --part parse2-24 # 0.0.28: gen2 address control
 job seed-construct-parse2-25 python3 ./tests/seedconstructcheck.py --part parse2-25 # 0.0.28: gen2 if control
+job seed-construct-parse2-26 python3 ./tests/seedconstructcheck.py --part parse2-26 # 0.0.28: gen2 switch control
+job seed-construct-parse2-27 python3 ./tests/seedconstructcheck.py --part parse2-27 # 0.0.28: gen2 loops control
+job seed-construct-parse2-28 python3 ./tests/seedconstructcheck.py --part parse2-28 # 0.0.28: gen2 if-loops family
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
