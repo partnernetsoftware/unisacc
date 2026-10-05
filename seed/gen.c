@@ -2847,7 +2847,7 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
         if (!last) die("fresh cell lacks key");
         scope = copy_n(cell + 6, (size_t)(last - cell - 6));
         owner = strchr(scope, '{') ? seed_fmt(scope, facts) : seed_interp(scope, env);
-        if (strncmp(owner, "U:", 2) && strncmp(owner, "S:", 2))
+        if (strncmp(owner, "U:", 2) && strncmp(owner, "S:", 2) && strncmp(owner, "P:", 2))
             die("manifest fresh scope is not yet covered");
         name = fresh_label(owner + 2, last + 1);
         v = value_string(name); free(name); free(owner); free(scope); return v;
@@ -2857,7 +2857,7 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
 /* Traverse a manifest block with the same source-order and foreach scopes as
    assemble.Run.block.  The callback will become the graph operation dispatcher;
    keeping traversal separate makes one iteration order serve all nine ops. */
-typedef void (*ManifestVisit)(size_t, ManifestRow *, Value *, Value *, void *);
+typedef void (*ManifestVisit)(size_t, ManifestRow *, Value *, Value *, Value *, void *);
 static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                                 Value *flags, Value *env, Value *extra,
                                 ManifestVisit visit, void *arg) {
@@ -2924,31 +2924,56 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             }
         } else {
             if (r->end != i + 1) die("body under non-foreach op");
-            visit(i, r, facts, opts, arg);
+            visit(i, r, facts, opts, env, arg);
         }
     }
 }
 typedef struct { Graph *graph; const char *dir; unsigned rows, labels; } ManifestGraph;
+static Value *manifest_bind_cells(const char *cells, Value *facts, Value *env) {
+    Value *out = value_new(JOBJ); char *all, *p;
+    if (!cells || !*cells || !strcmp(cells, "-")) return out;
+    all = copy(cells); p = all;
+    for (;;) {
+        char *comma = strchr(p, ','), *eq;
+        if (comma) *comma = 0;
+        eq = strchr(p, '=');
+        if (!eq) die("manifest binding lacks '='");
+        *eq = 0;
+        value_put(out, p, manifest_cell(eq + 1, facts, env));
+        if (!comma) break; p = comma + 1;
+    }
+    free(all); return out;
+}
 static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
-                                 Value *opts, void *arg) {
+                                 Value *opts, Value *env, void *arg) {
     ManifestGraph *ctx = arg; char path[1024];
     (void)index;
     if (!strcmp(row->cell[0], "rows")) {
-        Value *bindings = seed_bind_cells(row->cell[7], facts, value_new(JOBJ));
+        Value *bindings = value_new(JOBJ), *bindmap = value_get(opts, "bindmap");
+        for (size_t i = 0; i < opts->n; i++)
+            if (strcmp(opts->items[i].key, "bindmap")) die("manifest rows option is not yet covered");
+        if (bindmap) seed_update(bindings, value_path(facts, value_text(bindmap)));
+        seed_update(bindings, manifest_bind_cells(row->cell[7], facts, env));
         for (int mode = 0; mode < 2; mode++) {
             if (snprintf(path, sizeof(path), "%s/%s-%s.tsv", ctx->dir, row->cell[1],
                          mode ? "result" : "byte") >= (int)sizeof(path)) die("manifest rule path too long");
-            install_section(ctx->graph, path, row->cell[2], mode ? 'r' : 'b', bindings, NULL);
+            if (!strcmp(row->cell[2], "-") || !*row->cell[2])
+                install_plain(ctx->graph, path, mode ? 'r' : 'b', bindings, NULL);
+            else install_section(ctx->graph, path, row->cell[2], mode ? 'r' : 'b', bindings, NULL);
         }
         ctx->rows++;
     } else if (!strcmp(row->cell[0], "label")) {
         char *names = copy(row->cell[1]), *p = names;
+        if (opts->n) die("manifest label option is not yet covered");
         while (*p) {
             char *comma = strchr(p, ','); if (comma) *comma = 0;
             label_add(ctx->graph, p);
             if (!comma) break; p = comma + 1;
         }
         free(names); ctx->labels++;
+    } else if (!strcmp(row->cell[0], "let")) {
+        if (opts->n) die("manifest let option is not yet covered");
+        seed_update(env, manifest_bind_cells(row->cell[7], facts, env));
     } else {
         fprintf(stderr, "manifest op: %s\n", row->cell[0]);
         die("manifest graph operation is not yet covered");
@@ -2965,9 +2990,9 @@ static void manifest(Graph *graph, const char *dir) {
     if (!ctx.rows || !ctx.labels) die("manifest omitted rows or labels");
 }
 static void manifest_walk_trace(size_t index, ManifestRow *row, Value *facts,
-                                Value *opts, void *arg) {
+                                Value *opts, Value *env, void *arg) {
     Value *out = arg, *n = value_new(JINT);
-    (void)row; (void)facts; (void)opts;
+    (void)row; (void)facts; (void)opts; (void)env;
     n->number = (long long)index;
     value_put(out, NULL, n);
 }
