@@ -2873,8 +2873,10 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
         Value *opts;
         if (!manifest_when(r->cell[3], flags, facts)) continue;
         opts = (!strcmp(r->cell[8], "-") || !*r->cell[8]) ? value_new(JOBJ) : value_json(r->cell[8], "manifest opts");
+        seed_let(value_get(opts, "let"), facts, env);
         if (!strcmp(r->cell[0], "foreach")) {
             Value *over = value_get(opts, "over"), *as = value_get(opts, "as"), *items;
+            Value *pre = value_get(opts, "pre");
             if (!over || over->kind != JSTR) die("foreach without over");
             if (r->end == i + 1) die("foreach without body");
             if (over->s[0] == '$') die("foreach environment map is not yet covered");
@@ -2883,6 +2885,19 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             for (size_t j = 0; j < items->n; j++) {
                 Value *next = seed_env_copy(extra);
                 value_put(next, as && as->kind == JSTR ? as->s : "it", items->items[j].value);
+                if (pre) {
+                    if (pre->kind != JARR) die("foreach pre is not an array");
+                    for (size_t k = 0; k < pre->n; k++) {
+                        Value *pair = pre->items[k].value;
+                        Value *scope, *v;
+                        if (pair->kind != JARR || pair->n != 2 ||
+                            pair->items[0].value->kind != JSTR || pair->items[1].value->kind != JSTR)
+                            die("invalid foreach pre binding");
+                        scope = seed_facts_scope(env, r->cell[4], next);
+                        v = seed_eval(pair->items[1].value->s, scope, env);
+                        value_put(next, pair->items[0].value->s, v);
+                    }
+                }
                 manifest_walk_block(rows, i + 1, r->end, flags, env, next, visit, arg);
             }
         } else {
