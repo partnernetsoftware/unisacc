@@ -5976,6 +5976,17 @@ int main(int argc, char **argv) {
         if (fclose(out)) die("output close failed");
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-full-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_control(&g, "sizeof2");
+        parse2_gen2_manifest_strwalk(&g, "fact:seg_sizeof2", 0, 2);
+        parse2_gen2_manifest_strwalk(&g, "fact:seg_sizeof2", 1, 2);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-first-walk-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "sizeof2");
