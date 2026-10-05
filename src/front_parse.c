@@ -5414,6 +5414,36 @@ int stmt_(void) {
 }
 
 
+/* 0.0.28 F1: constructor and destructor calls.  A mark from the lexer applies to the function
+   definition whose name token follows it in the same declaration (no `;`, `{` or `}` between).
+   The call text is kept here because __init and __main_ret are emitted after every unit is walked,
+   when an earlier unit's tokens are gone. */
+char ctbuf[8192]; int nctbuf; char dtbuf[8192]; int ndtbuf;
+int ctor_note(int t) {
+    int m; int k; int c; int ok; int kind; int nsave; int q;
+    m = 0;
+    while (m < nctorm) {
+        if (ctorm[m] <= t) {
+            ok = 1; k = ctorm[m];
+            while (k < t) { if (tlen[k] == 1) { c = src[tpos[k]]; if (c == 59 || c == 123 || c == 125) ok = 0; } k = k + 1; }
+            if (ok) {
+                kind = ctork[m]; ctork[m] = 0;
+                if (kind) {
+                    nsave = nout; es("  @call.call "); etok(t); ec(10);
+                    q = nsave;
+                    while (q < nout) {
+                        if (kind == 1 && nctbuf < 8191) { ctbuf[nctbuf] = out[q]; nctbuf = nctbuf + 1; }
+                        if (kind == 2 && ndtbuf < 8191) { dtbuf[ndtbuf] = out[q]; ndtbuf = ndtbuf + 1; }
+                        q = q + 1;
+                    }
+                    nout = nsave;
+                }
+            }
+        }
+        m = m + 1;
+    }
+    return 0;
+}
 int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start; int fnvoid;
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
@@ -5539,6 +5569,7 @@ int function(int t, int w) {
     if (fsym >= 0) { if (symbool[fsym] && symptr[fsym] == 0) retkind = 9; }
     rett = t;
     retlab = newlab();
+    ctor_note(t);
     infunc = 1;
     block();
     infunc = 0;
@@ -6057,6 +6088,7 @@ int fe_units(char **paths, int npath, char *t) {
     if (unitmode) { if (symfn("main", 4) >= 0) emit_start(); es(".global __init_u\n__init_u:\n"); }
     else es("__init:\n");
     k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
+    k = 0; while (k < nctbuf) { out[nout] = ctbuf[k]; nout = nout + 1; k = k + 1; }   /* F1: constructors, after the initialisers */
     es("  @ctrl.ret\n");
     /* A return from main is exit(status) (C99 5.1.2.2.3).  When the program
        carries our <stdlib.h>, `exit` is a function in it -- the one that
@@ -6064,8 +6096,14 @@ int fe_units(char **paths, int npath, char *t) {
        rather than leaving by `.exit` with the handlers unrun.  Only after
        every unit is walked is it known whether there is one. */
     es("__main_ret:\n");
+    if (ndtbuf > 0) {                     /* F1: destructors, main's status kept across the calls */
+        es("  .lea r1, __mainrc\n  store64 [r1+0], r0\n");
+        k = 0; while (k < ndtbuf) { out[nout] = dtbuf[k]; nout = nout + 1; k = k + 1; }
+        es("  .lea r1, __mainrc\n  load64 r0, [r1+0]\n");
+    }
     if (symfn("exit", 4) >= 0) es("  @call.call exit\n");
     es("  @lit.exit r0\n");
+    if (ndtbuf > 0) es(".bss __mainrc 8\n");
     if (needslen) {
         es("__slen:\n  mov r2, r0\n  @lit.imm r1, 0\n"
            "__slen_top:\n  @alu.add r4, r2, r1\n  @mem.ld r5, [r4+0], 1\n"

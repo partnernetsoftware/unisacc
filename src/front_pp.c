@@ -24,6 +24,10 @@ int *tkind;             /* index into TOKV */
 int *tpos;              /* offset of the token text in src */
 int *tlen;
 int ntok;
+/* 0.0.28 F1: the lexer drops __attribute__((...)) (the Python lexer does too, and selfhost
+   compares token streams), so constructor/destructor survive only as marks: the index of the
+   next token and the kind (1 constructor, 2 destructor), read by the parser's function(). */
+int ctorm[256]; int ctork[256]; int nctorm;
 
 char tbuf[256];
 
@@ -2837,7 +2841,7 @@ int lex(void) {
     int strpfx;                            /* the `L` of an `L"..."`, or -1 */
     int isf;
     i = 0;
-    ntok = 0;
+    ntok = 0; nctorm = 0;
     strpfx = 0 - 1;
     while (1) {
         /* every branch below appends at most one token; none checked */
@@ -2887,6 +2891,14 @@ int lex(void) {
                         if (at(k) == 41) { st = st - 1;
                             if (st == 0) { k = k + 1; break; } }
                         k = k + 1;
+                    }
+                    if (srcis(i, j - i, "__attribute__") && nctorm < 256) {
+                        int q; q = j;
+                        while (q + 11 <= k) {
+                            if (srcis(q, 11, "constructor")) { ctorm[nctorm] = ntok; ctork[nctorm] = 1; nctorm = nctorm + 1; break; }
+                            if (q + 10 <= k && srcis(q, 10, "destructor")) { ctorm[nctorm] = ntok; ctork[nctorm] = 2; nctorm = nctorm + 1; break; }
+                            q = q + 1;
+                        }
                     }
                     i = k;
                     continue;
