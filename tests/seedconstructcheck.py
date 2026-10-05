@@ -638,6 +638,44 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                                 "seqs": [list(map(list, seq)) for seq in e3_printf_head.g.seqs]}
         assert printf_head_graph.read_bytes() == json.dumps(expected_printf_head, separators=(",", ":")).encode(), \
             "seed/gen.c parse2 printfallback head differs"
+        printf_dispatch_graph = work / "parse2-printfallback-dispatch.c.json"
+        run(str(cgen), "inspect-parse2-printfallback-dispatch-graph", str(printf_dispatch_graph))
+        e3_printf_dispatch = parse2base.executor()
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {"part_startup": 1}).run(
+            ROOT / "exec/parse2/gen2parts-manifest.tsv")
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {},
+                     {"control_section": "startup-marker", "statement": "STMT",
+                      "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+            ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {}).run(initializer_manifest)
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {}).run(float_manifest)
+        assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+        printf_dispatch_unary_run = assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {},
+                               {"warnings": False, "ucx": unaryenv["ucx"],
+                                "ufacts": unaryenv["ufacts"]})
+        printf_dispatch_unary_run.root = unary_manifest.parent
+        for depth, row in printf_dispatch_unary_run.rows(unary_manifest)[:10]:
+            printf_dispatch_unary_run.one(row, [], depth, {})
+        printf_manifest = ROOT / "exec/parse2/printfallback-manifest.tsv"
+        printf_dispatch_run = assemble.Run(e3_printf_dispatch, e3_printf_dispatch.P, {}, {})
+        printf_dispatch_run.root = printf_manifest.parent
+        for depth, row in printf_dispatch_run.rows(printf_manifest)[:3]:
+            printf_dispatch_run.one(row, [], depth, {})
+        e3_printf_dispatch.g.finish()
+        expected_printf_dispatch = {"start": "START",
+                                    "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                               for name, (mode, row) in e3_printf_dispatch.g.st.items()},
+                                    "seqs": [list(map(list, seq)) for seq in e3_printf_dispatch.g.seqs]}
+        printf_dispatch_actual = printf_dispatch_graph.read_bytes()
+        printf_dispatch_expected = json.dumps(expected_printf_dispatch, separators=(",", ":")).encode()
+        if printf_dispatch_actual != printf_dispatch_expected:
+            first = next((i for i, (a, b) in enumerate(zip(printf_dispatch_actual, printf_dispatch_expected))
+                          if a != b), min(len(printf_dispatch_actual), len(printf_dispatch_expected)))
+            raise AssertionError(f"seed/gen.c parse2 printfallback dispatch differs at {first}: "
+                                 f"C={printf_dispatch_actual[first:first+100]!r} "
+                                 f"Python={printf_dispatch_expected[first:first+100]!r}")
     if part in ("base", "all"):
         for stage, flags in (("prune", ()), ("opt", ()), ("opt", ("--o2",)), ("lex", ()), ("lex", ("--typed",)), ("pp", ()), ("nativeabi", ())):
             tag = stage + "".join(flags)
@@ -696,4 +734,4 @@ if part in ("base", "all"):
 if part in ("parse2", "all"):
     print("seed construct parse2: token prelude through autoscan graph byte-identical")
 if part in ("parse2-2", "all"):
-    print("seed construct parse2-2: unary control through printfallback head graph byte-identical")
+    print("seed construct parse2-2: unary control through printfallback dispatch graph byte-identical")
