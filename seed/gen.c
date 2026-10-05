@@ -3627,7 +3627,7 @@ static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
     if (snprintf(section, sizeof(section), "%s.all", part) >= (int)sizeof(section))
         die("unarycontrol section too long");
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
-    FILE *names; char *s; int rows = 0, labels = 0;
+    FILE *names; char *s, *bind_cell = NULL; int rows = 0, labels = 0;
     Value *facts = load_fact("k2-unary"), *bindings = value_new(JOBJ);
     Value *genfacts = load_fact("k2-gen2"), *sequences = NULL;
     Value *ufacts = value_path(genfacts, "unaryenv.ufacts");
@@ -3642,10 +3642,12 @@ static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
             if (strcmp(f[0], "let")) die("unarycontrol sequence declaration changed");
             sequences = mapseq_construct(value_json(f[8], "unarycontrol sequences"), facts);
         }
-        if (rows == row_index &&
-            (strcmp(f[0], "rows") || strcmp(f[1], "unarycontrol") ||
-             strcmp(f[2], section) || strcmp(f[4], "k2-unary")))
-            die("unarycontrol row declaration changed");
+        if (rows == row_index) {
+            if (strcmp(f[0], "rows") || strcmp(f[1], "unarycontrol") ||
+                strcmp(f[2], section) || strcmp(f[4], "k2-unary"))
+                die("unarycontrol row declaration changed");
+            bind_cell = copy(f[7]);
+        }
         rows++; free(s);
         if (rows > row_index) break;
     }
@@ -3675,6 +3677,9 @@ static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
         die("unarycontrol head fresh rows missing");
     for (size_t i = 0; i < ufacts->n; i++)
         value_put(bindings, ufacts->items[i].key, ufacts->items[i].value);
+    if (!bind_cell) die("unarycontrol row binding missing");
+    direct_bindings(bindings, bind_cell, facts);
+    free(bind_cell);
     {
         Value *selected = value_new(JOBJ);
         for (size_t i = 0; i < seqnames->n; i++) {
@@ -3691,6 +3696,7 @@ static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
 }
 static void parse2_unary_head(Graph *g) { parse2_unary_rows(g, "part0", 1); }
 static void parse2_unary_part4(Graph *g) { parse2_unary_rows(g, "part4", 4); }
+static void parse2_unary_float_d(Graph *g) { parse2_unary_rows(g, "convert_float", 5); }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
@@ -4064,6 +4070,32 @@ static void inspect_parse2_unary_part4_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_unary_float_d_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    parse2_unary_head(&g);
+    parse2_unary_compound(&g);
+    parse2_unary_cast_void(&g);
+    parse2_unary_part4(&g);
+    parse2_unary_float_d(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -4125,6 +4157,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-part4-graph")) {
         inspect_parse2_unary_part4_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-float-d-graph")) {
+        inspect_parse2_unary_float_d_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
