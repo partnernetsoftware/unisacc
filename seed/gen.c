@@ -3482,6 +3482,45 @@ static void parse2_float_entry(Graph *g) {
     install_section(g, "exec/parse2/floatconst-byte.tsv", "entry", 'b', bindings, sequences);
     install_section(g, "exec/parse2/floatconst-result.tsv", "entry", 'r', bindings, sequences);
 }
+static void parse2_float_digits(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    char *s; int row = 0, digit = 0;
+    if (!manifest) die("cannot open floatconst manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("floatconst manifest column count");
+        if (row++ < 3) { free(s); continue; }
+        if (strcmp(f[0], "template") || strcmp(f[1], "floatconst") ||
+            strcmp(f[2], "digit")) { free(s); break; }
+        {
+            Value *facts = load_facts_expr(f[4]), *bindings = value_new(JOBJ);
+            Value *opts = value_json(f[8], "floatconst digit options");
+            Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
+            Buffer expanded = expand_template_file("exec/parse2/floatconst-template.tsv", facts, "digit");
+            Buffer bound = {0}; FILE *table = buffer_file(&expanded); char *rule;
+            direct_bindings(bindings, f[7], facts);
+            while ((rule = line(table))) {
+                char *c[4]; int cols = fields_tab(rule, c, 4);
+                if (cols != 4) die("floatconst digit template column count");
+                buf_add(&bound, bound_name(c[0], bindings), strlen(bound_name(c[0], bindings)));
+                buf_char(&bound, '\t'); buf_add(&bound, c[1], strlen(c[1]));
+                buf_char(&bound, '\t');
+                buf_add(&bound, bound_name(c[2], bindings), strlen(bound_name(c[2], bindings)));
+                buf_char(&bound, '\t'); buf_add(&bound, c[3], strlen(c[3]));
+                buf_char(&bound, '\n'); free(rule);
+            }
+            if (ferror(table) || fclose(table)) die("floatconst digit template read failed");
+            table = buffer_file(&bound);
+            install_delta_text(g, table, 'b', domain, NULL, NULL, 0, 0, NULL, "START");
+            if (fclose(table)) die("floatconst digit table close failed");
+        }
+        digit++; free(s);
+        if (digit == 3) break;
+    }
+    if (fclose(manifest) || digit != 3) die("incomplete floatconst digit manifest");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3634,6 +3673,25 @@ static void inspect_parse2_float_entry_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_float_digits_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3674,6 +3732,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-float-entry-graph")) {
         inspect_parse2_float_entry_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-float-digits-graph")) {
+        inspect_parse2_float_digits_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
