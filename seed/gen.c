@@ -4272,14 +4272,15 @@ static Value *parse2_manifest_out_sequence(const char *cell) {
     }
     return seq;
 }
-static void parse2_addr_out_bindings(Value *seqs, const char *cells) {
+static void parse2_addr_out_bindings(Value *seqs, const char *cells, Value *env) {
     char *all = copy(cells), *p = all;
     while (*p) {
         char *comma = strchr(p, ','), *eq = strchr(p, '=');
         if (comma) *comma = 0;
         if (!eq || eq == p) die("addr sequence binding changed");
         *eq = 0;
-        value_put(seqs, p, parse2_manifest_out_sequence(eq + 1));
+        value_put(seqs, p, eq[1] == '$' ? value_path(env, eq + 2) :
+                  parse2_manifest_out_sequence(eq + 1));
         if (!comma) break;
         p = comma + 1;
     }
@@ -4292,6 +4293,7 @@ static Value *parse2_addr_template(Graph *g, const char *entry) {
     char *s; int row = 0; char *global, *done;
     if (!manifest || !entry || !constants) die("addr template inputs missing");
     value_put(env, "entry", value_string(entry));
+    value_put(env, "pending", value_new(JARR));
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -4326,7 +4328,7 @@ static Value *parse2_addr_template(Graph *g, const char *entry) {
                 value_put(facts, constants->items[i].key, constants->items[i].value);
                 value_put(bind, constants->items[i].key, constants->items[i].value);
             }
-            parse2_addr_out_bindings(seqs, f[6]);
+            parse2_addr_out_bindings(seqs, f[6], env);
             Buffer expanded = expand_template_file_fresh("exec/parse2/librarydata-template.tsv",
                                                          facts, "address", entry, NULL);
             Buffer bound = {0}; FILE *table = buffer_file(&expanded); char *rule;
@@ -4374,7 +4376,7 @@ static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
             Value *seqs = value_new(JOBJ), *bindings = value_new(JOBJ);
             if (strcmp(f[0], "rows") || strcmp(f[1], "helpers") ||
                 strcmp(f[2], "address-auto")) die("addr auto row changed");
-            parse2_addr_out_bindings(seqs, f[6]);
+            parse2_addr_out_bindings(seqs, f[6], env);
             direct_bindings(bindings, f[7], env);
             install_section_classes(g, "exec/parse2/helpers-byte.tsv", "address-auto", 'b',
                                     bindings, seqs, NULL);
@@ -4386,6 +4388,41 @@ static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
         if (row == 4) break;
     }
     if (fclose(manifest) || row != 4 || found != 1) die("addr auto row missing");
+}
+static void parse2_addr_main(Graph *g, Value *env) {
+    FILE *manifest = fopen("exec/parse2/addr-manifest.tsv", "rb");
+    Value *constants = load_fact("parse-constants");
+    char *s; int row = 0, found = 0;
+    if (!manifest || !constants || !env) die("addr main inputs missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("addr main manifest columns");
+        if (row == 4) {
+            Value *seqs = value_new(JOBJ), *bindings = value_new(JOBJ);
+            Value *opts = value_json(f[8], "addr main options");
+            Value *mapped = mapseq_construct(opts, constants);
+            char *cell = copy(f[7]), *mark = strstr(cell, ",GMARK=");
+            if (strcmp(f[0], "rows") || strcmp(f[1], "helpers") ||
+                strcmp(f[2], "address") || strcmp(f[4], "parse-constants") || !mark)
+                die("addr main declaration changed");
+            *mark = 0;
+            parse2_addr_out_bindings(seqs, f[6], env);
+            for (size_t i = 0; i < mapped->n; i++)
+                value_put(seqs, mapped->items[i].key, mapped->items[i].value);
+            direct_bindings(bindings, cell, env);
+            value_put(bindings, "GMARK", value_get(constants, "GMARK"));
+            install_section_classes(g, "exec/parse2/helpers-byte.tsv", "address", 'b',
+                                    bindings, seqs, NULL);
+            install_section_classes(g, "exec/parse2/helpers-result.tsv", "address", 'r',
+                                    bindings, seqs, NULL);
+            free(cell); found++;
+        }
+        row++; free(s);
+        if (row == 5) break;
+    }
+    if (fclose(manifest) || row != 5 || found != 1) die("addr main row missing");
 }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
@@ -4986,6 +5023,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
         if (fmtwalk > 15) {
             Value *addr_env = parse2_addr_template(&g, addr_entry);
             if (fmtwalk > 16) parse2_addr_auto(&g, addr_entry, addr_env);
+            if (fmtwalk > 17) parse2_addr_main(&g, addr_env);
         }
         free(addr_entry);
     }
@@ -5147,6 +5185,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-addr-auto-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 17); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-addr-complete-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 18); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
