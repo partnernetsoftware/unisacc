@@ -3304,7 +3304,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
 static void parse2_gen2_control(Graph *g, const char *section) {
     parse2_gen2_control_ex(g, section, NULL, NULL);
 }
-static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
+static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
     FILE *actions = fopen("exec/parse2/gen2-actions-manifest.tsv", "rb");
     FILE *manifest = fopen("exec/parse2/return-manifest.tsv", "rb");
     FILE *fresh = fopen("exec/parse2/return-fresh.tsv", "rb");
@@ -3315,7 +3315,8 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
         (strcmp(section, "ret0") && strcmp(section, "ret1") &&
          strcmp(section, "update") && strcmp(section, "expr0") &&
          strcmp(section, "qt0") && strcmp(section, "qt1") &&
-         strcmp(section, "floating") && strcmp(section, "qt2")))
+         strcmp(section, "floating") && strcmp(section, "qt2") &&
+         strcmp(section, "integer")))
         die("return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
@@ -3413,6 +3414,7 @@ static void parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
                                            bindings, sequences, classes, one);
         }
     }
+    return bindings;
 }
 static void parse2_gen2_return(Graph *g, const char *section) {
     parse2_gen2_return_ex(g, section, NULL);
@@ -6132,6 +6134,22 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-int-first-graph")) {
+        Value *ints = value_get(load_fact("k2-gen2"), "retint"), *extra = value_new(JOBJ);
+        Value *code;
+        if (!ints || ints->kind != JARR || ints->n != 8) die("return integer facts changed");
+        code = value_get(ints->items[0].value, "code");
+        if (!code || code->kind != JINT) die("return integer code missing");
+        value_put(extra, "integer_current", value_string("QT.scalar"));
+        value_put(extra, "integer_code", code);
+        build_parse2_token_graph(&g);
+        parse2_gen2_return_ex(&g, "integer", extra);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
