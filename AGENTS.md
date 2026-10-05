@@ -44,7 +44,7 @@
 |---|---|---|
 | macOS arm64 与 x86_64 | `./tests/all.sh`、`./tests/fat.sh`（Rosetta） | osx/arm64、osx/x86_64 |
 | Linux | `./tests/linux.sh`：整套测试跑在本机 Lima 虚拟机里。`LIMA_VM=minicon-lnx-x86_64` 在 arm64 宿主上是**模拟**的，脚本发现架构不一致会把看门狗放大 10 倍（曾有七个套件因超时被误判失败）。**模拟机上的全套不算发版证据**（0.0.21 实测：约 95 个超时假红），全套跑原生 arm64（`LIMA_VM=default`），x86_64 证据看 release-check 的真机 runner，见 release/RELEASE-PIPELINE.md §4/§14。虚拟机不挂载仓库，树是用管道送进去的 | lnx/arm64、lnx/x86_64 |
-| Windows 11 | `./tests/crossnative.sh`：本机 UTM 虚拟机，用 `utmctl` 驱动 | win/arm64、win/x86_64 |
+| Windows 11 | **CI 为准**（0.0.25 X7，主人 2026-10-04）：release-check 的 winsuite 在 windows-latest、windows-11-arm 真机上跑 winposix、examples、forward/win.c 和自举（`tests/winsuite.py`）；本机 UTM 虚拟机只用于手工排查（`./tests/crossnative.sh`、`tests/nativeboot.sh --windows`） | win/arm64、win/x86_64 |
 
 - `crossnative.sh` 在虚拟机没开时**跳过**该目标：先开机再看 Windows 结果，用完要**关机**（很耗 CPU）。`tests/vms.sh up` / `down` 两件事都做（down 只关 up 开的）；`make release` 自己会调用。
 - 跳过不等于通过：`crossnative.sh` 会点名跳过了什么，`STRICT=1` 让跳过变成失败。每个套件在“什么都没检查”时也失败（`closure.sh` 没有探针时曾打印 `identical 0 differ 0` 然后退出 0）。
