@@ -4835,6 +4835,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     if (fmtwalk > 11) parse2_fmtwalk_conversion(&g, 10);
     if (fmtwalk > 12) parse2_printfcontrol_escape(&g, 1, 4);
     if (fmtwalk > 13) parse2_printfcontrol_part(&g, 4);
+    if (fmtwalk > 14) parse2_unary_rows(&g, "part8", 11);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4984,6 +4985,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfcontrol-4-rows-graph")) {
         inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 14); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-part8-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 17, 1, 1, 1, 2, 15); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
