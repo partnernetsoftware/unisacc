@@ -3410,6 +3410,43 @@ static void parse2_numeric(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || rows != 3)
         die("incomplete numeric manifest");
 }
+static void parse2_float_boundary(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    FILE *templ; char *s; int rows = 0, edits = 0;
+    if (!manifest) die("cannot open floatconst manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("floatconst manifest column count");
+        if (rows == 0 && !strcmp(f[0], "let") &&
+            !strcmp(f[1], "-") && !strcmp(f[8], "{\"mapseq\":{\"reject0\":[{\"acts\":[[\"REJECT\",\"not covered: decimal floating constant\"]]}],\"reject1\":[{\"acts\":[[\"REJECT\",\"not covered: decimal floating suffix\"]]}]}}")) rows++;
+        else if (rows == 1 && !strcmp(f[0], "template") &&
+                 !strcmp(f[1], "floatconst") && !strcmp(f[2], "boundary") &&
+                 !strcmp(f[4], "k2-floatconst")) rows++;
+        else { free(s); break; }
+        free(s);
+        if (rows == 2) break;
+    }
+    if (fclose(manifest) || rows != 2) die("floatconst boundary manifest changed");
+    templ = fopen("exec/parse2/floatconst-template.tsv", "rb");
+    if (!templ) die("cannot open floatconst template");
+    while ((s = line(templ))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("floatconst template column count");
+        if (strcmp(f[0], "boundary")) { free(s); continue; }
+        if (edits == 0 && !strcmp(f[4], "move-state"))
+            pp_move_state(g, f[5], f[6]);
+        else if ((edits == 1 || edits == 2) && !strcmp(f[4], "drop-state"))
+            parse2_drop_state(g, f[5]);
+        else die("unsupported floatconst boundary edit");
+        edits++; free(s);
+    }
+    if (ferror(templ) || fclose(templ) || edits != 3)
+        die("incomplete floatconst boundary edits");
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3527,6 +3564,23 @@ static void inspect_parse2_numeric_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_float_boundary_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3561,6 +3615,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-numeric-graph")) {
         inspect_parse2_numeric_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-float-boundary-graph")) {
+        inspect_parse2_float_boundary_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;

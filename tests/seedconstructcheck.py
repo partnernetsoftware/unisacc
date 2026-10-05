@@ -257,6 +257,30 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                         "seqs": [list(map(list, seq)) for seq in e3_numeric.g.seqs]}
     assert numeric_graph.read_bytes() == json.dumps(expected_numeric, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 numeric child differs"
+    float_boundary_graph = work / "parse2-float-boundary.c.json"
+    run(str(cgen), "inspect-parse2-float-boundary-graph", str(float_boundary_graph))
+    e3_float = parse2base.executor()
+    assemble.Run(e3_float, e3_float.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_float, e3_float.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    assemble.Run(e3_float, e3_float.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+        ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+    assemble.Run(e3_float, e3_float.P, {}, {}).run(initializer_manifest)
+    assemble.Run(e3_float, e3_float.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+    float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
+    float_run = assemble.Run(e3_float, e3_float.P, {}, {})
+    float_run.root = float_manifest.parent
+    for depth, row in float_run.rows(float_manifest)[:2]:
+        float_run.one(row, [], depth, {})
+    e3_float.g.finish()
+    expected_float = {"start": "START",
+                      "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                 for name, (mode, row) in e3_float.g.st.items()},
+                      "seqs": [list(map(list, seq)) for seq in e3_float.g.seqs]}
+    assert float_boundary_graph.read_bytes() == json.dumps(expected_float, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 float boundary differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"
