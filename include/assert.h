@@ -14,7 +14,8 @@
 #define assert(e) ((void)0)
 #else
 /* an expression, not a statement (C99 7.2.1.1): SQLite's shell writes `x ? 1 : (assert(0), 0)` */
-#define assert(e) ((e) ? (void)0 : (printf("assertion failed: %s\n", #e), exit(1)))
+#define assert(e) ((e) ? (void)0 : \
+                   (printf("assertion failed: %s\n", #e), exit(1)))
 #endif
 
 #endif
