@@ -3622,7 +3622,10 @@ static void parse2_autoscan(Graph *g) {
     install_section_classes(g, "exec/parse/autoscan-result.tsv", "auto", 'r',
                             bindings, sequences, classes);
 }
-static void parse2_unary_head(Graph *g) {
+static void parse2_unary_rows(Graph *g, const char *part, int row_index) {
+    char section[64];
+    if (snprintf(section, sizeof(section), "%s.all", part) >= (int)sizeof(section))
+        die("unarycontrol section too long");
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *names; char *s; int rows = 0, labels = 0;
     Value *facts = load_fact("k2-unary"), *bindings = value_new(JOBJ);
@@ -3635,19 +3638,19 @@ static void parse2_unary_head(Graph *g) {
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9) die("unarycontrol manifest column count");
-        if (rows == 0 && !strcmp(f[0], "let")) {
-            Value *opts = value_json(f[8], "unarycontrol sequences");
-            sequences = mapseq_construct(opts, facts);
-            rows++;
-        } else if (rows == 1 && !strcmp(f[0], "rows") &&
-                   !strcmp(f[1], "unarycontrol") && !strcmp(f[2], "part0.all") &&
-                   !strcmp(f[4], "k2-unary")) rows++;
-        else { free(s); break; }
-        free(s);
-        if (rows == 2) break;
+        if (rows == 0) {
+            if (strcmp(f[0], "let")) die("unarycontrol sequence declaration changed");
+            sequences = mapseq_construct(value_json(f[8], "unarycontrol sequences"), facts);
+        }
+        if (rows == row_index &&
+            (strcmp(f[0], "rows") || strcmp(f[1], "unarycontrol") ||
+             strcmp(f[2], section) || strcmp(f[4], "k2-unary")))
+            die("unarycontrol row declaration changed");
+        rows++; free(s);
+        if (rows > row_index) break;
     }
-    if (fclose(manifest) || rows != 2 || !sequences || !classes || !seqnames)
-        die("unarycontrol head declaration changed");
+    if (fclose(manifest) || rows != row_index + 1 || !sequences || !classes || !seqnames)
+        die("unarycontrol row declaration missing");
     names = fopen("exec/parse2/unarycontrol-fresh.tsv", "rb");
     if (!names) die("cannot open unarycontrol fresh rows");
     while ((s = line(names))) {
@@ -3659,7 +3662,7 @@ static void parse2_unary_head(Graph *g) {
             if (strcmp(f[1], "mode") || strcmp(f[2], "owner") ||
                 strcmp(f[3], "kind") || strcmp(f[4], "key"))
                 die("unarycontrol fresh header changed");
-        } else if (!strcmp(f[0], "part0")) {
+        } else if (!strcmp(f[0], part)) {
             char *label;
             if (strcmp(f[1], "all")) die("unarycontrol fresh mode changed");
             label = fresh_label(f[2], f[3]);
@@ -3680,12 +3683,14 @@ static void parse2_unary_head(Graph *g) {
             if (!seq) die("unarycontrol named sequence missing");
             value_put(selected, name, seq);
         }
-        install_section_classes(g, "exec/parse2/unarycontrol-byte.tsv", "part0.all", 'b',
+        install_section_classes(g, "exec/parse2/unarycontrol-byte.tsv", section, 'b',
                                 bindings, selected, classes);
-        install_section_classes(g, "exec/parse2/unarycontrol-result.tsv", "part0.all", 'r',
+        install_section_classes(g, "exec/parse2/unarycontrol-result.tsv", section, 'r',
                                 bindings, selected, classes);
     }
 }
+static void parse2_unary_head(Graph *g) { parse2_unary_rows(g, "part0", 1); }
+static void parse2_unary_part4(Graph *g) { parse2_unary_rows(g, "part4", 4); }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
@@ -4034,6 +4039,31 @@ static void inspect_parse2_unary_cast_void_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_unary_part4_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    parse2_unary_head(&g);
+    parse2_unary_compound(&g);
+    parse2_unary_cast_void(&g);
+    parse2_unary_part4(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -4092,6 +4122,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-cast-void-graph")) {
         inspect_parse2_unary_cast_void_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-unary-part4-graph")) {
+        inspect_parse2_unary_part4_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
