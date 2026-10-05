@@ -15,7 +15,10 @@ for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh" "CORE_ASM_ARCH=x86_64 exec
     echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
 done
 # 0.0.25 P8: every row of the version plan says how it ends before the version commit.
-python3 tests/bound.py 20 python3 tests/ledgercheck.py --final > /tmp/precheck-lg.$$ 2>&1 || { cat /tmp/precheck-lg.$$; echo "  FAIL: settle the deferral ledger in the plan first"; bad=1; }
+# precheck runs after the version commit (freezecheck needs it), so ledgercheck's default
+# (version.h + 1) already names the next plan: check the version being released.
+V=$(sed -n 's/.*UNISACC_VERSION "\(.*\)".*/\1/p' src/version.h)
+python3 tests/bound.py 20 python3 tests/ledgercheck.py --final "plans/v$V.md" > /tmp/precheck-lg.$$ 2>&1 || { cat /tmp/precheck-lg.$$; echo "  FAIL: settle the deferral ledger in the plan first"; bad=1; }
 rm -f /tmp/precheck-lg.$$
 # 0.0.25 P1: after the version commit only `fix:` commits may touch the product closure.
 python3 tests/bound.py 20 python3 tests/freezecheck.py > /tmp/precheck-fz.$$ 2>&1 || { cat /tmp/precheck-fz.$$; echo "  FAIL: new work inside the freeze window (move it to the next version, or mark a red fix with fix:)"; bad=1; }
@@ -36,8 +39,6 @@ fi
 if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
     echo "  FAIL: UNISACC_FFI_X86_PROVIDER has no manifest.json (rebuild: release/RELEASE-PIPELINE.md section 9 step 5b)"; bad=1
 fi
-if [ "$(limactl list minicon-lnx-x86_64 --format '{{.Status}}' 2>/dev/null)" != Running ]; then
-    echo "  FAIL: Lima minicon-lnx-x86_64 is not running (ccinterop skips its lnx/x86_64 cells, and a skip is a failure): limactl start minicon-lnx-x86_64"; bad=1
-fi
+# 0.0.27 C2: the lnx/x86_64 ccinterop cells run on release-check ccinterop-x86, not a local Lima VM
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
 exit $bad
