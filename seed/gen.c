@@ -2902,6 +2902,22 @@ static Value *manifest_foreach_map(Value *over, Value *join, Value *facts, Value
     }
     return rows;
 }
+/* Graph-valued cells enter the manifest interpreter here; the facts reader
+   intentionally rejects them.  The first use is foreach.pre/chain fresh. */
+static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
+    if (!strncmp(cell, "fresh:", 6)) {
+        const char *last = strrchr(cell + 6, ':'); char *scope, *owner, *name;
+        Value *v;
+        if (!last) die("fresh cell lacks key");
+        scope = copy_n(cell + 6, (size_t)(last - cell - 6));
+        owner = strchr(scope, '{') ? seed_fmt(scope, facts) : seed_interp(scope, env);
+        if (strncmp(owner, "U:", 2) && strncmp(owner, "S:", 2))
+            die("manifest fresh scope is not yet covered");
+        name = fresh_label(owner + 2, last + 1);
+        v = value_string(name); free(name); free(owner); free(scope); return v;
+    }
+    return seed_eval(cell, facts, env);
+}
 /* Traverse a manifest block with the same source-order and foreach scopes as
    assemble.Run.block.  The callback will become the graph operation dispatcher;
    keeping traversal separate makes one iteration order serve all nine ops. */
@@ -2918,7 +2934,7 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
         seed_let(value_get(opts, "let"), facts, env);
         if (!strcmp(r->cell[0], "foreach")) {
             Value *over = value_get(opts, "over"), *as = value_get(opts, "as"), *items;
-            Value *pre = value_get(opts, "pre");
+            Value *pre = value_get(opts, "pre"), *chain = value_get(opts, "chain"), *current = NULL;
             char *over_path;
             if (!over || over->kind != JSTR) die("foreach without over");
             if (r->end == i + 1) die("foreach without body");
@@ -2929,6 +2945,12 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                 free(over_path);
             }
             if (items->kind != JARR) die("foreach over is not an array");
+            if (chain) {
+                Value *start = value_get(chain, "start");
+                if (chain->kind != JOBJ || !start || start->kind != JSTR)
+                    die("invalid foreach chain");
+                current = manifest_cell(start->s, facts, env);
+            }
             for (size_t j = 0; j < items->n; j++) {
                 Value *next = seed_env_copy(extra);
                 value_put(next, as && as->kind == JSTR ? as->s : "it", items->items[j].value);
@@ -2942,11 +2964,27 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                             die("invalid foreach pre binding");
                         scope = seed_env_copy(facts);
                         seed_update(scope, next);
-                        v = seed_eval(pair->items[1].value->s, scope, env);
+                        v = manifest_cell(pair->items[1].value->s, scope, env);
                         value_put(next, pair->items[0].value->s, v);
                     }
                 }
+                if (chain) {
+                    Value *scope = seed_env_copy(facts), *entry = value_get(chain, "entry");
+                    Value *next_cell = value_get(chain, "next"), *following;
+                    if (!entry || entry->kind != JSTR || !next_cell || next_cell->kind != JSTR)
+                        die("invalid foreach chain step");
+                    seed_update(scope, next);
+                    following = manifest_cell(next_cell->s, scope, env);
+                    value_put(next, entry->s, current);
+                    value_put(next, "next", following);
+                    current = following;
+                }
                 manifest_walk_block(rows, i + 1, r->end, flags, env, next, visit, arg);
+            }
+            if (chain) {
+                Value *result = value_get(chain, "result");
+                if (!result || result->kind != JSTR) die("invalid foreach chain result");
+                value_put(env, result->s, current);
             }
         } else {
             if (r->end != i + 1) die("body under non-foreach op");
@@ -2963,7 +3001,7 @@ static void manifest_walk_trace(size_t index, ManifestRow *row, Value *facts,
 }
 static void inspect_manifest_walk(const char *path, const char *row_text,
                                   const char *env_text, const char *flags_text,
-                                  const char *outpath) {
+                                  const char *outpath, int dump_env) {
     ManifestRows rows = manifest_rows(path);
     Value *flags = value_json(flags_text, "manifest flags");
     Value *env = value_json(env_text, "manifest env");
@@ -2974,7 +3012,7 @@ static void inspect_manifest_walk(const char *path, const char *row_text,
     manifest_walk_block(&rows, start, rows.row[start].end, flags, env, NULL,
                         manifest_walk_trace, trace);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, trace); if (fclose(out)) die("output close failed");
+    value_write(out, dump_env ? env : trace); if (fclose(out)) die("output close failed");
 }
 static void inspect_manifest_rows(const char *path, const char *outpath) {
     ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
@@ -6179,8 +6217,10 @@ int main(int argc, char **argv) {
     if (argc == 6 && !strcmp(argv[1], "inspect-manifest-when")) {
         inspect_manifest_when(argv[2], argv[3], argv[4], argv[5]); return 0;
     }
-    if (argc == 7 && !strcmp(argv[1], "inspect-manifest-walk")) {
-        inspect_manifest_walk(argv[2], argv[3], argv[4], argv[5], argv[6]); return 0;
+    if (argc == 7 && (!strcmp(argv[1], "inspect-manifest-walk") ||
+                      !strcmp(argv[1], "inspect-manifest-walk-env"))) {
+        inspect_manifest_walk(argv[2], argv[3], argv[4], argv[5], argv[6],
+                              !strcmp(argv[1], "inspect-manifest-walk-env")); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-graph")) {
         build_parse2_token_graph(&g);
