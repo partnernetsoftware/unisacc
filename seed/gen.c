@@ -3734,58 +3734,12 @@ static char *parse2_printfallback_head(Graph *g) {
     install_section(g, "exec/parse2/printfallback-result.tsv", "head", 'r', bindings, sequences);
     return copy(value_text(value_get(bindings, "PF_b1")));
 }
-static void parse2_printfallback_dispatch_int(Graph *g, const char *entry) {
+static void parse2_printfallback_more(Graph *g, const char *entry, int first, int last) {
     FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
-    FILE *templ = fopen("exec/parse2/printfallback-template.tsv", "rb");
-    Value *facts = NULL, *kinds; char *s; int row = 0, found = 0;
-    if (!manifest || !templ) die("cannot open printfallback dispatch inputs");
-    while ((s = line(manifest))) {
-        char *f[9]; int n;
-        if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, f, 9);
-        if (n != 9) die("printfallback manifest column count");
-        if (row == 2) {
-            if (strcmp(f[0], "template") || strcmp(f[1], "printfallback") ||
-                strcmp(f[2], "dispatch")) die("printfallback dispatch declaration changed");
-            facts = load_facts_expr(f[4]);
-        }
-        row++; free(s);
-        if (row == 3) break;
-    }
-    if (fclose(manifest) || row != 3 || !facts) die("printfallback dispatch missing");
-    kinds = value_get(facts, "kind");
-    if (!kinds || kinds->kind != JARR) die("printfallback kind facts missing");
-    while ((s = line(templ))) {
-        char *f[9]; int n;
-        if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, f, 9);
-        if (n != 9) die("printfallback template column count");
-        if (!strcmp(f[0], "dispatch")) {
-            if (found++ || strcmp(f[1], "kind") || strcmp(f[2], "kind") ||
-                strcmp(f[4], "fill-edge") || strcmp(f[5], "$PF_b1") ||
-                strcmp(f[7], "PF.convert.{kind.name}") || strcmp(f[8], "[]"))
-                die("printfallback dispatch template changed");
-            for (size_t i = 0; i < kinds->n; i++) {
-                Value *kind = kinds->items[i].value;
-                char key[16], target[128];
-                number_text((int)value_get(kind, "i")->number, key);
-                if (snprintf(target, sizeof(target), "PF.convert.%s",
-                             value_text(value_get(kind, "name"))) >= (int)sizeof(target))
-                    die("printfallback target too long");
-                edge_set(g, entry, 'r', key, target, "[]");
-            }
-        }
-        free(s);
-    }
-    if (ferror(templ) || fclose(templ) || found != 1)
-        die("printfallback dispatch template missing");
-}
-static void parse2_printfallback_body_int(Graph *g, const char *entry) {
-    FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
-    Value *sequences = NULL, *seqbindings = value_new(JOBJ);
-    Value *bindings = value_new(JOBJ), *ctx = value_new(JOBJ);
-    char *s; int row = 0;
-    if (!manifest) die("cannot open printfallback body manifest");
+    Value *sequences = NULL, *ctx = value_new(JOBJ);
+    char *s; int row = 0, installed = 0;
+    if (!manifest || first < 2 || last > 16 || first >= last)
+        die("invalid printfallback manifest range");
     value_put(ctx, "PF_b1", value_string(entry));
     while ((s = line(manifest))) {
         char *f[9]; int n;
@@ -3795,20 +3749,57 @@ static void parse2_printfallback_body_int(Graph *g, const char *entry) {
         if (row == 0) {
             if (strcmp(f[0], "let")) die("printfallback sequence declaration changed");
             sequences = mapseq_construct(value_json(f[8], "printfallback sequences"), ctx);
-        } else if (row == 3) {
-            if (strcmp(f[0], "rows") || strcmp(f[1], "printfallback") ||
-                strcmp(f[2], "body") || strcmp(f[4], "k2-printfallback") || !sequences)
+        } else if (row >= first && row < last && !strcmp(f[0], "template")) {
+            FILE *templ = fopen("exec/parse2/printfallback-template.tsv", "rb");
+            Value *facts = load_facts_expr(f[4]), *kinds = value_get(facts, "kind");
+            Value *bind = value_new(JOBJ); char *t; int found = 0;
+            if (strcmp(f[1], "printfallback") || strcmp(f[2], "dispatch") ||
+                !templ || !kinds || kinds->kind != JARR)
+                die("printfallback dispatch declaration changed");
+            direct_bindings(bind, f[7], ctx);
+            while ((t = line(templ))) {
+                char *v[9]; int m;
+                if (!*t || *t == '#') { free(t); continue; }
+                m = fields_tab(t, v, 9);
+                if (m != 9) die("printfallback template column count");
+                if (!strcmp(v[0], "dispatch")) {
+                    if (found++ || strcmp(v[1], "kind") || strcmp(v[2], "kind") ||
+                        strcmp(v[4], "fill-edge") || strcmp(v[5], "$PF_b1") ||
+                        strcmp(v[7], "PF.convert.{kind.name}") || strcmp(v[8], "[]"))
+                        die("printfallback dispatch template changed");
+                    for (size_t i = 0; i < kinds->n; i++) {
+                        Value *kind = kinds->items[i].value;
+                        char key[16], target[128];
+                        number_text((int)value_get(kind, "i")->number, key);
+                        if (snprintf(target, sizeof(target), "PF.convert.%s",
+                                     value_text(value_get(kind, "name"))) >= (int)sizeof(target) ||
+                            strcmp(target, value_text(value_get(bind, "convert"))))
+                            die("printfallback dispatch target changed");
+                        edge_set(g, entry, 'r', key, target, "[]");
+                    }
+                }
+                free(t);
+            }
+            if (ferror(templ) || fclose(templ) || found != 1)
+                die("printfallback dispatch template missing");
+            installed++;
+        } else if (row >= first && row < last && !strcmp(f[0], "rows")) {
+            Value *seqbindings = value_new(JOBJ), *bindings = value_new(JOBJ);
+            if (strcmp(f[1], "printfallback") || strcmp(f[2], "body") ||
+                strcmp(f[4], "k2-printfallback") || !sequences)
                 die("printfallback body declaration changed");
             direct_bindings(seqbindings, f[6], sequences);
             direct_bindings(bindings, f[7], ctx);
+            if (!value_get(seqbindings, "body")) die("printfallback body sequence missing");
+            install_section(g, "exec/parse2/printfallback-byte.tsv", "body", 'b', bindings, seqbindings);
+            install_section(g, "exec/parse2/printfallback-result.tsv", "body", 'r', bindings, seqbindings);
+            installed++;
         }
         row++; free(s);
-        if (row == 4) break;
+        if (row == last) break;
     }
-    if (fclose(manifest) || row != 4 || !value_get(seqbindings, "body"))
-        die("printfallback body missing");
-    install_section(g, "exec/parse2/printfallback-byte.tsv", "body", 'b', bindings, seqbindings);
-    install_section(g, "exec/parse2/printfallback-result.tsv", "body", 'r', bindings, seqbindings);
+    if (fclose(manifest) || row != last || installed != last - first)
+        die("printfallback manifest range incomplete");
 }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
@@ -4353,12 +4344,12 @@ static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     parse2_unary_int_u(&g);
     parse2_unary_part6(&g);
     entry = parse2_printfallback_head(&g);
-    parse2_printfallback_dispatch_int(&g, entry);
+    parse2_printfallback_more(&g, entry, 2, 3);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
-static void inspect_parse2_printfallback_body_graph(const char *outpath) {
+static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last) {
     Graph g = {0}; FILE *out; char *entry;
     build_parse2_token_graph(&g);
     parse2_startup_edits(&g);
@@ -4385,8 +4376,7 @@ static void inspect_parse2_printfallback_body_graph(const char *outpath) {
     parse2_unary_int_u(&g);
     parse2_unary_part6(&g);
     entry = parse2_printfallback_head(&g);
-    parse2_printfallback_dispatch_int(&g, entry);
-    parse2_printfallback_body_int(&g, entry);
+    parse2_printfallback_more(&g, entry, 2, last);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
@@ -4472,7 +4462,10 @@ int main(int argc, char **argv) {
         inspect_parse2_printfallback_dispatch_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-body-graph")) {
-        inspect_parse2_printfallback_body_graph(argv[2]); return 0;
+        inspect_parse2_printfallback_bodies_graph(argv[2], 4); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-printfallback-bodies-graph")) {
+        inspect_parse2_printfallback_bodies_graph(argv[2], 16); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
