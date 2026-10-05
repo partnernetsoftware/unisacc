@@ -3237,7 +3237,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "ladder-up") && strcmp(section, "ladder-read") &&
         strcmp(section, "ladder-and") && strcmp(section, "ladder-or") &&
         strcmp(section, "ladder-operator") && strcmp(section, "ladder-empty") &&
-        strcmp(section, "operator-prefix"))
+        strcmp(section, "operator-prefix") && strcmp(section, "operator-float-select"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3543,10 +3543,10 @@ static Value *parse2_gen2_operator_extra(Value *spec, Value *ctx) {
     }
     return result;
 }
-static void parse2_gen2_operator_prefix(Graph *g) {
+static void parse2_gen2_operator_prefix(Graph *g, int with_select) {
     FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
     Value *facts = load_fact("k2-gen2"), *ops = value_get(facts, "oprows");
-    Value *seqopts = NULL, *callopts = NULL; char *s; int row = 0;
+    Value *seqopts = NULL, *callopts = NULL, *selectopts = NULL; char *s; int row = 0;
     if (!manifest || !ops || ops->kind != JARR || ops->n != 16)
         die("operator prefix inputs missing");
     while ((s = line(manifest))) {
@@ -3562,11 +3562,17 @@ static void parse2_gen2_operator_prefix(Graph *g) {
                 strncmp(f[7], "control_section=@str:operator-prefix,", 36))
                 die("operator prefix call changed");
             callopts = value_json(f[8], "operator prefix call");
+        } else if (row == 55) {
+            if (strcmp(f[0], "..call") || strcmp(f[1], "control") ||
+                strncmp(f[7], "control_section=@str:operator-float-select,", 42))
+                die("operator float-select call changed");
+            selectopts = value_json(f[8], "operator float-select call");
         }
         row++; free(s);
-        if (row > 53) break;
+        if (row > (with_select ? 55 : 53)) break;
     }
-    if (fclose(manifest) || !seqopts || !callopts) die("operator prefix declarations missing");
+    if (fclose(manifest) || !seqopts || !callopts || (with_select && !selectopts))
+        die("operator prefix declarations missing");
     for (size_t i = 0; i < ops->n; i++) {
         Value *item = ops->items[i].value, *ctx = value_new(JOBJ), *seq;
         Value *name = value_get(item, "op"), *ptrn = value_get(item, "ptrn");
@@ -3590,6 +3596,13 @@ static void parse2_gen2_operator_prefix(Graph *g) {
         seq = mapseq_construct(seqopts, ctx);
         parse2_gen2_control_ex(g, "operator-prefix",
             parse2_gen2_operator_extra(callopts, ctx), seq);
+        if (with_select) {
+            Value *fl = value_get(item, "fl");
+            if (!fl || fl->kind != JARR || fl->n > 1)
+                die("operator float-select fact changed");
+            if (fl->n) parse2_gen2_control_ex(g, "operator-float-select",
+                parse2_gen2_operator_extra(selectopts, ctx), seq);
+        }
     }
 }
 static void parse2_string_initializer_head(Graph *g) {
@@ -5557,7 +5570,16 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-prefix-graph")) {
         build_parse2_token_graph(&g);
-        parse2_gen2_operator_prefix(&g);
+        parse2_gen2_operator_prefix(&g, 0);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-select-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_operator_prefix(&g, 1);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);

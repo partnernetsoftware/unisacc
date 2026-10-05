@@ -829,28 +829,32 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                                      f"C={actual[first:first+100]!r} "
                                      f"Python={expected[first:first+100]!r}")
     if part == "parse2-7":
-        actual_path = work / "parse2-gen2-operator-prefix.c.json"
-        run(str(cgen), "inspect-parse2-gen2-operator-prefix-graph", str(actual_path))
-        expected_graph = parse2base.executor()
         manifest = ROOT / "exec/parse2/gen2-manifest.tsv"
         rows = assemble.Run.rows(manifest)
-        runner = assemble.Run(expected_graph, expected_graph.P, {}, {})
-        runner.root = manifest.parent
-        runner.one(rows[47][1], rows[48:54], 0, {"seg_optail": 1})
-        expected_graph.g.finish()
-        expected = json.dumps({
-            "start": "START",
-            "states": {state: [mode, {str(k): v for k, v in row.items()}]
-                       for state, (mode, row) in expected_graph.g.st.items()},
-            "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
-        }, separators=(",", ":")).encode()
-        actual = actual_path.read_bytes()
-        if actual != expected:
-            first = next((i for i, (a, b) in enumerate(zip(actual, expected))
-                          if a != b), min(len(actual), len(expected)))
-            raise AssertionError(f"seed/gen.c gen2 operator-prefix differs at {first}: "
-                                 f"C={actual[first:first+100]!r} "
-                                 f"Python={expected[first:first+100]!r}")
+        for name, command, end in (
+            ("prefix", "inspect-parse2-gen2-operator-prefix-graph", 54),
+            ("select", "inspect-parse2-gen2-operator-select-graph", 56),
+        ):
+            actual_path = work / f"parse2-gen2-operator-{name}.c.json"
+            run(str(cgen), command, str(actual_path))
+            expected_graph = parse2base.executor()
+            runner = assemble.Run(expected_graph, expected_graph.P, {}, {})
+            runner.root = manifest.parent
+            runner.one(rows[47][1], rows[48:end], 0, {"seg_optail": 1})
+            expected_graph.g.finish()
+            expected = json.dumps({
+                "start": "START",
+                "states": {state: [mode, {str(k): v for k, v in row.items()}]
+                           for state, (mode, row) in expected_graph.g.st.items()},
+                "seqs": [list(map(list, seq)) for seq in expected_graph.g.seqs],
+            }, separators=(",", ":")).encode()
+            actual = actual_path.read_bytes()
+            if actual != expected:
+                first = next((i for i, (a, b) in enumerate(zip(actual, expected))
+                              if a != b), min(len(actual), len(expected)))
+                raise AssertionError(f"seed/gen.c gen2 operator-{name} differs at {first}: "
+                                     f"C={actual[first:first+100]!r} "
+                                     f"Python={expected[first:first+100]!r}")
     if part == "parse2-3":
         initializer_manifest = ROOT / "exec/parse2/strings-initializer-manifest.tsv"
         float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
@@ -1010,4 +1014,4 @@ if part == "parse2-5":
 if part == "parse2-6":
     print("seed construct parse2-6: gen2 E/C ladders and rejection graphs byte-identical")
 if part == "parse2-7":
-    print("seed construct parse2-7: gen2 operator-prefix graph byte-identical")
+    print("seed construct parse2-7: gen2 operator-prefix and float-select graphs byte-identical")
