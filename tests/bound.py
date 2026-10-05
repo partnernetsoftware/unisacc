@@ -46,12 +46,18 @@ def stop(process, code):
     return code
 
 
+def scale():
+    """0.0.27 C1: GitHub's hosted runners are 2-4x slower than this machine.  Under GITHUB_ACTIONS,
+    UNISACC_TIME_SCALE (1..5) multiplies every bound, so the scripts' own 20/46/55 s limits stretch
+    with the runner instead of timing out.  Locally the scale is always 1 (the 60 s rule holds)."""
+    if os.environ.get('GITHUB_ACTIONS') != 'true': return 1
+    v = os.environ.get('UNISACC_TIME_SCALE', '1')
+    return int(v) if v.isdigit() and 1 <= int(v) <= 5 else 1
+
+
 def main():
-    # The 60 s ceiling is this machine's rule (owner 2026-09-25); GitHub's hosted runners are two to
-    # four times slower, so under GITHUB_ACTIONS the ceiling is 300 s (0.0.27 C1).
-    cap = 300 if os.environ.get('GITHUB_ACTIONS') == 'true' else 60
-    if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= cap:
-        print('bound: timeout must be 1..%d seconds, followed by a command' % cap, file=sys.stderr)
+    if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 60:
+        print('bound: timeout must be 1..60 seconds, followed by a command', file=sys.stderr)
         return 2
     process = subprocess.Popen(sys.argv[2:], start_new_session=True)
     def interrupted(sig, frame):
@@ -60,7 +66,7 @@ def main():
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     try:
-        rc = process.wait(timeout=int(sys.argv[1]))
+        rc = process.wait(timeout=int(sys.argv[1]) * scale())
     except subprocess.TimeoutExpired:
         return stop(process, 142)
     # The direct child may exit while background children remain in its session.

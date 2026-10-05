@@ -80,6 +80,11 @@ int main(int argc, char **argv) {
         seconds = seconds * 10 + (unsigned)(*p - '0');
     }
     if (seconds < 1 || seconds > 60) goto usage;
+    {   /* 0.0.27 C1: on GitHub's hosted runners (GITHUB_ACTIONS=true) UNISACC_TIME_SCALE 1..5 stretches
+           every bound with the slower machine; locally the scale is always 1. */
+        const char *ga = getenv("GITHUB_ACTIONS"), *sc = getenv("UNISACC_TIME_SCALE");
+        if (ga && !strcmp(ga, "true") && sc && sc[0] >= '1' && sc[0] <= '5' && !sc[1]) seconds *= (unsigned)(sc[0] - '0');
+    }
     struct sigaction action;
     memset(&action, 0, sizeof action); action.sa_handler = interrupt;
     sigemptyset(&action.sa_mask);

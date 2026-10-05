@@ -113,9 +113,8 @@ PROBES=; for f in examples/*.c tests/c/*.c; do b=${f##*/}; refused "${b%.c}" || 
 # No suite may hang the run.  macOS has no `timeout`, so each one gets a
 # watchdog; 142 is the timeout and reads as a failure with a clear line.
 LIMIT=${SUITE_LIMIT:-60}
-CAP=60; [ "${GITHUB_ACTIONS:-}" = true ] && CAP=300   # hosted runners are slower (0.0.27 C1); 60 s stays the local rule
-case "$LIMIT" in *[!0-9]*|"") echo "SUITE_LIMIT must be 1..$CAP" >&2; exit 2;; esac
-[ "$LIMIT" -ge 1 ] && [ "$LIMIT" -le "$CAP" ] || { echo "SUITE_LIMIT must be 1..$CAP" >&2; exit 2; }
+case "$LIMIT" in *[!0-9]*|"") echo "SUITE_LIMIT must be 1..60" >&2; exit 2;; esac
+[ "$LIMIT" -ge 1 ] && [ "$LIMIT" -le 60 ] || { echo "SUITE_LIMIT must be 1..60" >&2; exit 2; }
 # Suites run CONCURRENTLY, JOBS at a time.  Each one writes its output to a
 # file of its own; the summary is printed afterwards in the fixed order below.
 # The default leaves cores free: this machine has overheated under full load.
