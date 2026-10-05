@@ -46,7 +46,10 @@ if [ -n "${UA:-}" ]; then
     seen() { (cd "$T" && "$U_RUN" -O2 -run "$R/$1" 2>"$2") > "$3"; }
 else
     U_KIND=reference
-    KNOWN=$R/tests/difftest.knownfail
+    # the Python reference route also has its own gaps (tests/difftest-py.knownfail, 0.0.28): probes the C
+    # reference and the product pass but `python3 -m unisa run` does not
+    cat "$R/tests/difftest.knownfail" "$R/tests/difftest-py.knownfail" > "$T/known.py"
+    KNOWN=$T/known.py
     seen() { (cd "$T" && python3 -m unisa run "$R/$1" --drive "$DRIVE" 2>"$2") > "$3"; }
 fi
 . "$R/tests/knownfail.sh"
