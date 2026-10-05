@@ -347,6 +347,27 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
                            "seqs": [list(map(list, seq)) for seq in e3_float_rows.g.seqs]}
     assert float_rows_graph.read_bytes() == json.dumps(expected_float_rows, separators=(",", ":")).encode(), \
         "seed/gen.c parse2 float rows differ"
+    autoscan_graph = work / "parse2-autoscan.c.json"
+    run(str(cgen), "inspect-parse2-autoscan-graph", str(autoscan_graph))
+    e3_autoscan = parse2base.executor()
+    assemble.Run(e3_autoscan, e3_autoscan.P, {}, {"part_startup": 1}).run(
+        ROOT / "exec/parse2/gen2parts-manifest.tsv")
+    assemble.Run(e3_autoscan, e3_autoscan.P, {},
+                 {"control_section": "startup-marker", "statement": "STMT",
+                  "extra": {}, "seqb": {}}).run(ROOT / "exec/parse2/control-manifest.tsv")
+    assemble.Run(e3_autoscan, e3_autoscan.P, {}, {"TK_STR": assemble.load_facts("parse-constants")["TK_STR"]}).run(
+        ROOT / "exec/parse2/strings-token-span-manifest.tsv")
+    assemble.Run(e3_autoscan, e3_autoscan.P, {}, {}).run(initializer_manifest)
+    assemble.Run(e3_autoscan, e3_autoscan.P, {}, {}).run(ROOT / "exec/parse/numeric-manifest.tsv")
+    assemble.Run(e3_autoscan, e3_autoscan.P, {}, {}).run(float_manifest)
+    assemble.Run(e3_autoscan, e3_autoscan.P, {}, {}).run(ROOT / "exec/parse/autoscan-manifest.tsv")
+    e3_autoscan.g.finish()
+    expected_autoscan = {"start": "START",
+                         "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                                    for name, (mode, row) in e3_autoscan.g.st.items()},
+                         "seqs": [list(map(list, seq)) for seq in e3_autoscan.g.seqs]}
+    assert autoscan_graph.read_bytes() == json.dumps(expected_autoscan, separators=(",", ":")).encode(), \
+        "seed/gen.c parse2 autoscan child differs"
     actions_json = work / "parse2-actions.c.json"
     run(str(cgen), "inspect-mapseq", "parse2:gen2-actions", str(actions_json))
     actions_manifest = ROOT / "exec/parse2/gen2-actions-manifest.tsv"

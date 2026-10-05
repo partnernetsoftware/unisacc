@@ -3556,6 +3556,72 @@ static void parse2_float_rows(Graph *g) {
     if (ferror(manifest) || fclose(manifest) || installed != 10)
         die("incomplete floatconst rows");
 }
+static void parse2_autoscan(Graph *g) {
+    FILE *manifest = fopen("exec/parse/autoscan-manifest.tsv", "rb");
+    FILE *names; char *s; int rows = 0, labels = 0;
+    Value *facts = load_fact("parse-constants"), *bindings = value_new(JOBJ);
+    Value *sequences = value_new(JOBJ), *classes = value_new(JOBJ);
+    Value *tokens = value_get(load_fact("parse-tokens"), "TK");
+    if (!manifest) die("cannot open autoscan manifest");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "autoscan") ||
+            strcmp(f[2], "auto") || strcmp(f[4], "parse-constants") || rows++)
+            die("unsupported autoscan manifest");
+        {
+            Value *opts = value_json(f[8], "autoscan options");
+            Value *map = value_get(opts, "bindmap"), *tokenmap = value_get(opts, "tokens");
+            Value *act = value_new(JARR), *seq = value_new(JARR);
+            const char *reject = "reject_header=@rej:";
+            if (strncmp(f[6], reject, strlen(reject))) die("autoscan rejection changed");
+            value_put(act, NULL, value_string("REJECT"));
+            value_put(act, NULL, value_string(f[6] + strlen(reject)));
+            value_put(seq, NULL, act); value_put(sequences, "reject_header", seq);
+            if (!map || map->kind != JOBJ || !tokenmap || tokenmap->kind != JOBJ)
+                die("autoscan map declaration missing");
+            for (size_t i = 0; i < map->n; i++) {
+                const char *ref = value_text(map->items[i].value);
+                if (strncmp(ref, "parse-constants!.", 17)) die("autoscan map fact changed");
+                value_put(bindings, map->items[i].key, value_get(facts, ref + 17));
+            }
+            for (size_t i = 0; i < tokenmap->n; i++) {
+                const char *name = value_text(tokenmap->items[i].value);
+                Value *code = !strcmp(name, "identifier") ? value_get(facts, "TK_ID") :
+                              value_get(tokens, name);
+                Value *list = value_new(JARR);
+                if (!code || code->kind != JINT) die("autoscan token code missing");
+                value_put(list, NULL, code); value_put(classes, tokenmap->items[i].key, list);
+            }
+        }
+        free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || rows != 1)
+        die("incomplete autoscan manifest");
+    names = fopen("exec/parse/autoscan-names.tsv", "rb");
+    if (!names) die("cannot open autoscan names");
+    while ((s = line(names))) {
+        char *f[3]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 3);
+        if (n != 3 || (!labels && strcmp(f[0], "AUTO_r1")))
+            die("autoscan names changed");
+        {
+            char owner[256]; char *label;
+            if (snprintf(owner, sizeof(owner), "%s.autoscan_%s", f[1], f[0]) >= (int)sizeof(owner))
+                die("autoscan owner too long");
+            label = fresh_label(owner, f[2]);
+            value_put(bindings, f[0], value_string(label)); free(label);
+        }
+        labels++; free(s);
+    }
+    if (ferror(names) || fclose(names) || labels != 19) die("autoscan names incomplete");
+    install_section_classes(g, "exec/parse/autoscan-byte.tsv", "auto", 'b',
+                            bindings, sequences, classes);
+    install_section_classes(g, "exec/parse/autoscan-result.tsv", "auto", 'r',
+                            bindings, sequences, classes);
+}
 static void inspect_parse2_startup_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
@@ -3747,6 +3813,27 @@ static void inspect_parse2_float_rows_graph(const char *outpath) {
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
 }
+static void inspect_parse2_autoscan_graph(const char *outpath) {
+    Graph g = {0}; FILE *out;
+    build_parse2_token_graph(&g);
+    parse2_startup_edits(&g);
+    parse2_startup_control(&g);
+    parse2_string_span(&g);
+    parse2_string_initializer_head(&g);
+    parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
+    parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
+    parse2_string_initializer_tail(&g);
+    parse2_numeric(&g);
+    parse2_float_boundary(&g);
+    parse2_float_entry(&g);
+    parse2_float_digits(&g);
+    parse2_float_rows(&g);
+    parse2_autoscan(&g);
+    finish(&g);
+    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+}
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -3793,6 +3880,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-float-rows-graph")) {
         inspect_parse2_float_rows_graph(argv[2]); return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-autoscan-graph")) {
+        inspect_parse2_autoscan_graph(argv[2]); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-tokens")) {
         inspect_parse2_tokens(argv[2]); return 0;
