@@ -1603,6 +1603,20 @@ static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
             if (fclose(rows)) die("lex template close failed");
         } else if (!strcmp(field[0], "template") && !strcmp(field[1], "sourcefacts")) {
             sourcefacts_lex_edits(g);
+        } else if (!strcmp(field[0], "template")) {
+            char path[1024]; Buffer lines; FILE *rows; Value *domain;
+            const char *mode;
+            opts = value_json(field[8], "lex template options");
+            facts = load_facts_expr(field[4]);
+            if (snprintf(path, sizeof(path), "exec/lex/%s-template.tsv", field[1]) >= (int)sizeof(path))
+                die("lex template path too long");
+            lines = expand_template_file(path, facts, field[2]);
+            rows = buffer_file(&lines);
+            mode = value_text(value_get(opts, "mode"));
+            domain = value_get(opts, "domain_keys");
+            domain = domain ? value_path(facts, value_text(domain)) : numeric_domain(0, 257);
+            install_delta_text(g, rows, mode[0], domain, NULL, sequences, 1, 0, NULL, inner_start);
+            if (fclose(rows)) die("lex template close failed");
         } else if (!strcmp(field[0], "let")) {
             if (!strcmp(field[7], "START=@str:LOC.magic0")) inner_start = "LOC.magic0";
             else if (!strcmp(field[7], "START=@str:SF.start")) inner_start = "SF.start";
