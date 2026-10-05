@@ -252,7 +252,8 @@ def _gen2ns(tag):
     UNS = E.UNS   # unsigned char/short/int/long: UNS + size
     SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
     STAG, SSZ = E.STAG, E.SSZ
-    STRUCT_MAX, MEMBER_STRIDE = 128, 256
+    STRUCT_MAX, MEMBER_STRIDE = E.STRUCT_MAX, 256
+    SIG_RADIX = E.SIG_RADIX
     MOF, MSZ, MPT, MBS, MAR, MFLAT = (i << 40 for i in range(1, 7))
     BFW, BFO, BFS, TDE = (i << 40 for i in (8, 9, 10, 11))
     FPB = E.FPB   # register-call function pointer
@@ -313,7 +314,8 @@ def _gen2ns(tag):
     ENUM_STATE, TAG_EPOCH = 63 << 40, 64 << 40
     assert FPS_PSH + SBB * 16 < ENUM_STATE < TAG_EPOCH
     assert ENUM_CAPACITY > 0 and max([BOOL, DBL, FLT, FPB, FPV] + [code for _, code, *_ in TYINT]) < ENUM_FIRST
-    assert FPS_FIRST < SBB and SBB + STRUCT_MAX < 4096
+    assert FPS_FIRST < SBB and SBB + STRUCT_MAX < SIG_RADIX
+    assert 8 * SIG_RADIX + SBB + STRUCT_MAX < 2 ** 31  # parameter depth packing fits signed 32-bit
 
 
     return SimpleNamespace(**locals())
@@ -1751,6 +1753,14 @@ TABLES.append(("k2-libraryenv", ["exec/build/parsebase.py", "exec/build/parse2ba
                "exec/facts/libraryexports.tsv", "exec/facts/librarycallables.tsv", "exec/facts/libraryimports.tsv",
                "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv", "exec/facts/valueranks.tsv",
                "exec/facts/k2-gen2.tsv", "exec/facts/k2-librarymodule-map.tsv", "exec/facts/export.py"], k2libraryenv))
+
+def signature_layout():
+    rows = (line.split('\t') for line in (ROOT / 'exec/facts/parse-constants.tsv').read_text().splitlines())
+    radix = next(int(row[1]) for row in rows if row[0] == 'SIG_RADIX')
+    return [f'=SIG_RADIX\tint\t{radix}']
+
+
+TABLES.append(('signature-layout', ['exec/facts/parse-constants.tsv', 'exec/facts/export.py'], signature_layout))
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
