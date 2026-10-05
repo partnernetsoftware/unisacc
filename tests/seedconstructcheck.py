@@ -19,10 +19,10 @@ def run(*args, timeout=20):
     assert result.returncode == 0, (args, result.returncode, result.stderr[:1500])
     return result
 
-if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3"):
+if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in ("base", "parse2", "parse2-2", "parse2-3", "parse2-4"):
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3")
+    raise SystemExit("usage: seedconstructcheck.py --part base|parse2|parse2-2|parse2-3|parse2-4")
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -714,6 +714,26 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             raise AssertionError(f"seed/gen.c parse2 printfallback body differs at {first}: "
                                  f"C={printf_body_actual[first:first+100]!r} "
                                  f"Python={printf_body_expected[first:first+100]!r}")
+    if part == "parse2-4":
+        dimensions_c = work / "parse2-gen2-dimensions.c.json"
+        run(str(cgen), "inspect-parse2-gen2-dimensions-graph", str(dimensions_c))
+        dimensions = parse2base.executor()
+        assemble.Run(dimensions, dimensions.P, {}, {"seg_types-dimensions": 1}).run(
+            ROOT / "exec/parse2/gen2-manifest.tsv")
+        dimensions.g.finish()
+        dimensions_expected = json.dumps({
+            "start": "START",
+            "states": {name: [mode, {str(k): v for k, v in row.items()}]
+                       for name, (mode, row) in dimensions.g.st.items()},
+            "seqs": [list(map(list, seq)) for seq in dimensions.g.seqs],
+        }, separators=(",", ":")).encode()
+        dimensions_actual = dimensions_c.read_bytes()
+        if dimensions_actual != dimensions_expected:
+            first = next((i for i, (a, b) in enumerate(zip(dimensions_actual, dimensions_expected))
+                          if a != b), min(len(dimensions_actual), len(dimensions_expected)))
+            raise AssertionError(f"seed/gen.c gen2 dimensions differs at {first}: "
+                                 f"C={dimensions_actual[first:first+100]!r} "
+                                 f"Python={dimensions_expected[first:first+100]!r}")
     if part == "parse2-3":
         initializer_manifest = ROOT / "exec/parse2/strings-initializer-manifest.tsv"
         float_manifest = ROOT / "exec/parse2/floatconst-manifest.tsv"
@@ -866,3 +886,5 @@ if part in ("parse2-2", "all"):
     print("seed construct parse2-2: unary control through printfallback body graph byte-identical")
 if part == "parse2-3":
     print("seed construct parse2-3: unary part10 graph byte-identical")
+if part == "parse2-4":
+    print("seed construct parse2-4: gen2 dimensions graph byte-identical")

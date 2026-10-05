@@ -3220,6 +3220,56 @@ static void parse2_startup_control(Graph *g) {
     install_section_classes(g, "exec/parse2/control-result.tsv", "startup-marker", 'r',
                             bindings, sequences, classes);
 }
+/* The first gen2 segment delegates to the control manifest.  Read its
+   declaration and fresh-label table in source order, as assemble.Run does. */
+static void parse2_gen2_dimensions(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
+    FILE *fresh = fopen("exec/parse2/control-fresh.tsv", "rb");
+    Value *facts = load_fact("k2-control"), *opts = NULL;
+    Value *bindings = value_new(JOBJ), *sequences, *classes;
+    char *s; int rows = 0, header = 0;
+    if (!manifest || !fresh) die("cannot open gen2 dimensions declarations");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9);
+        if (n != 9) die("control manifest column count");
+        if (!rows && !strcmp(f[0], "rows") && !strcmp(f[1], "control") &&
+            !strcmp(f[3], "!fact:control_export") && !strcmp(f[4], "k2-control"))
+            opts = value_json(f[8], "control options");
+        rows++; free(s);
+    }
+    if (ferror(manifest) || fclose(manifest) || rows != 2 || !opts)
+        die("unsupported control manifest");
+    sequences = mapseq_construct(opts, facts);
+    classes = value_get(facts, "classes");
+    if (!classes || classes->kind != JOBJ) die("control classes missing");
+    Value *consts = value_get(facts, "consts");
+    if (!consts || consts->kind != JOBJ) die("control constants missing");
+    for (size_t i = 0; i < consts->n; i++)
+        value_put(bindings, consts->items[i].key, consts->items[i].value);
+    value_put(bindings, "statement", value_string("STMT"));
+    while ((s = line(fresh))) {
+        char *f[4], *label; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 4);
+        if (n != 4) die("control fresh column count");
+        if (!header++) {
+            if (strcmp(f[0], "section") || strcmp(f[1], "prefix") ||
+                strcmp(f[2], "kind") || strcmp(f[3], "key"))
+                die("control fresh header mismatch");
+        } else if (!strcmp(f[0], "dimensions")) {
+            label = fresh_label(f[1], f[2]);
+            value_put(bindings, f[3], value_string(label)); free(label);
+        }
+        free(s);
+    }
+    if (ferror(fresh) || fclose(fresh) || !header) die("control fresh read failed");
+    install_section_classes(g, "exec/parse2/control-byte.tsv", "dimensions", 'b',
+                            bindings, sequences, classes);
+    install_section_classes(g, "exec/parse2/control-result.tsv", "dimensions", 'r',
+                            bindings, sequences, classes);
+}
 static void parse2_string_initializer_head(Graph *g) {
     FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
@@ -5040,6 +5090,15 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_dimensions(&g);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
         inspect_parse2_token_graph(argv[2]); return 0;
     }
