@@ -51,7 +51,7 @@ SEED_WHITELIST = ('exec/finite_rules.py', 'exec/assemble.py', 'exec/facts/export
 # check and reference-simulator tools: to move to the tests/ side, not counted
 SEED_TOOLS = re.compile(r'(check|sim|compare|roundtrip|cut)\.py$')
 
-SEEDPY_CAP, ASSEMBLE_CAP = 1, 420   # 0.0.28 X8': manifest traversal stays within P5; helpers live under exec/build/
+SEEDPY_CAP, ASSEMBLE_CAP = 1, 420   # 0.0.27 (99537d8a): assemble.py alone; helpers moved to exec/build/manifest_support.py (706 lines together) -- P5 reading pending the commissar
 
 def seedpy():
     counts, tools = {}, []
