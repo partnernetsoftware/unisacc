@@ -3236,7 +3236,8 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "resd-row") && strcmp(section, "resd-final") &&
         strcmp(section, "ladder-up") && strcmp(section, "ladder-read") &&
         strcmp(section, "ladder-and") && strcmp(section, "ladder-or") &&
-        strcmp(section, "ladder-operator") && strcmp(section, "ladder-empty"))
+        strcmp(section, "ladder-operator") && strcmp(section, "ladder-empty") &&
+        strcmp(section, "operator-prefix"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3524,6 +3525,71 @@ static void parse2_gen2_ladder(Graph *g, char kind) {
                 parse2_gen2_ladder_extra(owner, up_name, next_name, dispatch, name->s), NULL);
         }
         free(dispatch);
+    }
+}
+static Value *parse2_gen2_operator_extra(Value *spec, Value *ctx) {
+    Value *result = value_new(JOBJ), *let = value_get(spec, "let");
+    Value *extra = let ? value_get(let, "extra") : NULL;
+    if (!extra || extra->kind != JOBJ) die("operator extra declaration missing");
+    for (size_t i = 0; i < extra->n; i++) {
+        Value *source = extra->items[i].value, *v;
+        const char *cell = value_text(source);
+        if (!strncmp(cell, "@str:", 5)) {
+            char *expanded = interpolate(cell + 5, ctx);
+            v = value_string(expanded); free(expanded);
+        } else if (*cell == '$') v = value_path(ctx, cell + 1);
+        else v = value_path(ctx, cell);
+        value_put(result, extra->items[i].key, v);
+    }
+    return result;
+}
+static void parse2_gen2_operator_prefix(Graph *g) {
+    FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    Value *facts = load_fact("k2-gen2"), *ops = value_get(facts, "oprows");
+    Value *seqopts = NULL, *callopts = NULL; char *s; int row = 0;
+    if (!manifest || !ops || ops->kind != JARR || ops->n != 16)
+        die("operator prefix inputs missing");
+    while ((s = line(manifest))) {
+        char *f[9]; int n;
+        if (!*s || *s == '#') { free(s); continue; }
+        n = fields_tab(s, f, 9); if (n != 9) die("gen2 manifest columns");
+        if (row == 48) {
+            if (strcmp(f[0], ".let") || strcmp(f[4], "k2-gen2"))
+                die("operator prefix sequence declaration changed");
+            seqopts = value_json(f[8], "operator prefix sequences");
+        } else if (row == 53) {
+            if (strcmp(f[0], ".call") || strcmp(f[1], "control") ||
+                strncmp(f[7], "control_section=@str:operator-prefix,", 36))
+                die("operator prefix call changed");
+            callopts = value_json(f[8], "operator prefix call");
+        }
+        row++; free(s);
+        if (row > 53) break;
+    }
+    if (fclose(manifest) || !seqopts || !callopts) die("operator prefix declarations missing");
+    for (size_t i = 0; i < ops->n; i++) {
+        Value *item = ops->items[i].value, *ctx = value_new(JOBJ), *seq;
+        Value *name = value_get(item, "op"), *ptrn = value_get(item, "ptrn");
+        Value *cmpl = value_get(item, "cmpl"); char ref[128];
+        if (!name || name->kind != JSTR || !ptrn || ptrn->kind != JARR ||
+            !cmpl || cmpl->kind != JARR) die("operator prefix fact changed");
+        for (size_t j = 0; j < facts->n; j++)
+            value_put(ctx, facts->items[j].key, facts->items[j].value);
+        for (size_t j = 0; j < item->n; j++)
+            value_put(ctx, item->items[j].key, item->items[j].value);
+        value_put(ctx, "o", item);
+        if (snprintf(ref, sizeof(ref), "OPX.%s.%c", name->s,
+                     ptrn->n ? 'n' : 'r') >= (int)sizeof(ref))
+            die("operator integer entry too long");
+        value_put(ctx, "ient", value_string(ref));
+        if (cmpl->n) {
+            if (snprintf(ref, sizeof(ref), "OPX.%s.r", name->s) >= (int)sizeof(ref))
+                die("operator pointer target too long");
+            value_put(ctx, "pct", value_string(ref));
+        } else value_put(ctx, "pct", value_string("DEAD.pa"));
+        seq = mapseq_construct(seqopts, ctx);
+        parse2_gen2_control_ex(g, "operator-prefix",
+            parse2_gen2_operator_extra(callopts, ctx), seq);
     }
 }
 static void parse2_string_initializer_head(Graph *g) {
@@ -5483,6 +5549,15 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-c-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_ladder(&g, 'C');
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-prefix-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_operator_prefix(&g);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
