@@ -1,6 +1,6 @@
 # K2 清单 DSL 规格（0.0.24 T1 第一步：现状冻结）
 
-以代码为准：`exec/assemble.py`（下称 A，负责清单遍历与图安装）、`exec/build/manifest_support.py`（通用值、绑定与行语法）、`exec/finite_rules.py`（FR）、`exec/build/gen.py`（G）、`exec/facts/load.py`（L）。下文旧行号对应 982e3685；X8' 拆分后须按函数名查找。
+以代码为准：`exec/assemble.py`（A，负责清单遍历、通用值/绑定/行语法与图安装）、`exec/finite_rules.py`（FR）、`exec/build/gen.py`（G）、`exec/facts/load.py`（L，负责两种 facts 格式读取）。下文旧行号对应 982e3685；请按函数名查找。
 统计范围：`exec/**/*-manifest.tsv` 132 个，`exec/facts/*.tsv` 210 个（T1a 起；A: 行号仍是 T1a 前的，A:187 以后减 5，A:599 以后减 6，A:617 以后减 12）。本文只描述现状，不改行为。
 
 ## 1. 清单头（G:7-15，解析 G:35-39）
