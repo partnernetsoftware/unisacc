@@ -3238,7 +3238,9 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "ladder-and") && strcmp(section, "ladder-or") &&
         strcmp(section, "ladder-operator") && strcmp(section, "ladder-empty") &&
         strcmp(section, "operator-prefix") && strcmp(section, "operator-float-select") &&
-        strcmp(section, "operator-float-body") && strcmp(section, "operator-float-reject"))
+        strcmp(section, "operator-float-body") && strcmp(section, "operator-float-reject") &&
+        strcmp(section, "operator-pointer-add") && strcmp(section, "operator-pointer-sub") &&
+        strcmp(section, "operator-pointer-other") && strcmp(section, "operator-integer"))
         die("unsupported gen2 control section");
     if (!manifest || !fresh) die("cannot open gen2 control declarations");
     while ((s = line(manifest))) {
@@ -3548,7 +3550,8 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
     FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
     Value *facts = load_fact("k2-gen2"), *ops = value_get(facts, "oprows");
     Value *seqopts = NULL, *callopts = NULL, *selectopts = NULL;
-    Value *floatopts = NULL, *floatcall = NULL, *rejectcall = NULL; char *s; int row = 0;
+    Value *floatopts = NULL, *floatcall = NULL, *rejectcall = NULL;
+    Value *pointercall = NULL, *integercall = NULL; char *s; int row = 0;
     if (!manifest || !ops || ops->kind != JARR || ops->n != 16)
         die("operator prefix inputs missing");
     while ((s = line(manifest))) {
@@ -3583,13 +3586,25 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
                 strncmp(f[7], "control_section=@str:operator-float-reject,", 42))
                 die("operator float-reject call changed");
             rejectcall = value_json(f[8], "operator float-reject call");
+        } else if (row == 61) {
+            if (strcmp(f[0], ".call") || strcmp(f[1], "control") ||
+                strncmp(f[7], "control_section=@str:operator-pointer-{ptr},", 44))
+                die("operator pointer call changed");
+            pointercall = value_json(f[8], "operator pointer call");
+        } else if (row == 62) {
+            if (strcmp(f[0], ".call") || strcmp(f[1], "control") ||
+                strncmp(f[7], "control_section=@str:operator-integer,", 37))
+                die("operator integer call changed");
+            integercall = value_json(f[8], "operator integer call");
         }
         row++; free(s);
-        if (row > (level > 2 ? 60 : level > 1 ? 58 : level ? 55 : 53)) break;
+        if (row > (level > 4 ? 62 : level > 3 ? 61 : level > 2 ? 60 :
+                   level > 1 ? 58 : level ? 55 : 53)) break;
     }
     if (fclose(manifest) || !seqopts || !callopts || (level && !selectopts) ||
         (level > 1 && (!floatopts || !floatcall)) ||
-        (level > 2 && !rejectcall))
+        (level > 2 && !rejectcall) || (level > 3 && !pointercall) ||
+        (level > 4 && !integercall))
         die("operator prefix declarations missing");
     for (size_t i = 0; i < ops->n; i++) {
         Value *item = ops->items[i].value, *ctx = value_new(JOBJ), *seq;
@@ -3660,6 +3675,16 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
             if (nf->n) parse2_gen2_control_ex(g, "operator-float-reject",
                 parse2_gen2_operator_extra(rejectcall, ctx), seq);
         }
+        if (level > 3) {
+            Value *ptr = value_get(item, "ptr"); char section[64];
+            if (!ptr || ptr->kind != JSTR ||
+                snprintf(section, sizeof(section), "operator-pointer-%s", ptr->s) >= (int)sizeof(section))
+                die("operator pointer variant changed");
+            parse2_gen2_control_ex(g, section,
+                parse2_gen2_operator_extra(pointercall, ctx), seq);
+        }
+        if (level > 4) parse2_gen2_control_ex(g, "operator-integer",
+            parse2_gen2_operator_extra(integercall, ctx), seq);
     }
 }
 static void parse2_string_initializer_head(Graph *g) {
@@ -5655,6 +5680,24 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-reject-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 3);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-pointer-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_operator_prefix(&g, 4);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-full-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_operator_prefix(&g, 5);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
