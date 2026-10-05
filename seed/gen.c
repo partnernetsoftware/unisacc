@@ -5704,6 +5704,20 @@ int main(int argc, char **argv) {
         if (fclose(out)) die("output close failed");
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladders-graph")) {
+        build_parse2_token_graph(&g);
+        parse2_gen2_ladder(&g, 'E');
+        parse2_gen2_operator_prefix(&g, 5);
+        parse2_gen2_tytail(&g);
+        parse2_gen2_ladder_reject(&g, "E");
+        parse2_gen2_ladder(&g, 'C');
+        parse2_gen2_ladder_reject(&g, "C");
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
         inspect_parse2_token_graph(argv[2]); return 0;
     }
