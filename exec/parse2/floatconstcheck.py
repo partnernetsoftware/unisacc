@@ -50,9 +50,10 @@ print('floating bits:',len(values),'host-cc expectations, table/network agree;',
 # converter process error, so inspect the token kind as well as the bits.
 integers = ['0', '9223372036854775807', '9223372036854775808UL',
             '10000000000000000000UL', '18446744073709551614ULL',
-            '18446744073709551615UL']
+            '18446744073709551615UL', '01777777777777777777777',
+            '0xFFFFFFFFFFFFFFFF']
 overflow = ['18446744073709551616UL', '99999999999999999999UL',
-            '184467440737095516150UL']
+            '184467440737095516150UL', '07777777777777777777777']
 for v in integers + overflow:
  (T/'input').write_text(v+'\n')
  for model in ('h.tbl','h.net'):
@@ -62,5 +63,5 @@ for v in integers + overflow:
   if v in overflow:
    assert kind==102,(v,model,'overflow accepted',kind)
   else:
-   assert kind==101 and int.from_bytes(p.stdout[1:],'little')==int(v.rstrip('uUlL')),(v,model,p.stdout.hex())
-print('decimal integers:',len(integers),'exact values;',len(overflow),'overflow tokens rejected; table/network agree')
+   assert kind==101 and int.from_bytes(p.stdout[1:],'little')==int(v.rstrip('uUlL'), 0 if v.startswith(('0x', '0X')) else 8 if v.startswith('0') and len(v)>1 else 10),(v,model,p.stdout.hex())
+print('integer constants:',len(integers),'exact values;',len(overflow),'overflow tokens rejected; table/network agree')
