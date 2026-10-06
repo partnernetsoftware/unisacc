@@ -29,7 +29,7 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 - 判据：`queue: N/N completed, 0 failed` 且 release.sh 打印 `final rc=0`；`UNVERIFIED` 行是门禁外义务，逐条写进回执。
 
 ## 4. 平台客机
-- Linux 源码套件：只在**原生 arm64** 客机上跑全套：`LIMA_VM=default SUITE_LIMIT=55 JOBS=2 ./tests/linux.sh all`（约 7 分钟；linux.sh 默认 900 s 与 all.sh 上限 60 冲突，必须显式给 55）。结论只认“only guest-known reds”那一行。
+- Linux 源码套件：只在**原生 arm64** 客机上跑全套：`LIMA_VM=default SUITE_LIMIT=55 JOBS=2 ./tests/linux.sh all`（约 7 分钟；linux.sh 默认 900 s 与 all.sh 上限 60 冲突，必须显式给 55）。结论只认“only guest-known reds”那一行（0.0.30 R3 起 bigclosure/ape 不再算客机已知红，只剩无 clang 的 warn）。**R2（0.0.30）：Linux 全套不与本地队列重叠**——0.0.29 重叠导致四个超时假红、队列因负载暂停 600 s；排在队列 rc=0 之后（等签名、公证的空档里跑），或与队列同跑时用 `JOBS=1`。
 - **Linux x86_64 不在模拟机上跑全套**（0.0.21 教训）：`minicon-lnx-x86_64` 在 arm64 宿主上是 qemu 模拟，约慢 10 倍。显式 `SUITE_LIMIT=55` 会覆盖 linux.sh 的 ×10 放大，0.0.21 一轮约 95 个超时、8 个 rc=1，而这些套件在原生 arm64 上全绿；`tests/all.sh` 构建参考 UA 的 45 s 与 `tests/lib.sh` 的 30 s 限时也不随之放大（模拟机上 gcc -O2 需 76 s）。x86_64 的产品证据来自 release-check 的真机 runner（ubuntu-latest，见 §5）；模拟机只用于定向套件（ccinterop、forward 的 lnx/x86_64 项，队列运行时开着它即可）。`default`（4 GiB）跑不动两个 2.2 GB 的 Python 自编译（bigclosure/ape），要么 JOBS=1，要么用 8 GiB 的 `minicon-lnx-aarch64`（需 gcc/clang/libffi-dev/perl(shasum)，用后 `limactl stop`）。
 - Windows：`utmctl start minicon-win-arm-64`，等 `utmctl ip-address` 有值（agent 就绪）；`./tests/crossnative.sh examples/*.c`（8 例约 18 s）与 `env UA=… ./tests/nativeboot.sh --windows win/arm64|win/x86_64`（各约 10 s）都可从普通 shell 跑，**不需要 Terminal**：以前的 -10004 是 `utmctl exec --hide` 造成的（2026-09-29 查明）。客机坑见 prd v0.0.12 表“R11-0 ④ 复盘”。用后 `utmctl stop`。
 
