@@ -28,6 +28,11 @@ from unisa.__main__ import _built
 from unisa.oracle import Oracle
 from unisa.driver import compile_file
 UA, files = sys.argv[1], sys.argv[2:]
+# 0.0.31 R4: SHARD=K/N keeps every Nth file by position (stable; the gate passes one sorted list)
+import os
+if os.environ.get("SHARD"):
+    k, n = map(int, os.environ["SHARD"].split("/"))
+    files = files[k - 1::n]
 FRONT = ("pp", "lex", "parse", "type", "scope", "irsel", "tyinfo", "pfconv")
 nets = _built()
 # a probe the two front ends are KNOWN to disagree on is listed, with its

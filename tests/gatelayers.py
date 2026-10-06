@@ -35,11 +35,11 @@ PLATFORM_PREFIX = ("bigclosure-", "fat-", "ffi-", "exec-mach", "exec-win",
 
 # A complete compiler route, probe corpus, or shipped product is exercised.
 PIPELINE = set("""
-declshape volatile-comma stages malloc asmtext combo forward forward-multi
+declshape volatile-comma malloc asmtext combo forward forward-multi
 linkunits staticinit tagforward parserbounds formatonce staticunits cli
 ccparity run multi hostile source target kernel source-layout
 """.split())
-PIPELINE_PREFIX = ("corpus-", "difftest-", "difftest_o-", "csmithdiff-",
+PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff-",
                    "ccrun-", "opt-run-", "closure-", "declmatrix-", "com-",
                    "strconvert-", "exec-chain-", "exec-e3self", "exec-e4self",
                    "exec-self", "exec-winx86self", "exec-formats")
