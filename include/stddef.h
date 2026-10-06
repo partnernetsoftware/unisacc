@@ -6,7 +6,7 @@
  * whichever header comes first defines them and the other defers. */
 #ifndef _UNISA_SIZE_T
 #define _UNISA_SIZE_T
-typedef long size_t;
+typedef unsigned long size_t;
 #endif
 typedef long ptrdiff_t;
 typedef int wchar_t;
