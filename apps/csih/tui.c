@@ -105,6 +105,7 @@ void net_cancel(void);
 void net_progress(int *sec, int *tokens, long *sent);
 void net_recv(long *n);
 void net_cache(int *hit, int *miss, int *seen);
+int  net_deepseek_forget(void);
 
 /* How long a loop waits before redrawing anyway. Frames only change on input in
  * this design, so this is a safety net rather than the animation clock — but
@@ -387,7 +388,7 @@ static void tui_note_err(tui_state *st, const char *s) {
  * tells the model to continue that goal instead of starting over. */
 static void tui_goal_prompt(const tui_state *st, char *out, int n) {
     snprintf(out, (size_t)n,
-             "目标：%s。继续这一目标，做完就停。要加功能先 bin/envelope 0:grkwjcgmcdsh，不得先写入。",
+             "目标：%s。继续这一目标，做完就停。要加功能先 bin/envelope 0:grkwjcgmcsih，不得先写入。",
              st->goal);
 }
 
@@ -444,6 +445,19 @@ static int tui_slash(tui_state *st) {
             st->loop_left = TUI_LOOP_MAX;
             if (!st->busy) tui_queue_goal(st);
         }
+        st->input[0] = '\0';
+        st->ninput = 0;
+        return 1;
+    }
+    /* Re-read the key file on the next call. Pages are already read every
+     * frame. The command itself is consumed. A busy turn is left running. */
+    if (!strcmp(st->input, "/reload")) {
+        if (st->busy)
+            tui_log_plain(st, "reload: 请求中，没重载");
+        else if (net_deepseek_forget())
+            tui_log_plain(st, "reload: 页每帧已重读，密钥缓存已清");
+        else
+            tui_log_plain(st, "reload: 密钥文件打不开，沿用已有密钥");
         st->input[0] = '\0';
         st->ninput = 0;
         return 1;
@@ -1622,6 +1636,36 @@ int main(int argc, char **argv) {
             if (g.loop_on || g.npending != before) {
                 printf("FAIL new goal resumed the loop\n"); failures++;
             } else printf("  ok   new goal stays idle until /loop\n");
+            {
+                int nlog, fold, keep;
+                tui_log_plain(&g, "keep-me");
+                keep = g.nlog - 1;
+                g.npending = 1;
+                snprintf(g.pending[0], TUI_INPUT_MAX, "%s", "queued");
+                g.loop_on = 1;
+                g.ex_open[keep] = 1;
+                nlog = g.nlog;
+                fold = g.ex_open[keep];
+                g.busy = 1;
+                tui_type(&g, "/reload");
+                if (g.quit || !g.busy || g.input[0] || g.nlog != nlog + 1
+                    || strcmp(g.log[keep], "keep-me")
+                    || !tui_frame_has(&g, "reload: 请求中，没重载")
+                    || g.npending != 1 || strcmp(g.pending[0], "queued")
+                    || strcmp(g.goal, "keep-going") || !g.loop_on
+                    || g.ex_open[keep] != fold) {
+                    printf("FAIL busy /reload\n"); failures++;
+                } else printf("  ok   busy /reload stays in process\n");
+                g.busy = 0;
+                nlog = g.nlog;
+                tui_type(&g, "/reload");
+                if (g.quit || g.busy || g.input[0] || g.nlog != nlog + 1
+                    || strcmp(g.log[keep], "keep-me")
+                    || !tui_frame_has(&g, "reload: 页每帧已重读，密钥缓存已清")
+                    || strcmp(g.goal, "keep-going") || g.npending != 1) {
+                    printf("FAIL idle /reload\n"); failures++;
+                } else printf("  ok   idle /reload clears the key cache\n");
+            }
             {
                 tui_state tall;
                 r_frame fit;

@@ -199,7 +199,7 @@ static int agent_run_selftest(void) {
         const char *rules = agent_model_rules();
         a_expect(rules
                  && strstr(rules, "bin/envelope")
-                 && strstr(rules, "0:grkwjcgmcdsh")
+                 && strstr(rules, "0:grkwjcgmcsih")
                  && strstr(rules, "新功能先讨论")
                  && strstr(rules, "不得先写入")
                  && strstr(rules, "why")
@@ -209,7 +209,7 @@ static int agent_run_selftest(void) {
                  && strstr(rules, "已经 answer 之后")
                  && strstr(rules, "还没 answer 时")
                  && strstr(rules, "不要 exec tmux"),
-                 "rules: bin/envelope 0:grkwjcgmcdsh 新功能先讨论、不得先写入 markdown-tree-dag mermaid-flowchart-memory-palace");
+                 "rules: bin/envelope 0:grkwjcgmcsih 新功能先讨论、不得先写入 markdown-tree-dag mermaid-flowchart-memory-palace");
         a_expect(agent_may_stop_ans(1, 3, 1) && agent_may_stop_ans(2, 3, 1),
                  "answered: first stop ends the turn");
         a_expect(!agent_may_stop(1, 3) && !agent_may_stop(2, 3) && agent_may_stop(3, 3),

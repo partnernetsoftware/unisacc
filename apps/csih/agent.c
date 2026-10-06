@@ -174,9 +174,9 @@ typedef struct {
  * see the same policy. */
 
 static const char *AGENT_SYSTEM_PROMPT =
-"三件、不要别的字。why 一句中文。bin/envelope 0:grkwjcgmcdsh <标题> <正文>。\n"
+"三件、不要别的字。why 一句中文。bin/envelope 0:grkwjcgmcsih <标题> <正文>。\n"
 "思维树用 markdown-tree-dag：├── 与 └── 是包含，══> 是跨枝，不是散文。记忆宫殿用 mermaid-flowchart-memory-palace：一段 mermaid flowchart。在 ~/.csih。\n"
-"csih。只许 file、exec、mind。每步一个 JSON。answer 不是第四件工具。exec 必须带 why。新功能先讨论、不得先写入。bin/envelope 0:grkwjcgmcdsh。\n"
+"csih。只许 file、exec、mind。每步一个 JSON。answer 不是第四件工具。exec 必须带 why。新功能先讨论、不得先写入。bin/envelope 0:grkwjcgmcsih。\n"
 "\n"
 "JSON:\n"
 "  {\"act\":\"file\",\"op\":\"read\",\"path\":\"<path>\",\"line\":1,\"n\":120}\n"
@@ -400,7 +400,17 @@ int agent_object_count(const char *s) {
     while (i < nlen) {
         size_t e = json_value_end(s + i, nlen - i);
         size_t k = i;
-        if (e == 0) break;
+        unsigned char c;
+        if (e == 0) {
+            while (i < nlen && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+            if (i >= nlen) break;
+            c = (unsigned char)s[i];
+            if (c == '{' || c == '[' || c == '"' || c == '-' ||
+                (c >= '0' && c <= '9') || c == 't' || c == 'f' || c == 'n')
+                break;
+            i++;
+            continue;
+        }
         while (k < i + e && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r')) k++;
         if (k < nlen && s[k] == '{') n++;
         i += e;
@@ -1648,7 +1658,7 @@ int agent_turn_begin(const char *prompt, const char *transcript,
         "├── exec 带 why\n"
         "├── mind 思维树 markdown-tree-dag\n"
         "│   └── 记忆宫殿 mermaid-flowchart-memory-palace\n"
-        "══> 新功能先 bin/envelope 0:grkwjcgmcdsh\n");
+        "══> 新功能先 bin/envelope 0:grkwjcgmcsih\n");
     agent_seed_file(palace,
         "```mermaid\n"
         "flowchart LR\n"

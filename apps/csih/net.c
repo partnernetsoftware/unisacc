@@ -346,16 +346,19 @@ static void net_take_body(int fd, char *buf, size_t cap, size_t *off) {
     }
 }
 
+/* Key read from ~/env.jsonl. DEEPSEEK_API_KEY, when set, is used first and
+ * is not stored here. /reload clears only this buffer. */
+static char net_key[200];
+
 /* unisacc re-execs into its cache and drops DEEPSEEK_API_KEY. Read the
  * deepseek object in ~/env.jsonl. The first api_key in that file is not this one. */
 static const char *net_deepseek_key(void) {
-    static char key[200];
     const char *env = getenv("DEEPSEEK_API_KEY");
     const char *home;
     char path[512], line[4096];
     FILE *f;
     if (env && env[0]) return env;
-    if (key[0]) return key;
+    if (net_key[0]) return net_key;
     home = getenv("HOME");
     if (!home) return 0;
     snprintf(path, sizeof path, "%s/env.jsonl", home);
@@ -372,12 +375,28 @@ static const char *net_deepseek_key(void) {
         q = strchr(p, '"');
         if (!q) continue;
         q++;
-        while (*q && *q != '"' && i < (int)sizeof key - 1) key[i++] = *q++;
-        key[i] = 0;
+        while (*q && *q != '"' && i < (int)sizeof net_key - 1) net_key[i++] = *q++;
+        net_key[i] = 0;
         break;
     }
     fclose(f);
-    return key[0] ? key : 0;
+    return net_key[0] ? net_key : 0;
+}
+
+/* Drop the cached env.jsonl key when that file can be opened. Returns 1
+ * then. A missing file leaves the cache, so the next call still has it.
+ * Does not unset DEEPSEEK_API_KEY and does not rewrite env.jsonl. */
+int net_deepseek_forget(void) {
+    const char *home = getenv("HOME");
+    char path[512];
+    FILE *f;
+    if (!home || !home[0]) return 0;
+    snprintf(path, sizeof path, "%s/env.jsonl", home);
+    f = fopen(path, "r");
+    if (!f) return 0;
+    fclose(f);
+    net_key[0] = 0;
+    return 1;
 }
 
 /* Host libc FILE*. curl's default writer is fwrite; a unisacc FILE* or
@@ -788,6 +807,22 @@ static void run_selftest(void) {
             expect(tokens == 11 && seen == 1 && hit == 2 && miss == 3, "usage replaces the byte estimate");
             unlink(path);
         }
+    }
+
+    /* /reload asks this before it drops the cached key. A missing file must
+     * leave the cache. DEEPSEEK_API_KEY is not touched. */
+    {
+        char saved[512];
+        const char *home = getenv("HOME");
+        int saw;
+        saved[0] = 0;
+        if (home) snprintf(saved, sizeof saved, "%s", home);
+        setenv("HOME", "/tmp/csih-reload-missing", 1);
+        saw = net_deepseek_forget();
+        if (saved[0]) setenv("HOME", saved, 1);
+        else unsetenv("HOME");
+        expect(saw == 0, "a missing env.jsonl keeps the cached key");
+        if (saved[0]) expect(net_deepseek_forget() == 1, "an open env.jsonl clears the cached key");
     }
 }
 

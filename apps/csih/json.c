@@ -603,7 +603,7 @@ int json_run_selftest(void) {
     {
         const char *span = " {\"a\":\"}\"} ";
         size_t e = json_value_end(span, strlen(span));
-        expect(e == 11 && span[e - 1] == '}', "span closes after the brace inside the string");
+        expect(e == 10 && span[e - 1] == '}', "span closes after the brace inside the string");
         expect(json_value_end("{", 1) == 0, "unclosed object is not a span");
     }
     {
