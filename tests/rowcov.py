@@ -37,6 +37,16 @@ def edges(delta):
             total.add((name, str(k)))
     return total
 
+def shard(files, k, n, stage):
+    """Files of shard K of N.  Round robin, except parse2: a probe that includes <math.h> costs ~30 s there
+    (0.0.32 q11: the two shards holding one each took 45 and 37 s, the rest ~14 s, and one hit the 53 s
+    watchdog under a 4-job queue), so each heavy probe gets a shard of its own and the rest skip those shards."""
+    if stage != 'parse2': return files[k - 1::n]
+    heavy = [f for f in files if '<math.h>' in (ROOT / f).read_text(errors='replace')]
+    if k <= len(heavy): return [heavy[k - 1]]
+    light = [f for f in files if f not in heavy]; m = n - len(heavy)
+    return light[k - len(heavy) - 1::m]
+
 def probe_print(files):
     """0.0.28 E22: what a shard's result depends on besides the delta -- its probe files and the reference."""
     import hashlib
@@ -129,7 +139,7 @@ def main():
         files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
         import time
         def fresh(k):
-            try: return json.loads((out / ('%s-%d.json' % (stage, k))).read_text()).get('probes') == probe_print(files[k - 1::n])
+            try: return json.loads((out / ('%s-%d.json' % (stage, k))).read_text()).get('probes') == probe_print(shard(files, k, n, stage))
             except (FileNotFoundError, ValueError): return False
         deadline = time.time() + 40           # in a queue the shard jobs may still be finishing: wait for them first
         while time.time() < deadline and not all(fresh(k) for k in range(1, n + 1)): time.sleep(2)
@@ -234,7 +244,7 @@ def main():
             fs.cache[b'\0cli/target'] = b'lnx/x86_64'
         return fs
     files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
-    mine = files[k - 1::n]; cov = set(); ran = 0; first = {}
+    mine = shard(files, k, n, stage); cov = set(); ran = 0; first = {}
     os.chdir(ROOT)
     for f in mine:
         c = set()
