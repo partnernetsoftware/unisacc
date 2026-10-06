@@ -156,8 +156,8 @@ modeljob() {   # modeljob NAME: one compilerpack model job into $T/models/NAME.{
         object-enc-x86_64) set -- "$1" enc --object;; object-enc-arm64) set -- "$1" enc/arm --object;;
         *) echo "unknown model job $1" >&2; exit 2;;
     esac
-    mkdir -p "$T/models"; n=$1; shift
-    gen "$1" "$T/models/$n.json" "$@"
+    mkdir -p "$T/models"; n=$1; st=$2; shift 2
+    gen "$st" "$T/models/$n.json" "$@"
     tn "$T/models/$n.json" "$T/models/$n.tbl" "$T/models/$n.net"
     rm -f "$T/models/$n.json"
 }
