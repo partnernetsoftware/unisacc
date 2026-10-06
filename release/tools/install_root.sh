@@ -12,7 +12,8 @@ cp "$C/unisacc-next.com" unisacc.com && cp "$C/unisacc-next.com.build.json" unis
 cp "$C/seed/unisacc-seed.com" unisacc-seed.com && cp "$C/seed/unisacc-seed.com.build.json" unisacc-seed.com.build.json || exit 1
 chmod +x unisacc.com unisacc-seed.com
 if [ -d "$C/model-audit" ]; then rm -rf "${PWD:?}/model-audit" && cp -R "$C/model-audit" model-audit || exit 1; fi
-python3 tests/bound.py 30 python3 exec/c/provenance.py check unisacc.com || { echo "install_root: provenance failed"; exit 1; }
+if [ -x "$C/seedbin/ident" ]; then prov="$C/seedbin/ident . check"; else prov="python3 exec/c/provenance.py check"; fi   # B5
+tests/bound 30 $prov unisacc.com || { echo "install_root: provenance failed"; exit 1; }
 python3 tests/bound.py 30 python3 tests/subtractsafety.py | tail -1 || exit 1
 a=$(./unisacc.com --version); b=$(./unisacc-seed.com --version)
 [ "$a" = "$b" ] || { echo "install_root: VERSION MISMATCH com [$a] seed [$b]"; exit 1; }
