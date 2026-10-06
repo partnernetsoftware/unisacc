@@ -64,7 +64,10 @@ if kind in ('all','cc') and shard in ('all','1/3'):
         # it at the 16 KiB-aligned end of text plus the dl prefix
         # (exec/enc/memorylayout-result.tsv ML.reserve-pages). Compare against
         # the explicit binding at that derived base, not at the live one.
-        d1=((tb+nt+16383)&~16383)+prefix
+        # Round the text length, not the address: the live base is only page
+        # (4 KiB) aligned under ASLR, so rounding tb+nt was wrong whenever tb
+        # was not 16 KiB aligned (M1, 1 in ~4 runs).
+        d1=tb+((nt+16383)&~16383)+prefix
         if d1==db: expect=image
         else:
             two=sim.Files()
