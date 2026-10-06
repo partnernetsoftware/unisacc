@@ -104,7 +104,7 @@ job manifest-entries-lower python3 ./tests/manifestentries.py --stage lower
 job dsl-ops python3 ./tests/dslops.py   # T2: one independent contract and mutation for each manifest op
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
-for k in $(seq 1 40); do job csmithdiff-$k SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
+for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
 # R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
 # regressions found after 0.0.16's local queue was green came from here
 # (ccrun8: a Python-route bit-field value; opt-run1: c-testsuite 00204).
