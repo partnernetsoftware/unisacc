@@ -86,4 +86,4 @@ moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具
 
 ## 探针
 
-`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；csih 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `plans/v0.0.28.md` F1。
+`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；csih 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `archive/plans/v0.0.28.md` F1。

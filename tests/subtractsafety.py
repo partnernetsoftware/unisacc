@@ -29,7 +29,7 @@ import tempfile
 ARCHIVE = 'archive'
 SKIP_PREFIXES = ('ujs/', '.git/')
 IMPORT_RE = re.compile(r'^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+(?:\s*,\s*[\w.]+)*))', re.M)
-PATH_RE = re.compile(r'(?<![\w$@{])[\w][\w.-]*(?:/[\w.-]+)+')
+PATH_RE = re.compile(r'(?<![\w$@{%])[\w][\w.-]*(?:/[\w.-]+)+')
 TEXT_SUFFIXES = {'.py', '.sh', '.md', '.c', '.h', '.tsv', '.txt', '.json', '.yml', '.yaml',
                  '.toml', '.cfg', '.ini', '.mk', '.S', '.s', '.html', '.css', '.js', '.in', '.knownfail', ''}
 
