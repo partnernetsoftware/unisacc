@@ -3815,8 +3815,44 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
     if (specs->kind != JARR) die("manifest freshrows must be a list");
     for (size_t si = 0; si < specs->n; si++) {
         Value *spec = specs->items[si].value, *file = value_get(spec, "file");
+        Value *over = value_get(spec, "over"), *source = NULL;
         Value *where = value_get(spec, "where");
         char path[1024]; FILE *f; char *s; char *header[16]; int nh = 0;
+        if (!file && over) {
+            if (over->kind != JSTR) die("manifest freshrows over must be a path");
+            source = value_path(facts, over->s);
+            if (source->kind != JARR) die("manifest freshrows over must be a list");
+            for (size_t ri = 0; ri < source->n; ri++) {
+                Value *row = source->items[ri].value, *ctx = seed_env_copy(facts);
+                char *key, *owner, *kind, *label;
+                int take = 1;
+                if (row->kind != JOBJ) die("manifest freshrows item must be an object");
+                Value *ordinal = value_new(JINT); ordinal->number = (long long)ri;
+                value_put(ctx, "i", ordinal);
+                seed_update(ctx, row);
+                if (where) {
+                    if (where->kind != JOBJ) die("freshrows where is not an object");
+                    for (size_t wi = 0; wi < where->n; wi++) {
+                        char *expect = seed_fmt(value_text(where->items[wi].value), ctx);
+                        Value *actual = value_get(row, where->items[wi].key);
+                        if (!actual || strcmp(value_text(actual), expect)) take = 0;
+                        free(expect);
+                    }
+                }
+                if (!take) continue;
+                key = seed_fmt(value_text(value_get(spec, "key")), ctx);
+                owner = seed_fmt(value_text(value_get(spec, "owner")), ctx);
+                kind = seed_fmt(value_text(value_get(spec, "kind")), ctx);
+                if (value_get(spec, "lookup") && manifest_truth(value_get(spec, "lookup"))) {
+                    Value *prior = value_get(bindings, owner[0] == '$' ? owner + 1 : owner);
+                    if (prior) { char *resolved = copy(value_text(prior)); free(owner); owner = resolved; }
+                }
+                label = fresh_label(owner, kind);
+                value_put(bindings, key, value_string(label));
+                free(key); free(owner); free(kind); free(label);
+            }
+            continue;
+        }
         if (!file || file->kind != JSTR ||
             snprintf(path, sizeof(path), "%s/%s", dir, file->s) >= (int)sizeof(path))
             die("manifest freshrows file is not covered");
@@ -3985,7 +4021,8 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                  strcmp(opts->items[i].key, "domain_keys") &&
                 strcmp(opts->items[i].key, "export") && strcmp(opts->items[i].key, "accumulate") &&
                  strcmp(opts->items[i].key, "keep") && strcmp(opts->items[i].key, "let") &&
-                 strcmp(opts->items[i].key, "cellsfirst") && strcmp(opts->items[i].key, "outseq")) {
+                 strcmp(opts->items[i].key, "cellsfirst") && strcmp(opts->items[i].key, "outseq") &&
+                 strcmp(opts->items[i].key, "with")) {
                 fprintf(stderr, "manifest rows option: %s (%s/%s:%s)\n", opts->items[i].key,
                         ctx->dir, row->cell[1], row->cell[2]);
                 die("manifest rows option is not yet covered");
@@ -4151,7 +4188,8 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
             if (strcmp(opts->items[i].key, "mapseq") && strcmp(opts->items[i].key, "let") &&
                 strcmp(opts->items[i].key, "bindmap") && strcmp(opts->items[i].key, "freshrows") &&
                 strcmp(opts->items[i].key, "accumulate") && strcmp(opts->items[i].key, "keep") &&
-                strcmp(opts->items[i].key, "textrows") && strcmp(opts->items[i].key, "once"))
+                strcmp(opts->items[i].key, "textrows") && strcmp(opts->items[i].key, "once") &&
+                strcmp(opts->items[i].key, "with"))
                 die("manifest let option is not yet covered");
         if (accumulate) seed_update(bindings, value_get(ctx->accum, value_text(accumulate)));
         if (bindmap) {
@@ -8616,6 +8654,22 @@ int main(int argc, char **argv) {
         Value *v = load_fact(argv[2]);
         out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
         value_write(out, v); if (fclose(out)) die("output close failed");
+        return 0;
+    }
+    if (argc >= 3 && argc <= 7 && !strcmp(argv[1], "enc")) {
+        ManifestRows rows = manifest_rows("exec/enc/gen-manifest.tsv");
+        ManifestGraph ctx = {0}; Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
+        const char *names[] = {"elf", "macho", "pe", "object"};
+        for (int i = 0; i < 4; i++) {
+            Value *v = value_new(JBOOL); v->number = has_flag(argc - 3, argv + 3, names[i]);
+            value_put(flags, names[i], v);
+        }
+        ctx.graph = &g; ctx.dir = "exec/enc"; ctx.flags = flags; ctx.accum = value_new(JOBJ);
+        manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
+        finish(&g);
+        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        output_graph(out, &g, "START", NULL);
+        if (fclose(out)) die("output close failed");
         return 0;
     }
     if (argc >= 3 && argc <= 6 && !strcmp(argv[1], "parse2")) {
