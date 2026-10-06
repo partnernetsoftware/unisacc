@@ -67,6 +67,13 @@ jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
 size_t  json_value_end(const char *text, size_t len);
 void    jfree(jvalue *v);
 size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
+size_t  json_rec(char *out, size_t cap,
+                 const char *k1, const char *v1,
+                 const char *k2, const char *v2,
+                 const char *k3, const char *v3);
+size_t  json_msg(char *buf, size_t cap, int comma,
+                 const char *role, const char *lead, const char *content);
+size_t  json_model(char *out, size_t cap, const char *msgs, size_t n);
 jvalue *jget(jvalue *obj, const char *key);
 const char *jstr(jvalue *v);
 double  jnum(jvalue *v, double dflt);
@@ -352,7 +359,6 @@ size_t agent_pack_tool(const char *text, char *out, size_t outlen, size_t cap) {
 
 /* The record must stay valid JSON. A cut through a UTF-8 byte is a 400. */
 int agent_tool_record(char *rec, size_t recsz, const char *name, const char *text) {
-    char esc[AGENT_RESULT_MAX];
     char tmp[AGENT_RESULT_MAX];
     size_t cap = 1600;
     int i;
@@ -360,16 +366,14 @@ int agent_tool_record(char *rec, size_t recsz, const char *name, const char *tex
     for (i = 0; i < 8; i++) {
         size_t recn;
         agent_pack_tool(text, tmp, sizeof tmp, cap);
-        agent_json_str(tmp, esc, sizeof esc);
-        recn = (size_t)snprintf(rec, recsz,
-            "{\"role\":\"tool\",\"name\":\"%s\",\"text\":\"%s\"}",
-            name ? name : "tool", esc);
-        if (recn + 1 < recsz && rec[0] == '{' && rec[recn - 1] == '}') return 1;
+        recn = json_rec(rec, recsz, "role", "tool", "name", name ? name : "tool",
+                        "text", tmp);
+        if (recn > 0 && rec[0] == '{' && rec[recn - 1] == '}') return 1;
         if (cap <= 64) break;
         cap = cap > 240 ? cap - 240 : 64;
     }
-    snprintf(rec, recsz, "{\"role\":\"tool\",\"name\":\"%s\",\"text\":\"truncated\"}",
-             name ? name : "tool");
+    json_rec(rec, recsz, "role", "tool", "name", name ? name : "tool",
+             "text", "truncated");
     return 1;
 }
 
@@ -392,6 +396,24 @@ static void agent_strip_fence(const char *in, char *out, size_t outlen) {
 
 /* How many JSON objects are in the text. The loop runs only the first.
  * The model sees that result, then writes the next step itself. */
+/* The user asked for words only. A later tool call is still a tool call.
+ * Bare prose is the answer, even when it contains a brace from C code. */
+int agent_user_forbids_tools(const char *prompt) {
+    if (!prompt) return 0;
+    if (strstr(prompt, "不要用工具")) return 1;
+    if (strstr(prompt, "不用工具")) return 1;
+    if (strstr(prompt, "不要使用工具")) return 1;
+    return 0;
+}
+
+int agent_take_prose(agent_step *s, const char *content, int no_tools) {
+    if (!s || !no_tools || s->kind != ACT_ERR) return 0;
+    if (!content || !content[0]) return 0;
+    s->kind = ACT_ANSWER;
+    snprintf(s->text, sizeof s->text, "%s", content);
+    return 1;
+}
+
 int agent_object_count(const char *s) {
     size_t i = 0, nlen;
     int n = 0;
@@ -998,8 +1020,6 @@ static int agent_build_messages(const char *transcript, const char *tail,
     recs = session_read(transcript);
     memset(held, 0, sizeof held);
 
-    a += (size_t)snprintf(acc + a, sizeof acc - a,
-                          "{\"role\":\"system\",\"content\":\"");
     /* System text stays byte-stable (catalog + prompt). The tmux window list
      * is caller text with newlines; it rides a user message below,
      * JSON-escaped, so it never lands inside this string. */
@@ -1009,9 +1029,8 @@ static int agent_build_messages(const char *transcript, const char *tail,
         sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "Catalog:\n");
         sa += (size_t)plugin_catalog(sysbuf + sa, (int)(sizeof sysbuf - sa));
         sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "\n%s", AGENT_SYSTEM_PROMPT);
-        a += agent_json_str(sysbuf, acc + a, sizeof acc - a);
+        a += json_msg(acc + a, sizeof acc - a, 0, "system", NULL, sysbuf);
     }
-    a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
 
     for (i = 0; i < recs.count; i++) {
         char err[128];
@@ -1091,11 +1110,9 @@ static int agent_build_messages(const char *transcript, const char *tail,
         }
         if (omitted && a + (size_t)note_cost < history_room && a + 32 < sizeof acc) {
             size_t before = a;
-            a += (size_t)snprintf(acc + a, sizeof acc - a,
-                                  ",{\"role\":\"user\",\"content\":\"");
-            a += agent_json_str(AGENT_OMIT_NOTE, acc + a, sizeof acc - a);
-            a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
-            if (a >= history_room) { a = before; acc[a] = '\0'; }
+            size_t n = json_msg(acc + a, sizeof acc - a, 1, "user", NULL, AGENT_OMIT_NOTE);
+            if (n && before + n < history_room) a += n;
+            else acc[a] = '\0';
         }
     }
     for (k = 0; k < nvals; k++) {
@@ -1108,33 +1125,24 @@ static int agent_build_messages(const char *transcript, const char *tail,
             agent_pack_tool(texts[k], packed, sizeof packed, 1600);
             wire = packed;
         }
-        a += (size_t)snprintf(acc + a, sizeof acc - a,
-                              ",{\"role\":\"%s\",\"content\":\"", api_roles[k]);
-        if (wraps[k]) a += agent_json_str("[tool]\n", acc + a, sizeof acc - a);
-        a += agent_json_str(wire, acc + a, sizeof acc - a);
-        a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
+        {
+            size_t n = json_msg(acc + a, sizeof acc - a, 1, api_roles[k],
+                                 wraps[k] ? "[tool]\n" : NULL, wire);
+            if (n) a += n;
+        }
         if (a >= history_room && k + 1 < nvals) { a = before; acc[a] = '\0'; use[k] = 0; }
     }
 
-    if (tail && tail[0] && a + 32 < sizeof acc) {
-        a += (size_t)snprintf(acc + a, sizeof acc - a,
-                              ",{\"role\":\"user\",\"content\":\"");
-        a += agent_json_str(tail, acc + a, sizeof acc - a);
-        a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
-    } else if (send_extra && a + 32 < sizeof acc) {
-        a += (size_t)snprintf(acc + a, sizeof acc - a,
-                              ",{\"role\":\"user\",\"content\":\"");
-        a += agent_json_str(extra_system, acc + a, sizeof acc - a);
-        a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
-    }
+    if (tail && tail[0] && a + 32 < sizeof acc)
+        a += json_msg(acc + a, sizeof acc - a, 1, "user", NULL, tail);
+    else if (send_extra && a + 32 < sizeof acc)
+        a += json_msg(acc + a, sizeof acc - a, 1, "user", NULL, extra_system);
 
     for (k = 0; k < nvals; k++) jfree(held[k]);
     session_free(&recs);
     if (a >= sizeof acc) a = sizeof acc - 1;
     acc[a] = '\0';
-    snprintf(out, outlen, "{\"model\":\"__MODEL__\",\"messages\":[%.*s],\"stream\":false}",
-             (int)a, acc);
-    return (int)strlen(out);
+    return (int)json_model(out, outlen, acc, a);
 }
 
 /* Build messages for a transcript with no tail and no extra. Selftest uses it. */
@@ -1265,7 +1273,7 @@ static void agent_seed_file(const char *path, const char *template) {
 enum { PH_IDLE = 0, PH_GO = 1, PH_WAIT = 2, PH_DONE = 3, HTTP_ACT = 0, HTTP_END = 1 };
 
 static struct {
-    int phase, http_kind, round, action, parse_fail, judge;
+    int phase, http_kind, round, action, parse_fail, judge, no_tools;
     agent_result res;
     agent_event_fn on_event;
     void *ud;
@@ -1447,7 +1455,7 @@ static int at_after_http(void) {
         char dec_rec[128];
         AT.judge++;
         if (d.kind == ACT_GO_CONTINUE) {
-            snprintf(dec_rec, sizeof dec_rec, "{\"role\":\"decision\",\"go\":\"continue\"}");
+            json_rec(dec_rec, sizeof dec_rec, "role", "decision", "go", "continue", NULL, NULL);
             session_append(AT.transcript, dec_rec);
             at_event("  → continue");
             AT.round++;
@@ -1462,7 +1470,7 @@ static int at_after_http(void) {
             AT.phase = PH_GO;
             return 1;
         }
-        snprintf(dec_rec, sizeof dec_rec, "{\"role\":\"decision\",\"go\":\"stop\"}");
+        json_rec(dec_rec, sizeof dec_rec, "role", "decision", "go", "stop", NULL, NULL);
         session_append(AT.transcript, dec_rec);
         at_event("  → stop");
         AT.res.stopped = 1;
@@ -1472,16 +1480,14 @@ static int at_after_http(void) {
     }
     {
         agent_step s = agent_parse(AT.content);
+        agent_take_prose(&s, AT.content, AT.no_tools);
         if (s.kind == ACT_GO_STOP || s.kind == ACT_GO_CONTINUE) AT.judge++;
         char asst_rec[AGENT_CONTENT_MAX + 64];
-        char cesc[AGENT_CONTENT_MAX];
         char result[AGENT_RESULT_MAX];
         char tool_rec[AGENT_RESULT_MAX + 64];
-        char esc[AGENT_RESULT_MAX];
         const char *nm = plugin_name(s.kind);
         if (!nm) nm = "?";
-        agent_json_str(AT.content, cesc, sizeof cesc);
-        snprintf(asst_rec, sizeof asst_rec, "{\"role\":\"assistant\",\"text\":\"%s\"}", cesc);
+        json_rec(asst_rec, sizeof asst_rec, "role", "assistant", "text", AT.content, NULL, NULL);
         session_append(AT.transcript, asst_rec);
         {
             char ev[256];
@@ -1537,9 +1543,7 @@ static int at_after_http(void) {
         if (s.kind == ACT_ANSWER || s.kind == ACT_GO_STOP) {
             char why[200];
             if (agent_failing(why, (int)sizeof why)) {
-                agent_json_str(why, esc, sizeof esc);
-                snprintf(tool_rec, sizeof tool_rec,
-                         "{\"role\":\"tool\",\"name\":\"error\",\"text\":\"%s\"}", esc);
+                json_rec(tool_rec, sizeof tool_rec, "role", "tool", "name", "error", "text", why);
                 session_append(AT.transcript, tool_rec);
                 at_event(why);
                 AT.phase = PH_GO;
@@ -1552,14 +1556,16 @@ static int at_after_http(void) {
                 AT.phase = PH_GO;
                 return 1;
             }
-            session_append(AT.transcript, "{\"role\":\"decision\",\"go\":\"stop\"}");
+            json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "stop", NULL, NULL);
+            session_append(AT.transcript, tool_rec);
             AT.res.stopped = 1;
             AT.res.ok = 1;
             AT.phase = PH_DONE;
             return 0;
         }
         if (s.kind == ACT_GO_CONTINUE) {
-            session_append(AT.transcript, "{\"role\":\"decision\",\"go\":\"continue\"}");
+            json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "continue", NULL, NULL);
+            session_append(AT.transcript, tool_rec);
             AT.round++;
             AT.action = 0;
             AT.http_kind = HTTP_ACT;
@@ -1572,7 +1578,8 @@ static int at_after_http(void) {
              * The next continue would be round+1. At the cap, do not ask:
              * continue would be rejected on the next step anyway. */
             if (AT.round + 1 >= MAX_ROUNDS) {
-                session_append(AT.transcript, "{\"role\":\"decision\",\"go\":\"stop\"}");
+                json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "stop", NULL, NULL);
+                session_append(AT.transcript, tool_rec);
                 AT.res.ok = 1;
                 snprintf(AT.res.reason, sizeof AT.res.reason, "reached MAX_ROUNDS");
                 AT.phase = PH_DONE;
@@ -1584,8 +1591,8 @@ static int at_after_http(void) {
             return 1;
         }
         if (s.kind == ACT_ERR) {
-            agent_json_str("could not parse your output as a JSON action; emit exactly one {\"act\":...} object", esc, sizeof esc);
-            snprintf(tool_rec, sizeof tool_rec, "{\"role\":\"tool\",\"name\":\"error\",\"text\":\"%s\"}", esc);
+            json_rec(tool_rec, sizeof tool_rec, "role", "tool", "name", "error", "text",
+                     "could not parse your output as a JSON action; emit exactly one {\"act\":...} object");
             session_append(AT.transcript, tool_rec);
             if (++AT.parse_fail >= 3) {
                 AT.res.ok = 1;
@@ -1637,9 +1644,10 @@ int agent_turn_begin(const char *prompt, const char *transcript,
                      const char *extra_system,
                      agent_event_fn on_event, void *ud) {
     char user_rec[AGENT_CONTENT_MAX + 64];
-    char pesc[AGENT_CONTENT_MAX];
+
     char tree[2048], palace[2048];
     memset(&AT, 0, sizeof AT);
+    AT.no_tools = agent_user_forbids_tools(prompt);
     net_reset();
     net_turn_clock();
     at_copy(AT.endpoint, (int)sizeof AT.endpoint, endpoint);
@@ -1667,8 +1675,7 @@ int agent_turn_begin(const char *prompt, const char *transcript,
         "  mind --> palace[\"mermaid-flowchart-memory-palace\"]\n"
         "```\n");
     agent_journal_trim(AT.transcript, AGENT_JOURNAL_MAX, AGENT_JOURNAL_KEEP);
-    agent_json_str(prompt ? prompt : "", pesc, sizeof pesc);
-    snprintf(user_rec, sizeof user_rec, "{\"role\":\"user\",\"text\":\"%s\"}", pesc);
+    json_rec(user_rec, sizeof user_rec, "role", "user", "text", prompt ? prompt : "", NULL, NULL);
     if (session_append(AT.transcript, user_rec) != 0) {
         AT.res.err = 1;
         snprintf(AT.res.reason, sizeof AT.res.reason, "cannot write transcript");

@@ -57,6 +57,8 @@ typedef struct {
 } agent_result;
 
 agent_step agent_parse(const char *content);
+int agent_user_forbids_tools(const char *prompt);
+int agent_take_prose(agent_step *s, const char *content, int no_tools);
 int  agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen);
 int  agent_note_cd(char *cwd, size_t cwdlen, const char *cmd, char *out, size_t outlen);
 int  agent_object_count(const char *s);
@@ -130,6 +132,14 @@ static int agent_run_selftest(void) {
 
     s = agent_parse("total nonsense");
     a_expect(s.kind == ACT_ERR, "garbage is ACT_ERR");
+    a_expect(!agent_user_forbids_tools("读 json.c") && agent_user_forbids_tools("不要用工具。只回答")
+             && agent_user_forbids_tools("请不用工具"),
+             "不用工具 is a property of the user line");
+    a_expect(!agent_take_prose(&s, "out[0]=0 即可", 0), "prose stays an error when tools are allowed");
+    s = agent_parse("not json");
+    a_expect(agent_take_prose(&s, "out[0]=0 即可", 1) && s.kind == ACT_ANSWER
+             && strstr(s.text, "out[0]"),
+             "不用工具: prose is the answer");
     s = agent_parse("Sure.\n{\"act\":\"exec\",\"cmd\":\"pwd\"}\n{\"act\":\"exec\",\"cmd\":\"ls\"}");
     a_expect(s.kind == ACT_EXEC && strcmp(s.cmd, "pwd") == 0,
              "prose plus extra objects keeps the first");

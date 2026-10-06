@@ -169,6 +169,7 @@ typedef struct {
     int  loop_left;           /* remaining auto-submits this arming */
     int  sys_open;            /* 0: system rule only. 1: ten body rows */
     int  sys_top;             /* first wrapped row shown while open */
+    int  log_skip;            /* newest log entries hidden; 0 follows the tail */
 } tui_state;
 
 static void tui_state_init(tui_state *st, const char *transcript) {
@@ -187,6 +188,9 @@ static void tui_redraw(tui_state *st);
 static int tui_run_agent(tui_state *st);
 static void tui_apply_key(tui_state *st, int kind, char ch);
 static void tui_submit(tui_state *st);
+static void tui_log_hold(tui_state *st);
+static void tui_log_scroll(tui_state *st, int delta);
+static int tui_log_room(const tui_state *st);
 static r_frame tui_render_state(tui_state *st, int cols);
 
 /* ── the key queue ──────────────────────────────────────────────────────── */
@@ -313,6 +317,7 @@ static void tui_log_plain(tui_state *st, const char *s) {
     st->ex_cmd[st->nlog][0] = 0;
     snprintf(st->log[st->nlog], sizeof st->log[0], "%s", s ? s : "");
     st->nlog++;
+    tui_log_hold(st);
     tui_note_err(st, s);
 }
 
@@ -356,6 +361,7 @@ static void tui_log_event(tui_state *st, const char *line) {
         snprintf(st->log[st->nlog], sizeof st->log[0], "%s", line ? line : "");
     }
     st->nlog++;
+    tui_log_hold(st);
     tui_note_err(st, line);
 }
 
@@ -586,6 +592,30 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         if (st->ninput > 0) return;
         if (st->busy) { st->cancel = 1; net_cancel(); }
         st->quit = 1;
+        return;
+    case TERM_KEY_UP:
+        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
+        tui_log_scroll(st, 1);
+        return;
+    case TERM_KEY_DOWN:
+        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
+        tui_log_scroll(st, -1);
+        return;
+    case TERM_KEY_PGUP:
+        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
+        tui_log_scroll(st, tui_log_room(st));
+        return;
+    case TERM_KEY_PGDN:
+        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
+        tui_log_scroll(st, -tui_log_room(st));
+        return;
+    case TERM_KEY_HOME:
+        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
+        tui_log_scroll(st, 40);
+        return;
+    case TERM_KEY_END:
+        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
+        st->log_skip = 0;
         return;
     case TERM_KEY_UNKNOWN:
         /* Never swallowed: an ignored key reads as "the UI is broken". */
@@ -893,13 +923,86 @@ static void tui_click(tui_state *st, int x, int y) {
     }
 }
 
-/* Wheel over the open system rows. dir 1 moves down, dir 2 moves up.
- * Anywhere else, including a wheel on an exec row, is ignored. */
+/* Log entries the viewport can hold before an open exec shrinks it. */
+static int tui_log_room(const tui_state *st) {
+    int rows = st->rows > 0 ? st->rows : 24;
+    int sys_rows = st->sys_open ? TUI_SYS_N : 0;
+    int room = rows - 15 - sys_rows - st->npending;
+    if (room < 1) room = 1;
+    if (room > TUI_LOG_VIEW) room = TUI_LOG_VIEW;
+    return room;
+}
+
+/* Visible log entries are [start, end). end hides log_skip newest rows. */
+static void tui_log_range(tui_state *st, int *start_out, int *end_out, int *show_out) {
+    int show = tui_log_room(st);
+    int skip = st->log_skip;
+    int end, start, extra, i;
+    if (skip < 0) skip = 0;
+    end = st->nlog - skip;
+    if (end < 0) end = 0;
+    start = end - show;
+    if (start < 0) start = 0;
+    extra = 0;
+    for (i = start; i < end; i++)
+        if (st->ex_on[i] && st->ex_open[i]) extra++;
+    if (extra > 0 && show > extra) show -= extra;
+    start = end - show;
+    if (start < 0) start = 0;
+    if (start_out) *start_out = start;
+    if (end_out) *end_out = end;
+    if (show_out) *show_out = show;
+}
+
+static void tui_log_clamp(tui_state *st) {
+    int show = tui_log_room(st);
+    int end, start, extra, i, max;
+    if (st->log_skip < 0) st->log_skip = 0;
+    end = st->nlog - st->log_skip;
+    if (end < 0) end = 0;
+    start = end - show;
+    if (start < 0) start = 0;
+    extra = 0;
+    for (i = start; i < end; i++)
+        if (st->ex_on[i] && st->ex_open[i]) extra++;
+    if (extra > 0 && show > extra) show -= extra;
+    max = st->nlog - show;
+    if (max < 0) max = 0;
+    if (st->log_skip > max) st->log_skip = max;
+}
+
+/* A new line while reading history stays below the window. */
+static void tui_log_hold(tui_state *st) {
+    if (st->log_skip > 0) {
+        st->log_skip++;
+        tui_log_clamp(st);
+    }
+}
+
+static void tui_log_scroll(tui_state *st, int delta) {
+    if (!st || st->mode != 1) return;
+    st->log_skip += delta;
+    tui_log_clamp(st);
+}
+
+/* Screen rows of the log viewport. Filled by the render that just ran. */
+static int tui_log_y0;
+static int tui_log_y1;
+
+/* Wheel over the open system rows still moves that block.
+ * dir 1 moves down, dir 2 moves up. A wheel on the log viewport
+ * moves history: up shows older entries, down returns toward the tail.
+ * Three entries per notch. Anywhere else is ignored. */
 static void tui_wheel(tui_state *st, int y, int dir) {
-    if (!st->sys_open) return;
-    if (tui_sys_y0 <= 0 || y < tui_sys_y0 || y >= tui_sys_y1) return;
-    if (dir == 1) st->sys_top++;
-    else if (dir == 2 && st->sys_top > 0) st->sys_top--;
+    if (st->sys_open && tui_sys_y0 > 0 && y >= tui_sys_y0 && y < tui_sys_y1) {
+        if (dir == 1) st->sys_top++;
+        else if (dir == 2 && st->sys_top > 0) st->sys_top--;
+        return;
+    }
+    if (tui_log_y0 > 0 && y >= tui_log_y0 && y < tui_log_y1) {
+        if (dir == 2) tui_log_scroll(st, 3);
+        else if (dir == 1) tui_log_scroll(st, -3);
+    }
 }
 
 /* One frame row. A raw newline would split the redraw. Draw it as ⏎,
@@ -1006,7 +1109,6 @@ static r_frame tui_render_state(tui_state *st, int cols) {
      * here would mean every body line aliases the last one. */
     char line[64][R_LINE_MAX + 1];
     int n = 0, i;
-    int rows = st->rows > 0 ? st->rows : 24;
     char hint[160];
 
     memset(&rs, 0, sizeof rs);
@@ -1014,6 +1116,8 @@ static r_frame tui_render_state(tui_state *st, int cols) {
     tui_sys_rule_y = 0;
     tui_sys_y0 = 0;
     tui_sys_y1 = 0;
+    tui_log_y0 = 0;
+    tui_log_y1 = 0;
     rs.title = (st->mode == 1) ? "csih · agent" : "csih";
     rs.width = cols;
     /* Idle agent hint stays fixed. While a call is in flight, show whole
@@ -1036,6 +1140,11 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                          sec, tokens, sent, got);
         } else if (st->ask_exit)
             snprintf(hint, sizeof hint, "要退出请按 Ctrl-D");
+        else if (st->log_skip > 0)
+            snprintf(hint, sizeof hint, "更早%d · End回底", st->log_skip);
+        else if (cols >= 72)
+            snprintf(hint, sizeof hint,
+                     "Ctrl-C 清空 · Ctrl-D 退出 · Enter 发送 · ↑↓翻历史 PgUp/PgDn Home/End");
         else
             snprintf(hint, sizeof hint, "Ctrl-C 清空 · Ctrl-D 退出 · Enter 发送");
     } else if (st->ask_exit)
@@ -1050,18 +1159,12 @@ static r_frame tui_render_state(tui_state *st, int cols) {
          * Fewer log lines are padded so the block does not collapse. */
         /* 15 = title + goal/loop + input + hint + error + two rules
          * + eight mind rows. System body is 0 or 10, not inside the 15. */
-        int sys_rows = st->sys_open ? TUI_SYS_N : 0;
-        int room = rows - 15 - sys_rows - st->npending;
-        int show, starti = 0, extra = 0, view_at, filled;
-        if (room < 1) room = 1;
-        show = room < TUI_LOG_VIEW ? room : TUI_LOG_VIEW;
-        if (st->nlog > show) starti = st->nlog - show;
-        for (i = starti; i < st->nlog; i++)
-            if (st->ex_on[i] && st->ex_open[i]) extra++;
-        if (extra > 0 && show > extra) show -= extra;
-        if (st->nlog > show) starti = st->nlog - show;
+        int show, starti = 0, endi = 0, view_at, filled;
+        tui_log_clamp(st);
+        tui_log_range(st, &starti, &endi, &show);
         view_at = n;
-        for (i = starti; i < st->nlog && n < 40; i++) {
+        tui_log_y0 = view_at + 2;
+        for (i = starti; i < endi && n < 40; i++) {
             if (st->ex_on[i]) {
                 char tag[32];
                 /* Title is frame row 1, so body index n is screen row n+2. */
@@ -1120,6 +1223,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             n++;
             filled++;
         }
+        tui_log_y1 = n + 2;
         {
             char gfold[R_LINE_MAX + 1];
             char suffix[32];
@@ -1312,6 +1416,8 @@ static int tui_run_agent(tui_state *st) {
         snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)getpid());
     transcript = journal;
 
+    /* A send follows the new line. History scroll stays put until then. */
+    st->log_skip = 0;
     /* Capture the prompt before clearing the input line. */
     memset(prompt, 0, sizeof prompt);
     strncpy(prompt, st->input, sizeof prompt - 1);
@@ -1697,6 +1803,67 @@ int main(int argc, char **argv) {
                            1 + TUI_LOG_VIEW, goal_at);
                     failures++;
                 } else printf("  ok   log view is %d\n", TUI_LOG_VIEW);
+                {
+                    int h, saw = 0;
+                    char hist[16];
+                    for (h = 0; h < 40; h++) {
+                        snprintf(hist, sizeof hist, "hist-%02d", h);
+                        tui_log_line(&wide, hist);
+                    }
+                    fr = tui_render_state(&wide, 40);
+                    if (tui_log_y0 < 2 || tui_log_y1 <= tui_log_y0
+                        || tui_frame_has(&wide, "hist-00")
+                        || !tui_frame_has(&wide, "hist-39")
+                        || tui_frame_bad_width(&fr, 40)) {
+                        printf("FAIL log tail hist y %d..%d\n", tui_log_y0, tui_log_y1);
+                        failures++;
+                    } else {
+                        tui_wheel(&wide, tui_log_y0, 2);
+                        fr = tui_render_state(&wide, 40);
+                        if (wide.log_skip != 3 || !tui_frame_has(&wide, "hist-17")
+                            || tui_frame_has(&wide, "hist-39")
+                            || !tui_frame_has(&wide, "更早3")
+                            || tui_frame_bad_width(&fr, 40)) {
+                            printf("FAIL log wheel skip %d\n", wide.log_skip);
+                            failures++;
+                        } else {
+                            tui_log_line(&wide, "hist-new");
+                            if (wide.log_skip != 4 || tui_frame_has(&wide, "hist-new")
+                                || !tui_frame_has(&wide, "hist-17")) {
+                                printf("FAIL log hold skip %d\n", wide.log_skip);
+                                failures++;
+                            } else {
+                                tui_wheel(&wide, 1, 2);
+                                tui_apply_key(&wide, TERM_KEY_END, 0);
+                                fr = tui_render_state(&wide, 80);
+                                saw = 0;
+                                for (k = 0; k < fr.n; k++)
+                                    if (strstr(fr.lines[k], "PgUp/PgDn")) saw = 1;
+                                if (wide.log_skip != 0 || !saw || !tui_frame_has(&wide, "hist-new")
+                                    || tui_frame_bad_width(&fr, 80)) {
+                                    printf("FAIL log end or wide hint\n");
+                                    failures++;
+                                } else {
+                                    tui_apply_key(&wide, TERM_KEY_UP, 0);
+                                    tui_apply_key(&wide, TERM_KEY_PGUP, 0);
+                                    tui_apply_key(&wide, TERM_KEY_HOME, 0);
+                                    if (wide.log_skip != 20 || !tui_frame_has(&wide, "hist-01")
+                                        || tui_frame_has(&wide, "hist-new")) {
+                                        printf("FAIL log home skip %d\n", wide.log_skip);
+                                        failures++;
+                                    } else {
+                                        tui_apply_key(&wide, TERM_KEY_PGDN, 0);
+                                        tui_apply_key(&wide, TERM_KEY_DOWN, 0);
+                                        if (wide.log_skip != 0) {
+                                            printf("FAIL log page down skip %d\n", wide.log_skip);
+                                            failures++;
+                                        } else printf("  ok   log wheel and keys\n");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 tui_state_init(&wide, NULL);
                 wide.mode = 1;
                 wide.rows = 54;

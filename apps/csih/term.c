@@ -223,6 +223,22 @@ term_key_t term_parse_key(const char *buf, int got) {
     k.raw[got] = '\0';
     k.nraw = got;
 
+    /* ESC [ <digits> ~  is one key: paste, page, home, or end. */
+    if (got >= 4 && buf[0] == 0x1b && buf[1] == '[' && buf[got - 1] == '~') {
+        const char *p = buf + 2;
+        const char *end = buf + got - 1;
+        int num = 0;
+        if (term_num(&p, end, &num) && p == end) {
+            if (num == 200) k.kind = TERM_KEY_PASTE_ON;
+            else if (num == 201) k.kind = TERM_KEY_PASTE_OFF;
+            else if (num == 5) k.kind = TERM_KEY_PGUP;
+            else if (num == 6) k.kind = TERM_KEY_PGDN;
+            else if (num == 1) k.kind = TERM_KEY_HOME;
+            else if (num == 4) k.kind = TERM_KEY_END;
+            else k.kind = TERM_KEY_UNKNOWN;
+            return k;
+        }
+    }
     if (got == 1) {
         unsigned char c = (unsigned char)buf[0];
         if (c == 3)  { k.kind = TERM_KEY_CTRL_C;    return k; }
@@ -234,23 +250,14 @@ term_key_t term_parse_key(const char *buf, int got) {
         k.ch = buf[0];
         return k;
     }
-    /* Bracketed paste. Must be recognised whole, not as ESC [ 2 plus digits. */
-    if (got == 6 && buf[0] == 0x1b && buf[1] == '[' && buf[5] == '~') {
-        if (buf[2] == '2' && buf[3] == '0' && buf[4] == '0') {
-            k.kind = TERM_KEY_PASTE_ON;
-            return k;
-        }
-        if (buf[2] == '2' && buf[3] == '0' && buf[4] == '1') {
-            k.kind = TERM_KEY_PASTE_OFF;
-            return k;
-        }
-    }
     if (got == 3 && buf[0] == 0x1b && buf[1] == '[') {
         switch (buf[2]) {
         case 'A': k.kind = TERM_KEY_UP;    return k;
         case 'B': k.kind = TERM_KEY_DOWN;  return k;
         case 'C': k.kind = TERM_KEY_RIGHT; return k;
         case 'D': k.kind = TERM_KEY_LEFT;  return k;
+        case 'H': k.kind = TERM_KEY_HOME;  return k;
+        case 'F': k.kind = TERM_KEY_END;   return k;
         default: break;
         }
     }
@@ -271,6 +278,10 @@ static const char *term_key_name(term_key_kind k) {
     case TERM_KEY_DOWN:      return "down";
     case TERM_KEY_RIGHT:     return "right";
     case TERM_KEY_LEFT:      return "left";
+    case TERM_KEY_PGUP:      return "pgup";
+    case TERM_KEY_PGDN:      return "pgdn";
+    case TERM_KEY_HOME:      return "home";
+    case TERM_KEY_END:       return "end";
     case TERM_KEY_CHAR:      return "char";
     case TERM_KEY_MOUSE:     return "mouse";
     case TERM_KEY_WHEEL:     return "wheel";
@@ -349,8 +360,9 @@ int term_read_keys(term_key_t *out, int cap) {
                     if (mk.kind != TERM_KEY_NONE) out[nk++] = mk;
                     i = end + 1;
                 }
-            } else if (avail >= 3 && buf[i + 1] == '[' && buf[i + 2] == '2') {
-                /* ESC [ 200 ~ / ESC [ 201 ~. Longer than an arrow. */
+            } else if (avail >= 3 && buf[i + 1] == '['
+                       && buf[i + 2] >= '0' && buf[i + 2] <= '9') {
+                /* ESC [ <digits> ~ : paste, page, home, end. Longer than an arrow. */
                 int kk, end = -1, lim = avail > 8 ? 8 : avail;
                 for (kk = 3; kk < lim; kk++)
                     if (buf[i + kk] == '~') { end = i + kk; break; }
@@ -486,6 +498,12 @@ static void run_selftest(void) {
             { "\x1b[B",   3, TERM_KEY_DOWN,      "ESC [ B is down" },
             { "\x1b[C",   3, TERM_KEY_RIGHT,     "ESC [ C is right" },
             { "\x1b[D",   3, TERM_KEY_LEFT,      "ESC [ D is left" },
+            { "\x1b[5~",  4, TERM_KEY_PGUP,      "ESC [ 5 ~ is page up" },
+            { "\x1b[6~",  4, TERM_KEY_PGDN,      "ESC [ 6 ~ is page down" },
+            { "\x1b[H",   3, TERM_KEY_HOME,      "ESC [ H is home" },
+            { "\x1b[F",   3, TERM_KEY_END,       "ESC [ F is end" },
+            { "\x1b[1~",  4, TERM_KEY_HOME,      "ESC [ 1 ~ is home" },
+            { "\x1b[4~",  4, TERM_KEY_END,       "ESC [ 4 ~ is end" },
             /* A bare ESC must be UNKNOWN, never silently dropped: swallowing a
              * key is how a TUI gets "sometimes it ignores me" reports. */
             { "\x1b",     1, TERM_KEY_UNKNOWN,   "a bare ESC is unknown, not eaten" },

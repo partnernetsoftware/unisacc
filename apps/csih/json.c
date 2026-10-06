@@ -28,6 +28,10 @@
  * not end the value, and nesting stops at JSON_MAX_DEPTH. Callers use it
  * to cut the first value out of model prose. It does not build a tree.
  *
+ * json_rec() and json_msg() own the quote characters. A caller passes a
+ * plain key and a plain value. The value is escaped here. A short buffer
+ * yields nothing, so a record is never cut through a backslash.
+ *
  * The CLI takes SUBCOMMANDS, not dash-options: measured on unisacc 0.0.17,
  * running a source directly reserves the dash flags for the compiler itself.
  */
@@ -59,6 +63,13 @@ jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
 size_t  json_value_end(const char *text, size_t len);
 void    jfree(jvalue *v);
 size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
+size_t  json_rec(char *out, size_t cap,
+                 const char *k1, const char *v1,
+                 const char *k2, const char *v2,
+                 const char *k3, const char *v3);
+size_t  json_msg(char *buf, size_t cap, int comma,
+                 const char *role, const char *lead, const char *content);
+size_t  json_model(char *out, size_t cap, const char *msgs, size_t n);
 jvalue *jget(jvalue *obj, const char *key);
 const char *jstr(jvalue *v);
 double  jnum(jvalue *v, double dflt);
@@ -491,6 +502,120 @@ size_t json_escape(const char *in, char *out, size_t outlen, size_t *in_used) {
     if (in_used) *in_used = i;
     return used;
 }
+
+/* Copy raw JSON bytes. Returns 0 when they do not fit, and clears out. */
+static int jw_add(char *out, size_t cap, size_t *n, const char *s, size_t sn) {
+    if (*n + sn + 1 > cap) return 0;
+    memcpy(out + *n, s, sn);
+    *n += sn;
+    out[*n] = 0;
+    return 1;
+}
+
+/* A JSON string, quotes included. The whole value must fit. */
+static int jw_qstr(char *out, size_t cap, size_t *n, const char *v) {
+    size_t used = 0, wrote, need;
+    if (!v) v = "";
+    need = strlen(v);
+    if (*n + 3 > cap) return 0;
+    wrote = json_escape(v, out + *n + 1, cap - *n - 2, &used);
+    if (used != need) return 0;
+    out[*n] = '"';
+    *n += 1 + wrote;
+    out[(*n)++] = '"';
+    out[*n] = 0;
+    return 1;
+}
+
+static int jw_field(char *out, size_t cap, size_t *n, int first,
+                    const char *k, const char *v) {
+    if (!k) return 1;
+    if (!first && !jw_add(out, cap, n, ",", 1)) return 0;
+    if (!jw_qstr(out, cap, n, k)) return 0;
+    if (!jw_add(out, cap, n, ":", 1)) return 0;
+    if (!jw_qstr(out, cap, n, v)) return 0;
+    return 1;
+}
+
+/* {"k":"v", ...} with one, two, or three string fields. A NULL k2 or k3
+ * stops the list. Values are escaped. Returns 0 and an empty out when the
+ * object does not fit. */
+size_t json_rec(char *out, size_t cap,
+                const char *k1, const char *v1,
+                const char *k2, const char *v2,
+                const char *k3, const char *v3) {
+    size_t n = 0;
+    if (!out || cap < 3 || !k1) return 0;
+    out[0] = 0;
+    if (!jw_add(out, cap, &n, "{", 1)) { out[0] = 0; return 0; }
+    if (!jw_field(out, cap, &n, 1, k1, v1) ||
+        !jw_field(out, cap, &n, 0, k2, v2) ||
+        !jw_field(out, cap, &n, 0, k3, v3) ||
+        !jw_add(out, cap, &n, "}", 1)) {
+        out[0] = 0;
+        return 0;
+    }
+    return n;
+}
+
+/* One chat message. comma puts a comma in front. lead, when set, is the
+ * start of the content and is escaped with it. */
+size_t json_msg(char *buf, size_t cap, int comma,
+                const char *role, const char *lead, const char *content) {
+    size_t n = 0;
+    if (!buf || cap < 8) return 0;
+    buf[0] = 0;
+    if (comma && !jw_add(buf, cap, &n, ",", 1)) { buf[0] = 0; return 0; }
+    if (!jw_add(buf, cap, &n, "{", 1) ||
+        !jw_field(buf, cap, &n, 1, "role", role) ||
+        !jw_add(buf, cap, &n, ",", 1) ||
+        !jw_qstr(buf, cap, &n, "content") ||
+        !jw_add(buf, cap, &n, ":", 1)) {
+        buf[0] = 0;
+        return 0;
+    }
+    /* content is lead + body inside one pair of quotes. */
+    {
+        size_t used = 0, wrote, need;
+        const char *body = content ? content : "";
+        if (n + 3 > cap) { buf[0] = 0; return 0; }
+        buf[n++] = '"';
+        if (lead && lead[0]) {
+            need = strlen(lead);
+            wrote = json_escape(lead, buf + n, cap - n - 2, &used);
+            if (used != need) { buf[0] = 0; return 0; }
+            n += wrote;
+        }
+        need = strlen(body);
+        wrote = json_escape(body, buf + n, cap - n - 2, &used);
+        if (used != need) { buf[0] = 0; return 0; }
+        n += wrote;
+        if (n + 2 > cap) { buf[0] = 0; return 0; }
+        buf[n++] = '"';
+        buf[n] = 0;
+    }
+    if (!jw_add(buf, cap, &n, "}", 1)) { buf[0] = 0; return 0; }
+    return n;
+}
+
+/* The request body around an already-built messages array. msgs is raw
+ * JSON, not a string value, so it is copied as it stands. */
+size_t json_model(char *out, size_t cap, const char *msgs, size_t nmsg) {
+    const char *pre = "{\"model\":\"__MODEL__\",\"messages\":[";
+    const char *post = "],\"stream\":false}";
+    size_t lp, lq;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    lp = strlen(pre);
+    lq = strlen(post);
+    if (!msgs) nmsg = 0;
+    if (lp + nmsg + lq + 1 > cap) return 0;
+    memcpy(out, pre, lp);
+    if (nmsg) memcpy(out + lp, msgs, nmsg);
+    memcpy(out + lp + nmsg, post, lq);
+    out[lp + nmsg + lq] = 0;
+    return lp + nmsg + lq;
+}
 double jnum(jvalue *v, double dflt) { return (v && v->kind == J_NUM) ? v->n : dflt; }
 size_t jlen(jvalue *v) {
     if (!v) return 0;
@@ -615,6 +740,21 @@ int json_run_selftest(void) {
         deep[67] = 0;
         expect(json_parse(deep, 67, err, sizeof err) == NULL, "nesting past 32 is rejected");
         expect(json_value_end(deep, 67) == 0, "a too-deep span is not a value");
+    }
+
+    {
+        char buf[80];
+        size_t n = json_rec(buf, sizeof buf, "role", "user", "text", "a\"b", NULL, NULL);
+        expect(n > 0 && !strcmp(buf, "{\"role\":\"user\",\"text\":\"a\\\"b\"}"),
+               "a record escapes its value");
+        expect(json_rec(buf, 8, "role", "user", "text", "hello", NULL, NULL) == 0
+               && buf[0] == 0, "a short record buffer stays empty");
+        n = json_msg(buf, sizeof buf, 1, "user", NULL, "x");
+        expect(n > 0 && !strcmp(buf, ",{\"role\":\"user\",\"content\":\"x\"}"),
+               "a message is role and content");
+        n = json_msg(buf, sizeof buf, 0, "user", "[tool]\n", "z");
+        expect(n > 0 && !strcmp(buf, "{\"role\":\"user\",\"content\":\"[tool]\\nz\"}"),
+               "a message lead is escaped with the content");
     }
 
     /* Empty containers are legal. */

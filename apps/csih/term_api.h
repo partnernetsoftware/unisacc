@@ -39,6 +39,10 @@ typedef enum {
     TERM_KEY_DOWN,
     TERM_KEY_RIGHT,
     TERM_KEY_LEFT,
+    TERM_KEY_PGUP,          /* ESC [ 5 ~ */
+    TERM_KEY_PGDN,          /* ESC [ 6 ~ */
+    TERM_KEY_HOME,          /* ESC [ H or ESC [ 1 ~ */
+    TERM_KEY_END,           /* ESC [ F or ESC [ 4 ~ */
     TERM_KEY_UNKNOWN,
     TERM_KEY_CHAR,
     TERM_KEY_MOUSE,         /* left press; x and y are 1-based cells */
