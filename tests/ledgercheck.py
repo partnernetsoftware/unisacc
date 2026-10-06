@@ -39,7 +39,7 @@ def main():
 
 def norm(item):
     """Row id as plans write it: first word, ASCII primes folded (receipts say T3', plans T3′)."""
-    return item.split()[0].replace("''", '″').replace("'", '′') if item.split() else ''
+    return item.split()[0].replace("'''", '‴').replace("''", '″').replace("'", '′') if item.split() else ''
 
 def plan_file(ver):
     for d in ('plans', 'archive/plans'):
