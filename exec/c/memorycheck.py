@@ -122,7 +122,7 @@ for exe in drivers:
         for level in (0,2):
             flags=['-O'+str(level),'-run',f,'one','two']
             ref=run([ua,*flags]);got=run([exe,'--models',p/'compiler.pkg',*flags])
-            assert ref.returncode>=0 and ref.returncode<128
+            assert ref.returncode>=0 and ref.returncode<128,(f,level,ref.returncode,ref.stderr)
             assert (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,ref.stderr),(exe,f,level,ref.returncode,got.returncode,got.stderr)
     app=p/'app.c';app.write_text('#include <stdio.h>\n#include <stdlib.h>\nint main(int n,char **v) { printf("%d %s %s\\n",n,v[1],getenv("MEMORY_PROBE")); return 7; }\n')
     env=dict(os.environ,MEMORY_PROBE='present');args=['-O1','-run',app,'--','-argument']
@@ -149,7 +149,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
     # This checks reserve/commit arguments and failures, not a Windows guest.
     mock=p/'reserve.c';mock.write_text((root/'exec/c/memory-contract.c').read_text())
     ok(['cc','-O2','-I'+str(root/'exec/c'),mock,'-o',p/'reserve'])
-    assert ok([p/'reserve','0'])==b'reserve and exact-address commit\n'
+    got=ok([p/'reserve','0']);assert got==b'reserve and exact-address commit\n',got
     for mode,message in [(1,b'cannot reserve'),(2,b'cannot commit'),
                           (3,b'cannot commit'),(4,b'exceeds reserved')]:
         rejected=run([p/'reserve',str(mode)])
@@ -166,5 +166,5 @@ if kind in ('all','cc') and shard in ('all','1/3'):
                     'if(p[0] || p[609999999])return 8;p[609999999]=7;'
                     'printf("%d %d\\n",p[0],p[609999999]);munmap(x.base,x.reserved);return 0;}\n')
     ok(['cc','-O2','-I'+str(root/'exec/c'),lazy,'-o',p/'lazy'])
-    assert ok([p/'lazy'])==b'0 7\n'
+    got=ok([p/'lazy']);assert got==b'0 7\n',got
     print('memory extent: 610MB virtual range, zero initial pages and final page write pass; host loader only')
