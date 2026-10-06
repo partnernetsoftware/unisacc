@@ -631,6 +631,7 @@ int main(int argc, char **argv) {
                 for (int q=0;q<nb;q++) {
                     int j=j0+q; pids[q]=(int)fork();
                     if (pids[q]==0) {
+                        if (!freopen("/dev/null","w",stderr)) _exit(1);   /* a failing unit is reported by the serial path, once */
                         Buf unit={0}; ATTR_UNIT=j; unit.b=source_read(sources[j],&unit.n);
                         int r=runroute(unitroute,&unit,sources[j]); if (r) _exit(1);
                         snprintf(pf,sizeof pf,"%s/ua-unit-%d-%d",td&&*td?td:"/tmp",me,j);
