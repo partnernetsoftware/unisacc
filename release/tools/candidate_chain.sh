@@ -11,6 +11,8 @@ H=$(git -C $R rev-parse --short HEAD); W=/private/tmp/unisacc-cand-$H
 [ -d $W ] || git -C $R worktree add --detach $W $H >/dev/null 2>&1 || exit 1
 (cd $R && cp unisacc.com unisacc.com.build.json unisacc-seed.com unisacc-seed.com.build.json $W/) || exit 1
 cd $W
+# 0.5 s before hours of build and queue: r31c found the freeze violation at suite 494/676 (cdx 10-06)
+tests/bound 20 python3 tests/freezecheck.py || { echo "candidate_chain: freezecheck red; fix or waive first"; exit 1; }
 python3 tests/bound.py 58 ./tests/build_ref.sh $B/ua.c $B/ua | tail -1 || exit 1
 release/tools/build_candidate.sh $B/cand $B/ua > $B/build.log 2>&1 || { tail -3 $B/build.log; exit 1; }
 D=$B/cand/seed
