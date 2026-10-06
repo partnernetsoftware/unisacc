@@ -88,7 +88,7 @@ weights:
 # build.
 com:
 	@UA="$(if $(filter 1,$(COMB)),$(SEED_DIR)/unisacc-seed.com,$(UA))" \
-	 python3 tests/bound.py 60 sh -ec '\
+	 tests/bound 60 sh -ec '\
 	    out="$(if $(MODEL_DIR),$(MODEL_DIR),out/model-com)"; \
 	    dst="$(COM_OUT)"; \
 	    ./exec/c/buildcompiler.sh "$$out"; \
@@ -97,7 +97,7 @@ com:
 	    cp "$$out/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
 	    mv -f "$$tmp" "$$dst"; \
 	    cp "$$out/unisacc-next.com.build.json" "$$dst.build.json"; \
-	    python3 exec/c/provenance.py check "$$dst"'
+	    if [ -x "$$out/seedbin/ident" ]; then "$$out/seedbin/ident" . check "$$dst"; else python3 exec/c/provenance.py check "$$dst"; fi'
 
 # N22 stage 1: ONE bounded build step of the seed, built by $(UA) exactly as
 # `com` builds today.  The seed is never shipped; its only job is to be the
@@ -107,9 +107,9 @@ com:
 # and the last one seals the seed and records it.  `all` still works for a
 # shell with no watchdog.
 seed-com:
-	@UA="$(UA)" python3 tests/bound.py 55 ./exec/c/buildcompiler.sh "$(SEED_DIR)" $(SEED_STEP)
+	@UA="$(UA)" tests/bound 55 ./exec/c/buildcompiler.sh "$(SEED_DIR)" $(SEED_STEP)
 	@case "$(SEED_STEP)" in pack|all) \
-	    python3 tests/bound.py 55 sh -ec '\
+	    tests/bound 55 sh -ec '\
 	    set -e; \
 	    [ -s "$(SEED_DIR)/unisacc-next.com" ] || { echo "seed-com: no artifact" >&2; exit 1; }; \
 	    dst="$(SEED_DIR)/unisacc-seed.com"; \
@@ -118,7 +118,7 @@ seed-com:
 	    cp "$(SEED_DIR)/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
 	    mv -f "$$tmp" "$$dst"; \
 	    cp "$(SEED_DIR)/unisacc-next.com.build.json" "$$dst.build.json"; \
-	    python3 exec/c/provenance.py check "$$dst"; \
+	    if [ -x "$(SEED_DIR)/seedbin/ident" ]; then "$(SEED_DIR)/seedbin/ident" . check "$$dst"; else python3 exec/c/provenance.py check "$$dst"; fi; \
 	    python3 exec/c/comboot.py stage 1 "$$dst"'; \
 	    ;; *) echo "seed-com: $(SEED_STEP) done (not the last step; nothing sealed yet)";; esac
 
@@ -133,27 +133,27 @@ stage3:
 # it is never shipped.  `make comboot` runs all three stages and the cmp.
 com3:
 	@$(MAKE) --no-print-directory com COMB=1 COM_OUT="$(SEED_DIR)/stage3/unisacc.com"
-	@python3 tests/bound.py 55 exec/c/comboot.py cmp "$(COM_OUT)" "$(SEED_DIR)/stage3/unisacc.com"
+	@tests/bound 55 exec/c/comboot.py cmp "$(COM_OUT)" "$(SEED_DIR)/stage3/unisacc.com"
 
 # The gate: four shards, each bounded, each doing ONE stage's build and then
 # its comparison.  The build steps inside are sharded by SEED_STEP, so the
 # per-shard cost is one buildcompiler step -- see exec/c/comboot.py.
 comboot:
-	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard seed; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
-	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard stage2; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
-	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard stage3; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
-	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard fixedpoint; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 python3 exec/c/comboot.py shard seed; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 python3 exec/c/comboot.py shard stage2; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 python3 exec/c/comboot.py shard stage3; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 python3 exec/c/comboot.py shard fixedpoint; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
 
 # The build steps the shards call, as separate targets so `make -n` shows them.
 COMBSTEP_DIR ?= /tmp/unisacc-comb-build
 comboot-seed-step:
-	@UA="$(UA)" python3 tests/bound.py 55 ./exec/c/buildcompiler.sh "$(SEED_DIR)" $(SEED_STEP)
+	@UA="$(UA)" tests/bound 55 ./exec/c/buildcompiler.sh "$(SEED_DIR)" $(SEED_STEP)
 comboot-stage2-step:
 	@UA="$(if $(filter 1,$(COMB)),$(SEED_DIR)/unisacc-seed.com,$(UA))" \
-	 python3 tests/bound.py 55 ./exec/c/buildcompiler.sh "$(COMBSTEP_DIR)" $(COMB_STEP)
+	 tests/bound 55 ./exec/c/buildcompiler.sh "$(COMBSTEP_DIR)" $(COMB_STEP)
 comboot-stage3-step:
 	@UA="$(if $(filter 1,$(COMB)),unisacc.com,$(UA))" \
-	 python3 tests/bound.py 55 ./exec/c/buildcompiler.sh "$(COMBSTEP_DIR)" $(COMB_STEP)
+	 tests/bound 55 ./exec/c/buildcompiler.sh "$(COMBSTEP_DIR)" $(COMB_STEP)
 
 classic-com: ref
 	@mkdir -p out
@@ -166,7 +166,7 @@ classic-com: ref
 model-com:
 	@test -n "$(MODEL_DIR)" || { echo 'model-com: set MODEL_DIR to a private output directory' >&2; exit 2; }
 	@case "$(MODEL_STEP)" in shared|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pack-driver) ;; *) echo 'model-com: set MODEL_STEP=shared|OS/ARCH|pack|pack-prep-1..3|pack-models|pack-driver (see exec/c/BUILDING.md)' >&2; exit 2;; esac
-	@UA="$(UA)" python3 tests/bound.py 55 ./exec/c/buildcompiler.sh "$(MODEL_DIR)" "$(MODEL_STEP)"
+	@UA="$(UA)" tests/bound 55 ./exec/c/buildcompiler.sh "$(MODEL_DIR)" "$(MODEL_STEP)"
 
 release:
 	@UA="$(UA)" ./tests/release.sh --com
