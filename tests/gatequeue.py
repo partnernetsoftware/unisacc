@@ -190,13 +190,21 @@ def fingerprint(jobs):
         # 0.0.29 P7': {MODEL_COM} may stand inside an argument (UA={MODEL_COM}); every product suite was
         # declared with the main checkout's absolute path, so in a release queue (MODEL_COM = the candidate)
         # none of the 87 com- declarations matched and all of them hashed the whole tree
-        declared_cmd = [a.replace('{MODEL_COM}', mc) for a in entry['command']] if entry else None
+        # 0.0.32 P7': {UA} too (combo, exec-prune-0..3 were declared with it but never matched); every
+        # PATH_KEYS value set for this queue is expanded the same way on both sides
+        keys = {'{%s}' % k: settings.get(k) or os.environ.get(k) for k in PATH_KEYS}
+        keys['{MODEL_COM}'] = mc
+        def expand(a):
+            for k, v in keys.items():
+                if v: a = a.replace(k, v)
+            return a
+        declared_cmd = [expand(a) for a in entry['command']] if entry else None
         # 0.0.23 E: "match": "contains" -- the declared command is a contiguous run of the job's
         # command; the job's full command stays in the identity, so a changed argument list (new
         # test files in a shard, an env prefix) re-runs the job but no longer drops its declaration
         # 0.0.32 P7': the planned job keeps {MODEL_COM} unexpanded, so expand it on both sides (q11: combo and
         # exec-container never matched and fell back to the global fingerprint)
-        shown = [a.replace('{MODEL_COM}', mc) for a in command]
+        shown = [expand(a) for a in command]
         if entry and entry.get('match') == 'contains':
             k = len(declared_cmd)
             audited = any(shown[i:i+k] == declared_cmd for i in range(len(shown)-k+1))
