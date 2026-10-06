@@ -40,7 +40,8 @@ def plan(com):
 def execution_environment():
     # Terminal.app supplies a fresh transport identifier for each window.
     # Suites do not receive it either: reuse hashes the actual execution env.
-    return {k:v for k,v in os.environ.items() if k != 'TERM_SESSION_ID'}
+    # OLDPWD is shell history, not an input; PWD (the worktree) goes through portable() as {ROOT}.
+    return {k:v for k,v in os.environ.items() if k not in ('TERM_SESSION_ID','OLDPWD')}
 
 def execution_settings():
     return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
@@ -63,6 +64,9 @@ def portable(text):
         try: r = str(pathlib.Path(v).resolve())
         except OSError: r = v
         if r != v: pairs.append((r, '{%s}' % k))
+    # The worktree itself (cdx: PWD alone moved every stamp): resolved and as the shell spells it.
+    for v in {str(ROOT), os.environ.get('PWD', '')}:
+        if v and pathlib.Path(v).resolve() == ROOT: pairs.append((v, '{ROOT}'))
     for v, key in sorted(pairs, key=lambda kv: -len(kv[0])): text = text.replace(v, key)
     return text
 
