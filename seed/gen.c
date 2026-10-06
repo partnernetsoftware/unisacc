@@ -2949,17 +2949,26 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
     ManifestGraph *ctx = arg; char path[1024];
     (void)index;
     if (!strcmp(row->cell[0], "rows")) {
-        Value *bindings = value_new(JOBJ), *bindmap = value_get(opts, "bindmap");
+        Value *bindings = value_new(JOBJ), *sequences = value_new(JOBJ);
+        Value *bindmap = value_get(opts, "bindmap"), *classes = value_get(opts, "classes");
+        Value *mapseq = value_get(opts, "mapseq"), *seqfact = value_get(opts, "seqfact");
         for (size_t i = 0; i < opts->n; i++)
-            if (strcmp(opts->items[i].key, "bindmap")) die("manifest rows option is not yet covered");
+            if (strcmp(opts->items[i].key, "bindmap") && strcmp(opts->items[i].key, "classes") &&
+                strcmp(opts->items[i].key, "mapseq") && strcmp(opts->items[i].key, "seqfact"))
+                die("manifest rows option is not yet covered");
         if (bindmap) seed_update(bindings, value_path(facts, value_text(bindmap)));
         seed_update(bindings, manifest_bind_cells(row->cell[7], facts, env));
+        if (seqfact) seed_update(sequences, value_path(facts, value_text(seqfact)));
+        if (mapseq) seed_update(sequences, mapseq_construct(opts, facts));
+        seed_update(sequences, manifest_bind_cells(row->cell[6], facts, env));
+        if (classes) classes = value_path(facts, value_text(classes));
         for (int mode = 0; mode < 2; mode++) {
             if (snprintf(path, sizeof(path), "%s/%s-%s.tsv", ctx->dir, row->cell[1],
                          mode ? "result" : "byte") >= (int)sizeof(path)) die("manifest rule path too long");
             if (!strcmp(row->cell[2], "-") || !*row->cell[2])
-                install_plain(ctx->graph, path, mode ? 'r' : 'b', bindings, NULL);
-            else install_section(ctx->graph, path, row->cell[2], mode ? 'r' : 'b', bindings, NULL);
+                install_plain_classes(ctx->graph, path, mode ? 'r' : 'b', bindings, sequences, classes);
+            else install_section_classes(ctx->graph, path, row->cell[2], mode ? 'r' : 'b',
+                                         bindings, sequences, classes);
         }
         ctx->rows++;
     } else if (!strcmp(row->cell[0], "label")) {
