@@ -204,6 +204,16 @@ static int fwd_second;                           /* the recompile with the stubs
    the run-forward resource, so its bytes are the same in both passes; UNISA_FWD_UNITCACHE=0 turns it off. */
 static struct { const char *path; unsigned char *b; int n; unsigned char *attr; unsigned nattr; } ucache[256];
 static int nucache;
+/* F2': units of one multi-source run are independent (the unit cache already replays them), so on
+   POSIX hosts the not-yet-cached units compile in forked workers; each writes its bytes and attribute
+   payloads to a file and the serial loop consumes them as cache entries.  A worker that fails leaves
+   its unit to the serial path, so diagnostics come out exactly as before.  UNISA_JOBS=1 disables. */
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/wait.h>
+static int par_get(FILE *f, unsigned *v) { unsigned char q[4]; if (fread(q,1,4,f)!=4) return 0; *v=q[0]|q[1]<<8|q[2]<<16|(unsigned)q[3]<<24; return 1; }
+static void par_put(FILE *f, unsigned v) { unsigned char q[4]={v&255,v>>8&255,v>>16&255,v>>24&255}; fwrite(q,1,4,f); }
+#endif
 static int ucache_find(const char *path) { for (int k=0;k<nucache;k++) if (!strcmp(ucache[k].path,path)) return k; return -1; }
 static void ucache_replay(int k) {                /* append unit k's attribute records under ATTR_UNIT */
     if (!ucache[k].nattr) return;
@@ -611,9 +621,48 @@ int main(int argc, char **argv) {
         char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/%sunit",target,warnings ? "warn/" : "");
         const char *uc=getenv("UNISA_FWD_UNITCACHE");
         int cacheon = !deps && !(uc && !strcmp(uc,"0"));
+#ifndef _WIN32
+        const char *uj=getenv("UNISA_JOBS"); int jobs = uj ? atoi(uj) : 4;
+        if (cacheon && !fwd_second && !warnings && jobs > 1 && nsources > 1 && nucache + nsources <= 256) {
+            const char *td=getenv("TMPDIR"); char pf[200]; int me=(int)getpid();
+            long base = ATTRS.n ? ATTRS.n : 4;
+            for (int j0=0;j0<nsources;j0+=jobs) {
+                int pids[64]; int nb = nsources-j0 < jobs ? nsources-j0 : jobs; if (nb>64) nb=64;
+                for (int q=0;q<nb;q++) {
+                    int j=j0+q; pids[q]=(int)fork();
+                    if (pids[q]==0) {
+                        Buf unit={0}; ATTR_UNIT=j; unit.b=source_read(sources[j],&unit.n);
+                        int r=runroute(unitroute,&unit,sources[j]); if (r) _exit(1);
+                        snprintf(pf,sizeof pf,"%s/ua-unit-%d-%d",td&&*td?td:"/tmp",me,j);
+                        FILE *f=fopen(pf,"wb"); if (!f) _exit(1);
+                        long after = ATTRS.n ? ATTRS.n : 4; unsigned cnt=(unsigned)((after-base)/9);
+                        par_put(f,(unsigned)unit.n); fwrite(unit.b,1,unit.n,f); par_put(f,cnt);
+                        for (unsigned r2=0;r2<cnt;r2++) fwrite(ATTRS.b+base+9*r2+4,1,5,f);
+                        if (fclose(f)) _exit(1);
+                        _exit(0);
+                    }
+                }
+                for (int q=0;q<nb;q++) {
+                    int st=0, j=j0+q; if (pids[q]<=0) continue;
+                    if (waitpid(pids[q],&st,0)!=pids[q] || !WIFEXITED(st) || WEXITSTATUS(st)) continue;
+                    snprintf(pf,sizeof pf,"%s/ua-unit-%d-%d",td&&*td?td:"/tmp",me,j);
+                    FILE *f=fopen(pf,"rb"); if (!f) continue;
+                    unsigned n=0,cnt=0; int ok=par_get(f,&n);
+                    unsigned char *b=ok?xrealloc(0,n?n:1):0; if (ok) ok=fread(b,1,n,f)==n && par_get(f,&cnt);
+                    unsigned char *at=ok?xrealloc(0,cnt?5*cnt:1):0; if (ok) ok=fread(at,1,5*(size_t)cnt,f)==5*(size_t)cnt;
+                    fclose(f); remove(pf);
+                    if (!ok || ucache_find(sources[j])>=0) { free(b); free(at); continue; }
+                    int k=nucache++; ucache[k].path=sources[j]; ucache[k].n=(int)n; ucache[k].b=b; ucache[k].nattr=cnt; ucache[k].attr=at;
+                }
+            }
+        }
+        int prefilled = !fwd_second && nucache > 0;
+#else
+        int prefilled = 0;
+#endif
         for (int j=0;j<nsources;j++) {
             Buf unit={0}; ATTR_UNIT=j;
-            int hit = cacheon && fwd_second ? ucache_find(sources[j]) : -1;
+            int hit = cacheon && (fwd_second || prefilled) ? ucache_find(sources[j]) : -1;
             if (hit >= 0) {                   /* the first pass's bytes and records for this unit */
                 unit.n=ucache[hit].n; unit.b=xrealloc(0,unit.n?unit.n:1); memcpy(unit.b,ucache[hit].b,unit.n);
                 ucache_replay(hit);
