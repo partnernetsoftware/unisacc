@@ -48,8 +48,9 @@ for f in sys.argv[1:]:
             if b:
                 ins.meta[b[0]] = int(ins.meta[b[0]])
                 break
-    ok = (same({k:v for k,v in vars(back).items() if k not in ("code", "labels")},
-               {k:v for k,v in vars(tp).items() if k not in ("code", "labels")}) and same(back.data, tp.data) and same(back.syms, tp.syms) and back.target == tp.target and len(back.code) == len(tp.code) and same(back.labels, tp.labels) and
+    # data is compared by value: lower hands out a bytearray since 0.0.30 R3 (one allocation, no copy), the text parses back to bytes
+    ok = (same({k:v for k,v in vars(back).items() if k not in ("code", "labels", "data")},
+               {k:v for k,v in vars(tp).items() if k not in ("code", "labels", "data")}) and bytes(back.data) == bytes(tp.data) and same(back.syms, tp.syms) and back.target == tp.target and len(back.code) == len(tp.code) and same(back.labels, tp.labels) and
           all(a.op == b.op and same(list(a.args), list(b.args)) and same(a.meta, b.meta) for a, b in zip(tp.code, back.code)))
     print("  %s %s  insns %d  labels %d" % ("same" if ok else "DIFFER", f, len(tp.code), len(tp.labels)))
     bad += not ok
