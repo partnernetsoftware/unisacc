@@ -63,7 +63,18 @@ static Value *seed_env_copy(Value *obj) {
     Value *out = value_new(JOBJ); size_t i;
     if (!obj) return out;
     if (obj->kind != JOBJ) die("environment is not an object");
-    for (i = 0; i < obj->n; i++) value_put(out, obj->items[i].key, obj->items[i].value);
+    (void)i;
+    if (!obj->n) return out;
+    /* D2: keys are unique and never freed, so share them and clone the index in bulk
+       (per-row env copies were most of parse2) */
+    out->cap = obj->n; out->n = obj->n;
+    out->items = grow(NULL, out->cap, sizeof(*out->items));
+    memcpy(out->items, obj->items, obj->n * sizeof(*out->items));
+    if (obj->hix && obj->hitems == obj->items && obj->hn == obj->n) {
+        out->hix = grow(NULL, obj->hcap, sizeof(size_t));
+        memcpy(out->hix, obj->hix, obj->hcap * sizeof(size_t));
+        out->hcap = obj->hcap; out->hn = out->n; out->hitems = out->items;
+    }
     return out;
 }
 static void seed_update(Value *into, Value *from) {

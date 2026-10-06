@@ -136,8 +136,10 @@ static void value_put(Value *parent, const char *key, Value *child) {
         if (at >= 0) { parent->items[at].value = child; return; }
     }
     if (parent->n == parent->cap) {
+        int indexed = parent->hix && parent->hitems == parent->items && parent->hn == parent->n;
         parent->cap = parent->cap ? parent->cap * 2 : 8;
         parent->items = grow(parent->items, parent->cap, sizeof(*parent->items));
+        if (indexed) parent->hitems = parent->items;   /* D2: the index holds positions, still valid */
     }
     parent->items[parent->n].key = key ? copy(key) : NULL;
     parent->items[parent->n++].value = child;
