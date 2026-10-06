@@ -227,7 +227,22 @@ pack_driver() {
     . ./tests/lib.sh
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R"
     product_version=$(awk -F'"' '/^#define UNISACC_VERSION "[0-9.]+"/ { n++; v = $2 } END { if (n != 1) exit 1; print v }' src/version.h)
+    if [ "${SEED_GEN:-1}" = 1 ]; then
+        # 0.0.32 B5: UA -b writes the five images (byte-equal to unisa ape's Python lowering of UA's
+        # tapes) and seed/ape.c (zlib gzip, VERSIONINFO, payload trailer) the container -- byte-equal
+        # to `unisa ape` (tests/seedapecheck.sh).
+        seedtool ape seed/ape.c -DAPE_ZLIB -lz
+        via=$UA; [ "$(head -c 2 "$UA")" = MZ ] && via="sh $UA"
+        pids=
+        for t in win/x86_64 lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64; do
+            b $via -O2 -b "$t" exec/c/asmcompiler.c -o "$T/slice-$(echo "$t" | tr / -)" & pids="$pids $!"
+        done
+        for p in $pids; do wait "$p"; done
+        b "$T/seedbin/ape" --payload "$T/compiler.pkg" --product Unisacc "$product_version" "$T/unisacc-next.com" \
+            "$T/slice-win-x86_64" "$T/slice-lnx-x86_64" "$T/slice-lnx-arm64" "$T/slice-osx-x86_64" "$T/slice-osx-arm64"
+    else
     b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" --product-name Unisacc --product-version "$product_version" -o "$T/unisacc-next.com"
+    fi
     [ -s "$T/unisacc-next.com" ]
     manifest check shared
     for os in lnx osx win; do for arch in arm64 x86_64; do manifest check "$os-$arch"; done; done
