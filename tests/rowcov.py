@@ -79,7 +79,7 @@ def main():
             return target
     def cached():
         """delta + side table for this stage, rebuilt only when exec/ changes; atomic, so parallel shard jobs can share it"""
-        key = subprocess.run(['sh', '-c', 'git ls-files -s exec weights | git hash-object --stdin; git diff --stat -- exec weights | git hash-object --stdin'],
+        key = subprocess.run(['sh', '-c', 'git ls-files -s exec weights | git hash-object --stdin; git diff -- exec weights | git hash-object --stdin; git ls-files -o --exclude-standard -z -- exec weights | xargs -0 git hash-object --'],
                              cwd=ROOT, capture_output=True, text=True).stdout.replace('\n', '')
         stamp = out / (stage + '.key')
         try:
