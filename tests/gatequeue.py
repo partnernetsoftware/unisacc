@@ -47,6 +47,25 @@ def execution_settings():
                 'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT',
                 'UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL','UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER') if k in os.environ}
 
+# 0.0.31 P7': path-valued selectors (the candidate, the same-source UA, the FFI provider) live in a
+# per-round scratch directory, so their PATHS changed every rebuild and voided every stamp (0.0.30
+# third queue: 0/671 reused although only tests/docs changed).  Their contents are identities already
+# (executable_inputs, provider_inputs); stamps and the stored job table see {KEY} instead of the path.
+PATH_KEYS = ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','UNISA_CONTAINER','UNISA_KERNEL',
+             'UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER','SEED_DIR')
+
+def portable(text):
+    pairs = []
+    for k in PATH_KEYS:
+        v = os.environ.get(k, '')
+        if '/' not in v: continue
+        pairs.append((v, '{%s}' % k))
+        try: r = str(pathlib.Path(v).resolve())
+        except OSError: r = v
+        if r != v: pairs.append((r, '{%s}' % k))
+    for v, key in sorted(pairs, key=lambda kv: -len(kv[0])): text = text.replace(v, key)
+    return text
+
 def executable_inputs(settings):
     # These selectors are one quoted executable argument, never shell commands.
     # MODEL_COM is a file path; the other selectors also permit a PATH command.
@@ -140,7 +159,7 @@ def fingerprint(jobs):
     # 0.0.29 P7': gate.sh's job lines and gatedeps.json are no longer global identities -- a job's own
     # command, declared inputs and guards are in its stamp already, so editing one job line or refreshing
     # another suite's declaration keeps every other result (0.0.28 measured 0% reuse because of these two)
-    def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    def stamp(value): return hashlib.sha256(portable(json.dumps(value, sort_keys=True)).encode()).hexdigest()
     global_inputs = None
     inventories, family_tools = {}, {}
     extra_trees = {}
@@ -287,7 +306,7 @@ def main():
     lock = (state/'lock').open('a'); fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stamp = fingerprint(jobs); path = state/'results.json'
     data = json.loads(path.read_text()) if path.is_file() else {'stamp':stamp, 'jobs':jobs, 'exclusive':sorted(exclusive), 'results':{}}
-    resume(data, stamp, jobs, exclusive)
+    resume(data, stamp, {n:portable(c) if isinstance(c, str) else json.loads(portable(json.dumps(c))) for n, c in jobs.items()}, exclusive)
     atomic(path, data)
     # Classic and network drivers, and different concurrency, have different costs.
     profile = json.dumps([execution_settings(), sorted(exclusive)], sort_keys=True).encode()
