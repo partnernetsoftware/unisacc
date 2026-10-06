@@ -107,10 +107,11 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
         p = run([t/'run', t/'pp.net', f, f, R/'include'])
         assert p.returncode != 0 and b'argument count' in p.stderr, p.stderr
         assert run([os.environ.get('CC', 'cc'), '-E', '-P', f]).returncode != 0
-        # Library bodies on demand is E2's default (R11-3) and cc has no such notion: a quoted
-        # #include switches the trimming off by rule, so both sides see every header body.
+        # Library bodies on demand is E2's default (R11-3) and cc has no such notion: an #include
+        # named by a macro switches the trimming off by rule, so both sides see every header body
+        # (0.0.31 F3: a plain quoted #include no longer does -- quoted headers are scanned instead).
         (t/'nothing.h').write_text('')
-        f = t/'b_ppif.c'; f.write_text('#include "nothing.h"\n'+(R/'tests/c/b_ppif.c').read_text())
+        f = t/'b_ppif.c'; f.write_text('#define NOTHING "nothing.h"\n#include NOTHING\n'+(R/'tests/c/b_ppif.c').read_text())
         got = call([t/'run', t/'pp.net', f, f, R/'include'])
         if mode:
             length, _, _, ns, ni = struct.unpack_from('<5I', got, 7)
