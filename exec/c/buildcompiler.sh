@@ -27,6 +27,20 @@ tn() {   # tn JSON TBL NET
         b python3 exec/c/net.py "$2" "$3"
     fi
 }
+# 0.0.32 B5: SEED_GEN=1 (default) constructs the delta JSON of the stages seed/gen.c covers with the
+# C99 constructor instead of exec/build/gen.py; same bytes (tests/seedgencheck.sh).  Stages it does not
+# cover yet (lower, enc) stay on gen.py.  Built by the host cc for now, not unisacc.com: the product's
+# unbuffered stdio makes parse2 take >55 s and its -O2 build segfaults there (plans/v0.0.32.md D2).
+gen() {   # gen STAGE OUT.json [FLAG...]
+    if [ "${SEED_GEN:-1}" = 1 ]; then
+        if [ ! -x "$T/seedbin/seed-gen" ]; then
+            mkdir -p "$T/seedbin"; b ${SEED_GEN_CC:-cc} -std=c99 -O2 -w -I"$R/seed" "$R/seed/gen.c" -o "$T/seedbin/seed-gen"
+        fi
+        b "$T/seedbin/seed-gen" "$@" >/dev/null
+    else
+        b python3 exec/build/gen.py "$@"
+    fi
+}
 # Reuse the model preparation identity/digest implementation. These are completion
 # records, not a result cache: requested stages always rebuild their own outputs.
 manifest() {
@@ -68,13 +82,13 @@ shared() {
     start shared
     mkdir -p "$T/kernels"
     for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
-    b python3 exec/build/gen.py pp "$T/shared/e2.json" --shared-predefines
-    b python3 exec/build/gen.py lex "$T/shared/e1.json" --typed
-    b python3 exec/build/gen.py parse2 "$T/shared/e3.json"
-    b python3 exec/build/gen.py opt "$T/shared/e4.json" --o2
-    b python3 exec/build/gen.py opt "$T/shared/o1.json"
-    b python3 exec/build/gen.py prune "$T/shared/prune.json"
-    b python3 exec/build/gen.py nativeabi "$T/shared/nativeabi.json"
+    gen pp "$T/shared/e2.json" --shared-predefines
+    gen lex "$T/shared/e1.json" --typed
+    gen parse2 "$T/shared/e3.json"
+    gen opt "$T/shared/e4.json" --o2
+    gen opt "$T/shared/o1.json"
+    gen prune "$T/shared/prune.json"
+    gen nativeabi "$T/shared/nativeabi.json"
     for s in e2 e1 e3 e4 o1 prune nativeabi; do
         tn "$T/shared/$s.json" "$T/shared/$s.tbl" "$T/shared/$s.net"
     done
