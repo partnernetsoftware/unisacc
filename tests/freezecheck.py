@@ -7,6 +7,10 @@ since then: once src/version.h carries the release number, a commit that changes
 (exec/ unisa/ src/ kernel/ include/ weights/, as exec/pipeline/models.py:closure hashes them) must say
 `fix:` at the start of its subject.  Anything else is a new feature and waits for the next version.
   tests/freezecheck.py [REPO]     exit 1 and name each offending commit
+
+A red fix already pushed without the prefix (history is not rewritten once an rc tag points past it)
+is waived by a line `SHA8<TAB>red suite it fixed` in release/freeze-waivers.tsv; the waiver is read
+from HEAD, so it is reviewed like any commit.
 """
 import subprocess, sys
 CLOSURE = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/', 'seed/')
@@ -27,12 +31,16 @@ def main(repo):
     ver = __import__('re').search(r'"([0-9.]+)"', git(repo, 'show', 'HEAD:src/version.h')).group(1)
     if git(repo, 'tag', '-l', 'v' + ver).strip():
         print('freezecheck: v%s is already released; not in a freeze window' % ver); return 0
+    try:
+        waived = {l.split('\t')[0] for l in git(repo, 'show', 'HEAD:release/freeze-waivers.tsv').splitlines() if l and not l.startswith('#')}
+    except subprocess.CalledProcessError:
+        waived = set()
     bad = []
     for line in git(repo, 'log', '--format=%H %s', v + '..HEAD').splitlines():
         sha, subject = line.split(' ', 1)
         files = git(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', sha).split()
         hit = [f for f in files if product(f)]
-        if hit and not subject.startswith('fix:'):
+        if hit and not subject.startswith('fix:') and sha[:8] not in waived:
             bad.append((sha[:8], subject[:70], hit[:3]))
     for sha, subject, hit in bad:
         print('  FREEZE %s %s  (touches %s)' % (sha, subject, ', '.join(hit)))

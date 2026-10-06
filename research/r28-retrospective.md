@@ -19,7 +19,7 @@
 | # | 问题 | 处理 | 落到哪里 |
 |---|---|---|---|
 | 1 | 新探针放进 tests/c 就被十几个套件消费（difftest-py、ccrun、fat、closure、chain），POSIX-only 或 Python 不支持的探针在队列里成片变红 | POSIX 宿主行为探针改放 tests/forward；Python 路线缺口有自己的清单 | RELEASE-PIPELINE §20；收官路线规则 2（封版前一天不加 tests/c 探针） |
-| 2 | 队列复用率 0%（P7 实测）：gate.sh、gatedeps.json、gatequeue.py 是全局指纹，任何修红都让全部结果作废 | 政委裁定 P7 砍掉，0.0.29 新立 P7′ | plans/v0.0.29.md P7′ |
+| 2 | 队列复用率 0%（P7 实测）：gate.sh、gatedeps.json、gatequeue.py 是全局指纹，任何修红都让全部结果作废 | 政委裁定 P7 砍掉，0.0.29 新立 P7′ | archive/plans/v0.0.29.md P7′ |
 | 3 | rowcov 分片基线可以随探针重分布被调低（协调员 E22） | lower/enc 加并集棘轮 union8；parse2 进 0.0.29 T4 | tests/rowcov.py、gate.sh |
 | 4 | 我在 run.c 加 <time.h> 打断了产品驱动打包；一次 git revert 失败后误 amend 了别的提交信息 | 撤回并在后续提交说明里更正 | 本复盘；规则：产品闭包里的驱动改动先建候选再提交 |
 | 5 | 修红改了头文件 → 产品字节变 → 重封 | 头文件改动要在版本号提交前跑一遍队列相关套件 | 收官路线规则 3 |
