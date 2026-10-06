@@ -1890,19 +1890,115 @@ int quotedinc(void) {
     }
     return 0;
 }
+/* 0.0.31 F3: a unit with quoted includes keeps -ftrim-libc.  The quoted headers are read here,
+   recursively and once each (beside the including file, then each -I, as #include resolves
+   them), into qtext; a library name is wanted when it occurs in the unit or in that text.  A
+   quoted header that cannot be found, or more than QTEXT bytes / 64 files of them, switches
+   trimming off for the unit as before -- the scan never guesses. */
+#define QTEXT 1048576
+char qtext[QTEXT]; int nqtext;
+char qpath[64][512]; int qbeg[65]; int nqpath;
+int strsame(char *a, char *b);
+int qadd(char *dir, int dl, char *nm, int nl) {      /* 1 read (or seen), 0 not here, -1 give up */
+    char path[512]; int p; int k; int fd; int n;
+    p = 0; k = 0;
+    while (k < dl) { if (p < 500) { path[p] = dir[k]; p = p + 1; } k = k + 1; }
+    k = 0;
+    while (k < nl) { if (p < 510) { path[p] = nm[k]; p = p + 1; } k = k + 1; }
+    path[p] = 0;
+    k = 0;
+    while (k < nqpath) { if (strsame(qpath[k], path)) return 1; k = k + 1; }
+    fd = ropen(path);
+    if (fd < 0) return 0;
+    if (nqpath >= 64) { __close(fd); return 0 - 1; }
+    n = __read(fd, qtext + nqtext, QTEXT - nqtext);
+    __close(fd);
+    if (n < 0 || nqtext + n >= QTEXT) return 0 - 1;
+    k = 0; while (k <= p) { qpath[nqpath][k] = path[k]; k = k + 1; }
+    qbeg[nqpath] = nqtext;
+    nqpath = nqpath + 1;
+    nqtext = nqtext + n;
+    qtext[nqtext] = 10; nqtext = nqtext + 1;
+    return 1;
+}
+/* the quoted #includes of text[b..e), resolved beside `from` (a path) */
+int qscan(char *text, int b, int e, char *from) {
+    int i; int j; int nm; int dl; int k; int r; int q;
+    dl = 0; k = 0;
+    while (from[k]) { if (from[k] == 47) dl = k + 1; k = k + 1; }
+    i = b;
+    while (i < e) {
+        j = i;
+        while (j < e) { if (text[j] != 32) { if (text[j] != 9) break; } j = j + 1; }
+        if (j + 8 < e) { if (text[j] == 35) {
+            j = j + 1;
+            while (j < e) { if (text[j] != 32) { if (text[j] != 9) break; } j = j + 1; }
+            if (j + 7 < e) { if (text[j] == 105) { if (text[j + 1] == 110) { if (text[j + 2] == 99) {
+              if (text[j + 3] == 108) { if (text[j + 4] == 117) { if (text[j + 5] == 100) { if (text[j + 6] == 101) {
+                j = j + 7;
+                while (j < e) { if (text[j] != 32) { if (text[j] != 9) break; } j = j + 1; }
+                if (j < e) { if (text[j] != 60) {
+                    if (text[j] != 34) return 0 - 1;          /* a macro-named include */
+                    j = j + 1; nm = j;
+                    while (j < e) { if (text[j] == 34 || text[j] == 10) break; j = j + 1; }
+                    if (j >= e || text[j] != 34) return 0 - 1;
+                    if (text[nm] == 47) r = qadd("", 0, text + nm, j - nm);
+                    else r = qadd(from, dl, text + nm, j - nm);
+                    q = 0;
+                    while (r == 0 && q < noptinc) { r = qadd(optincs[q], iincdl[q], text + nm, j - nm); q = q + 1; }
+                    if (r == 0) { if (vfind(HDR_NAMES, NHDR, text + nm, j - nm) >= 0) r = 1; }   /* a carried header, as "stdio.h" falls back to */
+                    if (r <= 0) return 0 - 1;
+                } }
+            } } } } } } } }
+        } }
+        while (i < e) { if (text[i] == 10) break; i = i + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+int qheaders(void) {
+    int done; int e;
+    nqtext = 0; nqpath = 0;
+    if (srcpath == 0) return 0 - 1;
+    if (qscan(src, 0, nsrc, srcpath) < 0) return 0 - 1;
+    done = 0;
+    while (done < nqpath) {                 /* each file's own includes, in reading order */
+        e = nqtext; if (done + 1 < nqpath) e = qbeg[done + 1];
+        if (qscan(qtext, qbeg[done], e, qpath[done]) < 0) return 0 - 1;
+        done = done + 1;
+    }
+    return 0;
+}
+int qfind(char *nm, int nl) {               /* nm as a whole identifier in qtext */
+    int i; int k;
+    i = 0;
+    while (i + nl <= nqtext) {
+        if (qtext[i] == nm[0]) {
+            k = 1; while (k < nl) { if (qtext[i + k] != nm[k]) break; k = k + 1; }
+            if (k == nl) {
+                if (i == 0 || idch(qtext[i - 1] & 255) == 0) {
+                    if (i + nl >= nqtext || idch(qtext[i + nl] & 255) == 0) return i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
 int ftrim_libc_scan(void) {
-    int k; int p; int n; int b; int e;
+    int k; int p; int n; int b; int e; int quoted;
     k = 0; while (k < NLIBBODY) { ftrim_libc_mark[k] = 0; k = k + 1; }
     ftrim_libc_act = 0;
     if (ftrim_libc == 0) return 0;
     if (nostdinc) return 0;
-    if (quotedinc()) return 0;
+    quoted = quotedinc();
+    if (quoted) { if (qheaders() < 0) return 0; }
     ftrim_libc_act = 1;
     k = 0; while (k < NLIBROOT) { ftrim_libc_mark[LIBROOT_DEP[k]] = 1; k = k + 1; }
     k = 0; p = 0;
     while (k < NLIBKEY) {
         n = 0; while (LIBKEY_NAMES[p + n]) n = n + 1;
-        if (srcfind(LIBKEY_NAMES + p, n, 0) >= 0) {
+        if (srcfind(LIBKEY_NAMES + p, n, 0) >= 0 || (quoted && qfind(LIBKEY_NAMES + p, n) >= 0)) {
             b = LIBKEY_OFF[k]; e = LIBKEY_OFF[k + 1];
             while (b < e) { ftrim_libc_mark[LIBKEY_DEP[b]] = 1; b = b + 1; }
         }

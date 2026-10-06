@@ -101,6 +101,14 @@ checked "unisacc libc on demand" 5 last "$UA" -run "$D/n1.c" "$D/n2.c"
 envwant=$(printf 'before outer\nenv2 sees from-env1')
 checked "unisacc environ env1 env2 -run" "$envwant" all env H1PROBE=outer "$UA" -run "$D/env1.c" "$D/env2.c"
 checked "unisacc environ env2 env1 -run" "$envwant" all env H1PROBE=outer "$UA" -run "$D/env2.c" "$D/env1.c"
+# 0.0.31 F3: a unit with quoted includes keeps -ftrim-libc; the quoted headers (nested, and a
+# macro naming strdup) are scanned, so the program still links and runs, and trims exactly as
+# flat.c, the same text with the headers pasted in (0.0.30 reference: 132322 vs 66274 bytes).
+checked "unisacc F3 quoted-include trim -run" "5 abc" all "$UA" -run "$D/f3/main.c"
+if bound 20 "$UA" "$D/f3/main.c" -o "$T/f3q" && bound 20 "$UA" "$D/f3/flat.c" -o "$T/f3flat"; then
+    a=$(wc -c < "$T/f3q"); b=$(wc -c < "$T/f3flat")
+    if [ "$a" -eq "$b" ]; then echo "  ok   F3 quoted $a = flat $b bytes"; else echo "  FAIL F3 quoted $a != flat $b bytes"; rc=1; fi
+else echo "  FAIL F3 build"; rc=1; fi
 if [ -n "$HOST" ]; then
     if bound 20 "$UA" "$D/m1.c" "$D/m2.c" -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
         chmod +x "$T/um"
