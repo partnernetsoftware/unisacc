@@ -136,6 +136,17 @@ static int _u_st_fd[_U_NST];
 static int _u_st_eof[_U_NST];
 static int _u_st_err[_U_NST];
 static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
+/* D3: a 4 KB read buffer per stream.  Bytes are taken from it before the
+   descriptor is asked again; fseek/rewind drop it and ftell subtracts what is
+   still unread, so the stream position stays the one C99 7.19.9 describes. */
+#define _U_BUFSZ 4096
+static char _u_st_buf[_U_NST * _U_BUFSZ];
+static int _u_st_bpos[_U_NST];
+static int _u_st_blen[_U_NST];
+static void _u_st_copy(char *__u_d, const char *__u_s, long __u_n) {
+    long __u_j; __u_j = 0;
+    while (__u_j < __u_n) { __u_d[__u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
+}
 static int _u_st_n;
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
@@ -151,6 +162,7 @@ static int _u_st_slot(FILE *__u_f) {
     __u_i = _u_st_n; _u_st_n = _u_st_n + 1;
     _u_st_fd[__u_i] = __u_fd;
     _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
+    _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0;
     return __u_i;
 }
 #endif
@@ -217,8 +229,24 @@ static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
         ((char *)__u_p)[0] = (char)_u_st_ung[__u_i];
         _u_st_ung[__u_i] = 0 - 1; __u_pre = 1;
     }
+    /* buffered bytes next, then at most one descriptor read: straight into
+       the caller for a request of a buffer or more, else a buffer refill */
+    if (__u_i >= 0 && __u_want > __u_pre && _u_st_bpos[__u_i] < _u_st_blen[__u_i]) {
+        long __u_k; __u_k = _u_st_blen[__u_i] - _u_st_bpos[__u_i];
+        if (__u_k > __u_want - __u_pre) __u_k = __u_want - __u_pre;
+        _u_st_copy((char *)__u_p + __u_pre, _u_st_buf + __u_i * _U_BUFSZ + _u_st_bpos[__u_i], __u_k);
+        _u_st_bpos[__u_i] = _u_st_bpos[__u_i] + (int)__u_k; __u_pre = __u_pre + __u_k;
+        if (__u_pre == __u_want) return __u_n;
+    }
     __u_got = 0;
-    if (__u_want > __u_pre) __u_got = __read(_unisa_fd(__u_f), (char *)__u_p + __u_pre, __u_want - __u_pre);
+    if (__u_want > __u_pre) {
+        if (__u_i >= 0 && __u_want - __u_pre < _U_BUFSZ) {
+            __u_got = __read(_unisa_fd(__u_f), _u_st_buf + __u_i * _U_BUFSZ, _U_BUFSZ);
+            _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = __u_got > 0 ? (int)__u_got : 0;
+            if (__u_got > __u_want - __u_pre) __u_got = __u_want - __u_pre;
+            if (__u_got > 0) { _u_st_copy((char *)__u_p + __u_pre, _u_st_buf + __u_i * _U_BUFSZ, __u_got); _u_st_bpos[__u_i] = (int)__u_got; }
+        } else __u_got = __read(_unisa_fd(__u_f), (char *)__u_p + __u_pre, __u_want - __u_pre);
+    }
     if (__u_got < 0) { if (__u_i >= 0) _u_st_err[__u_i] = 1; __u_got = 0; }
     __u_got = __u_got + __u_pre;
     if (__u_got < __u_want && __u_i >= 0) _u_st_eof[__u_i] = 1;
@@ -467,23 +495,37 @@ static int fclose(FILE *__u_f) {
         _u_st_n = _u_st_n - 1;
         _u_st_fd[__u_i] = _u_st_fd[_u_st_n]; _u_st_eof[__u_i] = _u_st_eof[_u_st_n];
         _u_st_err[__u_i] = _u_st_err[_u_st_n]; _u_st_ung[__u_i] = _u_st_ung[_u_st_n];
+        _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ, _u_st_buf + _u_st_n * _U_BUFSZ, _U_BUFSZ);
+        _u_st_bpos[__u_i] = _u_st_bpos[_u_st_n]; _u_st_blen[__u_i] = _u_st_blen[_u_st_n];
     }
     return __close(_unisa_fd(__u_f));
 }
 #endif
 #endif
-/* A FILE * is its descriptor and nothing is buffered, so the file offset
-   is the stream's position: fseek and ftell are lseek.  [S-15 D2] */
+/* The stream position is the descriptor offset less what the read buffer
+   and the pushback still hold; fseek and rewind drop both (and clear eof,
+   C99 7.19.9.2).  [S-15 D2, D3] */
 #if !__UNISA_FTRIM_LIBC || __UN_fseek
 static int fseek(FILE *__u_f, long __u_off, int __u_whence) {
+    int __u_i; __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0) {
+        if (__u_whence == SEEK_CUR) __u_off = __u_off - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0);
+        _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1; _u_st_eof[__u_i] = 0;
+    }
     return __lseek(_unisa_fd(__u_f), __u_off, __u_whence) < 0 ? -1 : 0;
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_ftell
-static long ftell(FILE *__u_f) { return __lseek(_unisa_fd(__u_f), 0, SEEK_CUR); }
+static long ftell(FILE *__u_f) {
+    long __u_r; int __u_i;
+    __u_r = __lseek(_unisa_fd(__u_f), 0, SEEK_CUR);
+    __u_i = _u_st_slot(__u_f);
+    if (__u_r >= 0 && __u_i >= 0) __u_r = __u_r - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0);
+    return __u_r;
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_rewind
-static void rewind(FILE *__u_f) { __lseek(_unisa_fd(__u_f), 0, SEEK_SET); }
+static void rewind(FILE *__u_f) { fseek(__u_f, 0, SEEK_SET); clearerr(__u_f); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_remove
 static int remove(const char *__u_path) { return __unlink((char *)__u_path) < 0 ? -1 : 0; }
