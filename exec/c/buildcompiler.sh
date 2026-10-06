@@ -29,7 +29,7 @@ tn() {   # tn JSON TBL NET
 }
 # 0.0.32 B5: SEED_GEN=1 (default) constructs the delta JSON of the stages seed/gen.c covers with the
 # C99 constructor instead of exec/build/gen.py; same bytes (tests/seedgencheck.sh).  Stages it does not
-# cover yet (lower, enc) stay on gen.py.  Built by the host cc for now, not unisacc.com: a .com -O2
+# cover yet (lower) stay on gen.py.  Built by the host cc for now, not unisacc.com: a .com -O2
 # seed-gen is byte-equal but runs parse2 in ~26 s against ~7 s (plans/v0.0.32.md D2).
 gen() {   # gen STAGE OUT.json [FLAG...]
     if [ "${SEED_GEN:-1}" = 1 ]; then
@@ -126,7 +126,7 @@ target() {
     case $os in lnx) osflag=; image=elf;; osx) osflag=--osx; image=macho;; win) osflag=--win; image=pe;; esac
     case $arch in arm64) archflag=--arm64; enc=enc/arm;; x86_64) archflag=; enc=enc;; esac
     b python3 exec/build/gen.py lower "$d/lower.json" --full $osflag $archflag
-    b python3 exec/build/gen.py "$enc" "$d/elf.json" "--$image"
+    gen "$enc" "$d/elf.json" "--$image"
     for s in lower elf; do
         tn "$d/$s.json" "$d/$s.tbl" "$d/$s.net"
     done

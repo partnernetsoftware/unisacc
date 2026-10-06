@@ -12,8 +12,9 @@ key=$(cat exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exe
 spec() { case $1 in
     e2) echo "pp --shared-predefines";; e1) echo "lex --typed";; e3) echo parse2;; e4) echo "opt --o2";;
     o1) echo opt;; prune) echo prune;; nativeabi) echo nativeabi;;
-    enc-elf) echo "enc --elf";; enc-macho) echo "enc --macho";; enc-pe) echo "enc --pe";; *) echo "?";; esac; }
-names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe"}
+    enc-elf) echo "enc --elf";; enc-macho) echo "enc --macho";; enc-pe) echo "enc --pe";;
+    arm-elf) echo "enc/arm --elf";; arm-macho) echo "enc/arm --macho";; arm-pe) echo "enc/arm --pe";; *) echo "?";; esac; }
+names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe"}
 run() {
     n=$1; set -- $(spec "$n"); st=$1; shift
     [ "$st" = "?" ] && { echo "DIFF $n (unknown name)"; return; }

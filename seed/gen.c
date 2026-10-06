@@ -8796,8 +8796,9 @@ int main(int argc, char **argv) {
         value_write(out, v); if (close_in(out)) die("output close failed");
         return 0;
     }
-    if (argc >= 3 && argc <= 7 && !strcmp(argv[1], "enc")) {
-        ManifestRows rows = manifest_rows("exec/enc/gen-manifest.tsv");
+    if (argc >= 3 && argc <= 7 && (!strcmp(argv[1], "enc") || !strcmp(argv[1], "enc/arm"))) {
+        /* gen.py: STAGE/gen-manifest.tsv, or STAGE-manifest.tsv for stage/sub */
+        ManifestRows rows = manifest_rows(argv[1][3] ? "exec/enc/arm-manifest.tsv" : "exec/enc/gen-manifest.tsv");
         ManifestGraph ctx = {0}; Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
         const char *names[] = {"elf", "macho", "pe", "object"};
         for (int i = 0; i < 4; i++) {
