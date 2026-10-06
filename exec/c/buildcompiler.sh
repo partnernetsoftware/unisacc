@@ -8,7 +8,7 @@ step=${2:-all}
 case $step in all|shared|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pack-driver|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
 [ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
 mkdir -p "$1"; T=$(cd "$1" && pwd)
-b() { python3 "$R/tests/bound.py" 50 "$@"; }
+b() { "$R/tests/bound" 50 "$@"; }   # the native watchdog (0.0.32 B5: no python3 for the bound itself)
 # 0.0.25 B3: SEED_C=1 turns delta JSON -> table -> network into the C99 seed tools (seed/tbl.c,
 # seed/net.c) built by the installed previous release, unisacc.com, instead of exec/c/tbl.py and
 # net.py.  Both routes give the same bytes (tests/seedconstructmatrix.py; 0.0.25 B3 built byte-identical
@@ -188,7 +188,7 @@ pack() { pack_models; pack_driver; }
 case $step in
     all)
         # One process-tree budget for the entire build, including all children.
-        python3 "$R/tests/bound.py" 55 sh -c '
+        "$R/tests/bound" 55 sh -c '
             set -eu
             script=$1; out=$2
             pair() {
