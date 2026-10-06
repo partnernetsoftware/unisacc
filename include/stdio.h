@@ -204,7 +204,7 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
 
 /* Unbuffered: a FILE * here is a file descriptor, so there is nowhere to
    keep a buffer and every character costs a read.  Correct, not fast. */
-#if !__UNISA_FTRIM_LIBC || __UN_fgetc
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_slot || __UN_setvbuf
 /* ---- stream state ------------------------------------------------------
    A FILE* is a descriptor and nothing more (see the top of this file), so
    there is nowhere on the stream to remember that a read hit EOF or failed,
