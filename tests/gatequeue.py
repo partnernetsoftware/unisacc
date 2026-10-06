@@ -16,12 +16,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 LOCATION_BOUND = ('com-comboot-',)
 # A job that consumes another's recorded state starts only after it passed (0.0.21 and 0.0.22:
 # the longest-first pick ran stage2 before seed -- "stage 2 recorded before stage 1").
-AFTER = {'rowcov-lower-union': 'rowcov-lower-8', 'rowcov-parse2-union': 'rowcov-parse2-24', 'rowcov-enc-union': 'rowcov-enc-8',   # 0.0.28 E22: reuse the shards
-         'com-comboot-stage2': 'com-comboot-seed', 'com-comboot-stage3': 'com-comboot-stage2',
-         'com-comboot-fixedpoint': 'com-comboot-stage3'}
-AFTER.update({'rowcov-parse2-%d' % k: 'rowcov-parse2-build' for k in range(1, 25)})   # 0.0.31 R4
-AFTER.update({'exec-bindverify-%s' % a: 'exec-bindprep-%s' % a for a in ('arm64', 'x86_64')})   # 0.0.32: verify reads prep's build dir
-AFTER['exec-bindprep-x86_64'] = 'exec-bindprep-arm64'   # q10: both preps in one window hit 53 s (alone 30-38 s)
+# scheduling order lives in tests/gateorder.json (0.0.32 P7'): it decides only when a job starts, so it is
+# kept out of the common identity -- two edits of this table in q10 invalidated all 688 results each time
+AFTER = json.loads((pathlib.Path(__file__).resolve().parent/'gateorder.json').read_text())['after']
 
 def atomic(path, obj):
     tmp = path.with_suffix(path.suffix + '.tmp')
@@ -197,11 +194,14 @@ def fingerprint(jobs):
         # 0.0.23 E: "match": "contains" -- the declared command is a contiguous run of the job's
         # command; the job's full command stays in the identity, so a changed argument list (new
         # test files in a shard, an env prefix) re-runs the job but no longer drops its declaration
+        # 0.0.32 P7': the planned job keeps {MODEL_COM} unexpanded, so expand it on both sides (q11: combo and
+        # exec-container never matched and fell back to the global fingerprint)
+        shown = [a.replace('{MODEL_COM}', mc) for a in command]
         if entry and entry.get('match') == 'contains':
             k = len(declared_cmd)
-            audited = any(command[i:i+k] == declared_cmd for i in range(len(command)-k+1))
+            audited = any(shown[i:i+k] == declared_cmd for i in range(len(shown)-k+1))
         else:
-            audited = entry is not None and command == declared_cmd
+            audited = entry is not None and shown == declared_cmd
         inventory, extra = {}, None
         if entry and entry.get('reviewed_trees'):
             for tree, reviewed in entry['reviewed_trees'].items():
