@@ -23,6 +23,8 @@ for f in "$@"; do
     name=$(basename "$f" .c)
     if grep -Fxq "$name" "$OUT/inputs"; then echo "duplicate output name: $name" >&2; exit 2; fi
     printf '%s\n' "$name" >> "$OUT/inputs"
+    export UNISA_ATTRIBUTES="$OUT/$name.attributes"
+    rm -f "$UNISA_ATTRIBUTES"
     in=$f
     for s in $STAGES; do
         out="$OUT/$name.$s"

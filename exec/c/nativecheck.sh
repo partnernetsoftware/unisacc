@@ -38,23 +38,29 @@ if part in ('all', 'stages'):
         run([ua,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     for src in ['examples/hello.c','examples/fib.c','tests/c/b_toknames.c']:
         name=pathlib.Path(src).stem;inp=pathlib.Path(src)
+        attrs=p/(name+'.ua.attributes');attrs.unlink(missing_ok=True)
+        os.environ['UNISA_ATTRIBUTES']=str(attrs)
         for stage in ['e2','e1','e3','e4','prune','lower','elf']:
             got=run([ua,p/(stage+'.net'),inp,src,root/'include'])
             want=p/(name+'.'+('macho' if stage=='elf' else stage))
             if got!=want.read_bytes():raise SystemExit(f'{name} {stage}: executor output differs')
             inp=p/(name+'.ua.'+stage);inp.write_bytes(got)
         print('native executor:',src,'seven stages equal')
+    os.environ.pop('UNISA_ATTRIBUTES',None)
     # The seven network stages now compile their own C runtime.  The resulting
     # runtime repeats those stages on its own source, without Python processing it.
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         run([netrun,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     src='exec/c/run.c';inp=pathlib.Path(src)
+    attrs=p/'run.net.attributes';attrs.unlink(missing_ok=True)
+    os.environ['UNISA_ATTRIBUTES']=str(attrs)
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         got=run([netrun,p/(stage+'.net'),inp,src,root/'include'])
         want=p/('run.'+('macho' if stage=='elf' else stage))
         if got!=want.read_bytes():raise SystemExit(f'network-built runtime self stage {stage}: differs')
         inp=p/('run.self.'+stage);inp.write_bytes(got)
     print('network-built runtime: seven self stages and image equal; seven domain checks passed')
+    os.environ.pop('UNISA_ATTRIBUTES',None)
 if part in ('all', 'chain'):
     # The same stages also run within a single process, passing only bytes.
     models=[p/(stage+'.net') for stage in ['e2','e1','e3','e4','prune','lower','elf']]
@@ -68,6 +74,8 @@ if part in ('all', 'resources'):
     isolated=p/'isolated';isolated.mkdir()
     shutil.copyfile(root/'exec/c/run.c',isolated/'runtime.c')
     for name in ['core.c','core.h','codec.h','packagefooter.h']: shutil.copyfile(root/'exec/c'/name,isolated/name)
+    (isolated/'asm').mkdir()
+    shutil.copyfile(root/'exec/c/asm/binding.c',isolated/'asm/binding.c')
     shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
     for exe in [p/'run',ua,netrun]:
         got=run([exe,'--bundle','models.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated)
