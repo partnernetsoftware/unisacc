@@ -21,9 +21,9 @@ def run(txt, per_char):
         f.write('{"role":"model","p":0.830000}\n')
     mfd, sfd = pty.openpty()
     fcntl.ioctl(sfd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 70, 0, 0))
-    # cdsh.sh is unisacc.com cdsh.c plus the file table.
-    cdsh = os.path.join(ROOT, "cdsh.sh")
-    cmd = "exec %s run %s" % (shlex.quote(cdsh), shlex.quote(TR))
+    # csih.sh is unisacc.com csih.c plus the file table.
+    csih = os.path.join(ROOT, "csih.sh")
+    cmd = "exec %s run %s" % (shlex.quote(csih), shlex.quote(TR))
     p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=sfd, stderr=sfd, stdin=sfd, close_fds=True)
     os.close(sfd)
     # Wait for the frame, do not sleep a guess at it. Reading the first bytes is
@@ -121,9 +121,9 @@ for label, per_char in (("bulk (whole line in one write)", False), ("per-charact
 
 # One TUI process, three CLI lines. The frame must show the shell line and
 # the file the later read printed. This is the CLI entry driving the TUI.
-HAND = "/tmp/cdsh-e2e-hand.txt"
+HAND = "/tmp/csih-e2e-hand.txt"
 rc, screen, up = run([
-    "sh echo cdsh-hand",
+    "sh echo csih-hand",
     "write %s from-cli" % HAND,
     "read %s" % HAND,
 ], False)
@@ -132,7 +132,7 @@ if not up:
           % (rc, " ".join(screen.split())[:200]))
     fail += 1
 else:
-    if "cdsh-hand" in screen and "from-cli" in screen:
+    if "csih-hand" in screen and "from-cli" in screen:
         print("  ok    cli hand: echo and read landed on the tui")
     else:
         print("  FAIL  cli hand: screen missing tool output: %s"

@@ -8,7 +8,7 @@
  *
  * The tui and agent rows are the images that actually link. They do not
  * name suite.c or probes/u_run.c. Those two files are the suite row.
- * The tui row starts with cdsh.c, which includes tui.c. tui.c is not a
+ * The tui row starts with csih.c, which includes tui.c. tui.c is not a
  * second argv slot (structure-id ceiling). rows tui.c still selects it.
  */
 /* No #include. Same ceiling as above if this file is ever linked into the TUI. */
@@ -37,7 +37,7 @@ static const char *slice_src[SUITE_N][SUITE_MAX_SRC] = {
     { "json.c", "session.c", "session_cli.c" },
     { "render.c", "render_cli.c" },
     { "term.c", "term_cli.c" },
-    { "cdsh.c", "render.c", "term.c", "chat.c", "clock.c", "tools.c",
+    { "csih.c", "render.c", "term.c", "chat.c", "clock.c", "tools.c",
       "file.c", "shell.c", "edit.c", "gate.c", "json.c", "session.c",
       "agent.c", "plugin.c", "net.c" },
     { "chat.c", "clock.c", "gate.c", "json.c", "session.c", "chat_cli.c" },
@@ -91,8 +91,8 @@ static const char *suite_base(const char *path) {
 static int suite_named(const char *base) {
     int i, k;
     if (!base || !base[0]) return 0;
-    /* tui.c is compiled as the body of cdsh.c, so it has no argv slot. */
-    if (!strcmp(base, "tui.c")) base = "cdsh.c";
+    /* tui.c is compiled as the body of csih.c, so it has no argv slot. */
+    if (!strcmp(base, "tui.c")) base = "csih.c";
     for (i = 0; i < SUITE_N; i++)
         for (k = 0; k < slice_n[i]; k++)
             if (!strcmp(slice_src[i][k], base)) return 1;
@@ -103,20 +103,20 @@ static int suite_named(const char *base) {
 int suite_match_path(const char *path, const char *cwd) {
     const char *base = suite_base(path);
     if (!suite_named(base)) return 0;
-    if (path && strstr(path, "/dsh/cdsh/")) return 1;
-    if (cwd && strstr(cwd, "/dsh/cdsh") && path && !strchr(path, '/')) return 1;
+    if (path && strstr(path, "/apps/csih/")) return 1;
+    if (cwd && strstr(cwd, "/apps/csih") && path && !strchr(path, '/')) return 1;
     return 0;
 }
 
 int suite_run_selftest(void) {
     int fail = 0;
-    const char *root = "/Users/wjc/repos/moltbaby/skills/llm/dsh/cdsh";
+    const char *root = "/Users/wjc/repos/unisacc/apps/csih";
     if (suite_match_path("/tmp/json.c", "/tmp")) fail++;
     if (!suite_match_path("json.c", root)) fail++;
-    if (!suite_match_path("/Users/wjc/repos/moltbaby/skills/llm/dsh/cdsh/plugin.c", "/tmp")) fail++;
+    if (!suite_match_path("/Users/wjc/repos/unisacc/apps/csih/plugin.c", "/tmp")) fail++;
     if (suite_match_path("README.md", root)) fail++;
     if (suite_slice_count() < 16) fail++;
-    if (!suite_match_path("cdsh.c", root)) fail++;
+    if (!suite_match_path("csih.c", root)) fail++;
     if (!suite_match_path("tui.c", root)) fail++;
     {
         int i, k, tui_n = -1;
@@ -126,14 +126,14 @@ int suite_run_selftest(void) {
             int n = suite_slice_fill(i, av, 24, &nm);
             if (nm && !strcmp(nm, "tui")) {
                 tui_n = n;
-                if (!av[0] || strcmp(av[0], "cdsh.c")) fail++;
+                if (!av[0] || strcmp(av[0], "csih.c")) fail++;
                 for (k = 0; k < n; k++) {
                     if (!av[k]) continue;
                     if (!strcmp(av[k], "tui.c") || !strcmp(av[k], "suite.c")) fail++;
                 }
             }
         }
-        /* 15 sources plus the selftest word. cdsh.c stands in for tui.c. */
+        /* 15 sources plus the selftest word. csih.c stands in for tui.c. */
         if (tui_n != 16) fail++;
     }
     if (fail) printf("FAIL suite match %d\n", fail);

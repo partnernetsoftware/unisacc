@@ -384,8 +384,8 @@ static void run_selftest(void) {
     {
         struct stat st;
         char tmp[512];
-        snprintf(tmp, sizeof tmp, "%s/rest.txt.cdsh-tmp", base);
-        expect(stat(tmp, &st) != 0, "no .cdsh-tmp file is left behind");
+        snprintf(tmp, sizeof tmp, "%s/rest.txt.csih-tmp", base);
+        expect(stat(tmp, &st) != 0, "no .csih-tmp file is left behind");
     }
 
     /* --- a no-op edit (new == old) is still exactly one replacement ----- */

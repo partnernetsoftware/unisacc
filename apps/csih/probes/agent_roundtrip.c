@@ -1,7 +1,7 @@
 /* agent_roundtrip.c — agent loop against probes/agent-stub.py. No gcc.
  *   unisacc probes/agent_roundtrip.c probes/u_run.c
  *
- * CDSH_* must be in the OS environ of the inner unisacc.com. unisacc's
+ * CSIH_* must be in the OS environ of the inner unisacc.com. unisacc's
  * setenv() is an in-process override table; exec of another unisacc.com
  * does not see it. Host sh `export` does.
  */
@@ -56,7 +56,7 @@ int main(void) {
     const char *stub = "probes/agent-stub.py";
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
     if (access(stub, 0) != 0) stub = "agent-stub.py";
-    snprintf(dir, sizeof dir, "/tmp/cdsh-agent-%d", (int)getpid());
+    snprintf(dir, sizeof dir, "/tmp/csih-agent-%d", (int)getpid());
     snprintf(work, sizeof work, "%s/work", dir);
     snprintf(tr, sizeof tr, "%s/tr.jsonl", dir);
     if (mkdir(dir, 0700) || mkdir(work, 0700)) { printf("no temp\n"); return 2; }
@@ -74,8 +74,8 @@ int main(void) {
     if (wait_port(port) != 0) { u_stop(pid); printf("  FAIL  stub did not listen\n"); return 1; }
     snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
     snprintf(script, sizeof script,
-        "export CDSH_ENDPOINT='%s'; export CDSH_MODEL=stub; "
-        "export CDSH_CWD='%s'; export CDSH_TRANSCRIPT='%s'; exec \"$0\" \"$@\"",
+        "export CSIH_ENDPOINT='%s'; export CSIH_MODEL=stub; "
+        "export CSIH_CWD='%s'; export CSIH_TRANSCRIPT='%s'; exec \"$0\" \"$@\"",
         ep, work, tr);
     args[0] = (char *)"agent.c"; args[1] = (char *)"agent_cli.c";
     args[2] = (char *)"file.c"; args[3] = (char *)"edit.c";

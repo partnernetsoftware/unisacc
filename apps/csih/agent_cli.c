@@ -14,10 +14,11 @@
  *   agent_cli agent <prompt...>        (runs the full loop against the endpoint)
  *
  * Env overrides (so the same binary drives a stub or the real proxy):
- *   CDSH_ENDPOINT   default https://api.deepseek.com/v1/chat/completions
- *   CDSH_MODEL      default deepseek-chat
- *   CDSH_CWD        working dir for tools + the two working files (default ".")
- *   CDSH_TRANSCRIPT transcript path (default a fresh /tmp file)
+ *   CSIH_ENDPOINT   default https://api.deepseek.com/v1/chat/completions
+ *   CSIH_MODEL      default deepseek-chat
+ *   CSIH_CWD        working dir for tools + the two working files (default ".")
+ *   CSIH_TRANSCRIPT transcript path (default $HOME/.cdsh/tui.jsonl)
+ *   The old CDSH_* names still work when the CSIH_* one is unset.
  */
 
 #include <stdio.h>
@@ -41,6 +42,8 @@ typedef struct {
     char  text[4096];
     char  old[4096];
     char  nw[4096];
+    int   line;
+    int   nlines;
 } agent_step;
 
 typedef struct {
@@ -60,6 +63,14 @@ int  agent_object_count(const char *s);
 int  agent_tool_record(char *rec, size_t recsz, const char *name, const char *text);
 int  agent_chat_role(const char *role, char *out, size_t outlen, int *wrap);
 const char *agent_model_rules(void);
+void agent_set_spill(int on);
+int agent_may_stop(int judge, int maxn);
+int agent_may_stop_ans(int judge, int maxn, int answered);
+int agent_mentions_window(const char *s);
+int agent_transcript_path(char *out, size_t outlen);
+int agent_ctx_start(int count, int max_recs, const int *costs, int budget);
+int agent_journal_trim(const char *path, long max_bytes, int keep);
+int agent_ctx_preview(const char *transcript, char *out, size_t outlen);
 agent_result agent_run(const char *prompt, const char *transcript,
                        const char *endpoint, const char *model, const char *cwd);
 agent_result agent_run_cb(const char *prompt, const char *transcript,
@@ -163,8 +174,49 @@ static int agent_run_selftest(void) {
                  && strstr(rules, "why")
                  && strstr(rules, "markdown-tree-dag")
                  && strstr(rules, "mermaid-flowchart-memory-palace")
-                 && strstr(rules, "csih。"),
+                 && strstr(rules, "csih。")
+                 && strstr(rules, "已经 answer 之后")
+                 && strstr(rules, "还没 answer 时")
+                 && strstr(rules, "不要 exec tmux"),
                  "rules: bin/envelope 0:grkwjcgmcdsh 新功能先讨论、不得先写入 markdown-tree-dag mermaid-flowchart-memory-palace");
+        a_expect(agent_may_stop_ans(1, 3, 1) && agent_may_stop_ans(2, 3, 1),
+                 "answered: first stop ends the turn");
+        a_expect(!agent_may_stop(1, 3) && !agent_may_stop(2, 3) && agent_may_stop(3, 3),
+                 "stop waits for the third judgment");
+        a_expect(!agent_mentions_window("c99 的 use/import 类包管理有没有人试过"),
+                 "a package question is not a window");
+        a_expect(agent_mentions_window("看看窗口 13") && agent_mentions_window("tmux capture-pane"),
+                 "a window request keeps the list");
+        a_expect(strstr(rules, "下一窗") != NULL && strstr(rules, "只跑第一个") != NULL,
+                 "rules keep one step, then the next window");
+    }
+
+    {
+        s = agent_parse("{\"act\":\"file\",\"op\":\"read\",\"path\":\"a.c\",\"line\":40,\"n\":20}");
+        a_expect(s.kind == ACT_READ && s.line == 40 && s.nlines == 20 && !strcmp(s.path, "a.c"),
+                 "file read takes a line window");
+    }
+
+    {
+        int costs[5] = {100, 100, 100, 100, 100};
+        char jpath[512];
+        a_expect(agent_ctx_start(5, 50, costs, 250) == 3,
+                 "a full context drops the oldest records");
+        a_expect(agent_ctx_start(5, 2, costs, 10000) == 3,
+                 "context keeps at most the newest records");
+        a_expect(agent_ctx_start(3, 50, costs, 50) == 3,
+                 "an oversized newest record is not replaced by an older one");
+        a_expect(agent_ctx_start(0, 50, costs, 100) == 0, "empty context starts at 0");
+        a_expect(agent_transcript_path(jpath, sizeof jpath) == 0, "transcript path resolves");
+        if (getenv("CSIH_TRANSCRIPT") && getenv("CSIH_TRANSCRIPT")[0])
+            a_expect(strcmp(jpath, getenv("CSIH_TRANSCRIPT")) == 0,
+                     "transcript follows CSIH_TRANSCRIPT");
+        else if (getenv("CDSH_TRANSCRIPT") && getenv("CDSH_TRANSCRIPT")[0])
+            a_expect(strcmp(jpath, getenv("CDSH_TRANSCRIPT")) == 0,
+                     "transcript follows CDSH_TRANSCRIPT");
+        else
+            a_expect(strstr(jpath, "/.cdsh/tui.jsonl") != NULL,
+                     "transcript defaults to the home journal");
     }
 
     /* executor: exec really runs */
@@ -172,10 +224,15 @@ static int agent_run_selftest(void) {
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "exec runs");
     a_expect(strstr(out, "hi") != NULL, "  exec output captured");
 
-    /* a long result is stored whole; the return text is only a pointer */
+    /* a long result stays in memory unless the CLI asked for spill */
     memset(&s, 0, sizeof s); s.kind = ACT_EXEC;
     strncpy(s.cmd, "dd if=/dev/zero bs=2500 count=1 2>/dev/null | tr '\\0' A", sizeof s.cmd - 1);
+    agent_set_spill(0);
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "long exec runs");
+    a_expect(strstr(out, "full:") == NULL && strstr(out, "AAAA") != NULL,
+             "  long exec does not write a tool file");
+    agent_set_spill(1);
+    a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "long exec spill runs");
     a_expect(strstr(out, "full: ") != NULL && strstr(out, "/.csih/tool/") != NULL,
              "  long result names a tool file");
     {
@@ -197,9 +254,10 @@ static int agent_run_selftest(void) {
             remove(spath);
         }
     }
+    agent_set_spill(0);
 
     /* executor: file write then read round-trips */
-    snprintf(path, sizeof path, "/tmp/cdsh-agent-test-%d.txt", (int)getpid());
+    snprintf(path, sizeof path, "/tmp/csih-agent-test-%d.txt", (int)getpid());
     remove(path);
     s = agent_parse("{\"act\":\"file\",\"op\":\"write\",\"path\":\"PLACE\",\"text\":\"hello-world\"}");
     /* path is a fixed placeholder above; set it directly */
@@ -213,6 +271,29 @@ static int agent_run_selftest(void) {
     strncpy(s.path, path, sizeof s.path - 1);
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "file read runs");
     a_expect(strstr(out, "hello-world") != NULL, "  read returned the content");
+    remove(path);
+
+    {
+        FILE *lf;
+        snprintf(path, sizeof path, "/tmp/csih-lines-%d.txt", (int)getpid());
+        lf = fopen(path, "w");
+        a_expect(lf != NULL, "line window fixture");
+        if (lf) {
+            int row;
+            for (row = 1; row <= 10; row++) fprintf(lf, "L%d\n", row);
+            fclose(lf);
+        }
+        memset(&s, 0, sizeof s);
+        s.kind = ACT_READ;
+        strncpy(s.path, path, sizeof s.path - 1);
+        s.line = 3;
+        s.nlines = 2;
+        a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "line window reads");
+        a_expect(strstr(out, "L3") && strstr(out, "L4") && !strstr(out, "L2") && !strstr(out, "L5"),
+                 "  window is lines 3 and 4");
+        a_expect(strstr(out, "下一窗 line=5") != NULL, "  window names the next line");
+        remove(path);
+    }
 
     remove(path);
 
@@ -274,6 +355,61 @@ static int agent_run_selftest(void) {
         rmdir(base);
     }
 
+    {
+        const char *jp = "/tmp/csih-ctx-selftest.jsonl";
+        FILE *jf;
+        char *body;
+        int row, col, opened = 0;
+        remove(jp);
+        jf = fopen(jp, "w");
+        a_expect(jf != NULL, "context fixture opens");
+        if (jf) {
+            opened = 1;
+            for (row = 0; row < 30; row++) {
+                fprintf(jf, "{\"role\":\"user\",\"text\":\"%s", row == 0 ? "OLDMARKER" : "pad");
+                for (col = 0; col < 2500; col++) fputc('B', jf);
+                fprintf(jf, "%s\"}\n", row == 29 ? "NEWMARKER" : "mid");
+            }
+            fprintf(jf, "{\"role\":\"decision\",\"go\":\"stop\"}\n");
+            fclose(jf);
+        }
+        body = (char *)malloc(65536);
+        a_expect(body != NULL, "context preview buffer");
+        if (body && opened) {
+            agent_ctx_preview(jp, body, 65536);
+            a_expect(strstr(body, "NEWMARKER") != NULL, "context keeps the newest record");
+            a_expect(strstr(body, "OLDMARKER") == NULL, "context drops the oldest record");
+            a_expect(strstr(body, "decision") == NULL, "decision records stay off the wire");
+        }
+        free(body);
+        remove(jp);
+    }
+
+    {
+        const char *jp = "/tmp/csih-journal-selftest.jsonl";
+        FILE *jf;
+        char line[80];
+        int row, n = 0;
+        remove(jp);
+        jf = fopen(jp, "w");
+        a_expect(jf != NULL, "journal fixture opens");
+        if (jf) {
+            for (row = 0; row < 10; row++)
+                fprintf(jf, "{\"role\":\"user\",\"text\":\"line-%d\"}\n", row);
+            fclose(jf);
+        }
+        a_expect(agent_journal_trim(jp, 80, 3) == 1, "a long journal keeps the newest lines");
+        jf = fopen(jp, "r");
+        while (jf && fgets(line, sizeof line, jf)) n++;
+        if (jf) fclose(jf);
+        a_expect(n == 3, "trimmed journal has the kept count");
+        line[0] = 0;
+        jf = fopen(jp, "r");
+        if (jf) { if (!fgets(line, sizeof line, jf)) line[0] = 0; fclose(jf); }
+        a_expect(strstr(line, "line-7") != NULL, "trim starts at the oldest kept line");
+        remove(jp);
+    }
+
     if (a_failures) { printf("agent: %d FAILED\n", a_failures); return 1; }
     printf("agent: all cases pass\n");
     return 0;
@@ -296,13 +432,21 @@ static void print_trace(const char *transcript) {
     fclose(f);
 }
 
+static const char *csih_env(const char *neu, const char *old) {
+    const char *v = getenv(neu);
+    if (v && v[0]) return v;
+    v = getenv(old);
+    if (v && v[0]) return v;
+    return 0;
+}
+
 static int run_agent(int argc, char **argv) {
-    const char *endpoint = getenv("CDSH_ENDPOINT");
-    const char *model    = getenv("CDSH_MODEL");
-    const char *cwd      = getenv("CDSH_CWD");
-    const char *transcript = getenv("CDSH_TRANSCRIPT");
+    const char *endpoint = csih_env("CSIH_ENDPOINT", "CDSH_ENDPOINT");
+    const char *model    = csih_env("CSIH_MODEL", "CDSH_MODEL");
+    const char *cwd      = csih_env("CSIH_CWD", "CDSH_CWD");
+    char journal[512];
+    const char *transcript;
     char prompt[4096];
-    char def_transcript[256];
     char real_cwd[1024];
     agent_result r;
     int i, n;
@@ -314,16 +458,16 @@ static int run_agent(int argc, char **argv) {
         if (!getcwd(real_cwd, sizeof real_cwd)) strcpy(real_cwd, ".");
         cwd = real_cwd;
     }
-    if (!transcript) {
-        snprintf(def_transcript, sizeof def_transcript, "/tmp/cdsh-agent-%d.jsonl", (int)getpid());
-        remove(def_transcript);
-        transcript = def_transcript;
-    }
+    if (agent_transcript_path(journal, sizeof journal) != 0)
+        snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)getpid());
+    transcript = journal;
 
-    /* join the rest of argv as the prompt */
+    /* join the rest of argv as the prompt. The word spill is a switch. */
+    agent_set_spill(0);
     prompt[0] = '\0';
     for (i = 2, k = 0; i < argc && k < sizeof prompt - 2; i++) {
-        if (i > 2) prompt[k++] = ' ';
+        if (!strcmp(argv[i], "spill")) { agent_set_spill(1); continue; }
+        if (k > 0) prompt[k++] = ' ';
         n = snprintf(prompt + k, sizeof prompt - k, "%s", argv[i]);
         if (n < 0) break;
         k += (size_t)n;
@@ -349,6 +493,6 @@ int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "";
     if (!strcmp(cmd, "selftest")) return agent_run_selftest();
     if (!strcmp(cmd, "agent")) return run_agent(argc, argv);
-    printf("usage: agent_cli selftest | agent <prompt...>\n");
+    printf("usage: agent_cli selftest | agent [spill] <prompt...>\n");
     return 64;
 }

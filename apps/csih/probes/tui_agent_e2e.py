@@ -20,10 +20,10 @@ def run():
     except OSError: pass
 
     env = dict(os.environ)
-    env["CDSH_ENDPOINT"]   = EP
-    env["CDSH_MODEL"]      = "stub"
-    env["CDSH_CWD"]        = work
-    env["CDSH_TRANSCRIPT"] = tr
+    env["CSIH_ENDPOINT"]   = EP
+    env["CSIH_MODEL"]      = "stub"
+    env["CSIH_CWD"]        = work
+    env["CSIH_TRANSCRIPT"] = tr
     # Drop TMUX so the in-TUI tmux enumeration connects via the socket instead
     # of the pty we hand the TUI. A pty whose master is this harness does not
     # answer tmux's terminal probes and would deadlock; the real user terminal

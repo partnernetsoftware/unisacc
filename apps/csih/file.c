@@ -174,7 +174,7 @@ file_result file_read(const char *path, char *buf, size_t cap) {
 /*
  * Replace `path` with `text`, atomically.
  *
- * Writes "<path>.cdsh-tmp" then renames it over the target. Same-directory
+ * Writes "<path>.csih-tmp" then renames it over the target. Same-directory
  * rename is atomic on POSIX, so a reader sees the old contents or the new
  * contents and never a half-written mixture. On any failure the temp file is
  * removed, so a failed write leaves the original intact rather than a stray
@@ -195,7 +195,7 @@ file_result file_write(const char *path, const char *text, size_t len) {
     if (!path || (!text && len)) { r.err = EINVAL; return r; }
 
     if (strlen(path) + 16 >= sizeof tmp) { r.err = ENAMETOOLONG; return r; }
-    snprintf(tmp, sizeof tmp, "%s.cdsh-tmp", path);
+    snprintf(tmp, sizeof tmp, "%s.csih-tmp", path);
 
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { r.err = errno; return r; }
@@ -409,7 +409,7 @@ static void run_selftest(void) {
     {
         char tmp[512];
         struct stat st;
-        snprintf(tmp, sizeof tmp, "%s/c.txt.cdsh-tmp", base);
+        snprintf(tmp, sizeof tmp, "%s/c.txt.csih-tmp", base);
         expect(stat(tmp, &st) != 0, "no temp file is left after a successful write");
     }
 

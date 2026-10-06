@@ -1,6 +1,6 @@
 /* tui_e2e.c — pty witness stays probes/tui_e2e.py (openpty). This file is the entry.
  *   unisacc probes/tui_e2e.c
- * The python drives cdsh.sh, which is unisacc.com cdsh.c plus the file table.
+ * The python drives csih.sh, which is unisacc.com csih.c plus the file table.
  */
 #include <stdio.h>
 #include <stdlib.h>

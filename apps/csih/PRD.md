@@ -1,6 +1,6 @@
 # csih
 
-产品名 csih：C 语言为基础的超级智能驾具（c-based super intelligence harness）。源码目录和入口文件仍叫 cdsh，tmux 窗口仍是 cdsh-tui。状态在 `~/.csih`；若只有旧的 `~/.csih`，第一次使用时把 `~/.csih` 指过去。
+产品名 csih：C 语言为基础的超级智能驾具（c-based super intelligence harness）。源码目录是 unisacc 的 `apps/csih`，入口是 `csih.sh` / `csih.c`，启动器是 moltbaby 的 `bin/rawcsih`。tmux 窗口是 csih-tui。状态在 `~/.csih`；若只有旧的 `~/.cdsh`，第一次使用时把 `~/.csih` 指过去。
 
 本地 agent。三件工具，经 unisacc.com 以 C 源文件直接 `-run`。配置写在源码里，不进 `moltbaby/bin/llm`。密钥不进源码。
 
@@ -28,7 +28,7 @@ mind 的 JSON：`{"act":"mind","op":"add|read","target":"tree|palace","text":"..
 
 ## 怎么跑
 
-不要 `gcc` / `cc` / `clang`。macOS 对 APE 直接 `execve` 得到 ENOEXEC，所以用 `/bin/sh` 当加载器。开发期入口是同目录的 `cdsh.sh`：`unisacc.com cdsh.c` 加上文件表。`cdsh.c` 含 `tui.c`，不再单独占一个翻译单元。`~/.csih/run.c` 读密钥后执行 `cdsh.sh agent`。
+不要 `gcc` / `cc` / `clang`。macOS 对 APE 直接 `execve` 得到 ENOEXEC，所以用 `/bin/sh` 当加载器。开发期入口是同目录的 `csih.sh`：`unisacc.com csih.c` 加上文件表。`csih.c` 含 `tui.c`，不再单独占一个翻译单元。`~/.csih/run.c` 读密钥后执行 `csih.sh agent`。旧环境变量 `CDSH_*` 在对应 `CSIH_*` 没设置时仍有效。
 
 自迭代的验证环在 `docs/self-iter.md`：改源文件后由 harness 用同一条 `u_spawn` 跑受影响的 `selftest`，红则拒绝 `answer`；整份 `check.c` 绿了才重启 TUI。
 
@@ -55,18 +55,18 @@ TUI 需要 tty：`unisacc.com ~/.csih/run.c`。它从 `~/env.jsonl` 的 `deepsee
 
 ## 远景
 
-能稳定当作 harness 使用之后才做 `cdsh.com`。仓位迁移现在开始：正在用的源仍是 moltbaby 的 `skills/llm/dsh/cdsh`，目标是 unisacc 的 `apps/cdsh`。那边 selftest 绿、引用改完之前，不删这边。
+能稳定当作 harness 使用之后才做 `csih.com`。正在用的源是 unisacc 的 `apps/csih`。moltbaby 的 `skills/llm/dsh/csih` 已归档到 `archived/skills/llm/dsh/csih`。
 
 发布两种形式：
 
 | 形式 | 是什么 |
 | --- | --- |
-| `cdsh.sh` | 开发期。一条命令：`unisacc.com cdsh.c` 加上文件表。脚本只是把这条命令包短 |
-| `cdsh.com` | 交付期。同一份源做成一个跨架构可执行文件。现在还没有这个文件 |
+| `csih.sh` | 开发期。一条命令：`unisacc.com csih.c` 加上文件表。脚本只是把这条命令包短 |
+| `csih.com` | 交付期。同一份源做成一个跨架构可执行文件。现在还没有这个文件 |
 
-代码从 moltbaby 仓迁到 unisacc 仓新建的 `apps/cdsh`。这是真正的应用目录。`examples/apps/` 仍是演示，不放 cdsh。
+代码从 moltbaby 仓迁到 unisacc 仓的 `apps/csih`。这是真正的应用目录。`examples/apps/` 仍是演示，不放 csih。
 
-迁完后修正 moltbaby 的引用，包括 `skills/`（含 `skills/unisacc/SKILL.md`）和 `bin/llm` 相关（`bin/llm` 里 cdsh 指向 `bin/rawcdsh`，`bin/rawcdsh` 的 `CDSH_DIR` 与源文件表）。仓内写死的 `/dsh/cdsh`（`suite.c`、`agent.c`）和仓外 `~/.csih/run.c` 一起改。配置仍写在源码里，不把密钥或配置放进 `bin/llm`。
+moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具名是 `csih`，旧说法 `cdsh` 仍指向同一个启动器。仓外 `~/.cdsh/run.c`（`~/.csih` 指到同一文件）执行的是这份 `csih.sh`。配置仍写在源码里，不把密钥或配置放进 `bin/llm`。
 
 ### 异步 I/O（规划参考）
 
@@ -86,4 +86,4 @@ TUI 需要 tty：`unisacc.com ~/.csih/run.c`。它从 `~/env.jsonl` 的 `deepsee
 
 ## 探针
 
-`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；cdsh 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `archive/plans/v0.0.28.md` F1。
+`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；cdsh 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `plans/v0.0.28.md` F1。

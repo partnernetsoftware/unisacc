@@ -98,7 +98,7 @@ int main(void) {
     U = getenv("UNISACC");
     if (!U || !U[0]) U = "/Users/wjc/repos/unisacc/unisacc.com";
     if (access(U, 1) != 0) { printf("no unisacc at %s\n", U); return 1; }
-    snprintf(work, sizeof work, "/tmp/cdsh-check-%d", (int)getpid());
+    snprintf(work, sizeof work, "/tmp/csih-check-%d", (int)getpid());
     if (mkdir(work, 0700) != 0) { printf("no temp\n"); return 2; }
 
     printf("csih — backend=unisacc (%s)\n\n", U);

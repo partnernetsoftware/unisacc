@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
             int n = suite_slice_fill(i, av, 24, &nm);
             int k, hit = 0;
             const char *want = argv[2];
-            if (!strcmp(want, "tui.c")) want = "cdsh.c";
+            if (!strcmp(want, "tui.c")) want = "csih.c";
             for (k = 0; k < n; k++)
                 if (av[k] && !strcmp(av[k], want)) hit = 1;
             if (!hit) continue;

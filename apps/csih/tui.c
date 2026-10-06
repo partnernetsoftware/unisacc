@@ -91,6 +91,9 @@ int agent_turn_begin(const char *prompt, const char *transcript,
 int agent_turn_step(int wait_ms);
 agent_result agent_turn_take(void);
 const char *agent_model_rules(void);
+void agent_set_spill(int on);
+int agent_mentions_window(const char *s);
+int agent_transcript_path(char *out, size_t outlen);
 void agent_turn_seal(int ok, int stopped, int rounds, int actions, int err,
                      const char *answer);
 
@@ -886,7 +889,57 @@ static void tui_wheel(tui_state *st, int y, int dir) {
 }
 
 /* One frame row. A raw newline would split the redraw. Draw it as ⏎,
- * and stop on a code-point boundary so a long line is not cut in half. */
+ * and stop on a code-point boundary so a long line is not cut in half.
+ * dstmax is the byte budget of one row; the text is wrapped by display
+ * columns, so a long event line becomes several rows instead of being
+ * cut at the buffer edge. */
+static int tui_put_folded_n(char *dst, int dstmax, const char *prefix,
+                            const char *src, int cols, int cont) {
+    int o = 0, i = 0, w = 0;
+    int plen = 0;
+    if (!dst || dstmax < 1) return i;
+    if (!prefix) prefix = "";
+    if (!src) src = "";
+    /* Continuation rows keep the prefix column blank so the wrapped
+     * body lines up under the first row. */
+    while (prefix[o] && o + 1 < dstmax) {
+        dst[o] = cont ? ' ' : prefix[o];
+        o++;
+        plen++;
+    }
+    if (prefix[o]) { dst[o] = '\0'; return i; }
+    w = cont ? 0 : tui_disp_width(prefix);
+    if (cols < 1) cols = R_LINE_MAX;
+    while (src[i]) {
+        unsigned int cp = 0;
+        int need, cw;
+        if (src[i] == '\n' || src[i] == '\r') {
+            if (w + 1 > cols) break;
+            if (o + 4 > dstmax) break;
+            memcpy(dst + o, "⏎", 3);
+            o += 3;
+            w += 1;
+            if (src[i] == '\r' && src[i + 1] == '\n') i++;
+            i++;
+            continue;
+        }
+        need = tui_next_cp(src + i, &cp);
+        if (need <= 0) break;
+        cw = tui_cp_cols(cp);
+        if (w + cw > cols) break;
+        if (o + need >= dstmax) break;
+        memcpy(dst + o, src + i, (size_t)need);
+        o += need;
+        i += need;
+        w += cw;
+    }
+    dst[o] = '\0';
+    (void)plen;
+    return i;
+}
+
+/* One folded row, wrapped to `cols` display columns. Kept as a thin
+ * wrapper so existing callers keep working. */
 static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char *src) {
     int o = 0, i = 0;
     if (!dst || dstmax < 1) return;
@@ -1000,19 +1053,50 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                 /* Title is frame row 1, so body index n is screen row n+2. */
                 snprintf(tag, sizeof tag, "exec[%s]> ",
                          st->ex_open[i] ? "收缩" : "展开");
-                tui_put_folded(line[n], (int)sizeof line[n], tag, st->ex_why[i]);
-                rs.body[n] = line[n];
-                tui_hit_add(n + 2, i);
-                n++;
+                {
+                    const char *p = st->ex_why[i];
+                    int cont = 0;
+                    while (*p && n < 40) {
+                        int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                    tag, p, cols, cont);
+                        rs.body[n] = line[n];
+                        tui_hit_add(n + 2, i);
+                        n++;
+                        if (used <= 0) break;
+                        p += used;
+                        cont = 1;
+                    }
+                    if (n == 0) { line[0][0] = '\0'; }
+                }
                 if (st->ex_open[i] && n < 40) {
-                    tui_put_folded(line[n], (int)sizeof line[n], "  ", st->ex_cmd[i]);
-                    rs.body[n] = line[n];
-                    tui_hit_add(n + 2, i);
-                    n++;
+                    {
+                        const char *p = st->ex_cmd[i];
+                        int cont = 0;
+                        while (*p && n < 40) {
+                            int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                        "  ", p, cols, cont);
+                            rs.body[n] = line[n];
+                            tui_hit_add(n + 2, i);
+                            n++;
+                            if (used <= 0) break;
+                            p += used;
+                            cont = 1;
+                        }
+                    }
                 }
             } else {
-                tui_put_folded(line[n], (int)sizeof line[n], "", st->log[i]);
-                rs.body[n] = line[n]; n++;
+                {
+                    const char *p = st->log[i];
+                    int cont = 0;
+                    while (*p && n < 40) {
+                        int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                    "", p, cols, cont);
+                        rs.body[n] = line[n]; n++;
+                        if (used <= 0) break;
+                        p += used;
+                        cont = 1;
+                    }
+                }
             }
         }
         filled = n - view_at;
@@ -1029,13 +1113,23 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             snprintf(suffix, sizeof suffix, " · loop> %s", st->loop_on ? "on" : "off");
             glen = (int)sizeof line[n] - (int)strlen("goal> ") - (int)strlen(suffix);
             if (glen < 1) glen = 1;
-            tui_put_folded(gfold, glen, "", st->goal);
+            tui_put_folded_n(gfold, glen, "", st->goal, glen, 0);
             snprintf(line[n], sizeof line[n], "goal> %s%s", gfold, suffix);
         }
         rs.body[n] = line[n]; n++;
         for (i = 0; i < st->npending && n < 62; i++) {
-            tui_put_folded(line[n], (int)sizeof line[n], "待发送> ", st->pending[i]);
-            rs.body[n] = line[n]; n++;
+            {
+                const char *p = st->pending[i];
+                int cont = 0;
+                while (*p && n < 62) {
+                    int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                "待发送> ", p, cols, cont);
+                    rs.body[n] = line[n]; n++;
+                    if (used <= 0) break;
+                    p += used;
+                    cont = 1;
+                }
+            }
         }
         tui_input_row(line[n], (int)sizeof line[n], st->input, cols);
         rs.body[n] = line[n]; n++;
@@ -1177,12 +1271,20 @@ static void tui_during_net(void) {
     tui_redraw(st);
 }
 
+static const char *csih_env(const char *neu, const char *old) {
+    const char *v = getenv(neu);
+    if (v && v[0]) return v;
+    v = getenv(old);
+    if (v && v[0]) return v;
+    return 0;
+}
+
 static int tui_run_agent(tui_state *st) {
-    const char *endpoint = getenv("CDSH_ENDPOINT");
-    const char *model    = getenv("CDSH_MODEL");
-    const char *cwd      = getenv("CDSH_CWD");
-    const char *transcript = getenv("CDSH_TRANSCRIPT");
-    char def_transcript[256];
+    const char *endpoint = csih_env("CSIH_ENDPOINT", "CDSH_ENDPOINT");
+    const char *model    = csih_env("CSIH_MODEL", "CDSH_MODEL");
+    const char *cwd      = csih_env("CSIH_CWD", "CDSH_CWD");
+    char journal[512];
+    const char *transcript;
     char real_cwd[1024];
     char extra[1536];
     char prompt[TUI_INPUT_MAX];
@@ -1191,32 +1293,26 @@ static int tui_run_agent(tui_state *st) {
     if (!endpoint) endpoint = "https://api.deepseek.com/v1/chat/completions";
     if (!model)    model = "deepseek-chat";
     if (!cwd) { if (!getcwd(real_cwd, sizeof real_cwd)) strcpy(real_cwd, "."); cwd = real_cwd; }
-    if (!transcript) {
-        snprintf(def_transcript, sizeof def_transcript, "/tmp/cdsh-agent-%d.jsonl", (int)getpid());
-        remove(def_transcript);
-        transcript = def_transcript;
-    }
+    /* Same file across turns and across the cache re-exec. Do not delete it. */
+    if (agent_transcript_path(journal, sizeof journal) != 0)
+        snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)getpid());
+    transcript = journal;
 
     /* Capture the prompt before clearing the input line. */
     memset(prompt, 0, sizeof prompt);
     strncpy(prompt, st->input, sizeof prompt - 1);
 
-    /* Enumerate the live tmux windows so the model can drive them. If tmux is
-     * unavailable the string stays empty and the agent simply works in cwd. */
+    /* A window list only when the user named a window. Otherwise it becomes
+     * the last user turn and the model answers tmux instead of the question. */
     extra[0] = '\0';
-    {
+    if (agent_mentions_window(prompt)) {
         shell_result sr = shell_run_in(
             "tmux list-windows -F '#{window_index} #{window_name}' 2>/dev/null "
             "| grep -v \"^$(tmux display-message -p '#{window_index}') \"",
             NULL);
         if (sr.ok && sr.out[0]) {
             snprintf(extra, sizeof extra,
-                "You are running inside a tmux session. For interactive development you MAY drive "
-                "existing tmux windows via `exec` commands such as: "
-                "tmux send-keys -t <index> '<command>' Enter ; "
-                "tmux capture-pane -t <index> -p ; tmux split-window '<command>'. "
-                "Available windows (index name):\n%s"
-                "Prefer the file tool for editing files; use tmux for long-lived or observational commands.",
+                "下面是窗口清单，只有用户要求操作窗口时才用。\n%s",
                 sr.out);
         }
     }
@@ -1840,10 +1936,20 @@ int main(int argc, char **argv) {
             printf("tui %s needs a terminal (stdin and stdout must be ttys)\n", cmd);
             return 64;
         }
-        /* `tui run [transcript]` / `tui agent [transcript]`.
+        /* `tui run [spill] [transcript]` / `tui agent [spill] [transcript]`.
+         * spill writes long tool results under ~/.csih/tool. Default is off.
          * tui_state_init clears the struct, so the measured size is applied
          * after it. Doing it before left rows at the 24-line default. */
-        tui_state_init(&st, argc > 2 ? argv[2] : NULL);
+        {
+            int ai;
+            const char *transcript = NULL;
+            agent_set_spill(0);
+            for (ai = 2; ai < argc; ai++) {
+                if (!strcmp(argv[ai], "spill")) agent_set_spill(1);
+                else if (!transcript) transcript = argv[ai];
+            }
+            tui_state_init(&st, transcript);
+        }
         st.mode = agent_mode ? 1 : 0;
         {
             term_size_t sz = term_size();
