@@ -758,8 +758,9 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
         Value *item = rows ? rows->items[i].value : NULL;
         for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
         if (item) {
-            if (item->kind != JOBJ) die("mapseq item is not an object");
-            for (j = 0; j < item->n; j++) value_put(ctx, item->items[j].key, item->items[j].value);
+            /* assemble mapseq: a non-dict row leaves ctx = facts */
+            if (item->kind != JOBJ && where) die("mapseq where over a non-object item");
+            if (item->kind == JOBJ) for (j = 0; j < item->n; j++) value_put(ctx, item->items[j].key, item->items[j].value);
         }
         if (where) {
             if (where->kind != JOBJ) die("invalid mapseq where");
@@ -772,6 +773,10 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
                     char number[64], *want = strchr(expect->s, '{') ? seed_fmt(expect->s, facts) : copy(expect->s);
                     snprintf(number, sizeof(number), "%lld", actual->number);
                     if (strcmp(number, want)) take = 0;
+                    free(want);
+                } else if (expect->kind == JSTR && strchr(expect->s, '{') && actual && actual->kind == JSTR) {
+                    char *want = seed_fmt(expect->s, facts);   /* where {"target": "{target}"} */
+                    if (strcmp(actual->s, want)) take = 0;
                     free(want);
                 } else if (!map_equal(actual, expect)) take = 0;
             }
@@ -3569,7 +3574,9 @@ static char *manifest_section(const char *section, Value *flags) {
         name = open + 1;
         if (*name == '!') { neg = 1; name++; }
         question = memchr(name, '?', (size_t)(end - name));
-        if (!question) die("manifest section conditional missing question mark");
+        if (!question) {   /* not {flag?text}: _section leaves it for _fmt */
+            buf_add(&out, open, (size_t)(end + 1 - open)); at = end + 1; continue;
+        }
         length = (size_t)(question - name);
         char *key = copy_n(name, length);
         int enabled = manifest_truth(value_get(flags, key));
@@ -3640,6 +3647,8 @@ static char *manifest_interp(const char *v, Value *env) {
     return out.s;
 }
 static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
+    /* Run.value: v = self.interp(v) before the form is read */
+    if (strchr(cell, '{') && env) cell = manifest_interp(cell, env);
     if (!strncmp(cell, "@acts:", 6)) return value_path(facts, cell + 6);
     if (!strncmp(cell, "@seqmap:", 8)) {   /* assemble._seqmap: LIST:TEMPLATE (0.0.32 B5, enc) */
         const char *colon = strrchr(cell + 8, ':'); char *lst, *path; Value *xs, *tmpl, *out = value_new(JARR);
@@ -4120,10 +4129,10 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
             }
         if (accumulate) seed_update(bindings, value_get(ctx->accum, value_text(accumulate)));
         if (bindmap) {
-            if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, value_text(bindmap)));
+            if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap), env)));
             else if (bindmap->kind == JARR) {
                 for (size_t i = 0; i < bindmap->n; i++)
-                    seed_update(bindings, value_path(facts, value_text(bindmap->items[i].value)));
+                    seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap->items[i].value), env)));
             } else if (bindmap->kind == JOBJ) {
                 for (size_t i = 0; i < bindmap->n; i++)
                     value_put(bindings, bindmap->items[i].key,
@@ -4333,10 +4342,10 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                 die("manifest let option is not yet covered");
         if (accumulate) seed_update(bindings, value_get(ctx->accum, value_text(accumulate)));
         if (bindmap) {
-            if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, value_text(bindmap)));
+            if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap), env)));
             else if (bindmap->kind == JARR) {
                 for (size_t i = 0; i < bindmap->n; i++)
-                    seed_update(bindings, value_path(facts, value_text(bindmap->items[i].value)));
+                    seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap->items[i].value), env)));
             } else die("manifest let bindmap shape is not covered");
         }
         manifest_freshrows_file(ctx->dir, freshrows, facts, bindings);
@@ -4362,7 +4371,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         ManifestRows child_rows; ManifestGraph child = *ctx; char *slash;
         if (bindmap) {
             if (bindmap->kind != JSTR) die("manifest call bindmap is not yet covered");
-            seed_update(child_env, value_path(facts, value_text(bindmap)));
+            seed_update(child_env, value_path(facts, manifest_interp(value_text(bindmap), env)));
         }
         seed_update(child_env, bindings);
         if (flagopts) {
@@ -4401,10 +4410,10 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         Value *skip = value_get(opts, "skip"), *ordered = value_get(opts, "ordered");
         const char *section = row->cell[2]; Buffer selected = {0}; FILE *input, *table; char *s;
         if (bindmap) {
-            if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, value_text(bindmap)));
+            if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap), env)));
             else if (bindmap->kind == JARR) {
                 for (size_t i = 0; i < bindmap->n; i++)
-                    seed_update(bindings, value_path(facts, value_text(bindmap->items[i].value)));
+                    seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap->items[i].value), env)));
             } else if (bindmap->kind == JOBJ) {
                 for (size_t i = 0; i < bindmap->n; i++)
                     value_put(bindings, bindmap->items[i].key,
@@ -4482,11 +4491,20 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                  strcmp(opts->items[i].key, "let") && strcmp(opts->items[i].key, "textrows") &&
                  strcmp(opts->items[i].key, "msgrows") &&
                  strcmp(opts->items[i].key, "mapseq") && strcmp(opts->items[i].key, "seqenv") &&
-                 strcmp(opts->items[i].key, "with") && strcmp(opts->items[i].key, "result")) {
+                 strcmp(opts->items[i].key, "with") && strcmp(opts->items[i].key, "result") &&
+                 strcmp(opts->items[i].key, "accumulate") && strcmp(opts->items[i].key, "keep")) {
                 fprintf(stderr, "manifest template option: %s (%s/%s:%s)\n",
                         opts->items[i].key, ctx->dir, row->cell[1], row->cell[2]);
                 die("manifest template option is not yet covered");
             }
+        if (value_get(opts, "accumulate")) {   /* assemble.bindings: accum[acc] + cells, stored back */
+            const char *acc = value_text(value_get(opts, "accumulate")); Value *keep = value_get(opts, "keep");
+            Value *merged = value_new(JOBJ);
+            seed_update(merged, value_get(ctx->accum, acc)); seed_update(merged, bindings);
+            bindings = merged;
+            value_put(ctx->accum, acc, seed_env_copy(bindings));
+            if (keep) value_put(env, value_text(keep), seed_env_copy(bindings));
+        }
         if (domainopt) {
             if (domainopt->kind != JARR || domainopt->n != 2) die("invalid template domain");
             domain = numeric_domain((int)domainopt->items[0].value->number,
@@ -8796,16 +8814,24 @@ int main(int argc, char **argv) {
         value_write(out, v); if (close_in(out)) die("output close failed");
         return 0;
     }
-    if (argc >= 3 && argc <= 7 && (!strcmp(argv[1], "enc") || !strcmp(argv[1], "enc/arm"))) {
+    if (argc >= 3 && argc <= 8 && (!strcmp(argv[1], "enc") || !strcmp(argv[1], "enc/arm") || !strcmp(argv[1], "lower"))) {
         /* gen.py: STAGE/gen-manifest.tsv, or STAGE-manifest.tsv for stage/sub */
-        ManifestRows rows = manifest_rows(argv[1][3] ? "exec/enc/arm-manifest.tsv" : "exec/enc/gen-manifest.tsv");
+        int lower = !strcmp(argv[1], "lower");
+        ManifestRows rows = manifest_rows(lower ? "exec/lower/gen-manifest.tsv" :
+                                          argv[1][3] ? "exec/enc/arm-manifest.tsv" : "exec/enc/gen-manifest.tsv");
         ManifestGraph ctx = {0}; Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
-        const char *names[] = {"elf", "macho", "pe", "object"};
-        for (int i = 0; i < 4; i++) {
+        const char *encnames[] = {"elf", "macho", "pe", "object"}, *lowernames[] = {"full", "arm64", "osx", "win", "object"};
+        const char **names = lower ? lowernames : encnames; int nn = lower ? 5 : 4;
+        for (int i = 3; i < argc; i++) {
+            int ok = 0;
+            for (int j = 0; j < nn; j++) if (!strncmp(argv[i], "--", 2) && !strcmp(argv[i] + 2, names[j])) ok = 1;
+            if (!ok) die("usage: seed-gen enc|enc/arm|lower OUT.json [--FLAG...]");
+        }
+        for (int i = 0; i < nn; i++) {
             Value *v = value_new(JBOOL); v->number = has_flag(argc - 3, argv + 3, names[i]);
             value_put(flags, names[i], v);
         }
-        ctx.graph = &g; ctx.dir = "exec/enc"; ctx.flags = flags; ctx.accum = value_new(JOBJ);
+        ctx.graph = &g; ctx.dir = lower ? "exec/lower" : "exec/enc"; ctx.flags = flags; ctx.accum = value_new(JOBJ);
         manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");

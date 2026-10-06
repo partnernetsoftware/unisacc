@@ -1,7 +1,7 @@
 #!/bin/sh
 # 0.0.32 B5: seed/gen.c builds the product's shared deltas byte-identical to exec/build/gen.py --
 # the stages buildcompiler.sh's `shared` step constructs (e2 pp --shared-predefines, e1 lex --typed,
-# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format).  Python references are cached by the hash of
+# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format, lower --full per target).  Python references are cached by the hash of
 # exec/ inputs, so a gen.c edit reruns only the C side.     usage: tests/seedgencheck.sh [NAME...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
@@ -13,8 +13,11 @@ spec() { case $1 in
     e2) echo "pp --shared-predefines";; e1) echo "lex --typed";; e3) echo parse2;; e4) echo "opt --o2";;
     o1) echo opt;; prune) echo prune;; nativeabi) echo nativeabi;;
     enc-elf) echo "enc --elf";; enc-macho) echo "enc --macho";; enc-pe) echo "enc --pe";;
-    arm-elf) echo "enc/arm --elf";; arm-macho) echo "enc/arm --macho";; arm-pe) echo "enc/arm --pe";; *) echo "?";; esac; }
-names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe"}
+    arm-elf) echo "enc/arm --elf";; arm-macho) echo "enc/arm --macho";; arm-pe) echo "enc/arm --pe";;
+    lower-lnx-x) echo "lower --full";; lower-lnx-a) echo "lower --full --arm64";;
+    lower-osx-x) echo "lower --full --osx";; lower-osx-a) echo "lower --full --osx --arm64";;
+    lower-win-x) echo "lower --full --win";; lower-win-a) echo "lower --full --win --arm64";; *) echo "?";; esac; }
+names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a"}
 run() {
     n=$1; set -- $(spec "$n"); st=$1; shift
     [ "$st" = "?" ] && { echo "DIFF $n (unknown name)"; return; }
