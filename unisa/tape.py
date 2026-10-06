@@ -115,8 +115,11 @@ class Tape:
         assert op in SHAPE, "unknown tape op %r" % op
         exp = len(SHAPE[op])
         assert len(args) == exp, "%s takes %d operands, got %d" % (op, exp, len(args))
-        self.code.append(Insn(op, list(args)))
-        self.records.append(("insn", op, tuple(args)))
+        # R3': one immutable operand tuple shared by the instruction and its record
+        # (a list per Insn plus a tuple copy per record was ~60 MB on the compiler itself);
+        # a later patch replaces Insn.args, so the record keeps the as-emitted operands
+        self.code.append(Insn(op, args))
+        self.records.append(("insn", op, args))
         return len(self.code) - 1
 
     def string(self, name, raw, align=1):

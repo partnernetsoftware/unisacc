@@ -573,10 +573,10 @@ class Walker:
         if not self.renames:
             return
         for ins in self.em.t.code[self.unit_start:]:
-            if ins.op == "call":              # `call NAME`
-                ins.args[0] = self.renames.get(ins.args[0], ins.args[0])
+            if ins.op == "call":              # `call NAME` (args is an immutable tuple, R3')
+                ins.args = (self.renames.get(ins.args[0], ins.args[0]),) + tuple(ins.args[1:])
             elif ins.op == ".lea":            # `.lea r, SYMBOL`
-                ins.args[1] = self.renames.get(ins.args[1], ins.args[1])
+                ins.args = (ins.args[0], self.renames.get(ins.args[1], ins.args[1])) + tuple(ins.args[2:])
 
     def finish_program(self):
         # entry: run the pointer initialisers, then main
@@ -1136,7 +1136,8 @@ class Walker:
             self.em.imm(ACC, 0)   # reaching main's } returns 0 (C99 5.1.2.2.3)
         self.em.label(self.ret_label)
         self.em.epilogue()
-        self.em.t.code[self.frame_ix].args[0] = (self.maxoff + 7) // 8 * 8
+        fr = self.em.t.code[self.frame_ix]
+        fr.args = ((self.maxoff + 7) // 8 * 8,) + tuple(fr.args[1:])
         self.sc.pop()
 
     def alloc(self, ty):
