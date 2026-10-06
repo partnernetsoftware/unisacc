@@ -81,11 +81,10 @@ job bigclosure-osx-arm64 ./tests/bigclosure.sh --target osx/arm64
 job bigclosure-win-x86_64 ./tests/bigclosure.sh --target win/x86_64
 job bigclosure-win-arm64 ./tests/bigclosure.sh --target win/arm64
 # fat: 179 probes, each written, signed and executed twice (arm64 + Rosetta), was
-# 50 s alone and 53 s+ beside another job -- three shards keep each under 25 s.
+# 50 s alone and 53 s+ beside another job.  Three shards grew to ~46 s each in the
+# 0.0.31 queue (limit 53), so six now (cdx 10-06); the union is still every probe.
 FATC=$(ls examples/*.c tests/c/*.c)
-job fat-1       ./tests/fat.sh $(echo "$FATC" | awk 'NR%3==1')
-job fat-2       ./tests/fat.sh $(echo "$FATC" | awk 'NR%3==2')
-job fat-3       ./tests/fat.sh $(echo "$FATC" | awk 'NR%3==0')
+for k in 1 2 3 4 5 6; do job fat-$k ./tests/fat.sh $(echo "$FATC" | awk -v k=$k 'NR%6==k%6'); done
 job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done
 for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
