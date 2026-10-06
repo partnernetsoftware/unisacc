@@ -64,6 +64,7 @@ typedef struct jvalue {
 } jvalue;
 
 jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
+size_t  json_value_end(const char *text, size_t len);
 void    jfree(jvalue *v);
 size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
 jvalue *jget(jvalue *obj, const char *key);
@@ -392,16 +393,17 @@ static void agent_strip_fence(const char *in, char *out, size_t outlen) {
 /* How many JSON objects are in the text. The loop runs only the first.
  * The model sees that result, then writes the next step itself. */
 int agent_object_count(const char *s) {
-    int n = 0, depth = 0, in_str = 0, esc = 0;
+    size_t i = 0, nlen;
+    int n = 0;
     if (!s) return 0;
-    for (; *s; s++) {
-        if (in_str) {
-            if (esc) esc = 0;
-            else if (*s == '\\') esc = 1;
-            else if (*s == '"') in_str = 0;
-        } else if (*s == '"') in_str = 1;
-        else if (*s == '{') { if (depth == 0) n++; depth++; }
-        else if (*s == '}' && depth > 0) depth--;
+    nlen = strlen(s);
+    while (i < nlen) {
+        size_t e = json_value_end(s + i, nlen - i);
+        size_t k = i;
+        if (e == 0) break;
+        while (k < i + e && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r')) k++;
+        if (k < nlen && s[k] == '{') n++;
+        i += e;
     }
     return n;
 }
@@ -423,24 +425,13 @@ agent_step agent_parse(const char *content) {
     {
         char one[AGENT_CONTENT_MAX];
         const char *q = strchr(stripped, '{');
-        int depth = 0, in_str = 0, esc = 0;
-        size_t o = 0;
+        size_t e;
         if (!q) return s;
-        for (; *q && o + 1 < sizeof one; q++) {
-            one[o++] = *q;
-            if (in_str) {
-                if (esc) esc = 0;
-                else if (*q == '\\') esc = 1;
-                else if (*q == '"') in_str = 0;
-            } else if (*q == '"') in_str = 1;
-            else if (*q == '{') depth++;
-            else if (*q == '}') {
-                depth--;
-                if (depth == 0) break;
-            }
-        }
-        one[o] = 0;
-        memcpy(stripped, one, o + 1);
+        e = json_value_end(q, strlen(q));
+        if (e == 0 || e + 1 > sizeof one) return s;
+        memcpy(one, q, e);
+        one[e] = 0;
+        memcpy(stripped, one, e + 1);
     }
     root = json_parse(stripped, strlen(stripped), errbuf, sizeof errbuf);
     if (!root || root->kind != J_OBJ) { if (root) jfree(root); return s; }

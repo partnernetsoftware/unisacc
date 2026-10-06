@@ -24,6 +24,10 @@
  * quotes) that is always legal UTF-8. A stray lead byte must not reach a
  * strict peer — that was HTTP 400, "invalid unicode code point".
  *
+ * json_value_end() is the one string-aware span. Braces inside a string do
+ * not end the value, and nesting stops at JSON_MAX_DEPTH. Callers use it
+ * to cut the first value out of model prose. It does not build a tree.
+ *
  * The CLI takes SUBCOMMANDS, not dash-options: measured on unisacc 0.0.17,
  * running a source directly reserves the dash flags for the compiler itself.
  */
@@ -49,7 +53,10 @@ typedef struct jvalue {
     char **keys; struct jvalue **vals; size_t nkeys;
 } jvalue;
 
+#define JSON_MAX_DEPTH 32
+
 jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
+size_t  json_value_end(const char *text, size_t len);
 void    jfree(jvalue *v);
 size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
 jvalue *jget(jvalue *obj, const char *key);
@@ -64,6 +71,7 @@ typedef struct {
     const char *end;
     char err[128];
     int  failed;
+    int  depth;
 } jparser;
 
 static void *jalloc(size_t n) { return calloc(1, n ? n : 1); }
@@ -158,6 +166,11 @@ static char *jparse_string_raw(jparser *ps) {
                             ps->p += 6;
                         }
                     }
+                    /* A leftover surrogate is not a Unicode scalar. Emitting
+                     * it would put ill-formed UTF-8 back on the wire. */
+                    if (cp >= 0xD800 && cp <= 0xDFFF) {
+                        free(out); jfail(ps, "bad \\u"); return NULL;
+                    }
                     len += put_utf8(out + len, cp);
                     break;
                 }
@@ -243,9 +256,15 @@ static jvalue *jparse_object(jparser *ps) {
 static jvalue *jparse_value(jparser *ps) {
     jskip_ws(ps);
     if (ps->p >= ps->end) { jfail(ps, "unexpected end"); return NULL; }
+    if (*ps->p == '{' || *ps->p == '[') {
+        jvalue *nest;
+        if (ps->depth >= JSON_MAX_DEPTH) { jfail(ps, "too deep"); return NULL; }
+        ps->depth++;
+        nest = (*ps->p == '{') ? jparse_object(ps) : jparse_array(ps);
+        ps->depth--;
+        return nest;
+    }
     switch (*ps->p) {
-        case '{': return jparse_object(ps);
-        case '[': return jparse_array(ps);
         case '"': { jvalue *v = jnew(J_STR); if (!v) { jfail(ps,"oom"); return NULL; }
                     v->s = jparse_string_raw(ps); if (ps->failed) { jfree(v); return NULL; } return v; }
         case 't': if (ps->end - ps->p >= 4 && !strncmp(ps->p,"true",4)) { jvalue *v=jnew(J_BOOL); if(!v){jfail(ps,"oom");return NULL;} v->b=1; ps->p+=4; return v; } break;
@@ -254,16 +273,29 @@ static jvalue *jparse_value(jparser *ps) {
         default: break;
     }
     if (*ps->p == '-' || isdigit((unsigned char)*ps->p)) {
-        char buf[64]; size_t n = 0;
-        jvalue *v = jnew(J_NUM);
-        if (!v) { jfail(ps, "oom"); return NULL; }
+        char buf[64], *endptr;
+        size_t n = 0;
+        jvalue *v;
+        int lead;
         if (*ps->p == '-') buf[n++] = *ps->p++;
-        while (ps->p < ps->end && n < sizeof(buf)-1 &&
+        while (ps->p < ps->end && n < sizeof(buf) - 1 &&
                (isdigit((unsigned char)*ps->p) || *ps->p=='.' || *ps->p=='e' || *ps->p=='E' ||
-                ((*ps->p=='+'||*ps->p=='-') && (buf[n-1]=='e'||buf[n-1]=='E'))))
+                ((*ps->p=='+'||*ps->p=='-') && n > 0 && (buf[n-1]=='e'||buf[n-1]=='E'))))
             buf[n++] = *ps->p++;
         buf[n] = '\0';
-        v->n = strtod(buf, NULL);
+        lead = (ps->p < ps->end && (isdigit((unsigned char)*ps->p) || *ps->p=='.' ||
+                *ps->p=='e' || *ps->p=='E' || *ps->p=='+' || *ps->p=='-'));
+        if (n == 0 || lead) { jfail(ps, "bad number"); return NULL; }
+        v = jnew(J_NUM);
+        if (!v) { jfail(ps, "oom"); return NULL; }
+        v->n = strtod(buf, &endptr);
+        if (endptr != buf + n ||
+            (buf[0] == '0' && n > 1 && isdigit((unsigned char)buf[1])) ||
+            (buf[0] == '-' && n > 2 && buf[1] == '0' && isdigit((unsigned char)buf[2]))) {
+            jfree(v);
+            jfail(ps, "bad number");
+            return NULL;
+        }
         return v;
     }
     jfail(ps, "unexpected token");
@@ -273,7 +305,7 @@ static jvalue *jparse_value(jparser *ps) {
 jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen) {
     jparser ps;
     jvalue *v;
-    ps.p = text; ps.end = text + len; ps.failed = 0; ps.err[0] = '\0';
+    ps.p = text; ps.end = text + len; ps.failed = 0; ps.err[0] = '\0'; ps.depth = 0;
     v = jparse_value(&ps);
     if (!ps.failed) {
         jskip_ws(&ps);
@@ -287,6 +319,89 @@ jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen) {
         return NULL;
     }
     return v;
+}
+
+/* Bytes from text[0] through the first JSON value, including its leading
+ * whitespace. 0 means there is no closed value. Braces and quotes inside a
+ * string do not change depth. Nesting above JSON_MAX_DEPTH is not a value. */
+size_t json_value_end(const char *text, size_t len) {
+    size_t i = 0;
+    char expect[JSON_MAX_DEPTH];
+    int depth;
+    if (!text) return 0;
+    while (i < len && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r'))
+        i++;
+    if (i >= len) return 0;
+    if (text[i] == '{' || text[i] == '[') {
+        depth = 0;
+        expect[depth++] = (text[i] == '{') ? '}' : ']';
+        i++;
+        while (i < len && depth > 0) {
+            if (text[i] == '"') {
+                i++;
+                while (i < len) {
+                    if (text[i] == '\\') {
+                        if (i + 1 >= len) return 0;
+                        i += 2;
+                        continue;
+                    }
+                    if (text[i] == '"') { i++; break; }
+                    i++;
+                }
+                continue;
+            }
+            if (text[i] == '{' || text[i] == '[') {
+                if (depth >= JSON_MAX_DEPTH) return 0;
+                expect[depth++] = (text[i] == '{') ? '}' : ']';
+                i++;
+                continue;
+            }
+            if (text[i] == '}' || text[i] == ']') {
+                depth--;
+                if (text[i] != expect[depth]) return 0;
+                i++;
+                continue;
+            }
+            i++;
+        }
+        return depth == 0 ? i : 0;
+    }
+    if (text[i] == '"') {
+        i++;
+        while (i < len) {
+            if (text[i] == '\\') {
+                if (i + 1 >= len) return 0;
+                i += 2;
+                continue;
+            }
+            if (text[i] == '"') return i + 1;
+            i++;
+        }
+        return 0;
+    }
+    if (i + 4 <= len && text[i] == 't' && text[i+1] == 'r' && text[i+2] == 'u' && text[i+3] == 'e')
+        return i + 4;
+    if (i + 5 <= len && text[i] == 'f' && text[i+1] == 'a' && text[i+2] == 'l' && text[i+3] == 's' && text[i+4] == 'e')
+        return i + 5;
+    if (i + 4 <= len && text[i] == 'n' && text[i+1] == 'u' && text[i+2] == 'l' && text[i+3] == 'l')
+        return i + 4;
+    if (text[i] == '-' || isdigit((unsigned char)text[i])) {
+        size_t j = i;
+        if (text[j] == '-') j++;
+        if (j >= len || !isdigit((unsigned char)text[j])) return 0;
+        while (j < len && isdigit((unsigned char)text[j])) j++;
+        if (j < len && text[j] == '.') {
+            j++;
+            while (j < len && isdigit((unsigned char)text[j])) j++;
+        }
+        if (j < len && (text[j] == 'e' || text[j] == 'E')) {
+            j++;
+            if (j < len && (text[j] == '+' || text[j] == '-')) j++;
+            while (j < len && isdigit((unsigned char)text[j])) j++;
+        }
+        return j;
+    }
+    return 0;
 }
 
 /* ── lookup ─────────────────────────────────────────────────────────────── */
@@ -477,6 +592,29 @@ int json_run_selftest(void) {
         seen = 99;
         json_escape("\"", tiny, 2, &seen);
         expect(tiny[0] == 0 && seen == 0, "quote escape is not a lone backslash");
+    }
+
+    expect(json_parse("\"\\ud800\"", strlen("\"\\ud800\""), err, sizeof err) == NULL,
+           "lone high surrogate rejected");
+    expect(json_parse("\"\\ude00\"", strlen("\"\\ude00\""), err, sizeof err) == NULL,
+           "lone low surrogate rejected");
+    expect(json_parse("1e", strlen("1e"), err, sizeof err) == NULL, "truncated exponent rejected");
+    expect(json_parse("01", strlen("01"), err, sizeof err) == NULL, "leading zero rejected");
+    {
+        const char *span = " {\"a\":\"}\"} ";
+        size_t e = json_value_end(span, strlen(span));
+        expect(e == 11 && span[e - 1] == '}', "span closes after the brace inside the string");
+        expect(json_value_end("{", 1) == 0, "unclosed object is not a span");
+    }
+    {
+        char deep[80];
+        int i;
+        for (i = 0; i < 33; i++) deep[i] = '[';
+        deep[33] = '1';
+        for (i = 0; i < 33; i++) deep[34 + i] = ']';
+        deep[67] = 0;
+        expect(json_parse(deep, 67, err, sizeof err) == NULL, "nesting past 32 is rejected");
+        expect(json_value_end(deep, 67) == 0, "a too-deep span is not a value");
     }
 
     /* Empty containers are legal. */

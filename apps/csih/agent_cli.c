@@ -135,6 +135,11 @@ static int agent_run_selftest(void) {
              "prose plus extra objects keeps the first");
     a_expect(agent_object_count("Sure.\n{\"act\":\"exec\",\"cmd\":\"pwd\"}\n{\"act\":\"exec\",\"cmd\":\"ls\"}") == 2,
              "two objects are counted");
+    s = agent_parse("{\"act\":\"answer\",\"text\":\"use } here\"}");
+    a_expect(s.kind == ACT_ANSWER && strcmp(s.text, "use } here") == 0,
+             "a brace inside a string stays in the first object");
+    a_expect(agent_object_count("{\"a\":\" } { \"} {\"b\":1}") == 2,
+             "a brace inside a string is not a second object");
     {
         char big[6001], rec[8256];
         size_t i, n;
