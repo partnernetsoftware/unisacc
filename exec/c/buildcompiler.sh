@@ -57,7 +57,10 @@ ident() {
 }
 # Reuse the model preparation identity/digest implementation. These are completion
 # records, not a result cache: requested stages always rebuild their own outputs.
+# seed/ident.c's `manifest` mode is the default (B5); SEED_GEN=0 keeps this Python.  The two
+# keys differ, so a tree switched between them reads as stale and rebuilds, never as fresh.
 manifest() {
+    if [ "${SEED_GEN:-1}" = 1 ]; then ident manifest "$1" "$T" "$2"; return; fi
     b python3 - "$T" "$1" "$2" <<'PYCODE'
 import hashlib,json,os,pathlib,sys
 sys.path.insert(0,'exec/pipeline')
