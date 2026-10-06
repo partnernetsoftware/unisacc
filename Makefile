@@ -119,7 +119,7 @@ seed-com:
 	    mv -f "$$tmp" "$$dst"; \
 	    cp "$(SEED_DIR)/unisacc-next.com.build.json" "$$dst.build.json"; \
 	    if [ -x "$(SEED_DIR)/seedbin/ident" ]; then "$(SEED_DIR)/seedbin/ident" . check "$$dst"; else python3 exec/c/provenance.py check "$$dst"; fi; \
-	    python3 exec/c/comboot.py stage 1 "$$dst"'; \
+	    sh exec/c/comboot.sh stage 1 "$$dst"'; \
 	    ;; *) echo "seed-com: $(SEED_STEP) done (not the last step; nothing sealed yet)";; esac
 
 # N22 one bounded build step of stage 2, then of stage 3.  COMB=1 is the whole
@@ -133,16 +133,16 @@ stage3:
 # it is never shipped.  `make comboot` runs all three stages and the cmp.
 com3:
 	@$(MAKE) --no-print-directory com COMB=1 COM_OUT="$(SEED_DIR)/stage3/unisacc.com"
-	@tests/bound 55 exec/c/comboot.py cmp "$(COM_OUT)" "$(SEED_DIR)/stage3/unisacc.com"
+	@tests/bound 55 sh exec/c/comboot.sh cmp "$(COM_OUT)" "$(SEED_DIR)/stage3/unisacc.com"
 
 # The gate: four shards, each bounded, each doing ONE stage's build and then
 # its comparison.  The build steps inside are sharded by SEED_STEP, so the
-# per-shard cost is one buildcompiler step -- see exec/c/comboot.py.
+# per-shard cost is one buildcompiler step -- see exec/c/comboot.sh (0.0.32 B5: no Python; comboot.py kept as the reference).
 comboot:
-	@until tests/bound 58 python3 exec/c/comboot.py shard seed; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
-	@until tests/bound 58 python3 exec/c/comboot.py shard stage2; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
-	@until tests/bound 58 python3 exec/c/comboot.py shard stage3; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
-	@until tests/bound 58 python3 exec/c/comboot.py shard fixedpoint; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 sh exec/c/comboot.sh shard seed; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 sh exec/c/comboot.sh shard stage2; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 sh exec/c/comboot.sh shard stage3; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until tests/bound 58 sh exec/c/comboot.sh shard fixedpoint; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
 
 # The build steps the shards call, as separate targets so `make -n` shows them.
 COMBSTEP_DIR ?= /tmp/unisacc-comb-build

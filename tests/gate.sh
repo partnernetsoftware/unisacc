@@ -563,10 +563,10 @@ if [ "$COM" = 1 ]; then
     # the bootstrap actually proven.  Every `make` inside a shard still gets its
     # own `tests/bound.py 55`, and a mkdir lock keeps two runs off one artifact.
     COMB_SEED="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}"
-    job com-comboot-seed       COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" python3 ./exec/c/comboot.py shard seed
-    job com-comboot-stage2     COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage2
-    job com-comboot-stage3     COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage3
-    job com-comboot-fixedpoint COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" UA="$PRODUCT" python3 ./exec/c/comboot.py shard fixedpoint
+    job com-comboot-seed       COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" sh ./exec/c/comboot.sh shard seed
+    job com-comboot-stage2     COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" UA="$PRODUCT" sh ./exec/c/comboot.sh shard stage2
+    job com-comboot-stage3     COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" UA="$PRODUCT" sh ./exec/c/comboot.sh shard stage3
+    job com-comboot-fixedpoint COMBOOT_BUDGET=999 SEED_DIR="$COMB_SEED" UA="$PRODUCT" sh ./exec/c/comboot.sh shard fixedpoint
 fi
 [ "$LIST" = 0 ] || exit 0
 [ "$n" -gt 0 ] || { echo "gate: no suites executed" >&2; exit 2; }
