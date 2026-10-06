@@ -120,88 +120,6 @@ static long fwrite(const void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
 }
 #endif
 
-#if !__UNISA_FTRIM_LIBC || __UN_fread
-static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
-    long __u_got;
-    __u_got = __read(_unisa_fd(__u_f), (char *)__u_p, __u_sz * __u_n);
-    if (__u_got < 0) return 0;
-    return __u_got / __u_sz;
-}
-#endif
-
-/* O_* are not portable numbers: Linux and the BSDs picked different bits,
-   and we hardcoded Linux's.  On macOS that turned "w" into flags nobody
-   accepts; the file was never created and every read of it came back
-   empty. */
-/* O_RDONLY is 0, O_WRONLY is 1 and O_RDWR is 2 on Linux and on the BSDs
-   alike, which is why only the CREAT/TRUNC/APPEND bits need per-host values. */
-#define _U_O_WRONLY  1
-#define _U_O_RDWR    2
-#ifdef __linux__
-#define _U_O_CREAT   64
-#define _U_O_TRUNC   512
-#define _U_O_APPEND  1024
-#else
-#define _U_O_CREAT   512
-#define _U_O_TRUNC   1024
-#define _U_O_APPEND  8
-#endif
-
-#if !__UNISA_FTRIM_LIBC || __UN_fopen
-static FILE *fopen(const char *__u_path, const char *__u_mode) {
-    int __u_fd;
-#ifdef _WIN32
-    /* Windows has no open(2), and CreateFileA wants its own shapes.  They
-       are built HERE and not in the encoder, because this is the only place
-       that knows whether the program is being compiled for Windows. */
-    long __u_access;
-    long __u_disp;
-    __u_access = 0x80000000;                  /* GENERIC_READ  */
-    __u_disp = 3;                             /* OPEN_EXISTING */
-    if (__u_mode[0] == 119) { __u_access = 0x40000000; __u_disp = 2; }   /* 'w' CREATE_ALWAYS */
-    if (__u_mode[0] == 97)  { __u_access = 0x40000000; __u_disp = 4; }   /* 'a' OPEN_ALWAYS   */
-    __u_fd = __open((char *)__u_path, __u_access, __u_disp);
-#else
-    int __u_flags;
-    int __u_plus;
-    /* The trailing `+` means UPDATE: read AND write.  It was ignored, so "w+"
-       behaved as "w" (O_WRONLY) and a tmpfile could be written but never read
-       back -- fread failed and the answer looked like an empty file.  O_RDWR
-       is what the `+` asks for, on the modes that allow it. */
-    __u_plus = 0;
-    { int __u_j; __u_j = 0; while (__u_mode[__u_j]) {
-        if (__u_mode[__u_j] == 43) __u_plus = 1;
-        __u_j = __u_j + 1; } }
-    __u_flags = 0;                            /* 'r': O_RDONLY */
-    if (__u_mode[0] == 114 && __u_plus) __u_flags = _U_O_RDWR;
-    if (__u_mode[0] == 119)                   /* 'w' */
-        __u_flags = _U_O_WRONLY | _U_O_CREAT | _U_O_TRUNC;
-    if (__u_mode[0] == 119 && __u_plus)
-        __u_flags = _U_O_RDWR | _U_O_CREAT | _U_O_TRUNC;
-    if (__u_mode[0] == 97)                    /* 'a' */
-        __u_flags = _U_O_WRONLY | _U_O_CREAT | _U_O_APPEND;
-    if (__u_mode[0] == 97 && __u_plus)
-        __u_flags = _U_O_RDWR | _U_O_CREAT | _U_O_APPEND;
-    /* 0644.  Passing no mode at all left it at 0, so the file we had just
-       created could not be opened again. */
-    __u_fd = __open((char *)__u_path, __u_flags, 420);
-#endif
-    if (__u_fd < 0) {
-        /* The gate answers -errno on Linux and Darwin (see the __write audit
-           above); Windows' CreateFileA gate answers -1.  Without this line
-           errno stayed 0 and sbase said "fopen /nonexistent: Success"
-           [R13-0b #25].  A bare -1 is reported as ENOENT: an open that
-           failed with no code is almost always a missing file. */
-        errno = 0 - __u_fd;
-#ifdef _WIN32
-        if (errno == 1) errno = ENOENT;
-#endif
-        return NULL;
-    }
-    return (FILE *)(long)__u_fd;
-}
-#endif
-
 /* Unbuffered: a FILE * here is a file descriptor, so there is nowhere to
    keep a buffer and every character costs a read.  Correct, not fast. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_slot || __UN_setvbuf
@@ -284,6 +202,101 @@ static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, long __u_size) {
     return 0;
 }
 #endif
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_fread
+static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
+    long __u_got; long __u_want; long __u_pre; int __u_i;
+    __u_want = __u_sz * __u_n;
+    if (__u_want <= 0) return 0;
+    /* a byte pushed back by ungetc comes out first [C99 7.19.7.11]; a short
+       read sets the end-of-file indicator and a failed one the error
+       indicator [C99 7.19.8.1] */
+    __u_pre = 0; __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0 && _u_st_ung[__u_i] >= 0) {
+        ((char *)__u_p)[0] = (char)_u_st_ung[__u_i];
+        _u_st_ung[__u_i] = 0 - 1; __u_pre = 1;
+    }
+    __u_got = 0;
+    if (__u_want > __u_pre) __u_got = __read(_unisa_fd(__u_f), (char *)__u_p + __u_pre, __u_want - __u_pre);
+    if (__u_got < 0) { if (__u_i >= 0) _u_st_err[__u_i] = 1; __u_got = 0; }
+    __u_got = __u_got + __u_pre;
+    if (__u_got < __u_want && __u_i >= 0) _u_st_eof[__u_i] = 1;
+    return __u_got / __u_sz;
+}
+#endif
+
+/* O_* are not portable numbers: Linux and the BSDs picked different bits,
+   and we hardcoded Linux's.  On macOS that turned "w" into flags nobody
+   accepts; the file was never created and every read of it came back
+   empty. */
+/* O_RDONLY is 0, O_WRONLY is 1 and O_RDWR is 2 on Linux and on the BSDs
+   alike, which is why only the CREAT/TRUNC/APPEND bits need per-host values. */
+#define _U_O_WRONLY  1
+#define _U_O_RDWR    2
+#ifdef __linux__
+#define _U_O_CREAT   64
+#define _U_O_TRUNC   512
+#define _U_O_APPEND  1024
+#else
+#define _U_O_CREAT   512
+#define _U_O_TRUNC   1024
+#define _U_O_APPEND  8
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_fopen
+static FILE *fopen(const char *__u_path, const char *__u_mode) {
+    int __u_fd;
+#ifdef _WIN32
+    /* Windows has no open(2), and CreateFileA wants its own shapes.  They
+       are built HERE and not in the encoder, because this is the only place
+       that knows whether the program is being compiled for Windows. */
+    long __u_access;
+    long __u_disp;
+    __u_access = 0x80000000;                  /* GENERIC_READ  */
+    __u_disp = 3;                             /* OPEN_EXISTING */
+    if (__u_mode[0] == 119) { __u_access = 0x40000000; __u_disp = 2; }   /* 'w' CREATE_ALWAYS */
+    if (__u_mode[0] == 97)  { __u_access = 0x40000000; __u_disp = 4; }   /* 'a' OPEN_ALWAYS   */
+    __u_fd = __open((char *)__u_path, __u_access, __u_disp);
+#else
+    int __u_flags;
+    int __u_plus;
+    /* The trailing `+` means UPDATE: read AND write.  It was ignored, so "w+"
+       behaved as "w" (O_WRONLY) and a tmpfile could be written but never read
+       back -- fread failed and the answer looked like an empty file.  O_RDWR
+       is what the `+` asks for, on the modes that allow it. */
+    __u_plus = 0;
+    { int __u_j; __u_j = 0; while (__u_mode[__u_j]) {
+        if (__u_mode[__u_j] == 43) __u_plus = 1;
+        __u_j = __u_j + 1; } }
+    __u_flags = 0;                            /* 'r': O_RDONLY */
+    if (__u_mode[0] == 114 && __u_plus) __u_flags = _U_O_RDWR;
+    if (__u_mode[0] == 119)                   /* 'w' */
+        __u_flags = _U_O_WRONLY | _U_O_CREAT | _U_O_TRUNC;
+    if (__u_mode[0] == 119 && __u_plus)
+        __u_flags = _U_O_RDWR | _U_O_CREAT | _U_O_TRUNC;
+    if (__u_mode[0] == 97)                    /* 'a' */
+        __u_flags = _U_O_WRONLY | _U_O_CREAT | _U_O_APPEND;
+    if (__u_mode[0] == 97 && __u_plus)
+        __u_flags = _U_O_RDWR | _U_O_CREAT | _U_O_APPEND;
+    /* 0644.  Passing no mode at all left it at 0, so the file we had just
+       created could not be opened again. */
+    __u_fd = __open((char *)__u_path, __u_flags, 420);
+#endif
+    if (__u_fd < 0) {
+        /* The gate answers -errno on Linux and Darwin (see the __write audit
+           above); Windows' CreateFileA gate answers -1.  Without this line
+           errno stayed 0 and sbase said "fopen /nonexistent: Success"
+           [R13-0b #25].  A bare -1 is reported as ENOENT: an open that
+           failed with no code is almost always a missing file. */
+        errno = 0 - __u_fd;
+#ifdef _WIN32
+        if (errno == 1) errno = ENOENT;
+#endif
+        return NULL;
+    }
+    return (FILE *)(long)__u_fd;
+}
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fgetc
@@ -445,7 +458,16 @@ static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
    the process's input away from every later read. */
 #if !__UNISA_FTRIM_LIBC || __UN_fclose
 static int fclose(FILE *__u_f) {
+    int __u_i;
     if ((long)__u_f >= _UNISA_STDIO_BASE) return 0;
+    /* free the stream's state slot: a later fopen that gets the same
+       descriptor must not inherit this stream's eof/err/pushback */
+    __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0) {
+        _u_st_n = _u_st_n - 1;
+        _u_st_fd[__u_i] = _u_st_fd[_u_st_n]; _u_st_eof[__u_i] = _u_st_eof[_u_st_n];
+        _u_st_err[__u_i] = _u_st_err[_u_st_n]; _u_st_ung[__u_i] = _u_st_ung[_u_st_n];
+    }
     return __close(_unisa_fd(__u_f));
 }
 #endif
