@@ -21,6 +21,7 @@ AFTER = {'rowcov-lower-union': 'rowcov-lower-8', 'rowcov-parse2-union': 'rowcov-
          'com-comboot-fixedpoint': 'com-comboot-stage3'}
 AFTER.update({'rowcov-parse2-%d' % k: 'rowcov-parse2-build' for k in range(1, 25)})   # 0.0.31 R4
 AFTER.update({'exec-bindverify-%s' % a: 'exec-bindprep-%s' % a for a in ('arm64', 'x86_64')})   # 0.0.32: verify reads prep's build dir
+AFTER['exec-bindprep-x86_64'] = 'exec-bindprep-arm64'   # q10: both preps in one window hit 53 s (alone 30-38 s)
 
 def atomic(path, obj):
     tmp = path.with_suffix(path.suffix + '.tmp')

@@ -41,7 +41,7 @@ for bound in ([native], [sys.executable, str(root/'bound.py')]):
                         time.sleep(.02)
                 time.sleep(.1)
                 process.send_signal(sig)
-                assert process.wait(timeout=3)==128+sig
+                assert process.wait(timeout=8)==128+sig   # 3 s flaked under a 4-job queue (q10)
                 state=subprocess.run(['/bin/ps','-p',str(pid),'-o','stat='],capture_output=True,text=True,timeout=2).stdout.strip()   # ps exits 1 once the pid is gone
                 assert not state or state.startswith('Z'), (bound,sig,state)
             finally:
