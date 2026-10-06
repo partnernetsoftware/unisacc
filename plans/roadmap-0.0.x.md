@@ -16,7 +16,7 @@
 | 版本 | 必须完成（版本的定义） | cc | cdx |
 |---|---|---|---|
 | 0.0.29 | C 构造器覆盖 parse2 全部 | P7′ 队列复用重做；T3 pp 死行；T4 parse2 并集棘轮；H4′ 后端按需增长，sqlite shell 跑通 | B4：parse2 余下各族 |
-| 0.0.30 | 七个阶段的 C 构造器齐（enc、lower） | H3：pthread（转发宿主 libpthread：create/join/mutex/cond/once/key 最小集）、wctype.h、fenv.h；F2′ cdsh 16 单元 ≤5 秒 | B4：enc、lower；T3′（从 0.0.29 T3 拆出，顺延 1）：pp 变体表（location/shared-predefine/start）各自构图，rowcov 报出各表 dead/live，死行清单清零或逐条说明；pp 未覆盖行 ≤681（棘轮每版降 ≥20） |
+| 0.0.30 | 七个阶段的 C 构造器齐（enc、lower） | H3：pthread（转发宿主 libpthread：create/join/mutex/cond/once/key 最小集）、wctype.h、fenv.h（wctype/fenv 已在 31e633e8 提前交付）；pthread 的前置设计（10-07 实测）：宿主线程要回调进我们编译出的函数，参考转发目前不支持回调（-funit 对象被 cc 调用即崩），运行时的 hostcall 暂存区是全局的、多线程会竞争，需先定 C ABI 入口桩和线程安全的运行时，再做 create/once/key；F2′ cdsh 16 单元 ≤5 秒 | B4：enc、lower；T3′（从 0.0.29 T3 拆出，顺延 1）：pp 变体表（location/shared-predefine/start）各自构图，rowcov 报出各表 dead/live，死行清单清零或逐条说明；pp 未覆盖行 ≤681（棘轮每版降 ≥20） |
 | 0.0.31 | 构建链不调用 Python（B5） | comboot 与发布流水线改走 C 构造器；F3 引号 include 的库裁剪；H1″ 整程序一个 environ、getenv 读 environ | B5 配合，删构建路径上的 Python 调用 |
 | 0.0.32 | lua、sqlite 两条路线编译并通过各自测试 | POSIX 头第四批，补齐 cosmocc 常见 82 个头里缺的；剩余静态容量改按需增长（原 0.1.2） | 产品侧 sqlite/lua 暴露的声明符与容量缺口 |
 | 0.0.33 | Windows 宿主转发 | Windows 上转发宿主 DLL（DNS 走 ws2 getaddrinfo、TLS 走 SChannel 或系统 libcurl）；D2 六平台进程生命周期矩阵（退出码、信号、崩溃） | 产品驱动在 win 目标的转发存根 |
