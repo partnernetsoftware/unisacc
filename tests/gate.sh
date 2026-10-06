@@ -428,6 +428,7 @@ job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
 job rowcov-pp python3 ./tests/rowcov.py pp all   # 0.0.25 T2: pp manifest rows reached by the probes; ratchet in tests/rowcov.baseline
 job rowcov-lex python3 ./tests/rowcov.py lex all   # 0.0.26 T2: lex manifest rows reached (on the preprocessor output); ratchet in tests/rowcov.baseline
+job rowcov-parse2-build python3 ./tests/rowcov.py parse2 build   # 0.0.31 R4: the shards reuse its cache
 for k in $(seq 1 24); do job rowcov-parse2-$k python3 ./tests/rowcov.py parse2 gate$k/24; done   # 0.0.30 R2: 24 shards (16/12 hit the 55 s window three times in 0.0.29)   # 0.0.26 T2: each shard ratchets its own reached rows
 for st in lower enc; do for k in $(seq 1 8); do job rowcov-$st-$k python3 ./tests/rowcov.py $st gate$k/8; done; done   # 0.0.26 T2: lower (--full) and enc (--elf) rows, on tapes from the reference -S
 for st in lower enc; do job rowcov-$st-union python3 ./tests/rowcov.py $st union8; done   # 0.0.28 E22: the union may only rise, whatever the shards' redistribution

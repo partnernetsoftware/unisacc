@@ -19,6 +19,7 @@ LOCATION_BOUND = ('com-comboot-',)
 AFTER = {'rowcov-lower-union': 'rowcov-lower-8', 'rowcov-parse2-union': 'rowcov-parse2-24', 'rowcov-enc-union': 'rowcov-enc-8',   # 0.0.28 E22: reuse the shards
          'com-comboot-stage2': 'com-comboot-seed', 'com-comboot-stage3': 'com-comboot-stage2',
          'com-comboot-fixedpoint': 'com-comboot-stage3'}
+AFTER.update({'rowcov-parse2-%d' % k: 'rowcov-parse2-build' for k in range(1, 25)})   # 0.0.31 R4
 
 def atomic(path, obj):
     tmp = path.with_suffix(path.suffix + '.tmp')

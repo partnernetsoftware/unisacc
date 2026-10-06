@@ -91,6 +91,12 @@ def main():
         sc = build(tmp)
         if sc.read_bytes() != dj.read_bytes(): sys.exit('rowcov: the side-table build changed the delta')
         os.replace(tmp, out / (stage + '.rows.tsv')); stamp.write_text(key)
+    if what == 'build':
+        # 0.0.31 R4: one job builds the shared delta + side table; the shards start after it
+        # (0.0.30: shards 1/2 both built it concurrently, 51/53 s each, the rest ~11 s)
+        cached()
+        print('rowcov %s build: cached delta and side table ready' % stage)
+        return 0
     if what.startswith('gate'):
         # gate shape for the slow stages: `STAGE gate K/N` = cached build + one shard + that shard's own
         # row count against tests/rowcov/STAGE.{shards,union} (key STAGE/K/N); no cross-job merge is needed
