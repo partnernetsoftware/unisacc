@@ -28,6 +28,9 @@ if [ -z "$*" ]; then
     names="$names ident"
     { cc -std=c99 -D_POSIX_C_SOURCE=200809L -O2 -w seed/ident.c -o "$T/ident" &&
       a=$("$B" 30 "$T/ident") && p=$("$B" 30 python3 exec/c/provenance.py identity) && [ -n "$a" ] && [ "$a" = "$p" ] &&
+      head -c 4096 /dev/urandom > "$T/art" && "$B" 30 "$T/ident" . write "$T/art" "$a" && cp "$T/art.build.json" "$T/art.c.json" &&
+      "$B" 30 python3 exec/c/provenance.py write "$T/art" "$a" && cmp -s "$T/art.c.json" "$T/art.build.json" &&
+      "$B" 30 "$T/ident" . check "$T/art" >/dev/null &&
       echo "SAME ident"; } > "$T/r-ident.txt" 2>&1 || echo "DIFF ident" >> "$T/r-ident.txt"
 fi
 same=0; diff=0; for n in $names; do cat "$T/r-$n.txt"; grep -q '^SAME' "$T/r-$n.txt" && same=$((same+1)) || diff=$((diff+1)); done

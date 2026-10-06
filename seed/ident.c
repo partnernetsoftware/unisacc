@@ -7,7 +7,10 @@
  * 32-byte SHA-256 of its contents.  Paths sort by their parts, byte-wise
  * (Python's sorted(key=parts)), which is plain byte order with '/' lowest.
  *
- * Usage: ident [ROOT]   (default: the current directory)
+ * Usage: ident [ROOT]                          the identity (default ROOT: .)
+ *        ident ROOT write ARTIFACT START_DIGEST  ARTIFACT.build.json, as provenance.py write
+ *        ident ROOT check ARTIFACT               verify it, as provenance.py check
+ * The record is byte-equal to Python's json.dumps(indent=2, sort_keys=True).
  */
 #include <dirent.h>
 #include <stdint.h>
@@ -128,11 +131,10 @@ static void file_entry(Sha *h, const char *rel) {
     sha_put(h, rel, strlen(rel) + 1);
     sha_put(h, dg, 32);
 }
-int main(int argc, char **argv) {
+static void identity(char hex[65]) {
     static const char *const dirs[] = {"exec", "unisa", "src", "kernel", "include", "weights", "seed"};
     Sha h; unsigned char out[32]; size_t i, first; int j;
-    if (argc > 2) die("usage", "ident [ROOT]");
-    if (argc == 2 && chdir(argv[1])) die("cannot enter", argv[1]);
+    npaths = 0;
     sha_init(&h);
     for (j = 0; j < 7; j++) {
         first = npaths; walk(dirs[j]);
@@ -154,7 +156,126 @@ int main(int argc, char **argv) {
     qsort(paths + first, npaths - first, sizeof *paths, part_cmp);
     for (i = first; i < npaths; i++) file_entry(&h, paths[i]);
     sha_end(&h, out);
-    for (i = 0; i < 32; i++) printf("%02x", out[i]);
-    printf("\n");
+    for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", out[i]);
+}
+/* sha256 of a file (absolute or relative to ROOT) and its size */
+static long file_digest(const char *path, char hex[65]) {
+    Sha f; unsigned char buf[1 << 16], dg[32]; long n, total = 0; int i, fd = open(path, O_RDONLY);
+    if (fd < 0) die("cannot open", path);
+    sha_init(&f);
+    while ((n = read(fd, buf, sizeof buf)) > 0) { sha_put(&f, buf, (size_t)n); total += n; }
+    if (n < 0) die("read failed", path);
+    close(fd); sha_end(&f, dg);
+    for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", dg[i]);
+    return total;
+}
+static void json_str(FILE *o, const char *v) {
+    const unsigned char *p = (const unsigned char *)v;
+    fputc('"', o);
+    for (; *p; p++) {
+        if (*p == '"' || *p == '\\') fprintf(o, "\\%c", *p);
+        else if (*p == '\n') fputs("\\n", o);
+        else if (*p == '\r') fputs("\\r", o);
+        else if (*p == '\t') fputs("\\t", o);
+        else if (*p == '\b') fputs("\\b", o);
+        else if (*p == '\f') fputs("\\f", o);
+        else if (*p < 0x20) fprintf(o, "\\u%04x", *p);
+        else if (*p >= 0x80) die("non-ASCII build setting", v);
+        else fputc(*p, o);
+    }
+    fputc('"', o);
+}
+extern char **environ;
+static int env_cmp(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
+static void write_record(const char *root, const char *artifact, const char *expected) {
+    char cur[65], art[65], commit[64] = {0}, cmd[2048], dest[2048], tmp[2100];
+    char **set = NULL; size_t ns = 0, i; long bytes; FILE *pp, *o;
+    identity(cur);
+    if (strcmp(cur, expected)) die("product inputs changed during packaging", artifact);
+    bytes = file_digest(artifact, art);
+    if (strlen(root) > 1000) die("root too long", root);
+    sprintf(cmd, "git -C '%s' rev-parse HEAD", root);
+    pp = popen(cmd, "r");
+    if (!pp || !fgets(commit, sizeof commit, pp) || pclose(pp) != 0) die("git rev-parse failed", root);
+    commit[strcspn(commit, "\n")] = 0;
+    for (i = 0; environ[i]; i++) {
+        const char *e = environ[i];
+        if (!strncmp(e, "E1", 2) || !strncmp(e, "E2", 2) || !strncmp(e, "E3", 2) || !strncmp(e, "E4", 2)
+            || !strncmp(e, "PYTHONHASHSEED", 14)) {
+            set = realloc(set, (ns + 1) * sizeof *set); if (!set) die("out of memory", e);
+            set[ns++] = (char *)e;
+        }
+    }
+    qsort(set, ns, sizeof *set, env_cmp);
+    if (strlen(artifact) > 2000) die("path too long", artifact);
+    sprintf(dest, "%s.build.json", artifact); sprintf(tmp, "%s.tmp", dest);
+    o = fopen(tmp, "w"); if (!o) die("cannot write", tmp);
+    fprintf(o, "{\n  \"artifact_sha256\": \"%s\",\n  \"bytes\": %ld,\n  \"commit\": ", art, bytes);
+    json_str(o, commit);
+    fprintf(o, ",\n  \"schema\": 1,\n  \"settings\": ");
+    if (!ns) fputs("{}", o);
+    else {
+        fputs("{\n", o);
+        for (i = 0; i < ns; i++) {
+            char *eq = strchr(set[i], '='), key[256];
+            size_t kl = (size_t)(eq - set[i]);
+            if (kl >= sizeof key) die("setting name too long", set[i]);
+            memcpy(key, set[i], kl); key[kl] = 0;
+            fputs("    ", o); json_str(o, key); fputs(": ", o); json_str(o, eq + 1);
+            fputs(i + 1 < ns ? ",\n" : "\n", o);
+        }
+        fputs("  }", o);
+    }
+    fprintf(o, ",\n  \"sources_sha256\": \"%s\"\n}\n", cur);
+    if (fclose(o)) die("write failed", tmp);
+    if (rename(tmp, dest)) die("cannot rename", tmp);
+    free(set);
+}
+/* the value after `"KEY": ` in a record this tool or provenance.py wrote */
+static int field(const char *text, const char *key, char *out, size_t cap) {
+    char pat[64]; const char *p; size_t n = 0;
+    sprintf(pat, "\"%s\": ", key);
+    p = strstr(text, pat); if (!p) return 0;
+    p += strlen(pat); if (*p == '"') p++;
+    while (*p && *p != '"' && *p != ',' && *p != '\n' && n + 1 < cap) out[n++] = *p++;
+    out[n] = 0; return 1;
+}
+static void check_record(const char *artifact) {
+    char path[2100], text[1 << 14], v[128], cur[65], art[65]; long bytes; int fd; long n;
+    if (strlen(artifact) > 2000) die("path too long", artifact);
+    sprintf(path, "%s.build.json", artifact);
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { fprintf(stderr, "product freshness: %s: no build record\n", artifact); exit(1); }
+    n = read(fd, text, sizeof text - 1); close(fd);
+    if (n <= 0) { fprintf(stderr, "product freshness: %s: unreadable build record\n", artifact); exit(1); }
+    text[n] = 0;
+    identity(cur);
+    if (!field(text, "schema", v, sizeof v) || strcmp(v, "1") || !field(text, "sources_sha256", v, sizeof v) || strcmp(v, cur)) {
+        fprintf(stderr, "product freshness: %s: product inputs changed; rebuild with make com\n", artifact); exit(1);
+    }
+    bytes = file_digest(artifact, art);
+    {   char b[32]; sprintf(b, "%ld", bytes);
+        if (!field(text, "artifact_sha256", v, sizeof v) || strcmp(v, art) || !field(text, "bytes", cur, sizeof cur) || strcmp(cur, b)) {
+            fprintf(stderr, "product freshness: %s: artifact differs from its build record\n", artifact); exit(1);
+        }
+    }
+    printf("product freshness: verified %s\n", art);
+}
+int main(int argc, char **argv) {
+    char hex[65];
+    const char *root = argc >= 2 ? argv[1] : ".";
+    char abs1[4096];
+    if (!(argc == 1 || argc == 2 || (argc == 5 && !strcmp(argv[2], "write")) || (argc == 4 && !strcmp(argv[2], "check"))))
+        die("usage", "ident [ROOT] | ident ROOT write ARTIFACT START | ident ROOT check ARTIFACT");
+    /* the artifact path is taken relative to the caller's directory, before entering ROOT */
+    if (argc >= 4) {
+        if (argv[3][0] == '/') { if (strlen(argv[3]) >= sizeof abs1) die("path too long", argv[3]); strcpy(abs1, argv[3]); }
+        else { if (!getcwd(abs1, sizeof abs1 - strlen(argv[3]) - 2)) die("getcwd failed", argv[3]); strcat(abs1, "/"); strcat(abs1, argv[3]); }
+    }
+    if (chdir(root)) die("cannot enter", root);
+    if (argc == 5) { write_record(".", abs1, argv[4]); return 0; }
+    if (argc == 4) { check_record(abs1); return 0; }
+    identity(hex);
+    printf("%s\n", hex);
     return 0;
 }

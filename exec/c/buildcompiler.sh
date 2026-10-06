@@ -41,15 +41,18 @@ gen() {   # gen STAGE OUT.json [FLAG...]
         b python3 exec/build/gen.py "$@"
     fi
 }
-# The product source identity (= exec/c/provenance.py identity) from seed/ident.c; SEED_GEN=0 keeps Python.
+# The product source identity and build record (= exec/c/provenance.py identity / write) from
+# seed/ident.c; SEED_GEN=0 keeps Python.  `ident` prints the identity, `ident write ART START` records.
 ident() {
     if [ "${SEED_GEN:-1}" = 1 ]; then
         if [ ! -x "$T/seedbin/ident" ]; then
             mkdir -p "$T/seedbin"; b ${SEED_GEN_CC:-cc} -std=c99 -D_POSIX_C_SOURCE=200809L -O2 -w "$R/seed/ident.c" -o "$T/seedbin/ident.$$" && mv -f "$T/seedbin/ident.$$" "$T/seedbin/ident"   # parts build in parallel
         fi
-        b "$T/seedbin/ident" "$R"
-    else
+        b "$T/seedbin/ident" "$R" "$@"
+    elif [ $# = 0 ]; then
         b python3 exec/c/provenance.py identity
+    else
+        b python3 exec/c/provenance.py "$@"
     fi
 }
 # Reuse the model preparation identity/digest implementation. These are completion
@@ -177,7 +180,7 @@ pack_driver() {
     [ -s "$T/unisacc-next.com" ]
     manifest check shared
     for os in lnx osx win; do for arch in arm64 x86_64; do manifest check "$os-$arch"; done; done
-    b python3 exec/c/provenance.py write "$T/unisacc-next.com" "$source_start"
+    ident write "$T/unisacc-next.com" "$source_start"
     chmod +x "$T/unisacc-next.com"
     echo "development assembly/network compiler: $T/unisacc-next.com"
 }
