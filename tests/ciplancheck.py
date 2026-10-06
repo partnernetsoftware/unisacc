@@ -61,7 +61,7 @@ def check():
         assert names and len(names) == len(set(names)), names
         import re
         def family(name):
-            for prefix in ('opt-', 'optpy-', 'ape-', 'acceptance', 'selfhost-', 'ccrun-', 'closure-'):
+            for prefix in ('opt-', 'optpy-', 'ape-', 'acceptance', 'selfhost-', 'ccrun-', 'closure-', 'nativeboot-'):
                 if name.startswith(prefix):
                     return prefix.rstrip('-')
             return name if name in BASE else re.sub(r'\d+$', '', name)
