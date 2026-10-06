@@ -52,11 +52,20 @@ int fwd_pdecl(int k, int kind, int w) {
     fwd_s(fwd_ctype(kind, w, 0)); fwd_s(" a"); fwd_d(k); return 0;
 }
 int fwd_pclear(void) { int k; k = 0; while (k < 64) { fwd_ptype[k] = 0; k = k + 1; } return 0; }
+/* 0.0.30 H3: the stubs look a name up through one helper -- the process's global symbols first,
+   then, on Linux, libm.so.6, where glibc keeps fenv.h's functions (macOS has them in libSystem) */
+int fwd_prologue(void) {
+    fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
+    fwd_s("static void *__unisa_fwdsym(const char *n) {\n    void *f; f = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, n);\n");
+    fwd_s("#ifdef __linux__\n    if (f == 0) { static void *m; if (m == 0) m = uffi_dlopen(\"libm.so.6\", 2); if (m) f = uffi_dlsym(m, n); }\n#endif\n");
+    fwd_s("    return f;\n}\n");
+    return 0;
+}
 int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, int rkind, int rw, int runs) {
     int k; char *rt; int rk;
     rt = fwd_ctype(rkind, rw, runs); rk = fwd_ukind(rkind, rw, runs);
     if (rkind == 1) { rt = "void *"; rk = 5; }
-    if (nfwdsrc == 0) fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
+    if (nfwdsrc == 0) fwd_prologue();
     {   /* R21-4a': integer and pointer signatures of at most six arguments call
            the host directly through __hostcall (no libffi: works on Linux too);
            floating-point ones keep the uffi/libffi bridge (macOS) */
@@ -67,7 +76,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
             k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
             if (np == 0) fwd_s("void");
             fwd_s(") {\n    static void *fn; long v[10];\n");
-            fwd_s("    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
+            fwd_s("    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
             fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
             k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { fwd_s("(long)a"); fwd_d(k); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
             if (isvoid) fwd_s("    __hostcall(fn, v);\n");
@@ -82,7 +91,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
     if (np == 0) fwd_s("void");
     fwd_s(") {\n    static void *fn; int kinds[33]; void *vals[33];");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
-    fwd_s("\n    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
+    fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
     fwd_s("    if (fn == 0) { write(2, \"unisacc -run: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(32 + nl); fwd_s("); exit(127); }\n");
     k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(kind[k], w[k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
     fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np); fwd_s(", 0 - 1, "); fwd_s(isvoid ? "0" : "&r"); fwd_s(");\n");
@@ -103,13 +112,13 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rk
     if (rkind == 1) { rt = "void *"; rk = 5; }
     if (np < 1 || np > 5 || rkind == 4 || rkind == 8) return 0;
     k = 0; while (k < np) { if (kind[k] == 4 || kind[k] == 8) return 0; k = k + 1; }
-    if (nfwdsrc == 0) fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
+    if (nfwdsrc == 0) fwd_prologue();
     fwd_s("#include <stdarg.h>\n");
     fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
     k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
     fwd_s(", ...) {\n    static void *fn; long x[4]; va_list ap;");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
-    fwd_s("\n    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
+    fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
     fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
     fwd_s("    va_start(ap, a"); fwd_d(np - 1); fwd_s("); x[0] = va_arg(ap, long); x[1] = va_arg(ap, long); x[2] = va_arg(ap, long); x[3] = va_arg(ap, long); va_end(ap);\n");
     fwd_s("#if defined(__APPLE__) && defined(__aarch64__)\n    { int kinds[9]; void *vals[9];\n");

@@ -41,7 +41,7 @@ if command -v limactl >/dev/null && [ "$(limactl list "$VM" --format '{{.Status}
     for f in tests/forward/*.c; do
         b=$(basename "$f" .c); [ "$b" = win ] && continue
         "$_BOUND" 30 "$UA" "$f" -b lnx/arm64 -o "$T/$b.lnx" 2>/dev/null || { bad=$((bad+1)); echo "  FAIL $b lnx/arm64 compile"; continue; }
-        out=$(tar -C "$T" -cf - "$b.lnx" -C "$R/tests/forward" "$b.c" | "$_BOUND" 40 limactl shell "$VM" -- sh -c "rm -rf /tmp/fw_$b && mkdir -p /tmp/fw_$b && cd /tmp/fw_$b && tar xf - && chmod +x $b.lnx && ./$b.lnx > a.txt 2>&1; gcc -w -o ref $b.c && ./ref > b.txt 2>&1; cmp -s a.txt b.txt && echo SAME || diff b.txt a.txt | head -4")
+        out=$(tar -C "$T" -cf - "$b.lnx" -C "$R/tests/forward" "$b.c" | "$_BOUND" 40 limactl shell "$VM" -- sh -c "rm -rf /tmp/fw_$b && mkdir -p /tmp/fw_$b && cd /tmp/fw_$b && tar xf - && chmod +x $b.lnx && ./$b.lnx > a.txt 2>&1; gcc -w -o ref $b.c -lm && ./ref > b.txt 2>&1; cmp -s a.txt b.txt && echo SAME || diff b.txt a.txt | head -4")
         case "$out" in SAME) ok=$((ok+1)); echo "  ok   $b lnx/arm64 image";; *) bad=$((bad+1)); echo "  FAIL $b lnx/arm64 image"; echo "$out";; esac
     done
 else skip=$((skip+1)); echo "  skip lnx/arm64 images (Lima $VM not running)"; fi
