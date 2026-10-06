@@ -285,7 +285,8 @@ run selfgap    ./tests/selfgap.sh
 if [ "$(uname -s)" = "Darwin" ]; then
     run bootstrap ./tests/bootstrap.sh
 fi
-run nativeboot ./tests/nativeboot.sh
+# three shards like gate.sh: the whole suite hit the 55 s limit in the 0.0.31 Linux run
+for part in self cross-a cross-b; do run nativeboot-$part env NB_PART=$part ./tests/nativeboot.sh; done
 if [ -d corpus/c-testsuite ]; then
     # four shards: each run stays under the 60 s ceiling (AGENTS.md)
     run corpus1 env FETCH=0 SHARD=1/4 ./tests/corpus.sh
