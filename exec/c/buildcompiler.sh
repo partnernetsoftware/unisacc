@@ -161,7 +161,7 @@ pack_driver() {
     [ "$(b python3 exec/c/provenance.py identity)" = "$source_start" ] || { echo "pack-driver: sources changed since pack-models" >&2; exit 1; }
     . ./tests/lib.sh
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R"
-    product_version=$(python3 -c 'import re; from pathlib import Path; m=re.findall(r"#define UNISACC_VERSION \"([0-9.]+)\"",Path("src/version.h").read_text()); assert len(m)==1; print(m[0])')
+    product_version=$(awk -F'"' '/^#define UNISACC_VERSION "[0-9.]+"/ { n++; v = $2 } END { if (n != 1) exit 1; print v }' src/version.h)
     b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" --product-name Unisacc --product-version "$product_version" -o "$T/unisacc-next.com"
     [ -s "$T/unisacc-next.com" ]
     manifest check shared
