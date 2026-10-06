@@ -32,6 +32,13 @@ if [ -z "$*" ]; then
       "$B" 30 python3 exec/c/provenance.py write "$T/art" "$a" && cmp -s "$T/art.c.json" "$T/art.build.json" &&
       "$B" 30 "$T/ident" . check "$T/art" >/dev/null &&
       echo "SAME ident"; } > "$T/r-ident.txt" 2>&1 || echo "DIFF ident" >> "$T/r-ident.txt"
+    # seed/blob.c: the kernel blob, equal to exec/c/asm/blob.py (B5); macOS only (Mach-O link)
+    if [ "$(uname -s)" = Darwin ]; then
+        names="$names blob"
+        { cc -std=c99 -D_DARWIN_C_SOURCE -D_POSIX_C_SOURCE=200809L -O2 -w seed/blob.c -o "$T/blob" &&
+          for a in arm64 x86_64; do "$B" 50 "$T/blob" . $a "$T/k.c.$a" >/dev/null && "$B" 50 python3 exec/c/asm/blob.py $a "$T/k.py.$a" >/dev/null &&
+            cmp -s "$T/k.c.$a" "$T/k.py.$a" || exit 1; done && echo "SAME blob"; } > "$T/r-blob.txt" 2>&1 || echo "DIFF blob" >> "$T/r-blob.txt"
+    fi
 fi
 same=0; diff=0; for n in $names; do cat "$T/r-$n.txt"; grep -q '^SAME' "$T/r-$n.txt" && same=$((same+1)) || diff=$((diff+1)); done
 echo "seedgen  same $same  differ $diff"; [ "$diff" = 0 ] && [ "$same" -gt 0 ]

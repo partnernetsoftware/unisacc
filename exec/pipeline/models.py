@@ -27,7 +27,7 @@ def closure(h):
             # construction input; exec/build/*.py (gen.py, graph.py, procs.py, parsebase.py,
             # parse2base.py) are.  exec/.gitignore keeps only these (0.0.24 T3).
             rel = path.relative_to(ROOT).parts
-            if rel[0] == 'seed' and rel[-1] not in ('tbl.c', 'net.c', 'json.h', 'gen.c', 'facts.h', 'ident.c'):
+            if rel[0] == 'seed' and rel[-1] not in ('tbl.c', 'net.c', 'json.h', 'gen.c', 'facts.h', 'ident.c', 'blob.c'):
                 continue   # only the tools the build runs (0.0.32 B5: seed/gen.c builds the shared deltas)
             if rel[0] == 'exec' and path.suffix in ('.sh', '.py') and path.stem.endswith('check'):
                 continue   # 0.0.32 X31: exec/**/*check.{sh,py} verify the deltas; no build step runs or imports them

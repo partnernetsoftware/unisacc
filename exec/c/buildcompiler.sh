@@ -98,7 +98,15 @@ start() {
 shared() {
     start shared
     mkdir -p "$T/kernels"
-    for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
+    # 0.0.32 B5: seed/blob.c cuts the kernel blob (byte-equal to exec/c/asm/blob.py); SEED_GEN=0 keeps Python
+    if [ "${SEED_GEN:-1}" = 1 ]; then
+        if [ ! -x "$T/seedbin/blob" ]; then
+            mkdir -p "$T/seedbin"; b ${SEED_GEN_CC:-cc} -std=c99 -D_DARWIN_C_SOURCE -D_POSIX_C_SOURCE=200809L -O2 -w "$R/seed/blob.c" -o "$T/seedbin/blob.$$" && mv -f "$T/seedbin/blob.$$" "$T/seedbin/blob"
+        fi
+        for arch in arm64 x86_64; do b "$T/seedbin/blob" "$R" "$arch" "$T/kernels/$arch"; done
+    else
+        for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
+    fi
     gen pp "$T/shared/e2.json" --shared-predefines
     gen lex "$T/shared/e1.json" --typed
     gen parse2 "$T/shared/e3.json"
