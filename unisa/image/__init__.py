@@ -45,11 +45,13 @@ def relocate(tp, data, shift):
     relocs = getattr(tp, "relocs", [])
     if not relocs:
         return data
-    # R3: copy only the stored prefix; the zero tail stays unresident
-    out = bytearray(len(data))
+    # R3': copy only the stored prefix; the zero tail stays a length
+    from ..padded import Padded
     k = len(data.rstrip(b"\x00"))
-    out[:k] = memoryview(data)[:k]
+    out = Padded(memoryview(data)[:k], len(data))
     for at in relocs:
+        if at + 8 > out.stored():
+            out.extend(bytes(at + 8 - out.stored()))
         v = int.from_bytes(out[at:at + 8], "little")
         out[at:at + 8] = ((v + shift) & MASK64).to_bytes(8, "little")
     return out

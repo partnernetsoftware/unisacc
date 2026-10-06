@@ -153,6 +153,9 @@ def facts(oracle, op, os_, arch, drive="spec"):
     return f
 
 
+from .padded import Padded
+
+
 def zero_last(data, syms, base, tail=0):
     """Lay the data out initialised-first: every blob (a symbol's bytes, up
     to the next symbol) that holds a nonzero byte, in order, then every blob
@@ -177,7 +180,10 @@ def zero_last(data, syms, base, tail=0):
         new[s] = at
         at += e - s
     used = at + (-at) % 8
-    out = bytearray(used + tail)   # R3: final size once; extend copied 600 MB
+    # R3': only the initialised prefix is real bytes; bytearray(n) would memset
+    # (and keep resident) the whole zero tail
+    stored = max([new[s] + e - s for (s, e), z in zip(blobs, zero) if not z] + [0])
+    out = Padded(bytes(stored), used + tail)
     view = memoryview(data)
     for (s, e), z in zip(blobs, zero):
         if not z:

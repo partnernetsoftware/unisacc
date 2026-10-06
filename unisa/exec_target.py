@@ -41,7 +41,8 @@ class Machine:
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
         self._brk = len(self.mem) // 2   # where mmap hands out pages
-        self.mem[DATA_BASE:DATA_BASE + len(tp.data)] = tp.data
+        stored = memoryview(tp.data)   # R3': a Padded tail is already zero in mem
+        self.mem[DATA_BASE:DATA_BASE + len(stored)] = stored
         self.R = {r: 0 for r in C.REGS if r != "none"}
         self.R["x16"] = self.R["x17"] = 0      # arm64 IP0/IP1: NR reg + scratch
         self.sp = C.REGMAP[self.arch][7]
