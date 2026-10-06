@@ -68,9 +68,9 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 S=<scratch>; V=0.0.N
 python3 tests/bound.py 58 ./tests/build_ref.sh $S/ua.c $S/ua                 # 1 同源参考（每次源码变都重建）
 release/tools/build_candidate.sh $S/cand $S/ua                               # 2 候选：七步 + pack-models + pack-driver
-D=/tmp/seed-$V; mkdir -p $D; cp $S/cand/unisacc-next.com $D/unisacc-seed.com; cp $S/cand/unisacc-next.com.build.json $D/unisacc-seed.com.build.json
+D=$S/cand/seed                                                               # build_candidate 已写出种子对
 python3 exec/c/comboot.py stage 1 $D/unisacc-seed.com
-for s in stage2 stage3 fixedpoint; do SEED_DIR=$D python3 exec/c/comboot.py shard $s; done   # 3 N22（stage2 装到仓根 unisacc.com）
+for s in stage2 stage3 fixedpoint; do until SEED_DIR=$D python3 tests/bound.py 58 python3 exec/c/comboot.py shard $s; r=$?; [ $r -ne 75 ]; do :; done; [ $r -eq 0 ] || break; done   # 3 N22；R1：超 40 s 停在步骤边界退 75，同命令续跑
 MODEL_COM=$S/cand/unisacc-next.com tests/fb12multi.sh; python3 tests/comdemo.py --com $S/cand/unisacc-next.com --out $S/demo.json
 release/tools/seal_candidate.sh $S/cand $V "<note>"; git commit -- release/candidate.json   # 4 封 GHCR
 make gatedeps; git commit -- tests/gatedeps.json; git push                  # 5 最后一提交；ls-remote 核对

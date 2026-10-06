@@ -139,10 +139,10 @@ com3:
 # its comparison.  The build steps inside are sharded by SEED_STEP, so the
 # per-shard cost is one buildcompiler step -- see exec/c/comboot.py.
 comboot:
-	@python3 tests/bound.py 55 exec/c/comboot.py shard seed
-	@python3 tests/bound.py 55 exec/c/comboot.py shard stage2
-	@python3 tests/bound.py 55 exec/c/comboot.py shard stage3
-	@python3 tests/bound.py 55 exec/c/comboot.py shard fixedpoint
+	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard seed; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard stage2; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard stage3; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
+	@until python3 tests/bound.py 58 python3 exec/c/comboot.py shard fixedpoint; r=$$?; [ $$r -ne 75 ]; do :; done; exit $$r
 
 # The build steps the shards call, as separate targets so `make -n` shows them.
 COMBSTEP_DIR ?= /tmp/unisacc-comb-build

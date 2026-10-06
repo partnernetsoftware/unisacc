@@ -49,12 +49,18 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OUT = ROOT / 'out' / 'comboot'
 REC = OUT / 'stages.json'
 SEED = pathlib.Path(os.environ.get('SEED_DIR', '/tmp/unisacc-seed-com')) / 'unisacc-seed.com'
 STAGE2 = ROOT / 'unisacc.com'
+# 0.0.30 R1: a shard stops at a step boundary once this many seconds have gone and exits 75
+# (pending); the driver re-runs the same shard, and the step markers resume it.  The 0.0.29
+# release instead had stage2/3 killed by the outer 55 s watchdog (rc=142) twice each.
+T0 = time.monotonic()
+BUDGET = float(os.environ.get('COMBOOT_BUDGET', '40'))
 STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
 # One buildcompiler step per bounded call: shared, the six targets, then pack.
 # `all` in one invocation is what does NOT fit the watchdog.  Measured on the
@@ -271,6 +277,10 @@ def build_model(model_dir):
             and (model_dir / 'unisacc-next.com').exists():
         return 0
     for st in STEP_LIST:
+        if not step_done(model_dir, st) and time.monotonic() - T0 > BUDGET:
+            print('comboot: %.0f s used, step %s pending; re-run the same shard (exit 75)'
+                  % (time.monotonic() - T0, st))
+            raise SystemExit(75)
         build_step(st, model_dir)
     return 0
 
