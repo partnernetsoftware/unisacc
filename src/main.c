@@ -308,8 +308,8 @@ int main(void) {
         } else {
             /* R21-4a': a written image forwards too (osx: libSystem; lnx: libc.so.6
                through a dynamic ELF; win: ucrtbase/kernel32/ws2_32 via GetProcAddress); objects, tapes and -E do not.
-               0.0.31 S3: bare -S does -- it prints the program -o would write (-b T -S keeps the tape contract) */
-            if (pponly == 0 && objwant == 0 && emitbin == 0 && (dump == 2 || (dump == 1 && sgiven && bgiven == 0)) && (t[0] == 111 || t[0] == 108 || t[0] == 119)) {
+               0.0.31 S3: bare -S does -- it prints the program -o would write to stdout; -S -o FILE and -b T -S keep the tape contract */
+            if (pponly == 0 && objwant == 0 && emitbin == 0 && (dump == 2 || (dump == 1 && sgiven && bgiven == 0 && outpath == 0)) && (t[0] == 111 || t[0] == 108 || t[0] == 119)) {
                 if (fe_units_fwd(inputs, &ninput, t, 1)) return 1;
                 r = 0;
             } else r = fe_units(inputs, ninput, t);
