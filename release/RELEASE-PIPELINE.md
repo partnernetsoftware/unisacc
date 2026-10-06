@@ -24,7 +24,7 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 - 环境变量全部进 stamp：第一窗就带齐 `UNISACC_FFI_X86_PROVIDER`（Rosetta union16 需要）。
 - 耗时历史按 profile key 存于 `$TMPDIR/unisacc-gate-times-<key>.json`；新 key 先合并旧文件播种，否则每窗只开约 4 个套件。
 - 队列运行期间**不改任何被声明文件**（tests、prd、research、README 都算），否则 `inputs changed` 清空全部结果。
-- **队列跑在冻结的分离工作树里**（0.0.31：主树上他人的提交/未提交编辑三次作废 118、396 个结果）：`git worktree add --detach scratchpad/wtNN HEAD`，同源 UA 从该树 `tests/build_ref.sh X.c X` 构建；gitignored 的 `unisacc.com`、`unisacc.com.build.json`、`unisacc-seed.com` 要手工拷进去（缺了 ffi-product、ape-version、apps-real、strconvert-model、qprefix 立即红）；完事 `git worktree remove`。
+- **队列跑在冻结的分离工作树里**（0.0.31：主树上他人的提交/未提交编辑三次作废 118、396 个结果）：`git worktree add --detach scratchpad/wtNN HEAD`，同源 UA 从该树 `tests/build_ref.sh X.c X` 构建；gitignored 的 `unisacc.com`、`unisacc.com.build.json`、`unisacc-seed.com` 要手工拷进去（缺了 ffi-product、ape-version、apps-real、strconvert-model、qprefix 立即红）；驱动要带 `REALPROG_CACHE=<主检出>/corpus`（否则 realprog 跳过 lua 报回归）和 `UNISACC_FFI_X86_PROVIDER`（否则 gate-infra、lib-*-rosetta 红）；完事 `git worktree remove`。
 - 独占套件（exec-bindx86、warningdriver）冷模型缓存会超 48 s：先在 Terminal 环境各跑一次暖缓存。
 - 每次 term.sh 交接留一个 Terminal 窗口；几百个后 osascript 超时、交接被拒。批次之间关窗，或先 `defaults write com.apple.Terminal NSQuitAlwaysKeepsWindows -bool false`。
 - 判据：`queue: N/N completed, 0 failed` 且 release.sh 打印 `final rc=0`；`UNVERIFIED` 行是门禁外义务，逐条写进回执。
