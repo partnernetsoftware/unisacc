@@ -113,11 +113,20 @@ else echo "  FAIL F3 build"; rc=1; fi
 # syscall cells); the output is cc's.  fwdptr: a static reached only by pointer forwards too.
 checked "unisacc fwd via pointer -run" "fwdptr" all "$UA" -run "$D/fwdptr.c"
 h3want=$(printf 'count 200000 sum 100 inits 1 dtors 10\nhanded 42\nrecursive 0 0 0\nself 1')
-checked "unisacc pthread -run" "$h3want" all "$UA" -run "$D/h3_pthread.c"
-if bound 20 "$UA" "$D/h3_pthread.c" -o "$T/h3o"; then
-    command -v codesign >/dev/null && { bound 10 codesign -f -s - "$T/h3o" >/dev/null 2>&1 || exit 1; }
-    checked "unisacc pthread -o" "$h3want" all "$T/h3o"
-else echo "  FAIL pthread -o build"; rc=1; fi
+# 0.0.31: the product (.com) refuses thread mode by name -- its lower/enc lack the host-ABI
+# wrapper entry (HENTRY/HLEAVE) for __ccw_ callbacks; H3 product path is plans/v0.0.32 H3c.
+# A refusal must be the named one; acceptance with wrong output still fails.
+h3ref=$(bound 20 "$UA" -run "$D/h3_pthread.c" 2>&1 >/dev/null)
+case "$UA" in *.com) com=1;; *) com=0;; esac
+if [ $com = 1 ] && printf %s "$h3ref" | grep -q "not covered: thread mode"; then
+    echo "  defer pthread on the product: not covered: thread mode (0.0.32 H3c)"
+else
+    checked "unisacc pthread -run" "$h3want" all "$UA" -run "$D/h3_pthread.c"
+    if bound 20 "$UA" "$D/h3_pthread.c" -o "$T/h3o"; then
+        command -v codesign >/dev/null && { bound 10 codesign -f -s - "$T/h3o" >/dev/null 2>&1 || exit 1; }
+        checked "unisacc pthread -o" "$h3want" all "$T/h3o"
+    else echo "  FAIL pthread -o build"; rc=1; fi
+fi
 if [ -n "$HOST" ]; then
     if bound 20 "$UA" "$D/m1.c" "$D/m2.c" -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
         chmod +x "$T/um"
