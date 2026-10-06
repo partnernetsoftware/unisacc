@@ -14,6 +14,15 @@ import json, os, pathlib, subprocess, sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'exec/pp'))
 
+def baseline(stage, kind):
+    """The ratchet floors: tests/rowcov/STAGE.shards (keys STAGE/K/N) and STAGE.union (key STAGE).
+    0.0.30 P7': one file per stage and kind, so raising one floor re-runs only the jobs that read it
+    (the single tests/rowcov.baseline re-ran all 37 rowcov jobs on any change).  Rows may only rise."""
+    try: text = (ROOT / 'tests' / 'rowcov' / ('%s.%s' % (stage, kind))).read_text()
+    except FileNotFoundError: return {}
+    return dict(l.split()[:2] for l in text.splitlines() if l and not l.startswith('#'))
+
+
 def xdir():
     out = subprocess.run(['sh', '-c', '. exec/stamp.sh && printf %s "$X"'], cwd=ROOT, capture_output=True, text=True).stdout
     return pathlib.Path(out)
@@ -84,7 +93,7 @@ def main():
         os.replace(tmp, out / (stage + '.rows.tsv')); stamp.write_text(key)
     if what.startswith('gate'):
         # gate shape for the slow stages: `STAGE gate K/N` = cached build + one shard + that shard's own
-        # row count against tests/rowcov.baseline (key STAGE/K/N); no cross-job merge is needed
+        # row count against tests/rowcov/STAGE.{shards,union} (key STAGE/K/N); no cross-job merge is needed
         k, n = map(int, what[4:].lstrip(':').split('/'))
         cached()
         r = subprocess.run([sys.executable, __file__, stage, '%d/%d' % (k, n)], cwd=ROOT)
@@ -97,14 +106,14 @@ def main():
             if path.startswith('synthetic'): continue
             if (st, key) in seen and (st, key) in total: rowsof[(path, line)] = 1
         got = len(rowsof)
-        base = dict(l.split()[:2] for l in (ROOT / 'tests/rowcov.baseline').read_text().splitlines() if l and not l.startswith('#'))
+        base = baseline(stage, 'shards')
         floor = int(base.get('%s/%d/%d' % (stage, k, n), 0))
         print('rowcov %s shard %d/%d  rows reached %d (baseline %d)' % (stage, k, n, got, floor))
         if got < floor: print('rowcov  FELL below the baseline'); return 1
-        if got > floor: print('rowcov  above the baseline: raise %s/%d/%d in tests/rowcov.baseline' % (stage, k, n))
+        if got > floor: print('rowcov  above the baseline: raise %s/%d/%d in tests/rowcov/%s.shards' % (stage, k, n, stage))
         return 0
     if what.startswith('union'):
-        # 0.0.28 E22: the union ratchet (key STAGE in tests/rowcov.baseline) after the gate shards: their
+        # 0.0.28 E22: the union ratchet (key STAGE in tests/rowcov/STAGE.{shards,union}) after the gate shards: their
         # results are reused when probes and reference are unchanged, a stale or missing shard is rerun
         n = int(what[5:] or 8)
         cached()
@@ -170,12 +179,12 @@ def main():
         print('rowcov %s  uncovered %d = dead %d (no edge left in the delta) + live %d (needs a probe)' % (stage, len(rows) - covered, dead, len(rows) - covered - dead))
         (out / (stage + '.cov.tsv')).write_text(''.join('%s\t%d\t%d\t%s\n' % (p, ln, r[0], r[1] or ('dead' if r[2] == 0 else '-')) for (p, ln), r in sorted(rows.items())))
         print('rowcov %s  rows %d   covered %d   (%.1f%%)   report %s' % (stage, len(rows), covered, 100.0 * covered / max(1, len(rows)), out / (stage + '.cov.tsv')))
-        # ratchet: covered rows may only rise (tests/rowcov.baseline); raise the number when they do
-        base = dict(l.split()[:2] for l in (ROOT / 'tests/rowcov.baseline').read_text().splitlines() if l and not l.startswith('#'))
+        # ratchet: covered rows may only rise (tests/rowcov/STAGE.{shards,union}); raise the number when they do
+        base = baseline(stage, 'union')
         floor = int(base.get(stage, 0))
         if covered < floor:
             print('rowcov %s  FELL below the baseline %d: a probe stopped reaching rows it used to' % (stage, floor)); return 1
-        if covered > floor: print('rowcov %s  above the baseline %d: raise it in tests/rowcov.baseline' % (stage, floor))
+        if covered > floor: print('rowcov %s  above the baseline %d: raise it in tests/rowcov/%s.union' % (stage, floor, stage))
         return 0
     k, n = map(int, what.split('/'))
     if not dj.exists() or stage == 'pp': build()
