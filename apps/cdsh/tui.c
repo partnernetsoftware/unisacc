@@ -46,6 +46,11 @@
  * "two mains" rule this project has enforced all along, broken by a new route. */
 #include "render_api.h"
 #include "term_api.h"
+#include "csih_home.h"
+#include "csih_cols.h"
+
+#define tui_next_cp csih_next_cp
+#define tui_cp_cols csih_cp_cols
 
 /*
  * chat.c's turn function, restated rather than #include'd. A restatement is what
@@ -579,40 +584,7 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
  * state: 0 has lines, 1 file missing, 2 file empty. */
 #define TUI_MIND_N 8
 
-static int tui_next_cp(const char *s, unsigned int *cp) {
-    unsigned char c;
-    int need = 1, i;
-    if (!s || !s[0]) return 0;
-    c = (unsigned char)s[0];
-    if (c < 0x80) { *cp = c; return 1; }
-    if ((c & 0xe0) == 0xc0) need = 2;
-    else if ((c & 0xf0) == 0xe0) need = 3;
-    else if ((c & 0xf8) == 0xf0) need = 4;
-    else return 0;
-    *cp = c & (0xff >> (need + 1));
-    for (i = 1; i < need; i++) {
-        unsigned char d = (unsigned char)s[i];
-        if ((d & 0xc0) != 0x80) return 0;
-        *cp = (*cp << 6) | (d & 0x3f);
-    }
-    return need;
-}
-
-/* Terminal columns, not bytes. CJK is 2. A short line is what leaves the
- * previous frame's tail on the right. */
-static int tui_cp_cols(unsigned int cp) {
-    if (cp < 0x1100) return 1;
-    if (cp <= 0x115f) return 2;
-    if (cp >= 0x2e80 && cp <= 0xa4cf) return 2;
-    if (cp >= 0xac00 && cp <= 0xd7a3) return 2;
-    if (cp >= 0xf900 && cp <= 0xfaff) return 2;
-    if (cp >= 0xfe10 && cp <= 0xfe6f) return 2;
-    if (cp >= 0xff00 && cp <= 0xff60) return 2;
-    if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
-    if (cp >= 0x1f300 && cp <= 0x1f9ff) return 2;
-    return 1;
-}
-
+/* Terminal columns, not bytes. The measure itself is csih_cols.h. */
 static int tui_disp_width(const char *s) {
     int w = 0;
     if (!s) return 0;
@@ -654,17 +626,6 @@ static void tui_pad_disp(char *s, int cols) {
         w++;
     }
     s[n] = '\0';
-}
-
-/* Prefer ~/.csih. An existing ~/.cdsh is linked so the old pages stay. */
-static void csih_home_bind(const char *home) {
-    char neu[512], old[512];
-    if (!home || !home[0]) return;
-    snprintf(neu, sizeof neu, "%s/.csih", home);
-    if (access(neu, 0) == 0) return;
-    snprintf(old, sizeof old, "%s/.cdsh", home);
-    if (access(old, 0) == 0 && symlink(".cdsh", neu) == 0) return;
-    mkdir(neu, 0750);
 }
 
 /* Fences and a bare `flowchart LR` are mermaid wrappers, not the map. */

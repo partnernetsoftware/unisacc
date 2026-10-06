@@ -26,7 +26,7 @@
  * They are called at the library level (not through tools.c's string dispatcher)
  * so a double-quote in a file's text cannot be mis-split by shell-style quoting.
  *
- * WORKING FILES — mind keeps two pages under ~/.cdsh: 思维树.md
+ * WORKING FILES — mind keeps two pages under ~/.csih: 思维树.md
  * (markdown-tree-dag) and 记忆宫殿.md (mermaid-flowchart-memory-palace).
  * They follow the user, not the working directory. agent_run seeds them
  * if missing. op=add still appends one "- " note; it does not rewrite the page.
@@ -49,6 +49,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "csih_home.h"
 
 /* ── restated declarations (so this file compiles alone) ─────────────────── */
 
@@ -233,17 +234,6 @@ static size_t agent_json_str(const char *in, char *out, size_t outlen) {
 
 /* A tool result longer than this leaves the transcript. The file keeps it. */
 #define AGENT_SPILL_AT 2000
-
-/* Prefer ~/.csih. An existing ~/.cdsh is linked so the old pages stay. */
-static void csih_home_bind(const char *home) {
-    char neu[512], old[512];
-    if (!home || !home[0]) return;
-    snprintf(neu, sizeof neu, "%s/.csih", home);
-    if (access(neu, 0) == 0) return;
-    snprintf(old, sizeof old, "%s/.cdsh", home);
-    if (access(old, 0) == 0 && symlink(".cdsh", neu) == 0) return;
-    mkdir(neu, 0750);
-}
 
 /* Write every byte of a long tool result under ~/.csih/tool/. The transcript
  * then holds the path and the first few lines, not a cut that drops the rest.
