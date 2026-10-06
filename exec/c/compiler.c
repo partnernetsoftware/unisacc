@@ -199,6 +199,23 @@ static int fwd_callback_decl(const USForwardType *t,int index,char *out,size_t c
     return n<0 || (size_t)n>=cap-at;
 }
 static int fwd_second;                           /* the recompile with the stubs: no side-car */
+/* 0.0.30 F2': the per-unit front-end output (unit route: e2, e1) of the first pass, with that unit's
+   USLATTR1 records, so the forwarding restart re-runs only the stub unit.  The unit route does not read
+   the run-forward resource, so its bytes are the same in both passes; UNISA_FWD_UNITCACHE=0 turns it off. */
+static struct { const char *path; unsigned char *b; int n; unsigned char *attr; unsigned nattr; } ucache[256];
+static int nucache;
+static int ucache_find(const char *path) { for (int k=0;k<nucache;k++) if (!strcmp(ucache[k].path,path)) return k; return -1; }
+static void ucache_replay(int k) {                /* append unit k's attribute records under ATTR_UNIT */
+    if (!ucache[k].nattr) return;
+    if (ATTRS.n == 0) { for (int q=0;q<4;q++) attr_put(0); }
+    unsigned total = attr_u32(ATTRS.b) + ucache[k].nattr;
+    for (unsigned r=0;r<ucache[k].nattr;r++) {
+        for (int q=0;q<4;q++) attr_put((ATTR_UNIT >> (8*q)) & 255);
+        for (int q=0;q<5;q++) attr_put(ucache[k].attr[5*r+q]);
+    }
+    for (int q=0;q<4;q++) ATTRS.b[q] = (total >> (8*q)) & 255;
+    if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
+}
 static char fwd_path[600];
 static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1: stubs written; -1: error */
     size_t at=0,n=(size_t)in->n; const unsigned char *b=in->b; uint64_t tl=0,cnt=0;
@@ -592,10 +609,27 @@ int main(int argc, char **argv) {
     }
     else {
         char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/%sunit",target,warnings ? "warn/" : "");
+        const char *uc=getenv("UNISA_FWD_UNITCACHE");
+        int cacheon = !deps && !(uc && !strcmp(uc,"0"));
         for (int j=0;j<nsources;j++) {
-            Buf unit={0}; unit.b=source_read(sources[j],&unit.n); ATTR_UNIT=j;
-            rc=runroute(unitroute,&unit,sources[j]);
-            if (rc) { free(unit.b); break; }
+            Buf unit={0}; ATTR_UNIT=j;
+            int hit = cacheon && fwd_second ? ucache_find(sources[j]) : -1;
+            if (hit >= 0) {                   /* the first pass's bytes and records for this unit */
+                unit.n=ucache[hit].n; unit.b=xrealloc(0,unit.n?unit.n:1); memcpy(unit.b,ucache[hit].b,unit.n);
+                ucache_replay(hit);
+            } else {
+                long before = ATTRS.n ? ATTRS.n : 4;
+                unit.b=source_read(sources[j],&unit.n);
+                rc=runroute(unitroute,&unit,sources[j]);
+                if (rc) { free(unit.b); break; }
+                if (cacheon && fwdwant && nucache < 256) {
+                    int k=nucache++; ucache[k].path=sources[j];
+                    ucache[k].n=unit.n; ucache[k].b=xrealloc(0,unit.n?unit.n:1); memcpy(ucache[k].b,unit.b,unit.n);
+                    long after = ATTRS.n ? ATTRS.n : 4; unsigned cnt=(unsigned)((after-before)/9);
+                    ucache[k].nattr=cnt; ucache[k].attr=xrealloc(0,cnt?5*cnt:1);
+                    for (unsigned r=0;r<cnt;r++) memcpy(ucache[k].attr+5*r, ATTRS.b+before+9*r+4, 5);
+                }
+            }
             int namelen=strlen(sources[j]);
             long framed=(long)unit.n+4+(long)namelen;
             if (framed>0x7fffffff) return clierror("unit frame too large");
