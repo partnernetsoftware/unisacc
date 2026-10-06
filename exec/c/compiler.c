@@ -622,15 +622,17 @@ int main(int argc, char **argv) {
         const char *uc=getenv("UNISA_FWD_UNITCACHE");
         int cacheon = !deps && !(uc && !strcmp(uc,"0"));
 #ifndef _WIN32
-        const char *uj=getenv("UNISA_JOBS"); int jobs = uj ? atoi(uj) : 4;
+        const char *uj=getenv("UNISA_JOBS"); int jobs = uj ? atoi(uj) : 8;   /* F4: 8 with a rolling pool */
         if (cacheon && !fwd_second && !warnings && jobs > 1 && nsources > 1 && nucache + nsources <= 256) {
             const char *td=getenv("TMPDIR"); char pf[200]; int me=(int)getpid();
             long base = ATTRS.n ? ATTRS.n : 4;
-            for (int j0=0;j0<nsources;j0+=jobs) {
-                int pids[64]; int nb = nsources-j0 < jobs ? nsources-j0 : jobs; if (nb>64) nb=64;
-                for (int q=0;q<nb;q++) {
-                    int j=j0+q; pids[q]=(int)fork();
-                    if (pids[q]==0) {
+            /* F4: a rolling pool -- a finished worker's slot takes the next unit at once */
+            int pids[256], live=0, next=0; if (jobs>64) jobs=64;
+            for (int j=0;j<nsources;j++) pids[j]=0;
+            while (next<nsources || live>0) {
+                while (next<nsources && live<jobs) {
+                    int j=next++; pids[j]=(int)fork();
+                    if (pids[j]==0) {
                         if (!freopen("/dev/null","w",stderr)) _exit(1);   /* a failing unit is reported by the serial path, once */
                         Buf unit={0}; ATTR_UNIT=j; unit.b=source_read(sources[j],&unit.n);
                         int r=runroute(unitroute,&unit,sources[j]); if (r) _exit(1);
@@ -642,19 +644,23 @@ int main(int argc, char **argv) {
                         if (fclose(f)) _exit(1);
                         _exit(0);
                     }
+                    if (pids[j]>0) live++;
                 }
-                for (int q=0;q<nb;q++) {
-                    int st=0, j=j0+q; if (pids[q]<=0) continue;
-                    if (waitpid(pids[q],&st,0)!=pids[q] || !WIFEXITED(st) || WEXITSTATUS(st)) continue;
-                    snprintf(pf,sizeof pf,"%s/ua-unit-%d-%d",td&&*td?td:"/tmp",me,j);
-                    FILE *f=fopen(pf,"rb"); if (!f) continue;
-                    unsigned n=0,cnt=0; int ok=par_get(f,&n);
-                    unsigned char *b=ok?xrealloc(0,n?n:1):0; if (ok) ok=fread(b,1,n,f)==n && par_get(f,&cnt);
-                    unsigned char *at=ok?xrealloc(0,cnt?5*cnt:1):0; if (ok) ok=fread(at,1,5*(size_t)cnt,f)==5*(size_t)cnt;
-                    fclose(f); remove(pf);
-                    if (!ok || ucache_find(sources[j])>=0) { free(b); free(at); continue; }
-                    int k=nucache++; ucache[k].path=sources[j]; ucache[k].n=(int)n; ucache[k].b=b; ucache[k].nattr=cnt; ucache[k].attr=at;
-                }
+                if (!live) break;
+                int st=0, w=(int)waitpid(-1,&st,0), j=-1;
+                if (w<=0) break;
+                for (int q=0;q<nsources;q++) if (pids[q]==w) { j=q; break; }
+                if (j<0) continue;
+                live--; pids[j]=0;
+                if (!WIFEXITED(st) || WEXITSTATUS(st)) continue;
+                snprintf(pf,sizeof pf,"%s/ua-unit-%d-%d",td&&*td?td:"/tmp",me,j);
+                FILE *f=fopen(pf,"rb"); if (!f) continue;
+                unsigned n=0,cnt=0; int ok=par_get(f,&n);
+                unsigned char *b=ok?xrealloc(0,n?n:1):0; if (ok) ok=fread(b,1,n,f)==n && par_get(f,&cnt);
+                unsigned char *at=ok?xrealloc(0,cnt?5*cnt:1):0; if (ok) ok=fread(at,1,5*(size_t)cnt,f)==5*(size_t)cnt;
+                fclose(f); remove(pf);
+                if (!ok || ucache_find(sources[j])>=0) { free(b); free(at); continue; }
+                int k=nucache++; ucache[k].path=sources[j]; ucache[k].n=(int)n; ucache[k].b=b; ucache[k].nattr=cnt; ucache[k].attr=at;
             }
         }
         int prefilled = !fwd_second && nucache > 0;
