@@ -54,9 +54,9 @@ int main(void) {
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
-    int objwant; int bgiven; int funit; int asmwant;
+    int objwant; int bgiven; int funit; int asmwant; int sgiven;
     srcroom(0);
-    asmwant = 0;
+    asmwant = 0; sgiven = 0;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
     ninput = 0; objwant = 0; bgiven = 0; funit = 0;
     ftrim_libc = 1;
@@ -121,7 +121,7 @@ int main(void) {
                means what it means to gcc, and the usage line says so. */
             } else { if (a[1] == 99 || a[1] == 83) { dump = 1;   /* -c, -S */
                 if (a[1] == 99) objwant = 1;             /* -c -b lnx/ARCH writes a relocatable ELF */
-                if (a[1] == 83) asmwant = 1;             /* -S -b lnx/ARCH writes that object as GNU assembly */
+                if (a[1] == 83) { asmwant = 1; sgiven = 1; }            /* -S -b lnx/ARCH writes that object as GNU assembly */
             } else { if (a[1] == 118) { verb = 1;          /* -v */
             } else { if (a[1] == 111) {                    /* -o */
                 if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
@@ -308,8 +308,8 @@ int main(void) {
         } else {
             /* R21-4a': a written image forwards too (osx: libSystem; lnx: libc.so.6
                through a dynamic ELF; win: ucrtbase/kernel32/ws2_32 via GetProcAddress); objects, tapes and -E do not.
-               0.0.31 S3: -S does -- it prints the program -o would write */
-            if (pponly == 0 && objwant == 0 && emitbin == 0 && (dump == 2 || dump == 1) && (t[0] == 111 || t[0] == 108 || t[0] == 119)) {
+               0.0.31 S3: bare -S does -- it prints the program -o would write (-b T -S keeps the tape contract) */
+            if (pponly == 0 && objwant == 0 && emitbin == 0 && (dump == 2 || (dump == 1 && sgiven && bgiven == 0)) && (t[0] == 111 || t[0] == 108 || t[0] == 119)) {
                 if (fe_units_fwd(inputs, &ninput, t, 1)) return 1;
                 r = 0;
             } else r = fe_units(inputs, ninput, t);
