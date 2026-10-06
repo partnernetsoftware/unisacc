@@ -137,6 +137,30 @@ target() {
     manifest write "$name"
     echo "completed compiler target $os/$arch"
 }
+# 0.0.32 B5: with SEED_GEN=1 the compiler package is declared and written by C99 seed tools too:
+# the model jobs (compilerpack.py model_jobs/PREP_PARTS) go through seed-gen + tn into $T/models,
+# seed/compilerpack.c writes routes.tsv, predefines and the model audit, and seed/pack.c (zlib) the
+# P3 package -- byte-equal to compilerpack.py + pack.py (tests/seedpackcheck.sh, seedcompilerpackcheck.sh).
+seedtool() {   # seedtool NAME SOURCE [CC FLAG...]: build $T/seedbin/NAME once (parts build in parallel)
+    n=$1; src=$2; shift 2
+    if [ ! -x "$T/seedbin/$n" ]; then
+        mkdir -p "$T/seedbin"; b ${SEED_GEN_CC:-cc} -std=c99 -O2 -w -I"$R/seed" "$R/$src" -o "$T/seedbin/$n.$$" "$@" && mv -f "$T/seedbin/$n.$$" "$T/seedbin/$n"
+    fi
+}
+modeljob() {   # modeljob NAME: one compilerpack model job into $T/models/NAME.{tbl,net}
+    case $1 in
+        warnparse) set -- "$1" parse2 --warnings --errors;; errorparse) set -- "$1" parse2 --errors;;
+        warnunits) set -- "$1" parse2/units --locations;; warnlex) set -- "$1" lex --locations;; tokenlex) set -- "$1" lex;;
+        tokenpp) set -- "$1" pp --shared-predefines --no-autoinc;; warnpp-shared) set -- "$1" pp --locations --shared-predefines;;
+        object-lower-x86_64) set -- "$1" lower --full --object;; object-lower-arm64) set -- "$1" lower --full --object --arm64;;
+        object-enc-x86_64) set -- "$1" enc --object;; object-enc-arm64) set -- "$1" enc/arm --object;;
+        *) echo "unknown model job $1" >&2; exit 2;;
+    esac
+    mkdir -p "$T/models"; n=$1; shift
+    gen "$1" "$T/models/$n.json" "$@"
+    tn "$T/models/$n.json" "$T/models/$n.tbl" "$T/models/$n.net"
+    rm -f "$T/models/$n.json"
+}
 pack_prep() {
     # Part $1 of the model construction (compilerpack.py PREP_PARTS) into this
     # build's own cache, so each bounded step stays well under 55 s (0.0.23: one
@@ -149,7 +173,15 @@ pack_prep() {
             routes="$routes $T/$os-$arch/route.tsv"
         done
     done
+    if [ "${SEED_GEN:-1}" = 1 ]; then
+        case $1 in
+            1) jobs=warnparse;; 2) jobs=errorparse;;
+            3) jobs="warnunits warnlex tokenlex tokenpp warnpp-shared object-lower-arm64 object-lower-x86_64 object-enc-arm64 object-enc-x86_64";;
+        esac
+        for j in $jobs; do modeljob "$j"; done
+    else
     UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py --prepare-only --part "$1/3" --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include -o /dev/null $routes
+    fi
     ident > "$T/pack-prep-$1.done"   # completion record (comboot step manifest)
     echo "prepared model part $1/3"
 }
@@ -172,7 +204,15 @@ pack_models() {
     # directory (empty before pack-prep-1); pack-prep-1..3 fill it and pack-models only
     # packages (--require-cached: a missing model is an error, not a slow rebuild).
     # Cache hits re-check the product digests.
+    if [ "${SEED_GEN:-1}" = 1 ]; then
+        seedtool compilerpack seed/compilerpack.c; seedtool pack seed/pack.c -lz
+        rm -rf "$T/pack-routes"
+        b "$T/seedbin/compilerpack" "$T/pack-routes" --o1 "$T/shared/o1.net" --e2 "$T/shared/e2.net" --nativeabi "$T/shared/nativeabi.net" --models "$T/models" --kernels "$T/kernels" --audit-dir "$T/model-audit" "$@"
+        [ "$codec_flag" = --compressed ] || codec_flag=
+        b "$T/seedbin/pack" $codec_flag -o "$T/compiler.pkg" --mount 006864722f include --mount 006b65726e656c2f "$T/kernels" --mount 00707265646566696e65732f "$T/pack-routes/predefines" "$T/pack-routes/routes.tsv"
+    else
     UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py --require-cached $codec_flag --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    fi
     [ -s "$T/compiler.pkg" ]
     printf '%s\n' "$source_start" > "$T/compiler.pkg.source"   # the identity pack-driver seals with
     echo "model package: $T/compiler.pkg"
