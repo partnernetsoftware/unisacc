@@ -72,6 +72,13 @@ def carry_check(plan):
                 if plan_file(ver) is None: bad.append('%s: %s defers to v%s, which has no plan file' % (src.name, rid, ver))
                 elif src is prev and ver == '0.0.%d' % n and (renamed or rid) not in here:
                     bad.append('%s defers %s to v%s, but %s has no row %s' % (src.name, rid, ver, plan.name, renamed or rid))
+                elif src is prev and ver == '0.0.%d' % n:
+                    # E42 (unisa coordinator 10-06): the count carried here must equal the count the
+                    # previous plan's marker states (`顺延 3 → ...` lands as a row whose last cell is 3)
+                    said = re.match(r'顺延\s*(\d+)', marks[0])
+                    got = re.match(r'\s*(\d+)', here[renamed or rid].rstrip().rstrip('|').split(' | ')[-1])
+                    if said and (not got or got.group(1) != said.group(1)):
+                        bad.append('%s defers %s %s times, but %s row %s counts %s' % (src.name, rid, said.group(1), plan.name, renamed or rid, got.group(1) if got else 'nothing'))
     receipt = ROOT / 'research' / ('r%d-release-acceptance.json' % (n - 1))
     if receipt.is_file():
         import json
