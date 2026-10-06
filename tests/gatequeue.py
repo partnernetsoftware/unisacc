@@ -331,6 +331,7 @@ def main():
     histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(profile).hexdigest()[:16]+'.json')
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]
+    exclusive |= {n for n in data.get('retried', []) if n in pending}   # a retry runs alone in later windows too
     active = {}; start = time.monotonic(); deadline = start + args.window
     def estimate(n): return min(args.window-2, max(2, history.get(n, 30)*1.3+1))
     try:
@@ -363,6 +364,11 @@ def main():
                     pending.append(n)
                     data.setdefault('deferred', []).append({'name':n,'limit':limit})
                     history[n] = max(elapsed*2, history.get(n,0))
+                elif rc == 142 and n not in data.setdefault('retried', []) and n not in exclusive:
+                    # 0.0.32: a full attempt that timed out is retried once, alone (q10-q12: jobs that take
+                    # 24-45 s alone hit the watchdog beside three others); a second timeout is the result
+                    pending.append(n); exclusive.add(n); data['retried'].append(n)
+                    history[n] = max(elapsed, history.get(n,0))
                 else:
                     data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit}
                     history[n] = elapsed
