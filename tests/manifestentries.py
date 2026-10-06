@@ -207,14 +207,17 @@ def extended_contracts(stage):
         target,actions=edge(g,'START',0)
         assert target=='LINE' and actions[:4]==[('LDI','dn',0),('LDI','ns',0),('LDI','rn',0),('LDI','data_limit',f['posix_limit'])],'START limit'
     def definition(g):
-        _,actions=edge(g,'D.ne',0)
-        assert actions==[('INTERN','ni','nstart','nend'),('LDX','t','ni',f['DEFINED']),('CMPI','t',0)],'D.ne'
+        # 511802e1: D.ne interns then checks the thread-mode name; the DEFINED test moved to D.thread.check
+        target,actions=edge(g,'D.ne',0)
+        assert target=='D.thread.check' and actions==[('INTERN','ni','nstart','nend'),('CMP','ni','id_thread')],'D.ne'
+        _,actions=edge(g,'D.thread.check',0)
+        assert actions==[('LDX','t','ni',f['DEFINED']),('CMPI','t',0)],'D.thread.check'
     return [
         ('string-kind',lambda g:expect(g,'D.str','D.ws',[('LDI','is_bss',0)]),('data-result.tsv','D.str','*','actions','"is_bss",0','"is_bss",1')),
         ('bss-kind',lambda g:expect(g,'D.bss','D.ws',[('LDI','is_bss',1)]),('data-result.tsv','D.bss','*','actions','"is_bss",1','"is_bss",0')),
         ('copy-line',lambda g:expect(g,'COPYLINE','CL',[('JUMP','line')]),('data-result.tsv','COPYLINE','*','target','CL','SKIP')),
         ('limit',limit,('data-result.tsv','START','*','actions','"constant","data_limit"','"constant","extra"')),
-        ('definition',definition,('data-result.tsv','D.ne','*','actions','"constant","DEFINED"','"constant","RAW"')),
+        ('definition',definition,('data-result.tsv','D.thread.check','*','actions','"constant","DEFINED"','"constant","RAW"')),
         ('reject',lambda g:expect(g,'FAIL','DEAD',[('REJECT','not covered: tape data directive')]),('data-result.tsv','FAIL','*','target','DEAD','RET'))]
 
 
