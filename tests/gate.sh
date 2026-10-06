@@ -9,6 +9,9 @@
 # freshly written binaries are not held for the first-launch scan.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
+# F4 made the product driver default to 8 unit workers; gate jobs run several at once,
+# so each job gets 2 (R4 budget: outer jobs x UNISA_JOBS).  The csih F4 benchmark keeps 8.
+export UNISA_JOBS=${UNISA_JOBS:-2}
 if [ "$(uname -s)" = Darwin ] && [ -z "${TERM_SH_INSIDE:-}" ] && [ "${TERM_SH:-1}" != 0 ]; then
     TERM_SH_ALARM=${TERM_SH_ALARM:-60} exec ./tests/term.sh ./tests/gate.sh "$@"
 fi
