@@ -8,7 +8,7 @@ hang where cc finished is a failure, unless the seed is listed in tests/csmithdi
 (one "seed compiler" per line, removed when fixed -- a listed seed that passes is red).
 Seeds: SEEDS=a-b (default 1-40), split by SHARD=k/n.  Needs csmith (Homebrew) on PATH.
 """
-import os, pathlib, shutil, subprocess, sys, tempfile
+import hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BOUND = [sys.executable, str(ROOT / 'tests/bound.py')]
 CSMITH = shutil.which('csmith') or sys.exit('csmithdiff: csmith not found (brew install csmith)')
@@ -18,6 +18,12 @@ OPTS = ['--no-packed-struct', '--no-bitfields', '--no-volatiles', '--max-funcs',
 def run(cmd, timeout, cwd=None):
     r = subprocess.run(BOUND + [str(timeout)] + cmd, capture_output=True, cwd=cwd)
     return r.returncode, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace')
+
+# cc's verdict per seed depends only on csmith, its headers, cc and OPTS: cache it, so the
+# csmithdiff-k and com-csmithdiff-k jobs (and reruns) pay the 5 s no-verdict seeds once.
+WANT = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'unisacc-csmith-want'
+CCID = subprocess.run(['cc', '--version'], capture_output=True).stdout
+def want_key(seed): return hashlib.sha256(repr((str(pathlib.Path(CSMITH).resolve()), str(INC), CCID, OPTS, seed)).encode()).hexdigest()
 
 def launch(comp): return ['sh', comp] if comp.endswith('.com') else [comp]
 
@@ -39,9 +45,14 @@ with tempfile.TemporaryDirectory(prefix='unisacc-csmith-') as td:
         rc, out, _ = run([CSMITH, '--seed', str(seed)] + OPTS, 20, cwd=d)   # csmith writes platform.info into its cwd
         if rc: print('csmithdiff FAIL generate', seed); bad += 1; continue
         src.write_text(out)
-        rc, _, err = run(['cc', '-std=c99', '-w', '-I' + str(INC), '-o', str(d / 'ref'), str(src)], 30)
-        if rc: print('csmithdiff FAIL cc', seed, err[:120]); bad += 1; continue
-        want = run([str(d / 'ref')], 5)
+        cache = WANT / (want_key(seed) + '.json')
+        try: want = tuple(json.loads(cache.read_text()))
+        except FileNotFoundError:
+            rc, _, err = run(['cc', '-std=c99', '-w', '-I' + str(INC), '-o', str(d / 'ref'), str(src)], 30)
+            if rc: print('csmithdiff FAIL cc', seed, err[:120]); bad += 1; continue
+            want = run([str(d / 'ref')], 5)
+            WANT.mkdir(exist_ok=True); tmp = cache.with_suffix('.%d' % os.getpid())
+            tmp.write_text(json.dumps(want)); os.replace(tmp, cache)
         if want[0] != 0: skipped += 1; continue          # cc's build did not finish in 5 s: no verdict
         for label, comp in [('reference', ua)] + ([('product', product)] if product else []):
             got = run(launch(comp) + ['-I' + str(ROOT / 'include'), '-I' + str(INC), '-run', str(src)], 20)
