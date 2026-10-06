@@ -10,6 +10,7 @@ return address pushed on the stack by `call`.
 bytes in the data area and binds NAME for `.lea`.
 """
 
+from .padded import ZData
 import re
 
 REGS = tuple("r%d" % i for i in range(8))
@@ -98,7 +99,7 @@ class Tape:
         self.code = []          # [Insn]
         self.labels = {}        # name -> pc
         self.records = []       # source-order semantic records, including data definitions
-        self.data = bytearray() # packed literals, based at DATA_BASE
+        self.data = ZData()     # packed literals, based at DATA_BASE; zero runs are lengths (R3')
         self.syms = {}          # name -> address
         # Offsets in `data` that hold an absolute data address (a global
         # pointer initialised with a string literal).  The interpreter uses
@@ -145,13 +146,12 @@ class Tape:
             end = addr - DATA_BASE
             nxt = min([a - DATA_BASE for a in self.syms.values()
                        if a - DATA_BASE > end] + [len(self.data)])
-            blob = self.data[end:nxt]
             # a large zero-filled global is `.bss`, not a quoted literal: a
             # 64 KB arena would otherwise serialise as 64 KB of "\0"
-            if len(blob) > 16 and not any(blob):
-                out.append(".bss %s %d" % (name, len(blob)))
+            if nxt - end > 16 and self.data.count(0, end, nxt) == nxt - end:
+                out.append(".bss %s %d" % (name, nxt - end))
             else:
-                out.append(".str %s %s" % (name, _quote(blob)))
+                out.append(".str %s %s" % (name, _quote(self.data[end:nxt])))
         rev = {}
         for name, pc in self.labels.items():
             rev.setdefault(pc, []).append(name)
@@ -275,7 +275,7 @@ def parse(text):
         if line.startswith(".bss "):
             name, n = line[5:].split()
             before = len(t.records)
-            t.string(name, b"\x00" * int(n), align=8)
+            t.string(name, bytes(int(n)), align=8)   # calloc: pages untouched
             record = ("bss", name, int(n))
             if len(t.records) == before:
                 t.records.append(record)

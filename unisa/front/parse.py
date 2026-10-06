@@ -719,7 +719,7 @@ class Walker:
             # particular, `extern char x[];` must not leave a one-byte x ahead
             # of the later definition whose string supplies the real bound.
             if not (extern and not init):
-                self.em.t.string(lab, b"\x00" * max(1, size), align=8)
+                self.em.t.string(lab, bytes(max(1, size)), align=8)
             sym = self.sc.declare(name, ty, gkind, sym=lab)
             if init:
                 self.global_init(sym, ty)
@@ -1259,8 +1259,8 @@ class Walker:
                 init = self.eat("=")
                 if init and ty.kind == "arr" and ty.n == 0:
                     ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
-                self.em.t.string(lab, b"\x00" *
-                                 max(1, ty.size(self.sc.structs)), align=8)
+                self.em.t.string(lab, bytes(max(1, ty.size(self.sc.structs))),
+                                 align=8)   # R3': calloc, pages untouched
                 sym = self.sc.declare(name, ty, "global", sym=lab)
                 if init:
                     self.global_init(sym, ty)
@@ -2556,7 +2556,7 @@ class Walker:
         if ty.kind == "arr" and ty.n == 0:
             ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
         lab = "g_cl%d" % self.i
-        self.em.t.string(lab, b"\x00" * max(1, ty.size(self.sc.structs)),
+        self.em.t.string(lab, bytes(max(1, ty.size(self.sc.structs))),
                          align=8)
         self.const_init(lab, ty)
         return lab

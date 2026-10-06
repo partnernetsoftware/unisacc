@@ -7,6 +7,7 @@ exec_target.py, and the fold compares those six results against this one.
 from .bits import MASK64
 from . import fp
 from .fp import OPS3 as FOPS3, OPS2 as FOPS2
+from .padded import copy_data
 import os as _os
 
 from .tape import REGS, SP, MEM_SIZE, STACK_TOP, DATA_BASE
@@ -64,7 +65,7 @@ class VM:
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
         self._brk = MEM_SIZE // 2        # where mmap hands out pages
-        self.mem[DATA_BASE:DATA_BASE + len(tape.data)] = tape.data
+        copy_data(self.mem, DATA_BASE, tape.data)
         # argv lives just above the program's data, NUL terminated
         self.argv = []
         p = DATA_BASE + len(tape.data) + 64

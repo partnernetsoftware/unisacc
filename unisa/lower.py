@@ -153,7 +153,7 @@ def facts(oracle, op, os_, arch, drive="spec"):
     return f
 
 
-from .padded import Padded
+from .padded import Padded, ZData
 
 
 def zero_last(data, syms, base, tail=0):
@@ -184,7 +184,7 @@ def zero_last(data, syms, base, tail=0):
     # (and keep resident) the whole zero tail
     stored = max([new[s] + e - s for (s, e), z in zip(blobs, zero) if not z] + [0])
     out = Padded(bytes(stored), used + tail)
-    view = memoryview(data)
+    view = data if isinstance(data, ZData) else memoryview(data)   # ZData slices build only this blob
     for (s, e), z in zip(blobs, zero):
         if not z:
             out[new[s]:new[s] + e - s] = view[s:e]

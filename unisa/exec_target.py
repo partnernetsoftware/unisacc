@@ -7,6 +7,7 @@ never looks back at the generic tape op. [X-2]
 That is the whole reason --fold is a test: a wrong syscall number, a wrong
 argument register or a wrong gate lands here as a trap or as wrong bytes.
 """
+from .padded import copy_data
 from . import fp
 from .fp import OPS3 as _FOPS3, OPS2 as _FOPS2
 from . import catalog as C
@@ -41,8 +42,7 @@ class Machine:
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
         self._brk = len(self.mem) // 2   # where mmap hands out pages
-        stored = memoryview(tp.data)   # R3': a Padded tail is already zero in mem
-        self.mem[DATA_BASE:DATA_BASE + len(stored)] = stored
+        copy_data(self.mem, DATA_BASE, tp.data)   # R3': zero runs are already zero in mem
         self.R = {r: 0 for r in C.REGS if r != "none"}
         self.R["x16"] = self.R["x17"] = 0      # arm64 IP0/IP1: NR reg + scratch
         self.sp = C.REGMAP[self.arch][7]
