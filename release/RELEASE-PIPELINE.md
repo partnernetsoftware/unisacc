@@ -232,3 +232,13 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **Python 路线的缺口各有清单**：pyfront.knownfail（fat）、difftest-py.knownfail（difftest-py）、ccrun.knownwrong（ccrun）；precheck 的本版号 knownfail 规则不看 pyfront。
 - **签名部署批准可能被网络吞掉**：批准后查 `pending_deployments` 长度为 0 再等。
 - **队列复用目前失效**（P7 实测 0%）：0.0.29 P7′ 修好之前，修一次红就要预计整轮重跑。
+
+## 21. 0.0.31 回顾（2026-10-06，发布前先记）
+
+- 根目录的 `.com` 必须与 `.build.json` 成对。0.0.30 收尾时拷进了签名版，旁边却是未签名包的 json，结果 0.0.31 队列拒绝启动。现在 queue.sh 一律从 CAND_DIR 装入候选的那一对（0d0ab8f8），收尾改用 `install_root.sh`。
+- 签名前必须有草稿 release，否则资格签名会报 release not found。现在 `release_prep.sh` 发现缺少草稿时会自动创建。
+- 不要改正在运行的驱动脚本：bash 边跑边读文件，0.0.31 队列结束时因此报了语法错误。要改就改一份副本。
+- 改了 `tests/all.sh`，要接着跑 `tests/ciplancheck.py`。nativeboot 分片后，release-check 因套件改名而变红。
+- exec/ 下的检查脚本也算产品来源闭包，候选建好后再改它，候选就会被判过期（X31，0.0.32 解决）。
+- 产品 δ 的修复，要先用私有 .com 跑过原来失败的套件，再建候选。候选 2 只凭合成 tape 的字节相等就开建，结果 pthread 运行时段错误。
+- 队列耗时：墙钟 47 分钟，其中作业 6820 s（4 路并行的下限是 28 分钟），窗口外开销 487 s，窗口内利用率 74%；csmithdiff 普通版与 com 版重复跑（已去重）。0.0.32 计划：跨候选按输入闭包复用结果、滚动调度、jobs 6 并保留负载保护。
