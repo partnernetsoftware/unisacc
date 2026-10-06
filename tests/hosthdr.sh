@@ -21,6 +21,8 @@ case "$(uname -s)/$(uname -m)" in Darwin/arm64) HOST=osx/arm64;; Darwin/x86_64) 
 for h in $(cd include && find . -name '*.h' | sed 's|^\./||' | sort); do
     printf '#include <%s>\nint main(void) { return 0; }\n' "$h" > "$T/alone.c"
     for t in "$HOST" lnx/x86_64 win/x86_64; do
+        # 0.0.31 H3: pthread.h refuses Windows on purpose (#error names the version)
+        [ "$h" = pthread.h ] && [ "$t" = win/x86_64 ] && continue
         if "$_BOUND" 30 "$UA" -fno-trim-libc "$T/alone.c" -b "$t" -o "$T/alone.out" 2>"$T/err"; then ok=$((ok+1)); else bad=$((bad+1)); echo "  FAIL alone $h $t: $(head -1 "$T/err")"; fi
     done
 done

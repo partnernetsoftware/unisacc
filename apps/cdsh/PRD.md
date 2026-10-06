@@ -86,4 +86,4 @@ TUI 需要 tty：`unisacc.com ~/.csih/run.c`。它从 `~/env.jsonl` 的 `deepsee
 
 ## 探针
 
-`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；cdsh 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `plans/v0.0.28.md` F1。
+`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；cdsh 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `archive/plans/v0.0.28.md` F1。
