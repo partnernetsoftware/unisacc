@@ -15,5 +15,8 @@ mv -f "$source.$$" "$source"
 # itself was built -- so `closure` staying at 540/540 across the change is
 # the evidence that nothing about it depends on the optimiser (and would
 # be a loud way to discover latent UB if it ever did).
-cc -w -std=c99 ${CFLAGS:--O2} -o "${2:-/tmp/ua_ref}.$$" "${1:-/tmp/ua_ref.c}"
-mv -f "${2:-/tmp/ua_ref}.$$" "${2:-/tmp/ua_ref}"
+# P7': link under the final basename in a private dir -- the ad-hoc codesign Identifier is the
+# output's basename, so a PID-bearing temp name made same-source UAs differ by ~53 bytes
+out="${2:-/tmp/ua_ref}"; tdir=$(mktemp -d "$(dirname "$out")/.ua_ref.XXXXXX") || exit 2
+cc -w -std=c99 ${CFLAGS:--O2} -o "$tdir/$(basename "$out")" "${1:-/tmp/ua_ref.c}" || { rm -rf "$tdir"; exit 1; }
+mv -f "$tdir/$(basename "$out")" "$out"; rm -rf "$tdir"
