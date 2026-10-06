@@ -72,7 +72,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
             r,expect,_=sim.run(enc,lowered,f,two,maxsteps=50000000,loaded=el);assert r=='accept',(f,'explicit at derived base',r)
         assert verdict=='accept' and once==expect,(f,'one-pass binding differs',hex(tb),hex(db),hex(d1))
         (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
-        assert ok([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])==image
+        assert ok([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])==once,(f,'reserved network differs from one-pass')
         (resources/'memory/reserve').unlink()
         (resources/'memory/data').write_bytes(struct.pack('<Q',db))
         print('bound native bytes:',f,'reference = explicit binding = reserved binding = network')
