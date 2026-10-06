@@ -14,3 +14,5 @@ for step in pack-prep-1 pack-prep-2 pack-prep-3 pack-models pack-driver; do
   echo "step $step rc=$rc $(date +%H:%M:%S) $(( $(date +%s)-s0 ))s"; [ $rc -eq 0 ] || exit $rc
 done
 shasum -a 256 $D/unisacc-next.com; python3 exec/c/provenance.py check $D/unisacc-next.com
+# comboot seed pair (RELEASE-PIPELINE §9 step 3): $D/seed/unisacc-seed.com(.build.json); use SEED_DIR=$D/seed
+mkdir -p $D/seed && cp $D/unisacc-next.com $D/seed/unisacc-seed.com && cp $D/unisacc-next.com.build.json $D/seed/unisacc-seed.com.build.json && echo "seed: $D/seed"
