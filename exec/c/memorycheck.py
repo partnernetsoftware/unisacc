@@ -60,7 +60,17 @@ if kind in ('all','cc') and shard in ('all','1/3'):
             if key!='memory/data': one.cache[b'\0'+key.encode()]=struct.pack('<Q',v)
         one.cache[b'\0memory/reserve']=struct.pack('<Q',reserve)
         verdict,once,_=sim.run(enc,lowered,f,one,maxsteps=50000000,loaded=el)
-        assert verdict=='accept' and once==image,(f,'one-pass binding differs')
+        # The reference maps data wherever the OS puts it (ASLR); one-pass places
+        # it at the 16 KiB-aligned end of text plus the dl prefix
+        # (exec/enc/memorylayout-result.tsv ML.reserve-pages). Compare against
+        # the explicit binding at that derived base, not at the live one.
+        d1=((tb+nt+16383)&~16383)+prefix
+        if d1==db: expect=image
+        else:
+            two=sim.Files()
+            for key,v in vals.items(): two.cache[b'\0'+key.encode()]=struct.pack('<Q',d1 if key=='memory/data' else v)
+            r,expect,_=sim.run(enc,lowered,f,two,maxsteps=50000000,loaded=el);assert r=='accept',(f,'explicit at derived base',r)
+        assert verdict=='accept' and once==expect,(f,'one-pass binding differs',hex(tb),hex(db),hex(d1))
         (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
         assert ok([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])==image
         (resources/'memory/reserve').unlink()
