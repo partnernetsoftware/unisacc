@@ -1,14 +1,15 @@
 #!/bin/sh
 # 0.0.32 B5: seed/gen.c builds the product's shared deltas byte-identical to exec/build/gen.py --
 # the stages buildcompiler.sh's `shared` step constructs (e2 pp --shared-predefines, e1 lex --typed,
-# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format, lower --full per target).  Python references are cached by the hash of
+# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format, lower --full per target, and compilerpack's model jobs).  Python references are cached by the hash of
 # exec/ inputs, so a gen.c edit reruns only the C side.     usage: tests/seedgencheck.sh [NAME...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
 T=${TMPDIR:-/tmp}/unisacc-seedgen; mkdir -p "$T"
 key=$(cat exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exec/facts/*.tsv weights/gold/*.tsv 2>/dev/null | shasum | cut -c1-16)
-"$B" 55 cc -std=c99 -O2 -Iseed -o "$T/gen" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
+G=$T/gen.$$; trap 'rm -f "$G"' EXIT   # per run: gate shards build concurrently
+"$B" 55 cc -std=c99 -O2 -Iseed -o "$G" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
 spec() { case $1 in
     e2) echo "pp --shared-predefines";; e1) echo "lex --typed";; e3) echo parse2;; e4) echo "opt --o2";;
     o1) echo opt;; prune) echo prune;; nativeabi) echo nativeabi;;
@@ -16,20 +17,25 @@ spec() { case $1 in
     arm-elf) echo "enc/arm --elf";; arm-macho) echo "enc/arm --macho";; arm-pe) echo "enc/arm --pe";;
     lower-lnx-x) echo "lower --full";; lower-lnx-a) echo "lower --full --arm64";;
     lower-osx-x) echo "lower --full --osx";; lower-osx-a) echo "lower --full --osx --arm64";;
-    lower-win-x) echo "lower --full --win";; lower-win-a) echo "lower --full --win --arm64";; *) echo "?";; esac; }
-names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a"}
+    lower-win-x) echo "lower --full --win";; lower-win-a) echo "lower --full --win --arm64";;
+    obj-lower-x) echo "lower --full --object";; obj-lower-a) echo "lower --full --object --arm64";;
+    obj-enc-x) echo "enc --object";; obj-enc-a) echo "enc/arm --object";;
+    tokenpp) echo "pp --shared-predefines --no-autoinc";; tokenlex) echo lex;; warnlex) echo "lex --locations";;
+    warnparse) echo "parse2 --warnings --errors";; warnunits) echo "parse2/units --locations";;
+    errorparse) echo "parse2 --errors";; warnpp) echo "pp --locations --shared-predefines";; *) echo "?";; esac; }
+names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a tokenpp tokenlex warnlex warnparse warnunits errorparse warnpp"}
 run() {
     n=$1; set -- $(spec "$n"); st=$1; shift
     [ "$st" = "?" ] && { echo "DIFF $n (unknown name)"; return; }
     py="$T/py-$key-$n.json"
     [ -s "$py" ] || { "$B" 55 python3 exec/build/gen.py "$st" "$py.tmp" "$@" >/dev/null 2>&1 && mv "$py.tmp" "$py"; }
     [ -s "$py" ] || { echo "DIFF $n (python reference failed)"; return; }
-    "$B" 55 "$T/gen" "$st" "$T/c-$n.json" "$@" 2> "$T/c-$n.err"
+    "$B" 55 "$G" "$st" "$T/c-$n.json" "$@" 2> "$T/c-$n.err"
     if cmp -s "$T/c-$n.json" "$py"; then echo "SAME $n"; else echo "DIFF $n $(tail -1 "$T/c-$n.err")"; fi
 }
 k=0; for n in $names; do run "$n" > "$T/r-$n.txt" & k=$((k+1)); [ $((k % 4)) = 0 ] && wait; done; wait
 # seed/ident.c: the product source identity, equal to exec/c/provenance.py identity (B5)
-if [ -z "$*" ]; then
+if [ -z "$*" ] || [ "$1" = e2 ]; then   # the first gate shard also checks ident and blob
     names="$names ident"
     { cc -std=c99 -D_POSIX_C_SOURCE=200809L -O2 -w seed/ident.c -o "$T/ident" &&
       a=$("$B" 30 "$T/ident") && p=$("$B" 30 python3 exec/c/provenance.py identity) && [ -n "$a" ] && [ "$a" = "$p" ] &&

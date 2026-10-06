@@ -733,12 +733,18 @@ static void map_actions(Value *out, Value *actions, Value *ctx) {
             int output = !strcmp(value_text(input->items[0].value), "@out");
             Value *value; const unsigned char *s;
             if (input->n != 2) die("invalid mapseq byte expansion");
-            value = map_cell(input->items[1].value, ctx);
-            s = (const unsigned char *)value_text(value);
-            for (; *s; s++) {
+            {   Value *raw = input->items[1].value; size_t n;
+                /* a literal with an embedded "\u0000" ("\u0000cli/funit") keeps every byte */
+                if (raw->kind == JSTR && strlen(raw->s) < raw->n) {
+                    if (memchr(raw->s, '{', raw->n)) die("mapseq byte literal with NUL and fields");
+                    value = raw; n = raw->n;
+                } else { value = map_cell(raw, ctx); n = strlen(value_text(value)); }
+                s = (const unsigned char *)value_text(value);
+                for (const unsigned char *e = s + n; s < e; s++) {
                 Value *byte = value_new(JINT); action = value_new(JARR); byte->number = *s;
                 value_put(action, NULL, value_string(output ? "OUT" : "SBOUT"));
                 value_put(action, NULL, byte); value_put(out, NULL, action);
+                }
             }
             continue;
         }
@@ -979,6 +985,9 @@ static char *template_subst_ctx(const char *text, Value *scope, Value *labels,
             } else {
                 dot = strchr(path, '.'); if (dot) *dot++ = 0;
                 value = value_get(scope, path); if (dot) value = value_get(value, dot);
+            }
+            if (value && value->kind == JARR) {   /* finite_rules var(): a list renders as JSON */
+                buf_value(&out, value); free(path); i = (size_t)(end - text); continue;
             }
             piece = value_scalar_text(value, number);
             if (!piece) die("unbound template variable");
@@ -4018,15 +4027,18 @@ static Value *manifest_bind_cells(const char *cells, Value *facts, Value *env) {
     }
     free(all); return out;
 }
-static Value *manifest_byte_actions(const char *text, const char *op) {
+static Value *manifest_byte_actions_n(const char *text, size_t n, const char *op) {
     Value *seq = value_new(JARR);
-    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+    for (const unsigned char *p = (const unsigned char *)text; p < (const unsigned char *)text + n; p++) {
         Value *action = value_new(JARR), *number = value_new(JINT);
         number->number = *p;
         value_put(action, NULL, value_string(op)); value_put(action, NULL, number);
         value_put(seq, NULL, action);
     }
     return seq;
+}
+static Value *manifest_byte_actions(const char *text, const char *op) {
+    return manifest_byte_actions_n(text, strlen(text), op);
 }
 static void manifest_seqrows_file(const char *dir, Value *spec, const char *op,
                                   const char *prefix, Value *sequences, Value *names) {
@@ -4044,7 +4056,7 @@ static void manifest_seqrows_file(const char *dir, Value *spec, const char *op,
         if (decoded->kind != JSTR) die("sequence row is not a string");
         name = grow(NULL, strlen(prefix) + strlen(field[0]) + 1, 1);
         strcpy(name, prefix); strcat(name, field[0]);
-        value_put(sequences, name, manifest_byte_actions(decoded->s, op));
+        value_put(sequences, name, manifest_byte_actions_n(decoded->s, decoded->n, op));   /* "\u0000" survives */
         if (names) value_put(names, NULL, value_string(field[0]));
         free(name); free(s);
     }
@@ -4080,11 +4092,22 @@ static void manifest_outseq(const char *dir, const char *stem, Value *sequences)
         if (ferror(f) || close_in(f)) die("manifest outseq read failed");
     }
 }
+static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *facts,
+                                     Value *opts, Value *env, void *arg);
+/* Run.one: a stem starting with '@' is a value (`@fmt:XO.original.{it[state]}`). */
 static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                                  Value *opts, Value *env, void *arg) {
+    char *stem = row->cell[1];
+    if (stem[0] == '@') row->cell[1] = (char *)value_text(manifest_cell(stem, facts, env));
+    manifest_graph_visit_row(index, row, facts, opts, env, arg);
+    row->cell[1] = stem;
+}
+static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *facts,
+                                     Value *opts, Value *env, void *arg) {
     ManifestGraph *ctx = arg; char path[1024];
     (void)index;
     if (ctx->done) return;
+    if (getenv("SEED_GEN_TRACE")) fprintf(stderr, "row %s %s %s %s\n", ctx->dir, row->cell[0], row->cell[1], row->cell[2]);
     Value *once = value_get(opts, "once");
     if (once) {
         const char *name = value_text(once);
@@ -4482,7 +4505,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         Value *classes = classopt ? value_path(facts, value_text(classopt)) : NULL;
         Value *domain = numeric_domain(0, 257), *sequences = value_new(JOBJ);
         Value *bindings = manifest_bind_cells(row->cell[7], facts, env);
-        Buffer expanded, edits = {0}; FILE *table; char *owner = NULL;
+        Buffer expanded, edits = {0}; FILE *table; char *owner = NULL; Value *tmodes;
         const char *section = row->cell[2];
         for (size_t i = 0; i < opts->n; i++)
             if (strcmp(opts->items[i].key, "mode") && strcmp(opts->items[i].key, "domain") &&
@@ -4543,7 +4566,8 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                                   value_text(msgrows->items[2].value), sequences, names);
             value_put(facts, value_text(msgrows->items[1].value), names);
         }
-        expanded = expand_template_file_fresh_edit(path, facts, section, owner, NULL, &edits);
+        tmodes = value_new(JOBJ);
+        expanded = expand_template_file_fresh_edit(path, facts, section, owner, tmodes, &edits);
         table = buffer_file(&expanded);
         if (mapseq) {
             Value *mapfacts = seed_env_copy(facts);
@@ -4564,6 +4588,11 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         install_delta_text_bound(ctx->graph, table, modeopt ? value_text(modeopt)[0] : 'r', domain,
                                  classes, sequences, overlayopt && manifest_truth(overlayopt), 0,
                                  NULL, "START", bindings);
+        for (size_t i = 0; i < tmodes->n; i++)   /* rule:MODE: g.on(..., modes.get(state, mode)) */
+            for (size_t j = 0; j < ctx->graph->n; j++)
+                if (!strcmp(ctx->graph->state[j].name, tmodes->items[i].key)) {
+                    ctx->graph->state[j].mode = value_text(tmodes->items[i].value)[0]; break;
+                }
         {
             Value *groups = value_new(JOBJ), *result = value_get(opts, "result");
             manifest_template_edits(ctx->graph, &edits, bindings, sequences,
@@ -8655,7 +8684,8 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-body")) {
         inspect_pp_through_linedir(argv[2], 2); return 0;
     }
-    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--shared-predefines"))) && !strcmp(argv[1], "pp")) {
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--shared-predefines"))) && !strcmp(argv[1], "pp") &&
+        !getenv("SEED_GEN_GENERIC")) {
         pp_shared_predefines = argc == 4; inspect_pp_through_linedir(argv[2], 3); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
@@ -8862,6 +8892,48 @@ int main(int argc, char **argv) {
         output_graph(out, &g, value_text(value_get(env, "ex_ret")), NULL);
         if (close_in(out)) die("output close failed");
         return 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "prune")) {
+        /* gen.py's generic driver for a parsebase manifest: flags from `#! flags`,
+           start from `#! start` (a literal or $env name). */
+        char man[512], *slash = strchr(argv[1], '/'), *s; FILE *f; char flagline[512] = "", start[256] = "START";
+        int other = 0;
+        if (slash) snprintf(man, sizeof man, "exec/%.*s/%s-manifest.tsv", (int)(slash - argv[1]), argv[1], slash + 1);
+        else snprintf(man, sizeof man, "exec/%s/gen-manifest.tsv", argv[1]);
+        if (!(f = fopen(man, "rb"))) die("usage: seed-gen STAGE OUT.json [--FLAG...]");
+        while ((s = line(f))) {
+            if (!strncmp(s, "#! flags ", 9)) snprintf(flagline, sizeof flagline, " %s ", s + 9);
+            else if (!strncmp(s, "#! start ", 9)) snprintf(start, sizeof start, "%s", s + 9);
+            else if (!strncmp(s, "#! base ", 8)) { if (strcmp(s + 8, "build/parsebase.py") && strcmp(s + 8, "build/graph.py")) other = 1; }
+            else if (!strcmp(s, "#! graph G")) { }   /* the same G parsebase uses */
+            else if (!strncmp(s, "#! ", 3)) other = 1;
+            free(s);
+        }
+        close_in(f);
+        if (other) die("seed-gen: this stage's manifest head is not yet covered");
+        {
+            ManifestRows rows = manifest_rows(man);
+            ManifestGraph ctx = {0}; Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
+            char dir[512]; const char *st = start;
+            for (int i = 3; i < argc; i++) {
+                char want[128];
+                snprintf(want, sizeof want, " %s ", argv[i] + 2);
+                if (strncmp(argv[i], "--", 2) || !strstr(flagline, want)) die("seed-gen: unknown stage flag");
+            }
+            for (char *p = strtok(flagline, " "); p; p = strtok(NULL, " ")) {
+                Value *v = value_new(JBOOL); v->number = has_flag(argc - 3, argv + 3, p);
+                value_put(flags, p, v);
+            }
+            snprintf(dir, sizeof dir, "%s", man); *strrchr(dir, '/') = 0;
+            ctx.graph = &g; ctx.dir = dir; ctx.flags = flags; ctx.accum = value_new(JOBJ);
+            manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
+            if (start[0] == '$') st = value_text(value_get(env, start + 1));
+            finish(&g);
+            out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+            output_graph(out, &g, st, NULL);
+            if (close_in(out)) die("output close failed");
+            return 0;
+        }
     }
     if ((argc != 3 && argc != 4) || strcmp(argv[1], "prune")) die("usage: seed-gen prune OUT.json [RULE_DIR]");
     manifest(&g, argc == 4 ? argv[3] : "exec/prune");

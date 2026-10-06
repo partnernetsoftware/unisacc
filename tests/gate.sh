@@ -466,7 +466,10 @@ job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags m
 job seedfacts python3 ./tests/seedfactscheck.py   # 0.0.29 B4: seed/facts.h bindings and lets equal assemble.py on every manifest
 job seedparse2-1 ./tests/seedparse2check.sh x locations warnings errors   # 0.0.29 B4: seed/gen.c parse2 = gen.py, eight variants in two jobs
 job seedparse2-2 ./tests/seedparse2check.sh locations,warnings locations,errors warnings,errors locations,warnings,errors
-job seedgen ./tests/seedgencheck.sh   # 0.0.32 B5: seed/gen.c = gen.py on the seven shared deltas buildcompiler.sh constructs
+# 0.0.32 B5: seed/gen.c = gen.py on every delta the build constructs; three shards stay under the 60 s ceiling
+job seedgen ./tests/seedgencheck.sh e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe
+job seedgen-2 ./tests/seedgencheck.sh lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a
+job seedgen-3 ./tests/seedgencheck.sh tokenpp tokenlex warnlex warnparse warnunits errorparse warnpp
 scparts=$(python3 "$R/tests/seedconstructcheck.py" --list) || scparts=""
 [ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.py --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
 for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
