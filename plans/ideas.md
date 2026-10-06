@@ -176,3 +176,11 @@
 
 **结论状态**：用户直觉假设，方向合理（int32 权重 + SIMD 与现有整数内核同向，值得一测）；曾排入 0.0.11 探索区（R12-5 ④ 有界可行性片），按最小实验决定是否立项。
 
+
+### FX-7 构建链去 Python：用 unisacc 自己替换（cc 2026-10-06）
+
+B5 已把共享步的七个 δ 换成 `seed/gen.c`（cc 编译）。思路：剩余 Python（compilerpack/provenance/blob/`unisa ape`/manifest heredoc、Makefile、comboot）逐个改写为 C99，并由 `unisacc.com` 自己编译。障碍即 D2：产品 stdio 不带缓冲、-O2 构建的 seed-gen 段错误；D2 修好后 `SEED_GEN_CC` 默认改为 `unisacc.com`。验收：PATH 里去掉 python3，仍能从种子构建候选版。
+
+### FX-8 发布队列提效（cc 2026-10-06）
+
+0.0.31 rc 队列跑了 676 个套件，只红了 freezecheck，而这个红在队列跑之前就能查出来。思路：版本提交之后先跑一次只读的 freezecheck/ledgercheck，再开队列；队列负载高时 Linux nativeboot/ape 在 55 秒处超时，复跑前先查负载，把重套件安排到负载低的窗口。
