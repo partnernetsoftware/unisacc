@@ -25,7 +25,7 @@ def main():
         path=pathlib.Path(d)/'tape'
         for i,(name,text) in enumerate(cases):
             path.write_text(text);t=parse(text)
-            expected,syms=zero_last(t.data,t.syms,256)
+            expected,syms,_=zero_last(t.data,t.syms,256)
             expected+=bytes((-len(expected))%8+(WIN_EXTRA if win else SCRATCH+PRINTMAX))
             commands=[[sys.argv[1],sys.argv[2],str(path)]]
             if i<builtin:commands.append([sys.executable,'exec/pp/sim.py',sys.argv[3],str(path)])
