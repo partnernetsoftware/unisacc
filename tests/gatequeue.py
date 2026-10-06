@@ -374,11 +374,13 @@ def main():
     after = fingerprint(jobs)
     if after != stamp:
         if isinstance(after, dict):
-            for n in jobs:
-                if after[n] != stamp[n]: data['results'].pop(n, None)
-        else: data['results'].clear()
+            changed = [n for n in jobs if after[n] != stamp[n]]
+            for n in changed: data['results'].pop(n, None)
+        else:
+            changed = ['(fingerprint shape changed)']
+            data['results'].clear()
         atomic(path, data)
-        raise SystemExit('inputs changed during queue: results invalid')
+        raise SystemExit('inputs changed during queue: results invalid; %d jobs: %s' % (len(changed), ' '.join(changed[:20])))
     bad = [n for n,r in data['results'].items() if r['rc'] != 0]
     missing = set(jobs)-data['results'].keys()
     print('queue: %d/%d completed, %d failed, %d pending, window %.2fs; logs %s' %
