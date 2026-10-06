@@ -22,7 +22,8 @@
 |---|---|---|
 | v0.0.12–v0.0.29 | [archive/plans/](archive/plans/) — 逐版计划与结项收据；发布身份与回执见 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases) 与 research/r*-release-acceptance.json | 已归档 |
 | v0.0.30 | [archive/plans/v0.0.30.md](archive/plans/v0.0.30.md) | 2026-10-06 公开 |
-| v0.0.31 | [plans/v0.0.31.md](plans/v0.0.31.md) | 进行中 |
+| v0.0.31 | [plans/v0.0.31.md](plans/v0.0.31.md) | 已完成，公开待政委裁定 |
+| v0.0.32 | [plans/v0.0.32.md](plans/v0.0.32.md) | 进行中：cc 侧完成；余 H3c、F4（E3 单遍 + 内核 transition）、H1‴/D1 产品 δ（cdx） |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；权重本体与推理速度的精确结构优化实验（§5.2）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
@@ -226,6 +227,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。
 - **发版复盘**（0.0.27 起每版一份，research/r<N>-retrospective.md）：列出各环节耗时、问题与解决、要带进下一版的流程项；能持久化的规则写进 release/RELEASE-PIPELINE.md 的逐版回顾，流程项写进下一版计划（0.0.27 → v0.0.28 R1–R4）。
+- **队列复用与超时**（0.0.32）：只改一份测试文件复用 90.7%（q13）；声明与作业命令两边展开 `{MODEL_COM}`、带 env 前缀的用 `match: contains`，否则退回全局指纹；调度先后在 `tests/gateorder.json`（不进公共指纹）；满额看门狗超时自动独占重试一次；性能断言量 CPU 秒而非墙钟。F4 采样：产品冷编约 92% 样本在执行器内核 transition 热循环。
 - **reviewed trees**：`make gatedeps` 从 HEAD 的 `git archive`（umask 022）计算戳与 guards，作为发布前最后一提交。
 
 ### 开发与发布流水线（向 minicon 学习，v0.0.10 起实行；手册与脚本是权威，此处为索引）
