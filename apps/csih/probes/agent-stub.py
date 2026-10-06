@@ -5,7 +5,7 @@ agent-stub.py — a scripted stand-in for the DeepSeek chat/completions API.
 It returns the SAME JSON shape DeepSeek does:
     {"choices":[{"message":{"role":"assistant","content":"..."}}], ...}
 
-so cdsh's agent.c can be exercised end-to-end with NO DNS, NO TLS, and NO API
+so csih's agent.c can be exercised end-to-end with NO DNS, NO TLS, and NO API
 key. The stub is stateless: it decides what to emit by inspecting the request's
 messages, so two independent agent runs (gcc + unisacc) against one stub are
 both correct.

@@ -28,7 +28,7 @@ mind 的 JSON：`{"act":"mind","op":"add|read","target":"tree|palace","text":"..
 
 ## 怎么跑
 
-不要 `gcc` / `cc` / `clang`。macOS 对 APE 直接 `execve` 得到 ENOEXEC，所以用 `/bin/sh` 当加载器。开发期入口是同目录的 `csih.sh`：`unisacc.com csih.c` 加上文件表。`csih.c` 含 `tui.c`，不再单独占一个翻译单元。`~/.csih/run.c` 读密钥后执行 `csih.sh agent`。旧环境变量 `CDSH_*` 在对应 `CSIH_*` 没设置时仍有效。
+不要 `gcc` / `cc` / `clang`。macOS 对 APE 直接 `execve` 得到 ENOEXEC，所以用 `/bin/sh` 当加载器。开发期入口是同目录的 `csih.sh`：`unisacc.com csih.c` 加上文件表。`csih.c` 含 `tui.c`，不再单独占一个翻译单元。`~/.csih/run.c` 读密钥后执行 `csih.sh agent`。`bin/llm` 和 `bin/rawcsih` 只认 `CSIH_*`。
 
 自迭代的验证环在 `docs/self-iter.md`：改源文件后由 harness 用同一条 `u_spawn` 跑受影响的 `selftest`，红则拒绝 `answer`；整份 `check.c` 绿了才重启 TUI。
 
@@ -66,7 +66,7 @@ TUI 需要 tty：`unisacc.com ~/.csih/run.c`。它从 `~/env.jsonl` 的 `deepsee
 
 代码从 moltbaby 仓迁到 unisacc 仓的 `apps/csih`。这是真正的应用目录。`examples/apps/` 仍是演示，不放 csih。
 
-moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具名是 `csih`，旧说法 `csih` 仍指向同一个启动器。仓外 `~/.cdsh/run.c`（`~/.csih` 指到同一文件）执行的是这份 `csih.sh`。配置仍写在源码里，不把密钥或配置放进 `bin/llm`。
+moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具名是 `csih`。仓外 `~/.cdsh/run.c`（`~/.csih` 指到同一文件）执行的是这份 `csih.sh`。配置仍写在源码里，不把密钥或配置放进 `bin/llm`。
 
 ### 异步 I/O（规划参考）
 

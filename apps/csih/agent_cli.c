@@ -145,6 +145,18 @@ static int agent_run_selftest(void) {
         n = strlen(rec);
         a_expect(n + 1 < sizeof rec && rec[n - 1] == '}' && rec[n - 2] == '"',
                  "  record is closed JSON");
+        a_expect(strstr(rec, "中间略") != NULL, "  a long tool row keeps a middle mark");
+    }
+    {
+        char raw[4100], rec[8256];
+        memset(raw, 'M', sizeof raw - 1);
+        memcpy(raw, "HEADMARK", 8);
+        memcpy(raw + sizeof raw - 9, "TAILMARK", 8);
+        raw[sizeof raw - 1] = 0;
+        a_expect(agent_tool_record(rec, sizeof rec, "file", raw) == 1
+                 && strstr(rec, "HEADMARK") && strstr(rec, "TAILMARK")
+                 && strstr(rec, "中间略") && strlen(rec) < 4000,
+                 "a long tool row keeps its head and its tail");
     }
 
     s = agent_parse("```json\n{\"act\":\"exec\",\"cmd\":\"ls\"}\n```");
@@ -380,6 +392,37 @@ static int agent_run_selftest(void) {
             a_expect(strstr(body, "NEWMARKER") != NULL, "context keeps the newest record");
             a_expect(strstr(body, "OLDMARKER") == NULL, "context drops the oldest record");
             a_expect(strstr(body, "decision") == NULL, "decision records stay off the wire");
+        }
+        free(body);
+        remove(jp);
+    }
+
+    {
+        const char *jp = "/tmp/csih-ctx-keep-user.jsonl";
+        FILE *jf;
+        char *body;
+        int row, col, opened = 0;
+        remove(jp);
+        jf = fopen(jp, "w");
+        a_expect(jf != NULL, "user-keep fixture opens");
+        if (jf) {
+            opened = 1;
+            fprintf(jf, "{\"role\":\"user\",\"text\":\"OLDMARKER\"}\n");
+            for (row = 0; row < 40; row++) {
+                fprintf(jf, "{\"role\":\"tool\",\"name\":\"file\",\"text\":\"%s",
+                        row == 0 ? "TOOLGONE" : "toolpad");
+                for (col = 0; col < 2000; col++) fputc('Q', jf);
+                fprintf(jf, "\"}\n");
+            }
+            fprintf(jf, "{\"role\":\"user\",\"text\":\"NEWMARKER\"}\n");
+            fclose(jf);
+        }
+        body = (char *)malloc(65536);
+        if (body && opened) {
+            agent_ctx_preview(jp, body, 65536);
+            a_expect(strstr(body, "OLDMARKER") != NULL, "a full context keeps the older user line");
+            a_expect(strstr(body, "NEWMARKER") != NULL, "a full context keeps the newest user line");
+            a_expect(strstr(body, "TOOLGONE") == NULL, "a full context drops an old tool row first");
         }
         free(body);
         remove(jp);

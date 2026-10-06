@@ -306,29 +306,65 @@ static int agent_spill(const char *body, size_t n, char *out, size_t outlen) {
     return 1;
 }
 
+/* A long tool result keeps its head and its tail. The middle is the part
+ * that can go. The tail is where a file window names the next line. */
+size_t agent_pack_tool(const char *text, char *out, size_t outlen, size_t cap) {
+    const char *mark = "\n...(中间略)...\n";
+    size_t n, markn, head, tail, ts, used;
+    if (!out || outlen < 8) return 0;
+    if (!text) text = "";
+    n = strlen(text);
+    if (cap > outlen - 1) cap = outlen - 1;
+    if (cap < 8) cap = 8;
+    if (n <= cap) {
+        n = utf8_prefix(text, n);
+        memcpy(out, text, n);
+        out[n] = 0;
+        return n;
+    }
+    markn = strlen(mark);
+    if (cap <= markn + 8) {
+        n = utf8_prefix(text, cap);
+        memcpy(out, text, n);
+        out[n] = 0;
+        return n;
+    }
+    head = (cap - markn) * 2 / 3;
+    tail = cap - markn - head;
+    head = utf8_prefix(text, head);
+    if (tail > n) tail = n;
+    ts = n - tail;
+    while (ts < n && ((unsigned char)text[ts] & 0xc0) == 0x80) ts++;
+    used = head + markn + (n - ts);
+    if (used > cap && head > used - cap) {
+        head = utf8_prefix(text, head - (used - cap));
+        used = head + markn + (n - ts);
+    }
+    if (used > outlen - 1) return 0;
+    memcpy(out, text, head);
+    memcpy(out + head, mark, markn);
+    memcpy(out + head + markn, text + ts, n - ts);
+    out[used] = 0;
+    return used;
+}
+
 /* The record must stay valid JSON. A cut through a UTF-8 byte is a 400. */
 int agent_tool_record(char *rec, size_t recsz, const char *name, const char *text) {
     char esc[AGENT_RESULT_MAX];
     char tmp[AGENT_RESULT_MAX];
-    size_t n, elen, i;
+    size_t cap = 1600;
+    int i;
     if (!rec || recsz < 64) return 0;
-    n = text ? strlen(text) : 0;
-    if (n > 3000) n = 3000;
     for (i = 0; i < 8; i++) {
         size_t recn;
-        n = utf8_prefix(text ? text : "", n);
-        if (n >= sizeof tmp) n = sizeof tmp - 1;
-        memcpy(tmp, text ? text : "", n);
-        tmp[n] = 0;
-        if (text && strlen(text) > n && n + 16 < sizeof tmp)
-            memcpy(tmp + n, "\n... (truncated)", 16), tmp[n + 16] = 0;
-        elen = agent_json_str(tmp, esc, sizeof esc);
+        agent_pack_tool(text, tmp, sizeof tmp, cap);
+        agent_json_str(tmp, esc, sizeof esc);
         recn = (size_t)snprintf(rec, recsz,
             "{\"role\":\"tool\",\"name\":\"%s\",\"text\":\"%s\"}",
             name ? name : "tool", esc);
         if (recn + 1 < recsz && rec[0] == '{' && rec[recn - 1] == '}') return 1;
-        if (n <= 32) break;
-        n -= 32;
+        if (cap <= 64) break;
+        cap = cap > 240 ? cap - 240 : 64;
     }
     snprintf(rec, recsz, "{\"role\":\"tool\",\"name\":\"%s\",\"text\":\"truncated\"}",
              name ? name : "tool");
@@ -821,7 +857,8 @@ int agent_transcript_path(char *out, size_t outlen) {
 
 /* First index of the contiguous newest slice that fits.
  * count records, at most max_recs, costs[i] bytes, budget bytes.
- * A full budget drops the oldest. If nothing fits, returns count. */
+ * A full budget drops the oldest. If nothing fits, returns count.
+ * The wire pack uses agent_ctx_pick, which drops tool rows before user rows. */
 int agent_ctx_start(int count, int max_recs, const int *costs, int budget) {
     int start, i, used;
     if (count < 0) count = 0;
@@ -836,6 +873,41 @@ int agent_ctx_start(int count, int max_recs, const int *costs, int budget) {
         used += c;
     }
     return start;
+}
+
+/* Mark which of the n records go out. The newest row always stays.
+ * Pass 1 drops the oldest tool rows, pass 2 the oldest assistant rows,
+ * pass 3 the oldest remaining rows. User text is last to go, and it is
+ * copied as written, not folded into a summary. */
+static void agent_ctx_pick(int n, const int *costs, int budget,
+                           char roles[][16], const int *wraps, int *use) {
+    int sum = 0, i, pass;
+    if (n < 0) n = 0;
+    if (budget < 0) budget = 0;
+    for (i = 0; i < n; i++) {
+        use[i] = 1;
+        sum += costs && costs[i] > 0 ? costs[i] : 0;
+    }
+    for (pass = 0; pass < 3; pass++) {
+        int guard = 0;
+        while (sum > budget && guard < n) {
+            int victim = -1;
+            for (i = 0; i < n - 1; i++) {
+                int tool, asst;
+                if (!use[i]) continue;
+                tool = wraps && wraps[i];
+                asst = roles && roles[i][0] && !strcmp(roles[i], "assistant");
+                if (pass == 0 && !tool) continue;
+                if (pass == 1 && (tool || !asst)) continue;
+                victim = i;
+                break;
+            }
+            if (victim < 0) break;
+            use[victim] = 0;
+            if (costs && costs[victim] > 0) sum -= costs[victim];
+            guard++;
+        }
+    }
 }
 
 static size_t agent_escaped_len(const char *in) {
@@ -884,8 +956,9 @@ int agent_journal_trim(const char *path, long max_bytes, int keep) {
 /* ── build the chat `messages` JSON from the transcript + system + tail ──────
  * writes `{"model":"__MODEL__","messages":[...],"stream":false}` into out.
  * The caller splices the real model name over __MODEL__. Returns byte count.
- * Eligible records (role + text) are packed newest-first. A full body drops
- * the oldest lines. decision records have no text and stay on disk only. */
+ * Eligible records go out oldest to newest among the rows that fit.
+ * A full body drops tool rows before user rows. A long tool row keeps
+ * its head and its tail. decision records have no text and stay on disk only. */
 
 static int agent_build_messages(const char *transcript, const char *tail,
                                 const char *extra_system, char *out, size_t outlen) {
@@ -899,7 +972,8 @@ static int agent_build_messages(const char *transcript, const char *tail,
     char api_roles[CTX_N][16];
     int wraps[CTX_N];
     int costs[CTX_N];
-    int nvals = 0, keep, k;
+    int use[CTX_N];
+    int nvals = 0, k;
 
     recs = session_read(transcript);
     memset(held, 0, sizeof held);
@@ -970,21 +1044,35 @@ static int agent_build_messages(const char *transcript, const char *tail,
         history_room = room - reserve;
     }
     for (k = 0; k < nvals; k++) {
-        int n = 32 + (int)strlen(api_roles[k]) + (int)agent_escaped_len(texts[k]);
+        char packed[1704];
+        const char *wire = texts[k];
+        int n;
+        if (wraps[k]) {
+            agent_pack_tool(texts[k], packed, sizeof packed, 1600);
+            wire = packed;
+        }
+        n = 32 + (int)strlen(api_roles[k]) + (int)agent_escaped_len(wire);
         if (wraps[k]) n += 16;
         costs[k] = n;
     }
-    keep = agent_ctx_start(nvals, MAX_CTX_RECS, costs,
-                           a < history_room ? (int)(history_room - a) : 0);
-    if (nvals > 0 && keep >= nvals) keep = nvals - 1;
-    for (k = keep; k < nvals && a + 64 < history_room; k++) {
+    agent_ctx_pick(nvals, costs, a < history_room ? (int)(history_room - a) : 0,
+                   api_roles, wraps, use);
+    for (k = 0; k < nvals; k++) {
+        char packed[1704];
+        const char *wire = texts[k];
         size_t before = a;
+        if (!use[k]) continue;
+        if (a + 64 >= history_room && k + 1 < nvals) continue;
+        if (wraps[k]) {
+            agent_pack_tool(texts[k], packed, sizeof packed, 1600);
+            wire = packed;
+        }
         a += (size_t)snprintf(acc + a, sizeof acc - a,
                               ",{\"role\":\"%s\",\"content\":\"", api_roles[k]);
         if (wraps[k]) a += agent_json_str("[tool]\n", acc + a, sizeof acc - a);
-        a += agent_json_str(texts[k], acc + a, sizeof acc - a);
+        a += agent_json_str(wire, acc + a, sizeof acc - a);
         a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
-        if (a >= history_room && k > keep) { a = before; acc[a] = '\0'; break; }
+        if (a >= history_room && k + 1 < nvals) { a = before; acc[a] = '\0'; use[k] = 0; }
     }
 
     if (tail && tail[0] && a + 32 < sizeof acc) {
