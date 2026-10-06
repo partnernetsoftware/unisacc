@@ -272,6 +272,9 @@ poscase "$T/nohdr.c" "5:11" "no such file for #include"
 # (C99 6.2.2p7) -- `static char *environ[]` over <unistd.h> bound to the header's object
 { echo 'extern char **env_zz;'; echo 'static char *env_zz[] = {"A=1", 0};'; echo 'int main(void) { return env_zz[1] != 0; }'; } > "$T/staticafter.c"
 poscase "$T/staticafter.c" "2:14" "static declaration follows a non-static"
+# 0.0.32 D1: a static object's initializer must be constant (C99 6.7.8p4); cc names the call
+{ echo 'int f(int x) { return x + 1; }'; echo 'int v = f(1);'; echo 'int main(void) { return v != 2; }'; } > "$T/staticinit.c"
+poscase "$T/staticinit.c" "2:9" "initializer element is not a compile-time constant"
 printf "  rejection positions: %d named correctly, %d known missing, %d wrong\n" \
     "$pos_ok" "$pos_known" "$pos_bad"
 [ "$pos_bad" -eq 0 ] && [ $((pos_ok + pos_known)) -gt 0 ] && [ "$pos_revived" -eq 0 ] \

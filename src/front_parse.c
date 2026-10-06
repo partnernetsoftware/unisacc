@@ -1785,6 +1785,16 @@ int primary(void) {
             int ai; ai = sfind(tp);
             if (ai >= 0) { if (symkind[ai] == 1 || symkind[ai] == 3)
                 err_tok(tp, "static initializer refers to an automatic object"); }
+            /* 0.0.32 D1: a static object's initializer is a constant expression (C99 6.7.8p4).
+               A call, or the value of an object, used to be accepted and run in __init at
+               startup; cc rejects both.  &x and array names stay address constants. */
+            if (ai >= 0) {
+                if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1) && (symkind[ai] == 2 || symfp[ai]))
+                    err_tok(tp, "initializer element is not a compile-time constant");
+                if (symkind[ai] == 0 && kind(tp + 1) != vfind(TOKV, NTOKV, "(", 1)
+                    && kind(tp - 1) != vfind(TOKV, NTOKV, "&", 1))
+                    err_tok(tp, "initializer element is not a compile-time constant");
+            }
         }
         { int ui; ui = sfind(tp); if (ui >= 0) { if (kind(tp + 1) == tidx("(", 1)) symused[ui] = 1; } }
         if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) {
