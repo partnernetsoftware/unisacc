@@ -184,7 +184,7 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None, dia
     W = {}
     stack = []
     blobs = [b"", bytes(srcpath, "latin-1")]      # blob 1: the source path
-    blobid = {}
+    blobid = {b"\0cli/source": 1}
     intern = {}
     xattr = [0] * len(x)
     frames = [[x, xattr, 0, len(x)]]

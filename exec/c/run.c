@@ -565,10 +565,11 @@ int main(int argc, char **argv) {
     /* 0.0.28 F1: like the driver, ask E1 for its constructor/destructor side-car and hand the
        stripped records to the next stage as \0cli/attributes (stage-by-stage runs pass the stripped
        E1 output on disk, so the records travel in UNISA_ATTRIBUTES when the caller sets it) */
-    static const unsigned char f1one = 1; static ResourceInput sres[2];
+    static const unsigned char f1one = 1; static ResourceInput sres[3];
     sres[0].name = (const unsigned char *)"\0cli/f1"; sres[0].n = 7; sres[0].data = &f1one; sres[0].len = 1;
     sres[1].name = (const unsigned char *)"\0cli/attributes"; sres[1].n = 15; sres[1].data = 0; sres[1].len = 0;
-    if (!RI) { RI = sres; NRI = 2; ATTR_SLOT = 1; }
+    sres[2].name = (const unsigned char *)"\0cli/source"; sres[2].n = 11; sres[2].data = (const unsigned char *)src; sres[2].len = strlen(src);
+    if (!RI) { RI = sres; NRI = 3; ATTR_SLOT = 1; }
     { const char *ap = getenv("UNISA_ATTRIBUTES"); if (ap && *ap) { int an = 0; unsigned char *ab = readfile(ap, &an, 1);
         if (ab) { ATTRS.b = ab; ATTRS.n = an; ATTRS.cap = an; sres[1].data = ab; sres[1].len = an; } } }
     Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
