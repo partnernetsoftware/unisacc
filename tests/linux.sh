@@ -56,9 +56,9 @@ if [ "$slow" -gt 1 ] && [ "$what" = all ] && [ "${ALLOW_EMULATED_ALL:-0}" != 1 ]
     echo "linux: refusing 'all' on emulated $VM (release/RELEASE-PIPELINE.md section 4); run a named suite, or ALLOW_EMULATED_ALL=1"; exit 2
 fi
 
-# R18-11 ⑤: the guest's own limits are not compiler failures.  On the 4 GiB
-# `default` VM the Python compile of the flat compiler source is OOM-killed
-# (bigclosure*, ape-prepare*, ape), and the guest has no clang for `warn`.
+# R18-11 ⑤: the guest's own limits are not compiler failures: the guest has no
+# clang for `warn`.  (bigclosure*/ape* were OOM-killed on the 4 GiB guest until
+# 0.0.30 R3 stopped copying 600 MB of bss zeros; they are real reds again.)
 # They are reported by name as guest-known after the run (STRICT=1 keeps
 # them red); every other red still fails.
 GUEST_MEM_KB=$(limactl shell "$VM" -- awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d '\r')
@@ -125,7 +125,6 @@ if [ "$rc" -ne 0 ] && [ "${STRICT:-0}" != 1 ]; then
     other=""; known=""
     for n in $reds; do
         case "$n" in
-            bigclosure*|ape-prepare*|ape) [ "${GUEST_MEM_KB:-0}" -lt 6000000 ] && { known="$known $n"; continue; };;
             warn) [ "$GUEST_CLANG" = no ] && { known="$known $n"; continue; };;
         esac
         other="$other $n"
