@@ -153,7 +153,13 @@ def fingerprint(jobs):
     # 0.0.22: the checkout path is not an identity -- a queue continued in a new worktree of the
     # same content reuses its results (0.0.21: ~420/432 invalidated by the path alone).  Jobs that
     # keep state inside the checkout (LOCATION_BOUND) still carry it.
-    common = [provider_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
+    # 0.0.31 P7' fix (found by cdx): SEED_DIR is a {KEY} path in stamps, so the seed's CONTENT must be an
+    # identity here -- before, only the changing path kept two different seeds apart
+    seed_inputs = {}
+    if os.environ.get('SEED_DIR'):
+        for name in ('unisacc-seed.com', 'unisacc-seed.com.build.json'):
+            seed_inputs[name] = digest(str(pathlib.Path(os.environ['SEED_DIR']) / name))
+    common = [provider_inputs, seed_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
               {n:digest(n) for n in ('tests/gatequeue.py', 'tests/bound.py')}, gate_runner()]
     # 0.0.29 P7': gate.sh's job lines and gatedeps.json are no longer global identities -- a job's own
