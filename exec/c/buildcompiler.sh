@@ -29,8 +29,8 @@ tn() {   # tn JSON TBL NET
 }
 # 0.0.32 B5: SEED_GEN=1 (default) constructs the delta JSON of the stages seed/gen.c covers with the
 # C99 constructor instead of exec/build/gen.py; same bytes (tests/seedgencheck.sh).  Stages it does not
-# cover yet (lower, enc) stay on gen.py.  Built by the host cc for now, not unisacc.com: the product's
-# unbuffered stdio makes parse2 take >55 s and its -O2 build segfaults there (plans/v0.0.32.md D2).
+# cover yet (lower, enc) stay on gen.py.  Built by the host cc for now, not unisacc.com: a .com -O2
+# seed-gen is byte-equal but runs parse2 in ~26 s against ~7 s (plans/v0.0.32.md D2).
 gen() {   # gen STAGE OUT.json [FLAG...]
     if [ "${SEED_GEN:-1}" = 1 ]; then
         if [ ! -x "$T/seedbin/seed-gen" ]; then
@@ -39,6 +39,17 @@ gen() {   # gen STAGE OUT.json [FLAG...]
         b "$T/seedbin/seed-gen" "$@" >/dev/null
     else
         b python3 exec/build/gen.py "$@"
+    fi
+}
+# The product source identity (= exec/c/provenance.py identity) from seed/ident.c; SEED_GEN=0 keeps Python.
+ident() {
+    if [ "${SEED_GEN:-1}" = 1 ]; then
+        if [ ! -x "$T/seedbin/ident" ]; then
+            mkdir -p "$T/seedbin"; b ${SEED_GEN_CC:-cc} -std=c99 -D_POSIX_C_SOURCE=200809L -O2 -w "$R/seed/ident.c" -o "$T/seedbin/ident.$$" && mv -f "$T/seedbin/ident.$$" "$T/seedbin/ident"   # parts build in parallel
+        fi
+        b "$T/seedbin/ident" "$R"
+    else
+        b python3 exec/c/provenance.py identity
     fi
 }
 # Reuse the model preparation identity/digest implementation. These are completion
@@ -125,11 +136,11 @@ pack_prep() {
         done
     done
     UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py --prepare-only --part "$1/3" --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include -o /dev/null $routes
-    b python3 exec/c/provenance.py identity > "$T/pack-prep-$1.done"   # completion record (comboot step manifest)
+    ident > "$T/pack-prep-$1.done"   # completion record (comboot step manifest)
     echo "prepared model part $1/3"
 }
 pack_models() {
-    source_start=$(b python3 exec/c/provenance.py identity)
+    source_start=$(ident)
     manifest check shared
     set --
     for os in lnx osx win; do
@@ -158,7 +169,7 @@ pack_driver() {
     # took ~50 s of CPU against a 55 s bound (R14-2 (2)).
     [ -s "$T/compiler.pkg" ] && [ -s "$T/compiler.pkg.source" ] || { echo "pack-driver: run pack-models first" >&2; exit 1; }
     source_start=$(cat "$T/compiler.pkg.source")
-    [ "$(b python3 exec/c/provenance.py identity)" = "$source_start" ] || { echo "pack-driver: sources changed since pack-models" >&2; exit 1; }
+    [ "$(ident)" = "$source_start" ] || { echo "pack-driver: sources changed since pack-models" >&2; exit 1; }
     . ./tests/lib.sh
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R"
     product_version=$(awk -F'"' '/^#define UNISACC_VERSION "[0-9.]+"/ { n++; v = $2 } END { if (n != 1) exit 1; print v }' src/version.h)
