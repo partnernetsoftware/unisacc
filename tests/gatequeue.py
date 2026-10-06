@@ -55,6 +55,9 @@ def execution_settings():
 PATH_KEYS = ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','UNISA_CONTAINER','UNISA_KERNEL',
              'UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER','SEED_DIR')
 
+# hashed, so portable() cannot fold it into {ROOT}: LOCATION_BOUND jobs keep state inside the checkout
+ROOT_ID = hashlib.sha256(str(ROOT).encode()).hexdigest()
+
 def portable(text):
     pairs = []
     for k in PATH_KEYS:
@@ -249,7 +252,7 @@ def fingerprint(jobs):
         if audited:
             identity = [common, command, {n:digest(n) for n in inputs}]
             if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]
-            if name.startswith(LOCATION_BOUND): identity.append(str(ROOT))
+            if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID)
             result[name] = stamp(identity)
         else:
             if global_inputs is None: global_inputs = {n:digest(n) for n in names}
@@ -257,7 +260,7 @@ def fingerprint(jobs):
             # `job` line no longer invalidates every undeclared result (inputs stay global)
             identity = [common, command, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
             if inventory: identity += [inventory, extra]
-            if name.startswith(LOCATION_BOUND): identity.append(str(ROOT))
+            if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID)
             result[name] = stamp(identity)
     return result
 
