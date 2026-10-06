@@ -97,6 +97,10 @@ checked "unisacc m2 m1 -run" "$want" all "$UA" -run "$D/m2.c" "$D/m1.c"
 checked "unisacc fwd 1 2 -run" "$fwdwant" all "$UA" -run "$D/fwd1.c" "$D/fwd2.c"
 checked "unisacc fwd 2 1 -run" "$fwdwant" all "$UA" -run "$D/fwd2.c" "$D/fwd1.c"
 checked "unisacc libc on demand" 5 last "$UA" -run "$D/n1.c" "$D/n2.c"
+# 0.0.31 H1'': environ assigned in one unit is what getenv reads in the other (cc agrees).
+envwant=$(printf 'before outer\nenv2 sees from-env1')
+checked "unisacc environ env1 env2 -run" "$envwant" all env H1PROBE=outer "$UA" -run "$D/env1.c" "$D/env2.c"
+checked "unisacc environ env2 env1 -run" "$envwant" all env H1PROBE=outer "$UA" -run "$D/env2.c" "$D/env1.c"
 if [ -n "$HOST" ]; then
     if bound 20 "$UA" "$D/m1.c" "$D/m2.c" -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
         chmod +x "$T/um"

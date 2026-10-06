@@ -426,6 +426,22 @@ static int _unisa_envslot(const char *__u_name, int __u_make) {
     return __u_make ? __u_free : -1;
 }
 #endif
+/* 0.0.31 H1'': the process environment, one `char **` for the whole program: external linkage,
+   a tentative definition in every unit, merged at link (C99 6.9.2).  <unistd.h> names it `environ`.
+   A constructor fills it before main from the block the kernel left after argv (0.0.28 F1);
+   -ftrim-libc keeps it as a root (unisa/libneed.py ROOTS). */
+char **_unisa_env;
+static char *_unisa_envv[4096];
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_environ_init
+__attribute__((constructor)) static void _unisa_environ_init(void) {
+    int __u_k; int __u_n;
+    if (_unisa_env) return;                 /* another unit's constructor already filled it */
+    __u_k = __argc() + 1; __u_n = 0;
+    while (__u_n < 4095 && __argv(__u_k) != 0) { _unisa_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+    _unisa_envv[__u_n] = 0;
+    _unisa_env = _unisa_envv;
+}
+#endif
 /* Windows reads the real environment through the host channel in 0.0.22,
    when the product lowers it (the compiler itself must not need it yet). */
 #if !__UNISA_FTRIM_LIBC || __UN_getenv
@@ -437,12 +453,11 @@ static char *getenv(const char *__u_name) {
         __u_i = 0; while (_unisa_envk[__u_k][__u_i] != 61) __u_i = __u_i + 1;
         return _unisa_envk[__u_k] + __u_i + 1;
     }
-    __u_k = __argc() + 1;
-    while ((__u_e = __argv(__u_k)) != 0) {
+    if (!_unisa_env) _unisa_environ_init();   /* called from a constructor that ran first */
+    for (__u_k = 0; (__u_e = _unisa_env[__u_k]) != 0; __u_k++) {
         __u_i = 0;
         while (__u_name[__u_i] && __u_e[__u_i] == __u_name[__u_i]) __u_i = __u_i + 1;
         if (__u_name[__u_i] == 0 && __u_e[__u_i] == 61) return __u_e + __u_i + 1;
-        __u_k = __u_k + 1;
     }
     return 0;
 }

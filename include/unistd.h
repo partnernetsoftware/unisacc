@@ -178,22 +178,11 @@ static int execve(const char *__u_path, char *const __u_argv[], char *const __u_
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_execve), (long)__u_path, (long)__u_argv, (long)__u_envp, 0, 0));
 }
 #endif
-static char *_unisa_envv[4096];
-#if !__UNISA_FTRIM_LIBC || __UN__unisa_environ
-static char **_unisa_environ(void) {        /* the process environment, as getenv walks it */
-    int __u_k; int __u_n; __u_k = __argc() + 1; __u_n = 0;
-    while (__u_n < 4095 && __argv(__u_k) != 0) { _unisa_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
-    _unisa_envv[__u_n] = 0;
-    return _unisa_envv;
-}
-#endif
-/* 0.0.28 H1': POSIX `environ`, a real variable so `extern char **environ;` in the program refers to
-   it (C99 6.2.2p4).  A constructor fills it before main (0.0.28 F1); -ftrim-libc keeps it as a root
-   (unisa/libneed.py ROOTS), since no name in the program keys a body only a startup hook uses. */
-static char **environ;
-#if !__UNISA_FTRIM_LIBC || __UN__unisa_environ_init
-__attribute__((constructor)) static void _unisa_environ_init(void) { environ = _unisa_environ(); }
-#endif
+/* 0.0.31 H1'': POSIX `environ` is <stdlib.h>'s _unisa_env, one object for the whole program
+   (a tentative definition with external linkage in every unit, merged at link, C99 6.9.2), so an
+   assignment in one unit is what getenv and execv see in every other. */
+#include <stdlib.h>
+#define environ _unisa_env
 /* execv passes the current environ (POSIX; 0.0.28 E20) */
 #if !__UNISA_FTRIM_LIBC || __UN_execv
 static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, environ); }
