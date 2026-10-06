@@ -194,7 +194,8 @@ static const char *AGENT_SYSTEM_PROMPT =
 "- 已经 answer 之后，下一步就输出 {\"go\":\"stop\"} 结束；只有还剩具体一步没做时才 continue。\n"
 "- 还没 answer 时，前两次 stop 不结束、会再问一次；做完就 answer，再 stop。\n"
 "- 用户这句话是唯一任务。用户没写 tmux、窗口或窗名，就不要 exec tmux，也不要在 answer 里谈窗口。\n"
-"- 用户说不用工具时，第一步就 answer。\n";
+"- 用户说不用工具时，第一步就 answer。\n"
+"- 若出现「上文有省略」，那一句只说明较早的工具结果或助手行被拿掉了。留下的用户原话没有改写。\n";
 
 /* The same bytes spliced into the model request. Selftest reads this pointer. */
 const char *agent_model_rules(void) { return AGENT_SYSTEM_PROMPT; }
@@ -875,30 +876,46 @@ int agent_ctx_start(int count, int max_recs, const int *costs, int budget) {
     return start;
 }
 
+/* One user line, sent only when an older row was left out of this request.
+ * It says what was omitted. It does not rewrite any user text. */
+static const char *AGENT_OMIT_NOTE =
+    "上文有省略。被省略的是较早的工具结果和助手行。用户原话不改写。";
+
 /* Mark which of the n records go out. The newest row always stays.
  * Pass 1 drops the oldest tool rows, pass 2 the oldest assistant rows,
- * pass 3 the oldest remaining rows. User text is last to go, and it is
- * copied as written, not folded into a summary. */
+ * pass 3 the oldest remaining rows. The first non-tool user row stays
+ * until every other non-newest row is already gone. User text is copied
+ * as written, not folded into a summary. */
 static void agent_ctx_pick(int n, const int *costs, int budget,
                            char roles[][16], const int *wraps, int *use) {
-    int sum = 0, i, pass;
+    int sum = 0, i, pass, head = -1;
     if (n < 0) n = 0;
     if (budget < 0) budget = 0;
     for (i = 0; i < n; i++) {
+        int tool = wraps && wraps[i];
         use[i] = 1;
         sum += costs && costs[i] > 0 ? costs[i] : 0;
+        if (head < 0 && !tool && roles && roles[i][0] && !strcmp(roles[i], "user"))
+            head = i;
     }
     for (pass = 0; pass < 3; pass++) {
         int guard = 0;
         while (sum > budget && guard < n) {
             int victim = -1;
             for (i = 0; i < n - 1; i++) {
-                int tool, asst;
+                int tool, asst, later, j;
                 if (!use[i]) continue;
                 tool = wraps && wraps[i];
                 asst = roles && roles[i][0] && !strcmp(roles[i], "assistant");
                 if (pass == 0 && !tool) continue;
                 if (pass == 1 && (tool || !asst)) continue;
+                if (i == head) {
+                    later = 0;
+                    for (j = 0; j < n - 1; j++) {
+                        if (j != head && use[j]) { later = 1; break; }
+                    }
+                    if (later) continue;
+                }
                 victim = i;
                 break;
             }
@@ -957,8 +974,10 @@ int agent_journal_trim(const char *path, long max_bytes, int keep) {
  * writes `{"model":"__MODEL__","messages":[...],"stream":false}` into out.
  * The caller splices the real model name over __MODEL__. Returns byte count.
  * Eligible records go out oldest to newest among the rows that fit.
- * A full body drops tool rows before user rows. A long tool row keeps
- * its head and its tail. decision records have no text and stay on disk only. */
+ * A full body drops tool rows before user rows, and keeps the first
+ * user row until the newer rows are gone. When a row is left out, one
+ * short note says so. A long tool row keeps its head and its tail.
+ * decision records have no text and stay on disk only. */
 
 static int agent_build_messages(const char *transcript, const char *tail,
                                 const char *extra_system, char *out, size_t outlen) {
@@ -1055,8 +1074,29 @@ static int agent_build_messages(const char *transcript, const char *tail,
         if (wraps[k]) n += 16;
         costs[k] = n;
     }
-    agent_ctx_pick(nvals, costs, a < history_room ? (int)(history_room - a) : 0,
-                   api_roles, wraps, use);
+    {
+        int budget = a < history_room ? (int)(history_room - a) : 0;
+        int omitted = 0;
+        int note_cost = 32 + 4 + (int)agent_escaped_len(AGENT_OMIT_NOTE);
+        agent_ctx_pick(nvals, costs, budget, api_roles, wraps, use);
+        for (k = 0; k < nvals; k++) if (!use[k]) omitted = 1;
+        /* Reserve the note before the second pick so later rows still fit. */
+        if (omitted && note_cost > 0 && note_cost < budget) {
+            agent_ctx_pick(nvals, costs, budget - note_cost, api_roles, wraps, use);
+            omitted = 0;
+            for (k = 0; k < nvals; k++) if (!use[k]) omitted = 1;
+        } else {
+            omitted = 0;
+        }
+        if (omitted && a + (size_t)note_cost < history_room && a + 32 < sizeof acc) {
+            size_t before = a;
+            a += (size_t)snprintf(acc + a, sizeof acc - a,
+                                  ",{\"role\":\"user\",\"content\":\"");
+            a += agent_json_str(AGENT_OMIT_NOTE, acc + a, sizeof acc - a);
+            a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
+            if (a >= history_room) { a = before; acc[a] = '\0'; }
+        }
+    }
     for (k = 0; k < nvals; k++) {
         char packed[1704];
         const char *wire = texts[k];
@@ -1300,6 +1340,53 @@ static void at_event(const char *line) {
     if (AT.on_event && line) AT.on_event(line, AT.ud);
 }
 
+/* One log slot is 240 bytes. A whole answer does not fit in one slot.
+ * Split on newlines, then on a UTF-8 boundary, so the TUI can show the rest. */
+int agent_event_pack(const char *prefix, const char *text, char rows[][200], int cap) {
+    const char *p = text ? text : "";
+    int n = 0, pref = 0;
+    if (!rows || cap < 1) return 0;
+    if (prefix && prefix[0]) {
+        snprintf(rows[0], 200, "%s", prefix);
+        pref = (int)strlen(rows[0]);
+        if (pref > 160) pref = 160;
+        rows[0][pref] = 0;
+    }
+    if (!p[0]) return pref ? 1 : 0;
+    while (*p && n < cap) {
+        int o = 0;
+        if (n == 0 && pref) o = pref;
+        while (*p == '\n' || *p == '\r') {
+            if (*p == '\r' && p[1] == '\n') p++;
+            p++;
+            if (o > (n == 0 ? pref : 0)) break;
+        }
+        while (*p && *p != '\n' && *p != '\r') {
+            unsigned char c = (unsigned char)*p;
+            int need = 1, k;
+            if ((c & 0xe0) == 0xc0) need = 2;
+            else if ((c & 0xf0) == 0xe0) need = 3;
+            else if ((c & 0xf8) == 0xf0) need = 4;
+            else if (c >= 0x80) need = 1;
+            if (o + need >= 199) break;
+            for (k = 0; k < need && p[k]; k++) rows[n][o++] = p[k];
+            if (k < need) { p += k; break; }
+            p += need;
+        }
+        rows[n][o] = 0;
+        if (o > 0) n++;
+        if (*p == '\n' || *p == '\r') {
+            if (*p == '\r' && p[1] == '\n') p++;
+            p++;
+        }
+    }
+    if (*p && n > 0) {
+        int o = (int)strlen(rows[n - 1]);
+        if (o + 3 < 199) memcpy(rows[n - 1] + o, "...", 4);
+    }
+    return n;
+}
+
 static int at_fail(int rc) {
     if (rc == -5) snprintf(AT.res.reason, sizeof AT.res.reason, "model call cancelled");
     else if (rc == -6) snprintf(AT.res.reason, sizeof AT.res.reason, "model call timed out (120s)");
@@ -1397,6 +1484,7 @@ static int at_after_http(void) {
         session_append(AT.transcript, asst_rec);
         {
             char ev[256];
+            ev[0] = 0;
             if (s.kind == ACT_EXEC) {
                 char whyb[72], cmdb[120];
                 int wi, wo, ci, co;
@@ -1418,7 +1506,15 @@ static int at_after_http(void) {
             else if (s.kind == ACT_READ || s.kind == ACT_WRITE || s.kind == ACT_EDIT)
                 snprintf(ev, sizeof ev, "▸ %s: %s", nm, s.path);
             else if (s.kind == ACT_MIND) snprintf(ev, sizeof ev, "▸ %s %s: %s", nm, s.op, s.path);
-            else if (s.kind == ACT_ANSWER) snprintf(ev, sizeof ev, "✓ %s: %s", nm, s.text);
+            else if (s.kind == ACT_ANSWER) {
+                char arows[12][200];
+                char apref[48];
+                int ai, an;
+                snprintf(apref, sizeof apref, "✓ %s: ", nm);
+                an = agent_event_pack(apref, s.text, arows, 12);
+                for (ai = 0; ai < an; ai++) at_event(arows[ai]);
+                ev[0] = 0;
+            }
             else if (s.kind == ACT_GO_STOP)
                 snprintf(ev, sizeof ev, "%s",
                          agent_may_stop_ans(AT.judge, MAX_JUDGE, AT.res.answer[0] != 0) ? "  → stop" : "  → 再判断");
@@ -1435,7 +1531,7 @@ static int at_after_http(void) {
                 if (!flat[0]) snprintf(ev, sizeof ev, "▸ (empty)");
                 else snprintf(ev, sizeof ev, "▸ %s", flat);
             }
-            at_event(ev);
+            if (ev[0]) at_event(ev);
         }
         if (s.kind == ACT_ANSWER || s.kind == ACT_GO_STOP) {
             char why[200];

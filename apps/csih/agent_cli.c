@@ -61,6 +61,7 @@ int  agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen);
 int  agent_note_cd(char *cwd, size_t cwdlen, const char *cmd, char *out, size_t outlen);
 int  agent_object_count(const char *s);
 int  agent_tool_record(char *rec, size_t recsz, const char *name, const char *text);
+int  agent_event_pack(const char *prefix, const char *text, char rows[][200], int cap);
 int  agent_chat_role(const char *role, char *out, size_t outlen, int *wrap);
 const char *agent_model_rules(void);
 void agent_set_spill(int on);
@@ -157,6 +158,19 @@ static int agent_run_selftest(void) {
                  && strstr(rec, "HEADMARK") && strstr(rec, "TAILMARK")
                  && strstr(rec, "中间略") && strlen(rec) < 4000,
                  "a long tool row keeps its head and its tail");
+    }
+    {
+        char rows[12][200];
+        char big[900];
+        int n, i, bad = 0;
+        memset(big, 'A', sizeof big - 1);
+        memcpy(big, "HEAD\n", 5);
+        memcpy(big + 860, "\nTAIL", 5);
+        big[sizeof big - 1] = 0;
+        n = agent_event_pack("✓ answer: ", big, rows, 12);
+        for (i = 0; i < n; i++) if (strlen(rows[i]) >= 200) bad = 1;
+        a_expect(n >= 3 && !bad && strstr(rows[0], "HEAD") && strstr(rows[n - 1], "TAIL"),
+                 "a long answer is several log rows");
     }
 
     s = agent_parse("```json\n{\"act\":\"exec\",\"cmd\":\"ls\"}\n```");
@@ -380,7 +394,8 @@ static int agent_run_selftest(void) {
             for (row = 0; row < 30; row++) {
                 fprintf(jf, "{\"role\":\"user\",\"text\":\"%s", row == 0 ? "OLDMARKER" : "pad");
                 for (col = 0; col < 2500; col++) fputc('B', jf);
-                fprintf(jf, "%s\"}\n", row == 29 ? "NEWMARKER" : "mid");
+                fprintf(jf, "%s\"}\n",
+                        row == 29 ? "NEWMARKER" : (row == 1 ? "MIDONLY" : "mid"));
             }
             fprintf(jf, "{\"role\":\"decision\",\"go\":\"stop\"}\n");
             fclose(jf);
@@ -390,7 +405,10 @@ static int agent_run_selftest(void) {
         if (body && opened) {
             agent_ctx_preview(jp, body, 65536);
             a_expect(strstr(body, "NEWMARKER") != NULL, "context keeps the newest record");
-            a_expect(strstr(body, "OLDMARKER") == NULL, "context drops the oldest record");
+            a_expect(strstr(body, "OLDMARKER") != NULL, "context keeps the first user line");
+            a_expect(strstr(body, "MIDONLY") == NULL, "context drops a middle user line");
+            a_expect(strstr(body, "被省略的是较早的工具结果和助手行") != NULL,
+                     "an omission is one short note");
             a_expect(strstr(body, "decision") == NULL, "decision records stay off the wire");
         }
         free(body);
@@ -423,6 +441,8 @@ static int agent_run_selftest(void) {
             a_expect(strstr(body, "OLDMARKER") != NULL, "a full context keeps the older user line");
             a_expect(strstr(body, "NEWMARKER") != NULL, "a full context keeps the newest user line");
             a_expect(strstr(body, "TOOLGONE") == NULL, "a full context drops an old tool row first");
+            a_expect(strstr(body, "被省略的是较早的工具结果和助手行") != NULL,
+                     "a dropped tool row leaves one note");
         }
         free(body);
         remove(jp);
