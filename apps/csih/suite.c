@@ -1,4 +1,4 @@
-/* suite.c — the one argv table for cdsh selftests. No main.
+/* suite.c — the one argv table for csih selftests. No main.
  *
  * check.c walks every row in-process. The TUI does not link this file:
  * net.c already pulls netdb.h, and one more translation unit overflows

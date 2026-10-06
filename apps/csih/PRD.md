@@ -66,7 +66,7 @@ TUI 需要 tty：`unisacc.com ~/.csih/run.c`。它从 `~/env.jsonl` 的 `deepsee
 
 代码从 moltbaby 仓迁到 unisacc 仓的 `apps/csih`。这是真正的应用目录。`examples/apps/` 仍是演示，不放 csih。
 
-moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具名是 `csih`，旧说法 `cdsh` 仍指向同一个启动器。仓外 `~/.cdsh/run.c`（`~/.csih` 指到同一文件）执行的是这份 `csih.sh`。配置仍写在源码里，不把密钥或配置放进 `bin/llm`。
+moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具名是 `csih`，旧说法 `csih` 仍指向同一个启动器。仓外 `~/.cdsh/run.c`（`~/.csih` 指到同一文件）执行的是这份 `csih.sh`。配置仍写在源码里，不把密钥或配置放进 `bin/llm`。
 
 ### 异步 I/O（规划参考）
 
@@ -76,7 +76,7 @@ moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具
 
 以后若改网络，只在这条泵上做小步，例如少建几次 curl 句柄，或让正文更早出现在帧上。每一步都要能单独退回，相关 selftest 仍绿。做不到这一点就不做。
 
-下面这些不属于 cdsh 的顺序：新的跨平台事件库、线程池、六目标探针、把模型调用换到另一套队列上。出处只供以后想到类似问题时翻一下。
+下面这些不属于 csih 的顺序：新的跨平台事件库、线程池、六目标探针、把模型调用换到另一套队列上。出处只供以后想到类似问题时翻一下。
 
 - libuv 设计：https://docs.libuv.org/en/v1.x/design.html
 - Windows IOCP：https://learn.microsoft.com/en-us/windows/win32/fileio/i-o-completion-ports
@@ -86,4 +86,4 @@ moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具
 
 ## 探针
 
-`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；cdsh 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `plans/v0.0.28.md` F1。
+`probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；csih 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `plans/v0.0.28.md` F1。

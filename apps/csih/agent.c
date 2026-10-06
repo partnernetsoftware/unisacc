@@ -26,7 +26,7 @@
  * They are called at the library level (not through tools.c's string dispatcher)
  * so a double-quote in a file's text cannot be mis-split by shell-style quoting.
  *
- * WORKING FILES — mind keeps two pages under ~/.cdsh: 思维树.md
+ * WORKING FILES — mind keeps two pages under ~/.csih: 思维树.md
  * (markdown-tree-dag) and 记忆宫殿.md (mermaid-flowchart-memory-palace).
  * They follow the user, not the working directory. agent_run seeds them
  * if missing. op=add still appends one "- " note; it does not rewrite the page.
@@ -732,8 +732,8 @@ int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
         return (s->path[0] && s->old[0]) ? 1 : 0;
     }
     case ACT_MIND: {
-        /* which: tree → ~/.cdsh/思维树.md (markdown-tree-dag),
-         * palace → ~/.cdsh/记忆宫殿.md (mermaid-flowchart-memory-palace).
+        /* which: tree → ~/.csih/思维树.md (markdown-tree-dag),
+         * palace → ~/.csih/记忆宫殿.md (mermaid-flowchart-memory-palace).
          * op is s->op: "read" returns the file, "add" appends one
          * "- " note. It does not rewrite the page into that shape. */
         const char *name = plugin_page(s->path);
@@ -1107,7 +1107,7 @@ typedef struct {
     char reason[320];
 } agent_result;
 
-/* Both pages live in ~/.cdsh. They are not tied to the working directory. */
+/* Both pages live in ~/.csih. They are not tied to the working directory. */
 static int page_path(char *out, int outlen, const char *cwd, const char *which) {
     const char *page = plugin_page(which);
     const char *home;

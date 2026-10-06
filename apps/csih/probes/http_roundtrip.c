@@ -1,4 +1,4 @@
-/* http_roundtrip.c — cdsh net.c GET against a local python http.server.
+/* http_roundtrip.c — csih net.c GET against a local python http.server.
  *   unisacc probes/http_roundtrip.c probes/u_run.c
  * python only serves the file. The client under test is unisacc. No gcc.
  */

@@ -21,7 +21,7 @@
  *      rename() within a directory is atomic on POSIX, so readers see either
  *      the old file or the new one, never a mixture.
  *
- *   3. NO PATH EXPANSION. No `~`, no globs, no shell quoting. cdsh has no
+ *   3. NO PATH EXPANSION. No `~`, no globs, no shell quoting. csih has no
  *      shell and pretending otherwise means one day expanding `~` into the
  *      wrong home, or a `*` into a file list nobody meant. If a caller wants
  *      those, that is the caller's job, done explicitly.

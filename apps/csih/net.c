@@ -1,5 +1,5 @@
 /*
- * net.c — talk HTTP/1.1 over a TCP socket. This is the layer cdsh needs to
+ * net.c — talk HTTP/1.1 over a TCP socket. This is the layer csih needs to
  * reach a model, and it is deliberately the smallest thing that can do it.
  *
  * http:// is hand-written sockets. The host is resolved with getaddrinfo

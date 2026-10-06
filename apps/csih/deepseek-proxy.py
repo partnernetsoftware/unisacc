@@ -2,11 +2,11 @@
 """
 deepseek-proxy.py — optional plaintext hop. Not required for TLS.
 
-cdsh can POST https://api.deepseek.com directly: net.c spawns https_post.c,
+csih can POST https://api.deepseek.com directly: net.c spawns https_post.c,
 which dlopens libcurl (unisacc 0.0.24). This proxy remains for a caller that
 still speaks only http://127.0.0.1 and wants the key injected on the way out.
 
-    cdsh (plaintext)  ──>  127.0.0.1:PROXY_PORT  ──>  https://api.deepseek.com
+    csih (plaintext)  ──>  127.0.0.1:PROXY_PORT  ──>  https://api.deepseek.com
 
 Usage:
     DEEPSEEK_API_KEY=sk-... python3 deepseek-proxy.py [port]   (default 8080)

@@ -107,7 +107,7 @@ typedef struct {
 
 /*
  * Buffer sizes. The read cap is a POLICY ceiling, and it is deliberately
- * generous-but-finite: cdsh is for source files and transcripts, not for
+ * generous-but-finite: csih is for source files and transcripts, not for
  * rewriting a database. A file larger than this is REFUSED with its real size
  * in `bytes` (file_read reports it) rather than partially rewritten — see
  * file.c's first rule, which this module inherits rather than re-decides.

@@ -74,7 +74,7 @@ void term_on_signal(int sig) { (void)sig; term_got_int = 1; }
  * even if the program exits from a signal handler.
  *
  * Returns 0 on success, -1 if stdin is not a terminal — which is NOT an error
- * worth aborting on: cdsh must still run when its output is a pipe (that is how
+ * worth aborting on: csih must still run when its output is a pipe (that is how
  * check.sh tests it).
  */
 int term_raw_enter(void) {

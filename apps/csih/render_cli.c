@@ -5,7 +5,7 @@
  * has one `main`, so a module that keeps its own `main` cannot be linked with
  * any other. Combining render.c + term.c + tui.c pulled in THREE mains and the
  * link failed with `duplicate symbol '_main'` (gcc) and
- * `arm64: main:` (unisacc) — the identical trap the rest of cdsh already avoids.
+ * `arm64: main:` (unisacc) — the identical trap the rest of csih already avoids.
  *
  * CLI takes SUBCOMMANDS, not dash-options (unisacc reserves the dashes).
  */

@@ -139,7 +139,7 @@ shell_result shell_run_in(const char *command, const char *cwd) {
         if (cwd && chdir(cwd) != 0) _exit(125);
         /* stdin from /dev/null: a command that reads stdin must NOT steal
          * keystrokes from the terminal that launched us. This matters when
-         * cdsh runs inside a raw-mode TUI (tui agent) — without it, an agent
+         * csih runs inside a raw-mode TUI (tui agent) — without it, an agent
          * step like `cat` or `read` would drain the keyboard buffer the TUI
          * is still reading from, and characters would vanish. It is harmless
          * for every existing caller (none of the tool commands read stdin). */

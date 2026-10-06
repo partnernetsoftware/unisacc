@@ -1,6 +1,6 @@
 /* net_cover.c — headers, the wait.h trap, loopback, localhost DNS.
  *   unisacc probes/net_cover.c probes/u_run.c
- * No gcc. Run from the cdsh directory.
+ * No gcc. Run from the csih directory.
  */
 #include <stdio.h>
 #include <stdlib.h>

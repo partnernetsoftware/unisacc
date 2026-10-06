@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 def is_tool_result(m):
     role = m.get("role")
     content = m.get("content") or ""
-    # cdsh keeps role=tool on disk, but the wire form is a user turn
+    # csih keeps role=tool on disk, but the wire form is a user turn
     # prefixed with [tool] so DeepSeek does not see a bare role=tool.
     if role == "tool":
         return True

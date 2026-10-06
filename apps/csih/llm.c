@@ -135,7 +135,7 @@ static size_t llm_escape(const char *in, char *out, size_t outlen, size_t *in_us
  *
  * The accepted shapes, in order — the first one found wins, and this ORDER is
  * the contract:
- *   {"p":0.83,"text":"..."}          cdsh's own shape, what llm_server.py emits
+ *   {"p":0.83,"text":"..."}          csih's own shape, what llm_server.py emits
  *   {"choices":[{"message":{"content":"..."}}],"p":0.83}  OpenAI-ish, p beside it
  * Alternates are tried only when the previous shape is absent, never merged:
  * a body carrying both must resolve to one record, not two.
@@ -304,7 +304,7 @@ int llm_run_selftest(void) {
 #define LLM_X(body) llm_extract((body), strlen(body), &t)
 
     memset(&t, 0, sizeof t);
-    llm_expect(LLM_X("{\"p\":0.83,\"text\":\"go on\"}") == 0, "cdsh shape parses");
+    llm_expect(LLM_X("{\"p\":0.83,\"text\":\"go on\"}") == 0, "csih shape parses");
     llm_expect(t.p > 0.82 && t.p < 0.84, "p is read as a number");
     llm_expect(!strcmp(t.text, "go on"), "text is read");
 

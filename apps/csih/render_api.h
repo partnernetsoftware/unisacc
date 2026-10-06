@@ -9,7 +9,7 @@
  * identically-named copies. The build failed with "redefinition of 'main'".
  *
  * That is the same trap this project has hit from the other direction before:
- * cdsh cannot combine two files that each define `main`, which is why the
+ * csih cannot combine two files that each define `main`, which is why the
  * self-tests live in *_cli.c and why check.sh asserts the rule still holds.
  * Including a .c was simply the same rule broken by a different route.
  *

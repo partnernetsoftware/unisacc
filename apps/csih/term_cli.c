@@ -2,7 +2,7 @@
  * term_cli.c — the `main` for term.c, moved out so term.c is a library.
  *
  * Same reason as render_cli.c: each module used to carry its own `main`, and
- * linking them together produced `duplicate symbol '_main'`. The rest of cdsh
+ * linking them together produced `duplicate symbol '_main'`. The rest of csih
  * already split library from CLI (gate/json/session); render/term/tui had not,
  * because until now nothing needed them combined.
  *

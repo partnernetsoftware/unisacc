@@ -1,13 +1,13 @@
 /*
  * clock.c — real monotonic time, now that unisacc 0.0.20 (R20-6, 2026-10-02) 内环已接
- * provides `struct timespec` + `clock_gettime`. Before that cdsh had no real
+ * provides `struct timespec` + `clock_gettime`. Before that csih had no real
  * clock (PRD §6 listed "no real timing" as a gap caused by the missing struct).
  *
  * LIBRARY, NO `main` (main is in clock_cli.c) — unisacc allows one `main` per
  * program (SKILL.md §2b).
  *
  * WHY A MODULE: timing was the one capability PRD §6 flagged as blocked by the
- * unisacc gap. Now unblocked, cdsh can measure its own decision latency with a
+ * unisacc gap. Now unblocked, csih can measure its own decision latency with a
  * real clock instead of borrowing `poll`'s millisecond timeout as a stand-in.
  * One capability = one .c, same as gate/json/session.
  *

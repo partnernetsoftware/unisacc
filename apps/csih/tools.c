@@ -1,5 +1,5 @@
 /*
- * tools.c — the dispatch table between what a user types and what cdsh does.
+ * tools.c — the dispatch table between what a user types and what csih does.
  *
  * WHY A TABLE AND NOT AN IF-CHAIN: an agent's tool surface is the thing it
  * reasons ABOUT, so it has to be introspectable — "what can I do here" must be
@@ -15,7 +15,7 @@
  *
  * THE PARSING RULE, and it is a deliberate limit: an argument list is split on
  * spaces, with double quotes grouping. There is NO escaping, NO variables, NO
- * globbing, and NO pipes. cdsh has no shell; a tool surface that half-implements
+ * globbing, and NO pipes. csih has no shell; a tool surface that half-implements
  * one is worse than one that plainly does not, because `rm $HOME/x` silently
  * doing something unexpected is a much better outcome for the author of a
  * half-shell than `rm $HOME/x` failing loudly. Callers who want a shell can
@@ -154,7 +154,7 @@ static int tool_split(const char *line, tool_args *a) {
  * Resolve a possibly-relative path against the tool's cwd.
  *
  * Only handles the "relative" case: an absolute path is passed through, and a
- * leading `~` is NOT expanded anywhere in cdsh (see cmd_cd). Keeping the rule
+ * leading `~` is NOT expanded anywhere in csih (see cmd_cd). Keeping the rule
  * this narrow is what stops a path from meaning something the caller did not
  * type.
  */
@@ -332,7 +332,7 @@ static int cmd_cd(const tool_args *a, tool_result *r) {
 
     if (!dir[0] || !strcmp(dir, "~")) {
         /* A bare `cd` reports where we are instead of guessing a home
-         * directory: cdsh does not expand `~` anywhere else, and doing it here
+         * directory: csih does not expand `~` anywhere else, and doing it here
          * would be the one place a caller's text turns into a different path.
          * getenv("HOME") is read, but never by string-substituting into a
          * command. */

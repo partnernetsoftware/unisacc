@@ -1,7 +1,7 @@
 /*
  * chat.c — one turn of conversation, as a function the TUI can call.
  *
- * WHAT THIS CLOSES: until now cdsh had a working gate (gate.c), a working
+ * WHAT THIS CLOSES: until now csih had a working gate (gate.c), a working
  * transcript (session.c), a working loop that proved they compose (loop.c), and
  * a working TUI (tui.c) — but the TUI's Enter key did nothing. The pieces were
  * all green and the program still could not hold a conversation. This file is
@@ -222,7 +222,7 @@ chat_turn chat_turn_run(const char *path, const char *user_text, double threshol
  *
  * This exists so the TUI and the tests can produce the one thing gate.c needs
  * without a network client. When a real model is attached it will append the
- * same shape — that is the entire contract between cdsh and its model.
+ * same shape — that is the entire contract between csih and its model.
  */
 int chat_note_p(const char *path, double p) {
     char rec[160];

@@ -1,5 +1,5 @@
 /*
- * loop.c — the smallest CLOSED LOOP over the three cdsh libraries.
+ * loop.c — the smallest CLOSED LOOP over the three csih libraries.
  *
  *   session file ──read──> a record ──take a field as probability──> gate
  *        ▲                                                             │
