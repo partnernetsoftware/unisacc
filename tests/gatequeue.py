@@ -127,7 +127,9 @@ def fingerprint(jobs):
                 h = hashlib.sha256()
                 with p.open('rb') as f:
                     for block in iter(lambda:f.read(1024*1024), b''): h.update(block)
-                files[name] = [mode, h.hexdigest()]
+                # git's view of a mode: only the execute bit is content (cdx/cc 0.0.31: a 0600 copy of a
+                # 0644 file voided half the queue across worktrees)
+                files[name] = [0o100755 if mode & 0o111 else 0o100644, h.hexdigest()]
             except FileNotFoundError:
                 files[name] = ['missing']
         return files[name]
