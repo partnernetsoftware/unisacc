@@ -143,10 +143,12 @@ static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
 static char _u_st_buf[_U_NST * _U_BUFSZ];
 static int _u_st_bpos[_U_NST];
 static int _u_st_blen[_U_NST];
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_copy
 static void _u_st_copy(char *__u_d, const char *__u_s, long __u_n) {
     long __u_j; __u_j = 0;
     while (__u_j < __u_n) { __u_d[__u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
 }
+#endif
 static int _u_st_n;
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
