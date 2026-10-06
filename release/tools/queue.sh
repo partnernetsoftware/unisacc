@@ -15,7 +15,9 @@ if [ ! -d "$W" ]; then
   git worktree add -q --detach "$W" HEAD || { echo "queue: cannot create worktree $W"; exit 2; }
   # untracked inputs the gates read: the installed product (comboot writes it;
   # absent at the start, its appearance invalidated the 0.0.19 queue at 408/415)
-  for f in unisacc.com unisacc.com.build.json; do [ -f "$R/$f" ] && cp -p "$R/$f" "$W/$f"; done
+  # 0.0.31: the root holds the SIGNED public .com beside the unsigned build.json (not a pair);
+  # the queue tests the candidate, so install the stage-2 pair from CAND_DIR
+  cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"
   # 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
   # network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
   # 0.0.27: launched from an rc worktree, $R has no ignored corpus either -- take it from the main checkout
