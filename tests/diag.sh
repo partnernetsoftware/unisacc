@@ -268,6 +268,10 @@ red=$R/tests/c
 # E2's DG.inc (the same file:line:col, the same words).
 { echo '/* a header that no distribution bundles */'; echo; echo; echo; echo '#include <no_such_header_zz.h>'; echo 'int main(void) { return 0; }'; } > "$T/nohdr.c"
 poscase "$T/nohdr.c" "5:11" "no such file for #include"
+# 0.0.32 H1''': a static definition after a non-static declaration in the same unit
+# (C99 6.2.2p7) -- `static char *environ[]` over <unistd.h> bound to the header's object
+{ echo 'extern char **env_zz;'; echo 'static char *env_zz[] = {"A=1", 0};'; echo 'int main(void) { return env_zz[1] != 0; }'; } > "$T/staticafter.c"
+poscase "$T/staticafter.c" "2:14" "static declaration follows a non-static"
 printf "  rejection positions: %d named correctly, %d known missing, %d wrong\n" \
     "$pos_ok" "$pos_known" "$pos_bad"
 [ "$pos_bad" -eq 0 ] && [ $((pos_ok + pos_known)) -gt 0 ] && [ "$pos_revived" -eq 0 ] \

@@ -5763,6 +5763,12 @@ int unit(void) {
             /* a file-scope static belongs to THIS unit; record it before
                anything spells the name, so the definition already carries
                the suffix */
+            /* 0.0.32 H1''': `static T x` after a non-static `x` in the same unit is undefined
+               (C99 6.2.2p7) and cc rejects it; accepting it bound the program's static to the
+               header's external object -- `static char *environ[]` over <unistd.h>'s environ */
+            if (declstatic) { int pk; pk = sfind(t);
+                if (pk >= 0 && symunit[pk] == curunit && symkind[pk] != 1 && symgstat[pk] == 0)
+                    err_tok(t, "static declaration follows a non-static declaration of this name (C99 6.2.2p7)"); }
             if (declstatic) ustat_add(t);
             /* ...which also means a second unit's `static hidden` is NOT a
                redeclaration of the first unit's: it needs its own storage,
