@@ -108,6 +108,10 @@ static char *strstr(const char *__u_h, const char *__u_n) {
 static void *memset(void *__u_p, int __u_c, long __u_n) {
     char *__u_d; long __u_i;
     __u_d = (char *)__u_p; __u_i = 0;
+    if (__u_n >= 16) {   /* D2: eight bytes a step */
+        long __u_w; __u_w = __u_c & 255; __u_w = __u_w * 72340172838076673L;
+        while (__u_i + 8 <= __u_n) { *(long *)(__u_d + __u_i) = __u_w; __u_i = __u_i + 8; }
+    }
     while (__u_i < __u_n) { __u_d[__u_i] = __u_c; __u_i = __u_i + 1; }
     return __u_p;
 }
@@ -117,6 +121,8 @@ static void *memset(void *__u_p, int __u_c, long __u_n) {
 static void *memcpy(void *__u_dst, const void *__u_src, long __u_n) {
     char *__u_d; char *__u_s; long __u_i;
     __u_d = (char *)__u_dst; __u_s = (char *)__u_src; __u_i = 0;
+    /* D2: eight bytes a step (every target allows unaligned 64-bit access), then the tail */
+    while (__u_i + 8 <= __u_n) { *(long *)(__u_d + __u_i) = *(long *)(__u_s + __u_i); __u_i = __u_i + 8; }
     while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
     return __u_dst;
 }

@@ -762,9 +762,10 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
     size_t i, n = rows ? rows->n : 1;
     if (rows && rows->kind != JARR) die("mapseq over is not a list");
     for (i = 0; i < n; i++) {
-        Value *ctx = value_new(JOBJ); size_t j; int take = 1;
+        Value *ctx; size_t j; int take = 1;
         Value *item = rows ? rows->items[i].value : NULL;
-        for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
+        if (facts->kind != JOBJ) die("environment is not an object");
+        ctx = seed_env_copy(facts);   /* D2: bulk copy */
         if (item) {
             /* assemble mapseq: a non-dict row leaves ctx = facts */
             if (item->kind != JOBJ && where) die("mapseq where over a non-object item");
@@ -811,10 +812,11 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
         Value *parts = value_get(decl, "parts"); size_t i;
         if (rows->kind != JARR || !parts || parts->kind != JARR) die("invalid mapseq rows or parts");
         for (i = 0; i < rows->n; i++) {
-            Value *row = rows->items[i].value, *ctx = value_new(JOBJ), *acts = value_new(JARR);
+            Value *row = rows->items[i].value, *ctx, *acts = value_new(JARR);
             char *name; size_t j, p;
             if (row->kind != JOBJ) die("mapseq row is not an object");
-            for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
+            if (facts->kind != JOBJ) die("environment is not an object");
+            ctx = seed_env_copy(facts);   /* D2: bulk copy, same key order as the put loop */
             for (j = 0; j < row->n; j++) value_put(ctx, row->items[j].key, row->items[j].value);
             name = interpolate(namefmt, ctx);
             for (p = 0; p < parts->n; p++) {
