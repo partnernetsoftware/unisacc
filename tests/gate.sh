@@ -470,6 +470,7 @@ job seedparse2-2 ./tests/seedparse2check.sh locations,warnings locations,errors 
 job seedgen ./tests/seedgencheck.sh e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe
 job seedgen-2 ./tests/seedgencheck.sh lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a
 job seedgen-3 ./tests/seedgencheck.sh tokenpp tokenlex warnlex warnparse warnunits errorparse warnpp
+job com-memalign ./tests/memaligncheck.sh   # 0.0.32 D2: word-wise memcpy/memset only on shared alignment (UBSan + product)
 job com-seedgen ./tests/seedgencomcheck.sh   # 0.0.32 D2: .com -O2 seed/gen.c parse2 == cc build, <= 10 s
 job seedpack ./tests/seedpackcheck.sh   # 0.0.32 B5: seed/pack.c + compilerpack.c == pack.py + compilerpack.py
 job seedape ./tests/seedapecheck.sh     # 0.0.32 B5: UA -b + seed/ape.c == unisa ape (product container)
