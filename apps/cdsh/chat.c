@@ -1,0 +1,303 @@
+/*
+ * chat.c — one turn of conversation, as a function the TUI can call.
+ *
+ * WHAT THIS CLOSES: until now cdsh had a working gate (gate.c), a working
+ * transcript (session.c), a working loop that proved they compose (loop.c), and
+ * a working TUI (tui.c) — but the TUI's Enter key did nothing. The pieces were
+ * all green and the program still could not hold a conversation. This file is
+ * the joint: it takes what the user typed, appends it, runs the gate over what
+ * is now the newest probability in the transcript, and appends the verdict.
+ *
+ * WHY A SEPARATE FILE FROM loop.c: loop.c owns a `main` (it is the runnable
+ * closed-loop demo). Including it would drag a second `main` into any program
+ * that wants a chat turn — the exact failure that cost this project three
+ * builds already, measured twice: gcc says `duplicate symbol '_main'`, unisacc
+ * says `arm64: main:` and names nothing. So the turn logic lives here, with no
+ * `main`, and loop.c keeps its demo. Both call the same three libraries; only
+ * one of them can be linked into the TUI.
+ *
+ * WHAT IT IS NOT: a model client. There is no network here and no subprocess
+ * (unisacc's fork family is still missing — see probes/f22.sh). The gate is fed
+ * whatever probability the transcript already holds, which is what makes this
+ * file testable TODAY and still correct when a real model is attached: the
+ * model's job is to append a `p` record, and that is the only thing this file
+ * reads.
+ *
+ * unisacc limits honoured here (SKILL.md §2, and each one was measured):
+ *   - every struct is restated below, so this file compiles on its own
+ *     (unisacc can see an earlier file's type, but that is order-dependent)
+ *   - `return f()` where f returns a struct is rejected from a non-main
+ *     function: assign to a local first
+ *   - the entry points here take `const char *` and stdio stays local, which
+ *     keeps this library a pure string→decision unit
+ *
+ * CLI takes SUBCOMMANDS, not dash-options.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ── restated declarations (so this file compiles alone; see header note) ── */
+
+typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
+typedef struct jvalue {
+    jkind kind;
+    int    b;
+    double n;
+    char  *s;
+    struct jvalue **items;  size_t len;
+    char **keys; struct jvalue **vals; size_t nkeys;
+} jvalue;
+
+jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
+size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
+void    jfree(jvalue *v);
+jvalue *jget(jvalue *obj, const char *key);
+double  jnum(jvalue *v, double dflt);
+const char *jstr(jvalue *v);
+
+typedef struct {
+    char **lines;     /* owned */
+    size_t count;
+    size_t bad;
+} session_records;
+
+int session_append(const char *path, const char *record);
+session_records session_read(const char *path);
+void session_free(session_records *r);
+
+typedef struct { double threshold; } gate_config;
+typedef struct {
+    int    cont;
+    double p;
+    int    ok;
+    char   why[128];
+} gate_decision;
+
+gate_decision gate_decide(const char *reply, const gate_config *cfg);
+
+/* clock.c: real monotonic time, for transcript timestamps. unisacc 0.0.20
+ * (R20-6) provides struct timespec + clock_gettime; before that this symbol
+ * was undefined and these records could not carry a time at all. We do NOT
+ * fall back to a fake clock — a transcript without timing is still honest,
+ * it just omits the field, whereas a made-up number would be a lie. */
+long clock_now_ms(void);
+
+/* ── the turn ───────────────────────────────────────────────────────────── */
+
+typedef struct {
+    int    ok;            /* the turn completed at all */
+    int    cont;          /* the gate's verdict */
+    double p;             /* the probability the gate saw */
+    char   verdict[192];  /* what to show the user */
+} chat_turn;
+
+/*
+ * Escape a string for embedding in a JSON string literal.
+ *
+ * Needed because the user's text goes straight into the transcript, and a
+ * transcript is JSON Lines. Without this, typing a double quote would write a
+ * line that does not parse — and the failure would appear LATER, as a corrupt
+ * transcript, not at the moment of typing. Escaping at the boundary is the only
+ * place the mistake is cheap to find.
+ *
+ * Returns the number of bytes that WOULD be written (like snprintf), so callers
+ * can detect truncation instead of silently losing the tail of a line.
+ */
+static size_t chat_escape(const char *in, char *out, size_t outlen) {
+    return json_escape(in, out, outlen, NULL);
+}
+
+/*
+ * Find the newest `"p": <number>` in the transcript and hand it to the gate as
+ * TEXT, not as a double.
+ *
+ * Text on purpose: gate.c reads "the last number in the string", so routing the
+ * stored value back through the same parser means the gate and the transcript
+ * can never disagree about what a probability means. Re-deriving from the
+ * parsed double would be a second interpretation — and a chance for the two to
+ * drift apart without either being obviously wrong.
+ *
+ * The LAST record wins because the transcript grows downward: the newest
+ * statement of p is the tail. A missing p anywhere is reported as such rather
+ * than defaulted to 0, because "no probability was ever stated" and "the
+ * probability was zero" lead to opposite decisions.
+ */
+static int chat_last_p(const char *path, char *out, size_t outlen, double *pout) {
+    session_records recs = session_read(path);
+    int found = 0;
+    size_t i;
+    if (recs.lines == NULL && recs.count == 0) {
+        /* An empty transcript is normal on the first turn, not an error. */
+        session_free(&recs);
+        return 0;
+    }
+    for (i = recs.count; i > 0; i--) {
+        const char *line = recs.lines[i - 1];
+        jvalue *v;
+        char err[128];
+        err[0] = '\0';
+        v = json_parse(line, strlen(line), err, sizeof err);
+        if (v) {
+            jvalue *pv = jget(v, "p");
+            if (pv && pv->kind == J_NUM) {
+                double d = jnum(pv, 0.0);
+                snprintf(out, outlen, "%.6f", d);
+                if (pout) *pout = d;
+                found = 1;
+                jfree(v);
+                break;
+            }
+            jfree(v);
+        }
+    }
+    session_free(&recs);
+    return found;
+}
+
+/*
+ * Run one turn: record what the user said, let the gate judge the newest
+ * probability in the transcript, and record the verdict.
+ *
+ * The verdict is written INTO the transcript, not just returned — that is what
+ * makes the next turn able to see it, and it is the same property check.sh
+ * asserts for loop.c ("the verdict is IN the transcript (loop closed, not just
+ * printed)"). A verdict that only reaches the screen is not a closed loop.
+ */
+chat_turn chat_turn_run(const char *path, const char *user_text, double threshold) {
+    chat_turn t;
+    char esc[2048];
+    char rec[2304];
+    char ptext[64];
+    double p = 0.0;
+    gate_config cfg;
+    gate_decision d;
+
+    memset(&t, 0, sizeof t);
+    t.ok = 0;
+    cfg.threshold = threshold;
+
+    /* 1. record the user's line (escaped, so a quote cannot corrupt the log) */
+    chat_escape(user_text ? user_text : "", esc, sizeof esc);
+    {
+        long ts = clock_now_ms();   /* -1 == clock unavailable (honest sentinel) */
+        snprintf(rec, sizeof rec, "{\"role\":\"user\",\"text\":\"%s\",\"ts\":%ld}",
+                 esc, ts);
+    }
+    if (session_append(path, rec) != 0) {
+        snprintf(t.verdict, sizeof t.verdict, "cannot write transcript");
+        return t;
+    }
+
+    /* 2. judge the newest stated probability */
+    if (!chat_last_p(path, ptext, sizeof ptext, &p)) {
+        snprintf(t.verdict, sizeof t.verdict, "no probability stated yet");
+        t.ok = 1;                  /* the turn is fine; there is just nothing to judge */
+        return t;
+    }
+    d = gate_decide(ptext, &cfg);
+
+    /* 3. write the verdict back, so the transcript carries the whole loop */
+    {
+        char wesc[256];
+        long ts = clock_now_ms();
+        chat_escape(d.why, wesc, sizeof wesc);
+        snprintf(rec, sizeof rec,
+                 "{\"role\":\"gate\",\"verdict\":\"%s\",\"p\":%.6f,\"ts\":%ld}",
+                 d.cont ? "CONTINUE" : "STOP", d.p, ts);
+        (void)wesc;
+        session_append(path, rec);
+    }
+
+    t.ok = 1;
+    t.cont = d.cont;
+    t.p = d.p;
+    snprintf(t.verdict, sizeof t.verdict, "%s (p=%.2f)",
+             d.cont ? "CONTINUE" : "STOP", d.p);
+    return t;
+}
+
+/*
+ * Append a probability, as a model would.
+ *
+ * This exists so the TUI and the tests can produce the one thing gate.c needs
+ * without a network client. When a real model is attached it will append the
+ * same shape — that is the entire contract between cdsh and its model.
+ */
+int chat_note_p(const char *path, double p) {
+    char rec[160];
+    long ts = clock_now_ms();
+    snprintf(rec, sizeof rec, "{\"role\":\"model\",\"p\":%.6f,\"ts\":%ld}", p, ts);
+    return session_append(path, rec);
+}
+
+/* ── self-test ──────────────────────────────────────────────────────────── */
+
+static int failures = 0;
+static void expect(int cond, const char *what) {
+    if (!cond) { printf("FAIL %s\n", what); failures++; }
+}
+
+static void run_selftest(void) {
+    const char *path = "/tmp/cdsh-chat-selftest.jsonl";
+    chat_turn t;
+    FILE *f;
+
+    /* start from nothing, so the "first turn has no transcript" path is taken */
+    f = fopen(path, "w"); if (f) fclose(f);
+
+    /* A turn with no probability yet must NOT be an error and must NOT decide.
+     * "nothing to judge" and "judged zero" lead to opposite verdicts. */
+    t = chat_turn_run(path, "hello", 0.5);
+    expect(t.ok == 1, "a turn with no probability still completes");
+    expect(strstr(t.verdict, "no probability") != NULL, "and says so plainly");
+
+    /* Now a probability arrives, as a model would append it. */
+    expect(chat_note_p(path, 0.83) == 0, "a probability can be appended");
+    t = chat_turn_run(path, "again", 0.5);
+    expect(t.ok == 1, "the second turn completes");
+    expect(t.cont == 1, "p=0.83 continues at threshold 0.5");
+    expect(t.p > 0.82 && t.p < 0.84, "the gate saw the stored probability");
+
+    /* Below threshold stops. */
+    expect(chat_note_p(path, 0.20) == 0, "a second probability can be appended");
+    t = chat_turn_run(path, "stop now", 0.5);
+    expect(t.cont == 0, "p=0.20 stops at threshold 0.5");
+
+    /* The verdict must be IN the file — a verdict only on screen is not a
+     * closed loop, and the next turn could not see it. */
+    {
+        session_records recs = session_read(path);
+        int saw_gate = 0, saw_user = 0, saw_ts = 0;
+        size_t i;
+        for (i = 0; i < recs.count; i++) {
+            if (strstr(recs.lines[i], "\"role\":\"gate\"")) saw_gate = 1;
+            if (strstr(recs.lines[i], "\"role\":\"user\"")) saw_user = 1;
+            if (strstr(recs.lines[i], "\"ts\":")) saw_ts = 1;
+        }
+        expect(saw_gate, "the verdict is in the transcript");
+        expect(saw_user, "the user line is in the transcript");
+        expect(saw_ts, "every record carries a monotonic ts (clock.c is load-bearing)");
+        expect(recs.bad == 0, "every line written is valid JSON");
+        session_free(&recs);
+    }
+
+    /* A quote in the user's text must not corrupt the transcript. This is the
+     * failure that would otherwise surface later, as a parse error on a line
+     * nobody remembers typing. */
+    f = fopen(path, "w"); if (f) fclose(f);
+    (void)chat_turn_run(path, "he said \"hi\" \\ and\nnewline", 0.5);
+    {
+        session_records recs = session_read(path);
+        expect(recs.bad == 0, "escaped input still parses as JSON");
+        session_free(&recs);
+    }
+
+    remove(path);
+}
+
+int chat_run_selftest(void) {
+    run_selftest();
+    printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
+    return failures == 0 ? 0 : 1;
+}

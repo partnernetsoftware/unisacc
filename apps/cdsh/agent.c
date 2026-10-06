@@ -1,0 +1,1331 @@
+/*
+ * agent.c — the LLM-driven loop that turns csih into an agent.
+ *
+ * LIBRARY, NO `main` (main is in agent_cli.c) — the same unisacc rule as every
+ * other module: one main per program, so a module that keeps its own cannot be
+ * linked into anything else.
+ *
+ * WHAT THIS IS
+ * ------------
+ * Given a user prompt, drive a real chat model through a fixed two-point
+ * decision per round:
+ *   1. ACTION PHASE — the model's "quick decision": it returns ONE action as a
+ *      JSON object — `exec` (run a shell command) or `file` (read/write/edit) —
+ *      and the harness executes it and feeds the result back. It may also return
+ *      `answer` to say the round's work is done.
+ *   2. ROUND-END DECISION — after the answer, the harness asks once more:
+ *      continue (jump to another round on the same goal) or stop (end).
+ *
+ * The model is the decider. gate.c's statistical threshold is NOT used; the only
+ * hard limits here are MAX_ROUNDS / MAX_ACTIONS, which exist so a confused model
+ * cannot loop forever (a fence, not a judge).
+ *
+ * TOOLS EXPOSED TO THE MODEL — exactly two, by design (user requirement):
+ *   - exec  → shell_run_in()  (real /bin/sh -c, with csih's cwd persistence)
+ *   - file  → file_read / file_write / edit_replace
+ * They are called at the library level (not through tools.c's string dispatcher)
+ * so a double-quote in a file's text cannot be mis-split by shell-style quoting.
+ *
+ * WORKING FILES — mind keeps two pages under ~/.cdsh: 思维树.md
+ * (markdown-tree-dag) and 记忆宫殿.md (mermaid-flowchart-memory-palace).
+ * They follow the user, not the working directory. agent_run seeds them
+ * if missing. op=add still appends one "- " note; it does not rewrite the page.
+ *
+ * The endpoint URL is an argument. net.c can POST https:// directly (libcurl)
+ * and resolve names. deepseek-proxy.py remains only for a caller that still
+ * wants a plaintext hop on 127.0.0.1.
+ *
+ * unisacc limits honoured (SKILL.md §2): no `return f()` of a struct from a
+ * non-main function (assign to a local first); stdio stays in agent_cli.c.
+ * Every type this file uses is restated below, which is what lets the module
+ * compile on its own: unisacc can see a type an EARLIER file on the command line
+ * defined, but that is order-dependent, and the restatement removes the
+ * dependency.
+ */
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* ── restated declarations (so this file compiles alone) ─────────────────── */
+
+typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
+typedef struct jvalue {
+    jkind kind;
+    int    b;
+    double n;
+    char  *s;
+    struct jvalue **items;  size_t len;
+    char **keys; struct jvalue **vals; size_t nkeys;
+} jvalue;
+
+jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
+void    jfree(jvalue *v);
+size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
+jvalue *jget(jvalue *obj, const char *key);
+const char *jstr(jvalue *v);
+double  jnum(jvalue *v, double dflt);
+
+typedef struct {
+    int  ok;      /* 1 = success, 0 = failure */
+    int  err;     /* errno at the failure point, 0 on success */
+    long bytes;   /* bytes read or written */
+} file_result;
+file_result file_read(const char *path, char *buf, size_t cap);
+file_result file_write(const char *path, const char *text, size_t len);
+file_result file_append_line(const char *path, const char *line);
+static int page_path(char *out, int outlen, const char *cwd, const char *which);
+
+int plugin_kind(const char *name);
+const char *plugin_name(int kind);
+int plugin_catalog(char *out, int outlen);
+
+typedef struct {
+    int  ok;
+    int  err;
+    long count;   /* occurrences of `old` found (0, 1, or N) */
+    long bytes;
+} edit_result;
+const char *plugin_page(const char *name);
+edit_result edit_replace(const char *path, const char *old_text,
+                         const char *new_text);
+
+#define SHELL_OUT_MAX 65536
+typedef struct {
+    int  ok;          /* 1 = the shell ran (whatever its exit status) */
+    int  err;         /* errno if THIS function failed (fork/pipe/wait) */
+    int  exited;
+    int  status;
+    int  signal;
+    long bytes;
+    char out[SHELL_OUT_MAX];
+} shell_result;
+shell_result shell_run_in(const char *command, const char *cwd);
+
+#define NET_BODY_MAX  65536
+#define NET_HDR_MAX   16384
+typedef struct {
+    int  ok;
+    int  err;
+    int  status;
+    long body_bytes;
+    int  chunked;
+    char header[NET_HDR_MAX];
+    char body[NET_BODY_MAX];
+} net_response;
+int net_async_begin(const char *method, const char *url, const char *content_type, const char *body);
+int net_async_pump(int wait_ms);
+net_response net_async_end(void);
+void net_reset(void);
+void net_turn_clock(void);
+net_response net_http(const char *method, const char *url,
+                     const char *content_type, const char *body);
+
+typedef struct {
+    char **lines;
+    size_t count;
+    size_t bad;
+} session_records;
+session_records session_read(const char *path);
+void session_free(session_records *r);
+int session_append(const char *path, const char *record);
+
+/* forward declaration (agent_run_cb calls it below) */
+static int agent_build_messages(const char *transcript, const char *tail,
+                                const char *extra_system, char *out, size_t outlen);
+
+/* The agent reports progress through this callback so a UI (the TUI) can show
+ * each step live without the library itself knowing what a terminal is. A NULL
+ * callback means "run silently" — the original agent_cli path. */
+typedef void (*agent_event_fn)(const char *line, void *ud);
+
+/* ── a step the model emits ──────────────────────────────────────────────── */
+
+typedef enum {
+    ACT_ERR = 0, ACT_EXEC, ACT_READ, ACT_WRITE, ACT_EDIT,
+    ACT_ANSWER, ACT_GO_CONTINUE, ACT_GO_STOP, ACT_MIND
+} agent_kind;
+
+typedef struct {
+    int   kind;
+    char  cmd[4096];
+    char  why[160];   /* one sentence shown for an exec; the command stays collapsed */
+    char  op[64];
+    char  path[1024];
+    char  text[4096];
+    char  old[4096];
+    char  nw[4096];
+} agent_step;
+
+#define AGENT_CONTENT_MAX 4096
+#define AGENT_ANSWER_MAX  4096
+#define AGENT_RESULT_MAX  8192
+
+/* The bytes after Catalog: in the system message. The TUI keeps this
+ * collapsed until the rule is opened, then shows ten scrollable rows.
+ * Keep the operating rules in the opening so the panel and the model
+ * see the same policy. */
+
+static const char *AGENT_SYSTEM_PROMPT =
+"三件、不要别的字。why 一句中文。bin/envelope 0:grkwjcgmcdsh <标题> <正文>。\n"
+"思维树用 markdown-tree-dag：├── 与 └── 是包含，══> 是跨枝，不是散文。记忆宫殿用 mermaid-flowchart-memory-palace：一段 mermaid flowchart。在 ~/.csih。\n"
+"csih。只许 file、exec、mind。每步一个 JSON。answer 不是第四件工具。exec 必须带 why。新功能先讨论、不得先写入。bin/envelope 0:grkwjcgmcdsh。\n"
+"\n"
+"JSON:\n"
+"  {\"act\":\"file\",\"op\":\"read\",\"path\":\"<path>\"}\n"
+"  {\"act\":\"file\",\"op\":\"write\",\"path\":\"<path>\",\"text\":\"<full contents>\"}\n"
+"  {\"act\":\"file\",\"op\":\"edit\",\"path\":\"<path>\",\"old\":\"<old>\",\"new\":\"<new>\"}\n"
+"  {\"act\":\"exec\",\"cmd\":\"<shell command>\",\"why\":\"<一句说明>\"}\n"
+"  {\"act\":\"mind\",\"op\":\"add|read\",\"target\":\"tree|palace\",\"text\":\"...\"}\n"
+"  {\"act\":\"answer\",\"text\":\"<final reply>\"}\n"
+"\n"
+"- 多写的 JSON 会被丢掉，只跑第一个。\n"
+"- file 读写普通文件。exec 只跑 /bin/sh -c。纯 cd <dir> 记住目录，后面的 exec 和 file 跟着走，不要每步再 cd。\n"
+"- mind 只碰两页，都在 ~/.csih，不跟工作目录。tree 是 ~/.csih/思维树.md，格式 markdown-tree-dag：一层缩进的 markdown 树，├── 与 └── 表示包含，══> 表示跨枝依赖，不是散文。palace 是 ~/.csih/记忆宫殿.md，格式 mermaid-flowchart-memory-palace：一整段 ```mermaid flowchart，边表示树里放不好的关系。没有目录就建。op=add 只追加一行短注，仍以 \"- \" 开头，不会改写整页。op=read 返回该文件。这两页不要用 file 或 exec。\n"
+"- 停在工具结果写明的工作目录。用户没点别的目录就不要搜整盘。\n"
+"- 先做用户的任务。要记住或计划时用 mind。做完就 answer，不要再调用工具。\n"
+"- 然后 harness 会另问一次继续或停止。只有还缺一块具体改动才继续。任务完成就停。\n"
+"- 用户说不用工具时，第一步就 answer。\n";
+
+/* The same bytes spliced into the model request. Selftest reads this pointer. */
+const char *agent_model_rules(void) { return AGENT_SYSTEM_PROMPT; }
+
+/* the round-end nudge: appended as a transient user message, never stored */
+static const char *AGENT_ROUND_END_NUDGE =
+"Round work appears done. Decide only: continue the same task (another round) "
+"or stop. Output exactly {\"go\":\"continue\"} or {\"go\":\"stop\"}.";
+
+#define MAX_ROUNDS   8
+#define MAX_ACTIONS  16
+#define MAX_CTX_RECS 50      /* last N transcript records sent as context */
+
+/* ── JSON string escaping (for building the request body) ────────────────── */
+
+/* Largest prefix that ends on a complete UTF-8 character. */
+static size_t utf8_prefix(const char *s, size_t n) {
+    size_t i;
+    int cont, need;
+    unsigned char c;
+    if (!s) return 0;
+    i = n;
+    cont = 0;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xc0) == 0x80 && cont < 3) {
+        i--;
+        cont++;
+    }
+    if (i == 0) return 0;
+    c = (unsigned char)s[i - 1];
+    if ((c & 0x80) == 0) need = 1;
+    else if ((c & 0xe0) == 0xc0) need = 2;
+    else if ((c & 0xf0) == 0xe0) need = 3;
+    else if ((c & 0xf8) == 0xf0) need = 4;
+    else { return i > 0 ? i - 1 : 0; }
+    if (need == cont + 1) return n;
+    return i > 0 ? i - 1 : 0;
+}
+
+static size_t agent_json_str(const char *in, char *out, size_t outlen) {
+    return json_escape(in, out, outlen, NULL);
+}
+
+/* A tool result longer than this leaves the transcript. The file keeps it. */
+#define AGENT_SPILL_AT 2000
+
+/* Prefer ~/.csih. An existing ~/.cdsh is linked so the old pages stay. */
+static void csih_home_bind(const char *home) {
+    char neu[512], old[512];
+    if (!home || !home[0]) return;
+    snprintf(neu, sizeof neu, "%s/.csih", home);
+    if (access(neu, 0) == 0) return;
+    snprintf(old, sizeof old, "%s/.cdsh", home);
+    if (access(old, 0) == 0 && symlink(".cdsh", neu) == 0) return;
+    mkdir(neu, 0750);
+}
+
+/* Write every byte of a long tool result under ~/.csih/tool/. The transcript
+ * then holds the path and the first few lines, not a cut that drops the rest.
+ * Returns 1 when `out` is that short form. Returns 0 if nothing was stored. */
+static int agent_spill(const char *body, size_t n, char *out, size_t outlen) {
+    const char *home;
+    char dir[512], path[640];
+    FILE *f;
+    size_t i, lines, shown;
+    static int seq;
+    if (!body || n <= AGENT_SPILL_AT || !out || outlen < 96) return 0;
+    home = getenv("HOME");
+    if (!home || !home[0]) return 0;
+    csih_home_bind(home);
+    snprintf(dir, sizeof dir, "%s/.csih", home);
+    mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/.csih/tool", home);
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST) return 0;
+    snprintf(path, sizeof path, "%s/%d-%d.txt", dir, (int)getpid(), ++seq);
+    f = fopen(path, "w");
+    if (!f) return 0;
+    if (fwrite(body, 1, n, f) != n) { fclose(f); remove(path); return 0; }
+    if (fclose(f) != 0) { remove(path); return 0; }
+    lines = 0;
+    shown = 0;
+    for (i = 0; i < n && shown < 480 && lines < 8; i++) {
+        if (body[i] == '\n') lines++;
+        shown = i + 1;
+    }
+    shown = utf8_prefix(body, shown);
+    snprintf(out, outlen, "full: %s (%zu bytes)\n%.*s%s",
+             path, n, (int)shown, body, shown < n ? "\n..." : "");
+    return 1;
+}
+
+/* The record must stay valid JSON. A cut through a UTF-8 byte is a 400. */
+int agent_tool_record(char *rec, size_t recsz, const char *name, const char *text) {
+    char esc[AGENT_RESULT_MAX];
+    char tmp[AGENT_RESULT_MAX];
+    size_t n, elen, i;
+    if (!rec || recsz < 64) return 0;
+    n = text ? strlen(text) : 0;
+    if (n > 3000) n = 3000;
+    for (i = 0; i < 8; i++) {
+        size_t recn;
+        n = utf8_prefix(text ? text : "", n);
+        if (n >= sizeof tmp) n = sizeof tmp - 1;
+        memcpy(tmp, text ? text : "", n);
+        tmp[n] = 0;
+        if (text && strlen(text) > n && n + 16 < sizeof tmp)
+            memcpy(tmp + n, "\n... (truncated)", 16), tmp[n + 16] = 0;
+        elen = agent_json_str(tmp, esc, sizeof esc);
+        recn = (size_t)snprintf(rec, recsz,
+            "{\"role\":\"tool\",\"name\":\"%s\",\"text\":\"%s\"}",
+            name ? name : "tool", esc);
+        if (recn + 1 < recsz && rec[0] == '{' && rec[recn - 1] == '}') return 1;
+        if (n <= 32) break;
+        n -= 32;
+    }
+    snprintf(rec, recsz, "{\"role\":\"tool\",\"name\":\"%s\",\"text\":\"truncated\"}",
+             name ? name : "tool");
+    return 1;
+}
+
+/* ── strip a possible ```json ... ``` fence from model content ───────────── */
+
+static void agent_strip_fence(const char *in, char *out, size_t outlen) {
+    size_t i = 0, o = 0, n = strlen(in);
+    while (i < n && (in[i] == ' ' || in[i] == '\n' || in[i] == '\r' || in[i] == '\t')) i++;
+    if (strncmp(in + i, "```json", 7) == 0) { i += 7; while (i < n && in[i] != '\n') i++; if (i<n)i++; }
+    else if (strncmp(in + i, "```", 3) == 0) { i += 3; while (i < n && in[i] != '\n') i++; if (i<n)i++; }
+    while (i < n && o < outlen - 1) {
+        if (strncmp(in + i, "```", 3) == 0) break;
+        out[o++] = in[i++];
+    }
+    while (o > 0 && (out[o-1] == ' ' || out[o-1] == '\n' || out[o-1] == '\r' || out[o-1] == '\t')) o--;
+    out[o] = '\0';
+}
+
+/* ── parse one model content string into a step ─────────────────────────── */
+
+/* How many JSON objects are in the text. The loop runs only the first. */
+int agent_object_count(const char *s) {
+    int n = 0, depth = 0, in_str = 0, esc = 0;
+    if (!s) return 0;
+    for (; *s; s++) {
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (*s == '\\') esc = 1;
+            else if (*s == '"') in_str = 0;
+        } else if (*s == '"') in_str = 1;
+        else if (*s == '{') { if (depth == 0) n++; depth++; }
+        else if (*s == '}' && depth > 0) depth--;
+    }
+    return n;
+}
+
+agent_step agent_parse(const char *content) {
+    agent_step s;
+    char stripped[AGENT_CONTENT_MAX];
+    char errbuf[128];
+    jvalue *root, *v;
+    const char *p;
+
+    memset(&s, 0, sizeof s);
+    s.kind = ACT_ERR;
+    if (!content || !*content) return s;
+
+    agent_strip_fence(content, stripped, sizeof stripped);
+    /* Models often write a sentence and then several JSON objects.
+     * Take the first balanced object. The rest is not a second action. */
+    {
+        char one[AGENT_CONTENT_MAX];
+        const char *q = strchr(stripped, '{');
+        int depth = 0, in_str = 0, esc = 0;
+        size_t o = 0;
+        if (!q) return s;
+        for (; *q && o + 1 < sizeof one; q++) {
+            one[o++] = *q;
+            if (in_str) {
+                if (esc) esc = 0;
+                else if (*q == '\\') esc = 1;
+                else if (*q == '"') in_str = 0;
+            } else if (*q == '"') in_str = 1;
+            else if (*q == '{') depth++;
+            else if (*q == '}') {
+                depth--;
+                if (depth == 0) break;
+            }
+        }
+        one[o] = 0;
+        memcpy(stripped, one, o + 1);
+    }
+    root = json_parse(stripped, strlen(stripped), errbuf, sizeof errbuf);
+    if (!root || root->kind != J_OBJ) { if (root) jfree(root); return s; }
+
+    v = jget(root, "go");
+    if (v && v->kind == J_STR) {
+        p = jstr(v);
+        if (strcmp(p, "continue") == 0) s.kind = ACT_GO_CONTINUE;
+        else if (strcmp(p, "stop") == 0) s.kind = ACT_GO_STOP;
+        jfree(root); return s;
+    }
+
+    v = jget(root, "act");
+    if (v && v->kind == J_STR) {
+        int k;
+        p = jstr(v);
+        k = plugin_kind(p);
+        if (k == ACT_EXEC) {
+            s.kind = ACT_EXEC;
+            v = jget(root, "cmd");
+            if (v && v->kind == J_STR) { strncpy(s.cmd, jstr(v), sizeof s.cmd - 1); }
+            v = jget(root, "why");
+            if (v && v->kind == J_STR) { strncpy(s.why, jstr(v), sizeof s.why - 1); }
+        } else if (k == ACT_MIND) {
+            s.kind = ACT_MIND;
+            v = jget(root, "op");
+            if (v && v->kind == J_STR) strncpy(s.op, jstr(v), sizeof s.op - 1);   /* op: read|add */
+            v = jget(root, "target");
+            if (!v || v->kind != J_STR) v = jget(root, "which");
+            if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1); /* target or which */
+            v = jget(root, "text");
+            if (v && v->kind == J_STR) strncpy(s.text, jstr(v), sizeof s.text - 1);
+        } else if (k == ACT_READ) {
+            jvalue *op = jget(root, "op");
+            const char *ops = (op && op->kind == J_STR) ? jstr(op) : "";
+            if (strcmp(ops, "read") == 0) {
+                s.kind = ACT_READ;
+                v = jget(root, "path");
+                if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1);
+            } else if (strcmp(ops, "write") == 0) {
+                s.kind = ACT_WRITE;
+                v = jget(root, "path");
+                if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1);
+                v = jget(root, "text");
+                if (v && v->kind == J_STR) strncpy(s.text, jstr(v), sizeof s.text - 1);
+            } else if (strcmp(ops, "edit") == 0) {
+                s.kind = ACT_EDIT;
+                v = jget(root, "path");
+                if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1);
+                v = jget(root, "old");
+                if (v && v->kind == J_STR) strncpy(s.old, jstr(v), sizeof s.old - 1);
+                v = jget(root, "new");
+                if (v && v->kind == J_STR) strncpy(s.nw, jstr(v), sizeof s.nw - 1);
+            }
+        } else if (k == ACT_ANSWER) {
+            s.kind = ACT_ANSWER;
+            v = jget(root, "text");
+            if (v && v->kind == J_STR) strncpy(s.text, jstr(v), sizeof s.text - 1);
+        }
+    }
+    jfree(root);
+    return s;
+}
+
+/* ── execute a parsed step; result text (a summary) goes in `out` ────────────
+ * returns 1 if the step was a valid tool call that ran, 0 if malformed. */
+
+/* A relative tool path is under the agent cwd, not the process cwd.
+ * An absolute path is left alone. */
+static void agent_under(const char *cwd, const char *in, char *out, size_t n) {
+    if (!in) { if (n) out[0] = 0; return; }
+    if (!cwd || !cwd[0] || in[0] == '/') snprintf(out, n, "%s", in);
+    else snprintf(out, n, "%s/%s", cwd, in);
+}
+
+file_result file_list(const char *dir, char *out, size_t cap);
+
+/* A command that is only `cd` or `cd <dir>` updates cwd for later steps.
+ * Returns 1 if this command was that builtin (caller must not also run a shell).
+ * `cd foo && bar` is not this builtin. */
+int agent_note_cd(char *cwd, size_t cwdlen, const char *cmd, char *out, size_t outlen) {
+    const char *p, *end;
+    char dir[1024], next[1024], probe[8];
+    file_result fr;
+    size_t n;
+    if (!cwd || !cmd || !out) return 0;
+    p = cmd;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p[0] != 'c' || p[1] != 'd') return 0;
+    if (p[2] != 0 && p[2] != ' ' && p[2] != '\t') return 0;
+    p += 2;
+    while (*p == ' ' || *p == '\t') p++;
+    end = p + strlen(p);
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n')) end--;
+    if (strstr(p, "&&") || strchr(p, ';') || strchr(p, '|')) return 0;
+    n = (size_t)(end - p);
+    if (n >= sizeof dir) { snprintf(out, outlen, "path too long"); return 1; }
+    memcpy(dir, p, n);
+    dir[n] = 0;
+    if (!dir[0]) { snprintf(out, outlen, "cwd: %s", cwd); return 1; }
+    if (n >= 2 && ((dir[0] == '"' && dir[n - 1] == '"') || (dir[0] == '\'' && dir[n - 1] == '\''))) {
+        memmove(dir, dir + 1, n - 2);
+        dir[n - 2] = 0;
+    }
+    if (dir[0] == '/') snprintf(next, sizeof next, "%s", dir);
+    else snprintf(next, sizeof next, "%s/%s", cwd, dir);
+    fr = file_list(next, probe, sizeof probe);
+    if (!fr.ok && fr.err != ENOSPC) {
+        snprintf(out, outlen, "cannot cd to %s (errno %d)", next, fr.err);
+        return 1;
+    }
+    if (strlen(next) >= cwdlen) { snprintf(out, outlen, "path too long"); return 1; }
+    snprintf(cwd, cwdlen, "%s", next);
+    snprintf(out, outlen, "cwd is now %s", cwd);
+    return 1;
+}
+
+/* Red sticks in this process until a later source write is all green.
+ * The table is not linked here: shell_run_in asks suite_cli. */
+static int agent_red;
+static char agent_why[180];
+
+static void agent_mark(int red, const char *why) {
+    agent_red = red ? 1 : 0;
+    if (!agent_red) { agent_why[0] = 0; return; }
+    snprintf(agent_why, sizeof agent_why, "%s", why ? why : "slice red");
+}
+
+static int agent_failing(char *why, int n) {
+    if (!agent_red) return 0;
+    if (why && n > 0) snprintf(why, (size_t)n, "%s", agent_why);
+    return 1;
+}
+
+static int agent_cdsh_src(const char *path, const char *cwd) {
+    const char *base, *dot;
+    if (!path || !path[0]) return 0;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    dot = strrchr(base, '.');
+    if (!dot || (strcmp(dot, ".c") != 0 && strcmp(dot, ".h") != 0)) return 0;
+    if (strstr(path, "/dsh/cdsh/")) return 1;
+    if (cwd && strstr(cwd, "/dsh/cdsh") && !strchr(path, '/')) return 1;
+    return 0;
+}
+
+static void agent_first_line(const char *s, char *line, int n) {
+    int p = 0;
+    if (!s) s = "";
+    while (s[p] && s[p] != '\n' && p + 1 < n) {
+        line[p] = s[p];
+        p++;
+    }
+    line[p] = 0;
+}
+
+/* Spawn the slice rows that name this source. shell_run_in is already in
+ * this program. Linking suite.c here overflows unisacc's struct ids once
+ * net.c's netdb.h is in the same image. */
+static int agent_slice(const char *path, const char *cwd, char *note, int nlen) {
+    const char *base, *bin, *root;
+    char cmd[1800], listing[4096];
+    shell_result r;
+    int any = 0, bad = 0, used = 0, p = 0;
+    if (note && nlen > 0) note[0] = 0;
+    if (!agent_cdsh_src(path, cwd)) return 0;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    bin = getenv("UNISACC");
+    if (!bin || !bin[0]) bin = "/Users/wjc/repos/unisacc/unisacc.com";
+    root = (cwd && cwd[0]) ? cwd : ".";
+    snprintf(cmd, sizeof cmd, "exec \"%s\" suite.c suite_cli.c rows %s", bin, base);
+    r = shell_run_in(cmd, root);
+    if (!r.ok || !r.exited || r.status != 0) {
+        char line[160], why[180];
+        int rc = r.exited ? r.status : -1;
+        agent_first_line(r.out, line, (int)sizeof line);
+        snprintf(why, sizeof why, "slice rows rc=%d %s", rc, line[0] ? line : "(no output)");
+        agent_mark(1, why);
+        if (note && nlen > 0) snprintf(note, (size_t)nlen, "%s", why);
+        return -1;
+    }
+    snprintf(listing, sizeof listing, "%s", r.out);
+    while (listing[p]) {
+        char line[700], name[40], args[640], why[180], first[160];
+        int i = 0, a = 0, rc;
+        while (listing[p] && listing[p] != '\n' && i + 1 < (int)sizeof line)
+            line[i++] = listing[p++];
+        if (listing[p] == '\n') p++;
+        line[i] = 0;
+        if (!line[0]) continue;
+        if (!strcmp(line, "none")) break;
+        i = 0;
+        while (line[i] && line[i] != ' ' && i + 1 < (int)sizeof name) {
+            name[i] = line[i];
+            i++;
+        }
+        name[i] = 0;
+        if (line[i] == ' ') i++;
+        while (line[i] && a + 1 < (int)sizeof args) args[a++] = line[i++];
+        args[a] = 0;
+        if (!args[0]) continue;
+        snprintf(cmd, sizeof cmd, "exec \"%s\" %s", bin, args);
+        r = shell_run_in(cmd, root);
+        rc = r.exited ? r.status : -1;
+        agent_first_line(r.out, first, (int)sizeof first);
+        any = 1;
+        snprintf(why, sizeof why, "slice %s rc=%d %s", name[0] ? name : "?", rc,
+                 first[0] ? first : "(no output)");
+        if (note && nlen > used + 8) {
+            int w = snprintf(note + used, (size_t)(nlen - used), "%s%s",
+                             used ? "; " : "", why);
+            if (w > 0) used += w;
+        }
+        if (rc != 0) { bad = 1; agent_mark(1, why); }
+    }
+    if (!any) return 0;
+    if (bad) return -1;
+    agent_mark(0, NULL);
+    return 1;
+}
+
+int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
+    char path[512];
+    out[0] = '\0';
+    agent_under(cwd, s->path, path, sizeof path);
+    switch (s->kind) {
+    case ACT_EXEC: {
+        shell_result r = shell_run_in(s->cmd, cwd);
+        long cap = (long)(outlen - 64);
+        long n = r.bytes;
+        int trunc = 0;
+        char head[160];
+        if (n < 0) { n = (long)strlen(r.out); trunc = 1; }
+        snprintf(head, sizeof head, "cwd=%s\nexit=%d\n",
+                 cwd && cwd[0] ? cwd : ".", r.exited ? r.status : -1);
+        if (n > AGENT_SPILL_AT && agent_spill(r.out, (size_t)n, out, outlen)) {
+            char merged[AGENT_RESULT_MAX];
+            snprintf(merged, sizeof merged, "%s%s%s", head, out,
+                     trunc ? "\n(capture stopped at shell buffer)" : "");
+            snprintf(out, outlen, "%s", merged);
+            return s->cmd[0] ? 1 : 0;
+        }
+        if (n > cap) { n = cap; trunc = 1; }
+        if (n < 0) n = 0;
+        snprintf(out, outlen, "%s%.*s%s", head, (int)n, r.out,
+                 trunc ? "\n... (truncated)" : "");
+        return s->cmd[0] ? 1 : 0;
+    }
+    case ACT_READ: {
+        char *buf = (char *)malloc(NET_BODY_MAX);
+        file_result r;
+        if (!buf) { snprintf(out, outlen, "oom"); return 0; }
+        r = file_read(path, buf, NET_BODY_MAX);
+        if (!r.ok && r.err == -1001)
+            snprintf(out, outlen, "full: %s (%ld bytes)\nfile is larger than the read buffer; open that path",
+                     path, r.bytes);
+        else if (!r.ok) snprintf(out, outlen, "read failed (err=%d)", r.err);
+        else if (r.bytes > AGENT_SPILL_AT && agent_spill(buf, (size_t)r.bytes, out, outlen)) {
+            /* out already names the file that holds every byte read */
+        } else {
+            long cap = (long)(outlen - 64);
+            long n = r.bytes < cap ? r.bytes : cap;
+            snprintf(out, outlen, "bytes=%ld/%ld\n%.*s%s", n, r.bytes, (int)n, buf,
+                     r.bytes > cap ? "\n... (truncated)" : "");
+        }
+        free(buf);
+        return s->path[0] ? 1 : 0;
+    }
+    case ACT_WRITE: {
+        file_result r = file_write(path, s->text, strlen(s->text));
+        snprintf(out, outlen, r.ok ? "wrote %ld bytes" : "write failed (err=%ld)",
+                 r.ok ? r.bytes : (long)r.err);
+        if (r.ok) {
+            char note[500];
+            int g = agent_slice(path, cwd, note, (int)sizeof note);
+            if (g != 0 && note[0]) {
+                char merged[AGENT_RESULT_MAX];
+                snprintf(merged, sizeof merged, "%s\n%s", out, note);
+                snprintf(out, outlen, "%s", merged);
+            }
+        }
+        return (s->path[0] && s->text[0]) ? 1 : 0;
+    }
+    case ACT_EDIT: {
+        edit_result r = edit_replace(path, s->old, s->nw);
+        if (!r.ok) snprintf(out, outlen, "edit failed (err=%d)", r.err);
+        else if (r.count == 0) snprintf(out, outlen, "edit: old text not found");
+        else if (r.count > 1) snprintf(out, outlen, "edit: ambiguous (%ld matches)", r.count);
+        else snprintf(out, outlen, "edited (%ld bytes)", r.bytes);
+        if (r.ok && r.count == 1) {
+            char note[500];
+            int g = agent_slice(path, cwd, note, (int)sizeof note);
+            if (g != 0 && note[0]) {
+                char merged[AGENT_RESULT_MAX];
+                snprintf(merged, sizeof merged, "%s\n%s", out, note);
+                snprintf(out, outlen, "%s", merged);
+            }
+        }
+        return (s->path[0] && s->old[0]) ? 1 : 0;
+    }
+    case ACT_MIND: {
+        /* which: tree → ~/.cdsh/思维树.md (markdown-tree-dag),
+         * palace → ~/.cdsh/记忆宫殿.md (mermaid-flowchart-memory-palace).
+         * op is s->op: "read" returns the file, "add" appends one
+         * "- " note. It does not rewrite the page into that shape. */
+        const char *name = plugin_page(s->path);
+        char mp[2048];
+        if (!name || !name[0]) { snprintf(out, outlen, "mind: target must be tree or palace"); return 0; }
+        if (!page_path(mp, (int)sizeof mp, cwd, s->path)) {
+            snprintf(out, outlen, "mind: no path for %s", s->path);
+            return 0;
+        }
+        if (!strcmp(s->op, "read")) {
+            char *buf = (char *)malloc(NET_BODY_MAX);
+            file_result r;
+            if (!buf) { snprintf(out, outlen, "oom"); return 0; }
+            r = file_read(mp, buf, NET_BODY_MAX);
+            if (!r.ok && r.err == -1001)
+                snprintf(out, outlen, "full: %s (%ld bytes)\nfile is larger than the read buffer; open that path",
+                         mp, r.bytes);
+            else if (!r.ok) snprintf(out, outlen, "%s: read failed (err=%d)", name, r.err);
+            else if (r.bytes > AGENT_SPILL_AT && agent_spill(buf, (size_t)r.bytes, out, outlen)) {
+                /* full page is the file named in out */
+            } else {
+                long cap = (long)(outlen - 64);
+                long n = r.bytes < cap ? r.bytes : cap;
+                snprintf(out, outlen, "%s\n%.*s%s", name, (int)n, buf,
+                         r.bytes > cap ? "\n... (truncated)" : "");
+            }
+            free(buf);
+            return 1;
+        } else if (!strcmp(s->op, "add")) {
+            /* file_append_line() owns the line boundary: it creates the file
+             * and inserts a separating newline if the file lacks one, so pass
+             * the "- " text WITHOUT a trailing \n. */
+            char line[4200];
+            file_result r;
+            snprintf(line, sizeof line, "- %s", s->text);
+            r = file_append_line(mp, line);
+            if (!r.ok) snprintf(out, outlen, "%s: append failed (err=%d)", name, r.err);
+            else snprintf(out, outlen, "%s: appended", name);
+            return 1;
+        }
+        snprintf(out, outlen, "mind: op must be read or add");
+        return 0;
+    }
+    default:
+        snprintf(out, outlen, "unrecognized step");
+        return 0;
+    }
+}
+
+/* Chat completions accept only system/user/assistant. Transcript roles such as
+ * tool stay on disk, but go out as a user turn (wrap=1) so the model still
+ * sees the result. A bare role=tool has no tool_call_id and DeepSeek returns
+ * HTTP 400, which the loop then treats as a dead model. */
+int agent_chat_role(const char *role, char *out, size_t outlen, int *wrap) {
+    if (wrap) *wrap = 0;
+    if (!role || !role[0] || !out || outlen < 16) return 0;
+    if (!strcmp(role, "system") || !strcmp(role, "user") ||
+        !strcmp(role, "assistant")) {
+        snprintf(out, outlen, "%s", role);
+        return 1;
+    }
+    snprintf(out, outlen, "user");
+    if (wrap) *wrap = 1;
+    return 1;
+}
+
+/* ── build the chat `messages` JSON from the transcript + system + tail ──────
+ * writes `{"model":"__MODEL__","messages":[...],"stream":false}` into out.
+ * The caller splices the real model name over __MODEL__. Returns byte count. */
+
+static int agent_build_messages(const char *transcript, const char *tail,
+                                const char *extra_system, char *out, size_t outlen) {
+    session_records recs;
+    char acc[NET_BODY_MAX];
+    size_t a = 0, i, start;
+
+    recs = session_read(transcript);
+
+    a += (size_t)snprintf(acc + a, sizeof acc - a,
+                          "{\"role\":\"system\",\"content\":\"");
+    /* System text stays byte-stable (catalog + prompt). The tmux window list
+     * is caller text with newlines; it rides the last user message below,
+     * JSON-escaped, so it never lands inside this string. */
+    {
+        char sysbuf[NET_BODY_MAX];
+        size_t sa = 0;
+        sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "Catalog:\n");
+        sa += (size_t)plugin_catalog(sysbuf + sa, (int)(sizeof sysbuf - sa));
+        sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "\n%s", AGENT_SYSTEM_PROMPT);
+        a += agent_json_str(sysbuf, acc + a, sizeof acc - a);
+    }
+    a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
+
+    start = recs.count > MAX_CTX_RECS ? recs.count - MAX_CTX_RECS : 0;
+    for (i = start; i < recs.count && a < sizeof acc - 2; i++) {
+        char err[128];
+        jvalue *v = json_parse(recs.lines[i], strlen(recs.lines[i]), err, sizeof err);
+        const char *role = NULL, *text = NULL;
+        if (v && v->kind == J_OBJ) {
+            jvalue *rv = jget(v, "role");
+            jvalue *tv = jget(v, "text");
+            char api_role[16];
+            int wrap = 0;
+            if (rv && rv->kind == J_STR) role = jstr(rv);
+            if (tv && tv->kind == J_STR) text = jstr(tv);
+            if (role && text && agent_chat_role(role, api_role, sizeof api_role, &wrap)
+                && a + 64 < sizeof acc) {
+                a += (size_t)snprintf(acc + a, sizeof acc - a,
+                                      ",{\"role\":\"%s\",\"content\":\"", api_role);
+                if (wrap) a += agent_json_str("[tool]\n", acc + a, sizeof acc - a);
+                a += agent_json_str(text, acc + a, sizeof acc - a);
+                a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
+            }
+            jfree(v);
+        }
+    }
+
+    if (tail && tail[0]) {
+        a += (size_t)snprintf(acc + a, sizeof acc - a,
+                              ",{\"role\":\"user\",\"content\":\"");
+        a += agent_json_str(tail, acc + a, sizeof acc - a);
+        if (extra_system && extra_system[0]) {
+            a += agent_json_str("\n\n", acc + a, sizeof acc - a);
+            a += agent_json_str(extra_system, acc + a, sizeof acc - a);
+        }
+        a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
+    } else if (extra_system && extra_system[0]) {
+        a += (size_t)snprintf(acc + a, sizeof acc - a,
+                              ",{\"role\":\"user\",\"content\":\"");
+        a += agent_json_str(extra_system, acc + a, sizeof acc - a);
+        a += (size_t)snprintf(acc + a, sizeof acc - a, "\"}");
+    }
+
+    session_free(&recs);
+    snprintf(out, outlen, "{\"model\":\"__MODEL__\",\"messages\":[%.*s],\"stream\":false}",
+             (int)a, acc);
+    return (int)strlen(out);
+}
+
+/* ── one model call: POST messages to endpoint, extract content ──────────── */
+
+static int agent_last_http;
+static char agent_last_err[160];
+
+static int agent_call(const char *endpoint, const char *model,
+                      const char *messages_json, char *content, size_t clen) {
+    char body[NET_BODY_MAX];
+    net_response r;
+    jvalue *root, *c0, *msg, *ct;
+    char err[128];
+    char *m;
+    size_t pre, rest, need;
+
+    content[0] = '\0';
+    snprintf(body, sizeof body, "%s", messages_json);
+    m = strstr(body, "__MODEL__");
+    if (!m) return -1;                       /* nothing to splice */
+    pre = (size_t)(m - body);
+    rest = strlen(m + 9);
+    need = pre + strlen(model) + rest + 1;
+    if (need > sizeof body) return -1;
+    memmove(m + strlen(model), m + 9, rest + 1);
+    memcpy(m, model, strlen(model));
+
+    r = net_http("POST", endpoint, "application/json", body);
+    agent_last_http = r.status;
+    agent_last_err[0] = '\0';
+    if (!r.ok) {
+        if (r.err == -2004) return -5;
+        if (r.err == -2005) return -6;
+        return -2;
+    }
+    if (r.status < 200 || r.status >= 300) {
+        int i, j = 0;
+        const char *b = r.body ? r.body : "";
+        for (i = 0; b[i] && j < (int)sizeof agent_last_err - 1; i++) {
+            char c = b[i];
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            agent_last_err[j++] = c;
+        }
+        agent_last_err[j] = '\0';
+        {
+            const char *home = getenv("HOME");
+            char path[512];
+            FILE *f;
+            if (home && home[0]) {
+                csih_home_bind(home);
+                snprintf(path, sizeof path, "%s/.csih/last-http.txt", home);
+                f = fopen(path, "w");
+                if (f) {
+                    fprintf(f, "status %d\n%s\n", r.status, r.body ? r.body : "");
+                    fclose(f);
+                }
+            }
+        }
+        return -3;
+    }
+
+    root = json_parse(r.body, (size_t)(r.body_bytes > 0 ? r.body_bytes : strlen(r.body)),
+                      err, sizeof err);
+    if (!root || root->kind != J_OBJ) { if (root) jfree(root); return -4; }
+    {
+        jvalue *ch = jget(root, "choices");
+        if (ch && ch->kind == J_ARR && ch->len > 0) {
+            c0 = ch->items[0];
+            if (c0 && c0->kind == J_OBJ) {
+                msg = jget(c0, "message");
+                if (msg && msg->kind == J_OBJ) {
+                    ct = jget(msg, "content");
+                    if (ct && ct->kind == J_STR) {
+                        strncpy(content, jstr(ct), clen - 1);
+                        content[clen - 1] = '\0';
+                    }
+                }
+            }
+        }
+    }
+    jfree(root);
+    return content[0] ? 0 : -5;
+}
+
+/* ── the whole run ───────────────────────────────────────────────────────── */
+
+typedef struct {
+    int  ok;
+    int  stopped;     /* 1 = ended via go:stop; 0 = hit MAX_ROUNDS */
+    int  rounds;
+    int  actions;
+    int  err;
+    char answer[AGENT_ANSWER_MAX];
+    char reason[320];
+} agent_result;
+
+/* Both pages live in ~/.cdsh. They are not tied to the working directory. */
+static int page_path(char *out, int outlen, const char *cwd, const char *which) {
+    const char *page = plugin_page(which);
+    const char *home;
+    char dir[1024];
+    (void)cwd;
+    if (!page || !page[0] || !out || outlen < 2) return 0;
+    home = getenv("HOME");
+    if (!home || !home[0]) return 0;
+    csih_home_bind(home);
+    snprintf(dir, sizeof dir, "%s/.csih", home);
+    mkdir(dir, 0750);
+    snprintf(out, (size_t)outlen, "%s/%s", dir, page);
+    return 1;
+}
+
+static void agent_seed_file(const char *path, const char *template) {
+    if (!path || !path[0]) return;
+    /* Existence, not a short read. file_read refuses a file bigger than its
+     * buffer, and treating that as "missing" used to wipe the page. */
+    if (access(path, 0) == 0) return;
+    file_write(path, template, strlen(template));
+}
+
+/* One turn, one static continuation. step() is a single await point:
+ * it returns while the HTTPS transfer is still running. */
+enum { PH_IDLE = 0, PH_GO = 1, PH_WAIT = 2, PH_DONE = 3, HTTP_ACT = 0, HTTP_END = 1 };
+
+static struct {
+    int phase, http_kind, round, action, parse_fail;
+    agent_result res;
+    agent_event_fn on_event;
+    void *ud;
+    char endpoint[256];
+    char model[80];
+    char transcript[512];
+    char cwd[1024];
+    char run_cwd[1024];
+    char extra[1600];
+    char messages[NET_BODY_MAX];
+    char content[AGENT_CONTENT_MAX];
+} AT;
+
+static void at_copy(char *d, int n, const char *s) {
+    if (!s) s = "";
+    snprintf(d, (size_t)n, "%s", s);
+}
+
+static int at_splice_model(void) {
+    char *m = strstr(AT.messages, "__MODEL__");
+    size_t pre, rest, need;
+    if (!m) return -1;
+    pre = (size_t)(m - AT.messages);
+    rest = strlen(m + 9);
+    need = pre + strlen(AT.model) + rest + 1;
+    if (need > sizeof AT.messages) return -1;
+    memmove(m + strlen(AT.model), m + 9, rest + 1);
+    memcpy(m, AT.model, strlen(AT.model));
+    return 0;
+}
+
+static int at_start_http(const char *tail) {
+    net_response r;
+    agent_build_messages(AT.transcript, tail, AT.extra[0] ? AT.extra : NULL,
+                         AT.messages, sizeof AT.messages);
+    if (at_splice_model() != 0) { AT.phase = PH_DONE; AT.res.err = -1; return 0; }
+    if (net_async_begin("POST", AT.endpoint, "application/json", AT.messages) != 0) {
+        r = net_async_end();
+        AT.res.err = (r.err == -2004) ? -5 : -2;
+        snprintf(AT.res.reason, sizeof AT.res.reason, "model call failed to start");
+        AT.phase = PH_DONE;
+        return 0;
+    }
+    AT.phase = PH_WAIT;
+    return 1;
+}
+
+static void at_event(const char *line) {
+    if (AT.on_event && line) AT.on_event(line, AT.ud);
+}
+
+static int at_fail(int rc) {
+    if (rc == -5) snprintf(AT.res.reason, sizeof AT.res.reason, "model call cancelled");
+    else if (rc == -6) snprintf(AT.res.reason, sizeof AT.res.reason, "model call timed out (120s)");
+    else if (rc == -3) snprintf(AT.res.reason, sizeof AT.res.reason, "model call failed (http %d) %s", agent_last_http, agent_last_err);
+    else snprintf(AT.res.reason, sizeof AT.res.reason, "model call failed (rc=%d)", rc);
+    AT.res.err = rc;
+    AT.phase = PH_DONE;
+    return 0;
+}
+
+/* Returns 1 if the turn should keep going. */
+static int at_after_http(void) {
+    net_response r = net_async_end();
+    int rc;
+    agent_last_http = r.status;
+    agent_last_err[0] = '\0';
+    AT.content[0] = '\0';
+    if (!r.ok) {
+        if (r.err == -2004) return at_fail(-5);
+        if (r.err == -2005) return at_fail(-6);
+        return at_fail(-2);
+    }
+    if (r.status < 200 || r.status >= 300) {
+        int i, j = 0;
+        for (i = 0; r.body[i] && j < (int)sizeof agent_last_err - 1; i++) {
+            char c = r.body[i];
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            agent_last_err[j++] = c;
+        }
+        agent_last_err[j] = 0;
+        return at_fail(-3);
+    }
+    {
+        char err[128];
+        jvalue *root = json_parse(r.body, (size_t)(r.body_bytes > 0 ? r.body_bytes : strlen(r.body)), err, sizeof err);
+        jvalue *ch, *c0, *msg, *ct;
+        if (!root || root->kind != J_OBJ) { if (root) jfree(root); return at_fail(-4); }
+        ch = jget(root, "choices");
+        if (ch && ch->kind == J_ARR && ch->len > 0) {
+            c0 = ch->items[0];
+            if (c0 && c0->kind == J_OBJ) {
+                msg = jget(c0, "message");
+                if (msg && msg->kind == J_OBJ) {
+                    ct = jget(msg, "content");
+                    if (ct && ct->kind == J_STR)
+                        snprintf(AT.content, sizeof AT.content, "%s", jstr(ct));
+                }
+            }
+        }
+        jfree(root);
+    }
+    if (!AT.content[0]) return at_fail(-4);
+    rc = 0;
+    (void)rc;
+    if (AT.http_kind == HTTP_END) {
+        agent_step d = agent_parse(AT.content);
+        char dec_rec[128];
+        const char *go = (d.kind == ACT_GO_CONTINUE) ? "continue" : "stop";
+        snprintf(dec_rec, sizeof dec_rec, "{\"role\":\"decision\",\"go\":\"%s\"}", go);
+        session_append(AT.transcript, dec_rec);
+        at_event(d.kind == ACT_GO_CONTINUE ? "  → continue" : "  → stop");
+        if (d.kind == ACT_GO_CONTINUE) {
+            AT.round++;
+            AT.action = 0;
+            AT.http_kind = HTTP_ACT;
+            AT.phase = PH_GO;
+            return 1;
+        }
+        AT.res.stopped = 1;
+        AT.res.ok = 1;
+        AT.phase = PH_DONE;
+        return 0;
+    }
+    {
+        agent_step s = agent_parse(AT.content);
+        char asst_rec[AGENT_CONTENT_MAX + 64];
+        char cesc[AGENT_CONTENT_MAX];
+        char result[AGENT_RESULT_MAX];
+        char tool_rec[AGENT_RESULT_MAX + 64];
+        char esc[AGENT_RESULT_MAX];
+        const char *nm = plugin_name(s.kind);
+        if (!nm) nm = "?";
+        agent_json_str(AT.content, cesc, sizeof cesc);
+        snprintf(asst_rec, sizeof asst_rec, "{\"role\":\"assistant\",\"text\":\"%s\"}", cesc);
+        session_append(AT.transcript, asst_rec);
+        {
+            char ev[256];
+            if (s.kind == ACT_EXEC) {
+                char whyb[72], cmdb[120];
+                int wi, wo, ci, co;
+                const char *srcw = s.why[0] ? s.why : "(无解释)";
+                for (wi = 0, wo = 0; srcw[wi] && wo + 1 < (int)sizeof whyb; wi++) {
+                    char c = srcw[wi];
+                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                    whyb[wo++] = c;
+                }
+                whyb[wo] = 0;
+                for (ci = 0, co = 0; s.cmd[ci] && co + 1 < (int)sizeof cmdb; ci++) {
+                    char c = s.cmd[ci];
+                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                    cmdb[co++] = c;
+                }
+                cmdb[co] = 0;
+                snprintf(ev, sizeof ev, "exec\t%s\t%s", whyb, cmdb);
+            }
+            else if (s.kind == ACT_READ || s.kind == ACT_WRITE || s.kind == ACT_EDIT)
+                snprintf(ev, sizeof ev, "▸ %s: %s", nm, s.path);
+            else if (s.kind == ACT_MIND) snprintf(ev, sizeof ev, "▸ %s %s: %s", nm, s.op, s.path);
+            else if (s.kind == ACT_ANSWER) snprintf(ev, sizeof ev, "✓ %s: %s", nm, s.text);
+            else if (s.kind == ACT_GO_STOP) snprintf(ev, sizeof ev, "  → stop");
+            else if (s.kind == ACT_GO_CONTINUE) snprintf(ev, sizeof ev, "  → continue");
+            else {
+                char flat[200];
+                int i, j = 0;
+                for (i = 0; AT.content[i] && j < (int)sizeof flat - 1; i++) {
+                    char c = AT.content[i];
+                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                    flat[j++] = c;
+                }
+                flat[j] = 0;
+                if (!flat[0]) snprintf(ev, sizeof ev, "▸ (empty)");
+                else snprintf(ev, sizeof ev, "▸ %s", flat);
+            }
+            at_event(ev);
+        }
+        if (s.kind == ACT_ANSWER || s.kind == ACT_GO_STOP) {
+            char why[200];
+            if (agent_failing(why, (int)sizeof why)) {
+                agent_json_str(why, esc, sizeof esc);
+                snprintf(tool_rec, sizeof tool_rec,
+                         "{\"role\":\"tool\",\"name\":\"error\",\"text\":\"%s\"}", esc);
+                session_append(AT.transcript, tool_rec);
+                at_event(why);
+                AT.phase = PH_GO;
+                return 1;
+            }
+        }
+        if (s.kind == ACT_GO_STOP) {
+            session_append(AT.transcript, "{\"role\":\"decision\",\"go\":\"stop\"}");
+            AT.res.stopped = 1;
+            AT.res.ok = 1;
+            AT.phase = PH_DONE;
+            return 0;
+        }
+        if (s.kind == ACT_GO_CONTINUE) {
+            session_append(AT.transcript, "{\"role\":\"decision\",\"go\":\"continue\"}");
+            AT.round++;
+            AT.action = 0;
+            AT.http_kind = HTTP_ACT;
+            AT.phase = PH_GO;
+            return 1;
+        }
+        if (s.kind == ACT_ANSWER) {
+            snprintf(AT.res.answer, sizeof AT.res.answer, "%s", s.text);
+            /* One supplementary decision after the work of this round.
+             * The next continue would be round+1. At the cap, do not ask:
+             * continue would be rejected on the next step anyway. */
+            if (AT.round + 1 >= MAX_ROUNDS) {
+                session_append(AT.transcript, "{\"role\":\"decision\",\"go\":\"stop\"}");
+                AT.res.ok = 1;
+                snprintf(AT.res.reason, sizeof AT.res.reason, "reached MAX_ROUNDS");
+                AT.phase = PH_DONE;
+                return 0;
+            }
+            AT.http_kind = HTTP_END;
+            at_event("↻ round-end decision");
+            AT.phase = PH_GO;
+            return 1;
+        }
+        if (s.kind == ACT_ERR) {
+            agent_json_str("could not parse your output as a JSON action; emit exactly one {\"act\":...} object", esc, sizeof esc);
+            snprintf(tool_rec, sizeof tool_rec, "{\"role\":\"tool\",\"name\":\"error\",\"text\":\"%s\"}", esc);
+            session_append(AT.transcript, tool_rec);
+            if (++AT.parse_fail >= 3) {
+                AT.res.ok = 1;
+                snprintf(AT.res.reason, sizeof AT.res.reason, "too many unparseable steps");
+                AT.phase = PH_DONE;
+                return 0;
+            }
+            AT.action++;
+            AT.phase = PH_GO;
+            return 1;
+        }
+        {
+            const char *name = nm;
+            if (s.kind == ACT_EXEC && agent_note_cd(AT.run_cwd, sizeof AT.run_cwd, s.cmd, result, sizeof result)) {
+            } else {
+                agent_exec(&s, AT.run_cwd[0] ? AT.run_cwd : AT.cwd, result, sizeof result);
+            }
+            if (agent_object_count(AT.content) > 1 && strlen(result) + 80 < sizeof result)
+                strcat(result, "\n[only the first action ran; send one JSON object]");
+            agent_tool_record(tool_rec, sizeof tool_rec, name, result);
+            session_append(AT.transcript, tool_rec);
+            AT.res.actions++;
+            {
+                char note[160], flat[120];
+                int i, o = 0;
+                for (i = 0; result[i] && o + 1 < (int)sizeof flat; i++) {
+                    char c = result[i];
+                    flat[o++] = (c == '\n' || c == '\r') ? ' ' : c;
+                }
+                flat[o] = 0;
+                snprintf(note, sizeof note, "  → %s", flat[0] ? flat : "(no output)");
+                at_event(note);
+            }
+        }
+        AT.action++;
+        if (AT.action >= MAX_ACTIONS) { AT.http_kind = HTTP_END; at_event("↻ round-end decision"); }
+        AT.phase = PH_GO;
+        return 1;
+    }
+}
+
+int agent_turn_begin(const char *prompt, const char *transcript,
+                     const char *endpoint, const char *model, const char *cwd,
+                     const char *extra_system,
+                     agent_event_fn on_event, void *ud) {
+    char user_rec[AGENT_CONTENT_MAX + 64];
+    char pesc[AGENT_CONTENT_MAX];
+    char tree[2048], palace[2048];
+    memset(&AT, 0, sizeof AT);
+    net_reset();
+    net_turn_clock();
+    at_copy(AT.endpoint, (int)sizeof AT.endpoint, endpoint);
+    at_copy(AT.model, (int)sizeof AT.model, model);
+    at_copy(AT.transcript, (int)sizeof AT.transcript, transcript);
+    at_copy(AT.cwd, (int)sizeof AT.cwd, cwd);
+    at_copy(AT.run_cwd, (int)sizeof AT.run_cwd, cwd);
+    at_copy(AT.extra, (int)sizeof AT.extra, extra_system);
+    AT.on_event = on_event;
+    AT.ud = ud;
+    page_path(tree, (int)sizeof tree, AT.cwd, "tree");
+    page_path(palace, (int)sizeof palace, AT.cwd, "palace");
+    agent_seed_file(tree,
+        "csih\n"
+        "├── file\n"
+        "├── exec 带 why\n"
+        "├── mind 思维树 markdown-tree-dag\n"
+        "│   └── 记忆宫殿 mermaid-flowchart-memory-palace\n"
+        "══> 新功能先 bin/envelope 0:grkwjcgmcdsh\n");
+    agent_seed_file(palace,
+        "```mermaid\n"
+        "flowchart LR\n"
+        "  csih --> file & exec & mind\n"
+        "  mind --> tree[\"markdown-tree-dag\"]\n"
+        "  mind --> palace[\"mermaid-flowchart-memory-palace\"]\n"
+        "```\n");
+    agent_json_str(prompt ? prompt : "", pesc, sizeof pesc);
+    snprintf(user_rec, sizeof user_rec, "{\"role\":\"user\",\"text\":\"%s\"}", pesc);
+    if (session_append(AT.transcript, user_rec) != 0) {
+        AT.res.err = 1;
+        snprintf(AT.res.reason, sizeof AT.res.reason, "cannot write transcript");
+        AT.phase = PH_DONE;
+        return -1;
+    }
+    AT.phase = PH_GO;
+    AT.http_kind = HTTP_ACT;
+    return 0;
+}
+
+int agent_turn_step(int wait_ms) {
+    if (AT.phase == PH_DONE || AT.phase == PH_IDLE) return 0;
+    if (AT.phase == PH_WAIT) {
+        if (net_async_pump(wait_ms)) return 1;
+        return at_after_http();
+    }
+    if (AT.round >= MAX_ROUNDS) {
+        AT.res.ok = 1;
+        snprintf(AT.res.reason, sizeof AT.res.reason, "reached MAX_ROUNDS");
+        AT.phase = PH_DONE;
+        return 0;
+    }
+    if (AT.action == 0 && AT.http_kind == HTTP_ACT) {
+        AT.res.rounds++;
+        AT.parse_fail = 0;
+    }
+    if (AT.http_kind == HTTP_END) return at_start_http(AGENT_ROUND_END_NUDGE);
+    return at_start_http(NULL);
+}
+
+agent_result agent_turn_take(void) { agent_result r = AT.res; return r; }
+
+/* Install a finished local result. The TUI end path reads it through
+ * agent_turn_take. No socket is opened. */
+void agent_turn_seal(int ok, int stopped, int rounds, int actions, int err,
+                     const char *answer) {
+    memset(&AT.res, 0, sizeof AT.res);
+    AT.res.ok = ok;
+    AT.res.stopped = stopped;
+    AT.res.rounds = rounds;
+    AT.res.actions = actions;
+    AT.res.err = err;
+    if (answer) snprintf(AT.res.answer, sizeof AT.res.answer, "%s", answer);
+    AT.phase = PH_DONE;
+}
+
+agent_result agent_run_cb_core(const char *prompt, const char *transcript,
+                       const char *endpoint, const char *model, const char *cwd,
+                       const char *extra_system,
+                       agent_event_fn on_event, void *ud) {
+    agent_result r;
+    if (agent_turn_begin(prompt, transcript, endpoint, model, cwd, extra_system, on_event, ud) != 0) {
+        r = agent_turn_take();
+        return r;
+    }
+    while (agent_turn_step(200)) ;
+    r = agent_turn_take();
+    return r;
+}
+
+
+/*
+ * Public, UI-aware entry point: same loop as the core, but lets a caller
+ * receive live progress lines (e.g. the TUI) and inject environment it knows
+ * about (e.g. available tmux windows) without the library depending on either.
+ */
+agent_result agent_run_cb(const char *prompt, const char *transcript,
+                          const char *endpoint, const char *model, const char *cwd,
+                          const char *extra_system,
+                          agent_event_fn on_event, void *ud) {
+    agent_result r = agent_run_cb_core(prompt, transcript, endpoint, model, cwd,
+                                       extra_system, on_event, ud);
+    return r;
+}
+
+/*
+ * No events and no extra system text. The CLI uses agent_run_cb so each step
+ * is printed before the next model call.
+ */
+agent_result agent_run(const char *prompt, const char *transcript,
+                       const char *endpoint, const char *model, const char *cwd) {
+    agent_result r = agent_run_cb_core(prompt, transcript, endpoint, model, cwd,
+                                       NULL, NULL, NULL);
+    return r;
+}
