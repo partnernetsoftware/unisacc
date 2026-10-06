@@ -264,7 +264,7 @@ job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 comp
 for k in 1 2 3 4; do job difftest_o-$k SHARD=$k/4 ./tests/difftest_o.sh; done
 job warn        ./tests/warn.sh
 job diag-units  ./tests/diagunits.sh
-job nativeboot  ./tests/nativeboot.sh
+for part in self cross-a cross-b; do job nativeboot-$part env NB_PART=$part ./tests/nativeboot.sh; done  # 0.0.31: one window no longer holds all eight compiles
 job staticinit  ./tests/staticinit.sh
 job tagforward ./tests/tagforward.sh
 job parserbounds ./tests/parserbounds.sh

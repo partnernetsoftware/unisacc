@@ -82,19 +82,41 @@ bound 55 env UA="$UA" bash -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' _ "$R" || ex
 if [ "$mode" = windows ]; then windows "$2"; exit $?; fi
 H=$(host_target)
 [ -n "$H" ] || { echo "nativeboot: skip (no host target)"; exit 77; }
+# NB_PART (0.0.31): a self-built compiler takes ~7.5 s per self-compile, so
+# N1..N3 plus five cross images (~55 s) no longer fit one window.  "self"
+# proves N1=N2=N3; "cross-a"/"cross-b" use N1 as the native compiler (equal
+# to N2 by the self part) for three and two cross targets.  Default: all.
+part=${NB_PART:-all}
 compile "$T/N1" "$UA" "$H" || exit 1
 runnable "$T/N1" "$T/r1" || { fail "prepare N1"; exit 1; }
-compile "$T/N2" "$T/r1" "$H" || exit 1
-runnable "$T/N2" "$T/r2" || { fail "prepare N2"; exit 1; }
-compile "$T/N3" "$T/r2" "$H" || exit 1
-cmp -s "$T/N1" "$T/N2" && cmp -s "$T/N2" "$T/N3" || { fail "N1=N2=N3"; exit 1; }
+if [ "$part" = all ] || [ "$part" = self ]; then
+    compile "$T/N2" "$T/r1" "$H" || exit 1
+    runnable "$T/N2" "$T/r2" || { fail "prepare N2"; exit 1; }
+    compile "$T/N3" "$T/r2" "$H" || exit 1
+    cmp -s "$T/N1" "$T/N2" && cmp -s "$T/N2" "$T/N3" || { fail "N1=N2=N3"; exit 1; }
+    [ "$part" = self ] && { printf '  ok N1=N2=N3 on %s  %s\n' "$H" "$(shasum < "$T/N1" | cut -c1-16)"; exit 0; }
+else
+    cp "$T/r1" "$T/r2" || exit 1
+fi
+case $part in
+    all) targets="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64";;
+    cross-a) targets="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64";;
+    cross-b) targets="win/x86_64 win/arm64";;
+    *) echo "nativeboot: unknown NB_PART $part" >&2; exit 2;;
+esac
 cross=0
-for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
+for target in $targets; do
     [ "$target" = "$H" ] && continue
     compile "$T/reference" "$UA" "$target" && compile "$T/native" "$T/r2" "$target" || exit 1
     cmp -s "$T/reference" "$T/native" || { fail "cross $target"; exit 1; }
     cross=$((cross+1))
 done
+[ "$cross" -gt 0 ] || { fail "no cross target checked"; exit 1; }
+if [ "$part" != all ]; then
+    printf '  ok %s: cross %s  %s\n' "$part" "$cross" "$(shasum < "$T/N1" | cut -c1-16)"
+    [ "$part" = cross-b ] && echo '  skip Windows self-build (run in CI: release-check winsuite; by hand: --windows win/arm64 and --windows win/x86_64)'
+    exit 0
+fi
 printf '  ok N1=N2=N3 on %s, cross %s/5  %s\n' "$H" "$cross" "$(shasum < "$T/N1" | cut -c1-16)"
 echo '  skip Windows self-build (run in CI: release-check winsuite; by hand: --windows win/arm64 and --windows win/x86_64)'
 echo 'native bootstrap reached locally; Windows self-build unverified'

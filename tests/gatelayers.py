@@ -29,7 +29,7 @@ PLATFORM = set("""
 c99 apps-real realprog hosthdr syscall6 winposix ccinterop elfobj
 nativeboot windows-resolver-host
 """.split())
-PLATFORM_PREFIX = ("bigclosure-", "fat-", "ffi-", "exec-mach", "exec-win",
+PLATFORM_PREFIX = ("bigclosure-", "nativeboot-", "fat-", "ffi-", "exec-mach", "exec-win",
                    "exec-pe", "exec-arm", "exec-bind", "exec-container",
                    "seed-matrix-lnx-", "seed-matrix-osx-", "seed-matrix-win-")
 
