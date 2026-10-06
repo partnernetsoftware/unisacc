@@ -245,13 +245,38 @@ static int actions_depend_on_key(const char *raw, Value *sequences) {
     }
     return 0;
 }
-static char *line(FILE *f) {
-    size_t n = 0, cap = 256; char *s = grow(NULL, cap, 1); int c;
-    while ((c = fgetc(f)) != EOF && c != '\n') {
-        if (n + 1 >= cap) { if (cap > SIZE_MAX / 2) die("line too long"); cap *= 2; s = grow(s, cap, 1); }
-        s[n++] = (char)c;
+/* Whole-file input: the product's stdio is unbuffered (every fgetc is a read), so line()
+   reads each stream once in large chunks and hands out lines from memory.  Streams nest
+   (a manifest row installs other tables), so each open stream keeps its own copy;
+   close_in() drops it, since a later fopen can return the same FILE * value. */
+typedef struct { FILE *f; char *buf; size_t n, pos; } Reader;
+static Reader rd[8];
+static Reader *rd_get(FILE *f) {
+    size_t cap = 1 << 16, got; int i, k = -1;
+    for (i = 0; i < 8; i++) { if (rd[i].f == f) return &rd[i]; if (!rd[i].f && k < 0) k = i; }
+    if (k < 0) die("too many open input streams");
+    rd[k].f = f; rd[k].n = rd[k].pos = 0; rd[k].buf = grow(NULL, cap, 1);
+    for (;;) {
+        if (cap - rd[k].n < (1 << 16)) { if (cap > SIZE_MAX / 2) die("input too long"); cap *= 2; rd[k].buf = grow(rd[k].buf, cap, 1); }
+        got = fread(rd[k].buf + rd[k].n, 1, cap - rd[k].n, f);
+        if (!got) break;
+        rd[k].n += got;
     }
-    if (c == EOF && n == 0) { free(s); return NULL; }
+    return &rd[k];
+}
+static int close_in(FILE *f) {
+    int i;
+    for (i = 0; i < 8; i++) if (rd[i].f == f) { free(rd[i].buf); rd[i].buf = NULL; rd[i].f = NULL; }
+    return fclose(f);
+}
+static char *line(FILE *f) {
+    Reader *r = rd_get(f); size_t start, n; char *s;
+    if (r->pos >= r->n) return NULL;
+    start = r->pos;
+    while (r->pos < r->n && r->buf[r->pos] != '\n') r->pos++;
+    n = r->pos - start;
+    if (r->pos < r->n) r->pos++;
+    s = grow(NULL, n + 1, 1); memcpy(s, r->buf + start, n);
     if (n && s[n - 1] == '\r') n--;
     s[n] = 0; return s;
 }
@@ -272,23 +297,10 @@ static void quoted(FILE *f, const char *s) {
     fputc('"', f);
 }
 static void value_write(FILE *f, const Value *v) {
-    size_t i;
-    switch (v->kind) {
-    case JSTR: quoted(f, v->s); break;
-    case JINT: fprintf(f, "%lld", v->number); break;
-    case JUINT: fprintf(f, "%llu", v->unumber); break;
-    case JBOOL: fputs(v->number ? "true" : "false", f); break;
-    case JNULL: fputs("null", f); break;
-    case JOBJ: case JARR:
-        fputc(v->kind == JOBJ ? '{' : '[', f);
-        for (i = 0; i < v->n; i++) {
-            if (i) fputc(',', f);
-            if (v->kind == JOBJ) { quoted(f, v->items[i].key); fputc(':', f); }
-            value_write(f, v->items[i].value);
-        }
-        fputc(v->kind == JOBJ ? '}' : ']', f); break;
-    default: die("unknown value kind");
-    }
+    /* one write of the whole text: the product's stdio sends every fputc to the kernel */
+    char *t = value_json_text(v); size_t n = strlen(t);
+    if (fwrite(t, 1, n, f) != n) die("write failed");
+    free(t);
 }
 static int fields_tab(char *s, char **field, int max) {
     int n = 0; char *p = s;
@@ -382,7 +394,7 @@ static Value *load_fact(const char *stem) {
         }
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("fact read failed");
+    if (ferror(f) || close_in(f)) die("fact read failed");
     /* A header-only facts file is an empty map in the Python constructor. */
     if (typed < 0) typed = 1;
     if (!typed && table && nh == 2 && !strcmp(header[0], "name") && !strcmp(header[1], "value")) {
@@ -563,7 +575,7 @@ static Value *fresh_bindings_file(Value *opts, const char *root) {
         }
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("freshrows read failed");
+    if (ferror(f) || close_in(f)) die("freshrows read failed");
     if (!header) die("empty freshrows table");
     return bindings;
 }
@@ -606,7 +618,7 @@ static void numeric_file_bindings(Value *opts, Value *facts, Value *bindings) {
         value_put(bindings, key, value_string(label));
         free(key); free(owner); free(kind); free(label); free(s);
     }
-    if (ferror(f) || fclose(f) || !header) die("numeric freshrows read failed");
+    if (ferror(f) || close_in(f) || !header) die("numeric freshrows read failed");
 }
 static void declared_bindmap(Value *opts, Value *facts, Value *bindings) {
     Value *map = value_get(opts, "bindmap");
@@ -854,7 +866,7 @@ static Value *textrows_construct(const char *root, Value *opts) {
         }
         free(s);
     }
-    if (ferror(f) || fclose(f) || !header) die("textrows read failed");
+    if (ferror(f) || close_in(f) || !header) die("textrows read failed");
     return out;
 }
 static void let_bind(Value *env, const char *bind) {
@@ -889,9 +901,9 @@ static void inspect_lets(const char *stage, const char *outpath, int argc, char 
         }
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("manifest read failed");
+    if (ferror(f) || close_in(f)) die("manifest read failed");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, env); if (fclose(out)) die("output close failed");
+    value_write(out, env); if (close_in(out)) die("output close failed");
 }
 
 /* A template's `each` and `over` columns are finite products of fact lists.
@@ -1059,7 +1071,7 @@ static Buffer expand_template_file_fresh_edit(const char *path, Value *facts,
                     copy(field[5]), copy(field[6]), copy(field[7]), copy(field[8]), r->depth};
         free(s);
     }
-    if (ferror(f) || fclose(f) || !rows.n) die("template read failed");
+    if (ferror(f) || close_in(f) || !rows.n) die("template read failed");
     for (i = 0; i < rows.n;) {
         size_t end = i + 1;
         while (end < rows.n && !strcmp(rows.row[end].block, rows.row[i].block)) {
@@ -1091,7 +1103,7 @@ static void inspect_template(const char *stage, const char *section, const char 
     Buffer expanded = expand_template_section(stage, section);
     FILE *out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     if (expanded.n && fwrite(expanded.s, 1, expanded.n, out) != expanded.n) die("template write failed");
-    if (fclose(out)) die("template close failed");
+    if (close_in(out)) die("template close failed");
 }
 static void inspect_fresh(const char *stage, const char *stem, const char *outpath, const char *initial) {
     char path[1024], *end; FILE *f, *out; char *s; int found = 0;
@@ -1109,11 +1121,11 @@ static void inspect_fresh(const char *stage, const char *stem, const char *outpa
             direct_bindings(bindings, field[7], facts);
             if (++found > 1) die("ambiguous fresh manifest row");
             out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-            value_write(out, bindings); if (fclose(out)) die("output close failed");
+            value_write(out, bindings); if (close_in(out)) die("output close failed");
         }
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("manifest read failed");
+    if (ferror(f) || close_in(f)) die("manifest read failed");
     if (!found) die("fresh manifest row not found");
 }
 static RuleState *rule_state(RuleSet *r, const char *name) {
@@ -1456,7 +1468,7 @@ static Value *lex_sequences_flags(int argc, char **argv) {
         if (!when_true(field[3], argc, argv)) { free(s); continue; }
         opts = value_json(field[8], "lex output options");
         facts = load_facts_expr(field[4]); sequences = mapseq_construct(opts, facts);
-        fclose(f); free(s); return sequences;
+        close_in(f); free(s); return sequences;
     }
     die("missing lex output row"); return NULL;
 }
@@ -1476,12 +1488,12 @@ static void inspect_pp_start(const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || !sequences) die("pp start sequences missing");
+    if (ferror(manifest) || close_in(manifest) || !sequences) die("pp start sequences missing");
     table = fopen("exec/pp/start-byte.tsv", "rb"); if (!table) die("cannot open pp start table");
     install_delta_text(&g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
-    if (fclose(table)) die("pp start table close failed");
+    if (close_in(table)) die("pp start table close failed");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_delta_template(const char *section, const char *outpath) {
     Graph g = {0}; Buffer rows = expand_template_section("lex", section);
@@ -1489,9 +1501,9 @@ static void inspect_delta_template(const char *section, const char *outpath) {
     Value *domain = numeric_domain(0, 257), *sequences = lex_sequences();
     FILE *f = buffer_file(&rows), *out;
     install_delta_text(&g, f, 'b', domain, classes, sequences, 1, 0, NULL, "DISPATCH");
-    if (fclose(f)) die("temporary table close failed");
+    if (close_in(f)) die("temporary table close failed");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void install_lex_table(Graph *g, const char *stem, Value *opts,
                               Value *facts, Value *sequences, const char *lexer) {
@@ -1511,7 +1523,7 @@ static void install_lex_table(Graph *g, const char *stem, Value *opts,
     if (snprintf(path, sizeof(path), "exec/lex/%s", stem) >= (int)sizeof(path)) die("lex table path too long");
     f = fopen(path, "rb"); if (!f) die("cannot open lex table");
     install_delta_text(g, f, mode[0], domain, classes, sequences, 0, ordered, skip, lexer);
-    if (fclose(f)) die("lex table close failed");
+    if (close_in(f)) die("lex table close failed");
 }
 static void inspect_delta_table(const char *stem, const char *outpath) {
     Graph g = {0}; FILE *manifest = fopen("exec/lex/gen-manifest.tsv", "rb"), *out;
@@ -1529,9 +1541,9 @@ static void inspect_delta_table(const char *stem, const char *outpath) {
         install_lex_table(&g, stem, opts, facts, lex_sequences(), "DISPATCH");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("lex table not found");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("lex table not found");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void finish_lex(Graph *g, const char *start) {
     Value *facts = load_fact("lex-domains"), *rows = value_get(facts, "lex-domains");
@@ -2254,7 +2266,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
         manifest_companions(g, pending, np);
     }
     free(pending);
-    if (ferror(f) || fclose(f)) die("template edit read failed");
+    if (ferror(f) || close_in(f)) die("template edit read failed");
 }
 typedef struct { Graph *graph; TRow *row; } EditContext;
 static void edit_row_visit(Value *scope, void *arg) {
@@ -2312,7 +2324,7 @@ static void sourcefacts_lex_edits(Graph *g) {
         tuple_walk(row.each, facts, scope, edit_block_visit, &block);
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("lex sourcefacts template read failed");
+    if (ferror(f) || close_in(f)) die("lex sourcefacts template read failed");
 }
 static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
     FILE *f = fopen("exec/lex/gen-manifest.tsv", "rb"); char *s; Value *sequences = lex_sequences_flags(argc, argv);
@@ -2336,7 +2348,7 @@ static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
             FILE *rows = buffer_file(&lines);
             facts = load_facts_expr(field[4]); classes = value_get(facts, "classes");
             install_delta_text(g, rows, 'b', domain, classes, sequences, 1, 0, NULL, "DISPATCH");
-            if (fclose(rows)) die("lex template close failed");
+            if (close_in(rows)) die("lex template close failed");
         } else if (!strcmp(field[0], "template") && !strcmp(field[1], "sourcefacts")) {
             sourcefacts_lex_edits(g);
         } else if (!strcmp(field[0], "template")) {
@@ -2352,14 +2364,14 @@ static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
             domain = value_get(opts, "domain_keys");
             domain = domain ? value_path(facts, value_text(domain)) : numeric_domain(0, 257);
             install_delta_text(g, rows, mode[0], domain, NULL, sequences, 1, 0, NULL, inner_start);
-            if (fclose(rows)) die("lex template close failed");
+            if (close_in(rows)) die("lex template close failed");
         } else if (!strcmp(field[0], "let")) {
             if (!strcmp(field[7], "START=@str:LOC.magic0")) inner_start = "LOC.magic0";
             else if (!strcmp(field[7], "START=@str:SF.start")) inner_start = "SF.start";
         } else if (strcmp(field[0], "call")) die("unsupported lex manifest op");
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("lex manifest read failed");
+    if (ferror(f) || close_in(f)) die("lex manifest read failed");
     finish_lex(g, start);
 }
 static void output(FILE *f, const Graph *g);
@@ -2386,7 +2398,7 @@ static void install_plain_classes(Graph *g, const char *path, char mode,
         } else rule_keys_classes(st, field[1], bound_name(field[2], bindings), field[3], classes);
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("rule read failed");
+    if (ferror(f) || close_in(f)) die("rule read failed");
     if (!rules.n) die("empty rule file");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
@@ -2438,7 +2450,7 @@ static void install_section_domain_classes(Graph *g, const char *path, const cha
         } else rule_keys_classes(st, field[2], bound_name(field[3], bindings), field[4], classes);
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("section rule read failed");
+    if (ferror(f) || close_in(f)) die("section rule read failed");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
         int variable = st->def_actions && actions_depend_on_key(st->def_actions, sequences);
@@ -2496,7 +2508,7 @@ static void install_prn_call(Graph *g) {
         } else die("unsupported called DSL op");
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("called manifest read failed");
+    if (ferror(f) || close_in(f)) die("called manifest read failed");
     if (loops != 1 || body != 1 || !instances || instances->kind != JARR) die("incomplete called manifest");
     for (size_t i = 0; i < instances->n; i++) {
         Value *item = instances->items[i].value, *facts = load_facts_expr(factexpr);
@@ -2533,7 +2545,7 @@ static void install_numout_call(Graph *g) {
         rows++;
         free(s);
     }
-    if (ferror(f) || fclose(f) || rows != 1) die("numout manifest read failed");
+    if (ferror(f) || close_in(f) || rows != 1) die("numout manifest read failed");
 }
 static Value *classes_for(Value *opts, Value *facts) {
     Value *spec = value_get(opts, "classmap"), *classes = value_new(JOBJ);
@@ -2596,7 +2608,7 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
         } else die("unsupported opt answer iterator");
         rows++; free(s);
     }
-    if (ferror(f) || fclose(f) || rows != 2) die("opt answer template read failed");
+    if (ferror(f) || close_in(f) || rows != 2) die("opt answer template read failed");
 }
 static void inspect_pp_emit(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
@@ -2634,9 +2646,9 @@ static void inspect_pp_emit(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp emit row missing");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp emit row missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_object_predefine(const char *outpath) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
@@ -2655,9 +2667,9 @@ static void inspect_pp_object_predefine(const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp object-predefine row missing");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp object-predefine row missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void pp_install_stem(Graph *g, const char *stem, const char *section,
                             Value *bindings, Value *sequences) {
@@ -2687,7 +2699,7 @@ static void pp_install_prefix(Graph *g, int no_autoinc) {
             FILE *table = fopen("exec/pp/start-byte.tsv", "rb");
             if (!table || !sequences || start++) die("invalid pp prefix start");
             install_delta_text(g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
-            if (fclose(table)) die("pp start table close failed");
+            if (close_in(table)) die("pp start table close failed");
         } else if (!strcmp(field[0], "rows") &&
                    (!strcmp(field[1], "cli") || !strcmp(field[1], "text") ||
                     !strcmp(field[1], "macro") || !strcmp(field[1], "pragma"))) {
@@ -2700,14 +2712,14 @@ static void pp_install_prefix(Graph *g, int no_autoinc) {
         } else die("unsupported pp prefix manifest row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || start != 1 || rows != 4)
+    if (ferror(manifest) || close_in(manifest) || start != 1 || rows != 4)
         die("incomplete pp prefix");
 }
 static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, no_autoinc);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 typedef struct { int depth; char *raw; char *field[9]; } PPRow;
 static int pp_shared_predefines;   /* 0.0.32 B5: --shared-predefines (the product's e2) */
@@ -2791,21 +2803,21 @@ static void pp_install_call_autoinc(Graph *g) {
         op = r->field[0]; while (op[depth] == '.') depth++;
         r->depth = depth;
     }
-    if (ferror(f) || fclose(f)) die("pp autoinc manifest read failed");
+    if (ferror(f) || close_in(f)) die("pp autoinc manifest read failed");
     pp_autoinc_block(g, rows, 0, n, 0, env);
 }
 static void inspect_pp_call_autoinc(const char *outpath) {
     Graph g = {0}; FILE *out;
     pp_install_call_autoinc(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_through_autoinc(const char *outpath, int no_autoinc) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, no_autoinc);
     if (!no_autoinc) pp_install_call_autoinc(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void pp_install_body_before_dsw(Graph *g) {
     FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s;
@@ -2871,7 +2883,7 @@ static void pp_install_body_before_dsw(Graph *g) {
         } else die("unsupported pp body row before dsw");
         free(s);
     }
-    if (ferror(f) || fclose(f) || scans != 1 || obj != 1 || assembly != 1 || linedir != 1)
+    if (ferror(f) || close_in(f) || scans != 1 || obj != 1 || assembly != 1 || linedir != 1)
         die("incomplete pp body before dsw");
 }
 static void pp_install_dsw(Graph *g) {
@@ -2888,12 +2900,12 @@ static void pp_install_dsw(Graph *g) {
             FILE *table = buffer_file(&lines);
             if (strcmp(value_text(value_get(opts, "mode")), "r")) die("pp dsw mode changed");
             install_delta_text(g, table, 'r', domain, NULL, NULL, 0, 0, NULL, "START");
-            if (fclose(table)) die("pp dsw table close failed");
+            if (close_in(table)) die("pp dsw table close failed");
             found++;
         }
         free(s);
     }
-    if (ferror(f) || fclose(f) || found != 1) die("pp dsw declaration missing");
+    if (ferror(f) || close_in(f) || found != 1) die("pp dsw declaration missing");
 }
 static void pp_install_body_after_dsw(Graph *g) {
     FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s; int active = 0;
@@ -2935,7 +2947,7 @@ static void pp_install_body_after_dsw(Graph *g) {
             FILE *table = buffer_file(&lines);
             if (strcmp(value_text(value_get(opts, "mode")), "b")) die("pp escape mode changed");
             install_delta_text(g, table, 'b', domain, NULL, NULL, 0, 0, NULL, "START");
-            if (fclose(table)) die("pp escape table close failed");
+            if (close_in(table)) die("pp escape table close failed");
             escape++;
         } else if (!strcmp(field[0], "rows") &&
                    (!strcmp(field[1], "directive-body") || !strcmp(field[1], "include-location") ||
@@ -2960,7 +2972,7 @@ static void pp_install_body_after_dsw(Graph *g) {
         } else die("unsupported pp body row after dsw");
         free(s);
     }
-    if (ferror(f) || fclose(f) || actions != 1 || rows != 7 || escape != 1 || accept != 1)
+    if (ferror(f) || close_in(f) || actions != 1 || rows != 7 || escape != 1 || accept != 1)
         die("incomplete pp body after dsw");
 }
 static void pp_move_state(Graph *g, const char *from, const char *to) {
@@ -3050,7 +3062,7 @@ static void pp_sourcefacts_edit(Graph *g, const char *section) {
         else die("unsupported pp sourcefacts edit");
         edits++; free(s);
     }
-    if (ferror(f) || fclose(f) || edits != (!strcmp(section, "pre") ? 3 : 1))
+    if (ferror(f) || close_in(f) || edits != (!strcmp(section, "pre") ? 3 : 1))
         die("pp sourcefacts edits missing");
 }
 static void pp_install_sourcefacts(Graph *g) {
@@ -3066,7 +3078,7 @@ static void inspect_pp_through_linedir(const char *outpath, int with_dsw) {
     if (with_dsw > 1) pp_install_body_after_dsw(&g);
     if (with_dsw > 2) { pp_install_sourcefacts(&g); finish(&g); }
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_header(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
@@ -3111,9 +3123,9 @@ static void inspect_pp_header(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 2) die("pp header rows missing");
+    if (ferror(manifest) || close_in(manifest) || found != 2) die("pp header rows missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_body(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
@@ -3151,9 +3163,9 @@ static void inspect_pp_body(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 2) die("pp body rows missing");
+    if (ferror(manifest) || close_in(manifest) || found != 2) die("pp body rows missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_key(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
@@ -3185,9 +3197,9 @@ static void inspect_pp_key(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp key row missing");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp key row missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_autoinc(const char *stem, const char *outpath) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
@@ -3218,9 +3230,9 @@ static void inspect_pp_autoinc(const char *stem, const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp autoinc row missing");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp autoinc row missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_locations(const char *outpath) {
     FILE *manifest = fopen("exec/pp/locations-manifest.tsv", "rb"), *out;
@@ -3244,9 +3256,9 @@ static void inspect_pp_locations(const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp locations row missing");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp locations row missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_template(const char *stem, const char *outpath) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
@@ -3265,14 +3277,14 @@ static void inspect_pp_template(const char *stem, const char *outpath) {
                 die("pp template path too long");
             lines = expand_template_file(path, facts, field[2]); rows = buffer_file(&lines);
             install_delta_text(&g, rows, mode[0], domain, NULL, NULL, 0, 0, NULL, "START");
-            if (fclose(rows)) die("pp template close failed");
+            if (close_in(rows)) die("pp template close failed");
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp template row missing or repeated");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp template row missing or repeated");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_assembly(const char *section, const char *outpath) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
@@ -3299,9 +3311,9 @@ static void inspect_pp_assembly(const char *section, const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp assembly row missing or repeated");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp assembly row missing or repeated");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_rows(const char *stem, const char *outpath, int no_autoinc) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
@@ -3322,9 +3334,9 @@ static void inspect_pp_rows(const char *stem, const char *outpath, int no_autoin
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp row missing or repeated");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp row missing or repeated");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void inspect_pp_cli(const char *outpath, int no_autoinc) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
@@ -3351,9 +3363,9 @@ static void inspect_pp_cli(const char *outpath, int no_autoinc) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1) die("pp CLI row missing");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp CLI row missing");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void construct_opt(Graph *g, int o2) {
     FILE *f = fopen("exec/opt/gen-manifest.tsv", "rb"); char *s;
@@ -3424,7 +3436,7 @@ static void construct_opt(Graph *g, int o2) {
         } else die("unsupported enabled opt DSL op");
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("opt manifest read failed");
+    if (ferror(f) || close_in(f)) die("opt manifest read failed");
     if (prn != 1 || numout != o2 || scans != 1 || maps != 1 || setup != 1 ||
         answer != o2 || extra != (o2 ? 5 : 0) || roundlet != 1 || common != 1 || level != 1)
         die("incomplete opt manifest");
@@ -3455,10 +3467,10 @@ static void inspect_bound_rows(const char *stage, const char *stem, const char *
         }
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("manifest read failed");
+    if (ferror(f) || close_in(f)) die("manifest read failed");
     if (!found) die("bound row not found");
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void finish(Graph *g) {
     const char *unreachable = "[[\"REJECT\",\"unreachable\"]]";
@@ -3512,7 +3524,7 @@ static ManifestRows manifest_rows(const char *path) {
         stack[sp++] = rows.n++;
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("manifest read failed");
+    if (ferror(f) || close_in(f)) die("manifest read failed");
     while (sp) rows.row[stack[--sp]].end = rows.n;
     return rows;
 }
@@ -3818,7 +3830,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
             }
             free(s);
         }
-        if (ferror(f) || fclose(f)) die("manifest freshrows read failed");
+        if (ferror(f) || close_in(f)) die("manifest freshrows read failed");
         free(name); return;
     }
     if (specs->kind != JARR) die("manifest freshrows must be a list");
@@ -3908,7 +3920,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
             }
             free(s);
         }
-        if (ferror(f) || fclose(f) || !nh) die("manifest freshrows read failed");
+        if (ferror(f) || close_in(f) || !nh) die("manifest freshrows read failed");
         for (int i = 0; i < nh; i++) free(header[i]);
     }
 }
@@ -3957,7 +3969,7 @@ static void manifest_seqrows_file(const char *dir, Value *spec, const char *op,
         if (names) value_put(names, NULL, value_string(field[0]));
         free(name); free(s);
     }
-    if (ferror(f) || fclose(f)) die("sequence rows read failed");
+    if (ferror(f) || close_in(f)) die("sequence rows read failed");
 }
 static void manifest_outseq(const char *dir, const char *stem, Value *sequences) {
     const char *suffix[] = {"-result.tsv", "-byte.tsv"};
@@ -3986,7 +3998,7 @@ static void manifest_outseq(const char *dir, const char *stem, Value *sequences)
             }
             free(s);
         }
-        if (ferror(f) || fclose(f)) die("manifest outseq read failed");
+        if (ferror(f) || close_in(f)) die("manifest outseq read failed");
     }
 }
 static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
@@ -4114,7 +4126,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                     if (fields_tab(ts, field, 2) != 2) die("token class column count");
                     value_put(token_map, field[0], value_string(field[1])); free(ts);
                 }
-                if (ferror(tf) || fclose(tf)) die("token class read failed");
+                if (ferror(tf) || close_in(tf)) die("token class read failed");
             }
             if (token_map->kind != JOBJ) die("token classes are not an object");
             classes = classes ? seed_env_copy(classes) : value_new(JOBJ);
@@ -4325,12 +4337,12 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
             }
             free(s);
         }
-        if (ferror(input) || fclose(input)) die("manifest table read failed");
+        if (ferror(input) || close_in(input)) die("manifest table read failed");
         table = buffer_file(&selected);
         install_delta_text_bound(ctx->graph, table, modeopt ? value_text(modeopt)[0] : 'r',
                                  domain, classes, sequences, 0, ordered && manifest_truth(ordered),
                                  skip, "START", bindings);
-        if (fclose(table)) die("manifest table close failed");
+        if (close_in(table)) die("manifest table close failed");
         free(selected.s); ctx->rows++;
     } else if (!strcmp(row->cell[0], "template")) {
         Value *modeopt = value_get(opts, "mode"), *domainopt = value_get(opts, "domain");
@@ -4421,7 +4433,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                                     modeopt ? value_text(modeopt)[0] : 'r', groups);
             if (result) value_put(env, value_text(result), groups);
         }
-        if (fclose(table)) die("template table close failed");
+        if (close_in(table)) die("template table close failed");
         free(expanded.s); free(edits.s); free(owner);
         ctx->rows++;
     } else if (!strcmp(row->cell[0], "assert-absent")) {
@@ -4470,7 +4482,7 @@ static void inspect_manifest_graph(const char *path, const char *flags_text,
     manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
     free(dir);
 }
 static void manifest_walk_trace(size_t index, ManifestRow *row, Value *facts,
@@ -4493,7 +4505,7 @@ static void inspect_manifest_walk(const char *path, const char *row_text,
     manifest_walk_block(&rows, start, rows.row[start].end, flags, env, NULL,
                         manifest_walk_trace, trace);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, dump_env ? env : trace); if (fclose(out)) die("output close failed");
+    value_write(out, dump_env ? env : trace); if (close_in(out)) die("output close failed");
 }
 static void inspect_manifest_rows(const char *path, const char *outpath) {
     ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
@@ -4507,7 +4519,7 @@ static void inspect_manifest_rows(const char *path, const char *outpath) {
         value_put(row, NULL, cells); value_put(all, NULL, row);
     }
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, all); if (fclose(out)) die("output close failed");
+    value_write(out, all); if (close_in(out)) die("output close failed");
 }
 static void inspect_manifest_when(const char *path, const char *facts_expr,
                                   const char *flags_json, const char *outpath) {
@@ -4526,7 +4538,7 @@ static void inspect_manifest_when(const char *path, const char *facts_expr,
         }
     }
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, all); if (fclose(out)) die("output close failed");
+    value_write(out, all); if (close_in(out)) die("output close failed");
 }
 /* First nested nativeabi call: modelsignature -> modelinput.  This command
    exposes a small graph slice while the full nativeabi manifest interpreter
@@ -4561,14 +4573,14 @@ static void nativeabi_modelinput_call(Graph *g) {
                     subfound++;
                     free(row);
                 }
-                if (ferror(sub) || fclose(sub) || subfound != 1) die("modelinput row not found");
+                if (ferror(sub) || close_in(sub) || subfound != 1) die("modelinput row not found");
             }
             install_section(g, "exec/modelinput-result.tsv", "u64", 'r', bindings, sequences);
             found++;
         }
         free(s);
     }
-    if (ferror(f) || fclose(f) || found != 1) die("modelinput call not found");
+    if (ferror(f) || close_in(f) || found != 1) die("modelinput call not found");
 }
 static void inspect_nativeabi_modelinput(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -4576,7 +4588,7 @@ static void inspect_nativeabi_modelinput(const char *outpath) {
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL);
-    if (fclose(out)) die("output close failed");
+    if (close_in(out)) die("output close failed");
 }
 static Value *nativeabi_rows(Graph *g, const char *stem, const char *section,
                              const char *factexpr, const char *bind, const char *opttext,
@@ -4639,7 +4651,7 @@ static void nativeabi_calls(Graph *g) {
         else if (strcmp(col[0], "let")) die("unsupported modelsignature declaration");
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("modelsignature read failed");
+    if (ferror(f) || close_in(f)) die("modelsignature read failed");
     f = fopen("exec/modelgraphequality-manifest.tsv", "rb"); if (!f) die("cannot open modelgraphequality manifest");
     while ((s = line(f))) {
         char *col[9]; int n;
@@ -4649,14 +4661,14 @@ static void nativeabi_calls(Graph *g) {
         else if (strcmp(col[0], "let") && strcmp(col[0], "call")) die("unsupported modelgraphequality declaration");
         free(s);
     }
-    if (ferror(f) || fclose(f)) die("modelgraphequality read failed");
+    if (ferror(f) || close_in(f)) die("modelgraphequality read failed");
 }
 static void inspect_nativeabi_calls(const char *outpath) {
     Graph g = {0}; FILE *out;
     nativeabi_calls(&g); finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, "START", NULL);
-    if (fclose(out)) die("output close failed");
+    if (close_in(out)) die("output close failed");
 }
 static void nativeabi_template_at(Graph *g, const char *path, const char *section,
                                   const char *fresh_owner) {
@@ -4668,7 +4680,7 @@ static void nativeabi_template_at(Graph *g, const char *path, const char *sectio
     if (expanded.n && fwrite(expanded.s, 1, expanded.n, f) != expanded.n) die("template write failed");
     if (fflush(f) || fseek(f, 0, SEEK_SET)) die("template rewind failed");
     install_delta_text(g, f, 'r', numeric_domain(0, 257), NULL, seqs, 0, 0, NULL, "START");
-    if (fclose(f)) die("template close failed");
+    if (close_in(f)) die("template close failed");
     free(expanded.s);
 }
 static void inspect_nativeabi_head(const char *outpath, int phase) {
@@ -4711,12 +4723,12 @@ static void inspect_nativeabi_head(const char *outpath, int phase) {
         } else die("unsupported nativeabi manifest operation");
         free(linebuf);
     }
-    if (ferror(manifest) || fclose(manifest) || seen != limit)
+    if (ferror(manifest) || close_in(manifest) || seen != limit)
         die("nativeabi manifest incomplete");
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
     output_graph(out, &g, phase >= 8 ? "NC.START" : "START", NULL);
-    if (fclose(out)) die("output close failed");
+    if (close_in(out)) die("output close failed");
 }
 static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names) {
     Buffer b = {0}; char number[32];
@@ -4767,7 +4779,7 @@ static void inspect_parse2_tokens(const char *outpath) {
     }
     value_put(result, "WORDS", words); value_put(result, "TK", tk);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, result); if (fclose(out)) die("output close failed");
+    value_write(out, result); if (close_in(out)) die("output close failed");
 }
 static void build_parse2_token_graph(Graph *g) {
     FILE *manifest = fopen("exec/parse/tokens2-manifest.tsv", "rb");
@@ -4788,7 +4800,7 @@ static void build_parse2_token_graph(Graph *g) {
             rules = buffer_file(&expanded);
             install_delta_text(g, rules, 'b', numeric_domain(0, 257), NULL,
                                sequences, 0, 0, NULL, "START");
-            if (fclose(rules)) die("parse2 token template close failed");
+            if (close_in(rules)) die("parse2 token template close failed");
             for (size_t i = 0; i < modes->n; i++) {
                 const char *name = modes->items[i].key; size_t j;
                 if (strcmp(value_text(modes->items[i].value), "r"))
@@ -4813,7 +4825,7 @@ static void build_parse2_token_graph(Graph *g) {
         } else die("unsupported parse2 token manifest row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || template_seen != 1 || rows_seen != 1)
+    if (ferror(manifest) || close_in(manifest) || template_seen != 1 || rows_seen != 1)
         die("incomplete parse2 token manifest");
 }
 static void inspect_parse2_token_graph(const char *outpath) {
@@ -4821,7 +4833,7 @@ static void inspect_parse2_token_graph(const char *outpath) {
     build_parse2_token_graph(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 /* The first nested parse2 body call installs gen2's startup marker.  Execute
    the stage-edits declaration on the token graph, in manifest order.  These
@@ -4839,7 +4851,7 @@ static void parse2_startup_edits(Graph *g) {
             (!strcmp(f[2], "startup") || !strcmp(f[2], "startup-entry"))) declared++;
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || declared != 2)
+    if (ferror(manifest) || close_in(manifest) || declared != 2)
         die("parse2 startup edits not declared");
     templ = fopen("exec/parse2/stage-edits-template.tsv", "rb");
     if (!templ) die("cannot open parse2 stage edits");
@@ -4875,7 +4887,7 @@ static void parse2_startup_edits(Graph *g) {
         }
         free(s);
     }
-    if (ferror(templ) || fclose(templ) || copied != 1 || dropped != 1 || rule != 1)
+    if (ferror(templ) || close_in(templ) || copied != 1 || dropped != 1 || rule != 1)
         die("incomplete parse2 startup edits");
 }
 static void parse2_drop_state(Graph *g, const char *name) {
@@ -4907,7 +4919,7 @@ static void parse2_string_span(Graph *g) {
         else die("unexpected parse2 string span manifest row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || declared != 3)
+    if (ferror(manifest) || close_in(manifest) || declared != 3)
         die("incomplete parse2 string span manifest");
     templ = fopen("exec/parse2/strings-template.tsv", "rb");
     if (!templ) die("cannot open parse2 strings template");
@@ -4922,7 +4934,7 @@ static void parse2_string_span(Graph *g) {
         }
         free(s);
     }
-    if (ferror(templ) || fclose(templ) || dropped != 1)
+    if (ferror(templ) || close_in(templ) || dropped != 1)
         die("incomplete parse2 strings template");
     for (int i = 0; i < 3; i++) {
         char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR);
@@ -4954,7 +4966,7 @@ static void parse2_startup_control(Graph *g) {
             opts = value_json(f[8], "parse2 control options");
         declarations++; free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || declarations != 2 || !opts)
+    if (ferror(manifest) || close_in(manifest) || declarations != 2 || !opts)
         die("unsupported parse2 control manifest");
     /* The startup-marker section has no fresh labels.  Its named action
        sequences still come from the same mapseq declaration as every other
@@ -5006,7 +5018,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
             opts = value_json(f[8], "control options");
         rows++; free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 2 || !opts)
+    if (ferror(manifest) || close_in(manifest) || rows != 2 || !opts)
         die("unsupported control manifest");
     sequences = mapseq_construct(opts, facts);
     if (seqextra) {
@@ -5037,7 +5049,7 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         }
         free(s);
     }
-    if (ferror(fresh) || fclose(fresh) || !header) die("control fresh read failed");
+    if (ferror(fresh) || close_in(fresh) || !header) die("control fresh read failed");
     if (extra) {
         if (extra->kind != JOBJ) die("control extra facts must be an object");
         for (size_t i = 0; i < extra->n; i++)
@@ -5092,7 +5104,7 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
         action_row++; free(s);
         if (action_row == 2) break;
     }
-    if (fclose(actions) || action_row != 2) die("gen2 return action declarations missing");
+    if (close_in(actions) || action_row != 2) die("gen2 return action declarations missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -5109,7 +5121,7 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
         }
         free(s); if (return_row) break;
     }
-    if (fclose(manifest) || return_row != 1) die("return row declaration missing");
+    if (close_in(manifest) || return_row != 1) die("return row declaration missing");
     {
         Value *constant = value_get(facts, "retconst");
         if (!constant || constant->kind != JOBJ) die("return constants missing");
@@ -5130,7 +5142,7 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
         }
         free(s);
     }
-    if (ferror(fresh) || fclose(fresh) || !header) die("return fresh rows missing");
+    if (ferror(fresh) || close_in(fresh) || !header) die("return fresh rows missing");
     if (extra) {
         if (extra->kind != JOBJ) die("return extra bindings must be an object");
         for (size_t i = 0; i < extra->n; i++)
@@ -5225,7 +5237,7 @@ static void parse2_gen2_conditional(Graph *g) {
         }
         rows++; free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 11)
+    if (ferror(manifest) || close_in(manifest) || rows != 11)
         die("conditional manifest incomplete");
 }
 static void parse2_gen2_type_words(Graph *g) {
@@ -5376,7 +5388,7 @@ static void parse2_gen2_ladder_reject(Graph *g, const char *which) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || count != (strcmp(which, "E") ? 3 : 4))
+    if (ferror(manifest) || close_in(manifest) || count != (strcmp(which, "E") ? 3 : 4))
         die("gen2 ladder reject rows changed");
 }
 static Value *parse2_gen2_ladder_extra(const char *owner, const char *up,
@@ -5413,7 +5425,7 @@ static void parse2_gen2_ladder_dispatch(Graph *g, const char *owner,
     table = buffer_file(&expanded);
     install_delta_text(g, table, 'r', numeric_domain(0, 257), NULL,
                        value_new(JOBJ), 0, 0, NULL, "START");
-    if (fclose(table)) die("ladder dispatch table close failed");
+    if (close_in(table)) die("ladder dispatch table close failed");
     free(expanded.s);
 }
 static void parse2_gen2_ladder(Graph *g, char kind) {
@@ -5531,7 +5543,7 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
         if (row > (level > 4 ? 62 : level > 3 ? 61 : level > 2 ? 60 :
                    level > 1 ? 58 : level ? 55 : 53)) break;
     }
-    if (fclose(manifest) || !seqopts || !callopts || (level && !selectopts) ||
+    if (close_in(manifest) || !seqopts || !callopts || (level && !selectopts) ||
         (level > 1 && (!floatopts || !floatcall)) ||
         (level > 2 && !rejectcall) || (level > 3 && !pointercall) ||
         (level > 4 && !integercall))
@@ -5644,7 +5656,7 @@ static void parse2_gen2_statics(Graph *g) {
         }
         free(s);
     }
-    if (ferror(outer) || fclose(outer) || found != 1) die("missing statics call");
+    if (ferror(outer) || close_in(outer) || found != 1) die("missing statics call");
     for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
     while ((s = line(manifest))) {
         char *f[9]; int n;
@@ -5670,7 +5682,7 @@ static void parse2_gen2_statics(Graph *g) {
                 parse2_drop_state(g, t[5]);
                 free(tline);
             }
-            if (ferror(templ) || fclose(templ) || edits != 1) die("incomplete statics template");
+            if (ferror(templ) || close_in(templ) || edits != 1) die("incomplete statics template");
             row++;
         } else if (row == 2 && !strcmp(f[0], "rows") && !strcmp(f[1], "statics")) {
             Value *sq = value_new(JOBJ); bindings = value_new(JOBJ);
@@ -5684,7 +5696,7 @@ static void parse2_gen2_statics(Graph *g) {
         } else die("unexpected statics manifest row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 3) die("incomplete statics manifest");
+    if (ferror(manifest) || close_in(manifest) || row != 3) die("incomplete statics manifest");
 }
 static void parse2_gen2_initializers_hook(Graph *g) {
     FILE *manifest = fopen("exec/parse2/initializers-manifest.tsv", "rb");
@@ -5704,7 +5716,7 @@ static void parse2_gen2_initializers_hook(Graph *g) {
         } else die("unexpected initializers hook row");
         free(s);
     }
-    if (fclose(manifest) || row != 2) die("incomplete initializers hook manifest");
+    if (close_in(manifest) || row != 2) die("incomplete initializers hook manifest");
     templ = fopen("exec/parse2/initializers-template.tsv", "rb");
     if (!templ) die("cannot open initializers template");
     while ((s = line(templ))) {
@@ -5718,7 +5730,7 @@ static void parse2_gen2_initializers_hook(Graph *g) {
         }
         free(s);
     }
-    if (ferror(templ) || fclose(templ) || edit != 1) die("incomplete initializers hook template");
+    if (ferror(templ) || close_in(templ) || edit != 1) die("incomplete initializers hook template");
 }
 static Value *parse2_gen2_initializers_text(Value *text) {
     Value *seq = value_new(JARR);
@@ -5801,7 +5813,7 @@ static void parse2_gen2_initializers_main(Graph *g) {
         } else die("unexpected initializer main row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 3) die("incomplete initializer main manifest");
+    if (ferror(manifest) || close_in(manifest) || row != 3) die("incomplete initializer main manifest");
 }
 static void parse2_string_walk_head(Graph *g, const char *pre, const char *body, const char *done);
 static void parse2_string_walk_escape(Graph *g, const char *pre, const char *body);
@@ -5822,7 +5834,7 @@ static void parse2_gen2_manifest_strwalk(Graph *g, const char *when, int ordinal
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || found != count || ordinal < 0 || ordinal >= count)
+    if (ferror(manifest) || close_in(manifest) || found != count || ordinal < 0 || ordinal >= count)
         die("gen2 string walker count changed");
     const char *pre = value_text(value_get(bindings, "pre"));
     const char *body = value_text(value_get(bindings, "body"));
@@ -5851,7 +5863,7 @@ static void parse2_gen2_shape_simple(Graph *g, const char *section) {
             strcmp(f[4], "k2-gen2") || rows++) die("unsupported shape manifest");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 1) die("incomplete shape manifest");
+    if (ferror(manifest) || close_in(manifest) || rows != 1) die("incomplete shape manifest");
     for (size_t i = 0; i < consts->n; i++)
         value_put(bindings, consts->items[i].key, consts->items[i].value);
     while ((s = line(fresh))) {
@@ -5866,7 +5878,7 @@ static void parse2_gen2_shape_simple(Graph *g, const char *section) {
         }
         free(s);
     }
-    if (ferror(fresh) || fclose(fresh) || !labels) die("shape fresh labels absent");
+    if (ferror(fresh) || close_in(fresh) || !labels) die("shape fresh labels absent");
     install_section_classes(g, "exec/parse2/shape-byte.tsv", section, 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse2/shape-result.tsv", section, 'r',
@@ -5909,7 +5921,7 @@ static void parse2_string_initializer_head(Graph *g) {
         } else die("unexpected string initializer head row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 2)
+    if (ferror(manifest) || close_in(manifest) || row != 2)
         die("incomplete string initializer head");
 }
 static void parse2_string_walk_head(Graph *g, const char *pre,
@@ -5953,7 +5965,7 @@ static void parse2_string_walk_head(Graph *g, const char *pre,
         } else die("unexpected string walker head row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 2)
+    if (ferror(manifest) || close_in(manifest) || row != 2)
         die("incomplete string walker head");
 }
 static void parse2_string_walk_escape(Graph *g, const char *pre,
@@ -5988,7 +6000,7 @@ static void parse2_string_walk_escape(Graph *g, const char *pre,
         }
         free(s);
     }
-    if (ferror(templ) || fclose(templ) || found != 1)
+    if (ferror(templ) || close_in(templ) || found != 1)
         die("incomplete string escape template");
 }
 static void parse2_string_walk_tail(Graph *g, const char *pre,
@@ -6031,7 +6043,7 @@ static void parse2_string_walk_tail(Graph *g, const char *pre,
         } else die("unexpected string walker tail row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 4)
+    if (ferror(manifest) || close_in(manifest) || row != 4)
         die("incomplete string walker tail");
 }
 static void parse2_string_initializer_tail(Graph *g) {
@@ -6070,7 +6082,7 @@ static void parse2_string_initializer_tail(Graph *g) {
         } else die("unexpected string initializer tail row");
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 4)
+    if (ferror(manifest) || close_in(manifest) || row != 4)
         die("incomplete string initializer tail");
 }
 static void parse2_numeric(Graph *g) {
@@ -6100,7 +6112,7 @@ static void parse2_numeric(Graph *g) {
         install_section(g, "exec/parse/numeric-result.tsv", f[2], 'r', bindings, NULL);
         rows++; free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 3)
+    if (ferror(manifest) || close_in(manifest) || rows != 3)
         die("incomplete numeric manifest");
 }
 static void parse2_float_boundary(Graph *g) {
@@ -6121,7 +6133,7 @@ static void parse2_float_boundary(Graph *g) {
         free(s);
         if (rows == 2) break;
     }
-    if (fclose(manifest) || rows != 2) die("floatconst boundary manifest changed");
+    if (close_in(manifest) || rows != 2) die("floatconst boundary manifest changed");
     templ = fopen("exec/parse2/floatconst-template.tsv", "rb");
     if (!templ) die("cannot open floatconst template");
     while ((s = line(templ))) {
@@ -6137,7 +6149,7 @@ static void parse2_float_boundary(Graph *g) {
         else die("unsupported floatconst boundary edit");
         edits++; free(s);
     }
-    if (ferror(templ) || fclose(templ) || edits != 3)
+    if (ferror(templ) || close_in(templ) || edits != 3)
         die("incomplete floatconst boundary edits");
 }
 static void parse2_float_entry(Graph *g) {
@@ -6162,7 +6174,7 @@ static void parse2_float_entry(Graph *g) {
         free(s);
         if (rows == 3) break;
     }
-    if (fclose(manifest) || rows != 3) die("floatconst entry manifest changed");
+    if (close_in(manifest) || rows != 3) die("floatconst entry manifest changed");
     for (int i = 0; i < 2; i++) {
         Value *actions = value_new(JARR), *act = value_new(JARR); char key[16];
         snprintf(key, sizeof(key), "reject%d", i);
@@ -6204,15 +6216,15 @@ static void parse2_float_digits(Graph *g) {
                 buf_char(&bound, '\t'); buf_add(&bound, c[3], strlen(c[3]));
                 buf_char(&bound, '\n'); free(rule);
             }
-            if (ferror(table) || fclose(table)) die("floatconst digit template read failed");
+            if (ferror(table) || close_in(table)) die("floatconst digit template read failed");
             table = buffer_file(&bound);
             install_delta_text(g, table, 'b', domain, NULL, NULL, 0, 0, NULL, "START");
-            if (fclose(table)) die("floatconst digit table close failed");
+            if (close_in(table)) die("floatconst digit table close failed");
         }
         digit++; free(s);
         if (digit == 3) break;
     }
-    if (fclose(manifest) || digit != 3) die("incomplete floatconst digit manifest");
+    if (close_in(manifest) || digit != 3) die("incomplete floatconst digit manifest");
 }
 static void parse2_float_rows(Graph *g) {
     FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
@@ -6246,7 +6258,7 @@ static void parse2_float_rows(Graph *g) {
         }
         installed++; free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || installed != 10)
+    if (ferror(manifest) || close_in(manifest) || installed != 10)
         die("incomplete floatconst rows");
 }
 static void parse2_autoscan(Graph *g) {
@@ -6290,7 +6302,7 @@ static void parse2_autoscan(Graph *g) {
         }
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 1)
+    if (ferror(manifest) || close_in(manifest) || rows != 1)
         die("incomplete autoscan manifest");
     names = fopen("exec/parse/autoscan-names.tsv", "rb");
     if (!names) die("cannot open autoscan names");
@@ -6309,7 +6321,7 @@ static void parse2_autoscan(Graph *g) {
         }
         labels++; free(s);
     }
-    if (ferror(names) || fclose(names) || labels != 19) die("autoscan names incomplete");
+    if (ferror(names) || close_in(names) || labels != 19) die("autoscan names incomplete");
     install_section_classes(g, "exec/parse/autoscan-byte.tsv", "auto", 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse/autoscan-result.tsv", "auto", 'r',
@@ -6344,7 +6356,7 @@ static Value *parse2_unary_rows(Graph *g, const char *part, int row_index, Value
         rows++; free(s);
         if (rows > row_index) break;
     }
-    if (fclose(manifest) || rows != row_index + 1 || !sequences || !classes || !seqnames)
+    if (close_in(manifest) || rows != row_index + 1 || !sequences || !classes || !seqnames)
         die("unarycontrol row declaration missing");
     names = fopen("exec/parse2/unarycontrol-fresh.tsv", "rb");
     if (!names) die("cannot open unarycontrol fresh rows");
@@ -6366,7 +6378,7 @@ static Value *parse2_unary_rows(Graph *g, const char *part, int row_index, Value
         }
         free(s);
     }
-    if (ferror(names) || fclose(names) || !labels)
+    if (ferror(names) || close_in(names) || !labels)
         die("unarycontrol head fresh rows missing");
     for (size_t i = 0; i < ufacts->n; i++)
         value_put(bindings, ufacts->items[i].key, ufacts->items[i].value);
@@ -6428,7 +6440,7 @@ static char *parse2_printfallback_head(Graph *g) {
         row++; free(s);
         if (row == 2) break;
     }
-    if (fclose(manifest) || row != 2 || !sequences) die("printfallback head missing");
+    if (close_in(manifest) || row != 2 || !sequences) die("printfallback head missing");
     install_section(g, "exec/parse2/printfallback-byte.tsv", "head", 'b', bindings, sequences);
     install_section(g, "exec/parse2/printfallback-result.tsv", "head", 'r', bindings, sequences);
     return copy(value_text(value_get(bindings, "PF_b1")));
@@ -6479,7 +6491,7 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
                 }
                 free(t);
             }
-            if (ferror(templ) || fclose(templ) || found != 1)
+            if (ferror(templ) || close_in(templ) || found != 1)
                 die("printfallback dispatch template missing");
             installed++;
         } else if (row >= first && row < last && !strcmp(f[0], "rows")) {
@@ -6498,7 +6510,7 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
         row++; free(s);
         if (row == last) break;
     }
-    if (fclose(manifest) || row != last || installed != last - first)
+    if (close_in(manifest) || row != last || installed != last - first)
         die("printfallback manifest range incomplete");
 }
 static void parse2_printfcontrol_part0(Graph *g) {
@@ -6523,7 +6535,7 @@ static void parse2_printfcontrol_part0(Graph *g) {
                                 bindings, sequences, classes);
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 1)
+    if (ferror(manifest) || close_in(manifest) || rows != 1)
         die("printfcontrol part0 row missing");
 }
 static void parse2_printf_strwalk(Graph *g, int call_row) {
@@ -6544,7 +6556,7 @@ static void parse2_printf_strwalk(Graph *g, int call_row) {
         row++; free(s);
         if (row == call_row + 1) break;
     }
-    if (fclose(manifest) || row != call_row + 1 || !value_get(bindings, "pre"))
+    if (close_in(manifest) || row != call_row + 1 || !value_get(bindings, "pre"))
         die("printf string walker missing");
     const char *pre = value_text(value_get(bindings, "pre"));
     const char *body = value_text(value_get(bindings, "body"));
@@ -6575,7 +6587,7 @@ static void parse2_printfcontrol_append(Graph *g) {
         if (first < 0 || end > 257 || first >= end) die("printfcontrol append domain invalid");
         free(s); break;
     }
-    if (ferror(manifest) || fclose(manifest) || found != 1)
+    if (ferror(manifest) || close_in(manifest) || found != 1)
         die("printfcontrol append manifest missing");
     while ((s = line(table))) {
         char *f[5]; int n;
@@ -6593,7 +6605,7 @@ static void parse2_printfcontrol_append(Graph *g) {
         }
         free(s);
     }
-    if (ferror(table) || fclose(table) || installed != 1)
+    if (ferror(table) || close_in(table) || installed != 1)
         die("printfcontrol append row missing");
 }
 static Value *parse2_printfcontrol_part1_all(Graph *g) {
@@ -6626,7 +6638,7 @@ static Value *parse2_printfcontrol_part1_all(Graph *g) {
         row++; free(s);
         if (row == 2) break;
     }
-    if (fclose(manifest) || row != 2) die("printfcontrol part1 row missing");
+    if (close_in(manifest) || row != 2) die("printfcontrol part1 row missing");
     return bindings;
 }
 static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
@@ -6664,7 +6676,7 @@ static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
         row++; free(s);
         if (row == 3) break;
     }
-    if (fclose(manifest) || row != 3) die("printfcontrol plain row missing");
+    if (close_in(manifest) || row != 3) die("printfcontrol plain row missing");
 }
 static void parse2_printfcontrol_part(Graph *g, int part) {
     char path[128], section[32]; FILE *manifest;
@@ -6697,7 +6709,7 @@ static void parse2_printfcontrol_part(Graph *g, int part) {
                                 bindings, sequences, classes);
         free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || rows != 1)
+    if (ferror(manifest) || close_in(manifest) || rows != 1)
         die("printfcontrol part row missing");
 }
 static void parse2_printf_wide_hooks(Graph *g) {
@@ -6735,7 +6747,7 @@ static void parse2_printf_wide_hooks(Graph *g) {
         row++; free(s);
         if (row == 9) break;
     }
-    if (fclose(manifest) || row != 9 || found != 1) die("printf wide hooks row missing");
+    if (close_in(manifest) || row != 9 || found != 1) die("printf wide hooks row missing");
 }
 static void parse2_printfcontrol_escape(Graph *g, int last, int part) {
     char path[128]; FILE *manifest;
@@ -6772,15 +6784,15 @@ static void parse2_printfcontrol_escape(Graph *g, int last, int part) {
             buf_char(&bound, '\t'); buf_add(&bound, c[3], strlen(c[3]));
             buf_char(&bound, '\n'); free(rule);
         }
-        if (ferror(table) || fclose(table)) die("printfcontrol escape template read failed");
+        if (ferror(table) || close_in(table)) die("printfcontrol escape template read failed");
         table = buffer_file(&bound);
         install_delta_text(g, table, found ? 'b' : 'r', numeric_domain(0, 256), NULL,
                            sequences, 0, 0, NULL, "START");
-        if (fclose(table)) die("printfcontrol escape table close failed");
+        if (close_in(table)) die("printfcontrol escape table close failed");
         found++; free(s);
         if (found == last) break;
     }
-    if (fclose(manifest) || found != last) die("printfcontrol escape row missing");
+    if (close_in(manifest) || found != last) die("printfcontrol escape row missing");
 }
 static void parse2_fmtwalk_rows(Graph *g, int last, int call_row) {
     FILE *outer = fopen("exec/parse2/printf-manifest.tsv", "rb");
@@ -6802,7 +6814,7 @@ static void parse2_fmtwalk_rows(Graph *g, int last, int call_row) {
         row++; free(s);
         if (row == call_row + 1) break;
     }
-    if (fclose(outer) || row != call_row + 1) die("printf fmtwalk call missing");
+    if (close_in(outer) || row != call_row + 1) die("printf fmtwalk call missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -6830,7 +6842,7 @@ static void parse2_fmtwalk_rows(Graph *g, int last, int call_row) {
         found++; free(s);
         if (found == last) break;
     }
-    if (fclose(manifest) || found != last) die("fmtwalk rows missing");
+    if (close_in(manifest) || found != last) die("fmtwalk rows missing");
 }
 static void parse2_fmtwalk_conversion(Graph *g, int call_row) {
     FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
@@ -6853,7 +6865,7 @@ static void parse2_fmtwalk_conversion(Graph *g, int call_row) {
         row++; free(s);
         if (row == call_row + 1) break;
     }
-    if (fclose(outer) || row != call_row + 1 || !value_get(callctx, "pre"))
+    if (close_in(outer) || row != call_row + 1 || !value_get(callctx, "pre"))
         die("printf fmtwalk conversion call missing");
     row = 0;
     while ((s = line(manifest))) {
@@ -6873,7 +6885,7 @@ static void parse2_fmtwalk_conversion(Graph *g, int call_row) {
         }
         row++; free(s);
     }
-    if (ferror(manifest) || fclose(manifest) || row != 4 || !bindcell)
+    if (ferror(manifest) || close_in(manifest) || row != 4 || !bindcell)
         die("fmtwalk conversion rows missing");
     for (size_t i = 0; i < conv->n; i++) {
         Value *ctx = value_new(JOBJ), *bindings = value_new(JOBJ);
@@ -6996,17 +7008,17 @@ static Value *parse2_addr_template(Graph *g, const char *entry) {
                 buf_add(&bound, acts, strlen(acts)); buf_char(&bound, '\n');
                 free(acts); free(rule);
             }
-            if (ferror(table) || fclose(table)) die("addr template read failed");
+            if (ferror(table) || close_in(table)) die("addr template read failed");
             table = buffer_file(&bound);
             install_delta_text(g, table, 'r', numeric_domain(0, 257), NULL,
                                NULL, 0, 0, NULL, "START");
-            if (fclose(table)) die("addr template install failed");
+            if (close_in(table)) die("addr template install failed");
             free(global); free(done);
         }
         row++; free(s);
         if (row == 2) break;
     }
-    if (fclose(manifest) || row != 2) die("addr template rows missing");
+    if (close_in(manifest) || row != 2) die("addr template rows missing");
     return env;
 }
 static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
@@ -7041,7 +7053,7 @@ static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
         row++; free(s);
         if (row == 4) break;
     }
-    if (fclose(manifest) || row != 4 || found != 1) die("addr auto row missing");
+    if (close_in(manifest) || row != 4 || found != 1) die("addr auto row missing");
 }
 static void parse2_addr_main(Graph *g, Value *env) {
     FILE *manifest = fopen("exec/parse2/addr-manifest.tsv", "rb");
@@ -7076,7 +7088,7 @@ static void parse2_addr_main(Graph *g, Value *env) {
         row++; free(s);
         if (row == 5) break;
     }
-    if (fclose(manifest) || row != 5 || found != 1) die("addr main row missing");
+    if (close_in(manifest) || row != 5 || found != 1) die("addr main row missing");
 }
 static void parse2_unary_compound(Graph *g) {
     FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
@@ -7101,7 +7113,7 @@ static void parse2_unary_compound(Graph *g) {
             die("unary compound call changed");
         free(s); break;
     }
-    if (fclose(manifest) || rows != 3) die("unary compound call missing");
+    if (close_in(manifest) || rows != 3) die("unary compound call missing");
     while ((s = line(control))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -7114,7 +7126,7 @@ static void parse2_unary_compound(Graph *g) {
         }
         free(s);
     }
-    if (ferror(control) || fclose(control) || declared != 1)
+    if (ferror(control) || close_in(control) || declared != 1)
         die("control manifest declaration missing");
     for (size_t i = 0; i < consts->n; i++)
         value_put(bindings, consts->items[i].key, consts->items[i].value);
@@ -7141,7 +7153,7 @@ static void parse2_unary_cast_void(Graph *g) {
             die("unarycontrol cast-void declaration changed");
         found++; free(s); break;
     }
-    if (fclose(manifest) || found != 1) die("unarycontrol cast-void missing");
+    if (close_in(manifest) || found != 1) die("unarycontrol cast-void missing");
     install_section(g, "exec/parse2/width-byte.tsv", "cast-void", 'b', NULL, NULL);
     install_section(g, "exec/parse2/width-result.tsv", "cast-void", 'r', NULL, NULL);
 }
@@ -7151,7 +7163,7 @@ static void inspect_parse2_startup_graph(const char *outpath) {
     parse2_startup_edits(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_startup_control_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7160,7 +7172,7 @@ static void inspect_parse2_startup_control_graph(const char *outpath) {
     parse2_startup_control(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_startup_strings_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7169,7 +7181,7 @@ static void inspect_parse2_startup_strings_graph(const char *outpath) {
     parse2_string_span(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_startup_prefix_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7179,7 +7191,7 @@ static void inspect_parse2_startup_prefix_graph(const char *outpath) {
     parse2_string_span(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_initializer_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7190,7 +7202,7 @@ static void inspect_parse2_initializer_head_graph(const char *outpath) {
     parse2_string_initializer_head(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_strwalk_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7202,7 +7214,7 @@ static void inspect_parse2_strwalk_head_graph(const char *outpath) {
     parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_strwalk_escape_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7215,7 +7227,7 @@ static void inspect_parse2_strwalk_escape_graph(const char *outpath) {
     parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_strwalk_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7229,7 +7241,7 @@ static void inspect_parse2_strwalk_graph(const char *outpath) {
     parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_startup_branch_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7244,7 +7256,7 @@ static void inspect_parse2_startup_branch_graph(const char *outpath) {
     parse2_string_initializer_tail(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_numeric_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7260,7 +7272,7 @@ static void inspect_parse2_numeric_graph(const char *outpath) {
     parse2_numeric(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_float_boundary_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7277,7 +7289,7 @@ static void inspect_parse2_float_boundary_graph(const char *outpath) {
     parse2_float_boundary(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_float_entry_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7295,7 +7307,7 @@ static void inspect_parse2_float_entry_graph(const char *outpath) {
     parse2_float_entry(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_float_digits_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7314,7 +7326,7 @@ static void inspect_parse2_float_digits_graph(const char *outpath) {
     parse2_float_digits(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_float_rows_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7334,7 +7346,7 @@ static void inspect_parse2_float_rows_graph(const char *outpath) {
     parse2_float_rows(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_autoscan_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7355,7 +7367,7 @@ static void inspect_parse2_autoscan_graph(const char *outpath) {
     parse2_autoscan(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7377,7 +7389,7 @@ static void inspect_parse2_unary_head_graph(const char *outpath) {
     parse2_unary_head(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_compound_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7400,7 +7412,7 @@ static void inspect_parse2_unary_compound_graph(const char *outpath) {
     parse2_unary_compound(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_cast_void_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7424,7 +7436,7 @@ static void inspect_parse2_unary_cast_void_graph(const char *outpath) {
     parse2_unary_cast_void(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_part4_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7449,7 +7461,7 @@ static void inspect_parse2_unary_part4_graph(const char *outpath) {
     parse2_unary_part4(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_float_d_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7475,7 +7487,7 @@ static void inspect_parse2_unary_float_d_graph(const char *outpath) {
     parse2_unary_float_d(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_float_s_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7502,7 +7514,7 @@ static void inspect_parse2_unary_float_s_graph(const char *outpath) {
     parse2_unary_float_s(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_int_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7531,7 +7543,7 @@ static void inspect_parse2_unary_int_graph(const char *outpath) {
     parse2_unary_int_u(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_unary_part6_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7561,7 +7573,7 @@ static void inspect_parse2_unary_part6_graph(const char *outpath) {
     parse2_unary_part6(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_printfallback_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7592,7 +7604,7 @@ static void inspect_parse2_printfallback_head_graph(const char *outpath) {
     parse2_printfallback_head(&g);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     Graph g = {0}; FILE *out; char *entry;
@@ -7624,7 +7636,7 @@ static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     parse2_printfallback_more(&g, entry, 2, 3);
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last, int control0, int strwalk, int append, int part1, int fmtwalk) {
     Graph g = {0}; FILE *out; char *entry;
@@ -7688,7 +7700,7 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
     }
     finish(&g);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (fclose(out)) die("output close failed");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
@@ -7709,7 +7721,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-tail-graph")) {
@@ -7719,7 +7731,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-prefix-graph")) {
@@ -7731,7 +7743,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-typedef-graph")) {
@@ -7744,7 +7756,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-tail-graph")) {
@@ -7758,7 +7770,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-word-graph")) {
@@ -7773,7 +7785,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-entry-graph")) {
@@ -7789,7 +7801,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-tytail-graph")) {
@@ -7806,7 +7818,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-reject-e-graph")) {
@@ -7815,7 +7827,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-reject-ec-graph")) {
@@ -7825,7 +7837,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-e-graph")) {
@@ -7834,7 +7846,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-c-graph")) {
@@ -7843,7 +7855,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-prefix-graph")) {
@@ -7852,7 +7864,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-select-graph")) {
@@ -7861,7 +7873,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-body-graph")) {
@@ -7870,7 +7882,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-reject-graph")) {
@@ -7879,7 +7891,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-pointer-graph")) {
@@ -7888,7 +7900,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-full-graph")) {
@@ -7897,7 +7909,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladders-graph")) {
@@ -7911,7 +7923,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-family-graph")) {
@@ -7945,7 +7957,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt-full-graph")) {
@@ -7963,7 +7975,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-ints-graph")) {
@@ -7972,7 +7984,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-int-first-graph")) {
@@ -7988,7 +8000,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt2-graph")) {
@@ -7997,7 +8009,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-pair-graph")) {
@@ -8009,7 +8021,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-first-graph")) {
@@ -8020,7 +8032,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt1-graph")) {
@@ -8029,7 +8041,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt0-full-graph")) {
@@ -8039,7 +8051,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt0-graph")) {
@@ -8048,7 +8060,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return0-full-graph")) {
@@ -8063,7 +8075,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-expression-graph")) {
@@ -8079,7 +8091,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-expr0-graph")) {
@@ -8088,7 +8100,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-updates-graph")) {
@@ -8103,7 +8115,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-update-graph")) {
@@ -8115,7 +8127,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return0-graph")) {
@@ -8124,7 +8136,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-if-loops-graph")) {
@@ -8135,7 +8147,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-parse2-gen2-control-graph")) {
@@ -8144,7 +8156,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-full-graph")) {
@@ -8155,7 +8167,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-first-walk-graph")) {
@@ -8165,7 +8177,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-control-graph")) {
@@ -8174,7 +8186,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof1-full-graph")) {
@@ -8184,7 +8196,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof0-full-graph")) {
@@ -8194,7 +8206,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof0-control-graph")) {
@@ -8203,7 +8215,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-parameter-declarators-graph")) {
@@ -8212,7 +8224,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-staticauto-graph")) {
@@ -8221,7 +8233,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-guard-graph")) {
@@ -8231,7 +8243,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-full-graph")) {
@@ -8247,7 +8259,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-init-graph")) {
@@ -8261,7 +8273,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-initializers-main-graph")) {
@@ -8274,7 +8286,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-initializers-hook-graph")) {
@@ -8286,7 +8298,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-graph")) {
@@ -8295,7 +8307,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -8571,7 +8583,7 @@ int main(int argc, char **argv) {
         construct_lex(&g, argc - 3, argv + 3, start);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, start, tok_names);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         fprintf(stderr, "lex states %lu\n", (unsigned long)g.n);
         return 0;
     }
@@ -8590,7 +8602,7 @@ int main(int argc, char **argv) {
     if ((argc == 3 || argc == 4) && !strcmp(argv[1], "opt")) {
         construct_opt(&g, argc == 4);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
-        output(out, &g); if (fclose(out)) die("output close failed");
+        output(out, &g); if (close_in(out)) die("output close failed");
         fprintf(stderr, "opt states %lu\n", (unsigned long)g.n);
         return 0;
     }
@@ -8624,19 +8636,19 @@ int main(int argc, char **argv) {
                     sequences = mapseq_construct(opts, facts);
                     if (++found > 1) die("ambiguous mapseq row");
                     out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
-                    value_write(out, sequences); if (fclose(out)) die("output close failed");
+                    value_write(out, sequences); if (close_in(out)) die("output close failed");
                 }
             }
             free(s);
         }
-        if (ferror(f) || fclose(f)) die("manifest read failed");
+        if (ferror(f) || close_in(f)) die("manifest read failed");
         if (!found) die("mapseq row not found");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-prn")) {
         install_prn_call(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
-        output(out, &g); if (fclose(out)) die("output close failed"); return 0;
+        output(out, &g); if (close_in(out)) die("output close failed"); return 0;
     }
     if (argc == 6 && !strcmp(argv[1], "inspect-bound-rows")) {
         inspect_bound_rows(argv[2], argv[3], argv[4], argv[5]); return 0;
@@ -8649,7 +8661,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[4], "b") && strcmp(argv[4], "r")) die("inspect-rows mode must be b or r");
         install_plain(&g, argv[2], argv[4][0], empty, empty);
         out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
-        output(out, &g); if (fclose(out)) die("output close failed");
+        output(out, &g); if (close_in(out)) die("output close failed");
         return 0;
     }
     if ((argc == 6 || argc == 7) && !strcmp(argv[1], "inspect-manifest-graph")) {
@@ -8662,7 +8674,7 @@ int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "inspect-facts")) {
         Value *v = load_fact(argv[2]);
         out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
-        value_write(out, v); if (fclose(out)) die("output close failed");
+        value_write(out, v); if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc >= 3 && argc <= 7 && !strcmp(argv[1], "enc")) {
@@ -8678,7 +8690,7 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if (argc >= 3 && argc <= 6 && !strcmp(argv[1], "parse2")) {
@@ -8702,14 +8714,14 @@ int main(int argc, char **argv) {
         finish(&g);
         out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
         output_graph(out, &g, value_text(value_get(env, "ex_ret")), NULL);
-        if (fclose(out)) die("output close failed");
+        if (close_in(out)) die("output close failed");
         return 0;
     }
     if ((argc != 3 && argc != 4) || strcmp(argv[1], "prune")) die("usage: seed-gen prune OUT.json [RULE_DIR]");
     manifest(&g, argc == 4 ? argv[3] : "exec/prune");
     finish(&g);
     out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (fclose(out)) die("output close failed");
+    output(out, &g); if (close_in(out)) die("output close failed");
     fprintf(stderr, "prune states %lu\n", (unsigned long)g.n);
     return 0;
 }
