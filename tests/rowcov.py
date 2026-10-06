@@ -53,14 +53,17 @@ def probe_print(files):
 
 def main():
     stage, what = sys.argv[1], sys.argv[2]
-    assert stage in ('pp', 'lex', 'parse2', 'lower', 'enc'), 'stages: pp, lex, parse2, lower, enc'
+    assert stage in ('pp', 'pp-locations', 'pp-shared', 'lex', 'parse2', 'lower', 'enc'), 'stages: pp, pp-locations, pp-shared, lex, parse2, lower, enc'
     X = xdir(); out = X / 'rowcov'; out.mkdir(parents=True, exist_ok=True)
     ppj = X / 'e2/d.json'
     # lex runs on the preprocessor's output, so a lex shard first runs pp; its delta is the product's e1 (--typed)
     dj = ppj if stage == 'pp' else out / (stage + '.json')
     lexj = out / 'lex.json'
     lowerj = out / 'lower.json'
-    FLAGS = {'lex': ['--typed'], 'lower': ['--full'], 'enc': ['--elf']}
+    # 0.0.32 T3': the pp variant tables (location, shared-predefine) exist only in a delta built with
+    # their flag, so the plain pp build reported none of their rows; each variant gets its own graph
+    FLAGS = {'lex': ['--typed'], 'lower': ['--full'], 'enc': ['--elf'], 'pp-locations': ['--locations'], 'pp-shared': ['--shared-predefines']}
+    gstage = 'pp' if stage.startswith('pp-') else stage
     def build(log=None):
         if subprocess.run(['sh', 'exec/pp/run.sh', 'gen'], cwd=ROOT, capture_output=True).returncode:
             sys.exit('rowcov: building the pp delta failed (exec/pp/run.sh gen)')
@@ -73,7 +76,7 @@ def main():
         if stage != 'pp' or log:
             target = out / (stage + ('.sidecar.json' if log else '.json'))
             env = dict(os.environ, UNISACC_ROW_LOG=str(log)) if log else os.environ
-            r = subprocess.run([sys.executable, 'exec/build/gen.py', stage, str(target)] + FLAGS.get(stage, []),
+            r = subprocess.run([sys.executable, 'exec/build/gen.py', gstage, str(target)] + FLAGS.get(stage, []),
                                cwd=ROOT, env=env, capture_output=True)
             if r.returncode: sys.exit('rowcov: gen.py %s failed' % stage)
             return target
@@ -183,6 +186,13 @@ def main():
         # state or totalised away: a candidate for deletion) versus live (reachable, no probe takes it)
         dead = sum(1 for r in rows.values() if not r[1] and r[2] == 0)
         print('rowcov %s  uncovered %d = dead %d (no edge left in the delta) + live %d (needs a probe)' % (stage, len(rows) - covered, dead, len(rows) - covered - dead))
+        # 0.0.32 T3': dead/live per table, so a variant table's rows are visible on their own line
+        per = {}
+        for (p, ln), r in rows.items():
+            t = per.setdefault(pathlib.Path(p).name, [0, 0, 0])
+            t[0 if r[1] else (1 if r[2] == 0 else 2)] += 1
+        for t, (c, d, l) in sorted(per.items()):
+            if d or l: print('rowcov %s  table %-34s covered %4d  dead %3d  live %3d' % (stage, t, c, d, l))
         (out / (stage + '.cov.tsv')).write_text(''.join('%s\t%d\t%d\t%s\n' % (p, ln, r[0], r[1] or ('dead' if r[2] == 0 else '-')) for (p, ln), r in sorted(rows.items())))
         print('rowcov %s  rows %d   covered %d   (%.1f%%)   report %s' % (stage, len(rows), covered, 100.0 * covered / max(1, len(rows)), out / (stage + '.cov.tsv')))
         # ratchet: covered rows may only rise (tests/rowcov/STAGE.{shards,union}); raise the number when they do
@@ -193,7 +203,7 @@ def main():
         if covered > floor: print('rowcov %s  above the baseline %d: raise it in tests/rowcov/%s.union' % (stage, floor, stage))
         return 0
     k, n = map(int, what.split('/'))
-    if not dj.exists() or stage == 'pp': build()
+    if not dj.exists() or stage.startswith('pp'): build()
     import sim
     ppdelta = json.loads(ppj.read_text()); pploaded = sim.load(ppdelta)
     if stage in ('lex', 'parse2'):
@@ -212,7 +222,17 @@ def main():
         ua = os.environ.get('UA', '/tmp/ua_ref')
         subprocess.run(['sh', '-c', 'UA=%s; . ./tests/lib.sh; ua_ready' % ua], cwd=ROOT, capture_output=True)
     else:
-        delta, loaded, names = ppdelta, pploaded, pploaded[0]
+        delta, loaded = (ppdelta, pploaded) if stage == 'pp' else (json.loads(dj.read_text()), None)
+        if loaded is None: loaded = sim.load(delta)
+        names = loaded[0]
+    def ppfiles():
+        # pp-shared reads its predefines as resources (exec/pp/sharedcheck.py): give it them, target lnx/x86_64
+        fs = sim.Files()
+        if stage == 'pp-shared':
+            sys.path.insert(0, str(ROOT / 'exec')); import assemble
+            for key, v in assemble.load_facts('pp-gen')['predefres'].items(): fs.cache[b'\0predefines/' + key.encode()] = v.encode()
+            fs.cache[b'\0cli/target'] = b'lnx/x86_64'
+        return fs
     files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
     mine = files[k - 1::n]; cov = set(); ran = 0; first = {}
     os.chdir(ROOT)
@@ -227,8 +247,8 @@ def main():
                     else:
                         res, tins, _ = sim.run(lowerdelta, tape, f, sim.Files(), maxsteps=200_000_000, loaded=lowerloaded)
                         if res == 'accept': sim.run(delta, tins, f, sim.Files(), cov=c, maxsteps=200_000_000, loaded=loaded)
-            elif stage == 'pp':
-                sim.run(delta, open(f, 'rb').read(), f, sim.Files(), cov=c, maxsteps=20_000_000, loaded=loaded)
+            elif stage.startswith('pp'):
+                sim.run(delta, open(f, 'rb').read(), f, ppfiles(), cov=c, maxsteps=20_000_000, loaded=loaded)
             else:
                 res, val, _ = sim.run(ppdelta, open(f, 'rb').read(), f, sim.Files(), maxsteps=20_000_000, loaded=pploaded)
                 if res == 'accept' and stage == 'lex': lexsim.run(delta, val, cov=c, maxsteps=20_000_000)

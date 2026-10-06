@@ -427,6 +427,8 @@ job shared-e2-located ./tests/sharede2.sh located
 job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
 job rowcov-pp python3 ./tests/rowcov.py pp all   # 0.0.25 T2: pp manifest rows reached by the probes; ratchet in tests/rowcov.baseline
+job rowcov-pp-locations python3 ./tests/rowcov.py pp-locations all   # 0.0.32 T3': the --locations variant graph
+job rowcov-pp-shared python3 ./tests/rowcov.py pp-shared all   # 0.0.32 T3': the --shared-predefines variant graph (predefines as resources)
 job rowcov-lex python3 ./tests/rowcov.py lex all   # 0.0.26 T2: lex manifest rows reached (on the preprocessor output); ratchet in tests/rowcov.baseline
 job rowcov-parse2-build python3 ./tests/rowcov.py parse2 build   # 0.0.31 R4: the shards reuse its cache
 for k in $(seq 1 24); do job rowcov-parse2-$k python3 ./tests/rowcov.py parse2 gate$k/24; done   # 0.0.30 R2: 24 shards (16/12 hit the 55 s window three times in 0.0.29)   # 0.0.26 T2: each shard ratchets its own reached rows
