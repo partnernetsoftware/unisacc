@@ -29,6 +29,7 @@ struct Value {
     int kind; /* JOBJ/JARR/JSTR/JINT */
     char *s; long long number; unsigned long long unumber;
     Member *items; size_t n, cap;
+    size_t *hix; size_t hcap, hn; Member *hitems;   /* object key index, rebuilt when items/n change */
 };
 
 static void die(const char *why) { fprintf(stderr, "seed-gen: %s\n", why); exit(1); }
@@ -90,14 +91,49 @@ static Value *value_new(int kind) {
 static Value *value_string(const char *s) {
     Value *v = value_new(JSTR); v->s = copy(s); v->n = strlen(s); return v;
 }
+static size_t value_khash(const char *k) {
+    size_t h = (size_t)2166136261u;
+    for (; *k; k++) h = (h ^ (unsigned char)*k) * (size_t)16777619u;
+    return h;
+}
+/* objects past 16 members find a key through a hash index instead of a scan: the manifest walk's
+   environment and accumulator objects grow to thousands of keys (value_put was 37% of parse2) */
+static long value_find(Value *v, const char *key) {
+    size_t i, h;
+    if (v->n <= 16) {
+        for (i = 0; i < v->n; i++) if (!strcmp(v->items[i].key, key)) return (long)i;
+        return -1;
+    }
+    if (v->hn != v->n || v->hitems != v->items || v->hcap < 2 * v->n) {
+        size_t cap = 64;
+        while (cap < 4 * v->n) cap *= 2;
+        free(v->hix); v->hix = calloc(cap, sizeof(size_t)); if (!v->hix) die("out of memory");
+        v->hcap = cap;
+        for (i = 0; i < v->n; i++) {
+            h = value_khash(v->items[i].key) & (cap - 1);
+            while (v->hix[h]) {
+                if (!strcmp(v->items[v->hix[h] - 1].key, v->items[i].key)) break;
+                h = (h + 1) & (cap - 1);
+            }
+            if (!v->hix[h]) v->hix[h] = i + 1;
+        }
+        v->hn = v->n; v->hitems = v->items;
+    }
+    h = value_khash(key) & (v->hcap - 1);
+    while (v->hix[h]) {
+        if (!strcmp(v->items[v->hix[h] - 1].key, key)) return (long)(v->hix[h] - 1);
+        h = (h + 1) & (v->hcap - 1);
+    }
+    return -1;
+}
 static void value_put(Value *parent, const char *key, Value *child) {
     size_t i;
     if (parent->kind != JOBJ && parent->kind != JARR) die("value is not a container");
     if (parent->kind == JOBJ) {
+        long at;
         if (!key) die("missing object key");
-        for (i = 0; i < parent->n; i++) if (!strcmp(parent->items[i].key, key)) {
-            parent->items[i].value = child; return;
-        }
+        at = value_find(parent, key);
+        if (at >= 0) { parent->items[at].value = child; return; }
     }
     if (parent->n == parent->cap) {
         parent->cap = parent->cap ? parent->cap * 2 : 8;
@@ -105,12 +141,19 @@ static void value_put(Value *parent, const char *key, Value *child) {
     }
     parent->items[parent->n].key = key ? copy(key) : NULL;
     parent->items[parent->n++].value = child;
+    if (parent->kind == JOBJ && parent->hix && parent->hitems == parent->items && parent->hn + 1 == parent->n
+        && parent->hcap >= 2 * parent->n) {
+        size_t h = value_khash(key) & (parent->hcap - 1);
+        while (parent->hix[h]) h = (h + 1) & (parent->hcap - 1);
+        parent->hix[h] = parent->n; parent->hn = parent->n;
+    }
 }
 static Value *value_get(Value *v, const char *key) {
     size_t i;
+    long at;
     if (!v || v->kind != JOBJ) return NULL;
-    for (i = 0; i < v->n; i++) if (!strcmp(v->items[i].key, key)) return v->items[i].value;
-    return NULL;
+    (void)i; at = value_find(v, key);
+    return at >= 0 ? v->items[at].value : NULL;
 }
 static Value *value_from_json(JDoc *d, int ix) {
     JNode *n = &d->n[ix]; Value *v = value_new(n->type); int child;
@@ -709,9 +752,12 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
                 Value *actual = value_get(ctx, where->items[j].key);
                 Value *expect = where->items[j].value;
                 if (expect->kind == JSTR && actual && actual->kind == JINT) {
-                    char number[64];
+                    /* assemble mapseq: str(row[k]) != _fmt(v, facts) -- the expected text is formatted
+                       against the facts first ({it[unknown]} in errors' message rows) */
+                    char number[64], *want = strchr(expect->s, '{') ? seed_fmt(expect->s, facts) : copy(expect->s);
                     snprintf(number, sizeof(number), "%lld", actual->number);
-                    if (strcmp(number, expect->s)) take = 0;
+                    if (strcmp(number, want)) take = 0;
+                    free(want);
                 } else if (!map_equal(actual, expect)) take = 0;
             }
         }
@@ -897,7 +943,15 @@ static char *template_subst_ctx(const char *text, Value *scope, Value *labels,
                 *kind++ = 0;
                 value = value_get(map, name);
                 if (!value) {
-                    char *label = fresh_label(fresh_owner, kind);
+                    char *label;
+                    if (!strcmp(fresh_owner, "\001split")) {
+                        /* assemble.Run.fresh 'split': KIND is OWNER_KIND -> P.fresh(holder(OWNER), KIND),
+                           with KIND the second '_' field exactly as Python's k.split('_')[1] */
+                        char *u = strchr(kind, '_'), *v;
+                        if (!u) die("split fresh kind needs OWNER_KIND");
+                        *u++ = 0; v = strchr(u, '_'); if (v) *v = 0;
+                        label = fresh_label(kind, u);
+                    } else label = fresh_label(fresh_owner, kind);
                     value = value_string(label); value_put(map, name, value); free(label);
                 }
             } else if (!strncmp(path, "prev:", 5)) {
@@ -1126,7 +1180,7 @@ static int seq(Graph *g, const char *actions) {
     if (g->ns >= INT_MAX) die("too many sequences");
     if (g->ns == g->cs) { g->cs = g->cs ? g->cs * 2 : 64; g->seq = grow(g->seq, g->cs, sizeof(*g->seq)); }
     g->seq[g->ns] = copy(actions); g->seq_index[h] = g->ns + 1;
-    action_labels(g, actions);
+    if (strstr(actions, "\"PUSH\"")) action_labels(g, actions);
     return (int)g->ns++;
 }
 static size_t name_hash(const char *name) {
@@ -1536,27 +1590,33 @@ static int value_equal(const Value *a, const Value *b) {
     return 1;
 }
 static char *value_json_text(const Value *v) {
-    FILE *f = tmpfile(); long n; char *text;
-    if (!f) die("cannot open temporary JSON");
-    value_write(f, v);
-    if (fflush(f) || (n = ftell(f)) < 0 || fseek(f, 0, SEEK_SET)) die("temporary JSON write failed");
-    text = grow(NULL, (size_t)n + 1, 1);
-    if (fread(text, 1, (size_t)n, f) != (size_t)n || fclose(f)) die("temporary JSON read failed");
-    text[n] = 0; return text;
+    /* the same bytes value_write prints (buf_value and buf_quote mirror it), built in memory: a
+       tmpfile per call was most of --errors' time, nearly all of it in the kernel */
+    Buffer b = {0};
+    buf_value(&b, v);
+    if (!b.s) { b.s = grow(NULL, 1, 1); b.s[0] = 0; }
+    return b.s;
 }
 static State *find_state(Graph *g, const char *name) {
     size_t i;
     for (i = 0; i < g->n; i++) if (!strcmp(g->state[i].name, name)) return &g->state[i];
+    fprintf(stderr, "template edit state: %s\n", name);
     die("template edit state missing"); return NULL;
 }
 typedef struct { Value *pattern, *actions; char *skip, *require; } CompanionRule;
 static int manifest_glob_span(const char *pattern, size_t length, const char *text) {
-    if (!length) return !*text;
-    if (*pattern == '*')
-        return manifest_glob_span(pattern + 1, length - 1, text) ||
-               (*text && manifest_glob_span(pattern, length, text + 1));
-    if (*pattern == '?') return *text && manifest_glob_span(pattern + 1, length - 1, text + 1);
-    return *pattern == *text && manifest_glob_span(pattern + 1, length - 1, text + 1);
+    size_t pi = 0, ti = 0, star = SIZE_MAX, after = 0, tn = strlen(text);
+    while (ti < tn) {
+        if (pi < length && (pattern[pi] == '?' || pattern[pi] == text[ti])) {
+            pi++; ti++;
+        } else if (pi < length && pattern[pi] == '*') {
+            star = pi++; after = ti;
+        } else if (star != SIZE_MAX) {
+            pi = star + 1; ti = ++after;
+        } else return 0;
+    }
+    while (pi < length && pattern[pi] == '*') pi++;
+    return pi == length;
 }
 static int manifest_globs(const char *spec, const char *name) {
     const char *at = spec;
@@ -1575,6 +1635,15 @@ static int manifest_action_prefix(Value *pattern, Value *action) {
         Value *p = pattern->items[i].value, *a = action->items[i].value;
         char *ps, *as; int same;
         if (p->kind == JNULL) continue;
+        if (p->kind == JSTR && a->kind == JSTR) {
+            if (strcmp(p->s, a->s)) return 0;
+            continue;
+        }
+        if ((p->kind == JINT || p->kind == JUINT) &&
+            (a->kind == JINT || a->kind == JUINT)) {
+            if (p->number != a->number) return 0;
+            continue;
+        }
         ps = value_json_text(p); as = value_json_text(a);
         same = !strcmp(ps, as); free(ps); free(as);
         if (!same) return 0;
@@ -1583,16 +1652,66 @@ static int manifest_action_prefix(Value *pattern, Value *action) {
 }
 static void manifest_companions(Graph *g, CompanionRule *rules, size_t nr) {
     typedef struct { unsigned char *signature; int *mapped; } CompanionCache;
+    typedef struct { const char *skip, *require; } CompanionScope;
     CompanionCache *cache = NULL; size_t nc = 0, cc = 0, original_ns = g->ns;
+    size_t misses = 0;
+    CompanionScope *scopes = NULL; size_t nsc = 0;
+    size_t *scope_index, *rule_group, *rule_next, *group_head, ng = 1;
+    const char **group_name;
     if (!nr) return;
+    scopes = grow(NULL, nr, sizeof(*scopes));
+    scope_index = grow(NULL, nr, sizeof(*scope_index));
+    rule_group = grow(NULL, nr, sizeof(*rule_group));
+    rule_next = grow(NULL, nr, sizeof(*rule_next));
+    group_head = grow(NULL, nr + 1, sizeof(*group_head));
+    group_name = grow(NULL, nr + 1, sizeof(*group_name));
+    group_name[0] = NULL;
+    for (size_t i = 0; i <= nr; i++) group_head[i] = SIZE_MAX;
+    for (size_t ri = 0; ri < nr; ri++) {
+        size_t si;
+        for (si = 0; si < nsc; si++)
+            if (!strcmp(scopes[si].skip, rules[ri].skip) &&
+                !strcmp(scopes[si].require, rules[ri].require)) break;
+        if (si == nsc) {
+            scopes[nsc].skip = rules[ri].skip;
+            scopes[nsc++].require = rules[ri].require;
+        }
+        scope_index[ri] = si;
+        rule_group[ri] = 0;
+        if (rules[ri].pattern->n) {
+            Value *first = rules[ri].pattern->items[0].value;
+            if (first->kind == JARR && first->n && first->items[0].value->kind == JSTR) {
+                const char *name = first->items[0].value->s;
+                size_t gi;
+                for (gi = 1; gi < ng; gi++) if (!strcmp(group_name[gi], name)) break;
+                if (gi == ng) group_name[ng++] = name;
+                rule_group[ri] = gi;
+            }
+        }
+    }
+    for (size_t ri = nr; ri-- > 0;) {
+        size_t group = rule_group[ri];
+        rule_next[ri] = group_head[group]; group_head[group] = ri;
+    }
     for (size_t si = 0; si < g->n; si++) {
+        if (getenv("UNISACC_SEED_TRACE") && si % 1000 == 0)
+            fprintf(stderr, "companion progress %lu/%lu caches %lu misses %lu\n", (unsigned long)si,
+                    (unsigned long)g->n, (unsigned long)nc, (unsigned long)misses);
         State *st = &g->state[si];
         unsigned char *signature = grow(NULL, nr, 1);
+        unsigned char *allowed = grow(NULL, nsc, 1);
         int *mapped = NULL;
-        for (size_t ri = 0; ri < nr; ri++)
-            signature[ri] = !manifest_globs(rules[ri].skip, st->name) &&
-                (!strcmp(rules[ri].require, "-") || !*rules[ri].require ||
-                 manifest_globs(rules[ri].require, st->name));
+        for (size_t ci = 0; ci < nsc; ci++)
+            allowed[ci] = !manifest_globs(scopes[ci].skip, st->name) &&
+                (!strcmp(scopes[ci].require, "-") || !*scopes[ci].require ||
+                 manifest_globs(scopes[ci].require, st->name));
+        for (size_t ri = 0; ri < nr; ri++) signature[ri] = allowed[scope_index[ri]];
+        free(allowed);
+        {
+            int any_rule = 0;
+            for (size_t ri = 0; ri < nr; ri++) if (signature[ri]) { any_rule = 1; break; }
+            if (!any_rule) { free(signature); continue; }
+        }
         for (size_t ci = 0; ci < nc; ci++)
             if (!memcmp(cache[ci].signature, signature, nr)) { mapped = cache[ci].mapped; break; }
         if (!mapped) {
@@ -1611,6 +1730,25 @@ static void manifest_companions(Graph *g, CompanionRule *rules, size_t nr) {
             if (oldseq < 0 || (size_t)oldseq >= original_ns)
                 die("companion sequence outside original graph");
             if (mapped[oldseq]) { edge->seq = mapped[oldseq] - 1; continue; }
+            misses++;
+            {
+                int possible = 0;
+                for (size_t ri = 0; ri < nr && !possible; ri++) {
+                    CompanionRule *r = &rules[ri]; Value *first, *op;
+                    char needle[128];
+                    if (!signature[ri]) continue;
+                    if (!r->pattern->n) { possible = 1; break; }
+                    first = r->pattern->items[0].value;
+                    if (first->kind != JARR || !first->n) { possible = 1; break; }
+                    op = first->items[0].value;
+                    if (op->kind != JSTR || strlen(op->s) + 3 >= sizeof(needle)) {
+                        possible = 1; break;
+                    }
+                    snprintf(needle, sizeof(needle), "\"%s\"", op->s);
+                    if (strstr(g->seq[oldseq], needle)) possible = 1;
+                }
+                if (!possible) { mapped[oldseq] = oldseq + 1; continue; }
+            }
             Value *source = value_json(g->seq[edge->seq], "companion source actions");
             Value *out = value_new(JARR); char *text;
             for (size_t ri = 0; ri < nr; ri++) {
@@ -1621,11 +1759,23 @@ static void manifest_companions(Graph *g, CompanionRule *rules, size_t nr) {
             }
             for (size_t ai = 0; ai < source->n; ai++) {
                 Value *action = source->items[ai].value;
+                size_t gi = 0, specific, wildcard;
                 value_put(out, NULL, action);
-                for (size_t ri = 0; ri < nr; ri++) {
-                    CompanionRule *r = &rules[ri];
+                if (action->kind == JARR && action->n && action->items[0].value->kind == JSTR) {
+                    const char *op = action->items[0].value->s;
+                    for (size_t j = 1; j < ng; j++)
+                        if (!strcmp(group_name[j], op)) { gi = j; break; }
+                }
+                specific = gi ? group_head[gi] : SIZE_MAX;
+                wildcard = group_head[0];
+                while (specific != SIZE_MAX || wildcard != SIZE_MAX) {
+                    size_t ri;
+                    CompanionRule *r;
                     Value *p, *extra;
                     int already = 1;
+                    if (specific < wildcard) { ri = specific; specific = rule_next[ri]; }
+                    else { ri = wildcard; wildcard = rule_next[ri]; }
+                    r = &rules[ri];
                     if (!r->pattern->n || !signature[ri]) continue;
                     p = r->pattern->items[0].value;
                     if (p->kind == JARR && p->n && action->kind == JARR && action->n) {
@@ -1672,10 +1822,11 @@ static void manifest_companions(Graph *g, CompanionRule *rules, size_t nr) {
     for (size_t ci = 0; ci < nc; ci++) {
         free(cache[ci].mapped); free(cache[ci].signature);
     }
-    free(cache);
+    free(cache); free(scopes); free(scope_index);
+    free(rule_group); free(rule_next); free(group_head); free(group_name);
 }
 static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
-                                    Value *sequences, char mode) {
+                                    Value *sequences, char mode, Value *groups) {
     FILE *f; char *s; CompanionRule *pending = NULL; size_t np = 0, cp = 0;
     if (!edits->n) return;
     f = buffer_file(edits);
@@ -1698,6 +1849,104 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             manifest_companions(g, pending, np); np = 0;
         }
         if (!strcmp(field[0], "label")) { label_add(g, field[1]); free(s); continue; }
+        if (!strcmp(field[0], "group-tail")) {
+            /* finite_rules.install_template group-tail: an edge whose last action is [OP, MESSAGE...]
+               with MESSAGE under PREFIX loses that action and jumps to one label per message, numbered
+               in first-seen order; the message -> label map is the row's result (errors: reasons) */
+            Value *spec = value_json(field[1], "group-tail spec");
+            const char *op, *prefix; size_t plen;
+            if (spec->kind != JARR || spec->n != 2) die("group-tail spec must be [op, prefix]");
+            op = value_text(spec->items[0].value); prefix = value_text(spec->items[1].value); plen = strlen(prefix);
+            if (!groups) groups = value_new(JOBJ);
+            for (size_t si = 0; si < g->n; si++) {
+                State *st = &g->state[si];
+                if (strcmp(field[2], "-") && *field[2]) {
+                    const char *at = field[2]; int skipped = 0;
+                    while (*at) {
+                        const char *end = strchr(at, ','); size_t len = end ? (size_t)(end-at) : strlen(at);
+                        if (strlen(st->name) == len && !strncmp(st->name, at, len)) skipped = 1;
+                        if (!end) break;
+                        at = end + 1;
+                    }
+                    if (skipped) continue;
+                }
+                for (size_t ei = 0; ei < st->n; ei++) {
+                    Edge *edge = &st->edge[ei];
+                    Value *acts = value_json(g->seq[edge->seq], "group-tail actions"), *last, *label, *joined;
+                    const char *msg; char *text;
+                    if (acts->kind != JARR || !acts->n) continue;
+                    last = acts->items[acts->n - 1].value;
+                    if (last->kind != JARR || last->n < 2 || last->items[0].value->kind != JSTR ||
+                        strcmp(last->items[0].value->s, op) || last->items[1].value->kind != JSTR) continue;
+                    msg = last->items[1].value->s;
+                    if (strncmp(msg, prefix, plen)) continue;
+                    label = value_get(groups, msg);
+                    if (!label) {
+                        char num[32]; Buffer nb = {0};
+                        snprintf(num, sizeof(num), "%lu", (unsigned long)groups->n);
+                        buf_add(&nb, field[3], strlen(field[3])); buf_add(&nb, num, strlen(num)); buf_char(&nb, 0);
+                        label = value_string(nb.s); free(nb.s);
+                        value_put(groups, msg, label);
+                    }
+                    joined = value_new(JARR);
+                    for (size_t ai = 0; ai + 1 < acts->n; ai++) value_put(joined, NULL, acts->items[ai].value);
+                    text = value_json_text(joined);
+                    edge->target = copy(label->s); edge->seq = seq(g, text); free(text);
+                }
+            }
+            free(s); continue;
+        }
+        if (!strcmp(field[0], "insert-after")) {
+            /* finite_rules.install_template insert-after: after each action whose prefix equals one of
+               the patterns, the matching insertion list follows; every edge is re-interned */
+            Value *patterns = value_json(field[1], "insert-after patterns");
+            Value *inserts = value_json(field[4], "insert-after insertions");
+            size_t original_ns = g->ns; int *memo;
+            if (patterns->kind != JARR || inserts->kind != JARR || patterns->n != inserts->n)
+                die("insert-after needs one insertion per pattern");
+            memo = grow(NULL, original_ns ? original_ns : 1, sizeof(*memo));
+            memset(memo, 0, original_ns * sizeof(*memo));
+            for (size_t si = 0; si < g->n; si++) {
+                State *st = &g->state[si];
+                if (strcmp(field[2], "-") && *field[2]) {
+                    const char *at = field[2]; int skipped = 0;
+                    while (*at) {
+                        const char *end = strchr(at, ','); size_t len = end ? (size_t)(end-at) : strlen(at);
+                        if (strlen(st->name) == len && !strncmp(st->name, at, len)) skipped = 1;
+                        if (!end) break;
+                        at = end + 1;
+                    }
+                    if (skipped) continue;
+                }
+                for (size_t ei = 0; ei < st->n; ei++) {
+                    Edge *edge = &st->edge[ei];
+                    int oldseq = edge->seq; Value *acts, *out; char *text;
+                    if (oldseq >= 0 && (size_t)oldseq < original_ns && memo[oldseq]) { edge->seq = memo[oldseq] - 1; continue; }
+                    acts = value_json(g->seq[oldseq], "insert-after actions"); out = value_new(JARR);
+                    for (size_t ai = 0; acts->kind == JARR && ai < acts->n; ai++) {
+                        Value *x = acts->items[ai].value;
+                        value_put(out, NULL, x);
+                        for (size_t pi = 0; pi < patterns->n; pi++) {
+                            Value *pat = patterns->items[pi].value; int match = 1;
+                            if (pat->kind != JARR || x->kind != JARR || pat->n > x->n) continue;
+                            for (size_t k = 0; match && k < pat->n; k++) {
+                                char *w = value_json_text(pat->items[k].value), *g2 = value_json_text(x->items[k].value);
+                                if (strcmp(w, g2)) match = 0;
+                                free(w); free(g2);
+                            }
+                            if (match) {
+                                Value *ins = inserts->items[pi].value;
+                                for (size_t k = 0; ins->kind == JARR && k < ins->n; k++) value_put(out, NULL, ins->items[k].value);
+                                break;
+                            }
+                        }
+                    }
+                    text = value_json_text(out); edge->seq = seq(g, text); free(text);
+                    if (oldseq >= 0 && (size_t)oldseq < original_ns) memo[oldseq] = edge->seq + 1;
+                }
+            }
+            free(memo); free(s); continue;
+        }
         if (!strcmp(field[0], "alias")) {
             char key[16];
             for (int k = 0; k <= 256; k++) {
@@ -1768,6 +2017,65 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                 }
             }
             free(rewritten);
+            free(s); continue;
+        }
+        if (!strcmp(field[0], "split-at")) {
+            Value *cut = value_json(field[1], "split-at pattern");
+            size_t original_ns = g->ns, original_n = g->n;
+            int *rewritten = grow(NULL, original_ns ? original_ns : 1, sizeof(*rewritten));
+            char **remainder = grow(NULL, original_ns ? original_ns : 1, sizeof(*remainder));
+            if (cut->kind != JARR || !cut->n) die("split-at pattern must be nonempty array");
+            memset(rewritten, 0, original_ns * sizeof(*rewritten));
+            memset(remainder, 0, original_ns * sizeof(*remainder));
+            for (size_t si = 0; si < original_n; si++) {
+                for (size_t ei = 0; ei < g->state[si].n; ei++) {
+                    Edge *edge = &g->state[si].edge[ei];
+                    int oldseq = edge->seq;
+                    if (oldseq < 0 || (size_t)oldseq >= original_ns)
+                        die("split-at sequence outside original graph");
+                    if (!rewritten[oldseq]) {
+                        Value *acts = value_json(g->seq[oldseq], "split-at source actions");
+                        size_t at;
+                        rewritten[oldseq] = -1;
+                        if (acts->kind != JARR || acts->n < cut->n) continue;
+                        for (at = 0; at + cut->n <= acts->n; at++) {
+                            size_t pi;
+                            for (pi = 0; pi < cut->n; pi++) {
+                                Value *want = cut->items[pi].value;
+                                Value *got = acts->items[at + pi].value;
+                                if (want->kind != JARR || got->kind != JARR ||
+                                    want->n != got->n || !manifest_action_prefix(want, got)) break;
+                            }
+                            if (pi == cut->n) break;
+                        }
+                        if (at + cut->n <= acts->n) {
+                            Value *front = value_new(JARR), *back = value_new(JARR);
+                            Value *push = value_new(JARR); char *text;
+                            for (size_t ai = 0; ai < at; ai++)
+                                value_put(front, NULL, acts->items[ai].value);
+                            value_put(push, NULL, value_string("PUSH"));
+                            value_put(push, NULL, value_string(field[2]));
+                            value_put(front, NULL, push);
+                            for (size_t ai = at + cut->n; ai < acts->n; ai++)
+                                value_put(back, NULL, acts->items[ai].value);
+                            text = value_json_text(front);
+                            rewritten[oldseq] = seq(g, text) + 1; free(text);
+                            remainder[oldseq] = value_json_text(back);
+                        }
+                    }
+                    if (rewritten[oldseq] > 0) {
+                        char key[16]; char *target = edge->target;
+                        edge->seq = rewritten[oldseq] - 1;
+                        edge->target = copy(field[3]);
+                        label_add(g, field[2]);
+                        for (int ki = 0; ki <= 256; ki++) {
+                            number_text(ki, key);
+                            edge_set(g, field[2], 'r', key, target, remainder[oldseq]);
+                        }
+                    }
+                }
+            }
+            free(rewritten); free(remainder);
             free(s); continue;
         }
         for (i = 0; i < g->n && strcmp(g->state[i].name, field[1]); i++);
@@ -1878,6 +2186,40 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             }
             free(old_text);
             if (!found) die("copy-replace source action missing");
+        } else if (!strcmp(field[0], "clone-push")) {
+            State source_state = g->state[i], *target_state;
+            for (size_t j = 0; j < g->n; j++)
+                if (!strcmp(g->state[j].name, field[2])) die("clone-push target exists");
+            if (g->n == g->cap) {
+                g->cap = g->cap ? g->cap * 2 : 64;
+                g->state = grow(g->state, g->cap, sizeof(*g->state));
+            }
+            target_state = &g->state[g->n++]; *target_state = source_state;
+            target_state->name = copy(field[2]);
+            target_state->edge = grow(NULL, source_state.n, sizeof(*target_state->edge));
+            memcpy(target_state->edge, source_state.edge, source_state.n * sizeof(*target_state->edge));
+            target_state->cap = source_state.n;
+            if (source_state.key_index) {
+                target_state->key_index = grow(NULL, 257, sizeof(*target_state->key_index));
+                memcpy(target_state->key_index, source_state.key_index, 257 * sizeof(*target_state->key_index));
+            }
+            for (size_t ei = 0; ei < target_state->n; ei++) {
+                Edge *edge = &target_state->edge[ei];
+                Value *acts = value_json(g->seq[edge->seq], "clone-push actions");
+                unsigned pushes = 0; char *text;
+                if (strcmp(edge->target, field[3])) die("clone-push target mismatch");
+                for (size_t ai = 0; ai < acts->n; ai++) {
+                    Value *act = acts->items[ai].value;
+                    if (act->kind == JARR && act->n &&
+                        !strcmp(value_text(act->items[0].value), "PUSH")) {
+                        if (act->n != 2) die("clone-push action arity");
+                        act->items[1].value = value_string(field[4]); pushes++;
+                    }
+                }
+                if (pushes != 1) die("clone-push requires one PUSH");
+                text = value_json_text(acts); edge->seq = seq(g, text); free(text);
+            }
+            label_add(g, field[4]);
         } else if (!strcmp(field[0], "copy-state") || !strcmp(field[0], "copy")) {
             const char *source = !strcmp(field[0], "copy") ? field[2] : field[1];
             const char *target = !strcmp(field[0], "copy") ? field[1] : field[2];
@@ -3191,6 +3533,28 @@ static int manifest_when(const char *when, Value *flags, Value *facts) {
     }
     free(parts); return 1;
 }
+static char *manifest_section(const char *section, Value *flags) {
+    Buffer out = {0}; const char *at = section;
+    while (*at) {
+        const char *open = strchr(at, '{');
+        if (!open) { buf_add(&out, at, strlen(at)); break; }
+        buf_add(&out, at, (size_t)(open - at));
+        const char *end = strchr(open + 1, '}');
+        const char *question, *name; size_t length; int neg = 0;
+        if (!end) die("manifest section bracket missing");
+        name = open + 1;
+        if (*name == '!') { neg = 1; name++; }
+        question = memchr(name, '?', (size_t)(end - name));
+        if (!question) die("manifest section conditional missing question mark");
+        length = (size_t)(question - name);
+        char *key = copy_n(name, length);
+        int enabled = manifest_truth(value_get(flags, key));
+        free(key);
+        if (enabled != neg) buf_add(&out, question + 1, (size_t)(end - question - 1));
+        at = end + 1;
+    }
+    return out.s ? out.s : copy(section);
+}
 /* assemble.Run.foreach: an environment map is iterated in insertion order as
    {key,value} rows.  An optional facts table supplies the first matching row
    (or formatted defaults), with key/value winning on a name collision. */
@@ -3242,30 +3606,49 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
         int bytes = !strncmp(cell, "@bytes:", 7);
         int textf = !strncmp(cell, "@textf:", 7), quoted = !strncmp(cell, "@text:", 6);
         const char *arg = cell + (bytes || textf ? 7 : quoted ? 6 : 5);
-        char *text;
-        if (textf) text = seed_str(value_path(facts, arg));
+        char *text; size_t textn;
+        if (bytes && *arg == '=') {
+            Value *source = value_path(facts, arg + 1);
+            if (source->kind == JSTR) { text = source->s; textn = source->n; }
+            else { text = seed_str(source); textn = strlen(text); }
+        }
+        else if (textf) text = seed_str(value_path(facts, arg));
         else if (quoted) text = seed_str(value_json(arg, "manifest text"));
         else text = *arg == '=' ? seed_str(value_path(facts, arg + 1)) : seed_fmt(arg, facts);
+        if (!(bytes && *arg == '=')) textn = strlen(text);
         Value *seq = value_new(JARR);
-        for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        for (size_t ti = 0; ti < textn; ti++) {
+            const unsigned char *p = (const unsigned char *)text + ti;
             Value *action = value_new(JARR), *n = value_new(JINT);
-            if (!textf && !quoted && p[0] == '\\' && p[1] == 'x' &&
-                isxdigit(p[2]) && isxdigit(p[3])) {
+            if (!bytes && !textf && !quoted && ti + 3 < textn &&
+                p[0] == '\\' && p[1] == 'x' && isxdigit(p[2]) && isxdigit(p[3])) {
                 char hex[3] = {(char)p[2], (char)p[3], 0};
-                n->number = strtol(hex, NULL, 16); p += 3;
-            } else if (!bytes && !textf && !quoted && p[0] == '\\' && p[1]) {
-                p++;
-                n->number = *p == 'n' ? '\n' : *p == 't' ? '\t' : *p;
+                n->number = strtol(hex, NULL, 16); ti += 3;
+            } else if (!bytes && !textf && !quoted && p[0] == '\\' && ti + 1 < textn) {
+                ti++;
+                n->number = text[ti] == 'n' ? '\n' : text[ti] == 't' ? '\t' : (unsigned char)text[ti];
             } else n->number = *p;
             value_put(action, NULL, value_string(bytes ? "SBOUT" : "OUT"));
             value_put(action, NULL, n); value_put(seq, NULL, action);
         }
-        free(text); return seq;
+        if (!(bytes && *arg == '=')) free(text);
+        return seq;
     }
     if (!strncmp(cell, "@rej:", 5)) {
         Value *seq = value_new(JARR), *action = value_new(JARR);
+        const char *raw = cell + 5;
+        size_t rawlen = strlen(raw);
+        char *message = copy(raw);
+        if (rawlen >= 3 && raw[0] == '{' && raw[rawlen - 1] == '}' &&
+            !memchr(raw + 1, '{', rawlen - 2) &&
+            !memchr(raw + 1, '}', rawlen - 2)) {
+            char *key = copy_n(raw + 1, rawlen - 2);
+            Value *v = value_path(facts, key);
+            free(message); message = seed_str(v); free(key);
+        }
         value_put(action, NULL, value_string("REJECT"));
-        value_put(action, NULL, value_string(cell + 5));
+        value_put(action, NULL, value_string(message));
+        free(message);
         value_put(seq, NULL, action); return seq;
     }
     if (!strncmp(cell, "fresh:", 6)) {
@@ -3728,6 +4111,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                          mode ? "result" : "byte") >= (int)sizeof(path)) die("manifest rule path too long");
             const char *section = row->cell[2];
             if (section[0] == '@') section = value_text(manifest_cell(section, facts, env));
+            else if (strchr(section, '{')) section = manifest_section(section, ctx->flags);
             if (!strcmp(section, "-") || !*section)
                 install_plain_classes(ctx->graph, path, mode ? 'r' : 'b', bindings, sequences, classes);
             else if (domainkeys)
@@ -3741,12 +4125,14 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         ctx->rows++;
     } else if (!strcmp(row->cell[0], "holder")) {
         char key[256]; const char *spec = row->cell[5];
-        if (opts->n) die("manifest holder options are not yet covered");
+        if (opts->n && (opts->n != 1 || !value_get(opts, "cur")))
+            die("manifest holder options are not yet covered");
         if (snprintf(key, sizeof(key), "__holder_%s", row->cell[1]) >= (int)sizeof(key))
             die("holder name too long");
         if (strncmp(spec, "P:", 2) && strncmp(spec, "U:", 2) && strncmp(spec, "S:", 2))
             die("manifest holder kind is not yet covered");
-        value_put(env, key, value_string(spec + 2));
+        value_put(env, key, value_string(value_get(opts, "cur") ?
+                                         value_text(value_get(opts, "cur")) : spec + 2));
     } else if (!strcmp(row->cell[0], "label")) {
         char *names = copy(row->cell[1]), *p = names;
         if (opts->n) die("manifest label option is not yet covered");
@@ -3875,6 +4261,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
             value_put(domain, NULL, value_path(facts, value_text(domainat)));
         }
         if (section[0] == '@') section = value_text(manifest_cell(section, facts, env));
+        else if (strchr(section, '{')) section = manifest_section(section, ctx->flags);
         if (snprintf(path, sizeof(path), "%s/%s", ctx->dir, row->cell[1]) >= (int)sizeof(path))
             die("manifest table path too long");
         input = fopen(path, "rb"); if (!input) die("cannot open manifest table");
@@ -3882,11 +4269,11 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
             char *field[5]; int n;
             if (!*s || *s == '#') { free(s); continue; }
             n = fields_tab(s, field, 5);
-            if (n != 5) die("manifest table column count");
-            if ((!strcmp(section, "-") || !*section || !strcmp(field[0], section))) {
-                for (int i = 1; i < 5; i++) {
+            if (n != 4 && n != 5) die("manifest table column count");
+            if (n == 4 || !strcmp(section, "-") || !*section || !strcmp(field[0], section)) {
+                for (int i = n == 4 ? 0 : 1; i < n; i++) {
                     buf_add(&selected, field[i], strlen(field[i]));
-                    buf_char(&selected, i == 4 ? '\n' : '\t');
+                    buf_char(&selected, i == n - 1 ? '\n' : '\t');
                 }
             }
             free(s);
@@ -3902,7 +4289,8 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         Value *modeopt = value_get(opts, "mode"), *domainopt = value_get(opts, "domain");
         Value *domainkeys = value_get(opts, "domain_keys");
         Value *classopt = value_get(opts, "classes"), *overlayopt = value_get(opts, "overlay");
-        Value *textrows = value_get(opts, "textrows"), *mapseq = value_get(opts, "mapseq");
+        Value *textrows = value_get(opts, "textrows"), *msgrows = value_get(opts, "msgrows");
+        Value *mapseq = value_get(opts, "mapseq");
         Value *seqenv = value_get(opts, "seqenv");
         Value *classes = classopt ? value_path(facts, value_text(classopt)) : NULL;
         Value *domain = numeric_domain(0, 257), *sequences = value_new(JOBJ);
@@ -3914,8 +4302,9 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                 strcmp(opts->items[i].key, "domain_keys") &&
                  strcmp(opts->items[i].key, "classes") && strcmp(opts->items[i].key, "overlay") &&
                  strcmp(opts->items[i].key, "let") && strcmp(opts->items[i].key, "textrows") &&
+                 strcmp(opts->items[i].key, "msgrows") &&
                  strcmp(opts->items[i].key, "mapseq") && strcmp(opts->items[i].key, "seqenv") &&
-                 strcmp(opts->items[i].key, "with")) {
+                 strcmp(opts->items[i].key, "with") && strcmp(opts->items[i].key, "result")) {
                 fprintf(stderr, "manifest template option: %s (%s/%s:%s)\n",
                         opts->items[i].key, ctx->dir, row->cell[1], row->cell[2]);
                 die("manifest template option is not yet covered");
@@ -3929,6 +4318,7 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         if (strcmp(row->cell[5], "-") && *row->cell[5]) {
             char *scope = seed_interp(row->cell[5], env);
             if (!strcmp(scope, "none")) owner = NULL;
+            else if (!strcmp(scope, "split")) owner = copy("\001split");
             else if (scope[0] == '=') {
                 char key[256]; Value *held;
                 if (snprintf(key, sizeof(key), "__holder_%s", scope + 1) >= (int)sizeof(key))
@@ -3937,18 +4327,28 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
                 owner = copy(value_text(held));
             }
             else {
-                if (strncmp(scope, "P:", 2) && strncmp(scope, "U:", 2))
+                if (strncmp(scope, "P:", 2) && strncmp(scope, "U:", 2) &&
+                    strncmp(scope, "S:", 2))
                     die("manifest template fresh scope is not yet covered");
                 owner = copy(scope + 2);
             }
             free(scope);
         }
         if (section[0] == '@') section = value_text(manifest_cell(section, facts, env));
+        else if (strchr(section, '{')) section = manifest_section(section, ctx->flags);
         if (snprintf(path, sizeof(path), "%s/%s-template.tsv", ctx->dir, row->cell[1]) >= (int)sizeof(path))
             die("template path too long");
+        manifest_seqrows_file(ctx->dir, textrows, "OUT", "", sequences, NULL);
+        if (msgrows) {
+            Value *names = value_new(JARR);
+            if (msgrows->kind != JARR || msgrows->n != 3)
+                die("template msgrows shape is not covered");
+            manifest_seqrows_file(ctx->dir, msgrows->items[0].value, "SBOUT",
+                                  value_text(msgrows->items[2].value), sequences, names);
+            value_put(facts, value_text(msgrows->items[1].value), names);
+        }
         expanded = expand_template_file_fresh_edit(path, facts, section, owner, NULL, &edits);
         table = buffer_file(&expanded);
-        manifest_seqrows_file(ctx->dir, textrows, "OUT", "", sequences, NULL);
         if (mapseq) {
             Value *mapfacts = seed_env_copy(facts);
             seed_update(mapfacts, bindings);
@@ -3968,8 +4368,12 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         install_delta_text_bound(ctx->graph, table, modeopt ? value_text(modeopt)[0] : 'r', domain,
                                  classes, sequences, overlayopt && manifest_truth(overlayopt), 0,
                                  NULL, "START", bindings);
-        manifest_template_edits(ctx->graph, &edits, bindings, sequences,
-                                modeopt ? value_text(modeopt)[0] : 'r');
+        {
+            Value *groups = value_new(JOBJ), *result = value_get(opts, "result");
+            manifest_template_edits(ctx->graph, &edits, bindings, sequences,
+                                    modeopt ? value_text(modeopt)[0] : 'r', groups);
+            if (result) value_put(env, value_text(result), groups);
+        }
         if (fclose(table)) die("template table close failed");
         free(expanded.s); free(edits.s); free(owner);
         ctx->rows++;
