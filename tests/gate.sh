@@ -470,6 +470,7 @@ job seedparse2-2 ./tests/seedparse2check.sh locations,warnings locations,errors 
 job seedgen ./tests/seedgencheck.sh e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe
 job seedgen-2 ./tests/seedgencheck.sh lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a
 job seedgen-3 ./tests/seedgencheck.sh tokenpp tokenlex warnlex warnparse warnunits errorparse warnpp
+job seedpack ./tests/seedpackcheck.sh   # 0.0.32 B5: seed/pack.c == exec/c/pack.py (P1/P2/P3)
 scparts=$(python3 "$R/tests/seedconstructcheck.py" --list) || scparts=""
 [ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.py --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
 for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
