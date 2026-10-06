@@ -2710,6 +2710,7 @@ static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
     output(out, &g); if (fclose(out)) die("output close failed");
 }
 typedef struct { int depth; char *raw; char *field[9]; } PPRow;
+static int pp_shared_predefines;   /* 0.0.32 B5: --shared-predefines (the product's e2) */
 static Value *pp_env_copy(Value *env) {
     Value *copy = value_new(JOBJ);
     for (size_t i = 0; i < env->n; i++) value_put(copy, env->items[i].key, env->items[i].value);
@@ -2838,7 +2839,15 @@ static void pp_install_body_before_dsw(Graph *g) {
             Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
             direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL); linedir++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "shared-predefine")) {
-            /* This row belongs to --shared-predefines, not the default product route. */
+            /* --shared-predefines: predefines come from resources; it replaces the per-target foreach */
+            if (strcmp(field[3], "shared-predefines")) die("unsupported shared-predefine condition");
+            if (pp_shared_predefines) {
+                Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
+                direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL);
+            }
+        } else if (!strcmp(field[0], "foreach") && pp_shared_predefines) {
+            if (strcmp(field[3], "!shared-predefines")) die("unsupported pp predefine foreach condition");
+            free(s); break;
         } else if (!strcmp(field[0], "foreach")) {
             Value *facts = load_facts_expr(field[4]);
             Value *predef = value_get(value_get(facts, "predef"), "lnx/x86_64");
@@ -8497,8 +8506,8 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-body")) {
         inspect_pp_through_linedir(argv[2], 2); return 0;
     }
-    if (argc == 3 && !strcmp(argv[1], "pp")) {
-        inspect_pp_through_linedir(argv[2], 3); return 0;
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--shared-predefines"))) && !strcmp(argv[1], "pp")) {
+        pp_shared_predefines = argc == 4; inspect_pp_through_linedir(argv[2], 3); return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
