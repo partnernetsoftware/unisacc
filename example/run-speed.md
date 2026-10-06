@@ -23,7 +23,7 @@
 | csih 整表 `-run selftest` | 7.996 | 和 `-o` 同级。卡在编译，不在跑 |
 | `UNISA_JOBS=1 / 4 / 8` 再编 csih | 9.820 / 8.174 / 7.591 | 默认已是 4。提到 8 只少 0.6 秒 |
 
-csih 文件表：`csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c`，目录 `moltbaby/skills/llm/dsh/csih`。
+csih 文件表：`csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c`，目录 `apps/csih`。
 
 ## 可以下手的地方
 
