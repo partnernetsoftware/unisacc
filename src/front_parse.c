@@ -787,7 +787,7 @@ int pponly;                 /* -E: stop after the preprocessor */
    and this unit's initialisers form `__init_u` (the unisacc linker chains
    every unit's `__init_u` into the program's `__init`). */
 int unitmode;
-int ccw_note(int t, int ext); int ccw_def(int t);
+int ccw_note(int t, int ext); int ccw_def(int t); int cca_note(int t); int ncca;
 int objextern;              /* -c -b (any object): `extern` objects without a definition are .extern, not storage */
 int declextern;
 int emit_start(void);
@@ -1825,6 +1825,7 @@ int primary(void) {
         curuns = symuns[i]; curbool = symbool[i];
         if (symkind[i] == 2) {           /* a function designator */
             es("  @mem.lea r0, "); etok(tp); ec(10);
+            if (objextern == 0 && unitmode == 0) cca_note(tp);
             adv(); lvalue = 0; curelem = 8; curptr = 0; cursize = 8;
             curfn = 1; curfnst = 0 - 1; curflt = 0;
             return postfix();
@@ -6127,7 +6128,7 @@ int fe_units(char **paths, int npath, char *t) {
     model_dims();
     setup();
     nout = 0; nsym = 0; nsympk = 0; nlab = 0; npool = 0;
-    poolend = 0; nloop = 0; fdef_n = 0; nfwdsrc = 0;
+    poolend = 0; nloop = 0; fdef_n = 0; nfwdsrc = 0; ncca = 0;
     /* `__init` ACCUMULATES: every unit's global initialisers run there, so
        this is reset once for the program, not once per file.  Resetting it
        per file silently dropped unit one's initialisers -- the program ran
@@ -6362,6 +6363,12 @@ int ud_target(int a, int e, int *blk) {
     k = 0;
     if (out[j] == 99) { if (out[j+1] == 97) { if (out[j+2] == 108) { if (out[j+3] == 108) { if (out[j+4] == 32) k = j + 5; } } } }
     if (out[j] == 106) { if (out[j+1] == 117) { if (out[j+2] == 109) { if (out[j+3] == 112) { if (out[j+4] == 32) k = j + 5; } } } }
+    /* `.lea rN, NAME`: a function whose address is taken is reached too --
+       a static one called only through a pointer lost its forwarded calls */
+    if (out[j] == 46) { if (out[j+1] == 108) { if (out[j+2] == 101) { if (out[j+3] == 97) { if (out[j+4] == 32) {
+        k = j + 5; while (k < e && out[k] != 44) k = k + 1;
+        if (k + 2 < e && out[k + 1] == 32) k = k + 2; else k = 0;
+    } } } } }
     if (k == 0) return 0;
     nm = k; L = 0;
     while (nm + L < e && out[nm + L] != 10 && out[nm + L] != 32 && out[nm + L] != 44) L = L + 1;
@@ -6466,6 +6473,7 @@ int fwd_stub(char *nm, int nl) {
         k = 0; while (k < np) { kk[k] = sympk[f + k]; ww[k] = sympkw[f + k]; if (kk[k] == 9) return 0; k = k + 1; }
         vrw = symelem[si]; visvoid = vrw == 0 && symptr[si] == 0 && symflt[si] == 0;
         if (visvoid == 0 && symptr[si] == 0 && symflt[si] == 0 && symretw[si]) vrw = symretw[si];
+        if (ncca > 0 && nfwdsrc == 0) fwd_ccw = 1;
         return fwd_emit_var(nm, nl, np, kk, ww, visvoid, symptr[si] ? 1 : symflt[si], symptr[si] ? 8 : vrw, symuns[si]);
     }
     k = 0; while (k < np) { if (sympk[f + k] == 9) return 0; k = k + 1; }
@@ -6493,6 +6501,7 @@ int fwd_stub(char *nm, int nl) {
     {   int kk[64]; int ww[64]; int uu[64];
         if (np > 64) return 0;
         k = 0; while (k < np) { kk[k] = sympk[f + k]; ww[k] = sympkw[f + k]; uu[k] = 0; k = k + 1; }
+        if (ncca > 0 && nfwdsrc == 0) fwd_ccw = 1;   /* before the prologue is written */
         fwd_emit(nm, nl, np, kk, ww, uu, isvoid, symptr[si] ? 1 : symflt[si], symptr[si] ? 8 : rw, symuns[si]);
     }
     return 1;
@@ -6604,6 +6613,60 @@ int ccx_emit(char *nm, int nl) {
     es("  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n");
     return 0;
 }
+/* 0.0.31 H3: host callbacks.  A function whose address is taken may be handed to the host (a
+   thread start routine, a pthread_once initialiser), and the host calls it with the C ABI.  Each
+   such function is remembered here, spelled as its label (unit suffix included); when the
+   forwarding stubs asked for it (fwd_ccw, src/fwdstub.c) the program gets one inbound wrapper
+   per function -- `__ccw_N: call NAME; ret`, which the back end brackets exactly as the object
+   exports above -- and `__unisa_ccw_of(p)`, which turns such a function's address into its
+   wrapper's and returns any other pointer unchanged.  The stubs pass every pointer argument
+   through it, so internal calls through function pointers are untouched. */
+char cca_nm[256 * 80]; int cca_l[256]; int ncca;
+int cca_note(int t) {
+    char nm[80]; int n; int k; int i; int u;
+    n = 0; k = 0;
+    while (k < tlen[t] && n < 72) { nm[n] = src[tpos[t] + k]; n = n + 1; k = k + 1; }
+    if (k < tlen[t]) return 0;
+    if (ustat_is(t)) {
+        nm[n] = 95; nm[n + 1] = 95; nm[n + 2] = 117; n = n + 3; u = curunit;
+        if (u >= 10) { nm[n] = 48 + u / 10; n = n + 1; }
+        nm[n] = 48 + u % 10; n = n + 1;
+    }
+    i = 0;
+    while (i < ncca) {
+        if (cca_l[i] == n) { k = 0; while (k < n && cca_nm[i * 80 + k] == nm[k]) k = k + 1; if (k == n) return 0; }
+        i = i + 1;
+    }
+    if (ncca >= 256) return 0;
+    k = 0; while (k < n) { cca_nm[ncca * 80 + k] = nm[k]; k = k + 1; }
+    cca_l[ncca] = n; ncca = ncca + 1;
+    return 0;
+}
+int ccwof_is(char *p, int n) {
+    char *w; int k; w = "__unisa_ccw_of";
+    if (fwd_ccw == 0 || n != 14) return 0;
+    k = 0; while (k < 14) { if (p[k] != w[k]) return 0; k = k + 1; }
+    return 1;
+}
+int cca_emit(void) {
+    int i; int k;
+    i = 0;
+    while (i < ncca) {
+        es("__ccw_"); en(i); es(":\n  call "); k = 0; while (k < cca_l[i]) { ec(cca_nm[i * 80 + k] & 255); k = k + 1; }
+        es("\n  ret\n");
+        i = i + 1;
+    }
+    es("__unisa_ccw_of:\n");
+    i = 0;
+    while (i < ncca) {
+        es("  .lea r1, "); k = 0; while (k < cca_l[i]) { ec(cca_nm[i * 80 + k] & 255); k = k + 1; }
+        es("\n  eq r2, r0, r1\n  jumpz r2, __ccwq_"); en(i); es("\n  .lea r0, __ccw_"); en(i);
+        es("\n  ret\n__ccwq_"); en(i); es(":\n");
+        i = i + 1;
+    }
+    es("  ret\n");
+    return 0;
+}
 /* cc interop slice 2 (inbound): in a whole-program object a function
    that is DEFINED here and was DECLARED `extern` somewhere in the unit
    (the interface header's spelling: `extern int api(int);`) is exported to
@@ -6683,6 +6746,7 @@ int undef_calls(void) {
                    gcc never emitted that block in the first place */
                 if (h >= 0) { if (ud_reach[h] == 0) { i = e + 1; continue; } }
                 h = ud_slot(i + 7);
+                if (ud_tab[h] == 0) { if (ccwof_is(out + i + 7, e - i - 7)) ud_tab[h] = i + 8; }   /* cca_emit defines it below */
                 if (ud_tab[h] == 0) {
                     ud_tab[h] = i + 8;        /* report each name once */
                     if (unitmode) {           /* defined in another unit: the linker's business */
@@ -6751,5 +6815,6 @@ int undef_calls(void) {
     }
     nccx = 0;
     if (objextern && unitmode == 0) bad = bad + ccw_emit();
+    if (fwd_ccw && fwdrun == 0 && objextern == 0 && unitmode == 0) cca_emit();
     return bad;
 }

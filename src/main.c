@@ -20,7 +20,7 @@ extern char tb_file[MAXOUT];
    file and compile once more with it as the last unit.  1 on failure. */
 int fe_units_fwd(char **inputs, int *ninput, char *t, int fwd) {
     int r1;
-    fwdrun = fwd; nfwdsrc = 0;
+    fwdrun = fwd; nfwdsrc = 0; fwd_ccw = 0;
     /* A win target's host call delivers four arguments (src/fwdstub.c
        fwd_maxargs); 119 is 'w'. Everything else keeps fwd_emit's own six. */
     fwd_maxargs = (t != 0 && t[0] == 119) ? 4 : 0;

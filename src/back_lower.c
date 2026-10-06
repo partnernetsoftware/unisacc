@@ -18,6 +18,7 @@
 
 #include "tapescan.h"
 #define BK_DATA_BASE 256            /* tape.DATA_BASE */
+int bk_threads;                      /* H3: the `__unisa_threads` global (g___unisa_threads): per-thread syscall cells */
 int bk_anyccw;                       /* some __ccw_ wrapper exists (its body's local symbol is renamed) */
 int bk_dyn;                 /* 0.0.21 R21-4a': a Linux image that imports dlopen/dlsym/dlclose/dlerror (dynamic ELF) */
 int bk_elf_hdrs(void) { return bk_dyn ? 784 : 176; }   /* ELF header bytes before the code (bk_elf) */
@@ -223,7 +224,7 @@ int bk_repack(void) {
         if (pass == 1) bk_nzend = cur;      /* nonzero blobs end here, zero blobs follow */
         pass = pass - 1;
     }
-    bknd = 0; bknz = 0; bkdlen = 0; pass = 1; bk_dyn = 0; bk_anyccw = 0;
+    bknd = 0; bknz = 0; bkdlen = 0; pass = 1; bk_dyn = 0; bk_anyccw = 0; bk_threads = 0;
     while (pass >= 0) {
         b = 0;
         while (b < bknb) {
@@ -907,6 +908,15 @@ int bk_lower(void) {
     while (j < bknn) {
         bklab_tpc[j] = 0 - 1;
         if (bklab_pc[j] >= 0) { bklab_next[j] = bklab_first[bklab_pc[j]]; bklab_first[bklab_pc[j]] = j; }
+        j = j + 1;
+    }
+    j = 0;
+    while (j < bknn) {
+        if (bkos != 2 && bkname_len[j] == 17) {
+            char *tn; int q; tn = "g___unisa_threads"; q = 0;
+            while (q < 17 && bkpool[bkname_at[j] + q] == tn[q]) q = q + 1;
+            if (q == 17) bk_threads = 1;
+        }
         j = j + 1;
     }
     pc = 0;

@@ -22,6 +22,10 @@ int fwdrun; char fwdsrc[131072]; int nfwdsrc;
    target; the product driver leaves it 0 and does not forward to a win target
    at all yet (archive/plans/v0.0.23.md item A1). */
 int fwd_maxargs;
+/* 0.0.31 H3: set by the reference front end when the program takes a function's address; every
+   pointer argument then goes through __unisa_ccw_of (front_parse.c cca_emit), so a function the
+   host calls back arrives as its C-ABI wrapper.  0 = the old bytes (and the product's). */
+int fwd_ccw;
 /* 0.0.28 N1' (glob's callback): a driver that knows a parameter's exact C declaration -- a function
    pointer, which `void *` does not match -- puts it here, whole and named a<k> ("int (*a2)(char *, int)").
    Read by fwd_emit and fwd_emit_var for parameter k, cleared after each stub; all 0 = the old bytes. */
@@ -56,6 +60,7 @@ int fwd_pclear(void) { int k; k = 0; while (k < 64) { fwd_ptype[k] = 0; k = k + 
    then, on Linux, libm.so.6, where glibc keeps fenv.h's functions (macOS has them in libSystem) */
 int fwd_prologue(void) {
     fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
+    if (fwd_ccw) fwd_s("void *__unisa_ccw_of(void *);\n");
     fwd_s("static void *__unisa_fwdsym(const char *n) {\n    void *f; f = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, n);\n");
     fwd_s("#ifdef __linux__\n    if (f == 0) { static void *m; if (m == 0) m = uffi_dlopen(\"libm.so.6\", 2); if (m) f = uffi_dlsym(m, n); }\n#endif\n");
     fwd_s("    return f;\n}\n");
@@ -78,7 +83,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
             fwd_s(") {\n    static void *fn; long v[10];\n");
             fwd_s("    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
             fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
-            k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { fwd_s("(long)a"); fwd_d(k); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
+            k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(long)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s("(long)a"); fwd_d(k); } } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
             if (isvoid) fwd_s("    __hostcall(fn, v);\n");
             else { fwd_s("    return ("); fwd_s(rt); fwd_s(")__hostcall(fn, v);\n"); }
             fwd_s("}\n");
@@ -93,6 +98,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
     fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
     fwd_s("    if (fn == 0) { write(2, \"unisacc -run: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(32 + nl); fwd_s("); exit(127); }\n");
+    k = 0; while (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("    a"); fwd_d(k); fwd_s(" = __unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(");\n"); } k = k + 1; }
     k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(kind[k], w[k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
     fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np); fwd_s(", 0 - 1, "); fwd_s(isvoid ? "0" : "&r"); fwd_s(");\n");
     if (!isvoid) fwd_s("    return r;\n");
@@ -122,11 +128,12 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rk
     fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
     fwd_s("    va_start(ap, a"); fwd_d(np - 1); fwd_s("); x[0] = va_arg(ap, long); x[1] = va_arg(ap, long); x[2] = va_arg(ap, long); x[3] = va_arg(ap, long); va_end(ap);\n");
     fwd_s("#if defined(__APPLE__) && defined(__aarch64__)\n    { int kinds[9]; void *vals[9];\n");
+    k = 0; while (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("    a"); fwd_d(k); fwd_s(" = __unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(");\n"); } k = k + 1; }
     k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(kind[k], w[k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
     k = 0; while (k < 4) { fwd_s("    kinds["); fwd_d(np + k); fwd_s("] = 3; vals["); fwd_d(np + k); fwd_s("] = &x["); fwd_d(k); fwd_s("];\n"); k = k + 1; }
     fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np + 4); fwd_s(", "); fwd_d(np); fwd_s(", "); fwd_s(isvoid ? "0" : "&r"); fwd_s("); }\n");
     fwd_s("#else\n    { long v[10];\n");
-    k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { fwd_s("(long)a"); fwd_d(k); } else if (k < np + 4) { fwd_s("x["); fwd_d(k - np); fwd_s("]"); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
+    k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(long)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s("(long)a"); fwd_d(k); } } else if (k < np + 4) { fwd_s("x["); fwd_d(k - np); fwd_s("]"); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
     if (isvoid) fwd_s("    __hostcall(fn, v); }\n");
     else { fwd_s("    r = ("); fwd_s(rt); fwd_s(")__hostcall(fn, v); }\n"); }
     fwd_s("#endif\n");

@@ -129,8 +129,29 @@ int a_adr(int d, long pc, long target) {
     ow(0x10000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5) | d);
     return 0;
 }
+/* H3 thread mode (bk_threads): the scratch cells the system-call ops spill
+   through move from the shared data block to just below the tape stack
+   pointer, so two threads in a system call no longer share them.  The
+   displacement for an address in the block, or 1 when it is not a cell.
+   Within 128 bytes: the x86-64 kernel skips that red zone on a signal. */
+long bk_tcell(long target) {
+    long o;
+    if (bk_threads == 0) return 1;
+    o = target - bk_shift - bk_scr0;
+    if (o == 0) return 0 - 8;
+    if (o == 8) return 0 - 16;
+    if (o == 16) return 0 - 24;
+    if (o >= 24 && o < 48) return o - 72;          /* print buffer: -48..-25 */
+    if (o >= 80 && o < 128) return o - 176;        /* six spill cells: -96..-49 */
+    if (o == 128) return 0 - 104;
+    if (o == 136) return 0 - 112;
+    return 1;
+}
 int a_adrp_add(int d, long pc, long target) {
     long page; long lo12;
+    {   long td; td = bk_tcell(target);
+        if (td != 1) { ow(0xD1000000 | ((0 - td) << 10) | (7 << 5) | d); ow(0xD503201F); return 0; }   /* sub d, x7, #-td; nop */
+    }
     page = (target >> 12) - (pc >> 12);
     lo12 = target & 0xFFF;
     if (bk_objmode) {                                   /* R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC */
@@ -680,6 +701,9 @@ int x_store(int r, int b, long disp, int wd) {
 }
 /* [rip+disp32], 7 bytes fixed */
 int x_rip(int opc, int r, long pcnext, long target) {
+    {   long td; td = bk_tcell(target);
+        if (td != 1) { x_rex(1, r >> 3, 0, 0); ob(opc); ob(0x44 | ((r & 7) << 3)); ob(0x24); ob(td & 255); ob(0x66); ob(0x90); return 0; }   /* [rsp+d8]; 2-byte nop */
+    }
     x_rex(1, r >> 3, 0, 0); ob(opc); x_modrm(0, r, 5);
     if (bk_objmode && target >= BK_OBJDATA) {           /* R_X86_64_PC32 against .data/.bss, A = offset - 4 */
         if (bk_relo(bkol, 2, target)) bkro_add[bknro - 1] = bkro_add[bknro - 1] - 4;
