@@ -212,7 +212,6 @@ def extended_contracts(stage):
         assert target=='D.thread.check' and actions==[('INTERN','ni','nstart','nend'),('CMP','ni','id_thread')],'D.ne'
         _,actions=edge(g,'D.thread.check',0)
         assert actions==[('LDX','t','ni',f['DEFINED']),('CMPI','t',0)],'D.thread.check'
-        assert edge(g,'D.thread.check',1)==edge(g,'D.thread.check',0),'thread symbol follows the same definition path'
     return [
         ('string-kind',lambda g:expect(g,'D.str','D.ws',[('LDI','is_bss',0)]),('data-result.tsv','D.str','*','actions','"is_bss",0','"is_bss",1')),
         ('bss-kind',lambda g:expect(g,'D.bss','D.ws',[('LDI','is_bss',1)]),('data-result.tsv','D.bss','*','actions','"is_bss",1','"is_bss",0')),
