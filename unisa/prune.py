@@ -183,7 +183,8 @@ def prune(tape):
     result=copy.copy(tape)
     result.code=[tape.code[i] for i in pcs]
     result.labels={name:mapping[oldpc] for name,oldpc in tape.labels.items() if name in labels}
-    result.data=bytearray(tape.data);result.syms=dict(tape.syms);result.relocs=list(tape.relocs)
+    result.data=tape.data;   # shared, read-only from here on (a copy cost 600 MB on the compiler's own tape)
+    result.syms=dict(tape.syms);result.relocs=list(tape.relocs)
     return result
 
 

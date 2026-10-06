@@ -153,7 +153,7 @@ def facts(oracle, op, os_, arch, drive="spec"):
     return f
 
 
-def zero_last(data, syms, base):
+def zero_last(data, syms, base, tail=0):
     """Lay the data out initialised-first: every blob (a symbol's bytes, up
     to the next symbol) that holds a nonzero byte, in order, then every blob
     that is all zeros.  Each keeps its address mod 8.  The zeros then form one
@@ -166,15 +166,23 @@ def zero_last(data, syms, base):
         starts = [0] + starts
     ends = starts[1:] + [len(data)]
     blobs = [(s, e) for s, e in zip(starts, ends)]
-    nz = [b for b in blobs if any(data[b[0]:b[1]])]
-    zz = [b for b in blobs if not any(data[b[0]:b[1]])]
-    out = bytearray()
+    # R3 (0.0.30): no slice copies, and the zero blobs are never written -- bytearray(n) pages
+    # stay unresident, so the compiler's 600 MB of static arrays no longer cost 600 MB of RAM
+    zero = [data.count(0, s, e) == e - s for s, e in blobs]
+    order = [b for b, z in zip(blobs, zero) if not z] + [b for b, z in zip(blobs, zero) if z]
     new = {}
-    for s, e in nz + zz:
-        out.extend(b"\x00" * ((s - len(out)) % 8))
-        new[s] = len(out)
-        out.extend(data[s:e])
-    return out, {n: base + new[a - base] for n, a in syms.items()}
+    at = 0
+    for s, e in order:
+        at += (s - at) % 8
+        new[s] = at
+        at += e - s
+    used = at + (-at) % 8
+    out = bytearray(used + tail)   # R3: final size once; extend copied 600 MB
+    view = memoryview(data)
+    for (s, e), z in zip(blobs, zero):
+        if not z:
+            out[new[s]:new[s] + e - s] = view[s:e]
+    return out, {n: base + new[a - base] for n, a in syms.items()}, used
 
 
 def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
@@ -184,21 +192,18 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
         tape = prune(tape)
     from .tape import DATA_BASE
     os_, arch = target.split("/")
-    data, syms = zero_last(tape.data, tape.syms, DATA_BASE)
-    pad = (-len(data)) % 8
-    data.extend(b"\x00" * pad)
-    base = DATA_BASE + len(data)
+    win = os_ == "win"
+    tail = SCRATCH + PRINTMAX + (WIN_EXTRA - SCRATCH - PRINTMAX if win else 0)
+    data, syms, used = zero_last(tape.data, tape.syms, DATA_BASE, tail)
+    base = DATA_BASE + used
     SCR0, SCR1, PRINTLEN, PRINTBUF = base, base + 8, base + 16, base + 24
     ARGC, ARGV = base + 48, base + 56
     SYSCELL = [base + SYSA + 8 * i for i in range(6)]
     FPCELL, SPCELL = base + SYSFP, base + SYSSP
-    win = os_ == "win"
     HSTD, WRITTEN, SAVE = (base + WIN_HSTD, base + WIN_WRITTEN,
                            base + WIN_SAVE)
     STACKTOP = base + WIN_EXTRA + WIN_STACK
-    data.extend(b"\x00" * (SCRATCH + PRINTMAX +
-                           (WIN_EXTRA - SCRATCH - PRINTMAX if win else 0)))
-    tp = TargetProgram(target, bytes(data), syms)
+    tp = TargetProgram(target, data, syms)   # R3: bytes(data) touched every zero page
     tp.src_os = getattr(tape, "src_os", tp.os)
     tp.data_len = len(data)
     # the tape stack is zero-filled, so it is bss: it costs image size but not

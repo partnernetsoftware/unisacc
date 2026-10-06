@@ -42,18 +42,24 @@ def imports(os_, arch, textlen):
 def relocate(tp, data, shift):
     """Apply the data-segment shift to absolute addresses stored IN the data
     (global pointers initialised with string literals)."""
-    out = bytearray(data)
-    for at in getattr(tp, "relocs", []):
+    relocs = getattr(tp, "relocs", [])
+    if not relocs:
+        return data
+    # R3: copy only the stored prefix; the zero tail stays unresident
+    out = bytearray(len(data))
+    k = len(data.rstrip(b"\x00"))
+    out[:k] = memoryview(data)[:k]
+    for at in relocs:
         v = int.from_bytes(out[at:at + 8], "little")
         out[at:at + 8] = ((v + shift) & MASK64).to_bytes(8, "little")
-    return bytes(out)
+    return out
 
 
 def build(tp, text, data, entry, stub=b""):
     # Only the data up to its last nonzero byte is stored; the loader zero-
     # fills the rest of the `full` length.  lower.zero_last put the zeros last.
     full = len(data)
-    data = bytes(data).rstrip(b"\x00")
+    data = bytes(data.rstrip(b"\x00"))   # R3: rstrip first, so only the stored prefix is copied
     if tp.os == "win":
         return pe.write(tp.arch, text, data, entry,
                         relocs=getattr(tp, "relocs", ()),
