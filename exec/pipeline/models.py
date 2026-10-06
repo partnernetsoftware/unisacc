@@ -29,6 +29,8 @@ def closure(h):
             rel = path.relative_to(ROOT).parts
             if rel[0] == 'seed' and rel[-1] not in ('tbl.c', 'net.c', 'json.h', 'gen.c', 'facts.h', 'ident.c'):
                 continue   # only the tools the build runs (0.0.32 B5: seed/gen.c builds the shared deltas)
+            if rel[0] == 'exec' and path.suffix in ('.sh', '.py') and path.stem.endswith('check'):
+                continue   # 0.0.32 X31: exec/**/*check.{sh,py} verify the deltas; no build step runs or imports them
             if rel[:2] == ('exec', 'build') and (len(rel) > 3 or path.suffix != '.py'):
                 continue   # only the tracked drivers exec/build/*.py are inputs; anything else there is generated
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):

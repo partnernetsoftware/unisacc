@@ -23,6 +23,7 @@ def product(path):
     if not path.startswith(CLOSURE) or not path.endswith(EXT): return False
     parts = path.split('/')
     if parts[0] == 'seed' and parts[-1] not in ('tbl.c', 'net.c', 'json.h', 'gen.c', 'facts.h', 'ident.c'): return False   # the seed tools the build runs (0.0.32 B5: gen.c)
+    if parts[0] == 'exec' and path.endswith(('check.sh', 'check.py')): return False   # 0.0.32 X31: verifiers, not inputs
     return not (parts[:2] == ['exec', 'build'] and (len(parts) > 3 or not path.endswith('.py')))
 
 def main(repo):

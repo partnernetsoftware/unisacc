@@ -99,6 +99,10 @@ static int keep(const char *rel) {
         return !strcmp(base, "tbl.c") || !strcmp(base, "net.c") || !strcmp(base, "json.h")
             || !strcmp(base, "gen.c") || !strcmp(base, "facts.h") || !strcmp(base, "ident.c");
     }
+    if (!strncmp(rel, "exec/", 5)) {   /* 0.0.32 X31: *check.sh and *check.py under exec are verifiers, not inputs */
+        size_t n = strlen(rel);
+        if ((n >= 8 && !strcmp(rel + n - 8, "check.sh")) || (n >= 8 && !strcmp(rel + n - 8, "check.py"))) return 0;
+    }
     if (!strncmp(rel, "exec/build/", 11))
         return !strchr(rel + 11, '/') && !strcmp(sfx, ".py");
     return 1;
