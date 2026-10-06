@@ -1,7 +1,7 @@
 #!/bin/sh
 # 0.0.32 B5: seed/gen.c builds the product's shared deltas byte-identical to exec/build/gen.py --
 # the stages buildcompiler.sh's `shared` step constructs (e2 pp --shared-predefines, e1 lex --typed,
-# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi).  Python references are cached by the hash of
+# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format).  Python references are cached by the hash of
 # exec/ inputs, so a gen.c edit reruns only the C side.     usage: tests/seedgencheck.sh [NAME...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
@@ -11,8 +11,9 @@ key=$(cat exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exe
 "$B" 55 cc -std=c99 -O2 -Iseed -o "$T/gen" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
 spec() { case $1 in
     e2) echo "pp --shared-predefines";; e1) echo "lex --typed";; e3) echo parse2;; e4) echo "opt --o2";;
-    o1) echo opt;; prune) echo prune;; nativeabi) echo nativeabi;; *) echo "?";; esac; }
-names=${*:-"e2 e1 e3 e4 o1 prune nativeabi"}
+    o1) echo opt;; prune) echo prune;; nativeabi) echo nativeabi;;
+    enc-elf) echo "enc --elf";; enc-macho) echo "enc --macho";; enc-pe) echo "enc --pe";; *) echo "?";; esac; }
+names=${*:-"e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe"}
 run() {
     n=$1; set -- $(spec "$n"); st=$1; shift
     [ "$st" = "?" ] && { echo "DIFF $n (unknown name)"; return; }

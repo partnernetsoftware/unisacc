@@ -395,6 +395,9 @@ static Value *load_fact(const char *stem) {
         free(s);
     }
     if (ferror(f) || close_in(f)) die("fact read failed");
+    /* load.facts: a table whose single column is `value` is the list of values. */
+    if (!typed && table && nh == 1 && !strcmp(header[0], "value"))
+        for (ci = 0; ci < table->n; ci++) table->items[ci].value = value_get(table->items[ci].value, "value");
     /* A header-only facts file is an empty map in the Python constructor. */
     if (typed < 0) typed = 1;
     if (!typed && table && nh == 2 && !strcmp(header[0], "name") && !strcmp(header[1], "value")) {
@@ -3620,8 +3623,50 @@ static Value *manifest_foreach_map(Value *over, Value *join, Value *facts, Value
 }
 /* Graph-valued cells enter the manifest interpreter here; the facts reader
    intentionally rejects them.  The first use is foreach.pre/chain fresh. */
+/* Run.interp: {name} becomes str(env[name]) when env binds it; others stay. */
+static char *manifest_interp(const char *v, Value *env) {
+    Buffer out = {0};
+    while (*v) {
+        const char *end = *v == '{' ? v + 1 : NULL;
+        if (end) while (isalnum((unsigned char)*end) || *end == '_') end++;
+        if (end && end > v + 1 && *end == '}') {
+            char *name = copy_n(v + 1, (size_t)(end - v - 1)); Value *x = value_get(env, name);
+            free(name);
+            if (x) { char *t = seed_str(x); buf_add(&out, t, strlen(t)); free(t); v = end + 1; continue; }
+        }
+        buf_char(&out, *v++);
+    }
+    buf_char(&out, 0);
+    return out.s;
+}
 static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
     if (!strncmp(cell, "@acts:", 6)) return value_path(facts, cell + 6);
+    if (!strncmp(cell, "@seqmap:", 8)) {   /* assemble._seqmap: LIST:TEMPLATE (0.0.32 B5, enc) */
+        const char *colon = strrchr(cell + 8, ':'); char *lst, *path; Value *xs, *tmpl, *out = value_new(JARR);
+        if (!colon) die("@seqmap lacks template");
+        lst = copy_n(cell + 8, (size_t)(colon - cell - 8));
+        path = seed_fmt(lst, facts); xs = value_path(facts, path); tmpl = value_path(facts, colon + 1);
+        if (xs->kind != JARR || tmpl->kind != JARR) die("@seqmap: list and template must be arrays");
+        for (size_t i = 0; i < xs->n; i++)
+            for (size_t j = 0; j < tmpl->n; j++) {
+                Value *a = tmpl->items[j].value;
+                if (a->kind == JSTR) {
+                    Value *seq = value_get(env, a->s + 1);
+                    if (!seq || seq->kind != JARR) { fprintf(stderr, "@seqmap env: %s\n", a->s); die("@seqmap: unknown sequence"); }
+                    for (size_t k = 0; k < seq->n; k++) value_put(out, NULL, seq->items[k].value);
+                } else {
+                    Value *t = value_new(JARR);
+                    if (a->kind != JARR) die("@seqmap: template item is neither name nor action");
+                    for (size_t k = 0; k < a->n; k++) {
+                        Value *c = a->items[k].value;
+                        value_put(t, NULL, c->kind == JSTR && !strcmp(c->s, "{x}") ? xs->items[i].value : c);
+                    }
+                    value_put(out, NULL, t);
+                }
+            }
+        free(lst); free(path);
+        return out;
+    }
     if (!strncmp(cell, "@out:", 5) || !strncmp(cell, "@bytes:", 7) ||
         !strncmp(cell, "@textf:", 7) || !strncmp(cell, "@text:", 6)) {
         int bytes = !strncmp(cell, "@bytes:", 7);
@@ -3657,7 +3702,8 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
     }
     if (!strncmp(cell, "@rej:", 5)) {
         Value *seq = value_new(JARR), *action = value_new(JARR);
-        const char *raw = cell + 5;
+        char *interp = manifest_interp(cell + 5, env);
+        const char *raw = interp;
         size_t rawlen = strlen(raw);
         char *message = copy(raw);
         if (rawlen >= 3 && raw[0] == '{' && raw[rawlen - 1] == '}' &&
@@ -3739,6 +3785,30 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                 free(over_path);
             }
             if (items->kind != JARR) die("foreach over is not an array");
+            if (value_get(opts, "where")) {
+                /* assemble._foreach: keep rows whose column is one of the
+                   section-expanded, fact-formatted allowed strings. */
+                Value *where = value_get(opts, "where"), *kept = value_new(JARR);
+                if (where->kind != JOBJ) die("foreach where is not an object");
+                for (size_t j = 0; j < items->n; j++) {
+                    int ok = 1;
+                    for (size_t w = 0; ok && w < where->n; w++) {
+                        Value *allowed = where->items[w].value;
+                        Value *cell = value_get(items->items[j].value, where->items[w].key);
+                        int hit = 0;
+                        if (allowed->kind != JARR || !cell) die("foreach where shape");
+                        for (size_t a = 0; !hit && a < allowed->n; a++) {
+                            char *sec = manifest_section(value_text(allowed->items[a].value), flags);
+                            char *want = seed_fmt(sec, facts);
+                            hit = cell->kind == JSTR && !strcmp(cell->s, want);
+                            free(sec); free(want);
+                        }
+                        ok = hit;
+                    }
+                    if (ok) value_put(kept, NULL, items->items[j].value);
+                }
+                items = kept;
+            }
             if (chain) {
                 Value *start = value_get(chain, "start");
                 if (chain->kind != JOBJ || !start || start->kind != JSTR)
@@ -4183,6 +4253,55 @@ static void manifest_graph_visit(size_t index, ManifestRow *row, Value *facts,
         ctx->rows++;
     } else if (!strcmp(row->cell[0], "holder")) {
         char key[256]; const char *spec = row->cell[5];
+        Value *cols = value_get(opts, "cols");
+        if (cols) {
+            /* assemble._fresh_table: P(owner).fresh and E.P.fresh(holder(owner))
+               draw the same graph-wide label, so scope only names the owner. */
+            Value *where = value_get(opts, "where"), *ownerfmt = value_get(opts, "owner");
+            char path[1024]; FILE *f; char *s; int ki, kd, ko;
+            for (size_t i = 0; i < opts->n; i++)
+                if (strcmp(opts->items[i].key, "cols") && strcmp(opts->items[i].key, "where") &&
+                    strcmp(opts->items[i].key, "owner") && strcmp(opts->items[i].key, "scope"))
+                    die("manifest holder table option is not yet covered");
+            if (cols->kind != JARR || cols->n != 3) die("manifest holder cols shape");
+            ki = (int)cols->items[0].value->number; kd = (int)cols->items[1].value->number;
+            ko = (int)cols->items[2].value->number;
+            if (snprintf(path, sizeof(path), "%s/%s", ctx->dir, row->cell[1]) >= (int)sizeof(path))
+                die("manifest holder path too long");
+            f = fopen(path, "rb"); if (!f) die("cannot open manifest holder table");
+            while ((s = line(f))) {
+                char *field[32], owner[1024]; int n, skip = 0;
+                if (!*s || *s == '#') { free(s); continue; }
+                n = fields_tab(s, field, 32);
+                if (ki >= n || kd >= n || ko >= n) die("manifest holder table columns");
+                for (size_t w = 0; where && w < where->n; w++) {
+                    Value *c = where->items[w].value; int col;
+                    if (c->kind != JARR || c->n != 2) die("manifest holder where shape");
+                    col = (int)c->items[0].value->number;
+                    if (col >= n) die("manifest holder where column");
+                    if (strcmp(field[col], value_text(c->items[1].value))) skip = 1;
+                }
+                if (!skip) {
+                    const char *fmt = ownerfmt ? value_text(ownerfmt) : "{owner}"; size_t o = 0;
+                    char *label;
+                    while (*fmt) {
+                        const char *sub = NULL; size_t adv = 1;
+                        if (!strncmp(fmt, "{owner}", 7)) { sub = field[ko]; adv = 7; }
+                        else if (!strncmp(fmt, "{key}", 5)) { sub = field[ki]; adv = 5; }
+                        if (sub) { size_t l = strlen(sub); if (o + l >= sizeof(owner)) die("holder owner too long");
+                                   memcpy(owner + o, sub, l); o += l; }
+                        else { if (o + 1 >= sizeof(owner)) die("holder owner too long"); owner[o++] = *fmt; }
+                        fmt += adv;
+                    }
+                    owner[o] = 0;
+                    label = fresh_label(owner, field[kd]);
+                    value_put(env, field[ki], value_string(label)); free(label);
+                }
+                free(s);
+            }
+            if (ferror(f) || close_in(f)) die("manifest holder table read failed");
+            return;
+        }
         if (opts->n && (opts->n != 1 || !value_get(opts, "cur")))
             die("manifest holder options are not yet covered");
         if (snprintf(key, sizeof(key), "__holder_%s", row->cell[1]) >= (int)sizeof(key))

@@ -5,6 +5,43 @@
 #ifndef SEED_FACTS_H
 #define SEED_FACTS_H
 
+/* Python repr() of a list/dict fact, as str() prints containers (0.0.32 B5, enc).  Strings take
+   repr's quote choice and escapes; facts are ASCII text, so \xNN covers the rest. */
+static void seed_repr(Buffer *b, Value *v) {
+    char n[64]; size_t i;
+    switch (v->kind) {
+    case JSTR: {
+        const unsigned char *p = (const unsigned char *)v->s;
+        char q = strchr(v->s, '\'') && !strchr(v->s, '"') ? '"' : '\'';
+        buf_char(b, q);
+        for (i = 0; i < v->n; i++) {
+            unsigned c = p[i];
+            if (c == (unsigned char)q || c == '\\') { buf_char(b, '\\'); buf_char(b, (char)c); }
+            else if (c == '\n') buf_add(b, "\\n", 2);
+            else if (c == '\t') buf_add(b, "\\t", 2);
+            else if (c == '\r') buf_add(b, "\\r", 2);
+            else if (c < 0x20 || c == 0x7f) { snprintf(n, sizeof n, "\\x%02x", c); buf_add(b, n, 4); }
+            else buf_char(b, (char)c);
+        }
+        buf_char(b, q); return; }
+    case JARR:
+        buf_char(b, '[');
+        for (i = 0; i < v->n; i++) { if (i) buf_add(b, ", ", 2); seed_repr(b, v->items[i].value); }
+        buf_char(b, ']'); return;
+    case JOBJ:
+        buf_char(b, '{');
+        for (i = 0; i < v->n; i++) {
+            Value k = {0}; if (i) buf_add(b, ", ", 2);
+            k.kind = JSTR; k.s = v->items[i].key; k.n = strlen(k.s);
+            seed_repr(b, &k); buf_add(b, ": ", 2); seed_repr(b, v->items[i].value);
+        }
+        buf_char(b, '}'); return;
+    case JINT: snprintf(n, sizeof n, "%lld", v->number); buf_add(b, n, strlen(n)); return;
+    case JUINT: snprintf(n, sizeof n, "%llu", v->unumber); buf_add(b, n, strlen(n)); return;
+    case JBOOL: buf_add(b, v->number ? "True" : "False", v->number ? 4 : 5); return;
+    default: buf_add(b, "None", 4); return;
+    }
+}
 /* Python str() of a fact value, as interpolation and @str/@fmt use it */
 static char *seed_str(Value *v) {
     char n[64];
@@ -15,7 +52,7 @@ static char *seed_str(Value *v) {
     case JUINT: snprintf(n, sizeof(n), "%llu", v->unumber); return copy(n);
     case JBOOL: return copy(v->number ? "True" : "False");
     case JNULL: return copy("None");
-    default: die("str() of a list or object is not used by manifests");
+    default: { Buffer b = {0}; buf_add(&b, "", 0); seed_repr(&b, v); return b.s; }
     }
     return 0;
 }
