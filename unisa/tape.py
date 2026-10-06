@@ -127,6 +127,17 @@ class Tape:
         -- has to start on an 8-byte boundary."""
         if name in self.syms:
             return self.syms[name]
+        if isinstance(raw, int):            # R3': a zero global by size; never built as bytes
+            if raw <= 16:
+                raw = bytes(raw)
+            else:
+                if align > 1:
+                    self.data.extend(b"\x00" * ((-len(self.data)) % align))
+                addr = DATA_BASE + len(self.data)
+                self.data.extend_zero(raw)
+                self.syms[name] = addr
+                self.records.append(("bss", name, raw))
+                return addr
         if align > 1:
             pad = (-len(self.data)) % align
             self.data.extend(b"\x00" * pad)
@@ -275,7 +286,7 @@ def parse(text):
         if line.startswith(".bss "):
             name, n = line[5:].split()
             before = len(t.records)
-            t.string(name, bytes(int(n)), align=8)   # calloc: pages untouched
+            t.string(name, int(n), align=8)   # R3': zeros by size
             record = ("bss", name, int(n))
             if len(t.records) == before:
                 t.records.append(record)

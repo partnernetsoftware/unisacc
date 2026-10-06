@@ -48,6 +48,15 @@ class ZData:
             self.segs.append([self.n, bytearray(raw)])
         self.n += k
 
+    def extend_zero(self, k):
+        if k <= 0:
+            return
+        if self.segs and isinstance(self.segs[-1][1], int):
+            self.segs[-1][1] += k
+        else:
+            self.segs.append([self.n, k])
+        self.n += k
+
     def _span(self, s, e):
         import bisect
         i = max(bisect.bisect_right([g[0] for g in self.segs], s) - 1, 0)
