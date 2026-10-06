@@ -4,6 +4,7 @@
 # commit candidate.json -> gatedeps unchanged -> push (ls-remote verified) -> rc tag -> queue tree -> queue loop
 # (via release/tools/queue.sh).  Prints "queue tree PATH" so a signing chain can start alongside.  (0.0.30 retro)
 set -u
+setopt pipefail   # `cmd | tail -1 || exit 1` must see cmd failing (cdx: false|tail -1 returns 0)
 V=$1; B=$2; NOTE=$3; OLD=${4:-}; R=$(git rev-parse --show-toplevel)
 [ -z "$OLD" ] || until grep -q "queue done" $OLD 2>/dev/null; do sleep 20; done
 H=$(git -C $R rev-parse --short HEAD); W=/private/tmp/unisacc-cand-$H
@@ -20,7 +21,7 @@ cp $W/release/candidate.json $R/release/candidate.json
 cd $R && git commit -q -m "$V: seal candidate ($NOTE)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- release/candidate.json || exit 1
-python3 tests/bound.py 58 make gatedeps | tail -1 | cut -c1-120
+python3 tests/bound.py 58 make gatedeps | tail -1 | cut -c1-120 || exit 1
 git diff --quiet tests/gatedeps.json || git commit -q -m "$V: refresh gatedeps at seal" -- tests/gatedeps.json   # docs/test commits since the last refresh move guard stamps; not product closure
 git push -q origin main; [ "$(git ls-remote origin refs/heads/main | cut -c1-40)" = "$(git rev-parse HEAD)" ] || { echo NOT-PUSHED; exit 1; }
 git tag -d rc/v$V >/dev/null 2>&1; git push -q origin :refs/tags/rc/v$V 2>/dev/null
