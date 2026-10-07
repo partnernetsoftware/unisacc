@@ -2390,9 +2390,11 @@ class Walker:
                 self.em.lea(ACC, s.sym)
             elif s.ty.kind == "arr" and s.ty.n < 0:
                 # a VLA lives on the tape stack; the frame slot holds its
-                # ADDRESS, so load that instead of computing one
+                # ADDRESS, so load that instead of computing one.  It is still
+                # an array lvalue like a fixed one (ACC = its address): `&v`
+                # is the array's storage (0.0.33, tests/c/b_vla_addr.c)
                 self.em.load(ACC, FP, -s.off, 8)
-                self.lval = None
+                self.lval = s.ty
                 return self.postfix_chain(s.ty)
             else:
                 self.em.imm(TMP, s.off)
