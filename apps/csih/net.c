@@ -171,21 +171,58 @@ int net_parse_url(const char *url, net_url *u) {
 
 /* ── connect ────────────────────────────────────────────────────────────── */
 
+/* A Winsock SOCKET is pointer-width and must never enter the POSIX fd layer. */
+#define NET_INVALID_SOCKET (~0UL)
+static void net_socket_error(void) {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    errno = e == 10004 ? EINTR : e;
+#endif
+}
+static void net_socket_close(unsigned long fd) {
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close((int)fd);
+#endif
+}
+static long net_socket_send(unsigned long fd, const void *buf, size_t len) {
+#ifdef _WIN32
+    int n = (int)(len > 0x7fffffffUL ? 0x7fffffffUL : len);
+    int r = send(fd, (const char *)buf, n, 0);
+    if (r < 0) net_socket_error();
+    return r;
+#else
+    return send((int)fd, buf, len, 0);
+#endif
+}
+static long net_socket_recv(unsigned long fd, void *buf, size_t len) {
+#ifdef _WIN32
+    int n = (int)(len > 0x7fffffffUL ? 0x7fffffffUL : len);
+    int r = recv(fd, (char *)buf, n, 0);
+    if (r < 0) net_socket_error();
+    return r;
+#else
+    return recv((int)fd, buf, len, 0);
+#endif
+}
 /* Any name getaddrinfo can resolve, not only numeric IPv4 and localhost. */
-static int net_connect(const char *host, const char *port) {
+static unsigned long net_connect(const char *host, const char *port) {
     struct addrinfo hints, *res = 0, *p;
-    int fd = -1, rc;
+    unsigned long fd = NET_INVALID_SOCKET;
+    int rc;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     rc = getaddrinfo(host, port, &hints, &res);
     if (rc != 0) return -1;
     for (p = res; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
+        fd = (unsigned long)socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd == NET_INVALID_SOCKET) { net_socket_error(); continue; }
+        if (connect(fd, p->ai_addr, (int)p->ai_addrlen) == 0) break;
+        net_socket_error();
+        net_socket_close(fd);
+        fd = NET_INVALID_SOCKET;
     }
     freeaddrinfo(res);
     return fd;
@@ -605,7 +642,8 @@ net_response net_http(const char *method, const char *url,
                       const char *content_type, const char *body) {
     net_response r;
     net_url u;
-    int fd, prc;
+    unsigned long fd;
+    int prc;
     char req[8192];
     size_t reqlen;
     size_t blen = body ? strlen(body) : 0;
@@ -620,7 +658,7 @@ net_response net_http(const char *method, const char *url,
     if (u.https) { r = net_https(method, url, content_type, body); return r; }
 
     fd = net_connect(u.host, u.port);
-    if (fd < 0) { r.err = errno ? errno : ECONNREFUSED; return r; }
+    if (fd == NET_INVALID_SOCKET) { r.err = errno ? errno : ECONNREFUSED; return r; }
 
     reqlen = (size_t)snprintf(req, sizeof req,
         "%s %s HTTP/1.1\r\n"
@@ -638,13 +676,13 @@ net_response net_http(const char *method, const char *url,
         blen ? (content_type ? content_type : "application/octet-stream") : "",
         body ? body : "");
 
-    if (reqlen >= sizeof req) { close(fd); r.err = NET_REFUSED_URL; return r; }
+    if (reqlen >= sizeof req) { net_socket_close(fd); r.err = NET_REFUSED_URL; return r; }
 
     {
         size_t off = 0;
         while (off < reqlen) {
-            ssize_t w = write(fd, req + off, reqlen - off);
-            if (w < 0) { if (errno == EINTR) continue; r.err = errno; close(fd); return r; }
+            long w = net_socket_send(fd, req + off, reqlen - off);
+            if (w < 0) { if (errno == EINTR) continue; r.err = errno; net_socket_close(fd); return r; }
             off += (size_t)w;
         }
     }
@@ -656,16 +694,16 @@ net_response net_http(const char *method, const char *url,
         char *all = (char *)malloc(NET_HDR_MAX + NET_BODY_MAX);
         size_t off = 0, cap = NET_HDR_MAX + NET_BODY_MAX;
         int truncated = 0;
-        if (!all) { close(fd); r.err = ENOMEM; return r; }
+        if (!all) { net_socket_close(fd); r.err = ENOMEM; return r; }
         for (;;) {
-            ssize_t n;
+            long n;
             if (off >= cap) { truncated = 1; break; }
-            n = read(fd, all + off, cap - off);
+            n = net_socket_recv(fd, all + off, cap - off);
             if (n < 0) { if (errno == EINTR) continue; break; }
             if (n == 0) break;
             off += (size_t)n;
         }
-        close(fd);
+        net_socket_close(fd);
         all[off < cap ? off : cap - 1] = '\0';
 
         /* Split headers from body on the first blank line. A response with no
