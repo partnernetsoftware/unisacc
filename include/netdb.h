@@ -38,8 +38,8 @@ const char *gai_strerror(int __u_e);
 /* 0.0.33 W2: Windows forwards too -- getaddrinfo/freeaddrinfo are ws2_32.dll exports (the written
  * image resolves ucrtbase/kernel32/ws2_32 through GetProcAddress, src/main.c:309), so names go to the
  * system resolver (DNS, hosts, search suffixes) instead of the bundled hosts-file reader.  ws2_32 needs
- * WSAStartup before its first call; a constructor does it once (WSAStartup counts, so a program that
- * calls it again stays balanced).  gai_strerrorA is an inline in Microsoft's headers, not an export:
+ * WSAStartup before its first call; the getaddrinfo macro below does it once (WSAStartup counts, so a
+ * program that calls it again stays balanced).  gai_strerrorA is an inline in Microsoft's headers, not an export:
  * it stays a body here.  Windows struct addrinfo: size_t ai_addrlen, ai_canonname before ai_addr. */
 #undef EAI_NONAME
 #undef EAI_FAMILY
@@ -52,12 +52,16 @@ const char *gai_strerror(int __u_e);
 int getaddrinfo(const char *__u_node, const char *__u_service, const struct addrinfo *__u_hints, struct addrinfo **__u_res);
 void freeaddrinfo(struct addrinfo *__u_ai);
 int WSAStartup(unsigned short __u_version, void *__u_data);
-#if !__UNISA_FTRIM_LIBC || __UN_getaddrinfo
-__attribute__((constructor)) static void _unisa_wsa_init(void) {
+/* the first call starts Winsock: a function-like macro (not a constructor -- the winsuite runners
+ * returned WSANOTINITIALISED 10093 with one) wraps each call; the inner name is the forwarded
+ * prototype, since a macro does not expand inside itself, and &getaddrinfo still names it */
+static int _unisa_wsa_done;
+static int _unisa_wsa_init(void) {
     static long __u_wsadata[64];             /* WSADATA is 408 bytes on Win64 */
-    WSAStartup(0x0202, __u_wsadata);
+    if (!_unisa_wsa_done) { _unisa_wsa_done = 1; WSAStartup(0x0202, __u_wsadata); }
+    return 0;
 }
-#endif
+#define getaddrinfo(__u_n, __u_s, __u_h, __u_r) (_unisa_wsa_init() + getaddrinfo(__u_n, __u_s, __u_h, __u_r))
 #if !__UNISA_FTRIM_LIBC || __UN_gai_strerror
 static const char *gai_strerror(int __u_e) {
     return __u_e == EAI_NONAME ? "No such host is known" : __u_e == EAI_SERVICE ? "The specified class was not found"
