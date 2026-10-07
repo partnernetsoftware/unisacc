@@ -1479,7 +1479,7 @@ def x86entry():
                              *[k for k in meta if k not in ("role", "form", "reloc", "carry", "winapi")])]
     ids += [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2"),
             ("win/x86_64", "target3")]
-    ids += [("@" + k, "h_" + k) for k in ("target", "data", "sym", "src_os", "data_len", "bss", "relocs", "argc", "argv")]
+    ids += [("@" + k, "h_" + k) for k in ("target", "data", "sym", "src_os", "data_len", "bss", "threads", "relocs", "argc", "argv")]
     out.append("@ids\tword:str\tnm:str")
     out += ["\t%s\t%s" % w for w in ids]
     win = tuple(F("enc-x86win-meta"))
