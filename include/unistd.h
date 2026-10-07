@@ -2,7 +2,7 @@
  * the file-descriptor calls the bundled library already makes through its
  * own syscall intrinsics, under their POSIX names.  Return values follow
  * POSIX: -1 with errno set on failure.  isatty arrived in 0.0.18.  Not provided (yet): fork/exec,
- * getpid, sleep, pipes (POSIX L2, plans/v0.1.x.md). */
+ * getpid, sleep, pipes (POSIX L2). */
 #ifndef _UNISA_UNISTD_H
 #define _UNISA_UNISTD_H
 #include <stddef.h>

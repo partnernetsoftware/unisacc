@@ -3,7 +3,7 @@
  * on Linux, TIOCGETA/TIOCSETA on macOS).  The struct is the kernel's layout:
  * Linux's has 19 control characters and no speed fields (the request writes
  * exactly that); macOS's has 20 and 64-bit flag words.  Windows: its console
- * API is a separate column (plans/v0.2.x.md harness). */
+ * API is a separate column (terminal harness). */
 #ifndef _UNISA_TERMIOS_H
 #define _UNISA_TERMIOS_H
 #include <errno.h>
