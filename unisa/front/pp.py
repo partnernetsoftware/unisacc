@@ -332,7 +332,13 @@ def _splice(src):
             continue
         out.append(line)
         if pending:
-            joined = "".join(out[-pending - 1:])
+            # a join that falls between tokens keeps PHYS there, so
+            # __LINE__ can still name its own physical line
+            seg = out[-pending - 1:]
+            joined = seg[0]
+            for nxt in seg[1:]:
+                safe = joined[-1:].isspace() or nxt[:1].isspace()
+                joined += (PHYS if safe else "") + nxt
             del out[-pending - 1:]
             out.append(joined)
             out.extend([""] * pending)
@@ -391,6 +397,22 @@ LAST_ORIGIN = [None]
 SNAPS = []
 MARK = "\x02"
 _MARK_RE = re.compile(MARK + r"(\d+)" + MARK)
+# __LINE__/__FILE__ (C99 6.10.8) and #line (6.10.4): a use written in the
+# source is replaced where it stands; a use that a macro body brings in takes
+# the line of the invocation, so a line that may invoke such a macro is
+# prefixed with LMARK line SEP file LMARK, which expansion reads and drops.
+LMARK, LSEP, PHYS = "\x03", "\x1f", "\x04"
+_LMARK_RE = re.compile(LMARK + "[^" + LMARK + "]*" + LMARK)
+CUR = [None]                    # (line, file) the expander is at
+
+
+def _cstr(path):
+    return '"' + (path or "<input>").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _liney(body):
+    b = body[1] if isinstance(body, tuple) else body
+    return "__LINE__" in b or "__FILE__" in b
 # #pragma push_macro / pop_macro: a stack of saved definitions per name
 _PUSHED = {}
 
@@ -418,7 +440,10 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     # the Python front end said `line 553` for line 4 of a six-line file.
     where = []
     src = _decomment(_splice(src))
-    for lineno, raw in enumerate(src.splitlines(), 1):
+    ln_off, fname = 0, path            # #line moves both
+    liney = any(_liney(v) for v in macros.values())
+    for lineno, raw0 in enumerate(src.splitlines(), 1):
+        raw = raw0.replace(PHYS, "")
         # every element appended below came from this source line, unless
         # it is a spliced header, which brings its own origins
         while len(where) < len(out):
@@ -426,6 +451,25 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
         m = DIRECTIVE.match(raw)
         live = all(t for (t, _) in stack)
         if not m:
+            if live and raw.strip() and ("__LINE__" in raw or
+                                         "__FILE__" in raw or liney):
+                here_ln = lineno + ln_off
+                if "__LINE__" in raw or "__FILE__" in raw:
+                    acc, k = [], 0
+                    for t in _pieces(raw0):
+                        if t == PHYS:
+                            k += 1
+                        elif t == "__LINE__" and t not in macros:
+                            acc.append(str(here_ln + k))
+                        elif t == "__FILE__" and t not in macros:
+                            acc.append(_cstr(fname))
+                        else:
+                            k += t.count(PHYS)
+                            acc.append(t.replace(PHYS, ""))
+                    raw = "".join(acc)
+                if liney:
+                    raw = LMARK + "%d%s%s" % (here_ln, LSEP, _cstr(fname)) \
+                        + LMARK + raw
             if live and pending[0] and raw.strip():
                 SNAPS.append(dict(macros))
                 raw = MARK + str(len(SNAPS) - 1) + MARK + raw
@@ -433,6 +477,13 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
             out.append(raw if live else "")
             continue
         d, rest = m.group(1), m.group(2)
+        if d == "line" and live:
+            lm = re.match(r'^\s*(\d+)\s*(?:"((?:\\.|[^"\\])*)")?\s*$',
+                          expand(rest, macros).strip())
+            if lm:
+                ln_off = int(lm.group(1)) - (lineno + 1)
+                if lm.group(2) is not None:
+                    fname = lm.group(2)
         if d == "pragma" and live:
             # #pragma push_macro("X") / pop_macro("X"): save X's definition
             # (or its absence) and restore it later
@@ -538,11 +589,13 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                     params = [x.strip() for x in m2.group(2).split(",")
                               if x.strip()]
                     macros[m2.group(1)] = (params, m2.group(3).strip())
+                    liney = liney or _liney(macros[m2.group(1)])
                 else:
                     parts = rest.split(None, 1)
                     if parts:
                         macros[parts[0]] = \
                             parts[1].strip() if len(parts) > 1 else ""
+                        liney = liney or _liney(macros[parts[0]])
             elif d == "undef" and rest.split():
                 macros.pop(rest.split()[0], None)
             pending[0] = True
@@ -570,7 +623,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
 # space between its tokens, so no two can re-lex as one.
 
 _PPTOK = re.compile(
-    r'(?P<ws>[ \t\r\f\v]+)|(?P<nl>\n)'
+    r'(?P<lm>\x03[^\x03]*\x03)|(?P<ws>[ \t\r\f\v]+)|(?P<nl>\n)'
     r'|(?P<str>(?:u8|[LuU])?"(?:\\.|[^"\\\n])*"?)'
     r"|(?P<chr>[LuU]?'(?:\\.|[^'\\\n])*'?)"
     r'|(?P<num>\.?[0-9](?:[eEpP][+-]|[A-Za-z0-9_.])*)'
@@ -628,7 +681,10 @@ class _Expander:
         while self.pos < len(self.src):
             s = self.src[self.pos]
             self.pos += 1
-            if s == "\n":
+            if s[:1] == LMARK:
+                _at(s)
+                ws = True
+            elif s == "\n":
                 self.nl += 1
                 ws = True
             elif s.isspace():
@@ -663,6 +719,9 @@ class _Expander:
             if args is not None:
                 return
         d = self.m.get(name) if _IDSTART.match(name) else None
+        if d is None and CUR[0] and name in ("__LINE__", "__FILE__"):
+            out.append((CUR[0][name == "__FILE__"], hs, ws))
+            return
         if d is None or name in hs:
             out.append(t)
             return
@@ -793,11 +852,15 @@ class _Expander:
 def expand(text, macros):
     """Macro-expand `text` with the table `macros`."""
     if not macros:
-        return text
+        return _LMARK_RE.sub("", text)
     src = _pieces(text)
     out, i, n = [], 0, len(src)
     while i < n:
         s = src[i]
+        if s[:1] == LMARK:
+            _at(s)
+            i += 1
+            continue
         d = macros.get(s) if s[:1].isalpha() or s[:1] == "_" else None
         if s == "_Pragma" or (d is not None and (not isinstance(d, tuple) or
                                                  _paren_follows(src, i + 1))):
@@ -819,8 +882,13 @@ def expand(text, macros):
     return "".join(out)
 
 
+def _at(mark):
+    ln, fn = mark[1:-1].split(LSEP, 1)
+    CUR[0] = (ln, fn)
+
+
 def _paren_follows(src, i):
-    while i < len(src) and src[i].isspace():
+    while i < len(src) and (src[i].isspace() or src[i][:1] == LMARK):
         i += 1
     return i < len(src) and src[i] == "("
 
