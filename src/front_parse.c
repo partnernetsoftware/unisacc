@@ -1173,6 +1173,18 @@ int cplitexpr(int w, int sst, int isarr, int n) {
     return postfix();
 }
 
+/* the `(*...)` group of a pointer-declaring abstract declarator in a cast,
+   nested as deep as C allows: `(void (*(*)(void *, const char *))(void)) p`
+   (sqlite's dlsym cast) is a pointer either way, so the inner suffixes are skipped */
+static void castabsptr(void) {
+    adv(); while (eatstar()) { }
+    if (cur() == tidx("(", 1) && kind(tp + 1) == tidx("*", 1)) castabsptr();
+    while (cur() == tidx("(", 1) || cur() == tidx("[", 1)) {
+        if (cur() == tidx("(", 1)) skipparen();
+        else { while (cur() != tidx("]", 1)) adv(); adv(); }
+    }
+    need(tidx(")", 1), ")");
+}
 int unary(void) {
     int p;
     curfn = 0; curfnst = 0 - 1;
@@ -1325,8 +1337,7 @@ int unary(void) {
             while (eatstar()) { declptr = 1; csz = 8; }
             cpd = declpd;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
-                adv(); while (eatstar()) { }
-                need(tidx(")", 1), ")");
+                castabsptr();
                 if (cur() == tidx("(", 1)) skipparen();
                 declptr = 1; csz = 8;
             } }
