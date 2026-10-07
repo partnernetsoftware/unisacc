@@ -232,9 +232,11 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
     size_t at=0,n=(size_t)in->n; const unsigned char *b=in->b; uint64_t tl=0,cnt=0;
     if (n<7 || memcmp(b,"USLFW1\n",7)) { fputs("unisacc: error: forwarding side-car missing\n",stderr); return -1; }
     at=7;
-    if (us_fw_u64(b,n,&at,&tl) || us_fw_u64(b,n,&at,&cnt) || tl>n-at) { fputs("unisacc: error: forwarding side-car malformed\n",stderr); return -1; }
+    uint64_t ccwc=0;
+    if (us_fw_u64(b,n,&at,&tl) || us_fw_u64(b,n,&at,&cnt) || us_fw_u64(b,n,&at,&ccwc) || ccwc>256 || tl>n-at) { fputs("unisacc: error: forwarding side-car malformed\n",stderr); return -1; }
     tape->b=xrealloc(0,tl+1); memcpy(tape->b,b+at,tl); tape->n=(int)tl; at+=tl;
     fwm_reset();
+    fwd_ccw=ccwc>0;
     if (cnt==0) return 0;
     nfwdsrc=0;
     for (uint64_t r=0;r<cnt;r++) {
@@ -596,6 +598,7 @@ int main(int argc, char **argv) {
        its hostcall delivers four register arguments, so a wider call is refused by name (src/main.c:26) */
     fwd_maxargs = !strncmp(target,"win/",4) ? 4 : 0;
     if (fwdwant) { cli[NRI].name=(const unsigned char *)"\0cli/run-forward"; cli[NRI].n=16; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
+    if (fwd_second && fwd_ccw) { cli[NRI].name=(const unsigned char *)"\0cli/ccw"; cli[NRI].n=8; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
     int fwd_restart = 0;
     Buf objres={0}, funitres={0};
     if (objwant) bput(&objres,1,0);
@@ -722,7 +725,7 @@ int main(int argc, char **argv) {
                     if (host_dl_slot(1)==0) return clierror("host libc forwarding needs a dynamic compiler image");
 #endif
                     Buf merged={0};
-                    int fast=fwd_incremental(target,level,&tape,nsources,&merged);
+                    int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
                     if (fast>0) {
                         free(in.b); free(tape.b); in=merged;
                         rc=runroute_from(route,level ? "e4" : "prune",&in,src);

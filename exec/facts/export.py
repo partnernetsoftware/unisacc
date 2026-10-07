@@ -552,26 +552,31 @@ def lowercode():
     sys.path.insert(0, str(ROOT))
     from unisa.tape import SHAPE
     out = ["=%s\tint\t%d" % (n, (105 + i) << 40)
-           for i, n in enumerate(("OP", "KIND", "AC", "ARG", "TXT", "REG", "FORM", "ARGREG"))]
+           for i, n in enumerate(("OP", "KIND", "AC", "ARG", "TXT", "REG", "FORM", "ARGREG", "CCW"))]
     words = list(dict.fromkeys(list(SHAPE) + ["r" + str(i) for i in range(8)] + [
         "0", "1", "2", "3", "4", "8", "-8", "_start:", "write", "exit",
-        ".hostcall", ".hostaddr", ".librarycall", ".libraryaddr"]))
+        ".hostcall", ".hostaddr", ".librarycall", ".libraryaddr"]
+        # H3d: the cc-interop inbound label definitions `__ccw_N:` (front_parse.c ccw_emit, N < 256) carry a `mark`
+        # (the CCW side table, set when they are interned): the scan has no prefix primitive, and an id range
+        # is not enough -- source labels are interned between these words at run time
+        + ["__ccw_" + str(i) + ":" for i in range(256)]))
     from unisa import lower as L
     for n in ("WIN_HSTD", "WIN_WRITTEN", "WIN_SAVE", "WIN_ARGVA", "SYSA", "SYSFP", "SYSSP"):
         out.append("=%s\tint\t%d" % (n, getattr(L, n)))
     out.append("=WIN_STACK_END\tint\t%d" % (L.WIN_EXTRA + L.WIN_STACK))
     out += ["=SYSA%d\tint\t%d" % (i, L.SYSA + 8 * i) for i in range(6)]
     out += ["=key_argc\tjson\t" + json.dumps("\0process/argc"), "=key_argv\tjson\t" + json.dumps("\0process/argv")]
-    out.append("@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json")
+    out.append("@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json\tmark:json")
     for os_ in ("lnx", "osx", "win"):
         for arch in ("x86_64", "arm64"):
             regmap = {r[0]: r[2] for r in _gold("regmap") if r[1] == arch}
             enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
             for i, w in enumerate(words):
-                out.append("\t%s/%s\t%d\t%s\t%s\t%s\t%s" % (
+                out.append("\t%s/%s\t%d\t%s\t%s\t%s\t%s\t%s" % (
                     os_, arch, i, _esc(w), json.dumps([j for j, k in enumerate(SHAPE.get(w, ())) if k == "r"]),
                     json.dumps([regmap[w]] if w in regmap else []),
-                    json.dumps([" form=" + enc[w]] if w in enc else [])))
+                    json.dumps([" form=" + enc[w]] if w in enc else []),
+                    json.dumps([1] if w.startswith("__ccw_") else [])))
     # Per-target env of the code route (was exec/lower/code.py env prep): code-manifest.tsv
     # merges codeenv.<target> with bindmap.  Scratch registers are checked here, at export.
     from unisa.emit_x86 import SCR, SCR2
@@ -1510,7 +1515,8 @@ def armentry():
              '.ld': ('rrii', 11), '.st': ('riri', 12), 'jump': ('l', 13), 'jumpz': ('rl', 14), 'call': ('l', 15),
              'setreg': ('rv', 25), 'spinit': ('r', 26), 'gate': ('', 27), '.lea': ('rl', 28), 'setmem': ('ir', 29),
              'argsave': ('iib', 30), 'argvget': ('rri', 31), '.zero': ('rii', 32), 'winsave': ('i', 33),
-             'winrest': ('ir', 34), 'winstdh': ('i', 35), 'winargs': ('iii', 36), 'itoa': ('iii', 37)}
+             'winrest': ('ir', 34), 'winstdh': ('i', 35), 'winargs': ('iii', 36), 'itoa': ('iii', 37),
+             'hentry': ('r', 62), 'hleave': ('', 63)}
     specs.update({r['op']: (r['shape'], r['cls']) for r in F('enc-armint-specs')})
     specs.update({r['op']: (r['shape'], r['cls']) for r in F('enc-armfp-specs')})
     specs.update({k: ('rrr', 7) for k in A['alu3']})
