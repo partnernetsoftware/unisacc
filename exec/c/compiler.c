@@ -264,7 +264,11 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
         if (!emitted) { fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1; }
     }
     if (nfwdsrc > 0) fwd_emit_libs();
+#ifdef _WIN32
+    { const char *td=getenv("TEMP"); snprintf(fwd_path,sizeof fwd_path,"%s\\unisacc-forward-%lx.c",td ? td : ".",(unsigned long)(uintptr_t)&at); }
+#else
     snprintf(fwd_path,sizeof fwd_path,"/tmp/unisacc-forward-%lx.c",(unsigned long)(uintptr_t)&at);
+#endif
     FILE *f=fopen(fwd_path,"wb"); if (!f) return -1;
     int werr=fwrite(fwdsrc,1,nfwdsrc,f)!=(size_t)nfwdsrc; werr|=fclose(f)!=0;
     return werr ? -1 : 1;
@@ -587,7 +591,10 @@ int main(int argc, char **argv) {
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     static const unsigned char fwd_one=1;
     int fwdwant = (runit || mode==0) && !fwd_second && !tape_input && !linking
-        && (!strncmp(target,"osx/",4) || !strncmp(target,"lnx/",4));
+        && (!strncmp(target,"osx/",4) || !strncmp(target,"lnx/",4) || !strncmp(target,"win/",4));
+    /* 0.0.33 W2: win forwards too (ucrtbase/kernel32/ws2_32 by GetProcAddress, like the reference);
+       its hostcall delivers four register arguments, so a wider call is refused by name (src/main.c:26) */
+    fwd_maxargs = !strncmp(target,"win/",4) ? 4 : 0;
     if (fwdwant) { cli[NRI].name=(const unsigned char *)"\0cli/run-forward"; cli[NRI].n=16; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
     int fwd_restart = 0;
     Buf objres={0}, funitres={0};
