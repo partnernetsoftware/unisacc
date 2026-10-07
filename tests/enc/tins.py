@@ -109,12 +109,6 @@ def parse(text, target="lnx/x86_64"):
                     if value < 0:
                         raise ValueError("negative size")
                 setattr(tp, tag[1:], value)
-            elif tag == "@threads":
-                # H3d S1: thread mode (the program defines __unisa_threads); only "1" is written
-                if tag in header or words[1:] != ["1"]:
-                    raise ValueError("duplicate or malformed @threads")
-                header.add(tag)
-                tp.threads = 1
             elif tag == "@sym" and len(words) == 3:
                 if words[1] in tp.syms:
                     raise ValueError("duplicate data symbol")
