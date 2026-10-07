@@ -1330,9 +1330,10 @@ int unary(void) {
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd; int cb; int cptr;
+            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd; int cb; int cptr; int cfpt;
             adv();
             cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt; cb = declbool;
+            cfpt = declspecfp;
             declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) { declptr = 1; csz = 8; }
             cpd = declpd;
@@ -1381,6 +1382,9 @@ int unary(void) {
             curpd = 0; curbase = cw;
             if (declptr) { curpd = cpd > 0 ? cpd : 1; if (curpd >= 2) curelem = 8; }
             if (declptr) curelem = cw;
+            /* to a function-pointer typedef, or a pointer to one: `(**(finder_type *)p)(...)`
+               (sqlite's unix VFS) derefs to the function pointer, then to itself */
+            if (cfpt && declptr && curpd <= 2) curfn = 1;
             /* `(struct S *)p` -- the member access after it needs the type */
             curstruct = 0 - 1;
             if (declptr) { if (cst >= 0) { curstruct = cst; curelem = stsize[cst]; } }
@@ -1777,7 +1781,9 @@ int primary(void) {
             if (kind(tp + 3) == tidx(")", 1)) { if (kind(tp + 4) == tidx("(", 1)) {
                 i = sfind(tp + 2);
                 if (i >= 0) symused[i] = 1;
-                if (i >= 0) { if (symfp[i]) {
+                /* not for a pointer TO a function pointer (`finder_type *q; (*q)(...)`
+                   loads q first: sqlite's unix VFS) -- the general path below does */
+                if (i >= 0) { if (symfp[i] && symptrd[i] <= 1) {
                     adv(); adv(); icparen = 1;
                     return icall(i, tp);
                 } }
@@ -1886,6 +1892,8 @@ int primary(void) {
         /* A scalar function-pointer object loads its pointer value, but
            dereferencing that value yields a function designator, not data. */
         if (symfp[i] && symptrd[i] == 1 && symkind[i] != 3 && symkind[i] != 5) curfn = 1;
+        /* a pointer TO one (`finder_type *q`): `*q` is the function pointer, an lvalue (P_DEREF) */
+        if (symfp[i] && symptrd[i] == 2 && symkind[i] != 3 && symkind[i] != 5) curfn = 1;
         adv();
         lvalue = 1;
         if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
@@ -3865,6 +3873,9 @@ int isqual(int t) {
 int eatstar(void) {
     if (eat(tidx("*", 1)) == 0) return 0;
     declpd = declpd + 1;
+    /* on a function-pointer typedef the typedef is depth 1 already, so `ft *q` is a
+       pointer TO the function pointer (depth 2, as `LogFn *pf`; sqlite's unix VFS finder) */
+    if (declspecfp && declpd < 2) declpd = 2;
     while (isqual(tp)) adv();
     return 1;
 }
