@@ -393,7 +393,9 @@ def main():
                     history[n] = max(elapsed, history.get(n,0))
                 else:
                     data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit}
-                    history[n] = elapsed
+                    # Q1 (0.0.33): rise at once, fall by halves -- a cache-warm 2 s run must not
+                    # admit the next cold 20 s run into a 6 s tail (cand33: 17% of slot time died as DEFER)
+                    history[n] = max(elapsed, (history.get(n, elapsed)+elapsed)/2)
                 atomic(path,data); atomic(histpath,history)
                 lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
                 print('DONE' if n in data['results'] else 'DEFER',n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
