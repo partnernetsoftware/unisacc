@@ -47,6 +47,12 @@ def main():
             path.write_text(text)
             for cmd in ([sys.argv[1],sys.argv[2],str(path)],[sys.executable,'exec/pp/sim.py',sys.argv[3],str(path)]):
                 r=subprocess.run(cmd,capture_output=True,timeout=60)
-                assert r.returncode==1 and not r.stdout and b'not covered: thread mode' in r.stderr,(name,cmd,r.returncode,r.stdout,r.stderr)
-            print('lower data',name,'not covered: thread mode; executors 2',flush=True)
+                # H3d S1: thread mode is accepted; the header carries @threads 1 and the data is the plain layout
+                assert r.returncode==0,(name,cmd,r.returncode,r.stderr)
+                x=parse_header(r.stdout.decode())
+                assert getattr(x,'threads',0)==1 and 'g___unisa_threads' in x.syms,(name,'thread header/symbol')
+            print('lower data',name,'@threads 1; executors 2',flush=True)
+        path.write_text(cases[0][1])
+        r=subprocess.run([sys.argv[1],sys.argv[2],str(path)],capture_output=True,timeout=60)
+        assert b'@threads' not in r.stdout,'threads header on a program without threads'
 if __name__=='__main__':main()
