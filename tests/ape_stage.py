@@ -54,7 +54,10 @@ def prepare(state, target, ua):
     # image.build reads program.code for Linux (b08ab96b: hostcall/hostaddr make
     # the ELF dynamic); pack has no code, so the decision is sealed here.
     dynamic = any(i.op in ('hostcall', 'hostaddr') for i in program.code)
-    record = dict(schema=2, source=source, target=target, entry=layout['entry'], dynamic=dynamic,
+    # R3' (0cec57ae): data is Padded -- write_bytes stores only the prefix, so the full length is
+    # sealed too; without it the packed lnx/arm64 image lost 58 KB of zero tail and crashed (0.0.32 Linux)
+    record = dict(schema=3, source=source, target=target, entry=layout['entry'], dynamic=dynamic,
+                  data_len=len(data),
                   bss=getattr(program, 'bss', 0), relocs=getattr(program, 'relocs', []),
                   files={name: digest(dest / name) for name in ('text.bin', 'data.bin')})
     if identity(ua) != source:
@@ -70,7 +73,7 @@ def pack(state, output, ua):
     for target in TARGETS:
         dest = directory(state, target)
         record = json.loads((dest / 'record.json').read_text())
-        if record['schema'] != 2 or record['source'] != source or record['target'] != target:
+        if record['schema'] != 3 or record['source'] != source or record['target'] != target:
             raise ValueError('stale APE preparation: ' + target)
         if set(record['files']) != {'text.bin', 'data.bin'}:
             raise ValueError('incomplete APE preparation: ' + target)
@@ -81,8 +84,9 @@ def pack(state, output, ua):
         code = [SimpleNamespace(op='hostcall')] if record['dynamic'] else []
         program = SimpleNamespace(os=os_, arch=arch, bss=record['bss'], relocs=record['relocs'],
                                   code=code)
+        from unisa.padded import Padded
         prepared[target] = (program, (dest / 'text.bin').read_bytes(),
-                            (dest / 'data.bin').read_bytes(), record['entry'])
+                            Padded((dest / 'data.bin').read_bytes(), record['data_len']), record['entry'])
 
     def one(target, stub=b''):
         program, text, data, entry = prepared[target]

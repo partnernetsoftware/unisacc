@@ -25,6 +25,14 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 VM=${LIMA_VM:-default}
 what=${1:-all}
+# `linux.sh all --suite NAME ...` reruns chosen all.sh entries in the guest (0.0.32: ape staged path red only under all)
+[ "$#" -gt 0 ] && shift
+SEL=""
+while [ "$#" -ge 2 ] && [ "$1" = --suite ]; do
+    case "$2" in *[!A-Za-z0-9_.-]*) echo "linux: bad suite name $2" >&2; exit 2;; esac
+    SEL="$SEL --suite $2"; shift 2
+done
+[ "$#" -eq 0 ] || { echo "linux: unknown arguments: $*" >&2; exit 2; }
 
 command -v limactl >/dev/null || { echo "linux: no limactl -- skipped"; exit 0; }
 case "$(limactl list "$VM" --format '{{.Status}}' 2>/dev/null)" in
@@ -114,7 +122,7 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
         native|crossnative|fat|ccrun|selfhost|closure|stages)
             P='examples/*.c tests/c/*.c';;
     esac
-    { if [ '$what' = all ]; then ./tests/all.sh
+    { if [ '$what' = all ]; then ./tests/all.sh $SEL
     elif [ -n \"\$P\" ]; then sh -c \"./tests/$what.sh \$P\"
     else ./tests/$what.sh; fi; } 2>&1 | tee \"\$LOG\"
     exit \${PIPESTATUS[0]}
