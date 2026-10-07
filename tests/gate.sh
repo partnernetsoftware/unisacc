@@ -217,7 +217,10 @@ if [ "$(uname -s)" = Darwin ]; then
     # cold path finish; self-prepare on a missing artefact keeps the pair
     # order-independent when a queue runs them out of order.
     for a in arm64 x86_64; do
-        job exec-bindprep-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindprep.sh
+        # 0.0.32: three parts (qc11: the whole prep took 48.96 s of 49 alone under load 4)
+        job exec-bindprep-first-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindprep.sh first
+        job exec-bindprep-second-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindprep.sh second
+        job exec-bindprep-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindprep.sh package
         job exec-bindverify-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindverify.sh
         job lib-bank-$a python3 ./tests/bankcheck.py --arch $a   # R12-1 BNK1 plan harness (was ungated; 7-10 s)
     done
