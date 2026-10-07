@@ -3537,7 +3537,17 @@ long cunary(void) {
                 need(tidx(")", 1), ")");
                 return sl + 1;
             }
-            w = cexpr(); need(tidx(")", 1), ")");
+            {   /* walk the operand for its type and throw the code away, as unary()'s
+                   P_SIZEOF does: `char d[sizeof(p->m)]` is a constant (C99 6.6p6), and
+                   cexpr() gave the operand's VALUE */
+                int nsave; int isave;
+                nsave = nout; isave = nibuf;
+                unevaluated = unevaluated + 1; cursize = 8; curvla = 0;
+                exprc();
+                unevaluated = unevaluated - 1; nout = nsave; nibuf = isave;
+                w = cursize; curvla = 0;
+            }
+            need(tidx(")", 1), ")");
             return w;
         }
         return 8;                       /* `sizeof x`: a scalar in this subset */
@@ -3593,6 +3603,19 @@ int isconstdim(int j) {
         k = kind(j);
         if (k == tidx("[", 1)) depth = depth + 1;
         if (k == tidx("]", 1)) { if (depth == 0) return 1; depth = depth - 1; }
+        /* sizeof (expr) names objects but only for their type: a constant unless
+           one of them is itself a VLA */
+        if (k == tidx("sizeof", 6) && kind(j + 1) == tidx("(", 1)) {
+            int pd; pd = 0; j = j + 1;
+            while (j < ntok) {
+                k = kind(j);
+                if (k == tidx("(", 1)) pd = pd + 1;
+                if (k == tidx(")", 1)) { pd = pd - 1; if (pd == 0) break; }
+                if (k == T_ID) { i = sfind(j); if (i >= 0) { if (symvla[i]) return 0; } }
+                j = j + 1;
+            }
+            j = j + 1; continue;
+        }
         if (k == T_ID) {
             i = mfindt(j);
             if (i >= 0) { if (machas[i]) { j = j + 1; continue; } }
@@ -3947,7 +3970,9 @@ int declspec(void) {                       /* -> element width */
            member (a function-pointer typedef) left declspecptr set, and
            `typedef struct Reg {...} Reg;` became an 8-byte pointer type
            (lua's luaL_Reg tables) */
-        { int sti; declsave(); sti = stparse(0); declrestore(); declstruct = sti; }
+        { int sti; int sv[13]; int q; for (q = 0; q < 13; q++) sv[q] = declsv[q];
+          declsave(); sti = stparse(0); declrestore(); declstruct = sti;
+          for (q = 0; q < 13; q++) declsv[q] = sv[q]; }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
         declsz = stsize[declstruct];
         declbase = declsz;
         skipspecq();
@@ -3958,7 +3983,9 @@ int declspec(void) {                       /* -> element width */
            member (a function-pointer typedef) left declspecptr set, and
            `typedef struct Reg {...} Reg;` became an 8-byte pointer type
            (lua's luaL_Reg tables) */
-        { int sti; declsave(); sti = stparse(1); declrestore(); declstruct = sti; }
+        { int sti; int sv[13]; int q; for (q = 0; q < 13; q++) sv[q] = declsv[q];
+          declsave(); sti = stparse(1); declrestore(); declstruct = sti;
+          for (q = 0; q < 13; q++) declsv[q] = sv[q]; }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
         declsz = stsize[declstruct];
         declbase = declsz;
         skipspecq();
