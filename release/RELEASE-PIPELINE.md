@@ -242,3 +242,13 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - exec/ 下的检查脚本也算产品来源闭包，候选建好后再改它，候选就会被判过期（X31，0.0.32 解决）。
 - 产品 δ 的修复，要先用私有 .com 跑过原来失败的套件，再建候选。候选 2 只凭合成 tape 的字节相等就开建，结果 pthread 运行时段错误。
 - 队列耗时：墙钟 47 分钟，其中作业 6820 s（4 路并行的下限是 28 分钟），窗口外开销 487 s，窗口内利用率 74%；csmithdiff 普通版与 com 版重复跑（已去重）。0.0.32 计划：跨候选按输入闭包复用结果、滚动调度、jobs 6 并保留负载保护。
+
+## 22. 0.0.32 回顾（2026-10-07，发布前先记）
+- **队列与构建分开起后台**：cand12 第一次跑了 30 分钟就被后台时限停掉；队列循环拆成 qloop.sh 后，续跑直接复用已有状态。长队列要单独起，并给足时限（2 h）。
+- **版本号提交要在最后一个开发候选之前**：0.0.32 是先跑开发候选 cand12，再提交版本号、跑 cand13，多跑了一整轮 692 项（约 45 min）。0.0.33 Q1 改为先提交版本号，开发候选就是发版候选。
+- **F4 基准钉住 HEAD**：f4time 从 `git archive HEAD apps/csih` 解出源码来编，不碰别人正在改的工作副本（工作副本测出约 5.1 s，HEAD 约 6.0 s）；解到临时目录后，路径必须用绝对路径。
+- **push 和 Linux 并行**：本机 Linux 全套跑的同时就 push 触发 release-check（GitHub runner，不占本机）；本次 run 37566384751 绿。
+- **代提交**：cdx 撞上 index.lock EPERM 时，由 cc 按路径代提交，等待链不会自己往下走。
+- **queuecheck 的真实快照用例要求树已签章**：先提交接线、刷新 gatedeps，再跑 queuecheck。
+- **分段 ape 要封完整长度**：R3′ 把数据零尾改成长度（Padded）后，tests/ape_stage.py 写 data.bin 只剩前缀，Linux 分段 ape 段错误（139）；record 现记 data_len（schema 3）。单跑 ape 走直接构建，所以只在 all 里红。
+- **linux.sh all --suite NAME**：Linux 红项单独重跑（ape 14 s、native8/ccrun8 各约 15 s），不必再跑 1063 s 整轮；全套中 native8/ccrun8 的 55 s 超时单独复跑为绿，属负载。
