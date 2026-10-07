@@ -7,13 +7,34 @@ set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 TARGET=${TARGET:-lnx/x86_64}; export TARGET
 SELF_PART=${SELF_PART:-all}
-case $SELF_PART in all|stages|package|bootstrap) ;; *) echo "unknown selfcheck part: $SELF_PART" >&2; exit 2;; esac
+case $SELF_PART in all|stages|stages1|stages2|package|bootstrap) ;; *) echo "unknown selfcheck part: $SELF_PART" >&2; exit 2;; esac
 [ "$SELF_PART" != package ] || [ "${NETWORK:-1}" = 1 ] || { echo 'package selfcheck requires NETWORK=1' >&2; exit 2; }
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
-b python3 tests/sourceflat.py "$T/unisacc.c"
-SELF="$T/unisacc.c"
+MODEL=tbl; [ "${NETWORK:-1}" != 1 ] || MODEL=net
+case $SELF_PART in
+    stages1|stages2)
+        state_root=${SELF_STAGE_DIR:-${GATE_STATE:-${TMPDIR:-/tmp}}}
+        target_tag=$(printf '%s' "$TARGET" | tr / _)
+        T="$state_root/exec-selfstage-$target_tag-${NETWORK:-1}"
+        mkdir -p "$T"
+        SELF="$T/unisacc.c"
+        if [ "$SELF_PART" = stages1 ]; then
+            rm -f "$T/.ready"
+            b python3 tests/sourceflat.py "$SELF"
+        else
+            [ -s "$T/.ready" ] || { echo 'missing stages1 proof' >&2; exit 1; }
+            b python3 tests/sourceflat.py "$T/unisacc.current.c"
+            cmp "$T/unisacc.current.c" "$SELF" || { echo 'stale stages1 source' >&2; exit 1; }
+            rm "$T/unisacc.current.c"
+        fi
+        ;;
+    *)
+        T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+        b python3 tests/sourceflat.py "$T/unisacc.c"
+        SELF="$T/unisacc.c"
+        ;;
+esac
 if [ "$SELF_PART" = bootstrap ]; then
     case "$(uname -s)/$(uname -m):$TARGET" in
         Darwin/arm64:osx/*|Darwin/x86_64:osx/x86_64) ;;
@@ -26,8 +47,22 @@ if [ "$SELF_PART" = bootstrap ]; then
     echo "bootstrap $TARGET: reference N1=N2=N3 (stage selfcheck compares N1)"
     exit 0
 fi
-if [ "$SELF_PART" != package ]; then
-b ./exec/pipeline/elf.sh "$T" "$SELF" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
+if [ "$SELF_PART" = stages1 ]; then
+    b env STAGE_TO=e3 ./exec/pipeline/elf.sh "$T" "$SELF" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
+    shasum -a 256 "$SELF" "$T/run" "$T/unisacc.e3" \
+        "$T/e2.$MODEL" "$T/e1.$MODEL" "$T/e3.$MODEL" \
+        "$T/e4.$MODEL" "$T/prune.$MODEL" "$T/lower.$MODEL" "$T/elf.$MODEL" \
+        exec/pipeline/elf.sh exec/pipeline/selfcheck.sh exec/pipeline/image-stages.tsv > "$T/.ready.tmp"
+    if [ -f "$T/unisacc.attributes" ]; then shasum -a 256 "$T/unisacc.attributes" >> "$T/.ready.tmp"; fi
+    mv "$T/.ready.tmp" "$T/.ready"
+    echo "$MODEL self-source $TARGET: stages e2..e3 prepared"
+    exit 0
+elif [ "$SELF_PART" = stages2 ]; then
+    b python3 exec/pipeline/models.py "$T" "$TARGET" "${NETWORK:-1}" "${EXEC_CC:-cc}" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
+    shasum -a 256 -c "$T/.ready" >/dev/null || { echo 'stale stages1 models or tape' >&2; exit 1; }
+    b env STAGE_MODELS_READY=1 STAGE_FROM=e4 ./exec/pipeline/elf.sh "$T" "$SELF" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
+elif [ "$SELF_PART" != package ]; then
+    b ./exec/pipeline/elf.sh "$T" "$SELF" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 else
     b python3 exec/pipeline/models.py "$T" "$TARGET" "${NETWORK:-1}" "${EXEC_CC:-cc}" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 fi
@@ -45,7 +80,6 @@ printf '%s\n' $osnames "$arch" __LP64__ __UNISA__ > "$T/macros.c"
 for name in "$other" $absent; do
     printf '#ifdef %s\nWRONG_TARGET\n#endif\n' "$name" >> "$T/macros.c"
 done
-MODEL=tbl; [ "${NETWORK:-1}" != 1 ] || MODEL=net
 if [ "$SELF_PART" != package ]; then
     b "$T/run" "$T/e2.$MODEL" "$T/macros.c" > "$T/macros.delta"
     b "$UA" -b "$TARGET" -E "$T/macros.c" > "$T/macros.ref"
@@ -59,7 +93,7 @@ b "$UA" -O2 -b "$TARGET" "$SELF" -o "$T/ref.elf"
 if [ "$SELF_PART" != package ]; then
     cmp "$T/ref.elf" "$T/unisacc.$IMAGE"
 fi
-if [ "$MODEL" = net ] && [ "$SELF_PART" != stages ]; then
+if [ "$MODEL" = net ] && [ "$SELF_PART" != stages ] && [ "$SELF_PART" != stages2 ]; then
     b env UNISA_MAXSTEPS=400000000000 "$T/run" --bundle "$T/models.pkg" "$TARGET" "$SELF" "$SELF" "$R/include" > "$T/pack.image"
     cmp "$T/pack.image" "$T/ref.elf"
     if [ "$SELF_PART" = all ]; then cmp "$T/pack.image" "$T/unisacc.$IMAGE"; fi
