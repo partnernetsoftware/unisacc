@@ -43,7 +43,7 @@ exclusive=()  # fat is three ~17 s shards since 0.0.13 and no longer needs a win
 # inner 20 s hard timeout (lib-carrier-import-model).  They get a window each.
 # 0.0.21: exec-tableself (the self-source through seven table stages) reached 48 s alone and the
 # Python image step of each bigclosure target exceeds its 45 s bound under contention; each gets a window
-for s in exec-memx86-ua-1 lib-carrier-import-model exec-tableself bigclosure-osx-arm64 bigclosure-osx-x86_64 bigclosure-lnx-arm64 bigclosure-lnx-x86_64 bigclosure-win-arm64 bigclosure-win-x86_64; do exclusive+=(--exclusive-suite "$s"); done
+for s in exec-memx86-ua-1 lib-carrier-import-model exec-tableself bigclosure-osx-arm64 bigclosure-osx-x86_64 bigclosure-lnx-arm64 bigclosure-lnx-x86_64 bigclosure-win-arm64 bigclosure-win-x86_64 com-seedgen; do exclusive+=(--exclusive-suite "$s"); done
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-arm64); fi
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
