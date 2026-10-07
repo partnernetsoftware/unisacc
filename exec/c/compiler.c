@@ -153,6 +153,7 @@ int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)
    same bytes the reference front end writes. */
 #include "forwardsignature.h"
 #include "../../src/fwdstub.c"
+#include "fwdmerge.c"
 /* The callback graph carries a C function-pointer type.  Scalar pointees
    are enough for glob's errfunc and similar host APIs; other graphs retain
    the named refusal until their declaration can be printed exactly. */
@@ -233,6 +234,7 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
     at=7;
     if (us_fw_u64(b,n,&at,&tl) || us_fw_u64(b,n,&at,&cnt) || tl>n-at) { fputs("unisacc: error: forwarding side-car malformed\n",stderr); return -1; }
     tape->b=xrealloc(0,tl+1); memcpy(tape->b,b+at,tl); tape->n=(int)tl; at+=tl;
+    fwm_reset();
     if (cnt==0) return 0;
     nfwdsrc=0;
     for (uint64_t r=0;r<cnt;r++) {
@@ -245,6 +247,7 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
         if (bad || sig.structbyval || sig.ret.structbyval || sig.n>32) {
             fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1;
         }
+        (void)fwm_export((const unsigned char *)nm,(int)nl);
         int kk[33],ww[33],uu[33]; char cbdecl[33][256];
         for (int k=0;k<sig.n;k++) { kk[k]=sig.args[k].kind; ww[k]=sig.args[k].width; uu[k]=0; }
         for (int k=0;k<sig.n;k++) if (sig.args[k].callback) {
@@ -266,6 +269,7 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
     int werr=fwrite(fwdsrc,1,nfwdsrc,f)!=(size_t)nfwdsrc; werr|=fclose(f)!=0;
     return werr ? -1 : 1;
 }
+#include "fwdincrement.c"
 static int product_view(int argc,char **argv) {
     int dis=argv[1][0]=='o';
     if (dis ? (argc!=4 || strcmp(argv[2],"-d")) : argc!=3) { fputs(dis ? "usage: unisacc objdump -d FILE.o\n" : "usage: unisacc nm FILE.o\n",stderr); return 2; }
@@ -710,7 +714,13 @@ int main(int argc, char **argv) {
 #ifdef __linux__
                     if (host_dl_slot(1)==0) return clierror("host libc forwarding needs a dynamic compiler image");
 #endif
-                    fwd_restart=1;
+                    Buf merged={0};
+                    int fast=fwd_incremental(target,level,&tape,nsources,&merged);
+                    if (fast>0) {
+                        free(in.b); free(tape.b); in=merged;
+                        rc=runroute_from(route,level ? "e4" : "prune",&in,src);
+                    } else if (fast<0) { free(tape.b); rc=1; }
+                    else { free(tape.b); fwd_restart=1; }
                 }
             }
         } else
