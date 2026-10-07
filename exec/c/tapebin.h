@@ -91,9 +91,9 @@ static void tbc_mem(Buf*b,uint64_t reg,uint64_t off){
 static void tbc_insn(Buf *b,int op,const uint64_t *v,const int *tag,
                      const unsigned char **names,const size_t *lens,size_t nn){
     const char *name=tb_opnames[op],*shape=tb_shapes[op];
-    tbc_put(b,"  ");tbc_put(b,name);int pad=7-(int)strlen(name);while(pad-->0)bput(b,' ',0);
-    if(*shape)bput(b,' ',0);
-    if(op==30){tbc_mem(b,v[0],v[1]);} /* callm */
+    tbc_put(b,"  ");tbc_put(b,name);
+    if(*shape){int pad=7-(int)strlen(name);while(pad-->0)bput(b,' ',0);bput(b,' ',0);}
+    if(strcmp(name,"callm")==0){tbc_mem(b,v[0],v[1]);} /* callm */
     else if(op==21||op==23){ /* load64, .ld */
         tbc_arg(b,'r',0,v[0],names,lens,nn);tbc_put(b,", ");tbc_mem(b,v[1],v[2]);
         if(op==23){tbc_put(b,", ");tbc_arg(b,'i',tag[3],v[3],names,lens,nn);}
