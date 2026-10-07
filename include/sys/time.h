@@ -10,4 +10,8 @@ struct timeval { long tv_sec; long tv_usec; };
 int utimes(const char *__u_path, const struct timeval __u_t[2]);
 int gettimeofday(struct timeval *__u_tv, void *__u_tz);
 #endif
+/* 0.0.34 L2 (SQLite's Apple path): forwarded to the system C library */
+#ifdef __APPLE__
+int futimes(int __u_fd, const struct timeval __u_tv[2]);
+#endif
 #endif

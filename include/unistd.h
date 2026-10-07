@@ -471,4 +471,10 @@ long sysconf(int __u_name);
 #define _SC_PAGE_SIZE _SC_PAGESIZE
 ssize_t readlink(const char *__u_path, char *__u_buf, size_t __u_n);
 #endif
+/* 0.0.34 L2 (SQLite's Apple locking style): forwarded */
+#ifdef __APPLE__
+typedef unsigned char uuid_t[16];
+int fsctl(const char *__u_path, unsigned long __u_req, void *__u_data, unsigned int __u_opt);
+int gethostuuid(uuid_t __u_id, const struct timespec *__u_wait);
+#endif
 #endif

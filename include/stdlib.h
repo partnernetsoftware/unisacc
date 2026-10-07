@@ -534,4 +534,9 @@ static int system(const char *__u_cmd) {
 }
 #endif
 #endif
+/* 0.0.34 L2 (SQLite's Apple path): forwarded to the system C library */
+#ifdef __APPLE__
+long random(void);
+void srandomdev(void);
+#endif
 #endif
