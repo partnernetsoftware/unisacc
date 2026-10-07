@@ -15,20 +15,22 @@ if [ ! -d "$W" ]; then
   git worktree add -q --detach "$W" HEAD || { echo "queue: cannot create worktree $W"; exit 2; }
   # untracked inputs the gates read: the installed product (comboot writes it;
   # absent at the start, its appearance invalidated the 0.0.19 queue at 408/415)
-  # 0.0.31: the root holds the SIGNED public .com beside the unsigned build.json (not a pair);
-  # the queue tests the candidate, so install the stage-2 pair from CAND_DIR
-  cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"
-  # 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
-  # network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
-  # 0.0.27: launched from an rc worktree, $R has no ignored corpus either -- take it from the main checkout
-  M=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
-  for c in "$M"/corpus/*; do [ -e "$W/corpus/${c##*/}" ] || { mkdir -p "$W/corpus"; ln -s "$c" "$W/corpus/${c##*/}"; }; done
-  # 0.0.21 R21-14: a stale build.json beside a new unisacc.com is rewritten by comboot mid-queue
-  # and invalidates every job that declares it (0.0.20: six exec-driver results)
-  if [ -f "$W/unisacc.com" ]; then
-    want=$(python3 -c "import json;print(json.load(open('$W/unisacc.com.build.json'))['artifact_sha256'])" 2>/dev/null)
-    [ "$want" = "$(shasum -a 256 "$W/unisacc.com" | cut -d' ' -f1)" ] || { echo "queue: unisacc.com and its build.json are not a pair; install both from stage 2"; exit 2; }
-  fi
+fi
+# 0.0.33: also for a QUEUE_WORKTREE made beforehand (build_candidate flow): it got no corpus links
+# (diag saw 0 damaged-corpus programs) and kept the root .com instead of the candidate pair
+# 0.0.31: the root holds the SIGNED public .com beside the unsigned build.json (not a pair);
+# the queue tests the candidate, so install the stage-2 pair from CAND_DIR
+cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"
+# 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
+# network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
+# 0.0.27: launched from an rc worktree, $R has no ignored corpus either -- take it from the main checkout
+M=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+for c in "$M"/corpus/*; do [ -e "$W/corpus/${c##*/}" ] || { mkdir -p "$W/corpus"; ln -s "$c" "$W/corpus/${c##*/}"; }; done
+# 0.0.21 R21-14: a stale build.json beside a new unisacc.com is rewritten by comboot mid-queue
+# and invalidates every job that declares it (0.0.20: six exec-driver results)
+if [ -f "$W/unisacc.com" ]; then
+  want=$(python3 -c "import json;print(json.load(open('$W/unisacc.com.build.json'))['artifact_sha256'])" 2>/dev/null)
+  [ "$want" = "$(shasum -a 256 "$W/unisacc.com" | cut -d' ' -f1)" ] || { echo "queue: unisacc.com and its build.json are not a pair; install both from stage 2"; exit 2; }
 fi
 cd "$W"
 [ -s "$SEED/unisacc-seed.com" ] || { echo "no $SEED/unisacc-seed.com"; exit 2; }
