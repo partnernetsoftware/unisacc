@@ -1,8 +1,8 @@
 # Time unisacc.com -run against small programs.
-# python3 example/time_run.py
+# python3 examples/run-speed/time_run.py
 import os, statistics, subprocess, time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 UA = os.path.join(ROOT, "unisacc.com")
 EX = os.path.dirname(os.path.abspath(__file__))
 UNITS = os.path.join(EX, "units")

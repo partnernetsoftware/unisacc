@@ -1,13 +1,13 @@
 # unisacc.com -run 速度：2026-10-06 实测
 
-产品：`/Users/wjc/repos/unisacc/unisacc.com`，`unisacc 0.0.30`，2.0MB。本机没有 tcc。对照是 `/usr/bin/clang -O0 -c`。计时是墙钟中位数；csih 那几行是单次。源在 `example/`，复现脚本 `example/time_run.py`。`-v` 在这个产品驱动上直接失败：`unisacc: model driver: option not migrated`，所以没有阶段计数。
+产品：`/Users/wjc/repos/unisacc/unisacc.com`，`unisacc 0.0.30`，2.0MB。本机没有 tcc。对照是 `/usr/bin/clang -O0 -c`。计时是墙钟中位数；csih 那几行是单次。源在 `examples/run-speed/`，复现脚本 `examples/run-speed/time_run.py`。`-v` 在这个产品驱动上直接失败：`unisacc: model driver: option not migrated`，所以没有阶段计数。
 
 ## 数字
 
 | 对象 | 秒 | 备注 |
 |---|---:|---|
 | `--version` | 0.011 | 进程装载不是卡顿 |
-| `-run example/empty.c` | 0.046 | 空 main |
+| `-run examples/run-speed/empty.c` | 0.046 | 空 main |
 | `-E` 只含 `<stdio.h>` | 0.033 | 预处理 44033 字节 |
 | `-fno-trim-libc -E` 同一文件 | 0.050 | 68933 字节。裁剪有效，但不是大头 |
 | `-run` 调用 `printf` | 0.166 | 预处理 83003 字节；`printf` 把 `_unisa_fd` 正文拉进来 |
@@ -17,7 +17,7 @@
 | 16 个函数写在一个 .c | 0.051 | 比 16 个空单元还快 |
 | 8 个单元各含同一组四个头 | 0.445 | |
 | 同样的头只出现在一个单元 | 0.163 | 重复头文件贵 0.28 秒 |
-| clang `-O0 -c` 四个头文件 | 0.029 | 同一份 `example/headers.c` |
+| clang `-O0 -c` 四个头文件 | 0.029 | 同一份 `examples/run-speed/headers.c` |
 | csih 15 个 .c 各自 `-E` 相加 | 3.838 | 最慢是 `net.c` 0.655 秒、364957 字节 |
 | csih 整表 `-o /tmp/ua-csih.bin` | 8.187 | 不运行程序 |
 | csih 整表 `-run selftest` | 7.996 | 和 `-o` 同级。卡在编译，不在跑 |
