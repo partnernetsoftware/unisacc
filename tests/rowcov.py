@@ -10,9 +10,19 @@ once it exists this report gains a per-manifest-row column and a witness per row
   tests/rowcov.py pp merge N    merge the N shards and print the coverage line
 Judged only from the TSV-built delta and the Python simulator: no graphhash, no reference binary.
 """
-import json, os, pathlib, subprocess, sys
+import hashlib, json, os, pathlib, subprocess, sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'exec/pp'))
+
+def shard_baseline(stage):
+    """STAGE.shards lines `STAGE/K/N ROWS [PROBES]`: PROBES (sha256[:12] of the shard's probe names) is optional."""
+    try: text = (ROOT / 'tests' / 'rowcov' / (stage + '.shards')).read_text()
+    except FileNotFoundError: return {}
+    out = {}
+    for l in text.splitlines():
+        if not l or l.startswith('#'): continue
+        w = l.split(); out[w[0]] = (int(w[1]), w[2] if len(w) > 2 else None)
+    return out
 
 def baseline(stage, kind):
     """The ratchet floors: tests/rowcov/STAGE.shards (keys STAGE/K/N) and STAGE.union (key STAGE).
@@ -125,11 +135,20 @@ def main():
             if path.startswith('synthetic'): continue
             if (st, key) in seen and (st, key) in total: rowsof[(path, line)] = 1
         got = len(rowsof)
-        base = baseline(stage, 'shards')
-        floor = int(base.get('%s/%d/%d' % (stage, k, n), 0))
+        key = '%s/%d/%d' % (stage, k, n)
+        base = shard_baseline(stage)
+        floor, names = base.get(key, (0, None))
+        files = sorted(str(p.relative_to(ROOT)) for p in list((ROOT / 'examples').glob('*.c')) + list((ROOT / 'tests/c').glob('*.c')))
+        mine = hashlib.sha256('\n'.join(shard(files, k, n, stage)).encode()).hexdigest()[:12]
         print('rowcov %s shard %d/%d  rows reached %d (baseline %d)' % (stage, k, n, got, floor))
+        # 0.0.33: a shard floor holds only for the probe names it was measured on.  Adding a probe moves
+        # files between round-robin shards (5b1961a2: lower 2/3 and enc 2/4/7/8 fell, unions did not);
+        # then the union job is the ratchet and this shard prints its new line instead of failing.
+        if names is not None and names != mine:
+            print('rowcov  probe set of this shard changed since its baseline: the union decides; new line: %s %d %s' % (key, got, mine))
+            return 0
         if got < floor: print('rowcov  FELL below the baseline'); return 1
-        if got > floor: print('rowcov  above the baseline: raise %s/%d/%d in tests/rowcov/%s.shards' % (stage, k, n, stage))
+        if got > floor or names is None: print('rowcov  above the baseline: set "%s %d %s" in tests/rowcov/%s.shards' % (key, got, mine, stage))
         return 0
     if what.startswith('union'):
         # 0.0.28 E22: the union ratchet (key STAGE in tests/rowcov/STAGE.{shards,union}) after the gate shards: their
