@@ -27,11 +27,12 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 # difftest lists needed.  07 is the case that forces it: ua_ref already has
 # the position (5:11), the product has neither the position nor the header
 # name, so one shared list would be a false green on one route or the other.
-if [ "$(basename "${UA:-/tmp/ua_ref}")" = ua_ref ]; then
-    KNOWN=$R/tests/diag.knownfail
-else
-    KNOWN=$R/tests/diag.com.knownfail
-fi
+# Route by what UA is, not by its name: a private reference (ua33, ua_cand...) is the reference
+# route too; com-diag passes the product, always a .com (0.0.33: a ua33 run read the com ledger).
+case ${UA:-/tmp/ua_ref} in
+    *.com) KNOWN=$R/tests/diag.com.knownfail;;
+    *) KNOWN=$R/tests/diag.knownfail;;
+esac
 T=$(scratch)
 . "$R/tests/knownfail.sh"
 knownfail_load "$KNOWN" "$T/known.keys" || exit 1
