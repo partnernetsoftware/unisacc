@@ -1196,4 +1196,93 @@ static FILE *fdopen(int __u_fd, const char *__u_mode) {
     return (FILE *)(long)__u_fd;
 }
 #endif
+/* popen/pclose (POSIX), 0.0.34: a pipe (socketpair on macOS, as pipe() in unistd.h), a fork, and
+   /bin/sh -c in the child with the pipe end on fd 0 or 1 -- the raw calls system() uses, so this
+   header still needs no <unistd.h>.  pclose waits for the child and returns its wait status. */
+#ifndef _WIN32
+#if defined(__APPLE__) && defined(__x86_64__)
+#define _U_PO_SC(n) (0x2000000L + (n))
+#else
+#define _U_PO_SC(n) (n)
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+static int _u_po_fd[16]; static long _u_po_pid[16]; static int _u_po_n;
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_popen
+static FILE *popen(const char *__u_cmd, const char *__u_mode) {
+    static char *__u_env[512]; char *__u_argv[4]; int __u_p[2]; long __u_pid; long __u_me; long __u_r;
+    int __u_k; int __u_n; int __u_rd; int __u_mine; int __u_kid;
+    __u_rd = __u_mode[0] == 114;
+    if ((!__u_rd && __u_mode[0] != 119) || _u_po_n >= 16) { errno = 22; return NULL; }
+#ifdef __APPLE__
+    __u_r = __syscall6(_U_PO_SC(135), 1, 1, 0, (long)__u_p, 0);
+#elif defined(__x86_64__)
+    __u_r = __syscall6(293, (long)__u_p, 0, 0, 0, 0);
+#else
+    __u_r = __syscall6(59, (long)__u_p, 0, 0, 0, 0);
+#endif
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return NULL; }
+    __u_mine = __u_rd ? __u_p[0] : __u_p[1]; __u_kid = __u_rd ? __u_p[1] : __u_p[0];
+    __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
+    __u_n = 0; __u_k = __argc() + 1;
+    while (__u_n < 511 && __argv(__u_k) != 0) { __u_env[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+    __u_env[__u_n] = 0;
+    _u_st_flushall();
+#ifdef __APPLE__
+    __u_me = __syscall6(_U_PO_SC(20), 0, 0, 0, 0, 0);
+    __u_pid = __syscall6(_U_PO_SC(2), 0, 0, 0, 0, 0);
+    if (__u_pid >= 0 && __syscall6(_U_PO_SC(20), 0, 0, 0, 0, 0) != __u_me) __u_pid = 0;
+#elif defined(__x86_64__)
+    __u_me = 0; __u_pid = __syscall6(57, 0, 0, 0, 0, 0);
+#else
+    __u_me = 0; __u_pid = __syscall6(220, 17, 0, 0, 0, 0);
+#endif
+    if (__u_pid < 0) { __close(__u_p[0]); __close(__u_p[1]); errno = (int)(0 - __u_pid); return NULL; }
+    if (__u_pid == 0) {
+        __u_k = __u_rd ? 1 : 0;
+        if (__u_kid != __u_k) {
+#ifdef __APPLE__
+            __syscall6(_U_PO_SC(90), __u_kid, __u_k, 0, 0, 0);
+#elif defined(__x86_64__)
+            __syscall6(33, __u_kid, __u_k, 0, 0, 0);
+#else
+            __syscall6(24, __u_kid, __u_k, 0, 0, 0);
+#endif
+            __close(__u_kid);
+        }
+        __close(__u_mine);
+        for (__u_k = 0; __u_k < _u_po_n; __u_k = __u_k + 1) __close(_u_po_fd[__u_k]);
+#if defined(__APPLE__) || defined(__x86_64__)
+        __syscall6(_U_PO_SC(59), (long)"/bin/sh", (long)__u_argv, (long)__u_env, 0, 0);
+#else
+        __syscall6(221, (long)"/bin/sh", (long)__u_argv, (long)__u_env, 0, 0);
+#endif
+        __exit(127);
+    }
+    __close(__u_kid);
+    _u_po_fd[_u_po_n] = __u_mine; _u_po_pid[_u_po_n] = __u_pid; _u_po_n = _u_po_n + 1;
+    return fdopen(__u_mine, __u_mode);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_pclose
+static int pclose(FILE *__u_f) {
+    long __u_pid; int __u_k; int __u_fd; int __u_st;
+    __u_fd = _unisa_fd(__u_f); __u_pid = -1;
+    for (__u_k = 0; __u_k < _u_po_n; __u_k = __u_k + 1) if (_u_po_fd[__u_k] == __u_fd) {
+        __u_pid = _u_po_pid[__u_k]; _u_po_n = _u_po_n - 1;
+        _u_po_fd[__u_k] = _u_po_fd[_u_po_n]; _u_po_pid[__u_k] = _u_po_pid[_u_po_n]; break; }
+    if (__u_pid < 0) { errno = 10; return -1; }   /* ECHILD */
+    fclose(__u_f);
+    __u_st = 0;
+#ifdef __APPLE__
+    if (__syscall6(_U_PO_SC(7), __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#elif defined(__x86_64__)
+    if (__syscall6(61, __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#else
+    if (__syscall6(260, __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#endif
+    return __u_st;
+}
+#endif
+#endif
 #endif
