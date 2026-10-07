@@ -23,7 +23,7 @@
 | v0.0.12–v0.0.29 | [archive/plans/](archive/plans/) — 逐版计划与结项收据；发布身份与回执见 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases) 与 research/r*-release-acceptance.json | 已归档 |
 | v0.0.30 | [archive/plans/v0.0.30.md](archive/plans/v0.0.30.md) | 2026-10-06 公开 |
 | v0.0.31 | [plans/v0.0.31.md](plans/v0.0.31.md) | 已完成，公开待政委裁定 |
-| v0.0.32 | [plans/v0.0.32.md](plans/v0.0.32.md) | 冻结中（10-07 版本提交 dbe168a7，cand13 全队列在跑；勿提交产品闭包）；可封（E46，10-07）：H3c 降级→0.0.33 H3d，F4 分拆→F4′（约 6.0 s），H1‴/D1 产品侧→H1⁗/D1′；公开等政委「发」 |
+| v0.0.32 | [plans/v0.0.32.md](plans/v0.0.32.md) | 开发完成、冻结中（10-07：版本提交 dbe168a7；cand13 38ea3622 本机 692/692 绿；release-check 37566384751 绿；Linux 原生 arm64 全套 + 定点复跑绿〔ape 分段零尾修于 tests/ape_stage.py，native8/ccrun8 负载超时复跑绿，warn 客机无 clang〕；勿提交产品闭包）；可封（E46，10-07）：H3c 降级→0.0.33 H3d，F4 分拆→F4′（约 6.0 s），H1‴/D1 产品侧→H1⁗/D1′；公开等政委「发」 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；权重本体与推理速度的精确结构优化实验（§5.2）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
