@@ -158,10 +158,12 @@ typedef struct {
     int  rows;            /* usable height, from term_size */
     char log[40][240];    /* agent event scrollback (ring buffer) */
     int  nlog;
-    int  ex_on[40];             /* 1 when this log slot is an exec row */
-    int  ex_open[40];           /* 1 shows the one-line command */
+    int  ex_on[40];             /* 1 when this log slot is a tool row */
+    int  ex_open[40];           /* 1 shows the tool body; 0 is the summary */
+    char ex_tag[40][12];
     char ex_why[40][96];
     char ex_cmd[40][120];
+    char ex_body[40][1024];     /* tool output, drawn only while open */
     char last_answer[1024];
     char errline[240];        /* last error, shown on the status row, not in the log */
     char goal[TUI_INPUT_MAX]; /* /goal text; empty until set */
@@ -298,13 +300,17 @@ static void tui_log_make_room(tui_state *st) {
     memmove(st->log[0], st->log[1], sizeof st->log[0] * 39);
     memmove(st->ex_on, st->ex_on + 1, sizeof st->ex_on[0] * 39);
     memmove(st->ex_open, st->ex_open + 1, sizeof st->ex_open[0] * 39);
+    memmove(st->ex_tag[0], st->ex_tag[1], sizeof st->ex_tag[0] * 39);
     memmove(st->ex_why[0], st->ex_why[1], sizeof st->ex_why[0] * 39);
     memmove(st->ex_cmd[0], st->ex_cmd[1], sizeof st->ex_cmd[0] * 39);
+    memmove(st->ex_body[0], st->ex_body[1], sizeof st->ex_body[0] * 39);
     st->nlog = 39;
     st->ex_on[39] = 0;
     st->ex_open[39] = 0;
+    st->ex_tag[39][0] = 0;
     st->ex_why[39][0] = 0;
     st->ex_cmd[39][0] = 0;
+    st->ex_body[39][0] = 0;
 }
 
 static void tui_note_err(tui_state *st, const char *s);
@@ -313,8 +319,10 @@ static void tui_log_plain(tui_state *st, const char *s) {
     tui_log_make_room(st);
     st->ex_on[st->nlog] = 0;
     st->ex_open[st->nlog] = 0;
+    st->ex_tag[st->nlog][0] = 0;
     st->ex_why[st->nlog][0] = 0;
     st->ex_cmd[st->nlog][0] = 0;
+    st->ex_body[st->nlog][0] = 0;
     snprintf(st->log[st->nlog], sizeof st->log[0], "%s", s ? s : "");
     st->nlog++;
     tui_log_hold(st);
@@ -325,8 +333,26 @@ static void tui_log_line(tui_state *st, const char *s) {
     tui_log_plain(st, s);
 }
 
-/* `exec<TAB>why<TAB>cmd` from the agent. Anything else is a plain log line.
- * Default is collapsed: the why is on screen, the command is one hidden line. */
+/* First N bytes of a tool call, cut on a UTF-8 boundary. A longer call
+ * keeps an ellipsis so the closed row stays a summary. */
+static void tui_condense(char *dst, int dstmax, const char *src, int maxb) {
+    int i = 0;
+    if (!dst || dstmax < 1) return;
+    if (!src) src = "";
+    while (src[i] && i + 1 < dstmax && i < maxb) {
+        dst[i] = src[i];
+        i++;
+    }
+    while (i > 0 && ((unsigned char)dst[i - 1] & 0xC0) == 0x80) i--;
+    if (src[i] && i + 4 < dstmax) {
+        memcpy(dst + i, "…", 3);
+        i += 3;
+    }
+    dst[i] = 0;
+}
+
+/* `exec<TAB>why<TAB>cmd` or `fold<TAB>tag<TAB>why<TAB>call`.
+ * Closed row shows why and a short call. The body stays hidden. */
 static int tui_exec_fields(const char *line, char *why, int wn, char *cmd, int cn) {
     const char *p, *tab;
     int n;
@@ -344,20 +370,80 @@ static int tui_exec_fields(const char *line, char *why, int wn, char *cmd, int c
     return 1;
 }
 
+/* fold<TAB>tag<TAB>why<TAB>call. tag is the word in front of [展开]. */
+static int tui_fold_fields(const char *line, char *tag, int tn,
+                           char *why, int wn, char *cmd, int cn) {
+    const char *p, *t1, *t2;
+    int n;
+    if (!line || strncmp(line, "fold\t", 5) != 0) return 0;
+    p = line + 5;
+    t1 = strchr(p, '\t');
+    if (!t1) return 0;
+    n = (int)(t1 - p);
+    if (n >= tn) n = tn - 1;
+    if (n < 0) n = 0;
+    memcpy(tag, p, (size_t)n);
+    tag[n] = 0;
+    p = t1 + 1;
+    t2 = strchr(p, '\t');
+    if (!t2) return 0;
+    n = (int)(t2 - p);
+    if (n >= wn) n = wn - 1;
+    if (n < 0) n = 0;
+    memcpy(why, p, (size_t)n);
+    why[n] = 0;
+    snprintf(cmd, (size_t)cn, "%s", t2 + 1);
+    if (!tag[0]) snprintf(tag, (size_t)tn, "tool");
+    if (!why[0]) snprintf(why, (size_t)wn, "%s", "(无解释)");
+    return 1;
+}
+
+/* Tool output is `  │ ...`. It belongs to the tool row above it. */
+static const char *tui_bar_text(const char *line) {
+    if (!line || strncmp(line, "  │ ", 6) != 0) return 0;
+    return line + 6;
+}
+
+static void tui_body_add(tui_state *st, int i, const char *s) {
+    char *b = st->ex_body[i];
+    size_t n = strlen(b);
+    size_t cap = sizeof st->ex_body[0];
+    if (!s) s = "";
+    if (n && n + 1 < cap) b[n++] = '\n';
+    while (*s && n + 1 < cap) b[n++] = *s++;
+    b[n] = 0;
+}
+
 static void tui_log_event(tui_state *st, const char *line) {
-    char why[96], cmd[120];
+    char tag[12], why[96], cmd[120];
+    const char *bar = tui_bar_text(line);
+    if (bar && st->nlog > 0 && st->ex_on[st->nlog - 1]) {
+        tui_body_add(st, st->nlog - 1, bar);
+        tui_note_err(st, line);
+        return;
+    }
     tui_log_make_room(st);
-    if (tui_exec_fields(line, why, (int)sizeof why, cmd, (int)sizeof cmd)) {
+    tag[0] = 0;
+    if (tui_exec_fields(line, why, (int)sizeof why, cmd, (int)sizeof cmd))
+        snprintf(tag, sizeof tag, "exec");
+    else if (!tui_fold_fields(line, tag, (int)sizeof tag, why, (int)sizeof why,
+                              cmd, (int)sizeof cmd))
+        tag[0] = 0;
+    if (tag[0]) {
         st->ex_on[st->nlog] = 1;
         st->ex_open[st->nlog] = 0;
+        snprintf(st->ex_tag[st->nlog], sizeof st->ex_tag[0], "%s", tag);
         snprintf(st->ex_why[st->nlog], sizeof st->ex_why[0], "%s", why);
         snprintf(st->ex_cmd[st->nlog], sizeof st->ex_cmd[0], "%s", cmd);
-        snprintf(st->log[st->nlog], sizeof st->log[0], "exec[展开]> %s", why);
+        st->ex_body[st->nlog][0] = 0;
+        snprintf(st->log[st->nlog], sizeof st->log[0], "%s[展开]> %s", tag, why);
     } else {
         st->ex_on[st->nlog] = 0;
         st->ex_open[st->nlog] = 0;
+        st->ex_tag[st->nlog][0] = 0;
         st->ex_why[st->nlog][0] = 0;
         st->ex_cmd[st->nlog][0] = 0;
+        st->ex_body[st->nlog][0] = 0;
         snprintf(st->log[st->nlog], sizeof st->log[0], "%s", line ? line : "");
     }
     st->nlog++;
@@ -627,9 +713,12 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
     }
 }
 
-/* Eight content rows under the input. Left is 思维树.md, right is 记忆宫殿.md.
- * state: 0 has lines, 1 file missing, 2 file empty. */
-#define TUI_MIND_N 8
+/* Rows under the mind rule. Left is 思维树.md, right is 记忆宫殿.md.
+ * state: 0 has lines, 1 file missing, 2 file empty.
+ * Fixed rows are title, goal, input, hint, error, the two rules, and this block.
+ * System body and pending lines are counted at the call. */
+#define TUI_MIND_N 12
+#define TUI_FIXED_ROWS (7 + TUI_MIND_N)
 
 /* Terminal columns, not bytes. The measure itself is csih_cols.h. */
 static int tui_disp_width(const char *s) {
@@ -927,7 +1016,7 @@ static void tui_click(tui_state *st, int x, int y) {
 static int tui_log_room(const tui_state *st) {
     int rows = st->rows > 0 ? st->rows : 24;
     int sys_rows = st->sys_open ? TUI_SYS_N : 0;
-    int room = rows - 15 - sys_rows - st->npending;
+    int room = rows - TUI_FIXED_ROWS - sys_rows - st->npending;
     if (room < 1) room = 1;
     if (room > TUI_LOG_VIEW) room = TUI_LOG_VIEW;
     return room;
@@ -1153,12 +1242,9 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         snprintf(hint, sizeof hint, "Ctrl-C 清空 · Ctrl-D 退出 · %d", st->ticks);
 
     if (st->mode == 1) {
-        /* Log plus goal, loop, pending, input, key hint, two rules,
-         * the system body (0 or 10), the mind block, and the title must fit.
-         * The log viewport is 20 rows when the terminal allows it.
-         * Fewer log lines are padded so the block does not collapse. */
-        /* 15 = title + goal/loop + input + hint + error + two rules
-         * + eight mind rows. System body is 0 or 10, not inside the 15. */
+        /* Log viewport is TUI_LOG_VIEW when the terminal allows it.
+         * Fewer log lines are padded so the block does not collapse.
+         * TUI_FIXED_ROWS already includes the mind block. */
         int show, starti = 0, endi = 0, view_at, filled;
         tui_log_clamp(st);
         tui_log_range(st, &starti, &endi, &show);
@@ -1167,11 +1253,21 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         for (i = starti; i < endi && n < 40; i++) {
             if (st->ex_on[i]) {
                 char tag[32];
-                /* Title is frame row 1, so body index n is screen row n+2. */
-                snprintf(tag, sizeof tag, "exec[%s]> ",
+                char head[220];
+                char cond[40];
+                const char *kind = st->ex_tag[i][0] ? st->ex_tag[i] : "exec";
+                /* Title is frame row 1, so body index n is screen row n+2.
+                 * Closed: the explanation and a short call. Open: that line,
+                 * the full call when it was shortened, then the tool output. */
+                snprintf(tag, sizeof tag, "%s[%s]> ", kind,
                          st->ex_open[i] ? "收缩" : "展开");
+                tui_condense(cond, (int)sizeof cond, st->ex_cmd[i], 28);
+                if (cond[0])
+                    snprintf(head, sizeof head, "%s · %s", st->ex_why[i], cond);
+                else
+                    snprintf(head, sizeof head, "%s", st->ex_why[i]);
                 {
-                    const char *p = st->ex_why[i];
+                    const char *p = head;
                     int cont = 0;
                     while (*p && n < 40) {
                         int used = tui_put_folded_n(line[n], (int)sizeof line[n],
@@ -1185,20 +1281,34 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                     }
                     if (n == 0) { line[0][0] = '\0'; }
                 }
-                if (st->ex_open[i] && n < 40) {
-                    {
-                        const char *p = st->ex_cmd[i];
-                        int cont = 0;
-                        while (*p && n < 40) {
-                            int used = tui_put_folded_n(line[n], (int)sizeof line[n],
-                                                        "  ", p, cols, cont);
-                            rs.body[n] = line[n];
-                            tui_hit_add(n + 2, i);
-                            n++;
-                            if (used <= 0) break;
-                            p += used;
-                            cont = 1;
-                        }
+                if (st->ex_open[i] && n < 40 && st->ex_cmd[i][0]
+                    && strcmp(st->ex_cmd[i], cond) != 0) {
+                    const char *p = st->ex_cmd[i];
+                    int cont = 0;
+                    while (*p && n < 40) {
+                        int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                    "  ", p, cols, cont);
+                        rs.body[n] = line[n];
+                        tui_hit_add(n + 2, i);
+                        n++;
+                        if (used <= 0) break;
+                        p += used;
+                        cont = 1;
+                    }
+                }
+                if (st->ex_open[i] && n < 40 && st->ex_body[i][0]) {
+                    const char *p = st->ex_body[i];
+                    int cont = 0, brows = 0;
+                    while (*p && n < 40 && brows < 8) {
+                        int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                    "  ", p, cols, cont);
+                        rs.body[n] = line[n];
+                        tui_hit_add(n + 2, i);
+                        n++;
+                        brows++;
+                        if (used <= 0) break;
+                        p += used;
+                        cont = 1;
                     }
                 }
             } else {
@@ -1883,28 +1993,36 @@ int main(int argc, char **argv) {
                 tui_state_init(&ex, NULL);
                 ex.mode = 1;
                 ex.rows = 24;
-                tui_log_event(&ex, "exec\t跑一下自测\tunisacc-cmd-marker");
+                tui_log_event(&ex, "exec\t跑一下自测\tcmd-ok");
+                tui_log_event(&ex, "  │ BODYMARK-hidden");
+                tui_log_event(&ex, "fold\tfile\tread\tjson.c");
+                tui_log_event(&ex, "  │ FILEBODY-hidden");
                 fr = tui_render_state(&ex, 40);
                 for (k = 0; k < fr.n; k++) {
-                    if (strstr(fr.lines[k], "exec[展开]>") && strstr(fr.lines[k], "跑一下自测")) {
+                    if (strstr(fr.lines[k], "exec[展开]>")) {
                         why = 1;
                         y = k + 1;
                     }
-                    if (strstr(fr.lines[k], "unisacc-cmd-marker")) cmd = 1;
+                    if (strstr(fr.lines[k], "BODYMARK-hidden")) cmd = 1;
+                    if (strstr(fr.lines[k], "FILEBODY-hidden")) cmd = 1;
                 }
-                if (!why || cmd || y < 1) {
-                    printf("FAIL exec why hidden command\n"); failures++;
+                if (!why || cmd || y < 1 || !tui_frame_has(&ex, "跑一下自测")
+                    || !tui_frame_has(&ex, "cmd-ok")
+                    || !tui_frame_has(&ex, "file[展开]>")
+                    || !tui_frame_has(&ex, "read · json.c")) {
+                    printf("FAIL tool row stays closed\n"); failures++;
                 } else {
                     tui_click(&ex, 1, y);
                     fr = tui_render_state(&ex, 40);
                     cmd = 0;
                     for (k = 0; k < fr.n; k++) {
                         if (strstr(fr.lines[k], "exec[收缩]>")) closed = 1;
-                        if (strstr(fr.lines[k], "unisacc-cmd-marker")) cmd = 1;
+                        if (strstr(fr.lines[k], "BODYMARK-hidden")) cmd = 1;
+                        if (strstr(fr.lines[k], "FILEBODY-hidden")) cmd = 1;
                     }
-                    if (!closed || !cmd) {
-                        printf("FAIL exec click did not expand\n"); failures++;
-                    } else printf("  ok   exec click toggles the command\n");
+                    if (!closed || !cmd || tui_frame_has(&ex, "FILEBODY-hidden")) {
+                        printf("FAIL tool click did not expand\n"); failures++;
+                    } else printf("  ok   tool row opens on click\n");
                 }
             }
             {

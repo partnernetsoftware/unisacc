@@ -6,7 +6,7 @@
  *     unisacc gate.c json.c session.c loop.c    →  arm64: main:
  * which reads like a missing backend feature and is not. loop.c drives the
  * three libraries, so they drop `main` and each keeps a CLI file
- * (json_cli.c). The self-test stays here, callable as `json_run_selftest`.
+ * (json_cli.c). json_run_selftest lives in that CLI, not in this library.
  *
  * WHY THIS LAYER, AND WHY NOW: the harness's session format is JSONL — one
  * JSON object per line. Reading it is the cheapest useful thing the C99 side
@@ -563,7 +563,7 @@ size_t json_rec(char *out, size_t cap,
 size_t json_msg(char *buf, size_t cap, int comma,
                 const char *role, const char *lead, const char *content) {
     size_t n = 0;
-    if (!buf || cap < 8) return 0;
+    if (!buf || cap < 8) { if (buf && cap) buf[0] = 0; return 0; }
     buf[0] = 0;
     if (comma && !jw_add(buf, cap, &n, ",", 1)) { buf[0] = 0; return 0; }
     if (!jw_add(buf, cap, &n, "{", 1) ||
@@ -624,157 +624,4 @@ size_t jlen(jvalue *v) {
     return 0;
 }
 
-/* ── self-test ──────────────────────────────────────────────────────────── */
-
-static int failures = 0;
-static void expect(int cond, const char *what) {
-    if (!cond) { printf("FAIL %s\n", what); failures++; }
-}
-
-/*
- * Runs the reader's cases. Non-static so json_cli.c can call it across files
- * while the assertions stay next to the code they check.
- */
-int json_run_selftest(void) {
-    char err[128];
-    jvalue *v;
-
-    v = json_parse("{\"a\":1,\"b\":\"x\"}", strlen("{\"a\":1,\"b\":\"x\"}"), err, sizeof(err));
-    expect(v != NULL, "object parses");
-    if (v) {
-        expect(jnum(jget(v, "a"), -1) == 1, "number field");
-        expect(jstr(jget(v, "b")) && !strcmp(jstr(jget(v, "b")), "x"), "string field");
-        expect(jget(v, "zz") == NULL, "missing key is NULL");
-        jfree(v);
-    }
-
-    /* A REAL session line: nested, unicode escape, boolean. */
-    {
-        const char *line = "{\"role\":\"user\",\"n\":3,\"ok\":true,\"t\":[\"a\",\"b\"],\"s\":\"\\u4e2d\\u6587\"}";
-        v = json_parse(line, strlen(line), err, sizeof(err));
-        expect(v != NULL, "session-shaped line parses");
-        if (v) {
-            expect(jlen(jget(v, "t")) == 2, "array length");
-            expect(jstr(jget(v, "s")) && !strcmp(jstr(jget(v, "s")), "\xe4\xb8\xad\xe6\x96\x87"), "\\u escape becomes UTF-8");
-            expect(jget(v, "ok") && jget(v, "ok")->kind == J_BOOL && jget(v, "ok")->b == 1, "boolean");
-            jfree(v);
-        }
-    }
-
-    /* Malformed input must FAIL, not silently produce something. */
-    expect(json_parse("{\"a\":}", strlen("{\"a\":}"), err, sizeof(err)) == NULL, "missing value rejected");
-    expect(json_parse("{\"a\":1} junk", strlen("{\"a\":1} junk"), err, sizeof(err)) == NULL, "trailing content rejected");
-    expect(json_parse("[1,2", strlen("[1,2"), err, sizeof(err)) == NULL, "unterminated array rejected");
-    expect(json_parse("\"unterminated", strlen("\"unterminated"), err, sizeof(err)) == NULL, "unterminated string rejected");
-    expect(json_parse("", strlen(""), err, sizeof(err)) == NULL, "empty input rejected");
-
-    /* Escapes that matter for a transcript. */
-    v = json_parse("\"a\\nb\\t\\\"c\\\\d\"", strlen("\"a\\nb\\t\\\"c\\\\d\""), err, sizeof(err));
-    expect(v && !strcmp(jstr(v), "a\nb\t\"c\\d"), "escapes decode");
-    jfree(v);
-
-    /* Surrogate pair → 4-byte UTF-8. */
-    v = json_parse("\"\\ud83d\\ude00\"", strlen("\"\\ud83d\\ude00\""), err, sizeof(err));
-    expect(v && jstr(v) && (unsigned char)jstr(v)[0] == 0xF0, "surrogate pair becomes 4-byte UTF-8");
-    jfree(v);
-
-    /* Writer: quotes, controls, and a round trip through the reader. */
-    {
-        char esc[64], wrapped[80];
-        size_t seen = 0;
-        json_escape("a\"b\\c\n\x01", esc, sizeof esc, &seen);
-        expect(seen == 7, "escape consumes the whole input");
-        expect(!strcmp(esc, "a\\\"b\\\\c\\n\\u0001"), "quotes, slash, newline, control");
-        snprintf(wrapped, sizeof wrapped, "\"%s\"", esc);
-        v = json_parse(wrapped, strlen(wrapped), err, sizeof err);
-        expect(v && jstr(v) && !strcmp(jstr(v), "a\"b\\c\n\x01"), "escape round-trips");
-        jfree(v);
-    }
-    /* The HTTP 400: a stray E7 (not a continuation) before 如何. */
-    {
-        char raw[8], esc[32], wrapped[40];
-        size_t seen = 0;
-        raw[0] = (char)0xE7;
-        raw[1] = (char)0xE5; raw[2] = (char)0xA6; raw[3] = (char)0x82; /* 如 */
-        raw[4] = (char)0xE4; raw[5] = (char)0xBD; raw[6] = (char)0x95; /* 何 */
-        raw[7] = 0;
-        json_escape(raw, esc, sizeof esc, &seen);
-        expect(seen == 7, "stray lead is consumed, not stuck");
-        snprintf(wrapped, sizeof wrapped, "\"%s\"", esc);
-        v = json_parse(wrapped, strlen(wrapped), err, sizeof err);
-        expect(v && jstr(v) && !strcmp(jstr(v), "\xe5\xa6\x82\xe4\xbd\x95"), "stray lead dropped, 如何 kept");
-        jfree(v);
-    }
-    /* A short buffer must not cut a code point or an escape in half. */
-    {
-        char tiny[4];
-        size_t seen = 99;
-        json_escape("\xe4\xb8\x80Z", tiny, 3, &seen);
-        expect(tiny[0] == 0 && seen == 0, "3-byte character does not fit in 2 bytes");
-        seen = 99;
-        json_escape("\xe4\xb8\x80Z", tiny, 4, &seen);
-        expect(!strcmp(tiny, "\xe4\xb8\x80") && seen == 3, "one complete character, then stop");
-        seen = 99;
-        json_escape("\"", tiny, 2, &seen);
-        expect(tiny[0] == 0 && seen == 0, "quote escape is not a lone backslash");
-    }
-
-    expect(json_parse("\"\\ud800\"", strlen("\"\\ud800\""), err, sizeof err) == NULL,
-           "lone high surrogate rejected");
-    expect(json_parse("\"\\ude00\"", strlen("\"\\ude00\""), err, sizeof err) == NULL,
-           "lone low surrogate rejected");
-    expect(json_parse("1e", strlen("1e"), err, sizeof err) == NULL, "truncated exponent rejected");
-    expect(json_parse("01", strlen("01"), err, sizeof err) == NULL, "leading zero rejected");
-    {
-        const char *span = " {\"a\":\"}\"} ";
-        size_t e = json_value_end(span, strlen(span));
-        expect(e == 10 && span[e - 1] == '}', "span closes after the brace inside the string");
-        expect(json_value_end("{", 1) == 0, "unclosed object is not a span");
-    }
-    {
-        char deep[80];
-        int i;
-        for (i = 0; i < 33; i++) deep[i] = '[';
-        deep[33] = '1';
-        for (i = 0; i < 33; i++) deep[34 + i] = ']';
-        deep[67] = 0;
-        expect(json_parse(deep, 67, err, sizeof err) == NULL, "nesting past 32 is rejected");
-        expect(json_value_end(deep, 67) == 0, "a too-deep span is not a value");
-    }
-
-    {
-        char buf[80];
-        size_t n = json_rec(buf, sizeof buf, "role", "user", "text", "a\"b", NULL, NULL);
-        expect(n > 0 && !strcmp(buf, "{\"role\":\"user\",\"text\":\"a\\\"b\"}"),
-               "a record escapes its value");
-        expect(json_rec(buf, 8, "role", "user", "text", "hello", NULL, NULL) == 0
-               && buf[0] == 0, "a short record buffer stays empty");
-        n = json_msg(buf, sizeof buf, 1, "user", NULL, "x");
-        expect(n > 0 && !strcmp(buf, ",{\"role\":\"user\",\"content\":\"x\"}"),
-               "a message is role and content");
-        n = json_msg(buf, sizeof buf, 0, "user", "[tool]\n", "z");
-        expect(n > 0 && !strcmp(buf, "{\"role\":\"user\",\"content\":\"[tool]\\nz\"}"),
-               "a message lead is escaped with the content");
-    }
-
-    /* Empty containers are legal. */
-    v = json_parse("{}", strlen("{}"), err, sizeof(err)); expect(v != NULL, "{} parses"); jfree(v);
-    v = json_parse("[]", strlen("[]"), err, sizeof(err)); expect(v != NULL, "[] parses"); jfree(v);
-
-    /* Negative and exponent numbers. */
-    /* Length must be strlen, not "looks about right" — passed 7 for a 6-char
-     * literal on the first attempt, which handed the parser the NUL as input
-     * and failed a correct parser. Caught by this very test. */
-    v = json_parse("-1.5e3", strlen("-1.5e3"), err, sizeof(err));
-    expect(v && jnum(v, 0) < -1499.0 && jnum(v, 0) > -1501.0, "negative exponent number");
-    jfree(v);
-
-    printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
-    return failures == 0 ? 0 : 1;
-}
-
-/* The CLI (json_cli.c) owns `main`, the stdin reading, and the summary print, so
- * this library exposes only string→value entry points and keeps stdio out of its
- * interface. An earlier note blamed a cross-file `FILE *` prototype for
- * mis-lowering `%.4f`; unisacc 0.0.23 does not do that (measured 2026-10-04), so
- * the claim is gone and only the split remains. */
+/* json_cli.c owns main and json_run_selftest. */

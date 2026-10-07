@@ -1510,9 +1510,15 @@ static int at_after_http(void) {
                 cmdb[co] = 0;
                 snprintf(ev, sizeof ev, "exec\t%s\t%s", whyb, cmdb);
             }
-            else if (s.kind == ACT_READ || s.kind == ACT_WRITE || s.kind == ACT_EDIT)
-                snprintf(ev, sizeof ev, "▸ %s: %s", nm, s.path);
-            else if (s.kind == ACT_MIND) snprintf(ev, sizeof ev, "▸ %s %s: %s", nm, s.op, s.path);
+            else if (s.kind == ACT_READ)
+                snprintf(ev, sizeof ev, "fold\tfile\tread\t%s", s.path);
+            else if (s.kind == ACT_WRITE)
+                snprintf(ev, sizeof ev, "fold\tfile\twrite\t%s", s.path);
+            else if (s.kind == ACT_EDIT)
+                snprintf(ev, sizeof ev, "fold\tfile\tedit\t%s", s.path);
+            else if (s.kind == ACT_MIND)
+                snprintf(ev, sizeof ev, "fold\tmind\t%s\t%s",
+                         s.op[0] ? s.op : "mind", s.path);
             else if (s.kind == ACT_ANSWER) {
                 char arows[12][200];
                 char apref[48];
