@@ -65,27 +65,7 @@ static char _unisa_ch;
    feof() at all is likely to hold open; a ninth simply forgets its flags
    rather than failing, because a wrong answer from feof() is worse than none.
    [R13-0 #06 / N15] */
-#define _U_NST 8
-static int _u_st_fd[_U_NST];
-static int _u_st_eof[_U_NST];
-static int _u_st_err[_U_NST];
-static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
-/* D3: a 4 KB read buffer per stream.  Bytes are taken from it before the
-   descriptor is asked again; fseek/rewind drop it and ftell subtracts what is
-   still unread, so the stream position stays the one C99 7.19.9 describes. */
-#define _U_BUFSZ 4096
-static char _u_st_buf[_U_NST * _U_BUFSZ];
-static int _u_st_bpos[_U_NST];
-static int _u_st_blen[_U_NST];
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_copy
-static void _u_st_copy(char *__u_d, const char *__u_s, long __u_n) {
-    long __u_j; __u_j = 0;
-    while (__u_j < __u_n) { __u_d[__u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
-}
-#endif
-static int _u_st_wlen[_U_NST];             /* D3': bytes waiting in the buffer to be written */
-static int _u_st_n;
-
+#include <sys/_exit.h>
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
 static int _u_st_slot(FILE *__u_f) {
     int __u_fd; int __u_i;
@@ -103,41 +83,6 @@ static int _u_st_slot(FILE *__u_f) {
     return __u_i;
 }
 #endif
-
-/* D3': the write side of the buffer.  A stream's buffer holds either unread
-   bytes or unwritten ones: a write after a read gives the unread part back to
-   the descriptor (lseek), and a read, seek, tell, fflush, fclose or exit
-   writes the waiting bytes first.  The loop in _u_st_raw stops on what the
-   __write gate calls an error: negative on POSIX and the VM, 0 on Windows
-   (WriteFile's count); an answer larger than asked is not trusted. */
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_raw
-static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
-    long __u_done; long __u_r;
-    __u_done = 0;
-    while (__u_done < __u_n) {
-        __u_r = __write(__u_fd, (char *)__u_p + __u_done, __u_n - __u_done);
-        if (__u_r <= 0 || __u_r > __u_n - __u_done) return __u_done;
-        __u_done = __u_done + __u_r;
-    }
-    return __u_n;
-}
-#endif
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_wflush
-static int _u_st_wflush(int __u_i) {
-    long __u_k;
-    if (__u_i < 0 || _u_st_wlen[__u_i] == 0) return 0;
-    __u_k = _u_st_wlen[__u_i]; _u_st_wlen[__u_i] = 0;
-    if (_u_st_raw(_u_st_fd[__u_i], _u_st_buf + __u_i * _U_BUFSZ, __u_k) != __u_k) { _u_st_err[__u_i] = 1; return EOF; }
-    return 0;
-}
-#endif
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_flushall
-static void _u_st_flushall(void) {
-    int __u_i; __u_i = 0;
-    while (__u_i < _u_st_n) { _u_st_wflush(__u_i); __u_i = __u_i + 1; }
-}
-#endif
-#include <sys/_exit.h>
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
 static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n) {
     int __u_fd; int __u_i;
@@ -149,9 +94,10 @@ static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n) {
     if (_u_st_bpos[__u_i] < _u_st_blen[__u_i] || _u_st_ung[__u_i] >= 0)
         __lseek(__u_fd, 0 - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0), SEEK_CUR);
     _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
-    /* exit flushes; naming exit here also keeps its body under -ftrim-libc,
+    /* exit flushes; naming exit here keeps its body under -ftrim-libc,
        so a return from main goes through it (front_parse.c __main_ret) */
-    _unisa_stdio_flush = _u_st_flushall; _unisa_stdio_reach = exit;
+    if (__u_n < 0) exit(1);   /* never taken: a call (not an address, which Windows forward
+                                 programs refuse as a callback) that keeps exit under -ftrim-libc */
     if (_u_st_wlen[__u_i] + __u_n > _U_BUFSZ) { if (_u_st_wflush(__u_i) != 0) return 0; }
     if (__u_n >= _U_BUFSZ) return _u_st_raw(__u_fd, __u_p, __u_n);
     _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ + _u_st_wlen[__u_i], __u_p, __u_n);
