@@ -1,6 +1,5 @@
-/* sys/socket.h -- 0.0.19 R19-1 (dsh: the harness's HTTP/SSE).  Linux and
- * macOS through the generic gate; constants and sockaddr layouts per OS (macOS
- * sockaddr starts with a length byte).  Not on Windows yet (Winsock: 0.0.20). */
+/* sys/socket.h -- POSIX sockets through the generic gate on Linux/macOS;
+ * Windows sockets use ws2_32 forwarding and keep SOCKET at pointer width. */
 #ifndef _UNISA_SYS_SOCKET_H
 #define _UNISA_SYS_SOCKET_H
 #include <sys/types.h>
@@ -12,6 +11,17 @@ typedef unsigned short sa_family_t;
 struct sockaddr { unsigned char sa_len; unsigned char sa_family; char sa_data[14]; };
 struct sockaddr_storage { unsigned char ss_len; unsigned char ss_family; char __ss_pad[126]; };
 #define AF_INET6 30
+#define SOL_SOCKET 0xffff
+#define SO_REUSEADDR 0x0004
+#define SO_KEEPALIVE 0x0008
+#define SO_RCVBUF 0x1002
+#define SO_SNDBUF 0x1001
+#define SO_ERROR 0x1007
+#define MSG_NOSIGNAL 0
+#elif defined(_WIN32)
+struct sockaddr { sa_family_t sa_family; char sa_data[14]; };
+struct sockaddr_storage { sa_family_t ss_family; char __ss_pad[126]; };
+#define AF_INET6 23
 #define SOL_SOCKET 0xffff
 #define SO_REUSEADDR 0x0004
 #define SO_KEEPALIVE 0x0008
@@ -41,7 +51,29 @@ struct sockaddr_storage { sa_family_t ss_family; char __ss_pad[126]; };
 #define SHUT_WR 1
 #define SHUT_RDWR 2
 #define MSG_PEEK 2
-#ifndef _WIN32
+#ifdef _WIN32
+/* Winsock exports use a pointer-width SOCKET, not a POSIX int fd.  These are
+ * declarations: the whole-program forwarder resolves them from ws2_32.dll. */
+typedef unsigned long SOCKET;
+#define INVALID_SOCKET ((SOCKET)-1)
+#define SOCKET_ERROR (-1)
+SOCKET socket(int __u_af, int __u_type, int __u_protocol);
+int connect(SOCKET __u_s, const struct sockaddr *__u_addr, int __u_len);
+int bind(SOCKET __u_s, const struct sockaddr *__u_addr, int __u_len);
+int listen(SOCKET __u_s, int __u_backlog);
+SOCKET accept(SOCKET __u_s, struct sockaddr *__u_addr, int *__u_len);
+int send(SOCKET __u_s, const char *__u_buf, int __u_len, int __u_flags);
+int recv(SOCKET __u_s, char *__u_buf, int __u_len, int __u_flags);
+int sendto(SOCKET __u_s, const char *__u_buf, int __u_len, int __u_flags, const struct sockaddr *__u_addr, int __u_addrlen);
+int recvfrom(SOCKET __u_s, char *__u_buf, int __u_len, int __u_flags, struct sockaddr *__u_addr, int *__u_addrlen);
+int setsockopt(SOCKET __u_s, int __u_level, int __u_name, const char *__u_value, int __u_len);
+int getsockopt(SOCKET __u_s, int __u_level, int __u_name, char *__u_value, int *__u_len);
+int getsockname(SOCKET __u_s, struct sockaddr *__u_addr, int *__u_len);
+int getpeername(SOCKET __u_s, struct sockaddr *__u_addr, int *__u_len);
+int shutdown(SOCKET __u_s, int __u_how);
+int closesocket(SOCKET __u_s);
+int WSAGetLastError(void);
+#else
 #ifdef __APPLE__
 #define _UNISA_NR_socket 97
 #define _UNISA_NR_connect 98
