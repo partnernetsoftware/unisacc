@@ -29,7 +29,7 @@ int main(void) {
     printf("mid %s\n", back);
     fclose(f);
     f = fopen(p, "r");
-    n = (long)fread(back, 1, sizeof back, f);
+    n = (long)fread(back, 1, sizeof back - 1, f); back[n] = 0;
     printf("all %ld %c%c %s %d\n", n, back[6], back[7], back + n - 3,
            memcmp(back + 8, big + 2, 9998) == 0);
     fclose(f);
