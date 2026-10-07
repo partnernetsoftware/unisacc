@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from unisa.tapebin import TARGETS, encode, target_id
+from unisa.tapebin import TARGETS, decode, encode, target_id
 from knownfail import read as knownfail_read
 
 
@@ -38,6 +38,15 @@ def main():
         base = pathlib.Path(tmp)
         ref = base / "ref"
         run(["./tests/build_ref.sh", base / "ref.c", ref])
+        if k == 1:
+            # The C reader must distinguish the adjacent callr/callm opcodes.
+            # A bad callr decode used to print [r5+0] and fail later in ARM64 E4.
+            calls = base / "calls.tapebin"
+            calls.write_bytes(encode("entry:\n  callr r5\n  callm [r5+0]\n  ret\n"))
+            decoded = base / "calls.tape"
+            run(["sh", product, calls, "-t", "lnx/arm64", "-o", decoded])
+            if decoded.read_bytes() != decode(calls.read_bytes()).to_canonical_text().encode("latin-1"):
+                raise AssertionError("model tapebin reader confuses callr and callm")
         for target in (TARGETS if k == 1 else ()):
             binary = base / "hello.tapebin"
             classic = base / "classic.tapebin"
