@@ -52,7 +52,7 @@ A 研究给定有限控制表到网络的精确构造，不证明控制表自动
 
 | 文件 | 角色 |
 |---|---|
-| [`paper-d-intent.md`](paper-d-intent.md) | 意向书（分工、三步、需要的理论、实验、风险）；工程条目在 plans/v0.1.x.md v0.1.3 |
+| [`paper-d-intent.md`](paper-d-intent.md) | 意向书（分工、三步、需要的理论、实验、风险）；工程条目在 archive/plans/v0.1.x.md v0.1.3 |
 
 **Paper E**
 

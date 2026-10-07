@@ -24,8 +24,6 @@
 | v0.0.30 | [archive/plans/v0.0.30.md](archive/plans/v0.0.30.md) | 2026-10-06 公开 |
 | v0.0.31 | [plans/v0.0.31.md](plans/v0.0.31.md) | 已完成，公开待政委裁定 |
 | v0.0.32 | [plans/v0.0.32.md](plans/v0.0.32.md) | 已公开（10-07，v0.0.32 unisacc.com d198bae2，候选 38ea3622；回执 research/r32-release-acceptance.json）
-| v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；权重本体与推理速度的精确结构优化实验（§5.2）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
-| v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
 
 历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的问题由 [v0.0.31 计划](plans/v0.0.31.md) 跟踪。
@@ -251,10 +249,10 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 - **0.0.x 收官（2026-10-05，主人：按规划早点做完；同日修订）**：见 [plans/roadmap-0.0.x.md](plans/roadmap-0.0.x.md)。六个版本：0.0.29 parse2；0.0.30 enc/lower + pthread/wctype/fenv；0.0.31 构建链不调用 Python；0.0.32 lua+sqlite 两路线通过；0.0.33 Windows 宿主转发 + 六平台进程矩阵；0.0.34 minicon+agenterm 通过、包与容器自构造 = 0.0.x 完工。0.1.x 只留证明、内存安全节点、权重研究、wasm。只顺延、不砍。
 - **远期（主人 2026-10-06）**：从 0.2.x.y 起具备完善的 POSIX C99 能力，并逐步丰富包管理，形成自己的生态，摆脱对 Python/Node.js/Bun 等动态语言的依赖。路线含义：0.0.31 的构建链不调用 Python 是第一步；0.1.x 之后的每版应削减一项动态语言依赖（参考实现、门禁脚本、发布工具），并为包格式和包仓库预留条款。远期还包括（主人 2026-10-06 补充）：unisacc.com 成熟后作为 shebang 解释器运行 Unix 脚本（`#!/usr/bin/env unisacc.com -run`，已有的 `-run` 在内存里映射代码，不写出二进制、不触发首次执行扫描）；脚本后缀定为 **`.cx`**（主人 2026-10-06 决定：表示 .c 的扩展；`.cs` C#、`.csh` C shell 已被占用）。
-- **.cx 替代 .sh/.py 的分期（主人 2026-10-07 问“哪个版本能完成”；cc 评估 10-07）**：现状——`#!/usr/bin/env unisacc.com -run` 的 .cx 已能跑（t.cx 实测传参正确），libc 已有 system/fork/execvp/waitpid/opendir/glob/regcomp/getenv，缺 popen；仓库跟踪 190 个 .sh（tests 106、exec 55、release 13）与 408 个 .py（tests 170、exec 118、unisa 48、ujs 29）。分期：**0.0.34** 补 popen 与一个小的 `include/cx.h`（跑命令取输出、读写整文件、sha256、限时），试点改写 3 个小脚本（prevheaders、headerchain、lifecycle）并入门禁；**0.0.35–0.0.36** 构建与发布链（release/ 13 个 .sh、build_candidate、buildcompiler 编排）改为 .cx，由上一版 unisacc.com 运行，自举链除宿主 cc 外不再需要 sh/Python；**0.0.37** 门禁编排（gate/gatequeue/term）；**0.0.38–0.0.39** tests 下 170 个 .py 套件（两版分批）；**0.0.40** exec 生成器（cdx 域，δ 构造器已有 C 种子先例 seed/gen.c）；**0.0.41** 替换 unisa/ Python 参考实现（行为基准，须先有逐字节等价的 C/.cx 参考）。**全部在 0.0.x 内完成自举**（主人 10-07：0.0.x 就自举，0.1.x 开发包管理）；0.1.x 不承载本迁移，plans/v0.1.x.md 须在 0.0.33 收官时按「0.1.x = 包管理」重排。完成判据：仓库干净机器只装 unisacc.com 与宿主 cc 即可构建、门禁、发布。
-- **0.2.x.y 系列目标（主人 2026-10-06）**：Node.js/Bun/Python 的生态强在好用的语法糖与丰富的包；unisa/unisacc 要为两者给出方案，在脚本领域重新夺回领地（`.cx` + shebang `-run` 是入口）。同期借鉴 Rust 的内存管理（所有权/借用一类的静态检查，与 0.1.x 内存安全检查节点衔接）。具体条款待 0.1.x 收官后写入 plans/v0.2.x.md。
+- **.cx 替代 .sh/.py 的分期（主人 2026-10-07 问“哪个版本能完成”；cc 评估 10-07）**：现状——`#!/usr/bin/env unisacc.com -run` 的 .cx 已能跑（t.cx 实测传参正确），libc 已有 system/fork/execvp/waitpid/opendir/glob/regcomp/getenv，缺 popen；仓库跟踪 190 个 .sh（tests 106、exec 55、release 13）与 408 个 .py（tests 170、exec 118、unisa 48、ujs 29）。分期：**0.0.34** 补 popen 与一个小的 `include/cx.h`（跑命令取输出、读写整文件、sha256、限时），试点改写 3 个小脚本（prevheaders、headerchain、lifecycle）并入门禁；**0.0.35–0.0.36** 构建与发布链（release/ 13 个 .sh、build_candidate、buildcompiler 编排）改为 .cx，由上一版 unisacc.com 运行，自举链除宿主 cc 外不再需要 sh/Python；**0.0.37** 门禁编排（gate/gatequeue/term）；**0.0.38–0.0.39** tests 下 170 个 .py 套件（两版分批）；**0.0.40** exec 生成器（cdx 域，δ 构造器已有 C 种子先例 seed/gen.c）；**0.0.41** 替换 unisa/ Python 参考实现（行为基准，须先有逐字节等价的 C/.cx 参考）。**全部在 0.0.x 内完成自举**（主人 10-07：0.0.x 就自举，0.1.x 开发包管理）。完成判据：仓库干净机器只装 unisacc.com 与宿主 cc 即可构建、门禁、发布。
+- 0.2.x.y 系列目标（脚本领域、Rust 式内存检查）随 0.1.x/0.2.x 计划于 2026-10-07 撤下，原文见 git 历史（主人：专心 0.0.x.y）。
 
-当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](archive/plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
+当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](archive/plans/v0.0.22.md)。0.1.x/0.2.x 远期计划已于 2026-10-07 撤下（主人：干扰太大，专心 0.0.x.y），旧稿在 archive/plans/。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
 
 ### 5.0 种子层路线（主人定调 2026-10-03 19:51）
 
@@ -278,7 +276,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 目标是减少阈值网络的**权重与结构记录本身**、运行时内存及每次编译的模型求值成本；P3/DEFLATE 发布包压缩率只作背景指标，不能冒充权重减少。只读快照（根 `unisacc.com` SHA256 `8dad89c528a789a25151ec26e8ea38889b8c1aa15bb8a8badba161a9fb7eda31`，2026-10-05）：28 个网络共 71,771 个状态银行、122,958 个阈值隐单元；48,558 个银行无隐单元，66,230 个银行至多两个，284 个银行至少 32 个，最大 2,171 个。`research/model-bytes.json` 的 raw 2,996,855 B / 存储 880,454 B 与此快照的网络数量同量，但该账本绑定旧候选，不能当当前源码身份。已有 [FX-6 测量](archive/research/r12/r12-fx6-measurement.json)：每次转移平均激活 1.9 个单元、每输入字节约 18.3 次转移，SIMD/O3 未提速；静态银行数不代表动态热度。
 
-优先做两项**最小实验**，具体排期和验收在 [0.1.x 计划](plans/v0.1.x.md) 的“权重本体与推理”节：
+优先做两项**最小实验**，旧排期见 [archive/plans/v0.1.x.md](archive/plans/v0.1.x.md) 的权重本体与推理一节（已撤下，不排期）：
 
 1. **同权连续阈值段的精确聚合**：把一段相同的双输出差分权重表示为阈值激活数乘权重，保持阈值网络语义。只读统计得到 122,958 个单元可归为 66,975 段（记录数 1.84 倍），其中 234 个长银行的记录数可局部减少至少 10 倍；尚未计新增段字段、真实字节、访问频率与延迟，不能宣称全模型或整机达到 10 倍。
 2. **类型化动作模板与银行结构归一化**：统计仅在寄存器、常量、字符串或续点上不同的动作/状态，连同参数和重定位计算真实大小；先只读建模，不改执行器。若净字节或动态热点不足，停止“全模型数量级缩小”假设。

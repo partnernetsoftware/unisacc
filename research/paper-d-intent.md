@@ -1,7 +1,7 @@
 # Paper D 意向书：权重换逻辑流水线里的可选内存安全节点——模型推断标注、确定性检查器验证、按证明程度分级编译
 
 **状态**：意向书（2026-09-30，政委方向）。不是草稿，也不做任何结果声称。
-**关系**：独立成文。依赖 Paper A（[`unisacc-paper.md`](unisacc-paper.md)：表即网络、δ 框架、穷举验证）与 Paper C（[`paper-c-intent.md`](paper-c-intent.md)：管道方法）；把内存安全当作"在同一条流水线上再加一个可选节点"的实例，而不是另起一套工具。工程条目在 [`plans/v0.1.x.md`](../plans/v0.1.x.md) v0.1.3。
+**关系**：独立成文。依赖 Paper A（[`unisacc-paper.md`](unisacc-paper.md)：表即网络、δ 框架、穷举验证）与 Paper C（[`paper-c-intent.md`](paper-c-intent.md)：管道方法）；把内存安全当作"在同一条流水线上再加一个可选节点"的实例，而不是另起一套工具。工程条目在 [`archive/plans/v0.1.x.md`](../archive/plans/v0.1.x.md) v0.1.3。
 
 ---
 
