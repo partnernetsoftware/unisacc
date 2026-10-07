@@ -252,3 +252,4 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **queuecheck 的真实快照用例要求树已签章**：先提交接线、刷新 gatedeps，再跑 queuecheck。
 - **分段 ape 要封完整长度**：R3′ 把数据零尾改成长度（Padded）后，tests/ape_stage.py 写 data.bin 只剩前缀，Linux 分段 ape 段错误（139）；record 现记 data_len（schema 3）。单跑 ape 走直接构建，所以只在 all 里红。
 - **linux.sh all --suite NAME**：Linux 红项单独重跑（ape 14 s、native8/ccrun8 各约 15 s），不必再跑 1063 s 整轮；全套中 native8/ccrun8 的 55 s 超时单独复跑为绿，属负载。
+- **未签名回执绑 rc 提交的 release-check run**：0.0.32 先按 20148939 的 run 做回执，封存推送后 rc 指向 28c850e6，资格签名断言 wrong upstream source 失败；改用 28c850e6 自己的 run（37572481970）重做回执（zip 字节不变）后通过。顺序：封存 → push → rc_tag → 等该提交的 release-check 绿 → unsigned_receipt.py → 上传草稿 → 资格/公司签名（scratchpad qual32.sh 一条链）。
