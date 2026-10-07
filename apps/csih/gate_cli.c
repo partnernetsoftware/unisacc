@@ -68,3 +68,32 @@ int main(int argc, char **argv)
     printf("%s p=%.4f reason=\"%s\"\n", d.cont ? "CONTINUE" : "STOP", d.p, d.why);
     return d.cont ? 0 : 1;
 }
+
+int gate_run_selftest(const gate_config *cfg)
+{
+    struct { const char *in; int ok; double p; int cont; } cases[] = {
+        { "0.83",            1, 0.83, 1 },
+        { "0",               1, 0.00, 0 },
+        { "The probability is 0.9", 1, 0.90, 1 },
+        { "0.2\nActually 0.7",      1, 0.70, 1 },
+        { "80%",             1, 0.80, 1 },
+        { "1.4",             1, 1.00, 1 },
+        { "-0.2",            1, 0.00, 0 },
+        { "no number here",  0, 0.00, 0 },
+        { "",                0, 0.00, 0 },
+    };
+    size_t n = sizeof(cases) / sizeof(cases[0]), k, bad = 0;
+    for (k = 0; k < n; k++) {
+        gate_decision d = gate_decide(cases[k].in, cfg);
+        int ok = (d.ok == cases[k].ok) &&
+                 (!d.ok || (d.p > cases[k].p - 0.001 && d.p < cases[k].p + 0.001)) &&
+                 (d.cont == cases[k].cont);
+        if (!ok) {
+            bad++;
+            printf("FAIL [%s] got ok=%d p=%.3f cont=%d\n", cases[k].in, d.ok, d.p, d.cont);
+        }
+    }
+    printf("%lu/%lu self-test cases pass\n",
+           (unsigned long)(n - bad), (unsigned long)n);
+    return bad == 0 ? 0 : 1;
+}

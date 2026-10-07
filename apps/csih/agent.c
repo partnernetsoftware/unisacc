@@ -50,6 +50,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "csih_home.h"
+#include "plugin_api.h"
 
 /* ── restated declarations (so this file compiles alone) ─────────────────── */
 
@@ -170,6 +171,16 @@ typedef struct {
     int   line;    /* 1-based start for file read; 0 means line 1 */
     int   nlines;  /* how many lines; 0 means the default window */
 } agent_step;
+
+static int agent_mind(const agent_step *s, const char *cwd, char *out, int outlen);
+static agent_step g_mind_step;
+static const char *g_mind_cwd;
+static void mind_register(void);
+static void file_register(void);
+static void exec_register(void);
+static int agent_file(const agent_step *s, const char *cwd, char *out, int outlen);
+static agent_step g_file_step;
+static const char *g_file_cwd;
 
 #define AGENT_CONTENT_MAX 4096
 #define AGENT_ANSWER_MAX  4096
@@ -697,29 +708,33 @@ int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
     out[0] = '\0';
     agent_under(cwd, s->path, path, sizeof path);
     switch (s->kind) {
-    case ACT_EXEC: {
-        shell_result r = shell_run_in(s->cmd, cwd);
-        long cap = (long)(outlen - 64);
-        long n = r.bytes;
-        int trunc = 0;
-        char head[160];
-        if (n < 0) { n = (long)strlen(r.out); trunc = 1; }
-        snprintf(head, sizeof head, "cwd=%s\nexit=%d\n",
-                 cwd && cwd[0] ? cwd : ".", r.exited ? r.status : -1);
-        if (n > AGENT_SPILL_AT && agent_spill(r.out, (size_t)n, out, outlen)) {
-            char merged[AGENT_RESULT_MAX];
-            snprintf(merged, sizeof merged, "%s%s%s", head, out,
-                     trunc ? "\n(capture stopped at shell buffer)" : "");
-            snprintf(out, outlen, "%s", merged);
-            return s->cmd[0] ? 1 : 0;
-        }
-        if (n > cap) { n = cap; trunc = 1; }
-        if (n < 0) n = 0;
-        snprintf(out, outlen, "%s%.*s%s", head, (int)n, r.out,
-                 trunc ? "\n... (truncated)" : "");
-        return s->cmd[0] ? 1 : 0;
+    case ACT_EXEC:
+        g_file_step = *s;
+        g_file_cwd = cwd;
+        exec_register();
+        return plugin_run("exec", s->cmd, out, outlen);
+    case ACT_READ:
+    case ACT_WRITE:
+    case ACT_EDIT:
+        g_file_step = *s;
+        g_file_cwd = cwd;
+        file_register();
+        return plugin_run("file", s->path, out, outlen);
+    case ACT_MIND:
+        g_mind_step = *s;
+        g_mind_cwd = cwd;
+        mind_register();
+        return plugin_run("mind", s->path, out, outlen);
+    default:
+        snprintf(out, outlen, "unrecognized step");
+        return 0;
     }
-    case ACT_READ: {
+}
+
+static int agent_file(const agent_step *s, const char *cwd, char *out, int outlen) {
+    char path[512];
+    agent_under(cwd, s->path, path, sizeof path);
+    if (s->kind == ACT_READ) {
         FILE *f;
         char row[2048];
         int start, want, total = 0, shown = 0, last = 0, full = 0;
@@ -759,7 +774,7 @@ int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
         }
         return 1;
     }
-    case ACT_WRITE: {
+    if (s->kind == ACT_WRITE) {
         file_result r = file_write(path, s->text, strlen(s->text));
         snprintf(out, outlen, r.ok ? "wrote %ld bytes" : "write failed (err=%ld)",
                  r.ok ? r.bytes : (long)r.err);
@@ -774,7 +789,8 @@ int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
         }
         return (s->path[0] && s->text[0]) ? 1 : 0;
     }
-    case ACT_EDIT: {
+    /* ACT_EDIT */
+    {
         edit_result r = edit_replace(path, s->old, s->nw);
         if (!r.ok) snprintf(out, outlen, "edit failed (err=%d)", r.err);
         else if (r.count == 0) snprintf(out, outlen, "edit: old text not found");
@@ -791,7 +807,9 @@ int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
         }
         return (s->path[0] && s->old[0]) ? 1 : 0;
     }
-    case ACT_MIND: {
+}
+
+static int agent_mind(const agent_step *s, const char *cwd, char *out, int outlen) {
         /* which: tree → ~/.csih/思维树.md (markdown-tree-dag),
          * palace → ~/.csih/记忆宫殿.md (mermaid-flowchart-memory-palace).
          * op is s->op: "read" returns the file, "add" appends one
@@ -836,11 +854,65 @@ int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
         }
         snprintf(out, outlen, "mind: op must be read or add");
         return 0;
+}
+
+/* plugin_run("mind") reaches here: the static step kept by agent_exec. */
+static int mind_run(const char *arg, char *out, int outlen) {
+    (void)arg;
+    return agent_mind(&g_mind_step, g_mind_cwd, out, outlen);
+}
+
+static cdsh_plugin mind_row = { "mind", "tree|palace add|read", mind_run, 0 };
+static int mind_registered;
+static void mind_register(void) {
+    if (!mind_registered) { mind_registered = 1; plugin_register(&mind_row); }
+}
+
+/* plugin_run("file") reaches here: the static step kept by agent_exec. */
+static int file_run(const char *arg, char *out, int outlen) {
+    (void)arg;
+    return agent_file(&g_file_step, g_file_cwd, out, outlen);
+}
+
+static cdsh_plugin file_row = { "file", "read|write|edit", file_run, 0 };
+static int file_registered;
+static void file_register(void) {
+    if (!file_registered) { file_registered = 1; plugin_register(&file_row); }
+}
+
+/* plugin_run("exec") reaches here; runs the current step's command. */
+static int exec_run(const char *arg, char *out, int outlen) {
+    const agent_step *s = &g_file_step;
+    const char *cwd = g_file_cwd;
+    shell_result r;
+    long cap, n;
+    int trunc = 0;
+    char head[160];
+    (void)arg;
+    r = shell_run_in(s->cmd, cwd);
+    cap = (long)(outlen - 64);
+    n = r.bytes;
+    if (n < 0) { n = (long)strlen(r.out); trunc = 1; }
+    snprintf(head, sizeof head, "cwd=%s\nexit=%d\n",
+             cwd && cwd[0] ? cwd : ".", r.exited ? r.status : -1);
+    if (n > AGENT_SPILL_AT && agent_spill(r.out, (size_t)n, out, outlen)) {
+        char merged[AGENT_RESULT_MAX];
+        snprintf(merged, sizeof merged, "%s%s%s", head, out,
+                 trunc ? "\n(capture stopped at shell buffer)" : "");
+        snprintf(out, outlen, "%s", merged);
+        return s->cmd[0] ? 1 : 0;
     }
-    default:
-        snprintf(out, outlen, "unrecognized step");
-        return 0;
-    }
+    if (n > cap) { n = cap; trunc = 1; }
+    if (n < 0) n = 0;
+    snprintf(out, outlen, "%s%.*s%s", head, (int)n, r.out,
+             trunc ? "\n... (truncated)" : "");
+    return s->cmd[0] ? 1 : 0;
+}
+
+static cdsh_plugin exec_row = { "exec", "shell", exec_run, 0 };
+static int exec_registered;
+static void exec_register(void) {
+    if (!exec_registered) { exec_registered = 1; plugin_register(&exec_row); }
 }
 
 /* Chat completions accept only system/user/assistant. Transcript roles such as

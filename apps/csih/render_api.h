@@ -13,7 +13,7 @@
  * self-tests live in *_cli.c and why check.sh asserts the rule still holds.
  * Including a .c was simply the same rule broken by a different route.
  *
- * RULE: a module's self-test stays in the module; a module's interface is
+ * RULE: a module's self-test lives in its *_cli.c; a module's interface is
  * declared here. Never `#include` a .c file.
  */
 #ifndef CDSH_RENDER_API_H

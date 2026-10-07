@@ -6,9 +6,8 @@
  *     unisacc gate.c json.c session.c loop.c    →  arm64: main:
  * which reads like a missing backend feature and is not. loop.c is the program
  * that drives all three, so the LIBRARIES drop `main` and the CLI moved to
- * gate_cli.c. The self-test is still in this file (callable as
- * `gate_run_selftest`) so `unisacc gate.c gate_cli.c selftest` proves this
- * module alone, unchanged in spirit from when the main lived here.
+ * gate_cli.c. The self-test lives in that file (`gate_run_selftest`) so
+ * `unisacc gate.c gate_cli.c selftest` proves this module alone.
  *
  * The CLI takes SUBCOMMANDS, not dash-options. Measured on unisacc 0.0.17:
  * running a source directly reserves the dash flags for the compiler itself —
@@ -162,31 +161,5 @@ gate_decision gate_decide(const char *reply, const gate_config *cfg)
  * so the assertions live next to the policy they check — the same reason the
  * JS side keeps its tests beside the code.
  */
-int gate_run_selftest(const gate_config *cfg)
-{
-    struct { const char *in; int ok; double p; int cont; } cases[] = {
-        { "0.83",            1, 0.83, 1 },
-        { "0",               1, 0.00, 0 },
-        { "The probability is 0.9", 1, 0.90, 1 },
-        { "0.2\nActually 0.7",      1, 0.70, 1 },
-        { "80%",             1, 0.80, 1 },
-        { "1.4",             1, 1.00, 1 },
-        { "-0.2",            1, 0.00, 0 },
-        { "no number here",  0, 0.00, 0 },
-        { "",                0, 0.00, 0 },
-    };
-    size_t n = sizeof(cases) / sizeof(cases[0]), k, bad = 0;
-    for (k = 0; k < n; k++) {
-        gate_decision d = decide(cases[k].in, cfg);
-        int ok = (d.ok == cases[k].ok) &&
-                 (!d.ok || (d.p > cases[k].p - 0.001 && d.p < cases[k].p + 0.001)) &&
-                 (d.cont == cases[k].cont);
-        if (!ok) {
-            bad++;
-            printf("FAIL [%s] got ok=%d p=%.3f cont=%d\n", cases[k].in, d.ok, d.p, d.cont);
-        }
-    }
-    printf("%lu/%lu self-test cases pass\n",
-           (unsigned long)(n - bad), (unsigned long)n);
-    return bad == 0 ? 0 : 1;
-}
+
+/* gate_cli.c owns the self-test. */

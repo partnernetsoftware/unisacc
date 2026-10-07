@@ -171,6 +171,7 @@ typedef struct {
     int  loop_left;           /* remaining auto-submits this arming */
     int  sys_open;            /* 0: system rule only. 1: ten body rows */
     int  sys_top;             /* first wrapped row shown while open */
+    int  mind_top;            /* first folded row of the mind block */
     int  log_skip;            /* newest log entries hidden; 0 follows the tail */
 } tui_state;
 
@@ -467,6 +468,14 @@ static int tui_looks_err(const char *s) {
 
 static void tui_note_err(tui_state *st, const char *s) {
     int i, o = 0;
+    if (!s) return;
+    /* A step trace indented "  \u2502 .../x.c:..." is the tool's own body text,
+     * so an exit=1 printed there is not a turn error. Real tool failures and
+     * plain exit=/error: lines still paint 错误>. */
+    if (s[0] == ' ' && s[1] == ' ' &&
+        (unsigned char)s[2] == 0xE2 && (unsigned char)s[3] == 0x94 && (unsigned char)s[4] == 0x82 &&
+        strstr(s, ".c:"))
+        return;
     if (!tui_looks_err(s)) return;
     for (i = 0; s[i] && o + 1 < (int)sizeof st->errline; i++) {
         char c = s[i];
@@ -720,6 +729,11 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
 #define TUI_MIND_N 12
 #define TUI_FIXED_ROWS (7 + TUI_MIND_N)
 
+/* Mind pages are read whole and folded to the column width, one screen row
+ * per folded piece. Continuation rows start with two spaces. */
+#define TUI_MIND_SRC  400
+#define TUI_MIND_WRAP 800
+
 /* Terminal columns, not bytes. The measure itself is csih_cols.h. */
 static int tui_disp_width(const char *s) {
     int w = 0;
@@ -776,7 +790,7 @@ static int tui_mind_noise(const char *s) {
 }
 
 static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
-                           int *nlines, int *state) {
+                           int maxlines, int *nlines, int *state) {
     char path[512], buf[512];
     FILE *fp;
     const char *home = getenv("HOME");
@@ -797,10 +811,8 @@ static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
         while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
         if (!buf[0] || tui_mind_noise(buf)) continue;
         *state = 0;
-        if (*nlines == TUI_MIND_N)
-            memmove(got[0], got[1], (size_t)(TUI_MIND_N - 1) * (R_LINE_MAX + 1));
-        else
-            (*nlines)++;
+        if (*nlines >= maxlines) break;
+        (*nlines)++;
         snprintf(got[*nlines - 1], R_LINE_MAX + 1, "%s", buf);
     }
     fclose(fp);
@@ -861,11 +873,15 @@ static int tui_label_rule(char *dst, int dstmax, const char *label, int width) {
 
 /* Screen row of the system rule, and the half-open body range under it.
  * Filled by the render that just ran. A click or a wheel looks here. */
-#define TUI_SYS_N    10
-#define TUI_SYS_WRAP 80
+#define TUI_SYS_N     10
+#define TUI_SYS_WRAP  80
+#define TUI_MIND_SRC  200
+#define TUI_MIND_WRAP 80
 static int tui_sys_rule_y;
 static int tui_sys_y0;
 static int tui_sys_y1;
+static int tui_mind_y0;
+static int tui_mind_y1;
 
 /* Top edge of the system block. Collapsed is [展开], open is [收缩]. */
 static void tui_sys_rule(r_state *rs, char line[][R_LINE_MAX + 1], int *n,
@@ -950,23 +966,123 @@ static void tui_sys_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n,
     tui_sys_y1 = *n + 2;
 }
 
-static void tui_mind_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int cols) {
-    char tree[TUI_MIND_N][R_LINE_MAX + 1];
-    char palace[TUI_MIND_N][R_LINE_MAX + 1];
+/* Fold a page into rows fitted to `width`. Stops at maxrows.
+ * Returns the number of source lines consumed. *rows is the fitted count. */
+static int tui_mind_fold(char src[][R_LINE_MAX + 1], int n,
+                         char dst[][R_LINE_MAX + 1], int maxrows,
+                         int *rows, int width, int state) {
+    int i, out = 0;
+    if (n <= 0) {
+        if (state == 1) snprintf(dst[0], R_LINE_MAX + 1, "(无)");
+        else if (state == 2) snprintf(dst[0], R_LINE_MAX + 1, "(空)");
+        else dst[0][0] = '\0';
+        if (maxrows > 0) out = 1;
+        if (rows) *rows = out;
+        return n;
+    }
+    if (width < 1) width = 1;
+    for (i = 0; i < n; i++) {
+        const char *p = src[i];
+        int used, first = 1;
+        if (!p[0]) p = " ";
+        while (*p && out < maxrows) {
+            int w = width;
+            if (!first) {
+                /* Continuation of a wrapped note: indent two spaces so the
+                 * next line reads as the same note, not a new one. */
+                int k;
+                for (k = 0; k < 2 && k < w - 1; k++) dst[out][k] = ' ';
+                used = tui_utf8_fit(p, w - k, dst[out] + k);
+                if (used > 0 && p[used]) {
+                    /* Prefer a break at space/punctuation over a cut mid-token. */
+                    int b = 0, bo = 0;
+                    while (b < used) {
+                        unsigned int cp = 0;
+                        int need = tui_next_cp(p + b, &cp);
+                        if (need <= 0) break;
+                        b += need;
+                        if (cp == ' ' || cp == '-' || cp == '/' || cp == ',' || cp == '.' ||
+                            (cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF01 && cp <= 0xFF60))
+                            bo = b;
+                    }
+                    if (bo > 0) used = bo;
+                }
+                if (used <= 0) {
+                    unsigned int cp = 0;
+                    int need = tui_next_cp(p, &cp);
+                    if (need <= 0) break;
+                    p += need;
+                    continue;
+                }
+                dst[out][k + used] = '\0';
+                p += used;
+                out++;
+                continue;
+            }
+            used = tui_utf8_fit(p, w, dst[out]);
+            if (used > 0 && p[used]) {
+                /* Prefer a break at space/punctuation over a cut mid-token. */
+                int b = 0, bo = 0;
+                while (b < used) {
+                    unsigned int cp = 0;
+                    int need = tui_next_cp(p + b, &cp);
+                    if (need <= 0) break;
+                    b += need;
+                    if (cp == ' ' || cp == '-' || cp == '/' || cp == ',' || cp == '.' ||
+                        (cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF01 && cp <= 0xFF60))
+                        bo = b;
+                }
+                if (bo > 0) used = bo;
+            }
+            if (used <= 0) {
+                unsigned int cp = 0;
+                int need = tui_next_cp(p, &cp);
+                if (need <= 0) break;
+                p += need;
+                continue;
+            }
+            dst[out][used] = '\0';
+            p += used;
+            out++;
+            first = 0;
+        }
+        if (out >= maxrows) break;
+    }
+    if (rows) *rows = out;
+    return n;
+}
+
+static void tui_mind_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int cols, tui_state *st) {
+    static char tree[TUI_MIND_SRC][R_LINE_MAX + 1];
+    static char palace[TUI_MIND_SRC][R_LINE_MAX + 1];
+    static char lwrap[TUI_MIND_WRAP][R_LINE_MAX + 1];
+    static char rwrap[TUI_MIND_WRAP][R_LINE_MAX + 1];
     char left[R_LINE_MAX + 1], right[R_LINE_MAX + 1];
-    int tn = 0, pn = 0, ts = 1, ps = 1, half, rest, bar, i;
-    tui_page_lines("思维树.md", tree, &tn, &ts);
-    tui_page_lines("记忆宫殿.md", palace, &pn, &ps);
+    int tn = 0, pn = 0, ts = 1, ps = 1, half, rest, bar;
+    int lrows = 0, rrows = 0, total, maxtop, top, row, i;
+    tui_mind_y0 = 0;
+    tui_mind_y1 = 0;
+    if (!st) return;
+    tui_page_lines("思维树.md", tree, TUI_MIND_SRC, &tn, &ts);
+    tui_page_lines("记忆宫殿.md", palace, TUI_MIND_SRC, &pn, &ps);
     bar = tui_mind_bar(cols, &half, &rest);
+    tn = tui_mind_fold(tree, tn, lwrap, TUI_MIND_WRAP, &lrows, half, ts);
+    pn = tui_mind_fold(palace, pn, rwrap, TUI_MIND_WRAP, &rrows, rest, ps);
+    (void)tn;
+    (void)pn;
+    total = lrows > rrows ? lrows : rrows;
+    if (total < 1) total = 1;
+    maxtop = total > TUI_MIND_N ? total - TUI_MIND_N : 0;
+    top = st->mind_top;
+    if (top < 0) top = 0;
+    if (top > maxtop) top = maxtop;
+    st->mind_top = top;
     if (*n >= 63) return;
-    /* Names are on the rule above. These rows are the page text. */
-    for (i = 0; i < TUI_MIND_N && *n < 63; i++) {
-        const char *lt = (i < tn) ? tree[i] : "";
-        const char *rt = (i < pn) ? palace[i] : "";
-        if (i == 0 && ts == 1) lt = "(无)";
-        if (i == 0 && ts == 2) lt = "(空)";
-        if (i == 0 && ps == 1) rt = "(无)";
-        if (i == 0 && ps == 2) rt = "(空)";
+    tui_mind_y0 = *n + 2;
+    for (row = 0; row < TUI_MIND_N && *n < 63; row++) {
+        int idx = top + row;
+        const char *lt = (idx >= 0 && idx < lrows) ? lwrap[idx] : "";
+        const char *rt = (idx >= 0 && idx < rrows) ? rwrap[idx] : "";
         tui_col_put(left, half, lt);
         tui_col_put(right, rest, rt);
         if (bar < 0)
@@ -976,6 +1092,7 @@ static void tui_mind_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int
         rs->body[*n] = line[*n];
         (*n)++;
     }
+    tui_mind_y1 = *n + 2;
 }
 
 /* Build the frame for a state. The two mind lines also follow the files on
@@ -1036,8 +1153,21 @@ static void tui_log_range(tui_state *st, int *start_out, int *end_out, int *show
     for (i = start; i < end; i++)
         if (st->ex_on[i] && st->ex_open[i]) extra++;
     if (extra > 0 && show > extra) show -= extra;
-    start = end - show;
-    if (start < 0) start = 0;
+    {
+        /* Opening a row spends a slot. Keep that row on screen. */
+        int old_start = start;
+        int limit = end;
+        start = limit - show;
+        if (start < 0) start = 0;
+        for (i = old_start; i < limit; i++) {
+            if (i < start && st->ex_on[i] && st->ex_open[i]) {
+                start = i;
+                end = start + show;
+                if (end > limit) end = limit;
+                break;
+            }
+        }
+    }
     if (start_out) *start_out = start;
     if (end_out) *end_out = end;
     if (show_out) *show_out = show;
@@ -1086,6 +1216,11 @@ static void tui_wheel(tui_state *st, int y, int dir) {
     if (st->sys_open && tui_sys_y0 > 0 && y >= tui_sys_y0 && y < tui_sys_y1) {
         if (dir == 1) st->sys_top++;
         else if (dir == 2 && st->sys_top > 0) st->sys_top--;
+        return;
+    }
+    if (tui_mind_y0 > 0 && y >= tui_mind_y0 && y < tui_mind_y1) {
+        if (dir == 1) st->mind_top++;
+        else if (dir == 2 && st->mind_top > 0) st->mind_top--;
         return;
     }
     if (tui_log_y0 > 0 && y >= tui_log_y0 && y < tui_log_y1) {
@@ -1368,7 +1503,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         tui_sys_rule(&rs, line, &n, cols, st);
         tui_sys_block(&rs, line, &n, cols, st);
         tui_mind_rule(&rs, line, &n, cols);
-        tui_mind_block(&rs, line, &n, cols);
+        tui_mind_block(&rs, line, &n, cols, st);
     } else {
         tui_input_row(line[n], (int)sizeof line[n], st->input, cols);
         rs.body[n] = line[n]; n++;
@@ -1379,7 +1514,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         tui_sys_rule(&rs, line, &n, cols, st);
         tui_sys_block(&rs, line, &n, cols, st);
         tui_mind_rule(&rs, line, &n, cols);
-        tui_mind_block(&rs, line, &n, cols);
+        tui_mind_block(&rs, line, &n, cols, st);
         snprintf(line[n], sizeof line[n], "%s", st->notice ? st->notice : "");
         rs.body[n] = line[n]; n++;
         snprintf(line[n], sizeof line[n], "ticks %d  cols %d", st->ticks, cols);
@@ -1554,6 +1689,7 @@ static int tui_run_agent(tui_state *st) {
         tui_log_plain(st, you);
     }
     st->input[0] = '\0'; st->ninput = 0;
+    st->errline[0] = '\0';   /* new you>: drop last round's error */
     tui_redraw(st);
 
     st->cancel = 0;
@@ -2021,7 +2157,8 @@ int main(int argc, char **argv) {
                         if (strstr(fr.lines[k], "FILEBODY-hidden")) cmd = 1;
                     }
                     if (!closed || !cmd || tui_frame_has(&ex, "FILEBODY-hidden")) {
-                        printf("FAIL tool click did not expand\n"); failures++;
+                        printf("FAIL tool click did not expand\n");
+                        failures++;
                     } else printf("  ok   tool row opens on click\n");
                 }
             }

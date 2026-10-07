@@ -133,75 +133,10 @@ int plugin_run(const char *name, const char *arg, char *out, int outlen) {
     return 0;
 }
 
-int plugin_run_selftest(void) {
-    int i;
-    for (i = 0; i < BUILTIN_COUNT; i++) {
-        if (builtin_at(plugins[i].name) < 0 || !plugins[i].kind) {
-            printf("missing %s\n", plugins[i].name);
-            return 1;
-        }
-        {
-            const char *n = plugin_name(plugins[i].kind);
-            if (!n || strcmp(n, plugins[i].name)) {
-                printf("name mismatch %s\n", plugins[i].name);
-                return 1;
-            }
-        }
-        if (builtin_seen(plugins[i].name, i)) continue;
-        printf("%s\n", plugins[i].name);
-    }
-    if (plugin_find("nosuch")) {
-        printf("present nosuch\n");
-        return 1;
-    }
-    printf("absent nosuch\n");
-    {
-        const char *mh = plugin_help("mind");
-        if (!mh || !strstr(mh, "markdown-tree-dag")
-            || !strstr(mh, "mermaid-flowchart-memory-palace")) {
-            printf("mind help format\n");
-            return 1;
-        }
-    }
-    {
-        const char *page = plugin_page("tree");
-        if (strcmp(page, "思维树.md")) {
-            printf("page tree\n");
-            return 1;
-        }
-        printf("%s\n", page);
-        page = plugin_page("palace");
-        if (strcmp(page, "记忆宫殿.md")) {
-            printf("page palace\n");
-            return 1;
-        }
-        printf("%s\n", page);
-    }
-    if (plugin_page("nosuch")[0] != 0) {
-        printf("page nosuch\n");
-        return 1;
-    }
-    {
-        static cdsh_plugin row;
-        char cat[512];
-        row.name = "probe";
-        row.help = "selftest extra";
-        row.run = 0;
-        row.next = 0;
-        plugin_register(&row);
-        {
-            const char *ph = plugin_help("probe");
-            if (!ph || strcmp(ph, "selftest extra")) {
-                printf("help extra\n");
-                return 1;
-            }
-        }
-        plugin_catalog(cat, (int)sizeof cat);
-        if (!strstr(cat, "probe: selftest extra\n")) {
-            printf("catalog extra\n");
-            return 1;
-        }
-        printf("probe\n");
-    }
-    return 0;
+/* Walk the built-in table. The assertions live in plugin_cli.c. */
+int plugin_builtin_n(void) { return BUILTIN_COUNT; }
+
+const plugin_t *plugin_builtin(int i) {
+    if (i < 0 || i >= BUILTIN_COUNT) return 0;
+    return &plugins[i];
 }

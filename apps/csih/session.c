@@ -6,7 +6,7 @@
  *     unisacc gate.c json.c session.c loop.c    →  arm64: main:
  * which reads like a missing backend feature and is not. loop.c drives the
  * three libraries, so they drop `main`; session's CLI lives in session_cli.c
- * and its self-test is reachable as `session_run_selftest`.
+ * and its self-test lives in session_cli.c.
  *
  * WHY THIS LAYER: the session log is what an LLM sees as context, and it is
  * plain JSONL — one object per line. Reading and appending it needs only
@@ -158,63 +158,4 @@ session_records session_read(const char *path) {
     return out;
 }
 
-/* ── self-test ──────────────────────────────────────────────────────────── */
-
-static int failures = 0;
-static void expect(int cond, const char *what) {
-    if (!cond) { printf("FAIL %s\n", what); failures++; }
-}
-
-static void rm_file(const char *p) { remove(p); }
-
-/* Non-static so session_cli.c can call it across files while the assertions
- * stay next to the code they check. Returns 0 when all cases pass. */
-int session_run_selftest(void) {
-    const char *tmp = "/tmp/cdsh-session-selftest.jsonl";
-    session_records r;
-
-    rm_file(tmp);
-
-    /* Append three, read three. */
-    expect(session_append(tmp, "{\"role\":\"user\",\"text\":\"hi\"}") == 0, "append 1");
-    expect(session_append(tmp, "{\"role\":\"assistant\",\"text\":\"yo\"}") == 0, "append 2");
-    expect(session_append(tmp, "{\"role\":\"tool\",\"name\":\"bash\"}") == 0, "append 3");
-    r = session_read(tmp);
-    expect(r.count == 3, "three records read back");
-    expect(r.bad == 0, "none malformed");
-    session_free(&r);
-
-    /* A newline inside a record must be REFUSED: it would split one entry into
-     * two on read, which is a corruption nobody notices until much later. */
-    expect(session_append(tmp, "{\"a\":1}\n{\"b\":2}") == 2, "embedded newline refused");
-    r = session_read(tmp);
-    expect(r.count == 3, "the refusal did not write anything");
-    session_free(&r);
-
-    /* Empty and NULL are refused rather than writing a blank line. */
-    expect(session_append(tmp, "") == 1, "empty record refused");
-    expect(session_append(tmp, NULL) == 1, "NULL record refused");
-
-    /* A malformed line is COUNTED, not silently dropped. */
-    {
-        FILE *f = fopen(tmp, "a");
-        if (f) { fprintf(f, "not json\n"); fclose(f); }
-    }
-    r = session_read(tmp);
-    expect(r.count == 3, "good records survive");
-    expect(r.bad == 1, "the malformed line is counted, not lost");
-    session_free(&r);
-
-    /* Reading a missing file is an empty result, not a crash. */
-    r = session_read("/tmp/cdsh-does-not-exist-xyz.jsonl");
-    expect(r.count == 0 && r.bad == 0, "missing file is empty, not fatal");
-    session_free(&r);
-
-    rm_file(tmp);
-
-    printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
-    return failures == 0 ? 0 : 1;
-}
-
-/* The CLI (`main`, `read`, `append`) lives in session_cli.c — see gate_cli.c
- * for why `main` cannot be here and why the CLI, not the library, prints. */
+/* session_cli.c owns the self-test. */
