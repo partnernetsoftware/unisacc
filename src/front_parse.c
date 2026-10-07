@@ -1317,7 +1317,15 @@ int unary(void) {
         setkind(1); curpd = 0; curbase = 8; curvla = 0;
         return 0;
     }
-    if (p == P_ADDR) { adv(); unary();
+    if (p == P_ADDR) { adv();
+        /* &v of a VLA: its storage, which the frame slot named v points at -- the
+           slot's own address let sqlite's `char dbFileVers[sizeof(p->m)]; read(&dbFileVers)`
+           (an object in the bound makes it variable-length) write over the frame */
+        if (kind(tp) == T_ID) { int vi; int nk; vi = sfind(tp); nk = kind(tp + 1);
+            if (vi >= 0) { if (symvla[vi] && nk != tidx("[", 1) && nk != tidx(".", 1) && nk != tidx("->", 2) && nk != tidx("(", 1)) {
+                unary(); loadval(); curvla = 0; curptr = 1; lvalue = 0; return 0;
+            } } }
+        unary();
         /* &x: a pointer one deeper than x */
         if (lvalue) {
             if (curptr) { curpd = curpd + 1; curelem = 8; }
