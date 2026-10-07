@@ -43,6 +43,7 @@ int symbool[MAXSYM];        /* ...and it is _Bool, which normalises on store */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
 int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
 int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
+int symfpp[MAXSYM];   /* a pointer TO a function-pointer typedef (`ft *q`), not `int (*(*p)(..))(..)` */
 /* Floating point.  A value's floating kind is 0 (an integer), 4 (float) or
    8 (double); like the unsigned bit it describes the object a pointer points
    to, so `*p` of a `double *` is a double. */
@@ -834,6 +835,7 @@ int sadd(int t, int kind, int off, int elem) {
     sympkfirst[nsym] = nsympk;
     symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
     if (declptr) symptrd[nsym] = declpd > 0 ? declpd : 1;
+    symfpp[nsym] = declspecfp && declptr && declpd == 2;
     symbase[nsym] = declbase;
     sh_push(nsym, t);
     nsym = nsym + 1;
@@ -1791,7 +1793,7 @@ int primary(void) {
                 if (i >= 0) symused[i] = 1;
                 /* not for a pointer TO a function pointer (`finder_type *q; (*q)(...)`
                    loads q first: sqlite's unix VFS) -- the general path below does */
-                if (i >= 0) { if (symfp[i] && symptrd[i] <= 1) {
+                if (i >= 0) { if (symfp[i] && !symfpp[i]) {
                     adv(); adv(); icparen = 1;
                     return icall(i, tp);
                 } }
@@ -1901,7 +1903,7 @@ int primary(void) {
            dereferencing that value yields a function designator, not data. */
         if (symfp[i] && symptrd[i] == 1 && symkind[i] != 3 && symkind[i] != 5) curfn = 1;
         /* a pointer TO one (`finder_type *q`): `*q` is the function pointer, an lvalue (P_DEREF) */
-        if (symfp[i] && symptrd[i] == 2 && symkind[i] != 3 && symkind[i] != 5) curfn = 1;
+        if (symfp[i] && symfpp[i] && symkind[i] != 3 && symkind[i] != 5) curfn = 1;
         adv();
         lvalue = 1;
         if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
