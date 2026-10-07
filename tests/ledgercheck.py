@@ -67,7 +67,7 @@ def carry_check(plan):
     for src in [plan] + ([prev] if prev else []):
         for rid, line in rows(src.read_text()).items():
             marks = re.findall(r'〔([^〕]*)〕', line)
-            for t in re.findall(r'顺延[^〕]*?(?:→\s*|顺延\s+)(0\.\d+\.\d+)(?:\s+([A-Za-z][\w′″]*))?', ' '.join('〔%s〕' % k for k in marks[:1])):
+            for t in re.findall(r'顺延[^〕]*?(?:→\s*|顺延\s+)(0\.\d+\.\d+)(?:\s+([A-Za-z][\w′″‴⁗]*))?', ' '.join('〔%s〕' % k for k in marks[:1])):
                 ver, renamed = t
                 if plan_file(ver) is None: bad.append('%s: %s defers to v%s, which has no plan file' % (src.name, rid, ver))
                 elif src is prev and ver == '0.0.%d' % n and (renamed or rid) not in here:
@@ -77,8 +77,27 @@ def carry_check(plan):
                     # previous plan's marker states (`顺延 3 → ...` lands as a row whose last cell is 3)
                     said = re.match(r'顺延\s*(\d+)', marks[0])
                     got = re.match(r'\s*(\d+)', here[renamed or rid].rstrip().rstrip('|').split(' | ')[-1])
-                    if said and (not got or got.group(1) != said.group(1)):
+                    # E50 (10-07): a row deferred again here counts one more (its own marker says so)
+                    again = re.search(r'顺延\s*\d+\s*→', (re.findall(r'〔([^〕]*)〕', here[renamed or rid]) or [''])[0])
+                    ok = not said or (got and (got.group(1) == said.group(1) or (again and int(got.group(1)) == int(said.group(1)) + 1)))
+                    if not ok:
                         bad.append('%s defers %s %s times, but %s row %s counts %s' % (src.name, rid, said.group(1), plan.name, renamed or rid, got.group(1) if got else 'nothing'))
+    # E50 (10-07): a row's own `顺延 N →` must match its count cell (H3c said 4 and counted 3)
+    for rid, line in here.items():
+        marks = re.findall(r'〔([^〕]*)〕', line)
+        own = re.search(r'顺延\s*(\d+)\s*→', marks[0]) if marks else None
+        cnt = re.match(r'\s*(\d+)', line.rstrip().rstrip('|').split(' | ')[-1])
+        if own and (not cnt or cnt.group(1) != own.group(1)):
+            bad.append('%s row %s says 顺延 %s but counts %s' % (plan.name, rid, own.group(1), cnt.group(1) if cnt else 'nothing'))
+    # E50: the plan's 主题 line names the roadmap's definition for this version
+    road = ROOT / 'plans' / 'roadmap-0.0.x.md'
+    if road.is_file():
+        for line in road.read_text().splitlines():
+            if line.startswith('| 0.0.%d | ' % n):
+                need = line.split(' | ')[1].strip()
+                theme = next((l for l in plan.read_text().splitlines() if l.startswith('主题')), '')
+                if need.split('（')[0] not in theme:
+                    bad.append('%s 主题 does not name the roadmap definition "%s"' % (plan.name, need))
     receipt = ROOT / 'research' / ('r%d-release-acceptance.json' % (n - 1))
     if receipt.is_file():
         import json
