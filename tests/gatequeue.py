@@ -340,8 +340,11 @@ def main():
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]
     exclusive |= {n for n in data.get('retried', []) if n in pending}   # a retry runs alone in later windows too
-    active = {}; start = time.monotonic(); deadline = start + args.window
-    def estimate(n): return min(args.window-2, max(2, history.get(n, 30)*1.3+1))
+    active = {}; start = time.monotonic()
+    # 0.0.32: q15 -- a 54 s window plus the epilogue (provenance check, refingerprint) crossed term.sh's 60 s
+    window = args.window - (4 if args.com else 2)
+    deadline = start + window
+    def estimate(n): return min(window-2, max(2, history.get(n, 30)*1.3+1))
     try:
         while pending or active:
             left = deadline-time.monotonic()
@@ -366,7 +369,7 @@ def main():
                 rc = p.poll()
                 if rc is None: continue
                 log.close(); elapsed = time.monotonic()-t
-                if rc == 142 and limit < args.window-3:
+                if rc == 142 and limit < window-3:
                     # A late fill used only the window remainder, not a full
                     # attempt. Keep it pending and give it an early slot next.
                     pending.append(n)
