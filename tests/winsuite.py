@@ -64,6 +64,12 @@ def prepare(out, ua):
             r = sh([ua, str(ROOT / 'tests/forward/win.c'), '-b', a, '-o', str(out / exe)])
             entries.append({'suite': 'forward', 'name': 'win', 'arch': a, 'exe': exe if not r.returncode else None,
                             'want': 'pid>0 1 tick>0 1 len 9', 'compile_error': r.stderr.decode()[:200] if r.returncode else None})
+        for a in ARCHES:                    # 0.0.33 W2: DNS through ws2_32 (runner has network)
+            exe = 'forward-dns-%s.exe' % a.split('/')[1]
+            r = sh([ua, str(ROOT / 'tests/forward/win_dns.c'), '-b', a, '-o', str(out / exe)])
+            entries.append({'suite': 'forward', 'name': 'win_dns', 'arch': a, 'exe': exe if not r.returncode else None,
+                            'want': 'localhost family 2 len 16 port 443\ngithub.com family 2 len 16 port 443',
+                            'compile_error': r.stderr.decode()[:200] if r.returncode else None})
         life = ROOT / 'tests/life/cases.c'
         for a in ARCHES:
             exe = 'life-%s.exe' % a.split('/')[1]
