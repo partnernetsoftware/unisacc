@@ -11,8 +11,6 @@
 #define EXIT_FAILURE 1
 #define RAND_MAX 32767
 
-int exit();
-
 /* The allocator.  Memory comes from the OS in 1 MB chunks (mmap, or
  * VirtualAlloc on Windows); a block is a 16-byte header -- its size, then its
  * class -- and the payload, so every pointer handed out is 16-aligned.
