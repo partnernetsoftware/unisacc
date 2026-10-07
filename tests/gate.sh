@@ -254,7 +254,10 @@ job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64
 job exec-selfprep-table ./tests/selfprep.sh osx/arm64 0
 job exec-selfprep-x86 ./tests/selfprep.sh lnx/x86_64
 job exec-selfprep-arm ./tests/selfprep.sh lnx/arm64
-job exec-tableself env SELF_PART=stages NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
+# 0.0.33: the self-source stage check split after E3 (53 s whole, 49 s queue limit -> rc142 in cand36/37);
+# stages2 verifies the stages1 handoff by content (source, run, models, E3 tape) and fails if stale
+job exec-tableself-1 env SELF_PART=stages1 NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
+job exec-tableself-2 env SELF_PART=stages2 NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-selfelf env SELF_PART=stages ./exec/pipeline/selfcheck.sh                    # current compiler source through seven deltas
 job exec-selfelf-package env SELF_PART=package ./exec/pipeline/selfcheck.sh
 job exec-armself env SELF_PART=stages TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines
