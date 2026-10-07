@@ -55,12 +55,14 @@ int WSAStartup(unsigned short __u_version, void *__u_data);
 /* the first call starts Winsock: a function-like macro (not a constructor -- the winsuite runners
  * returned WSANOTINITIALISED 10093 with one) wraps each call; the inner name is the forwarded
  * prototype, since a macro does not expand inside itself, and &getaddrinfo still names it */
-static int _unisa_wsa_done;
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_wsa_init
 static int _unisa_wsa_init(void) {
+    static int __u_done;
     static long __u_wsadata[64];             /* WSADATA is 408 bytes on Win64 */
-    if (!_unisa_wsa_done) { _unisa_wsa_done = 1; WSAStartup(0x0202, __u_wsadata); }
+    if (!__u_done) { __u_done = 1; WSAStartup(0x0202, __u_wsadata); }
     return 0;
 }
+#endif
 #define getaddrinfo(__u_n, __u_s, __u_h, __u_r) (_unisa_wsa_init() + getaddrinfo(__u_n, __u_s, __u_h, __u_r))
 #if !__UNISA_FTRIM_LIBC || __UN_gai_strerror
 static const char *gai_strerror(int __u_e) {
