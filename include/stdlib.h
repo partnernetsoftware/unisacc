@@ -98,23 +98,7 @@ static void free(void *__u_q) {
  * return.  `__exit` is the tape's gate to the OS, so this is a one-line
  * wrapper around it -- and `abort` is the same call with the status a shell
  * reports for SIGABRT. */
-static void (*_unisa_atexit[32])(void);
-static int _unisa_natexit = 0;
-/* D3': <stdio.h> sets this when a stream holds unwritten bytes; exit runs
-   it after the atexit handlers, so streams are flushed last (C99 7.20.4.3p4) */
-static void (*_unisa_stdio_flush)(void);
-static void (*_unisa_stdio_exit)(int);
-#if !__UNISA_FTRIM_LIBC || __UN_exit
-static void exit(int __u_code) {
-    /* the atexit handlers, last registered first (C99 7.20.4.3p3) */
-    while (_unisa_natexit > 0) {
-        _unisa_natexit = _unisa_natexit - 1;
-        _unisa_atexit[_unisa_natexit]();
-    }
-    if (_unisa_stdio_flush) _unisa_stdio_flush();
-    __exit(__u_code);
-}
-#endif
+#include <sys/_exit.h>   /* exit, the atexit table and the stdio flush hook (shared with <stdio.h>) */
 #if !__UNISA_FTRIM_LIBC || __UN_abort
 static void abort(void) { __exit(134); }
 #endif

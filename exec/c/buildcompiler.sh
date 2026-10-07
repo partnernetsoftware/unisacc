@@ -17,8 +17,10 @@ tn() {   # tn JSON TBL NET
     if [ "${SEED_C:-1}" = 1 ]; then
         if [ ! -x "$T/seedbin/seed-net" ] || [ ! -x "$T/seedbin/seed-tbl" ]; then
             mkdir -p "$T/seedbin"
-            b sh "$R/unisacc.com" "$R/seed/tbl.c" -o "$T/seedbin/seed-tbl"
-            b sh "$R/unisacc.com" "$R/seed/net.c" -o "$T/seedbin/seed-net"
+            # -fno-trim-libc: the installed previous release reads this tree's include/, and its trim table
+            # does not know helpers added since (0.0.33 D3': undefined _u_st_wflush); carry every body.
+            b sh "$R/unisacc.com" -fno-trim-libc "$R/seed/tbl.c" -o "$T/seedbin/seed-tbl"
+            b sh "$R/unisacc.com" -fno-trim-libc "$R/seed/net.c" -o "$T/seedbin/seed-net"
         fi
         b "$T/seedbin/seed-tbl" "$1" "$2"
         b "$T/seedbin/seed-net" "$2" "$3"
