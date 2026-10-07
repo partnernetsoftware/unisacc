@@ -335,7 +335,11 @@ def main():
     resume(data, stamp, {n:portable(c) if isinstance(c, str) else json.loads(portable(json.dumps(c))) for n, c in jobs.items()}, exclusive)
     atomic(path, data)
     # Classic and network drivers, and different concurrency, have different costs.
-    profile = json.dumps([execution_settings(), sorted(exclusive)], sort_keys=True).encode()
+    # 0.0.33 Q1: path-valued selectors name a per-round scratch path; keyed by the path, every
+    # candidate started with no history, every job was estimated at 30 s (admitted only with >=41 s
+    # left: cand13 limits were all 40-49 s, mean job 9.7 s), and window tails went unused.
+    settings = {k:('{'+k+'}' if k in PATH_KEYS else v) for k, v in execution_settings().items()}
+    profile = json.dumps([settings, sorted(exclusive)], sort_keys=True).encode()
     histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(profile).hexdigest()[:16]+'.json')
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]
