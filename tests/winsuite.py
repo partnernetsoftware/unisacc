@@ -10,12 +10,21 @@ What moves here (each was "compile on the Mac, run in the VM, compare"):
   winposix    tests/hosthdr/winposix*.c built by UA; expected = the same probe built by the host cc
   crossnative examples/*.c built by the Python route; expected = `python3 -m unisa run --target`
   forward     tests/forward/win.c built by UA; expected = the fixed line forward.sh checks
+  lifecycle   tests/life/cases.c built by UA, one run per case (0.0.33 W3): stdout AND exit code.
+              Expected = the POSIX shell statuses tests/lifecycle.sh checks against cc, which is the
+              unisacc rule on every target: abort 134 and raise(SIGTERM) 143 (MSVC's CRT says 3 for
+              both), exit codes are 32-bit (ret256 is 256, not 0), and a crash is the OS's own
+              report (STATUS_ACCESS_VIOLATION, 0xC0000005).
 Release-check runs prepare on a macOS runner and run on windows-latest and windows-11-arm.  The UTM
 VM stays available for hands-on debugging only (owner 2026-10-04).
 """
 import json, os, pathlib, platform, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ARCHES = ('win/arm64', 'win/x86_64')
+# W3: (case, stdout, exit code) for tests/life/cases.c on Windows; see the docstring
+LIFE = (('ret0', '', 0), ('ret7', '', 7), ('ret255', '', 255), ('ret256', '', 256), ('exit3', '', 3),
+        ('atexit', 'main\nh2\nh1', 5), ('pending', 'no newline', 4), ('abort', 'before', 134),
+        ('raise', '', 143), ('handled', 'seen 15', 0), ('segv', '', 0xC0000005))
 
 def norm(b):
     text = b.decode('utf-8', 'replace').replace('\r', '')
@@ -55,6 +64,14 @@ def prepare(out, ua):
             r = sh([ua, str(ROOT / 'tests/forward/win.c'), '-b', a, '-o', str(out / exe)])
             entries.append({'suite': 'forward', 'name': 'win', 'arch': a, 'exe': exe if not r.returncode else None,
                             'want': 'pid>0 1 tick>0 1 len 9', 'compile_error': r.stderr.decode()[:200] if r.returncode else None})
+        life = ROOT / 'tests/life/cases.c'
+        for a in ARCHES:
+            exe = 'life-%s.exe' % a.split('/')[1]
+            r = sh([ua, str(life), '-b', a, '-o', str(out / exe)])
+            for case, want, rc in LIFE:
+                entries.append({'suite': 'lifecycle', 'name': case, 'arch': a, 'exe': exe if not r.returncode else None,
+                                'args': [case], 'want': want, 'want_rc': rc,
+                                'compile_error': r.stderr.decode()[:200] if r.returncode else None})
         # nativeboot's Windows proof: the win image of the compiler rebuilds itself from the flat source
         flat = out / 'unisacc.flat.c'
         if subprocess.run(['python3', str(ROOT / 'tests/sourceflat.py'), str(flat)], cwd=ROOT, capture_output=True, timeout=60).returncode:
@@ -95,9 +112,11 @@ def run(out, arch=None):
             continue
         with tempfile.TemporaryDirectory(prefix='winsuite-') as td:
             try:
-                r = subprocess.run([str((out / e['exe']).resolve())], cwd=td, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+                r = subprocess.run([str((out / e['exe']).resolve())] + e.get('args', []), cwd=td, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if 'want_rc' in e else subprocess.STDOUT, timeout=20)
                 got = norm(r.stdout)
+                if 'want_rc' in e and (r.returncode & 0xFFFFFFFF) != e['want_rc']:
+                    got += ' <exit %d, want %d>' % (r.returncode & 0xFFFFFFFF, e['want_rc'])
             except subprocess.TimeoutExpired:
                 got = '<timeout>'
         if got == e['want']:
