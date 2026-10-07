@@ -53,11 +53,15 @@ static long _unisa_len(const char *__u_s) {
 #endif
 
 static char _unisa_ch;
+/* D3': every write goes through _u_st_wput (below the stream table), which
+   keeps a 4 KB buffer for streams fopen opened; the standard streams are
+   written straight through, as before. */
+static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n);
 
 #if !__UNISA_FTRIM_LIBC || __UN_fputc
 static int fputc(int __u_c, FILE *__u_f) {
     _unisa_ch = __u_c;
-    __write(_unisa_fd(__u_f), &_unisa_ch, 1);
+    _u_st_wput(__u_f, &_unisa_ch, 1);
     return __u_c;
 }
 #endif
@@ -68,7 +72,7 @@ static int putchar(int __u_c) { return fputc(__u_c, stdout); }
 
 #if !__UNISA_FTRIM_LIBC || __UN_fputs
 static int fputs(const char *__u_s, FILE *__u_f) {
-    __write(_unisa_fd(__u_f), (char *)__u_s, _unisa_len(__u_s));
+    _u_st_wput(__u_f, __u_s, _unisa_len(__u_s));
     return 0;
 }
 #endif
@@ -106,17 +110,9 @@ static int puts(const char *__u_s) {
  * The return is complete elements: done / sz, rounded down. */
 #if !__UNISA_FTRIM_LIBC || __UN_fwrite
 static long fwrite(const void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
-    long __u_total; long __u_done; long __u_r;
     if (__u_sz <= 0 || __u_n <= 0) return 0;
     if (__u_n > 0x7fffffffffffffff / __u_sz) return 0;
-    __u_total = __u_sz * __u_n;
-    __u_done = 0;
-    while (__u_done < __u_total) {
-        __u_r = __write(_unisa_fd(__u_f), (char *)__u_p + __u_done, __u_total - __u_done);
-        if (__u_r <= 0 || __u_r > __u_total - __u_done) return __u_done / __u_sz;
-        __u_done = __u_done + __u_r;
-    }
-    return __u_n;
+    return _u_st_wput(__u_f, (const char *)__u_p, __u_sz * __u_n) / __u_sz;
 }
 #endif
 
@@ -149,6 +145,7 @@ static void _u_st_copy(char *__u_d, const char *__u_s, long __u_n) {
     while (__u_j < __u_n) { __u_d[__u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
 }
 #endif
+static int _u_st_wlen[_U_NST];             /* D3': bytes waiting in the buffer to be written */
 static int _u_st_n;
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
@@ -164,8 +161,64 @@ static int _u_st_slot(FILE *__u_f) {
     __u_i = _u_st_n; _u_st_n = _u_st_n + 1;
     _u_st_fd[__u_i] = __u_fd;
     _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
-    _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0;
+    _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_wlen[__u_i] = 0;
     return __u_i;
+}
+#endif
+
+/* D3': the write side of the buffer.  A stream's buffer holds either unread
+   bytes or unwritten ones: a write after a read gives the unread part back to
+   the descriptor (lseek), and a read, seek, tell, fflush, fclose or exit
+   writes the waiting bytes first.  The loop in _u_st_raw stops on what the
+   __write gate calls an error: negative on POSIX and the VM, 0 on Windows
+   (WriteFile's count); an answer larger than asked is not trusted. */
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_raw
+static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
+    long __u_done; long __u_r;
+    __u_done = 0;
+    while (__u_done < __u_n) {
+        __u_r = __write(__u_fd, (char *)__u_p + __u_done, __u_n - __u_done);
+        if (__u_r <= 0 || __u_r > __u_n - __u_done) return __u_done;
+        __u_done = __u_done + __u_r;
+    }
+    return __u_n;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_wflush
+static int _u_st_wflush(int __u_i) {
+    long __u_k;
+    if (__u_i < 0 || _u_st_wlen[__u_i] == 0) return 0;
+    __u_k = _u_st_wlen[__u_i]; _u_st_wlen[__u_i] = 0;
+    if (_u_st_raw(_u_st_fd[__u_i], _u_st_buf + __u_i * _U_BUFSZ, __u_k) != __u_k) { _u_st_err[__u_i] = 1; return EOF; }
+    return 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_flushall
+static void _u_st_flushall(void) {
+    int __u_i; __u_i = 0;
+    while (__u_i < _u_st_n) { _u_st_wflush(__u_i); __u_i = __u_i + 1; }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
+#include <stdlib.h>
+static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n) {
+    int __u_fd; int __u_i;
+    __u_fd = _unisa_fd(__u_f);
+    if (__u_n <= 0) return 0;
+    if ((long)__u_f >= _UNISA_STDIO_BASE || __u_fd <= 2) return _u_st_raw(__u_fd, __u_p, __u_n);
+    __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return _u_st_raw(__u_fd, __u_p, __u_n);
+    if (_u_st_bpos[__u_i] < _u_st_blen[__u_i] || _u_st_ung[__u_i] >= 0)
+        __lseek(__u_fd, 0 - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0), SEEK_CUR);
+    _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
+    /* exit flushes; naming exit here also keeps its body under -ftrim-libc,
+       so a return from main goes through it (front_parse.c __main_ret) */
+    _unisa_stdio_flush = _u_st_flushall; _unisa_stdio_exit = exit;
+    if (_u_st_wlen[__u_i] + __u_n > _U_BUFSZ) { if (_u_st_wflush(__u_i) != 0) return 0; }
+    if (__u_n >= _U_BUFSZ) return _u_st_raw(__u_fd, __u_p, __u_n);
+    _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ + _u_st_wlen[__u_i], __u_p, __u_n);
+    _u_st_wlen[__u_i] = _u_st_wlen[__u_i] + (int)__u_n;
+    return __u_n;
 }
 #endif
 
@@ -227,6 +280,7 @@ static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
        read sets the end-of-file indicator and a failed one the error
        indicator [C99 7.19.8.1] */
     __u_pre = 0; __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0 && _u_st_wlen[__u_i] > 0) _u_st_wflush(__u_i);
     if (__u_i >= 0 && _u_st_ung[__u_i] >= 0) {
         ((char *)__u_p)[0] = (char)_u_st_ung[__u_i];
         _u_st_ung[__u_i] = 0 - 1; __u_pre = 1;
@@ -494,11 +548,13 @@ static int fclose(FILE *__u_f) {
        descriptor must not inherit this stream's eof/err/pushback */
     __u_i = _u_st_slot(__u_f);
     if (__u_i >= 0) {
+        _u_st_wflush(__u_i);
         _u_st_n = _u_st_n - 1;
         _u_st_fd[__u_i] = _u_st_fd[_u_st_n]; _u_st_eof[__u_i] = _u_st_eof[_u_st_n];
         _u_st_err[__u_i] = _u_st_err[_u_st_n]; _u_st_ung[__u_i] = _u_st_ung[_u_st_n];
         _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ, _u_st_buf + _u_st_n * _U_BUFSZ, _U_BUFSZ);
         _u_st_bpos[__u_i] = _u_st_bpos[_u_st_n]; _u_st_blen[__u_i] = _u_st_blen[_u_st_n];
+        _u_st_wlen[__u_i] = _u_st_wlen[_u_st_n];
     }
     return __close(_unisa_fd(__u_f));
 }
@@ -510,6 +566,7 @@ static int fclose(FILE *__u_f) {
 #if !__UNISA_FTRIM_LIBC || __UN_fseek
 static int fseek(FILE *__u_f, long __u_off, int __u_whence) {
     int __u_i; __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0) _u_st_wflush(__u_i);
     if (__u_i >= 0) {
         if (__u_whence == SEEK_CUR) __u_off = __u_off - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0);
         _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1; _u_st_eof[__u_i] = 0;
@@ -520,8 +577,9 @@ static int fseek(FILE *__u_f, long __u_off, int __u_whence) {
 #if !__UNISA_FTRIM_LIBC || __UN_ftell
 static long ftell(FILE *__u_f) {
     long __u_r; int __u_i;
-    __u_r = __lseek(_unisa_fd(__u_f), 0, SEEK_CUR);
     __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0) _u_st_wflush(__u_i);
+    __u_r = __lseek(_unisa_fd(__u_f), 0, SEEK_CUR);
     if (__u_r >= 0 && __u_i >= 0) __u_r = __u_r - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0);
     return __u_r;
 }
@@ -538,7 +596,11 @@ static int rename(const char *__u_from, const char *__u_to) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fflush
-static int fflush(FILE *__u_f) { return 0; }
+static int fflush(FILE *__u_f) {
+    if (__u_f == NULL) { _u_st_flushall(); return 0; }
+    if ((long)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) return 0;
+    return _u_st_wflush(_u_st_slot(__u_f));
+}
 #endif
 
 /* ---- a runtime formatter ------------------------------------------------
@@ -553,7 +615,7 @@ static void _u_put(char *__u_out, long __u_cap, long *__u_n, FILE *__u_f, int __
         if (__u_cap < 0 | *__u_n < __u_cap - 1) __u_out[*__u_n] = __u_c;
     } else {
         __u_ch = __u_c;
-        __write(_unisa_fd(__u_f), &__u_ch, 1);
+        _u_st_wput(__u_f, &__u_ch, 1);
     }
     *__u_n = *__u_n + 1;
 }
