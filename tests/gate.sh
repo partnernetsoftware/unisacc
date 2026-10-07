@@ -459,6 +459,7 @@ job asmtext     ./tests/asmtext.sh   # R18-1/R18-2: -S -b lnx | unisacc as == -c
 job combo       python3 ./tests/combo.py "$UA" "${MODEL_COM:-./unisacc.com}"   # R19-7: construct x type x position; product = reference tape or refused by name
 job syscall6    ./tests/syscall6.sh   # R19-9 (3): generic system-call gate on osx/arm64, Rosetta x86_64, Lima lnx/arm64
 job lifecycle   ./tests/lifecycle.sh   # 0.0.33 W3 (D2): exit statuses, atexit, abort/raise, a handled signal and a crash, against cc on this host
+job prevheaders ./tests/prevheaders.sh   # 0.0.33 D3′: the installed previous release still compiles the seed tools against this include/
 job forward     ./tests/forward.sh   # R19-10/R21-4a': prototyped undefined functions forward to the system libc (-run and images, six targets)
 job forward-multi ./tests/forwardmulti.sh   # 0.0.26 N5: forwarding across translation units (default run, -run, -o)
 job winposix    ./tests/winposix.sh   # R21-4a': Windows POSIX layer over kernel32 = macOS cc (win/arm64, win/x86_64 in the UTM VM; skipped when it is down)

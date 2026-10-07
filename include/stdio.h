@@ -172,7 +172,7 @@ static int _u_st_slot(FILE *__u_f) {
    writes the waiting bytes first.  The loop in _u_st_raw stops on what the
    __write gate calls an error: negative on POSIX and the VM, 0 on Windows
    (WriteFile's count); an answer larger than asked is not trusted. */
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_raw
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_raw || __UN__u_st_slot   /* D3′: the previous release reaches only names it knows; every stream path names _u_st_slot */
 static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
     long __u_done; long __u_r;
     __u_done = 0;
@@ -184,7 +184,7 @@ static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
     return __u_n;
 }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_wflush
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_wflush || __UN__u_st_slot   /* D3′: the previous release reaches only names it knows; every stream path names _u_st_slot */
 static int _u_st_wflush(int __u_i) {
     long __u_k;
     if (__u_i < 0 || _u_st_wlen[__u_i] == 0) return 0;
@@ -193,13 +193,13 @@ static int _u_st_wflush(int __u_i) {
     return 0;
 }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_flushall
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_flushall || __UN__u_st_slot   /* D3′: the previous release reaches only names it knows; every stream path names _u_st_slot */
 static void _u_st_flushall(void) {
     int __u_i; __u_i = 0;
     while (__u_i < _u_st_n) { _u_st_wflush(__u_i); __u_i = __u_i + 1; }
 }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_wput || __UN__u_st_slot   /* D3′: the previous release reaches only names it knows; every stream path names _u_st_slot */
 #include <stdlib.h>
 static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n) {
     int __u_fd; int __u_i;
