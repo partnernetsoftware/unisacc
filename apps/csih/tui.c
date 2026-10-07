@@ -83,6 +83,7 @@ typedef struct {
     int  err;
     char answer[4096];
     char reason[320];
+    char last[320];
 } agent_result;
 int agent_turn_begin(const char *prompt, const char *transcript,
                      const char *endpoint, const char *model, const char *cwd,
@@ -102,7 +103,7 @@ typedef struct { int ok; int err; int exited; int status; int signal; long bytes
 shell_result shell_run_in(const char *command, const char *cwd);
 void net_set_tick(void (*fn)(void));
 void net_cancel(void);
-void net_progress(int *sec, int *tokens, long *sent);
+void net_progress(int *sec, int *tokens, long *sent, int *rsec);
 void net_recv(long *n);
 void net_cache(int *hit, int *miss, int *seen);
 int  net_deepseek_forget(void);
@@ -131,6 +132,8 @@ typedef struct {
     int  cancel;                 /* stop this turn and return to the input */
     int  busy;                   /* 1 while a model call is in flight */
     int  busy_tick;              /* ticks when busy became 1 */
+    char phase[64];              /* what the in-flight request is doing now */
+    int  ended;                  /* 1 when phase holds a stop cause, not a live call */
     int  ticks;                  /* loop iterations; not printed in agent mode */
     const char *notice;          /* one-line feedback, e.g. an unknown key */
     const char *transcript;      /* where turns are recorded; NULL = no chat */
@@ -172,6 +175,7 @@ typedef struct {
     int  sys_open;            /* 0: system rule only. 1: ten body rows */
     int  sys_top;             /* first wrapped row shown while open */
     int  mind_top;            /* first folded row of the mind block */
+    int  mind_open;           /* 0: mind rule only. 1: folded mind rows */
     int  log_skip;            /* newest log entries hidden; 0 follows the tail */
 } tui_state;
 
@@ -469,6 +473,15 @@ static int tui_looks_err(const char *s) {
 static void tui_note_err(tui_state *st, const char *s) {
     int i, o = 0;
     if (!s) return;
+    /* A quote of source or tool body (x.c:/x.h: lines) is never a turn
+     * error, even when the quoted text happens to contain exit=1. */
+    if (strstr(s, ".c:") || strstr(s, ".h:")) return;
+    /* A later success in the same turn clears the stale error row. */
+    if (!tui_looks_err(s) &&
+        (strstr(s, "exit=0") || strstr(s, "selftest ok") || strstr(s, " ok "))) {
+        st->errline[0] = '\0';
+        return;
+    }
     /* A step trace indented "  \u2502 .../x.c:..." is the tool's own body text,
      * so an exit=1 printed there is not a turn error. Real tool failures and
      * plain exit=/error: lines still paint 错误>. */
@@ -485,11 +498,11 @@ static void tui_note_err(tui_state *st, const char *s) {
     st->errline[o] = 0;
 }
 
-/* The line a live turn actually runs. The goal text stays intact; this only
- * tells the model to continue that goal instead of starting over. */
+/* The line a live turn actually runs. Only the user's goal. The write gate
+ * stays in the system prompt, and is not repeated onto this task. */
 static void tui_goal_prompt(const tui_state *st, char *out, int n) {
     snprintf(out, (size_t)n,
-             "目标：%s。继续这一目标，做完就停。要加功能先 bin/envelope 0:grkwjcgmcsih，不得先写入。",
+             "目标：%s。继续这一目标，做完就停。",
              st->goal);
 }
 
@@ -508,7 +521,11 @@ static void tui_drop_goal_pending(tui_state *st) {
 
 static void tui_queue_goal(tui_state *st) {
     char line[TUI_INPUT_MAX];
-    if (!st->goal[0] || st->loop_left <= 0 || st->npending >= 8) return;
+    if (!st->goal[0] || st->npending >= 8) return;
+    if (st->loop_left <= 0) {
+        st->loop_on = 0;
+        return;
+    }
     tui_goal_prompt(st, line, (int)sizeof line);
     snprintf(st->pending[st->npending], TUI_INPUT_MAX, "%s", line);
     st->npending++;
@@ -722,12 +739,11 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
     }
 }
 
-/* Rows under the mind rule. Left is 思维树.md, right is 记忆宫殿.md.
- * state: 0 has lines, 1 file missing, 2 file empty.
- * Fixed rows are title, goal, input, hint, error, the two rules, and this block.
- * System body and pending lines are counted at the call. */
+/* Rows under the mind rule when that drawer is open.
+ * Fixed rows are title, goal, input, the status line, and the two rules.
+ * System body, mind body, and pending lines are counted in tui_log_room. */
 #define TUI_MIND_N 12
-#define TUI_FIXED_ROWS (7 + TUI_MIND_N)
+#define TUI_FIXED_ROWS 7
 
 /* Mind pages are read whole and folded to the column width, one screen row
  * per folded piece. Continuation rows start with two spaces. */
@@ -882,13 +898,67 @@ static int tui_sys_y0;
 static int tui_sys_y1;
 static int tui_mind_y0;
 static int tui_mind_y1;
+static int tui_mind_rule_y;
 
-/* Top edge of the system block. Collapsed is [展开], open is [收缩]. */
+static int tui_text_lines(const char *src) {
+    int n = 0, any = 0;
+    if (!src) return 0;
+    for (; *src; src++) {
+        if (*src == '\n') {
+            if (any) n++;
+            any = 0;
+        } else if (*src != ' ' && *src != '\t' && *src != '\r')
+            any = 1;
+    }
+    if (any) n++;
+    return n;
+}
+
+/* Content lines in a mind page. -1 when the file is missing. */
+static int tui_page_count(const char *name) {
+    char path[512], buf[512];
+    FILE *fp;
+    const char *home = getenv("HOME");
+    int n = 0, any = 0;
+    if (!home || !home[0]) return -1;
+    csih_home_bind(home);
+    snprintf(path, sizeof path, "%s/.csih/%s", home, name);
+    fp = fopen(path, "r");
+    if (!fp) {
+        snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
+        fp = fopen(path, "r");
+    }
+    if (!fp) return -1;
+    while (fgets(buf, sizeof buf, fp)) {
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+        if (!buf[0] || tui_mind_noise(buf)) continue;
+        any = 1;
+        if (n < 999) n++;
+    }
+    fclose(fp);
+    return any ? n : 0;
+}
+
+static void tui_rule_label(char *dst, int n, const char *name, int open, int count) {
+    const char *mark = open ? "收缩" : "展开";
+    /* Keep [展开] and [收缩] intact so a click can find the bracket. */
+    if (count < 0)
+        snprintf(dst, (size_t)n, "-<%s>[%s]> 无", name, mark);
+    else if (count > 99)
+        snprintf(dst, (size_t)n, "-<%s>[%s]> 99+", name, mark);
+    else
+        snprintf(dst, (size_t)n, "-<%s>[%s]> %d", name, mark, count);
+}
+
+/* Top edge of the system block. Collapsed is [展开], open is [收缩].
+ * The number is how many source lines sit behind the rule. */
 static void tui_sys_rule(r_state *rs, char line[][R_LINE_MAX + 1], int *n,
                          int cols, const tui_state *st) {
-    const char *label;
+    char label[80];
     if (*n >= 63 || cols < 1) return;
-    label = (st && st->sys_open) ? "-<系统提示词>[收缩]>" : "-<系统提示词>[展开]>";
+    tui_rule_label(label, (int)sizeof label, "系统提示词", st && st->sys_open,
+                   tui_text_lines(agent_model_rules()));
     tui_sys_rule_y = *n + 2;
     tui_label_rule(line[*n], R_LINE_MAX + 1, label, cols);
     rs->body[*n] = line[*n];
@@ -896,17 +966,21 @@ static void tui_sys_rule(r_state *rs, char line[][R_LINE_MAX + 1], int *n,
 }
 
 /* Top edge of the mind block. Titles sit on the rule, split by ┬. */
-static void tui_mind_rule(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int cols) {
+static void tui_mind_rule(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int cols, const tui_state *st) {
     char left[R_LINE_MAX + 1], right[R_LINE_MAX + 1];
     int half, rest, bar;
     if (*n >= 63 || cols < 1) return;
+    tui_mind_rule_y = *n + 2;
     bar = tui_mind_bar(cols, &half, &rest);
+    tui_rule_label(left, (int)sizeof left, "思维树", st && st->mind_open, tui_page_count("思维树.md"));
+    tui_rule_label(right, (int)sizeof right, "记忆宫殿", st && st->mind_open, tui_page_count("记忆宫殿.md"));
     if (bar < 0) {
-        tui_label_rule(line[*n], R_LINE_MAX + 1, "-<思维树>", cols);
+        tui_label_rule(line[*n], R_LINE_MAX + 1, left, cols);
     } else {
-        tui_label_rule(left, (int)sizeof left, "-<思维树>", half);
-        tui_label_rule(right, (int)sizeof right, "-<记忆宫殿>", rest);
-        snprintf(line[*n], R_LINE_MAX + 1, "%s┬%s", left, right);
+        char lfit[R_LINE_MAX + 1], rfit[R_LINE_MAX + 1];
+        tui_label_rule(lfit, (int)sizeof lfit, left, half);
+        tui_label_rule(rfit, (int)sizeof rfit, right, rest);
+        snprintf(line[*n], R_LINE_MAX + 1, "%s┬%s", lfit, rfit);
     }
     rs->body[*n] = line[*n];
     (*n)++;
@@ -988,10 +1062,10 @@ static int tui_mind_fold(char src[][R_LINE_MAX + 1], int n,
         while (*p && out < maxrows) {
             int w = width;
             if (!first) {
-                /* Continuation of a wrapped note: indent two spaces so the
+                /* Continuation of a wrapped note: indent four spaces so the
                  * next line reads as the same note, not a new one. */
                 int k;
-                for (k = 0; k < 2 && k < w - 1; k++) dst[out][k] = ' ';
+                for (k = 0; k < 4 && k < w - 1; k++) dst[out][k] = ' ';
                 used = tui_utf8_fit(p, w - k, dst[out] + k);
                 if (used > 0 && p[used]) {
                     /* Prefer a break at space/punctuation over a cut mid-token. */
@@ -1062,7 +1136,7 @@ static void tui_mind_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int
     int lrows = 0, rrows = 0, total, maxtop, top, row, i;
     tui_mind_y0 = 0;
     tui_mind_y1 = 0;
-    if (!st) return;
+    if (!st || !st->mind_open) return;
     tui_page_lines("思维树.md", tree, TUI_MIND_SRC, &tn, &ts);
     tui_page_lines("记忆宫殿.md", palace, TUI_MIND_SRC, &pn, &ps);
     bar = tui_mind_bar(cols, &half, &rest);
@@ -1119,6 +1193,11 @@ static void tui_click(tui_state *st, int x, int y) {
         st->sys_top = 0;
         return;
     }
+    if (y == tui_mind_rule_y && tui_mind_rule_y > 0) {
+        st->mind_open = !st->mind_open;
+        st->mind_top = 0;
+        return;
+    }
     for (h = 0; h < tui_hit_n; h++) {
         int i;
         if (tui_hit_y[h] != y) continue;
@@ -1133,7 +1212,8 @@ static void tui_click(tui_state *st, int x, int y) {
 static int tui_log_room(const tui_state *st) {
     int rows = st->rows > 0 ? st->rows : 24;
     int sys_rows = st->sys_open ? TUI_SYS_N : 0;
-    int room = rows - TUI_FIXED_ROWS - sys_rows - st->npending;
+    int mind_rows = st->mind_open ? TUI_MIND_N : 0;
+    int room = rows - TUI_FIXED_ROWS - sys_rows - mind_rows - st->npending;
     if (room < 1) room = 1;
     if (room > TUI_LOG_VIEW) room = TUI_LOG_VIEW;
     return room;
@@ -1325,6 +1405,40 @@ static void tui_input_row(char *dst, int dstmax, const char *input, int cols) {
     snprintf(dst, (size_t)dstmax, "> %s", piece);
 }
 
+/* After a request finishes the busy line collapses to shortcuts; keep the
+ * last phase and its whole-second cost so idle still shows what just ran. */
+static const char *idle_last(tui_state *st) {
+    static char buf[96];
+    int sec = 0, tokens = 0, rsec = 0;
+    long sent = 0;
+    /* sec is this turn. rsec is only the last request, and must not replace it. */
+    net_progress(&sec, &tokens, &sent, &rsec);
+    if (!st->phase[0] || (sec <= 0 && !st->ended)) {
+        buf[0] = '\0';
+        return buf;
+    }
+    if (st->ended)
+        snprintf(buf, sizeof buf, "上一轮 %s", st->phase);
+    else
+        snprintf(buf, sizeof buf, "上次 %s %d秒", st->phase, sec);
+    return buf;
+}
+
+static const char *tui_role_title(void) {
+    static char buf[64];
+    const char *role = getenv("CSIH_ROLE");
+    const char *peer = getenv("CSIH_PEER");
+    if (!role || !role[0]) return "csih · agent";
+    (void)peer;
+    if (!strcmp(role, "write"))
+        snprintf(buf, sizeof buf, "csih · 写");
+    else if (!strcmp(role, "watch"))
+        snprintf(buf, sizeof buf, "csih · 看");
+    else
+        return "csih · agent";
+    return buf;
+}
+
 static r_frame tui_render_state(tui_state *st, int cols) {
     r_state rs;
     r_frame f;
@@ -1333,7 +1447,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
      * here would mean every body line aliases the last one. */
     char line[64][R_LINE_MAX + 1];
     int n = 0, i;
-    char hint[160];
+    char hint[R_LINE_MAX + 1];
 
     memset(&rs, 0, sizeof rs);
     tui_hit_n = 0;
@@ -1342,7 +1456,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
     tui_sys_y1 = 0;
     tui_log_y0 = 0;
     tui_log_y1 = 0;
-    rs.title = (st->mode == 1) ? "csih · agent" : "csih";
+    rs.title = (st->mode == 1) ? tui_role_title() : "csih";
     rs.width = cols;
     /* Idle agent hint stays fixed. While a call is in flight, show whole
      * seconds only. Cache hit/miss appear only after a real usage object.
@@ -1351,35 +1465,49 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         int sec = 0, tokens = 0, hit = 0, miss = 0, seen = 0;
         long sent = 0, got = 0;
         if (st->busy) {
-            net_progress(&sec, &tokens, &sent);
+            net_progress(&sec, &tokens, &sent, &sec);
             net_recv(&got);
             net_cache(&hit, &miss, &seen);
             if (seen)
                 snprintf(hint, sizeof hint,
-                         "请求中 %d秒 %d词元 上传 %ld字节 已收 %ld字节 hit %d miss %d",
-                         sec, tokens, sent, got, hit, miss);
+                         "请求中 %s %d秒 %d词元 上传 %ld字节 已收 %ld字节 hit %d miss %d",
+                         st->phase, sec, tokens, sent, got, hit, miss);
             else
                 snprintf(hint, sizeof hint,
-                         "请求中 %d秒 %d词元 上传 %ld字节 已收 %ld字节",
+                         "请求中 %s %d秒 %d词元 上传 %ld字节 已收 %ld字节",
+                         st->phase,
                          sec, tokens, sent, got);
         } else if (st->ask_exit)
             snprintf(hint, sizeof hint, "要退出请按 Ctrl-D");
         else if (st->log_skip > 0)
             snprintf(hint, sizeof hint, "更早%d · End回底", st->log_skip);
-        else if (cols >= 72)
-            snprintf(hint, sizeof hint,
-                     "Ctrl-C 清空 · Ctrl-D 退出 · Enter 发送 · ↑↓翻历史 PgUp/PgDn Home/End");
-        else
-            snprintf(hint, sizeof hint, "Ctrl-C 清空 · Ctrl-D 退出 · Enter 发送");
+        else {
+            const char *prev = idle_last(st);
+            const char *sep = prev[0] ? " · " : "";
+            char raw[R_LINE_MAX + 1];
+            int fit = cols > 0 ? cols : 1;
+            if (fit > R_MAX_COLS) fit = R_MAX_COLS;
+            snprintf(raw, sizeof raw, "%s%sEnter 发送", prev, sep);
+            tui_utf8_fit(raw, fit, hint);
+        }
     } else if (st->ask_exit)
         snprintf(hint, sizeof hint, "要退出请按 Ctrl-D · %d", st->ticks);
     else
         snprintf(hint, sizeof hint, "Ctrl-C 清空 · Ctrl-D 退出 · %d", st->ticks);
+    if (st->errline[0]) {
+        char with[R_LINE_MAX + 1];
+        char fitted[R_LINE_MAX + 1];
+        int fit = cols > 0 ? cols : 1;
+        if (fit > R_MAX_COLS) fit = R_MAX_COLS;
+        snprintf(with, sizeof with, "%s · 错误> %s", hint, st->errline);
+        tui_utf8_fit(with, fit, fitted);
+        snprintf(hint, sizeof hint, "%s", fitted);
+    }
 
     if (st->mode == 1) {
         /* Log viewport is TUI_LOG_VIEW when the terminal allows it.
          * Fewer log lines are padded so the block does not collapse.
-         * TUI_FIXED_ROWS already includes the mind block. */
+         * Mind and system drawers add their rows only while open. */
         int show, starti = 0, endi = 0, view_at, filled;
         tui_log_clamp(st);
         tui_log_range(st, &starti, &endi, &show);
@@ -1462,14 +1590,10 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             }
         }
         filled = n - view_at;
-        while (filled < show && n < 40) {
-            line[n][0] = '\0';
-            rs.body[n] = line[n];
-            n++;
-            filled++;
-        }
+        (void)filled;
+        (void)show;
         tui_log_y1 = n + 2;
-        {
+        if (st->loop_on) {
             char gfold[R_LINE_MAX + 1];
             char suffix[32];
             int glen;
@@ -1478,8 +1602,8 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             if (glen < 1) glen = 1;
             tui_put_folded_n(gfold, glen, "", st->goal, glen, 0);
             snprintf(line[n], sizeof line[n], "goal> %s%s", gfold, suffix);
+            rs.body[n] = line[n]; n++;
         }
-        rs.body[n] = line[n]; n++;
         for (i = 0; i < st->npending && n < 62; i++) {
             {
                 const char *p = st->pending[i];
@@ -1498,22 +1622,18 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         rs.body[n] = line[n]; n++;
         snprintf(line[n], sizeof line[n], "%s", hint);
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "错误> %s", st->errline[0] ? st->errline : "-");
-        rs.body[n] = line[n]; n++;
         tui_sys_rule(&rs, line, &n, cols, st);
         tui_sys_block(&rs, line, &n, cols, st);
-        tui_mind_rule(&rs, line, &n, cols);
+        tui_mind_rule(&rs, line, &n, cols, st);
         tui_mind_block(&rs, line, &n, cols, st);
     } else {
         tui_input_row(line[n], (int)sizeof line[n], st->input, cols);
         rs.body[n] = line[n]; n++;
         snprintf(line[n], sizeof line[n], "%s", hint);
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "错误> %s", st->errline[0] ? st->errline : "-");
-        rs.body[n] = line[n]; n++;
         tui_sys_rule(&rs, line, &n, cols, st);
         tui_sys_block(&rs, line, &n, cols, st);
-        tui_mind_rule(&rs, line, &n, cols);
+        tui_mind_rule(&rs, line, &n, cols, st);
         tui_mind_block(&rs, line, &n, cols, st);
         snprintf(line[n], sizeof line[n], "%s", st->notice ? st->notice : "");
         rs.body[n] = line[n]; n++;
@@ -1582,6 +1702,33 @@ static void tui_redraw(tui_state *st) {
  */
 static void tui_agent_event(const char *line, void *ud) {
     tui_state *st = (tui_state *)ud;
+    /* A folded step carries the live tool and path, tab-separated:
+     * fold<TAB><tool><TAB><sub><TAB><path>. Show it as the phase. Anything
+     * else means the loop is back to waiting on the model. */
+    if (!strncmp(line, "fold\t", 5)) {
+        const char *a = line + 5;
+        const char *b = strchr(a, '\t');
+        const char *c = b ? strchr(b + 1, '\t') : NULL;
+        char tool[32], sub[32], path[96];
+        tool[0] = sub[0] = path[0] = '\0';
+        if (b) {
+            snprintf(tool, sizeof tool, "%.*s", (int)(b - a), a);
+            if (c) {
+                snprintf(sub, sizeof sub, "%.*s", (int)(c - (b + 1)), b + 1);
+                snprintf(path, sizeof path, "%s", c + 1);
+            }
+        }
+        if (path[0] && sub[0])
+            snprintf(st->phase, sizeof st->phase, "%s %s %s", tool, sub, path);
+        else if (path[0])
+            snprintf(st->phase, sizeof st->phase, "%s %s", tool, path);
+        else if (sub[0])
+            snprintf(st->phase, sizeof st->phase, "%s %s", tool[0] ? tool : "工具", sub);
+        else
+            snprintf(st->phase, sizeof st->phase, "%s", tool[0] ? tool : "工具");
+    } else if (st->busy) {
+        snprintf(st->phase, sizeof st->phase, "等模型");
+    }
     tui_log_event(st, line);
     tui_redraw(st);
 }
@@ -1694,7 +1841,9 @@ static int tui_run_agent(tui_state *st) {
 
     st->cancel = 0;
     st->busy = 1;
+    st->ended = 0;
     st->busy_tick = st->ticks;
+    snprintf(st->phase, sizeof st->phase, "等模型");
     tui_redraw(st);
     if (agent_turn_begin(prompt, transcript, endpoint, model, cwd, extra, tui_agent_event, st) != 0) {
         r = agent_turn_take();
@@ -1715,6 +1864,19 @@ static void tui_turn_done(tui_state *st) {
     int cancelled = st->cancel || r.err == -5;
     st->cancel = 0;
     st->busy = 0;
+    /* Overwrite the in-flight phase with the stop cause so the idle bottom
+     * bar writes how this turn ended, not a stale "等模型". */
+    st->ended = 1;
+    if (cancelled)
+        snprintf(st->phase, sizeof st->phase, "已取消");
+    else if (!r.ok)
+        snprintf(st->phase, sizeof st->phase, "出错");
+    else if (r.answer[0])
+        snprintf(st->phase, sizeof st->phase, "已答");
+    else if (r.stopped)
+        snprintf(st->phase, sizeof st->phase, "动作打满未答");
+    else
+        snprintf(st->phase, sizeof st->phase, "未答");
     if (cancelled) {
         tui_log_plain(st, "已取消");
         tui_redraw(st);
@@ -1731,8 +1893,18 @@ static void tui_turn_done(tui_state *st) {
                  r.answer[0] ? r.answer : "(no answer text)");
         {
             char sum[240];
-            snprintf(sum, sizeof sum, "↻ rounds=%d actions=%d stopped=%s",
-                     r.rounds, r.actions, r.stopped ? "yes" : "no");
+            /* The answer text is already the ✓ row. This line is only the
+             * round result, so a long answer is not cut mid-sentence. */
+            if (r.answer[0])
+                snprintf(sum, sizeof sum,
+                         "↻ 本轮结束 rounds=%d actions=%d · 已答 · %s",
+                         r.rounds, r.actions,
+                         r.reason[0] ? r.reason : "已结束");
+            else
+                snprintf(sum, sizeof sum,
+                         "↻ 本轮结束 rounds=%d actions=%d · 未作答，动作 %d 次 · %s",
+                         r.rounds, r.actions, r.actions,
+                         r.reason[0] ? r.reason : "已结束");
             tui_log_plain(st, sum);
         }
     }
@@ -1843,12 +2015,13 @@ int main(int argc, char **argv) {
                 snprintf(lz.pending[0], TUI_INPUT_MAX, "%s", "c\nd");
                 lz.npending = 1;
                 snprintf(lz.goal, TUI_INPUT_MAX, "%s", "g\nh");
+                lz.loop_on = 1;
                 lf = tui_render_state(&lz, 40);
                 for (k = 0; k < lf.n; k++) {
                     if (strchr(lf.lines[k], '\n') || strchr(lf.lines[k], '\r')) broke = 1;
                     if (strstr(lf.lines[k], "you> a⏎b")) mark |= 1;
                     if (strstr(lf.lines[k], "待发送> c⏎d")) mark |= 2;
-                    if (strstr(lf.lines[k], "goal> g⏎h · loop> off")) mark |= 4;
+                    if (strstr(lf.lines[k], "goal> g⏎h · loop> on")) mark |= 4;
                 }
                 if (broke || mark != 7 || tui_frame_bad_width(&lf, 40) || lf.n > lz.rows) {
                     printf("FAIL log newline split the frame\n"); failures++;
@@ -1928,15 +2101,15 @@ int main(int argc, char **argv) {
             tui_state_init(&g, NULL);
             g.mode = 1;
             tui_type(&g, "/goal");
-            if (g.busy || g.goal[0] || !tui_frame_has(&g, "goal>")) {
+            if (g.busy || g.goal[0] || tui_frame_has(&g, "goal>")) {
                 printf("FAIL bare /goal\n"); failures++;
-            } else printf("  ok   /goal shows empty\n");
+            } else printf("  ok   /goal omits the empty goal line\n");
             tui_type(&g, "/loop");
             if (g.busy || g.loop_on) {
                 printf("FAIL /loop without a goal\n"); failures++;
             } else printf("  ok   /loop without goal stays off\n");
             tui_type(&g, "/goal keep-going");
-            if (g.busy || strcmp(g.goal, "keep-going") != 0 || !tui_frame_has(&g, "keep-going")) {
+            if (g.busy || strcmp(g.goal, "keep-going") != 0 || tui_frame_has(&g, "goal>")) {
                 printf("FAIL /goal text\n"); failures++;
             } else printf("  ok   /goal sets keep-going\n");
             tui_type(&g, "/loop");
@@ -1979,7 +2152,7 @@ int main(int argc, char **argv) {
             before = g.npending;
             agent_turn_seal(1, 1, 1, 0, 0, "done");
             tui_turn_done(&g);
-            if (g.goal[0] || g.loop_on || g.npending != before || !tui_frame_has(&g, "loop> off")) {
+            if (g.goal[0] || g.loop_on || g.npending != before) {
                 printf("FAIL empty /goal left the loop armed\n"); failures++;
             } else printf("  ok   empty /goal disarms loop\n");
             tui_type(&g, "/goal keep-going");
@@ -2038,11 +2211,13 @@ int main(int argc, char **argv) {
                 tui_state_init(&wide, NULL);
                 wide.mode = 1;
                 wide.rows = 54;
+                snprintf(wide.goal, sizeof wide.goal, "g");
+                wide.loop_on = 1;
                 tui_log_line(&wide, "only-one");
                 fr = tui_render_state(&wide, 40);
                 for (k = 0; k < fr.n; k++)
                     if (!strncmp(fr.lines[k], "goal>", 5)) { goal_at = k; break; }
-                if (goal_at != 1 + TUI_LOG_VIEW || !strstr(fr.lines[1], "only-one")
+                if (goal_at != 2 || !strstr(fr.lines[1], "only-one")
                     || strncmp(fr.lines[0], "csih · agent", 12) != 0
                     || fr.n > wide.rows || tui_frame_bad_width(&fr, 40)) {
                     printf("FAIL log view want %d got goal at %d\n",
@@ -2084,7 +2259,8 @@ int main(int argc, char **argv) {
                                 fr = tui_render_state(&wide, 80);
                                 saw = 0;
                                 for (k = 0; k < fr.n; k++)
-                                    if (strstr(fr.lines[k], "PgUp/PgDn")) saw = 1;
+                                    if (strstr(fr.lines[k], "Enter 发送")
+                                        && !strstr(fr.lines[k], "PgUp")) saw = 1;
                                 if (wide.log_skip != 0 || !saw || !tui_frame_has(&wide, "hist-new")
                                     || tui_frame_bad_width(&fr, 80)) {
                                     printf("FAIL log end or wide hint\n");
@@ -2113,14 +2289,18 @@ int main(int argc, char **argv) {
                 tui_state_init(&wide, NULL);
                 wide.mode = 1;
                 wide.rows = 54;
+                snprintf(wide.goal, sizeof wide.goal, "g");
+                wide.loop_on = 1;
                 fr = tui_render_state(&wide, 40);
                 goal_at = -1;
                 for (k = 0; k < fr.n; k++)
                     if (!strncmp(fr.lines[k], "goal>", 5)) { goal_at = k; break; }
-                if (goal_at != 1 + TUI_LOG_VIEW || tui_frame_has(&wide, "type a prompt")) {
+                if (goal_at < 1 || (goal_at > 1 && !fr.lines[goal_at - 1][0])) {
+                    /* No blank rows should pad the empty log view; goal sits
+                     * right below the header. */
                     printf("FAIL empty log view goal at %d\n", goal_at);
                     failures++;
-                } else printf("  ok   empty log view is %d\n", TUI_LOG_VIEW);
+                } else printf("  ok   empty log view unpadded, goal at %d\n", goal_at);
             }
             {
                 tui_state ex;
@@ -2167,7 +2347,7 @@ int main(int argc, char **argv) {
                 tui_state_init(&er, NULL);
                 er.mode = 1;
                 er.rows = 24;
-                if (!tui_frame_has(&er, "错误> -")) {
+                if (tui_frame_has(&er, "错误>")) {
                     printf("FAIL empty error status\n"); failures++;
                 }
                 tui_log_event(&er, "exit=1 nfs: not responding");
@@ -2229,11 +2409,31 @@ int main(int argc, char **argv) {
                     if (strstr(mf.lines[k], "│")) bars++;
                 }
                 if (in_at < 0 || hint_at < in_at || sysn != 0 || !collapsed || rules < 2 || !head
-                    || !paired || !tee || bars != TUI_MIND_N || mf.n > mind.rows
+                    || paired || !tee || bars != 0 || mf.n > mind.rows
                     || tui_frame_bad_width(&mf, 40)
                     || tui_frame_has(&mind, "```") || tui_frame_has(&mind, "flowchart LR")) {
-                    printf("FAIL mind columns under input\n"); failures++;
+                    printf("FAIL mind drawer stays closed\n"); failures++;
                 } else printf("  ok   rules between hint, system, and mind\n");
+                {
+                    int my = 0, opened = 0, obars = 0, opaired = 0;
+                    for (k = 0; k < mf.n; k++) {
+                        if (strstr(mf.lines[k], "-<思维树>") && strstr(mf.lines[k], "[展开]"))
+                            my = k + 1;
+                    }
+                    if (my > 0) tui_click(&mind, 1, my);
+                    mf = tui_render_state(&mind, 40);
+                    for (k = 0; k < mf.n; k++) {
+                        if (strstr(mf.lines[k], "-<思维树>") && strstr(mf.lines[k], "[收缩]"))
+                            opened = 1;
+                        if (strstr(mf.lines[k], "乙") && strstr(mf.lines[k], "│")
+                            && strstr(mf.lines[k], "丑")) opaired = 1;
+                        if (strstr(mf.lines[k], "│")) obars++;
+                    }
+                    if (!opened || !opaired || obars != TUI_MIND_N || mf.n > mind.rows
+                        || tui_frame_bad_width(&mf, 40)) {
+                        printf("FAIL mind drawer did not open\n"); failures++;
+                    } else printf("  ok   mind drawer opens\n");
+                }
                 {
                     int sy = 0, body = 0, phase = 0, by = 0;
                     char first[R_LINE_MAX + 1], next[R_LINE_MAX + 1];

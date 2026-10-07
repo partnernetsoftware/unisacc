@@ -290,6 +290,8 @@ static net_tick_fn net_tick_cb;
 static int net_stop;
 static int net_elapsed;
 static time_t net_turn0;
+static time_t net_req0;      /* this request's start; reset per net_async_begin */
+static int net_req_elapsed;  /* whole seconds for this request only */
 static int net_tokens;
 static long net_sent;
 static long net_got;
@@ -304,10 +306,11 @@ void net_turn_clock(void) {
     net_got = 0;
     net_hit = net_miss = net_usage_seen = 0;
 }
-void net_progress(int *sec, int *tokens, long *sent) {
+void net_progress(int *sec, int *tokens, long *sent, int *rsec) {
     if (sec) *sec = net_elapsed;
     if (tokens) *tokens = net_tokens;
     if (sent) *sent = net_sent;
+    if (rsec) *rsec = net_req_elapsed;
 }
 void net_recv(long *n) {
     if (n) *n = net_got;
@@ -352,6 +355,8 @@ void net_note_progress(const char *path, time_t t0) {
     char *p;
     net_elapsed = (int)(time(0) - (net_turn0 ? net_turn0 : t0));
     if (net_elapsed < 0) net_elapsed = 0;
+    net_req_elapsed = (int)(time(0) - (net_req0 ? net_req0 : t0));
+    if (net_req_elapsed < 0) net_req_elapsed = 0;
     if (stat(path, &st) != 0 || st.st_size <= 0) {
         net_tokens = 0;
         net_got = 0;
@@ -495,6 +500,8 @@ int net_async_begin(const char *method, const char *url,
     net_hdr = 0;
     net_capture[0] = 0;
     net_t0 = 0;
+    net_req0 = time(0);
+    net_req_elapsed = 0;
     memset(&net_res, 0, sizeof net_res);
     if (net_stop) { net_res.err = NET_CANCELLED; return -1; }
     net_sent = body ? (long)strlen(body) : 0;

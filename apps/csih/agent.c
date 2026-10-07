@@ -175,12 +175,14 @@ typedef struct {
 static int agent_mind(const agent_step *s, const char *cwd, char *out, int outlen);
 static agent_step g_mind_step;
 static const char *g_mind_cwd;
-static void mind_register(void);
-static void file_register(void);
-static void exec_register(void);
+static void plugin_register_once(cdsh_plugin *row, int *flag);
+static cdsh_plugin mind_row, file_row, exec_row;
+static int mind_registered, file_registered, exec_registered;
 static int agent_file(const agent_step *s, const char *cwd, char *out, int outlen);
 static agent_step g_file_step;
 static const char *g_file_cwd;
+static agent_step g_exec_step;
+static const char *g_exec_cwd;
 
 #define AGENT_CONTENT_MAX 4096
 #define AGENT_ANSWER_MAX  4096
@@ -703,27 +705,117 @@ static int agent_slice(const char *path, const char *cwd, char *note, int nlen) 
     return 1;
 }
 
+static char g_role_force[16];
+static char g_peer_force[64];
+static int g_watch_mailed;
+
+void agent_role_test(const char *role, const char *peer) {
+    snprintf(g_role_force, sizeof g_role_force, "%s", role ? role : "");
+    snprintf(g_peer_force, sizeof g_peer_force, "%s", peer ? peer : "");
+    g_watch_mailed = 0;
+}
+
+void agent_watch_reset(void) { g_watch_mailed = 0; }
+
+static const char *agent_role_get(void) {
+    if (g_role_force[0]) return g_role_force;
+    {
+        const char *v = getenv("CSIH_ROLE");
+        return (v && v[0]) ? v : "";
+    }
+}
+
+static const char *agent_peer_get(void) {
+    if (g_peer_force[0]) return g_peer_force;
+    {
+        const char *v = getenv("CSIH_PEER");
+        return (v && v[0]) ? v : "";
+    }
+}
+
+static int agent_peer_name_ok(const char *p) {
+    int n = 0;
+    if (!p) return 0;
+    for (; *p; p++, n++) {
+        char c = *p;
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == ':' || c == '_' || c == '-';
+        if (!ok || n >= 48) return 0;
+    }
+    return n > 0;
+}
+
+void agent_watch_note(const char *cmd) {
+    const char *peer = agent_peer_get();
+    if (cmd && strstr(cmd, "envelope") && agent_peer_name_ok(peer) && strstr(cmd, peer))
+        g_watch_mailed = 1;
+}
+
+int agent_watch_needs_mail(void) {
+    return strcmp(agent_role_get(), "watch") == 0 && !g_watch_mailed;
+}
+
+static int agent_watch_exec_ok(const char *cmd, const char *peer) {
+    if (!cmd || !agent_peer_name_ok(peer)) return 0;
+    if (strstr(cmd, "respawn") || strstr(cmd, "csih.sh") || strstr(cmd, "make "))
+        return 0;
+    if (!strstr(cmd, peer)) return 0;
+    if (strstr(cmd, "capture-pane")) return 1;
+    if (strstr(cmd, "envelope")) return 1;
+    return 0;
+}
+
+/* Watch may read, capture the peer, and envelope the peer. It may not write. */
+int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int n) {
+    const char *role = agent_role_get();
+    const char *peer = agent_peer_get();
+    if (why && n > 0) why[0] = 0;
+    if (strcmp(role, "watch") != 0) return 0;
+    if (kind == ACT_READ) return 0;
+    if (kind == ACT_MIND && op && strcmp(op, "read") == 0) return 0;
+    if (kind == ACT_EXEC && agent_watch_exec_ok(cmd, peer)) return 0;
+    if (why && n > 1)
+        snprintf(why, (size_t)n, "%s",
+                 "看客不改源码。只许读、capture-pane 同伴、给同伴发 envelope。");
+    return 1;
+}
+
+static int agent_role_line(char *dst, int n) {
+    const char *role = agent_role_get();
+    const char *peer = agent_peer_get();
+    if (!dst || n < 8 || !agent_peer_name_ok(peer)) return 0;
+    if (!strcmp(role, "write"))
+        return snprintf(dst, (size_t)n,
+                        "\n写手。同伴 %s。只做同伴信封里的一件。做完执行 /Users/wjc/repos/moltbaby/bin/envelope %s 回一句。不重启。\n",
+                        peer, peer);
+    if (!strcmp(role, "watch"))
+        return snprintf(dst, (size_t)n,
+                        "\n看客。同伴 %s。用户点了这个窗口时，只许 tmux capture-pane -p -t %s，以及 /Users/wjc/repos/moltbaby/bin/envelope %s 送一件。不改源码，不编译，不重启。\n",
+                        peer, peer, peer);
+    return 0;
+}
+
 int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
     char path[512];
     out[0] = '\0';
     agent_under(cwd, s->path, path, sizeof path);
     switch (s->kind) {
     case ACT_EXEC:
-        g_file_step = *s;
-        g_file_cwd = cwd;
-        exec_register();
+        g_exec_step = *s;
+        g_exec_cwd = cwd;
+        plugin_register_once(&exec_row, &exec_registered);
         return plugin_run("exec", s->cmd, out, outlen);
     case ACT_READ:
     case ACT_WRITE:
     case ACT_EDIT:
         g_file_step = *s;
         g_file_cwd = cwd;
-        file_register();
+        plugin_register_once(&file_row, &file_registered);
         return plugin_run("file", s->path, out, outlen);
     case ACT_MIND:
         g_mind_step = *s;
         g_mind_cwd = cwd;
-        mind_register();
+        plugin_register_once(&mind_row, &mind_registered);
         return plugin_run("mind", s->path, out, outlen);
     default:
         snprintf(out, outlen, "unrecognized step");
@@ -863,9 +955,9 @@ static int mind_run(const char *arg, char *out, int outlen) {
 }
 
 static cdsh_plugin mind_row = { "mind", "tree|palace add|read", mind_run, 0 };
-static int mind_registered;
-static void mind_register(void) {
-    if (!mind_registered) { mind_registered = 1; plugin_register(&mind_row); }
+
+static void plugin_register_once(cdsh_plugin *row, int *flag) {
+    if (!*flag) { *flag = 1; plugin_register(row); }
 }
 
 /* plugin_run("file") reaches here: the static step kept by agent_exec. */
@@ -875,15 +967,11 @@ static int file_run(const char *arg, char *out, int outlen) {
 }
 
 static cdsh_plugin file_row = { "file", "read|write|edit", file_run, 0 };
-static int file_registered;
-static void file_register(void) {
-    if (!file_registered) { file_registered = 1; plugin_register(&file_row); }
-}
 
 /* plugin_run("exec") reaches here; runs the current step's command. */
 static int exec_run(const char *arg, char *out, int outlen) {
-    const agent_step *s = &g_file_step;
-    const char *cwd = g_file_cwd;
+    const agent_step *s = &g_exec_step;
+    const char *cwd = g_exec_cwd;
     shell_result r;
     long cap, n;
     int trunc = 0;
@@ -910,10 +998,6 @@ static int exec_run(const char *arg, char *out, int outlen) {
 }
 
 static cdsh_plugin exec_row = { "exec", "shell", exec_run, 0 };
-static int exec_registered;
-static void exec_register(void) {
-    if (!exec_registered) { exec_registered = 1; plugin_register(&exec_row); }
-}
 
 /* Chat completions accept only system/user/assistant. Transcript roles such as
  * tool stay on disk, but go out as a user turn (wrap=1) so the model still
@@ -1101,6 +1185,7 @@ static int agent_build_messages(const char *transcript, const char *tail,
         sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "Catalog:\n");
         sa += (size_t)plugin_catalog(sysbuf + sa, (int)(sizeof sysbuf - sa));
         sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "\n%s", AGENT_SYSTEM_PROMPT);
+        sa += (size_t)agent_role_line(sysbuf + sa, (int)(sizeof sysbuf - sa));
         a += json_msg(acc + a, sizeof acc - a, 0, "system", NULL, sysbuf);
     }
 
@@ -1314,6 +1399,7 @@ typedef struct {
     int  err;
     char answer[AGENT_ANSWER_MAX];
     char reason[320];
+    char last[320];   /* last action's tool + first output line, for the seal line */
 } agent_result;
 
 /* Both pages live in ~/.csih. They are not tied to the working directory. */
@@ -1544,7 +1630,8 @@ static int at_after_http(void) {
         }
         json_rec(dec_rec, sizeof dec_rec, "role", "decision", "go", "stop", NULL, NULL);
         session_append(AT.transcript, dec_rec);
-        at_event("  → stop");
+        at_event("  → stop (判定可停)");
+        snprintf(AT.res.reason, sizeof AT.res.reason, "%s", "judge ok");
         AT.res.stopped = 1;
         AT.res.ok = 1;
         AT.phase = PH_DONE;
@@ -1602,20 +1689,10 @@ static int at_after_http(void) {
             }
             else if (s.kind == ACT_GO_STOP)
                 snprintf(ev, sizeof ev, "%s",
-                         agent_may_stop_ans(AT.judge, MAX_JUDGE, AT.res.answer[0] != 0) ? "  → stop" : "  → 再判断");
+                         agent_may_stop_ans(AT.judge, MAX_JUDGE, AT.res.answer[0] != 0) ? "  → stop (go=stop)" : "  → 再判断");
             else if (s.kind == ACT_GO_CONTINUE) snprintf(ev, sizeof ev, "  → continue");
-            else {
-                char flat[200];
-                int i, j = 0;
-                for (i = 0; AT.content[i] && j < (int)sizeof flat - 1; i++) {
-                    char c = AT.content[i];
-                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-                    flat[j++] = c;
-                }
-                flat[j] = 0;
-                if (!flat[0]) snprintf(ev, sizeof ev, "▸ (empty)");
-                else snprintf(ev, sizeof ev, "▸ %s", flat);
-            }
+            else
+                snprintf(ev, sizeof ev, "无法解析");
             if (ev[0]) at_event(ev);
         }
         if (s.kind == ACT_ANSWER || s.kind == ACT_GO_STOP) {
@@ -1636,6 +1713,8 @@ static int at_after_http(void) {
             }
             json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "stop", NULL, NULL);
             session_append(AT.transcript, tool_rec);
+            at_event("  → stop (go=stop)");
+            snprintf(AT.res.reason, sizeof AT.res.reason, "%s", "go=stop");
             AT.res.stopped = 1;
             AT.res.ok = 1;
             AT.phase = PH_DONE;
@@ -1650,6 +1729,14 @@ static int at_after_http(void) {
             AT.phase = PH_GO;
             return 1;
         }
+        if (s.kind == ACT_ANSWER && agent_watch_needs_mail()) {
+            json_rec(tool_rec, sizeof tool_rec, "role", "tool", "name", "error", "text",
+                     "先给同伴发 envelope，再 answer。");
+            session_append(AT.transcript, tool_rec);
+            at_event("先给同伴发 envelope");
+            AT.phase = PH_GO;
+            return 1;
+        }
         if (s.kind == ACT_ANSWER) {
             snprintf(AT.res.answer, sizeof AT.res.answer, "%s", s.text);
             /* One supplementary decision after the work of this round.
@@ -1659,6 +1746,7 @@ static int at_after_http(void) {
                 json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "stop", NULL, NULL);
                 session_append(AT.transcript, tool_rec);
                 AT.res.ok = 1;
+                at_event("  → stop (MAX_ROUNDS)");
                 snprintf(AT.res.reason, sizeof AT.res.reason, "reached MAX_ROUNDS");
                 AT.phase = PH_DONE;
                 return 0;
@@ -1684,14 +1772,21 @@ static int at_after_http(void) {
         }
         {
             const char *name = nm;
-            if (s.kind == ACT_EXEC && agent_note_cd(AT.run_cwd, sizeof AT.run_cwd, s.cmd, result, sizeof result)) {
+            if (agent_peer_blocked(s.kind, s.op, s.cmd, result, (int)sizeof result)) {
+            } else if (s.kind == ACT_EXEC && agent_note_cd(AT.run_cwd, sizeof AT.run_cwd, s.cmd, result, sizeof result)) {
             } else {
+                if (s.kind == ACT_EXEC) agent_watch_note(s.cmd);
                 agent_exec(&s, AT.run_cwd[0] ? AT.run_cwd : AT.cwd, result, sizeof result);
             }
             if (agent_object_count(AT.content) > 1 && strlen(result) + 80 < sizeof result)
                 strcat(result, "\n[only the first action ran; send one JSON object]");
             agent_tool_record(tool_rec, sizeof tool_rec, name, result);
             session_append(AT.transcript, tool_rec);
+            {
+                /* Tool name only. The result body stays in the tool row. */
+                snprintf(AT.res.last, sizeof AT.res.last, "%s",
+                         name && name[0] ? name : "act");
+            }
             AT.res.actions++;
             {
                 const char *p = result;
@@ -1711,7 +1806,21 @@ static int at_after_http(void) {
             }
         }
         AT.action++;
-        if (AT.action >= MAX_ACTIONS) { AT.http_kind = HTTP_END; at_event("↻ round-end decision"); }
+        if (AT.action >= MAX_ACTIONS) {
+            /* Action budget spent and no answer yet. Do not spend a model
+             * turn deciding: stop once, with the reason written here. */
+            snprintf(AT.res.reason, sizeof AT.res.reason,
+                     "reached MAX_ACTIONS (%d) with no answer; last %s",
+                     MAX_ACTIONS,
+                     AT.res.last[0] ? AT.res.last : "(no result)");
+            session_append(AT.transcript,
+                           "{\"role\":\"decision\",\"go\":\"stop\"}");
+            at_event("  → stop (MAX_ACTIONS)");
+            AT.res.stopped = 1;
+            AT.res.ok = 1;
+            AT.phase = PH_DONE;
+            return 0;
+        }
         AT.phase = PH_GO;
         return 1;
     }
@@ -1725,6 +1834,7 @@ int agent_turn_begin(const char *prompt, const char *transcript,
 
     char tree[2048], palace[2048];
     memset(&AT, 0, sizeof AT);
+    agent_watch_reset();
     AT.no_tools = agent_user_forbids_tools(prompt);
     net_reset();
     net_turn_clock();

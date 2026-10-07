@@ -55,7 +55,7 @@ typedef struct {
 int net_parse_url(const char *url, net_url *u);
 void net_note_progress(const char *path, time_t t0);
 int net_deepseek_forget(void);
-void net_progress(int *sec, int *tokens, long *sent);
+void net_progress(int *sec, int *tokens, long *sent, int *rsec);
 void net_recv(long *n);
 void net_cache(int *hit, int *miss, int *seen);
 extern int net_hit, net_miss, net_usage_seen;
@@ -141,7 +141,7 @@ static void run_selftest(void) {
             fputs("{\"abcd\"}", f);
             fclose(f);
             net_note_progress(path, time(0));
-            net_progress(&sec, &tokens, 0);
+            net_progress(&sec, &tokens, 0, 0);
             net_recv(&got);
             net_cache(&hit, &miss, &seen);
             expect(got == 8 && tokens == 2 && seen == 0, "partial body counts bytes and hides cache");
@@ -149,7 +149,7 @@ static void run_selftest(void) {
             fputs("{\"usage\":{\"total_tokens\":11,\"prompt_cache_hit_tokens\":2,\"prompt_cache_miss_tokens\":3}}", f);
             fclose(f);
             net_note_progress(path, time(0));
-            net_progress(&sec, &tokens, 0);
+            net_progress(&sec, &tokens, 0, 0);
             net_cache(&hit, &miss, &seen);
             expect(tokens == 11 && seen == 1 && hit == 2 && miss == 3, "usage replaces the byte estimate");
             unlink(path);

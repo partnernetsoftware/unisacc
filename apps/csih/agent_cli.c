@@ -54,6 +54,7 @@ typedef struct {
     int  err;
     char answer[4096];
     char reason[128];
+    char last[320];
 } agent_result;
 
 agent_step agent_parse(const char *content);
@@ -70,6 +71,10 @@ void agent_set_spill(int on);
 int agent_may_stop(int judge, int maxn);
 int agent_may_stop_ans(int judge, int maxn, int answered);
 int agent_mentions_window(const char *s);
+void agent_role_test(const char *role, const char *peer);
+int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int n);
+void agent_watch_note(const char *cmd);
+int agent_watch_needs_mail(void);
 int agent_transcript_path(char *out, size_t outlen);
 int agent_ctx_start(int count, int max_recs, const int *costs, int budget);
 int agent_journal_trim(const char *path, long max_bytes, int keep);
@@ -230,6 +235,36 @@ static int agent_run_selftest(void) {
                  "a window request keeps the list");
         a_expect(strstr(rules, "下一窗") != NULL && strstr(rules, "只跑第一个") != NULL,
                  "rules keep one step, then the next window");
+    }
+
+    {
+        char why[160];
+        agent_role_test("watch", "0:csih-tui");
+        a_expect(agent_peer_blocked(ACT_EDIT, "edit", "", why, (int)sizeof why) == 1,
+                 "watch does not edit");
+        a_expect(agent_peer_blocked(ACT_READ, "read", "", why, (int)sizeof why) == 0,
+                 "watch may read");
+        a_expect(agent_peer_blocked(ACT_MIND, "add", "", why, (int)sizeof why) == 1
+                 && agent_peer_blocked(ACT_MIND, "read", "", why, (int)sizeof why) == 0,
+                 "watch mind is read only");
+        a_expect(agent_peer_blocked(ACT_EXEC, "",
+                 "tmux capture-pane -p -t 0:csih-tui", why, (int)sizeof why) == 0,
+                 "watch may capture the peer");
+        a_expect(agent_peer_blocked(ACT_EXEC, "",
+                 "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 一件 看不懂",
+                 why, (int)sizeof why) == 0,
+                 "watch may envelope the peer");
+        a_expect(agent_peer_blocked(ACT_EXEC, "",
+                 "tmux respawn-pane -k -t 0:csih-tui", why, (int)sizeof why) == 1,
+                 "watch does not respawn");
+        agent_role_test("write", "0:csih-tui2");
+        a_expect(agent_peer_blocked(ACT_EDIT, "edit", "", why, (int)sizeof why) == 0,
+                 "write may edit");
+        agent_role_test("watch", "0:csih-tui");
+        a_expect(agent_watch_needs_mail() == 1, "watch must mail before answer");
+        agent_watch_note("/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 一件 折叠没有计数");
+        a_expect(agent_watch_needs_mail() == 0, "envelope to the peer clears the gate");
+        agent_role_test("", "");
     }
 
     {
