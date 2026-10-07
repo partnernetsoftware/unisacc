@@ -1199,7 +1199,7 @@ static FILE *fdopen(int __u_fd, const char *__u_mode) {
 /* popen/pclose (POSIX), 0.0.34: a pipe (socketpair on macOS, as pipe() in unistd.h), a fork, and
    /bin/sh -c in the child with the pipe end on fd 0 or 1 -- the raw calls system() uses, so this
    header still needs no <unistd.h>.  pclose waits for the child and returns its wait status. */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__UNISA_PYFRONT)   /* as system(): the Python front end folds one tape across targets */
 #if defined(__APPLE__) && defined(__x86_64__)
 #define _U_PO_SC(n) (0x2000000L + (n))
 #else
