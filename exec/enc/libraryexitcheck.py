@@ -38,7 +38,7 @@ def main():
                     (resource/'exit').write_bytes(value or bytes(8))
                     pkg.write_bytes(build([manifest],[] if value is None else [('006c6962726172792f',resource)]))
                     got=subprocess.run([runtime,'--bundle',str(pkg),'test',str(source)],capture_output=True,timeout=55)
-                    accept=os_ in ('osx','lnx') or (os_=='win' and op=='hostcall' and value is not None and len(value)==8 and int.from_bytes(value,'little')!=0)
+                    accept=os_ in ('osx','lnx','win')
                     assert (status=='accept')==accept,(os_,op,value,status)
                     assert got.returncode==(0 if accept else 1),(os_,op,value,got.returncode,got.stderr)
                     if accept:

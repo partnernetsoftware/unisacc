@@ -1241,14 +1241,15 @@ def _rows(name, rows):
     return out
 
 
-def pefields():
+def pefields(imports=None):
     """PE32+ header and import-directory field schema (unisa/image/pe.py)."""
     import json
     sys.path.insert(0, str(ROOT))
     from unisa.image import pe
-    n = len(pe.IMPORTS); iat = 40 + 8 * (n + 1); off = iat + 8 * (n + 1)
+    if imports is None: imports = pe.IMPORTS
+    n = len(imports); iat = 40 + 8 * (n + 1); off = iat + 8 * (n + 1)
     names = []
-    for name in pe.IMPORTS:
+    for name in imports:
         raw = b"\0\0" + name.encode() + b"\0"; raw += b"\0" * (len(raw) % 2)
         names.append((off, raw)); off += len(raw)
     dlloff = off; off += len(pe.DLL) + 1; cfg = (off + 7) & -8; idlen = cfg + pe.LOADCFG
@@ -1298,6 +1299,8 @@ def pefields():
 
 
 TABLES.append(("enc-pe", ["unisa/image/pe.py", "exec/facts/export.py"], pefields))
+TABLES.append(("enc-pe-forward", ["unisa/image/pe.py", "exec/facts/export.py"],
+               lambda: pefields(__import__("unisa.image.pe", fromlist=["pe"]).FORWARD_IMPORTS)))
 
 
 def machofields():

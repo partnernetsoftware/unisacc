@@ -61,14 +61,11 @@ def main():
                 else: assert result.returncode==1,(status,result.stderr)
                 n+=1
         if target.startswith('win/'):
-            # The ordinary Windows host bridge needs the conditional IAT route.
-            # Refuse it by name until that route is byte-equal to the reference.
             for raw in (b'_start:\n.hostcall r1, r0\n', b'_start:\n.hostaddr r0, 0\n'):
                 source.write_bytes(raw)
-                status,_,_=simulate(d,raw,'input',files=Resources(None),maxsteps=1000000)
-                result=subprocess.run([runtime,str(tbl),str(source)],capture_output=True,timeout=55)
-                assert status=='reject' and result.returncode==1,(raw,status,result.returncode)
-                assert b'Windows .hostcall/.hostaddr forwarding' in result.stderr,result.stderr
+                status,out,_=simulate(d,raw,'input',files=Resources(None),maxsteps=1000000)
+                assert status=='accept',(raw,status)
+                assert command([runtime,str(tbl),str(source)])==out,'Windows bridge table differs'
                 n+=1
         print('libraryexit:',target,n,'table/network verdicts; full-domain check-net; callback host execution separate')
 

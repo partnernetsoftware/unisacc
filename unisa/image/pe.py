@@ -37,6 +37,7 @@ IMPORTS = ("GetStdHandle", "WriteFile", "ReadFile", "CloseHandle",
            "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess",
            "TerminateProcess", "SetStdHandle", "GetCurrentProcess",
            "GetCurrentProcessId", "GetModuleFileNameW")
+FORWARD_IMPORTS = IMPORTS + ("LoadLibraryA", "GetProcAddress", "FreeLibrary", "GetLastError")
 
 
 _round = round_up
