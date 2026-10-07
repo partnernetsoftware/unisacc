@@ -29,6 +29,10 @@ with tempfile.TemporaryDirectory() as td:
     assert run('failure')==1
     assert json.loads((t/'failure/results.json').read_text())['results']['bad']['rc']==2
     jobs={'timeout':[sys.executable,'-c','import time; time.sleep(30)']}
+    # 0.0.32: a full-limit timeout is retried once, alone; the second timeout is the result
+    assert run('timeout',5)==75
+    first=json.loads((t/'timeout/results.json').read_text())
+    assert 'timeout' not in first['results'] and first['retried']==['timeout']
     assert run('timeout',5)==1
     assert json.loads((t/'timeout/results.json').read_text())['results']['timeout']['rc']==142
     print('queue: rolling refill, resume, changed inputs, nonzero exit and timeout controls pass')
