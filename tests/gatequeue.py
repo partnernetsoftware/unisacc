@@ -348,7 +348,14 @@ def main():
     # 0.0.32: q15 -- a 54 s window plus the epilogue (provenance check, refingerprint) crossed term.sh's 60 s
     window = args.window - (4 if args.com else 2)
     deadline = start + window
-    def estimate(n): return min(window-2, max(2, history.get(n, 30)*1.3+1))
+    # 0.0.33 Q1: a job with no record takes the median of the recorded ones (30 s until five exist).  The flat
+    # 30 s (-> 40 s estimate) kept every unmeasured job out of the last 40 s of each window; a job that
+    # then runs out of window is deferred and retried with twice its elapsed time (below), so a wrong guess
+    # costs one cut-short attempt.
+    def cold():
+        v = sorted(history.values())
+        return v[len(v)//2] if len(v) >= 5 else 30
+    def estimate(n): return min(window-2, max(2, history.get(n, cold())*1.3+1))
     try:
         while pending or active:
             left = deadline-time.monotonic()
