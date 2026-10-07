@@ -48,8 +48,12 @@ while IFS='|' read -r name kind url pin; do
     [ -d "$CACHE/$name" ] && continue
     [ "${FETCH:-1}" = "1" ] || { echo "realprog corpus absent (FETCH=0): $name"; exit 1; }
     if [ "$kind" = git ]; then
-        bound 40 git clone -q "$url" "$CACHE/$name" || { echo "clone failed: $name"; exit 1; }
-        (cd "$CACHE/$name" && bound 15 git checkout -q "$pin") || exit 1
+        # clone and check out beside the cache, then rename: an interrupted clone (the 0.0.33 queue
+        # left a .git-only corpus/lua) must not pass the -d test above forever
+        rm -rf "$CACHE/.$name.part"
+        bound 40 git clone -q "$url" "$CACHE/.$name.part" || { echo "clone failed: $name"; exit 1; }
+        (cd "$CACHE/.$name.part" && bound 15 git checkout -q "$pin") || exit 1
+        mv "$CACHE/.$name.part" "$CACHE/$name" || exit 1
     else
         bound 50 curl -sfL -o "$T/$name.zip" "$url" || { echo "download failed: $name"; exit 1; }
         got=$(shasum -a 256 "$T/$name.zip" | cut -d' ' -f1)

@@ -80,9 +80,9 @@ def main(group):
         cnet = d / "seed-net"
         # 0.0.25 B1: the seed constructor is built by unisacc.com (the installed previous release),
         # not by the system cc -- the self-hosting road uses our own compiler wherever it can
-        run(deadline, "sh", str(ROOT / "unisacc.com"), "seed/net.c", "-o", str(cnet))
+        run(deadline, "sh", str(ROOT / "unisacc.com"), "-fno-trim-libc", "seed/net.c", "-o", str(cnet))
         ctbl = d / "seed-tbl"                    # 0.0.25 B2: delta JSON -> flat table in C as well
-        run(deadline, "sh", str(ROOT / "unisacc.com"), "seed/tbl.c", "-o", str(ctbl))
+        run(deadline, "sh", str(ROOT / "unisacc.com"), "-fno-trim-libc", "seed/tbl.c", "-o", str(ctbl))
         done = []
         for name, generator, flags in specs(group):
             graph, table = d / (name + ".json"), d / (name + ".tbl")

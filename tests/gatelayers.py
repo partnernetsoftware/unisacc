@@ -27,7 +27,7 @@ CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-")
 # Target execution, native ABI, or a cross-target image is part of the claim.
 PLATFORM = set("""
 c99 apps-real realprog hosthdr syscall6 winposix ccinterop elfobj
-nativeboot windows-resolver-host
+nativeboot windows-resolver-host lifecycle
 """.split())
 PLATFORM_PREFIX = ("bigclosure-", "nativeboot-", "fat-", "ffi-", "exec-mach", "exec-win",
                    "exec-pe", "exec-arm", "exec-bind", "exec-container",
@@ -47,7 +47,7 @@ PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff
 # A single delta, builder stage, or library subsystem is checked in isolation.
 STAGE = set("""
 strconvert-host libneed apps-structure seed-construct seedfacts seedparse2-1 seedparse2-2 seed-matrix-shared
-seed-matrix-object seedgen seedape seedpack exec-bridge-linux warn diag target-package
+seed-matrix-object seedgen seedape seedpack exec-bridge-linux warn diag target-package prevheaders
 """.split())
 STAGE_PREFIX = ("exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
                 "warn-", "diag-", "referee-", "shared-e2-", "seedgen-")

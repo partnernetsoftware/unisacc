@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
     if part in ("base", "all"):
         cnet = work / "seed-net"
-        run("sh", str(ROOT / "unisacc.com"), "seed/net.c", "-o", str(cnet))   # 0.0.25 B1: our compiler, not cc
+        run("sh", str(ROOT / "unisacc.com"), "-fno-trim-libc", "seed/net.c", "-o", str(cnet))   # 0.0.25 B1: our compiler, not cc
         graph = work / "prune.json"
         table = work / "prune.tbl"
         run("python3", "exec/build/gen.py", "prune", str(graph))
@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             assert py.read_bytes() == c.read_bytes(), source
     # 0.0.25 B4: the manifest -> delta step in C, one stage at a time (seed/gen.c); prune first
     cgen = work / "seed-gen"
-    run("sh", str(ROOT / "unisacc.com"), "seed/gen.c", "-o", str(cgen))
+    run("sh", str(ROOT / "unisacc.com"), "-fno-trim-libc", "seed/gen.c", "-o", str(cgen))
     if part in ("parse2", "all"):
         # B4 parse2 first slice: the declared token vocabulary and its two E3
         # additions must have the same insertion order and numbers in both seeds.
