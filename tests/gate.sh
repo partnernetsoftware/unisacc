@@ -159,7 +159,11 @@ job exec-formatwarn1 python3 ./exec/parse2/returnwarningcheck.py --format --shar
 job exec-e3self ./exec/parse2/selfcheck.sh                       # complete current compiler source -> tape
 job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal bits, table/net and host cc
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
-job exec-e4     env E4STRICT=1 ./exec/opt/check.sh examples/*.c tests/c/*.c   # S-17 E4: -O1 and -O2 as deltas
+# S-17 E4: -O1 and -O2 as deltas, four shards (the single job ran 48.8-49.1 s against 49)
+job exec-e4-1   env E4STRICT=1 ./exec/opt/check.sh examples/*.c tests/c/a_*.c
+job exec-e4-2   env E4STRICT=1 ./exec/opt/check.sh tests/c/b_[a-l]*.c
+job exec-e4-4   env E4STRICT=1 ./exec/opt/check.sh tests/c/b_[!a-l]*.c
+job exec-e4-3   env E4STRICT=1 ./exec/opt/check.sh tests/c/[!ab]*.c
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
 job exec-prune-0 env PRUNE_PART=0 PRUNE_UA="$UA" python3 ./exec/prune/check.py
 job exec-prune-1 env PRUNE_PART=1 PRUNE_UA="$UA" python3 ./exec/prune/check.py
@@ -268,7 +272,10 @@ job exec-macxself env SELF_PART=stages TARGET=osx/x86_64 ./exec/pipeline/selfche
 job exec-macxself-package env SELF_PART=package TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-bootstrap-osxarm env SELF_PART=bootstrap TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-bootstrap-osxx86 env SELF_PART=bootstrap TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh
-job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 complete source-to-ELF paths
+# the fixed source-to-ELF paths of exec/pipeline/keep-elf.txt (96 in 0.0.34), three shards
+job exec-srcelf-1 env ELF_SHARD=1/3 ./exec/pipeline/check-elf.sh
+job exec-srcelf-2 env ELF_SHARD=2/3 ./exec/pipeline/check-elf.sh
+job exec-srcelf-3 env ELF_SHARD=3/3 ./exec/pipeline/check-elf.sh
 for k in 1 2 3 4; do job difftest_o-$k SHARD=$k/4 ./tests/difftest_o.sh; done
 job warn        ./tests/warn.sh
 job diag-units  ./tests/diagunits.sh
