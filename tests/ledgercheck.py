@@ -87,6 +87,9 @@ def carry_check(plan):
         marks = re.findall(r'〔([^〕]*)〕', line)
         own = re.search(r'顺延\s*(\d+)\s*→', marks[0]) if marks else None
         cnt = re.match(r'\s*(\d+)', line.rstrip().rstrip('|').split(' | ')[-1])
+        # E61 (10-08): `具名顺延 0.0.35` with no `顺延 N →` count slipped through (1acc9226)
+        if marks and not own and '已完成' not in marks[0] and re.search(r'顺延\s*(?:到\s*)?0\.0\.\d+', marks[0]):
+            bad.append('%s row %s defers by name without a count (write 顺延 N → 0.0.M)' % (plan.name, rid))
         if own and (not cnt or cnt.group(1) != own.group(1)):
             bad.append('%s row %s says 顺延 %s but counts %s' % (plan.name, rid, own.group(1), cnt.group(1) if cnt else 'nothing'))
     # E50: the plan's 主题 line names the roadmap's definition for this version
