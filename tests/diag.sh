@@ -273,6 +273,18 @@ poscase "$T/nohdr.c" "5:11" "no such file for #include"
 # (C99 6.2.2p7) -- `static char *environ[]` over <unistd.h> bound to the header's object
 { echo 'extern char **env_zz;'; echo 'static char *env_zz[] = {"A=1", 0};'; echo 'int main(void) { return env_zz[1] != 0; }'; } > "$T/staticafter.c"
 poscase "$T/staticafter.c" "2:14" "static declaration follows a non-static"
+# H1-3: the conflicting declaration name, including comma and pointer declarators.
+printf 'int f(void);\nstatic int f(void);\n' > "$T/link_function.c"
+poscase "$T/link_function.c" "2:12" "static declaration follows a non-static"
+printf 'extern int y;\nstatic int x, y;\n' > "$T/link_comma.c"
+poscase "$T/link_comma.c" "2:15" "static declaration follows a non-static"
+printf 'extern int (*p)(void);\nstatic int (*p)(void);\n' > "$T/link_fp.c"
+poscase "$T/link_fp.c" "2:14" "static declaration follows a non-static"
+printf 'int main(void){extern int f(void);return 0;}\nstatic int f(void){return 1;}\n' > "$T/link_block.c"
+poscase "$T/link_block.c" "2:12" "static declaration follows a non-static"
+printf 'static int x;\nint x;\n' > "$T/link_plain.c"
+poscase "$T/link_plain.c" "2:5" "non-static declaration follows a static"
+
 # 0.0.32 D1: a static object's initializer must be constant (C99 6.7.8p4); cc names the call
 { echo 'int f(int x) { return x + 1; }'; echo 'int v = f(1);'; echo 'int main(void) { return v != 2; }'; } > "$T/staticinit.c"
 poscase "$T/staticinit.c" "2:9" "initializer element is not a compile-time constant"
