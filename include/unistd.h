@@ -462,6 +462,9 @@ static char *getcwd(char *__u_buf, size_t __u_size) {
 ssize_t pread(int __u_fd, void *__u_buf, size_t __u_n, off_t __u_off);
 ssize_t pwrite(int __u_fd, const void *__u_buf, size_t __u_n, off_t __u_off);
 int fchown(int __u_fd, uid_t __u_uid, gid_t __u_gid);
+/* 0.0.34 X1 (cx.h cx_run_timeout kills the whole group): forwarded */
+int setpgid(pid_t __u_pid, pid_t __u_pgid);
+pid_t getpgrp(void);
 long sysconf(int __u_name);
 #ifdef __APPLE__
 #define _SC_PAGESIZE 29
