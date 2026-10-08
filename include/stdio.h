@@ -553,6 +553,24 @@ static long ftell(FILE *__u_f) {
     return __u_r;
 }
 #endif
+/* POSIX spellings lua's LUA_USE_POSIX build asks for (0.0.34 L1b): off_t is
+   long here, so fseeko/ftello are fseek/ftell; there is one thread, so the
+   stream locks have nothing to do and getc_unlocked is getc. */
+#if !__UNISA_FTRIM_LIBC || __UN_fseeko
+static int fseeko(FILE *__u_f, long __u_off, int __u_whence) { return fseek(__u_f, __u_off, __u_whence); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_ftello
+static long ftello(FILE *__u_f) { return ftell(__u_f); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_flockfile
+static void flockfile(FILE *__u_f) { (void)__u_f; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_funlockfile
+static void funlockfile(FILE *__u_f) { (void)__u_f; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getc_unlocked
+static int getc_unlocked(FILE *__u_f) { return fgetc(__u_f); }
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_rewind
 static void rewind(FILE *__u_f) { fseek(__u_f, 0, SEEK_SET); clearerr(__u_f); }
 #endif

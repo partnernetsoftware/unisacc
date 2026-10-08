@@ -253,6 +253,30 @@ static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
 
 /* The fractional part is accumulated as an integer and scaled once, so a
  * long run of digits does not lose the low ones to repeated division. */
+/* mkstemp (POSIX, 0.0.34 L1b): replace the trailing XXXXXX and create the file
+   exclusively, retrying on EEXIST; the letters come from a counter mixed with the
+   address of a local, so two processes running the same binary still differ. */
+#if !__UNISA_FTRIM_LIBC || __UN_mkstemp
+#include <fcntl.h>
+static int mkstemp(char *__u_t) {
+    static unsigned long __u_seq;
+    long __u_n; long __u_j; int __u_try; int __u_fd; unsigned long __u_v;
+    __u_n = 0; while (__u_t[__u_n]) __u_n = __u_n + 1;
+    if (__u_n < 6) { errno = EINVAL; return 0 - 1; }
+    __u_j = __u_n - 6; while (__u_j < __u_n) { if (__u_t[__u_j] != 88) { errno = EINVAL; return 0 - 1; } __u_j = __u_j + 1; }
+    __u_try = 0;
+    while (__u_try < 100) {
+        __u_seq = __u_seq + 1;
+        __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u;
+        __u_j = __u_n - 6;
+        while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
+        __u_fd = open(__u_t, O_RDWR | O_CREAT | O_EXCL, 384);
+        if (__u_fd >= 0 || errno != EEXIST) return __u_fd;
+        __u_try = __u_try + 1;
+    }
+    return 0 - 1;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtod
 static double strtod(const char *__u_s, char **__u_end) {
     double __u_v; int __u_sign; long __u_i; int __u_any;
