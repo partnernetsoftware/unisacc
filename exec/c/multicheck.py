@@ -72,6 +72,18 @@ if part in ('all','static'):
             assert ok([*base,*files,'-t',target])==want,files
             r=run([*base,'-run',*files]);assert (r.returncode,r.stdout,r.stderr)==(19,b'',b''),r
     print('block-static unit namespaces: both orders, reference tapes and exit 19',flush=True)
+    pair=['tests/multi/qualifiedstatic1.c','tests/multi/qualifiedstatic2.c']
+    oracle=p/'qualified-static-cc';ok(['cc',*pair,'-o',oracle])
+    expected=run([oracle]);assert (expected.returncode,expected.stdout,expected.stderr)==(27,b'',b'')
+    for files in (pair,pair[::-1]):
+        want=ok([ua,*files,'-t',target])
+        for driver in drivers:
+            base=[driver,'--models',p/'compiler.pkg']
+            assert ok([*base,*files,'-t',target])==want,('qualified static',files)
+            r=run([*base,'-run',*files]);assert (r.returncode,r.stdout,r.stderr)==(27,b'',b''),r
+            out=p/'qualified-static-image';ok([*base,*files,'-o',out])
+            r=run([out]);assert (r.returncode,r.stdout,r.stderr)==(27,b'',b''),r
+    print('const/volatile/restrict static pointers, typedefs, arrays and function pointers: both unit orders, system cc exit 27',flush=True)
 
 if part in ('all','frame') and kind in ('all','cc'):
     sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()));import sim
