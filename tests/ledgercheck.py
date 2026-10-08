@@ -67,7 +67,7 @@ def carry_check(plan):
     for src in [plan] + ([prev] if prev else []):
         for rid, line in rows(src.read_text()).items():
             marks = re.findall(r'〔([^〕]*)〕', line)
-            for t in re.findall(r'顺延[^〕]*?(?:→\s*|顺延\s+)(0\.\d+\.\d+)(?:\s+([A-Za-z][\w′″‴⁗]*))?', ' '.join('〔%s〕' % k for k in marks[:1])):
+            for t in re.findall(r'顺延[^〕]*?(?:→\s*|顺延\s+)(0\.\d+\.\d+)(?:\s+([A-Za-z][\w′″‴⁗]*))?', ' '.join('〔%s〕' % k for k in marks[:1] if k.lstrip().startswith('顺延'))):
                 ver, renamed = t
                 if plan_file(ver) is None: bad.append('%s: %s defers to v%s, which has no plan file' % (src.name, rid, ver))
                 elif src is prev and ver == '0.0.%d' % n and (renamed or rid) not in here:
