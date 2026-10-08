@@ -267,10 +267,10 @@ int at_xreg(char *s, int n, int *cls, int *hi) {
 #define XO_IND 5                                /* *%reg */
 int xo_k[4]; int xo_cls[4]; int xo_r[4]; int xo_hi[4]; long xo_imm[4];
 int xo_base[4]; int xo_idx[4]; int xo_sc[4]; int xo_rip[4];
-char *xo_xn[4]; int xo_xl[4]; long xo_xa[4];   /* displacement / target expression */
+char *xo_xn[4]; int xo_xl[4]; long xo_xa[4]; int xo_got[4];   /* displacement / target expression */
 int at_xop(int i, char *s, int n) {
     int k; int cls; int hi; int r;
-    xo_base[i] = 0 - 1; xo_idx[i] = 0 - 1; xo_sc[i] = 1; xo_rip[i] = 0; xo_xn[i] = s; xo_xl[i] = 0; xo_xa[i] = 0;
+    xo_base[i] = 0 - 1; xo_idx[i] = 0 - 1; xo_sc[i] = 1; xo_rip[i] = 0; xo_xn[i] = s; xo_xl[i] = 0; xo_xa[i] = 0; xo_got[i] = 0;
     if (n >= 2 && s[0] == 37) {
         r = at_xreg(s + 1, n - 1, &cls, &hi); if (r < 0) return 0;
         xo_k[i] = XO_REG; xo_cls[i] = cls; xo_r[i] = r; xo_hi[i] = hi; return 1;
@@ -285,7 +285,11 @@ int at_xop(int i, char *s, int n) {
     }
     k = 0; while (k < n && s[k] != 40) k = k + 1;
     if (k == n && n > 4 && at_is(s + n - 4, 4, "@PLT")) { k = n - 4; n = k; }
-    if (!at_expr(s, k)) return 0;
+    {   int ke; ke = k;
+        /* name@GOTPCREL(%rip): the address of a name defined elsewhere, from its GOT slot */
+        if (k < n && k > 9 && at_is(s + k - 9, 9, "@GOTPCREL")) { xo_got[i] = 1; ke = k - 9; }
+        if (!at_expr(s, ke)) return 0;
+    }
     xo_xn[i] = at_xn; xo_xl[i] = at_xl; xo_xa[i] = at_xa;
     if (k == n) { xo_k[i] = XO_TGT; return 1; }
     if (s[n - 1] != 41) return 0;
@@ -481,6 +485,11 @@ int at_xrip(int i, long addr) {
     at_xn = xo_xn[i]; at_xl = xo_xl[i]; at_xa = xo_xa[i];
     if (!at_resolve()) return 0;
     if (at_rsect == 0 - 1) return 0;            /* a bare number: no absolute rip forms */
+    if (xo_got[i]) {
+        if (at_rsect != 0) return 0;
+        at_addrel(at_mpos, 9, at_rval - (at_el - at_mpos));     /* R_X86_64_GOTPCREL */
+        return 1;
+    }
     if (at_rsect == 1) {
         long d; d = at_rval - end;
         if (!at_fits32(d)) return 0;
@@ -767,8 +776,9 @@ int at_xdec(long off) {
                         long d; d = (int)at_rd(p + ripf, 4);
                         at_ln = 0;
                         if (at_drel && at_drelo == off + ripf) {
-                            if (at_dtype != 2 || d != 0) return 0;
+                            if ((at_dtype != 2 && at_dtype != 9) || d != 0) return 0;
                             at_ltgt(at_dsym, at_dadd + (kk - ripf));
+                            if (at_dtype == 9) at_ls("@GOTPCREL");
                         } else {
                             long tg; tg = off + kk + d;
                             if (tg < 0 || tg > at_txl) return 0;
@@ -955,6 +965,11 @@ int at_amem(char *s, int n, int kind) {
     at_mo = 0; at_mm = 0 - 1;
     if (k == n) return kind != 82;
     q = s + k + 1; ql = n - k - 1; while (ql > 0 && at_sp(q[0])) { q = q + 1; ql = ql - 1; }
+    if (ql > 10 && at_is(q, 10, ":got_lo12:")) {    /* ldr xd, [xn, :got_lo12:name] */
+        if (kind != 71 || !at_expr(q + 10, ql - 10) || at_xl == 0 || !at_resolve() || at_rsect != 0) return 0;
+        at_addrel(0, 312, at_rval);
+        return 1;
+    }
     if (kind == 82) {
         long sh; int c;
         c = 0; while (c < ql && q[c] != 44) c = c + 1;
@@ -1022,7 +1037,7 @@ int at_atry(struct at_arow *r, long addr) {
             w = w | ((unsigned int)(0 - v - 1) << 5);
         } else { if (c == 56 || c == 52 || c == 50 || c == 49) {
             int size; size = c - 48;
-            if (!at_amem(o, ol, 0)) return 0;
+            if (!at_amem(o, ol, size == 8 ? 71 : 0)) return 0;
             if (at_mo < 0 || at_mo % size || at_mo / size > 4095) return 0;
             w = w | ((unsigned int)(at_mo / size) << 10) | ((unsigned int)at_mb << 5);
         } else { if (c == 85) {
@@ -1057,9 +1072,12 @@ int at_atry(struct at_arow *r, long addr) {
                 }
             }
         } else { if (c == 80) {                  /* adrp: always relocated */
+            int got; got = ol > 5 && at_is(o, 5, ":got:");
+            if (got) { o = o + 5; ol = ol - 5; }
             if (!at_expr(o, ol) || at_xl == 0) return 0;
             if (!at_resolve()) return 0;
-            at_addrel(0, 275, at_rval);
+            if (got && at_rsect != 0) return 0;
+            at_addrel(0, got ? 311 : 275, at_rval);
         } else { if (c == 90) {                  /* lsl #s = ubfm immr=-s, imms=63-s */
             long v; if (!at_aimm(o, ol, &v) || v < 1 || v > 63) return 0;
             w = w | ((unsigned int)((64 - v) & 63) << 16) | ((unsigned int)(63 - v) << 10);
@@ -1137,7 +1155,10 @@ int at_adec_row(struct at_arow *r, unsigned int w, long off) {
         }
         if (c == 107) { at_lc(35); at_lhex((w >> 5) & 65535); }
         if (c == 75) { at_lc(35); at_lnum(0 - (long)((w >> 5) & 65535) - 1); }
-        if (c == 56 || c == 52 || c == 50 || c == 49) {
+        if (c == 56 && at_drel && at_drelo == off) {
+            if (at_dtype != 312 || ((w >> 10) & 4095) || at_dsym < 4) return 0;
+            at_lc(91); at_aname(88, (w >> 5) & 31); at_ls(", :got_lo12:"); at_ltgt(at_dsym, at_dadd); at_lc(93);
+        } else if (c == 56 || c == 52 || c == 50 || c == 49) {
             long o; o = ((w >> 10) & 4095) * (c - 48);
             at_lc(91); at_aname(88, (w >> 5) & 31); if (o) { at_ls(", #"); at_lhex(o); } at_lc(93);
         }
@@ -1162,7 +1183,8 @@ int at_adec_row(struct at_arow *r, unsigned int w, long off) {
             }
         }
         if (c == 80) {
-            if (!(at_drel && at_drelo == off && at_dtype == 275) || (w & 0x60FFFFE0)) return 0;
+            if (!(at_drel && at_drelo == off && (at_dtype == 275 || at_dtype == 311)) || (w & 0x60FFFFE0)) return 0;
+            if (at_dtype == 311) { if (at_dsym < 4) return 0; at_ls(":got:"); }
             at_ltgt(at_dsym, at_dadd);
         }
         if (c == 90) {
