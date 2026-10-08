@@ -300,7 +300,9 @@ def contract_digest(name):
     """sha256 of NAME without its SCHEDULING-BEGIN..END regions: an edit that only changes which job
     starts when keeps every result; any other edit (commands, limits, retries, environment) does not."""
     out, skip = [], False
-    for line in pathlib.Path(name).read_text().splitlines(True):
+    try: text = pathlib.Path(name).read_text()
+    except FileNotFoundError: return ['missing']   # as digest(): queuecheck fixtures run from a tree without it
+    for line in text.splitlines(True):
         tag = line.strip()
         if tag.startswith('# SCHEDULING-BEGIN'):
             if skip: raise SystemExit('queue: nested SCHEDULING-BEGIN in '+name)
