@@ -6,7 +6,8 @@ Each probe isolates one construct the reference fixed in 0.0.21 (the a_* and
 hosthdr/ccinterop probes).  Whole-program probes compare the E3 network's tape
 with `UA -S -o -`.  Object probes (-c -b, \\0cli/object) cannot be compared on
 tape (the reference writes its interop thunks only into objects), so the
-reference must accept them (`-c -b lnx/x86_64`) and E3 must refuse by name.
+reference must accept them (`-c -b lnx/x86_64`); unsupported signatures refuse
+by name, and the integer-call probe separately checks its ABI thunk contract.
 Verdicts are printed; full implementation is 0.0.22 work.
 """
 import os, pathlib, subprocess, sys, tempfile
@@ -52,8 +53,10 @@ PROBES = [  # (item, name, source)
  (12, 'stale-struct-mark', 'struct S { long a; double d; }; static double ld(struct S *s){ return s->d; } int main(void){ struct S s; s.d=370.5; if (ld(&s) != 370.5) return 1; return 0; }\n'),
 ]
 OBJECTS = [  # (item, name, source, refusal)
+ (13, 'ccx-address', 'int h(int);\nint main(void){return h==0;}\n', 'not covered: cc interop external function address'),
+ (13, 'ccx-call-address', 'int h(int);\nint main(void){return h(1)+(h==0);}\n', 'not covered: cc interop external function address'),
  (13, 'ccw-export', 'extern int f(int);\nint f(int x){return x+1;}\nint main(void){return f(1);}\n', 'not covered: cc interop export'),
- (13, 'ccx-call', 'int h(int);\nint main(void){return h(1);}\n', 'not covered: cc interop call'),
+ (13, 'ccx-call-float', 'int h(float);\nint main(void){return h(1.0f); }\n', 'not covered: cc interop call'),
 ]
 FILES = [(1, 'a_tdarr'), (2, 'a_tdlate'), (5, 'a_fpmemb'), (6, 'a_ptr2d'), (4, 'a_ptrptrmemb'),
          (7, 'a_regtab'), (3, 'a_externarr'), (3, 'fb12-13-extern-incomplete-array'), (8, 'a_parenfn'), (12, 'a_callres'),
@@ -114,6 +117,14 @@ def main():
             assert got.returncode == 1 and refusal.encode() in got.stderr and not got.stdout, (item, name, got.returncode, got.stderr[-500:])
             counts['refused'] += 1
             print('r21 item %d %s: object refused: %s' % (item, name, refusal[len('not covered: '):]), flush=True)
+        f = t/'object-call.c'; f.write_text('int h(int);\nint main(void){return h(1); }\n')
+        got = e3('object', f)
+        thunk = (b'h:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 48\n'
+                 b'  store64 [r6-48], r0\n  imm r2, 48\n  sub64 r1, r6, r2\n  .lea r0, __ccx_h\n'
+                 b'  imm r2, 0\n  .hostcall r0, r1\n  imm r2, 32\n  shl64 r0, r0, r2\n'
+                 b'  shr64 r0, r0, r2\n  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n')
+        assert got.returncode == 0 and got.stdout.endswith(thunk), ('ccx integer thunk', got.returncode, got.stderr[-500:])
+        print('r21 ccx-call: integer ABI thunk contract identical', flush=True)
         f = t/'object-plain.c'; f.write_text('static int g(int x){return x+1;}\nint main(void){return g(1);}\n')
         assert e3('object', f).returncode == 0, 'a plain object must stay accepted'
         print('r21: %d reference-identical, %d refused by name, 0 accepted with different bytes (networks)' % (counts['equal'], counts['refused']))
