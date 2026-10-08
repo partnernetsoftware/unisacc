@@ -26,7 +26,7 @@ import sys
 EOF = 256
 
 
-def run(delta, x, cov=None, files=None, maxsteps=3000000, f1=False):
+def run(delta, x, cov=None, files=None, maxsteps=3000000):
     if delta.get("start") == "SF.start":
         # Provenance and located framing use the shared ordinary-action simulator.
         import importlib.util
@@ -34,10 +34,6 @@ def run(delta, x, cov=None, files=None, maxsteps=3000000, f1=False):
         spec = importlib.util.spec_from_file_location("e1_core_sim", Path(__file__).resolve().parents[1] / "pp/sim.py")
         core = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(core)
-        if f1:
-            if files is None:
-                files = core.Files()
-            files.cache[b"\0cli/f1"] = b"\1"
         model = dict(delta)
         model["states"] = dict(delta["states"], HALT=["b", {}])
         model["seqs"] = [[("ALUI", "add", a[1], a[1], 1) if a[0] == "INC" else a
@@ -100,12 +96,9 @@ def run(delta, x, cov=None, files=None, maxsteps=3000000, f1=False):
 
 
 def main():
-    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] != "--f1"):
-        sys.stderr.write("usage: sim.py delta.json INPUT [--f1]\n")
-        return 2
     delta = json.load(open(sys.argv[1]))
     x = open(sys.argv[2], "rb").read()
-    res, val, steps = run(delta, x, f1=len(sys.argv) == 4)
+    res, val, steps = run(delta, x)
     if res == "accept":
         sys.stdout.buffer.write(val)
         return 0

@@ -18,16 +18,6 @@ valid, 1 invalid with the reason on stderr).  `run.py` checks every stream.
 - **tape.text** -- the reference's `-S -o -` tape: `label:` lines, `.dir`
   lines, indented instructions.
 
-The E1/E3 connection also carries constructor and destructor marks. With
-`\0cli/f1`, E1 frames its typed tokens as `USLATTR1`, two LE32 words (mark
-count and token byte length), then count records of LE32 token ordinal and
-one kind byte, followed by the ordinary typed tokens. `run.py` removes this
-frame before comparing or checking `tokens.typed`; it adds unit zero to each
-record and passes the resulting `\0cli/attributes` resource to E3. The
-reference front end retains these marks outside its token stream. Dropping
-the resource can make E3 accept a source while omitting a constructor call
-from the tape, as `probes/f1_header_ctor.c` demonstrates.
-
 ## Preprocessor diagnostic envelope (development)
 
 `exec/build/gen.py pp --locations` emits **pp.locations**, while its default remains
