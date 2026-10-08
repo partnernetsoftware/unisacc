@@ -1,0 +1,7 @@
+# Managed actor protocol (native control plane only)
+
+`agent-managed DIR SESSION HASH FD` takes ownership and enters raw mode, sends ACK, then waits for ACTIVATE. `standby-managed DIR SESSION HANDOFF HASH FD` validates private DIR and inherited socket FD, sends READY without reading TTY, taking ownership or syncing journal. COMMIT uses only DIR/handoff-HANDOFF.json, activates owned context, raw TTY and consumes once, sends ACK and waits for ACTIVATE.
+
+Every bounded JSON line has exactly string op/session/handoff/hash. IDs are safe owned IDs of at most64 bytes; HASH64 hex. Unknown/stale messages are rejected. ACTIVE accepts idle FREEZE with a new handoff/hash, preserving actual draft and UI in the snapshot without changing current identity. RELEASE closes ownership; RETIRE requires release and skips terminal restoration. RESUME requires the trusted host to terminate and wait for the candidate first, then reacquires and restores the original UI/identity. Release uncertainty stays BLOCKED. EOF exits, so workers do not remain orphan writers. /reload-code requests only from idle managed actors and is excluded from history.
+
+The socket must be a trusted inherited private host capability. These messages do not authenticate a source digest. A future stable launcher must verify candidates, retain the CTTY session leader/foreground group, save baseline termios and restore it finally. Native term_raw_enter can overwrite its saved state on RESUME. This is not a complete launcher or deployed hot replacement.

@@ -10,14 +10,16 @@
 #include <string.h>
 
 int reload_state_validate(const char *text, size_t len, char *why, size_t cap);
+int reload_state_validate_v2(const char *text, size_t len, char *why, size_t cap);
 
 #define RS_CLI_MAX 131072
 
 int main(int argc, char **argv) {
-    if (argc != 3 || strcmp(argv[1], "check") != 0) {
+    if (argc != 3 || (strcmp(argv[1], "check") != 0 && strcmp(argv[1], "check-v2") != 0)) {
         fprintf(stderr, "usage: %s check FILE\n", argv[0]);
         return 2;
     }
+    int use_v2 = strcmp(argv[1], "check-v2") == 0;
 
     const char *path = argv[2];
     FILE *f = fopen(path, "rb");
@@ -61,7 +63,8 @@ int main(int argc, char **argv) {
     buf[len] = '\0';
 
     char why[256];
-    int ok = reload_state_validate(buf, len, why, sizeof why);
+    int ok = use_v2 ? reload_state_validate_v2(buf, len, why, sizeof why)
+                    : reload_state_validate(buf, len, why, sizeof why);
     printf("%s: %s\n", ok ? "PASS" : "FAIL", why);
 
     free(buf);

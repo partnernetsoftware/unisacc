@@ -207,14 +207,14 @@ static const char *AGENT_SYSTEM_PROMPT =
 "  {\"act\":\"mind\",\"op\":\"add|read\",\"target\":\"tree|palace\",\"text\":\"...\"}\n"
 "  {\"act\":\"answer\",\"text\":\"<final reply>\"}\n"
 "\n"
-"- 一次只跑第一个 JSON。看完这一步的结果，再写下一步。\n"
+"- 每次响应恰好一个 JSON 对象。调用工具时只发该工具对象并等待真实结果；同一响应不得再带 answer、go 或说明。只有整个任务实际完成，或需要诚实报告失败时，才单独发 answer。\n"
 "- 读文件用 line 和 n。这一窗没到文件末尾时，结果里写下一窗的 line。\n"
 "- file 读写普通文件。exec 只跑 /bin/sh -c。纯 cd <dir> 记住目录，后面的 exec 和 file 跟着走，不要每步再 cd。\n"
 "- mind 只碰两页，都在 ~/.csih，不跟工作目录。tree 是 ~/.csih/思维树.md，格式 markdown-tree-dag：一层缩进的 markdown 树，├── 与 └── 表示包含，══> 表示跨枝依赖，不是散文。palace 是 ~/.csih/记忆宫殿.md，格式 mermaid-flowchart-memory-palace：一整段 ```mermaid flowchart，边表示树里放不好的关系。没有目录就建。op=add 只追加一行短注，仍以 \"- \" 开头，不会改写整页。op=read 返回该文件。这两页不要用 file 或 exec。\n"
 "- 停在工具结果写明的工作目录。用户没点别的目录就不要搜整盘。\n"
 "- 先做用户的任务。要记住或计划时用 mind。做完就 answer，不要再调用工具。\n"
 "- 已经 answer 之后，下一步就输出 {\"go\":\"stop\"} 结束；只有还剩具体一步没做时才 continue。\n"
-"- 还没 answer 时，前两次 stop 不结束、会再问一次；做完就 answer，再 stop。\n"
+"- 还没 answer 时，前两次 stop 不结束、会再问一次；第三次可结束失败回合。做完就 answer，再 stop。预算耗尽不表示通过。\n"
 "- 用户这句话是唯一任务。用户没写 tmux、窗口或窗名，就不要 exec tmux，也不要在 answer 里谈窗口。\n"
 "- 用户说不用工具时，第一步就 answer。\n"
 "- 若出现「上文有省略」，那一句只说明较早的工具结果或助手行被拿掉了。留下的用户原话没有改写。\n";
@@ -442,14 +442,23 @@ int agent_object_count(const char *s) {
             while (i < nlen && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
             if (i >= nlen) break;
             c = (unsigned char)s[i];
-            if (c == '{' || c == '[' || c == '"' || c == '-' ||
-                (c >= '0' && c <= '9') || c == 't' || c == 'f' || c == 'n')
-                break;
+            if (c == '`') {
+                while (i < nlen && s[i] == '`') i++;
+                while (i < nlen && s[i] != '\n') i++;
+                if (i < nlen) i++;
+                continue;
+            }
+            /* json_value_end already said no valid value starts here, so a
+             * leading word is prose. Skip it byte by byte. Only a broken
+             * container or quote means stop, not a stray t/f/n/digit. */
+            if (c == '{' || c == '[' || c == '"')
+                return -1;
             i++;
             continue;
         }
         while (k < i + e && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r')) k++;
         if (k < nlen && s[k] == '{') n++;
+        else return -1;
         i += e;
     }
     return n;
@@ -466,12 +475,19 @@ agent_step agent_parse(const char *content) {
     s.kind = ACT_ERR;
     if (!content || !*content) return s;
 
-    agent_strip_fence(content, stripped, sizeof stripped);
-    /* Models often write a sentence and then several JSON objects.
-     * Take the first balanced object. The rest is not a second action. */
+    /* Reject before any execution: more than one top-level object is not a
+     * sequence of actions. Return the default ACT_ERR so the caller asks for
+     * a single JSON object and the model can retry. */
+    {
+        int n_obj = agent_object_count(content);
+        if (n_obj != 1) return s;
+    }
+
+    /* Accept at most one top-level object. Models may still write a leading
+     * sentence or a code fence; take the single balanced object that follows. */
     {
         char one[AGENT_CONTENT_MAX];
-        const char *q = strchr(stripped, '{');
+        const char *q = strchr(content, '{');
         size_t e;
         if (!q) return s;
         e = json_value_end(q, strlen(q));
@@ -656,7 +672,7 @@ static int agent_slice(const char *path, const char *cwd, char *note, int nlen) 
     bin = getenv("UNISACC");
     if (!bin || !bin[0]) bin = "/Users/wjc/repos/unisacc/unisacc.com";
     root = (cwd && cwd[0]) ? cwd : ".";
-    snprintf(cmd, sizeof cmd, "exec \"%s\" suite.c suite_cli.c rows %s", bin, base);
+    snprintf(cmd, sizeof cmd, "CSIH_ROLE= CSIH_PEER= exec \"%s\" suite.c suite_cli.c rows %s", bin, base);
     r = shell_run_in(cmd, root);
     if (!r.ok || !r.exited || r.status != 0) {
         char line[160], why[180];
@@ -687,7 +703,7 @@ static int agent_slice(const char *path, const char *cwd, char *note, int nlen) 
         while (line[i] && a + 1 < (int)sizeof args) args[a++] = line[i++];
         args[a] = 0;
         if (!args[0]) continue;
-        snprintf(cmd, sizeof cmd, "exec \"%s\" %s", bin, args);
+        snprintf(cmd, sizeof cmd, "CSIH_ROLE= CSIH_PEER= exec \"%s\" %s", bin, args);
         r = shell_run_in(cmd, root);
         rc = r.exited ? r.status : -1;
         agent_first_line(r.out, first, (int)sizeof first);
@@ -709,10 +725,12 @@ static int agent_slice(const char *path, const char *cwd, char *note, int nlen) 
 
 static char g_role_force[16];
 static char g_peer_force[64];
+static int g_role_configured; /* explicit startup configuration, including empty peer */
 static int g_watch_mailed;
 static int g_watch_deny;
 
 void agent_role_test(const char *role, const char *peer) {
+    g_role_configured = 0; /* preserve legacy test/reset fallback semantics */
     snprintf(g_role_force, sizeof g_role_force, "%s", role ? role : "");
     snprintf(g_peer_force, sizeof g_peer_force, "%s", peer ? peer : "");
     g_watch_mailed = 0;
@@ -721,7 +739,7 @@ void agent_role_test(const char *role, const char *peer) {
 void agent_watch_reset(void) { g_watch_mailed = 0; g_watch_deny = 0; }
 
 static const char *agent_role_get(void) {
-    if (g_role_force[0]) return g_role_force;
+    if (g_role_configured || g_role_force[0]) return g_role_force;
     {
         const char *v = getenv("CSIH_ROLE");
         return (v && v[0]) ? v : "";
@@ -729,7 +747,7 @@ static const char *agent_role_get(void) {
 }
 
 static const char *agent_peer_get(void) {
-    if (g_peer_force[0]) return g_peer_force;
+    if (g_role_configured || g_peer_force[0]) return g_peer_force;
     {
         const char *v = getenv("CSIH_PEER");
         return (v && v[0]) ? v : "";
@@ -748,9 +766,93 @@ static int agent_peer_name_ok(const char *p) {
     return n > 0;
 }
 
-void agent_watch_note(const char *cmd) {
-    const char *peer = agent_peer_get();
-    if (cmd && strstr(cmd, "envelope") && agent_peer_name_ok(peer) && strstr(cmd, peer))
+/* Production startup setter: validate all fields before changing either.
+ * Unlike the legacy test override, an explicitly empty peer stays empty. */
+int agent_role_configure(const char *role, const char *peer) {
+    size_t nr, np, i;
+    if (!role || !peer) return -1;
+    nr = strlen(role); np = strlen(peer);
+    if (!nr || nr >= sizeof g_role_force || np >= sizeof g_peer_force ||
+        (np && !agent_peer_name_ok(peer))) return -1;
+    for (i = 0; i < nr; i++) {
+        unsigned char c = (unsigned char)role[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || strchr("_-.:", c))) return -1;
+    }
+    memcpy(g_role_force, role, nr + 1);
+    memcpy(g_peer_force, peer, np + 1);
+    g_role_configured = 1;
+    agent_watch_reset();
+    return 0;
+}
+
+/* Text alone cannot prove delivery. Kept for existing callers. */
+void agent_watch_note(const char *cmd) { (void)cmd; }
+
+/* Conservative shell-word subset: literal words and balanced single/double
+ * quotes, without expansion, escapes, control bytes, or shell operators.
+ * Only the trusted absolute entry point with the exact peer is evidence. */
+static int agent_envelope_call(const char *cmd, const char *peer) {
+    char word[4096];
+    int argc = 0;
+    const char *p = cmd;
+    if (!p || !agent_peer_name_ok(peer)) return 0;
+    while (*p) {
+        int quote = 0, n = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        while (*p && (quote || (*p != ' ' && *p != '\t'))) {
+            unsigned char c = (unsigned char)*p++;
+            if (c < 32 || c == 127) return 0;
+            if (!quote && (c == '\'' || c == '"')) { quote = c; continue; }
+            if (quote && c == quote) { quote = 0; continue; }
+            if (!quote && strchr("#;&|<>()$`\\*?[]{}~", c)) return 0;
+            if (quote == '"' && (c == '$' || c == '`' || c == '\\')) return 0;
+            if (n >= (int)sizeof word - 1) return 0;
+            word[n++] = (char)c;
+        }
+        if (quote || n == 0) return 0;
+        word[n] = 0;
+        if (argc == 0 && strcmp(word, "/Users/wjc/repos/moltbaby/bin/envelope")) return 0;
+        if (argc == 1 && strcmp(word, peer)) return 0;
+        if (argc == 3 && (word[0] == '@' || !strcmp(word, "-"))) return 0;
+        argc++;
+    }
+    return argc >= 4;
+}
+
+static int agent_envelope_receipt(const char *out) {
+    const char *p;
+    int n = 0, nonzero = 0;
+    if (strncmp(out, "envelope → ", strlen("envelope → "))) return 0;
+    p = out + strlen("envelope → ");
+    while (*p && !(p[0] == ':' && p[1] == ' ')) {
+        unsigned char c = (unsigned char)*p++;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || strchr("%:._-", c))) return 0;
+        if (++n > 128) return 0;
+    }
+    if (!n || p[0] != ':' || p[1] != ' ') return 0;
+    p += 2; n = 0;
+    while (*p >= '0' && *p <= '9') {
+        if (*p != '0') nonzero = 1;
+        p++; if (++n > 10) return 0;
+    }
+    if (!n || !nonzero || strncmp(p, " chars", 6)) return 0;
+    p += 6;
+    return !strcmp(p, "\n") || !strcmp(p, " [submitted✓:BUSY]\n") ||
+           !strcmp(p, " [submitted✓:composer清空]\n") ||
+           !strcmp(p, " [submitted✓:BUSY:cursor帧判]\n") ||
+           !strcmp(p, " [submitted✓:composer清空:cursor帧判]\n");
+}
+
+/* Also exposed for structured CLI unit checks; no command is executed here. */
+void agent_watch_result(const char *cmd, const shell_result *r) {
+    if (!r || strcmp(agent_role_get(), "watch") || !r->ok || !r->exited ||
+        r->status != 0 || r->err || r->signal || r->timed_out ||
+        r->bytes < 0 || r->bytes >= SHELL_OUT_MAX ||
+        !memchr(r->out, 0, sizeof r->out) || (long)strlen(r->out) != r->bytes) return;
+    if (agent_envelope_call(cmd, agent_peer_get()) && agent_envelope_receipt(r->out))
         g_watch_mailed = 1;
 }
 
@@ -981,6 +1083,7 @@ static int exec_run(const char *arg, char *out, int outlen) {
     char head[160];
     (void)arg;
     r = shell_run_in(s->cmd, cwd);
+    agent_watch_result(s->cmd, &r); /* raw status/receipt before spill or truncation */
     cap = (long)(outlen - 64);
     n = r.bytes;
     if (n < 0) { n = (long)strlen(r.out); trunc = 1; }
@@ -1575,7 +1678,7 @@ int agent_event_pack(const char *prefix, const char *text, char rows[][200], int
 
 static int at_fail(int rc) {
     if (rc == -5) snprintf(AT.res.reason, sizeof AT.res.reason, "model call cancelled");
-    else if (rc == -6) snprintf(AT.res.reason, sizeof AT.res.reason, "model call timed out (120s)");
+    else if (rc == -6) snprintf(AT.res.reason, sizeof AT.res.reason, "model call timed out (60s)");
     else if (rc == -3) snprintf(AT.res.reason, sizeof AT.res.reason, "model call failed (http %d) %s", agent_last_http, agent_last_err);
     else snprintf(AT.res.reason, sizeof AT.res.reason, "model call failed (rc=%d)", rc);
     AT.res.err = rc;
@@ -1646,6 +1749,25 @@ static int at_after_http(void) {
         agent_step d = agent_parse(AT.content);
         char dec_rec[128];
         AT.judge++;
+        if (d.kind != ACT_GO_STOP && d.kind != ACT_GO_CONTINUE) {
+            char *raw = malloc(AGENT_CONTENT_MAX + 64);
+            if (raw) {
+                json_rec(raw, AGENT_CONTENT_MAX + 64, "role", "assistant", "text", AT.content, NULL, NULL);
+                session_append(AT.transcript, raw);
+                free(raw);
+            }
+            session_append(AT.transcript,
+                "{\"role\":\"tool\",\"name\":\"error\",\"text\":\"invalid round-end judgment; emit exactly go stop or continue\"}");
+            at_event("invalid round-end judgment");
+            if (AT.judge >= MAX_JUDGE) {
+                AT.res.ok = 0;
+                snprintf(AT.res.reason, sizeof AT.res.reason, "unfinished: invalid round-end judgment (%d)", MAX_JUDGE);
+                AT.phase = PH_DONE;
+                return 0;
+            }
+            AT.phase = PH_GO;
+            return 1;
+        }
         if (d.kind == ACT_GO_CONTINUE) {
             json_rec(dec_rec, sizeof dec_rec, "role", "decision", "go", "continue", NULL, NULL);
             session_append(AT.transcript, dec_rec);
@@ -1665,9 +1787,10 @@ static int at_after_http(void) {
         json_rec(dec_rec, sizeof dec_rec, "role", "decision", "go", "stop", NULL, NULL);
         session_append(AT.transcript, dec_rec);
         at_event("  → stop (判定可停)");
-        snprintf(AT.res.reason, sizeof AT.res.reason, "%s", "judge ok");
+        snprintf(AT.res.reason, sizeof AT.res.reason, "%s",
+                 AT.res.answer[0] ? "judge ok" : "unfinished: go=stop without answer");
         AT.res.stopped = 1;
-        AT.res.ok = 1;
+        AT.res.ok = AT.res.answer[0] != 0;
         AT.phase = PH_DONE;
         return 0;
     }
@@ -1770,9 +1893,10 @@ static int at_after_http(void) {
             json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "stop", NULL, NULL);
             session_append(AT.transcript, tool_rec);
             at_event("  → stop (go=stop)");
-            snprintf(AT.res.reason, sizeof AT.res.reason, "%s", "go=stop");
+            snprintf(AT.res.reason, sizeof AT.res.reason, "%s",
+                     AT.res.answer[0] ? "go=stop" : "unfinished: go=stop without answer");
             AT.res.stopped = 1;
-            AT.res.ok = 1;
+            AT.res.ok = AT.res.answer[0] != 0;
             AT.phase = PH_DONE;
             return 0;
         }
@@ -1824,11 +1948,11 @@ static int at_after_http(void) {
         }
         if (s.kind == ACT_ERR) {
             json_rec(tool_rec, sizeof tool_rec, "role", "tool", "name", "error", "text",
-                     "could not parse your output as a JSON action; emit exactly one {\"act\":...} object");
+                     "response rejected: the entire response was not executed; do not send a tool together with answer or go, or add explanatory text; retry with exactly one {\"act\":...} object and wait for its result");
             session_append(AT.transcript, tool_rec);
             if (++AT.parse_fail >= 3) {
-                AT.res.ok = 1;
-                snprintf(AT.res.reason, sizeof AT.res.reason, "too many unparseable steps");
+                AT.res.ok = 0;
+                snprintf(AT.res.reason, sizeof AT.res.reason, "unfinished: too many unparseable steps");
                 AT.phase = PH_DONE;
                 return 0;
             }
@@ -1841,11 +1965,8 @@ static int at_after_http(void) {
             if (agent_peer_blocked(s.kind, s.op, s.cmd, result, (int)sizeof result)) {
             } else if (s.kind == ACT_EXEC && agent_note_cd(AT.run_cwd, sizeof AT.run_cwd, s.cmd, result, sizeof result)) {
             } else {
-                if (s.kind == ACT_EXEC) agent_watch_note(s.cmd);
                 agent_exec(&s, AT.run_cwd[0] ? AT.run_cwd : AT.cwd, result, sizeof result);
             }
-            if (agent_object_count(AT.content) > 1 && strlen(result) + 80 < sizeof result)
-                strcat(result, "\n[only the first action ran; send one JSON object]");
             agent_tool_record(tool_rec, sizeof tool_rec, name, result);
             session_append(AT.transcript, tool_rec);
             {
@@ -1876,14 +1997,14 @@ static int at_after_http(void) {
             /* Action budget spent and no answer yet. Do not spend a model
              * turn deciding: stop once, with the reason written here. */
             snprintf(AT.res.reason, sizeof AT.res.reason,
-                     "reached MAX_ACTIONS (%d) with no answer; last %s",
+                     "unfinished: reached MAX_ACTIONS (%d) before completion; last %s",
                      MAX_ACTIONS,
                      AT.res.last[0] ? AT.res.last : "(no result)");
             session_append(AT.transcript,
                            "{\"role\":\"decision\",\"go\":\"stop\"}");
-            at_event("  → stop (MAX_ACTIONS)");
+            at_event("  → stop (MAX_ACTIONS, unfinished)");
             AT.res.stopped = 1;
-            AT.res.ok = 1;
+            AT.res.ok = 0;
             AT.phase = PH_DONE;
             return 0;
         }
@@ -1948,8 +2069,8 @@ int agent_turn_step(int wait_ms) {
         return at_after_http();
     }
     if (AT.round >= MAX_ROUNDS) {
-        AT.res.ok = 1;
-        snprintf(AT.res.reason, sizeof AT.res.reason, "reached MAX_ROUNDS");
+        AT.res.ok = 0;
+        snprintf(AT.res.reason, sizeof AT.res.reason, "unfinished: reached MAX_ROUNDS after continue");
         AT.phase = PH_DONE;
         return 0;
     }

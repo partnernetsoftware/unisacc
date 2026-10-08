@@ -48,6 +48,14 @@
 #include "term_api.h"
 #include "csih_home.h"
 #include "csih_cols.h"
+#include "reload_session.h"
+#include "reload_io.h"
+#include "reload_owner.h"
+#include "csih_message_io.h"
+#include <fcntl.h>
+#include <poll.h>
+
+int journal_checkpoint(const char *path, long long *offset, char *why, size_t cap);
 
 #define tui_next_cp csih_next_cp
 #define tui_cp_cols csih_cp_cols
@@ -95,6 +103,7 @@ const char *agent_model_rules(void);
 void agent_set_spill(int on);
 int agent_mentions_window(const char *s);
 int agent_transcript_path(char *out, size_t outlen);
+int agent_role_configure(const char *role, const char *peer);
 void agent_turn_seal(int ok, int stopped, int rounds, int actions, int err,
                      const char *answer);
 
@@ -118,7 +127,7 @@ int  net_deepseek_forget(void);
 
 #define TUI_INPUT_MAX 4096 /* a paste is one buffer, not one 240-byte line */
 #define TUI_LOOP_MAX  8   /* goal resubmits, same order of magnitude as a turn */
-#define TUI_LOG_VIEW  20  /* agent log rows; a shorter terminal uses fewer */
+#define TUI_LOG_VIEW  40  /* agent log rows; a shorter terminal uses fewer */
 
 typedef struct {
     char input[TUI_INPUT_MAX];   /* what the user has typed */
@@ -142,6 +151,10 @@ typedef struct {
     int  ticks;                  /* loop iterations; not printed in agent mode */
     const char *notice;          /* one-line feedback, e.g. an unknown key */
     const char *transcript;      /* where turns are recorded; NULL = no chat */
+    char journal_path[4096];     /* owned path after inactive snapshot apply */
+    reload_session_state *owned; /* explicit startup context, heap owned by main */
+    char owned_dir[4096];
+    int owner_fd;
     char  last[192];             /* most recent verdict, so it can be shown */
     char  output[1024];          /* last tool output, shown in the frame */
 
@@ -182,16 +195,306 @@ typedef struct {
     int  mind_top;            /* first folded row of the mind block */
     int  mind_open;           /* 0: mind rule only. 1: folded mind rows */
     int  log_skip;            /* newest log entries hidden; 0 follows the tail */
+    char mail_id[33];         /* in-flight message id, empty when idle */
+    int  mail_active;         /* 1 while a take()ed message is being handled */
+    int  mail_blocked;        /* 1 when take() yielded nothing usable */
+    long mail_next_ms;        /* next poll deadline, from clock_now_ms */
+    char mail_error[256];     /* last take/finish failure reason */
 } tui_state;
+
+long clock_now_ms(void);
+int session_append(const char *path, const char *line);
+size_t json_rec(char *buf, size_t cap, const char *key1, const char *val1,
+                const char *key2, const char *val2,
+                const char *key3, const char *val3);
+
+static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason);
+static void tui_mail_complete(tui_state *st, const char *result, const char *reason);
+static void tui_mail_poll(tui_state *st, int tasks_allowed);
 
 static void tui_state_init(tui_state *st, const char *transcript) {
     memset(st, 0, sizeof *st);
     st->transcript = transcript;
+    st->owner_fd = -1;
     st->mode = 0;
     st->cols = 40;
     st->rows = 24;
     st->notice = 0;
     (void)transcript;
+}
+
+/* These helpers prepare an inactive restore only; they do not transfer
+ * startup context, journal ownership, or a running request. */
+static int tui_reload_error(char *why, size_t cap, const char *message) {
+    if (why && cap) snprintf(why, cap, "%s", message);
+    return -1;
+}
+
+static int tui_reload_valid(const reload_session_state *snapshot,
+                            char *why, size_t cap) {
+    char *scratch = malloc(1048576);
+    size_t len = 0;
+    int rc;
+    if (!scratch) return tui_reload_error(why, cap, "reload allocation failed");
+    rc = reload_session_encode_v2(snapshot, scratch, 1048576, &len, why, cap);
+    free(scratch);
+    return rc;
+}
+
+static int tui_reload_capture(const tui_state *st,
+                              const reload_session_state *metadata,
+                              reload_session_state *out, char *why, size_t cap) {
+    size_t i;
+    if (!out) return tui_reload_error(why, cap, "reload null output");
+    if (!st || !metadata || out == metadata) {
+        memset(out, 0, sizeof *out);
+        return tui_reload_error(why, cap, "reload null or aliased input");
+    }
+    memset(out, 0, sizeof *out);
+    if (st->busy) return tui_reload_error(why, cap, "reload busy");
+    if (st->npending < 0 || st->npending > 8 || st->nhistory < 0 || st->nhistory > 16 ||
+        st->history_pos < 0 || st->history_pos > st->nhistory)
+        return tui_reload_error(why, cap, "reload counts out of range");
+    memcpy(out->session_id, metadata->session_id, sizeof out->session_id);
+    memcpy(out->handoff_id, metadata->handoff_id, sizeof out->handoff_id);
+    memcpy(out->candidate_hash, metadata->candidate_hash, sizeof out->candidate_hash);
+    memcpy(out->cwd, metadata->cwd, sizeof out->cwd);
+    memcpy(out->role, metadata->role, sizeof out->role);
+    memcpy(out->peer, metadata->peer, sizeof out->peer);
+    memcpy(out->journal_path, metadata->journal_path, sizeof out->journal_path);
+    out->journal_offset = metadata->journal_offset;
+    memcpy(out->goal, st->goal, sizeof out->goal);
+    memcpy(out->input, st->input, sizeof out->input);
+    memcpy(out->history_draft, st->history_draft, sizeof out->history_draft);
+    out->npending = (size_t)st->npending;
+    out->nhistory = (size_t)st->nhistory;
+    out->history_pos = (size_t)st->history_pos;
+    out->history_browsing = st->history_browsing;
+    out->loop_on = st->loop_on;
+    out->loop_left = st->loop_left;
+    for (i = 0; i < out->npending; i++)
+        memcpy(out->pending[i], st->pending[i], sizeof out->pending[i]);
+    for (i = 0; i < out->nhistory; i++)
+        memcpy(out->history[i], st->history[i], sizeof out->history[i]);
+    if (tui_reload_valid(out, why, cap) != 0) {
+        memset(out, 0, sizeof *out);
+        return -1;
+    }
+    return 0;
+}
+
+static int tui_reload_apply(tui_state *st, const reload_session_state *snapshot,
+                            char *why, size_t cap) {
+    size_t i;
+    if (!st || !snapshot) return tui_reload_error(why, cap, "reload null input");
+    if (st->busy) return tui_reload_error(why, cap, "reload busy");
+    if (tui_reload_valid(snapshot, why, cap) != 0) return -1;
+    memcpy(st->goal, snapshot->goal, sizeof st->goal);
+    memcpy(st->input, snapshot->input, sizeof st->input);
+    st->ninput = (int)strlen(st->input);
+    memset(st->pending, 0, sizeof st->pending);
+    memset(st->history, 0, sizeof st->history);
+    st->npending = (int)snapshot->npending;
+    st->nhistory = (int)snapshot->nhistory;
+    for (i = 0; i < snapshot->npending; i++)
+        memcpy(st->pending[i], snapshot->pending[i], sizeof st->pending[i]);
+    for (i = 0; i < snapshot->nhistory; i++)
+        memcpy(st->history[i], snapshot->history[i], sizeof st->history[i]);
+    memcpy(st->history_draft, snapshot->history_draft, sizeof st->history_draft);
+    st->history_pos = (int)snapshot->history_pos;
+    st->history_browsing = snapshot->history_browsing;
+    st->loop_on = snapshot->loop_on;
+    st->loop_left = snapshot->loop_left;
+    memcpy(st->journal_path, snapshot->journal_path, sizeof st->journal_path);
+    st->transcript = st->journal_path;
+    return 0;
+}
+
+/* Export/prepare assume idle single-writer ownership and trusted ancestors.
+ * prepare intentionally uses checkpoint: it fsyncs the journal while checking
+ * its current exact length, without reading/replaying or consuming anything. */
+static int tui_reload_export(const tui_state *st,
+                             const reload_session_state *metadata,
+                             const char *path, char *why, size_t cap) {
+    reload_session_state *work = NULL, *snapshot = NULL;
+    char *encoded = NULL;
+    size_t len = 0;
+    long long offset = 0;
+    int rc = -1;
+    if (!st || !metadata || !path)
+        return tui_reload_error(why, cap, "reload null input");
+    if (st->busy) return tui_reload_error(why, cap, "reload busy");
+    if (!memchr(metadata->journal_path, 0, sizeof metadata->journal_path))
+        return tui_reload_error(why, cap, "journal path not terminated");
+    work = malloc(sizeof *work);
+    snapshot = malloc(sizeof *snapshot);
+    encoded = malloc(131073);
+    if (!work || !snapshot || !encoded) {
+        tui_reload_error(why, cap, "reload allocation failed");
+        goto done;
+    }
+    memcpy(work, metadata, sizeof *work);
+    if (journal_checkpoint(work->journal_path, &offset, why, cap) != 0) goto done;
+    work->journal_offset = (unsigned long long)offset;
+    if (tui_reload_capture(st, work, snapshot, why, cap) != 0) goto done;
+    if (reload_session_encode_v2(snapshot, encoded, 131073, &len, why, cap) != 0) goto done;
+    rc = reload_io_save(path, encoded, len, why, cap);
+    if (rc == -2)
+        tui_reload_error(why, cap, "state replaced; durability not confirmed");
+ done:
+    free(encoded);
+    free(snapshot);
+    free(work);
+    return rc;
+}
+
+static int tui_reload_prepare_bound(const char *path, const char *expected_session,
+                              const char *expected_handoff, const char *expected_hash,
+                              const char *expected_journal,
+                              reload_session_state *out, reload_io_token *token,
+                              char *why, size_t cap) {
+    char *text = NULL;
+    size_t len = 0;
+    long long offset = 0;
+    int rc = -1;
+    if (out) memset(out, 0, sizeof *out);
+    if (token) memset(token, 0, sizeof *token);
+    if (!path || !expected_session || !expected_handoff || !expected_hash || !out || !token)
+        return tui_reload_error(why, cap, "reload null input");
+    text = malloc(131073);
+    if (!text) return tui_reload_error(why, cap, "reload allocation failed");
+    if (reload_io_load(path, expected_session, expected_handoff, expected_hash,
+                       text, 131073, &len, token, why, cap) != 0) goto done;
+    if (reload_session_decode_v2(text, len, out, why, cap) != 0) goto done;
+    if (expected_journal && strcmp(out->journal_path, expected_journal)) {
+        tui_reload_error(why, cap, "snapshot journal not bound to owned directory");
+        goto done;
+    }
+    if (journal_checkpoint(out->journal_path, &offset, why, cap) != 0) goto done;
+    if ((unsigned long long)offset != out->journal_offset) {
+        tui_reload_error(why, cap, "journal length != snapshot offset");
+        goto done;
+    }
+    rc = 0;
+ done:
+    free(text);
+    if (rc != 0) {
+        memset(out, 0, sizeof *out);
+        memset(token, 0, sizeof *token);
+    }
+    return rc;
+}
+
+static int tui_reload_prepare(const char *path, const char *session,
+                              const char *handoff, const char *hash,
+                              reload_session_state *out, reload_io_token *token,
+                              char *why, size_t cap) {
+    return tui_reload_prepare_bound(path, session, handoff, hash, NULL, out, token, why, cap);
+}
+
+/* Runtime capacities are those of the real agent, not the wider codec. */
+static int tui_owned_id(const char *s, int empty) {
+    size_t i;
+    if (!s || (!empty && !s[0]) || strlen(s) > 4095) return 0;
+    for (i = 0; s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || strchr("_-.:", c))) return 0;
+    }
+    return 1;
+}
+
+static int tui_owned_runtime(const reload_session_state *m, char *why, size_t cap) {
+    size_t i;
+    if (strlen(m->journal_path) >= 512 || strlen(m->cwd) >= 1024 ||
+        m->cwd[0] != '/' || strlen(m->peer) > 48 || strlen(m->role) >= 16)
+        return tui_reload_error(why, cap, "owned runtime path/peer capacity exceeded");
+    for (i = 0; m->peer[i]; i++) {
+        unsigned char c = (unsigned char)m->peer[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || strchr(":_-", c)))
+            return tui_reload_error(why, cap, "owned runtime peer invalid");
+    }
+    return 0;
+}
+
+static int tui_owned_start(tui_state *st, const char *dir, const char *session,
+                           const char *hash, const char *state_path, const char *handoff,
+                           reload_io_token *token, char *why, size_t cap) {
+    char lock[4096], journal[4096];
+    const char *v;
+    size_t i;
+    int fd, dfd;
+    struct stat sb;
+    reload_session_state *m;
+    if (!dir || dir[0] != '/' || strlen(dir) > 4000 || dir[strlen(dir)-1] == '/' ||
+        !tui_owned_id(session, 0) || !hash || strlen(hash) != 64 ||
+        (state_path && !tui_owned_id(handoff, 0)))
+        return tui_reload_error(why, cap, "owned arguments invalid");
+    for (i = 0; i < 64; i++)
+        if (!strchr("0123456789abcdefABCDEF", hash[i]))
+            return tui_reload_error(why, cap, "owned hash must be 64 hex (explicit binding only)");
+    snprintf(lock, sizeof lock, "%s/owner.lock", dir);
+    snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
+    if (strlen(journal) >= 512)
+        return tui_reload_error(why, cap, "owned journal exceeds agent capacity");
+    if (reload_owner_acquire(lock, &st->owner_fd, why, cap) != 0) return -1;
+    m = malloc(sizeof *m);
+    if (!m) return tui_reload_error(why, cap, "owned context allocation failed");
+    memset(m, 0, sizeof *m); st->owned = m;
+    snprintf(st->owned_dir, sizeof st->owned_dir, "%s", dir);
+    if (state_path) {
+        if (tui_reload_prepare_bound(state_path, session, handoff, hash, journal, m, token, why, cap) != 0) return -1;
+        if (strcmp(m->journal_path, journal))
+            return tui_reload_error(why, cap, "snapshot journal not bound to owned directory");
+    } else {
+        snprintf(m->session_id, sizeof m->session_id, "%s", session);
+        snprintf(m->candidate_hash, sizeof m->candidate_hash, "%s", hash);
+        snprintf(m->handoff_id, sizeof m->handoff_id, "initial");
+        snprintf(m->journal_path, sizeof m->journal_path, "%s", journal);
+        v = getenv("CSIH_CWD");
+        if (v && v[0]) {
+            if (strlen(v) >= 1024) return tui_reload_error(why, cap, "owned cwd exceeds agent capacity");
+            snprintf(m->cwd, sizeof m->cwd, "%s", v);
+        } else if (!getcwd(m->cwd, sizeof m->cwd))
+            return tui_reload_error(why, cap, "owned getcwd failed");
+        v = getenv("CSIH_ROLE");
+        if (!v || !v[0]) v = "agent";
+        if (!tui_owned_id(v, 0)) return tui_reload_error(why, cap, "owned role invalid");
+        snprintf(m->role, sizeof m->role, "%s", v);
+        v = getenv("CSIH_PEER");
+        if (!v) v = "";
+        if (!tui_owned_id(v, 1)) return tui_reload_error(why, cap, "owned peer invalid");
+        snprintf(m->peer, sizeof m->peer, "%s", v);
+    }
+    if (tui_owned_runtime(m, why, cap) != 0) return -1;
+    dfd = open(m->cwd, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0) return tui_reload_error(why, cap, "owned cwd not enterable directory");
+    if (close(dfd) != 0 || chdir(m->cwd) != 0)
+        return tui_reload_error(why, cap, "owned cwd activation failed");
+    if (!state_path) {
+        fd = open(journal, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0) return tui_reload_error(why, cap, "owned journal open failed");
+        if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_uid != getuid() ||
+            (sb.st_mode & 0777) != 0600) {
+            close(fd); return tui_reload_error(why, cap, "owned journal not trusted regular file");
+        }
+        if (close(fd) != 0) return tui_reload_error(why, cap, "owned journal close failed");
+    }
+    if (tui_reload_apply(st, m, why, cap) != 0) return -1;
+    if (setenv("CSIH_CWD", m->cwd, 1) != 0 || setenv("CSIH_ROLE", m->role, 1) != 0 ||
+        setenv("CSIH_PEER", m->peer, 1) != 0)
+        return tui_reload_error(why, cap, "owned startup environment failed");
+    if (agent_role_configure(m->role, m->peer) != 0)
+        return tui_reload_error(why, cap, "owned agent role configuration failed");
+    return 0;
+}
+
+static int tui_owned_close(tui_state *st, char *why, size_t cap) {
+    int rc = 0;
+    if (st->owner_fd >= 0) rc = reload_owner_release(&st->owner_fd, why, cap);
+    free(st->owned); st->owned = NULL;
+    return rc;
 }
 
 /* Forward declarations: the key handler (defined below) dispatches to
@@ -579,7 +882,43 @@ static void tui_queue_goal(tui_state *st) {
 
 /* Slash commands never start a model turn. /loop on queues the goal so the
  * live loop can start it while idle. Returns 1 when the line was one. */
+static int tui_managed_request(tui_state *st);
+
 static int tui_slash(tui_state *st) {
+    if (!strcmp(st->input, "/reload-code")) {
+        if (tui_managed_request(st) != 0) tui_log_plain(st, "reload-code: requires managed idle actor");
+        return 1;
+    }
+    if (!strncmp(st->input, "/export-state", 13) &&
+        (st->input[13] == 0 || st->input[13] == ' ')) {
+        reload_session_state *m = NULL;
+        tui_state *copy = NULL;
+        char why[256], path[4096], note[4200];
+        const char *handoff = st->input + 13;
+        int rc = -1;
+        while (*handoff == ' ') handoff++;
+        if (!st->owned || st->owner_fd < 0 || st->busy || !tui_owned_id(handoff, 0)) {
+            tui_log_plain(st, "export-state: requires owned idle state and explicit valid HANDOFF");
+            return 1;
+        }
+        m = malloc(sizeof *m); copy = malloc(sizeof *copy);
+        if (!m || !copy) snprintf(why, sizeof why, "allocation failed");
+        else {
+            memcpy(m, st->owned, sizeof *m);
+            snprintf(m->handoff_id, sizeof m->handoff_id, "%s", handoff);
+            memcpy(copy, st, sizeof *copy);
+            copy->input[0] = 0; copy->ninput = 0;
+            snprintf(path, sizeof path, "%s/state-v2.json", st->owned_dir);
+            rc = tui_reload_export(copy, m, path, why, sizeof why);
+        }
+        if (rc == 0) {
+            st->input[0] = 0; st->ninput = 0;
+            snprintf(note, sizeof note, "state saved: %s (explicit HASH binding only)", path);
+        } else snprintf(note, sizeof note, "export-state: %s", why);
+        tui_log_plain(st, note);
+        free(copy); free(m);
+        return 1;
+    }
     if (!strcmp(st->input, "/goal")) {
         st->input[0] = '\0';
         st->ninput = 0;
@@ -660,7 +999,10 @@ static void tui_manual_submit(tui_state *st) {
     snprintf(captured, TUI_INPUT_MAX, "%s", st->input);
     int had = st->input[0] != '\0';
     tui_submit(st);
-    if (had && st->input[0] == '\0') tui_history_add(st, captured);
+    if (had && st->input[0] == '\0' &&
+        !( !strncmp(captured, "/export-state", 13) &&
+           (captured[13] == 0 || captured[13] == ' ')) &&
+        strcmp(captured, "/reload-code")) tui_history_add(st, captured);
 }
 
 static void tui_submit(tui_state *st) {
@@ -762,11 +1104,11 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         st->quit = 1;
         return;
     case TERM_KEY_UP:
-        if (st->pasting) { tui_input_byte(st, '\n'); return; }
+        if (st->pasting) return;
         tui_history_move(st, -1);
         return;
     case TERM_KEY_DOWN:
-        if (st->pasting) { tui_input_byte(st, '\n'); return; }
+        if (st->pasting) return;
         tui_history_move(st, 1);
         return;
     case TERM_KEY_PGUP:
@@ -1480,10 +1822,10 @@ static const char *idle_last(tui_state *st) {
     return buf;
 }
 
-static const char *tui_role_title(void) {
+static const char *tui_role_title(const tui_state *st) {
     static char buf[64];
-    const char *role = getenv("CSIH_ROLE");
-    const char *peer = getenv("CSIH_PEER");
+    const char *role = st->owned ? st->owned->role : getenv("CSIH_ROLE");
+    const char *peer = st->owned ? st->owned->peer : getenv("CSIH_PEER");
     if (!role || !role[0]) return "csih · agent";
     (void)peer;
     if (!strcmp(role, "write"))
@@ -1512,7 +1854,12 @@ static r_frame tui_render_state(tui_state *st, int cols) {
     tui_sys_y1 = 0;
     tui_log_y0 = 0;
     tui_log_y1 = 0;
-    rs.title = (st->mode == 1) ? tui_role_title() : "csih";
+    rs.title = (st->mode == 1) ? tui_role_title(st) : "csih";
+    if (st->owned) {
+        static char bound_title[160];
+        snprintf(bound_title, sizeof bound_title, "%s · %.64s", rs.title, st->owned->candidate_hash);
+        rs.title = bound_title;
+    }
     rs.width = cols;
     /* Idle agent hint stays fixed. While a call is in flight, show whole
      * seconds only. Cache hit/miss appear only after a real usage object.
@@ -1803,6 +2150,7 @@ static void tui_during_net(void) {
     term_key_t batch[16];
     int nk, j, room;
     if (!st) return;
+    tui_mail_poll(st, 0);
     if (term_wait_readable(0) == 1) {
         room = tui_q_room(st);
         if (room > 16) room = 16;
@@ -1845,7 +2193,7 @@ static const char *csih_env(const char *neu, const char *old) {
     return 0;
 }
 
-static int tui_run_agent(tui_state *st) {
+static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_manual_input) {
     const char *endpoint = csih_env("CSIH_ENDPOINT", "CDSH_ENDPOINT");
     const char *model    = csih_env("CSIH_MODEL", "CDSH_MODEL");
     const char *cwd      = csih_env("CSIH_CWD", "CDSH_CWD");
@@ -1860,15 +2208,20 @@ static int tui_run_agent(tui_state *st) {
     if (!model)    model = "deepseek-chat";
     if (!cwd) { if (!getcwd(real_cwd, sizeof real_cwd)) strcpy(real_cwd, "."); cwd = real_cwd; }
     /* Same file across turns and across the cache re-exec. Do not delete it. */
-    if (agent_transcript_path(journal, sizeof journal) != 0)
-        snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)getpid());
-    transcript = journal;
+    if (st->owned) {
+        cwd = st->owned->cwd;
+        transcript = st->transcript;
+    } else {
+        if (agent_transcript_path(journal, sizeof journal) != 0)
+            snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)getpid());
+        transcript = journal;
+    }
 
     /* A send follows the new line. History scroll stays put until then. */
     st->log_skip = 0;
     /* Capture the prompt before clearing the input line. */
     memset(prompt, 0, sizeof prompt);
-    strncpy(prompt, st->input, sizeof prompt - 1);
+    strncpy(prompt, source_prompt, sizeof prompt - 1);
 
     /* A window list only when the user named a window. Otherwise it becomes
      * the last user turn and the model answers tmux instead of the question. */
@@ -1891,7 +2244,7 @@ static int tui_run_agent(tui_state *st) {
         snprintf(you, sizeof you, "you> %s", prompt);
         tui_log_plain(st, you);
     }
-    st->input[0] = '\0'; st->ninput = 0;
+    if (clear_manual_input) { st->input[0] = '\0'; st->ninput = 0; }
     st->errline[0] = '\0';   /* new you>: drop last round's error */
     tui_redraw(st);
 
@@ -1915,9 +2268,26 @@ static int tui_run_agent(tui_state *st) {
     return 0;
 }
 
+static int tui_run_agent(tui_state *st) {
+    return tui_run_prompt(st, st->input, 1);
+}
+
+/* Automatic prompts never borrow the manual editor. The real agent copies
+ * the dedicated prompt before returning; later keys continue editing input. */
+static int tui_run_pending(tui_state *st) {
+    char prompt[TUI_INPUT_MAX];
+    if (st->busy || st->npending <= 0) return 0;
+    snprintf(prompt, sizeof prompt, "%s", st->pending[0]);
+    st->npending--;
+    memmove(st->pending[0], st->pending[1], (size_t)st->npending * TUI_INPUT_MAX);
+    st->pending[st->npending][0] = 0;
+    return tui_run_prompt(st, prompt, 0);
+}
+
 static void tui_turn_done(tui_state *st) {
     agent_result r = agent_turn_take();
     int cancelled = st->cancel || r.err == -5;
+    int from_mail = st->mail_active;
     st->cancel = 0;
     st->busy = 0;
     /* Overwrite the in-flight phase with the stop cause so the idle bottom
@@ -1933,6 +2303,8 @@ static void tui_turn_done(tui_state *st) {
         snprintf(st->phase, sizeof st->phase, "动作打满未答");
     else
         snprintf(st->phase, sizeof st->phase, "未答");
+    if (from_mail)
+        tui_mail_complete(st, cancelled ? "cancelled" : (r.ok ? "ok" : "failed"), r.reason);
     if (cancelled) {
         tui_log_plain(st, "已取消");
         tui_redraw(st);
@@ -1965,7 +2337,279 @@ static void tui_turn_done(tui_state *st) {
         }
     }
     tui_redraw(st);
-    if (!cancelled && r.ok && st->loop_on) tui_queue_goal(st);
+    if (!cancelled && r.ok && st->loop_on && !from_mail) tui_queue_goal(st);
+}
+
+
+/* One actor per process. The inherited private stream is a trusted host
+ * capability, not an authentication protocol. No actor crosses exec. */
+static struct {
+    int fd, phase, raw, retired, used;
+    char session[65], handoff[65], hash[65], dir[4096];
+    char next_handoff[65], next_hash[65], frame[1024];
+} tui_managed;
+
+static int tui_managed_send(const char *op, int pending) {
+    char line[512]; int n;
+    n = snprintf(line, sizeof line,
+        "{\"op\":\"%s\",\"session\":\"%s\",\"handoff\":\"%s\",\"hash\":\"%s\"}\n",
+        op, tui_managed.session, pending ? tui_managed.next_handoff : tui_managed.handoff,
+        pending ? tui_managed.next_hash : tui_managed.hash);
+    return n > 0 && n < (int)sizeof line && write(tui_managed.fd, line, n) == n ? 0 : -1;
+}
+
+static int tui_managed_request(tui_state *st) {
+    if (!tui_managed.phase || tui_managed.phase != 3 || st->busy ||
+        !st->owned || st->owner_fd < 0) return -1;
+    if (tui_managed_send("REQUEST", 0) != 0) { st->quit = 1; return -1; }
+    st->input[0] = 0; st->ninput = 0;
+    return 0;
+}
+
+static int tui_managed_init(const char *dir, const char *sid, const char *hid,
+                            const char *hash, const char *fdtext, int standby) {
+    struct stat sb; int dfd, fd = 0, flags, i;
+    if (!dir || dir[0] != '/' || strlen(dir) > 4000 || dir[strlen(dir)-1] == '/' ||
+        !tui_owned_id(sid, 0) || strlen(sid) > 64 || !tui_owned_id(hid, 0) ||
+        strlen(hid) > 64 || !hash || strlen(hash) != 64 || !fdtext || !*fdtext) return -1;
+    for (i = 0; i < 64; i++) if (!strchr("0123456789abcdefABCDEF", hash[i])) return -1;
+    for (i = 0; fdtext[i]; i++) {
+        if (fdtext[i] < '0' || fdtext[i] > '9' || fd > 100000) return -1;
+        fd = fd * 10 + fdtext[i] - '0';
+    }
+    if (fd < 3 || fstat(fd, &sb) != 0 || !S_ISSOCK(sb.st_mode)) return -1;
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) return -1;
+    dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return -1;
+    i = fstat(dfd, &sb) == 0 && S_ISDIR(sb.st_mode) && sb.st_uid == getuid() && (sb.st_mode & 0777) == 0700;
+    if (close(dfd) != 0 || !i) return -1;
+    memset(&tui_managed, 0, sizeof tui_managed);
+    tui_managed.fd = fd; tui_managed.phase = standby ? 1 : 2;
+    snprintf(tui_managed.dir, sizeof tui_managed.dir, "%s", dir);
+    snprintf(tui_managed.session, sizeof tui_managed.session, "%s", sid);
+    snprintf(tui_managed.handoff, sizeof tui_managed.handoff, "%s", hid);
+    snprintf(tui_managed.hash, sizeof tui_managed.hash, "%s", hash);
+    return 0;
+}
+
+static int tui_managed_message(tui_state *st) {
+    jvalue *root, *o, *sid, *hid, *hash;
+    const char *op; char why[256], path[4096], lock[4096];
+    int match, pending, rc = -1; size_t i;
+    reload_session_state *m = NULL;
+    reload_io_token token;
+    root = NULL;
+    if (!rs_no_embedded_nul(tui_managed.frame, tui_managed.used, why, sizeof why)) goto done;
+    root = json_parse(tui_managed.frame, tui_managed.used, why, sizeof why);
+    if (!root || root->kind != J_OBJ || root->nkeys != 4) goto done;
+    for (i = 0; i < root->nkeys; i++) {
+        size_t j;
+        if (strcmp(root->keys[i], "op") && strcmp(root->keys[i], "session") &&
+            strcmp(root->keys[i], "handoff") && strcmp(root->keys[i], "hash")) goto done;
+        for (j = 0; j < i; j++) if (!strcmp(root->keys[i], root->keys[j])) goto done;
+    }
+    o = jget(root, "op"); sid = jget(root, "session"); hid = jget(root, "handoff"); hash = jget(root, "hash");
+    if (!o || !sid || !hid || !hash || o->kind != J_STR || sid->kind != J_STR ||
+        hid->kind != J_STR || hash->kind != J_STR || strcmp(sid->s, tui_managed.session)) goto done;
+    op = o->s;
+    match = !strcmp(hid->s, tui_managed.handoff) && !strcmp(hash->s, tui_managed.hash);
+    pending = tui_managed.next_handoff[0] && !strcmp(hid->s, tui_managed.next_handoff) && !strcmp(hash->s, tui_managed.next_hash);
+    if (!strcmp(op, "ACTIVATE") && match && tui_managed.phase == 2) {
+        tui_managed.phase = 3; tui_repaint = 1; rc = 0;
+    } else if (!strcmp(op, "COMMIT") && match && tui_managed.phase == 1) {
+        snprintf(path, sizeof path, "%s/handoff-%s.json", tui_managed.dir, tui_managed.handoff);
+        if (tui_owned_start(st, tui_managed.dir, tui_managed.session, tui_managed.hash,
+            path, tui_managed.handoff, &token, why, sizeof why) != 0) goto fatal;
+        if (term_raw_enter() != 0) goto fatal;
+        tui_managed.raw = 1;
+        if (reload_io_consume(path, &token, why, sizeof why) != 0) goto fatal;
+        tui_managed.phase = 2; rc = tui_managed_send("ACK", 0);
+    } else if (!strcmp(op, "FREEZE") && tui_managed.phase == 3 && !st->busy &&
+               tui_owned_id(hid->s, 0) && strlen(hid->s) <= 64 && strlen(hash->s) == 64) {
+        for (i = 0; i < 64; i++) if (!strchr("0123456789abcdefABCDEF", hash->s[i])) goto done;
+        if (!strcmp(hid->s, tui_managed.handoff)) goto done;
+        m = malloc(sizeof *m); if (!m) goto done;
+        memcpy(m, st->owned, sizeof *m);
+        snprintf(m->handoff_id, sizeof m->handoff_id, "%s", hid->s);
+        snprintf(m->candidate_hash, sizeof m->candidate_hash, "%s", hash->s);
+        snprintf(path, sizeof path, "%s/handoff-%s.json", tui_managed.dir, hid->s);
+        if (tui_reload_export(st, m, path, why, sizeof why) != 0) goto done;
+        snprintf(tui_managed.next_handoff, sizeof tui_managed.next_handoff, "%s", hid->s);
+        snprintf(tui_managed.next_hash, sizeof tui_managed.next_hash, "%s", hash->s);
+        tui_managed.phase = 4; rc = tui_managed_send("FROZEN", 1);
+    } else if (!strcmp(op, "RELEASE") && pending && tui_managed.phase == 4) {
+        if (reload_owner_release(&st->owner_fd, why, sizeof why) != 0) {
+            tui_managed.phase = 6; rc = tui_managed_send("BLOCKED", 1);
+        } else { tui_managed.phase = 5; rc = tui_managed_send("RELEASED", 1); }
+    } else if (!strcmp(op, "RETIRE") && pending && tui_managed.phase == 5) {
+        tui_managed.retired = 1; st->quit = 1; rc = 0;
+    } else if (!strcmp(op, "RESUME") && pending && (tui_managed.phase == 4 || tui_managed.phase == 5)) {
+        /* Trusted host must terminate+wait candidate before sending RESUME. */
+        if (st->owner_fd < 0) {
+            snprintf(lock, sizeof lock, "%s/owner.lock", tui_managed.dir);
+            if (reload_owner_acquire(lock, &st->owner_fd, why, sizeof why) != 0) goto done;
+        }
+        if (term_raw_enter() != 0) goto fatal;
+        tui_managed.raw = 1; rc = tui_managed_send("RESUMED", 1);
+        if (!rc) { tui_managed.phase = 3; tui_managed.next_handoff[0] = 0; tui_managed.next_hash[0] = 0; tui_repaint = 1; }
+    }
+    goto done;
+fatal:
+    st->quit = 1;
+done:
+    free(m); if (root) jfree(root);
+    if (rc != 0 && !st->quit && tui_managed_send("REJECT", 0) != 0) st->quit = 1;
+    return rc;
+}
+
+static void tui_managed_poll(tui_state *st) {
+    char c; int n;
+    while (!st->quit) {
+        n = read(tui_managed.fd, &c, 1);
+        if (n == 0) { st->quit = 1; break; }
+        if (n < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) st->quit = 1;
+            break;
+        }
+        if (!c || tui_managed.used >= (int)sizeof tui_managed.frame - 1) { st->quit = 1; break; }
+        if (c == '\n') {
+            tui_managed.frame[tui_managed.used] = 0;
+            tui_managed_message(st); tui_managed.used = 0;
+        } else tui_managed.frame[tui_managed.used++] = c;
+    }
+}
+
+/* Write one audit line for a message lifecycle transition. Only does work when
+ * the owned state, transcript and owner fd are all valid. The record carries
+ * exactly the three keys the mailbox expects — never role/text, and never any
+ * notice body. Returns 1 when the line was appended, 0 otherwise. */
+static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason) {
+    char record[4096];
+    if (!st || !st->owned || !st->transcript[0] || st->owner_fd < 0) return 0;
+    if (!id || !result || !reason) return 0;
+    if (json_rec(record, sizeof record,
+                 "mail_id", id,
+                 "result", result,
+                 "reason", reason) == 0) return 0;
+    if (session_append(st->transcript, record) != 0) return 0;
+    return 1;
+}
+
+/* Close out the in-flight message. The audit line is written first; if that
+ * fails the started state is left in place and the message is marked blocked,
+ * with no finish() attempted. When the audit line lands, finish() moves
+ * started->done; a non-zero rc also blocks and keeps the id so nothing is
+ * replayed automatically. Task success is never claimed here — that is decided
+ * by the caller's result. Either way mail_active clears and the id is dropped;
+ * a blocked flag persists. */
+static void tui_mail_complete(tui_state *st, const char *result, const char *reason) {
+    char why[256];
+    int rc;
+    if (!st || !st->mail_active || !st->mail_id[0]) return;
+    why[0] = 0;
+    if (!tui_mail_meta(st, st->mail_id, result, reason)) {
+        st->mail_blocked = 1;
+        tui_log_plain(st, "result not recorded, started kept");
+        st->mail_active = 0;
+        st->mail_id[0] = 0;
+        return;
+    }
+    rc = csih_message_finish(st->owned_dir, st->owned->session_id,
+                             st->mail_id, why, sizeof why);
+    if (rc != 0) {
+        char note[4200];
+        st->mail_blocked = 1;
+        snprintf(note, sizeof note,
+                 "finish rc=%d why=%s (not replayed automatically)", rc, why);
+        tui_log_plain(st, note);
+    } else {
+        tui_log_plain(st, "message done");
+    }
+    st->mail_active = 0;
+    st->mail_id[0] = 0;
+}
+
+/* Poll the private ACTIVE mailbox once. Only the unique ACTIVE owner (phase 3,
+ * owned session, valid owner fd) may run this; it is a no-op otherwise. The job
+ * of this helper is to hand a taken message into the normal prompt path — it
+ * never invents a second execution path, and never ACKs a notice. Every return
+ * frees the heap message. Throttled by mail_next_ms so a ready pole returns
+ * soon without busy-spinning. */
+static void tui_mail_poll(tui_state *st, int tasks_allowed) {
+    char inbox[4096], why[256];
+    struct stat sb;
+    csih_message *m;
+    long now;
+    int rc;
+    if (!st || tui_managed.phase != 3) return;
+    if (!st->owned || st->owner_fd < 0 || !st->owned_dir[0]) return;
+    now = clock_now_ms();
+    if (now < 0) return;
+    if (st->mail_next_ms && now < st->mail_next_ms) return;
+    st->mail_next_ms = now + 250;
+    if (snprintf(inbox, sizeof inbox, "%s/inbox", st->owned_dir) >= (int)sizeof inbox) return;
+    if (lstat(inbox, &sb) != 0) {
+        if (errno != ENOENT) {
+            const char *e = "mailbox unavailable";
+            if (strcmp(st->mail_error, e)) { snprintf(st->mail_error, sizeof st->mail_error, "%s", e); tui_log_plain(st, e); }
+        }
+        return;
+    }
+    m = malloc(sizeof *m);
+    if (!m) return;
+    if (st->busy || st->npending > 0 || st->mail_active || st->mail_blocked) tasks_allowed = 0;
+    tasks_allowed = !!tasks_allowed;
+    why[0] = 0;
+    rc = csih_message_take(st->owned_dir, st->owned->session_id, tasks_allowed, m, why, sizeof why);
+    if (rc == 0) { free(m); return; }
+    if (rc < 0) {
+        char note[512];
+        snprintf(note, sizeof note, "take rc=%d why=%s", rc, why);
+        if (strcmp(st->mail_error, note)) { snprintf(st->mail_error, sizeof st->mail_error, "%s", note); tui_log_plain(st, note); }
+        if (rc == -2) st->mail_blocked = 1;
+        free(m);
+        return;
+    }
+    if (rc == 1) {
+        /* A held task only runs when nothing else occupies the actor. */
+        if (!tasks_allowed) {
+            tui_log_plain(st, "task held: actor busy");
+            st->mail_blocked = 1;
+            free(m);
+            return;
+        }
+        snprintf(st->mail_id, sizeof st->mail_id, "%s", m->id);
+        st->mail_active = 1;
+        if (!tui_mail_meta(st, st->mail_id, "started", "accepted")) {
+            /* No audit line: leave started unconsumed and do not execute. */
+            tui_log_plain(st, "task not run: audit line failed");
+            st->mail_blocked = 1;
+            st->mail_active = 0;
+            st->mail_id[0] = 0;
+            free(m);
+            return;
+        }
+        if (tui_run_prompt(st, m->body, 0) != 0)
+            tui_mail_complete(st, "failed", "begin failed");
+        free(m);
+        return;
+    }
+    if (rc == 2) {
+        /* A notice is shown, never ACKed, never fed to the model. */
+        tui_log_plain(st, m->body);
+        why[0] = 0;
+        if (csih_message_finish(st->owned_dir, st->owned->session_id, m->id, why, sizeof why) != 0) {
+            char note[512];
+            st->mail_blocked = 1;
+            snprintf(note, sizeof note, "notice finish failed: %s", why);
+            tui_log_plain(st, note);
+        }
+        free(m);
+        return;
+    }
+    free(m);
 }
 
 int main(int argc, char **argv) {
@@ -1973,10 +2617,216 @@ int main(int argc, char **argv) {
 
     if (!strcmp(cmd, "selftest")) {
         /* Driven by an injected key sequence, so this runs with no terminal. */
-        tui_state st;
+        static tui_state st;
         r_frame prev, next;
         char out[4096];
         int failures = 0, cols = 40;
+        {
+            static tui_state source, fresh, saved;
+            static reload_session_state metadata, snapshot, zero;
+            char why[256];
+            tui_state_init(&source, NULL);
+            memset(&metadata, 0, sizeof metadata);
+            snprintf(metadata.session_id, sizeof metadata.session_id, "sess");
+            snprintf(metadata.handoff_id, sizeof metadata.handoff_id, "handoff");
+            memset(metadata.candidate_hash, 'a', 64);
+            snprintf(metadata.cwd, sizeof metadata.cwd, "/tmp");
+            snprintf(metadata.role, sizeof metadata.role, "agent");
+            snprintf(metadata.journal_path, sizeof metadata.journal_path, "/tmp/reload-journal.jsonl");
+            metadata.journal_offset = 17;
+            snprintf(source.goal, sizeof source.goal, "目标");
+            snprintf(source.input, sizeof source.input, "输入");
+            source.ninput = (int)strlen(source.input);
+            snprintf(source.pending[0], sizeof source.pending[0], "待发送");
+            source.npending = 1;
+            snprintf(source.history[0], sizeof source.history[0], "历史");
+            source.nhistory = 1; source.history_pos = 0; source.history_browsing = 1;
+            snprintf(source.history_draft, sizeof source.history_draft, "中文草稿");
+            source.loop_on = 1; source.loop_left = 0;
+            memcpy(&saved, &source, sizeof saved);
+            tui_state_init(&fresh, NULL);
+            fresh.mode = 1; fresh.cols = 77; fresh.rows = 31;
+            if (tui_reload_capture(&source, &metadata, &snapshot, why, sizeof why) != 0 ||
+                memcmp(&source, &saved, sizeof source) ||
+                tui_reload_apply(&fresh, &snapshot, why, sizeof why) != 0 ||
+                strcmp(fresh.goal, source.goal) || strcmp(fresh.input, source.input) ||
+                fresh.ninput != source.ninput || fresh.npending != 1 || fresh.nhistory != 1 ||
+                strcmp(fresh.pending[0], source.pending[0]) || strcmp(fresh.history[0], source.history[0]) ||
+                strcmp(fresh.history_draft, source.history_draft) || fresh.history_pos != 0 ||
+                fresh.history_browsing != 1 || fresh.loop_on != 1 || fresh.loop_left != 0 ||
+                fresh.transcript != fresh.journal_path || strcmp(fresh.journal_path, metadata.journal_path) ||
+                fresh.mode != 1 || fresh.cols != 77 || fresh.rows != 31) {
+                printf("FAIL reload capture/apply restore %s\n", why); failures++;
+            }
+            memset(snapshot.journal_path, 0, sizeof snapshot.journal_path);
+            if (strcmp(fresh.transcript, metadata.journal_path)) {
+                printf("FAIL reload journal path ownership\n"); failures++;
+            }
+            fresh.busy = 1;
+            memcpy(&saved, &fresh, sizeof saved);
+            if (tui_reload_apply(&fresh, &snapshot, why, sizeof why) != -1 ||
+                memcmp(&fresh, &saved, sizeof fresh)) {
+                printf("FAIL reload busy apply atomicity\n"); failures++;
+            }
+            if (tui_reload_capture(&fresh, &metadata, &snapshot, why, sizeof why) != -1 ||
+                memcmp(&snapshot, &zero, sizeof snapshot) || memcmp(&fresh, &saved, sizeof fresh)) {
+                printf("FAIL reload busy capture zero\n"); failures++;
+            }
+            fresh.busy = 0;
+            memcpy(&saved, &fresh, sizeof saved);
+            snapshot.loop_left = 9;
+            if (tui_reload_apply(&fresh, &snapshot, why, sizeof why) != -1 ||
+                memcmp(&fresh, &saved, sizeof fresh)) {
+                printf("FAIL reload bad snapshot atomicity\n"); failures++;
+            }
+            source.loop_left = 9;
+            if (tui_reload_capture(&source, &metadata, &snapshot, why, sizeof why) != -1 ||
+                memcmp(&snapshot, &zero, sizeof snapshot)) {
+                printf("FAIL reload invalid capture zero\n"); failures++;
+            }
+            {
+                static reload_session_state before_metadata, expected, prepared;
+                static reload_io_token token, old_token, zero_token;
+                char dir[160];
+                char path[4096], journal[4096];
+                const char *line = "中文日志\n";
+                FILE *f;
+                int fixture_ok = 0, seq;
+                for (seq = 0; seq < 100; seq++) {
+                    snprintf(dir, sizeof dir, "/tmp/csih-reload-bridge-%ld-%d", (long)getpid(), seq);
+                    if (mkdir(dir, 0700) == 0) { fixture_ok = 1; break; }
+                }
+                snprintf(path, sizeof path, "%s/state.json", dir);
+                snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
+                if (fixture_ok) {
+                    f = fopen(journal, "wb");
+                    if (!f) fixture_ok = 0;
+                    else {
+                        if (fwrite(line, 1, strlen(line), f) != strlen(line)) fixture_ok = 0;
+                        if (fclose(f) != 0) fixture_ok = 0;
+                    }
+                }
+                if (!fixture_ok) {
+                    printf("FAIL reload bridge fixture\n"); failures++;
+                } else {
+                    source.loop_left = 0;
+                    snprintf(metadata.journal_path, sizeof metadata.journal_path, "%s", journal);
+                    metadata.journal_offset = 999;
+                    memcpy(&before_metadata, &metadata, sizeof metadata);
+                    if (tui_reload_export(&source, &metadata, path, why, sizeof why) != 0 ||
+                        memcmp(&metadata, &before_metadata, sizeof metadata)) {
+                        printf("FAIL reload bridge export %s\n", why); failures++;
+                    }
+                    before_metadata.journal_offset = (unsigned long long)strlen(line);
+                    if (tui_reload_capture(&source, &before_metadata, &expected, why, sizeof why) != 0 ||
+                        tui_reload_prepare(path, metadata.session_id, metadata.handoff_id,
+                                           metadata.candidate_hash, &prepared, &token, why, sizeof why) != 0 ||
+                        memcmp(&expected, &prepared, sizeof expected) || access(path, F_OK) != 0) {
+                        printf("FAIL reload bridge prepare %s\n", why); failures++;
+                    }
+                    memcpy(&old_token, &token, sizeof token);
+                    source.busy = 1;
+                    if (tui_reload_export(&source, &metadata, path, why, sizeof why) != -1 ||
+                        strcmp(why, "reload busy") ||
+                        tui_reload_prepare(path, metadata.session_id, metadata.handoff_id,
+                                           metadata.candidate_hash, &prepared, &token, why, sizeof why) != 0 ||
+                        memcmp(&expected, &prepared, sizeof expected) ||
+                        memcmp(&token, &old_token, sizeof token)) {
+                        printf("FAIL reload bridge busy preserves file %s\n", why); failures++;
+                    }
+                    source.busy = 0;
+                    if (tui_reload_prepare(path, "wrong", metadata.handoff_id, metadata.candidate_hash,
+                                           &prepared, &token, why, sizeof why) != -1 ||
+                        strcmp(why, "session_id mismatch") ||
+                        memcmp(&prepared, &zero, sizeof prepared) ||
+                        memcmp(&token, &zero_token, sizeof token) || access(path, F_OK) != 0) {
+                        printf("FAIL reload bridge wrong identity retains file %s\n", why); failures++;
+                    }
+                    f = fopen(journal, "ab");
+                    if (!f) { printf("FAIL reload bridge append fixture\n"); failures++; }
+                    else {
+                        int append_ok = fwrite("x", 1, 1, f) == 1;
+                        if (fclose(f) != 0) append_ok = 0;
+                        if (!append_ok) { printf("FAIL reload bridge append fixture\n"); failures++; }
+                    }
+                    if (tui_reload_prepare(path, metadata.session_id, metadata.handoff_id, metadata.candidate_hash,
+                                           &prepared, &token, why, sizeof why) != -1 ||
+                        strcmp(why, "journal length != snapshot offset") ||
+                        memcmp(&prepared, &zero, sizeof prepared) ||
+                        memcmp(&token, &zero_token, sizeof token) || access(path, F_OK) != 0) {
+                        printf("FAIL reload bridge changed journal retains file %s\n", why); failures++;
+                    }
+                }
+                if (fixture_ok) {
+                    unlink(path);
+                    unlink(journal);
+                    rmdir(dir);
+                }
+            }
+        }
+
+  { static tui_state v; r_frame f; int i, saw;
+    static const struct { int rows; int room; } cases[3] = { { 24, 17 }, { 40, 33 }, { 60, 40 } };
+    int c;
+    for (c = 0; c < 3; c++) {
+      tui_state_init(&v, NULL); v.mode = 1; v.rows = cases[c].rows;
+      snprintf(v.input, sizeof v.input, "HEIGHT_DRAFT");
+      v.ninput = (int)strlen("HEIGHT_DRAFT");
+      for (i = 0; i < 40; i++) tui_log_line(&v, "L");
+      f = tui_render_state(&v, 80);
+      saw = 0;
+      for (i = 0; i < f.n; i++)
+        if (strstr(f.lines[i], "HEIGHT_DRAFT")) saw = 1;
+      if (tui_log_room(&v) != cases[c].room || f.n > cases[c].rows || f.n > 63 ||
+          tui_frame_bad_width(&f, 80) || !saw) {
+        printf("FAIL height%d\n", cases[c].rows); failures++;
+      }
+    }
+  }
+        {
+            static tui_state h;
+            tui_state_init(&h, NULL);
+            h.mode = 1;
+            h.busy = 1;
+            tui_input_byte(&h, 'A');
+            if (h.ninput != 1) { printf("FAIL hist A ninput\n"); failures++; }
+            tui_apply_key(&h, TERM_KEY_ENTER, 0);
+            tui_input_byte(&h, 'B');
+            tui_apply_key(&h, TERM_KEY_ENTER, 0);
+            if (h.nhistory != 2 || h.npending != 2 ||
+                strcmp(h.history[0], "A") || strcmp(h.history[1], "B")) {
+                printf("FAIL A/B history\n"); failures++;
+            }
+            {
+                h.npending = 8;
+                snprintf(h.input, sizeof(h.input), "C");
+                h.ninput = 1;
+                tui_apply_key(&h, TERM_KEY_ENTER, 0);
+                if (strcmp(h.input, "C") || h.ninput != 1 || h.nhistory != 2 ||
+                    h.npending != 8) { printf("FAIL fullQ\n"); failures++; }
+                h.npending = 2;
+            }
+            {
+                const char *dr = "\xe4\xb8\xad\xe6\x96\x87\xe8\x8d\x89\xe7\xa8\xbf";
+                snprintf(h.input, sizeof(h.input), "%s", dr);
+                h.ninput = (int)strlen(dr);
+                tui_apply_key(&h, TERM_KEY_UP, 0);
+                if (strcmp(h.input, "B")) { printf("FAIL UpB\n"); failures++; }
+                tui_apply_key(&h, TERM_KEY_UP, 0);
+                if (strcmp(h.input, "A")) { printf("FAIL UpA\n"); failures++; }
+                tui_apply_key(&h, TERM_KEY_DOWN, 0);
+                if (strcmp(h.input, "B")) { printf("FAIL DnB\n"); failures++; }
+                tui_apply_key(&h, TERM_KEY_DOWN, 0);
+                if (strcmp(h.input, dr) || h.ninput != (int)strlen(dr) ||
+                    h.history_browsing) { printf("FAIL DnD\n"); failures++; }
+                snprintf(h.input, sizeof(h.input), "X");
+                h.ninput = 1;
+                tui_apply_key(&h, TERM_KEY_UP, 0);
+                tui_apply_key(&h, TERM_KEY_DOWN, 0);
+                if (strcmp(h.input, "X")) { printf("FAIL X\n"); failures++; }
+                if (h.log_skip) { printf("FAIL ls\n"); failures++; }
+            }
+        }
 
         tui_state_init(&st, NULL);   /* selftest drives keys, not a transcript */
         prev = tui_render_state(&st, cols);
@@ -2018,7 +2868,7 @@ int main(int argc, char **argv) {
             } else printf("  ok   backspace deletes one code point\n");
         }
         {
-            tui_state b;
+            static tui_state b;
             r_frame bf;
             int k, saw = 0;
             tui_state_init(&b, NULL);
@@ -2035,7 +2885,7 @@ int main(int argc, char **argv) {
 
         /* A paste is one buffer. Newlines inside it are not Enter. */
         {
-            tui_state pz;
+            static tui_state pz;
             r_frame pf;
             int k, saw = 0;
             tui_state_init(&pz, NULL);
@@ -2061,7 +2911,7 @@ int main(int argc, char **argv) {
                 printf("FAIL paste row width\n"); failures++;
             } else printf("  ok   paste row shows return\n");
             {
-                tui_state lz;
+                static tui_state lz;
                 r_frame lf;
                 int broke = 0, mark = 0;
                 tui_state_init(&lz, NULL);
@@ -2107,7 +2957,7 @@ int main(int argc, char **argv) {
         tui_apply_key(&st, TERM_KEY_CTRL_D, 0);
         if (!st.quit) { printf("FAIL empty ctrl-d did not quit\n"); failures++; }
         {
-            tui_state qx;
+            static tui_state qx;
             tui_state_init(&qx, NULL);
             tui_type(&qx, "/exit");
             if (!qx.quit) { printf("FAIL /exit did not quit\n"); failures++; }
@@ -2118,7 +2968,7 @@ int main(int argc, char **argv) {
 
         /* A timeout is not a quit and does change the tick line. */
         {
-            tui_state t2;
+            static tui_state t2;
             tui_state_init(&t2, NULL);
             tui_apply_key(&t2, -1, 0);
             if (t2.quit) { printf("FAIL timeout quit\n"); failures++; }
@@ -2139,7 +2989,7 @@ int main(int argc, char **argv) {
         }
 
         {
-            tui_state q;
+            static tui_state q;
             term_key_t k;
             int n = 0;
             memset(&q, 0, sizeof q);
@@ -2152,7 +3002,7 @@ int main(int argc, char **argv) {
             if (tui_q_room(&q) != 0) { printf("FAIL full queue accepted more\n"); failures++; }
         }
         {
-            tui_state g;
+            static tui_state g;
             int posts = 0, before, you = 0, i;
             tui_state_init(&g, NULL);
             g.mode = 1;
@@ -2248,7 +3098,7 @@ int main(int argc, char **argv) {
                 } else printf("  ok   idle /reload clears the key cache\n");
             }
             {
-                tui_state tall;
+                static tui_state tall;
                 r_frame fit;
                 int k;
                 tui_state_init(&tall, NULL);
@@ -2261,12 +3111,12 @@ int main(int argc, char **argv) {
                 } else printf("  ok   agent frame fits %d\n", fit.n);
             }
             {
-                tui_state wide;
+                static tui_state wide;
                 r_frame fr;
                 int k, goal_at = -1;
                 tui_state_init(&wide, NULL);
                 wide.mode = 1;
-                wide.rows = 54;
+                wide.rows = 27;
                 snprintf(wide.goal, sizeof wide.goal, "g");
                 wide.loop_on = 1;
                 tui_log_line(&wide, "only-one");
@@ -2322,7 +3172,6 @@ int main(int argc, char **argv) {
                                     printf("FAIL log end or wide hint\n");
                                     failures++;
                                 } else {
-                                    tui_apply_key(&wide, TERM_KEY_UP, 0);
                                     tui_apply_key(&wide, TERM_KEY_PGUP, 0);
                                     tui_apply_key(&wide, TERM_KEY_HOME, 0);
                                     if (wide.log_skip != 20 || !tui_frame_has(&wide, "hist-01")
@@ -2331,7 +3180,6 @@ int main(int argc, char **argv) {
                                         failures++;
                                     } else {
                                         tui_apply_key(&wide, TERM_KEY_PGDN, 0);
-                                        tui_apply_key(&wide, TERM_KEY_DOWN, 0);
                                         if (wide.log_skip != 0) {
                                             printf("FAIL log page down skip %d\n", wide.log_skip);
                                             failures++;
@@ -2359,7 +3207,7 @@ int main(int argc, char **argv) {
                 } else printf("  ok   empty log view unpadded, goal at %d\n", goal_at);
             }
             {
-                tui_state ex;
+                static tui_state ex;
                 r_frame fr;
                 int k, y = 0, why = 0, cmd = 0, closed = 0;
                 tui_state_init(&ex, NULL);
@@ -2399,7 +3247,7 @@ int main(int argc, char **argv) {
                 }
             }
             {
-                tui_state er;
+                static tui_state er;
                 tui_state_init(&er, NULL);
                 er.mode = 1;
                 er.rows = 24;
@@ -2412,7 +3260,7 @@ int main(int argc, char **argv) {
                 } else printf("  ok   error status keeps the nfs line\n");
             }
             {
-                tui_state mind;
+                static tui_state mind;
                 r_frame mf;
                 char oldhome[512];
                 const char *home = getenv("HOME");
@@ -2588,7 +3436,7 @@ int main(int argc, char **argv) {
         /* Mode 0 Enter is the CLI hand. The same line through tool_run (what
          * tools_cli run prints) must be the line the frame shows. No socket. */
         {
-            tui_state hand;
+            static tui_state hand;
             tool_result via_cli;
             char line[1024];
             size_t i;
@@ -2646,13 +3494,26 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (!strcmp(cmd, "run") || !strcmp(cmd, "agent")) {
+    if (!strcmp(cmd, "run") || !strcmp(cmd, "agent") ||
+        !strcmp(cmd, "agent-owned") || !strcmp(cmd, "resume-agent") ||
+        !strcmp(cmd, "agent-managed") || !strcmp(cmd, "standby-managed")) {
         /* The real loop. Needs a terminal; refuses politely without one rather
          * than emitting escape sequences into a pipe. `agent` is the same loop
          * in agent mode (Enter drives the DeepSeek loop instead of the gate). */
-        tui_state st;
+        static tui_state st;
+        static reload_io_token resume_token;
+        char owned_why[256];
         int cols, first = 1;
-        int agent_mode = !strcmp(cmd, "agent");
+        int managed_mode = !strcmp(cmd, "agent-managed") || !strcmp(cmd, "standby-managed");
+        int standby_mode = !strcmp(cmd, "standby-managed");
+        int owned_mode = !strcmp(cmd, "agent-owned") || !strcmp(cmd, "resume-agent") || managed_mode;
+        int resume_mode = !strcmp(cmd, "resume-agent");
+        int agent_mode = strcmp(cmd, "run") != 0;
+        if ((owned_mode && !resume_mode && !managed_mode && argc != 5) || (resume_mode && argc != 7) ||
+            (managed_mode && argc != (standby_mode ? 7 : 6))) {
+            printf("usage: agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
+            return 64;
+        }
 
         if (!isatty(0) || !isatty(1)) {
             printf("tui %s needs a terminal (stdin and stdout must be ttys)\n", cmd);
@@ -2666,11 +3527,23 @@ int main(int argc, char **argv) {
             int ai;
             const char *transcript = NULL;
             agent_set_spill(0);
-            for (ai = 2; ai < argc; ai++) {
+            if (!owned_mode) for (ai = 2; ai < argc; ai++) {
                 if (!strcmp(argv[ai], "spill")) agent_set_spill(1);
                 else if (!transcript) transcript = argv[ai];
             }
             tui_state_init(&st, transcript);
+        }
+        if (managed_mode && tui_managed_init(argv[2], argv[3], standby_mode ? argv[4] : "initial",
+                standby_mode ? argv[5] : argv[4], standby_mode ? argv[6] : argv[5], standby_mode) != 0) {
+            printf("managed startup refused\n"); return 1;
+        }
+        if (owned_mode && !standby_mode && tui_owned_start(&st, argv[2], resume_mode ? argv[4] : argv[3],
+                 resume_mode ? argv[6] : argv[4], resume_mode ? argv[3] : NULL,
+                 resume_mode ? argv[5] : NULL, &resume_token, owned_why, sizeof owned_why) != 0) {
+            printf("owned startup refused: %s\n", owned_why);
+            if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0)
+                printf("ownership return not confirmed: %s\n", owned_why);
+            return 1;
         }
         st.mode = agent_mode ? 1 : 0;
         {
@@ -2686,14 +3559,42 @@ int main(int argc, char **argv) {
         }
         r_frame_init(&tui_prev);
         term_install_exit_handler(term_on_signal);
-        if (term_raw_enter() != 0) { printf("cannot enter raw mode\n"); return 1; }
+        if (!standby_mode && term_raw_enter() != 0) {
+            printf("cannot enter raw mode\n");
+            if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0)
+                printf("ownership return not confirmed: %s\n", owned_why);
+            return 1;
+        }
+        /* Commit point: validated UI/context applied, ownership held, raw TTY
+         * ready. Consume exactly once; cleanup failure is not a second apply. */
+        if (resume_mode && reload_io_consume(argv[3], &resume_token, owned_why, sizeof owned_why) != 0) {
+            term_raw_leave();
+            printf("restore committed; state cleanup failed: %s; do not reapply\n", owned_why);
+            if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0)
+                printf("ownership return not confirmed: %s\n", owned_why);
+            return 1;
+        }
+        if (managed_mode) {
+            tui_managed.raw = !standby_mode;
+            if (tui_managed_send(standby_mode ? "READY" : "ACK", 0) != 0) st.quit = 1;
+        }
+        if (owned_mode && !standby_mode) tui_log_plain(&st, "owned session; HASH is explicit binding, not verified source identity");
 
         while (!st.quit && !term_interrupted()) {
+            if (managed_mode) {
+                struct pollfd ctl;
+                tui_managed_poll(&st);
+                if (st.quit) break;
+                if (tui_managed.phase != 3) {
+                    ctl.fd = tui_managed.fd; ctl.events = POLLIN; ctl.revents = 0;
+                    poll(&ctl, 1, TUI_FRAME_MS); continue;
+                }
+            }
             if (st.busy && !agent_turn_step(0)) tui_turn_done(&st);
             if (!st.busy && st.npending > 0 && st.mode == 1) {
-                tui_dequeue(&st);
-                tui_run_agent(&st);
+                tui_run_pending(&st);
             }
+            tui_mail_poll(&st, !st.busy && st.npending == 0 && st.mode == 1);
             /* Drain everything that has arrived into the queue FIRST, then
              * consume exactly one key per redraw. Consuming the read directly
              * is what lost 14 of 15 characters: one read returns a whole typed
@@ -2744,11 +3645,19 @@ int main(int argc, char **argv) {
             tui_redraw(&st);
             if (first) { tui_write_all("\x1b[?25l", 6); first = 0; }
         }
-        term_raw_leave();
-        tui_write_all("\x1b[?25h\x1b[0m\n", 9);   /* show cursor, reset, newline */
+        if (!managed_mode || (!tui_managed.retired && tui_managed.raw && st.owner_fd >= 0)) {
+            term_raw_leave();
+            tui_write_all("\x1b[?25h\x1b[0m\n", 9);
+        }
+        if (managed_mode) close(tui_managed.fd);
+        /* Successful retirement must not restore TTY state over the new actor. */
+        /* show cursor, reset, newline */
+        if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0) {
+            printf("ownership return not confirmed: %s\n", owned_why); return 1;
+        }
         return 0;
     }
 
-    printf("usage: tui selftest | once | run | agent\n");
+    printf("usage: tui selftest | once | run | agent | agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
     return 64;
 }

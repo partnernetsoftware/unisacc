@@ -91,7 +91,7 @@ typedef struct {
 #define NET_NO_CURL       (-2003)
 #define NET_CANCELLED     (-2004)
 #define NET_TIMEOUT       (-2005)
-#define NET_TOTAL_SEC     120
+#define NET_TOTAL_SEC     60
 
 /*
  * A tiny local case-insensitive compare.

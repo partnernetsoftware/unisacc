@@ -399,23 +399,21 @@ static int cmd_ls(const tool_args *a, tool_result *r) {
 
 /* ── the table ──────────────────────────────────────────────────────────── */
 
-typedef int (*tool_fn)(const tool_args *, tool_result *);
-
 typedef struct {
     const char *name;
     const char *usage;
     const char *help;
-    tool_fn     fn;
+    int         id;
 } tool_entry;
 
 static const tool_entry TOOLS[] = {
-    { "sh",     "sh <command...>",      "run a command through a real shell (/bin/sh -c)", cmd_sh },
-    { "cd",     "cd [dir]",             "change the directory later sh/read/write/ls use", cmd_cd },
-    { "edit",   "edit <path> <old> <new>", "replace a UNIQUE occurrence (fails otherwise)", cmd_edit },
-    { "read",   "read <path>",          "print a file (refused if larger than 64KB)", cmd_read },
-    { "write",  "write <path> <text>",  "atomically replace a file's contents",       cmd_write },
-    { "append", "append <path> <line>", "add one line to a file",                     cmd_append },
-    { "ls",     "ls [dir]",             "list a directory",                           cmd_ls },
+    { "sh",     "sh <command...>",      "run a command through a real shell (/bin/sh -c)", 0 },
+    { "cd",     "cd [dir]",             "change the directory later sh/read/write/ls use", 1 },
+    { "edit",   "edit <path> <old> <new>", "replace a UNIQUE occurrence (fails otherwise)", 2 },
+    { "read",   "read <path>",          "print a file (refused if larger than 64KB)", 3 },
+    { "write",  "write <path> <text>",  "atomically replace a file's contents",       4 },
+    { "append", "append <path> <line>", "add one line to a file",                     5 },
+    { "ls",     "ls [dir]",             "list a directory",                           6 },
 };
 #define TOOL_COUNT ((int)(sizeof TOOLS / sizeof TOOLS[0]))
 
@@ -458,7 +456,15 @@ tool_result tool_run(const char *line) {
 
     for (i = 0; i < TOOL_COUNT; i++) {
         if (!strcmp(a.argv[0], TOOLS[i].name)) {
-            TOOLS[i].fn(&a, &r);
+            switch (TOOLS[i].id) {
+            case 0: cmd_sh(&a, &r); break;
+            case 1: cmd_cd(&a, &r); break;
+            case 2: cmd_edit(&a, &r); break;
+            case 3: cmd_read(&a, &r); break;
+            case 4: cmd_write(&a, &r); break;
+            case 5: cmd_append(&a, &r); break;
+            case 6: cmd_ls(&a, &r); break;
+            }
             return r;
         }
     }

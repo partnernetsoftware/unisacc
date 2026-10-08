@@ -1,0 +1,7 @@
+# Private actual-runtime coverage
+
+`python3 probes/reload_runtime.py tools RECEIPT.json` freezes source and compiler privately, uses stable real CTTY launcher with two real gated source versions, and exercises localhost exec pwd plus file read, answer, stop after the first handoff. Standby inherits intentionally wrong cwd/role/peer/journal environment; actual tool BODY and system requests must match the restored context. The second handoff captures the now nonempty journal at its exact byte offset, retaining goal/history and current unsent draft with a unique native owner. Unrelated journal bytes must remain unchanged. No actual provider or mail is contacted.
+
+`python3 probes/reload_runtime.py goal-failure RECEIPT.json` uses the original /goal and /loop on automatic dispatch. Three unparseable replies must show unfinished failure and no extra request during1.3 seconds. Export must retain loop_on=true/left7 but no pending goal; the armed state alone does not automatically redispatch a failed turn. User changes may later initiate work. This verifies no redispatch after failure, not indefinite runtime liveness.
+
+Each selector has55 seconds overall (outer bound60), candidate inner build/gates14 seconds, protocol8 seconds, runtime-turn10 seconds. Detailed JSON includes frozen production hashes, requests, actual tools/journal/offset, candidate receipts and terminal restoration. The probe is private test coverage, not deployment of an existing window.

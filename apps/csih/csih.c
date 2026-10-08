@@ -7,4 +7,5 @@
  * the convenient spelling of that argv. csih.com is the other release
  * form (one cross-arch executable) and is not produced here.
  */
+#include "reload_support.inc"
 #include "tui.c"

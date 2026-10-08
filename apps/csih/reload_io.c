@@ -10,7 +10,7 @@
 
 #define RELOAD_IO_MAX 131072
 
-extern int reload_state_validate(const char *text, size_t len, char *why, size_t cap);
+extern int reload_state_validate_any(const char *text, size_t len, char *why, size_t cap);
 
 static void rset(char *why, size_t cap, const char *m) {
   if (!why || cap == 0) return;
@@ -30,7 +30,7 @@ int reload_io_save(const char *path, const char *text, size_t len, char *why, si
   if (path[0] != '/') { rset(why, cap, "path 非绝对路径"); return -1; }
   if (strlen(path) > 4095) { rset(why, cap, "path 总长超过 4095"); return -1; }
   if (len > RELOAD_IO_MAX) { rset(why, cap, "len 超过 131072"); return -1; }
-  if (reload_state_validate(text, len, why, cap) == 0) return -1;
+  if (reload_state_validate_any(text, len, why, cap) == 0) return -1;
   const char *slash = strrchr(path, '/');
   if (!slash || slash == path || slash[1] == '\0') { rset(why, cap, "path 非法目录或空名"); return -1; }
   size_t dlen = (size_t)(slash - path);

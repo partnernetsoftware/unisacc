@@ -53,7 +53,7 @@ typedef struct {
     int  actions;
     int  err;
     char answer[4096];
-    char reason[128];
+    char reason[320];
     char last[320];
 } agent_result;
 
@@ -73,6 +73,12 @@ int agent_may_stop_ans(int judge, int maxn, int answered);
 int agent_mentions_window(const char *s);
 void agent_role_test(const char *role, const char *peer);
 int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int n);
+typedef struct {
+    int ok, err, exited, status, signal, timed_out;
+    long bytes;
+    char out[65536];
+} shell_result;
+void agent_watch_result(const char *cmd, const shell_result *r);
 void agent_watch_note(const char *cmd);
 int agent_watch_needs_mail(void);
 int agent_transcript_path(char *out, size_t outlen);
@@ -146,8 +152,8 @@ static int agent_run_selftest(void) {
              && strstr(s.text, "out[0]"),
              "不用工具: prose is the answer");
     s = agent_parse("Sure.\n{\"act\":\"exec\",\"cmd\":\"pwd\"}\n{\"act\":\"exec\",\"cmd\":\"ls\"}");
-    a_expect(s.kind == ACT_EXEC && strcmp(s.cmd, "pwd") == 0,
-             "prose plus extra objects keeps the first");
+    a_expect(s.kind == ACT_ERR,
+             "prose plus extra objects rejected before execution");
     a_expect(agent_object_count("Sure.\n{\"act\":\"exec\",\"cmd\":\"pwd\"}\n{\"act\":\"exec\",\"cmd\":\"ls\"}") == 2,
              "two objects are counted");
     s = agent_parse("{\"act\":\"answer\",\"text\":\"use } here\"}");
@@ -233,8 +239,9 @@ static int agent_run_selftest(void) {
                  "a package question is not a window");
         a_expect(agent_mentions_window("看看窗口 13") && agent_mentions_window("tmux capture-pane"),
                  "a window request keeps the list");
-        a_expect(strstr(rules, "下一窗") != NULL && strstr(rules, "只跑第一个") != NULL,
-                 "rules keep one step, then the next window");
+        a_expect(strstr(rules, "下一窗") != NULL && strstr(rules, "恰好一个 JSON 对象") != NULL &&
+                 strstr(rules, "等待真实结果") != NULL,
+                 "rules keep one action, wait for its result, and name the next window");
     }
 
     {
@@ -263,7 +270,35 @@ static int agent_run_selftest(void) {
         agent_role_test("watch", "0:csih-tui");
         a_expect(agent_watch_needs_mail() == 1, "watch must mail before answer");
         agent_watch_note("/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 一件 折叠没有计数");
-        a_expect(agent_watch_needs_mail() == 0, "envelope to the peer clears the gate");
+        a_expect(agent_watch_needs_mail() == 1, "command text cannot clear mail gate");
+        {
+            static shell_result r;
+            const char *cmd = "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui '中文 标题' \"中文 正文\"";
+            const char *bad[] = {
+                "false # envelope 0:csih-tui",
+                "echo 'envelope → 0:csih-tui.0: 80 chars' # envelope 0:csih-tui",
+                "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 标题 正文; true",
+                "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui2 标题 正文",
+                "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 标题 $(echo 正文)",
+                "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 标题 正文 > /tmp/x"
+            };
+            int i;
+            memset(&r, 0, sizeof r); r.ok = 1; r.exited = 1;
+            snprintf(r.out, sizeof r.out, "envelope → 0:csih-tui.0: 80 chars [submitted✓:BUSY]\n");
+            r.bytes = (long)strlen(r.out);
+            for (i = 0; i < 6; i++) {
+                agent_watch_result(bad[i], &r);
+                a_expect(agent_watch_needs_mail() == 1, "fake/composite/wrong-peer envelope rejected");
+            }
+            r.status = 3; agent_watch_result(cmd, &r);
+            a_expect(agent_watch_needs_mail() == 1, "failure receipt does not clear mail gate");
+            r.status = 0; r.timed_out = 1; agent_watch_result(cmd, &r);
+            a_expect(agent_watch_needs_mail() == 1, "timeout does not clear mail gate");
+            r.timed_out = 0; r.bytes = -1; agent_watch_result(cmd, &r);
+            a_expect(agent_watch_needs_mail() == 1, "truncated receipt rejected");
+            r.bytes = (long)strlen(r.out); agent_watch_result(cmd, &r);
+            a_expect(agent_watch_needs_mail() == 0, "structured success result clears mail gate (no delivery performed)");
+        }
         agent_role_test("", "");
     }
 
@@ -596,8 +631,8 @@ static int run_agent(int argc, char **argv) {
         return 1;
     }
     printf("\n%s\n", r.answer[0] ? r.answer : "(no answer text)");
-    printf("rounds=%d actions=%d stopped=%s\n",
-           r.rounds, r.actions, r.stopped ? "yes (go:stop)" : "no (MAX_ROUNDS)");
+    printf("rounds=%d actions=%d stopped=%s reason=%s\n",
+           r.rounds, r.actions, r.stopped ? "yes" : "no", r.reason);
     print_trace(transcript);
     return 0;
 }
