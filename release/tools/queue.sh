@@ -61,3 +61,4 @@ for i in $(seq 1 300); do
 done
 echo "final rc=$rc" >> "$LOG"
 grep -E "^queue:|final rc|UNVERIFIED" "$LOG" | tail -4
+exit "$rc"
