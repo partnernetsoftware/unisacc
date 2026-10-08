@@ -33,29 +33,8 @@ typedef enum {
     ACT_ANSWER, ACT_GO_CONTINUE, ACT_GO_STOP, ACT_MIND
 } agent_kind;
 
-typedef struct {
-    int   kind;
-    char  cmd[4096];
-    char  why[160];
-    char  op[64];
-    char  path[1024];
-    char  text[4096];
-    char  old[4096];
-    char  nw[4096];
-    int   line;
-    int   nlines;
-} agent_step;
 
-typedef struct {
-    int  ok;
-    int  stopped;
-    int  rounds;
-    int  actions;
-    int  err;
-    char answer[4096];
-    char reason[320];
-    char last[320];
-} agent_result;
+#include "agent_result.h"
 
 agent_step agent_parse(const char *content);
 int agent_user_forbids_tools(const char *prompt);
@@ -81,6 +60,7 @@ typedef struct {
 void agent_watch_result(const char *cmd, const shell_result *r);
 void agent_watch_note(const char *cmd);
 int agent_watch_needs_mail(void);
+int agent_delivery_require_next(int required);
 int agent_transcript_path(char *out, size_t outlen);
 int agent_ctx_start(int count, int max_recs, const int *costs, int budget);
 int agent_journal_trim(const char *path, long max_bytes, int keep);
@@ -129,7 +109,11 @@ static int agent_run_selftest(void) {
     a_expect(s.kind == ACT_WRITE, "parse file write");
 
     s = agent_parse("{\"act\":\"answer\",\"text\":\"done\"}");
-    a_expect(s.kind == ACT_ANSWER, "parse answer");
+    a_expect(s.kind == ACT_ANSWER && s.outcome == AGENT_OUTCOME_UNVERIFIED, "legacy answer unverified");
+    s = agent_parse("{\"act\":\"answer\",\"outcome\":\"partial\",\"text\":\"artifact exists\"}");
+    a_expect(s.kind == ACT_ANSWER && s.outcome == AGENT_OUTCOME_PARTIAL, "explicit partial answer");
+    s = agent_parse("{\"act\":\"answer\",\"outcome\":\"failed\",\"outcome\":\"completed\",\"text\":\"x\"}");
+    a_expect(s.kind == ACT_ERR, "duplicate outcome rejected");
     s = agent_parse("{\"act\":\"mind\",\"op\":\"add\",\"target\":\"palace\",\"text\":\"note\"}");
     a_expect(s.kind == ACT_MIND && !strcmp(s.path, "palace") && !strcmp(s.op, "add"), "parse mind target");
     s = agent_parse("{\"act\":\"mind\",\"op\":\"read\",\"which\":\"tree\"}");
@@ -219,18 +203,23 @@ static int agent_run_selftest(void) {
     {
         const char *rules = agent_model_rules();
         a_expect(rules
-                 && strstr(rules, "bin/envelope")
-                 && strstr(rules, "0:grkwjcgmcsih")
+                 && strstr(rules, "先理解当前请求与仍有效约束")
+                 && strstr(rules, "自主最小查证")
+                 && strstr(rules, "普通无需工具的咨询可直接单独 answer")
+                 && strstr(rules, "只有当前任务明确要求或明确授权通信")
+                 && strstr(rules, "禁止或不需要确认时，不得发送外部消息")
+                 && !strstr(rules, "0:grkwjcgmcsih")
                  && strstr(rules, "新功能先讨论")
                  && strstr(rules, "不得先写入")
                  && strstr(rules, "why")
                  && strstr(rules, "markdown-tree-dag")
                  && strstr(rules, "mermaid-flowchart-memory-palace")
                  && strstr(rules, "csih。")
-                 && strstr(rules, "已经 answer 之后")
-                 && strstr(rules, "还没 answer 时")
+                 && strstr(rules, "answer之后独立验收")
+                 && strstr(rules, "stop立即停止但不自动通过")
+                 && strstr(rules, "本回合harness action_id")
                  && strstr(rules, "不要 exec tmux"),
-                 "rules: bin/envelope 0:grkwjcgmcsih 新功能先讨论、不得先写入 markdown-tree-dag mermaid-flowchart-memory-palace");
+                 "rules: default answer, explicit communication authorization, no obsolete peer, and existing task/memory rules");
         a_expect(agent_may_stop_ans(1, 3, 1) && agent_may_stop_ans(2, 3, 1),
                  "answered: first stop ends the turn");
         a_expect(!agent_may_stop(1, 3) && !agent_may_stop(2, 3) && agent_may_stop(3, 3),
@@ -242,6 +231,35 @@ static int agent_run_selftest(void) {
         a_expect(strstr(rules, "下一窗") != NULL && strstr(rules, "恰好一个 JSON 对象") != NULL &&
                  strstr(rules, "等待真实结果") != NULL,
                  "rules keep one action, wait for its result, and name the next window");
+    }
+
+    {
+        char *body = (char *)malloc(65536);
+        a_expect(body != NULL, "role communication policy preview buffer");
+        if (body) {
+            agent_role_test("write", "0:policy-peer");
+            agent_ctx_preview("/tmp/csih-role-policy-missing.jsonl", body, 65536);
+            a_expect(strstr(body, "cwd 不是文件系统隔离") != NULL &&
+                     strstr(body, "所有测试临时输出都必须留在该目录内") != NULL &&
+                     strstr(body, "不要使用全局固定 /tmp 文件") != NULL &&
+                     strstr(body, "已有越界必须如实报告，不能因后续修复隐去") != NULL &&
+                     strstr(body, "不能把未核实的范围宣称已验证") != NULL,
+                     "actual model request describes task-local temporary files and honest side effects without claiming isolation");
+            a_expect(strstr(body, "写手。同伴 0:policy-peer") != NULL &&
+                     strstr(body, "先最小查证、执行和验收") != NULL &&
+                     strstr(body, "禁止或不需要确认时不得发送") != NULL &&
+                     strstr(body, "做完执行") == NULL,
+                     "writer has actual peer and no automatic external confirmation obligation");
+            agent_role_test("watch", "0:policy-peer");
+            agent_ctx_preview("/tmp/csih-role-policy-missing.jsonl", body, 65536);
+            a_expect(strstr(body, "看客。同伴 0:policy-peer") != NULL &&
+                     strstr(body, "可用 file read 与 mind read 查证") != NULL &&
+                     strstr(body, "只有当前任务明确要求或明确授权通信时才发送") != NULL &&
+                     strstr(body, "真实成功回执") != NULL && agent_watch_needs_mail() == 1,
+                     "watch authorization guidance preserves the real delivery gate");
+        }
+        free(body);
+        agent_role_test(NULL, NULL);
     }
 
     {
@@ -268,7 +286,7 @@ static int agent_run_selftest(void) {
         a_expect(agent_peer_blocked(ACT_EDIT, "edit", "", why, (int)sizeof why) == 0,
                  "write may edit");
         agent_role_test("watch", "0:csih-tui");
-        a_expect(agent_watch_needs_mail() == 1, "watch must mail before answer");
+        a_expect(agent_watch_needs_mail() == 1, "watch receipt tracker is not a task obligation");
         agent_watch_note("/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 一件 折叠没有计数");
         a_expect(agent_watch_needs_mail() == 1, "command text cannot clear mail gate");
         {
@@ -402,7 +420,7 @@ static int agent_run_selftest(void) {
         a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "line window reads");
         a_expect(strstr(out, "L3") && strstr(out, "L4") && !strstr(out, "L2") && !strstr(out, "L5"),
                  "  window is lines 3 and 4");
-        a_expect(strstr(out, "下一窗 line=5") != NULL, "  window names the next line");
+        a_expect(!strcmp(out, "L3\nL4\n"), "  window is exact raw text without invented coverage footer");
         remove(path);
     }
 
@@ -625,8 +643,10 @@ static int run_agent(int argc, char **argv) {
     fflush(stdout);
     r = agent_run_cb(prompt, transcript, endpoint, model, cwd, NULL, print_event, NULL);
 
+    printf("acceptance=%d scope=%d (semantic assessment, not proof)\n",r.acceptance,r.scope);
     if (!r.ok) {
         printf("agent FAILED: %s (err=%d)\n", r.reason, r.err);
+        if (r.answer[0]) printf("\n%s\n", r.answer);
         print_trace(transcript);
         return 1;
     }

@@ -75,6 +75,9 @@ def run_case(name, responses, prompt, expect_reqs, expect_rc, pre=None, extra_en
             reasons.append("%s missing 'peer mail not delivered'" % name)
     if name in ("normal", "watch_no_tools"):
         if "agent FAILED" in s: reasons.append("%s x 'agent FAILED'" % name)
+    if name in ("outcome_failed", "outcome_failed_last", "watch_failed") and "FAILED_ARTIFACT" not in s: reasons.append("failed body missing")
+    if name in ("outcome_partial", "watch_partial") and "PARTIAL_ARTIFACT" not in s: reasons.append("partial body missing")
+    if name == "outcome_legacy" and ("LEGACY_ARTIFACT" not in s or "unverified" not in s): reasons.append("legacy outcome missing")
     expected_cause = {
         "parsefail": "too many unparseable steps",
         "stop_no_answer": "go=stop without answer",
@@ -109,24 +112,37 @@ def run_case(name, responses, prompt, expect_reqs, expect_rc, pre=None, extra_en
     return dict(name=name, ok=ok, rc=rc, requests=reqs, expected_requests=expect_reqs, expected_rc=expect_rc, stdout=s, reasons=reasons, records=records)
 
 EXEC = '{"act":"exec","cmd":"true","why":"x"}'
-ANSWER = '{"act":"answer","text":"done"}'
+ANSWER = '{"act":"answer","outcome":"completed","text":"done"}'
 STOP = '{"go":"stop"}'
 
 def main():
     def mk_red(cwd):
         os.makedirs(os.path.join(cwd, "apps", "csih"))
+    failed = json.dumps(dict(act="answer", outcome="failed", text="FAILED_ARTIFACT"))
+    partial = json.dumps(dict(act="answer", outcome="partial", text="PARTIAL_ARTIFACT"))
+    legacy = json.dumps(dict(act="answer", text="LEGACY_ARTIFACT"))
     rows = [
+        ("outcome_failed", [failed, STOP], "do it", 1, 1, None, None),
+        ("outcome_partial", [partial, STOP], "do it", 1, 1, None, None),
+        ("outcome_legacy", [legacy, STOP], "do it", 1, 1, None, None),
+        ("outcome_failed_last", ['{"go":"continue"}'] * 7 + [failed], "do it", 8, 1, None, None),
+        ("outcome_last_continue", ['{"go":"continue"}'] * 7 + [ANSWER, '{"go":"continue"}'], "do it", 9, 1, None, None),
+        ("outcome_invalid", ['{"act":"answer","outcome":1,"text":"bad"}'], "do it", 3, 1, None, None),
+        ("outcome_duplicate", ['{"act":"answer","outcome":"failed","outcome":"completed","text":"bad"}'], "do it", 3, 1, None, None),
+        ("outcome_nul", ['{"act":"answer","outcome":"completed\\u0000failed","text":"bad"}'], "do it", 3, 1, None, None),
+        ("watch_failed", [failed], "do watch", 1, 1, None, None),
+        ("watch_partial", [partial], "do watch", 1, 1, None, None),
         ("normal", [EXEC, ANSWER, STOP], "do it", 3, 0, None, None),
         ("parsefail", ["UNPARSEABLE"], "do it", 3, 1, None, None),
         ("stop_no_answer", [STOP], "do it", 3, 1, None, None),
         ("direct_stop_no_answer", ['{"go":"continue"}', '{"go":"continue"}', STOP], "do it", 3, 1, None, None),
-        ("last_round_answer", ['{"go":"continue"}'] * 7 + [ANSWER], "do it", 8, 0, None, None),
+        ("last_round_answer", ['{"go":"continue"}'] * 7 + [ANSWER, STOP], "do it", 9, 0, None, None),
         ("action_budget", [EXEC], "do it", 16, 1, None, None),
         ("round_budget", ['{"go":"continue"}'], "do it", 8, 1, None, None),
         ("prior_answer_budget", [ANSWER] + ['{"go":"continue"}'] * 8, "do it", 9, 1, None, None),
         ("invalid_judge", [ANSWER, "INVALID_JUDGMENT"], "do it", 4, 1, None, None),
         ("invalid_judge_recovery", [ANSWER, "INVALID_JUDGMENT", STOP], "do it", 3, 0, None, None),
-        ("no_tools_prose", ["直接答复", STOP], "不用工具，直接回答测试", 2, 0, None, None),
+        ("no_tools_prose", ["直接答复", STOP], "不用工具，直接回答测试", 1, 1, None, None),
         ("red", ['{"act":"file","op":"write","path":"apps/csih/probe.c","text":"x"}', STOP],
          "write probe", 2, 1, mk_red, None),
         ("watch_answer", [ANSWER, ANSWER], "do watch", 2, 1, None, None),
