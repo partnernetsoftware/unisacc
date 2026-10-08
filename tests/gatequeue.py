@@ -19,6 +19,8 @@ LOCATION_BOUND = ('com-comboot-',)
 # scheduling order lives in tests/gateorder.json (0.0.32 P7'): it decides only when a job starts, so it is
 # kept out of the common identity -- two edits of this table in q10 invalidated all 688 results each time
 AFTER = json.loads((pathlib.Path(__file__).resolve().parent/'gateorder.json').read_text())['after']
+# a job waits for one predecessor (a name) or for several (a list): a union over shards waits for all of them
+PREDS = {n: ([p] if isinstance(p, str) else list(p)) for n, p in AFTER.items()}
 
 def atomic(path, obj):
     tmp = path.with_suffix(path.suffix + '.tmp')
@@ -361,11 +363,12 @@ def main():
             left = deadline-time.monotonic()
             while pending and len(active) < args.jobs and left > 2:
                 if exclusive.intersection(active): break
-                for n in [n for n in pending if AFTER.get(n) in data['results'] and data['results'][AFTER[n]]['rc'] != 0]:
+                for n in [n for n in pending if any(p in data['results'] and data['results'][p]['rc'] != 0 for p in PREDS.get(n, ()))]:
+                    bad = [p for p in PREDS[n] if p in data['results'] and data['results'][p]['rc'] != 0]
                     pending.remove(n); data['results'][n] = {'rc': 1, 'seconds': 0, 'limit': 0}
-                    print('DONE', n, 'rc=1 0.00s predecessor', AFTER[n], 'failed', flush=True)
+                    print('DONE', n, 'rc=1 0.00s predecessor', ' '.join(bad), 'failed', flush=True)
                 fits = [n for n in pending if estimate(n) <= left-1
-                        and (AFTER.get(n) not in jobs or AFTER[n] in data['results'])]
+                        and all(p not in jobs or p in data['results'] for p in PREDS.get(n, ()))]
                 if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job
