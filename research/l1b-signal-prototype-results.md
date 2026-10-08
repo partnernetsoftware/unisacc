@@ -47,3 +47,28 @@ host入口试验在临时C里强制把`_unisa_sigtramp`判为host入口，目的
 - 参数准备期间的确定性嵌套注入尚未做；不能用本探针的单层成功证明共享sys/write参数安全。
 
 暂不落产品δ。cc可并行核对头补丁的x86跳板/sigreturn契约，cdx继续核对arm64双栈与嵌套现场；验证后才决定通用入口和私有帧如何同批实现。
+
+## 第二轮：入口与gate捕获、双层转绿
+
+实际跑过，2026-10-09；产品文件仍未修改。
+
+x86临时编码器在host入口第一条参数移动前保存寄存器，直接write二进制现场，再恢复全部寄存器。在sigreturn的TO_GATE前再次保存。现场文件`/tmp/cdx-l1b-proto/gatecapture-osx-x86_64.result.json`：前80B为入口，后80B为gate，末48B为返回现场。
+
+- 入口r8/r9与跳板uctx/token逐位相等，排除第5/6参数桥接换址。
+- 入口rsp在静态64KiB备用栈内，uctx却在另一地址区；不能用uctx不邻近rsp断言桥接错误。
+- gate的rax=0x20000b8，rdi=uctx、rsi=1、rdx=token；实际执行syscall，返回+1。
+- cc独立系统clang x86_64对照也得到同样失败，`infostyle=30`后能返回main。其源与结果在`/tmp/cc-l1b/`。这里区分cc对照与cdx复验，不把源代码阅读当实跑。
+- cdx临时头把x86第二参数固定30：sys6私有帧原型单层rc0、双层MABCD/rc0；Rosetta双层重复5/5通过。
+
+arm64临时变体`/tmp/cdx-l1b-proto/spgate.c`：在TO_GATE保存真实SP到x7下方16B，用真实SP=x7-512执行系统调用，之后恢复真实SP（不改变x7、原错误返回归一化保留）。同一双层探针由MAB/139变MABCD/0，重复5/5通过；单层也rc0。这支持“gate时真实SP高于tape活动帧，嵌套信号覆盖活动栈”的方向，但尚未直接捕获被覆盖字节。
+
+重复结果：`/tmp/cdx-l1b-proto/nested-repeat.json`。构建每步40秒，执行每次2秒，重复实验整步15秒上限。
+
+### 仍需解决的生产边界
+
+1. 512B只为诊断预留，不能当作生产栈契约；还需明确对齐、入口保存区、所有异步可中断指令处的真实SP与tapeSP关系。
+2. 仅在gate期间同步真实SP，不能保护gate外任意时间来的信号；正式方案须覆盖分配/撤帧及真实ABI调用边界。
+3. `.sys`/`.write`共享暂存格尚未迁移，参数准备中重入注入尚未做。
+4. `_unisa_sigtramp`按名字硬编码host入口仅是诊断；产品需通用入口契约。
+5. x86的30只在Rosetta实跑，未声称原生Intel通过；[XNU x86 sigreturn源码](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/dev/i386/unix_signal.c)提供UC_FLAVOR与上下文恢复判据，不能代替目标机器验收。
+6. 未生成产品δ、未构建私有.com、未完成四个非Windows目标镜像逐字节对拍。L1b′仍未收口。
