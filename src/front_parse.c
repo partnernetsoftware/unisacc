@@ -6085,6 +6085,7 @@ int isdotc(char *p) {
     n = 0; while (p[n]) n = n + 1;
     if (n < 2) return 0;
     if (p[n - 2] == 46 && p[n - 1] == 99) return 1;     /* .c */
+    if (n >= 3) { if (p[n - 3] == 46 && p[n - 2] == 99 && p[n - 1] == 120) return 1; }  /* .cx script */
     if (n >= 5) { if (p[n - 5] == 46 && p[n - 4] == 116 && p[n - 3] == 97
                    && p[n - 2] == 112 && p[n - 1] == 101) return 1; }  /* .tape */
     return 0;
