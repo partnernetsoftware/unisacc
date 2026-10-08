@@ -256,6 +256,7 @@ static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
 /* mkstemp (POSIX, 0.0.34 L1b): replace the trailing XXXXXX and create the file
    exclusively, retrying on EEXIST; the letters come from a counter mixed with the
    address of a local, so two processes running the same binary still differ. */
+#ifndef _WIN32   /* POSIX only: on Windows fcntl.h would drag host-call bodies into untrimmed tapes */
 #if !__UNISA_FTRIM_LIBC || __UN_mkstemp
 #include <fcntl.h>
 #endif
@@ -279,6 +280,7 @@ static int mkstemp(char *__u_t) {
     return 0 - 1;
 }
 #endif
+#endif /* !_WIN32 */
 /* strtod's slow path (more than 19 digits, or a power of ten past 22) is a
  * guess a few ulp off; these compare the decimal with the halfway points around
  * it in big integers (base 2^32) and step to the correctly rounded double. */
