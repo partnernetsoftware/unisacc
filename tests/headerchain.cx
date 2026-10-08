@@ -1,0 +1,47 @@
+#!/usr/bin/env -S unisacc.com -run
+/* headerchain.cx -- 0.0.34 X2 pilot (was headerchain.sh).  After editing include/*.h, regenerate
+ * everything the headers feed, in order: kernel/unisa_headers.inc (emit-kernel) -> exec/facts
+ * (export.py) -> tests/graphhash.tsv, only the pp and parse2 entries the headers reach -> guard check
+ * (unisa/libneed.py) -> the previous release still compiles the seed tools (prevheaders.cx) -> a smoke
+ * batch of exec suites against the tree (needs UA and UNISACC_FFI_X86_PROVIDER like gate.sh;
+ * HEADERCHAIN_SMOKE=0 skips it).  Every step is bounded; the graphhash part is sharded
+ * (HEADERCHAIN_SHARDS, default 4; GRAPHHASH_JOBS default 2) so no step passes 58 s.  The whole chain
+ * runs a few minutes: start it in the background.  A generator, not a check.
+ * Run from the repo root: sh unisacc.com -run tests/headerchain.cx */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void step(const char *cmd) {
+    printf("== %s\n", cmd); fflush(stdout);
+    if (system(cmd) != 0) { fprintf(stderr, "headerchain: failed: %s\n", cmd); exit(1); }
+}
+
+int main(void) {
+    static const char *smoke[] = {
+        "--suite exec-chain-1 --suite exec-chain-2", "--suite exec-chain-3 --suite exec-chain-4",
+        "--suite exec-chain-5 --suite exec-formatwarn0 --suite exec-formatwarn1",
+        "--suite libneed --suite exec-srcelf", "--suite exec-unitparse", "--suite exec-f1-attributes" };
+    const char *e = getenv("HEADERCHAIN_SHARDS"), *j = getenv("GRAPHHASH_JOBS"), *sm = getenv("HEADERCHAIN_SMOKE");
+    int n = e && atoi(e) > 0 ? atoi(e) : 4, k, i;
+    char cmd[1024];
+    step("python3 tests/bound.py 55 python3 -m unisa emit-kernel");
+    step("python3 tests/bound.py 55 python3 exec/facts/export.py");
+    for (k = 1; k <= n; k++) {
+        snprintf(cmd, sizeof cmd, "env GRAPHHASH_JOBS=%s python3 tests/bound.py 58 python3 tests/graphhash.py"
+                 " --write --only pp --only parse2 --shard %d/%d", j && j[0] ? j : "2", k, n);
+        step(cmd);
+    }
+    step("python3 tests/bound.py 20 python3 unisa/libneed.py");
+    step("tests/bound 58 sh ./unisacc.com -run tests/prevheaders.cx");
+    if (!sm || strcmp(sm, "1") == 0) {
+        for (i = 0; i < (int)(sizeof smoke / sizeof *smoke); i++) {
+            snprintf(cmd, sizeof cmd, "./tests/gate.sh %s", smoke[i]);
+            step(cmd);
+        }
+    }
+    fflush(stdout);
+    system("git status --short kernel exec/facts tests/graphhash.tsv");
+    printf("headerchain: ok\n");
+    return 0;
+}
