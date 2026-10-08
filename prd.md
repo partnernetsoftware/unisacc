@@ -23,7 +23,9 @@
 | v0.0.12–v0.0.29 | [archive/plans/](archive/plans/) — 逐版计划与结项收据；发布身份与回执见 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases) 与 research/r*-release-acceptance.json | 已归档 |
 | v0.0.30 | [archive/plans/v0.0.30.md](archive/plans/v0.0.30.md) | 2026-10-06 公开 |
 | v0.0.31 | [plans/v0.0.31.md](plans/v0.0.31.md) | 已完成，公开待政委裁定 |
-| v0.0.32 | [plans/v0.0.32.md](plans/v0.0.32.md) | 已公开（10-07，v0.0.32 unisacc.com d198bae2，候选 38ea3622；回执 research/r32-release-acceptance.json）
+| v0.0.32 | [archive/plans/v0.0.32.md](archive/plans/v0.0.32.md) | 10-07 公开（unisacc.com d198bae2，候选 38ea3622；回执 research/r32-release-acceptance.json） |
+| v0.0.33 | [archive/plans/v0.0.33.md](archive/plans/v0.0.33.md) | 10-08 公开（unisacc.com c2d03fe6，候选 e0a8ff7c；rc/v0.0.33=bc23f113；回执 research/r33-release-acceptance.json） |
+| v0.0.34 | [plans/v0.0.34.md](plans/v0.0.34.md) | 阶段 0 整理期进行中，随后开工 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
 
 历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的问题由 [v0.0.31 计划](plans/v0.0.31.md) 跟踪。
