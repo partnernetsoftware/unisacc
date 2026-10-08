@@ -8,6 +8,8 @@ tests/bound.py 55 and records sha256(OUT).  Test infrastructure only.
   python3 tests/graphhash.py --write [--only DIR]...   (re)record those entries
   python3 tests/graphhash.py --list
   python3 tests/graphhash.py --only exec/parse2 --shard 1/3
+  python3 tests/graphhash.py --stage parse2 --stage parse2/units   exact stage keys (8 + 2 entries)
+  an empty selection or shard exits 2
 At most 3 generators run at once.  Exit 0 all equal, 1 mismatch/failure.
 """
 import hashlib, itertools, os, subprocess, sys, tempfile
@@ -66,12 +68,19 @@ def main(argv):
     write = '--write' in argv
     only = [argv[i + 1].rstrip('/') for i, a in enumerate(argv) if a == '--only']
     ents = [x for x in _entries() if not only or any(x[0].startswith(d + '/') or x[0].startswith('exec/' + d.split('exec/')[-1] + '/') or x[0].endswith(' ' + d.split('/')[-1]) for d in only)]
+    stages = [argv[i + 1].rstrip('/') for i, a in enumerate(argv) if a == '--stage']
+    if stages:   # exact stage key: --stage parse2/units picks gen.py parse2/units and its variants only
+        ents = [x for x in ents if x[0].split(' ', 1)[-1] in stages]
+    if not ents:   # cdx 10-08: --only parse2/units selected 0 entries and exited 0 (false green)
+        print('graphhash: empty selection (only=%s stage=%s)' % (only, stages), file=sys.stderr); return 2
     if '--shard' in argv:
         shard = argv[argv.index('--shard') + 1]
         part, total = (int(x) for x in shard.split('/'))
         if total < 1 or part < 1 or part > total:
             raise ValueError('expected --shard K/N with 1 <= K <= N')
         ents = [entry for i, entry in enumerate(ents) if i % total == part - 1]
+        if not ents:
+            print('graphhash: shard %s is empty' % shard, file=sys.stderr); return 2
     if '--list' in argv:
         for g, a in ents: print(key(g, a))
         return 0
