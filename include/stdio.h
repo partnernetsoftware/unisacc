@@ -462,6 +462,7 @@ static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
 static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
     FILE *__u_n; long __u_r;
     if (__u_path == 0) { errno = EINVAL; return NULL; }
+    _u_st_wflush(_u_st_slot(__u_f));
     __u_n = fopen(__u_path, __u_mode);
     if (__u_n == NULL) return NULL;
 #ifdef _WIN32
@@ -480,6 +481,25 @@ static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
 #endif
     __close((long)__u_n);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return NULL; }
+    /* the old stream's buffer and flags belong to the file it had: drop them,
+       take the new mode, and free the slot of the descriptor just closed
+       (lua's loadfile reopens "rb" after one getc and reads from the start) */
+    {   int __u_i; int __u_k;
+        __u_k = _u_st_slot(__u_n); __u_i = _u_st_slot(__u_f);
+        if (__u_i >= 0) {
+            _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
+            _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_wlen[__u_i] = 0;
+            if (__u_k >= 0) _u_st_ro[__u_i] = _u_st_ro[__u_k];
+        }
+        if (__u_k >= 0) {
+            _u_st_n = _u_st_n - 1;
+            _u_st_fd[__u_k] = _u_st_fd[_u_st_n]; _u_st_eof[__u_k] = _u_st_eof[_u_st_n];
+            _u_st_err[__u_k] = _u_st_err[_u_st_n]; _u_st_ung[__u_k] = _u_st_ung[_u_st_n];
+            _u_st_copy(_u_st_buf + __u_k * _U_BUFSZ, _u_st_buf + _u_st_n * _U_BUFSZ, _U_BUFSZ);
+            _u_st_bpos[__u_k] = _u_st_bpos[_u_st_n]; _u_st_blen[__u_k] = _u_st_blen[_u_st_n];
+            _u_st_wlen[__u_k] = _u_st_wlen[_u_st_n]; _u_st_ro[__u_k] = _u_st_ro[_u_st_n];
+        }
+    }
     return __u_f;
 #endif
 }
@@ -503,7 +523,7 @@ static int fclose(FILE *__u_f) {
         _u_st_err[__u_i] = _u_st_err[_u_st_n]; _u_st_ung[__u_i] = _u_st_ung[_u_st_n];
         _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ, _u_st_buf + _u_st_n * _U_BUFSZ, _U_BUFSZ);
         _u_st_bpos[__u_i] = _u_st_bpos[_u_st_n]; _u_st_blen[__u_i] = _u_st_blen[_u_st_n];
-        _u_st_wlen[__u_i] = _u_st_wlen[_u_st_n];
+        _u_st_wlen[__u_i] = _u_st_wlen[_u_st_n]; _u_st_ro[__u_i] = _u_st_ro[_u_st_n];
     }
     return __close(_unisa_fd(__u_f));
 }
