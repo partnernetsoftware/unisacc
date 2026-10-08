@@ -8,15 +8,24 @@
 set -u
 D=${1:?candidate dir}; UA=${2:?same-source reference}; SEED=${3:?seed dir}
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-# 0.0.36 (owner, 10-09): main checkout only -- no worktrees, no branches.  The queue runs in the
-# main checkout under a freeze of main (product inputs untouched until the queue is done).  The
-# root unisacc.com pair is replaced by the candidate's; the previous pair is kept as *.prequeue.
-W=$R
-[ -f "$W/unisacc.com" ] && [ ! -f "$W/unisacc.com.prequeue" ] && cp -p "$W/unisacc.com" "$W/unisacc.com.prequeue" && cp -p "$W/unisacc.com.build.json" "$W/unisacc.com.build.json.prequeue"
-cmp -s "$D/unisacc-next.com" "$W/unisacc.com" || { cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"; }
+# R19-0: the queue runs in its own detached worktree at the commit it started
+# on, so commits to main (plans, prd, other agents' work) never reach it.
+W=${QUEUE_WORKTREE:-/tmp/unisacc-queue-$(git rev-parse --short HEAD)}
+if [ ! -d "$W" ]; then
+  git worktree add -q --detach "$W" HEAD || { echo "queue: cannot create worktree $W"; exit 2; }
+  # untracked inputs the gates read: the installed product (comboot writes it;
+  # absent at the start, its appearance invalidated the 0.0.19 queue at 408/415)
+fi
+# 0.0.33: also for a QUEUE_WORKTREE made beforehand (build_candidate flow): it got no corpus links
+# (diag saw 0 damaged-corpus programs) and kept the root .com instead of the candidate pair
+# 0.0.31: the root holds the SIGNED public .com beside the unsigned build.json (not a pair);
+# the queue tests the candidate, so install the stage-2 pair from CAND_DIR
+cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"
 # 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
 # network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
 # 0.0.27: launched from an rc worktree, $R has no ignored corpus either -- take it from the main checkout
+M=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+for c in "$M"/corpus/*; do [ -e "$W/corpus/${c##*/}" ] || { mkdir -p "$W/corpus"; ln -s "$c" "$W/corpus/${c##*/}"; }; done
 # 0.0.21 R21-14: a stale build.json beside a new unisacc.com is rewritten by comboot mid-queue
 # and invalidates every job that declares it (0.0.20: six exec-driver results)
 if [ -f "$W/unisacc.com" ]; then
