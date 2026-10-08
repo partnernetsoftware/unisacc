@@ -256,14 +256,14 @@ static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
 /* mkstemp (POSIX, 0.0.34 L1b): replace the trailing XXXXXX and create the file
    exclusively, retrying on EEXIST; the letters come from a counter mixed with the
    address of a local, so two processes running the same binary still differ. */
-#ifndef _WIN32   /* POSIX only: on Windows fcntl.h would drag host-call bodies into untrimmed tapes */
-#if !__UNISA_FTRIM_LIBC || __UN_mkstemp
-#include <fcntl.h>
-#endif
+/* No <fcntl.h> here: an untrimmed tape (the Python front end, --fold) would carry
+   every fcntl.h body, and those name host calls Windows lowering refuses.  The
+   exclusive-create flags are spelled out instead (O_RDWR|O_CREAT|O_EXCL per OS). */
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_mkstemp
 static int mkstemp(char *__u_t) {
     static unsigned long __u_seq;
-    long __u_n; long __u_j; int __u_try; int __u_fd; unsigned long __u_v;
+    long __u_n; long __u_j; int __u_try; long __u_r; unsigned long __u_v;
     __u_n = 0; while (__u_t[__u_n]) __u_n = __u_n + 1;
     if (__u_n < 6) { errno = EINVAL; return 0 - 1; }
     __u_j = __u_n - 6; while (__u_j < __u_n) { if (__u_t[__u_j] != 88) { errno = EINVAL; return 0 - 1; } __u_j = __u_j + 1; }
@@ -273,8 +273,14 @@ static int mkstemp(char *__u_t) {
         __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u;
         __u_j = __u_n - 6;
         while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
-        __u_fd = open(__u_t, O_RDWR | O_CREAT | O_EXCL, 384);
-        if (__u_fd >= 0 || errno != EEXIST) return __u_fd;
+#ifdef __APPLE__
+        __u_r = __open(__u_t, 0xA02, 384);
+#else
+        __u_r = __open(__u_t, 0302, 384);
+#endif
+        if (__u_r >= 0) return (int)__u_r;
+        errno = (int)(0 - __u_r);
+        if (errno != EEXIST) return 0 - 1;
         __u_try = __u_try + 1;
     }
     return 0 - 1;
