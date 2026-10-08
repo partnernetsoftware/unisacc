@@ -451,6 +451,15 @@ static double strtod(const char *__u_s, char **__u_end) {
         while (__u_m != 0 && __u_x10 < 0 && __u_m % 10 == 0) { __u_m = __u_m / 10; __u_x10 = __u_x10 + 1; }
         __u_drop = __u_drop || __u_m > 9007199254740992 || __u_x10 > 22 || __u_x10 < 0 - 22;
         if (__u_m >> 63) __u_v = (double)(long)(__u_m >> 1) * 2.0 + (double)(long)(__u_m & 1); else __u_v = (double)(long)__u_m;
+        /* decimal magnitude of the leading digit: past 10^309 the value overflows, below 10^-325
+           it underflows to zero -- decided here, because the big-integer walk below only moves a
+           few ulp and its integers do not reach such exponents */
+        if (__u_m != 0) {
+            unsigned long __u_t; long __u_mag; __u_t = __u_m; __u_mag = __u_x10 - 1;
+            while (__u_t) { __u_t = __u_t / 10; __u_mag = __u_mag + 1; }
+            if (__u_mag > 309) { __u_m = 0; __u_v = 1.0e300 * 1.0e300; __u_drop = 0; }
+            else { if (__u_mag < 0 - 325) { __u_m = 0; __u_v = 0.0; __u_drop = 0; errno = ERANGE; } }
+        }
         if (__u_m != 0) {
             while (__u_x10 > 22) { __u_v = __u_v * 1.0e22; __u_x10 = __u_x10 - 22; }
             while (__u_x10 < 0 - 22) { __u_v = __u_v / 1.0e22; __u_x10 = __u_x10 + 22; }
@@ -462,6 +471,9 @@ static double strtod(const char *__u_s, char **__u_end) {
             if (__u_v > 1.7976931348623157e308) __u_v = 1.7976931348623157e308;
             __u_v = _u_sd_fix(__u_s + __u_ds, __u_de - __u_ds, __u_ex - __u_fd, __u_v);
         }
+        /* C99 7.20.1.3p10: overflow, and underflow (zero or subnormal from a nonzero decimal), set ERANGE */
+        if (__u_v > 1.7976931348623157e308) errno = ERANGE;
+        else { if (__u_m != 0 && __u_v < 2.2250738585072014e-308) errno = ERANGE; }
     }
     if (__u_end) *__u_end = (char *)(__u_s + (__u_any ? __u_i : 0));
     return __u_v * (double)__u_sign;
