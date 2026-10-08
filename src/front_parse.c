@@ -1438,6 +1438,10 @@ int postfix(void) {
             lvalue = 0;
             push();                                  /* address */
             eload(e2);
+            /* a narrow unsigned load is sign-extended like any other: mask it
+               as ++x does, or `u8 x = 200; x++` yields -56 (lua lcode.c
+               `fs->iwthabs++ >= MAXIWTHABS` never fired) */
+            if (curptr == 0) { if (e2 < BFTAG) { if (curuns) zext(e2); } }
             if (curbool && curptr == 0) {
                 /* Normalization loses the arithmetic inverse: save old x. */
                 push();

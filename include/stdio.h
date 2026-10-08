@@ -79,7 +79,7 @@ static int _u_st_slot(FILE *__u_f) {
     __u_i = _u_st_n; _u_st_n = _u_st_n + 1;
     _u_st_fd[__u_i] = __u_fd;
     _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
-    _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_wlen[__u_i] = 0;
+    _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_wlen[__u_i] = 0; _u_st_ro[__u_i] = 0;
     return __u_i;
 }
 #endif
@@ -91,6 +91,7 @@ static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n) {
     if ((long)__u_f >= _UNISA_STDIO_BASE || __u_fd <= 2) return _u_st_raw(__u_fd, __u_p, __u_n);
     __u_i = _u_st_slot(__u_f);
     if (__u_i < 0) return _u_st_raw(__u_fd, __u_p, __u_n);
+    if (_u_st_ro[__u_i]) { _u_st_err[__u_i] = 1; errno = 9; return 0; }   /* EBADF, as glibc and BSD answer at once */
     if (_u_st_bpos[__u_i] < _u_st_blen[__u_i] || _u_st_ung[__u_i] >= 0)
         __lseek(__u_fd, 0 - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0), SEEK_CUR);
     _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
@@ -324,6 +325,9 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
 #endif
         return NULL;
     }
+    {   int __u_s2; int __u_j2; int __u_ro; __u_ro = __u_mode[0] == 114; __u_j2 = 0;
+        while (__u_mode[__u_j2]) { if (__u_mode[__u_j2] == 43) __u_ro = 0; __u_j2 = __u_j2 + 1; }
+        __u_s2 = _u_st_slot((FILE *)(long)__u_fd); if (__u_s2 >= 0) _u_st_ro[__u_s2] = __u_ro; }
     return (FILE *)(long)__u_fd;
 }
 #endif
@@ -703,13 +707,52 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
     int __u_P;
     int __u_upper;
     int __u_strip;
-    __u_upper = __u_c == 70 || __u_c == 69 || __u_c == 71;
+    __u_upper = __u_c == 70 || __u_c == 69 || __u_c == 71 || __u_c == 65;
     if (((__u_bits >> 52) & 2047) == 2047) {
         char *__u_w;
         if (__u_bits & 4503599627370495) __u_w = __u_upper ? "NAN" : "nan";
         else __u_w = __u_upper ? "INF" : "inf";
         __u_out[0] = __u_w[0]; __u_out[1] = __u_w[1]; __u_out[2] = __u_w[2];
         return 3;
+    }
+    if ((__u_c | 32) == 97) {                     /* %a %A: C99 7.19.6.1p8 */
+        unsigned long __u_m; int __u_lead; int __u_hd; int __u_d;
+        __u_m = __u_bits & 4503599627370495; __u_e = (int)((__u_bits >> 52) & 2047);
+        if (__u_e == 0) {                         /* subnormal: normalised, as BSD libc prints it */
+            __u_lead = 0; __u_e = 0;
+            if (__u_m) { __u_lead = 1; __u_e = 0 - 1022; while ((__u_m & 4503599627370496) == 0) { __u_m = __u_m << 1; __u_e = __u_e - 1; } __u_m = __u_m & 4503599627370495; }
+        }
+        else { __u_lead = 1; __u_e = __u_e - 1023; }
+        __u_nd = 13;
+        if (__u_prec >= 0 && __u_prec < 13) {
+            unsigned long __u_rem; unsigned long __u_half; int __u_sh;
+            __u_sh = (13 - __u_prec) * 4;
+            __u_rem = __u_m & (((unsigned long)1 << __u_sh) - 1); __u_half = (unsigned long)1 << (__u_sh - 1);
+            __u_m = __u_m >> __u_sh;
+            if (__u_rem > __u_half || (__u_rem == __u_half && (__u_m & 1))) __u_m = __u_m + 1;
+            if (__u_m >> (__u_prec * 4)) { __u_m = __u_m & (((unsigned long)1 << (__u_prec * 4)) - 1); __u_lead = __u_lead + 1; }
+            __u_nd = __u_prec; __u_hd = __u_prec;
+        } else {
+            if (__u_prec < 0) { while (__u_nd > 0 && (__u_m & 15) == 0) { __u_m = __u_m >> 4; __u_nd = __u_nd - 1; } __u_hd = __u_nd; }
+            else __u_hd = __u_prec;
+        }
+        __u_n = 0;
+        __u_out[0] = 48; __u_out[1] = __u_upper || __u_c == 65 ? 88 : 120; __u_out[2] = 48 + __u_lead; __u_n = 3;
+        if (__u_hd > 0 || __u_alt) { __u_out[__u_n] = 46; __u_n = __u_n + 1; }
+        __u_j = 0;
+        while (__u_j < __u_hd) {
+            __u_d = 0;
+            if (__u_j < __u_nd) __u_d = (int)((__u_m >> ((__u_nd - 1 - __u_j) * 4)) & 15);
+            __u_out[__u_n] = __u_d < 10 ? 48 + __u_d : (__u_c == 65 ? 55 : 87) + __u_d; __u_n = __u_n + 1; __u_j = __u_j + 1;
+        }
+        __u_out[__u_n] = __u_c == 65 ? 80 : 112; __u_n = __u_n + 1;
+        if (__u_e < 0) { __u_out[__u_n] = 45; __u_ee = 0 - __u_e; } else { __u_out[__u_n] = 43; __u_ee = __u_e; }
+        __u_n = __u_n + 1;
+        if (__u_ee >= 1000) { __u_out[__u_n] = 48 + __u_ee / 1000; __u_n = __u_n + 1; }
+        if (__u_ee >= 100) { __u_out[__u_n] = 48 + (__u_ee / 100) % 10; __u_n = __u_n + 1; }
+        if (__u_ee >= 10) { __u_out[__u_n] = 48 + (__u_ee / 10) % 10; __u_n = __u_n + 1; }
+        __u_out[__u_n] = 48 + __u_ee % 10; __u_n = __u_n + 1;
+        return __u_n;
     }
     if (__u_prec < 0) __u_prec = 6;
     __u_nd = _u_dexp(__u_bits & 9223372036854775807, __u_dig, &__u_x);
@@ -834,7 +877,7 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
         __u_i = __u_i + 1;
         if (__u_c == 37) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 37); continue; }
         __u_sp = NULL; __u_sign = 0; __u_base = 10; __u_upper = 0; __u_neg = 0;
-        if (__u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69 | __u_c == 103 | __u_c == 71) {
+        if (__u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69 | __u_c == 103 | __u_c == 71 | __u_c == 97 | __u_c == 65) {
             /* %f %e %g: a double -- a float argument was promoted to one */
             double __u_dv;
             unsigned long __u_bits;
@@ -884,6 +927,8 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                 }
                 __u_start = _u_digits(__u_buf, __u_uv, __u_base, __u_upper);
                 __u_len = 24 - __u_start;
+                /* C99 7.19.6.1p8: precision 0 and value 0 give no digits (%#o still gives "0") */
+                if (__u_prec == 0 && __u_uv == 0 && __u_c != 112) { __u_start = 24; __u_len = 0; }
                 /* %p: 0x and the hex digits, as both host C libraries print it (7.19.6.1p8
                    leaves the form implementation-defined) */
                 if (__u_c == 112) { __u_start = __u_start - 2; __u_buf[__u_start] = 48;
@@ -922,7 +967,7 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
         {   int __u_sc;
             __u_sc = 0;
             if (__u_c == 100 | __u_c == 105 | __u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69
-                | __u_c == 103 | __u_c == 71) {
+                | __u_c == 103 | __u_c == 71 | __u_c == 97 | __u_c == 65) {
                 if (__u_sign) __u_sc = 45; else { if (__u_plus) __u_sc = 43; else { if (__u_space) __u_sc = 32; } }
             }
             __u_k = __u_width - __u_len;

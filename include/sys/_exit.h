@@ -28,6 +28,7 @@ static void _u_st_copy(char *__u_d, const char *__u_s, long __u_n) {
 }
 #endif
 static int _u_st_wlen[_U_NST];             /* D3': bytes waiting in the buffer to be written */
+static int _u_st_ro[_U_NST];               /* opened "r" without "+": a write fails with EBADF [C99 7.19.5.3] */
 static int _u_st_n;
 
 
