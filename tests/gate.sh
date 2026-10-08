@@ -475,6 +475,7 @@ job combo       python3 ./tests/combo.py "$UA" "${MODEL_COM:-./unisacc.com}"   #
 job syscall6    ./tests/syscall6.sh   # R19-9 (3): generic system-call gate on osx/arm64, Rosetta x86_64, Lima lnx/arm64
 job lifecycle   tests/bound 58 sh ./unisacc.com -run tests/lifecycle.cx   # 0.0.34 X2 .cx pilot (was lifecycle.sh); 0.0.33 W3 (D2): exit statuses, atexit, abort/raise, a handled signal and a crash, against cc on this host
 job luatests    ./tests/luatests.sh   # 0.0.34 L1: lua 5.4 testes run by the reference (and osx/x86_64 under Rosetta) = cc
+job minicon     tests/bound 58 sh tests/minicon.sh   # 0.0.36 M1: minicon loader built by cc, unisacc.com and the reference; same exit codes, argv/signal pass-through, no extract dir left
 job prevheaders tests/bound 58 sh ./unisacc.com -run tests/prevheaders.cx   # 0.0.34 X2 .cx pilot (was prevheaders.sh); 0.0.33 D3′: the installed previous release still compiles the seed tools against this include/
 job forward     ./tests/forward.sh   # R19-10/R21-4a': prototyped undefined functions forward to the system libc (-run and images, six targets)
 job forward-multi ./tests/forwardmulti.sh   # 0.0.26 N5: forwarding across translation units (default run, -run, -o)
