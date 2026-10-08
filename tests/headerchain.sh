@@ -23,7 +23,7 @@ step tests/bound 58 sh ./unisacc.com -run tests/prevheaders.cx
 # Smoke: the suites that caught header slips against the tree, no candidate needed (0.0.33 D3': the
 # full queue found them only after a candidate build and ~30 min).  HEADERCHAIN_SMOKE=0 skips.
 if [ "${HEADERCHAIN_SMOKE:-1}" = 1 ]; then
-  for batch in "exec-chain-1 exec-chain-2" "exec-chain-3 exec-chain-4" "exec-chain-5 exec-formatwarn0 exec-formatwarn1" "libneed exec-srcelf" "exec-unitparse" "exec-f1-attributes"; do
+  for batch in "exec-chain-1 exec-chain-2" "exec-chain-3 exec-chain-4" "exec-chain-5 exec-formatwarn0 exec-formatwarn1" "libneed exec-srcelf-1" "exec-srcelf-2 exec-srcelf-3" "exec-unitparse" "exec-f1-attributes"; do
     a=""; for x in $batch; do a="$a --suite $x"; done
     step ./tests/gate.sh $a
   done

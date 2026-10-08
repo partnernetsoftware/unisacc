@@ -4,7 +4,7 @@
  * constructor and every other name). */
 #ifndef _UNISA_SYS_EXIT_H
 #define _UNISA_SYS_EXIT_H
-int exit();   /* before the definition, as <stdlib.h> always had it (0.0.33 D3': after it, the redeclaration typed exit int and E3 refused assert's (printf(...), exit(1))) */
+static void exit();   /* 0.0.35 H1: static like its definition below (C99 6.2.2p7); before the definition, as <stdlib.h> always had it (0.0.33 D3': after it, the redeclaration typed exit int and E3 refused assert's (printf(...), exit(1))) */
 static void (*_unisa_atexit[32])(void);
 static int _unisa_natexit = 0;
 /* the stdio stream table lives here so exit can flush it by a direct call:

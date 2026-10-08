@@ -754,24 +754,6 @@ int ustat_add(int t) {
    cc rejects it.  sclass: 0 no storage class (object), 1 static, 2 extern / function. */
 #define MAXLHIST 4096
 char lhist[MAXLHIST * NAMEW]; int lhist_u[MAXLHIST]; char lhist_l[MAXLHIST]; int nlhist;
-/* 0.0.35 H1: is buffer position p inside a spliced header?  The bundled libc
-   declares a function and later gives it a static body; that is the library's
-   own arrangement, not the program's.  Linear in p: call it only on the way
-   to a diagnostic. */
-int pos_inheader(long p) {
-    long q; long line; int i;
-    if (p < 0) p = 0;
-    if (p > nsrc) p = nsrc;
-    line = 1 - prelines; q = 0;
-    while (q < p) { if (src[q] == 10) line = line + 1; q = q + 1; }
-    i = nireg - 1;
-    while (i >= 0) {
-        if (line > ireg_ln[i] + ireg_nl[i]) line = line - ireg_nl[i];
-        else { if (line >= ireg_ln[i]) return 1; }
-        i = i - 1;
-    }
-    return 0;
-}
 int linkage_note(int t, int sclass) {
     int i; int k; int ok; int p; int at;
     p = 0; at = 0 - 1; i = 0;
@@ -783,8 +765,8 @@ int linkage_note(int t, int sclass) {
         }
         i = i + 1;
     }
-    if (sclass == 1 && p == 2 && pos_inheader(tpos[t]) == 0) err_tok(t, "static declaration follows a non-static declaration of this name (C99 6.2.2p7)");
-    if (sclass == 0 && p == 1 && pos_inheader(tpos[t]) == 0) err_tok(t, "non-static declaration follows a static declaration of this name (C99 6.2.2p7)");
+    if (sclass == 1 && p == 2) err_tok(t, "static declaration follows a non-static declaration of this name (C99 6.2.2p7)");
+    if (sclass == 0 && p == 1) err_tok(t, "non-static declaration follows a static declaration of this name (C99 6.2.2p7)");
     if (at < 0) {
         if (nlhist >= MAXLHIST) return 0;
         at = nlhist; nlhist = nlhist + 1;

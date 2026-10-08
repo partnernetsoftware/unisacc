@@ -32,7 +32,7 @@ typedef struct _UNISA_FILE FILE;
 #define stdout ((FILE *)(_UNISA_STDIO_BASE + 1))
 #define stderr ((FILE *)(_UNISA_STDIO_BASE + 2))
 
-int printf();
+static int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
 static int _unisa_fd(FILE *__u_f) {
