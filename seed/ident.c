@@ -59,6 +59,8 @@ static int keep(const char *rel) {
         size_t n = strlen(rel);
         if ((n >= 8 && !strcmp(rel + n - 8, "check.sh")) || (n >= 8 && !strcmp(rel + n - 8, "check.py"))) return 0;
     }
+    if ((!strcmp(sfx, ".c") || !strcmp(sfx, ".h")) && (!strncmp(rel, "probes/", 7) || strstr(rel, "/probes/")))
+        return 0;   /* 0.0.35 P8: probe sources are test inputs (same rule as exec/pipeline/models.py closure) */
     if (!strncmp(rel, "exec/build/", 11))
         return !strchr(rel + 11, '/') && !strcmp(sfx, ".py");
     return 1;
