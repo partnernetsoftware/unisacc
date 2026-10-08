@@ -30,7 +30,11 @@ run() {
     py="$T/py-$key-$n.json"
     [ -s "$py" ] || { "$B" 55 python3 exec/build/gen.py "$st" "$py.tmp" "$@" >/dev/null 2>&1 && mv "$py.tmp" "$py"; }
     [ -s "$py" ] || { echo "DIFF $n (python reference failed)"; return; }
-    "$B" 55 "$G" "$st" "$T/c-$n.json" "$@" 2> "$T/c-$n.err"
+    # a fresh output each run, and only a zero exit may compare: a timed-out or failed
+    # generator must not be judged by a c-$n.json some earlier run left behind
+    rm -f "$T/c-$n.json"
+    "$B" 55 "$G" "$st" "$T/c-$n.json.$$" "$@" 2> "$T/c-$n.err" || { echo "DIFF $n (C generator rc=$?) $(tail -1 "$T/c-$n.err")"; rm -f "$T/c-$n.json.$$"; return; }
+    mv "$T/c-$n.json.$$" "$T/c-$n.json"
     if cmp -s "$T/c-$n.json" "$py"; then echo "SAME $n"; else echo "DIFF $n $(tail -1 "$T/c-$n.err")"; fi
 }
 k=0; for n in $names; do run "$n" > "$T/r-$n.txt" & k=$((k+1)); [ $((k % 4)) = 0 ] && wait; done; wait
