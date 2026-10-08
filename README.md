@@ -404,7 +404,7 @@ ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are e
 
 | Part | Subclauses | Covered | Partial | Unsupported | Covered |
 |---|---|---|---|---|---|
-| Language (clause 6) | 98 | 93 | 3 | 2 | 94% |
+| Language (clause 6) | 98 | 92 | 4 | 2 | 93% |
 | Environment (clause 5) | 16 | 13 | 2 | 1 | 81% |
 | Library (clause 7) | 361 | 127 | 43 | 191 | 35% |
 | Annexes F, G | 19 | 0 | 0 | 19 | 0% |
