@@ -1286,3 +1286,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b′ 第一轮原型实测，2026-10-09〕仅在/tmp复制头与导出参考C上应用旧sigaction补丁/诊断变体，main产品未改。重构sig_nested：旧参考osx/arm64 rc138、x86_64 rc139；arm64仅删除共享FP/SP恢复的诊断变体rc0，仅强制trampoline host入口rc139，两者合用rc0。私有80B sys6帧+临时host入口桥接：arm64单层rc0，x86单层rc142；更强双信号嵌套系统cc为MABCD/rc0，原型两架构只到MAB（arm64 rc139，x86 rc159）。因此不交δ、不记完成。arm64 .frame只动x7而真实SP未同步，嵌套备用栈可能覆盖tape活动帧，属待验证推断；x86另需核对sigreturn现场。证据与命令在research/l1b-signal-prototype-results.md。
 
 〔L1b′ 第二轮原型实测，2026-10-09〕x86入口原始r8/r9与跳板uctx/token逐位相同；TO_GATE前rax=0x20000b8及三参数正确，排除桥接换址和调用号错误。cc系统clang对照定位Rosetta须UC_FLAVOR=30；临时头按此改后，私有sys6帧原型单层与双层通过。arm64仅在gate期间把真实SP移到x7下512B、保存恢复原SP，双层由MAB/139变MABCD/0。两架构双层各5/5通过。这是缩小根因的临时原型，不是产品完成：gate之外异步中断、sys/write共享格、通用入口与四目标δ同字节仍未验证；512B是诊断值，不是栈契约。详见research/l1b-signal-prototype-results.md第二轮。
+
+〔L1b′ 生产边界设计，2026-10-09；尚未实现〕备用栈与UC_FLAVOR头补丁继续停放。arm64拟建立真实SP≤活动tape栈下界的逐指令不变量：分配先降低真实SP再提交x7，撤帧先提高x7再提高真实SP，真实SP保持16B对齐；call/ret、显式写r7、HENTRY/HLEAVE和宿主调用均须审计，不能仅在gate同步。入口优先核对既有__ccw_保留前缀契约可否表达头内信号跳板，不引入按单个函数名硬接线。sys6/sys/write的私有快照与FP恢复同片验证。此处是下一轮原型约束，不是产品验收结论。
