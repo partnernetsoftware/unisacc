@@ -172,7 +172,7 @@ def fingerprint(jobs):
             seed_inputs[name] = digest(str(pathlib.Path(os.environ['SEED_DIR']) / name))
     common = [provider_inputs, seed_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
-              {n:digest(n) for n in ('tests/gatequeue.py', 'tests/bound.py')}, gate_runner()]
+              {'tests/gatequeue.py':contract_digest('tests/gatequeue.py'), 'tests/bound.py':digest('tests/bound.py')}, gate_runner()]
     # 0.0.29 P7': gate.sh's job lines and gatedeps.json are no longer global identities -- a job's own
     # command, declared inputs and guards are in its stamp already, so editing one job line or refreshing
     # another suite's declaration keeps every other result (0.0.28 measured 0% reuse because of these two)
@@ -296,6 +296,22 @@ def resume(data, stamps, jobs, exclusive):
     if invalid: print('INVALIDATE', ','.join(invalid), flush=True)
     data['stamp'] = stamps
 
+def contract_digest(name):
+    """sha256 of NAME without its SCHEDULING-BEGIN..END regions: an edit that only changes which job
+    starts when keeps every result; any other edit (commands, limits, retries, environment) does not."""
+    out, skip = [], False
+    for line in pathlib.Path(name).read_text().splitlines(True):
+        tag = line.strip()
+        if tag.startswith('# SCHEDULING-BEGIN'):
+            if skip: raise SystemExit('queue: nested SCHEDULING-BEGIN in '+name)
+            skip = True; continue
+        if tag == '# SCHEDULING-END':
+            if not skip: raise SystemExit('queue: stray SCHEDULING-END in '+name)
+            skip = False; continue
+        if not skip: out.append(line)
+    if skip: raise SystemExit('queue: unterminated SCHEDULING-BEGIN in '+name)
+    return hashlib.sha256(''.join(out).encode()).hexdigest()
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--state', type=pathlib.Path)
@@ -354,10 +370,12 @@ def main():
     # 30 s (-> 40 s estimate) kept every unmeasured job out of the last 40 s of each window; a job that
     # then runs out of window is deferred and retried with twice its elapsed time (below), so a wrong guess
     # costs one cut-short attempt.
+    # SCHEDULING-BEGIN (0.0.35 P11: admission order/estimates only; masked out of the queue identity)
     def cold():
         v = sorted(history.values())
         return v[len(v)//2] if len(v) >= 5 else 30
     def estimate(n): return min(window-2, max(2, history.get(n, cold())*1.3+1))
+    # SCHEDULING-END
     try:
         while pending or active:
             left = deadline-time.monotonic()
@@ -367,12 +385,14 @@ def main():
                     bad = [p for p in PREDS[n] if p in data['results'] and data['results'][p]['rc'] != 0]
                     pending.remove(n); data['results'][n] = {'rc': 1, 'seconds': 0, 'limit': 0}
                     print('DONE', n, 'rc=1 0.00s predecessor', ' '.join(bad), 'failed', flush=True)
+                # SCHEDULING-BEGIN
                 fits = [n for n in pending if estimate(n) <= left-1
                         and all(p not in jobs or p in data['results'] for p in PREDS.get(n, ()))]
                 if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job
                 n = max(alone or fits, key=estimate); pending.remove(n)
+                # SCHEDULING-END
                 limit = max(1, int(left)-1)
                 log = (state/(n+'.log')).open('wb')
                 p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=execution_environment())
