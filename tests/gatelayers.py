@@ -22,7 +22,7 @@ script-inventory subtract-safety subtract-safety-selftest c99-ledger
 publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
 lib-bindings-registry
 """.split())
-CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-")
+CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-")
 
 # Target execution, native ABI, or a cross-target image is part of the claim.
 PLATFORM = set("""

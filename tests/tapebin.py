@@ -4,6 +4,26 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
+import os
+
+T0 = time.time()
+
+
+def stage(name):
+    # 0.0.34 queue: tapebin-roundtrip hit 49 s with an empty log; name each stage's elapsed time
+    print("tapebin: %-28s %5.1fs" % (name, time.time() - T0), file=sys.stderr, flush=True)
+
+
+def reference(base):
+    """The same-source UA the gate passes, else a private build (as before)."""
+    ua = os.environ.get("UA")
+    if ua and os.access(ua, os.X_OK):
+        return pathlib.Path(ua)
+    ref = base / "ref"
+    subprocess.run(["./tests/build_ref.sh", str(base / "ref.c"), str(ref)], check=True, timeout=30)
+    stage("private reference built")
+    return ref
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -34,7 +54,7 @@ def check(text):
             raise AssertionError("damaged package accepted")
 
 
-def main():
+def main(part):
     check('.global exported\n.extern imported\nexported:\n  ret\n')
     unit_text = '.unit 2\n.global g_a\n.bss g_a 4\n.gdef g_a\n.extern g_b\n'
     check(unit_text)
@@ -52,15 +72,15 @@ def main():
     if not files:
         raise AssertionError("no C inputs")
     tapes = []
-    for path in files:
-        tape = subprocess.check_output([sys.executable, "-m", "unisa", "tape", str(path)])
-        check(tape.decode("latin-1"))
-        tapes.append((path, tape))
+    if part in ("codec", "all"):
+        for path in files:
+            tape = subprocess.check_output([sys.executable, "-m", "unisa", "tape", str(path)], timeout=20)
+            check(tape.decode("latin-1"))
+            tapes.append((path, tape))
+        stage("python tapes (%d)" % len(files))
     with tempfile.TemporaryDirectory(prefix="unisacc-tapebin-") as tmp:
         base = pathlib.Path(tmp)
-        ref = base / "ref"
-        subprocess.run(["./tests/build_ref.sh", str(base / "ref.c"), str(ref)],
-                       check=True, timeout=30)
+        ref = reference(base)
         unit_plain = base / 'unit.tape'
         unit_binary = base / 'unit.tapebin'
         unit_plain.write_text(unit_text)
@@ -71,9 +91,17 @@ def main():
         all_sources = sorted(pathlib.Path("examples").glob("*.c")) + sorted(pathlib.Path("tests/c").glob("*.c"))
         if not all_sources:
             raise AssertionError("empty full probe set")
-        for path in all_sources:
-            text = subprocess.check_output([str(ref), str(path), "-t", "osx/arm64"], timeout=20)
-            check(text.decode("latin-1"))
+        if part.startswith("structure") or part == "all":
+            if "/" in part:   # structure-K/N: every N-th probe from K
+                k, n = (int(x) for x in part.split("-", 1)[1].split("/"))
+                all_sources = all_sources[k - 1::n]
+            for path in all_sources:
+                text = subprocess.check_output([str(ref), str(path), "-t", "osx/arm64"], timeout=20)
+                check(text.decode("latin-1"))
+            stage("structural roundtrips (%d)" % len(all_sources))
+        if part.startswith("structure"):
+            print("tapebin structure: %d structural roundtrips" % len(all_sources))
+            return
         for path, text in tapes:
             plain = base / "probe.tape"
             binary = base / "probe.tapebin"
@@ -92,6 +120,7 @@ def main():
                 images.append(image.read_bytes())
             if images[0] != images[1]:
                 raise AssertionError("C reference image differs for " + str(path))
+        stage("C/Python encoder + images")
         for target in TARGETS:
             text = subprocess.check_output([sys.executable, "-m", "unisa", "tape",
                                             "examples/hello.c", "--target", target], timeout=20)
@@ -120,8 +149,13 @@ def main():
                 for source in (plain, binary)]
         if [(r.returncode, r.stdout) for r in runs][0] != [(r.returncode, r.stdout) for r in runs][1]:
             raise AssertionError("C reference run differs")
+        stage("targets + run")
+    if part == "codec":
+        print("tapebin codec: %d C/Python byte-identical tapes, 6 target images, C run" % len(files))
+        return
     print("tapebin: %d structural roundtrips, %d C/Python byte-identical tapes, 6 target images, C run" % (len(all_sources), len(files)))
 
 
 if __name__ == "__main__":
-    main()
+    # structure[-K/N] | codec (the two gate shards, 0.0.34) | all (default, both in one run)
+    main(sys.argv[1] if len(sys.argv) > 1 else "all")

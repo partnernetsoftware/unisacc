@@ -450,7 +450,9 @@ job revivedscan python3 ./tests/revivedscan.py   # 0.0.25 P2: an excused probe t
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
-job tapebin-roundtrip python3 ./tests/tapebin.py
+job tapebin-roundtrip-structure-1 python3 ./tests/tapebin.py structure-1/2   # 0.0.34: one job hit 49 s (251 probes)
+job tapebin-roundtrip-structure-2 python3 ./tests/tapebin.py structure-2/2
+job tapebin-roundtrip-codec python3 ./tests/tapebin.py codec
 job tapebin-shape python3 -m unisa.tapebin_shape --check
 job tape-reader python3 ./tests/tapereadercheck.py
 job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
