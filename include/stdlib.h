@@ -287,6 +287,7 @@ static int mkstemp(char *__u_t) {
 }
 #endif
 /* mkdtemp (POSIX, 0.0.35 M1): mkstemp's names, but a directory, mode 0700 */
+#ifndef __UNISA_PYFRONT   /* __mkdir has no Windows import; the Python front end folds one tape across targets */
 #if !__UNISA_FTRIM_LIBC || __UN_mkdtemp
 static char *mkdtemp(char *__u_t) {
     static unsigned long __u_seq;
@@ -308,6 +309,7 @@ static char *mkdtemp(char *__u_t) {
     }
     return 0;
 }
+#endif
 #endif
 #endif /* !_WIN32 */
 /* strtod's slow path (more than 19 digits, or a power of ten past 22) is a
