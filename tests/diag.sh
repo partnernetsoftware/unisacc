@@ -311,6 +311,33 @@ got=$("$_BOUND" 60 "$UA" -run "$red/fb12-21-indirect-call-six-args.c" 2>"$T/indi
 if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then ok=$((ok+1));
 else bad=$((bad+1)); echo "  FAIL indirect6: rc=$rc output=[$got]"; fi
 
+# C1b (0.0.37): C99 6.5.3.2p1 -- `&` of an object declared `register`.  A rejection must carry
+# the clause and leave no program (cross target, never executed); an acceptance must run and exit 0.
+printf '%s\n' 'struct S{int n;};int main(void){register struct S*q=0;struct S t;{struct S{int m;} u;int x=&u.m==0;(void)x;} return &t.n==0&&q;}' > "$T/reg_acc_member_noleak.c"
+printf '%s\n' 'struct S{int n;};int main(void){int a[2];struct S s;int *p=&s.n; p=&a[1]; return (p==0);}' > "$T/reg_acc_nonreg.c"
+printf '%s\n' 'int main(void){int n;register int*p=&n;return &*p==0;}' > "$T/reg_acc_pointer_deref.c"
+printf '%s\n' 'int main(void){int a[2];register int*p=a;return &p[0]==0;}' > "$T/reg_acc_pointer_index.c"
+printf '%s\n' 'int main(void){register int n=1;{int n=2;int*p=&n;return *p!=2;}}' > "$T/reg_acc_shadow.c"
+printf '%s\n' 'int main(void){register int a[3]={1,2,3};int s=(int)sizeof a;return s!=12;}' > "$T/reg_acc_sizeof_regarr.c"
+printf '%s\n' 'int main(void){register int a[2];return &a[0]==0;}' > "$T/reg_rej_array.c"
+printf '%s\n' 'int main(void){register int a=1,b=2;int *p=&b;return p==0&&a;}' > "$T/reg_rej_comma.c"
+printf '%s\n' 'struct S{int n;};int main(void){register struct S s;return &s.n==0;}' > "$T/reg_rej_member.c"
+printf '%s\n' 'int f(register int n){return &n==0;} int main(void){return f(1);}' > "$T/reg_rej_param.c"
+printf '%s\n' 'int main(void){register int n=3;return &(n)==0;}' > "$T/reg_rej_paren.c"
+printf '%s\n' 'int main(void){int n;register int*p=&n;return &p==0;}' > "$T/reg_rej_pointer_itself.c"
+printf '%s\n' 'int main(void){register int n=3;return &n==0;}' > "$T/reg_rej_scalar.c"
+printf '%s\n' 'struct S{int a[2];};int main(void){register struct S s;return &s.a[0]==0;}' > "$T/reg_rej_struct_array_member.c"
+for f in "$T"/reg_rej_*.c; do
+    rm -f "$T/reg.bin"; "$_BOUND" 20 "$UA" "$f" -b lnx/x86_64 -o "$T/reg.bin" > "$T/reg.out" 2>&1; rc=$?
+    if [ "$rc" -eq 1 ] && [ ! -e "$T/reg.bin" ] && grep -q "error:.*C99 6.5.3.2p1" "$T/reg.out"; then ok=$((ok+1))
+    else bad=$((bad+1)); printf "  FAIL %-28s rc=%s want the 6.5.3.2p1 rejection: %s\n" "${f##*/}" "$rc" "$(head -1 "$T/reg.out" | cut -c1-80)"; fi
+done
+for f in "$T"/reg_acc_*.c; do
+    "$_BOUND" 20 "$UA" -run "$f" > "$T/reg.out" 2>&1; rc=$?
+    if [ "$rc" -eq 0 ]; then ok=$((ok+1))
+    else bad=$((bad+1)); printf "  FAIL %-28s rc=%s want accepted, exit 0: %s\n" "${f##*/}" "$rc" "$(head -1 "$T/reg.out" | cut -c1-80)"; fi
+done
+
 echo
 echo "diag  ok $ok   wrong $bad"
 # A suite that checked nothing is not green: `closure.sh` with no

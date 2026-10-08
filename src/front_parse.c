@@ -41,6 +41,10 @@ int symtok[MAXSYM];         /* the token that declared it */
 int symused[MAXSYM];        /* read at least once (not just assigned) */
 int symbool[MAXSYM];        /* ...and it is _Bool, which normalises on store */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
+int symreg[MAXSYM];         /* declared with the `register` storage class (C99 6.5.3.2p1: no unary & on it) */
+int declreg;                /* declspec() saw `register` (reset at each declspec, kept out of struct members) */
+int declsymreg;             /* what sadd() records into symreg: set by local_decl / the parameter loop only */
+int paramreg;               /* parameter_decl(): the parameter's own `register` */
 int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
 int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
 int symfpp[MAXSYM];   /* a pointer TO a function-pointer typedef (`ft *q`), not `int (*(*p)(..))(..)` */
@@ -860,6 +864,7 @@ int sadd(int t, int kind, int off, int elem) {
     symtok[nsym] = t; symused[nsym] = 0;
     symbool[nsym] = declbool;
     symfp[nsym] = declfp;
+    symreg[nsym] = declsymreg;
     symvla[nsym] = 0;
     symretw[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
@@ -1219,6 +1224,52 @@ static void castabsptr(void) {
     }
     need(tidx(")", 1), ")");
 }
+/* C99 6.5.3.2p1: the operand of unary & shall not be an object declared `register`, nor a
+   subobject of one (`&r.f`, `&a[i]`).  Decided by the object designated: `&p[0]` / `&*p` of a
+   register POINTER designate *p, so a pointer accepts; a deeper chain (`->`, a call, a second
+   `[` past the array's dimensions, `[` after `.f`) is not judged and is accepted. */
+void regaddr_check(void) {
+    /* The operand designates the register object, or a subobject of it, until a
+       subscript or `->` goes through a POINTER: then it designates *p, which may
+       have its address taken (&p[0]).  &p itself, &s.a[0] for an array member a,
+       and &a[i] for a register array all stay inside the register object. */
+    int q; int i; int d; int dims; int st; int mi;
+    q = tp;
+    while (kind(q) == tidx("(", 1)) q = q + 1;
+    if (kind(q) != T_ID) return;
+    i = sfind(q);
+    if (i < 0) return;
+    if (symreg[i] == 0) return;
+    dims = 0; st = symstruct[i];
+    if (symkind[i] == 3) { dims = 1; if (symdim2[i] > 0) dims = 2; if (symdim3[i] > 0) dims = 3; }
+    q = q + 1;
+    while (1) {
+        if (kind(q) == tidx(")", 1)) q = q + 1;
+        else if (kind(q) == tidx("->", 2) || kind(q) == tidx("(", 1)) return;   /* through a pointer, or a call */
+        else if (kind(q) == tidx("[", 1)) {
+            if (dims == 0) return;          /* subscripting a pointer: the operand is *p */
+            dims = dims - 1;
+            d = 0;
+            while (kind(q) != T_EOF) {
+                if (kind(q) == tidx("[", 1)) d = d + 1;
+                if (kind(q) == tidx("]", 1)) { d = d - 1; if (d == 0) break; }
+                q = q + 1;
+            }
+            q = q + 1;
+        }
+        else if (kind(q) == tidx(".", 1)) {
+            q = q + 1;
+            if (st < 0 || kind(q) != T_ID) return;
+            mi = mbfind(st, q);
+            if (mi < 0) return;
+            dims = 0; st = mbstruct[mi];
+            if (mbarr[mi]) { dims = 1; if (mbdim2[mi] > 0) dims = 2; if (mbdim3[mi] > 0) dims = 3; }
+            q = q + 1;
+        }
+        else break;
+    }
+    err_tok(tp, "cannot take the address of an object declared 'register' (C99 6.5.3.2p1)");
+}
 int unary(void) {
     int p;
     curfn = 0; curfnst = 0 - 1;
@@ -1352,6 +1403,7 @@ int unary(void) {
         return 0;
     }
     if (p == P_ADDR) { adv();
+        regaddr_check();
         /* &v of a VLA: its storage, which the frame slot named v points at -- the
            slot's own address let sqlite's `char dbFileVers[sizeof(p->m)]; read(&dbFileVers)`
            (an object in the bound makes it variable-length) write over the frame */
@@ -3985,6 +4037,7 @@ int skipspecq(void) {
     while (isspecq(tp)) {
         if (srcis(tpos[tp], tlen[tp], "static")) declstatic = 1;
         if (srcis(tpos[tp], tlen[tp], "extern")) declextern = 1;
+        if (srcis(tpos[tp], tlen[tp], "register")) declreg = 1;
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
         adv();
@@ -4000,7 +4053,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
-    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0; declextern = 0;
+    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0; declextern = 0; declreg = 0;
     declspectdn = 0; declspectdsz = 0;
     skipspecq();
     td = tdfind(tp);
@@ -4027,7 +4080,7 @@ int declspec(void) {                       /* -> element width */
            `typedef struct Reg {...} Reg;` became an 8-byte pointer type
            (lua's luaL_Reg tables) */
         { int sti; int sv[13]; int q; for (q = 0; q < 13; q++) sv[q] = declsv[q];
-          declsave(); sti = stparse(0); declrestore(); declstruct = sti;
+          { int rsv; rsv = declreg; declsave(); sti = stparse(0); declrestore(); declstruct = sti; declreg = rsv; }
           for (q = 0; q < 13; q++) declsv[q] = sv[q]; }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
         declsz = stsize[declstruct];
         declbase = declsz;
@@ -4040,7 +4093,7 @@ int declspec(void) {                       /* -> element width */
            `typedef struct Reg {...} Reg;` became an 8-byte pointer type
            (lua's luaL_Reg tables) */
         { int sti; int sv[13]; int q; for (q = 0; q < 13; q++) sv[q] = declsv[q];
-          declsave(); sti = stparse(1); declrestore(); declstruct = sti;
+          { int rsv; rsv = declreg; declsave(); sti = stparse(1); declrestore(); declstruct = sti; declreg = rsv; }
           for (q = 0; q < 13; q++) declsv[q] = sv[q]; }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
         declsz = stsize[declstruct];
         declbase = declsz;
@@ -4990,6 +5043,7 @@ int parameter_decl(void) {
     int pw; int pw0;
     paramtok = 0 - 1;
     pw = declspec(); pw0 = pw;
+    paramreg = declreg;
     paramstruct = declstruct; paramflt = declflt;
     declptr = declspecptr; declpd = declspecpd; declfp = declspecfp;
     while (eatstar()) declptr = 1;
@@ -5062,16 +5116,17 @@ int block_prototype(int t, int w) {
     return 0;
 }
 
-int local_decl(void) {
-    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool; int tdhere;
+int local_decl_in(void) {
+    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool; int tdhere; int lreg;
     int psave[9];
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
     lflt0 = declflt; lbool = declbool; /* initializers may contain type names */
-    lstat = declstatic;
+    lstat = declstatic; lreg = declreg;
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
+        declsymreg = lreg;   /* every declarator of this declaration, comma-continued ones too */
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
         declptr = declspecptr; declpd = declspecpd;
@@ -5350,6 +5405,14 @@ int local_decl(void) {
     }
     need(vfind(TOKV, NTOKV, ";", 1), ";");
     return 0;
+}
+
+int local_decl(void) {
+    int sv; int r;
+    sv = declsymreg; declsymreg = 0;
+    r = local_decl_in();
+    declsymreg = sv;
+    return r;
 }
 
 /* -Wreturn-type without a flow graph: after each statement, `laststmt`
@@ -5709,7 +5772,9 @@ int function(int t, int w) {
                `(b * p) / 13u` divided the whole 64-bit product -- found
                by the widened fuzz [S-15 A3], not by any written probe. */
             declbytes = declptr ? 8 : declsz;
+            declsymreg = paramreg;
             sadd(pt, 1, off, pw);
+            declsymreg = 0;
             if (pst >= 0) { if (declptr == 0) {
                 if (nsp >= 16) { printf("more than 16 struct parameters\n"); __exit(1); }
                 spsym[nsp] = nsym - 1; nsp = nsp + 1;

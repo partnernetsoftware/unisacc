@@ -1274,3 +1274,9 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔C1b register 取址实施约束，2026-10-09〕声明属性独立REGISTERBANK，作用域undo新增第43格（总44）；对象与参数声明显式捕获register，结构/函数指针嵌套保存恢复，不复用类型/联结银行。unary-&按参考14例的对象/子对象规则预检；不得直接TN.raw前瞻再只恢复位置，其可达分支会写TIX与转换临时银行。独立token视图原型仅识别id、括号、点、箭头、下标，其余整行不透明跳过，24项普通/位置v1/v2及截断检查通过；尚未接入parse2，不算14例诊断验收完成。
 
 〔C1b 元数据首片实测〕逗号续项、普通参数、局部遮蔽、函数指针对象/参数、嵌套结构、sizeof不泄漏共7例tape同参考，探针观测REGISTERBANK置1、遮蔽清0并恢复1、退域恢复0；r21仍48同/5具名拒绝/0异，facts30/0、op9，parse2八变体图重录，fresh-order0..8不变。默认图临时注入独立预读/游标恢复，含数字/字符串的4份完整tape不变；带位置的24项只读视图检查通过。以上不是unary-&14例完成，参考补丁仍隔离。
+
+〔C1b 取址检查接线〕采用独立有限token视图，仅查询根及结构成员；合法名字在声明时已INTERN，复制图14例中新增intern顺序不变。SBFIND查询的是blob而非符号，不用它访问REGISTERBANK。根/成员数组按SHAPE rank跟踪，跨指针下标、箭头或调用放行，仍在register对象内则报C99 6.5.3.2p1。复制图6接受同tape、8精确拒绝；正式清单/errors/location与C执行器随后验。
+
+〔C1b 诊断验收补正〕正式C执行器发现uc_kind=1会多报结构返回未覆盖帧；register取址是C约束诊断，应设uc_kind=0，完整stderr必须与参考逐字节比较，不能只检查子串。
+
+〔0.0.37 C1b 同落验收，2026-10-09〕参考register取址检查与E3独立token视图同落，tests/diag.sh增加14例（6接受、8拒绝C99 6.5.3.2p1）。正式默认清单14例通过且接受tape与INTERN新增顺序不变；C执行器E2→E1→E3位置/错误路径14例完整tape或stderr逐字节同新参考，UNITOK2另4例完整结果同；参考diag31/0、r21为48同/5具名拒绝/0接受不同。parse2八变体graphhash重录，其他阶段记录不变；fresh-order0..8全重录核对无变化，facts30/0、kernel stale0、op9。仓根.com直接-run seed/gen.c生成完整parse2与Python逐字节同。正式0.0.37候选.com的14例运行由cc补验，未以合成tape替代；register数组隐式衰变等未纳入本片，不把整个6.7.1宣称covered。元数据额外嵌套FP不泄漏验证累计9例，前文首片7例为当时记录。
