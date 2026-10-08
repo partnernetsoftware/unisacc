@@ -56,10 +56,34 @@ def _valid(cache):
     except (FileNotFoundError,ValueError):
         return False
 
-def _construct(script,args,env,j,t,n):
-    here=Path(__file__).resolve().parent
-    for tool,argv in [(script,[j,*args]),(here/'tbl.py',[j,t]),(here/'net.py',[t,n])]:
-        subprocess.run([sys.executable,str(tool),*map(str,argv)],check=True,timeout=60,env=env)
+def _construct(script,args,env,j,t,n,trace=None):
+    """TRACE: a directory; each tool then runs under readtrace.py and its read set lands there."""
+    here=Path(__file__).resolve().parent;root=here.parents[1]
+    for i,(tool,argv) in enumerate([(script,[j,*args]),(here/'tbl.py',[j,t]),(here/'net.py',[t,n])]):
+        pre=[str(here/'readtrace.py'),str(Path(trace)/('read%d.json'%i)),str(root)] if trace else []
+        subprocess.run([sys.executable,*pre,str(tool),*map(str,argv)],check=True,timeout=60,env=env)
+
+def _readset(root,trace):
+    """The union read set of one traced construction, as {path: digest}; None if a tool spawned."""
+    files=set();dirs=set()
+    for i in range(3):
+        r=json.loads((Path(trace)/('read%d.json'%i)).read_text())
+        if r['spawn']: return None
+        files.update(r['files']);dirs.update(r['dirs'])
+    return _stamp(root,{'f:'+f for f in files}|{'d:'+d for d in dirs})
+
+def _stamp(root,names):
+    out={}
+    for k in sorted(names):
+        p=root/k[2:]
+        if k[0]=='d':
+            try: out[k]=hashlib.sha256('\0'.join(sorted(os.listdir(p))).encode()).hexdigest()
+            except (FileNotFoundError,NotADirectoryError): out[k]='absent'
+        else:
+            try: out[k]=_digest(p)
+            except FileNotFoundError: out[k]='absent'
+            except IsADirectoryError: out[k]='dir'
+    return out
 
 def built_model(td,name,script,args,env=None):
     """Construct NAME.tbl/.net in td, reusing a verified content-keyed cache."""
@@ -71,28 +95,47 @@ def built_model(td,name,script,args,env=None):
     s=Path(script).resolve();root=Path(__file__).resolve().parents[2]
     # 0.0.36 P8: the script by its repo-relative spelling, so a frozen worktree with the same bytes hits
     sname=s.relative_to(root).as_posix() if s.is_relative_to(root) else str(s)
-    key=hashlib.sha256(json.dumps([closure_hash,sname,list(map(str,args)),
-                                   [(k,effective.get(k)) for k in names]]).encode()).hexdigest()
+    envs=[(k,effective.get(k)) for k in names]
+    wholekey=hashlib.sha256(json.dumps([closure_hash,sname,list(map(str,args)),envs]).encode()).hexdigest()
     base=Path(os.environ.get('UNISACC_MODEL_CACHE',tempfile.gettempdir()+'/unisacc-model-cache'))
     base.mkdir(parents=True,exist_ok=True)
-    cache=base/('pack-'+key)
-    with (base/('pack-'+key+'.lock')).open('a') as lock:
+    # 0.0.36 P8 per-stage keys: a model is keyed by what its construction actually read
+    # (repo files, missing ones included, and directory listings), so an edit to another
+    # stage's inputs keeps it.  Lookup is manifest-style: every read set recorded under the
+    # job identity is re-stamped against the tree, and an equal stamp names the cache.  A
+    # construction that spawned a process was not fully observed: it keeps the whole-closure key.
+    job=hashlib.sha256(json.dumps(['compilerpack-readset-v1',sys.version,sname,list(map(str,args)),envs]).encode()).hexdigest()
+    index=base/('index-'+job+'.json')
+    def readkey(stamp): return hashlib.sha256(json.dumps([job,stamp],sort_keys=True).encode()).hexdigest()
+    with (base/('index-'+job+'.lock')).open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        if not _valid(cache):
-            if REQUIRE_CACHED: raise ValueError('model %s not prepared (run the pack-prep steps first)'%name)
-            work=Path(tempfile.mkdtemp(prefix='pack-'+key+'.build-',dir=base))
-            try:
-                _construct(script,args,env,work/'m.json',work/'m.tbl',work/'m.net')
-                (work/'m.json').unlink()
-                (work/'manifest.json').write_text(json.dumps({k:_digest(work/k) for k in ('m.tbl','m.net')},sort_keys=True))
-                try: cache.stat()
-                except FileNotFoundError: pass
-                else: shutil.rmtree(cache)
-                work.rename(cache)
-            finally:
-                try: work.stat()
-                except FileNotFoundError: pass
-                else: shutil.rmtree(work)
+        try: seen=json.loads(index.read_text())
+        except FileNotFoundError: seen=[]
+        for names_ in seen:
+            cache=base/('pack-'+readkey(_stamp(root,names_)))
+            if _valid(cache):
+                shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n); return n
+        cache=base/('pack-'+wholekey)
+        if _valid(cache):
+            shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n); return n
+        if REQUIRE_CACHED: raise ValueError('model %s not prepared (run the pack-prep steps first)'%name)
+        work=Path(tempfile.mkdtemp(prefix='pack-'+job+'.build-',dir=base))
+        try:
+            _construct(script,args,env,work/'m.json',work/'m.tbl',work/'m.net',trace=work)
+            stamp=_readset(root,work)
+            for k in ('m.json','read0.json','read1.json','read2.json'): (work/k).unlink()
+            (work/'manifest.json').write_text(json.dumps({k:_digest(work/k) for k in ('m.tbl','m.net')},sort_keys=True))
+            cache=base/('pack-'+(wholekey if stamp is None else readkey(stamp)))
+            try: cache.stat()
+            except FileNotFoundError: pass
+            else: shutil.rmtree(cache)
+            work.rename(cache)
+            if stamp is not None and sorted(stamp) not in seen:
+                seen.append(sorted(stamp)); tmp=index.with_suffix('.tmp'); tmp.write_text(json.dumps(seen)); tmp.replace(index)
+        finally:
+            try: work.stat()
+            except FileNotFoundError: pass
+            else: shutil.rmtree(work)
         shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n)
     return n
 

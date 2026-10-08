@@ -4725,6 +4725,23 @@ int memberat(int sst, int rel, int *ms) {
    level's context, and a closing brace moves the cursor to the END of its
    sub-aggregate -- C99 6.7.8p20: `{1, {4}, 9}` puts the 9 in the member after
    the braced one, whatever the braced list left out. */
+/* C99 6.7.8p13: the struct object of type `st` that starts at slot i of an
+   object whose elements are struct `sst`, outermost first; its byte offset in
+   stobjoff.  Returns 0 when no such sub-object starts exactly there. */
+int stobjoff;
+int stobjat(int i, int sst, int st) {
+    int per; int el; int k; int mi; int ms; int mst; int sub; int idx;
+    if (sst < 0) return 0;
+    per = structslots(sst); el = i / per; k = i - el * per;
+    if (k == 0 && sst == st) { stobjoff = el * stsize[sst]; return 1; }
+    mi = memberat(sst, k, &ms);
+    if (mi < 0 || mbstruct[mi] < 0) return 0;
+    mst = mbstruct[mi]; sub = structslots(mst); idx = (k - ms) / sub;
+    if (stobjat(k - ms - idx * sub, mst, st) == 0) return 0;
+    stobjoff = el * stsize[sst] + mboff[mi] + idx * stsize[mst] + stobjoff;
+    return 1;
+}
+
 int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     int i; int depth; int delta; int ew; int isarr; int rows; int per; int rows3;
     int myflt; int sk;
@@ -4861,6 +4878,19 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
         slotat(i, w, sst);
         delta = slotoff; ew = slotw; sk = slotflt;
         expr(); loadval();
+        /* C99 6.7.8p13: a struct-typed expression initializes the compatible
+           sub-object starting here WHOLE; splitting it into scalar slots stored
+           its address into the first member (0.0.36 N1: seed/pack.c's trie
+           node literal (Node){parent, qi, a} lost its Act). */
+        if (isglobal == 0 && curstruct >= 0 && curptr == 0 && curelem == 0 && stobjat(i, sst, curstruct)) {
+            int st; st = curstruct;
+            push();
+            initaddr(isglobal, gt, off, stobjoff);
+            es("  mov r0, r1\n  @mem.load r1, [r7+0]\n  @call.frame -8\n");
+            scopy(stsize[st]);
+            i = i + structslots(st);
+            continue;
+        }
         fconv(fkind(), sk);                      /* to the slot's type */
         initaddr(isglobal, gt, off, delta);
         estore(ew);
