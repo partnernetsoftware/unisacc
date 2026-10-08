@@ -1,0 +1,166 @@
+--- a/exported-reference.c
++++ b/exported-reference.c
+@@ -35650,6 +35650,9 @@
+ int bk_rmap[8];                     /* tape register -> machine register */
+ 
+ int bk_isccw(int j) {                /* a `__ccw_` label: cc interop inbound wrapper */
++    /* Diagnostic prototype only: force host entry for this one signal trampoline. */
++    { int q; char *sn; sn = "_unisa_sigtramp"; q = 0;
++      if (bkname_len[j] == 15) { while (q < 15 && bkpool[bkname_at[j]+q] == sn[q]) q=q+1; if (q==15) return 1; } }
+     char *p; if (bkname_len[j] <= 6) return 0;
+     p = bkpool + bkname_at[j];
+     return p[0] == 95 && p[1] == 95 && p[2] == 99 && p[3] == 99 && p[4] == 119 && p[5] == 95;
+@@ -35678,6 +35681,39 @@
+ }
+ 
+ /* lower.syscall_seq */
++/* L1b private-frame diagnostic prototype; no repository implementation. */
++int bk_protosys6(int cop, char *nm, int pc) {
++    int k; int scratch; int generic; int g; int nr; int ar; int src;
++    scratch = bkarch == 1 ? 16 : 11;
++    generic = strsame(nm, "syscall");
++    tk(bk_opof("mov", 3), scratch, bk_rmap[7], 0, 0);
++    tk(bk_opof(".frame", 6), 80, 0, 0, 0);
++    k = 0;
++    while (k < 6) {
++        src = bk_rmap[bkav[pc*8+1+k]];
++        if (src == bk_rmap[7]) src = scratch;
++        tk(bk_opof("store64", 7), bk_rmap[7], k*8, src, 0);
++        k = k+1;
++    }
++    tk(bk_opof("store64", 7), bk_rmap[7], 48, bk_rmap[6], 0);
++    tk(bk_opof("store64", 7), bk_rmap[7], 56, scratch, 0);
++    bk_facts(cop);
++    if (generic) tk(bk_opof("load64", 6), bkf_nr, bk_rmap[7], 0, 0);
++    else { bk_needno(); if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno); }
++    k = 0;
++    while (k < (generic ? 5 : 6)) {
++        if (bkf_arg[k] < 0) break;
++        tk(bk_opof("load64", 6), bkf_arg[k], bk_rmap[7], 8*(k+generic), 0);
++        k = k+1;
++    }
++    g = tk(TO_GATE, 0, 0, 0, 0);
++    tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
++    tkg_rc[g] = bkf_retconv; tkg_wi[g] = bkf_winimp;
++    tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
++    tk(bk_opof("load64", 6), bk_rmap[6], bk_rmap[7], 48, 0);
++    tk(bk_opof(".frame", 6), 0-80, 0, 0, 0);
++    return 0;
++}
+ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
+     int g; int i;
+     bk_facts(cop);
+@@ -35963,6 +35999,12 @@
+             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
+         } else { if (bk_is(op, ".sys6")) {
+             char nm[32]; int id; int L;
++            id = bkav[pc * 8]; L = bkname_len[id]; if (L > 31) L = 31;
++            k = 0; while (k < L) { nm[k] = bkpool[bkname_at[id] + k]; k = k + 1; } nm[L] = 0;
++            cw = bk_cop(nm);
++            if (bkos != 2) bk_protosys6(cw, nm, pc);
++            else {
++            char nm[32]; int id; int L;
+             k = 0;
+             while (k < 6) {
+                 tk(TO_SETMEM, bk_sysa + 8 * k, bk_rmap[bkav[pc * 8 + 1 + k]], 0, 0);
+@@ -35981,6 +36023,7 @@
+             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
+             tk_setreg(bk_rmap[6], SK_MEM, bk_sysfp);
+             tk_setreg(bk_rmap[7], SK_MEM, bk_syssp);
++            }
+         } else { if (bk_is(op, ".exit")) {
+             tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
+             bk_syscall(bk_cop("exit"), SK_MEM, bk_scr0, SK_IMM, 0, SK_IMM, 0, 0 - 1, 0);
+@@ -36526,6 +36569,7 @@
+ }
+ 
+ /* one lowered instruction -> bytes at bkout; 0 when it has no encoding */
++int a_shadow(int r) { ow(0xAA0003EF | (r << 16)); ow(0x927CEDEF); ow(0xD10041FF); return 0; }
+ int bk_arm(int i, long off) {
+     int op; long *a; char *o; long pc; long v; int k; int d; int n;
+     op = tkop[i]; a = tka + i * 4;
+@@ -36538,9 +36582,9 @@
+     }
+     if (op == TO_HENTRY) {              /* sub sp, sp, #16; str x29, [sp]; str x30, [sp, #8]; mov x29, sp; mov x7, sp
+                                            (no stp/ldp: the assembly-text printer has no pair forms) */
+-        ow(0xd10043ff); ow(0xf90003fd); ow(0xf90007fe); ow(0x910003fd); ow(0x910003e0 | a[0]); return 1;
+-    }
+-    if (op == TO_HLEAVE) { ow(0xf94003fd); ow(0xf94007fe); ow(0x910043ff); ow(0xd65f03c0); return 1; }   /* ldr x29/x30; add sp, sp, #16; ret */
++        ow(0xd10043ff); ow(0xf90003fd); ow(0xf90007fe); ow(0x910003fd); ow(0x910003e0 | a[0]); a_shadow(a[0]); return 1;
++    }
++    if (op == TO_HLEAVE) { a_mem(0,30,29,8,8); a_mem(0,17,29,0,8); ow(0x910043BF); ow(0xAA1103FD); ow(0xd65f03c0); return 1; }   /* ldr x29/x30; add sp, sp, #16; ret */
+     if (op == TO_HOSTADDR) {
+         a_adrp_add(a[0], pc, bkos == 2 ? bk_imp[BK_NIMP+a[1]] : BK_DATA_BASE+bk_shift-32+8*a[1]);
+         ow(0xF9400000 | (a[0]<<5) | a[0]); return 1;
+@@ -36574,7 +36618,7 @@
+     }
+     if (op == TO_SPINIT) {
+         if (a[1] >= 0) { a_adrp_add(a[0], pc, a[1] + bk_shift); return 1; }
+-        ow(0x91000000 | (31 << 5) | a[0]);
++        ow(0x91000000 | (31 << 5) | a[0]); a_shadow(a[0]);
+         return 1;
+     }
+     if (op == TO_WINSAVE) {
+@@ -36623,7 +36667,7 @@
+         return 1;
+     }
+     o = bk_nth(BKOPS, op);
+-    if (strsame(o, "mov")) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
++    if (strsame(o, "mov")) { if (a[0]==7) a_shadow(a[1]); ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
+     if (strsame(o, "imm")) {
+         unsigned long u; u = a[1];
+         ow(0xD2800000 | ((u & 0xFFFF) << 5) | a[0]);
+@@ -36649,13 +36693,12 @@
+         }
+     }
+     if (strsame(o, ".frame")) {
+-        n = a[0];
+-        if (n > 0 - 4096 && n < 4096) {
+-            ow((n >= 0 ? 0xD1000000 : 0x91000000) | ((n >= 0 ? n : 0 - n) << 10) | (7 << 5) | 7);
+-            return 1;
+-        }
+-        a_movimm(A_IP0, n >= 0 ? n : 0 - n, 0);
+-        ow((n >= 0 ? 0xCB000000 : 0x8B000000) | (A_IP0 << 16) | (7 << 5) | 7);
++        int dst; n = a[0]; dst = n >= 0 ? 16 : 7;
++        if (n > 0 - 4096 && n < 4096)
++            ow((n >= 0 ? 0xD1000000 : 0x91000000) | ((n >= 0 ? n : 0 - n) << 10) | (7 << 5) | dst);
++        else { a_movimm(A_IP0,n >= 0 ? n : 0-n,0); ow((n >= 0 ? 0xCB000000 : 0x8B000000) | (A_IP0 << 16) | (7 << 5) | dst); }
++        a_shadow(dst);
++        if (dst != 7) ow(0xAA1003E7);
+         return 1;
+     }
+     if (strsame(o, ".lea")) { a_adrp_add(a[0], pc, bk_leaaddr(i)); return 1; }
+@@ -36673,7 +36716,8 @@
+         return 1;
+     }
+     if (strsame(o, "callr")) {
+-        a_adr(A_IP1, pc, pc + 16);
++        ow(0xD10020EF); a_shadow(15);
++        a_adr(A_IP1, pc + 16, pc + 32);
+         ow(0xD1002000 | (7 << 5) | 7);
+         ow(0xF9000000 | (7 << 5) | A_IP1);
+         ow(0xD63F0000 | (a[0] << 5));      /* blr: pairs with ret for the return predictor */
+@@ -36690,7 +36734,7 @@
+     }
+     if (strsame(o, "ret")) {
+         ow(0xF9400000 | (7 << 5) | A_IP1);
+-        ow(0x91002000 | (7 << 5) | 7);
++        ow(0x91002000 | (7 << 5) | 7); a_shadow(7);
+         ow(0xD65F0000 | (A_IP1 << 5));     /* ret x17: same jump as br, predicted */
+         return 1;
+     }
+@@ -36700,11 +36744,12 @@
+         return 1;
+     }
+     if (strsame(o, "call")) {
+-        a_adr(A_IP1, pc, pc + 16);
++        ow(0xD10020EF); a_shadow(15);
++        a_adr(A_IP1, pc + 16, pc + 32);
+         ow(0xD1002000 | (7 << 5) | 7);
+         ow(0xF9000000 | (7 << 5) | A_IP1);
+         if (bk_objmode && bklab_tpc[a[0]] < 0) { bk_relcall(bkol, a[0], 901); ow(0x94000000); }
+-        else ow(0x94000000 | a_relf(i, bk_label(a[0]) - (off + 12)));   /* bl */
++        else ow(0x94000000 | a_relf(i, bk_label(a[0]) - (off + 28)));   /* bl */
+         return 1;
+     }
+     if (strsame(o, "jumpz")) {

@@ -72,3 +72,20 @@ arm64临时变体`/tmp/cdx-l1b-proto/spgate.c`：在TO_GATE保存真实SP到x7�
 4. `_unisa_sigtramp`按名字硬编码host入口仅是诊断；产品需通用入口契约。
 5. x86的30只在Rosetta实跑，未声称原生Intel通过；[XNU x86 sigreturn源码](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/dev/i386/unix_signal.c)提供UC_FLAVOR与上下文恢复判据，不能代替目标机器验收。
 6. 未生成产品δ、未构建私有.com、未完成四个非Windows目标镜像逐字节对拍。L1b′仍未收口。
+
+## 第三轮：gate之外的异步嵌套反例
+
+实际跑过，2026-10-09。诊断源[ l1b-signal-async.c ](l1b-signal-async.c)，结果[l1b-signal-async-results.json](l1b-signal-async-results.json)。诊断编码器差异保存在[l1b-stack-prototype.patch](l1b-stack-prototype.patch)：对临时完整导出C应用，不是对main源应用，更不是待直接落地的生产补丁；其中仍含强制跳板名字的诊断接线。
+
+主程序与ALRM外层处理函数都反复递归6层、创建33个long的volatile局部数组并检查内容。宿主每轮送ALRM，100微秒后送USR2，再等1毫秒；外层末尾还自行触发USR2。内层计数、外层计数、所有局部数组和返回求和均检查。父测试限7秒、执行进程超时必杀。新强探针不依赖内层只在kill系统调用期间投递。
+
+| 原型 | 三次外部异步嵌套 | ALRM发送数 |
+|---|---|---|
+| 逐帧/调用保护真实SP（shadow） | 3/3输出R、OK，rc0 | 141、143、143 |
+| 仅gate下移真实SP（spgate） | 3/3 SIGSEGV，rc=-11 | 每次1 |
+
+阴性对照有效。最初较弱版本没有让外层处理函数递归工作，同一送信号节奏下两个原型都绿；不能把那轮当作gate之外反例。
+
+shadow诊断变更：真实SP取候选x7向下16B对齐后再留16B保护区；正向.frame先保护新帧再更新x7，负向.frame先更新x7再释放；call在保存返回地址前保护，ret取回返回地址后释放；HLEAVE按入口x29锚点恢复宿主SP/FP/LR。该轮没有gate的512B特殊处理。
+
+边界：C产出的路径实测通过，不等于任意输入tape已证明。特别是mov到r7当前统一先更新真实SP，尚需区分向上/向下更新顺序；其他算术写r7未接保护。HOSTCALL、全系统调用私有化和通用回调入口仍未完成。先修这些边界，再移入参考和δ，不把这份诊断补丁直接应用到产品。
