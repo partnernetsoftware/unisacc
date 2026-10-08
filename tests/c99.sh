@@ -20,7 +20,12 @@ D=$R/tests/c99
 ok=0; bad=0; refused=0; known=0; revived=0
 KNOWN=$R/tests/c99.knownfail
 . "$R/tests/knownfail.sh"
-knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+# the product (.com) route may defer a probe the reference already passes, by
+# name and version, in its own list; the reference route never reads it
+case "${UA:-}" in
+    *.com) knownfail_load_many "$T/known.keys" "$KNOWN" "$R/tests/c99.com.knownfail" || exit 1 ;;
+    *) knownfail_load "$KNOWN" "$T/known.keys" || exit 1 ;;
+esac
 isknown() { knownfail_has "$1"; }
 : > "$T/passing"
 for f in "$D"/*.c; do

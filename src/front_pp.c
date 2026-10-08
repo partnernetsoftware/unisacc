@@ -1360,6 +1360,11 @@ int mdef1(char *s) { return mdefb(s, blen(s), "1", 1, 1, 0); }
 int blen(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 int predef(void) {
     char *t; int i;
+    /* C99 6.10.8: a conforming hosted C99 implementation; installed before
+       -D/-U so either can replace or remove one (unisa/front/pp.py: same) */
+    mdef1("__STDC__");
+    mdefb("__STDC_VERSION__", 16, "199901L", 7, 199901, 0);
+    mdef1("__STDC_HOSTED__");
     /* -D NAME or -D NAME=<integer> */
     i = 0;
     while (i < noptd) {

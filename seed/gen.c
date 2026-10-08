@@ -2703,6 +2703,7 @@ static void pp_install_stem(Graph *g, const char *stem, const char *section,
         else install_plain(g, path, i ? 'r' : 'b', bindings, sequences);
     }
 }
+static void pp_install_standard(Graph *g);
 static void pp_install_prefix(Graph *g, int no_autoinc) {
     FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb");
     Value *sequences = NULL; char *s; int start = 0, rows = 0;
@@ -2712,6 +2713,9 @@ static void pp_install_prefix(Graph *g, int no_autoinc) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        if (!strcmp(field[0], "call") && !strcmp(field[1], "standard")) {
+            pp_install_standard(g); free(s); continue;
+        }
         if (!strcmp(field[0], "call")) { free(s); break; }
         if (!when_true(field[3], no_autoinc, flags)) { free(s); continue; }
         if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
@@ -4620,6 +4624,13 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         die("manifest graph operation is not yet covered");
     }
     (void)opts;
+}
+static void pp_install_standard(Graph *g) {
+    ManifestRows rows = manifest_rows("exec/pp/standard-manifest.tsv");
+    ManifestGraph ctx = {0};
+    Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
+    ctx.graph = g; ctx.dir = "exec/pp"; ctx.flags = flags; ctx.accum = value_new(JOBJ);
+    manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
 }
 static void manifest(Graph *graph, const char *dir) {
     char path[1024]; ManifestRows rows; ManifestGraph ctx = {0};

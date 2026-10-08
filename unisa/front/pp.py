@@ -19,7 +19,8 @@ PREDEF = {
 
 def predefines(target):
     os_, arch = target.split("/")
-    d = {}
+    # C99 6.10.8, in front_pp.c's order; -D/-U apply afterwards
+    d = {"__STDC__": "1", "__STDC_VERSION__": "199901L", "__STDC_HOSTED__": "1"}
     for m in PREDEF[os_] + PREDEF[arch]:
         d[m] = "1"
     d["__UNISA__"] = "1"
