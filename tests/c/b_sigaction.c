@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L   /* glibc hides struct sigaction under plain -std=c99 */
 #include <stdio.h>
 #include <signal.h>
 static volatile int hits;

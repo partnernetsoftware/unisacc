@@ -63,7 +63,8 @@ k=$(wc -c < /tmp/art_k1.zip | tr -d ' ')
 chk "weights <= 32768 B" "yes" "$([ "$w" -le 32768 ] && echo yes || echo "no ($w)")"
 # 0.0.19 raised from 65536: the bundled C library (kernel/unisa_headers.inc)
 # grew by the Linux-interface layer (processes, sockets, time, errno)
-chk "kit <= 98304 B" "yes" "$([ "$k" -le 98304 ] && echo yes || echo "no ($k)")"
+# 0.0.35 raised from 98304: M1 headers (dirent *at, mkdtemp, AT_*) put the kit at 104165
+chk "kit <= 114688 B" "yes" "$([ "$k" -le 114688 ] && echo yes || echo "no ($k)")"
 
 echo; echo "artifacts $pass   failed $fail"
 # A suite that checked nothing is not green: `closure.sh` with no
