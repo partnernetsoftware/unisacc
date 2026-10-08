@@ -1270,3 +1270,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.37 C1a 验收，2026-10-09〕4ab53c46 已含产品结构体返回调用的清单/模板与错误契约：非局部返回走已有 LI.structreturnexpr 的类型/分号检查及 WCOPY，局部对象路径不变。66与259字节结构体分支返回的完整E3 tape同参考；错误/警告模式各18完整结果同，r21为48同、5具名拒绝、0 accepted-different。C3头新增后补重导k2-gen2/k2-libraryenv/pp-autoinc-gen，facts30表0 differ；重录parse2八项与pp十三项（实际变8+12），fresh-order0..8全核对且无变化；kernel stale0，op9。仓根.com直接-run seed/gen.c产出完整parse2与Python逐字节同。正式0.0.37候选.com运行66仍需cc验收后删knownfail；return(mk())等非ID入口仍具名未覆盖，不把本片说成所有结构体返回表达式均覆盖。C1b register取址及C2仍未结。
 
 〔0.0.37 C2 g4 验收，2026-10-09〕无原型普通直接函数超过六实参走现有参数栈反转，再按恢复的sys=0选择直接调用；内建函数超限仍具名拒绝，间接调用与默认float提升控制保持参考同tape。新增b_noproto_many探针覆盖0/6/7/8参、不同位置权重及嵌套调用，系统cc与参考实跑均8 91 140 204 204 204；完整流水线E3逐字节同。parse2八变体基线重录，fresh-order0..8无变化，facts30表0 differ，r21为48同/5具名拒绝/0接受不同；仓根.com -run seed/gen.c完整parse2同Python。正式新候选跨单元运行留给cc补验。g5用zlib1.2.12历史配置尚未复现原incomplete struct：全编先被K&R声明阻挡，描述符前缀可编，不记已修。
+
+〔C1b register 取址实施约束，2026-10-09〕声明属性独立REGISTERBANK，作用域undo新增第43格（总44）；对象与参数声明显式捕获register，结构/函数指针嵌套保存恢复，不复用类型/联结银行。unary-&按参考14例的对象/子对象规则预检；不得直接TN.raw前瞻再只恢复位置，其可达分支会写TIX与转换临时银行。独立token视图原型仅识别id、括号、点、箭头、下标，其余整行不透明跳过，24项普通/位置v1/v2及截断检查通过；尚未接入parse2，不算14例诊断验收完成。
+
+〔C1b 元数据首片实测〕逗号续项、普通参数、局部遮蔽、函数指针对象/参数、嵌套结构、sizeof不泄漏共7例tape同参考，探针观测REGISTERBANK置1、遮蔽清0并恢复1、退域恢复0；r21仍48同/5具名拒绝/0异，facts30/0、op9，parse2八变体图重录，fresh-order0..8不变。默认图临时注入独立预读/游标恢复，含数字/字符串的4份完整tape不变；带位置的24项只读视图检查通过。以上不是unary-&14例完成，参考补丁仍隔离。

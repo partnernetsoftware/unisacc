@@ -135,7 +135,8 @@ def _gen2ns(tag):
 
     O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
     VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
-    UNDO_SIZE = 43
+    REGISTERBANK = _VR["REGISTERBANK"]
+    UNDO_SIZE = 44
     FPS_FIRST = 128  # disjoint primitive/signature/structure base-code ranges
     FPS_RD, FPS_RB, FPS_VAR, FPS_PARAM, FPS_RSH, FPS_FN, FPS_COUNT, FPS_PSH = (i << 40 for i in range(55, 63))
     # Shared rule/control entry points (reuse before adding a new state cluster):
@@ -1008,7 +1009,7 @@ def k2gen2():
         updateops=[dict(key=G.TK[o + "="], target="LV.c" + o) for o in G.E.CASOPS])
     scopeconst = {n: getattr(G.E, n) for n in ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
     scopeconst.update(VALUEBANK=G._VR["VALUEBANK"], TYPERANK=G.TYPERANK, LOC=G.LOC, END_=G.END_, ENV=G.ENV, VLSIZE=G.VLSIZE,
-                      UNDO_SIZE=G.UNDO_SIZE, SHAPE=G.SHAPE, TDE=G.TDE)
+                      UNDO_SIZE=G.UNDO_SIZE, SHAPE=G.SHAPE, TDE=G.TDE, REGISTERBANK=G.REGISTERBANK)
     for n, base, size in (("UNDO", G.E.UNDO, G.UNDO_SIZE), ("DIM", G.DIM, 8), ("PDB", G.PDB, 16)):
         scopeconst.update((n + "_" + str(i), base + i) for i in range(size))
     widthparts = dict(
@@ -1051,7 +1052,7 @@ def k2gen2():
             "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
             "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
             "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
-            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(_namespace_constants(G)), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
+            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(_namespace_constants(G)), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'REGISTERBANK', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
             "=shapeconst\tjson\t" + dump(shapeconst), "=shapeclasses\tjson\t" + dump(shapeclasses),
             "=retconst\tjson\t" + dump(retconst), "=retclasses\tjson\t" + dump(retclasses),
             "=retexpr0\tjson\t" + dump(retexpr0), "=retint\tjson\t" + dump([dict(code=c) for _, c, *_ in G.TYINT]), "=retfloat\tjson\t" + dump([dict(label=l, cv=v, base=b) for l, v, b in (("double", "d", G.DBL), ("single", "s", G.FLT))]), "=retcompound\tjson\t" + dump(retcompound),
