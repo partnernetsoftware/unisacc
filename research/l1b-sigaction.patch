@@ -1,0 +1,260 @@
+diff --git a/include/signal.h b/include/signal.h
+index 81c4b524..b5dfe02b 100644
+--- a/include/signal.h
++++ b/include/signal.h
+@@ -3,9 +3,10 @@
+  * as BSD and glibc do); SIG_DFL for the signals
+  * whose default is to terminate ends the process with the shell's status
+  * for that signal (128 + n), which is what a program that raises SIGABRT
+- * and is run from a shell observes.  No signal ever arrives from OUTSIDE:
+- * there is no sigaction system call here, so a handler installed for
+- * SIGINT is never called by Ctrl-C.  That is stated rather than faked. */
++ * and is run from a shell observes.  Since 0.0.35 the handler is also
++ * installed with the kernel (sigaction below), so signals from outside
++ * (kill, alarm, Ctrl-C) reach it on macOS and Linux; Windows keeps the
++ * in-process table only. */
+ #ifndef _UNISA_SIGNAL_H
+ #define _UNISA_SIGNAL_H
+ typedef int sig_atomic_t;
+@@ -21,35 +22,25 @@ typedef int sig_atomic_t;
+ #define SIGQUIT 3
+ #define SIGKILL 9
+ #define SIGTERM 15
+-#define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
++#define SIGWINCH 28                 /* same number on Linux and macOS */
++#define SIGPIPE 13
++#define SIGALRM 14
++#ifdef __APPLE__
++#define SIGSTOP 17
++#define SIGCONT 19
++#define SIGCHLD 20
++#define SIGUSR1 30
++#define SIGUSR2 31
++#else
++#define SIGUSR1 10
++#define SIGUSR2 12
++#define SIGCHLD 17
++#define SIGCONT 18
++#define SIGSTOP 19
++#endif
+ #define _UNISA_NSIG 32
+ static void (*_unisa_sig[_UNISA_NSIG])(int);
+ 
+-#if !__UNISA_FTRIM_LIBC || __UN_signal
+-static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
+-    void (*__u_old)(int);
+-    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return SIG_ERR;
+-    __u_old = _unisa_sig[__u_sig];
+-    _unisa_sig[__u_sig] = __u_fn;
+-    return __u_old;
+-}
+-#endif
+-
+-#if !__UNISA_FTRIM_LIBC || __UN_raise
+-static int raise(int __u_sig) {
+-    void (*__u_fn)(int);
+-    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return 0 - 1;
+-    __u_fn = _unisa_sig[__u_sig];
+-    if (__u_fn == SIG_IGN) return 0;
+-    if (__u_fn != SIG_DFL) {
+-        __u_fn(__u_sig);
+-        return 0;
+-    }
+-    __exit(128 + __u_sig);
+-    return 0;
+-}
+-#endif
+-
+ /* sigaction and the signal sets (0.0.34 L1b, for lua built with LUA_USE_POSIX).
+  * They share signal()'s in-process table, so the same rule holds: a handler is
+  * recorded and raise() calls it; nothing arrives from outside.  The mask and
+@@ -94,15 +85,117 @@ static int sigismember(const sigset_t *__u_s, int __u_sig) {
+ #endif
+ static sigset_t _unisa_sigmask[_UNISA_NSIG];
+ static int _unisa_sigflags[_UNISA_NSIG];
++/* The kernel half (0.0.35): the handler is also installed with the real
++ * sigaction call, so kill/alarm from outside reach it.  macOS: syscall 46 with
++ * the kernel's own struct {handler, tramp, mask u32, flags}; the kernel calls
++ * tramp(handler, infostyle, sig, siginfo, uctx) as a plain function, and
++ * tramp returns through sigreturn (184) with (uctx, infostyle, token 0) -- the
++ * token is passed on as the kernel gave it (sixth argument).  The compiled
++ * code keeps its locals under the INTERRUPTED frame (the tape stack pointer
++ * is a register the kernel leaves alone), exactly where the kernel had put
++ * the signal frame: so every handler runs with the kernel frame on an
++ * alternate stack (sigaltstack, SA_ONSTACK, 64 KB static), installed once.
++ * Linux arm64: rt_sigaction (134), no restorer: the kernel's vdso trampoline
++ * returns.  Linux x86-64: rt_sigaction (13) demands SA_RESTORER, and a C
++ * function cannot be the restorer (its prologue moves rsp off the frame), so
++ * the restorer is 8 bytes of machine code (mov eax,15; syscall) written once
++ * into a mapped RWX page.  Windows: in-process table only. */
++#ifndef _WIN32
++#ifdef __APPLE__
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sigtramp
++static void _unisa_sigtramp(void (*__u_fn)(int), int __u_style, int __u_sig, void *__u_info, void *__u_uctx, long __u_token) {
++    if (__u_fn != SIG_DFL && __u_fn != SIG_IGN) __u_fn(__u_sig);
++#ifdef __x86_64__
++    __syscall6(0x2000000L + 184, (long)__u_uctx, (long)__u_style, __u_token, 0, 0);
++#else
++    __syscall6(184, (long)__u_uctx, (long)__u_style, __u_token, 0, 0);
++#endif
++    __exit(128 + __u_sig);   /* sigreturn refused: not reached */
++}
++#endif
++#elif defined(__x86_64__)
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sigrestorer
++static long _unisa_sigrestorer(void) {
++    static unsigned char *__u_p;
++    if (!__u_p) {
++        __u_p = (unsigned char *)__mmap(0, 4096, 7, 0x22, 0 - 1, 0);   /* PROT_READ|WRITE|EXEC, MAP_PRIVATE|ANONYMOUS */
++        if ((long)__u_p < 0 && (long)__u_p > -4096) { __u_p = 0; return 0; }
++        __u_p[0] = 0xb8; __u_p[1] = 15; __u_p[2] = 0; __u_p[3] = 0; __u_p[4] = 0;   /* mov eax, 15 (rt_sigreturn) */
++        __u_p[5] = 0x0f; __u_p[6] = 0x05;                                            /* syscall */
++    }
++    return (long)__u_p;
++}
++#endif
++#endif
++static long _unisa_sigstack[8192];
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sigaltstack
++static int _unisa_sigaltstack(void) {
++    static int __u_done;
++    if (__u_done) return 0;
++#ifdef __APPLE__
++    { struct { void *__u_sp; unsigned long __u_n; int __u_f; } __u_s;
++      __u_s.__u_sp = _unisa_sigstack; __u_s.__u_n = sizeof _unisa_sigstack; __u_s.__u_f = 0;
++#ifdef __x86_64__
++      if (__syscall6(0x2000000L + 53, (long)&__u_s, 0, 0, 0, 0) < 0) return 0 - 1;
++#else
++      if (__syscall6(53, (long)&__u_s, 0, 0, 0, 0) < 0) return 0 - 1;
++#endif
++    }
++#else
++    { struct { void *__u_sp; int __u_f; unsigned long __u_n; } __u_s;
++      __u_s.__u_sp = _unisa_sigstack; __u_s.__u_f = 0; __u_s.__u_n = sizeof _unisa_sigstack;
++#ifdef __x86_64__
++      if (__syscall6(131, (long)&__u_s, 0, 0, 0, 0) < 0) return 0 - 1;
++#else
++      if (__syscall6(132, (long)&__u_s, 0, 0, 0, 0) < 0) return 0 - 1;
++#endif
++    }
++#endif
++    __u_done = 1; return 0;
++}
++#endif
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sigkernel
++static int _unisa_sigkernel(int __u_sig, void (*__u_fn)(int), sigset_t __u_mask, int __u_flags) {
++    if (__u_fn != SIG_DFL && __u_fn != SIG_IGN && _unisa_sigaltstack() < 0) return 0 - 12;
++#ifdef __APPLE__
++    struct { void (*__u_h)(int); void (*__u_t)(void (*)(int), int, int, void *, void *, long); unsigned __u_m; int __u_f; } __u_k;
++    __u_k.__u_h = __u_fn; __u_k.__u_t = _unisa_sigtramp; __u_k.__u_m = (unsigned)__u_mask;
++    __u_k.__u_f = (__u_flags & (SA_RESTART | SA_RESETHAND | SA_NODEFER)) | 1;   /* SA_ONSTACK */
++#ifdef __x86_64__
++    return (int)__syscall6(0x2000000L + 46, __u_sig, (long)&__u_k, 0, 0, 0);
++#else
++    return (int)__syscall6(46, __u_sig, (long)&__u_k, 0, 0, 0);
++#endif
++#else
++    struct { void (*__u_h)(int); unsigned long __u_f; long __u_r; unsigned long __u_m; } __u_k;
++    __u_k.__u_h = __u_fn; __u_k.__u_r = 0; __u_k.__u_m = (unsigned long)__u_mask;
++    __u_k.__u_f = (__u_flags & SA_RESTART ? 0x10000000UL : 0) | (__u_flags & SA_RESETHAND ? 0x80000000UL : 0) | (__u_flags & SA_NODEFER ? 0x40000000UL : 0) | 0x08000000UL;   /* SA_ONSTACK */
++#ifdef __x86_64__
++    __u_k.__u_r = _unisa_sigrestorer();
++    if (!__u_k.__u_r) return 0 - 12;   /* ENOMEM: no restorer page, table only */
++    __u_k.__u_f = __u_k.__u_f | 0x04000000UL;   /* SA_RESTORER */
++    return (int)__syscall6(13, __u_sig, (long)&__u_k, 0, 8, 0);
++#else
++    return (int)__syscall6(134, __u_sig, (long)&__u_k, 0, 8, 0);
++#endif
++#endif
++}
++#endif
++#endif
+ #if !__UNISA_FTRIM_LIBC || __UN_sigaction
+ static int sigaction(int __u_sig, const struct sigaction *__u_act, struct sigaction *__u_old) {
+-    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG || ((__u_sig == SIGKILL) && __u_act)) { errno = EINVAL; return 0 - 1; }
++    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG || ((__u_sig == SIGKILL || __u_sig == SIGSTOP) && __u_act)) { errno = EINVAL; return 0 - 1; }
+     if (__u_old) {
+         __u_old->sa_handler = _unisa_sig[__u_sig];
+         __u_old->sa_mask = _unisa_sigmask[__u_sig];
+         __u_old->sa_flags = _unisa_sigflags[__u_sig];
+     }
+     if (__u_act) {
++#ifndef _WIN32
++        long __u_r;
++        __u_r = _unisa_sigkernel(__u_sig, __u_act->sa_handler, __u_act->sa_mask, __u_act->sa_flags);
++        if (__u_r < 0 && __u_r > -4096 && __u_r != -12) return (int)_unisa_ret(__u_r);
++#endif
+         _unisa_sig[__u_sig] = __u_act->sa_handler;
+         _unisa_sigmask[__u_sig] = __u_act->sa_mask;
+         _unisa_sigflags[__u_sig] = __u_act->sa_flags;
+@@ -110,6 +203,34 @@ static int sigaction(int __u_sig, const struct sigaction *__u_act, struct sigact
+     return 0;
+ }
+ #endif
++#if !__UNISA_FTRIM_LIBC || __UN_signal
++static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
++    void (*__u_old)(int);
++    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return SIG_ERR;
++    __u_old = _unisa_sig[__u_sig];
++#ifndef _WIN32
++    { long __u_r; __u_r = _unisa_sigkernel(__u_sig, __u_fn, 0, SA_RESTART); if (__u_r < 0 && __u_r > -4096 && __u_r != -12) return SIG_ERR; }
++#endif
++    _unisa_sig[__u_sig] = __u_fn;
++    return __u_old;
++}
++#endif
++
++#if !__UNISA_FTRIM_LIBC || __UN_raise
++static int raise(int __u_sig) {
++    void (*__u_fn)(int);
++    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return 0 - 1;
++    __u_fn = _unisa_sig[__u_sig];
++    if (__u_fn == SIG_IGN) return 0;
++    if (__u_fn != SIG_DFL) {
++        __u_fn(__u_sig);
++        return 0;
++    }
++    __exit(128 + __u_sig);
++    return 0;
++}
++#endif
++
+ #if !__UNISA_FTRIM_LIBC || __UN_sigprocmask
+ static int sigprocmask(int __u_how, const sigset_t *__u_set, sigset_t *__u_old) {
+     if (__u_old) *__u_old = 0;
+diff --git a/include/unistd.h b/include/unistd.h
+index 18f00514..2bf023e9 100644
+--- a/include/unistd.h
++++ b/include/unistd.h
+@@ -244,6 +244,31 @@ static int execle(const char *__u_path, const char *__u_a0, ...) {
+ }
+ #endif
+ #endif
++/* alarm (0.0.35): SIGALRM after N seconds, 0 cancels; the previous timer's
++   remaining seconds come back.  macOS has no alarm call and arm64 Linux has
++   none either, so all POSIX targets use setitimer(ITIMER_REAL): macOS 83,
++   Linux x86-64 38, Linux arm64 103.  Windows: no timer, answers 0. */
++#ifndef _WIN32
++#if !__UNISA_FTRIM_LIBC || __UN_alarm
++static unsigned alarm(unsigned __u_s) {
++    long __u_v[4], __u_o[4];
++    __u_v[0] = 0; __u_v[1] = 0; __u_v[2] = (long)__u_s; __u_v[3] = 0;
++    __u_o[0] = 0; __u_o[1] = 0; __u_o[2] = 0; __u_o[3] = 0;
++#ifdef __APPLE__
++    __syscall6(_UNISA_SC(83), 0, (long)__u_v, (long)__u_o, 0, 0);
++#elif defined(__x86_64__)
++    __syscall6(38, 0, (long)__u_v, (long)__u_o, 0, 0);
++#else
++    __syscall6(103, 0, (long)__u_v, (long)__u_o, 0, 0);
++#endif
++    return (unsigned)(__u_o[2] + (__u_o[3] ? 1 : 0));
++}
++#endif
++#else
++#if !__UNISA_FTRIM_LIBC || __UN_alarm
++static unsigned alarm(unsigned __u_s) { return 0; }
++#endif
++#endif
+ /* sleep / usleep over the shared nanosleep primitive (sys/_timespec.h; Sleep on Windows) */
+ #include <sys/_timespec.h>
+ #if !__UNISA_FTRIM_LIBC || __UN_sleep
