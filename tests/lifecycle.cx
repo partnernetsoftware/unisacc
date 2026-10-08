@@ -1,0 +1,71 @@
+#!/usr/bin/env -S unisacc.com -run
+/* lifecycle.cx -- 0.0.34 X2 pilot (was lifecycle.sh).  W3 (D2): the process lifecycle matrix on this
+ * host -- each case of tests/life/cases.c built by cc (the oracle), the C reference ($UA, resolved by
+ * tests/lib.sh ua_ready when unset) and, when MODEL_COM is set, the product; the shell-visible status
+ * and stdout must be the same.  On Apple silicon the osx/x86_64 slice runs under Rosetta as a column.
+ * Linux runs through tests/linux.sh, Windows through the release-check winsuite.
+ * Run from the repo root: sh unisacc.com -run tests/lifecycle.cx
+ * Only system() and stdio are used, so the previous release (no cx.h) can run it. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static char T[64];
+static int sh(const char *cmd) {
+    char buf[2048]; snprintf(buf, sizeof buf, "T=%s; B=tests/bound; %s", T, cmd); return system(buf);
+}
+/* whole small file into buf ("" when absent) */
+static void slurp(const char *path, char *buf, size_t cap) {
+    FILE *f = fopen(path, "rb"); size_t n = 0;
+    if (f) { n = fread(buf, 1, cap - 1, f); fclose(f); }
+    buf[n] = 0;
+}
+
+int main(void) {
+    static const char *cases[] = { "ret0", "ret7", "ret255", "ret256", "exit3", "atexit", "pending",
+                                   "abort", "raise", "handled", "segv" };
+    const char *builds[3]; int nb = 0, ok = 0, bad = 0, c, b;
+    char cmd[1024], path[128], want[4096], got[4096], ua[1024];
+    const char *com = getenv("MODEL_COM");
+    snprintf(T, sizeof T, "/tmp/lifecycle.%ld", (long)getpid());
+    if (sh("rm -rf $T && mkdir $T") != 0) return 2;
+    /* the reference compiler: $UA, or what tests/lib.sh resolves */
+    if (sh("if [ -n \"${UA:-}\" ]; then printf %s \"$UA\"; else . ./tests/lib.sh >/dev/null 2>&1; ua_ready >/dev/null 2>&1 && printf %s \"$UA\"; fi > $T/ua") != 0) return 2;
+    snprintf(path, sizeof path, "%s/ua", T); slurp(path, ua, sizeof ua);
+    if (!ua[0]) { printf("lifecycle  no reference compiler (UA)\n"); sh("rm -rf $T"); return 1; }
+    if (sh("$B 30 cc -std=c99 -w -o $T/cc tests/life/cases.c") != 0) { printf("lifecycle  cc failed\n"); sh("rm -rf $T"); return 1; }
+    snprintf(cmd, sizeof cmd, "$B 30 '%s' -o $T/ref tests/life/cases.c", ua);
+    if (sh(cmd) != 0) { printf("lifecycle  reference build failed\n"); sh("rm -rf $T"); return 1; }
+    builds[nb++] = "ref";
+    if (sh("[ \"$(uname -s)/$(uname -m)\" = Darwin/arm64 ] && arch -x86_64 /usr/bin/true 2>/dev/null") == 0) {
+        snprintf(cmd, sizeof cmd, "$B 30 '%s' -b osx/x86_64 -o $T/x86 tests/life/cases.c", ua);
+        if (sh(cmd) != 0) { printf("lifecycle  osx/x86_64 build failed\n"); sh("rm -rf $T"); return 1; }
+        builds[nb++] = "x86";
+    }
+    if (com && com[0]) {
+        snprintf(cmd, sizeof cmd, "$B 40 sh '%s' -o $T/com tests/life/cases.c", com);
+        if (sh(cmd) != 0) { printf("lifecycle  product build failed\n"); sh("rm -rf $T"); return 1; }
+        builds[nb++] = "com";
+    }
+    for (c = 0; c < (int)(sizeof cases / sizeof *cases); c++) {
+        /* bound is relative to the repo root: run it by absolute path inside $T */
+        snprintf(cmd, sizeof cmd, "R=$(pwd); cd $T && { \"$R/$B\" 10 ./cc %s 2>/dev/null; echo \"status $?\"; } > want", cases[c]);
+        sh(cmd); snprintf(path, sizeof path, "%s/want", T); slurp(path, want, sizeof want);
+        for (b = 0; b < nb; b++) {
+            snprintf(cmd, sizeof cmd, "R=$(pwd); cd $T && { \"$R/$B\" 10 %s ./%s %s 2>/dev/null; echo \"status $?\"; } > got",
+                     strcmp(builds[b], "x86") == 0 ? "arch -x86_64" : "", builds[b], cases[c]);
+            sh(cmd); snprintf(path, sizeof path, "%s/got", T); slurp(path, got, sizeof got);
+            if (strcmp(got, want) == 0) ok++;
+            else { bad++; printf("  FAIL %s %s: got [%s] want [%s]\n", builds[b], cases[c], got, want); }
+        }
+    }
+    sh("rm -rf $T");
+    fflush(stdout);
+    printf("\nlifecycle  ");
+    fflush(stdout); system("printf %s \"$(uname -s)/$(uname -m)\"");
+    printf("  builds [");
+    for (b = 0; b < nb; b++) printf(b ? " %s" : "%s", builds[b]);
+    printf("]  ok %d   wrong %d\n", ok, bad);
+    return ok > 0 && bad == 0 ? 0 : 1;
+}

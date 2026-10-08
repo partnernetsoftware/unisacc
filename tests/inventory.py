@@ -11,7 +11,7 @@ Orphan = neither; each must be deleted, gated, or listed in tests/ungated-checks
 """
 import pathlib, re, subprocess, sys
 R = pathlib.Path(__file__).resolve().parents[1]
-SCRIPTS = sorted({p for pat in ('tests/*.sh', 'tests/*.py', 'exec/**/*check*.py', 'exec/**/*check*.sh', 'exec/**/*.sh')
+SCRIPTS = sorted({p for pat in ('tests/*.sh', 'tests/*.py', 'tests/*.cx', 'exec/**/*check*.py', 'exec/**/*check*.sh', 'exec/**/*.sh')
                   for p in R.glob(pat) if p.is_file() and '__pycache__' not in p.parts and 'build' not in p.parts})
 def rel(p): return str(p.relative_to(R))
 def text(p):

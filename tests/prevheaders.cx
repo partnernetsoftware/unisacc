@@ -1,0 +1,41 @@
+#!/usr/bin/env -S unisacc.com -run
+/* prevheaders.cx -- 0.0.34 X2 pilot (was prevheaders.sh): the installed previous release (./unisacc.com)
+ * must still compile the tools a candidate build makes with it (seed/tbl.c, seed/net.c, exactly as
+ * exec/c/buildcompiler.sh tn does: -fno-trim-libc) against this tree's include/, and a stdio program
+ * built the same way must run.  0.0.33 D3': new stdio helpers gated only on their own names were
+ * unreachable for the 0.0.32 -ftrim-libc reach, so build_candidate's shared step failed with
+ * "undefined function".  Run from the repo root: sh unisacc.com -run tests/prevheaders.cx
+ * Only system() is used, so the previous release (which carries no cx.h) can run it. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static char T[64];
+/* every command names the scratch directory as $T */
+static int sh(const char *cmd) {
+    char buf[1200]; snprintf(buf, sizeof buf, "T=%s; %s", T, cmd); return system(buf);
+}
+
+int main(void) {
+    static const char *tools[] = { "seed/tbl.c", "seed/net.c" };
+    char cmd[1024]; int bad = 0, n = 0, i;
+    FILE *f = fopen("unisacc.com", "rb");
+    if (!f) { fprintf(stderr, "prevheaders: no installed unisacc.com\n"); return 1; }
+    fclose(f);
+    snprintf(T, sizeof T, "/tmp/prevheaders.%ld", (long)getpid());
+    if (sh("rm -rf $T && mkdir $T") != 0) return 2;
+    for (i = 0; i < 2; i++) {
+        n++;
+        snprintf(cmd, sizeof cmd, "tests/bound 30 sh unisacc.com -fno-trim-libc %s -o $T/x > $T/log 2>&1", tools[i]);
+        if (sh(cmd) != 0) { bad++; printf("FAIL %s\n", tools[i]); fflush(stdout); sh("tail -2 $T/log"); }
+    }
+    n++;
+    if (sh("tests/bound 30 sh unisacc.com -fno-trim-libc tests/c/stream_wbuf.c -o $T/sw > $T/log 2>&1"
+           " && tests/bound 10 $T/sw > $T/out 2>&1 && grep -q END $T/out") != 0) {
+        bad++; printf("FAIL stream_wbuf\n"); fflush(stdout); sh("tail -2 $T/log");
+    }
+    sh("rm -rf $T");
+    printf("prevheaders  checked %d   failed %d\n", n, bad);
+    return n > 0 && bad == 0 ? 0 : 1;
+}

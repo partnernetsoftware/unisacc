@@ -2,7 +2,7 @@
 # headerchain.sh -- after editing include/*.h, regenerate everything the headers feed, in order:
 #   kernel/unisa_headers.inc (emit-kernel) -> exec/facts (export.py) -> tests/graphhash.tsv, only the
 #   pp and parse2 entries the headers reach (the other ~30 entries do not read include/) -> guard check
-#   (unisa/libneed.py) -> the previous release still compiles the seed tools (prevheaders.sh) -> a smoke
+#   (unisa/libneed.py) -> the previous release still compiles the seed tools (prevheaders.cx) -> a smoke
 #   batch of exec suites against the tree (needs UA and UNISACC_FFI_X86_PROVIDER like gate.sh).
 # Every step is bounded; the graphhash part is sharded so no step passes 58 s.  The whole chain runs
 # a few minutes: start it in the background.  0.0.33 D3': done by hand three times, ~10 min each
@@ -19,7 +19,7 @@ while [ $k -le $N ]; do
   k=$((k+1))
 done
 step $B 20 python3 unisa/libneed.py
-step ./tests/prevheaders.sh
+step tests/bound 58 sh ./unisacc.com -run tests/prevheaders.cx
 # Smoke: the suites that caught header slips against the tree, no candidate needed (0.0.33 D3': the
 # full queue found them only after a candidate build and ~30 min).  HEADERCHAIN_SMOKE=0 skips.
 if [ "${HEADERCHAIN_SMOKE:-1}" = 1 ]; then

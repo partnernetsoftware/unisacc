@@ -461,8 +461,8 @@ job hosthdr     ./tests/hosthdr.sh   # R18-10: sys/stat, fcntl, poll, termios, s
 job asmtext     ./tests/asmtext.sh   # R18-1/R18-2: -S -b lnx | unisacc as == -c on the corpus; system as accepts; hand-written .s
 job combo       python3 ./tests/combo.py "$UA" "${MODEL_COM:-./unisacc.com}"   # R19-7: construct x type x position; product = reference tape or refused by name
 job syscall6    ./tests/syscall6.sh   # R19-9 (3): generic system-call gate on osx/arm64, Rosetta x86_64, Lima lnx/arm64
-job lifecycle   ./tests/lifecycle.sh   # 0.0.33 W3 (D2): exit statuses, atexit, abort/raise, a handled signal and a crash, against cc on this host
-job prevheaders ./tests/prevheaders.sh   # 0.0.33 D3′: the installed previous release still compiles the seed tools against this include/
+job lifecycle   tests/bound 58 sh ./unisacc.com -run tests/lifecycle.cx   # 0.0.34 X2 .cx pilot (was lifecycle.sh); 0.0.33 W3 (D2): exit statuses, atexit, abort/raise, a handled signal and a crash, against cc on this host
+job prevheaders tests/bound 58 sh ./unisacc.com -run tests/prevheaders.cx   # 0.0.34 X2 .cx pilot (was prevheaders.sh); 0.0.33 D3′: the installed previous release still compiles the seed tools against this include/
 job forward     ./tests/forward.sh   # R19-10/R21-4a': prototyped undefined functions forward to the system libc (-run and images, six targets)
 job forward-multi ./tests/forwardmulti.sh   # 0.0.26 N5: forwarding across translation units (default run, -run, -o)
 job winposix    ./tests/winposix.sh   # R21-4a': Windows POSIX layer over kernel32 = macOS cc (win/arm64, win/x86_64 in the UTM VM; skipped when it is down)
@@ -532,7 +532,7 @@ if [ "$COM" = 1 ]; then
         printf 'gate product: %s sha256 %s\n' "$PRODUCT" "$PRODUCT_SHA"
     fi
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
-    job com-lifecycle MODEL_COM="$PRODUCT" ./tests/lifecycle.sh   # 0.0.33 W3: the same matrix built by the product
+    job com-lifecycle MODEL_COM="$PRODUCT" tests/bound 58 sh ./unisacc.com -run tests/lifecycle.cx   # 0.0.33 W3: the same matrix built by the product
     job com-forward UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forward.sh   # 0.0.28 N1': posix2 (glob callback), var (variadic), host functions on the product
     job com-forward-multi UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forwardmulti.sh   # 0.0.26 N5: the product failed here up to 0.0.25
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
