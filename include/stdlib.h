@@ -286,6 +286,47 @@ static int mkstemp(char *__u_t) {
     return 0 - 1;
 }
 #endif
+/* realpath (POSIX, 0.0.37 C3): open the path and ask the kernel for the name it resolved
+   (Apple F_GETPATH; Linux readlink of /proc/self/fd/N), so symlinks, "." and ".." are the
+   kernel's answer, not a lexical guess.  The path must exist, as POSIX requires; a file
+   the caller cannot open fails with the open's errno.  NULL resolved: malloc(PATH_MAX). */
+#ifndef __UNISA_PYFRONT
+#if !__UNISA_FTRIM_LIBC || __UN_realpath
+static char *realpath(const char *__u_p, char *__u_out) {
+    char __u_tmp[PATH_MAX]; long __u_fd; long __u_r; long __u_n; long __u_k; char *__u_d;
+#ifdef __APPLE__
+    __u_fd = __open((char *)__u_p, 0, 0);
+    if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
+    __u_r = __fcntl(__u_fd, 50, (long)__u_tmp);   /* F_GETPATH */
+    __close(__u_fd);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; }
+    __u_n = 0; while (__u_tmp[__u_n]) __u_n = __u_n + 1;
+#else
+    char __u_fdp[32]; long __u_v; char __u_dig[24];
+    __u_fd = __open((char *)__u_p, 010000000, 0);   /* O_PATH: no read permission needed */
+    if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
+    __u_k = 0; while ("/proc/self/fd/"[__u_k]) { __u_fdp[__u_k] = "/proc/self/fd/"[__u_k]; __u_k = __u_k + 1; }
+    __u_v = __u_fd; __u_n = 0;
+    do { __u_dig[__u_n] = (char)(48 + __u_v % 10); __u_v = __u_v / 10; __u_n = __u_n + 1; } while (__u_v);
+    while (__u_n) { __u_n = __u_n - 1; __u_fdp[__u_k] = __u_dig[__u_n]; __u_k = __u_k + 1; }
+    __u_fdp[__u_k] = 0;
+#ifdef __x86_64__
+    __u_r = __syscall6(89, (long)__u_fdp, (long)__u_tmp, PATH_MAX - 1, 0, 0);          /* readlink */
+#else
+    __u_r = __syscall6(78, -100, (long)__u_fdp, (long)__u_tmp, PATH_MAX - 1, 0);       /* readlinkat */
+#endif
+    __close(__u_fd);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; }
+    if (__u_r >= PATH_MAX - 1) { errno = ENAMETOOLONG; return 0; }
+    __u_n = __u_r; __u_tmp[__u_n] = 0;
+#endif
+    __u_d = __u_out;
+    if (!__u_d) { __u_d = (char *)malloc(PATH_MAX); if (!__u_d) { errno = ENOMEM; return 0; } }
+    __u_k = 0; while (__u_k <= __u_n) { __u_d[__u_k] = __u_tmp[__u_k]; __u_k = __u_k + 1; }
+    return __u_d;
+}
+#endif
+#endif
 /* mkdtemp (POSIX, 0.0.35 M1): mkstemp's names, but a directory, mode 0700 */
 #ifndef __UNISA_PYFRONT   /* __mkdir has no Windows import; the Python front end folds one tape across targets */
 #if !__UNISA_FTRIM_LIBC || __UN_mkdtemp

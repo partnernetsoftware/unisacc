@@ -9,6 +9,14 @@
 #define _UNISA_LIMITS_H
 
 #define CHAR_BIT    8
+/* PATH_MAX (POSIX <limits.h>, 0.0.37 C3): the host's own value */
+#ifdef _WIN32
+#define PATH_MAX    260
+#elif defined(__APPLE__)
+#define PATH_MAX    1024
+#else
+#define PATH_MAX    4096
+#endif
 #define SCHAR_MIN   (-128)
 #define SCHAR_MAX   127
 #define UCHAR_MAX   255
