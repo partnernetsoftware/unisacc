@@ -4,7 +4,6 @@
 # behave like cc on the loader's own contract: exit codes, payload argv/exit/signal pass-through,
 # and no extract directory left behind.
 cd "$(dirname "$0")/.." || exit 1
-. tests/lib.sh 2>/dev/null || true
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 case "$(uname -s)/$(uname -m)" in
   Darwin/arm64) cell=osx-aarch64;; Darwin/x86_64) cell=osx-x86_64;;
@@ -14,8 +13,14 @@ esac
 mkdir -p "$T/cells/$cell"
 printf '#!/bin/sh\necho "payload $#:$*"\ncase "$1" in sig) kill -TERM $$;; esac\nexit 3\n' > "$T/cells/$cell/minicon"
 B="cc"; tests/bound 30 cc -std=c99 -D_DEFAULT_SOURCE -o "$T/cc" tests/minicon/loader.c || { echo "minicon  cc build failed"; exit 1; }
-tests/bound 30 sh ./unisacc.com -o "$T/com" tests/minicon/loader.c || { echo "minicon  FAIL unisacc.com build"; exit 1; }
-B="$B com"
+# the product route: MODEL_COM (the candidate in a release queue) or the installed ./unisacc.com;
+# NO_COM=1 (gate job `minicon`) leaves it to `com-minicon` -- the installed .com reads this tree's include/
+if [ -z "${NO_COM:-}" ]; then
+    tests/bound 30 sh "${MODEL_COM:-./unisacc.com}" -o "$T/com" tests/minicon/loader.c || { echo "minicon  FAIL unisacc.com build"; exit 1; }
+    B="$B com"
+fi
+# PREBUILT=path: a loader cross-built elsewhere (e.g. -b lnx/arm64 on the host, run in a Linux guest)
+if [ -n "${PREBUILT:-}" ]; then cp "$PREBUILT" "$T/pre" && chmod +x "$T/pre" && B="$B pre"; fi
 if [ -n "${UA:-}" ]; then tests/bound 30 "$UA" -o "$T/ua" tests/minicon/loader.c || { echo "minicon  FAIL UA build"; exit 1; }; B="$B ua"; fi
 run() {   # run BIN CASE -> one normalized line
   b=$1; shift

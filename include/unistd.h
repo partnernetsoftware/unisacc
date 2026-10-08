@@ -414,11 +414,36 @@ static long readlink(const char *__u_p, char *__u_buf, size_t __u_n) {
 #endif
 }
 #endif
-/* 0.0.27 H1: the user and group ids forward to the system C library (pwd.h uses them) */
-uid_t getuid(void);
-uid_t geteuid(void);
-gid_t getgid(void);
-gid_t getegid(void);
+/* 0.0.36 M1: the user and group ids are direct system calls (0.0.27 H1 forwarded them to the system
+   C library, which a static unisacc.com on Linux cannot reach: minicon's loader calls geteuid) */
+#ifdef __APPLE__
+#define _UNISA_NR_getuid 24
+#define _UNISA_NR_geteuid 25
+#define _UNISA_NR_getgid 47
+#define _UNISA_NR_getegid 43
+#elif defined(__x86_64__)
+#define _UNISA_NR_getuid 102
+#define _UNISA_NR_geteuid 107
+#define _UNISA_NR_getgid 104
+#define _UNISA_NR_getegid 108
+#else
+#define _UNISA_NR_getuid 174
+#define _UNISA_NR_geteuid 175
+#define _UNISA_NR_getgid 176
+#define _UNISA_NR_getegid 177
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getuid
+static uid_t getuid(void) { return (uid_t)__syscall6(_UNISA_SC(_UNISA_NR_getuid), 0, 0, 0, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_geteuid
+static uid_t geteuid(void) { return (uid_t)__syscall6(_UNISA_SC(_UNISA_NR_geteuid), 0, 0, 0, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getgid
+static gid_t getgid(void) { return (gid_t)__syscall6(_UNISA_SC(_UNISA_NR_getgid), 0, 0, 0, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getegid
+static gid_t getegid(void) { return (gid_t)__syscall6(_UNISA_SC(_UNISA_NR_getegid), 0, 0, 0, 0, 0); }
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_ttyname
 static char *ttyname(int __u_fd) {             /* 0.0.24 D2: the terminal's path, or 0 with errno */
     static char __u_tn[1024]; long __u_r;
