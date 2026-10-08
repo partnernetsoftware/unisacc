@@ -746,6 +746,56 @@ int ustat_add(int t) {
     ustat_u[nustat] = curunit; nustat = nustat + 1;
     return 0;
 }
+/* 0.0.35 H1: the linkage each file-scope name of this unit has so far (C99 6.2.2):
+   1 internal, 2 external.  An `extern` declaration or a function declared without a
+   storage class takes the earlier linkage (p4, p5), so `static int x; extern int x;
+   static int x;` is one internal object; `static` after external linkage, or a plain
+   object declaration after internal linkage, has both linkages: undefined (p7), and
+   cc rejects it.  sclass: 0 no storage class (object), 1 static, 2 extern / function. */
+#define MAXLHIST 4096
+char lhist[MAXLHIST * NAMEW]; int lhist_u[MAXLHIST]; char lhist_l[MAXLHIST]; int nlhist;
+/* 0.0.35 H1: is buffer position p inside a spliced header?  The bundled libc
+   declares a function and later gives it a static body; that is the library's
+   own arrangement, not the program's.  Linear in p: call it only on the way
+   to a diagnostic. */
+int pos_inheader(long p) {
+    long q; long line; int i;
+    if (p < 0) p = 0;
+    if (p > nsrc) p = nsrc;
+    line = 1 - prelines; q = 0;
+    while (q < p) { if (src[q] == 10) line = line + 1; q = q + 1; }
+    i = nireg - 1;
+    while (i >= 0) {
+        if (line > ireg_ln[i] + ireg_nl[i]) line = line - ireg_nl[i];
+        else { if (line >= ireg_ln[i]) return 1; }
+        i = i - 1;
+    }
+    return 0;
+}
+int linkage_note(int t, int sclass) {
+    int i; int k; int ok; int p; int at;
+    p = 0; at = 0 - 1; i = 0;
+    while (i < nlhist) {
+        if (lhist_u[i] == curunit) {
+            k = 0; ok = 1;
+            while (k < tlen[t] && k < NAMEW - 1) { if (lhist[i * NAMEW + k] != src[tpos[t] + k]) { ok = 0; break; } k = k + 1; }
+            if (ok && lhist[i * NAMEW + k] == 0) { p = lhist_l[i]; at = i; break; }
+        }
+        i = i + 1;
+    }
+    if (sclass == 1 && p == 2 && pos_inheader(tpos[t]) == 0) err_tok(t, "static declaration follows a non-static declaration of this name (C99 6.2.2p7)");
+    if (sclass == 0 && p == 1 && pos_inheader(tpos[t]) == 0) err_tok(t, "non-static declaration follows a static declaration of this name (C99 6.2.2p7)");
+    if (at < 0) {
+        if (nlhist >= MAXLHIST) return 0;
+        at = nlhist; nlhist = nlhist + 1;
+        k = 0;
+        while (k < tlen[t] && k < NAMEW - 1) { lhist[at * NAMEW + k] = src[tpos[t] + k]; k = k + 1; }
+        lhist[at * NAMEW + k] = 0; lhist_u[at] = curunit;
+    }
+    if (sclass == 1) lhist_l[at] = 1;
+    else { if (sclass == 0 || p == 0) lhist_l[at] = 2; }
+    return 0;
+}
 /* The function called `nm` that unit 0 defined, or -1: unit 0's statics
    keep their names, so this is the label a call would use. */
 int symfn(char *nm, int L) {
@@ -3228,9 +3278,23 @@ int lor(void) {
 /* `a ? b : c` -- only one arm is evaluated, so each gets its own label and
    the value they share is r0. */
 int cond(void) {
-    int els; int end; int p1; int e1; int ci;
+    int els; int end; int p1; int e1; int ci; int cstart; int dead;
     lor();
+    cstart = tp - 1;            /* the condition's last token; the caller may have taken its first */
     if (cur() != tidx("?", 1)) return 0;
+    /* 0.0.35 D1: in a static initializer, `0 ? f() : 3` is a constant expression -- the
+       call sits in an arm that is not evaluated (C99 6.6p3).  Only a lone integer
+       literal right after the `=` is decided here; any other condition keeps both arms checked. */
+    dead = 0;
+    if (toinit && cstart >= 1 && kind(cstart - 1) == tidx("=", 1) && src[tpos[cstart]] >= 48 && src[tpos[cstart]] <= 57) {
+        int z; int q; z = 1; q = 0;
+        while (q < tlen[cstart]) { int ch; ch = src[tpos[cstart] + q];
+            if (ch == 46 || ch == 101 || ch == 69 || ch == 112 || ch == 80) { z = 0 - 1; break; }   /* a floating literal: undecided */
+            if ((ch >= 49 && ch <= 57) || (ch >= 97 && ch <= 102 && ch != 101) || (ch >= 65 && ch <= 70 && ch != 69)) { if (!(q == 1 && (ch == 120 || ch == 88))) z = 0; }
+            q = q + 1; }
+        if (z == 1) dead = 1;           /* 0: the middle arm is dead */
+        if (z == 0) dead = 2;           /* nonzero: the last arm is dead */
+    }
     loadval(); ftruthy(); adv();
     els = newlab(); end = newlab();
     elab("  @ctrl.jumpz r0, __unisacc_L", els); ec(10);
@@ -3241,11 +3305,15 @@ int cond(void) {
            `c ? f(), 7 : 0`.  It was parsed at the assignment level, which
            stopped at the comma and then demanded a `:`.  stb_image_write.h's
            stb_sb_free() expands to exactly that shape. */
+        if (dead == 1) unevaluated = unevaluated + 1;
         exprc(); loadval(); k1 = fkind(); a1 = tyax(); p1 = curptr; e1 = curelem;
+        if (dead == 1) unevaluated = unevaluated - 1;
         elab("  @ctrl.jump __unisacc_L", end); ec(10);
         elab("__unisacc_L", els); es(":\n");
         need(tidx(":", 1), ":");
+        if (dead == 2) unevaluated = unevaluated + 1;
         cond(); loadval(); k2 = fkind();
+        if (dead == 2) unevaluated = unevaluated - 1;
         ci = 0 - 1;
         if (p1 == 0 && curptr == 0 && k1 < 4 && k2 < 4) {
             int ct; ct = tyask(a1, "+", 1, tyax());
@@ -5545,6 +5613,7 @@ int function(int t, int w) {
     int pst; int nsp; int spsym[16]; int pfl; int fnglobal;
     /* `static int helper(...)` in the second unit is not the `helper` in
        the first: recorded here, before the label is emitted */
+    if (declstatic) linkage_note(t, 1); else linkage_note(t, 2);   /* 0.0.35 H1: functions too */
     if (declstatic) ustat_add(t);
     if (objextern && unitmode == 0 && declstatic == 0) ccw_note(t, declextern);
     fnglobal = declstatic == 0;              /* -funit: exported (bundled-header bodies are all static) */
@@ -5839,9 +5908,7 @@ int unit(void) {
             /* 0.0.32 H1''': `static T x` after a non-static `x` in the same unit is undefined
                (C99 6.2.2p7) and cc rejects it; accepting it bound the program's static to the
                header's external object -- `static char *environ[]` over <unistd.h>'s environ */
-            if (declstatic) { int pk; pk = sfind(t);
-                if (pk >= 0 && symunit[pk] == curunit && symkind[pk] != 1 && symgstat[pk] == 0)
-                    err_tok(t, "static declaration follows a non-static declaration of this name (C99 6.2.2p7)"); }
+            if (declstatic) linkage_note(t, 1); else { if (declextern) linkage_note(t, 2); else linkage_note(t, 0); }
             if (declstatic) ustat_add(t);
             /* ...which also means a second unit's `static hidden` is NOT a
                redeclaration of the first unit's: it needs its own storage,
