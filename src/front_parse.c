@@ -5097,6 +5097,28 @@ int local_decl(void) {
             need(tidx(";", 1), ";");
             return 0;
         }
+        /* 0.0.35 H1: `extern int x;` in a block names the file-scope object -- it was taken
+           for a fresh automatic and read garbage.  Covered when that object is already
+           declared at file scope and nothing nearer hides it; otherwise refused by name. */
+        if (declextern && lstat == 0) {
+            int gx; int dp; gx = sfind(t);
+            if (gx < 0 || gx >= scopebase || symkind[gx] == 2) {
+                err_uncov(t, "ref.parse", "decl.blockextern", "not covered: block-scope extern object without a visible file-scope declaration");
+                return 0;
+            }
+            linkage_note(t, 2);
+            dp = 0;
+            while (cur() != T_EOF) {
+                if (cur() == tidx("[", 1) || cur() == tidx("(", 1)) dp = dp + 1;
+                if (cur() == tidx("]", 1) || cur() == tidx(")", 1)) dp = dp - 1;
+                if (dp == 0 && (cur() == tidx(",", 1) || cur() == tidx(";", 1) || cur() == tidx("=", 1))) break;
+                adv();
+            }
+            if (cur() == tidx("=", 1)) { err_tok(tp, "a block-scope extern declaration cannot have an initializer (C99 6.7.8p5)"); return 0; }
+            if (eat(tidx(",", 1))) continue;
+            need(tidx(";", 1), ";");
+            return 0;
+        }
         lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
         if (fpn > 0) { n = fpn; isarr = 1; }
