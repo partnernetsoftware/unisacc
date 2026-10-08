@@ -1072,6 +1072,7 @@ class Walker:
         self.off, self.maxoff = 0, 0
         self.fn_ret = ret
         self.fn_label = sym
+        self.fn_name = name
         self.fn_nfixed = len(params) + (1 if ret.kind == "struct" else 0)
         self.fn_vararg = vararg
         self.ret_label = self.em.new_label("ret_" + sym + "_")
@@ -2378,6 +2379,10 @@ class Walker:
             self.want("expr", t, "lookup")
             self.next()
             s = self.sc.lookup(name)
+            if s is None and name == "__func__" and getattr(self, "fn_name", None):
+                # C99 6.4.2.2: as if `static const char __func__[] = "name";`
+                self.em.lea(ACC, self.em.intern(self.fn_name))
+                return self.postfix_chain(Type("arr", to=I8, n=len(self.fn_name)+1))
             if s is None:
                 raise CError("line %d: unknown identifier %r" % (t.line, name))
             if s.kind == "enum":
