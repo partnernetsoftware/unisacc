@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Merge comdemo.py records from several machines into one matrix and judge it.
 
-usage: comdemo_matrix.py --out MATRIX.json RESULT.json...
+usage: comdemo_matrix.py [--strict] --out MATRIX.json RESULT.json...
+--strict (release, 0.0.35): the labels must be exactly the six targets, once each, and every target
+must carry every program some machine ran (a missing cell is a failure; an explicit unsupported cell is kept).
 Judgement: every record passed on its own machine; every deterministic program printed
 identical bytes on every machine (stdout sha256); all records ran the same candidate bytes.
 Prints a table (program x machine) and exits 1 on any disagreement.
 """
 import argparse, json, pathlib, sys
 
+TARGETS = ('lnx/x86_64', 'lnx/arm64', 'osx/arm64', 'osx/x86_64', 'win/x86_64', 'win/arm64')
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', type=pathlib.Path, required=True)
+    ap.add_argument('--strict', action='store_true')
     ap.add_argument('results', nargs='+', type=pathlib.Path)
     a = ap.parse_args()
     recs = [json.loads(p.read_text()) for p in a.results]
@@ -21,6 +26,15 @@ def main():
     for lab, r in zip(labels, recs):
         if r['status'] != 'passed': problems.append(f'{lab}: failed {r["failures"]}')
     programs = sorted({n for r in recs for n in r['programs']})
+    if a.strict:
+        dup = sorted({l for l in labels if labels.count(l) > 1})
+        if dup: problems.append(f'duplicate machine labels: {dup}')
+        if set(labels) != set(TARGETS):
+            problems.append(f'targets: missing {sorted(set(TARGETS)-set(labels))} unexpected {sorted(set(labels)-set(TARGETS))}')
+        if not programs: problems.append('no programs ran')
+        for lab, r in zip(labels, recs):
+            gone = [n for n in programs if n not in r['programs']]
+            if gone: problems.append(f'{lab}: missing cells {gone}')
     table = {}
     for n in programs:
         cells = {lab: r['programs'].get(n) for lab, r in zip(labels, recs)}
