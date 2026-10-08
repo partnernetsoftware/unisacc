@@ -1027,9 +1027,9 @@ def k2gen2():
     updcompound = [dict(key=G.TK[o + "="], target="X.c" + o) for o in G.E.CASOPS]
     updid0 = sorted(set(range(257)) - {c["key"] for c in updcompound})
     retconst = dict(SBB=G.SBB, SSZ=G.SSZ, CKT=G.CKT, expr_entry="E%d" % G.LEVELS[0], tail_entry="C%d" % G.LEVELS[0])
-    tk = dict(G.TK, identifier=G.TK_ID)
+    tk = dict(G.TK, identifier=G.TK_ID, number=G.TK_NUM)
     for w in ("type=extern", "type=_Bool"):   # the token codes gen2 build() appends before any rows install
-        tk.setdefault(w, max(v for k, v in tk.items() if k != "identifier") + 1)
+        tk.setdefault(w, max(v for k, v in tk.items() if k not in ("identifier", "number")) + 1)
     retclasses = {n: [tk[t]] for n, t in G.tape_rows("return-tokens.tsv")}
     retclasses.update(typewords=[tk[w] for w in G.TWORDS], scalar_types=[G.BOOL, G.DBL, G.FLT], float_types=[G.DBL, G.FLT],
                       axis_f64=[G.AX.index("f64")], axis_f32=[G.AX.index("f32")],

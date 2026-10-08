@@ -288,6 +288,18 @@ poscase "$T/link_plain.c" "2:5" "non-static declaration follows a static"
 # 0.0.32 D1: a static object's initializer must be constant (C99 6.7.8p4); cc names the call
 { echo 'int f(int x) { return x + 1; }'; echo 'int v = f(1);'; echo 'int main(void) { return v != 2; }'; } > "$T/staticinit.c"
 poscase "$T/staticinit.c" "2:9" "initializer element is not a compile-time constant"
+# D1: static-local, object-value, aggregate and restored sizeof context.
+printf 'int f(void){return 7;} int g(void){static int x=f();return x;}\nint main(void){return 0;}\n' > "$T/init_local.c"
+poscase "$T/init_local.c" "1:49" "initializer element is not a compile-time constant"
+printf 'int y; static int x=y;\nint main(void){return 0;}\n' > "$T/init_value.c"
+poscase "$T/init_value.c" "1:21" "initializer element is not a compile-time constant"
+printf 'int f(void){return 7;} struct S{int x;}; static struct S s={f()};\nint main(void){return 0;}\n' > "$T/init_aggregate.c"
+poscase "$T/init_aggregate.c" "1:61" "initializer element is not a compile-time constant"
+printf 'int f(void){return 7;} static int x=sizeof(f())+f(); int main(void){return 0;}\n' > "$T/init_after_sizeof.c"
+poscase "$T/init_after_sizeof.c" "1:49" "initializer element is not a compile-time constant"
+
+printf 'int f(void){return 7;} static int x=0?f():3; static int y=f(); int main(void){return 0;}\n' > "$T/init_after_dead.c"
+poscase "$T/init_after_dead.c" "1:59" "initializer element is not a compile-time constant"
 printf "  rejection positions: %d named correctly, %d known missing, %d wrong\n" \
     "$pos_ok" "$pos_known" "$pos_bad"
 [ "$pos_bad" -eq 0 ] && [ $((pos_ok + pos_known)) -gt 0 ] && [ "$pos_revived" -eq 0 ] \
