@@ -68,7 +68,10 @@ def built_model(td,name,script,args,env=None):
         _construct(script,args,env,j,t,n); return n
     closure_hash,names=_keybase()
     effective=os.environ if env is None else env
-    key=hashlib.sha256(json.dumps([closure_hash,str(Path(script).resolve()),list(map(str,args)),
+    s=Path(script).resolve();root=Path(__file__).resolve().parents[2]
+    # 0.0.36 P8: the script by its repo-relative spelling, so a frozen worktree with the same bytes hits
+    sname=s.relative_to(root).as_posix() if s.is_relative_to(root) else str(s)
+    key=hashlib.sha256(json.dumps([closure_hash,sname,list(map(str,args)),
                                    [(k,effective.get(k)) for k in names]]).encode()).hexdigest()
     base=Path(os.environ.get('UNISACC_MODEL_CACHE',tempfile.gettempdir()+'/unisacc-model-cache'))
     base.mkdir(parents=True,exist_ok=True)
