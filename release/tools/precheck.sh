@@ -40,11 +40,13 @@ if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
     echo "  FAIL: UNISACC_FFI_X86_PROVIDER has no manifest.json (rebuild: release/RELEASE-PIPELINE.md section 9 step 5b)"; bad=1
 fi
 # 0.0.27 C2: the lnx/x86_64 ccinterop cells run on release-check ccinterop-x86, not a local Lima VM
+# 0.0.34 rc4: each contract window runs inside Terminal.app (term.sh), as the release queue does: from a bare
+# shell tools took 51 s against 44 s (first-exec scans of every new binary)
 # 0.0.28 R2: the contract layer (ledger, freeze, gate layers, fresh-order, ...) before sealing --
 # 0.0.27 moved its rc twice for tool reds that only the queue found after the seal.
 # Measured 2026-10-05: 46 suites, 6 windows of 55 s at jobs 2, 192 s; the cap of 10 leaves room
 cq=$(mktemp -d "${TMPDIR:-/tmp}/precheck-contract.XXXXXX"); crc=75; w=0
-while [ "$crc" -eq 75 ] && [ "$w" -lt 10 ]; do w=$((w+1)); python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
+while [ "$crc" -eq 75 ] && [ "$w" -lt 10 ]; do w=$((w+1)); ./tests/term.sh env ${UA:+UA=$UA} ${MODEL_COM:+MODEL_COM=$MODEL_COM} ${SEED_DIR:+SEED_DIR=$SEED_DIR} ${UNISACC_FFI_X86_PROVIDER:+UNISACC_FFI_X86_PROVIDER=$UNISACC_FFI_X86_PROVIDER} python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
 if [ "$crc" -ne 0 ]; then grep '^DONE' "$cq"/w*.log | grep -v ' rc=0 ' | cut -c1-200; tail -1 "$cq/w$w.log"; echo "  FAIL: contract layer (rc=$crc after $w windows; logs $cq)"; bad=1
 else echo "contract layer: passed in $w window(s)"; rm -rf "$cq"; fi
 # 0.0.28 E17: a known-fail line written during this version is debt the version must close before sealing

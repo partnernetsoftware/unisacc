@@ -76,7 +76,8 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
 }
 T0=$(date +%s)
 # longest first, so the tail of the run is short
-job tools       ./tests/tools.sh
+job tools-1     env SHARD=1/2 ./tests/tools.sh   # 0.0.34 rc4: the single job ran 42.9-51.1 s against 51
+job tools-2     env SHARD=2/2 ./tests/tools.sh
 job bigclosure-lnx-x86_64 ./tests/bigclosure.sh --target lnx/x86_64
 job bigclosure-lnx-arm64 ./tests/bigclosure.sh --target lnx/arm64
 job bigclosure-osx-x86_64 ./tests/bigclosure.sh --target osx/x86_64
