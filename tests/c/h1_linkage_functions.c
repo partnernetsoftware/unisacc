@@ -6,4 +6,4 @@ static int second(void) { return 4; }
 static int (*pick(void))(void);
 extern int (*pick(void))(void);
 static int (*pick(void))(void) { return first; }
-int main(void) { return first() == 3 && second() == 4 && pick()() == 3 ? 0 : 1; }
+int main(void) { extern int first(void); extern int second(void); return first() == 3 && second() == 4 && pick()() == 3 ? 0 : 1; }
