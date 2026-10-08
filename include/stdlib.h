@@ -286,6 +286,29 @@ static int mkstemp(char *__u_t) {
     return 0 - 1;
 }
 #endif
+/* mkdtemp (POSIX, 0.0.35 M1): mkstemp's names, but a directory, mode 0700 */
+#if !__UNISA_FTRIM_LIBC || __UN_mkdtemp
+static char *mkdtemp(char *__u_t) {
+    static unsigned long __u_seq;
+    long __u_n; long __u_j; int __u_try; long __u_r; unsigned long __u_v;
+    __u_n = 0; while (__u_t[__u_n]) __u_n = __u_n + 1;
+    if (__u_n < 6) { errno = EINVAL; return 0; }
+    __u_j = __u_n - 6; while (__u_j < __u_n) { if (__u_t[__u_j] != 88) { errno = EINVAL; return 0; } __u_j = __u_j + 1; }
+    __u_try = 0;
+    while (__u_try < 100) {
+        __u_seq = __u_seq + 1;
+        __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u + 17;
+        __u_j = __u_n - 6;
+        while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
+        __u_r = __mkdir(__u_t, 448, 0);
+        if (__u_r >= 0) return __u_t;
+        errno = (int)(0 - __u_r);
+        if (errno != EEXIST) return 0;
+        __u_try = __u_try + 1;
+    }
+    return 0;
+}
+#endif
 #endif /* !_WIN32 */
 /* strtod's slow path (more than 19 digits, or a power of ten past 22) is a
  * guess a few ulp off; these compare the decimal with the halfway points around

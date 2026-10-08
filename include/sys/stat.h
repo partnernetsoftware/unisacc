@@ -153,6 +153,40 @@ static int mkdir(const char *__u_p, mode_t __u_m) {
 #endif
 }
 #endif
+/* *at() flags (0.0.35 M1, minicon's loader): each kernel's own values */
+#ifndef AT_FDCWD
+#ifdef __APPLE__
+#define AT_FDCWD (0 - 2)
+#define AT_SYMLINK_NOFOLLOW 0x20
+#define AT_REMOVEDIR 0x80
+#else
+#define AT_FDCWD (0 - 100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_REMOVEDIR 0x200
+#endif
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_fstatat
+static int fstatat(int __u_dfd, const char *__u_p, struct stat *__u_b, int __u_fl) {
+#ifdef _WIN32
+    if (__u_dfd != AT_FDCWD) { errno = ENOSYS; return -1; }
+    return stat(__u_p, __u_b);
+#else
+    long __u_r;
+#if defined(__APPLE__)
+#if defined(__x86_64__)
+    __u_r = __syscall6(0x2000000L + 470, (long)__u_dfd, (long)__u_p, (long)__u_b, (long)__u_fl, 0);
+#else
+    __u_r = __syscall6(470, (long)__u_dfd, (long)__u_p, (long)__u_b, (long)__u_fl, 0);
+#endif
+#elif defined(__x86_64__)
+    __u_r = __syscall6(262, (long)__u_dfd, (long)__u_p, (long)__u_b, (long)__u_fl, 0);
+#else
+    __u_r = __syscall6(79, (long)__u_dfd, (long)__u_p, (long)__u_b, (long)__u_fl, 0);
+#endif
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
+#endif
+}
+#endif
 /* 0.0.28 H4: forwarded to the system C library on Linux and macOS */
 #ifndef _WIN32
 int fchmod(int __u_fd, mode_t __u_mode);

@@ -99,6 +99,40 @@ static int unlink(const char *__u_path) {
 #endif
 }
 #endif
+/* *at() flags (0.0.35 M1, minicon's loader): each kernel's own values */
+#ifndef AT_FDCWD
+#ifdef __APPLE__
+#define AT_FDCWD (0 - 2)
+#define AT_SYMLINK_NOFOLLOW 0x20
+#define AT_REMOVEDIR 0x80
+#else
+#define AT_FDCWD (0 - 100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_REMOVEDIR 0x200
+#endif
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_unlinkat
+static int unlinkat(int __u_dfd, const char *__u_p, int __u_fl) {
+#ifdef _WIN32
+    if (__u_dfd != AT_FDCWD) { errno = ENOSYS; return -1; }
+    return (__u_fl & AT_REMOVEDIR) ? rmdir(__u_p) : unlink(__u_p);
+#else
+    long __u_r;
+#if defined(__APPLE__)
+#if defined(__x86_64__)
+    __u_r = __syscall6(0x2000000L + 472, (long)__u_dfd, (long)__u_p, (long)__u_fl, 0, 0);
+#else
+    __u_r = __syscall6(472, (long)__u_dfd, (long)__u_p, (long)__u_fl, 0, 0);
+#endif
+#elif defined(__x86_64__)
+    __u_r = __syscall6(263, (long)__u_dfd, (long)__u_p, (long)__u_fl, 0, 0);
+#else
+    __u_r = __syscall6(35, (long)__u_dfd, (long)__u_p, (long)__u_fl, 0, 0);
+#endif
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
+#endif
+}
+#endif
 /* ---- processes (0.0.19 R19-5), through the generic gate __syscall6 (R19-9):
    the call numbers live here, per OS/arch; nothing in the compiler's tables.
    macOS x86-64 numbers carry the BSD class 0x2000000.  macOS fork returns the

@@ -65,6 +65,24 @@ static DIR *opendir(const char *__u_path) {
 #endif
 }
 #endif
+/* fdopendir/dirfd (POSIX, 0.0.35 M1): the stream takes over FD, which must be an open directory */
+#if !__UNISA_FTRIM_LIBC || __UN_fdopendir
+static DIR *fdopendir(int __u_fd) {
+    DIR *__u_d;
+#ifdef _WIN32
+    (void)__u_fd; errno = ENOSYS; return 0;
+#else
+    if (__u_fd < 0) { errno = EBADF; return 0; }
+    __u_d = (DIR *)malloc(sizeof(DIR));
+    if (__u_d == 0) { errno = ENOMEM; return 0; }
+    __u_d->fd = __u_fd; __u_d->pos = 0; __u_d->len = 0; __u_d->failed = 0; __u_d->basep = 0; __u_d->index = 0;
+    return __u_d;
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_dirfd
+static int dirfd(DIR *__u_d) { if (!__u_d || __u_d->fd < 0) { errno = EINVAL; return -1; } return __u_d->fd; }
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_readdir
 static struct dirent *readdir(DIR *__u_d) {
     unsigned char *__u_r; int __u_rl, __u_i, __u_left; long __u_n;
