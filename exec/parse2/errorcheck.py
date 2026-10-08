@@ -45,9 +45,9 @@ with tempfile.TemporaryDirectory(prefix='parser-errors-') as td:
   print('parser errors',name,'full result identical',flush=True)
  f=t/'struct-return.c';f.write_text('typedef struct { int a; int b; } T;\nstatic T mk(int n){T t;t.a=n;t.b=n;return t;}\nstatic T g(int n){return mk(n);}\nint main(void){return g(2).a-2;}\n')
  got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
- assert got.returncode==1 and got.stderr.startswith((b'UNCOVERED\te3\t-\t-\t'+str(f).encode()+b':3:')),got.stderr
- assert b'\texpr.call.ret-struct\tstruct return expression outside local lvalue\n' in got.stderr,got.stderr
- print('parser errors struct-return product gap has a located coverage record',flush=True)
+ ref=run([os.environ.get('UA','/tmp/ua_ref'),*ref_flags,'-t','lnx/x86_64',f,'-o','-'])
+ assert ref.returncode==0 and (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,ref.stderr),(got.returncode,ref.returncode,got.stderr,ref.stderr)
+ print('parser errors struct-return call full result identical',flush=True)
  for limit in ('1','2','0','3','20'):
   f=t/'limit.c';f.write_text(cases[3][1])
   (resources/'error-limit').write_text(limit)

@@ -15,6 +15,7 @@ import sim  # noqa: E402
 
 source = sys.argv[2]
 include_dirs = []
+attributes = None
 i = 3
 while i < len(sys.argv):
     arg = sys.argv[i]
@@ -30,12 +31,19 @@ while i < len(sys.argv):
         include_dirs.append(sys.argv[i])
     elif arg.startswith("-I") and len(arg) > 2:
         include_dirs.append(arg[2:])
+    elif arg == "--attributes":
+        i += 1
+        if i >= len(sys.argv):
+            sys.exit("simrun: missing --attributes path")
+        attributes = sys.argv[i]
     else:
         sys.exit("simrun: unknown option " + arg)
     i += 1
 files = sim.Files()
 if include_dirs:
     files.cache[b"\0cli/include-dir"] = "\n".join(include_dirs).encode("utf-8")
+if attributes is not None:
+    files.cache[b"\0cli/attributes"] = open(attributes, "rb").read()
 try:
     res, val, _ = sim.run(json.load(open(sys.argv[1])), open(sys.argv[2], "rb").read(), source, files)
 except (RuntimeError, OSError) as ex:     # a bad table or an unreadable file: 2, as exec/c/run.c

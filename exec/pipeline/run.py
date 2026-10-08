@@ -14,6 +14,7 @@ import hashlib
 import models
 import os
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -103,6 +104,21 @@ def first_diff(a, b):
     return "length %d vs ref %d lines" % (len(la), len(lb))
 
 
+def split_f1(frame):
+    """E1's F1 frame carries marks outside the ordinary typed-token stream."""
+    if len(frame) < 16 or frame[:8] != b"USLATTR1":
+        raise ValueError("E1 did not return an F1 attribute frame")
+    count, token_len = struct.unpack_from("<II", frame, 8)
+    end = 16 + 5 * count
+    if count > 256 or end + token_len != len(frame):
+        raise ValueError("malformed E1 attribute frame")
+    attrs = bytearray(struct.pack("<I", count))
+    for i in range(count):
+        attrs.extend(struct.pack("<I", 0))  # one source, unit zero
+        attrs.extend(frame[16 + 5 * i:21 + 5 * i])
+    return frame[end:], bytes(attrs)
+
+
 def main():
     a = sys.argv[1:]
     feed = "--ref-feed" in a
@@ -157,6 +173,7 @@ def main():
         print("input is not src.c: %s" % bad)
         return 1
     ok = True
+    attrs_path = None
     for k, s in enumerate(rows, 1):
         n, fmt = s["name"], s["in"].rstrip("?")
         if s["in"].endswith("?"):
@@ -181,7 +198,17 @@ def main():
         cmd = s["exec"].format(delta=s["delta"], **{"in": shlex.quote(cur)})
         if n == "E2":
             cmd += " --source " + shlex.quote(src) + incflags
+        if n == "E3" and attrs_path is not None:
+            cmd += " --attributes " + shlex.quote(attrs_path)
         r, o, e = sh(cmd)
+        if n == "E1" and r == 0:
+            try:
+                o, attrs = split_f1(o)
+            except ValueError as ex:
+                print("E1: not covered -- %s" % ex)
+                return 1
+            attrs_path = os.path.join(tmp, "e1.attributes")
+            open(attrs_path, "wb").write(attrs)
         # The token dumper's command path does not accept -I.  Feed it the
         # already checked E2 stream; this is also the exact text E1 consumed.
         ref_input = cur if n == "E1" else src

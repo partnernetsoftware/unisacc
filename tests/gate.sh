@@ -527,10 +527,11 @@ job lib-bindings-registry python3 ./tests/librarybindingscheck.py
 job tsv-build-account     python3 ./tests/tsvbuild_check.py
 # The five exec/pipeline/check_*_text.py format checkers have no caller in any
 # gate; the only path that reaches them is exec/pipeline/run.py, which nothing
-# invoked either.  This suite is that path, made bounded: run.py walks the seven
-# stages over one small program and calls check_<fmt>.py on each produced dump,
-# so a format checker that starts rejecting valid output fails here.
+# invoked either. These bounded suites walk the connected stages and call
+# check_<fmt>.py on each dump. The F1 probe also checks that E1's attribute
+# sidecar reaches E3 when a bundled header declares a constructor.
 job exec-formats python3 ./exec/pipeline/run.py examples/hello.c
+job exec-formats-f1 python3 ./exec/pipeline/run.py exec/pipeline/probes/f1_header_ctor.c
 job pipeline-cache python3 ./tests/pipelinecache.py
 # The last check that was in no gate AND failing on this HEAD: it cross-assembles
 # librarycall_<arch>.S for a Linux target and an Apple target and requires the
