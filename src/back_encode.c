@@ -152,6 +152,12 @@ int a_adrp_add(int d, long pc, long target) {
     {   long td; td = bk_tcell(target);
         if (td != 1) { ow(0xD1000000 | ((0 - td) << 10) | (7 << 5) | d); ow(0xD503201F); return 0; }   /* sub d, x7, #-td; nop */
     }
+    if (bk_objmode && target >= BK_OBJUND && bkos != 2) {   /* a name no unit defines may live in a shared library: load its address from the GOT */
+        if ((target - BK_OBJUND) & 1048575) { __write(2, "object: offset into an external name needs its own GOT form\n", 61); __exit(1); }
+        bk_relo(bkol, 311, target); bk_relo(bkol + 4, 312, target);   /* R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC */
+        ow(0x90000000 | d); ow(0xF9400000 | (d << 5) | d);             /* adrp d, :got:x; ldr d, [d, :got_lo12:x] */
+        return 0;
+    }
     page = (target >> 12) - (pc >> 12);
     lo12 = target & 0xFFF;
     if (bk_objmode) {                                   /* R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC */
@@ -703,6 +709,13 @@ int x_store(int r, int b, long disp, int wd) {
 int x_rip(int opc, int r, long pcnext, long target) {
     {   long td; td = bk_tcell(target);
         if (td != 1) { x_rex(1, r >> 3, 0, 0); ob(opc); ob(0x44 | ((r & 7) << 3)); ob(0x24); ob(td & 255); ob(0x66); ob(0x90); return 0; }   /* [rsp+d8]; 2-byte nop */
+    }
+    if (bk_objmode && opc == 0x8D && target >= BK_OBJUND && bkos != 2) {   /* lea of a name no unit defines: mov from its GOT slot */
+        if ((target - BK_OBJUND) & 1048575) { __write(2, "object: offset into an external name needs its own GOT form\n", 61); __exit(1); }
+        x_rex(1, r >> 3, 0, 0); ob(0x8B); x_modrm(0, r, 5);
+        if (bk_relo(bkol, 9, target)) bkro_add[bknro - 1] = bkro_add[bknro - 1] - 4;   /* R_X86_64_GOTPCREL */
+        x_d32(0);
+        return 0;
     }
     x_rex(1, r >> 3, 0, 0); ob(opc); x_modrm(0, r, 5);
     if (bk_objmode && target >= BK_OBJDATA) {           /* R_X86_64_PC32 against .data/.bss, A = offset - 4 */

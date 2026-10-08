@@ -42,6 +42,7 @@
 | 被系统 crt 启动（`cc a.o b.o` 直接可用） | 上一行 + `main` 走 C 调用约定 + 与 libc 的符号共存 | 0.0.18 之后，按需 | — |
 | 链接系统 libc 代替随带库 | 符号前缀策略、调用约定、errno/stdio 状态归属 | 远期，不承诺 | — |
 | `-shared` / `-fPIC` | 全部引用已是 PC 相对；缺动态节、GOT、PLT 与导出表 | 0.0.18 | `dlopen` 自家 `.so` |
+| 调用共享库里的函数（`-c` 对象 + `.so`/`.dylib`） | 参考侧 0.0.36：对未定义名取址走 GOT（arm64 `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC`、Mach-O `GOT_LOAD_PAGE21/PAGEOFF12`；x86_64 `GOTPCREL`、Mach-O `GOT_LOAD`），默认 PIE 可链；产品 δ 待 cdx 首片 | 0.0.36 | agenterm 探针（research/a1-handoff.md） |
 
 ## 4. ELF 可重定位目标文件规格（0.0.16）
 

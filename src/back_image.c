@@ -463,8 +463,11 @@ int bk_machoobj(void) {
         else { if (bkarch) {
             if (add != 0) bk_mrel(a, add, 0, 0, 10);                              /* ARM64_RELOC_ADDEND */
             if (bkro_type[k] == 275) bk_mrel(a, s, 1, 1, 3);                       /* ARM64_RELOC_PAGE21 */
-            else bk_mrel(a, s, 0, 1, 4);                                           /* ARM64_RELOC_PAGEOFF12 */
-        } else bk_mrel(a, s, 1, 1, 1); } }                                         /* X86_64_RELOC_SIGNED */
+            else { if (bkro_type[k] == 311) bk_mrel(a, s, 1, 1, 5);                 /* ARM64_RELOC_GOT_LOAD_PAGE21 */
+            else { if (bkro_type[k] == 312) bk_mrel(a, s, 0, 1, 6);                 /* ARM64_RELOC_GOT_LOAD_PAGEOFF12 */
+            else bk_mrel(a, s, 0, 1, 4); } }                                       /* ARM64_RELOC_PAGEOFF12 */
+        } else { if (bkro_type[k] == 9) bk_mrel(a, s, 1, 1, 3);                  /* X86_64_RELOC_GOT_LOAD */
+        else bk_mrel(a, s, 1, 1, 1); } } }                                         /* X86_64_RELOC_SIGNED */
         k = k + 1;
     }
     bk_msym(1, 14, 1, 0); bk_msym(7, 14, 2, ad); bk_msym(13, 14, 3, ab);          /* ltmp0..2 */
