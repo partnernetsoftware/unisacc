@@ -53,7 +53,7 @@ com|com-build)
 *) echo "usage: luatests.sh [ref|com-build|com]" >&2; exit 2;;
 esac
 ok=0; bad=0
-run() { (cd "$L/testes" && "$_BOUND" 30 $1 "$T/$2" -e "_port=true" "$3.lua" 2>&1 | sed "s|$T/$2|lua|g"; echo "status ${PIPESTATUS[0]}"); }
+run() { (cd "$L/testes" && "$_BOUND" 30 $1 "$T/$2" -e "_port=true" "$3.lua" 2>&1 | sed -e "s|$T/$2|lua|g" -e "s|^test done on .*|test done on <clock>|"; echo "status ${PIPESTATUS[0]}"); }
 for t in $EXACT $STATUS; do
     want=$(run "" cc "$t")
     case " $STATUS " in *" $t "*) want=$(echo "$want" | tail -1);; esac
