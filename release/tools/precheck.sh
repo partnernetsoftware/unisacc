@@ -7,13 +7,6 @@ bad=0
 t0=$(date +%s); python3 tests/bound.py 55 python3 -m unisa build-weights >/dev/null 2>&1 || bad=1; t=$(( $(date +%s) - t0 ))
 echo "build-weights ${t}s (local budget 19 s: release-check runs it under 55 s on a runner about twice as slow)"; [ "$t" -le 19 ] || { echo "  FAIL: hosted runners take about twice as long"; bad=1; }
 [ -z "$(git status --porcelain -- weights)" ] || { echo "  FAIL: build-weights changed weights/ (commit the construction first)"; bad=1; }
-for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh" "CORE_ASM_ARCH=x86_64 exec/c/asm/bindprep.sh" "UA=$UA exec/c/warningcheck.sh ua Wall"; do
-    t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 ))
-    # 0.0.23 F1: a cold cache (new sources) cost 55 s in 0.0.21 and 0.0.22; the first pass builds it,
-    # the second is the check -- a timeout only fails when the warm pass times out too
-    if [ "$rc" -eq 142 ]; then echo "warm-up: $w cold pass timed out (${t}s); checking warm"; t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 )); fi
-    echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
-done
 # 0.0.25 P8: every row of the version plan says how it ends before the version commit.
 # precheck runs after the version commit (freezecheck needs it), so ledgercheck's default
 # (version.h + 1) already names the next plan: check the version being released.
@@ -39,6 +32,22 @@ fi
 if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
     echo "  FAIL: UNISACC_FFI_X86_PROVIDER has no manifest.json (rebuild: release/RELEASE-PIPELINE.md section 9 step 5b)"; bad=1
 fi
+# 0.0.28 E17: a known-fail line written during this version is debt the version must close before sealing
+V=$(sed -n 's/.*UNISACC_VERSION "\(.*\)".*/\1/p' src/version.h)
+kf=$(grep -n "0\.0\.${V##*.} \|${V} " tests/*.knownfail tests/*.knownwrong exec/c/*.knownfail 2>/dev/null | grep -v '^[^:]*:[0-9]*:#' | grep -v '^tests/pyfront.knownfail:')   # the Python control group is not shipped
+if [ -n "$kf" ]; then printf '%s\n' "$kf" | cut -c1-200; echo "  FAIL: known-fail lines tagged $V remain (close them or move them to the next version with a reason)"; bad=1; fi
+# 0.0.35 P9: the cheap checks above fail first, before any warm-up (10-08: a known red waited 278 s);
+# bindprep runs as gate.sh does, first/second/package, each under its own bound (one cold pass was 55 s)
+if [ "$bad" -ne 0 ]; then echo "precheck FAILED (cheap checks): fix before freezing"; exit 1; fi
+for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh first" "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh second" "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh package" \
+         "CORE_ASM_ARCH=x86_64 exec/c/asm/bindprep.sh first" "CORE_ASM_ARCH=x86_64 exec/c/asm/bindprep.sh second" "CORE_ASM_ARCH=x86_64 exec/c/asm/bindprep.sh package" \
+         "UA=$UA exec/c/warningcheck.sh ua Wall"; do
+    t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 ))
+    # 0.0.23 F1: a cold cache (new sources) cost 55 s in 0.0.21 and 0.0.22; the first pass builds it,
+    # the second is the check -- a timeout only fails when the warm pass times out too
+    if [ "$rc" -eq 142 ]; then echo "warm-up: $w cold pass timed out (${t}s); checking warm"; t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 )); fi
+    echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
+done
 # 0.0.27 C2: the lnx/x86_64 ccinterop cells run on release-check ccinterop-x86, not a local Lima VM
 # 0.0.34 rc4: each contract window runs inside Terminal.app (term.sh), as the release queue does: from a bare
 # shell tools took 51 s against 44 s (first-exec scans of every new binary)
@@ -49,9 +58,5 @@ cq=$(mktemp -d "${TMPDIR:-/tmp}/precheck-contract.XXXXXX"); crc=75; w=0
 while [ "$crc" -eq 75 ] && [ "$w" -lt 10 ]; do w=$((w+1)); ./tests/term.sh env ${UA:+"UA=$UA"} ${MODEL_COM:+"MODEL_COM=$MODEL_COM"} ${SEED_DIR:+"SEED_DIR=$SEED_DIR"} ${UNISACC_FFI_X86_PROVIDER:+"UNISACC_FFI_X86_PROVIDER=$UNISACC_FFI_X86_PROVIDER"} python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
 if [ "$crc" -ne 0 ]; then grep '^DONE' "$cq"/w*.log | grep -v ' rc=0 ' | cut -c1-200; tail -1 "$cq/w$w.log"; echo "  FAIL: contract layer (rc=$crc after $w windows; logs $cq)"; bad=1
 else echo "contract layer: passed in $w window(s)"; rm -rf "$cq"; fi
-# 0.0.28 E17: a known-fail line written during this version is debt the version must close before sealing
-V=$(sed -n 's/.*UNISACC_VERSION "\(.*\)".*/\1/p' src/version.h)
-kf=$(grep -n "0\.0\.${V##*.} \|${V} " tests/*.knownfail tests/*.knownwrong exec/c/*.knownfail 2>/dev/null | grep -v '^[^:]*:[0-9]*:#' | grep -v '^tests/pyfront.knownfail:')   # the Python control group is not shipped
-if [ -n "$kf" ]; then printf '%s\n' "$kf" | cut -c1-200; echo "  FAIL: known-fail lines tagged $V remain (close them or move them to the next version with a reason)"; bad=1; fi
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
 exit $bad
