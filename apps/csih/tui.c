@@ -125,6 +125,11 @@ typedef struct {
     int  ninput;
     char pending[8][TUI_INPUT_MAX]; /* lines typed while a call is in flight */
     int  npending;
+    char history[16][TUI_INPUT_MAX]; /* accepted manual lines, oldest first */
+    int  nhistory;
+    int  history_pos;              /* browsing cursor; == nhistory means tail */
+    int  history_browsing;         /* 1 while Up/Down is walking history */
+    char history_draft[TUI_INPUT_MAX]; /* draft saved on the first Up */
     int  quit;                   /* leave the program */
     int  ask_exit;               /* empty Ctrl-C: say Ctrl-D quits, do not quit */
     int  pasting;                /* inside ESC [ 200 ~ ... ESC [ 201 ~ */
@@ -283,6 +288,46 @@ static int tui_frame_bad_width(const r_frame *f, int width) {
  * Split from the loop so it can be driven by a scripted key sequence in the
  * self-test. `key_kind` is a term_key_kind; -1 means "the wait timed out".
  */
+static void tui_history_add(tui_state *st, const char *text) {
+    if (!text || !text[0]) return;
+    if (st->nhistory > 0 && !strcmp(st->history[st->nhistory - 1], text)) {
+        st->history_pos = st->nhistory;
+        st->history_browsing = 0;
+        return;
+    }
+    if (st->nhistory >= 16) {
+        memmove(st->history[0], st->history[1], (size_t)(16 - 1) * TUI_INPUT_MAX);
+        st->nhistory = 16 - 1;
+    }
+    snprintf(st->history[st->nhistory], TUI_INPUT_MAX, "%s", text);
+    st->nhistory++;
+    st->history_pos = st->nhistory;
+    st->history_browsing = 0;
+}
+
+static void tui_history_move(tui_state *st, int delta) {
+    if (st->nhistory <= 0) return;
+    if (!st->history_browsing) {
+        if (delta >= 0) return;
+        snprintf(st->history_draft, TUI_INPUT_MAX, "%s", st->input);
+        st->history_browsing = 1;
+        st->history_pos = st->nhistory;
+    }
+    {
+        int pos = st->history_pos + delta;
+        if (pos < 0) pos = 0;
+        if (pos > st->nhistory) pos = st->nhistory;
+        st->history_pos = pos;
+    }
+    if (st->history_pos >= st->nhistory) {
+        snprintf(st->input, TUI_INPUT_MAX, "%s", st->history_draft);
+        st->history_browsing = 0;
+    } else {
+        snprintf(st->input, TUI_INPUT_MAX, "%s", st->history[st->history_pos]);
+    }
+    st->ninput = (int)strlen(st->input);
+}
+
 static void tui_enqueue(tui_state *st) {
     if (!st->input[0]) return;
     if (st->npending >= 8) { st->notice = "待发送已满"; return; }
@@ -607,6 +652,17 @@ static void tui_input_byte(tui_state *st, char ch) {
     }
 }
 
+/* Manual Enter path. Records the line into history only when tui_submit
+ * actually accepted it (input was non-empty and got cleared). The queue-full
+ * path keeps the input, so it is not recorded. */
+static void tui_manual_submit(tui_state *st) {
+    char captured[TUI_INPUT_MAX];
+    snprintf(captured, TUI_INPUT_MAX, "%s", st->input);
+    int had = st->input[0] != '\0';
+    tui_submit(st);
+    if (had && st->input[0] == '\0') tui_history_add(st, captured);
+}
+
 static void tui_submit(tui_state *st) {
     st->ask_exit = 0;
     if (!strcmp(st->input, "/exit") || !strcmp(st->input, "/quit")) {
@@ -676,7 +732,7 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
     case TERM_KEY_PASTE_OFF:
         /* The whole paste is one message. Newlines inside it were not Enter. */
         st->pasting = 0;
-        if (st->input[0]) tui_submit(st);
+        if (st->input[0]) tui_manual_submit(st);
         return;
     case TERM_KEY_ENTER:
         /* A newline that still has keys behind it is part of a paste or a
@@ -685,7 +741,7 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
             tui_input_byte(st, '\n');
             return;
         }
-        tui_submit(st);
+        tui_manual_submit(st);
         return;
     case TERM_KEY_CTRL_C:
         /* A typed line is cleared. An empty line does not quit: say so.
@@ -706,12 +762,12 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         st->quit = 1;
         return;
     case TERM_KEY_UP:
-        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
-        tui_log_scroll(st, 1);
+        if (st->pasting) { tui_input_byte(st, '\n'); return; }
+        tui_history_move(st, -1);
         return;
     case TERM_KEY_DOWN:
-        if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
-        tui_log_scroll(st, -1);
+        if (st->pasting) { tui_input_byte(st, '\n'); return; }
+        tui_history_move(st, 1);
         return;
     case TERM_KEY_PGUP:
         if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }

@@ -8,7 +8,7 @@
 #include <string.h>
 
 typedef struct {
-    int ok; int err; int exited; int status; int signal; long bytes;
+    int ok; int err; int exited; int status; int signal; int timed_out; long bytes;
     char out[65536];
 } shell_result;
 
@@ -131,6 +131,16 @@ static void run_selftest(void) {
     r = shell_run("awk 'BEGIN{for(i=0;i<80000;i++) printf \"x\"}'");
     expect(r.ok == 1 && r.exited == 1 && r.status == 0, "a long command still exits");
     expect(r.bytes < 0, "and the overflow is reported instead of a fake length");
+
+    /* --- a runaway command is killed, not waited on forever ------------- */
+    setenv("CSIH_EXEC_TIMEOUT_SEC", "1", 1);
+    r = shell_run("sleep 3");
+    expect(r.timed_out == 1, "a command over the budget is marked timed out");
+    expect(r.ok == 1, "and the result is still returned (not an error)");
+    expect(r.exited == 0 && r.signal != 0, "and the child died by a signal (killed)");
+    r = shell_run("echo alive");
+    expect(!strcmp(r.out, "alive\n"), "a normal command still works after a timeout");
+    unsetenv("CSIH_EXEC_TIMEOUT_SEC");
 }
 
 int shell_run_selftest(void) {

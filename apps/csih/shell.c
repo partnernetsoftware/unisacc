@@ -56,6 +56,9 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <signal.h>
+#include <time.h>
+#include <poll.h>
 
 /* ── results ────────────────────────────────────────────────────────────── */
 
@@ -67,9 +70,38 @@ typedef struct {
     int  exited;      /* 1 = the child exited normally */
     int  status;      /* exit status when exited, else 0 */
     int  signal;      /* terminating signal when !exited, else 0 */
+    int  timed_out;   /* 1 = the child was killed for running too long */
     long bytes;       /* bytes of output captured */
     char out[SHELL_OUT_MAX];
 } shell_result;
+
+/* Wait until fd is readable or the absolute deadline passes.
+ * Returns 1 when readable, 0 on deadline, -1 on error. *rem_ms gets the
+ * remaining milliseconds at the moment of return (0 if past deadline). */
+static int shell_poll_deadline(int fd, struct timespec *deadline, long *rem_ms)
+{
+    for (;;) {
+        struct timespec now;
+        long ms;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        ms = (long)(deadline->tv_sec - now.tv_sec) * 1000L
+           + (deadline->tv_nsec - now.tv_nsec) / 1000000L;
+        if (ms <= 0) { if (rem_ms) *rem_ms = 0; return 0; }
+        if (rem_ms) *rem_ms = ms;
+        {
+            struct pollfd p;
+            int pr;
+            p.fd = fd;
+            p.events = POLLIN;
+            p.revents = 0;
+            pr = poll(&p, 1, (int)ms);
+            if (pr > 0) return 1;
+            if (pr == 0) { if (rem_ms) *rem_ms = 0; return 0; }
+            if (errno == EINTR) continue;
+            return -1;
+        }
+    }
+}
 
 /* ── running ────────────────────────────────────────────────────────────── */
 
@@ -177,10 +209,27 @@ shell_result shell_run_in(const char *command, const char *cwd) {
 
     /* Drain first, then wait — the child may be blocked writing into a full
      * pipe while we wait for it to finish. Reversed, that is the deadlock. */
+    long budget_ms = 60000;
+    struct timespec deadline;
+    const char *env = getenv("CSIH_EXEC_TIMEOUT_SEC");
+    if (env && env[0]) {
+        long v = strtol(env, NULL, 10);
+        if (v > 0 && v <= 60) budget_ms = v * 1000;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += budget_ms / 1000;
+    deadline.tv_nsec += (budget_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000L;
+    }
     {
         size_t off = 0;
         ssize_t n;
         while (off + 1 < sizeof r.out) {
+            if (shell_poll_deadline(pipefd[0], &deadline, NULL) == 0) {
+                r.timed_out = 1;
+                break;
+            }
             n = read(pipefd[0], r.out + off, sizeof r.out - 1 - off);
             if (n < 0) {
                 if (errno == EINTR) continue;
@@ -197,6 +246,9 @@ shell_result shell_run_in(const char *command, const char *cwd) {
             char junk[1024];
             r.bytes = -1;
             for (;;) {
+                int pr = shell_poll_deadline(pipefd[0], &deadline, NULL);
+                if (pr == 0) { r.timed_out = 1; break; }
+                if (pr < 0) { r.err = errno; break; }
                 n = read(pipefd[0], junk, sizeof junk);
                 if (n < 0) { if (errno == EINTR) continue; break; }
                 if (n == 0) break;
@@ -208,9 +260,39 @@ shell_result shell_run_in(const char *command, const char *cwd) {
     {
         int st = 0;
         pid_t w;
-        do {
-            w = waitpid(pid, &st, 0);
-        } while (w < 0 && errno == EINTR);
+        /* One deadline for the whole turn: if we already hit it while
+         * reading, kill now; otherwise wait with the same deadline's
+         * remaining time, never a fresh budget. */
+        if (r.timed_out) {
+            kill(pid, SIGKILL);
+            do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
+        } else {
+            for (;;) {
+                w = waitpid(pid, &st, WNOHANG);
+                if (w == pid) break;
+                if (w < 0 && errno != EINTR) break;
+                if (w < 0 && errno == EINTR) continue;
+                {
+                    struct timespec now;
+                    long ms;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    ms = (long)(deadline.tv_sec - now.tv_sec) * 1000L
+                       + (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+                    if (ms <= 0) {
+                        kill(pid, SIGKILL);
+                        r.timed_out = 1;
+                        do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
+                        break;
+                    }
+                    {
+                        struct timespec ts;
+                        ts.tv_sec = 0;
+                        ts.tv_nsec = (ms > 100 ? 100 : ms) * 1000000L;
+                        nanosleep(&ts, NULL);
+                    }
+                }
+            }
+        }
 
         if (w < 0) { r.err = errno; return r; }
 

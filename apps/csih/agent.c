@@ -110,6 +110,7 @@ typedef struct {
     int  exited;
     int  status;
     int  signal;
+    int  timed_out;   /* 1 = killed for exceeding CSIH_EXEC_TIMEOUT_SEC */
     long bytes;
     char out[SHELL_OUT_MAX];
 } shell_result;
@@ -226,6 +227,7 @@ const char *agent_model_rules(void) { return AGENT_SYSTEM_PROMPT; }
 #define MAX_JUDGE    3
 #define MAX_ROUNDS   8
 #define MAX_ACTIONS  16
+#define MAX_MODEL_REPLIES 128 /* hard cap on model calls per user turn; binds all branches */
 #define MAX_CTX_RECS 50      /* last N eligible transcript records sent as context */
 /* The journal outlives one process. unisacc's cache re-exec drops setenv,
  * so the default path is derived from HOME, which the host still has. */
@@ -708,6 +710,7 @@ static int agent_slice(const char *path, const char *cwd, char *note, int nlen) 
 static char g_role_force[16];
 static char g_peer_force[64];
 static int g_watch_mailed;
+static int g_watch_deny;
 
 void agent_role_test(const char *role, const char *peer) {
     snprintf(g_role_force, sizeof g_role_force, "%s", role ? role : "");
@@ -715,7 +718,7 @@ void agent_role_test(const char *role, const char *peer) {
     g_watch_mailed = 0;
 }
 
-void agent_watch_reset(void) { g_watch_mailed = 0; }
+void agent_watch_reset(void) { g_watch_mailed = 0; g_watch_deny = 0; }
 
 static const char *agent_role_get(void) {
     if (g_role_force[0]) return g_role_force;
@@ -981,8 +984,12 @@ static int exec_run(const char *arg, char *out, int outlen) {
     cap = (long)(outlen - 64);
     n = r.bytes;
     if (n < 0) { n = (long)strlen(r.out); trunc = 1; }
-    snprintf(head, sizeof head, "cwd=%s\nexit=%d\n",
-             cwd && cwd[0] ? cwd : ".", r.exited ? r.status : -1);
+    if (r.timed_out)
+        snprintf(head, sizeof head, "cwd=%s\nexit=timeout\n",
+                 cwd && cwd[0] ? cwd : ".");
+    else
+        snprintf(head, sizeof head, "cwd=%s\nexit=%d\n",
+                 cwd && cwd[0] ? cwd : ".", r.exited ? r.status : -1);
     if (n > AGENT_SPILL_AT && agent_spill(r.out, (size_t)n, out, outlen)) {
         char merged[AGENT_RESULT_MAX];
         snprintf(merged, sizeof merged, "%s%s%s", head, out,
@@ -1432,6 +1439,7 @@ enum { PH_IDLE = 0, PH_GO = 1, PH_WAIT = 2, PH_DONE = 3, HTTP_ACT = 0, HTTP_END 
 
 static struct {
     int phase, http_kind, round, action, parse_fail, judge, no_tools;
+    int replies;      /* model reply calls this turn, monotonic, never reset by round/action */
     agent_result res;
     agent_event_fn on_event;
     void *ud;
@@ -1477,13 +1485,24 @@ static const char *at_judge_nudge(void) {
     else
         snprintf(judge_nudge, sizeof judge_nudge,
                  "收尾判断 %d/%d。只输出 {\"go\":\"continue\"} 或 {\"go\":\"stop\"}。"
-                 "没做完就 continue；还没 answer 时前两次 stop 不结束。",
+                 "没做完就 continue；还没 answer 时前两次 stop 不结束。"
+                 "失败不能宣称通过；stop 可以结束失败回合并保留原因。",
                  n, MAX_JUDGE);
     return judge_nudge;
 }
 
 static int at_start_http(const char *tail) {
     net_response r;
+    /* Budget exhausted: never issue another request, even from an early
+     * return path that would otherwise re-enter the model. */
+    if (AT.replies >= MAX_MODEL_REPLIES) {
+        AT.res.ok = 0;
+        snprintf(AT.res.reason, sizeof AT.res.reason,
+                 "unfinished: reply budget already exhausted (%d), no acceptance green",
+                 MAX_MODEL_REPLIES);
+        AT.phase = PH_DONE;
+        return 0;
+    }
     /* Window list once per user turn, on the first action call.
      * Later steps and the judgment must not see it again. */
     agent_build_messages(AT.transcript, tail,
@@ -1606,6 +1625,21 @@ static int at_after_http(void) {
         jfree(root);
     }
     if (!AT.content[0]) return at_fail(-4);
+    /* One model reply received. Monotonic across the whole turn; never
+     * reset by round/action. Every later branch (ACT, END, red flag,
+     * judge, nudge) returns through here, so this single gate bounds the
+     * total number of model calls. */
+    AT.replies++;
+    if (AT.replies > MAX_MODEL_REPLIES) {
+        AT.res.ok = 0;
+        AT.res.stopped = 0;
+        snprintf(AT.res.reason, sizeof AT.res.reason,
+                 "unfinished: exceeded MAX_MODEL_REPLIES (%d), no acceptance green",
+                 MAX_MODEL_REPLIES);
+        at_event("  → stop (reply budget exhausted, unfinished)");
+        AT.phase = PH_DONE;
+        return 0;
+    }
     rc = 0;
     (void)rc;
     if (AT.http_kind == HTTP_END) {
@@ -1698,6 +1732,19 @@ static int at_after_http(void) {
         if (s.kind == ACT_ANSWER || s.kind == ACT_GO_STOP) {
             char why[200];
             if (agent_failing(why, (int)sizeof why)) {
+                if (s.kind == ACT_GO_STOP) {
+                    /* A red flag means this slice failed. stop may end the
+                     * failed round and keep the reason, but it cannot claim
+                     * success. No further model call. */
+                    json_rec(tool_rec, sizeof tool_rec, "role", "decision", "go", "stop", NULL, NULL);
+                    session_append(AT.transcript, tool_rec);
+                    at_event("  → stop (red, failed)");
+                    snprintf(AT.res.reason, sizeof AT.res.reason, "unfinished: %s", why);
+                    AT.res.stopped = 1;
+                    AT.res.ok = 0;
+                    AT.phase = PH_DONE;
+                    return 0;
+                }
                 json_rec(tool_rec, sizeof tool_rec, "role", "tool", "name", "error", "text", why);
                 session_append(AT.transcript, tool_rec);
                 at_event(why);
@@ -1706,6 +1753,15 @@ static int at_after_http(void) {
             }
         }
         if (s.kind == ACT_GO_STOP) {
+            if (!AT.no_tools && agent_watch_needs_mail()) {
+                at_event("  → stop (peer mail not delivered)");
+                snprintf(AT.res.reason, sizeof AT.res.reason,
+                         "%s", "unfinished: peer mail not delivered");
+                AT.res.stopped = 1;
+                AT.res.ok = 0;
+                AT.phase = PH_DONE;
+                return 0;
+            }
             if (!agent_may_stop_ans(AT.judge, MAX_JUDGE, AT.res.answer[0] != 0)) {
                 AT.http_kind = HTTP_END;
                 AT.phase = PH_GO;
@@ -1729,9 +1785,19 @@ static int at_after_http(void) {
             AT.phase = PH_GO;
             return 1;
         }
-        if (s.kind == ACT_ANSWER && agent_watch_needs_mail()) {
+        if (s.kind == ACT_ANSWER && !AT.no_tools && agent_watch_needs_mail()) {
+            g_watch_deny++;
+            if (g_watch_deny >= 2) {
+                at_event("  → stop (peer mail not delivered)");
+                snprintf(AT.res.reason, sizeof AT.res.reason,
+                         "%s", "unfinished: peer mail not delivered");
+                AT.res.stopped = 1;
+                AT.res.ok = 0;
+                AT.phase = PH_DONE;
+                return 0;
+            }
             json_rec(tool_rec, sizeof tool_rec, "role", "tool", "name", "error", "text",
-                     "先给同伴发 envelope，再 answer。");
+                     "先给同伴发 envelope，再 answer；例如 exec bin/envelope 0:<peer> \"<标题>\" \"<正文>\"。");
             session_append(AT.transcript, tool_rec);
             at_event("先给同伴发 envelope");
             AT.phase = PH_GO;
