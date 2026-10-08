@@ -81,7 +81,7 @@ static void walk(const char *rel) {
 }
 static void file_entry(Sha *h, const char *rel) {
     /* read(2), not stdio: the product's <stdio.h> refuses ferror() in a unit
-       that never calls fgetc (plans/v0.0.32.md D3) */
+       that never calls fgetc (archive/plans/v0.0.32.md D3) */
     Sha f; unsigned char buf[1 << 16], dg[32]; long n; int fd = open(rel, O_RDONLY);
     if (fd < 0) die("cannot open", rel);
     sha_init(&f);

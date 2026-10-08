@@ -32,7 +32,7 @@ tn() {   # tn JSON TBL NET
 # 0.0.32 B5: SEED_GEN=1 (default) constructs the delta JSON of the stages seed/gen.c covers with the
 # C99 constructor instead of exec/build/gen.py; same bytes (tests/seedgencheck.sh), every stage the
 # build constructs (shared, lower --full, enc per target).  Built by the host cc for now, not unisacc.com: a .com -O2
-# seed-gen is byte-equal but runs parse2 in ~26 s against ~7 s (plans/v0.0.32.md D2).
+# seed-gen is byte-equal but runs parse2 in ~26 s against ~7 s (archive/plans/v0.0.32.md D2).
 gen() {   # gen STAGE OUT.json [FLAG...]
     if [ "${SEED_GEN:-1}" = 1 ]; then
         if [ ! -x "$T/seedbin/seed-gen" ]; then
