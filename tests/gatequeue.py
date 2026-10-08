@@ -386,9 +386,14 @@ def main():
                     pending.remove(n); data['results'][n] = {'rc': 1, 'seconds': 0, 'limit': 0}
                     print('DONE', n, 'rc=1 0.00s predecessor', ' '.join(bad), 'failed', flush=True)
                 # SCHEDULING-BEGIN
-                fits = [n for n in pending if estimate(n) <= left-1
+                # 0.0.35 P12: a job deferred out of a tail runs only at a full window, first (rc4 tools-1 was
+                # deferred twice, from 13 s and 36 s tails: 49 s of slot time lost)
+                full = set(data.get('fullwindow', []))
+                fits = [n for n in pending if estimate(n) <= left-1 and (n not in full or left >= window-3)
                         and all(p not in jobs or p in data['results'] for p in PREDS.get(n, ()))]
                 if not fits: break
+                first = [n for n in fits if n in full]
+                if first: fits = first
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job
                 n = max(alone or fits, key=estimate); pending.remove(n)
@@ -408,6 +413,7 @@ def main():
                     # attempt. Keep it pending and give it an early slot next.
                     pending.append(n)
                     data.setdefault('deferred', []).append({'name':n,'limit':limit})
+                    if n not in data.setdefault('fullwindow', []): data['fullwindow'].append(n)
                     history[n] = max(elapsed*2, history.get(n,0))
                 elif rc == 142 and n not in data.setdefault('retried', []) and n not in exclusive:
                     # 0.0.32: a full attempt that timed out is retried once, alone (q10-q12: jobs that take
