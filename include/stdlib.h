@@ -258,6 +258,8 @@ static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
    address of a local, so two processes running the same binary still differ. */
 #if !__UNISA_FTRIM_LIBC || __UN_mkstemp
 #include <fcntl.h>
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_mkstemp
 static int mkstemp(char *__u_t) {
     static unsigned long __u_seq;
     long __u_n; long __u_j; int __u_try; int __u_fd; unsigned long __u_v;
