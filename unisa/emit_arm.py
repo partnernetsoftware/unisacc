@@ -124,11 +124,12 @@ def _disp(bytes_, bits):
 
 
 def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
-           text_va=0, imps=None, short=False):
+           text_va=0, imps=None, short=False, os=None):
     o, a = ins.op, ins.args
     if o == "hostcall":
-        from .hostabi import ARM_FN, ARM_ARGV, ARM_BODY
-        return w(ARM_FN | (N(a[0]) << 16)) + w(ARM_ARGV | (N(a[1]) << 16)) + b"".join(w(v) for v in ARM_BODY)
+        from .hostabi import ARM_FN, ARM_ARGV, ARM_BODY, WIN_ARM_BODY
+        body = WIN_ARM_BODY if os == "win" else ARM_BODY   # back_encode.c bk_arm: bkos == 2
+        return w(ARM_FN | (N(a[0]) << 16)) + w(ARM_ARGV | (N(a[1]) << 16)) + b"".join(w(v) for v in body)
     if o == "hostaddr":
         if not 0 <= a[1] < 4:
             raise ValueError("hostaddr index must be 0..3")
@@ -533,8 +534,8 @@ class _Zero:
         return 0
 
 
-def size(ins, labels, short=False):
-    b = encode(ins, 0, _Zero(labels), "arm64", {}, 0, 0, {})
+def size(ins, labels, short=False, os=None):
+    b = encode(ins, 0, _Zero(labels), "arm64", {}, 0, 0, {}, os=os)
     return len(b) if b is not None else 4
 
 

@@ -464,13 +464,14 @@ def rip(opc, reg, pc_next, target):
 
 
 def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
-           text_va=0, imps=None, short=False):
+           text_va=0, imps=None, short=False, os=None):
     """-> bytes, or None when the op has no encoding here.  `short`: the
     assembler has found this branch's target within a signed byte."""
     o, a = ins.op, ins.args
     if o == "hostcall":
-        from .hostabi import X86_BODY
-        return mov_rr("r11", a[0]) + mov_rr("rax", a[1]) + X86_BODY
+        from .hostabi import X86_BODY, WIN_X86_BODY
+        body = WIN_X86_BODY if os == "win" else X86_BODY   # back_encode.c bk_x86: bkos == 2
+        return mov_rr("r11", a[0]) + mov_rr("rax", a[1]) + body
     if o == "hostaddr":
         if not 0 <= a[1] < 4:
             raise ValueError("hostaddr index must be 0..3")
@@ -702,8 +703,8 @@ class _Zero:
         return 0
 
 
-def size(ins, labels, short=False):
-    b = encode(ins, 0, _Zero(labels), "x86_64", {}, 0, 0, None, short)
+def size(ins, labels, short=False, os=None):
+    b = encode(ins, 0, _Zero(labels), "x86_64", {}, 0, 0, None, short, os=os)
     return len(b) if b is not None else len(UD2)
 
 

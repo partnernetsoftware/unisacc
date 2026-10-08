@@ -76,7 +76,12 @@ def encodings(d,runner,arch,models):
     inp.write_text(win)
     win_outputs=[call([runner,current,inp]).stdout for current in models]
     require(win_outputs[0] and win_outputs[0]==win_outputs[1],arch+' Windows hostcall/hostaddr table/net encoding differs')
-    print(arch+': 96 macOS bridge encodings and Windows hostcall/hostaddr table/net agreement; 6 invalid cases rejected',flush=True)
+    # X4: the reference (unisa.assemble, matching back_encode.c's bkos==2 body) judges the hostcall bytes.
+    # hostaddr is excluded: unisa.image.pe has no forward-import (LoadLibraryA..GetLastError) IAT layout,
+    # so its win hostaddr slot is not back_encode.c's bk_imp[BK_NIMP+i] (plans/v0.0.34.md X4).
+    ref=assemble(parse_tins(win))[0]; n=len(ref)-(12 if arch=='arm64' else 7)
+    require(win_outputs[0][:n]==ref[:n],arch+' Windows hostcall differs from the reference assembler')
+    print(arch+': 96 macOS bridge encodings and Windows hostcall/hostaddr table/net agreement, hostcall equal to reference; 6 invalid cases rejected',flush=True)
 
 
 def lowering(d,runner,arch,models,oracle):

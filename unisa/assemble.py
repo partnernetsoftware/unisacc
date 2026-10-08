@@ -37,7 +37,7 @@ def assemble(tp):
     # each newly short branch saves and re-sums the offsets -- re-encoding
     # every instruction per round would give back the speed the assembler
     # has, on a program the size of the compiler.
-    sizes = [be.size(ins, tp.labels) for ins in tp.code]
+    sizes = [be.size(ins, tp.labels, os=tp.os) for ins in tp.code]
     cand = [(pc, be.short_size(ins), be.branch_target(ins))
             for pc, ins in enumerate(tp.code) if be.short_size(ins) is not None]
     short = set()
@@ -68,7 +68,7 @@ def assemble(tp):
     covered = 0
     for pc, ins in enumerate(tp.code):
         b = be.encode(ins, offs[pc], labels, tp.arch, tp.syms,
-                      shift, text_va, imps, pc in short)
+                      shift, text_va, imps, pc in short, os=tp.os)
         if b is None:
             b = be.UD2 if tp.arch == "x86_64" else be.BRK
         else:
