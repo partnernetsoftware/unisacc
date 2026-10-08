@@ -78,7 +78,8 @@ for f in $FILES; do
     # EXPORTS a symbol named __mmap, so an undeclared call linked to it with
     # an implicit int return and the 64-bit pointer was cut to 32 bits: the
     # REFERENCE crashed, on Linux only, and the suite reported it as ours.
-    { echo '#include <stdio.h>'; echo '#include <string.h>'
+    { echo '#define _DEFAULT_SOURCE'   # glibc hides struct sigaction etc. under -std=c99 (0.0.35 Linux red)
+      echo '#include <stdio.h>'; echo '#include <string.h>'
       echo '#include <stdlib.h>'; echo '#include <sys/mman.h>'
       echo 'static long unisa_mmap_(long a,long n,long p,long f,long d,long o){return (long)mmap((void *)a,(size_t)n,(int)p,(int)f,(int)d,(off_t)o);}'
       # VARIADIC: the probe writes __mmap(M_ARGS), and a six-parameter

@@ -48,7 +48,8 @@ for f in "${FILES[@]}"; do
     throttle
     (
     D="$T/$b.d"; mkdir -p "$D"
-    { echo '#include <stdio.h>'; echo '#include <string.h>'
+    { echo '#define _DEFAULT_SOURCE'   # glibc hides struct sigaction etc. under -std=c99 (0.0.35 Linux red)
+      echo '#include <stdio.h>'; echo '#include <string.h>'
       echo '#include <stdlib.h>'; echo '#include <sys/mman.h>'
       echo 'static long unisa_mmap_(long a,long n,long p,long f,long d,long o){return (long)mmap((void *)a,(size_t)n,(int)p,(int)f,(int)d,(off_t)o);}'
       echo '#define __mmap(...) unisa_mmap_(__VA_ARGS__)'
