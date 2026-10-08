@@ -4941,7 +4941,7 @@ static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL);
 static void inspect_parse2_tokens(const char *outpath) {
     Value *facts = load_fact("parse-tokens"), *words = value_get(facts, "WORDS");
     Value *tk = value_get(facts, "TK"), *result = value_new(JOBJ);
-    const char *extra[] = {"type=extern", "type=_Bool"};
+    Value *extra = value_get(load_fact("parse2-extra"), "words");
     long long maximum = 0; size_t i; FILE *out;
     if (!words || words->kind != JARR || !tk || tk->kind != JOBJ)
         die("invalid parse token facts");
@@ -4950,13 +4950,15 @@ static void inspect_parse2_tokens(const char *outpath) {
         if (!v || v->kind != JINT || v->number < 0) die("invalid parse token number");
         if (v->number > maximum) maximum = v->number;
     }
-    for (i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
+    if (!extra || extra->kind != JARR) die("invalid parse2 extra words");
+    for (i = 0; i < extra->n; i++) {
+        const char *word = value_text(extra->items[i].value);
         Value *id = value_new(JINT);
-        if (value_get(tk, extra[i])) die("duplicate parse2 token");
+        if (value_get(tk, word)) die("duplicate parse2 token");
         if (maximum == LLONG_MAX) die("parse token number overflow");
         id->number = ++maximum;
-        value_put(words, NULL, value_string(extra[i]));
-        value_put(tk, extra[i], id);
+        value_put(words, NULL, value_string(word));
+        value_put(tk, word, id);
     }
     value_put(result, "WORDS", words); value_put(result, "TK", tk);
     out = fopen(outpath, "wb"); if (!out) die("cannot open output");

@@ -936,11 +936,18 @@ def _namespace_constants(G):
     return dict(function=f, globals=g, local=dict(SKIPS=G.SKIPS, PTR=E.PTR, BASE=E.BASE))
 
 
+def _parse2_extra_words():
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    from load import manifest_facts
+    return manifest_facts("parse2-extra")["words"]
+
+
 def _tk2(E):
     """parse2's token ids: parse words plus type=extern/_Bool appended after max(TK) (parse2base.tokens)."""
     assert "type=extern" not in E.TK
     tk = dict(E.TK)
-    for w in ("type=extern", "type=_Bool"):
+    for w in _parse2_extra_words():
         tk[w] = max(tk.values()) + 1
     return tk
 
@@ -986,7 +993,7 @@ def k2gen2():
     autonames = [dict(name=nm) for nm in _autonames(G.E)]
     i32 = G.TYINFO["i32"][0]
     btk = dict(G.TK)   # build() appends these two token codes before types() runs
-    for w in ("type=extern", "type=_Bool"):
+    for w in _parse2_extra_words():
         btk[w] = max(btk.values()) + 1
     typetargets = {btk[w]: "TS." + w for w in G.TWORDS}
     typetargets.update((G.TK_ID if w == "identifier" else btk[w], t) for w, t in G.tape_rows("type-entry.tsv"))
@@ -1019,7 +1026,7 @@ def k2gen2():
     updconst.update(("U" + str(z), G.UNS + z) for z in (1, 2, 4, 8))
     updconst.update(tail_entry="C%d" % G.LEVELS[0], axis_ptr=G.AX.index("ptr"), axis_struct=G.AX.index("struct"))
     tk = dict(G.TK, identifier=G.TK_ID)
-    for w in ("type=extern", "type=_Bool"):   # the token codes gen2 build() appends before any rows install
+    for w in _parse2_extra_words():   # the token codes gen2 build() appends before any rows install
         tk.setdefault(w, max(v for k, v in tk.items() if k != "identifier") + 1)
     updclasses = {n: [tk[t]] for n, t in G.tape_rows("update-tokens.tsv")}
     updclasses.update(BOOL=[G.BOOL], float_types=[G.DBL, G.FLT], float_axes=[G.AX.index("f32"), G.AX.index("f64")],
@@ -1028,7 +1035,7 @@ def k2gen2():
     updid0 = sorted(set(range(257)) - {c["key"] for c in updcompound})
     retconst = dict(SBB=G.SBB, SSZ=G.SSZ, CKT=G.CKT, expr_entry="E%d" % G.LEVELS[0], tail_entry="C%d" % G.LEVELS[0])
     tk = dict(G.TK, identifier=G.TK_ID, number=G.TK_NUM)
-    for w in ("type=extern", "type=_Bool"):   # the token codes gen2 build() appends before any rows install
+    for w in _parse2_extra_words():   # the token codes gen2 build() appends before any rows install
         tk.setdefault(w, max(v for k, v in tk.items() if k not in ("identifier", "number")) + 1)
     retclasses = {n: [tk[t]] for n, t in G.tape_rows("return-tokens.tsv")}
     retclasses.update(typewords=[tk[w] for w in G.TWORDS], scalar_types=[G.BOOL, G.DBL, G.FLT], float_types=[G.DBL, G.FLT],
@@ -1068,7 +1075,7 @@ def k2gen2tokens():
     B = _module("exec/build/parse2base.py", "k2gen2tok_base")
     tk = dict(E.TK)
     words = list(E.WORDS)
-    for w in ("type=extern", "type=_Bool"):
+    for w in _parse2_extra_words():
         words.append(w); tk[w] = max(tk.values()) + 1
     skip = B.QUALIFIERS
     spans = dict(ln.split("\t") for ln in (ROOT / "exec/parse/token-prefixes.tsv").read_text().splitlines()
@@ -1141,9 +1148,9 @@ def k2unitstokens():
 
 TABLES = [
     ("parse-tokens", ["exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], parsetokens),
-    ("k2-gen2-tokens", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
+    ("k2-gen2-tokens", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
     ("k2-units-tokens", ["exec/build/parsebase.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
-    ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
+    ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
@@ -1635,7 +1642,7 @@ def k2membercontrol():
             "=pop1_text\tjson\t" + compact(templates["template1"])]
 
 
-TABLES.append(("k2-membercontrol", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/parse2/membercontrol-template.tsv",
+TABLES.append(("k2-membercontrol", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/parse2/membercontrol-template.tsv",
                                     "exec/parse2/membercontrol-tokens.tsv", "exec/parse2/membercontrol-operators.tsv",
                                     "exec/parse2/membercontrol-fresh.tsv", "exec/parse2/membercontrol-manifest-fresh.tsv",
                                     "exec/parse2/membercontrol-text.tsv", "exec/parse2/membercontrol-stack.tsv",
@@ -1759,7 +1766,7 @@ def k2libraryenv():
             "=nomain_reason\tjson\t" + dump(mainreason), "=ret_text\tjson\t" + dump('  ret\n')]
 
 
-TABLES.append(("k2-libraryenv", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/build/parsebase.py", "exec/parse2/librarycallables-result.tsv",
+TABLES.append(("k2-libraryenv", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/build/parsebase.py", "exec/parse2/librarycallables-result.tsv",
                "exec/facts/libraryexports.tsv", "exec/facts/librarycallables.tsv", "exec/facts/libraryimports.tsv",
                "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv", "exec/facts/valueranks.tsv",
                "exec/facts/k2-gen2.tsv", "exec/facts/k2-librarymodule-map.tsv", "exec/facts/export.py"], k2libraryenv))

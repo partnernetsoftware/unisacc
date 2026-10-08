@@ -13,10 +13,11 @@ import sys
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "facts"))
-from load import facts as _facts
+from load import facts as _facts, manifest_facts as _manifest_facts
 
 _RANKOF = {r["name"]: r["value"] for r in _facts("valueranks") if r["kind"] == "rank"}
 QUALIFIERS = ("type=const", "type=volatile", "type=restrict", "type=inline")
+EXTRA_WORDS = tuple(_manifest_facts("parse2-extra")["words"])
 DEFS = {}   # (name, how) -> count
 
 
@@ -51,7 +52,7 @@ def install(E):
 
 
 def tokens(E):
-    for w in ("type=extern", "type=_Bool"):
+    for w in EXTRA_WORDS:
         E.WORDS.append(w)
         E.TK[w] = max(E.TK.values()) + 1
     import assemble   # token reader: exec/parse/tokens2-manifest.tsv (facts k2-gen2-tokens)
