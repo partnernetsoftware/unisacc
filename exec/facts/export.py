@@ -284,6 +284,7 @@ def _gen2ns(tag):
     TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
     SFLAT = 16 * POSSPAN  # scalar slots in a struct/member
     GUNIT = 15 * POSSPAN  # global symbol -> last declaration unit epoch
+    GHL, GHE = 21 * POSSPAN, 22 * POSSPAN  # effective file linkage; declaration unit epoch + 1
     PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
     GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
     TAGLEVEL, TAGUNDO = 19 * POSSPAN, 20 * POSSPAN
@@ -930,7 +931,7 @@ def _namespace_constants(G):
     E = G.E
     f = dict(PIDS=G.PIDS, PDB=G.PDB, LOC=G.LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
     f.update(("FN_PDB" + str(i), G.PDB + i) for i in range(16))
-    g = {name: getattr(G, name) for name in ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
+    g = {name: getattr(G, name) for name in ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "GHL", "GHE", "SINIT", "SKIPS")}
     g.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
     return dict(function=f, globals=g, local=dict(SKIPS=G.SKIPS, PTR=E.PTR, BASE=E.BASE))
 
