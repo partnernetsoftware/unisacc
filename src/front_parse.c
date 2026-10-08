@@ -5012,6 +5012,7 @@ int paramkind_add(int pk) {
 int block_prototype(int t, int w) {
     int si; int np; int var; int pw;
     declbytes = declptr ? 8 : declsz;
+    linkage_note(t, 2);   /* 0.0.35 H1: a block function declaration has the file-scope linkage history too (C99 6.2.2p4) */
     si = sadd(t, 2, 0, w);
     sympkfirst[si] = nsympk;
     need(tidx("(", 1), "(");
