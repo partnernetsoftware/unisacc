@@ -104,6 +104,7 @@ checked "unisacc environ env2 env1 -run" "$envwant" all env H1PROBE=outer "$UA" 
 # 0.0.31 F3: a unit with quoted includes keeps -ftrim-libc; the quoted headers (nested, and a
 # macro naming strdup) are scanned, so the program still links and runs, and trims exactly as
 # flat.c, the same text with the headers pasted in (0.0.30 reference: 132322 vs 66274 bytes).
+checked "unisacc printf-like external name" "7" all "$UA" -run "$D/pfalias0.c" "$D/pfalias1.c"
 checked "unisacc F3 quoted-include trim -run" "5 abc" all "$UA" -run "$D/f3/main.c"
 if bound 20 "$UA" "$D/f3/main.c" -o "$T/f3q" && bound 20 "$UA" "$D/f3/flat.c" -o "$T/f3flat"; then
     a=$(wc -c < "$T/f3q"); b=$(wc -c < "$T/f3flat")
