@@ -279,6 +279,100 @@ static int mkstemp(char *__u_t) {
     return 0 - 1;
 }
 #endif
+/* strtod's slow path (more than 19 digits, or a power of ten past 22) is a
+ * guess a few ulp off; these compare the decimal with the halfway points around
+ * it in big integers (base 2^32) and step to the correctly rounded double. */
+#define _U_BL 200
+#if !__UNISA_FTRIM_LIBC || __UN__u_bn_muls
+static void _u_bn_muls(unsigned int *__u_a, int *__u_n, unsigned int __u_k) {
+    unsigned long __u_c; int __u_i; __u_c = 0;
+    for (__u_i = 0; __u_i < *__u_n; __u_i++) { __u_c = __u_c + (unsigned long)__u_a[__u_i] * __u_k; __u_a[__u_i] = (unsigned int)__u_c; __u_c = __u_c >> 32; }
+    if (__u_c && *__u_n < _U_BL) { __u_a[*__u_n] = (unsigned int)__u_c; *__u_n = *__u_n + 1; }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_bn_shl
+static void _u_bn_shl(unsigned int *__u_a, int *__u_n, long __u_b) {
+    int __u_w; int __u_s; int __u_i;
+    __u_w = (int)(__u_b >> 5); __u_s = (int)(__u_b & 31);
+    if (*__u_n == 0) return;
+    if (__u_s) _u_bn_muls(__u_a, __u_n, 1u << __u_s);
+    if (__u_w) {
+        if (*__u_n + __u_w > _U_BL) __u_w = _U_BL - *__u_n;
+        for (__u_i = *__u_n - 1; __u_i >= 0; __u_i--) __u_a[__u_i + __u_w] = __u_a[__u_i];
+        for (__u_i = 0; __u_i < __u_w; __u_i++) __u_a[__u_i] = 0;
+        *__u_n = *__u_n + __u_w;
+    }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_bn_pow10
+static void _u_bn_pow10(unsigned int *__u_a, int *__u_n, long __u_x) {
+    while (__u_x >= 9) { _u_bn_muls(__u_a, __u_n, 1000000000u); __u_x = __u_x - 9; }
+    while (__u_x > 0) { _u_bn_muls(__u_a, __u_n, 10u); __u_x = __u_x - 1; }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_bn_cmp
+static int _u_bn_cmp(unsigned int *__u_a, int __u_na, unsigned int *__u_b, int __u_nb) {
+    int __u_i;
+    while (__u_na > 0 && __u_a[__u_na - 1] == 0) __u_na = __u_na - 1;
+    while (__u_nb > 0 && __u_b[__u_nb - 1] == 0) __u_nb = __u_nb - 1;
+    if (__u_na != __u_nb) return __u_na > __u_nb ? 1 : 0 - 1;
+    for (__u_i = __u_na - 1; __u_i >= 0; __u_i--) if (__u_a[__u_i] != __u_b[__u_i]) return __u_a[__u_i] > __u_b[__u_i] ? 1 : 0 - 1;
+    return 0;
+}
+#endif
+/* sign of D*10^x10 - (2m+1)*2^(e-1), the halfway point above v; D = the digits
+   s[0..len) skipping '.', at most 780 significant (the rest only make it bigger) */
+#if !__UNISA_FTRIM_LIBC || __UN__u_sd_cmp
+static int _u_sd_cmp(const char *__u_s, long __u_len, long __u_x10, double __u_v) {
+    static unsigned int __u_d[_U_BL]; static unsigned int __u_h[_U_BL];
+    int __u_nd; int __u_nh; int __u_sticky; int __u_c; long __u_i; long __u_cnt; long __u_xx;
+    unsigned long __u_bits; unsigned long __u_m; long __u_e;
+    __u_nd = 0; __u_sticky = 0; __u_cnt = 0; __u_xx = __u_x10;
+    for (__u_i = 0; __u_i < __u_len; __u_i++) {
+        int __u_ch; unsigned long __u_c2; int __u_j;
+        __u_ch = __u_s[__u_i];
+        if (__u_ch == 46) continue;
+        if (__u_cnt >= 780) { if (__u_ch != 48) __u_sticky = 1; __u_xx = __u_xx + 1; continue; }
+        if (__u_nd == 0 && __u_ch == 48) continue;
+        if (__u_nd == 0) { __u_d[0] = 0; __u_nd = 1; }
+        _u_bn_muls(__u_d, &__u_nd, 10u);
+        __u_c2 = (unsigned long)(__u_ch - 48);
+        for (__u_j = 0; __u_c2 && __u_j < __u_nd; __u_j++) { __u_c2 = __u_c2 + __u_d[__u_j]; __u_d[__u_j] = (unsigned int)__u_c2; __u_c2 = __u_c2 >> 32; }
+        if (__u_c2 && __u_nd < _U_BL) { __u_d[__u_nd] = (unsigned int)__u_c2; __u_nd = __u_nd + 1; }
+        __u_cnt = __u_cnt + 1;
+    }
+    if (__u_nd == 0) return 0 - 1;
+    __u_bits = *(unsigned long *)&__u_v;
+    __u_e = (long)((__u_bits >> 52) & 2047); __u_m = __u_bits & 4503599627370495;
+    if (__u_e == 0) __u_e = 1; else __u_m = __u_m | 4503599627370496;
+    __u_e = __u_e - 1075;
+    __u_m = 2 * __u_m + 1;
+    __u_nh = 2; __u_h[0] = (unsigned int)__u_m; __u_h[1] = (unsigned int)(__u_m >> 32);
+    if (__u_xx > 0) _u_bn_pow10(__u_d, &__u_nd, __u_xx); else _u_bn_pow10(__u_h, &__u_nh, 0 - __u_xx);
+    if (__u_e - 1 > 0) _u_bn_shl(__u_h, &__u_nh, __u_e - 1); else _u_bn_shl(__u_d, &__u_nd, 1 - __u_e);
+    __u_c = _u_bn_cmp(__u_d, __u_nd, __u_h, __u_nh);
+    if (__u_c == 0 && __u_sticky) __u_c = 1;
+    return __u_c;
+}
+#endif
+/* walk the guess (finite, >= 0, a few ulp off) to the correctly rounded double */
+#if !__UNISA_FTRIM_LIBC || __UN__u_sd_fix
+static double _u_sd_fix(const char *__u_s, long __u_len, long __u_x10, double __u_v) {
+    unsigned long __u_b; unsigned long __u_lb; int __u_c; int __u_k;
+    for (__u_k = 0; __u_k < 64; __u_k++) {
+        __u_b = *(unsigned long *)&__u_v;
+        if (__u_b >= 9218868437227405312) return __u_v;              /* inf or nan */
+        __u_c = _u_sd_cmp(__u_s, __u_len, __u_x10, __u_v);
+        if (__u_c > 0 || (__u_c == 0 && (__u_b & 1))) { __u_b = __u_b + 1; __u_v = *(double *)&__u_b; continue; }
+        if (__u_b == 0) return __u_v;
+        __u_lb = __u_b - 1;
+        __u_c = _u_sd_cmp(__u_s, __u_len, __u_x10, *(double *)&__u_lb);
+        if (__u_c < 0 || (__u_c == 0 && !(__u_lb & 1))) { __u_v = *(double *)&__u_lb; continue; }
+        return __u_v;
+    }
+    return __u_v;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtod
 static double strtod(const char *__u_s, char **__u_end) {
     double __u_v; int __u_sign; long __u_i; int __u_any;
@@ -330,18 +424,20 @@ static double strtod(const char *__u_s, char **__u_end) {
      * once by a power of ten; with at most 2^53 and |power| <= 22 that is a
      * single rounding (Clinger's fast path), so 2^63 and 10^i come out exact. */
     {   unsigned long __u_m; long __u_x10; double __u_p; long __u_q;
-        __u_m = 0; __u_x10 = 0;
+        long __u_ds; long __u_de; long __u_fd; long __u_ex; int __u_drop;
+        __u_m = 0; __u_x10 = 0; __u_ds = __u_i; __u_fd = 0; __u_ex = 0; __u_drop = 0;
         while (__u_s[__u_i] >= 48 && __u_s[__u_i] <= 57) {
-            if (__u_m < 1844674407370955161) __u_m = __u_m * 10 + (unsigned long)(__u_s[__u_i] - 48); else __u_x10 = __u_x10 + 1;
+            if (__u_m < 1844674407370955161) __u_m = __u_m * 10 + (unsigned long)(__u_s[__u_i] - 48); else { __u_x10 = __u_x10 + 1; __u_drop = 1; }
             __u_i = __u_i + 1; __u_any = 1;
         }
         if (__u_s[__u_i] == 46) {
             __u_i = __u_i + 1;
             while (__u_s[__u_i] >= 48 && __u_s[__u_i] <= 57) {
-                if (__u_m < 1844674407370955161) { __u_m = __u_m * 10 + (unsigned long)(__u_s[__u_i] - 48); __u_x10 = __u_x10 - 1; }
-                __u_i = __u_i + 1; __u_any = 1;
+                if (__u_m < 1844674407370955161) { __u_m = __u_m * 10 + (unsigned long)(__u_s[__u_i] - 48); __u_x10 = __u_x10 - 1; } else __u_drop = 1;
+                __u_i = __u_i + 1; __u_any = 1; __u_fd = __u_fd + 1;
             }
         }
+        __u_de = __u_i;
         if (__u_any) { if (__u_s[__u_i] == 101 || __u_s[__u_i] == 69) {
             long __u_j; __u_j = __u_i + 1; __u_esign = 1;
             if (__u_s[__u_j] == 45) { __u_esign = 0 - 1; __u_j = __u_j + 1; }
@@ -349,10 +445,11 @@ static double strtod(const char *__u_s, char **__u_end) {
             if (__u_s[__u_j] >= 48 && __u_s[__u_j] <= 57) {
                 __u_e = 0;
                 while (__u_s[__u_j] >= 48 && __u_s[__u_j] <= 57) { if (__u_e < 100000) __u_e = __u_e * 10 + (__u_s[__u_j] - 48); __u_j = __u_j + 1; }
-                __u_i = __u_j; __u_x10 = __u_x10 + __u_esign * __u_e;
+                __u_i = __u_j; __u_x10 = __u_x10 + __u_esign * __u_e; __u_ex = __u_esign * __u_e;
             }
         } }
         while (__u_m != 0 && __u_x10 < 0 && __u_m % 10 == 0) { __u_m = __u_m / 10; __u_x10 = __u_x10 + 1; }
+        __u_drop = __u_drop || __u_m > 9007199254740992 || __u_x10 > 22 || __u_x10 < 0 - 22;
         if (__u_m >> 63) __u_v = (double)(long)(__u_m >> 1) * 2.0 + (double)(long)(__u_m & 1); else __u_v = (double)(long)__u_m;
         if (__u_m != 0) {
             while (__u_x10 > 22) { __u_v = __u_v * 1.0e22; __u_x10 = __u_x10 - 22; }
@@ -360,6 +457,10 @@ static double strtod(const char *__u_s, char **__u_end) {
             __u_p = 1.0; __u_q = __u_x10 < 0 ? 0 - __u_x10 : __u_x10;
             while (__u_q > 0) { __u_p = __u_p * 10.0; __u_q = __u_q - 1; }
             if (__u_x10 > 0) __u_v = __u_v * __u_p; else { if (__u_x10 < 0) __u_v = __u_v / __u_p; }
+        }
+        if (__u_m != 0 && __u_drop) {
+            if (__u_v > 1.7976931348623157e308) __u_v = 1.7976931348623157e308;
+            __u_v = _u_sd_fix(__u_s + __u_ds, __u_de - __u_ds, __u_ex - __u_fd, __u_v);
         }
     }
     if (__u_end) *__u_end = (char *)(__u_s + (__u_any ? __u_i : 0));
