@@ -10,8 +10,8 @@
 |---|---|---|---|
 | 0.0.35 | 当前计划（H1/D1、P8–P12、M1/A1/N1）+ **K0 .cx 工具基础**：include/cx.h 扩成模块（文件、目录遍历、进程与超时、退出码、sha256、JSON/TSV 读写），自带单元测试；未跟踪脚本盘点 | K0、盘点 | H1/D1 当前片 |
 | 0.0.36 | **顺延收口**（E71：K1 已撤出本版，K1 原定义「构建与发布链：release/ 16、build_candidate/buildcompiler 编排、term/bound/stamp 类工具改 .cx」待政委另行排期，本表不代排） | 顺延项 | 顺延项 |
-| 0.0.37 | **K2 门禁运行器与队列**：gate.sh、gatequeue.py、bound.py、gatedeps、precheck 改 .cx（复用规则、身份、调度语义对拍） | K2 | — |
-| 0.0.38 | **K3 tests/ 套件第一批**（.sh 107 全部 + .py 约一半） | K3 | — |
+| 0.0.37 | **c99 闭环与顺延超限项**（K2 依赖已撤出的 K1，顺延到 0.0.38，不删） | C1–C3 | — |
+| 0.0.38 | **K2 门禁运行器与队列**：gate.sh、gatequeue.py、bound.py、gatedeps、precheck 改 .cx（复用规则、身份、调度语义对拍）；同版 **K3 tests/ 套件第一批**（.sh 107 全部 + .py 约一半） | K2、K3 | — |
 | 0.0.39 | **K4 tests/ .py 余下** + iterate/apps/scripts/bench | K4 | apps/csih 探针 |
 | 0.0.40 | **K5 exec/ 生成器与检查**（173 个；δ 构造器已有 seed/gen.c 先例） | 检查脚本 | K5 生成器 |
 | 0.0.41 | **K6 unisa/ 参考与权重构造**改为 C（先有逐字节等价的 C 参考，再删 Python） | 门禁接线 | K6 |
