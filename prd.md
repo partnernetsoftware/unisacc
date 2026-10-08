@@ -1280,3 +1280,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔C1b 诊断验收补正〕正式C执行器发现uc_kind=1会多报结构返回未覆盖帧；register取址是C约束诊断，应设uc_kind=0，完整stderr必须与参考逐字节比较，不能只检查子串。
 
 〔0.0.37 C1b 同落验收，2026-10-09〕参考register取址检查与E3独立token视图同落，tests/diag.sh增加14例（6接受、8拒绝C99 6.5.3.2p1）。正式默认清单14例通过且接受tape与INTERN新增顺序不变；C执行器E2→E1→E3位置/错误路径14例完整tape或stderr逐字节同新参考，UNITOK2另4例完整结果同；参考diag31/0、r21为48同/5具名拒绝/0接受不同。parse2八变体graphhash重录，其他阶段记录不变；fresh-order0..8全重录核对无变化，facts30/0、kernel stale0、op9。仓根.com直接-run seed/gen.c生成完整parse2与Python逐字节同。正式0.0.37候选.com的14例运行由cc补验，未以合成tape替代；register数组隐式衰变等未纳入本片，不把整个6.7.1宣称covered。元数据额外嵌套FP不泄漏验证累计9例，前文首片7例为当时记录。
+
+〔L1b′ 勘察约束，2026-10-09；只是设计〕不能只修.sys6的SYSFP/SYSSP：六参数SYSA格以及.sys/.write参数格也共享，信号可在保存或装载之间插入而污染外层调用。优先设计POSIX系统调用的私有栈帧（现有load64/store64/栈调整表达），同时核对真实信号入口的host ABI→tape栈边界；旧sigaction补丁直接传函数地址，既有__ccw转换只在转发桩启用时生效，不能假定直接内核回调已有包装。参考、头、lower/enc同批落，先证明嵌套重入和处理函数返回；不以仅修arm64重装FP/SP代替完整验收。详见research/l1b-signal-lowering-design.md。
