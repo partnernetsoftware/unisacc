@@ -2520,6 +2520,8 @@ class Walker:
                 self.em.emit(self.em.recipe("alu",
                                             "sub" if op == "++" else "add"),
                              ACC, ACC, TMP)
+                if aty.kind in NARROW_UNS:
+                    self.em.zext(NARROW_UNS[aty.kind])   # the narrow load sign-extended the old value
                 ty = aty
             elif p == "call":
                 ty = self.call_value(ty)
