@@ -29,14 +29,20 @@ def layout(os_, arch, textlen, dynamic=False):
     if os_ == "win":
         # .text / .rdata (the import table) / .data, each on its own page:
         # a section RVA must be a multiple of SectionAlignment [I-16]
-        return t, BASE[os_] + pe.data_rva(textlen)
+        return t, BASE[os_] + pe.data_rva(textlen, dynamic)
     return t, t + textlen
 
 
-def imports(os_, arch, textlen):
+def imports(os_, arch, textlen, dynamic=False):
     """`__imp_<name>` -> the absolute address of its IAT slot.  Only Windows
-    has any: on Linux and macOS we talk to the kernel directly."""
-    return pe.imports(arch, textlen) if os_ == "win" else {}
+    has any: on Linux and macOS we talk to the kernel directly.  A forwarding
+    Windows image (`dynamic`) has the four FORWARD_IMPORTS slots too."""
+    return pe.imports(arch, textlen, dynamic) if os_ == "win" else {}
+
+
+def forwards(tp):
+    """back_lower.c bk_dyn: the program uses the host bridge."""
+    return any(i.op in ("hostcall", "hostaddr") for i in tp.code)
 
 
 def relocate(tp, data, shift):
@@ -62,11 +68,12 @@ def build(tp, text, data, entry, stub=b""):
     # fills the rest of the `full` length.  lower.zero_last put the zeros last.
     full = len(data)
     data = bytes(data.rstrip(b"\x00"))   # R3: rstrip first, so only the stored prefix is copied
+    dynamic = tp.os in ("lnx", "win") and forwards(tp)
     if tp.os == "win":
         return pe.write(tp.arch, text, data, entry,
                         relocs=getattr(tp, "relocs", ()),
-                        bss=getattr(tp, "bss", 0), full=full, stub=stub)
-    dynamic = tp.os == "lnx" and any(i.op in ("hostcall", "hostaddr") for i in tp.code)
+                        bss=getattr(tp, "bss", 0), full=full, stub=stub,
+                        dynamic=dynamic)
     if tp.os == "lnx":
         return elf.write(tp.arch, text, data, entry, full=full, dynamic=dynamic)
     return WRITER[tp.os](tp.arch, text, data, entry, full=full)

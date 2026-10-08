@@ -475,6 +475,9 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "hostaddr":
         if not 0 <= a[1] < 4:
             raise ValueError("hostaddr index must be 0..3")
+        if os == "win":   # back_encode.c:1014 bkos == 2: the IAT slot bk_imp[BK_NIMP+i]
+            from .image.pe import FORWARD_IMPORTS, IMPORTS
+            return rip(0x8B, a[0], text_va+off+7, (imps or {}).get("__imp_" + FORWARD_IMPORTS[len(IMPORTS)+a[1]], 0))
         return rip(0x8B, a[0], text_va+off+7, 256+shift-32+8*a[1])
     if o == "mov":
         return mov_rr(a[0], a[1])

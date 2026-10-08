@@ -133,7 +133,11 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
     if o == "hostaddr":
         if not 0 <= a[1] < 4:
             raise ValueError("hostaddr index must be 0..3")
-        slot = 256 + shift - 32 + 8*a[1]
+        if os == "win":   # back_encode.c:465 bkos == 2: the IAT slot bk_imp[BK_NIMP+i]
+            from .image.pe import FORWARD_IMPORTS, IMPORTS
+            slot = (imps or {}).get("__imp_" + FORWARD_IMPORTS[len(IMPORTS)+a[1]], 0)
+        else:
+            slot = 256 + shift - 32 + 8*a[1]
         return adrp_add(N(a[0]), text_va+off, slot) + _ldr(N(a[0]), N(a[0]))
     if o == "mov":                                  # orr Xd, xzr, Xm
         return w(0xAA0003E0 | (N(a[1]) << 16) | N(a[0]))

@@ -56,16 +56,19 @@ LOADCFG = 0x140
 COOKIE_FIELD = 0x58     # IMAGE_LOAD_CONFIG_DIRECTORY64.SecurityCookie
 
 
-def _idata(rva, cookie=0):
-    """The import section, laid out at `rva`.  Returns (bytes, iat_offset)."""
-    n = len(IMPORTS)
+def _idata(rva, cookie=0, dynamic=False):
+    """The import section, laid out at `rva`.  Returns (bytes, iat_offset,
+    cfg_offset).  A forwarding image (`dynamic`, back_encode.c bk_dyn on
+    bkos == 2) imports the four extra kernel32 names of FORWARD_IMPORTS."""
+    names_ = FORWARD_IMPORTS if dynamic else IMPORTS
+    n = len(names_)
     desc = 20 * 2                       # one descriptor + the null terminator
     int_off = desc                      # import name table
     iat_off = int_off + (n + 1) * 8     # import address table
     nm_off = iat_off + (n + 1) * 8      # hint/name entries
     names, off = bytearray(), nm_off
     hint_rva = []
-    for f in IMPORTS:
+    for f in names_:
         hint_rva.append(rva + off)
         e = struct.pack("<H", 0) + f.encode() + b"\x00"
         if len(e) % 2:
@@ -106,6 +109,15 @@ IAT_OFF = _idata(0)[1]
 CFG_OFF = _idata(0)[2]
 
 
+def idata_dims(dynamic=False):
+    """-> (IDATA_LEN, IAT_OFF, CFG_OFF) of a plain or forwarding image
+    (back_encode.c bk_idata_layout)."""
+    if not dynamic:
+        return IDATA_LEN, IAT_OFF, CFG_OFF
+    b, iat, cfg = _idata(0, dynamic=True)
+    return len(b), iat, cfg
+
+
 def _reloc(rvas):
     """A .reloc section, from absolute RVAs.
 
@@ -133,24 +145,27 @@ def _reloc(rvas):
     return bytes(b)
 
 
-def _rvas(textlen):
+def _rvas(textlen, dynamic=False):
     """-> (rdata_rva, data_rva)"""
     r = TEXT_RVA + _round(textlen, SECT_ALIGN)
-    return r, r + _round(IDATA_LEN, SECT_ALIGN)
+    return r, r + _round(idata_dims(dynamic)[0], SECT_ALIGN)
 
 
-def data_rva(textlen):
-    return _rvas(textlen)[1]
+def data_rva(textlen, dynamic=False):
+    return _rvas(textlen, dynamic)[1]
 
 
-def imports(arch, textlen):
-    """`__imp_<name>` -> the absolute address of its IAT slot."""
-    r, _ = _rvas(textlen)
-    base = IMAGEBASE + r + IAT_OFF
-    return {"__imp_" + f: base + 8 * i for i, f in enumerate(IMPORTS)}
+def imports(arch, textlen, dynamic=False):
+    """`__imp_<name>` -> the absolute address of its IAT slot (back_encode.c
+    bk_imp[]; a forwarding image has the four FORWARD_IMPORTS slots too)."""
+    r, _ = _rvas(textlen, dynamic)
+    base = IMAGEBASE + r + idata_dims(dynamic)[1]
+    names_ = FORWARD_IMPORTS if dynamic else IMPORTS
+    return {"__imp_" + f: base + 8 * i for i, f in enumerate(names_)}
 
 
-def write(arch, text, data, entry, relocs=(), bss=0, full=None, stub=b""):
+def write(arch, text, data, entry, relocs=(), bss=0, full=None, stub=b"",
+          dynamic=False):
     """`stub` goes between the DOS header and the PE header, where the DOS
     stub used to sit.  An APE file puts its shell script there: the same
     bytes are a PE for Windows and a script for a Unix shell. [S-10]"""
@@ -162,17 +177,19 @@ def write(arch, text, data, entry, relocs=(), bss=0, full=None, stub=b""):
         text_rva = max(TEXT_RVA, _round(hdr_file, SECT_ALIGN))
     HDR_FILE, TEXT_RVA = hdr_file, text_rva
     try:
-        return _write(arch, text, data, entry, relocs, bss, full, stub)
+        return _write(arch, text, data, entry, relocs, bss, full, stub, dynamic)
     finally:
         HDR_FILE, TEXT_RVA = 0x400, 0x1000
 
 
-def _write(arch, text, data, entry, relocs, bss, full, stub):
-    rd_rva, dt_rva = _rvas(len(text))
+def _write(arch, text, data, entry, relocs, bss, full, stub, dynamic=False):
+    rd_rva, dt_rva = _rvas(len(text), dynamic)
+    _, iat_off, cfg_off = idata_dims(dynamic)
+    nimp = len(FORWARD_IMPORTS if dynamic else IMPORTS)
     # the cookie follows the FULL data; it is a zero word, so it may as well
     # be zero-filled with the rest of the tail instead of stored
     cookie_rva = dt_rva + _round(max(1, full), 8)
-    idata, _, _ = _idata(rd_rva, IMAGEBASE + cookie_rva)
+    idata, _, _ = _idata(rd_rva, IMAGEBASE + cookie_rva, dynamic)
     rd_file = HDR_FILE + _round(len(text), FILE_ALIGN)
     dt_file = rd_file + _round(len(idata), FILE_ALIGN)
     dvs = _round(max(1, full), 8) + 8 + bss    # bss costs image, not file
@@ -181,7 +198,7 @@ def _write(arch, text, data, entry, relocs, bss, full, stub):
     rl_file = dt_file + _round(len(data), FILE_ALIGN)
     # the cookie pointer in the load config is itself an absolute address, so
     # it is also the one relocation every image of ours carries
-    reloc = _reloc([rd_rva + CFG_OFF + COOKIE_FIELD] +
+    reloc = _reloc([rd_rva + cfg_off + COOKIE_FIELD] +
                    [dt_rva + r for r in relocs])
     img_size = rl_rva + _round(len(reloc), SECT_ALIGN)
 
@@ -220,8 +237,8 @@ def _write(arch, text, data, entry, relocs, bss, full, stub):
     dirs = [(0, 0)] * 16
     dirs[1] = (rd_rva, 40)                              # import directory
     dirs[5] = (rl_rva, len(reloc))                      # base relocations
-    dirs[10] = (rd_rva + CFG_OFF, LOADCFG)              # load config [I-17]
-    dirs[12] = (rd_rva + IAT_OFF, (len(IMPORTS) + 1) * 8)   # IAT
+    dirs[10] = (rd_rva + cfg_off, LOADCFG)              # load config [I-17]
+    dirs[12] = (rd_rva + iat_off, (nimp + 1) * 8)       # IAT
     for (a, sz) in dirs:
         o += struct.pack("<II", a, sz)
     o = o[:opt].ljust(opt, b"\x00")

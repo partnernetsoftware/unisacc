@@ -57,11 +57,11 @@ def assemble(tp):
         for pc, n in fits:
             short.add(pc)
             sizes[pc] = n
-    dynamic = tp.os == "lnx" and any(i.op in ("hostcall", "hostaddr") for i in tp.code)
+    dynamic = tp.os in ("lnx", "win") and image.forwards(tp)   # back_lower.c bk_dyn
     text_va, data_va = image.layout(tp.os, tp.arch, end, dynamic=dynamic)
     if tp.os == "osx":
         data_va += image.macho.DLPREFIX
-    imps = image.imports(tp.os, tp.arch, end)
+    imps = image.imports(tp.os, tp.arch, end, dynamic)
     # interpreter addresses are DATA_BASE-relative; shift them onto the image
     shift = data_va - DATA_BASE
     out = bytearray()
