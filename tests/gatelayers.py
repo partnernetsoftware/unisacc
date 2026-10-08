@@ -26,7 +26,7 @@ CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "t
 
 # Target execution, native ABI, or a cross-target image is part of the claim.
 PLATFORM = set("""
-c99 apps-real realprog hosthdr syscall6 winposix ccinterop elfobj
+c99 apps-real realprog hosthdr syscall6 winposix ccinterop elfobj minicon
 nativeboot windows-resolver-host lifecycle luatests
 """.split())
 PLATFORM_PREFIX = ("bigclosure-", "nativeboot-", "fat-", "ffi-", "exec-mach", "exec-win",
