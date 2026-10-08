@@ -31,6 +31,8 @@ def closure(h):
                 continue   # only the tools the build runs (0.0.32 B5: seed/gen.c builds the shared deltas)
             if rel[0] == 'exec' and path.suffix in ('.sh', '.py') and path.stem.endswith('check'):
                 continue   # 0.0.32 X31: exec/**/*check.{sh,py} verify the deltas; no build step runs or imports them
+            if 'probes' in rel[:-1] and path.suffix in ('.c', '.h'):
+                continue   # 0.0.35 P8: probe sources are test inputs; no generator reads them (a probe edit kept invalidating every model)
             if rel[:2] == ('exec', 'build') and (len(rel) > 3 or path.suffix != '.py'):
                 continue   # only the tracked drivers exec/build/*.py are inputs; anything else there is generated
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
