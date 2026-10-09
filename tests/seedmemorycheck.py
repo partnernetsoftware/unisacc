@@ -27,7 +27,7 @@ class Memory(unittest.TestCase):
   with patch.object(m,'requirement',return_value=(4096,'measured')),patch.object(m,'available',side_effect=PermissionError):
    with self.assertRaises(PermissionError):m.assess('gen',['e3'])
  def test_known_group_with_warm_cache_and_cold_unknown(self):
-  with tempfile.TemporaryDirectory() as d,patch.object(m,'reference_key',return_value=m.REFERENCE_KEYS['gen']):
+  with tempfile.TemporaryDirectory() as d,patch.object(m,'reference_key',return_value=m.REFERENCE_KEYS['gen']),patch.object(m,'execution_identity',return_value={**m.EVIDENCE_IDENTITY,'flags':m.EQUIVALENT_FLAGS[1]}):
    self.assertIsNone(m.requirement('gen',['tokenpp','tokenlex','warnlex'],d)[0])
    c=pathlib.Path(d)/'unisacc-seedgen';c.mkdir()
    for n in ['tokenpp','tokenlex','warnlex']:(c/('py-'+m.REFERENCE_KEYS['gen']+'-'+n+'.json')).write_text('{}')
@@ -55,6 +55,33 @@ class Memory(unittest.TestCase):
     self.assertEqual(r.returncode,4,(r.stdout,r.stderr));self.assertRegex(r.stdout,r'(?m)^seedgen-3\s+rc=77\s')
     self.assertIn('missing=memory',r.stdout)
     self.assertFalse(list(cache.glob('gen.*')),'generator must not start')
+
+ def test_changed_identity_is_unknown_even_when_binary_matches(self):
+  good={**m.EVIDENCE_IDENTITY,'flags':m.EQUIVALENT_FLAGS[1]}
+  self.assertIsNone(m.identity_reason(good,'warm'))
+  self.assertIsNone(m.identity_reason({**good,'flags':m.EQUIVALENT_FLAGS[0]},'warm'))
+  for field,value in [('host','Linux/arm64'),('cc_sha256','other'),('cc_version','other'),('parallelism',8),('flags','-std=c99 -O1 -Iseed')]:
+   with self.subTest(field=field),patch.object(m,'execution_identity',return_value={**good,field:value}),patch.object(m,'available',side_effect=AssertionError('must reject identity before admission')):
+    self.assertEqual(m.assess('gen',['tokenpp'])[0],2)
+  self.assertIsNotNone(m.identity_reason(good,'cold'))
+ def test_fake_cc_entity_with_same_version_is_rejected(self):
+  with tempfile.TemporaryDirectory() as d:
+   cc=pathlib.Path(d)/'cc';cc.write_text('#!/bin/sh\necho "'+m.EVIDENCE_IDENTITY['cc_version']+'"\n');cc.chmod(0o755)
+   with patch.object(m.shutil,'which',return_value=str(cc)),patch.object(m.platform,'system',return_value='Linux'),patch.object(m.platform,'machine',return_value='x86_64'):
+    identity=m.execution_identity('gen')
+   self.assertEqual(identity['cc_version'],m.EVIDENCE_IDENTITY['cc_version'])
+   self.assertIn('cc_sha256',m.identity_reason(identity,'warm'))
+ def test_binary_gate_rejects_changed_or_missing_binary(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=pathlib.Path(d)/'gen';p.write_bytes(b'measured fixture')
+   with patch.object(m,'BINARY_SHA',m.hashlib.sha256(p.read_bytes()).hexdigest()):
+    self.assertEqual(m.verify_binary(p),0);p.write_bytes(b'changed');self.assertEqual(m.verify_binary(p),2)
+   self.assertEqual(m.verify_binary(pathlib.Path(d)/'missing'),2)
+
+ def test_postbuild_identity_is_rechecked(self):
+  with patch.object(sys,'argv',['seedmemory.py','gen','tokenpp','--verify-binary','fake']),patch.object(m,'verify_binary',return_value=0),patch.object(m,'requirement',return_value=(None,'cc changed after build')),contextlib.redirect_stdout(io.StringIO()) as out:
+   self.assertEqual(m.main(),2)
+  self.assertIn('cc changed after build',out.getvalue())
 
  def test_77_terminal_protocol(self):
   with patch.object(sys,'argv',['seedmemory.py','gen']),patch.object(m,'assess',return_value=(77,4096,100,'measured')),contextlib.redirect_stdout(io.StringIO()) as out:

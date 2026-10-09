@@ -5,12 +5,15 @@
 # exec/ inputs, so a gen.c edit reruns only the C side.     usage: tests/seedgencheck.sh [NAME...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+GEN_CC_FLAGS='-std=c99 -O2 -Iseed'
+GEN_PARALLELISM=4
 python3 "$R/tests/seedmemory.py" gen "$@" || exit $?
 B=$R/tests/bound
 T=${TMPDIR:-/tmp}/unisacc-seedgen; mkdir -p "$T"
 key=$(cat exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exec/facts/*.tsv weights/gold/*.tsv 2>/dev/null | shasum | cut -c1-16)
 G=$T/gen.$$; trap 'rm -f "$G"' EXIT   # per run: gate shards build concurrently
-"$B" 55 cc -std=c99 -O2 -Iseed -o "$G" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
+"$B" 55 cc $GEN_CC_FLAGS -o "$G" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
+python3 "$R/tests/seedmemory.py" gen "$@" --verify-binary "$G" || exit $?
 spec() { case $1 in
     e2) echo "pp --shared-predefines";; e1) echo "lex --typed";; e3) echo parse2;; e4) echo "opt --o2";;
     o1) echo opt;; prune) echo prune;; nativeabi) echo nativeabi;;
@@ -38,7 +41,7 @@ run() {
     mv "$T/c-$n.json.$$" "$T/c-$n.json"
     if cmp -s "$T/c-$n.json" "$py"; then echo "SAME $n"; else echo "DIFF $n $(tail -1 "$T/c-$n.err")"; fi
 }
-k=0; for n in $names; do run "$n" > "$T/r-$n.txt" & k=$((k+1)); [ $((k % 4)) = 0 ] && wait; done; wait
+k=0; for n in $names; do run "$n" > "$T/r-$n.txt" & k=$((k+1)); [ $((k % GEN_PARALLELISM)) = 0 ] && wait; done; wait
 # seed/ident.c: the product source identity, equal to exec/c/provenance.py identity (B5)
 if [ -z "$*" ] || [ "$1" = e2 ]; then   # the first gate shard also checks ident and blob
     names="$names ident"

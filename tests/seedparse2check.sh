@@ -5,11 +5,14 @@
 # On a difference it names the first states only one side has.   usage: tests/seedparse2check.sh [FLAGSET...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+GEN_CC_FLAGS='-std=c99 -O2 -Iseed'
+GEN_PARALLELISM=4
 python3 "$R/tests/seedmemory.py" parse2 "$@" || exit $?
 B=$R/tests/bound
 T=${TMPDIR:-/tmp}/unisacc-seedparse2; mkdir -p "$T"
 key=$(cat exec/assemble.py exec/build/*.py exec/parse2/* exec/facts/*.tsv 2>/dev/null | shasum | cut -c1-16)
-"$B" 55 cc -std=c99 -O2 -Iseed -o "$T/gen" seed/gen.c || { echo "seedparse2: gen.c does not build"; exit 1; }
+"$B" 55 cc $GEN_CC_FLAGS -o "$T/gen" seed/gen.c || { echo "seedparse2: gen.c does not build"; exit 1; }
+python3 "$R/tests/seedmemory.py" parse2 "$@" --verify-binary "$T/gen" || exit $?
 sets=${*:-"x locations warnings errors locations,warnings locations,errors warnings,errors locations,warnings,errors"}
 run() {   # one variant: C now, Python from cache
     v=$1; fl=$(echo "$v" | tr ',' ' ' | sed 's/x//; s/\([a-z][a-z]*\)/--\1/g')
@@ -26,6 +29,6 @@ print("   only C:", sorted(sc - sp)[:5], " only Python:", sorted(sp - sc)[:5])
 P
     fi
 }
-n=0; for v in $sets; do run "$v" > "$T/r-$v.txt" & n=$((n+1)); [ $((n % 4)) = 0 ] && wait; done; wait
+n=0; for v in $sets; do run "$v" > "$T/r-$v.txt" & n=$((n+1)); [ $((n % GEN_PARALLELISM)) = 0 ] && wait; done; wait
 same=0; diff=0; for v in $sets; do cat "$T/r-$v.txt"; grep -q '^SAME' "$T/r-$v.txt" && same=$((same+1)) || diff=$((diff+1)); done
 echo "seedparse2  same $same  differ $diff"; [ "$diff" = 0 ]

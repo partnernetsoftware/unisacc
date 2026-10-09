@@ -1311,3 +1311,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔P7 seed 内存准入，2026-10-10；cc授权与收紧边界〕每次套件启动检查 MemAvailable 与自身/祖先 cgroup v2 有限剩余额度的较小值。C 路线复用 matrixA2（seed/gen.c sha256 8ba733540188…，与8ea81419同字节），按原四并发分组峰值合计加 max(25%,512MiB)。Python 冷参照、未测 parse2 组合与 com 生成路线记 UNKNOWN，rc2 拒启动；仅需求已知且不足退77。全族含 seedgen-3/-4、com-seedgen。原获批 prlimit 测量随规则收紧作废，不作 RSS 依据；systemd-run --user scope 无用户 bus，停止测峰、保留 UNKNOWN，未重现 OOM。
 
 〔P7 seed 内存准入复核；实际跑过〕七项宿主声明/启动 guard 同步：seedparse2-1/-2、seedgen/-2/-3/-4、com-seedgen。8项受控自检通过，含真实 gate 的低 MemAvailable/低 cgroup 双负例（seedgen-3 rc77、整体rc4，生成器未启动）、祖先有限余额/耗尽、每次启动重读、未知需求rc2、权限错误不伪装不足、暖缓存/输入变更；hostcheck原12项自检通过，inventory 415脚本、0孤儿。真实七项单批 bound55 两秒结束，全部 rc2 UNKNOWN：parse2未测flags、冷Python缓存缺失、COM路线未测；hostcheck同步7 UNKNOWN，不冒充77/PASS，生成器未启动。原 OOM/外杀记录不改；无有效scope测峰条件，后续须有证据再补准入需求。
+
+〔P7 内存证据身份绑定认领，2026-10-10；cc轻量授权〕阈值独立绑定 Linux/x86_64、历史 cc 实体 a23ecab8…及 Debian14.2.0-19 版本、原内部四并发和暖参照分支。matrix flags 含 -w，cc 已实际构建两组 flags 并证明生成器二进制同 sha2d1696da…，只认可该具名等价对；编译后在任何生成前核二进制 sha。其它宿主/cc/flags/并发/冷分支或产物不同均 UNKNOWN rc2，不沿旧阈值。只做受控身份负例，不测峰、不跑生成器，独立队列不受主检出修改影响。
+
+〔P7 内存证据身份绑定复核；实际跑过〕12项 bound55 轻量自检通过：同版本伪造 cc 实体、换 ISA、flags、版本、并发均 UNKNOWN rc2，冷分支不复用暖阈值；生成器二进制变更/缺失拒绝，构建后再次核 cc/flags/宿主/并发/缓存身份。套件 flags 与并发值成为同一变量，声明与实际 cc/调度共用，原参数/四并发不变。保留 cc 证明的带/不带-w具名二进制等价，其它 flags不猜；构建后核原 sha2d1696da…才允许生成。受控低 MemAvailable/cgroup仍77且不启动生成器。未测峰、未运行生成器、未改运行中独立队列、未刷新gatedeps；cc 在队列结束后统一刷新。
