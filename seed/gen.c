@@ -150,6 +150,15 @@ static void value_put(Value *parent, const char *key, Value *child) {
         parent->hix[h] = parent->n; parent->hn = parent->n;
     }
 }
+/* 0.0.37: free a tree that this caller parsed and alone owns (value_json of a temporary): strings,
+   member keys, children and the index.  Never call it on a value reachable from elsewhere. */
+static void value_free(Value *v) {
+    size_t i;
+    if (!v) return;
+    if (v->kind == JOBJ || v->kind == JARR)
+        for (i = 0; i < v->n; i++) { free(v->items[i].key); value_free(v->items[i].value); }
+    free(v->s); free(v->items); free(v->hix); free(v);
+}
 static Value *value_get(Value *v, const char *key) {
     size_t i;
     long at;
@@ -1890,7 +1899,10 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                with MESSAGE under PREFIX loses that action and jumps to one label per message, numbered
                in first-seen order; the message -> label map is the row's result (errors: reasons) */
             Value *spec = value_json(field[1], "group-tail spec");
-            const char *op, *prefix; size_t plen;
+            const char *op, *prefix; size_t plen, ncache = g->ns;
+            int *mapped = grow(NULL, ncache, sizeof(*mapped));
+            char **targets = grow(NULL, ncache, sizeof(*targets));
+            memset(mapped, 0, ncache * sizeof(*mapped));
             if (spec->kind != JARR || spec->n != 2) die("group-tail spec must be [op, prefix]");
             op = value_text(spec->items[0].value); prefix = value_text(spec->items[1].value); plen = strlen(prefix);
             if (!groups) groups = value_new(JOBJ);
@@ -1908,14 +1920,27 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                 }
                 for (size_t ei = 0; ei < st->n; ei++) {
                     Edge *edge = &st->edge[ei];
-                    Value *acts = value_json(g->seq[edge->seq], "group-tail actions"), *last, *label, *joined;
+                    int oldseq = edge->seq;
+                    Value *acts, *last, *label, *joined;
                     const char *msg; char *text;
-                    if (acts->kind != JARR || !acts->n) continue;
+                    /* A sequence has one result within this row. Keep first-seen message numbering,
+                       but parse/free each distinct sequence once instead of once per edge. */
+                    if ((size_t)oldseq >= ncache) die("group-tail sequence outside initial pool");
+                    if (mapped[oldseq]) {
+                        if (mapped[oldseq] > 0) {
+                            edge->target = copy(targets[oldseq]); edge->seq = mapped[oldseq] - 1;
+                        }
+                        continue;
+                    }
+                    mapped[oldseq] = -1;
+                    acts = value_json(g->seq[oldseq], "group-tail actions");
+                    /* 0.0.37: every edge of every state was parsed and kept -- 2.8 GB of parse2 --errors */
+                    if (acts->kind != JARR || !acts->n) { value_free(acts); continue; }
                     last = acts->items[acts->n - 1].value;
                     if (last->kind != JARR || last->n < 2 || last->items[0].value->kind != JSTR ||
-                        strcmp(last->items[0].value->s, op) || last->items[1].value->kind != JSTR) continue;
+                        strcmp(last->items[0].value->s, op) || last->items[1].value->kind != JSTR) { value_free(acts); continue; }
                     msg = last->items[1].value->s;
-                    if (strncmp(msg, prefix, plen)) continue;
+                    if (strncmp(msg, prefix, plen)) { value_free(acts); continue; }
                     label = value_get(groups, msg);
                     if (!label) {
                         char num[32]; Buffer nb = {0};
@@ -1928,8 +1953,12 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                     for (size_t ai = 0; ai + 1 < acts->n; ai++) value_put(joined, NULL, acts->items[ai].value);
                     text = value_json_text(joined);
                     edge->target = copy(label->s); edge->seq = seq(g, text); free(text);
+                    mapped[oldseq] = edge->seq + 1; targets[oldseq] = label->s; /* owned by groups */
+                    free(joined->items); free(joined->hix); free(joined);   /* borrows acts' children */
+                    value_free(acts);
                 }
             }
+            free(mapped); free(targets); value_free(spec);
             free(s); continue;
         }
         if (!strcmp(field[0], "insert-after")) {

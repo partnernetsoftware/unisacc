@@ -1359,3 +1359,17 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.37 云机构造交接，2026-10-09；实际跑过〕版本b398a194；同源UA /tmp/cdx37-linux-ref，候选/seed对在/tmp/cdx37-linux-candidate。候选2243464B sha52173312，--version0.0.37，身份核验成功；seed7581888B sha928bda8d，hello与版本正确。g4五组、C99 64–66在新候选同参考rc0。shared并行首次58s超时，串行原预算内通过；cc已确认当时另一路comboot parse2并发OOM，原生Cgen单测也OOM（5576016KiB/18s），jemalloc试验50s超时；均不算绿。现完成Python构造后交cc独占COMBOOT_BUDGET=1现有窗口旋钮做定点及642套件，本会话停止重构造避免抢内存，不改验收。
 
 〔0.0.37 本机封存实跑阻塞，2026-10-09〕按原seal_candidate.sh对/tmp/cdx37-linux-candidate尝试GHCR封存（bound55），registry HEAD返回403 Forbidden，未改release/candidate.json。gh api用户响应scopes为gist/read:org/repo/workflow，缺write:packages；需要补齐本机会话包写入凭据，不用未封存产物冒称正式发布。候选sha52173312和seed对已交cc串行定点/全量；cdx不并发重构造。已报董秘真实403证据。
+
+〔0.0.37 主导互换接管，2026-10-09〕政委/董秘授权恢复并由cdx主导，cwd=/home/box/repos/unisacc-cc，HEAD b8d96260；cc已释放重活，父只读ps未见gen/matrix/候选/queue残留。未提交仅seed/gen.c的group-tail所有权释放修片，保留且只在矩阵全绿后单独提交。cc交A2三十调用全同字节、B2十三调用ASan通过，errorparse终止143及其余十七项未验；旧52173312候选/队列证据只作历史。原matrix.sh的120/600/3000秒限时不合AGENTS上限，接管改用独立输出、逐项bound50/外层≤60、rc与source/tool/output摘要齐全的串行B验证，不删矩阵项。先用clang O2 ASan单项测量（相同源、地址检查保留；既有detect_leaks=0，按cc建议quarantine64/context5），不套生产读数；若单项超时保留失败并定位，不提高预算、不冻结候选。接单回执后一机一重活，B完整通过→冻结一个提交→同源候选/seed→自举/queue，沿§24–27顺序。
+
+〔矩阵B受限诊断，2026-10-09；cdx实际跑过〕clang19 O2 ASan+quarantine64/context5：warnunits 8.25s/rc0，与Python同字节；errorparse在bound50退出142/无输出，保留/tmp/cdx37-matrix-b/errorparse.receipt.json，未记同字节或通过。运行中约1.45GB RSS，未OOM；先单独将ASan分配栈深改context1（只诊断元数据，地址检查/quarantine64/全输入不变），以真实UAF负例确认检测仍有效后复测同组合，不改生产预算，不冻结候选。cc已只读复核acts独占/joined借用/label独立的所有权释放正确。
+
+〔矩阵B errors预算定位与同切口修片，2026-10-09〕context1真实UAF负例检出，但errorparse仍bound50/142，第二失败回执保留，未记绿。父读group-tail发现每条边重复value_json同一intern动作序列；同一模板行内结果仅依赖oldseq、固定op/prefix/groups，且groups标签按首次命中顺序分配。拟在该行按旧序列缓存“无变更/目标label/新seq”，保持原边遍历和首次编号次序；已存在manifest_companions的mapped先例。仅触及同一group-tail热点，保留cc的独占树深释放和joined借用浅释放。改后旧A/B结果对新seed源码失效，完整三十项生产/ASan重跑；失败继续先定位，不建候选、不改预算、不降地址检查。
+
+〔group-tail memo独立只读复核，2026-10-09〕cc核seq文本intern副作用、负缓存的行内不变性、首次标签顺序、ncache初值/新seq不重复访问、groups中label借用与spec释放顺序全部成立，无阻塞；旧A/B对新源码作废。完整B恢复quarantine64/context5原诊断设置后重跑（context1仅失败诊断实验），先errorparse最小受限验证再展开完整矩阵。
+
+〔group-tail修片受限B最重组合已过，2026-10-09；实际跑过〕恢复quarantine64/context5，clang O2 ASan errorparse37.15s/3155040KiB、warnparse37.48s/3175204KiB，rc0且逐字节同Python，本轮seed源码sha8ba73354稳定；两个单项不是全矩阵。开始同一源完整三十项生产O2与ASan；Python参考为cc本轮A2新鲜生成，Python/TSV未改，仅seed/gen.c缓存修片。旧失败回执保留于.previous-*；所有当前项要匹配新源码hash/flags/工具才计入。
+
+〔同源生产矩阵A完整通过，2026-10-09；cdx实际跑过〕新seed/gen.c sha8ba73354、GCC O2三十调用逐项bound50/外层55全部rc0同Python（cc本轮新鲜参考，Python/TSV无改）；source前后稳定。errors生产6.75s/2171620KiB、warnings+errors5.79s/2186436KiB，对照交接A2的40.58/33.69s。完整回执在/tmp/cdx37-matrix-a；不是候选验收。B同源最重两项37s内已过，继续其余二十八项，完整B绿前不提交冻结或建候选。
+
+〔0.0.37 全矩阵已闭合，2026-10-09；实际跑过〕新seed源码8ba73354的A/B各三十调用全rc0/同Python，flags调用差集missing0/extra0，全部逐项bound50并记录源码/工具/参考/输出摘要；超时旧回执仍保留。证据research/c37-generator-matrix.{md,json}；cc独立只读复核所有权及memo语义。现在单独提交seed/gen.c修片与这轮证据，冻结一个源提交；之后只起一条默认C构造候选链，旧52173312及10/642不作新身份通过证据。
