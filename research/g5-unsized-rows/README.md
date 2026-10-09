@@ -20,3 +20,11 @@ sites recompute n after dimtail for non-struct elements.  Checks (cc / fixed / o
 - with typedef-reset.patch too: zlib 1.3.1 (16 units + test/example.c, -DZ_HAVE_UNISTD_H)
   builds and its output equals cc's.
 Open separately: the bkscr bound (a large `.zero` should not unroll into scratch).
+
+Revision (cdx review 10-09): a string no longer fills a whole outer row.  In a char array it
+consumes its innermost subarray (sper = decldim3 or the row), for pointer elements one element.
+sp.c (cdx probe: `const char *p[][2]={"a","b"}`, `char s[][2][4]={"a","b"}`): cc rc 0, fixed rc 0,
+old rc 1.  sp2.c sizes `32 16 9 24 12` equal cc (old `48 24 9 24 18`); rows.c, sz3.c, zlib example
+still equal cc.  Separate, pre-existing (old reference too): sp2.c VALUES of a string in a char
+[][2][N] subarray are wrong (`gs[1][0]` empty, `ls[1][0]` "I"; cc "c" "c") -- initialisation, not
+sizing; to fix or refuse exactly in its own slice.
