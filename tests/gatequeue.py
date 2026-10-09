@@ -7,7 +7,7 @@ input invalidation. Model preparation may
 be shared separately. Each window is <=55 s, leaving cleanup inside the 60 s
 outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
-import argparse, re, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
+import argparse, bisect, re, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 from gatelayers import LAYERS, select as select_layers
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -146,6 +146,18 @@ def fingerprint(jobs):
                                   'unisacc.c', 'README.md', 'ARCHITECTURE.md', 'AGENTS.md',
                                   'prd.tree.md', 'prd.map.md', 'research/referee.tsv', 'iterate', 'release', 'scripts', 'Makefile'])
     names = sorted(set(raw.decode().split('\0')) - {''})
+    # 0.0.38 ②: the files under a tree prefix, by binary search on the sorted list -- the same set the
+    # per-job scan `any(n.startswith(prefix+'/') ...)` produced, without 10.8M startswith calls per
+    # fingerprint (12 s, twice per window, measured 10-10)
+    under_cache = {}
+    def under(prefix, pool=None):
+        key = (prefix, id(pool))
+        if key not in under_cache:
+            if pool is None and 'sorted' not in under_cache: under_cache['sorted'] = sorted(names)   # names gains unisacc.com unsorted
+            src = under_cache['sorted'] if pool is None else pool
+            lo = bisect.bisect_left(src, prefix + '/'); hi = bisect.bisect_left(src, prefix + '0')   # '0' follows '/'
+            under_cache[key] = src[lo:hi]
+        return under_cache[key]
     if digest('unisacc.com') != ['missing']: names.append('unisacc.com')
     tools = {}
     for name in ('python3', 'sh', 'bash', 'cc', 'openssl', 'grep', 'wc', 'tr', 'uname', 'id', 'env', '/bin/ps', '/usr/bin/openssl'):
@@ -265,18 +277,21 @@ def fingerprint(jobs):
             audited = bool(guards) and all(digest(n)[-1] == sha for n,sha in guards.items())
             # Added Python modules must also lose the reviewed import closure.
             guarded = set(guards)
-            audited = audited and all(n in guarded for n in names
-                if n.endswith('.py') and any(n.startswith(prefix+'/') for prefix in entry.get('code_trees', [])))
+            audited = audited and all(n in guarded for prefix in entry.get('code_trees', [])
+                for n in under(prefix) if n.endswith('.py'))
         inputs = []
         if entry:
-            tracked = set(names)
-            for prefix in entry.get('trees', []):   # declared trees outside the fingerprint pathspec (seed/, plans/...)
+            trees = entry.get('trees', [])
+            for prefix in trees:   # declared trees outside the fingerprint pathspec (seed/, plans/...)
                 if prefix not in extra_trees:
                     raw2 = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', prefix])
                     extra_trees[prefix] = sorted(set(raw2.decode().split('\0')) - {''})
-                tracked.update(extra_trees[prefix])
-            inputs = sorted(set(entry['files']) | {n for n in tracked
-                if any(n.startswith(prefix+'/') for prefix in entry.get('trees', []))})
+            # tracked = names plus every listed extra tree; keep the names under any declared prefix
+            sel = set(entry['files'])
+            for q in trees:
+                sel.update(under(q))
+                for p in trees: sel.update(under(q, extra_trees[p]))
+            inputs = sorted(sel)
         if audited:
             identity = [common, command, {n:digest(n) for n in inputs}]
             if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]
