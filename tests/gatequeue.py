@@ -375,6 +375,11 @@ def main():
     layers.add_argument('--through-layer', choices=LAYERS,
                         help='run this layer and all narrower layers')
     ap.add_argument('--list-selection', action='store_true', help='print selected suite names without running')
+    # SCHEDULING-BEGIN (0.0.38 full038c: memory-heavy suites -- at most one of them runs at a time; light
+    # jobs keep the other slots.  Four rowcov trees (~2 GB each) at once on a host with 3-4 GB free
+    # thrashed a window past the outer bound.)
+    ap.add_argument('--heavy-suite', action='append', default=[], help='memory-heavy suite: never two at once')
+    # SCHEDULING-END
     ap.add_argument('--exclusive-suite', action='append', default=[],
                     help='selected suite that must run alone (repeatable; prioritized)')
     # 0.0.38 P3: the parent's deadline (time.monotonic(), same boot) reaches the scheduler as an
@@ -511,6 +516,9 @@ def main():
                 if not fits: break
                 first = [n for n in fits if n in full]
                 if first: fits = first
+                heavy = set(getattr(args, 'heavy_suite', []))
+                if heavy & set(active): fits = [n for n in fits if n not in heavy]   # one heavy job at a time
+                if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job
                 n = max(alone or fits, key=estimate); pending.remove(n)

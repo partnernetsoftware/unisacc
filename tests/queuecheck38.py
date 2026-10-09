@@ -113,4 +113,11 @@ with tempfile.TemporaryDirectory() as td:
     assert run('frac',55,('--parent-deadline',str(_t.monotonic()+7.9)))==75
     st=json.loads((t/'frac/results.json').read_text())
     assert st.get('retried')==['frac'] and not st.get('deferred'), (st.get('retried'), st.get('deferred'))
+    # full038c: memory-heavy suites never overlap each other; light jobs still fill the other slots
+    code2='import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.write_text(str(time.monotonic())); time.sleep(float(sys.argv[2])); p.with_suffix(".end").write_text(str(time.monotonic()))'
+    jobs={n:[sys.executable,'-c',code2,str(t/n),d] for n,d in [('h1','0.6'),('h2','0.6'),('l1','0.1'),('l2','0.1')]}
+    assert run('heavy',55,('--jobs','4','--heavy-suite','h1','--heavy-suite','h2'))==0
+    a1,a2=float((t/'h1').read_text()),float((t/'h2').read_text()); e1,e2=float((t/'h1.end').read_text()),float((t/'h2.end').read_text())
+    assert a2>=e1 or a1>=e2, 'two heavy suites overlapped'
+    assert float((t/'l1').read_text()) < max(e1,e2), 'light jobs waited for the heavy ones'
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')

@@ -60,6 +60,9 @@ for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdr
 # four at once exhausted 16 GB on the cloud host -- the kernel OOM-killed other processes and the window
 # died from outside (full038, window 24).  They run alone; their limits are unchanged.
 for s in seedparse2-1 seedparse2-2 seedgen seedgen-2; do exclusive+=(--exclusive-suite "$s"); done
+# 0.0.38 full038c: a rowcov suite holds ~2 GB (measured: one tree 1.97 GB RSS); four at once thrashed the
+# cloud host past the outer bound.  At most one runs at a time; light jobs keep the other slots.
+for s in $(./tests/gate.sh --list --com 2>/dev/null | grep '^rowcov'); do exclusive+=(--heavy-suite "$s"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 # the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-x86_64); fi
