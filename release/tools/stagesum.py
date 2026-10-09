@@ -7,7 +7,11 @@ A begin without an end is INCOMPLETE; a pair whose ends lie on different boots h
 (the monotonic clocks are not comparable) and is INCOMPLETE too.  Per phase: total wall is the
 union of its command intervals (overlap is not added twice), waits likewise; attempts, rc and
 acceptance statuses are listed apart -- rc 0 is not PASS, a ruling is not PASS.  Unmeasured CPU
-and RSS stay null.
+and RSS stay null.  Subphases (window-N folded to window) get their own union and count beside the
+phase total.  Scope of the queue segments: prologue starts inside gatequeue (term.sh, release.sh's
+checks and warm-up are only in the enclosing window); segments are written when a window ends
+normally, so a window killed from outside has no segment events -- its split is unknown, never
+inferred from the parent's missing end.
 """
 import argparse, json, pathlib, re, sys
 
@@ -102,6 +106,8 @@ def summarise(events, run=None):
             p['incomplete'].append({'id': i, 'why': 'begin and end on different boots'}); continue
         if e['mono'] < b['mono']: raise SystemExit('stagesum: end before begin: %s' % i)
         p['spans'].append(((b['run'], b['boot_id']), b['mono'], e['mono']))
+        sub = re.sub(r'-\d+$', '', b.get('subphase') or '(whole)')     # window-7 -> window
+        p.setdefault('subs', {}).setdefault(sub, []).append(((b['run'], b['boot_id']), b['mono'], e['mono']))
         cpu = None if e.get('cpu_user') is None or e.get('cpu_sys') is None else round(e['cpu_user'] + e['cpu_sys'], 3)
         p['cpu'].append(cpu); p['rss'].append(e.get('rss_kib'))
     for i, b in wb.items():
@@ -120,6 +126,8 @@ def summarise(events, run=None):
             'commands': p['commands'], 'attempts': sorted(p['attempts']),
             'rc': p['rc'], 'acceptance': p['acceptance'],
             'cpu_s': p['cpu'], 'rss_kib_per_command': p['rss'],
+            # per subphase: union and count, apart from the phase total (a parent and its parts are not added)
+            'subphases': {k: {'wall_s': union(v), 'count': len(v)} for k, v in sorted(p.get('subs', {}).items())},
             'status': 'INCOMPLETE' if p['incomplete'] else 'COMPLETE',
             'incomplete': p['incomplete'],
         }
@@ -139,6 +147,8 @@ def main(argv=None):
         f = lambda v: '-' if v is None else '%.1f' % v
         print('%-11s %9s %9s %4d %-10s %s' % (name, f(r['wall_s']), f(r['wait_s']), r['commands'], r['status'],
                                               ','.join(str(x) for x in r['acceptance']) or '-'))
+        for sub, v in r['subphases'].items():
+            print('  %-9s %9s %9s %4d' % (sub, f(v['wall_s']), '', v['count']))
     return 0
 
 

@@ -34,6 +34,11 @@ s = S.summarise([ev('begin', 'a', 10), ev('begin', 'b', 20), ev('end', 'a', 30, 
 assert s['wall_s'] == 30.0 and s['wait_s'] == 60.0 and s['status'] == 'COMPLETE', s
 assert s['acceptance'] == ['FAILED', 'UNVERIFIED'] and s['rc'] == [0, 0], 'rc 0 must not become PASS'
 assert s['cpu_s'] == [None, None] and s['rss_kib_per_command'] == [None, None], 'unmeasured must be null, not 0'
+# subphases: window-N folded, each with its own union/count; the parent total is not their sum
+s = S.summarise([ev('begin', 'p', 0), dict(ev('begin', 'a', 0), subphase='window-1', parent_id='p'), ev('end', 'a', 10),
+                 dict(ev('begin', 'b', 20), subphase='window-2', parent_id='p'), ev('end', 'b', 30),
+                 dict(ev('begin', 'c', 21), subphase='jobs', parent_id='b'), ev('end', 'c', 29), ev('end', 'p', 30)])['queue']
+assert s['wall_s'] == 30.0 and s['subphases']['window'] == {'wall_s': 20.0, 'count': 2} and s['subphases']['jobs']['wall_s'] == 8.0, s
 # missing end, cross-boot pair: INCOMPLETE, no invented wall time; several attempts of one phase are listed
 s = S.summarise([ev('begin', 'a', 1), ev('begin', 'c', 5, attempt=2), ev('end', 'c', 9, boot='b2')])['queue']
 assert s['status'] == 'INCOMPLETE' and s['wall_s'] is None and s['attempts'] == [1, 2], s
