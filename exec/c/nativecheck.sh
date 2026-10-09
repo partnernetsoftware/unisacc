@@ -9,13 +9,20 @@ UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 PART=${NATIVE_PART:-all}
+case "$(uname -s)/$(uname -m)" in
+ Linux/x86_64) TARGET=lnx/x86_64; IMAGE=elf;;
+ Linux/aarch64|Linux/arm64) TARGET=lnx/arm64; IMAGE=elf;;
+ Darwin/arm64) TARGET=osx/arm64; IMAGE=macho;;
+ Darwin/x86_64) TARGET=osx/x86_64; IMAGE=macho;;
+ *) echo 'nativecheck: unsupported host' >&2; exit 2;;
+esac
 case $PART in
  all|stages) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
  chain) INPUTS="examples/hello.c tests/c/b_toknames.c exec/c/run.c";;
  resources) INPUTS="exec/c/run.c";;
  *) echo 'unknown NATIVE_PART' >&2; exit 2;;
 esac
-b env EXEC_CC=cc NETWORK=1 TARGET=osx/arm64 ./exec/pipeline/elf.sh "$T" $INPUTS > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
+b env EXEC_CC=cc NETWORK=1 TARGET="$TARGET" ./exec/pipeline/elf.sh "$T" $INPUTS > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 b python3 tests/sourceflat.py "$T/unisacc.c"
 b "$UA" -O2 "$T/unisacc.c" -o "$T/compiler"
 b "$T/compiler" -O2 exec/c/run.c -o "$T/run-ua"
@@ -23,7 +30,7 @@ if [ "$PART" = all ] || [ "$PART" = stages ]; then
  b env EXEC_CC="$T/compiler" python3 exec/c/netcheck.py
  b env EXEC_CC="$T/compiler" ./exec/c/neg.sh
 fi
-b python3 - "$T" "$R" "$PART" <<'PY'
+b python3 - "$T" "$R" "$PART" "$TARGET" "$IMAGE" <<'PY'
 import os,pathlib,resource,shutil,signal,subprocess,sys
 p=pathlib.Path(sys.argv[1]);root=pathlib.Path(sys.argv[2]);ua=p/'run-ua'
 def run(cmd, cwd=None):
@@ -31,7 +38,7 @@ def run(cmd, cwd=None):
                      env=dict(os.environ,UNISA_MAXSTEPS='400000000000'))
     if r.returncode:raise SystemExit(f'{cmd}: rc {r.returncode}: {r.stderr.decode(errors="replace")}')
     return r.stdout
-part=sys.argv[3]; netrun=p/'run.macho'
+part=sys.argv[3]; target=sys.argv[4]; image=sys.argv[5]; netrun=p/('run.'+image)
 assert netrun.read_bytes()==ua.read_bytes(), 'network runtime != compiler-built runtime'
 if part in ('all', 'stages'):
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
@@ -42,7 +49,7 @@ if part in ('all', 'stages'):
         os.environ['UNISA_ATTRIBUTES']=str(attrs)
         for stage in ['e2','e1','e3','e4','prune','lower','elf']:
             got=run([ua,p/(stage+'.net'),inp,src,root/'include'])
-            want=p/(name+'.'+('macho' if stage=='elf' else stage))
+            want=p/(name+'.'+(image if stage=='elf' else stage))
             if got!=want.read_bytes():raise SystemExit(f'{name} {stage}: executor output differs')
             inp=p/(name+'.ua.'+stage);inp.write_bytes(got)
         print('native executor:',src,'seven stages equal')
@@ -56,7 +63,7 @@ if part in ('all', 'stages'):
     os.environ['UNISA_ATTRIBUTES']=str(attrs)
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         got=run([netrun,p/(stage+'.net'),inp,src,root/'include'])
-        want=p/('run.'+('macho' if stage=='elf' else stage))
+        want=p/('run.'+(image if stage=='elf' else stage))
         if got!=want.read_bytes():raise SystemExit(f'network-built runtime self stage {stage}: differs')
         inp=p/('run.self.'+stage);inp.write_bytes(got)
     print('network-built runtime: seven self stages and image equal; seven domain checks passed')
@@ -67,7 +74,7 @@ if part in ('all', 'chain'):
     for exe in [p/'run',ua,netrun]:
         for src in ['examples/hello.c','tests/c/b_toknames.c','exec/c/run.c']:
             got=run([exe,'--chain',src,src,root/'include',*models])
-            want=p/(pathlib.Path(src).stem+'.macho')
+            want=p/(pathlib.Path(src).stem+'.'+image)
             if got!=want.read_bytes():raise SystemExit(f'{exe} in-memory chain differs: {src}')
     print('stream chain: three runtime builds, including network self-rebuild, equal')
 if part in ('all', 'resources'):
@@ -78,13 +85,13 @@ if part in ('all', 'resources'):
     shutil.copyfile(root/'exec/c/asm/binding.c',isolated/'asm/binding.c')
     shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
     for exe in [p/'run',ua,netrun]:
-        got=run([exe,'--bundle','models.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated)
+        got=run([exe,'--bundle','models.pkg',target,'runtime.c','runtime.c'],cwd=isolated)
         if got!=netrun.read_bytes():raise SystemExit(f'{exe} resource-packaged self route differs')
     print('resource package: three runtime builds reproduce self, no include directory, isolated cwd')
     sys.path.insert(0,str(root/'exec/c'))
     from pack import build as package_build
     (isolated/'without-resources.pkg').write_bytes(package_build([p/'route.tsv']))
-    r=subprocess.run([str(netrun),'--bundle','without-resources.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated,capture_output=True,timeout=60)
+    r=subprocess.run([str(netrun),'--bundle','without-resources.pkg',target,'runtime.c','runtime.c'],cwd=isolated,capture_output=True,timeout=60)
     # Since R13-0b #07 the runtime no longer dies on an absent header resource: E2
     # rejects.  With no include directory the first header to fail is one the
     # autoinc pass inserted, which has no source line -- so the reject carries no
