@@ -38,11 +38,20 @@ if git rev-parse -q --verify HEAD >/dev/null 2>&1 && [ -z "$(git status --porcel
     KEY=$( (echo "$TARGET"; git ls-files -s -- exec unisa include src kernel weights tests examples/hello.c) | shasum -a 256 | cut -c1-16)
 fi
 C=${TMPDIR:-/tmp}/unisacc-memprep-$KEY
+# A cold cache under a parallel queue: the first job takes the lock and builds, the rest wait for it
+# (at most 40 s, then build themselves) instead of all building at once.  A lock older than 120 s is stale.
+if [ -n "$KEY" ] && [ ! -f "$C/ok" ] && ! mkdir "$C.lock" 2>/dev/null; then
+    if [ -n "$(find "$C.lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then rm -rf "$C.lock"; fi
+    w=0; while [ $w -lt 80 ] && [ ! -f "$C/ok" ] && [ -d "$C.lock" ]; do sleep 0.5; w=$((w+1)); done
+    MINE=
+else
+    MINE=$KEY
+fi
 if [ -n "$KEY" ] && [ -f "$C/ok" ]; then
-    cp -R "$C/." "$T/"; rm -f "$T/ok"
+    cp -R "$C/." "$T/"; rm -f "$T/ok"; [ -z "$MINE" ] || rm -rf "$C.lock"
 else
     prep
-    if [ -n "$KEY" ] && mkdir "$C.lock" 2>/dev/null; then
+    if [ -n "$MINE" ]; then
         rm -rf "$C.tmp.$$"; cp -R "$T" "$C.tmp.$$" && rm -f "$C.tmp.$$/unisacc-flat.c" && touch "$C.tmp.$$/ok" \
             && { [ -d "$C" ] || mv "$C.tmp.$$" "$C"; }; rm -rf "$C.tmp.$$" "$C.lock"
     fi
