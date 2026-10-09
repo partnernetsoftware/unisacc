@@ -68,6 +68,10 @@ def ruled_match(name, r, log, rules):
 
 def classify(name, r, log, h1, rules=None):
     if r.get('status') == 'UNVERIFIED' or r.get('rc') == 77: return 'UNVERIFIED_HOST'
+    # 0.0.38: the resource admission refused to start (rc 2, its own UNKNOWN line as the last line):
+    # missing evidence, not a product error -- any other rc 2 stays an ordinary failure
+    lines = [l for l in log.splitlines() if l.strip()]
+    if r.get('rc') == 2 and lines and lines[-1].startswith('UNKNOWN: required=memory'): return 'RESOURCE_UNKNOWN'
     if rules and ruled_match(name, r, log, rules): return 'RULED_BASELINE'   # exactly as ruled: still not PASS
     if r.get('status') == 'INTERRUPTED': return 'OUTER_INTERRUPTED'
     tail = '\n'.join(log.splitlines()[-5:])
@@ -100,7 +104,7 @@ def main(argv=None):
         print(json.dumps({'jobs': len(data['jobs']), 'pass': passed, 'classes': counts,
                           'rows': [dict(suite=n, cls=c, rc=rc, last=l) for n, c, rc, l in rows]}, indent=2)); return 0
     print('exit table: %d suites, %d PASS; %s' % (len(data['jobs']), passed, ', '.join('%s %d' % kv for kv in sorted(counts.items()))))
-    for c in ['NEEDS_RULING', 'OUTER_INTERRUPTED', 'TOOL_MISSING', 'HOST_TIMEOUT', 'RULED_BASELINE', 'UNVERIFIED_HOST', 'PENDING']:
+    for c in ['NEEDS_RULING', 'RESOURCE_UNKNOWN', 'OUTER_INTERRUPTED', 'TOOL_MISSING', 'HOST_TIMEOUT', 'RULED_BASELINE', 'UNVERIFIED_HOST', 'PENDING']:
         sel = [r for r in rows if r[1] == c]
         if not sel: continue
         print('\n[%s] %s' % (c, disp.get(c, 'not yet run')))
