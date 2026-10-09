@@ -127,7 +127,7 @@ int declspecptr;        /* the specifier itself was a pointer typedef */
    shared across units and not deduplicated.  Measured: 256 refuses, 257 is the
    first refusal; the fb12-23 fixture needs 276 (91+92+93) across three units,
    which is why 256 was just barely not enough.  [R13-0c #33] */
-#define MAXTD 1024
+#define MAXTD 8192
 char tdname[MAXTD * NAMEW];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
@@ -4618,6 +4618,48 @@ int initcountat(int j) {
     return n;
 }
 
+/* The outer length of an unsized `T a[][N]` (C99 6.7.8p22): a braced row fills
+   one whole row, a string in a char array its innermost subarray (sper; 0 for
+   pointers, where it is one element), a loose scalar one element, `[k] =` moves to
+   row k.  initcountat counts scalars, which sized {{1,2,3}} as three rows of
+   a[][4] (zlib crc32.h: 1585 rows for 7, a 3 MB clear; 0.0.37 C2). */
+int unsz;                             /* this declarator's first [] was empty */
+int initrowsat(int j, int per, int sper) {
+    int pos; int n; int d; int c;
+    if (kind(j) != tidx("{", 1)) return 1;
+    j = j + 1; pos = 0; n = 0;
+    while (j < ntok && kind(j) != tidx("}", 1)) {
+        c = kind(j);
+        if (c == tidx("[", 1) && kind(j + 1) == T_NUM && kind(j + 2) == tidx("]", 1) && kind(j + 3) == tidx("=", 1)) {
+            pos = numval(j + 1) * per; j = j + 4; c = kind(j);
+        }
+        if (sper > 0 && c == T_STR && (kind(j + 1) == tidx(",", 1) || kind(j + 1) == tidx("}", 1))) {
+            pos = (pos + sper - 1) / sper * sper + sper; j = j + 1;   /* a char subarray: its innermost row */
+        } else if (c == tidx("{", 1)) {
+            pos = (pos + per - 1) / per * per + per;
+            { d = 0; while (j < ntok) { if (kind(j) == tidx("{", 1)) d = d + 1; if (kind(j) == tidx("}", 1)) { d = d - 1; if (d == 0) break; } j = j + 1; } j = j + 1; }
+        } else {
+            d = 0;
+            while (j < ntok) {
+                c = kind(j);
+                if (d == 0 && (c == tidx(",", 1) || c == tidx("}", 1))) break;
+                if (c == tidx("(", 1) || c == tidx("{", 1) || c == tidx("[", 1)) d = d + 1;
+                if (c == tidx(")", 1) || c == tidx("}", 1) || c == tidx("]", 1)) d = d - 1;
+                j = j + 1;
+            }
+            pos = pos + 1;
+        }
+        if (pos > n) n = pos;
+        if (kind(j) == tidx(",", 1)) j = j + 1;
+    }
+    return (n + per - 1) / per;
+}
+int initrowsof(int per, int sper) {               /* the same, for this declarator's `= {...}` */
+    int j; j = tp;
+    while (j < ntok) { if (kind(j) == tidx("=", 1)) break; if (kind(j) == tidx(";", 1)) return 0; j = j + 1; }
+    return initrowsat(j + 1, per, sper);
+}
+
 /* ---- wide string literals ---------------------------------------------
    `L"..."`: the source is read a byte at a time, so the literal is still
    UTF-8 here; it decodes to code points, and each element of the array is
@@ -4832,6 +4874,11 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     }
     i = 0; depth = 0;
     while (1) {
+        /* ...but a string in a THREE-dimensional character array (its innermost
+           subarray) is not covered: it was accepted and initialised the wrong
+           bytes (0.0.37 g5 str3d); the product refuses the same shape. */
+        if (isarr && w == 1 && sst < 0 && rows3 > 0 && cur() == T_STR && iswide(tp) == 0)
+            err_uncov(tp, "ref.parse", "init.rowunsupported", "not covered: string initializer outside a two-dimensional character row");
         /* A string fills one whole row of a two-dimensional character array. */
         if (depth == 1 && isarr && w == 1 && sst < 0 && rows > 0 && rows3 == 0) {
             int braced; int text;
@@ -5219,11 +5266,13 @@ int local_decl_in(void) {
             if (cur() == tidx("[", 1)) {
                 adv(); isarr = 1;
                 if (cur() == tidx("]", 1)) {
-                    n = initcount(w == 1 && declpd == 0 && sst < 0);
+                    unsz = 1; n = initcount(w == 1 && declpd == 0 && sst < 0);
                     if (sst >= 0) { int per; per = structslots(sst); n = (n + per - 1) / per; }
                 } else n = cexpr();
                 need(tidx("]", 1), "]");
                 n = dimtail(n);
+                if (unsz && sst < 0 && decldim2 > 0) n = initrowsof(decldim2, w == 1 && declpd == 0 && declptr == 0 ? (decldim3 ? decldim3 : decldim2) : 0) * decldim2;
+                unsz = 0;
             }
             ew = w;
             if (sst >= 0) ew = declsz;
@@ -5312,7 +5361,7 @@ int local_decl_in(void) {
             /* `int a[] = {1,2,3}` -- the initialiser says how long it is,
                and for an array of structs it says how many SCALARS */
             if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
-                n = initcount(w == 1 && declpd == 0 && sst < 0);
+                unsz = 1; n = initcount(w == 1 && declpd == 0 && sst < 0);
                 if (sst >= 0) {
                     int per; per = structslots(sst);
                     n = (n + per - 1) / per;
@@ -5323,6 +5372,8 @@ int local_decl_in(void) {
             /* `a[n][m]` is n*m elements in a row; the FIRST index strides a
                whole row, which is what decldim2 records */
             n = dimtail(n);
+            if (unsz && sst < 0 && decldim2 > 0) n = initrowsof(decldim2, w == 1 && declpd == 0 && declptr == 0 ? (decldim3 ? decldim3 : decldim2) : 0) * decldim2;
+            unsz = 0;
           }
             if (sst >= 0) w = declsz;
             apd = declpd;
@@ -5979,7 +6030,7 @@ int unit(void) {
             if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                 adv();
                 if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
-                    n = initcount(w == 1 && declpd == 0 && gstruct < 0);
+                    unsz = 1; n = initcount(w == 1 && declpd == 0 && gstruct < 0);
                     if (gstruct >= 0) {
                         int per; per = structslots(gstruct);
                         n = (n + per - 1) / per;
@@ -5989,6 +6040,8 @@ int unit(void) {
                 need(vfind(TOKV, NTOKV, "]", 1), "]");
                 isarr = 1;
                 n = dimtail(n);
+                if (unsz && gstruct < 0 && decldim2 > 0) n = initrowsof(decldim2, w == 1 && declpd == 0 && declptr == 0 ? (decldim3 ? decldim3 : decldim2) : 0) * decldim2;
+                unsz = 0;
                 if (gstruct >= 0) w = declsz;
             }
             gpd = declpd;
@@ -6289,7 +6342,7 @@ int fe_load(char *path, char *t) {
     int fd; int k;
     srcpath = path;
     /* Source maps belong to this unit; warning counts belong to the program. */
-    nspl = 0; nireg = 0; nfnpool = 0; nautoinc = 0; nld = 0;
+    nspl = 0; nireg = 0; nisp = 0; nfnpool = 0; nautoinc = 0; nld = 0;
     /* normalise EACH -I with a trailing slash, in the order given; the search
        walks them in that order */
     optincdl = 0;
@@ -6367,7 +6420,7 @@ int fe_load(char *path, char *t) {
    so a call in the first unit reaches a definition in the last the same way
    it reaches one further down its own file. */
 int fe_units(char **paths, int npath, char *t) {
-    int k; int u; int r;
+    int k; int u; int r; int td0;
     /* The model answers the `@stage.op` forms the prologue itself contains,
        so it is set up BEFORE anything is emitted.  With this after the
        first file was loaded, `@call.call __init` came out as `add64` -- a
@@ -6383,9 +6436,10 @@ int fe_units(char **paths, int npath, char *t) {
     nibuf = 0; nustat = 0;
     if (unitmode == 0) emit_start();
     else es(".unit 2\n");                  /* R20-3: this unit carries the .gdef contract */
-    u = 0;
+    u = 0; td0 = ntd;
     while (u < npath) {
         curunit = u;
+        ntd = td0;   /* file-scope typedefs end with their unit (C99 6.2.1p4); zlib inftrees.h `code` broke trees.c (0.0.37 C2) */
         r = fe_load(paths[u], t);
         if (r) return r;
         /* before the walk, so a forward reference spells a name the way its

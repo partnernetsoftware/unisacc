@@ -800,6 +800,7 @@ char incpaths[65536]; int nincpaths; int incdisk;
 int nireg;
 #define MAXSPL 4096
 long spl_at[MAXSPL]; int nspl;   /* joined continuation lines: the file line of each backslash, ascending */
+int isp_reg[MAXSPL]; long isp_at[MAXSPL]; int nisp;   /* a header's joined lines: its region, and the buffer line in it */
 char fnpool[8192]; int nfnpool;
 /* #line N ["file"] (C99 6.10.4) [R14-3].  Each directive is recorded with
    the include region it sits in and its own line as the user counts it; a
@@ -1104,7 +1105,20 @@ int incdo(int ls, int le, int from) {
         while (c2 < ls) { if (src[c2] == 10) ln = ln + 1; c2 = c2 + 1; }
         ireg_ln[nireg] = ln;
         ireg_nl[nireg] = 1; c2 = 0;
-        while (c2 < n) { if (incbuf[c2] == 10) ireg_nl[nireg] = ireg_nl[nireg] + 1; c2 = c2 + 1; }
+        /* lines as the BUFFER will have them: splice() re-runs over the header
+           and joins `\` + newline, so a continuation line is not one here
+           (deflate.h's 34 put trees.c:158 at :98; 0.0.37 g5) */
+        while (c2 < n) {
+            if (incbuf[c2] == 10) {
+                if (!(c2 > 0 && (incbuf[c2 - 1] == 92 || (incbuf[c2 - 1] == 13 && c2 > 1 && incbuf[c2 - 2] == 92))))
+                    ireg_nl[nireg] = ireg_nl[nireg] + 1;
+                else {   /* dropping one would give a wrong __LINE__: refuse instead */
+                    if (nisp >= MAXSPL) { __write(2, "unisacc: too many continuation lines in headers\n", 48); __exit(1); }
+                    isp_reg[nisp] = nireg; isp_at[nisp] = ireg_nl[nireg]; nisp = nisp + 1;
+                }
+            }
+            c2 = c2 + 1;
+        }
         ireg_path[nireg] = 0 - 1;
         if (incdisk) {
             q = 0; while (incpath[q]) q = q + 1;
@@ -1223,6 +1237,7 @@ int diag_at(long p, char *msg, char *kind) {
     }
     fname = inside >= 0 ? fnpool + ireg_nm[inside] : srcpath;
     if (warnonly) { warnonly = 0; if (inside >= 0) { nwarn = nwarn - 1; return 0; } }
+    if (inside >= 0) { int h; long l0; h = 0; l0 = line; while (h < nisp) { if (isp_reg[h] == inside && isp_at[h] < l0) line = line + 1; h = h + 1; } }   /* the header's own joins */
     if (inside < 0) {
         line = line - nautoinc;   /* the headers we added on the user's behalf */
         /* each joined continuation line is a line the file has that this
@@ -1268,6 +1283,7 @@ long line_at(long p) {
         else { if (line >= ireg_ln[i]) { inside = i; line = line - ireg_ln[i] + 1; break; } }
         i = i - 1;
     }
+    if (inside >= 0) { int h; long l0; h = 0; l0 = line; while (h < nisp) { if (isp_reg[h] == inside && isp_at[h] < l0) line = line + 1; h = h + 1; } }   /* the header's own joins */
     if (inside < 0) {
         line = line - nautoinc;
         i = 0;
@@ -1298,7 +1314,14 @@ int nerr;                /* errors reported so far */
 int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
 int errtop;              /* where the top-level construct being walked began */
 
-int err_atu(long p, char *stage, char *construct, char *msg) { uncov_stage = stage; uncov_construct = construct; return err_at(p, msg); }
+/* err_at only prints; a refusal must also count, or the program is written
+   anyway (every #line refusal exited 0 with an image; 0.0.37 g5) */
+int err_atu(long p, char *stage, char *construct, char *msg) {
+    if (panic) return 0;
+    uncov_stage = stage; uncov_construct = construct; err_at(p, msg);
+    nerr = nerr + 1;
+    return 0;
+}
 int err_tok(int t, char *msg);
 int err_uncov(int t, char *stage, char *construct, char *msg) {   /* R20-2 */
     if (panic) return 0;
@@ -1478,7 +1501,7 @@ int preprocess(void) {
     int a; int k; int ns; int ne;
     int key[4];
     ndepth = 0;
-    nmac = 0; mh_n = 0 - 1;
+    nmac = 0; mh_n = 0 - 1; nmacpool = 0;   /* per unit: a 33-unit command line filled the pool (lua multi-unit, 0.0.37 L1′) */
     curseg = 0; nsegpos = 0; npush = 0; pp_seg = 0 - 1;
     predef();
     i = 0;
