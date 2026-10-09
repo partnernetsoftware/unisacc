@@ -2,7 +2,8 @@
 # stagerun.sh STAGE... -- run the gate suites of compiler stages (tests/stagemap.c) on a frozen snapshot
 # of HEAD, so commits landing on the shared main during the run cannot void it ("inputs changed").
 # The snapshot is a shared clone (objects borrowed, not a worktree) under $TMPDIR, reused per commit.
-# Environment as for gatequeue (UA, MODEL_COM, UNISACC_FFI_X86_PROVIDER, ...); JOBS default 4.
+# Needs UA, UNISACC_FFI_X86_PROVIDER; MODEL_COM defaults to the snapshot's unisacc.com; JOBS default 4.
+# Run it directly (not under term.sh): each window is its own term.sh hand-off.
 # Prints the queue line per window; exit 0 all green, 1 a failure, 2 usage.
 [ $# -ge 1 ] || { echo 'usage: tests/stagerun.sh STAGE...' >&2; exit 2; }
 R=$(cd "$(dirname "$0")/.." && pwd); head=$(git -C "$R" rev-parse HEAD) || exit 2
@@ -22,7 +23,9 @@ sel=""; for n in "$@"; do sel="$sel --suite $n"; done
 state=$snap/.stagestate-$(echo "$sel" | cksum | cut -d' ' -f1)
 log=$state.log; : > "$log"; n=0
 while :; do
-    python3 tests/gatequeue.py --state "$state" --com --jobs "${JOBS:-4}" $sel > "$log.w" 2>&1; rc=$?
+    # one bounded Terminal hand-off per window (tests/term.sh: XProtect-exempt, 60 s ceiling)
+    ./tests/term.sh env UA="$UA" MODEL_COM="$com" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" \
+        python3 tests/gatequeue.py --state "$state" --com --jobs "${JOBS:-4}" $sel > "$log.w" 2>&1; rc=$?
     cat "$log.w" >> "$log"; grep -E '^(queue:|DONE .* rc=[1-9]|inputs changed)' "$log.w"
     n=$((n+1)); [ $rc = 75 ] || [ $rc = 142 ] || break
 done
