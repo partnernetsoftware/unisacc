@@ -77,6 +77,14 @@ static Value *seed_env_copy(Value *obj) {
     }
     return out;
 }
+/* 0.0.37: release a scope made by seed_env_copy once nothing reads it -- its own items array and
+   index only; keys and values are shared with the source (or interned) and stay alive.  Per-row
+   scopes were never released: parse2 peaked at 5.3 GB (2 GB of it env copies) and the cloud host
+   (16 GB, no swap) OOM-killed seed-gen. */
+static void seed_env_drop(Value *v) {
+    if (!v) return;
+    free(v->items); free(v->hix); free(v);
+}
 static void seed_update(Value *into, Value *from) {
     size_t i;
     if (!from) return;

@@ -726,6 +726,7 @@ static void map_actions(Value *out, Value *actions, Value *ctx) {
                 Value *nested = seed_env_copy(ctx);
                 value_put(nested, as ? value_text(as) : "it", items->items[j].value);
                 map_actions(out, body, nested);
+                seed_env_drop(nested);
             }
             continue;
         }
@@ -791,6 +792,7 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
             }
         }
         if (take) map_actions(out, value_get(part, "acts"), ctx);
+        seed_env_drop(ctx);
     }
 }
 static Value *mapseq_construct(Value *opts, Value *facts) {
@@ -850,6 +852,7 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
                 if (!source || source->kind != JARR) die("mapseq acts is not a list");
                 map_actions(acts, source, ctx);
             }
+            seed_env_drop(ctx);
             value_put(out, name, acts); free(name);
         }
     }
@@ -3794,7 +3797,7 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
         ManifestRow *r = &rows->row[i];
         Value *facts = seed_facts_scope(env, r->cell[4], extra);
         Value *opts;
-        if (!manifest_when(r->cell[3], flags, facts)) continue;
+        if (!manifest_when(r->cell[3], flags, facts)) { seed_env_drop(facts); continue; }
         opts = (!strcmp(r->cell[8], "-") || !*r->cell[8]) ? value_new(JOBJ) : value_json(r->cell[8], "manifest opts");
         manifest_let_graph(opts, facts, env);
         if (value_get(opts, "with")) seed_update(facts, value_get(opts, "with"));
@@ -3855,6 +3858,7 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                         scope = seed_env_copy(facts);
                         seed_update(scope, next);
                         v = manifest_cell(pair->items[1].value->s, scope, env);
+                        seed_env_drop(scope);
                         value_put(next, pair->items[0].value->s, v);
                     }
                 }
@@ -3865,11 +3869,13 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                         die("invalid foreach chain step");
                     seed_update(scope, next);
                     following = manifest_cell(next_cell->s, scope, env);
+                    seed_env_drop(scope);
                     value_put(next, entry->s, current);
                     value_put(next, "next", following);
                     current = following;
                 }
                 manifest_walk_block(rows, i + 1, r->end, flags, env, next, visit, arg);
+                seed_env_drop(next);
             }
             if (chain) {
                 Value *result = value_get(chain, "result");
@@ -3883,6 +3889,7 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                         r->cell[0], r->cell[1]);
             visit(i, r, facts, opts, env, arg);
         }
+        seed_env_drop(facts);
     }
 }
 typedef struct { Graph *graph; const char *dir; Value *flags, *accum; unsigned rows, labels; int done; } ManifestGraph;
@@ -3956,7 +3963,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
                         free(expect);
                     }
                 }
-                if (!take) continue;
+                if (!take) { seed_env_drop(ctx); continue; }
                 key = seed_fmt(value_text(value_get(spec, "key")), ctx);
                 owner = seed_fmt(value_text(value_get(spec, "owner")), ctx);
                 kind = seed_fmt(value_text(value_get(spec, "kind")), ctx);
@@ -3967,6 +3974,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
                 label = fresh_label(owner, kind);
                 value_put(bindings, key, value_string(label));
                 free(key); free(owner); free(kind); free(label);
+                seed_env_drop(ctx);
             }
             continue;
         }
@@ -4013,6 +4021,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
                     value_put(bindings, key, value_string(label));
                     free(key); free(owner); free(kind); free(label);
                 }
+                seed_env_drop(ctx);
             }
             free(s);
         }
