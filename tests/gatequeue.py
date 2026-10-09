@@ -326,6 +326,18 @@ def stagelog_segments(args, *marks):
     except (SystemExit, OSError, ImportError) as e:
         print('stagelog: window segments not recorded (%s)' % e, file=sys.stderr)
 
+# SCHEDULING-BEGIN (0.0.38 full038c: admission checks live memory -- a heavy suite needs its measured
+# footprint plus margin free, any other job a conservative floor (unmeasured jobs are not assumed small);
+# reread before every start, so a shared host's changing load is seen.  Not Linux: no reading, no gate.)
+HEAVY_MIB, FLOOR_MIB = 2048 + 512, 768
+def mem_available_mib():
+    try:
+        for line in open('/proc/meminfo'):
+            if line.startswith('MemAvailable:'): return int(line.split()[1]) // 1024
+    except OSError: pass
+    return None
+# SCHEDULING-END
+
 def resume(data, stamps, jobs, exclusive):
     # 0.0.21: a changed job list or exclusive set no longer forces a new state: results
     # survive only for jobs whose command and fingerprint are both unchanged; added jobs
@@ -518,6 +530,11 @@ def main():
                 if first: fits = first
                 heavy = set(getattr(args, 'heavy_suite', []))
                 if heavy & set(active): fits = [n for n in fits if n not in heavy]   # one heavy job at a time
+                free = mem_available_mib()
+                if free is not None:
+                    fits = [n for n in fits if free >= (HEAVY_MIB if n in heavy else FLOOR_MIB)]
+                    if not fits and not active:
+                        print('queue: WAIT memory -- %d MiB free, nothing admissible' % free, flush=True)
                 if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job

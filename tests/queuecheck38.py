@@ -120,4 +120,16 @@ with tempfile.TemporaryDirectory() as td:
     a1,a2=float((t/'h1').read_text()),float((t/'h2').read_text()); e1,e2=float((t/'h1.end').read_text()),float((t/'h2.end').read_text())
     assert a2>=e1 or a1>=e2, 'two heavy suites overlapped'
     assert float((t/'l1').read_text()) < max(e1,e2), 'light jobs waited for the heavy ones'
+    # live memory admission: with little free, a heavy suite is not started (light ones still are);
+    # with nothing admissible the window ends without starting anything (no OOM is reproduced)
+    jobs={n:[sys.executable,'-c',code2,str(t/n),'0.1'] for n in ('hv','lt')}
+    q.mem_available_mib=lambda: 1500
+    assert run('memlow',55,('--heavy-suite','hv','--parent-deadline',str(_t.monotonic()+6)))==75
+    r=json.loads((t/'memlow/results.json').read_text())['results']
+    assert 'lt' in r and 'hv' not in r, r
+    q.mem_available_mib=lambda: 500
+    assert run('memnone',55,('--heavy-suite','hv','--parent-deadline',str(_t.monotonic()+6)))!=0
+    assert not json.loads((t/'memnone/results.json').read_text())['results']
+    q.mem_available_mib=lambda: 9000
+    assert run('memok',55,('--heavy-suite','hv'))==0
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
