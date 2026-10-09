@@ -1302,3 +1302,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1′/L2 数组拒绝最小化，2026-10-09；出货产品实跑〕宏N=32的static unsigned long mask[N]独立-run退出0；仅前置extern const char version[]，同一完整数组在[32]后被拒incomplete array declaration before another definition，退出1。因此存在可复现的未完成extern声明历史影响，不能把完整数组报错直接归因宏长度识别；sqlite现场是否同根尚未验。两例入research/l1prime-array-history，排L1b后，当前输入窗口未动。
 
 〔C2 g5 单元边界，2026-10-09；源码核查，补丁待验〕research/g5-typedef-leak记录a.c的文件域typedef code泄漏到b.c参数同名，交换单元顺序不报错。fe_units每单元重载token而未重置ntd；typedef名字可见性应按翻译单元隔离，不能靠增大MAXTD结算。L1′参考窗口并入此项，由cc准备补丁及顺序互换/不同同名typedef/前单元签名保留的对拍；δ另核对TDN/TDB/TDD/TDE等名字绑定的单元复位。结构描述与跨单元函数签名必须保留，行映射偏移另列，不混作typedef修复验收。排在L1b首片后，尚未修改生产输入。
+
+〔C2 g5 行数补丁审阅，2026-10-09；系统cc实跑，修后参考待验〕unsized-rows.patch用initrowsat(j,per)把每个独立字符串都计为完整外层行，但字符串可初始化指针元素或内层char数组，不能只按token判整行。反例const char *p[][2]={"a","b"}的sizeof为2*sizeof(void*)，char s[][2][4]={"a","b"}的sizeof为8；系统cc合并探针退出0。当前补丁按其扫描逻辑两者均算两行（未跑修后参考）；需携带元素类型/剩余维度，或对此精确拒绝，补对拍后再同窗落。bkscr写越界是独立后端缺陷，缩短此数组不能算边界防护完成。
