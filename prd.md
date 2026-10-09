@@ -1411,3 +1411,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔F4本版FAILED回执提交，2026-10-09；cc主导决定〕cc决定ccw快路不落0.0.37：cdx静态scratch fast=1仍8.91s/selftest rc0，未满足原≤5s；cc宿主scratch报告6.93s，e3/lower/elf三串行段合计5.04s，仅定位参考。p1快慢运行均0而布局字节不同；p2无转发字节同且运行0；p3快慢字节同且双方rc2，既有问题另记后续，不冒称通过。冻结候选首测rc1/无产物；fc7ca424守卫源码修片尚未包含在冻结52173312中。F4状态本版FAILED，等待董秘/政委结账裁定及守卫是否进入发布物；不擅自认定账本结算、不启动候选/queue。定位数据保存在prd本段（过程JSON未入库）；cc收回重活owner。
 
 〔过程JSON出库，2026-10-09；董秘代裁〕research下0.0.37的/tmp过程JSON（c37-f4-failed、c37-frozen-linux-chain、c37-generator-matrix、c37-linux-candidate、c2-g4-current-cloud、l1b-signal-async-results）从树删除，不改写历史；引用改指同名脱敏.md或本文摘要，.gitignore加过程产物规则。F4′摘要：冻结候选首测rc1无产物；守卫修后冷编约11.7s，ccw快路scratch约8.9s，串行e3/lower/elf约5.0s，未达≤5s。
+
+〔cc授权同源预备链，2026-10-09〕主导cc已push8911adf4并指定cdx为唯一重活owner：固定该HEAD仅重建含fc7ca424守卫的默认C候选→seed→stage2/3，不封存/queue/Draft。已核seed/gen.c sha8ba73354与既有A/B30项同源，seed/exec/build/exec/parse2相对8ea81419零改动，复用生成器矩阵证据，不将旧产品验收复用到新候选。构造设SEED_GEN=1/SEED_C=1，原Linux宿主SEED_GEN_CC适配保留；每step55/outer58，comboot既有budget10，串行链；新source/hash待构造落地记录，产物交cc独验后等待发布物裁定。
+
+〔同源预备链完成，2026-10-09；cdx实际跑过〕从8911adf4构造默认C候选，source689a91de5cdd68c39d7ef20ba0f4cbd4a06846d4fe815ca4a7aeea61c9568d54；候选/stage2/stage3逐字节同sha740007ef4f25cb1d2a1ad0e35bf1b7dbe7ffc5d3739cf2d5d518e350b525fcc7，2243480B。经典seed sha928bda8d18efc20374e2a62b2dfb828dc847e07f9bc3694e43619e4e7d37a6dd与原版相同，导出源与侧录摘要一致；产品三份freshness均通过，候选与seed版本0.0.37。每目标/准备/打包均rc0；comboot stage2/3各八窗，以75按原身份续用、最终rc0，定点rc0。期间ce3b5d69仅文档清理，product source保持同源；构造身份记录HEAD可不同但闭包相同。未封存/queue/Draft，过程JSON不入库，重活释放给cc独验；F4发布裁定尚待。
