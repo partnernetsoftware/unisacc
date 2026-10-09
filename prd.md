@@ -1331,3 +1331,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔C2 g5 云机修片冻结前验证，2026-10-09；实际跑过〕八个 parse2 变体均串行/受限构造成功，fresh 哈希及计数全部保持既有基线；仅更新对应八条 graphhash。r21 复用本轮新构造普通 E3 JSON，PP/E1 重建后原生网络实跑 48 同/5 具名拒绝/0 接受不同。errors 模式的跨单元泄漏与同单元合法复合字面量双向共四组 tape/完整诊断与参考同字节。回归借用的七份最小例复制入 tests/multi/typedef-*.c，纳入既有门禁的 tests/multi 输入闭包，避免 research 例变化不使队列缓存失效；新增 multi isolation 全片与 C 构造器一致性、正式 .com 仍待 m4pro 验收。证据整理于 research/c2-g5-unit-typedef-cloud.md，不结算整个 C2。
 
 〔云机提交身份，2026-10-09〕云机未配 Git 作者，当前修片提交只用命令级 cdx-unisacc <cdx-unisacc@localhost>，不改全局配置、不借用人的作者身份。会话中 main 已经论文/计划文档更新前移666bb0bc；编译输入未变，本片仍只提交自身路径。
+
+〔C2 g4 云机接单核对，2026-10-09〕董秘/cc授权先推g5再只跟g4；g5与cc的c4e5001f文档已合并推到cee7ccc7。当前main已含5a632535的g4实现：普通sys=0超过六参走CL.vdone，CL.vend按sys=0恢复直接调用；callcontrol.py已于15bbf1bf迁成manifest删除，云机/home/box与/tmp未找到暂存副本。先按当前构造链重新生成E3并复验无原型/有原型/K&R与多单元；不手改TSV、不复活已删除构造器、不以公开0.0.36旧拒绝判main缺口。cc独立克隆验收待交接。
+
+〔C2 g4 当前源码复验，2026-10-09；实际跑过〕main d87c8917 从当前 manifest 重新构造 E3，JSON sha2187cf66、net shaf25d68ab，与g5冻结证据一致。六类九组（无原型/原型单文件、原始a+b双序、加权无原型/原型双序、float默认提升）原生E3 tape与参考逐字节同，系统cc与参考-run均退出0。cc确认K&R定义在参考本身expected {，撤销该变体；正式验收保持a+b、完整单文件、原型对照三者候选.com退出0且同参考。无需重复修5a632535已实现的控制，不手改表、不复活15bbf1bf已删除的生成器；当前仅补可复现证据并交cc独立克隆。Darwin构建限制仍使正式候选未验，不结算C2整项。
