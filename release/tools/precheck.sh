@@ -29,7 +29,7 @@ if [ -f unisacc.com ] && [ -f unisacc.com.build.json ]; then
     [ "$want" = "$have" ] || { echo "  FAIL: unisacc.com and unisacc.com.build.json are not a pair (install both from stage 2)"; bad=1; }
 fi
 # 0.0.22 P1-B 7: the two external preparations the 0.0.21 queue lost 14 jobs to
-if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
+if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] && [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
     echo "  FAIL: UNISACC_FFI_X86_PROVIDER has no manifest.json (rebuild: release/RELEASE-PIPELINE.md section 9 step 5b)"; bad=1
 fi
 # 0.0.28 E17: a known-fail line written during this version is debt the version must close before sealing
