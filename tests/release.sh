@@ -33,6 +33,10 @@ if [ "${RELEASE_BOUND:-0}" != 1 ]; then
     RELEASE_DEADLINE=$(python3 -c 'import time;print("%.3f"%(time.monotonic()+55-1))')
     exec python3 "$R/tests/bound.py" 55 env RELEASE_BOUND=1 RELEASE_DEADLINE="$RELEASE_DEADLINE" "$0" "$@"
 fi
+sl() { [ -n "${STAGELOG_RUN:-}" ] && [ "$STAGELOG_RUN" != 0 ] || return 0
+       python3 "$R/release/tools/stagelog.py" "$@" 2>/dev/null || :; }
+# 0.0.38 P6: release.sh's own checks up to the scheduler are one segment (warm-ups are their own)
+cid=$(sl begin --run "${STAGELOG_RUN:-0}" --phase queue --subphase release-checks ${STAGELOG_PARENT:+--parent-id "$STAGELOG_PARENT"})
 MODEL_COM=$(cd "$(dirname "$MODEL_COM")" && printf '%s/%s' "$PWD" "$(basename "$MODEL_COM")")
 export MODEL_COM UA SEED_DIR STRICT=1
 before=$(shasum -a 256 "$MODEL_COM"); before=${before%% *}
@@ -81,19 +85,33 @@ else
 fi
 dirty=$(cd "$R" && git status --porcelain -- $DECLARED 2>/dev/null | head -3)
 [ -z "$dirty" ] || { printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty" >&2; exit 1; }
+[ -z "${cid:-}" ] || sl end --id "$cid" --execution-status release-checks
 warm_done=0
 # 0.0.22: the caches live in the checkout, so the markers are per checkout -- a state continued
 # in a new worktree warms again (0.0.21: bindprep/warningdriver timed out cold at 53 s)
 wk=$(printf '%s' "$R" | cksum | cut -d' ' -f1)
+# 0.0.38: a marker means the cache was built.  A step that does not apply to this host is marked
+# .na and costs no window; a failed step writes no marker -- it is counted, and after two failures
+# the queue goes on COLD (named, .cold), never as if the cache existed.
 for w in 1 2 3; do
-    [ -f "$GATE_STATE/warm.$w.$wk" ] && { warm_done=$w; continue; }
+    m="$GATE_STATE/warm.$w.$wk"
+    [ -f "$m" ] || [ -f "$m.na" ] || [ -f "$m.cold" ] && { warm_done=$w; continue; }
+    case $w in 1|2) [ "$(uname -s)" = Darwin ] || { : > "$m.na"; echo "warm-up $w/3 not applicable on $(uname -s)"; continue; };; esac
+    sid=$(sl begin --run "$STAGELOG_RUN" --phase queue --subphase "warmup-$w" ${STAGELOG_PARENT:+--parent-id "$STAGELOG_PARENT"})
+    wrc=0
     case $w in
-        1) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
-        2) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
-        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1 || :;;   # 0.0.38: a cache warm-up is best effort; under set -e its failure ended the window rc 1
+        1) python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1 || wrc=$?;;
+        2) python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1 || wrc=$?;;
+        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1 || wrc=$?;;
     esac
-    : > "$GATE_STATE/warm.$w.$wk"
-    echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
+    [ -z "$sid" ] || sl end --id "$sid" --rc "$wrc" --execution-status "warmup"
+    if [ "$wrc" = 0 ]; then
+        : > "$m"; echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
+    else
+        n=$(( $(cat "$m.fail" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$m.fail"
+        if [ "$n" -ge 2 ]; then : > "$m.cold"; echo "warm-up $w/3 FAILED twice (rc=$wrc): continuing COLD -- its suites may time out"
+        else echo "warm-up $w/3 failed (rc=$wrc, attempt $n): no cache marker; retried next window"; fi
+    fi
     exit 75
 done
 deadline=(); [ -n "${RELEASE_DEADLINE:-}" ] && deadline=(--parent-deadline "$RELEASE_DEADLINE")
