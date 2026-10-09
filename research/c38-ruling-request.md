@@ -22,13 +22,13 @@
 | D 其他超时 | 10 | com-fb12-multi、com-luatests-build（BLOCKED 1 的根）、com-tapebin-1/2/3、exec-arm、exec-asm、exec-driver-core-contracts、seed-matrix-features-1、shared-e2-located | 均 142 | 记 H1 云机基线 |
 | E 已裁套件的新失败形态 | 2 | lib-lifecycle（运行时分配断言，异于已裁 40 s 超时）、exec-driver-language-2（宿主 cc 编 enum_forward.c 失败，异于已裁外杀） | 首错签名不匹配 rulings.tsv，故未消费旧裁 | 请逐项裁：是否追加 H2 并允许 H2 切口修一轮 |
 | F 门禁自身 | 1 | gate-layers（unclassified gate suite: hostcheck） | 本轮新增 6 个套件未登记层；主树 48b8b9ae 已修，运行树旧码保留红 | 记已修，主树复核 rc0 |
-| G 产品/驱动功能红 | 4 | com-forward-multi（ok 1 wrong 2）、com-multi（multi-unit FAILING）、com-difftest_o-1（refuse 3）、realprog（lua） | 产品 .com 路线的真实功能不符/拒收 | 需逐项定位：真实产品缺陷还是宿主差异；不得记入宿主基线了事 |
+| G 产品/驱动功能红 | 4 | com-forward-multi、com-multi、com-difftest_o-1、realprog | 日志定位见文末（定位≠裁定）：前两项为静态镜像 `-run` 宿主转发按设计拒绝；com-difftest_o-1 为一形状明确拒收（wrong 0）；realprog 为宿主参照编译器跳过 lua/sqlite | 各项须对原承诺义务裁：`-run` 宿主转发义务在静态 Linux 镜像上如何处置；拒收覆盖缺口是否记缺口条目；宿主跳项是否入 H2。不自动转 77/H2 |
 | H 其他 rc1 | 5 | exec-bridge-linux（clang -arch arm64）、windows-resolver-host（需 zig/真 SDK）、seed-construct-parse2/-2/-3（inspect-parse2 图断言） | 前两项是宿主工具链缺项；后三项为构造器断言 | 前两项记 H2 宿主基线；seed-construct-parse2 三项需定位 |
 
-## 同时提请
+## 同时提请（与本裁表分开出口）
 
-1. 授权一次 verification 全量（当前 main，含 attempt 类别、per-suite history、实时内存准入、stage 对安装修片，约 2.5 h，不进 Draft），用于与本基线对比测得提效；未授权前不跑。
-2. 浪费榜首项（tail DEFER 4816.9 作业秒）的改进已在主树，需上项全量方能测得实效。
+1. 授权一次 verification 全量（当前 main，约 2.5 h，不进 Draft），只测运行树 04a5087b 之后**尚未生效**的差异：attempt 类别持久化（7de2efa0）、实时内存准入（cce2de15/e5ddec42/2cedd407）、stage 对安装与来源核（a7b059dc/a3d3bb78）、重项准入（8ef26efa 已在续跑段部分生效）；同候选同宿主同条件对比。未授权前不跑。
+2. 入窗 attempt 类别判定（2df6655f）与 per-suite history（740b52a0）**已在 full038c 运行树生效**，其效果已含在本基线里，不重复认收益；175 次 DEFER（4816.9 作业秒）是否可避免为 unknown。
 
 ## G/H 组定位（只读现有日志，未新跑）
 
@@ -39,4 +39,4 @@
 | com-difftest_o-1 | `fb12-31-unused-static-refs-undefined` 在 -O0/-O1/-O2 均 `reject: not covered: a branch to an undefined label` | 产品对该形状明确拒收（未覆盖），wrong 0；是覆盖缺口不是错码，建议记覆盖缺口条目而非宿主基线 |
 | realprog | `skip lua` / `skip sqlite`：the system compiler will not build it here | 宿主参照编译器不建这两个程序（与产品无关），skip 计失败；建议 H2 宿主基线并声明宿主需求 |
 
-结论：G 组 4 项中 2 项为已知的静态镜像 `-run` 转发限制，1 项为明确拒收的覆盖缺口，1 项为宿主参照跳项；未见产品产出错误字节（wrong 均为 0 或拒收）。
+结论（定位，非裁定）：G 组 4 项中 2 项为已知的静态镜像 `-run` 转发限制，1 项为明确拒收的覆盖缺口，1 项为宿主参照跳项；未见产品产出错误字节（wrong 均为 0 或拒收）。归入何类由裁定决定。
