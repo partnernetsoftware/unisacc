@@ -66,13 +66,14 @@ with tempfile.TemporaryDirectory() as td:
     d=t/'stall'; d.mkdir()
     (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'stalled':3}))
     assert run('stall')==3
-    # a job that keeps being deferred after its early slot (0.0.37 rowcov) stalls instead of looping
+    # a job that had its early slot (0.0.37 rowcov) gets a full attempt, not endless deferrals
     jobs={'long':[sys.executable,'-c','import time; time.sleep(30)']}
     d=t/'redefer'; d.mkdir()
     (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'fullwindow':['long'],'stalled':2}))
     rc=run('redefer',55,('--parent-deadline',str(_t.monotonic()+9)))
     st=json.loads((d/'results.json').read_text())
-    assert rc==3 or (rc==75 and st['stalled']>=3), (rc, st.get('stalled'), st.get('deferred'))
+    # at a window's start a long job is a full attempt: it is retried alone, not deferred again
+    assert rc==75 and 'long' in st.get('retried',[]) and not st.get('deferred'), (rc, st.get('retried'), st.get('deferred'))
     # an external header the host plan declares is part of the identity: editing it voids reuse
     inc=t/'csinc'; inc.mkdir(); (inc/'csmith.h').write_text('a\n')
     with patch.dict(os.environ,{'CSMITH_INCLUDE':str(inc)}):
@@ -91,6 +92,15 @@ with tempfile.TemporaryDirectory() as td:
     assert all(isinstance(w[k],float) for k in ('prologue_s','jobs_s','epilogue_s')), w
     ev=[json.loads(l) for l in (home/'.unisacc/stagelog/events.jsonl').read_text().splitlines()]
     assert [e['subphase'] for e in ev if e['event']=='begin']==['prologue','jobs','epilogue'] and len(ev)==6, ev
+    # full038: under a parent deadline a job longer than any window gets a full attempt, a solo retry,
+    # then a timeout result -- never 'late fill' deferrals until nothing is admissible and the queue stalls
+    jobs={'toolong':[sys.executable,'-c','import time; time.sleep(60)']}
+    seen=[]
+    for _ in range(4):
+        rc=run('span',55,('--parent-deadline',str(_t.monotonic()+12))); seen.append(rc)
+        if rc!=75: break
+    st=json.loads((t/'span/results.json').read_text())
+    assert st['results'].get('toolong',{}).get('rc')==142 and not st.get('deferred'), (seen, st)
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
     # Exclusive jobs must precede and never overlap ordinary two-slot work.
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in

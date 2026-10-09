@@ -467,7 +467,11 @@ def main():
     def cold():
         v = sorted(history.values())
         return v[len(v)//2] if len(v) >= 5 else 30
-    def estimate(n): return min(window-2, max(2, history.get(n, cold())*1.3+1))
+    # 0.0.38 P3 fix (full038): under a parent deadline a full window is `span`, not `window`; capping
+    # estimates and full-attempt tests at `window` made every 46 s attempt a 'late fill' and doubled its
+    # estimate past any window -- nothing admissible, the queue stalled with the job never decided
+    span = deadline - start
+    def estimate(n): return min(span-2, max(2, history.get(n, cold())*1.3+1))
     # SCHEDULING-END
     try:
         while pending or active:
@@ -482,7 +486,7 @@ def main():
                 # 0.0.35 P12: a job deferred out of a tail runs only at a full window, first (rc4 tools-1 was
                 # deferred twice, from 13 s and 36 s tails: 49 s of slot time lost)
                 full = set(data.get('fullwindow', []))
-                fits = [n for n in pending if estimate(n) <= left-1 and (n not in full or left >= window-3)
+                fits = [n for n in pending if estimate(n) <= left-1 and (n not in full or left >= span-3)
                         and all(p not in jobs or p in data['results'] for p in PREDS.get(n, ()))]
                 if not fits: break
                 first = [n for n in fits if n in full]
@@ -503,7 +507,7 @@ def main():
                 if rc is None: continue
                 log.close(); elapsed = time.monotonic()-t
                 progress = True
-                if rc == 142 and limit < window-3:
+                if rc == 142 and limit < span-3:
                     # A late fill used only the window remainder, not a full
                     # attempt. Keep it pending and give it an early slot next.
                     # 0.0.38 P3: deferring a job that already had its early slot is not progress
