@@ -2,7 +2,13 @@
 # precheck.sh UA -- R19-0 (3): run BEFORE freezing and building a candidate.
 # Each check is one the 0.0.18 release found only after a candidate existed,
 # costing a rebuild each time.  Budgets keep 30% margin under the 55 s bounds.
-set -u; UA=${1:?same-source reference}; R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
+set -u
+R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
+if [ "${1:-}" = host ]; then
+    shift
+    exec python3 tests/bound.py 55 python3 tests/hostcheck.py "$@"
+fi
+UA=${1:?same-source reference}
 bad=0
 t0=$(date +%s); python3 tests/bound.py 55 python3 -m unisa build-weights >/dev/null 2>&1 || bad=1; t=$(( $(date +%s) - t0 ))
 echo "build-weights ${t}s (local budget 19 s: release-check runs it under 55 s on a runner about twice as slow)"; [ "$t" -le 19 ] || { echo "  FAIL: hosted runners take about twice as long"; bad=1; }

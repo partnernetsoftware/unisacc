@@ -25,6 +25,7 @@ while [ $# -gt 0 ]; do
         --com) COM=1; shift;;
         --list) LIST=1; shift;;
         --plan) LIST=2; shift;;
+        --host-plan) LIST=3; shift;;
         --suite) [ $# -ge 2 ] || { echo 'missing suite name' >&2; exit 2; }
             SELECT="$SELECT $2"; shift 2;;
         --stage) [ $# -ge 2 ] || { echo 'missing stage name' >&2; exit 2; }   # tests/stagemap.c
@@ -78,6 +79,22 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     name=$1; shift
     if [ "$LIST" = 1 ]; then echo "$name"; return; fi
     if [ "$LIST" = 2 ]; then printf '%s\0' "$name" "$#" "$@"; return; fi
+    if [ "$LIST" = 3 ]; then
+        # Executing host and emitted target are separate obligations.
+        case $name in
+          csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
+          lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
+          lib-stack-x86|lib-stack-x86-hostabi) req='darwin-x86_64|osx/x86_64|cc-arch-x86_64|cdx|native-stack-bridge';;
+          lib-windows-gp) req='any|win/x86_64,win/arm64|clang-coff,llvm-objcopy|cdx|coff-declarations';;
+          exec-bootstrap-osxarm) req='darwin-arm64|osx/arm64|cc|cdx|native-bootstrap';;
+          exec-bootstrap-osxx86) req='darwin-x86_64|osx/x86_64|cc|cdx|native-bootstrap';;
+          exec-native-*) req='native-posix|host|cc|cdx|native-network-runtime';;
+          lib-windows-imports) req='native-posix|win-export-synthetic|cc|cdx|native-export-probe';;
+          lib-lifecycle|lib-callable-catalog) req='native-posix|host|cc,libffi|cdx|native-ffi-probe';;
+          *) req='UNKNOWN|UNKNOWN|UNKNOWN|unassigned|UNKNOWN';;
+        esac
+        printf '%s\0%s\0' "$name" "$req"; return
+    fi
     case " $SELECT " in *" $name "*) ;; *) return;; esac
     # 0.0.37: count live children by PID -- `jobs -rp` is bash-only and, inside $(...), dash
     # sees no jobs at all, so on a Linux /bin/sh every suite started at once (cloud host).
