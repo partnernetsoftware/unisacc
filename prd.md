@@ -1405,3 +1405,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔F4修片定位第二证据，2026-10-09；实际跑过〕scratch仅收窄runit守卫后csih15单元成功产出动态ELF并selftest rc0，但冷编11.71s，未满足5s。trace复测12.03s，fwd_ccw=1导致fast=0；91d6c1ea为callback支持强制全E3重放，覆盖此前63280efb增量快路。同一F4切口下一scratch实验仅使用已有cli/ccw资源在第一遍生成callback wrapper/mapper，再尝试既有fwd_incremental；δ/模型不改，不能取消callback语义或改变15单元。须与强制重放逐字节/行为对拍及callback反例核证后才考虑落修片。
 
 〔cc重新主导、cdx执行F4功能修片，2026-10-09〕重活由cc统一调度。已实测Linux静态编译器的宿主loader守卫仅对-run必要；-o生成程序在运行时使用自己的loader。将compiler.c守卫收窄为runit && host_dl_slot(1)==0，保留-run拒绝及back_encode二道检查。同一单行scratch静态driver：getpagesize探针-o成功/实际运行rc0、-run仍原错；csih固定15单元-o/selftest均rc0但11.71s。该修片只解决功能阻塞，不认定F4性能完成；ccw快路仍因merge尾段形状拒绝而重放，后续同一切口处理。冻结52173312不因这次源码修片变成新候选。
+
+〔F4快路包尾定位，2026-10-09；代码实读〕forward-result先将原tape封入USLFW1，再在全部records之后追加ccw wrapper/mapper；仅初遍启用cli/ccw仍不够，fwd_sidecar目前丢弃records后的尾部。拟scratch将首遍全程序尾部仅cnt>0且ccwc>0并入base，保留全程序static名称/回调地址；stub-only尾部不当全程序名单，merge只在base已有mapper时识别并丢弃重复生成段。无forward/ccwc0不加段，异常形状保留慢路。
+
+〔F4本版FAILED回执提交，2026-10-09；cc主导决定〕cc决定ccw快路不落0.0.37：cdx静态scratch fast=1仍8.91s/selftest rc0，未满足原≤5s；cc宿主scratch报告6.93s，e3/lower/elf三串行段合计5.04s，仅定位参考。p1快慢运行均0而布局字节不同；p2无转发字节同且运行0；p3快慢字节同且双方rc2，既有问题另记后续，不冒称通过。冻结候选首测rc1/无产物；fc7ca424守卫源码修片尚未包含在冻结52173312中。F4状态本版FAILED，等待董秘/政委结账裁定及守卫是否进入发布物；不擅自认定账本结算、不启动候选/queue。定位数据保存在research/c37-f4-failed.json；cc收回重活owner。
