@@ -225,6 +225,8 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 〔开发提速评审吸纳，2026-10-09；政委令，cc 落实〕来源 cdx2 只读评审（/tmp/unisacc-cdx2/speedup-review.md，未入库）：近期最大损耗是环境型失效与临时状态丢失（0.0.36 两次 539→15、713→11；重启清空临时目录后重建候选），其次是候选前补录/闭包变化引起的重封与整轮重跑（0.0.24 三次封装 64 分；0.0.31/32 版本号后置重复整轮约 45 分）。本版只落 ROI 高、不改验收的五项，细则见 release/RELEASE-PIPELINE.md §23：①队列只用 queue.sh（NOFALLBACK、同源候选对、单驱动、caffeinate 防休眠）；②precheck 加未提交/未跟踪输入与 corpus 在位检查；③queue.sh 每窗后目录外持久备份、重启自动恢复（gatequeue 仍逐项核指纹）；④签名等待窗重叠原生 Linux 预验；⑤日常阶段定向+chain 再构正式候选。不做：加 jobs、放宽预算、自动重试到绿、Linux 绿顶替 m4pro 全门禁、重开 Q2。评审中的 6–10 项（两槽并发构建、缓存命中核验、precheck 契约状态共享、阶段输入失效、套件合并/K2 迁移）待测量或待批准，不在本版实施；K2/K1 排期仍未定（E76）。
 
+〔构造器改动的候选顺序，2026-10-09；政委令，cc 落实〕按 cdx2 v4：生成器（seed/gen.c、seed/facts.h、exec/build/）改动后先做 flags 全矩阵预验（shared 七、lower 六、pack-prep 模型十一，含 parse2 --errors、--warnings --errors 与 object 变体；每项 ASan 无错、与 gen.py 同 flags 逐字节同、峰值 RSS 低于宿主可用内存、墙钟在 50 s 内）→ 一次冻结候选 → 再自举/queue；禁止每修一处就整链重建。细则 release/RELEASE-PIPELINE.md §24。起因：92dbae02 修 parse2 行级作用域泄漏（5.25→1.28 GB）后直接整链重建，pack-prep-1 才暴露 parse2 --errors 的 group-tail 每边 JSON 解析不释放（5.4 GB）。
+
 ## 4. 质量体系
 
 - **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。

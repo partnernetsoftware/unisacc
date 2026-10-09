@@ -264,3 +264,12 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 4. **签名等待时重叠 Linux 预验**：同一候选身份稳定（封存后、字节不再变）时，Apple 公证/Windows 远端签名的等待窗里跑原生 Linux 对应套件（Lima `default` 或云机原生）。只在 m4pro 本机四路队列不在跑时让同宿主 Lima 起重任务；签名后核对 payload 字节与签前一致。Linux 结果是预验，不替代 m4pro 全门禁或六格 runner。
 5. **日常阶段定向 + chain，再构正式候选**：开发中先用 `tests/stagerun.sh` / `gate.sh --suite` 跑改动所在阶段与 chain 组，人工补 `also` 标签与下游（`--stage` 只按主标签选，不含 also）；修红只重跑受影响项，沿用固定 CAND 与 GATE_STATE。阶段绿不签发 release；正式候选仍跑 `release.sh --com` 全量。
 
+## 24. 构造器改动后的候选顺序（政委 10-09；cdx2 v4）：全矩阵预验 → 一次冻结 → 自举/队列
+
+动因：0.0.37 云机先修 seed-gen 一处泄漏就整链重建，到 pack-prep-1 才发现 `parse2 --errors` 另一处 5.4 GB 峰值，白跑一次 UA/shared/六 target。改为：
+
+1. **生成器全矩阵预验（不建候选）**：seed/gen.c、seed/facts.h、exec/build/ 任一改动后，先对候选实际调用的**全部** stage/flags 组合各跑一次——shared 七个（pp --shared-predefines、lex --typed、parse2、opt --o2、opt、prune、nativeabi）、六个 `lower --full [--osx|--win] [--arm64]`、pack-prep 十一个模型作业（buildcompiler.sh `modeljob`：parse2 --errors、parse2 --warnings --errors、parse2/units --locations、lex --locations、lex、pp --shared-predefines --no-autoinc、pp --locations --shared-predefines、lower --full --object [--arm64]、enc --object、enc/arm --object）。每项：AddressSanitizer 无错；输出与 `exec/build/gen.py` 同 flags 逐字节相同；记峰值 RSS（`/usr/bin/time -v`）与墙钟，峰值须低于宿主可用内存（云机 16 GB 无 swap，常仅 3.5–5 GB 可用），单项墙钟在 `b` 的 50 s 内。
+2. **一次冻结**：矩阵全绿后才提交并冻结，从该提交**只建一次**候选（build_ref → build_candidate → seed）。
+3. **再自举与队列**：comboot 定点 → queue.sh 全量。
+4. **禁止**每修一处就整链重建；矩阵中途发现新红，回到 1，不起候选。候选建成后发现构造器红，同样先回 1 预验全矩阵，再冻结重建一次。
+
