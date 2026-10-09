@@ -52,6 +52,7 @@ Per-stage receipt: [`seal-remeasure-tip.json`](seal-remeasure-tip.json) field `h
 
 - **Submission identity.** Tip gold + constructed weights are op-87 / 8769 keys / **569** units. EN/arXiv Table 1 remains the labeled historical op-74 / 8509 / **517** identity. Collapse only after 政委 chooses one sealed submission identity and the matching Table 1 + abstract are rewritten together (CN/EN/tex).
 - **A2 9174.** Still no frozen gold on this tip that reproduces 9174 as a key count (9124 B in the texts is weight bytes, not keys).
+- **§8.1 platform matrix.** Per-target execution evidence from release receipts only is inventoried in [`seal-platform-matrix-inventory-20261009.md`](seal-platform-matrix-inventory-20261009.md); that does not replace a same-identity native matrix for submission.
 
 ## Self-check
 
