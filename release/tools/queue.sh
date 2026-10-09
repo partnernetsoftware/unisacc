@@ -8,6 +8,15 @@
 set -u
 D=${1:?candidate dir}; UA=${2:?same-source reference}; SEED=${3:?seed dir}
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
+# 0.0.38 P6: per-window wall clock into the private stage log (outside the repo); a logging failure
+# never stops the queue.  STAGELOG_RUN=0 turns it off.
+SL=${STAGELOG_RUN-q-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}; [ "$SL" = 0 ] && SL=
+qid=; [ -z "$SL" ] || qid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --source-commit "$(git rev-parse --short HEAD)" 2>/dev/null) || :
+st() { [ -z "$SL" ] || python3 "$R/release/tools/stagelog.py" "$@" 2>/dev/null || :; }
+# 0.0.38 P6: setup (worktree, candidate pair, state restore) is its own segment, and an early exit still
+# closes the run's record with its rc (cdx2 10-10)
+sid=$(st begin --run "$SL" --phase queue --subphase setup ${qid:+--parent-id "$qid"})
+trap 'r=$?; [ -z "${sid:-}" ] || st end --id "$sid" --rc "$r" >/dev/null; [ -z "$qid" ] || st end --id "$qid" --rc "$r" >/dev/null' EXIT
 # R19-0: the queue runs in its own detached worktree at the commit it started
 # on, so commits to main (plans, prd, other agents' work) never reach it.
 W=${QUEUE_WORKTREE:-/tmp/unisacc-queue-$(git rev-parse --short HEAD)}
@@ -62,17 +71,16 @@ backup() {   # swap only after a complete copy: a failed copy keeps the previous
     && rm -rf "$B/state.old" && { [ ! -d "$B/state" ] || mv "$B/state" "$B/state.old"; } && mv "$B/state.new" "$B/state" && rm -rf "$B/state.old" \
     || echo "queue: backup to $B failed (previous copy kept)" >> "$LOG"; }
 LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" >> "$LOG" || : > "$LOG"
-# 0.0.38 P6: per-window wall clock into the private stage log (outside the repo); a logging failure
-# never stops the queue.  STAGELOG_RUN=0 turns it off.
-SL=${STAGELOG_RUN-q-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}; [ "$SL" = 0 ] && SL=
-qid=; [ -z "$SL" ] || qid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --source-commit "$(git rev-parse --short HEAD)" 2>/dev/null) || :
+[ -z "$sid" ] || st end --id "$sid" --execution-status setup >/dev/null; sid=
 # QUEUE_WINDOWS caps the windows of this run (default 300) -- a short supervised check, not a pass
 for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
+  waid=$(st wait --action begin --run "$SL" --phase queue --reason gatequeue-alive)
   for k in $(seq 1 90); do
     ps -eo pid,command | grep "[g]atequeue.py" > "$D/.gq" || break
     [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
     sleep 2
   done
+  [ -z "$waid" ] || st wait --action end --run "$SL" --phase queue --reason gatequeue-alive --id "$waid" >/dev/null
   wid=; [ -z "$SL" ] || wid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --subphase "window-$i" --parent-id "$qid" 2>/dev/null) || :
   env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" STAGELOG_RUN="${SL:-0}" STAGELOG_PARENT="${wid:-}" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"
@@ -89,12 +97,13 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
   if [ "$l5" -ge "${QUEUE_LOAD_MAX:-6}" ]; then hot=${hot:-$(date +%s)}; else hot=; fi
   if [ -n "$hot" ] && [ $(( $(date +%s) - hot )) -ge "${QUEUE_LOAD_SECS:-600}" ]; then
     echo "paused: 5-min load >= ${QUEUE_LOAD_MAX:-6} for ${QUEUE_LOAD_SECS:-600} s $(date +%H:%M:%S)" >> "$LOG"
+    lid=$(st wait --action begin --run "$SL" --phase queue --reason load-pause)
     while [ "$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($3)}')" -ge "${QUEUE_LOAD_RESUME:-4}" ]; do sleep 60; done
+    [ -z "$lid" ] || st wait --action end --run "$SL" --phase queue --reason load-pause --id "$lid" >/dev/null
     echo "resumed $(date +%H:%M:%S)" >> "$LOG"; hot=
   fi
   [ $((i % 40)) -eq 0 ] && osascript -e 'tell application "Terminal" to close (every window whose busy is false)' >/dev/null 2>&1
 done
 echo "final rc=$rc" >> "$LOG"
-[ -z "$qid" ] || python3 "$R/release/tools/stagelog.py" end --id "$qid" --rc "$rc" >/dev/null 2>&1 || :
 grep -E "^queue:|final rc|UNVERIFIED" "$LOG" | tail -4
 exit "$rc"
