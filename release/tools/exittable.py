@@ -95,9 +95,29 @@ def main(argv=None):
         if r.get('rc') == 0 and not r.get('status'): passed += 1; continue
         try: log = (st / (name + '.log')).read_text(errors='replace')
         except FileNotFoundError: log = ''
+        # 0.0.38: a job never run because a predecessor failed is not its own red -- it hangs under its root
+        if r.get('rc') == 1 and r.get('seconds') == 0 and r.get('limit') == 0:
+            rows.append((name, 'BLOCKED', 1, 'not run: predecessor failed')); continue
         c = classify(name, r, log, h1, rules)
         last = (log.strip().splitlines() or [''])[-1][:120]
         rows.append((name, c, r.get('rc'), last))
+    # root of each blocked job: follow the declared predecessors (gatequeue's PREDS) to a red that ran
+    root_of = {}
+    try:
+        sys.path.insert(0, str(ROOT / 'tests')); import gatequeue as _gq
+        preds = getattr(_gq, 'PREDS', {})
+    except Exception: preds = {}
+    ran_red = {n for n, k, _, _ in rows if k not in ('BLOCKED', 'PENDING')}
+    for n, k, _, _ in rows:
+        if k != 'BLOCKED': continue
+        seen, todo, root = set(), list(preds.get(n, ())), None
+        while todo:
+            p = todo.pop(0)
+            if p in seen: continue
+            seen.add(p)
+            if p in ran_red: root = p; break
+            todo += list(preds.get(p, ()))
+        root_of[n] = root or '(unknown root)'
     counts = {}
     for _, c, _, _ in rows: counts[c] = counts.get(c, 0) + 1
     if a.json:
@@ -108,7 +128,14 @@ def main(argv=None):
         sel = [r for r in rows if r[1] == c]
         if not sel: continue
         print('\n[%s] %s' % (c, disp.get(c, 'not yet run')))
-        for n, _, rc, l in sel: print('  %-34s rc=%s  %s' % (n, rc, l))
+        for n, _, rc, l in sel:
+            if c == 'BLOCKED': continue
+            under = [b for b, k, _, _ in rows if k == 'BLOCKED' and root_of.get(b) == n]
+            print('  %-34s rc=%s  %s%s' % (n, rc, l, ('  [+%d not run downstream]' % len(under)) if under else ''))
+    blocked = [r for r in rows if r[1] == 'BLOCKED']
+    if blocked:
+        print('\n[BLOCKED] %d obligations not executed because a predecessor failed (counted once under their root above; '
+              'never PASS, no execution time)' % len(blocked))
     return 0
 
 
