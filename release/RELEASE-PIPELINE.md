@@ -253,3 +253,14 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **分段 ape 要封完整长度**：R3′ 把数据零尾改成长度（Padded）后，tests/ape_stage.py 写 data.bin 只剩前缀，Linux 分段 ape 段错误（139）；record 现记 data_len（schema 3）。单跑 ape 走直接构建，所以只在 all 里红。
 - **linux.sh all --suite NAME**：Linux 红项单独重跑（ape 14 s、native8/ccrun8 各约 15 s），不必再跑 1063 s 整轮；全套中 native8/ccrun8 的 55 s 超时单独复跑为绿，属负载。
 - **未签名回执绑 rc 提交的 release-check run**：0.0.32 先按 20148939 的 run 做回执，封存推送后 rc 指向 28c850e6，资格签名断言 wrong upstream source 失败；改用 28c850e6 自己的 run（37572481970）重做回执（zip 字节不变）后通过。顺序：封存 → push → rc_tag → 等该提交的 release-check 绿 → unsigned_receipt.py → 上传草稿 → 资格/公司签名（scratchpad qual32.sh 一条链）。
+
+## 23. 0.0.37 开发提速（政委 10-09 吸纳 cdx2 只读评审；不改验收）
+
+依赖顺序不变：同源身份 → 候选 → 自举/契约 → 封存 → m4pro 全门禁 → 信任与发布。只重叠互不争用的等待。不做：加 jobs、放宽 60 s/55 s 预算、自动重试到绿、Linux 绿顶替 m4pro 全门禁。
+
+1. **队列只用 `release/tools/queue.sh`**：它自带 `TERM_SH_NOFALLBACK=1`、同源候选对（stage 2 的 `.com` 与 build.json 配对检查）、seed/UA/提供者检查；0.0.37 起另有：同机已有 queue.sh 时拒绝再起第二个，macOS 上用 `caffeinate -dims` 保持屏幕与空闲不休眠（0.0.36 两次 539→15、713→11 大面积失效即屏幕休眠与手写续跑缺 NOFALLBACK）。不再手写续跑循环；续跑就是重跑同一条 queue.sh 命令。
+2. **候选前清单（precheck.sh 先跑）**：版本提交、顺延账 `--final`、冻结窗、事实导出、提供者、已知红、契约层之外，0.0.37 起再查：构建/测试树内未提交或未跟踪的输入（plans/prd/research/archive/docs 不算）、`corpus/c-testsuite` 是否在位。任一项红先修再冻结，避免封存后重封与整轮重跑。
+3. **状态与日志的目录外持久备份**：queue.sh 每窗结束（无 gatequeue 在跑）把 `CAND_DIR.queue/` 与候选 build.json 复制到 `QUEUE_BACKUP`（默认 `~/.unisacc/queue-backup/<候选目录名>-<候选 sha 前 12 位>/state`），整份复制成功后才替换旧份。重启时若状态目录不在而备份在，自动恢复；gatequeue 仍逐项核对输入指纹，只有身份完全相同的结果才复用。
+4. **签名等待时重叠 Linux 预验**：同一候选身份稳定（封存后、字节不再变）时，Apple 公证/Windows 远端签名的等待窗里跑原生 Linux 对应套件（Lima `default` 或云机原生）。只在 m4pro 本机四路队列不在跑时让同宿主 Lima 起重任务；签名后核对 payload 字节与签前一致。Linux 结果是预验，不替代 m4pro 全门禁或六格 runner。
+5. **日常阶段定向 + chain，再构正式候选**：开发中先用 `tests/stagerun.sh` / `gate.sh --suite` 跑改动所在阶段与 chain 组，人工补 `also` 标签与下游（`--stage` 只按主标签选，不含 also）；修红只重跑受影响项，沿用固定 CAND 与 GATE_STATE。阶段绿不签发 release；正式候选仍跑 `release.sh --com` 全量。
+

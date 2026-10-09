@@ -36,8 +36,25 @@ cd "$W"
 [ -s "$SEED/unisacc-seed.com" ] || { echo "no $SEED/unisacc-seed.com"; exit 2; }
 [ -x "$UA" ] && [ -s "$D/unisacc-next.com" ] || { echo "missing UA or candidate"; exit 2; }
 : "${UNISACC_FFI_X86_PROVIDER:?set UNISACC_FFI_X86_PROVIDER}"
-Q=${QUEUE_STATE:-$D.queue}; mkdir -p "$Q"
-LOG=$Q/release-queue.log; : > "$LOG"
+# 0.0.37 speedup ①: one driver only -- a second queue.sh on this host would race this one's
+# stray-gatequeue kill; refuse instead of competing (0.0.36: hand-written resume loops).
+others=$(ps -eo pid=,ppid=,args= | awk -v me=$$ '$1!=me && $2!=me && /release\/tools\/queue\.sh/ && !/awk/ {print $1}')
+[ -z "$others" ] || { echo "queue: another queue.sh is running (pid $others); resume with that one, do not start a second"; exit 2; }
+# 0.0.37 speedup ①: 0.0.36 lost 539 and 713 results to a sleeping display (apps-real and term.sh
+# need it).  Hold display and idle sleep for the life of this script; macOS only, elsewhere a no-op.
+command -v caffeinate >/dev/null 2>&1 && { caffeinate -dims -w $$ & }
+Q=${QUEUE_STATE:-$D.queue}
+# 0.0.37 speedup ③: a persistent copy outside the candidate dir and /tmp, written only between
+# windows (no gatequeue alive, nothing half-written).  A restart that finds no state restores it;
+# gatequeue still re-checks every stamp, so a restored result is reused only for identical inputs.
+B=${QUEUE_BACKUP:-$HOME/.unisacc/queue-backup/$(basename "$D")-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}
+if [ ! -d "$Q" ] && [ -d "$B/state" ]; then mkdir -p "$Q" && cp -pR "$B/state/." "$Q/" && echo "queue: restored state from $B (stamps re-checked by gatequeue)"; fi
+mkdir -p "$Q"
+backup() {   # swap only after a complete copy: a failed copy keeps the previous backup
+  mkdir -p "$B" && rm -rf "$B/state.new" && cp -pR "$Q" "$B/state.new" && cp -p "$D/unisacc-next.com.build.json" "$B/" \
+    && rm -rf "$B/state.old" && { [ ! -d "$B/state" ] || mv "$B/state" "$B/state.old"; } && mv "$B/state.new" "$B/state" && rm -rf "$B/state.old" \
+    || echo "queue: backup to $B failed (previous copy kept)" >> "$LOG"; }
+LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" >> "$LOG" || : > "$LOG"
 for i in $(seq 1 300); do
   for k in $(seq 1 90); do
     ps -eo pid,command | grep "[g]atequeue.py" > "$D/.gq" || break
@@ -45,7 +62,7 @@ for i in $(seq 1 300); do
     sleep 2
   done
   env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
-  echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"
+  echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"; backup
   case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
   # 0.0.28 R1 (owner rule): the 5-minute load at or above QUEUE_LOAD_MAX (6) for ten minutes pauses
   # the queue at a window boundary until it falls below QUEUE_LOAD_RESUME (4); results are kept.

@@ -223,6 +223,8 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - **单元与链接**：`-funit` 写单元对象（tape 带 `.global/.extern` 链接属性；对象里另有不装载的节存单元 tape）。`unisacc a.o b.o lib.a [-o prog]` 在 tape 级合并（src/tapelink.c：私有名改 `__u<k>_`、全局按名相会、同名全局对象按 C 公共定义合一、各单元 `__init_u` 串成 `__init`），再走普通后端，六目标都可出；`unisacc ar rcs|t|x` 读写系统 `ar` 也认的归档。产品驱动复用同一合并核心，编译决策仍全在模型路由。
 - **驱动默认模式**：见 §3.11（裸 `unisacc FILE.c` 即运行）。
 
+〔开发提速评审吸纳，2026-10-09；政委令，cc 落实〕来源 cdx2 只读评审（/tmp/unisacc-cdx2/speedup-review.md，未入库）：近期最大损耗是环境型失效与临时状态丢失（0.0.36 两次 539→15、713→11；重启清空临时目录后重建候选），其次是候选前补录/闭包变化引起的重封与整轮重跑（0.0.24 三次封装 64 分；0.0.31/32 版本号后置重复整轮约 45 分）。本版只落 ROI 高、不改验收的五项，细则见 release/RELEASE-PIPELINE.md §23：①队列只用 queue.sh（NOFALLBACK、同源候选对、单驱动、caffeinate 防休眠）；②precheck 加未提交/未跟踪输入与 corpus 在位检查；③queue.sh 每窗后目录外持久备份、重启自动恢复（gatequeue 仍逐项核指纹）；④签名等待窗重叠原生 Linux 预验；⑤日常阶段定向+chain 再构正式候选。不做：加 jobs、放宽预算、自动重试到绿、Linux 绿顶替 m4pro 全门禁、重开 Q2。评审中的 6–10 项（两槽并发构建、缓存命中核验、precheck 契约状态共享、阶段输入失效、套件合并/K2 迁移）待测量或待批准，不在本版实施；K2/K1 排期仍未定（E76）。
+
 ## 4. 质量体系
 
 - **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。

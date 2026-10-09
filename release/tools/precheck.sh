@@ -36,6 +36,14 @@ fi
 V=$(sed -n 's/.*UNISACC_VERSION "\(.*\)".*/\1/p' src/version.h)
 kf=$(grep -n "0\.0\.${V##*.} \|${V} " tests/*.knownfail tests/*.knownwrong exec/c/*.knownfail 2>/dev/null | grep -v '^[^:]*:[0-9]*:#' | grep -v '^tests/pyfront.knownfail:')   # the Python control group is not shipped
 if [ -n "$kf" ]; then printf '%s\n' "$kf" | cut -c1-200; echo "  FAIL: known-fail lines tagged $V remain (close them or move them to the next version with a reason)"; bad=1; fi
+# 0.0.37 speedup ②: inputs the candidate would read but the commit does not hold -- an uncommitted
+# or untracked file under the build/test tree makes the sealed identity differ from the commit
+# (rework: re-seal + whole queue).  Notes (plans/, prd.md, research/, archive/, docs/) do not count.
+dirty=$(git status --porcelain --untracked-files=all | cut -c4- | grep -v -E '^(plans/|prd\.md$|research/|archive/|docs/|paper)' | head -20)
+if [ -n "$dirty" ]; then printf '  %s\n' $dirty; echo "  FAIL: uncommitted or untracked inputs (commit them or move them out of the tree before freezing)"; bad=1; fi
+# 0.0.37 speedup ②: the corpus suites and diag's damaged-corpus check read the gitignored corpus;
+# absent, diag counts 0 damaged programs and fails inside the queue (cloud pre-check 10-09)
+[ -d corpus/c-testsuite/tests/single-exec ] || { echo "  FAIL: corpus/c-testsuite missing (FETCH=1 tests/corpus.sh, or copy it from the main checkout)"; bad=1; }
 # 0.0.35 P9: the cheap checks above fail first, before any warm-up (10-08: a known red waited 278 s);
 # bindprep runs as gate.sh does, first/second/package, each under its own bound (one cold pass was 55 s)
 if [ "$bad" -ne 0 ]; then echo "precheck FAILED (cheap checks): fix before freezing"; exit 1; fi
