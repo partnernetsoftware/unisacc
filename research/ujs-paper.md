@@ -8,7 +8,7 @@
 - **M3 / P0 product compile:** `./tests/ujs2wasm_compiler.sh`  
 - **Ship-js contract:** `./tests/uxe_ship_js.sh`  
 - **UXE unmanned:** `npm run test:uxe:*` — **separate** from language; flaky UXE must not block language green  
-**Method proofs:** live in Paper A [cite A] (`research/formalization-roadmap.md`, Lean L0–L3)—this paper does not re-prove IntNet existence, and **ships no UJS-specific Lean**.
+**Method proofs:** live in Paper A [cite A] (`archive/research/formalization-roadmap.md`, Lean L0–L3)—this paper does not re-prove IntNet existence, and **ships no UJS-specific Lean**.
 
 ---
 
@@ -208,7 +208,7 @@ UJS shows that the UNISA SH method [cite A] extends to a closed JavaScript *spec
 
 ## References
 
-- [cite A] Companion: *UNISA SH / 表即网络* — `research/unisacc-paper.md` §3.4 · `research/formalization-roadmap.md` (Lean L0–L3).
+- [cite A] Companion: *UNISA SH / 表即网络* — `research/unisacc-paper.md` §3.4 · `archive/research/formalization-roadmap.md` (Lean L0–L3).
 - Omlin & Giles, *Constructing deterministic finite-state automata in recurrent neural networks*, JACM 1996.
 - Lindner et al., Tracr (2023); Jia & Rinard (SAS 2021); Boniol et al. (2026); Kraska et al. (2018); Trofin et al., MLGO (2021); Shalev-Shwartz et al. (P-8b family)—detail in `research/prior-art.md`.
 - Living product / gates: `ujs/prd.md` · layout: `ujs/ARCHITECTURE.md` · Host: `ujs/practice/uxe/HOST_ABI.md` (symlink `ujs/uxe/`) · outline: `research/ujs-paper-outline.md`.
