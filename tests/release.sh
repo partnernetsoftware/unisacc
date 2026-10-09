@@ -43,8 +43,11 @@ exclusive=()  # fat is three ~17 s shards since 0.0.13 and no longer needs a win
 # inner 20 s hard timeout (lib-carrier-import-model).  They get a window each.
 # 0.0.21: exec-tableself reached 48 s alone (0.0.33: split into -1/-2 at ~17 s each, no window now); the
 # Python image step of each bigclosure target exceeds its 45 s bound under contention; each gets a window
-for s in exec-memx86-ua-1 lib-carrier-import-model bigclosure-osx-arm64 bigclosure-osx-x86_64 bigclosure-lnx-arm64 bigclosure-lnx-x86_64 bigclosure-win-arm64 bigclosure-win-x86_64 com-seedgen; do exclusive+=(--exclusive-suite "$s"); done
+for s in lib-carrier-import-model bigclosure-osx-arm64 bigclosure-osx-x86_64 bigclosure-lnx-arm64 bigclosure-lnx-x86_64 bigclosure-win-arm64 bigclosure-win-x86_64 com-seedgen; do exclusive+=(--exclusive-suite "$s"); done
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-arm64); fi
+# 0.0.37: gate.sh lists exec-memx86-* only on Darwin/arm64 (x86_64 under Rosetta); elsewhere naming it
+# here made gatequeue refuse the whole queue ("unknown exclusive suite", cloud Linux host)
+if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then exclusive+=(--exclusive-suite exec-memx86-ua-1); fi
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 # the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
