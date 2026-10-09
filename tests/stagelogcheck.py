@@ -44,6 +44,19 @@ assert s['rc'] == [1, 0] and s['wall_s'] == 7.0
 rejects([ev('end', 'x', 1)], 'orphan end')
 rejects([ev('begin', 'a', 1), ev('begin', 'a', 2)], 'duplicate id')
 rejects([ev('begin', 'a', 5), ev('end', 'a', 1)], 'end before begin')
+# two runs (or two boots) of one phase are summed per clock line, never unioned across them
+s = S.summarise([ev('begin', 'a', 10), ev('end', 'a', 20), dict(ev('begin', 'b', 10), run='r2'), dict(ev('end', 'b', 20)),
+                 ev('begin', 'c', 10, boot='b2'), ev('end', 'c', 20, boot='b2')])['queue']
+assert s['wall_s'] == 30.0, s
+rejects([ev('wait-begin', 'w', 9), ev('wait-end', 'w', 3)], 'wait ending before it began')
+rejects([ev('wait-begin', 'w', 1), ev('wait-end', 'w', 3, phase='seal')], 'wait ending in another phase')
+rejects([ev('begin', 'x', 1), ev('wait-begin', 'x', 2)], 'command and wait sharing an id')
+rejects([ev('begin', 'a', 1, parent_id='nope')], 'unknown parent')
+bad_line({k: v for k, v in ev('begin', 'a', 1).items() if k != 'phase'}, 'missing phase')
+bad_line(ev('begin', 'a', 1, phase='lunch'), 'unknown phase')
+bad_line(dict(ev('begin', 'a', 1), mono=float('nan')), 'NaN time')
+bad_line(ev('end', 'a', 1, acc='GREEN'), 'unknown acceptance status')
+bad_line(ev('end', 'a', 1, rss=-1), 'negative RSS')
 bad_line(dict(ev('begin', 'a', 1), argv='make x'), 'field outside whitelist')
 bad_line(dict(ev('begin', 'a', 1), run='/home/someone/x'), 'absolute home path')
 bad_line(dict(ev('end', 'a', 1), execution_status='ghp_abcdef'), 'credential-looking value')
@@ -65,5 +78,10 @@ with tempfile.TemporaryDirectory() as td:
     assert subprocess.run([sys.executable, str(LOG), '--log', str(ROOT / 'stagelog.jsonl'), 'begin', '--run', 'r', '--phase', 'queue'],
                           capture_output=True, timeout=20).returncode != 0, 'log inside the repository accepted'
     assert not (ROOT / 'stagelog.jsonl').exists()
+    assert run('end', '--id', eid, '--cpu-user', 'nan').returncode != 0, 'NaN CPU accepted'
+    link = pathlib.Path(td) / 'link.jsonl'; link.symlink_to(pathlib.Path(td) / 'elsewhere.jsonl')
+    assert subprocess.run([sys.executable, str(LOG), '--log', str(link), 'begin', '--run', 'r', '--phase', 'queue'],
+                          capture_output=True, timeout=20).returncode != 0, 'symlinked log accepted'
 print('stagelog: union of overlaps, waits, null for unmeasured, rc0 != PASS, INCOMPLETE for missing end/cross-boot, '
-      'orphan/duplicate/order/whitelist/path/credential rejections and writer refusals pass')
+      'per-run/boot clock lines, wait order/run/phase, shared/unknown ids, missing/unknown fields, NaN, '
+      'orphan/duplicate/order/whitelist/path/credential rejections and writer refusals (NaN, symlink, in-repo) pass')

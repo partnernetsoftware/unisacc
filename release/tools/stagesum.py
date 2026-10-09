@@ -17,6 +17,10 @@ FIELDS = {
     'wait-begin': {'event', 'id', 'run', 'phase', 'reason', 'mono', 'boot_id', 'utc'},
     'wait-end': {'event', 'id', 'run', 'phase', 'reason', 'mono', 'boot_id', 'utc'},
 }
+PHASES = ('code', 'matrix', 'freeze', 'candidate', 'fixedpoint', 'accept17', 'seal', 'queue', 'draft', 'public')
+ACCEPT = ('PASS', 'FAILED', 'UNVERIFIED', 'ACCEPTED_BY_RULING')
+REQUIRED = {'begin': {'event', 'id', 'run', 'phase', 'mono', 'boot_id'}, 'end': {'event', 'id', 'mono', 'boot_id', 'acceptance_status'},
+            'wait-begin': {'event', 'id', 'run', 'mono', 'boot_id'}, 'wait-end': {'event', 'id', 'run', 'mono', 'boot_id'}}
 SENSITIVE = re.compile(r'(/home/|/Users/|/tmp/|/var/folders/|[A-Za-z]:\\\\|token|password|secret|ghp_|gho_)', re.I)
 
 
@@ -30,6 +34,19 @@ def load(path):
         if kind not in FIELDS: raise SystemExit('stagesum: line %d: unknown event %r' % (k, kind))
         extra = set(r) - FIELDS[kind]
         if extra: raise SystemExit('stagesum: line %d: fields outside the whitelist: %s' % (k, ','.join(sorted(extra))))
+        missing = REQUIRED[kind] - set(r)
+        if missing: raise SystemExit('stagesum: line %d: missing fields %s' % (k, ','.join(sorted(missing))))
+        m = r.get('mono')
+        if not isinstance(m, (int, float)) or isinstance(m, bool) or m != m or m in (float('inf'), float('-inf')):
+            raise SystemExit('stagesum: line %d: mono must be a finite number' % k)
+        if r.get('phase') is not None and r['phase'] not in PHASES:
+            raise SystemExit('stagesum: line %d: unknown phase %r' % (k, r['phase']))
+        if kind == 'end' and r.get('acceptance_status') not in ACCEPT:
+            raise SystemExit('stagesum: line %d: unknown acceptance status %r' % (k, r.get('acceptance_status')))
+        for f in ('cpu_user', 'cpu_sys', 'rss_kib'):
+            v = r.get(f)
+            if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool) or v != v or v < 0 or v == float('inf')):
+                raise SystemExit('stagesum: line %d: %s must be null or a finite non-negative number' % (k, f))
         for f, v in r.items():
             if isinstance(v, str) and f != 'utc' and SENSITIVE.search(v):
                 raise SystemExit('stagesum: line %d: field %s looks like a path or credential' % (k, f))
@@ -38,6 +55,14 @@ def load(path):
 
 
 def union(spans):
+    """Sum of per-(run, boot) unions: monotonic times are comparable only on one boot, and two runs
+    of one phase are two stretches of work, not one overlapping interval."""
+    groups = {}
+    for key, a, b in spans: groups.setdefault(key, []).append((a, b))
+    return round(sum(union1(v) for v in groups.values()), 3)
+
+
+def union1(spans):
     total, end = 0.0, None
     for a, b in sorted(spans):
         if end is None or a > end: total += b - a; end = b
@@ -56,6 +81,14 @@ def summarise(events, run=None):
         if i not in begins: raise SystemExit('stagesum: end without begin: %s' % i)
     for i in we:
         if i not in wb: raise SystemExit('stagesum: wait end without begin: %s' % i)
+        a, z = wb[i], we[i]
+        if (a.get('run'), a.get('phase')) != (z.get('run'), z.get('phase')):
+            raise SystemExit('stagesum: wait %s ends in another run/phase' % i)
+        if a.get('boot_id') == z.get('boot_id') and z['mono'] < a['mono']:
+            raise SystemExit('stagesum: wait end before begin: %s' % i)
+    if set(begins) & set(wb): raise SystemExit('stagesum: a command and a wait share an id')
+    for i, b in begins.items():
+        if b.get('parent_id') and b['parent_id'] not in begins: raise SystemExit('stagesum: unknown parent %s' % b['parent_id'])
     phases = {}
     for i, b in begins.items():
         if run and b['run'] != run: continue
@@ -68,7 +101,7 @@ def summarise(events, run=None):
         if b.get('boot_id') is None or b.get('boot_id') != e.get('boot_id'):
             p['incomplete'].append({'id': i, 'why': 'begin and end on different boots'}); continue
         if e['mono'] < b['mono']: raise SystemExit('stagesum: end before begin: %s' % i)
-        p['spans'].append((b['mono'], e['mono']))
+        p['spans'].append(((b['run'], b['boot_id']), b['mono'], e['mono']))
         cpu = None if e.get('cpu_user') is None or e.get('cpu_sys') is None else round(e['cpu_user'] + e['cpu_sys'], 3)
         p['cpu'].append(cpu); p['rss'].append(e.get('rss_kib'))
     for i, b in wb.items():
@@ -78,7 +111,7 @@ def summarise(events, run=None):
                                                                        'incomplete': [], 'rc': [], 'acceptance': [], 'cpu': [], 'rss': []})
         if e is None or e.get('boot_id') != b.get('boot_id') or b.get('boot_id') is None:
             p['incomplete'].append({'id': i, 'why': 'wait without end' if e is None else 'wait across boots'}); continue
-        p['waits'].append((b['mono'], e['mono']))
+        p['waits'].append(((b['run'], b['boot_id']), b['mono'], e['mono']))
     out = {}
     for name, p in phases.items():
         out[name] = {

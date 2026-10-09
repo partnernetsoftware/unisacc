@@ -38,15 +38,17 @@ def token(v, what):
 
 def logpath(arg):
     p = pathlib.Path(arg).expanduser() if arg else pathlib.Path.home() / '.unisacc' / 'stagelog' / 'events.jsonl'
-    p = p.resolve()
+    if p.is_symlink(): raise SystemExit('stagelog: the event log must not be a symlink')
+    p = p.parent.resolve() / p.name
     if p == ROOT or ROOT in p.parents: raise SystemExit('stagelog: the event log stays outside the repository')
     return p
 
 
 def write(path, rec):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     line = json.dumps(rec, sort_keys=True, separators=(',', ':')) + '\n'
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # never follow a planted symlink; one write() per line keeps concurrent appends whole
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try: os.write(fd, line.encode())
     finally: os.close(fd)
 
@@ -55,7 +57,7 @@ def num(v, what):
     if v is None: return None
     try: x = float(v)
     except ValueError: raise SystemExit('stagelog: %s must be a number' % what)
-    if x < 0: raise SystemExit('stagelog: %s must not be negative' % what)
+    if x != x or x in (float('inf'), float('-inf')) or x < 0: raise SystemExit('stagelog: %s must be a finite non-negative number' % what)
     return x
 
 
