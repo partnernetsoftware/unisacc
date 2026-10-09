@@ -321,3 +321,15 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 
 后续量完再做（不在本轮实施）：候选与 seed 共用同源参考（须保 seed 无 Python 与来源证明）；precheck 拆为候选前廉价检查 + 定点后契约检查，并接入 candidate_chain；窗口外耗时分账后优化最大项。待裁：queue.sh/stagerun.sh 自建 worktree 与"只用 main、不开 worktree"的计划注记是否冲突，未裁前沿用现脚本并在回执注明。
 
+
+## 28. 0.0.38 流水线提效（P1–P7；董秘代裁、政委点头 10-09）
+
+不放宽任何限时、不加 jobs、不删测试、不改验收措辞。
+
+1. **预授权裁定表与单一出口表（P1）**：红项按 `release/preauth.tsv` 归类——UNVERIFIED_HOST（套件 rc 77）、TOOL_MISSING、OUTER_INTERRUPTED、HOST_TIMEOUT（plans H1 清单内的 142）、STALLED（队列 rc 3）、NEEDS_RULING（其余：错误输出、编译错、sanitizer 报告、清单外超时）。`release/tools/exittable.py STATE` 读队列状态出一张表；发布 owner 维护这一张，只有 NEEDS_RULING 一次打包报裁。归类不是通过：PASS、各类与 PENDING 分列。
+2. **宿主就绪预检（P2）**：冻结前 `release/tools/precheck.sh host`（`tests/hostcheck.py`，读 `tests/gate.sh --host-plan` 声明）；工具实探，缺项报 MISSING/UNSUPPORTED/UNKNOWN，工具就绪不等于套件通过。
+3. **队列共同 deadline 与活锁（P3）**：`tests/release.sh` 把外层 bound 的单调截止时刻以参数交给 `gatequeue.py --parent-deadline`（不进套件环境与指纹）；作业限时不超过外层剩余。启动前写 inflight，外层杀窗计一次中断，第二次记 INTERRUPTED、rc 为 null，不合成 142；被杀窗零进展或连续三窗无作业退出，队列退 3（STALLED/BUDGET_UNSCHEDULABLE），`queue.sh` 不再按 75 续跑，须先诊断。套件 rc 77 = UNVERIFIED，队列退 4，`release.sh` 不放行。
+4. **gatedeps 三个稳定点（P4）**：只在冻结提交后、封存（candidate.json）提交后、`tests/` 或检查器改动提交后刷新一次 `make gatedeps`；prd/plans/research 的状态记录不触发刷新，prd 的三个 guard（script-inventory/publish-order/gate-infra）相关改动随最近的稳定点一并刷新。队列期间不刷。
+5. **旁路并行（P5）**：同机重活一个令牌——候选构造、comboot、queue、ASan 矩阵、F4 计时互斥（8 核 16 GB 无 swap，4-job 队列已近满载）。可与主干重叠的只有轻活与远端等待：宿主预检与工具安装、预授权表/出口表、权限准备、冻结后的廉价契约检查（ledger/freeze/subtract/facts）、封存后等远端 CI、Draft 说明预填。
+6. **阶段墙钟（P6）**：`release/tools/stagelog.py begin|end|wait` 写仓外 `~/.unisacc/stagelog/events.jsonl`（字段白名单，同 boot 单调钟，未测为 null）；`queue.sh` 自动记整轮与每窗。`release/tools/stagesum.py` 汇总：区间并集、缺 end/跨 boot 记 INCOMPLETE、rc 与验收状态分列。入仓只放脱敏汇总表。
+7. **套件同步（P7）**：宿主不满足的套件声明需求并退 77（末行 `UNVERIFIED: required=… observed=… missing=…`），交叉目标的字节对拍照跑；编译错/输出不符/sanitizer 报告仍是 FAILED，不凭宿主或 stderr 关键词改判。
