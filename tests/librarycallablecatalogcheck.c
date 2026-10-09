@@ -24,5 +24,5 @@ int main(int argc,char **argv){
  invalidate_bindings(c);CHECK(!c->callable_count&&!c->callable_site_count&&!c->callable_declarations&&!c->callable_sites);
  CHECK(!library_callable_catalog_load(c,two,two_n));
  puts("CALL1/CALL2/CALL3: fixed/variadic/zero-tail/empty-alias maps, all truncations/malformed atomic, replacement/re-relocate/clear/free lifecycle passed");rc=0;
-done:us_free(c);free(one);free(two);return rc;
+done:us_free(c);free(one);free(two);free(three);return rc;
 }
