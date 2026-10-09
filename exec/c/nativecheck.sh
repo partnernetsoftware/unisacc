@@ -5,17 +5,17 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # Models are freshly constructed; every stage's bytes and status must agree.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { "$_BOUND" 60 "$@"; }
-PART=${NATIVE_PART:-all}
 case "$(uname -s)/$(uname -m)" in
  Linux/x86_64) TARGET=lnx/x86_64; IMAGE=elf;;
  Linux/aarch64|Linux/arm64) TARGET=lnx/arm64; IMAGE=elf;;
  Darwin/arm64) TARGET=osx/arm64; IMAGE=macho;;
  Darwin/x86_64) TARGET=osx/x86_64; IMAGE=macho;;
- *) echo 'nativecheck: unsupported host' >&2; exit 2;;
+ *) printf 'UNVERIFIED: required=native-posix observed=%s missing=execution-host target=host\n' "$(uname -s)/$(uname -m)"; exit 77;;
 esac
+UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+b() { "$_BOUND" 60 "$@"; }
+PART=${NATIVE_PART:-all}
 case $PART in
  all|stages) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
  chain) INPUTS="examples/hello.c tests/c/b_toknames.c exec/c/run.c";;

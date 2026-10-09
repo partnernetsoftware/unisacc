@@ -105,4 +105,10 @@ def check(ua,arch):
   print(arch,out.decode().strip())
 if __name__=='__main__':
  if len(sys.argv)!=3:sys.exit('usage: librarystackcheck.py PRIVATE_MODEL_COM ARCH')
+ sys.path.insert(0,str(ROOT/'tests'))
+ from hostcheck import require_host
+ arch=sys.argv[2]
+ if arch not in ('arm64','x86_64'):sys.exit('unsupported stack architecture')
+ rc=require_host('darwin-arm64' if arch=='arm64' else 'darwin-x86_64','osx/'+arch)
+ if rc:sys.exit(rc)
  check(pathlib.Path(sys.argv[1]).resolve(),sys.argv[2])

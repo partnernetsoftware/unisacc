@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Host readiness negative cases; no candidate construction or suite-result reuse."""
-import contextlib, importlib.util, io, json, os, pathlib, tempfile, unittest
+import contextlib, importlib.util, io, json, os, pathlib, tempfile, unittest, subprocess, sys
 from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('hostcheck',pathlib.Path(__file__).with_name('hostcheck.py'))
 h=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(h)
@@ -26,6 +26,10 @@ class HostChecks(unittest.TestCase):
             self.assertEqual(declared['csmithdiff-40']['dependencies'],'csmith')
             self.assertTrue(any(d['required']=='UNKNOWN' for d in declared.values()))
         self.assertIn('com-csmithdiff-40',h.declarations(True))
+    def test_inventory_cannot_return_success_without_probes(self):
+        r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'15',sys.executable,str(h.ROOT/'tests/hostcheck.py'),'--inventory','--suite','exec-native-chain'],capture_output=True,text=True)
+        self.assertEqual(r.returncode,77,(r.stdout,r.stderr))
+        self.assertTrue(r.stdout.splitlines()[-1].startswith('UNVERIFIED:'))
     def test_missing_tool_and_missing_header(self):
         with patch.object(h.shutil,'which',return_value=None):
             self.assertEqual(h.Checks().probe('cc'),'MISSING')
@@ -52,6 +56,24 @@ class HostChecks(unittest.TestCase):
         self.assertEqual(h.prediction({},b,'Linux/x86_64','new'),'UNKNOWN')
     def test_no_time_left_is_unknown(self):
         self.assertEqual(h.Checks(seconds=0).probe('cc'),'UNKNOWN')
+    @unittest.skipUnless(h.host().startswith('Linux/'),'Linux negative host cases')
+    def test_host_suites_reject_before_preparation(self):
+        commands=[
+            [sys.executable,'exec/c/librarystackcheck.py','missing.com','arm64'],
+            [sys.executable,'exec/c/librarystackcheck.py','missing.com','x86_64'],
+            [sys.executable,'tests/r10stackx86check.py'],
+            ['env','SELF_PART=bootstrap','TARGET=osx/arm64','UA=/nonexistent','sh','exec/pipeline/selfcheck.sh'],
+            ['env','SELF_PART=bootstrap','TARGET=osx/x86_64','UA=/nonexistent','sh','exec/pipeline/selfcheck.sh']]
+        for args in commands:
+            r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'10',*args],cwd=h.ROOT,capture_output=True,text=True)
+            self.assertEqual(r.returncode,77,(args,r.stdout,r.stderr))
+            self.assertTrue(r.stdout.splitlines()[-1].startswith('UNVERIFIED: required='))
+    def test_native_unknown_host_does_not_build_reference(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=pathlib.Path(td)/'uname';p.write_text('#!/bin/sh\necho unsupported\n');p.chmod(0o755)
+            r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'10','env','PATH='+td+':'+os.environ['PATH'],'UA=/nonexistent','sh','exec/c/nativecheck.sh'],cwd=h.ROOT,capture_output=True,text=True)
+            self.assertEqual(r.returncode,77,(r.stdout,r.stderr))
+            self.assertIn('observed=unsupported/unsupported',r.stdout)
     def test_stat_does_not_hide_permission_or_enotdir(self):
         with patch.object(pathlib.Path,'stat',side_effect=PermissionError):
             with self.assertRaises(PermissionError):h.regular('x')

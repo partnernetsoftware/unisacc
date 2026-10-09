@@ -9,6 +9,14 @@ TARGET=${TARGET:-lnx/x86_64}; export TARGET
 SELF_PART=${SELF_PART:-all}
 case $SELF_PART in all|stages|stages1|stages2|package|bootstrap) ;; *) echo "unknown selfcheck part: $SELF_PART" >&2; exit 2;; esac
 [ "$SELF_PART" != package ] || [ "${NETWORK:-1}" = 1 ] || { echo 'package selfcheck requires NETWORK=1' >&2; exit 2; }
+if [ "$SELF_PART" = bootstrap ]; then
+    case $TARGET in
+        osx/arm64) requirement=darwin-arm64;;
+        osx/x86_64) requirement=darwin-x86_64;;
+        *) echo "unsupported bootstrap target: $TARGET" >&2; exit 2;;
+    esac
+    python3 tests/hostcheck.py --require "$requirement" --target "$TARGET" || exit $?
+fi
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 b() { "$_BOUND" 60 "$@"; }
 MODEL=tbl; [ "${NETWORK:-1}" != 1 ] || MODEL=net

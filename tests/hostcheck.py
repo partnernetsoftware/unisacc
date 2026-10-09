@@ -79,9 +79,13 @@ class Checks:
         return result
     def executable(self, name):
         command=name  # The declared suites invoke literal cc, not an unconsumed CC override.
+        if name in ('clang','llvm-objcopy') and os.environ.get('LLVM_BIN'):
+            command=str(pathlib.Path(os.environ['LLVM_BIN'])/name)
         exe=shutil.which(command)
         if not exe: raise FileNotFoundError(command)
-        r=self.run([exe,'--version'])
+        # csmith may write platform.info even during capability/version discovery.
+        with tempfile.TemporaryDirectory(prefix='unisacc-host-version-') as td:
+            r=self.run([exe,'--version'],cwd=td)
         if r.returncode: return None
         self.identities[name]=tool_identity(exe,r.stdout+r.stderr)
         return exe
@@ -90,8 +94,11 @@ class Checks:
         if kind == 'corpus':
             # Presence only; never a proof of corpus contents or test result freshness.
             return 'READY' if regular(ROOT/'corpus/c-testsuite/README.md') else 'MISSING'
-        if kind not in ('cc','cc-arch-arm64','cc-arch-x86_64','csmith','libffi','clang-coff','llvm-objcopy'):
+        if kind not in ('cc','cc-arch-arm64','cc-arch-x86_64','csmith','libffi','clang-coff','llvm-objcopy','python3'):
             return 'UNKNOWN'
+        if kind == 'python3':
+            exe=self.executable('python3')
+            return 'READY' if exe and self.run([exe,'-c','pass']).returncode==0 else 'FAILED_PROBE'
         if kind == 'llvm-objcopy': return 'READY' if self.executable('llvm-objcopy') else 'FAILED_PROBE'
         if kind == 'clang-coff':
             exe=self.executable('clang')
@@ -155,7 +162,7 @@ def main():
                 status=next((k for k in ('FAILED_PROBE','MISSING','UNKNOWN') if k in statuses),'READY')
         rows.append(dict(suite=name,**d,status=status))
     inputs={'host':host(),'declarations':decl,'tools':checks.identities,
-            'environment_sha256':{k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in ('CC','PATH','CSMITH_INCLUDE','UA','MODEL_COM','SEED_DIR')}}
+            'environment_sha256':{k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in ('CC','PATH','CSMITH_INCLUDE','LLVM_BIN','UA','MODEL_COM','SEED_DIR')}}
     # This binds readiness inputs, never stands in for gatequeue's full suite fingerprint.
     for key in ('UA','MODEL_COM'):
         value=os.environ.get(key)
@@ -175,6 +182,9 @@ def main():
         a.output.parent.mkdir(parents=True,exist_ok=True)
         with a.output.open('x') as f: json.dump(result,f,indent=2);f.write('\n')
     if any(r['status'] in ('FAILED_PROBE','MISSING') for r in rows): return 1
-    return 77 if any(r['status'] in ('UNKNOWN','UNVERIFIED') for r in rows) else 0
+    if any(r['status'] in ('UNKNOWN','UNVERIFIED') for r in rows):
+        print('UNVERIFIED: required=declared-ready-host observed='+host()+' missing=host-or-dependency-obligation target=declared')
+        return 77
+    return 0
 
 if __name__=='__main__': sys.exit(main())

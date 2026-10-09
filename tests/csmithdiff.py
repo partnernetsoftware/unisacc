@@ -12,8 +12,10 @@ import hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BOUND = [sys.executable, str(ROOT / 'tests/bound.py')]
 CSMITH = shutil.which('csmith') or sys.exit('csmithdiff: csmith not found (brew install csmith)')
-INC = next(iter(sorted(pathlib.Path(CSMITH).resolve().parents[1].glob('include/csmith-*'))), None) or sys.exit('csmithdiff: csmith headers not found')
-OPTS = ['--no-packed-struct', '--no-bitfields', '--no-volatiles', '--max-funcs', '4', '--max-block-depth', '3']
+from hostcheck import csmith_include, header_identity, digest, CSMITH_OPTS
+try: INC=csmith_include(CSMITH)
+except FileNotFoundError as e: sys.exit('csmithdiff: '+str(e))
+OPTS = CSMITH_OPTS
 
 def run(cmd, timeout, cwd=None):
     r = subprocess.run(BOUND + [str(timeout)] + cmd, capture_output=True, cwd=cwd)
@@ -23,7 +25,10 @@ def run(cmd, timeout, cwd=None):
 # csmithdiff-k and com-csmithdiff-k jobs (and reruns) pay the 5 s no-verdict seeds once.
 WANT = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'unisacc-csmith-want'
 CCID = subprocess.run(['cc', '--version'], capture_output=True).stdout
-def want_key(seed): return hashlib.sha256(repr((str(pathlib.Path(CSMITH).resolve()), str(INC), CCID, OPTS, seed)).encode()).hexdigest()
+CSMITH_ID=digest(pathlib.Path(CSMITH).resolve())
+HEADERS_ID=header_identity(INC)
+CC_BINARY_ID=digest(pathlib.Path(shutil.which('cc')).resolve())
+def want_key(seed): return hashlib.sha256(repr((str(pathlib.Path(CSMITH).resolve()), CSMITH_ID, str(INC), HEADERS_ID, CCID, CC_BINARY_ID, OPTS, seed)).encode()).hexdigest()
 
 def launch(comp): return ['sh', comp] if comp.endswith('.com') else [comp]
 

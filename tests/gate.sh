@@ -82,6 +82,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
+          hostcheck|stagelog|exittable) req='any|host|python3|cdx|selfcheck';;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
           lib-stack-x86|lib-stack-x86-hostabi) req='darwin-x86_64|osx/x86_64|cc-arch-x86_64|cdx|native-stack-bridge';;
@@ -144,6 +145,9 @@ job manifest-entries-lower python3 ./tests/manifestentries.py --stage lower
 job dsl-ops python3 ./tests/dslops.py   # T2: one independent contract and mutation for each manifest op
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
+job hostcheck python3 ./tests/hostcheckcheck.py
+job stagelog python3 ./tests/stagelogcheck.py
+job exittable python3 ./tests/exittablecheck.py
 for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
 # R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
 # regressions found after 0.0.16's local queue was green came from here
@@ -648,6 +652,8 @@ if [ "$COM" = 1 ]; then
     PRODUCT_AFTER=$(product_hash) || exit 1
     [ "$PRODUCT_AFTER" = "$PRODUCT_SHA" ] || { echo 'gate: product changed during acceptance' >&2; exit 1; }
 fi
-bad=$(cat "$O"/* | grep -vc ' rc=0 ')
-echo "gate  suites $(ls "$O" | wc -l | tr -d ' ')   failed $bad   $(( $(date +%s)-T0 ))s wall"
-[ "$bad" -eq 0 ]
+bad=$(cat "$O"/* | grep -vcE ' rc=(0|77) ')
+unverified=$(cat "$O"/* | grep -c ' rc=77 ')
+echo "gate  suites $(ls "$O" | wc -l | tr -d ' ')   failed $bad   unverified $unverified   $(( $(date +%s)-T0 ))s wall"
+[ "$bad" -eq 0 ] || exit 1
+[ "$unverified" -eq 0 ] || exit 4

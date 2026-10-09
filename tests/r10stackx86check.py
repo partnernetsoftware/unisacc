@@ -15,6 +15,9 @@ def run(args):
 
 
 def main():
+    from hostcheck import require_host
+    rc=require_host('darwin-x86_64','osx/x86_64')
+    if rc: raise SystemExit(rc)
     with tempfile.TemporaryDirectory(prefix='r10stackx86-') as directory:
         p = pathlib.Path(directory)
         sysv = (ROOT/'exec/c/librarycall_x86_64.S').read_text()
