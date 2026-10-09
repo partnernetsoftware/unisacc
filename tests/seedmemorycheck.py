@@ -69,8 +69,27 @@ class Memory(unittest.TestCase):
    cc=pathlib.Path(d)/'cc';cc.write_text('#!/bin/sh\necho "'+m.EVIDENCE_IDENTITY['cc_version']+'"\n');cc.chmod(0o755)
    with patch.object(m.shutil,'which',return_value=str(cc)),patch.object(m.platform,'system',return_value='Linux'),patch.object(m.platform,'machine',return_value='x86_64'):
     identity=m.execution_identity('gen')
-   self.assertEqual(identity['cc_version'],m.EVIDENCE_IDENTITY['cc_version'])
-   self.assertIn('cc_sha256',m.identity_reason(identity,'warm'))
+   self.assertIsNone(identity)  # Unreviewed wrappers are rejected before execution.
+ def test_named_launcher_route_and_changed_launcher_target_flags_env(self):
+  body='#!/bin/sh\nfor arg do\n    case "$arg" in seed/compilerpack.c|*/seed/compilerpack.c) exec /usr/bin/cc -D_XOPEN_SOURCE=700 "$@";; esac\ndone\nexec /usr/bin/cc "$@"\n'
+  self.assertEqual(m.hashlib.sha256(body.encode()).hexdigest(),m.LAUNCHER_SHA)
+  with tempfile.TemporaryDirectory() as d:
+   launcher=pathlib.Path(d)/'cc';launcher.write_text(body);launcher.chmod(0o755)
+   target=pathlib.Path(d)/'backend';target.write_text('#!/bin/sh\necho "'+m.EVIDENCE_IDENTITY['cc_version']+'"\n');target.chmod(0o755)
+   evidence={**m.EVIDENCE_IDENTITY,'cc_sha256':m.hashlib.sha256(target.read_bytes()).hexdigest()}
+   clean={k:'' for k in m.ENV_KEYS}
+   with patch.object(m,'LAUNCHER_PATH',launcher),patch.object(m,'LAUNCHER_TARGET',target),patch.object(m,'EVIDENCE_IDENTITY',evidence),patch.object(m.shutil,'which',return_value=str(launcher)),patch.object(m.platform,'system',return_value='Linux'),patch.object(m.platform,'machine',return_value='x86_64'),patch.dict(os.environ,clean):
+    good=m.execution_identity('gen');self.assertIsNone(m.identity_reason(good,'warm'))
+    self.assertEqual(good['launcher']['sha256'],m.LAUNCHER_SHA);self.assertEqual(good['compile_resources'],'UNKNOWN')
+    self.assertIsNotNone(m.identity_reason({**good,'flags':'-O0'},'warm'))
+    self.assertIsNotNone(m.identity_reason({**good,'launcher':{**good['launcher'],'sha256':'changed'}},'warm'))
+    with patch.dict(os.environ,{'CPATH':'/unproved'}):self.assertIsNone(m.execution_identity('gen'))
+    launcher.write_text(body+'# changed\n');self.assertIsNone(m.execution_identity('gen'));launcher.write_text(body)
+    target.write_text(target.read_text()+'# changed\n');self.assertIsNone(m.execution_identity('gen'))
+    target.write_text('#!/bin/sh\necho "'+m.EVIDENCE_IDENTITY['cc_version']+'"\n')
+    other=pathlib.Path(d)/'other';other.write_text(body)
+    with patch.object(m.shutil,'which',return_value=str(other)):self.assertIsNone(m.execution_identity('gen'))
+
  def test_binary_gate_rejects_changed_or_missing_binary(self):
   with tempfile.TemporaryDirectory() as d:
    p=pathlib.Path(d)/'gen';p.write_bytes(b'measured fixture')

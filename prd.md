@@ -1315,3 +1315,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔P7 内存证据身份绑定认领，2026-10-10；cc轻量授权〕阈值独立绑定 Linux/x86_64、历史 cc 实体 a23ecab8…及 Debian14.2.0-19 版本、原内部四并发和暖参照分支。matrix flags 含 -w，cc 已实际构建两组 flags 并证明生成器二进制同 sha2d1696da…，只认可该具名等价对；编译后在任何生成前核二进制 sha。其它宿主/cc/flags/并发/冷分支或产物不同均 UNKNOWN rc2，不沿旧阈值。只做受控身份负例，不测峰、不跑生成器，独立队列不受主检出修改影响。
 
 〔P7 内存证据身份绑定复核；实际跑过〕12项 bound55 轻量自检通过：同版本伪造 cc 实体、换 ISA、flags、版本、并发均 UNKNOWN rc2，冷分支不复用暖阈值；生成器二进制变更/缺失拒绝，构建后再次核 cc/flags/宿主/并发/缓存身份。套件 flags 与并发值成为同一变量，声明与实际 cc/调度共用，原参数/四并发不变。保留 cc 证明的带/不带-w具名二进制等价，其它 flags不猜；构建后核原 sha2d1696da…才允许生成。受控低 MemAvailable/cgroup仍77且不启动生成器。未测峰、未运行生成器、未改运行中独立队列、未刷新gatedeps；cc 在队列结束后统一刷新。
+
+〔P7 具名 cc launcher 路线认领，2026-10-10；cc轻量授权〕仅审核历史 launcher sha5c036d42…，原脚本对 seed/gen.c 全参转发固定 /usr/bin/cc；目标实体/版本、具名等价 flags、影响编译/装载环境的空值约束与宿主/并发/暖分支均须匹配，构建后仍核生成器 sha2d1696da…才准生成。其它 wrapper 或变化 UNKNOWN。不以同字节推断编译资源：阈值仅支持生成器运行，compile_resources 明确 UNKNOWN。现场 launcher 缺失已报 cc，不擅自重建；只做受控 fixture 身份负例，不测峰不跑生成器。
+
+〔P7 具名 launcher 路线复核；实际跑过〕13项内存自检及12项 hostcheck 自检均 bound55 rc0；受控原脚本 fixture 的审核 SHA 匹配，目标实体/版本、flags、环境空值、宿主/并发/暖分支匹配才认可，改 launcher 字节/路径、目标 cc、flags、CPATH 均拒绝；原二进制变更/构建后重核负例保持。不会执行未审核 wrapper 来猜其目标，审核原脚本固定exec目标；真实现场 launcher 缺失，未重建或跑生成器。阈值与 hostcheck 输出明确 scope=generator-execution、compile_resources=UNKNOWN，编译资源未宣称已测。未测峰、不改预算/判据，gatedeps交cc统一刷新。

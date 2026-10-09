@@ -95,7 +95,7 @@ class Checks:
             import seedmemory
             family,names=seedmemory.SUITES[kind.split(':',1)[1]]
             rc,need,observed,basis=seedmemory.assess(family,names)
-            self.memory[kind]={'required_bytes':need,'available_bytes':observed,'basis':basis}
+            self.memory[kind]={'required_bytes':need,'available_bytes':observed,'basis':basis,'scope':'generator-execution','compile_resources':'UNKNOWN'}
             return {0:'READY',77:'UNVERIFIED',2:'UNKNOWN'}[rc]
         if kind == 'corpus':
             # Presence only; never a proof of corpus contents or test result freshness.
