@@ -35,4 +35,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-09 心跳（封口重测，未改稿内数字）：** tip `873cc031` 的 `weights/gold` 十八阶段 `#field` 域积合计 **8769**，逐行对齐中文表 1（op-87）；与英文表 1（op-74 / 8509）仅 enc/isel/abi/combo 的 `op` 87≠74。SHA-256 pin（18 阶段 Table 1 顺序）`b8244bd8d9422dd32bb21af7053c38ef009d9d5a027c0924b1cac167fa454e70`；二十表 sorted pin `1ef9608742cded03d0a7c1acc74572379efeae228a8f34e15be047bf6ff581b3`（域积 9041=8769+257+15）。单元 517/569 本拍未重测；A2 的 9174 仍非本 tip frozen gold（预注册写 type 4281/peep 1638 等，与 tip 不一致）。详见 `research/seal-remeasure-20261009.md`。投稿身份仍待政委选定后再三联改写。
 
 - **2026-10-09 心跳（DENSE 路径命名封口，未改数字与产物）：** 决策网络实例产品 DENSE 查表不收回「基于神经网络的编译器」主张，见 [`seal-dense-path-not-withdraw-nn-20261009.md`](seal-dense-path-not-withdraw-nn-20261009.md)。
+- **2026-10-09 心跳（逐字节自举封口，未改键数与产物）：** N1=N2=N3 仅未签名连续代字节同一具名检查，非语义自举定理或 C99/表≡C 证明，见 [`seal-bootstrap-bytes-not-semantic-20261009.md`](seal-bootstrap-bytes-not-semantic-20261009.md)。
 - **2026-10-09 心跳（§7.3 活板门封口，未改表数字）：** 「活板门」仅为立方体机理示意、非不可达性定理，见 [`seal-trapdoor-not-unreachability-20261009.md`](seal-trapdoor-not-unreachability-20261009.md)。
