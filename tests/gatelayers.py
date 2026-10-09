@@ -21,7 +21,8 @@ revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader
 script-inventory subtract-safety subtract-safety-selftest c99-ledger
 publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
 lib-bindings-registry
-""".split())
+hostcheck seedmemory stagelog exittable warmup gate-infra-38
+""".split())   # 0.0.38 P1-P7 pipeline contracts
 CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "tools-")
 
 # Target execution, native ABI, or a cross-target image is part of the claim.
