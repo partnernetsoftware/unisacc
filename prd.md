@@ -1372,7 +1372,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 〔同源生产矩阵A完整通过，2026-10-09；cdx实际跑过〕新seed/gen.c sha8ba73354、GCC O2三十调用逐项bound50/外层55全部rc0同Python（cc本轮新鲜参考，Python/TSV无改）；source前后稳定。errors生产6.75s/2171620KiB、warnings+errors5.79s/2186436KiB，对照交接A2的40.58/33.69s。完整回执在/tmp/cdx37-matrix-a；不是候选验收。B同源最重两项37s内已过，继续其余二十八项，完整B绿前不提交冻结或建候选。
 
-〔0.0.37 全矩阵已闭合，2026-10-09；实际跑过〕新seed源码8ba73354的A/B各三十调用全rc0/同Python，flags调用差集missing0/extra0，全部逐项bound50并记录源码/工具/参考/输出摘要；超时旧回执仍保留。证据research/c37-generator-matrix.{md,json}；cc独立只读复核所有权及memo语义。现在单独提交seed/gen.c修片与这轮证据，冻结一个源提交；之后只起一条默认C构造候选链，旧52173312及10/642不作新身份通过证据。
+〔0.0.37 全矩阵已闭合，2026-10-09；实际跑过〕新seed源码8ba73354的A/B各三十调用全rc0/同Python，flags调用差集missing0/extra0，全部逐项bound50并记录源码/工具/参考/输出摘要；超时旧回执仍保留。证据research/c37-generator-matrix.md；cc独立只读复核所有权及memo语义。现在单独提交seed/gen.c修片与这轮证据，冻结一个源提交；之后只起一条默认C构造候选链，旧52173312及10/642不作新身份通过证据。
 
 〔冻结候选链宿主编译定位，2026-10-09〕freeze8ea81419默认C链shared24.25s/1285236KiB、六target及pack-prep1/2/3全部rc0。pack-models主机编译seed/compilerpack.c因strict C99的glibc realpath声明不可见退出1，尚未打包；保留日志/tmp/unisacc37-8ea81419-pack-models.log。不改冻结源码，不重跑整链；通过已有SEED_GEN_CC="cc -D_XOPEN_SOURCE=700"给尚未编的host工具提供标准X/Open声明，单项先编测后仅续pack-models/driver；已完成manifest继续严格核身份/输出，预算不变。候选生产记录须标明此宿主选项。
 
@@ -1408,4 +1408,6 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 〔F4快路包尾定位，2026-10-09；代码实读〕forward-result先将原tape封入USLFW1，再在全部records之后追加ccw wrapper/mapper；仅初遍启用cli/ccw仍不够，fwd_sidecar目前丢弃records后的尾部。拟scratch将首遍全程序尾部仅cnt>0且ccwc>0并入base，保留全程序static名称/回调地址；stub-only尾部不当全程序名单，merge只在base已有mapper时识别并丢弃重复生成段。无forward/ccwc0不加段，异常形状保留慢路。
 
-〔F4本版FAILED回执提交，2026-10-09；cc主导决定〕cc决定ccw快路不落0.0.37：cdx静态scratch fast=1仍8.91s/selftest rc0，未满足原≤5s；cc宿主scratch报告6.93s，e3/lower/elf三串行段合计5.04s，仅定位参考。p1快慢运行均0而布局字节不同；p2无转发字节同且运行0；p3快慢字节同且双方rc2，既有问题另记后续，不冒称通过。冻结候选首测rc1/无产物；fc7ca424守卫源码修片尚未包含在冻结52173312中。F4状态本版FAILED，等待董秘/政委结账裁定及守卫是否进入发布物；不擅自认定账本结算、不启动候选/queue。定位数据保存在research/c37-f4-failed.json；cc收回重活owner。
+〔F4本版FAILED回执提交，2026-10-09；cc主导决定〕cc决定ccw快路不落0.0.37：cdx静态scratch fast=1仍8.91s/selftest rc0，未满足原≤5s；cc宿主scratch报告6.93s，e3/lower/elf三串行段合计5.04s，仅定位参考。p1快慢运行均0而布局字节不同；p2无转发字节同且运行0；p3快慢字节同且双方rc2，既有问题另记后续，不冒称通过。冻结候选首测rc1/无产物；fc7ca424守卫源码修片尚未包含在冻结52173312中。F4状态本版FAILED，等待董秘/政委结账裁定及守卫是否进入发布物；不擅自认定账本结算、不启动候选/queue。定位数据保存在prd本段（过程JSON未入库）；cc收回重活owner。
+
+〔过程JSON出库，2026-10-09；董秘代裁〕research下0.0.37的/tmp过程JSON（c37-f4-failed、c37-frozen-linux-chain、c37-generator-matrix、c37-linux-candidate、c2-g4-current-cloud、l1b-signal-async-results）从树删除，不改写历史；引用改指同名脱敏.md或本文摘要，.gitignore加过程产物规则。F4′摘要：冻结候选首测rc1无产物；守卫修后冷编约11.7s，ccw快路scratch约8.9s，串行e3/lower/elf约5.0s，未达≤5s。

@@ -15,7 +15,7 @@
 `exec/build/gen.py parse2`，manifest 读取声明表并构造 δ JSON。
 本轮按此入口重新构造 tbl/net，没有手改 TSV 或恢复旧生成器。
 新 JSON/network 与 g5 冻结身份一致，完整哈希及逐例收据见
-[c2-g4-current-cloud.json](c2-g4-current-cloud.json)。
+过程JSON未入库（本文即脱敏摘要）。
 
 ## 云机预检
 

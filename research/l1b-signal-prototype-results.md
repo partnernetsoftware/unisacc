@@ -75,7 +75,7 @@ arm64临时变体`/tmp/cdx-l1b-proto/spgate.c`：在TO_GATE保存真实SP到x7�
 
 ## 第三轮：gate之外的异步嵌套反例
 
-实际跑过，2026-10-09。诊断源[ l1b-signal-async.c ](l1b-signal-async.c)，结果[l1b-signal-async-results.json](l1b-signal-async-results.json)。诊断编码器差异保存在[l1b-stack-prototype.patch](l1b-stack-prototype.patch)：对临时完整导出C应用，不是对main源应用，更不是待直接落地的生产补丁；其中仍含强制跳板名字的诊断接线。
+实际跑过，2026-10-09。诊断源[ l1b-signal-async.c ](l1b-signal-async.c)，结果见本文（过程JSON未入库）。诊断编码器差异保存在[l1b-stack-prototype.patch](l1b-stack-prototype.patch)：对临时完整导出C应用，不是对main源应用，更不是待直接落地的生产补丁；其中仍含强制跳板名字的诊断接线。
 
 主程序与ALRM外层处理函数都反复递归6层、创建33个long的volatile局部数组并检查内容。宿主每轮送ALRM，100微秒后送USR2，再等1毫秒；外层末尾还自行触发USR2。内层计数、外层计数、所有局部数组和返回求和均检查。父测试限7秒、执行进程超时必杀。新强探针不依赖内层只在kill系统调用期间投递。
 
