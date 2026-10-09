@@ -65,6 +65,7 @@ with tempfile.TemporaryDirectory() as td:
     jobs={'quick':[sys.executable,'-c','pass']}
     before=json.loads((t/'capped/results.json').read_text())['results']['quick']
     assert run('capped',55,('--parent-deadline',str(_t.monotonic()+40)))==0
+    assert json.loads((t/'capped/results.json').read_text())['results']['quick'].get('kind')=='full', 'attempt kind not kept in the result'
     assert json.loads((t/'capped/results.json').read_text())['results']['quick']==before, 'deadline change reran a finished job'
     # P6: each window records prologue/jobs/epilogue and logs them as paired events when asked
     home=t/'home'; home.mkdir()

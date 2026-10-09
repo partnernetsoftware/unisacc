@@ -523,7 +523,7 @@ def main():
                 log = (state/(n+'.log')).open('wb')
                 p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=execution_environment())
                 active[n] = (p, log, time.monotonic(), limit)
-                print('START',n,'limit='+str(limit),flush=True)
+                print('START',n,'limit='+str(limit),'kind='+kind,'left=%.1f'%left,flush=True)   # 0.0.38: the attempt kind stays in the log
                 left = deadline-time.monotonic()
             for n, (p, log, t, limit) in list(active.items()):
                 rc = p.poll()
@@ -546,7 +546,7 @@ def main():
                     pending.append(n); exclusive.add(n); data['retried'].append(n)
                     note(n, lb=elapsed)
                 else:
-                    data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit}
+                    data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit,'kind':kind}
                     # 0.0.38 P7: rc 77 is a suite's UNVERIFIED (its host lacks a declared requirement):
                     # neither PASS nor FAILED; the release check lists it and does not pass it
                     if rc == 77: data['results'][n]['status'] = 'UNVERIFIED'
