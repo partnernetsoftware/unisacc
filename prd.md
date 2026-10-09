@@ -1323,3 +1323,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 第三次全量 full038c 被外部回收，2026-10-10；实际跑过〕HEAD 04a5087b（含收尾预算、attempt 类别、history 有效期、具名 launcher 路线），候选 740007ef。约 65 窗、落盘 330/649（293 rc0、27 rc142、4 资源 UNKNOWN rc2、5 rc77、1 rc1），期间无外杀、无新 OOM；随后 Claude Code 因整机内存告急回收后台进程（非队列失败），日志无最终出口，记 INCOMPLETE，不合成终态。按宿主规则不自行重起，待授权在资源足够时用原 state 续跑；续跑前核遗留进程、身份/history/cache 与可用内存。随后补 7de2efa0：attempt 类别写入 START 行与结果。
 
 〔full038c 续跑再停，2026-10-10；实际跑过〕董秘授权后沿原 worktree 04a5087b/state 续跑：330→389/649，窗 8 四个 rowcov 同时运行（单个 rowcov 进程树实测 1.97 GB RSS，宿主可用 3–4 GB），无 OOM 但抖动至 62 s 超 term.sh 外层 60 s，P3 停滞保护 rc3。单一根因：内存重作业并发。修 8ef26efa：gatequeue --heavy-suite（调度准入，至多一个重作业，轻作业照常填槽），release.sh 标 50 个 rowcov 为重。待裁：该修片须在新 worktree 运行，而 04a5087b 之后 gatequeue 已有语义改动（7de2efa0），续跑将使 389 项身份失效，等同重开一轮。
+
+〔0.0.38 首次完整全量 queue，2026-10-10；实际跑过〕full038c 649/649 有结果，真实出口 rc1（有红，非绿链）；四段同一 state、代码身份分段（04a5087b→81a4ee4a；queue.sh a7b059dc）。窗内墙钟约 2 h 22 min/175 窗，每窗前后置约 3.6 s；浪费首位为 tail DEFER 175 次 4817 作业秒。分段与出口表见 research/c38-pipeline-baseline.md。待一次裁：出口表 57 项（附根因分组）。
