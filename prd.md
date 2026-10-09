@@ -1297,3 +1297,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔H2 lifecycle 宿主声明修后实测〕私有 wrapper 在所有头之前定义 _DEFAULT_SOURCE，使 glibc 暴露 mincore；宿主共享库及 native-lifecycle 编译已过。bound55 gate 47秒 rc1：native-lifecycle 1000轮触发既有40秒内层超时，仍记 FAILED，未改预算、迭代数或资格；该运行时限问题交 cc/H1。
 
 〔H2 五项修后受限复核；实际跑过〕winimports 1f2e643b：循环体/断言作用域明确，原 Werror 下 gate rc0；proc-enum 69d12f9c：私有 shim 包装 glibc lseek 并转换负 errno，真实701项目录/长名/高PID/缺失状态 gate rc0；apps-real fbe16fbd：procview 包含 errno.h，原全套39秒 rc0，仍明确 Linux windows 仅分析 fixture；callable-catalog：原 LSan 938字节泄漏是测试第三份 three fixture 未释放，补入 done，与 one/two 同生命周期，普通运行及 ASan/UBSan/LSan gate 13秒 rc0。五项均未动产品闭包、未放宽 Werror/sanitizer/预算、未删测；lifecycle 59a5e95d 仅修通 mincore 编译，原1000轮40秒内层超时仍 FAILED，未记 PASS，交 cc/H1。
+
+〔0.0.38 H2 宿主真红修片，2026-10-10；实际跑过〕cdx 逐项根因修（无产品闭包改动、不关 Werror/sanitizer、不抬限时）：lib-windows-imports 1f2e643b、proc-enum 69d12f9c、apps-real fbe16fbd、lib-callable-catalog 5f9cf2cb（测试夹具 three 938 B 泄漏补释放）均真实 gate rc0；lib-lifecycle 59a5e95d 编译通过但 1000 轮在 40 s 内层超时仍 FAILED。待第二次一并裁：lib-lifecycle 超时（新失败形态）与 exec-memory-cc-1 在受控队列中为宿主 cc 编译失败 rc1（与已裁的外层中断不同）。
