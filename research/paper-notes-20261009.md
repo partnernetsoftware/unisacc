@@ -65,4 +65,4 @@ cx 这条路还暗示三类应用，都还没起稿：
 
 产品线上已有的分层意向是 minicon、unisa、tinyvm、ujs。论文不要跟着产品名各写一篇。能挂回 A 的才留：ujs 已经是 B，wasm 或一台表驱动的小虚拟机以后若写，父节点仍是 A。指不回 A 的，先并进实证，或者不起稿。
 
-**封口：** 摘要拒绝措辞与定义 3 偏函数澄清见 [`seal-refusal-partial-fn-20261009.md`](seal-refusal-partial-fn-20261009.md)（仅 research 文案，不碰表数字与测量身份）。
+**封口：** 摘要拒绝措辞与定义 3 偏函数澄清见 [`seal-refusal-partial-fn-20261009.md`](seal-refusal-partial-fn-20261009.md)（仅 research 文案，不碰表数字与测量身份）。摘要「精确重建」= T1 全表重跑构造器，≠ A2/RQ2 单条编辑局部性，见 [`seal-rebuild-vs-locality-20261009.md`](seal-rebuild-vs-locality-20261009.md)。
