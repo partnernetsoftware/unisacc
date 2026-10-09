@@ -73,7 +73,7 @@ for i in $(seq 1 300); do
     sleep 2
   done
   wid=; [ -z "$SL" ] || wid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --subphase "window-$i" --parent-id "$qid" 2>/dev/null) || :
-  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
+  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" STAGELOG_RUN="${SL:-0}" STAGELOG_PARENT="${wid:-}" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"; backup
   [ -z "$SL" ] || python3 "$R/release/tools/stagelog.py" end --id "$wid" --rc "$rc" --execution-status "window-rc-$rc" >/dev/null 2>&1 || :
   case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac

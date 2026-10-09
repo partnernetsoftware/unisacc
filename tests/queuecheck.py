@@ -78,6 +78,19 @@ with tempfile.TemporaryDirectory() as td:
     with patch.dict(os.environ,{'CSMITH_INCLUDE':str(inc)}):
         one=real_fingerprint({'x':['true']}); (inc/'csmith.h').write_text('b\n'); two=real_fingerprint({'x':['true']})
     assert one!=two, 'csmith header change kept the old identity'
+    # a different deadline alone is scheduling, not identity: the finished result is reused
+    jobs={'quick':[sys.executable,'-c','pass']}
+    before=json.loads((t/'capped/results.json').read_text())['results']['quick']
+    assert run('capped',55,('--parent-deadline',str(_t.monotonic()+40)))==0
+    assert json.loads((t/'capped/results.json').read_text())['results']['quick']==before, 'deadline change reran a finished job'
+    # P6: each window records prologue/jobs/epilogue and logs them as paired events when asked
+    home=t/'home'; home.mkdir()
+    with patch.dict(os.environ,{'HOME':str(home)}):
+        assert run('segments',55,('--stagelog-run','qtest','--stagelog-parent','e-0123'))==0
+    w=json.loads((t/'segments/results.json').read_text())['window']
+    assert all(isinstance(w[k],float) for k in ('prologue_s','jobs_s','epilogue_s')), w
+    ev=[json.loads(l) for l in (home/'.unisacc/stagelog/events.jsonl').read_text().splitlines()]
+    assert [e['subphase'] for e in ev if e['event']=='begin']==['prologue','jobs','epilogue'] and len(ev)==6, ev
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
     # Exclusive jobs must precede and never overlap ordinary two-slot work.
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in

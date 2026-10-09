@@ -97,7 +97,9 @@ for w in 1 2 3; do
     exit 75
 done
 deadline=(); [ -n "${RELEASE_DEADLINE:-}" ] && deadline=(--parent-deadline "$RELEASE_DEADLINE")
-env -u RELEASE_DEADLINE python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" "${deadline[@]}" --state "$GATE_STATE" || rc=$?
+# 0.0.38 P6: the stage log names reach the scheduler as arguments, never the suites' environment
+[ -n "${STAGELOG_RUN:-}" ] && [ "$STAGELOG_RUN" != 0 ] && deadline+=(--stagelog-run "$STAGELOG_RUN" --stagelog-parent "${STAGELOG_PARENT:-}")
+env -u RELEASE_DEADLINE -u STAGELOG_RUN -u STAGELOG_PARENT python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" "${deadline[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
 [ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
 case "$rc" in

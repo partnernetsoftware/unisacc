@@ -292,6 +292,25 @@ def fingerprint(jobs):
             result[name] = stamp(identity)
     return result
 
+def stagelog_segments(args, *marks):
+    """0.0.38 P6: one paired begin/end per window segment in the private stage log (never fatal)."""
+    if not args.stagelog_run: return
+    sys.path.insert(0, str(ROOT/'release/tools'))
+    try:
+        import stagelog
+        boot = stagelog.boot_id(); path = stagelog.logpath(None)
+        for name, a, b in zip(('prologue', 'jobs', 'epilogue'), marks, marks[1:]):
+            eid = 'e-' + os.urandom(8).hex()
+            utc = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            stagelog.write(path, {'event':'begin','id':eid,'run':stagelog.token(args.stagelog_run,'run'),'phase':'queue',
+                                  'subphase':name,'attempt':1,'parent_id':stagelog.token(args.stagelog_parent or None,'parent id'),
+                                  'source_commit':None,'mono':round(a,6),'boot_id':boot,'utc':utc})
+            stagelog.write(path, {'event':'end','id':eid,'rc':None,'acceptance_status':'UNVERIFIED','execution_status':None,
+                                  'authorization_ref':None,'cpu_user':None,'cpu_sys':None,'rss_kib':None,
+                                  'mono':round(b,6),'boot_id':boot,'utc':utc})
+    except (SystemExit, OSError, ImportError) as e:
+        print('stagelog: window segments not recorded (%s)' % e, file=sys.stderr)
+
 def resume(data, stamps, jobs, exclusive):
     # 0.0.21: a changed job list or exclusive set no longer forces a new state: results
     # survive only for jobs whose command and fingerprint are both unchanged; added jobs
@@ -347,10 +366,13 @@ def main():
     # argument, never through the suites' environment, so it is not part of any job identity
     ap.add_argument('--parent-deadline', type=float, default=None,
                     help='monotonic second by which this window must have exited (outer bound)')
+    # 0.0.38 P6: where this window's prologue/jobs/epilogue go in the private stage log (optional)
+    ap.add_argument('--stagelog-run', default=None); ap.add_argument('--stagelog-parent', default=None)
     args = ap.parse_args()
     if not 1 <= args.jobs <= 4 or not 5 <= args.window <= 55: ap.error('jobs 1..4; window 5..55')
     if not args.list_selection and args.state is None:
         ap.error('--state is required when running suites')
+    t_begin = time.monotonic()
     os.chdir(ROOT)
     if args.com and not args.list_selection:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
@@ -384,6 +406,7 @@ def main():
     pending = [n for n in jobs if n not in data['results']]
     exclusive |= {n for n in data.get('retried', []) if n in pending}   # a retry runs alone in later windows too
     active = {}; start = time.monotonic()
+    t_jobs = start
     # 0.0.32: q15 -- a 54 s window plus the epilogue (provenance check, refingerprint) crossed term.sh's 60 s
     epilogue = 4 if args.com else 2
     window = args.window - epilogue
@@ -508,10 +531,15 @@ def main():
         # 0.0.38 P3: three windows in a row without a legal completion stop the driver
         data['stalled'] = 0 if data['window'].get('completed') else data.get('stalled', 0) + 1
         atomic(path,data)
+    t_epi = time.monotonic()
     if args.com:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
                         os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
     after = fingerprint(jobs)
+    t_end = time.monotonic()
+    data['window'].update(prologue_s=round(t_jobs-t_begin,3), jobs_s=round(t_epi-t_jobs,3), epilogue_s=round(t_end-t_epi,3))
+    atomic(path, data)
+    stagelog_segments(args, t_begin, t_jobs, t_epi, t_end)
     if after != stamp:
         if isinstance(after, dict):
             changed = [n for n in jobs if after[n] != stamp[n]]
