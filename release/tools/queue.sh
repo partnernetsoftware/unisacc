@@ -40,7 +40,9 @@ cd "$W"
 UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-}
 # 0.0.37 speedup ①: one driver only -- a second queue.sh on this host would race this one's
 # stray-gatequeue kill; refuse instead of competing (0.0.36: hand-written resume loops).
-others=$(ps -eo pid=,ppid=,args= | awk -v me=$$ '$1!=me && $2!=me && /release\/tools\/queue\.sh/ && !/awk/ {print $1}')
+# match only processes RUNNING the script (it is argv0 or argv1), never a shell whose -c text names it;
+# skip this script, its children and its parent
+others=$(ps -eo pid=,ppid=,args= | awk -v me=$$ -v pp=$PPID '$1!=me && $2!=me && $1!=pp && ($3 ~ /queue\.sh$/ || $4 ~ /release\/tools\/queue\.sh$/) {print $1}')
 [ -z "$others" ] || { echo "queue: another queue.sh is running (pid $others); resume with that one, do not start a second"; exit 2; }
 # 0.0.37 speedup ①: 0.0.36 lost 539 and 713 results to a sleeping display (apps-real and term.sh
 # need it).  Hold display and idle sleep for the life of this script; macOS only, elsewhere a no-op.
