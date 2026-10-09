@@ -1291,3 +1291,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 lib-windows-gp 子义务拆分，2026-10-10；实际跑过〕cdx 40529934：lib-windows-gp 只做双 ISA cross-COFF 字节核验（本机真实 PASS），新增 lib-windows-gp-native 为 Darwin x86_64/Rosetta MS-ABI 桥执行（本机 rc77 UNVERIFIED）；损坏导出字节负例 cross rc1 不被 77 吞。gatedeps 3978ac47。待董秘一次裁：宿主真红 5（lib-windows-imports、lib-lifecycle、apps-real、proc-enum、lib-callable-catalog）与外层中断 2（exec-driver-language-2、exec-memory-cc-1）。
 
 〔董秘代裁 7 套件，2026-10-10〕5 个宿主真红记入 H2 基线（可在 H2 切口修，不挡收口）；exec-driver-language-2、exec-memory-cc-1 外层中断记入 H1 云机基线。不删测、不改验收、不抬限时、不重试到绿。plans H1/H2 行已记。
+
+〔0.0.38 H2 五项宿主真红修片认领，2026-10-10；cc授权〕逐项仅改测试/示例：winimports 将循环体与后置断言明确分开；lifecycle 私有宿主探针在头文件前启用 glibc mincore 的 feature macro；proc-enum 私有系统调用 shim 补 lseek 与负 errno 转换；procview 显式包含 errno.h；callable-catalog 核真实测试 fixture 所有权并保持 LSan。各项 bound55，原 Werror/sanitizer/判据不变；若需产品闭包改动先报 cc。

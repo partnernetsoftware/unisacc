@@ -26,7 +26,8 @@ int main(void){
     for(int i=0;i<x.count;i++){
         uint64_t a=0;assert(x.rows[i].len==8 && x.rows[i].name[0]==0);
         assert(!memcmp(x.rows[i].name,"\0process/import/kernel32.dll/",sizeof("\0process/import/kernel32.dll/")-1));
-        for(int j=7;j>=0;j--)a=(a<<8)|x.rows[i].data[j];assert(a==UINT64_C(0xfedcba9876543210));
+        for(int j=7;j>=0;j--){a=(a<<8)|x.rows[i].data[j];}
+        assert(a==UINT64_C(0xfedcba9876543210));
     }
     memset(p,0,sz);assert(!memcmp(x.rows[0].name+sizeof("\0process/import/kernel32.dll/")-1,"Export00000000",14));
     library_winimports_free(&x);assert(!x.rows && !x.count);library_winimports_free(&x);free(p);
