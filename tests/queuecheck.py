@@ -66,6 +66,18 @@ with tempfile.TemporaryDirectory() as td:
     d=t/'stall'; d.mkdir()
     (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'stalled':3}))
     assert run('stall')==3
+    # a job that keeps being deferred after its early slot (0.0.37 rowcov) stalls instead of looping
+    jobs={'long':[sys.executable,'-c','import time; time.sleep(30)']}
+    d=t/'redefer'; d.mkdir()
+    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'fullwindow':['long'],'stalled':2}))
+    rc=run('redefer',55,('--parent-deadline',str(_t.monotonic()+9)))
+    st=json.loads((d/'results.json').read_text())
+    assert rc==3 or (rc==75 and st['stalled']>=3), (rc, st.get('stalled'), st.get('deferred'))
+    # an external header the host plan declares is part of the identity: editing it voids reuse
+    inc=t/'csinc'; inc.mkdir(); (inc/'csmith.h').write_text('a\n')
+    with patch.dict(os.environ,{'CSMITH_INCLUDE':str(inc)}):
+        one=real_fingerprint({'x':['true']}); (inc/'csmith.h').write_text('b\n'); two=real_fingerprint({'x':['true']})
+    assert one!=two, 'csmith header change kept the old identity'
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
     # Exclusive jobs must precede and never overlap ordinary two-slot work.
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in

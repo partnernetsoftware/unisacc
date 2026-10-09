@@ -155,6 +155,21 @@ def fingerprint(jobs):
         if settings.get(key):
             path = shutil.which(settings[key])
             tools[key] = [path, digest(path)] if path else ['missing', settings[key]]
+    # 0.0.38 P2/P7: external tools the host plan declares are identities too -- the csmith executable
+    # and the headers it compiles against, and the LLVM tools a cross build runs (a changed header or
+    # tool must not reuse an old result; the hostcheck summary is never a suite result)
+    path = shutil.which(os.environ.get('CSMITH') or 'csmith')
+    tools['csmith'] = [path, digest(path)] if path else ['missing']
+    incs = [os.environ['CSMITH_INCLUDE']] if os.environ.get('CSMITH_INCLUDE') else (
+        sorted(str(d) for d in pathlib.Path(path).resolve().parents[1].glob('include/csmith-*')) + ['/usr/include/csmith'] if path else [])
+    for d in incs:
+        dp = pathlib.Path(d)
+        if dp.is_dir():
+            tools['csmith-include:' + d] = {str(f.relative_to(dp)): digest(str(f)) for f in sorted(dp.rglob('*.h'))}
+    if os.environ.get('LLVM_BIN'):
+        lb = pathlib.Path(os.environ['LLVM_BIN'])
+        for name in ('clang', 'ld.lld', 'lld-link', 'llvm-nm', 'llvm-ar', 'llvm-objcopy'):
+            tools['LLVM_BIN/' + name] = [str(lb / name), digest(str(lb / name))] if (lb / name).exists() else ['missing']
     provider_inputs = {}
     for key in ('UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER'):
         if settings.get(key):
@@ -449,9 +464,12 @@ def main():
                 rc = p.poll()
                 if rc is None: continue
                 log.close(); elapsed = time.monotonic()-t
+                progress = True
                 if rc == 142 and limit < window-3:
                     # A late fill used only the window remainder, not a full
                     # attempt. Keep it pending and give it an early slot next.
+                    # 0.0.38 P3: deferring a job that already had its early slot is not progress
+                    progress = n not in data.get('fullwindow', [])
                     pending.append(n)
                     data.setdefault('deferred', []).append({'name':n,'limit':limit})
                     if n not in data.setdefault('fullwindow', []): data['fullwindow'].append(n)
@@ -469,8 +487,8 @@ def main():
                     # Q1 (0.0.33): rise at once, fall by halves -- a cache-warm 2 s run must not
                     # admit the next cold 20 s run into a 6 s tail (cand33: 17% of slot time died as DEFER)
                     history[n] = max(elapsed, (history.get(n, elapsed)+elapsed)/2)
-                # a job that exited inside the window (result, deferral or retry) is progress
-                data['window']['completed'] = data['window'].get('completed', 0) + 1
+                # a result, a first retry or a first deferral is progress; a repeated deferral is not
+                if progress: data['window']['completed'] = data['window'].get('completed', 0) + 1
                 data.get('inflight', {}).pop(n, None)
                 atomic(path,data); atomic(histpath,history)
                 lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
