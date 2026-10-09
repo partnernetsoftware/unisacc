@@ -1345,3 +1345,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔Linux kernel 实跑与构建路径，2026-10-09；实际跑过〕共享machocc适配后C/Python双ISAblob逐字节同；产品ABI x86原生netcheck全过，含E3表2559878观察、资源/包/拒绝/诊断链与无Cfallback；seedgen e2首片SAME e2/ident/blob，3同0异。保留默认C构造，首台未装产品或Cgen内存不足时使用原有SEED_GEN=0/SEED_C=0路线试建（非新增回退）；build_candidate的已安装产品pair前置只在实际使用它的SEED_C=1要求，Python路线不读取该pair。正式发布仍受macOS门禁/Apple资产与GHCR权限约束，不改验收。
 
 〔Linux 候选全构造，2026-10-09；实际跑过〕既有Python构造路线SEED_GEN=0/SEED_C=0已完成shared、六target、三pack-prep、pack-models、pack-driver，每步bound58内成功。私有产品2243464B sha8d147e0f，源码身份80f404fc；版本仍0.0.36，非封版。g4五组/C1三探针同参考；初次diag因语料缺位0项失败，补齐上游语料后原套件31通过0错（40损坏语料、13定位、14register例）；seed七工具编译通过，pack.c仍在zlib include拒绝。政委新令本云机继续闭环，拟合入cc Linux门禁修片并交独立克隆，不降低验收。
+
+〔0.0.37 候选版本推进，2026-10-09〕cc独立克隆实际验私有Linux构造：g4五组、C1 64–66、C1b diag31/0、C3七工具与realpath通过（research/c37-linux-precheck.md）；pack.c zlib包含仍拒绝，不结算C2整项。政委要求本云机继续完成发布，现只推进同一候选构造/验收切口：版本号升0.0.37，重建同源参考/候选，构造seed对并验证comboot定点，再交Linux全量642套件。升版本不是封版或全项完成。
