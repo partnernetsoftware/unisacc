@@ -7,8 +7,8 @@ spec = importlib.util.spec_from_file_location('exittable_under_test', ROOT / 're
 X = importlib.util.module_from_spec(spec); spec.loader.exec_module(X)
 with tempfile.TemporaryDirectory() as td:
     t = pathlib.Path(td)
-    (t / 'plan.md').write_text('| H1 | 超时：closure-c1..2、selfelf(+package)、tools-2 | cc | x | 0 |\n| H2 | 宿主红：wrong-host | cc | x | 0 |\n')
-    res = {'ok': {'rc': 0}, 'host': {'rc': 77, 'status': 'UNVERIFIED'}, 'cut': {'rc': None, 'status': 'INTERRUPTED'},
+    (t / 'plan.md').write_text('| H1 | 超时：closure-c1..2、selfelf(+package)、tools-2 | cc | x | 0 |\n| H2 | 宿主红：wrong-host、cut-job | cc | x | 0 |\n')
+    res = {'ok': {'rc': 0}, 'host': {'rc': 77, 'status': 'UNVERIFIED'}, 'cut-job': {'rc': None, 'status': 'INTERRUPTED'},
            'tool': {'rc': 1}, 'closure-c2': {'rc': 142}, 'exec-selfelf-package': {'rc': 142},
            'slow-unlisted': {'rc': 142}, 'wrong': {'rc': 1}, 'wrong-host': {'rc': 1}}
     logs = {'tool': 'csmithdiff: csmith not found (brew install csmith)\n', 'wrong': 'differ 3\n'}
@@ -18,7 +18,9 @@ with tempfile.TemporaryDirectory() as td:
     with contextlib.redirect_stdout(out): X.main([str(t), '--h1', str(t / 'plan.md'), '--json'])
     d = json.loads(out.getvalue())
     got = {r['suite']: r['cls'] for r in d['rows']}
-    assert got == {'host': 'UNVERIFIED_HOST', 'cut': 'OUTER_INTERRUPTED', 'tool': 'TOOL_MISSING', 'closure-c2': 'HOST_TIMEOUT',
+    assert got == {'host': 'UNVERIFIED_HOST', 'cut-job': 'OUTER_INTERRUPTED', 'tool': 'TOOL_MISSING', 'closure-c2': 'HOST_TIMEOUT',
                    'exec-selfelf-package': 'HOST_TIMEOUT', 'slow-unlisted': 'NEEDS_RULING', 'wrong': 'NEEDS_RULING', 'wrong-host': 'RULED_BASELINE', 'later': 'PENDING'}, got
     assert d['pass'] == 1 and d['jobs'] == 10, d
+    cut = next(r for r in d['rows'] if r['suite'] == 'cut-job')
+    assert cut['cls'] == 'OUTER_INTERRUPTED' and cut['last'].startswith('[ruled'), cut
 print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass')

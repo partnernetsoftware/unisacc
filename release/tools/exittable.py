@@ -61,6 +61,8 @@ def main(argv=None):
         except FileNotFoundError: log = ''
         c = classify(name, r, log, h1, ruled)
         last = (log.strip().splitlines() or [''])[-1][:120]
+        # a ruling never changes the class or the failure; it is shown beside them
+        if name in ruled and c != 'RULED_BASELINE': last = '[ruled into H1/H2 baseline] ' + last
         rows.append((name, c, r.get('rc'), last))
     counts = {}
     for _, c, _, _ in rows: counts[c] = counts.get(c, 0) + 1
