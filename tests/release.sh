@@ -90,7 +90,7 @@ for w in 1 2 3; do
     case $w in
         1) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
         2) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
-        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1;;
+        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1 || :;;   # 0.0.38: a cache warm-up is best effort; under set -e its failure ended the window rc 1
     esac
     : > "$GATE_STATE/warm.$w.$wk"
     echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
