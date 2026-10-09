@@ -722,7 +722,7 @@ int main(int argc, char **argv) {
                 else if (fr==0) { free(in.b); in=tape; rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* the stage after e3, as for tape input */
                 else {
 #ifdef __linux__
-                    if (host_dl_slot(1)==0) return clierror("host libc forwarding needs a dynamic compiler image");
+                    if (runit && host_dl_slot(1)==0) return clierror("host libc forwarding needs a dynamic compiler image");
 #endif
                     Buf merged={0};
                     int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);

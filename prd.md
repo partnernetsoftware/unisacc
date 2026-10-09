@@ -1397,3 +1397,11 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔发布阻塞审计与CI候选绑定，2026-10-09〕连续三个目标窗口均复核ledger --final十一项未结算，carry0；已集中请求董秘逐项裁，未收到结论。其间可独立完成的默认C构造/定点/宿主包对拍/归档引用修复均已完成，当前不再重复重活。run37921949099的source/ccinterop已成功，但candidate阶段读取release/candidate.json仍指0.0.36封存SHA b4607639/source407f4f3c；冻结0.0.37实物为52173312/sourcee68c02ef，故此run候选阶段不构成新候选六格验收。工作流main推送遇closure mismatch会跳过候选步骤并仍显示绿，发布tag路径才硬失败；不能以绿色跳过或等待该run冒充新候选验收。§27与cheap门槛要求账本结算后再封存/正式queue；不擅自顺延超限项，不改验收，目标未完成，需董秘裁定后续跑同一冻结候选。
 
 〔董秘代裁恢复与F4唯一切口，2026-10-09〕政委授评估权的董秘逐项裁已到并明确resume：冻结source e68c02ef/候选52173312保留；C2/C3按冻结独验DONE，pack.c zlib具名缺口归原C2结论、宿主zlib仅构造前提；W2/E57本版授权顺延，Windows真宿主条件与原验收不变；X3/L2/L1′/L1b′/A1/N1无整项冻结证据则+1入0.0.38候选，已验证部分具名保留。F4′不许再延：v0.0.32 csih固定15单元、新进程冷编三次中位数≤5s才DONE，编译失败或超限本版FAILED并开2h定位。cc只读核tag28c850e6/apps树8d378e6652fb与顺序、默认8单元滚动池/默认缓存；Linux静态产品曾拒host libc forwarding，失败计时不得算合格。先更新计划并push，再主测，不并行queue/生成器，不改验收。
+
+〔F4状态标记预检注意，2026-10-09〕ledgercheck仅搜索关键词，F4“进行中：不准再顺延”被其中顺延误认结算，初次显示0项不代表性能已过。状态标记改同义“禁止再次延期”，保持≤5s/FAILED/2h验收不变，不改检查器；必须以实际F4测量结论收口。
+
+〔F4首测FAILED与定位首因，2026-10-09；实际跑过〕v0.0.32固定15单元在冻结52173312/sourcee68c02ef新进程默认8jobs/默认单元缓存冷编，wall4.99/user8.11/sys1.17/RSS166912KiB，rc1，无产物，拒host libc forwarding needs a dynamic compiler image；失败耗时不算≤5s通过。进入董秘授权2h定位：libcurl.so.4与libdl宿主在位；src/host_dl.h明确自编Linux image无loader slot，compiler.c:725却在-o与-run两路统一拒绝，src/back_encode.c仅-run要求slot。拟先scratch派生静态driver单行收窄runit守卫、复用原compiler.pkg测写ELF/真实执行/仍拒-run；不改冻结源、不冒称派生产物正式候选，不重构造模型，cc只读审阅。
+
+〔F4修片定位第二证据，2026-10-09；实际跑过〕scratch仅收窄runit守卫后csih15单元成功产出动态ELF并selftest rc0，但冷编11.71s，未满足5s。trace复测12.03s，fwd_ccw=1导致fast=0；91d6c1ea为callback支持强制全E3重放，覆盖此前63280efb增量快路。同一F4切口下一scratch实验仅使用已有cli/ccw资源在第一遍生成callback wrapper/mapper，再尝试既有fwd_incremental；δ/模型不改，不能取消callback语义或改变15单元。须与强制重放逐字节/行为对拍及callback反例核证后才考虑落修片。
+
+〔cc重新主导、cdx执行F4功能修片，2026-10-09〕重活由cc统一调度。已实测Linux静态编译器的宿主loader守卫仅对-run必要；-o生成程序在运行时使用自己的loader。将compiler.c守卫收窄为runit && host_dl_slot(1)==0，保留-run拒绝及back_encode二道检查。同一单行scratch静态driver：getpagesize探针-o成功/实际运行rc0、-run仍原错；csih固定15单元-o/selftest均rc0但11.71s。该修片只解决功能阻塞，不认定F4性能完成；ccw快路仍因merge尾段形状拒绝而重放，后续同一切口处理。冻结52173312不因这次源码修片变成新候选。
