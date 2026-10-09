@@ -34,8 +34,8 @@ b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
 }
 KEY=
-if git rev-parse -q --verify HEAD >/dev/null 2>&1 && [ -z "$(git status --porcelain --untracked-files=no -- exec unisa include src kernel weights tests examples 2>/dev/null)" ]; then
-    KEY=$( (echo "$TARGET"; git ls-files -s -- exec unisa include src kernel weights tests examples) | shasum -a 256 | cut -c1-16)
+if git rev-parse -q --verify HEAD >/dev/null 2>&1 && [ -z "$(git status --porcelain --untracked-files=no -- exec unisa include src kernel weights tests examples/hello.c 2>/dev/null)" ]; then
+    KEY=$( (echo "$TARGET"; git ls-files -s -- exec unisa include src kernel weights tests examples/hello.c) | shasum -a 256 | cut -c1-16)
 fi
 C=${TMPDIR:-/tmp}/unisacc-memprep-$KEY
 if [ -n "$KEY" ] && [ -f "$C/ok" ]; then
