@@ -25,10 +25,14 @@
 | G 产品/驱动功能红 | 4 | com-forward-multi、com-multi、com-difftest_o-1、realprog | 日志定位见文末（定位≠裁定）：前两项为静态镜像 `-run` 宿主转发按设计拒绝；com-difftest_o-1 为一形状明确拒收（wrong 0）；realprog 为宿主参照编译器跳过 lua/sqlite | 各项须对原承诺义务裁：`-run` 宿主转发义务在静态 Linux 镜像上如何处置；拒收覆盖缺口是否记缺口条目；宿主跳项是否入 H2。不自动转 77/H2 |
 | H 其他 rc1 | 5 | exec-bridge-linux（clang -arch arm64）、windows-resolver-host（需 zig/真 SDK）、seed-construct-parse2/-2/-3（inspect-parse2 图断言） | 前两项是宿主工具链缺项；后三项为构造器断言 | 前两项记 H2 宿主基线；seed-construct-parse2 三项需定位 |
 
-## 同时提请（与本裁表分开出口）
+## 同时提请（与本裁表分开出口；两选项均待裁、未执行）
 
-1. 授权一次 verification 全量（当前 main，约 2.5 h，不进 Draft），只测运行树 04a5087b 之后**尚未生效**的差异：attempt 类别持久化（7de2efa0）、实时内存准入（cce2de15/e5ddec42/2cedd407）、stage 对安装与来源核（a7b059dc/a3d3bb78）、重项准入（8ef26efa 已在续跑段部分生效）；同候选同宿主同条件对比。未授权前不跑。
-2. 入窗 attempt 类别判定（2df6655f）与 per-suite history（740b52a0）**已在 full038c 运行树生效**，其效果已含在本基线里，不重复认收益；175 次 DEFER（4816.9 作业秒）是否可避免为 unknown。
+运行树 full038c 已生效：入窗 attempt 类别（2df6655f）、per-suite history（740b52a0）、重项准入（8ef26efa，续跑段起）、stage 对同字节安装（a7b059dc，resume3 起）——其效果已含在基线中，不重复认收益。尚未在任何完整运行生效：类别持久化字段（7de2efa0）、实时内存准入与持有至退出（cce2de15/e5ddec42/2cedd407）、stage 对来源核（a3d3bb78）。
+
+| 选项 | 内容 | 预算 | 能回答的问题 |
+|---|---|---|---|
+| A 差异定向验证 | 当前 main 上跑门禁 gate-infra、gate-infra-38、installpair、warmup、stagelog、exittable、hostcheck、seedmemory；再以 QUEUE_WINDOWS=3 的受控 queue（同候选 740007ef、新私有 state）走真实 release/term/gatequeue 包装链 | 约 15 min，单项 ≤55 s，不开全量 | 未生效差异在真实包装链中行为正确：START/结果带 kind、实时内存准入与持有、installpair 来源核与幂等；不回答整轮提效 |
+| B 完整性能对照 | 当前 main 新开一次完整 queue（承认为新完整运行），同候选同宿主同条件，与 full038c 按窗墙钟/分段/浪费对比 | 约 2.5 h | 整轮墙钟与浪费是否下降；可得可度量收口 |
 
 ## G/H 组定位（只读现有日志，未新跑）
 
