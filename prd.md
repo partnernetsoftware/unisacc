@@ -1294,3 +1294,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b′ r7/HOSTCALL 原型续验，2026-10-09；实际跑过〕mov写r7临时编码区分方向：向下先降真实SP再写x7，向上先写x7再抬真实SP。独立低级tape移动SP下128B再恢复，实际退出0；双层与外部异步递归反例续验绿。HOSTCALL审计见既有ARM桥用私有真栈保存x1–x7/原SP/LR；加入真实libSystem sched_yield转发的异步递归探针退出0，tape确认含该函数及.hostcall。以上不等于任意算术写r7或所有宿主签名已验；下一片仍为完整r7写入覆盖与sys/write私有快照。
 
 〔L1b′ 私有参数与通用入口原型，2026-10-09；实际跑过〕临时POSIX .sys/.write已改为80B私有帧快照，覆盖atfd_1/atfd_1_zero/atfd_2_zero5/zero4参数形状；sys6原SP暂存由x16改x12，避免.frame计算覆盖它。两架构低级tape分别用r7作为sys6/sys/write缓冲，均ABCABCABC/0。移除信号跳板单名判断，临时头改用已有__ccw_前缀，两架构双层MABCD/0。ARM普通目的寄存器为r7的计算先产出到独立暂存，再按移动方向提交栈；sub/add/load写r7低级探针退出0，HOSTCALL+外部异步探针194次ALRM退出0。这些仍是隔离导出C原型，未生成产品δ；.exit/.print共享格、逐快照重入注入、Linux信号入口和正式四目标验收继续保留。
+
+〔L1b′ 裁库闭包核查，2026-10-09；实际跑过〕libneed.table从头内标识符自动提依赖，不需手写sigaction边。隔离应用14c85649停放补丁后，完整table先报carried body defined twice: alarm（unistd新增POSIX/Windows两个同名static体，解析器不按条件编译去重）。仅在临时副本删去Windows重复体以检查依赖后，sigaction闭包含__ccw_unisa_sigtramp、_unisa_sigkernel、_unisa_sigaltstack、_unisa_sigrestorer与_unisa_ret，守卫名匹配。停放补丁需把alarm平台分支放同一函数体，正式头落地后导出pp facts/E2，不添加手写边或放松重复检查。
