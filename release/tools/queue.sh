@@ -62,14 +62,20 @@ backup() {   # swap only after a complete copy: a failed copy keeps the previous
     && rm -rf "$B/state.old" && { [ ! -d "$B/state" ] || mv "$B/state" "$B/state.old"; } && mv "$B/state.new" "$B/state" && rm -rf "$B/state.old" \
     || echo "queue: backup to $B failed (previous copy kept)" >> "$LOG"; }
 LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" >> "$LOG" || : > "$LOG"
+# 0.0.38 P6: per-window wall clock into the private stage log (outside the repo); a logging failure
+# never stops the queue.  STAGELOG_RUN=0 turns it off.
+SL=${STAGELOG_RUN-q-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}; [ "$SL" = 0 ] && SL=
+qid=; [ -z "$SL" ] || qid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --source-commit "$(git rev-parse --short HEAD)" 2>/dev/null) || :
 for i in $(seq 1 300); do
   for k in $(seq 1 90); do
     ps -eo pid,command | grep "[g]atequeue.py" > "$D/.gq" || break
     [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
     sleep 2
   done
+  wid=; [ -z "$SL" ] || wid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --subphase "window-$i" --parent-id "$qid" 2>/dev/null) || :
   env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"; backup
+  [ -z "$SL" ] || python3 "$R/release/tools/stagelog.py" end --id "$wid" --rc "$rc" --execution-status "window-rc-$rc" >/dev/null 2>&1 || :
   case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
   # 0.0.28 R1 (owner rule): the 5-minute load at or above QUEUE_LOAD_MAX (6) for ten minutes pauses
   # the queue at a window boundary until it falls below QUEUE_LOAD_RESUME (4); results are kept.
@@ -84,5 +90,6 @@ for i in $(seq 1 300); do
   [ $((i % 40)) -eq 0 ] && osascript -e 'tell application "Terminal" to close (every window whose busy is false)' >/dev/null 2>&1
 done
 echo "final rc=$rc" >> "$LOG"
+[ -z "$qid" ] || python3 "$R/release/tools/stagelog.py" end --id "$qid" --rc "$rc" >/dev/null 2>&1 || :
 grep -E "^queue:|final rc|UNVERIFIED" "$LOG" | tail -4
 exit "$rc"
