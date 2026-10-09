@@ -19,7 +19,7 @@ fi
 if [ "${GATE_BOUND:-0}" != 1 ]; then
     exec python3 "$R/tests/bound.py" 60 env GATE_BOUND=1 "$0" "$@"
 fi
-COM=0; LIST=0; SELECT=""
+COM=0; LIST=0; SELECT=""; STAGES=""
 while [ $# -gt 0 ]; do
     case $1 in
         --com) COM=1; shift;;
@@ -27,6 +27,8 @@ while [ $# -gt 0 ]; do
         --plan) LIST=2; shift;;
         --suite) [ $# -ge 2 ] || { echo 'missing suite name' >&2; exit 2; }
             SELECT="$SELECT $2"; shift 2;;
+        --stage) [ $# -ge 2 ] || { echo 'missing stage name' >&2; exit 2; }   # tests/stagemap.c
+            STAGES="$STAGES $2"; shift 2;;
         *) echo "unknown gate option: $1" >&2; exit 2;;
     esac
 done
@@ -41,6 +43,14 @@ else
     : "${UNISACC_FFI_X86_PROVIDER:?set UNISACC_FFI_X86_PROVIDER to the x86_64 libffi provider}"
 fi
 
+# --stage S: the suites tests/stagemap.c assigns to compiler stage S (run by the product itself).
+if [ -n "$STAGES" ] && [ "$LIST" = 0 ]; then
+    c=""; [ "$COM" = 1 ] && c=--com
+    picked=$(UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-LIST} GATE_BOUND=1 "$0" --list $c |
+             "${MODEL_COM:-$R/unisacc.com}" -run "$R/tests/stagemap.c" -- --stage $STAGES) || { echo 'gate: stagemap failed' >&2; exit 2; }
+    [ -n "$picked" ] || { echo "gate: no suites in stage(s)$STAGES" >&2; exit 2; }
+    SELECT="$SELECT $(echo $picked)"
+fi
 if [ "$LIST" = 0 ] && [ -z "$SELECT" ]; then
     echo 'gate: select a bounded batch with --suite NAME; use --list [--com] for names' >&2; exit 2
 fi
