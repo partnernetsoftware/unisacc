@@ -29,3 +29,14 @@
 
 1. 授权一次 verification 全量（当前 main，含 attempt 类别、per-suite history、实时内存准入、stage 对安装修片，约 2.5 h，不进 Draft），用于与本基线对比测得提效；未授权前不跑。
 2. 浪费榜首项（tail DEFER 4816.9 作业秒）的改进已在主树，需上项全量方能测得实效。
+
+## G/H 组定位（只读现有日志，未新跑）
+
+| 套件 | 首错 | 归因 |
+|---|---|---|
+| com-multi | 3 项 `-run` 均为 `host libc forwarding needs a dynamic compiler image` | 本机静态 APE 编译器无宿主 loader：`-run` 宿主转发按设计拒绝（fc7ca424 只放开 `-o`）。非新产品缺陷；属宿主/产品形态限制，建议 H2 基线并在套件声明 `-run` 转发需动态镜像（不满足子项 77） |
+| com-forward-multi | 两单元默认运行与 `-run` 同一拒绝消息 | 同上 |
+| com-difftest_o-1 | `fb12-31-unused-static-refs-undefined` 在 -O0/-O1/-O2 均 `reject: not covered: a branch to an undefined label` | 产品对该形状明确拒收（未覆盖），wrong 0；是覆盖缺口不是错码，建议记覆盖缺口条目而非宿主基线 |
+| realprog | `skip lua` / `skip sqlite`：the system compiler will not build it here | 宿主参照编译器不建这两个程序（与产品无关），skip 计失败；建议 H2 宿主基线并声明宿主需求 |
+
+结论：G 组 4 项中 2 项为已知的静态镜像 `-run` 转发限制，1 项为明确拒收的覆盖缺口，1 项为宿主参照跳项；未见产品产出错误字节（wrong 均为 0 或拒收）。
