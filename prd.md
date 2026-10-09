@@ -1349,3 +1349,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.37 候选版本推进，2026-10-09〕cc独立克隆实际验私有Linux构造：g4五组、C1 64–66、C1b diag31/0、C3七工具与realpath通过（research/c37-linux-precheck.md）；pack.c zlib包含仍拒绝，不结算C2整项。政委要求本云机继续完成发布，现只推进同一候选构造/验收切口：版本号升0.0.37，重建同源参考/候选，构造seed对并验证comboot定点，再交Linux全量642套件。升版本不是封版或全项完成。
 
 〔0.0.37 云机构造交接，2026-10-09；实际跑过〕版本b398a194；同源UA /tmp/cdx37-linux-ref，候选/seed对在/tmp/cdx37-linux-candidate。候选2243464B sha52173312，--version0.0.37，身份核验成功；seed7581888B sha928bda8d，hello与版本正确。g4五组、C99 64–66在新候选同参考rc0。shared并行首次58s超时，串行原预算内通过；cc已确认当时另一路comboot parse2并发OOM，原生Cgen单测也OOM（5576016KiB/18s），jemalloc试验50s超时；均不算绿。现完成Python构造后交cc独占COMBOOT_BUDGET=1现有窗口旋钮做定点及642套件，本会话停止重构造避免抢内存，不改验收。
+
+〔0.0.37 本机封存实跑阻塞，2026-10-09〕按原seal_candidate.sh对/tmp/cdx37-linux-candidate尝试GHCR封存（bound55），registry HEAD返回403 Forbidden，未改release/candidate.json。gh api用户响应scopes为gist/read:org/repo/workflow，缺write:packages；需要补齐本机会话包写入凭据，不用未封存产物冒称正式发布。候选sha52173312和seed对已交cc串行定点/全量；cdx不并发重构造。已报董秘真实403证据。
