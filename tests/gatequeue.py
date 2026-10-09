@@ -415,7 +415,9 @@ def main():
     # candidate started with no history, every job was estimated at 30 s (admitted only with >=41 s
     # left: cand13 limits were all 40-49 s, mean job 9.7 s), and window tails went unused.
     settings = {k:('{'+k+'}' if k in PATH_KEYS else v) for k, v in execution_settings().items()}
-    profile = json.dumps([settings, sorted(exclusive)], sort_keys=True).encode()
+    # 0.0.38: one history per settings profile -- not per exclusive set (changing one exclusive suite
+    # moved every suite to an empty history); each entry carries its suite's identity instead
+    profile = json.dumps([settings], sort_keys=True).encode()
     histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(profile).hexdigest()[:16]+'.json')
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]
@@ -467,14 +469,29 @@ def main():
     # then runs out of window is deferred and retried with twice its elapsed time (below), so a wrong guess
     # costs one cut-short attempt.
     # SCHEDULING-BEGIN (0.0.35 P11: admission order/estimates only; masked out of the queue identity)
+    # 0.0.38: an entry counts only for the suite identity it was measured under; a changed suite starts
+    # from the cold prior.  Completed durations ('ok') and lower bounds from timeouts/deferrals ('lb')
+    # are kept apart.  Estimates order admission only: they never set a limit or decide a result.
+    ident = (lambda n: stamp.get(n)) if isinstance(stamp, dict) else (lambda n: stamp)
+    def entry(n):
+        e = history.get(n)
+        return e if isinstance(e, dict) and e.get('id') == ident(n) else None
+    def known(n):
+        e = entry(n)
+        return None if e is None else max(e.get('ok') or 0, e.get('lb') or 0) or None
+    def note(n, ok=None, lb=None):
+        e = entry(n) or {'id': ident(n)}
+        if ok is not None: e['ok'] = max(ok, ((e.get('ok') or ok) + ok) / 2)   # rise at once, fall by halves
+        if lb is not None: e['lb'] = max(lb, e.get('lb') or 0)
+        history[n] = e
     def cold():
-        v = sorted(history.values())
+        v = sorted(e['ok'] for n, e in history.items() if isinstance(e, dict) and e.get('ok') and entry(n))
         return v[len(v)//2] if len(v) >= 5 else 30
     # 0.0.38 P3 fix (full038): under a parent deadline a full window is `span`, not `window`; capping
     # estimates and full-attempt tests at `window` made every 46 s attempt a 'late fill' and doubled its
     # estimate past any window -- nothing admissible, the queue stalled with the job never decided
     span = deadline - start
-    def estimate(n): return min(span-2, max(2, history.get(n, cold())*1.3+1))
+    def estimate(n): return min(span-2, max(2, (known(n) or cold())*1.3+1))
     # SCHEDULING-END
     try:
         while pending or active:
@@ -522,12 +539,12 @@ def main():
                     pending.append(n)
                     data.setdefault('deferred', []).append({'name':n,'limit':limit})
                     if n not in data.setdefault('fullwindow', []): data['fullwindow'].append(n)
-                    history[n] = max(elapsed*2, history.get(n,0))
+                    note(n, lb=elapsed*2)
                 elif rc == 142 and n not in data.setdefault('retried', []) and n not in exclusive:
                     # 0.0.32: a full attempt that timed out is retried once, alone (q10-q12: jobs that take
                     # 24-45 s alone hit the watchdog beside three others); a second timeout is the result
                     pending.append(n); exclusive.add(n); data['retried'].append(n)
-                    history[n] = max(elapsed, history.get(n,0))
+                    note(n, lb=elapsed)
                 else:
                     data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit}
                     # 0.0.38 P7: rc 77 is a suite's UNVERIFIED (its host lacks a declared requirement):
@@ -535,7 +552,7 @@ def main():
                     if rc == 77: data['results'][n]['status'] = 'UNVERIFIED'
                     # Q1 (0.0.33): rise at once, fall by halves -- a cache-warm 2 s run must not
                     # admit the next cold 20 s run into a 6 s tail (cand33: 17% of slot time died as DEFER)
-                    history[n] = max(elapsed, (history.get(n, elapsed)+elapsed)/2)
+                    note(n, ok=elapsed)
                 # a result, a first retry or a first deferral is progress; a repeated deferral is not
                 if progress: data['window']['completed'] = data['window'].get('completed', 0) + 1
                 data.get('inflight', {}).pop(n, None)
