@@ -145,6 +145,14 @@ with tempfile.TemporaryDirectory() as td:
     with contextlib.redirect_stdout(out):
         sys.argv=['gatequeue.py','--state',str(t/'memunk'),'--window','55']; q.main()
     assert 'memory UNKNOWN' in out.getvalue()
+    if sys.platform.startswith('linux'):   # an incomplete reading admits nothing on Linux
+        assert not json.loads((t/'memunk/results.json').read_text())['results'], 'unknown memory admitted a job'
+    # a booking is held until the job exits, however late it allocates (no time-based release)
+    jobs={n:[sys.executable,'-c',code2,str(t/n),'2.5'] for n in ('b1','b2')}
+    q.mem_available_mib=lambda: 1000            # room for one floor only
+    run('held',55,('--jobs','4','--parent-deadline',str(_t.monotonic()+8)))
+    s1,s2=(float((t/n).read_text()) for n in ('b1','b2')); e1=float((t/('b1' if s1<s2 else 'b2')).with_suffix('.end').read_text())
+    assert max(s1,s2) >= e1, 'second job started before the first released its booking'
     # the real reading parses on this host (meminfo and, where limited, the cgroup path)
     del q.mem_available_mib
     q=load('queue_under_test',ROOT/'tests/gatequeue.py'); q.plan=lambda com:jobs; q.fingerprint=lambda plan:stamp[0]

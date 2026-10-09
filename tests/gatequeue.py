@@ -342,15 +342,16 @@ def mem_available_mib():
         rel = next(l.split(':', 2)[2].strip() for l in open('/proc/self/cgroup') if l.startswith('0::'))
         d = pathlib.Path('/sys/fs/cgroup') / rel.lstrip('/')
         while True:
-            try:
-                mx = (d/'memory.max').read_text().strip(); cur = int((d/'memory.current').read_text())
+            if (d/'memory.max').exists():
+                try:
+                    mx = (d/'memory.max').read_text().strip(); cur = int((d/'memory.current').read_text())
+                except (OSError, ValueError): return None    # a limit exists but cannot be read: unknown
                 if mx != 'max': vals.append(max(0, int(mx) - cur) // (1024*1024))
-            except (OSError, ValueError): pass
             if d == pathlib.Path('/sys/fs/cgroup') or d.parent == d: break
             d = d.parent
     except (OSError, StopIteration): pass
     return min(vals) if vals else None
-RESERVE_SECONDS = 10   # a started job's memory may not show in the reading yet: hold its need meanwhile
+MEM_GATED = sys.platform.startswith('linux')   # elsewhere there is no reading to gate on (said once)
 # SCHEDULING-END
 
 def resume(data, stamps, jobs, exclusive):
@@ -525,6 +526,7 @@ def main():
     span = deadline - start
     def estimate(n): return min(span-2, max(2, (known(n) or cold())*1.3+1))
     # SCHEDULING-END
+    mem_blocked = False
     try:
         while pending or active:
             left = deadline-time.monotonic()
@@ -546,16 +548,23 @@ def main():
                 heavy = set(getattr(args, 'heavy_suite', []))
                 if heavy & set(active): fits = [n for n in fits if n not in heavy]   # one heavy job at a time
                 free = mem_available_mib()
-                if free is None:
+                if free is None and MEM_GATED:
+                    # Linux without a complete reading: admit nothing (the stall stop ends the queue rc 3)
+                    if not active: print('queue: memory UNKNOWN -- reading incomplete; nothing admitted', flush=True)
+                    fits = []; mem_blocked = True
+                elif free is None:
                     if not data.get('mem_unknown_said'):
-                        print('queue: memory UNKNOWN -- no MemAvailable/cgroup reading; admission not memory-gated', flush=True)
+                        print('queue: memory UNKNOWN on this platform -- admission not memory-gated', flush=True)
                         data['mem_unknown_said'] = True
                 else:
-                    now = time.monotonic()
-                    held = sum(HEAVY_MIB if a in heavy else FLOOR_MIB for a, v in active.items() if now - v[2] < RESERVE_SECONDS)
-                    fits = [n for n in fits if free - held >= (HEAVY_MIB if n in heavy else FLOOR_MIB)]
+                    # every active job keeps its need booked until it exits (allocation may come late);
+                    # the live reading can only lower the budget.  Costs throughput, never memory.
+                    held = sum(HEAVY_MIB if a in heavy else FLOOR_MIB for a in active)
+                    budget = min(free, data.setdefault('window', {}).setdefault('mem_start', free)) - held
+                    fits = [n for n in fits if budget >= (HEAVY_MIB if n in heavy else FLOOR_MIB)]
                     if not fits and not active:
-                        print('queue: WAIT memory -- %d MiB free (%d held for new starts), nothing admissible' % (free, held), flush=True)
+                        print('queue: WAIT memory -- %d MiB free, nothing admissible' % free, flush=True)
+                        mem_blocked = True
                 if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job
@@ -606,6 +615,8 @@ def main():
                 lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
                 print('DONE' if n in data['results'] else 'DEFER',n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
                 del active[n]
+            # 0.0.38: nothing running and memory admits nothing -- end the window (the stall stop counts it)
+            if not active and mem_blocked: break
             if not active and (not pending or not any(estimate(n) <= deadline-time.monotonic()-1 for n in pending)): break
             if time.monotonic() >= deadline: break
             time.sleep(.05)
