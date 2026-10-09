@@ -64,6 +64,37 @@ if part in ('all','isolation'):
             got=run([driver,'--models',p/'compiler.pkg',*files,'-t',target])
             assert got.returncode==1 and reason in got.stderr and not got.stdout,(files,driver,got)
     print('duplicate initialized object and duplicate main: named multi-unit rejection',flush=True)
+    # C2 g5: typedef names are unit-local, while aggregate descriptors and
+    # function signatures must survive for calls into earlier units.
+    tdroot=pathlib.Path('tests/multi')
+    for names in (('a','b'),('s1','s2','sm'),('g1','g2')):
+        pair=[tdroot/('typedef-'+name+'.c') for name in names]
+        oracle=p/'typedef-system';ok(['cc',*pair,'-o',oracle])
+        expected=run([oracle]);assert (expected.returncode,expected.stdout,expected.stderr)==(0,b'',b'')
+        for files in (pair,pair[::-1]):
+            want=ok([ua,*files,'-t',target])
+            for driver in drivers:
+                base=[driver,'--models',p/'compiler.pkg']
+                assert ok([*base,*files,'-t',target])==want,('unit typedef',files,driver)
+                got=run([*base,'-run',*files])
+                assert (got.returncode,got.stdout,got.stderr)==(0,b'',b''),got
+    tddecl=p/'typedef-declaration.c';tdleak=p/'typedef-leak.c'
+    tddecl.write_text('typedef struct { int x; } code; int helper(void){code c={1};return c.x;}\n')
+    tdleak.write_text('int main(void){return (code){1}.x!=1;}\n')
+    for files in ([tddecl,tdleak],[tdleak,tddecl]):
+        ref=run([ua,*files,'-t',target]);assert ref.returncode==1 and not ref.stdout,ref
+        for driver in drivers:
+            got=run([driver,'--models',p/'compiler.pkg',*files,'-t',target])
+            assert got.returncode==1 and not got.stdout,('typedef leaked between units',files,driver,got)
+    # A declaration in the same unit still makes the compound literal valid.
+    tdleak.write_text('typedef struct { int x; } code; int main(void){return (code){1}.x!=1;}\n')
+    for files in ([tddecl,tdleak],[tdleak,tddecl]):
+        want=ok([ua,*files,'-t',target])
+        for driver in drivers:
+            base=[driver,'--models',p/'compiler.pkg']
+            assert ok([*base,*files,'-t',target])==want,('local typedef compound literal',files,driver)
+            got=run([*base,'-run',*files]);assert (got.returncode,got.stdout,got.stderr)==(0,b'',b''),got
+    print('unit typedef isolation: six descriptor/signature tapes, two leak rejects, local compound literals and native exits',flush=True)
 if part in ('all','static'):
     for files in (['tests/multi/static1.c','tests/multi/static2.c'],['tests/multi/static2.c','tests/multi/static1.c']):
         want=ok([ua,*files,'-t',target])

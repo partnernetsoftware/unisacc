@@ -1270,6 +1270,8 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 〔N1 register 产品覆盖，2026-10-09〕register 保留为独立 token，在块声明、for 初始声明及参数类型入口消费，不在 tokenizer 全局抹掉，避免把文件域 register 当作普通定义接受。parse2 追加词由领域表统一供 Python/C 种子读取；有效声明的 tape 与参考逐字节一致。
 
+〔云机接班单切口，2026-10-09〕cdx-unisacc 在 /home/box/repos/unisacc、main 235ca5bd、干净工作树接班，宿主原生 Linux x86_64，未携入 m4pro 的仓根产品或 out 缓存。本轮只核验 C2 g5 typedef 翻译单元隔离的产品 δ；参考 fe_units 已有 td0/ntd 复位，产品 startup-marker 的 @unit+ 当前只递增 unit_epoch/复位 ixcount，TDN 仍按 intern 名称共享。先复现并核对名字可见性和描述符保留，再决定最小修片，不动其他切口及验收措辞。
+
 〔0.0.37 开工，2026-10-09〕cc 解冻 main，0.0.36 队列留在29728cc6独立冻结树。cdx先做C1：66结构体返回调用必须与参考tape同形；register对象取址诊断参考与δ同落，不能只用有效声明通过就把6.7.1记covered。C2由只读子代理最小化g4/g5。F4′沿用钉住v0.0.32 csih 15单元、正式同源候选冷编≤5s及csmithdiff/difftest/com无豁免；W2沿用Windows两ISA的csih DNS+真实HTTPS和参考行为对拍；E57余半随W2结算，不另换验收。预算估算另报cc，实测阻塞即重估。
 
 〔0.0.37 C1a 验收，2026-10-09〕4ab53c46 已含产品结构体返回调用的清单/模板与错误契约：非局部返回走已有 LI.structreturnexpr 的类型/分号检查及 WCOPY，局部对象路径不变。66与259字节结构体分支返回的完整E3 tape同参考；错误/警告模式各18完整结果同，r21为48同、5具名拒绝、0 accepted-different。C3头新增后补重导k2-gen2/k2-libraryenv/pp-autoinc-gen，facts30表0 differ；重录parse2八项与pp十三项（实际变8+12），fresh-order0..8全核对且无变化；kernel stale0，op9。仓根.com直接-run seed/gen.c产出完整parse2与Python逐字节同。正式0.0.37候选.com运行66仍需cc验收后删knownfail；return(mk())等非ID入口仍具名未覆盖，不把本片说成所有结构体返回表达式均覆盖。C1b register取址及C2仍未结。
@@ -1321,3 +1323,11 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b sys6 首片验收补齐，2026-10-09；实际跑过〕生产代码已由共享main提交819793f1收录，未改写该提交。六目标lower逐指令/元数据对拍、四POSIX手写tape镜像与C参考逐字节同、参考四次macOS实跑、Windows四镜像旧基线、产品-run种子构造lower整图逐字节同均通过；facts 30表0异，lower九模式基线重录（Windows/default不变），fresh-order九模式无变化。正式新.com实跑与Linux实跑尚待cc候选验收；不据本片声称完整信号安全。详见research/l1b-sys6-production-slice.md。
 
 〔L1b 首片产品补验与第二片边界，2026-10-09；cc提供实跑回执、后续为源码勘察〕cc在同源私有候选a4943d78（8bb59293）上跑accept ok，Windows四镜像旧基线相同，POSIX十二行变化，macOS四路与Lima Linux arm64的C/tape两路通过；参考七片已同窗落7646bb81，阶段门禁进行中。本会话继续只读准备，不动src/include/kernel/exec。下一片优先.sys/.write私有参数帧：严格复用code-abi-sources.tsv中mode0/2的有序mem/imm与参数数目（plain三、zero4四、atfd_1四、atfd_1_zero三、atfd_2_zero5五、write三），仅把mem源改成帧槽读取；旧隔离bk_proto3固定装六个参数不可直接移入生产。准备说明见research/l1b-next-production-slice.md（只是设计，未实施）。Windows保持原序列；ARM逐指令SP保护、HOSTCALL和信号头继续独立结算，私有帧本身不解决ARM真实SP仍高于活动tape帧的问题。
+
+〔C2 g5 云机产品反例，2026-10-09；实际跑过〕原有 a/b、s1/s2/sm、g1/g2 双向共六组 typed E1→E3 模拟输出与 Linux 参考逐字节相同；参数遮蔽已清 TDN，原例不足以证明产品有错。补充反例：第一单元 typedef struct {int x;} code，第二单元未声明 code 却 return (code){1}.x!=1；参考拒 unknown identifier，产品 δ 接受。拟只在 @unit+ 清 typedef 名字可见标志及其枚举类型标记，保留描述符、结构池、跨单元函数签名；用 typedef 写入的 intern ID 上界限定清理，逐名只处理有效 TDN。验收含原六组保持同字节、新反例双序拒绝以及同单元合法复合字面量。
+
+〔C2 g5 云机验证资源边界，2026-10-09；实际跑过〕修后普通 E3 原生网络穷举 2559878 观察一致；原六组 typed E1→E3 模拟与原生网络均同参考 tape，新增复合字面量泄漏由接受变拒绝，合法全局同名对象同字节。unitlocationcheck 全过（位置序列化、10 map/7 frame 拒绝），seedfacts 1076 同/0 异。并发两 Python 变体与 C seed/gen 构造时，内核 OOM 日志杀 cdx37-seedgen（anon-rss 5932868kB），两变体超 55s；已报董秘并改串行，不放宽 60s，不计通过。C 种子构造一致性与正式候选/新增 multi isolation 全片实跑仍需补验。
+
+〔C2 g5 云机修片冻结前验证，2026-10-09；实际跑过〕八个 parse2 变体均串行/受限构造成功，fresh 哈希及计数全部保持既有基线；仅更新对应八条 graphhash。r21 复用本轮新构造普通 E3 JSON，PP/E1 重建后原生网络实跑 48 同/5 具名拒绝/0 接受不同。errors 模式的跨单元泄漏与同单元合法复合字面量双向共四组 tape/完整诊断与参考同字节。回归借用的七份最小例复制入 tests/multi/typedef-*.c，纳入既有门禁的 tests/multi 输入闭包，避免 research 例变化不使队列缓存失效；新增 multi isolation 全片与 C 构造器一致性、正式 .com 仍待 m4pro 验收。证据整理于 research/c2-g5-unit-typedef-cloud.md，不结算整个 C2。
+
+〔云机提交身份，2026-10-09〕云机未配 Git 作者，当前修片提交只用命令级 cdx-unisacc <cdx-unisacc@localhost>，不改全局配置、不借用人的作者身份。会话中 main 已经论文/计划文档更新前移666bb0bc；编译输入未变，本片仍只提交自身路径。
