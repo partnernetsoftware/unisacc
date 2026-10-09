@@ -1298,3 +1298,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b′ 私有参数与通用入口原型，2026-10-09；实际跑过〕临时POSIX .sys/.write已改为80B私有帧快照，覆盖atfd_1/atfd_1_zero/atfd_2_zero5/zero4参数形状；sys6原SP暂存由x16改x12，避免.frame计算覆盖它。两架构低级tape分别用r7作为sys6/sys/write缓冲，均ABCABCABC/0。移除信号跳板单名判断，临时头改用已有__ccw_前缀，两架构双层MABCD/0。ARM普通目的寄存器为r7的计算先产出到独立暂存，再按移动方向提交栈；sub/add/load写r7低级探针退出0，HOSTCALL+外部异步探针194次ALRM退出0。这些仍是隔离导出C原型，未生成产品δ；.exit/.print共享格、逐快照重入注入、Linux信号入口和正式四目标验收继续保留。
 
 〔L1b′ 裁库闭包核查，2026-10-09；实际跑过〕libneed.table从头内标识符自动提依赖，不需手写sigaction边。隔离应用14c85649停放补丁后，完整table先报carried body defined twice: alarm（unistd新增POSIX/Windows两个同名static体，解析器不按条件编译去重）。仅在临时副本删去Windows重复体以检查依赖后，sigaction闭包含__ccw_unisa_sigtramp、_unisa_sigkernel、_unisa_sigaltstack、_unisa_sigrestorer与_unisa_ret，守卫名匹配。停放补丁需把alarm平台分支放同一函数体，正式头落地后导出pp facts/E2，不添加手写边或放松重复检查。
+
+〔L1′/L2 数组拒绝最小化，2026-10-09；出货产品实跑〕宏N=32的static unsigned long mask[N]独立-run退出0；仅前置extern const char version[]，同一完整数组在[32]后被拒incomplete array declaration before another definition，退出1。因此存在可复现的未完成extern声明历史影响，不能把完整数组报错直接归因宏长度识别；sqlite现场是否同根尚未验。两例入research/l1prime-array-history，排L1b后，当前输入窗口未动。
