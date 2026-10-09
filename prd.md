@@ -1317,3 +1317,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b sys6 验收探针审阅，2026-10-09；源码核查〕sys6probe.c的12个__syscall6在参考前端均由sysargs6固定送r0..r5，并发出.sys6 syscall，不因常量号变成具名op，也不因局部声明顺序改变tape源寄存器；帧内buf地址经求值送入r2，不等于直接以r7作源。现12/12证据仅覆盖C参数求值/动态号写调用，尚缺具名mmap和低级tape寄存器置换/r7别名。accept.c中sh编译失败未设置bad、未清理旧产物就sha，可把旧文件当新证据；需生成临时产物、成功才替换、编译失败显式失败。private3的Windows ARM镜像变化已标反例，首片只移POSIX sys6 helper，不搬ARM编码器原型。生产代码仍未落。
 
 〔L1b POSIX sys6 生产首片，2026-10-09；参考实跑与δ对拍进行中〕六个源寄存器在修改ABI寄存器前写入80B私有tape帧（0–40参数、48旧FP、56旧SP）；r7作源取帧分配前的快照，arm用x12、x86用r11保存旧SP，避免未来ARM.frame计算所用x16覆盖快照。动态号从槽0取、其余五参从8–40取；具名调用六参从0–40取，gate后从私有帧恢复FP并释放帧。Windows仍走原全局格路线；不在本片落信号头或编码器SP更新，.sys/.write与HOSTCALL私有化另片处理。生产参考通过验收器四次macOS运行及Windows四镜像基线；lnx/x86_64原生δ对手写tape255条指令与Python逐字段同，其他目标与正式产品验收尚待完成。验收手写tape带注释，lower文本入口目前不接受分号注释，对拍只去注释不改变指令；不把该格式拒绝当sys6错码。
+
+〔L1b sys6 首片验收补齐，2026-10-09；实际跑过〕生产代码已由共享main提交819793f1收录，未改写该提交。六目标lower逐指令/元数据对拍、四POSIX手写tape镜像与C参考逐字节同、参考四次macOS实跑、Windows四镜像旧基线、产品-run种子构造lower整图逐字节同均通过；facts 30表0异，lower九模式基线重录（Windows/default不变），fresh-order九模式无变化。正式新.com实跑与Linux实跑尚待cc候选验收；不据本片声称完整信号安全。详见research/l1b-sys6-production-slice.md。
