@@ -29,7 +29,16 @@ fi
 # (diag saw 0 damaged-corpus programs) and kept the root .com instead of the candidate pair
 # 0.0.31: the root holds the SIGNED public .com beside the unsigned build.json (not a pair);
 # the queue tests the candidate, so install the stage-2 pair from CAND_DIR
-cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"
+# 0.0.38 full038c: com-comboot-stage2 reinstalls its own stage pair into the root mid-queue -- the same
+# .com bytes, but a build.json naming another commit -- and the end-of-window input check then voided
+# 124 results.  When the seed directory's stage pair carries the candidate's exact bytes, install that
+# pair, so comboot's reinstall changes nothing; otherwise the candidate pair as before.
+SP="$SEED/stage3"
+if [ -s "$SP/unisacc.com" ] && [ -s "$SP/unisacc.com.build.json" ] && cmp -s "$SP/unisacc.com" "$D/unisacc-next.com"; then
+  cp -p "$SP/unisacc.com" "$W/unisacc.com" && cp -p "$SP/unisacc.com.build.json" "$W/unisacc.com.build.json"
+else
+  cp -p "$D/unisacc-next.com" "$W/unisacc.com" && cp -p "$D/unisacc-next.com.build.json" "$W/unisacc.com.build.json"
+fi
 # 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
 # network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
 # 0.0.27: launched from an rc worktree, $R has no ignored corpus either -- take it from the main checkout
