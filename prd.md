@@ -1305,3 +1305,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔H2 exec-memory-cc-1 单轮修片认领，2026-10-10；董秘二裁/cc授权〕首错 reserve.c 缺 stdint.h，intptr_t/uint64_t 未声明。只改 exec/c/memorycheck.py 生成的宿主探针前置显式 stdint.h；同一 loader 的 lazy 探针也显式包含该声明。不改 memory.c/memory-contract.c，memorycheck.py 为 source closure 明确排除的验证工具。bound55 原单项复测，修后若被限时挡住仍维持基线，不放宽限时。
 
 〔H2 exec-memory-cc-1 单轮修后结果；实际跑过〕原单项 gate bound55 外层 rc142，在模型准备阶段被中断，未产出 suite rc，保留基线/INTERRUPTED，不记 PASS、不重试。另 bound55 定点直接用原 cc -O2 构建生成的 reserve/lazy 探针：reserve 正常路径与四项拒绝的原返回码/诊断全过，lazy 610MB 虚拟范围初始零与末页写入原判据全过，证明 stdint 声明根因已修；不代表全套验收通过。未动产品闭包及限时。
+
+〔0.0.38 首次全量 queue 中止，2026-10-10；实际跑过〕候选 740007ef（digest 689a91de 未变），三段共约 30 min 墙钟：①首段 22 min 完成 228/647 后，四个 seed 生成作业并发吃满 16 GB，内核 OOM 误杀他人进程，P3 停滞保护 rc3 停（53c316c2 改为独占）；②续跑段因 cc 自己的 P3 缺陷（父 deadline 下 deferral/估计仍按 window-3）长独占作业无限 DEFER，停滞保护 rc3 停（1bab9cae 修，5c6e1066 补组合边界回归）；③第三段 seedparse2-1 单独运行仍触发 OOM（共享云机他人桌面进程占约 8 GB，可用约 3–4 GB），再次误杀他人进程，cc 主动中止全量，不再在本机跑 seed 生成类套件。另：cc 的 gatequeue 修片落在 SCHEDULING 区段外，改变全部作业身份，续跑几乎全部失效（1/647 保留），属返工成本。整轮绿链基线未得。待裁：seedparse2-1/-2、seedgen、seedgen-2 在共享云机的内存需求（建议按 P7 声明内存需求，MemAvailable 不足记 UNVERIFIED，不改测试判据与限时）。
