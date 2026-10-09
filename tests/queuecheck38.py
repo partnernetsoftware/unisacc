@@ -132,4 +132,21 @@ with tempfile.TemporaryDirectory() as td:
     assert not json.loads((t/'memnone/results.json').read_text())['results']
     q.mem_available_mib=lambda: 9000
     assert run('memok',55,('--heavy-suite','hv'))==0
+    # a reading that does not drop yet (allocation lag) cannot admit three jobs on the same free memory
+    jobs={n:[sys.executable,'-c',code2,str(t/n),'1.5'] for n in ('a1','a2','a3')}
+    q.mem_available_mib=lambda: 1700           # room for two 768 MiB floors, not three
+    run('lag',55,('--jobs','4','--parent-deadline',str(_t.monotonic()+6)))
+    starts=sorted(float((t/n).read_text()) for n in ('a1','a2','a3') if (t/n).exists())
+    assert len(starts)>=2 and (len(starts)<3 or starts[2]-starts[0] >= 1.0), 'third job admitted on a stale reading: %r'%starts
+    # no reading at all: said UNKNOWN, not silently safe
+    q.mem_available_mib=lambda: None
+    jobs={'u1':[sys.executable,'-c','pass']}
+    out=io.StringIO()
+    with contextlib.redirect_stdout(out):
+        sys.argv=['gatequeue.py','--state',str(t/'memunk'),'--window','55']; q.main()
+    assert 'memory UNKNOWN' in out.getvalue()
+    # the real reading parses on this host (meminfo and, where limited, the cgroup path)
+    del q.mem_available_mib
+    q=load('queue_under_test',ROOT/'tests/gatequeue.py'); q.plan=lambda com:jobs; q.fingerprint=lambda plan:stamp[0]
+    v=q.mem_available_mib(); assert v is None or v>0, v
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')

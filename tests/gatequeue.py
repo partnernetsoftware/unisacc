@@ -331,11 +331,26 @@ def stagelog_segments(args, *marks):
 # reread before every start, so a shared host's changing load is seen.  Not Linux: no reading, no gate.)
 HEAVY_MIB, FLOOR_MIB = 2048 + 512, 768
 def mem_available_mib():
+    """min(host MemAvailable, the tightest remaining cgroup v2 allowance on this process's path), MiB;
+    None when neither can be read (said as UNKNOWN by the caller, never treated as safe)."""
+    vals = []
     try:
         for line in open('/proc/meminfo'):
-            if line.startswith('MemAvailable:'): return int(line.split()[1]) // 1024
+            if line.startswith('MemAvailable:'): vals.append(int(line.split()[1]) // 1024)
     except OSError: pass
-    return None
+    try:
+        rel = next(l.split(':', 2)[2].strip() for l in open('/proc/self/cgroup') if l.startswith('0::'))
+        d = pathlib.Path('/sys/fs/cgroup') / rel.lstrip('/')
+        while True:
+            try:
+                mx = (d/'memory.max').read_text().strip(); cur = int((d/'memory.current').read_text())
+                if mx != 'max': vals.append(max(0, int(mx) - cur) // (1024*1024))
+            except (OSError, ValueError): pass
+            if d == pathlib.Path('/sys/fs/cgroup') or d.parent == d: break
+            d = d.parent
+    except (OSError, StopIteration): pass
+    return min(vals) if vals else None
+RESERVE_SECONDS = 10   # a started job's memory may not show in the reading yet: hold its need meanwhile
 # SCHEDULING-END
 
 def resume(data, stamps, jobs, exclusive):
@@ -531,10 +546,16 @@ def main():
                 heavy = set(getattr(args, 'heavy_suite', []))
                 if heavy & set(active): fits = [n for n in fits if n not in heavy]   # one heavy job at a time
                 free = mem_available_mib()
-                if free is not None:
-                    fits = [n for n in fits if free >= (HEAVY_MIB if n in heavy else FLOOR_MIB)]
+                if free is None:
+                    if not data.get('mem_unknown_said'):
+                        print('queue: memory UNKNOWN -- no MemAvailable/cgroup reading; admission not memory-gated', flush=True)
+                        data['mem_unknown_said'] = True
+                else:
+                    now = time.monotonic()
+                    held = sum(HEAVY_MIB if a in heavy else FLOOR_MIB for a, v in active.items() if now - v[2] < RESERVE_SECONDS)
+                    fits = [n for n in fits if free - held >= (HEAVY_MIB if n in heavy else FLOOR_MIB)]
                     if not fits and not active:
-                        print('queue: WAIT memory -- %d MiB free, nothing admissible' % free, flush=True)
+                        print('queue: WAIT memory -- %d MiB free (%d held for new starts), nothing admissible' % (free, held), flush=True)
                 if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job
