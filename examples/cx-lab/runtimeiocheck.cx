@@ -1,0 +1,80 @@
+#!/usr/bin/env -S unisacc.com -run
+/* examples/cx-lab/runtimeiocheck.cx -- lab experiment, not part of the product.
+ *
+ * A .cx port of tests/runtimeiocheck.py: build a 65539-byte binary fixture (bytes 0..255
+ * repeating, so it exercises CRLF/DOS-EOF bytes too), compile the real tests/runtimeiobytes.c
+ * (read-only reference, untouched) twice -- once plain, once under ASan/UBSan -- run each
+ * against the fixture, and check the exact expected line came back with nothing on stderr.
+ * Writes examples/cx-lab/out/bytes.bin, out/native, out/sanitised and out/runtimeio.tsv; reads
+ * tests/runtimeiobytes.c. Touches nothing else, in particular not tests/runtimeiocheck.py.
+ *
+ * Run from the repo root:  ./unisacc.com -run examples/cx-lab/runtimeiocheck.cx
+ */
+#include "cxlab.h"
+
+#define FIXLEN 65539
+static const char *WANT = "binary IO: 65539 bytes preserved\n";
+
+int main(void) {
+    unsigned char fixture[FIXLEN];
+    int i, ok_all = 1;
+    FILE *f;
+    char *variants[2][2] = {
+        {"native", ""},
+        {"sanitised", "-fsanitize=address,undefined -fno-sanitize-recover=all"},
+    };
+
+    for (i = 0; i < FIXLEN; i++) fixture[i] = (unsigned char)(i % 256);
+
+    system("mkdir -p examples/cx-lab/out");
+    if (cx_write("examples/cx-lab/out/bytes.bin", fixture, FIXLEN) != 0) {
+        printf("runtimeiocheck: could not write the fixture\n"); return 1;
+    }
+
+    f = fopen("examples/cx-lab/out/runtimeio.tsv", "wb");
+    if (!f) { printf("runtimeiocheck: cannot open out/runtimeio.tsv\n"); return 1; }
+    fprintf(f, "variant\tbuild_rc\trun_rc\tstdout_ok\n");
+
+    for (i = 0; i < 2; i++) {
+        char build_argv_buf[256];
+        char *build_argv[16];
+        char exe[64], *out; size_t n; int bn = 0, rc, stdout_ok;
+
+        snprintf(exe, sizeof exe, "examples/cx-lab/out/%s", variants[i][0]);
+        build_argv[bn++] = "cc"; build_argv[bn++] = "-O2";
+        if (variants[i][1][0]) {
+            strcpy(build_argv_buf, variants[i][1]);
+            {
+                char *p = strtok(build_argv_buf, " ");
+                while (p) { build_argv[bn++] = p; p = strtok(0, " "); }
+            }
+        }
+        build_argv[bn++] = "tests/runtimeiobytes.c";
+        build_argv[bn++] = "-o"; build_argv[bn++] = exe;
+        build_argv[bn] = 0;
+
+        rc = cx_runv_timeout(build_argv, 30, &out, &n); /* cc is a plain Mach-O/ELF, execvp works */
+        free(out);
+        if (rc != 0) {
+            printf("runtimeiocheck: %-10s build failed rc=%d\n", variants[i][0], rc);
+            fprintf(f, "%s\t%d\t-\t0\n", variants[i][0], rc);
+            ok_all = 0;
+            continue;
+        }
+
+        {
+            char runcmd[128];
+            snprintf(runcmd, sizeof runcmd, "%s examples/cx-lab/out/bytes.bin 2>&1", exe);
+            rc = cx_run_timeout(runcmd, 10, &out, &n); /* 2>&1: stderr must come back empty too */
+            stdout_ok = out && strcmp(out, WANT) == 0;
+            printf("runtimeiocheck: %-10s run_rc=%d stdout_ok=%d\n", variants[i][0], rc, stdout_ok);
+            fprintf(f, "%s\t0\t%d\t%d\n", variants[i][0], rc, stdout_ok);
+            if (rc != 0 || !stdout_ok) ok_all = 0;
+            free(out);
+        }
+    }
+    fclose(f);
+
+    printf("runtimeiocheck: %s\n", ok_all ? "PASS" : "FAIL");
+    return ok_all ? 0 : 1;
+}
