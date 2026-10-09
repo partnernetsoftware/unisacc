@@ -27,7 +27,7 @@
 
 | 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
-| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md)，每个版本带签后大小、SHA-256 与验收收据（最新 v0.0.20） |
+| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md)，每个版本带签后大小、SHA-256 与验收收据（最新 v0.0.36） |
 
 六目标实跑：本机 osx/arm64 与 Rosetta 全量门禁；Lima lnx/arm64、lnx/x86_64 与 UTM win/arm64、win/x86_64 跑 examples（`tests/crossnative.sh`）并完成 Windows 双目标编译器自举。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
 历史单次memory计时与收据见 [单次 memory 集成证据](archive/research/20260928/memory-once-integrated-bench-20260928.json)。
@@ -73,7 +73,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 | 位置 | 内容 | 由谁写出 |
 |---|---|---|
-| `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。18 个阶段共 8,486 行 | `python3 -m unisa gold-export`（`build-weights` 会顺带执行） |
+| `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。18 个阶段共 8,769 行 | `python3 -m unisa gold-export`（`build-weights` 会顺带执行） |
 | `weights/built.json` | 构造出的权重，JSON，便于阅读和调试 | `python3 -m unisa build-weights`（约 20 s） |
 | `weights/built.uns2` | 同一份经典参考权重的紧凑二进制 | 同上 |
 | `kernel/unisa_model.inc` | 权重、各阶段维度、词表、编码器操作码表的 C 形态，经典参考读取它 | `python3 -m unisa emit-kernel` |

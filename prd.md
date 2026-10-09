@@ -14,7 +14,7 @@
 
 ### 版本状态与历史身份
 
-最近已发布版本为 **v0.0.30**（2026-10-06 公开）。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
+最近已发布版本为 **v0.0.36**（2026-10-09 公开）。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
 
 ### 计划索引（正文在 plans/，prd 只放索引）
 
@@ -26,7 +26,6 @@
 | v0.0.32 | [archive/plans/v0.0.32.md](archive/plans/v0.0.32.md) | 10-07 公开（unisacc.com d198bae2，候选 38ea3622；回执 research/r32-release-acceptance.json） |
 | v0.0.33 | [archive/plans/v0.0.33.md](archive/plans/v0.0.33.md) | 10-08 公开（unisacc.com c2d03fe6，候选 e0a8ff7c；rc/v0.0.33=bc23f113；回执 research/r33-release-acceptance.json） |
 | v0.0.34 | [archive/plans/v0.0.34.md](archive/plans/v0.0.34.md) | 10-08 公开（unisacc.com f48938ef，候选 60f4765c；rc/v0.0.34=99150ee6；回执 research/r34-release-acceptance.json） |
-| v0.0.34 | [archive/plans/v0.0.34.md](archive/plans/v0.0.34.md) | 候选已封（78ae645f，rc/v0.0.34=d70ba891），本地验收中；主题项 minicon/agenterm/包与容器顺延 0.0.35；公开须政委说「发」 |
 | v0.0.35 | [archive/plans/v0.0.35.md](archive/plans/v0.0.35.md) | 10-08 公开（回执 research/r35-release-acceptance.json） |
 | v0.0.36 | [archive/plans/v0.0.36.md](archive/plans/v0.0.36.md) | 10-09 公开（unisacc.com baf296dd，候选 b4607639；rc2 29728cc6；回执 research/r36-release-acceptance.json） |
 | v0.0.37 | [plans/v0.0.37.md](plans/v0.0.37.md) | 进行中（c99 闭环与顺延超限项） |
