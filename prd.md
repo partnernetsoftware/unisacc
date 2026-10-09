@@ -1327,3 +1327,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 首次完整全量 queue，2026-10-10；实际跑过〕full038c 649/649 有结果，真实出口 rc1（有红，非绿链）；四段同一 state、代码身份分段（04a5087b→81a4ee4a；queue.sh a7b059dc）。窗内墙钟约 2 h 22 min/175 窗，每窗前后置约 3.6 s；浪费首位为 tail DEFER 175 次 4817 作业秒。分段与出口表见 research/c38-pipeline-baseline.md。待一次裁：出口表 57 项（附根因分组）。
 
 〔0.0.38 一次裁红请求，2026-10-10〕research/c38-ruling-request.md：full038c 出口表 NEEDS_RULING 57 项按根因分 A–H 组（宿主跳项 7、自举 self 超时 8、rowcov/lib-source 超时 20、其他超时 10、已裁套件新形态 2、门禁自身 1（已修）、产品/驱动功能红 4、其他 rc1 5），并列已有处置（H1 15、资源 UNKNOWN 6、宿主 77 6、BLOCKED 27 挂三根）与 verification 全量授权请求。未开第四轮、未进 Draft。
+
+〔董秘 full038c 出口表一次裁，2026-10-10〕A 宿主跳项→H2；B 自举 self 超时→H1；C rowcov/lib-source 超时→H1（另审 probe 丢弃仅预验）；D 其他超时→H1；E lib-lifecycle/exec-driver-language-2 新形态→H2 允许 H2 切口修一轮；F gate-layers→主树 48b8b9ae 已修；G com-multi/com-forward-multi→H2（静态 -run 需动态镜像）、com-difftest_o-1→覆盖缺口 COV1、realprog→H2；H exec-bridge-linux/windows-resolver-host→H2，seed-construct-parse2×3→待定位 SC1 不挡收口。53 行按套件+形态+签名落 release/rulings.tsv；出口表复核：NEEDS_RULING 只余 gate-layers（已修）与 SC1 三项。同时授权 current-main scoped verification（同候选 740007ef 同宿主，不进 Draft）。
