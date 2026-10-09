@@ -1319,3 +1319,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔P7 具名 cc launcher 路线认领，2026-10-10；cc轻量授权〕仅审核历史 launcher sha5c036d42…，原脚本对 seed/gen.c 全参转发固定 /usr/bin/cc；目标实体/版本、具名等价 flags、影响编译/装载环境的空值约束与宿主/并发/暖分支均须匹配，构建后仍核生成器 sha2d1696da…才准生成。其它 wrapper 或变化 UNKNOWN。不以同字节推断编译资源：阈值仅支持生成器运行，compile_resources 明确 UNKNOWN。现场 launcher 缺失已报 cc，不擅自重建；只做受控 fixture 身份负例，不测峰不跑生成器。
 
 〔P7 具名 launcher 路线复核；实际跑过〕13项内存自检及12项 hostcheck 自检均 bound55 rc0；受控原脚本 fixture 的审核 SHA 匹配，目标实体/版本、flags、环境空值、宿主/并发/暖分支匹配才认可，改 launcher 字节/路径、目标 cc、flags、CPATH 均拒绝；原二进制变更/构建后重核负例保持。不会执行未审核 wrapper 来猜其目标，审核原脚本固定exec目标；真实现场 launcher 缺失，未重建或跑生成器。阈值与 hostcheck 输出明确 scope=generator-execution、compile_resources=UNKNOWN，编译资源未宣称已测。未测峰、不改预算/判据，gatedeps交cc统一刷新。
+
+〔0.0.38 第三次全量 full038c 被外部回收，2026-10-10；实际跑过〕HEAD 04a5087b（含收尾预算、attempt 类别、history 有效期、具名 launcher 路线），候选 740007ef。约 65 窗、落盘 330/649（293 rc0、27 rc142、4 资源 UNKNOWN rc2、5 rc77、1 rc1），期间无外杀、无新 OOM；随后 Claude Code 因整机内存告急回收后台进程（非队列失败），日志无最终出口，记 INCOMPLETE，不合成终态。按宿主规则不自行重起，待授权在资源足够时用原 state 续跑；续跑前核遗留进程、身份/history/cache 与可用内存。随后补 7de2efa0：attempt 类别写入 START 行与结果。
