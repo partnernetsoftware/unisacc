@@ -227,6 +227,8 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 〔构造器改动的候选顺序，2026-10-09；政委令，cc 落实〕按 cdx2 v4：生成器（seed/gen.c、seed/facts.h、exec/build/）改动后先做 flags 全矩阵预验（shared 七、lower 六、pack-prep 模型十一，含 parse2 --errors、--warnings --errors 与 object 变体；每项 ASan 无错、与 gen.py 同 flags 逐字节同、峰值 RSS 低于宿主可用内存、墙钟在 50 s 内）→ 一次冻结候选 → 再自举/queue；禁止每修一处就整链重建。细则 release/RELEASE-PIPELINE.md §24。起因：92dbae02 修 parse2 行级作用域泄漏（5.25→1.28 GB）后直接整链重建，pack-prep-1 才暴露 parse2 --errors 的 group-tail 每边 JSON 解析不释放（5.4 GB）。
 
+〔开发流程纪律，2026-10-09；政委停工令后 cc 反思落实〕10-09 云机 0.0.37 的返工多数是流程而非产品：重活并发致 OOM、长跑前不做最小冒烟（comboot 活锁、预热循环、独占项名拒队列）、被动长等未设检查点（com-seedgen 停滞由 cdx2 发现）、验证脚本未自证（旧输出误报 IDENTICAL）、pkill -f 自杀会话、改产品闭包前未估重建代价。今后七条：重活一机一件且起前核内存；先小后大；长跑设检查点、3 窗无进展即停；验证工具先自证；停进程只按 PID；提交前分产品闭包与否；停工令即停全部后台并报残留。细则 release/RELEASE-PIPELINE.md §25（与 §24 全矩阵预验配合）。
+
 ## 4. 质量体系
 
 - **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
