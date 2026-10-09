@@ -25,7 +25,7 @@ realpath 探针：参考 `/usr/../etc//hostname`→`/etc/hostname`，不存在�
 
 ## C2 g4
 
-见 research/n1-gaps/README.md 末段（c4e5001f）。修片在 cdx 的 callcontrol.py 生成器侧，已 envelope 交 cdx；本机只做验收。当前 main 已含 cdx 5a632535 g4 表修，上表产品列是公开 0.0.36 旧行为。验收命令（候选 .com 到手后）：`sh $COM -run research/n1-gaps/g4_a.c research/n1-gaps/g4_b.c`、K&R 定义单文件变体（`int f8();` + `int f8(a,…,h) int a,…,h; {…}`）、原型对照三者 rc=0，且与参考一致。
+见 research/n1-gaps/README.md 末段（c4e5001f）。修片在 cdx 的 callcontrol.py 生成器侧，已 envelope 交 cdx；本机只做验收。当前 main 已含 cdx 5a632535 g4 表修，上表产品列是公开 0.0.36 旧行为。验收命令（候选 .com 到手后）：`sh $COM -run research/n1-gaps/g4_a.c research/n1-gaps/g4_b.c`、单文件变体（`int f8();` 声明 + 调用 + 其后带原型定义 `int f8(int a,…,int h){…}`；K&R 定义参考本身不收，不作反例）、原型对照三者 rc=0，且与参考一致。
 
 ## F4′
 
