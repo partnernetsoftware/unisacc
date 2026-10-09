@@ -1281,3 +1281,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 P1–P7 收口，2026-10-09；实际跑过〕补齐 P6 每窗前置/作业/收尾分段（gatequeue 以参数接 run/父 id，不进套件环境）与 P3「仅 deadline 变化复用结果」负例（3a473712）；queue.sh 加 QUEUE_WINDOWS 上限便于受控验证。受控 queue（0.0.37 候选，私有 state，5 窗）：新工作树 3 窗暖身后 2 个 gatequeue 窗完成 16/645、1 红，stagesum 汇总 queue 13 条命令全配对 COMPLETE、分段事件齐。plans P1–P7 标已完成。
 
 〔0.0.38 可度量收口读数，2026-10-10；实际跑过〕② 指纹减负 6adefadd（645/555 两计划全部 stamp 与旧码逐项相同，2.8→1.55 s/次）；① 暖身拆出 release/tools/warmup.sh + tests/warmupcheck.sh（门禁 warmup），测试发现并修 STAGELOG_RUN 未设触发 set -u（3ee644a9）；③ 首份分段墙钟基线与 ④ H2 真实复验见 research/c38-pipeline-baseline.md：受控 7 窗每窗前后置约 4 s（原约 6.4 s），新工作树暖身 3 两次失败已具名 COLD；H2 43 PASS/6 UNVERIFIED/5 FAILED/2 INTERRUPTED，宿主不适用不吞真实失败。流程违规一次：cc 在 cdx 运行中改 tests/gate.sh 致一次 wrapper 失败，已保留记录并授权单次新 attempt。下一刀：暖身 3 冷跑超限（H1）、lib-windows-gp 子义务分声明、5 个宿主真实红按 H2 修。
+
+〔0.0.38 可度量收口：修后复测，2026-10-10；实际跑过〕暖身 3 改为只建宿主模型缓存，用 models.py 真实 key 与 valid() 判定（edc69bdc/2e51ee2b/6cde5ce2，modelkey.py 只读调用，不动 exec/），失败/UNKNOWN 不写成功标记；queue.sh 补 setup、gatequeue 互斥等待与负载暂停的等待对、EXIT 早退收尾（cadab671）。同候选同口径 7 窗：完成 14→58/62 套件，暖身 2 窗连败→1 窗建成。详表 research/c38-pipeline-baseline.md。
