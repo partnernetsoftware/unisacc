@@ -8,9 +8,10 @@ relocatable object in the target's own format -- ELF, Mach-O or COFF -- that the
 system linkers (GNU ld, lld, ld64, lld-link) accept, and that may read data
 symbols a C compiler defined; `-c -b os/arch -funit` writes a *unit* object for
 separate compilation, and `unisacc a.o b.o lib.a [-o prog]` links unit objects
-and archives (`unisacc ar rcs|t|x`) for any of the six targets. Object writing
-is on the reference compiler; the shipped `unisacc.com` links unit objects and
-writes archives, and refuses `-c -b` by name until its own object route is done.
+and archives (`unisacc ar rcs|t|x`) for any of the six targets. The
+reference compiler writes objects for all six targets; the shipped `unisacc.com` links
+unit objects, writes archives, and writes `-c -b lnx/ARCH` objects, but refuses `-c -b`
+for osx/win by name (exec/c/compiler.c:510).
 Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64 -o FILE.s` writes that object as GNU assembly
 (AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
 assembles it -- or hand-written code in the same subset -- back into the
