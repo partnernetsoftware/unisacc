@@ -41,7 +41,7 @@ static char *rules[] = {
           " malloc memalign hosthdr syscall6 winposix auditnet exec-container exec-package exec-net"
           " exec-codec exec-core exec-embedded target-package lifecycle exec-srcelf",
     "chain", "difftest* csmithdiff* corpus* ccrun* closure* stages exec-chain exec-native-* exec-formats*"
-             " exec-multi-* multi fb12-multi realprog luatests* minicon apps-* bigclosure",
+             " exec-multi-* multi fb12-multi realprog luatests* sqlspeed* minicon apps-* bigclosure",
     "lib", "lib-*",
     "build", "seed* exec-*self* exec-selfprep-* exec-bootstrap-* nativeboot-* comboot-* exec-driver-*"
              " exec-tableself",
