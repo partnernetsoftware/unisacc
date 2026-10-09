@@ -10,7 +10,10 @@ S=${1:?state dir}; R=${2:?checkout}
 host=${WARMUP_HOST:-$(uname -s)}   # WARMUP_HOST only for tests/warmupcheck.sh
 sl() { [ -n "${STAGELOG_RUN:-}" ] && [ "$STAGELOG_RUN" != 0 ] || return 0
        python3 "$R/release/tools/stagelog.py" "$@" 2>/dev/null || :; }
-wk=$(printf '%s' "$R" | cksum | cut -d' ' -f1)
+# the marker names the checkout AND the model inputs it warmed (exec/, weights/ trees at HEAD plus any
+# uncommitted change there): changed inputs in the same checkout warm again (cdx2 10-10)
+inputs=$( { git -C "$R" rev-parse HEAD:exec HEAD:weights 2>/dev/null; git -C "$R" status --porcelain -- exec weights 2>/dev/null; } )
+wk=$(printf '%s\n%s' "$R" "$inputs" | cksum | cut -d' ' -f1)
 for w in 1 2 3; do
     m="$S/warm.$w.$wk"
     { [ -f "$m" ] || [ -f "$m.na" ] || [ -f "$m.cold" ]; } && continue
@@ -20,7 +23,15 @@ for w in 1 2 3; do
     case $w in
         1) python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1 || wrc=$?;;
         2) python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1 || wrc=$?;;
-        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1 || wrc=$?;;
+        # 0.0.38: the cache the warning drivers need is the host model preparation; warningcheck.sh as a
+        # whole runs 48 s even warm on the cloud host, so it can never settle inside 50 s (0.0.37's
+        # "3/3 done" was written after a failure).  Build only the cache, in a scratch dir.
+        3) wt=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-warm.XXXXXX")
+           case $(uname -s)/$(uname -m) in Darwin/arm64) wtg=osx/arm64;; Darwin/x86_64) wtg=osx/x86_64;;
+                Linux/aarch64|Linux/arm64) wtg=lnx/arm64;; Linux/x86_64) wtg=lnx/x86_64;; *) wtg=;; esac
+           if [ -n "$wtg" ]; then (cd "$R" && TARGET=$wtg python3 "$R/tests/bound.py" 50 ./exec/pipeline/elf.sh "$wt" examples/hello.c >/dev/null 2>&1) || wrc=$?
+           else wrc=2; fi
+           rm -rf "$wt";;
     esac
     [ -z "$sid" ] || sl end --id "$sid" --rc "$wrc" --execution-status warmup
     if [ "$wrc" = 0 ]; then
