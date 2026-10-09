@@ -1293,3 +1293,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔董秘代裁 7 套件，2026-10-10〕5 个宿主真红记入 H2 基线（可在 H2 切口修，不挡收口）；exec-driver-language-2、exec-memory-cc-1 外层中断记入 H1 云机基线。不删测、不改验收、不抬限时、不重试到绿。plans H1/H2 行已记。
 
 〔0.0.38 H2 五项宿主真红修片认领，2026-10-10；cc授权〕逐项仅改测试/示例：winimports 将循环体与后置断言明确分开；lifecycle 私有宿主探针在头文件前启用 glibc mincore 的 feature macro；proc-enum 私有系统调用 shim 补 lseek 与负 errno 转换；procview 显式包含 errno.h；callable-catalog 核真实测试 fixture 所有权并保持 LSan。各项 bound55，原 Werror/sanitizer/判据不变；若需产品闭包改动先报 cc。
+
+〔H2 lifecycle 宿主声明修后实测〕私有 wrapper 在所有头之前定义 _DEFAULT_SOURCE，使 glibc 暴露 mincore；宿主共享库及 native-lifecycle 编译已过。bound55 gate 47秒 rc1：native-lifecycle 1000轮触发既有40秒内层超时，仍记 FAILED，未改预算、迭代数或资格；该运行时限问题交 cc/H1。

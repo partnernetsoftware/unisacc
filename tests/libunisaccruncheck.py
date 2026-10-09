@@ -13,7 +13,7 @@ def main():
   shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
   out=td/'library.dylib'
   wrapper=td/'test-library.c'
-  wrapper.write_text('#include "'+str(runtime/'libunisacc.c')+'"\n'+r'''
+  wrapper.write_text('#define _DEFAULT_SOURCE 1\n#include "'+str(runtime/'libunisacc.c')+'"\n'+r'''
 __attribute__((visibility("default"))) long test_runtime_count(void){long n=0;for(Allocation*a=allocations;a;a=a->next)n++;return n;}
 __attribute__((visibility("default"))) long test_guest_count(us_context*c){long n=0;for(GuestMap*m=c->guest_maps;m;m=m->next)n++;return n;}
 __attribute__((visibility("default"))) long test_guest_base(us_context*c){return c->guest_maps?(long)c->guest_maps->base:0;}
