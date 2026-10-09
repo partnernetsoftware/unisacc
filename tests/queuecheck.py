@@ -36,6 +36,37 @@ with tempfile.TemporaryDirectory() as td:
     assert run('timeout',5)==1
     assert json.loads((t/'timeout/results.json').read_text())['results']['timeout']['rc']==142
     print('queue: rolling refill, resume, changed inputs, nonzero exit and timeout controls pass')
+    # 0.0.38 P3/P7: UNVERIFIED, parent deadline, outer-kill interruption, stall stop
+    jobs={'hostonly':[sys.executable,'-c','print("UNVERIFIED: required=osx/arm64 observed=lnx/x86_64 missing=native Darwin"); raise SystemExit(77)']}
+    assert run('unverified')==4, 'UNVERIFIED must not pass the queue'
+    r=json.loads((t/'unverified/results.json').read_text())['results']['hostonly']
+    assert r['rc']==77 and r['status']=='UNVERIFIED'
+    import time as _t
+    jobs={'short':[sys.executable,'-c','pass']}
+    assert run('nobudget',55,('--parent-deadline',str(_t.monotonic()+3)))==3, 'no budget must be reported, not run'
+    assert 'short' not in json.loads((t/'nobudget/results.json').read_text())['results']
+    jobs={'quick':[sys.executable,'-c','pass']}
+    assert run('capped',55,('--parent-deadline',str(_t.monotonic()+12)))==0
+    lim=json.loads((t/'capped/results.json').read_text())['results']['quick']['limit']
+    assert lim<=9, 'job limit must respect the parent deadline: %r'%lim
+    # an outer kill leaves inflight: first counts an interruption (no synthetic rc), a killed window
+    # that completed nothing stops the driver; the second interruption is the INTERRUPTED result
+    jobs={'victim':[sys.executable,'-c','pass'],'other':[sys.executable,'-c','pass']}
+    d=t/'killed'; d.mkdir()
+    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'inflight':{'victim':{'limit':48}},'window':{'completed':0}}))
+    assert run('killed')==3, 'killed window with no progress must stop'
+    k=json.loads((d/'results.json').read_text())
+    assert k['interrupted']=={'victim':1} and 'victim' not in k['results'] and 'inflight' not in k
+    k.update(stalled=0, window={'completed':1}, inflight={'victim':{'limit':48}}); (d/'results.json').write_text(json.dumps(k))
+    assert run('killed')==1
+    v=json.loads((d/'results.json').read_text())['results']['victim']
+    assert v['status']=='INTERRUPTED' and v['rc'] is None, v
+    # three windows in a row without any job exit stop the driver instead of 75 forever
+    jobs={'never':[sys.executable,'-c','pass']}
+    d=t/'stall'; d.mkdir()
+    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'stalled':3}))
+    assert run('stall')==3
+    print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
     # Exclusive jobs must precede and never overlap ordinary two-slot work.
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in
           [('normal-a','0.4'),('normal-b','0.4'),('exclusive-a','0.2'),('exclusive-b','0.2')]}

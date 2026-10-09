@@ -328,6 +328,10 @@ def main():
     ap.add_argument('--list-selection', action='store_true', help='print selected suite names without running')
     ap.add_argument('--exclusive-suite', action='append', default=[],
                     help='selected suite that must run alone (repeatable; prioritized)')
+    # 0.0.38 P3: the parent's deadline (time.monotonic(), same boot) reaches the scheduler as an
+    # argument, never through the suites' environment, so it is not part of any job identity
+    ap.add_argument('--parent-deadline', type=float, default=None,
+                    help='monotonic second by which this window must have exited (outer bound)')
     args = ap.parse_args()
     if not 1 <= args.jobs <= 4 or not 5 <= args.window <= 55: ap.error('jobs 1..4; window 5..55')
     if not args.list_selection and args.state is None:
@@ -366,8 +370,42 @@ def main():
     exclusive |= {n for n in data.get('retried', []) if n in pending}   # a retry runs alone in later windows too
     active = {}; start = time.monotonic()
     # 0.0.32: q15 -- a 54 s window plus the epilogue (provenance check, refingerprint) crossed term.sh's 60 s
-    window = args.window - (4 if args.com else 2)
+    epilogue = 4 if args.com else 2
+    window = args.window - epilogue
     deadline = start + window
+    # 0.0.38 P3: one deadline for every layer.  The parent's remaining time already paid for the
+    # prologue above (provenance, fingerprint); a job limit never exceeds what the outer bound leaves,
+    # so the outer kill no longer lands before the job's own limit (0.0.37: rowcov x4, 12 windows)
+    if args.parent_deadline is not None:
+        deadline = min(deadline, args.parent_deadline - epilogue)
+    # 0.0.38 P3: a window killed from outside leaves its inflight records.  The job's real rc is
+    # unknown: count an interruption (never a synthetic 142); the second one is the result
+    # (status INTERRUPTED, rc null).  A killed window that had completed nothing stops the driver.
+    killed = data.pop('inflight', {})
+    last = data.get('window', {})
+    for n, rec in killed.items():
+        if n in data['results'] or n not in jobs: continue
+        hits = data.setdefault('interrupted', {})
+        hits[n] = hits.get(n, 0) + 1
+        print('INTERRUPTED', n, 'attempt', hits[n], 'limit', rec.get('limit'), flush=True)
+        if hits[n] >= 2:
+            data['results'][n] = {'rc': None, 'status': 'INTERRUPTED', 'seconds': None, 'limit': rec.get('limit')}
+        elif n not in exclusive:
+            exclusive.add(n)
+    stall = data.get('stalled', 0)
+    if killed and last.get('completed', 0) == 0:
+        stall = max(stall, 3)
+    data['stalled'] = stall
+    data['window'] = {'completed': 0}
+    atomic(path, data)
+    pending = [n for n in jobs if n not in data['results']]
+    if stall >= 3:
+        print('queue: STALLED -- %s; no legal completion in the last windows (stop, do not repeat with 75)' %
+              ('a window was killed from outside with nothing completed' if killed else '3 windows without progress'), flush=True)
+        return 3
+    if pending and args.parent_deadline is not None and deadline - time.monotonic() <= 3:
+        print('queue: BUDGET_UNSCHEDULABLE -- %.1fs left after the prologue' % (deadline-time.monotonic()), flush=True)
+        return 3
     # 0.0.33 Q1: a job with no record takes the median of the recorded ones (30 s until five exist).  The flat
     # 30 s (-> 40 s estimate) kept every unmeasured job out of the last 40 s of each window; a job that
     # then runs out of window is deferred and retried with twice its elapsed time (below), so a wrong guess
@@ -401,6 +439,7 @@ def main():
                 n = max(alone or fits, key=estimate); pending.remove(n)
                 # SCHEDULING-END
                 limit = max(1, int(left)-1)
+                data.setdefault('inflight', {})[n] = {'limit': limit}; atomic(path, data)
                 log = (state/(n+'.log')).open('wb')
                 p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=execution_environment())
                 active[n] = (p, log, time.monotonic(), limit)
@@ -424,9 +463,15 @@ def main():
                     history[n] = max(elapsed, history.get(n,0))
                 else:
                     data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit}
+                    # 0.0.38 P7: rc 77 is a suite's UNVERIFIED (its host lacks a declared requirement):
+                    # neither PASS nor FAILED; the release check lists it and does not pass it
+                    if rc == 77: data['results'][n]['status'] = 'UNVERIFIED'
                     # Q1 (0.0.33): rise at once, fall by halves -- a cache-warm 2 s run must not
                     # admit the next cold 20 s run into a 6 s tail (cand33: 17% of slot time died as DEFER)
                     history[n] = max(elapsed, (history.get(n, elapsed)+elapsed)/2)
+                # a job that exited inside the window (result, deferral or retry) is progress
+                data['window']['completed'] = data['window'].get('completed', 0) + 1
+                data.get('inflight', {}).pop(n, None)
                 atomic(path,data); atomic(histpath,history)
                 lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
                 print('DONE' if n in data['results'] else 'DEFER',n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
@@ -440,6 +485,10 @@ def main():
         for n, (p, log, t, limit) in active.items():
             p.wait(timeout=2); log.close()
             data['results'][n] = {'rc':142,'seconds':round(time.monotonic()-t,3),'limit':limit}
+            data.get('inflight', {}).pop(n, None)
+            data['window']['completed'] = data['window'].get('completed', 0) + 1
+        # 0.0.38 P3: three windows in a row without a legal completion stop the driver
+        data['stalled'] = 0 if data['window'].get('completed') else data.get('stalled', 0) + 1
         atomic(path,data)
     if args.com:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
@@ -454,11 +503,15 @@ def main():
             data['results'].clear()
         atomic(path, data)
         raise SystemExit('inputs changed during queue: results invalid; %d jobs: %s' % (len(changed), ' '.join(changed[:20])))
-    bad = [n for n,r in data['results'].items() if r['rc'] != 0]
+    unv = [n for n,r in data['results'].items() if r.get('status') == 'UNVERIFIED']
+    bad = [n for n,r in data['results'].items() if r['rc'] != 0 and n not in unv]
     missing = set(jobs)-data['results'].keys()
-    print('queue: %d/%d completed, %d failed, %d pending, window %.2fs; logs %s' %
-          (len(data['results']),len(jobs),len(bad),len(missing),time.monotonic()-start,state),flush=True)
-    return 75 if missing else (1 if bad else 0)
+    print('queue: %d/%d completed, %d failed, %d unverified, %d pending, window %.2fs; logs %s' %
+          (len(data['results']),len(jobs),len(bad),len(unv),len(missing),time.monotonic()-start,state),flush=True)
+    if data.get('stalled', 0) >= 3 and missing:
+        print('queue: STALLED -- 3 windows without a legal completion (stop, do not repeat with 75)', flush=True)
+        return 3
+    return 75 if missing else (1 if bad else (4 if unv else 0))
 
 if __name__ == '__main__':
     sys.exit(main())

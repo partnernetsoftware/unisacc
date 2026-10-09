@@ -28,7 +28,10 @@ esac
 [ -f "$MODEL_COM" ] && [ -x "$MODEL_COM" ] && [ -s "$MODEL_COM" ] || { echo 'release: missing/empty/non-executable MODEL_COM' >&2; exit 2; }
 [ "$UA" != /tmp/ua_ref ] && [ -f "$UA" ] && [ -x "$UA" ] || { echo 'release: UA must be an existing private reference' >&2; exit 2; }
 if [ "${RELEASE_BOUND:-0}" != 1 ]; then
-    exec python3 "$R/tests/bound.py" 55 env RELEASE_BOUND=1 "$0" "$@"
+    # 0.0.38 P3: the outer bound's deadline (monotonic, same boot) goes to the scheduler as an
+    # argument; it is never exported to suites, so job identities do not change with it
+    RELEASE_DEADLINE=$(python3 -c 'import time;print("%.3f"%(time.monotonic()+55-1))')
+    exec python3 "$R/tests/bound.py" 55 env RELEASE_BOUND=1 RELEASE_DEADLINE="$RELEASE_DEADLINE" "$0" "$@"
 fi
 MODEL_COM=$(cd "$(dirname "$MODEL_COM")" && printf '%s/%s' "$PWD" "$(basename "$MODEL_COM")")
 export MODEL_COM UA SEED_DIR STRICT=1
@@ -93,11 +96,14 @@ for w in 1 2 3; do
     echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
     exit 75
 done
-python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?
+deadline=(); [ -n "${RELEASE_DEADLINE:-}" ] && deadline=(--parent-deadline "$RELEASE_DEADLINE")
+env -u RELEASE_DEADLINE python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" "${deadline[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
 [ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
 case "$rc" in
     75) echo "local acceptance PENDING: repeat with GATE_STATE=$GATE_STATE; release NOT ready"; exit 75;;
+    3) echo "local acceptance STALLED/UNSCHEDULABLE (rc=3): diagnose before repeating; release NOT ready" >&2; exit 3;;
+    4) echo "local acceptance INCOMPLETE: UNVERIFIED suites remain (listed in the queue log); release NOT ready" >&2; exit 4;;
     0) ;;
     *) echo "local acceptance FAILED (rc=$rc); release NOT ready" >&2; exit "$rc";;
 esac
