@@ -6,7 +6,8 @@
  * --selftest and can be checked against rowcov.py's own output (--seen).  Interface, all TSV:
  *
  *   EDGE LOG   (from UNISACC_EDGE_LOG, one or more files)  model  state_id  key  probe
- *              state_id is the executor's number, BOT = -1; one line per distinct edge per execution
+ *              state_id is the executor's number (>= 0, in STATES); key -1 is BOT and is read as the
+ *              key name "BOT"; one line per distinct edge per execution
  *   STATES     (the same model's state dictionary)          state_id  state_name
  *   EDGES      (edges that count: not REJECT unreachable)   state_name  key
  *   ROWS       (build side table, UNISACC_ROW_LOG)         state_name  key  manifest_path  line
@@ -15,6 +16,7 @@
  *   rowcov.c -- --model M --states S --edges E --rows R [--floor N] [--cov OUT] LOG...
  *   rowcov.c -- --states S --edges E --rows R --seen F ...
  *   rowcov.c -- --selftest
+ * --taken OUT writes the taken edge set (state TAB key, unsorted) for a set comparison.
  * Prints the same two lines rowcov.py's merge prints (edges/taken, rows/covered) and, with --floor,
  * fails when covered rows fall below it.  A log line for another model, an unknown state id, or a
  * malformed line is an error, never skipped: a coverage number from a mixed log is not a number.
@@ -29,9 +31,17 @@
 
 static char *sname[MAXS]; static int nsname;            /* state id (index) -> name; ids 0.. */
 typedef struct { char *st; char *key; char *path; int line; int taken; char *wit; } Row;
-static char **ekey; static int *etaken; static char **ewit; static int ne;   /* counted edges "state\tkey" */
+static char **ekey; static int *etaken; static char **ewit; static int ne; static char *takenf;   /* counted edges "state\tkey" */
 static Row *rows; static int nrows;
 
+/* the whole field is a decimal integer (atoi reads "abc" as 0) */
+static int number(char *s, int *out) {
+    char *e; long v;
+    if (!*s) return 0;
+    v = strtol(s, &e, 10);
+    if (*e || v < -2147483647L || v > 2147483647L) return 0;
+    *out = (int)v; return 1;
+}
 static char *sdup(char *s) { char *d = malloc(strlen(s) + 1); strcpy(d, s); return d; }
 static void die(char *what, char *where, int ln) { fprintf(stderr, "rowcov: %s (%s:%d)\n", what, where, ln); exit(1); }
 
@@ -79,7 +89,8 @@ static void read_states(char *p) {
     while (fgets(l, sizeof l, f)) {
         ln++; n = fields(l, v, 3); if (!n) continue;
         if (n != 2) die("states line needs: id name", p, ln);
-        id = atoi(v[0]); if (id < 0 || id >= MAXS || sname[id]) die("bad or duplicate state id", p, ln);
+        if (!number(v[0], &id)) die("state id is not a number", p, ln);
+        if (id < 0 || id >= MAXS || sname[id]) die("bad or duplicate state id", p, ln);
         sname[id] = sdup(v[1]); if (id >= nsname) nsname = id + 1;
     }
     fclose(f);
@@ -111,10 +122,8 @@ static void read_log(char *p, char *model) {
         ln++; n = fields(l, v, 5); if (!n) continue;
         if (n != 4) die("edge log line needs: model state_id key probe", p, ln);
         if (strcmp(v[0], model)) die("edge log from another model", p, ln);
-        id = atoi(v[1]);
-        if (id == -1) continue;                        /* BOT: before the first state, no row */
-        if (id < 0 || id >= nsname || !sname[id]) die("edge log state id not in the state dictionary", p, ln);
-        take(sname[id], v[2], v[3]);
+        if (!number(v[1], &id) || id < 0 || id >= nsname || !sname[id]) die("edge log state id not in the state dictionary", p, ln);
+        take(sname[id], strcmp(v[2], "-1") ? v[2] : "BOT", v[3]);   /* cdx: BOT is key -1, not a state */
     }
     fclose(f);
 }
@@ -147,6 +156,11 @@ static int report(char *stage, int floor, char *cov) {
         rows_n++; covered += any;
     }
     printf("rowcov %s  rows %d   covered %d   (%.1f%%)\n", stage, rows_n, covered, rows_n ? 100.0 * covered / rows_n : 0.0);
+    if (takenf) {        /* the taken edge set itself, for a line-by-line comparison (equal counts prove nothing) */
+        FILE *o = fopen(takenf, "w"); if (!o) die("cannot write taken", takenf, 0);
+        for (i = 0; i < ne; i++) if (etaken[i]) fprintf(o, "%s\n", ekey[i]);
+        fclose(o);
+    }
     if (cov) {
         FILE *o = fopen(cov, "w"); if (!o) die("cannot write cov", cov, 0);
         for (i = 0; i < nrows; i++) fprintf(o, "%s\t%d\t%s\t%s\n", rows[i].path, rows[i].line, rows[i].taken ? "taken" : "-", rows[i].wit ? rows[i].wit : "-");
@@ -163,14 +177,14 @@ static int selftest(void) {
     if (!d) d = "/tmp";
     for (i = 0; i < 5; i++) sprintf(b[i], "%s/rowcov-selftest-%d-%d.tsv", d, (int)getpid(), i);
     put(b[0], "0\tS0\n1\tS1\n2\tS2\n");
-    put(b[1], "S0\ta\nS0\tb\nS1\ta\nS2\tz\n");                       /* 4 counted edges */
-    put(b[2], "S0\ta\tm.tsv\t3\nS0\tb\tm.tsv\t3\nS1\ta\tm.tsv\t9\nS2\tz\tm.tsv\t12\nS9\tq\tsynthetic\t1\n");
-    put(b[3], "M\t-1\t^\tp1.c\nM\t0\ta\tp1.c\nM\t1\ta\tp2.c\nM\t1\ta\tp1.c\nM\t2\tREJ\tp2.c\n");
+    put(b[1], "S0\tBOT\nS0\tb\nS1\ta\nS2\tz\n");                     /* 4 counted edges */
+    put(b[2], "S0\tBOT\tm.tsv\t3\nS0\tb\tm.tsv\t3\nS1\ta\tm.tsv\t9\nS2\tz\tm.tsv\t12\nS9\tq\tsynthetic\t1\n");
+    put(b[3], "M\t0\t-1\tp1.c\nM\t1\ta\tp2.c\nM\t1\ta\tp1.c\nM\t2\tREJ\tp2.c\n");
     for (i = 0; i < 2; i++) {
         /* run the same pipeline in-process */
         nsname = 0; memset(sname, 0, sizeof sname); ne = 0; memset(hidx, 0, sizeof hidx); nrows = 0;
         read_states(b[0]); read_edges(b[1]); read_rows(b[2]);
-        if (i == 0) read_log(b[3], "M"); else { put(b[4], "S0\ta\tp1.c\nS1\ta\tp2.c\n"); read_seen(b[4]); }
+        if (i == 0) read_log(b[3], "M"); else { put(b[4], "S0\tBOT\tp1.c\nS1\ta\tp2.c\n"); read_seen(b[4]); }
         { int hit = 0, j; for (j = 0; j < ne; j++) hit += etaken[j];
           if (ne != 4 || hit != 2) { fprintf(stderr, "rowcov selftest: edges %d taken %d, want 4 2\n", ne, hit); return 1; } }
         rc = report("selftest", 2, 0);       /* rows m.tsv:3 m.tsv:9 m.tsv:12 -> covered 3 and 9 */
@@ -178,7 +192,7 @@ static int selftest(void) {
         if (report("selftest", 3, 0) != 1) { fprintf(stderr, "rowcov selftest: floor 3 must fail\n"); return 1; }
     }
     for (i = 0; i < 5; i++) remove(b[i]);
-    printf("rowcov selftest: ok (log and seen routes, BOT skipped, rejection not counted, synthetic rows excluded, floor)\n");
+    printf("rowcov selftest: ok (log and seen routes, BOT key -1, rejection not counted, synthetic rows excluded, floor)\n");
     return 0;
 }
 
@@ -195,6 +209,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--seen") && i + 1 < argc) seen = argv[++i];
         else if (!strcmp(argv[i], "--floor") && i + 1 < argc) floor = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cov") && i + 1 < argc) cov = argv[++i];
+        else if (!strcmp(argv[i], "--taken") && i + 1 < argc) takenf = argv[++i];
         else if (!strcmp(argv[i], "--stage") && i + 1 < argc) stage = argv[++i];
         else if (argv[i][0] == '-') { fprintf(stderr, "rowcov: unknown option %s\n", argv[i]); return 2; }
         else if (nlog < 4096) logs[nlog++] = argv[i];
