@@ -22,10 +22,10 @@ def classes():
     return out
 
 
-def h1_names(plan):
+def h1_names(plan, item='H1'):
     try: text = pathlib.Path(plan).read_text()
     except FileNotFoundError: return set()
-    row = next((l for l in text.splitlines() if l.startswith('| H1 ')), '')
+    row = next((l for l in text.splitlines() if l.startswith('| %s ' % item)), '')
     names = set(re.findall(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)+', row))
     for stem, lo, hi in re.findall(r'([a-z][a-z0-9-]*?)(\d+)\.\.(\d+)', row):     # closure-c1..4
         names |= {'%s%d' % (stem, k) for k in range(int(lo), int(hi) + 1)}
@@ -34,13 +34,14 @@ def h1_names(plan):
     return names | {'exec-' + n for n in names if not n.startswith(('exec-', 'lib-'))}
 
 
-def classify(name, r, log, h1):
+def classify(name, r, log, h1, ruled=frozenset()):
     if r.get('status') == 'UNVERIFIED' or r.get('rc') == 77: return 'UNVERIFIED_HOST'
     if r.get('status') == 'INTERRUPTED': return 'OUTER_INTERRUPTED'
     tail = '\n'.join(log.splitlines()[-5:])
     if TOOL.search(tail) and r.get('rc') not in (0, 142): return 'TOOL_MISSING'
     if r.get('rc') == 142 and name in h1:
         return 'HOST_TIMEOUT'
+    if name in ruled: return 'RULED_BASELINE'   # named in the plan's H1/H2 rows by a ruling: still not PASS
     return 'NEEDS_RULING'
 
 
@@ -50,6 +51,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     st = pathlib.Path(a.state); data = json.loads((st / 'results.json').read_text())
     disp, h1 = classes(), h1_names(a.h1)
+    ruled = h1 | h1_names(a.h1, 'H2')
     rows, passed = [], 0
     for name in data['jobs']:
         r = data['results'].get(name)
@@ -57,7 +59,7 @@ def main(argv=None):
         if r.get('rc') == 0 and not r.get('status'): passed += 1; continue
         try: log = (st / (name + '.log')).read_text(errors='replace')
         except FileNotFoundError: log = ''
-        c = classify(name, r, log, h1)
+        c = classify(name, r, log, h1, ruled)
         last = (log.strip().splitlines() or [''])[-1][:120]
         rows.append((name, c, r.get('rc'), last))
     counts = {}
@@ -66,7 +68,7 @@ def main(argv=None):
         print(json.dumps({'jobs': len(data['jobs']), 'pass': passed, 'classes': counts,
                           'rows': [dict(suite=n, cls=c, rc=rc, last=l) for n, c, rc, l in rows]}, indent=2)); return 0
     print('exit table: %d suites, %d PASS; %s' % (len(data['jobs']), passed, ', '.join('%s %d' % kv for kv in sorted(counts.items()))))
-    for c in ['NEEDS_RULING', 'OUTER_INTERRUPTED', 'TOOL_MISSING', 'HOST_TIMEOUT', 'UNVERIFIED_HOST', 'PENDING']:
+    for c in ['NEEDS_RULING', 'OUTER_INTERRUPTED', 'TOOL_MISSING', 'HOST_TIMEOUT', 'RULED_BASELINE', 'UNVERIFIED_HOST', 'PENDING']:
         sel = [r for r in rows if r[1] == c]
         if not sel: continue
         print('\n[%s] %s' % (c, disp.get(c, 'not yet run')))
@@ -75,4 +77,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try: sys.exit(main())
+    except BrokenPipeError: sys.exit(0)
