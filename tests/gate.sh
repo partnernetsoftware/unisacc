@@ -152,6 +152,7 @@ job seedmemory python3 ./tests/seedmemorycheck.py
 job stagelog python3 ./tests/stagelogcheck.py
 job exittable python3 ./tests/exittablecheck.py
 job warmup ./tests/warmupcheck.sh   # 0.0.38: warm-up markers only for a built cache; COLD named
+job installpair ./tests/installpaircheck.sh   # 0.0.38: queue root pair = comboot's reinstall when same origin
 for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
 # R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
 # regressions found after 0.0.16's local queue was green came from here
