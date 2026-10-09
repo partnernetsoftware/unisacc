@@ -20,7 +20,10 @@ mk() { [ -n "$wtg" ] && "${WARMUP_MODELKEY:-$R/release/tools/modelkey.py}" "$R" 
 for w in 1 2 3; do
     m="$S/warm.$w.$wk"
     if [ "$w" = 3 ]; then
-        set -- $(mk); key=${1:-unknown}; state=${2:-invalid}; m="$S/warm.3.$key"
+        set -- $(mk); key=${1:-}; state=${2:-}
+        # identity query failed: say UNKNOWN, write nothing, decide nothing -- re-judged next window (cdx2 10-10)
+        case $state in valid|invalid) ;; *) echo "warm-up 3/3 UNKNOWN: model identity query failed; no cache conclusion"; continue;; esac
+        m="$S/warm.3.$key"
         [ "$state" = valid ] && { [ -f "$m" ] || { : > "$m"; echo "warm-up 3/3 cache already valid (key ${key%"${key#????????????}"})"; }; continue; }
         [ -f "$m.cold" ] && continue
     else
@@ -40,9 +43,10 @@ for w in 1 2 3; do
            else wrc=2; fi
            rm -rf "$wt";;
     esac
+    # step 3 counts as built only if the cache under the real key is valid afterwards -- decided before
+    # the stage event ends, so the event's rc is the final one
+    if [ "$w" = 3 ] && [ "$wrc" = 0 ]; then set -- $(mk); [ "${2:-}" = valid ] || wrc=3; [ -z "${1:-}" ] || m="$S/warm.3.$1"; fi
     [ -z "$sid" ] || sl end --id "$sid" --rc "$wrc" --execution-status warmup
-    # step 3 counts as built only if the cache under the real key is valid afterwards
-    if [ "$w" = 3 ] && [ "$wrc" = 0 ]; then set -- $(mk); [ "${2:-invalid}" = valid ] || wrc=3; m="$S/warm.3.${1:-$key}"; fi
     if [ "$wrc" = 0 ]; then
         : > "$m"; echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
     else
