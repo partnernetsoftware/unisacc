@@ -1373,3 +1373,11 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔同源生产矩阵A完整通过，2026-10-09；cdx实际跑过〕新seed/gen.c sha8ba73354、GCC O2三十调用逐项bound50/外层55全部rc0同Python（cc本轮新鲜参考，Python/TSV无改）；source前后稳定。errors生产6.75s/2171620KiB、warnings+errors5.79s/2186436KiB，对照交接A2的40.58/33.69s。完整回执在/tmp/cdx37-matrix-a；不是候选验收。B同源最重两项37s内已过，继续其余二十八项，完整B绿前不提交冻结或建候选。
 
 〔0.0.37 全矩阵已闭合，2026-10-09；实际跑过〕新seed源码8ba73354的A/B各三十调用全rc0/同Python，flags调用差集missing0/extra0，全部逐项bound50并记录源码/工具/参考/输出摘要；超时旧回执仍保留。证据research/c37-generator-matrix.{md,json}；cc独立只读复核所有权及memo语义。现在单独提交seed/gen.c修片与这轮证据，冻结一个源提交；之后只起一条默认C构造候选链，旧52173312及10/642不作新身份通过证据。
+
+〔冻结候选链宿主编译定位，2026-10-09〕freeze8ea81419默认C链shared24.25s/1285236KiB、六target及pack-prep1/2/3全部rc0。pack-models主机编译seed/compilerpack.c因strict C99的glibc realpath声明不可见退出1，尚未打包；保留日志/tmp/unisacc37-8ea81419-pack-models.log。不改冻结源码，不重跑整链；通过已有SEED_GEN_CC="cc -D_XOPEN_SOURCE=700"给尚未编的host工具提供标准X/Open声明，单项先编测后仅续pack-models/driver；已完成manifest继续严格核身份/输出，预算不变。候选生产记录须标明此宿主选项。
+
+〔冻结链第二宿主依赖缺位，2026-10-09〕X/Open编译探针rc0；续pack-models随后在host seed/pack.c:19缺zlib.h退出1，保留-xopen.log。本机补系统zlib1g-dev（先download-only受限，再no-download安装），不改冻结产品源码、不重跑模型；产品pack.c缺口与host系统头缺位分开记录，不能把host安装算产品C2通过。
+
+〔冻结候选对与独立验收，2026-10-09；实际跑过〕8ea81419默认C构造pack-models/driver及build_seed已通过；host SEED_GEN_CC="cc -D_XOPEN_SOURCE=700"，系统zlib1g-dev在位。候选/tmp/unisacc37-8ea81419/unisacc-next.com sha52173312db634105eee1ca58d2aa72d6ca96f0e59a16ae961758fd9504f0fb64、seed sha928bda8d18efc20374e2a62b2dfb828dc847e07f9bc3694e43619e4e7d37a6dd；source e68c02ef8874870b44936cb148e1de6421ab30e23575d6ecab3cc27e99a7e93c，两者版本0.0.37。生成器只修资源行为，产物与旧候选同字节但身份不得复用旧源码验收。cc独立accept run-185235，27s/rc0，17/17 PASS，pack.c:19具名缺口不变，K&R两路皆拒且不计通过；cc确认无残留生产者并交还owner。prd未提交均为cdx构造现场记录。
+
+〔冻结元数据与账本预检，2026-10-09；实际跑过〕freezecheck报92dbae02与8ea81419缺fix:前缀，两笔均为已授权红修（OOM/受限ASan超时），不是新功能。按freezecheck已有release/freeze-waivers.tsv机制记录红证据，不改检查器、不重写已推历史。ledgercheck --final仍报C1/C2/C3/F4′/W2/E57/X3/L2/Q2/L1′/L1b′/A1/N1十三项未结算，carry mismatch0；不以17项小验收声称整账本结算。继续同源自举，先seed再受限stage2窗口，一机一重活。
