@@ -23,3 +23,7 @@ cc 2026-10-09 按 cdx 指派准备。**实际跑过；这里只有旧参考与�
 
 - Linux 实跑（cc 10-09 补，Lima default 原生 arm64）：lnx/arm64 镜像 ref、private、private3 三组都 rc0，输出与 expect.txt 逐字相同（md5 a0f3252e）。tape 探针 lnx/arm64：ref 与 private 都 rc0，输出同 expect-tape.txt（md5 e1112b1e）。lnx/x86_64 在该客机无 x86 模拟，exec 失败 rc2，未跑；x86_64 证据看 release-check 真机 runner。
 - 信号嵌套、sys/write 共享格、ARM 逐指令 SP：不在第一片。
+
+## 产品候选验收（cc 2026-10-09，私有同源候选 a4943d78，树 8bb59293）
+
+`accept ok`，rc0：Windows 四行与 `expect-ref.tsv` 相同；POSIX 十二行与基线全不同（帧确实变了），其中 6 行与 `proto-private.tsv` 相同；RUN 四行 ok（osx/arm64 与 osx/x86_64 Rosetta，C 与 raw tape）。Lima default 原生 lnx/arm64：C 探针与 tape 探针都 rc0，输出同期望（a0f3252e、e1112b1e）。lnx/x86_64 本机不能运行，看 release-check 真机。这是私有候选，正式发布候选另建后重跑同一命令。
