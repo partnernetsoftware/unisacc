@@ -94,7 +94,7 @@ class Checks:
         if kind == 'corpus':
             # Presence only; never a proof of corpus contents or test result freshness.
             return 'READY' if regular(ROOT/'corpus/c-testsuite/README.md') else 'MISSING'
-        if kind not in ('cc','cc-arch-arm64','cc-arch-x86_64','csmith','libffi','clang-coff','llvm-objcopy','python3'):
+        if kind not in ('cc','cc-arch-arm64','cc-arch-x86_64','clang-arch-x86_64','csmith','libffi','clang-coff','llvm-objcopy','python3'):
             return 'UNKNOWN'
         if kind == 'python3':
             exe=self.executable('python3')
@@ -108,7 +108,7 @@ class Checks:
                 for target in ('x86_64-pc-windows-msvc','aarch64-pc-windows-msvc'):
                     if self.run([exe,'-target',target,'-c',src,'-o',pathlib.Path(td)/'p.o']).returncode: return 'FAILED_PROBE'
             return 'READY'
-        cc=self.executable('cc')
+        cc=self.executable('clang' if kind.startswith('clang-arch-') else 'cc')
         if not cc: return 'FAILED_PROBE'
         with tempfile.TemporaryDirectory(prefix='unisacc-hostcheck-') as td:
             d=pathlib.Path(td);src=d/'p.c';flags=[]
@@ -123,7 +123,7 @@ class Checks:
                 src.write_text('#include <ffi.h>\nint main(void){return ffi_type_void.size!=0;}\n');flags=['-lffi']
             else:
                 src.write_text('int main(void){return 0;}\n')
-                if kind.startswith('cc-arch-'): flags=['-arch',kind[len('cc-arch-'):]]
+                if kind.startswith(('cc-arch-','clang-arch-')): flags=['-arch',kind.split('-arch-',1)[1]]
             r=self.run([cc,'-std=c99',src,*flags,'-o',d/'p'])
             return 'READY' if r.returncode==0 else 'FAILED_PROBE'
 

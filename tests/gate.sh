@@ -87,6 +87,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
           lib-stack-x86|lib-stack-x86-hostabi) req='darwin-x86_64|osx/x86_64|cc-arch-x86_64|cdx|native-stack-bridge';;
           lib-windows-gp) req='any|win/x86_64,win/arm64|clang-coff,llvm-objcopy|cdx|coff-declarations';;
+          lib-windows-gp-native) req='darwin-x86_64|win/x86_64|clang-arch-x86_64|cdx|native-msabi-bridge';;
           exec-bootstrap-osxarm) req='darwin-arm64|osx/arm64|cc|cdx|native-bootstrap';;
           exec-bootstrap-osxx86) req='darwin-x86_64|osx/x86_64|cc|cdx|native-bootstrap';;
           exec-native-*) req='native-posix|host|cc|cdx|native-network-runtime';;
@@ -478,7 +479,8 @@ job exec-binaryio python3 ./tests/runtimeiocheck.py
 job exec-crcllp64 python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
 job lib-windows-imports python3 ./tests/librarywinimportscheck.py
-job lib-windows-gp python3 ./exec/enc/windowshostbridgecheck.py
+job lib-windows-gp python3 ./exec/enc/windowshostbridgecheck.py --part cross
+job lib-windows-gp-native python3 ./exec/enc/windowshostbridgecheck.py --part native
 job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
 job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located

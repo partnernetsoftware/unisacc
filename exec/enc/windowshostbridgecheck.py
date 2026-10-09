@@ -92,26 +92,35 @@ def command(args):
  assert p.returncode==0,(args,p.returncode,p.stdout,p.stderr)
  return p.stdout
 
-def main():
+def main(part='all'):
+ if part=='native':
+  sys.path.insert(0,str(ROOT/'tests'))
+  from hostcheck import require_host
+  rc=require_host('darwin-x86_64','win/x86_64')
+  if rc:return rc
  llvm=os.environ.get('LLVM_BIN')
  clang=str(pathlib.Path(llvm)/'clang') if llvm else shutil.which('clang')
  objcopy=str(pathlib.Path(llvm)/'llvm-objcopy') if llvm else shutil.which('llvm-objcopy')
- if not clang or not objcopy:sys.exit('Win64 declaration check requires clang and llvm-objcopy')
+ if not clang or (part!='native' and not objcopy):sys.exit('Win64 declaration check requires clang and llvm-objcopy')
  with tempfile.TemporaryDirectory(prefix='r10-winhost-template-') as name:
-  d=pathlib.Path(name);src=d/'bridge.s';src.write_text(ASM)
-  command([clang,'-target','x86_64-pc-windows-msvc','-c',src,'-o',d/'bridge.obj'])
-  command([objcopy,'--dump-section=.text='+str(d/'bridge.bin'),d/'bridge.obj',d/'bridge-copy.obj'])
-  assert (d/'bridge.bin').read_bytes()==WIN_X86_BODY,'declaration differs from independent assembly'
-  arm=d/'arm-bridge.s';arm.write_text(ARM_ASM)
-  command([clang,'-target','aarch64-pc-windows-msvc','-c',arm,'-o',d/'arm-bridge.obj'])
-  command([objcopy,'--dump-section=.text='+str(d/'arm-bridge.bin'),d/'arm-bridge.obj',d/'arm-bridge-copy.obj'])
-  arm_bytes=(d/'arm-bridge.bin').read_bytes()
-  assert len(arm_bytes)==4*len(WIN_ARM_BODY)
-  assert tuple(int.from_bytes(arm_bytes[i:i+4],'little') for i in range(0,len(arm_bytes),4))==WIN_ARM_BODY,'ARM declaration differs from independent assembly'
-  assert WIN_ARM_BODY!=(), 'ARM Win64 ten-argument body missing'
-  # Every ARM declaration word has a register Rt/Rd in bits0..4; no x18
-  # appears there or as memory base Rn. No PC-relative instruction uses x18.
-  assert all((w&31)!=18 and ((w>>5)&31)!=18 for w in WIN_ARM_BODY), 'ARM platform register clobber'
+  d=pathlib.Path(name)
+  if part!='native':
+   src=d/'bridge.s';src.write_text(ASM)
+   command([clang,'-target','x86_64-pc-windows-msvc','-c',src,'-o',d/'bridge.obj'])
+   command([objcopy,'--dump-section=.text='+str(d/'bridge.bin'),d/'bridge.obj',d/'bridge-copy.obj'])
+   assert (d/'bridge.bin').read_bytes()==WIN_X86_BODY,'declaration differs from independent assembly'
+   arm=d/'arm-bridge.s';arm.write_text(ARM_ASM)
+   command([clang,'-target','aarch64-pc-windows-msvc','-c',arm,'-o',d/'arm-bridge.obj'])
+   command([objcopy,'--dump-section=.text='+str(d/'arm-bridge.bin'),d/'arm-bridge.obj',d/'arm-bridge-copy.obj'])
+   arm_bytes=(d/'arm-bridge.bin').read_bytes()
+   assert len(arm_bytes)==4*len(WIN_ARM_BODY)
+   assert tuple(int.from_bytes(arm_bytes[i:i+4],'little') for i in range(0,len(arm_bytes),4))==WIN_ARM_BODY,'ARM declaration differs from independent assembly'
+   assert WIN_ARM_BODY!=(), 'ARM Win64 ten-argument body missing'
+   # Every ARM declaration word has a register Rt/Rd in bits0..4; no x18
+   # appears there or as memory base Rn. No PC-relative instruction uses x18.
+   assert all((w&31)!=18 and ((w>>5)&31)!=18 for w in WIN_ARM_BODY), 'ARM platform register clobber'
+   print('COFF byte declaration verified: x86_64 and arm64')
+   if part=='cross':return 0
   if sys.platform=='darwin':
    sys.path.insert(0,str(ROOT/'tests'))
    from hostcheck import require_host
@@ -141,7 +150,10 @@ int main(void){uint64_t v[8]={0,1,UINT32_MAX,UINT64_C(0x100000000),INT64_MAX,UIN
    assert control.returncode==1, ('missing rcx restore not detected',control.returncode)
    print('missing rcx restore mutant rejected: ok')
   else:
-   print('COFF byte declaration verified: x86_64 and arm64')
    print('UNVERIFIED: required=Darwin/native-msabi observed='+platform.system()+'/'+platform.machine()+' missing=native-msabi-probe target=win/x86_64,win/arm64')
    return 77
-if __name__=='__main__':sys.exit(main())
+if __name__=='__main__':
+ import argparse
+ parser=argparse.ArgumentParser(description=__doc__)
+ parser.add_argument('--part',choices=('all','cross','native'),default='all')
+ sys.exit(main(parser.parse_args().part))

@@ -1283,3 +1283,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 可度量收口读数，2026-10-10；实际跑过〕② 指纹减负 6adefadd（645/555 两计划全部 stamp 与旧码逐项相同，2.8→1.55 s/次）；① 暖身拆出 release/tools/warmup.sh + tests/warmupcheck.sh（门禁 warmup），测试发现并修 STAGELOG_RUN 未设触发 set -u（3ee644a9）；③ 首份分段墙钟基线与 ④ H2 真实复验见 research/c38-pipeline-baseline.md：受控 7 窗每窗前后置约 4 s（原约 6.4 s），新工作树暖身 3 两次失败已具名 COLD；H2 43 PASS/6 UNVERIFIED/5 FAILED/2 INTERRUPTED，宿主不适用不吞真实失败。流程违规一次：cc 在 cdx 运行中改 tests/gate.sh 致一次 wrapper 失败，已保留记录并授权单次新 attempt。下一刀：暖身 3 冷跑超限（H1）、lib-windows-gp 子义务分声明、5 个宿主真实红按 H2 修。
 
 〔0.0.38 可度量收口：修后复测，2026-10-10；实际跑过〕暖身 3 改为只建宿主模型缓存，用 models.py 真实 key 与 valid() 判定（edc69bdc/2e51ee2b/6cde5ce2，modelkey.py 只读调用，不动 exec/），失败/UNKNOWN 不写成功标记；queue.sh 补 setup、gatequeue 互斥等待与负载暂停的等待对、EXIT 早退收尾（cadab671）。同候选同口径 7 窗：完成 14→58/62 套件，暖身 2 窗连败→1 窗建成。详表 research/c38-pipeline-baseline.md。
+
+〔0.0.38 P7 Windows GP 子义务拆分认领，2026-10-10；cc授权〕保留 lib-windows-gp 名称专管双 ISA cross-COFF 字节核验，新增 lib-windows-gp-native 专管 Darwin x86_64/Rosetta 的 native MS-ABI 桥执行；host-plan/hostcheck 独立声明。交叉核验不因 native 宿主不可用而退77，字节不符必须 FAILED；本机 native 子项明确 UNVERIFIED，不记整组通过。单项 bound55 串行复测，不动其余 H2 红项。
+
+〔0.0.38 P7 Windows GP 子义务复核；实际跑过〕本机 gate 双子项：cross rc0（双 ISA 字节相同），native rc77（Darwin x86_64 执行宿主不满足），整体 rc4、不放行；hostcheck 分别 READY/UNVERIFIED，native 依赖显式声明 clang -arch x86_64。负例分别破坏 x86_64/arm64 导出字节，gate cross rc1、native rc77、整体 rc1，77 不吞已执行的失败；hostcheck 自检12项通过。native 真执行仍未在本机验证。

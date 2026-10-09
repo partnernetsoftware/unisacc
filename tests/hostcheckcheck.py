@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Host readiness negative cases; no candidate construction or suite-result reuse."""
-import contextlib, importlib.util, io, json, os, pathlib, tempfile, unittest, subprocess, sys
+import contextlib, importlib.util, io, json, os, pathlib, tempfile, unittest, subprocess, sys, shutil
 from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('hostcheck',pathlib.Path(__file__).with_name('hostcheck.py'))
 h=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(h)
@@ -21,6 +21,9 @@ class HostChecks(unittest.TestCase):
             declared=h.declarations(com)
             self.assertGreater(len(declared),500)
             self.assertEqual(declared['lib-windows-gp']['required'],'any')
+            self.assertEqual(declared['lib-windows-gp-native']['required'],'darwin-x86_64')
+            self.assertEqual(declared['lib-windows-gp-native']['probe'],'native-msabi-bridge')
+            self.assertEqual(declared['lib-windows-gp-native']['dependencies'],'clang-arch-x86_64')
             self.assertEqual(declared['lib-windows-imports']['required'],'native-posix')
             self.assertEqual(declared['exec-native-chain']['target'],'host')
             self.assertEqual(declared['csmithdiff-40']['dependencies'],'csmith')
@@ -62,6 +65,7 @@ class HostChecks(unittest.TestCase):
             [sys.executable,'exec/c/librarystackcheck.py','missing.com','arm64'],
             [sys.executable,'exec/c/librarystackcheck.py','missing.com','x86_64'],
             [sys.executable,'tests/r10stackx86check.py'],
+            [sys.executable,'exec/enc/windowshostbridgecheck.py','--part','native'],
             ['env','SELF_PART=bootstrap','TARGET=osx/arm64','UA=/nonexistent','sh','exec/pipeline/selfcheck.sh'],
             ['env','SELF_PART=bootstrap','TARGET=osx/x86_64','UA=/nonexistent','sh','exec/pipeline/selfcheck.sh']]
         for args in commands:
@@ -74,6 +78,29 @@ class HostChecks(unittest.TestCase):
             r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'10','env','PATH='+td+':'+os.environ['PATH'],'UA=/nonexistent','sh','exec/c/nativecheck.sh'],cwd=h.ROOT,capture_output=True,text=True)
             self.assertEqual(r.returncode,77,(r.stdout,r.stderr))
             self.assertIn('observed=unsupported/unsupported',r.stdout)
+    @unittest.skipUnless(h.host().startswith('Linux/'), 'Linux separates native host from cross-COFF')
+    def test_coff_failure_is_not_hidden_by_native_unverified(self):
+        clang=shutil.which('clang');objcopy=shutil.which('llvm-objcopy')
+        if not clang or not objcopy:self.skipTest('cross-COFF tools unavailable')
+        for broken in ('bridge.bin','arm-bridge.bin'):
+            with self.subTest(broken=broken),tempfile.TemporaryDirectory() as td:
+                d=pathlib.Path(td);(d/'clang').symlink_to(clang)
+                wrapper=d/'llvm-objcopy'
+                wrapper.write_text('#!'+sys.executable+'\nimport sys,subprocess,pathlib\n'
+                    +'r=subprocess.run(['+repr(objcopy)+',*sys.argv[1:]])\n'
+                    +'if r.returncode:sys.exit(r.returncode)\n'
+                    +'for a in sys.argv[1:]:\n'
+                    +' if a.startswith("--dump-section=.text="):\n'
+                    +'  p=pathlib.Path(a.split("=",2)[2])\n'
+                    +'  if p.name=='+repr(broken)+':p.write_bytes(b"bad")\n')
+                wrapper.chmod(0o755)
+                env=dict(os.environ,LLVM_BIN=td,UA=shutil.which('true'),JOBS='1',TERM_SH_INSIDE='1',GATE_BOUND='1')
+                r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'15','sh','tests/gate.sh',
+                    '--suite','lib-windows-gp','--suite','lib-windows-gp-native'],cwd=h.ROOT,env=env,capture_output=True,text=True)
+                self.assertEqual(r.returncode,1,(r.stdout,r.stderr))
+                self.assertRegex(r.stdout,r'(?m)^lib-windows-gp\s+rc=1\s')
+                self.assertRegex(r.stdout,r'(?m)^lib-windows-gp-native\s+rc=77\s')
+
     def test_stat_does_not_hide_permission_or_enotdir(self):
         with patch.object(pathlib.Path,'stat',side_effect=PermissionError):
             with self.assertRaises(PermissionError):h.regular('x')
