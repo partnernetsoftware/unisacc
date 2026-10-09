@@ -13,6 +13,9 @@ if [ ! -d "$snap/.git" ]; then
     for f in unisacc.com unisacc.com.build.json unisacc-seed.com unisacc-seed.com.build.json; do
         [ -f "$R/$f" ] && cp -p "$R/$f" "$snap.part/"
     done
+    # the corpus is gitignored, so a clone has none: link it per entry as release/tools/queue.sh does
+    # (without it diag saw 0 damaged-corpus programs and warn read nothing from cc)
+    for c in "$R"/corpus/*; do [ -e "$c" ] && { mkdir -p "$snap.part/corpus"; ln -s "$c" "$snap.part/corpus/${c##*/}"; }; done
     mv "$snap.part" "$snap"
 fi
 cd "$snap" || exit 2
@@ -24,7 +27,7 @@ state=$snap/.stagestate-$(echo "$sel" | cksum | cut -d' ' -f1)
 log=$state.log; : > "$log"; n=0
 while :; do
     # one bounded Terminal hand-off per window (tests/term.sh: XProtect-exempt, 60 s ceiling)
-    ./tests/term.sh env UA="$UA" MODEL_COM="$com" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" \
+    ./tests/term.sh env REALPROG_CACHE="$R/corpus" UA="$UA" MODEL_COM="$com" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" \
         python3 tests/gatequeue.py --state "$state" --com --jobs "${JOBS:-4}" $sel > "$log.w" 2>&1; rc=$?
     cat "$log.w" >> "$log"; grep -E '^(queue:|DONE .* rc=[1-9]|inputs changed)' "$log.w"
     n=$((n+1)); [ $rc = 75 ] || [ $rc = 142 ] || break
