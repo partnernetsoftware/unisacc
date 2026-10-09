@@ -86,34 +86,8 @@ fi
 dirty=$(cd "$R" && git status --porcelain -- $DECLARED 2>/dev/null | head -3)
 [ -z "$dirty" ] || { printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty" >&2; exit 1; }
 [ -z "${cid:-}" ] || sl end --id "$cid" --execution-status release-checks
-warm_done=0
-# 0.0.22: the caches live in the checkout, so the markers are per checkout -- a state continued
-# in a new worktree warms again (0.0.21: bindprep/warningdriver timed out cold at 53 s)
-wk=$(printf '%s' "$R" | cksum | cut -d' ' -f1)
-# 0.0.38: a marker means the cache was built.  A step that does not apply to this host is marked
-# .na and costs no window; a failed step writes no marker -- it is counted, and after two failures
-# the queue goes on COLD (named, .cold), never as if the cache existed.
-for w in 1 2 3; do
-    m="$GATE_STATE/warm.$w.$wk"
-    [ -f "$m" ] || [ -f "$m.na" ] || [ -f "$m.cold" ] && { warm_done=$w; continue; }
-    case $w in 1|2) [ "$(uname -s)" = Darwin ] || { : > "$m.na"; echo "warm-up $w/3 not applicable on $(uname -s)"; continue; };; esac
-    sid=$(sl begin --run "$STAGELOG_RUN" --phase queue --subphase "warmup-$w" ${STAGELOG_PARENT:+--parent-id "$STAGELOG_PARENT"})
-    wrc=0
-    case $w in
-        1) python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1 || wrc=$?;;
-        2) python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1 || wrc=$?;;
-        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1 || wrc=$?;;
-    esac
-    [ -z "$sid" ] || sl end --id "$sid" --rc "$wrc" --execution-status "warmup"
-    if [ "$wrc" = 0 ]; then
-        : > "$m"; echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
-    else
-        n=$(( $(cat "$m.fail" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$m.fail"
-        if [ "$n" -ge 2 ]; then : > "$m.cold"; echo "warm-up $w/3 FAILED twice (rc=$wrc): continuing COLD -- its suites may time out"
-        else echo "warm-up $w/3 failed (rc=$wrc, attempt $n): no cache marker; retried next window"; fi
-    fi
-    exit 75
-done
+# 0.0.22/0.0.38: cache warm-ups, one step per window, markers only for a built cache (release/tools/warmup.sh)
+"$R/release/tools/warmup.sh" "$GATE_STATE" "$R" || exit $?
 deadline=(); [ -n "${RELEASE_DEADLINE:-}" ] && deadline=(--parent-deadline "$RELEASE_DEADLINE")
 # 0.0.38 P6: the stage log names reach the scheduler as arguments, never the suites' environment
 [ -n "${STAGELOG_RUN:-}" ] && [ "$STAGELOG_RUN" != 0 ] && deadline+=(--stagelog-run "$STAGELOG_RUN" --stagelog-parent "${STAGELOG_PARENT:-}")
