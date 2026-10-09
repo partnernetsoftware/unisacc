@@ -1300,3 +1300,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b′ 裁库闭包核查，2026-10-09；实际跑过〕libneed.table从头内标识符自动提依赖，不需手写sigaction边。隔离应用14c85649停放补丁后，完整table先报carried body defined twice: alarm（unistd新增POSIX/Windows两个同名static体，解析器不按条件编译去重）。仅在临时副本删去Windows重复体以检查依赖后，sigaction闭包含__ccw_unisa_sigtramp、_unisa_sigkernel、_unisa_sigaltstack、_unisa_sigrestorer与_unisa_ret，守卫名匹配。停放补丁需把alarm平台分支放同一函数体，正式头落地后导出pp facts/E2，不添加手写边或放松重复检查。
 
 〔L1′/L2 数组拒绝最小化，2026-10-09；出货产品实跑〕宏N=32的static unsigned long mask[N]独立-run退出0；仅前置extern const char version[]，同一完整数组在[32]后被拒incomplete array declaration before another definition，退出1。因此存在可复现的未完成extern声明历史影响，不能把完整数组报错直接归因宏长度识别；sqlite现场是否同根尚未验。两例入research/l1prime-array-history，排L1b后，当前输入窗口未动。
+
+〔C2 g5 单元边界，2026-10-09；源码核查，补丁待验〕research/g5-typedef-leak记录a.c的文件域typedef code泄漏到b.c参数同名，交换单元顺序不报错。fe_units每单元重载token而未重置ntd；typedef名字可见性应按翻译单元隔离，不能靠增大MAXTD结算。L1′参考窗口并入此项，由cc准备补丁及顺序互换/不同同名typedef/前单元签名保留的对拍；δ另核对TDN/TDB/TDD/TDE等名字绑定的单元复位。结构描述与跨单元函数签名必须保留，行映射偏移另列，不混作typedef修复验收。排在L1b首片后，尚未修改生产输入。
