@@ -101,6 +101,21 @@ with tempfile.TemporaryDirectory() as td:
         if rc!=75: break
     st=json.loads((t/'span/results.json').read_text())
     assert st['results'].get('toolong',{}).get('rc')==142 and not st.get('deferred'), (seen, st)
+    # combined boundary (cdx2): parent deadline x exclusive x an inflated history estimate x a pending
+    # late-fill marker.  Every path must end in a decided result within a bounded number of windows,
+    # no job limit may exceed the parent's span, and no window may sit idle with work pending.
+    jobs={'hog':[sys.executable,'-c','import time; time.sleep(60)'], 'quick':[sys.executable,'-c','pass']}
+    d=t/'combo'; d.mkdir()
+    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':['hog'],'results':{},
+                                               'fullwindow':['hog'],'deferred':[{'name':'hog','limit':5}]}))
+    with patch.dict(os.environ,{'TMPDIR':str(d)}):   # private history: the estimate starts cold
+        for _ in range(6):
+            dl=_t.monotonic()+11
+            rc=run('combo',55,('--exclusive-suite','hog','--parent-deadline',str(dl)))
+            st=json.loads((d/'results.json').read_text())
+            if rc!=75: break
+    assert rc==1 and st['results']['hog']['rc']==142 and st['results']['quick']['rc']==0, (rc, st)
+    assert all(r['limit']<=9 for r in st['results'].values()), 'a limit exceeded the parent span: %r'%st['results']
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
     # Exclusive jobs must precede and never overlap ordinary two-slot work.
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in
