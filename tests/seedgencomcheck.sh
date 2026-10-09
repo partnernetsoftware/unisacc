@@ -3,6 +3,7 @@
 # byte-identical to the cc build within 10 CPU seconds.      usage: MODEL_COM=PATH tests/seedgencomcheck.sh
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+python3 "$R/tests/seedmemory.py" com "$@" || exit $?
 B=$R/tests/bound; COM=${MODEL_COM:-$R/unisacc.com}
 T=${TMPDIR:-/tmp}/unisacc-seedgencom.$$; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
 "$B" 55 sh "$COM" -O2 -Iseed seed/gen.c -o "$T/gcom" || { echo "seedgencom: .com does not build gen.c"; exit 1; }

@@ -65,7 +65,7 @@ def tool_identity(executable, version):
     return {'sha256':digest(pathlib.Path(executable).resolve()), 'version_sha256':hashlib.sha256(version).hexdigest()}
 
 class Checks:
-    def __init__(self, seconds=50): self.deadline=time.monotonic()+seconds; self.cache={}; self.identities={}
+    def __init__(self, seconds=50): self.deadline=time.monotonic()+seconds; self.cache={}; self.identities={}; self.memory={}
     def run(self, args, **kwargs):
         left=int(self.deadline-time.monotonic())
         if left < 1: raise TimeoutError('host precheck budget exhausted')
@@ -91,6 +91,12 @@ class Checks:
         return exe
     def _probe(self, kind):
         if kind == 'UNKNOWN': return 'UNKNOWN'
+        if kind.startswith('seed-memory:'):
+            import seedmemory
+            family,names=seedmemory.SUITES[kind.split(':',1)[1]]
+            rc,need,observed,basis=seedmemory.assess(family,names)
+            self.memory[kind]={'required_bytes':need,'available_bytes':observed,'basis':basis}
+            return {0:'READY',77:'UNVERIFIED',2:'UNKNOWN'}[rc]
         if kind == 'corpus':
             # Presence only; never a proof of corpus contents or test result freshness.
             return 'READY' if regular(ROOT/'corpus/c-testsuite/README.md') else 'MISSING'
@@ -159,8 +165,10 @@ def main():
             if not matches(d['required']): status='UNVERIFIED'
             elif not a.inventory:
                 statuses=[checks.probe(k) for k in d['dependencies'].split(',')]
-                status=next((k for k in ('FAILED_PROBE','MISSING','UNKNOWN') if k in statuses),'READY')
+                status=next((k for k in ('FAILED_PROBE','MISSING','UNKNOWN','UNVERIFIED') if k in statuses),'READY')
         rows.append(dict(suite=name,**d,status=status))
+        if d['dependencies'].startswith('seed-memory:'):
+            rows[-1]['memory']=checks.memory.get(d['dependencies'],{'basis':'not probed'})
     inputs={'host':host(),'declarations':decl,'tools':checks.identities,
             'environment_sha256':{k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in ('CC','PATH','CSMITH_INCLUDE','LLVM_BIN','UA','MODEL_COM','SEED_DIR')}}
     # This binds readiness inputs, never stands in for gatequeue's full suite fingerprint.

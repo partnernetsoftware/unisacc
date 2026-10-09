@@ -82,7 +82,8 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
-          hostcheck|stagelog|exittable) req='any|host|python3|cdx|selfcheck';;
+          hostcheck|stagelog|exittable|seedmemory) req='any|host|python3|cdx|selfcheck';;
+          seedparse2-1|seedparse2-2|seedgen|seedgen-2|seedgen-3|seedgen-4|com-seedgen) req="native-posix|host|seed-memory:$name|cdx|fresh-memory-admission";;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
           lib-stack-x86|lib-stack-x86-hostabi) req='darwin-x86_64|osx/x86_64|cc-arch-x86_64|cdx|native-stack-bridge';;
@@ -147,6 +148,7 @@ job dsl-ops python3 ./tests/dslops.py   # T2: one independent contract and mutat
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
 job hostcheck python3 ./tests/hostcheckcheck.py
+job seedmemory python3 ./tests/seedmemorycheck.py
 job stagelog python3 ./tests/stagelogcheck.py
 job exittable python3 ./tests/exittablecheck.py
 job warmup ./tests/warmupcheck.sh   # 0.0.38: warm-up markers only for a built cache; COLD named

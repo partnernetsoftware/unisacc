@@ -5,6 +5,7 @@
 # On a difference it names the first states only one side has.   usage: tests/seedparse2check.sh [FLAGSET...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+python3 "$R/tests/seedmemory.py" parse2 "$@" || exit $?
 B=$R/tests/bound
 T=${TMPDIR:-/tmp}/unisacc-seedparse2; mkdir -p "$T"
 key=$(cat exec/assemble.py exec/build/*.py exec/parse2/* exec/facts/*.tsv 2>/dev/null | shasum | cut -c1-16)

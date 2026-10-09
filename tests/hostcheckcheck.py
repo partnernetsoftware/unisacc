@@ -27,6 +27,8 @@ class HostChecks(unittest.TestCase):
             self.assertEqual(declared['lib-windows-imports']['required'],'native-posix')
             self.assertEqual(declared['exec-native-chain']['target'],'host')
             self.assertEqual(declared['csmithdiff-40']['dependencies'],'csmith')
+            for name in ('seedparse2-1','seedparse2-2','seedgen','seedgen-2','seedgen-3','seedgen-4','com-seedgen'):
+                self.assertEqual(declared[name]['dependencies'],'seed-memory:'+name)
             self.assertTrue(any(d['required']=='UNKNOWN' for d in declared.values()))
         self.assertIn('com-csmithdiff-40',h.declarations(True))
     def test_inventory_cannot_return_success_without_probes(self):
