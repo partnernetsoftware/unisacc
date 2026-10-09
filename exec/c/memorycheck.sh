@@ -24,11 +24,29 @@ if [ "$OS" != osx ] && [ "$ARCH" != "$HOST_ARCH" ]; then
 fi
 hostcc() { if [ "$OS" = osx ]; then b cc -arch "$ARCH" "$@"; else b cc "$@"; fi; }
 TARGET=$OS/$ARCH; export TARGET
+# The package prep does not depend on DRIVER_KIND or MEMORY_SHARD: 18 gate jobs built it 18 times and
+# one hit the 60 s window under load.  On a clean tree it is cached by the tracked inputs' blob ids.
+prep() {
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 b python3 exec/build/gen.py opt "$T/o1.json"
 b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
+}
+KEY=
+if git rev-parse -q --verify HEAD >/dev/null 2>&1 && [ -z "$(git status --porcelain --untracked-files=no -- exec unisa include src kernel weights tests examples 2>/dev/null)" ]; then
+    KEY=$( (echo "$TARGET"; git ls-files -s -- exec unisa include src kernel weights tests examples) | shasum -a 256 | cut -c1-16)
+fi
+C=${TMPDIR:-/tmp}/unisacc-memprep-$KEY
+if [ -n "$KEY" ] && [ -f "$C/ok" ]; then
+    cp -R "$C/." "$T/"; rm -f "$T/ok"
+else
+    prep
+    if [ -n "$KEY" ] && mkdir "$C.lock" 2>/dev/null; then
+        rm -rf "$C.tmp.$$"; cp -R "$T" "$C.tmp.$$" && rm -f "$C.tmp.$$/unisacc-flat.c" && touch "$C.tmp.$$/ok" \
+            && { [ -d "$C" ] || mv "$C.tmp.$$" "$C"; }; rm -rf "$C.tmp.$$" "$C.lock"
+    fi
+fi
 if [ "$KIND" = all ] || [ "$KIND" = cc ]; then hostcc -O2 exec/c/compiler.c -o "$T/driver-cc"; fi
 if [ "$KIND" = all ] || [ "$KIND" = ua ]; then b "$UA" -b "$TARGET" -O2 exec/c/compiler.c -o "$T/driver-ua"; fi
 if [ "$KIND" = all ] || [ "$KIND" = asm ]; then b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.sh -O2 exec/c/compiler.c -o "$T/driver-asm"; fi
