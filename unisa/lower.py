@@ -226,7 +226,7 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
         return tuple(R(x) if kind == "r" else x
                      for x, kind in zip(args, TAPE_SHAPE[op]))
 
-    def syscall_seq(op, arg_srcs):
+    def syscall_seq(op, arg_srcs, private=False):
         f = facts(oracle, op, os_, arch, drive)
         if win and (C.WINAPI.get(op) is None or f["winimp"] == "none"):
             raise ValueError("%s: no Windows import for this op" % op)
@@ -243,7 +243,11 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
             # enter the kernel with whatever the number register held
             raise ValueError("%s: no system call for this on %s" % (op, os_))
         if op == "syscall":
-            tp.emit("setreg", f["nrreg"], ("mem", SYSCELL[0]), role="sysno")
+            if private:
+                tp.emit("load64", f["nrreg"], sp, 0,
+                        form=facts(oracle, "load64", os_, arch, drive)["form"])
+            else:
+                tp.emit("setreg", f["nrreg"], ("mem", SYSCELL[0]), role="sysno")
         elif sysno != "none":
             n = int(sysno, 0)
             if fault == "osx_class_bit" and os_ == "osx":
@@ -262,7 +266,11 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
                 raise NotImplementedError(
                     "%s/%s passes syscall argument %d on the stack, which "
                     "this gate does not do (%s)" % (os_, arch, i, op))
-            tp.emit("setreg", args[i], src, role="arg%d" % i)
+            if private:
+                tp.emit("load64", args[i], sp, src[1],
+                        form=facts(oracle, "load64", os_, arch, drive)["form"])
+            else:
+                tp.emit("setreg", args[i], src, role="arg%d" % i)
         # Darwin reports a failed syscall in the CARRY flag and returns the
         # errno POSITIVE; Linux returns -errno.  Without this the caller sees
         # ENOENT (2) as a valid file descriptor -- which is exactly what a
@@ -354,16 +362,34 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
             tp.emit("setmem", SCR0, R(a[0]))
             syscall_seq("exit", [("mem", SCR0), ("imm", 0), ("imm", 0)])
         elif o == ".sys6":
-            # six arguments: spill them all, then fill the argument registers
-            for i in range(6):
-                tp.emit("setmem", SYSCELL[i], R(a[i + 1]))
-            tp.emit("setmem", FPCELL, rmap["r6"])
-            tp.emit("setmem", SPCELL, rmap["r7"])
-            syscall_seq(a[0], [("mem", c) for c in (SYSCELL[1:] if a[0] == "syscall" else SYSCELL)])
-            tp.emit("mov", rmap["r0"],
-                    facts(oracle, a[0], os_, arch, drive)["ret"])
-            tp.emit("setreg", rmap["r6"], ("mem", FPCELL), role="fp")
-            tp.emit("setreg", rmap["r7"], ("mem", SPCELL), role="sp")
+            if not win:
+                scratch = "x12" if arch == "arm64" else "r11"
+                assert scratch not in set(rmap.values())
+                def physical(op, *args):
+                    tp.emit(op, *args, form=oracle.ask("enc", ("load64", os_, arch)))
+                physical("mov", scratch, sp)
+                physical(".frame", 80)
+                for i in range(6):
+                    src = R(a[i + 1])
+                    physical("store64", sp, 8 * i, scratch if src == sp else src)
+                physical("store64", sp, 48, rmap["r6"])
+                physical("store64", sp, 56, scratch)
+                syscall_seq(a[0], [("stack", 8 * i) for i in
+                                  (range(1, 6) if a[0] == "syscall" else range(6))], private=True)
+                physical("mov", rmap["r0"], facts(oracle, a[0], os_, arch, drive)["ret"])
+                physical("load64", rmap["r6"], sp, 48)
+                physical(".frame", -80)
+            else:
+                # six arguments: spill them all, then fill the argument registers
+                for i in range(6):
+                    tp.emit("setmem", SYSCELL[i], R(a[i + 1]))
+                tp.emit("setmem", FPCELL, rmap["r6"])
+                tp.emit("setmem", SPCELL, rmap["r7"])
+                syscall_seq(a[0], [("mem", c) for c in (SYSCELL[1:] if a[0] == "syscall" else SYSCELL)])
+                tp.emit("mov", rmap["r0"],
+                        facts(oracle, a[0], os_, arch, drive)["ret"])
+                tp.emit("setreg", rmap["r6"], ("mem", FPCELL), role="fp")
+                tp.emit("setreg", rmap["r7"], ("mem", SPCELL), role="sp")
         elif o == ".argc":
             tp.emit("setreg", R(a[0]), ("mem", ARGC), role="argc")
         elif o == ".argv":

@@ -685,6 +685,8 @@ def lowerabi():
                                 break
                             raise ValueError("unsupported stack syscall argument")
                         a = dict(idx=i, kind=k, value=v, reg=f[1 + i])
+                        if mode == 1 and os_ != "win":
+                            a["stackoffset"] = v - L.SYSA
                         if k == "imm":
                             pend.append(a)
                         else:
@@ -697,7 +699,9 @@ def lowerabi():
                         "true" if os_ == "osx" else "false", "none" if WINAPI.get(o) is None else WINAPI[o],
                         val(f[0]), val(f[11]), val(f[12]), json.dumps(mems),
                         json.dumps(prev), json.dumps(pend)]))
-    return out + rows + sel + om + ["=none\tjson\t[]", "=zero\tint\t0", "=eight\tint\t8"]
+    private_modes = [om[0].replace("@opmodes", "@private_modes", 1)] + [
+        row for row in om[1:] if row.split("\t")[3] == "1" and not row.split("\t")[1].startswith("win/")]
+    return out + rows + sel + om + private_modes + ["=none\tjson\t[]", "=zero\tint\t0", "=eight\tint\t8"]
 
 
 def optgen():

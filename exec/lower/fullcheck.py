@@ -45,6 +45,13 @@ def main():
             fixture += '  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n'
         if target.startswith(('lnx/', 'osx/')):
             fixture += '  .sys6 syscall, r0, r1, r2, r3, r4, r5\n'
+            # Snapshot precedes ABI writes; r7 means the pre-allocation stack.
+            fixture += ''.join('  .sys6 '+op+', '+', '.join(regs)+'\n' for op, regs in (
+                ('syscall', ('r3','r5','r0','r1','r4','r2')),
+                ('syscall', ('r0','r1','r7','r2','r3','r4')),
+                ('syscall', ('r5','r4','r3','r2','r1','r0')),
+                ('mmap', ('r2','r4','r0','r1','r3','r5')),
+                ('mmap', ('r7','r6','r5','r4','r3','r2'))))
         unavailable=[]
         if target.startswith('win/'):
             from unisa.catalog import WINAPI, winimp

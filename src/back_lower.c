@@ -874,6 +874,39 @@ int bk_genfacts(int op) {             /* the facts the generic path asks for op 
     return 0;
 }
 
+/* POSIX sys6 owns its argument and frame snapshots; Windows keeps its ABI route. */
+int bk_sys6_private(int cop, char *nm, int pc) {
+    int k; int scratch; int generic; int g; int src;
+    scratch = bkarch == 1 ? 12 : 11;
+    generic = strsame(nm, "syscall");
+    tk(bk_opof("mov", 3), scratch, bk_rmap[7], 0, 0);
+    tk(bk_opof(".frame", 6), 80, 0, 0, 0);
+    k = 0;
+    while (k < 6) {
+        src = bk_rmap[bkav[pc*8+1+k]];
+        if (src == bk_rmap[7]) src = scratch;
+        tk(bk_opof("store64", 7), bk_rmap[7], k*8, src, 0);
+        k = k+1;
+    }
+    tk(bk_opof("store64", 7), bk_rmap[7], 48, bk_rmap[6], 0);
+    tk(bk_opof("store64", 7), bk_rmap[7], 56, scratch, 0);
+    bk_facts(cop);
+    if (generic) tk(bk_opof("load64", 6), bkf_nr, bk_rmap[7], 0, 0);
+    else { bk_needno(); if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno); }
+    k = 0;
+    while (k < (generic ? 5 : 6)) {
+        if (bkf_arg[k] < 0) break;
+        tk(bk_opof("load64", 6), bkf_arg[k], bk_rmap[7], 8*(k+generic), 0);
+        k = k+1;
+    }
+    g = tk(TO_GATE, 0, 0, 0, 0);
+    tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
+    tkg_rc[g] = bkf_retconv; tkg_wi[g] = bkf_winimp;
+    tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
+    tk(bk_opof("load64", 6), bk_rmap[6], bk_rmap[7], 48, 0);
+    tk(bk_opof(".frame", 6), 0-80, 0, 0, 0);
+    return 0;
+}
 int bk_lower(void) {
     long base; int pc; int op; int k; int cw;
     int j; int ccw;
@@ -1027,14 +1060,16 @@ int bk_lower(void) {
             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
         } else { if (bk_is(op, ".sys6")) {
             char nm[32]; int id; int L;
+            id = bkav[pc * 8]; L = bkname_len[id]; if (L > 31) L = 31;
+            k = 0; while (k < L) { nm[k] = bkpool[bkname_at[id] + k]; k = k + 1; } nm[L] = 0;
+            cw = bk_cop(nm);
+            if (bkos != 2) { bk_sys6_private(cw, nm, pc); }
+            else {
             k = 0;
             while (k < 6) {
                 tk(TO_SETMEM, bk_sysa + 8 * k, bk_rmap[bkav[pc * 8 + 1 + k]], 0, 0);
                 k = k + 1;
             }
-            id = bkav[pc * 8]; L = bkname_len[id]; if (L > 31) L = 31;
-            k = 0; while (k < L) { nm[k] = bkpool[bkname_at[id] + k]; k = k + 1; } nm[L] = 0;
-            cw = bk_cop(nm);
             /* on x86-64 two of the six argument registers ARE the tape's
                frame and stack pointers: save them across the call [S-9] */
             tk(TO_SETMEM, bk_sysfp, bk_rmap[6], 0, 0);
@@ -1045,6 +1080,7 @@ int bk_lower(void) {
             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
             tk_setreg(bk_rmap[6], SK_MEM, bk_sysfp);
             tk_setreg(bk_rmap[7], SK_MEM, bk_syssp);
+            }
         } else { if (bk_is(op, ".exit")) {
             tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
             bk_syscall(bk_cop("exit"), SK_MEM, bk_scr0, SK_IMM, 0, SK_IMM, 0, 0 - 1, 0);
