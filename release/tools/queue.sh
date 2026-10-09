@@ -66,7 +66,8 @@ LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" 
 # never stops the queue.  STAGELOG_RUN=0 turns it off.
 SL=${STAGELOG_RUN-q-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}; [ "$SL" = 0 ] && SL=
 qid=; [ -z "$SL" ] || qid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --source-commit "$(git rev-parse --short HEAD)" 2>/dev/null) || :
-for i in $(seq 1 300); do
+# QUEUE_WINDOWS caps the windows of this run (default 300) -- a short supervised check, not a pass
+for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
   for k in $(seq 1 90); do
     ps -eo pid,command | grep "[g]atequeue.py" > "$D/.gq" || break
     [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
