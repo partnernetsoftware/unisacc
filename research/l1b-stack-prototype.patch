@@ -1,23 +1,13 @@
 --- a/exported-reference.c
 +++ b/exported-reference.c
-@@ -35650,6 +35650,9 @@
- int bk_rmap[8];                     /* tape register -> machine register */
- 
- int bk_isccw(int j) {                /* a `__ccw_` label: cc interop inbound wrapper */
-+    /* Diagnostic prototype only: force host entry for this one signal trampoline. */
-+    { int q; char *sn; sn = "_unisa_sigtramp"; q = 0;
-+      if (bkname_len[j] == 15) { while (q < 15 && bkpool[bkname_at[j]+q] == sn[q]) q=q+1; if (q==15) return 1; } }
-     char *p; if (bkname_len[j] <= 6) return 0;
-     p = bkpool + bkname_at[j];
-     return p[0] == 95 && p[1] == 95 && p[2] == 99 && p[3] == 99 && p[4] == 119 && p[5] == 95;
-@@ -35678,6 +35681,39 @@
+@@ -35678,6 +35678,60 @@
  }
  
  /* lower.syscall_seq */
 +/* L1b private-frame diagnostic prototype; no repository implementation. */
 +int bk_protosys6(int cop, char *nm, int pc) {
 +    int k; int scratch; int generic; int g; int nr; int ar; int src;
-+    scratch = bkarch == 1 ? 16 : 11;
++    scratch = bkarch == 1 ? 12 : 11;
 +    generic = strsame(nm, "syscall");
 +    tk(bk_opof("mov", 3), scratch, bk_rmap[7], 0, 0);
 +    tk(bk_opof(".frame", 6), 80, 0, 0, 0);
@@ -47,10 +37,48 @@
 +    tk(bk_opof(".frame", 6), 0-80, 0, 0, 0);
 +    return 0;
 +}
++int bk_proto3(int cop, int r0, int r1, int r2, int writeop) {
++    int src[3]; int ix[6]; long iv[6]; int k; int g; int scratch; char *sh;
++    src[0]=r0; src[1]=r1; src[2]=r2; scratch=bkarch==1?12:11;
++    tk(bk_opof("mov",3),scratch,bk_rmap[7],0,0);
++    tk(bk_opof(".frame",6),80,0,0,0);
++    k=0;while(k<3){tk(bk_opof("store64",7),bk_rmap[7],k*8,src[k]==bk_rmap[7]?scratch:src[k],0);k++;}
++    tk(bk_opof("store64",7),bk_rmap[7],48,bk_rmap[6],0);
++    k=0;while(k<6){ix[k]=-1;iv[k]=0;k++;}
++    ix[0]=0;ix[1]=1;ix[2]=2;
++    bk_facts(cop);sh=bk_nth(BH_ABI_ARGSHAPE,bkf_argshape);
++    if(writeop){ix[0]=-1;iv[0]=1;ix[1]=0;ix[2]=1;}
++    else if(strsame(sh,"atfd_1")){ix[0]=-1;iv[0]=-100;ix[1]=0;ix[2]=1;ix[3]=2;}
++    else if(strsame(sh,"atfd_1_zero")){ix[0]=-1;iv[0]=-100;ix[1]=0;ix[2]=-1;}
++    else if(strsame(sh,"atfd_2_zero5")){ix[0]=-1;iv[0]=-100;ix[1]=0;ix[2]=-1;iv[2]=-100;ix[3]=1;}
++    bk_needno();tk_setreg(bkf_nr,SK_IMM,bkf_sysno);
++    k=0;while(k<6){if(bkf_arg[k]<0)break;if(ix[k]>=0)tk(bk_opof("load64",6),bkf_arg[k],bk_rmap[7],ix[k]*8,0);else tk_setreg(bkf_arg[k],SK_IMM,iv[k]);k++;}
++    g=tk(TO_GATE,0,0,0,0);tkg_form[g]=bkf_form;tkg_gate[g]=bkf_gate;tkg_cop[g]=cop;tkg_ret[g]=bkf_ret;tkg_rc[g]=bkf_retconv;tkg_wi[g]=bkf_winimp;
++    tk(bk_opof("mov",3),bk_rmap[0],bkf_ret<0?31:bkf_ret,0,0);
++    tk(bk_opof("load64",6),bk_rmap[6],bk_rmap[7],48,0);
++    tk(bk_opof(".frame",6),-80,0,0,0);return 0;
++}
  int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
      int g; int i;
      bk_facts(cop);
-@@ -35963,6 +35999,12 @@
+@@ -35926,6 +35980,7 @@
+             pc = pc + 1; continue;
+         }
+         if (bk_is(op, ".write")) {
++            if(bkos!=2){bk_proto3(bk_cop("write"),bk_rmap[bkav[pc*8]],bk_rmap[bkav[pc*8+1]],bk_rmap[0],1);pc++;continue;}
+             tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
+             tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 8 + 1]], 0, 0);
+             bk_syscall(bk_cop("write"), SK_IMM, 1, SK_MEM, bk_scr0, SK_MEM, bk_scr1, 0 - 1, 0);
+@@ -35935,6 +35990,8 @@
+             bk_syscall(bk_cop("write"), SK_IMM, 1, SK_ADDR, bk_pbuf, SK_MEM, bk_plen, 0 - 1, 0);
+         } else { if (bk_is(op, ".sys")) {
+             char nm[32]; int id; int L;
++            if(bkos!=2){id=bkav[pc*8];L=bkname_len[id];if(L>31)L=31;k=0;while(k<L){nm[k]=bkpool[bkname_at[id]+k];k++;}nm[L]=0;
++                bk_proto3(bk_cop(nm),bk_rmap[bkav[pc*8+1]],bk_rmap[bkav[pc*8+2]],bk_rmap[bkav[pc*8+3]],0);pc++;continue;}
+             tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8 + 1]], 0, 0);
+             tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 8 + 2]], 0, 0);
+             tk(TO_SETMEM, bk_plen, bk_rmap[bkav[pc * 8 + 3]], 0, 0);
+@@ -35963,6 +36020,12 @@
              tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
          } else { if (bk_is(op, ".sys6")) {
              char nm[32]; int id; int L;
@@ -63,7 +91,7 @@
              k = 0;
              while (k < 6) {
                  tk(TO_SETMEM, bk_sysa + 8 * k, bk_rmap[bkav[pc * 8 + 1 + k]], 0, 0);
-@@ -35981,6 +36023,7 @@
+@@ -35981,6 +36044,7 @@
              tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
              tk_setreg(bk_rmap[6], SK_MEM, bk_sysfp);
              tk_setreg(bk_rmap[7], SK_MEM, bk_syssp);
@@ -71,15 +99,17 @@
          } else { if (bk_is(op, ".exit")) {
              tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
              bk_syscall(bk_cop("exit"), SK_MEM, bk_scr0, SK_IMM, 0, SK_IMM, 0, 0 - 1, 0);
-@@ -36526,6 +36569,7 @@
+@@ -36526,7 +36590,8 @@
  }
  
  /* one lowered instruction -> bytes at bkout; 0 when it has no encoding */
+-int bk_arm(int i, long off) {
 +int a_shadow(int r) { ow(0xAA0003EF | (r << 16)); ow(0x927CEDEF); ow(0xD10041FF); return 0; }
- int bk_arm(int i, long off) {
++int bk_arm_inner(int i, long off) {
      int op; long *a; char *o; long pc; long v; int k; int d; int n;
      op = tkop[i]; a = tka + i * 4;
-@@ -36538,9 +36582,9 @@
+     pc = bk_textva + off;
+@@ -36538,9 +36603,9 @@
      }
      if (op == TO_HENTRY) {              /* sub sp, sp, #16; str x29, [sp]; str x30, [sp, #8]; mov x29, sp; mov x7, sp
                                             (no stp/ldp: the assembly-text printer has no pair forms) */
@@ -92,7 +122,7 @@
      if (op == TO_HOSTADDR) {
          a_adrp_add(a[0], pc, bkos == 2 ? bk_imp[BK_NIMP+a[1]] : BK_DATA_BASE+bk_shift-32+8*a[1]);
          ow(0xF9400000 | (a[0]<<5) | a[0]); return 1;
-@@ -36574,7 +36618,7 @@
+@@ -36574,7 +36639,7 @@
      }
      if (op == TO_SPINIT) {
          if (a[1] >= 0) { a_adrp_add(a[0], pc, a[1] + bk_shift); return 1; }
@@ -101,7 +131,7 @@
          return 1;
      }
      if (op == TO_WINSAVE) {
-@@ -36623,7 +36667,14 @@
+@@ -36623,7 +36688,14 @@
          return 1;
      }
      o = bk_nth(BKOPS, op);
@@ -117,7 +147,7 @@
      if (strsame(o, "imm")) {
          unsigned long u; u = a[1];
          ow(0xD2800000 | ((u & 0xFFFF) << 5) | a[0]);
-@@ -36649,13 +36700,12 @@
+@@ -36649,13 +36721,12 @@
          }
      }
      if (strsame(o, ".frame")) {
@@ -137,7 +167,7 @@
          return 1;
      }
      if (strsame(o, ".lea")) { a_adrp_add(a[0], pc, bk_leaaddr(i)); return 1; }
-@@ -36673,7 +36723,8 @@
+@@ -36673,7 +36744,8 @@
          return 1;
      }
      if (strsame(o, "callr")) {
@@ -147,7 +177,7 @@
          ow(0xD1002000 | (7 << 5) | 7);
          ow(0xF9000000 | (7 << 5) | A_IP1);
          ow(0xD63F0000 | (a[0] << 5));      /* blr: pairs with ret for the return predictor */
-@@ -36690,7 +36741,7 @@
+@@ -36690,7 +36762,7 @@
      }
      if (strsame(o, "ret")) {
          ow(0xF9400000 | (7 << 5) | A_IP1);
@@ -156,7 +186,7 @@
          ow(0xD65F0000 | (A_IP1 << 5));     /* ret x17: same jump as br, predicted */
          return 1;
      }
-@@ -36700,11 +36751,12 @@
+@@ -36700,11 +36772,12 @@
          return 1;
      }
      if (strsame(o, "call")) {
@@ -171,3 +201,24 @@
          return 1;
      }
      if (strsame(o, "jumpz")) {
+@@ -36714,6 +36787,20 @@
+     return 0;
+ }
+ 
++int bk_arm(int i, long off) {
++    int op; int wr; int ok; op=tkop[i];wr=0;
++    /* First-operand destinations in the finite low-level catalog. Memory stores are excluded. */
++    if ((op>=0 && op<=25 && op!=22 && op!=24) || (op>=42 && op<=65) || op==TO_SETREG || op==TO_HOSTADDR || op==TO_ARGVGET) wr=1;
++    if (wr && tka[i*4]==7) {
++        tka[i*4]=14; ok=bk_arm_inner(i,off); tka[i*4]=7;
++        if (!ok) return 0;
++        ow(0xEB0701DF); ow(0x540000C2);
++        a_shadow(14); ow(0xAA0E03E7); ow(0x14000005);
++        ow(0xAA0E03E7); a_shadow(7);
++        return 1;
++    }
++    return bk_arm_inner(i,off);
++}
+ /* ---- x86_64: emit_x86.py, line for line ------------------------------- */
+ #define X_RAX 0
+ #define X_RCX 1

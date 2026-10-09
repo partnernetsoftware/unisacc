@@ -1292,3 +1292,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔L1b′ 第三轮异步反例，2026-10-09；实际跑过〕临时arm64编码器在.frame分配前降真实SP、撤帧后抬真实SP，并处理call/ret及HENTRY/HLEAVE锚点。强探针由宿主异步送ALRM/USR2，外层处理函数反复递归建帧、检查局部数组；全程保护原型3/3正常，只有gate同步原型3/3首次送信号即SIGSEGV。最初外层只在gate内触发嵌套的弱探针两者都绿，已明确不作反例。证据和诊断补丁入research；仍缺任意r7写入完整覆盖、sys/write私有化、通用入口、产品δ和四目标验收，不宣称L1b完成。
 
 〔L1b′ r7/HOSTCALL 原型续验，2026-10-09；实际跑过〕mov写r7临时编码区分方向：向下先降真实SP再写x7，向上先写x7再抬真实SP。独立低级tape移动SP下128B再恢复，实际退出0；双层与外部异步递归反例续验绿。HOSTCALL审计见既有ARM桥用私有真栈保存x1–x7/原SP/LR；加入真实libSystem sched_yield转发的异步递归探针退出0，tape确认含该函数及.hostcall。以上不等于任意算术写r7或所有宿主签名已验；下一片仍为完整r7写入覆盖与sys/write私有快照。
+
+〔L1b′ 私有参数与通用入口原型，2026-10-09；实际跑过〕临时POSIX .sys/.write已改为80B私有帧快照，覆盖atfd_1/atfd_1_zero/atfd_2_zero5/zero4参数形状；sys6原SP暂存由x16改x12，避免.frame计算覆盖它。两架构低级tape分别用r7作为sys6/sys/write缓冲，均ABCABCABC/0。移除信号跳板单名判断，临时头改用已有__ccw_前缀，两架构双层MABCD/0。ARM普通目的寄存器为r7的计算先产出到独立暂存，再按移动方向提交栈；sub/add/load写r7低级探针退出0，HOSTCALL+外部异步探针194次ALRM退出0。这些仍是隔离导出C原型，未生成产品δ；.exit/.print共享格、逐快照重入注入、Linux信号入口和正式四目标验收继续保留。

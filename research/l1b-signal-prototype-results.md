@@ -97,3 +97,15 @@ shadow诊断变更：真实SP取候选x7向下16B对齐后再留16B保护区；�
 HOSTCALL源码审计：BK_HOST_ARM和签名桥在真栈私有区域保存x1–x7、原SP、LR，进入宿主后按宿主栈运行，回来再恢复。实际探针在原异步递归主循环里每5轮转发一次libSystem sched_yield（共20000次），R/OK/0，153次ALRM；裸-S tape确认含sched_yield及.hostcall。这只验一个真实宿主签名，不是所有FFI契约穷举。
 
 临时补丁已更新到本轮mov方向分支。正式通用入口、其他SP写入、sys/write私有化、四目标逐字节和私有.com仍待完成，头补丁继续停放。
+
+## 私有三参数、通用入口及其他SP写入
+
+实际跑过。临时POSIX`.sys`/`.write`把三个源值和FP保存到80B私有栈帧，再按ABI形状装载参数。Windows维持原路径。动态编号sys6与命名sys6继续各自语义。`.sys`的atfd_1/atfd_1_zero/atfd_2_zero5/zero4按原lower规则转换；尚未穷举这些形状的实际OS效果。
+
+新增低级tape专门用r7直接作为三种写调用的缓冲，arm64与Rosetta各输出ABCABCABC、rc0，证明取得调整前SP。原型原先用x16暂存原SP，新.frame也会用x16计算候选SP，存在冲突；已改用x12，不能沿用旧暂存选择。
+
+删除backend对`_unisa_sigtramp`的单名判断；临时头中的跳板命名为`__ccw_unisa_sigtramp`，通过既有通用host入口前缀，两架构双层均MABCD/0，arm64 HOSTCALL+外部异步递归R/OK/0（185次ALRM）。include仍未修改，停放头补丁仍需cc把这一命名与autonames守卫一并对齐。
+
+ARM其他写r7的原型先在x14计算结果，再按向下先保护、向上先提交的顺序写x7（x15作SP对齐暂存）；覆盖有限低级目录中以首操作数为目的的计算/加载及SETREG/HOSTADDR/ARGVGET，不覆盖内存写等仅把r7作为基址的指令。sub64/add64/load64写r7低级镜像rc0，双层MABCD/0，HOSTCALL异步递归R/OK/0（194次ALRM）。x14/x15保留用途与所有内部低级序列仍需逐项审计，不能仅凭范围编号认为目录契约永久稳定。
+
+本轮更新的诊断补丁仍针对临时完整导出C；它不再含按信号函数名单名硬接线。还未改产品参考、lower/enc δ，未做每个快照边界注入；`.exit/.print`仍共享格，Linux直接handler入口尚未接桥。不得因本轮Mac原型接受而提前落停放头。
