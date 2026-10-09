@@ -70,10 +70,12 @@
 
 | 类别 | 次数 | 作业秒 |
 |---|---|---|
-| tail 填空后 DEFER（可避免候选） | 175 | 4816.9 |
+| DEFER（运行树 04a5087b 按入窗时记录的 tail 类别判定；是否可避免 unknown） | 175 | 4816.9 |
 | solo 重试后最终超时（规则所需） | 63 | 2863.8 |
 | 整窗超时（随后 solo） | 1 | 46.1 |
 | 资源拒启（非提速） | 10 | 1.2 |
 | 宿主 UNVERIFIED（非提速） | 7 | 1.0 |
 
-出口表：538 PASS、57 待裁、27 BLOCKED（挂两个根超时下）、15 H1 宿主超时、6 资源 UNKNOWN、6 宿主 UNVERIFIED。下一刀按浪费排：①tail DEFER 4817 作业秒（主树 2df6655f/7de2efa0 的 attempt 类别与 history 有效期在本运行树中未生效，须下一次完整运行验证）；②rowcov/closure/stages/self 系 H1 超时；③comboot 安装幂等与回执来源前置核。
+出口表：538 PASS、57 待裁、27 BLOCKED（挂三个根：rowcov-parse2-build 25、com-luatests-build 1、rowcov-enc 系 1）、15 H1 宿主超时、6 资源 UNKNOWN、6 宿主 UNVERIFIED。下一刀按浪费排：①DEFER 4817 作业秒：入窗时的 attempt 类别判定（2df6655f）与 per-suite history 有效期（740b52a0）**已在运行树 04a5087b 生效**；未生效的只有类别持久化字段（7de2efa0，故终结果无 kind）与之后的实时内存准入（cce2de15/e5ddec42/2cedd407）、stage 对安装（a7b059dc/a3d3bb78）。这些 DEFER 是按记录类别判为 tail 的尝试，是否可避免需另核，不可全数记为可省；②rowcov/closure/stages/self 系 H1 超时；③comboot 安装幂等与回执来源前置核。
+
+更正（2026-10-10，cdx2 复核）：上表 DEFER 原标“可避免候选”、BLOCKED 原写“两个根”、并称 2df6655f/740b52a0 未在运行树生效，三处均已改正；可避免性保留 unknown。
