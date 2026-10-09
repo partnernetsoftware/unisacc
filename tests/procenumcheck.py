@@ -14,6 +14,7 @@ SHIM = r'''#include <unistd.h>
 #include <sys/syscall.h>
 static long __open(char *p,int flags,int mode) { long n=open(p,flags,mode); return n<0?-errno:n; }
 static long __close(int fd) { long n=close(fd); return n<0?-errno:n; }
+static long __lseek(int fd,long off,int whence) { long n=lseek(fd,off,whence); return n<0?-errno:n; }
 static long __getdents64(int fd,void *p,int n) { long r=syscall(SYS_getdents64,fd,p,n);return r<0?-errno:r; }
 #endif
 '''
