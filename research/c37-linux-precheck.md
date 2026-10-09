@@ -30,3 +30,16 @@ realpath 探针：参考 `/usr/../etc//hostname`→`/etc/hostname`，不存在�
 ## F4′
 
 钉住 v0.0.32 csih 15 单元在 Linux 上不可作同口径计时：产品经宿主转发调 libcurl，静态产品报 `host libc forwarding needs a dynamic compiler image`；`-t osx/arm64` / `-t lnx/x86_64` 交叉编到符号解析失败（`curl_slist_free_all` 等）用时约 4.95 s / 5.15–5.20 s（冷缓存，未产出二进制，仅作量级参考）。≤5 s 验收须在 m4pro 同机冷编。
+
+## 云机 Linux 构造的预候选（cc 独立验收，2026-10-09 15:0x；非正式候选）
+
+对象：cdx 在本机用 machocc（clang/ld64.lld/llvm-nm）构造的 `/tmp/cdx-linux-candidate/unisacc-next.com`，sha256 `8d147e0fc5eb7ce241fc6e9ac93f5a4db1d4fd4a5ff972a22c1ca4e49dd3d067`，2,243,464 B；`--version` 仍报 0.0.36（版本号未提交），构建改动当时未提交、无 seed 对。kernel 与旧 Apple blob 字节不同（cdx 报）。以下只作预检，正式候选（版本号提交 + 构建改动入库 + seed + 自举定点）上须重跑。
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| g4 | `-run g4_a.c g4_b.c`（双序）、`-run g4_one.c`、`-run g4_prototype.c`、`-run g4_float.c` | 全 rc=0 |
+| C1 | `-run tests/c99/64–66` | 全 rc=0（66 在 0.0.36 产品上是 UNCOVERED） |
+| C1b | `UA=<包装 sh 候选> tests/diag.sh` | ok 31 wrong 0（含 register 取址段与 damaged corpus） |
+| C3 | `-fno-trim-libc seed/{tbl,net,gen,blob,ident,ape,compilerpack}.c` | 7/7 rc=0（ape 即 C1a 形状） |
+| C3 | `seed/pack.c` | rc=1 `pack.c:19` zlib 头（按 C2 记） |
+| C3 realpath | `-run rp.c` | `/etc/hostname`；不存在路径 NULL errno 2 |
