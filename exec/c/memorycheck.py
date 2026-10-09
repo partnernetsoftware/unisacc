@@ -150,7 +150,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
     print('memory loader: both builds accept valid bytes and reject entry/length/extent violations')
     # Compile the production loader with a Windows API-contract double.
     # This checks reserve/commit arguments and failures, not a Windows guest.
-    mock=p/'reserve.c';mock.write_text((root/'exec/c/memory-contract.c').read_text())
+    mock=p/'reserve.c';mock.write_text('#include <stdint.h>\n'+(root/'exec/c/memory-contract.c').read_text())
     ok(['cc','-O2','-I'+str(root/'exec/c'),mock,'-o',p/'reserve'])
     got=ok([p/'reserve','0']);assert got==b'reserve and exact-address commit\n',got
     for mode,message in [(1,b'cannot reserve'),(2,b'cannot commit'),
@@ -160,7 +160,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
     print('memory allocation: Windows contract success and four failures; mock only')
     # Large virtual extent, only two actual pages touched; not a huge C source.
     lazy=p/'lazy.c'
-    lazy.write_text('#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n'
+    lazy.write_text('#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n'
                     'typedef struct { unsigned char *b; int n; } Buf;\n'
                     'static void die(const char *s){fprintf(stderr,"%s\\n",s);exit(2); }\n'
                     '#include "memory.c"\n'

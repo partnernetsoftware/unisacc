@@ -1301,3 +1301,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 H2 宿主真红修片，2026-10-10；实际跑过〕cdx 逐项根因修（无产品闭包改动、不关 Werror/sanitizer、不抬限时）：lib-windows-imports 1f2e643b、proc-enum 69d12f9c、apps-real fbe16fbd、lib-callable-catalog 5f9cf2cb（测试夹具 three 938 B 泄漏补释放）均真实 gate rc0；lib-lifecycle 59a5e95d 编译通过但 1000 轮在 40 s 内层超时仍 FAILED。待第二次一并裁：lib-lifecycle 超时（新失败形态）与 exec-memory-cc-1 在受控队列中为宿主 cc 编译失败 rc1（与已裁的外层中断不同）。
 
 〔董秘二次代裁，2026-10-10 01:24〕lib-lifecycle 编译通过后 1000 轮/40 s 内层超时记 H1；exec-memory-cc-1 宿主 cc 编 reserve.c 失败记 H2，允许 H2 切口修一轮，修不动维持基线。已落 release/rulings.tsv（按套件+失败形态+首错签名精确匹配）与 plans H1/H2 行。
+
+〔H2 exec-memory-cc-1 单轮修片认领，2026-10-10；董秘二裁/cc授权〕首错 reserve.c 缺 stdint.h，intptr_t/uint64_t 未声明。只改 exec/c/memorycheck.py 生成的宿主探针前置显式 stdint.h；同一 loader 的 lazy 探针也显式包含该声明。不改 memory.c/memory-contract.c，memorycheck.py 为 source closure 明确排除的验证工具。bound55 原单项复测，修后若被限时挡住仍维持基线，不放宽限时。
+
+〔H2 exec-memory-cc-1 单轮修后结果；实际跑过〕原单项 gate bound55 外层 rc142，在模型准备阶段被中断，未产出 suite rc，保留基线/INTERRUPTED，不记 PASS、不重试。另 bound55 定点直接用原 cc -O2 构建生成的 reserve/lazy 探针：reserve 正常路径与四项拒绝的原返回码/诊断全过，lazy 610MB 虚拟范围初始零与末页写入原判据全过，证明 stdint 声明根因已修；不代表全套验收通过。未动产品闭包及限时。
