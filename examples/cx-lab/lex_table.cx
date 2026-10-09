@@ -1,0 +1,208 @@
+#!/usr/bin/env -S unisacc.com -run
+/* examples/cx-lab/lex_table.cx -- lab experiment, not part of the product.
+ *
+ * Question this answers: instead of hand-writing code that directly computes and dumps a
+ * token TSV (ad hoc per-character branching baked into the writer), can C syntax first be
+ * *normalized into tables* -- a byte->class table and a (state,class)->(action,next) table,
+ * shaped like the project's own exec/ finite-rules tables (just toy sized and hand-written,
+ * not generated or gold-derived) -- and then run by one small generic engine?
+ *
+ * This script is pure cx/C99: it never shells out to unisacc.com, never touches exec/facts,
+ * weights/, or kernel/.  It only reads examples/cx-lab/{charclass,transition}.tsv and
+ * examples/cx-lab/sample.c, and writes examples/cx-lab/out/tokens.tsv.
+ *
+ * Run from the repo root:  ./unisacc.com -run examples/cx-lab/lex_table.cx
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#define MAXCLS 16
+static char cls_name[MAXCLS][8];
+static char cls_kind[MAXCLS][8];
+static char cls_lit[MAXCLS];
+static int n_cls = 0;
+
+#define MAXROW 48
+static char tr_state[MAXROW][16];
+static char tr_class[MAXROW][16];
+static char tr_action[MAXROW][24];
+static char tr_next[MAXROW][16];
+static int n_tr = 0;
+
+static char bytecls[256][8]; /* every byte's class name, computed once from charclass.tsv */
+
+static char *slurp(const char *path, size_t *outlen) {
+    FILE *f = fopen(path, "rb");
+    char *buf; size_t n = 0, cap = 4096, k;
+    if (!f) { printf("lex_table: cannot open %s\n", path); exit(1); }
+    buf = malloc(cap);
+    while ((k = fread(buf + n, 1, cap - n - 1, f)) > 0) {
+        n += k;
+        if (cap - n < 2) { cap *= 2; buf = realloc(buf, cap); }
+    }
+    fclose(f);
+    buf[n] = 0;
+    if (outlen) *outlen = n;
+    return buf;
+}
+
+/* split one line on '\t' into up to `ncols` fields, each copied into dst[i] (cap 32 incl NUL) */
+static void split_tsv(const char *line, char dst[][32], int ncols) {
+    int col = 0; const char *p = line;
+    for (col = 0; col < ncols; col++) dst[col][0] = 0;
+    col = 0;
+    while (*p && col < ncols) {
+        int i = 0;
+        while (*p && *p != '\t' && *p != '\n') { if (i < 31) dst[col][i++] = *p; p++; }
+        dst[col][i] = 0;
+        col++;
+        if (*p == '\t') p++;
+    }
+}
+
+static void load_charclass(const char *path) {
+    char *text = slurp(path, 0);
+    char *line = text, *nl;
+    int first_row_seen = 0;
+    while (line && *line) {
+        nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (line[0] != '#' && line[0] != 0) {
+            char f[3][32];
+            split_tsv(line, f, 3);
+            if (!first_row_seen && strcmp(f[0], "class") == 0) { first_row_seen = 1; }
+            else {
+                first_row_seen = 1;
+                strncpy(cls_name[n_cls], f[0], 7);
+                strncpy(cls_kind[n_cls], f[1], 7);
+                cls_lit[n_cls] = f[2][0];
+                n_cls++;
+            }
+        }
+        line = nl ? nl + 1 : 0;
+    }
+    free(text);
+}
+
+static void load_transition(const char *path) {
+    char *text = slurp(path, 0);
+    char *line = text, *nl;
+    int first_row_seen = 0;
+    while (line && *line) {
+        nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (line[0] != '#' && line[0] != 0) {
+            char f[4][32];
+            split_tsv(line, f, 4);
+            if (!first_row_seen && strcmp(f[0], "state") == 0) { first_row_seen = 1; }
+            else {
+                first_row_seen = 1;
+                strncpy(tr_state[n_tr], f[0], 15);
+                strncpy(tr_class[n_tr], f[1], 15);
+                strncpy(tr_action[n_tr], f[2], 23);
+                strncpy(tr_next[n_tr], f[3], 15);
+                n_tr++;
+            }
+        }
+        line = nl ? nl + 1 : 0;
+    }
+    free(text);
+}
+
+/* classify every byte once, by applying charclass.tsv's rows top to bottom; first match wins */
+static void build_bytecls(void) {
+    int b, i;
+    for (b = 0; b < 256; b++) {
+        strcpy(bytecls[b], "OTHER");
+        for (i = 0; i < n_cls; i++) {
+            int hit = 0;
+            if (strcmp(cls_kind[i], "ALPHA_") == 0) hit = isalpha(b) || b == '_';
+            else if (strcmp(cls_kind[i], "DIGIT") == 0) hit = isdigit(b);
+            else if (strcmp(cls_kind[i], "NL") == 0) hit = (b == '\n');
+            else if (strcmp(cls_kind[i], "SPACE") == 0) hit = isspace(b);
+            else if (strcmp(cls_kind[i], "EXACT") == 0) hit = (b == (unsigned char)cls_lit[i]);
+            else if (strcmp(cls_kind[i], "PUNCT") == 0) hit = ispunct(b);
+            if (hit) { strcpy(bytecls[b], cls_name[i]); break; }
+        }
+    }
+}
+
+/* (state, bytecls[c]) -> action, next; falls back to (state, "*") */
+static void lookup(const char *state, const char *cls, char *action, char *next) {
+    int i;
+    for (i = 0; i < n_tr; i++)
+        if (strcmp(tr_state[i], state) == 0 && strcmp(tr_class[i], cls) == 0) {
+            strcpy(action, tr_action[i]); strcpy(next, tr_next[i]); return;
+        }
+    for (i = 0; i < n_tr; i++)
+        if (strcmp(tr_state[i], state) == 0 && strcmp(tr_class[i], "*") == 0) {
+            strcpy(action, tr_action[i]); strcpy(next, tr_next[i]); return;
+        }
+    strcpy(action, "bad"); strcpy(next, "DISPATCH"); /* table was not total for this state/class */
+}
+
+static FILE *outf;
+static int tok_idx = 0;
+static char buf[256]; static int buflen = 0;
+static char tokind[8] = "";
+
+static void emit(const char *kind) {
+    buf[buflen] = 0;
+    fprintf(outf, "%d\t%s\t%s\n", tok_idx++, kind, buf);
+    buflen = 0;
+}
+
+/* returns 1 if the current byte was consumed (cursor should advance), 0 to reprocess it */
+static int do_action(const char *action, int c) {
+    if (strcmp(action, "skip") == 0) return 1;
+    if (strcmp(action, "start_ident") == 0) { buf[buflen++] = (char)c; strcpy(tokind, "ID"); return 1; }
+    if (strcmp(action, "start_num") == 0) { buf[buflen++] = (char)c; strcpy(tokind, "NUM"); return 1; }
+    if (strcmp(action, "cont") == 0) { buf[buflen++] = (char)c; return 1; }
+    if (strcmp(action, "end_ident") == 0) { emit("ID"); return 0; }
+    if (strcmp(action, "end_num") == 0) { emit("NUM"); return 0; }
+    if (strcmp(action, "start_char") == 0) { buf[buflen++] = (char)c; strcpy(tokind, "CHAR"); return 1; }
+    if (strcmp(action, "end_char") == 0) { buf[buflen++] = (char)c; emit("CHAR"); return 1; }
+    if (strcmp(action, "start_str") == 0) { buf[buflen++] = (char)c; strcpy(tokind, "STR"); return 1; }
+    if (strcmp(action, "end_str") == 0) { buf[buflen++] = (char)c; emit("STR"); return 1; }
+    if (strcmp(action, "emit_op") == 0) { buf[buflen++] = (char)c; emit("OP"); return 1; }
+    if (strcmp(action, "bad") == 0) { buf[buflen++] = (char)c; emit("BAD"); return 1; }
+    if (strcmp(action, "start_slash") == 0) { buf[buflen++] = (char)c; return 1; }
+    if (strcmp(action, "end_slash_op") == 0) { emit("OP"); return 0; }
+    if (strcmp(action, "start_lcmt") == 0) { buflen = 0; return 1; }
+    if (strcmp(action, "start_bcmt") == 0) { buflen = 0; return 1; }
+    if (strcmp(action, "end_lcmt") == 0) { return 1; }
+    if (strcmp(action, "maybe_end_bcmt") == 0) { return 1; }
+    if (strcmp(action, "end_bcmt") == 0) { return 1; }
+    printf("lex_table: unknown action %s\n", action); exit(1);
+}
+
+int main(void) {
+    char *src; size_t n, pos;
+    char state[16] = "DISPATCH", nextst[16], action[24];
+
+    load_charclass("examples/cx-lab/charclass.tsv");
+    load_transition("examples/cx-lab/transition.tsv");
+    build_bytecls();
+
+    src = slurp("examples/cx-lab/sample.c", &n);
+    system("mkdir -p examples/cx-lab/out");
+    outf = fopen("examples/cx-lab/out/tokens.tsv", "wb");
+    if (!outf) { printf("lex_table: cannot open out/tokens.tsv\n"); return 1; }
+    fprintf(outf, "idx\tkind\ttext\n");
+
+    pos = 0;
+    while (pos < n) {
+        unsigned char c = (unsigned char)src[pos];
+        lookup(state, bytecls[c], action, nextst);
+        if (do_action(action, c)) pos++;
+        strcpy(state, nextst);
+    }
+    if (buflen > 0) emit(tokind[0] ? tokind : "ID"); /* flush a token left open at EOF */
+    fclose(outf);
+    free(src);
+
+    printf("lex_table: ok tokens=%d classes=%d rules=%d\n", tok_idx, n_cls, n_tr);
+    return 0;
+}
