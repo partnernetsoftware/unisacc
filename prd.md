@@ -305,6 +305,8 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 - **gettimeofday 在 fork+wait 后跳涨 2^32 微秒（cx-lab 实验副产物，2026-10-09，未修）**：本机 unisacc.com 0.0.35，同一进程里背靠背两次 `gettimeofday()` 相差 0.000000s；但只要中间跑过一次 `fork()+waitpid()`（哪怕子进程只是 `true`），下一次 `gettimeofday()` 立刻比预期多出约 4294.967296s（≈2^32 微秒），像是返回值在 fork 之后被错位多算了一轮 2^32。触发路径：`include/cx.h` 的 `cx_run_timeout`/`cx_runv_timeout`（内部 fork+waitpid）之后，调用方进程自己再调一次 `gettimeofday`。影响：任何“fork 子进程前后各自测一次 gettimeofday 算耗时”的写法都会算出垂圾数字——`examples/cx-lab/time_run.cx` 最初版本就中招，六行计时全变成 ~8589s；已在该 lab 脚本里绕开（让计时发生在被 fork 出来的 bash 子进程内部，用 `TIMEFORMAT=%R` 把耗时当字符串读回来，不再跨 fork 调用自己的 gettimeofday），没有碰 src/ 或运行时实现，产品代码未改。未验证范围：是否只在这台机器/这个版本/`-run` 内触发，是否也影响 `clock_gettime`（include/time.h 两者都映射到同一个宿主 gettimeofday），是否波及任何产品内计时相关功能或套件。
 
+- **`include/cx.h` 缺独立 stderr 捕获（cx-lab 实验副产物，2026-10-09，未修）**：`cx_run`/`cx_run_timeout`/`cx_runv_timeout` 只把子进程 stdout 接进调用方给的缓冲区（`dup2(fd,1)`），stderr 原样继承自父进程，没有单独通道。把 `tests/runtimeiocheck.py` port 成 `examples/cx-lab/runtimeiocheck.cx` 时需要同时断言“stdout 等于某行”和“stderr 为空”（原 Python 版本分别拿 `subprocess.run` 的 `stdout`/`stderr` 两个字段判断），cx.h 现状做不到分别拿到两路输出，只能退一步在命令字符串里 `2>&1` 合流后整体比对期望字符串——如果 stderr 真的非空，合流后的内容就不会精确等于期望行，等价地抓住了错误，但拿不到 stderr 本身的内容用于诊断信息。影响：任何要迁的 `.py` 测试如果像这样既要分别看 stdout 又要分别看 stderr（不少 tests/*.py 用 `subprocess.run(capture_output=True)` 正是这种模式），都会撞上同一个缺口。没有改 include/cx.h；如果 0.0.38–0.0.39 真要批量迁 tests/ 下的 170 个 `.py`（§5 路线），这里需要先补一个 `cx_run_timeout` 的变体（例如把 stderr 另 dup2 到第二个临时文件）。
+
 ### 6.1 研究问题立项：表的可解释性与完备性（主人 2026-10-03，立项不打断 K2）
 
 主人原问：① 构造出来的表数据（即使由 LLM 起草）如何具备**可解释性**；② 如何**计算并证明完备性**——现在只靠 TDD 检验，没有机制说明编译器还有多少不完备，“很没底气”；现有推论只挽回一点信心，缺严谨理论推导，需研究补上。
@@ -1313,3 +1315,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔rowcov C 日志接口反例，2026-10-09；产品-run实跑〕tests/rowcov.c把state_id=-1视为BOT跳过，但机器BOT是key=-1且state_id仍有效。最小STATES 0/S0、EDGES与ROWS S0/BOT、LOG M/0/-1/p.c：原生日志路线taken0/covered0/rc1，--seen S0/BOT/p.c路线taken1/covered1/rc0。应拒绝所有未知state_id（包括-1），把key=-1规范化BOT再关联旁表；已有--seen汇总计数对拍不覆盖该日志接口。STATE字典必须由构造时保留并绑定同模型身份，现CoreModel不含符号状态名，不能从二进制捏造恢复。运行钩子尚未实现。
 
 〔L1b sys6 验收探针审阅，2026-10-09；源码核查〕sys6probe.c的12个__syscall6在参考前端均由sysargs6固定送r0..r5，并发出.sys6 syscall，不因常量号变成具名op，也不因局部声明顺序改变tape源寄存器；帧内buf地址经求值送入r2，不等于直接以r7作源。现12/12证据仅覆盖C参数求值/动态号写调用，尚缺具名mmap和低级tape寄存器置换/r7别名。accept.c中sh编译失败未设置bad、未清理旧产物就sha，可把旧文件当新证据；需生成临时产物、成功才替换、编译失败显式失败。private3的Windows ARM镜像变化已标反例，首片只移POSIX sys6 helper，不搬ARM编码器原型。生产代码仍未落。
+
+〔L1b POSIX sys6 生产首片，2026-10-09；参考实跑与δ对拍进行中〕六个源寄存器在修改ABI寄存器前写入80B私有tape帧（0–40参数、48旧FP、56旧SP）；r7作源取帧分配前的快照，arm用x12、x86用r11保存旧SP，避免未来ARM.frame计算所用x16覆盖快照。动态号从槽0取、其余五参从8–40取；具名调用六参从0–40取，gate后从私有帧恢复FP并释放帧。Windows仍走原全局格路线；不在本片落信号头或编码器SP更新，.sys/.write与HOSTCALL私有化另片处理。生产参考通过验收器四次macOS运行及Windows四镜像基线；lnx/x86_64原生δ对手写tape255条指令与Python逐字段同，其他目标与正式产品验收尚待完成。验收手写tape带注释，lower文本入口目前不接受分号注释，对拍只去注释不改变指令；不把该格式拒绝当sys6错码。
