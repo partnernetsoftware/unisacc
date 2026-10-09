@@ -131,6 +131,7 @@ def main(argv=None):
     ap.add_argument('--log', default=str(pathlib.Path.home() / '.unisacc' / 'stagelog' / 'events.jsonl'))
     ap.add_argument('--run'); ap.add_argument('--json', action='store_true')
     a = ap.parse_args(argv)
+    if not pathlib.Path(a.log).is_file(): print('stagesum: no event log at %s' % a.log, file=sys.stderr); return 2
     s = summarise(load(a.log), a.run)
     if a.json: print(json.dumps(s, indent=2, sort_keys=True)); return 0
     print('%-11s %9s %9s %4s %-10s %s' % ('phase', 'wall_s', 'wait_s', 'cmd', 'status', 'acceptance'))
