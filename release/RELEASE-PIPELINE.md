@@ -268,8 +268,8 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 
 动因：0.0.37 云机先修 seed-gen 一处泄漏就整链重建，到 pack-prep-1 才发现 `parse2 --errors` 另一处 5.4 GB 峰值，白跑一次 UA/shared/六 target。改为：
 
-1. **生成器全矩阵预验（不建候选）**：seed/gen.c、seed/facts.h、exec/build/ 任一改动后，先对候选实际调用的**全部** stage/flags 组合各跑一次——shared 七个（pp --shared-predefines、lex --typed、parse2、opt --o2、opt、prune、nativeabi）、六个 `lower --full [--osx|--win] [--arm64]`、pack-prep 十一个模型作业（buildcompiler.sh `modeljob`：parse2 --errors、parse2 --warnings --errors、parse2/units --locations、lex --locations、lex、pp --shared-predefines --no-autoinc、pp --locations --shared-predefines、lower --full --object [--arm64]、enc --object、enc/arm --object）。每项：AddressSanitizer 无错；输出与 `exec/build/gen.py` 同 flags 逐字节相同；记峰值 RSS（`/usr/bin/time -v`）与墙钟，峰值须低于宿主可用内存（云机 16 GB 无 swap，常仅 3.5–5 GB 可用），单项墙钟在 `b` 的 50 s 内。
-2. **一次冻结**：矩阵全绿后才提交并冻结，从该提交**只建一次**候选（build_ref → build_candidate → seed）。
+1. **生成器全矩阵预验（不建候选）**：seed/gen.c、seed/facts.h、exec/build/ 改动后，从冻结快照的 `buildcompiler.sh` 的 shared、target、modeljob 及实际启用的构造路线导出 stage/flags 清单。当前直接 gen 调用为 shared 七个、六目标各 lower 与 enc 共十二个、pack-prep 十一个模型作业；共三十个调用位置（相同 stage/flags 可合并执行，但记录所有调用位置），不是旧清单的二十四个。六目标 enc/enc-arm 各自的 ELF/Mach-O/PE flags 必须在清单中；`parse2 --warnings --errors` 不以 warnings-only 代替，object 变体不以普通 lower/enc 代替。构造路线调用不同则清单相应补齐，不硬编码三十为永久验收数。每个组合分别记录源摘要、flags、工具与构建模式、rc、输出摘要及参考对拍；任何非零退出、超时或陈旧输出不能记绿。ASan 是内存正确性诊断，生产 O2 是预算/RSS 测量，两类结果分开记录，不把 ASan 开销套用生产预算。生产调用保持原 b 50 s 与外层既有预算；内存按 §25 的可用量与余量评估，不改产品验收。
+2. **一次冻结**：矩阵全绿后才提交并冻结，从该提交开一条候选流水线；失败先定位，只有身份与完整依赖仍匹配的已完成步骤才允许续用，不循环整链重建。建立候选（build_ref → build_candidate → seed）。
 3. **再自举与队列**：comboot 定点 → queue.sh 全量。
 4. **禁止**每修一处就整链重建；矩阵中途发现新红，回到 1，不起候选。候选建成后发现构造器红，同样先回 1 预验全矩阵，再冻结重建一次。
 
@@ -285,3 +285,26 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 6. **提交前看改动落在哪**：动产品闭包（exec unisa src kernel include weights seed，见 exec/pipeline/models.py closure）意味着候选身份变化、必须重建，提交前先按 §24 完成全矩阵、估好重建代价；release/、tests/、文档改动不影响候选身份，可直接提交。
 7. **停工令**：收到停工立即按 PID 停全部后台活，报告残留状态（未提交改动、停在哪一步），不再起新活，直到流程改好并获准。
 
+
+## 26. 本次停工状态与恢复门槛（政委 10-09；cdx2 补审）
+
+**状态：停工，尚未获准恢复。** cc 回报所属后台已按 PID 安全停止；未提交 `seed/gen.c` 的 errors group-tail 释放修片保留，旧队列 10/642 状态保留。A 阶段旧二十四组合同字节/RSS、B 阶段十三组合 ASan 是 cc 回报，尚非本节补齐后的完整矩阵验收；本窗未复跑。不得以“流程文档已写”自行恢复开发、候选、queue、ASan/profiling等重活。
+
+### 反思与纠正
+
+- **范围漏项**：基础 parse2 降峰后就建候选，完整 errors 组合才在 pack-prep 暴露；旧全矩阵又漏六目标 enc。以实际调用位置导出清单，每轮标记 covered/missing，不凭手记组合数认全绿。
+- **身份与证据混淆**：旧输出被读取、超时被记相同、ASan 和生产预算混用。每次输出用独立临时目录或先清旧文件；先验退出码/新鲜度，再对拍；诊断与生产读数分别记录。
+- **无进展续跑**：外层142未保存失败导致独占项每窗重启。第一次出现无结果的完整窗超时即核对所属进程、持久结果与剩余预算；三窗无新完成是最迟停止线，不是允许先盲等三窗。保留失败日志，不删除失败以假绿续跑。
+- **协作空转**：会话 cwd 被移除使 cdx 三次 ENOENT；用现存克隆的显式工作目录先只读核对 tip/脏树。同机只有一位重活 owner；权限、平台交接只读准备可另行做，不能偷偷起另一份生成器。
+
+### 恢复前回执（先流程，再获准，再按顺序执行）
+
+| 项 | 恢复前须确认 | 恢复后的第一步，不能提前执行 |
+|---|---|---|
+| 停工/残留 | owner、所属PID清理结果、未提交路径、状态目录、最后成功与失败步骤已记录 | 保留残留，不代提交别人的修片 |
+| 预验清单 | 实际全部调用位置及组合映射完整，旧遗漏已补；命令、模式、输出和证据字段可检查 | 串行补未完成预验；有红只修最小问题，不起候选 |
+| 资源/窗口 | 一机一owner；峰值未知先测单项；开始/收尾预算、检查点、失败处置明确 | 单个预验有实测后才进入长链，不放宽既有预算 |
+| 身份与发布边界 | 旧候选身份标明失效；GHCR权限/Apple/m4pro交接负责人明确，未解除项具名 | 权限未解除只报阻塞，不能假封存或拿Linux替正式全门禁 |
+| 独立复核/恢复授权 | 流程维护者与复核者确认以上字段；政委明确允许恢复 | 按“完整预验→冻结提交→同源候选/seed→定点/契约→封存与完整验证→信任与发布”执行 |
+
+这是流程文档与人工执行门槛，**没有宣称已有自动闸**。恢复后的预验仍须亲测，已有部分证据不冒充全矩阵；不删测试、不放宽预算、不改验收、不扩大方向。此前手册关于 precheck 先后的冲突，以候选前廉价身份/生成物检查、comboot 后封存前契约检查分开处理，两段均保留。
