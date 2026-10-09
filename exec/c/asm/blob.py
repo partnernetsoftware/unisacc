@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline assembly/linking only. Extract a position-independent kernel blob.
 No compiler model, source program or expected answer is read here. The linked
-Mach-O is a seed-tool container, not the OS format of the returned machine code.
+Mach-O (Apple tools on Darwin, LLVM on Linux) is a seed-tool container, not the OS format of the returned machine code.
 """
 import argparse,pathlib,struct,subprocess,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[3]
@@ -18,11 +18,10 @@ def build(arch):
         for unit in UNITS+('bridge',):
             source=ROOT/'exec/c/asm'/f'{unit}_{arch}.S';obj=d/(unit+'.o')
             defs=[] if unit=='bridge' else ['-D'+s+'=bridge_'+s for s in IMPORTS]
-            run(['cc','-arch',arch,*defs,'-c',source,'-o',obj]);objects.append(obj)
+            run(['sh',ROOT/'exec/c/asm/machocc.sh',arch,'compile',*defs,'-c',source,'-o',obj]);objects.append(obj)
         image=d/'kernel'
-        run(['cc','-arch',arch,'-nostdlib','-Wl,-static','-Wl,-e,_kernel_entry','-Wl,-no_uuid',
-             '-Wl,-no_fixup_chains',*objects,'-o',image])
-        if run(['nm','-u',image]).strip(): raise ValueError('unresolved kernel imports')
+        run(['sh',ROOT/'exec/c/asm/machocc.sh',arch,'link',*objects,'-o',image])
+        if run(['sh',ROOT/'exec/c/asm/machocc.sh',arch,'nm','-u',image]).strip(): raise ValueError('unresolved kernel imports')
         raw=image.read_bytes()
         if struct.unpack_from('<I',raw)[0]!=0xfeedfacf:raise ValueError('not Mach-O 64')
         ncmd=struct.unpack_from('<I',raw,16)[0];at=32;text=None;end=0;symbols=None

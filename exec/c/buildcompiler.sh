@@ -6,7 +6,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -ge 1 ] && [ $# -le 2 ] || { echo 'usage: buildcompiler.sh OUTPUT_DIR [shared|OS/ARCH|pack]' >&2; exit 2; }
 step=${2:-all}
 case $step in all|shared|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pack-driver|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
-[ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
+case $(uname -s) in Darwin|Linux) ;; *) echo 'kernel seed assembler requires Darwin or Linux' >&2; exit 2;; esac
 mkdir -p "$1"; T=$(cd "$1" && pwd)
 b() { "$R/tests/bound" 50 "$@"; }   # the native watchdog (0.0.32 B5: no python3 for the bound itself)
 # 0.0.25 B3: SEED_C=1 turns delta JSON -> table -> network into the C99 seed tools (seed/tbl.c,

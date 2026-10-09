@@ -47,8 +47,9 @@ if [ -z "$*" ] || [ "$1" = e2 ]; then   # the first gate shard also checks ident
       "$B" 30 python3 exec/c/provenance.py write "$T/art" "$a" && cmp -s "$T/art.c.json" "$T/art.build.json" &&
       "$B" 30 "$T/ident" . check "$T/art" >/dev/null &&
       echo "SAME ident"; } > "$T/r-ident.txt" 2>&1 || echo "DIFF ident" >> "$T/r-ident.txt"
-    # seed/blob.c: the kernel blob, equal to exec/c/asm/blob.py (B5); macOS only (Mach-O link)
-    if [ "$(uname -s)" = Darwin ]; then
+    # seed/blob.c: the kernel blob, equal to exec/c/asm/blob.py (B5); native Apple or Linux LLVM seed tools
+    # Both constructors use exec/c/asm/machocc.sh; no runtime fallback or cached blob.
+    if [ "$(uname -s)" = Darwin ] || [ "$(uname -s)" = Linux ]; then
         names="$names blob"
         { cc -std=c99 -D_DARWIN_C_SOURCE -D_POSIX_C_SOURCE=200809L -O2 -w seed/blob.c -o "$T/blob" &&
           for a in arm64 x86_64; do "$B" 50 "$T/blob" . $a "$T/k.c.$a" >/dev/null && "$B" 50 python3 exec/c/asm/blob.py $a "$T/k.py.$a" >/dev/null &&

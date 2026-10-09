@@ -1337,3 +1337,11 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔C2 g4 云机接单核对，2026-10-09〕董秘/cc授权先推g5再只跟g4；g5与cc的c4e5001f文档已合并推到cee7ccc7。当前main已含5a632535的g4实现：普通sys=0超过六参走CL.vdone，CL.vend按sys=0恢复直接调用；callcontrol.py已于15bbf1bf迁成manifest删除，云机/home/box与/tmp未找到暂存副本。先按当前构造链重新生成E3并复验无原型/有原型/K&R与多单元；不手改TSV、不复活已删除构造器、不以公开0.0.36旧拒绝判main缺口。cc独立克隆验收待交接。
 
 〔C2 g4 当前源码复验，2026-10-09；实际跑过〕main d87c8917 从当前 manifest 重新构造 E3，JSON sha2187cf66、net shaf25d68ab，与g5冻结证据一致。六类九组（无原型/原型单文件、原始a+b双序、加权无原型/原型双序、float默认提升）原生E3 tape与参考逐字节同，系统cc与参考-run均退出0。cc确认K&R定义在参考本身expected {，撤销该变体；正式验收保持a+b、完整单文件、原型对照三者候选.com退出0且同参考。无需重复修5a632535已实现的控制，不手改表、不复活15bbf1bf已删除的生成器；当前仅补可复现证据并交cc独立克隆。Darwin构建限制仍使正式候选未验，不结算C2整项。
+
+〔0.0.37 Linux 正式候选构建调查，2026-10-09〕政委明确不写死Darwin，授权查实依赖并移除可移植守卫，目标云机完成候选及发布。已pull ded65f53与后续文档至31f1ebba，不改验收。buildcompiler守卫背后是seed/blob.c、asm/blob.py以cc -arch/Apple ld参数生成Mach-O并抽取含头的PIC kernel，不是运行时OS依赖；拟先用Linux LLVM Mach-O交叉汇编/链接验证UNIKERN1、零未决导入/运行重定位、入口/slot与原生执行契约，再修改构建适配。LLVM未安装，准备安装Debian现有clang/lld/llvm19。Apple签名公证/dmg与多平台证据是独立发布边界，不能仅删Darwin行就宣布发布可行。
+
+〔Linux Mach-O 种子最小实验，2026-10-09；实际跑过〕LLVM19交叉构造两ISA后，原blob.py抽取/结构检查均接受，ARM7672B sha9bab0499、x867696B sha56bcd071，未决导入0；与公开0.0.36 Apple ld64包内blob不同，不能冒称逐字节同。拟让C/Python两构造器共享一个host工具适配（Darwin保持原cc/ld参数，Linux用clang+ld64.lld+llvm-nm），UNIKERN1格式与所有PIC/入口/零重定位检查不变；扩seedgen首片原有blob对拍至Linux，先产品ABI原生x86网络执行后去buildcompiler守卫。cc已查Apple签名/公证/dmg及macOS门禁为真依赖、GHCR缺write:packages；这些尚不能由Linux替代，发布不予豁免。
+
+〔Linux kernel 实跑与构建路径，2026-10-09；实际跑过〕共享machocc适配后C/Python双ISAblob逐字节同；产品ABI x86原生netcheck全过，含E3表2559878观察、资源/包/拒绝/诊断链与无Cfallback；seedgen e2首片SAME e2/ident/blob，3同0异。保留默认C构造，首台未装产品或Cgen内存不足时使用原有SEED_GEN=0/SEED_C=0路线试建（非新增回退）；build_candidate的已安装产品pair前置只在实际使用它的SEED_C=1要求，Python路线不读取该pair。正式发布仍受macOS门禁/Apple资产与GHCR权限约束，不改验收。
+
+〔Linux 候选全构造，2026-10-09；实际跑过〕既有Python构造路线SEED_GEN=0/SEED_C=0已完成shared、六target、三pack-prep、pack-models、pack-driver，每步bound58内成功。私有产品2243464B sha8d147e0f，源码身份80f404fc；版本仍0.0.36，非封版。g4五组/C1三探针同参考；初次diag因语料缺位0项失败，补齐上游语料后原套件31通过0错（40损坏语料、13定位、14register例）；seed七工具编译通过，pack.c仍在zlib include拒绝。政委新令本云机继续闭环，拟合入cc Linux门禁修片并交独立克隆，不降低验收。

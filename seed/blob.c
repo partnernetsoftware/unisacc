@@ -2,7 +2,7 @@
  *
  * Offline assembly/linking only: assemble exec/c/asm/<unit>_<arch>.S, link them
  * static with no imports, and cut the position-independent kernel blob out of the
- * Mach-O __TEXT segment.  The output is byte-identical to blob.py's:
+ * Mach-O __TEXT segment (Apple tools on Darwin, LLVM on Linux).  The output is byte-identical to blob.py's:
  *     "UNIKERN1" u64 arch(1 arm64, 2 x86_64) u64 entry u64 slot u64 end, text[0:end]
  *
  * Usage: blob ROOT ARCH OUTPUT
@@ -41,19 +41,19 @@ int main(int argc, char **argv) {
     strcpy(dir, "/tmp/unisa-kernel-XXXXXX");
     if (!mkdtemp(dir)) { dir[0] = 0; die("mkdtemp failed"); }
     for (i = 0; i < sizeof UNITS / sizeof *UNITS; i++) {
-        int c = snprintf(cmd, sizeof cmd, "cc -arch %s", arch);
+        int c = snprintf(cmd, sizeof cmd, "sh '%s/exec/c/asm/machocc.sh' %s compile", root, arch);
         if (strcmp(UNITS[i], "bridge"))
             for (k = 0; k < sizeof IMPORTS / sizeof *IMPORTS; k++)
                 c += snprintf(cmd + c, sizeof cmd - c, " -D%s=bridge_%s", IMPORTS[k], IMPORTS[k]);
         snprintf(cmd + c, sizeof cmd - c, " -c '%s/exec/c/asm/%s_%s.S' -o '%s/%s.o'", root, UNITS[i], arch, dir, UNITS[i]);
         run(cmd);
     }
-    {   int c = snprintf(cmd, sizeof cmd, "cc -arch %s -nostdlib -Wl,-static -Wl,-e,_kernel_entry -Wl,-no_uuid -Wl,-no_fixup_chains", arch);
+    {   int c = snprintf(cmd, sizeof cmd, "sh '%s/exec/c/asm/machocc.sh' %s link", root, arch);
         for (i = 0; i < sizeof UNITS / sizeof *UNITS; i++) c += snprintf(cmd + c, sizeof cmd - c, " '%s/%s.o'", dir, UNITS[i]);
         snprintf(cmd + c, sizeof cmd - c, " -o '%s/kernel'", dir);
         run(cmd);
     }
-    snprintf(cmd, sizeof cmd, "nm -u '%s/kernel' > '%s/undef'", dir, dir); run(cmd);
+    snprintf(cmd, sizeof cmd, "sh '%s/exec/c/asm/machocc.sh' %s nm -u '%s/kernel' > '%s/undef'", root, arch, dir, dir); run(cmd);
     snprintf(path, sizeof path, "%s/undef", dir);
     if (stat(path, &st) || st.st_size != 0) die("unresolved kernel imports");
     snprintf(path, sizeof path, "%s/kernel", dir);

@@ -297,7 +297,11 @@ save System V nonvolatile GPRs across product code. Nine services are allocation
 free, byte copy/compare/fill/length and the two host callbacks; none is a compiler
 decision. The kernel's mutable execution state remains in its existing frames.
 
-blob.py uses the macOS assembler/static linker as an offline seed tool. It
+blob.py and seed/blob.c share machocc.sh as an offline seed-tool adapter:
+Apple cc/static linker on Darwin, clang/ld64.lld/llvm-nm on Linux (install
+LLVM clang, lld and llvm). The Mach-O container layout can differ by linker;
+C/Python must produce the same complete blob on the same host, and all existing
+PIC/entry/slot/import/relocation checks remain mandatory. It
 requires no unresolved import or runtime rebasing/binding, and extracts __TEXT
 through its last section. The service slot is bound before the mapping becomes
 RX. binding.c validates the ISA and byte extents, maps/copies/protects the code
