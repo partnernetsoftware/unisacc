@@ -37,7 +37,9 @@ done
 # variable truncated the list at the first suite that needed one and every suite
 # below it became invisible.  In list mode the value is a placeholder; in a real
 # run the hard requirement stands.
-if [ "$LIST" != 0 ]; then
+# 0.0.37: only the Rosetta suites (listed on Darwin/arm64 alone) read the provider, so a
+# Linux host runs its whole list without one; on Darwin/arm64 the requirement is unchanged.
+if [ "$LIST" != 0 ] || [ "$(uname -s)/$(uname -m)" != Darwin/arm64 ]; then
     UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-LIST-MODE-PLACEHOLDER}
 else
     : "${UNISACC_FFI_X86_PROVIDER:?set UNISACC_FFI_X86_PROVIDER to the x86_64 libffi provider}"
@@ -71,18 +73,25 @@ UA=${UA:-/tmp/ua_ref}; export UA
 . "$R/tests/lib.sh"; [ "$LIST" != 0 ] || ua_ready
 O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
 TC=$(ls tests/c/*.c)
-n=0
+n=0; PIDS=
 job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     name=$1; shift
     if [ "$LIST" = 1 ]; then echo "$name"; return; fi
     if [ "$LIST" = 2 ]; then printf '%s\0' "$name" "$#" "$@"; return; fi
     case " $SELECT " in *" $name "*) ;; *) return;; esac
-    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.1; done
+    # 0.0.37: count live children by PID -- `jobs -rp` is bash-only and, inside $(...), dash
+    # sees no jobs at all, so on a Linux /bin/sh every suite started at once (cloud host).
+    while :; do
+        live=; c=0
+        for p in $PIDS; do kill -0 "$p" 2>/dev/null && { live="$live $p"; c=$((c+1)); }; done
+        PIDS=$live; [ "$c" -lt "$JOBS" ] && break; sleep 0.1
+    done
     n=$((n+1)); f="$O/$(printf %03d $n).$name"
     ( t0=$(date +%s)
       out=$(python3 "$R/tests/bound.py" 60 env "$@" 2>&1); rc=$?
       printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(( $(date +%s)-t0 ))" \
           "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f" ) &
+    PIDS="$PIDS $!"
 }
 T0=$(date +%s)
 # longest first, so the tail of the run is short

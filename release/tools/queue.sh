@@ -35,7 +35,9 @@ fi
 cd "$W"
 [ -s "$SEED/unisacc-seed.com" ] || { echo "no $SEED/unisacc-seed.com"; exit 2; }
 [ -x "$UA" ] && [ -s "$D/unisacc-next.com" ] || { echo "missing UA or candidate"; exit 2; }
-: "${UNISACC_FFI_X86_PROVIDER:?set UNISACC_FFI_X86_PROVIDER}"
+# 0.0.37: the provider feeds only the Darwin/arm64 Rosetta suites (gate.sh); elsewhere it is not read
+[ "$(uname -s)/$(uname -m)" != Darwin/arm64 ] || : "${UNISACC_FFI_X86_PROVIDER:?set UNISACC_FFI_X86_PROVIDER}"
+UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-}
 # 0.0.37 speedup ①: one driver only -- a second queue.sh on this host would race this one's
 # stray-gatequeue kill; refuse instead of competing (0.0.36: hand-written resume loops).
 others=$(ps -eo pid=,ppid=,args= | awk -v me=$$ '$1!=me && $2!=me && /release\/tools\/queue\.sh/ && !/awk/ {print $1}')
