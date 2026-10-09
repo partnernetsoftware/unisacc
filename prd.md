@@ -231,6 +231,8 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 〔停工与恢复门槛，2026-10-09；政委令〕当前停工，未获准恢复。cc回报已停所属后台；未提交 seed/gen.c errors 修片与旧队列10/642保留。已写流程不等于已验收，更不自动授权重活。先确认残留/owner、实际完整组合清单、资源与收尾预算、证据字段、权限/平台负责人；流程独立复核后由政委明确恢复，才串行补预验，完整绿后再冻结候选。未补齐的 ASan/六目标 enc 不以旧部分绿替代。详见 release/RELEASE-PIPELINE.md §26；本次仅文档修订，无自动闸或新验收措辞变更。
 
+〔全链路日常执行，2026-10-09；政委/董秘令，cc 落实〕吸纳 cdx2 pipeline-speedup-full 与 v5：①全矩阵全绿→一次冻结→一次候选链；②权限/平台接收提前由非重活窗轻量准备，封存与 rc 后远端等待叠正式 queue，不倒序封存；③定向验分清 HEAD 与未提交、补 also/下游；④交接以生产者退出与 rc 为准，覆盖用调用位置差集，失败先分类；⑤重活单 owner、认领/释放确认。⑥（共享同源参考、precheck 拆分接入 chain）量完再做。细则 release/RELEASE-PIPELINE.md §27。
+
 ## 4. 质量体系
 
 - **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
