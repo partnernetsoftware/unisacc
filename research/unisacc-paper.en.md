@@ -141,6 +141,8 @@ Table 1 lists the 18 stages; it is generated from the truth tables and the const
 | combo | isel and abi merged into one table, as a control experiment (not on the main path) | op 74 × OS 3 × arch 2 | 15 heads | 444 | 100 | 1.000 |
 | **Total** | | | | **8,509** | **517** | |
 
+The **combo** row in Table 1 is a **control experiment** only: a hand-merged isel$\cup$abi truth table, not on the main ship path. Accuracy 1.000 on that row means only that the constructed network agrees with **that merged table's own declared finite domain** (the same T1 reading as every other row); it does **not** prove that arbitrary stage merges preserve T1, and does **not** claim merged hidden width equals $W_{\mathrm{isel}}+W_{\mathrm{abi}}$ (the printed Units cells already disagree with a naive sum---100 vs 74+52 here, 121 vs 88+69 in the Chinese Table 1---cited only as reading hygiene). Systematic merge and composition reachability, and the preregistered A2 RQ1 baseline $W^*\mathrel{:=}W_1+W_2$, belong to study A2; Paper A does not elevate the combo row into a merge theorem.
+
 ### 3.3 Deployment kernel and determinism
 
 ![Figure 1. Deterministic integer feed-forward network: verification path (top) and deployment kernel (bottom). The key space is a finite product $K$; the output is the class name given by strict argmax.](figures/fig1-deterministic-intnet.png)
