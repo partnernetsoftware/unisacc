@@ -116,6 +116,20 @@ with tempfile.TemporaryDirectory() as td:
             if rc!=75: break
     assert rc==1 and st['results']['hog']['rc']==142 and st['results']['quick']['rc']==0, (rc, st)
     assert all(r['limit']<=9 for r in st['results'].values()), 'a limit exceeded the parent span: %r'%st['results']
+    # full038b: four leftovers that ignore SIGTERM at the window's end are reaped within the tail budget;
+    # the whole tail (reaping, saves, refingerprint) is measured and reserved for the next window
+    stub='import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'
+    jobs={'deaf%d'%k:[sys.executable,'-c',stub] for k in range(4)}
+    t0=_t.monotonic(); rc=run('deaf',55,('--parent-deadline',str(_t.monotonic()+14))); took=_t.monotonic()-t0
+    st=json.loads((t/'deaf/results.json').read_text())
+    assert took < 14+1, 'window overran its parent deadline: %.1fs'%took
+    assert st.get('epilogue_max',0) > 0 and 'inflight' not in st or not st['inflight'], st.get('epilogue_max')
+    # full038b rounding: a fractional span (x.9 s) admitted at the window's start is a full attempt --
+    # recorded as such at admission -- so its timeout is a solo retry, not a tail-fill deferral
+    jobs={'frac':[sys.executable,'-c','import time; time.sleep(60)']}
+    assert run('frac',55,('--parent-deadline',str(_t.monotonic()+11.9)))==75
+    st=json.loads((t/'frac/results.json').read_text())
+    assert st.get('retried')==['frac'] and not st.get('deferred'), (st.get('retried'), st.get('deferred'))
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')
     # Exclusive jobs must precede and never overlap ordinary two-slot work.
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in

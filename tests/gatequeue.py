@@ -423,7 +423,10 @@ def main():
     active = {}; start = time.monotonic()
     t_jobs = start
     # 0.0.32: q15 -- a 54 s window plus the epilogue (provenance check, refingerprint) crossed term.sh's 60 s
-    epilogue = 4 if args.com else 2
+    # SCHEDULING-BEGIN (0.0.38 full038b: the wrap-up reserve is the slowest measured wrap-up plus 1 s,
+    # never less than before; a fixed 4 s let a loaded wrap-up overrun the outer bound)
+    epilogue = max(4 if args.com else 2, int(-(-(data.get('epilogue_max', 0) + 1) // 1)))
+    # SCHEDULING-END
     window = args.window - epilogue
     deadline = start + window
     # 0.0.38 P3: one deadline for every layer.  The parent's remaining time already paid for the
@@ -496,7 +499,10 @@ def main():
                 n = max(alone or fits, key=estimate); pending.remove(n)
                 # SCHEDULING-END
                 limit = max(1, int(left)-1)
-                data.setdefault('inflight', {})[n] = {'limit': limit}; atomic(path, data)
+                # 0.0.38: the attempt's kind is decided here, from the exact time left, and recorded --
+                # not rebuilt at exit from the rounded limit (full038b: 46 s attempts counted as tail fills)
+                kind = 'solo' if n in data.get('retried', []) else ('full' if left >= span - 3 else 'tail')
+                data.setdefault('inflight', {})[n] = {'limit': limit, 'kind': kind, 'left': round(left, 3)}; atomic(path, data)
                 log = (state/(n+'.log')).open('wb')
                 p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=execution_environment())
                 active[n] = (p, log, time.monotonic(), limit)
@@ -507,7 +513,8 @@ def main():
                 if rc is None: continue
                 log.close(); elapsed = time.monotonic()-t
                 progress = True
-                if rc == 142 and limit < span-3:
+                kind = data.get('inflight', {}).get(n, {}).get('kind', 'full')
+                if rc == 142 and kind == 'tail':
                     # A late fill used only the window remainder, not a full
                     # attempt. Keep it pending and give it an early slot next.
                     # 0.0.38 P3: deferring a job that already had its early slot is not progress
@@ -540,23 +547,35 @@ def main():
             if time.monotonic() >= deadline: break
             time.sleep(.05)
     finally:
-        # A signal/exception/window ending cannot leave tests behind.
+        t_tail = time.monotonic()   # 0.0.38: the tail budget starts here, reaping included
+        # A signal/exception/window ending cannot leave tests behind.  0.0.38 full038b: stop the leftovers
+        # together within one 2 s grace, then kill and wait at most 1 s more each (bound.py reaps its own
+        # process group); a 2 s wait per job in turn, raising on a slow one, overran the outer bound.
         for p, log, _, _ in active.values(): p.terminate()
+        grace = time.monotonic() + 2
+        for p, log, _, _ in active.values():
+            try: p.wait(timeout=max(0.05, grace - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                p.kill()
+                try: p.wait(timeout=1)
+                except subprocess.TimeoutExpired: print('queue: a killed job did not exit within 1 s', flush=True)
         for n, (p, log, t, limit) in active.items():
-            p.wait(timeout=2); log.close()
+            log.close()
             data['results'][n] = {'rc':142,'seconds':round(time.monotonic()-t,3),'limit':limit}
             data.get('inflight', {}).pop(n, None)
             data['window']['completed'] = data['window'].get('completed', 0) + 1
         # 0.0.38 P3: three windows in a row without a legal completion stop the driver
         data['stalled'] = 0 if data['window'].get('completed') else data.get('stalled', 0) + 1
         atomic(path,data)
-    t_epi = time.monotonic()
+    t_epi = t_tail
     if args.com:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
                         os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
     after = fingerprint(jobs)
     t_end = time.monotonic()
     data['window'].update(prologue_s=round(t_jobs-t_begin,3), jobs_s=round(t_epi-t_jobs,3), epilogue_s=round(t_end-t_epi,3))
+    # 0.0.38: remember the slowest whole tail (reaping, saves, provenance, fingerprint) for the next reserve
+    data['epilogue_max'] = round(max(data.get('epilogue_max', 0), t_end - t_tail), 3)
     atomic(path, data)
     stagelog_segments(args, t_begin, t_jobs, t_epi, t_end)
     if after != stamp:
