@@ -11,7 +11,7 @@
 ## 已有节点
 
 - A：基石。中文正文 `research/unisacc-paper.md`，修订中，未投稿。
-- A2：预注册 `research/a2-preregistration.md`（2026-10-02 冻结），没有正文。把 A 的 §7.3 里「构造对训练」搬出去。SGD 只作对照组。结果可以回来收窄 A 的说法，但不能长成第二套理论。
+- A2：预注册 `research/a2-preregistration.md`（2026-10-02 冻结），没有正文。把 A 的 §7.3 里「构造对训练」搬出去。SGD 只作对照组。结果可以回来收窄 A 的说法，但不能长成第二套理论。tip `2ec7664` 上该路径已不存在，正文在 `archive/research/a2-preregistration.md`（见 `research/seal-a2-prereg-presence-20261009.md`）。
 - B：UJS 应用短文，已有草稿，父节点是 A。
 - C：管道方法意向。D：可选内存安全节点，上游是 A 和 C。E：有限控制表的系统构造，不挡 A 投稿。优化还没起稿，上游是 A 和 E。wasm 还没起稿，只依赖 A。
 
