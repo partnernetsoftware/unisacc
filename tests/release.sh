@@ -56,6 +56,10 @@ if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-
 # here made gatequeue refuse the whole queue ("unknown exclusive suite", cloud Linux host)
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then exclusive+=(--exclusive-suite exec-memx86-ua-1); fi
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
+# 0.0.38: the seed generator jobs each hold GBs (parse2 variants, Python reference beside the C build);
+# four at once exhausted 16 GB on the cloud host -- the kernel OOM-killed other processes and the window
+# died from outside (full038, window 24).  They run alone; their limits are unchanged.
+for s in seedparse2-1 seedparse2-2 seedgen seedgen-2; do exclusive+=(--exclusive-suite "$s"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 # the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-x86_64); fi
