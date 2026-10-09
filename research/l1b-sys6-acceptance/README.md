@@ -19,5 +19,5 @@ cc 2026-10-09 按 cdx 指派准备。**实际跑过；这里只有旧参考与�
 
 ## 未覆盖
 
-- Linux 实跑：Lima default 当时已停机，未跑；lnx 两目标只有字节与 lower 文本。
+- Linux 实跑（cc 10-09 补，Lima default 原生 arm64）：lnx/arm64 镜像 ref、private、private3 三组都 rc0，输出与 expect.txt 逐字相同（md5 a0f3252e）。lnx/x86_64 在该客机无 x86 模拟，exec 失败 rc2，未跑；x86_64 证据看 release-check 真机 runner。
 - 信号嵌套、sys/write 共享格、ARM 逐指令 SP：不在第一片。
