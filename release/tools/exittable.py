@@ -41,18 +41,29 @@ def rulings(path):
     for line in text.splitlines():
         if line and not line.startswith('#'):
             suite, kind, sig, base, ref = (line.split('\t') + [''] * 5)[:5]
-            out[suite] = (kind, sig, base, ref)
+            out.setdefault(suite, []).append((kind, sig, base, ref))   # several rulings per suite add up
     return out
+
+
+ERRLINE = re.compile(r'(?i)(^|[\s=])error:')   # a diagnostic line (compiler, sanitizer); words elsewhere don't count
+
+
+def failure_lines(log):
+    """The real failure: the first diagnostic `error:` line and the log's last line (the exception or
+    verdict) -- not a word that happens to sit somewhere in its tail."""
+    lines = [l for l in log.splitlines() if l.strip()]
+    first = next((l for l in lines if ERRLINE.search(l)), '')
+    return [first, lines[-1] if lines else '']
 
 
 def ruled_match(name, r, log, rules):
     """The red is exactly what was ruled: same suite, same kind, same first-error signature."""
-    if name not in rules: return None
-    kind, sig, base, ref = rules[name]
-    got = 'INTERRUPTED' if r.get('status') == 'INTERRUPTED' or r.get('rc') in (None, 142) else 'FAILED'
-    if got != kind: return None
-    if sig and sig not in log[-4000:]: return None
-    return base
+    got = ('INTERRUPTED' if r.get('status') == 'INTERRUPTED' or r.get('rc') is None else
+           'TIMEOUT' if r.get('rc') == 142 else 'FAILED')       # its own limit is not an outside kill
+    where = failure_lines(log)
+    for kind, sig, base, ref in rules.get(name, []):
+        if kind == got and (not sig or any(sig in l for l in where)): return base
+    return None
 
 
 def classify(name, r, log, h1, rules=None):
