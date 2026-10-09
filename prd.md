@@ -1325,3 +1325,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔full038c 续跑再停，2026-10-10；实际跑过〕董秘授权后沿原 worktree 04a5087b/state 续跑：330→389/649，窗 8 四个 rowcov 同时运行（单个 rowcov 进程树实测 1.97 GB RSS，宿主可用 3–4 GB），无 OOM 但抖动至 62 s 超 term.sh 外层 60 s，P3 停滞保护 rc3。单一根因：内存重作业并发。修 8ef26efa：gatequeue --heavy-suite（调度准入，至多一个重作业，轻作业照常填槽），release.sh 标 50 个 rowcov 为重。待裁：该修片须在新 worktree 运行，而 04a5087b 之后 gatequeue 已有语义改动（7de2efa0），续跑将使 389 项身份失效，等同重开一轮。
 
 〔0.0.38 首次完整全量 queue，2026-10-10；实际跑过〕full038c 649/649 有结果，真实出口 rc1（有红，非绿链）；四段同一 state、代码身份分段（04a5087b→81a4ee4a；queue.sh a7b059dc）。窗内墙钟约 2 h 22 min/175 窗，每窗前后置约 3.6 s；浪费首位为 tail DEFER 175 次 4817 作业秒。分段与出口表见 research/c38-pipeline-baseline.md。待一次裁：出口表 57 项（附根因分组）。
+
+〔0.0.38 一次裁红请求，2026-10-10〕research/c38-ruling-request.md：full038c 出口表 NEEDS_RULING 57 项按根因分 A–H 组（宿主跳项 7、自举 self 超时 8、rowcov/lib-source 超时 20、其他超时 10、已裁套件新形态 2、门禁自身 1（已修）、产品/驱动功能红 4、其他 rc1 5），并列已有处置（H1 15、资源 UNKNOWN 6、宿主 77 6、BLOCKED 27 挂三根）与 verification 全量授权请求。未开第四轮、未进 Draft。
