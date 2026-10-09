@@ -1289,3 +1289,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 P7 Windows GP 子义务复核；实际跑过〕本机 gate 双子项：cross rc0（双 ISA 字节相同），native rc77（Darwin x86_64 执行宿主不满足），整体 rc4、不放行；hostcheck 分别 READY/UNVERIFIED，native 依赖显式声明 clang -arch x86_64。负例分别破坏 x86_64/arm64 导出字节，gate cross rc1、native rc77、整体 rc1，77 不吞已执行的失败；hostcheck 自检12项通过。native 真执行仍未在本机验证。
 
 〔0.0.38 lib-windows-gp 子义务拆分，2026-10-10；实际跑过〕cdx 40529934：lib-windows-gp 只做双 ISA cross-COFF 字节核验（本机真实 PASS），新增 lib-windows-gp-native 为 Darwin x86_64/Rosetta MS-ABI 桥执行（本机 rc77 UNVERIFIED）；损坏导出字节负例 cross rc1 不被 77 吞。gatedeps 3978ac47。待董秘一次裁：宿主真红 5（lib-windows-imports、lib-lifecycle、apps-real、proc-enum、lib-callable-catalog）与外层中断 2（exec-driver-language-2、exec-memory-cc-1）。
+
+〔董秘代裁 7 套件，2026-10-10〕5 个宿主真红记入 H2 基线（可在 H2 切口修，不挡收口）；exec-driver-language-2、exec-memory-cc-1 外层中断记入 H1 云机基线。不删测、不改验收、不抬限时、不重试到绿。plans H1/H2 行已记。
