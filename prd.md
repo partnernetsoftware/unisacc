@@ -1304,3 +1304,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔C2 g5 单元边界，2026-10-09；源码核查，补丁待验〕research/g5-typedef-leak记录a.c的文件域typedef code泄漏到b.c参数同名，交换单元顺序不报错。fe_units每单元重载token而未重置ntd；typedef名字可见性应按翻译单元隔离，不能靠增大MAXTD结算。L1′参考窗口并入此项，由cc准备补丁及顺序互换/不同同名typedef/前单元签名保留的对拍；δ另核对TDN/TDB/TDD/TDE等名字绑定的单元复位。结构描述与跨单元函数签名必须保留，行映射偏移另列，不混作typedef修复验收。排在L1b首片后，尚未修改生产输入。
 
 〔C2 g5 行数补丁审阅，2026-10-09；系统cc实跑，修后参考待验〕unsized-rows.patch用initrowsat(j,per)把每个独立字符串都计为完整外层行，但字符串可初始化指针元素或内层char数组，不能只按token判整行。反例const char *p[][2]={"a","b"}的sizeof为2*sizeof(void*)，char s[][2][4]={"a","b"}的sizeof为8；系统cc合并探针退出0。当前补丁按其扫描逻辑两者均算两行（未跑修后参考）；需携带元素类型/剩余维度，或对此精确拒绝，补对拍后再同窗落。bkscr写越界是独立后端缺陷，缩短此数组不能算边界防护完成。
+
+〔g5 头续行不只影响诊断，2026-10-09；出货产品与系统cc实跑〕包含research/g5-header-splice-line/m.h后，在主文件第3行return __LINE__ != 3，仓根unisacc.com -run退出1，系统cc编译执行退出0（临时源/tmp/cdx-g5-splice-line/line.c）。src/front_pp.c的line_at与diag_at均以ireg_ln/ireg_nl撤销include拼接，line_at还供__LINE__/__FILE__宏使用；不能按仅诊断、不影响代码收口。参考补丁需同步line_at/diag_at/头来源映射，产品E2位置记录与宏展开同规则；验收增加主文件/头内/嵌套头的LINE与FILE及CRLF续行，普通预处理文本不变与受影响宏值的修正须分别对拍。生产输入未改，仍排L1b首片后的窗口。
