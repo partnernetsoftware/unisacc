@@ -18,3 +18,9 @@ Acceptance acc/ (main file joins, header joins, nested header sub/n.h, CRLF head
 __FILE__): cc lines `15 4 3 3`; fixed reference `15 4 3 3`, rc 0; old reference and product 0.0.36
 `11 2 2 2`, rc 1.  __FILE__ spelling: cc says ./h1.h, we say h1.h (implementation-defined; acc
 compares ours).  e7 -> e7.c:3, e9 -> m2.h:4, zlib trees.c -> :159 (real line), cdx line.c rc 0.
+
+Review round 2 (cdx): the header-join table refuses when full (`unisacc: too many continuation lines in
+headers`, rc 1; big.h with 4100 joins) instead of dropping a record.  acc2/: `#line` inside a header with
+joins is refused (position now hl.h:3, old hl.h:2) -- and that refusal exited 0 (see ../g5-line-refusal-rc);
+two units a.c+b.c and b.c+a.c both print `5 3` like cc (old reference `3 3`: the first unit's joins
+leaked into the second).
