@@ -30,3 +30,4 @@
 - 隔离 WAIT 结束：董秘代裁选 1（改宿主 cgroup；不改测峰口径、不换机、禁 prlimit 兜底），background 已启用 memory 控制器。cc 10:04 实测包装 /tmp/cc38-memscope.sh（sha256 66c04dac1caf77f9…，仓外）：子组 memory.max + swap.max=0，以 uid 1000 运行；256M 限下 100 MiB 分配 rc0 peak 108158976；64M 限下 200 MiB 分配被 OOM 杀 rc137 oom_kill=1；子组用后删除。§24 采证 begin 另记（cdx）。
 - 测峰口径（cdx2）：每次尝试独立子组，先入组再 exec，不迁无关进程；memory.max 读回打印；memory.peak 是该子组 cgroup 记账峰值，与进程 RSS 分列；OOM（oom_kill 增量 + rc）照实保留，下界不当 PASS。
 - §24 矩阵采证 begin：2026-10-10T10:08:00+08:00（cdx 回执；WAIT 结束 10:04 分列）。memscope sha 66c04dac 已由 cdx 核对；每项 MAX=min(3GiB, MemAvailable−1GiB)；生产、参考、ASan 分别隔离；30 项串行，首红停。
+- 更正：10:08 的 begin 只是准备开始，不计作业——run.py 读 TSV 时 DictReader 漏了分隔符，首项前崩溃（KeyError flags），未执行任何一项。cdx 修好后重开矩阵，各项 begin 按实际记录（cdx 回执）。
