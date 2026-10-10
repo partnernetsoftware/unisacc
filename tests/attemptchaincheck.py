@@ -75,4 +75,9 @@ for bad in ([E(boot_id=None), F(boot_id=None)],            # no boot on either s
             [E(), E(run='OTHER', subphase='window-9'), F()]):   # same id begun in another run: end could be either's
     assert A.stage_windows(bad, 'R') == {1: None}, bad
 assert A.join_windows(wl, A.stage_windows(ev, 'R'), 3)['ends_outside_windows'] == 1
-print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, per-window join with stagelog (UNKNOWN wall never inferred), WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')
+lc = A.replay(['START x-1 limit=9 kind=tail', 'DEFER x-1 rc=142 4.00s', 'START x-1 limit=9 kind=full', 'DONE x-1 rc=0 6.00s',
+                'START y limit=9 kind=full', 'DONE y rc=0 10.00s'])
+lr = A.layers(lc, lambda n: 'stage' if n.startswith('x') else 'contract')
+assert lr['total_job_s'] == 20.0 and lr['layers'][0] == {'layer': 'stage', 'suites': 1, 'job_s': 10.0, 'share': 0.5, 'rework_s': 4.0}, lr
+assert {f['family']: f['rework_s'] for f in lr['families']} == {'x': 4.0, 'y': 0.0}, lr
+print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, per-window join with stagelog (UNKNOWN wall never inferred), layer/family job-seconds with rework, WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')

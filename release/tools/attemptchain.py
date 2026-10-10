@@ -10,7 +10,7 @@ Offline replay of a queue log into per-suite attempt chains; never runs or resum
 - --strict exits 1 on pending, unknown, evidence gaps or any reconcile difference;
 - job-seconds are not wall clock; near-limit passes are listed per kind and limit.
 With --results the replay is reconciled against the queue's results.json (suite count and final rc)."""
-import argparse, collections, json, re, sys
+import argparse, collections, importlib.util, json, pathlib, re, sys
 
 START = re.compile(r'START (\S+) limit=(\d+)(?: kind=(\w+))?')        # pre-0.0.38 logs have no kind
 END = re.compile(r'(DONE|DEFER) (\S+) rc=(\S+) ([\d.]+)s(.*)')
@@ -178,6 +178,25 @@ def join_windows(wins, walls, total_ends=None):
     return j
 
 
+def layers(chains, layer_of, top=12):
+    """Job-seconds by gate layer and by shard family, with the part spent on deferrals and non-final attempts
+    ('rework') beside it -- the targets for layering/folding/concurrency work.  Job-seconds, not wall clock."""
+    lay, lay_w, fam, fam_w, count = (collections.Counter() for _ in range(5))
+    for name, seq in chains.items():
+        try: l = layer_of(name)
+        except Exception: l = 'UNKNOWN'
+        count[l] += 1
+        for i, a in enumerate(seq):
+            sec = a['seconds'] or 0.0
+            lay[l] += sec; fam[family(name)] += sec
+            if a['outcome'].endswith('DEFER') or i != len(seq) - 1:
+                lay_w[l] += sec; fam_w[family(name)] += sec
+    total = sum(lay.values()) or 1.0
+    return {'total_job_s': round(total, 1),
+            'layers': [{'layer': k, 'suites': count[k], 'job_s': round(v, 1), 'share': round(v / total, 3), 'rework_s': round(lay_w[k], 1)} for k, v in lay.most_common()],
+            'families': [{'family': k, 'job_s': round(v, 1), 'share': round(v / total, 3), 'rework_s': round(fam_w[k], 1)} for k, v in fam.most_common(top)]}
+
+
 def reconcile(summary, results):
     res = results.get('results', {})
     diff = [n for n, rc in summary['final_rc'].items() if n in res and str(res[n].get('rc')) != str(rc)]
@@ -196,12 +215,22 @@ def strict_rc(s):
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument('log'); ap.add_argument('--results'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--exittable', help='WF5: exittable --json output to check rc-class conservation against')
+    ap.add_argument('--layers', action='store_true', help='job-seconds and rework by gate layer and shard family')
     ap.add_argument('--stagelog', help='WF5: stagelog events.jsonl for the per-window wall-clock join')
     ap.add_argument('--run', help='stagelog run id (e.g. q-ba3f40cb4fba)')
     ap.add_argument('--tail-risk', action='store_true', help='WF2: sibling-shard risk hints for tail deferrals')
     ap.add_argument('--strict', action='store_true', help='exit 1 on pending, unknown, evidence gaps or any reconcile difference')
     a = ap.parse_args(argv)
     chains = replay(open(a.log).read().splitlines())
+    if a.layers:
+        spec = importlib.util.spec_from_file_location('gatelayers', pathlib.Path(__file__).resolve().parents[2] / 'tests/gatelayers.py')
+        gl = importlib.util.module_from_spec(spec); spec.loader.exec_module(gl)
+        r = layers(chains, gl.layer)
+        if a.json: print(json.dumps(r, indent=1)); return 0
+        print('layers  total %.1f job-s (not wall clock); rework = deferrals + non-final attempts' % r['total_job_s'])
+        for x in r['layers']: print('  %-9s %4d suites %8.1f job-s %5.1f%%  rework %7.1f' % (x['layer'], x['suites'], x['job_s'], 100 * x['share'], x['rework_s']))
+        for x in r['families']: print('  family %-26s %8.1f job-s %5.1f%%  rework %7.1f' % (x['family'], x['job_s'], 100 * x['share'], x['rework_s']))
+        return 0
     if a.stagelog:
         if not a.run or a.tail_risk or a.strict or a.results or a.exittable: print('attemptchain: --stagelog needs --run and runs alone', file=sys.stderr); return 2
         total = sum(1 for l in open(a.log) if END.match(l))
