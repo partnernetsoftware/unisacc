@@ -20,6 +20,23 @@ case "${1:-}" in
     *) echo 'usage: MODEL_COM=file GATE_STATE=dir UA=reference tests/release.sh [--com]' >&2; exit 2;;
 esac
 [ "${SUITES:-1}" = 1 ] || { echo 'release: SUITES=0 cannot establish acceptance' >&2; exit 2; }
+# 0.0.40 (机房主任 20:55): RELEASE_SUITES="a b c" is an OBSERVATION of named suites, never acceptance.  Every name must
+# be a contract-layer suite of the --com plan (no product cache, so no warm-up), the run never writes RELEASE_OUT, a
+# formal run refuses its state, and a completed observation exits 65 (not 0/1/2/3/4/75/142).
+OBS=${RELEASE_SUITES:-}
+if [ -n "$OBS" ]; then
+    obs_names=$(printf '%s\n' $OBS | sort -u)
+    [ "$(printf '%s\n' $OBS | wc -l)" = "$(printf '%s\n' "$obs_names" | wc -l)" ] || { echo "release: RELEASE_SUITES repeats a name" >&2; exit 66; }
+    plan=$("$R/tests/gate.sh" --list --com 2>/dev/null) || { echo "release: cannot list the --com plan" >&2; exit 66; }
+    for n in $obs_names; do
+        printf '%s\n' "$plan" | grep -qxF "$n" || { echo "release: RELEASE_SUITES names $n, not in the --com plan" >&2; exit 66; }
+        layer=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tests"); import gatelayers as g; print(g.layer(sys.argv[2]))' "$R" "$n" 2>/dev/null) || layer=unknown
+        [ "$layer" = contract ] || { echo "release: RELEASE_SUITES names $n (layer $layer); an observation runs contract-layer suites only" >&2; exit 66; }
+    done
+    [ -z "${RELEASE_OUT:-}" ] || { echo "release: an observation never writes RELEASE_OUT" >&2; exit 66; }
+elif [ -f "${GATE_STATE:-/nonexistent}/observation.json" ]; then
+    echo "release: $GATE_STATE holds an observation run; a formal run never continues it" >&2; exit 66
+fi
 : "${MODEL_COM:?explicit already-built candidate required}"
 : "${GATE_STATE:?explicit persistent private queue directory required}"
 : "${UA:?explicit existing private reference required}"
@@ -94,18 +111,30 @@ dirty=$(cd "$R" && git status --porcelain -- $DECLARED 2>/dev/null | head -3)
 [ -z "$dirty" ] || { printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty" >&2; exit 1; }
 [ -z "${cid:-}" ] || sl end --id "$cid" --execution-status release-checks
 # 0.0.22/0.0.38: cache warm-ups, one step per window, markers only for a built cache (release/tools/warmup.sh)
-"$R/release/tools/warmup.sh" "$GATE_STATE" "$R" || exit $?
+if [ -n "$OBS" ]; then
+    printf '{"observation": true, "suites": [%s], "acceptance": false}\n' "$(printf '"%s",' $obs_names | sed 's/,$//')" > "$GATE_STATE/observation.json"
+    echo "release: OBSERVATION ONLY ($(echo $obs_names)); warm-ups skipped (contract-layer suites build no cache); not acceptance"
+else
+    "$R/release/tools/warmup.sh" "$GATE_STATE" "$R" || exit $?
+fi
 deadline=(); [ -n "${RELEASE_DEADLINE:-}" ] && deadline=(--parent-deadline "$RELEASE_DEADLINE")
 # 0.0.38 P6: the stage log names reach the scheduler as arguments, never the suites' environment
 [ -n "${STAGELOG_RUN:-}" ] && [ "$STAGELOG_RUN" != 0 ] && deadline+=(--stagelog-run "$STAGELOG_RUN" --stagelog-parent "${STAGELOG_PARENT:-}")
-env -u RELEASE_DEADLINE -u STAGELOG_RUN -u STAGELOG_PARENT python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" "${deadline[@]}" --state "$GATE_STATE" || rc=$?
+if [ -n "$OBS" ]; then
+    kept=(); sel=()
+    for n in $obs_names; do sel+=(--suite "$n"); done
+    i=0; while [ $i -lt ${#exclusive[@]} ]; do f=${exclusive[$i]}; v=${exclusive[$((i+1))]}; i=$((i+2))
+        printf '%s\n' $obs_names | grep -qxF "$v" && kept+=("$f" "$v"); done
+    exclusive=(${kept[@]+"${kept[@]}"})
+fi
+env -u RELEASE_DEADLINE -u STAGELOG_RUN -u STAGELOG_PARENT -u RELEASE_SUITES python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 ${exclusive[@]+"${exclusive[@]}"} ${sel[@]+"${sel[@]}"} "${deadline[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
 [ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
 case "$rc" in
     75) echo "local acceptance PENDING: repeat with GATE_STATE=$GATE_STATE; release NOT ready"; exit 75;;
     3) echo "local acceptance STALLED/UNSCHEDULABLE (rc=3): diagnose before repeating; release NOT ready" >&2; exit 3;;
     4) echo "local acceptance INCOMPLETE: UNVERIFIED suites remain (listed in the queue log); release NOT ready" >&2; exit 4;;
-    0) ;;
+    0) [ -z "$OBS" ] || { echo "OBSERVATION ONLY: named suites ($(echo $obs_names)) completed; not acceptance; release NOT ready (rc 65)"; exit 65; };;
     *) echo "local acceptance FAILED (rc=$rc); release NOT ready" >&2; exit "$rc";;
 esac
 python3 - "$GATE_STATE" "$MODEL_COM" "$before" "${RELEASE_OUT:-}" <<'CHECK'

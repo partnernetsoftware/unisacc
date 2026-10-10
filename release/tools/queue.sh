@@ -84,14 +84,15 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
   done
   [ -z "$waid" ] || st wait --action end --run "$SL" --phase queue --reason gatequeue-alive --id "$waid" >/dev/null
   wid=; [ -z "$SL" ] || wid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --subphase "window-$i" --parent-id "$qid" 2>/dev/null) || :
-  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$Q" STAGELOG_RUN="${SL:-0}" STAGELOG_PARENT="${wid:-}" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
+  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" RELEASE_SUITES="${QUEUE_SUITES:-}" GATE_STATE="$Q" STAGELOG_RUN="${SL:-0}" STAGELOG_PARENT="${wid:-}" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"
   [ -z "$SL" ] || python3 "$R/release/tools/stagelog.py" end --id "$wid" --rc "$rc" --execution-status "window-rc-$rc" >/dev/null 2>&1 || :
   # 0.0.38 P6: the state backup between windows is its own segment (outside the window)
   bid=; [ -z "$SL" ] || bid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --subphase backup --parent-id "$qid" 2>/dev/null) || :
   backup
   [ -z "$bid" ] || python3 "$R/release/tools/stagelog.py" end --id "$bid" --execution-status backup >/dev/null 2>&1 || :
-  case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
+  # 0.0.40: 65 = a completed observation (QUEUE_SUITES), 66 = an observation refused; neither continues
+  case $rc in 0|65|66) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
   # 0.0.28 R1 (owner rule): the 5-minute load at or above QUEUE_LOAD_MAX (6) for ten minutes pauses
   # the queue at a window boundary until it falls below QUEUE_LOAD_RESUME (4); results are kept.
   # Built in because the 0.0.27 external watcher missed once and killed the wrong PID once.

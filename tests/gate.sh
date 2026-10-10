@@ -82,7 +82,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
-          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|queuetimeout|gatesummary|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
+          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|queuetimeout|gatesummary|observation|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
           seedparse2-1|seedparse2-2|seedgen|seedgen-2|seedgen-3|seedgen-4|com-seedgen) req="native-posix|host|seed-memory:$name|cdx|fresh-memory-admission";;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
@@ -164,6 +164,7 @@ job queuestart-strict python3 ./tests/queuestartcheck.py   # 0.0.40: fresh refus
 job queuestart-launch ./tests/queuestartlaunchcheck.sh   # 0.0.40: the real queue.sh entry refuses a wrong start with zero window launches (fake launcher)
 job queuetimeout ./tests/queuetimeoutcheck.sh   # 0.0.40: window timeouts (142/124) at the real queue.sh never turn green; state kept (fake launcher)
 job gatesummary ./tests/gatesummarycheck.sh   # 0.0.40: the gate summary reads only the leading suite rc field (fixture result lines)
+job observation ./tests/observationcheck.sh   # 0.0.40: RELEASE_SUITES observation scope refused (66) before scheduling; never acceptance
 job docedit python3 ./tests/doceditcheck.py   # 0.0.40: ledger appends keep the old text as an exact prefix; the 0586f01a truncating write is RED
 job whyrerun python3 ./tests/whyreruncheck.py   # 0.0.39: invalidation explainer (reasons per suite)
 job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fetch identity checks
