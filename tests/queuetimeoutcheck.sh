@@ -25,9 +25,9 @@ sed -i.bak "s#__T__#$T#" "$W/tests/term.sh" && rm -f "$W/tests/term.sh.bak"; chm
 run() {   # run RCS WINDOWS NAME -> prints "rc launches"; state in $T/q-NAME
   rm -f "$T/launches"; printf '%s\n' $1 > "$T/rcs"; Q=$T/q-$3
   env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-$3" QUEUE_STATE="$Q" \
-    QUEUE_WINDOWS="$2" UNISACC_FFI_X86_PROVIDER=/nonexistent timeout 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1
-  cp "$T/out" "$T/out-$3"
-  echo "$? $(wc -l < "$T/launches" | tr -d ' ')"
+    QUEUE_WINDOWS="$2" UNISACC_FFI_X86_PROVIDER=/nonexistent timeout 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; qrc=$?
+  cp "$T/out" "$T/out-$3" || { echo "copy-failed 0"; return; }
+  echo "$qrc $(wc -l < "$T/launches" | tr -d ' ')"
 }
 kept() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d['results'].get('a')=={'rc':0} else 1)" "$T/q-$1/results.json"; }
 set -- $(run "142" 1 one);   [ "$1" = 142 ] && [ "$2" = 1 ] || fail "one window, 142: rc=$1 launches=$2 (want 142/1, no second window)"
