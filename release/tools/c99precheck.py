@@ -79,7 +79,22 @@ def verdicts(text, rows, rc=None):
 
 def entity(cmd):
     """The file a command name resolves to on PATH (a launcher script stays itself; never parsed)."""
-    return os.path.realpath(subprocess.check_output(['sh', '-c', 'command -v ' + cmd], text=True).strip())
+    import shutil
+    path = shutil.which(cmd)
+    if not path: raise SystemExit('c99precheck: %r not found on PATH' % cmd)
+    return os.path.realpath(path)
+
+
+def backend(path):
+    """A wrapper is not its compiler: only the registered launcher (release/c38-host-launcher.json) is mapped to
+    its recorded target; any other script is reported unmapped rather than parsed."""
+    try: rec = json.load(open(ROOT / 'release/c38-host-launcher.json'))
+    except Exception: rec = {}
+    if rec and sha(path) == rec.get('sha256'):
+        return {'registered_launcher': 'release/c38-host-launcher.json', 'target': rec.get('target_realpath'),
+                'target_sha256': rec.get('target_sha256'), 'target_now_sha256': sha(rec['target_realpath']) if rec.get('target_realpath') and os.path.exists(rec['target_realpath']) else None}
+    with open(path, 'rb') as f: script = f.read(2) == b'#!'
+    return 'UNMAPPED wrapper script' if script else 'native executable'
 
 
 def identity(ua, rows, group_path):
@@ -87,8 +102,9 @@ def identity(ua, rows, group_path):
     sys.path.insert(0, str(ROOT / 'exec/c')); import provenance
     return {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
             'source_digest': provenance.source_digest(), 'ua_sha256': sha(ua), 'cc': cc,
-            'tools': {'oracle_cc': os.environ.get('CC', 'cc'), 'oracle_cc_realpath': entity(os.environ.get('CC', 'cc')),
-                      'oracle_cc_sha256': sha(entity(os.environ.get('CC', 'cc'))),   # runtime: difftest_o's ${CC:-cc} reference
+            'tools': {'oracle_cc': (os.environ.get('CC') or 'cc'), 'oracle_cc_realpath': entity((os.environ.get('CC') or 'cc')),
+                      'oracle_cc_sha256': sha(entity((os.environ.get('CC') or 'cc'))),   # runtime: difftest_o's ${CC:-cc} reference
+                      'oracle_cc_backend': backend(entity(os.environ.get('CC') or 'cc')),
                       'difftest_o.sh': sha(ROOT / 'tests/difftest_o.sh'), 'build_ref.sh': sha(ROOT / 'tests/build_ref.sh'),
                       'c99precheck.py': sha(__file__), 'cflags': os.environ.get('CFLAGS', '-O2')},
             'group_sha256': sha(group_path), 'probes': {r['probe']: sha(ROOT / r['probe']) for r in rows}}
