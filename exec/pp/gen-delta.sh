@@ -18,7 +18,8 @@ for a in "$@"; do
     case "$seen" in *" $a "*) echo "exec/pp/gen-delta.sh: $a given twice" >&2; exit 2;; esac
     seen="$seen$a "
 done
-case "$seen" in *" --osx "*" --win "*|*" --win "*" --osx "*) echo "exec/pp/gen-delta.sh: --osx and --win exclude each other" >&2; exit 2;; esac
+# each member on its own: the two flags may sit next to each other and share one separating space
+case "$seen" in *" --osx "*) case "$seen" in *" --win "*) echo "exec/pp/gen-delta.sh: --osx and --win exclude each other" >&2; exit 2;; esac;; esac
 B=$R/tests/bound
 case "${SEED_GEN-1}" in
     0) exec "$B" 55 python3 exec/build/gen.py pp "$OUT" "$@";;

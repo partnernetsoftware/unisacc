@@ -138,7 +138,7 @@ evw "NEG-osxwin rc py=$py_rc c=$c_rc  kind py=semantic-exclusion c=unsupported-l
 D=$W/exec/pp/gen-delta.sh
 gd() { out=$1; shift; rm -f "$out"; env "$@" sh "$D" "$out" 2>"$S/gd.err"; }
 gda() { out=$1; shift; rm -f "$out"; env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$out" "$@" 2>"$S/gd.err"; }
-for bad_flags in "--o2" "--osx --osx" "--osx --win" "--win --arm64 --osx" "osx"; do
+for bad_flags in "--o2" "--osx --osx" "--osx --win" "--win --osx" "--win --arm64 --osx" "--osx --arm64 --win" "osx"; do
     gda "$S/bf.json" $bad_flags; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/bf.json" ]; } && ok "helper refuses '$bad_flags'" || no "helper did not refuse '$bad_flags' (rc=$r)"
 done
