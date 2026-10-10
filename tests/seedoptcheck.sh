@@ -3,7 +3,8 @@
 # exec/opt/gen-delta.sh prefers seed-gen with no silent Python fallback.  Does not change exec/opt/check.sh.
 # 0.0.40 (机房主任 23:41): everything runs in a private scratch tree (git archive of HEAD), never the checkout:
 # the negative mutates the scratch copy only, an EXIT/INT/TERM/HUP trap removes the scratch, and the checkout's
-# rounds-result.tsv is hashed before and after (conserved).  usage: tests/seedoptcheck.sh
+# rounds-result.tsv is hashed before and after (conserved).  23:47: default-route cache key is seed/*.[ch]
+# content hash (not gen.c mtime); a json.h-only edit in the scratch must rebuild.  usage: tests/seedoptcheck.sh
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 S=$(mktemp -d "${TMPDIR:-/tmp}/seedopt.XXXXXX") || exit 2
@@ -12,9 +13,14 @@ trap 'exit 130' INT TERM HUP
 NEG=exec/opt/rounds-result.tsv
 before=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$NEG") || exit 2
 W=$S/tree; mkdir "$W"
-git archive HEAD exec seed unisa tests/bound tests/bound.c | tar -x -C "$W" || { echo "seedopt: scratch tree failed"; exit 2; }
+# archive to a file first: a failing git archive must not hide behind tar's status
+H=$(git rev-parse --verify HEAD) || exit 2   # the one commit this run is about; every copy comes from it
+echo "seedopt  tree $H"
+git archive -o "$S/tree.tar" "$H" exec seed unisa tests/bound tests/bound.c tests/bound.py || { echo "seedopt: git archive failed"; exit 2; }
+tar -x -C "$W" -f "$S/tree.tar" || { echo "seedopt: scratch tree failed"; exit 2; }
 cd "$W" || exit 2
 B=$W/tests/bound
+BOUND_CACHE=$S/boundcache; export BOUND_CACHE   # the bound helper is built inside the scratch, not the shared cache
 G=$S/seed-gen
 "$B" 55 cc -std=c99 -O2 -w -Iseed -o "$G" seed/gen.c || { echo "seedopt: gen.c does not build"; exit 1; }
 same=0; bad=0
@@ -67,7 +73,7 @@ grep -q 'expected section plus four columns' "$S/neg-py.err" || no "NEG Python r
 grep -q 'section rule column count' "$S/neg-c.err" || no "NEG C refuse not named ($(tail -1 "$S/neg-c.err"))"
 [ ! -e "$S/neg-py.json" ] && [ ! -e "$S/neg-c.json" ] || no "NEG wrote output despite refuse"
 echo "NEG refuse  py_rc=$py_rc c_rc=$c_rc"
-(cd "$R" && git archive HEAD "$NEG") | tar -x -C "$W" || exit 2   # restore the scratch copy for the helper checks
+tar -x -C "$W" -f "$S/tree.tar" "$NEG" || exit 2   # restore the scratch copy for the helper checks
 
 # gen-delta.sh (the scratch copy, so its R is the scratch tree): no silent fallback, 0/1 only, no extra flags
 D=$W/exec/opt/gen-delta.sh
@@ -90,9 +96,24 @@ for l in o1 o2; do
     if [ "$l" = o2 ]; then env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$S/h-$l.json" --o2; else env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$S/h-$l.json"; fi
     r=$?; { [ "$r" -eq 0 ] && cmp -s "$S/h-$l.json" "$S/py-$l.json"; } && ok "helper-$l" || no "helper-$l (rc=$r)"
 done
-# the default route (no SEED_GEN_BIN) builds its own keyed seed-gen into a private directory and matches too
-rm -f "$S/dflt.json"; env SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$S/dflt.json"; r=$?
-{ [ "$r" -eq 0 ] && cmp -s "$S/dflt.json" "$S/py-o1.json"; } && ok "default-route o1" || no "default-route o1 (rc=$r)"
+# the default route: SEED_GEN_BIN removed from the environment, so gen-delta must build its own keyed seed-gen
+# into a fresh private directory (exactly one seed-gen-KEY with its .sha256 appears) and match the reference
+for l in o1 o2; do
+    rm -rf "$S/seedbin-$l" "$S/dflt-$l.json"
+    if [ "$l" = o2 ]; then env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin-$l" sh "$D" "$S/dflt-$l.json" --o2
+    else env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin-$l" sh "$D" "$S/dflt-$l.json"; fi
+    r=$?; n=$(ls "$S/seedbin-$l" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}$')
+    { [ "$r" -eq 0 ] && [ "$n" -eq 1 ] && cmp -s "$S/dflt-$l.json" "$S/py-$l.json"; } && ok "default-route $l (own keyed build)" || no "default-route $l (rc=$r builds=$n)"
+done
+# cache key is content of seed/*.[ch] (not gen.c mtime): unchanged reuses the keyed binary; json.h-only must rebuild
+bins0=$(ls -1 "$S/seedbin"/seed-gen-* 2>/dev/null | wc -l | tr -d ' ')
+rm -f "$S/dflt2.json"; env SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$S/dflt2.json"; r=$?
+bins1=$(ls -1 "$S/seedbin"/seed-gen-* 2>/dev/null | wc -l | tr -d ' ')
+{ [ "$r" -eq 0 ] && [ "$bins1" = "$bins0" ] && cmp -s "$S/dflt2.json" "$S/py-o1.json"; } && ok "default-route cache hit" || no "default-route spurious rebuild (rc=$r bins $bins0->$bins1)"
+printf '\n/* seedopt: json.h cache probe */\n' >> seed/json.h
+rm -f "$S/hdr.json"; env SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$S/hdr.json" 2>"$S/gd.err"; r=$?
+bins2=$(ls -1 "$S/seedbin"/seed-gen-* 2>/dev/null | wc -l | tr -d ' ')
+{ [ "$r" -eq 0 ] && [ "$bins2" -gt "$bins1" ] && cmp -s "$S/hdr.json" "$S/py-o1.json"; } && ok "json.h-only rebuild" || no "json.h-only did not rebuild (rc=$r bins $bins1->$bins2)"
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$NEG") || exit 2
