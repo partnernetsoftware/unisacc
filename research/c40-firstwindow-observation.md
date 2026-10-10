@@ -24,3 +24,14 @@
 ## 失败与未解释项（如实保留）
 - 第一次尝试（/tmp/cc40-prep/firstwindow，STAGELOG_RUN=fw40-210213）在 21:02:13 启动：回执 fresh/restored=no 已写出，但 release-queue.log 一直为空，被外层 timeout 58 杀掉（exit 124）。随后同一命令再跑两次（STAGELOG_RUN=0 一次，stage log 打开一次）都在约 2 s 内完成，rc 65。首次的阻塞点后经 stage log 定位（21:1x 补记）：run fw40-210213 只有 queue begin、setup begin 和一条 `wait-begin reason=gatequeue-alive`（13:02:14Z），**没有 wait-end**，即 queue.sh 停在“宿主上另有 gatequeue.py 存活”的等待循环里（queue.sh 最多等 90×2 s），直到被外层 58 s 杀掉。当时是哪个 gatequeue 进程仍为 UNKNOWN（事后 ps 已无）。observationcheck 的一次间歇挂起（exit 142、零启动）症状相同，两次重跑均绿。
 - 本次只观察了接线。这不是产品验收，也不证明全量 queue 的行为。真实计时器下的超时首窗仍然缺。
+
+## 新 helper 的真实首窗（firstwindow4，2026-10-10 21:26；机房主任 21:25）
+
+- 树 87eb16ee（含 gqalive.py 进程闸），status 0；候选 2b20f4b2…、UA fd8f3877…、正式白名单 0 行；`--list-selection` 恰好输出三名；运行前 `gqalive.py` rc=1（无在跑 gatequeue）。
+- 这次发起运行的 shell 自身命令文本含 `gatequeue.py`（旧逻辑下会自等），新逻辑未被它阻塞。
+- 回执：mode=fresh、restored=no、source=none、artifact 2b20f4b2…；“backup … left untouched (backup not read)”。
+- release.sh：“OBSERVATION ONLY (checkrun docedit queuestart-strict); warm-ups skipped …; not acceptance”。
+- 逐项：START×3；DONE checkrun rc=0（0.10 s）、docedit rc=0（0.25 s）、queuestart-strict rc=0（1.11 s）；queue: 3/3 completed；window 1 rc=65、final rc=65，“OBSERVATION ONLY … not acceptance; release NOT ready (rc 65)”；observation.json acceptance=false。
+- stage log（run fw4-212610，按 id 配对，同 boot_id）：9 个 begin 全部有 end——queue（4.328 s，rc 65）、setup（0.55 s）、**wait-begin/wait-end reason=gatequeue-alive（13:26:11Z→13:26:11Z，0.066 s）**、window-1（3.492 s，rc 65）、release-checks、prologue、jobs（1.113 s）、epilogue、backup。
+- 证据：/tmp/cc40-prep/firstwindow4（run.log、state/、stage-pairs.txt、run-id）。
+- 仍单列：真实计时器触发的超时首窗；BSD ps 按空白切分 argv 非无损；21:02 首窗卡住的进程 UNKNOWN。firstwindow3 不作为本节证据。
