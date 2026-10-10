@@ -3668,6 +3668,35 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(cmd, "context-index")) {
+        /* Dev only: bind the owned DIR like agent-owned, print the context packet
+         * once, then return ownership. check.sh diffs it against a golden. */
+        static tui_state st;
+        static reload_io_token token;
+        char why[256];
+        char *packet = NULL;
+        if (argc != 5) {
+            printf("usage: context-index DIR SESSION HASH\n");
+            return 64;
+        }
+        if (tui_owned_start(&st, argv[2], argv[3], argv[4], NULL, NULL, &token, why, sizeof why) != 0) {
+            printf("owned startup refused: %s\n", why);
+            return 1;
+        }
+        if (!tui_context_index(&st, &packet) || !packet) {
+            printf("context index failed\n");
+            tui_owned_close(&st, why, sizeof why);
+            return 1;
+        }
+        printf("%s\n", packet);
+        free(packet);
+        if (tui_owned_close(&st, why, sizeof why) != 0) {
+            printf("ownership return not confirmed: %s\n", why);
+            return 1;
+        }
+        return 0;
+    }
+
     if (!strcmp(cmd, "run") || !strcmp(cmd, "agent") ||
         !strcmp(cmd, "agent-owned") || !strcmp(cmd, "resume-agent") ||
         !strcmp(cmd, "agent-managed") || !strcmp(cmd, "standby-managed")) {

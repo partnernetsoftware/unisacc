@@ -54,5 +54,17 @@ else
     echo "FAIL 4: cc build/selftest"; grep -m3 -E 'error|undefined' "$TMP/cc_build.log"; tail -3 "$TMP/cc_selftest.log" 2>/dev/null; rc=1
 fi
 
+# 5. context-index golden: owned fixture (two notices, fixed mtimes) through the real
+#    tui_context_index path. Normalized: monotonic captured_ms, temp owned dir, runtime cwd.
+if mkdir -p "$TMP/ci" && python3 fixtures/context_index_fixture.py "$TMP/ci/owned" \
+   && ./csih.sh context-index "$TMP/ci/owned" csih2 "$(printf 'a%.0s' $(seq 64))" > "$TMP/ci/raw.json" 2> "$TMP/ci/err.log" \
+   && sed -e 's|"captured_ms":[0-9]*|"captured_ms":<MS>|' -e "s|$TMP/ci/owned|<DIR>|g" \
+          -e "s|\"turn_start_cwd\":\"$ROOT\"|\"turn_start_cwd\":\"<CWD>\"|" "$TMP/ci/raw.json" > "$TMP/ci/norm.json" \
+   && cmp -s "$TMP/ci/norm.json" fixtures/context_index.golden.json; then
+    echo "ok   5: context-index packet matches golden"
+else
+    echo "FAIL 5: context-index golden mismatch (see $TMP/ci/norm.json vs fixtures/context_index.golden.json)"; head -c 400 "$TMP/ci/err.log" 2>/dev/null; rc=1
+fi
+
 [ $rc -eq 0 ] && echo "check ok" || echo "check FAILED"
 exit $rc
