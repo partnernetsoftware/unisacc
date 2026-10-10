@@ -69,5 +69,14 @@ chmod -x weights/gold.tsv
 printf '#!/bin/sh\necho staged > weights/gold.tsv; git add weights/gold.tsv; git checkout -q -- weights/gold.tsv 2>/dev/null; exit 0\n' > stage; chmod +x stage
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/stage "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1
 [ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "an index change during the gate was committed"
+mkdir -p weights/m && echo m > weights/m/one.tsv && git add weights/m/one.tsv
+printf '#!/bin/sh\necho n > weights/m/two.tsv\nexit 0\n' > addm; chmod +x addm
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/addm "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- weights/m > /dev/null 2>&1
+[ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a member added under the pathspec during the gate was committed"
+rm -f weights/m/two.tsv
+printf '#!/bin/sh\nrm -f weights/m/one.tsv\nexit 0\n' > delm; chmod +x delm
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/delm "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- weights/m > /dev/null 2>&1
+[ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a member deleted under the pathspec during the gate was committed"
+git checkout -q -- weights/m/one.tsv
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1 || fail "stable covered input was not committed"
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified, directory refused); inputs changed during the gate (content, mode, index) rc 4, no commit"
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit"

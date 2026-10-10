@@ -67,6 +67,9 @@ top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "commitgate: not in a
 log=$(mktemp "${TMPDIR:-/tmp}/commitgate.XXXXXX")
 # 0.0.40-prep (机房主任 18:28): the committed inputs must be the checked inputs -- index entry (mode/blob/stage),
 # working-tree bytes and mode, and membership of every given path are snapshotted before and after the gate.
+# Boundary (named): only the COMMITTED pathspecs are bound; a suite's other inputs, its gatedeps declaration and
+# its tools are not snapshotted here.  Coverage is declaration-level (gatedeps), not proof of assertion
+# semantics or of a valid reviewed stamp.
 snap() { python3 - "$@" <<'PY_SNAP'
 import hashlib, os, subprocess, sys
 h = hashlib.sha256()
