@@ -15,7 +15,7 @@
 - 宿主不适用（rc77，覆盖义务保留）：exec-bootstrap-osxarm、exec-bootstrap-osxx86、lib-stack-arm、lib-stack-x86、lib-stack-x86-hostabi、lib-windows-gp-native
 - 未执行义务（内存证据 UNKNOWN，rc2）：com-seedgen、seedgen-2、seedgen-3、seedgen-4、seedparse2-1、seedparse2-2
 - 前驱失败未执行（BLOCKED 27，随根处置）：挂 rowcov-parse2-build、rowcov-enc 等根。
-- gate-infra：出口时因 gatedeps 已审核哈希过时为红（原账 NEEDS_RULING 1 保留），28633d5e 刷新后具名补验 rc0，机房主任代裁结案。
+- gate-infra：**NEEDS_RULING**（机房主任代裁口径）。出口时因 gatedeps 已审核哈希过时为红；28633d5e 仅刷新哈希，未真重审，不作具名补验；刷新后单项 rc0 只是事实记录。
 
 ## 顺延
 K2a、K1、F4″、COV1、K2b、K2c、H37、X3、L2、L1′、L1b′、A1、N1 → 0.0.39；W2、E57 → 有 Windows 双 ISA 真宿主的版本；H1/H2 跨版进行。
