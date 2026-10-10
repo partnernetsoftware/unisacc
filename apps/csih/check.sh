@@ -69,5 +69,22 @@ else
     echo "FAIL 5: context-index golden mismatch (see $TMP/ci/norm.json vs fixtures/context_index.golden.json)"; head -c 400 "$TMP/ci/err.log" 2>/dev/null; rc=1
 fi
 
+# 6. whole flat file table under ASan+UBSan: build with cc, run selftest, no sanitizer report.
+#    Same table as csih.sh; .cx copied to temp .c (cc only takes .c). Reports fail the gate.
+if cc -std=c99 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -w -I cc -I . \
+      -include json.h -include csih_cols.h -include csih_home.h \
+      tui.c render.c term.c chat.c clock.c tools.c "$TMP/cols.c" "$TMP/home.c" file.c shell.c edit.c gate.c "$TMP/json.c" \
+      session.c agent.c plugin.c net.c \
+      reload_state.c reload_session_decode.c reload_session_encode.c reload_io.c reload_load.c \
+      reload_consume.c journal_checkpoint.c reload_owner.c csih_message.c csih_message_io.c context_index.c \
+      -o "$TMP/csih_asan" -lcurl -lm -ldl > "$TMP/asan_build.log" 2>&1 \
+   && "$TMP/csih_asan" selftest > "$TMP/asan_selftest.log" 2>&1 \
+   && tail -1 "$TMP/asan_selftest.log" | grep -q 'selftest ok' \
+   && ! grep -q 'AddressSanitizer\|runtime error' "$TMP/asan_selftest.log"; then
+    echo "ok   6: flat table ASan+UBSan build + selftest ok, no sanitizer report"
+else
+    echo "FAIL 6: ASan+UBSan flat build/selftest"; grep -m3 -E 'error|AddressSanitizer|runtime error' "$TMP/asan_build.log" "$TMP/asan_selftest.log" 2>/dev/null; rc=1
+fi
+
 [ $rc -eq 0 ] && echo "check ok" || echo "check FAILED"
 exit $rc
