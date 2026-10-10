@@ -22,8 +22,12 @@ c=d.get('courts') or {}
 for court in ('six-native-cells-final-bytes','windows-defender-final-bytes'):
     r=c.get(court) or {}
     if r.get('conclusion')!='success' or not r.get('run_id'): no('court %s has no successful run' % court)
-s=c.get('six-native-cells-final-bytes',{}).get('cells_public_sha256')
-if s is not None and s!=want: no('six-native court tested other bytes')
+six=c.get('six-native-cells-final-bytes',{})
+if six.get('cells_public_sha256')!=want: no('six-native court does not name the signed bytes')
+if six.get('cells')!=6: no('six-native court did not cover six cells')
+de=c.get('windows-defender-final-bytes',{})
+if de.get('final_sha256')!=want: no('defender court does not name the signed bytes')
+if not de.get('cells'): no('defender court names no scanned cells')
 if not (c.get('owner-promotion') or {}).get('authority'): no('owner-promotion has no named authority')
 open_items=[x.get('item') for x in d.get('pending',[]) if x.get('state')!='RESOLVED']
 if open_items: no('acceptance receipt has pending items: %s' % ', '.join(map(str,open_items)))

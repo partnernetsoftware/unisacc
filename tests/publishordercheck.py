@@ -42,8 +42,8 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     def acceptance(eligible, signed, **drop):
         rec = {'schema': 1, 'version': '-mock', 'release_eligible': eligible == 'true',
                'windows': {'after_sha256': signed},
-               'courts': {'six-native-cells-final-bytes': {'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': signed},
-                          'windows-defender-final-bytes': {'run_id': 2, 'conclusion': 'success'},
+               'courts': {'six-native-cells-final-bytes': {'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': signed, 'cells': 6},
+                          'windows-defender-final-bytes': {'run_id': 2, 'conclusion': 'success', 'final_sha256': signed, 'cells': ['windows-latest', 'windows-11-arm']},
                           'owner-promotion': {'authority': 'mock owner'}}}
         for key, value in drop.items():
             if key == 'version': rec['version'] = value
@@ -67,7 +67,11 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
                 acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'failure'}),
                 acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': '2' * 64}),
                 acceptance('true', expected, owner_promotion={}),
-                acceptance('true', expected, pending=[{'item': 'gate-infra', 'state': 'PENDING'}])):
+                acceptance('true', expected, pending=[{'item': 'gate-infra', 'state': 'PENDING'}]),
+                acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells': 6}),
+                acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': expected, 'cells': 5}),
+                acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'success', 'final_sha256': '3' * 64, 'cells': ['w']}),
+                acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'success', 'cells': ['w']})):
         result, rows = run(expected, bad)
         assert result.returncode != 0 and 'refused' in result.stdout, (bad, result.stdout)
         assert not rows, (bad, rows)
@@ -81,4 +85,4 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     deleted = next(i for i, row in enumerate(rows) if 'delete-asset' in row)
     published = next(i for i, row in enumerate(rows) if 'release edit' in row)
     assert checked < deleted < published, rows
-print('publish order: ineligible/other-bytes/missing/minimal/wrong-tag/failed-court/other-court-bytes/unauthorised-promotion/pending-item acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')
+print('publish order: ineligible/other-bytes/missing/minimal/wrong-tag/failed-court/other-court-bytes/unauthorised-promotion/pending-item/no-six-sha/five-cells/defender-other-or-no-sha acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')
