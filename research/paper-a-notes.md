@@ -49,3 +49,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~14:07 心跳（切口 A 摘要决策网络五目标自举边界，未改键数与产物）：** abstract.txt / TeX 摘要裸「the compiler self-hosts」收紧为 decision-network instance + N1=N2=N3 + five named targets（§5.3）；CN/EN 摘要本已 scoped，未改正文；见 [`notes/paper-a-seal-abstract-decision-net-five-selfhost-20261010-1407.md`](notes/paper-a-seal-abstract-decision-net-five-selfhost-20261010-1407.md)。
 
 - **2026-10-10 ~14:25 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立测量侧注「表 4 历史速度比区间 3.9×–16.6× / ~4–17×」；父节点回 A；不挡投稿；不起稿；不闭合 §8.1 同身份重测。见 [`notes/paper-a-derive-purify-table4-speed-band-20261010-1425.md`](notes/paper-a-derive-purify-table4-speed-band-20261010-1425.md)。
+
+- **2026-10-10 ~14:40 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「自举不动点 / bootstrap fixed-point theorem」；父节点回 A（及已封字节自举边界）；A 只保留五目标 N1=N2=N3；不动点 OUT；不起稿。见 [`notes/paper-a-derive-purify-bootstrap-fixedpoint-20261010-1440.md`](notes/paper-a-derive-purify-bootstrap-fixedpoint-20261010-1440.md)。
