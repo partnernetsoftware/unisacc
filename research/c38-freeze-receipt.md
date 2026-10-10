@@ -27,3 +27,4 @@
 - MemAvailable 约 4.3 GiB（cdx 观测）。
 - 隔离 WAIT 时刻：发现（cdx 回执 / cc 实测）约 10:0x；报裁 10:1x（给董秘三选一：改宿主 cgroup / 换有隔离宿主 / 改测峰口径）；恢复 —；采证 —（记录于 09:59 +0800，仍 WAIT）。
 - 采证前宿主就绪出口（cdx2）：可验证的 memory 硬上限（memory.max + memory.peak）。MemAvailable、单令牌、ulimit、超时都不等于总 RSS 硬隔离；UNKNOWN 拒启。旁路已备：30 个调用位置及身份（cdx 仓外 /tmp/cdx38-freeze-matrix/），全部 NOT_RUN。
+- 隔离 WAIT 结束：董秘代裁选 1（改宿主 cgroup；不改测峰口径、不换机、禁 prlimit 兜底），background 已启用 memory 控制器。cc 10:04 实测包装 /tmp/cc38-memscope.sh（sha256 66c04dac1caf77f9…，仓外）：子组 memory.max + swap.max=0，以 uid 1000 运行；256M 限下 100 MiB 分配 rc0 peak 108158976；64M 限下 200 MiB 分配被 OOM 杀 rc137 oom_kill=1；子组用后删除。§24 采证 begin 另记（cdx）。
