@@ -13,7 +13,9 @@ b python3 exec/build/gen.py parse2 "$OUT/e3.json"
 # 0.0.40 K5-1f (机房主任 03:43): opt δ through exec/opt/gen-delta.sh, sharing the private seed-gen cache with the pp
 # step below (opt runs first and builds seed-gen cold; pp then uses the same keyed binary)
 b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/opt/gen-delta.sh" "$OUT/e4.json" --o2
-b python3 exec/build/gen.py prune "$OUT/prune.json"
+# 0.0.40 K5-1g (机房主任 04:09): prune δ through exec/prune/gen-delta.sh, sharing the private seed-gen cache (built by
+# the opt step above, used again by pp below)
+b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/prune/gen-delta.sh" "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
 case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=enc/arm;; *) ARCHFLAG=; ENCODER=enc;; esac
 # 0.0.40 K5-1c (机房主任 01:23): pp δ through exec/pp/gen-delta.sh (seed-gen first, no Python fallback), with a
