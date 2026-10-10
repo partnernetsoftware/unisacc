@@ -8,8 +8,8 @@
  *
  * The tui and agent rows are the images that actually link. They do not
  * name suite.c or probes/u_run.c. Those two files are the suite row.
- * The tui row starts with csih.c, which includes tui.c. tui.c is not a
- * second argv slot (structure-id ceiling). rows tui.c still selects it.
+ * The tui row starts with tui.c and lists the flat table of csih.sh.
+ * No unit textually includes another unit; tui.c has main.
  */
 /* No #include. Same ceiling as above if this file is ever linked into the TUI. */
 int snprintf(char *s, unsigned long n, const char *fmt, ...);
@@ -22,35 +22,38 @@ char *strrchr(const char *s, int c);
 char *strchr(const char *s, int c);
 
 #define SUITE_N 17
-#define SUITE_MAX_SRC 20
+#define SUITE_MAX_SRC 40
 
 static const char *slice_name[SUITE_N] = {
     "gate", "json", "session", "render", "term", "tui", "chat", "edit",
     "tools", "shell", "net", "llm", "clock", "agent", "file", "loop", "suite"
 };
 static const int slice_n[SUITE_N] = {
-    2, 2, 3, 2, 2, 15, 6, 3, 5, 2, 2, 6, 3, 9, 2, 4, 2
+    2, 2, 3, 2, 2, 28, 6, 3, 5, 2, 2, 6, 3, 9, 2, 4, 2
 };
 static const char *slice_src[SUITE_N][SUITE_MAX_SRC] = {
     { "gate.c", "gate_cli.c" },
-    { "json.c", "json_cli.c" },
-    { "json.c", "session.c", "session_cli.c" },
+    { "json.cx", "json_cli.c" },
+    { "json.cx", "session.c", "session_cli.c" },
     { "render.c", "render_cli.c" },
     { "term.c", "term_cli.c" },
-    { "csih.c", "render.c", "term.c", "chat.c", "clock.c", "tools.c",
-      "file.c", "shell.c", "edit.c", "gate.c", "json.c", "session.c",
-      "agent.c", "plugin.c", "net.c" },
-    { "chat.c", "clock.c", "gate.c", "json.c", "session.c", "chat_cli.c" },
+    { "tui.c", "render.c", "term.c", "chat.c", "clock.c", "tools.c",
+      "cols.cx", "home.cx", "file.c", "shell.c", "edit.c", "gate.c",
+      "json.cx", "session.c", "agent.c", "plugin.c", "net.c",
+      "reload_state.c", "reload_session_decode.c", "reload_session_encode.c",
+      "reload_io.c", "reload_load.c", "reload_consume.c", "journal_checkpoint.c",
+      "reload_owner.c", "csih_message.c", "csih_message_io.c", "context_index.c" },
+    { "chat.c", "clock.c", "gate.c", "json.cx", "session.c", "chat_cli.c" },
     { "edit.c", "file.c", "edit_cli.c" },
     { "tools.c", "file.c", "shell.c", "edit.c", "tools_cli.c" },
     { "shell.c", "shell_cli.c" },
     { "net.c", "net_cli.c" },
-    { "llm.c", "llm_cli.c", "json.c", "net.c", "gate.c", "session.c" },
+    { "llm.c", "llm_cli.c", "json.cx", "net.c", "gate.c", "session.c" },
     { "clock.c", "clock_cli.c", "gate.c" },
     { "agent.c", "agent_cli.c", "file.c", "edit.c", "shell.c",
-      "json.c", "session.c", "net.c", "plugin.c" },
+      "json.cx", "session.c", "net.c", "plugin.c" },
     { "file.c", "file_cli.c" },
-    { "gate.c", "json.c", "session.c", "loop.c" },
+    { "gate.c", "json.cx", "session.c", "loop.c" },
     { "suite.c", "suite_cli.c" },
 };
 
@@ -91,8 +94,6 @@ static const char *suite_base(const char *path) {
 static int suite_named(const char *base) {
     int i, k;
     if (!base || !base[0]) return 0;
-    /* tui.c is compiled as the body of csih.c, so it has no argv slot. */
-    if (!strcmp(base, "tui.c")) base = "csih.c";
     for (i = 0; i < SUITE_N; i++)
         for (k = 0; k < slice_n[i]; k++)
             if (!strcmp(slice_src[i][k], base)) return 1;
@@ -112,29 +113,28 @@ int suite_run_selftest(void) {
     int fail = 0;
     const char *root = "/Users/wjc/repos/unisacc/apps/csih";
     if (suite_match_path("/tmp/json.c", "/tmp")) fail++;
-    if (!suite_match_path("json.c", root)) fail++;
+    if (!suite_match_path("json.cx", root)) fail++;
     if (!suite_match_path("/Users/wjc/repos/unisacc/apps/csih/plugin.c", "/tmp")) fail++;
     if (suite_match_path("README.md", root)) fail++;
     if (suite_slice_count() < 16) fail++;
-    if (!suite_match_path("csih.c", root)) fail++;
     if (!suite_match_path("tui.c", root)) fail++;
     {
         int i, k, tui_n = -1;
         for (i = 0; i < suite_slice_count(); i++) {
-            const char *av[24];
+            const char *av[48];
             const char *nm = 0;
-            int n = suite_slice_fill(i, av, 24, &nm);
+            int n = suite_slice_fill(i, av, 48, &nm);
             if (nm && !strcmp(nm, "tui")) {
                 tui_n = n;
-                if (!av[0] || strcmp(av[0], "csih.c")) fail++;
+                if (!av[0] || strcmp(av[0], "tui.c")) fail++;
                 for (k = 0; k < n; k++) {
                     if (!av[k]) continue;
-                    if (!strcmp(av[k], "tui.c") || !strcmp(av[k], "suite.c")) fail++;
+                    if (!strcmp(av[k], "suite.c")) fail++;
                 }
             }
         }
-        /* 15 sources plus the selftest word. csih.c stands in for tui.c. */
-        if (tui_n != 16) fail++;
+        /* 28 sources plus the selftest word (suite_slice_fill appends it): the flat table of csih.sh. */
+        if (tui_n != 29) fail++;
     }
     if (fail) printf("FAIL suite match %d\n", fail);
     return fail ? 1 : 0;
