@@ -8,8 +8,8 @@
 set -u
 TAG=${1:?tag}; WANT=${2:?signed sha256}; ACC=${3:?release acceptance receipt (research/r<N>-release-acceptance.json)}
 cd "$(dirname "$0")/../.." || exit 1          # gh needs the repository (0.0.19 published once with uploads failing outside it)
-python3 - "$ACC" "$WANT" "$TAG" <<'PY' || exit 1
-import json,sys
+required=$(python3 - "$ACC" "$WANT" "$TAG" <<'PY'
+import json,re,sys
 acc,want,tag=sys.argv[1:4]
 def no(why): print('refused:',why); sys.exit(1)
 try: d=json.load(open(acc))
@@ -31,10 +31,18 @@ if not de.get('cells'): no('defender court names no scanned cells')
 if not (c.get('owner-promotion') or {}).get('authority'): no('owner-promotion has no named authority')
 open_items=[x.get('item') for x in d.get('pending',[]) if x.get('state')!='RESOLVED']
 if open_items: no('acceptance receipt has pending items: %s' % ', '.join(map(str,open_items)))
+assets=(d.get('published') or {}).get('public_assets')
+if not isinstance(assets,list) or not assets: no('acceptance receipt has no asset set')
+if any(not isinstance(a,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*',a) for a in assets): no('acceptance receipt has an invalid asset name')
+if len(set(assets))!=len(assets): no('acceptance receipt repeats an asset')
+if 'unisacc.com' not in assets: no('acceptance asset set omits unisacc.com')
+print(' '.join(assets))
 PY
+) || { printf "%s\n" "$required"; exit 1; }
 have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || exit 1
-case " $have " in *" unisacc.com "*) ;; *) echo "refused: no signed unisacc.com on $TAG yet"; exit 1;; esac
-case " $have " in *" unisacc-macos-universal.dmg "*) ;; *) echo "refused: no unisacc-macos-universal.dmg on $TAG yet"; exit 1;; esac
+for a in $required; do
+  case " $have " in *" $a "*) ;; *) echo "refused: no receipt asset $a on $TAG yet"; exit 1;; esac
+done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # a draft's asset needs the authenticated client (0.0.20: plain curl of the asset URL failed)
 mkdir "$T/d" && gh release download "$TAG" --pattern unisacc.com -D "$T/d" >/dev/null || { echo "draft download failed"; exit 1; }
@@ -42,7 +50,7 @@ mv "$T/d/unisacc.com" "$T/draft-unisacc.com"
 draft_hash=$(shasum -a 256 "$T/draft-unisacc.com" | cut -d' ' -f1)
 [ "$draft_hash" = "$WANT" ] || { echo "REFUSED DRAFT BYTES: $draft_hash != $WANT"; exit 1; }
 for a in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
-  case "$a" in unisacc.com|unisacc-macos-universal.dmg) ;; *) gh release delete-asset "$TAG" "$a" -y >/dev/null || exit 1; echo "removed $a";; esac
+  case " $required " in *" $a "*) ;; *) gh release delete-asset "$TAG" "$a" -y >/dev/null || exit 1; echo "removed $a";; esac
 done
 gh release edit "$TAG" --draft=false --latest >/dev/null || exit 1
 curl -sfL -o "$T/unisacc.com" "https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/download/$TAG/unisacc.com" || { echo "download failed"; exit 1; }
