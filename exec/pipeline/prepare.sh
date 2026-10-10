@@ -14,7 +14,9 @@ b python3 exec/build/gen.py opt "$OUT/e4.json" --o2
 b python3 exec/build/gen.py prune "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
 case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=enc/arm;; *) ARCHFLAG=; ENCODER=enc;; esac
-b python3 exec/build/gen.py pp "$OUT/e2.json" $OSFLAG $ARCHFLAG
+# 0.0.40 K5-1c (机房主任 01:23): pp δ through exec/pp/gen-delta.sh (seed-gen first, no Python fallback), with a
+# private seed-gen cache inside this work directory (overrides an inherited SEED_GEN_DIR; rebuilt per cold prepare)
+b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/pp/gen-delta.sh" "$OUT/e2.json" $OSFLAG $ARCHFLAG
 b python3 exec/build/gen.py lower "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
 b python3 exec/build/gen.py "$ENCODER" "$OUT/elf.json" "--$IMAGE"
 MODEL=tbl
