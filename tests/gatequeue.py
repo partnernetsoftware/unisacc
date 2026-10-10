@@ -250,6 +250,17 @@ def fingerprint(jobs, parts=None, revoked=()):
                 try: path = subprocess.check_output([cc or 'cc', '-print-prog-name=' + prog], text=True, timeout=10).strip()
                 except (OSError, subprocess.SubprocessError): path = ''
                 path = shutil.which(path) or path
+                # Darwin Apple clang returns bare "cc1" (no separate binary); resolve via
+                # -print-file-name or xcrun. Absolute missing paths stay missing (k2bcheck mock).
+                if not (path and os.path.isfile(path)) and path and os.path.basename(path) == path:
+                    alt = ''
+                    try: alt = subprocess.check_output([cc or 'cc', '-print-file-name=' + prog], text=True, timeout=10).strip()
+                    except (OSError, subprocess.SubprocessError): pass
+                    if alt and os.path.isfile(alt): path = alt
+                    elif prog == 'cc1' and sys.platform == 'darwin':
+                        try: alt = subprocess.check_output(['xcrun', '--find', 'clang'], text=True, timeout=10).strip()
+                        except (OSError, subprocess.SubprocessError): alt = ''
+                        path = alt if alt and os.path.isfile(alt) else (cc or path)
                 tc[prog] = [path, digest(path)] if path and os.path.isfile(path) else ['missing', path]
             try: tc['version'] = subprocess.check_output([cc or 'cc', '--version'], text=True, timeout=10).splitlines()[0]
             except (OSError, subprocess.SubprocessError, IndexError): tc['version'] = 'missing'
