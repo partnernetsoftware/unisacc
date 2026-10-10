@@ -10,7 +10,7 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 
 - **部分完成：同身份重测表 4（§8.1 第 1 条）。** 只读回执核对：第 1–2 行与 `archive/research/r9/r9-current-bench-20260928.json`（`c4993fd0…`）一致；第 3–4 行声称的 `c94cf5fe…` 与稿内 fib/self 经典列在仓库内**无**基准 JSON，最近 `candidate-bench` 为另一产物且经典列对不上。见 [`seal-table4-same-identity-20261009.md`](seal-table4-same-identity-20261009.md)。同身份四行重测仍阻塞于政委选定投稿产物；未改表 4 单元格。
 - **部分完成：冻结最终身份。** 附录 A 已记录 v0.0.13 与 v0.0.14 的产物身份和回执；投稿所用最终身份尚未冻结，表 2 与 §7.1 的门禁数字仍需绑定到同一身份并补构建命令。
-- **部分完成：平台执行矩阵。** 2026-10-09 已从发布回执盘点证据类别（[`seal-platform-matrix-inventory-20261009.md`](seal-platform-matrix-inventory-20261009.md)）；六 runner 演示、Lima arm64 全套件、Windows VM 自重建、lnx/x86_64 本地套件未验、Windows -run 仅 CI 等均有回执字段。投稿仍缺**同一冻结身份**下的原生执行矩阵表（§8.1 第 3 条），不能单靠回执闭合。
+- **部分完成：平台执行矩阵。** 2026-10-09 已从发布回执盘点证据类别（[`seal-platform-matrix-inventory-20261009.md`](seal-platform-matrix-inventory-20261009.md)）+ 同身份脚手架（[`seal-same-identity-matrix-scaffold-20261009.md`](seal-same-identity-matrix-scaffold-20261009.md)）；六 runner 演示、Lima arm64 全套件、Windows VM 自重建、lnx/x86_64 本地套件未验、Windows -run 仅 CI 等均有回执字段。2026-10-10 ~16:45 已升格为封口硬缺口钉（[`notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md`](notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md)）；投稿仍缺**同一冻结身份**下的原生执行矩阵表（§8.1 第 3 条），不能单靠回执闭合；tip Latest 已漂至 v0.0.38，§8.1 名义仍 v0.0.19。
 - **部分完成：表 5 重测或降级。** 正文已将 tcc/cc 对比注明为决策网络实例的历史测量；投稿前仍需决定是否补同负载的网络编译器数字。
 
 ## 投稿前应当补强（论证）
@@ -60,4 +60,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 
 - **2026-10-10 ~16:15 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「宽度作为一种复杂度／W* vs training-width race」；父节点回 A2 RQ1→A；不挡投稿；不起稿；seal-adam-width 不重做。见 [`notes/paper-a-derive-purify-width-complexity-wstar-20261010-1615.md`](notes/paper-a-derive-purify-width-complexity-wstar-20261010-1615.md)。
 - **2026-10-10 ~16:29 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「有限性／有限控制表的系统构造（阶段分类 + 系统造表方法）」；父节点回意向 E→A；不挡投稿；不起稿；paper-e-intent 不重写。见 [`notes/paper-a-derive-purify-finiteness-control-tables-20261010-1629.md`](notes/paper-a-derive-purify-finiteness-control-tables-20261010-1629.md)。
+- **2026-10-10 ~16:45 心跳（切口 C 真缺口钉，未改稿内数字）：** §8.1 第 3 条同身份六目标平台执行矩阵升格为 **seal-blocking**；inventory／scaffold 只证明模式；禁止把六 runner 演示当成原生矩阵；候选身份刷新 Latest=v0.0.38。见 [`notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md`](notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md)。
 
