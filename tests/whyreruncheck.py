@@ -21,6 +21,9 @@ B = {'stamps': {'p': '1', 'q': '1', 'r': '1', 's': '1', 't': '1', 'u': '0'}, 'su
      't': suite(inventory={'exec': '2'}), 'u': suite()}}                              # reviewed product tree; u reusable
 r = W.explain(A, B)['rows']
 assert r['p']['category'] == ['product'] and r['q']['category'] == ['contract'] and r['r']['category'] == ['host'], r
+m = W.explain({'stamps': {'v': '0'}, 'suites': {'v': suite()}}, {'stamps': {'v': '1'}, 'suites': {'v': suite(
+        inputs={'tests/x.py': '2', 'exec/a.py': '2'}, common={**{k: '0' for k in W.COMMON_KEYS}, 'platform': '9', 'queue_contract': '9'})}})['rows']
+assert m['v']['category'] == ['contract', 'host', 'product'], m      # every applicable category, not the first
 assert r['s']['category'] == ['global'] and 'UNKNOWN' in r['s']['reasons'][0] and r['t']['category'] == ['product'] and 'u' not in r, r
 sys.path.insert(0, str(ROOT / 'tests')); os.chdir(ROOT)
 spec = importlib.util.spec_from_file_location('gq_under_test', ROOT / 'tests/gatequeue.py')

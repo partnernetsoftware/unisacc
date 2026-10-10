@@ -10,6 +10,7 @@ stamp -- nothing is recomputed differently), keeping one digest per label and pe
              candidate/UA executables or their settings
   contract   the suite's own command, or a declared test/tool input (tests/, release/, ...)
   host       the shared environment (platform, interpreter, tools, gate runner) or the family toolchain
+  (a suite gets every category that applies -- categories overlap and per-category counts do not add up)
   global     an unaudited suite: its identity holds every tracked file, so ANY change reruns it -- reported
              as UNKNOWN-cause, never narrowed (conservative, matching gatequeue's global fallback)
   location   the checkout root of a location-bound suite
@@ -68,14 +69,15 @@ def explain(a, b):
                     if isinstance(vx, dict) or isinstance(vy, dict) else []
                 if label == 'global_inputs':
                     cats.add('global'); reasons.append('global fallback (unaudited): %d tracked files changed, cause UNKNOWN' % len(keys))
-                elif label == 'inputs':
-                    cats.add(classify_inputs(keys)); reasons.append('declared inputs: ' + ', '.join(keys[:5]) + (' ...' if len(keys) > 5 else ''))
+                elif label == 'inputs':   # per file: product and test inputs both named when both changed
+                    cats.update('product' if f.startswith(PRODUCT) else 'contract' for f in keys)
+                    reasons.append('declared inputs: ' + ', '.join(keys[:5]) + (' ...' if len(keys) > 5 else ''))
                 elif label in ('settings', 'executables'):
                     cats.add('product'); reasons.append('%s: %s' % (label, ', '.join(keys) or 'changed'))
                 elif label == 'command':
                     cats.add('contract'); reasons.append('command changed')
-                elif label == 'common':
-                    cats.add('contract' if keys == ['queue_contract'] else 'host'); reasons.append('shared: ' + ', '.join(keys))
+                elif label == 'common':   # per key: the queue contract is contract, every other shared key is host
+                    cats.update('contract' if k == 'queue_contract' else 'host' for k in keys); reasons.append('shared: ' + ', '.join(keys))
                 elif label == 'inventory':   # reviewed trees: product when the tree is under the product closure
                     cats.add('product' if any(k.startswith(PRODUCT) or k.rstrip('/') + '/' in PRODUCT for k in keys) else 'contract')
                     reasons.append('reviewed trees: ' + ', '.join(keys))
