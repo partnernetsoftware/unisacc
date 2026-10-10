@@ -43,3 +43,14 @@
 - 它还依赖 tui.c 的 `tui_state`（tui.c:192）。
 - 因此它不是"缺 include"，而是模块边界缺失：一个消费方绕过了 csih_message_io 的接口直接摸私有状态。正确做法是把 mailbox 的只读扫描（列出、预览）收进 csih_message_io 的公共函数，context_index 只调公共接口；这是设计改动，不是机械的文件搬迁。
 - 在该改动完成前，tui.c 与 reload_support.inc 的单元化不能完成；这是转单元的前置条件。
+
+## run 模式 .cx 缺陷：干净 0.0.38 源码复现（2026-10-10）
+
+- 源码：`git archive v0.0.38`（无 .git，故 provenance 校验失败，不影响产物）。
+- 构建：`make com`，引导件为本地 0.0.35 发布件（严格的"上一发布版 0.0.37"在仓内不可得，此为偏差）。
+- 产物：`unisacc 0.0.38`，sha256 `a3db339b…a599abe`（完整值见构建日志）。
+- 复现（`scratchpad/cxrepro`，仓库外目录执行）：
+  - `sh U mm.c pv.cx` → `unisacc: no host function f7` rc=127（**复现**）
+  - `sh U mm.c pv.c` → rc=0
+  - `sh U mm.c pv.cx -o mmcx && ./mmcx` → rc=0
+- 结论：缺陷在干净 0.0.38 源码产物上复现，run 模式丢 `.cx` 定义仍在；csih.sh 保持 build-then-run。
