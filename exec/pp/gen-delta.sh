@@ -1,7 +1,8 @@
 #!/bin/sh
 # K5-1b: construct pp δ JSON. Prefer seed/gen.c (seed-gen); Python remains the independent byte reference
-# (SEED_GEN=0). On seed-gen failure do not silently fall back to gen.py.  No consumer calls this yet
-# (exec/pp/run.sh, exec/pipeline/prepare.sh and exec/c/chain.sh still call gen.py pp).
+# (SEED_GEN=0). On seed-gen failure do not silently fall back to gen.py.
+# Consumers: exec/pipeline/prepare.sh (K5-1c) and exec/c/chain.sh (K5-1d, no flags); exec/pp/run.sh still calls gen.py pp.
+# 0.0.40 K5-1d (机房主任 02:35): header hygiene only (wiring is in the consumers).
 # 0.0.40 (机房主任 00:42): SEED_GEN is 0 or 1 (anything else rc 2).  Flags: each of the six in
 # exec/pp/gen-manifest.tsv (--locations --shared-predefines --osx --win --arm64 --no-autoinc) at most once,
 # never --osx with --win; anything else rc 2.  The default seed-gen build is keyed by seed/*.c seed/*.h, the

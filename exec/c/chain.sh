@@ -46,7 +46,9 @@ for name in $(cat "$T/known"); do
 done
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "chain: cc failed"; exit 1; }
-b 60 python3 exec/build/gen.py pp "$T/e2.json" >/dev/null 2>&1 || { echo "chain: E2 gen failed"; exit 1; }
+# 0.0.40 K5-1d (机房主任 02:35): pp δ through exec/pp/gen-delta.sh (seed-gen first, no Python fallback), with a
+# private seed-gen cache inside this chain scratch (overrides an inherited SEED_GEN_DIR; cleared with $T)
+b 60 env SEED_GEN_DIR="$T/.seed-gen-cache" sh "$R/exec/pp/gen-delta.sh" "$T/e2.json" >"$T/e2-gen.out" 2>"$T/e2-gen.err" || { echo "chain: E2 gen failed"; exit 1; }
 b 60 python3 exec/build/gen.py lex "$T/e1.json" --typed >/dev/null 2>&1 || { echo "chain: E1 gen failed"; exit 1; }
 b 60 python3 exec/build/gen.py parse2 "$T/e3.json" >/dev/null 2>&1 || { echo "chain: E3 gen failed"; exit 1; }
 MODEL=tbl
