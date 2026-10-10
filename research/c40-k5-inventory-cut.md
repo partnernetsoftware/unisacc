@@ -148,3 +148,6 @@
 #### K5-1d 当前口径（机房主任 02:55 限定收口；只追加，上段为历史）
 上段“tip 复跑 rc0 20/0、外层 50.784 s”是 grk 那次复跑的读数（回执未引 02:47 授权），按 02:55 裁定作**只读旁证、不并入**。限定收口以 cc 依 02:47 授权的干净复跑为准：锁 1bd685b0，夹具身份 28a0c4c2 跑前落盘并闭合，gate rc0、20 SAME / 0 DIFF、外层 49.583 s（两次同机并发重叠，墙钟都不代表单独耗时）。schema INCOMPLETE 顺延（共享检出四文件前后 sha 未采；残留 scratch 来源 UNKNOWN；参考子 rc 未存；证据复制 `|| true`）；夹具无 INCOMPLETE 行 ≠ schema 齐。不称 exec-chain 五片全绿、不称净提速。回执：/tmp/cc40-prep/k5-1d/receipt-rerun-0247.md（仓外）。
 
+
+### K5-1e（exec/pp/run.sh 的 pp 接 gen-delta）——限定收口（机房主任 03:31），锁 1a8825ed（rebase 后 e1f086d8，patch-id 相等）
+run.sh：ready 每步失败即 return 1；d.json 经 gen-delta，一次性 SEED_GEN_DIR 在命令内创建、不进 fresh 文本；fresh 文本带 SEED_GEN/BIN/CC 与解析出的编译器路径，seed/*.[ch] 与 gen-delta.sh 进依赖；gen 分支 ready || exit 1。夹具 tests/seedpprun.sh（gate seedgen-pprun）。读数：受控 run2 rc0 16/0（22.2 s，暖用例同路径恢复后先做未改对照）；真实冷观察一次 rc0（21.9 s，ua_ref+ua_noauto+d.json 全链冷建），d.json 与 SEED_GEN=0 参考同为 ee8ac744。run1 首红（夹具把暖缓存复制到新路径）原账保留。未证：并发、cc1/as/ld 与完整编译器身份、ex/corpus 分片、净提速；冷观察无调用追踪。回执：/tmp/cc40-prep/k5-1e/receipt-run1.md、receipt-run2.md、receipt-cold1.md（仓外）。
