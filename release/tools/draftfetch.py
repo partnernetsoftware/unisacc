@@ -3,7 +3,8 @@
 
 Fetch the signed unisacc.com from a still-DRAFT release by fixed ids, for courts that must run before
 publishing.  Before any byte is used it checks, via the GitHub API with the workflow's read token:
-the release id has this tag, is a draft, and targets the expected commit; the asset id belongs to that
+the release id has this tag name, is a draft, and its target_commitish field equals the expected commit (a
+draft's tag usually does not exist yet, so this is the release record's target -- not a check of any tag ref); the asset id belongs to that
 release and is named unisacc.com.  The downloaded bytes must equal the signed sha256.  It never falls
 back to the public URL, a cache or "latest"; it never uploads, deletes or publishes.  `--verify-again`
 re-hashes the file after a test so a court cannot run on bytes it modified.  The token is read from
@@ -60,7 +61,7 @@ def main(argv=None):
         print('draftfetch: download failed: %s' % type(e).__name__); return 1
     open(a.out, 'wb').write(data)
     got = sha(a.out)
-    print('source=authenticated-draft release_id=%s asset_id=%s tag=%s commit=%s sha256 %s' % (a.release_id, a.asset_id, a.tag, a.commit, got))
+    print('source=authenticated-draft release_id=%s asset_id=%s tag_name=%s target_commitish=%s sha256 %s' % (a.release_id, a.asset_id, a.tag, a.commit, got))
     if got != a.sha256: print('draftfetch: DRAFT BYTES DIFFER from the signed hash'); return 1
     return 0
 
