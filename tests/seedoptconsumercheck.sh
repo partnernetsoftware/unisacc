@@ -91,8 +91,9 @@ case "\${1:-}" in
                    "$REALPY" -c 'import hashlib,os,sys
 d=sys.argv[1]
 for f in sorted(os.listdir(d)):
-    st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "\$d" > "\$SNAPMID" \
-                       || { echo "python3 shim: mid snapshot failed" >&2; exit 95; }
+    st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "\$d" > "\$SNAPMID"
+                   mr=\$?; echo "\$mr" > "\$SNAPMID.rc"
+                   [ "\$mr" -eq 0 ] || { echo "python3 shim: mid snapshot failed" >&2; exit 95; }
                    : > "\$3"; exit 0;;
             lex|parse2|lower|enc|enc/arm) log short "python3 \$*"; : > "\$3"; exit 0;;
         esac;;
@@ -132,7 +133,7 @@ for f in sorted(os.listdir(d)):
     st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "$1"; }
 prep() {   # prep NAME [SCRIPT] [ENV...]: prepare.sh OUT lnx/x86_64 0 cc under the shims; prints rc
     n=$1; sc=${2:-$PREP}; shift 2 2>/dev/null || shift $#
-    o=$S/out-$n; rm -rf "$o"; mkdir -p "$o"; : > "$S/log-$n"; rm -f "$S/snapmid-$n"
+    o=$S/out-$n; rm -rf "$o"; mkdir -p "$o"; : > "$S/log-$n"; rm -f "$S/snapmid-$n" "$S/snapmid-$n.rc"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR PATH="$S/shim:$PATH" SHIMLOG="$S/log-$n" SNAPMID="$S/snapmid-$n" \
         "$@" sh "$sc" "$o" lnx/x86_64 0 cc > "$S/log-$n.out" 2>&1; echo $?
 }
@@ -156,8 +157,11 @@ evw "POS rc=$r"
 nc=$(count "$l" pass-gen-c ""); nk=$(count "$l" pass "$KEYSTEP")
 { [ "$nc" -eq 1 ] && [ "$nk" -eq 2 ]; } && ok "seed/gen.c compiled once; helper key step twice (opt, pp)" || no "compiles=$nc key steps=$nk"
 evw "POS compiles=$nc keysteps=$nk"
-{ [ -s "$S/snapmid-pos" ] && [ "$se" -eq 0 ] && [ -s "$S/snapend-pos" ] && cmp -s "$S/snapmid-pos" "$S/snapend-pos" \
-    && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$S/snapend-pos")" -eq 1 ]; } \
+mrc=$(cat "$S/snapmid-pos.rc" 2>/dev/null || echo none)
+evw "POS snapmid_rc=$mrc snapend_rc=$se"
+{ [ "$mrc" = 0 ] && [ -s "$S/snapmid-pos" ] && [ "$se" -eq 0 ] && [ -s "$S/snapend-pos" ] && cmp -s "$S/snapmid-pos" "$S/snapend-pos" \
+    && [ "$(wc -l < "$S/snapend-pos")" -eq 2 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$S/snapend-pos")" -eq 1 ] \
+    && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$S/snapend-pos")" -eq 1 ]; } \
     && ok "cache after opt == cache after pp (one binary, same inode/mtime/sha): pp reused it" || no "cache changed between opt and pp (snapend rc=$se)"
 # event order in the shim log: helper key step (opt) -> prune (mid snapshot taken here) -> helper key step (pp)
 ord=$(awk -F '\t' -v k="$KEYSTEP" '$1 == "pass" && $2 == k { printf "K" } $1 == "short" && $2 ~ /^python3 exec\/build\/gen.py prune / { printf "P" }' "$l")
@@ -166,8 +170,9 @@ evw "POS order=$ord snapend_rc=$se"
 { ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-pp; } && ok "no direct gen.py opt / pp" || no "direct Python generator call"
 g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
 rm -f "$S/ref-e4.json"
-[ -n "$g" ] && "$W/tests/bound" 55 "$g" opt "$S/ref-e4.json" --o2 2>/dev/null && cmp -s "$o/e4.json" "$S/ref-e4.json" \
-    && ok "e4.json = seed-gen opt --o2" || no "e4.json differs from seed-gen opt --o2"
+rr=none; [ -n "$g" ] && { "$W/tests/bound" 55 "$g" opt "$S/ref-e4.json" --o2 2>"$S/ref-e4.err"; rr=$?; }
+evw "POS ref_rc=$rr"
+{ [ "$rr" = 0 ] && cmp -s "$o/e4.json" "$S/ref-e4.json"; } && ok "e4.json = seed-gen opt --o2 (reference rc 0)" || no "e4.json vs seed-gen opt --o2 (reference rc=$rr)"
 
 # 2-4 negatives: the opt step fails, prepare stops before prune and pp
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
@@ -203,7 +208,7 @@ cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 if [ -n "$EV" ]; then
-    for f in shimneg log-pos log-pos.out snapmid-pos snapend-pos log-red log-red.out log-missing log-missing.out log-badsg log-badsg.out \
+    for f in shimneg log-pos log-pos.out snapmid-pos snapmid-pos.rc snapend-pos ref-e4.err log-red log-red.out log-missing log-missing.out log-badsg log-badsg.out \
              log-mut log-mut.out log-sg0 log-sg0.out; do
         cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedoptc: EVIDENCE copy of $f failed" >&2; }
     done
