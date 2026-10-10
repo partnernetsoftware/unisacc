@@ -79,3 +79,11 @@
 - Draft 资产（机房主任 12:31 授权，未签名、未公开）：从 GHCR digest 9b9c1022 拉取封存成员，unisacc.com 与本地候选逐字节同（ba3f40cb），build.json artifact ba3f40cb；上传 unisacc.com（2243480 B）、unisacc.com.build.json、models.json 与 SHA256SUMS 到 Draft v0.0.38（target 4790de9d），说明更新为 bd352750 版。只读冒烟：从 Draft 下载 unisacc.com，sha ba3f40cb，`--version` 输出 unisacc 0.0.38。
 - 签名（政委授权公开并签名）：Apple 签名本机不可行（Linux，无 codesign/keychain，无 ~/.private_keys；0.0.37 同为“Apple 签名与 dmg 本版未提供”），未做。Windows：unsigned_receipt（zip 2d0c6b41…、receipt 6c1de20a…，source 4790de9d，upstream release-check 38023907999/1）上传 Draft；qualification run 38024551370 success；company run 38024592099 已派发并 approve_signing 批准。
 - seedmemorycheck Darwin 失败（机房主任 ① 只读核）：test_gate_low_memory_exits_before_generator 的 env 未设 UNISACC_FFI_X86_PROVIDER，Darwin/arm64 上 gate.sh:43–46 要求该变量，先退 1——测试对该 env 非 hermetic。设占位后走到 seedmemory：EVIDENCE_IDENTITY host 为 'Linux/x86_64'（bf82bcb9 起即如此，53fe285f 只改 C_SHA/BINARY_SHA/C_RSS，未改 host），Darwin 上 identity_reason 先返回 'memory evidence identity differs: host' → rc2 UNKNOWN，到不了低内存 77 分支。故该测试期望（rc4 + 行内 rc77）只在与证据身份同宿主（Linux/x86_64）可达；与当前 gen.c 一致，非 53fe285f 回归。未改断言；修法（测试固定 env 与 identity 打桩，或声明 Linux/x86_64 专属）待裁。
+
+## 公开与 court 实况（2026-10-10；实际执行）
+
+- 公开：v0.0.38 于 04:38:52Z（12:38:52 SGT）公开，tag v0.0.38 = rc 4790de9d，唯一资产签名 unisacc.com 579f6525…（2259256 B）。公开先于三 court；签名回执 release_eligible=false 与公开并存，按机房主任 12:47 边界记实况、不撤回。cc 按 RELEASE-PIPELINE §9（12 公开→12b smoke）执行，未先过 court，与签名回执口径不一致，已认。
+- six-native-cells-final-bytes court：release-smoke run 38024805460 success；六格（osx/arm64、osx/x86_64、lnx/x86_64、lnx/arm64、win/x86_64、win/arm64）各自未认证下载公开资产，job 日志 `public sha256` 均为 579f6525ce101ef3…（= 签后字节），comdemo status passed。
+- windows-defender-final-bytes court：仓内无 Defender 工作流，本机为 Linux，未做真扫；**PENDING**。本机冒烟（fb12-multi 10/10、comdemo 19 passed）不代此 court。
+- owner-promotion：**PENDING**，等 Defender 证据或政委放行（机房主任本轮不代签）。
+- gate-infra 归因分歧：机房主任 12:31 具名裁定通过（bd352750 落 rulings，版本说明已写“具名裁定通过、RULED”）；消息入口 12:48 代裁仍记 NEEDS_RULING、不认刷哈希代重审，证据目录 /tmp/c38-inbox-evidence-20261010T124818（exit.txt / exit-ruled.txt / SHA256SUMS -c 全 OK / freeze-vs-tree.txt）。两份裁定冲突，cc 不自选，已公开的版本说明维持现状待裁。
