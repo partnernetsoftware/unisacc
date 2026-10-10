@@ -25,4 +25,12 @@ with tempfile.TemporaryDirectory() as td:
     assert got == {'host': 'UNVERIFIED_HOST', 'cut-job': 'RULED_BASELINE', 'tool': 'TOOL_MISSING', 'closure-c2': 'HOST_TIMEOUT',
                    'exec-selfelf-package': 'HOST_TIMEOUT', 'slow-unlisted': 'NEEDS_RULING', 'wrong': 'NEEDS_RULING', 'wrong-host': 'RULED_BASELINE', 'new-sig': 'NEEDS_RULING', 'plan-only': 'NEEDS_RULING', 'second-rule': 'RULED_BASELINE', 'stale-word': 'NEEDS_RULING', 'own-limit': 'NEEDS_RULING', 'mem-gap': 'RESOURCE_UNKNOWN', 'plain-two': 'NEEDS_RULING', 'shard-1': 'BLOCKED', 'later': 'PENDING'}, got
     assert d['pass'] == 1 and d['jobs'] == 18, d   # a ruled red is never PASS; a new signature or a plan-only name needs a ruling
-print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass')
+# 0.0.40-prep (机房主任 18:33): a missing H1 table fails closed (rc 2, no table) instead of silently classing nothing as H1
+with tempfile.TemporaryDirectory() as m:
+    mt = pathlib.Path(m); (mt / 'results.json').write_text(json.dumps({'jobs': {}}))
+    for bad in (str(mt / 'no-such-plan.md'), str(ROOT / 'plans/v0.0.38.md')):   # the pre-archive default
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err): rc = X.main([str(mt), '--h1', bad])
+        assert rc == 2 and out.getvalue() == '' and 'does not exist' in err.getvalue(), (bad, rc, out.getvalue(), err.getvalue())
+    assert X.main([str(mt), '--h1', str(ROOT / 'archive/plans/v0.0.38.md')]) in (0, None)   # the archived table is accepted
+print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass; missing H1 table (and the pre-archive default) rc 2, archived table accepted')

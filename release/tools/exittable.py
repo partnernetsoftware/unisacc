@@ -23,8 +23,7 @@ def classes():
 
 
 def h1_names(plan, item='H1'):
-    try: text = pathlib.Path(plan).read_text()
-    except FileNotFoundError: return set()
+    text = pathlib.Path(plan).read_text()   # 0.0.40-prep: a missing H1 table is an error, never an empty set
     row = next((l for l in text.splitlines() if l.startswith('| %s ' % item)), '')
     names = set(re.findall(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)+', row))
     for stem, lo, hi in re.findall(r'([a-z][a-z0-9-]*?)(\d+)\.\.(\d+)', row):     # closure-c1..4
@@ -86,6 +85,8 @@ def main(argv=None):
     ap.add_argument('state'); ap.add_argument('--h1', default=str(ROOT / 'archive/plans/v0.0.38.md')); ap.add_argument('--json', action='store_true')
     ap.add_argument('--rulings', default=str(ROOT / 'release/rulings.tsv'))
     a = ap.parse_args(argv)
+    if not pathlib.Path(a.h1).is_file():   # 0.0.40-prep (机房主任 18:33): fail closed before reading any state
+        print('exittable: H1 table %s does not exist (archived plans live under archive/plans/)' % a.h1, file=sys.stderr); return 2
     st = pathlib.Path(a.state); data = json.loads((st / 'results.json').read_text())
     disp, h1, rules = classes(), h1_names(a.h1), rulings(a.rulings)
     rows, passed = [], 0
