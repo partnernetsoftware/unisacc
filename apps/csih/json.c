@@ -43,6 +43,8 @@
 /* Types and prototypes come from json.h (declarations only, injected by csih.sh).
  * unisacc runs each file as one unit, so json.h is injected with -include, never #include. */
 
+#define JSON_MAX_DEPTH 32
+
 
 
 typedef struct {
