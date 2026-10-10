@@ -8,7 +8,25 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 S=$(mktemp -d "${TMPDIR:-/tmp}/seedopt.XXXXXX") || exit 2
-trap 'rm -rf "$S"' EXIT
+# 0.0.40 (机房主任 00:04): SEEDOPT_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
+# the scratch would lose: every SAME/DIFF line, the o1/o2 JSON sha256s and the monotonic start/end (ns), written
+# before the scratch is removed -- also on a failing or interrupted run.
+EV=${SEEDOPT_EVIDENCE:-}
+mono() { python3 -c 'import time;print(time.monotonic_ns())'; }
+if [ -n "$EV" ]; then
+    case "$EV" in "$S"|"$S"/*) echo "seedopt: SEEDOPT_EVIDENCE inside the scratch"; exit 2;; esac
+    mkdir -p "$EV" && [ -z "$(ls -A "$EV")" ] || { echo "seedopt: SEEDOPT_EVIDENCE must be a new or empty directory: $EV"; exit 2; }
+    echo "start_ns $(mono)" > "$EV/mono.txt" || exit 2
+fi
+export_ev() {
+    [ -n "$EV" ] || return 0
+    for f in c-o1 c-o2 py-o1 py-o2; do
+        if [ -f "$S/$f.json" ]; then python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(), sys.argv[2])' "$S/$f.json" "$f.json"
+        else echo "MISSING $f.json"; fi
+    done > "$EV/json.sha256"
+    echo "end_ns $(mono)" >> "$EV/mono.txt"
+}
+trap 'export_ev; rm -rf "$S"' EXIT
 trap 'exit 130' INT TERM HUP
 NEG=exec/opt/rounds-result.tsv
 before=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$NEG") || exit 2
@@ -24,8 +42,8 @@ BOUND_CACHE=$S/boundcache; export BOUND_CACHE   # the bound helper is built insi
 G=$S/seed-gen
 "$B" 55 cc -std=c99 -O2 -w -Iseed -o "$G" seed/gen.c || { echo "seedopt: gen.c does not build"; exit 1; }
 same=0; bad=0
-ok() { echo "SAME $1"; same=$((same + 1)); }
-no() { echo "DIFF $1"; bad=$((bad + 1)); }
+ok() { echo "SAME $1"; [ -z "$EV" ] || echo "SAME $1" >> "$EV/lines.txt"; same=$((same + 1)); }
+no() { echo "DIFF $1"; [ -z "$EV" ] || echo "DIFF $1" >> "$EV/lines.txt"; bad=$((bad + 1)); }
 # a refusal is a normal non-zero exit: not 0, not a timeout (124/142) and not a signal (>= 128)
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 
@@ -146,4 +164,5 @@ cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$NEG") || exit 2
 [ "$before" = "$after" ] && ok "checkout $NEG untouched" || no "checkout $NEG changed"
 echo "seedopt  same $same  bad $bad"
+[ -z "$EV" ] || echo "seedopt  same $same  bad $bad  tree $H" >> "$EV/lines.txt"
 [ "$bad" = 0 ] && [ "$same" -gt 0 ]
