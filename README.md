@@ -163,9 +163,38 @@ build a replacement or assert cross-platform release readiness. CI only re-runs 
 
 > **Shell = inferencer + executor + model data.**
 
-In the classic seed/reference, the walker, symbol table, relocation arithmetic
-and image writers are ordinary code. Its fact stages below use networks, with one kernel for all of them
-(`embed -> gemv -> ReLU -> gemv -> argmax`, integers only):
+The default model product compiles through a **seven-stage byte-stream pipeline**
+(below). The **classic seed/reference (decision-network instance)** is a
+separate route: the walker, symbol table, relocation arithmetic and image
+writers are ordinary code. Its fact stages use cube networks at ask points,
+with one kernel for all of them (`embed -> gemv -> ReLU -> gemv -> argmax`,
+integers only).
+
+### Byte-stream pipeline (network-compiler instance)
+
+The default model product runs compilation as **seven byte-stream stages**.
+Each stage is a constructed integer threshold network driven by one generic
+executor. Stage boundaries are the I/O contract below (aligned with Paper A
+§4.2 in [research/unisacc-paper.en.md](research/unisacc-paper.en.md)). Tests
+and model keys should stop at these edges; this is not the same table as the
+eighteen classic decision stages later in this section.
+
+| stage | input → output | role |
+|---|---|---|
+| preprocess | source bytes → preprocessed text | line continuation, comments, directives, macros, conditionals, includes |
+| lex | preprocessed text → typed token stream | keywords, identifiers, operators, literals, longest match |
+| parse | token stream → tape | declarations, scopes, types, precedence, statements, init, calls |
+| opt | tape → tape | peephole / stack-to-reg style rewrites on tape |
+| prune | tape → tape | drop unreachable whole functions on image/run routes (public tape out skips prune) |
+| lowering | tape → target ops + data | ABI, regmap, syscalls, layout, reloc |
+| encode + image | target ops → ELF / Mach-O / PE (or in-memory image) | encoding, branches, reloc, headers, Mach-O ad-hoc signature |
+
+`tape` is the target-independent IR (fixed register set + op vocabulary). The
+eighteen-stage table below is the **decision-network / classic-reference**
+instance (finite key → class at ask points). It does **not** replace the
+seven-stage byte-stream contract above.
+
+### Decision-network stages (classic-reference instance)
 
 <!-- stages:begin -->
 | stage | key | out | keys | units |
@@ -390,8 +419,9 @@ SHA-256 `baf296dd…`, plus the notarized macOS dmg; receipt in
 0.0.37 is in development ([plan](plans/v0.0.37.md)). Verification, platform gaps
 and signing work are recorded in [prd](prd.md).
 
-The generated table above describes classic finite fact decisions; current
-whole-stage networks and their limits are documented in
+The decision-network table above describes classic finite fact decisions; the
+seven-stage byte-stream contract is in the same section. Current whole-stage
+networks and their limits are documented in
 [the pipeline design](prd.md#pipeline-design). Exhaustive network/table equality
 is distinct from C semantics, stage compatibility, platform execution and
 package/container self-construction. Classical no-Python self-hosting and
