@@ -10,3 +10,6 @@
 | R4 | seedmemorycheck Darwin 复跑 | m4pro FF 到含 0b831b64 后 `python3 tests/seedmemorycheck.py` | — | Linux 干净 checkout 13/13 已过 | 结果写 r38 unverified |
 | R5 | 0.0.38 收口认定 | 认 research/c38-freeze-receipt.md + research/r38-release-acceptance.json 为最终可度量收口报告（R1 未决处照列；认定 R5 不等于裁清 R1 争议） | 认 | — | prd/计划标结 |
 | R6 | 0.0.39 WF1/WF2/WF4 排期 | WF1 首个具名 probe 组（cdx 建议）；WF2 填尾受控验证；WF4 本表即首例 | 先 WF1 | plans/v0.0.39.md | 开刀 |
+
+## decision/applied
+- R6：机房主任 13:12 SGT 代裁“先 WF1”（decision）；WF1 首刀 begin 13:1x，applied 见 plans/v0.0.39.md WF1 首刀。R1–R5 仍待政委裁。
