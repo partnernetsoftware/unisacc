@@ -25,3 +25,5 @@
 - 进程位于 cgroup `0::/agent`，无委派（mkdir 被拒）；有免密 sudo，但 `/sys/fs/cgroup/background` 的 `cgroup.subtree_control` 为空，子 cgroup 无 memory.max，root 也写不进。
 - 可行路线均需改宿主 cgroup 配置（例如在某父级启用 memory 控制器后建专用子组），属宿主变更，待裁；未做任何改动，测试子组已删除。
 - MemAvailable 约 4.3 GiB（cdx 观测）。
+- 隔离 WAIT 时刻：发现（cdx 回执 / cc 实测）约 10:0x；报裁 10:1x（给董秘三选一：改宿主 cgroup / 换有隔离宿主 / 改测峰口径）；恢复 —；采证 —（记录于 09:59 +0800，仍 WAIT）。
+- 采证前宿主就绪出口（cdx2）：可验证的 memory 硬上限（memory.max + memory.peak）。MemAvailable、单令牌、ulimit、超时都不等于总 RSS 硬隔离；UNKNOWN 拒启。旁路已备：30 个调用位置及身份（cdx 仓外 /tmp/cdx38-freeze-matrix/），全部 NOT_RUN。
