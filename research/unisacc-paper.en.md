@@ -441,7 +441,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 ### 8.1 Conditions not yet met before submission (registered as R20-11)
 
-The release identity frozen for this paper is v0.0.19 (Appendix A; v0.0.20 is published, and submission-grade remeasurement will use the latest identity). Each item below must be met before submission or explicitly downgraded in the text; registration is not completion:
+The release identity frozen for this paper remains v0.0.19 (Appendix A; historical receipts and the registered §8.1 item scopes under that identity). As of 2026-10-10, public Latest is v0.0.38; submission-grade same-identity remeasurement must pick one sealed Latest identity and must not mix v0.0.19 receipts with later binaries as one measurement. Each item below must be met before submission or explicitly downgraded in the text; registration is not completion:
 
 1. **Same-identity remeasurement of Table 4**: Table 4's four rows already mix two v0.0.9-era identities (`c4993fd0…`, `c94cf5fe…`), while the v0.0.19 product has grown from 1.23 MB to 1.92 MB. It must be remeasured on the same machine with the same identity; otherwise it can only be cited as a historical measurement.
 2. **Remeasure or downgrade Table 5**: Table 5 is one historical measurement of the decision-network instance (DENSE lookup), not network-compiler pipeline timing; it must be remeasured with the tcc and cc versions recorded, or else treated at appendix strength only (§7.2).
