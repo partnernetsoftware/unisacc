@@ -21,3 +21,4 @@
 - 机房主任代裁（unisacc10m）：exec 9ae3c358 据 cdx2 独立二审通过、记已审（不宣称六平台/对象 ABI 已证）；两 court 工作流 contents:write 仅限 release-smoke.yml、defender-scan.yml，先单 job 预检后扇出，Draft 不公开，R3 仍 DECIDED 至签后字节 court 绿。
 - 机房主任代裁（Draft v0.0.39）：留作演练靶，不公开、不删，不抵签后 R3；下一刀签名演练→Draft 换签后资产→真 court；F4″ 缺 m4pro 只记缺口。
 - publish-order 已审（机房主任认戳（政委授权其决策），约 2026-10-10T15:08:00+08:00）：依据 research/c39-d233-publish-order-review.md——d23351a7 publish-order 守卫真重审材料通过。限定照审阅稿：未做真实 Draft 端到端 publish 演练；当前 tip 上 release/tools/publish.sh 与 tests/publishordercheck.py 仍为 d23351a7 字节，publishordercheck rc0。daf53c86 仍仅 hash refresh，不作重审依据；gatedeps 未重刷（guard 已对齐）。
+- R3=APPLIED（机房主任，方案 2，2026-10-10T15:19:48+08:00）：签后 0.0.38 字节 579f6525 于 Draft 408747179 六格+Defender 全绿；不抵 0.0.39 真链；Draft 不公开。
