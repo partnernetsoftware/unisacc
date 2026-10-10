@@ -21,7 +21,7 @@ revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader
 script-inventory subtract-safety subtract-safety-selftest c99-ledger
 publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
 lib-bindings-registry
-hostcheck seedmemory stagelog exittable warmup gate-infra-38 installpair attemptchain c99precheck rulingwait namedrefuse checkrun commitgate whyrerun draftfetch draftguard precommithook k2b queuestart queuestart-strict queuestart-launch docedit
+hostcheck seedmemory stagelog exittable warmup gate-infra-38 installpair attemptchain c99precheck rulingwait namedrefuse checkrun commitgate whyrerun draftfetch draftguard precommithook k2b queuestart queuestart-strict queuestart-launch queuetimeout docedit
 """.split())   # 0.0.38 P1-P7 pipeline contracts
 CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "tools-")
 
