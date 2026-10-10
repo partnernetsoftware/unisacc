@@ -44,10 +44,11 @@ printf '{"artifact_sha256":"%s"}\n' "$art" > "$B/unisacc-next.com.build.json"
 # 3. an unknown start mode: refused, no window
 rc=$(q "$T/q-mode" QUEUE_START=auto); [ "$rc" = 2 ] && [ "$(launches)" = 0 ] || fail "unknown mode: rc=$rc launches=$(launches)"
 # 4. a clean default start launches windows and never imports the backup (positive)
-Q=$T/q-fresh; rc=$(q "$Q")
+# an inherited QUEUE_START=resume from the caller must not leak into a default start (q clears it)
+Q=$T/q-fresh; export QUEUE_START=resume; rc=$(q "$Q"); unset QUEUE_START
 [ "$rc" = 0 ] && [ "$(launches)" -ge 1 ] || fail "clean fresh start: rc=$rc launches=$(launches) $(cat "$T/out")"
 grep -q '^restored=no$' "$Q/start-receipt.txt" && [ ! -e "$Q/results.json" ] || fail "fresh start imported the backup"
 # 5. a failing window after a clean start is not a green queue (the positive cannot hide a red launch)
 printf '#!/bin/sh\necho launched >> "%s/launches"\nexit 1\n' "$T" > "$W/tests/term.sh"; rm -f "$T/launches"
 rc=$(q "$T/q-red"); [ "$rc" != 0 ] && [ "$(launches)" -ge 1 ] || fail "a failing window gave rc=$rc launches=$(launches)"
-echo "queuestartlaunch  real queue.sh entry: fresh-into-live, foreign-backup resume and unknown mode exit 2 with zero window launches, state untouched/not created, refusal logged; a clean fresh start exits 0 and launches without importing the backup; a failing window is not rc 0; snapshots cover members, modes and bytes"
+echo "queuestartlaunch  real queue.sh entry: fresh-into-live, foreign-backup resume and unknown mode exit 2 with zero window launches, state untouched/not created, refusal logged; a clean default start (even with QUEUE_START=resume inherited) exits 0 and launches without importing the backup; a failing window is not rc 0; snapshots cover members, modes and bytes"
