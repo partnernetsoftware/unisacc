@@ -38,9 +38,18 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], MOCK_LOG=str(log))
     expected = hashlib.sha256(b'signed asset').hexdigest()
 
-    def acceptance(eligible, signed):
-        path = work / ('acc-%s-%s.json' % (eligible, signed[:4]))
-        path.write_text('{"release_eligible": %s, "windows": {"after_sha256": "%s"}}' % (eligible, signed))
+    import json
+    def acceptance(eligible, signed, **drop):
+        rec = {'schema': 1, 'version': '-mock', 'release_eligible': eligible == 'true',
+               'windows': {'after_sha256': signed},
+               'courts': {'six-native-cells-final-bytes': {'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': signed},
+                          'windows-defender-final-bytes': {'run_id': 2, 'conclusion': 'success'},
+                          'owner-promotion': {'authority': 'mock owner'}}}
+        for key, value in drop.items():
+            if key == 'version': rec['version'] = value
+            else: rec['courts'][key.replace('_', '-')] = value
+        path = work / ('acc-%d.json' % len(list(work.glob('acc-*.json'))))
+        path.write_text(json.dumps(rec))
         return str(path)
 
     def run(want_hash, acc=None):
@@ -51,7 +60,12 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
         return result, log.read_text().splitlines()
 
     # 0.0.39 WF3 negative: not eligible, other bytes or no receipt -> refused before any gh call
-    for bad in (acceptance('false', expected), acceptance('true', '1' * 64), str(work / 'missing.json')):
+    minimal = work / 'minimal.json'; minimal.write_text('{"release_eligible": true, "windows": {"after_sha256": "%s"}}' % expected)
+    for bad in (acceptance('false', expected), acceptance('true', '1' * 64), str(work / 'missing.json'), str(minimal),
+                acceptance('true', expected, version='9.9.9'),
+                acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'failure'}),
+                acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': '2' * 64}),
+                acceptance('true', expected, owner_promotion={})):
         result, rows = run(expected, bad)
         assert result.returncode != 0 and 'refused' in result.stdout, (bad, result.stdout)
         assert not rows, (bad, rows)
@@ -65,4 +79,4 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     deleted = next(i for i, row in enumerate(rows) if 'delete-asset' in row)
     published = next(i for i, row in enumerate(rows) if 'release edit' in row)
     assert checked < deleted < published, rows
-print('publish order: ineligible/other-bytes/missing acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')
+print('publish order: ineligible/other-bytes/missing/minimal/wrong-tag/failed-court/other-court-bytes/unauthorised-promotion acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')

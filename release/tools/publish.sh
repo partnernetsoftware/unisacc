@@ -8,12 +8,23 @@
 set -u
 TAG=${1:?tag}; WANT=${2:?signed sha256}; ACC=${3:?release acceptance receipt (research/r<N>-release-acceptance.json)}
 cd "$(dirname "$0")/../.." || exit 1          # gh needs the repository (0.0.19 published once with uploads failing outside it)
-python3 - "$ACC" "$WANT" <<'PY' || exit 1
+python3 - "$ACC" "$WANT" "$TAG" <<'PY' || exit 1
 import json,sys
-try: d=json.load(open(sys.argv[1]))
-except Exception as e: print('refused: no readable acceptance receipt:',e); sys.exit(1)
-if d.get('release_eligible') is not True: print('refused: acceptance receipt is not release_eligible'); sys.exit(1)
-if d.get('windows',{}).get('after_sha256')!=sys.argv[2]: print('refused: acceptance receipt names other signed bytes'); sys.exit(1)
+acc,want,tag=sys.argv[1:4]
+def no(why): print('refused:',why); sys.exit(1)
+try: d=json.load(open(acc))
+except Exception as e: no('no readable acceptance receipt: %s' % e)
+if d.get('schema')!=1: no('acceptance receipt schema is not 1')
+if 'v'+str(d.get('version'))!=tag: no('acceptance receipt is for v%s, not %s' % (d.get('version'),tag))
+if d.get('release_eligible') is not True: no('acceptance receipt is not release_eligible')
+if d.get('windows',{}).get('after_sha256')!=want: no('acceptance receipt names other signed bytes')
+c=d.get('courts') or {}
+for court in ('six-native-cells-final-bytes','windows-defender-final-bytes'):
+    r=c.get(court) or {}
+    if r.get('conclusion')!='success' or not r.get('run_id'): no('court %s has no successful run' % court)
+s=c.get('six-native-cells-final-bytes',{}).get('cells_public_sha256')
+if s is not None and s!=want: no('six-native court tested other bytes')
+if not (c.get('owner-promotion') or {}).get('authority'): no('owner-promotion has no named authority')
 PY
 have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || exit 1
 case " $have " in *" unisacc.com "*) ;; *) echo "refused: no signed unisacc.com on $TAG yet"; exit 1;; esac
