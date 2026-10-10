@@ -22,6 +22,9 @@ assert ok3['tests/c/a.c']['got'] == 'refuse', ok3
 agree1 = 'difftest_o SHARD=1/1 probes=1  agree 3   wrong 0   refuse 0   known 0   revived 0'
 assert P.verdicts(agree1, rows[1:2], rc=0)['tests/c/b.c']['got'] == 'agree'
 assert P.verdicts(agree1, rows[1:2], rc=1)['tests/c/b.c']['got'] == 'unproven'   # unexplained nonzero rc
+refuse3 = '\n'.join(['  REFUSE a %s: not covered: x' % o for o in ('-O0', '-O1', '-O2')] + [three])
+for bad_rc in (142, -9, 2):   # timeout, signal, usage: never a normal refusal
+    assert P.verdicts(refuse3, rows[:1], rc=bad_rc)['tests/c/a.c']['got'] == 'unproven', bad_rc
 # fail closed: no summary, wrong probe count, known entries or unaccounted totals -> unproven, never agree
 for bad in ('', 'difftest_o SHARD=1/1 probes=3  agree 9   wrong 0   refuse 0   known 0   revived 0',
             'difftest_o SHARD=1/1 probes=4  agree 9   wrong 0   refuse 0   known 3   revived 0',

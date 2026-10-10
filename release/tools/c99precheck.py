@@ -52,7 +52,8 @@ def verdicts(text, rows, rc=None):
     n, agree, wrong, refuse, known, revived = map(int, m.groups()) if m else (None,) * 6
     complete = bool(m) and n == len(rows) and known == 0 and revived == 0 and agree + wrong + refuse == 3 * n
     # difftest_o exits 0 only when everything agrees; a nonzero rc must be explained by refuse/wrong counts
-    if rc is not None and complete and (rc == 0) != (wrong == 0 and refuse == 0): complete = False
+    # only 0 (all agree) or 1 (refuse/wrong counted) are normal; a timeout (142), signal (<0) or other rc is unproven
+    if rc is not None and complete and not ((rc == 0 and wrong == 0 and refuse == 0) or (rc == 1 and (wrong or refuse))): complete = False
     for r in rows:
         b = pathlib.Path(r['probe']).stem
         lines = [l for l in text.splitlines() if re.match(r'\s+(REFUSE|WRONG|FAIL) %s\b' % re.escape(b), l)]
