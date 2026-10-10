@@ -31,7 +31,7 @@ class Memory(unittest.TestCase):
    self.assertIsNone(m.requirement('gen',['tokenpp','tokenlex','warnlex'],d)[0])
    c=pathlib.Path(d)/'unisacc-seedgen';c.mkdir()
    for n in ['tokenpp','tokenlex','warnlex']:(c/('py-'+m.REFERENCE_KEYS['gen']+'-'+n+'.json')).write_text('{}')
-   peak=(39+120+743)*1024**2
+   peak=sum(m.C_RSS[n]+1 for n in ['tokenpp','tokenlex','warnlex'])*1024**2
    self.assertEqual(m.requirement('gen',['tokenpp','tokenlex','warnlex'],d)[0],peak+512*1024**2)
    with patch.object(m,'reference_key',return_value='changed'):self.assertIsNone(m.requirement('gen',['tokenpp'],d)[0])
  def test_unknown_com_and_unmeasured_parse2_flags(self):
