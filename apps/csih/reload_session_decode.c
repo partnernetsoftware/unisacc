@@ -12,27 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ── the slice of json.c used here (types restated verbatim from
- *    reload_state.c so this file compiles standalone; json.c is an earlier
- *    file in the same unit). No jitem/jbool exist: arrays use items/len,
- *    bools use the b member. ────────────────────────────────────────── */
-#ifndef CSIH_RELOAD_JSON_TYPES
-#define CSIH_RELOAD_JSON_TYPES
-typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
-typedef struct jvalue {
-    jkind kind;
-    int    b;
-    double n;
-    char  *s;
-    struct jvalue **items;  size_t len;
-    char **keys; struct jvalue **vals; size_t nkeys;
-} jvalue;
-#endif
-
-jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
-jvalue *jget(jvalue *obj, const char *key);
-const char *jstr(jvalue *v);
-void    jfree(jvalue *v);
+/* JSON types and prototypes come from json.h (injected by -include). */
 
 int reload_state_validate_v2(const char *text, size_t len, char *why, size_t cap);
 

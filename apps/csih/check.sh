@@ -46,8 +46,11 @@ fi
 #    Warnings are not gated here; the link and the cc-built selftest are.
 for f in cols home json; do cp "$f.cx" "$TMP/$f.c" || rc=1; done
 if cc -std=c99 -I cc -I . -include json.h -include csih_cols.h -include csih_home.h \
-      csih.c render.c term.c chat.c clock.c tools.c "$TMP/cols.c" "$TMP/home.c" file.c shell.c edit.c gate.c "$TMP/json.c" \
-      session.c agent.c plugin.c net.c -o "$TMP/csih_cc" -lcurl -lm -ldl > "$TMP/cc_build.log" 2>&1 \
+      tui.c render.c term.c chat.c clock.c tools.c "$TMP/cols.c" "$TMP/home.c" file.c shell.c edit.c gate.c "$TMP/json.c" \
+      session.c agent.c plugin.c net.c \
+      reload_state.c reload_session_decode.c reload_session_encode.c reload_io.c reload_load.c \
+      reload_consume.c journal_checkpoint.c reload_owner.c csih_message.c csih_message_io.c context_index.c \
+      -o "$TMP/csih_cc" -lcurl -lm -ldl > "$TMP/cc_build.log" 2>&1 \
    && "$TMP/csih_cc" selftest > "$TMP/cc_selftest.log" 2>&1 && tail -1 "$TMP/cc_selftest.log" | grep -q 'selftest ok'; then
     echo "ok   4: cc -std=c99 full build + selftest ok"
 else

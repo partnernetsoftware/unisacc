@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -2262,7 +2263,7 @@ static const char *csih_env(const char *neu, const char *old) {
     return 0;
 }
 
-#include "context_index.inc"
+#include "context_index.h"
 int agent_context_packet(const char *packet);
 
 static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_manual_input) {
@@ -2327,7 +2328,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
     snprintf(st->phase, sizeof st->phase, "等模型");
     tui_redraw(st);
     {char *context=NULL;
-        if(!tui_context_index(st,&context) || agent_context_packet(context)!=0){
+        if(!context_index_packet(st->owned,st->owned_dir,&context) || agent_context_packet(context)!=0){
             free(context);st->busy=0;tui_log_plain(st,"context-index unavailable: capture/encoding failed");tui_redraw(st);return 1;
         }
         free(context);
@@ -3683,7 +3684,7 @@ int main(int argc, char **argv) {
             printf("owned startup refused: %s\n", why);
             return 1;
         }
-        if (!tui_context_index(&st, &packet) || !packet) {
+        if (!context_index_packet(st.owned,st.owned_dir,&packet) || !packet) {
             printf("context index failed\n");
             tui_owned_close(&st, why, sizeof why);
             return 1;

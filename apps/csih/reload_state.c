@@ -239,7 +239,7 @@ static int rs_history_browsing(jvalue *v, size_t hist_len, unsigned long long po
  * silently truncate. A literal backslash-then-u0000 (i.e. \\u0000) is
  * plain text and must be allowed, so we skip the byte after every escape
  * rather than strstr-ing. */
-static int rs_no_embedded_nul(const char *text, size_t len, char *why, size_t cap) {
+int rs_no_embedded_nul(const char *text, size_t len, char *why, size_t cap) {
     for (size_t i = 0; i < len; i++) {
         if (text[i] == '\0')
             return rs_fail(why, cap, "embedded NUL not representable");

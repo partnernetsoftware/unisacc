@@ -29,6 +29,9 @@ typedef struct {
     int loop_left;
 } reload_session_state;
 
+/* 文本无内嵌 NUL 且为合法 UTF-8；失败写 why 并返回 0。被 reload_state.c 与 tui.c 共用。 */
+int rs_no_embedded_nul(const char *text, size_t len, char *why, size_t cap);
+
 /* 解析 v2 会话；成功返回 0，失败返回 -1 并清零输出。 */
 int reload_session_decode_v2(const char *text, size_t len,
                              reload_session_state *out,

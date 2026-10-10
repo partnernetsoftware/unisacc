@@ -3,7 +3,7 @@
 import hashlib, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, time, uuid
 SUFFIXES={".c",".h",".inc",".cx"}
 # Same file table as csih.sh (cols/home/json are .cx providers; .h headers come in via -include).
-SOURCES="csih.c render.c term.c chat.c clock.c tools.c cols.cx home.cx file.c shell.c edit.c gate.c json.cx session.c agent.c plugin.c net.c".split()
+SOURCES="tui.c render.c term.c chat.c clock.c tools.c cols.cx home.cx file.c shell.c edit.c gate.c json.cx session.c agent.c plugin.c net.c reload_state.c reload_session_decode.c reload_session_encode.c reload_io.c reload_load.c reload_consume.c journal_checkpoint.c reload_owner.c csih_message.c csih_message_io.c context_index.c".split()
 INCLUDES="csih_cols.h csih_home.h json.h".split()
 AGENT="agent.c agent_cli.c cols.cx home.cx file.c edit.c shell.c json.cx session.c net.c plugin.c".split()
 GATES=[("tui-selftest","candidate",SOURCES,"selftest ok"),("agent-selftest","agent-selftest",AGENT,"agent: all cases pass")]
