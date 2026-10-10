@@ -1,6 +1,7 @@
 #!/bin/sh
 # K5-1h: construct parse2 δ JSON. Prefer seed/gen.c (seed-gen); Python remains the independent byte reference
-# (SEED_GEN=0). On seed-gen failure do not silently fall back to gen.py.  Consumer: exec/pipeline/prepare.sh.
+# (SEED_GEN=0). On seed-gen failure do not silently fall back to gen.py.  Consumers: exec/pipeline/prepare.sh (K5-1h)
+# and exec/c/chain.sh (K5-1i).
 # 0.0.40 (机房主任 06:01): prepare calls parse2 with no flag, so this helper takes OUT and nothing else (any flag,
 # --locations/--warnings/--errors included, rc 2).  SEED_GEN is 0 or 1 (anything else rc 2).  Same keyed, sha-checked
 # default seed-gen build as the opt, prune and pp helpers; a copy of exec/prune/gen-delta.sh with the stage name

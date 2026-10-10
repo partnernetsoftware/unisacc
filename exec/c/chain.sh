@@ -50,7 +50,9 @@ b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "chain: cc failed"; e
 # private seed-gen cache inside this chain scratch (overrides an inherited SEED_GEN_DIR; cleared with $T)
 b 60 env SEED_GEN_DIR="$T/.seed-gen-cache" sh "$R/exec/pp/gen-delta.sh" "$T/e2.json" >"$T/e2-gen.out" 2>"$T/e2-gen.err" || { echo "chain: E2 gen failed"; exit 1; }
 b 60 python3 exec/build/gen.py lex "$T/e1.json" --typed >/dev/null 2>&1 || { echo "chain: E1 gen failed"; exit 1; }
-b 60 python3 exec/build/gen.py parse2 "$T/e3.json" >/dev/null 2>&1 || { echo "chain: E3 gen failed"; exit 1; }
+# 0.0.40 K5-1i (机房主任 07:46): parse2 δ through exec/parse2gen/gen-delta.sh, sharing the private seed-gen cache the pp
+# step above built cold (same keyed binary; stdout/stderr to $T/e3-gen.{out,err})
+b 60 env SEED_GEN_DIR="$T/.seed-gen-cache" sh "$R/exec/parse2gen/gen-delta.sh" "$T/e3.json" >"$T/e3-gen.out" 2>"$T/e3-gen.err" || { echo "chain: E3 gen failed"; exit 1; }
 MODEL=tbl
 case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1"; exit 2;; esac
 for s in e2 e1 e3; do

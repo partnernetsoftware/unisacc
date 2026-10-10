@@ -95,7 +95,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           seedgen-opt) req='native-posix|host|cc,python3|cdx|seed-gen-opt-byte-pair';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
-          seedgen-ppchain) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
+          seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
           seedgen-pprun) req='native-posix|host|cc,python3|cdx|seed-gen-pp-run';;
           seedgen-optconsumer-1|seedgen-optconsumer-2|seedgen-optconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-opt-consumer';;
           seedgen-pruneconsumer-1|seedgen-pruneconsumer-2|seedgen-pruneconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-prune-consumer';;
@@ -576,7 +576,9 @@ job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:4
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
 job seedgen-ppconsumer-2 sh ./tests/seedppconsumercheck.sh 2
-job seedgen-ppchain sh ./tests/seedppchaincheck.sh   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled
+job seedgen-ppchain-1 sh ./tests/seedppchaincheck.sh 1   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled; K5-1i (07:53): + parse2 helper, three slices
+job seedgen-ppchain-2 sh ./tests/seedppchaincheck.sh 2
+job seedgen-ppchain-3 sh ./tests/seedppchaincheck.sh 3
 job seedgen-pprun sh ./tests/seedpprun.sh   # 0.0.40 K5-1e (机房主任 02:59): exec/pp/run.sh d.json through gen-delta, controlled
 job seedgen-optconsumer-1 sh ./tests/seedoptconsumercheck.sh 1   # 0.0.40 K5-1f (机房主任 03:43): prepare.sh opt step through gen-delta, controlled; K5-1h (06:12): three slices
 job seedgen-optconsumer-2 sh ./tests/seedoptconsumercheck.sh 2
