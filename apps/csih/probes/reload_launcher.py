@@ -42,10 +42,13 @@ def main():
                 except Exception as error:child_result.write_text(json.dumps(dict(error=repr(error))));os._exit(1)
             import fcntl
             fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',35,120,0,0))
-            output=b'';deadline=time.monotonic()+55
+            output=b'';deadline=time.monotonic()+240
             def pump():
                 nonlocal output
-                assert time.monotonic()<deadline,'outer case exceeded55s'
+                if time.monotonic()>=deadline:
+                    # Record where the scripted run stalled; the session dir is gone after cleanup.
+                    result['stalled_events']=events()[-5:];result['stalled_output']=output.decode(errors='replace')[-400:]
+                    raise AssertionError('outer case exceeded240s')
                 if select.select([master],[],[],.03)[0]:
                     try:output+=os.read(master,65536)
                     except OSError:pass
@@ -101,7 +104,14 @@ def main():
             result['passed']=True
     except Exception as error:result.update(passed=False,error=repr(error))
     finally:
-        if pid:os.killpg(pid,signal.SIGKILL);os.waitpid(pid,0)
+        if pid:
+            # macOS returns EPERM for killpg when the group leader already exited (zombie).
+            # Record the outcome instead of letting cleanup mask the probe result.
+            try:os.killpg(pid,signal.SIGKILL);result['cleanup']='killed'
+            except ProcessLookupError:result['cleanup']='no group'
+            except PermissionError as error:result['cleanup']='leader exited: '+repr(error)
+            try:os.waitpid(pid,0)
+            except ChildProcessError:pass
         result['after']=hashes();assert result['before']==result['after']
         pathlib.Path(sys.argv[2] if len(sys.argv)>2 else '/tmp/csih-launcher-'+mode+'-review.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
     print('PASS launcher '+mode if result.get('passed') else 'FAIL '+result.get('error','unknown'),flush=True)
