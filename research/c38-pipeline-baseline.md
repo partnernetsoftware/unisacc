@@ -79,3 +79,23 @@
 出口表：538 PASS、57 待裁、27 BLOCKED（挂三个根：rowcov-parse2-build 25、com-luatests-build 1、rowcov-enc 系 1）、15 H1 宿主超时、6 资源 UNKNOWN、6 宿主 UNVERIFIED。下一刀按浪费排：①DEFER 4817 作业秒：入窗时的 attempt 类别判定（2df6655f）与 per-suite history 有效期（740b52a0）**已在运行树 04a5087b 生效**；未生效的只有类别持久化字段（7de2efa0，故终结果无 kind）与之后的实时内存准入（cce2de15/e5ddec42/2cedd407）、stage 对安装（a7b059dc/a3d3bb78）。这些 DEFER 是按记录类别判为 tail 的尝试，是否可避免需另核，不可全数记为可省；②rowcov/closure/stages/self 系 H1 超时；③comboot 安装幂等与回执来源前置核。
 
 更正（2026-10-10，cdx2 复核）：上表 DEFER 原标“可避免候选”、BLOCKED 原写“两个根”、并称 2df6655f/740b52a0 未在运行树生效，三处均已改正；可避免性保留 unknown。
+
+## 授权 scoped verification：ver038（2026-10-10；实际跑过，董秘授权）
+
+current main 81c4827f，同候选 740007ef、同宿主、同 cc 启动器；**单段运行、无暂停/外杀/失效/停滞**，stagesum COMPLETE（full038c 为 INCOMPLETE）。新出现的差异按原样分列，不称修复或回归。
+
+| 指标 | full038c（04a5087b→81a4ee4a，四段） | ver038（81c4827f，单段） |
+|---|---|---|
+| 结果 / final rc | 649/649，rc 1 | 650/650（+installpair），rc 1 |
+| PASS | 538 | 538 |
+| 窗数 / 窗并集墙钟 | 175 / 8533.5 s | 153 / 7301.0 s |
+| jobs 段合计 | 7637.6 s | 6478.9 s |
+| prologue / epilogue 每窗 | 1.9 / 1.7 s | 1.9 / 1.8 s |
+| 中途失效重验 | 39 + 124 项 | 0 |
+| tail→deferred 尝试 | 175 次 / 4816.9 作业秒（类别未持久化） | 87 次 / 1595.7 作业秒（持久 kind） |
+| tail 成功填尾 | unknown（无持久 kind） | 273 次 / 1926.2 作业秒 |
+| full→solo（规则所需）/ solo 后终 142 | unknown 拆分 / 63 次 2863.8 作业秒（混合） | 63 次 2757.8 / 51 次 2251.9 作业秒 |
+
+口径：两轮 649 项共同 suite 的 fingerprint stamp 全部不同（公共身份含 gatequeue 契约等，已变），故**不是同身份对照**；153 vs 175 窗与墙钟差只作描述，不宣称净提速。可归因的确定事实：ver038 无中途失效（full038c 的 39+124 项返工为前次运行缺陷，已由 a7b059dc/a3d3bb78 与准入修复）；tail 尝试现可分成功与延期两桶。
+
+终 rc 变化 23 项（定位前不称修复/回归）：10 项非 0→0（exec-driver-core-contracts、gate-layers、lib-*-source 7 项、lib-source-provenance(+located)，多为 142→0）；11 项 0→非 0（exec-armself-package、exec-driver-resources、exec-selfelf(+package)、exec-selfprep-table、exec-tableself-1、exec-winlower、seed-construct-base 均 0→142；gate-infra-38 0→1 为 cc 测试依赖真实内存/旧 history，已修 6b655220、与本轮证据分列；lib-union16-callback-2/3 0→1 待定位）；2 项非 0 间互换（exec-tableself-2 142→1、lib-lifecycle 1→142）。0↔142 成对翻转集中在近限时的长作业，与负载/冷暖相关的可能性需逐项核；缺估计证据记 UNKNOWN，不补跑。冻结证据：~/.unisacc/evidence/ver038-final（SHA256SUMS）。
