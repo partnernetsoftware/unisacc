@@ -1331,3 +1331,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔董秘 full038c 出口表一次裁，2026-10-10〕A 宿主跳项→H2；B 自举 self 超时→H1；C rowcov/lib-source 超时→H1（另审 probe 丢弃仅预验）；D 其他超时→H1；E lib-lifecycle/exec-driver-language-2 新形态→H2 允许 H2 切口修一轮；F gate-layers→主树 48b8b9ae 已修；G com-multi/com-forward-multi→H2（静态 -run 需动态镜像）、com-difftest_o-1→覆盖缺口 COV1、realprog→H2；H exec-bridge-linux/windows-resolver-host→H2，seed-construct-parse2×3→待定位 SC1 不挡收口。53 行按套件+形态+签名落 release/rulings.tsv；出口表复核：NEEDS_RULING 只余 gate-layers（已修）与 SC1 三项。同时授权 current-main scoped verification（同候选 740007ef 同宿主，不进 Draft）。
 
 〔0.0.38 scoped verification 收口读数，2026-10-10；实际跑过〕ver038 650/650 rc1、538 PASS、单段 153 窗 7301 s、无中途失效（full038c 为四段 175 窗 8533.5 s 并有 39+124 项返工）。非同身份对照，墙钟差只描述；tail 成功 273 次与延期 87 次现可分账。23 项终 rc 变化已列待定位，gate-infra-38 红为 cc 测试缺陷已修 6b655220。详见 research/c38-pipeline-baseline.md 末节。
+
+〔0.0.38 裁后落地清单，2026-10-10〕research/c38-post-ruling-checklist.md：裁定结果→rulings/plans 落点与边界（H1/H2/修一轮/COV1/SC1/union16/历史 solo）、可度量收口证据保持口径、进入 Draft 的六项前提。只整理，不代裁、不改验收措辞、不起全量。
