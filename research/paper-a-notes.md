@@ -55,3 +55,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~14:57 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立测量侧注「表 5 DENSE 决策网络实例 vs tcc/cc 历史耗时」；父节点回 A；不挡投稿；不起稿；不闭合 §8.1 第 2 条重测/降级。见 [`notes/paper-a-derive-purify-table5-timing-20261010-1457.md`](notes/paper-a-derive-purify-table5-timing-20261010-1457.md)。
 
 - **2026-10-10 ~15:43 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「局部性＝构造法独有编辑定理 / edit locality as construction-unique theorem」；父节点回 A2 RQ2→A；不挡投稿；不起稿；seal-rebuild 不重做。见 [`notes/paper-a-derive-purify-locality-edit-theorem-20261010-1543.md`](notes/paper-a-derive-purify-locality-edit-theorem-20261010-1543.md)。
+
+- **2026-10-10 ~15:52 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「阶段组合／表合并＝可独立命题 / stage combo · table merge」；父节点回 A2 RQ1（和／或意向 C）→A；不挡投稿；不起稿；seal-combo-row／seal-combo-fail 不重做。见 [`notes/paper-a-derive-purify-combo-merge-theorem-20261010-1552.md`](notes/paper-a-derive-purify-combo-merge-theorem-20261010-1552.md)。
