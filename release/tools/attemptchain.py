@@ -118,47 +118,61 @@ WINDOW = re.compile(r'window (\d+) rc=(\S+) ')
 
 
 def windows(lines):
-    """WF5: per queue window (closed by gatequeue's `window N rc=R hh:mm:ss` line) the attempts it ended:
-    new final results, tail successes, deferrals, UNKNOWN-free job-seconds.  Kept apart from wall clock."""
-    out, cur = [], collections.Counter(); secs = 0.0
+    """WF5: per queue window (closed by gatequeue's `window N rc=R hh:mm:ss` line) the attempts it ended, each
+    kept as (suite, kind, outcome, rc): new finals, passes, deferrals, job-seconds.  Kept apart from wall clock."""
+    out, cur, kinds, secs = [], [], {}, 0.0
     for line in lines:
+        m = START.match(line)
+        if m: kinds[m.group(1)] = m.group(3) or 'unknown'; continue
         m = WINDOW.match(line)
         if m:
-            out.append({'window': int(m.group(1)), 'rc': m.group(2), **cur, 'job_seconds': round(secs, 1)}); cur = collections.Counter(); secs = 0.0
+            c = collections.Counter(a[2] for a in cur)
+            out.append({'window': int(m.group(1)), 'rc': m.group(2), 'ends': len(cur), 'final': c['DONE'], 'deferred': c['DEFER'],
+                        'passed': sum(1 for a in cur if a[2] == 'DONE' and a[3] == '0'), 'job_seconds': round(secs, 1), 'attempts': cur})
+            cur, secs = [], 0.0
             continue
         m = END.match(line)
         if m:
-            ev, rc, sec = m.group(1), m.group(3), float(m.group(4))
-            cur['ends'] += 1; secs += sec
-            if ev == 'DONE': cur['final'] += 1
-            if ev == 'DEFER': cur['deferred'] += 1
-            if ev == 'DONE' and rc == '0': cur['passed'] += 1
+            cur.append((m.group(2), kinds.pop(m.group(2), 'unstarted'), m.group(1), m.group(3))); secs += float(m.group(4))
     return out
 
 
 def stage_windows(events, run):
-    """Wall seconds of each window-N segment of RUN from a stagelog events.jsonl (begin/end paired by id);
-    a begin without an end or on another boot is UNKNOWN (never inferred)."""
-    begins, ends = {}, {}
+    """Wall seconds of each window-N segment of RUN from a stagelog events.jsonl.  UNKNOWN (None, never
+    inferred) unless: exactly one begin for that window and one end for that id, both carry the same
+    non-empty boot_id, and end - begin is finite and >= 0."""
+    import math
+    begins, ends, per_window = collections.defaultdict(list), collections.defaultdict(list), collections.defaultdict(list)
     for line in events:
         d = json.loads(line)
-        if d.get('event') == 'begin' and d.get('run') == run and str(d.get('subphase', '')).startswith('window-'):
-            begins[d['id']] = d
+        if d.get('event') == 'begin' and d.get('run') == run and str(d.get('subphase') or '').startswith('window-'):
+            begins[d['id']].append(d); per_window[int(d['subphase'].split('-')[1])].append(d['id'])
         elif d.get('event') == 'end':
-            ends[d['id']] = d
+            ends[d['id']].append(d)
     out = {}
-    for i, b in begins.items():
-        e = ends.get(i); n = int(b['subphase'].split('-')[1])
-        out[n] = round(e['mono'] - b['mono'], 2) if e and e.get('boot_id') == b.get('boot_id') else None
+    for n, ids in per_window.items():
+        out[n] = None
+        if len(ids) != 1 or len(begins[ids[0]]) != 1 or len(ends[ids[0]]) != 1: continue
+        b, e = begins[ids[0]][0], ends[ids[0]][0]
+        if not b.get('boot_id') or b.get('boot_id') != e.get('boot_id'): continue
+        try: w = float(e['mono']) - float(b['mono'])
+        except (KeyError, TypeError, ValueError): continue
+        if math.isfinite(w) and w >= 0: out[n] = round(w, 2)
     return out
 
 
-def join_windows(wins, walls):
+def join_windows(wins, walls, total_ends=None):
     rows = [{**w, 'wall_s': walls.get(w['window'])} for w in wins]
-    idle = [r['window'] for r in rows if not r.get('final') and not r.get('deferred') and not r.get('ends')]
-    return {'ends_in_windows': sum(r.get('ends', 0) for r in rows), 'windows': len(rows), 'stagelog_windows': len(walls),
-            'stagelog_only': sorted(set(walls) - {r['window'] for r in rows}), 'unknown_wall': sorted(r['window'] for r in rows if r['wall_s'] is None),
-            'no_progress': idle, 'wall_s_sum': round(sum(r['wall_s'] or 0 for r in rows), 1), 'rows': rows}
+    nums = [r['window'] for r in rows]
+    j = {'ends_in_windows': sum(r['ends'] for r in rows), 'windows': len(rows), 'stagelog_windows': len(walls),
+         'duplicate_windows': sorted({n for n in nums if nums.count(n) > 1}),
+         'stagelog_only': sorted(set(walls) - set(nums)), 'unknown_wall': sorted(r['window'] for r in rows if r['wall_s'] is None),
+         'no_ends': [r['window'] for r in rows if not r['ends']],            # nothing ended in the window
+         'no_new_final': [r['window'] for r in rows if not r['final']],      # deferrals only, or nothing
+         'wall_s_sum': round(sum(r['wall_s'] or 0 for r in rows), 1), 'rows': rows}
+    if total_ends is not None: j['ends_outside_windows'] = total_ends - j['ends_in_windows']
+    j['ok'] = not (j['duplicate_windows'] or j['stagelog_only'] or j['unknown_wall'] or j.get('ends_outside_windows'))
+    return j
 
 
 def reconcile(summary, results):
@@ -187,15 +201,15 @@ def main(argv=None):
     chains = replay(open(a.log).read().splitlines())
     if a.stagelog:
         if not a.run or a.tail_risk or a.strict or a.results or a.exittable: print('attemptchain: --stagelog needs --run and runs alone', file=sys.stderr); return 2
-        j = join_windows(windows(open(a.log).read().splitlines()), stage_windows(open(a.stagelog), a.run))
-        if a.json: print(json.dumps(j, indent=1)); return 0
         total = sum(1 for l in open(a.log) if END.match(l))
+        j = join_windows(windows(open(a.log).read().splitlines()), stage_windows(open(a.stagelog), a.run), total)
+        if a.json: print(json.dumps(j, indent=1)); return 0 if j['ok'] else 1
         if j['ends_in_windows'] != total: print('attemptchain: %d ends outside any closed window (of %d) -- UNKNOWN window' % (total - j['ends_in_windows'], total))
-        print('windows %d  stagelog windows %d  unknown wall %s  no-progress %s  window wall sum %.1fs (wall, not job-seconds)'
-              % (j['windows'], j['stagelog_windows'], j['unknown_wall'] or '-', j['no_progress'] or '-', j['wall_s_sum']))
+        print('windows %d  stagelog windows %d  unknown wall %s  no ends %s  no new final %d  window wall sum %.1fs (wall, not job-seconds)'
+              % (j['windows'], j['stagelog_windows'], j['unknown_wall'] or '-', j['no_ends'] or '-', len(j['no_new_final']), j['wall_s_sum']))
         for r in j['rows']: print('  w%-4d rc=%-3s wall %7s  ends %3d  final %3d  passed %3d  deferred %3d  job %7.1fs'
               % (r['window'], r['rc'], r['wall_s'], r.get('ends', 0), r.get('final', 0), r.get('passed', 0), r.get('deferred', 0), r['job_seconds']))
-        return 0
+        return 0 if j['ok'] else 1
     s = summarise(chains)
     if a.tail_risk and (a.strict or a.results or a.json or a.exittable):
         print('attemptchain: --tail-risk is a separate hint report; run --strict/--results/--json on their own', file=sys.stderr); return 2

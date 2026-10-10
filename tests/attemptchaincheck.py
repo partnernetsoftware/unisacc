@@ -60,7 +60,18 @@ wl = A.windows(['START a limit=9 kind=full', 'DONE a rc=0 2.00s', 'window 1 rc=7
 ev = [_j.dumps(x) for x in ({'event': 'begin', 'id': 'w1', 'run': 'R', 'subphase': 'window-1', 'mono': 1.0, 'boot_id': 'b'}, {'event': 'end', 'id': 'w1', 'mono': 11.0, 'boot_id': 'b'},
                             {'event': 'begin', 'id': 'w2', 'run': 'R', 'subphase': 'window-2', 'mono': 20.0, 'boot_id': 'b'}, {'event': 'end', 'id': 'w2', 'mono': 25.0, 'boot_id': 'x'},
                             {'event': 'begin', 'id': 'w3', 'run': 'R', 'subphase': 'window-3', 'mono': 30.0, 'boot_id': 'b'})]
-jw = A.join_windows(wl, A.stage_windows(ev, 'R'))
+jw = A.join_windows(wl, A.stage_windows(ev, 'R'), 2)
 assert [r['wall_s'] for r in jw['rows']] == [10.0, None, None], jw     # other boot and missing end: UNKNOWN, never inferred
-assert jw['ends_in_windows'] == 2 and jw['rows'][0]['passed'] == 1 and jw['rows'][1]['deferred'] == 1 and jw['no_progress'] == [3], jw
+assert jw['ends_in_windows'] == 2 and jw['rows'][0]['passed'] == 1 and jw['rows'][1]['deferred'] == 1 and jw['no_ends'] == [3], jw
+assert jw['no_new_final'] == [2, 3] and jw['rows'][1]['attempts'] == [('b', 'tail', 'DEFER', '142')] and not jw['ok'], jw
+E = lambda **k: _j.dumps({'event': 'begin', 'id': 'i', 'run': 'R', 'subphase': 'window-1', 'mono': 1.0, 'boot_id': 'b', **k})
+F = lambda **k: _j.dumps({'event': 'end', 'id': 'i', 'mono': 11.0, 'boot_id': 'b', **k})
+assert A.stage_windows([E(), F()], 'R') == {1: 10.0}
+for bad in ([E(boot_id=None), F(boot_id=None)],            # no boot on either side
+            [E(), F(mono=-4.0)],                           # end before begin: negative wall
+            [E(), F(), F()],                               # duplicate end id
+            [E(), E(id='j'), F()],                         # duplicate window
+            [E(), F(mono='nan')]):                         # not finite
+    assert A.stage_windows(bad, 'R') == {1: None}, bad
+assert A.join_windows(wl, A.stage_windows(ev, 'R'), 3)['ends_outside_windows'] == 1
 print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, per-window join with stagelog (UNKNOWN wall never inferred), WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')
