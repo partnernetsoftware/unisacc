@@ -4,11 +4,12 @@ import hashlib, json, os, pathlib, shutil, signal, subprocess, sys, tempfile, th
 from http.server import BaseHTTPRequestHandler, HTTPServer
 APP = pathlib.Path(__file__).resolve().parents[1]
 ROOT = APP.parents[1]
-TUI = "csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c".split()
-CLI = "agent.c agent_cli.c file.c edit.c shell.c json.c session.c net.c plugin.c".split()
+TUI = "tui.c render.c term.c chat.c clock.c tools.c cols.cx home.cx file.c shell.c edit.c gate.c json.cx session.c agent.c plugin.c net.c reload_state.c reload_session_decode.c reload_session_encode.c reload_io.c reload_load.c reload_consume.c journal_checkpoint.c reload_owner.c csih_message.c csih_message_io.c context_index.c".split()
+INCLUDES = ["-include", str(APP / "csih_cols.h"), "-include", str(APP / "csih_home.h"), "-include", str(APP / "json.h")]
+CLI = "agent.c agent_cli.c cols.cx home.cx file.c edit.c shell.c json.cx session.c net.c plugin.c".split()
 
 def hashes():
-    paths = sorted(p for p in APP.rglob("*") if p.suffix in (".c", ".h", ".inc"))
+    paths = sorted(p for p in APP.rglob("*") if p.suffix in (".c", ".h", ".inc", ".cx"))
     paths += [ROOT / "unisacc.com", pathlib.Path(__file__)]
     return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
@@ -28,7 +29,7 @@ def main():
         assert APP.joinpath("net.c").read_text().count("#define NET_TOTAL_SEC     60") == 1
         with tempfile.TemporaryDirectory(prefix="csih-net-timeout-") as tmp:
             private = pathlib.Path(tmp); app = private / "app"; app.mkdir()
-            for rel in [pathlib.Path(p).relative_to(APP) for p in result["before"] if pathlib.Path(p).suffix in (".c", ".h", ".inc")]:
+            for rel in [pathlib.Path(p).relative_to(APP) for p in result["before"] if pathlib.Path(p).suffix in (".c", ".h", ".inc", ".cx")]:
                 src = APP / rel; assert not src.is_symlink()
                 dst = app / rel; dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dst)
             compiler = private / "unisacc.com"; shutil.copy2(ROOT / "unisacc.com", compiler)
@@ -38,7 +39,7 @@ def main():
             for key in ("OPENAI_API_KEY", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "CDSH_ROLE", "CDSH_PEER", "CDSH_ENDPOINT", "CDSH_MODEL", "CDSH_CWD"):
                 env.pop(key, None)
             # Complete selftest uses an unchanged private production snapshot (60s).
-            result["tui_build"] = run(["/bin/sh", str(compiler), "-o", str(private / "tui"), *TUI], app, env)
+            result["tui_build"] = run(["/bin/sh", str(compiler), *INCLUDES, "-o", str(private / "tui"), *TUI], app, env)
             assert result["tui_build"]["rc"] == 0, result["tui_build"]
             result["tui_selftest"] = run([str(private / "tui"), "selftest"], app, env)
             gate = result["tui_selftest"]
@@ -46,7 +47,7 @@ def main():
             net = app / "net.c"; text = net.read_text(); assert text.count("#define NET_TOTAL_SEC     60") == 1
             net.write_text(text.replace("#define NET_TOTAL_SEC     60", "#define NET_TOTAL_SEC     1"))
             result["private_threshold"] = 1
-            result["agent_build"] = run(["/bin/sh", str(compiler), "-o", str(private / "agent"), *CLI], app, env)
+            result["agent_build"] = run(["/bin/sh", str(compiler), *INCLUDES, "-o", str(private / "agent"), *CLI], app, env)
             assert result["agent_build"]["rc"] == 0, result["agent_build"]
             class Handler(BaseHTTPRequestHandler):
                 def log_message(self, *args): pass

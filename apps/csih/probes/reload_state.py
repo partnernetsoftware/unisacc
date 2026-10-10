@@ -17,6 +17,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.dirname(HERE)              # .../apps/csih
 ROOT = os.path.dirname(os.path.dirname(APP))   # .../unisacc.com
+BIN = None                                       # set by build_bin()
 
 def run_check(case_name, raw_text, expect_code, expect_ok, why_substr):
     """Run the CLI on raw_text; return (ok, message)."""
@@ -25,8 +26,7 @@ def run_check(case_name, raw_text, expect_code, expect_ok, why_substr):
         path = os.path.join(tmpdir, "state.json")
         with open(path, "wb") as f:
             f.write(raw_text.encode("utf-8"))
-        cmd = ["/bin/sh", os.path.join(ROOT, "unisacc.com"), "json.c",
-               "reload_state.c", "reload_state_cli.c", "check", path]
+        cmd = [BIN, "check", path]
         try:
             p = subprocess.run(cmd, cwd=APP, capture_output=True,
                                timeout=4)
@@ -145,7 +145,28 @@ def cases2():
     return cs
 
 
+def build_bin():
+    """Build once with -o: run mode (no -o) drops .cx definitions (unisacc known defect)."""
+    global BIN
+    tmpdir = tempfile.mkdtemp(prefix="csih-state-bin-")
+    BIN = os.path.join(tmpdir, "reload_state_check")
+    p = subprocess.run(["/bin/sh", os.path.join(ROOT, "unisacc.com"),
+                        "-include", os.path.join(APP, "json.h"), "-o", BIN,
+                        "json.cx", "reload_state.c", "reload_state_cli.c"],
+                       cwd=APP, capture_output=True, timeout=120)
+    if p.returncode != 0:
+        print("FAIL build: " + p.stderr.decode("utf-8", "replace")[-400:])
+        sys.exit(1)
+    return tmpdir
+
 def main():
+    bindir = build_bin()
+    try:
+        return run_all()
+    finally:
+        shutil.rmtree(bindir, ignore_errors=True)
+
+def run_all():
     all_cases = cases() + cases2()
     passed = 0
     failed = 0

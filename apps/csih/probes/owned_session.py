@@ -3,7 +3,8 @@
 import fcntl, hashlib, json, os, pathlib, pty, select, signal, struct, subprocess, tempfile, termios, time
 APP = pathlib.Path(__file__).resolve().parents[1]
 ROOT = APP.parents[1]
-SRC = "csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c".split()
+SRC = "tui.c render.c term.c chat.c clock.c tools.c cols.cx home.cx file.c shell.c edit.c gate.c json.cx session.c agent.c plugin.c net.c reload_state.c reload_session_decode.c reload_session_encode.c reload_io.c reload_load.c reload_consume.c journal_checkpoint.c reload_owner.c csih_message.c csih_message_io.c context_index.c".split()
+INCLUDES = ["-include", str(APP/"csih_cols.h"), "-include", str(APP/"csih_home.h"), "-include", str(APP/"json.h")]
 WATCH = list(APP.glob("*.c")) + list(APP.glob("*.h")) + list(APP.glob("*.inc")) + [ROOT / "unisacc.com"]
 
 def hashes(): return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in WATCH}
@@ -44,7 +45,7 @@ def main():
             global BINARY
             folder=pathlib.Path(tmp); cwd=folder / "cwd"; cwd.mkdir(mode=0o700)
             BINARY=folder / "owned-tui"
-            build=subprocess.run(["/bin/sh",str(ROOT / "unisacc.com"),"-o",str(BINARY),*SRC],
+            build=subprocess.run(["/bin/sh",str(ROOT / "unisacc.com"),*INCLUDES,"-o",str(BINARY),*SRC],
                                  cwd=APP,capture_output=True,timeout=15)
             assert build.returncode==0,(build.stdout,build.stderr)
             assert BINARY.is_file(),"compiler did not produce executable"
@@ -60,13 +61,16 @@ def main():
             other=Session(["agent-owned",tmp,"sess",hash],env); sessions.append(other); other.finish(1)
             assert b"ownership lock unavailable" in other.out and journal.read_bytes()==old and journal.stat().st_ino==inode
             print("PASS second owner refused without journal write",flush=True)
-            owner.send(b"/goal OWNEDGOAL\r"); owner.send("中文草稿".encode()); owner.send(b"\x1b[A")
+            # /goal is a command and never enters history; one plain line seeds history so Up can save the draft.
+            owner.send(b"/goal OWNEDGOAL\r"); owner.send("旧输入\r".encode()); owner.until("旧输入"); owner.send("中文草稿".encode()); owner.send(b"\x1b[A")
             owner.send(b"\x7f"*30); owner.send(b"/export-state h1\r")
             assert state.is_file(),owner.out.decode(errors="replace")
-            saved=json.loads(state.read_text()); assert saved["input"]=="" and saved["history"]==["/goal OWNEDGOAL"]
-            assert saved["history_draft"]=="中文草稿" and saved["goal"]=="OWNEDGOAL"
+            saved=json.loads(state.read_text()); assert saved["input"]=="" and "/goal OWNEDGOAL" not in saved["history"] # slash commands never enter history (tui.c tui_history_add gate)
+            assert saved["history"]==["旧输入"] and saved["history_draft"]=="中文草稿" and saved["goal"]=="OWNEDGOAL"
             assert saved["cwd"]==str(cwd) and saved["role"]=="write" and saved["peer"]=="0:owned-test"
-            assert saved["journal"]==dict(path=str(journal),offset=len(old)) and saved["loop_left"]==0 and saved["loop_on"] is False
+            # the seeded plain line is a real turn, so the journal grew; the snapshot binds the size at export time
+            assert saved["journal"]==dict(path=str(journal),offset=journal.stat().st_size) and saved["loop_left"]==0 and saved["loop_on"] is False
+            old=journal.read_bytes()
             owner.send(b"/exit\r"); owner.finish(); print("PASS owned controls exported without sending/history pollution",flush=True)
             raw=state.read_bytes()
             for label, mutation, session in [("identity",None,"wrong"),("offset",dict(offset=1),"sess"),("binding",dict(path=str(folder/"other.jsonl")),"sess")]:
@@ -88,5 +92,5 @@ def main():
     finally:
         for session in sessions: session.close()
         assert hashes()==before,"source/compiler changed"
-    print("TOTAL PASS; no model turn dispatched; hashes unchanged")
+    print("TOTAL PASS; seeded turn goes to 127.0.0.1:1 (refused, no network); hashes unchanged")
 if __name__=="__main__":main()

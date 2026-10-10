@@ -2,7 +2,8 @@
 """Trusted private broker with actual controlling TTY; not a production launcher."""
 import hashlib, json, os, pathlib, pty, select, signal, socket, struct, subprocess, sys, tempfile, termios, time
 APP=pathlib.Path(__file__).resolve().parents[1]; ROOT=APP.parents[1]
-SRC="csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c".split()
+SRC="tui.c render.c term.c chat.c clock.c tools.c cols.cx home.cx file.c shell.c edit.c gate.c json.cx session.c agent.c plugin.c net.c reload_state.c reload_session_decode.c reload_session_encode.c reload_io.c reload_load.c reload_consume.c journal_checkpoint.c reload_owner.c csih_message.c csih_message_io.c context_index.c".split()
+INCLUDES=["-include",str(APP/"csih_cols.h"),"-include",str(APP/"csih_home.h"),"-include",str(APP/"json.h")]
 def hashes():
     paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
@@ -90,7 +91,7 @@ def main():
             root=pathlib.Path(tmp).resolve();home=root/'home';home.mkdir(mode=0o700);(home/'env.jsonl').write_text('{"DEEPSEEK_API_KEY":"LOCAL_STUB_ONLY"}\n')
             env=dict(os.environ,HOME=str(home),DEEPSEEK_API_KEY='LOCAL_STUB_ONLY',CSIH_ENDPOINT='http://127.0.0.1:1/unreachable',CSIH_ROLE='write',CSIH_PEER='',CSIH_CWD=str(root))
             for key in ('OPENAI_API_KEY','HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','ALL_PROXY','all_proxy'):env.pop(key,None)
-            binary=root/'candidate';result['build']=bounded(['/bin/sh',str(ROOT/'unisacc.com'),'-o',str(binary),*SRC],APP,env);assert result['build']['rc']==0,result['build']
+            binary=root/'candidate';result['build']=bounded(['/bin/sh',str(ROOT/'unisacc.com'),*INCLUDES,'-o',str(binary),*SRC],APP,env);assert result['build']['rc']==0,result['build']
             gateenv=dict(env,CSIH_ROLE='',CSIH_PEER='');result['selftest']=bounded([str(binary),'selftest'],APP,gateenv);assert result['selftest']['rc']==0,result['selftest']
             pid,master=pty.fork()
             if pid==0:
