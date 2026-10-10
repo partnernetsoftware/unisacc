@@ -30,7 +30,7 @@ def replay(lines):
         if m:
             ev, name, rc, secs, rest = m.group(1), m.group(2), m.group(3), float(m.group(4)), m.group(5)
             att = open_.pop(name, None)
-            if att is None and ev == 'DONE' and rc == '1' and secs == 0.0 and 'predecessor' in rest:
+            if att is None and ev == 'DONE' and rc == '1' and secs == 0.0 and re.match(r'\s*predecessor \S+ failed\s*$', rest):   # gatequeue's exact BLOCKED line
                 chains[name].append({'kind': 'blocked', 'limit': None, 'outcome': 'BLOCKED', 'rc': rc, 'seconds': 0.0})
             elif att is None:   # an end without its START: execution happened but the start was not logged
                 chains[name].append({'kind': 'unstarted', 'limit': None, 'outcome': 'UNSTARTED-' + ev, 'rc': rc, 'seconds': secs})
