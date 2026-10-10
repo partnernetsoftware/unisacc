@@ -93,6 +93,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           exec-bootstrap-osxx86) req='darwin-x86_64|osx/x86_64|cc|cdx|native-bootstrap';;
           exec-native-*) req='native-posix|host|cc|cdx|native-network-runtime';;
           seedgen-opt) req='native-posix|host|cc,python3|cdx|seed-gen-opt-byte-pair';;
+          seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           lib-windows-imports) req='native-posix|win-export-synthetic|cc|cdx|native-export-probe';;
           lib-lifecycle|lib-callable-catalog) req='native-posix|host|cc,libffi|cdx|native-ffi-probe';;
           *) req='UNKNOWN|UNKNOWN|UNKNOWN|unassigned|UNKNOWN';;
@@ -565,6 +566,8 @@ job seedparse2-2 ./tests/seedparse2check.sh locations,warnings locations,errors 
 job seedgen ./tests/seedgencheck.sh e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe
 job seedgen-2 ./tests/seedgencheck.sh lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a
 job seedgen-opt sh ./tests/seedoptcheck.sh   # 0.0.40 K5-1 (机房主任 23:36/23:41): opt seed/gen.c = gen.py, scratch tree only
+job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
+job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-3 ./tests/seedgencheck.sh tokenpp tokenlex warnlex
 job seedgen-4 ./tests/seedgencheck.sh warnparse warnunits errorparse warnpp   # seedgen-3 hit 49 s in the rc3 queue
 job com-memalign ./tests/memaligncheck.sh   # 0.0.32 D2: word-wise memcpy/memset only on shared alignment (UBSan + product)
