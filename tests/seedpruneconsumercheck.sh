@@ -2,7 +2,7 @@
 # K5-1g (机房主任 04:09): exec/pipeline/prepare.sh's prune step goes through exec/prune/gen-delta.sh and shares the
 # private SEED_GEN_DIR="$OUT/.seed-gen-cache" with opt (before it) and pp (after it).  Controlled, lnx/x86_64,
 # NETWORK=0.  Shims first on PATH:
-#  * sh: a call whose first argument is exec/{opt,prune,pp}/gen-delta.sh is logged (stage, full argv), run with the
+#  * sh: a call whose first argument is exec/{parse2gen,opt,prune,pp}/gen-delta.sh is logged (stage, full argv), run with the
 #    real shell, its rc logged, and AFTER it returns the cache is snapshotted into $SNAPDIR/after-<stage> (name,
 #    inode, mtime_ns, sha256; ABSENT only when the directory does not exist; snapshot rc into after-<stage>.rc; a
 #    failed snapshot ends the call with 95).  NEG_PRUNE_BIN=<path> makes only the prune helper run with that
@@ -10,7 +10,9 @@
 #  * python3: passes "-", "-c", tests/bound.py and gen.py opt / prune / pp (logged pass-gen-<stage>); short-circuits
 #    gen.py lex/parse2/lower/enc/enc/arm and exec/c/tbl.py; refuses anything else, an unknown gen.py stage included.
 #  * cc: stubs exec/c/run.c; passes seed/gen.c (logged pass-gen-c), tests/bound.c and a lone --version; refuses else.
-# Checks: positive (helpers opt -> prune -> pp with exact argv and rc 0; after-opt = after-prune = after-pp, each rc 0,
+# 0.0.40 K5-1h (机房主任 06:01): parse2 now runs first through exec/parse2gen/gen-delta.sh and builds the cache cold;
+# gen.py parse2 stays short-circuited here (the parse2 consumer is tests/seedparse2consumercheck.sh).
+# Checks: positive (helpers parse2 -> opt -> prune -> pp with exact argv and rc 0; after-parse2 = after-opt = after-prune = after-pp, each rc 0,
 # exactly the binary and its sidecar; one seed/gen.c compile; prune.json = seed-gen prune); prune-only red and missing
 # BIN (opt green, prune fails, prepare stops before pp); helper argument refusals; the old direct gen.py prune line;
 # SEED_GEN=0 reference; shim refusals.  Schema: /tmp/cc40-prep/k5-1g/schema.md.
@@ -81,6 +83,7 @@ cat > "$S/shim/sh" <<SHIM || exit 2
 #!$REALSH
 log() { [ -n "\${SHIMLOG:-}" ] && printf '%s\t%s\n' "\$1" "\$2" >> "\$SHIMLOG" || { echo "sh shim: log write failed" >&2; exit 96; }; }
 case "\${1:-}" in
+    */exec/parse2gen/gen-delta.sh) st=parse2;;
     */exec/opt/gen-delta.sh) st=opt;;
     */exec/prune/gen-delta.sh) st=prune;;
     */exec/pp/gen-delta.sh) st=pp;;
@@ -141,7 +144,7 @@ no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 haslog() { awk -F '\t' -v c="$2" -v a="$3" '$1 == c && $2 == a { f = 1 } END { exit !f }' "$1"; }
 hasclass() { awk -F '\t' -v c="$2" '$1 == c { f = 1 } END { exit !f }' "$1"; }
 count() { awk -F '\t' -v c="$2" -v a="$3" '$1 == c && (a == "" || $2 == a) { n++ } END { print n + 0 }' "$1"; }
-helpers() { awk -F '\t' '$1 ~ /^helper-(opt|prune|pp)$/ { sub(/^helper-/, "", $1); printf "%s ", $1 }' "$1"; }
+helpers() { awk -F '\t' '$1 ~ /^helper-(parse2|opt|prune|pp)$/ { sub(/^helper-/, "", $1); printf "%s ", $1 }' "$1"; }
 KEYSTEP="python3 - cc -std=c99 -O2 -w"
 prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under the shims; prints rc
     [ $# -ge 1 ] && [ -n "$1" ] || { echo "seedprunec: prep needs a NAME" >&2; exit 2; }
@@ -169,20 +172,21 @@ evw "POS rc=$r"
     && ok "prepare rc 0; e4.json, prune.json, e2.json made; no unknown call" || no "prepare (rc=$r) $(tail -1 "$l.out")"
 hs=$(helpers "$l")
 evw "POS helpers=$hs"
-{ [ "$hs" = "opt prune pp " ] \
+{ [ "$hs" = "parse2 opt prune pp " ] \
+    && haslog "$l" helper-parse2 "$W/exec/parse2gen/gen-delta.sh $o/e3.json" && haslog "$l" helper-parse2-rc 0 \
     && haslog "$l" helper-opt "$W/exec/opt/gen-delta.sh $o/e4.json --o2" && haslog "$l" helper-opt-rc 0 \
     && haslog "$l" helper-prune "$W/exec/prune/gen-delta.sh $o/prune.json" && haslog "$l" helper-prune-rc 0 \
     && haslog "$l" helper-pp "$W/exec/pp/gen-delta.sh $o/e2.json" && haslog "$l" helper-pp-rc 0; } \
-    && ok "helpers in order opt -> prune -> pp, exact argv, each rc 0" || no "helper trajectory '$hs'"
+    && ok "helpers in order parse2 -> opt -> prune -> pp, exact argv, each rc 0" || no "helper trajectory '$hs'"
 nc=$(count "$l" pass-gen-c ""); nk=$(count "$l" pass "$KEYSTEP")
 evw "POS compiles=$nc keysteps=$nk"
 [ "$nc" -eq 1 ] && ok "seed/gen.c compiled exactly once" || no "seed/gen.c compiles=$nc"
 two() { [ "$(cat "$1.rc" 2>/dev/null)" = 0 ] && [ "$(wc -l < "$1")" -eq 2 ] \
     && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$1")" -eq 1 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$1")" -eq 1 ]; }
-evw "POS snap_rc opt=$(cat "$sd/after-opt.rc" 2>/dev/null || echo none) prune=$(cat "$sd/after-prune.rc" 2>/dev/null || echo none) pp=$(cat "$sd/after-pp.rc" 2>/dev/null || echo none)"
-{ two "$sd/after-opt" && two "$sd/after-prune" && two "$sd/after-pp" \
-    && cmp -s "$sd/after-opt" "$sd/after-prune" && cmp -s "$sd/after-prune" "$sd/after-pp"; } \
-    && ok "after-opt = after-prune = after-pp: one binary and its sidecar, same inode/mtime/sha (prune and pp reused it)" \
+evw "POS snap_rc parse2=$(cat "$sd/after-parse2.rc" 2>/dev/null || echo none) opt=$(cat "$sd/after-opt.rc" 2>/dev/null || echo none) prune=$(cat "$sd/after-prune.rc" 2>/dev/null || echo none) pp=$(cat "$sd/after-pp.rc" 2>/dev/null || echo none)"
+{ two "$sd/after-parse2" && two "$sd/after-opt" && two "$sd/after-prune" && two "$sd/after-pp" \
+    && cmp -s "$sd/after-parse2" "$sd/after-opt" && cmp -s "$sd/after-opt" "$sd/after-prune" && cmp -s "$sd/after-prune" "$sd/after-pp"; } \
+    && ok "after-parse2 = after-opt = after-prune = after-pp: one binary and its sidecar, same inode/mtime/sha (opt, prune and pp reused it)" \
     || no "cache snapshots differ or are not exactly two members"
 { ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp; } && ok "no Python generator call" || no "Python generator called"
 g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
@@ -198,11 +202,11 @@ for case_ in "red:3:$S/red-gen" "missing:2:/nonexistent/seed-gen"; do
     r=$(prep "nprune-$n" "$PREP" NEG_PRUNE_BIN="$bin")
     l=$S/log-nprune-$n; o=$S/out-nprune-$n
     hs=$(helpers "$l")
-    { [ "$r" = "$want" ] && [ "$hs" = "opt prune " ] && haslog "$l" helper-opt-rc 0 && [ -s "$o/e4.json" ] \
+    { [ "$r" = "$want" ] && [ "$hs" = "parse2 opt prune " ] && haslog "$l" helper-parse2-rc 0 && haslog "$l" helper-opt-rc 0 && [ -s "$o/e4.json" ] \
         && haslog "$l" helper-prune-rc "$want" && [ ! -e "$o/prune.json" ] && [ ! -e "$o/e2.json" ] \
         && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py (lower|enc) / { f = 1 } END { exit !f }' "$l" \
         && ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp; } \
-        && ok "prune-only $n: opt rc 0 with e4.json, prune helper rc $want, prepare rc $r before pp, no prune.json/e2.json, no Python" \
+        && ok "prune-only $n: parse2 and opt rc 0 with e4.json, prune helper rc $want, prepare rc $r before pp, no prune.json/e2.json, no Python" \
         || no "prune-only $n (prepare rc=$r want $want, helpers '$hs') $(tail -1 "$l.out")"
     evw "NEG-prune-$n prepare=$r helpers=$hs"
 done
@@ -232,13 +236,13 @@ open(sys.argv[2], "w").write(s.replace(new, 'b python3 exec/build/gen.py prune "
 PY
 r=$(prep mut exec/pipeline/prepare-oldprune.sh)
 hs=$(helpers "$S/log-mut")
-{ [ "$r" = 0 ] && [ -s "$S/log-mut" ] && haslog "$S/log-mut" pass-gen-prune "python3 exec/build/gen.py prune $S/out-mut/prune.json" && [ "$hs" = "opt pp " ]; } \
+{ [ "$r" = 0 ] && [ -s "$S/log-mut" ] && haslog "$S/log-mut" pass-gen-prune "python3 exec/build/gen.py prune $S/out-mut/prune.json" && [ "$hs" = "parse2 opt pp " ]; } \
     && ok "mutant (old direct gen.py prune) is caught: Python prune logged, no prune helper" || no "mutant not caught (rc=$r helpers '$hs')"
 evw "MUTANT rc=$r helpers=$hs"
 # 5 SEED_GEN=0 named reference
 r=$(prep sg0 "$PREP" SEED_GEN=0)
 l=$S/log-sg0; sd=$S/snap-sg0
-{ [ "$r" = 0 ] && [ "$(helpers "$l")" = "opt prune pp " ] && haslog "$l" pass-gen-prune "python3 exec/build/gen.py prune $S/out-sg0/prune.json" \
+{ [ "$r" = 0 ] && [ "$(helpers "$l")" = "parse2 opt prune pp " ] && haslog "$l" pass-gen-prune "python3 exec/build/gen.py prune $S/out-sg0/prune.json" \
     && haslog "$l" pass-gen-opt "python3 exec/build/gen.py opt $S/out-sg0/e4.json --o2" && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $S/out-sg0/e2.json" \
     && [ "$(cat "$sd/after-prune" 2>/dev/null)" = ABSENT ] && [ "$(cat "$sd/after-prune.rc" 2>/dev/null)" = 0 ] \
     && cmp -s "$S/out-sg0/prune.json" "$S/out-pos/prune.json"; } \
@@ -249,7 +253,7 @@ cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 if [ -n "$EV" ]; then
-    for f in shimneg log-pos log-pos.out snap-pos/after-opt snap-pos/after-opt.rc snap-pos/after-prune snap-pos/after-prune.rc \
+    for f in shimneg log-pos log-pos.out snap-pos/after-parse2 snap-pos/after-parse2.rc snap-pos/after-opt snap-pos/after-opt.rc snap-pos/after-prune snap-pos/after-prune.rc \
              snap-pos/after-pp snap-pos/after-pp.rc ref-prune.err log-nprune-red log-nprune-red.out log-nprune-missing log-nprune-missing.out \
              log-mut log-mut.out log-sg0 log-sg0.out snap-sg0/after-prune snap-sg0/after-prune.rc; do
         mkdir -p "$EV/$(dirname "$f")" && cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedprunec: EVIDENCE copy of $f failed" >&2; }
