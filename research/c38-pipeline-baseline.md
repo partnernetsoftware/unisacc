@@ -99,3 +99,16 @@ current main 81c4827f，同候选 740007ef、同宿主、同 cc 启动器；**�
 口径：两轮 649 项共同 suite 的 fingerprint stamp 全部不同（公共身份含 gatequeue 契约等，已变），故**不是同身份对照**；153 vs 175 窗与墙钟差只作描述，不宣称净提速。可归因的确定事实：ver038 无中途失效（full038c 的 39+124 项返工为前次运行缺陷，已由 a7b059dc/a3d3bb78 与准入修复）；tail 尝试现可分成功与延期两桶。
 
 终 rc 变化 23 项（定位前不称修复/回归）：10 项非 0→0（exec-driver-core-contracts、gate-layers、lib-*-source 7 项、lib-source-provenance(+located)，多为 142→0）；11 项 0→非 0（exec-armself-package、exec-driver-resources、exec-selfelf(+package)、exec-selfprep-table、exec-tableself-1、exec-winlower、seed-construct-base 均 0→142；gate-infra-38 0→1 为 cc 测试依赖真实内存/旧 history，已修 6b655220、与本轮证据分列；lib-union16-callback-2/3 0→1：定位为 tail 入窗 limit=28 跑满 28.00 s 后套件以 rc1 报 `variants: []`——套件把限时截断转成普通失败，调度只对 142 延期重试，故截断被记为终结果；full038c 中二者整窗 rc0。属套件/调度交互，非产品回归，待裁处置（套件应在被限时截断时如实退 142，或该族不入短尾））；2 项非 0 间互换（exec-tableself-2 142→1、lib-lifecycle 1→142）。0↔142 成对翻转集中在近限时的长作业，与负载/冷暖相关的可能性需逐项核；缺估计证据记 UNKNOWN，不补跑。冻结证据：~/.unisacc/evidence/ver038-final（SHA256SUMS）。
+
+## 同输入子集对照（2026-10-10；只用两轮冻结证据，未新跑）
+
+方法：取 full038c（04a5087b）与 ver038（81c4827f）共同 649 项中，**命令相同且各自声明输入（gatedeps files + trees）在两提交间逐字节未变**的套件：570 项（排除：声明输入有变 6、无声明 73、命令变 0）。其 stamp 差异只来自一次性的公共身份分量（gatequeue 契约等），按套件看是同命令同输入。
+
+| 同输入子集 | full038c | ver038 |
+|---|---|---|
+| 两轮均通过 | 468 项 | 468 项 |
+| 末次通过尝试作业秒合计 | 6132.6 | 6068.9（−1.0%） |
+| 逐套件差中位数 | — | −0.05 s |
+| 子集内终 rc 翻转 | 失败→通过 9、通过→失败 8（均已按尝试链定位） | |
+
+结论（可度量）：同输入套件的执行成本两轮基本相同（−1.0%），因此整轮从 175 窗 / 8533.5 s 到 153 窗 / 7301.0 s 的差异不来自套件变快，而来自调度与流程：中途失效 163 项→0、四段→单段、tail 延期 175→87 次。该差异仍受宿主负载影响，记为本机单样本读数，不外推。
