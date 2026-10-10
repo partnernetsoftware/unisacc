@@ -38,9 +38,9 @@ for bad in ('', 'difftest_o SHARD=1/1 probes=3  agree 9   wrong 0   refuse 0   k
     assert all(x['got'] == 'unproven' and not x['ok'] for x in u.values()), (bad, u)
 # an inherited PROBES never narrows a formal run: without WF1_PRECHECK=1 difftest_o keeps the whole shard
 import os
-full = subprocess.run(['bash', '-c', 'source <(sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh); echo ${#FILES[@]}'], cwd=ROOT,
+full = subprocess.run(['bash', '-c', 'f=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$f"; . "$f"; rm -f "$f"; echo ${#FILES[@]}'], cwd=ROOT,
                       env=dict(os.environ, SH_N='4', SH_K='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True).stdout.strip()
-narrow = subprocess.run(['bash', '-c', 'source <(sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh); echo ${#FILES[@]}'], cwd=ROOT,
+narrow = subprocess.run(['bash', '-c', 'f=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$f"; . "$f"; rm -f "$f"; echo ${#FILES[@]}'], cwd=ROOT,
                         env=dict(os.environ, SH_N='4', SH_K='1', WF1_PRECHECK='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True).stdout.strip()
 assert int(full) > 1 and narrow == '1', (full, narrow)
 # shard map = the bash loop in difftest_o.sh (glob order, host skipped, i % 4)
