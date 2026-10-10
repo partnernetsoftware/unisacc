@@ -20,7 +20,7 @@ case "$FAKE_MODE" in
 esac
 UA
 chmod +x "$T/ua"
-run() { FAKE_MODE=$1 UA="$T/ua" UA_RUN="$T/ua" DIFFO_REFUSE="${LEDGER:-$T/refuse}" DIFFO_REFUSE_SELFTEST=${SELFTEST:-1} WF1_PRECHECK=1 PROBES=$P SHARD=1/1 \
+run() { FAKE_MODE=$1 UA="$T/ua" UA_RUN="$T/ua" DIFFO_REFUSE="${LEDGER:-$T/refuse}" DIFFO_REFUSE_SELFTEST=${SELFTEST:-1} DIFFO_KNOWN=${DIFFO_KNOWN:-} WF1_PRECHECK=1 PROBES=$P SHARD=1/1 \
         DIFFO_CACHE="$T/cache" python3 tests/bound.py 55 ./tests/difftest_o.sh > "$T/out.$1" 2>&1; echo $?; }
 fail() { echo "namedrefuse: $*"; tail -3 "$T/out.$2"; exit 1; }
 [ "$(run refuse)" = 0 ] && grep -q 'named 1' "$T/out.refuse" || fail "exact refusal at all levels not accepted" refuse
@@ -37,4 +37,7 @@ for L in "$T/missing" "$T/empty" "$T/dup"; do
   [ "$(LEDGER=$L run wrong)" = 2 ] || fail "ledger $L did not stop the run" wrong
 done
 [ "$(SELFTEST=0 run wrong)" = 2 ] || fail "DIFFO_REFUSE without the self-test flag was honoured" wrong
-echo "namedrefuse  exact refusal at -O0/-O1/-O2 accepted and never counted as agree; wrong, signal, other diagnostic, partial refusal FAIL; agreement REVIVED; missing/empty/duplicate ledger and unflagged override stop the run"
+# a ledger that is well formed but lacks a COVn knownfail obligation (empty, comments only, line deleted) stops too
+printf '# nothing\n' > "$T/blank"; printf 'fb12-31-unused-static-refs-undefined COV1 P2 test\n' > "$T/kf"
+[ "$(LEDGER=$T/blank DIFFO_KNOWN=$T/kf run wrong)" = 2 ] || fail "an empty ledger let a COV1 obligation fall back to knownfail" wrong
+echo "namedrefuse  exact refusal at -O0/-O1/-O2 accepted and never counted as agree; wrong, signal, other diagnostic, partial refusal FAIL; agreement REVIVED; missing/empty/duplicate ledger, a missing COVn obligation and an unflagged override stop the run (before any probe runs)"

@@ -22,6 +22,11 @@ assert ok3['tests/c/a.c']['got'] == 'refuse', ok3
 agree1 = 'difftest_o SHARD=1/1 probes=1  agree 3   wrong 0   refuse 0   known 0   revived 0'
 assert P.verdicts(agree1, rows[1:2], rc=0)['tests/c/b.c']['got'] == 'agree'
 assert P.verdicts(agree1, rows[1:2], rc=1)['tests/c/b.c']['got'] == 'unproven'   # unexplained nonzero rc
+# named field: a named refusal counts 3 levels (agree+wrong+refuse+3*named == 3n) and reads as refuse
+nm = '\n'.join(['  named-refuse a: not covered: x', 'difftest_o SHARD=1/1 probes=2  agree 3   wrong 0   refuse 0   known 0   revived 0   named 1   (x)'])
+vn = P.verdicts(nm, rows[:2], rc=0)
+assert vn['tests/c/a.c']['got'] == 'refuse' and vn['tests/c/b.c']['got'] == 'agree', vn
+assert P.verdicts(nm.replace('named 1', 'named 0'), rows[:2], rc=0)['tests/c/b.c']['got'] == 'unproven'   # totals no longer add up
 # conservation: summary wrong>0 without the named line, or a line naming a foreign probe -> unproven
 hidden = 'difftest_o SHARD=1/1 probes=1  agree 2   wrong 1   refuse 0   known 0   revived 0'
 assert P.verdicts(hidden, rows[1:2], rc=1)['tests/c/b.c']['got'] == 'unproven'

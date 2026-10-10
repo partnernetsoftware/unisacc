@@ -46,7 +46,7 @@ def shard_of(probe, root=ROOT, n=SHARDS):
     return ['difftest_o-%d' % k, 'com-difftest_o-%d' % k]
 
 
-SUMMARY = re.compile(r'difftest_o SHARD=\S+ probes=(\d+)\s+agree (\d+)\s+wrong (\d+)\s+refuse (\d+)\s+known (\d+)\s+revived (\d+)')
+SUMMARY = re.compile(r'difftest_o SHARD=\S+ probes=(\d+)\s+agree (\d+)\s+wrong (\d+)\s+refuse (\d+)\s+known (\d+)\s+revived (\d+)(?:\s+named (\d+))?')
 
 
 def verdicts(text, rows, rc=None):
@@ -55,8 +55,8 @@ def verdicts(text, rows, rc=None):
     totals that do not account for 3 -O levels per probe, every probe is 'unproven' (never agree)."""
     out = {}
     m = SUMMARY.search(text)
-    n, agree, wrong, refuse, known, revived = map(int, m.groups()) if m else (None,) * 6
-    complete = bool(m) and n == len(rows) and known == 0 and revived == 0 and agree + wrong + refuse == 3 * n
+    n, agree, wrong, refuse, known, revived, named = [int(x or 0) for x in m.groups()] if m else (None,) * 7
+    complete = bool(m) and n == len(rows) and known == 0 and revived == 0 and agree + wrong + refuse + 3 * named == 3 * n
     # conservation: the summary's refuse/wrong counts must equal the named per-probe lines, and every named line
     # must belong to a probe of this group -- a missing or foreign diagnostic never lets a probe read as agree
     named = [l.split() for l in text.splitlines() if re.match(r'\s+(REFUSE|WRONG|FAIL) ', l)]
@@ -69,6 +69,8 @@ def verdicts(text, rows, rc=None):
     for r in rows:
         b = pathlib.Path(r['probe']).stem
         lines = [l for l in text.splitlines() if re.match(r'\s+(REFUSE|WRONG|FAIL) %s\b' % re.escape(b), l)]
+        if any(re.match(r'\s+named-refuse %s:' % re.escape(b), l) for l in text.splitlines()):
+            out[r['probe']] = {'got': 'refuse' if complete else 'unproven', 'lines': ['named'], 'ok': complete and r['expect'] == 'refuse'}; continue
         kinds = {l.split()[0] for l in lines}
         levels = sorted(l.split()[2].rstrip(':') for l in lines if l.split()[0] == 'REFUSE')
         got = ('unproven' if not complete else

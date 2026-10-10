@@ -27,6 +27,40 @@ for f in tests/c/*.c examples/*.c; do
     i=$((i + 1))
 done
 [ "${#FILES[@]}" -gt 0 ] || { echo "empty SHARD=$SHARD" >&2; exit 2; }
+case "$UA" in *.com) KNOWN=$R/tests/difftest.com.knownfail;; *) KNOWN=$R/tests/difftest.knownfail;; esac
+[ "${DIFFO_REFUSE_SELFTEST:-}" = 1 ] && [ -n "${DIFFO_KNOWN:-}" ] && KNOWN=$DIFFO_KNOWN   # self-test only
+case "$UA" in *.com) REFUSE=$R/tests/difftest.com.refuse; NEED_REFUSE=1;; *) REFUSE=$R/tests/difftest.refuse; NEED_REFUSE=0;; esac
+# an override is honoured only by the self-test, so an inherited DIFFO_REFUSE never swaps a formal gate's ledger
+if [ -n "${DIFFO_REFUSE:-}" ]; then
+    [ "${DIFFO_REFUSE_SELFTEST:-}" = 1 ] || { echo "difftest_o: DIFFO_REFUSE is for tests/namedrefusecheck.sh only" >&2; exit 2; }
+    REFUSE=$DIFFO_REFUSE; NEED_REFUSE=1
+fi
+# fail closed: a required ledger that is missing, unreadable or malformed stops the run -- it never falls back
+# to knownfail, which would let a listed probe's wrong output or signal pass as "known"
+if [ "$NEED_REFUSE" = 1 ] || [ -e "$REFUSE" ]; then
+    python3 - "$REFUSE" "$KNOWN" <<'PY' || exit 2
+import sys
+seen = set()
+try: lines = open(sys.argv[1]).read().splitlines()
+except OSError as e: sys.exit('difftest_o: refuse ledger unreadable: %s' % e)
+for n, line in enumerate(lines, 1):
+    if not line.strip() or line.startswith('#'): continue
+    f = line.split('\t')
+    if len(f) != 3 or not f[0] or not f[1].strip() or not f[2].strip(): sys.exit('difftest_o: refuse ledger %s:%d malformed' % (sys.argv[1], n))
+    if f[0] in seen: sys.exit('difftest_o: refuse ledger %s:%d duplicate probe %s' % (sys.argv[1], n, f[0]))
+    seen.add(f[0])
+# every knownfail entry whose reason starts with a COVn tag is a named obligation and must be in the ledger,
+# so deleting its ledger line (or emptying the ledger) cannot let it fall back to the generic knownfail
+import re
+for kf in sys.argv[2:]:
+    try: klines = open(kf).read().splitlines()
+    except OSError: continue
+    for line in klines:
+        p = line.strip().split(maxsplit=1)
+        if len(p) == 2 and not p[0].startswith('#') and re.match(r'COV\d+\b', p[1]) and p[0] not in seen:
+            sys.exit('difftest_o: %s is a named obligation (%s) missing from %s' % (p[0], p[1].split()[0], sys.argv[1]))
+PY
+fi
 ua_ready
 bound 10 "$CC" --version > "$T/cc-version" 2>&1 || { echo 'FAIL cc version'; exit 1; }
 CCV=$(head -1 "$T/cc-version")
@@ -86,7 +120,6 @@ ok=0; bad=0; refuse=0; known=0; revived=0
 # level is REVIVED and fails the run (delete its line).  Before 2026-09-30 this
 # suite had no list at all, so the gate's difftest_o-N were red for every open
 # R13 defect the reference still has.
-case "$UA" in *.com) KNOWN=$R/tests/difftest.com.knownfail;; *) KNOWN=$R/tests/difftest.knownfail;; esac
 . "$R/tests/knownfail.sh"
 knownfail_load "$KNOWN" "$T/known.keys" || exit 1
 isknown() { knownfail_has "$1"; }
@@ -94,28 +127,6 @@ isknown() { knownfail_has "$1"; }
 # (probe<TAB>exact diagnostic<TAB>reason) must, at -O0, -O1 and -O2 each: have a completed reference,
 # no timeout/signal, a normal nonzero exit and the exact diagnostic on stderr.  Wrong output, a signal,
 # a timeout or another diagnostic is FAIL; agreeing at every level is REVIVED (delete the line).
-case "$UA" in *.com) REFUSE=$R/tests/difftest.com.refuse; NEED_REFUSE=1;; *) REFUSE=$R/tests/difftest.refuse; NEED_REFUSE=0;; esac
-# an override is honoured only by the self-test, so an inherited DIFFO_REFUSE never swaps a formal gate's ledger
-if [ -n "${DIFFO_REFUSE:-}" ]; then
-    [ "${DIFFO_REFUSE_SELFTEST:-}" = 1 ] || { echo "difftest_o: DIFFO_REFUSE is for tests/namedrefusecheck.sh only" >&2; exit 2; }
-    REFUSE=$DIFFO_REFUSE; NEED_REFUSE=1
-fi
-# fail closed: a required ledger that is missing, unreadable or malformed stops the run -- it never falls back
-# to knownfail, which would let a listed probe's wrong output or signal pass as "known"
-if [ "$NEED_REFUSE" = 1 ] || [ -e "$REFUSE" ]; then
-    python3 - "$REFUSE" <<'PY' || exit 2
-import sys
-seen = set()
-try: lines = open(sys.argv[1]).read().splitlines()
-except OSError as e: sys.exit('difftest_o: refuse ledger unreadable: %s' % e)
-for n, line in enumerate(lines, 1):
-    if not line.strip() or line.startswith('#'): continue
-    f = line.split('\t')
-    if len(f) != 3 or not f[0] or not f[1].strip() or not f[2].strip(): sys.exit('difftest_o: refuse ledger %s:%d malformed' % (sys.argv[1], n))
-    if f[0] in seen: sys.exit('difftest_o: refuse ledger %s:%d duplicate probe %s' % (sys.argv[1], n, f[0]))
-    seen.add(f[0])
-PY
-fi
 named=0
 refuse_sig() { [ -f "$REFUSE" ] && awk -F'\t' -v p="$1" '$0 !~ /^#/ && $1 == p { print $2; found=1 } END { exit !found }' "$REFUSE"; }
 for f in "${FILES[@]}"; do
