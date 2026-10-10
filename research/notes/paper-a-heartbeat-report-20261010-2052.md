@@ -1,0 +1,22 @@
+# Paper A 心跳短报 · 2026-10-10 ~20:52 Asia/Shanghai（CST）
+
+- **本拍切口=C**（真缺口钉）
+- **主张一句：** 8509/8769 是两套 track-facing 冻结配方（R87=CN 活 tip gold；R74=EN+arXiv 标注历史表），不是摘要-vs-表1 横切裂口；Δ=260=enc78+isel26+abi78+combo78；tip `e1fb5dbe` 上 gold pin / 四 blob / Softguess NONE×4 未因 PR#61 后产品 test 漂掉；§8.1 不统一词表配方（不叠 Ο 卡）。
+- **tip（开拍 / before）：** `e1fb5dbefa5943a967643cf54621c8063be06d91`
+- **tip（合入后 / after）：** （见 PR 合并；本短报提交时 = before，仅 research notes）
+- **四 blob（本 tip）：** CN `74893e3df1f9663b5d11f5bad6dc3cf0ca59e884` · EN `95657738e0b447ee4e40ea9ca3dd961329aebffc` · TeX `3830ede13556e8c9673f994fd6d843937476ecf5` · abs `43d7ea7e7297ed8be9a96e3950e014e359467973` — **全部 SAME**（本拍零 Paper A 正文 diff）
+- **Softguess：** **NONE×4**（仅扫；不粘；封口地位仍 OUT-OF-SCOPE）
+- **8509/8769：** **仍开** — 本拍钉 R87/R74 track-facing + Δ 阶段归因 + tip 再 pin；**不**改正文键数；**不**互换 CN/EN
+- **同身份矩阵：** **仍开** — 仅引用 ~16:45；本拍不填表
+- **产物轴：** ~17:08 卡仍有效；本拍**不叠**；Latest 候选仍 v0.0.39（事实，不代裁）
+- **挡粘点 / blockers：** Softguess NONE×4（非硬缺口）；词表轴 R87/R74 选定仍开；Ο1/Ο2 产物轴仍待政委；平台同身份矩阵仍开
+- **BODY_CHANGED：** no
+- **E_PURER：** N/A（切口 C）
+- **待批板：** 不叠决策卡；不代裁 Ο1/Ο2 或路线Ι；不催 Softguess 粘贴
+- **证据路径：**
+  - `research/notes/paper-a-gap-nail-vocab-track-recipes-delta260-20261010-2052.md`
+  - `research/notes/paper-a-heartbeat-report-20261010-2052.md`
+  - `research/seal-remeasure-20261009.md` / `research/seal-remeasure-tip.json`
+  - `research/notes/paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`
+  - `research/notes/paper-a-gap-nail-vocab-vs-product-identity-axes-20261010-2045.md`
+  - `research/notes/paper-a-decision-card-remeasure-identity-20261010-1708.md`（产物轴，不叠）
