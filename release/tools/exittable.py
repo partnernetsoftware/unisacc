@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """exittable: one release exit table from a queue state (0.0.38 P1).
 
-  exittable.py STATE_DIR [--h1 plans/v0.0.38.md] [--json]
+  exittable.py STATE_DIR [--h1 archive/plans/v0.0.38.md] [--json]
 
 Sorts every non-PASS result of STATE_DIR/results.json into the pre-authorised classes of
 release/preauth.tsv: UNVERIFIED_HOST (rc 77), OUTER_INTERRUPTED (status INTERRUPTED),
@@ -83,7 +83,7 @@ def classify(name, r, log, h1, rules=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('state'); ap.add_argument('--h1', default=str(ROOT / 'plans/v0.0.38.md')); ap.add_argument('--json', action='store_true')
+    ap.add_argument('state'); ap.add_argument('--h1', default=str(ROOT / 'archive/plans/v0.0.38.md')); ap.add_argument('--json', action='store_true')
     ap.add_argument('--rulings', default=str(ROOT / 'release/rulings.tsv'))
     a = ap.parse_args(argv)
     st = pathlib.Path(a.state); data = json.loads((st / 'results.json').read_text())
