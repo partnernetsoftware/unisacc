@@ -78,7 +78,11 @@ LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" 
 for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
   waid=$(st wait --action begin --run "$SL" --phase queue --reason gatequeue-alive)
   for k in $(seq 1 90); do
-    ps -eo pid,command | grep "[g]atequeue.py" > "$D/.gq" || break
+    # 0.0.40: only a process actually RUNNING gatequeue.py (its script is argv1, or argv0), never one whose
+    # command text merely mentions it -- a caller's shell script naming gatequeue.py made this loop wait on
+    # its own ancestor until the outer bound killed the window (first-window observation, 21:02)
+    ps -eo pid=,args= | awk '$2 ~ /gatequeue\.py$/ || ($2 ~ /(^|\/)python[0-9.]*$/ && $3 ~ /gatequeue\.py$/) {print}' > "$D/.gq"
+    [ -s "$D/.gq" ] || break
     [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
     sleep 2
   done

@@ -19,6 +19,10 @@ for c in "unknown:checkrun no-such-suite" "pipeline:checkrun difftest_o-1" "repe
   name=${c%%:*}; suites=${c#*:}; S=$T/s-$name
   rc=$(rel "$S" RELEASE_SUITES="$suites"); [ "$rc" = 66 ] && noscheduler "$S" || fail "$name scope not refused before scheduling: rc=$rc $(cat "$T/out")"
 done
+# the scheduler's own selection check must count its exit status: a correct list with rc 1 is still a refusal
+mkdir -p "$T/shim"; real=$(command -v python3)
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = --list-selection ] && { echo checkrun; exit 1; }; done\nexec "%s" "$@"\n' "$real" > "$T/shim/python3"; chmod +x "$T/shim/python3"
+S=$T/s-listrc; rc=$(rel "$S" RELEASE_SUITES="checkrun" PATH="$T/shim:$PATH"); [ "$rc" = 66 ] && noscheduler "$S" || fail "a failing scheduler selection check was accepted: rc=$rc $(cat "$T/out")"
 S=$T/s-out; rc=$(rel "$S" RELEASE_SUITES="checkrun" RELEASE_OUT="$T/out-dir"); [ "$rc" = 66 ] && noscheduler "$S" || fail "RELEASE_OUT accepted for an observation: rc=$rc"
 S=$T/s-formal; mkdir -p "$S"; printf '{"observation": true}\n' > "$S/observation.json"
 rc=$(rel "$S"); [ "$rc" = 66 ] && noscheduler "$S" || fail "a formal run continued an observation state: rc=$rc $(cat "$T/out")"
@@ -34,10 +38,13 @@ S=$T/s-badobs; mkdir -p "$S"; printf 'not json' > "$S/observation.json"; rc=$(re
 _BOUND=$("$R/tests/bound" --helper) || { echo "observation: need tests/bound"; exit 2; }
 D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests"; printf c > "$D/unisacc-next.com"
 printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
+# a process whose command TEXT mentions gatequeue.py (not running it) must not make queue.sh wait
+bash -c 'sleep 40 # tests/gatequeue.py --com' & mention=$!
 for want in 65 66; do
   printf '#!/bin/sh\necho x >> "%s/launches-%s"\nexit %s\n' "$T" "$want" "$want" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
   env -u QUEUE_START STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/q$want" QUEUE_BACKUP="$T/b$want" QUEUE_SUITES=checkrun QUEUE_WINDOWS=5 \
     UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
   [ "$rc" = "$want" ] && [ "$(wc -l < "$T/launches-$want" | tr -d ' ')" = 1 ] || fail "queue.sh on window rc $want: exit $rc, launches $(wc -l < "$T/launches-$want")"
 done
-echo "observation  unknown/non-contract/repeated/blank/glob/path-like/multi-line RELEASE_SUITES, RELEASE_OUT with an observation a formal run on an observation state, an observation on a formal state, a re-scoped or unreadable observation state all exit 66 before any scheduling, states untouched; queue.sh ends after one window on 65/66 with that rc"
+kill "$mention" 2>/dev/null; wait "$mention" 2>/dev/null
+echo "observation  unknown/non-contract/repeated/blank/glob/path-like/multi-line RELEASE_SUITES, RELEASE_OUT with an observation, a scheduler selection check that exits non-zero, a formal run on an observation state, an observation on a formal state, a re-scoped or unreadable observation state all exit 66 before any scheduling, states untouched; queue.sh ends after one window on 65/66 with that rc, and does not wait on a process that merely mentions gatequeue.py"

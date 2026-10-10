@@ -142,7 +142,7 @@ if [ -n "$OBS" ]; then
         printf '%s\n' $obs_names | grep -qxF "$v" && kept+=("$f" "$v"); done
     exclusive=(${kept[@]+"${kept[@]}"})
     # the scheduler's own view of the selection must be exactly the named suites, before anything runs
-    got=$(env -u RELEASE_SUITES python3 "$R/tests/gatequeue.py" --com --list-selection "${sel[@]}" 2>&1); lrc=$?
+    if got=$(env -u RELEASE_SUITES python3 "$R/tests/gatequeue.py" --com --list-selection "${sel[@]}" 2>&1); then lrc=0; else lrc=$?; fi
     [ "$lrc" = 0 ] || { echo "release: the scheduler refused the observation selection (rc $lrc): $got" >&2; exit 66; }
     got=$(printf '%s\n' "$got" | sort -u)
     [ "$got" = "$obs_names" ] || { echo "release: scheduler selection ($(echo $got)) != named ($(echo $obs_names))" >&2; exit 66; }
