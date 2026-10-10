@@ -48,3 +48,4 @@
 - 董秘一次裁 ledger19 已落 plans/v0.0.38.md（335b9312）：13 行 `顺延 N → 0.0.39`（计数加一，承接入草案 plans/v0.0.39.md，原验收不变）；W2/E57 顺延至有 Windows 双 ISA 真宿主的版本；H1/H2 跨版进行（基线非通过）；占位行砍掉；SC1 已完成。`ledgercheck --final plans/v0.0.38.md` 0 未结、carry 0。
 - SC1 修片 72120ea8：seed/gen.c `parse2_startup_control` 绑定 k2-control consts；seed-construct-parse2/-2/-3 真实 gate bound55 各 rc0（43/37/13 s），图对 Python 参考逐字节一致。
 - **身份变化**：`provenance.source_digest()` 689a91de → c7e75006（seed/gen.c 在产品闭包内）；seed-gen 二进制随之变化，种子内存证据（绑定生成器 sha 2d1696da）须对新生成器重测，否则准入 rc2。候选 740007ef 与 ver038 出口不能签给新闭包——本就须随 0.0.38 版本冻结重造候选、定点、出口；仍等董秘授权，不进 Draft。
+- 种子内存证据键（只读 tests/seedmemory.py 核对）：绑定 `C_SHA`=seed/gen.c 字节 sha（8ba73354…，72120ea8 后已变 → gen/parse2 族现判 rc2 'C source differs from measured route'）、`REFERENCE_KEYS`（exec/assemble.py、exec/build、exec/parse2、exec/facts 等，未变）、cc 实体 sha/版本/flags/并发/启动器。**不含 src/version.h**：版本号提交不使证据失效，故可在冻结授权后、版本提交前后任一时点对当前 gen.c 一次采证，无需二次重测；com 族本就 UNKNOWN（未测路线）。
