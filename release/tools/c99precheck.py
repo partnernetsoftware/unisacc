@@ -61,6 +61,9 @@ def verdicts(text, rows, rc=None):
     # must belong to a probe of this group -- a missing or foreign diagnostic never lets a probe read as agree
     named = [l.split() for l in text.splitlines() if re.match(r'\s+(REFUSE|WRONG|FAIL) ', l)]
     names = {pathlib.Path(r['probe']).stem for r in rows}
+    # named: the named count must equal the named-refuse lines, each naming a distinct probe of this group
+    nlines = [re.match(r'\s+named-refuse (\S+):', l).group(1) for l in text.splitlines() if re.match(r'\s+named-refuse \S+:', l)]
+    if complete and (len(nlines) != named or len(set(nlines)) != len(nlines) or any(x not in names for x in nlines)): complete = False
     if complete and (sum(1 for l in named if l[0] == 'REFUSE') != refuse or sum(1 for l in named if l[0] != 'REFUSE') != wrong
                      or any(l[1].rstrip(':') not in names for l in named)): complete = False
     # difftest_o exits 0 only when everything agrees; a nonzero rc must be explained by refuse/wrong counts

@@ -40,4 +40,8 @@ done
 # a ledger that is well formed but lacks a COVn knownfail obligation (empty, comments only, line deleted) stops too
 printf '# nothing\n' > "$T/blank"; printf 'fb12-31-unused-static-refs-undefined COV1 P2 test\n' > "$T/kf"
 [ "$(LEDGER=$T/blank DIFFO_KNOWN=$T/kf run wrong)" = 2 ] || fail "an empty ledger let a COV1 obligation fall back to knownfail" wrong
+: > "$T/zero"
+[ "$(LEDGER=$T/zero DIFFO_KNOWN=$T/kf run wrong)" = 2 ] || fail "a zero-byte ledger let a COV1 obligation fall back" wrong
+printf 'other-probe\tnot covered: z\tx\n' > "$T/other"     # other lines kept, the COV1 line deleted
+[ "$(LEDGER=$T/other DIFFO_KNOWN=$T/kf run wrong)" = 2 ] || fail "deleting only the COV1 line let it fall back" wrong
 echo "namedrefuse  exact refusal at -O0/-O1/-O2 accepted and never counted as agree; wrong, signal, other diagnostic, partial refusal FAIL; agreement REVIVED; missing/empty/duplicate ledger, a missing COVn obligation and an unflagged override stop the run (before any probe runs)"

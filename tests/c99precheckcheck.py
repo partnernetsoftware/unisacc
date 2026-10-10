@@ -27,6 +27,11 @@ nm = '\n'.join(['  named-refuse a: not covered: x', 'difftest_o SHARD=1/1 probes
 vn = P.verdicts(nm, rows[:2], rc=0)
 assert vn['tests/c/a.c']['got'] == 'refuse' and vn['tests/c/b.c']['got'] == 'agree', vn
 assert P.verdicts(nm.replace('named 1', 'named 0'), rows[:2], rc=0)['tests/c/b.c']['got'] == 'unproven'   # totals no longer add up
+one = 'difftest_o SHARD=1/1 probes=1  agree 0   wrong 0   refuse 0   known 0   revived 0   named 1   (x)'
+for bad in (one,                                                              # named count with no named line
+            '  named-refuse zz: not covered: x\n' + one,                      # named line for a foreign probe
+            '  named-refuse b: x\n  named-refuse b: x\n' + one.replace('named 1', 'named 2')):   # duplicate
+    assert P.verdicts(bad, rows[1:2], rc=0)['tests/c/b.c']['got'] == 'unproven', bad
 # conservation: summary wrong>0 without the named line, or a line naming a foreign probe -> unproven
 hidden = 'difftest_o SHARD=1/1 probes=1  agree 2   wrong 1   refuse 0   known 0   revived 0'
 assert P.verdicts(hidden, rows[1:2], rc=1)['tests/c/b.c']['got'] == 'unproven'
