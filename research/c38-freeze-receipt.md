@@ -56,3 +56,5 @@
   | com-seedgen | com | UNKNOWN：COM 路线未测 |
   预期 queue 出口中 seedparse2-1/-2、com-seedgen（及冷缓存时的 gen 族）为 RESOURCE_UNKNOWN 未执行义务，按 preauth 记缺证，不自动放行、不计 PASS；扩展映射属协议改动，须另裁。
 - 候选（cc，HEAD 53fe285f，实际跑过）：build_candidate shared+六 target+pack-prep-1..3 rc0（shared 119 s）；pack-models 首次 rc2：seed/compilerpack.c `realpath` 隐式声明（glibc 严格 C99，即 H37，本版裁顺延不实现）→ 按 0.0.37 已审核路线 PATH 前置 /tmp/cdx37-host-tools/cc（sha 5c036d42，仅对 compilerpack.c 加 -D_XOPEN_SOURCE=700，产品未改；seedmemory 登记的同一启动器）仅续跑 pack-models（10 s）、pack-driver（3 s）rc0，前 10 步未重做。候选 /tmp/cc38-final/cand/unisacc-next.com sha256 ba3f40cb…，ident check verified；种子对 /tmp/cc38-final/cand/seed/unisacc-seed.com sha256 ace3c040… 7581888 B。comboot stage1→stage2→stage3→fixedpoint 进行中。
+- comboot（实际跑过）：stage1 种子 ace3c040；stage2 3 shard rc0（sidecar seed 与 stage1 同）；stage3 3 shard rc0；fixed point holds：安装 unisacc.com == stage3 == 候选 ba3f40cb（10:44:44）。交接核：安装 pair 与候选 build.json 的 artifact_sha256 ba3f40cb、sources_sha256 5782090e 一致（commit 字段 f3557cb2/3ede21b8 不同，二者间仅 research 变化），provenance check verified。
+- queue 出口 10:45:01 起（release/tools/queue.sh /tmp/cc38-final/cand UA SEED，PATH 前置同一已审核启动器；状态 /tmp/cc38-final/cand.queue）。
