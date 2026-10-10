@@ -13,3 +13,4 @@
 
 ## decision/applied
 - R6：机房主任 13:12 SGT 代裁“先 WF1”（decision）；WF1 首刀 begin 13:1x，applied 见 plans/v0.0.39.md WF1 首刀。R1–R5 仍待政委裁。
+- R4：已验证（消息入口回执：干净检出 af12c118，不设 UNISACC_FFI_X86_PROVIDER，seedmemorycheck 13/13 OK），按消息入口指示关闭；回执未注明该检出所在宿主。
