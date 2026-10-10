@@ -4,7 +4,7 @@ import json,os,pathlib,shutil,tempfile,hashlib,threading,time,traceback,sys
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from agent_multi_action import APP,ROOT,SRC,bounded
 
-def freeze():return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]}
+def freeze():return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]}
 def main():
  import argparse
  a=argparse.ArgumentParser();a.add_argument('--receipt',required=True);args=a.parse_args();r={'before':freeze(),'cases':[]};deadline=time.monotonic()+55
@@ -12,7 +12,7 @@ def main():
  try:
   source=root/'source';source.mkdir()
   for p in APP.rglob('*'):
-   if p.suffix in ('.c','.h','.inc'):
+   if p.suffix in ('.c','.h','.inc','.cx'):
     d=source/p.relative_to(APP);d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(p.read_bytes())
   cli=source/'agent_cli.c';s=cli.read_text();entry='int main(int argc, char **argv) {';assert s.count(entry)==1
   s=s.replace(entry,'int csih_private_read(const char*,const char*);\n'+entry+'\n if(argc==3&&!strcmp(argv[1],"read-proof"))return csih_private_read(argv[2],".");\n');cli.write_text(s)

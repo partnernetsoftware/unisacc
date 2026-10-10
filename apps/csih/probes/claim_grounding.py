@@ -4,14 +4,14 @@ import json,os,pathlib,shutil,tempfile,hashlib,threading,time,traceback,re
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from agent_multi_action import APP,ROOT,SRC,bounded
 
-def freeze():return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]}
+def freeze():return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]}
 def main():
  import argparse
  a=argparse.ArgumentParser();a.add_argument('case',choices=['pages','empty-pages','legacy','partial','oversize']);a.add_argument('--receipt',required=True);args=a.parse_args();r={'before':freeze()};root=pathlib.Path(tempfile.mkdtemp(prefix='csih-claim-proof-'));r['retained_root']=str(root);deadline=time.monotonic()+55
  try:
   source=root/'source';source.mkdir()
   for p in APP.rglob('*'):
-   if p.suffix in ('.c','.h','.inc'):
+   if p.suffix in ('.c','.h','.inc','.cx'):
     d=source/p.relative_to(APP);d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(p.read_bytes())
   compiler=root/'compiler.com';shutil.copy2(ROOT/'unisacc.com',compiler);binary=root/'agent';env=dict(os.environ)
   for k in ('CSIH_ROLE','CSIH_PEER','OPENAI_API_KEY','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy'):env.pop(k,None)

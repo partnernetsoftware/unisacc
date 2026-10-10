@@ -4,7 +4,7 @@ import hashlib, json, os, pathlib, pty, select, signal, socket, struct, subproce
 APP=pathlib.Path(__file__).resolve().parents[1]; ROOT=APP.parents[1]
 SRC="csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c".split()
 def hashes():
-    paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
+    paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 def bounded(argv,cwd,env):
     p=subprocess.Popen(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)

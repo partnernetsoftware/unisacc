@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler,HTTPServer
 from agent_multi_action import APP,ROOT,SRC,bounded
 CASES=['recover','no-read','retain','no-tools','failed','stop','consultation','reason320','reason3','duplicate','nul','eof','long-path','fake-body','no-candidates','auditfail','read-retain','read-continue','read-correct','schema']
 def freeze():
- return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]}
+ return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]}
 def run(name,binary,root,env,deadline):
  cwd=root/name;cwd.mkdir();home=cwd/'home';home.mkdir();journal=cwd/'journal';notice=cwd/'notice.json';notice.write_text('CURRENT_RECEIPT_DATA\n');context=cwd/'context.json';context.write_text(json.dumps(dict(status='available',notices=[dict(id='a'*32,path=str(notice),kind='notice',body_preview='current deployment',body_bytes=22,preview_truncated=False)])))
  if name=='long-path':v=json.loads(context.read_text());v['notices'][0]['path']=str(cwd)+'/'+'x'*500;context.write_text(json.dumps(v))
@@ -108,7 +108,7 @@ def main():
   with tempfile.TemporaryDirectory(prefix='csih-reconcile-') as td:
    root=pathlib.Path(td);source=root/'source';source.mkdir()
    for p in APP.rglob('*'):
-    if p.suffix in ('.c','.h','.inc'):
+    if p.suffix in ('.c','.h','.inc','.cx'):
      assert not p.is_symlink();d=source/p.relative_to(APP);d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(p.read_bytes())
    cli=source/'agent_cli.c';text=cli.read_text();entry='int main(int argc, char **argv) {';assert text.count(entry)==1
    injection='int agent_context_packet(const char *packet);\n'+entry+'\n if(argc==3&&!strcmp(argv[1],"schema-proof")){char *out=malloc(65536);int n;if(!out)return 9;n=agent_ctx_preview(argv[2],out,65536);if(n<=0)return 9;puts(out);free(out);return 0;}\n if(argc>1&&!strcmp(argv[1],"reconcile-agent")){char *b=malloc(32768);FILE *f=fopen(getenv("CSIH_PRIVATE_CONTEXT_PACKET"),"rb");size_t n;if(!b||!f)return 9;n=fread(b,1,32767,f);if(ferror(f)||fclose(f))return 9;b[n]=0;if(agent_context_packet(b))return 9;free(b);argv[1]="agent";}\n';cli.write_text(text.replace(entry,injection))

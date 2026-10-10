@@ -6,7 +6,7 @@ from agent_multi_action import APP, ROOT, SRC, bounded
 FEEDBACK=['feedback-319','feedback-320-recover','feedback-473-recover','feedback-utf8-319','feedback-utf8-320-recover','feedback-extra-recover','feedback-missing-recover','feedback-duplicate-recover','feedback-old-recover','feedback-unknown-recover','feedback-extra-exhaust','feedback-length-exhaust','feedback-audit-failure']
 CASES=['accepted-work','consultation','legacy-stop','missing-evidence','rejected','invalid-recovery','legacy-answer','duplicate-evidence','continue-invalidates','budget-continue','audit-failure','watch-completed','watch-partial','watch-failed','required-missing','required-fake','required-wrong-peer','context-capacity']+FEEDBACK
 def freeze():
-    paths=[p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc')]+[ROOT/'unisacc.com',pathlib.Path(__file__)]
+    paths=[p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx')]+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 def run(name,binary,root,env,deadline):
     cwd=root/name;cwd.mkdir();home=cwd/'home';home.mkdir();journal=cwd/'journal';requests=[];responses=[]
@@ -180,7 +180,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='csih-completion-') as temp:
             root=pathlib.Path(temp);source=root/'source';source.mkdir()
             for p in APP.rglob('*'):
-                if p.suffix in ('.c','.h','.inc'):
+                if p.suffix in ('.c','.h','.inc','.cx'):
                     assert not p.is_symlink();d=source/p.relative_to(APP);d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(p.read_bytes())
             cli=source/'agent_cli.c';text=cli.read_text();entry='int main(int argc, char **argv) {';assert text.count(entry)==1
             injection=entry+'\n    if(argc>1&&!strcmp(argv[1],"required-agent")){agent_role_test("watch","0:private-peer");if(agent_delivery_require_next(1))return 8;argv[1]="agent";}\n'

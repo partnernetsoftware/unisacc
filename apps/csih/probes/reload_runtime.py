@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 APP=pathlib.Path(__file__).resolve().parents[1];ROOT=APP.parents[1];sys.path.insert(0,str(APP))
 spec=importlib.util.spec_from_file_location('runtime_launcher',APP/'reload_launcher.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 def hashes():
-    files=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',APP/'reload_launcher.py',APP/'reload_candidate.py',pathlib.Path(__file__)]
+    files=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',APP/'reload_launcher.py',APP/'reload_candidate.py',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 class EvidenceDirectory:
     def __init__(self,result):self.result=result;self.temp=tempfile.TemporaryDirectory(prefix='csih-reload-runtime-')
@@ -31,7 +31,7 @@ def main():
         with EvidenceDirectory(result) as tmp:
             root=pathlib.Path(tmp).resolve();source=root/'source';source.mkdir(mode=0o700)
             for path in APP.rglob('*'):
-                if path.suffix in ('.c','.h','.inc'):
+                if path.suffix in ('.c','.h','.inc','.cx'):
                     assert not path.is_symlink();dest=source/path.relative_to(APP);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes())
             compiler=root/'compiler.com';shutil.copy2(ROOT/'unisacc.com',compiler);compiler.chmod(0o600)
             assert hashlib.sha256(compiler.read_bytes()).hexdigest()==result['before'][str(ROOT/'unisacc.com')]

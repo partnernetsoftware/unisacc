@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 APP=pathlib.Path(__file__).resolve().parents[1];ROOT=APP.parents[1]
 SRC=['agent.c','agent_cli.c','file.c','edit.c','shell.c','json.c','session.c','net.c','plugin.c']
 def hashes():
-    paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
+    paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 def bounded(argv,cwd,env,limit):
     p=subprocess.Popen(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
@@ -75,7 +75,7 @@ def main():
         root=pathlib.Path(temporary);source=root/'source';source.mkdir(mode=0o700)
         try:
             for path in APP.rglob('*'):
-                if path.suffix in ('.c','.h','.inc'):
+                if path.suffix in ('.c','.h','.inc','.cx'):
                     assert not path.is_symlink();dest=source/path.relative_to(APP);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes())
             compiler=root/'compiler.com';shutil.copy2(ROOT/'unisacc.com',compiler);compiler.chmod(0o600)
             assert hashlib.sha256(compiler.read_bytes()).hexdigest()==result['before'][str(ROOT/'unisacc.com')]

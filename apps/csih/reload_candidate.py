@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Trusted-private-directory candidate builder/verifier, not authentication or handoff."""
 import hashlib, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, time, uuid
-SUFFIXES={".c",".h",".inc"}
-SOURCES="csih.c render.c term.c chat.c clock.c tools.c file.c shell.c edit.c gate.c json.c session.c agent.c plugin.c net.c".split()
-AGENT="agent.c agent_cli.c file.c edit.c shell.c json.c session.c net.c plugin.c".split()
+SUFFIXES={".c",".h",".inc",".cx"}
+# Same file table as csih.sh (cols/home/json are .cx providers; .h headers come in via -include).
+SOURCES="csih.c render.c term.c chat.c clock.c tools.c cols.cx home.cx file.c shell.c edit.c gate.c json.cx session.c agent.c plugin.c net.c".split()
+INCLUDES="csih_cols.h csih_home.h json.h".split()
+AGENT="agent.c agent_cli.c cols.cx home.cx file.c edit.c shell.c json.cx session.c net.c plugin.c".split()
 GATES=[("tui-selftest","candidate",SOURCES,"selftest ok"),("agent-selftest","agent-selftest",AGENT,"agent: all cases pass")]
 SCHEMA="csih-candidate-v1"
 
@@ -83,7 +85,10 @@ def record_command(directory,name,kind,argv,cwd,env):
     return dict(argv=argv,cwd=str(cwd),rc=rc,stdout_sha256=sha(out),stderr_sha256=sha(err)),out,err
 
 def expected_command(directory,binary,sources,kind):
-    if kind=="build":return ["/bin/sh",str(directory/"compiler.com"),"-o",str(directory/binary),*sources]
+    if kind=="build":
+        # Absolute -include paths into the frozen app, as csih.sh passes them.
+        flags=[x for h in INCLUDES for x in ("-include",str(directory/"app"/h))]
+        return ["/bin/sh",str(directory/"compiler.com"),*flags,"-o",str(directory/binary),*sources]
     return [str(directory/binary),"selftest"]
 
 def build(source,compiler,root):

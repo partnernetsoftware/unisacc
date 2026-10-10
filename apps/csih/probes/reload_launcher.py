@@ -5,7 +5,7 @@ APP=pathlib.Path(__file__).resolve().parents[1];ROOT=APP.parents[1]
 sys.path.insert(0,str(APP))
 spec=importlib.util.spec_from_file_location('native_launcher',APP/'reload_launcher.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 def hashes():
-    files=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',APP/'reload_launcher.py',pathlib.Path(__file__)]
+    files=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',APP/'reload_launcher.py',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 def main():
     mode=sys.argv[1] if len(sys.argv)>1 else 'success';assert mode in ('success','rollback')
@@ -14,7 +14,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='csih-launcher-') as tmp:
             root=pathlib.Path(tmp).resolve();source=root/'source';source.mkdir(mode=0o700)
             for path in APP.rglob('*'):
-                if path.suffix in ('.c','.h','.inc'):
+                if path.suffix in ('.c','.h','.inc','.cx'):
                     assert not path.is_symlink();dest=source/path.relative_to(APP);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes())
             candidates=root/'candidates';candidates.mkdir(mode=0o700);session=root/'session';session.mkdir(mode=0o700);home=root/'home';home.mkdir(mode=0o700)
             (home/'env.jsonl').write_text('{"DEEPSEEK_API_KEY":"LOCAL_STUB_ONLY"}\n')
@@ -42,16 +42,18 @@ def main():
                 except Exception as error:child_result.write_text(json.dumps(dict(error=repr(error))));os._exit(1)
             import fcntl
             fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',35,120,0,0))
-            output=b'';deadline=time.monotonic()+240
+            output=b'';pty_errors=[];deadline=time.monotonic()+240
             def pump():
                 nonlocal output
                 if time.monotonic()>=deadline:
                     # Record where the scripted run stalled; the session dir is gone after cleanup.
                     result['stalled_events']=events()[-5:];result['stalled_output']=output.decode(errors='replace')[-400:]
+                    result['pty_errors']=pty_errors[-3:];result['child_waitpid']=os.waitpid(pid,os.WNOHANG) if pid else None
+                    result['child_result']=child_result.read_text() if child_result.exists() else None
                     raise AssertionError('outer case exceeded240s')
                 if select.select([master],[],[],.03)[0]:
                     try:output+=os.read(master,65536)
-                    except OSError:pass
+                    except OSError as error:pty_errors.append(repr(error))
             def events():
                 try:return [json.loads(line) for line in (session/'launcher-events.jsonl').read_text().splitlines()]
                 except FileNotFoundError:return []
@@ -78,7 +80,7 @@ def main():
                 while time.monotonic()<end:pump()
                 assert '坏构建后仍可编辑' in output.decode(errors='replace')
                 os.write(master,b'\x03');type_line('/export-state inspect')
-                saved=json.loads((session/'state-v2.json').read_text());assert saved['goal']=='保留目标' and '/goal 保留目标' in saved['history'] and '/reload-code' not in saved['history']
+                saved=json.loads((session/'state-v2.json').read_text());result['saved_debug']=saved;assert saved['goal']=='保留目标' and '/goal 保留目标' not in saved['history'] and '/reload-code' not in saved['history'] # slash commands never enter history (tui.c tui_history_add gate)
                 assert saved['cwd']==str(root) and saved['role']=='write' and saved['peer']=='0:private-peer' and saved['journal']['path']==str(session/'journal.jsonl')
                 result['export']=saved
             else:
@@ -102,7 +104,8 @@ def main():
             assert result['snapshots'][0]['input']=='中文换版草稿',result['snapshots'][0]['input']
             if mode=='success':assert result['snapshots'][-1]['input']=='中文第二草稿'
             result['passed']=True
-    except Exception as error:result.update(passed=False,error=repr(error))
+    except Exception as error:
+        import traceback;result.update(passed=False,error=repr(error),where=traceback.format_exc()[-700:])
     finally:
         if pid:
             # macOS returns EPERM for killpg when the group leader already exited (zombie).

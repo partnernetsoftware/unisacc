@@ -6,7 +6,7 @@ SOURCES='agent.c agent_cli.c file.c edit.c shell.c json.c session.c net.c plugin
 PREFIX='CSIH_ROLE= CSIH_PEER= exec '
 
 def hashes():
-    files=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
+    files=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 
 def run(argv,cwd,env):
@@ -29,7 +29,7 @@ def main():
                 if attempt:shutil.rmtree(app);app.mkdir(parents=True,mode=0o700)
                 for srcpath in before:
                     src=pathlib.Path(srcpath)
-                    if src.suffix in ('.c','.h','.inc'):
+                    if src.suffix in ('.c','.h','.inc','.cx'):
                         assert not src.is_symlink();dst=app/src.relative_to(APP);dst.parent.mkdir(parents=True,exist_ok=True);dst.write_bytes(src.read_bytes())
                 compiler=root/'unisacc.com';shutil.copy2(ROOT/'unisacc.com',compiler);compiler.chmod(0o700)
                 after=hashes()
@@ -61,7 +61,7 @@ def main():
             home=root/'home';home.mkdir(mode=0o700);(home/'env.jsonl').write_text('{"DEEPSEEK_API_KEY":"LOCAL_STUB_ONLY"}\n')
             env=dict(PATH=os.defpath,HOME=str(home),UNISACC=str(compiler),DEEPSEEK_API_KEY='LOCAL_STUB_ONLY',CSIH_ROLE='write',CSIH_PEER='0:private-peer',CSIH_EXEC_TIMEOUT_SEC='14',CSIH_ENDPOINT='http://127.0.0.1:1/unreachable',CSIH_MODEL='slice-no-model')
             result['compiler_sha256']=hashlib.sha256(compiler.read_bytes()).hexdigest();assert result['compiler_sha256']==result['before'][str(ROOT/'unisacc.com')]
-            result['private_input_sha256']={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in app.rglob('*') if p.suffix in ('.c','.h','.inc')}
+            result['private_input_sha256']={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in app.rglob('*') if p.suffix in ('.c','.h','.inc','.cx')}
             binary=root/'private-cli';result['build']=run(['/bin/sh',str(compiler),'-o',str(binary),*SOURCES],app,env);assert result['build']['rc']==0,result['build']
             result['binary_sha256']=hashlib.sha256(binary.read_bytes()).hexdigest()
             action=json.dumps(dict(act='file',op='edit',path='tui.c',old=old,new=new))

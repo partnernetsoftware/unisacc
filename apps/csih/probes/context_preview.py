@@ -6,7 +6,7 @@ sys.path.insert(0,str(APP))
 from reload_candidate import SOURCES
 
 def freeze():
-    paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
+    paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 def main():
     receipt=pathlib.Path(sys.argv[1]);report={'before':freeze()};deadline=time.monotonic()+55
@@ -14,7 +14,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='csih-preview-') as td:
             root=pathlib.Path(td);source=root/'source';source.mkdir();session=root/'session';session.mkdir(mode=0o700)
             for p in APP.rglob('*'):
-                if p.suffix in ('.c','.h','.inc'):
+                if p.suffix in ('.c','.h','.inc','.cx'):
                     assert not p.is_symlink();d=source/p.relative_to(APP);d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(p.read_bytes())
             tui=source/'tui.c';text=tui.read_text();entry='int main(int argc, char **argv) {';assert text.count(entry)==1
             injection=entry+r'''
