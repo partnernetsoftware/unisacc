@@ -58,3 +58,11 @@
 - 候选（cc，HEAD 53fe285f，实际跑过）：build_candidate shared+六 target+pack-prep-1..3 rc0（shared 119 s）；pack-models 首次 rc2：seed/compilerpack.c `realpath` 隐式声明（glibc 严格 C99，即 H37，本版裁顺延不实现）→ 按 0.0.37 已审核路线 PATH 前置 /tmp/cdx37-host-tools/cc（sha 5c036d42，仅对 compilerpack.c 加 -D_XOPEN_SOURCE=700，产品未改；seedmemory 登记的同一启动器）仅续跑 pack-models（10 s）、pack-driver（3 s）rc0，前 10 步未重做。候选 /tmp/cc38-final/cand/unisacc-next.com sha256 ba3f40cb…，ident check verified；种子对 /tmp/cc38-final/cand/seed/unisacc-seed.com sha256 ace3c040… 7581888 B。comboot stage1→stage2→stage3→fixedpoint 进行中。
 - comboot（实际跑过）：stage1 种子 ace3c040；stage2 3 shard rc0（sidecar seed 与 stage1 同）；stage3 3 shard rc0；fixed point holds：安装 unisacc.com == stage3 == 候选 ba3f40cb（10:44:44）。交接核：安装 pair 与候选 build.json 的 artifact_sha256 ba3f40cb、sources_sha256 5782090e 一致（commit 字段 f3557cb2/3ede21b8 不同，二者间仅 research 变化），provenance check verified。
 - queue 出口 10:45:01 起（release/tools/queue.sh /tmp/cc38-final/cand UA SEED，PATH 前置同一已审核启动器；状态 /tmp/cc38-final/cand.queue）。
+
+## 0.0.38 新候选出口（2026-10-10 10:45:01–12:18:14；实际跑过）
+
+- queue：650/650 完成，final rc=1（ver038 同口径），单段，INVALIDATE/INTERRUPTED 0；墙钟 5593 s。证据包 ~/.unisacc/evidence/c38-final（含 SHA256SUMS）。
+- 出口表（release/tools/exittable.py，rulings/H1 现行）：**565 PASS**；RULED_BASELINE 34、HOST_TIMEOUT 11（H1 具名）、UNVERIFIED_HOST 6（rc77 宿主不适用）、RESOURCE_UNKNOWN 6（com-seedgen；seedgen-2/3/4 冷缓存；seedparse2-1/-2 未映射 flags——与准入静态差集一致，未执行义务，非 PASS）、BLOCKED 27（挂 rowcov-parse2-build 25+、rowcov-enc 系 1 等根）、NEEDS_RULING 1。
+- 唯一 NEEDS_RULING `gate-infra`：compilercheck 闭包对照中 README 夹具编辑波及 7 个 exec-driver 套件，原因是 tests/gatedeps.json 已审核树哈希早于 SC1 修片与版本提交（§0：最后一步刷新）。28633d5e `make gatedeps` 刷新后单项 gate-infra rc0（16 s）。tests/ 不在产品闭包，候选 ba3f40cb 不变。
+- 作业秒分解（c38-decomp.py，同口径）：有效 565 次 / 7457.7 s；延期 160 / 4130.2；终红/未执行 85 / 1509.2；合计 810 / 13097.0（ver038 799 / 13981.8）。
+- ledgercheck --final 0 未结、carry 0。
