@@ -43,9 +43,9 @@ After the 2026-10-10 ~13:13 pin, Conclusion still paired「面向六个目标」
 | Artifact | SHA-256 |
 | --- | --- |
 | Branch tip (merge) | TIP |
-| CN `research/unisacc-paper.md` | BLOB_CN |
-| EN `research/unisacc-paper.en.md` | BLOB_EN |
-| TeX `research/arxiv-paper-a/main.tex` | BLOB_TEX |
+| CN `research/unisacc-paper.md` | `a3ba21c238c67103fa9a15fd8f01923aeee4d8c7a8ae3e1986f7bacc68bdf092` |
+| EN `research/unisacc-paper.en.md` | `0d7f01a41a09e481a9063734012790421719b89b6ee7ebcc1bd86cda1510849d` |
+| TeX `research/arxiv-paper-a/main.tex` | `3186ca6a9165f28b4ab3ee2ce9a1015732dc20770e81b32cc7846a6d433242e4` |
 | abstract `research/arxiv-paper-a/abstract.txt` | `ecdfc15c7d664cdcd37eaed945e6b995fd30b262f29b2b0baf386d335088c495` (SAME) |
 
 ## OUT OF SCOPE

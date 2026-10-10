@@ -6,9 +6,9 @@
 - **tip（合入后）：** TIP
 - **PR：** URL/number after open; supersedes stale draft #31 (`cursor/paper-a-conclusion-five-vs-six-af19`)
 - **Paper A blob drift：** Conclusion 三联五-vs-六收紧；abstract SAME
-  - CN `research/unisacc-paper.md`：BLOB_CN
-  - EN `research/unisacc-paper.en.md`：BLOB_EN
-  - TeX `research/arxiv-paper-a/main.tex`：BLOB_TEX
+  - CN `research/unisacc-paper.md`：`a3ba21c238c67103fa9a15fd8f01923aeee4d8c7a8ae3e1986f7bacc68bdf092`
+  - EN `research/unisacc-paper.en.md`：`0d7f01a41a09e481a9063734012790421719b89b6ee7ebcc1bd86cda1510849d`
+  - TeX `research/arxiv-paper-a/main.tex`：`3186ca6a9165f28b4ab3ee2ce9a1015732dc20770e81b32cc7846a6d433242e4`
   - abstract `research/arxiv-paper-a/abstract.txt`：`ecdfc15c7d664cdcd37eaed945e6b995fd30b262f29b2b0baf386d335088c495` **SAME**
 - **Softguess：** NONE
 - **挡粘点 / blockers：** 测量身份 8509/8769 仍开放（[`paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`](paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md)）；本拍未改键数与表数字。
