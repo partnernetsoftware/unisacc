@@ -87,7 +87,7 @@ REALPY=$(command -v python3) && REALCC=$(command -v cc) || { echo "seedppc: pyth
 mkdir "$S/shim"
 cat > "$S/shim/python3" <<SHIM || exit 2
 #!/bin/sh
-log() { printf '%s\t%s\n' "\$1" "\$2" >> "\$SHIMLOG"; }
+log() { [ -n "\${SHIMLOG:-}" ] && printf '%s\t%s\n' "\$1" "\$2" >> "\$SHIMLOG" || { echo "python3 shim: log write failed" >&2; exit 96; }; }
 case "\${1:-}" in
     -|-c) log pass "python3 \$*"; exec "$REALPY" "\$@";;
     */tests/bound.py|tests/bound.py) log pass "python3 \$*"; exec "$REALPY" "\$@";;
@@ -105,10 +105,11 @@ cat > "$S/shim/cc" <<SHIM || exit 2
 for a in "\$@"; do case "\$a" in exec/c/run.c|*/exec/c/run.c) run=1;; esac; done
 if [ -n "\${run:-}" ]; then
     o=; prev=; for a in "\$@"; do [ "\$prev" = -o ] && o=\$a; prev=\$a; done
-    printf '%s\t%s\n' short "cc \$*" >> "\$SHIMLOG"
+    printf '%s\t%s\n' short "cc \$*" >> "\$SHIMLOG" || { echo "cc shim: log write failed" >&2; exit 96; }
     [ -n "\$o" ] && printf '#!/bin/sh\nexit 0\n' > "\$o" && chmod +x "\$o"; exit \$?
 fi
-printf '%s\t%s\n' pass "cc \$*" >> "\$SHIMLOG"; exec "$REALCC" "\$@"
+printf '%s\t%s\n' pass "cc \$*" >> "\$SHIMLOG" || { echo "cc shim: log write failed" >&2; exit 96; }
+exec "$REALCC" "\$@"
 SHIM
 chmod +x "$S/shim/python3" "$S/shim/cc"
 same=0; bad=0
@@ -119,12 +120,18 @@ slug() { echo "$1" | tr / -; }
 prep() {   # prep TARGET OUT LOG [SCRIPT] [ENV...]: run prepare.sh under the shims; prints its rc
     t=$1; o=$2; l=$3; sc=${4:-$PREP}; shift 4 2>/dev/null || shift $#
     rm -rf "$o"; mkdir -p "$o"; : > "$l"
-    env PATH="$S/shim:$PATH" SHIMLOG="$l" "$@" sh "$sc" "$o" "$t" 0 cc > "$l.out" 2>&1; echo $?
+    env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR PATH="$S/shim:$PATH" SHIMLOG="$l" "$@" \
+        sh "$sc" "$o" "$t" 0 cc > "$l.out" 2>&1; echo $?
 }
+haslog() {   # haslog LOG CLASS ARGV: an exact (class, argv) record
+    awk -F '\t' -v c="$2" -v a="$3" '$1 == c && $2 == a { f = 1 } END { exit !f }' "$1"
+}
+hasclass() { awk -F '\t' -v c="$2" '$1 == c { f = 1 } END { exit !f }' "$1"; }
 via_helper() {   # via_helper OUT LOG: exactly one keyed seed-gen (+ .sha256) in the private cache, no direct gen.py pp
     nb=$(ls "$1/.seed-gen-cache" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}$')
     ns=$(ls "$1/.seed-gen-cache" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256$')
-    [ "$nb" -eq 1 ] && [ "$ns" -eq 1 ] && ! grep -q '^pass-gen-pp' "$2"
+    # the log must be live: gen-delta's key step is a recorded pass-through
+    [ "$nb" -eq 1 ] && [ "$ns" -eq 1 ] && ! hasclass "$2" pass-gen-pp && haslog "$2" pass "python3 - cc -std=c99 -O2 -w"
 }
 for t in $TARGETS; do
     s=$(slug "$t"); o=$S/out-$s; l=$S/log-$s
@@ -136,8 +143,8 @@ for t in $TARGETS; do
     [ -n "$g" ] && "$W/tests/bound" 55 "$g" pp "$S/ref-$s.json" $(flags "$t") 2>/dev/null && cmp -s "$o/e2.json" "$S/ref-$s.json" \
         && ok "$t e2 = seed-gen pp $(flags "$t")" || no "$t e2 differs from seed-gen with the expected flags"
     f=$(flags "$t")
-    grep -qx "short	python3 exec/build/gen.py lower $o/lower.json --full${f:+ $f}" "$l" && ok "$t reaches lower with the same flags" || no "$t lower not reached as expected"
-    [ "$(grep -c '^UNKNOWN' "$l")" -eq 0 ] && ok "$t no unknown tool call" || no "$t unknown tool call: $(grep '^UNKNOWN' "$l" | head -1)"
+    haslog "$l" short "python3 exec/build/gen.py lower $o/lower.json --full${f:+ $f}" && ok "$t reaches lower with the same flags" || no "$t lower not reached as expected"
+    ! hasclass "$l" UNKNOWN && ok "$t no unknown tool call" || no "$t unknown tool call: $(grep '^UNKNOWN' "$l" | head -1)"
 done
 
 if [ "$SHARD" = 1 ]; then
@@ -147,7 +154,7 @@ for case_ in "red:3:SEED_GEN=1 SEED_GEN_BIN=$S/red-gen" "missing:2:SEED_GEN=1 SE
     n=${case_%%:*}; rest=${case_#*:}; want=${rest%%:*}; envs=${rest#*:}
     o=$S/neg-$n; l=$S/neglog-$n
     r=$(prep "$t" "$o" "$l" "$PREP" $envs)
-    { [ "$r" -eq "$want" ] && [ ! -e "$o/e2.json" ] && ! grep -q 'gen.py lower' "$l" && ! grep -q '^pass-gen-pp' "$l"; } \
+    { [ "$r" -eq "$want" ] && [ ! -e "$o/e2.json" ] && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py lower / { f = 1 } END { exit !f }' "$l" && ! hasclass "$l" pass-gen-pp && [ -s "$l" ]; } \
         && ok "NEG-$n prepare stops rc $r before lower, no e2.json, no Python fallback" || no "NEG-$n rc=$r (want $want) $(tail -1 "$l.out")"
     evw "NEG-$n rc prepare=$r want=$want"
 done
@@ -162,14 +169,14 @@ open(sys.argv[2], "w").write(s.replace(new, 'b python3 exec/build/gen.py pp "$OU
 PY
 o=$S/mut; l=$S/mutlog
 r=$(prep "$t" "$o" "$l" "$M")
-{ [ "$r" -eq 0 ] && ! via_helper "$o" "$l" && grep -q '^pass-gen-pp' "$l"; } && ok "mutant (old direct gen.py pp) is caught: not through the helper" || no "mutant not caught (rc=$r)"
+{ [ "$r" -eq 0 ] && ! via_helper "$o" "$l" && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $o/e2.json"; } && ok "mutant (old direct gen.py pp) is caught: not through the helper" || no "mutant not caught (rc=$r)"
 evw "MUTANT rc prepare=$r"
 fi
 
 if [ "$SHARD" = 2 ]; then
 t=win/arm64; s=$(slug "$t"); o=$S/py-$s; l=$S/pylog-$s
 r=$(prep "$t" "$o" "$l" "$PREP" SEED_GEN=0)
-{ [ "$r" -eq 0 ] && grep -q "^pass-gen-pp	python3 exec/build/gen.py pp $o/e2.json --win --arm64\$" "$l" && cmp -s "$o/e2.json" "$S/out-$s/e2.json"; } \
+{ [ "$r" -eq 0 ] && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $o/e2.json --win --arm64" && cmp -s "$o/e2.json" "$S/out-$s/e2.json"; } \
     && ok "SEED_GEN=0 named reference: helper -> gen.py pp --win --arm64, byte-equal to the C e2" || no "SEED_GEN=0 route (rc=$r)"
 evw "SEEDGEN0 rc prepare=$r"
 fi
@@ -177,7 +184,11 @@ fi
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
-[ -z "$EV" ] || cp "$S"/log-* "$S"/neglog-* "$S"/mutlog "$S"/pylog-* "$EV/" 2>/dev/null
+if [ -n "$EV" ]; then   # the shard's own logs, by name; a failed copy marks the export
+    logs=""; for t in $TARGETS; do logs="$logs log-$(slug "$t")"; done
+    if [ "$SHARD" = 1 ]; then logs="$logs neglog-red neglog-missing neglog-badsg mutlog"; else logs="$logs pylog-win-arm64"; fi
+    for f in $logs; do cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedppc: EVIDENCE copy of $f failed" >&2; }; done
+fi
 echo "seedppc  shard $SHARD  same $same  bad $bad"
 evw "seedppc  shard $SHARD  same $same  bad $bad  tree $H"
 [ "$bad" = 0 ] && [ "$same" -gt 0 ] && [ "$evfail" = 0 ]
