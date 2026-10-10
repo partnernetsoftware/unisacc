@@ -72,7 +72,8 @@ def family(name):
 
 
 def tail_risk(chains):
-    """WF2: for each tail attempt, the successful seconds of *other* suites in its family next to the tail
+    """WF2 (after the fact: reads the whole log, so siblings may have run later -- a hindsight risk hint, not
+    evidence that was available before the tail was admitted): for each tail attempt, the successful seconds of *other* suites in its family next to the tail
     limit -- a risk hint only, never this suite's lower bound; successful tails are counted beside it."""
     ok = collections.defaultdict(list)
     for name, seq in chains.items():
@@ -114,6 +115,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     chains = replay(open(a.log).read().splitlines())
     s = summarise(chains)
+    if a.tail_risk and (a.strict or a.results or a.json):
+        print('attemptchain: --tail-risk is a separate hint report; run --strict/--results/--json on their own', file=sys.stderr); return 2
     if a.tail_risk:
         t = tail_risk(chains)
         print('tail-risk  tail successes %d  tail deferrals %d  (hints only; sibling seconds are not this suite\'s lower bound)' % (t['tail_success'], t['tail_deferred']))

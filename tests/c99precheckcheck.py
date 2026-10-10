@@ -13,6 +13,15 @@ text = '\n'.join(['  REFUSE a -O0: not covered: x', '  REFUSE a -O1: not covered
 v = P.verdicts(text, rows)
 assert [v[r['probe']]['got'] for r in rows] == ['refuse', 'agree', 'other', 'other'], v
 assert [v[r['probe']]['ok'] for r in rows] == [True, True, False, False], v
+# refuse needs -O0, -O1 and -O2 once each (three -O0 lines are not a refusal); a nonzero rc must be explained
+three = 'difftest_o SHARD=1/1 probes=1  agree 0   wrong 0   refuse 3   known 0   revived 0'
+dup = P.verdicts('\n'.join(['  REFUSE a -O0: not covered: x'] * 3 + [three]), rows[:1])
+assert dup['tests/c/a.c']['got'] == 'other', dup
+ok3 = P.verdicts('\n'.join(['  REFUSE a %s: not covered: x' % o for o in ('-O0', '-O1', '-O2')] + [three]), rows[:1], rc=1)
+assert ok3['tests/c/a.c']['got'] == 'refuse', ok3
+agree1 = 'difftest_o SHARD=1/1 probes=1  agree 3   wrong 0   refuse 0   known 0   revived 0'
+assert P.verdicts(agree1, rows[1:2], rc=0)['tests/c/b.c']['got'] == 'agree'
+assert P.verdicts(agree1, rows[1:2], rc=1)['tests/c/b.c']['got'] == 'unproven'   # unexplained nonzero rc
 # fail closed: no summary, wrong probe count, known entries or unaccounted totals -> unproven, never agree
 for bad in ('', 'difftest_o SHARD=1/1 probes=3  agree 9   wrong 0   refuse 0   known 0   revived 0',
             'difftest_o SHARD=1/1 probes=4  agree 9   wrong 0   refuse 0   known 3   revived 0',
