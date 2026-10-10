@@ -44,3 +44,25 @@
 | realprog | `skip lua` / `skip sqlite`：the system compiler will not build it here | 宿主参照编译器不建这两个程序（与产品无关），skip 计失败；建议 H2 宿主基线并声明宿主需求 |
 
 结论（定位，非裁定）：G 组 4 项中 2 项为已知的静态镜像 `-run` 转发限制，1 项为明确拒收的覆盖缺口，1 项为宿主参照跳项；未见产品产出错误字节（wrong 均为 0 或拒收）。归入何类由裁定决定。
+
+## 二次裁请求：ver038 新增 12 项与 23 项终 rc 变化的定位（2026-10-10，只读既有日志）
+
+23 项终 rc 变化按尝试链定位（before = full038c 末段尝试，after = ver038 尝试链）：
+
+| 类 | 套件 | 证据 | 归因 |
+|---|---|---|---|
+| 近限时翻转 0→142 | exec-armself-package、exec-driver-resources、exec-selfelf(+package)、exec-winlower、seed-construct-base | before 通过时耗 39–46 s（限时 44–46）；after full 与 solo 均于 43–44 s 超时 | 宿主速度边界作业，负载敏感；非产品回归 |
+| 冷/暖缓存翻转 0→142 | exec-tableself-1、exec-selfprep-table | before 通过只需 6 s / 1 s（缓存暖）；after 三次尝试均 27–44 s 超时（冷） | 冷缓存下超限；非产品回归 |
+| 截断记为普通失败 0→1 | lib-union16-callback-2/3 | after 为 tail 入窗 limit 28/24、跑满后 rc1 `variants: []` | 套件把限时截断转 rc1，调度无法延期重试 |
+| 前次运行的调度/中断伪红 142→0 | lib-*-source 7 项、lib-source-provenance(+located)、exec-driver-core-contracts | before 为 full038c 停滞窗外杀/收尾强制 142 或 tail 截断；after 整窗 26–37 s 通过 | 前次运行缺陷（已修），非产品修复 |
+| 门禁自身 | gate-layers 1→0（已修 48b8b9ae）；gate-infra-38 0→1（cc 测试依赖真实内存，已修 6b655220） | — | 测试/登记缺陷，非产品 |
+| 形态互换 | exec-tableself-2 142→1（after 0 s：前驱失败未执行，BLOCKED）；lib-lifecycle 1→142（after 三次尝试均超时） | — | 前者随根；后者已裁 H1 超时形态的 TIMEOUT 变体 |
+
+请裁（ver038 出口表 NEEDS_RULING 12 项）：
+
+| 项 | 建议（供裁） |
+|---|---|
+| exec-armself-package、exec-driver-resources、exec-winlower、seed-construct-base、exec-tableself-1、exec-selfprep-table | 记 H1 云机基线（TIMEOUT，近限时/冷缓存），限时不变 |
+| lib-union16-callback-2/3 | H2/P7 切口修套件：被外层限时截断时如实退 142（不转 rc1），使调度能按规则延期重试；修前不入基线 |
+| seed-construct-parse2 ×3 | 已裁 SC1“先定位再结，不挡收口”，沿用 |
+| 本轮新增 lib-lifecycle TIMEOUT 形态 | 追加 H1（已裁 FAILED/TimeoutExpired 形态的同族） |
