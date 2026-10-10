@@ -90,7 +90,9 @@ case "\${1:-}" in
                    d=\$(dirname "\$3")/.seed-gen-cache
                    "$REALPY" -c 'import hashlib,os,sys
 d=sys.argv[1]
-for f in sorted(os.listdir(d)):
+try: names=sorted(os.listdir(d))
+except FileNotFoundError: print("ABSENT"); sys.exit(0)
+for f in names:
     st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "\$d" > "\$SNAPMID"
                    mr=\$?; echo "\$mr" > "\$SNAPMID.rc"
                    [ "\$mr" -eq 0 ] || { echo "python3 shim: mid snapshot failed" >&2; exit 95; }
@@ -131,8 +133,11 @@ snap() { python3 -c 'import hashlib,os,sys
 d=sys.argv[1]
 for f in sorted(os.listdir(d)):
     st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "$1"; }
-prep() {   # prep NAME [SCRIPT] [ENV...]: prepare.sh OUT lnx/x86_64 0 cc under the shims; prints rc
-    n=$1; sc=${2:-$PREP}; shift 2 2>/dev/null || shift $#
+prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under the shims; prints rc
+    # explicit arguments: no "shift N" (a POSIX special-builtin error ends the subshell when N > $#)
+    [ $# -ge 1 ] && [ -n "$1" ] || { echo "seedoptc: prep needs a NAME" >&2; exit 2; }
+    n=$1; shift
+    sc=$PREP; if [ $# -gt 0 ]; then sc=$1; shift; fi
     o=$S/out-$n; rm -rf "$o"; mkdir -p "$o"; : > "$S/log-$n"; rm -f "$S/snapmid-$n" "$S/snapmid-$n.rc"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR PATH="$S/shim:$PATH" SHIMLOG="$S/log-$n" SNAPMID="$S/snapmid-$n" \
         "$@" sh "$sc" "$o" lnx/x86_64 0 cc > "$S/log-$n.out" 2>&1; echo $?
@@ -151,7 +156,7 @@ unset SHIMLOG
 r=$(prep pos)
 o=$S/out-pos; l=$S/log-pos
 snap "$o/.seed-gen-cache" > "$S/snapend-pos"; se=$?
-{ [ "$r" -eq 0 ] && [ -s "$o/e4.json" ] && [ -s "$o/e2.json" ] && ! hasclass "$l" UNKNOWN; } \
+{ [ "$r" = 0 ] && [ -s "$l" ] && [ -s "$l.out" ] && [ -s "$o/e4.json" ] && [ -s "$o/e2.json" ] && ! hasclass "$l" UNKNOWN; } \
     && ok "prepare rc 0, e4.json and e2.json made, no unknown call" || no "prepare (rc=$r) $(tail -1 "$l.out")"
 evw "POS rc=$r"
 nc=$(count "$l" pass-gen-c ""); nk=$(count "$l" pass "$KEYSTEP")
@@ -195,21 +200,26 @@ if s.count(new) != 1: raise SystemExit("opt line not found exactly once")
 open(sys.argv[2], "w").write(s.replace(new, 'b python3 exec/build/gen.py opt "$OUT/e4.json" --o2\n'))
 PY
 r=$(prep mut exec/pipeline/prepare-oldopt.sh)
-{ [ "$r" -eq 0 ] && haslog "$S/log-mut" pass-gen-opt "python3 exec/build/gen.py opt $S/out-mut/e4.json --o2"; } \
-    && ok "mutant (old direct gen.py opt) is caught" || no "mutant not caught (rc=$r)"
+{ [ "$r" = 0 ] && [ -s "$S/log-mut" ] && haslog "$S/log-mut" pass-gen-opt "python3 exec/build/gen.py opt $S/out-mut/e4.json --o2" \
+    && [ "$(cat "$S/snapmid-mut.rc" 2>/dev/null)" = 0 ] && [ "$(cat "$S/snapmid-mut" 2>/dev/null)" = ABSENT ]; } \
+    && ok "mutant (old direct gen.py opt) is caught: direct call logged, rc 0, no cache yet at prune" || no "mutant not caught (rc=$r)"
+evw "MUTANT snapmid_rc=$(cat "$S/snapmid-mut.rc" 2>/dev/null || echo none) snapmid=$(head -1 "$S/snapmid-mut" 2>/dev/null || echo none)"
 evw "MUTANT rc=$r"
 # 6 SEED_GEN=0 named reference
 r=$(prep sg0 "$PREP" SEED_GEN=0)
-{ [ "$r" -eq 0 ] && haslog "$S/log-sg0" pass-gen-opt "python3 exec/build/gen.py opt $S/out-sg0/e4.json --o2" && cmp -s "$S/out-sg0/e4.json" "$S/out-pos/e4.json"; } \
+{ [ "$r" = 0 ] && [ -s "$S/log-sg0" ] && haslog "$S/log-sg0" pass-gen-opt "python3 exec/build/gen.py opt $S/out-sg0/e4.json --o2" \
+    && haslog "$S/log-sg0" pass-gen-pp "python3 exec/build/gen.py pp $S/out-sg0/e2.json" \
+    && [ "$(cat "$S/snapmid-sg0.rc" 2>/dev/null)" = 0 ] && [ "$(cat "$S/snapmid-sg0" 2>/dev/null)" = ABSENT ] \
+    && cmp -s "$S/out-sg0/e4.json" "$S/out-pos/e4.json"; } \
     && ok "SEED_GEN=0 reference: helper -> gen.py opt --o2, byte-equal to the C e4.json" || no "SEED_GEN=0 reference (rc=$r)"
-evw "SEEDGEN0 rc=$r"
+evw "SEEDGEN0 rc=$r snapmid_rc=$(cat "$S/snapmid-sg0.rc" 2>/dev/null || echo none) snapmid=$(head -1 "$S/snapmid-sg0" 2>/dev/null || echo none)"
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 if [ -n "$EV" ]; then
     for f in shimneg log-pos log-pos.out snapmid-pos snapmid-pos.rc snapend-pos ref-e4.err log-red log-red.out log-missing log-missing.out log-badsg log-badsg.out \
-             log-mut log-mut.out log-sg0 log-sg0.out; do
+             log-mut log-mut.out snapmid-mut snapmid-mut.rc log-sg0 log-sg0.out snapmid-sg0 snapmid-sg0.rc; do
         cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedoptc: EVIDENCE copy of $f failed" >&2; }
     done
 fi
