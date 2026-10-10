@@ -1,55 +1,29 @@
-# Harness CLI 命令设计（草案，≤80行）
+# Harness CLI 命令（P0 已接线，2026-10-10）
 
-只读核实来源：`tui.c` 的 `tui_slash()`(878-960) 与 `tui_submit()`(999-1013)。
-现状：**尚无 `/help`、`/clear`、`/status`、`/cancel`**（grep 全仓为空）。
-真实已有：`/exit`、`/quit`、`/reload`、`/reload-code`、`/export-state`、`/goal`、`/loop`。
-未知斜杠：`tui_slash` 返回 0 后**当作普通 prompt 交模型**（`tui_run_agent` 1013），当前不存在“报错不交模型”的行为，需本设计新增。
+以下命令在 agent 模式由本地处理，零模型请求、不写 journal、不进入发送 history。
 
-## 第一批
+- `/help`：列出 native 命令与一行用途；忙闲均可。
+- `/status`：输出 busy、mode、owned、是否持有 owner、goal 是否存在、loop/剩余预算、history 条数、pending 条数及按键队列长度。忙闲均可，只读业务状态；命令文本消费，反馈追加 UI 日志。owner 仅表示本地所有权 fd，不认证源码身份。
+- `/clear`：无参数。忙时立即拒绝，不排队；闲时清屏上日志/展开索引/滚动位置、输入、history 与浏览草稿、旧错误/答案显示。保留 pending（反馈条数）、goal、loop/剩余预算、journal、mind、磁盘 state 与模型上下文；因此后续 pending/loop 仍可能产生输出，不宣称模型忘记。
+- `/goal [text]`：设置目标；裸 `/goal` 保留目标；`/goal` 后空格且无文本清目标并解除循环。
+- `/loop [text]`：当前切换开关，参数不解析；无目标时保持关闭。
+- `/reload`：空闲时清密钥缓存，忙时不动。
+- `/reload-code`：仅 managed idle actor。
+- `/export-state HANDOFF`：仅 owned idle 且 HANDOFF 合法；失败保留输入。
+- `/exit`、`/quit`：退出。
 
-### `/help`
-- 目的：列出所有 native 命令及一行用途；纯 UI，零模型请求。
-- 参数：无。
-- 忙/闲：两者都即时打印，不打断在飞轮。
-- 保留/清理：只追加本地日志，不动 context、journal、memory、目标、history。
-- 反馈：成功→命令清单；失败→无（不产生失败）。
-- 验收：输入 `/help` 后 stdout/frame 含全部命令名，且无模型请求。
+## 命令识别与错误
 
-### `/status`
-- 目的：只读汇报 busy、mode、owned/owner、goal 是否有、loop 开关、history 条数、队列长度；零模型请求。
-- 参数：无。
-- 忙/闲：都允许读取快照，不修改状态。
-- 保留/清理：纯读。
-- 反馈：成功→状态行；失败→无。
-- 验收：忙时与闲时各一次，字段与实际状态一致。
+仅单行 `^/[A-Za-z][A-Za-z0-9_-]*( |$)` 进入命令表；包含后续路径分隔符的路径或多行文本仍是普通 prompt。
+未知命令本地报错 `unknown command`，清命令输入，零模型请求。不带参数的命令收到参数时本地报 usage。
+`//foo` 绕过命令表，发送字面 `/foo`；忙时只排队一次，history 保存实际发送文本。
 
-### `/clear`
-- 目的：清理**本地 UI 会话面**，非“全忘记”。
-- 参数：无（不接受目标名，避免歧义）。
-- 忙/闲：**忙时拒绝**并提示（避免清掉在飞轮上下文）；闲时执行。
-- 保留/清理范围：
-  - 清理：屏上日志、本地输入框、发送 history（并显式排除不进 history）。
-  - 不清：原审计 journal、共享 mind 页、`/goal` 目标与 loop 状态、磁盘 state-v2.json。
-  - 且**不重置模型上下文 epoch**——已核 `tui.c` 无此 API；因此不得宣称“模型已忘记”。
-- 反馈：成功→“cleared UI view; model context and journal unchanged”；忙→“busy: not cleared”。
-- 验收：1) 清后 journal 字节不变；2) 旧 draft/history 不再可见；3) `/clear` 本身不入发送 history；4) 不产生模型请求；5) 不清 goal/loop/memory。
+## 回归
 
-### 未知斜杠
-- 目的：`/xxx` 未登记时**本地报错**，不进模型猜。
-- 行为：打印“unknown command: /xxx（/help 查看）”，清输入，零模型请求。
-- 验收：输入 `/foobar` 后无模型调用且屏上有报错行。
+`./csih.sh selftest` 的真实 Enter 路径覆盖忙闲 help/status、clear 忙时拒绝、闲时清 history 后不重新加入命令、上下键不召回旧草稿、pending 逐字节不变、loop_left 不变及 journal 字节不变。
+同套件覆盖未知命令、参数错误、路径/多行输入与字面逃逸。
+这是本地 TUI 单元自测；完整外环及运行中窗口部署应分别验收。
 
-## 收进 help 的既有命令（一行用途）
-- `/goal [text]` 设定/清空目标；`/loop [on]` 在空闲时自动续跑目标。
-- `/reload` 空闲时重载 key 缓存；忙时保持不动。
-- `/reload-code` 需 managed idle actor。
-- `/export-state HANDOFF` 需 owned idle 状态与合法 HANDOFF。
-- `/exit`、`/quit` 退出。
+## 后续
 
-## 下一批（需明确边界后再列）
-- `/cancel`：仅在能定义“取消的实际范围”（是否 abort 网络、是否保留已收 transcript、是否可 resume）后才加入；本稿不列。
-
-## 开放问题
-- epoch/context 重置 API 尚未存在，`/clear` 语义须与 `tui.c` 同步演进。
-- `/clear` 忙时拒绝 vs 排队等待，需主人选一种。
-
+`/cancel` 与 context epoch 重置仍需单独定义真实范围，不并入 `/clear`。

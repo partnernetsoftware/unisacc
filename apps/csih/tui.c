@@ -875,7 +875,83 @@ static void tui_queue_goal(tui_state *st) {
  * live loop can start it while idle. Returns 1 when the line was one. */
 static int tui_managed_request(tui_state *st);
 
+/* Recognize command tokens only, never absolute paths or multiline pastes. */
+static int tui_command_len(const char *text) {
+    int i = 1;
+    if (!text || text[0] != '/' || strchr(text, '\n') || strchr(text, '\r')) return 0;
+    if (!((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z'))) return 0;
+    for (i = 2; text[i]; i++) {
+        char c = text[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-')) break;
+    }
+    return text[i] == 0 || text[i] == ' ' ? i : 0;
+}
+
+static void tui_command_done(tui_state *st) {
+    st->input[0] = 0;
+    st->ninput = 0;
+}
+
 static int tui_slash(tui_state *st) {
+    int token = tui_command_len(st->input);
+    char note[240];
+    if (!token) return 0;
+    if (!strcmp(st->input, "/help")) {
+        tui_log_plain(st, "/help: 本地帮助；//foo 发送字面 /foo");
+        tui_log_plain(st, "/status: 只读状态；/clear: 清 UI，保留上下文、journal、pending、goal/loop");
+        tui_log_plain(st, "/goal [text]: 设目标；裸 /goal 保留；/goal 后空格清目标");
+        tui_log_plain(st, "/loop [text]: 切换目标循环，参数当前不解析");
+        tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
+        tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/status")) {
+        snprintf(note, sizeof note,
+            "busy=%d mode=%s owned=%d owner=%d goal=%d loop=%d left=%d history=%d pending=%d keys=%d",
+            st->busy, st->mode == 1 ? "agent" : "chat", st->owned != NULL,
+            st->owner_fd >= 0, st->goal[0] != 0, st->loop_on, st->loop_left,
+            st->nhistory, st->npending, (st->qtail - st->qhead + 64) % 64);
+        tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/clear")) {
+        if (st->busy) tui_log_plain(st, "busy: not cleared");
+        else {
+            memset(st->log, 0, sizeof st->log);
+            memset(st->ex_on, 0, sizeof st->ex_on);
+            memset(st->ex_open, 0, sizeof st->ex_open);
+            memset(st->ex_tag, 0, sizeof st->ex_tag);
+            memset(st->ex_why, 0, sizeof st->ex_why);
+            memset(st->ex_cmd, 0, sizeof st->ex_cmd);
+            memset(st->ex_body, 0, sizeof st->ex_body);
+            st->nlog = 0; st->log_skip = 0;
+            memset(st->history, 0, sizeof st->history);
+            memset(st->history_draft, 0, sizeof st->history_draft);
+            st->nhistory = 0; st->history_pos = 0; st->history_browsing = 0;
+            st->errline[0] = 0; st->last_answer[0] = 0;
+            st->last[0] = 0; st->output[0] = 0; st->notice = NULL;
+            st->phase[0] = 0; st->ended = 0;
+            snprintf(note, sizeof note, "cleared UI view; model context and journal unchanged; pending=%d retained", st->npending);
+            tui_log_plain(st, note);
+        }
+        tui_command_done(st);
+        return 1;
+    }
+    if (st->input[token] == ' ' && ((!strncmp(st->input, "/help", 5) && token == 5) ||
+        (!strncmp(st->input, "/status", 7) && token == 7) ||
+        (!strncmp(st->input, "/clear", 6) && token == 6) ||
+        (!strncmp(st->input, "/reload", 7) && token == 7) ||
+        (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
+        (!strncmp(st->input, "/exit", 5) && token == 5) ||
+        (!strncmp(st->input, "/quit", 5) && token == 5))) {
+        snprintf(note, sizeof note, "usage: %.*s (no arguments)", token, st->input);
+        tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
     if (!strcmp(st->input, "/reload-code")) {
         if (tui_managed_request(st) != 0) tui_log_plain(st, "reload-code: requires managed idle actor");
         return 1;
@@ -955,7 +1031,10 @@ static int tui_slash(tui_state *st) {
         st->ninput = 0;
         return 1;
     }
-    return 0;
+    snprintf(note, sizeof note, "unknown command: %.*s (/help 查看)", token, st->input);
+    tui_log_plain(st, note);
+    tui_command_done(st);
+    return 1;
 }
 
 static void tui_type(tui_state *st, const char *s) {
@@ -991,9 +1070,9 @@ static void tui_manual_submit(tui_state *st) {
     int had = st->input[0] != '\0';
     tui_submit(st);
     if (had && st->input[0] == '\0' &&
-        !( !strncmp(captured, "/export-state", 13) &&
-           (captured[13] == 0 || captured[13] == ' ')) &&
-        strcmp(captured, "/reload-code")) tui_history_add(st, captured);
+        !(st->mode == 1 && tui_command_len(captured)) &&
+        strcmp(captured, "/exit") && strcmp(captured, "/quit"))
+        tui_history_add(st, st->mode == 1 && captured[0] == '/' && captured[1] == '/' ? captured + 1 : captured);
 }
 
 static void tui_submit(tui_state *st) {
@@ -1008,7 +1087,11 @@ static void tui_submit(tui_state *st) {
      * drives the file/exec tools and, via exec, the live tmux windows). */
     if (st->mode == 1) {
         if (!st->input[0]) return;
-        if (tui_slash(st)) return;
+        if (st->input[0] == '/' && st->input[1] == '/') {
+            if (st->busy && st->npending >= 8) { st->notice = "待发送已满"; return; }
+            memmove(st->input, st->input + 1, (size_t)st->ninput);
+            st->ninput--;
+        } else if (tui_slash(st)) return;
         if (st->busy) { tui_enqueue(st); return; }
         tui_run_agent(st);
         return;
@@ -2625,6 +2708,99 @@ int main(int argc, char **argv) {
         r_frame prev, next;
         char out[4096];
         int failures = 0, cols = 40;
+        {
+            static tui_state h, before;
+            static const char *help_names[10] = {
+                "/help", "/status", "/clear", "/goal", "/loop", "/reload",
+                "/reload-code", "/export-state", "/exit", "/quit"
+            };
+            char journal[96], bytes[64];
+            const char *audit = "audit unchanged\n";
+            FILE *f;
+            int i, j, found, n, bad = 0;
+            snprintf(journal, sizeof journal, "csih-command-selftest-%ld.jsonl", (long)getpid());
+            f = fopen(journal, "wb");
+            if (!f) bad = 1;
+            else {
+                if (fwrite(audit, 1, strlen(audit), f) != strlen(audit)) bad = 1;
+                if (fclose(f) != 0) bad = 1;
+            }
+            tui_state_init(&h, journal); h.mode = 1;
+            tui_history_add(&h, "old history");
+            snprintf(h.history_draft, sizeof h.history_draft, "old draft");
+            h.history_browsing = 1; h.history_pos = 0;
+            snprintf(h.goal, sizeof h.goal, "keep goal"); h.loop_on = 1; h.loop_left = 3;
+            snprintf(h.pending[0], sizeof h.pending[0], "queued text"); h.npending = 1;
+            h.qhead = 3; h.qtail = 5;
+            memcpy(&before, &h, sizeof h);
+            for (i = 0; i < 2; i++) {
+                h.busy = i;
+                tui_type(&h, "/help");
+                for (j = 0; j < 10; j++) {
+                    int k;
+                    found = 0;
+                    for (k = 0; k < h.nlog; k++) if (strstr(h.log[k], help_names[j])) found = 1;
+                    if (!found) bad = 1;
+                }
+                tui_type(&h, "/status");
+                snprintf(bytes, sizeof bytes, "busy=%d mode=agent owned=0 owner=0", i);
+                if (!strstr(h.log[h.nlog - 1], bytes) ||
+                    !strstr(h.log[h.nlog - 1], "goal=1 loop=1 left=3 history=1 pending=1 keys=2") ||
+                    h.busy != i || h.nhistory != 1 || h.npending != 1 || h.input[0]) bad = 1;
+            }
+            h.busy = 1;
+            tui_type(&h, "/clear");
+            if (strcmp(h.log[h.nlog - 1], "busy: not cleared") ||
+                h.nhistory != 1 || strcmp(h.history_draft, "old draft") ||
+                h.history_pos != 0 || !h.history_browsing || !h.busy) bad = 1;
+            h.busy = 0; h.ex_open[0] = 1; h.log_skip = 2;
+            snprintf(h.phase, sizeof h.phase, "old phase"); h.ended = 1;
+            tui_type(&h, "/clear");
+            if (h.nlog != 1 || !strstr(h.log[0], "pending=1 retained") ||
+                h.nhistory || h.history_pos || h.history_browsing || h.history_draft[0] ||
+                h.log_skip || h.ex_open[0] || h.input[0] || h.ninput || h.busy || h.phase[0] || h.ended ||
+                h.loop_left != before.loop_left || h.loop_on != before.loop_on ||
+                strcmp(h.goal, before.goal) || h.npending != before.npending ||
+                memcmp(h.pending, before.pending, sizeof h.pending) || h.transcript != before.transcript) bad = 1;
+            tui_apply_key(&h, TERM_KEY_UP, 0); tui_apply_key(&h, TERM_KEY_DOWN, 0);
+            if (h.input[0] || h.history_browsing) bad = 1;
+            tui_type(&h, "/foobar");
+            if (!strstr(h.log[h.nlog - 1], "unknown command: /foobar") || h.busy || h.nhistory || h.npending != 1) bad = 1;
+            tui_type(&h, "/clear extra");
+            if (!strstr(h.log[h.nlog - 1], "usage: /clear") || h.nlog != 3 || h.busy || h.nhistory) bad = 1;
+            f = fopen(journal, "rb");
+            if (!f) bad = 1;
+            else {
+                n = (int)fread(bytes, 1, sizeof bytes - 1, f); bytes[n] = 0;
+                if (strcmp(bytes, audit)) bad = 1;
+                fclose(f);
+            }
+            unlink(journal);
+            if (bad) { printf("FAIL native help/status/clear invariants\n"); failures++; }
+            else printf("  ok   native commands preserve journal, pending, loop and exclude history\n");
+            tui_state_init(&h, NULL); h.mode = 1; h.busy = 1;
+            tui_type(&h, "//foo");
+            tui_type(&h, "/foo/bar");
+            tui_type(&h, "/help\nordinary text");
+            if (h.npending != 3 || strcmp(h.pending[0], "/foo") ||
+                strcmp(h.pending[1], "/foo/bar") || strcmp(h.pending[2], "/help\nordinary text") ||
+                h.nhistory != 3 || strcmp(h.history[0], "/foo") || h.nlog ||
+                tui_command_len("/foo.bar") || tui_command_len("/9foo") ||
+                tui_command_len("/help\rtext") || tui_command_len("/foo\ttext") ||
+                !tui_command_len("/foo-bar_2 arg")) {
+                printf("FAIL slash token boundaries and literal escape\n"); failures++;
+            } else printf("  ok   slash tokens exclude paths/multiline; literal escape queued once\n");
+            h.npending = 8;
+            tui_type(&h, "//retry");
+            if (strcmp(h.input, "//retry") || h.ninput != 7 || h.nhistory != 3) {
+                printf("FAIL escaped full queue keeps draft\n"); failures++;
+            }
+            h.npending = 0;
+            tui_manual_submit(&h);
+            if (h.npending != 1 || strcmp(h.pending[0], "/retry") || h.nhistory != 4 || h.input[0]) {
+                printf("FAIL escaped full queue retry\n"); failures++;
+            }
+        }
         {
             static tui_state source, fresh, saved;
             static reload_session_state metadata, snapshot, zero;
