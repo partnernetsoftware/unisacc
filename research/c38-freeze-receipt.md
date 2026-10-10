@@ -87,3 +87,4 @@
 - windows-defender-final-bytes court：仓内无 Defender 工作流，本机为 Linux，未做真扫；**PENDING**。本机冒烟（fb12-multi 10/10、comdemo 19 passed）不代此 court。
 - owner-promotion：**PENDING**，等 Defender 证据或政委放行（机房主任本轮不代签）。
 - gate-infra 归因分歧：机房主任 12:31 具名裁定通过（bd352750 落 rulings，版本说明已写“具名裁定通过、RULED”）；消息入口 12:48 代裁仍记 NEEDS_RULING、不认刷哈希代重审，证据目录 /tmp/c38-inbox-evidence-20261010T124818（exit.txt / exit-ruled.txt / SHA256SUMS -c 全 OK / freeze-vs-tree.txt）。两份裁定冲突，cc 不自选，已公开的版本说明维持现状待裁。
+- six-native 完整证据：每格 job id 与日志 `public sha256` 全 64 位均为 579f6525ce101ef35100269bcd57ea74e2e3b38bded38ab9dcf014856640d9da（smoke-cells.txt 入证据包，连同 signing-receipt.json，SHA256SUMS 已重算）。workflow head 158ae864 ≠ rc 不是偏差，court 看 tag 与最终字节（cdx2）。seedmemorycheck Darwin 修片 0b831b64：选“测试自带 env + identity 打桩”，期望不变，Linux 13/13、gate seedmemory 绿；Darwin 待复跑确认。
