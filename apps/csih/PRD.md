@@ -84,6 +84,14 @@ moltbaby 里的命令已经是 `bin/rawcsih` 和 `csih.sh`。`bin/llm` 的工具
 - Rust Future：https://doc.rust-lang.org/std/future/trait.Future.html
 - 不要堵住事件循环：https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop
 
+## 工具链约束（硬性，2026-10-10）
+
+- 唯一允许的第三方运行时是 unisacc（`unisacc.com`）。禁止新增或保留 Python、Node、Bash 等脚本语言实现的产品代码、探针、门禁、夹具生成器。
+- 源码只用 `.c` / `.cx` / `.h`，其中 `.cx` 是模块化 provider。禁止 `.py`、`.sh` 进入仓库的构建、测试或运行路径。
+- 构建与运行统一经 unisacc：`-o` 构建后运行，不依赖 run 模式丢弃 `.cx` 与全局 `-include` 的行为。
+- 宿主 `cc` 不作为门禁依赖；若 unisacc 缺能力，向 unisacc 维护者（cc-unisacc）反馈，等修复，不以外部工具绕过。
+- 现有 `.sh` 与 `.py` 逐步淘汰：每个文件须有对应 `.c` 替代后删除。
+
 ## 探针
 
 `probes/` 里是可运行的检查，不是第二份规格。平台差（HTTPS、多文件、POSIX）已在 unisacc 0.0.26 里；csih 不再自带一层按操作系统分叉的封装。constructor 不执行记在 unisacc `archive/plans/v0.0.28.md` F1。
