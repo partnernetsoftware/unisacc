@@ -36,3 +36,10 @@
 - 恢复前就绪核（cc，10:15）：MemAvailable 2739 MiB → 按公式上限 1715 MiB，低于参照需求 2135 MiB（旧 gen、RSS 口径，仅作参照），未就绪；不重复跑已知偏低配置。前 19 项身份与配置未变，证据保留，不从头重做；获裁后只从第 20 项起开新 attempt。
 - §24 attempt2（第 20 项起，董秘裁：宿主上限偏低因会话外 ChatGPT 占内存，非生成器回归；已关桌面 ChatGPT）：启动 MemAvailable 7042154496 B，公式 MAX=3221225472 B（3 GiB），≥2200 MiB 门槛；日志 /tmp/cdx38-freeze-matrix/attempt2/run.log；关联原 OOM 账（第 20 项 attempt1 rc137 下界保留不覆盖）。矩阵生产数据仅当 cc/flags/并发/输入键与证据 margin 覆盖一致时才作为一次采证候选；ASan 或 cgroup 组 peak 不抵生产 RSS 证据；旧 2135 MiB 只是参照，不保证新路线（cdx2）。
 - §24 attempt2 第 20 项 warnparse（实际跑过，cdx；脚本首启 NameError 未执行即崩，10:17:44 实际 begin）：生产 O2 rc0，time RSS 2186572 KiB（2135 MiB，与既有证据同值），cgroup peak 2318188544 B，7.80 s；参考 rc0，peak 722587648 B；生产与参考输出逐字节相同。ASan rc137，peak=max=3221225472 B，oom_kill +1——ASan 诊断在 3 GiB 公式上限下 OOM，是下界、非 PASS；首红停，21–30 项 NOT_RUN。§24 规定 ASan 与生产预算分开记，不把 ASan 开销套用生产预算；但 ASan 非零即红。待裁：ASan 诊断项是否可在宿主余量允许时用更高的独立上限重测（会改变'不抬限'），或记该项 ASan 为宿主受限 UNKNOWN 后续跑 21–30。
+- §24 路线阶段状态（续接用；裁到后只续获准缺项）：
+  | 项 | 生产 | 参考 | ASan |
+  |---|---|---|---|
+  | 1–19 | rc0 | rc0 同字节 | rc0 |
+  | 20 warnparse | attempt1 OOM（下界，保留）；attempt2 rc0 RSS 2135 MiB | attempt2 rc0 同字节 | attempt2 OOM @3 GiB，未结 |
+  | 21–30 | NOT_RUN | NOT_RUN | NOT_RUN |
+  续接时不重跑已绿的生产/参考；若裁 UNKNOWN，第 20 项 ASan 作为未结诊断义务列入最终出口，不因 21–30 转绿而抹掉。
