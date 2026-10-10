@@ -9,7 +9,7 @@ R3 已按方案 2 APPLIED（0.0.38 签后字节 579f6525 于 Draft 408747179 六
 | A2 | WF1–WF5 收口口径 | 各有首刀与复核闭合，均为“要求/工具”，非产品验收 | 已裁 R9：流程工具已交付，不抵产品验收 |
 | A3 | 产品闭包变化 | 自 a5c1a995（0.0.38 版本提交）仅 8a433c5d（exec/enc，COV1）；seed/ exec/build exec/facts 未变 | 已具备 |
 | A4 | §24 生成器矩阵 | COV1 已跑 30/30（历史证据成立）；冻结时须按当前矩阵完整键核复用，键不符即重跑 | 可复用修片后矩阵（COV1 快照，完整有序输入一致，非旧 0.0.38 矩阵；e1bbe7bb；cdx2 独审通过，ASan 首 OOM/非 LSan 限定保留） |
-| A5 | seed 内存证据 | seedmemory.reference_key(gen)=6ec1fe9d67dd0733 与证据 e8d10ecb97107e7b 失配（parse2 相符）；gen.c 未变不等于证据有效 | 补证已有（失配唯一来源 exec/enc/x86-procs-result.tsv；30 条 C 路线 rc0/oom0，gen sha f997b25d；e1bbe7bb）；gen 证据常量已接线（df2bae7e = 613f410b 同内容，key 6ec1fe9d67dd0733，30 项 RSS 按本轮实测、余量算法不变；cdx2 独审通过）：暖 C 具名路线具备；COM/Python 冷/四路实峰仍 UNKNOWN |
+| A5 | seed 内存证据 | 现 key 6ec1fe9d67dd0733 已接线（df2bae7e）。历史：原证据 e8d10ecb97107e7b 失配（parse2 相符）；gen.c 未变不等于证据有效 | 补证已有（失配唯一来源 exec/enc/x86-procs-result.tsv；30 条 C 路线 rc0/oom0，gen sha f997b25d；e1bbe7bb）；gen 证据常量已接线（df2bae7e = 613f410b 同内容，key 6ec1fe9d67dd0733，30 项 RSS 按本轮实测、余量算法不变；cdx2 独审通过）：暖 C 具名路线具备；COM/Python 冷/四路实峰仍 UNKNOWN |
 | A6 | 宿主 | m4pro 无（F4″ 缺口照列）；H37 启动器路线 5c036d42 证据在 release/c38-host-launcher.json | F4″ 缺口；其余已具备 |
 | A7 | 共享检出脏树 | examples/*.c 九个未认领删除，gate-infra 在共享检出红（干净 HEAD 绿）；queue 在独立 worktree 跑不受影响 | 须认领方（不代恢复） |
 
