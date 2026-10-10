@@ -130,9 +130,9 @@ ok() { echo "SAME $1"; evw "SAME $1"; same=$((same + 1)); }
 no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 # the shims refuse what they do not know (rc 97, recorded UNKNOWN)
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
-for bad in "-c foo.c" "-O2 -o x exec/c/run.c seed/gen.c" "-o x"; do
-    "$S/shim/cc" $bad >/dev/null 2>&1; r=$?
-    [ "$r" -eq 97 ] && ok "cc shim refuses '$bad'" || no "cc shim did not refuse '$bad' (rc=$r)"
+for bad_argv in "-c foo.c" "-O2 -o x exec/c/run.c seed/gen.c" "-o x"; do   # not "bad": that is the failure count
+    "$S/shim/cc" $bad_argv >/dev/null 2>&1; r=$?
+    [ "$r" -eq 97 ] && ok "cc shim refuses '$bad_argv'" || no "cc shim did not refuse '$bad_argv' (rc=$r)"
 done
 "$S/shim/python3" exec/c/other.py >/dev/null 2>&1; r=$?
 [ "$r" -eq 97 ] && ok "python3 shim refuses an unknown script" || no "python3 shim did not refuse (rc=$r)"
@@ -214,7 +214,7 @@ cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 if [ -n "$EV" ]; then   # the shard's own logs, by name; a failed copy marks the export
-    logs=""; for t in $TARGETS; do logs="$logs log-$(slug "$t")"; done
+    logs="shimneg"; for t in $TARGETS; do logs="$logs log-$(slug "$t")"; done
     if [ "$SHARD" = 1 ]; then logs="$logs neglog-red neglog-missing neglog-badsg mutlog"; else logs="$logs pylog-win-arm64"; fi
     for f in $logs; do cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedppc: EVIDENCE copy of $f failed" >&2; }; done
 fi
