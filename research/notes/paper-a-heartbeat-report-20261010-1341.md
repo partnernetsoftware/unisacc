@@ -1,0 +1,25 @@
+# Paper A 心跳短报 2026-10-10 ~13:41 SGT
+
+- **本拍切口：** A 成篇定稿增量
+- **主张一句：** 标题与关键词裸「自举 / Self-Hosting」收紧为「逐字节自举（N1=N2=N3）/ Byte-for-Byte Self-Hosting」，与已封的 byte-bootstrap 边界对齐；摘要正文未动。
+- **tip（开拍）：** `4d2538333bf63d440462c422b39e3f6c4d0d6644`
+- **tip（合入后）：** _PENDING_MERGE_
+- **PR：** _PENDING_
+- **Paper A blob drift：** title/keywords 三联改写；abstract SAME
+  - CN `research/unisacc-paper.md`：`f2800508d87de31b549aa89bf41204c221095b71` → _PENDING_
+  - EN `research/unisacc-paper.en.md`：`333f2d29d796f8879909c535c0b1612f08c6a4ef` → _PENDING_
+  - TeX `research/arxiv-paper-a/main.tex`：`6177ab7c97fc8366c75efd72b0ea4dd25bd99a37` → _PENDING_
+  - abstract `research/arxiv-paper-a/abstract.txt`：`9e8838928ca79ec1708fcfb2df3683548566516f` **SAME**（本拍未改）
+- **Softguess：** NONE 预期；本拍不重开。
+- **挡粘点：** 无（research-only；标题/关键词收紧；未改摘要正文/键数/表数字/产品代码）。
+- **待批板：** 不叠 ~03:44 两板（本拍无新信息）。
+- **切后 A 更纯在哪：** 标题/关键词不再可被误读为语义自举定理；硬缺口仍停在测量身份/表口径/跨平台矩阵。
+- **仍开硬缺口：** 测量身份 8509/8769；表口径；跨平台矩阵测量。
+- **证据路径：**
+  - `research/notes/paper-a-seal-title-bootstrap-boundary-20261010-1341.md`
+  - `research/notes/paper-a-heartbeat-report-20261010-1341.md`
+  - `research/notes/paper-a-seal-conclusion-bootstrap-boundary-20261010-1313.md`（父封口类·结论）
+  - `research/seal-bootstrap-bytes-not-semantic-20261009.md`（父封口类）
+  - `research/paper-a-notes.md`（本拍一行）
+  - `research/paper-notes-20261009.md`（封口指针）
+- **待政委：** 无必须项。
