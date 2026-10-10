@@ -115,7 +115,9 @@ nsid() { ls "$S/seedbin" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256
 snap() { python3 -c 'import hashlib,os,sys
 d=sys.argv[1]
 for f in sorted(os.listdir(d)):
-    st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "$S/seedbin"; }
+    st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "${1:-$S/seedbin}"; }
+# the snapshot's own failure must be visible: an unreadable directory gives a non-zero status (controlled stub)
+snap "$S/no-such-dir" >/dev/null 2>&1 && no "snapshot of a missing directory did not fail" || ok "snapshot failure is visible"
 dg() { out=$1; rm -f "$out"; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" 2>"$S/gd.err"; }
 rm -rf "$S/seedbin"
 dg "$S/cold.json"; r=$?
