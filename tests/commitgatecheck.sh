@@ -32,7 +32,8 @@ for tree in exec kernel include unisa weights; do
   [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "$tree default set accepted or committed"
   COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- "./$tree" > /dev/null 2>&1
   [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "$tree contract-only directory accepted or committed"
-  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- "$tree/input.c" > /dev/null 2>&1 || fail "$tree product suite refused"
+  suite=difftest_o-1; [ "$tree" = exec ] && suite=exec-driver-core-modes   # difftest_o-1 does not declare exec/
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite $suite -- "$tree/input.c" > /dev/null 2>&1 || fail "$tree covering product suite refused"
 done
 mkdir -p seed
 for name in gen.c compilerpack.c; do
@@ -47,4 +48,26 @@ echo x > weights/x.tsv; git add weights/x.tsv
 before=$(git rev-parse HEAD)
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- weights/x.tsv > /dev/null 2>&1
 [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "weights TSV contract-only accepted"
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded"
+# 0.0.40-prep (机房主任 18:28) (1): the named product suite must declare every shipping path it is offered for
+echo y > weights/gold.tsv; git add weights/gold.tsv; before=$(git rev-parse HEAD)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite exec-elfobject -- weights/gold.tsv > /dev/null 2>&1
+[ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a product suite that does not declare weights/ was accepted"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite exec-elfobject --suite tools -- weights/gold.tsv > /dev/null 2>&1
+[ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "an unclassified suite was not refused (any() short-circuit)"
+mkdir -p exec/d && echo z > exec/d/new.c && git add exec/d/new.c
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- ./exec > /dev/null 2>&1
+[ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a directory pathspec with an uncovered shipping file was accepted"
+# (2): inputs changed while the gate ran -> no commit, rc 4 (content, mode, index), even if the gate looks green
+printf '#!/bin/sh\necho changed >> weights/gold.tsv\necho "gate  suites 1   failed 0"\nexit 0\n' > edit; chmod +x edit
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/edit "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1
+[ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a working-tree change during the gate was committed"
+git add weights/gold.tsv
+printf '#!/bin/sh\nchmod +x weights/gold.tsv\nexit 0\n' > mode; chmod +x mode
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/mode "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1
+[ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a mode change during the gate was committed"
+chmod -x weights/gold.tsv
+printf '#!/bin/sh\necho staged > weights/gold.tsv; git add weights/gold.tsv; git checkout -q -- weights/gold.tsv 2>/dev/null; exit 0\n' > stage; chmod +x stage
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/stage "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1
+[ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "an index change during the gate was committed"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1 || fail "stable covered input was not committed"
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified, directory refused); inputs changed during the gate (content, mode, index) rc 4, no commit"

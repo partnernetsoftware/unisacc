@@ -19,23 +19,42 @@ done
 # suite outside the contract layer, or nothing is checked for it and nothing is committed.
 # Resolve scoped directories/pathspecs against tracked and untracked paths, using
 # the same product predicate as the freeze closure. Keep standalone unisacc.c.
-product=$(python3 - "$R" "$@" <<'PY_PRODUCT'
-import pathlib, subprocess, sys
-sys.path.insert(0, sys.argv[1] + '/tests')
+# 0.0.40-prep (机房主任 18:28): every shipping path in the commit must be declared as an input of at least
+# one NAMED suite (tests/gatedeps.json files/trees, or its family's); "any non-contract suite" is not enough.
+# Unknown or unclassified suites fail closed.
+named=$(printf '%s\n' ${suites[@]+"${suites[@]}"} | grep -v '^--suite$' || true)
+python3 - "$R" "$named" "$@" <<'PY_PRODUCT' || exit 2
+import json, subprocess, sys
+R, named, args = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
+sys.path.insert(0, R + '/tests')
 from freezecheck import product
+import gatelayers
 paths = set()
-for arg in sys.argv[2:]:
+for arg in args:
     p = arg[2:] if arg.startswith('./') else arg
     paths.add(p)
     paths.update(subprocess.check_output(['git','ls-files','-z','--cached','--others','--exclude-standard','--',p]).decode().split('\0'))
-print(int(any(p == 'unisacc.c' or product(p) for p in paths)))
+ship = sorted(p for p in paths if p and (p == 'unisacc.c' or product(p)))
+if not ship: sys.exit(0)
+def no(m): print('commitgate: ' + m, file=sys.stderr); sys.exit(1)
+if not named: no('product closure changes need --suite naming a product (non-contract) suite that declares them')
+d = json.load(open(R + '/tests/gatedeps.json'))
+specs = []
+for n in named:
+    try: layer = gatelayers.layer(n)
+    except ValueError: no('suite %s is not classified by tests/gatelayers.py (fail closed)' % n)
+    if n not in d['suites']: no('suite %s has no declared inputs in tests/gatedeps.json (fail closed)' % n)
+    if layer != 'contract': specs.append(d['suites'][n])
+if not specs: no('product closure changes need --suite naming at least one product (non-contract) suite')
+def covers(s, p):
+    for src in (s, d['families'].get(s.get('family'), {})):
+        if p in (src.get('files') or []): return True
+        for k in ('trees', 'code_trees', 'all_files_trees', 'reviewed_trees'):
+            if any(p == t or p.startswith(t.rstrip('/') + '/') for t in (src.get(k) or [])): return True
+    return False
+miss = [p for p in ship if not any(covers(s, p) for s in specs)]
+if miss: no('no named product suite declares these shipping paths: ' + ' '.join(miss[:20]) + (' ...' if len(miss) > 20 else ''))
 PY_PRODUCT
-) || { echo "commitgate: cannot classify product paths" >&2; exit 2; }
-if [ "$product" = 1 ]; then
-  named=$(printf '%s\n' ${suites[@]+"${suites[@]}"} | grep -v '^--suite$' || true)
-  [ -n "$named" ] && python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tests"); import gatelayers as g; sys.exit(0 if any(g.layer(n) != "contract" for n in sys.argv[2:]) else 1)' "$R" $named \
-    || { echo "commitgate: product closure changes need --suite naming at least one product (non-contract) suite" >&2; exit 2; }
-fi
 [ ${#suites[@]} -gt 0 ] || suites=(--suite gate-layers --suite script-inventory --suite checkrun)
 gate=$R/tests/gate.sh
 if [ -n "${COMMITGATE_GATE:-}" ]; then
@@ -46,6 +65,24 @@ fi
 top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "commitgate: not in a git repository" >&2; exit 2; }
 [ "$top" = "$R" ] || [ "${COMMITGATE_SELFTEST:-}" = 1 ] || { echo "commitgate: cwd repository $top is not the checked repository $R" >&2; exit 2; }
 log=$(mktemp "${TMPDIR:-/tmp}/commitgate.XXXXXX")
+# 0.0.40-prep (机房主任 18:28): the committed inputs must be the checked inputs -- index entry (mode/blob/stage),
+# working-tree bytes and mode, and membership of every given path are snapshotted before and after the gate.
+snap() { python3 - "$@" <<'PY_SNAP'
+import hashlib, os, subprocess, sys
+h = hashlib.sha256()
+h.update(subprocess.check_output(['git','ls-files','-s','-z','--'] + sys.argv[1:]))
+for p in sorted(set(subprocess.check_output(['git','ls-files','-z','--cached','--others','--exclude-standard','--'] + sys.argv[1:]).decode().split('\0')) - {''}):
+    h.update(p.encode() + b'\0')
+    try:
+        st = os.lstat(p); h.update(oct(st.st_mode).encode())
+        h.update(os.readlink(p).encode() if os.path.islink(p) else open(p, 'rb').read())
+    except FileNotFoundError: h.update(b'<absent>')
+print(h.hexdigest())
+PY_SNAP
+}
+before=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; }
 "$R/release/tools/checkrun.sh" "$log" -- "$gate" ${suites[@]+"${suites[@]}"} || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
+after=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; }
+[ "$before" = "$after" ] || { echo "commitgate: inputs changed while the gate ran ($before -> $after), nothing committed (log $log)" >&2; exit 4; }
 git commit -q -m "$msg" -- "$@" || { echo "commitgate: gate was green but git commit failed" >&2; exit 3; }
 echo "commitgate: committed $(git rev-parse --short HEAD) after gate rc=0 (log $log)"
