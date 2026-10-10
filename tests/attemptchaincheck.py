@@ -40,4 +40,10 @@ assert r['rc_mismatch'] == ['e'] and r['missing_from_replay'] == ['b'] and r['ex
 s['reconcile'] = r; assert A.strict_rc(s) == 1
 clean = A.summarise(A.replay(['START z limit=9 kind=full', 'DONE z rc=0 1.00s']))
 clean['reconcile'] = A.reconcile(clean, {'results': {'z': {'rc': 0}}}); assert A.strict_rc(clean) == 0, clean
-print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict')
+t = A.tail_risk(A.replay(['START x-1 limit=10 kind=tail', 'DEFER x-1 rc=142 10.00s', 'START x-2 limit=46 kind=full', 'DONE x-2 rc=0 30.00s',
+                           'START x-3 limit=40 kind=tail', 'DONE x-3 rc=0 5.00s', 'START y-1 limit=9 kind=tail', 'DEFER y-1 rc=142 9.00s']))
+assert t['tail_success'] == 1 and t['tail_deferred'] == 2, t
+r = {row['suite']: row for row in t['rows']}
+assert r['x-1']['sibling_max_s'] == 30.0 and r['x-1']['hint'].startswith('risk'), r       # sibling needed 30 s > tail 10 s
+assert r['y-1']['hint'].startswith('UNKNOWN'), r                                         # no sibling evidence: UNKNOWN, not safe
+print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')

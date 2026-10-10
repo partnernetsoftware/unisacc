@@ -66,6 +66,33 @@ def summarise(chains, near=2.0):
             'near_limit': sorted(nearlimit, key=lambda r: r['margin']), 'final_rc': final}
 
 
+def family(name):
+    """Shard family: a trailing -N shard number dropped (csmithdiff-27 -> csmithdiff)."""
+    return re.sub(r'-\d+$', '', name)
+
+
+def tail_risk(chains):
+    """WF2: for each tail attempt, the successful seconds of *other* suites in its family next to the tail
+    limit -- a risk hint only, never this suite's lower bound; successful tails are counted beside it."""
+    ok = collections.defaultdict(list)
+    for name, seq in chains.items():
+        for a in seq:
+            if a['outcome'] == 'DONE' and a['rc'] == '0': ok[family(name)].append((name, a['seconds']))
+    rows, tail_ok, tail_defer = [], 0, 0
+    for name, seq in chains.items():
+        for a in seq:
+            if a['kind'] != 'tail': continue
+            if a['outcome'] == 'DONE' and a['rc'] == '0': tail_ok += 1
+            if a['outcome'] != 'DEFER': continue
+            tail_defer += 1
+            sib = [s for n, s in ok[family(name)] if n != name]
+            rows.append({'suite': name, 'limit': a['limit'], 'deferred_after': a['seconds'],
+                         'siblings_ok': len(sib), 'sibling_max_s': max(sib) if sib else None,
+                         'hint': 'UNKNOWN (no sibling evidence)' if not sib else
+                                 'risk: a sibling needed more than this tail budget' if max(sib) > a['limit'] else 'siblings fit this tail budget'})
+    return {'tail_success': tail_ok, 'tail_deferred': tail_defer, 'rows': rows}
+
+
 def reconcile(summary, results):
     res = results.get('results', {})
     diff = [n for n, rc in summary['final_rc'].items() if n in res and str(res[n].get('rc')) != str(rc)]
@@ -82,9 +109,16 @@ def strict_rc(s):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument('log'); ap.add_argument('--results'); ap.add_argument('--json', action='store_true')
+    ap.add_argument('--tail-risk', action='store_true', help='WF2: sibling-shard risk hints for tail deferrals')
     ap.add_argument('--strict', action='store_true', help='exit 1 on pending, unknown, evidence gaps or any reconcile difference')
     a = ap.parse_args(argv)
-    s = summarise(replay(open(a.log).read().splitlines()))
+    chains = replay(open(a.log).read().splitlines())
+    s = summarise(chains)
+    if a.tail_risk:
+        t = tail_risk(chains)
+        print('tail-risk  tail successes %d  tail deferrals %d  (hints only; sibling seconds are not this suite\'s lower bound)' % (t['tail_success'], t['tail_deferred']))
+        for r in sorted(t['rows'], key=lambda r: r['suite']): print('  %-40s limit %3s  deferred after %6.2fs  siblings ok %2d  max %s  %s' % (r['suite'], r['limit'], r['deferred_after'], r['siblings_ok'], r['sibling_max_s'], r['hint']))
+        return 0
     if a.results: s['reconcile'] = reconcile(s, json.load(open(a.results)))
     if a.json:
         print(json.dumps({k: v for k, v in s.items() if k != 'final_rc'}, indent=1)); return strict_rc(s) if a.strict else 0
