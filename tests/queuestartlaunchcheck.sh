@@ -1,5 +1,5 @@
 #!/bin/bash
-# queuestartlaunchcheck (0.0.40, 机房主任 20:22/20:37): the REAL release/tools/queue.sh entry refuses a wrong start
+# queuestartlaunchcheck (0.0.40, 机房主任 20:22/20:37/20:45): the REAL release/tools/queue.sh entry refuses a wrong start
 # before any window: a fake window launcher (QUEUE_WORKTREE/tests/term.sh) records every launch.  Refusals must
 # exit 2 with zero launches and the state dir untouched; a clean fresh start must launch.  No real gate runs.
 set -u
@@ -13,10 +13,12 @@ printf 'seed' > "$S/unisacc-seed.com"; printf '#!/bin/sh\nexit 0\n' > "$T/ua"; c
 printf '#!/bin/sh\necho launched >> "%s/launches"\nexit 0\n' "$T" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
 printf '{"artifact_sha256":"%s"}\n' "$art" > "$B/unisacc-next.com.build.json"
 printf '{"stamp":{},"results":{"old":{"rc":0}}}\n' > "$B/state/results.json"
+# macOS has no GNU timeout(1); in-repo tests/bound is the watchdog (1..60s).
+_BOUND=$("$R/tests/bound" --helper) || { echo "queuestartlaunch: need tests/bound (native watchdog)"; exit 2; }
 q() {   # q STATE_DIR [ENV...] -- one real queue.sh start; prints rc
   local Q=$1; shift
   env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$B" QUEUE_STATE="$Q" UNISACC_FFI_X86_PROVIDER=/nonexistent "$@" \
-    timeout 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; echo $?
+    "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; echo $?
 }
 launches() { [ -f "$T/launches" ] && wc -l < "$T/launches" | tr -d ' ' || echo 0; }
 snap() {   # every member (files, dirs, links) with its mode and bytes
