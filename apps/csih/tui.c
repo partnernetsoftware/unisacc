@@ -1217,9 +1217,6 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
 
 /* Mind pages are read whole and folded to the column width, one screen row
  * per folded piece. Continuation rows start with two spaces. */
-#define TUI_MIND_SRC  400
-#define TUI_MIND_WRAP 800
-
 /* Terminal columns, not bytes. The measure itself is csih_cols.h. */
 static int tui_disp_width(const char *s) {
     int w = 0;

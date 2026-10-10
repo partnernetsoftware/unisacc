@@ -42,18 +42,17 @@ else
     echo "FAIL 3b: msg fuzz (build/run failed, or decode success path never hit)"; cat "$TMP/fuzz_msg.out" 2>/dev/null; rc=1
 fi
 
-# 4. cc/clang C99 syntax of every file-table unit (cc shim for unisacc_ffi.h; .cx copied to temp .c)
-cc_fail=0
-for f in csih render term chat clock tools file shell edit gate session agent plugin net; do
-    cc -std=c99 -fsyntax-only -I cc -I . -include json.h -include csih_cols.h -include csih_home.h "$f.c" > "$TMP/cc_$f.log" 2>&1 \
-        || { echo "FAIL 4: cc $f: $(grep -m1 error "$TMP/cc_$f.log")"; cc_fail=1; }
-done
-for f in cols home json; do
-    cp "$f.cx" "$TMP/$f.c"
-    cc -std=c99 -fsyntax-only -I cc -I . -include json.h -include csih_cols.h -include csih_home.h "$TMP/$f.c" > "$TMP/cc_$f.log" 2>&1 \
-        || { echo "FAIL 4: cc $f.cx: $(grep -m1 error "$TMP/cc_$f.log")"; cc_fail=1; }
-done
-[ $cc_fail -eq 0 ] && echo "ok   4: cc -std=c99 syntax over the file table" || rc=1
+# 4. cc C99 full build + selftest of the file table (cc/unisacc_ffi.h shim; .cx copied to temp .c).
+#    Warnings are not gated here; the link and the cc-built selftest are.
+for f in cols home json; do cp "$f.cx" "$TMP/$f.c" || rc=1; done
+if cc -std=c99 -I cc -I . -include json.h -include csih_cols.h -include csih_home.h \
+      csih.c render.c term.c chat.c clock.c tools.c "$TMP/cols.c" "$TMP/home.c" file.c shell.c edit.c gate.c "$TMP/json.c" \
+      session.c agent.c plugin.c net.c -o "$TMP/csih_cc" -lcurl -lm -ldl > "$TMP/cc_build.log" 2>&1 \
+   && "$TMP/csih_cc" selftest > "$TMP/cc_selftest.log" 2>&1 && tail -1 "$TMP/cc_selftest.log" | grep -q 'selftest ok'; then
+    echo "ok   4: cc -std=c99 full build + selftest ok"
+else
+    echo "FAIL 4: cc build/selftest"; grep -m3 -E 'error|undefined' "$TMP/cc_build.log"; tail -3 "$TMP/cc_selftest.log" 2>/dev/null; rc=1
+fi
 
 [ $rc -eq 0 ] && echo "check ok" || echo "check FAILED"
 exit $rc

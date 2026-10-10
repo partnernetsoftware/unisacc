@@ -1829,7 +1829,7 @@ static int agent_call(const char *endpoint, const char *model,
     }
     if (r.status < 200 || r.status >= 300) {
         int i, j = 0;
-        const char *b = r.body ? r.body : "";
+        const char *b = r.body[0] ? r.body : "";
         for (i = 0; b[i] && j < (int)sizeof agent_last_err - 1; i++) {
             char c = b[i];
             if (c == '\n' || c == '\r' || c == '\t') c = ' ';
@@ -1845,7 +1845,7 @@ static int agent_call(const char *endpoint, const char *model,
                 snprintf(path, sizeof path, "%s/.csih/last-http.txt", home);
                 f = fopen(path, "w");
                 if (f) {
-                    fprintf(f, "status %d\n%s\n", r.status, r.body ? r.body : "");
+                    fprintf(f, "status %d\n%s\n", r.status, r.body[0] ? r.body : "");
                     fclose(f);
                 }
             }
