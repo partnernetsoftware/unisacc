@@ -62,3 +62,4 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~16:29 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「有限性／有限控制表的系统构造（阶段分类 + 系统造表方法）」；父节点回意向 E→A；不挡投稿；不起稿；paper-e-intent 不重写。见 [`notes/paper-a-derive-purify-finiteness-control-tables-20261010-1629.md`](notes/paper-a-derive-purify-finiteness-control-tables-20261010-1629.md)。
 - **2026-10-10 ~16:45 心跳（切口 C 真缺口钉，未改稿内数字）：** §8.1 第 3 条同身份六目标平台执行矩阵升格为 **seal-blocking**；inventory／scaffold 只证明模式；禁止把六 runner 演示当成原生矩阵；候选身份刷新 Latest=v0.0.38。见 [`notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md`](notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md)。
 
+- **2026-10-10 ~19:15 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「活板门／trapdoor ≠ 不可达性定理」；父节点回 A2 RQ1/RQ3→A；不挡投稿；不起稿；seal-trapdoor 不重写；不叠 Ο1/Ο2。见 [`notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1915.md`](notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1915.md)。
