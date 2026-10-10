@@ -3,11 +3,12 @@
 - **本拍切口：** A 成篇定稿增量
 - **主张一句：** 结论里裸「自举 / self-hosts」收紧为具名检查下逐字节自举（N1=N2=N3；§5.3；非语义自举定理），与已封的 byte-bootstrap 边界对齐。
 - **tip（开拍）：** `6fa8f653f8c8b1ad6f349ab6ff4412a4ae65a859`（product attemptchain…；晚于 paper PR #27 `4b7bb1c`）
-- **tip（合入后）：** （merge 后回填）
+- **tip（合入后）：** `737e8ed175b4cca3b8718a54aa3d797a4b824746`（PR #29 squash merge）
+- **PR：** #29 merged yes
 - **Paper A blob drift：** Conclusion 三联改写；abstract SAME
-  - CN `research/unisacc-paper.md`：改前 `000b7ef1ef80029fc016e9acb736efaf650840df` → 合入后新 blob
-  - EN `research/unisacc-paper.en.md`：改前 `93fdf05232dcc290862c59d16e4bc39fdf1976c0` → 合入后新 blob
-  - TeX `research/arxiv-paper-a/main.tex`：改前 `8122353c5446417827391eb7a4934ba9aa549017` → 合入后新 blob
+  - CN `research/unisacc-paper.md`：`000b7ef1…` → `f2800508d87de31b549aa89bf41204c221095b71`
+  - EN `research/unisacc-paper.en.md`：`93fdf052…` → `333f2d29d796f8879909c535c0b1612f08c6a4ef`
+  - TeX `research/arxiv-paper-a/main.tex`：`8122353c…` → `6177ab7c97fc8366c75efd72b0ea4dd25bd99a37`
   - abstract `research/arxiv-paper-a/abstract.txt`：`9e8838928ca79ec1708fcfb2df3683548566516f` **SAME**
 - **Softguess：** NONE 预期；本拍不重开。
 - **挡粘点：** 无（research-only；结论一句收紧；未改键数/表数字/产品代码）。
