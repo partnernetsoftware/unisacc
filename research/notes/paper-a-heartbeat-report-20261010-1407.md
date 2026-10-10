@@ -3,8 +3,8 @@
 - **本拍切口：** A（Cut A）
 - **主张一句：** 摘要不能把「the compiler self-hosts」读成整机/六平台自举；应写决策网络实例在 §5.3 具名五目标上逐字节自举（N1=N2=N3），非语义自举定理。
 - **tip（开拍）：** `cfb29cb2b55062193a12c781dc9ebb3eede8e343`
-- **tip（合入后）：** _(after merge)_
-- **PR：** _(after open/merge)_ ; stale draft #31 to close → #34
+- **tip（合入后）：** 21dd2501980766e746a9da5ba843222e800868b8
+- **PR：** [#35](https://github.com/partnernetsoftware/unisacc/pull/35) merged; stale draft #31 closed → #34
 - **Paper A blob drift：** abstract.txt + TeX 摘要主语收紧；CN/EN 摘要 SAME
   - CN `research/unisacc-paper.md`：`f40070830bc44538ac15c3734dcc8257a8e3d7ee` **SAME**
   - EN `research/unisacc-paper.en.md`：`7878d8072a35438db9653cb21c257b362c7a0665` **SAME**

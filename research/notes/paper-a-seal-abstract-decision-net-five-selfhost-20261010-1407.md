@@ -58,7 +58,7 @@ After the 2026-10-10 ~13:58 §10 five-vs-six pin, **abstract.txt** still said `a
 
 | Artifact | git blob SHA |
 | --- | --- |
-| Branch tip (merge) | _(after merge)_ |
+| Branch tip (merge) | `21dd2501980766e746a9da5ba843222e800868b8` (PR #35 squash) |
 | CN `research/unisacc-paper.md` | `f40070830bc44538ac15c3734dcc8257a8e3d7ee` **SAME** |
 | EN `research/unisacc-paper.en.md` | `7878d8072a35438db9653cb21c257b362c7a0665` **SAME** |
 | TeX `research/arxiv-paper-a/main.tex` | `eacae1a1dafa8b4d81eaaa4283d73e1792636a48` (was `1bb25b6c91cd7ce8c0bb6ceec5e6c571745982af`) |
