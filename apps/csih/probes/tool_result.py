@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Actual tool facts: native localhost HTTP, gate failure/recovery and managed CTTY/handoff."""
+import os as _os, sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _flat import AGENT, GLOBAL_INCLUDES, TUI  # csih file table, one source (probes/_flat.py)
 import re, subprocess, traceback, fcntl, hashlib, importlib.util, json, os, pathlib, pty, select, shutil, signal, struct, sys, tempfile, termios, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 APP=pathlib.Path(__file__).resolve().parents[1];ROOT=APP.parents[1];sys.path.insert(0,str(APP))
@@ -65,7 +67,7 @@ def main():
                     try:o,e=proc.communicate(timeout=limit);timed=False
                     except subprocess.TimeoutExpired:os.killpg(proc.pid,signal.SIGKILL);o,e=proc.communicate();timed=True
                     return dict(argv=argv,rc=proc.returncode,timeout=timed,stdout=o.decode(errors='replace'),stderr=e.decode(errors='replace'))
-                binary=root/'native';build=bounded(['/bin/sh',str(compiler),'-o',str(binary),'agent.c','agent_cli.c','file.c','edit.c','shell.c','json.c','session.c','net.c','plugin.c'],14);result['build']=build;assert build['rc']==0 and not build['stderr'] and not build['timeout'],build
+                binary=root/'native';build=bounded(['/bin/sh',str(compiler),*GLOBAL_INCLUDES,'-o',str(binary),*AGENT],14);result['build']=build;assert build['rc']==0 and not build['stderr'] and not build['timeout'],build
                 previews=[]
                 for body in ('plain old body',json.dumps(dict(status=dict(op_success=True)))):
                     journal=root/'old.jsonl';journal.write_text(json.dumps(dict(role='tool',name='file',text=body))+'\n')

@@ -3,9 +3,16 @@ import hashlib, json, os, pathlib, shutil, signal, subprocess, sys, tempfile, th
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 CWD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # apps/csih
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _flat import AGENT, GLOBAL_INCLUDES  # csih file table, one source (probes/_flat.py)
 BIN = "/Users/wjc/repos/unisacc/unisacc.com"
-SRC = ["agent.c", "agent_cli.c", "file.c", "edit.c", "shell.c", "json.c",
-       "session.c", "net.c", "plugin.c", "agent"]
+# built once with -o (run mode drops .cx providers and -include globals), then run per case
+AGENT_BIN = os.path.join(tempfile.mkdtemp(prefix="csih-loop-bin-"), "agent-bin")
+
+def build_bin():
+    r = subprocess.run(["/bin/sh", BIN, *GLOBAL_INCLUDES, "-o", AGENT_BIN, *AGENT],
+                       cwd=CWD, capture_output=True, timeout=180)
+    assert r.returncode == 0 and not r.stderr, r.stderr[-400:]
 
 def make_handler(responses, counter):
     class H(BaseHTTPRequestHandler):
@@ -49,7 +56,7 @@ def run_case(name, responses, prompt, expect_reqs, expect_rc, pre=None, extra_en
         env["CSIH_PEER"] = "0:csih-x"
     if extra_env: env.update(extra_env)
     if pre: pre(cwd)
-    argv = ["/bin/sh", BIN] + SRC + [prompt]
+    argv = [AGENT_BIN, "agent", prompt]
     out = b""
     try:
         p = subprocess.Popen(argv, cwd=CWD, env=env, stdout=subprocess.PIPE,
@@ -175,6 +182,7 @@ def main():
         files = sorted(p for p in pathlib.Path(CWD).rglob("*") if p.suffix in (".c", ".h", ".inc"))
         files += [pathlib.Path(BIN), pathlib.Path(__file__)]
         return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+    build_bin()
     before = hashes()
     r = [run_case(*row) for row in rows]
     after = hashes()

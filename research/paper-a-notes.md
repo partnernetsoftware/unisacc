@@ -18,6 +18,8 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **图 2：管线与执行器。** 现在只有图 1（立方体网络）。补一张“七阶段字节流 + 通用执行器一步”的结构图，对应 §4.2。
 - **算法 1 的复杂度与最优性差距。** 给出贪心覆盖的运行时间，以及 5 个小表上贪心与精确最小值的逐表对比（现在只有合计 35 → 20）。§3.2 已将 35→20 与 796k→71k 贪心缩参、算法 1 最优性定理的阅读风险封口（[`seal-algo1-35-20-not-optimality-20261009.md`](seal-algo1-35-20-not-optimality-20261009.md)）；逐表对比与运行时间**仍未完成**。
 - **维护面统计。** §8 声称“表示迁移不等于维护成本下降”；用 exec 生成器 `.py`、手写 `.c`、`.tsv` 分列的行数趋势给出实测（与 v0.0.10 计划中的行数账本同源）。tip 类别快照（≠ 同等覆盖趋势证明）见 [`seal-maint-surface-not-trend-20261009.md`](seal-maint-surface-not-trend-20261009.md)。 衍生净化升格登记（快照≠缩小／趋势定理；~18:12 E）见 [`notes/paper-a-derive-purify-maint-surface-not-trend-20261010-1812.md`](notes/paper-a-derive-purify-maint-surface-not-trend-20261010-1812.md)。
+- **算法 1 的复杂度与最优性差距。** 给出贪心覆盖的运行时间，以及 5 个小表上贪心与精确最小值的逐表对比（现在只有合计 35 → 20）。§3.2 已将 35→20 与 796k→71k 贪心缩参、算法 1 最优性定理的阅读风险封口（[`seal-algo1-35-20-not-optimality-20261009.md`](seal-algo1-35-20-not-optimality-20261009.md)）；2026-10-10 ~19:30 已升格 derive-purify 登记（[`notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md`](notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md)）；逐表对比与运行时间**仍未完成**。
+- **维护面统计。** §8 声称“表示迁移不等于维护成本下降”；用 exec 生成器 `.py`、手写 `.c`、`.tsv` 分列的行数趋势给出实测（与 v0.0.10 计划中的行数账本同源）。tip 类别快照（≠ 同等覆盖趋势证明）见 [`seal-maint-surface-not-trend-20261009.md`](seal-maint-surface-not-trend-20261009.md)。
 - **消融。** 阈值前缀求值与声明式返回各自的贡献（现在只报合并效果）。
 - **外部裁判扩展。** 目前登记表有 8/18 个决策阶段具名外部裁判，但覆盖范围各异；解析与预处理仍需扩展独立裁判。
 
@@ -66,3 +68,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~16:59 心跳（切口 A 成篇定稿增量）：** §8.1 开篇披露冻结仍 v0.0.19、公开 Latest 已至 v0.0.38；投稿级同身份重测须另选单一密封 Latest，不得混读回执与更新二进制；**不**改派冻结身份。见 [`notes/paper-a-seal-section81-latest-drift-20261010-1659.md`](notes/paper-a-seal-section81-latest-drift-20261010-1659.md)。
 
 - **2026-10-10 ~17:27 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「活板门／trapdoor ≠ 不可达性定理」；父节点回 A2→A；不挡投稿；不起稿；seal-trapdoor 不重写；不叠 ~17:08 Ο1/Ο2/Ο3。见 [`notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1727.md`](notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1727.md)。
+- **2026-10-10 ~19:15 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「活板门／trapdoor ≠ 不可达性定理」；父节点回 A2 RQ1/RQ3→A；不挡投稿；不起稿；seal-trapdoor 不重写；不叠 Ο1/Ο2。见 [`notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1915.md`](notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1915.md)。
+- **2026-10-10 ~19:30 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「算法 1／Algo1 35→20 精确枚举与 796k→71k 贪心缩参 ≠ 最优性定理」；父节点回 A；不挡投稿；不起稿；seal-algo1 不重写；csih 后 tip 重登记；不叠 Ο1/Ο2。见 [`notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md`](notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md)。
