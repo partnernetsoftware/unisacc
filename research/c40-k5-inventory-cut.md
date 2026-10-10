@@ -154,3 +154,5 @@ run.sh：ready 每步失败即 return 1；d.json 经 gen-delta，一次性 SEED_
 
 ### K5-1f（prepare.sh 的 opt 步骤接 exec/opt/gen-delta.sh）——限定收口（机房主任 04:04），锁 fbc3bcd6（rebase 后 305be291，patch-id 相等）
 prepare.sh:13 → gen-delta --o2，与 pp 共用私有 SEED_GEN_DIR；opt 在 pp 之前，冷准备时 opt 冷建、pp 复用。夹具 tests/seedoptconsumercheck.sh（gate seedgen-optconsumer）。读数：受控 run2 rc0 15/0（20.1 s），命中直接证明——seed/gen.c 编译 1 次、事件顺序 opt→prune→pp、opt 后与 pp 后两次快照逐字节相同且恰为二进制+sidecar；真实冷观察一次 lnx/x86_64 NETWORK=1 rc0 38.9 s，e4 与 SEED_GEN=0 参考同为 4ee21644，私有缓存成员数 1（冷观察本身不单证命中）。run1 首红（夹具 shift 2 致命、快照遇缺目录失败）原账保留。未证：并发、完整编译器身份、净提速；独立 schema 原件缺。回执：/tmp/cc40-prep/k5-1f/receipt-run1.md、receipt-run2.md、receipt-cold1.md（仓外）。
+
+（行号说明，grk 04:2x：上段 K5-1f 写的“prepare.sh:13”是替换点；当前 tip 上 opt 接线在 prepare.sh 第 15 行，第 13–14 行是新加的注释，第 16 行是 prune。）
