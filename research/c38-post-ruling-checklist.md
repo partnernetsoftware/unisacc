@@ -42,3 +42,9 @@
 1. `src/version.h` 仍为 0.0.37，候选 740007ef 即已公开的 v0.0.37 产物。0.0.38 发布须先做版本号提交——它改变产品闭包，按 §24/§27 与本清单 §3-2 须重新冻结、构造同源候选与 stage2=stage3 定点，并对新候选重做出口（本轮 ver038 证据只证流水线与套件，不能签给新二进制）。
 2. `ledgercheck --final plans/v0.0.38.md` 仍有 19 行未结（K2a–c、K1、H37、F4″、H1、H2、COV1、SC1、W2、E57、X3、L2、L1′、L1b′、A1、N1、顺延占位），须逐行结算或顺延。
 3. 其余：freezecheck 待版本提交后进入冻结窗；subtract-safety 0；gate-layers/script-inventory/gate-infra 绿；CI release-check、封存与 rc 按 §9/§28；公开另由政委/董秘授权。
+
+## 6. ledger 一次裁落地与 SC1 修片（2026-10-10；实际跑过）
+
+- 董秘一次裁 ledger19 已落 plans/v0.0.38.md（335b9312）：13 行 `顺延 N → 0.0.39`（计数加一，承接入草案 plans/v0.0.39.md，原验收不变）；W2/E57 顺延至有 Windows 双 ISA 真宿主的版本；H1/H2 跨版进行（基线非通过）；占位行砍掉；SC1 已完成。`ledgercheck --final plans/v0.0.38.md` 0 未结、carry 0。
+- SC1 修片 72120ea8：seed/gen.c `parse2_startup_control` 绑定 k2-control consts；seed-construct-parse2/-2/-3 真实 gate bound55 各 rc0（43/37/13 s），图对 Python 参考逐字节一致。
+- **身份变化**：`provenance.source_digest()` 689a91de → c7e75006（seed/gen.c 在产品闭包内）；seed-gen 二进制随之变化，种子内存证据（绑定生成器 sha 2d1696da）须对新生成器重测，否则准入 rc2。候选 740007ef 与 ver038 出口不能签给新闭包——本就须随 0.0.38 版本冻结重造候选、定点、出口；仍等董秘授权，不进 Draft。
