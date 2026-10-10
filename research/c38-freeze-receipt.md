@@ -31,3 +31,5 @@
 - 测峰口径（cdx2）：每次尝试独立子组，先入组再 exec，不迁无关进程；memory.max 读回打印；memory.peak 是该子组 cgroup 记账峰值，与进程 RSS 分列；OOM（oom_kill 增量 + rc）照实保留，下界不当 PASS。
 - §24 矩阵采证 begin：2026-10-10T10:08:00+08:00（cdx 回执；WAIT 结束 10:04 分列）。memscope sha 66c04dac 已由 cdx 核对；每项 MAX=min(3GiB, MemAvailable−1GiB)；生产、参考、ASan 分别隔离；30 项串行，首红停。
 - 更正：10:08 的 begin 只是准备开始，不计作业——run.py 读 TSV 时 DictReader 漏了分隔符，首项前崩溃（KeyError flags），未执行任何一项。cdx 修好后重开矩阵，各项 begin 按实际记录（cdx 回执）。
+- §24 首红（cdx 回执，实际跑过）：实际首项 begin 10:07:47.937+08:00；前 19/30 项生产/独立参考/ASan 均 rc0 且同字节。第 20 项 modeljob:warnparse（parse2 --warnings --errors），begin 10:13:20.882，生产 rc137：子组 max=peak=2065084416 B（1969 MiB），oom_kill +1，time RSS 2008560 KiB，7.97 s。OOM 峰只是下界，非 PASS；已停，未加上限、未重试；该项参考/ASan 与后 10 项 NOT_RUN。gen 源 b802e4f2 未变，O2 二进制 f997b25d。证据 /tmp/cdx38-freeze-matrix/（results.tsv、19-production.log）。
+- 首红定位（cc，只读）：tests/seedmemory.py 既有证据记 warnparse 生产 RSS 2135 MiB，高于本次上限 1969 MiB——上限按 min(3GiB, MemAvailable−1GiB) 取，当时宿主 MemAvailable 约 2.9 GiB（16 GiB 总量，大部分被会话外的 ChatGPT/chrome/node 等进程占用）。即上限低于已知需求，不是生成器回归的证据；但新 gen.c 下的真实峰值仍未知。需要宿主可用内存 ≥ 约 3.7 GiB（上限 ≥ 2.7 GiB 留 1 GiB 余量）才能按既定口径测该项，待裁。
