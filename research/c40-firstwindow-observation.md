@@ -45,3 +45,4 @@
 - stage log（run tfw-213955，按 id 配对，同 boot）：5 对齐——queue 4.584 s rc 142、setup、wait-begin/end reason=gatequeue-alive 0.065 s、window-1 4.105 s rc 142、backup。
 - 证据：/tmp/cc40-prep/timerfirstwin（run.log、fixture/、stage-pairs.txt、run-id）。
 - 边界：窗口主体是夹具（sleep），不是真实 gate 套件；首次 f31e76b3 的证据 run 在启动计数改为追加式之前，以本次 f988066a 为准。21:02 首窗卡住的进程仍 UNKNOWN；BSD ps argv 非无损照列。
+- 更正与补记（cdx 21:4x）：外层 native bound 超时同样返回 142，不是 124；所以“内层”不能靠退出码区分，依据是用时（queue 4.584 s、window 4.105 s，外层上限 50 s 未触及）和夹具记下的父进程 `bound.py 4`。夹具输出里的 `fatal: not a git repository` 与 `REALPROG_CACHE=//corpus` 来自 queue.sh 在非 git 夹具工作树里取 corpus 路径，属夹具诊断噪声；本节不是完整产品首窗，也不证明无残留进程。
