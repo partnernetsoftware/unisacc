@@ -116,7 +116,9 @@ with tempfile.TemporaryDirectory() as td:
     # full038c: memory-heavy suites never overlap each other; light jobs still fill the other slots
     code2='import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.write_text(str(time.monotonic())); time.sleep(float(sys.argv[2])); p.with_suffix(".end").write_text(str(time.monotonic()))'
     jobs={n:[sys.executable,'-c',code2,str(t/n),d] for n,d in [('h1','0.6'),('h2','0.6'),('l1','0.1'),('l2','0.1')]}
+    _real_mem=q.mem_available_mib; q.mem_available_mib=lambda: 16000   # heavy exclusion only, not live memory (ver038: real load held the light jobs)
     assert run('heavy',55,('--jobs','4','--heavy-suite','h1','--heavy-suite','h2'))==0
+    q.mem_available_mib=_real_mem
     a1,a2=float((t/'h1').read_text()),float((t/'h2').read_text()); e1,e2=float((t/'h1.end').read_text()),float((t/'h2.end').read_text())
     assert a2>=e1 or a1>=e2, 'two heavy suites overlapped'
     assert float((t/'l1').read_text()) < max(e1,e2), 'light jobs waited for the heavy ones'
@@ -150,7 +152,10 @@ with tempfile.TemporaryDirectory() as td:
     # a booking is held until the job exits, however late it allocates (no time-based release)
     jobs={n:[sys.executable,'-c',code2,str(t/n),'2.5'] for n in ('b1','b2')}
     q.mem_available_mib=lambda: 1000            # room for one floor only
-    run('held',55,('--jobs','4','--parent-deadline',str(_t.monotonic()+8)))
+    (t/'held-hist').mkdir()
+    with patch.dict(os.environ,{'TMPDIR':str(t/'held-hist')}):   # private history: no estimate left by earlier runs
+        for _ in range(3):
+            if run('held',55,('--jobs','4','--parent-deadline',str(_t.monotonic()+8)))!=75: break
     s1,s2=(float((t/n).read_text()) for n in ('b1','b2')); e1=float((t/('b1' if s1<s2 else 'b2')).with_suffix('.end').read_text())
     assert max(s1,s2) >= e1, 'second job started before the first released its booking'
     # the real reading parses on this host (meminfo and, where limited, the cgroup path)
