@@ -44,15 +44,14 @@
  * of a step that is known to work.
  *
  * unisacc limits honoured (SKILL.md §2): no `return f()` of a struct from a
- * non-main function; stdio stays in the CLI. Types are restated, not shared, so
- * that this module compiles on its own: unisacc can see a type an EARLIER file
- * on the command line defined, but that is order-dependent.
+ * non-main function; stdio stays in the CLI. jvalue and the json prototypes come
+ * from json.h (-include in csih.sh), never restated here.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ── restated declarations (so this file compiles alone) ─────────────────── */
+/* ── module types ─────────────────────────────────────────────────────── */
 
 typedef struct {
     int  ok; int err; int status; long body_bytes; int chunked;

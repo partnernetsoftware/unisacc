@@ -24,8 +24,8 @@
  * reads.
  *
  * unisacc limits honoured here (SKILL.md §2, and each one was measured):
- *   - every struct is restated below, so this file compiles on its own
- *     (unisacc can see an earlier file's type, but that is order-dependent)
+ *   - jvalue and the json prototypes come from json.h (-include in csih.sh);
+ *     nothing from json is restated here
  *   - `return f()` where f returns a struct is rejected from a non-main
  *     function: assign to a local first
  *   - the entry points here take `const char *` and stdio stays local, which
