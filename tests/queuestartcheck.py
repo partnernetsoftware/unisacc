@@ -55,10 +55,12 @@ try:
     for i, bad in enumerate(('0', '"s"', 'true', '{}', '{"artifact_sha256": 5}', '{"artifact_sha256": null}')):   # scalar / missing / mistyped field
         Q = T / ('q14m%d' % i); Q.mkdir(); (Q / 'start-receipt.json').write_text(bad); before = tree(Q); rc, out = run(Q, B, D, 'resume')
         if rc != 2 or tree(Q) != before: fail('receipt %s resumed: %s' % (bad, out))
+        if 'REFUSED' not in out: fail('receipt %s refusal not reported: %s' % (bad, out))
     for i, bad in enumerate(('0', '"s"', '{}', '{"artifact_sha256": 5}')):
         bb = T / ('b-build-%d' % i); shutil.copytree(B, bb); (bb / 'unisacc-next.com.build.json').write_text(bad)
         Q = T / ('q15m%d' % i); rc, out = run(Q, bb, D, 'resume')
         if rc != 2 or Q.exists(): fail('build.json %s not refused: %s' % (bad, out))
+        if 'REFUSED resume' not in (bb / 'start-refusals.log').read_text(): fail('build.json %s refusal not logged' % bad)
     b = T / 'b-null-build'; shutil.copytree(B, b); (b / 'unisacc-next.com.build.json').write_text('null')
     Q = T / 'q15'; rc, out = run(Q, b, D, 'resume')
     if rc != 2 or Q.exists() or 'REFUSED' not in (b / 'start-refusals.log').read_text(): fail('null build.json not refused: %s' % out)
@@ -87,6 +89,6 @@ try:
     if os.geteuid() != 0 and (rc != 2 or Q.exists() or (T / 'q6.resume-tmp').exists()): fail('failed copy left a half state: %s' % out)
     # an unknown mode is a usage error
     if run(T / 'q7', B, D, 'auto')[0] != 2: fail('unknown mode accepted')
-    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object (array/null/scalar) or field-less/mistyped build.json/receipt and bound-receipt-plus-foreign-files refused; a failed install rename rolls back to the old Q exactly')
+    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object (array/null/scalar) or field-less/mistyped build.json/receipt (each refusal reported, build.json refusals logged) and bound-receipt-plus-foreign-files refused; a failed install rename rolls back to the old Q exactly')
 finally:
     shutil.rmtree(T, ignore_errors=True)

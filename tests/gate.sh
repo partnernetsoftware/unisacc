@@ -82,7 +82,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
-          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
+          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
           seedparse2-1|seedparse2-2|seedgen|seedgen-2|seedgen-3|seedgen-4|com-seedgen) req="native-posix|host|seed-memory:$name|cdx|fresh-memory-admission";;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
@@ -161,6 +161,7 @@ job k2b K2B_UA=${UA:-/tmp/ua_ref} python3 ./tests/k2bcheck.py   # 0.0.40 K2b: na
 job precommithook ./tests/precommithookcheck.sh   # 0.0.40-prep: local pre-commit routes shipping paths through commitgate (scratch repo)
 job queuestart ./tests/queuestartcheck.sh   # 0.0.40: default fresh refuses backup auto-restore; resume is explicit+receipt-bound (fixture)
 job queuestart-strict python3 ./tests/queuestartcheck.py   # 0.0.40: fresh refuses a live state, resume refuses malformed/foreign/unknown sources, no half copy
+job queuestart-launch ./tests/queuestartlaunchcheck.sh   # 0.0.40: the real queue.sh entry refuses a wrong start with zero window launches (fake launcher)
 job docedit python3 ./tests/doceditcheck.py   # 0.0.40: ledger appends keep the old text as an exact prefix; the 0586f01a truncating write is RED
 job whyrerun python3 ./tests/whyreruncheck.py   # 0.0.39: invalidation explainer (reasons per suite)
 job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fetch identity checks
