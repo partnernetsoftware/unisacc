@@ -1,10 +1,6 @@
-/* One UTF-8 column measure for the frame and the renderer. CJK is 2.
- * Box drawing (U+2500 and the rule glyphs) stays 1 because it is below
- * U+1100. A byte count is not a column count. static: no extra .c. */
-#ifndef CSIH_COLS_H
-#define CSIH_COLS_H
-
-static int csih_next_cp(const char *s, unsigned int *cp) {
+/* module csih.cols: provider, bodies from csih_cols.h, static removed */
+#include "csih_cols_pub.h"
+int csih_next_cp(const char *s, unsigned int *cp) {
     unsigned char c;
     int need = 1, i;
     if (!s || !s[0]) return 0;
@@ -22,8 +18,7 @@ static int csih_next_cp(const char *s, unsigned int *cp) {
     }
     return need;
 }
-
-static int csih_cp_cols(unsigned int cp) {
+int csih_cp_cols(unsigned int cp) {
     if (cp < 0x1100) return 1;
     if (cp <= 0x115f) return 2;
     if (cp >= 0x2e80 && cp <= 0xa4cf) return 2;
@@ -35,5 +30,3 @@ static int csih_cp_cols(unsigned int cp) {
     if (cp >= 0x1f300 && cp <= 0x1f9ff) return 2;
     return 1;
 }
-
-#endif

@@ -11,7 +11,7 @@ if [ $# -eq 0 ]; then
 fi
 exec /bin/sh "$UNI" \
     csih.c \
-    render.c term.c chat.c clock.c tools.c \
+    render.c term.c chat.c clock.c tools.c cols.c \
     file.c shell.c edit.c gate.c json.c session.c \
     agent.c plugin.c net.c \
     "$@"
