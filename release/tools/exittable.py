@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """exittable: one release exit table from a queue state (0.0.38 P1).
 
-  exittable.py STATE_DIR [--h1 archive/plans/v0.0.38.md] [--json]
+  exittable.py STATE_DIR [--h1 PATH] [--json]
+
+  --h1 is optional and must be the table this version's plan settles (own row or H1-INHERIT);
+  another path (including an older plan) is refused -- not a bypass.
 
 Sorts every non-PASS result of STATE_DIR/results.json into the pre-authorised classes of
 release/preauth.tsv: UNVERIFIED_HOST (rc 77), OUTER_INTERRUPTED (status INTERRUPTED),
@@ -95,14 +98,22 @@ def classify(name, r, log, h1, rules=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('state'); ap.add_argument('--h1', help="default: this version's plan settles it (h1source: own row or H1-INHERIT)"); ap.add_argument('--root', default=str(ROOT), help=argparse.SUPPRESS); ap.add_argument('--json', action='store_true')
+    ap.add_argument('state'); ap.add_argument('--h1', help="optional: must match this version's settled table (h1source: own row or H1-INHERIT); not a bypass"); ap.add_argument('--root', default=str(ROOT), help=argparse.SUPPRESS); ap.add_argument('--json', action='store_true')
     ap.add_argument('--rulings', default=str(ROOT / 'release/rulings.tsv'))
     a = ap.parse_args(argv)
-    if a.h1 is None:   # 0.0.40 (机房主任 22:53 E): the default follows the version's own declaration, never a fixed old plan
-        spec = importlib.util.spec_from_file_location('h1source', pathlib.Path(__file__).resolve().parent / 'h1source.py')
-        H = importlib.util.module_from_spec(spec); spec.loader.exec_module(H)
-        try: a.h1 = str(pathlib.Path(a.root) / H.resolve(a.root)[1])
-        except H.Refused as e: print('exittable: no H1 table for this version -- %s' % e, file=sys.stderr); return 2
+    # 0.0.40 (机房主任 22:53 E / 23:15): settle from the version's declaration first; --h1 may only name that same table
+    spec = importlib.util.spec_from_file_location('h1source', pathlib.Path(__file__).resolve().parent / 'h1source.py')
+    H = importlib.util.module_from_spec(spec); spec.loader.exec_module(H)
+    try: kind, rel, _host = H.resolve(a.root)
+    except H.Refused as e: print('exittable: no H1 table for this version -- %s' % e, file=sys.stderr); return 2
+    settled = (pathlib.Path(a.root) / rel).resolve()
+    if a.h1 is None:
+        a.h1 = str(settled)
+    else:
+        got = pathlib.Path(a.h1).expanduser().resolve()
+        if got != settled:   # 机房主任 23:15: reject --h1 that disagrees with own row / H1-INHERIT (no old-plan bypass)
+            print('exittable: --h1 %s is not this version\'s H1 table (%s via %s); pointing --h1 at another plan is not a bypass' % (a.h1, rel, kind), file=sys.stderr); return 2
+        a.h1 = str(settled)
     if not pathlib.Path(a.h1).is_file():   # 0.0.40-prep (机房主任 18:33): fail closed before reading any state
         print('exittable: H1 table %s does not exist (archived plans live under archive/plans/)' % a.h1, file=sys.stderr); return 2
     st = pathlib.Path(a.state); data = json.loads((st / 'results.json').read_text())
