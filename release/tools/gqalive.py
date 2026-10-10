@@ -23,7 +23,8 @@ def table():
         for p in os.listdir('/proc'):
             if not p.isdigit(): continue
             try: raw = open('/proc/%s/cmdline' % p, 'rb').read()
-            except OSError: continue          # exited meanwhile, or not ours to read
+            except (FileNotFoundError, ProcessLookupError): continue   # exited meanwhile
+            # any other read error (permission, I/O) is UNKNOWN, never "no gatequeue": it propagates to exit 2
             rows.append((int(p), [a.decode(errors='replace') for a in raw.split(b'\0') if a]))
         return rows
     out = subprocess.run(['ps', '-axo', 'pid=,args='], capture_output=True, text=True, timeout=10)

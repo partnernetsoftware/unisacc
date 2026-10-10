@@ -82,8 +82,11 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
     # command text merely mentions it -- a caller's shell script naming gatequeue.py made this loop wait on
     # its own ancestor until the outer bound killed the window (first-window observation, 21:02)
     python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?
-    [ "$g" = 2 ] && { echo "queue: cannot read the process table; not starting a window beside an unknown gatequeue"; exit 2; }
-    [ "$g" = 0 ] || break
+    case $g in
+      0) ;;          # a gatequeue is running: wait
+      1) break;;     # none: start the window
+      *) echo "queue: gqalive.py exit $g (process table unknown); not starting a window beside an unknown gatequeue"; exit 2;;
+    esac
     [ "$k" -ge 60 ] && xargs kill < "$D/.gq" 2>/dev/null
     sleep 2
   done

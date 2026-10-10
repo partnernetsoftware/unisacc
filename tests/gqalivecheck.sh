@@ -21,4 +21,17 @@ for mode in proc ps; do
 done
 mkdir -p "$T/shim"; printf '#!/bin/sh\nexit 1\n' > "$T/shim/ps"; chmod +x "$T/shim/ps"
 GQALIVE_TABLE=ps PATH="$T/shim:$PATH" python3 "$R/release/tools/gqalive.py" >/dev/null 2>&1; [ $? = 2 ] || fail "an unreadable process table was not exit 2"
-echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2"
+# queue.sh accepts only 0 (running) and 1 (none) from the helper: 2, 127, 137 refuse the window (helper stubbed)
+mkdir -p "$T/q/release/tools" "$T/q/tests"; cp "$R/release/tools/queue.sh" "$T/q/release/tools/"
+for f in queuestart.py queuestart.sh installpair.sh stagelog.py; do cp "$R/release/tools/$f" "$T/q/release/tools/"; done
+(cd "$T/q" && git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m b)
+D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests" "$T/seed"; printf c > "$D/unisacc-next.com"; printf s > "$T/seed/unisacc-seed.com"
+printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
+printf '#!/bin/sh\nexit 0\n' > "$T/ua"; chmod +x "$T/ua"; printf '#!/bin/sh\necho x >> "%s/launched"\nexit 0\n' "$T" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
+for code in 2 127 137; do
+  printf 'import sys\nsys.exit(%s)\n' "$code" > "$T/q/release/tools/gqalive.py"; rm -f "$T/launched"
+  env -u QUEUE_START STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/qs$code" QUEUE_BACKUP="$T/qb$code" QUEUE_WINDOWS=1 UNISACC_FFI_X86_PROVIDER=/x \
+    bash "$T/q/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
+  [ "$rc" = 2 ] && [ ! -e "$T/launched" ] || fail "helper exit $code: queue rc=$rc, launched=$([ -e "$T/launched" ] && echo yes || echo no) $(cat "$T/out")"
+done
+echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2; queue.sh refuses the window on helper exit 2/127/137"
