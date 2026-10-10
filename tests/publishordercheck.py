@@ -47,6 +47,7 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
                           'owner-promotion': {'authority': 'mock owner'}}}
         for key, value in drop.items():
             if key == 'version': rec['version'] = value
+            elif key == 'pending': rec['pending'] = value
             else: rec['courts'][key.replace('_', '-')] = value
         path = work / ('acc-%d.json' % len(list(work.glob('acc-*.json'))))
         path.write_text(json.dumps(rec))
@@ -65,7 +66,8 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
                 acceptance('true', expected, version='9.9.9'),
                 acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'failure'}),
                 acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': '2' * 64}),
-                acceptance('true', expected, owner_promotion={})):
+                acceptance('true', expected, owner_promotion={}),
+                acceptance('true', expected, pending=[{'item': 'gate-infra', 'state': 'PENDING'}])):
         result, rows = run(expected, bad)
         assert result.returncode != 0 and 'refused' in result.stdout, (bad, result.stdout)
         assert not rows, (bad, rows)
@@ -79,4 +81,4 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     deleted = next(i for i, row in enumerate(rows) if 'delete-asset' in row)
     published = next(i for i, row in enumerate(rows) if 'release edit' in row)
     assert checked < deleted < published, rows
-print('publish order: ineligible/other-bytes/missing/minimal/wrong-tag/failed-court/other-court-bytes/unauthorised-promotion acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')
+print('publish order: ineligible/other-bytes/missing/minimal/wrong-tag/failed-court/other-court-bytes/unauthorised-promotion/pending-item acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')

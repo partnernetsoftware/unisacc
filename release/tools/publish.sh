@@ -25,6 +25,8 @@ for court in ('six-native-cells-final-bytes','windows-defender-final-bytes'):
 s=c.get('six-native-cells-final-bytes',{}).get('cells_public_sha256')
 if s is not None and s!=want: no('six-native court tested other bytes')
 if not (c.get('owner-promotion') or {}).get('authority'): no('owner-promotion has no named authority')
+open_items=[x.get('item') for x in d.get('pending',[]) if x.get('state')!='RESOLVED']
+if open_items: no('acceptance receipt has pending items: %s' % ', '.join(map(str,open_items)))
 PY
 have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || exit 1
 case " $have " in *" unisacc.com "*) ;; *) echo "refused: no signed unisacc.com on $TAG yet"; exit 1;; esac
