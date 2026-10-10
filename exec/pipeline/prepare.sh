@@ -10,7 +10,9 @@ b() { "$_BOUND" 60 "$@"; }
 b "${EXEC_CC:-cc}" -O2 -o "$OUT/run" exec/c/run.c
 b python3 exec/build/gen.py lex "$OUT/e1.json" --typed
 b python3 exec/build/gen.py parse2 "$OUT/e3.json"
-b python3 exec/build/gen.py opt "$OUT/e4.json" --o2
+# 0.0.40 K5-1f (机房主任 03:43): opt δ through exec/opt/gen-delta.sh, sharing the private seed-gen cache with the pp
+# step below (opt runs first and builds seed-gen cold; pp then uses the same keyed binary)
+b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/opt/gen-delta.sh" "$OUT/e4.json" --o2
 b python3 exec/build/gen.py prune "$OUT/prune.json"
 case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
 case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=enc/arm;; *) ARCHFLAG=; ENCODER=enc;; esac
