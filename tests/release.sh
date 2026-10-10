@@ -24,9 +24,16 @@ esac
 # be a contract-layer suite of the --com plan (no product cache, so no warm-up), the run never writes RELEASE_OUT, a
 # formal run refuses its state, and a completed observation exits 65 (not 0/1/2/3/4/75/142).
 OBS=${RELEASE_SUITES:-}
-if [ -n "$OBS" ]; then
-    obs_names=$(printf '%s\n' $OBS | sort -u)
-    [ "$(printf '%s\n' $OBS | wc -l)" = "$(printf '%s\n' "$obs_names" | wc -l)" ] || { echo "release: RELEASE_SUITES repeats a name" >&2; exit 66; }
+if [ -n "$OBS" ]; then   # queue.sh always passes RELEASE_SUITES; only an empty string is a formal run
+    case $RELEASE_SUITES in *$'\n'*|*$'\r'*) echo "release: RELEASE_SUITES spans lines; one line of names only" >&2; exit 66;; esac
+    read -r -a obs_arr <<< "$RELEASE_SUITES"   # split on blanks only: no glob expansion
+    [ ${#obs_arr[@]} -gt 0 ] || { echo "release: RELEASE_SUITES is blank: it names no suite (an observation never widens to the full plan)" >&2; exit 66; }
+    for n in "${obs_arr[@]}"; do
+        [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "release: RELEASE_SUITES name '$n' is not a plain suite name" >&2; exit 66; }
+    done
+    obs_names=$(printf '%s\n' "${obs_arr[@]}" | sort -u)
+    [ "${#obs_arr[@]}" = "$(printf '%s\n' "$obs_names" | wc -l | tr -d ' ')" ] || { echo "release: RELEASE_SUITES repeats a name" >&2; exit 66; }
+    OBS=$obs_names
     plan=$("$R/tests/gate.sh" --list --com 2>/dev/null) || { echo "release: cannot list the --com plan" >&2; exit 66; }
     for n in $obs_names; do
         printf '%s\n' "$plan" | grep -qxF "$n" || { echo "release: RELEASE_SUITES names $n, not in the --com plan" >&2; exit 66; }
@@ -34,6 +41,14 @@ if [ -n "$OBS" ]; then
         [ "$layer" = contract ] || { echo "release: RELEASE_SUITES names $n (layer $layer); an observation runs contract-layer suites only" >&2; exit 66; }
     done
     [ -z "${RELEASE_OUT:-}" ] || { echo "release: an observation never writes RELEASE_OUT" >&2; exit 66; }
+    # a state is either formal or one named observation: never cross-continued, never re-scoped in place
+    if [ -f "${GATE_STATE:-/nonexistent}/observation.json" ]; then
+        was=$(python3 -c 'import json,sys; print("\n".join(sorted(json.load(open(sys.argv[1]))["suites"])))' "$GATE_STATE/observation.json" 2>/dev/null) \
+            || { echo "release: $GATE_STATE/observation.json is unreadable; not continued" >&2; exit 66; }
+        [ "$was" = "$obs_names" ] || { echo "release: $GATE_STATE observed ($(echo $was)), not ($(echo $obs_names)); an observation is never re-scoped" >&2; exit 66; }
+    elif [ -e "${GATE_STATE:-/nonexistent}/results.json" ] || [ -e "${GATE_STATE:-/nonexistent}/head" ]; then
+        echo "release: $GATE_STATE holds a formal run; an observation never continues it" >&2; exit 66
+    fi
 elif [ -f "${GATE_STATE:-/nonexistent}/observation.json" ]; then
     echo "release: $GATE_STATE holds an observation run; a formal run never continues it" >&2; exit 66
 fi
@@ -126,6 +141,11 @@ if [ -n "$OBS" ]; then
     i=0; while [ $i -lt ${#exclusive[@]} ]; do f=${exclusive[$i]}; v=${exclusive[$((i+1))]}; i=$((i+2))
         printf '%s\n' $obs_names | grep -qxF "$v" && kept+=("$f" "$v"); done
     exclusive=(${kept[@]+"${kept[@]}"})
+    # the scheduler's own view of the selection must be exactly the named suites, before anything runs
+    got=$(env -u RELEASE_SUITES python3 "$R/tests/gatequeue.py" --com --list-selection "${sel[@]}" 2>&1); lrc=$?
+    [ "$lrc" = 0 ] || { echo "release: the scheduler refused the observation selection (rc $lrc): $got" >&2; exit 66; }
+    got=$(printf '%s\n' "$got" | sort -u)
+    [ "$got" = "$obs_names" ] || { echo "release: scheduler selection ($(echo $got)) != named ($(echo $obs_names))" >&2; exit 66; }
 fi
 env -u RELEASE_DEADLINE -u STAGELOG_RUN -u STAGELOG_PARENT -u RELEASE_SUITES python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 ${exclusive[@]+"${exclusive[@]}"} ${sel[@]+"${sel[@]}"} "${deadline[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}

@@ -22,5 +22,5 @@
 - stage log（~/.unisacc/stagelog/events.jsonl，run fwprobe2，boot_id 9122943e…）：8 个 begin 全部有对应 end，end 的单调时钟均不早于 begin。分别是：queue（rc 65）、setup、window-1（rc 65）、release-checks、prologue、jobs、epilogue、backup。另有一对 wait-begin/wait-end（gatequeue-alive），用时 0.06 s。
 
 ## 失败与未解释项（如实保留）
-- 第一次尝试（/tmp/cc40-prep/firstwindow，STAGELOG_RUN=fw40-210213）在 21:02:13 启动：回执 fresh/restored=no 已写出，但 release-queue.log 一直为空，被外层 timeout 58 杀掉（exit 124）。随后同一命令再跑两次（STAGELOG_RUN=0 一次，stage log 打开一次）都在约 2 s 内完成，rc 65。首次的阻塞点**未定位**，记为 UNKNOWN：可能停在 gatequeue-alive 等待循环里（当时宿主上可能有别的 gatequeue），但没有证据。
+- 第一次尝试（/tmp/cc40-prep/firstwindow，STAGELOG_RUN=fw40-210213）在 21:02:13 启动：回执 fresh/restored=no 已写出，但 release-queue.log 一直为空，被外层 timeout 58 杀掉（exit 124）。随后同一命令再跑两次（STAGELOG_RUN=0 一次，stage log 打开一次）都在约 2 s 内完成，rc 65。首次的阻塞点后经 stage log 定位（21:1x 补记）：run fw40-210213 只有 queue begin、setup begin 和一条 `wait-begin reason=gatequeue-alive`（13:02:14Z），**没有 wait-end**，即 queue.sh 停在“宿主上另有 gatequeue.py 存活”的等待循环里（queue.sh 最多等 90×2 s），直到被外层 58 s 杀掉。当时是哪个 gatequeue 进程仍为 UNKNOWN（事后 ps 已无）。observationcheck 的一次间歇挂起（exit 142、零启动）症状相同，两次重跑均绿。
 - 本次只观察了接线。这不是产品验收，也不证明全量 queue 的行为。真实计时器下的超时首窗仍然缺。

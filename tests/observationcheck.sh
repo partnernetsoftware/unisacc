@@ -12,7 +12,10 @@ rel() {   # rel STATE [ENV...] -> rc
     "$R/tests/release.sh" --com > "$T/out" 2>&1; echo $?
 }
 noscheduler() { [ ! -e "$1/results.json" ]; }
-for c in "unknown:checkrun no-such-suite" "pipeline:checkrun difftest_o-1" "repeat:checkrun checkrun" ; do
+S=$T/s-newline; rc=$(rel "$S" RELEASE_SUITES="checkrun
+../bad"); [ "$rc" = 66 ] && noscheduler "$S" || fail "a second line of names was ignored: rc=$rc $(cat "$T/out")"
+S=$T/s-cr; rc=$(rel "$S" RELEASE_SUITES="$(printf 'checkrun\r')"); [ "$rc" = 66 ] || fail "a CR in RELEASE_SUITES accepted: rc=$rc"
+for c in "unknown:checkrun no-such-suite" "pipeline:checkrun difftest_o-1" "repeat:checkrun checkrun" "blank:   " "glob:check*" "glob2:docedit ?heckrun" "path:../checkrun" ; do
   name=${c%%:*}; suites=${c#*:}; S=$T/s-$name
   rc=$(rel "$S" RELEASE_SUITES="$suites"); [ "$rc" = 66 ] && noscheduler "$S" || fail "$name scope not refused before scheduling: rc=$rc $(cat "$T/out")"
 done
@@ -20,4 +23,21 @@ S=$T/s-out; rc=$(rel "$S" RELEASE_SUITES="checkrun" RELEASE_OUT="$T/out-dir"); [
 S=$T/s-formal; mkdir -p "$S"; printf '{"observation": true}\n' > "$S/observation.json"
 rc=$(rel "$S"); [ "$rc" = 66 ] && noscheduler "$S" || fail "a formal run continued an observation state: rc=$rc $(cat "$T/out")"
 grep -q 'never continues it' "$T/out" || fail "formal refusal not explained"
-echo "observation  unknown/non-contract/repeated RELEASE_SUITES, RELEASE_OUT with an observation and a formal run on an observation state all exit 66 before any scheduling"
+# the other direction: an observation never continues a formal state, and never re-scopes an observation state
+S=$T/s-formal2; mkdir -p "$S"; printf '{"stamp":{},"jobs":{"x":["y"]},"results":{"x":{"rc":0}}}\n' > "$S/results.json"; before=$(cd "$S" && shasum -a 256 * | sort)
+rc=$(rel "$S" RELEASE_SUITES="checkrun"); [ "$rc" = 66 ] && [ "$(cd "$S" && shasum -a 256 * | sort)" = "$before" ] && [ ! -e "$S/observation.json" ] || fail "an observation continued a formal state: rc=$rc $(cat "$T/out")"
+S=$T/s-rescope; mkdir -p "$S"; printf '{"observation": true, "suites": ["checkrun"], "acceptance": false}\n' > "$S/observation.json"; before=$(cd "$S" && shasum -a 256 * | sort)
+rc=$(rel "$S" RELEASE_SUITES="checkrun docedit"); [ "$rc" = 66 ] && [ "$(cd "$S" && shasum -a 256 * | sort)" = "$before" ] || fail "an observation state was re-scoped: rc=$rc $(cat "$T/out")"
+S=$T/s-badobs; mkdir -p "$S"; printf 'not json' > "$S/observation.json"; rc=$(rel "$S" RELEASE_SUITES="checkrun"); [ "$rc" = 66 ] || fail "an unreadable observation.json was continued: rc=$rc"
+# queue.sh: 65 (completed observation) and 66 (refused observation) end the queue after one window -- never the
+# 75/142 continue path, never read as a pass by the window loop (fake window launcher, real queue.sh)
+_BOUND=$("$R/tests/bound" --helper) || { echo "observation: need tests/bound"; exit 2; }
+D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests"; printf c > "$D/unisacc-next.com"
+printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
+for want in 65 66; do
+  printf '#!/bin/sh\necho x >> "%s/launches-%s"\nexit %s\n' "$T" "$want" "$want" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
+  env -u QUEUE_START STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/q$want" QUEUE_BACKUP="$T/b$want" QUEUE_SUITES=checkrun QUEUE_WINDOWS=5 \
+    UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
+  [ "$rc" = "$want" ] && [ "$(wc -l < "$T/launches-$want" | tr -d ' ')" = 1 ] || fail "queue.sh on window rc $want: exit $rc, launches $(wc -l < "$T/launches-$want")"
+done
+echo "observation  unknown/non-contract/repeated/blank/glob/path-like/multi-line RELEASE_SUITES, RELEASE_OUT with an observation a formal run on an observation state, an observation on a formal state, a re-scoped or unreadable observation state all exit 66 before any scheduling, states untouched; queue.sh ends after one window on 65/66 with that rc"
