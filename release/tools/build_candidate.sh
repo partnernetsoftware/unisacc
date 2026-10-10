@@ -1,7 +1,10 @@
 #!/bin/bash
 # build_candidate.sh DIR UA -- shared, six targets, pack-prep-1..3, pack-models, pack-driver; each step bounded 58 s; stops at
 # the first failure.  UA must be a same-source reference (tests/build_ref.sh SRC OUT from this tree).
-set -u; D=${1:?candidate dir}; UA=${2:?same-source reference}; R=$(cd "$(dirname "$0")/../.." && pwd); cd "${ROOT:-$R}"; mkdir -p "$D"; D=$(cd "$D" && pwd)
+set -u; D=${1:?candidate dir}; UA=${2:?same-source reference}; R=$(cd "$(dirname "$0")/../.." && pwd); cd "${ROOT:-$R}"
+# 0.0.40 (机房主任 22:45 A): the H1 table the exit table will use is settled before anything is written or built
+python3 "$R/release/tools/h1source.py" . || exit 2
+mkdir -p "$D"; D=$(cd "$D" && pwd)
 # a detached worktree has no gitignored unisacc.com / seed (the shared step runs unisacc.com): name the fix instead of exit 127
 # Only SEED_C=1 builds tbl/net with the installed product; the existing
 # Python constructor route does not read that pair (first-host bootstrap).

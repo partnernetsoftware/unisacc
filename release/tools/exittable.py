@@ -22,14 +22,22 @@ def classes():
     return out
 
 
+class H1Error(Exception): pass
+
+
 def h1_names(plan, item='H1'):
     text = pathlib.Path(plan).read_text()   # 0.0.40-prep: a missing H1 table is an error, never an empty set
-    row = next((l for l in text.splitlines() if l.startswith('| %s ' % item)), '')
+    # 0.0.40 (机房主任 22:45 C): a missing or nameless row is unknown, never an empty list; empty is '| H1 | EMPTY |'
+    rows = [l for l in text.splitlines() if l.startswith('| %s ' % item)]
+    if len(rows) != 1: raise H1Error('%s: want exactly one "| %s |" row, found %d' % (plan, item, len(rows)))
+    row = rows[0]
+    if [c.strip() for c in row.split('|')[1:3]] == [item, 'EMPTY']: return set()
     names = set(re.findall(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)+', row))
     for stem, lo, hi in re.findall(r'([a-z][a-z0-9-]*?)(\d+)\.\.(\d+)', row):     # closure-c1..4
         names |= {'%s%d' % (stem, k) for k in range(int(lo), int(hi) + 1)}
     for base in re.findall(r'([a-z][a-z0-9-]*[a-z0-9])\(\+package\)', row):        # selfelf(+package)
         names |= {base, base + '-package'}
+    if not names: raise H1Error('%s: the %s row names no suite (write "| %s | EMPTY |" for an empty table)' % (plan, item, item))
     return names | {'exec-' + n for n in names if not n.startswith(('exec-', 'lib-'))}
 
 
@@ -88,7 +96,9 @@ def main(argv=None):
     if not pathlib.Path(a.h1).is_file():   # 0.0.40-prep (机房主任 18:33): fail closed before reading any state
         print('exittable: H1 table %s does not exist (archived plans live under archive/plans/)' % a.h1, file=sys.stderr); return 2
     st = pathlib.Path(a.state); data = json.loads((st / 'results.json').read_text())
-    disp, h1, rules = classes(), h1_names(a.h1), rulings(a.rulings)
+    try: h1 = h1_names(a.h1)
+    except H1Error as e: print('exittable: %s' % e, file=sys.stderr); return 2
+    disp, rules = classes(), rulings(a.rulings)
     rows, passed = [], 0
     for name in data['jobs']:
         r = data['results'].get(name)

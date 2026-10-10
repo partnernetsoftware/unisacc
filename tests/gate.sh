@@ -82,7 +82,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
-          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|queuetimeout|gatesummary|observation|gqalive|queuetimer|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
+          hostcheck|stagelog|exittable|h1source|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|queuetimeout|gatesummary|observation|gqalive|queuetimer|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
           seedparse2-1|seedparse2-2|seedgen|seedgen-2|seedgen-3|seedgen-4|com-seedgen) req="native-posix|host|seed-memory:$name|cdx|fresh-memory-admission";;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
@@ -151,6 +151,7 @@ job hostcheck python3 ./tests/hostcheckcheck.py
 job seedmemory python3 ./tests/seedmemorycheck.py
 job stagelog python3 ./tests/stagelogcheck.py
 job exittable python3 ./tests/exittablecheck.py
+job h1source python3 ./tests/h1sourcecheck.py   # 0.0.40 (机房主任 22:45 A/C): build_candidate settles its H1 table before any write or make
 job attemptchain python3 ./tests/attemptchaincheck.py   # 0.0.39 WF5: offline attempt-chain replay
 job c99precheck python3 ./tests/c99precheckcheck.py   # 0.0.39 WF1: dynamic-route PRECHECK parsing and shard map
 job rulingwait python3 ./tests/rulingwaitcheck.py   # 0.0.39 WF4: ruling request ledger and waits
