@@ -55,3 +55,4 @@
   | seedparse2-2 | parse2 | UNKNOWN：四组复合 flags 均无映射 |
   | com-seedgen | com | UNKNOWN：COM 路线未测 |
   预期 queue 出口中 seedparse2-1/-2、com-seedgen（及冷缓存时的 gen 族）为 RESOURCE_UNKNOWN 未执行义务，按 preauth 记缺证，不自动放行、不计 PASS；扩展映射属协议改动，须另裁。
+- 候选（cc，HEAD 53fe285f，实际跑过）：build_candidate shared+六 target+pack-prep-1..3 rc0（shared 119 s）；pack-models 首次 rc2：seed/compilerpack.c `realpath` 隐式声明（glibc 严格 C99，即 H37，本版裁顺延不实现）→ 按 0.0.37 已审核路线 PATH 前置 /tmp/cdx37-host-tools/cc（sha 5c036d42，仅对 compilerpack.c 加 -D_XOPEN_SOURCE=700，产品未改；seedmemory 登记的同一启动器）仅续跑 pack-models（10 s）、pack-driver（3 s）rc0，前 10 步未重做。候选 /tmp/cc38-final/cand/unisacc-next.com sha256 ba3f40cb…，ident check verified；种子对 /tmp/cc38-final/cand/seed/unisacc-seed.com sha256 ace3c040… 7581888 B。comboot stage1→stage2→stage3→fixedpoint 进行中。
