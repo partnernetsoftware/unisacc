@@ -1,4 +1,4 @@
-# Tables as Networks: A Self-Hosting C Compiler Whose Weights Are Constructed, Not Trained
+# Tables as Networks: A Byte-for-Byte Self-Hosting C Compiler Whose Weights Are Constructed, Not Trained
 
 September 2026 · Code, weights and all evidence: this repository (Appendix A)
 
@@ -14,7 +14,7 @@ We implement the method in unisacc, a compiler for a subset of C99 targeting six
 
 **The product and our claims rely on construction, not training**; §7.3 records one illustrative historical Adam comparison only, and preregistered study A2 owns systematic training comparisons. After rules on a table change, a full deterministic reconstruction from the updated tables yields networks exact on every key again (T1)—not a proved locality theorem for single-rule edits or zero error on unrelated keys (preregistered A2 RQ2). The Adam rows did not align with construction under the limits stated in §7.3 (illustrative history under that protocol, not a width- or reachability-superiority theorem). The cost of the method is equally real: Table 4's historical rows mix two v0.0.9-era product identities (`c4993fd0…`, `c94cf5fe…`; Appendix A); summarising their per-row ratios (3.9×–16.6×) as roughly 4–17× is a cross-artifact band, not one current measurement of the network-compiler pipeline. Enumeration proves that a network equals its table, not that the table agrees with C semantics; that layer is covered only partially, by external referees.
 
-**Keywords**: neural-network-based compiler; TSV table DSL; weight construction; exact networks; exhaustive verification; finite control; self-hosting
+**Keywords**: neural-network-based compiler; TSV table DSL; weight construction; exact networks; exhaustive verification; finite control; byte-for-byte self-hosting
 
 ---
 
