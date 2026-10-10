@@ -82,7 +82,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
-          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|whyrerun|draftfetch) req='any|host|python3|cdx|selfcheck';;
+          hostcheck|stagelog|exittable|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
           seedparse2-1|seedparse2-2|seedgen|seedgen-2|seedgen-3|seedgen-4|com-seedgen) req="native-posix|host|seed-memory:$name|cdx|fresh-memory-admission";;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
@@ -159,6 +159,7 @@ job checkrun ./tests/checkruncheck.sh   # 0.0.39: check status never taken from 
 job commitgate ./tests/commitgatecheck.sh   # 0.0.39: red gate leaves no commit (scratch repo)
 job whyrerun python3 ./tests/whyreruncheck.py   # 0.0.39: invalidation explainer (reasons per suite)
 job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fetch identity checks
+job draftguard python3 ./tests/draftguardcheck.py   # 0.0.39 R3: workflow draft-input guard executed
 job warmup ./tests/warmupcheck.sh   # 0.0.38: warm-up markers only for a built cache; COLD named
 job installpair ./tests/installpaircheck.sh   # 0.0.38: queue root pair = comboot's reinstall when same origin
 for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
