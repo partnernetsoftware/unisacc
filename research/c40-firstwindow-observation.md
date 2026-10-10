@@ -32,6 +32,6 @@
 - 回执：mode=fresh、restored=no、source=none、artifact 2b20f4b2…；“backup … left untouched (backup not read)”。
 - release.sh：“OBSERVATION ONLY (checkrun docedit queuestart-strict); warm-ups skipped …; not acceptance”。
 - 逐项：START×3；DONE checkrun rc=0（0.10 s）、docedit rc=0（0.25 s）、queuestart-strict rc=0（1.11 s）；queue: 3/3 completed；window 1 rc=65、final rc=65，“OBSERVATION ONLY … not acceptance; release NOT ready (rc 65)”；observation.json acceptance=false。
-- stage log（run fw4-212610，按 id 配对，同 boot_id）：9 个 begin 全部有 end——queue（4.328 s，rc 65）、setup（0.55 s）、**wait-begin/wait-end reason=gatequeue-alive（13:26:11Z→13:26:11Z，0.066 s）**、window-1（3.492 s，rc 65）、release-checks、prologue、jobs（1.113 s）、epilogue、backup。
+- stage log（run fw4-212610，按 id 配对，同 boot_id）：共 9 对全部配齐（8 个阶段 begin/end + 1 对 wait-begin/wait-end）——queue（4.328 s，rc 65）、setup（0.55 s）、**wait-begin/wait-end reason=gatequeue-alive（13:26:11Z→13:26:11Z，0.066 s）**、window-1（3.492 s，rc 65）、release-checks、prologue、jobs（1.113 s）、epilogue、backup。
 - 证据：/tmp/cc40-prep/firstwindow4（run.log、state/、stage-pairs.txt、run-id）。
 - 仍单列：真实计时器触发的超时首窗；BSD ps 按空白切分 argv 非无损；21:02 首窗卡住的进程 UNKNOWN。firstwindow3 不作为本节证据。
