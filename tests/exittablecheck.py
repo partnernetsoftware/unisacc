@@ -41,4 +41,27 @@ with tempfile.TemporaryDirectory() as m:
         (mt / 'p.md').write_text(text); out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err): rc = X.main([str(mt), '--h1', str(mt / 'p.md')])
         assert (rc or 0) == want and (want == 0 or (out.getvalue() == '' and 'H1' in err.getvalue())), (text, rc, out.getvalue(), err.getvalue())
-print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass; missing H1 table (and the pre-archive default) rc 2, archived table accepted; missing/nameless/duplicate/malformed or unclosed H1 row and EMPTY beside other cells rc 2, only \'| H1 | EMPTY |\' is empty')
+# 0.0.40 (机房主任 22:53 E): with no --h1 the table is the one this version's plan settles (own row or H1-INHERIT),
+# never a fixed old plan; no declaration or a broken one is rc 2 before any state is read
+import hashlib
+with tempfile.TemporaryDirectory() as m:
+    r = pathlib.Path(m); (r / 'src').mkdir(); (r / 'plans').mkdir(); (r / 'archive/plans').mkdir(parents=True); (r / 'q').mkdir()
+    (r / 'q/results.json').write_text(json.dumps({'jobs': {'tools-2': 1}, 'results': {'tools-2': {'rc': 142, 'seconds': 40, 'limit': 40}}}))
+    (r / 'q/tools-2.log').write_text('timeout\n')
+    old = '| H1 | 超时：tools-2 | cc | x | 0 |\n'; (r / 'archive/plans/v0.0.38.md').write_text(old)
+    def run(version, plan):
+        (r / 'src/version.h').write_text('#define UNISACC_VERSION "%s"\n' % version)
+        for f in (r / 'plans').iterdir(): f.unlink()
+        if plan is not None: (r / ('plans/v%s.md' % version)).write_text(plan)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err): rc = X.main([str(r / 'q'), '--root', str(r), '--json'])
+        return rc or 0, out.getvalue(), err.getvalue()
+    sha = hashlib.sha256(old.encode()).hexdigest()
+    rc, out, err = run('0.0.40', 'H1-INHERIT: archive/plans/v0.0.38.md sha256=%s host=h\n' % sha)
+    assert rc == 0 and json.loads(out)['rows'][0]['cls'] == 'HOST_TIMEOUT', (rc, out, err)     # the inherited table is used
+    rc, out, err = run('0.0.41', '| H1 | EMPTY |\n')
+    assert rc == 0 and json.loads(out)['rows'][0]['cls'] == 'NEEDS_RULING', (rc, out, err)     # an own empty table: not H1
+    for plan in ('# no declaration\n', None, 'H1-INHERIT: archive/plans/v0.0.38.md sha256=%s host=h\n' % ('0' * 64), '| H1 | tools-2\n'):
+        rc, out, err = run('0.0.40', plan)
+        assert rc == 2 and out == '' and 'no H1 table for this version' in err, (plan, rc, out, err)
+print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass; missing H1 table (and the pre-archive default) rc 2, archived table accepted; missing/nameless/duplicate/malformed or unclosed H1 row and EMPTY beside other cells rc 2, only \'| H1 | EMPTY |\' is empty; no --h1 = this version\'s own row or H1-INHERIT, none/broken rc 2')

@@ -9,7 +9,7 @@ TOOL_MISSING (the log names a missing tool/headers), HOST_TIMEOUT (rc 142 and th
 in the plan's H1 row), NEEDS_RULING (all else).  Pending suites are listed as PENDING.  PASS, the
 counts and the classes stay separate: an accepted class is not a pass.  Read-only.
 """
-import argparse, json, pathlib, re, sys
+import argparse, importlib.util, json, pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TOOL = re.compile(r'(not found|no such file or directory: .*(csmith|clang|zig|lld))', re.I)
 
@@ -95,9 +95,14 @@ def classify(name, r, log, h1, rules=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('state'); ap.add_argument('--h1', default=str(ROOT / 'archive/plans/v0.0.38.md')); ap.add_argument('--json', action='store_true')
+    ap.add_argument('state'); ap.add_argument('--h1', help="default: this version's plan settles it (h1source: own row or H1-INHERIT)"); ap.add_argument('--root', default=str(ROOT), help=argparse.SUPPRESS); ap.add_argument('--json', action='store_true')
     ap.add_argument('--rulings', default=str(ROOT / 'release/rulings.tsv'))
     a = ap.parse_args(argv)
+    if a.h1 is None:   # 0.0.40 (机房主任 22:53 E): the default follows the version's own declaration, never a fixed old plan
+        spec = importlib.util.spec_from_file_location('h1source', pathlib.Path(__file__).resolve().parent / 'h1source.py')
+        H = importlib.util.module_from_spec(spec); spec.loader.exec_module(H)
+        try: a.h1 = str(pathlib.Path(a.root) / H.resolve(a.root)[1])
+        except H.Refused as e: print('exittable: no H1 table for this version -- %s' % e, file=sys.stderr); return 2
     if not pathlib.Path(a.h1).is_file():   # 0.0.40-prep (机房主任 18:33): fail closed before reading any state
         print('exittable: H1 table %s does not exist (archived plans live under archive/plans/)' % a.h1, file=sys.stderr); return 2
     st = pathlib.Path(a.state); data = json.loads((st / 'results.json').read_text())
