@@ -35,3 +35,13 @@
 - stage log（run fw4-212610，按 id 配对，同 boot_id）：共 9 对全部配齐（8 个阶段 begin/end + 1 对 wait-begin/wait-end）——queue（4.328 s，rc 65）、setup（0.55 s）、**wait-begin/wait-end reason=gatequeue-alive（13:26:11Z→13:26:11Z，0.066 s）**、window-1（3.492 s，rc 65）、release-checks、prologue、jobs（1.113 s）、epilogue、backup。
 - 证据：/tmp/cc40-prep/firstwindow4（run.log、state/、stage-pairs.txt、run-id）。
 - 仍单列：真实计时器触发的超时首窗；BSD ps 按空白切分 argv 非无损；21:02 首窗卡住的进程 UNKNOWN。firstwindow3 不作为本节证据。
+
+## 真实计时器超时首窗（timerfirstwin，2026-10-10 21:39；机房主任 21:38）
+
+- 树 f988066a（tests/queuetimercheck.sh），status 0。真实 release/tools/queue.sh、真实 tests/term.sh 与 tests/bound.py；只有窗口主体 tests/release.sh 是夹具：先记启动、记父进程，再 sleep 16 s（4×alarm）。
+- 限时：TERM_SH_ALARM=4（Linux 上 term.sh 直接 exec `bound.py 4 …`）；外层 native bound 50 s；生产窗口预算 55 s 未改。
+- 夹具记下的父进程：`python3 ./tests/bound.py 4 env … ./tests/release.sh --com`，说明窗口主体确由 4 s 内层看门狗托管。
+- 结果：check rc=0；queue rc=142（内层看门狗，不是外层 124：总耗时约 4–5 s，远小于外层 50 s）；窗口主体启动恰 1 次（追加式计数 1 行），从未写出“完成”标记；release-queue.log 恰一行 `window 1 rc=142`、`final rc=142`，无 failed 0/OBSERVATION ONLY/completed 等通过字样；回执 mode=fresh、restored=no、source=none；无 start-refusals.log、输出无 REFUSED。
+- stage log（run tfw-213955，按 id 配对，同 boot）：5 对齐——queue 4.584 s rc 142、setup、wait-begin/end reason=gatequeue-alive 0.065 s、window-1 4.105 s rc 142、backup。
+- 证据：/tmp/cc40-prep/timerfirstwin（run.log、fixture/、stage-pairs.txt、run-id）。
+- 边界：窗口主体是夹具（sleep），不是真实 gate 套件；首次 f31e76b3 的证据 run 在启动计数改为追加式之前，以本次 f988066a 为准。21:02 首窗卡住的进程仍 UNKNOWN；BSD ps argv 非无损照列。
