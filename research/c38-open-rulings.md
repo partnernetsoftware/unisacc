@@ -22,3 +22,10 @@
 - 机房主任代裁（Draft v0.0.39）：留作演练靶，不公开、不删，不抵签后 R3；下一刀签名演练→Draft 换签后资产→真 court；F4″ 缺 m4pro 只记缺口。
 - publish-order 已审（机房主任认戳（政委授权其决策），约 2026-10-10T15:08:00+08:00）：依据 research/c39-d233-publish-order-review.md——d23351a7 publish-order 守卫真重审材料通过。限定照审阅稿：未做真实 Draft 端到端 publish 演练；当前 tip 上 release/tools/publish.sh 与 tests/publishordercheck.py 仍为 d23351a7 字节，publishordercheck rc0。daf53c86 仍仅 hash refresh，不作重审依据；gatedeps 未重刷（guard 已对齐）。
 - R3=APPLIED（机房主任，方案 2，2026-10-10T15:19:48+08:00）：签后 0.0.38 字节 579f6525 于 Draft 408747179 六格+Defender 全绿；不抵 0.0.39 真链；Draft 不公开。
+
+## 裁定②：compilercheck src 戳 = refresh 待真审（机房主任 unisacc10m，约 16:12 CST）
+
+- f7ce5442 将 families/compilercheck/reviewed_trees/src 由 ab4be130… 刷为 18ce7e3b…（另 tape-reader version.h、三处 prd.md 守卫）；该提交自述 refresh is not review。
+- 状态：**18ce7e3b = hash refresh-only / pending 真审，不记“已审 0.0.39”**；ab4be130 为 0.0.38 已审语境。不回退、不改 gatedeps 哈希、不改验收措辞。
+- 不设“版本行变化视为已审”通例。候选同源重建（82290c17，cand 2b20f4b2）后，具名轻审材料须写明区间 src 唯一字节变化为 eec82d5a 的 src/version.h 一行 0.0.38→0.0.39，审过再报机房主任盖已审。
+- 与 B.5（16:10:29 净开）分列：queue 可续跑，其出口不代此戳已审。
