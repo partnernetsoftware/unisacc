@@ -147,3 +147,52 @@ int csih_message_finish(const char *dir,const char *session,const char *id,char 
     if(!id){cmi_why(why,cap,"invalid id");return -1;}
     return cmi_operation(dir,session,0,id,NULL,why,cap);
 }
+/* Read-only preview of notices in done/. Same validation as take/finish
+ * (cmi_open + cmi_scan), no move, no acknowledgement. Top-cap by mtime desc,
+ * id asc; the preview keeps whole UTF-8 codepoints within 256 bytes. */
+int csih_message_preview(const char *dir,const char *session,csih_message_preview_entry *out,int cap,int *total,char *why,size_t wcap) {
+    cmi_work *w=NULL;csih_message *msg=NULL;DIR *d=NULL;struct dirent *e;
+    int i,j,n=0,t=0,ok=0;
+    if(total)*total=0;
+    if(!out||cap<0||!total||!cmi_session(session)){cmi_why(why,wcap,"invalid arguments");return -1;}
+    w=calloc(1,sizeof *w);msg=malloc(sizeof *msg);
+    if(!w||!msg){cmi_why(why,wcap,"allocation failed");goto end;}
+    w->lock=-1;for(i=0;i<5;i++)w->dirs[i]=-1;
+    w->buf=malloc(32769);if(!w->buf){cmi_why(why,wcap,"allocation failed");goto end;}
+    if(cmi_open(w,dir,why,wcap)!=1)goto end;
+    if(!cmi_scan(w,session,0,why,wcap))goto end;
+    d=opendir(w->paths[4]);if(!d){cmi_why(why,wcap,"done open failed");goto end;}
+    ok=1;
+    while(1){
+        char id[33],path[4096];struct stat sb;long mtime;size_t bytes,shown;int k;
+        errno=0;e=readdir(d);if(!e){if(errno){ok=0;cmi_why(why,wcap,"done read failed");}break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(strlen(e->d_name)!=37||strcmp(e->d_name+32,".json")){ok=0;cmi_why(why,wcap,"unexpected done entry");break;}
+        memcpy(id,e->d_name,32);id[32]=0;
+        if(!cmi_id(id)||!cmi_path(path,w->paths[4],e->d_name)){ok=0;cmi_why(why,wcap,"bad done path/id");break;}
+        k=cmi_read(w,path,id,session,msg,why,wcap);
+        if(!k){ok=0;break;}
+        if(k!=2)continue;
+        if(lstat(path,&sb)!=0||!S_ISREG(sb.st_mode)||sb.st_uid!=getuid()||(sb.st_mode&07777)!=0600){ok=0;cmi_why(why,wcap,"notice stat changed");break;}
+        mtime=(long)sb.st_mtime;t++;
+        j=0;while(j<n&&(out[j].mtime>mtime||(out[j].mtime==mtime&&strcmp(out[j].id,id)<0)))j++;
+        if(j>=cap)continue;
+        if(n<cap)n++;
+        for(i=n-1;i>j;i--)out[i]=out[i-1];
+        memset(&out[j],0,sizeof out[j]);
+        strcpy(out[j].id,id);out[j].mtime=mtime;
+        bytes=strlen(msg->body);shown=bytes>256?256:bytes;
+        /* Decoder validated UTF-8; retreat to a codepoint boundary. */
+        while(shown&&shown<bytes&&(((unsigned char)msg->body[shown]&0xc0)==0x80))shown--;
+        memcpy(out[j].preview,msg->body,shown);out[j].preview[shown]=0;
+        out[j].body_bytes=bytes;out[j].truncated=shown<bytes;
+    }
+    if(d){if(closedir(d)<0&&ok){ok=0;cmi_why(why,wcap,"done close failed");}d=NULL;}
+end:
+    if(w){if(!cmi_cleanup(w)&&ok){ok=0;cmi_why(why,wcap,"mailbox close failed");}w->buf=NULL;free(w);w=NULL;}
+    free(msg);
+    if(!ok)return -1;
+    *total=t;
+    cmi_why(why,wcap,"ok");
+    return n;
+}

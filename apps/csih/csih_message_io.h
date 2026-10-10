@@ -31,4 +31,25 @@ int csih_message_finish(const char *session_dir,
                         const char *id,
                         char *why, size_t cap);
 
+/* 只读预览 inbox/done 中的 notice，供 TUI 上下文索引使用。不移动、不确认、不执行。
+ * 条目按 file mtime 降序、id 升序；mtime 不是观察时间。预览为 UTF-8，最多 256 字节，
+ * 不切断码点；body_bytes 为完整 body 字节数。 */
+typedef struct csih_message_preview_entry {
+    char id[33];
+    long mtime;
+    size_t body_bytes;
+    int truncated;
+    char preview[257];
+} csih_message_preview_entry;
+
+/* 返回写入 out 的条数（0..cap）；*total 为所有有效 notice 总数（可大于 cap）。
+ * 返回 -1 表示不可用，原因写入 why（busy 时为 "mailbox busy"）。
+ * 同 csih_message_take 的前提：仅由唯一 ACTIVE owner 调用，协作 mailbox 记录锁。 */
+int csih_message_preview(const char *session_dir,
+                         const char *expected_session,
+                         csih_message_preview_entry *out,
+                         int cap,
+                         int *total,
+                         char *why, size_t why_cap);
+
 #endif /* CSIH_MESSAGE_IO_H */
