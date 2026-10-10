@@ -96,11 +96,20 @@ for bad in ('', 'difftest_o SHARD=1/1 probes=3  agree 9   wrong 0   refuse 0   k
     assert all(x['got'] == 'unproven' and not x['ok'] for x in u.values()), (bad, u)
 # an inherited PROBES never narrows a formal run: without WF1_PRECHECK=1 difftest_o keeps the whole shard
 import os
-full = subprocess.run(['bash', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
+full = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
                       env=dict(os.environ, SH_N='4', SH_K='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
-narrow = subprocess.run(['bash', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
+narrow = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
                         env=dict(os.environ, SH_N='4', SH_K='1', WF1_PRECHECK='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
 assert int(full) > 1 and narrow == '1', (full, narrow)
+# Shell-internal failures cannot be hidden by a valid-looking final echo.
+with tempfile.TemporaryDirectory() as tmp:
+    private = pathlib.Path(tmp)
+    fake_sed = private / 'sed'
+    for body in ('#!/bin/sh\nexit 1\n', '#!/bin/sh\nprintf "false\\n"\n'):
+        fake_sed.write_text(body); fake_sed.chmod(0o755)
+        failure = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed ignored > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo 1'],
+            env=dict(os.environ, TMPDIR=str(private), PATH=str(private) + os.pathsep + os.environ['PATH']), capture_output=True, text=True)
+        assert failure.returncode == 1 and failure.stdout.strip() != '1', failure
 # shard map = the bash loop in difftest_o.sh (glob order, host skipped, i % 4)
 bash = subprocess.run(['bash', '-c', 'i=0; for f in tests/c/*.c examples/*.c; do [ "$(basename "$f" .c)" = host ] && continue; echo "$f $((i % 4 + 1))"; i=$((i+1)); done'],
                       cwd=ROOT, capture_output=True, text=True, check=True).stdout.split('\n')
