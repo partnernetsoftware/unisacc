@@ -4,10 +4,12 @@ Run after agent.c and agent_cli.c freeze. A rejected multi-exec followed by
 answer may return0; that row proves rejection/zero side effects, not honesty
 of completion or a fix to every terminal-result policy.
 """
+import os as _os, sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _flat import AGENT, GLOBAL_INCLUDES, TUI  # csih file table, one source (probes/_flat.py)
 import argparse, hashlib, json, os, pathlib, shutil, signal, subprocess, sys, tempfile, threading, time, traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 APP=pathlib.Path(__file__).resolve().parents[1];ROOT=APP.parents[1]
-SRC=['agent.c','agent_cli.c','file.c','edit.c','shell.c','json.c','session.c','net.c','plugin.c']
+SRC=AGENT
 def hashes():
     paths=sorted(p for p in APP.rglob('*') if p.suffix in ('.c','.h','.inc','.cx'))+[ROOT/'unisacc.com',pathlib.Path(__file__)]
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
@@ -82,7 +84,7 @@ def main():
             env=dict(os.environ)
             for key in ('CSIH_ROLE','CSIH_PEER','OPENAI_API_KEY','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy'):env.pop(key,None)
             env.update(NO_PROXY='127.0.0.1,localhost',no_proxy='127.0.0.1,localhost')
-            binary=root/'agent-native';build=bounded(['/bin/sh',str(compiler),'-o',str(binary),*SRC],source,env,14);result['build']=build
+            binary=root/'agent-native';build=bounded(['/bin/sh',str(compiler),*GLOBAL_INCLUDES,'-o',str(binary),*SRC],source,env,14);result['build']=build
             assert build['rc']==0 and not build['timed_out'] and not build['stderr'],build
             result['private_sources']={str(p.relative_to(source)):hashlib.sha256(p.read_bytes()).hexdigest() for p in source.rglob('*') if p.is_file()}
             for name in args.cases or list(CASES):result['cases'].append(run_case(name,CASES[name],binary,root,env,deadline))

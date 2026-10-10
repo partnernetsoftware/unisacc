@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Real private edit->agent_slice environment isolation with expected-red old control."""
+import os as _os, sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _flat import AGENT, GLOBAL_INCLUDES, TUI  # csih file table, one source (probes/_flat.py)
 import hashlib, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, tempfile, time
 APP=pathlib.Path(__file__).resolve().parents[1];ROOT=APP.parents[1]
-SOURCES='agent.c agent_cli.c file.c edit.c shell.c json.c session.c net.c plugin.c'.split()
+SOURCES=AGENT
 PREFIX='CSIH_ROLE= CSIH_PEER= exec '
 
 def hashes():
@@ -62,7 +64,7 @@ def main():
             env=dict(PATH=os.defpath,HOME=str(home),UNISACC=str(compiler),DEEPSEEK_API_KEY='LOCAL_STUB_ONLY',CSIH_ROLE='write',CSIH_PEER='0:private-peer',CSIH_EXEC_TIMEOUT_SEC='14',CSIH_ENDPOINT='http://127.0.0.1:1/unreachable',CSIH_MODEL='slice-no-model')
             result['compiler_sha256']=hashlib.sha256(compiler.read_bytes()).hexdigest();assert result['compiler_sha256']==result['before'][str(ROOT/'unisacc.com')]
             result['private_input_sha256']={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in app.rglob('*') if p.suffix in ('.c','.h','.inc','.cx')}
-            binary=root/'private-cli';result['build']=run(['/bin/sh',str(compiler),'-o',str(binary),*SOURCES],app,env);assert result['build']['rc']==0,result['build']
+            binary=root/'private-cli';result['build']=run(['/bin/sh',str(compiler),*GLOBAL_INCLUDES,'-o',str(binary),*SOURCES],app,env);assert result['build']['rc']==0,result['build']
             result['binary_sha256']=hashlib.sha256(binary.read_bytes()).hexdigest()
             action=json.dumps(dict(act='file',op='edit',path='tui.c',old=old,new=new))
             result['edit']=run([str(binary),'slice-env',action],app,env);edit=result['edit'];assert edit['rc']==0,edit
