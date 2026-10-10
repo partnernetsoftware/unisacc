@@ -7,13 +7,21 @@
 | 授权前 HEAD | b8ed07cf | git |
 | seed/gen.c sha256 前缀 | b802e4f2d2d7f10a | 72120ea8 起 |
 | source_digest（版本提交前） | c7e75006 | exec/c/provenance.py |
-| §24 矩阵预验 owner / begin / end / 结论 | cdx / — / — / — | |
+| §24 矩阵预验 owner（认领≠begin）/ 阶段 id / begin / end / 证据摘要 / 结论 | cdx / — / — / — / — / **阻塞**：无有效内存隔离（见下） | |
 | 版本提交 / source_digest | — / — | |
-| 内存证据键（C_SHA、REFERENCE_KEYS、cc 实体/flags/并发）/ 采证时刻 | — | tests/seedmemory.py |
+| 内存证据键（C_SHA、REFERENCE_KEYS、cc 实体/版本/flags/并发、启动器 path/sha/target）/ 采证时刻 | — | tests/seedmemory.py；矩阵 RSS 只有在配置/路线与准入证据一致时才复用，不自动抵账 |
 | 同源参考 UA 路径 / sha | — | build_ref.sh |
 | 候选路径 / sha / sources_sha256 | — | build_candidate.sh |
 | seed 对 / comboot stage2=stage3 定点 | — | comboot.py |
 | queue state / 证据目录 / 最终 rc | — | ~/.unisacc/evidence/<run>-final（含 SHA256SUMS） |
 | 出口表（exittable）PASS / RULED / H1 / H2 / UNKNOWN / 77 / NEEDS_RULING | — | release/tools/exittable.py |
 
-出口表目标：除已裁 RULED/H1/H2/77 外无 NEEDS_RULING；旧 740007ef 与 ver038 证据不签新闭包。
+出口表目标：除已裁 RULED/H1/H2/77 外无 NEEDS_RULING；RESOURCE_UNKNOWN 是未执行义务，不因“无待裁”自动放行，按既定口径处理；旧 SC1 三项不替代全矩阵；旧 740007ef 与 ver038 证据不签新闭包。
+
+## 阻塞（2026-10-10 10:0x，cc 实测）
+
+§24 只准在有效内存隔离内测峰，禁止 prlimit 兜底。本机：
+- `systemd-run --user --scope -p MemoryMax=…` rc1：无 systemd user manager（/run/user/1000 不存在，user bus 连接失败）。
+- 进程位于 cgroup `0::/agent`，无委派（mkdir 被拒）；有免密 sudo，但 `/sys/fs/cgroup/background` 的 `cgroup.subtree_control` 为空，子 cgroup 无 memory.max，root 也写不进。
+- 可行路线均需改宿主 cgroup 配置（例如在某父级启用 memory 控制器后建专用子组），属宿主变更，待裁；未做任何改动，测试子组已删除。
+- MemAvailable 约 4.3 GiB（cdx 观测）。
