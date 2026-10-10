@@ -25,4 +25,13 @@ mkdir -p src && echo x > src/a.c && git add src/a.c
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- src/a.c > /dev/null 2>&1; [ $? -eq 2 ] || fail "a src/ change with the default (infrastructure) set was not refused"
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- src/a.c > /dev/null 2>&1; [ $? -eq 2 ] || fail "a src/ change with only contract suites was not refused"
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- src/a.c > /dev/null 2>&1 || fail "a src/ change with a product suite was refused"
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; src/ or unisacc.c needs a non-contract suite"
+for tree in exec kernel include unisa; do
+  mkdir -p "$tree"; echo x > "$tree/input"; git add "$tree/input"
+  before=$(git rev-parse HEAD)
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- "$tree/input" > /dev/null 2>&1
+  [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "$tree default set accepted or committed"
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- "./$tree" > /dev/null 2>&1
+  [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "$tree contract-only directory accepted or committed"
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- "$tree/input" > /dev/null 2>&1 || fail "$tree product suite refused"
+done
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; src/exec/kernel/include/unisa or unisacc.c needs a non-contract suite"

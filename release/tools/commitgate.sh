@@ -15,14 +15,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$msg" ] && [ $# -gt 0 ] || { echo "commitgate: need -m MSG and -- PATH..." >&2; exit 2; }
-# default set: infrastructure only (机房主任 ruling B).  A product change (src/, unisacc.c) must name at least one
+# default set: infrastructure only (机房主任 ruling B).  A product change (src/, exec/, kernel/, include/, unisa/, unisacc.c) must name at least one
 # suite outside the contract layer, or nothing is checked for it and nothing is committed.
 product=0
-for p in "$@"; do case $p in src/*|src|unisacc.c) product=1;; esac; done
+for p in "$@"; do case ${p#./} in src/*|src|exec/*|exec|kernel/*|kernel|include/*|include|unisa/*|unisa|unisacc.c) product=1;; esac; done
 if [ "$product" = 1 ]; then
-  named=$(printf '%s\n' "${suites[@]}" | grep -v '^--suite$' || true)
+  named=$(printf '%s\n' ${suites[@]+"${suites[@]}"} | grep -v '^--suite$' || true)
   [ -n "$named" ] && python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tests"); import gatelayers as g; sys.exit(0 if any(g.layer(n) != "contract" for n in sys.argv[2:]) else 1)' "$R" $named \
-    || { echo "commitgate: src/ or unisacc.c changes need --suite naming at least one product (non-contract) suite" >&2; exit 2; }
+    || { echo "commitgate: src/exec/kernel/include/unisa or unisacc.c changes need --suite naming at least one product (non-contract) suite" >&2; exit 2; }
 fi
 [ ${#suites[@]} -gt 0 ] || suites=(--suite gate-layers --suite script-inventory --suite checkrun)
 gate=$R/tests/gate.sh
@@ -34,6 +34,6 @@ fi
 top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "commitgate: not in a git repository" >&2; exit 2; }
 [ "$top" = "$R" ] || [ "${COMMITGATE_SELFTEST:-}" = 1 ] || { echo "commitgate: cwd repository $top is not the checked repository $R" >&2; exit 2; }
 log=$(mktemp "${TMPDIR:-/tmp}/commitgate.XXXXXX")
-"$R/release/tools/checkrun.sh" "$log" -- "$gate" "${suites[@]}" || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
+"$R/release/tools/checkrun.sh" "$log" -- "$gate" ${suites[@]+"${suites[@]}"} || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
 git commit -q -m "$msg" -- "$@" || { echo "commitgate: gate was green but git commit failed" >&2; exit 3; }
 echo "commitgate: committed $(git rev-parse --short HEAD) after gate rc=0 (log $log)"
