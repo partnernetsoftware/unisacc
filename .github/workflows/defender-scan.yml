@@ -30,30 +30,46 @@ on:
         type: string
         default: ''
 
-# contents: write only so the workflow token can SEE a draft release (GitHub shows drafts only to identities
-# with push access) -- 机房主任 ruling, R3=A host condition; the workflow never uploads, deletes or publishes
+# Default read. contents:write lives only on the minimal Draft-see job (preflight); matrix jobs
+# consume the preflight artifact and never need to see drafts themselves. Workflow never uploads,
+# deletes or publishes a release (机房主任 ruling / a44e4702 tighten).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   preflight:
-    # R3: one draft fetch (fixed ids + signed sha) before the matrix fans out; public mode passes through
+    # Minimal Draft-see job: only this job elevates to contents:write so the token can SEE a draft
+    # (GitHub shows drafts only to identities with push access). Fetches fixed ids + signed sha once,
+    # uploads the bytes for the matrix; public mode is a no-op pass-through.
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         if: inputs.asset_id != ''
         with:
           ref: ${{ inputs.tag_commit }}
+          persist-credentials: false
       - name: preflight draft fetch
         if: inputs.asset_id != ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          mkdir -p preflight
           python3 release/tools/draftfetch.py --repo "${{ github.repository }}" --release-id "${{ inputs.release_id }}" \
             --asset-id "${{ inputs.asset_id }}" --tag "${{ inputs.tag }}" --commit "${{ inputs.tag_commit }}" \
-            --sha256 "${{ inputs.sha256 }}" --out /tmp/preflight.com
+            --sha256 "${{ inputs.sha256 }}" --out preflight/unisacc.com
+      - uses: actions/upload-artifact@v4
+        if: inputs.asset_id != ''
+        with:
+          name: draft-unisacc-com
+          path: preflight/unisacc.com
+          retention-days: 1
   scan:
     needs: preflight
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -74,15 +90,13 @@ jobs:
         if: inputs.asset_id != ''
         with:
           ref: ${{ inputs.tag_commit }}
-      - name: fetch the DRAFT asset by fixed ids (R3=A court before publishing)
+          persist-credentials: false
+      - name: take the preflight-fixed DRAFT bytes (R3=A court before publishing)
         if: inputs.asset_id != ''
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          New-Item -ItemType Directory -Force dl | Out-Null
-          python release/tools/draftfetch.py --repo "${{ github.repository }}" --release-id "${{ inputs.release_id }}" --asset-id "${{ inputs.asset_id }}" --tag "${{ inputs.tag }}" --commit "${{ inputs.tag_commit }}" --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
-          if ($LASTEXITCODE -ne 0) { throw "draft fetch refused" }
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-unisacc-com
+          path: dl
       - name: download the public asset and check the signed hash
         if: inputs.asset_id == ''
         shell: pwsh
