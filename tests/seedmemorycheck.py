@@ -47,10 +47,11 @@ class Memory(unittest.TestCase):
       +'if len(sys.argv)>1 and sys.argv[1].endswith("/tests/seedmemory.py"):\n'
       +' sys.path.insert(0,'+repr(str(m.ROOT/'tests'))+')\n import seedmemory as m\n read=m.available\n'
       +' m.available=lambda:read(*[pathlib.Path(p) for p in '+repr([str(p) for p in paths])+'])\n'
+      +' m.execution_identity=lambda family:{**m.EVIDENCE_IDENTITY,"flags":m.EQUIVALENT_FLAGS[1]}\n'   # host-independent: the branch under test is low memory, not identity
       +' sys.argv=sys.argv[1:]\n sys.exit(m.main())\n'
       +'os.execv('+repr(sys.executable)+',['+repr(sys.executable)+',*sys.argv[1:]])\n')
     wrapper.chmod(0o755)
-    env=dict(os.environ,TMPDIR=d,PATH=str(tools)+':'+os.environ['PATH'],UA=shutil.which('true'),JOBS='1',TERM_SH_INSIDE='1',GATE_BOUND='1')
+    env=dict(os.environ,UNISACC_FFI_X86_PROVIDER=os.environ.get('UNISACC_FFI_X86_PROVIDER','SEEDMEMORYCHECK-PLACEHOLDER'),TMPDIR=d,PATH=str(tools)+':'+os.environ['PATH'],UA=shutil.which('true'),JOBS='1',TERM_SH_INSIDE='1',GATE_BOUND='1')
     r=subprocess.run([sys.executable,str(m.ROOT/'tests/bound.py'),'10','sh','tests/gate.sh','--suite','seedgen-3'],cwd=m.ROOT,env=env,capture_output=True,text=True)
     self.assertEqual(r.returncode,4,(r.stdout,r.stderr));self.assertRegex(r.stdout,r'(?m)^seedgen-3\s+rc=77\s')
     self.assertIn('missing=memory',r.stdout)

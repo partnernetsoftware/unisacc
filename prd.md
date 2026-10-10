@@ -29,6 +29,8 @@
 | v0.0.35 | [archive/plans/v0.0.35.md](archive/plans/v0.0.35.md) | 10-08 公开（回执 research/r35-release-acceptance.json） |
 | v0.0.36 | [archive/plans/v0.0.36.md](archive/plans/v0.0.36.md) | 10-09 公开（unisacc.com baf296dd，候选 b4607639；rc2 29728cc6；回执 research/r36-release-acceptance.json） |
 | v0.0.37 | [plans/v0.0.37.md](plans/v0.0.37.md) | 进行中（c99 闭环与顺延超限项） |
+| v0.0.38 | [archive/plans/v0.0.38.md](archive/plans/v0.0.38.md) | 10-10 公开（unisacc.com 579f6525 签名，候选 ba3f40cb；rc/v0.0.38=4790de9d；三 court 齐、owner-promote；回执 research/r38-release-acceptance.json） |
+| v0.0.39 | [plans/v0.0.39.md](plans/v0.0.39.md) | 计划（承接 0.0.38 顺延 + WF1–WF5 工作流要求） |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
 
 历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的问题由 [v0.0.31 计划](archive/plans/v0.0.31.md) 跟踪。

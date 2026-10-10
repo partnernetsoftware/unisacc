@@ -1,4 +1,4 @@
-# unisacc 0.0.38 版本说明（定稿 2026-10-10，机房主任代裁；未公开，公开/签名另须授权并先写回执）
+# unisacc 0.0.38
 
 主题：集中流水线提效（P1–P7）与 SC1 种子生成器修片。产品验收措辞未改、限时未抬、测试未删。
 
@@ -19,3 +19,8 @@
 
 ## 顺延
 K2a、K1、F4″、COV1、K2b、K2c、H37、X3、L2、L1′、L1b′、A1、N1 → 0.0.39；W2、E57 → 有 Windows 双 ISA 真宿主的版本；H1/H2 跨版进行。
+
+## 签名与资产
+- 资产：unisacc.com（Windows Authenticode 签名，Valid；签名者 PARTNERNET SOFTWARE PTY LTD，Microsoft ID Verified CS EOC CA 04）。签名前 sha256 ba3f40cb…（2243480 B，封存候选），签名后 579f6525ce101ef35100269bcd57ea74e2e3b38bded38ab9dcf014856640d9da（2259256 B）；签名 run 38024592099。
+- Apple 签名与 dmg 本版未提供（发布机为 Linux，无 Apple 签名环境）。
+- 构建依赖仓外宿主 cc 启动器（仅对 seed/compilerpack.c 加 -D_XOPEN_SOURCE=700），内容与 sha 见 release/c38-host-launcher.json；源码修正为 H37，顺延 0.0.39。

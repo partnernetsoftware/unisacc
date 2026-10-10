@@ -21,7 +21,9 @@ SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
 FILES=(); i=0
 for f in tests/c/*.c examples/*.c; do
     [ "$(basename "$f" .c)" = host ] && continue
-    [ $((i % SH_N)) -ne $((SH_K - 1)) ] || FILES+=("$f")
+    # 0.0.39 WF1: PROBES (space-separated paths) narrows the run to named probes only when WF1_PRECHECK=1 is
+    # also set, so a PROBES inherited from the environment can never shrink a formal gate; numbering unchanged
+    if [ $((i % SH_N)) -eq $((SH_K - 1)) ] && { [ "${WF1_PRECHECK:-}" != 1 ] || [[ " ${PROBES:-} " == *" $f "* ]]; }; then FILES+=("$f"); fi
     i=$((i + 1))
 done
 [ "${#FILES[@]}" -gt 0 ] || { echo "empty SHARD=$SHARD" >&2; exit 2; }

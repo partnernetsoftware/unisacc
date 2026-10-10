@@ -177,6 +177,9 @@ esac
 # diagnosis, exit status 1, no signal, within the bound.  The seeds are
 # the files themselves, so a failure names one.
 dmg=0; dbad=0
+# the corpus is untracked (.gitignore /corpus/): a clean clone has none.  Name it instead of failing on an
+# empty damaged-corpus count (0.0.39 review: make quick exit 2 on a clean clone); the check itself stays.
+[ -d corpus/c-testsuite/tests/single-exec ] || echo "  FAIL damaged corpus: corpus/c-testsuite missing (FETCH=1 tests/corpus.sh, or copy it from the main checkout)"
 for f in $(ls corpus/c-testsuite/tests/single-exec/*.c 2>/dev/null | head -40); do
     b=$(basename "$f" .c)
     awk 'BEGIN{n=0} { line=$0; out=""; while (match(line, /;/)) { n++; if (n==3) { out=out substr(line,1,RSTART-1); line=substr(line,RSTART+1) } else { out=out substr(line,1,RSTART); line=substr(line,RSTART+1) } } print out line }' "$f" > "$T/dmg_$b.c"

@@ -38,12 +38,43 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], MOCK_LOG=str(log))
     expected = hashlib.sha256(b'signed asset').hexdigest()
 
-    def run(want_hash):
+    import json
+    def acceptance(eligible, signed, **drop):
+        rec = {'schema': 1, 'version': '-mock', 'release_eligible': eligible == 'true',
+               'windows': {'after_sha256': signed},
+               'courts': {'six-native-cells-final-bytes': {'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': signed, 'cells': 6},
+                          'windows-defender-final-bytes': {'run_id': 2, 'conclusion': 'success', 'final_sha256': signed, 'cells': ['windows-latest', 'windows-11-arm']},
+                          'owner-promotion': {'authority': 'mock owner'}}}
+        for key, value in drop.items():
+            if key == 'version': rec['version'] = value
+            elif key == 'pending': rec['pending'] = value
+            else: rec['courts'][key.replace('_', '-')] = value
+        path = work / ('acc-%d.json' % len(list(work.glob('acc-*.json'))))
+        path.write_text(json.dumps(rec))
+        return str(path)
+
+    def run(want_hash, acc=None):
         log.write_text('')
-        result = subprocess.run(['bash', str(ROOT / 'release/tools/publish.sh'), 'v-mock', want_hash],
+        acc = acc or acceptance('true', want_hash)
+        result = subprocess.run(['bash', str(ROOT / 'release/tools/publish.sh'), 'v-mock', want_hash, acc],
                                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
         return result, log.read_text().splitlines()
 
+    # 0.0.39 WF3 negative: not eligible, other bytes or no receipt -> refused before any gh call
+    minimal = work / 'minimal.json'; minimal.write_text('{"release_eligible": true, "windows": {"after_sha256": "%s"}}' % expected)
+    for bad in (acceptance('false', expected), acceptance('true', '1' * 64), str(work / 'missing.json'), str(minimal),
+                acceptance('true', expected, version='9.9.9'),
+                acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'failure'}),
+                acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': '2' * 64}),
+                acceptance('true', expected, owner_promotion={}),
+                acceptance('true', expected, pending=[{'item': 'gate-infra', 'state': 'PENDING'}]),
+                acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells': 6}),
+                acceptance('true', expected, six_native_cells_final_bytes={'run_id': 1, 'conclusion': 'success', 'cells_public_sha256': expected, 'cells': 5}),
+                acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'success', 'final_sha256': '3' * 64, 'cells': ['w']}),
+                acceptance('true', expected, windows_defender_final_bytes={'run_id': 2, 'conclusion': 'success', 'cells': ['w']})):
+        result, rows = run(expected, bad)
+        assert result.returncode != 0 and 'refused' in result.stdout, (bad, result.stdout)
+        assert not rows, (bad, rows)
     result, rows = run('0' * 64)
     assert result.returncode != 0, result.stdout
     assert any('release download' in row for row in rows), rows   # 0.0.21: a draft asset is fetched with the authenticated client
@@ -54,4 +85,4 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     deleted = next(i for i, row in enumerate(rows) if 'delete-asset' in row)
     published = next(i for i, row in enumerate(rows) if 'release edit' in row)
     assert checked < deleted < published, rows
-print('publish order: wrong hash keeps draft and assets; correct hash verifies before removal and publication')
+print('publish order: ineligible/other-bytes/missing/minimal/wrong-tag/failed-court/other-court-bytes/unauthorised-promotion/pending-item/no-six-sha/five-cells/defender-other-or-no-sha acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')
