@@ -60,10 +60,13 @@ def main():
   frozen=t/'compiler.pkg';shutil.copy2(package,frozen);assert sha(frozen)==record['package_sha256']
   san=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if a.sanitize else []
   def run(stage,command):
-   cmd=[str(ROOT/'tests/bound'),'20',*map(str,command)];r=subprocess.run(cmd,capture_output=True,text=True,timeout=25);item={'stage':stage,'command':cmd,'rc':r.returncode,'stdout':r.stdout,'stderr':r.stderr};record['commands'].append(item);return item
+   cmd=[str(ROOT/'tests/bound'),'20',*map(str,command)]
+   try: r=subprocess.run(cmd,capture_output=True,text=True,timeout=25)
+   except subprocess.TimeoutExpired: r=subprocess.CompletedProcess(cmd,142,'','timeout')   # 0.0.38: a timed-out stage is a timeout
+   item={'stage':stage,'command':cmd,'rc':r.returncode,'stdout':r.stdout,'stderr':r.stderr};record['commands'].append(item);return item
   try:
    lib=t/'library.so';r=run('runtime_build',[os.environ.get('CC','cc'),*flags,*san,'-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',*ffi_cflags,rt/'libunisacc.c',rt/('librarycall_'+arch+'.S'),*ffi_ldflags,'-o',lib])
-   if r['rc']:return finish(1)
+   if r['rc']:return finish(142 if r['rc']==142 else 1)   # 0.0.38 (董秘 10-10): a time cut exits 142, not an ordinary failure
    record['runtime_sha256']=sha(lib);record['callback']=a.callback
    for name in cases:
     case,w,al=CASES[name];union=composite(name)
@@ -76,7 +79,7 @@ def main():
      nm=b'host_step';sig=b'USLSIG2\n'+U(1)+U(len(nm))+nm+bytes([0,1,0,int(len(params)>6)])+U(len(params))+union+U(len(params))+b''.join(params)+bytes([0]);sf=t/'host_step.sig';sf.write_bytes(sig);exe=t/'probe'
      variant={'case':name,'pressure':pressure,'union_extent':w,'union_alignment':al,'gp_prefix':gp,'fp_prefix':fp,'tail_types':['u64','double'],'signature_hex':sig.hex(),'signature_sha256':sha(sf),'callback':a.callback,'events':[],'rc':1};record['variants'].append(variant)
      r=run('probe_build',[os.environ.get('CC','cc'),*flags,*san,'-std=c99','-O2','-Wall','-Wextra','-I',rt,'-DUNION16_CASE='+str(case),'-DUNION16_PRESSURE='+str(prefix),'-DUNION16_CALLBACK='+str(int(a.callback)),t/'probe.c',lib,'-o',exe])
-     if r['rc']:return finish(1)
+     if r['rc']:return finish(142 if r['rc']==142 else 1)
      if a.build_only:variant['rc']=0;continue
      r=run('public_probe',[*(['arch','-x86_64'] if host!=arch else []),exe,frozen,target,sf]);variant['rc']=r['rc']
      for line in r['stdout'].splitlines():
@@ -84,6 +87,7 @@ def main():
       except json.JSONDecodeError:continue
       if isinstance(event,dict) and 'stage' in event:variant['events'].append(event)
      complete=[e for e in variant['events'] if e['stage']=='calls_100' and e['rc']==0]
+     if r['rc']==142:return finish(142)
      if r['rc'] or [e['opt'] for e in complete]!=[0,1,2]:return finish(1)
      assert all(e['extent']==w and e['alignment']==al for e in variant['events'])
      assert [e['native_calls'] for e in complete]==[100,200,300]

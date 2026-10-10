@@ -1333,3 +1333,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.38 scoped verification 收口读数，2026-10-10；实际跑过〕ver038 650/650 rc1、538 PASS、单段 153 窗 7301 s、无中途失效（full038c 为四段 175 窗 8533.5 s 并有 39+124 项返工）。非同身份对照，墙钟差只描述；tail 成功 273 次与延期 87 次现可分账。23 项终 rc 变化已列待定位，gate-infra-38 红为 cc 测试缺陷已修 6b655220。详见 research/c38-pipeline-baseline.md 末节。
 
 〔0.0.38 裁后落地清单，2026-10-10〕research/c38-post-ruling-checklist.md：裁定结果→rulings/plans 落点与边界（H1/H2/修一轮/COV1/SC1/union16/历史 solo）、可度量收口证据保持口径、进入 Draft 的六项前提。只整理，不代裁、不改验收措辞、不起全量。
+
+〔董秘二次裁落地，2026-10-10；实际跑过〕近限时/冷缓存超时 8 项与 lib-lifecycle TIMEOUT 形态 → H1（release/rulings.tsv 按 TIMEOUT 形态 9 行，plans H1 行具名）；lib-union16-callback-2/3 按授权 H2/P7 修：libraryunion16check 内部阶段超时（bound 20 → 142 或 TimeoutExpired）如实退 142、普通失败仍 rc1；受控假 CC 验证挂起→142、失败→1，真实 gate 两项各 27 s rc0，未入基线；SC1 沿用。ver038 冻结出口表复核：NEEDS_RULING 只余 gate-infra-38（cc 测试缺陷，已修 6b655220）、union16 两项（本修片，单项已 PASS）与 SC1 三项。
