@@ -113,7 +113,7 @@ def gate_runner():
     keep = [l for l in text.splitlines() if not re.match(r'\s*(job |for .*; do .*job |\[ .*\] \|\| job )', l)]
     return hashlib.sha256('\n'.join(keep).encode()).hexdigest()
 
-def fingerprint(jobs):
+def fingerprint(jobs, parts=None):
     """One tree inventory and one hash per file, shared by all suite stamps.
 
     Declarations are audited code snapshots, not automatic dependency discovery.
@@ -294,17 +294,22 @@ def fingerprint(jobs):
             inputs = sorted(sel)
         if audited:
             identity = [common, command, {n:digest(n) for n in inputs}]
-            if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]
-            if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID)
+            labels = ['common', 'command', 'inputs']
+            if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]; labels += ['settings', 'executables', 'inventory', 'toolchain']
+            if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID); labels.append('location')
             result[name] = stamp(identity)
         else:
             if global_inputs is None: global_inputs = {n:digest(n) for n in names}
             # 0.0.23 E: the job's own command, not the whole job table -- adding or changing one
             # `job` line no longer invalidates every undeclared result (inputs stay global)
             identity = [common, command, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
-            if inventory: identity += [inventory, extra]
-            if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID)
+            labels = ['common', 'command', 'settings', 'executables', 'global_inputs', 'inputs']
+            if inventory: identity += [inventory, extra]; labels += ['inventory', 'toolchain']
+            if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID); labels.append('location')
             result[name] = stamp(identity)
+        # 0.0.39: an optional, read-only view of the same identity by label (release/tools/whyrerun.py);
+        # it never changes the stamp above
+        if parts is not None: parts[name] = {'audited': bool(audited), **dict(zip(labels, identity))}
     return result
 
 def stagelog_segments(args, *marks):
