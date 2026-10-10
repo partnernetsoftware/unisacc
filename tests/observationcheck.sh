@@ -39,7 +39,8 @@ _BOUND=$("$R/tests/bound" --helper) || { echo "observation: need tests/bound"; e
 D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests"; printf c > "$D/unisacc-next.com"
 printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
 # a process whose command TEXT mentions gatequeue.py (not running it) must not make queue.sh wait
-bash -c 'sleep 40 # tests/gatequeue.py --com' & mention=$!
+bash -c 'sleep 40; echo tests/gatequeue.py --com >/dev/null' & mention=$!   # two commands: the shell (and its text) stays alive
+trap 'kill $mention 2>/dev/null; rm -rf "$T"' EXIT
 for want in 65 66; do
   printf '#!/bin/sh\necho x >> "%s/launches-%s"\nexit %s\n' "$T" "$want" "$want" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
   env -u QUEUE_START STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/q$want" QUEUE_BACKUP="$T/b$want" QUEUE_SUITES=checkrun QUEUE_WINDOWS=5 \

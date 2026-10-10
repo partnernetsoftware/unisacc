@@ -81,9 +81,10 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
     # 0.0.40: only a process actually RUNNING gatequeue.py (its script is argv1, or argv0), never one whose
     # command text merely mentions it -- a caller's shell script naming gatequeue.py made this loop wait on
     # its own ancestor until the outer bound killed the window (first-window observation, 21:02)
-    ps -eo pid=,args= | awk '$2 ~ /gatequeue\.py$/ || ($2 ~ /(^|\/)python[0-9.]*$/ && $3 ~ /gatequeue\.py$/) {print}' > "$D/.gq"
-    [ -s "$D/.gq" ] || break
-    [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
+    python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?
+    [ "$g" = 2 ] && { echo "queue: cannot read the process table; not starting a window beside an unknown gatequeue"; exit 2; }
+    [ "$g" = 0 ] || break
+    [ "$k" -ge 60 ] && xargs kill < "$D/.gq" 2>/dev/null
     sleep 2
   done
   [ -z "$waid" ] || st wait --action end --run "$SL" --phase queue --reason gatequeue-alive --id "$waid" >/dev/null
