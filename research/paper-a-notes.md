@@ -64,3 +64,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 
 
 - **2026-10-10 ~16:59 心跳（切口 A 成篇定稿增量）：** §8.1 开篇披露冻结仍 v0.0.19、公开 Latest 已至 v0.0.38；投稿级同身份重测须另选单一密封 Latest，不得混读回执与更新二进制；**不**改派冻结身份。见 [`notes/paper-a-seal-section81-latest-drift-20261010-1659.md`](notes/paper-a-seal-section81-latest-drift-20261010-1659.md)。
+
+- **2026-10-10 ~17:27 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「活板门／trapdoor ≠ 不可达性定理」；父节点回 A2→A；不挡投稿；不起稿；seal-trapdoor 不重写；不叠 ~17:08 Ο1/Ο2/Ο3。见 [`notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1727.md`](notes/paper-a-derive-purify-trapdoor-unreachability-20261010-1727.md)。
