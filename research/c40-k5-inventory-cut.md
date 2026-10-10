@@ -151,3 +151,6 @@
 
 ### K5-1e（exec/pp/run.sh 的 pp 接 gen-delta）——限定收口（机房主任 03:31），锁 1a8825ed（rebase 后 e1f086d8，patch-id 相等）
 run.sh：ready 每步失败即 return 1；d.json 经 gen-delta，一次性 SEED_GEN_DIR 在命令内创建、不进 fresh 文本；fresh 文本带 SEED_GEN/BIN/CC 与解析出的编译器路径，seed/*.[ch] 与 gen-delta.sh 进依赖；gen 分支 ready || exit 1。夹具 tests/seedpprun.sh（gate seedgen-pprun）。读数：受控 run2 rc0 16/0（22.2 s，暖用例同路径恢复后先做未改对照）；真实冷观察一次 rc0（21.9 s，ua_ref+ua_noauto+d.json 全链冷建），d.json 与 SEED_GEN=0 参考同为 ee8ac744。run1 首红（夹具把暖缓存复制到新路径）原账保留。未证：并发、cc1/as/ld 与完整编译器身份、ex/corpus 分片、净提速；冷观察无调用追踪。回执：/tmp/cc40-prep/k5-1e/receipt-run1.md、receipt-run2.md、receipt-cold1.md（仓外）。
+
+### K5-1f（prepare.sh 的 opt 步骤接 exec/opt/gen-delta.sh）——限定收口（机房主任 04:04），锁 fbc3bcd6（rebase 后 305be291，patch-id 相等）
+prepare.sh:13 → gen-delta --o2，与 pp 共用私有 SEED_GEN_DIR；opt 在 pp 之前，冷准备时 opt 冷建、pp 复用。夹具 tests/seedoptconsumercheck.sh（gate seedgen-optconsumer）。读数：受控 run2 rc0 15/0（20.1 s），命中直接证明——seed/gen.c 编译 1 次、事件顺序 opt→prune→pp、opt 后与 pp 后两次快照逐字节相同且恰为二进制+sidecar；真实冷观察一次 lnx/x86_64 NETWORK=1 rc0 38.9 s，e4 与 SEED_GEN=0 参考同为 4ee21644，私有缓存成员数 1（冷观察本身不单证命中）。run1 首红（夹具 shift 2 致命、快照遇缺目录失败）原账保留。未证：并发、完整编译器身份、净提速；独立 schema 原件缺。回执：/tmp/cc40-prep/k5-1f/receipt-run1.md、receipt-run2.md、receipt-cold1.md（仓外）。
