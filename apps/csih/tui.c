@@ -3443,7 +3443,6 @@ int main(int argc, char **argv) {
                 char oldhome[512];
                 const char *home = getenv("HOME");
                 int k, in_at = -1, hint_at = -1, sysn = 0, rules = 0, head = 0, paired = 0, tee = 0, labeled = 0, bars = 0, collapsed = 0;
-                int mkdir(const char *path, unsigned mode);
                 FILE *fp;
                 if (home) snprintf(oldhome, sizeof oldhome, "%s", home);
                 else oldhome[0] = '\0';

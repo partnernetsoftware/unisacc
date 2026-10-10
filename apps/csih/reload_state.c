@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int rs_upto4095(const char *s);   /* defined below; C99 needs the prototype first */
+
 /* ── the slice of json.c this library uses (types restated so this file
  *    compiles standalone; json.c is an earlier file in the same unit) ───── */
 #ifndef CSIH_RELOAD_JSON_TYPES
