@@ -146,13 +146,18 @@ def main(argv=None):
            'summary': (run.stdout.strip().splitlines() or [''])[-1],
            'probes': [{**r, **v[r['probe']], 'formal_shards': shard_of(r['probe'])} for r in rows]}
     files = shard_files()
+    tracked = [f for f in subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'tests/c', 'examples'], cwd=ROOT, text=True).split()
+               if f.endswith('.c') and f.count('/') == (2 if f.startswith('tests/c/') else 1) and pathlib.Path(f).stem != 'host']
+    rec['worktree_vs_head'] = {'missing': sorted(set(tracked) - set(files)), 'untracked': sorted(set(files) - set(tracked))}
     rec['formal_plan'] = {'shards': SHARDS, 'members': len(files), 'ordered_list_sha256': hashlib.sha256('\n'.join(files).encode()).hexdigest(),
                           'note': 'mapping holds only for this member list; any added/removed .c moves K. PRECHECK is not the formal shard run: com-difftest_o-K (product) obligations stay open'}
     side = key.read_text().split('\n')
     rec['ua_build_key'] = {'source_flags_cc': side[0], 'ua_sha256': side[1]}
-    rec['precheck'] = 'GREEN' if all(p['ok'] for p in rec['probes']) and side[0] == want and side[1] == sha(ua) else 'RED'
+    clean = not rec['worktree_vs_head']['missing'] and not rec['worktree_vs_head']['untracked']   # the mapping run is the committed plan
+    rec['precheck'] = 'GREEN' if all(p['ok'] for p in rec['probes']) and side[0] == want and side[1] == sha(ua) and clean else 'RED'
     pathlib.Path(a.out).write_text(json.dumps(rec, indent=1) + '\n')
     print('c99precheck %s  %s  cold %s s  warm %s s%s' % (rec['precheck'], a.group, cold, warm, '  (previous receipt STALE)' if rec['stale_previous'] else ''))
+    if not clean: print('  difftest_o members differ from HEAD (dirty tree): missing %s untracked %s' % (rec['worktree_vs_head']['missing'], rec['worktree_vs_head']['untracked']))
     for p in rec['probes']: print('  %-48s %-14s expect %-6s got %-6s %s' % (p['probe'], p['role'], p['expect'], p['got'], ','.join(p['formal_shards'] or ['UNMAPPED'])))
     return 0 if rec['precheck'] == 'GREEN' else 1
 
