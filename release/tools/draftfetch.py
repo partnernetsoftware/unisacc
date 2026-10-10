@@ -11,9 +11,12 @@ GITHUB_TOKEN and never printed."""
 import argparse, hashlib, json, os, sys, urllib.request
 
 
-def check(release, asset, tag, commit):
-    """Pure identity check (testable offline): a list of reasons, empty when the draft is the one named."""
+def check(release, asset, tag, commit, release_id=None, asset_id=None):
+    """Pure identity check (testable offline): a list of reasons, empty when the draft is the one named.
+    The API's answers must be the very ids that were asked for, not merely consistent with each other."""
     why = []
+    if release_id is not None and str(release.get('id')) != str(release_id): why.append('API returned release %s for requested %s' % (release.get('id'), release_id))
+    if asset_id is not None and str(asset.get('id')) != str(asset_id): why.append('API returned asset %s for requested %s' % (asset.get('id'), asset_id))
     if release.get('tag_name') != tag: why.append('release %s has tag %r, not %r' % (release.get('id'), release.get('tag_name'), tag))
     if release.get('draft') is not True: why.append('release %s is not a draft (already published?)' % release.get('id'))
     if release.get('target_commitish') != commit: why.append('release targets %r, not %r' % (release.get('target_commitish'), commit))
@@ -48,7 +51,7 @@ def main(argv=None):
         asset = json.loads(api('%s/releases/assets/%s' % (base, a.asset_id), token))
     except Exception as e:
         print('draftfetch: API read failed: %s' % type(e).__name__); return 1
-    why = check(release, asset, a.tag, a.commit)
+    why = check(release, asset, a.tag, a.commit, a.release_id, a.asset_id)
     if why:
         for w in why: print('draftfetch: REFUSED ' + w)
         return 1
