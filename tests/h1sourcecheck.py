@@ -49,6 +49,8 @@ try:
         'target without an H1 row': ('0.0.40', inherit(hashlib.sha256(b'# no row\n').hexdigest()), '# no row\n'),
         'malformed declaration': ('0.0.40', '# plan\nH1-INHERIT: archive/plans/v0.0.38.md\n', OLD),
         'own row naming no suite (not empty)': ('0.0.40', '| H1 | 无 | cc | x | 0 |\n', OLD),
+        'own row without cell structure': ('0.0.40', '| H1 nonsense fake-suite\n', OLD),
+        'EMPTY beside a suite name': ('0.0.40', '| H1 | EMPTY | fake-suite |\n', OLD),
         'own row and declaration': ('0.0.40', '| H1 | 超时：tools-2 |\n' + inherit(good), OLD),
     }
     for why, (ver, plan, old) in bad.items():
@@ -63,5 +65,5 @@ try:
 finally:
     shutil.rmtree(t, ignore_errors=True)
 print('h1source  positives (inherit+sha, own row, explicit EMPTY) reach the make stub after the H1 line; no declaration/'
-      'no plan/wrong sha/missing target/target without row/malformed/nameless row/both refused rc 2 with 0 make calls and no '
+      'no plan/wrong sha/missing target/target without row/malformed/nameless row/structureless row/EMPTY beside a name/both refused rc 2 with 0 make calls and no '
       'candidate dir; without the gate line the same negative reaches make')
