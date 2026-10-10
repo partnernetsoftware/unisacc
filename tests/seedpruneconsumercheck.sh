@@ -17,7 +17,7 @@
 # usage: tests/seedpruneconsumercheck.sh
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
-S=$(mktemp -d "${TMPDIR:-/tmp}/seedprunec.XXXXXX") || exit 2
+_td=${TMPDIR:-/tmp}; S=$(mktemp -d "${_td%/}/seedprunec.XXXXXX") || exit 2   # TMPDIR=/tmp/ would leave // in $W and the trajectory
 # 0.0.40 (机房主任 00:04): SEEDPRUNEC_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
 # the scratch would lose: every SAME/DIFF line, the o1/o2 JSON sha256s and the monotonic start/end (ns), written
 # before the scratch is removed -- also on a failing or interrupted run.

@@ -41,7 +41,7 @@ for f in srcs: h.update(f.encode() + b'\0' + hashlib.sha256(open(f, 'rb').read()
 print(h.hexdigest()[:16])
 PY
 ) || { echo "exec/opt/gen-delta.sh: cannot key the seed-gen build" >&2; exit 2; }
-    D=${SEED_GEN_DIR:-${TMPDIR:-/tmp}/unisacc-seedbin}
+    _td=${TMPDIR:-/tmp}; D=${SEED_GEN_DIR:-${_td%/}/unisacc-seedbin}   # trailing / of TMPDIR dropped, as exec/stamp.sh does
     mkdir -p "$D"
     G=$D/seed-gen-$key
     sha() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
