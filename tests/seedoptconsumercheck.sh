@@ -19,8 +19,11 @@
 #    rc after the opt helper only (no prune / pp helper), no e4.json, no Python fallback; the old direct "gen.py opt"
 #    line is caught (no opt helper, no cache before prune).
 #  * SEED_GEN=0 named reference: helpers -> gen.py opt --o2 / prune / pp, no cache; e4.json byte-equal to the C one.
-# usage: tests/seedoptconsumercheck.sh
+# usage: tests/seedoptconsumercheck.sh 1|2|3   (0.0.40 K5-1h 机房主任 06:12: three slices, each <= 58 s; every case keeps its own OUT and
+#   builds seed-gen cold -- no shared SEED_GEN_BIN / SEED_GEN_DIR)
 set -u
+case "${1:-}" in 1|2|3) SLICE=$1;; *) echo "usage: tests/seedoptconsumercheck.sh 1|2|3"; exit 2;; esac
+case $SLICE in 1) JSONS="out-pos/e4.json";; 2) JSONS=;; 3) JSONS="out-sg0/e4.json c3/e4.json";; esac
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 _td=${TMPDIR:-/tmp}; S=$(mktemp -d "${_td%/}/seedoptc.XXXXXX") || exit 2   # TMPDIR=/tmp/ would leave // in $W and the trajectory
 # 0.0.40 (机房主任 00:04): SEEDOPTC_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
@@ -49,7 +52,7 @@ fi
 export_ev() {   # hashes of the four JSON files (all four must exist and hash) and the end stamp
     [ -n "$EV" ] || return 0
     rc=0
-    for f in out-pos/e4.json out-sg0/e4.json; do
+    for f in $JSONS; do
         if [ -f "$S/$f" ] && h=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$S/$f") \
             && [ ${#h} -eq 64 ]; then line="$h $f"; else line="MISSING $f"; rc=1; fi
         printf '%s\n' "$line" >> "$EV/json.sha256" || rc=1
@@ -167,14 +170,21 @@ prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under t
 }
 # the shims refuse what they do not know (an unknown gen.py stage included)
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
+if [ "$SLICE" = 1 ]; then
 for argv in "exec/c/other.py" "exec/build/gen.py nosuchstage /dev/null"; do
     "$S/shim/python3" $argv >/dev/null 2>&1; r=$?
     [ "$r" -eq 97 ] && ok "python3 shim refuses '$argv'" || no "python3 shim did not refuse '$argv' (rc=$r)"
 done
 "$S/shim/cc" -c foo.c >/dev/null 2>&1; r=$?
 [ "$r" -eq 97 ] && ok "cc shim refuses an unknown source" || no "cc shim did not refuse (rc=$r)"
+fi
 unset SHIMLOG
 
+two() { [ -s "$1" ] && [ "$(wc -l < "$1")" -eq 2 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$1")" -eq 1 ] \
+    && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$1")" -eq 1 ]; }
+shaf() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1" 2>/dev/null || echo none; }
+
+if [ "$SLICE" = 1 ]; then
 # 1 positive
 r=$(prep pos)
 o=$S/out-pos; l=$S/log-pos; sd=$S/snap-pos
@@ -200,8 +210,6 @@ ord=$(awk -F '\t' -v k="$KEYSTEP" '$1 == "helper-parse2" { printf "A" } $1 == "h
 evw "POS order=$ord"
 src=; for f in before-parse2 after-parse2 before-opt after-opt before-prune after-prune before-pp after-pp; do src="$src $f=$(cat "$sd/$f.rc" 2>/dev/null || echo none)"; done
 evw "POS snap_rc$src snapend_rc=$se"
-two() { [ -s "$1" ] && [ "$(wc -l < "$1")" -eq 2 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$1")" -eq 1 ] \
-    && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$1")" -eq 1 ]; }
 { [ "$src" = " before-parse2=0 after-parse2=0 before-opt=0 after-opt=0 before-prune=0 after-prune=0 before-pp=0 after-pp=0" ] && [ "$se" -eq 0 ] \
     && [ "$(cat "$sd/before-parse2")" = ABSENT ] && two "$sd/after-parse2" \
     && cmp -s "$sd/after-parse2" "$sd/before-opt" && cmp -s "$sd/after-parse2" "$sd/after-opt" \
@@ -216,6 +224,10 @@ rr=none; [ -n "$g" ] && { "$W/tests/bound" 55 "$g" opt "$S/ref-e4.json" --o2 2>"
 evw "POS ref_rc=$rr"
 { [ "$rr" = 0 ] && cmp -s "$o/e4.json" "$S/ref-e4.json"; } && ok "e4.json = seed-gen opt --o2 (reference rc 0)" || no "e4.json vs seed-gen opt --o2 (reference rc=$rr)"
 
+evw "C_E4_SHA $(shaf "$o/e4.json")"
+fi
+
+if [ "$SLICE" = 2 ]; then
 # 2-3 negatives: only the opt helper fails (NEG_OPT_BIN; parse2 runs green first), prepare stops before prune and pp
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "red:3:NEG_OPT_BIN=$S/red-gen" "missing:2:NEG_OPT_BIN=/nonexistent/seed-gen"; do
@@ -237,6 +249,9 @@ l=$S/log-badsg
     && ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp; } \
     && ok "SEED_GEN=yes: refused by the parse2 helper (rc 2) before opt; no e3/e4, no Python" || no "SEED_GEN=yes rc=$r helpers '$(helpers "$l")'"
 evw "BADSG rc prepare=$r helpers=$(helpers "$l")"
+fi
+
+if [ "$SLICE" = 3 ]; then
 # 5 the old direct gen.py opt line is caught
 python3 - "$PREP" exec/pipeline/prepare-oldopt.sh <<'PY' || { echo "seedoptc: mutation failed"; exit 2; }
 import sys
@@ -261,19 +276,31 @@ r=$(prep sg0 "$PREP" SEED_GEN=0)
     && haslog "$S/log-sg0" pass-gen-pp "python3 exec/build/gen.py pp $S/out-sg0/e2.json" \
     && [ "$(helpers "$S/log-sg0")" = "parse2 opt prune pp " ] && haslog "$S/log-sg0" short "python3 exec/build/gen.py parse2 $S/out-sg0/e3.json" \
     && [ "$(cat "$S/snap-sg0/after-pp.rc" 2>/dev/null)" = 0 ] && [ "$(cat "$S/snap-sg0/after-pp" 2>/dev/null)" = ABSENT ] \
-    && cmp -s "$S/out-sg0/e4.json" "$S/out-pos/e4.json"; } \
-    && ok "SEED_GEN=0 reference: helpers -> gen.py parse2 (short-circuited) / opt --o2 / prune / pp, no cache, e4.json byte-equal to the C one" || no "SEED_GEN=0 reference (rc=$r)"
+    ; } \
+    && ok "SEED_GEN=0 reference: helpers -> gen.py parse2 (short-circuited) / opt --o2 / prune / pp, no cache" || no "SEED_GEN=0 reference (rc=$r)"
 evw "SEEDGEN0 rc=$r helpers=$(helpers "$S/log-sg0") after_pp_rc=$(cat "$S/snap-sg0/after-pp.rc" 2>/dev/null || echo none) after_pp=$(head -1 "$S/snap-sg0/after-pp" 2>/dev/null || echo none)"
+
+# the C side in this slice: the opt helper itself, default route, private cache in the scratch (cold build)
+mkdir -p "$S/c3"
+env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC SEED_GEN_DIR="$S/c3/cache" "$REALSH" "$W/exec/opt/gen-delta.sh" "$S/c3/e4.json" --o2 2>"$S/c3.err"; cr=$?
+evw "C3 rc=$cr"
+evw "C_E4_SHA $(shaf "$S/c3/e4.json")"
+{ [ "$cr" = 0 ] && cmp -s "$S/out-sg0/e4.json" "$S/c3/e4.json"; } && ok "SEED_GEN=0 e4.json byte-equal to the C opt --o2 built in this slice (helper rc 0)" || no "SEED_GEN=0 e4.json vs C (helper rc=$cr)"
+fi
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 if [ -n "$EV" ]; then
-    for f in shimneg log-pos log-pos.out snap-pos snapend-pos ref-e4.err log-red log-red.out snap-red log-missing log-missing.out snap-missing \
-             log-badsg log-badsg.out snap-badsg log-mut log-mut.out snap-mut log-sg0 log-sg0.out snap-sg0; do
+    case $SLICE in
+        1) files="shimneg log-pos log-pos.out snap-pos snapend-pos ref-e4.err";;
+        2) files="log-red log-red.out snap-red log-missing log-missing.out snap-missing log-badsg log-badsg.out snap-badsg";;
+        3) files="log-mut log-mut.out snap-mut log-sg0 log-sg0.out snap-sg0 c3.err";;
+    esac
+    for f in $files; do
         cp -R "$S/$f" "$EV/$f" || { evfail=1; echo "seedoptc: EVIDENCE copy of $f failed" >&2; }
     done
 fi
-echo "seedoptc  same $same  bad $bad"
-evw "seedoptc  same $same  bad $bad  tree $H"
+echo "seedoptc  slice $SLICE  same $same  bad $bad"
+evw "seedoptc  slice $SLICE  same $same  bad $bad  tree $H"
 [ "$bad" = 0 ] && [ "$same" -gt 0 ] && [ "$evfail" = 0 ]

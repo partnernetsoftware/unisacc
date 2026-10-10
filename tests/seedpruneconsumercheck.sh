@@ -16,8 +16,11 @@
 # exactly the binary and its sidecar; one seed/gen.c compile; prune.json = seed-gen prune); prune-only red and missing
 # BIN (opt green, prune fails, prepare stops before pp); helper argument refusals; the old direct gen.py prune line;
 # SEED_GEN=0 reference; shim refusals.  Schema: /tmp/cc40-prep/k5-1g/schema.md.
-# usage: tests/seedpruneconsumercheck.sh
+# usage: tests/seedpruneconsumercheck.sh 1|2|3   (0.0.40 K5-1h 机房主任 06:12: three slices, each <= 58 s; every case keeps its own OUT and
+#   builds seed-gen cold -- no shared SEED_GEN_BIN / SEED_GEN_DIR)
 set -u
+case "${1:-}" in 1|2|3) SLICE=$1;; *) echo "usage: tests/seedpruneconsumercheck.sh 1|2|3"; exit 2;; esac
+case $SLICE in 1) JSONS="out-pos/prune.json";; 2) JSONS=;; 3) JSONS="out-sg0/prune.json c3/prune.json";; esac
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 _td=${TMPDIR:-/tmp}; S=$(mktemp -d "${_td%/}/seedprunec.XXXXXX") || exit 2   # TMPDIR=/tmp/ would leave // in $W and the trajectory
 # 0.0.40 (机房主任 00:04): SEEDPRUNEC_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
@@ -46,7 +49,7 @@ fi
 export_ev() {   # hashes of the four JSON files (all four must exist and hash) and the end stamp
     [ -n "$EV" ] || return 0
     rc=0
-    for f in out-pos/prune.json out-sg0/prune.json; do
+    for f in $JSONS; do
         if [ -f "$S/$f" ] && h=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$S/$f") \
             && [ ${#h} -eq 64 ]; then line="$h $f"; else line="MISSING $f"; rc=1; fi
         printf '%s\n' "$line" >> "$EV/json.sha256" || rc=1
@@ -156,14 +159,21 @@ prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under t
 }
 # shim refusals (no generator)
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
+if [ "$SLICE" = 1 ]; then
 for argv in "exec/c/other.py" "exec/build/gen.py nosuchstage /dev/null"; do
     "$S/shim/python3" $argv >/dev/null 2>&1; r=$?
     [ "$r" -eq 97 ] && ok "python3 shim refuses '$argv'" || no "python3 shim did not refuse '$argv' (rc=$r)"
 done
 "$S/shim/cc" -c foo.c >/dev/null 2>&1; r=$?
 [ "$r" -eq 97 ] && ok "cc shim refuses an unknown source" || no "cc shim did not refuse (rc=$r)"
+fi
 unset SHIMLOG
 
+two() { [ "$(cat "$1.rc" 2>/dev/null)" = 0 ] && [ "$(wc -l < "$1")" -eq 2 ] \
+    && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$1")" -eq 1 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$1")" -eq 1 ]; }
+shaf() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1" 2>/dev/null || echo none; }
+
+if [ "$SLICE" = 1 ]; then
 # 1 positive
 r=$(prep pos)
 o=$S/out-pos; l=$S/log-pos; sd=$S/snap-pos
@@ -181,8 +191,6 @@ evw "POS helpers=$hs"
 nc=$(count "$l" pass-gen-c ""); nk=$(count "$l" pass "$KEYSTEP")
 evw "POS compiles=$nc keysteps=$nk"
 [ "$nc" -eq 1 ] && ok "seed/gen.c compiled exactly once" || no "seed/gen.c compiles=$nc"
-two() { [ "$(cat "$1.rc" 2>/dev/null)" = 0 ] && [ "$(wc -l < "$1")" -eq 2 ] \
-    && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$1")" -eq 1 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$1")" -eq 1 ]; }
 evw "POS snap_rc parse2=$(cat "$sd/after-parse2.rc" 2>/dev/null || echo none) opt=$(cat "$sd/after-opt.rc" 2>/dev/null || echo none) prune=$(cat "$sd/after-prune.rc" 2>/dev/null || echo none) pp=$(cat "$sd/after-pp.rc" 2>/dev/null || echo none)"
 { two "$sd/after-parse2" && two "$sd/after-opt" && two "$sd/after-prune" && two "$sd/after-pp" \
     && cmp -s "$sd/after-parse2" "$sd/after-opt" && cmp -s "$sd/after-opt" "$sd/after-prune" && cmp -s "$sd/after-prune" "$sd/after-pp"; } \
@@ -195,6 +203,10 @@ rr=none; rm -f "$S/ref-prune.json"
 evw "POS ref_rc=$rr"
 { [ "$rr" = 0 ] && cmp -s "$o/prune.json" "$S/ref-prune.json"; } && ok "prune.json = seed-gen prune (reference rc 0)" || no "prune.json vs seed-gen prune (reference rc=$rr)"
 
+evw "C_PRUNE_SHA $(shaf "$o/prune.json")"
+fi
+
+if [ "$SLICE" = 2 ]; then
 # 2 prune-only failures: opt green, prune fails, prepare stops before pp
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "red:3:$S/red-gen" "missing:2:/nonexistent/seed-gen"; do
@@ -226,6 +238,9 @@ done
 rm -f "$S/sv.json"; env SEED_GEN= "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
 { [ "$r" -eq 2 ] && [ ! -e "$S/sv.json" ]; } && ok "helper refuses SEED_GEN set but empty (unset is the default route, covered by the positive)" || no "helper did not refuse empty SEED_GEN (rc=$r)"
 
+fi
+
+if [ "$SLICE" = 3 ]; then
 # 4 the old direct gen.py prune line is caught
 python3 - "$PREP" exec/pipeline/prepare-oldprune.sh <<'PY' || { echo "seedprunec: mutation failed"; exit 2; }
 import sys
@@ -245,20 +260,31 @@ l=$S/log-sg0; sd=$S/snap-sg0
 { [ "$r" = 0 ] && [ "$(helpers "$l")" = "parse2 opt prune pp " ] && haslog "$l" pass-gen-prune "python3 exec/build/gen.py prune $S/out-sg0/prune.json" \
     && haslog "$l" pass-gen-opt "python3 exec/build/gen.py opt $S/out-sg0/e4.json --o2" && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $S/out-sg0/e2.json" \
     && [ "$(cat "$sd/after-prune" 2>/dev/null)" = ABSENT ] && [ "$(cat "$sd/after-prune.rc" 2>/dev/null)" = 0 ] \
-    && cmp -s "$S/out-sg0/prune.json" "$S/out-pos/prune.json"; } \
-    && ok "SEED_GEN=0 reference: three helpers -> Python, no cache, prune.json byte-equal to the C one" || no "SEED_GEN=0 reference (rc=$r)"
+    ; } \
+    && ok "SEED_GEN=0 reference: helpers -> Python (parse2 short-circuited), no cache" || no "SEED_GEN=0 reference (rc=$r)"
 evw "SEEDGEN0 rc=$r"
+
+# the C side in this slice: the prune helper itself, default route, private cache in the scratch (cold build)
+mkdir -p "$S/c3"
+env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC SEED_GEN_DIR="$S/c3/cache" "$REALSH" "$W/exec/prune/gen-delta.sh" "$S/c3/prune.json" 2>"$S/c3.err"; cr=$?
+evw "C3 rc=$cr"
+evw "C_PRUNE_SHA $(shaf "$S/c3/prune.json")"
+{ [ "$cr" = 0 ] && cmp -s "$S/out-sg0/prune.json" "$S/c3/prune.json"; } && ok "SEED_GEN=0 prune.json byte-equal to the C prune built in this slice (helper rc 0)" || no "SEED_GEN=0 prune.json vs C (helper rc=$cr)"
+fi
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 if [ -n "$EV" ]; then
-    for f in shimneg log-pos log-pos.out snap-pos/after-parse2 snap-pos/after-parse2.rc snap-pos/after-opt snap-pos/after-opt.rc snap-pos/after-prune snap-pos/after-prune.rc \
-             snap-pos/after-pp snap-pos/after-pp.rc ref-prune.err log-nprune-red log-nprune-red.out log-nprune-missing log-nprune-missing.out \
-             log-mut log-mut.out log-sg0 log-sg0.out snap-sg0/after-prune snap-sg0/after-prune.rc; do
+    case $SLICE in
+        1) files="shimneg log-pos log-pos.out snap-pos/after-parse2 snap-pos/after-parse2.rc snap-pos/after-opt snap-pos/after-opt.rc snap-pos/after-prune snap-pos/after-prune.rc snap-pos/after-pp snap-pos/after-pp.rc ref-prune.err";;
+        2) files="log-nprune-red log-nprune-red.out log-nprune-missing log-nprune-missing.out";;
+        3) files="log-mut log-mut.out log-sg0 log-sg0.out snap-sg0/after-prune snap-sg0/after-prune.rc c3.err";;
+    esac
+    for f in $files; do
         mkdir -p "$EV/$(dirname "$f")" && cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedprunec: EVIDENCE copy of $f failed" >&2; }
     done
 fi
-echo "seedprunec  same $same  bad $bad"
-evw "seedprunec  same $same  bad $bad  tree $H"
+echo "seedprunec  slice $SLICE  same $same  bad $bad"
+evw "seedprunec  slice $SLICE  same $same  bad $bad  tree $H"
 [ "$bad" = 0 ] && [ "$same" -gt 0 ] && [ "$evfail" = 0 ]

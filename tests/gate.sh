@@ -97,8 +97,8 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
           seedgen-pprun) req='native-posix|host|cc,python3|cdx|seed-gen-pp-run';;
-          seedgen-optconsumer) req='native-posix|host|cc,python3|cdx|seed-gen-opt-consumer';;
-          seedgen-pruneconsumer) req='native-posix|host|cc,python3|cdx|seed-gen-prune-consumer';;
+          seedgen-optconsumer-1|seedgen-optconsumer-2|seedgen-optconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-opt-consumer';;
+          seedgen-pruneconsumer-1|seedgen-pruneconsumer-2|seedgen-pruneconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-prune-consumer';;
           seedgen-parse2consumer-1|seedgen-parse2consumer-2|seedgen-parse2consumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-parse2-consumer';;
           lib-windows-imports) req='native-posix|win-export-synthetic|cc|cdx|native-export-probe';;
           lib-lifecycle|lib-callable-catalog) req='native-posix|host|cc,libffi|cdx|native-ffi-probe';;
@@ -578,8 +578,12 @@ job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (�
 job seedgen-ppconsumer-2 sh ./tests/seedppconsumercheck.sh 2
 job seedgen-ppchain sh ./tests/seedppchaincheck.sh   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled
 job seedgen-pprun sh ./tests/seedpprun.sh   # 0.0.40 K5-1e (机房主任 02:59): exec/pp/run.sh d.json through gen-delta, controlled
-job seedgen-optconsumer sh ./tests/seedoptconsumercheck.sh   # 0.0.40 K5-1f (机房主任 03:43): prepare.sh opt step through gen-delta, controlled
-job seedgen-pruneconsumer sh ./tests/seedpruneconsumercheck.sh   # 0.0.40 K5-1g (机房主任 04:09): prepare.sh prune step through gen-delta, controlled
+job seedgen-optconsumer-1 sh ./tests/seedoptconsumercheck.sh 1   # 0.0.40 K5-1f (机房主任 03:43): prepare.sh opt step through gen-delta, controlled; K5-1h (06:12): three slices
+job seedgen-optconsumer-2 sh ./tests/seedoptconsumercheck.sh 2
+job seedgen-optconsumer-3 sh ./tests/seedoptconsumercheck.sh 3
+job seedgen-pruneconsumer-1 sh ./tests/seedpruneconsumercheck.sh 1   # 0.0.40 K5-1g (机房主任 04:09): prepare.sh prune step through gen-delta, controlled; K5-1h (06:12): three slices
+job seedgen-pruneconsumer-2 sh ./tests/seedpruneconsumercheck.sh 2
+job seedgen-pruneconsumer-3 sh ./tests/seedpruneconsumercheck.sh 3
 job seedgen-parse2consumer-1 sh ./tests/seedparse2consumercheck.sh 1   # 0.0.40 K5-1h (机房主任 06:01): prepare.sh parse2 step through exec/parse2gen/gen-delta.sh, controlled
 job seedgen-parse2consumer-2 sh ./tests/seedparse2consumercheck.sh 2
 job seedgen-parse2consumer-3 sh ./tests/seedparse2consumercheck.sh 3
