@@ -102,3 +102,33 @@
 ## 禁
 
 未批就全量开干；整目录删 `.py`；旧全量空转；空等不交盘点。
+
+## 进度更新（2026-10-11 01:1x，机房主任 01:10 卫生授权；只追加，上文保留为历史）
+
+上文“K5-1 进度（首刀接线）”是 23:36 的快照；其中“负例改坏 exec/opt/rounds-result.tsv”的写法已被替换（原地改共享树，见下）。以下为现状。
+
+### K5-1（opt）——授权范围内限定收口（机房主任 00:30），产品锁 a2454bf1
+| 项 | 现状 |
+|---|---|
+| 提交链 | 7da8833b、ab4f75b8 → 418f7743、70ed1b2a、a60184a3、2ef26c16、e84949e2、08c79443、a2454bf1 |
+| 夹具 | tests/seedoptcheck.sh（gate job seedgen-opt，stage 层）：私有 scratch（git archive 固定提交），负例只改 scratch 副本；导出 fail-closed（SEEDOPT_EVIDENCE）；NEG 具名带双子 rc |
+| helper | exec/opt/gen-delta.sh：SEED_GEN 只认 0/1；最多一个 flag（--o2）；默认构建按编译器字节/版本/flags/seed 源码做 key，缓存校验 sha；不回退 Python |
+| 读数 | run3（私有 wt，a2454bf1，timeout 58）：rc0，28 具名 SAME / 0 DIFF；o1、o2 的 c/py JSON sha 相等；NEG py=1 c=1；5 个导出故障分支有读数；检出 TSV 守恒。三方（cdx/cdx2/grk）限定通过 |
+| 未证 / 不做 | 消费者 exec/opt/check.sh 未接（仍 gen.py）；中断路径、损坏缓存、RSS；故障分支只到函数级；JSON 本体与完整 stdout 未存；json.h 探针不走 hit_ok |
+| 过程账 | 首刀原地改共享 TSV 无 trap（已修）；外层 timeout 75 违规一次（run1，已自报）；一次修片回执与提交内容不符（2ef26c16，已更正）；共享检出曾有身份不明写者改夹具（不归因） |
+
+### K5-1b（pp）——限定收口（机房主任 01:10），产品锁 1c70d9e8
+| 项 | 现状 |
+|---|---|
+| 提交链 | 12b95470 → 1c70d9e8 |
+| helper | exec/pp/gen-delta.sh：SEED_GEN 只认 0/1；manifest 六个 flag 各至多一次；--osx 与 --win 分别检查成员、互斥 rc2；缓存键同 opt 版，不含 pp flag |
+| 夹具 | tests/seedppcheck.sh 1\|2（gate job seedgen-pp-1 / seedgen-pp-2，事先 3+3 拆分）：无 flag、--osx、--win / --arm64、--osx --arm64、--win --arm64 六组 c/py 对拍加 C 双跑；NEG-tsv（exec/pp/autoinc-result.tsv 第 2 行删末列）；NEG-osxwin；helper 拒 7 种坏 flag；默认路线冷建/命中/json.h 重建 |
+| 读数（1c70d9e8，私有 wt，timeout 58） | pp-1 rc0，30 SAME / 0 DIFF；pp-2 rc0，13 SAME / 0 DIFF；六组 c/py sha 两两相等；NEG 均 py=1 c=1；TSV 守恒。三方限定通过 |
+| 原账（12b95470，单列） | pp-1 红：helper 未早拒紧邻 --osx --win（case 模式共用空格），已由 1c70d9e8 修；pp-2 在首红后照跑，属范围偏差，读数不并入 |
+| 发现 | C 生成器对 --osx --win 的拒绝是“manifest let option is not yet covered”，不是互斥检查；生成器未改 |
+| 未证 / 不做 | 三个消费者（exec/pp/run.sh、exec/pipeline/prepare.sh、exec/c/chain.sh）未接，不称迁移或提效；buildcompiler 的 shared 步骤本就走 C，不属本刀；--locations、--no-autoinc 与 os/arch 交叉未对拍；第二次 C 双跑摘要与成功路径子 rc 未导出；中断、损坏缓存、RSS 未证 |
+
+### 共同
+- version.h 仍 0.0.39，不 bump；验收措辞、check.sh 未改；共享检出禁跑，首跑只在私有 worktree。
+- gate-infra：在 ab4f75b8 的干净 worktree 上实测为红（README-real-reviewed-snapshot），之后的 tip 未复跑；与本两刀无关，另列待指派。
+- 下一刀（K5-1c）草案由 cdx 主笔，未授权实现。
