@@ -42,5 +42,18 @@ else
     echo "FAIL 3b: msg fuzz (build/run failed, or decode success path never hit)"; cat "$TMP/fuzz_msg.out" 2>/dev/null; rc=1
 fi
 
+# 4. cc/clang C99 syntax of every file-table unit (cc shim for unisacc_ffi.h; .cx copied to temp .c)
+cc_fail=0
+for f in csih render term chat clock tools file shell edit gate session agent plugin net; do
+    cc -std=c99 -fsyntax-only -I cc -I . -include json.h -include csih_cols.h -include csih_home.h "$f.c" > "$TMP/cc_$f.log" 2>&1 \
+        || { echo "FAIL 4: cc $f: $(grep -m1 error "$TMP/cc_$f.log")"; cc_fail=1; }
+done
+for f in cols home json; do
+    cp "$f.cx" "$TMP/$f.c"
+    cc -std=c99 -fsyntax-only -I cc -I . -include json.h -include csih_cols.h -include csih_home.h "$TMP/$f.c" > "$TMP/cc_$f.log" 2>&1 \
+        || { echo "FAIL 4: cc $f.cx: $(grep -m1 error "$TMP/cc_$f.log")"; cc_fail=1; }
+done
+[ $cc_fail -eq 0 ] && echo "ok   4: cc -std=c99 syntax over the file table" || rc=1
+
 [ $rc -eq 0 ] && echo "check ok" || echo "check FAILED"
 exit $rc

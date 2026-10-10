@@ -17,15 +17,6 @@ static int rs_upto4095(const char *s);   /* defined below; C99 needs the prototy
  *    compiles standalone; json.c is an earlier file in the same unit) ───── */
 #ifndef CSIH_RELOAD_JSON_TYPES
 #define CSIH_RELOAD_JSON_TYPES
-typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
-typedef struct jvalue {
-    jkind kind;
-    int    b;
-    double n;
-    char  *s;
-    struct jvalue **items;  size_t len;
-    char **keys; struct jvalue **vals; size_t nkeys;
-} jvalue;
 #endif
 
 jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);

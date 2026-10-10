@@ -54,15 +54,6 @@
  * alone: multi-file resolution is not a preprocessor, nothing is textually
  * shared, and relying on an earlier file's definition would make the build
  * order-dependent. */
-typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
-typedef struct jvalue {
-    jkind kind;
-    int    b;
-    double n;
-    char  *s;
-    struct jvalue **items;  size_t len;
-    char **keys; struct jvalue **vals; size_t nkeys;
-} jvalue;
 jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
 void    jfree(jvalue *v);
 
