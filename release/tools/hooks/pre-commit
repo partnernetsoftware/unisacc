@@ -1,0 +1,18 @@
+#!/bin/bash
+# pre-commit (0.0.40-prep, 机房主任 18:33; local install only: release/tools/install_hooks.sh).  A commit whose
+# staged changes touch the shipping closure (tests/freezecheck.py product(), or unisacc.c) must come through
+# release/tools/commitgate.sh, which marks its own git commit with UNISACC_COMMITGATE_RUN=1.  Other commits
+# (docs, research, plans, tests) pass.  Emergency bypass: UNISACC_COMMITGATE_SKIP=1 (logged to stderr).
+[ "${UNISACC_COMMITGATE_RUN:-}" = 1 ] && exit 0
+R=$(git rev-parse --show-toplevel) || exit 1
+ship=$(git diff --cached --name-only -z --diff-filter=ACDMRT | python3 -c '
+import sys; sys.path.insert(0, sys.argv[1] + "/tests")
+from freezecheck import product
+print(" ".join(p for p in sys.stdin.read().split("\0") if p and (p == "unisacc.c" or product(p))))' "$R") \
+  || { echo "pre-commit: cannot classify staged paths; refusing (fail closed)" >&2; exit 1; }
+[ -z "$ship" ] && exit 0
+if [ "${UNISACC_COMMITGATE_SKIP:-}" = 1 ]; then
+  echo "pre-commit: UNISACC_COMMITGATE_SKIP=1 -- shipping paths committed WITHOUT commitgate: $ship" >&2; exit 0
+fi
+echo "pre-commit: shipping paths must be committed through release/tools/commitgate.sh --suite <covering suite>: $ship" >&2
+exit 1

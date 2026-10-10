@@ -87,5 +87,5 @@ before=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; 
 "$R/release/tools/checkrun.sh" "$log" -- "$gate" ${suites[@]+"${suites[@]}"} || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
 after=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; }
 [ "$before" = "$after" ] || { echo "commitgate: inputs changed while the gate ran ($before -> $after), nothing committed (log $log)" >&2; exit 4; }
-git commit -q -m "$msg" -- "$@" || { echo "commitgate: gate was green but git commit failed" >&2; exit 3; }
+UNISACC_COMMITGATE_RUN=1 git commit -q -m "$msg" -- "$@" || { echo "commitgate: gate was green but git commit failed" >&2; exit 3; }
 echo "commitgate: committed $(git rev-parse --short HEAD) after gate rc=0 (log $log)"
