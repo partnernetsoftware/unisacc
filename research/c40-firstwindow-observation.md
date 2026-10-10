@@ -1,0 +1,26 @@
+# 0.0.40 误 restore 门闩：受控真实首窗观察（cc，2026-10-10 21:03；机房主任 20:55 授权方案 A）
+
+**这是观察，不是验收。** 只跑具名的 contract 层轻量套件，单窗；正式 K2b 白名单为空，没有任何真实准入。
+
+## 身份
+- 树：0489b3cd（QUEUE_SUITES/RELEASE_SUITES 观察模式），status 0 行；
+- 候选 unisacc-next.com：2b20f4b2fd9a496d2e36d47577741420f9e4aba47be0d377e3866f5f91aa5ed9（0.0.39 候选；自 82290c17 起产品闭包无变化，release.sh 报 product freshness: verified）；
+- UA：fd8f3877e8b7b3bef517b276b16038cb5b54bf3a9fe76ed39ddc046cada971c2；
+- 选集核对：`gatequeue.py --com --list-selection --suite checkrun --suite queuestart-strict --suite docedit` 恰好输出这三个名字；
+- 正式白名单 tests/k2b-whitelist.tsv：0 条有效行。
+
+## 命令
+`QUEUE_SUITES="checkrun queuestart-strict docedit" QUEUE_WINDOWS=1 QUEUE_STATE=<新空目录>/state QUEUE_BACKUP=<新空目录>/backup STAGELOG_RUN=fwprobe2 release/tools/queue.sh /tmp/cc39-b5b/cand /tmp/cc39-b5b/ua /tmp/cc39-b5b/cand/seed`（未设 QUEUE_START，即默认 fresh）
+
+## 读数（证据目录 /tmp/cc40-prep/firstwindow3）
+- 启动回执 start-receipt.txt：mode=fresh、restored=no、source=none、artifact_sha256=2b20f4b2…；输出 “backup … left untouched (backup not read)”；
+- release.sh：“OBSERVATION ONLY (checkrun docedit queuestart-strict); warm-ups skipped (contract-layer suites build no cache); not acceptance”；
+- gatequeue 逐项（行首核，不采信汇总）：START checkrun / docedit / queuestart-strict；DONE checkrun rc=0（0.10 s）、docedit rc=0（0.25 s）、queuestart-strict rc=0（1.16 s）；
+- 汇总：queue: 3/3 completed, 0 failed, 0 unverified, 0 pending；
+- 结尾：“OBSERVATION ONLY: named suites … completed; not acceptance; release NOT ready (rc 65)”，release-queue.log 记 window 1 rc=65、final rc=65；
+- state/observation.json：{"observation": true, "suites": [...], "acceptance": false}；
+- stage log（~/.unisacc/stagelog/events.jsonl，run fwprobe2，boot_id 9122943e…）：8 个 begin 全部有对应 end，end 的单调时钟均不早于 begin。分别是：queue（rc 65）、setup、window-1（rc 65）、release-checks、prologue、jobs、epilogue、backup。另有一对 wait-begin/wait-end（gatequeue-alive），用时 0.06 s。
+
+## 失败与未解释项（如实保留）
+- 第一次尝试（/tmp/cc40-prep/firstwindow，STAGELOG_RUN=fw40-210213）在 21:02:13 启动：回执 fresh/restored=no 已写出，但 release-queue.log 一直为空，被外层 timeout 58 杀掉（exit 124）。随后同一命令再跑两次（STAGELOG_RUN=0 一次，stage log 打开一次）都在约 2 s 内完成，rc 65。首次的阻塞点**未定位**，记为 UNKNOWN：可能停在 gatequeue-alive 等待循环里（当时宿主上可能有别的 gatequeue），但没有证据。
+- 本次只观察了接线。这不是产品验收，也不证明全量 queue 的行为。真实计时器下的超时首窗仍然缺。
