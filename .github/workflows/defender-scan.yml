@@ -1,0 +1,50 @@
+name: defender-scan
+# windows-defender-final-bytes court (0.0.38): download the published unisacc.com unauthenticated,
+# check it is the signed hash from the signing receipt, update Defender signatures and scan the
+# file with MpCmdRun.  Read-only: never builds, never uploads to the release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag, e.g. v0.0.38"
+        required: true
+        type: string
+      sha256:
+        description: "Signed unisacc.com sha256 from the signing receipt"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: download the public asset and check the signed hash
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dl | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/unisacc.com" -OutFile dl/unisacc.com
+          $got = (Get-FileHash dl/unisacc.com -Algorithm SHA256).Hash.ToLower()
+          "public sha256 $got"
+          if ($got -ne "${{ inputs.sha256 }}") { throw "PUBLIC BYTES DIFFER from the signed hash" }
+      - name: Defender scan of the final bytes
+        shell: pwsh
+        run: |
+          $mp = Get-ChildItem "$env:ProgramData\Microsoft\Windows Defender\Platform" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $exe = if ($mp) { Join-Path $mp.FullName MpCmdRun.exe } else { "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" }
+          & $exe -SignatureUpdate
+          "signature update rc $LASTEXITCODE"
+          Get-MpComputerStatus | Select-Object AMProductVersion,AntivirusSignatureVersion,AntivirusSignatureLastUpdated,RealTimeProtectionEnabled | Format-List
+          $file = (Resolve-Path dl/unisacc.com).Path
+          & $exe -Scan -ScanType 3 -File $file -DisableRemediation
+          $rc = $LASTEXITCODE
+          "scan rc $rc (0 = no threat, 2 = threat found)"
+          Get-MpThreatDetection | Format-List
+          if ($rc -ne 0) { throw "Defender scan rc $rc" }
