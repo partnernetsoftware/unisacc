@@ -137,3 +137,6 @@
 - 上文“共同”一节说 gate-infra 的红“与本两刀无关”——收窄为：**只知道 ab4f75b8 上实测为红，之后未复跑；它与 K5-1 / K5-1b 有无因果关系未证明，另列待核。**
 - 上文 K5-1 表“读数”一行写“三方（cdx/cdx2/grk）限定通过”——收窄为：三方核过 run3 的读数，其中 grk 的原话是“读数核过、不称绿”；“授权范围内限定收口”是机房主任 00:30 的裁定，不是三方各自的结论。
 - K5-1b 表的“三方限定通过”：以机房主任 01:10 的收口裁定为准。
+
+### K5-1c（prepare.sh 的 pp 调用接 gen-delta）——限定收口（机房主任 01:43），产品锁 96272cd2
+生产只改 exec/pipeline/prepare.sh:17（私有 SEED_GEN_DIR="$OUT/.seed-gen-cache"，三项代价已明批）；夹具 tests/seedppconsumercheck.sh（gate seedgen-ppconsumer-1/-2）。受控片 1 rc0 22/0、片 2 rc0 18/0；唯一真实冷路线 lnx/x86_64（NETWORK=1）models rc0、外层 42.88 s，发布集 24 项不含私有缓存，e2 与 Python 同输入逐字节相同。缺项按 schema 顺延（Python 参考真实 rc/argv、冷编单段耗时、运行时 SEED_GEN_CC 与编译器身份、冷后两处源码 sha）；编译器键只与调用名解析为 /usr/bin/cc 相容。不称六目标端到端、不称提速；第二、第三消费者未接；gen-delta 头注释过时（延后）。回执：/tmp/cc40-prep/k5-1c/receipt-controlled-and-cold.md（仓外）。
