@@ -77,6 +77,7 @@ LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" 
 # QUEUE_WINDOWS caps the windows of this run (default 300) -- a short supervised check, not a pass
 for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
   waid=$(st wait --action begin --run "$SL" --phase queue --reason gatequeue-alive)
+  gq_still=0
   for k in $(seq 1 90); do
     # 0.0.40: only a process actually RUNNING gatequeue.py (its script is argv1, or argv0), never one whose
     # command text merely mentions it -- a caller's shell script naming gatequeue.py made this loop wait on
@@ -84,13 +85,15 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
     # 21:02 first-window hang showed the same wait, its process is UNKNOWN)
     python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?
     case $g in
-      0) ;;          # a gatequeue is running: wait
-      1) break;;     # none: start the window
+      0) gq_still=1;;   # a gatequeue is running: wait
+      1) gq_still=0; break;;  # none: start the window
       *) echo "queue: gqalive.py exit $g (process table unknown); not starting a window beside an unknown gatequeue"; exit 2;;
     esac
     [ "$k" -ge 60 ] && xargs kill < "$D/.gq" 2>/dev/null
     sleep 2
   done
+  # wait bound exhausted with a live gatequeue: refuse the window (keep state); do not fail-open
+  [ "$gq_still" = 0 ] || { echo "queue: gatequeue still alive after wait bound; not starting a window"; exit 2; }
   [ -z "$waid" ] || st wait --action end --run "$SL" --phase queue --reason gatequeue-alive --id "$waid" >/dev/null
   wid=; [ -z "$SL" ] || wid=$(python3 "$R/release/tools/stagelog.py" begin --run "$SL" --phase queue --subphase "window-$i" --parent-id "$qid" 2>/dev/null) || :
   env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" RELEASE_SUITES="${QUEUE_SUITES:-}" GATE_STATE="$Q" STAGELOG_RUN="${SL:-0}" STAGELOG_PARENT="${wid:-}" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?

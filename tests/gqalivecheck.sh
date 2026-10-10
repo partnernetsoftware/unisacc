@@ -1,7 +1,8 @@
 #!/bin/bash
 # gqalivecheck (0.0.40): release/tools/gqalive.py counts only processes RUNNING gatequeue.py (argv0, or a python
-# interpreter whose first non-option argument is it, e.g. python3 -u / -B), never text that mentions the name or a
-# file such as notgatequeue.py; an unreadable process table is exit 2, not "none".  Controlled fixture processes.
+# interpreter whose first non-option argument is it, e.g. python3 -u / -B, or macOS Python.app/.../Python), never text
+# that mentions the name or a file such as notgatequeue.py; an unreadable process table is exit 2, not "none".
+# Controlled fixture processes.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-gqalive.XXXXXX"); pids=()
 trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$T"' EXIT
@@ -27,6 +28,14 @@ ns = {}; exec(compile(src, 'gqalive', 'exec'), ns)
 for argv in (['python3', '-X'], ['python3', '-W'], ['python3', '-u', '-X'], ['python3'], []):
     assert ns['runs_gatequeue'](argv) is False, argv
 assert ns['runs_gatequeue'](['python3', '-X', 'dev', 'x/gatequeue.py']) is True
+# macOS Homebrew: ps argv0 is .../Python.app/Contents/MacOS/Python (basename Python); must match case-insensitively
+app = '/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python'
+assert ns['runs_gatequeue']([app, '-u', 'a/gatequeue.py']) is True
+assert ns['runs_gatequeue']([app, '-B', '-X', 'dev', 'a/gatequeue.py']) is True
+assert ns['runs_gatequeue'](['Python', 'a/gatequeue.py']) is True
+assert ns['runs_gatequeue'](['PYTHON3.14', 'a/gatequeue.py']) is True
+assert ns['runs_gatequeue']([app, 'a/notgatequeue.py']) is False
+assert ns['runs_gatequeue'](['Pythonista', 'a/gatequeue.py']) is False
 PY
 mkdir -p "$T/shim"; printf '#!/bin/sh\nexit 1\n' > "$T/shim/ps"; chmod +x "$T/shim/ps"
 GQALIVE_TABLE=ps PATH="$T/shim:$PATH" python3 "$R/release/tools/gqalive.py" >/dev/null 2>&1; [ $? = 2 ] || fail "an unreadable process table was not exit 2"
@@ -43,4 +52,4 @@ for code in 2 127 137; do
     bash "$T/q/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
   [ "$rc" = 2 ] && [ ! -e "$T/launched" ] || fail "helper exit $code: queue rc=$rc, launched=$([ -e "$T/launched" ] && echo yes || echo no) $(cat "$T/out")"
 done
-echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2; a trailing -X/-W never crashes the classifier; queue.sh refuses the window on helper exit 2/127/137"
+echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); Python.app/.../Python argv0 (macOS) matches case-insensitively; notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2; a trailing -X/-W never crashes the classifier; queue.sh refuses the window on helper exit 2/127/137"

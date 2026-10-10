@@ -2,11 +2,12 @@
 """gqalive.py (0.0.40): print the PIDs of processes RUNNING tests/gatequeue.py; exit 0 if any, 1 if none, 2 if the
 process table could not be read (the caller must not take that as "none").
 
-A process runs gatequeue.py when argv[0] is that file, or argv[0] is a python interpreter and the first non-option
+A process runs gatequeue.py when argv[0] is that file, or argv[0] is a python interpreter (basename matches
+python[0-9.]* case-insensitively -- macOS Homebrew reports Python.app/.../Python) and the first non-option
 argument is that file (options such as -u, -B, -X dev are skipped).  A process whose arguments merely mention the
 name -- a shell script text, `notgatequeue.py`, an editor -- does not count."""
 import os, re, subprocess, sys
-PY = re.compile(r'^python[0-9.]*$')
+PY = re.compile(r'^python[0-9.]*$', re.I)  # macOS Homebrew argv0 basename is Python (Python.app)
 def runs_gatequeue(argv):
     if not argv: return False
     if os.path.basename(argv[0]) == 'gatequeue.py': return True
