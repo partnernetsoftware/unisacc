@@ -140,3 +140,7 @@
 
 ### K5-1c（prepare.sh 的 pp 调用接 gen-delta）——限定收口（机房主任 01:43），产品锁 96272cd2
 生产只改 exec/pipeline/prepare.sh:17（私有 SEED_GEN_DIR="$OUT/.seed-gen-cache"，三项代价已明批）；夹具 tests/seedppconsumercheck.sh（gate seedgen-ppconsumer-1/-2）。受控片 1 rc0 22/0、片 2 rc0 18/0；唯一真实冷路线 lnx/x86_64（NETWORK=1）models rc0、外层 42.88 s，发布集 24 项不含私有缓存，e2 与 Python 同输入逐字节相同。缺项按 schema 顺延（Python 参考真实 rc/argv、冷编单段耗时、运行时 SEED_GEN_CC 与编译器身份、冷后两处源码 sha）；编译器键只与调用名解析为 /usr/bin/cc 相容。不称六目标端到端、不称提速；第二、第三消费者未接；gen-delta 头注释过时（延后）。回执：/tmp/cc40-prep/k5-1c/receipt-controlled-and-cold.md（仓外）。
+
+
+### K5-1d（chain.sh 的 pp 调用接 gen-delta）——受控绿已合 main（机房主任 02:4x），产品 tip 1bd685b0
+生产只改 `exec/c/chain.sh`（私有 `SEED_GEN_DIR="$T/.seed-gen-cache"` + `e2-gen.{out,err}`）与 `exec/pp/gen-delta.sh` **头注释**；夹具 `tests/seedppchaincheck.sh`（gate `seedgen-ppchain`）。tip 复跑 rc0 **20/0**、外层 **50.784 s**；e2=ee8ac744… 三路同；夹具 sha 28a0c4c2 与 tip 全等（闭合 cdx 所阻脏树 overlay 身份缺口）。version.h 仍 0.0.39。不称五片全绿/提速。回执：`research/c40-k5-1d-controlled-receipt.md`。
