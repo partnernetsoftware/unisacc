@@ -70,6 +70,10 @@ def identity(ua, rows, group_path):
     sys.path.insert(0, str(ROOT / 'exec/c')); import provenance
     return {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
             'source_digest': provenance.source_digest(), 'ua_sha256': sha(ua), 'cc': cc,
+            'tools': {'cc_realpath': os.path.realpath(subprocess.check_output(['sh', '-c', 'command -v cc'], text=True).strip()),
+                      'cc_sha256': sha(os.path.realpath(subprocess.check_output(['sh', '-c', 'command -v cc'], text=True).strip())),
+                      'difftest_o.sh': sha(ROOT / 'tests/difftest_o.sh'), 'build_ref.sh': sha(ROOT / 'tests/build_ref.sh'),
+                      'c99precheck.py': sha(__file__), 'cflags': os.environ.get('CFLAGS', '-O2')},
             'group_sha256': sha(group_path), 'probes': {r['probe']: sha(ROOT / r['probe']) for r in rows}}
 
 
