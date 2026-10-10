@@ -45,3 +45,13 @@
   续接时不重跑已绿的生产/参考；若裁 UNKNOWN，第 20 项 ASan 作为未结诊断义务列入最终出口，不因 21–30 转绿而抹掉。
 - §24 全绿（cdx 回执 + cc 逐字节复核 20–29 三路同字节、warnparse ASan 与生产同字节）：30/30 三路 rc0；选用 90 次隔离记录 oom_kill 0；attempt3 首 begin 10:28:11.467、结束约 10:31:53。生产最大 cgroup peak 2318188544 B / RSS 2186572 KiB / 7.80 s（warnparse）；ASan 最大 peak 3465375744 B / RSS 3304652 KiB / 48.43 s（warnparse，独立上限，不作生产证据）。前 19 项参考/ASan 进程 RSS NOT_RECORDED（仅 cgroup peak）。gen b802e4f2、O2 f997b25d、ASan 97efd271。导出 HEAD 6b127d73 至 761fb70c 仅 research 变化，产品输入未变。
 - 版本提交 a5c1a995（0.0.37 → 0.0.38）；source_digest 5782090e。下一步：按最终身份一次采 seed 内存证据（cdx）。
+- seed 内存证据 53fe285f（cdx）：C_SHA b802e4f2、BINARY f997b25d，30 路生产 C_RSS 刷新；自检 13/13、gate seedmemory rc0；seedmemorycheck 一处写死旧 RSS 的期望改为由 C_RSS 导出（公式断言不变）。
+- 同源参考 UA：/tmp/cc38-final/ua（`--version` 0.0.38，HEAD 53fe285f，13 s）；build_candidate 构建中（cc 持令牌）。
+- 准入路线静态差集（只读 tests/seedmemory.py SUITES ↔ C_RSS；未跑 seed，带入新 queue 出口表）：
+  | 套件 | 族 | 准入 |
+  |---|---|---|
+  | seedgen、seedgen-2/3/4 | gen | 暖缓存下可准入（缓存冷/缺 → RESOURCE_UNKNOWN rc2） |
+  | seedparse2-1 | parse2 | UNKNOWN：locations、warnings 无映射（x、errors 已证） |
+  | seedparse2-2 | parse2 | UNKNOWN：四组复合 flags 均无映射 |
+  | com-seedgen | com | UNKNOWN：COM 路线未测 |
+  预期 queue 出口中 seedparse2-1/-2、com-seedgen（及冷缓存时的 gen 族）为 RESOURCE_UNKNOWN 未执行义务，按 preauth 记缺证，不自动放行、不计 PASS；扩展映射属协议改动，须另裁。
