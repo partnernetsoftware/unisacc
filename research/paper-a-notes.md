@@ -59,3 +59,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~15:52 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「阶段组合／表合并＝可独立命题 / stage combo · table merge」；父节点回 A2 RQ1（和／或意向 C）→A；不挡投稿；不起稿；seal-combo-row／seal-combo-fail 不重做。见 [`notes/paper-a-derive-purify-combo-merge-theorem-20261010-1552.md`](notes/paper-a-derive-purify-combo-merge-theorem-20261010-1552.md)。
 
 - **2026-10-10 ~16:15 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「宽度作为一种复杂度／W* vs training-width race」；父节点回 A2 RQ1→A；不挡投稿；不起稿；seal-adam-width 不重做。见 [`notes/paper-a-derive-purify-width-complexity-wstar-20261010-1615.md`](notes/paper-a-derive-purify-width-complexity-wstar-20261010-1615.md)。
+- **2026-10-10 ~16:29 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「有限性／有限控制表的系统构造（阶段分类 + 系统造表方法）」；父节点回意向 E→A；不挡投稿；不起稿；paper-e-intent 不重写。见 [`notes/paper-a-derive-purify-finiteness-control-tables-20261010-1629.md`](notes/paper-a-derive-purify-finiteness-control-tables-20261010-1629.md)。
+
