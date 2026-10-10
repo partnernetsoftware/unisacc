@@ -47,9 +47,20 @@ r = {row['suite']: row for row in t['rows']}
 assert r['x-1']['sibling_max_s'] == 30.0 and r['x-1']['hint'].startswith('risk'), r       # sibling needed 30 s > tail 10 s
 assert r['y-1']['hint'].startswith('UNKNOWN'), r                                         # no sibling evidence: UNKNOWN, not safe
 c = A.summarise(A.replay(['START p limit=9 kind=full', 'DONE p rc=0 1.00s', 'START q limit=9 kind=full', 'DONE q rc=1 1.00s wrong']))
-good = {'jobs': 2, 'pass': 1, 'classes': {'NEEDS_RULING': 1}, 'rows': [{'suite': 'q', 'cls': 'NEEDS_RULING'}]}
+good = {'jobs': 2, 'pass': 1, 'classes': {'NEEDS_RULING': 1}, 'rows': [{'suite': 'q', 'cls': 'NEEDS_RULING', 'rc': 1}]}
 assert A.conserve(c, good)['ok'], A.conserve(c, good)
 for bad in ({**good, 'pass': 2}, {**good, 'rows': []}, {**good, 'rows': [{'suite': 'p', 'cls': 'X'}, {'suite': 'q', 'cls': 'NEEDS_RULING'}]},
-            {**good, 'rows': good['rows'] + [{'suite': 'z', 'cls': 'X'}]}, {**good, 'classes': {'NEEDS_RULING': 2}}):
+            {**good, 'rows': good['rows'] + [{'suite': 'z', 'cls': 'X'}]}, {**good, 'classes': {'NEEDS_RULING': 2}},
+            {**good, 'rows': [{'suite': 'q', 'cls': 'NEEDS_RULING', 'rc': 142}]},                       # red with the wrong rc
+            {**good, 'classes': {'HOST_TIMEOUT': 1}, 'rows': [{'suite': 'q', 'cls': 'NEEDS_RULING', 'rc': 1}]}):   # class swapped
     assert not A.conserve(c, bad)['ok'], bad
-print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')
+import json as _j
+wl = A.windows(['START a limit=9 kind=full', 'DONE a rc=0 2.00s', 'window 1 rc=75 10:00:00', 'START b limit=9 kind=tail', 'DEFER b rc=142 3.00s',
+                'window 2 rc=75 10:01:00', 'window 3 rc=0 10:02:00'])
+ev = [_j.dumps(x) for x in ({'event': 'begin', 'id': 'w1', 'run': 'R', 'subphase': 'window-1', 'mono': 1.0, 'boot_id': 'b'}, {'event': 'end', 'id': 'w1', 'mono': 11.0, 'boot_id': 'b'},
+                            {'event': 'begin', 'id': 'w2', 'run': 'R', 'subphase': 'window-2', 'mono': 20.0, 'boot_id': 'b'}, {'event': 'end', 'id': 'w2', 'mono': 25.0, 'boot_id': 'x'},
+                            {'event': 'begin', 'id': 'w3', 'run': 'R', 'subphase': 'window-3', 'mono': 30.0, 'boot_id': 'b'})]
+jw = A.join_windows(wl, A.stage_windows(ev, 'R'))
+assert [r['wall_s'] for r in jw['rows']] == [10.0, None, None], jw     # other boot and missing end: UNKNOWN, never inferred
+assert jw['ends_in_windows'] == 2 and jw['rows'][0]['passed'] == 1 and jw['rows'][1]['deferred'] == 1 and jw['no_progress'] == [3], jw
+print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, per-window join with stagelog (UNKNOWN wall never inferred), WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')

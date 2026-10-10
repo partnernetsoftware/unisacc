@@ -104,10 +104,61 @@ def conserve(summary, exit_json):
            'foreign': sorted(set(names) - set(fin)),
            'listed_rc0': sorted(n for n in names if fin.get(n) == '0'),          # a PASS hidden in a class
            'unlisted_not_rc0': sorted(n for n in unlisted if fin[n] != '0')}    # a red with no class
-    out['ok'] = (not (out['duplicates'] or out['foreign'] or out['listed_rc0'] or out['unlisted_not_rc0'])
+    hist = collections.Counter(r['cls'] for r in rows)
+    out['rc_mismatch'] = sorted(r['suite'] for r in rows if r['suite'] in fin and str(r.get('rc')) != str(fin[r['suite']]))
+    out['class_histogram_mismatch'] = {k: [hist.get(k, 0), v] for k, v in exit_json.get('classes', {}).items() if hist.get(k, 0) != v}
+    out['class_histogram_mismatch'].update({k: [v, 0] for k, v in hist.items() if k not in exit_json.get('classes', {})})
+    out['ok'] = (not (out['duplicates'] or out['foreign'] or out['listed_rc0'] or out['unlisted_not_rc0'] or out['rc_mismatch'] or out['class_histogram_mismatch'])
                  and exit_json.get('pass') == len(unlisted) and exit_json.get('jobs') == len(fin)
                  and sum(exit_json.get('classes', {}).values()) == len(names))
     return out
+
+
+WINDOW = re.compile(r'window (\d+) rc=(\S+) ')
+
+
+def windows(lines):
+    """WF5: per queue window (closed by gatequeue's `window N rc=R hh:mm:ss` line) the attempts it ended:
+    new final results, tail successes, deferrals, UNKNOWN-free job-seconds.  Kept apart from wall clock."""
+    out, cur = [], collections.Counter(); secs = 0.0
+    for line in lines:
+        m = WINDOW.match(line)
+        if m:
+            out.append({'window': int(m.group(1)), 'rc': m.group(2), **cur, 'job_seconds': round(secs, 1)}); cur = collections.Counter(); secs = 0.0
+            continue
+        m = END.match(line)
+        if m:
+            ev, rc, sec = m.group(1), m.group(3), float(m.group(4))
+            cur['ends'] += 1; secs += sec
+            if ev == 'DONE': cur['final'] += 1
+            if ev == 'DEFER': cur['deferred'] += 1
+            if ev == 'DONE' and rc == '0': cur['passed'] += 1
+    return out
+
+
+def stage_windows(events, run):
+    """Wall seconds of each window-N segment of RUN from a stagelog events.jsonl (begin/end paired by id);
+    a begin without an end or on another boot is UNKNOWN (never inferred)."""
+    begins, ends = {}, {}
+    for line in events:
+        d = json.loads(line)
+        if d.get('event') == 'begin' and d.get('run') == run and str(d.get('subphase', '')).startswith('window-'):
+            begins[d['id']] = d
+        elif d.get('event') == 'end':
+            ends[d['id']] = d
+    out = {}
+    for i, b in begins.items():
+        e = ends.get(i); n = int(b['subphase'].split('-')[1])
+        out[n] = round(e['mono'] - b['mono'], 2) if e and e.get('boot_id') == b.get('boot_id') else None
+    return out
+
+
+def join_windows(wins, walls):
+    rows = [{**w, 'wall_s': walls.get(w['window'])} for w in wins]
+    idle = [r['window'] for r in rows if not r.get('final') and not r.get('deferred') and not r.get('ends')]
+    return {'ends_in_windows': sum(r.get('ends', 0) for r in rows), 'windows': len(rows), 'stagelog_windows': len(walls),
+            'stagelog_only': sorted(set(walls) - {r['window'] for r in rows}), 'unknown_wall': sorted(r['window'] for r in rows if r['wall_s'] is None),
+            'no_progress': idle, 'wall_s_sum': round(sum(r['wall_s'] or 0 for r in rows), 1), 'rows': rows}
 
 
 def reconcile(summary, results):
@@ -128,10 +179,23 @@ def strict_rc(s):
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument('log'); ap.add_argument('--results'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--exittable', help='WF5: exittable --json output to check rc-class conservation against')
+    ap.add_argument('--stagelog', help='WF5: stagelog events.jsonl for the per-window wall-clock join')
+    ap.add_argument('--run', help='stagelog run id (e.g. q-ba3f40cb4fba)')
     ap.add_argument('--tail-risk', action='store_true', help='WF2: sibling-shard risk hints for tail deferrals')
     ap.add_argument('--strict', action='store_true', help='exit 1 on pending, unknown, evidence gaps or any reconcile difference')
     a = ap.parse_args(argv)
     chains = replay(open(a.log).read().splitlines())
+    if a.stagelog:
+        if not a.run or a.tail_risk or a.strict or a.results or a.exittable: print('attemptchain: --stagelog needs --run and runs alone', file=sys.stderr); return 2
+        j = join_windows(windows(open(a.log).read().splitlines()), stage_windows(open(a.stagelog), a.run))
+        if a.json: print(json.dumps(j, indent=1)); return 0
+        total = sum(1 for l in open(a.log) if END.match(l))
+        if j['ends_in_windows'] != total: print('attemptchain: %d ends outside any closed window (of %d) -- UNKNOWN window' % (total - j['ends_in_windows'], total))
+        print('windows %d  stagelog windows %d  unknown wall %s  no-progress %s  window wall sum %.1fs (wall, not job-seconds)'
+              % (j['windows'], j['stagelog_windows'], j['unknown_wall'] or '-', j['no_progress'] or '-', j['wall_s_sum']))
+        for r in j['rows']: print('  w%-4d rc=%-3s wall %7s  ends %3d  final %3d  passed %3d  deferred %3d  job %7.1fs'
+              % (r['window'], r['rc'], r['wall_s'], r.get('ends', 0), r.get('final', 0), r.get('passed', 0), r.get('deferred', 0), r['job_seconds']))
+        return 0
     s = summarise(chains)
     if a.tail_risk and (a.strict or a.results or a.json or a.exittable):
         print('attemptchain: --tail-risk is a separate hint report; run --strict/--results/--json on their own', file=sys.stderr); return 2
