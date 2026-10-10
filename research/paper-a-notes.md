@@ -9,7 +9,7 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 ## 投稿前必须补齐（证据）
 
 - **部分完成：同身份重测表 4（§8.1 第 1 条）。** 只读回执核对：第 1–2 行与 `archive/research/r9/r9-current-bench-20260928.json`（`c4993fd0…`）一致；第 3–4 行声称的 `c94cf5fe…` 与稿内 fib/self 经典列在仓库内**无**基准 JSON，最近 `candidate-bench` 为另一产物且经典列对不上。见 [`seal-table4-same-identity-20261009.md`](seal-table4-same-identity-20261009.md)。同身份四行重测仍阻塞于政委选定投稿产物；未改表 4 单元格。
-- **部分完成：冻结最终身份。** 附录 A 已记录 v0.0.13 与 v0.0.14 的产物身份和回执；投稿所用最终身份尚未冻结，表 2 与 §7.1 的门禁数字仍需绑定到同一身份并补构建命令。
+- **部分完成：冻结最终身份。** 附录 A 已记录 v0.0.13 与 v0.0.14 的产物身份和回执；投稿所用最终身份尚未冻结，表 2 与 §7.1 的门禁数字仍需绑定到同一身份并补构建命令。冻结／绑定／构建命令程序**仍未完成**（开放实证可做；表 2／§7.1 同身份绑定工作仍保留；但**非**理论／根主张闸门；GATE 升格已切见 [`notes/paper-a-derive-purify-final-identity-freeze-not-a-gate-20261011-0510.md`](notes/paper-a-derive-purify-final-identity-freeze-not-a-gate-20261011-0510.md)）。
 - **部分完成：平台执行矩阵。** 2026-10-09 已从发布回执盘点证据类别（[`seal-platform-matrix-inventory-20261009.md`](seal-platform-matrix-inventory-20261009.md)）+ 同身份脚手架（[`seal-same-identity-matrix-scaffold-20261009.md`](seal-same-identity-matrix-scaffold-20261009.md)）；六 runner 演示、Lima arm64 全套件、Windows VM 自重建、lnx/x86_64 本地套件未验、Windows -run 仅 CI 等均有回执字段。2026-10-10 ~16:45 已升格为封口硬缺口钉（[`notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md`](notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md)）；投稿仍缺**同一冻结身份**下的原生执行矩阵表（§8.1 第 3 条），不能单靠回执闭合；tip Latest 已漂至 v0.0.38，§8.1 名义仍 v0.0.19。
 - **部分完成：表 5 重测或降级。** 正文已将 tcc/cc 对比注明为决策网络实例的历史测量；投稿前仍需决定是否补同负载的网络编译器数字。
 
@@ -81,3 +81,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-11 ~04:12 心跳（切口 E 衍生净化，未改稿内数字）：** 登记「算法 1 五小表贪心-vs-精确逐表对比 + 贪心运行时间完稿 ≠ A 理论／投稿闸门」；父节点回 A（经构造+T1+§3.2 诚实合计披露 + seal 禁最优性定理）；不挡投稿；不起稿；不发明逐表数字；不重做 algo1-not-optimality-1930／seal-algo1；不降级 §8.1／8509-8769／Ο1/Ο2。见 [`notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md`](notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md)。
 
 - **2026-10-11 ~04:59 心跳（切口 E 衍生净化，未改稿内数字）：** 登记「同等覆盖维护面行数趋势实测完稿（`.py`／`.c`／`.tsv`）≠ A 理论／投稿闸门」；父节点回 A（经构造+T1+§8 诚实成本披露 + tip 类别快照台账 + seal 禁快照＝趋势定理）；不挡投稿；不起稿；不发明行数趋势数字；不重做 maint-surface-not-trend-1952／1812／seal-maint；不降级 §8.1／8509-8769／Ο1/Ο2。见 [`notes/paper-a-derive-purify-maint-surface-equal-coverage-trend-measure-not-a-gate-20261011-0459.md`](notes/paper-a-derive-purify-maint-surface-equal-coverage-trend-measure-not-a-gate-20261011-0459.md)。
+
+- **2026-10-11 ~05:10 心跳（切口 E 衍生净化，未改稿内数字）：** 登记「冻结最终投稿身份完稿（附录 A 已有 v0.0.13／v0.0.14 回执；表 2 与 §7.1 须同身份绑定并补构建命令）≠ A 理论／根主张闸门」；父节点回 A（经构造+T1+unisacc 实证+诚实披露最终身份未冻／双身份 8509/8769）；不挡投稿；不起稿；不降级开放实证绑定工作；不重做 8509-8769 gap-nail／平台程序／Ο1·Ο2 决策卡；不降级 §8.1／8509-8769／Ο1/Ο2。见 [`notes/paper-a-derive-purify-final-identity-freeze-not-a-gate-20261011-0510.md`](notes/paper-a-derive-purify-final-identity-freeze-not-a-gate-20261011-0510.md)。
