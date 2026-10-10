@@ -30,3 +30,15 @@
 4. `ledgercheck --final` 0 未结、carry 0；`freezecheck`、`subtract-safety`、`gate-layers`、`script-inventory`、`gate-infra(-38)` 绿。
 5. CI release-check 对封存提交绿；封存（seal_candidate.sh）与 rc 标签按 RELEASE-PIPELINE §9/§28 顺序；公开与签名另按政委/董秘授权。
 6. 不改验收措辞、不抬限时、不删测试；所有 H1/H2 条目随版本说明列明为宿主基线而非通过。
+
+## 4. §3 裁定落地与收口措辞（2026-10-10；实际跑过）
+
+董秘代裁 §3 选 1：认 ver038（650/650 FINAL）+ 具名补验为完整出口，不开新完整全量。具名补验（current main，同候选 740007ef，真实 gate，各 rc0，cc 回执）：gate-infra-38；lib-union16-callback-1..5、lib-union16-direct-1..5（libraryunion16check.py 共用者）；publish-order、com-auditnet、lib-ffi-provider（变更闭包表其余现役门禁）。exec-container、ffi-bridge、lib-source-longdouble-import-rosetta 为 gatedeps 旧声明、非现役门禁，无可跑。变更闭包表：`research/c38-s3-change-closure.md`。
+
+**收口措辞**：0.0.38 流水线提效可度量收口——前基线 full038c 与后验证 ver038 均为完整出口；同输入 468 项末次执行成本持平（−1.0%），整轮 175→153 窗、8533.5→7301.0 s、中途失效 163→0、四段→单段、tail 延期 175→87，与返工减少和调度改变一致、贡献未拆分、本机单样本；红项全部按两次裁定与 SC1 记账，产品验收措辞未改。
+
+## 5. 进入 0.0.38 Draft 的剩余前提（报告，未执行）
+
+1. `src/version.h` 仍为 0.0.37，候选 740007ef 即已公开的 v0.0.37 产物。0.0.38 发布须先做版本号提交——它改变产品闭包，按 §24/§27 与本清单 §3-2 须重新冻结、构造同源候选与 stage2=stage3 定点，并对新候选重做出口（本轮 ver038 证据只证流水线与套件，不能签给新二进制）。
+2. `ledgercheck --final plans/v0.0.38.md` 仍有 19 行未结（K2a–c、K1、H37、F4″、H1、H2、COV1、SC1、W2、E57、X3、L2、L1′、L1b′、A1、N1、顺延占位），须逐行结算或顺延。
+3. 其余：freezecheck 待版本提交后进入冻结窗；subtract-safety 0；gate-layers/script-inventory/gate-infra 绿；CI release-check、封存与 rc 按 §9/§28；公开另由政委/董秘授权。
