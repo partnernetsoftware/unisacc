@@ -20,7 +20,7 @@ case "$FAKE_MODE" in
 esac
 UA
 chmod +x "$T/ua"
-run() { FAKE_MODE=$1 UA="$T/ua" UA_RUN="$T/ua" DIFFO_REFUSE="$T/refuse" WF1_PRECHECK=1 PROBES=$P SHARD=1/1 \
+run() { FAKE_MODE=$1 UA="$T/ua" UA_RUN="$T/ua" DIFFO_REFUSE="${LEDGER:-$T/refuse}" DIFFO_REFUSE_SELFTEST=${SELFTEST:-1} WF1_PRECHECK=1 PROBES=$P SHARD=1/1 \
         DIFFO_CACHE="$T/cache" python3 tests/bound.py 55 ./tests/difftest_o.sh > "$T/out.$1" 2>&1; echo $?; }
 fail() { echo "namedrefuse: $*"; tail -3 "$T/out.$2"; exit 1; }
 [ "$(run refuse)" = 0 ] && grep -q 'named 1' "$T/out.refuse" || fail "exact refusal at all levels not accepted" refuse
@@ -29,4 +29,12 @@ for m in wrong signal diag mixed; do
   [ "$(run $m)" != 0 ] && grep -q "FAIL fb12-31-unused-static-refs-undefined named refusal broken" "$T/out.$m" || fail "$m was not a FAIL" $m
 done
 [ "$(run agree)" != 0 ] && grep -q 'revived 1' "$T/out.agree" || fail "agreeing everywhere was not REVIVED" agree
-echo "namedrefuse  exact refusal at -O0/-O1/-O2 accepted and never counted as agree; wrong, signal, other diagnostic, partial refusal FAIL; agreement REVIVED"
+# fail closed: missing ledger, empty diagnostic, duplicate probe, or an override without the self-test flag stop
+# the run with rc 2 even for a wrong-output driver (never fall back to knownfail)
+printf 'fb12-31-unused-static-refs-undefined\t \tx\n' > "$T/empty"
+printf 'fb12-31-unused-static-refs-undefined\tnot covered: a\tx\nfb12-31-unused-static-refs-undefined\tnot covered: a\tx\n' > "$T/dup"
+for L in "$T/missing" "$T/empty" "$T/dup"; do
+  [ "$(LEDGER=$L run wrong)" = 2 ] || fail "ledger $L did not stop the run" wrong
+done
+[ "$(SELFTEST=0 run wrong)" = 2 ] || fail "DIFFO_REFUSE without the self-test flag was honoured" wrong
+echo "namedrefuse  exact refusal at -O0/-O1/-O2 accepted and never counted as agree; wrong, signal, other diagnostic, partial refusal FAIL; agreement REVIVED; missing/empty/duplicate ledger and unflagged override stop the run"
