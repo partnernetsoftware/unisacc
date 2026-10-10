@@ -66,3 +66,4 @@
 - 唯一 NEEDS_RULING `gate-infra`：compilercheck 闭包对照中 README 夹具编辑波及 7 个 exec-driver 套件，原因是 tests/gatedeps.json 已审核树哈希早于 SC1 修片与版本提交（§0：最后一步刷新）。28633d5e `make gatedeps` 刷新后单项 gate-infra rc0（16 s）。tests/ 不在产品闭包，候选 ba3f40cb 不变。
 - 作业秒分解（c38-decomp.py，同口径）：有效 565 次 / 7457.7 s；延期 160 / 4130.2；终红/未执行 85 / 1509.2；合计 810 / 13097.0（ver038 799 / 13981.8）。
 - ledgercheck --final 0 未结、carry 0。
+- 复核补充（cdx/cdx2 独核：SHA256SUMS OK，分类 565/34/11/6/6/27/1 合 650，5593 s，INVALIDATE 0，定点身份匹配）：gate-infra 补验首跑输出未存档，已于 9612109f 后在同 gatedeps 状态下再跑一次并存 `~/.unisacc/evidence/c38-final/gate-infra-recheck.log`（rc0、16 s，含 HEAD 与时刻），SHA256SUMS 已重算；补验与原账 NEEDS_RULING 1 分列。state 中 `stalled=1` 原样保留，未凭字段判定曾停滞，末窗 1.34 s 与 BLOCKED 27 零耗时的事件解释待补。后续冻结时 gatedeps 应在稳定点核 reviewed snapshot 有效性：输入有变须真实再审，不只刷新 hash（cdx2）。DEFER 160 次 / 4130.2 作业秒非可省墙钟；与 ver038 是不同候选，不作净提速对比。
