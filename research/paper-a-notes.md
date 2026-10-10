@@ -53,3 +53,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~14:40 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「自举不动点 / bootstrap fixed-point theorem」；父节点回 A（及已封字节自举边界）；A 只保留五目标 N1=N2=N3；不动点 OUT；不起稿。见 [`notes/paper-a-derive-purify-bootstrap-fixedpoint-20261010-1440.md`](notes/paper-a-derive-purify-bootstrap-fixedpoint-20261010-1440.md)。
 
 - **2026-10-10 ~14:57 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立测量侧注「表 5 DENSE 决策网络实例 vs tcc/cc 历史耗时」；父节点回 A；不挡投稿；不起稿；不闭合 §8.1 第 2 条重测/降级。见 [`notes/paper-a-derive-purify-table5-timing-20261010-1457.md`](notes/paper-a-derive-purify-table5-timing-20261010-1457.md)。
+
+- **2026-10-10 ~15:43 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「局部性＝构造法独有编辑定理 / edit locality as construction-unique theorem」；父节点回 A2 RQ2→A；不挡投稿；不起稿；seal-rebuild 不重做。见 [`notes/paper-a-derive-purify-locality-edit-theorem-20261010-1543.md`](notes/paper-a-derive-purify-locality-edit-theorem-20261010-1543.md)。
