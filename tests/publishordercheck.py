@@ -38,12 +38,23 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], MOCK_LOG=str(log))
     expected = hashlib.sha256(b'signed asset').hexdigest()
 
-    def run(want_hash):
+    def acceptance(eligible, signed):
+        path = work / ('acc-%s-%s.json' % (eligible, signed[:4]))
+        path.write_text('{"release_eligible": %s, "windows": {"after_sha256": "%s"}}' % (eligible, signed))
+        return str(path)
+
+    def run(want_hash, acc=None):
         log.write_text('')
-        result = subprocess.run(['bash', str(ROOT / 'release/tools/publish.sh'), 'v-mock', want_hash],
+        acc = acc or acceptance('true', want_hash)
+        result = subprocess.run(['bash', str(ROOT / 'release/tools/publish.sh'), 'v-mock', want_hash, acc],
                                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
         return result, log.read_text().splitlines()
 
+    # 0.0.39 WF3 negative: not eligible, other bytes or no receipt -> refused before any gh call
+    for bad in (acceptance('false', expected), acceptance('true', '1' * 64), str(work / 'missing.json')):
+        result, rows = run(expected, bad)
+        assert result.returncode != 0 and 'refused' in result.stdout, (bad, result.stdout)
+        assert not rows, (bad, rows)
     result, rows = run('0' * 64)
     assert result.returncode != 0, result.stdout
     assert any('release download' in row for row in rows), rows   # 0.0.21: a draft asset is fetched with the authenticated client
@@ -54,4 +65,4 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
     deleted = next(i for i, row in enumerate(rows) if 'delete-asset' in row)
     published = next(i for i, row in enumerate(rows) if 'release edit' in row)
     assert checked < deleted < published, rows
-print('publish order: wrong hash keeps draft and assets; correct hash verifies before removal and publication')
+print('publish order: ineligible/other-bytes/missing acceptance touches nothing; wrong hash keeps draft and assets; correct hash verifies before removal and publication')

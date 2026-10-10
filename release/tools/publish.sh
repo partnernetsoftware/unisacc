@@ -1,11 +1,20 @@
 #!/bin/bash
-# publish.sh TAG SIGNED_COM_SHA256 -- make a draft release public the unisacc way (R18-11 ③):
+# publish.sh TAG SIGNED_COM_SHA256 ACCEPTANCE_JSON -- make a draft release public the unisacc way (R18-11 ③):
 # verify the draft's signed unisacc.com before removing other assets or publishing;
 # then download the public asset and compare it with the signed hash again.
 # Prints the verdict; nothing here signs or edits the repository.
+# 0.0.39 WF3: ACCEPTANCE (the release acceptance receipt) must say release_eligible true for exactly
+# these signed bytes, or nothing is touched (0.0.38 published while the signing receipt said false).
 set -u
-TAG=${1:?tag}; WANT=${2:?signed sha256}
+TAG=${1:?tag}; WANT=${2:?signed sha256}; ACC=${3:?release acceptance receipt (research/r<N>-release-acceptance.json)}
 cd "$(dirname "$0")/../.." || exit 1          # gh needs the repository (0.0.19 published once with uploads failing outside it)
+python3 - "$ACC" "$WANT" <<'PY' || exit 1
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception as e: print('refused: no readable acceptance receipt:',e); sys.exit(1)
+if d.get('release_eligible') is not True: print('refused: acceptance receipt is not release_eligible'); sys.exit(1)
+if d.get('windows',{}).get('after_sha256')!=sys.argv[2]: print('refused: acceptance receipt names other signed bytes'); sys.exit(1)
+PY
 have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || exit 1
 case " $have " in *" unisacc.com "*) ;; *) echo "refused: no signed unisacc.com on $TAG yet"; exit 1;; esac
 case " $have " in *" unisacc-macos-universal.dmg "*) ;; *) echo "refused: no unisacc-macos-universal.dmg on $TAG yet"; exit 1;; esac

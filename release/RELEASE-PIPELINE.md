@@ -53,7 +53,7 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 - 托管 macOS runner 排队可达 30 分钟、速度波动大：CI 只允许重跑失败 job，不改源；`tools11`（tiny-regex test2）41–50 s 余量太薄，R11-1 拆分。
 
 ## 8. 发布
-**只发封存字节**：签名前 `before_sha256` 必须等于本机队列验证过的候选哈希（`release/candidate.json` 的 `unisacc_com_sha256`）；`release/tools/publish.sh TAG 签后sha` 先核对草稿字节再公开，公开后再下载比对。
+**只发封存字节**：签名前 `before_sha256` 必须等于本机队列验证过的候选哈希（`release/candidate.json` 的 `unisacc_com_sha256`）；`release/tools/publish.sh TAG 签后sha 验收回执`（0.0.39 WF3：验收回执须 `release_eligible: true` 且 `windows.after_sha256` 等于签后 sha，否则不动草稿）先核对草稿字节再公开，公开后再下载比对。
 **发布后立即**把本轮候选放回仓根作为本地“当前产品”（不跟踪，但门禁与 `MODEL_COM` 默认读它）：`cp <cand>/unisacc-next.com unisacc.com && cp <cand>/unisacc-next.com.build.json unisacc.com.build.json && rm -rf model-audit && cp -R <cand>/model-audit model-audit && python3 exec/c/provenance.py check unisacc.com`——放的是**未签名候选字节**（与 build.json 的 artifact_sha256 一致；签名后的字节只在 release 资产里）。0.0.13 发布后仓根仍是 0.0.12 的 df8cc9b4…，主人发现 `--version` 不对（2026-09-30）。
 签后产物从 run artifact `unisacc-company-signed-<attempt>` 下载，核对签前/签后 SHA 与尺寸，上传草稿，回执写入 `research/r<N>-release-acceptance.json`，`gh release edit --draft=false`。之后再提交回执/文档。
 
