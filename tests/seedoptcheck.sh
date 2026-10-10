@@ -105,15 +105,27 @@ for l in o1 o2; do
     r=$?; n=$(ls "$S/seedbin-$l" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}$')
     { [ "$r" -eq 0 ] && [ "$n" -eq 1 ] && cmp -s "$S/dflt-$l.json" "$S/py-$l.json"; } && ok "default-route $l (own keyed build)" || no "default-route $l (rc=$r builds=$n)"
 done
-# cache key is content of seed/*.[ch] (not gen.c mtime): unchanged reuses the keyed binary; json.h-only must rebuild
-bins0=$(ls -1 "$S/seedbin"/seed-gen-* 2>/dev/null | wc -l | tr -d ' ')
-rm -f "$S/dflt2.json"; env SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$S/dflt2.json"; r=$?
-bins1=$(ls -1 "$S/seedbin"/seed-gen-* 2>/dev/null | wc -l | tr -d ' ')
-{ [ "$r" -eq 0 ] && [ "$bins1" = "$bins0" ] && cmp -s "$S/dflt2.json" "$S/py-o1.json"; } && ok "default-route cache hit" || no "default-route spurious rebuild (rc=$r bins $bins0->$bins1)"
-printf '\n/* seedopt: json.h cache probe */\n' >> seed/json.h
-rm -f "$S/hdr.json"; env SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$S/hdr.json" 2>"$S/gd.err"; r=$?
-bins2=$(ls -1 "$S/seedbin"/seed-gen-* 2>/dev/null | wc -l | tr -d ' ')
-{ [ "$r" -eq 0 ] && [ "$bins2" -gt "$bins1" ] && cmp -s "$S/hdr.json" "$S/py-o1.json"; } && ok "json.h-only rebuild" || no "json.h-only did not rebuild (rc=$r bins $bins1->$bins2)"
+# cache key is content of seed/*.[ch] (not gen.c mtime).  All three calls run with SEED_GEN_BIN unset in one
+# fresh directory: the first builds cold (exactly one binary), the second must reuse it (same name, same bytes),
+# a json.h-only edit (scratch copy) must build a second one.  Binaries and .sha256 sidecars are counted apart.
+nbin() { ls "$S/seedbin" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}$'; }
+nsid() { ls "$S/seedbin" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256$'; }
+# a rebuild replaces the file (rm, then mv of a new one): name, inode, mtime_ns and bytes together tell a reuse
+# from a rebuild even when the compiler reproduces the same bytes
+snap() { python3 -c 'import hashlib,os,sys
+d=sys.argv[1]
+for f in sorted(os.listdir(d)):
+    st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "$S/seedbin"; }
+dg() { out=$1; rm -f "$out"; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" 2>"$S/gd.err"; }
+rm -rf "$S/seedbin"
+dg "$S/cold.json"; r=$?
+{ [ "$r" -eq 0 ] && [ "$(nbin)" -eq 1 ] && [ "$(nsid)" -eq 1 ] && cmp -s "$S/cold.json" "$S/py-o1.json"; } && ok "default-route cold build" || no "default-route cold build (rc=$r bins $(nbin) sidecars $(nsid))"
+snap0=$(snap)
+dg "$S/hit.json"; r=$?
+{ [ "$r" -eq 0 ] && [ -n "$snap0" ] && [ "$(snap)" = "$snap0" ] && cmp -s "$S/hit.json" "$S/py-o1.json"; } && ok "default-route cache hit" || no "default-route cache hit (rc=$r; directory changed or output differs)"
+printf '\n/* seedopt: json.h cache probe */\n' >> seed/json.h   # the scratch copy (cwd is the scratch tree)
+dg "$S/hdr.json"; r=$?
+{ [ "$r" -eq 0 ] && [ "$(nbin)" -eq 2 ] && [ "$(nsid)" -eq 2 ] && cmp -s "$S/hdr.json" "$S/py-o1.json"; } && ok "json.h-only rebuild" || no "json.h-only rebuild (rc=$r bins $(nbin) sidecars $(nsid))"
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$NEG") || exit 2
