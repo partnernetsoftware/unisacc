@@ -157,6 +157,7 @@ job rulingwait python3 ./tests/rulingwaitcheck.py   # 0.0.39 WF4: ruling request
 job namedrefuse ./tests/namedrefusecheck.sh   # 0.0.39 COV1: named refusals exact at every -O, REVIVED fails
 job checkrun ./tests/checkruncheck.sh   # 0.0.39: check status never taken from a pipe
 job commitgate ./tests/commitgatecheck.sh   # 0.0.39: red gate leaves no commit (scratch repo)
+job k2b K2B_UA=${UA:-/tmp/ua_ref} python3 ./tests/k2bcheck.py   # 0.0.40 K2b: narrow whitelist, whole-tree fallbacks, missed-run RED (scratch copy)
 job precommithook ./tests/precommithookcheck.sh   # 0.0.40-prep: local pre-commit routes shipping paths through commitgate (scratch repo)
 job whyrerun python3 ./tests/whyreruncheck.py   # 0.0.39: invalidation explainer (reasons per suite)
 job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fetch identity checks

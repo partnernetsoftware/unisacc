@@ -113,7 +113,7 @@ def gate_runner():
     keep = [l for l in text.splitlines() if not re.match(r'\s*(job |for .*; do .*job |\[ .*\] \|\| job )', l)]
     return hashlib.sha256('\n'.join(keep).encode()).hexdigest()
 
-def fingerprint(jobs, parts=None):
+def fingerprint(jobs, parts=None, revoked=()):
     """One tree inventory and one hash per file, shared by all suite stamps.
 
     Declarations are audited code snapshots, not automatic dependency discovery.
@@ -205,6 +205,55 @@ def fingerprint(jobs, parts=None):
     # another suite's declaration keeps every other result (0.0.28 measured 0% reuse because of these two)
     def stamp(value): return hashlib.sha256(portable(json.dumps(value, sort_keys=True)).encode()).hexdigest()
     global_inputs = None
+    # 0.0.40 K2b (机房主任 18:55, K2b-0=b): a declared, guard-matching suite narrows its stamp to its declared
+    # inputs ONLY when it is on the named whitelist (tests/k2b-whitelist.tsv: suite, declaration sha256,
+    # review file + its sha256, host) and nothing invalidates the entry; every other suite -- audited or not --
+    # hashes the whole tree.  `revoked` (from the run state) withdraws a suite after a missed-run RED.
+    whitelist = {}
+    wl_digest = digest('tests/k2b-whitelist.tsv')
+    if wl_digest != ['missing']:
+        for line in pathlib.Path('tests/k2b-whitelist.tsv').read_text().splitlines():
+            if not line.strip() or line.startswith('#'): continue
+            f = line.split('\t')
+            if len(f) == 6: whitelist[f[0]] = f[1:]   # suite, decl sha, review, review sha, hosts, conditions
+    host = '%s/%s' % (platform.system(), platform.machine())
+    def k2b(name, entry):
+        if name not in whitelist: return 'not whitelisted'
+        if name in revoked: return 'revoked in run state'
+        if K2B_FORCE_TREE: return 'forced whole tree (comparison run)'
+        decl_sha, review, review_sha, hosts, conds = whitelist[name]
+        raw = manifest.get('suites', {}).get(name, {})
+        decl = {'suite': raw, 'family': manifest.get('families', {}).get(raw.get('family')) if raw.get('family') else None}
+        if hashlib.sha256(json.dumps(decl, sort_keys=True).encode()).hexdigest() != decl_sha: return 'declaration changed'
+        if digest(review)[-1] != review_sha: return 'review record changed or missing'
+        if host not in hosts.split(','): return 'host %s not in %s' % (host, hosts)
+        for c in filter(None, conds.split(',')):   # e.g. UA=set: only the reviewed warm route; any other branch is whole tree
+            key, _, want = c.partition('=')
+            if want == 'set': return 'condition %s too weak: name the reviewed executable as %s=sha256:<hex>' % (c, key)
+            elif want.startswith('sha256:') and len(want) == 71:
+                if executables.get(key, {}).get('sha256') != want[7:]: return 'condition %s not met (unreviewed route)' % c
+            else: return 'condition %s has an unknown form (fail closed)' % c
+        if entry.get('dynamic', 'none') != 'none': return 'dynamic inputs not measured'
+        if any(v == 'missing' or (isinstance(v, list) and v[:1] == ['missing']) for v in k2b_toolchain().values()):
+            return 'toolchain identity incomplete'
+        scope = list(entry.get('files', [])) + list(entry.get('trees', []))
+        if scope and subprocess.check_output(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--'] + scope).strip(b'\0'):
+            return 'untracked file inside the declaration'
+        return None
+    tc = {}
+    def k2b_toolchain():
+        """the system cc's own programs (cc1/as/ld) and its version line: cc's path+sha alone misses them"""
+        if not tc:
+            cc = shutil.which(settings.get('CC') or 'cc')
+            tc['cc'] = [cc, digest(cc)] if cc else ['missing']
+            for prog in ('cc1', 'as', 'ld'):
+                try: path = subprocess.check_output([cc or 'cc', '-print-prog-name=' + prog], text=True, timeout=10).strip()
+                except (OSError, subprocess.SubprocessError): path = ''
+                path = shutil.which(path) or path
+                tc[prog] = [path, digest(path)] if path and os.path.isfile(path) else ['missing', path]
+            try: tc['version'] = subprocess.check_output([cc or 'cc', '--version'], text=True, timeout=10).splitlines()[0]
+            except (OSError, subprocess.SubprocessError, IndexError): tc['version'] = 'missing'
+        return tc
     inventories, family_tools = {}, {}
     extra_trees = {}
     result = {}
@@ -292,8 +341,10 @@ def fingerprint(jobs, parts=None):
                 sel.update(under(q))
                 for p in trees: sel.update(under(q, extra_trees[p]))
             inputs = sorted(sel)
-        if audited:
-            identity = [common, command, {n:digest(n) for n in inputs}]
+        why = k2b(name, entry) if audited else 'not audited'
+        narrow = audited and why is None
+        if narrow:
+            identity = [common, command, {n:digest(n) for n in inputs}, ['k2b-whitelist', whitelist[name]], k2b_toolchain()]
             labels = ['common', 'command', 'inputs']
             if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]; labels += ['settings', 'executables', 'inventory', 'toolchain']
             if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID); labels.append('location')
@@ -308,9 +359,62 @@ def fingerprint(jobs, parts=None):
             if name.startswith(LOCATION_BOUND): identity.append(ROOT_ID); labels.append('location')
             result[name] = stamp(identity)
         # 0.0.39: an optional, read-only view of the same identity by label (release/tools/whyrerun.py);
-        # it never changes the stamp above
-        if parts is not None: parts[name] = {'audited': bool(audited), **dict(zip(labels, identity))}
+        # it never changes the stamp above.  K2b: a narrow suite also gets its whole-tree stamp (double
+        # computation; identities only -- a missed run is decided by comparing RESULTS, not stamps)
+        if parts is not None:
+            parts[name] = {'audited': bool(audited), 'k2b': 'narrow' if narrow else why, **dict(zip(labels, identity))}
+            if narrow:
+                if global_inputs is None: global_inputs = {n:digest(n) for n in names}
+                tree = [common, command, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
+                if inventory: tree += [inventory, extra]
+                if name.startswith(LOCATION_BOUND): tree.append(ROOT_ID)
+                parts[name]['k2b_tree_stamp'] = stamp(tree)
     return result
+
+def k2b_revoked(state):
+    """K2b: suites whose narrow reuse was withdrawn in THIS run state (never edits the in-repo whitelist)."""
+    p = pathlib.Path(state) / 'k2b-revoked.json'
+    return frozenset(json.loads(p.read_text())['revoked']) if p.is_file() else frozenset()
+
+def k2b_output_digest(log):
+    """sha256 of a suite log with checkout/selector paths folded (portable); nothing else is masked"""
+    try: raw = pathlib.Path(log).read_bytes()
+    except FileNotFoundError: return None
+    # lossless: path folding works on bytes (surrogateescape keeps every non-UTF-8 byte and every newline form)
+    return hashlib.sha256(portable(raw.decode('utf-8', 'surrogateescape')).encode('utf-8', 'surrogateescape')).hexdigest()
+
+# K2B_FORCE_TREE=1 selects the whole-tree side of a K2b comparison.  It is taken out of the environment at import,
+# so no suite ever sees it and it is no execution identity (the two sides must have the same inputs).
+K2B_FORCE_TREE = os.environ.pop('K2B_FORCE_TREE', None) == '1'
+
+K2B_SCHEDULING = {'stamp', 'seconds', 'started', 'ended', 'attempt', 'limit', 'kind', 'k2b'}   # scheduling and provenance, not the result
+
+def k2b_compare(state, suite, reused, actual):
+    """K2b missed-run check: a narrow-reused RESULT against the same-input whole-tree run's RESULT.
+    Equal (rc and status) -> 'ok'.  Different -> RED: the suite is revoked in the run state and every
+    result recorded for it is moved to `voided` (kept, never deleted) with the reason."""
+    keys = sorted((set(reused) | set(actual)) - K2B_SCHEDULING)
+    if reused.get('out_sha') and actual.get('out_sha') and all(reused.get(k) == actual.get(k) for k in keys): return 'ok'
+    st = pathlib.Path(state); path = st / 'results.json'
+    data = json.loads(path.read_text()) if path.is_file() else {'results': {}}
+    # the suite itself and every suite that runs after it (gateorder.json, transitively): their results may
+    # rest on the missed run, so they are voided too -- kept under `voided` with the reason, one entry per attempt
+    polluted = {suite}
+    while True:
+        more = {n for n, prev in AFTER.items() if set([prev] if isinstance(prev, str) else prev) & polluted} - polluted
+        if not more: break
+        polluted |= more
+    for victim in sorted(polluted & set(data.get('results', {}))):
+        data.setdefault('voided', {}).setdefault(victim, []).append(dict(data['results'].pop(victim),
+            voided_because='k2b missed run of %s: narrow result %r != whole-tree result %r' % (suite, reused, actual)))
+    if polluted & set(data.get('voided', {})):
+        atomic(path, data)
+    rv = st / 'k2b-revoked.json'
+    cur = json.loads(rv.read_text()) if rv.is_file() else {'revoked': [], 'why': {}}
+    if suite not in cur['revoked']: cur['revoked'].append(suite)
+    cur['why'][suite] = 'RED: narrow reuse %r disagrees with whole-tree run %r' % (reused, actual)
+    atomic(rv, cur)
+    return 'RED'
 
 def stagelog_segments(args, *marks):
     """0.0.38 P6: one paired begin/end per window segment in the private stage log (never fatal)."""
@@ -421,7 +525,40 @@ def main():
                     help='monotonic second by which this window must have exited (outer bound)')
     # 0.0.38 P6: where this window's prologue/jobs/epilogue go in the private stage log (optional)
     ap.add_argument('--stagelog-run', default=None); ap.add_argument('--stagelog-parent', default=None)
+    ap.add_argument('--k2b-compare', nargs=2, metavar=('NARROW_STATE', 'TREE_STATE'),
+                    help='K2b: after merging a narrowing slice, compare each whitelisted suite\'s result in a narrow-reuse '
+                         'state with the same-input whole-tree run; any difference is RED (revoked + voided in NARROW_STATE)')
     args = ap.parse_args()
+    if args.k2b_compare:
+        narrow, tree = (pathlib.Path(x) for x in args.k2b_compare)
+        held = []
+        for side in (narrow, tree):   # both states are locked and read once: no running queue may change either
+            h = (side/'lock').open('a'); held.append(h)
+            try: fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError: sys.exit('k2b-compare: %s is locked by a running queue' % side)
+        A = json.loads((narrow / 'results.json').read_text()); B = json.loads((tree / 'results.json').read_text())
+        wl = ROOT / 'tests/k2b-whitelist.tsv'
+        names = [l.split('\t')[0] for l in (wl.read_text().splitlines() if wl.is_file() else []) if l.strip() and not l.startswith('#')]
+        verdict = {}
+        for n in names:
+            a, b = A.get('results', {}).get(n), B.get('results', {}).get(n)
+            ka, kb = (a or {}).get('k2b') or {}, (b or {}).get('k2b') or {}
+            why = ('missing result' if a is None or b is None else
+                   'different command/route between the two states' if A.get('jobs', {}).get(n) != B.get('jobs', {}).get(n) else
+                   'narrow side was not run narrow' if ka.get('scope') != 'narrow' else
+                   'command missing in a state' if not A.get('jobs', {}).get(n) else
+                   'tree side was not a named whole-tree run' if kb.get('scope') != 'forced whole tree (comparison run)' else
+                   'stamp provenance missing' if not ka.get('tree_stamp') or not ka.get('stamp') or not kb.get('stamp') else
+                   'state stamp map missing or malformed' if not isinstance(A.get('stamp'), dict) or not isinstance(B.get('stamp'), dict) or not A['stamp'].get(n) or not B['stamp'].get(n) else
+                   'result provenance disagrees with its state stamp' if A['stamp'][n] != ka.get('stamp') or B['stamp'][n] != kb.get('stamp') else
+                   'not the same inputs: narrow-side whole-tree stamp != tree-side stamp' if ka['tree_stamp'] != kb['stamp'] else
+                   'output digest missing' if not a.get('out_sha') or not b.get('out_sha') else None)
+            if why:
+                k2b_compare(narrow, n, a or {}, {'missing': why}); verdict[n] = 'MISSING (%s)' % why
+            else: verdict[n] = k2b_compare(narrow, n, a, b)
+        for n, v in sorted(verdict.items()): print('k2b-compare %-30s %s' % (n, v))
+        print('k2b-compare whitelisted %d  red %d  missing %d' % (len(names), sum(v == 'RED' for v in verdict.values()), sum(v.startswith('MISSING') for v in verdict.values())))
+        sys.exit(1 if any(v != 'ok' for v in verdict.values()) else 0)
     if not 1 <= args.jobs <= 4 or not 5 <= args.window <= 55: ap.error('jobs 1..4; window 5..55')
     if not args.list_selection and args.state is None:
         ap.error('--state is required when running suites')
@@ -444,9 +581,15 @@ def main():
         ap.error('duplicate/unknown exclusive suite (must belong to selected jobs)')
     state = args.state.resolve(); state.mkdir(parents=True, exist_ok=True)
     lock = (state/'lock').open('a'); fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    stamp = fingerprint(jobs); path = state/'results.json'
+    revoked = k2b_revoked(state)
+    k2b_parts = {}
+    try: stamp = fingerprint(jobs, k2b_parts, revoked=revoked)
+    except TypeError: stamp = fingerprint(jobs)   # a test double with the 0.0.38 one-argument signature
+    path = state/'results.json'
     data = json.loads(path.read_text()) if path.is_file() else {'stamp':stamp, 'jobs':jobs, 'exclusive':sorted(exclusive), 'results':{}}
     resume(data, stamp, {n:portable(c) if isinstance(c, str) else json.loads(portable(json.dumps(c))) for n, c in jobs.items()}, exclusive)
+    # 0.0.40 K2b: per suite, the scope this run used and (narrow suites) the same-input whole-tree stamp
+    data['k2b'] = {n: {'scope': v.get('k2b'), 'tree_stamp': v.get('k2b_tree_stamp') or (stamp.get(n) if isinstance(stamp, dict) else None)} for n, v in k2b_parts.items()}
     atomic(path, data)
     # Classic and network drivers, and different concurrency, have different costs.
     # 0.0.33 Q1: path-valued selectors name a per-round scratch path; keyed by the path, every
@@ -616,6 +759,9 @@ def main():
                 # a result, a first retry or a first deferral is progress; a repeated deferral is not
                 if progress: data['window']['completed'] = data['window'].get('completed', 0) + 1
                 data.get('inflight', {}).pop(n, None)
+                if n in data['results']:   # 0.0.40 K2b: an output digest so a missed run can be judged on output, not rc alone
+                    data['results'][n]['out_sha'] = k2b_output_digest(state/(n+'.log'))
+                    data['results'][n]['k2b'] = dict(data.get('k2b', {}).get(n, {}), stamp=stamp.get(n) if isinstance(stamp, dict) else None)   # this run's own scope, not the window's
                 atomic(path,data); atomic(histpath,history)
                 lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
                 print('DONE' if n in data['results'] else 'DEFER',n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
@@ -650,7 +796,7 @@ def main():
     if args.com:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
                         os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
-    after = fingerprint(jobs)
+    after = fingerprint(jobs, revoked=revoked) if revoked else fingerprint(jobs)
     t_end = time.monotonic()
     data['window'].update(prologue_s=round(t_jobs-t_begin,3), jobs_s=round(t_epi-t_jobs,3), epilogue_s=round(t_end-t_epi,3))
     # 0.0.38: remember the slowest whole tail (reaping, saves, provenance, fingerprint) for the next reserve

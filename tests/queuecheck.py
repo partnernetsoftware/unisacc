@@ -182,8 +182,28 @@ with tempfile.TemporaryDirectory() as td:
         'guards':{'tests/'+n+'check.py':hashlib.sha256((private/('tests/'+n+'check.py')).read_bytes()).hexdigest()}}
         for n in ('docs','bound')}}
     dep=private/'tests/gatedeps.json';dep.write_text(json.dumps(declarations))
+    # 0.0.40 K2b (机房主任 19:00, K2b-0=b): a declared suite narrows only when it is on the named whitelist.
+    # Class 1 -- NOT whitelisted: every audited suite falls back to the whole tree.
     with patch.object(q,'ROOT',private), patch.dict(os.environ,environment,clear=True):
         os.chdir(private)
+        before=q.fingerprint(probe); r=private/'README.md'; o=r.read_bytes(); r.write_bytes(o+b'# edit\n')
+        after=q.fingerprint(probe); r.write_bytes(o)
+        assert {n for n in probe if before[n]!=after[n]}==set(probe), 'K2b: a non-whitelisted audited suite kept a narrow stamp'
+        saved={'stamp':before,'jobs':probe,'exclusive':[],'results':{n:{'rc':0} for n in probe}}
+        q.resume(saved,after,probe,set())
+        assert not saved['results'], 'K2b: resume kept a non-whitelisted result across an unrelated change'
+    # Class 2 -- a controlled, complete whitelist (fixture): the selective-reuse expectations below hold.
+    (private/'research').mkdir(); (private/'research/review.md').write_text('fixture review\n')
+    rsha=hashlib.sha256((private/'research/review.md').read_bytes()).hexdigest()
+    host='%s/%s'%(q.platform.system(),q.platform.machine())
+    (private/'tests/k2b-whitelist.tsv').write_text(''.join('%s\t%s\tresearch/review.md\t%s\t%s\t\n'%(n,
+        hashlib.sha256(json.dumps({'suite':declarations['suites'][n],'family':None},sort_keys=True).encode()).hexdigest(),rsha,host)
+        for n in ('docs','bound')))
+    subprocess.run(['git','-C',str(private),'add','-A'],check=True,timeout=5)   # untracked inputs would void the narrow stamp
+    with patch.object(q,'ROOT',private), patch.dict(os.environ,environment,clear=True):
+        os.chdir(private)
+        pp={}; q.fingerprint(probe,pp)
+        assert {n for n,v in pp.items() if v['k2b']=='narrow'}=={'docs','bound'}, ('K2b fixture whitelist not narrow', {n:v['k2b'] for n,v in pp.items()})
         def changed(path, expected):
             before=q.fingerprint(probe);original=path.read_bytes()
             path.write_bytes(original+(b' ' if path.suffix=='.json' else b'# edit\n'))
@@ -315,7 +335,17 @@ def compilercheck_closure_controls(queue, source_root, declaration_path=None):
             declared['suites'][n]={'command':probe[n],'files':[file]+(['README.md'] if n=='docs' else []),
                 'guards':{file:hashlib.sha256((fixture/file).read_bytes()).hexdigest()}}
         (fixture/'tests/gatedeps.json').write_text(json.dumps(declared))
+        # 0.0.40 K2b (机房主任 19:00): this fixture's reviewed closures are on a controlled whitelist (class 2);
+        # without it every audited suite hashes the whole tree (class 1, checked in the closures block above)
+        (fixture/'research').mkdir(exist_ok=True); (fixture/'research/review.md').write_text('fixture review\n')
+        rsha=hashlib.sha256((fixture/'research/review.md').read_bytes()).hexdigest()
+        host='%s/%s'%(queue.platform.system(),queue.platform.machine())
+        def dsha(n):
+            e=declared['suites'][n]
+            return hashlib.sha256(json.dumps({'suite':e,'family':declared['families'].get(e.get('family')) if e.get('family') else None},sort_keys=True).encode()).hexdigest()
+        (fixture/'tests/k2b-whitelist.tsv').write_text(''.join('%s\t%s\tresearch/review.md\t%s\t%s\t\n'%(n,dsha(n),rsha,host) for n in sorted(declared['suites'])))
         subprocess.run(['git','init','-q',str(fixture)],check=True,timeout=5)
+        subprocess.run(['git','-C',str(fixture),'add','-A'],check=True,timeout=5)
         ua=temp/'ua';model=temp/'model';ua.write_text('#!/bin/sh\nexit 0\n');model.write_bytes(ua.read_bytes());ua.chmod(0o755);model.chmod(0o755)
         tool=temp/'tools';tool.mkdir();awk=tool/'awk';awk.write_text('#!/bin/sh\nexit 0\n');awk.chmod(0o755)
         environment={k:v for k,v in os.environ.items() if k not in ('UA','UA_RUN','MODEL_COM','TOOLS_UA','CORPUS_UA','UNISA_CONTAINER','UNISA_KERNEL','TERM_SESSION_ID')}
