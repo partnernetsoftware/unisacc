@@ -1,8 +1,8 @@
-/* ASan/UBSan fuzz driver for json.c (untrusted model replies). Test harness, not part of csih. */
+/* ASan/UBSan fuzz driver for json.cx (untrusted model replies). Test harness, not part of csih. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-/* json.h comes from -include; json.c is linked as its own unit (no source #include). */
+/* json.h comes from -include; json.cx is linked as its own unit (no source #include). */
 static unsigned long long rng = 0x9e3779b97f4a7c15ULL;
 static unsigned rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (unsigned)rng; }
 static const char seed[] = "{\"a\":[1,-2.5e3,true,null,\"x\\u00e4\\n\"],\"b\":{\"c\":\"\\ud83d\\ude00\"}}";

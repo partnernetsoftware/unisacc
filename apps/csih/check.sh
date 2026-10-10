@@ -25,14 +25,16 @@ else
     echo "FAIL 2: selftest (see below)"; tail -20 "$TMP/selftest.log"; rc=1
 fi
 
-# 3. fuzz under ASan+UBSan (json.c and csih_message.c linked as separate units)
-if cc $CFLAGS -include json.h -o "$TMP/fuzz_json" fuzz/fuzz_json.c json.c \
+# 3. fuzz under ASan+UBSan. cc only takes .c, so the .cx providers are copied to
+#    $TMP as .c for the cc build; the repo keeps the .cx names.
+cp json.cx "$TMP/json.c" && cp csih_message.c "$TMP/csih_message.c" && cp csih_message.h "$TMP/" || rc=1
+if cc $CFLAGS -include json.h -I"$ROOT" -o "$TMP/fuzz_json" fuzz/fuzz_json.c "$TMP/json.c" \
    && "$TMP/fuzz_json" "$ITERS" > "$TMP/fuzz_json.out" 2>&1; then
     echo "ok   3a: json fuzz $(cat "$TMP/fuzz_json.out")"
 else
     echo "FAIL 3a: json fuzz"; cat "$TMP/fuzz_json.out" 2>/dev/null; rc=1
 fi
-if cc $CFLAGS -include json.h -include csih_message.h -o "$TMP/fuzz_msg" fuzz/fuzz_msg.c csih_message.c json.c \
+if cc $CFLAGS -include json.h -include csih_message.h -o "$TMP/fuzz_msg" fuzz/fuzz_msg.c "$TMP/csih_message.c" "$TMP/json.c" \
    && "$TMP/fuzz_msg" "$ITERS" > "$TMP/fuzz_msg.out" 2>&1 \
    && grep -q 'decoded_ok=[1-9]' "$TMP/fuzz_msg.out"; then
     echo "ok   3b: msg fuzz $(cat "$TMP/fuzz_msg.out")"
