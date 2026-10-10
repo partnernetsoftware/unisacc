@@ -21,7 +21,10 @@ if [ -n "${COMMITGATE_GATE:-}" ]; then
   [ "${COMMITGATE_SELFTEST:-}" = 1 ] || { echo "commitgate: COMMITGATE_GATE is for the self-test only" >&2; exit 2; }
   gate=$COMMITGATE_GATE
 fi
+# the gate checks this repository, so the commit must land in it too (a scratch repo only under the self-test)
+top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "commitgate: not in a git repository" >&2; exit 2; }
+[ "$top" = "$R" ] || [ "${COMMITGATE_SELFTEST:-}" = 1 ] || { echo "commitgate: cwd repository $top is not the checked repository $R" >&2; exit 2; }
 log=$(mktemp "${TMPDIR:-/tmp}/commitgate.XXXXXX")
 "$R/release/tools/checkrun.sh" "$log" -- "$gate" "${suites[@]}" || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
-git commit -q -m "$msg" -- "$@" || exit 1
+git commit -q -m "$msg" -- "$@" || { echo "commitgate: gate was green but git commit failed" >&2; exit 3; }
 echo "commitgate: committed $(git rev-parse --short HEAD) after gate rc=0 (log $log)"

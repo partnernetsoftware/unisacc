@@ -13,7 +13,12 @@ base=$(git rev-parse HEAD)
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/red "$R/release/tools/commitgate.sh" -m x -- a > /dev/null 2>&1 && fail "red gate committed"
 [ "$(git rev-parse HEAD)" = "$base" ] || fail "a commit appeared after a red gate"
 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- a > /dev/null 2>&1; [ $? -eq 2 ] || fail "override honoured without self-test flag"
+printf '#!/bin/sh\nkill -9 $$\n' > killed; chmod +x killed
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/killed "$R/release/tools/commitgate.sh" -m x -- a > /dev/null 2>&1 && fail "killed gate committed"
+[ "$(git rev-parse HEAD)" = "$base" ] || fail "a commit appeared after a killed gate"
+(cd "$T" && "$R/release/tools/commitgate.sh" -m x -- a > /dev/null 2>&1); [ $? -eq 2 ] || fail "a commit outside the checked repository was not refused"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- no-such-path > /dev/null 2>&1; [ $? -eq 3 ] || fail "git commit failure was not reported as 3"
 "$R/release/tools/commitgate.sh" -m x > /dev/null 2>&1; [ $? -eq 2 ] || fail "no paths was not refused"
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok -- a > /dev/null 2>&1 || fail "green gate did not commit"
 [ "$(git show --name-only --format= HEAD)" = a ] && git diff --cached --quiet -- a && ! git diff --cached --quiet -- b || fail "commit did not contain exactly the given path"
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; missing paths refused"
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused"
