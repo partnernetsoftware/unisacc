@@ -3,8 +3,8 @@
 - **本拍切口：** A
 - **主张一句：** §10 结论将「六目标 + 自举」钉为出货六平台、决策网络实例仅在五目标上具名检查逐字节自举（N1=N2=N3；名单 §5.3；非六全覆盖；非语义自举定理）。
 - **tip（开拍）：** `ce65cdcde2a8545bac86717d76a632a5867cda73`
-- **tip（本拍提交）：** `f82c6073`（branch `cursor/paper-a-conclusion-five-vs-six-af19`）
-- **PR：** _（待开）_
+- **tip（本拍提交）：** `b4e6020f`（branch `cursor/paper-a-conclusion-five-vs-six-af19`）
+- **PR：** https://github.com/partnernetsoftware/unisacc/pull/31
 - **Paper A blob drift：**
   - CN `research/unisacc-paper.md`：`f2800508d87de31b549aa89bf41204c221095b71` → `78fea31e081ea7304f3607a8fa7df236b280dc59`
   - EN `research/unisacc-paper.en.md`：`333f2d29d796f8879909c535c0b1612f08c6a4ef` → `ecff06fedf640b00a0572b159392f2e8d8104aa2`
