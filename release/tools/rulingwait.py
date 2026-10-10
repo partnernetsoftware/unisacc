@@ -11,8 +11,16 @@ def parse(path):
     rows = []
     for line in pathlib.Path(path).read_text().splitlines():
         if not line.strip() or line.startswith('#'): continue
-        f = (line.split('\t') + [''] * 8)[:8]
+        f = line.split('\t')
+        if len(f) != 8: raise SystemExit('rulingwait: MALFORMED line (want 8 tab-separated columns): %r' % line)
         rows.append(dict(zip(('id', 'requested_at', 'decided_at', 'applied_at', 'state', 'decided_by', 'ref', 'subject'), f)))
+    ids = [r['id'] for r in rows]
+    if len(ids) != len(set(ids)): raise SystemExit('rulingwait: MALFORMED duplicate id')
+    for r in rows:
+        for k in ('requested_at', 'decided_at', 'applied_at'):
+            v = r[k]
+            if v and v != 'UNKNOWN' and datetime.datetime.fromisoformat(v).tzinfo is None:
+                raise SystemExit('rulingwait: MALFORMED %s %s has no timezone' % (r['id'], k))
     return rows
 
 
@@ -27,7 +35,7 @@ def check(rows):
         if r['state'] == 'PENDING' and (dec or app): bad.append((r['id'], 'PENDING with decision/applied time'))
         if r['state'] in ('DECIDED', 'APPLIED') and not ((dec or r['decided_at'] == 'UNKNOWN') and r['decided_by']): bad.append((r['id'], 'decision without time/decider'))
         if r['state'] == 'APPLIED' and not (app and r['ref']): bad.append((r['id'], 'APPLIED without applied_at/ref'))
-        if dec and req and dec < req or app and dec and app < dec: bad.append((r['id'], 'times out of order'))
+        if (dec and req and dec < req) or (app and dec and app < dec) or (app and req and app < req): bad.append((r['id'], 'times out of order'))
     return bad
 
 

@@ -16,7 +16,13 @@ assert rc == 0 and 'waiting   60.0 min' in out and 'decided after   30.0 min, ap
 for bad in ('X\t%s\t\t\tAPPLIED\towner\t\ts\n' % T,                 # APPLIED without anything
             'X\t%s\t%s\t%s\tAPPLIED\towner\t\ts\n' % (T, D, A),     # APPLIED without ref
             'X\t%s\t%s\t\tPENDING\t\t\ts\n' % (T, D),               # PENDING with a decision time
-            'X\t%s\t%s\t\tDECIDED\towner\t\ts\n' % (D, T)):         # decided before requested
+            'X\t%s\t%s\t\tDECIDED\towner\t\ts\n' % (D, T),          # decided before requested
+            'X\t%s\tUNKNOWN\t%s\tAPPLIED\towner\tabc\ts\n' % (D, T)):   # applied before requested, decision UNKNOWN
     assert run(bad)[0] == 1, bad
+for bad in ('X\t%s\t\tPENDING\t\t\ts\n' % T,                       # 7 columns
+            'X\t%s\t\t\tPENDING\t\t\ts\nX\t%s\t\t\tPENDING\t\t\ts\n' % (T, T),   # duplicate id
+            'X\t2026-01-01T00:00:00\t\t\tPENDING\t\t\ts\n'):          # no timezone
+    try: run(bad); raise AssertionError(bad)
+    except SystemExit as e: assert 'MALFORMED' in str(e), e
 assert W.main([str(ROOT / 'release/ruling-requests.tsv')]) == 0
-print('rulingwait  waits from the ledger, malformed APPLIED/PENDING/order rejected, real ledger parses')
+print('rulingwait  waits from the ledger, malformed APPLIED/PENDING/order (incl. UNKNOWN decision) / columns / duplicate id / naive time rejected, real ledger parses')

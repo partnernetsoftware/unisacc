@@ -93,3 +93,4 @@
 - owner-promotion：three court 证据（six-native、Defender）已齐，**待机房主任/政委 promote**，cc 不代签。
 - owner-promotion（政委 2026-10-10：三 court 弄齐后 owner-promote，维持公开）：six-native（38024805460）与 Defender（38025538035）court 证据齐、cdx2 复核支持 PASS；cc 按授权写 research/r38-release-acceptance.json（release_eligible true，courts 三项、gate-infra 归因分歧与未验项照列）。plans/v0.0.38.md 归档 archive/plans/，prd 版本表加 v0.0.38/v0.0.39 行；ledgercheck（v0.0.39 carry 0）、publish-order、gate-infra、script-inventory 绿。
 - 流程偏差（cc 自认）：0.0.38 公开未走 release/tools/publish.sh（它要求 dmg，本版无 Apple 资产），而是直接 gh release edit；先在 Draft 上核签后字节（579f6525）再公开、公开后下载复核，实质步骤做了，但绕开了脚本。0.0.39 WF3 首刀给 publish.sh 加验收回执资格闸（见 plans/v0.0.39.md）。
+- WF1 映射核对（cdx/cdx2 报成员 252/253 ≠ 257）：git ls-tree 计 HEAD 与回执 commit 19daaf1d 的 difftest_o 成员同为 257，差集空——回执映射对 HEAD 有效。工作树少 5 个（examples/hello.c、indirect6.c、ptr.c、struct.c、switch.c），均为未提交删除、无人认领；cc 不碰。若提交，须重核 formal_plan 指纹。
