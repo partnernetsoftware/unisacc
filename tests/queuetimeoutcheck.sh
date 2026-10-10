@@ -34,6 +34,12 @@ set -- $(run "142" 3 cap);   [ "$1" = 142 ] && [ "$2" = 3 ] || fail "142 every w
 kept cap || fail "state lost across watchdog-timed-out windows"; grep -q '^final rc=142$' "$T/q-cap/release-queue.log" || fail "final rc 142 not logged"
 set -- $(run "124" 3 kill);       [ "$1" = 124 ] && [ "$2" = 1 ] || fail "outer kill 124: rc=$1 launches=$2 (want 124/1)"
 kept kill || fail "state lost after an outer kill"
+# an admitted start that later times out is not a refusal: no REFUSED line, no refusal log, receipt says fresh
+for n in cap kill; do
+  [ ! -e "$T/bak-$n/start-refusals.log" ] || fail "timeout ($n) recorded as a start refusal"
+  grep -q '^mode=fresh$' "$T/q-$n/start-receipt.txt" || fail "timeout ($n) lost its fresh start receipt"
+done
+grep -q REFUSED "$T/out" && fail "timeout output claims a refusal"
 set -- $(run "142 0" 5 late);     [ "$1" = 0 ] && [ "$2" = 2 ] || fail "142 then 0: rc=$1 launches=$2 (want 0/2)"
 set -- $(run "75 142 1" 5 red);  [ "$1" = 1 ] && [ "$2" = 3 ] || fail "75,142 then a red window: rc=$1 launches=$2 (want 1/3)"
-echo "queuetimeout  real queue.sh: one window ending 142 exits 142 with no second window; watchdog 142 to the window cap exits 142 (logged, state kept); an outer kill 124 stops at once with 124 (state kept); 142 then a completed window is 0; 75/142 then a red window is that red rc"
+echo "queuetimeout  real queue.sh: one window ending 142 exits 142 with no second window; watchdog 142 to the window cap exits 142 (logged, state kept); an outer kill 124 stops at once with 124 (state kept); 142 then a completed window is 0; 75/142 then a red window is that red rc; a timed-out admitted start is never recorded as a refusal"
