@@ -49,6 +49,12 @@ def run_main(release, asset, body, fail=None):
     return rc
 assert run_main(R, A, b'signed') == 0
 assert run_main(R, A, b'signed', 'api') == 1 and run_main(R, A, b'signed', 'download') == 1
+class E404(Exception): code = 404
+def fake404(url, token, accept='application/vnd.github+json'): raise E404()
+D.api = fake404; os.environ['GITHUB_TOKEN'] = TOKEN; buf = io.StringIO()
+with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(buf):
+    assert D.main(['--repo', 'o/r', '--release-id', '7', '--asset-id', '11', '--tag', 'v9', '--commit', 'abc', '--sha256', '0' * 64, '--out', str(pathlib.Path(d) / 'u')]) == 1
+assert 'E404 404' in buf.getvalue() and TOKEN not in buf.getvalue(), buf.getvalue()   # the HTTP status is reported, the token never
 assert run_main(R, A, b'other bytes') == 1
 assert run_main({**R, 'id': 8}, A, b'signed') == 1
 assert run_main(R, {'id': 12, 'name': 'unisacc.com'}, b'signed') == 1

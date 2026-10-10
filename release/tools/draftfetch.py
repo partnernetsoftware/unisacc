@@ -51,14 +51,14 @@ def main(argv=None):
         release = json.loads(api('%s/releases/%s' % (base, a.release_id), token))
         asset = json.loads(api('%s/releases/assets/%s' % (base, a.asset_id), token))
     except Exception as e:
-        print('draftfetch: API read failed: %s' % type(e).__name__); return 1
+        print('draftfetch: API read failed: %s %s' % (type(e).__name__, getattr(e, 'code', ''))); return 1
     why = check(release, asset, a.tag, a.commit, a.release_id, a.asset_id)
     if why:
         for w in why: print('draftfetch: REFUSED ' + w)
         return 1
     try: data = api('%s/releases/assets/%s' % (base, a.asset_id), token, 'application/octet-stream')
     except Exception as e:
-        print('draftfetch: download failed: %s' % type(e).__name__); return 1
+        print('draftfetch: download failed: %s %s' % (type(e).__name__, getattr(e, 'code', ''))); return 1
     open(a.out, 'wb').write(data)
     got = sha(a.out)
     print('source=authenticated-draft release_id=%s asset_id=%s tag_name=%s target_commitish=%s sha256 %s' % (a.release_id, a.asset_id, a.tag, a.commit, got))
