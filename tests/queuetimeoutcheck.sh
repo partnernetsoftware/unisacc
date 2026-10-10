@@ -9,6 +9,8 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qtimeout.XXXXXX"); trap 'rm -rf "$T"' EXIT
 fail() { echo "queuetimeout: $*"; exit 1; }
+# macOS has no GNU timeout(1); in-repo tests/bound is the watchdog (1..60s), as in queuestartlaunchcheck (e2e961d1)
+_BOUND=$("$R/tests/bound" --helper) || { echo "queuetimeout: need tests/bound (native watchdog)"; exit 2; }
 D=$T/cand; S=$T/seed; W=$T/wt; mkdir -p "$D" "$S" "$W/tests"
 printf 'candidate' > "$D/unisacc-next.com"; art=$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)
 printf '{"artifact_sha256":"%s"}\n' "$art" > "$D/unisacc-next.com.build.json"
@@ -25,7 +27,7 @@ sed -i.bak "s#__T__#$T#" "$W/tests/term.sh" && rm -f "$W/tests/term.sh.bak"; chm
 run() {   # run RCS WINDOWS NAME -> prints "rc launches"; state in $T/q-NAME
   rm -f "$T/launches"; printf '%s\n' $1 > "$T/rcs"; Q=$T/q-$3
   env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-$3" QUEUE_STATE="$Q" \
-    QUEUE_WINDOWS="$2" UNISACC_FFI_X86_PROVIDER=/nonexistent timeout 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; qrc=$?
+    QUEUE_WINDOWS="$2" UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; qrc=$?
   cp "$T/out" "$T/out-$3" || { echo "copy-failed 0"; return; }
   echo "$qrc $(wc -l < "$T/launches" | tr -d ' ')"
 }
