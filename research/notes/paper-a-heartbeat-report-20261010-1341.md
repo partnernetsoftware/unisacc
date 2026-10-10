@@ -3,12 +3,12 @@
 - **本拍切口：** A 成篇定稿增量
 - **主张一句：** 标题与关键词裸「自举 / Self-Hosting」收紧为「逐字节自举（N1=N2=N3）/ Byte-for-Byte Self-Hosting」，与已封的 byte-bootstrap 边界对齐；摘要正文未动。
 - **tip（开拍）：** `4d2538333bf63d440462c422b39e3f6c4d0d6644`
-- **tip（合入后）：** _PENDING_MERGE_
-- **PR：** _PENDING_
+- **tip（合入后）：** `e1176f5a9403705830665164bf8cf497d574bde4`（PR #32 squash merge）
+- **PR：** #32 merged yes
 - **Paper A blob drift：** title/keywords 三联改写；abstract SAME
-  - CN `research/unisacc-paper.md`：`f2800508d87de31b549aa89bf41204c221095b71` → _PENDING_
-  - EN `research/unisacc-paper.en.md`：`333f2d29d796f8879909c535c0b1612f08c6a4ef` → _PENDING_
-  - TeX `research/arxiv-paper-a/main.tex`：`6177ab7c97fc8366c75efd72b0ea4dd25bd99a37` → _PENDING_
+  - CN `research/unisacc-paper.md`：`f2800508d87de31b549aa89bf41204c221095b71` → `2e38f303f6080da89b2c1672c699dffce777aed8`
+  - EN `research/unisacc-paper.en.md`：`333f2d29d796f8879909c535c0b1612f08c6a4ef` → `678ee26450df6cdefd37e379956064d87750113c`
+  - TeX `research/arxiv-paper-a/main.tex`：`6177ab7c97fc8366c75efd72b0ea4dd25bd99a37` → `cef7c9ef6dd5c0cad0d6f5d138f84f118ed536dd`
   - abstract `research/arxiv-paper-a/abstract.txt`：`9e8838928ca79ec1708fcfb2df3683548566516f` **SAME**（本拍未改）
 - **Softguess：** NONE 预期；本拍不重开。
 - **挡粘点：** 无（research-only；标题/关键词收紧；未改摘要正文/键数/表数字/产品代码）。
