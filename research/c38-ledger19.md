@@ -17,7 +17,7 @@ P1–P7（流水线提效）已完成并不在 19 行内；本表与版本冻结
 | K1 | 随 K2 排期 | 顺延 0.0.39 |
 | F4″ | F4′ FAILED，冷编≤5 s 未达；流水线化为下一刀候选 | 顺延 0.0.39 |
 | COV1 | fb12-31 明确拒收（wrong 0），已裁不挡收口 | 顺延 0.0.39：补覆盖或保留具名拒收 |
-| SC1 | seed-construct-parse2 ×3 待定位，已裁不挡收口 | 顺延 0.0.39：定位后另报裁 |
+| SC1 | seed-construct-parse2 ×3 待定位，已裁不挡收口；ver038 日志首错一致：`seed-gen inspect-parse2-{startup-control,unary-head,unary-part10}-graph` 均 `seed-gen: unknown constant binding`（seed/gen.c:211，C 侧绑定表缺 Python 侧有的常量名；具体名待单项复现） | 顺延 0.0.39：定位后另报裁 |
 | W2、E57 | 需 Windows 双 ISA 真宿主 | 顺延至有真宿主的版本 |
 | X3、L2、L1′、L1b′、A1、N1 | 仅部分证据，无整项冻结证据 | 顺延 0.0.39（各行原阻塞照录） |
 

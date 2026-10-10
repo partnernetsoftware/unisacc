@@ -129,3 +129,9 @@ current main 81c4827f，同候选 740007ef、同宿主、同 cc 启动器；**�
 | 合计 | 979 / 18218.7 | 799 / 13981.8 | −4236.9（−23.3%） |
 
 读法：作业秒减少 4236.9，其中返工 + 重试消失占 3840.1（90.6%），对应 mid-run 失效修复（a7b059dc/a3d3bb78）与身份稳定；延期减少 463.3；有效工作持平（−2.4%）；终红增 246.2 来自已裁的近限时/冷缓存超时。作业秒是并发累加量，不能直接换算墙钟（墙钟 8533.5→7301.0 s，−14.4%）；本机单样本。
+
+### 覆盖口径（cdx2 复核后补，2026-10-10；只读现存证据）
+
+- 上表只计有 DONE/DEFER 行的尝试。末次 DONE 覆盖：full038c 641/649、ver038 649/650。缺终行的为外杀/停滞强制 142，results.json 有 rc 但无 DONE 行，**列 UNKNOWN、不合成入表**：full038c 8 项（lib-bitfield/carrier-factory/fp-rank/fp-value-rank/layout/sig3-source、lib-source-provenance(+located)）；ver038 1 项（seed-construct-base）。外杀尝试的 START→kill 成本亦未计。
+- 重复 DONE：full038c 162 项 / 163 次。逐项可链到日志 `INVALIDATE` 行的 39 项；其余 123 项在 release-queue.log 中无逐项 INVALIDATE 记录（续跑段重判失效未逐项落日志），其“返工”归因来自先前对 comboot 根 build.json 的诊断，**按日志只算未链接**。
+- 终红 +246.2 作业秒未逐项证明全部来自近限时/冷缓存；末次 PASS 集合两轮不完全相同（同为 538 项但成员有换）；90.6% 是作业秒占比，不是墙钟归因。
