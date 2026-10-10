@@ -1,0 +1,22 @@
+# Paper A 心跳短报 2026-10-10 ~12:56 SGT
+
+- **本拍切口：** E 衍生净化
+- **主张一句：** 将「目标参数化 / 跨架构换编码表」登记为从 A 切出的未来独立课题（父节点回 A），使跨架构定理式负担离开 A，且不挡投稿。
+- **tip（开拍）：** `c7233837feccaf190f13011ddd100e794ab4b6c0`（release/plans…；晚于 paper PR #27 `4b7bb1c`）
+- **Paper A blob drift：** **否**（相对 `4b7bb1c` 四路径 SAME）
+  - CN `research/unisacc-paper.md` `000b7ef1ef80029fc016e9acb736efaf650840df`
+  - EN `research/unisacc-paper.en.md` `93fdf05232dcc290862c59d16e4bc39fdf1976c0`
+  - TeX `research/arxiv-paper-a/main.tex` `8122353c5446417827391eb7a4934ba9aa549017`
+  - abstract `research/arxiv-paper-a/abstract.txt` `9e8838928ca79ec1708fcfb2df3683548566516f`
+  - 注：记忆中的 `04a5087b` 是中间 product commit，不是四 blob 指纹；本拍以 `4b7bb1c` 对照为准。
+- **Softguess：** 不重开为硬缺口（前钉：非 seal-blocking）；本拍未扫 Softguess 词表。
+- **挡粘点：** 无（research-only；未改正文主张/键数）。
+- **待批板：** 不叠 ~03:44 两板（本拍无新信息）。
+- **切后 A 更纯在哪：** A 不再被「跨架构未证参数化不变式」随便打脸；硬缺口仍停在测量身份/表口径/跨平台矩阵。
+- **仍开硬缺口：** 测量身份 8509/8769；表口径；跨平台矩阵测量。
+- **证据路径：**
+  - `research/notes/paper-a-derive-target-parameterization-20261010-1256.md`
+  - `research/notes/paper-a-heartbeat-report-20261010-1256.md`
+  - `research/paper-notes-20261009.md`（目标参数化条指针）
+  - `research/paper-a-notes.md`（本拍一行）
+- **待政委：** 无必须项；若日后要把目标参数化升格为正式衍生论文编号/投稿顺序，再批。
