@@ -17,7 +17,7 @@ P1–P7（流水线提效）已完成并不在 19 行内；本表与版本冻结
 | K1 | 随 K2 排期 | 顺延 0.0.39 |
 | F4″ | F4′ FAILED，冷编≤5 s 未达；流水线化为下一刀候选 | 顺延 0.0.39 |
 | COV1 | fb12-31 明确拒收（wrong 0），已裁不挡收口 | 顺延 0.0.39：补覆盖或保留具名拒收 |
-| SC1 | seed-construct-parse2 ×3 待定位，已裁不挡收口；ver038 日志首错一致：`seed-gen inspect-parse2-{startup-control,unary-head,unary-part10}-graph` 均 `seed-gen: unknown constant binding`（seed/gen.c:211，静态定位（未跑）：fe90d6f8（10-09 typedef 跨单元隔离）在 control-result.tsv 的 startup-marker 行加入 `["constant","TDE"]`/`["constant","TDN"]`；E3/Python 侧从 exec/facts/k2-control.tsv 的 consts（TDE=12094627905536、TDN=8000000）绑定，seed/gen.c `parse2_startup_control` 传空 `bindings`。startup-control 与 unary-head 直接经此函数，unary-part10 是否同路待复现确认；共同 assert 行不等于共同根因，三项义务分列。修法属 seed 生成器改动，按 SC1 裁定另报，不自行修） | 顺延 0.0.39：定位后另报裁 |
+| SC1 | seed-construct-parse2 ×3 待定位，已裁不挡收口；ver038 日志首错一致：`seed-gen inspect-parse2-{startup-control,unary-head,unary-part10}-graph` 均 `seed-gen: unknown constant binding`（seed/gen.c:211，静态定位（未跑）：fe90d6f8（10-09 typedef 跨单元隔离）在 control-result.tsv 的 startup-marker 行加入 `["constant","TDE"]`/`["constant","TDN"]`；E3/Python 侧从 exec/facts/k2-control.tsv 的 consts（TDE=12094627905536、TDN=8000000）绑定，seed/gen.c `parse2_startup_control` 传空 `bindings`。三项静态调用链均先经此函数（unary-part10 → inspect_parse2_printfallback_bodies_graph 内含 parse2_startup_control），最早失败节点静态同一；名字待复现确认；共同 assert 行不等于共同根因，三项义务分列。修法属 seed 生成器改动，按 SC1 裁定另报，不自行修） | 顺延 0.0.39：定位后另报裁 |
 | W2、E57 | 需 Windows 双 ISA 真宿主 | 顺延至有真宿主的版本 |
 | X3、L2、L1′、L1b′、A1、N1 | 仅部分证据，无整项冻结证据 | 顺延 0.0.39（各行原阻塞照录） |
 
