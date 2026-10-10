@@ -62,13 +62,11 @@ others=$(ps -eo pid=,ppid=,args= | awk -v me=$$ -v pp=$PPID '$1!=me && $2!=me &&
 command -v caffeinate >/dev/null 2>&1 && { caffeinate -dims -w $$ & }
 Q=${QUEUE_STATE:-$D.queue}
 # 0.0.37 speedup ③: a persistent copy outside the candidate dir and /tmp, written only between
-# windows (no gatequeue alive, nothing half-written).  A restart that finds no state restores it;
-# gatequeue still re-checks every stamp, so a restored result is reused only for identical inputs.
+# windows (no gatequeue alive, nothing half-written).  0.0.40: default QUEUE_START=fresh never
+# auto-restores that backup (B.5 16:09:40 mis-restore); resume is explicit and receipt-bound.
+# gatequeue still re-checks every stamp, so a resumed result is reused only for identical inputs.
 B=${QUEUE_BACKUP:-$HOME/.unisacc/queue-backup/$(basename "$D")-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}
-# the swap below leaves a moment with state.old and no state: restore from whichever full generation exists
-for g in state state.old; do
-  if [ ! -d "$Q" ] && [ -d "$B/$g" ]; then mkdir -p "$Q" && cp -pR "$B/$g/." "$Q/" && echo "queue: restored state from $B/$g (stamps re-checked by gatequeue)"; fi
-done
+"$R/release/tools/queuestart.sh" "$Q" "$B" "$D" "${QUEUE_START:-fresh}" || exit $?
 mkdir -p "$Q"
 backup() {   # swap only after a complete copy: a failed copy keeps the previous backup
   mkdir -p "$B" && rm -rf "$B/state.new" && cp -pR "$Q" "$B/state.new" && cp -p "$D/unisacc-next.com.build.json" "$B/" \
