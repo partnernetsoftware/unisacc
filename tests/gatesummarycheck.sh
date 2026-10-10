@@ -28,5 +28,12 @@ mkdir -p "$T/empty"; out=$(bash "$R/tests/gatesummary.sh" "$T/empty" 0); [ $? = 
 mkdir -p "$T/unreadable"; printf 'x rc=0 1s :: ok\n' > "$T/unreadable/001.x"; chmod 000 "$T/unreadable/001.x"
 if [ "$(id -u)" != 0 ]; then out=$(bash "$R/tests/gatesummary.sh" "$T/unreadable" 0 2>&1); [ $? = 1 ] || fail "an unreadable result was not a failure: $out"; fi
 chmod 644 "$T/unreadable/001.x"
+# one green file beside an empty (zero-byte) result is not green; a two-line file and a repeated suite fail too
+d=$T/green-empty; mkdir -p "$d"; L a 0 1 ok > "$d/001.a"; printf '\n' >> "$d/001.a"; : > "$d/002.b"
+out=$(bash "$R/tests/gatesummary.sh" "$d" 0); [ $? = 1 ] || fail "green + empty result summarised as passed: $out"
+d=$T/two-lines; mkdir -p "$d"; printf '%s\n%s\n' "$(L a 0 1 ok)" "$(L b 0 1 ok)" > "$d/001.a"
+out=$(bash "$R/tests/gatesummary.sh" "$d" 0); [ $? = 1 ] || fail "a two-line result file passed: $out"
+d=$T/dup; mkdir -p "$d"; L a 0 1 ok > "$d/001.a"; L a 0 1 ok > "$d/002.a"
+out=$(bash "$R/tests/gatesummary.sh" "$d" 0); [ $? = 1 ] || fail "a suite reported twice passed: $out"
 case_ mixed           1 1 1 "$(L a 0 1 ok)" "$(L b 77 0 unv)" "$(L c 2 0 'rc=0 rc=77')"
-echo "gatesummary  only the leading suite rc field counts: a red suite whose output mentions rc=0/77 is failed; rc 0 with rc=77 in its output stays PASS (not unverified); a real 77 exits 4; watchdog 142 and kill 137 are red; long names and malformed lines handled; a real 77 whose output says rc=0 is unverified, a 142 whose output says rc=77 is red; an empty or unreadable result set fails"
+echo "gatesummary  only the leading suite rc field counts: a red suite whose output mentions rc=0/77 is failed; rc 0 with rc=77 in its output stays PASS (not unverified); a real 77 exits 4; watchdog 142 and kill 137 are red; long names and malformed lines handled; a real 77 whose output says rc=0 is unverified, a 142 whose output says rc=77 is red; an empty or unreadable result set fails; a zero-byte result beside a green one, a multi-line result file and a repeated suite fail"
