@@ -26,6 +26,7 @@ run() {   # run RCS WINDOWS NAME -> prints "rc launches"; state in $T/q-NAME
   rm -f "$T/launches"; printf '%s\n' $1 > "$T/rcs"; Q=$T/q-$3
   env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-$3" QUEUE_STATE="$Q" \
     QUEUE_WINDOWS="$2" UNISACC_FFI_X86_PROVIDER=/nonexistent timeout 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1
+  cp "$T/out" "$T/out-$3"
   echo "$? $(wc -l < "$T/launches" | tr -d ' ')"
 }
 kept() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d['results'].get('a')=={'rc':0} else 1)" "$T/q-$1/results.json"; }
@@ -39,7 +40,7 @@ for n in cap kill; do
   [ ! -e "$T/bak-$n/start-refusals.log" ] || fail "timeout ($n) recorded as a start refusal"
   grep -q '^mode=fresh$' "$T/q-$n/start-receipt.txt" || fail "timeout ($n) lost its fresh start receipt"
 done
-grep -q REFUSED "$T/out" && fail "timeout output claims a refusal"
+for n in cap kill; do grep -q REFUSED "$T/out-$n" && fail "timeout ($n) output claims a refusal"; done
 set -- $(run "142 0" 5 late);     [ "$1" = 0 ] && [ "$2" = 2 ] || fail "142 then 0: rc=$1 launches=$2 (want 0/2)"
 set -- $(run "75 142 1" 5 red);  [ "$1" = 1 ] && [ "$2" = 3 ] || fail "75,142 then a red window: rc=$1 launches=$2 (want 1/3)"
 echo "queuetimeout  real queue.sh: one window ending 142 exits 142 with no second window; watchdog 142 to the window cap exits 142 (logged, state kept); an outer kill 124 stops at once with 124 (state kept); 142 then a completed window is 0; 75/142 then a red window is that red rc; a timed-out admitted start is never recorded as a refusal"
