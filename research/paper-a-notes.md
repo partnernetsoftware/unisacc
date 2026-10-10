@@ -43,3 +43,5 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~12:56 心跳（切口 E 衍生净化，未改稿内数字）：** 登记未来独立课题「目标参数化 / 跨架构换编码表」；父节点回 A；不挡投稿；不起稿。见 [`notes/paper-a-derive-target-parameterization-20261010-1256.md`](notes/paper-a-derive-target-parameterization-20261010-1256.md)。
 
 - **2026-10-10 ~13:13 心跳（切口 A 结论自举边界，未改键数与产物）：** §10 裸「自举 / self-hosts」收紧为具名检查下逐字节自举（N1=N2=N3；§5.3；非语义自举定理）；见 [`notes/paper-a-seal-conclusion-bootstrap-boundary-20261010-1313.md`](notes/paper-a-seal-conclusion-bootstrap-boundary-20261010-1313.md)。
+
+- **2026-10-10 ~13:28 心跳（切口 A 结论五 vs 六自举，未改键数与产物）：** §10 钉五目标具名自举、非六平台全覆盖；见 [`notes/paper-a-seal-conclusion-five-vs-six-selfhost-20261010-1328.md`](notes/paper-a-seal-conclusion-five-vs-six-selfhost-20261010-1328.md)。

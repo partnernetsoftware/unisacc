@@ -1,0 +1,23 @@
+# Paper A 心跳短报 2026-10-10 ~13:28 SGT
+
+- **本拍切口：** A
+- **主张一句：** §10 结论将「六目标 + 自举」钉为出货六平台、决策网络实例仅在五目标上具名检查逐字节自举（N1=N2=N3；名单 §5.3；非六全覆盖；非语义自举定理）。
+- **tip（开拍）：** `ce65cdcde2a8545bac86717d76a632a5867cda73`
+- **tip（本拍提交）：** `24004499`（branch `cursor/paper-a-conclusion-five-vs-six-af19`）
+- **PR：** _（待开）_
+- **Paper A blob drift：**
+  - CN `research/unisacc-paper.md`：`f2800508d87de31b549aa89bf41204c221095b71` → `78fea31e081ea7304f3607a8fa7df236b280dc59`
+  - EN `research/unisacc-paper.en.md`：`333f2d29d796f8879909c535c0b1612f08c6a4ef` → `ecff06fedf640b00a0572b159392f2e8d8104aa2`
+  - TeX `research/arxiv-paper-a/main.tex`：`6177ab7c97fc8366c75efd72b0ea4dd25bd99a37` → `c64d3267d50b6900325f2ae0819f89a728508d35`
+  - abstract `research/arxiv-paper-a/abstract.txt`：`9e8838928ca79ec1708fcfb2df3683548566516f` **SAME**
+- **Softguess：** NONE×4（预期）
+- **挡粘点：** 无（research-only；结论子句；未改键数/表/产品）
+- **待批板：** 不叠 ~03:44 两板
+- **仍开硬缺口：** 测量身份 8509/8769；表口径；跨平台矩阵测量
+- **证据路径：**
+  - `research/notes/paper-a-seal-conclusion-five-vs-six-selfhost-20261010-1328.md`
+  - `research/notes/paper-a-heartbeat-report-20261010-1328.md`
+  - `research/notes/paper-a-seal-conclusion-bootstrap-boundary-20261010-1313.md`（父类：字节边界）
+  - `research/seal-bootstrap-bytes-not-semantic-20261009.md`
+  - `research/paper-a-notes.md`
+  - `research/paper-notes-20261009.md`
