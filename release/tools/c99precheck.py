@@ -10,7 +10,7 @@ the verdicts are difftest_o's own (-O0/-O1/-O2 against cc -O2; refuse = explicit
 - each probe is mapped to the formal shards that run it (difftest_o-K and com-difftest_o-K, K of 4);
 - a counterexample that does not refuse, or a positive that does not agree, is a red PRECHECK.
 The product (unisacc.com / APE) obligations and the full c99/queue exit are unchanged by any result."""
-import argparse, glob, hashlib, json, os, pathlib, re, subprocess, sys, time
+import argparse, collections, glob, hashlib, json, os, pathlib, re, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SHARDS = 4
@@ -64,6 +64,11 @@ def verdicts(text, rows, rc=None):
     # named: the named count must equal the named-refuse lines, each naming a distinct probe of this group
     nlines = [re.match(r'\s+named-refuse (\S+):', l).group(1) for l in text.splitlines() if re.match(r'\s+named-refuse \S+:', l)]
     if complete and (len(nlines) != n_named or len(set(nlines)) != len(nlines) or any(x not in names for x in nlines)): complete = False
+    # per probe the producer's branches are exclusive: a named probe has no REFUSE/WRONG/FAIL line, and a probe's
+    # level diagnostics are at most one per -O level
+    if complete and set(nlines) & {l[1].rstrip(':') for l in named}: complete = False
+    levels = collections.Counter((l[1].rstrip(':'), l[2].rstrip(':')) for l in named if len(l) > 2 and l[2].rstrip(':').startswith('-O'))
+    if complete and any(c > 1 for c in levels.values()): complete = False
     if complete and (sum(1 for l in named if l[0] == 'REFUSE') != refuse or sum(1 for l in named if l[0] != 'REFUSE') != wrong
                      or any(l[1].rstrip(':') not in names for l in named)): complete = False
     # difftest_o exits 0 only when everything agrees; a nonzero rc must be explained by refuse/wrong counts

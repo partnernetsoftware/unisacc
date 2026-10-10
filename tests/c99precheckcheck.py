@@ -16,7 +16,7 @@ assert [v[r['probe']]['ok'] for r in rows] == [True, True, False, False], v
 # refuse needs -O0, -O1 and -O2 once each (three -O0 lines are not a refusal); a nonzero rc must be explained
 three = 'difftest_o SHARD=1/1 probes=1  agree 0   wrong 0   refuse 3   known 0   revived 0'
 dup = P.verdicts('\n'.join(['  REFUSE a -O0: not covered: x'] * 3 + [three]), rows[:1])
-assert dup['tests/c/a.c']['got'] == 'other', dup
+assert dup['tests/c/a.c']['got'] in ('other', 'unproven') and not dup['tests/c/a.c']['ok'], dup   # same level thrice
 ok3 = P.verdicts('\n'.join(['  REFUSE a %s: not covered: x' % o for o in ('-O0', '-O1', '-O2')] + [three]), rows[:1], rc=1)
 assert ok3['tests/c/a.c']['got'] == 'refuse', ok3
 agree1 = 'difftest_o SHARD=1/1 probes=1  agree 3   wrong 0   refuse 0   known 0   revived 0'
@@ -32,6 +32,13 @@ for bad in (one,                                                              # 
             '  named-refuse zz: not covered: x\n' + one,                      # named line for a foreign probe
             '  named-refuse b: x\n  named-refuse b: x\n' + one.replace('named 1', 'named 2')):   # duplicate
     assert P.verdicts(bad, rows[1:2], rc=0)['tests/c/b.c']['got'] == 'unproven', bad
+mix = '\n'.join(['  named-refuse a: not covered: x', '  WRONG a              -O2: got [1] cc -O2 says [2]',
+                 'difftest_o SHARD=1/1 probes=2  agree 2   wrong 1   refuse 0   known 0   revived 0   named 1   (x)'])
+vm = P.verdicts(mix, rows[:2], rc=1)
+assert all(x['got'] == 'unproven' for x in vm.values()), vm         # named and WRONG for one probe: contradictory
+dupl = '\n'.join(['  REFUSE a -O0: not covered: x', '  REFUSE a -O0: not covered: x', '  REFUSE a -O2: not covered: x',
+                  'difftest_o SHARD=1/1 probes=1  agree 0   wrong 0   refuse 3   known 0   revived 0   (x)'])
+assert P.verdicts(dupl, rows[:1], rc=1)['tests/c/a.c']['got'] == 'unproven'   # same level twice
 # conservation: summary wrong>0 without the named line, or a line naming a foreign probe -> unproven
 hidden = 'difftest_o SHARD=1/1 probes=1  agree 2   wrong 1   refuse 0   known 0   revived 0'
 assert P.verdicts(hidden, rows[1:2], rc=1)['tests/c/b.c']['got'] == 'unproven'
