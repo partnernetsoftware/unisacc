@@ -39,15 +39,15 @@
 
 ### context_index.inc 的真实阻塞（2026-10-10 实测）
 
-- context_index.inc 直接使用 csih_message_io.c 的私有实现：`cmi_work`（结构定义在 csih_message_io.c:13）、`cmi_id`、`cmi_path`、`cmi_cleanup`，并自行 calloc/free `cmi_work`。
-- 它还依赖 tui.c 的 `tui_state`（tui.c:192）。
-- 因此它不是"缺 include"，而是模块边界缺失：一个消费方绕过了 csih_message_io 的接口直接摸私有状态。正确做法是把 mailbox 的只读扫描（列出、预览）收进 csih_message_io 的公共函数，context_index 只调公共接口；这是设计改动，不是机械的文件搬迁。
-- 在该改动完成前，tui.c 与 reload_support.inc 的单元化不能完成；这是转单元的前置条件。
+- 已解除（de13cbd3）：context_index.inc 原先直接摸 csih_message_io.c 私有的 `cmi_work` 与 cmi_* 函数。现改为调用公共 `csih_message_preview()`（csih_message_io.h），不再访问私有状态，golden（check 5）字节等价保持。
+- 仍然存在：context_index.inc 依赖 tui.c 的 `tui_state`（tui.c:192）与 `clock_now_ms`、`json_rec`，因此它仍是 tui.c 的一个文本片段；转单元前需把 tui_state 的 owned 相关字段移入公共头。
+- tui.c 与 reload_support.inc 的单元化仍未开始；上面 tui_state 依赖是下一个前置条件。
 
 ## run 模式 .cx 缺陷：干净 0.0.38 源码复现（2026-10-10）
 
-- 源码：`git archive v0.0.38`（无 .git，故 provenance 校验失败，不影响产物）。
-- 构建：`make com`，引导件为本地 0.0.35 发布件（严格的"上一发布版 0.0.37"在仓内不可得，此为偏差）。
+- 源码：`git archive v0.0.38`（无 .git）。
+- 构建：严格自举链 0.0.35 → 0.0.37 → 0.0.38。每一步用 `make com` 的同一构建步骤逐步执行（`exec/c/buildcompiler.sh out/model-com <step>`：shared、各 target、pack-prep-1..3、pack），不套外层 55/60 秒看门狗；末尾 ident 校验因无 .git 失败，产物已完整写出。
+- 0.0.37 产物 `unisacc 0.0.37`；以它为引导的 0.0.38 与以 0.0.35 为引导的 0.0.38 sha256 相同（a3db339b…a599abe），复现结论与引导版本无关。
 - 产物：`unisacc 0.0.38`，sha256 `a3db339b…a599abe`（完整值见构建日志）。
 - 复现（`scratchpad/cxrepro`，仓库外目录执行）：
   - `sh U mm.c pv.cx` → `unisacc: no host function f7` rc=127（**复现**）
