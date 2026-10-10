@@ -36,3 +36,10 @@
 - reload_support.inc 的 `#define set_why checkpoint_set_why` / `#undef` 是两个库各自 set_why 的私有改名；转单元前必须给每个库建公共头并消除非静态重名。
 - csih.c 注释称 argv 已到 unisacc 结构 id 上限（netdb.h），textual include 是当时的绕法；转单元前需确认该上限在当前 unisacc 版本是否仍然成立。
 - 结论：转单元是逐单元的公共头化工作（每单元：类型与声明入头、去跨单元 static、删改名宏、context_index.inc 改为显式声明），不是改 csih.sh 能完成的。
+
+### context_index.inc 的真实阻塞（2026-10-10 实测）
+
+- context_index.inc 直接使用 csih_message_io.c 的私有实现：`cmi_work`（结构定义在 csih_message_io.c:13）、`cmi_id`、`cmi_path`、`cmi_cleanup`，并自行 calloc/free `cmi_work`。
+- 它还依赖 tui.c 的 `tui_state`（tui.c:192）。
+- 因此它不是"缺 include"，而是模块边界缺失：一个消费方绕过了 csih_message_io 的接口直接摸私有状态。正确做法是把 mailbox 的只读扫描（列出、预览）收进 csih_message_io 的公共函数，context_index 只调公共接口；这是设计改动，不是机械的文件搬迁。
+- 在该改动完成前，tui.c 与 reload_support.inc 的单元化不能完成；这是转单元的前置条件。
