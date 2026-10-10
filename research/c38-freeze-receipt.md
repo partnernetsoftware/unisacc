@@ -43,3 +43,5 @@
   | 20 warnparse | attempt1 OOM（下界，保留）；attempt2 rc0 RSS 2135 MiB | attempt2 rc0 同字节 | attempt2 OOM @3 GiB，未结 |
   | 21–30 | NOT_RUN | NOT_RUN | NOT_RUN |
   续接时不重跑已绿的生产/参考；若裁 UNKNOWN，第 20 项 ASan 作为未结诊断义务列入最终出口，不因 21–30 转绿而抹掉。
+- §24 全绿（cdx 回执 + cc 逐字节复核 20–29 三路同字节、warnparse ASan 与生产同字节）：30/30 三路 rc0；选用 90 次隔离记录 oom_kill 0；attempt3 首 begin 10:28:11.467、结束约 10:31:53。生产最大 cgroup peak 2318188544 B / RSS 2186572 KiB / 7.80 s（warnparse）；ASan 最大 peak 3465375744 B / RSS 3304652 KiB / 48.43 s（warnparse，独立上限，不作生产证据）。前 19 项参考/ASan 进程 RSS NOT_RECORDED（仅 cgroup peak）。gen b802e4f2、O2 f997b25d、ASan 97efd271。导出 HEAD 6b127d73 至 761fb70c 仅 research 变化，产品输入未变。
+- 版本提交 a5c1a995（0.0.37 → 0.0.38）；source_digest 5782090e。下一步：按最终身份一次采 seed 内存证据（cdx）。
