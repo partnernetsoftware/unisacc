@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fresh seed-suite memory admission; UNKNOWN is rc2, insufficient known memory rc77.
-C RSS: final-source b802e4f2, Linux/x86_64 GCC 14.2, isolated O2 matrix.
+Gen RSS: research/c39-a5-gen-memory.md, current key 6ec1fe9d67dd0733, isolated O2.
+Parse2 key and shared e3/errorparse RSS unchanged.
 RSS KiB floored to MiB; add one MiB per route before summing.
 Final -w/no-w builds byte-identical; four-worker groups sum serial route peaks.
 Cgroup accounting peaks and ASan diagnostics are separate from these RSS values.
@@ -9,7 +10,7 @@ Python cold construction and unmeasured flags/COM remain UNKNOWN.
 import argparse, hashlib, pathlib, stat, subprocess, sys, platform, shutil, re, tempfile, os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 C_SHA='b802e4f2d2d7f10ad13dd9392792e085de2dfdcd30fd2c2f0c8bbd42d9190cdb'
-REFERENCE_KEYS={'gen':'e8d10ecb97107e7b','parse2':'3d19910f75b9932c'}
+REFERENCE_KEYS={'gen':'6ec1fe9d67dd0733','parse2':'3d19910f75b9932c'}
 BINARY_SHA='f997b25d8f8391e12034871bd14e20523fa6cc88720cadb3bc6a71a41c591e64'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
@@ -26,10 +27,10 @@ ENV_KEYS=('CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','OBJC_INCLUDE_PATH',
  'GCC_SPECS','CFLAGS','CPPFLAGS','LDFLAGS')
 EQUIVALENT_FLAGS=('-std=c99 -O2 -w -Iseed','-std=c99 -O2 -Iseed')
 C_RSS={'e2':184,'e1':330,'e3':1255,'e4':40,'o1':14,'prune':32,
- 'nativeabi':298,'lower-lnx-x':191,'lower-lnx-a':215,'lower-osx-x':185,'lower-osx-a':211,'lower-win-x':130,
+ 'nativeabi':298,'lower-lnx-x':192,'lower-lnx-a':215,'lower-osx-x':185,'lower-osx-a':210,'lower-win-x':130,
  'lower-win-a':157,'errorparse':2120,'warnparse':2135,'warnunits':196,'warnlex':741,'tokenlex':119,
  'tokenpp':38,'warnpp':180,'obj-lower-x':195,'obj-lower-a':219,'obj-enc-x':156,'obj-enc-a':159,
- 'enc-elf':142,'arm-elf':142,'enc-macho':208,'arm-macho':208,'enc-pe':263,'arm-pe':263}
+ 'enc-elf':142,'arm-elf':142,'enc-macho':208,'arm-macho':208,'enc-pe':263,'arm-pe':264}
 SUITES={
  'seedparse2-1':('parse2',['x','locations','warnings','errors']),
  'seedparse2-2':('parse2',['locations,warnings','locations,errors','warnings,errors','locations,warnings,errors']),

@@ -34,6 +34,12 @@ class Memory(unittest.TestCase):
    peak=sum(m.C_RSS[n]+1 for n in ['tokenpp','tokenlex','warnlex'])*1024**2
    self.assertEqual(m.requirement('gen',['tokenpp','tokenlex','warnlex'],d)[0],peak+512*1024**2)
    with patch.object(m,'reference_key',return_value='changed'):self.assertIsNone(m.requirement('gen',['tokenpp'],d)[0])
+ def test_changed_gen_key_is_unknown_before_resource_admission(self):
+  good={**m.EVIDENCE_IDENTITY,'flags':m.EQUIVALENT_FLAGS[1]}
+  with patch.object(m,'execution_identity',return_value=good),patch.object(m,'reference_key',return_value='next-input-key'),patch.object(m,'available',side_effect=AssertionError('changed key must not admit resources')):
+   rc,required,observed,reason=m.assess('gen',['tokenpp'])
+   self.assertEqual(rc,2);self.assertIsNone(required)
+   self.assertIn('generator inputs differ',reason)
  def test_unknown_com_and_unmeasured_parse2_flags(self):
   self.assertIsNone(m.requirement('com',[])[0]);self.assertIsNone(m.requirement('parse2',['locations'])[0])
  def test_gate_low_memory_exits_before_generator(self):
