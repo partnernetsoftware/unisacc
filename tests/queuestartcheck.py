@@ -49,6 +49,12 @@ try:
     # receipt-only Q whose receipt is not an object ([]) is refused, untouched
     Q = T / 'q11'; Q.mkdir(); (Q / 'start-receipt.json').write_text('[]'); before = tree(Q); rc, out = run(Q, B, D, 'resume')
     if rc != 2 or tree(Q) != before: fail('receipt-only Q with a non-object receipt resumed: %s' % out)
+    # a receipt holding JSON null (not missing) is refused too, untouched and logged; same for a null build.json
+    Q = T / 'q14'; Q.mkdir(); (Q / 'start-receipt.json').write_text('null'); before = tree(Q); rc, out = run(Q, B, D, 'resume')
+    if rc != 2 or tree(Q) != before or 'REFUSED' not in out: fail('null receipt resumed: %s' % out)
+    b = T / 'b-null-build'; shutil.copytree(B, b); (b / 'unisacc-next.com.build.json').write_text('null')
+    Q = T / 'q15'; rc, out = run(Q, b, D, 'resume')
+    if rc != 2 or Q.exists() or 'REFUSED' not in (b / 'start-refusals.log').read_text(): fail('null build.json not refused: %s' % out)
     # the final install rename fails: the old receipt-only Q comes back exactly, no tmp/aside left
     Q = T / 'q12'; run(Q, B, D, 'fresh'); before = tree(Q)
     code = ("import runpy,os,sys; real=os.replace\n"
@@ -74,6 +80,6 @@ try:
     if os.geteuid() != 0 and (rc != 2 or Q.exists() or (T / 'q6.resume-tmp').exists()): fail('failed copy left a half state: %s' % out)
     # an unknown mode is a usage error
     if run(T / 'q7', B, D, 'auto')[0] != 2: fail('unknown mode accepted')
-    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object build.json/receipt and bound-receipt-plus-foreign-files refused; a failed install rename rolls back to the old Q exactly')
+    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object (array or null) build.json/receipt and bound-receipt-plus-foreign-files refused; a failed install rename rolls back to the old Q exactly')
 finally:
     shutil.rmtree(T, ignore_errors=True)

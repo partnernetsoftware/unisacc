@@ -16,9 +16,11 @@ def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 
 RECEIPTS = ('start-receipt.json', 'start-receipt.txt')
 
+MISSING = object()   # a file that does not exist -- distinct from a file holding JSON null
+
 def load_obj(p):
     try: return json.loads(pathlib.Path(p).read_text())
-    except FileNotFoundError: return None
+    except FileNotFoundError: return MISSING
     except (OSError, ValueError): return 'unreadable'
 
 def state_ok(d):
@@ -52,7 +54,7 @@ def main(argv):
         return 0
     prev = load_obj(Q / 'start-receipt.json')
     prev_art = prev.get('artifact_sha256') if isinstance(prev, dict) else None
-    if mode == 'resume' and prev is not None and not (isinstance(prev, dict) and isinstance(prev_art, str)):
+    if mode == 'resume' and prev is not MISSING and not (isinstance(prev, dict) and isinstance(prev_art, str)):
         return refuse('%s has a start receipt that is not a valid object (%s); not resumed' % (Q, 'unreadable' if prev == 'unreadable' else type(prev).__name__))
     if mode == 'resume' and prev_art not in (None, art):
         return refuse('%s was started for artifact %s, not this candidate %s' % (Q, str(prev_art)[:16], art[:16]))
@@ -71,7 +73,7 @@ def main(argv):
             return refuse('%s has no results.json yet but holds %s: not a state this queue wrote' % (Q, ', '.join(extra)))
         return receipt(False, 'existing %s' % Q, ['receipt artifact matches', 'existing state well-formed or not yet written'])
     built = load_obj(B / 'unisacc-next.com.build.json')
-    if built is None: return refuse('resume refused: backup %s has no build.json (unisacc-next.com.build.json)' % B)
+    if built is MISSING: return refuse('resume refused: backup %s has no build.json (unisacc-next.com.build.json)' % B)
     if not isinstance(built, dict): return refuse('resume refused: backup %s build.json is not a JSON object' % B)
     if built.get('artifact_sha256') != art: return refuse('resume refused: backup artifact mismatch -- %s is for artifact %s, not this candidate %s' % (B, str(built.get('artifact_sha256'))[:16], art[:16]))
     for g in ('state', 'state.old'):
