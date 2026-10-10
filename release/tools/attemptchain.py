@@ -140,13 +140,16 @@ def windows(lines):
 def stage_windows(events, run):
     """Wall seconds of each window-N segment of RUN from a stagelog events.jsonl.  UNKNOWN (None, never
     inferred) unless: exactly one begin for that window and one end for that id, both carry the same
-    non-empty boot_id, and end - begin is finite and >= 0."""
+    non-empty boot_id, and end - begin is finite and >= 0.  stagelog end events carry no run/phase (schema),
+    so the pairing identity is the id alone: an id begun by any other event, in any run, makes the window UNKNOWN."""
     import math
     begins, ends, per_window = collections.defaultdict(list), collections.defaultdict(list), collections.defaultdict(list)
     for line in events:
         d = json.loads(line)
-        if d.get('event') == 'begin' and d.get('run') == run and str(d.get('subphase') or '').startswith('window-'):
-            begins[d['id']].append(d); per_window[int(d['subphase'].split('-')[1])].append(d['id'])
+        if d.get('event') == 'begin':
+            begins[d['id']].append(d)    # every run: stagelog ends carry no run, so an id begun twice anywhere is ambiguous
+            if d.get('run') == run and str(d.get('subphase') or '').startswith('window-'):
+                per_window[int(d['subphase'].split('-')[1])].append(d['id'])
         elif d.get('event') == 'end':
             ends[d['id']].append(d)
     out = {}
@@ -168,7 +171,7 @@ def join_windows(wins, walls, total_ends=None):
          'duplicate_windows': sorted({n for n in nums if nums.count(n) > 1}),
          'stagelog_only': sorted(set(walls) - set(nums)), 'unknown_wall': sorted(r['window'] for r in rows if r['wall_s'] is None),
          'no_ends': [r['window'] for r in rows if not r['ends']],            # nothing ended in the window
-         'no_new_final': [r['window'] for r in rows if not r['final']],      # deferrals only, or nothing
+         'no_done': [r['window'] for r in rows if not r['final']],           # no DONE line (not: no new valid final)
          'wall_s_sum': round(sum(r['wall_s'] or 0 for r in rows), 1), 'rows': rows}
     if total_ends is not None: j['ends_outside_windows'] = total_ends - j['ends_in_windows']
     j['ok'] = not (j['duplicate_windows'] or j['stagelog_only'] or j['unknown_wall'] or j.get('ends_outside_windows'))
@@ -205,8 +208,8 @@ def main(argv=None):
         j = join_windows(windows(open(a.log).read().splitlines()), stage_windows(open(a.stagelog), a.run), total)
         if a.json: print(json.dumps(j, indent=1)); return 0 if j['ok'] else 1
         if j['ends_in_windows'] != total: print('attemptchain: %d ends outside any closed window (of %d) -- UNKNOWN window' % (total - j['ends_in_windows'], total))
-        print('windows %d  stagelog windows %d  unknown wall %s  no ends %s  no new final %d  window wall sum %.1fs (wall, not job-seconds)'
-              % (j['windows'], j['stagelog_windows'], j['unknown_wall'] or '-', j['no_ends'] or '-', len(j['no_new_final']), j['wall_s_sum']))
+        print('windows %d  stagelog windows %d  unknown wall %s  no ends %s  no DONE %d  window wall sum %.1fs (wall, not job-seconds)'
+              % (j['windows'], j['stagelog_windows'], j['unknown_wall'] or '-', j['no_ends'] or '-', len(j['no_done']), j['wall_s_sum']))
         for r in j['rows']: print('  w%-4d rc=%-3s wall %7s  ends %3d  final %3d  passed %3d  deferred %3d  job %7.1fs'
               % (r['window'], r['rc'], r['wall_s'], r.get('ends', 0), r.get('final', 0), r.get('passed', 0), r.get('deferred', 0), r['job_seconds']))
         return 0 if j['ok'] else 1
