@@ -54,6 +54,10 @@ COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" 
 [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a product suite that does not declare weights/ was accepted"
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite exec-elfobject --suite tools -- weights/gold.tsv > /dev/null 2>&1
 [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "an unclassified suite was not refused (any() short-circuit)"
+for order in "--suite tools --suite difftest_o-1" "--suite difftest_o-1 --suite tools"; do   # 机房主任 18:33: naming order must not skip an unclassified suite
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x $order -- weights/gold.tsv > /dev/null 2>&1
+  [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "unclassified suite skipped with order: $order"
+done
 mkdir -p exec/d && echo z > exec/d/new.c && git add exec/d/new.c
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- ./exec > /dev/null 2>&1
 [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a directory pathspec with an uncovered shipping file was accepted"
@@ -79,4 +83,4 @@ COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/delm "$R/release/tools/commitgate.sh" -
 [ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a member deleted under the pathspec during the gate was committed"
 git checkout -q -- weights/m/one.tsv
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1 || fail "stable covered input was not committed"
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit"
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified in either naming order, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit"
