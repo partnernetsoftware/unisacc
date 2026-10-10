@@ -1,6 +1,6 @@
 # K5 首具名切口：exec/ 生成器与检查盘点 + 1 条可批草案
 
-**状态（2026-10-10 23:34 CST，机房主任 23:32 自裁）**：盘点与**一条**可批切口草案入仓；**不**整锅迁移；**不**未批实现；**不**旧全量空转。tip `92a96f22`；`version.h` 仍 0.0.39。roadmap：0.0.40 = K5（cc 检查脚本 / cdx 生成器）；δ 构造器已有 `seed/gen.c` 先例。
+**状态（2026-10-10 ≈23:36 CST，机房主任批 K5-1：YES）**：盘点保留；**K5-1 已批**并推进接线/对拍负例；**不**整锅；**不**改 `exec/opt/check.sh` 验收；**不**旧全量空转；`version.h` 仍 0.0.39（冻结 bump 另裁）。tip 以 push 后 `main` 为准。roadmap：0.0.40 = K5（cc 检查脚本 / cdx 生成器）。
 
 ## 盘点（git 跟踪，exec/）
 
@@ -63,7 +63,7 @@
 
 **本盘点不冒称**任一 STAGE 已与 Python 逐字节等价；对拍须另授实跑。
 
-## 一条可批切口（草案，待政委/机房主任批）
+## 一条已批切口（K5-1：YES，2026-10-10 ≈23:36）
 
 ### 名称：K5-1 `opt` δ 构造切到 `seed/gen.c`（保留 Python 参考）
 
@@ -82,6 +82,22 @@
 
 - K5-1b：`pp` 同模式（flags 更多，次选）。
 - K5-check-1：薄检查壳（如 `enc/shacheck.sh`+`.py`）改 C——属检查族，与生成器刀分开批。
+
+
+
+## K5-1 进度（首刀接线，非冻结）
+
+| 项 | 状态 |
+|---|---|
+| 宿主 cc → `seed-gen` | `tests/seedoptcheck.sh` 编 `seed/gen.c` |
+| 同输入对拍 | `opt` 与 `opt --o2` 与 `exec/build/gen.py` 逐字节 SAME；C 双跑确定性 |
+| 负例 | 改坏 `exec/opt/rounds-result.tsv` 一行：Python `expected section plus four columns`、C `section rule column count`，均 rc≠0 且不写出 JSON |
+| 接线 | `exec/opt/gen-delta.sh`：默认优先 seed-gen；`SEED_GEN_BIN` 显式缺失 fail-closed；**不**静默回退 Python；`SEED_GEN=0` 仍走参考 |
+| `opt/check.sh` | **未改**（仍 `gen.py`） |
+| `version.h` | 仍 0.0.39 |
+| 产品 buildcompiler | 既有 `SEED_GEN=1` 默认已走 seed-gen（含 opt）；本刀不扩其它 STAGE 切口 |
+
+明确未做：不删 `.py`；不切 pp/lex/enc；不入 gate 全量；不 bump。
 
 ## 禁
 
