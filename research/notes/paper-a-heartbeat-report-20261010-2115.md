@@ -1,0 +1,24 @@
+# Paper A 心跳短报 · 2026-10-10 ~21:15 Asia/Shanghai（CST）
+
+- **本拍切口=C**（真缺口钉）
+- **主张一句：** tip HEAD Latest 已发布身份现为 **v0.0.39**（公开 SHA-256 `6b2b9680…`），相对 ~16:45 钉的 v0.0.38 已漂移；§8.1 第 3 条同身份六目标平台矩阵仍 seal-blocking／`blocked-on-identity`——产品 tip 前进与 runner-demo ≠ 原生矩阵闭合；不选定身份；不叠 Ο1/Ο2。
+- **tip（开拍 / before）：** `87eb16eeebc196c0be1f70649a9c73abb2cc2cab`（rebase 前工作 tip 曾见 `f81274a89e9d574037adae1772866a493dd4efa6`；scout `4dfbac368dec040c22ce842005632fb42a2fbd5c`）
+- **tip（合入后 / after）：** （见 PR 合并；本短报提交时 = before，仅 research notes）
+- **四 blob（本 tip）：** CN `74893e3df1f9663b5d11f5bad6dc3cf0ca59e884` · EN `95657738e0b447ee4e40ea9ca3dd961329aebffc` · TeX `3830ede13556e8c9673f994fd6d843937476ecf5` · abs `43d7ea7e7297ed8be9a96e3950e014e359467973` — **全部 SAME**（本拍零 Paper A 正文 diff）
+- **Softguess：** **NONE×4**（仅扫；不粘；封口地位仍 OUT-OF-SCOPE）
+- **8509/8769：** **仍开** — 仅引用 R87/R74（~20:52）；本拍不改正文键数
+- **同身份矩阵：** **仍开 · seal-blocking** — 本拍刷新 Latest＝v0.0.39 候选库存；六行仍 `blocked-on-identity`
+- **产物轴：** ~17:08 卡仍有效；本拍**不叠**；卡内举例 Latest 曾写 v0.0.38，事实已漂至 v0.0.39（选项结构不变）
+- **挡粘点 / blockers：** Softguess NONE×4（非硬缺口）；词表轴 R87/R74 选定仍开；Ο1/Ο2 产物轴仍待政委；平台同身份矩阵仍开
+- **BODY_CHANGED：** no
+- **E_PURER：** N/A（切口 C）
+- **待批板：** 不叠决策卡；不代裁 Ο1/Ο2；不催 Softguess 粘贴
+- **证据路径：**
+  - `research/notes/paper-a-gap-nail-platform-matrix-latest-refresh-20261010-2115.md`
+  - `research/notes/paper-a-heartbeat-report-20261010-2115.md`
+  - `research/notes/paper-a-gap-nail-platform-matrix-same-identity-20261010-1645.md`
+  - `research/r39-release-acceptance.json` / `research/r38-release-acceptance.json`
+  - `research/seal-platform-matrix-inventory-20261009.md` / `research/seal-same-identity-matrix-scaffold-20261009.md`
+  - `research/notes/paper-a-decision-card-remeasure-identity-20261010-1708.md`（不叠）
+  - `research/notes/paper-a-gap-nail-vocab-vs-product-identity-axes-20261010-2045.md`
+  - `research/notes/paper-a-gap-nail-vocab-track-recipes-delta260-20261010-2052.md`
