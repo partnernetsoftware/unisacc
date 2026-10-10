@@ -1,0 +1,21 @@
+# Paper A 心跳短报 2026-10-10 ~14:07 SGT
+
+- **本拍切口：** A（Cut A）
+- **主张一句：** 摘要不能把「the compiler self-hosts」读成整机/六平台自举；应写决策网络实例在 §5.3 具名五目标上逐字节自举（N1=N2=N3），非语义自举定理。
+- **tip（开拍）：** `cfb29cb2b55062193a12c781dc9ebb3eede8e343`
+- **tip（合入后）：** _(after merge)_
+- **PR：** _(after open/merge)_ ; stale draft #31 to close → #34
+- **Paper A blob drift：** abstract.txt + TeX 摘要主语收紧；CN/EN 摘要 SAME
+  - CN `research/unisacc-paper.md`：`f40070830bc44538ac15c3734dcc8257a8e3d7ee` **SAME**
+  - EN `research/unisacc-paper.en.md`：`7878d8072a35438db9653cb21c257b362c7a0665` **SAME**
+  - TeX `research/arxiv-paper-a/main.tex`：`eacae1a1dafa8b4d81eaaa4283d73e1792636a48` (was `1bb25b6c…`)
+  - abstract `research/arxiv-paper-a/abstract.txt`：`43d7ea7e7297ed8be9a96e3950e014e359467973` (was `9e883892…`)
+- **Softguess：** NONE
+- **挡粘点 / blockers：** 测量身份 8509/8769 仍开放（[`paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`](paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md)）；本拍未改键数与表数字。
+- **证据路径：**
+  - `research/notes/paper-a-seal-abstract-decision-net-five-selfhost-20261010-1407.md`
+  - `research/notes/paper-a-heartbeat-report-20261010-1407.md`
+  - `research/seal-bootstrap-bytes-not-semantic-20261009.md`
+  - `research/notes/paper-a-seal-conclusion-five-vs-six-selfhost-20261010-1358.md`
+  - `research/paper-a-notes.md`
+  - `research/paper-notes-20261009.md`
