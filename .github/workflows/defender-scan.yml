@@ -14,6 +14,21 @@ on:
         description: "Signed unisacc.com sha256 from the signing receipt"
         required: true
         type: string
+      release_id:
+        description: "R3=A court before publishing: the DRAFT release id (empty = published asset)"
+        required: false
+        type: string
+        default: ''
+      asset_id:
+        description: "Draft mode: the signed unisacc.com asset id"
+        required: false
+        type: string
+        default: ''
+      tag_commit:
+        description: "Draft mode: the commit the draft targets (rc/TAG)"
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -26,7 +41,21 @@ jobs:
         runner: [windows-latest, windows-11-arm]
     runs-on: ${{ matrix.runner }}
     steps:
+      - uses: actions/checkout@v4
+        if: inputs.asset_id != ''
+        with:
+          ref: ${{ inputs.tag_commit }}
+      - name: fetch the DRAFT asset by fixed ids (R3=A court before publishing)
+        if: inputs.asset_id != ''
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force dl | Out-Null
+          python release/tools/draftfetch.py --repo "${{ github.repository }}" --release-id "${{ inputs.release_id }}" --asset-id "${{ inputs.asset_id }}" --tag "${{ inputs.tag }}" --commit "${{ inputs.tag_commit }}" --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
+          if ($LASTEXITCODE -ne 0) { throw "draft fetch refused" }
       - name: download the public asset and check the signed hash
+        if: inputs.asset_id == ''
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dl | Out-Null
@@ -48,3 +77,9 @@ jobs:
           "scan rc $rc (0 = no threat, 2 = threat found)"
           Get-MpThreatDetection | Format-List
           if ($rc -ne 0) { throw "Defender scan rc $rc" }
+      - name: the scan ran on the fixed bytes (draft mode)
+        if: inputs.asset_id != ''
+        shell: pwsh
+        run: |
+          python release/tools/draftfetch.py --verify-again --repo x --release-id x --asset-id x --tag x --commit x --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
+          if ($LASTEXITCODE -ne 0) { throw "bytes changed during the scan" }

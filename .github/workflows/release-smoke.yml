@@ -15,6 +15,21 @@ on:
         description: "Signed unisacc.com sha256 from the signing receipt"
         required: true
         type: string
+      release_id:
+        description: "R3=A court before publishing: the DRAFT release id (empty = published asset, user smoke)"
+        required: false
+        type: string
+        default: ''
+      asset_id:
+        description: "Draft mode: the signed unisacc.com asset id"
+        required: false
+        type: string
+        default: ''
+      tag_commit:
+        description: "Draft mode: the commit the draft targets (rc/TAG)"
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -41,11 +56,23 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.asset_id != '' && inputs.tag_commit || inputs.tag }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: fetch the DRAFT asset by fixed ids (R3=A court before publishing)
+        if: inputs.asset_id != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          python release/tools/draftfetch.py --repo "${{ github.repository }}" --release-id "${{ inputs.release_id }}" \
+            --asset-id "${{ inputs.asset_id }}" --tag "${{ inputs.tag }}" --commit "${{ inputs.tag_commit }}" \
+            --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
+          chmod +x dl/unisacc.com
       - name: download the public asset (unauthenticated, as a user would)
+        if: inputs.asset_id == ''
         run: |
           set -euo pipefail
           mkdir -p dl
@@ -55,9 +82,14 @@ jobs:
           echo "public sha256 $got"
           [ "$got" = "${{ inputs.sha256 }}" ] || { echo "PUBLIC BYTES DIFFER from the signed hash"; exit 1; }
           chmod +x dl/unisacc.com
-      - name: demo suite on the public bytes (${{ matrix.target }})
+      - name: demo suite on the fetched bytes (${{ matrix.target }})
         run: |
           python tests/comdemo.py --com dl/unisacc.com --label "${{ matrix.target }}" --out "smoke-$(echo '${{ matrix.target }}' | tr / -).json"
+      - name: the court ran on the fixed bytes (draft mode)
+        if: inputs.asset_id != ''
+        run: |
+          python release/tools/draftfetch.py --verify-again --repo x --release-id x --asset-id x --tag x --commit x \
+            --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
       - uses: actions/upload-artifact@v4
         if: always()
         with:
