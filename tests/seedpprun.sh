@@ -42,7 +42,7 @@ fi
 export_ev() {   # hashes of the four JSON files (all four must exist and hash) and the end stamp
     [ -n "$EV" ] || return 0
     rc=0
-    for f in e2-cold/d.json e2-sg0/d.json; do
+    for f in tmpl/d.json e2-sg0/d.json; do
         if [ -f "$S/$f" ] && h=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$S/$f") \
             && [ ${#h} -eq 64 ]; then line="$h $f"; else line="MISSING $f"; rc=1; fi
         printf '%s\n' "$line" >> "$EV/json.sha256" || rc=1
@@ -97,59 +97,71 @@ no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 haslog() { awk -F '\t' -v c="$2" -v a="$3" '$1 == c && $2 == a { f = 1 } END { exit !f }' "$1"; }
 hasclass() { awk -F '\t' -v c="$2" '$1 == c { f = 1 } END { exit !f }' "$1"; }
 KEYSTEP="python3 - cc -std=c99 -O2 -w"
-gen() {   # gen NAME SCRIPT [ENV...]: run SCRIPT gen with E2TMP=$S/e2-NAME, TMPDIR=$S/tmp-NAME; prints rc
-    n=$1; sc=$2; shift 2
-    mkdir -p "$S/e2-$n" "$S/tmp-$n"; : > "$S/log-$n"
+gen() {   # gen LOG E2 SCRIPT [ENV...]: run SCRIPT gen with E2TMP=$S/e2-E2, TMPDIR=$S/tmp-LOG; prints rc
+    n=$1; t=$2; sc=$3; shift 3
+    mkdir -p "$S/e2-$t" "$S/tmp-$n"; : > "$S/log-$n"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR PATH="$S/shim:$PATH" SHIMLOG="$S/log-$n" \
-        E2TMP="$S/e2-$n" TMPDIR="$S/tmp-$n" "$@" sh "$sc" gen > "$S/log-$n.out" 2>&1; echo $?
+        E2TMP="$S/e2-$t" TMPDIR="$S/tmp-$n" "$@" sh "$sc" gen > "$S/log-$n.out" 2>&1; echo $?
 }
-rebuilt() { grep -qx "fresh: (re)building $S/e2-$1/d.json" "$S/log-$1.out"; }
+rebuilt() { grep -qx "fresh: (re)building $S/e2-$2/d.json" "$S/log-$1.out"; }        # rebuilt LOG E2
+anyrebuild() { grep -q '^fresh: (re)building ' "$S/log-$1.out"; }
 leftover() { ls "$S/tmp-$1" 2>/dev/null | grep -c '^seedgen-pprun\.'; }
 stampsha() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1" 2>/dev/null || echo none; }
+keysteps() { awk -F '\t' -v a="$KEYSTEP" '$1 == "pass" && $2 == a { n++ } END { print n + 0 }' "$S/log-$1"; }
 # the shim refuses what it does not know
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
 "$S/shim/python3" exec/c/other.py >/dev/null 2>&1; r=$?
 [ "$r" -eq 97 ] && ok "python3 shim refuses an unknown script" || no "python3 shim did not refuse (rc=$r)"
 unset SHIMLOG
 
-# 1 cold
-r=$(gen cold "$RUN")
-{ [ "$r" -eq 0 ] && [ -s "$S/e2-cold/d.json" ] && [ -f "$S/e2-cold/d.json.stamp" ] && rebuilt cold \
-    && haslog "$S/log-cold" pass "$KEYSTEP" && ! hasclass "$S/log-cold" pass-gen-pp && ! hasclass "$S/log-cold" UNKNOWN \
+# 1 cold, on the path every warm case reuses (fresh's command text holds the absolute $T paths, so a warm cache
+#   only exists at the path it was built on)
+r=$(gen cold base "$RUN")
+{ [ "$r" -eq 0 ] && [ -s "$S/e2-base/d.json" ] && [ -f "$S/e2-base/d.json.stamp" ] && rebuilt cold base \
+    && [ "$(keysteps cold)" -eq 1 ] && ! hasclass "$S/log-cold" pass-gen-pp && ! hasclass "$S/log-cold" UNKNOWN \
     && [ "$(leftover cold)" -eq 0 ]; } && ok "cold gen through the helper, stamp written, one-time seed-gen dir removed" \
     || no "cold gen (rc=$r leftover=$(leftover cold)) $(tail -1 "$S/log-cold.out")"
 evw "COLD rc=$r"
-s0=$(stampsha "$S/e2-cold/d.json.stamp")
-cp -a "$S/e2-cold" "$S/warm-template" || exit 2
-# 2 warm
-cp -a "$S/warm-template/." "$S/e2-warm/" 2>/dev/null || { mkdir -p "$S/e2-warm" && cp -a "$S/warm-template/." "$S/e2-warm/"; } || exit 2
-r=$(gen warm "$RUN")
-{ [ "$r" -eq 0 ] && ! rebuilt warm && [ "$(stampsha "$S/e2-warm/d.json.stamp")" = "$s0" ] && ! haslog "$S/log-warm" pass "$KEYSTEP"; } \
-    && ok "warm gen: d.json not rebuilt, stamp unchanged, helper not called" || no "warm gen (rc=$r)"
-evw "WARM rc=$r"
-# 3-5 warm stamp, then a bad helper configuration: must miss and fail
+s0=$(stampsha "$S/e2-base/d.json.stamp")
+cp -a "$S/e2-base" "$S/tmpl" || { echo "seedpprun: template copy failed"; exit 2; }
+restore() {   # back to the warm template, on the same path
+    rm -rf "$S/e2-base" || return 1
+    mkdir "$S/e2-base" && cp -a "$S/tmpl/." "$S/e2-base/" || return 1
+}
+control() {   # control NAME: restored and unchanged -> nothing rebuilt, stamp unchanged, helper not started
+    restore; rr=$?; evw "RESTORE-$1 rc=$rr"; [ "$rr" -eq 0 ] || { echo "seedpprun: restore failed"; exit 2; }
+    r=$(gen "ctl-$1" base "$RUN")
+    { [ "$r" -eq 0 ] && ! anyrebuild "ctl-$1" && [ "$(stampsha "$S/e2-base/d.json.stamp")" = "$s0" ] && [ "$(keysteps "ctl-$1")" -eq 0 ]; } \
+        && ok "warm control before $1: rc 0, nothing rebuilt, stamp unchanged, helper not started" \
+        || { no "warm control before $1 (rc=$r)"; return 1; }
+    evw "CTL-$1 rc=$r"
+}
+# 2-4 from the warm path: one bad helper setting at a time must miss the stamp and fail
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "badsg:SEED_GEN=yes" "redbin:SEED_GEN_BIN=$S/red-gen" "badcc:SEED_GEN_CC=/nonexistent/cc"; do
     n=${case_%%:*}; e=${case_#*:}
-    mkdir -p "$S/e2-$n" && cp -a "$S/warm-template/." "$S/e2-$n/" || exit 2
-    r=$(gen "$n" "$RUN" "$e")
-    { [ "$r" -ne 0 ] && [ "$r" -ne 124 ] && [ "$r" -lt 128 ] && rebuilt "$n" && [ ! -f "$S/e2-$n/d.json.stamp" ] \
-        && ! hasclass "$S/log-$n" pass-gen-pp; } \
-        && ok "warm then $e: stamp missed, gen rc $r, no stamp left, no Python fallback" || no "warm then $e (rc=$r) $(tail -1 "$S/log-$n.out")"
+    control "$n" || continue
+    r=$(gen "$n" base "$RUN" "$e")
+    { [ "$r" -ne 0 ] && [ "$r" -ne 124 ] && [ "$r" -lt 128 ] && rebuilt "$n" base \
+        && ! grep -qx "fresh: (re)building $S/e2-base/ua_ref" "$S/log-$n.out" && ! grep -qx "fresh: (re)building $S/e2-base/ua_noauto" "$S/log-$n.out" \
+        && [ ! -f "$S/e2-base/d.json.stamp" ] && ! hasclass "$S/log-$n" pass-gen-pp; } \
+        && ok "warm then $e: only d.json missed, gen rc $r, no stamp left, no Python fallback" || no "warm then $e (rc=$r) $(tail -1 "$S/log-$n.out")"
     evw "NEG-$n rc=$r"
 done
-# 6 an edited seed header rebuilds a warm d.json
-mkdir -p "$S/e2-hdr" && cp -a "$S/warm-template/." "$S/e2-hdr/" || exit 2
-printf '\n/* seedpprun: header probe */\n' >> seed/json.h
-r=$(gen hdr "$RUN")
-tar -x -C "$W" -f "$S/tree.tar" seed/json.h || exit 2
-{ [ "$r" -eq 0 ] && rebuilt hdr && haslog "$S/log-hdr" pass "$KEYSTEP" && [ "$(stampsha "$S/e2-hdr/d.json.stamp")" != "$s0" ]; } \
-    && ok "edited seed header rebuilds d.json through the helper" || no "seed header edit (rc=$r)"
-evw "HDR rc=$r"
+# 5 from the warm path: an edited seed header rebuilds d.json (and only d.json)
+if control hdr; then
+    printf '\n/* seedpprun: header probe */\n' >> seed/json.h
+    r=$(gen hdr base "$RUN")
+    tar -x -C "$W" -f "$S/tree.tar" seed/json.h || { echo "seedpprun: header restore failed"; exit 2; }
+    { [ "$r" -eq 0 ] && rebuilt hdr base && ! grep -qx "fresh: (re)building $S/e2-base/ua_ref" "$S/log-hdr.out" \
+        && [ "$(keysteps hdr)" -eq 1 ] && [ "$(stampsha "$S/e2-base/d.json.stamp")" != "$s0" ]; } \
+        && ok "edited seed header rebuilds d.json (only) through the helper" || no "seed header edit (rc=$r)"
+    evw "HDR rc=$r"
+fi
 # 7 ready failing: gen must fail; the copy without "|| exit 1" shows the old false green
 for case_ in "rdyfail:STUB_BUILD_REF_FAIL=1" "noautofail:STUB_MKNOAUTO_FAIL=1"; do
     n=${case_%%:*}; e=${case_#*:}
-    r=$(gen "$n" "$RUN" "$e")
+    r=$(gen "$n" "$n" "$RUN" "$e")
     { [ "$r" -ne 0 ] && [ "$r" -lt 128 ] && [ ! -e "$S/e2-$n/d.json" ] && [ ! -e "$S/e2-$n/d.json.stamp" ] \
         && ! haslog "$S/log-$n" pass "$KEYSTEP" && ! hasclass "$S/log-$n" pass-gen-pp; } \
         && ok "$e: run.sh gen rc $r, no d.json, helper and gen.py never started" || no "$e (rc=$r)"
@@ -164,7 +176,7 @@ if i < 0 or s.count(new) != 1: raise SystemExit("gen line not found exactly once
 e = s.index("\n", i)
 open(sys.argv[2], "w").write(s[:i] + "gen)      ready ;;" + s[e:])
 PY
-r=$(gen rdyold exec/pp/run-oldgen.sh STUB_BUILD_REF_FAIL=1)
+r=$(gen rdyold rdyold exec/pp/run-oldgen.sh STUB_BUILD_REF_FAIL=1)
 [ "$r" -eq 0 ] && ok "without '|| exit 1' the same failure ends 0 (the false green the fix closes)" || no "old gen line did not end 0 (rc=$r)"
 evw "RDYOLD rc=$r"
 # 8 the old direct gen.py pp line is caught
@@ -175,22 +187,22 @@ i = s.index("    fresh $T/d.json $B sh -c ")
 e = s.index("\n", i)
 open(sys.argv[2], "w").write(s[:i] + "    fresh $T/d.json $B python3 exec/build/gen.py pp $T/d.json -- exec/finite_rules.py" + s[e:])
 PY
-r=$(gen oldpp exec/pp/run-oldpp.sh)
+r=$(gen oldpp oldpp exec/pp/run-oldpp.sh)
 { [ "$r" -eq 0 ] && hasclass "$S/log-oldpp" pass-gen-pp && ! haslog "$S/log-oldpp" pass "$KEYSTEP"; } \
     && ok "mutant (old direct gen.py pp) is caught: not through the helper" || no "mutant not caught (rc=$r)"
 evw "MUTANT rc=$r"
 # 9 SEED_GEN=0 named reference, byte-equal to the cold C d.json
-r=$(gen sg0 "$RUN" SEED_GEN=0)
-{ [ "$r" -eq 0 ] && haslog "$S/log-sg0" pass-gen-pp "python3 exec/build/gen.py pp $S/e2-sg0/d.json" && cmp -s "$S/e2-sg0/d.json" "$S/e2-cold/d.json"; } \
-    && ok "SEED_GEN=0 reference: helper -> gen.py pp, byte-equal to the cold seed-gen d.json" || no "SEED_GEN=0 reference (rc=$r)"
+r=$(gen sg0 sg0 "$RUN" SEED_GEN=0)
+{ [ "$r" -eq 0 ] && haslog "$S/log-sg0" pass-gen-pp "python3 exec/build/gen.py pp $S/e2-sg0/d.json" && cmp -s "$S/e2-sg0/d.json" "$S/tmpl/d.json"; } \
+    && ok "SEED_GEN=0 reference: helper -> gen.py pp, byte-equal to the cold seed-gen d.json (template)" || no "SEED_GEN=0 reference (rc=$r)"
 evw "SEEDGEN0 rc=$r"
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$RUN") || exit 2
 [ "$before" = "$after" ] && ok "checkout $RUN untouched" || no "checkout $RUN changed"
 if [ -n "$EV" ]; then
-    for f in shimneg log-cold log-warm log-badsg log-redbin log-badcc log-hdr log-rdyfail log-noautofail log-rdyold log-oldpp log-sg0 \
-             log-cold.out log-warm.out log-badsg.out log-redbin.out log-badcc.out log-hdr.out log-rdyfail.out log-noautofail.out log-rdyold.out log-oldpp.out log-sg0.out; do
+    for f in shimneg log-cold log-ctl-badsg log-ctl-redbin log-ctl-badcc log-ctl-hdr log-badsg log-redbin log-badcc log-hdr log-rdyfail log-noautofail log-rdyold log-oldpp log-sg0 \
+             log-cold.out log-ctl-badsg.out log-ctl-redbin.out log-ctl-badcc.out log-ctl-hdr.out log-badsg.out log-redbin.out log-badcc.out log-hdr.out log-rdyfail.out log-noautofail.out log-rdyold.out log-oldpp.out log-sg0.out; do
         cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedpprun: EVIDENCE copy of $f failed" >&2; }
     done
 fi
