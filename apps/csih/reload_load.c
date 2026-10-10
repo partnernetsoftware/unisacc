@@ -15,13 +15,6 @@
 extern int reload_state_validate_any(const char *text, size_t len,
                                  char *why, size_t cap);
 
-/* 复用：JSON 解析与取值，opaque 声明，不重新定义 JSON 树。 */
-typedef struct jvalue jvalue;
-extern jvalue *json_parse(const char *text, size_t len,
-                          char *errbuf, size_t errlen);
-extern jvalue *jget(jvalue *obj, const char *key);
-extern const char *jstr(jvalue *v);
-extern void jfree(jvalue *v);
 
 #define LOAD_MAX_BYTES 131072
 #define WHY_CAP_DEFAULT 256

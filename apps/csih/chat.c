@@ -37,24 +37,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── restated declarations (so this file compiles alone; see header note) ── */
-
-typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
-typedef struct jvalue {
-    jkind kind;
-    int    b;
-    double n;
-    char  *s;
-    struct jvalue **items;  size_t len;
-    char **keys; struct jvalue **vals; size_t nkeys;
-} jvalue;
-
-jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
-size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
-void    jfree(jvalue *v);
-jvalue *jget(jvalue *obj, const char *key);
-double  jnum(jvalue *v, double dflt);
-const char *jstr(jvalue *v);
 
 typedef struct {
     char **lines;     /* owned */

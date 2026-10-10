@@ -10,6 +10,7 @@ if [ $# -eq 0 ]; then
     set -- agent
 fi
 exec /bin/sh "$UNI" -include "$ROOT/csih_cols.h" -include "$ROOT/csih_home.h" \
+    -include "$ROOT/json.h" \
     csih.c \
     render.c term.c chat.c clock.c tools.c cols.c home.c \
     file.c shell.c edit.c gate.c json.c session.c \

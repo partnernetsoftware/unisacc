@@ -40,40 +40,8 @@
 #include <string.h>
 #include <ctype.h>
 
-/* Self-contained: the type and prototypes live here, not in a separate header.
- * WHY: unisacc runs a source DIRECTLY, so a file is a program, not a translation
- * unit to be linked. Splitting into .h/.c and then linking two objects was me
- * importing gcc habits — it produced a "duplicate symbol _main" that has no
- * meaning in a world where each .c IS the executable. */
-
-typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
-
-typedef struct jvalue {
-    jkind kind;
-    int    b;
-    double n;
-    char  *s;
-    struct jvalue **items;  size_t len;
-    char **keys; struct jvalue **vals; size_t nkeys;
-} jvalue;
-
-#define JSON_MAX_DEPTH 32
-
-jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
-size_t  json_value_end(const char *text, size_t len);
-void    jfree(jvalue *v);
-size_t  json_escape(const char *in, char *out, size_t outlen, size_t *in_used);
-size_t  json_rec(char *out, size_t cap,
-                 const char *k1, const char *v1,
-                 const char *k2, const char *v2,
-                 const char *k3, const char *v3);
-size_t  json_msg(char *buf, size_t cap, int comma,
-                 const char *role, const char *lead, const char *content);
-size_t  json_model(char *out, size_t cap, const char *msgs, size_t n);
-jvalue *jget(jvalue *obj, const char *key);
-const char *jstr(jvalue *v);
-double  jnum(jvalue *v, double dflt);
-size_t  jlen(jvalue *v);
+/* Types and prototypes come from json.h (declarations only, injected by csih.sh).
+ * unisacc runs each file as one unit, so json.h is injected with -include, never #include. */
 
 
 

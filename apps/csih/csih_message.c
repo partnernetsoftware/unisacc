@@ -5,24 +5,6 @@
 #include <stddef.h>
 #include "csih_message.h"
 
-#ifndef CSIH_RELOAD_JSON_TYPES
-#define CSIH_RELOAD_JSON_TYPES
-typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } jkind;
-
-typedef struct jvalue {
-    jkind kind;
-    int    b;
-    double n;
-    char  *s;
-    struct jvalue **items;  size_t len;
-    char **keys; struct jvalue **vals; size_t nkeys;
-} jvalue;
-#endif /* CSIH_RELOAD_JSON_TYPES */
-
-jvalue *json_parse(const char *text, size_t len, char *errbuf, size_t errlen);
-void    jfree(jvalue *v);
-jvalue *jget(jvalue *obj, const char *key);
-const char *jstr(jvalue *v);
 
 /* 失败：写 why 并返回 0。NULL why / cap 0 安全。 */
 static int cm_fail(char *why, size_t cap, const char *msg) {
