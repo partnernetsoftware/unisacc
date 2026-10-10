@@ -1,6 +1,16 @@
 # 0.0.40 WF1 快测闭环（机房主任 21:57 代裁：通过（限定））
 
-同身份：动态参考 PRECHECK → 受影响正式分片 → 实际结果。工作树 /tmp/cc40-prep/wf1wt detached @0a6f334e，前后 status 0 行。原始证据在仓外 `/tmp/cc40-prep/wf1close/`（receipt.md、precheck.log、formal-difftest_o-{1,4,2}.log）；PRECHECK 回执副本：`research/wf1/cov1-precheck-0a6f.json`（旧 `cov1-precheck.json` 是 19daaf1d 的历史，不抵本轮）。
+同身份：动态参考 PRECHECK → 受影响正式分片 → 实际结果。工作树 /tmp/cc40-prep/wf1wt detached @0a6f334e，前后 status 0 行。
+
+## 仓内证据（本轮落仓；非产品验收）
+| 文件 | sha256 |
+|---|---|
+| `research/wf1/receipt.md` | `c4263b72d8df87dd7003f55b75692381885cc23379efdcaa93d449795ea1fc67` |
+| `research/wf1/formal-difftest_o-1.log` | `56bf43bd1a1009c1cf164d6e1a322cbd74da5ad39c491c4f0c18b0f57e095e27` |
+| `research/wf1/formal-difftest_o-4.log` | `2d04abfa83537a32e5d2bc840c10ea163a4ed5c74ce50f0971903c5e0377a13f` |
+| `research/wf1/formal-difftest_o-2.log` | `80aa7b751540ab69f8587ed4ec2d19dd048da7f636d74bdf5c32150be76fa0e9` |
+
+来源：仓外 `/tmp/cc40-prep/wf1close/` 原件字节对拷。PRECHECK 回执副本：`research/wf1/cov1-precheck-0a6f.json`（旧 `cov1-precheck.json` 是 19daaf1d 的历史，不抵本轮）。本闭环只证动态参考快测路线；**不**写成产品验收；com-difftest_o 产品义务不免。
 
 ## PRECHECK（2026-10-10 ~21:45 SGT）
 `c99precheck.py tests/wf1/cov1.tsv`：GREEN，cold 11.68 s，warm 0.6 s，rc=0。
