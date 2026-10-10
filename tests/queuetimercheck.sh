@@ -16,7 +16,7 @@ cp "$R/tests/term.sh" "$R/tests/bound.py" "$W/tests/"
 # never reach
 cat > "$W/tests/release.sh" <<BODY
 #!/bin/sh
-date +%s > "$T/body-started"
+date +%s >> "$T/body-started"   # one line per launch
 ps -o pid=,ppid=,args= -p \$PPID > "$T/body-parent" 2>&1
 echo fixture body started
 sleep $((ALARM * 4))
@@ -30,10 +30,10 @@ env -u QUEUE_START -u QUEUE_SUITES STAGELOG_RUN="${QUEUETIMER_STAGELOG:-0}" TERM
   QUEUE_WINDOWS=1 UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; rc=$?
 took=$(( $(date +%s) - t0 ))
 [ "$rc" = 142 ] || fail "queue rc=$rc, want 142 from the inner watchdog ($(cat "$T/out"))"
-[ -f "$T/body-started" ] || fail "the window body never started"
+[ "$(wc -l < "$T/body-started" 2>/dev/null | tr -d ' ')" = 1 ] || fail "window body launches: $(cat "$T/body-started" 2>/dev/null | wc -l) (want exactly 1)"
 [ ! -e "$T/body-finished" ] || fail "the window body ran past the alarm"
 grep -qE "bound\.py $ALARM " "$T/body-parent" || fail "the window body was not run under bound.py $ALARM: $(cat "$T/body-parent")"
-[ "$took" -ge "$ALARM" ] && [ "$took" -lt 45 ] || fail "took ${took}s: not the ${ALARM}s inner alarm"
+[ "$took" -ge "$ALARM" ] && [ "$took" -lt 45 ] || fail "took ${took}s: not the ${ALARM}s inner alarm (the outer 50s bound would mean >= 50)"
 [ "$(grep -c '^window ' "$Q/release-queue.log")" = 1 ] && grep -q '^window 1 rc=142 ' "$Q/release-queue.log" && grep -q '^final rc=142$' "$Q/release-queue.log" || fail "window lines: $(grep -E '^window|^final' "$Q/release-queue.log")"
 grep -q '^mode=fresh$' "$Q/start-receipt.txt" && grep -q '^restored=no$' "$Q/start-receipt.txt" && grep -q '^source=none$' "$Q/start-receipt.txt" || fail "receipt: $(cat "$Q/start-receipt.txt")"
 grep -qE 'failed 0|OBSERVATION ONLY|completed' "$Q/release-queue.log" && fail "a pass/completion line appeared"
