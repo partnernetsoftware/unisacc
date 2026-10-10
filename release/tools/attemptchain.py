@@ -199,6 +199,30 @@ def layers(chains, layer_of, top=12):
             'families': [{'family': k, 'job_s': round(v, 1), 'share': share(v), 'rework_s': round(fam_w[k], 1)} for k, v in fam.most_common(top)]}
 
 
+def tail_risk_prior(lines):
+    """WF2 (admission-time view): for each tail START, only sibling successes that ENDED EARLIER in the log --
+    evidence the scheduler had when it admitted the tail.  A hint, never this suite's lower bound; no prior
+    sibling evidence is UNKNOWN.  Compare with tail_risk(), which reads the whole log (hindsight)."""
+    seen = collections.defaultdict(list); rows = []; open_ = {}
+    for line in lines:
+        m = START.match(line)
+        if m:
+            name, limit, kind = m.group(1), int(m.group(2)), m.group(3) or 'unknown'
+            if kind == 'tail':
+                prior = [sec for n, sec in seen[family(name)] if n != name]
+                rows.append({'suite': name, 'limit': limit, 'prior_siblings_ok': len(prior), 'prior_max_s': max(prior) if prior else None,
+                             'hint': 'UNKNOWN (no prior sibling evidence)' if not prior else
+                                     'risk known at admission' if max(prior) > limit else 'prior siblings fit'})
+                open_[name] = len(rows) - 1
+            continue
+        m = END.match(line)
+        if m:
+            ev, name, rc, sec = m.group(1), m.group(2), m.group(3), float(m.group(4))
+            if name in open_: rows[open_.pop(name)]['outcome'] = ev + ' rc=' + rc
+            if ev == 'DONE' and rc == '0': seen[family(name)].append((name, sec))
+    return rows
+
+
 def reconcile(summary, results):
     res = results.get('results', {})
     diff = [n for n, rc in summary['final_rc'].items() if n in res and str(res[n].get('rc')) != str(rc)]
@@ -220,6 +244,7 @@ def main(argv=None):
     ap.add_argument('--layers', action='store_true', help='job-seconds and rework by gate layer and shard family')
     ap.add_argument('--stagelog', help='WF5: stagelog events.jsonl for the per-window wall-clock join')
     ap.add_argument('--run', help='stagelog run id (e.g. q-ba3f40cb4fba)')
+    ap.add_argument('--tail-risk-prior', action='store_true', help='WF2: admission-time sibling hints (only earlier evidence)')
     ap.add_argument('--tail-risk', action='store_true', help='WF2: sibling-shard risk hints for tail deferrals')
     ap.add_argument('--strict', action='store_true', help='exit 1 on pending, unknown, evidence gaps or any reconcile difference')
     a = ap.parse_args(argv)
@@ -247,6 +272,12 @@ def main(argv=None):
               % (r['window'], r['rc'], r['wall_s'], r.get('ends', 0), r.get('final', 0), r.get('passed', 0), r.get('deferred', 0), r['job_seconds']))
         return 0 if j['ok'] else 1
     s = summarise(chains)
+    if a.tail_risk_prior:
+        rows = tail_risk_prior(open(a.log).read().splitlines())
+        c = collections.Counter((r['hint'].split(' (')[0], r.get('outcome', 'open').split()[0]) for r in rows)
+        print('tail-risk-prior  %d tail admissions (only evidence available at admission; hints, not lower bounds)' % len(rows))
+        for (h, o), n in sorted(c.items()): print('  %-26s -> %-6s %4d' % (h, o, n))
+        return 0
     if a.tail_risk and (a.strict or a.results or a.json or a.exittable):
         print('attemptchain: --tail-risk is a separate hint report; run --strict/--results/--json on their own', file=sys.stderr); return 2
     if a.tail_risk:

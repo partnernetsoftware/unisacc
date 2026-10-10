@@ -82,4 +82,8 @@ assert lr['total_job_s'] == 20.0 and lr['layers'][0] == {'layer': 'stage', 'suit
 assert {f['family']: f['rework_s'] for f in lr['families']} == {'x': 4.0, 'y': 0.0}, lr
 lu = A.layers(A.replay(['START z limit=9 kind=full']), lambda n: 'stage')
 assert lu['total_job_s'] == 0 and lu['unknown_attempts'] == {'stage': 1} and lu['layers'] == [], lu   # UNKNOWN never counted as 0 s
-print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, per-window join with stagelog (UNKNOWN wall never inferred), layer/family job-seconds with rework, WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')
+pr = A.tail_risk_prior(['START x-1 limit=10 kind=tail', 'DEFER x-1 rc=142 10.00s', 'START x-2 limit=46 kind=full', 'DONE x-2 rc=0 30.00s',
+                         'START x-3 limit=10 kind=tail', 'DEFER x-3 rc=142 10.00s'])
+assert pr[0]['hint'].startswith('UNKNOWN') and pr[0]['outcome'] == 'DEFER rc=142', pr     # x-2 had not run yet: no hindsight
+assert pr[1]['prior_max_s'] == 30.0 and pr[1]['hint'] == 'risk known at admission', pr
+print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, per-window join with stagelog (UNKNOWN wall never inferred), layer/family job-seconds with rework, WF2 tail-risk hints (hindsight and admission-time) (siblings not a lower bound, no evidence UNKNOWN)')
