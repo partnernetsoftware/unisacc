@@ -12,9 +12,9 @@ int suite_slice_fill(int i, const char **argv, int cap, const char **name);
 int suite_run_selftest(void);
 
 static void print_row(int i) {
-    const char *av[24];
+    const char *av[48];
     const char *nm = 0;
-    int n = suite_slice_fill(i, av, 24, &nm);
+    int n = suite_slice_fill(i, av, 48, &nm);
     int k;
     printf("%s", nm ? nm : "?");
     for (k = 0; k < n; k++) printf(" %s", av[k] ? av[k] : "");
@@ -31,12 +31,11 @@ int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "rows")) {
         int any = 0;
         for (i = 0; i < suite_slice_count(); i++) {
-            const char *av[24];
+            const char *av[48];
             const char *nm = 0;
-            int n = suite_slice_fill(i, av, 24, &nm);
+            int n = suite_slice_fill(i, av, 48, &nm);
             int k, hit = 0;
             const char *want = argv[2];
-            if (!strcmp(want, "tui.c")) want = "csih.c";
             for (k = 0; k < n; k++)
                 if (av[k] && !strcmp(av[k], want)) hit = 1;
             if (!hit) continue;

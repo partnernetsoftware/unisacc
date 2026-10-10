@@ -108,9 +108,9 @@ int main(void) {
         if (suite_run_selftest() == 0) ok("suite match rules");
         else no("suite match rules");
         for (i = 0; i < suite_slice_count(); i++) {
-            const char *av[24];
+            const char *av[48];
             const char *name = NULL;
-            int n = suite_slice_fill(i, av, 24, &name);
+            int n = suite_slice_fill(i, av, 48, &name);
             char label[64];
             snprintf(label, sizeof label, "%s selftest", name ? name : "?");
             selftest(label, (char **)av, n);
