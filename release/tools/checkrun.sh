@@ -7,5 +7,5 @@ LOG=${1:?log file}; shift; [ "${1:-}" = -- ] && shift
 [ $# -gt 0 ] || { echo "checkrun: no command" >&2; exit 2; }
 "$@" > "$LOG" 2>&1; rc=$?
 tail -n "${CHECKRUN_TAIL:-3}" "$LOG"
-echo "checkrun: rc=$rc ($*)" >&2
+echo "checkrun: rc=$rc ($*)" | tee -a "$LOG" >&2   # the log carries its own verdict
 exit $rc
