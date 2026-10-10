@@ -144,3 +144,7 @@
 
 ### K5-1d（chain.sh 的 pp 调用接 gen-delta）——受控绿已合 main（机房主任 02:4x），产品 tip 1bd685b0
 生产只改 `exec/c/chain.sh`（私有 `SEED_GEN_DIR="$T/.seed-gen-cache"` + `e2-gen.{out,err}`）与 `exec/pp/gen-delta.sh` **头注释**；夹具 `tests/seedppchaincheck.sh`（gate `seedgen-ppchain`）。tip 复跑 rc0 **20/0**、外层 **50.784 s**；e2=ee8ac744… 三路同；夹具 sha 28a0c4c2 与 tip 全等（闭合 cdx 所阻脏树 overlay 身份缺口）。version.h 仍 0.0.39。不称五片全绿/提速。回执：`research/c40-k5-1d-controlled-receipt.md`。
+
+#### K5-1d 当前口径（机房主任 02:55 限定收口；只追加，上段为历史）
+上段“tip 复跑 rc0 20/0、外层 50.784 s”是 grk 那次复跑的读数（回执未引 02:47 授权），按 02:55 裁定作**只读旁证、不并入**。限定收口以 cc 依 02:47 授权的干净复跑为准：锁 1bd685b0，夹具身份 28a0c4c2 跑前落盘并闭合，gate rc0、20 SAME / 0 DIFF、外层 49.583 s（两次同机并发重叠，墙钟都不代表单独耗时）。schema INCOMPLETE 顺延（共享检出四文件前后 sha 未采；残留 scratch 来源 UNKNOWN；参考子 rc 未存；证据复制 `|| true`）；夹具无 INCOMPLETE 行 ≠ schema 齐。不称 exec-chain 五片全绿、不称净提速。回执：/tmp/cc40-prep/k5-1d/receipt-rerun-0247.md（仓外）。
+
