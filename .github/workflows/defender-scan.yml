@@ -45,6 +45,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: draft inputs are all-or-none (R3=A)
+        shell: pwsh
+        env:
+          RID: ${{ inputs.release_id }}
+          AID: ${{ inputs.asset_id }}
+          TC: ${{ inputs.tag_commit }}
+        run: |
+          $n = @($env:RID, $env:AID, $env:TC | Where-Object { $_ }).Count
+          if ($n -ne 0 -and $n -ne 3) { throw "release_id, asset_id and tag_commit must be given together" }
+          if ($n -eq 3 -and $env:TC -notmatch '^[0-9a-f]{40}$') { throw "tag_commit must be a full 40-hex sha" }
       - uses: actions/checkout@v4
         if: inputs.asset_id != ''
         with:
@@ -106,6 +116,12 @@ jobs:
           $got = (Get-FileHash dl/unisacc.com -Algorithm SHA256).Hash.ToLower()
           "public sha256 $got"
           if ($got -ne "${{ inputs.sha256 }}") { throw "PUBLIC BYTES DIFFER from the signed hash" }
+      - name: the artifact is the signed bytes BEFORE the scan (draft mode)
+        if: inputs.asset_id != ''
+        shell: pwsh
+        run: |
+          python release/tools/draftfetch.py --verify-again --repo x --release-id x --asset-id x --tag x --commit x --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
+          if ($LASTEXITCODE -ne 0) { throw "artifact bytes differ from the signed hash" }
       - name: Defender scan of the final bytes
         shell: pwsh
         run: |
