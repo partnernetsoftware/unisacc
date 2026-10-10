@@ -5195,6 +5195,11 @@ static void parse2_startup_control(Graph *g) {
     sequences = mapseq_construct(opts, facts);
     classes = value_get(facts, "classes");
     if (!classes || classes->kind != JOBJ) die("parse2 control classes missing");
+    /* Bind the control constants (TDN, TDE, ...) as assemble._bindings does. */
+    Value *consts = value_get(facts, "consts");
+    if (!consts || consts->kind != JOBJ) die("parse2 control constants missing");
+    for (size_t i = 0; i < consts->n; i++)
+        value_put(bindings, consts->items[i].key, consts->items[i].value);
     install_section_classes(g, "exec/parse2/control-byte.tsv", "startup-marker", 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse2/control-result.tsv", "startup-marker", 'r',
