@@ -10,7 +10,7 @@
 
 #define JC_MAX_OFF 9007199254740991LL
 
-static void set_why(char *why, size_t cap, const char *msg)
+static void checkpoint_set_why(char *why, size_t cap, const char *msg)
 {
     if (why == NULL || cap == 0)
         return;
@@ -25,73 +25,73 @@ int journal_checkpoint(const char *path, long long *offset, char *why, size_t ca
     long long sz;
 
     if (offset == NULL) {
-        set_why(why, cap, "null offset");
+        checkpoint_set_why(why, cap, "null offset");
         return -1;
     }
     *offset = 0;
 
     if (path == NULL || path[0] != '/') {
-        set_why(why, cap, "path not absolute");
+        checkpoint_set_why(why, cap, "path not absolute");
         return -1;
     }
     if (strlen(path) > 4095) {
-        set_why(why, cap, "path too long");
+        checkpoint_set_why(why, cap, "path too long");
         return -1;
     }
 
     fd = open(path, O_RDWR | O_NOFOLLOW);
     if (fd < 0) {
-        set_why(why, cap, "open failed");
+        checkpoint_set_why(why, cap, "open failed");
         return -1;
     }
 
     if (fstat(fd, &st) != 0) {
-        set_why(why, cap, "fstat failed");
+        checkpoint_set_why(why, cap, "fstat failed");
         close(fd);
         return -1;
     }
     if (!S_ISREG(st.st_mode)) {
-        set_why(why, cap, "not a regular file");
+        checkpoint_set_why(why, cap, "not a regular file");
         close(fd);
         return -1;
     }
     if (st.st_uid != getuid()) {
-        set_why(why, cap, "not owner");
+        checkpoint_set_why(why, cap, "not owner");
         close(fd);
         return -1;
     }
     sz = (long long)st.st_size;
     if (sz < 0 || sz > JC_MAX_OFF) {
-        set_why(why, cap, "size out of range");
+        checkpoint_set_why(why, cap, "size out of range");
         close(fd);
         return -1;
     }
 
     if (fsync(fd) != 0) {
-        set_why(why, cap, "fsync failed");
+        checkpoint_set_why(why, cap, "fsync failed");
         close(fd);
         return -1;
     }
 
     if (fstat(fd, &st) != 0) {
-        set_why(why, cap, "final fstat failed");
+        checkpoint_set_why(why, cap, "final fstat failed");
         close(fd);
         return -1;
     }
     if (!S_ISREG(st.st_mode) || (long long)st.st_size < 0 ||
         (long long)st.st_size > JC_MAX_OFF) {
-        set_why(why, cap, "final size out of range");
+        checkpoint_set_why(why, cap, "final size out of range");
         close(fd);
         return -1;
     }
 
     if (close(fd) != 0) {
-        set_why(why, cap, "close failed");
+        checkpoint_set_why(why, cap, "close failed");
         return -1;
     }
 
     if (offset != NULL)
         *offset = (long long)st.st_size;
-    set_why(why, cap, "ok");
+    checkpoint_set_why(why, cap, "ok");
     return 0;
 }

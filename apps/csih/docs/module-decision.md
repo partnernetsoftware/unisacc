@@ -33,7 +33,7 @@
 ## 文本 include 转单元：实测阻塞（2026-10-10）
 
 - csih.c 只有两行 include：reload_support.inc 与 tui.c；main 在 tui.c:2697。文件表直接列出 tui.c 与各 reload 单元，unisacc 报：`context_index.inc:3:5: unknown identifier`（cmi_work、csih_message 等类型由 tui.c 之前的文本提供）。
-- reload_support.inc 的 `#define set_why checkpoint_set_why` / `#undef` 是两个库各自 set_why 的私有改名；转单元前必须给每个库建公共头并消除非静态重名。
+- 已解除：reload_support.inc 原先的 `#define set_why checkpoint_set_why` 宏已删除，journal_checkpoint.c 的 static 函数直接改名为 `checkpoint_set_why`（check 全绿）。reload_load.c 的 set_why 保留。
 - csih.c 注释称 argv 已到 unisacc 结构 id 上限（netdb.h），textual include 是当时的绕法；转单元前需确认该上限在当前 unisacc 版本是否仍然成立。
 - 结论：转单元是逐单元的公共头化工作（每单元：类型与声明入头、去跨单元 static、删改名宏、context_index.inc 改为显式声明），不是改 csih.sh 能完成的。
 
