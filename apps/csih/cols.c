@@ -1,5 +1,4 @@
 /* module csih.cols: provider, bodies from csih_cols.h, static removed */
-#include "csih_cols_pub.h"
 int csih_next_cp(const char *s, unsigned int *cp) {
     unsigned char c;
     int need = 1, i;

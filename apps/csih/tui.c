@@ -46,7 +46,6 @@
  * "two mains" rule this project has enforced all along, broken by a new route. */
 #include "render_api.h"
 #include "term_api.h"
-#include "csih_home.h"
 #include "reload_session.h"
 #include "reload_io.h"
 #include "reload_owner.h"

@@ -51,7 +51,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include "csih_home.h"
 #include "plugin_api.h"
 
 /* ── restated declarations (so this file compiles alone) ─────────────────── */
