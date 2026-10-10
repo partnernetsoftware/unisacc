@@ -95,6 +95,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           seedgen-opt) req='native-posix|host|cc,python3|cdx|seed-gen-opt-byte-pair';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
+          seedgen-ppchain) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
           lib-windows-imports) req='native-posix|win-export-synthetic|cc|cdx|native-export-probe';;
           lib-lifecycle|lib-callable-catalog) req='native-posix|host|cc,libffi|cdx|native-ffi-probe';;
           *) req='UNKNOWN|UNKNOWN|UNKNOWN|unassigned|UNKNOWN';;
@@ -571,6 +572,7 @@ job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:4
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
 job seedgen-ppconsumer-2 sh ./tests/seedppconsumercheck.sh 2
+job seedgen-ppchain sh ./tests/seedppchaincheck.sh   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled
 job seedgen-3 ./tests/seedgencheck.sh tokenpp tokenlex warnlex
 job seedgen-4 ./tests/seedgencheck.sh warnparse warnunits errorparse warnpp   # seedgen-3 hit 49 s in the rc3 queue
 job com-memalign ./tests/memaligncheck.sh   # 0.0.32 D2: word-wise memcpy/memset only on shared alignment (UBSan + product)
