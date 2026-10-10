@@ -16,9 +16,9 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 ## 投稿前应当补强（论证）
 
 - **图 2：管线与执行器。** 现在只有图 1（立方体网络）。补一张“七阶段字节流 + 通用执行器一步”的结构图，对应 §4.2。
-- **算法 1 的复杂度与最优性差距。** 给出贪心覆盖的运行时间，以及 5 个小表上贪心与精确最小值的逐表对比（现在只有合计 35 → 20）。§3.2 已将 35→20 与 796k→71k 贪心缩参、算法 1 最优性定理的阅读风险封口（[`seal-algo1-35-20-not-optimality-20261009.md`](seal-algo1-35-20-not-optimality-20261009.md)）；逐表对比与运行时间**仍未完成**。
+- **算法 1 的复杂度与最优性差距。** 给出贪心覆盖的运行时间，以及 5 个小表上贪心与精确最小值的逐表对比（现在只有合计 35 → 20）。§3.2 已将 35→20 与 796k→71k 贪心缩参、算法 1 最优性定理的阅读风险封口（[`seal-algo1-35-20-not-optimality-20261009.md`](seal-algo1-35-20-not-optimality-20261009.md)）；逐表对比与运行时间**仍未完成**（开放实验可做，但**非**投稿／理论闸门；GATE 升格已切见 [`notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md`](notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md)）。
 - **维护面统计。** §8 声称“表示迁移不等于维护成本下降”；用 exec 生成器 `.py`、手写 `.c`、`.tsv` 分列的行数趋势给出实测（与 v0.0.10 计划中的行数账本同源）。tip 类别快照（≠ 同等覆盖趋势证明）见 [`seal-maint-surface-not-trend-20261009.md`](seal-maint-surface-not-trend-20261009.md)。 衍生净化升格登记（快照≠缩小／趋势定理；~18:12 E）见 [`notes/paper-a-derive-purify-maint-surface-not-trend-20261010-1812.md`](notes/paper-a-derive-purify-maint-surface-not-trend-20261010-1812.md)。
-- **算法 1 的复杂度与最优性差距。** 给出贪心覆盖的运行时间，以及 5 个小表上贪心与精确最小值的逐表对比（现在只有合计 35 → 20）。§3.2 已将 35→20 与 796k→71k 贪心缩参、算法 1 最优性定理的阅读风险封口（[`seal-algo1-35-20-not-optimality-20261009.md`](seal-algo1-35-20-not-optimality-20261009.md)）；2026-10-10 ~19:30 已升格 derive-purify 登记（[`notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md`](notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md)）；逐表对比与运行时间**仍未完成**。
+- **算法 1 的复杂度与最优性差距。** 给出贪心覆盖的运行时间，以及 5 个小表上贪心与精确最小值的逐表对比（现在只有合计 35 → 20）。§3.2 已将 35→20 与 796k→71k 贪心缩参、算法 1 最优性定理的阅读风险封口（[`seal-algo1-35-20-not-optimality-20261009.md`](seal-algo1-35-20-not-optimality-20261009.md)）；2026-10-10 ~19:30 已升格 derive-purify 登记（[`notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md`](notes/paper-a-derive-purify-algo1-not-optimality-20261010-1930.md)）；逐表对比与运行时间**仍未完成**（开放实验可做，但**非**投稿／理论闸门；GATE 升格已切见 [`notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md`](notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md)）。
 - **维护面统计。** §8 声称“表示迁移不等于维护成本下降”；用 exec 生成器 `.py`、手写 `.c`、`.tsv` 分列的行数趋势给出实测（与 v0.0.10 计划中的行数账本同源）。tip 类别快照（≠ 同等覆盖趋势证明）见 [`seal-maint-surface-not-trend-20261009.md`](seal-maint-surface-not-trend-20261009.md)。
 - **消融。** 阈值前缀求值与声明式返回各自的贡献（现在只报合并效果）。
 - **外部裁判扩展。** 目前登记表有 8/18 个决策阶段具名外部裁判，但覆盖范围各异；解析与预处理仍需扩展独立裁判。
@@ -77,3 +77,6 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-11 ~03:38 心跳（切口 E 衍生净化，未改稿内数字）：** 登记「图 2（七阶段字节流 + 通用执行器结构图）完稿 ≠ A 理论闸门」；父节点回 A（经构造+T1+unisacc 实证+图 1+§4.2 文字叙述）；不挡投稿；不起稿；不发明图／SVG；不改写 §4.2；不降级 §8.1／8509-8769／Ο1/Ο2。见 [`notes/paper-a-derive-purify-fig2-pipeline-diagram-not-a-gate-20261011-0338.md`](notes/paper-a-derive-purify-fig2-pipeline-diagram-not-a-gate-20261011-0338.md)。
 
 - **2026-10-11 ~03:58 心跳（切口 E 衍生净化，未改稿内数字）：** 登记「格式与投稿完稿（目标会议／期刊选定 + 规范编号参考文献对齐 prior-art.md + 匿名制品替换）≠ A 理论闸门」；父节点回 A（经构造+T1+unisacc 实证+CN/EN/TeX/abstract 对齐义务）；不挡投稿；不起稿；不代裁 venue／公开；不重排参考文献；不降级 §8.1／8509-8769／Ο1/Ο2。见 [`notes/paper-a-derive-purify-format-venue-bib-anon-not-a-gate-20261011-0358.md`](notes/paper-a-derive-purify-format-venue-bib-anon-not-a-gate-20261011-0358.md)。
+
+- **2026-10-11 ~04:12 心跳（切口 E 衍生净化，未改稿内数字）：** 登记「算法 1 五小表贪心-vs-精确逐表对比 + 贪心运行时间完稿 ≠ A 理论／投稿闸门」；父节点回 A（经构造+T1+§3.2 诚实合计披露 + seal 禁最优性定理）；不挡投稿；不起稿；不发明逐表数字；不重做 algo1-not-optimality-1930／seal-algo1；不降级 §8.1／8509-8769／Ο1/Ο2。见 [`notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md`](notes/paper-a-derive-purify-algo1-per-table-runtime-not-a-gate-20261011-0412.md)。
+
