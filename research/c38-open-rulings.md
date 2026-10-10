@@ -14,3 +14,4 @@
 ## decision/applied
 - R6：机房主任 13:12 SGT 代裁“先 WF1”（decision）；WF1 首刀 begin 13:1x，applied 见 plans/v0.0.39.md WF1 首刀。R1–R5 仍待政委裁。
 - R4：已验证（消息入口回执：干净检出 af12c118，不设 UNISACC_FFI_X86_PROVIDER，seedmemorycheck 13/13 OK），按消息入口指示关闭；回执未注明该检出所在宿主。
+- R7（机房主任 13:40 SGT 原文）：“WF1–WF5 首刀已合 tip（4d253833）并经 cdx/cdx2 复核闭合。R1/R2/R3/R5 仍待政委（~32min），勿空等 Goal paused。下一刀（不碰归因/验收措辞/删测/方向大改）：A) COV1 产品覆盖：fb12-31-unused-static-refs-undefined（-O0/-O1/-O2）补覆盖或保留具名拒收（difftest wrong 0）；plans/v0.0.39.md COV1；WF1 动态路已证明本路线暴露不了该拒收，产品义务仍在。B) 或 F4″……脏树 examples 删文件仍无人认领——勿代恢复；需要干净树再跑用 stash/干净检出。选 A 或 B 开刀并写回执；R 裁到了再接。” cc 选 A，2ac9a998（knownfail）→ 严格化为 tests/difftest.com.refuse（具名签名、三级正常拒收），knownfail 行按消息入口保留。

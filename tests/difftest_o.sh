@@ -90,9 +90,31 @@ case "$UA" in *.com) KNOWN=$R/tests/difftest.com.knownfail;; *) KNOWN=$R/tests/d
 . "$R/tests/knownfail.sh"
 knownfail_load "$KNOWN" "$T/known.keys" || exit 1
 isknown() { knownfail_has "$1"; }
+# 0.0.39 COV1: named refusals are stricter than knownfail.  A probe listed in the refuse ledger
+# (probe<TAB>exact diagnostic<TAB>reason) must, at -O0, -O1 and -O2 each: have a completed reference,
+# no timeout/signal, a normal nonzero exit and the exact diagnostic on stderr.  Wrong output, a signal,
+# a timeout or another diagnostic is FAIL; agreeing at every level is REVIVED (delete the line).
+case "$UA" in *.com) REFUSE=$R/tests/difftest.com.refuse;; *) REFUSE=$R/tests/difftest.refuse;; esac
+REFUSE=${DIFFO_REFUSE:-$REFUSE}
+named=0
+refuse_sig() { [ -f "$REFUSE" ] && awk -F'\t' -v p="$1" '$0 !~ /^#/ && $1 == p { print $2; found=1 } END { exit !found }' "$REFUSE"; }
 for f in "${FILES[@]}"; do
     b=$(basename "$f" .c); D="$T/$b.d"
     [ "$b" = "host" ] && continue
+    if sig=$(refuse_sig "$b"); then
+        if [ "$(cat "$D/v" 2>/dev/null)" != done ]; then bad=$((bad+1)); echo "  FAIL $b: $(cat "$D/v" 2>/dev/null || echo no-verdict)"; continue; fi
+        nagree=0; nrefuse=0; why=
+        for o in -O0 -O1 -O2; do
+            if [ -f "$D/fail$o" ]; then why="$why $o:$(cat "$D/fail$o")"
+            elif cmp -s "$D/want" "$D/got$o"; then nagree=$((nagree+1))
+            elif [ "$(tail -1 "$D/got$o")" != rc=0 ] && grep -qF -- "$sig" "$D/err$o"; then nrefuse=$((nrefuse+1))
+            else why="$why $o:not-the-named-refusal[$(head -1 "$D/err$o" | cut -c1-50)]"; fi
+        done
+        if [ "$nagree" = 3 ]; then revived=$((revived+1)); printf "       %-14s is a named refusal in %s but agrees at every level: delete its line\n" "$b" "$(basename "$REFUSE")"
+        elif [ "$nrefuse" = 3 ]; then named=$((named+1)); echo "  named-refuse $b: $sig"
+        else bad=$((bad+1)); echo "  FAIL $b named refusal broken:$why (agree $nagree, refuse $nrefuse of 3)"; fi
+        continue
+    fi
     if isknown "$b"; then
         kw=0; for o in -O0 -O1 -O2; do cmp -s "$D/want" "$D/got$o" || kw=1; done
         if [ "$kw" = 0 ]; then revived=$((revived+1)); printf "       %-14s is listed in %s but agrees at every level: delete its line\n" "$b" "$(basename "$KNOWN")"
@@ -114,5 +136,5 @@ for f in "${FILES[@]}"; do
     done
 done
 echo
-echo "difftest_o SHARD=$SHARD probes=${#FILES[@]}  agree $ok   wrong $bad   refuse $refuse   known $known   revived $revived   (-O0 -O1 -O2 against cc -O2)"
-[ "$bad" -eq 0 ] && [ "$refuse" -eq 0 ] && [ "$revived" -eq 0 ] && [ "$ok" -gt 0 ]
+echo "difftest_o SHARD=$SHARD probes=${#FILES[@]}  agree $ok   wrong $bad   refuse $refuse   known $known   revived $revived   named $named   (-O0 -O1 -O2 against cc -O2)"
+[ "$bad" -eq 0 ] && [ "$refuse" -eq 0 ] && [ "$revived" -eq 0 ] && [ $((ok + named)) -gt 0 ]
