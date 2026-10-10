@@ -51,6 +51,9 @@ try:
         'own row naming no suite (not empty)': ('0.0.40', '| H1 | 无 | cc | x | 0 |\n', OLD),
         'own row without cell structure': ('0.0.40', '| H1 nonsense fake-suite\n', OLD),
         'EMPTY beside a suite name': ('0.0.40', '| H1 | EMPTY | fake-suite |\n', OLD),
+        'name after EMPTY': ('0.0.40', '| H1 | fake-suite | EMPTY |\n', OLD),
+        'row without closing pipe': ('0.0.40', '| H1 | fake-suite\n', OLD),
+        'EMPTY without closing pipe': ('0.0.40', '| H1 | EMPTY\n', OLD),
         'own row and declaration': ('0.0.40', '| H1 | 超时：tools-2 |\n' + inherit(good), OLD),
     }
     for why, (ver, plan, old) in bad.items():
@@ -65,5 +68,5 @@ try:
 finally:
     shutil.rmtree(t, ignore_errors=True)
 print('h1source  positives (inherit+sha, own row, explicit EMPTY) reach the make stub after the H1 line; no declaration/'
-      'no plan/wrong sha/missing target/target without row/malformed/nameless row/structureless row/EMPTY beside a name/both refused rc 2 with 0 make calls and no '
+      'no plan/wrong sha/missing target/target without row/malformed/nameless row/structureless row/EMPTY beside a name/unclosed row or EMPTY/both refused rc 2 with 0 make calls and no '
       'candidate dir; without the gate line the same negative reaches make')

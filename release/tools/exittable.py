@@ -31,7 +31,7 @@ def h1_names(plan, item='H1'):
     rows = [l for l in text.splitlines() if l.startswith('| %s ' % item)]
     if len(rows) != 1: raise H1Error('%s: want exactly one "| %s |" row, found %d' % (plan, item, len(rows)))
     row = rows[0]
-    if not row.startswith('| %s |' % item): raise H1Error('%s: malformed %s row (want "| %s | ... |"): %r' % (plan, item, item, row[:60]))
+    if not (row.startswith('| %s |' % item) and row.rstrip().endswith('|')): raise H1Error('%s: malformed %s row (want "| %s | ... |", closing pipe included): %r' % (plan, item, item, row[:60]))
     cells = [c.strip() for c in row.split('|')[2:]]
     if 'EMPTY' in cells:   # an empty table is the whole row, never EMPTY beside names or other cells
         if [c for c in cells if c] != ['EMPTY']: raise H1Error('%s: EMPTY must stand alone in the %s row: %r' % (plan, item, row[:60]))

@@ -36,8 +36,9 @@ with tempfile.TemporaryDirectory() as m:
     # 0.0.40 (机房主任 22:45 C): a plan without its H1 row, or a row naming no suite, is unknown (rc 2), not an empty list;
     # only '| H1 | EMPTY |' is an empty table
     for text, want in (('# no row\n', 2), ('| H1 | 无 | cc | x | 0 |\n', 2), ('| H1 | a-b |\n| H1 | c-d |\n', 2), ('| H1 | EMPTY |\n', 0),
-                      ('| H1 nonsense fake-suite\n', 2), ('| H1 | EMPTY | fake-suite |\n', 2), ('| H1 | fake-suite | EMPTY |\n', 2)):
+                      ('| H1 nonsense fake-suite\n', 2), ('| H1 | EMPTY | fake-suite |\n', 2), ('| H1 | fake-suite | EMPTY |\n', 2),
+                      ('| H1 | fake-suite\n', 2), ('| H1 | EMPTY\n', 2)):   # no closing pipe
         (mt / 'p.md').write_text(text); out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err): rc = X.main([str(mt), '--h1', str(mt / 'p.md')])
         assert (rc or 0) == want and (want == 0 or (out.getvalue() == '' and 'H1' in err.getvalue())), (text, rc, out.getvalue(), err.getvalue())
-print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass; missing H1 table (and the pre-archive default) rc 2, archived table accepted; missing/nameless/duplicate/malformed H1 row and EMPTY beside other cells rc 2, only \'| H1 | EMPTY |\' is empty')
+print('exittable: UNVERIFIED/INTERRUPTED/tool/H1 timeout/unlisted/wrong-output/pending classes and PASS separation pass; missing H1 table (and the pre-archive default) rc 2, archived table accepted; missing/nameless/duplicate/malformed or unclosed H1 row and EMPTY beside other cells rc 2, only \'| H1 | EMPTY |\' is empty')
