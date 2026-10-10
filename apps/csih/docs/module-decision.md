@@ -29,3 +29,10 @@
 - 整表 cc/clang 编译仍失败：`reload_state.c` 隐式声明 `rs_upto4095`；`tui.c` 重声明 `mkdir`；`net.c` 依赖 unisacc 专有头 `unisacc_ffi.h`。
 - `-include` 是全局注入，没有真正的模块隔离；隔离要等分开编译（`docs/toolchain.md` §7）与接口工件。
 - `probes/reload_candidate.py` 为他人未提交改动；其冻结清单仍引用 `csih_cols.h`、`csih_home.h`，本决定保持了这两个文件名。
+
+## 文本 include 转单元：实测阻塞（2026-10-10）
+
+- csih.c 只有两行 include：reload_support.inc 与 tui.c；main 在 tui.c:2697。文件表直接列出 tui.c 与各 reload 单元，unisacc 报：`context_index.inc:3:5: unknown identifier`（cmi_work、csih_message 等类型由 tui.c 之前的文本提供）。
+- reload_support.inc 的 `#define set_why checkpoint_set_why` / `#undef` 是两个库各自 set_why 的私有改名；转单元前必须给每个库建公共头并消除非静态重名。
+- csih.c 注释称 argv 已到 unisacc 结构 id 上限（netdb.h），textual include 是当时的绕法；转单元前需确认该上限在当前 unisacc 版本是否仍然成立。
+- 结论：转单元是逐单元的公共头化工作（每单元：类型与声明入头、去跨单元 static、删改名宏、context_index.inc 改为显式声明），不是改 csih.sh 能完成的。
