@@ -40,14 +40,23 @@ def shard_of(probe, root=ROOT, n=SHARDS):
     return ['difftest_o-%d' % k, 'com-difftest_o-%d' % k]
 
 
+SUMMARY = re.compile(r'difftest_o SHARD=\S+ probes=(\d+)\s+agree (\d+)\s+wrong (\d+)\s+refuse (\d+)\s+known (\d+)\s+revived (\d+)')
+
+
 def verdicts(text, rows):
-    """Per probe from difftest_o lines: REFUSE / WRONG / FAIL lines name the probe; otherwise agree."""
+    """Per probe from difftest_o lines: REFUSE / WRONG / FAIL lines name the probe; otherwise agree.
+    Fail closed: without difftest_o's summary for exactly these probes, with known/revived entries, or with
+    totals that do not account for 3 -O levels per probe, every probe is 'unproven' (never agree)."""
     out = {}
+    m = SUMMARY.search(text)
+    n, agree, wrong, refuse, known, revived = map(int, m.groups()) if m else (None,) * 6
+    complete = bool(m) and n == len(rows) and known == 0 and revived == 0 and agree + wrong + refuse == 3 * n
     for r in rows:
         b = pathlib.Path(r['probe']).stem
         lines = [l for l in text.splitlines() if re.match(r'\s+(REFUSE|WRONG|FAIL) %s\b' % re.escape(b), l)]
         kinds = {l.split()[0] for l in lines}
-        got = 'refuse' if kinds == {'REFUSE'} and len(lines) == 3 else 'agree' if not lines else 'other'
+        got = ('unproven' if not complete else
+               'refuse' if kinds == {'REFUSE'} and len(lines) == 3 else 'agree' if not lines else 'other')
         out[r['probe']] = {'got': got, 'lines': lines, 'ok': got == r['expect']}
     return out
 
@@ -65,17 +74,20 @@ def main(argv=None):
     a = ap.parse_args(argv)
     rows = group(a.group)
     ua = pathlib.Path(a.ua or '/tmp/cc39-wf1/ua'); cold = None
-    if not ua.exists():                                   # cold preparation: the dynamic reference itself
+    sys.path.insert(0, str(ROOT / 'exec/c')); import provenance
+    key = pathlib.Path(str(ua) + '.source_digest'); want = provenance.source_digest()
+    # source key: a UA is used only when it was built from this source digest (a sidecar written at build)
+    if not ua.exists() or not key.exists() or key.read_text().strip() != want:
         ua.parent.mkdir(parents=True, exist_ok=True); t = time.monotonic()
         subprocess.run([sys.executable, str(ROOT / 'tests/bound.py'), '58', str(ROOT / 'tests/build_ref.sh'),
                         str(ua) + '.c', str(ua)], cwd=ROOT, check=True)
-        cold = round(time.monotonic() - t, 2)
+        cold = round(time.monotonic() - t, 2); key.write_text(want + '\n')
     ident = identity(ua, rows, a.group)
     prev = None
     try: prev = json.load(open(a.out)).get('identity')
     except Exception: pass
     t = time.monotonic()
-    env = dict(os.environ, UA=str(ua), PROBES=' '.join(r['probe'] for r in rows), SHARD='1/1')
+    env = dict(os.environ, UA=str(ua), PROBES=' '.join(r['probe'] for r in rows), SHARD='1/1', WF1_PRECHECK='1')
     run = subprocess.run([sys.executable, str(ROOT / 'tests/bound.py'), '55', './tests/difftest_o.sh'],
                          cwd=ROOT, env=env, capture_output=True, text=True)
     warm = round(time.monotonic() - t, 2)
@@ -87,7 +99,8 @@ def main(argv=None):
            'cold_prepare_s': cold, 'warm_execute_s': warm, 'difftest_o_rc': run.returncode,
            'summary': (run.stdout.strip().splitlines() or [''])[-1],
            'probes': [{**r, **v[r['probe']], 'formal_shards': shard_of(r['probe'])} for r in rows]}
-    rec['precheck'] = 'GREEN' if all(p['ok'] for p in rec['probes']) else 'RED'
+    rec['ua_source_digest'] = key.read_text().strip()
+    rec['precheck'] = 'GREEN' if all(p['ok'] for p in rec['probes']) and rec['ua_source_digest'] == want else 'RED'
     pathlib.Path(a.out).write_text(json.dumps(rec, indent=1) + '\n')
     print('c99precheck %s  %s  cold %s s  warm %s s%s' % (rec['precheck'], a.group, cold, warm, '  (previous receipt STALE)' if rec['stale_previous'] else ''))
     for p in rec['probes']: print('  %-48s %-14s expect %-6s got %-6s %s' % (p['probe'], p['role'], p['expect'], p['got'], ','.join(p['formal_shards'] or ['UNMAPPED'])))
