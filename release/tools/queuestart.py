@@ -14,6 +14,13 @@ import hashlib, json, os, pathlib, shutil, sys, time
 
 def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 
+RECEIPTS = ('start-receipt.json', 'start-receipt.txt')
+
+def load_obj(p):
+    try: return json.loads(pathlib.Path(p).read_text())
+    except FileNotFoundError: return None
+    except (OSError, ValueError): return 'unreadable'
+
 def state_ok(d):
     try: data = json.loads((d / 'results.json').read_text())
     except (OSError, ValueError) as e: return 'results.json unreadable (%s)' % type(e).__name__
@@ -43,23 +50,27 @@ def main(argv):
         elif restored: print('queue: resumed state from %s (receipt %s/start-receipt.json)' % (source, Q))
         else: print('queue: resume continues %s' % source)
         return 0
-    try: prev_art = json.loads((Q / 'start-receipt.json').read_text()).get('artifact_sha256')
-    except (OSError, ValueError): prev_art = None
+    prev = load_obj(Q / 'start-receipt.json')
+    prev_art = prev.get('artifact_sha256') if isinstance(prev, dict) else None
     if mode == 'resume' and prev_art not in (None, art):
         return refuse('%s was started for artifact %s, not this candidate %s' % (Q, str(prev_art)[:16], art[:16]))
-    held = Q.is_dir() and any(p.name not in ('start-receipt.json', 'start-receipt.txt') for p in Q.iterdir())   # a receipt alone is an empty start
+    held = Q.is_dir() and any(p.name not in RECEIPTS for p in Q.iterdir())   # a receipt alone is an empty start
     if mode == 'fresh':
         if held: return refuse('%s holds a live state already; a fresh start never continues it (QUEUE_START=resume to continue, or use a new QUEUE_STATE)' % Q)
         return receipt(False, 'none', ['Q absent or empty', 'backup not read'])
     if held:
-        try: prev = json.loads((Q / 'start-receipt.json').read_text())
-        except (OSError, ValueError): return refuse('%s holds a live state already but no readable start receipt (unknown origin); not mixed' % Q)
+        if not isinstance(prev, dict): return refuse('%s holds a live state already but no readable start receipt (unknown origin); not mixed' % Q)
         if prev.get('artifact_sha256') != art: return refuse('%s was started for artifact %s, not this candidate %s' % (Q, str(prev.get('artifact_sha256'))[:16], art[:16]))
-        bad = state_ok(Q)
-        if bad and (Q / 'results.json').exists(): return refuse('%s: %s' % (Q, bad))
+        if (Q / 'results.json').exists():
+            bad = state_ok(Q)
+            if bad: return refuse('%s: %s' % (Q, bad))
+        else:
+            extra = sorted(p.name for p in Q.iterdir() if p.name not in RECEIPTS)
+            return refuse('%s has no results.json yet but holds %s: not a state this queue wrote' % (Q, ', '.join(extra)))
         return receipt(False, 'existing %s' % Q, ['receipt artifact matches', 'existing state well-formed or not yet written'])
-    try: built = json.loads((B / 'unisacc-next.com.build.json').read_text())
-    except (OSError, ValueError): return refuse('resume refused: backup %s has no build.json (unisacc-next.com.build.json)' % B)
+    built = load_obj(B / 'unisacc-next.com.build.json')
+    if built is None: return refuse('resume refused: backup %s has no build.json (unisacc-next.com.build.json)' % B)
+    if not isinstance(built, dict): return refuse('resume refused: backup %s build.json is not a JSON object' % B)
     if built.get('artifact_sha256') != art: return refuse('resume refused: backup artifact mismatch -- %s is for artifact %s, not this candidate %s' % (B, str(built.get('artifact_sha256'))[:16], art[:16]))
     for g in ('state', 'state.old'):
         src = B / g
@@ -72,8 +83,14 @@ def main(argv):
         except OSError as e:
             shutil.rmtree(tmp, ignore_errors=True)
             return refuse('copy of %s failed (%s); nothing restored' % (src, type(e).__name__))
-        if Q.is_dir(): Q.rmdir()          # empty by the check above
-        tmp.replace(Q)
+        try:
+            if Q.is_dir():   # only our own receipts may be here (checked above); they are superseded
+                for r in RECEIPTS: (Q / r).unlink(missing_ok=True)
+                Q.rmdir()
+            tmp.replace(Q)
+        except OSError as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return refuse('could not install %s as %s (%s); nothing restored' % (src, Q, type(e).__name__))
         return receipt(True, str(src), ['backup build.json artifact matches', 'results.json well-formed', 'copied whole then renamed'])
     return refuse('backup %s has no complete state generation to resume' % B)
 

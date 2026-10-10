@@ -43,12 +43,22 @@ try:
     if rc != 2 or tree(Q) != before: fail('unknown-origin state continued: %s' % out)
     Q = T / 'q5'; Q.mkdir(); (Q / 'start-receipt.json').write_text(json.dumps({'artifact_sha256': '1' * 64})); before = tree(Q); rc, out = run(Q, B, D, 'resume')
     if rc != 2 or tree(Q) != before: fail('state bound to another candidate continued: %s' % out)
+    # a receipt-only Q (a previous empty fresh start) resumed from the backup: atomic import, no tmp left
+    Q = T / 'q8'; run(Q, B, D, 'fresh'); rc, out = run(Q, B, D, 'resume')
+    if rc or json.loads((Q / 'results.json').read_text()) != good or (T / 'q8.resume-tmp').exists(): fail('receipt-only Q resume failed: %s' % out)
+    # build.json that is valid JSON but not an object is refused cleanly
+    b = T / 'b-list-build'; shutil.copytree(B, b); (b / 'unisacc-next.com.build.json').write_text('[]')
+    Q = T / 'q9'; rc, out = run(Q, b, D, 'resume')
+    if rc != 2 or 'REFUSED' not in out or Q.exists(): fail('non-object build.json not refused: %s' % out)
+    # a bound receipt plus foreign files and no results.json is not a state this queue wrote
+    Q = T / 'q10'; run(Q, B, D, 'fresh'); (Q / 'junk').write_text('x'); before = tree(Q); rc, out = run(Q, B, D, 'resume')
+    if rc != 2 or tree(Q) != before: fail('bound receipt + foreign files continued: %s' % out)
     # a copy that fails midway restores nothing (no half state)
     b = T / 'b-unreadable'; shutil.copytree(B, b); os.chmod(b / 'state/a.log', 0)
     Q = T / 'q6'; rc, out = run(Q, b, D, 'resume'); os.chmod(b / 'state/a.log', 0o644)
     if os.geteuid() != 0 and (rc != 2 or Q.exists() or (T / 'q6.resume-tmp').exists()): fail('failed copy left a half state: %s' % out)
     # an unknown mode is a usage error
     if run(T / 'q7', B, D, 'auto')[0] != 2: fail('unknown mode accepted')
-    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing')
+    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object build.json and bound-receipt-plus-foreign-files refused')
 finally:
     shutil.rmtree(T, ignore_errors=True)
