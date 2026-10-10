@@ -1,6 +1,6 @@
 # 0.0.38 ledger 19 行一次汇总（2026-10-10；只汇总，不代裁、不改验收措辞、不起候选/重活）
 
-依据：`python3 tests/ledgercheck.py --final plans/v0.0.38.md` → 19 行未结，carry 0。结语只认 已完成/顺延/跨版进行/砍掉。
+依据：`python3 tests/ledgercheck.py --final archive/plans/v0.0.38.md` → 19 行未结，carry 0。结语只认 已完成/顺延/跨版进行/砍掉。
 P1–P7（流水线提效）已完成并不在 19 行内；本表与版本冻结分开：账裁清后再一次版本提交冻结。
 
 ## 表一 已完成证据（可直接落结语）

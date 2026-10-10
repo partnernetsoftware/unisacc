@@ -1272,7 +1272,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 〔0.0.37 发布结论，2026-10-09；过程回执已移 archive/prd-history-20261009.md〕v0.0.37 已公开：tag v0.0.37 = rc 7a8764fc，资产 unisacc.com 740007ef（source 689a91de，stage2=stage3 定点，seed 928bda8d）。C1–C3 完成（g4/g5、register、struct return、realpath/PATH_MAX）；Linux 静态编译器 -o 宿主转发守卫修 fc7ca424。F4′ 本版 FAILED（csih15 冷编中位 11.93 s > 5 s），顺延 0.0.38 F4″，原验收不改。W2/E57/X3/L2/L1′/L1b′/A1/N1 顺延 0.0.38。放行依据：CI release-check 绿 + cc 独立 17/17 + 定点；本机全量 queue 380/642 完成、302 通过、78 红（工具缺失/宿主超时/写死 Mac/宿主 cc-glibc 四类）、262 未跑，不记为全 PASS，限时与宿主化记 0.0.38 H1/H2/P 项。
 
-〔0.0.38 计划梳理：集中流水线提效，2026-10-09；董秘代裁、政委点头开工准备〕本版主线改为流程补丁与测试套件同一切口（plans/v0.0.38.md P1–P7）：预授权裁定表与单一出口表、冻结前 hostcheck、queue 三层共同 deadline 与无进展硬停（外层中断记 INTERRUPTED，不合成 rc142）、gatedeps 只在冻结后/封存后/tests 改动三个稳定点刷新、重活单令牌下的旁路并行、阶段墙钟（仓外记录、入仓只放汇总表）、套件声明宿主需求（不满足记 UNVERIFIED）与预检依赖。不放宽预算、不删测试、不改验收措辞；roadmap 原 K2/K3 不作本版主线。单写者 cc，cdx/cdx2 交验收条款；改码等董秘发 /goal。
+〔0.0.38 计划梳理：集中流水线提效，2026-10-09；董秘代裁、政委点头开工准备〕本版主线改为流程补丁与测试套件同一切口（archive/plans/v0.0.38.md P1–P7）：预授权裁定表与单一出口表、冻结前 hostcheck、queue 三层共同 deadline 与无进展硬停（外层中断记 INTERRUPTED，不合成 rc142）、gatedeps 只在冻结后/封存后/tests 改动三个稳定点刷新、重活单令牌下的旁路并行、阶段墙钟（仓外记录、入仓只放汇总表）、套件声明宿主需求（不满足记 UNVERIFIED）与预检依赖。不放宽预算、不删测试、不改验收措辞；roadmap 原 K2/K3 不作本版主线。单写者 cc，cdx/cdx2 交验收条款；改码等董秘发 /goal。
 
 〔0.0.38 P2/P7执行认领，2026-10-09；董秘/goal及cc分工〕cdx独占hostcheck新工具、precheck host入口、gate宿主需求声明及第一批宿主套件；cc独占deadline/queue状态协议，cdx2独占计时。新增gate --host-plan保持旧--plan不变，声明清单覆盖真实枚举，尚未声明项明确UNKNOWN。套件rc77末行UNVERIFIED只用于不满足显式执行宿主/ISA需求；缺工具/编译错误与真实输出不符保留，交叉构造不因target不同跳过。csmith补Debian/显式头路径并把实际头及工具身份绑定对照缓存；先受限自证再提交，不重建候选/全量queue。
 

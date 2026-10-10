@@ -6,7 +6,7 @@
 
 | 裁定结果 | 落点 | 消费方式 | 边界 |
 |---|---|---|---|
-| 某套件记 H1 云机基线 | `release/rulings.tsv` 追加一行：套件 / `TIMEOUT` 或 `FAILED` / 首错签名 / `H1` / 裁定出处；`plans/v0.0.38.md` H1 行具名 | exittable 归 RULED_BASELINE，不计 PASS | 只覆盖该套件、该形态、该签名；同套件新形态或新签名回 NEEDS_RULING；限时不变 |
+| 某套件记 H1 云机基线 | `release/rulings.tsv` 追加一行：套件 / `TIMEOUT` 或 `FAILED` / 首错签名 / `H1` / 裁定出处；`archive/plans/v0.0.38.md` H1 行具名 | exittable 归 RULED_BASELINE，不计 PASS | 只覆盖该套件、该形态、该签名；同套件新形态或新签名回 NEEDS_RULING；限时不变 |
 | 某套件记 H2 宿主基线 | 同上（`H2`）；H2 行具名，并在 H2 切口给出宿主需求声明 | 同上 | 宿主不适用子项最终应由套件声明并退 77（P7），不以 skip 放过 |
 | 允许 H2 切口修一轮 | 修片单笔提交（不动产品闭包，需动先报）；单项 bound≤55 真实 gate 复测 | 修通即原 rulings 行不再匹配（套件转 PASS）；修不动维持该行 | 只一轮；不重试到绿 |
 | 覆盖缺口（COV1） | plans COV1 行；不进 rulings 宿主基线 | exittable 仍 NEEDS_RULING 直至补覆盖或保留具名拒收的裁定行 | 不改 PASS、不改判据 |
@@ -40,12 +40,12 @@
 ## 5. 进入 0.0.38 Draft 的剩余前提（报告，未执行）
 
 1. `src/version.h` 仍为 0.0.37，候选 740007ef 即已公开的 v0.0.37 产物。0.0.38 发布须先做版本号提交——它改变产品闭包，按 §24/§27 与本清单 §3-2 须重新冻结、构造同源候选与 stage2=stage3 定点，并对新候选重做出口（本轮 ver038 证据只证流水线与套件，不能签给新二进制）。
-2. `ledgercheck --final plans/v0.0.38.md` 仍有 19 行未结（K2a–c、K1、H37、F4″、H1、H2、COV1、SC1、W2、E57、X3、L2、L1′、L1b′、A1、N1、顺延占位），须逐行结算或顺延。
+2. `ledgercheck --final archive/plans/v0.0.38.md` 仍有 19 行未结（K2a–c、K1、H37、F4″、H1、H2、COV1、SC1、W2、E57、X3、L2、L1′、L1b′、A1、N1、顺延占位），须逐行结算或顺延。
 3. 其余：freezecheck 待版本提交后进入冻结窗；subtract-safety 0；gate-layers/script-inventory/gate-infra 绿；CI release-check、封存与 rc 按 §9/§28；公开另由政委/董秘授权。
 
 ## 6. ledger 一次裁落地与 SC1 修片（2026-10-10；实际跑过）
 
-- 董秘一次裁 ledger19 已落 plans/v0.0.38.md（335b9312）：13 行 `顺延 N → 0.0.39`（计数加一，承接入草案 plans/v0.0.39.md，原验收不变）；W2/E57 顺延至有 Windows 双 ISA 真宿主的版本；H1/H2 跨版进行（基线非通过）；占位行砍掉；SC1 已完成。`ledgercheck --final plans/v0.0.38.md` 0 未结、carry 0。
+- 董秘一次裁 ledger19 已落 archive/plans/v0.0.38.md（335b9312）：13 行 `顺延 N → 0.0.39`（计数加一，承接入草案 plans/v0.0.39.md，原验收不变）；W2/E57 顺延至有 Windows 双 ISA 真宿主的版本；H1/H2 跨版进行（基线非通过）；占位行砍掉；SC1 已完成。`ledgercheck --final archive/plans/v0.0.38.md` 0 未结、carry 0。
 - SC1 修片 72120ea8：seed/gen.c `parse2_startup_control` 绑定 k2-control consts；seed-construct-parse2/-2/-3 真实 gate bound55 各 rc0（43/37/13 s），图对 Python 参考逐字节一致。
 - **身份变化**：`provenance.source_digest()` 689a91de → c7e75006（seed/gen.c 在产品闭包内）；seed-gen 二进制随之变化，种子内存证据（绑定生成器 sha 2d1696da）须对新生成器重测，否则准入 rc2。候选 740007ef 与 ver038 出口不能签给新闭包——本就须随 0.0.38 版本冻结重造候选、定点、出口；仍等董秘授权，不进 Draft。
 - 种子内存证据键（只读 tests/seedmemory.py 核对）：绑定 `C_SHA`=seed/gen.c 字节 sha（8ba73354…，72120ea8 后已变 → gen/parse2 族现判 rc2 'C source differs from measured route'）、`REFERENCE_KEYS`（exec/assemble.py、exec/build、exec/parse2、exec/facts 等，未变）、cc 实体 sha/版本/flags/并发/启动器。**不含 src/version.h**：版本号提交不使证据失效，故可在冻结授权后、版本提交前后任一时点对当前 gen.c 一次采证，无需二次重测；com 族本就 UNKNOWN（未测路线）。
