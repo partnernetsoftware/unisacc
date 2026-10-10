@@ -46,6 +46,21 @@ try:
     # a receipt-only Q (a previous empty fresh start) resumed from the backup: atomic import, no tmp left
     Q = T / 'q8'; run(Q, B, D, 'fresh'); rc, out = run(Q, B, D, 'resume')
     if rc or json.loads((Q / 'results.json').read_text()) != good or (T / 'q8.resume-tmp').exists(): fail('receipt-only Q resume failed: %s' % out)
+    # receipt-only Q whose receipt is not an object ([]) is refused, untouched
+    Q = T / 'q11'; Q.mkdir(); (Q / 'start-receipt.json').write_text('[]'); before = tree(Q); rc, out = run(Q, B, D, 'resume')
+    if rc != 2 or tree(Q) != before: fail('receipt-only Q with a non-object receipt resumed: %s' % out)
+    # the final install rename fails: the old receipt-only Q comes back exactly, no tmp/aside left
+    Q = T / 'q12'; run(Q, B, D, 'fresh'); before = tree(Q)
+    code = ("import runpy,os,sys; real=os.replace\n"
+            "def bad(a,b,**k):\n    if str(a).endswith('.resume-tmp'): raise OSError('injected rename failure')\n    return real(a,b,**k)\n"
+            "os.replace=bad; import pathlib; pathlib.Path.replace=lambda self,t: bad(self,t) or pathlib.Path(t)\n"
+            "sys.argv=[sys.argv[1]]+sys.argv[2:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+    r = subprocess.run([sys.executable, '-c', code, str(TOOL), str(Q), str(B), str(D), 'resume'], capture_output=True, text=True, timeout=20)
+    if r.returncode != 2 or tree(Q) != before or (T / 'q12.resume-tmp').exists() or (T / 'q12.resume-old').exists():
+        fail('failed install did not roll back to the old Q: rc %s %s %s' % (r.returncode, r.stdout, r.stderr[-300:]))
+    # a Q that does not exist yet still resumes from a good backup (positive kept)
+    Q = T / 'q13'; rc, out = run(Q, B, D, 'resume')
+    if rc or json.loads((Q / 'results.json').read_text()) != good: fail('absent Q + good backup did not resume: %s' % out)
     # build.json that is valid JSON but not an object is refused cleanly
     b = T / 'b-list-build'; shutil.copytree(B, b); (b / 'unisacc-next.com.build.json').write_text('[]')
     Q = T / 'q9'; rc, out = run(Q, b, D, 'resume')
@@ -59,6 +74,6 @@ try:
     if os.geteuid() != 0 and (rc != 2 or Q.exists() or (T / 'q6.resume-tmp').exists()): fail('failed copy left a half state: %s' % out)
     # an unknown mode is a usage error
     if run(T / 'q7', B, D, 'auto')[0] != 2: fail('unknown mode accepted')
-    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object build.json and bound-receipt-plus-foreign-files refused')
+    print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object build.json/receipt and bound-receipt-plus-foreign-files refused; a failed install rename rolls back to the old Q exactly')
 finally:
     shutil.rmtree(T, ignore_errors=True)

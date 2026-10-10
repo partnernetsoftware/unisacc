@@ -52,6 +52,8 @@ def main(argv):
         return 0
     prev = load_obj(Q / 'start-receipt.json')
     prev_art = prev.get('artifact_sha256') if isinstance(prev, dict) else None
+    if mode == 'resume' and prev is not None and not (isinstance(prev, dict) and isinstance(prev_art, str)):
+        return refuse('%s has a start receipt that is not a valid object (%s); not resumed' % (Q, 'unreadable' if prev == 'unreadable' else type(prev).__name__))
     if mode == 'resume' and prev_art not in (None, art):
         return refuse('%s was started for artifact %s, not this candidate %s' % (Q, str(prev_art)[:16], art[:16]))
     held = Q.is_dir() and any(p.name not in RECEIPTS for p in Q.iterdir())   # a receipt alone is an empty start
@@ -83,14 +85,15 @@ def main(argv):
         except OSError as e:
             shutil.rmtree(tmp, ignore_errors=True)
             return refuse('copy of %s failed (%s); nothing restored' % (src, type(e).__name__))
+        aside = Q.with_name(Q.name + '.resume-old')
         try:
-            if Q.is_dir():   # only our own receipts may be here (checked above); they are superseded
-                for r in RECEIPTS: (Q / r).unlink(missing_ok=True)
-                Q.rmdir()
+            if Q.is_dir(): Q.replace(aside)   # the old receipt-only Q is kept whole until the new one is in place
             tmp.replace(Q)
         except OSError as e:
+            if aside.is_dir() and not Q.exists(): aside.replace(Q)   # roll back: the old Q exactly as it was
             shutil.rmtree(tmp, ignore_errors=True)
-            return refuse('could not install %s as %s (%s); nothing restored' % (src, Q, type(e).__name__))
+            return refuse('could not install %s as %s (%s); old state kept, nothing restored' % (src, Q, type(e).__name__))
+        shutil.rmtree(aside, ignore_errors=True)
         return receipt(True, str(src), ['backup build.json artifact matches', 'results.json well-formed', 'copied whole then renamed'])
     return refuse('backup %s has no complete state generation to resume' % B)
 
