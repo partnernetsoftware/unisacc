@@ -116,15 +116,28 @@ snap() { python3 -c 'import hashlib,os,sys
 d=sys.argv[1]
 for f in sorted(os.listdir(d)):
     st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "${1:-$S/seedbin}"; }
-# the snapshot's own failure must be visible: an unreadable directory gives a non-zero status (controlled stub)
+# the snapshot's own failure must be visible: a missing directory gives a non-zero status (controlled stub)
 snap "$S/no-such-dir" >/dev/null 2>&1 && no "snapshot of a missing directory did not fail" || ok "snapshot failure is visible"
 dg() { out=$1; rm -f "$out"; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" 2>"$S/gd.err"; }
 rm -rf "$S/seedbin"
 dg "$S/cold.json"; r=$?
 { [ "$r" -eq 0 ] && [ "$(nbin)" -eq 1 ] && [ "$(nsid)" -eq 1 ] && cmp -s "$S/cold.json" "$S/py-o1.json"; } && ok "default-route cold build" || no "default-route cold build (rc=$r bins $(nbin) sidecars $(nsid))"
-snap0=$(snap)
-dg "$S/hit.json"; r=$?
-{ [ "$r" -eq 0 ] && [ -n "$snap0" ] && [ "$(snap)" = "$snap0" ] && cmp -s "$S/hit.json" "$S/py-o1.json"; } && ok "default-route cache hit" || no "default-route cache hit (rc=$r; directory changed or output differs)"
+# hit_ok SNAP ACTION: both snapshots stored with their own status; red on a non-zero snapshot, a non-zero action,
+# an empty snapshot, or a changed directory
+hit_ok() {
+    a0=$($1); s0=$?
+    $2; r=$?
+    a1=$($1); s1=$?
+    [ "$s0" -eq 0 ] && [ "$s1" -eq 0 ] && [ "$r" -eq 0 ] && [ -n "$a0" ] && [ "$a1" = "$a0" ]
+}
+# call-site negatives (no generator): identical partial output followed by a failure, and an empty snapshot
+part_fail() { echo "seed-gen-0000000000000000 1 1 x"; return 1; }
+empty_ok() { return 0; }
+noop() { return 0; }
+hit_ok part_fail noop && no "hit_ok accepted a snapshot that printed then failed" || ok "hit_ok rejects partial output + failure"
+hit_ok empty_ok noop && no "hit_ok accepted an empty snapshot" || ok "hit_ok rejects an empty snapshot"
+hit_dg() { dg "$S/hit.json"; }
+hit_ok snap hit_dg && cmp -s "$S/hit.json" "$S/py-o1.json" && ok "default-route cache hit" || no "default-route cache hit (action rc=$r snapshot rc $s0/$s1; directory changed, empty, or output differs)"
 printf '\n/* seedopt: json.h cache probe */\n' >> seed/json.h   # the scratch copy (cwd is the scratch tree)
 dg "$S/hdr.json"; r=$?
 { [ "$r" -eq 0 ] && [ "$(nbin)" -eq 2 ] && [ "$(nsid)" -eq 2 ] && cmp -s "$S/hdr.json" "$S/py-o1.json"; } && ok "json.h-only rebuild" || no "json.h-only rebuild (rc=$r bins $(nbin) sidecars $(nsid))"
