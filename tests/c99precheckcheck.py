@@ -46,7 +46,7 @@ assert int(full) > 1 and narrow == '1', (full, narrow)
 # shard map = the bash loop in difftest_o.sh (glob order, host skipped, i % 4)
 bash = subprocess.run(['bash', '-c', 'i=0; for f in tests/c/*.c examples/*.c; do [ "$(basename "$f" .c)" = host ] && continue; echo "$f $((i % 4 + 1))"; i=$((i+1)); done'],
                       cwd=ROOT, capture_output=True, text=True, check=True).stdout.split('\n')
-want = dict(l.split() for l in bash if l)
+want = {k: v for k, v in (l.split() for l in bash if l) if (ROOT / k).exists()}   # an unmatched glob stays literal in bash
 for f in list(want)[:40] + list(want)[-40:]:
     assert P.shard_of(f) == ['difftest_o-' + want[f], 'com-difftest_o-' + want[f]], (f, P.shard_of(f), want[f])
 assert P.shard_of('tests/c/no-such-probe.c') is None

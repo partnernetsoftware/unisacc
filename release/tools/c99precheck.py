@@ -114,6 +114,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument('group'); ap.add_argument('out'); ap.add_argument('--ua')
     a = ap.parse_args(argv)
     rows = group(a.group)
+    files0 = shard_files()
+    tracked0 = [f for f in subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'tests/c', 'examples'], cwd=ROOT, text=True).split()
+                if f.endswith('.c') and f.count('/') == (2 if f.startswith('tests/c/') else 1) and pathlib.Path(f).stem != 'host']
+    if set(files0) != set(tracked0):   # refuse before any probe runs: a dirty member list is not the committed plan
+        print('c99precheck REFUSED  difftest_o members differ from HEAD: missing %s untracked %s'
+              % (sorted(set(tracked0) - set(files0)), sorted(set(files0) - set(tracked0))))
+        return 1
     ua = pathlib.Path(a.ua or '/tmp/cc39-wf1/ua'); cold = None
     sys.path.insert(0, str(ROOT / 'exec/c')); import provenance
     key = pathlib.Path(str(ua) + '.source_digest')

@@ -46,4 +46,10 @@ assert t['tail_success'] == 1 and t['tail_deferred'] == 2, t
 r = {row['suite']: row for row in t['rows']}
 assert r['x-1']['sibling_max_s'] == 30.0 and r['x-1']['hint'].startswith('risk'), r       # sibling needed 30 s > tail 10 s
 assert r['y-1']['hint'].startswith('UNKNOWN'), r                                         # no sibling evidence: UNKNOWN, not safe
-print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')
+c = A.summarise(A.replay(['START p limit=9 kind=full', 'DONE p rc=0 1.00s', 'START q limit=9 kind=full', 'DONE q rc=1 1.00s wrong']))
+good = {'jobs': 2, 'pass': 1, 'classes': {'NEEDS_RULING': 1}, 'rows': [{'suite': 'q', 'cls': 'NEEDS_RULING'}]}
+assert A.conserve(c, good)['ok'], A.conserve(c, good)
+for bad in ({**good, 'pass': 2}, {**good, 'rows': []}, {**good, 'rows': [{'suite': 'p', 'cls': 'X'}, {'suite': 'q', 'cls': 'NEEDS_RULING'}]},
+            {**good, 'rows': good['rows'] + [{'suite': 'z', 'cls': 'X'}]}, {**good, 'classes': {'NEEDS_RULING': 2}}):
+    assert not A.conserve(c, bad)['ok'], bad
+print('attemptchain  deferral cost kept after success, pending/unknown/blocked/unstarted separated, old START without kind, history gaps kept, near-limit by kind/limit, results reconciled both ways, strict, WF5 rc-class conservation vs exittable, WF2 tail-risk hints (siblings not a lower bound, no evidence UNKNOWN)')

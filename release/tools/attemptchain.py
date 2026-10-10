@@ -94,6 +94,22 @@ def tail_risk(chains):
     return {'tail_success': tail_ok, 'tail_deferred': tail_defer, 'rows': rows}
 
 
+def conserve(summary, exit_json):
+    """WF5: rc-class conservation against exittable --json, which lists every non-PASS suite once and counts
+    PASS: listed suites are never rc 0, unlisted finals are exactly the rc 0 ones, and PASS + listed = suites."""
+    rows = exit_json.get('rows', []); names = [r['suite'] for r in rows]; fin = summary['final_rc']
+    unlisted = set(fin) - set(names)
+    out = {'suites': len(fin), 'listed': len(names), 'pass': exit_json.get('pass'),
+           'duplicates': sorted({n for n in names if names.count(n) > 1}),
+           'foreign': sorted(set(names) - set(fin)),
+           'listed_rc0': sorted(n for n in names if fin.get(n) == '0'),          # a PASS hidden in a class
+           'unlisted_not_rc0': sorted(n for n in unlisted if fin[n] != '0')}    # a red with no class
+    out['ok'] = (not (out['duplicates'] or out['foreign'] or out['listed_rc0'] or out['unlisted_not_rc0'])
+                 and exit_json.get('pass') == len(unlisted) and exit_json.get('jobs') == len(fin)
+                 and sum(exit_json.get('classes', {}).values()) == len(names))
+    return out
+
+
 def reconcile(summary, results):
     res = results.get('results', {})
     diff = [n for n, rc in summary['final_rc'].items() if n in res and str(res[n].get('rc')) != str(rc)]
@@ -105,17 +121,19 @@ def reconcile(summary, results):
 def strict_rc(s):
     r = s.get('reconcile', {})
     bad = s['pending'] or s['unknown'] or s['evidence_gaps'] or r.get('missing_from_replay') or r.get('extra_in_replay') or r.get('rc_mismatch')
+    if 'conserve' in s and not s['conserve']['ok']: bad = True
     return 1 if bad else 0
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument('log'); ap.add_argument('--results'); ap.add_argument('--json', action='store_true')
+    ap.add_argument('--exittable', help='WF5: exittable --json output to check rc-class conservation against')
     ap.add_argument('--tail-risk', action='store_true', help='WF2: sibling-shard risk hints for tail deferrals')
     ap.add_argument('--strict', action='store_true', help='exit 1 on pending, unknown, evidence gaps or any reconcile difference')
     a = ap.parse_args(argv)
     chains = replay(open(a.log).read().splitlines())
     s = summarise(chains)
-    if a.tail_risk and (a.strict or a.results or a.json):
+    if a.tail_risk and (a.strict or a.results or a.json or a.exittable):
         print('attemptchain: --tail-risk is a separate hint report; run --strict/--results/--json on their own', file=sys.stderr); return 2
     if a.tail_risk:
         t = tail_risk(chains)
@@ -123,12 +141,14 @@ def main(argv=None):
         for r in sorted(t['rows'], key=lambda r: r['suite']): print('  %-40s limit %3s  deferred after %6.2fs  siblings ok %2d  max %s  %s' % (r['suite'], r['limit'], r['deferred_after'], r['siblings_ok'], r['sibling_max_s'], r['hint']))
         return 0
     if a.results: s['reconcile'] = reconcile(s, json.load(open(a.results)))
+    if a.exittable: s['conserve'] = conserve(s, json.load(open(a.exittable)))
     if a.json:
         print(json.dumps({k: v for k, v in s.items() if k != 'final_rc'}, indent=1)); return strict_rc(s) if a.strict else 0
     print('attemptchain  suites %d  final %d  pending %d  unknown %d  evidence-gap suites %d' % (s['suites'], s['final'], len(s['pending']), len(s['unknown']), len(s['evidence_gaps'])))
     for k in sorted(s['attempts']): print('  %-22s %4d attempts %9.1f job-s' % (k, s['attempts'][k], s['job_seconds'].get(k, 0.0)))
     for r in s['near_limit']: print('  near-limit %-40s %-5s limit %3d  %6.2fs  margin %.3f' % (r['suite'], r['kind'], r['limit'], r['seconds'], r['margin']))
     if 'reconcile' in s: print('  reconcile', json.dumps(s['reconcile']))
+    if 'conserve' in s: print('  conserve', json.dumps(s['conserve']))
     return strict_rc(s) if a.strict else 0
 
 
