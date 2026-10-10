@@ -25,13 +25,26 @@ mkdir -p src && echo x > src/a.c && git add src/a.c
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- src/a.c > /dev/null 2>&1; [ $? -eq 2 ] || fail "a src/ change with the default (infrastructure) set was not refused"
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- src/a.c > /dev/null 2>&1; [ $? -eq 2 ] || fail "a src/ change with only contract suites was not refused"
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- src/a.c > /dev/null 2>&1 || fail "a src/ change with a product suite was refused"
-for tree in exec kernel include unisa; do
-  mkdir -p "$tree"; echo x > "$tree/input"; git add "$tree/input"
+for tree in exec kernel include unisa weights; do
+  mkdir -p "$tree"; echo x > "$tree/input.c"; git add "$tree/input.c"
   before=$(git rev-parse HEAD)
-  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- "$tree/input" > /dev/null 2>&1
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x -- "$tree/input.c" > /dev/null 2>&1
   [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "$tree default set accepted or committed"
   COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- "./$tree" > /dev/null 2>&1
   [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "$tree contract-only directory accepted or committed"
-  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- "$tree/input" > /dev/null 2>&1 || fail "$tree product suite refused"
+  COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- "$tree/input.c" > /dev/null 2>&1 || fail "$tree product suite refused"
 done
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; src/exec/kernel/include/unisa or unisacc.c needs a non-contract suite"
+mkdir -p seed
+for name in gen.c compilerpack.c; do
+ echo x > "seed/$name"; git add "seed/$name"
+ before=$(git rev-parse HEAD)
+ COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- "seed/$name" > /dev/null 2>&1
+ [ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "seed/$name contract-only accepted"
+done
+echo doc > seed/README; git add seed/README
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m doc --suite gate-layers -- seed/README > /dev/null 2>&1 || fail "seed README counted as product"
+echo x > weights/x.tsv; git add weights/x.tsv
+before=$(git rev-parse HEAD)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite gate-layers -- weights/x.tsv > /dev/null 2>&1
+[ $? -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "weights TSV contract-only accepted"
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded"
