@@ -20,7 +20,6 @@
 #include <string.h>
 
 #include "render_api.h"   /* the interface lives in ONE place; see that file */
-#include "csih_cols_pub.h"
 
 #define r_next_cp csih_next_cp
 #define r_cp_cols csih_cp_cols

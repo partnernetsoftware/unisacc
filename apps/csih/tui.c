@@ -47,7 +47,6 @@
 #include "render_api.h"
 #include "term_api.h"
 #include "csih_home.h"
-#include "csih_cols_pub.h"
 #include "reload_session.h"
 #include "reload_io.h"
 #include "reload_owner.h"

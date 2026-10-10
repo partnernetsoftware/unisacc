@@ -9,7 +9,7 @@ cd "$ROOT" || exit 1
 if [ $# -eq 0 ]; then
     set -- agent
 fi
-exec /bin/sh "$UNI" \
+exec /bin/sh "$UNI" -include "$ROOT/csih_cols_pub.h" \
     csih.c \
     render.c term.c chat.c clock.c tools.c cols.c \
     file.c shell.c edit.c gate.c json.c session.c \
