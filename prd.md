@@ -1341,3 +1341,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔§3 裁定落地，2026-10-10；实际跑过〕认 ver038 + 具名补验为完整出口（gate-infra-38、union16 family 10 项、publish-order、com-auditnet、lib-ffi-provider 均 rc0）；收口措辞见 research/c38-post-ruling-checklist.md §4。进 Draft 尚缺：版本号提交（改产品闭包→须新冻结/同源候选/定点/对新候选出口）与 ledger 19 行未结；未自行公开。
 
 〔0.0.38 版本冻结起点，2026-10-10；实际跑过〕董秘/政委授权冻结。§24 生成器全矩阵（30 调用位置，seed/gen.c b802e4f2）三路生产 O2/独立参考/ASan 全绿且输出同字节（attempt1 前 19 项；warnparse 生产 attempt2、ASan attempt3 独立上限；21–30 attempt3），证据仓外 /tmp/cdx38-freeze-matrix。版本号升 0.0.38；随后按最终身份一次采 seed 内存证据，再同源参考/候选、comboot 定点、queue 出口。升版本不是封版。
+
+〔0.0.39 版本冻结起点，2026-10-10；实际跑过〕机房主任 unisacc10m 15:42 代裁开闸（方案1 B 链）：A1/A2 R9、A3–A5 暖C 具备、A6 F4″ 顺延 0.0.40、A7 examples 脏删 ACCEPT-AS-KNOWN（冻结/queue 一律干净 worktree）。版本号升 0.0.39；随后 B.2 同源参考/候选、B.3 comboot 定点、B.4 gatedeps 冻结稳定点、B.5 queue 出口。升版本不是封版；Draft v0.0.39 仍挂 0.0.38 演练字节，B.8 前不换挂、不公开。
