@@ -56,6 +56,7 @@ try:
         Q = T / ('q14m%d' % i); Q.mkdir(); (Q / 'start-receipt.json').write_text(bad); before = tree(Q); rc, out = run(Q, B, D, 'resume')
         if rc != 2 or tree(Q) != before: fail('receipt %s resumed: %s' % (bad, out))
         if 'REFUSED' not in out: fail('receipt %s refusal not reported: %s' % (bad, out))
+        if not (B / 'start-refusals.log').exists() or ('%s has a start receipt' % Q) not in (B / 'start-refusals.log').read_text(): fail('receipt %s refusal not logged' % bad)
     for i, bad in enumerate(('0', '"s"', '{}', '{"artifact_sha256": 5}')):
         bb = T / ('b-build-%d' % i); shutil.copytree(B, bb); (bb / 'unisacc-next.com.build.json').write_text(bad)
         Q = T / ('q15m%d' % i); rc, out = run(Q, bb, D, 'resume')
