@@ -102,19 +102,41 @@ log UNKNOWN "python3 \$*"; exit 97
 SHIM
 cat > "$S/shim/cc" <<SHIM || exit 2
 #!/bin/sh
-for a in "\$@"; do case "\$a" in exec/c/run.c|*/exec/c/run.c) run=1;; esac; done
-if [ -n "\${run:-}" ]; then
+# whitelist: exec/c/run.c alone (stubbed), seed/gen.c or tests/bound.c (real compiler), "--version" (real);
+# anything else is refused with rc 97
+log() { [ -n "\${SHIMLOG:-}" ] && printf '%s\t%s\n' "\$1" "\$2" >> "\$SHIMLOG" || { echo "cc shim: log write failed" >&2; exit 96; }; }
+srcs=0; run=; known=
+for a in "\$@"; do
+    case "\$a" in
+        *.c) srcs=\$((srcs + 1));;
+    esac
+    case "\$a" in
+        exec/c/run.c|*/exec/c/run.c) run=1;;
+        seed/gen.c|*/seed/gen.c|tests/bound.c|*/tests/bound.c) known=1;;
+    esac
+done
+if [ "\$#" -eq 1 ] && [ "\$1" = --version ]; then log pass "cc \$*"; exec "$REALCC" "\$@"; fi
+if [ -n "\$run" ] && [ "\$srcs" -eq 1 ]; then
     o=; prev=; for a in "\$@"; do [ "\$prev" = -o ] && o=\$a; prev=\$a; done
-    printf '%s\t%s\n' short "cc \$*" >> "\$SHIMLOG" || { echo "cc shim: log write failed" >&2; exit 96; }
-    [ -n "\$o" ] && printf '#!/bin/sh\nexit 0\n' > "\$o" && chmod +x "\$o"; exit \$?
+    [ -n "\$o" ] || { log UNKNOWN "cc \$*"; exit 97; }
+    log short "cc \$*"; printf '#!/bin/sh\nexit 0\n' > "\$o" && chmod +x "\$o"; exit \$?
 fi
-printf '%s\t%s\n' pass "cc \$*" >> "\$SHIMLOG" || { echo "cc shim: log write failed" >&2; exit 96; }
-exec "$REALCC" "\$@"
+if [ -n "\$known" ] && [ -z "\$run" ] && [ "\$srcs" -eq 1 ]; then log pass "cc \$*"; exec "$REALCC" "\$@"; fi
+log UNKNOWN "cc \$*"; exit 97
 SHIM
 chmod +x "$S/shim/python3" "$S/shim/cc"
 same=0; bad=0
 ok() { echo "SAME $1"; evw "SAME $1"; same=$((same + 1)); }
 no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
+# the shims refuse what they do not know (rc 97, recorded UNKNOWN)
+SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
+for bad in "-c foo.c" "-O2 -o x exec/c/run.c seed/gen.c" "-o x"; do
+    "$S/shim/cc" $bad >/dev/null 2>&1; r=$?
+    [ "$r" -eq 97 ] && ok "cc shim refuses '$bad'" || no "cc shim did not refuse '$bad' (rc=$r)"
+done
+"$S/shim/python3" exec/c/other.py >/dev/null 2>&1; r=$?
+[ "$r" -eq 97 ] && ok "python3 shim refuses an unknown script" || no "python3 shim did not refuse (rc=$r)"
+unset SHIMLOG
 flags() { case $1 in lnx/x86_64) ;; lnx/arm64) echo --arm64;; osx/x86_64) echo --osx;; osx/arm64) echo --osx --arm64;; win/x86_64) echo --win;; win/arm64) echo --win --arm64;; esac; }
 slug() { echo "$1" | tr / -; }
 prep() {   # prep TARGET OUT LOG [SCRIPT] [ENV...]: run prepare.sh under the shims; prints its rc
@@ -135,7 +157,14 @@ via_helper() {   # via_helper OUT LOG: exactly one keyed seed-gen (+ .sha256) in
 }
 for t in $TARGETS; do
     s=$(slug "$t"); o=$S/out-$s; l=$S/log-$s
-    r=$(prep "$t" "$o" "$l" "$PREP")
+    if [ "$t" = lnx/x86_64 ]; then   # an inherited SEED_GEN_DIR is overridden: the sentinel directory stays as it was
+        mkdir -p "$S/sentinel-dir" && echo sentinel > "$S/sentinel-dir/sentinel"
+        r=$(prep "$t" "$o" "$l" "$PREP" SEED_GEN_DIR="$S/sentinel-dir")
+        [ "$(ls -A "$S/sentinel-dir")" = sentinel ] && [ "$(cat "$S/sentinel-dir/sentinel")" = sentinel ] \
+            && ok "$t inherited SEED_GEN_DIR overridden (sentinel directory unchanged)" || no "$t inherited SEED_GEN_DIR was used"
+    else
+        r=$(prep "$t" "$o" "$l" "$PREP")
+    fi
     [ "$r" -eq 0 ] || { no "$t prepare rc=$r $(tail -1 "$l.out")"; continue; }
     via_helper "$o" "$l" && ok "$t pp through gen-delta (private keyed seed-gen, no direct gen.py pp)" || no "$t pp not through the helper"
     g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
