@@ -80,7 +80,8 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
   for k in $(seq 1 90); do
     # 0.0.40: only a process actually RUNNING gatequeue.py (its script is argv1, or argv0), never one whose
     # command text merely mentions it -- a caller's shell script naming gatequeue.py made this loop wait on
-    # its own ancestor until the outer bound killed the window (first-window observation, 21:02)
+    # its own ancestor until the outer bound killed the window (reproduced 21:14 with a live parent shell; the
+    # 21:02 first-window hang showed the same wait, its process is UNKNOWN)
     python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?
     case $g in
       0) ;;          # a gatequeue is running: wait

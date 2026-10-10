@@ -19,6 +19,15 @@ for mode in proc ps; do
   for p in $real_u $real_bx; do printf '%s\n' "$out" | grep -qx "$p" || fail "$mode: python3 -u/-B gatequeue.py ($p) missed"; done
   for p in $not_ $mention; do printf '%s\n' "$out" | grep -qx "$p" && fail "$mode: $p counted (only mentions/suffix-matches gatequeue.py)"; done
 done
+# malformed argv (a trailing -X / -W with no value) never crashes the classifier into a bare exit 1 ("none")
+python3 - "$R/release/tools/gqalive.py" <<'PY' || fail "malformed argv crashed or misclassified"
+import importlib.util, sys
+src = open(sys.argv[1]).read().split("try: rows = table()")[0]
+ns = {}; exec(compile(src, 'gqalive', 'exec'), ns)
+for argv in (['python3', '-X'], ['python3', '-W'], ['python3', '-u', '-X'], ['python3'], []):
+    assert ns['runs_gatequeue'](argv) is False, argv
+assert ns['runs_gatequeue'](['python3', '-X', 'dev', 'x/gatequeue.py']) is True
+PY
 mkdir -p "$T/shim"; printf '#!/bin/sh\nexit 1\n' > "$T/shim/ps"; chmod +x "$T/shim/ps"
 GQALIVE_TABLE=ps PATH="$T/shim:$PATH" python3 "$R/release/tools/gqalive.py" >/dev/null 2>&1; [ $? = 2 ] || fail "an unreadable process table was not exit 2"
 # queue.sh accepts only 0 (running) and 1 (none) from the helper: 2, 127, 137 refuse the window (helper stubbed)
@@ -34,4 +43,4 @@ for code in 2 127 137; do
     bash "$T/q/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
   [ "$rc" = 2 ] && [ ! -e "$T/launched" ] || fail "helper exit $code: queue rc=$rc, launched=$([ -e "$T/launched" ] && echo yes || echo no) $(cat "$T/out")"
 done
-echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2; queue.sh refuses the window on helper exit 2/127/137"
+echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2; a trailing -X/-W never crashes the classifier; queue.sh refuses the window on helper exit 2/127/137"

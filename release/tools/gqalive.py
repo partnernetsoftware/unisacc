@@ -13,8 +13,8 @@ def runs_gatequeue(argv):
     if not PY.match(os.path.basename(argv[0])): return False
     i = 1
     while i < len(argv) and argv[i].startswith('-'):
-        if argv[i] in ('-X', '-W'): i += 1   # options with a separate value
         if argv[i] in ('-c', '-m'): return False
+        if argv[i] in ('-X', '-W'): i += 1   # options with a separate value (a missing value just ends the scan)
         i += 1
     return i < len(argv) and os.path.basename(argv[i]) == 'gatequeue.py'
 def table():
@@ -33,6 +33,8 @@ def table():
 try: rows = table()
 except Exception as e: print('gqalive: cannot read the process table (%s)' % e, file=sys.stderr); sys.exit(2)
 if not rows: print('gqalive: empty process table', file=sys.stderr); sys.exit(2)
-me = os.getpid(); hits = [p for p, a in rows if p != me and runs_gatequeue(a)]
+me = os.getpid()
+try: hits = [p for p, a in rows if p != me and runs_gatequeue(a)]
+except Exception as e: print('gqalive: cannot classify the process table (%s)' % type(e).__name__, file=sys.stderr); sys.exit(2)
 for p in hits: print(p)
 sys.exit(0 if hits else 1)
