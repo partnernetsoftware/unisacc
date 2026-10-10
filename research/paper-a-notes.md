@@ -45,3 +45,4 @@ A 不以完整控制表自动合成为投稿前提；系统构表方法归 [Pape
 - **2026-10-10 ~13:13 心跳（切口 A 结论自举边界，未改键数与产物）：** §10 裸「自举 / self-hosts」收紧为具名检查下逐字节自举（N1=N2=N3；§5.3；非语义自举定理）；见 [`notes/paper-a-seal-conclusion-bootstrap-boundary-20261010-1313.md`](notes/paper-a-seal-conclusion-bootstrap-boundary-20261010-1313.md)。
 
 - **2026-10-10 ~13:41 心跳（切口 A 标题/关键词自举边界，未改摘要正文与键数）：** 标题与关键词裸「自举 / Self-Hosting」收紧为逐字节自举（N1=N2=N3）/ Byte-for-Byte Self-Hosting；摘要正文未动；见 [`notes/paper-a-seal-title-bootstrap-boundary-20261010-1341.md`](notes/paper-a-seal-title-bootstrap-boundary-20261010-1341.md)。
+- **2026-10-10 ~13:58 心跳（切口 A 结论五目标自举 vs 六平台出货，未改摘要与键数）：** §10 将六平台与五目标 N1=N2=N3 分离表述；见 [`notes/paper-a-seal-conclusion-five-vs-six-selfhost-20261010-1358.md`](notes/paper-a-seal-conclusion-five-vs-six-selfhost-20261010-1358.md)。
