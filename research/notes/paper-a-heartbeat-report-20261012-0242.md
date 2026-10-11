@@ -7,6 +7,7 @@
 | --- | --- |
 | tip before（任务书） | `fb5733a5`（#178 tip-after K6-17 E） |
 | tip 开工核对 | `5e59250a`（K6-18 prec_label；已越过 #178） |
+| tip after（#179） | `8750bf83`（本钉 squash merge） |
 | Paper A 正文 | CN/EN **SAME** vs #154；TeX/abs **SAME** vs #168（相对 #154 仅布局漂）；**零**键数 diff |
 | Softguess | **NONE×4** |
 | 重测 | 8769／569／pin `b8244bd8…`／built `5e45bf5e…`／op×4=87 **全部 MATCH** |

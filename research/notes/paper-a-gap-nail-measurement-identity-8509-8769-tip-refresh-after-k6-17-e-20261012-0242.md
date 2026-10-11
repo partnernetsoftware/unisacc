@@ -5,7 +5,7 @@
 - **主张一句：** 在 tip 已并入 **K6-15..17 产品叶**、**E #166–#178**（含 K6-15 pe／K6-16 ape／K6-17 vm·deferred·divmod 分界与 tip-after）、**#168 A 成篇增量**（TeX/abs image field layout，非整键数）、**#169 Softguess C**、以及 tip 再前进的 **K6-18 prec_label** 之后，活 gold `# stage …: N keys` 加总与 `built.json` H **仍只锁 op-87／8769／569**；EN／arXiv／abstract **8509／517** 仍为稿内 labeled **op-74**（无 tip frozen-gold pin）；**产品叶子／E 净化／#168 布局对齐／Softguess NONE ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3 平台 C 为主切口**（仅引用）。
 - **仓库 tip（本拍核对开工）：** `5e59250afe85b08d8f95129cd2b2d47678b44569`（短 `5e59250a`；= K6-18 unisa.gold prec_label；已越过任务书起始 tip `fb5733a538d235b72379172bbc59230b1573fc6c` = Merge #178）
 - **tip-before（任务书起点，已核）：** `fb5733a538d235b72379172bbc59230b1573fc6c`（Merge #178 fill tip-after K6-17 E #177）
-- **tip-after：** _填于 PR 合并后_（本页初稿写于 tip `5e59250a`）
+- **tip-after：** `8750bf83c50fe1825a20dc11e4b11f2f1bdc39b6`（短 `8750bf83`；= squash Merge #179 本钉）
 - **公开 Latest：** **v0.0.40**（unsigned；target `1db30835…`）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改冻结措辞）
 - **四 blob（git @ tip `5e59250a`）：**
   - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
