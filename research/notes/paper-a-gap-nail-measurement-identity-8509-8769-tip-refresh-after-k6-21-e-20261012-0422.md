@@ -5,7 +5,7 @@
 - **主张一句：** 在 tip 已并入 **K6-21 type_label 产品叶**（`ec3a6d2c`）与 **E #191/#192**（K6-21 gold type_label ≠ A gate 及 tip-after）之后，活 gold `# stage …: N keys` 加总与 `built.json` H **仍只锁 op-87／8769／569**；EN／arXiv／abstract **8509／517** 仍为稿内 labeled **op-74**（无 tip frozen-gold pin）；**产品叶子／E 净化／Softguess NONE ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3 平台 C 为主切口**（仅引用）；**不重做** E K6-21 净化（已合 #191/#192）。
 - **仓库 tip（本拍核对开工）：** `f12f57a443f8b70bc4cb5a24f13366acd38f6af7`（短 `f12f57a4`；= #192 fill tip-after K6-21 E #191；相对任务书起点 **无漂**）
 - **tip-before（任务书起点，已核）：** `f12f57a443f8b70bc4cb5a24f13366acd38f6af7`（短 `f12f57a4`）
-- **tip-after：** （合入后填；squash Merge 本钉）
+- **tip-after：** `095dcec2a5ee8f226fb596019faf32990e813975`（短 `095dcec2`；= squash Merge #193 本钉）
 - **公开 Latest：** **v0.0.40**（unsigned）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改冻结措辞）
 - **四 blob（git @ tip `f12f57a4`）：**
   - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
@@ -111,7 +111,7 @@
 | --- | --- |
 | tip-before（任务书 #192） | `f12f57a443f8b70bc4cb5a24f13366acd38f6af7` |
 | tip 开工核对 | `f12f57a443f8b70bc4cb5a24f13366acd38f6af7`（无漂） |
-| tip-after | （合入后填） |
+| tip-after | `095dcec2a5ee8f226fb596019faf32990e813975`（短 `095dcec2`；= squash Merge #193） |
 | CN / EN / TeX / abstract vs #168 | **SAME / SAME / SAME / SAME** |
 | Softguess | **NONE×4** |
 | gold 18-stage pin / built / H | `b8244bd8…` **MATCH** / `5e45bf5e…` **MATCH** / **569** |
