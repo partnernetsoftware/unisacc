@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（开工核对） | `d6d1ff3908ae4888915d02084d52420f87d13fc3`（K6-22 narrative correction；**无漂**） |
-| tip after（本 C merge 后填） | _(merge 后由 follow-up 填)_ |
+| tip after（#197） | `cb6433af`（`cb6433af6e3da82f47a5a8086457479570fc2982`） |
 | Softguess | **NONE×4**（机扫 Softguess／softguess／权重就是／weights are the logic／逻辑本身／权重即逻辑／权重≡逻辑 于 CN/EN/TeX/abstract 均 0） |
 | 四 blob vs #168 | CN `5231dd3b…` / EN `0a707d70…` / TeX `aab7bd9b…` / abs `d2eb48f7…` — **SAME×4** |
 | Latest／冻结 | 仍 **v0.0.40**／名义 **v0.0.19**；不 bump；冻句未改 |

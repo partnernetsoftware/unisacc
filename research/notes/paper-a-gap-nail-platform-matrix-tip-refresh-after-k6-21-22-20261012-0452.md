@@ -110,7 +110,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `d6d1ff3908ae4888915d02084d52420f87d13fc3`（K6-22 narrative correction） |
-| tip after（本 note 合入后填） | _(merge 后由 follow-up PR 填)_ |
+| tip after | `cb6433af6e3da82f47a5a8086457479570fc2982`（Merge #197 squash） |
 | Paper A 末次正文布局 | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout；键数未改） |
 | CN `research/unisacc-paper.md` | `5231dd3bf3e60804c678d48015f1e337edd9dc56` **SAME** vs #168 |
 | EN `research/unisacc-paper.en.md` | `0a707d704079bfef3b2b5193bfa8dc2b5ec90303` **SAME** vs #168 |
