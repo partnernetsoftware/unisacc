@@ -68,7 +68,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `0c750220ba93843e26a6e551966cffb65e4c7266` |
-| tip after（本 note 合入后填） | TBD |
+| tip after（本 note 合入后填） | `f8ac641fd6dedce1ee4b6fc67e34cad1729587cb` |
 | K6-17 | `0c750220ba93843e26a6e551966cffb65e4c7266` |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
 | Paper A 末次正文（CN/EN 相对 #154） | #154 `bdec4bcbf823d0b527a15c40afe61f69942063fc`（T1→\(K_s\)；CN/EN 自此未改） |
