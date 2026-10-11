@@ -5,7 +5,7 @@
 - **主张一句：** 在 tip 已并入 **K6-25 scope_label**、**K6-26 pp_label** 产品叶、以及 **E/C #203–#208**（含 0544 8509 C #203/#204 与 K6-25/26 E #205–#208）之后，活 gold `# stage …: N keys` 加总与 `built.json` H **仍只锁 op-87／8769／569**；EN／arXiv／abstract **8509／517** 仍为稿内 labeled **op-74**（无 tip frozen-gold pin）；**K6-25／K6-26 产品有限域金标叶／E 分界 ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3 平台 C 为主切口**；**不重做** 最近 E（K6-25 #205／K6-26 #207）。
 - **仓库 tip（本拍核对开工）：** `bd03986a4d710bfd73b0b936ade2ecf13031c7da`（短 `bd03986a`；= #208 fill tip-after K6-26 E #207；相对任务书起点 **无漂**）
 - **tip-before（任务书起点，已核）：** `bd03986a4d710bfd73b0b936ade2ecf13031c7da`（短 `bd03986a`）
-- **tip-after：** `TIP_AFTER_PLACEHOLDER`（= squash Merge 本钉；其间 tip 曾入 K6-27 `a5f74bfb`，≠ 身份闭合）
+- **tip-after：** `70c0af57d7fe2f5bf74555fce2ab8d29996b8a9e`（短 `70c0af57`；= squash Merge #209 本钉；其间 tip 曾入 K6-27 `a5f74bfb`，≠ 身份闭合）
 - **公开 Latest：** **v0.0.40**（unsigned；assets=10；target `1db30835…`）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）
 - **四 blob（git @ tip `bd03986a`／live `a5f74bfb`）：**
   - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
@@ -110,7 +110,7 @@
 | tip-before（任务书 #208） | `bd03986a4d710bfd73b0b936ade2ecf13031c7da` |
 | tip 开工核对 | `bd03986a4d710bfd73b0b936ade2ecf13031c7da`（无漂） |
 | tip live（写注前） | `a5f74bfb8dd8c62d715410194ed6a42954bf609b`（短 `a5f74bfb`；= K6-27 reloc_label 产品叶；≠ 身份闭合） |
-| tip-after | `TIP_AFTER_PLACEHOLDER`（= squash Merge 本钉） |
+| tip-after | `70c0af57d7fe2f5bf74555fce2ab8d29996b8a9e`（短 `70c0af57`；= squash Merge #209 本钉） |
 | CN / EN / TeX / abstract vs #168 | **SAME / SAME / SAME / SAME** |
 | Softguess | **NONE×4** |
 | gold 18-stage pin / built / H | `b8244bd8…` **MATCH** / `5e45bf5e…` **MATCH** / **569** |
