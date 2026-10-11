@@ -106,6 +106,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-tape) req='native-posix|host|cc,python3|cdx|unisa-tape-point-sample';;
           unisa-tapebin) req='native-posix|host|cc,python3|cdx|unisa-tapebin-point-sample';;
           unisa-tapebin-shape) req='native-posix|host|cc,python3|cdx|unisa-tapebin-shape-point-sample';;
+          unisa-image-fat) req='native-posix|host|cc,python3|cdx|unisa-image-fat-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -598,6 +599,7 @@ job unisa-fp sh ./tests/unisafpcheck.sh   # 0.0.41 K6-9: unisa.fp op3/op2 (binar
 job unisa-tape sh ./tests/unisatapecheck.sh   # 0.0.41 K6-10: unisa.tape build/emit/string/to_text/to_canonical_text + parse round trips C ref vs tape.py (point sample; not gold/vm/layout); keep Python
 job unisa-tapebin sh ./tests/unisatapebincheck.sh   # 0.0.41 K6-11: unisa.tapebin encode/decode (canonical LEB128, pools, sections, SHA-256 digest, target_id, check_origin) C ref vs tapebin.py (point sample; tapebin_shape out of scope); keep Python
 job unisa-tapebin-shape sh ./tests/unisatapebinshapecheck.sh   # 0.0.41 K6-11b: unisa.tapebin_shape render/records/c (71 opcodes incl. fp) C ref vs tapebin_shape.py, read-only against docs/*.tsv and src/tapebin_shape.inc; no --write; keep Python
+job unisa-image-fat sh ./tests/unisaimagefatcheck.sh   # 0.0.41 K6-12: unisa.image.fat write() (fat header, descriptors, page-aligned slices) C ref vs fat.py (point sample; elf/macho/pe/ape out of scope); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
