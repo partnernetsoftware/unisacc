@@ -5,7 +5,7 @@
 - **主张一句：** 在 tip 已并入 **K6-19 emit_arm 产品叶**、**E #181–#186**（§7.4 cost-meas／K6-19 emit_arm／K6-18 gold prec_label 分界与 tip-after）、以及 tip 再前进的 **K6-20 lex_label 产品叶（尚未 E 净化）** 之后，活 gold `# stage …: N keys` 加总与 `built.json` H **仍只锁 op-87／8769／569**；EN／arXiv／abstract **8509／517** 仍为稿内 labeled **op-74**（无 tip frozen-gold pin）；**产品叶子／E 净化／Softguess NONE ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3 平台 C 为主切口**（仅引用）。
 - **仓库 tip（本拍核对开工）：** `8e023cdbd30ede5a544b98910e9e447d5c31a5c4`（短 `8e023cd`；= K6-20 unisa.gold lex_label；已越过任务书起始 tip `c4a8ff8b8c3f6985dfc4ad78b67cf26c6f8d688f` = Merge #186）
 - **tip-before（任务书起点，已核）：** `c4a8ff8b8c3f6985dfc4ad78b67cf26c6f8d688f`（Merge #186 fill tip-after K6-18 E #185）
-- **tip-after：** _填于 PR 合并后_（本页初稿写于 tip `8e023cd`）
+- **tip-after：** `d0d6c70e4ba1fb9011c2b28ffcfa71f6531aef24`（短 `d0d6c70`；= squash Merge #187 本钉）
 - **公开 Latest：** **v0.0.40**（unsigned）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改冻结措辞）
 - **四 blob（git @ tip `8e023cd`）：**
   - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
@@ -111,7 +111,7 @@
 | --- | --- |
 | tip-before（任务书 #186） | `c4a8ff8b8c3f6985dfc4ad78b67cf26c6f8d688f` |
 | tip 开工核对 | `8e023cdbd30ede5a544b98910e9e447d5c31a5c4`（K6-20；已越过 #186） |
-| tip-after | _填于 PR 合并后_ |
+| tip-after | `d0d6c70e4ba1fb9011c2b28ffcfa71f6531aef24`（短 `d0d6c70`；= squash Merge #187） |
 | CN / EN / TeX / abstract vs #168 | **SAME / SAME / SAME / SAME** |
 | Softguess | **NONE×4** |
 | gold 18-stage pin / built / H | `b8244bd8…` **MATCH** / `5e45bf5e…` **MATCH** / **569** |

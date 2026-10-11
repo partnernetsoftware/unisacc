@@ -7,7 +7,7 @@
 | --- | --- |
 | tip before（任务书） | `c4a8ff8b`（#186 tip-after K6-18 E） |
 | tip 开工核对 | `8e023cd`（K6-20 lex_label；已越过 #186；**NEW 产品叶，未 E 净化，不闭合身份**） |
-| tip after | _填于 PR 合并后_ |
+| tip after（#187） | `d0d6c70`（本钉 squash merge） |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**键数 diff |
 | Softguess | **NONE×4** |
 | 重测 | 8769／569／pin `b8244bd8…`／built `5e45bf5e…`／op×4=87 **全部 MATCH** |
