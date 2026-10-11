@@ -45,3 +45,9 @@
 ---
 
 *K6-1 2026-10-11 ≈18:36 SGT / 政委代裁授*
+
+## rebase后读数（1838）
+- 基：origin/main `524bc114`（#143）；本提交 rebase 后为 `a4a631f7`（原 `c45df54d`，rebase 无冲突，仅 plans/research 与既有 gate 行）。
+- 命令：`./tests/gate.sh --suite unisa-bits`（60 s 有界）。
+- 结果：`unisa-bits rc=0 0s :: unisabits same 7 diff 0`；`gate suites 1 failed 0 unverified 0`。
+- 未改：`seed/unisa_bits.c` 行为、`unisa/bits.py`（未删）、version.h、release/、gold/construct/emit-kernel。
