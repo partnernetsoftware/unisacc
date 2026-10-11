@@ -73,7 +73,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `73f09c949c9f77e29af81bb783f26e29a0833eda` |
-| tip after（本 note 合入后填） | _(merge 后回填)_ |
+| tip after（本 note 合入后填） | `854b40b5c4fdec25e1fbc2c4a9e1ece2b97064c1`（短 `854b40b5`；= squash Merge #183 本 E） |
 | K6-19 产品叶 | `73f09c949c9f77e29af81bb783f26e29a0833eda` |
 | 上拍 C 锚 tip | `888b24e3e8787b976c96c07446252fc6e47b9768`（之后已入 #181/#182 cost E，再入 K6-19） |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
