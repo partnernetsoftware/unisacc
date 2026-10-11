@@ -3,7 +3,7 @@
 - **本拍切口：** E（衍生净化）
 - **主张一句：** 把 K6-20 `unisa.gold` `lex_label`／`CHARC`（12×4=48 全表 + 15 命名点；ast 抽取，不 `build()`；neg 2/2；不称 gold 闭包）升成 A seal-before／T1／身份／Softguess／§8.1#3 不得搭乘 A。
 - **tip before：** `ec3a6d2c`（K6-21 type_label 产品叶刚入；相对上拍 `97dfabbe`）
-- **tip after：** （合入后填；本 PR squash merge）
+- **tip after：** （；Merge #189）
 - **锚产品叶：** `8e023cdb`（K6-20 lex_label；上拍 C 明示 NEW 未 E）
 - **NEW tip 叶（本拍不净化）：** K6-21 `type_label` @ `ec3a6d2c` — 仅记 NEW，defer 后续 E
 - **Paper A drift：** no（CN/EN/TeX/abs SAME vs #168；四 blob SAME）

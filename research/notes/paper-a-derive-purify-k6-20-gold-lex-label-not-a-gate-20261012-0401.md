@@ -74,7 +74,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `ec3a6d2cb090790cde6e8a599de9548b31f1ff6c` |
-| tip after（本 note 合入后填） | （合入后由 follow-up 填） |
+| tip after（本 note 合入后填） | （短 ；= squash Merge #189 本 E） |
 | K6-20 产品叶 | `8e023cdbd30ede5a544b98910e9e447d5c31a5c4` |
 | tip 上 NEW 未净化叶 | `ec3a6d2cb090790cde6e8a599de9548b31f1ff6c`（K6-21 type_label；本拍只记） |
 | 上拍 C 锚 tip | `97dfabbe…`（#188 tip-after；之后入 K6-20→K6-21） |
