@@ -133,9 +133,11 @@ int main(void) {
         fclose(f);
     }
     {
-        char *a[] = {"gate.c","json.cx","session.c","loop.c","run", path};
+        /* run mode: the same -include globals as suite rows (relative, run from apps/csih) */
+        char *a[] = {"-include","csih_cols.h","-include","csih_home.h","-include","json.h",
+                     "gate.c","json.cx","session.c","loop.c","run", path};
         char line[160];
-        run_args(a, 6, out, (int)sizeof out, &rc);
+        run_args(a, 12, out, (int)sizeof out, &rc);
         first_line(out, line, (int)sizeof line);
         snprintf(msg, sizeof msg, "loop run stdout+rc (unisacc rc=%d: %s)", rc, line);
         if (rc == 0) ok(msg); else no(msg);
