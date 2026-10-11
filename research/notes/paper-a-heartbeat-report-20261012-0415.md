@@ -3,7 +3,7 @@
 - **本拍切口：** E（衍生净化）
 - **主张一句：** 把 K6-21 `unisa.gold` `type_label`（TYS×TOPS×TYS 4275 全表 + 27 命名点；ast 抽 10 定义，不 `build()`；neg 2/2；不称 gold 闭包）升成 A seal-before／T1／身份／Softguess／§8.1#3 不得搭乘 A。
 - **tip before：** `81a7877`（上拍 #189+#190 K6-20 已净化；相对基线无漂）
-- **tip after：** （合入后填；本 PR squash merge）
+- **tip after：** `15bcc711`（`15bcc7117acc02e74b9ec32ae5ef7f8cb532ea2e`；Merge #191）
 - **锚产品叶：** `ec3a6d2c`（K6-21 type_label；上拍 E 明示 NEW 未 E）
 - **Paper A drift：** no（CN/EN/TeX/abs SAME vs #168；四 blob SAME）
 - **Softguess：** **NONE×4**（不升闸；字面粘贴仍 P0 UNAPPLIED）
