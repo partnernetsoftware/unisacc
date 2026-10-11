@@ -22,3 +22,16 @@
 - 本轮只续此短记，不改 prd.md，不接触 /tmp/unisacc-cdx2/plans/ 0.0.41 稿，未代提交或推送。
 
 收口：五键写入及远端落地核验吻合，未见越权/夹带；research/prd 卫生仍属另案。
+
+## 0848 证据入仓旁观续记
+
+核验时间：2026-10-11T08:49:27.650693+08:00；实际只读核验。依据 `ruling-k5-1i-guard-write-closed-0848.md`。
+
+- cc 入仓提交 `2350cf280db56e52967df777db16e74d29f3d9f4`，父提交为已闭合写键 `1e2f7b51b899453788573997f5c712f13b1c3889`。独立枚举全部提交差集：恰 10 个文件，全部在 research/c40-stamp-B-guard-k5-1i/ 内，无目录外夹带。
+- gatedeps、exec、prd 相对写键基点差集为空；全部提交路径限定也排除了版本/其它源码变动。prd 工作文件与写键基点字节相等；cc pane 记录按裁定建议丢弃旧旁观脏行，本旁观未改 prd。
+- 仓内 guard-write-0847-receipt-cc.md 与原 /tmp 写回执逐字节相等，持久化缺口已闭合。
+- 独立 git ls-remote origin refs/heads/main（20 秒超时）rc0，远端 main 为 2350cf280db56e52967df777db16e74d29f3d9f4；父子关系支持快进结果，cc pane 记录普通 FF、未 force。本旁观未重放推送。
+- 续本段前工作树干净；本段为提交后的新增旁观短记，尚未提交，不冒充已含于 2350cf28。未见入仓越权；没有 bump/Draft/跑门证据，不代证产品验收。
+- 本轮只续本短记，不碰 /tmp/unisacc-cdx2/plans/ 或 0.0.41 稿，未代提交/推送。
+
+收口：授权 research-only 入仓已落地，未见越权/夹带。
