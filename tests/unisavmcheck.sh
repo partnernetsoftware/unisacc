@@ -64,6 +64,8 @@ pair() {   # pair NAME MAXSTEPS -- C and python outputs byte-equal; C double-run
 printf 'I imm r0 7\nI imm r1 5\nI add64 r2 r0 r1\nI mul64 r3 r2 r1\nI sub64 r4 r3 r0\nI .exit r4\n' > "$T/arith.txt"
 printf 'I imm r0 -7\nI imm r1 2\nI .div r2 r0 r1\nI .mod r3 r0 r1\nI shr64 r4 r0 r1\nI lshr64 r5 r0 r1\nI .print r2\nI .print r3\nI .print r4\nI .print r5\nI .exit r2\n' > "$T/divmod.txt"
 printf 'I imm r0 0\nI imm r1 100\nL top\nI jumpz r1 done\nI add64 r0 r0 r1\nI imm r2 1\nI sub64 r1 r1 r2\nI jump top\nL done\nI imm r6 8192\nI store64 r6 0 r0\nI load64 r3 r6 0\nI .print r3\nI call sub1\nI .exit r0\nL sub1\nI imm r4 9\nI add64 r0 r0 r4\nI ret\n' > "$T/loop.txt"
+printf 'I imm r0 100\nI imm r1 7\nI .udiv r2 r0 r1\nI .umod r3 r0 r1\nI .print r2\nI .print r3\nI .exit r3\n' > "$T/udiv.txt"
+printf 'I imm r0 -1\nI imm r1 3\nI .udiv r2 r0 r1\nI .umod r3 r0 r1\nI .exit r3\n' > "$T/udivbig.txt"
 printf 'L top\nI jump top\n' > "$T/spin.txt"
 printf 'I imm r0 16777216\nI load64 r1 r0 0\n' > "$T/fault.txt"
 printf 'I imm r0 5\nI imm r1 0\nI .udiv r2 r0 r1\n' > "$T/divzero.txt"
@@ -75,7 +77,9 @@ pair spin 50
 pair fault 1000
 pair divzero 1000
 pair narrow 1000
-echo "SAME $same of $total programs (arithmetic; signed/unsigned div and mod; shifts; loop/call/ret; store/load; print; step-limit halt 124; memory fault 139; div-zero halt 136; narrow load/store)"
+pair udiv 1000
+pair udivbig 1000
+echo "SAME $same of $total programs (arithmetic; signed div and mod; unsigned successful .udiv/.umod incl. 2^64-1; shifts; loop/call/ret; store/load; print; step-limit halt 124; memory fault 139; div-zero halt 136; narrow load/store)"
 
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 neg() {   # neg NAME PROGRAM -- both refuse, empty stdout
