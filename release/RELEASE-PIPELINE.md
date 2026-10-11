@@ -260,6 +260,8 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 
 > 脚注（机房主任 2026-10-11）：曾用私有 Darwin 宿主做全门禁私有验收；**现非 Draft/发布硬依赖**，验收一律 GitHub CI。
 
+> 脚注（机房主任 1532；政委「好」）：日常 Darwin 以 m4pro 本机绿推进 Draft **材料**；GitHub mac CI 留给大版本校验。正式开 Draft 前再确认公开边界；Latest 另授。见 `research/c40-darwin-b139/ruling-darwin-host-m4pro-flex-1532.md`。本脚注不废止上一脚注的发布／大版本 CI 校验口径。
+
 1. **队列只用 `release/tools/queue.sh`**：它自带 `TERM_SH_NOFALLBACK=1`、同源候选对（stage 2 的 `.com` 与 build.json 配对检查）、seed/UA/提供者检查；0.0.37 起另有：同机已有 queue.sh 时拒绝再起第二个，macOS 上用 `caffeinate -dims` 保持屏幕与空闲不休眠（0.0.36 两次 539→15、713→11 大面积失效即屏幕休眠与手写续跑缺 NOFALLBACK）。不再手写续跑循环；续跑就是重跑同一条 queue.sh 命令。
 2. **候选前清单（precheck.sh 先跑）**：版本提交、顺延账 `--final`、冻结窗、事实导出、提供者、已知红、契约层之外，0.0.37 起再查：构建/测试树内未提交或未跟踪的输入（plans/prd/research/archive/docs 不算）、`corpus/c-testsuite` 是否在位。任一项红先修再冻结，避免封存后重封与整轮重跑。
 3. **状态与日志的目录外持久备份**：queue.sh 每窗结束（无 gatequeue 在跑）把 `CAND_DIR.queue/` 与候选 build.json 复制到 `QUEUE_BACKUP`（默认 `~/.unisacc/queue-backup/<候选目录名>-<候选 sha 前 12 位>/state`），整份复制成功后才替换旧份。重启时若状态目录不在而备份在，自动恢复；gatequeue 仍逐项核对输入指纹，只有身份完全相同的结果才复用。

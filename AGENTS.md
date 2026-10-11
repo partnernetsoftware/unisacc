@@ -35,6 +35,8 @@
 
 **不要为了测试而 push。** 仓库已公开，托管的 runner 免费，`.github/workflows/ci.yml` 会在 push 时触发。开发循环可先本机跑绿；**0.0.40 起 Draft/发布验收一律以 GitHub CI 为准**（含 macos runner、release-check 六格等现行闸），不以私有 Darwin 宿主上线为硬依赖。CI 对开发循环仍是干净机器上的第二意见，但**不是**可被本机私有门禁替代的发布证据。
 
+**日常 Darwin flex（机房主任 1532；政委「好」）**：日常以 m4pro 本机绿推进 Draft **材料**；GitHub mac CI 留给大版本校验；主 CI 旁观不挡日常。正式开 Draft 前须再确认公开边界；Latest 仍须另授。详见 `research/c40-darwin-b139/ruling-darwin-host-m4pro-flex-1532.md`。1228「Draft/发布验收以 GitHub CI 为准」仍适用于发布／大版本校验。
+
 规则的来由：仓库还是私有时，push 触发的一个 Linux 加两个 macOS 任务的矩阵（macOS 计费是 Linux 的 10 倍）在一次“每个增量都 push”的会话里耗光了组织的 Actions 预算。所以攒着做，一次 push。
 
 三个平台都在本机：
