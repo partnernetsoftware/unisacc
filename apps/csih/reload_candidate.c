@@ -35,6 +35,13 @@
 #include <sys/wait.h>
 #include <cx.h>
 
+/* jvalue lives in json.h; csih.sh / the build line inject it with -include.
+   Without that flag the compiler used to refuse with "not covered: parameter"
+   at check_unique(const jvalue *) -- a diagnostic lie.  Fail loud here. */
+#ifndef CSIH_JSON_H
+#error "reload_candidate.c requires -include json.h (jvalue); see file header / csih.sh"
+#endif
+
 #define SCHEMA "csih-candidate-v1"
 #define PATHCAP 4096
 #define MODEBITS(m) ((m) & 07777)

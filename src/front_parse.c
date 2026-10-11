@@ -4101,6 +4101,16 @@ int declspec(void) {                       /* -> element width */
         return 8;
     }
     if (cur() == tidx("enum", 4)) { declenum = 1; declsz = enumspec(); declbase = declsz; skipspecq(); return declsz; }
+    /* An identifier here that is not a typedef is an unknown type name
+       (clang: "unknown type name").  Falling through used to leave the
+       default int width and let the parameter/control path refuse with
+       the misleading "not covered: parameter" / "not covered: top-level
+       construct" (csih reload_candidate jvalue; undef.c).  Refusal stays;
+       only the diagnostic is clarified -- not a coverage expansion. */
+    if (cur() == T_ID) {
+        err_tok(tp, "unknown type name");
+        return 8;
+    }
     while (is_typetok()) {
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
