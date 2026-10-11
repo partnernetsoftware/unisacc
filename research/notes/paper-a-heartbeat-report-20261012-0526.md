@@ -10,7 +10,7 @@
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文 diff |
 | 挡粘仍开 | §8.1#3、8509/8769、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不重钉 C） |
-| NEW vs #199 K6-23 opinfo E | 对象是 **peep_label／PEEP_\***，≠ opinfo_label／OPINFO_OPS |
+| NEW vs #199 K6-23 opinfo E | 对象是 peep_label／PEEP_*，≠ opinfo_label／OPINFO_OPS |
 | DISTINCT | ≠ K6-23 opinfo（#199）；≠ K6-22 binsel（#195）；≠ K6-21 type（#191）；≠ K6-20 lex（#189）；≠ K6-18 prec（#185）；≠ K6-19 emit_arm（#183）；≠ #120 host-cc；≠ §7.4 cost-meas（#181）；≠ Softguess 产品路径；≠ image pe/elf/macho/fat/tape；≠ 1245 peephole opts suite |
 | 切后A更纯 | peep 有限域金标对照挂产品枝，不进根主张闸门；攻击面缩回构造+T1+仍开测量债 |
 | 证据 | `research/notes/paper-a-derive-purify-k6-24-gold-peep-label-not-a-gate-20261012-0526.md` |
