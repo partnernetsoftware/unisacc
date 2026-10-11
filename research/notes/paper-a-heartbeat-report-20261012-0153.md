@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `0c750220ba93843e26a6e551966cffb65e4c7266`（K6-17 产品；父 #172 K6-16 tip-after） |
-| tip after | TBD（本 note PR 合入后填） |
+| tip after | `f8ac641fd6dedce1ee4b6fc67e34cad1729587cb` |
 | K6-17 | `0c750220ba93843e26a6e551966cffb65e4c7266` |
 | Softguess | **NONE×4**（口号族 0；softmax 否认 CN/EN/TeX 各 1、abs 0；字面粘贴仍 P0 UNAPPLIED） |
 | Paper A 正文 | 相对 #168：CN/EN/TeX/abs **SAME×4**；相对 #154：CN/EN SAME，TeX/abs CHANGED（#168） |
