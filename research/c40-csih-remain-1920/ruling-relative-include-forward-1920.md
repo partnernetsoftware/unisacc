@@ -38,7 +38,7 @@ csih.sh / suite 现用绝对 `"$ROOT/..."` 可规避；**去掉 -include 不是�
 |---|---|
 | claim_id | c40-csih-remain-1920-scheme-A |
 | base_sha | 24a9c6d52d3f102b07015e973df53261c9e86eb1 |
-| tip（落刀后填） |  |
+| tip（落刀后填） | `64603035`（fix commit；旁支 tip 见回执） |
 | env_id | Linux box；`tests/build_ref.sh` → `/tmp/fwd-skip-opti-ua` |
 | POS | `tests/fwd_rel_include_forward.sh` relative+forward 无 `no such file` |
 | NEG | same 脚本 missing.h 须拒绝 |
@@ -62,4 +62,4 @@ csih.sh / suite 现用绝对 `"$ROOT/..."` 可规避；**去掉 -include 不是�
 | NEG | missing.h → rc=1，stderr 含 `no such file for #include` |
 | cli smoke | `tests/cli.sh` ok 68 wrong 0 |
 | verdict | **PASS**（首红未触发） |
-| tip |  () hotfix/relative-include-forward-1920 |
+| tip | `64603035` (`64603035d9c1b9bd02d22096cce0ce2641897937`) hotfix/relative-include-forward-1920；材料钉 tip `1aa2e99e` |
