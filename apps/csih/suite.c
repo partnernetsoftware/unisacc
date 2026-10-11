@@ -30,7 +30,7 @@ static const char *slice_name[SUITE_N] = {
     "tools", "shell", "net", "llm", "clock", "agent", "file", "loop", "suite"
 };
 static const int slice_n[SUITE_N] = {
-    2, 2, 3, 2, 2, 28, 6, 3, 5, 2, 2, 6, 3, 10, 2, 4, 2
+    2, 2, 3, 3, 2, 28, 6, 3, 5, 2, 2, 6, 3, 10, 2, 4, 2
 };
 static const char *slice_src[SUITE_N][SUITE_MAX_SRC] = {
     { "gate.c", "gate_cli.c" },
