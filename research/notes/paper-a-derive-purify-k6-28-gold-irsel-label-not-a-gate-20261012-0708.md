@@ -82,7 +82,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `dde789eaab0fecef25667eafb49bf5db3db682c2` |
-| tip after（本 note 合入后填） | `TBD_FILL_AFTER_SQUASH_MERGE` |
+| tip after（本 note 合入后填） | `56968e171a3c794c6dddb03592e6fb8134bb6fb0`（短 `56968e17`；= squash Merge #213 本 E） |
 | K6-28 产品叶 | `dde789eaab0fecef25667eafb49bf5db3db682c2`（= tip before；本拍首次 E） |
 | 上拍 E 锚 tip | `8e1b8482…`（#212 tip-after；K6-27 E 已合）；其后 NEW 产品叶 = K6-28 `dde789ea`，未 E 净化直至本拍 |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
