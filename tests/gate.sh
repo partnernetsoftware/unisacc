@@ -103,6 +103,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-uns1) req='native-posix|host|cc,python3|cdx|unisa-uns1-point-sample';;
           unisa-catalog) req='native-posix|host|cc,python3|cdx|unisa-catalog-point-sample';;
           unisa-fp) req='native-posix|host|cc,python3|cdx|unisa-fp-point-sample';;
+          unisa-tape) req='native-posix|host|cc,python3|cdx|unisa-tape-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -592,6 +593,7 @@ job unisa-libneed sh ./tests/unisalibneedcheck.sh   # 0.0.41 K6-6: unisa.libneed
 job unisa-uns1 sh ./tests/unisauns1check.sh   # 0.0.41 K6-7: unisa.control.uns1 dumps/loads/pad4 C ref vs uns1.py (point sample; i8+f32; q4/q2/f16 out of scope); keep Python
 job unisa-catalog sh ./tests/unisacatalogcheck.sh   # 0.0.41 K6-8: unisa.catalog OS/ARCH/TARGETS + sampled sysno/form/symbol/gate/argregs C ref vs catalog.py (point sample; full table is K6-8b); keep Python
 job unisa-fp sh ./tests/unisafpcheck.sh   # 0.0.41 K6-9: unisa.fp op3/op2 (binary64/32 arithmetic, compares, conversions, sqrt) C ref vs fp.py (point sample; dec_to_f32 out of C domain); keep Python
+job unisa-tape sh ./tests/unisatapecheck.sh   # 0.0.41 K6-10: unisa.tape build/emit/string/to_text/to_canonical_text + parse round trips C ref vs tape.py (point sample; not gold/vm/layout); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
