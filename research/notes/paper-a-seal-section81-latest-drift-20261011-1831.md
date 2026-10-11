@@ -59,7 +59,7 @@
 
 | Artifact | SHA |
 | --- | --- |
-| tip after merge | _(fill after merge)_ |
+| tip after merge | `ab0d1192e4c9fd0f3139f0d7750954b88445afdd` (Merge #142) |
 | CN `research/unisacc-paper.md` | `c37b9291a6cc5fcd24beda00299fdf630da0c02c` |
 | EN `research/unisacc-paper.en.md` | `fad7b3e0b51731f3615de9753aea0144dbee79b2` |
 | TeX `research/arxiv-paper-a/main.tex` | `5c880b0bafd86cbd10691a149212048a7b7d7279` |
