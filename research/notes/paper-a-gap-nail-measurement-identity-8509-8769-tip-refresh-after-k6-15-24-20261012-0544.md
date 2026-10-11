@@ -5,6 +5,7 @@
 - **主张一句：** 在 tip 已并入 **K6-15..24 产品叶**、**derive-purify E**（opinfo／peep 等）、以及 **§8.1#3 C** tip-refresh（含 #197）与多次 8509 C 中间钉（#166／#179／#187／#193）之后，活 gold `# stage …: N keys` 加总与 `built.json` H **仍只锁 op-87／8769／569**；EN／arXiv／abstract **8509／517** 仍为稿内 labeled **op-74**（无 tip frozen-gold pin）；**产品叶子／E 净化／§8.1#3 C ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3 平台 C 为主切口**（仅引用最新 #197）；**不重做** 最近 E（K6-23 #199／K6-24 #201）。
 - **仓库 tip（本拍核对开工）：** `f2806d67b26a447d04586125797248751c6766dc`（短 `f2806d67`；= #202 fill tip-after K6-24 E #201；相对任务书起点 **无漂**）
 - **tip-before（任务书起点，已核）：** `f2806d67b26a447d04586125797248751c6766dc`（短 `f2806d67`）
+- **tip-after：** `51ed2b9b2a103baedf29f4459343112e5f1d1d2b`（短 `51ed2b9b`；= squash Merge #203 本钉）
 - **公开 Latest：** **v0.0.40**（unsigned；target `1db30835…`）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）
 - **四 blob（git @ tip `f2806d67`）：**
   - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
@@ -118,7 +119,7 @@
 | --- | --- |
 | tip-before（任务书 #202） | `f2806d67b26a447d04586125797248751c6766dc` |
 | tip 开工核对 | `f2806d67b26a447d04586125797248751c6766dc`（无漂） |
-| tip-after | （本 PR squash merge 后填；见 follow-up 或本页交付行） |
+| tip-after | `51ed2b9b2a103baedf29f4459343112e5f1d1d2b`（短 `51ed2b9b`；= squash Merge #203 本钉；其间 tip 曾入 K6-25 `89d012e9`，≠ 身份闭合） |
 | CN / EN / TeX / abstract vs #168 | **SAME / SAME / SAME / SAME** |
 | Softguess | **NONE×4** |
 | gold 18-stage pin / built / H | `b8244bd8…` **MATCH** / `5e45bf5e…` **MATCH** / **569** |
