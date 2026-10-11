@@ -70,7 +70,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `826c24a0a5138b8c16ae8189a851051a5bc24d88` |
-| tip after（本 note 合入后填） | _TBD_ |
+| tip after（本 note 合入后填） | `3c998f74fcbe9fd42cd263c6dc0adce80a9028db` |
 | K6-17 narrow fix 产品叶 | `826c24a0a5138b8c16ae8189a851051a5bc24d88` |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
 | Paper A 末次正文（CN/EN 相对 #154） | #154 `bdec4bcbf823d0b527a15c40afe61f69942063fc`（T1→\(K_s\)；CN/EN 自此未改） |

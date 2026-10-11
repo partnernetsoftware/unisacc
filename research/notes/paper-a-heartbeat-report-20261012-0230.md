@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `826c24a0a5138b8c16ae8189a851051a5bc24d88`（K6-17 narrow fix 0214；父 #176 tip-after） |
-| tip after | _TBD_（合入后 fill） |
+| tip after | `3c998f74fcbe9fd42cd263c6dc0adce80a9028db` |
 | K6-17 narrow fix | `826c24a0a5138b8c16ae8189a851051a5bc24d88` |
 | Softguess | **NONE×4**（口号族 0；softmax 否认 CN/EN/TeX 各 1、abs 0；字面粘贴仍 P0 UNAPPLIED） |
 | Paper A 正文 | 相对 #168：CN/EN/TeX/abs **SAME×4**；相对 #154：CN/EN SAME，TeX/abs CHANGED（#168） |
