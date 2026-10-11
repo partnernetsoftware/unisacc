@@ -62,7 +62,7 @@
 ## 7. 日志原件
 
 - 缺口（已确认）：K5-1i run1 的 `receipt-run1.md` / `push.log` 原在 `/tmp/cc40-prep/k5-1i/`，该目录**现已不存在**（`ls` 确认）。0804 真审引用的“run1 受控证 pp0→parse2 红 3/2、chain1 与 shim 停点”因此无原件可引；不得以旧路径或转述代替。
-- 拟办：夹具运行时用 `EVIDENCE=<新建空目录>`（模仿 `seedpprun.sh` 的 SEEDPPRUN_EVIDENCE：写 SHIMLOG、rc、stderr、最终 chain 输出的 sha256），在 scratch 删除前落盘；落盘目录须在仓外 `/tmp/cc40-prep/first-red/`，入仓时再以副本形式进 `research/c40-stamp-B-guard-k5-1i/`，并记副本与原件的 sha256。
+- 已办（0902 r3）：夹具以 `FIRSTRED_EVIDENCE=/tmp/cc40-prep/first-red/r3` 运行，在 scratch 删除前落盘 SHIMLOG、rc、chain stdout/stderr、e3-gen.err、ua-build.out 与 SHA256SUMS；原件留在仓外 `/tmp/cc40-prep/first-red/r3/`；副本入 `research/c40-stamp-B-guard-k5-1i/first-red-run-0902/`，两边 SHA256SUMS 总哈希均为 `71b3f97d…56cbf`，`sha256sum -c` 通过。r1、r2 不入仓（r2 为夹具正则误判的失败记录，仅存于 `/tmp/cc40-prep/first-red/r2/`）。身份见 `first-red-identity-0910.md`（事后采样），闭合回执见 `first-red-closure-receipt-cc-0942.md`。
 
 ## 8. 与 0804 真审限定的关系
 
