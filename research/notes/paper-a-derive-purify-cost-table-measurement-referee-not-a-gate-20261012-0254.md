@@ -77,7 +77,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `888b24e3e8787b976c96c07446252fc6e47b9768` |
-| tip after（本 note 合入后填） | _(merge 后回填)_ |
+| tip after（本 note 合入后填） | `ccea5821f237d0a2d52bd4119d02052a15c1a2d9`（短 `ccea5821`；= squash Merge #181 本 E） |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf` |
 | Paper A 末次正文（CN/EN 相对 #154） | #154 `bdec4bcbf823d0b527a15c40afe61f69942063fc` |
 | CN `research/unisacc-paper.md` | `5231dd3bf3e60804c678d48015f1e337edd9dc56` **SAME** |
