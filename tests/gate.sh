@@ -123,6 +123,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-gold-pp-label) req='native-posix|host|cc,python3|cdx|unisa-gold-pp-label-point-sample';;
           unisa-gold-reloc-label) req='native-posix|host|cc,python3|cdx|unisa-gold-reloc-label-point-sample';;
           unisa-gold-irsel-label) req='native-posix|host|cc,python3|cdx|unisa-gold-irsel-label-point-sample';;
+          unisa-gold-parse-label) req='native-posix|host|cc,python3|cdx|unisa-gold-parse-label-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -632,6 +633,7 @@ job unisa-gold-scope-label sh ./tests/unisagoldscopelabelcheck.sh   # 0.0.41 K6-
 job unisa-gold-pp-label sh ./tests/unisagoldpplabelcheck.sh   # 0.0.41 K6-26: unisa.gold pp_label finite domain DIRS x DEFINED (18 rows) + named points, C ref vs gold.py source (ast extraction; no build(); no regen; not gold closure); keep Python
 job unisa-gold-reloc-label sh ./tests/unisagoldreloclabelcheck.sh   # 0.0.41 K6-27: unisa.gold reloc_label finite domain JMPKIND x ARCH (6 rows) + named points, C ref vs gold.py/catalog.py source (ast extraction; no build(); no regen; not irsel/parse); keep Python
 job unisa-gold-irsel-label sh ./tests/unisagoldirsellabelcheck.sh   # 0.0.41 K6-28: unisa.gold irsel_label IRSEL_MAP mapping (70 entries, not a Cartesian product) + named points, C ref vs gold.py source (ast extraction; no build(); no regen; not parse); keep Python
+job unisa-gold-parse-label sh ./tests/unisagoldparselabelcheck.sh   # 0.0.41 K6-29: unisa.gold parse_label stage domain NT x TOKS (5 x 68 = 340) + named points, C ref vs gold.py source (ast extraction; labels checked against PRODS; no build(); not front-end parse); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
