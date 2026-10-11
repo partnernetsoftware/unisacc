@@ -1,0 +1,86 @@
+# Paper A 衍生净化：tip c41 / K6-7 control.uns1 + K6-8 catalog + K6-9 fp 不得搭乘 A
+
+- **拍点：** 2026-10-11 ~21:56 Asia/Shanghai（UTC+8）
+- **切口：** **E. 衍生净化**
+- **仓库 tip（只读核对 / before）：** `ffb44495bd5c80bdb89302bf3baf12c240bdfaf1`（= K6-9 unisa.fp；祖先含 K6-8 narrow `36375f66`、Paper A #154 T1→K_s `bdec4bcb`、K6-8 `09ae0912`、K6-7 `68af41ff`、#151 linalg/libneed E）
+- **父节点 tip 链（相关）：** K6-7 `68af41ff…`（unisa.control.uns1 dumps/loads/pad4 C↔uns1.py；same 14、neg 3/3）；K6-8 `09ae0912…`（unisa.catalog OS/ARCH/TARGETS + sampled sysno/form/symbol/gate/argregs C↔catalog.py；same 15、neg 2/2；full table 另排 K6-8b）+ narrow fix `36375f66…`；K6-9 `ffb44495…`（unisa.fp op3/op2 C↔fp.py；181 points；neg 2/2）
+- **Latest：** **v0.0.40**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改；禁 bump/Latest）
+- **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证载体／字节流管道）→ 产品／unisa **control.uns1**、**catalog（OS/ARCH/TARGETS + sysno 采样）**、**fp（op3/op2）** 参考对 hygiene／载体验收旁支 → 仍回 **A**
+- **状态：** **note only**（登记「须先 K6-7/8/9 绿／完稿才许投 A／构造+T1 才成立／gate 绿＝测量身份闭合／缺之则实证封口不完整／须升 Softguess／第四 seal-before」升格 ≠ 理论闸门；**不起稿**；**不改** A 根主张、键数身份、CN/EN/TeX/abstract、product/kernel/weights/facts、投稿方向；**不代裁** Ο1/Ο2（仍荐 Ο1）；**不重钉** Softguess tip-refresh／8509·8769；**不重做** #151 linalg/libneed E 及更早 ZData/padded/peversion/hostabi/same7 E）
+- **Softguess：** tip 四文件 **NONE×4**（机扫 `Softguess`/`softguess`/`权重就是`/`weights are the logic`/`逻辑本身`/`权重即逻辑` 均 0 hit；§3「不含 softmax」否认句不计；**NONE≠seal-before 债**）
+- **测量身份：** 8509/8769 **仍开** — 本拍不重钉、不叠；**不叠** Ο1/Ο2
+- **Paper A 正文漂移：** tip 四 blob 相对 #154 `bdec4bcb` **SAME**（本拍零正文 diff）
+
+---
+
+## 主张一句（本页唯一）
+
+**把 tip 产品战役 K6-7（unisa.control.uns1）、K6-8（unisa.catalog OS/ARCH/TARGETS + sysno）、K6-9（unisa.fp op3/op2）升成 Paper A seal-before／T1／测量身份／Softguess／第四闸门——不得搭乘 A。** 三者是产品／CI hygiene 与载体验收点采样，不是 A 理论。A seal-before 仍只是 §8.1#3、8509·8769、Ο1|Ο2（荐Ο1）。同模式见 #151（linalg K6-5 + libneed K6-6 ≠ A gate）。
+
+---
+
+## 切什么
+
+| 战役 | 对象 | 分类 |
+| --- | --- | --- |
+| K6-7 | `unisa.control.uns1` dumps(i8,f32)/loads/pad4 C↔uns1.py；same 14、neg 3/3 | **keep 产品／control 参考对 hygiene**；切出「须先绿才许投 A／＝T1／身份闭合／Softguess」 |
+| K6-8 | `unisa.catalog` OS/ARCH/TARGETS + sampled sysno… C↔catalog.py；same 15、neg 2/2；full table 另排 K6-8b | **keep 产品／catalog 点采样 hygiene**；切出「catalog/sysno 绿＝投稿闸门／表扩＝第四 seal」 |
+| K6-9 | `unisa.fp` op3/op2 C↔fp.py；181 points；neg 2/2 | **keep 产品／fp 参考对 hygiene**；切出「fp 点采样＝构造空／须升 Softguess」 |
+| §8.1#3／8509·8769／Ο1|Ο2 | 仍开硬缺口与决策卡（荐Ο1） | **keep seal-blocking**；本拍不重钉、不叠、不代裁 |
+| A 根主张／T1 on \(K_s\) | 构造网络；声明域逐键全等 | **keep in A** |
+
+**不切：** 根主张、键数数字、§8.1#3、Ο1/Ο2、product/kernel/weights/facts、CN/EN/TeX/abstract、投稿方向、K6-7/8/9 工程本身（只切升格读法）。
+
+---
+
+## 为何不挡 A 投稿
+
+1. **A 根主张是构造＋T1（声明域 \(K_s\)），不是「unisacontrol/uns1、catalog、fp 点采样已绿」。** 三者是载体／表扩周边 hygiene，不是构造 falsifier，也不是第二套理论。
+2. **gate 绿 ≠ Softguess／第四 seal-before／8509·8769 闭合。** 诚实跑 K6-7/8/9 是工程卫生；不能反向读成投稿前提。
+3. **与 §8.1#3／8509·8769／Ο1|Ο2／#151 linalg+libneed 正交。** 本拍不把 control/catalog/fp 加为第四挡粘，不叠决策卡。
+4. **切后 A 更纯：** A 保持「构造 + T1 on declared domain \(K_s\)」；catalog／fp／control 点采样不进摘要／seal 判据。攻击面从「须先 K6-7/8/9 完稿才许封 A」缩回「硬缺口仍只开 §8.1#3、8509·8769、Ο1|Ο2」。
+5. **本拍零 Paper A 正文 diff。**
+
+---
+
+## 父节点如何回 A
+
+- **旁支回 A：** A（字节流／构造 TSV→weights 编译器 + T1 on \(K_s\) + unisacc 实证）→ unisa.control.uns1／catalog／fp 产品／参考对 hygiene 旁支（表扩／载体验收实证侧路）→ 仍回 A。
+- 结果可回来收紧「载体／点采样如何披露」措辞，不能长成与 A 并列的第二套理论，也不能把「K6-7/8/9 未绿」回写成投稿前提或 Softguess 触发器。
+- **DAG：** 切出的是升格闸门，不是删掉 control/catalog/fp 工程债或 A 硬缺口。
+
+---
+
+## tip / blob 表（本拍核对）
+
+| 项 | 值 |
+| --- | --- |
+| tip before | `ffb44495bd5c80bdb89302bf3baf12c240bdfaf1` |
+| Paper A 末次正文 | #154 `bdec4bcbf823d0b527a15c40afe61f69942063fc`（T1→\(K_s\)） |
+| K6-7 | `68af41ff5d3812e66006e61bb03c31e7576c1cfb` |
+| K6-8 | `09ae091243bba1e7e62ef2ddfe84e77291912d14`（+ narrow `36375f66…`） |
+| K6-9 | `ffb44495bd5c80bdb89302bf3baf12c240bdfaf1` |
+| CN `research/unisacc-paper.md` | `5231dd3bf3e60804c678d48015f1e337edd9dc56` **SAME** vs #154 |
+| EN `research/unisacc-paper.en.md` | `0a707d704079bfef3b2b5193bfa8dc2b5ec90303` **SAME** |
+| TeX `research/arxiv-paper-a/main.tex` | `0ef6027ccc73b20b1d7d4371f89c47b069885bb7` **SAME** |
+| abs `research/arxiv-paper-a/abstract.txt` | `43d7ea7e7297ed8be9a96e3950e014e359467973` **SAME** |
+| Softguess | **NONE×4**（预期态；不升 seal-before） |
+
+---
+
+## OUT（本拍明确不做）
+
+- 改正文 CN/EN/TeX/abstract；粘 Softguess／近似推断
+- 代裁／叠卡 Ο1/Ο2；重钉 Softguess tip-refresh 或 8509·8769 tip-refresh
+- 改 product/kernel/weights/facts／键数／投稿方向；bump Latest
+- 重做 #151 linalg/libneed 或更早 ZData/padded/peversion/hostabi/same7 E
+- 把 K6-7/8/9 加为第四 seal-before／Softguess 触发／8509·8769 闭合证明
+
+---
+
+## 证据索引
+
+- 本笔记：`research/notes/paper-a-derive-purify-k6-7-8-9-control-catalog-fp-not-a-gate-20261011-2156.md`
+- 同模式先验：[`paper-a-derive-purify-unisa-linalg-libneed-k6-5-6-not-a-gate-20261011-2046.md`](paper-a-derive-purify-unisa-linalg-libneed-k6-5-6-not-a-gate-20261011-2046.md)（#151）
+- T1 声明域统一：[`paper-a-seal-t1-declared-domain-unify-20261011-2127.md`](paper-a-seal-t1-declared-domain-unify-20261011-2127.md)（#154）
+- Softguess tip-refresh（已做，不重做）：[`paper-a-gap-nail-softguess-tip-refresh-latest40-c41-20261011-2108.md`](paper-a-gap-nail-softguess-tip-refresh-latest40-c41-20261011-2108.md)（#153）
