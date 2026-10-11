@@ -1,0 +1,125 @@
+# Paper A · 真缺口钉 tip-refresh：测量身份 8509 vs 8769 · K6-19 + E #181–#186 之后仍 blocking
+
+- **拍点：** 2026-10-12 ~03:44 Asia/Singapore（UTC+8）
+- **本拍切口：** **C. 真缺口钉**
+- **主张一句：** 在 tip 已并入 **K6-19 emit_arm 产品叶**、**E #181–#186**（§7.4 cost-meas／K6-19 emit_arm／K6-18 gold prec_label 分界与 tip-after）、以及 tip 再前进的 **K6-20 lex_label 产品叶（尚未 E 净化）** 之后，活 gold `# stage …: N keys` 加总与 `built.json` H **仍只锁 op-87／8769／569**；EN／arXiv／abstract **8509／517** 仍为稿内 labeled **op-74**（无 tip frozen-gold pin）；**产品叶子／E 净化／Softguess NONE ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3 平台 C 为主切口**（仅引用）。
+- **仓库 tip（本拍核对开工）：** `8e023cdbd30ede5a544b98910e9e447d5c31a5c4`（短 `8e023cd`；= K6-20 unisa.gold lex_label；已越过任务书起始 tip `c4a8ff8b8c3f6985dfc4ad78b67cf26c6f8d688f` = Merge #186）
+- **tip-before（任务书起点，已核）：** `c4a8ff8b8c3f6985dfc4ad78b67cf26c6f8d688f`（Merge #186 fill tip-after K6-18 E #185）
+- **tip-after：** _填于 PR 合并后_（本页初稿写于 tip `8e023cd`）
+- **公开 Latest：** **v0.0.40**（unsigned）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改冻结措辞）
+- **四 blob（git @ tip `8e023cd`）：**
+  - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
+  - EN `0a707d704079bfef3b2b5193bfa8dc2b5ec90303`
+  - TeX `aab7bd9b8e3c72d08aa2672a559513bb70e02049`（`research/arxiv-paper-a/main.tex`）
+  - abstract `d2eb48f7814b7b578b5644c5e19ff9a76ffe3d3b`（`research/arxiv-paper-a/abstract.txt`）
+  - 相对 #168 tip `ae7f7424585f60fc0184e86e3dbd3b32686125bf`：**四 blob SAME**（其后 K6／E／Softguess／本钉 **零** Paper A 正文 diff）
+  - 相对 post-T1 `#154` tip `bdec4bcbf823d0b527a15c40afe61f69942063fc`：**CN/EN SAME**；**TeX/abstract DIFF**（原因＝Merge #168 布局；**非整键数改写**）
+- **Softguess：** **NONE×4**（机扫 `Softguess`／`softguess`／`SoftGuess`／`权重就是`／`weights are the logic`／`逻辑本身`／`权重即逻辑`／`权重≡逻辑` 于 CN/EN/TeX/abstract 均 0 hit；softmax 仅 CN/EN/TeX 各 1 处「不含／no softmax」义务句；本钉不粘 Softguess）
+- **角色：** 可引用 tip-refresh 钉（citation nail）；**supersede tip 证据 only**；相对 [`paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-k6-17-e-20261012-0242.md`](paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-k6-17-e-20261012-0242.md)（#179 @ tip ~`5e59250a`／Merge `8750bf83`）**并入 K6-19／E #181–#186／K6-20 NEW tip 事实**。**不是**新决策卡；**不叠** Ο1/Ο2；**不重做** 平台矩阵 C／Softguess C／另一路 E。
+- **父节点：** **A**
+- **DISTINCT：**
+  - vs [`paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-k6-17-e-20261012-0242.md`](paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-k6-17-e-20261012-0242.md)（**C** #179 @ tip `5e59250a`；K6-15..18 + E #166–#178）——本页是 **K6-19 + E #181–#186 + tip K6-20** 之后 tip `8e023cd`；NEW 焦点＝产品叶／E 分界 **之后 8509/8769 仍 seal-blocking**。
+  - vs [`paper-a-gap-nail-softguess-tip-refresh-after-168-image-layout-20261012-0125.md`](paper-a-gap-nail-softguess-tip-refresh-after-168-image-layout-20261012-0125.md)（**C** #169）——正交 Softguess 纪律；本钉是 **8509/8769**；仅引用 Softguess NONE×4。
+  - vs E #181／#183／#185（§7.4 cost-meas／K6-19 emit_arm／K6-18 gold prec_label ≠ A gate）——本拍是 **C**，不叠另一路 E；只引用「已登记 ≠ A 闸门」加强分界。
+  - vs [`paper-a-draft-increment-image-field-layout-tex-abs-align-20261012-0115.md`](paper-a-draft-increment-image-field-layout-tex-abs-align-20261012-0115.md)（**A** #168）——TeX/abs 布局对齐；**不改**键数身份；本钉记录四 blob vs #168 SAME。
+  - vs [`paper-a-gap-nail-platform-matrix-tip-refresh-after-hosted-ci-e-20261012-0028.md`](paper-a-gap-nail-platform-matrix-tip-refresh-after-hosted-ci-e-20261012-0028.md)（**C** #165）——**正交**硬缺口（§8.1#3）；本钉仅引用。
+  - vs [`paper-a-decision-card-remeasure-identity-20261011-1808.md`](paper-a-decision-card-remeasure-identity-20261011-1808.md)（**B**）——**不叠**第二张决策卡；只引用荐 Ο1。
+  - vs [`paper-a-gap-nail-8509-8769-delta-20261011-2054.md`](paper-a-gap-nail-8509-8769-delta-20261011-2054.md)（**C** Δ 溯源）——本页不重做 78+26+78+78；只确认 tip 前进后 **Δ 解释 ≠ 身份闭合** 仍成立。
+
+---
+
+## 主张一句（本页唯一）
+
+**@ tip `8e023cd`（Latest v0.0.40 + K6-19 + E #181–#186 + K6-20）：活 gold 仍锁 op-87／8769／569（pin MATCH）；EN／TeX／abstract 仍标 op-74／8509／517；四 blob vs #168 SAME；Softguess NONE×4；产品叶子／E 净化 ≠ 测量身份闭合 → 仍 seal-blocking；仍荐 Ο1，不叠卡、不改键数。**
+
+---
+
+## 证据表：NEW tip 事实（相对 0242／#179 @ `5e59250a`）→ 对 8509/8769 的含义（do / don't）
+
+| NEW tip 事实（verified `5e59250a`..`8e023cd`） | 对测量身份 **意味着** | **不意味着** |
+| --- | --- | --- |
+| Merge #179 `8750bf83` + #180 tip-after：C 8509 tip-refresh 0242（本页先验） | tip 证据基线已钉；本页 supersede | 0242 已闭合身份 |
+| Merge #181 `ccea5821` + #182/`a7b4ad8b` tip-after：§7.4 cost-meas E ≠ A gate | 旁支 hygiene／E 分界 | cost-meas 登记＝键数债消失 |
+| tip c41 **K6-19** emit_arm `73f09c94…` + Merge #183 `854b40b5` + #184/`ce4e9420` tip-after：N/w/movimm/mem ≠ A gate | 产品／E 分界；点采样 hygiene | emit_arm 绿＝op-87／8769 与 EN 8509 统一 |
+| Merge #185 `7e87921f` + #186/`c4a8ff8b` tip-after：K6-18 gold prec_label E ≠ A gate（K6-18 **产品**已在 #179 范围；**E 净化为本拍 NEW**） | E 已登记 ≠ A 闸门；加强分界 | prec_label E＝8769 身份新封／EN 8509 消失 |
+| tip c41 **K6-20** lex_label `8e023cd…`（本拍开工时 tip 已越过 #186；**尚未 E 净化**） | NEW 产品叶 hygiene；**不改** `weights/gold` 域积／pin | lex_label 绿＝测量身份闭合／seal-before |
+| 四 blob vs #168 **SAME**；Softguess **NONE×4** | tip 前进可引用；键数句未因 K6/E 改写 | tip 前进／叶子／E／Softguess＝双身份债消失 |
+
+**结论：** K6-19／E #181–#186／K6-20 是相对 0242／#179 的**可引用新卫生／产品／分界证据**；它们**加强**「叶子／E／Softguess ≠ 测量身份闭合」分界，**不**把 8509/8769 从 seal-blocking 降级。K6-20 仅作 tip 事实引用，**不**升成 A 闸门，亦**不**代做本拍 E。
+
+---
+
+## 本拍重测（方法同 [`../seal-remeasure-20261009.md`](../seal-remeasure-20261009.md)）
+
+对 tip `8e023cd` 的 `weights/gold/{pp…combo}.tsv`（K6-19／E #181–#186／K6-20 **不改** `weights/gold` 域积）：
+
+| Check | Value @ tip `8e023cd` |
+| --- | --- |
+| 18-stage header `# stage …: N keys` 加总 | **8769** |
+| Matches CN Table 1 (op-87) | **yes** |
+| Matches EN Table 1 labeled 8509 | **no**（差仅 enc/isel/abi/combo；Δ=260 见 2054） |
+| SHA-256 pin（`===<stage>\n` + bytes，Table 1 顺序 pp…combo） | `b8244bd8d9422dd32bb21af7053c38ef009d9d5a027c0924b1cac167fa454e70` |
+| Pin vs 2026-10-09 / 1239 / 1422／1514／1641／1745／1845／2054／2255／0039／0242 | **MATCH** |
+| enc/isel/abi/combo `#field op` 长度 | **87 / 87 / 87 / 87**（域积 522 / 174 / 522 / 522） |
+| `weights/built.json` SHA-256 | `5e45bf5e018c9e1f0417fdbeb17cbf3b87463c761542f676686a7c5fc03d665a` **MATCH** |
+| 18-stage `H` 加总（`built.json` per-stage `H`） | **569**（对齐 CN；**不是** EN 517） |
+
+→ K6-19 与 E #181–#186／K6-20 **之后** tip **仍未改** 活 gold／built 测量身份。活产物仍锁 **op-87／8769／569**。EN／arXiv／abstract **8509／517** 仍为稿内 **labeled** op-74。
+
+### 机械差（引用 2054；本拍未改）
+
+- 键差 **8769−8509 = 260**，仅 **enc / isel / abi / combo**（`op` 87 vs 74；分解 78+26+78+78）
+- 单元差 **569−517 = 52**，仅 **isel / abi / combo**（`enc` 两侧单元同为 5）
+- **Δ 已解释 ≠ 身份已闭合**
+
+---
+
+## 稿内双身份位点（@ tip；只读摘）
+
+| 侧 | 身份 | 代表位点 |
+| --- | --- | --- |
+| CN | op-87／8769／569 | 摘要 L13；表 1 合计 L141；键数说明 L144 |
+| EN | op-74／8509／517 | 摘要 L13；表 1 题注 L120；合计 L142 |
+| TeX | op-74／8509／517 | 摘要 ~L76；表 1 caption ~L262；Total ~L319 |
+| abstract.txt | op-74／8509（并声明 CN op-87／8769） | L1 |
+
+---
+
+## 仍挡封口（still-blocking · IN SCOPE）
+
+1. **单一冻结投稿测量身份尚未选定**（Ο1/Ο2 待政委批；默认仍荐 Ο1＝以 tip gold op-87／8769／569 为唯一投稿身份并三联改写；本拍不代裁、不叠卡——引用 [`paper-a-decision-card-remeasure-identity-20261011-1808.md`](paper-a-decision-card-remeasure-identity-20261011-1808.md)；K6／E／K6-20 **无新测量身份信息** beyond 引用 0242／1808／2054）。
+2. **EN op-74 无 tip gold pin**：`b8244bd8…` 钉的是 tip gold 的 **op-87 活表**；op-74 没有对称 frozen gold 复现。
+3. **CN/EN/TeX/abstract 三联数字在选定身份前不得互换或单侧改写**（正文免责已在；本拍**零正文键数 diff**）。
+4. **禁止**把 K6-19／E #181–#186／K6-20／Softguess NONE×4／Δ 已解释写成 8509/8769 已闭合。
+5. 正交仍开（仅引用）：**§8.1#3** 同身份平台执行矩阵（[`paper-a-gap-nail-platform-matrix-tip-refresh-after-hosted-ci-e-20261012-0028.md`](paper-a-gap-nail-platform-matrix-tip-refresh-after-hosted-ci-e-20261012-0028.md)；fill_status 仍 `blocked-on-identity`）。
+
+### OUT OF SCOPE
+
+- 改正文 CN/EN/TeX/abstract 任何键数/单元；互换 8509↔8769
+- 发明 op-74 tip gold / 把 9174 升格为 Table 1 键数
+- Softguess 字面粘贴；叠第二张 Ο1/Ο2 决策卡
+- 改 kernel / weights / facts / 产品代码；代裁密封 Latest／签名
+- 重做 #165 平台矩阵 C 或 #169 Softguess C 为主切口（本钉仅引用）
+- 重写 0242／2054／1808／E #181–#186／#168 钉正文（本页只 supersede tip 证据）
+- 把 K6-20 lex_label 升成 A seal-before／T1／第四闸门（本拍未做 E；仅作 tip 事实引用）
+
+---
+
+## tip / blob 表
+
+| 项 | SHA / 状态 |
+| --- | --- |
+| tip-before（任务书 #186） | `c4a8ff8b8c3f6985dfc4ad78b67cf26c6f8d688f` |
+| tip 开工核对 | `8e023cdbd30ede5a544b98910e9e447d5c31a5c4`（K6-20；已越过 #186） |
+| tip-after | _填于 PR 合并后_ |
+| CN / EN / TeX / abstract vs #168 | **SAME / SAME / SAME / SAME** |
+| Softguess | **NONE×4** |
+| gold 18-stage pin / built / H | `b8244bd8…` **MATCH** / `5e45bf5e…` **MATCH** / **569** |
+
+---
+
+## 本拍交付
+
+- 本注：`research/notes/paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-k6-19-e-20261012-0344.md`
+- 短报：`research/notes/paper-a-heartbeat-report-20261012-0344.md`
+- **零** Paper A 正文键数 diff；**零** product／kernel／weights／facts diff
