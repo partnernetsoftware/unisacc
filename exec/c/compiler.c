@@ -429,7 +429,8 @@ int main(int argc, char **argv) {
         else if (runit && src && a[0]!='-') {
             if(tapebin_path(src)||tape_path(src)){argstart=i;break;}
             size_t len=strlen(a);
-            if ((len>=2 && !strcmp(a+len-2,".c")) || object_path(a)) sources[nsources++]=a;
+            /* .cx script: same as isdotc (src/front_parse.c); break here would turn the rest into argv */
+            if ((len>=2 && !strcmp(a+len-2,".c")) || (len>=3 && !strcmp(a+len-3,".cx")) || object_path(a)) sources[nsources++]=a;
             else { argstart=i; break; }
         }
         else if (!strcmp(a,"-MD") || !strcmp(a,"-MMD")) { if (!deps) deps=""; }
