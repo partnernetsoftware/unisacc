@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `0da1fabb`（K6-26 产品叶本身；**无漂**） |
-| tip after（合入后填） | _(fill after merge)_ |
+| tip after（#207） | `25999cad`（本 E squash merge） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文 diff |
 | 挡粘仍开 | §8.1#3、8509/8769、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不重钉 C） |
