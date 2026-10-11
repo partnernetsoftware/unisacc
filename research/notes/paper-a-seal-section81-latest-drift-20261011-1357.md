@@ -59,9 +59,9 @@
 
 | Artifact | SHA |
 | --- | --- |
-| tip after merge | *(PR merge)* |
-| CN `research/unisacc-paper.md` | *(after)* |
-| EN `research/unisacc-paper.en.md` | *(after)* |
-| TeX `research/arxiv-paper-a/main.tex` | *(after)* |
+| tip after merge | `8f2361d1dac21df8bb81a55547e6aad9c673aec9` (Merge #124) |
+| CN `research/unisacc-paper.md` | `e2c67f1a0df02a1d5ecd548aa957fa555aaf955b` |
+| EN `research/unisacc-paper.en.md` | `ca2bf002cc6d10ae2695c58b78fefb5ced7ab848` |
+| TeX `research/arxiv-paper-a/main.tex` | `bd62b23a058b7572a75e8e20264402d84512993d` |
 | abstract | `43d7ea7e7297ed8be9a96e3950e014e359467973` (**SAME**) |
 
