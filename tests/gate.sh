@@ -110,6 +110,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-image-elf) req='native-posix|host|cc,python3|cdx|unisa-image-elf-point-sample';;
           unisa-image-macho) req='native-posix|host|cc,python3|cdx|unisa-image-macho-point-sample';;
           unisa-image-pe) req='native-posix|host|cc,python3|cdx|unisa-image-pe-point-sample';;
+          unisa-ape) req='native-posix|host|cc,python3|cdx|unisa-ape-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -606,6 +607,7 @@ job unisa-image-fat sh ./tests/unisaimagefatcheck.sh   # 0.0.41 K6-12: unisa.ima
 job unisa-image-elf sh ./tests/unisaimageelfcheck.sh   # 0.0.41 K6-13: unisa.image.elf static write() (ELF64 header, two PT_LOAD, page-aligned data, signed entry) C ref vs elf.py (point sample; dynamic=True not claimed; macho/pe/ape out of scope); keep Python
 job unisa-image-macho sh ./tests/unisaimagemachocheck.sh   # 0.0.41 K6-14: unisa.image.macho write() (Mach-O 64 load commands, DYLD_INFO binds, ad-hoc SuperBlob with per-page SHA-256) C ref vs macho.py (point sample; not loadable/codesign closure; pe/ape out of scope); keep Python
 job unisa-image-pe sh ./tests/unisaimagepecheck.sh   # 0.0.41 K6-15: unisa.image.pe write() static path (stub empty, dynamic False: PE32+ headers, import section, load config, .reloc) C ref vs pe.py (point sample; dynamic/stub/ape not claimed); keep Python
+job unisa-ape sh ./tests/unisaapecheck.sh   # 0.0.41 K6-16: unisa.ape build() script/two-pass layout, gzip Unix members (zlib), PE stub split, UNIPKG1 payload trailer; fixture compile_target (not a product target; not loadable/multi-platform); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
