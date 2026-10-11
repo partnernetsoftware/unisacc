@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-11 ≈21:45 Asia/Singapore（UTC+8）；政委加码 ≈22:00「先协作构思再写码」
 - **仓 tip（只读核对 / before）：** `2779b4bde6a8e5200eaa6e9c6c8f6e7acde08b55`
 - **依据：** `docs/cx-spec-draft.md` §2–3 / §3.1 / M 片；`apps/csih/docs/module-decision.md`；政委「把 rust 优点用在 unisacc(posix c99)」；加码五轴共构
-- **状态：** **设计短页 + 可验收旁注授刀**（材料 only；**不**接编译器实现、**不**改产品路径、**不**挡 K6-9 真审主叶）
+- **状态：** **设计短页 + 可验收旁注授刀**（材料 only；**不**接编译器实现、**不**改产品路径、**不**挡 K6-9 / **不**抢 K6-10）；续页见 checker-reject-N1N3
 - **授刀名：** `cxif-cols-boundary-旁注-2145`
 
 ---
@@ -154,7 +154,7 @@ research/cxif-cols-boundary/
 | CXIF schema 未进 `spec.md` | 本页 v0 stub 键冻结；升 spec 另授 |
 | 检查器尚不能拒 N1–N3 | 材料口径；执行器接线后复跑 |
 | `.cx` run 模式缺陷 | 已知；本刀不修 |
-| 三窗共构 | 本短页为共构底稿；他窗审轴可补注，不另开第二份互相打架的「权威」 |
+| 三窗共构 | 本短页为共构底稿；续页 [`csih-cx-modularity-2145-checker-reject-N1N3.md`](csih-cx-modularity-2145-checker-reject-N1N3.md) 钉「如何实现检查器拒 N1–N3」（语法/接线/门闩 vs 样例分账）；不另开第二份打架权威 |
 
 ---
 

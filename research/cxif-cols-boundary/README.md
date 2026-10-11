@@ -2,6 +2,7 @@
 
 - **授刀：** `cxif-cols-boundary-旁注-2145`
 - **设计短页：** [`../csih-cx-modularity-2145.md`](../csih-cx-modularity-2145.md)
+- **共构续页（检查器拒 N1–N3）：** [`../csih-cx-modularity-2145-checker-reject-N1N3.md`](../csih-cx-modularity-2145-checker-reject-N1N3.md)
 - **对照源（只读）：** `apps/csih/cols.cx`、`apps/csih/csih_cols.h`
 - **口径：** 材料可审；**不是**产品 gate；**不是**「检查器已实现」证据
 
