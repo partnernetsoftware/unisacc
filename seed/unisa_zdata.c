@@ -134,6 +134,18 @@ static void zd_set(size_t s, size_t e, const unsigned char *raw) {
     }
 }
 
+/* ZData._range: step must be 1 */
+static void zd_range(size_t s, size_t e, size_t step) {
+    (void)s; (void)e;
+    if (step != 1) die("ZData: stepped slice", NULL);
+}
+
+/* ZData.count: only zeros are counted */
+static void zd_count(long x, size_t s, size_t e) {
+    (void)s; (void)e;
+    if (x != 0) die("ZData.count counts zeros only", NULL);
+}
+
 static size_t zd_count0(size_t s, size_t e) {
     size_t i, total = 0;
     for (i = first_index(s); i < nseg && segs[i].start < e; i++) {
@@ -182,14 +194,14 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(op, "stepread")) {
             size_t step; sscanf(line, "%*s %zu %zu %zu", &s, &e, &step);
-            if (step != 1) die("ZData: stepped slice", line);
-            die("unexpected stepread", line);
+            zd_range(s, e, step);   /* ZData._range: refuses step != 1 */
+            die("unexpected: stepped slice accepted", line);
         }
         else if (!strcmp(op, "count")) { sscanf(line, "%*s %zu %zu", &s, &e); if (e > n) e = n; printf("%zu\n", zd_count0(s, e)); }
         else if (!strcmp(op, "countx")) {
             long x; sscanf(line, "%*s %zu %zu %ld", &s, &e, &x);
-            if (x != 0) die("ZData.count counts zeros only", line);
-            die("unexpected countx", line);
+            zd_count(x, s, e);      /* ZData.count: refuses x != 0 */
+            die("unexpected: nonzero count accepted", line);
         }
         else if (!strcmp(op, "len")) printf("%zu\n", n);
         else if (!strcmp(op, "dump")) {
@@ -199,7 +211,7 @@ int main(int argc, char **argv) {
                 else { printf("SEG %zu D %zu ", segs[i].start, segs[i].len); print_hex(segs[i].d, segs[i].len); printf("\n"); }
             }
         }
-        else if (!strcmp(op, "copy")) {
+        else if (!strcmp(op, "copy") || !strcmp(op, "copy_data")) {
             size_t i; sscanf(line, "%*s %zu %zu", &m, &base);
             unsigned char *mem = calloc(m ? m : 1, 1); if (!mem) die("out of memory", NULL);
             for (i = 0; i < nseg; i++) {

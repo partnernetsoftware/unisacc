@@ -51,10 +51,13 @@ for line in open(sys.argv[1]):
                 print('SEG %d D %d %s' % (st, len(obj), bytes(obj).hex()))
     elif op == 'copy':
         m, base = int(t[1]), int(t[2]); mem = bytearray(m); z.copy_into(mem, base); print(bytes(mem).hex())
+    elif op == 'copy_data':
+        from unisa.padded import copy_data   # the module-level entry point; ZData branch
+        m, base = int(t[1]), int(t[2]); mem = bytearray(m); copy_data(mem, base, z); print(bytes(mem).hex())
     elif op == 'stepread':
-        s, e, step = int(t[1]), int(t[2]), int(t[3]); assert step == 1, 'ZData: stepped slice'
+        s, e, step = int(t[1]), int(t[2]), int(t[3]); z[s:e:step]   # real ZData.__getitem__ -> _range
     elif op == 'countx':
-        s, e, x = int(t[1]), int(t[2]), int(t[3]); assert x == 0, 'ZData.count counts zeros only'
+        s, e, x = int(t[1]), int(t[2]), int(t[3]); z.count(x, s, e)   # real ZData.count
     else:
         raise SystemExit('unknown op ' + op)
 PY
@@ -97,6 +100,17 @@ copy 4120 3
 read 0 6
 count 0 4120
 OPS
+cat > "$T/scripts/E.ops" <<'OPS'
+extend 7f
+zeros 4100
+extend 0a0b
+extzero 3
+set 4101 00
+dump
+copy_data 4120 5
+read 0 6
+count 0 4106
+OPS
 cat > "$T/scripts/D.ops" <<'OPS'
 extend ab
 extzero 5000
@@ -120,7 +134,8 @@ pt() {   # pt NAME
     cmp -s "$T/c-$nm.txt" "$T/p-$nm.txt" || { diff -u "$T/p-$nm.txt" "$T/c-$nm.txt" | head -30; fail "DIFF script $nm"; }
     same=$((same + 1)); echo "SAME $nm ($(wc -l <"$T/c-$nm.txt" | tr -d ' ') lines)"
 }
-pt A; pt B; pt C; pt D
+pt A; pt B; pt C; pt D; pt E
+
 
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 neg() {   # neg NAME LINE -- both sides must refuse; nothing printed for the refused op
@@ -130,6 +145,8 @@ neg() {   # neg NAME LINE -- both sides must refuse; nothing printed for the ref
     PYTHONPATH="$R" "$B" 10 python3 "$T/pydump.py" "$f" >"$T/n-$nm-p.out" 2>"$T/n-$nm-p.err"; p=$?
     refused "$c" || fail "NEG-$nm C accepted (rc=$c): first red"
     refused "$p" || fail "NEG-$nm python accepted (rc=$p): first red"
+    [ ! -s "$T/n-$nm-c.out" ] || fail "NEG-$nm C printed stdout (must be empty): first red"
+    [ ! -s "$T/n-$nm-p.out" ] || fail "NEG-$nm python printed stdout (must be empty): first red"
     echo "NEG-$nm both refuse (c_rc=$c py_rc=$p) c_err=$(tail -1 "$T/n-$nm-c.err")"
 }
 neg stepread "stepread 0 2 2"
