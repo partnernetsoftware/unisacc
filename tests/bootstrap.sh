@@ -32,13 +32,13 @@ sign_image() {
     if command -v codesign >/dev/null; then bound 10 codesign -f -s - "$1" >/dev/null 2>&1; fi
 }
 branch_b() {
-    bound 30 "$UA" "$SELF" -c > "$T/bs_B.tape"
+    bound 30 "$UA" "$SELF" -t "$HOST_TARGET" -c > "$T/bs_B.tape"
     [ -s "$T/bs_B.tape" ] || { echo 'empty B tape'; return 1; }
     bound 45 python3 -m unisa compile "$T/bs_B.tape" --from-tape -o "$T/bs_B" \
         --target "$HOST_TARGET" --drive built
     [ -s "$T/bs_B" ] || { echo 'empty B image'; return 1; }
     sign_image "$T/bs_B"
-    bound 30 "$T/bs_B" "$SELF" -c > "$T/bs_C.tape"
+    bound 30 "$T/bs_B" "$SELF" -t "$HOST_TARGET" -c > "$T/bs_C.tape"
     [ -s "$T/bs_C.tape" ] || { echo 'empty C tape'; return 1; }
 }
 branch_u() {
@@ -46,7 +46,7 @@ branch_u() {
         --target "$HOST_TARGET" --drive built
     [ -s "$T/bs_U" ] || { echo 'empty U image'; return 1; }
     sign_image "$T/bs_U"
-    bound 30 "$T/bs_U" "$SELF" -c > "$T/bs_UT.tape"
+    bound 30 "$T/bs_U" "$SELF" -t "$HOST_TARGET" -c > "$T/bs_UT.tape"
     [ -s "$T/bs_UT.tape" ] || { echo 'empty U tape'; return 1; }
 }
 # A background shell retains errexit; waiting preserves both branch failures.
