@@ -4,7 +4,7 @@
 - **本拍切口：** **C. 真缺口钉**
 - **主张一句：** **#168 已把 TeX/`abstract.txt` 摘要补上 image field layout（对齐 CN「镜像字段布局」／EN）；在 tip `41c3cae2`（#168 follow-up tip-after 填注后）四 Paper A blob 上 Softguess 字面与「权重就是逻辑」口号族仍 NONE×4**；「不含/no softmax」义务句仍在 CN/EN/TeX（abstract 无 softmax 字面）；**NONE×4 是预期态，不是封口前理论债**；Softguess 字面粘贴仍属 **P0 命名卫生（UNAPPLIED）**。本拍**不**粘正文、**不**叠 Ο1/Ο2、**不**重溯 8509 Δ。
 - **仓库 tip-before（本拍开工）：** `41c3cae2c2a5ffbd86f2d36cad0b0b68d20be2e1`（= #168 follow-up：fill tip-after `ae7f7424…` in heartbeat 0115）
-- **tip-after：** _pending merge_（本 PR 合入后填）
+- **tip-after：** `c2d5a1f384f5ddd3d0722ca1856b9c21712702e9`（#169 squash merge）
 - **公开 Latest：** **v0.0.40**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）
 - **四 blob @ tip-before（gh content sha）：**
   - CN `research/unisacc-paper.md` → `5231dd3bf3e60804c678d48015f1e337edd9dc56`
@@ -111,7 +111,7 @@
 ## 证据
 
 - tip-before：`41c3cae2c2a5ffbd86f2d36cad0b0b68d20be2e1`
-- tip-after：_pending merge_
+- tip-after：`c2d5a1f384f5ddd3d0722ca1856b9c21712702e9`（#169）
 - Paper A blobs：相对 #168 **SAME**（sha 见上）；相对 2108 Softguess 钉 **CHANGED×4**
 - Softguess / 口号：**NONE×4**；softmax 义务句：CN/EN/TeX 各 1
 - 正交钉：Softguess seal-boundary 20261010-1230；weights≡logic scope 20261010-1154；2108 tip-refresh；#167 E；#168 A draft-increment

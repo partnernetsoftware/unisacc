@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `41c3cae2c2a5ffbd86f2d36cad0b0b68d20be2e1`（#168 follow-up tip-after 填注） |
-| tip after | _pending merge_ |
+| tip after | `c2d5a1f384f5ddd3d0722ca1856b9c21712702e9`（#169） |
 | Paper A 正文 | 相对 #168：CN/EN/TeX/abs **SAME**（零正文 diff）；相对 2108 Softguess 钉：四 blob **CHANGED** |
 | Softguess | **NONE×4**（含口号族）；softmax 义务 CN/EN/TeX 各 1、abs 0 |
 | 挡粘仍开 | §8.1#3、8509/8769、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不改键数） |
