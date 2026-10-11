@@ -2,7 +2,7 @@
 
 - **本拍切口：** E（衍生净化）
 - **主张一句：** 把 §7.4「代价表的裁判是测量」升成「须先完成代价格逐格测量战役才许投 A」不得搭乘 A；A 只保留方法纪律实证。
-- **tip：** `888b24e3` → `ccea5821`（Merge #181）（before SAME vs 上拍 C #179+#180）
+- **tip：** `888b24e3` → `ccea5821`（Merge #181；before SAME vs 上拍 C #179+#180）
 - **Paper A drift：** no（CN/EN/TeX/abs SAME vs #168）
 - **挡粘点：** 8509/8769 仍 seal-blocking；§8.1#3 仍开；Softguess NONE×4（不升闸）
 - **待批板：** 仍荐 Ο1（不叠新卡）
