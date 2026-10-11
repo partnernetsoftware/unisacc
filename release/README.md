@@ -8,7 +8,7 @@
 
 以下是 qualification 与 company 签名共用的输入契约（示例取自历史 0.0.9 回执，字段不变）；每个版本须用当时冻结的版本与源码重新生成，不能继承上一版回执。
 
-先完成本机本轮全部门禁、六平台运行与独立构建证据。不要为了测试 push。
+先完成候选字节与独立构建证据；**Draft/发布验收以 GitHub CI（含 macos runner / release-check）为准**，不以私有 Darwin 宿主上线为硬依赖。不要为了测试 push。
 源码和工作树必须干净；签名调度只能使用当前 `main`，调度 workflow 的
 `GITHUB_SHA`、checkout、远端 `main`、回执与 CI SHA 必须相同。
 
@@ -41,10 +41,10 @@
 }
 ```
 
-`local_gate_complete` 是主人的本地验收声明，必须对应保留的本机门禁证据；
+`local_gate_complete` 是主人的本地构建/门禁声明字段，必须对应保留的证据；
 工作流验证封存声明和字节一致性，不会重新执行本机门禁。`upstream` 必须是
 本仓库 `.github/workflows/ci.yml` 在 `main` 上已经成功的精确 attempt。
-CI 是源码的第二意见，不是这些本机构建字节的生产者，也不替代本地证据。
+**正式 Draft/发布验收以该 CI 成功 attempt 为准**（含 macos runner）；CI 不是发行二进制的生产者，但**替代**「须等私有 Darwin 宿主上线才开 Draft」的旧口径。
 `product_version` 必须精确等于源码 `src/version.h` 中唯一的 `UNISACC_VERSION`；
 未知版本或仅形状合法但不匹配的版本拒绝。ZIP原始名称必须没有NUL截断，成员只接受
 普通文件和 STORED/DEFLATED 压缩；上游API响应的 run id/attempt、下载前后资产 id、

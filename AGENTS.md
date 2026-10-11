@@ -31,9 +31,9 @@
 - 提交一律带路径：`git commit -m … -- 路径`。别人已暂存的文件不能被顺带提交。
 - 改代码用精确匹配加断言的 Python 替换，不用 `sed`；`os.path.exists` 会把 ENOTDIR/EACCES 当成“不存在”，要用 `stat` 并只捕获 `FileNotFoundError`。
 
-## 测试：本机，不用 GitHub Actions
+## 测试：开发循环本机；Draft/发布验收一律 GitHub CI
 
-**不要为了测试而 push。** 仓库已公开，托管的 runner 免费，`.github/workflows/ci.yml` 会在 push 时触发，但 CI 只是**安全网**，不是测试循环：先把本机测试跑绿，再让 CI 在一台没人动过的机器上当第二意见。
+**不要为了测试而 push。** 仓库已公开，托管的 runner 免费，`.github/workflows/ci.yml` 会在 push 时触发。开发循环可先本机跑绿；**0.0.40 起 Draft/发布验收一律以 GitHub CI 为准**（含 macos runner、release-check 六格等现行闸），不以私有 Darwin 宿主上线为硬依赖。CI 对开发循环仍是干净机器上的第二意见，但**不是**可被本机私有门禁替代的发布证据。
 
 规则的来由：仓库还是私有时，push 触发的一个 Linux 加两个 macOS 任务的矩阵（macOS 计费是 Linux 的 10 倍）在一次“每个增量都 push”的会话里耗光了组织的 Actions 预算。所以攒着做，一次 push。
 
@@ -74,7 +74,7 @@
 
 ## 构建与发布
 
-**CI 只测试，不构建。** 每个出货产物都在本机**同一个环境**里交叉编译（一个能自己写出六个目标的编译器，意义就在这里），再经 GitHub release（进行中是草稿）中转。GitHub Actions 只是干净机器上的第二意见，绝不是产出二进制的地方。本机跨机器测试走 UTM 虚拟机（`tests/crossnative.sh`，以及仓库之外的 `utm-court` 辅助脚本）和 Lima Linux 虚拟机。
+**CI 只测试，不构建发行二进制。** 每个出货产物都在本机**同一个环境**里交叉编译（一个能自己写出六个目标的编译器，意义就在这里），再经 GitHub release（进行中是草稿）中转。GitHub Actions **不**产出发行二进制，但 **Draft/发布验收证据以 CI（含 macos runner / release-check）为准**；私有 Darwin 宿主上线非硬依赖。本机跨机器排查走 UTM 虚拟机（`tests/crossnative.sh`，以及仓库之外的 `utm-court` 辅助脚本）和 Lima Linux 虚拟机。
 
 ## 生成物：kernel/
 

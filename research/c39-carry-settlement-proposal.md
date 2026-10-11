@@ -7,7 +7,7 @@
 | COV1 | 8a433c5d 已落，fb12-31 三档覆盖，refuse/knownfail 行已撤（research/c39-cov1-coverage.md） | 已完成 |
 | K2a K2b K2c K1 | 未启动实现 | 顺延 0.0.40，原验收不变 |
 | H37 | 提案未批，仍用具名 host launcher | 顺延 0.0.40 |
-| F4″ | 无 m4pro 同机冷编三次中位 | 顺延 0.0.40；记缺口（需 m4pro），不以 scratch 认定通过 |
+| F4″ | 无同口径冷编三次中位≤5s 证据 | 顺延 0.0.40；计时宿主改钉 GitHub CI / macos runner（曾需私有 Darwin，现非依赖）；不以 scratch 认定通过 |
 | X3 L2 L1′ L1b′ A1 N1 | 仅部分证据，无整项冻结证据 | 顺延 0.0.40，原验收不变 |
 
 WF1–WF5：首刀均落地并经复核闭合（c99precheck、attemptchain、rulingwait、checkrun/commitgate、whyrerun）。

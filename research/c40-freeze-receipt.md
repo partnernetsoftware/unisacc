@@ -18,4 +18,4 @@
 
 - 本回执只记 1124 冻链事实；不替代 0.0.39 方案1 回执（`research/c39-freeze-receipt.md`）。
 - gate 为 `exec-unitparse` 单套件（commitgate 要求的产品覆盖套件），不是全量门。
-- 冻后 `.cx` 修复的验收（m4pro 私有 run/-o/argv 三绿）未完成，见交接页。
+- 冻后 `.cx` 修复：私有 Darwin 宿主 run/-o/argv 三绿已于后续刀完成并入仓（`10c2e9b7`）；该私有验收**非** Draft/发布硬依赖。此后 Draft/发布验收一律 GitHub CI（含 macos runner）。

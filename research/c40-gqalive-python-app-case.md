@@ -1,6 +1,6 @@
 # 0.0.40 gqalive macOS Python.app argv0 大小写（机房主任 21:36 阻塞优先）
 
-**状态（2026-10-10）**：修复入仓；Linux 与 m4pro 夹具绿；不改产品验收、不删 gqalive 的 exit 2、不用 `GQALIVE_TABLE=ps` 绕过。
+**状态（2026-10-10）**：修复入仓；Linux 与私有 Darwin 夹具绿；不改产品验收、不删 gqalive 的 exit 2、不用 `GQALIVE_TABLE=ps` 绕过。脚注（2026-10-11）：下表私有 Darwin 读数为历史旁注，**非** Draft/发布硬依赖；验收一律 GitHub CI。
 
 ## 根因
 
@@ -22,9 +22,9 @@ basename = `Python`，不匹配 → 活着的 `python3 … gatequeue.py` 被判�
 |---|---|---|
 | box (Linux) | `./tests/gqalivecheck.sh` | rc 0 |
 | box (Linux) | `./tests/queuetimeoutcheck.sh` | rc 0 |
-| m4pro tip（修前） | `./tests/gqalivecheck.sh` | **rc 1**：`proc: running gatequeue.py not found (rc 1)` |
-| m4pro（修后） | `./tests/gqalivecheck.sh` | **rc 0** |
-| m4pro（修后） | 实起 `python3 -u …/gatequeue.py`，`ps` argv0 为 `…/Python.app/…/Python`，`gqalive.py` | rc 0，HIT 该 PID |
-| m4pro（修后） | `./tests/queuetimeoutcheck.sh` | rc 0 |
+| 私有 Darwin tip（修前；历史） | `./tests/gqalivecheck.sh` | **rc 1**：`proc: running gatequeue.py not found (rc 1)` |
+| 私有 Darwin（修后；历史） | `./tests/gqalivecheck.sh` | **rc 0** |
+| 私有 Darwin（修后；历史） | 实起 `python3 -u …/gatequeue.py`，`ps` argv0 为 `…/Python.app/…/Python`，`gqalive.py` | rc 0，HIT 该 PID |
+| 私有 Darwin（修后；历史） | `./tests/queuetimeoutcheck.sh` | rc 0 |
 
 未做：真实 release queue 首窗观察；BSD `ps` 空白切分 argv 非无损（既有边界）。
