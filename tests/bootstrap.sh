@@ -6,6 +6,20 @@ set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
+# 1417/1413 diagnostic copy, env-gated: unset = no change.  CI macOS suites sets
+# UNISACC_DIAG_OUT so branch files are copied before lib.sh's EXIT trap removes the
+# scratch; upload-artifact runs only on failure.  Never changes the verdict; copy
+# failures are ignored.
+diag_copy() {
+    [ -n "${UNISACC_DIAG_OUT:-}" ] || return 0
+    mkdir -p "$UNISACC_DIAG_OUT/bootstrap" 2>/dev/null || return 0
+    for f in B.log U.log bs_B.tape bs_C.tape bs_UT.tape bs_B bs_U unisacc.flat.c; do
+        [ -e "$T/$f" ] && cp -p "$T/$f" "$UNISACC_DIAG_OUT/bootstrap/$f" 2>/dev/null || :
+    done
+    { echo "host=$(uname -a)"; echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "brc=${brc:-na} urc=${urc:-na}"; } \
+        >"$UNISACC_DIAG_OUT/bootstrap/meta.txt" 2>/dev/null || :
+    return 0
+}
 SELF="$T/unisacc.flat.c"
 bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 HOST_TARGET=${HOST_TARGET:-$(host_target)}
@@ -40,6 +54,7 @@ branch_b >"$T/B.log" 2>&1 & bp=$!
 branch_u >"$T/U.log" 2>&1 & up=$!
 brc=0; wait "$bp" || brc=$?
 urc=0; wait "$up" || urc=$?
+diag_copy
 if [ "$brc" -ne 0 ] || [ "$urc" -ne 0 ]; then
     echo "  FAIL bootstrap branches B=$brc U=$urc"
     cat "$T/B.log" "$T/U.log"; exit 1
