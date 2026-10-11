@@ -72,7 +72,7 @@ T2a assumes identical initialisation, observations, action catalogues and primit
 
 | Level | Content | Status |
 |---|---|---|
-| **T1** | Every released network equals its table on its whole domain (or declared observation domain) | Proved: constructive existence + full-domain enumeration |
+| **T1** | Every released network equals its table on its declared domain (Definition 2's $K_s$; the pipeline DSL's "declared observation domain" names that same finite key domain) | Proved: constructive existence + full-domain enumeration |
 | **E** | Byte-level comparison with the classic reference on measured inputs; two named differences remain in v0.0.14 | Empirical evidence, scoped in §5.5 |
 | **T2a** | Pointwise-equal controller substitution in the same executor | Conditional stepwise induction; implementation assumptions not mechanised |
 | **T2b** | The network compiler simulates an independent reference compiler over whole runs | Open: needs initial-state relation, state invariants, final-state match and divergence sensitivity |
