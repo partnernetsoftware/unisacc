@@ -51,3 +51,13 @@
 - 命令：`./tests/gate.sh --suite unisa-bits`（60 s 有界）。
 - 结果：`unisa-bits rc=0 0s :: unisabits same 7 diff 0`；`gate suites 1 failed 0 unverified 0`。
 - 未改：`seed/unisa_bits.c` 行为、`unisa/bits.py`（未删）、version.h、release/、gold/construct/emit-kernel。
+
+## 原证（1841 补证；首红停窄修后）
+- **gate 命令行**：`./tests/gate.sh --suite unisa-bits`（有界 58 s）。UTC：`2026-10-11T10:41:48Z`–`10:41:49Z`；**rc=0**；`unisa-bits rc=0 1s :: unisabits same 7 diff 0`；`gate suites 1 failed 0 unverified 0`。
+- **直跑原日志**：`research/c41-k6-1-bits-run-1841.log`（`sh tests/unisabitscheck.sh`；UTC `10:41:55Z`–`10:41:56Z`；rc=0；`unisabits same 7 diff 0`）。
+  - 逐项：mask64 SAME；round_up-batch（20 cases）SAME；round-up-singles（20）SAME；round_up-det SAME；mask64-det SAME；NEG-a0 两侧拒绝（py_rc=1 c_rc=1）SAME；NEG-badint 两侧拒绝（py_rc=1 c_rc=1）SAME。
+  - identity：tree `16f6e0ee…`；cases sha256 `fa583573…`；bits.bin sha256 `f093ff59…`（本次构建产物）；host-cc `cc (Debian 14.2.0-19) 14.2.0`。
+- **源三件 sha256**：`unisa/bits.py` `5a2cad1e71d96b776917fe476cc0b89c7d04768badc40612d11686e9f74b0671`；`seed/unisa_bits.c` `e05a6b470d4295baace5c68f8d7f7a94c7eacea9bd9b04fca295005c99c782f7`；`tests/unisabitscheck.sh`（窄修后）`3b094a75211c5f931d2973283cfab1796da43b29bf45c402cf341005caab7fe9`（窄修前为 `df0fee35…`，见 cdx 1838 审）。
+- **首红停窄修**：`no()` 改为立即 `fail "first red: <name>"`（exit 1）；单例 C/Python 与两条 NEG 的 C/Python 运行加 `tests/bound 10` 看门狗。
+  - 探针：scratch 中强制 mask64 DIFF，输出 `DIFF mask64` / `unisabits: first red: mask64`，**后续用例未执行**，probe rc=1。
+- 限定：本记录只证 unisa-bits 当前范围（identity 与 same 7 / diff 0）；不证 Python bigint 全域等价，不证产品。

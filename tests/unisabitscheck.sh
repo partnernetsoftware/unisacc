@@ -40,7 +40,7 @@ CASES
 
 same=0; bad=0
 ok() { echo "SAME $1"; same=$((same + 1)); }
-no() { echo "DIFF $1"; bad=$((bad + 1)); }
+no() { echo "DIFF $1"; bad=$((bad + 1)); fail "first red: $1"; }   # 1841: first DIFF/NEG failure stops here
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 
 # MASK64
@@ -72,8 +72,8 @@ i=0
 while read -r v a; do
     [ -n "$v" ] || continue
     i=$((i + 1))
-    "$T/bits" round-up "$v" "$a" >"$T/one-c.txt" 2>"$T/one-c.err"; c=$?
-    python3 -c 'from unisa.bits import round_up; import sys; print(round_up(int(sys.argv[1]), int(sys.argv[2])))' "$v" "$a" >"$T/one-py.txt" 2>"$T/one-py.err"; p=$?
+    "$B" 10 "$T/bits" round-up "$v" "$a" >"$T/one-c.txt" 2>"$T/one-c.err"; c=$?
+    "$B" 10 python3 -c 'from unisa.bits import round_up; import sys; print(round_up(int(sys.argv[1]), int(sys.argv[2])))' "$v" "$a" >"$T/one-py.txt" 2>"$T/one-py.err"; p=$?
     if [ "$c" -eq 0 ] && [ "$p" -eq 0 ] && cmp -s "$T/one-c.txt" "$T/one-py.txt"; then
         :
     else
@@ -89,8 +89,8 @@ if [ "$c" -eq 0 ] && cmp -s "$T/c-ru.txt" "$T/c-ru2.txt"; then ok "round_up-det"
 if cmp -s "$T/c-mask.txt" "$T/c-mask2.txt"; then ok "mask64-det"; else no "mask64 nondeterministic"; fi
 
 # negatives: bad width (a=0) — both refuse; C by name "alignment zero"; Python ZeroDivisionError
-"$T/bits" round-up 8 0 >"$T/neg-c.out" 2>"$T/neg-c.err"; c_rc=$?
-python3 -c 'from unisa.bits import round_up; round_up(8, 0)' >"$T/neg-py.out" 2>"$T/neg-py.err"; py_rc=$?
+"$B" 10 "$T/bits" round-up 8 0 >"$T/neg-c.out" 2>"$T/neg-c.err"; c_rc=$?
+"$B" 10 python3 -c 'from unisa.bits import round_up; round_up(8, 0)' >"$T/neg-py.out" 2>"$T/neg-py.err"; py_rc=$?
 neg0=$bad
 refused "$c_rc" || no "NEG-a0 C did not refuse (rc=$c_rc)"
 refused "$py_rc" || no "NEG-a0 Python did not refuse (rc=$py_rc)"
@@ -100,8 +100,8 @@ grep -qi 'ZeroDivision\|division by zero' "$T/neg-py.err" || no "NEG-a0 Python r
 [ "$bad" -eq "$neg0" ] && ok "NEG-a0 both refuse by name (py_rc=$py_rc c_rc=$c_rc)"
 
 # negatives: bad integer token
-"$T/bits" round-up 8 x >"$T/neg2-c.out" 2>"$T/neg2-c.err"; c_rc=$?
-python3 -c 'from unisa.bits import round_up; round_up(8, int("x"))' >"$T/neg2-py.out" 2>"$T/neg2-py.err"; py_rc=$?
+"$B" 10 "$T/bits" round-up 8 x >"$T/neg2-c.out" 2>"$T/neg2-c.err"; c_rc=$?
+"$B" 10 python3 -c 'from unisa.bits import round_up; round_up(8, int("x"))' >"$T/neg2-py.out" 2>"$T/neg2-py.err"; py_rc=$?
 neg0=$bad
 refused "$c_rc" || no "NEG-badint C did not refuse (rc=$c_rc)"
 refused "$py_rc" || no "NEG-badint Python did not refuse (rc=$py_rc)"
