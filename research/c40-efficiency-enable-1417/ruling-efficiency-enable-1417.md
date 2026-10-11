@@ -32,7 +32,7 @@
 ## 身份（采样）
 - 仓：`~/repos/unisacc-cc`
 - CI 钉源码 SHA（attempt2）：`82e1a9f06e9e39f805e25f0ad285b7306acb9937`
-- tip（本裁定落地后以 `git rev-parse HEAD` 为准）
+- tip（已进 origin/main）：`1cb3fad0bba62a9e9343e4782626978e5a52aabb`（短 `1cb3fad0`）
 
 ## 已落路径
 - 本页；L2/L3 模板状态更新；两份启用回执；cdx 真审；paste×3
