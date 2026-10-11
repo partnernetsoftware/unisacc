@@ -159,11 +159,16 @@ ACCEPT_REF=${UA:-/tmp/ua_ref}
 [ -x "$ACCEPT_REF" ] || { echo 'bootstrap reference missing' >&2; exit 1; }
 identity=$(cat unisacc.c "$SELF" "$SELF.source.json" tests/export_ref.sh src/*.c src/*.h kernel/*.c kernel/*.inc weights/built.json "$ACCEPT_REF" tests/acceptance.sh \
     unisa/*.py unisa/front/*.py unisa/image/*.py | cksum)
+# Same-shape as bootstrap.sh (ed50f00c): bare -c defaults t=lnx/x86_64 and
+# bakes Linux MAP_ANON into Darwin tapes (B139). Pieces already require Darwin/arm64.
+. "$R/tests/lib.sh"
+HOST_TARGET=${HOST_TARGET:-$(host_target)}
+[ "$HOST_TARGET" = osx/arm64 ] || { echo "acceptance 10-*: need osx/arm64 host, got [$HOST_TARGET]" >&2; exit 2; }
 if [ "$ACCEPT_CASE" = 10-Btape ]; then
-    . "$R/tests/lib.sh"; ua_ready
+    ua_ready
     rm -f "$S/B" "$S/C.tape" "$S/U" "$S/U.tape"
     printf '%s\n' "$identity" >"$S/source.stamp"
-    "$_BOUND" 30 "$UA" "$SELF" -c >"$S/B.tape" || { fail=$((fail+1)); return; }
+    "$_BOUND" 30 "$UA" "$SELF" -t "$HOST_TARGET" -c >"$S/B.tape" || { fail=$((fail+1)); return; }
     [ -s "$S/B.tape" ] || { fail=$((fail+1)); return; }
 else
     [ "$(cat "$S/source.stamp" 2>/dev/null)" = "$identity" ] || { echo 'bootstrap state missing/stale' >&2; exit 1; }
@@ -172,21 +177,21 @@ case "$ACCEPT_CASE" in
     10-Bimage)
         [ -s "$S/B.tape" ] || exit 1
         rm -f "$S/B"
-        "$_BOUND" 45 python3 -m unisa compile "$S/B.tape" --from-tape -o "$S/B" --target osx/arm64 --drive built || { fail=$((fail+1)); return; }
+        "$_BOUND" 45 python3 -m unisa compile "$S/B.tape" --from-tape -o "$S/B" --target "$HOST_TARGET" --drive built || { fail=$((fail+1)); return; }
         [ -s "$S/B" ] || exit 1
         chmod +x "$S/B"; "$_BOUND" 8 codesign -f -s - "$S/B" || exit 1;;
     10-Ctape)
         [ -x "$S/B" ] || exit 1
-        "$_BOUND" 30 "$S/B" "$SELF" -c >"$S/C.tape" || { fail=$((fail+1)); return; }
+        "$_BOUND" 30 "$S/B" "$SELF" -t "$HOST_TARGET" -c >"$S/C.tape" || { fail=$((fail+1)); return; }
         [ -s "$S/C.tape" ] || exit 1;;
     10-Uimage)
         rm -f "$S/U"
-        "$_BOUND" 45 python3 -m unisa compile "$SELF" -o "$S/U" --target osx/arm64 --drive built || { fail=$((fail+1)); return; }
+        "$_BOUND" 45 python3 -m unisa compile "$SELF" -o "$S/U" --target "$HOST_TARGET" --drive built || { fail=$((fail+1)); return; }
         [ -s "$S/U" ] || exit 1
         chmod +x "$S/U"; "$_BOUND" 8 codesign -f -s - "$S/U" || exit 1;;
     10-compare)
         [ -x "$S/U" ] && [ -s "$S/B.tape" ] && [ -s "$S/C.tape" ] || exit 1
-        "$_BOUND" 30 "$S/U" "$SELF" -c >"$S/U.tape" || { fail=$((fail+1)); return; }
+        "$_BOUND" 30 "$S/U" "$SELF" -t "$HOST_TARGET" -c >"$S/U.tape" || { fail=$((fail+1)); return; }
         [ -s "$S/U.tape" ] || exit 1
         if cmp -s "$S/B.tape" "$S/C.tape" && cmp -s "$S/B.tape" "$S/U.tape"; then r=same; else r=DIFFER; fi
         chk "B = C = U" same "$r"; return;;
