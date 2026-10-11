@@ -42,7 +42,11 @@ int fe_units_fwd(char **inputs, int *ninput, char *t, int fwd) {
         fd2 = wopen(fwdpath); if (fd2 < 0) return 1;
         __write(fd2, fwdsrc, nfwdsrc); __close(fd2);
         inputs[*ninput] = fwdpath; *ninput = *ninput + 1; fwdrun = 0;
+        /* Scheme A: synthetic forward stubs do not need the caller's -include;
+           injecting it makes quoted relative paths resolve under /tmp. */
+        opti_skip_path = fwdpath;
         r1 = fe_units(inputs, *ninput, t);
+        opti_skip_path = 0;
         *ninput = *ninput - 1;
         if (r1) return 1;
     }
