@@ -133,7 +133,7 @@ int main(void) {
         fclose(f);
     }
     {
-        char *a[] = {"gate.c","json.c","session.c","loop.c","run", path};
+        char *a[] = {"gate.c","json.cx","session.c","loop.c","run", path};
         char line[160];
         run_args(a, 6, out, (int)sizeof out, &rc);
         first_line(out, line, (int)sizeof line);

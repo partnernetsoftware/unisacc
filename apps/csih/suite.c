@@ -13,6 +13,7 @@
  */
 /* No #include. Same ceiling as above if this file is ever linked into the TUI. */
 int snprintf(char *s, unsigned long n, const char *fmt, ...);
+char *realpath(const char *path, char *resolved);
 int printf(const char *fmt, ...);
 char *getenv(const char *name);
 unsigned long strlen(const char *s);
@@ -35,7 +36,7 @@ static const char *slice_src[SUITE_N][SUITE_MAX_SRC] = {
     { "gate.c", "gate_cli.c" },
     { "json.cx", "json_cli.c" },
     { "json.cx", "session.c", "session_cli.c" },
-    { "render.c", "render_cli.c" },
+    { "render.c", "cols.cx", "render_cli.c" },
     { "term.c", "term_cli.c" },
     { "tui.c", "render.c", "term.c", "chat.c", "clock.c", "tools.c",
       "cols.cx", "home.cx", "file.c", "shell.c", "edit.c", "gate.c",
@@ -68,12 +69,38 @@ void suite_mark(int red, const char *why) {
 
 int suite_slice_count(void) { return SUITE_N; }
 
+/* Run mode (no -o) takes the public headers only through -include, so every row
+ * carries the same three globals as csih.sh. The forward file cannot resolve a
+ * relative -include, so the paths are absolute: the app dir from getcwd(). */
+#define SUITE_GLOBALS_N 6
+static char suite_glob_buf[3][600];
+static const char *suite_globals[SUITE_GLOBALS_N];
+static int suite_globals_ready;
+
+static void suite_globals_init(void) {
+    static const char *hdr[3] = {"csih_cols.h", "csih_home.h", "json.h"};
+    char dir[512];
+    int h;
+    if (suite_globals_ready) return;
+    if (!realpath(".", dir)) dir[0] = 0;
+    for (h = 0; h < 3; h++) {
+        snprintf(suite_glob_buf[h], sizeof suite_glob_buf[h], "%s/%s", dir, hdr[h]);
+        suite_globals[2 * h] = "-include";
+        suite_globals[2 * h + 1] = suite_glob_buf[h];
+    }
+    suite_globals_ready = 1;
+}
+
 int suite_slice_fill(int i, const char **argv, int cap, const char **name) {
-    int k;
+    int k, g;
     if (name) *name = NULL;
     if (i < 0 || i >= SUITE_N || cap < 2) return 0;
     if (name) *name = slice_name[i];
-    for (k = 0; k < slice_n[i] && k < cap - 1; k++) argv[k] = slice_src[i][k];
+    if (cap < SUITE_GLOBALS_N + 2) return 0;
+    suite_globals_init();
+    for (g = 0; g < SUITE_GLOBALS_N; g++) argv[g] = suite_globals[g];
+    for (k = 0; k < slice_n[i] && k + SUITE_GLOBALS_N < cap - 1; k++) argv[SUITE_GLOBALS_N + k] = slice_src[i][k];
+    k += SUITE_GLOBALS_N;
     argv[k++] = "selftest";
     return k;
 }
@@ -126,15 +153,15 @@ int suite_run_selftest(void) {
             int n = suite_slice_fill(i, av, 48, &nm);
             if (nm && !strcmp(nm, "tui")) {
                 tui_n = n;
-                if (!av[0] || strcmp(av[0], "tui.c")) fail++;
+                if (!av[SUITE_GLOBALS_N] || strcmp(av[SUITE_GLOBALS_N], "tui.c")) fail++;
                 for (k = 0; k < n; k++) {
                     if (!av[k]) continue;
                     if (!strcmp(av[k], "suite.c")) fail++;
                 }
             }
         }
-        /* 28 sources plus the selftest word (suite_slice_fill appends it): the flat table of csih.sh. */
-        if (tui_n != 29) fail++;
+        /* 6 global -include words, 28 sources, and the selftest word: the flat table of csih.sh. */
+        if (tui_n != SUITE_GLOBALS_N + 28 + 1) fail++;
     }
     if (fail) printf("FAIL suite match %d\n", fail);
     return fail ? 1 : 0;
