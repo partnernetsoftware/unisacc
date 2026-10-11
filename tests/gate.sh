@@ -120,6 +120,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-gold-opinfo-label) req='native-posix|host|cc,python3|cdx|unisa-gold-opinfo-label-point-sample';;
           unisa-gold-peep-label) req='native-posix|host|cc,python3|cdx|unisa-gold-peep-label-point-sample';;
           unisa-gold-scope-label) req='native-posix|host|cc,python3|cdx|unisa-gold-scope-label-point-sample';;
+          unisa-gold-pp-label) req='native-posix|host|cc,python3|cdx|unisa-gold-pp-label-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -626,6 +627,7 @@ job unisa-gold-binsel-label sh ./tests/unisagoldbinsellabelcheck.sh   # 0.0.41 K
 job unisa-gold-opinfo-label sh ./tests/unisagoldopinfolabelcheck.sh   # 0.0.41 K6-23: unisa.gold opinfo_label finite op domain OPINFO_OPS (tape.SHAPE 71 ops + other = 72 rows) + named points, C ref vs gold.py source (ast extraction; no build(); no regen; not peep/irsel/parse closure); keep Python
 job unisa-gold-peep-label sh ./tests/unisagoldpeeplabelcheck.sh   # 0.0.41 K6-24: unisa.gold peep_label finite domain PEEP_A x PEEP_B x PEEP_REL (1632 rows) + named points incl. store64 fall-through, C ref vs gold.py source (ast extraction; no build(); no regen; not gold closure); keep Python
 job unisa-gold-scope-label sh ./tests/unisagoldscopelabelcheck.sh   # 0.0.41 K6-25: unisa.gold scope_label finite domain CTX x KIND (30 rows) + named points, C ref vs gold.py source (ast extraction; no build(); no regen; not gold closure); keep Python
+job unisa-gold-pp-label sh ./tests/unisagoldpplabelcheck.sh   # 0.0.41 K6-26: unisa.gold pp_label finite domain DIRS x DEFINED (18 rows) + named points, C ref vs gold.py source (ast extraction; no build(); no regen; not gold closure); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
