@@ -1,5 +1,5 @@
 # Darwin B139（CI bootstrap B=139）材料索引
-- **1532 flex**：政委同意日常 Darwin 以 m4pro 本机绿推进 Draft；GitHub mac CI 留大版本校验；主 CI `38119555397` 旁观。裁定 `ruling-darwin-host-m4pro-flex-1532.md`；本机绿证 `m4pro-bootstrap-flex-1532.md`（tip `7acb254a` ok B=C=U）；paste `paste-*-1532.txt`。开 Draft 前再确认公开边界；禁擅自 Latest/公开。
+- **1532 flex**：政委同意日常 Darwin 以 m4pro 本机绿推进 Draft；GitHub mac CI 留大版本校验；主 CI `38119555397` 旁观。裁定 `ruling-darwin-host-m4pro-flex-1532.md`；本机绿证 `m4pro-bootstrap-flex-1532.md`（tip `7acb254a` ok B=C=U）；paste `paste-*-1532.txt`。1626 已按机房主任代裁开 Draft v0.0.40（--draft；Latest 仍 v0.0.39）；见 `research/c40-draft-open-1626/`。禁擅自 Latest/公开。
 
 - 1453：CI dispatch `38119555397` @ ed50f00c + acceptance 10-* 同形钉；裁定 `ruling-b139-ci-dispatch-1453.md`；材料 `cc-acceptance-10-bare-c-1453.md`。
 
