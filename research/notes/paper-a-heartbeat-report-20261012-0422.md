@@ -7,7 +7,7 @@
 | --- | --- |
 | tip before（任务书） | `f12f57a4`（#192 tip-after K6-21 E #191；**无漂**） |
 | tip 开工核对 | `f12f57a4` |
-| tip after | （本钉 squash merge 后填） |
+| tip after（#193） | `095dcec2`（本钉 squash merge） |
 | Paper A 正文 | 四 blob **SAME** vs #168／vs #187；**零**键数 diff |
 | Softguess | **NONE×4** |
 | 重测 | 8769／569／pin `b8244bd8…`／built `5e45bf5e…` **全部 MATCH** |
