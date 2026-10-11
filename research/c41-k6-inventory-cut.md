@@ -137,9 +137,9 @@
 
 ---
 
-## 一条可批切口草案（K6-1；**未批实现**）
+## 一条已批切口（K6-1：YES，政委 2026-10-11 ≈18:36）
 
-### 名称（候选）：K6-1 `unisa.bits` → C 参考对拍（保留 Python）
+### 名称：K6-1 `unisa.bits` → C 参考对拍（保留 Python）
 
 | 项 | 内容 |
 |---|---|
@@ -151,18 +151,29 @@
 | 备选（不本刀） | `hostabi`（15 行叶子，字符串表）；`padded`（有 `layout_check`/`ape_stage` 钩，稍重）；`peversion`（已有 `apeversioncheck`）；`control.rng`（训练对照，非出货主路径） |
 | 归属建议 | cdx 实现 C 参考与对拍；cc 核既有钩仍绿且不扩验收 |
 
-**不预填 PASS。实现须政委/机房主任批 K6-1 后才动。**
+**已批实现。** 落地回执：`research/c41-k6-1-bits.md`（gate `unisa-bits` same 7 / diff 0；不删 py；不 bump）。
+
+### K6-1 进度（追加）
+
+| 项 | 状态 |
+|---|---|
+| C 参考 | `seed/unisa_bits.c` |
+| 夹具 | `tests/unisabitscheck.sh`；gate job `unisa-bits` |
+| 读数 | rc0；SAME×7 / DIFF×0（MASK64、round_up×20、det×2、NEG-a0、NEG-badint） |
+| 明确未做 | 不删 bits.py；不切下一叶子；不 bump；不 Draft/Latest/签 |
 
 ---
 
 ## 禁
 
-未批就写 C / 删 py；整目录迁；旧全量空转；空等不交盘点；二次 publish / 扩签 / 动 Latest。
+未批就整目录迁 / 删 py；旧全量空转；二次 publish / 扩签 / 动 Latest / 签 / bump。
 
 ## 首红记录
 
-本窗盘点：ast 解析 48/48 成功；`.py` 计数=48；未越文件域。**无首红。**
+K6-0 盘点：ast 解析 48/48 成功；`.py` 计数=48；未越文件域。**无首红。**
+
+K6-1 实现：编译绿；对拍 7/0；负例两侧同拒；未越 K6-1 文件域。**无首红。**
 
 ---
 
-*K6-0 材料 2026-10-11 ≈18:35 SGT / 政委并授*
+*K6-0 材料 2026-10-11 ≈18:35 SGT / 政委并授；K6-1 代裁授 ≈18:36 SGT*
