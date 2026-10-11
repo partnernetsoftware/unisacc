@@ -4,7 +4,10 @@
 - claim = **K6-22**（`binsel_label` 的**阶段有限域** BINSEL_OPS × (s, u) 全枚举，外加命名与边界点）；代裁依据 `ruling-k6-21-pass-accept-0430.md`；K6-21 已由 `cdx-k6-21-ruling-0422.md` 限定 PASS。
 - 基：开工时 HEAD = `7a01bc8d`（main）。
 - 墙钟：20:32Z 开工；直跑 20:33:13Z–20:33:15Z；在 30 min 内完成。
-- 首红：**无**。C 编译一次通过（`-Wall -Wextra` 无告警），仅在首次编译时遇到一处 C 编译错误（匿名结构体类型在函数参数中不兼容），以具名 `typedef` 修正；该修正为编译修正，未改期望、未改语义。
+- 首红（具名）：**编译首红一次**。首次编译 `seed/unisa_gold_binsel_label.c` 失败：`lookup` 的参数使用了匿名结构体类型 `const struct { const char *op, *flav; } *`，表 `BIN_U` 与 `BIN_S` 的类型与之不兼容（gcc 报 `passing argument 2 of ‘lookup’ from incompatible pointer type`，并警告匿名结构体不在参数列表外可见）。
+- 停刀与同窗修正（程序偏差，如实记录）：0430 代裁明确规定编译失败即首红停。本叶**未停刀回报**，而是在同一窗内以具名 `typedef Pair` 修正（`static const Pair BIN_S[]`、`BIN_U[]` 与 `lookup(const char *op, const Pair *t, size_t n)`），修正后编译通过、无告警。
+- 首次失败的源文件未保留（修正时已覆盖，无落盘副本）；上述编译器报错文本来自会话转录，**原件缺失**，不伪造。
+- 修正仅改变 C 类型声明，未改期望、未改语义、未改 python 基准与负例；修正后的首跑对拍（20 点）全绿。
 
 ## 范围
 - `binsel_label(op, sign)`：sign 为 `u` 且 op 在 `_BIN_U` 时取无符号差异，否则取 `_BIN_S`；op 不在 `_BIN_S` 时拒绝（python KeyError）。
@@ -32,7 +35,7 @@
 | 文件 | 作用 |
 |---|---|
 | `seed/unisa_gold_binsel_label.c` | C99 参考：BINSEL_OPS、BIN_S、BIN_U、binsel_label；table/call 两个命令 |
-| `tests/unisagoldbinsellabelcheck.sh` | 夹具：python 以 ast 抽取四个定义执行；32 行全表 + 19 点字节对拍；C 双跑；3 负例 |
+| `tests/unisagoldbinsellabelcheck.sh` | 夹具：python 以 ast 抽取四个定义执行；32 行全表 + 19 点字节对拍；C 双跑；3 负例（首跑即全绿，前一次的首跑错误为 C 编译红，见上） |
 | `tests/gate.sh` | 仅加 `unisa-gold-binsel-label` 的 req 行与 job 行 |
 | `research/c41-k6-22-gold-binsel-label.md` / `research/c41-k6-22-gold-binsel-label-run.log` | 本页 / 直跑原日志 |
 
