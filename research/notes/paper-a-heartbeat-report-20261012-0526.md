@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `87734673`（K6-24 peep_label 产品叶；父 `16ba652a` = #200；**无漂**） |
-| tip after（本 E squash；合入后填） | TBD |
+| tip after（#201） | `0752e871`（本 E squash merge） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文 diff |
 | 挡粘仍开 | §8.1#3、8509/8769、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不重钉 C） |
