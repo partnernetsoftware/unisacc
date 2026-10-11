@@ -99,6 +99,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-padded) req='native-posix|host|cc,python3|cdx|unisa-padded-point-sample';;
           unisa-zdata) req='native-posix|host|cc,python3|cdx|unisa-zdata-script-sample';;
           unisa-linalg) req='native-posix|host|cc,python3|cdx|unisa-linalg-point-sample';;
+          unisa-libneed) req='native-posix|host|cc,python3|cdx|unisa-libneed-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -584,6 +585,7 @@ job unisa-peversion sh ./tests/unisapeversioncheck.sh   # 0.0.41 K6-3: unisa.pev
 job unisa-padded sh ./tests/unisapaddedcheck.sh   # 0.0.41 K6-4: unisa.padded.Padded C ref vs padded.py observable values (point sample; ZData is K6-4b); keep Python
 job unisa-zdata sh ./tests/unisazdatacheck.sh   # 0.0.41 K6-4b: unisa.padded.ZData C ref vs padded.py on scripted op sequences (point sample); keep Python
 job unisa-linalg sh ./tests/unisalinalgcheck.sh   # 0.0.41 K6-5: unisa.linalg gemv/relu/argmax/margin C ref vs linalg.py (point sample); keep Python
+job unisa-libneed sh ./tests/unisalibneedcheck.sh   # 0.0.41 K6-6: unisa.libneed consts/guard/bodies/table/roots C ref vs libneed.py on scratch micro incdir (point sample); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
