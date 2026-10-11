@@ -37,6 +37,8 @@
 ## 不称
 
 不称 unisa 全树 C 化；不称删 Python；不称净提速；不称 gate 全量绿；不称 bump/Draft/Latest/签；不称 uint64 溢出域与 Python bigint 逐字节等价（溢出 C 拒、Python 放大整数——共享域外）。
+不称 **穷举**：`same 7` = 断言组点采样（20 手写输入上的七组断言），非 uint64/bigint 全域扫描；更大随机/穷举对拍另排。
+不称 **产品闭包含** `seed/unisa_bits.c`：该文件属参考/夹具域，不进产品闭包、不触发产品重封。
 
 ## 首红记录
 
@@ -61,3 +63,15 @@
 - **首红停窄修**：`no()` 改为立即 `fail "first red: <name>"`（exit 1）；单例 C/Python 与两条 NEG 的 C/Python 运行加 `tests/bound 10` 看门狗。
   - 探针：scratch 中强制 mask64 DIFF，输出 `DIFF mask64` / `unisabits: first red: mask64`，**后续用例未执行**，probe rc=1。
 - 限定：本记录只证 unisa-bits 当前范围（identity 与 same 7 / diff 0）；不证 Python bigint 全域等价，不证产品。
+
+## 点采样边界（代裁；消息入口 tip 821344d8；≈18:54 SGT）
+
+| 项 | 钉 |
+|---|---|
+| same 7 | 断言组：mask64 / round_up-batch / round-up-singles / round_up-det / mask64-det / NEG-a0 / NEG-badint |
+| 输入 | 手写 20 对（夹具 `cases.txt`）；点采样，非穷举、非随机扩样 |
+| 产品闭包 | `seed/unisa_bits.c` **不在**产品闭包 |
+| 另排 | 穷举 / 更大随机对拍另排 |
+| 不变 | 既有读数、源件 sha256、1841 裁决措辞不改；禁 bump / Draft / 动 Latest |
+
+本条只钉「点采样」边界；不重裁 PASS/FAIL。

@@ -161,6 +161,7 @@
 | 夹具 | `tests/unisabitscheck.sh`；gate job `unisa-bits` |
 | 读数 | rc0；SAME×7 / DIFF×0（MASK64、round_up×20、det×2、NEG-a0、NEG-badint） |
 | 明确未做 | 不删 bits.py；不切下一叶子；不 bump；不 Draft/Latest/签 |
+| 点采样边界（≈18:54） | same7=断言组点采样（20 手写）；非穷举；`seed/unisa_bits.c` 不在产品闭包；穷举/更大随机另排（见 plans/v0.0.41.md + c41-k6-1-bits.md） |
 
 ---
 
