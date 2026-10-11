@@ -1,6 +1,6 @@
 # 首红后后续任务零启动：补证材料（cc；0857 ONE=(A)；草案，未实跑）
 
-**状态：材料草案，未执行任何夹具。** 本页只写切口、注入点、预期调用序与缺口；不是实测证据。预期负例 ≠ 验收通过；不以首红 NEG 当 PASS；不改 bump / version / Draft / freeze / 验收措辞。
+**状态：r3 已实跑，命令层限定闭合，其余限定仍保留。** r3 证据见 `first-red-run-0902/` 与 §11；身份见 `first-red-identity-0910.md`。§2–§5 是实跑前的设计与预期，§11 才是观测。预期负例 ≠ 验收通过；不以首红 NEG 当 PASS；不改 bump / version / Draft / freeze / 验收措辞。
 
 ## 0. 固定身份
 
@@ -54,8 +54,9 @@
 
 ## 6. 首红后启动计数
 
-- 计数定义：SHIMLOG 中、位于 E3 红事件记录之后的行数，按类别（tbl / net / check-net / probe-run / UA / cc / python3-other）分别计。
-- 通过条件（仅指这一切口的预期负例成立）：上表六类后续计数全部为 0，且 chain rc 为 1、stderr 含 `E3 gen failed`。
+- 计数定义：SHIMLOG 中、位于 `helper-parse2-rc` 非零行之后的行数。六类为 tbl / net / check-net / probe-run / ua-ref / gen（python 的 gen.py），另计所有 shim 事件总数。
+- 通过条件（仅指这一切口的预期负例成立）：六类后续计数全部为 0、所有事件总数为 0，且 chain rc 为 1，**stdout** 含 `chain: E3 gen failed`。
+- r3 观测（§11）：六类与事件总数全为 0；chain rc 1；stdout 为 `chain: E3 gen failed`；首个非零子 rc 为 E3 的 3。与本节一致。
 - 通过条件**不**包括：PGID/SID 清空、TERM 行为、UA 过 shim、exec-chain 预算、净提速。
 
 ## 7. 日志原件
