@@ -73,7 +73,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `ce4e942030ca83c6b45d3f01a6d8e0a88d17c83c` |
-| tip after（本 note 合入后填） | _(merge 后回填)_ |
+| tip after（本 note 合入后填） | `7e87921f2b2894272bc10d8e341f7672d46b3416`（短 `7e87921f`；= squash Merge #185 本 E） |
 | K6-18 产品叶 | `5e59250afe85b08d8f95129cd2b2d47678b44569` |
 | 上拍 E 锚 tip | `ce4e942030ca83c6b45d3f01a6d8e0a88d17c83c`（#184 tip-after；K6-19 E 已入；本拍切此前 defer 的 K6-18） |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
