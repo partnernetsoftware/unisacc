@@ -76,7 +76,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `8b89f7014e0f563a1d5590c6858f18b0d7e08515` |
-| tip after（本 note 合入后填） | `TBD` |
+| tip after（本 note 合入后填） | `30bf8fc1e441a01890a7aa87814ea6a2607c33a7`（短 `30bf8fc1`；= squash Merge #195 本 E） |
 | K6-22 产品叶 | `8b89f7014e0f563a1d5590c6858f18b0d7e08515` |
 | 上拍 C 锚 tip | `7a01bc8d…`（#194 tip-after；K6-21+E 后 8509 已钉，K6-22 未净化） |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
