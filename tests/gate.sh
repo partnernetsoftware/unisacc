@@ -113,6 +113,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-ape) req='native-posix|host|cc,python3|cdx|unisa-ape-point-sample';;
           unisa-vm) req='native-posix|host|cc,python3|cdx|unisa-vm-point-sample';;
           unisa-gold-prec) req='native-posix|host|cc,python3|cdx|unisa-gold-prec-point-sample';;
+          unisa-emit-arm-nwmem) req='native-posix|host|cc,python3|cdx|unisa-emit-arm-nwmem-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -612,6 +613,7 @@ job unisa-image-pe sh ./tests/unisaimagepecheck.sh   # 0.0.41 K6-15: unisa.image
 job unisa-ape sh ./tests/unisaapecheck.sh   # 0.0.41 K6-16: unisa.ape build() script/two-pass layout, gzip Unix members (zlib), PE stub split, UNIPKG1 payload trailer; fixture compile_target (not a product target; not loadable/multi-platform); keep Python
 job unisa-vm sh ./tests/unisavmcheck.sh   # 0.0.41 K6-17: unisa.vm run() point programs (integer arithmetic and div/mod, shifts, loop/call/ret, store/load, print gate clobber, halts 124/136/139, narrow ld/st) C ref vs vm.py (point sample; not full opcode sweep; no syscall/file closure); keep Python
 job unisa-gold-prec sh ./tests/unisagoldpreccheck.sh   # 0.0.41 K6-18: unisa.gold prec_label finite domain (PREC_OPS full table + boundary strings) C ref vs gold.py source (ast extraction; no build(); no regen; not gold closure); keep Python
+job unisa-emit-arm-nwmem sh ./tests/unisaemitarmnwmemcheck.sh   # 0.0.41 K6-19: unisa.emit_arm N/w/movimm/mem legal domain (scaled, unscaled, sp, IP0 far path) + refusal points, C ref vs emit_arm.py (point sample; no encode/reloc/WinAPI/fp); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
