@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `503bb421`（#214 K6-28 E tip-after；**无漂**） |
-| tip after（本钉） | `TIP_AFTER_SHORT`（= squash Merge #PR1；合入后填） |
+| tip after（本钉） | `00830dbc`（= squash Merge #215；其间 K6-29 `e36b596` 入 tip，≠ 身份闭合） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文键数 diff |
 | 重测 | 18-stage sum **8769**；pin `b8244bd8…` **MATCH**；built `5e45bf5e…` **MATCH**；H **569**；enc/isel/abi/combo `#field op`=87 keys 522/174/522/522 |
