@@ -46,15 +46,11 @@ pt() {   # pt OP OS ARCH
     same=$((same + 1)); echo "SAME $1 $2 $3 : $(cut -d' ' -f4-8 "$T/c-$1-$2-$3.txt")"
 }
 PYTHONPATH="$R" "$B" 10 python3 "$T/pydump.py" consts > "$T/py-consts.txt" || fail "python consts"
-cat > "$T/consts.txt" <<'CONSTS'
-OS lnx osx win
-ARCH x86_64 arm64
-TARGETS lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64
-CONSTS
-PYTHONPATH="$R" "$B" 10 python3 -c 'from unisa import catalog as C
-print("OS " + " ".join(C.OS)); print("ARCH " + " ".join(C.ARCH)); print("TARGETS " + " ".join(C.TARGETS))' > "$T/py-consts2.txt" || fail "python consts2"
-cmp -s "$T/consts.txt" "$T/py-consts2.txt" || { diff -u "$T/consts.txt" "$T/py-consts2.txt"; fail "DIFF consts (OS/ARCH/TARGETS)"; }
-echo "SAME consts OS/ARCH/TARGETS (6 targets)"; same=$((same + 1))
+"$B" 10 "$T/catalog" consts >"$T/c-consts.txt" 2>"$T/c-consts.err" || fail "C consts refused $(cat "$T/c-consts.err")"
+"$B" 10 "$T/catalog" consts >"$T/c2-consts.txt" 2>/dev/null || fail "C consts second run rc!=0"
+cmp -s "$T/c-consts.txt" "$T/c2-consts.txt" || fail "C consts not deterministic"
+cmp -s "$T/c-consts.txt" "$T/py-consts.txt" || { diff -u "$T/py-consts.txt" "$T/c-consts.txt"; fail "DIFF consts (C vs python OS/ARCH/TARGETS)"; }
+echo "SAME consts C vs python OS/ARCH/TARGETS (6 targets)"; same=$((same + 1))
 
 # sysno: 3 ops x 2 targets; plus the osx-None case (clock_gettime on osx -> none)
 pt exit lnx x86_64
@@ -63,6 +59,12 @@ pt mmap win arm64
 pt open lnx arm64
 pt clock_gettime osx x86_64
 pt getdents64 osx arm64
+# sysno >= 3 ops x >= 2 targets (narrow-fix 2137): exit, mmap, open, close each on two targets
+pt mmap lnx x86_64
+pt mmap osx arm64
+pt open osx x86_64
+pt close lnx x86_64
+pt close osx arm64
 # enc_form / symbol / gate: >= 2 points each (covered above and below)
 pt add64 lnx x86_64
 pt syscall_gate win arm64

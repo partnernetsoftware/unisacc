@@ -34,3 +34,10 @@
 
 ## 禁项自检
 - 未改 src/version.h；未删 catalog.py；未 bump；未 Draft；未 Latest；未签；未改验收；未动 exec/kernel/weights/release；未改既有 K6-1..7 闭包；未开 K6-8b / K6-7b / K6-6b / 其他叶子；未跑旧全量；未整表穷举。
+
+## 窄修（2137 代裁；补证 cdx FAIL@2135）
+- 根因①：consts 只比对 Python 字面，无 C 可观测对拍 → 修：C 增加 `consts` 命令（OS / ARCH / TARGETS 三行），夹具改为 C 输出与 Python 导出逐行 cmp（不再用字面文件）。
+- 根因②：sysno 仅 exit 跨两 target → 修：新增 mmap（lnx/x86_64、osx/arm64）、open（osx/x86_64，并已有 lnx/arm64）、close（lnx/x86_64、osx/arm64）。覆盖 exit、mmap、open、close 四个 op，各 ≥2 target（sysno 为数值或 0x2000000|n）。
+- 直跑（窄修后）：UTC 13:38:48Z–13:38:49Z，rc=0，`unisacatalog same 20 diff 0 neg 2/2`；gate：UTC 2026-10-11T13:38:58Z–2026-10-11T13:38:59Z，rc=0，failed 0 unverified 0。
+- 窄修后源件 sha256：`seed/unisa_catalog.c` = `16f82c22ae914100fc19617bf705afe44ae560418bda2e8d56939ce4cd1a6921`；`tests/unisacatalogcheck.sh` = `1e953accd979aee14301b2c607e909dbfd6a7abb7f6bd1d48d3658b88bad0658`；`unisa/catalog.py` = `b3ff45a5f1fd91b73de3e7ca080d248c9974c892bc6a3e5ed77df0303616ef96`（只读，未变）。基 HEAD `bdec4bcbf823d0b527a15c40afe61f69942063fc`。
+- 口径仍为点采样；不含 K6-8b 整表穷举；不称产品闭包。

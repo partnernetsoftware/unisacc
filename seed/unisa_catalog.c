@@ -100,7 +100,19 @@ int main(int argc, char **argv) {
     const char *form, *symbol, *gate, *sysno;
     const char *a[7];
     const Sys *s;
-    if (argc != 4) { fprintf(stderr, "usage: unisa-catalog OP OS ARCH\n"); return 2; }
+    if (argc == 2 && !strcmp(argv[1], "consts")) {
+        /* OS, ARCH and TARGETS = "%s/%s" for os in OS for arch in ARCH (catalog.py) */
+        static const char *OSN[] = {"lnx", "osx", "win"};
+        static const char *ARN[] = {"x86_64", "arm64"};
+        int i, j;
+        printf("OS");  for (i = 0; i < 3; i++) printf(" %s", OSN[i]); printf("\n");
+        printf("ARCH"); for (j = 0; j < 2; j++) printf(" %s", ARN[j]); printf("\n");
+        printf("TARGETS");
+        for (i = 0; i < 3; i++) for (j = 0; j < 2; j++) printf(" %s/%s", OSN[i], ARN[j]);
+        printf("\n");
+        return 0;
+    }
+    if (argc != 4) { fprintf(stderr, "usage: unisa-catalog OP OS ARCH | consts\n"); return 2; }
     op = argv[1]; os = argv[2]; arch = argv[3];
     if (strcmp(os, "lnx") && strcmp(os, "osx") && strcmp(os, "win")) die("unknown OS", os);
     if (strcmp(arch, "x86_64") && strcmp(arch, "arm64")) die("unknown ARCH", arch);
