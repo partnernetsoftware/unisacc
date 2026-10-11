@@ -6384,9 +6384,10 @@ int fe_load(char *path, char *t) {
         __close(fd);
     }
     /* -include FILE: as if `#include "FILE"` were the first line.  The
-       lines it adds sit BEFORE the user's, so err_at subtracts them. */
+       lines it adds sit BEFORE the user's, so err_at subtracts them.
+       Skip when this unit is the synthetic forward stub (opti_skip_path). */
     prelines = 0;
-    if (nopti > 0) {
+    if (nopti > 0 && (opti_skip_path == 0 || strsame(path, opti_skip_path) == 0)) {
         int ni; int total; int q;
         total = 0;
         ni = 0; while (ni < nopti) { total = total + 12 + blen(opti[ni]); ni = ni + 1; }

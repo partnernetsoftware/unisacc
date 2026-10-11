@@ -765,6 +765,10 @@ char *optincs[16]; int noptinc;
    -nostdinc, and stdin as an input. */
 int noptu; char *optu[16];
 int nopti; char *opti[8];
+/* Path of the synthetic /tmp forward unit: fe_load skips user -include for it
+   (fe_units_fwd sets this around the second compile). Quoted includes resolve
+   beside the including file; a relative -include would look under /tmp. */
+char *opti_skip_path;
 int nostdinc;
 /* -ftrim-libc: library bodies on demand, the reference for the E2 model.  The
    carried headers guard each static body with
