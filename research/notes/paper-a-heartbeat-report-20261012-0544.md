@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `f2806d67`（#202 K6-24 E tip-after；**无漂**） |
-| tip after | （本 PR squash merge SHA；见交付） |
+| tip after（#203） | `51ed2b9b`（squash Merge #203；其间 K6-25 `89d012e9` 入 tip，≠ 身份闭合） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文键数 diff |
 | 重测 | 18-stage sum **8769**；pin `b8244bd8…` **MATCH**；built `5e45bf5e…` **MATCH**；H **569**；enc/isel/abi/combo op=87 keys 522/174/522/522 |
