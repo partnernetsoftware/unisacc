@@ -4,6 +4,7 @@
 - **本拍切口：** **C. 真缺口钉**
 - **主张一句：** **c42 env-pin 721 结证后的 harness hotfix（`2375d0d1`）+ product-closure（facts 头 / docgen 表 1 列头 T1；`627fd48b`）+ gatedeps 戳（`0b60c16d`）把 tip version 推到 0.0.42、公开 Latest 推到 v0.0.41，但都不闭合 §8.1 第 3 条同身份六目标原生平台矩阵，也不闭合 8509/8769 双身份债；相对 paper tip `80a8c629`（#288）四 Paper A blob SAME；Softguess NONE×4；env-pin queue / c42 Draft-candidate / product-closure ≠ A seal-before gates。**
 - **仓库 tip-before（本拍开工核对）：** `ffbc9e112f10421c28d4546a1c61ea035c33e8d4`（short `ffbc9e11`；= research(paper-a) fill tip-after 80a8c629 in §7.3 unit-grow notes (1626) #289）
+- **tip-after：** `aad2dac4a97f52d9c15846ecb6985c8fed831a3a`（short `aad2dac4`；= squash Merge #290 本钉）
 - **相对 paper tip `80a8c629`（#288 §7.3 unit-grow）：** 中间产品叶 `2375d0d1` → `627fd48b` → `0b60c16d` → notes fill `ffbc9e11`
 - **公开 Latest：** **v0.0.41**（published 2026-10-12T06:21:24Z；assets=7；draft=false）——相对 09:30 矩阵钉（Latest 仍 40）已前进
 - **tip `src/version.h`：** **0.0.42**（`#define UNISACC_VERSION "0.0.42"` @ tip `ffbc9e11`）
