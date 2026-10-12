@@ -7,7 +7,7 @@
 | --- | --- |
 | 本拍切口 | **A**（优先序：有可核对 abstract phrasing → A；非假 Latest 披露；非 C tip-refresh；非 B 叠卡；非 E 重切 c42） |
 | tip before | `525a5cd230320a619804e635160209b7eaa5f6d1`（= #323 after E 2132；**无漂**） |
-| tip after（本 A 合入后） | `_TBD after squash merge_` |
+| tip after（本 A 合入后） | `2d58f27e82cf2cc59fe154b0e6ecc54132627b60`（短 `2d58f27e`；= squash Merge #324 本 A） |
 | Softguess | **NONE×4**（BEFORE+AFTER；未粘 `逻辑本身`／`权重即逻辑`／`weights are the logic`） |
 | Paper A 正文 | CN/EN/TeX/abs **DIFF**（仅摘要核心主张句） |
 | CN before blob | `ae1efe0262f6cbbcd913029ccee89a55f7f1c9a8` |
@@ -24,4 +24,4 @@
 
 本拍切口=A. 成篇定稿增量 + 主张：摘要核心主张句收紧为在声明域上给出表的精确可执行形式（与表逐键同一），不是学得的近似——对齐已硬 §1／§10；CN/EN/TeX/abs 四联；不粘 Softguess。
 
-tip `525a5cd2`→`_TBD_`；正文 CN/EN/TeX/abs DIFF（仅摘要核心主张句）；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-draft-increment-abstract-core-claim-exact-executable-not-learned-approx-20261012-2217.md`；`research/notes/paper-a-heartbeat-report-20261012-2217.md`。
+tip `525a5cd2`→`2d58f27e`；正文 CN/EN/TeX/abs DIFF（仅摘要核心主张句）；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-draft-increment-abstract-core-claim-exact-executable-not-learned-approx-20261012-2217.md`；`research/notes/paper-a-heartbeat-report-20261012-2217.md`。
