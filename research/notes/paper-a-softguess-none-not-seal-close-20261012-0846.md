@@ -4,7 +4,7 @@
 - **本拍切口：** **C. 真缺口钉**
 - **主张一句：** **Softguess NONE×4（四 Paper A blob 相对 #168 基线 SAME）只证明措辞／blob 身份稳定，并不闭合 Paper A 封口路径；挡粘硬缺口仍是（1）测量身份／摘要 8509 vs 表 1 合计 8769、（2）§8.1 第 3 条、（3）待批 Ο1——本拍不叠新 Ο1 卡、不改键数。**
 - **仓库 tip-before（本拍开工）：** `dce7d5ce996280cb4382ae778a6871ba070d5492`（短 `dce7d5ce`）— 任务书／observe 0841 tip；= #224 bookkeeping after E #223（0.0.41 freeze／Stage／Python archive≠A gate）；相对任务书 **无漂**。
-- **tip-after：** `TBD_TIP_AFTER`（短 `TBD`；= squash Merge 本 C；bookkeeping 填）
+- **tip-after：** `6781b2db7f04d5b0eccb65670150406a3b9d1135`（短 `6781b2db`；= squash Merge #225 本 C）
 - **#168 基线：** merge `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（TeX/abs +image field layout）
 - **Latest：** **v0.0.40**（assets=10）；tip version **0.0.41**（freeze start；不 bump Latest）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）
 - **父节点：** **A**
@@ -101,6 +101,6 @@
 ## 证据
 
 - tip-before：`dce7d5ce996280cb4382ae778a6871ba070d5492`
-- tip-after：`TBD_TIP_AFTER`（bookkeeping）
+- tip-after：`6781b2db7f04d5b0eccb65670150406a3b9d1135`（#225）
 - Softguess／口号：**NONE×4**；四 blob：**SAME×4** vs #168 `ae7f7424…`
 - 正交钉：Softguess seal-boundary 1230；tip-refresh 0125；E 041-freeze 0825；8509 0813；§8.1#3 0801；Ο1 卡 1808
