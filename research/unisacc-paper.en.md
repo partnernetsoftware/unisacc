@@ -158,7 +158,7 @@ Byte-level reproducibility rests on two facts: **construction is deterministic**
 | Proposition | Content | Discharged by |
 |---|---|---|
 | **P-8** | Every total function $G:K\to Y$ has an exact network | Lean `naive_exact` (restates a known result) |
-| **P-3** | Released network ≡ truth table | Full-domain enumeration of the released integer network; `decision_list_exact` proves only the globally monochrome first-hit subcase |
+| **P-3** | Released network ≡ truth table | Full-domain enumeration of the released integer network (= T1 / exhaustive key-by-key equality on the declared domain / Definition 2, not sample fit or training accuracy); `decision_list_exact` proves only the globally monochrome first-hit subcase |
 | **P-1** | Query discipline (Definition 3) | Engineering discipline; premise of P-5 |
 | **P-5** | Network-driven ≡ table-driven | Lean `cong_of_pointwise`, `p5_of_p3_trace` (under P-1 and P-3) |
 | **P-2** | Every queried key ∈ $K_s$ | Runtime assertion; a Lean template on a toy walker; open for the full walkers |
