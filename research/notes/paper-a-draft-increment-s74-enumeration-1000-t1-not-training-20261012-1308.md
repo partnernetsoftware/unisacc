@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~13:08 Asia/Shanghai（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `620fcc138a105b47b06449697b4c76e3bebd8c49`（短 `620fcc13`；= #264 tip-after fill on main；paper 父 `#263` tip `140ecf8e` 之后）
-- **tip after：** _(merge 后填；本文件随 A PR 提交时占位)_
+- **tip after：** `96cc83fa1859f6beb12b13a418219058fcba7574`（短 `96cc83fa`；= squash Merge #265 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX §7.4「真值表本身会错」／「Truth tables can be wrong」句内「枚举 1.000」／「enumeration 1.000」同义收紧为 T1／定义 2；**不改** abstract.txt（无该短语）；**不改**键数身份、表 1／表 3／§6.1／Def2／附录 CLI／P-3／摘要已钉句、product/kernel/weights/facts、投稿方向；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件 **NONE×4**（机扫 `Softguess`/`softguess`/`soft-guess`/`Softmax-as-product`／「权重就是」／“weights are the logic”／「逻辑本身」／「权重即逻辑」／「权重≡逻辑」均 0 hit；§3「不含 softmax」／「no softmax」否认句不计；**未**粘 Softguess 口号）
@@ -53,9 +53,9 @@
 
 ## tip / blob 表
 
-| 项 | before (`620fcc13`) | after（#A tip 待填） |
+| 项 | before (`620fcc13`) | after（#265 tip `96cc83fa`） |
 | --- | --- | --- |
-| tip | `620fcc138a105b47b06449697b4c76e3bebd8c49` | _(merge 后填)_ |
+| tip | `620fcc138a105b47b06449697b4c76e3bebd8c49` | `96cc83fa1859f6beb12b13a418219058fcba7574`（短 `96cc83fa`；#265） |
 | CN `research/unisacc-paper.md` | `eda0b09521c35220014d7333357929779d041673` | **CHANGED** → `7b3b8735aaed1207a9501e33bd25b3bf3a725384` |
 | EN `research/unisacc-paper.en.md` | `61e7999a213837b0e3a6424b39ccbd728c637101` | **CHANGED** → `0fd1612e8d9e1ce41b25877c467f16cd6aab7f90` |
 | TeX `research/arxiv-paper-a/main.tex` | `7d315a722d493b018cb6764386f2e9e277f6e91a` | **CHANGED** → `ad31486ecf8f2abdad85bf10eb09a247c6fc8778` |
