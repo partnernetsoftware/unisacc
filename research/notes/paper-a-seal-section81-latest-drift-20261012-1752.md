@@ -72,5 +72,5 @@
 | Artifact | SHA |
 | --- | --- |
 | tip before | `0f6626c1fb42397a25129681a48e28cac4ce58ae` |
-| tip after merge | `TIP_AFTER_PLACEHOLDER` |
+| tip after merge | `e5fe6499b2fa7ebf87dc10bd595b89d780aa9401` (squash Merge #303) |
 | CN / EN / TeX / abs | **SAME** as tip before（本拍 notes-only） |
