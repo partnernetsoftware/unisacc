@@ -88,7 +88,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `018b4509101c57fb3121d73d63a1972f68978ba4` |
-| tip after（本 E squash merge） | `TIP_AFTER_PLACEHOLDER`（合入后 fill） |
+| tip after（本 E squash merge） | `c0907e0d5a07315175a9dff37e214acce686d1c8`（短 `c0907e0d`；= squash Merge #311 本 E） |
 | 末次 Paper A 正文 | #298 `3cd6514ea60fe69ba25fa613744f93f0a11944f3`（§8.1#3 identity-before-matrix；四 blob SAME @ tip） |
 | 新 tip 锚（桶回执） | `018b4509`（`research/c42-1640-bucket-receipt.md`） |
 | Cut E 1837 opcode 锚 | `e69f1f37`（#309）；fill `79c6f828`（#310） |
