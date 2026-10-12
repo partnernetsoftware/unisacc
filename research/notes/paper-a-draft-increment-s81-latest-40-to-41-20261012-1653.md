@@ -61,8 +61,8 @@
 
 | Artifact | SHA |
 | --- | --- |
-| tip after merge | _TBD_ |
-| CN `research/unisacc-paper.md` | _TBD_ |
-| EN `research/unisacc-paper.en.md` | _TBD_ |
-| TeX `research/arxiv-paper-a/main.tex` | _TBD_ |
+| tip after merge | `86a4669e698930399ca38e032608cba3f99ee702` (Merge #293) |
+| CN `research/unisacc-paper.md` | `1a1122863c44205f52e2a2ebaee1e14ffe43aa95` |
+| EN `research/unisacc-paper.en.md` | `35cb717952480f6a4e4cbc02dac831f030d2aabb` |
+| TeX `research/arxiv-paper-a/main.tex` | `1d057dfa376031ffbf3a3062f0fc8cfbdd19f541` |
 | abstract | `92a6472c92a13cb4e8149bbd798f24e6d6a5f648` (**SAME**) |
