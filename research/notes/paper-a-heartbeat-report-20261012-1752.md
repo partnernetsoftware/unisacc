@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（开拍核对） | `0f6626c1`（= #302 after Cut C 1737；**无漂**） |
-| tip after（本 A squash merge） | `TIP_AFTER_PLACEHOLDER` |
+| tip after（本 A squash merge） | `e5fe6499`（= squash Merge #303） |
 | Softguess slogan | **NONE×4** |
 | Paper A 正文 | CN/EN/TeX/abs **SAME**（notes-only；领句已是 v0.0.41／2026-10-12） |
 | Latest／冻结／tip version | Latest **v0.0.41** assets=7；冻 **v0.0.19**；tip version **0.0.42** |
