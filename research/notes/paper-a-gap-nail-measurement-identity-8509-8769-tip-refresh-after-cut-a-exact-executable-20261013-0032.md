@@ -5,7 +5,7 @@
 - **主张一句：** 在 tip 已并入 Cut A「精确可执行形式／非学得近似」正文链（§10/#320、abstract/#324、contrib#1/#327、contrib#4/#329、§7.4/#331 及 tip-after 书签 #321–#332）之后，活 gold 仍锁 **op-87／8769／569**；EN／TeX／abstract 仍标 **op-74／8509／517**；**措辞收紧 ≠ 测量身份闭合 → 仍 seal-blocking**。本拍只 supersede tip 证据；**不代裁 Ο1/Ο2（仍荐 Ο1）、不改正文键数、不叠决策卡、不重做 §8.1#3**。
 - **仓库 tip（本拍核对开工 / TIP_BEFORE）：** `c310975d91ade4496261343125285ae25adf4cd3`（短 `c310975d`；= `docs(paper-a): fill tip-after Cut A §7.4 exact-executable (20261013-0004) (#332)`；祖先含 `f67a4692`＝#331 §7.4 正文、`0f8e9c49`＝#329 contrib#4、`…` Cut A #320–#330）
 - **tip-before（任务书起点，已核）：** `c310975d91ade4496261343125285ae25adf4cd3`（相对任务书 **无漂**）
-- **tip-after：** （本钉合入后由 fill 拍或本 PR merge tip 回填）
+- **tip-after：** `66d564d16245c0623865924e8a178e7f2c84f300`（短 `66d564d1`；= squash Merge #333 本钉）
 - **公开 Latest：** **v0.0.41**（draft=false；assets=7）；tip `UNISACC_VERSION` **0.0.42**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）；Draft 仅 **v0.0.31**
 - **四 blob（git content sha @ tip `c310975d`）：**
   - CN `research/unisacc-paper.md` → `df18288d36f426900917b0487b66b0dbd15be731`
@@ -116,7 +116,7 @@
 | --- | --- |
 | tip-before（任务书 `c310975d`） | `c310975d91ade4496261343125285ae25adf4cd3` |
 | tip 开工核对 | `c310975d91ade4496261343125285ae25adf4cd3`（无漂） |
-| tip-after | （合入后回填） |
+| tip-after | `66d564d16245c0623865924e8a178e7f2c84f300`（短 `66d564d1`；= squash Merge #333 本钉） |
 | CN / EN / TeX / abstract vs #319 | **CHANGED / CHANGED / CHANGED / CHANGED**（措辞；键数数字位未动） |
 | CN / EN / TeX / abstract vs #168 | **CHANGED ×4**（非整键数改写） |
 | CN / EN / TeX / abstract vs #331 body | **SAME ×4** |
