@@ -3,8 +3,8 @@
 - **切口:** A 成篇定稿增量
 - **主张:** §7.3 Adam 对照表「>24 targets」构造列裸「单元数近似 / units grow roughly」钉为「精确（T1）+ 单元数规模经验拟合」（规模拟合≠表近似/训练逼近），堵住敌意软读成构造近似/T1 放宽。
 - **证据:**
-  - tip before `3fc64cd2` (`3fc64cd2524ede9d233acb5da8997486810096f0`) → tip after _(fill)_
-  - PR _(fill)_ (nail) + tip-after fill PR
+  - tip before `3fc64cd2` (`3fc64cd2524ede9d233acb5da8997486810096f0`) → tip after `80a8c629` (`80a8c629790380a74c85506422ba9e61866abba2`)
+  - PR #288 (nail) + tip-after fill PR
   - CN/EN/TeX **CHANGED**；abs **SAME**
   - Softguess slogan NONE×4
   - nail: `research/notes/paper-a-draft-increment-s73-unit-grow-roughly-size-fit-not-approx-t1-20261012-1626.md`
