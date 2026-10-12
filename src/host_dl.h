@@ -20,6 +20,14 @@ static long host_dl_slot(int i) {
     if (i == 3) return (long)dlerror;
 #endif
 #endif
+#if defined(__linux__) && defined(__UNISA__)
+    /* c42 experiment: the unisacc-built Linux image imports the four loader slots like macOS does
+       (PT_INTERP + DT_NEEDED libc, back_image.c); without this host_dl_slot is 0 and -run refuses. */
+    if (i == 0) return __hostaddr0();
+    if (i == 1) return __hostaddr1();
+    if (i == 2) return __hostaddr2();
+    if (i == 3) return __hostaddr3();
+#endif
 #if defined(__linux__) && !defined(__UNISA__)
     if (i == 0) return (long)dlopen;
     if (i == 1) return (long)dlsym;
