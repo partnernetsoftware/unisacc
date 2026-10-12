@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 13:58 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `e3bf35f28af56f8a9a4d3f439eb590657aaf4f17`（短 `e3bf35f2`；= #270 after A #269 abs all-exact pin）
-- **tip after：** TBD（merge 后第二 PR 回填）
+- **tip after：** `bb811af14f6b56a42dd1a4b5650a8dd774ea8e49`（短 `bb811af1`；= squash Merge #271 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX 表 1 列头裸「精度」／「Accuracy」改名为 **T1**；表注已钉 T1／定义 2，列头单独仍可被误读为训练精度；**不改** abstract.txt；**不改**键数身份、单元格 1.000、product/kernel/weights/facts、投稿方向、定义 2／3 本文、表注已钉句；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件口号 **NONE×4**（机扫 Softguess/softguess/soft-guess/Softmax-as-product／「权重就是」／“weights are the logic”／「逻辑本身」／「权重即逻辑」／「权重≡逻辑」均 0 hit）；软读 **HIT 表头「精度／Accuracy」**（本拍已钉）；残余候选：T1 状态格「全域枚举」、§7.3 Adam「accuracy hit 1.000」（训练对照故意用语，勿钉成 T1）
@@ -54,9 +54,9 @@
 
 ## tip / blob 表
 
-| 项 | before (`e3bf35f2`) | after（TBD） |
+| 项 | before (`e3bf35f2`) | after (`bb811af1`) |
 | --- | --- | --- |
-| tip | `e3bf35f28af56f8a9a4d3f439eb590657aaf4f17` | TBD（merge 后填） |
+| tip | `e3bf35f28af56f8a9a4d3f439eb590657aaf4f17` | `bb811af14f6b56a42dd1a4b5650a8dd774ea8e49`（短 `bb811af1`；#271） |
 | CN `research/unisacc-paper.md` | `5711fd4991c347abdc161acaf894488e755bcacb` | **CHANGED**（列头 精度→T1） |
 | EN `research/unisacc-paper.en.md` | `55f103209cadb9aedf6cf2f3456c9728a9b337a7` | **CHANGED**（列头 Accuracy→T1） |
 | TeX `research/arxiv-paper-a/main.tex` | `f1e93825d0465a578c286c4361dd02a5daf74036` | **CHANGED**（两处列头 Accuracy→T1） |
