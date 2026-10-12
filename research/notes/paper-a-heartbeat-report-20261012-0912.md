@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `e6374a98`（= Draft材料实开回执；**无漂**） |
-| tip after（本 E squash merge） | _(follow-up fill after merge)_ |
+| tip after（本 E squash merge） | （= squash Merge #230） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME×4** vs #168；**零**正文 diff |
 | 挡粘仍开 | §8.1#3、8509/8769（class-(a) 双身份未选）、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不重钉） |
