@@ -117,7 +117,7 @@ The greedy cover of lines 3–5 alone reduces the parameter count from 796,490 t
 
 Table 1 lists the 18 stages; it is generated from the truth tables and the constructed weights.
 
-**Table 1. Decision-network instance: key spaces and constructed network sizes** (accuracy by full-domain enumeration; **op-74 vocabulary identity**: 8,509 keys, 517 units. The Chinese internal draft Table 1 currently reports the distinct **op-87** identity 8,769 / 569; do not collapse the two until one sealed measurement.)
+**Table 1. Decision-network instance: key spaces and constructed network sizes** (accuracy by full-domain enumeration = T1 / exhaustive key-by-key equality on the declared domain (Definition 2), not sample fit or training accuracy; **op-74 vocabulary identity**: 8,509 keys, 517 units. The Chinese internal draft Table 1 currently reports the distinct **op-87** identity 8,769 / 569; do not collapse the two until one sealed measurement.)
 
 | Stage | What it decides | Key fields × vocabulary size | Output | Keys | Units | Accuracy |
 |---|---|---|---|---:|---:|---:|
