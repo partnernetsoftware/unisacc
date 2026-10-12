@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `682ca097c83ce5c9c5f93f578c4ac448712387f1`（= #314 after B 1914；**无漂**） |
-| tip after（本 C squash merge） | `TBD_AFTER_SQUASH_MERGE` |
+| tip after（本 C squash merge） | `d093781a2bc00e9e1405683d6aa534ba30ad5ece` |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs 1914／1737；**零**正文键数 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
@@ -26,4 +26,4 @@
 
 本拍切口=C. 真缺口钉 + 主张：Latest=v0.0.41／tip 0.0.42／E #309–#312／B #313/#314（Ο2→41 仍荐 Ο1）之后，活 gold 仍锁 op-87／8769／569；EN／TeX／abstract 仍标 op-74／8509／517 — 发布／E／B ≠ 测量身份闭合 → 仍 seal-blocking。
 
-tip `682ca097`→`TBD_AFTER_SQUASH_MERGE`；正文 SAME×4；Softguess NONE×4；重测 8769／pin MATCH／H=569；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；本拍不叠卡）。证据：`research/notes/paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-latest41-b1914-20261012-1928.md`；`research/notes/paper-a-heartbeat-report-20261012-1928.md`。
+tip `682ca097`→`d093781a2bc00e9e1405683d6aa534ba30ad5ece`；正文 SAME×4；Softguess NONE×4；重测 8769／pin MATCH／H=569；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；本拍不叠卡）。证据：`research/notes/paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-after-latest41-b1914-20261012-1928.md`；`research/notes/paper-a-heartbeat-report-20261012-1928.md`。
