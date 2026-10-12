@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~10:11 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `bfdbdebfd4bcd8f1caed057da640829028f43b2e`（短 `bfdbdebf`；= #239 after A #238 exact-executable-form；相对任务书 tip ~bfdbdebf **无漂**）
-- **tip after：** （merge 后回填）
+- **tip after：** `81ad1cc73f6c6ac8341739c0eeabf6bed62514aa`（短 `81ad1cc7`；= squash Merge #240 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX §7.4 同义收紧；**不改** abstract（该句不在摘要）；**不改**键数身份、product/kernel/weights/facts、投稿方向；**不叠** Ο1/Ο2（仍荐 Ο1）；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件 **NONE×4**（机扫 `Softguess`/`softguess`/`SoftGuess`/`权重就是`/`weights are the logic`/`逻辑本身`/`权重即逻辑`/`权重≡逻辑` 均 0 hit；§3「不含 softmax」／「no softmax」否认句不计；**未**粘 Softguess 口号）
@@ -54,10 +54,10 @@
 
 | 项 | before (`bfdbdebf`) | after（本拍；merge 后回填 SHA） |
 | --- | --- | --- |
-| tip | `bfdbdebfd4bcd8f1caed057da640829028f43b2e` | （待 merge） |
-| CN `research/unisacc-paper.md` | `0e358fdb035ec43da65661f86e0e940b944b5361` | **CHANGED** |
-| EN `research/unisacc-paper.en.md` | `d2e5aa7ddc3b6ff81589b9ec9a36db6b368e1001` | **CHANGED** |
-| TeX `research/arxiv-paper-a/main.tex` | `b57e0079bd9b1696289382a947fc84805adbdcdf` | **CHANGED** |
+| tip | `bfdbdebfd4bcd8f1caed057da640829028f43b2e` | `81ad1cc73f6c6ac8341739c0eeabf6bed62514aa` |
+| CN `research/unisacc-paper.md` | `0e358fdb035ec43da65661f86e0e940b944b5361` | **CHANGED** → `4d49887755a7aeb79ce46dd4756d0e9a1db6579f` |
+| EN `research/unisacc-paper.en.md` | `d2e5aa7ddc3b6ff81589b9ec9a36db6b368e1001` | **CHANGED** → `5ef967c3d4eea723b101697e8c789c8ef7790194` |
+| TeX `research/arxiv-paper-a/main.tex` | `b57e0079bd9b1696289382a947fc84805adbdcdf` | **CHANGED** → `c4ad1d88739bd2d5b14e9e2dc3284ba8abaa1f4a` |
 | abs `research/arxiv-paper-a/abstract.txt` | `d2eb48f7814b7b578b5644c5e19ff9a76ffe3d3b` | **SAME**（未改） |
 | Softguess | **NONE×4** | **NONE×4** |
 
