@@ -100,7 +100,7 @@ def table_zh():
     from .gold import STAGES, ALL
     from .__main__ import _built
     nets = _built()
-    L = ["| 阶段 | 键字段 × 词表大小 | 输出 | 键数 | 单元 | 精度 |",
+    L = ["| 阶段 | 键字段 × 词表大小 | 输出 | 键数 | 单元 | T1 |",   # c42: paper-a #271 renamed this column by hand (精度 → T1); the generator follows the paper
          "|---|---|---|---:|---:|---:|"]
     tk = tu = 0
     for n in ALL:
