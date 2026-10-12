@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~13:45 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `75fd4ea0023c281bb5bffed30d319b9b5c54a1fd`（短 `75fd4ea0`；= #268 after A #267 §9 full-domain enum）
-- **tip after：** （merge 后回填）
+- **tip after：** `0af0e41d3d5aa8c874b01e27fd47afa3e2f407fb`（短 `0af0e41d`；= squash Merge #269 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only 闭合上拍 #267 笔记明示的残余候选：`research/arxiv-paper-a/abstract.txt` 中「all exact」相对 TeX `\begin{abstract}` 已钉句漂移；**不改** CN/EN/TeX 正文（摘要开篇「精度均为 1.000／accuracy 1.000」与 TeX abs 已钉 T1）；**不改**键数身份、表 1／表 3／§6.1／Def2／附录 CLI／P-3／§7.4／§9／product/kernel/weights/facts、投稿方向；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** 口号机扫 **NONE×4**；软读扫描 **HIT abs「all exact」**（本拍已钉）；残余候选：表头「精度／Accuracy」、T1 状态格「全域枚举」、§7.3 Adam「accuracy hit 1.000」（训练对照故意用语，勿钉成 T1）
@@ -43,9 +43,9 @@
 
 ## tip / blob 表
 
-| 项 | before (`75fd4ea0`) | after（本拍；merge 后回填 tip SHA） |
+| 项 | before (`75fd4ea0`) | after (`0af0e41d`) |
 | --- | --- | --- |
-| tip | `75fd4ea0023c281bb5bffed30d319b9b5c54a1fd` | （merge 后填） |
+| tip | `75fd4ea0023c281bb5bffed30d319b9b5c54a1fd` | `0af0e41d3d5aa8c874b01e27fd47afa3e2f407fb`（短 `0af0e41d`；#269） |
 | CN `research/unisacc-paper.md` | `5711fd4991c347abdc161acaf894488e755bcacb` | **SAME** |
 | EN `research/unisacc-paper.en.md` | `55f103209cadb9aedf6cf2f3456c9728a9b337a7` | **SAME** |
 | TeX `research/arxiv-paper-a/main.tex` | `f1e93825d0465a578c286c4361dd02a5daf74036` | **SAME** |
