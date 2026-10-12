@@ -37,7 +37,7 @@
 ### abstract `research/arxiv-paper-a/abstract.txt`
 
 - **Before：** `The product and our claims rely on construction, not training; section 7.3 records one illustrative historical Adam comparison only, and preregistered study A2 owns systematic training comparisons.`
-- **After：** `The product and our claims rely on construction, not training; construction plus enumeration is not a substitute for—or approximation of—training, but a distinct verification discipline (weights constructed from tables, not trained). section 7.3 records one illustrative historical Adam comparison only, and preregistered study A2 owns systematic training comparisons.`
+- **After：** `The product and our claims rely on construction, not training; construction plus enumeration is not a substitute for—or approximation of—training, but a distinct verification discipline (weights constructed from tables, not trained). Section 7.3 records one illustrative historical Adam comparison only, and preregistered study A2 owns systematic training comparisons.`
 - **本拍改**（Paper A 摘要表面；闭合上拍 #242 abs SAME 缺口）。
 
 ---
@@ -61,7 +61,7 @@
 | CN `research/unisacc-paper.md` | `d00fd2507fde66253a12efd2f3b3048282b7acb7` | **CHANGED** → `dd22dc1c4dde5e0abd8da7f3b72316da4eed255d` |
 | EN `research/unisacc-paper.en.md` | `5ed764f4ffdd9d23f2ea2aaf39de4098b4e489ff` | **CHANGED** → `b10c1fc8e8e74bc0c2f36000b1cf5b1351982845` |
 | TeX `research/arxiv-paper-a/main.tex` | `bf62f9e90f67957cf2242153a910fc1420a9aaf0` | **CHANGED** → `33b376437ea541c8a99f3b5e6787d8638cdb0156` |
-| abs `research/arxiv-paper-a/abstract.txt` | `d2eb48f7814b7b578b5644c5e19ff9a76ffe3d3b` | **CHANGED** → `43f0a7fd18ed6769338fd66021f7ff524287876d` |
+| abs `research/arxiv-paper-a/abstract.txt` | `d2eb48f7814b7b578b5644c5e19ff9a76ffe3d3b` | **CHANGED** → `980f670df7734b49a5d90bb3c305cd2b565d0b8b` |
 | Softguess | **NONE×4** | **NONE×4** |
 
 相对 #168 基线：本拍起 Paper A 摘要相对 tip `3205de9b` 四文件均变；闭合上拍 abs SAME。
