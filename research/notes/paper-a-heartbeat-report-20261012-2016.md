@@ -7,7 +7,7 @@
 | --- | --- |
 | 本拍切口 | **C**（优先序：E 新杂质未锁定 → C tip-refresh；禁 B 叠卡；假 A 无） |
 | tip before | `6045f96122cdaeee5fe076d3bcf8efefd42f8aea`（= #318 after Cut E 2001） |
-| tip after（本 C 合入后） | （merge 后回填） |
+| tip after（本 C 合入后） |  |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME**；**零**正文 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |

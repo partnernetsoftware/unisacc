@@ -5,7 +5,7 @@
 - **主张一句：** Cut E 网络分片／Jaccard／libneed 另测 ≠ A gate（#317/#318；tip `6045f961`）合入之后，活 gold 测量身份 **仍**锁 **op-87／8769／569**；EN／TeX／abstract 仍标 **op-74／8509／517** — E 分界／tip 前进 **≠** 测量身份闭合 → **仍 seal-blocking**。本拍只 supersede tip 证据；**不改正文键数**；**不叠** Ο1/Ο2 决策卡（仍荐 Ο1；引 1914）；Softguess **NONE×4**。
 - **仓库 tip（本拍核对开工 / TIP_BEFORE）：** `6045f96122cdaeee5fe076d3bcf8efefd42f8aea`（短 `6045f961`；= `docs(paper-a): fill tip-after Cut E network sharding ≠ A gate (20261012-2001) (#318)`；祖先含 `28a51d29`＝#317 E 主钉、`1ae5d992`＝#316 fill C 1928、`d093781a`＝#315 C 1928）
 - **tip-before（任务书起点，已核）：** `6045f96122cdaeee5fe076d3bcf8efefd42f8aea`（相对任务书末次 tip ~6045f961 **无漂**）
-- **tip-after：** （本钉合入后由 fill 拍或本 PR merge tip 回填）
+- **tip-after：** （短 ；= squash Merge #319 本钉）
 - **公开 Latest：** **v0.0.41**（draft=false；assets=7）；tip `UNISACC_VERSION` **0.0.42**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）；Draft 仅 **v0.0.31**
 - **四 blob（git content sha @ tip `6045f961`）：**
   - CN `research/unisacc-paper.md` → `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473`
