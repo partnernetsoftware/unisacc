@@ -4,8 +4,8 @@
 - **Timestamp:** 2026-10-12 15:41 Asia/Singapore (UTC+8)
 - **Role:** 论文撰写员
 - **Tip before:** `a2b03ffa3ad6bad2fd9e8a3af655f051ccf510ef` (short `a2b03ffa`) — re-fetched; = #280 tip; matches task tip-before
-- **Tip after:** TBD (fill after merge)
-- **PR:** TBD
+- **Tip after:** `d7e177e26056cf39c99eb49c3e19e4f9570ec79b` (short `d7e177e2`)
+- **PR:** #281 (nails) + #282 (fill tip-after in notes)
 
 ## Claim
 
@@ -33,7 +33,7 @@
 | `research/arxiv-paper-a/main.tex` | `2a05fcc0eff2a13ed60758d148a06117b7f00921` | CHANGED |
 | `research/arxiv-paper-a/abstract.txt` | `92a6472c92a13cb4e8149bbd798f24e6d6a5f648` | SAME (no Adam accuracy literal) |
 
-## Blob SHAs (after edit; tip-after TBD)
+## Blob SHAs (tip after = d7e177e2)
 
 | Path | Blob SHA after | Action |
 |------|----------------|--------|
