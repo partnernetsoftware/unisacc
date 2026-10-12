@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~14:52 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `42b281b702e014412ddd956107436fc825376df3`（短 `42b281b7`；= #276 after combo T1 #275）
-- **tip after：** `TIP_AFTER_PLACEHOLDER`（短 `TIP_AFTER_SHORT`；= squash Merge #PR_A 本 A）
+- **tip after：** `5fb10f181b2913fdd8f4f4838292d80ee85ef7a8`（短 `5fb10f18`；= squash Merge #277 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN markdown 摘要决策网络实例句裸「精度均为 1.000」／「accuracy 1.000」改名为 **T1 均为 1.000**／**T1 1.000**；与表 1 列头 T1／#275 combo「T1 为 1.000／T1 1.000」对齐；括注 T1／定义 2／非训练精度 **保留**；**TeX `\begin{abstract}` 与 `abstract.txt` SAME**（已是「all exact under T1 …」，无裸 accuracy 1.000 领头词）；**不改**键数身份、表单元格 1.000、product/kernel/weights/facts、投稿方向、定义 2／3 本文、§7.3 Adam「accuracy hit 1.000」（训练对照故意用语，勿钉成 T1）；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件口号 **NONE×4**；软读 **HIT 摘要「精度均为／accuracy 1.000」**（本拍已钉）；残余候选：T1 状态格「全域枚举」、§7.3 Adam「accuracy hit 1.000」（勿钉成 T1）
@@ -56,11 +56,11 @@
 
 ## tip / blob 表
 
-| 项 | before (`42b281b7`) | after (`TIP_AFTER_SHORT`) |
+| 项 | before (`42b281b7`) | after (`5fb10f18`) |
 | --- | --- | --- |
-| tip | `42b281b702e014412ddd956107436fc825376df3` | `TIP_AFTER_PLACEHOLDER`（短 `TIP_AFTER_SHORT`；#PR_A） |
-| CN `research/unisacc-paper.md` | `5aecb9e0d037fa546a32e84e68b33ec36eca795e` | **CHANGED** → `CN_BLOB_AFTER` |
-| EN `research/unisacc-paper.en.md` | `ea74eda6a3a2c2d10e92b1ce05ba3c09f82db386` | **CHANGED** → `EN_BLOB_AFTER` |
+| tip | `42b281b702e014412ddd956107436fc825376df3` | `5fb10f181b2913fdd8f4f4838292d80ee85ef7a8`（短 `5fb10f18`；#277） |
+| CN `research/unisacc-paper.md` | `5aecb9e0d037fa546a32e84e68b33ec36eca795e` | **CHANGED** → `f289fda9f3c0f802d4c5b5eb2b4994f75f454d5a` |
+| EN `research/unisacc-paper.en.md` | `ea74eda6a3a2c2d10e92b1ce05ba3c09f82db386` | **CHANGED** → `4437f14887526280c1dd223264d90bea660b5ff6` |
 | TeX `research/arxiv-paper-a/main.tex` | `7ca29cc5c9c24a6ffb3a7107b9f731915a9a5097` | **SAME** |
 | abs `research/arxiv-paper-a/abstract.txt` | `92a6472c92a13cb4e8149bbd798f24e6d6a5f648` | **SAME** |
 | Softguess 口号 | **NONE×4** | **NONE×4** |
