@@ -11,6 +11,8 @@
  *   pack -o PKG --compressed --mount 006864722f include --mount 006b65726e656c2f KERNELS
  *        --mount 00707265646566696e65732f OUTDIR/predefines OUTDIR/routes.tsv
  * C99 plus POSIX (mkdir, realpath). */
+/* GCC14/glibc + -std=c99: realpath needs _DEFAULT_SOURCE (H1 linux host). */
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
