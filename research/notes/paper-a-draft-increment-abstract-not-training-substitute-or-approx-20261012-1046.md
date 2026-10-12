@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~10:46 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `3205de9b8e305495981c0525d04dbe5b0c598eae`（短 `3205de9b`；= #243 after A #242 §10 conclusion-not-training-substitute；相对任务书 tip `3205de9b` **无漂**）
-- **tip after：** `TIP_AFTER_PLACEHOLDER`（短 `TIP_AFTER_SHORT`；= squash Merge #N 本 A；merge 后回填）
+- **tip after：** `f3f1d59cf6853a46f53601774758cfe8dd805da0`（短 `f3f1d59c`；= squash Merge #244 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX+abs 摘要第三段同义收紧，对齐已硬的 §7.4/§10；**不改**键数身份、product/kernel/weights/facts、投稿方向；**不叠** Ο1（仍荐）；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件 **NONE×4**（机扫 `Softguess`/`softguess`/`SoftGuess`/`权重就是`/`weights are the logic`/`逻辑本身`/`权重即逻辑`/`权重≡逻辑` 均 0 hit；§3「不含 softmax」／「no softmax」否认句不计；**未**粘 Softguess 口号）
@@ -57,7 +57,7 @@
 
 | 项 | before (`3205de9b`) | after（本拍；merge 后回填 tip SHA） |
 | --- | --- | --- |
-| tip | `3205de9b8e305495981c0525d04dbe5b0c598eae` | `TIP_AFTER_PLACEHOLDER` |
+| tip | `3205de9b8e305495981c0525d04dbe5b0c598eae` | `f3f1d59cf6853a46f53601774758cfe8dd805da0` |
 | CN `research/unisacc-paper.md` | `d00fd2507fde66253a12efd2f3b3048282b7acb7` | **CHANGED** → `dd22dc1c4dde5e0abd8da7f3b72316da4eed255d` |
 | EN `research/unisacc-paper.en.md` | `5ed764f4ffdd9d23f2ea2aaf39de4098b4e489ff` | **CHANGED** → `b10c1fc8e8e74bc0c2f36000b1cf5b1351982845` |
 | TeX `research/arxiv-paper-a/main.tex` | `bf62f9e90f67957cf2242153a910fc1420a9aaf0` | **CHANGED** → `33b376437ea541c8a99f3b5e6787d8638cdb0156` |
