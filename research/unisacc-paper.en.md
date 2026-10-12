@@ -119,7 +119,7 @@ Table 1 lists the 18 stages; it is generated from the truth tables and the const
 
 **Table 1. Decision-network instance: key spaces and constructed network sizes** (accuracy by full-domain enumeration = T1 / exhaustive key-by-key equality on the declared domain (Definition 2), not sample fit or training accuracy; **op-74 vocabulary identity**: 8,509 keys, 517 units. The Chinese internal draft Table 1 currently reports the distinct **op-87** identity 8,769 / 569; do not collapse the two until one sealed measurement.)
 
-| Stage | What it decides | Key fields × vocabulary size | Output | Keys | Units | Accuracy |
+| Stage | What it decides | Key fields × vocabulary size | Output | Keys | Units | T1 |
 |---|---|---|---|---:|---:|---:|
 | pp | Action of a preprocessor directive (#if, #ifdef, #define…) given whether its condition holds: enter, skip, pop, or record a macro | directive 9 × defined 2 | 4 | 18 | 6 | 1.000 |
 | lex | Token kind from the current and next character class (identifier, number, string, comment, operator…) | char class 12 × lookahead 12 | 10 | 144 | 11 | 1.000 |
