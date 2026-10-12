@@ -84,8 +84,8 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `c0e1f8704aea7c073b87aa469ff3dd109dc2b366` |
-| tip after（squash merge 后填） | _TBD_ |
-| PR | _TBD_ |
+| tip after（squash Merge #298） | `3cd6514ea60fe69ba25fa613744f93f0a11944f3`（短 `3cd6514e`） |
+| PR | **#298**（squash merge；branch `paper-a/s81-item3-identity-before-matrix-20261012-1723` @ `efe75308`） |
 | Softguess after | **NONE×4** |
-| CN/EN/TeX/abs | CHANGED / CHANGED / CHANGED / SAME |
-| 四 blob after | _TBD_ |
+| CN/EN/TeX/abs | **CHANGED / CHANGED / CHANGED / SAME** |
+| 四 blob after | CN `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` · EN `8f4b3dc0540b2eba05415c8fb49620470974ecba` · TeX `05927f621a62fa3a45183e5b65395e1539c09054` · abs `92a6472c92a13cb4e8149bbd798f24e6d6a5f648`（SAME） |

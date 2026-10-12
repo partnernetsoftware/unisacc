@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `c0e1f870`（= #297 after Cut E Latest-tag churn；**无漂**） |
-| tip after（本 A squash merge） | _TBD_ |
+| tip after（本 A squash merge） | `3cd6514e`（= squash Merge #298） |
 | Softguess | **NONE×4**（BEFORE+AFTER） |
 | Paper A 正文 | CN/EN/TeX **CHANGED**（仅 §8.1#3）；abs **SAME** |
 | 挡粘仍开 | §8.1#3（矩阵仍开；本拍只钉身份先于矩阵）、8509/8769（class-(a)）、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡） |
