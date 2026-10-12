@@ -3,7 +3,7 @@
 - **切口:** C 真缺口钉
 - **主张:** c42 env-pin closeout + product-closure（tip 0.0.42 / Latest v0.0.41）不闭合 §8.1#3 同身份六目标原生矩阵，也不闭合 8509/8769 双身份；相对 paper tip `80a8c629` 四 blob SAME；Softguess NONE×4；env-pin／c42 Draft-candidate／product-closure ≠ A seal-before。
 - **证据:**
-  - tip before `ffbc9e11` (`ffbc9e112f10421c28d4546a1c61ea035c33e8d4`) → tip after（本 PR merge 后填）
+  - tip before `ffbc9e11` (`ffbc9e112f10421c28d4546a1c61ea035c33e8d4`) → tip after `aad2dac4` (`aad2dac4a97f52d9c15846ecb6985c8fed831a3a`) via #290; notes fill tip `320d62b4` (#291)
   - 产品叶已在 tip：`2375d0d1` harness / `627fd48b` product-closure / `0b60c16d` gatedeps（零 Paper A 正文文件）
   - CN/EN/TeX/abs vs `80a8c629`：**SAME**
   - Softguess NONE×4（≠ accuracy soft-read CLOSED #286）
