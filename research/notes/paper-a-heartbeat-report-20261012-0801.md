@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `2c909b26`（= #218 after E #217；**无漂**） |
-| tip after（本 C squash merge） | `TIP_AFTER_PLACEHOLDER`（= squash Merge 本 PR；合入后 tip-after fill） |
+| tip after（本 C squash merge） | `5e0b4194`（= squash Merge #219） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文 diff |
 | 挡粘仍开 | §8.1#3、8509/8769、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不重钉 8509） |
@@ -21,3 +21,4 @@
 | 决策卡（不叠） | `paper-a-decision-card-remeasure-identity-20261011-1808.md`（仍荐 Ο1） |
 | Latest／冻结 | 仍 v0.0.40／v0.0.19；不 bump |
 | inventory | `section_8_1_item_3_closable_from_receipts_only=false`；六行仍 `blocked-on-identity`（不重写 JSON） |
+

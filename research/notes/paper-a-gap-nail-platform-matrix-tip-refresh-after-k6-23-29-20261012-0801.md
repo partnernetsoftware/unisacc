@@ -122,7 +122,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `2c909b26550fc151b6e05be160f0d6cdb359e0e4`（K6-29 E #218 tip-after fill） |
-| tip after | `TIP_AFTER_PLACEHOLDER`（Merge 本 C squash；合入后由 tip-after fill PR 回填） |
+| tip after | `5e0b4194ba167609501604be0050954aaee5847c`（Merge #219 squash） |
 | Paper A 末次正文布局 | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout；键数未改） |
 | CN `research/unisacc-paper.md` | `5231dd3bf3e60804c678d48015f1e337edd9dc56` **SAME** vs #168 |
 | EN `research/unisacc-paper.en.md` | `0a707d704079bfef3b2b5193bfa8dc2b5ec90303` **SAME** vs #168 |
@@ -150,3 +150,4 @@
 - inventory：`section_8_1_item_3_closable_from_receipts_only=false`（未改）
 - 决策卡 B 1808：仍荐 Ο1（不叠）
 - 父节点：**A**
+
