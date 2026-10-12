@@ -7,7 +7,7 @@
 | --- | --- |
 | 本拍切口 | **E**（上拍 A §10；禁叠措辞；Ο1 无新信息禁叠 B；#320 后 tip-refresh C＝近重复禁） |
 | tip before | `0fe1451e1183ebeda2a6ea6d1813cd0583887b87`（= #321 after Cut A §10 #320；**无漂**） |
-| tip after（本 E 合入后） | _TBD after squash merge_ |
+| tip after（本 E 合入后） | `b162c150b7aad1ddf7d7f70a5ead08af8684ab6d`（= squash Merge #322） |
 | Softguess | **NONE×4**（CN/EN/TeX/abs；机扫 Softguess／soft-guess／软猜测 均 0） |
 | Paper A 正文 | 四 blob **SAME** vs post-#320 tip；**零**正文 diff |
 | CN blob | `ae1efe0262f6cbbcd913029ccee89a55f7f1c9a8` |
@@ -25,4 +25,4 @@
 
 本拍切口=E. 衍生净化 + 主张：c42-1640 GATE／acceptance FAILED／真红×3／H1=INHERIT 发布债 ≠ A seal-before；**A seal ≠ product acceptance PASS**；旁支父节点回 A（unisacc），是未来产品／release 课题。
 
-上拍路由：Cut A §10 已合 → 本拍不叠 A；Ο1 无新信息 → 不叠 B；无新测量 → 不 tip-refresh C。tip `0fe1451e`→_TBD_；正文 SAME×4；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-derive-purify-c42-1640-acceptance-failed-true-reds-not-a-gate-20261012-2132.md`；`research/notes/paper-a-heartbeat-report-20261012-2132.md`。
+上拍路由：Cut A §10 已合 → 本拍不叠 A；Ο1 无新信息 → 不叠 B；无新测量 → 不 tip-refresh C。tip `0fe1451e`→`b162c150`；正文 SAME×4；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-derive-purify-c42-1640-acceptance-failed-true-reds-not-a-gate-20261012-2132.md`；`research/notes/paper-a-heartbeat-report-20261012-2132.md`。
