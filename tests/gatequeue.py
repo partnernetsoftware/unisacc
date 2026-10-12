@@ -29,7 +29,7 @@ def atomic(path, obj):
 
 def plan(com):
     out = subprocess.check_output(['sh', 'tests/gate.sh', '--plan'] + (['--com'] if com else []),
-                                  env=dict(execution_environment(), TERM_SH='0'), timeout=10)
+                                  env=dict(subprocess_environment(), TERM_SH='0'), timeout=10)
     words = out.decode().split('\0'); assert words.pop() == ''
     jobs = {}; i = 0
     while i < len(words):
@@ -39,11 +39,46 @@ def plan(com):
     assert jobs, 'empty gate plan'
     return jobs
 
+_ENV_PIN = None   # durable pin from GATE_STATE/env-pin.json (c41); identity only
+
 def execution_environment():
+    # Stamp identity: the pinned build env from queue start, not the live agent shell.
+    # Subprocesses use subprocess_environment() so MODEL_COM and per-window knobs stay live.
+    if _ENV_PIN is not None:
+        return dict(_ENV_PIN)
+    import env_pin
+    return env_pin.collect()
+
+def subprocess_environment():
     # Terminal.app supplies a fresh transport identifier for each window.
-    # Suites do not receive it either: reuse hashes the actual execution env.
     # OLDPWD is shell history, not an input; PWD (the worktree) goes through portable() as {ROOT}.
-    return {k:v for k,v in os.environ.items() if k not in ('TERM_SESSION_ID','OLDPWD')}
+    return {k: v for k, v in os.environ.items() if k not in ('TERM_SESSION_ID', 'OLDPWD')}
+
+def init_env_pin(state):
+    """Load GATE_STATE/env-pin.json before fingerprinting; refuse resume without a pin."""
+    global _ENV_PIN
+    import env_pin
+    pin_path = pathlib.Path(state) / 'env-pin.json'
+    receipt = pathlib.Path(state) / 'start-receipt.json'
+    results = pathlib.Path(state) / 'results.json'
+    if pin_path.is_file():
+        try:
+            _ENV_PIN = env_pin.load(pin_path)
+        except ValueError as e:
+            raise SystemExit('queue: %s' % e)
+        if receipt.is_file():
+            try:
+                r = json.loads(receipt.read_text())
+            except (OSError, ValueError):
+                r = {}
+            want = r.get('env_pin_sha256') if isinstance(r, dict) else None
+            if isinstance(want, str) and want != env_pin.sha256_of_vars(_ENV_PIN):
+                raise SystemExit('queue: env-pin.json disagrees with start-receipt env_pin_sha256')
+        return
+    if results.is_file():
+        raise SystemExit('queue: env-pin.json missing -- cannot resume stamp identity without the queue start pin')
+    env_pin.write_atomic(pin_path)
+    _ENV_PIN = env_pin.load(pin_path)
 
 def execution_settings():
     return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
@@ -591,6 +626,7 @@ def main():
     if len(exclusive) != len(args.exclusive_suite) or exclusive - jobs.keys():
         ap.error('duplicate/unknown exclusive suite (must belong to selected jobs)')
     state = args.state.resolve(); state.mkdir(parents=True, exist_ok=True)
+    init_env_pin(state)
     lock = (state/'lock').open('a'); fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     revoked = k2b_revoked(state)
     k2b_parts = {}
@@ -735,7 +771,7 @@ def main():
                 kind = 'solo' if n in data.get('retried', []) else ('full' if left >= span - 3 else 'tail')
                 data.setdefault('inflight', {})[n] = {'limit': limit, 'kind': kind, 'left': round(left, 3)}; atomic(path, data)
                 log = (state/(n+'.log')).open('wb')
-                p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=execution_environment())
+                p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=subprocess_environment())
                 active[n] = (p, log, time.monotonic(), limit)
                 print('START',n,'limit='+str(limit),'kind='+kind,'left=%.1f'%left,flush=True)   # 0.0.38: the attempt kind stays in the log
                 left = deadline-time.monotonic()

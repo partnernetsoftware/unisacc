@@ -21,7 +21,8 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 ## 3. 本地全量门禁（`tests/release.sh --com`）
 驱动脚本要点（见 `release-queue-pitfalls` 记忆）：
 - `env TERM_SH_NOFALLBACK=1 ./tests/term.sh env UNISACC_FFI_X86_PROVIDER=… MODEL_COM=… UA=… GATE_STATE=… ./tests/release.sh --com`，退出 75/142 都继续；**下一窗前等上一窗的 `gatequeue.py` 进程退出**（否则状态锁冲突、结果被清）。
-- 环境变量全部进 stamp：第一窗就带齐 `UNISACC_FFI_X86_PROVIDER`（Rosetta union16 需要）。
+- **env-pin（c41）**：`queuestart` 在 `GATE_STATE/env-pin.json` 写入构建相关环境（PATH、编译器/库路径、`UNISACC_*`、`UNISA_*`、locale 等；排除 `CURSOR_*`/`AGENT_*` 等 agent shell 噪声），`start-receipt.json` 记录 `env_pin_sha256`。续跑/定点重试只认该钉，不再把整份 live `environ` 打进 stamp；无 pin 或 sha 不符则拒绝 resume。策略见 `tests/env_pin.py`。
+- 路径类选择器（`MODEL_COM`、`UA` 等）仍经 `execution_settings()` 进 stamp；第一窗就带齐 `UNISACC_FFI_X86_PROVIDER`（Rosetta union16 需要）。
 - 耗时历史按 profile key 存于 `$TMPDIR/unisacc-gate-times-<key>.json`；新 key 先合并旧文件播种，否则每窗只开约 4 个套件。
 - 队列运行期间**不改任何被声明文件**（tests、prd、research、README 都算），否则 `inputs changed` 清空全部结果。
 - **队列跑在冻结的分离工作树里**（0.0.31：主树上他人的提交/未提交编辑三次作废 118、396 个结果）：`git worktree add --detach scratchpad/wtNN HEAD`，同源 UA 从该树 `tests/build_ref.sh X.c X` 构建；gitignored 的 `unisacc.com`、`unisacc.com.build.json`、`unisacc-seed.com` 要手工拷进去（缺了 ffi-product、ape-version、apps-real、strconvert-model、qprefix 立即红）；驱动要带 `REALPROG_CACHE=<主检出>/corpus`（否则 realprog 跳过 lua 报回归）和 `UNISACC_FFI_X86_PROVIDER`（否则 gate-infra、lib-*-rosetta 红）；完事 `git worktree remove`。

@@ -12,9 +12,14 @@ Q exactly as it was (never half-copied); the refusal reason is printed and appen
 when the backup directory exists."""
 import hashlib, json, os, pathlib, shutil, sys, time
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+import env_pin
+
 def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 
 RECEIPTS = ('start-receipt.json', 'start-receipt.txt')
+START_META = RECEIPTS + ('env-pin.json',)   # written at queue start; not live results
 
 MISSING = object()   # a file that does not exist -- distinct from a file holding JSON null
 
@@ -42,12 +47,31 @@ def main(argv):
         if B.is_dir():
             with open(B / 'start-refusals.log', 'a') as f: f.write('%s REFUSED %s %s %s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S%z'), mode, art[:16], why))
         return 2
+    def pin_sha_for_start(restored):
+        pin_path = Q / 'env-pin.json'
+        if pin_path.is_file():
+            try:
+                vars_dict = env_pin.load(pin_path)
+            except ValueError as e:
+                return refuse(str(e))
+            return env_pin.sha256_of_vars(vars_dict)
+        if restored:
+            return refuse('restored state missing env-pin.json (cannot resume stamp identity)')
+        Q.mkdir(parents=True, exist_ok=True)
+        if mode == 'fresh' or not held:
+            return env_pin.write_atomic(pin_path)
+        return refuse('%s missing env-pin.json (start a fresh queue or restore a complete backup)' % Q)
+
     def receipt(restored, source, checks):
+        pin_sha = pin_sha_for_start(restored)
+        if isinstance(pin_sha, int):
+            return pin_sha
         Q.mkdir(parents=True, exist_ok=True)
         r = {'mode': mode, 'restored': restored, 'source': source, 'artifact_sha256': art, 'backup': str(B), 'checks': checks,
-             'at': time.strftime('%Y-%m-%dT%H:%M:%S%z')}
+             'env_pin_sha256': pin_sha, 'at': time.strftime('%Y-%m-%dT%H:%M:%S%z')}
         tmp = Q / '.start-receipt.tmp'; tmp.write_text(json.dumps(r, indent=1, sort_keys=True) + '\n'); tmp.replace(Q / 'start-receipt.json')
-        (Q / 'start-receipt.txt').write_text('mode=%s\nrestored=%s\nsource=%s\nartifact_sha256=%s\nbackup=%s\n' % (mode, 'yes' if restored else 'no', source, art, B))
+        (Q / 'start-receipt.txt').write_text('mode=%s\nrestored=%s\nsource=%s\nartifact_sha256=%s\nbackup=%s\nenv_pin_sha256=%s\n' % (
+            mode, 'yes' if restored else 'no', source, art, B, pin_sha))
         if mode == 'fresh': print('queue: fresh start; backup %s left untouched (backup not read)' % B)
         elif restored: print('queue: resumed state from %s (receipt %s/start-receipt.json)' % (source, Q))
         else: print('queue: resume continues %s' % source)
@@ -58,7 +82,7 @@ def main(argv):
         return refuse('%s has a start receipt that is not a valid object (%s); not resumed' % (Q, 'unreadable' if prev == 'unreadable' else type(prev).__name__))
     if mode == 'resume' and prev_art not in (None, art):
         return refuse('%s was started for artifact %s, not this candidate %s' % (Q, str(prev_art)[:16], art[:16]))
-    held = Q.is_dir() and any(p.name not in RECEIPTS for p in Q.iterdir())   # a receipt alone is an empty start
+    held = Q.is_dir() and any(p.name not in START_META for p in Q.iterdir())   # receipt+pin alone is an empty start
     if mode == 'fresh':
         if held: return refuse('%s holds a live state already; a fresh start never continues it (QUEUE_START=resume to continue, or use a new QUEUE_STATE)' % Q)
         return receipt(False, 'none', ['Q absent or empty', 'backup not read'])
@@ -69,7 +93,7 @@ def main(argv):
             bad = state_ok(Q)
             if bad: return refuse('%s: %s' % (Q, bad))
         else:
-            extra = sorted(p.name for p in Q.iterdir() if p.name not in RECEIPTS)
+            extra = sorted(p.name for p in Q.iterdir() if p.name not in START_META)
             return refuse('%s has no results.json yet but holds %s: not a state this queue wrote' % (Q, ', '.join(extra)))
         return receipt(False, 'existing %s' % Q, ['receipt artifact matches', 'existing state well-formed or not yet written'])
     built = load_obj(B / 'unisacc-next.com.build.json')
