@@ -344,7 +344,7 @@ We answer four questions. **RQ1**: Can the method support a real compiler? **RQ2
 
 | Item | Criterion | Result |
 |---|---|---|
-| Stage accuracy | Full-domain enumeration | all 18 stages 1.000 |
+| Stage accuracy | Full-domain enumeration (= T1 / exhaustive key-by-key equality on the declared domain / Definition 2, not sample fit or training accuracy) | all 18 stages 1.000 |
 | Truth table vs cc | Type table key by key against the system cc | 1,400 keys: 1,399 agree, 1 intentional deviation |
 | External corpus c-testsuite | Output equals the system cc | 216 of 220 pass, 0 errors; 4 outside the supported subset |
 | C99 probes | One by one against the system cc | 59/59 |
