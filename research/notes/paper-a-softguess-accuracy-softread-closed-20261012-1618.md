@@ -4,7 +4,7 @@
 - **本拍切口：** **C. 真缺口钉**
 - **主张一句：** **Paper A 正文（CN/EN/TeX/abstract）上剩余的「精度 / accuracy / 1.000」命中均为 already-glossed（T1 或 keep-as-training ≠ T1）或 false-positive（混合精度＝量化），无 must-nail 裸软读；软读战役可引用闭合；本拍不改正文、不叠 Ο1/8509/§8.1#3。**
 - **仓库 tip-before（本拍开工）：** `c005675b9e1dbf03d57216b7a5a08eb3ef3e4fe9`（短 `c005675b`）— Merge #285 Adam table/stability tip-after fix。
-- **tip-after：** （merge 后回填；预期本 notes-only PR squash/merge SHA）
+- **tip-after：** `59ac96e5922bb2ec13d26ad11c179e06ac64caf0`（短 `59ac96e5`；= squash Merge #286 本 C）
 - **父节点：** **A**
 - **状态：** Soft-read **CLOSED** 可引用钉（notes-only）；**不**改正文；**不**叠 Ο1；**不**改 8509/8769；**不**粘 Softguess 字面
 

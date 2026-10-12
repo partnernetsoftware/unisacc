@@ -3,8 +3,8 @@
 - **切口:** C 真缺口钉
 - **主张:** Paper A 正文 CN/EN/TeX/abstract 上「精度/accuracy/1.000」全量机扫：must-nail=0（皆 already-glossed T1 或 keep-as-training ≠ T1，或 FP 混合精度）；软读面 CLOSED 可引用；不改正文。
 - **证据:**
-  - tip before `c005675b` (`c005675b9e1dbf03d57216b7a5a08eb3ef3e4fe9`) → tip after （merge 后回填）
-  - PR （本 notes-only）
+  - tip before `c005675b` (`c005675b9e1dbf03d57216b7a5a08eb3ef3e4fe9`) → tip after `59ac96e5` (`59ac96e5922bb2ec13d26ad11c179e06ac64caf0`)
+  - PR #286 (nail) + tip-after fill PR
   - CN/EN/TeX/abs **SAME**（正文未改）
   - Softguess slogan NONE×4；soft-read result = **CLOSED**（must-nail 0）
   - nail: `research/notes/paper-a-softguess-accuracy-softread-closed-20261012-1618.md`
