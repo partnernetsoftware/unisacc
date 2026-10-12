@@ -7,7 +7,7 @@
 | --- | --- |
 | 本拍切口 | **A**（优先序：有可核对 phrasing → A；非假 Latest 披露；非 C tip-refresh；非 B 叠卡；非 E） |
 | tip before | `55b3c02bbd9f2cbf96a103a532ce3a9169649201`（= #319 after C 2016；**无漂**） |
-| tip after（本 A 合入后） | （merge 后回填） |
+| tip after（本 A 合入后） | （= squash Merge #320） |
 | Softguess | **NONE×4**（BEFORE+AFTER；未粘 `逻辑本身`／`权重即逻辑`／`weights are the logic`） |
 | Paper A 正文 | CN/EN/TeX **DIFF**（仅 §10 开句）；abs **SAME** `92a6472c…` |
 | CN before blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
