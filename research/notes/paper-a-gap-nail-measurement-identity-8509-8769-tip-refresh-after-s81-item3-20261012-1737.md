@@ -5,7 +5,7 @@
 - **主张一句：** @ current tip（after #298/#299 §8.1#3 + afternoon Cut A series + Softguess soft-read CLOSED 1618 + Latest-tag E 1715）：活 gold 仍锁 op-87／8769／569（pin MATCH）；EN／TeX／abstract 仍标 op-74／8509／517；正文成篇硬化／Softguess 软读闭合／§8.1#3 身份先于矩阵／Latest-tag E **≠** 测量身份闭合 → **仍 seal-blocking**；Softguess slogan NONE×4；仍荐 Ο1，不叠卡、不改键数。
 - **仓库 tip（本拍核对开工）：** `ac73e5336a4557daf648ce684669654bd0b8a733`（短 `ac73e533`；= `docs(paper-a): fill tip-after Cut A §8.1#3 identity-before-matrix (20261012-1723) (#299)`；祖先含 `3cd6514e`＝squash Merge #298 §8.1#3、`c0e1f870`/`71853c08`＝#297/#296 Latest-tag E、`59ac96e5`＝#286 Softguess accuracy soft-read CLOSED、以及下午 Cut A 成篇三联系列）
 - **tip-before（任务书起点，已核）：** `ac73e5336a4557daf648ce684669654bd0b8a733`（短 `ac73e533`；相对任务书 **无漂**）
-- **tip-after：** _TBD after merge_（本钉 squash Merge；fill PR 回填）
+- **tip-after：** （短 ；= squash Merge #300 本钉）（本钉 squash Merge；fill PR 回填）
 - **公开 Latest：** **v0.0.41**（assets=7；target `440b5c2b…`）；tip `UNISACC_VERSION` **0.0.42**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）；Draft 仅 **v0.0.31**
 - **四 blob（git content sha @ tip `ac73e533`）：**
   - CN `research/unisacc-paper.md` → `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473`
@@ -114,7 +114,7 @@
 | --- | --- |
 | tip-before（任务书 `ac73e533`） | `ac73e5336a4557daf648ce684669654bd0b8a733` |
 | tip 开工核对 | `ac73e5336a4557daf648ce684669654bd0b8a733`（无漂） |
-| tip-after | _TBD after merge_ |
+| tip-after | （短 ；= squash Merge #300 本钉） |
 | CN / EN / TeX / abstract @ tip | `d4ed54ad` / `8f4b3dc0` / `05927f62` / `92a6472c` |
 | 四 blob vs 0813 | **CHANGED**（成篇／§8.1／soft-read；键数数字位未动） |
 | Softguess slogan | **NONE×4** |
