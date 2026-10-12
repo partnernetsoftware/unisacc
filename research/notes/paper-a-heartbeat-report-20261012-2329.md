@@ -7,7 +7,7 @@
 | --- | --- |
 | 本拍切口 | **A**（优先序：有可核对 contrib#4 phrasing → A；非假 Latest 披露；非 C tip-refresh；非 B 叠卡；非 E 重切 c42） |
 | tip before | `ee90239631ba04f3632df816518b7efc411e2174`（= #328 after A 2256；**无漂**） |
-| tip after（本 A 合入后） | `TIP_AFTER_PLACEHOLDER`（短 `TIP_AFTER_SHORT`；= squash Merge #PR_A 本 A） |
+| tip after（本 A 合入后） | `0f8e9c49bce572a8eb2fd08bd37b7d316ffc0658`（短 `0f8e9c49`；= squash Merge #329 本 A） |
 | Softguess | **NONE×4**（BEFORE+AFTER；未粘 `逻辑本身`／`权重即逻辑`／`weights are the logic`） |
 | Paper A 正文 | CN/EN/TeX **DIFF**（仅贡献#4）；abs **SAME** |
 | CN before blob | `28bc7badd730cab6ca291decca6d22ca530a9241` |
@@ -24,4 +24,4 @@
 
 本拍切口=A. 成篇定稿增量 + 主张：贡献点第 4 条「验证纪律与经验」括注收紧为与摘要／§1／贡献#1／§10 已硬核心主张同框——在声明域上给出表的精确可执行形式（与表逐键同一），不是学得的近似；CN/EN/TeX 三联；abs 有意 SAME；不粘 Softguess。
 
-tip `ee902396`→`TIP_AFTER_SHORT`；正文 CN/EN/TeX DIFF（仅贡献#4）、abs SAME；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-draft-increment-contrib4-exact-executable-not-learned-approx-20261012-2329.md`；`research/notes/paper-a-heartbeat-report-20261012-2329.md`。
+tip `ee902396`→`0f8e9c49`；正文 CN/EN/TeX DIFF（仅贡献#4）、abs SAME；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-draft-increment-contrib4-exact-executable-not-learned-approx-20261012-2329.md`；`research/notes/paper-a-heartbeat-report-20261012-2329.md`。
