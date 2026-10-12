@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `018b4509`（= c42-1640 bucket receipt；**无漂**） |
-| tip after（本 E squash merge） | `TIP_AFTER_PLACEHOLDER`（= squash Merge #PR_MAIN） |
+| tip after（本 E squash merge） | `c0907e0d`（= squash Merge #311） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #298／tip before；**零**正文 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
@@ -25,4 +25,4 @@
 
 本拍切口=E. 衍生净化 + 主张：把「须先清完 tip 018b4509 桶回执上的 rc-class 债／INHERIT 台账（lifecycle／com-multi／com-forward-multi 真红记债、acceptance FAILED、candidate 封存阻断）才许投 A／缺之则根主张或实证不完整」升成闸门——不得搭乘 A；该台账是挂回 A 实证载体的未来产品债／release-engineering 旁支，≠ T1／8509·8769／§8.1#3／Softguess／Ο1。
 
-tip `018b4509`→`TIP_AFTER_PLACEHOLDER`（#PR_MAIN 已合）；正文 SAME×4（CN/EN/TeX/abs）；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐不叠）。待批：Ο1。证据：`research/notes/paper-a-derive-purify-rcclass-debt-inherit-ledger-not-a-gate-20261012-1900.md`；`research/notes/paper-a-heartbeat-report-20261012-1900.md`。
+tip `018b4509`→`c0907e0d`（#311 已合）；正文 SAME×4（CN/EN/TeX/abs）；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐不叠）。待批：Ο1。证据：`research/notes/paper-a-derive-purify-rcclass-debt-inherit-ledger-not-a-gate-20261012-1900.md`；`research/notes/paper-a-heartbeat-report-20261012-1900.md`。
