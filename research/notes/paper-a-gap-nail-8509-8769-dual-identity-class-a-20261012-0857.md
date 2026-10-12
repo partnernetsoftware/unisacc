@@ -4,7 +4,7 @@
 - **本拍切口：** **C. 真缺口钉**
 - **主张一句：** **8509 与 8769 不是同身份下的加减笔误，而是两套已标注并存的词表测量身份（EN/TeX/abstract＝op-74／8509／517；CN＋tip 活 gold＝op-87／8769／569）；分类＝(a) 已披露双身份＋禁互换免责——Δ=260 已溯源，但单一投稿测量身份未选，故仍 seal-blocking；本钉闭合「是不是未标注不一致」之问，不闭合封口。**
 - **仓库 tip-before（本拍开工核对）：** `809871a4f07f1957388a8979e29a8fe1f81a6488`（短 `809871a4`）＝ `research(c41)+plans: H1=INHERIT 0843 …`；祖先含 Softguess C #225/#226、E 041-freeze #223/#224、8509 tip-refresh #221。相对任务书「~603684ed」已前进至 H1 INHERIT 叶；**本拍以 origin/main tip 为准**。
-- **tip-after：** （短 ；= squash Merge #227 本钉）
+- **tip-after：** `682f006df76b18171a17d3bee7d273dcd4b1b18b`（短 `682f006d`；= squash Merge #227 本钉）
 - **公开 Latest：** **v0.0.40**（assets=10）；tip version **0.0.41**（freeze／H1 INHERIT；不 bump Latest）；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）
 - **四 blob @ tip `809871a4`：**
   - CN `5231dd3bf3e60804c678d48015f1e337edd9dc56`
@@ -138,6 +138,7 @@
 - 本笔记：`research/notes/paper-a-gap-nail-8509-8769-dual-identity-class-a-20261012-0857.md`
 - 心跳短报：`research/notes/paper-a-heartbeat-report-20261012-0857.md`
 - tip-before：`809871a4f07f1957388a8979e29a8fe1f81a6488`
+- tip-after：`682f006df76b18171a17d3bee7d273dcd4b1b18b`（短 `682f006d`；= squash Merge #227）
 - Softguess NONE×4；四 blob SAME vs #168（上表 SHA）
 - tip gold pin `b8244bd8…` **MATCH**；built `5e45bf5e…`；H＝569；enc/isel/abi/combo op＝87
 - Δ 溯源：[`paper-a-gap-nail-8509-8769-delta-20261011-2054.md`](paper-a-gap-nail-8509-8769-delta-20261011-2054.md)
