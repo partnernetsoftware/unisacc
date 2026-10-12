@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~12:09 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `9947f6167fb6617c7c23bb2ca2d539c0fba98847`（短 `9947f61`；= #255 tip-after fill for #254 Table1-caption；相对任务书 tip `9947f61` **无漂**）
-- **tip after：** （merge 后填）
+- **tip after：** `6ca1e3c874e5b7a509edeb377d1e80c76d8235bd`（短 `6ca1e3c`；= squash Merge #257 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX 表 3「阶段精度」行判据「全域枚举」／「Full-domain enumeration」同义收紧为 T1／定义 2；**不改** abstract.txt（无表 3 行）；**不改**键数身份、结果列「1.000」、项目列「阶段精度」／Stage accuracy、表 1 已钉表注、product/kernel/weights/facts、投稿方向、定义 2／3 本文、摘要已钉句；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件 **NONE×4**（机扫 `Softguess`/`softguess`/`soft-guess`/`Softmax-as-product`／「权重就是」／“weights are the logic”／「逻辑本身」／「权重即逻辑」／「权重≡逻辑」均 0 hit；§3「不含 softmax」／「no softmax」否认句不计；**未**粘 Softguess 口号）
@@ -59,7 +59,7 @@
 
 | 项 | before (`9947f61`) | after（本拍；merge 后填） |
 | --- | --- | --- |
-| tip | `9947f6167fb6617c7c23bb2ca2d539c0fba98847` | （merge 后填） |
+| tip | `9947f6167fb6617c7c23bb2ca2d539c0fba98847` | `6ca1e3c874e5b7a509edeb377d1e80c76d8235bd`（短 `6ca1e3c`；#257） |
 | CN `research/unisacc-paper.md` | `ec4fc12edc5d47baf598960200b015bf4a7e8830` | **CHANGED** → `b1568103f5ab1e71aecae0027c3ec03ef1cf3b4e` |
 | EN `research/unisacc-paper.en.md` | `30e524175292b6d4d95aa46d10e51a5c1522a06f` | **CHANGED** → `98a7e0a13493674afa78b7241b43e844cd4fed4a` |
 | TeX `research/arxiv-paper-a/main.tex` | `56edb8235d7879e7a60dcc63cc2a5a833e20dae2` | **CHANGED** → `03c69b5f35885d18e084895957c0de9a6ea2e07c` |
