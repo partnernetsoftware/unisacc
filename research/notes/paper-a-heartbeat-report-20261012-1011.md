@@ -7,7 +7,7 @@
 - **Softguess：** **NONE×4**（机扫；未粘口号）
 - **挡粘点：** §8.1#3 六目标同身份矩阵；8509/8769 测量身份；Ο1（荐，不叠）
 - **待批板：** Ο1 仍荐；本拍**不叠**新卡
-- **PR：** #240 merged；本拍 tip-after fill 为后续 PR
+- **PR：** #240+#241 merged
 - **证据路径：**
   - `research/notes/paper-a-draft-increment-not-training-substitute-or-approx-20261012-1011.md`
   - `research/notes/paper-a-heartbeat-report-20261012-1011.md`
