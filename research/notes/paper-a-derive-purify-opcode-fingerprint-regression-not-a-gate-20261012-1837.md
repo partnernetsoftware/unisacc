@@ -85,7 +85,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `e736e697e87a08cd2418f9485a080795722b1142` |
-| tip after（本 note 合入后填） | _(merge 后由 fill PR 填)_ |
+| tip after（本 E squash merge） | `e69f1f37244ceae8b193b1e09063d9a62b7e67e2`（短 `e69f1f37`；= squash Merge #309 本 E） |
 | 末次 Paper A 正文 | #298 `3cd6514ea60fe69ba25fa613744f93f0a11944f3`（§8.1#3 identity-before-matrix；四 blob SAME @ tip） |
 | Cut C 1827 §8.1#3 仍开锚 | `3c8cf0ff`（#307）；fill `e736e697`（#308） |
 | Cut E 1807 c42≠A-gate 锚 | `638c05c7`（#305）；fill `50b08922`（#306） |
