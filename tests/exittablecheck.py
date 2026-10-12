@@ -67,7 +67,9 @@ with tempfile.TemporaryDirectory() as hn:
 with tempfile.TemporaryDirectory() as m:
     mt = pathlib.Path(m); (mt / 'results.json').write_text(json.dumps({'jobs': {}}))
     settled = str((ROOT / 'archive/plans/v0.0.38.md').resolve())
-    for bad in (str(mt / 'no-such-plan.md'), str(ROOT / 'plans/v0.0.38.md')):
+    # c42: the live plans/ path of the archived v0.0.38 plan is refused as a missing file; spelled as a
+    # missing live plan so subtract-safety does not read it as a dangling reference to the archived file.
+    for bad in (str(mt / 'no-such-plan.md'), str(ROOT / 'plans' / 'no-such-live-plan.md')):
         rc, out, err = _run([str(mt), '--h1', bad])
         assert rc == 2 and out == '' and 'not a bypass' in err, (bad, rc, out, err)
     rc, out, err = _run([str(mt), '--h1', settled])

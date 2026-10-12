@@ -17,7 +17,7 @@ LAYERS = ("contract", "stage", "pipeline", "platform")
 CONTRACT = set("""
 finite-template decision-ledger dsl-ops modelbenchcheck bound qprefix
 pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck
-revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader
+revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin
 script-inventory subtract-safety subtract-safety-selftest c99-ledger
 publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
 lib-bindings-registry
@@ -49,7 +49,13 @@ PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff
 STAGE = set("""
 strconvert-host libneed apps-structure seed-construct seedfacts seedparse2-1 seedparse2-2 seed-matrix-shared
 seed-matrix-object seedgen seedape seedpack exec-bridge-linux warn diag target-package prevheaders
-""".split())
+unisa-bits unisa-hostabi unisa-peversion unisa-padded unisa-zdata unisa-linalg unisa-libneed unisa-uns1
+unisa-catalog unisa-fp unisa-tape unisa-tapebin unisa-tapebin-shape unisa-image-fat unisa-image-elf
+unisa-image-macho unisa-image-pe unisa-ape unisa-vm unisa-gold-prec unisa-emit-arm-nwmem
+unisa-gold-lex-label unisa-gold-type-label unisa-gold-binsel-label unisa-gold-opinfo-label
+unisa-gold-peep-label unisa-gold-scope-label unisa-gold-pp-label unisa-gold-reloc-label
+unisa-gold-irsel-label unisa-gold-parse-label
+""".split())   # c42: the 0.0.41 K6 C-reference vs Python point-sample checks: one subsystem each, not a route or target
 STAGE_PREFIX = ("exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
                 "warn-", "diag-", "referee-", "shared-e2-", "seedgen-")
 

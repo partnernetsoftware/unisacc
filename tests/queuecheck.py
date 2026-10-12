@@ -78,6 +78,7 @@ with tempfile.TemporaryDirectory() as td:
     previous_cwd=pathlib.Path.cwd()
     with patch.object(q,'ROOT',fixture), patch.dict(os.environ,environment,clear=True):
         os.chdir(fixture)
+        q._ENV_PIN = None   # c42: an earlier run() in this check leaves the sticky env-pin; this assertion must read the patched environ
         assert not q.executable_inputs(q.execution_settings()), 'implicit compiler file guessed'
         # Session transport changes preserve results; jobs see no session ID.
         session_marker=t/'session-env'
