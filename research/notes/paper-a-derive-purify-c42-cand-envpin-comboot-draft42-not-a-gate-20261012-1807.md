@@ -82,7 +82,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `8fb42477d430aaf81f40692b6037ced6bb2bddc1` |
-| tip after（本 note 合入后填） | `TBD` |
+| tip after（本 note 合入后填） | `638c05c792a670a17071f1f4e3b03dcf95cdf9a0`（短 `638c05c7`；= squash Merge #305 本 E） |
 | 末次 Paper A 正文 | #298 `3cd6514ea60fe69ba25fa613744f93f0a11944f3`（§8.1#3 harden；四 blob SAME @ tip） |
 | Cut A 1752 披露确认锚 | `e5fe6499`（#303）；fill `8fb42477`（#304） |
 | E 1715 Latest-tag churn 锚 | #296/#297 |
