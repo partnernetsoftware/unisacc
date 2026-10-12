@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `8fb42477`（= #304 after Cut A 1752；**无漂**） |
-| tip after（本 E squash merge） | `TBD` |
+| tip after（本 E squash merge） | `638c05c7`（= squash Merge #305） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #298／tip before；**零**正文 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
