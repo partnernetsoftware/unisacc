@@ -78,7 +78,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `3556d64141c67029e26dbdbb5d5ebd25215a6942` |
-| tip after（本 note 合入后填） | _TBD_（squash Merge 本 E 后填） |
+| tip after（本 note 合入后填） | `71853c0803fabfd5678004f73b655418715c3d11`（短 `71853c08`；= squash Merge #296 本 E） |
 | §8.1 Latest 40→41 披露锚 | #293+#294+#295；tip before = `3556d641` |
 | E 0942 Draft/H1/Latest·签升格锚 | #236/#237 |
 | E 0912 材料实开锚 | #230 |
