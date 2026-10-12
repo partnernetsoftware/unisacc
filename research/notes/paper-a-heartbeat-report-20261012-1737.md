@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `ac73e533`（= #299 after Cut A §8.1#3；**无漂**） |
-| tip after（本 C squash merge） | _TBD_ |
+| tip after（本 C squash merge） | （= squash Merge #300） |
 | Softguess slogan | **NONE×4** |
 | Paper A 正文 | CN/EN/TeX/abs **SAME**（本拍 notes-only；键数数字位未动） |
 | 活 gold 重测 | 8769；pin `b8244bd8…` **MATCH**；built `5e45bf5e…` **MATCH**；H=**569** |
