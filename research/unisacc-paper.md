@@ -492,7 +492,7 @@ tape 被 lower 到六个目标后，每个镜像由**按该目标 ABI 解释**�
 
 ```bash
 python3 -m unisa build-weights                  # 由真值表构造全部网络并枚举验证
-python3 -m unisa acc                            # 表 1：全域精度
+python3 -m unisa acc                            # 表 1：全域精度（声明域穷举逐键相等，即 T1／模型检验／定义 2，不是相对样本的拟合精度或训练精度）
 python3 -m unisa run examples/hello.c --fold    # 六目标折叠，期望 6/6
 ./tests/closure.sh examples/*.c tests/c/*.c     # 镜像逐字节闭环
 ./tests/nativeboot.sh                           # N1 = N2 = N3，无 Python
