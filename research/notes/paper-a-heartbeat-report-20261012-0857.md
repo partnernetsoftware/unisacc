@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（origin/main 开工） | `809871a4`（H1=INHERIT 0843；相对任务书 ~603684ed 已前进） |
-| tip after | （merge 后填） |
+| tip after（本 C squash merge） | （= squash Merge #227） |
 | Softguess | **NONE×4**（机证；主切已由 0846 钉，本拍不重粘） |
 | Paper A 正文 | 四 blob **SAME×4** vs #168；**零**键数 diff；notes-only |
 | 8509/8769 | **仍 sticky**：判 (a)；活 gold pin `b8244bd8…` MATCH／8769／569；EN 8509／517 仍无 tip gold pin |
