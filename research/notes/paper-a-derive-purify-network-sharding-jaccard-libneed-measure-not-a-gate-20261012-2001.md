@@ -72,7 +72,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `1ae5d992521e86d9c0fc3a4a086b5ab8b15f897e` |
-| tip after（本 note 合入后填） | _(merge 后由 fill PR 填)_ |
+|  tip after | `28a51d29d5004bcf634f0eee8ec70c56fe9a2f28` |
 | Latest／tip version／冻 | Latest **v0.0.41**；tip ver **0.0.42**；冻 **v0.0.19** |
 | CN `research/unisacc-paper.md` | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` **SAME** |
 | EN `research/unisacc-paper.en.md` | `8f4b3dc0540b2eba05415c8fb49620470974ecba` **SAME** |

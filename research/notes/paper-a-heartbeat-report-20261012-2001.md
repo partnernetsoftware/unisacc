@@ -7,7 +7,7 @@
 | --- | --- |
 | 本拍切口 | **E**（Cut A 已闭：§8.1 已披露 Latest=v0.0.41；禁止假 A） |
 | tip before | `1ae5d992521e86d9c0fc3a4a086b5ab8b15f897e`（= #316） |
-| tip after（本 E 合入后） | _(fill PR 回填)_ |
+| tip after（本 E 合入后） | `28a51d29d5004bcf634f0eee8ec70c56fe9a2f28` |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME**；**零**正文 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
@@ -26,4 +26,4 @@
 
 本拍切口=E. 衍生净化 + 主张：§5.2 Jaccard 分片空间／§8 按需库与网络分片须另测 ≠ A seal-before／≠ T1／≠ 8509·8769 闭合／≠ Softguess／≠ §8.1#3；挂回 A（优化旁支，上游 A+E）。
 
-Cut A 路由：tip §8.1 已写 Latest=v0.0.41 → 不假 A。tip `1ae5d992`→_(after)_；正文 SAME×4；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-derive-purify-network-sharding-jaccard-libneed-measure-not-a-gate-20261012-2001.md`；`research/notes/paper-a-heartbeat-report-20261012-2001.md`。
+Cut A 路由：tip §8.1 已写 Latest=v0.0.41 → 不假 A。tip `1ae5d992`→`28a51d29d500`；正文 SAME×4；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（引 1914；不叠卡）。证据：`research/notes/paper-a-derive-purify-network-sharding-jaccard-libneed-measure-not-a-gate-20261012-2001.md`；`research/notes/paper-a-heartbeat-report-20261012-2001.md`。
