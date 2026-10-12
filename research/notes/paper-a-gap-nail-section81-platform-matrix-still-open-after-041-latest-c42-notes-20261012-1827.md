@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~18:27 Asia/Singapore（UTC+8；论文心跳）
 - **本拍切口：** **C. 真缺口钉**
 - **仓库 tip（只读核对 / before）：** `50b08922a0d43219d0c4bd84874a3230c1376b86`（短 `50b08922`）— = squash Merge #306（fill tip-after Cut E 1807）；相对任务书 **无漂**
-- **tip after（本 C squash merge）：** `3c8cf0ff7ec90a4b67b552cf30261a6db028eb75（短 `3c8cf0ff`；= squash Merge #307 本 C）`（合入后填）
+- **tip after（本 C squash merge）：** `3c8cf0ff7ec90a4b67b552cf30261a6db028eb75`（短 `3c8cf0ff`；= squash Merge #307 本 C）
 - **tip `src/version.h`：** `UNISACC_VERSION "0.0.42"`（在研 tip ≠ Latest；本钉不改正文 tip 版号）
 - **公开 Latest（本拍重核）：** tag **v0.0.41**（`gh api .../releases/latest`；`draft=false`；`prerelease=false`；published `2026-10-12T06:21:24Z`＝2026-10-12 14:21 SGT；assets=**7**；target_commitish `440b5c2b16cb7a831f40826873bc2f3f290f6224`）
 - **Draft leftovers：** 仅 **v0.0.31**（`gh release list`）；**无** v0.0.42 Draft／Latest bump／签／公开升格
@@ -117,7 +117,7 @@ EN／TeX：同义（`after a single sealed measurement identity is chosen` … `
 | 项 | 值 |
 | --- | --- |
 | tip before | `50b08922a0d43219d0c4bd84874a3230c1376b86` |
-| tip after | `3c8cf0ff7ec90a4b67b552cf30261a6db028eb75（短 `3c8cf0ff`；= squash Merge #307 本 C）` |
+| tip after | `3c8cf0ff7ec90a4b67b552cf30261a6db028eb75`（短 `3c8cf0ff`；= squash Merge #307） |
 | 末次 Paper A 正文 | #298 `3cd6514ea60fe69ba25fa613744f93f0a11944f3`（§8.1#3 identity-before-matrix；四 blob SAME @ tip） |
 | Cut A 1752 披露确认锚 | `e5fe6499`（#303）；fill `8fb42477`（#304） |
 | Cut E 1807 c42≠A-gate 锚 | `638c05c7`（#305）；fill `50b08922`（#306） |
