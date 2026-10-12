@@ -1,6 +1,6 @@
 # 0.0.41 收口页（freeze 开拍；0805 机房主任代裁）
 
-**状态**：收口可冻已授；**freeze 开**（version→0.0.41 + 刷戳）。**不**预填 queue/seal/Draft PASS；**禁** Draft/Latest/签/公开。
+**状态**：收口可冻已授；**freeze 开**（version→0.0.41 + 刷戳）；**H1=INHERIT（0843）**。允许 candidate/queue 备 Draft 材料；**不**预填产品 PASS；**禁** Latest/签/公开（Draft 创建另授）。
 
 配套：`research/c41-freeze-0805/ruling-freeze-041-auth-0805.md`（权威裁定）；`research/c41-freeze-receipt.md`（事实）；0749 清单/可进收口裁定。
 
@@ -22,7 +22,7 @@
 | 优化管道 / Latest≥0.0.40 / K6-0 | 通过（历史） |
 | 不删 py / 不二次 publish / 不动 Latest | **守住** |
 | bump version.h→0.0.41 | **本拍执行**（见回执） |
-| H1 INHERIT/新建 | **OPEN — 卡点**（挡候选构建；另裁） |
+| H1 INHERIT/新建 | **已裁 INHERIT**（0843；`research/c41-h1-inherit-0843/`；不再挡 candidate） |
 | 不自动开 0.0.42 K7 | **守住**（顺延≠自动开工） |
 
 ## 3. gold / 缺口结算
@@ -36,11 +36,13 @@
 | 步 | 本拍 |
 |---|---|
 | freezecheck → version.h 0.0.41 → refresh_gatedeps | **授且执行** |
-| build_ref / build_candidate / comboot / queue / seal / rc_tag | **另授** |
-| Draft / 签 / 公开 / 动 Latest | **禁**（另授才开） |
+| build_ref / build_candidate / comboot / queue | **0843 已授**（备 Draft 材料） |
+| seal / rc_tag | **可作为材料链**；创建 Draft release 仍另授 |
+| Draft 公开 / 签 / 动 Latest | **禁**（另授才开） |
 
 ## 5. 禁项自检（开拍意图）
 
-未 Draft；未动 Latest；未签；未删 py；未授 K6-30+；未改验收；未预填产品 PASS；H1 未冒称已批。
+未 Draft 公开；未动 Latest；未签；未删 py；未授 K6-30+；未改验收；未预填产品 PASS。H1 已由 0843 裁 INHERIT（非冒称）。
 
-*收口页 2026-10-12 ≈08:05 SGT*
+*收口页 2026-10-12 ≈08:05 SGT；H1 态 0843 刷新*
+
