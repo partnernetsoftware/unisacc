@@ -90,25 +90,34 @@ with tempfile.TemporaryDirectory() as td:
         with patch.dict(os.environ,{'TERM_SESSION_ID':'window-b'}):
             assert q.fingerprint(jobs)==session_stamp
             assert run('session')==0 and session_marker.stat().st_mtime_ns==before
+        # c41 env-pin: live UNISA_MAXSTEPS drift with sticky pin must NOT void (pin holds).
         with patch.dict(os.environ,{'TERM_SESSION_ID':'window-b','UNISA_MAXSTEPS':'17'}):
-            assert q.fingerprint(jobs)!=session_stamp
-            assert run('session')==0 and session_marker.stat().st_mtime_ns!=before
+            assert q.fingerprint(jobs)==session_stamp, 'live fuel drift voided sticky env-pin stamp'
+            assert run('session')==0 and session_marker.stat().st_mtime_ns==before, 'live fuel drift reran under env-pin'
+        # Unpinned: fuel remains an identity factor (clears sticky pin from run()).
+        q._ENV_PIN = None
+        with patch.dict(os.environ,{'UNISA_MAXSTEPS':'17'}):
+            assert q.fingerprint(jobs)!=session_stamp, 'unpinned fuel was not an identity'
         jobs={'candidate':[sys.executable,'-c','import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("ran")',str(marker)]}
         print('queue: Terminal session changes reuse results, suites receive no transport ID, real fuel change reruns')
 
         # Fuel and model inputs affect execution even when the compiler is unchanged.
+        q._ENV_PIN = None
         for key in runtime_selectors:
             assert key not in q.execution_settings()
             with patch.dict(os.environ,{key:''}):
                 assert q.execution_settings().get(key)=='' , 'empty '+key+' was normalised away'
                 empty=q.fingerprint(jobs)
             assert empty!=q.fingerprint(jobs), 'unset/empty '+key+' shared an identity'
+        # c41: fuel identity is captured in env-pin at state start; same state + live drift resumes.
+        # A distinct state dir gets a distinct pin (different fuel) and does not share results.
         with patch.dict(os.environ,{'UNISA_MAXSTEPS':'2'}):
             assert run('fuel')==0
             before=marker.stat().st_mtime_ns
             assert run('fuel')==0 and marker.stat().st_mtime_ns==before
         with patch.dict(os.environ,{'UNISA_MAXSTEPS':'3'}):
-            assert run('fuel')==0 and marker.stat().st_mtime_ns!=before, 'changed fuel reused completed result'
+            assert run('fuel')==0 and marker.stat().st_mtime_ns==before, 'live fuel drift voided env-pin resume'
+            assert run('fuel-b')==0 and marker.stat().st_mtime_ns!=before, 'fresh state with other fuel reused'
         for key in runtime_selectors[1:]:
             data=t/(key+' data');data.write_bytes(b'model input');data.chmod(0o600)
             alternate=t/(key+' alternate');alternate.write_bytes(data.read_bytes());alternate.chmod(0o600)
@@ -166,6 +175,7 @@ with tempfile.TemporaryDirectory() as td:
             else: raise AssertionError('invalid candidate accepted')
     os.chdir(previous_cwd)
     print('queue: five explicit executable hashes, same-byte resume, changed/missing rejection, spaces/PATH/symlink and command-string controls pass')
+    q._ENV_PIN = None   # c41: drop sticky pin from earlier run() so closures see the patched environ
     # Small audited closures, with unknown suites retaining the global fallback.
     # This private tree is independent of concurrent product source edits.
     import hashlib, time
@@ -236,9 +246,21 @@ with tempfile.TemporaryDirectory() as td:
         footer.write_bytes(footer_original)
         print('queue: package-footer loses its completed result when release/apeinspect.py changes')
 
+        # c41 env-pin: earlier run()/main() leave _ENV_PIN sticky on this module.  Stamp identity
+        # follows the pin (not live agent-shell drift).  Clear it to assert live build-env still
+        # identities; then assert a loaded pin ignores live UNISA_MAXSTEPS (pairs envpincheck).
+        q._ENV_PIN = None
         base=q.fingerprint(probe)
         with patch.dict(os.environ,{'UNISA_MAXSTEPS':'123'}):
             assert all(q.fingerprint(probe)[n]!=base[n] for n in probe), 'environment reused'
+        import env_pin as _env_pin
+        pin_dir = private / 'env-pin-probe'; pin_dir.mkdir()
+        _env_pin.write_atomic(pin_dir / 'env-pin.json', {**dict(os.environ), 'UNISA_MAXSTEPS': '1'})
+        q.init_env_pin(pin_dir)
+        pinned = q.fingerprint(probe)
+        with patch.dict(os.environ,{'UNISA_MAXSTEPS':'999'}):
+            assert all(q.fingerprint(probe)[n]==pinned[n] for n in probe), 'env-pin ignored live UNISA_MAXSTEPS'
+        q._ENV_PIN = None
         with patch.object(q.platform,'platform',return_value='different platform'):
             assert all(q.fingerprint(probe)[n]!=base[n] for n in probe), 'platform reused'
         removed=private/'README.md';original=removed.read_bytes();removed.unlink()
@@ -268,6 +290,7 @@ with tempfile.TemporaryDirectory() as td:
         else: raise AssertionError('mid-run input change accepted')
         assert not json.loads((t/'racing/results.json').read_text())['results']
         q.fingerprint=real_fingerprint
+        q._ENV_PIN = None   # c41: run('racing') left a sticky pin from that state
         started=time.monotonic();snap=q.fingerprint(probe)
         saved={'stamp':snap,'jobs':probe,'exclusive':[],'results':{n:{'rc':0} for n in probe}}
         q.resume(saved,q.fingerprint(probe),probe,set())
@@ -305,6 +328,7 @@ subprocess.run([sys.executable, str(ROOT/"tests/provenancecheck.py")], cwd=ROOT,
 def compilercheck_closure_controls(queue, source_root, declaration_path=None):
     """Real fingerprints on a private source fixture; no compiler execution."""
     import copy, hashlib, shutil
+    queue._ENV_PIN = None   # c41: never inherit sticky pin from earlier queuecheck run()
     source_root=pathlib.Path(source_root)
     declaration=json.loads(pathlib.Path(declaration_path or source_root/'tests/gatedeps.json').read_text())
     family={n:dict(declaration['families'][e['family']],command=e['command'],family=e['family']) for n,e in declaration['suites'].items() if n.startswith('exec-driver-') and e['command'][0]=='./exec/c/compilercheck.sh'}

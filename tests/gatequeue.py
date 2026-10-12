@@ -81,9 +81,14 @@ def init_env_pin(state):
     _ENV_PIN = env_pin.load(pin_path)
 
 def execution_settings():
-    return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
+    # c41 env-pin: when a queue pin is loaded, stamp identity reads knobs from the pin
+    # (UNISA_MAXSTEPS etc. still sat in the per-job `settings` slice of fingerprint).  Live
+    # subprocesses keep subprocess_environment(); only identity is pinned.
+    keys = ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
                 'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT',
-                'UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL','UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER') if k in os.environ}
+                'UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL','UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER')
+    src = _ENV_PIN if _ENV_PIN is not None else os.environ
+    return {k: src[k] for k in keys if k in src}
 
 # 0.0.31 P7': path-valued selectors (the candidate, the same-source UA, the FFI provider) live in a
 # per-round scratch directory, so their PATHS changed every rebuild and voided every stamp (0.0.30

@@ -18,6 +18,13 @@ with tempfile.TemporaryDirectory() as td:
     def run(state,window=55,extra=()):
         sys.argv=['gatequeue.py','--state',str(t/state),'--window',str(window),*extra]
         with contextlib.redirect_stdout(io.StringIO()): return q.main()
+    def seed_state(name, obj):
+        # c41: resume with results.json requires env-pin.json (init_env_pin refuse otherwise)
+        import env_pin
+        d = t / name; d.mkdir(exist_ok=True)
+        (d / 'results.json').write_text(json.dumps(obj))
+        env_pin.write_atomic(d / 'env-pin.json')
+        return d
     # 0.0.38 P3/P7: UNVERIFIED, parent deadline, outer-kill interruption, stall stop
     jobs={'hostonly':[sys.executable,'-c','print("UNVERIFIED: required=osx/arm64 observed=lnx/x86_64 missing=native Darwin"); raise SystemExit(77)']}
     assert run('unverified')==4, 'UNVERIFIED must not pass the queue'
@@ -34,8 +41,7 @@ with tempfile.TemporaryDirectory() as td:
     # an outer kill leaves inflight: first counts an interruption (no synthetic rc), a killed window
     # that completed nothing stops the driver; the second interruption is the INTERRUPTED result
     jobs={'victim':[sys.executable,'-c','pass'],'other':[sys.executable,'-c','pass']}
-    d=t/'killed'; d.mkdir()
-    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'inflight':{'victim':{'limit':48}},'window':{'completed':0}}))
+    d=seed_state('killed', {'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'inflight':{'victim':{'limit':48}},'window':{'completed':0}})
     assert run('killed')==3, 'killed window with no progress must stop'
     k=json.loads((d/'results.json').read_text())
     assert k['interrupted']=={'victim':1} and 'victim' not in k['results'] and 'inflight' not in k
@@ -45,13 +51,11 @@ with tempfile.TemporaryDirectory() as td:
     assert v['status']=='INTERRUPTED' and v['rc'] is None, v
     # three windows in a row without any job exit stop the driver instead of 75 forever
     jobs={'never':[sys.executable,'-c','pass']}
-    d=t/'stall'; d.mkdir()
-    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'stalled':3}))
+    d=seed_state('stall', {'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'stalled':3})
     assert run('stall')==3
     # a job that had its early slot (0.0.37 rowcov) gets a full attempt, not endless deferrals
     jobs={'long':[sys.executable,'-c','import time; time.sleep(30)']}
-    d=t/'redefer'; d.mkdir()
-    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'fullwindow':['long'],'stalled':2}))
+    d=seed_state('redefer', {'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'fullwindow':['long'],'stalled':2})
     rc=run('redefer',55,('--parent-deadline',str(_t.monotonic()+9)))
     st=json.loads((d/'results.json').read_text())
     # at a window's start a long job is a full attempt: it is retried alone, not deferred again
@@ -88,9 +92,8 @@ with tempfile.TemporaryDirectory() as td:
     # late-fill marker.  Every path must end in a decided result within a bounded number of windows,
     # no job limit may exceed the parent's span, and no window may sit idle with work pending.
     jobs={'hog':[sys.executable,'-c','import time; time.sleep(60)'], 'quick':[sys.executable,'-c','pass']}
-    d=t/'combo'; d.mkdir()
-    (d/'results.json').write_text(json.dumps({'stamp':stamp[0],'jobs':jobs,'exclusive':['hog'],'results':{},
-                                               'fullwindow':['hog'],'deferred':[{'name':'hog','limit':5}]}))
+    d=seed_state('combo', {'stamp':stamp[0],'jobs':jobs,'exclusive':['hog'],'results':{},
+                                               'fullwindow':['hog'],'deferred':[{'name':'hog','limit':5}]})
     with patch.dict(os.environ,{'TMPDIR':str(d)}):   # private history: the estimate starts cold
         for _ in range(6):
             dl=_t.monotonic()+8

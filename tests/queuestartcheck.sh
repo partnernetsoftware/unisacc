@@ -17,6 +17,8 @@ printf '{"artifact_sha256":"%s","commit":"c1"}\n' "$art" > "$T/cand/unisacc-next
 printf '{"artifact_sha256":"%s","commit":"c1"}\n' "$art" > "$T/bak/unisacc-next.com.build.json"
 printf '{"jobs":{},"results":{"probe":{"rc":0}}}\n' > "$T/bak/state/results.json"
 echo MARKER > "$T/bak/state/probe.log"
+# c41 env-pin: resume refuses a backup state without env-pin.json (stamp identity)
+PYTHONPATH="$R/tests" python3 -c "import env_pin; env_pin.write_atomic(r'$T/bak/state/env-pin.json')"
 printf '{"artifact_sha256":"%s","commit":"other"}\n' "$(printf OTHER | shasum -a 256 | cut -d' ' -f1)" > "$T/bak-wrong/unisacc-next.com.build.json"
 printf '{"jobs":{},"results":{"probe":{"rc":0}}}\n' > "$T/bak-wrong/state/results.json"
 printf '{"artifact_sha256":"%s","commit":"c1"}\n' "$art" > "$T/bak-incomplete/unisacc-next.com.build.json"
