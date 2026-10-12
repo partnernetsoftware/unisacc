@@ -487,7 +487,7 @@ For table-shaped decisions in a compiler, exactness is a property that can be de
 
 ```bash
 python3 -m unisa build-weights                  # construct all networks from truth tables and enumerate
-python3 -m unisa acc                            # Table 1: full-domain accuracy
+python3 -m unisa acc                            # Table 1: full-domain accuracy (T1 / exhaustive key-by-key equality on the declared domain / Definition 2, not sample fit or training accuracy)
 python3 -m unisa run examples/hello.c --fold    # six-target folding, expect 6/6
 ./tests/closure.sh examples/*.c tests/c/*.c     # byte-level image closure
 ./tests/nativeboot.sh                           # N1 = N2 = N3, no Python
