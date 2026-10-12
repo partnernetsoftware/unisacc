@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~11:41 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `de462ea68a6e7d0b3ec8defae72e9c8f80f35f75`（短 `de462ea6`；= #251 tip-after fill for #250 Def2；相对任务书 tip `de462ea6` **无漂**）
-- **tip after：** _（squash merge 后由 tip-after fill 回填）_
+- **tip after：** `daca18ed0cd174f86957bedf336eb98e1bb18d53`（短 `daca18e`；= squash Merge #252 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX 摘要实证句「精度／accuracy 1.000／all exact」同义收紧为 T1／定义 2；**不改** abstract.txt（无「accuracy 1.000」软读字面，已用 all exact）；**不改**键数身份、product/kernel/weights/facts、投稿方向、定义 2／3 本文、T1 表行、贡献列表；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件 **NONE×4**（机扫 `Softguess`/`softguess`/`soft-guess`/`Softmax-as-product`／「权重就是」／“weights are the logic”／「逻辑本身」／「权重即逻辑」／「权重≡逻辑」均 0 hit；§3「不含 softmax」／「no softmax」否认句不计；**未**粘 Softguess 口号）
@@ -57,13 +57,13 @@
 
 ## tip / blob 表
 
-| 项 | before (`de462ea6`) | after（本拍；squash merge 后回填） |
+| 项 | before (`de462ea6`) | after（本拍；#252 `daca18e`） |
 | --- | --- | --- |
-| tip | `de462ea68a6e7d0b3ec8defae72e9c8f80f35f75` | _（待回填）_ |
-| CN `research/unisacc-paper.md` | `482661ec2954ae995a9841145c2b44db2cac95f3` | **CHANGED** |
-| EN `research/unisacc-paper.en.md` | `a7761815fffff16ffa31e1837d68ec46bcf5b396` | **CHANGED** |
-| TeX `research/arxiv-paper-a/main.tex` | `9ee7cd263691f961538737885fe0cd9332e6e5c1` | **CHANGED** |
-| abs `research/arxiv-paper-a/abstract.txt` | `980f670df7734b49a5d90bb3c305cd2b565d0b8b` | **SAME**（未改） |
+| tip | `de462ea68a6e7d0b3ec8defae72e9c8f80f35f75` | `daca18ed0cd174f86957bedf336eb98e1bb18d53`（短 `daca18e`；#252） |
+| CN `research/unisacc-paper.md` | `482661ec2954ae995a9841145c2b44db2cac95f3` | **CHANGED** → `4d33c55ea81e100dabd426382cdda559eda2f5d7` |
+| EN `research/unisacc-paper.en.md` | `a7761815fffff16ffa31e1837d68ec46bcf5b396` | **CHANGED** → `844b97f1fbefa85e33b2aca3d8fae6c57dd42744` |
+| TeX `research/arxiv-paper-a/main.tex` | `9ee7cd263691f961538737885fe0cd9332e6e5c1` | **CHANGED** → `569b029ff333a82bd3f1ac58ddc2f698cf36142b` |
+| abs `research/arxiv-paper-a/abstract.txt` | `980f670df7734b49a5d90bb3c305cd2b565d0b8b` | **SAME**（未改；`980f670df7734b49a5d90bb3c305cd2b565d0b8b`） |
 | Softguess | **NONE×4** | **NONE×4** |
 
 ---
