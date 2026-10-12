@@ -79,7 +79,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `e6374a98a62ec0e2607d744d63b0a609bd88d770` |
-| tip after（本 note 合入后填） | （短 ；= squash Merge #230 本 E） |
+| tip after（本 note 合入后填） | \`da84b19edc4a69ccf50a73099768d8ecc772f118\`（短 \`da84b19\`；= squash Merge #230 本 E） |
 | H1=INHERIT 锚 | `809871a4f07f1957388a8979e29a8fe1f81a6488` |
 | Draft 材料实开 tip | `e6374a98`（= tip before） |
 | 上拍 E 锚 tip | `ddc16df6`（#223 squash；0825 freeze E）；其上 NEW = H1 INHERIT＋材料链实开，未 E 净化直至本拍 |
