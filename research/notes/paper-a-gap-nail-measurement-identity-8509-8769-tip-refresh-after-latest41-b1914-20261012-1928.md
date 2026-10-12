@@ -5,7 +5,7 @@
 - **主张一句：** 公开 Latest=**v0.0.41**、tip version **0.0.42**、晚间 Cut E（opcode/rc-class #309–#312）与 Cut B #313/#314 刷新 Ο2→v0.0.41（仍荐 Ο1）之后，活 gold 测量身份 **仍**锁 **op-87／8769／569**；EN／TeX／abstract 仍标 **op-74／8509／517** — Latest 切／tip 漂／E 分界／决策卡刷新 **≠** 测量身份闭合 → **仍 seal-blocking**。本拍只 supersede tip 证据；**不改正文键数**；**不叠** Ο1/Ο2 决策卡；Softguess **NONE×4**。
 - **仓库 tip（本拍核对开工）：** `682ca097c83ce5c9c5f93f578c4ac448712387f1`（短 `682ca097`；= `Paper A B 1914: fill tip-after SHA after #313 squash merge (#314)`；祖先含 `4f3be9b0`＝#313 B 卡、`39d3e91e`/`c0907e0d`＝#312/#311 E rc-class、`79c6f828`/`e69f1f37`＝#310/#309 E opcode、以及 1737 C #300 族）
 - **tip-before（任务书起点，已核）：** `682ca097c83ce5c9c5f93f578c4ac448712387f1`（短 `682ca097`；相对任务书 **无漂**）
-- **tip-after：** `TBD_AFTER_SQUASH_MERGE`（本拍 notes PR squash merge 后由 follow-up 填）
+- **tip-after：** `d093781a2bc00e9e1405683d6aa534ba30ad5ece`（短 `d093781a`；= squash Merge #315 本钉）
 - **公开 Latest：** **v0.0.41**（draft=false；assets=7；target `440b5c2b…`）；tip `UNISACC_VERSION` **0.0.42**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改）；Draft 仅 **v0.0.31**
 - **四 blob（git content sha @ tip `682ca097`）：**
   - CN `research/unisacc-paper.md` → `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473`
@@ -116,7 +116,7 @@
 | --- | --- |
 | tip-before（任务书 `682ca097`） | `682ca097c83ce5c9c5f93f578c4ac448712387f1` |
 | tip 开工核对 | `682ca097c83ce5c9c5f93f578c4ac448712387f1`（无漂） |
-| tip-after | `TBD_AFTER_SQUASH_MERGE`（follow-up 填） |
+| tip-after | `d093781a2bc00e9e1405683d6aa534ba30ad5ece`（短 `d093781a`；= squash Merge #315 本钉） |
 | CN / EN / TeX / abstract @ tip | `d4ed54ad` / `8f4b3dc0` / `05927f62` / `92a6472c` |
 | 四 blob vs 1737／1914 | **SAME / SAME / SAME / SAME** |
 | Softguess slogan | **NONE×4** |
