@@ -4,8 +4,8 @@
 - **Timestamp:** 2026-10-12 15:59 Asia/Singapore (UTC+8)
 - **Role:** 论文撰写员
 - **Tip before:** `bd0d798053d12f730629d1619514c81832d8f4ce` (short `bd0d7980`) — re-fetched at beat start; task cited `a9924191` but main had raced +1 (`docs(release): §29…`); ancestor of tip-before; last beat #281+#282 prose nails remain
-- **Tip after:** _(fill after merge)_
-- **PR:** _(fill)_
+- **Tip after:**  (short )
+- **PR:** #283 (nails) + #284 (fill tip-after in notes)
 
 ## Claim
 
@@ -36,9 +36,9 @@
 
 
 
-## Blob SHAs (working tree / tip after TBD)
+## Blob SHAs (tip after = 03386ef6)
 
-| Path | Blob SHA after (pre-merge hash-object) | Action |
+| Path | Blob SHA after after | Action |
 |------|----------------------------------------|--------|
 | `research/unisacc-paper.md` | `09aa02b8f9365c567127b6da556afc36b1857381` | CHANGED |
 | `research/unisacc-paper.en.md` | `d19189a59240a0f38e85b5b0ae09c0acd0a952b9` | CHANGED |
