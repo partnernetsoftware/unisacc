@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~20:54 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `55b3c02bbd9f2cbf96a103a532ce3a9169649201`（短 `55b3c02b`；= #319 after Cut C 2016 tip-refresh；相对任务书 tip **无漂**）
-- **tip after：** （短 ；= squash Merge #320 本 A）
+- **tip after：** `8e2ab1155c671bff902d28c3a4323a16480d60ce`（短 `8e2ab115`；= squash Merge #320 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX §10 结论**开句**同义收紧，对齐已硬的 §1「精确可执行形式／非学得统计替代」；**不改** abstract（摘要无该结论开句）；**不改**键数身份（8509/8769/9174）、product/kernel/weights/facts、投稿方向；**不叠** Ο1（仍荐）；**不重钉** Softguess／§8.1#3／8509·8769；**不**粘 Softguess 口号字面（`逻辑本身`／`权重即逻辑`／`weights are the logic` 等仍 NONE）
 - **Softguess：** tip 四文件 **NONE×4**（BEFORE+AFTER 机扫 `Softguess`/`softguess`/`SoftGuess`/`权重就是`/`weights are the logic`/`逻辑本身`/`权重即逻辑`/`权重≡逻辑` 均 0 hit；bib「A neural compiler」为他文题名不计；**未**粘 Softguess 口号）
