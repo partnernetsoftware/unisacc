@@ -18,3 +18,17 @@
 - 顺延 0.0.42 ≠ 自动开 K7；归档 ≠ 删除。
 
 *回执 2026-10-12 ≈08:44 SGT*
+
+## 实开（0843 执行窗）
+
+| 项 | 事实 |
+|---|---|
+| wall | 2026-10-12 ≈08:57–09:06 SGT |
+| build_ref | `/tmp/c41-0843/ua` rc0；`--version` 0.0.41 |
+| build_candidate | `/tmp/c41-0843/cand/unisacc-next.com` sha256=`bcd2b9b75129cd511e5bb7fa7acad317e7a54d13bb6750ab4c540bbced07b2b9`；commit=`809871a4` |
+| comboot | fixedpoint 持（同 sha） |
+| queue | 见 `draft-materials-progress-0843.md` / `/tmp/c41-0843/cand.queue/` |
+| 禁项 | 未 Draft 创建；未动 Latest；未签；未公开 |
+| 宿主补丁 | `seed/compilerpack.c` +`_DEFAULT_SOURCE`（GCC14 realpath；seed∉产品闭包） |
+
+*实开补记 ≈09:06 SGT*
