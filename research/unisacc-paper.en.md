@@ -397,7 +397,7 @@ On this workload the self-built compiler takes about 1.5× the time of the tcc-b
 | Single tables (11 stages, 21,925 θ) | all reach training-run accuracy 1.000, 18.8 s | exact |
 | Merging adjacent stages | stuck at 0.8143 even with 12.8× the parameters (45,209 θ) | exact |
 | Extending a table (adding float types) | the type stage drops to 0.9514 at the original width and must be widened | rebuilt once, 3 s, exact |
-| More than 24 targets (synthetic beyond 6) | collapses to 0.4419 | units grow roughly as $39 + 4.2\log_2(\text{targets})$ |
+| More than 24 targets (synthetic beyond 6) | collapses to 0.4419 | exact (T1); unit-count size grows empirically roughly as $39 + 4.2\log_2(\text{targets})$ (size fit, not table approximation or training surrogate) |
 
 **Stability (different protocol).** With the same Adam hyperparameters but **without** the freeze-at-first-training-run-accuracy-1.000 rule, 30 of 99 runs touched training-run accuracy 1.000 and later fell back. That stopping rule is not the same as the frozen rows above and cannot be read as a single experiment.
 
