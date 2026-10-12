@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 ~13:29 Asia/Shanghai（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `b636295141a54d374989b776dc12b932566c1a1f`（短 `b636295`；= #266 tip-after fill on main；paper 父 `#265` tip `96cc83fa` 之后）
-- **tip after：** _(merge 后填；本文件随 A PR 提交时占位)_
+- **tip after：** `5fb5f5dbc85f4db2dc0c948797f21237b538ecbd`（短 `5fb5f5db`；= squash Merge #267 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX §9 相关工作「有限自动机与程序的网络编码」／「Network encodings…」句内「全定义域枚举」／「full declared domain」／TeX 另钉「full-domain enumeration as the release criterion」同义收紧为 T1／定义 2；**不改** abstract.txt（本拍优先 abs SAME；摘要「all exact」已在 TeX/EN 开篇钉过 T1，留作下一拍候选）；**不改**键数身份、表 1／表 3／§6.1／Def2／附录 CLI／P-3／§7.4／摘要已钉句、product/kernel/weights/facts、投稿方向；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件口号机扫 **NONE×4**（`Softguess`/`softguess`/`soft-guess`/`Softmax-as-product`／「权重就是」／“weights are the logic”／「逻辑本身」／「权重即逻辑」／「权重≡逻辑」均 0 hit；§3「不含 softmax」／「no softmax」否认句不计；**未**粘 Softguess 口号）；**软读扫描 HIT §9**（本拍钉点）
@@ -55,9 +55,9 @@
 
 ## tip / blob 表
 
-| 项 | before (`b636295`) | after（#A tip 待填） |
+| 项 | before (`b636295`) | after（#267 tip `5fb5f5db`） |
 | --- | --- | --- |
-| tip | `b636295141a54d374989b776dc12b932566c1a1f` | _(merge 后填)_ |
+| tip | `b636295141a54d374989b776dc12b932566c1a1f` | `5fb5f5dbc85f4db2dc0c948797f21237b538ecbd`（短 `5fb5f5db`；#267） |
 | CN `research/unisacc-paper.md` | `7b3b8735aaed1207a9501e33bd25b3bf3a725384` | **CHANGED** → `5711fd4991c347abdc161acaf894488e755bcacb` |
 | EN `research/unisacc-paper.en.md` | `0fd1612e8d9e1ce41b25877c467f16cd6aab7f90` | **CHANGED** → `55f103209cadb9aedf6cf2f3456c9728a9b337a7` |
 | TeX `research/arxiv-paper-a/main.tex` | `ad31486ecf8f2abdad85bf10eb09a247c6fc8778` | **CHANGED** → `f1e93825d0465a578c286c4361dd02a5daf74036` |
