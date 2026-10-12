@@ -4,8 +4,8 @@
 - **Timestamp:** 2026-10-12 16:26 Asia/Singapore (UTC+8)
 - **Role:** 论文撰写员
 - **Tip before:** `3fc64cd2524ede9d233acb5da8997486810096f0` (short `3fc64cd2`) — = #287 tip-after fill; Softguess accuracy soft-read CLOSED @ #286+#287
-- **Tip after:** _(fill after merge)_
-- **PR:** _(fill)_ (nails) + tip-after fill PR
+- **Tip after:** `80a8c629790380a74c85506422ba9e61866abba2` (short `80a8c629`)
+- **PR:** #288 (nails) + tip-after fill PR
 
 ## Claim
 
@@ -33,7 +33,7 @@
 | `research/arxiv-paper-a/main.tex` | `5d262b88f4f3ecf6bd75456c8c88be5f193171b1` | CHANGED |
 | `research/arxiv-paper-a/abstract.txt` | `92a6472c92a13cb4e8149bbd798f24e6d6a5f648` | SAME |
 
-## Blob SHAs (tip after = _(fill after merge)_)
+## Blob SHAs (tip after = `80a8c629`)
 
 | Path | Blob SHA after | Action |
 |------|----------------|--------|
