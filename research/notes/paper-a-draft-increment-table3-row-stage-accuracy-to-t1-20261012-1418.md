@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-12 14:18 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `9647ed68ef5caf4bf8163ab67ce13eacea822595`（短 `9647ed68`）
-- **tip after：** （短 ；= squash Merge #273 本 A）
+- **tip after：** `ce8bd538812f36b16bf966f66280cba06c288b26`（短 `ce8bd538`；= squash Merge #273 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only CN+EN+TeX 表 3 验收表行标裸「阶段精度」／「Stage accuracy」改名为 **阶段 T1**／**Stage T1**；判据格已钉 T1／定义 2，行标单独仍可被误读为训练／样本阶段精度；**不改** abstract.txt；**不改**键数身份、单元格 1.000、product/kernel/weights/facts、投稿方向、定义 2／3 本文、判据格已钉句；**不叠** Ο1；**不重钉** Softguess／§8.1#3／8509·8769
 - **Softguess：** tip 四文件口号 **NONE×4**；软读 **HIT 表 3 行标「阶段精度／Stage accuracy」**（本拍已钉）；残余候选：摘要／§1「精度均为 1.000」散文、combo「Accuracy 1.000」、§7.3 Adam「accuracy hit 1.000」（训练对照故意用语，勿钉成 T1）
@@ -52,9 +52,9 @@
 
 ## tip / blob 表
 
-| 项 | before (`9647ed68`) | after（短 ；= squash Merge #273 本 A） |
+| 项 | before (`9647ed68`) | after (`ce8bd538`) |
 | --- | --- | --- |
-| tip | `9647ed68ef5caf4bf8163ab67ce13eacea822595` | （填） |
+| tip | `9647ed68ef5caf4bf8163ab67ce13eacea822595` | `ce8bd538812f36b16bf966f66280cba06c288b26`（短 `ce8bd538`；#273） |
 | CN `research/unisacc-paper.md` | `1a59b52ae25dcd11a0a70099688d6ff454be4a9e` | **CHANGED**（行标 阶段精度→阶段 T1） |
 | EN `research/unisacc-paper.en.md` | `7370053fa9abba8cfc5947a6e1dfb27e821179f2` | **CHANGED**（行标 Stage accuracy→Stage T1） |
 | TeX `research/arxiv-paper-a/main.tex` | `5b835dabd408bb66eaa85bc6a2eb9172cf259099` | **CHANGED**（行标 Stage accuracy→Stage T1） |
