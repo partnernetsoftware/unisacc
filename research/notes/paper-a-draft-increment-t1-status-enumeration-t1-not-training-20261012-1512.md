@@ -4,8 +4,8 @@
 - **Timestamp:** 2026-10-12 15:12 Asia/Shanghai (Asia/Singapore UTC+8)
 - **Role:** 论文撰写员
 - **Tip before:** `f0397027c5e43552ba74235b23b2ae6dc1da1f68` (short `f0397027`) — re-fetched; main tip unchanged from task tip-before
-- **Tip after:** _PLACEHOLDER_ (fill after merge)
-- **PR:** _PLACEHOLDER_
+- **Tip after:** `8d513daff5d18f6c0fc7a2416bbf1336edd6998b` (short `8d513daf`)
+- **PR:** #279 (nails) + #280 (fill tip-after in notes)
 
 ## Claim
 
@@ -32,6 +32,15 @@ T1 状态格裸「全域枚举／full-domain enumeration」钉成「声明域穷
 | `research/unisacc-paper.en.md` | `4437f14887526280c1dd223264d90bea660b5ff6` | CHANGED |
 | `research/arxiv-paper-a/main.tex` | `7ca29cc5c9c24a6ffb3a7107b9f731915a9a5097` | CHANGED |
 | `research/arxiv-paper-a/abstract.txt` | `92a6472c92a13cb4e8149bbd798f24e6d6a5f648` | SAME (no T1 status table) |
+
+## Blob SHAs (tip after = 8d513daf)
+
+| Path | Blob SHA after | Action |
+|------|----------------|--------|
+| `research/unisacc-paper.md` | `8177afa826d4f2bd1286455641986df6829eab8c` | CHANGED |
+| `research/unisacc-paper.en.md` | `0378a8091567f715371f73d9ebc26b1fd827efb6` | CHANGED |
+| `research/arxiv-paper-a/main.tex` | `2a05fcc0eff2a13ed60758d148a06117b7f00921` | CHANGED |
+| `research/arxiv-paper-a/abstract.txt` | `92a6472c92a13cb4e8149bbd798f24e6d6a5f648` | SAME |
 
 ## Exact edits
 
@@ -91,6 +100,6 @@ SAME — no T1 status table; no invented change.
 4. Soft-read: other bare 「全域枚举」 sites outside status table already glossed in prior cuts (Table 1 / P-3 / §6.1 row); no further status-cell bare left after this nail
 5. Possible next residual: §7.3 Adam keep-as-training wording audit (do **not** rewrite training metric as T1)
 
-## Softguess re-scan (after local edit; reconfirm on tip after)
+## Softguess re-scan (tip after = 8d513daf)
 
-Expect Softguess_NONE_x4 yes.
+Confirmed Softguess_NONE_x4 yes on tip after (re-scanned CN/EN/TeX/abs).
