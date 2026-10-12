@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（开拍核对） | `50b08922`（= #306 after Cut E 1807；**无漂**） |
-| tip after（本 C squash merge） | `TIP_AFTER_PLACEHOLDER` |
+| tip after（本 C squash merge） | `3c8cf0ff`（= squash Merge #307） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #298／tip before；**零**正文 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
