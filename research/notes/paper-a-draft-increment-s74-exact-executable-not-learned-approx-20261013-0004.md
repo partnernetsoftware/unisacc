@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-13 ~00:04 Asia/Singapore（UTC+8）
 - **切口：** **A. 成篇定稿增量**
 - **仓库 tip（before）：** `b7caac334a342c046a7a120a7f5772615e1defbc`（短 `b7caac33`；= #330 after Cut A contrib#4 tip-after；相对任务书 tip **无漂**）
-- **tip after：** （合入本 A 后填；见 heartbeat-report / tip-after PR）
+- **tip after：** `f67a4692cf5fe8c0a8f3f636eecf604a466406f3`（短 `f67a4692`；= squash Merge #331 本 A）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 $K_s$；unisacc 为 POSIX C99 子集跨架构实证）
 - **状态：** research-only **§7.4 收束「两条可迁移的经验／Two lessons transfer」** CN+EN+TeX 同义收紧，对齐已硬的摘要／§1／贡献#1／贡献#4／§10「精确可执行形式／非学得近似」；保留「不是训练的替代品或逼近／distinct verification discipline that can run through an entire implementation」与「逐字节相同」后半句原框；**abstract.txt SAME**（无 §7.4；摘要核心主张句已硬，本拍 body-only）；**不改**键数身份（8509/8769/9174）、product/kernel/weights/facts、投稿方向；**不叠** Ο1（仍荐）；**不重钉** Softguess／§8.1#3／8509·8769；**不**粘 Softguess 口号字面
 - **Softguess：** tip 四文件 **NONE×4**（BEFORE+AFTER 机扫 `Softguess`/`softguess`/`SoftGuess`/`权重就是`/`weights are the logic`/`逻辑本身`/`权重即逻辑`/`权重≡逻辑` 均 0 hit；**未**粘 Softguess 口号；部署路径「不含 softmax」技术句保留，不计入 Softguess 漂移）
