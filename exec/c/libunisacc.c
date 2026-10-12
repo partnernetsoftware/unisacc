@@ -30,8 +30,10 @@ typedef struct LibraryCallableSite {uint64_t site,key,fixed;us_exports graph;us_
 /* Trusted E3 pairs exact source bytes with one frozen candidate; ABI is certified later. */
 typedef struct LibraryImportAlias {uint64_t id,key,frozen,raw,plan;unsigned char *source;size_t source_length;} LibraryImportAlias;
 typedef struct LibraryCarrierExport {us_export *source;us_carrier_certificate certificate;struct LibraryCarrierExport *next;} LibraryCarrierExport;
+struct UnisaCache;   /* run.c: the context's parsed package and decoded models */
 struct us_context {
     char *package, *definitions, *include_path, *target;
+    struct UnisaCache *cache;
     Source *sources;
     int source_count, optimisation, signature_version;
     unsigned char *tape;
@@ -133,6 +135,13 @@ static void cleanup(void) {
     memset(allocation_buckets,0,sizeof allocation_buckets);
 }
 static void diagnostic(int status,const char *reason,int n,const void *errors);
+/* The context's package bytes and decoded models outlive one call: they are
+   owned by the context cache, outside the tracked per-call domain. */
+static void *untracked_realloc(void *p,size_t n) { return realloc(p,n); }
+static void untracked_free(void *p) { free(p); }
+#define UNISA_PACKAGE_REALLOC untracked_realloc
+#define UNISA_PACKAGE_FREE untracked_free
+#define UNISA_PACKAGE_CACHE 1
 #define UNISA_RUNTIME_LIBRARY
 #define UNISA_RUNTIME_STATE static _Thread_local
 #define UNISA_RUNTIME_PANIC(message) __us_panic(message)
@@ -151,6 +160,12 @@ static void diagnostic(int status,const char *reason,int n,const void *errors);
 #undef realloc
 #undef calloc
 #undef free
+/* Bind the context's package (parsed once per path and file stamp) and
+   publish its decoded-model cache to the routes of this call. */
+static void library_package(us_context *c) {
+    if (!c->cache) { c->cache=calloc(1,sizeof *c->cache); if (!c->cache) __us_panic("out of memory"); }
+    cache_package(c->cache,c->package);
+}
 #include "memory.c"
 #include "../../src/host_dl.h"
 #if defined(_WIN32) && !defined(__UNISA__)
@@ -233,6 +248,7 @@ API void us_free(us_context *c) {
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);free(c->binding_blob);
+    if (c->cache) { cache_release(c->cache); free(c->cache); }
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
     for (int i=0;i<c->argc;i++) free(c->argv[i]); free(c->argv);
@@ -446,7 +462,7 @@ static int library_carrier_model(us_context *c,const char *target,const void *wi
     active=c;volatile int rc=1;
     if(!setjmp(failure)){
         RI=0;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=0;
-        package(c->package);
+        library_package(c);
         char route[64];snprintf(route,sizeof route,"%s/nativeabi",target);
         int present=0;for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,route))present=1;
         if(!present)rc=2;
@@ -458,7 +474,7 @@ static int library_carrier_model(us_context *c,const char *target,const void *wi
             rc=rejected?2:us_carrier_certificate_load(cert,target,input.b,(size_t)input.n,c->error,sizeof c->error);
         }
     }
-    cleanup();active=NULL;RI=NULL;NRI=0;NR=0;
+    cache_settle();cleanup();active=NULL;RI=NULL;NRI=0;NR=0;
     if(rc==2)c->error[0]=0;
     return (int)rc;
 }
@@ -577,7 +593,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         /* Reinitialise thread-local adapter inputs on every invocation. */
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
-        package(c->package);
+        library_package(c);
         ResourceInput resources[11]; memset(resources,0,sizeof resources);
         unsigned char callable_values[2][8];resource_u64(callable_values[0],(uintptr_t)library_callable_make_dispatch);resource_u64(callable_values[1],(uintptr_t)library_callable_call_dispatch);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
@@ -667,7 +683,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             }
         }
     } else rc=1;
-    cleanup(); active=0; RI=0; NRI=0;
+    cache_settle();cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
     if(!rc)rc=library_variadic_sites_prepare(c);
     if(rc){library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
@@ -947,7 +963,7 @@ API int us_relocate(us_context *c) {
     /* Mapping identity must survive longjmp on a malformed model output. */
     if (!setjmp(failure)) {
         RI=0;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=0;
-        package(c->package);
+        library_package(c);
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
@@ -987,7 +1003,7 @@ API int us_relocate(us_context *c) {
             if(c->signatures && us_exports_load_bridge(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
         }
     } else rc=1;
-    cleanup();active=0;RI=0;NRI=0;
+    cache_settle();cleanup();active=0;RI=0;NRI=0;
 #if defined(_WIN32) && !defined(__UNISA__)
     library_winimports_free(&winimports);
 #endif

@@ -41,6 +41,18 @@ static void die(const char *m) { UNISA_RUNTIME_PANIC(m); }
 #include "codec.h"
 #include "packagefooter.h"
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
+/* Package bytes and decoded model tables are owned by their cache (one per
+   library context; one static slot for the command line), not by the
+   per-call runtime allocation domain. The library routes these through an
+   untracked allocator; the command line uses plain realloc/free. */
+#ifndef UNISA_PACKAGE_REALLOC
+#define UNISA_PACKAGE_REALLOC realloc
+#define UNISA_PACKAGE_FREE free
+#endif
+/* UNISA_PACKAGE_CACHE (defined by the library) selects the per-context cache
+   entry points instead of the command-line package()/unpackage() pair. */
+static void *mrealloc(void *p, size_t n) { p = UNISA_PACKAGE_REALLOC(p, n ? n : 1); if (!p) die("out of memory"); return p; }
+static void mfree(void *p) { UNISA_PACKAGE_FREE(p); }
 
 /* File operations are OS adaptation, not compiler actions. The native
    POSIX gates return -errno; the host wrapper normalises libc to that form.
@@ -57,6 +69,14 @@ static long io_open(const char *path) {
 }
 static long io_read(long fd, void *p, long n) { return __read(fd, p, n); }
 static long io_close(long fd) { return __close(fd); }
+typedef struct { long long size, mtime, mtime_ns; int valid; } FileStamp;
+/* No stat gate: the stamp is the size only (seek to the end and back). */
+static int io_stamp(long fd, FileStamp *s) {
+    memset(s, 0, sizeof *s);
+    long end = __lseek(fd, 0, 2); if (end < 0) return 0;
+    if (__lseek(fd, 0, 0) < 0) die("cannot read input");
+    s->size = end; s->valid = 1; return 1;
+}
 #else
 #include <unistd.h>
 #include <fcntl.h>
@@ -70,11 +90,39 @@ static long io_open(const char *path) {
 }
 static long io_read(long fd, void *p, long n) { long r = read((int)fd, p, (size_t)n); return r < 0 ? -errno : r; }
 static long io_close(long fd) { return close((int)fd); }
+#include <sys/types.h>
+#include <sys/stat.h>
+typedef struct { long long size, mtime, mtime_ns; int valid; } FileStamp;
+static int io_stamp(long fd, FileStamp *s) {
+    memset(s, 0, sizeof *s);
+#ifdef _WIN32
+    struct _stat64 st; if (_fstat64((int)fd, &st)) return 0;
+#else
+    struct stat st; if (fstat((int)fd, &st)) return 0;
 #endif
-static unsigned char *readstream(long fd, const char *path, int *len) {
-    int n = 0, cap = 65536; unsigned char *b = xrealloc(0, cap);
+#ifdef S_ISREG
+    if (!S_ISREG(st.st_mode)) return 0;
+#else
+    if ((st.st_mode & S_IFMT) != S_IFREG) return 0;
+#endif
+    s->size = st.st_size; s->mtime = st.st_mtime;
+#if defined(__linux__) && defined(st_mtime)
+    s->mtime_ns = st.st_mtim.tv_nsec;
+#endif
+    s->valid = 1; return 1;
+}
+#endif
+/* Regular files are read into one buffer sized from the stamp (one spare
+   byte lets the final read observe EOF); streams keep the doubling buffer. */
+static unsigned char *readstream_with(long fd, const char *path, int *len, void *(*grow)(void *, size_t)) {
+    int n = 0, cap = 65536; FileStamp st;
+    if (io_stamp(fd, &st) && st.size > 0) {
+        if (st.size > INT32_MAX/2) die("file too large");
+        cap = (int)st.size + 1;
+    }
+    unsigned char *b = grow(0, cap);
     for (;;) {
-        if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = xrealloc(b, cap); }
+        if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = grow(b, cap); }
         long r = io_read(fd, b+n, cap-n);
         if (r < 0) { fprintf(stderr, "run: cannot read %s\n", path); die("cannot read input"); }
         if (!r) break;
@@ -83,6 +131,7 @@ static unsigned char *readstream(long fd, const char *path, int *len) {
     }
     *len = n; return b;
 }
+static unsigned char *readstream(long fd, const char *path, int *len) { return readstream_with(fd, path, len, xrealloc); }
 static unsigned char *readfile(const char *path, int *len, int optional) {
     long fd = io_open(path);
     if (fd < 0) {
@@ -148,12 +197,13 @@ static void loadbytes(unsigned char *data, int len) {
     if (NS > len || NQ > len || NSTR > len || NSTR == INT32_MAX) die("bad model count extent");
     ISNET = kind == 'N'; TOPMAX = NS - 1;
     if (ISNET) { TOPMAX=lint(); if (TOPMAX < NS-1 || TOPMAX == INT32_MAX) die("bad network domain"); }
-    STR = xrealloc(0, sizeof *STR * (NSTR + 1)); STRL = xrealloc(0, sizeof *STRL * (NSTR + 1));
+    STR = mrealloc(0, sizeof *STR * (NSTR + 1)); STRL = mrealloc(0, sizeof *STRL * (NSTR + 1));
+    memset(STR, 0, sizeof *STR * (NSTR + 1));
     for (int k = 0; k < NSTR; k++) {
         ltag('S');
         if (LBIN) {
             int n = lint(); if (n < 0 || n > LN-LP || n == INT32_MAX) die("bad binary model string");
-            STR[k]=xrealloc(0,n+1); STRL[k]=n; memcpy(STR[k],LB+LP,n);
+            STR[k]=mrealloc(0,n+1); STRL[k]=n; memcpy(STR[k],LB+LP,n);
             STR[k][n]=0; LP+=n; continue;
         }
         lskip(); int begin = LP;
@@ -161,12 +211,12 @@ static void loadbytes(unsigned char *data, int len) {
         int size = LP-begin; unsigned char *buf = LB+begin;
         int n = size == 1 && buf[0] == '-' ? 0 : size/2;
         if (size == 0 || ((size & 1) && !(size == 1 && buf[0] == '-'))) die("bad string");
-        STR[k] = xrealloc(0, n + 1); STRL[k] = n;
+        STR[k] = mrealloc(0, n + 1); STRL[k] = n;
         for (int j = 0; j < n; j++) STR[k][j] = (char)(hexv(buf[2 * j]) * 16 + hexv(buf[2 * j + 1]));
         STR[k][n] = 0;
     }
-    QOFF = xrealloc(0, sizeof(int) * NQ); QLEN = xrealloc(0, sizeof(int) * NQ);
-    int cap = 1 << 16; QA = xrealloc(0, sizeof(I) * cap); NQA = 0;
+    QOFF = mrealloc(0, sizeof(int) * NQ); QLEN = mrealloc(0, sizeof(int) * NQ);
+    int cap = 1 << 16; QA = mrealloc(0, sizeof(I) * cap); NQA = 0;
     for (int k = 0; k < NQ; k++) {
         int tag = lchar(), prefix = 0, copied = 0, from = 0, n;
         if (tag == 'C') {
@@ -184,7 +234,7 @@ static void loadbytes(unsigned char *data, int len) {
         if (NQA > INT32_MAX-copied) die("sequence extent overflow");
         while (NQA+copied > cap) {
             if (cap > INT32_MAX/2) die("sequence capacity exceeded");
-            cap *= 2; QA = xrealloc(QA, sizeof(I) * cap);
+            cap *= 2; QA = mrealloc(QA, sizeof(I) * cap);
         }
         for (int i = 0; i < copied; i++) QA[NQA++] = QA[from+i];
         for (int a = 0; a < n; a++) {
@@ -192,17 +242,18 @@ static void loadbytes(unsigned char *data, int len) {
             if (NQA > INT32_MAX-6) die("sequence extent overflow");
             if (NQA+6 > cap) {
                 if (cap > INT32_MAX/2) die("sequence capacity exceeded");
-                cap *= 2; QA = xrealloc(QA, sizeof(I) * cap);
+                cap *= 2; QA = mrealloc(QA, sizeof(I) * cap);
             }
             QA[NQA++] = op;
             for (int j = 0; j < ARITY[op]; j++) QA[NQA++] = lnum();
         }
     }
-    SMODE = xrealloc(0, sizeof(int) * NS); ROWC = xrealloc(0, sizeof(int) * NS);
-    ROWK = xrealloc(0, sizeof(int *) * NS); ROWN = xrealloc(0, sizeof(int *) * NS); ROWQ = xrealloc(0, sizeof(int *) * NS);
-    NLO = xrealloc(0, sizeof(int) * NS); NHI = xrealloc(0, sizeof(int) * NS);
-    BN = xrealloc(0, sizeof(int) * NS); BQ = xrealloc(0, sizeof(int) * NS);
-    RETS = xrealloc(0, sizeof(int) * NS); RETOK = xrealloc(0, sizeof(unsigned char *) * NS);
+    SMODE = mrealloc(0, sizeof(int) * NS); ROWC = mrealloc(0, sizeof(int) * NS);
+    ROWK = mrealloc(0, sizeof(int *) * NS); ROWN = mrealloc(0, sizeof(int *) * NS); ROWQ = mrealloc(0, sizeof(int *) * NS);
+    memset(ROWK, 0, sizeof(int *) * NS); memset(ROWN, 0, sizeof(int *) * NS); memset(ROWQ, 0, sizeof(int *) * NS);
+    NLO = mrealloc(0, sizeof(int) * NS); NHI = mrealloc(0, sizeof(int) * NS);
+    BN = mrealloc(0, sizeof(int) * NS); BQ = mrealloc(0, sizeof(int) * NS);
+    RETS = mrealloc(0, sizeof(int) * NS); RETOK = mrealloc(0, sizeof(unsigned char *) * NS);
     for (int s = 0; s < NS; s++) { RETS[s] = -1; RETOK[s] = 0; }
     for (int s = 0; s < NS; s++) {
         if (ISNET) {
@@ -210,7 +261,7 @@ static void loadbytes(unsigned char *data, int len) {
             if (m == 3) {   /* a stack bank with a declared return set */
                 int rs = lint(), rn = lint(), prev = -1;
                 if (rs < 0 || rs >= NQ || rn < 1 || rn > NS) die("bad return declaration");
-                RETS[s] = rs; RETOK[s] = xrealloc(0, NS); memset(RETOK[s], 0, NS);
+                RETS[s] = rs; RETOK[s] = mrealloc(0, NS); memset(RETOK[s], 0, NS);
                 for (int j = 0; j < rn; j++) {
                     int k = lint(); if (k <= prev || k >= NS) die("bad return declaration");
                     RETOK[s][k] = 1; prev = k;
@@ -220,7 +271,7 @@ static void loadbytes(unsigned char *data, int len) {
             if (m < 0 || m > 2 ||
                 lo != (m == 1 ? -1 : 0) || hi != (m == 1 ? TOPMAX : 256) || n < 0 || (I)n > (I)hi - lo) die("bad network bank");
             SMODE[s] = m; NLO[s] = lo; NHI[s] = hi; ROWC[s] = n; BN[s] = bn; BQ[s] = bq;
-            ROWK[s] = xrealloc(0, sizeof(int) * n); ROWN[s] = xrealloc(0, sizeof(int) * n); ROWQ[s] = xrealloc(0, sizeof(int) * n);
+            ROWK[s] = mrealloc(0, sizeof(int) * n); ROWN[s] = mrealloc(0, sizeof(int) * n); ROWQ[s] = mrealloc(0, sizeof(int) * n);
             int prev = lo;
             for (int j = 0; j < n; j++) {
                 ROWK[s][j]=lint(); ROWN[s][j]=lint(); ROWQ[s][j]=lint();
@@ -233,10 +284,10 @@ static void loadbytes(unsigned char *data, int len) {
         if (m < 0 || m > 2 || n < 0) die("bad state");
         SMODE[s] = m; ROWC[s] = n;
         if (m == 1) {                                   /* keyed by the stack top: a short list */
-            ROWK[s] = xrealloc(0, sizeof(int) * n); ROWN[s] = xrealloc(0, sizeof(int) * n); ROWQ[s] = xrealloc(0, sizeof(int) * n);
+            ROWK[s] = mrealloc(0, sizeof(int) * n); ROWN[s] = mrealloc(0, sizeof(int) * n); ROWQ[s] = mrealloc(0, sizeof(int) * n);
             for (int j = 0; j < n; j++) { ROWK[s][j]=lint(); ROWN[s][j]=lint(); ROWQ[s][j]=lint(); }
         } else {                                        /* keyed 0..256: direct */
-            ROWN[s] = xrealloc(0, sizeof(int) * 257); ROWQ[s] = xrealloc(0, sizeof(int) * 257); ROWK[s] = 0;
+            ROWN[s] = mrealloc(0, sizeof(int) * 257); ROWQ[s] = mrealloc(0, sizeof(int) * 257); ROWK[s] = 0;
             for (int j = 0; j < 257; j++) { ROWN[s][j] = dn; ROWQ[s][j] = dq; }
             for (int j = 0; j < n; j++) { int k=lint(), nx=lint(), q=lint(); if (k < 0 || k > 256 || nx < -1 || nx >= NS) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
         }
@@ -265,11 +316,29 @@ UNISA_RUNTIME_STATE unsigned char *PFILE, *PB; UNISA_RUNTIME_STATE int PN, PM, P
 UNISA_RUNTIME_STATE int *POFF, *PLEN, *PRAW; UNISA_RUNTIME_STATE uint32_t *PCRC; UNISA_RUNTIME_STATE int PVER; UNISA_RUNTIME_STATE Stage *STAGES;
 typedef struct { int name, n, data, len; } Resource;
 UNISA_RUNTIME_STATE Resource *RES; UNISA_RUNTIME_STATE int NR;
+/* A parsed package: the file bytes plus the directory tables the globals
+   above point into. It is owned by a cache, built once per package stamp. */
+typedef struct UnisaPackage {
+    char *path; FileStamp stamp; int complete;
+    unsigned char *file, *b; int n, m, s, ver;
+    int *off, *len, *raw; uint32_t *crc; Stage *stages; Resource *res; int nr;
+} Package;
+/* Decoded model tables of one stage. The core reads them through a const
+   CoreModel and never writes them, so a decoded model is reusable as is. */
+typedef struct UnisaModel {
+    int loaded;
+    int ns, nq, nrg, nstr, start, isnet, topmax, nqa;
+    char **str; int *strl; int *qoff, *qlen; I *qa;
+    int *smode, *rowc, **rowk, **rown, **rowq; int *nlo, *nhi, *bn, *bq, *rets; unsigned char **retok;
+} Model;
+typedef struct UnisaCache { Package package; Model *models; int nmodels; } Cache;
+UNISA_RUNTIME_STATE Cache *CACHE;          /* set by the library for the current call; the command line keeps it null */
+UNISA_RUNTIME_STATE int MODEL_LOADING;     /* a decode is in progress: the globals own fresh tables not yet captured */
 /* Borrowed process inputs override carried resources by exact byte key.
    The caller keeps these immutable spans alive for the whole route. */
 typedef struct { const unsigned char *name; int n; const unsigned char *data; int len; } ResourceInput;
 UNISA_RUNTIME_STATE ResourceInput *RI; UNISA_RUNTIME_STATE int NRI;
-static char *pword(void) {
+static char *pword_owned(void) {
     lskip(); int first = LP;
     while (LP < LN && LB[LP] > 32) {
         int c = LB[LP++];
@@ -277,78 +346,169 @@ static char *pword(void) {
               (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/')) die("bad package name");
     }
     int n = LP-first; if (!n) die("missing package name");
-    char *v = xrealloc(0, n+1); memcpy(v, LB+first, n); v[n] = 0; return v;
+    char *v = mrealloc(0, n+1); memcpy(v, LB+first, n); v[n] = 0; return v;
 }
-static void package(const char *path) {
-    PFILE = readfile(path, &PN, 0); PB = PFILE;
-    if (PN < 2 || PB[0] != 'P' || PB[1] != ' ') {
+/* Safe on a partially parsed package: every table is null until allocated,
+   and stage names are zeroed before they are filled. */
+static void package_release(Package *p) {
+    if (p->stages) for (int i = 0; i < p->s; i++) {
+        mfree(p->stages[i].route); mfree(p->stages[i].name); mfree(p->stages[i].in); mfree(p->stages[i].out);
+    }
+    mfree(p->stages); mfree(p->off); mfree(p->len); mfree(p->raw); mfree(p->crc); mfree(p->res); mfree(p->file); mfree(p->path);
+    memset(p, 0, sizeof *p);
+}
+static void package_bind(const Package *p) {
+    PFILE = p->file; PB = p->b; PN = p->n; PM = p->m; PS = p->s; PVER = p->ver;
+    POFF = p->off; PLEN = p->len; PRAW = p->raw; PCRC = p->crc; STAGES = p->stages; RES = p->res; NR = p->nr;
+    if (PVER == 3) crc_init();
+}
+static void package_unbind(void) {
+    PFILE = PB = 0; PN = PM = PS = PVER = 0; POFF = PLEN = PRAW = 0; PCRC = 0; STAGES = 0; RES = 0; NR = 0;
+}
+/* Parse the open package file into p (p must be released/zeroed). The fd is
+   consumed and closed. Every format edge is checked before any route runs. */
+static void package_parse(Package *p, long fd, const char *path) {
+    p->file = readstream_with(fd, path, &p->n, mrealloc); p->b = p->file;
+    if (io_close(fd) < 0) die("close failed");
+    if (p->n < 2 || p->b[0] != 'P' || p->b[1] != ' ') {
         PackageFooter footer;
         /* Signature records follow the package footer in Authenticode APEs.
            Locate only within the validated file/certificate extents. This is
            format handling, not a signature trust decision. */
-        if (!packagefooter_locate_bytes(PFILE, PN, &footer)) die("bad or missing package footer");
-        PB += (int)footer.package_offset; PN = (int)footer.package_length;
+        if (!packagefooter_locate_bytes(p->file, p->n, &footer)) die("bad or missing package footer");
+        p->b += (int)footer.package_offset; p->n = (int)footer.package_length;
     }
-    LBIN = 0; LB = PB; LN = PN; LP = 0;
+    LBIN = 0; LB = p->b; LN = p->n; LP = 0;
     ltag('P'); int version = lint();
     if (version != 1 && version != 2 && version != 3) die("unknown package version");
-    PVER = version; if (version == 3) crc_init();
-    PM = lint(); PS = lint(); NR = version >= 2 ? lint() : 0;
-    if (NR < 0 || NR > PN/5) die("bad resource count");
-    RES = xrealloc(0, sizeof(Resource)*NR);
-    if (PM <= 0 || PS <= 0 || PM > PN/8 || PS > PN/10) die("bad package count");
-    POFF = xrealloc(0, sizeof(int)*PM); PLEN = xrealloc(0, sizeof(int)*PM);
-    PRAW = xrealloc(0, sizeof(int)*PM); PCRC = xrealloc(0, sizeof(uint32_t)*PM);
-    STAGES = xrealloc(0, sizeof(Stage)*PS);
-    for (int i = 0; i < PS; i++) {
-        ltag('D'); Stage *s = &STAGES[i];
-        s->route = pword(); s->name = pword(); s->in = pword(); s->out = pword(); s->model = lint();
-        if (s->model < 0 || s->model >= PM) die("bad package model index");
+    p->ver = version; if (version == 3) crc_init();
+    int pm = lint(), ps = lint(), nr = version >= 2 ? lint() : 0;
+    if (nr < 0 || nr > p->n/5) die("bad resource count");
+    p->res = mrealloc(0, sizeof(Resource)*nr); p->nr = nr;
+    if (pm <= 0 || ps <= 0 || pm > p->n/8 || ps > p->n/10) die("bad package count");
+    p->off = mrealloc(0, sizeof(int)*pm); p->len = mrealloc(0, sizeof(int)*pm);
+    p->raw = mrealloc(0, sizeof(int)*pm); p->crc = mrealloc(0, sizeof(uint32_t)*pm); p->m = pm;
+    p->stages = mrealloc(0, sizeof(Stage)*ps); memset(p->stages, 0, sizeof(Stage)*ps); p->s = ps;
+    Stage *stages = p->stages;
+    for (int i = 0; i < ps; i++) {
+        ltag('D'); Stage *s = &stages[i];
+        s->route = pword_owned(); s->name = pword_owned(); s->in = pword_owned(); s->out = pword_owned(); s->model = lint();
+        if (s->model < 0 || s->model >= pm) die("bad package model index");
         int previous = -1;
-        for (int j = 0; j < i; j++) if (!strcmp(s->route, STAGES[j].route)) {
-            if (!strcmp(s->name, STAGES[j].name)) die("duplicate package stage");
+        for (int j = 0; j < i; j++) if (!strcmp(s->route, stages[j].route)) {
+            if (!strcmp(s->name, stages[j].name)) die("duplicate package stage");
             previous = j;
         }
-        if (previous >= 0 && strcmp(STAGES[previous].out, s->in)) die("package format mismatch");
+        if (previous >= 0 && strcmp(stages[previous].out, s->in)) die("package format mismatch");
     }
-    for (int i = 0; i < PM; i++) {
-        ltag('M'); int n = lint(); PRAW[i]=n; PCRC[i]=0;
+    for (int i = 0; i < pm; i++) {
+        ltag('M'); int n = lint(); p->raw[i]=n; p->crc[i]=0;
         if (version == 3) {
-            PRAW[i]=lint(); int codec=lint(); I checksum=lnum();
-            if (PRAW[i]<=0 || codec!=1 || checksum<0 || checksum>(I)UINT32_MAX) die("bad compressed model header");
-            PCRC[i]=(uint32_t)checksum;
+            p->raw[i]=lint(); int codec=lint(); I checksum=lnum();
+            if (p->raw[i]<=0 || codec!=1 || checksum<0 || checksum>(I)UINT32_MAX) die("bad compressed model header");
+            p->crc[i]=(uint32_t)checksum;
         }
         if (LP >= LN || LB[LP++] != 10 || n <= 0 || n > LN-LP) die("bad package model extent");
         if (version < 3 && LB[LP] != 'N') die("package requires networks");
-        POFF[i] = LP; PLEN[i] = n; LP += n;
+        p->off[i] = LP; p->len[i] = n; LP += n;
     }
-    for (int i = 0; i < NR; i++) {
+    for (int i = 0; i < nr; i++) {
         ltag('F'); int n = lint(), len = lint();
         if (LP >= LN || LB[LP++] != 10 || n <= 0 || len < 0 || n > LN-LP || len > LN-LP-n) die("bad resource extent");
-        RES[i].name = LP; RES[i].n = n; RES[i].data = LP+n; RES[i].len = len;
+        p->res[i].name = LP; p->res[i].n = n; p->res[i].data = LP+n; p->res[i].len = len;
         for (int j = 0; j < i; j++)
-            if (RES[j].n == n && !memcmp(PB+RES[j].name, PB+LP, n)) die("duplicate resource name");
+            if (p->res[j].n == n && !memcmp(p->b+p->res[j].name, p->b+LP, n)) die("duplicate resource name");
         LP += n+len;
     }
     if (LP != LN) die("trailing package data");
+    p->complete = 1;
+}
+static long package_open(const char *path) {
+    long fd = io_open(path);
+    if (fd < 0) { fprintf(stderr, "run: cannot open %s\n", path); die("cannot open input"); }
+    return fd;
+}
+#ifndef UNISA_PACKAGE_CACHE
+/* Command-line package: parsed on every call, released by unpackage(). */
+UNISA_RUNTIME_STATE Package CLIPKG;
+static void package(const char *path) {
+    package_release(&CLIPKG);
+    package_parse(&CLIPKG, package_open(path), path);
+    package_bind(&CLIPKG);
 }
 static void unpackage(void) {
-    for (int i = 0; i < PS; i++) {
-        free(STAGES[i].route); free(STAGES[i].name); free(STAGES[i].in); free(STAGES[i].out);
-    }
-    free(STAGES); free(POFF); free(PLEN); free(PRAW); free(PCRC); free(RES); RES = 0; NR = 0; free(PFILE);
+    package_release(&CLIPKG); package_unbind();
 }
+#endif
 
+static void model_clear(void) {
+    NS = NQ = NRG = NSTR = START = ISNET = TOPMAX = NQA = 0;
+    STR = 0; STRL = QOFF = QLEN = 0; QA = 0;
+    SMODE = ROWC = 0; ROWK = ROWN = ROWQ = 0; NLO = NHI = BN = BQ = RETS = 0; RETOK = 0;
+}
+static void model_capture(Model *m) {
+    m->ns = NS; m->nq = NQ; m->nrg = NRG; m->nstr = NSTR; m->start = START; m->isnet = ISNET; m->topmax = TOPMAX; m->nqa = NQA;
+    m->str = STR; m->strl = STRL; m->qoff = QOFF; m->qlen = QLEN; m->qa = QA;
+    m->smode = SMODE; m->rowc = ROWC; m->rowk = ROWK; m->rown = ROWN; m->rowq = ROWQ;
+    m->nlo = NLO; m->nhi = NHI; m->bn = BN; m->bq = BQ; m->rets = RETS; m->retok = RETOK;
+}
+static void model_bind(const Model *m) {
+    NS = m->ns; NQ = m->nq; NRG = m->nrg; NSTR = m->nstr; START = m->start; ISNET = m->isnet; TOPMAX = m->topmax; NQA = m->nqa;
+    STR = m->str; STRL = m->strl; QOFF = m->qoff; QLEN = m->qlen; QA = m->qa;
+    SMODE = m->smode; ROWC = m->rowc; ROWK = m->rowk; ROWN = m->rown; ROWQ = m->rowq;
+    NLO = m->nlo; NHI = m->nhi; BN = m->bn; BQ = m->bq; RETS = m->rets; RETOK = m->retok;
+}
+/* Safe on a partially decoded model (see loadbytes: arrays of pointers are zeroed when allocated). */
+static void model_release(Model *m) {
+    if (m->str) for (int i = 0; i < m->nstr; i++) mfree(m->str[i]);
+    if (m->rowk) for (int i = 0; i < m->ns; i++) mfree(m->rowk[i]);
+    if (m->rown) for (int i = 0; i < m->ns; i++) mfree(m->rown[i]);
+    if (m->rowq) for (int i = 0; i < m->ns; i++) mfree(m->rowq[i]);
+    if (m->retok) for (int i = 0; i < m->ns; i++) mfree(m->retok[i]);
+    mfree(m->str); mfree(m->strl); mfree(m->qoff); mfree(m->qlen); mfree(m->qa);
+    mfree(m->smode); mfree(m->rowc); mfree(m->rowk); mfree(m->rown); mfree(m->rowq);
+    mfree(m->nlo); mfree(m->nhi); mfree(m->bn); mfree(m->bq); mfree(m->rets); mfree(m->retok);
+    memset(m, 0, sizeof *m);
+}
 /* Model lifetime is one stage. No model-specific state survives unload. */
 static void unload(void) {
-    for (int i = 0; i < NSTR; i++) free(STR[i]);
-    for (int i = 0; i < NS; i++) { free(ROWK[i]); free(ROWN[i]); free(ROWQ[i]); }
-    free(STR); free(STRL); free(QOFF); free(QLEN); free(QA);
-    free(SMODE); free(ROWC); free(ROWK); free(ROWN); free(ROWQ);
-    free(NLO); free(NHI); free(BN); free(BQ);
-    for (int i = 0; i < NS; i++) free(RETOK[i]);
-    free(RETS); free(RETOK);
+    Model m; model_capture(&m); model_release(&m); model_clear();
 }
+
+#ifdef UNISA_PACKAGE_CACHE
+/* Context cache (library only): the package is parsed once per path+stamp
+   and its decoded models are kept by model index until the package changes
+   or the cache is released. On a longjmp out of a decode, cache_settle()
+   frees the tables the globals still own; a package that failed to parse is
+   never reused. */
+static int stamp_equal(const FileStamp *a, const FileStamp *b) {
+    return a->valid && b->valid && a->size == b->size && a->mtime == b->mtime && a->mtime_ns == b->mtime_ns;
+}
+static void cache_release(Cache *k) {
+    if (k->models) for (int i = 0; i < k->nmodels; i++) model_release(&k->models[i]);
+    mfree(k->models); k->models = 0; k->nmodels = 0;
+    package_release(&k->package);
+}
+static void cache_settle(void) {
+    if (MODEL_LOADING) { Model m; model_capture(&m); model_release(&m); MODEL_LOADING = 0; }
+    model_clear(); package_unbind(); CACHE = 0;
+}
+static void cache_package(Cache *k, const char *path) {
+    Package *p = &k->package;
+    long fd = package_open(path);
+    FileStamp stamp; io_stamp(fd, &stamp);
+    if (p->complete && p->path && !strcmp(p->path, path) && stamp_equal(&stamp, &p->stamp)) {
+        if (io_close(fd) < 0) die("close failed");
+    } else {
+        cache_release(k);
+        size_t n = strlen(path) + 1; p->path = mrealloc(0, n); memcpy(p->path, path, n);
+        p->stamp = stamp;
+        package_parse(p, fd, path);
+        k->models = mrealloc(0, sizeof(Model) * p->m); memset(k->models, 0, sizeof(Model) * p->m); k->nmodels = p->m;
+    }
+    package_bind(p); CACHE = k;
+}
+#endif
 
 static void core_model(CoreModel *m) {
     m->ns=NS;
@@ -514,18 +674,26 @@ static int runroute_range(const char *route, const char *first_stage, const char
             ready=1;
         }
         int m = STAGES[i].model;
-        unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
-        if (PVER == 3) {
-            owned = xrealloc(0, PRAW[m]);
-            if (unisa_inflate(owned, PRAW[m], bytes, len)) die("invalid compressed model");
-            if (crc((char *)owned, PRAW[m]) != PCRC[m]) die("compressed model CRC");
-            if (PRAW[m] < 9 || memcmp(owned,"UNINETB1N",9)) die("package requires binary networks");
-            bytes = owned; len = PRAW[m];
+        Model *slot = CACHE && m < CACHE->nmodels ? &CACHE->models[m] : 0;
+        if (slot && slot->loaded) model_bind(slot);
+        else {
+            unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
+            if (PVER == 3) {
+                owned = xrealloc(0, PRAW[m]);
+                if (unisa_inflate(owned, PRAW[m], bytes, len)) die("invalid compressed model");
+                if (crc((char *)owned, PRAW[m]) != PCRC[m]) die("compressed model CRC");
+                if (PRAW[m] < 9 || memcmp(owned,"UNINETB1N",9)) die("package requires binary networks");
+                bytes = owned; len = PRAW[m];
+            }
+            model_clear(); MODEL_LOADING = 1;
+            loadbytes(bytes, len); free(owned); LB = 0;
+            if (slot) { model_capture(slot); slot->loaded = 1; }
+            MODEL_LOADING = 0;
         }
-        loadbytes(bytes, len); free(owned); LB = 0;
         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
         if (!rc) attr_strip(&out);
-        unload(); free(in->b); in->b = out.b; in->n = out.n;
+        if (!slot) unload();
+        free(in->b); in->b = out.b; in->n = out.n;
         if (rc) return rc;
         count++;
         if (last_stage && !strcmp(STAGES[i].name,last_stage)) { ended=1; break; }
