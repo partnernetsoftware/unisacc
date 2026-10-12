@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `4d645c7`（= #237 after E #236；**无漂**） |
-| tip after | （merge 后回填） |
+| tip after | `fda97ed`（= squash Merge #238） |
 | Softguess | **NONE×4**（未粘 Softguess 口号） |
 | Paper A 正文 | CN/EN/TeX **CHANGED**；abs **SAME** vs #168 |
 | 挡粘仍开 | §8.1#3、8509/8769（class-(a)）、Ο1（**仍荐 Ο1**；本拍不叠卡、不重钉 Softguess／8509／§8.1#3） |
