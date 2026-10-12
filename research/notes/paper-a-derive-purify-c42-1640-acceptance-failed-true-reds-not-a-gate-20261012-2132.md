@@ -82,7 +82,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `0fe1451e1183ebeda2a6ea6d1813cd0583887b87` |
-| tip after（本 note 合入后填） | _TBD after squash merge_ |
+| tip after（本 note 合入后填） | `b162c150b7aad1ddf7d7f70a5ead08af8684ab6d`（短 `b162c150`；= squash Merge #322 本 E） |
 | Cut A §10 锚 | `8e2ab115`（#320）；fill `0fe1451e`（#321） |
 | E 1900 rc-class／INHERIT 台账锚 | #311（DISTINCT） |
 | E 1807 c42 战役叶锚 | #305（DISTINCT） |
