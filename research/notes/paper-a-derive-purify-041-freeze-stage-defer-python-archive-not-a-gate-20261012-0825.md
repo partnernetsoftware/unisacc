@@ -82,7 +82,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `2635db08d73527a17340fa1beba4b37b3217a232` |
-| tip after（本 note 合入后填） | `TBD_TIP_AFTER`（短 `TBD`；= squash Merge 本 E；bookkeeping 填） |
+| tip after（本 note 合入后填） | `ddc16df6f5b8e870d4834602d07f3e7a548a2d37`（短 `ddc16df6`；= squash Merge #223 本 E） |
 | freeze 开拍锚 | `c1a3d244a83f`（closeout+auth）；version `7709e024278f`；gatedeps `fa7ac94be1be` |
 | 上拍锚 tip | `2635db08`（#222 tip-after；C #221 8509 已合）；其上 NEW 产品事实 = 0.0.41 freeze／Stage 顺延／不删 py／H1 OPEN，未 E 净化直至本拍 |
 | Paper A 末次正文（TeX/abs） | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout） |
