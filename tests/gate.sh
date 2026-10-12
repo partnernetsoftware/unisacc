@@ -201,6 +201,7 @@ job k2b K2B_UA=${UA:-/tmp/ua_ref} python3 ./tests/k2bcheck.py   # 0.0.40 K2b: na
 job precommithook ./tests/precommithookcheck.sh   # 0.0.40-prep: local pre-commit routes shipping paths through commitgate (scratch repo)
 job queuestart ./tests/queuestartcheck.sh   # 0.0.40: default fresh refuses backup auto-restore; resume is explicit+receipt-bound (fixture)
 job queuestart-strict python3 ./tests/queuestartcheck.py   # 0.0.40: fresh refuses a live state, resume refuses malformed/foreign/unknown sources, no half copy
+job envpin python3 ./tests/envpincheck.py   # c41: CURSOR_/AGENT_ shell drift does not change stamp identity when env-pin is loaded
 job queuestart-launch ./tests/queuestartlaunchcheck.sh   # 0.0.40: the real queue.sh entry refuses a wrong start with zero window launches (fake launcher)
 job queuetimeout ./tests/queuetimeoutcheck.sh   # 0.0.40: window timeouts (142/124) at the real queue.sh never turn green; state kept (fake launcher)
 job gatesummary ./tests/gatesummarycheck.sh   # 0.0.40: the gate summary reads only the leading suite rc field (fixture result lines)

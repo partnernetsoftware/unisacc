@@ -15,6 +15,9 @@ try:
     (B / 'unisacc-next.com.build.json').write_text(json.dumps({'artifact_sha256': art}))
     good = {'stamp': {'a': 's'}, 'jobs': {'a': ['x']}, 'results': {'a': {'rc': 0}}}
     (B / 'state/results.json').write_text(json.dumps(good)); (B / 'state/a.log').write_text('old log\n')
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tests'))
+    import env_pin
+    env_pin.write_atomic(B / 'state/env-pin.json', {'PATH': os.environ.get('PATH', '/usr/bin'), 'HOME': os.environ.get('HOME', '/tmp')})
     # fresh: the backup exists for this very artifact and is still not restored
     Q = T / 'q1'; rc, out = run(Q, B, D, 'fresh')
     if rc or (Q / 'results.json').exists() or json.loads((Q / 'start-receipt.json').read_text())['restored'] is not False: fail('fresh restored a backup: %s' % out)
