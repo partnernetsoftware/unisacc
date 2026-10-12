@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `39d3e91ef6556164c235ba544c1af469fa8e68aa`（= #312 after E rc-class；**无漂**） |
-| tip after（本 B squash merge） | `_TIP_AFTER_PLACEHOLDER_` |
+| tip after（本 B squash merge） | `4f3be9b0fc8caf2261df8ebc987dfca16a1beaaa`（= squash Merge #313） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME**；**零**正文 diff |
 | CN blob | `d4ed54ad8060dcd61831c66bdca5a9a5fa1e1473` |
@@ -25,4 +25,4 @@
 
 本拍切口=B. 决策卡 + 主张：公开 Latest 已切 v0.0.41 后，待批重测身份卡 Ο2 目标须读 v0.0.41（1808 仍写 Ο2=v0.0.40＝标签漂移）；仍荐 Ο1 保冻结 v0.0.19；Ο3 混身份否决；正文 §8.1 披露已对齐 41（本拍不改正文）。
 
-tip `39d3e91e`→`_TIP_AFTER_PLACEHOLDER_`；正文 SAME×4；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（本刷新卡）。证据：`research/notes/paper-a-decision-card-remeasure-identity-20261012-1914.md`；`research/notes/paper-a-heartbeat-report-20261012-1914.md`。
+tip `39d3e91e`→`4f3be9b0fc8caf2261df8ebc987dfca16a1beaaa`；正文 SAME×4；Softguess NONE×4；Latest=v0.0.41／tip ver=0.0.42／Draft 仅 v0.0.31／冻 v0.0.19。挡粘仍开：§8.1#3、8509/8769、Ο1（荐）。待批：Ο1（本刷新卡）。证据：`research/notes/paper-a-decision-card-remeasure-identity-20261012-1914.md`；`research/notes/paper-a-heartbeat-report-20261012-1914.md`。

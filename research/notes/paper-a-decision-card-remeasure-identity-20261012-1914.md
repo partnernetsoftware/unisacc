@@ -2,7 +2,7 @@
 
 - **拍点：** 2026-10-12 ~19:14 Asia/Singapore（UTC+8；论文心跳 · 切口 **B** · 决策卡）
 - **仓库 tip（开拍 / before）：** `39d3e91ef6556164c235ba544c1af469fa8e68aa`（= #312 tip-after fill after Cut E rc-class #311）
-- **仓库 tip（合入 / after）：** `_TIP_AFTER_PLACEHOLDER_`（squash merge 后由 tip-after fill 回填）
+- **仓库 tip（合入 / after）：** `4f3be9b0fc8caf2261df8ebc987dfca16a1beaaa`（= squash Merge #313）
 - **公开 Latest：** tag **v0.0.41**（`gh api .../releases/latest`；`draft=false`；assets=**7**）— **只引 tag / 发布态**；本卡不发明 size 进主张句
 - **Draft 残留：** 仅 **v0.0.31**（draft=true）；与 Ο2 目标无关
 - **tip `src/version.h`：** `UNISACC_VERSION "0.0.42"`（在研 tip ≠ Latest；证据记，不改正文）
@@ -110,4 +110,4 @@
 | Softguess OUT-OF-SCOPE | [`paper-a-gap-nail-softguess-seal-boundary-20261010-1230.md`](paper-a-gap-nail-softguess-seal-boundary-20261010-1230.md)；0846 NONE≠seal-close |
 | Latest | tag **v0.0.41**（draft=false；assets=7） |
 | tip before | `39d3e91ef6556164c235ba544c1af469fa8e68aa` |
-| tip after | `_TIP_AFTER_PLACEHOLDER_` |
+| tip after | `4f3be9b0fc8caf2261df8ebc987dfca16a1beaaa` |
