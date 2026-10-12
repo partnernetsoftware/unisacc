@@ -6,7 +6,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before（任务书／开工核对） | `7e3c1ff`（= #235 after C #234；**无漂**） |
-| tip after（本 E squash merge） | *(merge 后填)* |
+| tip after（本 E squash merge） | `163c636`（= squash Merge #236） |
 | Softguess | **NONE×4** |
 | Paper A 正文 | 四 blob **SAME** vs #168；**零**正文 diff |
 | 挡粘仍开 | §8.1#3、8509/8769（class-(a)）、Ο1\|Ο2（**仍荐 Ο1**；本拍不叠卡、不重钉 Softguess／8509／§8.1#3） |
