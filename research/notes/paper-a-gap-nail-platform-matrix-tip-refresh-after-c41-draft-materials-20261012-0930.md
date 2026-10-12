@@ -126,7 +126,7 @@
 | 项 | 值 |
 | --- | --- |
 | tip before | `cec378c946d7cadcf34af65966d7d11b1bc91779`（#230 chain restore backticks；**无漂**） |
-| tip after | `TBD_AFTER_MERGE`（本拍 squash merge 后填；或 follow-up bookkeeping） |
+| tip after | `e8993986e1171f34880f2381546ed2dfdf736ae1`（squash Merge #234） |
 | Paper A 末次正文布局 | #168 `ae7f7424585f60fc0184e86e3dbd3b32686125bf`（image field layout；键数未改） |
 | CN `research/unisacc-paper.md` | `5231dd3bf3e60804c678d48015f1e337edd9dc56` **SAME** vs #168 |
 | EN `research/unisacc-paper.en.md` | `0a707d704079bfef3b2b5193bfa8dc2b5ec90303` **SAME** vs #168 |
