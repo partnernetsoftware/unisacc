@@ -11,12 +11,12 @@ int main(void) {
     printf("write %ld fsync %d\n", (long)write(fd, "abc\n", 4), fsync(fd));
     d = dup(fd); printf("dup ok %d\n", d > fd);
     close(d); close(fd);
-    printf("access exists %d missing %d errno-enoent %d\n", access("fo.txt", F_OK), access("nope.txt", R_OK), errno == ENOENT);
+    { int a1 = access("fo.txt", F_OK), a2 = access("nope.txt", R_OK), e1 = errno == ENOENT; printf("access exists %d missing %d errno-enoent %d\n", a1, a2, e1); }   /* sequenced: argument order is unspecified */
     unlink("fo.link");
     printf("symlink %d\n", symlink("fo.txt", "fo.link"));
     n = readlink("fo.link", buf, sizeof buf - 1); if (n >= 0) buf[n] = 0;
     printf("readlink %ld %s\n", n, n >= 0 ? buf : "-");
-    mkdir("fo.dir", 0755); printf("rmdir %d again %d enoent %d\n", rmdir("fo.dir"), rmdir("fo.dir"), errno == ENOENT);
+    mkdir("fo.dir", 0755); { int r1 = rmdir("fo.dir"), r2 = rmdir("fo.dir"), e2 = errno == ENOENT; printf("rmdir %d again %d enoent %d\n", r1, r2, e2); }
     fd = open("fo.txt", O_RDONLY); f = fdopen(fd, "r");
     printf("fdopen %d first %c\n", f != NULL, f ? fgetc(f) : '-');
     printf("EINTR %d EISDIR %d ENAMETOOLONG-set %d\n", EINTR, EISDIR, ENAMETOOLONG > 0);

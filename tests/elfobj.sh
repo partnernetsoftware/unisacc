@@ -6,7 +6,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # against the image and the (named) skips are in tests/elfobj.py; this wrapper
 # only supplies the reference compiler.  Linking needs ld.lld (host) or ld
 # (Linux); running the arm64 programs needs the Lima VM named by ELFOBJ_VM
-# (default: default) to be up -- it is a skip otherwise, a failure with STRICT=1.
+# (default: default) to be up -- it is a skip otherwise, rc 77 UNVERIFIED with STRICT=1.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready

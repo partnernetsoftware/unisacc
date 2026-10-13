@@ -6,7 +6,7 @@
 # refused by name (tests/ccinterop/refuse_*.err).
 #   UA=path/to/unisacc ./tests/ccinterop.sh
 #   CCI_VM_ARM (default `default`), CCI_VM_X86 (default minicon-lnx-x86_64): Lima VMs
-#   STRICT=1: a skip is a failure
+#   STRICT=1: a skip is rc 77 with a last line UNVERIFIED: required=... (section 28.7); a wrong result stays rc 1
 here=$(cd "$(dirname "$0")" && pwd)
 # default: the stamped reference build (lib.sh rebuilds it when stale); the old
 # unstamped /tmp/cci-ua default once ran a two-slice-old compiler: 8 false reds
@@ -17,10 +17,10 @@ P="$here/ccinterop"
 B="python3 $here/bound.py"
 tmp=$(mktemp -d /tmp/ccinterop.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
-ok=0; wrong=0; skipped=0
+ok=0; wrong=0; skipped=0; why=
 pass() { ok=$((ok + 1)); echo "ccinterop  ok     $1"; }
 fail() { wrong=$((wrong + 1)); echo "ccinterop  WRONG  $1"; }
-skip() { skipped=$((skipped + 1)); echo "ccinterop  skip   $1"; }
+skip() { skipped=$((skipped + 1)); why="$why${why:+; }$1"; echo "ccinterop  skip   $1"; }
 [ -x "$UA" ] || { echo "ccinterop: no compiler at UA=$UA"; exit 2; }
 
 # refusals: exact first error line, nonzero exit
@@ -89,6 +89,9 @@ done
 [ "${x86ci:-0}" = 1 ] && echo "  skip lnx/x86_64 cells (run in CI: release-check ccinterop-x86)"
 echo "ccinterop  ok $ok   wrong $wrong   skipped $skipped"
 [ $wrong -eq 0 ] || exit 1
-[ "${STRICT:-0}" = 1 ] && [ $skipped -ne 0 ] && exit 1
 [ $ok -gt 0 ] || exit 1
+if [ "${STRICT:-0}" = 1 ] && [ $skipped -ne 0 ]; then
+    echo "UNVERIFIED: required=arm64 Mac and/or Lima lnx guest (limactl) observed=$(uname -s)/$(uname -m) missing=$why"
+    exit 77
+fi
 exit 0

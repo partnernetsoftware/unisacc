@@ -33,14 +33,14 @@ int main(void) {
     errno = 0; fd = open("wp_f.txt", O_WRONLY | O_CREAT | O_EXCL, 0644);
     printf("excl %d eexist %d\n", fd, errno == EEXIST);
     printf("access F %d W %d\n", access("wp_f.txt", F_OK), access("wp_f.txt", W_OK));
-    errno = 0; printf("access missing %d enoent %d\n", access("wp_none.txt", F_OK), errno == ENOENT);
+    { int a3; errno = 0; a3 = access("wp_none.txt", F_OK); printf("access missing %d enoent %d\n", a3, errno == ENOENT); }
     printf("rename %d\n", rename("wp_f.txt", "wp_g.txt"));
     printf("stat old %d new %d\n", stat("wp_f.txt", &st), stat("wp_g.txt", &st));
-    printf("unlink %d again %d\n", unlink("wp_g.txt"), unlink("wp_g.txt"));
-    printf("mkdir %d", mkdir("wp_d", 0755)); printf(" again %d eexist %d\n", mkdir("wp_d", 0755), errno == EEXIST);
+    { int u1 = unlink("wp_g.txt"), u2 = unlink("wp_g.txt"); printf("unlink %d again %d\n", u1, u2); }   /* sequenced: argument order is unspecified */
+    printf("mkdir %d", mkdir("wp_d", 0755)); { int m2 = mkdir("wp_d", 0755), ee = errno == EEXIST; printf(" again %d eexist %d\n", m2, ee); }
     printf("stat dir %d", stat("wp_d", &st)); printf(" isdir %d\n", S_ISDIR(st.st_mode) != 0);
     printf("chdir %d", chdir("wp_d")); printf(" back %d\n", chdir(".."));
-    printf("rmdir %d again %d\n", rmdir("wp_d"), rmdir("wp_d"));
+    { int d1 = rmdir("wp_d"), d2 = rmdir("wp_d"); printf("rmdir %d again %d\n", d1, d2); }
     clock_gettime(CLOCK_MONOTONIC, &a); usleep(20000); clock_gettime(CLOCK_MONOTONIC, &b);
     printf("monotonic %d\n", (b.tv_sec - a.tv_sec) * 1000000000L + (b.tv_nsec - a.tv_nsec) >= 15000000L);
     a.tv_sec = 0; a.tv_nsec = 1000000; printf("nanosleep %d\n", nanosleep(&a, 0));

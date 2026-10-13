@@ -11,7 +11,13 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok=0; bad=0; skip=0
-if [ "$(uname -s)" != Darwin ]; then echo "  skip forward (macOS only in 0.0.19)"; echo; echo "forward  ok 0   wrong 0   skipped 1"; [ "${STRICT:-0}" != 1 ]; exit; fi
+if [ "$(uname -s)" != Darwin ]; then
+    echo "  skip forward (macOS only in 0.0.19)"; echo; echo "forward  ok 0   wrong 0   skipped 1"
+    # section 28.7: nothing ran, so this is UNVERIFIED (rc 77 under STRICT=1), never a pass
+    [ "${STRICT:-0}" != 1 ] && exit 0
+    echo "UNVERIFIED: required=macOS -run host forwarding (dlsym + uffi bridge) observed=$(uname -s)/$(uname -m) missing=darwin host"
+    exit 77
+fi
 for f in tests/forward/*.c; do
     b=$(basename "$f" .c)
     [ "$b" = win ] && continue

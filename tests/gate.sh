@@ -133,6 +133,14 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           seedgen-parse2consumer-1|seedgen-parse2consumer-2|seedgen-parse2consumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-parse2-consumer';;
           lib-windows-imports) req='native-posix|win-export-synthetic|cc|cdx|native-export-probe';;
           lib-lifecycle|lib-callable-catalog) req='native-posix|host|cc,libffi|cdx|native-ffi-probe';;
+          seedgen-construct-prep) req='native-posix|host|python3|cdx|seed-gen-shared-build';;
+          elfobj|com-elfobj) req='native-posix|host,osx/*,win/*,lnx/arm64-lima|cc,python3|cdx|elf-macho-coff-link-and-lima-run-cells';;
+          forward|com-forward) req='darwin-arm64|osx/arm64|cc|cdx|macos-run-host-forwarding';;
+          ccinterop) req='native-posix|host,osx/arm64,lnx/arm64-lima|cc|cdx|cc-interop-link-cells';;
+          syscall6) req='native-posix|host,lnx/arm64-lima|cc|cdx|syscall6-gate-cells';;
+          hosthdr) req='native-posix|host,lnx/arm64-lima|cc|cdx|hosthdr-reference-and-lima-cells';;
+          realprog) req='native-posix|host|cc|cdx|real-program-reference-build';;
+          windows-resolver-host) req='any|win/x86_64,win/arm64|zig|cdx|windows-sdk-cross-build';;
           *) req='UNKNOWN|UNKNOWN|UNKNOWN|unassigned|UNKNOWN';;
         esac
         printf '%s\0%s\0' "$name" "$req"; return
@@ -660,6 +668,7 @@ job seedpack ./tests/seedpackcheck.sh   # 0.0.32 B5: seed/pack.c + compilerpack.
 job seedape ./tests/seedapecheck.sh     # 0.0.32 B5: UA -b + seed/ape.c == unisa ape (product container)
 scparts=$(python3 "$R/tests/seedconstructcheck.py" --list) || scparts=""
 [ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.py --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
+job seedgen-construct-prep python3 ./tests/seedconstructcheck.py --prep   # one content-keyed build of seed/gen.c for every seed-construct shard (3 shards compiling it at once exceeded the 20 s compile limit under load)
 for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
 job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done

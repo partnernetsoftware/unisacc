@@ -16,6 +16,9 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # 0.0.34 X1: the system compiler sees cx.h alone (its other includes stay the system's)
 mkdir -p "$T/cxinc" && cp include/cx.h "$T/cxinc/"
 ok=0; bad=0; skip=0
+# glibc hides POSIX/XSI declarations (setenv, popen, lstat, gmtime_r, ...) under -std=c99, and gcc 14 makes an
+# implicit declaration an error; unisacc's headers declare them, so the reference needs the matching feature macro.
+CCFEAT=; [ "$(uname -s)" = Linux ] && CCFEAT=-D_GNU_SOURCE
 case "$(uname -s)/$(uname -m)" in Darwin/arm64) HOST=osx/arm64;; Darwin/x86_64) HOST=osx/x86_64;; Linux/x86_64) HOST=lnx/x86_64;; Linux/aarch64) HOST=lnx/arm64;; *) echo "hosthdr: no native target"; exit 1;; esac
 # R20-6: every carried header compiles when included on its own, for one
 # target per OS (a header that leans on another's includes, or a body that
@@ -32,7 +35,7 @@ echo "  alone: every include/ header on its own, $HOST lnx/x86_64 win/x86_64"
 for f in tests/hosthdr/*.c; do
     b=$(basename "$f" .c); mkdir -p "$T/u.$b" "$T/c.$b"
     "$_BOUND" 30 "$UA" "$f" -b "$HOST" -o "$T/u.$b/p" 2>"$T/err" || { bad=$((bad+1)); echo "  FAIL $b unisacc: $(head -1 "$T/err")"; continue; }
-    "$_BOUND" 30 cc -std=c99 -w -I "$T/cxinc" -o "$T/c.$b/p" "$f" || { skip=$((skip+1)); echo "  skip $b (cc)"; continue; }
+    "$_BOUND" 30 cc -std=c99 $CCFEAT -w -I "$T/cxinc" -o "$T/c.$b/p" "$f" || { skip=$((skip+1)); echo "  skip $b (cc)"; continue; }
     chmod +x "$T/u.$b/p"; command -v codesign >/dev/null && codesign -f -s - "$T/u.$b/p" >/dev/null 2>&1
     got=$(cd "$T/u.$b" && "$_BOUND" 10 ./p </dev/null 2>&1); want=$(cd "$T/c.$b" && "$_BOUND" 10 ./p </dev/null 2>&1)
     if [ "$got" = "$want" ]; then ok=$((ok+1)); echo "  ok   $b $HOST"; else bad=$((bad+1)); echo "  FAIL $b $HOST"; diff <(echo "$want") <(echo "$got") 2>/dev/null | head -4; fi
@@ -50,4 +53,10 @@ else
 fi
 echo
 echo "hosthdr  ok $ok   wrong $bad   skipped $skip"
-[ "$bad" -eq 0 ] && [ "$ok" -gt 0 ] && { [ "${STRICT:-0}" != 1 ] || [ "$skip" -eq 0 ]; }
+[ "$bad" -eq 0 ] && [ "$ok" -gt 0 ] || exit 1
+# section 28.7: the only skip left on a Linux x86_64 host is the Lima arm64 guest -> UNVERIFIED, not a failure, not a pass
+if [ "${STRICT:-0}" = 1 ] && [ "$skip" -ne 0 ]; then
+    echo "UNVERIFIED: required=Lima $VM (aarch64) guest with gcc, or the cc reference building every probe observed=$(uname -s)/$(uname -m) missing=$skip cell(s) not run (see skip lines)"
+    exit 77
+fi
+exit 0

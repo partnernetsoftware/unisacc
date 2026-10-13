@@ -24,4 +24,10 @@ if command -v limactl >/dev/null && [ "$(limactl list "$VM" --format '{{.Status}
 else skip=$((skip+1)); echo "  skip lnx/arm64 (Lima $VM not running)"; fi
 echo
 echo "syscall6  ok $ok   wrong $bad   skipped $skip"
-[ "$bad" -eq 0 ] && [ "$ok" -gt 0 ] && { [ "${STRICT:-0}" != 1 ] || [ "$skip" -eq 0 ]; }
+[ "$bad" -eq 0 ] && [ "$ok" -gt 0 ] || exit 1
+# section 28.7: a missing guest is UNVERIFIED (rc 77), not a failure and not a pass
+if [ "${STRICT:-0}" = 1 ] && [ "$skip" -ne 0 ]; then
+    echo "UNVERIFIED: required=Lima $VM (aarch64) guest observed=$(uname -s)/$(uname -m) missing=lnx/arm64 cell not run"
+    exit 77
+fi
+exit 0

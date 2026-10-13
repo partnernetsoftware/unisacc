@@ -15,7 +15,7 @@ int main(void) {
     if (stat("hh_dir/f.txt", &st) != 0) { puts("stat failed"); return 1; }
     printf("size %ld reg %d dir %d\n", (long)st.st_size, S_ISREG(st.st_mode) != 0, S_ISDIR(st.st_mode) != 0);
     fd = open("hh_dir/f.txt", O_RDONLY, 0); fstat(fd, &st); printf("fstat size %ld flags %d\n", (long)st.st_size, (fcntl(fd, F_GETFL, 0) & O_ACCMODE) == O_RDONLY);
-    p.fd = fd; p.events = POLLIN; p.revents = 0; printf("poll %d in %d\n", poll(&p, 1, 0), (p.revents & POLLIN) != 0); close(fd);
+    p.fd = fd; p.events = POLLIN; p.revents = 0; { int pr = poll(&p, 1, 0); printf("poll %d in %d\n", pr, (p.revents & POLLIN) != 0); } close(fd);
     chmod("hh_dir/f.txt", 0600); stat("hh_dir/f.txt", &st); printf("mode %o\n", (unsigned)(st.st_mode & 0777));
     d = opendir("hh_dir"); while ((e = readdir(d))) if (e->d_name[0] != '.') { n++; printf("entry %s\n", e->d_name); } closedir(d);
     printf("tty %d getattr %d winsz %d\n", isatty(0), tcgetattr(0, &t) == 0, ioctl(0, TIOCGWINSZ, &w) == 0);

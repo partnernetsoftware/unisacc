@@ -12,7 +12,7 @@ For each probe and both Linux architectures:
   3. --link: ld.lld (host) or ld (Linux host) links the object alone into a program;
   4. --run-arm64-lima VM: the lld- and GNU-ld-linked arm64 programs run inside
      the Lima VM and print exactly what the `-b lnx/arm64` image prints.
-Skips are named; STRICT=1 turns them into failures.  Every subprocess is bounded.
+Skips are named; STRICT=1 turns them into rc 77 with a last line UNVERIFIED: required=... (section 28.7).  Every subprocess is bounded.
 """
 import os
 import pathlib
@@ -26,7 +26,21 @@ PROBES = ['examples/hello.c', 'examples/fact.c', 'examples/fib.c', 'examples/ptr
           'examples/struct.c', 'examples/switch.c', 'examples/indirect6.c']
 ALLOWED = {'x86_64': {2}, 'arm64': {275, 277}}          # PC32; ADR_PREL_PG_HI21, ADD_ABS_LO12_NC
 MACHINE = {'x86_64': 62, 'arm64': 183}
-LLD = ['/opt/homebrew/opt/lld@21/bin/ld.lld', '/opt/homebrew/opt/lld/bin/ld.lld', 'ld.lld']
+LLD = ['/opt/homebrew/opt/lld@21/bin/ld.lld', '/opt/homebrew/opt/lld/bin/ld.lld', 'ld.lld', 'ld.lld-19', '/usr/lib/llvm-19/bin/ld.lld']
+
+
+def find_tool(names, fixed=()):
+    # fixed paths first (Homebrew), then PATH, then Debian/Ubuntu versioned names and llvm-N/bin dirs
+    import glob
+    for x in fixed:
+        if pathlib.Path(x).is_file(): return x
+    for n in names:
+        w = shutil.which(n)
+        if w: return w
+    for n in names:
+        for x in sorted(glob.glob('/usr/lib/llvm-*/bin/' + n), reverse=True):
+            if pathlib.Path(x).is_file(): return x
+    return None
 EMUL = {'x86_64': 'elf_x86_64', 'arm64': 'aarch64elf'}
 # The kernel32 names a COFF object imports: the one list the image writer owns
 # (a private copy went stale when 1828ea47 grew it 14 -> 22 names).
@@ -167,8 +181,8 @@ def main(argv):
             skips.append('Mach-O: not on macOS (needs ld64 and the SDK)')
         # COFF objects (R17-1): lld-link with a kernel32 import library made by
         # llvm-dlltool; the programs run in the Windows VM when one is named
-        lldlink = next((x for x in ('/opt/homebrew/opt/lld@21/bin/lld-link', '/opt/homebrew/opt/lld/bin/lld-link') if pathlib.Path(x).is_file()), shutil.which('lld-link'))
-        dlltool = next((x for x in ('/opt/homebrew/opt/llvm/bin/llvm-dlltool',) if pathlib.Path(x).is_file()), shutil.which('llvm-dlltool'))
+        lldlink = find_tool(('lld-link', 'lld-link-19'), ('/opt/homebrew/opt/lld@21/bin/lld-link', '/opt/homebrew/opt/lld/bin/lld-link'))
+        dlltool = find_tool(('llvm-dlltool', 'llvm-dlltool-19'), ('/opt/homebrew/opt/llvm/bin/llvm-dlltool',))
         winexe = {}
         if lldlink and dlltool:
             (tmp / 'k32.def').write_text('LIBRARY kernel32.dll\nEXPORTS\n' + ''.join('  %s\n' % n for n in WINIMPORTS))
@@ -288,7 +302,14 @@ def main(argv):
         shutil.rmtree(tmp, ignore_errors=True)
     for s in skips: print('elfobj  SKIP ' + s)
     print('elfobj  objects %d   relocations %d   linked %d   skipped %d' % (nobj, nrel, len(linked), len(skips)))
-    return 1 if (strict and skips) else 0
+    if skips and strict:
+        # section 28.7: every skip here is a missing host capability (ld64+SDK, Lima/UTM guest, lld-link/dlltool);
+        # all checks that could run passed above, a wrong result would have asserted.  Not a pass.
+        need = sorted({('macOS ld64+SDK' if x.startswith('Mach-O') else 'lld-link+llvm-dlltool' if x.startswith('COFF') else
+                        'Windows VM' if 'Windows VM' in x else 'limactl arm64 guest') for x in skips})
+        print('UNVERIFIED: required=%s observed=%s missing=%s' % (','.join(need), sys.platform, '; '.join(skips)))
+        return 77
+    return 0
 
 
 if __name__ == '__main__':

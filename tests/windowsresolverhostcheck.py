@@ -3,11 +3,14 @@ import argparse,hashlib,json,pathlib,shutil,subprocess,tempfile,time
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--output');ap.add_argument('--native',action='store_true');ap.add_argument('--target',choices=['aarch64-windows-gnu','x86_64-windows-gnu']);a=ap.parse_args()
+ zig=shutil.which('zig')
+ if not zig:   # section 28.7: a missing cross compiler is a host limit, not a wrong result
+  print('UNVERIFIED: required=zig (real Windows SDK cross compiler, aarch64-windows-gnu and x86_64-windows-gnu) observed=no zig on PATH missing=zig');raise SystemExit(77)
  td=pathlib.Path(a.output) if a.output else pathlib.Path(tempfile.mkdtemp(prefix='r10-windows-resolver-host-'))
  td.mkdir(parents=True,exist_ok=True);(td/'exec/c').mkdir(parents=True,exist_ok=True);(td/'tests').mkdir(exist_ok=True)
  files=['exec/c/librarybindings.h','exec/c/libraryresolver.h','tests/windowsresolverhost.c']
  for f in files:shutil.copy2(ROOT/f,td/f)
- zig=shutil.which('zig');assert zig,'real Windows SDK cross compiler zig required';runs=[];artifacts={}
+ runs=[];artifacts={}
  def run(cmd):
   start=time.monotonic();p=subprocess.run(['python3',str(ROOT/'tests/bound.py'),'45',*map(str,cmd)],capture_output=True,timeout=50)
   row=dict(command=list(map(str,cmd)),rc=p.returncode,seconds=time.monotonic()-start,stdout=p.stdout.decode(errors='replace'),stderr=p.stderr.decode(errors='replace'));runs.append(row)

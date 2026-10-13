@@ -71,6 +71,10 @@ case "$(uname -s)/$(uname -m)" in
     *) echo "realprog: no native target for this host"; exit 1;;
 esac
 command -v cc >/dev/null || { echo "realprog: no system compiler"; exit 1; }
+# glibc hides POSIX declarations (lstat, strdup, ...) under -std=c99 and gcc 14 makes an implicit declaration an
+# error; lua/sqlite also need libm/libdl at link time.  Only the system-compiler reference gets these.
+CCFEAT=; CCLIBS=
+[ "$(uname -s)" = Linux ] && { CCFEAT=-D_GNU_SOURCE; CCLIBS="-lm -ldl -lpthread"; }
 if [ -n "${REALPROG_UA:-}" ]; then DRIVER=$REALPROG_UA; else ua_ready; DRIVER=$UA; fi
 echo "realprog driver: $DRIVER   reference: cc"
 
@@ -82,7 +86,7 @@ while IFS='|' read -r name repo rel cflags args stdin; do
     dir=$CACHE/$repo
     src=""; for f in $rel; do src="$src $dir/$f"; done
     in=/dev/null; [ "$stdin" = - ] || in=$dir/$stdin
-    if ! (cd "$dir" && bound 60 cc -std=c99 -w $cflags -o "$T/ref" $src) 2>/dev/null; then
+    if ! (cd "$dir" && bound 60 cc -std=c99 $CCFEAT -w $cflags -o "$T/ref" $src $CCLIBS) 2>/dev/null; then
         skip=$((skip+1)); printf "  skip %-12s the system compiler will not build it here\n" "$name"; continue
     fi
     want=$(bound 30 "$T/ref" $args < "$in" 2>&1); wrc=$?

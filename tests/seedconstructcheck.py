@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Compare the C99 table-to-network constructor with the Python oracle."""
 from pathlib import Path
+import fcntl
+import hashlib
 import json
 import importlib
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,10 +29,59 @@ PARTS = ("base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "pars
 MANUAL = ("parse2-9",)
 if sys.argv[1:] == ["--list"]:
     print("\n".join(p for p in PARTS if p not in MANUAL)); raise SystemExit(0)
+
+# The seed/gen.c compile (about 8 s alone, over 20 s when several shards start together) is done once per
+# input content: --prep fills a content-keyed cache that every shard then uses.  The key is the compiler
+# (unisacc.com bytes), the flags and every file the generator is built from; the cached binary is checked
+# against its recorded digest on each use.  A shard that finds no entry builds it under the same lock, so
+# concurrent shards never compile it twice and coverage does not depend on the prep job having run.
+GEN_FLAGS = ("-fno-trim-libc",)
+
+def gen_key():
+    h = hashlib.sha256(b"seed-gen-v1\0" + "\0".join(GEN_FLAGS).encode() + b"\0")
+    for f in [ROOT / "unisacc.com", ROOT / "seed/gen.c", *sorted((ROOT / "seed").glob("*.h"))]:
+        h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + hashlib.sha256(f.read_bytes()).digest())
+    return h.hexdigest()
+
+def sha_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def gen_valid(entry):
+    try:
+        want = json.loads((entry / "manifest.json").read_text())["seed-gen"]
+        return (entry / "seed-gen").is_file() and sha_file(entry / "seed-gen") == want
+    except (FileNotFoundError, KeyError, ValueError):
+        return False
+
+def prepared_gen():
+    """Path of the shared seed-gen binary for the current inputs, built once under a lock."""
+    base = Path(os.environ.get("UNISACC_SEED_CACHE") or os.environ.get("UNISACC_MODEL_CACHE") or tempfile.gettempdir() + "/unisacc-seed-gen-cache")
+    base.mkdir(parents=True, exist_ok=True)
+    key = gen_key()
+    entry = base / ("gen-" + key)
+    with (base / ("gen-" + key + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if gen_valid(entry):
+            return entry / "seed-gen", True
+        stage = Path(tempfile.mkdtemp(prefix="gen-build-", dir=base))
+        try:
+            # the one compile, bounded by this step alone (the shards' own run() limit is unchanged)
+            run("sh", str(ROOT / "unisacc.com"), *GEN_FLAGS, "seed/gen.c", "-o", str(stage / "seed-gen"), timeout=45)
+            (stage / "manifest.json").write_text(json.dumps({"seed-gen": sha_file(stage / "seed-gen"), "key": key}) + "\n")
+            shutil.rmtree(entry, ignore_errors=True)
+            os.rename(stage, entry)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        assert gen_valid(entry), "prepared seed-gen failed its digest check"
+        return entry / "seed-gen", False
+
+if sys.argv[1:] == ["--prep"]:
+    path, hit = prepared_gen()
+    print("seed-gen %s %s" % ("reused" if hit else "built", path.parent.name)); raise SystemExit(0)
 if len(sys.argv) == 3 and sys.argv[1] == "--part" and sys.argv[2] in PARTS:
     part = sys.argv[2]
 else:
-    raise SystemExit("usage: seedconstructcheck.py --list | --part " + "|".join(PARTS))
+    raise SystemExit("usage: seedconstructcheck.py --list | --prep | --part " + "|".join(PARTS))
 
 with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
     work = Path(d)
@@ -52,8 +105,7 @@ with tempfile.TemporaryDirectory(prefix="unisacc-seed-net-") as d:
             run(str(cnet), str(source), str(c))
             assert py.read_bytes() == c.read_bytes(), source
     # 0.0.25 B4: the manifest -> delta step in C, one stage at a time (seed/gen.c); prune first
-    cgen = work / "seed-gen"
-    run("sh", str(ROOT / "unisacc.com"), "-fno-trim-libc", "seed/gen.c", "-o", str(cgen))
+    cgen, _ = prepared_gen()
     if part in ("parse2", "all"):
         # B4 parse2 first slice: the declared token vocabulary and its two E3
         # additions must have the same insertion order and numbers in both seeds.
