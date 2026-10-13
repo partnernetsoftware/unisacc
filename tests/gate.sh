@@ -322,8 +322,8 @@ job pptruth python3 ./tests/pptruthcheck.py
 for route in seed classic model; do job strconvert-$route python3 ./tests/strconvertroute.py "$route"; done
 job package-footer python3 ./tests/packagefootercheck.py
 job ape-version python3 ./tests/apeversioncheck.py --ape "${MODEL_COM:-./unisacc.com}"
-job staticimage python3 ./tests/staticimagecheck.py "${MODEL_COM:-./unisacc.com}"   # c42: the Linux compiler images in the product are static ELF (no PT_INTERP/PT_DYNAMIC); reads headers, does not run it
-job staticimage-selftest python3 ./tests/staticimagecheck.py --selftest
+job staticimage tests/bound 58 sh ./unisacc.com -run tests/staticimagecheck.cx -- "${MODEL_COM:-./unisacc.com}"   # c42: the Linux compiler images in the product are static ELF (one per architecture, PT_LOAD, no PT_INTERP/PT_DYNAMIC); dynamic C, reads headers, never runs the product under test
+job staticimage-selftest tests/bound 58 sh ./unisacc.com -run tests/staticimagecheck.cx -- --selftest
 job abi-manifest python3 ./tests/abimanifestcheck.py --check   # c42: tests/abi.manifest (exports, host callbacks, gates, ABI tables) equals what the sources derive; reads sources, does not run the product
 job abi-manifest-selftest python3 ./tests/abimanifestcheck.py --selftest
 job proc-enum python3 ./tests/procenumcheck.py
