@@ -64,3 +64,21 @@ hostaddr另外有需要留在待裁表的张力：lower.py:327参考限制宿主
 超时（124/142或fuel耗尽）、信号/崩溃、启动失败、工具缺失、job/harness的rc1均不算具名拒绝。应区分内层模型rc与外层测试rc，保留OBSERVATION/UNKNOWN/BLOCKED状态，不混进拒绝样本计数。建议未来动态C合同补这些检查；本次未改Python、未叠新工具、未入gatedeps。
 
 NEG-001 ?\n仍模型rc0/参考rc1的待裁红；加强bindings记录不能把它消掉，E3见证范围不扩大。A/B与raw-lower承诺依旧待主人裁定。
+
+## 04:58 非法hostaddr完整NEG的最小采证形状（只是设计，未运行）
+
+已直接只读对照仓外cdx2/observe-10m/bindings-refusal-evidence-gaps.md；该页明确区分进程拒绝与API错误，且指出libraryimports拒分支、全截断模拟分支、注册API错误不能统称同一种rc1证据。本节只提出缺口用例，不修改检查/产品、不采新模型。
+
+优先选择 **target=osx/x86_64**，避免Windows平台支持争议、Linux绑定模式的其它拒绝分支遮住索引检查。必须使用该target的确切lower模型，记录来源/完整哈希；不能用已封存lnx模型却把账写成osx。若该模式不支持下面合法控制，应停止并列入口/模式卡点，不换目标把别类拒绝冒充索引拒绝。
+
+|用例ID|完整原始tape字节（反斜杠n表示LF）|角色|
+|---|---|---|
+|HOSTADDR-CONTROL|`_start:\n.hostaddr r0, 2\nret\n`|同目标/模型/资源的合法索引控制；必须先确认参考和模型均接受及可对拍|
+|HOSTADDR-NEG-LOW|`_start:\n.hostaddr r0, -1\nret\n`|低边界域外；仅相对控制改变索引|
+|HOSTADDR-NEG-HIGH|`_start:\n.hostaddr r0, 4\nret\n`|高边界域外；参考规则为0≤index<4，首个最小NEG可只取这一条|
+
+每条记录：原始input.bytes及长度/SHA、target、匹配model SHA/来源、逻辑源名、执行燃料、逐key显式资源bytes或absent、参考与模型各自rc/stdout/stderr及长度/SHA、执行器/工具观测身份。沿现有fullcheck的parse→lower参考入口，两个NEG的预期参考校验点是unisa/lower.py:329的`hostaddr index must be 0..3`；任意traceback不算该校验点证据。模型须为正常拒绝rc1、stdout长度0、stderr为该入口约定的具名拒绝（例如已有not covered: <target> lowering类别），不得接受timeout/OOM/未知资源ledger/参数解析错误作同等证据。若仅给通用lowering诊断，须用合法控制与只改索引的配对保留因果范围，不声称模型已点名index这个子原因。
+
+参考的Python ValueError进程可能携带traceback；保留原件及具体预期校验点，不能把它误要求成native的reject前缀，也不能只看rc1。API错误另按非零返回＋具名error＋无registry副作用记录，不能硬套整个进程rc1/空stdout。查询未记录不是显式absent。
+
+首红停：合法控制失败、参考拒绝点不符、模型接受NEG、非空stdout、诊断错类、超时/崩溃任一出现就停止并保留原件；不能改输入/资源后继续消红。HOSTADDR-CONTROL与这两条NEG均未实跑，本节不关闭原缺口。NEG-001 ?\n仍待裁红，A/B不选择，E3范围不扩大。
