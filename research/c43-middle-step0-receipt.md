@@ -29,3 +29,13 @@
 只读定位：exec/lower/code-scan-result.tsv:4把任意interned token写OP；code-entry-result.tsv:64 x86分派末端走GENERIC；code-print-result.tsv:10与:6–7取原始TXT，经code-print-byte.tsv:4 COPY输出，未在该路径校验tape.SHAPE；参考unisa/tape.py:335校验op∈SHAPE而拒绝。是否需要独立lower入口的前置域验证、还是收紧模型GENERIC，需要产品刀另授；本次不改规则。不用产品正常前级保证来把独立合同红改成绿。
 
 至此停止lower进一步实测；没有换反例消红。E3只形成所选完整流的窄见证；没有自动摘钩或重验预算变更。下刀须复核拒绝域/参考契约，不能以“输入与模型同”替代域资格与原生行为义务。
+
+## 已验证源码/数据身份（27b4e33b）
+
+- middleflowcheck.cx SHA256：041e802703dfb6df8633a481f95110472ecbd41c1895b0c05a5ee9b9dce42028。
+- middleflowrunner.c SHA256：cf3942fa81b001560cd542e7d375c5258362291d3f11f6cbf786100a0b3df793。
+- exec/c/core.c SHA256：6845345a6d2a38bd97221eaf657970f755b69226e4670aab8d624711ea5d24d1。
+- exec/c/run.c SHA256：eb221857e5966f41047933914437e28c89e2d75fc8e0db68dedd3b4795b39d54。
+- 冻结manifest.tsv SHA256：0a6f54c3104b39d3e8afca70a90c63729d0ff4b7c5b5de24cbb278970201e8f3。
+
+这些是实现/数据收据，不混入纯模型语义身份，不推定源码任意变动后仍可复用。
