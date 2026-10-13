@@ -330,6 +330,8 @@ job early-stage-seal-selftest tests/bound 58 sh ./unisacc.com -run tests/earlyst
 job pp-leaf-seal tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.cx -- --check-core tests/seals/exec-pp-literals .
 job pp-leaf-seal-negative tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.cx -- --negative tests/seals/exec-pp-literals .
 job pp-leaf-capture-selftest tests/bound 58 sh ./unisacc.com -run tests/ppleafcapture.cx -- --selftest
+job middle-flow-e3 tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-e3 tests/seals/middleflow-step0
+job middle-flow-lower-accept tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-lower tests/seals/middleflow-step0
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
