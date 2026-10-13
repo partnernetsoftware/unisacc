@@ -326,6 +326,7 @@ job staticimage tests/bound 58 sh ./unisacc.com -run tests/staticimagecheck.cx -
 job staticimage-selftest tests/bound 58 sh ./unisacc.com -run tests/staticimagecheck.cx -- --selftest
 job abi-manifest tests/bound 58 sh ./unisacc.com -run tests/abimanifestcheck.cx -- --check   # c42: tests/abi.manifest (exports, host callbacks, gates, ABI tables) equals what the sources derive; dynamic C, reads sources, never runs the product under test
 job abi-manifest-selftest tests/bound 58 sh ./unisacc.com -run tests/abimanifestcheck.cx -- --selftest
+job early-stage-seal-selftest tests/bound 58 sh ./unisacc.com -run tests/earlystageseal.cx -- --selftest   # c43: data/byte-identity contract fixtures only; no stamp/cache reuse authority
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults

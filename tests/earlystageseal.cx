@@ -1,0 +1,128 @@
+#!/usr/bin/env -S unisacc.com -run
+/* earlystageseal.cx --check ROOT SEAL | --selftest
+   Byte-identity/data contract only; never executes the leaf or grants cache reuse.
+   See CONTRACT-INCREMENTAL.md. Fixture seals are forbidden outside selftest. */
+#include <cx.h>
+
+#define MAX_FILES 2048
+#define MAX_CASES 4096
+static const char *roles[] = {"input", "rule", "builder", "executor", "resource", "oracle", "environment", "accept-output", "refusal-output", 0};
+static const char *keys[] = {"schema", "leaf", "stage", "early-boundary", "scope", "review", "target", "flags", "protocol", "coverage", 0};
+static const char *fixed[] = {"early-stage-seal-v1", "exec-pp-literals", "e2", "lex", 0, "required", 0, 0, "pp.text+UNIPP1", "named-sample"};
+typedef struct { char *path; int role; } File;
+typedef struct { char *id, *input, *output; int refusal; } Case;
+static File files[MAX_FILES];
+static Case cases[MAX_CASES];
+static int fail(const char *s) { printf("earlystageseal: FAIL %s\n", s); return 1; }
+static int which(const char *s, const char **v) { int i; for(i=0;v[i];i++)if(!strcmp(s,v[i]))return i; return -1; }
+static int decimal(const char *s, unsigned long *n) {
+    unsigned long v=0; int i;
+    if(!*s)return 0;
+    for(i=0;s[i];i++) { unsigned long x=s[i]-'0'; if(x>9 || v>(~0UL-x)/10)return 0; v=v*10+x; }
+    *n=v; return 1;
+}
+static int hex64(const char *s) { int i; if(strlen(s)!=64)return 0; for(i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0; return 1; }
+static int safe_path(const char *s) {
+    const char *p=s,*q;
+    if(!*s || *s=='/' || strchr(s,'\\'))return 0;
+    while(*p) { q=strchr(p,'/'); if(!q)q=p+strlen(p); if(q==p || (q-p==1&&*p=='.') || (q-p==2&&p[0]=='.'&&p[1]=='.'))return 0; p=*q?q+1:q; if(*q&&! *p)return 0; }
+    return 1;
+}
+static int regular(const char *root, const char *rel, char path[4096]) {
+    struct stat st; size_t i,n;
+    if(!safe_path(rel) || snprintf(path,4096,"%s/%s",root,rel)>=4096)return 0;
+    n=strlen(root)+1;
+    for(i=n;path[i];i++) if(path[i]=='/') { path[i]=0; if(lstat(path,&st) || !S_ISDIR(st.st_mode)){path[i]='/';return 0;} path[i]='/'; }
+    return !lstat(path,&st) && S_ISREG(st.st_mode);
+}
+static int role_of(const char *path,int n) { int i; for(i=0;i<n;i++)if(!strcmp(path,files[i].path))return files[i].role; return -1; }
+static int check(const char *root,const char *seal,int fixture) {
+    size_t size,n; char *text=cx_read(seal,&size),*p,*end,*f[8],*v; char path[4096],hex[65];
+    unsigned long want,rc; int nf=0,nc=0,seen[10]={0},present[9]={0},accepts=0,refusals=0,i,k,fields;
+    if(!text)return fail("cannot read seal");
+    if(memchr(text,0,size)){free(text);return fail("embedded NUL in seal");}
+    p=text;
+    while(*p) {
+        end=strchr(p,'\n'); if(!end){free(text);return fail("record lacks final newline");} *end=0;
+        if(!*p || *p=='#'){p=end+1;continue;}
+        fields=1;f[0]=p;
+        for(v=p;*v;v++)if(*v=='\t'){*v=0;if(fields==8){free(text);return fail("too many fields");}f[fields++]=v+1;}
+        for(i=0;i<fields;i++)if(!*f[i] || strchr(f[i],'\r')){free(text);return fail("empty/CR field");}
+        k=which(f[0],keys);
+        if(k>=0) {
+            if(fields!=2 || seen[k]++){free(text);return fail("duplicate/malformed metadata");}
+            if(fixed[k]&&strcmp(f[1],fixed[k])){free(text);return fail("unsupported metadata");}
+            if(k==4 && strcmp(f[1],"measured") && !(fixture&&!strcmp(f[1],"fixture"))){free(text);return fail("fixture/unmeasured seal is not execution evidence");}
+            if(k==6 && strcmp(f[1],"lnx/x86_64")&&strcmp(f[1],"lnx/arm64")&&strcmp(f[1],"osx/x86_64")&&strcmp(f[1],"osx/arm64")&&strcmp(f[1],"win/x86_64")&&strcmp(f[1],"win/arm64")){free(text);return fail("unknown target");}
+        } else if(!strcmp(f[0],"file")) {
+            char *b;
+            if(fields!=5 || nf==MAX_FILES || (k=which(f[1],roles))<0 || !decimal(f[3],&want) || !hex64(f[4]) || role_of(f[2],nf)>=0){free(text);return fail("bad/duplicate file record");}
+            if(!regular(root,f[2],path)){free(text);return fail("missing/nonregular/unsafe file");}
+            b=cx_read(path,&n); if(!b){free(text);return fail("file read failed");}
+            cx_sha256_hex(b,n,hex);free(b);
+            if(want!=n||strcmp(hex,f[4])){free(text);return fail("file size/hash changed");}
+            files[nf].path=f[2];files[nf++].role=k;present[k]++;
+        } else if(!strcmp(f[0],"case")) {
+            if(fields!=7||nc==MAX_CASES||!decimal(f[5],&rc)){free(text);return fail("bad case record");}
+            for(i=0;i<nc;i++)if(!strcmp(cases[i].id,f[1])){free(text);return fail("duplicate case id");}
+            if(!strcmp(f[2],"accept")){if(rc||strcmp(f[6],"-")){free(text);return fail("accept rc/reason mismatch");}cases[nc].refusal=0;accepts++;}
+            else if(!strcmp(f[2],"refuse")){if(!rc||rc>125||rc==77||!strcmp(f[6],"-")||!strcmp(f[6],"UNKNOWN")||!strcmp(f[6],"BLOCKED")){free(text);return fail("refusal is not named completed coverage");}cases[nc].refusal=1;refusals++;}
+            else {free(text);return fail("unknown case verdict");}
+            cases[nc].id=f[1];cases[nc].input=f[3];cases[nc++].output=f[4];
+        } else {free(text);return fail("unknown record");}
+        p=end+1;
+    }
+    for(i=0;i<10;i++)if(!seen[i]){free(text);return fail("missing metadata");}
+    for(i=0;i<9;i++)if(!present[i]){free(text);return fail("missing identity/coverage role");}
+    if(!accepts||!refusals){free(text);return fail("accept/refusal coverage missing");}
+    for(i=0;i<nc;i++)if(role_of(cases[i].input,nf)!=0 || role_of(cases[i].output,nf)!=(cases[i].refusal?8:7)){free(text);return fail("case input/output identity not bound");}
+    printf("earlystageseal: %d files, %d accept, %d refusal; byte identities checked; closure review required, no reuse authority\n",nf,accepts,refusals);
+    free(text);return 0;
+}
+static int selftest(void) {
+    char dir[]="/tmp/earlyseal-XXXXXX",path[4096],seal[4096],hex[65],record[16384],work[16384];
+    const char *meta="schema\tearly-stage-seal-v1\nleaf\texec-pp-literals\nstage\te2\nearly-boundary\tlex\nscope\tfixture\nreview\trequired\ntarget\tlnx/x86_64\nflags\tplain+--locations\nprotocol\tpp.text+UNIPP1\ncoverage\tnamed-sample\n";
+    const char *data[]={"#if 017 == 15\nYES\n#endif\n","rules fixture\n","builder fixture\n","executor fixture\n","header/predefines fixture\n","oracle fixture\n","env fixture\n","YES\n","named overflow refusal\n","#if 18446744073709551616u\n#endif\n"};
+    size_t off=0;int i,bad=0;char name[32];
+    if(!mkdtemp(dir))return fail("mkdtemp");snprintf(seal,sizeof seal,"%s/seal.tsv",dir);
+    off=snprintf(record,sizeof record,"%s",meta);
+    for(i=0;i<10;i++) {
+        snprintf(name,sizeof name,"f%d",i);snprintf(path,sizeof path,"%s/%s",dir,name);
+        if(cx_write(path,data[i],strlen(data[i])))return fail("write fixture");
+        cx_sha256_hex(data[i],strlen(data[i]),hex);
+        off+=snprintf(record+off,sizeof record-off,"file\t%s\t%s\t%lu\t%s\n",roles[i==9?0:i],name,(unsigned long)strlen(data[i]),hex);
+    }
+    off+=snprintf(record+off,sizeof record-off,"case\toctal\taccept\tf0\tf7\t0\t-\ncase\toverflow\trefuse\tf9\tf8\t2\tnamed-limit\n");
+    cx_write(seal,record,off);if(check(dir,seal,1))bad=1;
+    if(!check(dir,seal,0)){puts("selftest FAIL fixture was accepted as measured");bad=1;}
+    for(i=0;i<10;i++) {
+        snprintf(path,sizeof path,"%s/f%d",dir,i);cx_write(path,"changed",7);
+        if(!check(dir,seal,1)){printf("selftest FAIL changed role %d passed\n",i);bad=1;}
+        cx_write(path,data[i],strlen(data[i]));
+    }
+    memcpy(work,record,off+1);
+    {char *at=strstr(work,"case\toverflow\trefuse\tf9\tf8\t2");at[strlen("case\toverflow\trefuse\tf9\tf8\t")]='0';}
+    cx_write(seal,work,off);if(!check(dir,seal,1))bad=1;
+    memcpy(work,record,off+1);{char *at=strstr(work,"case\toverflow");*at=0;}
+    cx_write(seal,work,strlen(work));if(!check(dir,seal,1))bad=1;
+    memcpy(work,record,off+1);{char *at=strstr(work,"file\trule\tf1");memcpy(at+strlen("file\t"),"xxxx",4);}
+    cx_write(seal,work,off);if(!check(dir,seal,1))bad=1;
+    memcpy(work,record,off+1);{
+        char *at=strstr(work,"file\trule\tf1"), *end=strchr(at,'\n');
+        memmove(at,end+1,strlen(end+1)+1);
+    }
+    cx_write(seal,work,strlen(work));if(!check(dir,seal,1))bad=1;
+    memcpy(work,record,off+1);{char *at=strstr(work,"file\tinput\tf0");memcpy(at+strlen("file\tinput\t"),"..",2);}
+    cx_write(seal,work,off);if(!check(dir,seal,1))bad=1;
+    memcpy(work,record,off+1);{char *at=strstr(work,"case\toverflow\trefuse\tf9");memcpy(at+strlen("case\toverflow\trefuse\t"),"f7",2);}
+    cx_write(seal,work,off);if(!check(dir,seal,1))bad=1;
+    cx_write(seal,record,off);snprintf(path,sizeof path,"%s/f3",dir);unlink(path);symlink("f0",path);
+    if(!check(dir,seal,1))bad=1;unlink(path);cx_write(path,data[3],strlen(data[3]));
+    for(i=0;i<10;i++){snprintf(path,sizeof path,"%s/f%d",dir,i);unlink(path);}unlink(seal);rmdir(dir);
+    printf("earlystageseal selftest: %s (fixture only, not measured leaf execution)\n",bad?"FAIL":"PASS");return bad;
+}
+int main(int argc,char **argv) {
+    if(argc==2&&!strcmp(argv[1],"--selftest"))return selftest();
+    if(argc==4&&!strcmp(argv[1],"--check"))return check(argv[2],argv[3],0);
+    fprintf(stderr,"usage: earlystageseal.cx --check ROOT SEAL | --selftest\n");return 2;
+}
