@@ -32,8 +32,14 @@
 
 定位：code-scan-result.tsv:4存任意op；code-entry-result.tsv:64走GENERIC；code-print-result.tsv:10/:6–7及code-print-byte.tsv:4原样拷贝，对比tape.py:335的SHAPE校验。疑似拒绝域/公共入口契约不齐，待主人定归属；不重分类为PASS，也不扩大到E3所有流。
 
-本批入口tests/lowernegledger.cx只读取冻结数据并登记EXPECTED_RED/NEEDS_RULING，完成记录返回77，不是宿主跳过绿，也不进入gate/gatedeps。证据完整性若损坏返回1且停止。收据须区分：既有模型/参考实际跑过；本批C登记实际跑过；两案只是设计。
+本批入口tests/lowernegledger.cx只读取冻结数据并登记EXPECTED_RED/NEEDS_RULING，完成记录返回77，不是宿主跳过绿，也不进入gate/gatedeps。本登记器绑定input.bytes、output.bytes、status.txt、comparison.tsv、reference-diagnostic.txt五份判定证据；长度或整文件字节改变返回1且停止。capture.stderr仅是采证包装器的“unexpected stage verdict 0 wanted 1”日志，不提供模型/参考rc或参考诊断，属观测层，本登记器不绑定它，也不对全部目录文件宣称完整性。收据须区分：既有模型/参考实际跑过；本批C登记实际跑过；两案只是设计。
 
 ## 本批实际运行收据
 
 `sh ./unisacc.com -run tests/lowernegledger.cx -- tests/seals/middleflow-step0/lower/red` 已实跑：rc77，输出 NEG-001 RECORDED EXPECTED_RED NEEDS_RULING。它核验的是冻结输入/输出及既有参考rc记录；没有重新执行lower或参考，没有给拒绝域所有权作裁定。C入口源码SHA256 c85811b10794c1942dbf19c05d56ab8051d461315cd07ea21ca1c688e007ddb0。原NEG模型/参考实测见第0步收据；本稿阶段归属与两种方案均只是设计。
+
+## 绑定修订
+
+comparison.tsv（319字节）与reference-diagnostic.txt（39字节）改为整文件SHA256核验，已移除strstr子串判断。cx_read通过include/cx.h:44–48调用_cx_slurp，后者在:39写buffer[len]=0，返回缓冲有末尾NUL；原子串搜索没有因缺终止符越界，但无法证明整文件完整性，本次不再依赖它。capture.stderr仍由外层封存manifest记录，但不影响该NEG登记的判定证据。
+
+绑定修订实际验证：原冻结目录rc77；五份判定文件逐个追加1字节均rc1；comparison.tsv和reference-diagnostic.txt各作一次等长替换、一次插入，均rc1；capture.stderr追加1字节仍rc77，符合声明的观测层范围。测试由仓外动态C篡改驱动执行，原冻结数据未修改，模型/参考未重跑。修订后lowernegledger.cx SHA256 7b6ebfa2e7e391ffaceb5b7e46c3c90eb2f24513a375f227aba581498b6caaaf。
