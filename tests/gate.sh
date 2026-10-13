@@ -324,8 +324,8 @@ job package-footer python3 ./tests/packagefootercheck.py
 job ape-version python3 ./tests/apeversioncheck.py --ape "${MODEL_COM:-./unisacc.com}"
 job staticimage tests/bound 58 sh ./unisacc.com -run tests/staticimagecheck.cx -- "${MODEL_COM:-./unisacc.com}"   # c42: the Linux compiler images in the product are static ELF (one per architecture, PT_LOAD, no PT_INTERP/PT_DYNAMIC); dynamic C, reads headers, never runs the product under test
 job staticimage-selftest tests/bound 58 sh ./unisacc.com -run tests/staticimagecheck.cx -- --selftest
-job abi-manifest python3 ./tests/abimanifestcheck.py --check   # c42: tests/abi.manifest (exports, host callbacks, gates, ABI tables) equals what the sources derive; reads sources, does not run the product
-job abi-manifest-selftest python3 ./tests/abimanifestcheck.py --selftest
+job abi-manifest tests/bound 58 sh ./unisacc.com -run tests/abimanifestcheck.cx -- --check   # c42: tests/abi.manifest (exports, host callbacks, gates, ABI tables) equals what the sources derive; dynamic C, reads sources, never runs the product under test
+job abi-manifest-selftest tests/bound 58 sh ./unisacc.com -run tests/abimanifestcheck.cx -- --selftest
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
