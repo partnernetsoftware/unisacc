@@ -324,6 +324,8 @@ job package-footer python3 ./tests/packagefootercheck.py
 job ape-version python3 ./tests/apeversioncheck.py --ape "${MODEL_COM:-./unisacc.com}"
 job staticimage python3 ./tests/staticimagecheck.py "${MODEL_COM:-./unisacc.com}"   # c42: the Linux compiler images in the product are static ELF (no PT_INTERP/PT_DYNAMIC); reads headers, does not run it
 job staticimage-selftest python3 ./tests/staticimagecheck.py --selftest
+job abi-manifest python3 ./tests/abimanifestcheck.py --check   # c42: tests/abi.manifest (exports, host callbacks, gates, ABI tables) equals what the sources derive; reads sources, does not run the product
+job abi-manifest-selftest python3 ./tests/abimanifestcheck.py --selftest
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
