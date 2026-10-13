@@ -2,20 +2,21 @@
 """staticimagecheck.py COM [--selftest] -- the Linux compiler images inside a product are static.
 
 A product (.com) carries one compressed compiler image per POSIX target.  The Linux ones must be
-static ELF: no PT_INTERP and no PT_DYNAMIC.  Such an image starts on any Linux kernel of its
-architecture, whatever libc the system has; a dynamic one needs that system's loader and libc
-before it can print a usage line.  0.0.42 shipped a candidate whose Linux images had silently
+static ELF: no PT_INTERP and no PT_DYNAMIC.  A dynamic image needs the system's loader and libc
+before it can print a usage line; a static one does not.  (Structurally static is all this
+shows: it does not prove the image starts on every kernel.)  0.0.42 shipped a candidate whose Linux images had silently
 become dynamic (a loader import in src/host_dl.h); the behaviour gate could not see it, because
 every gate host has glibc.  This reads program headers only: it does not run the product, so it
 answers in milliseconds, before a gate run is spent on the candidate.
 
-Exit 0: every Linux image found is static, and both architectures were found.
-Exit 1: a Linux image is dynamic, or one of the two architectures is missing (nothing checked is
-not a pass), or the file cannot be read as a product.
+Exit 0: exactly one Linux image per architecture, each static with at least one PT_LOAD.
+Exit 1: a Linux image is dynamic or has no loadable segment, an architecture is missing (nothing
+checked is not a pass) or appears more than once (an extra member must not stand in for the
+shipped one), or the file cannot be read as a product.
 """
 import struct, sys, zlib
 
-PT_DYNAMIC, PT_INTERP = 2, 3
+PT_LOAD, PT_DYNAMIC, PT_INTERP = 1, 2, 3
 MACHINES = {62: 'x86_64', 183: 'aarch64'}
 
 
@@ -51,7 +52,7 @@ def program_types(image):
 
 def check(data):
     """(lines, bad): one line per Linux image, and whether the product fails."""
-    lines, bad, seen = [], False, set()
+    lines, bad, seen = [], False, {}
     for at, image in members(data):
         try:
             types = program_types(image)
@@ -63,14 +64,19 @@ def check(data):
         machine = MACHINES.get(struct.unpack_from('<H', image, 18)[0])
         if machine is None:
             continue
-        seen.add(machine)
+        seen[machine] = seen.get(machine, 0) + 1
         dynamic = [name for kind, name in ((PT_INTERP, 'PT_INTERP'), (PT_DYNAMIC, 'PT_DYNAMIC')) if kind in types]
-        if dynamic:
+        if PT_LOAD not in types:
+            lines.append('  FAIL lnx/%s image at %d has no PT_LOAD (%d program headers)' % (machine, at, len(types))); bad = True
+        elif dynamic:
             lines.append('  FAIL lnx/%s image at %d is dynamic: %s' % (machine, at, ' '.join(dynamic))); bad = True
         else:
             lines.append('  ok   lnx/%s image at %d: static, %d program headers' % (machine, at, len(types)))
-    for machine in sorted(set(MACHINES.values()) - seen):
-        lines.append('  FAIL no lnx/%s image found' % machine); bad = True
+    for machine in sorted(MACHINES.values()):
+        if machine not in seen:
+            lines.append('  FAIL no lnx/%s image found' % machine); bad = True
+        elif seen[machine] != 1:
+            lines.append('  FAIL %d lnx/%s images found, want exactly 1' % (seen[machine], machine)); bad = True
     return lines, bad
 
 
@@ -93,9 +99,13 @@ def selftest():
                        ('PT_DYNAMIC', pack(elf(62, [1, 1]), elf(183, [1, 2]))),
                        ('one architecture missing', pack(elf(62, [1, 1]))),
                        ('no image at all', b'MZ-fixture' + bytes(100)),
-                       ('headers outside the image', pack(elf(62, [1, 1])[:80], elf(183, [1, 1])))):
+                       ('headers outside the image', pack(elf(62, [1, 1])[:80], elf(183, [1, 1]))),
+                       ('no program headers', pack(elf(62, []), elf(183, [1, 1]))),
+                       ('no PT_LOAD', pack(elf(62, [4]), elf(183, [1, 1]))),
+                       ('an extra static member beside a dynamic one', pack(elf(62, [1, 3]), elf(183, [1, 1]), elf(62, [1, 1]))),
+                       ('a duplicate static member', pack(elf(62, [1, 1]), elf(183, [1, 1]), elf(62, [1, 1])))):
         assert check(data)[1] is True, name + ' must fail'
-    print('staticimagecheck: static pass; PT_INTERP, PT_DYNAMIC, missing architecture, no image and truncated headers fail')
+    print('staticimagecheck: static pass; PT_INTERP, PT_DYNAMIC, missing or duplicate architecture, no image, no PT_LOAD, empty and truncated headers fail')
     return 0
 
 
