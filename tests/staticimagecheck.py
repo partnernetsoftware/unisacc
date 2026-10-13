@@ -14,29 +14,50 @@ Exit 1: a Linux image is dynamic or has no loadable segment, an architecture is 
 checked is not a pass) or appears more than once (an extra member must not stand in for the
 shipped one), or the file cannot be read as a product.
 """
-import struct, sys, zlib
+import re, struct, sys, zlib
 
 PT_LOAD, PT_DYNAMIC, PT_INTERP = 1, 2, 3
 MACHINES = {62: 'x86_64', 183: 'aarch64'}
 
 
 def members(data):
-    """Every gzip member in the file that inflates completely, as (offset, bytes)."""
-    at = 0
-    while True:
-        at = data.find(b'\x1f\x8b\x08', at)
-        if at < 0:
-            return
+    """Formal Linux launch slots, never gzip magic outside the launch table."""
+    if not data.startswith(b"MZqFpD='"):
+        raise ValueError('not an APE launch script')
+    end = data[:4096].find(b'\nesac\n')
+    if end < 0:
+        raise ValueError('missing launch table')
+    script = data[:end + 6]
+    if script.count(b'case "$u" in\n') != 1:
+        raise ValueError('missing/duplicate platform switch')
+    for line in script.splitlines():
+        if line.lstrip(b' ').startswith(b'Linux') and not re.match(rb'^ *(Linuxx86_64|Linuxaarch64\|Linuxarm64)\) o=', line):
+            raise ValueError('unknown Linux launch slot')
+    slots = []
+    for label, machine in ((b'Linuxx86_64', 62), (b'Linuxaarch64|Linuxarm64', 183)):
+        pattern = rb'^ *' + re.escape(label) + rb'\) o=([0-9]+) n=([0-9]+) k=[0-9a-f]{16};;$'
+        matches = list(re.finditer(pattern, script, re.M))
+        if len(matches) != 1:
+            raise ValueError('missing/duplicate Linux launch slot')
+        o, n = map(int, matches[0].groups())
+        at = o - 1
+        if o <= 0 or n <= 0 or at < len(script) or at > len(data) or n > len(data) - at:
+            raise ValueError('launch slot outside product')
+        slots.append((at, n, machine))
+    a, b = slots
+    if a[0] < b[0] + b[1] and b[0] < a[0] + a[1]:
+        raise ValueError('overlapping launch slots')
+    for at, n, machine in slots:
+        stream = zlib.decompressobj(31)
         try:
-            stream = zlib.decompressobj(31)
-            out = stream.decompress(data[at:])
-            if not stream.eof:
-                raise zlib.error('truncated')
-        except zlib.error:
-            at += 1
-            continue
+            out = stream.decompress(data[at:at + n])
+        except zlib.error as e:
+            raise ValueError('invalid gzip launch slot') from e
+        if not stream.eof or stream.unused_data:
+            raise ValueError('gzip length differs from launch slot')
+        if len(out) < 20 or struct.unpack_from('<H', out, 18)[0] != machine:
+            raise ValueError('launch slot ELF architecture mismatch')
         yield at, out
-        at += max(len(data) - at - len(stream.unused_data), 1)
 
 
 def program_types(image):
@@ -53,7 +74,11 @@ def program_types(image):
 def check(data):
     """(lines, bad): one line per Linux image, and whether the product fails."""
     lines, bad, seen = [], False, {}
-    for at, image in members(data):
+    try:
+        images = list(members(data))
+    except ValueError as error:
+        return ["  FAIL " + str(error)], True
+    for at, image in images:
         try:
             types = program_types(image)
         except ValueError as error:
@@ -92,7 +117,18 @@ def elf(machine, types):
 
 def selftest():
     import gzip
-    pack = lambda *images: b'MZ-fixture' + b''.join(gzip.compress(i) + b'pad' for i in images)
+    def pack(*images):
+        chunks = [gzip.compress(i) for i in images]
+        off = 512
+        slots = []
+        for chunk in chunks[:2]:
+            slots.append((off + 1, len(chunk)))
+            off += len(chunk)
+        slots += [(0, 0)] * (2 - len(slots))
+        header = ("MZqFpD='\nu=x\ncase \"$u\" in\n"
+                  "  Linuxx86_64) o=%d n=%d k=0000000000000000;;\n"
+                  "  Linuxaarch64|Linuxarm64) o=%d n=%d k=0000000000000000;;\nesac\n" % (*slots[0], *slots[1])).encode()
+        return header.ljust(512, b' ') + b''.join(chunks)
     static = pack(elf(62, [1, 1]), elf(183, [1, 1]), b'\xcf\xfa\xed\xfe' + bytes(60))
     assert check(static)[1] is False, 'two static Linux images must pass'
     for name, data in (('PT_INTERP', pack(elf(62, [1, 3, 1]), elf(183, [1, 1]))),
@@ -103,9 +139,10 @@ def selftest():
                        ('no program headers', pack(elf(62, []), elf(183, [1, 1]))),
                        ('no PT_LOAD', pack(elf(62, [4]), elf(183, [1, 1]))),
                        ('an extra static member beside a dynamic one', pack(elf(62, [1, 3]), elf(183, [1, 1]), elf(62, [1, 1]))),
-                       ('a duplicate static member', pack(elf(62, [1, 1]), elf(183, [1, 1]), elf(62, [1, 1])))):
+                       ('wrong architecture slot', pack(elf(62, [1, 1]), elf(62, [1, 1])))):
         assert check(data)[1] is True, name + ' must fail'
-    print('staticimagecheck: static pass; PT_INTERP, PT_DYNAMIC, missing or duplicate architecture, no image, no PT_LOAD, empty and truncated headers fail')
+    assert not check(pack(elf(62, [1, 1]), elf(183, [1, 1]), elf(62, [1, 1])))[1], 'unselected gzip is ignored'
+    print('staticimagecheck: formal slots pass; PT_INTERP, PT_DYNAMIC, missing or duplicate architecture, no image, no PT_LOAD, empty and truncated headers fail')
     return 0
 
 
