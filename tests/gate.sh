@@ -322,6 +322,8 @@ job pptruth python3 ./tests/pptruthcheck.py
 for route in seed classic model; do job strconvert-$route python3 ./tests/strconvertroute.py "$route"; done
 job package-footer python3 ./tests/packagefootercheck.py
 job ape-version python3 ./tests/apeversioncheck.py --ape "${MODEL_COM:-./unisacc.com}"
+job staticimage python3 ./tests/staticimagecheck.py "${MODEL_COM:-./unisacc.com}"   # c42: the Linux compiler images in the product are static ELF (no PT_INTERP/PT_DYNAMIC); reads headers, does not run it
+job staticimage-selftest python3 ./tests/staticimagecheck.py --selftest
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults

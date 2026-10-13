@@ -33,6 +33,8 @@ fi
 # .com bytes, but a build.json naming another commit -- and the end-of-window input check then voided
 # 124 results.  When the seed directory's stage pair carries the candidate's exact bytes, install that
 # pair, so comboot's reinstall changes nothing; otherwise the candidate pair as before.
+# c42: a millisecond contract check before any window is spent on the candidate -- its Linux images are static
+python3 "$R/tests/staticimagecheck.py" "$D/unisacc-next.com" || { echo "queue: the candidate fails the static-image contract; not starting"; exit 2; }
 "$R/release/tools/installpair.sh" "$D" "$SEED" "$W" || { echo "queue: cannot install the product pair"; exit 2; }
 # 0.0.21: the corpus suites read corpus/c-testsuite (ignored by git, so absent in a worktree; a
 # network clone failed there); CORPUS is not the knob -- warn and diag read it with another meaning
