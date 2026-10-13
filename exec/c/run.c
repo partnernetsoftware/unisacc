@@ -116,10 +116,9 @@ static int io_stamp(long fd, FileStamp *s) {
    byte lets the final read observe EOF); streams keep the doubling buffer. */
 static unsigned char *readstream_with(long fd, const char *path, int *len, void *(*grow)(void *, size_t)) {
     int n = 0, cap = 65536; FileStamp st;
-    if (io_stamp(fd, &st) && st.size > 0) {
-        if (st.size > INT32_MAX/2) die("file too large");
-        cap = (int)st.size + 1;
-    }
+    /* A size the stamp cannot represent (a directory under the lseek stamp) is not a
+       presize: fall back to the doubling buffer so the read reports the real error. */
+    if (io_stamp(fd, &st) && st.size > 0 && st.size <= INT32_MAX/2) cap = (int)st.size + 1;
     unsigned char *b = grow(0, cap);
     for (;;) {
         if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = grow(b, cap); }
