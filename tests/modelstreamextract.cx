@@ -1,0 +1,13 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Probe tool: extract exact P3 networks, never regenerate a candidate. Current extraction scope is unsigned terminal footer only. */
+#include <cx.h>
+#include "../exec/c/codec.h"
+static unsigned long le(const unsigned char*p){unsigned long v=0;int i;for(i=7;i>=0;i--)v=(v<<8)|p[i];return v;}
+static int fail(const char*s){fprintf(stderr,"modelstreams FAIL: %s\n",s);return 1;}
+int main(int argc,char**argv){size_t n;unsigned char*b,*p,*end,*nl;unsigned long len;int ver,nm,ns,nr,i,idx,stored,raw,codec,e3=-1,lower=-1;unsigned long sum;char route[100],stage[100],in[100],out[100],h[65],path[4096];FILE*mf,*rf;
+ if(argc!=3)return fail("usage PRODUCT OUTDIR");b=(unsigned char*)cx_read(argv[1],&n);if(!b||n<16||memcmp(b+n-16,"UNIPKG1\n",8))return fail("unsupported/missing terminal footer");len=le(b+n-8);if(len>n-16)return fail("package extent");p=b+n-16-len;end=b+n-16;nl=(unsigned char*)memchr(p,'\n',end-p);if(!nl)return fail("header");*nl=0;if(sscanf((char*)p,"P %d %d %d %d",&ver,&nm,&ns,&nr)!=4||ver!=3||nm<=0||nm>10000||ns<=0||ns>100000)return fail("unsupported P3");p=nl+1;
+ snprintf(path,sizeof path,"%s/routes.tsv",argv[2]);rf=fopen(path,"wb");if(!rf)return fail("routes output");
+ for(i=0;i<ns;i++){nl=(unsigned char*)memchr(p,'\n',end-p);if(!nl)return fail("stage line");*nl=0;if(sscanf((char*)p,"D %99s %99s %99s %99s %d",route,stage,in,out,&idx)!=5||idx<0||idx>=nm)return fail("stage format");fprintf(rf,"%s\t%s\t%s\t%s\t%d\n",route,stage,in,out,idx);if(!strcmp(route,"lnx/x86_64/image/O0")){if(!strcmp(stage,"e3"))e3=idx;if(!strcmp(stage,"lower"))lower=idx;}p=nl+1;}fclose(rf);if(e3<0||lower<0)return fail("required stage absent");
+ snprintf(path,sizeof path,"%s/models.tsv",argv[2]);mf=fopen(path,"wb");if(!mf)return fail("model output");crc_init();
+ for(i=0;i<nm;i++){unsigned char*bytes;nl=(unsigned char*)memchr(p,'\n',end-p);if(!nl)return fail("model header");*nl=0;if(sscanf((char*)p,"M %d %d %d %lu",&stored,&raw,&codec,&sum)!=4||codec!=1||stored<=0||raw<=0||raw>100000000||sum>4294967295UL)return fail("compressed header");p=nl+1;if(stored>end-p)return fail("compressed extent");bytes=malloc(raw);if(!bytes||unisa_inflate(bytes,raw,p,stored)||crc((char*)bytes,raw)!=(uint32_t)sum)return fail("model decode/CRC");cx_sha256_hex(bytes,raw,h);fprintf(mf,"%d\t%d\t%s\n",i,raw,h);if(i==e3||i==lower){snprintf(path,sizeof path,"%s/%s.net",argv[2],i==e3?"e3":"lower");if(cx_write(path,bytes,raw))return fail("network output");}free(bytes);p+=stored;}
+ fclose(mf);printf("modelstreams: P3 %d models/%d route rows; e3=%d lower=%d extracted with exact extent/CRC\n",nm,ns,e3,lower);free(b);return 0;}
