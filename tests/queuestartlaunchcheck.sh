@@ -17,7 +17,7 @@ printf '{"stamp":{},"results":{"old":{"rc":0}}}\n' > "$B/state/results.json"
 _BOUND=$("$R/tests/bound" --helper) || { echo "queuestartlaunch: need tests/bound (native watchdog)"; exit 2; }
 q() {   # q STATE_DIR [ENV...] -- one real queue.sh start; prints rc
   local Q=$1; shift
-  env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$B" QUEUE_STATE="$Q" UNISACC_FFI_X86_PROVIDER=/nonexistent "$@" \
+  env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP QUEUE_SELFTEST=1 STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$B" QUEUE_STATE="$Q" UNISACC_FFI_X86_PROVIDER=/nonexistent "$@" \
     "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; echo $?
 }
 launches() { [ -f "$T/launches" ] && wc -l < "$T/launches" | tr -d ' ' || echo 0; }

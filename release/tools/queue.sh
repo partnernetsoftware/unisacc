@@ -56,6 +56,9 @@ UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-}
 # match only processes RUNNING the script (it is argv0 or argv1), never a shell whose -c text names it;
 # skip this script, its children and its parent
 others=$(ps -eo pid=,ppid=,args= | awk -v me=$$ -v pp=$PPID '$1!=me && $2!=me && $1!=pp && ($3 ~ /queue\.sh$/ || $4 ~ /release\/tools\/queue\.sh$/) {print $1}')
+# self-tests (tests/queue*check.sh, observationcheck.sh) run this script against a fake window launcher and must not
+# see an unrelated live queue.sh; the bypass needs the explicit QUEUE_SELFTEST=1 (cf. COMMITGATE_SELFTEST)
+[ "${QUEUE_SELFTEST:-}" != 1 ] || others=
 [ -z "$others" ] || { echo "queue: another queue.sh is running (pid $others); resume with that one, do not start a second"; exit 2; }
 # 0.0.37 speedup ①: 0.0.36 lost 539 and 713 results to a sleeping display (apps-real and term.sh
 # need it).  Hold display and idle sleep for the life of this script; macOS only, elsewhere a no-op.

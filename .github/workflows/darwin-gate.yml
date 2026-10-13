@@ -1,0 +1,89 @@
+name: darwin-gate
+
+# The release-queue suites that need a Darwin execution host and exit 77 (UNVERIFIED) on the
+# Linux build host: exec-bootstrap-osx*, lib-stack-*, lib-windows-gp-native.  They are gate.sh
+# jobs, not all.sh suites, so neither ci.yml nor release-check.yml runs them.  Manual only
+# (macOS minutes): dispatch it once per sealed candidate and write the run id into the receipt.
+# It runs the SEALED candidate bytes; a tree that is ahead of the seal is a hard failure here,
+# because the point of the run is evidence about those bytes.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  darwin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15,       arch: arm64,  suites: "exec-bootstrap-osxarm lib-stack-arm" }
+          - { runner: macos-15-intel, arch: x86_64, suites: "exec-bootstrap-osxx86 lib-stack-x86 lib-stack-x86-hostabi lib-windows-gp-native" }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: read the sealed candidate reference
+        id: seal
+        run: |
+          set -euo pipefail
+          ref=$(python -c 'import json;print(json.load(open("release/candidate.json"))["ref"])')
+          sha=$(python -c 'import json;print(json.load(open("release/candidate.json"))["unisacc_com_sha256"])')
+          src=$(python -c 'import json;print(json.load(open("release/candidate.json"))["sources_sha256"])')
+          [[ "$ref" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]] || { echo "candidate ref must be an immutable digest reference: $ref" >&2; exit 1; }
+          have=$(python - <<'PY'
+          import sys; sys.path.insert(0,'exec/c'); import provenance
+          print(provenance.source_digest())
+          PY
+          )
+          [ "$have" = "$src" ] || { echo "tree closure $have != sealed $src: reseal before dispatching darwin-gate" >&2; exit 1; }
+          { echo "ref=$ref"; echo "sha=$sha"; } >> "$GITHUB_OUTPUT"
+      - name: oras
+        run: |
+          set -euo pipefail
+          v=1.3.0
+          case "$(uname -m)" in arm64) arch=arm64;; *) arch=amd64;; esac
+          mkdir -p "$HOME/oras-bin"; cd "$HOME/oras-bin"
+          curl -fsSL --retry 4 --retry-all-errors --retry-delay 5 "https://github.com/oras-project/oras/releases/download/v$v/oras_${v}_darwin_${arch}.tar.gz" | tar xz
+          echo "$HOME/oras-bin" >> "$GITHUB_PATH"
+      - name: pull the exact candidate bytes by digest and install the pair at the root
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir candidate && oras pull "${{ steps.seal.outputs.ref }}" --output candidate
+          got=$(python -c 'import hashlib;print(hashlib.sha256(open("candidate/unisacc.com","rb").read()).hexdigest())')
+          [ "$got" = "${{ steps.seal.outputs.sha }}" ] || { echo "candidate bytes differ: $got" >&2; exit 1; }
+          cp candidate/unisacc.com unisacc.com; cp candidate/unisacc.com.build.json unisacc.com.build.json; chmod +x unisacc.com
+          python exec/c/provenance.py check unisacc.com
+      - name: reference compiler from this tree
+        run: python3 tests/bound.py 58 ./tests/build_ref.sh "$RUNNER_TEMP/ua.c" "$RUNNER_TEMP/ua"
+      - name: host-gated suites (${{ matrix.arch }})
+        env:
+          UA: ${{ runner.temp }}/ua
+          MODEL_COM: ${{ github.workspace }}/unisacc.com
+        run: |
+          set -u
+          bad=0
+          for s in ${{ matrix.suites }}; do
+            python3 tests/bound.py 60 ./tests/gate.sh --com --suite "$s" > "gate-$s.log" 2>&1; rc=$?
+            echo "$s rc=$rc :: $(tail -n 1 "gate-$s.log")"
+            # 77 is UNVERIFIED: on the Darwin runner that is a failure of this workflow's purpose
+            [ "$rc" -eq 0 ] || bad=1
+          done
+          exit $bad
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: darwin-gate-${{ matrix.arch }}
+          path: gate-*.log

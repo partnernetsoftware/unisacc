@@ -26,7 +26,7 @@ exit 0
 BODY
 chmod +x "$W/tests/release.sh"
 Q=$T/state; t0=$(date +%s)
-env -u QUEUE_START -u QUEUE_SUITES STAGELOG_RUN="${QUEUETIMER_STAGELOG:-0}" TERM_SH=0 TERM_SH_ALARM=$ALARM QUEUE_WORKTREE="$W" QUEUE_STATE="$Q" QUEUE_BACKUP="$T/bak" \
+env -u QUEUE_START -u QUEUE_SUITES QUEUE_SELFTEST=1 STAGELOG_RUN="${QUEUETIMER_STAGELOG:-0}" TERM_SH=0 TERM_SH_ALARM=$ALARM QUEUE_WORKTREE="$W" QUEUE_STATE="$Q" QUEUE_BACKUP="$T/bak" \
   QUEUE_WINDOWS=1 UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; rc=$?
 took=$(( $(date +%s) - t0 ))
 [ "$rc" = 142 ] || fail "queue rc=$rc, want 142 from the inner watchdog ($(cat "$T/out"))"

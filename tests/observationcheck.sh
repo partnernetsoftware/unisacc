@@ -43,7 +43,7 @@ bash -c 'sleep 40; echo tests/gatequeue.py --com >/dev/null' & mention=$!   # tw
 trap 'kill $mention 2>/dev/null; rm -rf "$T"' EXIT
 for want in 65 66; do
   printf '#!/bin/sh\necho x >> "%s/launches-%s"\nexit %s\n' "$T" "$want" "$want" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
-  env -u QUEUE_START STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/q$want" QUEUE_BACKUP="$T/b$want" QUEUE_SUITES=checkrun QUEUE_WINDOWS=5 \
+  env -u QUEUE_START QUEUE_SELFTEST=1 STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/q$want" QUEUE_BACKUP="$T/b$want" QUEUE_SUITES=checkrun QUEUE_WINDOWS=5 \
     UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
   [ "$rc" = "$want" ] && [ "$(wc -l < "$T/launches-$want" | tr -d ' ')" = 1 ] || fail "queue.sh on window rc $want: exit $rc, launches $(wc -l < "$T/launches-$want")"
 done
