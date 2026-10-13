@@ -1,0 +1,77 @@
+#!/usr/bin/env -S unisacc.com -run
+#include <cx.h>
+/* Extraction of strace capture data, not a contract verdict or product reimplementation. */
+typedef struct { char *b; size_t n,cap; } Buf;
+typedef struct { char *path; const char *role; } Dep;
+static Dep deps[4096],tools[4096];static int nd,nt; static char *dirs[256];static int ndr;
+static const char *root,*outdir;static FILE *streams,*observations,*resources,*queries;
+static void add(Buf *b,const char *p,size_t n){if(b->n+n+1>b->cap){b->cap=(b->n+n+1)*2+64;b->b=realloc(b->b,b->cap);if(!b->b)exit(2);}memcpy(b->b+b->n,p,n);b->n+=n;b->b[b->n]=0;}
+static char *capture_dup(const char *p,size_t n){char *r=malloc(n+1);memcpy(r,p,n);r[n]=0;return r;}
+static Buf quoted(const char *p,const char **next){Buf b={0};int x,i;if(*p!='"')exit(2);p++;while(*p&&*p!='"'){unsigned char c=*p++;if(c=='\\'){c=*p++;if(c>='0'&&c<='7'){x=c-'0';for(i=0;i<2&&*p>='0'&&*p<='7';i++)x=x*8+(*p++-'0');c=x;}else if(c=='n')c='\n';else if(c=='r')c='\r';else if(c=='t')c='\t';else if(c=='b')c='\b';else if(c=='f')c='\f';else if(c=='v')c='\v';else if(c=='a')c='\a';else if(c=='x'){x=0;for(i=0;i<2&&isxdigit(*p);i++){x=x*16+(*p<='9'?*p-'0':tolower(*p)-'a'+10);p++;}c=x;}}add(&b,(char *)&c,1);}if(*p!='"')exit(2);*next=p+1;return b;}
+static char *result_suffix(char *p){char *r=0,*q=p;while((q=strstr(q,") = "))){r=q;q+=4;}return r;}
+static int cmp(const void*a,const void*b){return strcmp(((Dep*)a)->path,((Dep*)b)->path);}
+static void dependency(const char *absolute){const char *rel;char candidate[4096];int i;size_t n=strlen(root);struct stat st;
+ if(strncmp(absolute,root,n)||absolute[n]!='/'){
+  if(absolute[0]=='/' && strncmp(absolute,"/proc/",6) && strncmp(absolute,"/dev/",5) && strncmp(absolute,"/home/",6) && strncmp(absolute,"/tmp/",5) && !stat(absolute,&st) && S_ISREG(st.st_mode)){
+   for(i=0;i<nt;i++)if(!strcmp(tools[i].path,absolute))return;
+   if(nt==4096)exit(2);tools[nt++].path=capture_dup(absolute,strlen(absolute));
+  }return;
+ }rel=absolute+n+1;if(!*rel)return;
+ if(strstr(rel,"/__pycache__/")){int seen=0;for(i=0;i<nt;i++)if(!strcmp(tools[i].path,absolute))seen=1;if(!seen){if(nt==4096)exit(2);tools[nt++].path=capture_dup(absolute,strlen(absolute));}const char *q=strstr(rel,"/__pycache__/");const char *tail=q+13,*dot=strstr(tail,".cpython-");if(!dot)return;snprintf(candidate,sizeof candidate,"%.*s/%.*s.py",(int)(q-rel),rel,(int)(dot-tail),tail);rel=candidate;}
+ if(lstat(absolute,&st)||!S_ISREG(st.st_mode))return;
+ for(i=0;i<nd;i++)if(!strcmp(deps[i].path,rel))return;if(nd==4096)exit(2);
+ deps[nd].path=capture_dup(rel,strlen(rel));
+ deps[nd].role=!strncmp(rel,"include/",8)?"resource":(strstr(rel,".tsv")?"rule":(!strncmp(rel,"exec/c/",7)&&!strstr(rel,".py")?"executor":(!strcmp(rel,"exec/pp/literalcheck.py")||!strncmp(rel,"unisa/front/",12)?"harness":"builder")));nd++;
+}
+static void save(const char *name,Buf *b,char hash[65]){char path[4096];snprintf(path,sizeof path,"%s/%s",outdir,name);cx_sha256_hex(b->b?b->b:"",b->n,hash);if(cx_write(path,b->b?b->b:"",b->n))exit(2);}
+static int pidexit(const char *trace,long pid){char path[4096],*b,*p;size_t n;DIR*d=opendir(trace);struct dirent*e;int rc=-1;char marker[64];snprintf(marker,sizeof marker,"si_pid=%ld,",pid);while((e=readdir(d))){if(strncmp(e->d_name,"trace.",6))continue;snprintf(path,sizeof path,"%s/%s",trace,e->d_name);b=cx_read(path,&n);if(!b)continue;p=strstr(b,marker);if(p){p=strstr(p,"si_status=");if(p)rc=atoi(p+10);}free(b);if(rc>=0)break;}closedir(d);return rc;}
+static void scan(const char *trace,const char *name,int id){char path[4096],*b,*p,*end,*q,*exec=0,*inputpath=0;size_t n;Buf in={0},net={0},stdout_={0},stderr_={0},headers[64];char *headerkeys[64];int nh=0,rh=0;memset(headers,0,sizeof headers);int isrun=0,rc;char a[128],o[128],er[128],model[128],hi[65],ho[65],he[65],hm[65];
+ snprintf(path,sizeof path,"%s/%s",trace,name);b=cx_read(path,&n);if(!b)exit(2);
+ p=b;while(*p){end=strchr(p,'\n');if(!end)end=p+strlen(p);*end=0;
+ if(!strncmp(p,"execve(",7)&&strstr(p," = 0")){Buf x=quoted(p+7,(const char**)&q);exec=x.b;dependency(exec);if(strstr(exec,"/pp-literals-")&&strlen(exec)>=4&&!strcmp(exec+strlen(exec)-4,"/run")&&!strstr(q,"--check-net")){int k=0;isrun=1;q=strchr(q,'[')+1;while(*q&&*q!=']'){if(*q=='"'){x=quoted(q,(const char**)&q);if(k++==2)inputpath=x.b;}else q++;}}}
+ {char *suffix=result_suffix(p),*quote=strchr(p,'"'),*paren=strchr(p,'(');
+  if(suffix&&quote&&paren&&(!strncmp(p,"open",4)||!strncmp(p,"access(",7)||!strncmp(p,"newfstatat(",11)||!strncmp(p,"stat(",5)||!strncmp(p,"lstat(",6)||!strncmp(p,"readlink",8))){Buf value=quoted(quote,(const char**)&q);if(value.b&&strchr(value.b,'\t')==0&&strchr(value.b,'\n')==0)fprintf(queries,"query\t%s\t%.*s\t%s\t%ld\n",name,(int)(paren-p),p,value.b,atol(suffix+4));free(value.b);}
+ }
+ if(!strncmp(p,"getdents64(",11)){
+  char *start=strchr(p,'<'),*stop=start?strchr(start,'>'):0;
+  if(start&&stop){char *directory=capture_dup(start+1,stop-start-1);size_t rn=strlen(root);int seen=0,j;
+   if(!strncmp(directory,root,rn)&&directory[rn]=='/'&&!strstr(directory,"__pycache__")){
+    for(j=0;j<ndr;j++)if(!strcmp(dirs[j],directory+rn+1))seen=1;
+    if(!seen){if(ndr==256)exit(2);dirs[ndr++]=capture_dup(directory+rn+1,strlen(directory+rn+1));}
+   }free(directory);
+  }
+ }
+ if(!strncmp(p,"read(",5)){char *start=strchr(p,'<'),*stop=start?strchr(start,'>'):0;long got;char*res=result_suffix(p);if(res&&(got=atol(res+4))>=0&&start&&stop){char*file=capture_dup(start+1,stop-start-1);int header=-1,j;size_t rn=strlen(root);dependency(file);
+  if(isrun&&!strncmp(file,root,rn)&&!strncmp(file+rn,"/include/",9)){for(j=0;j<nh;j++)if(!strcmp(headerkeys[j],file+rn+9))header=j;if(header<0){if(nh==64)exit(2);header=nh;headerkeys[nh++]=capture_dup(file+rn+9,strlen(file+rn+9));}}
+  q=strchr(stop,'"');if(q&&isrun&&((inputpath&&!strcmp(file,inputpath))||(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))||header>=0)){Buf bytes=quoted(q,(const char**)&q);if(bytes.n!=(size_t)got){fprintf(stderr,"truncated capture %s decoded=%lu got=%ld\n",file,(unsigned long)bytes.n,got);exit(2);}if(inputpath&&!strcmp(file,inputpath))add(&in,bytes.b,bytes.n);if(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))add(&net,bytes.b,bytes.n);if(header>=0)add(&headers[header],bytes.b,bytes.n);free(bytes.b);}
+  if(header>=0&&got==0&&headers[header].n){char hash[65],object[128];cx_sha256_hex(headers[header].b,headers[header].n,hash);snprintf(object,sizeof object,"resource-%s.bytes",hash);save(object,&headers[header],hash);fprintf(resources,"resource\t%02d\t%d\thdr/%s\t%s\t%lu\t%s\n",id,rh++,headerkeys[header],object,(unsigned long)headers[header].n,hash);headers[header].n=0;}
+  free(file);
+ }}
+ if(isrun&&(!strncmp(p,"write(1",7)||!strncmp(p,"write(2",7))&&(p[7]=='<'||p[7]==',')){q=strchr(p,'"');if(q){Buf bytes=quoted(q,(const char**)&q);char *res=result_suffix(q);if(!res||atol(res+4)!=(long)bytes.n)exit(2);add(p[6]=='1'?&stdout_:&stderr_,bytes.b,bytes.n);free(bytes.b);}}
+ if(end==b+n)break;p=end+1;}
+ if(isrun){rc=pidexit(trace,atol(name+6));if(rc<0||!in.n||!net.n)exit(2);snprintf(a,sizeof a,"case-%02d.input",id);snprintf(o,sizeof o,"case-%02d.stdout",id);snprintf(er,sizeof er,"case-%02d.stderr",id);save(a,&in,hi);save(o,&stdout_,ho);save(er,&stderr_,he);cx_sha256_hex(net.b,net.n,hm);snprintf(model,sizeof model,"model-%s.net",hm);save(model,&net,hm);
+ fprintf(streams,"case\t%02d\t%s\t%d\t%s\t%lu\t%s\t%s\t%lu\t%s\t%s\t%lu\t%s\t%s\t%lu\t%s",id,rc?"refuse":"accept",rc,a,(unsigned long)in.n,hi,o,(unsigned long)stdout_.n,ho,er,(unsigned long)stderr_.n,he,model,(unsigned long)net.n,hm);
+ {Buf label={0};char labelhash[65],labelname[64];add(&label,inputpath,strlen(inputpath));snprintf(labelname,sizeof labelname,"case-%02d.source-label",id);save(labelname,&label,labelhash);fprintf(streams,"\t%s\t%lu\t%s\n",labelname,(unsigned long)label.n,labelhash);free(label.b);}
+ fprintf(observations,"case\t%02d\ttrace-pid\t%s\tinput-name\t%s\n",id,name,inputpath);}
+ for(int j=0;j<nh;j++){if(headers[j].n){fprintf(stderr,"header stream not closed\n");exit(2);}free(headers[j].b);free(headerkeys[j]);}
+ free(b);free(in.b);free(net.b);free(stdout_.b);free(stderr_.b);
+}
+int main(int argc,char**argv){DIR*d;struct dirent*e;char *names[2048],path[4096],hex[65],*b;size_t n;int count=0,i;FILE*dep,*expected;
+ if(argc==2&&!strcmp(argv[1],"--selftest")){const char *tail;Buf x=quoted("\"a\\n\\101\\0z\"",&tail);char sample[]="read(3<file>, \"x) = 0\", 6) = 6";int bad=x.n!=5||memcmp(x.b,"a\nA\0z",5)||strcmp(result_suffix(sample),") = 6");free(x.b);puts(bad?"ppcapture selftest FAIL":"ppcapture selftest PASS octal/NUL and syscall-like payload parsed exactly");return bad;}
+ if(argc!=4){fprintf(stderr,"usage: ppcapture TRACE_DIR ROOT OUT_DIR\n");return 2;}root=argv[2];outdir=argv[3];mkdir(outdir,0700);
+ snprintf(path,sizeof path,"%s/streams.tsv",outdir);streams=fopen(path,"w");snprintf(path,sizeof path,"%s/observation.tsv",outdir);observations=fopen(path,"w");if(!streams||!observations)return 2;
+ snprintf(path,sizeof path,"%s/resources.tsv",outdir);resources=fopen(path,"w");if(!resources)return 2;snprintf(path,sizeof path,"%s/queries.tsv",outdir);queries=fopen(path,"w");if(!queries)return 2;
+ d=opendir(argv[1]);while((e=readdir(d))){if(!strncmp(e->d_name,"trace.",6))names[count++]=capture_dup(e->d_name,strlen(e->d_name));}closedir(d);
+ for(i=0;i<count;i++)scan(argv[1],names[i],i);
+ fclose(streams);fclose(observations);fclose(resources);fclose(queries);qsort(deps,nd,sizeof(Dep),cmp);
+ snprintf(path,sizeof path,"%s/dependencies.tsv",outdir);dep=fopen(path,"w");snprintf(path,sizeof path,"%s/closure.expected.tsv",outdir);expected=fopen(path,"w");
+ for(i=0;i<nd;i++){snprintf(path,sizeof path,"%s/%s",root,deps[i].path);b=cx_read(path,&n);if(!b){fprintf(stderr,"missing dependency %s\n",path);return 2;}cx_sha256_hex(b,n,hex);free(b);fprintf(dep,"%s\t%s\t%lu\t%s\n",deps[i].role,deps[i].path,(unsigned long)n,hex);fprintf(expected,"%s\t%s\n",deps[i].role,deps[i].path);}
+ fclose(dep);fclose(expected);
+ snprintf(path,sizeof path,"%s/tools.tsv",outdir);dep=fopen(path,"w");qsort(tools,nt,sizeof(Dep),cmp);
+ for(i=0;i<nt;i++){b=cx_read(tools[i].path,&n);if(!b)continue;cx_sha256_hex(b,n,hex);free(b);fprintf(dep,"tool\t%s\t%lu\t%s\n",tools[i].path,(unsigned long)n,hex);}fclose(dep);
+ snprintf(path,sizeof path,"%s/directories.tsv",outdir);dep=fopen(path,"w");
+ for(i=0;i<ndr;i++){char *members[2048];int j,nm=0;Buf listing={0};snprintf(path,sizeof path,"%s/%s",root,dirs[i]);d=opendir(path);if(!d)exit(2);
+  while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,"__pycache__"))continue;if(nm==2048)exit(2);members[nm++]=capture_dup(e->d_name,strlen(e->d_name));}closedir(d);
+  qsort(members,nm,sizeof(char*),cmp);for(j=0;j<nm;j++){add(&listing,members[j],strlen(members[j]));add(&listing,"\n",1);}cx_sha256_hex(listing.b?listing.b:"",listing.n,hex);fprintf(dep,"directory\t%s\t%lu\t%s\n",dirs[i],(unsigned long)listing.n,hex);free(listing.b);
+ }fclose(dep);
+ printf("capture: %d traced repository dependencies, %d processes; streams fixed as bytes\n",nd,count);return 0;}
