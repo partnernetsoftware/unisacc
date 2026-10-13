@@ -63,8 +63,53 @@ def squash(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def lexical_mask(text, literals=False):
+    """Same offsets; comments (and optionally literals) become spaces, newlines stay."""
+    out = list(text)
+    i = 0
+    while i < len(text):
+        start = i
+        if text.startswith('/*', i):
+            end = text.find('*/', i + 2)
+            need(end >= 0, 'unterminated comment')
+            i = end + 2
+        elif text.startswith('//', i):
+            end = text.find('\n', i + 2)
+            i = len(text) if end < 0 else end
+        elif text[i] in ('"', "'"):
+            quote = text[i]
+            i += 1
+            while i < len(text) and text[i] != quote:
+                i += 2 if text[i] == '\\' else 1
+            need(i < len(text), 'unterminated literal')
+            i += 1
+            if not literals:
+                continue
+        else:
+            i += 1
+            continue
+        for j in range(start, i):
+            if out[j] not in ('\n', '\r'):
+                out[j] = ' '
+    return ''.join(out)
+
+
 def uncomment(text):
-    return re.sub(r'/\*.*?\*/', ' ', text, flags=re.S)
+    return lexical_mask(text)
+
+
+def balanced_end(mask, at):
+    pairs = {'(': ')', '[': ']', '{': '}'}
+    stack = []
+    for i in range(at, len(mask)):
+        c = mask[i]
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in ')]}':
+            need(stack and stack.pop() == c, 'unbalanced delimiters')
+            if not stack:
+                return i
+    raise Underived('unbalanced delimiters')
 
 
 def sha(data):
@@ -88,19 +133,59 @@ def function(text, name):
     found = list(re.finditer(r'^(static [^\n;{}]*\b%s\s*\([^)]*\))\s*\{' % re.escape(name), text, re.M))
     need(len(found) == 1, '%d definitions of %s' % (len(found), name))
     m = found[0]
-    depth, at = 0, m.end() - 1
-    for at in range(m.end() - 1, len(text)):
-        depth += {'{': 1, '}': -1}.get(text[at], 0)
-        if depth == 0:
-            break
-    need(depth == 0, 'unbalanced body of %s' % name)
+    at = balanced_end(lexical_mask(text, True), m.end() - 1)
     return squash(m.group(1)), text[m.end():at]
 
 
 def initializer(text, declaration):
-    m = re.search(re.escape(declaration) + r'\s*=\s*\{(.*?)\};', text, re.S)
+    mask = lexical_mask(text, True)
+    m = re.search(re.escape(declaration) + r'\s*=\s*\{', mask)
     need(m, 'no initializer ' + declaration)
-    return [squash(x) for x in re.split(r',(?![^()]*\))', m.group(1))]
+    end = balanced_end(mask, m.end() - 1)
+    need(re.match(r'\s*;', mask[end + 1:]), 'initializer missing semicolon')
+    out, start, i = [], m.end(), m.end()
+    while i < end:
+        if mask[i] in '([{':
+            i = balanced_end(mask, i) + 1
+            continue
+        if mask[i] == ',':
+            out.append(squash(uncomment(text[start:i])))
+            start = i + 1
+        i += 1
+    tail = squash(uncomment(text[start:end]))
+    if tail:
+        out.append(tail)
+    need(out and all(out), 'empty initializer item')
+    return out
+
+
+def platform_arms(body, name):
+    """Only top-level Windows/POSIX split; nested directives cannot steal its else."""
+    body = uncomment(body)
+    depth, begin, split, finish = 0, None, None, None
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        directive = line.strip()
+        if re.match(r'#\s*if(?:def|ndef)?\b', directive):
+            if depth == 0:
+                need(begin is None and directive == '#ifdef _WIN32', name + ' unsupported outer condition')
+                begin = offset + len(line)
+            depth += 1
+        elif re.match(r'#\s*(else|elif)\b', directive):
+            need(depth, 'unbalanced branch')
+            if depth == 1:
+                need(directive == '#else' and split is None, name + ' unsupported outer branch')
+                split = (offset, offset + len(line))
+        elif re.match(r'#\s*endif\b', directive):
+            depth -= 1
+            need(depth >= 0, 'unbalanced endif')
+            if depth == 0:
+                finish = offset
+                need(not body[offset + len(line):].strip(), name + ' trailing outer code')
+        offset += len(line)
+    need(depth == 0 and begin is not None and split is not None and finish is not None,
+         name + ' incomplete Windows/POSIX split')
+    return (('windows', body[begin:split[0]]), ('posix', body[split[1]:finish]))
 
 
 def derive(root=ROOT):
@@ -156,10 +241,7 @@ def derive(root=ROOT):
                 read(rel) for rel in files('exec/c/library*.h')), m.group(1))
             add('callback-fn', m.group(1), '%s body-sha256=%s' % (signature, sha(squash(body).encode())))
     for name in ('library_mmap', 'library_munmap'):
-        body = uncomment(function(library, name)[1])
-        m = re.fullmatch(r'\s*#ifdef _WIN32\n(.*?)\n#else\n(.*?)\n#endif\s*', body, re.S)
-        need(m, name + ' is not one #ifdef _WIN32 / #else / #endif')
-        for arm, code in (('windows', m.group(1)), ('posix', m.group(2))):
+        for arm, code in platform_arms(function(library, name)[1], name):
             first = re.match(r'\s*(if\s*\(.*?\)\s*(?:\{.*?\}|return[^;]*;))', code, re.S)
             need(first, 'no leading guard in %s (%s)' % (name, arm))
             add('guard', '%s/%s' % (name, arm), first.group(1))
@@ -174,16 +256,22 @@ def derive(root=ROOT):
     for line in read('src/host_dl.h').splitlines():
         s = line.strip()
         if re.match(r'#\s*if', s):
-            stack.append(squash(s))
-        elif re.match(r'#\s*else', s):
-            need(stack, 'unbalanced #else in host_dl.h')
-            stack[-1] = 'else of ' + stack[-1]
+            stack.append([squash(s), squash(s), False])
+        elif re.match(r'#\s*elif\b', s):
+            need(stack and not stack[-1][2], 'unbalanced #elif in host_dl.h')
+            prior = stack[-1][0]
+            stack[-1][1] = squash(s) + ' after ' + prior
+            stack[-1][0] += ' or ' + squash(s)
+        elif re.match(r'#\s*else\b', s):
+            need(stack and not stack[-1][2], 'unbalanced #else in host_dl.h')
+            stack[-1][1] = 'else of ' + stack[-1][0]
+            stack[-1][2] = True
         elif re.match(r'#\s*endif', s):
             need(stack, 'unbalanced #endif in host_dl.h')
             stack.pop()
         m = re.match(r'if \(i == (\d+)\) return (.*);$', s)
         if m:
-            add('dlslot', '%s | %s' % (' && '.join(stack), m.group(1)), m.group(2)); found += 1
+            add('dlslot', '%s | %s' % (' && '.join(x[1] for x in stack), m.group(1)), m.group(2)); found += 1
     need(found and not stack, 'no loader slot rule found in src/host_dl.h')
 
     # gate
@@ -246,8 +334,8 @@ def derive(root=ROOT):
 
 
 def render(entries):
-    head = ('# ABI contract manifest.  Generated by `python3 tests/abimanifest.py --write`; do not edit.\n'
-            '# Checked by tests/abimanifestcheck.py --check.  Rules: the docstring of tests/abimanifest.py.\n'
+    head = ('# ABI contract manifest.  Generated by `sh ./unisacc.com -run tests/abimanifestcheck.cx -- --write tests/abi.manifest`; do not edit.\n'
+            '# Checked by `sh ./unisacc.com -run tests/abimanifestcheck.cx -- --check`; Python is a bytewise reference.\n'
             '# section\tkey\tvalue\n')
     return head + ''.join('%s\t%s\t%s\n' % e for e in entries)
 

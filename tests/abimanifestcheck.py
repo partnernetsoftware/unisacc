@@ -4,7 +4,7 @@
 --check     derive the ABI contract from the sources (tests/abimanifest.py) and compare it with the
             committed tests/abi.manifest.  Any difference fails and is printed entry by entry as
             added / removed / changed.  An ABI change is then a reviewed, visible manifest diff
-            (`python3 tests/abimanifest.py --write`), not a side effect of new product bytes.
+            (`sh ./unisacc.com -run tests/abimanifestcheck.cx -- --write tests/abi.manifest`), not a side effect of new product bytes.
 --selftest  copy the generator's inputs to a scratch tree, break the contract one way at a time,
             and require every break to be reported.
 
@@ -62,6 +62,18 @@ def edit(root, rel, old, new, count=1):
 
 
 def selftest():
+    assert abimanifest.initializer('int a[] = { f(a,(b)), (int[]){1,2}[0], "x,y", 4 };', 'int a[]') == ['f(a,(b))', '(int[]){1,2}[0]', '"x,y"', '4']
+    code = 'static int probe(void) { /* } */ const char *s="}"; // }\nreturn 0; }\n'
+    assert abimanifest.function(code, 'probe')[1].endswith('return 0; ')
+    for malformed in ('{ f(a,(b) }', '{ /* unterminated'):
+        try:
+            abimanifest.balanced_end(abimanifest.lexical_mask(malformed, True), 0)
+        except Underived:
+            pass
+        else:
+            raise AssertionError('malformed scanner input must fail')
+    arms = abimanifest.platform_arms('#ifdef _WIN32\nif (x) return 0;\n#if A\nx();\n#else\ny();\n#endif\n#else\nif (y) return 1;\n#endif\n', 'probe')
+    assert arms[1][1].startswith('if (y)'), 'nested else must not become POSIX arm'
     entries, inputs = derive(ROOT)
     with tempfile.TemporaryDirectory(prefix='abimanifest-') as tmp:
         clean = pathlib.Path(tmp) / 'clean'
@@ -111,6 +123,12 @@ def selftest():
              lambda r: edit(r, MANIFEST, 'export\tus_new\tus_context*(const char*)', 'export\tus_new\tus_context*(void)')),
             ('missing manifest', 'no committed manifest',
              lambda r: (pathlib.Path(r) / MANIFEST).unlink()),
+            ('elif loader branch', 'added    dlslot #elif ALT after',
+             lambda r: edit(r, 'src/host_dl.h', '#if defined(__linux__) && !defined(__UNISA__)',
+                            '#if FIRST\n#elif ALT\n    if (i == 9) return alternate;\n#elif LAST')),
+            ('unsupported outer elif guard', 'cannot derive',
+             lambda r: edit(r, 'exec/c/libunisacc.c', '#ifdef _WIN32\n    /* Windows gates',
+                            '#ifdef _WIN32\n#elif ALT\n    /* Windows gates')),
         )
         for number, (name, expect, mutate) in enumerate(cases):
             broken = pathlib.Path(tmp) / ('case%d' % number)
@@ -134,7 +152,7 @@ def main(argv):
         print('\n'.join(lines))
     if bad:
         print('abimanifestcheck  FAILED: %s differs from the sources. If the ABI change is intended, run\n'
-              '  python3 tests/abimanifest.py --write\nand commit the manifest with the change.' % MANIFEST)
+              '  sh ./unisacc.com -run tests/abimanifestcheck.cx -- --write tests/abi.manifest\nand commit the manifest with the change.' % MANIFEST)
         return 1
     print('abimanifestcheck  %s matches the sources' % MANIFEST)
     return 0
