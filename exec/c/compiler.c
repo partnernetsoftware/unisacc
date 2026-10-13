@@ -397,7 +397,8 @@ static char *process_environment(int argc,char **argv,int i) {
    bound to the bytes that were written, so where memfd is unavailable or may not be executed the
    run is refused and -o is the way. */
 #ifdef __linux__
-static int fwd_exec;                             /* set once; the stub restart (fwd_second) re-enters main with it */
+static int fwd_exec;                             /* set once; the stub restart (fwd_second) re-enters main with it.  The CLI
+                                                    main is entered once per process: this is not state for a reusable entry point */
 #ifdef __aarch64__
 #define FX_MEMFD 279
 #define FX_EXECVEAT 281
@@ -447,7 +448,7 @@ static int forward_exec(const Buf *image,char **argv) {
     else err=fd;
     if (noloader)
         return clierror("this program calls the host C library, and running it needs the host's dynamic loader "
-            FX_LOADER ", which this system does not have (no glibc: a musl-only or scratch system); "
+            FX_LOADER ", which could not be opened here (as on a system without glibc); "
             "write the program with -o and run it where glibc is installed");
     fprintf(stderr,"unisacc: model driver: this program calls the host C library, and its image could not be started from an anonymous memory file (errno %ld); write the program with -o and run that\n",-err);
     return 1;
