@@ -43,3 +43,24 @@
 comparison.tsv（319字节）与reference-diagnostic.txt（39字节）改为整文件SHA256核验，已移除strstr子串判断。cx_read通过include/cx.h:44–48调用_cx_slurp，后者在:39写buffer[len]=0，返回缓冲有末尾NUL；原子串搜索没有因缺终止符越界，但无法证明整文件完整性，本次不再依赖它。capture.stderr仍由外层封存manifest记录，但不影响该NEG登记的判定证据。
 
 绑定修订实际验证：原冻结目录rc77；五份判定文件逐个追加1字节均rc1；comparison.tsv和reference-diagnostic.txt各作一次等长替换、一次插入，均rc1；capture.stderr追加1字节仍rc77，符合声明的观测层范围。测试由仓外动态C篡改驱动执行，原冻结数据未修改，模型/参考未重跑。修订后lowernegledger.cx SHA256 7b6ebfa2e7e391ffaceb5b7e46c3c90eb2f24513a375f227aba581498b6caaaf。
+
+## 04:47 四族索引交叉（只读源码核对，未跑新套件）
+
+本次从cdx2巡检patrol-10m-20261014-0416.md/0447.md读到四族转述：缺syscall/Win import、非法hostaddr、extent溢出、坏bindings。它是索引转述而非原蓝本全文；与本文按字节层次分的四族不是同一分类，不把二者名字强行对齐。下表各项只做源码/断言覆盖审计，未把静态规则当实际NEG通过。
+
+|cdx2四族|对应本文归属|可读证据入口与断言|当前缺口|
+|---|---|---|---|
+|缺syscall/Win import|族4目标能力，lower拥有|unisa/lower.py:232/:244；exec/lower/fullcheck.py:105–114：参考必须以点名ValueError拒绝，两个执行器均rc1、空stdout且stderr以reject: not covered:开头|已有三元断言，但本次未运行；不能替代其它目标/接口的NEG|
+|非法hostaddr|族4索引/目标规则，lower拥有|unisa/lower.py:325–329有目标限制/0..3规则；tests/unisatapecheck.sh:90只是索引2的合法序列化正例；libraryexitcheck.py:64–68是Windows索引0接受正例|未找到索引-1/4等完整输入→参考/模型rc、空stdout、具名stderr的一组NEG；不得把正例/源码规则计作已覆盖|
+|extent溢出|族2数据记录界限与lower布局接口|exec/lower/sparsecheck.py:30–34的单项2147483648和累计2000000000+1000000000，两个执行器断言rc1、空stdout、含tape data directive诊断|已有三元方向；stderr仅子串断言，尚非完整诊断协议/逐字节绑定，本次未跑|
+|坏bindings|族4显式外部合同能力|exec/lower/libraryimportscheck.py:45–47接受分支比stdout，拒分支只核rc1；:56–69含缺失/截断/超宽/签名/模块/寄存器形状等控制。libraryexitcheck.py:45/:61拒分支也只核rc1|仍缺拒绝时stdout为空和具名stderr的强断言；truncation全位置只核simulate的reject，本身不证明native完整拒绝合同|
+
+hostaddr另外有需要留在待裁表的张力：lower.py:327参考限制宿主ABI到osx/lnx，而libraryexitcheck.py:64–68显式要求Windows .hostcall/.hostaddr0模型接受。这里只指出源码口径差异，不把任一方当自动裁定，也不在本批修改正例或产品。
+
+### 建议拒绝记录口径（只是设计，未实施）
+
+具名域外拒绝证据应至少满足：`model_rc==1 ∧ stdout长度==0 ∧ stderr属于该NEG ID约定的具名拒绝诊断`，并绑定输入/模型/显式资源、参考rc与stdout/stderr哈希。诊断可按家族允许既有reject前缀或位置化error格式，但必须点名原因、排除Python traceback/包装器报错；不能用“任意stderr非空”替代。精确schema/是否保留部分输出仍须主人审合同，此处不静默放宽。
+
+超时（124/142或fuel耗尽）、信号/崩溃、启动失败、工具缺失、job/harness的rc1均不算具名拒绝。应区分内层模型rc与外层测试rc，保留OBSERVATION/UNKNOWN/BLOCKED状态，不混进拒绝样本计数。建议未来动态C合同补这些检查；本次未改Python、未叠新工具、未入gatedeps。
+
+NEG-001 ?\n仍模型rc0/参考rc1的待裁红；加强bindings记录不能把它消掉，E3见证范围不扩大。A/B与raw-lower承诺依旧待主人裁定。
