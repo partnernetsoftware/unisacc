@@ -69,13 +69,28 @@ static long io_open(const char *path) {
 }
 static long io_read(long fd, void *p, long n) { return __read(fd, p, n); }
 static long io_close(long fd) { return __close(fd); }
-typedef struct { long long size, mtime, mtime_ns; int valid; } FileStamp;
-/* No stat gate: the stamp is the size only (seek to the end and back). */
+/* Identity of an input file as far as the build can observe it; off is the
+   read position at stamp time (size - off is what a read will see). */
+typedef struct { long long size, off, mtime, mtime_ns, ctime, ctime_ns, ino, dev; unsigned tag; int valid; } FileStamp;
+/* No stat gate: the stamp is the size plus an FNV-1a tag of the first and last
+   4 KiB (two seeks and <= 8 KiB of reads per call). A same-size replacement
+   that differs only in the middle is not seen. The offset is restored. */
+static unsigned stamp_tag(long fd, long at, unsigned h, int *ok) {
+    unsigned char b[4096]; long n = 0, r;
+    if (__lseek(fd, at, 0) < 0) { *ok = 0; return h; }
+    while (n < 4096) { r = __read(fd, b + n, 4096 - n); if (r < 0) { *ok = 0; return h; } if (!r) break; n += r; }
+    for (long i = 0; i < n; i++) h = (h ^ b[i]) * 16777619u;
+    return h;
+}
 static int io_stamp(long fd, FileStamp *s) {
     memset(s, 0, sizeof *s);
+    long cur = __lseek(fd, 0, 1); if (cur < 0) return 0;
     long end = __lseek(fd, 0, 2); if (end < 0) return 0;
-    if (__lseek(fd, 0, 0) < 0) die("cannot read input");
-    s->size = end; s->valid = 1; return 1;
+    int ok = 1; unsigned h = 2166136261u;
+    h = stamp_tag(fd, 0, h, &ok); if (ok && end > 4096) h = stamp_tag(fd, end - 4096, h, &ok);
+    if (__lseek(fd, cur, 0) < 0) die("cannot read input");
+    if (!ok) return 0;
+    s->size = end; s->off = cur; s->tag = h; s->valid = 1; return 1;
 }
 #else
 #include <unistd.h>
@@ -92,7 +107,9 @@ static long io_read(long fd, void *p, long n) { long r = read((int)fd, p, (size_
 static long io_close(long fd) { return close((int)fd); }
 #include <sys/types.h>
 #include <sys/stat.h>
-typedef struct { long long size, mtime, mtime_ns; int valid; } FileStamp;
+/* Identity of an input file as far as the build can observe it; off is the
+   read position at stamp time (size - off is what a read will see). */
+typedef struct { long long size, off, mtime, mtime_ns, ctime, ctime_ns, ino, dev; unsigned tag; int valid; } FileStamp;
 static int io_stamp(long fd, FileStamp *s) {
     memset(s, 0, sizeof *s);
 #ifdef _WIN32
@@ -105,23 +122,27 @@ static int io_stamp(long fd, FileStamp *s) {
 #else
     if ((st.st_mode & S_IFMT) != S_IFREG) return 0;
 #endif
-    s->size = st.st_size; s->mtime = st.st_mtime;
+    s->size = st.st_size; s->mtime = st.st_mtime; s->ctime = st.st_ctime;
+    s->ino = (long long)st.st_ino; s->dev = (long long)st.st_dev;
 #if defined(__linux__) && defined(st_mtime)
-    s->mtime_ns = st.st_mtim.tv_nsec;
+    s->mtime_ns = st.st_mtim.tv_nsec; s->ctime_ns = st.st_ctim.tv_nsec;
+#elif defined(__APPLE__)
+    s->mtime_ns = st.st_mtimespec.tv_nsec; s->ctime_ns = st.st_ctimespec.tv_nsec;
 #endif
     s->valid = 1; return 1;
 }
 #endif
 /* Regular files are read into one buffer sized from the stamp (one spare
    byte lets the final read observe EOF); streams keep the doubling buffer. */
-static unsigned char *readstream_with(long fd, const char *path, int *len, void *(*grow)(void *, size_t)) {
-    int n = 0, cap = 65536; FileStamp st;
+static unsigned char *readstream_with(long fd, const char *path, int *len, void *(*grow)(void *, size_t), unsigned char **own) {
+    int n = 0, cap = 65536; FileStamp st; unsigned char *tmp;
+    if (!own) own = &tmp;   /* *own holds the buffer from the first allocation on, so a die() can still free it */
     /* A size the stamp cannot represent (a directory under the lseek stamp) is not a
        presize: fall back to the doubling buffer so the read reports the real error. */
-    if (io_stamp(fd, &st) && st.size > 0 && st.size <= INT32_MAX/2) cap = (int)st.size + 1;
-    unsigned char *b = grow(0, cap);
+    if (io_stamp(fd, &st) && st.size > st.off && st.size - st.off <= INT32_MAX/2) cap = (int)(st.size - st.off) + 1;
+    unsigned char *b = *own = grow(0, cap);
     for (;;) {
-        if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = grow(b, cap); }
+        if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = *own = grow(b, cap); }
         long r = io_read(fd, b+n, cap-n);
         if (r < 0) { fprintf(stderr, "run: cannot read %s\n", path); die("cannot read input"); }
         if (!r) break;
@@ -130,7 +151,7 @@ static unsigned char *readstream_with(long fd, const char *path, int *len, void 
     }
     *len = n; return b;
 }
-static unsigned char *readstream(long fd, const char *path, int *len) { return readstream_with(fd, path, len, xrealloc); }
+static unsigned char *readstream(long fd, const char *path, int *len) { return readstream_with(fd, path, len, xrealloc, 0); }
 static unsigned char *readfile(const char *path, int *len, int optional) {
     long fd = io_open(path);
     if (fd < 0) {
@@ -367,7 +388,7 @@ static void package_unbind(void) {
 /* Parse the open package file into p (p must be released/zeroed). The fd is
    consumed and closed. Every format edge is checked before any route runs. */
 static void package_parse(Package *p, long fd, const char *path) {
-    p->file = readstream_with(fd, path, &p->n, mrealloc); p->b = p->file;
+    p->file = 0; readstream_with(fd, path, &p->n, mrealloc, &p->file); p->b = p->file;   /* p->file owns the buffer if the read dies */
     if (io_close(fd) < 0) die("close failed");
     if (p->n < 2 || p->b[0] != 'P' || p->b[1] != ' ') {
         PackageFooter footer;
@@ -481,7 +502,9 @@ static void unload(void) {
    frees the tables the globals still own; a package that failed to parse is
    never reused. */
 static int stamp_equal(const FileStamp *a, const FileStamp *b) {
-    return a->valid && b->valid && a->size == b->size && a->mtime == b->mtime && a->mtime_ns == b->mtime_ns;
+    return a->valid && b->valid && a->size == b->size && a->off == b->off && a->tag == b->tag &&
+           a->mtime == b->mtime && a->mtime_ns == b->mtime_ns && a->ctime == b->ctime && a->ctime_ns == b->ctime_ns &&
+           a->ino == b->ino && a->dev == b->dev;
 }
 static void cache_release(Cache *k) {
     if (k->models) for (int i = 0; i < k->nmodels; i++) model_release(&k->models[i]);

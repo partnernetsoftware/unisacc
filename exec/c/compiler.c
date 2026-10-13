@@ -388,6 +388,92 @@ static char *process_environment(int argc,char **argv,int i) {
 #endif
 }
 #define ARGRESOURCE(i,k,v) cli[i].name=(const unsigned char *)k; cli[i].n=sizeof(k)-1; cli[i].data=v.b; cli[i].len=v.n
+/* A static compiler image (Linux, built by unisacc) has no host loader in its process, so a run
+   whose program forwards to the host libc cannot be bound in memory.  main finishes it as the
+   image -o writes (a dynamic ELF) and forward_exec replaces this process with it: argv,
+   environment, stdio and exit status are then the program's own.  The image goes to an anonymous
+   memory file, or to an unlinked temporary file where memfd is unavailable, and is exec'd by
+   descriptor (execveat, AT_EMPTY_PATH), which needs no /proc. */
+#ifdef __linux__
+static int fwd_exec;                             /* set once; the stub restart (fwd_second) re-enters main with it */
+#ifdef __aarch64__
+#define FX_MEMFD 279
+#define FX_EXECVEAT 281
+#define FX_OPENAT 56
+#define FX_CLOSE 57
+#define FX_WRITE 64
+#define FX_UNLINKAT 35
+#define FX_GETPID 172
+#define FX_LOADER "/lib/ld-linux-aarch64.so.1"
+#else
+#define FX_MEMFD 319
+#define FX_EXECVEAT 322
+#define FX_OPENAT 257
+#define FX_CLOSE 3
+#define FX_WRITE 1
+#define FX_UNLINKAT 263
+#define FX_GETPID 39
+#define FX_LOADER "/lib64/ld-linux-x86-64.so.2"
+#endif
+static long fx_sys(long nr,long a,long b,long c,long d,long e) {   /* a result, or -errno */
+#ifdef __UNISA__
+    return __syscall6(nr,a,b,c,d,e);
+#else
+    long r=syscall(nr,a,b,c,d,e); return r<0 ? -(long)errno : r;
+#endif
+}
+static int fx_fill(long fd,const Buf *image) {
+    int done=0;
+    while (done<image->n) {
+        long wrote=fx_sys(FX_WRITE,fd,(long)(image->b+done),image->n-done,0,0);
+        if (wrote==-4) continue;                 /* EINTR */
+        if (wrote<=0) return 1;
+        done+=(int)wrote;
+    }
+    return 0;
+}
+static long fx_exec(long fd,char **argv,char **envp) {
+    return fx_sys(FX_EXECVEAT,fd,(long)"",(long)argv,(long)envp,0x1000);   /* AT_EMPTY_PATH */
+}
+static int forward_exec(const Buf *image,char **argv) {
+    long err=0; int noloader=0; char **envp=argv;
+    while (*envp) envp++;                        /* the environment follows argv's NULL (runargs) */
+    envp++;
+    fflush(stdout); fflush(stderr);
+    /* MFD_CLOEXEC|MFD_EXEC; kernels before 6.3 reject MFD_EXEC with EINVAL */
+    long fd=fx_sys(FX_MEMFD,(long)"unisacc-run",1|16,0,0,0);
+    if (fd==-22) fd=fx_sys(FX_MEMFD,(long)"unisacc-run",1,0,0,0);
+    if (fd>=0) {
+        err=fx_fill(fd,image) ? -5 : fx_exec(fd,argv,envp);   /* returns only on failure */
+        noloader=err==-2;                        /* ENOENT by descriptor: the image's PT_INTERP file */
+        fx_sys(FX_CLOSE,fd,0,0,0,0);
+    }
+    if (fd<0 || (!noloader && err!=-8)) {
+        /* no memfd, or it may not be executed (vm.memfd_noexec): a private file, unlinked before
+           the exec; it is reopened read-only because a file open for writing is ETXTBSY */
+        char path[640]; const char *td=getenv("TMPDIR");
+        int n=snprintf(path,sizeof path,"%s/unisacc-run-%ld-%lx",td&&*td ? td : "/tmp",
+            fx_sys(FX_GETPID,0,0,0,0,0),(unsigned long)(uintptr_t)&err);
+        if (n>0 && n<(int)sizeof path) {
+            long wr=fx_sys(FX_OPENAT,-100,(long)path,1|0x40|0x80|0x80000,448,0);   /* O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0700 */
+            if (wr>=0) {
+                int bad=fx_fill(wr,image);
+                fx_sys(FX_CLOSE,wr,0,0,0,0);
+                long rd=bad ? -5 : fx_sys(FX_OPENAT,-100,(long)path,0x80000,0,0);  /* O_RDONLY|O_CLOEXEC */
+                fx_sys(FX_UNLINKAT,-100,(long)path,0,0,0);
+                if (rd>=0) { err=fx_exec(rd,argv,envp); noloader=err==-2; fx_sys(FX_CLOSE,rd,0,0,0,0); }
+                else err=rd;
+            } else if (fd<0) err=wr;
+        }
+    }
+    if (noloader)
+        return clierror("this program calls the host C library, and running it needs the host's dynamic loader "
+            FX_LOADER ", which this system does not have (no glibc: a musl-only or scratch system); "
+            "write the program with -o and run it where glibc is installed");
+    fprintf(stderr,"unisacc: model driver: this program calls the host C library, and its image could not be started from memory or a temporary file (errno %ld); write the program with -o and run that\n",-err);
+    return 1;
+}
+#endif
 
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
@@ -535,6 +621,11 @@ int main(int argc, char **argv) {
     if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
     if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
 #endif
+#ifdef __linux__
+    /* forward_exec, on the stub restart: the same program as an image; no file is written, as in a run */
+    int execrun=fwd_exec && runit;
+    if (execrun) { runit=0; mode=0; if (!deponly) deps=0; }
+#endif
     char route[96];
     int n = mode == 4 ? snprintf(route,sizeof route,"tokens") :
         mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
@@ -548,7 +639,11 @@ int main(int argc, char **argv) {
     ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
     unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8],process_dl[4][8];
     char **runargs=0;
-    if (runit) {
+    if (runit
+#ifdef __linux__
+        || execrun                               /* forward_exec takes the same vector */
+#endif
+        ) {
         int count=1+argc-argstart;
         int envn=0; while (process_environment(argc,argv,envn)) envn++;
         runargs=xrealloc(0,(count+envn+2)*sizeof(char *));
@@ -723,7 +818,15 @@ int main(int argc, char **argv) {
                 else if (fr==0) { free(in.b); in=tape; rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* the stage after e3, as for tape input */
                 else {
 #ifdef __linux__
-                    if (runit && host_dl_slot(1)==0) return clierror("host libc forwarding needs a dynamic compiler image");
+                    if (runit && host_dl_slot(1)==0) {
+                        /* Static compiler image: finish as the image route does and exec the result
+                           (forward_exec).  Stages up to e3 are the same models on both routes; the
+                           run's process and loader resources are withdrawn, as an image has none. */
+                        fwd_exec=1; execrun=1; runit=0; mode=0; if (!deponly) deps=0;
+                        for (int j=5;j<13;j++) cli[j].n=0;
+                        n=snprintf(route,sizeof route,"%s/%s%simage/O%d",target,warnings ? "warn/" : "",nsources>1 ? "multi/" : "",level);
+                        if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
+                    }
 #endif
                     Buf merged={0};
                     int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
@@ -796,6 +899,9 @@ int main(int argc, char **argv) {
     }
     free(sources); free(deptargets); free(depquoted);
     if (runit) return memory_enter(&mapping,&plan,&in);
+#ifdef __linux__
+    if (execrun) return forward_exec(&in,runargs);
+#endif
     if (!out && !mode && !explicit_image) {
 #ifdef _WIN32
         out = "a.exe";
