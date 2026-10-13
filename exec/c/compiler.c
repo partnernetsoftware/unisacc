@@ -392,27 +392,23 @@ static char *process_environment(int argc,char **argv,int i) {
    whose program forwards to the host libc cannot be bound in memory.  main finishes it as the
    image -o writes (a dynamic ELF) and forward_exec replaces this process with it: argv,
    environment, stdio and exit status are then the program's own.  The image goes to an anonymous
-   memory file, or to an unlinked temporary file where memfd is unavailable, and is exec'd by
-   descriptor (execveat, AT_EMPTY_PATH), which needs no /proc. */
+   memory file and is exec'd by descriptor (execveat, AT_EMPTY_PATH), which needs no /proc.
+   There is no on-disk fallback: a path in TMPDIR that is written, closed and reopened cannot be
+   bound to the bytes that were written, so where memfd is unavailable or may not be executed the
+   run is refused and -o is the way. */
 #ifdef __linux__
 static int fwd_exec;                             /* set once; the stub restart (fwd_second) re-enters main with it */
 #ifdef __aarch64__
 #define FX_MEMFD 279
 #define FX_EXECVEAT 281
-#define FX_OPENAT 56
 #define FX_CLOSE 57
 #define FX_WRITE 64
-#define FX_UNLINKAT 35
-#define FX_GETPID 172
 #define FX_LOADER "/lib/ld-linux-aarch64.so.1"
 #else
 #define FX_MEMFD 319
 #define FX_EXECVEAT 322
-#define FX_OPENAT 257
 #define FX_CLOSE 3
 #define FX_WRITE 1
-#define FX_UNLINKAT 263
-#define FX_GETPID 39
 #define FX_LOADER "/lib64/ld-linux-x86-64.so.2"
 #endif
 static long fx_sys(long nr,long a,long b,long c,long d,long e) {   /* a result, or -errno */
@@ -448,29 +444,12 @@ static int forward_exec(const Buf *image,char **argv) {
         noloader=err==-2;                        /* ENOENT by descriptor: the image's PT_INTERP file */
         fx_sys(FX_CLOSE,fd,0,0,0,0);
     }
-    if (fd<0 || (!noloader && err!=-8)) {
-        /* no memfd, or it may not be executed (vm.memfd_noexec): a private file, unlinked before
-           the exec; it is reopened read-only because a file open for writing is ETXTBSY */
-        char path[640]; const char *td=getenv("TMPDIR");
-        int n=snprintf(path,sizeof path,"%s/unisacc-run-%ld-%lx",td&&*td ? td : "/tmp",
-            fx_sys(FX_GETPID,0,0,0,0,0),(unsigned long)(uintptr_t)&err);
-        if (n>0 && n<(int)sizeof path) {
-            long wr=fx_sys(FX_OPENAT,-100,(long)path,1|0x40|0x80|0x80000,448,0);   /* O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0700 */
-            if (wr>=0) {
-                int bad=fx_fill(wr,image);
-                fx_sys(FX_CLOSE,wr,0,0,0,0);
-                long rd=bad ? -5 : fx_sys(FX_OPENAT,-100,(long)path,0x80000,0,0);  /* O_RDONLY|O_CLOEXEC */
-                fx_sys(FX_UNLINKAT,-100,(long)path,0,0,0);
-                if (rd>=0) { err=fx_exec(rd,argv,envp); noloader=err==-2; fx_sys(FX_CLOSE,rd,0,0,0,0); }
-                else err=rd;
-            } else if (fd<0) err=wr;
-        }
-    }
+    else err=fd;
     if (noloader)
         return clierror("this program calls the host C library, and running it needs the host's dynamic loader "
             FX_LOADER ", which this system does not have (no glibc: a musl-only or scratch system); "
             "write the program with -o and run it where glibc is installed");
-    fprintf(stderr,"unisacc: model driver: this program calls the host C library, and its image could not be started from memory or a temporary file (errno %ld); write the program with -o and run that\n",-err);
+    fprintf(stderr,"unisacc: model driver: this program calls the host C library, and its image could not be started from an anonymous memory file (errno %ld); write the program with -o and run that\n",-err);
     return 1;
 }
 #endif
