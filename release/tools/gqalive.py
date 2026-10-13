@@ -37,5 +37,10 @@ if not rows: print('gqalive: empty process table', file=sys.stderr); sys.exit(2)
 me = os.getpid()
 try: hits = [p for p, a in rows if p != me and runs_gatequeue(a)]
 except Exception as e: print('gqalive: cannot classify the process table (%s)' % type(e).__name__, file=sys.stderr); sys.exit(2)
+# self-test scope (QUEUE_SELFTEST=1 together with GQALIVE_SCOPE=<fixture worktree>): count only a gatequeue.py that lives
+# under the fixture, never an unrelated real gatequeue on the machine (which queue.sh would otherwise wait on and kill)
+if os.environ.get('QUEUE_SELFTEST') == '1' and os.environ.get('GQALIVE_SCOPE'):
+    sc = os.environ['GQALIVE_SCOPE'].rstrip('/') + '/'
+    hits = [p for p in hits if any(a.startswith(sc) and os.path.basename(a) == 'gatequeue.py' for a in dict(rows)[p])]
 for p in hits: print(p)
 sys.exit(0 if hits else 1)

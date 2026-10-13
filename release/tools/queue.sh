@@ -86,7 +86,8 @@ for i in $(seq 1 "${QUEUE_WINDOWS:-300}"); do
     # command text merely mentions it -- a caller's shell script naming gatequeue.py made this loop wait on
     # its own ancestor until the outer bound killed the window (reproduced 21:14 with a live parent shell; the
     # 21:02 first-window hang showed the same wait, its process is UNKNOWN)
-    python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?
+    if [ "${QUEUE_SELFTEST:-}" = 1 ]; then GQALIVE_SCOPE="$W" python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?   # self-test: only a gatequeue under the fixture worktree
+    else python3 "$R/release/tools/gqalive.py" > "$D/.gq"; g=$?; fi
     case $g in
       0) gq_still=1;;   # a gatequeue is running: wait
       1) gq_still=0; break;;  # none: start the window
