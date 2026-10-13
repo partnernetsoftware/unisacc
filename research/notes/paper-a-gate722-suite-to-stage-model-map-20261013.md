@@ -1,10 +1,10 @@
 # Paper A 材料：release gate ≈722 套件族 → 阶段模型映射（非 A seal-before）
 
-- **拍点：** 2026-10-13 ~20:00 Asia/Singapore（UTC+8）
+- **拍点：** 2026-10-13 ~20:00 Asia/Singapore（UTC+8）；**§6 四缺口补核** ~20:04（tip `20ecaeac`）
 - **性质：** 研究笔记／梳 0.0.42 后 → 0.0.43+ 材料；**不发布、不投稿、不改正文**
 - **权威（已机核 tip `a940aa08`）：** `tests/gate.sh --list --com` = **722**；`tests/gatelayers.py --check` → contract **79** / stage **377** / pipeline **217** / platform **49**；调度 `tests/release.sh` → `gatequeue.py --jobs 4 --window 55`
-- **前缀粗计（与机房主任口径一致，本拍复核）：** exec≈152、com≈93（含部分 `com-*` 与 `csmithdiff` 并列记账时 com 族约 93–95）、lib≈85、seed*≈85（`seed*`+`seedgen*`）、rowcov≈50、csmithdiff≈40
-- **排他／重载：** `release.sh` 具名 exclusive 基底约 **15**（另 Darwin 条件加项）；全部 `rowcov*` 走 `--heavy-suite`（并发上限 1）；窗末未跑完 **rc=75** = PENDING／可续跑，不是失败
+- **前缀粗计（与机房主任口径一致，本拍复核；~20:04 补核收口）：** exec≈152、com≈93（`com-` 前缀＝常开3＋仅 `--com` 的90；≠「一切产品路线」）、lib≈85、seed*≈85（`seed*`+`seedgen*`）、rowcov≈50、csmithdiff≈40（端到端另有 difftest／corpus／ccrun／closure／stages 等非 `com-` 前缀）
+- **排他／重载：** `release.sh` 具名 exclusive **Linux 基底 15**；Darwin 另加 `bindprep-arm64`／`x86_64`，仅 Darwin/arm64 再加 `exec-memx86-ua-1` → arm64 合计≈**18** exclusive；Linux-only exclusive：**无**；全部 `rowcov*`（≈50）走 `--heavy-suite`（并发上限 1，两宿主同）；窗末未跑完 **rc=75** = PENDING／可续跑，不是失败
 
 ---
 
@@ -83,7 +83,7 @@
 **典型：**
 
 - `gatelayers=platform`：`bigclosure-*`、`nativeboot-*`、`fat-*`、`winposix`、`ccinterop`、部分 `seed-matrix-{lnx,osx,win}-*`、跨目标 `exec-*-self`／绑定准备
-- 调度强制串行的胖项：`lib-carrier-import-model`、`com-seedgen`、`seedparse2-*`、`seedgen`／`seedgen-2`、Darwin 上的 `exec-bindprep-*` 等（exclusive≈15 基底）
+- 调度强制串行的胖项：`lib-carrier-import-model`、`com-seedgen`、`seedparse2-*`、`seedgen`／`seedgen-2`、Darwin 上的 `exec-bindprep-*` 等（Linux exclusive 基底 15；Darwin/arm64 至≈18，见 §6 补核①）
 - 桶回执已示范的 rc 类（见 `research/c42-1640-bucket-receipt.md`）：**rc77** 宿主不适用、**rc142** 超时、**rc2** 资源未知、队列元套件撞车——记噪声／债，不直接写成阶段语义红
 - 缺宿主工具（zig／跨 ld／仿真）导致的 `windows-resolver-host`、`elfobj`／`com-elfobj` 等
 
@@ -104,10 +104,10 @@
 ## 4. 缺口：增量测试结构缺失如何伤阶段叙事（供 0.0.42 后梳 43+）
 
 1. **指纹可续跑，但「新候选／新状态目录」常逼整表重开。**  
-   `gatequeue` 按 job 指纹（声明输入、设置、可执行物、env-pin 等）决定能否复用；`release.sh` 在树变时仍可复用指纹未变的结果。然而：**换 `MODEL_COM` 内容**会使依赖候选的 suite 指纹失效；**换新 `GATE_STATE` 目录**则是空表。材料上「相对上一候选哪一阶段变红」往往丢失，只剩一整窗 722 的平面结果。
+   `gatequeue` 按 job 指纹（声明输入、设置、可执行物、env-pin 等）决定能否复用；`release.sh` 在树变时仍可复用指纹未变的结果。然而：**whitelist 空时 stamp 含 `MODEL_COM` sha**——仅 cand 字节变 → 逻辑上 722 stamp 全失效；**新空 `GATE_STATE`** → carry 0／≈722。`GATE_STATE` 路径本身一般不进指纹（极少 `LOCATION_BOUND` 例外）。材料上「相对上一候选哪一阶段变红」往往丢失，只剩一整窗 722 的平面结果（实据与边界见 §6 补核②）。
 
 2. **失败难附着到 §4.2 阶段。**  
-   约一半以上 suite 名不携带 pp／lex／parse2／… 标签（驱动、告警、lib ABI、com 整包、队列元合同）。`gatelayers` 的 stage／pipeline／platform 是**诊断广度**，不能自动翻译成「预处理／lowering」叙事。没有「失败 → 阶段」的稳定索引时，论文侧只能手工抽样，阶段故事易被整包红淹没。
+   约一半以上 suite 名不携带 pp／lex／parse2／… 标签（驱动、告警、lib ABI、com 整包、队列元合同）。`gatelayers` 的 stage／pipeline／platform 是**诊断广度**，不能自动翻译成「预处理／lowering」叙事。库内另有 **`tests/stagemap.c`**（E2 pp…E6 image＋chain／lib／build／meta；≠ gatelayers）：exec≈152 中 paperish≈91、chain+build≈61；tip 上 `stagemap --check` 对全 722 **未绿**（新 suite 未入表）——阶段索引仍不完整，论文侧仍易被整包红淹没（见 §6 补核③）。
 
 3. **分片与前驱掩盖阶段信号。**  
    覆盖率／seed 分片在 build 失败或超时后批量连锁；exclusive／heavy 又改变谁先跑完。阶段叙事需要「根因 job＋阶段标签＋噪声类」，现状队列默认不产出该三维收据。
@@ -136,12 +136,23 @@
 
 ---
 
-## 6. 本拍未核清、需机房主任补文件／口径处
+## 6. 缺口 1–4 补核收口（原「未核清」已关）
 
-1. **Darwin 条件 exclusive 完整清单与当前云 Linux 跑法的差集**（脚本内 `uname` 分支；本拍在 Linux 盒上只核了基底≈15 + rowcov heavy）。  
-2. **「新候选／新 dir 往往整表重开」的量化回执**（例如某次 cand 切换后 reuse 比例）；本拍据 `gatequeue.py`／`release.sh` 注释与行为推理，未附新跑数。  
-3. **exec-\* 中未挂名阶段的子集是否另有内部 stage 标签表**（若存在于未读文档／私有台账，请指出路径；本拍只据 suite 名 + gatelayers + Paper A／GATE-LAYERS）。  
-4. **com 前缀 93 vs 「com- 开头 + 部分并列」记账**：`--list --com` 下以 `com-` 开头约 93，另有 `csmithdiff` 等不带 `com-` 前缀的产品差分族——对外口径若需「com≈93」请维持机房主任原表，勿与「一切产品路线」混加。
+原四条「需机房主任补文件／口径」已由机房主任在 tip `20ecaeac` 只读核清；回执：`/tmp/unisacc-cdx2/observe-10m/20261013-2004-paper-a-gate722-four-gaps-receipt.md`（方法：`tests/release.sh`、`tests/gatequeue.py`、`tests/stagemap.c`、`tests/gatelayers.py`、`tests/gate.sh --list[--com]`、`~/.unisacc/queue-backup/*/state/results.json` stamp diffs）。**未改** product／gate／本笔记以外文件。
+
+### 机房主任补核（2026-10-13 ~20:04 Asia/Singapore）
+
+① **Darwin exclusive／重载差集**  
+Linux 基底 **15**；Darwin 另加 `bindprep-arm64`／`bindprep-x86_64`；仅 Darwin/arm64 再加 `exec-memx86-ua-1` → arm64 合计≈**18** exclusive。`rowcov*`≈50 为 heavy（并发 1），两宿主同。**Linux-only exclusive：无。**
+
+② **换 cand／新 `GATE_STATE` 与 stamp 复用**  
+whitelist 空时 stamp 含 `MODEL_COM` sha；**新空 state → carry 0／≈722**。仅 cand 字节变 → 逻辑上 **722 stamp 全失效**。实据：两份不同 artifact 备份 **common720 same_stamp0**。`GATE_STATE` 路径本身一般**不**进指纹（极少 `LOCATION_BOUND` 例外）。
+
+③ **exec 阶段标签表（≠ gatelayers）**  
+有库内 `tests/stagemap.c`（E2 pp…E6 image + chain／lib／build／meta）。exec≈152 中 **paperish≈91**、**chain+build≈61**。tip 上 `stagemap --check` 对全 722 **未绿**（新 suite 未入表）。**≠** `gatelayers`（诊断广度）。
+
+④ **com≈93 边界（对外口径）**  
+`--list`＝**632**；`--list --com`＝**722**（+90）。`com-` 前缀 **93**＝常开 3＋仅 `--com` 的 90。对外**勿**把 93 写成「一切产品路线」；端到端还有 `csmithdiff`／`difftest`／`corpus`／`ccrun`／`closure`／`stages` 等非 `com-` 前缀。
 
 ---
 
