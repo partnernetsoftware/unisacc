@@ -116,6 +116,11 @@ class Tape:
         assert op in SHAPE, "unknown tape op %r" % op
         exp = len(SHAPE[op])
         assert len(args) == exp, "%s takes %d operands, got %d" % (op, exp, len(args))
+        # Tape integers carry no underscores (the C reference refuses them; the emitter says the same): a string
+        # operand in an integer slot is refused here, not accepted and left for the encoder to read
+        for kd, a in zip(SHAPE[op], args):
+            if kd == "i" and isinstance(a, str) and "_" in a:
+                raise ValueError("not an integer (python: ValueError) %s" % a)
         # R3': one immutable operand tuple shared by the instruction and its record
         # (a list per Insn plus a tuple copy per record was ~60 MB on the compiler itself);
         # a later patch replaces Insn.args, so the record keeps the as-emitted operands

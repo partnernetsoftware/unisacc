@@ -201,6 +201,9 @@ echo "fp.py $(sha256sum unisa/fp.py | cut -d' ' -f1)"
 echo "padded.py $(sha256sum unisa/padded.py | cut -d' ' -f1)"
 echo "bits.py $(sha256sum unisa/bits.py | cut -d' ' -f1)"
 echo "unisa_tape.c $(sha256sum seed/unisa_tape.c | cut -d' ' -f1)"
+# emit-side negative (0.0.43): the Python emit API refuses an underscore integer with the C emitter's diagnostic
+if PYTHONPATH="$R" python3 -c "from unisa import tape; tape.Tape().emit('imm', 'r1', '1_000')" 2>"$T/emit.err"; then fail "python emit accepted an underscore integer"; fi
+grep -q 'not an integer (python: ValueError) 1_000' "$T/emit.err" || fail "python emit diagnostic differs from the C emitter: $(cat "$T/emit.err")"
 echo "unisatapecheck.sh $(sha256sum tests/unisatapecheck.sh | cut -d' ' -f1)"
 cc --version 2>&1 | head -1 | sed 's/^/host-cc /'
 echo "unisatape  same $same  diff 0  neg 6/6"
