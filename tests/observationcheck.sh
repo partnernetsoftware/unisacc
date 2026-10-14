@@ -36,7 +36,7 @@ S=$T/s-badobs; mkdir -p "$S"; printf 'not json' > "$S/observation.json"; rc=$(re
 # queue.sh: 65 (completed observation) and 66 (refused observation) end the queue after one window -- never the
 # 75/142 continue path, never read as a pass by the window loop (fake window launcher, real queue.sh)
 _BOUND=$("$R/tests/bound" --helper) || { echo "observation: need tests/bound"; exit 2; }
-D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests"; printf c > "$D/unisacc-next.com"
+D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests"; cp "$R/unisacc.com" "$D/unisacc-next.com"   # real product bytes: queue.sh pre-flights the static-image contract on the candidate
 printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
 # a process whose command TEXT mentions gatequeue.py (not running it) must not make queue.sh wait
 bash -c 'sleep 40; echo tests/gatequeue.py --com >/dev/null' & mention=$!   # two commands: the shell (and its text) stays alive
