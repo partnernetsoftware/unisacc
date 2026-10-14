@@ -31,26 +31,41 @@
 4. **decision-ledger、exittable、subtract-safety-selftest：名单外读取都在已声明的 files 或 trees 内。** 已覆盖。
 5. **h1source、seedpy：无名单外读取。**
 
-## 三、尚未测或未完整
+## 三、补测结果与未完整项（第二版，2026-10-14）
 
-| 作业 | 状态 | 原因 |
-|---|---|---|
-| com-tapedomain、com-latebind、com-tools | 未测 | 命令依赖产品二进制 `$PRODUCT`，需要产品就绪后测 |
-| gate-infra | 已测（c3d13214） | 结论已在声明中 |
-| exec-bridge-linux、c99-ledger、ccinterop、realprog | 未测 | 静态表中标了 archive/、research/，尚未 strace；建议下一批 |
-| rowcov-parse2-1..24（24 条） | 不完整 | 每条超时（55 s），读集截断 |
-| rowcov-enc-1..7、enc-8 | 不完整 | 超时；enc-8 墙钟 438 秒（运行器缺陷，见第一节） |
-| rowcov-lower-1..8、lower-build、enc-build、lower-union、enc-union、parse2-union、pp-*、lex | 见批次记录 | lower-1..8 与 lex、lower-build、enc-build 完整；其余超时 |
+| 作业 | 结果 | 读集 | 名单外 | 处理 |
+|---|---|---:|---|---|
+| exec-bridge-linux | **本宿主不可测**：`linuxbridgecheck.py` 需要 `clang -arch arm64`（Apple 工具链），宿主没有，在 0.7 s 内 rc=1 | 2（不完整） | 无 | 不写声明，记为本宿主不可测 |
+| c99-ledger | rc=0 | 3 | 无 | 无需声明 |
+| ccinterop | rc=0 | 96 | 无 | 无需声明 |
+| realprog | rc=0，47 s | 178 | 73：`corpus/*`（已在 declared trees 内）、`.gitattributes`、`.gitignore` | 两个点文件已声明（232fd1b3）；corpus 由 declared tree 覆盖 |
+| com-tapedomain | rc=0，候选 `unisacc-next.com`（sha `7e881abb…`） | 2 | 0 | 无 |
+| com-latebind | rc=0，同上 | 2 | 0 | 无 |
+| com-tools | rc=0，同上，43.9 s | 37 | 31：`corpus/*`（克隆缓存，固定提交，同 tools-1..3） | 同 tools-1..3：外部固定语料，不进声明 |
+| gate-infra | 已在 c3d13214 测过 | — | — | 已声明 |
 
-## 四、完整化的办法（交 cc 定夺）
+注意：`com-*` 的候选是 cc 指定的 `unisacc-next.com`（sha 256 前缀 `7e881abb`），在 `578ec1cc` 的干净导出上运行。之前用根 `unisacc.com`（引导用的旧字节）的结果作废，未引用。`com-tapedomain` 与 `com-latebind` 的读集只有 2 个文件，因为测试以 `-run` 内嵌程序，读取少；这是实测数字，不是漏记。
 
-1. **拆分片（改 gate 本体，需要登记窗）。** rowcov 的 parse2 与 enc 分片在 55 秒窗口内放不下，拆成更多分片即可各自完整。代价是更多作业、更多 rowcov 树（每棵约 2 GB，有并发限制）。
-2. **不改分片、只补一次完整读集（研究，不入库）。** 在干净导出上对每条分片用 `python3 tests/bound.py 55 strace …` 逐条跑，把读集取并集；但这仍被 55 秒截断，不能得到完整读集。因此这条路**不可行**，除非放宽限时（政策上不允许）。
-3. **以超时窗口内的结论作为有界证据（当前做法）。** 窗口内 rowcov 对分片的读取都在名单内，且此前 `research/` 的静态误报已被实测否定（pp 作业）。这只能证明“截断前没有名单外读取”，不能证明完整。若采用此做法，需在声明里写明“有界”，不据此声明任何文件。
+### unisa-gold-opinfo-label：真红，修补已在仓外验证，待登记窗
 
-**建议**：先按 3 记账；若 parse2/enc 的名单外读取需要完整证明，走 1（拆分片），这需要登记窗。
+- 定性：**真红，不是环境**。Python 的 `OPINFO_OPS` 为 73 行（`tape.SHAPE` 72 个操作 + other），C 手抄表 72 行，缺 `.libraryfn`（`unisa/tape.py` 由 9645c6db 加入）。与 874a6e42 同类。
+- 修补（仓外，干净导出 + 提交 scratch）：`seed/unisa_gold_opinfo_label.c` 在 `.libraryaddr` 后插 `.libraryfn`，注释 71→72、72→73 行；`tests/unisagoldopinfolabelcheck.sh` 文字 72→73 行。**结果：rc=0，same 19，diff 0，neg 2/2。**
+- 同类另一处：`seed/unisa_vm.c` 的表也是 SHAPE 副本，缺 `.libraryfn`。修补：加 `{".libraryfn","ri"}`（执行时与 `.libraryaddr` 家族一样以 "operation not covered by this reference" 具名拒绝，不加空实现），头注释 Not covered 列表补上。**结果：`unisavmcheck.sh` rc=0，same 9，diff 0，neg 3/3。** 注意：这些对拍的程序没有使用 `.libraryfn`，所以没有直接证明它被具名拒绝；这一点需要单独的负例。
+- 待登记窗（cdx 持有）：gatedeps 声明 `unisa-gold-opinfo-label` 与 unisa-vm 的对应条目，derived-map 加 `unisa/tape.py` 行。当前两个 suite 都未在 gatedeps 中声明。
 
-## 五、本轮遗留的已知问题
+## 四、rowcov：采用的记账路与边界（cc 定，2026-10-14）
+
+- **采用**：按“源码已核只读名单内 + 有界实测窗口内 0 名单外读取”记账，不拆分片，不改 gate 本体。
+- **源码核对**（`tests/rowcov.py`）：它打开的路径是 `tests/rowcov/*`、`examples/*.c`、`tests/c/*.c`、`exec/*` 下的生成与表，全部在名单内。两处非仓库输入：(a) `xdir()` 通过 `exec/stamp.sh` 得到的输出目录（写入，scratch，不入库）；(b) `UA` 二进制，它已被 rowcov 自身的身份摘要（`edges()` 内 `hashlib` 对 UA 的 sha256）计入。
+- **边界**：读集**未完整**（parse2-1..24、enc-1..8、parse2-union、lower-union、enc-union、pp-*、pp-shared/locations 等多数超时）。只能说“源码级排除 + 截断前无名单外读取”，不能说“完整读集无名单外读取”。不据此写任何声明。lower-1..8、lower-build、enc-build、lex 为完整读集。
+
+## 五、方法（以后一律如此）
+
+- 限时：`python3 tests/bound.py 55 strace …`，按进程组清理。**不用裸 `timeout`**（`timeout` 只杀直接子进程，孙进程占管道，批次 07–08 的 enc-8 墙钟 438 秒由此而来）。每次运行 ≤55 秒。
+- 环境：干净导出（`git archive` 的 HEAD 或指定提交），不用共享工作树。导出中不得留 `.git`（做 k2b/opinfo 时的临时索引须在用完后删除，否则 rowcov 会读到 `.git/*`，曾因此作废一批）。
+- 超时（rc=124）读集截断，记为“未完整”，不据此写声明。
+
+## 六、本轮遗留的已知问题
 
 - 运行器（我的 `run.py`）用了裸 `timeout`，批次 07–08 的 enc-8 墙钟 438 秒。以后用 `tests/bound.py`。
 - 中途一批因导出误留 `.git` 而作废（已重跑干净版）。
