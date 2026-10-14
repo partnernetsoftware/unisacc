@@ -11,11 +11,13 @@
    Then every negative, in each of the four modes (-S -o -, -c -o F, -o F, -run), must
      - exit 1 (124 = timeout, 128+N = signal, 127 = could not start: none of those is a refusal),
      - write nothing to stdout,
-     - leave the output path absent,
+     - leave the output path as it was: absent when it was absent, and an existing file
+       byte for byte unchanged (each writing mode is run both ways),
      - name the reason on stderr: the case's own word, and the line number,
      - not be the tail encoder's "not covered" refusal standing in for the domain check.
 
-   Each negative differs from an accepted line of the control in one respect only.
+   Each negative differs from an accepted tape in one respect only.  The two integer bounds
+   themselves (2^64-1 and -2^63) are positive controls: accepted and returned unchanged.
 
    Exit 0: control accepted and every negative refused as above.  Exit 1: a contract failure
    (each is printed).  Exit 2: usage, or the scratch directory cannot be written.
@@ -30,6 +32,12 @@ static const struct neg NEGS[] = {
     {"bad-register",    "_start:\n  imm r9, 0\n  ret\n", "register"},
     {"bad-integer",     "_start:\n  imm r2, zz\n  ret\n", "integer"},
     {"bad-string",      "_start:\n  ret\n.str s \"abc\n", "string"},
+    {"bad-unit-record", ".unit x\n_start:\n  ret\n", "record"},
+    {"bad-gdef-record", ".gdef\n_start:\n  ret\n",   "record"},
+    /* integer literals are 64-bit words: at most 2^64-1, at least -2^63 (owner ruling 2026-10-14) */
+    {"integer-above",   "_start:\n  imm r2, 18446744073709551616\n  ret\n", "integer"},
+    {"integer-below",   "_start:\n  imm r2, -9223372036854775809\n  ret\n", "integer"},
+    {"integer-hex-above", "_start:\n  imm r2, 0x10000000000000000\n  ret\n", "integer"},
     {0, 0, 0}
 };
 struct mode { const char *id, *args; int writes; };
@@ -56,9 +64,11 @@ static int contains_nocase(const char *hay, const char *needle) {
 }
 
 /* run PRODUCT in one mode on SCRATCH/in.tape; stdout is returned, stderr goes to SCRATCH/err */
-static int run(const char *product, const char *scratch, const struct mode *m, char **out, size_t *n) {
+#define SENTINEL "KEEP-THIS-FILE\n"
+static int run(const char *product, const char *scratch, const struct mode *m, int sentinel, char **out, size_t *n) {
     char args[4096], cmd[16384], outpath[4096];
     snprintf(outpath, sizeof outpath, "%s/out.bin", scratch); unlink(outpath);
+    if (sentinel && cx_write(outpath, SENTINEL, strlen(SENTINEL))) return -1;
     snprintf(args, sizeof args, m->args, scratch);
     snprintf(cmd, sizeof cmd, "sh '%s' %s '%s/in.tape' 2>'%s/err'", product, args, scratch, scratch);
     return cx_run_timeout(cmd, 10, out, n);
@@ -75,32 +85,49 @@ int main(int argc, char **argv) {
     rc = cx_run_timeout(cmd, 10, 0, 0);
     snprintf(path, sizeof path, "%s/in.tape", argv[2]); tape = cx_read(path, &tn);
     if (rc != 0 || !tape || !tn) { printf("  FAIL control: product did not write a tape from C (rc %d)\n", rc); return 1; }
-    rc = run(argv[1], argv[2], &MODES[0], &out, &on);
+    rc = run(argv[1], argv[2], &MODES[0], 0, &out, &on);
     if (rc != 0 || on != tn || memcmp(out, tape, tn)) { printf("  FAIL control: a product-written tape is not accepted byte for byte (rc %d, %zu of %zu bytes)\n", rc, on, tn); return 1; }
     printf("  ok   control: %zu-byte tape accepted and returned unchanged\n", tn);
     free(out); free(tape);
+    {
+        static const char *BOUNDS[] = {"_start:\n  imm r2, 18446744073709551615\n  ret\n", "_start:\n  imm r2, -9223372036854775808\n  ret\n", 0};
+        const char **b;
+        for (b = BOUNDS; *b; b++) {
+            snprintf(path, sizeof path, "%s/in.tape", argv[2]);
+            if (cx_write(path, *b, strlen(*b))) { fprintf(stderr, "cannot write %s\n", path); return 2; }
+            rc = run(argv[1], argv[2], &MODES[0], 0, &out, &on);
+            if (rc != 0 || on != strlen(*b) || memcmp(out, *b, on)) { printf("  FAIL control: a 64-bit bound is not accepted unchanged (rc %d)\n", rc); return 1; }
+            free(out);
+        }
+        printf("  ok   control: 2^64-1 and -2^63 accepted and returned unchanged\n");
+    }
 
     for (g = NEGS; g->id; g++) {
         snprintf(path, sizeof path, "%s/in.tape", argv[2]);
         if (cx_write(path, g->tape, strlen(g->tape))) { fprintf(stderr, "cannot write %s\n", path); return 2; }
         for (m = MODES; m->id; m++) {
-            int before = bad; char what[256];
-            rc = run(argv[1], argv[2], m, &out, &on);
+          int sentinel;
+          for (sentinel = 0; sentinel <= m->writes; sentinel++) {
+            int before = bad; char what[256], label[32];
+            snprintf(label, sizeof label, "%s%s", m->id, sentinel ? "+existing" : "");
+            rc = run(argv[1], argv[2], m, sentinel, &out, &on);
             snprintf(path, sizeof path, "%s/err", argv[2]); err = cx_read(path, &en);
             snprintf(path, sizeof path, "%s/out.bin", argv[2]);
-            if (rc != 1) { snprintf(what, sizeof what, "exit %d, want 1%s", rc, rc == 0 ? " (accepted)" : rc == 124 ? " (timeout is not a refusal)" : rc > 128 ? " (signal is not a refusal)" : ""); fail(g->id, m->id, what); }
-            if (on) { snprintf(what, sizeof what, "%zu bytes on stdout, want none", on); fail(g->id, m->id, what); }
-            if (m->writes && exists(path)) fail(g->id, m->id, "output file was created");
+            if (rc != 1) { snprintf(what, sizeof what, "exit %d, want 1%s", rc, rc == 0 ? " (accepted)" : rc == 124 ? " (timeout is not a refusal)" : rc > 128 ? " (signal is not a refusal)" : ""); fail(g->id, label, what); }
+            if (on) { snprintf(what, sizeof what, "%zu bytes on stdout, want none", on); fail(g->id, label, what); }
+            if (m->writes && !sentinel && exists(path)) fail(g->id, label, "output file was created");
+            if (sentinel) { size_t kn; char *k = cx_read(path, &kn); if (!k || kn != strlen(SENTINEL) || memcmp(k, SENTINEL, kn)) fail(g->id, label, "an existing output file was changed or removed"); free(k); }
             if (rc == 1) {
-                if (!err || !en) fail(g->id, m->id, "no diagnostic on stderr");
+                if (!err || !en) fail(g->id, label, "no diagnostic on stderr");
                 else {
-                    if (contains_nocase(err, "encoder")) fail(g->id, m->id, "refused by the tail encoder, not by the domain check");
-                    if (!contains_nocase(err, g->word)) { snprintf(what, sizeof what, "diagnostic does not name the reason (\"%s\")", g->word); fail(g->id, m->id, what); }
-                    if (!contains_nocase(err, "line ")) fail(g->id, m->id, "diagnostic gives no line number");
+                    if (contains_nocase(err, "encoder")) fail(g->id, label, "refused by the tail encoder, not by the domain check");
+                    if (!contains_nocase(err, g->word)) { snprintf(what, sizeof what, "diagnostic does not name the reason (\"%s\")", g->word); fail(g->id, label, what); }
+                    if (!contains_nocase(err, "line ")) fail(g->id, label, "diagnostic gives no line number");
                 }
             }
-            if (bad == before) printf("  ok   %s/%s: refused, nothing written, reason named\n", g->id, m->id);
+            if (bad == before) printf("  ok   %s/%s: refused, nothing written, reason named\n", g->id, label);
             free(out); free(err); checked++;
+          }
         }
     }
     if (!checked) { printf("  FAIL nothing checked\n"); return 1; }
