@@ -12,10 +12,10 @@
    Exit 77: the host is not Linux or macOS on x86_64 or arm64. */
 #include <cx.h>
 
-/* build SOURCE as a native probe in DIR and run it; 0 when every group held */
-static int probe(const char *dir, const char *source, const char *arch, const char *product, const char *target) {
+/* build SOURCE (plus EXTRA sources; 2c1 sees only the public header) as a native probe in DIR and run it; 0 when every group held */
+static int probe(const char *dir, const char *source, const char *extra, const char *arch, const char *product, const char *target) {
     char cmd[16384], path[4096], *out, *e; size_t n; int rc;
-    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. %s exec/c/librarycall_%s.S -lffi -o '%s/probe' 2>'%s/build.err'", source, arch, dir, dir);
+    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. %s %s exec/c/librarycall_%s.S -lffi -o '%s/probe' 2>'%s/build.err'", source, extra, arch, dir, dir);
     rc = cx_run_timeout(cmd, 40, 0, 0);
     snprintf(path, sizeof path, "%s/build.err", dir);
     if (rc) {
@@ -43,19 +43,19 @@ int main(int argc, char **argv) {
     free(out);
     if (!arch || !target) { printf("liblatebindcheck  UNVERIFIED: host is not lnx/osx on x86_64/arm64\n"); return 77; }
     if (!mkdtemp(dir)) return 2;
-    rc = probe(dir, "tests/liblatebind.c", arch, argv[1], target);
+    rc = probe(dir, "tests/liblatebind.c", "", arch, argv[1], target);
     /* step 2b joins once the tree declares its entry points; until then it is reported, not run */
     {
         size_t hn; char *h = cx_read("exec/c/libunisacc.h", &hn);
         int has2b = h && strstr(h, "us_library_e3_fragment") != 0;
         free(h);
-        if (has2b) { int r2 = probe(dir, "tests/liblatebind2b.c", arch, argv[1], target); if (r2) rc = r2; }
+        if (has2b) { int r2 = probe(dir, "tests/liblatebind2b.c", "", arch, argv[1], target); if (r2) rc = r2; }
         else printf("  info 2b: exec/c/libunisacc.h does not declare the 2b entry points yet; not run\n");
         {
             size_t hn2; char *h2 = cx_read("exec/c/libunisacc.h", &hn2);
             int has2c1 = h2 && strstr(h2, "us_library_data_fragment") != 0;
             free(h2);
-            if (has2c1) { int r3 = probe(dir, "tests/liblatebind2c1.c", arch, argv[1], target); if (r3) rc = r3; }
+            if (has2c1) { int r3 = probe(dir, "tests/liblatebind2c1.c", "exec/c/libunisacc.c", arch, argv[1], target); if (r3) rc = r3; }
             else printf("  info 2c1: exec/c/libunisacc.h does not declare the 2c1 entry points yet; not run\n");
         }
     }
