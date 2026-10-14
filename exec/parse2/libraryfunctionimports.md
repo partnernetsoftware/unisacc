@@ -40,3 +40,31 @@ prepares on a miss and always reruns the dynamic C contract (results are not
 cached). Every tool/contract subprocess has its own bound. No full gate/fresh
 candidate is run. Initial observer load() and stdint include errors were tool
 construction faults; corrected without relaxing contract criteria or limits.
+
+
+## 2c1 data model witness (not library API integration)
+
+Explicit `library/data-contract` LE64(1) enables address-free kind=1 contracts.
+Selection must be canonical USLSEL1 with data owner4 and ordinary owner1; cli/target
+must agree with the POSIX contract target. Missing/wrong/duplicate ownership and
+ordinary/data same-name claims refuse with named diagnostics. No provider address
+or provider-derived supported flag enters this path. Readonly address-taking and
+reading pass E3; write refusal belongs to unbound lower, not this component.
+
+The six-operand .libraryaddr is retained. The finite model marks each emitted
+reference and accumulates a separate data fragment. Enabled output is USTFLOW2:
+magic8, mainN:u64, ordinaryN:u64, dataN:u64, then main/ordinary/data bytes.
+With the new resource absent, existing USTFLOW1 behavior remains unchanged.
+This model-only commit does not connect us_library_data_fragment, provider
+resolution, or the lower write-permission contract.
+
+Actual dynamic-C named selftest: old seven plus thirteen data fixtures, 20 total;
+positive realtime reference == frozen independent source expectations == model
+fragment; negative model/reference both rc1 with named reasons and no stdout.
+Table and network outputs match. A/B independent data object addresses are only
+observations in stderr, never model resource inputs; direct LE/BE/decimal/hex
+windows are absent from data fragments. Source/E1 UNITOK/package hashes are
+recorded in fixture comments. The typed projection is a narrow witness, not a
+complete located-input identity or result-reuse authorization.
+
+Construction and readset/RSS evidence: research/c43-e3-data-receipt.md.

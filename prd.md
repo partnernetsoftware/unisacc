@@ -1439,3 +1439,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 - 2c1 第0步（cc已审准，模型先行）：POSIX数据kind=1沿USLCON1与六操作数.libraryaddr；模型按合同name→稳定ID标定数据引用/UNILOW1 role=0 span，provider地址只在relocate填入。四接口沿cdx3草稿定名；lower getter与2b一致只读已产收据，须先relocate，缺provider失败仍保留。readonly-write由未绑定lower在provider解析前拒；extent/type/missing-provider由绑定层拒。供给extent≥需求，独立类型描述比较，不复制要求计签名证据；其余运行桥/Windows未迁移。不计已实施或全lower无地址。
 
 - 2c1第一模型笔（cc批准）：扩展既有exec-librarypartition-model，不新增登记；USLPAR1 header11=1显式数据迁移，kind1 owner4（独立位），header11=0旧数据owner2不变。审计route-mask不复用3，双归属拒绝。只读取址/读取须接受，写入由未绑定lower拒绝；本笔无消费者接线或产品行为证明。
+
+- 2c1 E3模型笔：显式library/data-contract=LE64(1)，规范selection数据owner4、普通owner1，cli/target与合同target一致；无开关保留USTFLOW1，启用则USTFLOW2三LE64长度依次main/ordinary/data，数据片段由六形.libraryaddr发射点模型标定。只读取址/读取在E3接受，写拒归未绑定lower；本笔不接provider/API，不计完整lower无地址。C/Python构造及四类数据片段参考对拍实际已跑，命名自测与干净导出读集/RSS仍在收口。

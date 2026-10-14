@@ -24,5 +24,5 @@ fi
 case ${1:-check} in --prepare) echo "libraryfunctionimports: prepared $K";exit 0;; check) ;; *) exit 2;; esac
 T=$(mktemp -d "${TMPDIR:-/tmp}/libraryfunctionimports-check.XXXXXX")
 trap 'rm -rf "$T"' EXIT HUP INT TERM
-cp "$D/model.net" "$D/runner" "$T/";cp tests/libraryfunctionimports-cases.tsv "$T/cases.tsv"
+cp "$D/model.net" "$D/model.tbl" "$D/runner" "$T/";cp tests/libraryfunctionimports-cases.tsv "$T/cases.tsv"
 "$R/tests/bound" 35 sh "${MODEL_COM:-./unisacc.com}" -run tests/libraryfunctionimportscheck.cx -- "$T"
