@@ -29,3 +29,11 @@
 | unisa-tapebin、unisa-tapebin-shape | 1 | 无（读集在名单内） |
 
 结论：批次 02 名单外没有读取。注意两项 rc1 是真实失败，不是读取问题：单独直接运行仍是 rc1（`unisatapebincheck.sh`：`DIFF encode`；`unisatapebinshapecheck.sh`：`DIFF render`）。输入文件在工作区没有未提交改动，最近的相关提交是 fdc1c1ab、701d76e8、7b4ac452，尚未定位，需要 owner 判断。
+
+## 批次 03（unisa- 未声明 10 个）
+| 作业 | rc | 名单外读取 |
+|---|---|---|
+| unisa-vm、unisa-gold-prec、unisa-emit-arm-nwmem、unisa-gold-lex-label、unisa-gold-type-label、unisa-gold-binsel-label、unisa-gold-peep-label、unisa-gold-scope-label、unisa-gold-pp-label | 0 | 无 |
+| unisa-gold-opinfo-label | 1 | 无（读集在名单内；rc1 未分析，待单独判断） |
+
+结论：批次 03 名单外没有读取。
