@@ -23,7 +23,7 @@ PREP_PARTS=[
     ['warnparse'],
     ['errorparse'],
     ['warnunits','warnlex','tokenlex','tokenpp','warnpp-shared','plainpp','nativeabi',
-     'object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64'],
+     'object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64','tapecheck'],
 ]
 
 def _digest(path):
@@ -170,7 +170,8 @@ def model_jobs(targets, shared_e2=None, shared_nativeabi=None):
         jobs.append(('object-lower-'+arch,gen,['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])))
         jobs.append(('object-enc-'+arch,gen,['enc/arm' if arch=='arm64' else 'enc','--object']))
     if shared_e2 is None: jobs.append(('plainpp',gen,['pp','--shared-predefines']))
-    jobs+=[('tokenpp',gen,['pp','--shared-predefines','--no-autoinc']),
+    jobs+=[('tapecheck',gen,['tapecheck']),
+           ('tokenpp',gen,['pp','--shared-predefines','--no-autoinc']),
            ('tokenlex',gen,['lex']),
            ('warnlex',gen,['lex','--locations']),
            ('warnparse',gen,['parse2','--warnings','--errors']),
@@ -324,6 +325,16 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         nativeabi=Path(shared_nativeabi).resolve() if shared_nativeabi is not None else job('nativeabi')
         for target in sorted(targets):
             rows.append('\t'.join([target+'/nativeabi','nativeabi','USLSIG2','USLNCAR1',str(nativeabi)]))
+        # E3 yields Tape on ordinary routes. Forwarding stops at E3 to extract
+        # its side-car; the driver then executes this same stage on extracted Tape.
+        tapecheck=job('tapecheck')
+        checked=[]
+        for row in rows:
+            checked.append(row)
+            cols=row.split('\t')
+            if cols[1]=='e3':
+                checked.append('\t'.join([cols[0],'tapecheck',cols[3],cols[3],str(tapecheck)]))
+        rows=checked
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         payload=build([manifest],mounts,compressed=compressed,cache=MODEL_CACHE)
         if audit_dir is not None: retain_models(audit_dir, rows)

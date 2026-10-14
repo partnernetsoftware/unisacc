@@ -38,6 +38,17 @@
 static int clierror(const char *s) {
     fprintf(stderr, "unisacc: model driver: %s\n", s); return 1;
 }
+/* [TP-7/TP-8] Route dispatch only: validation is the finite model, not C grammar.
+   A missing stage must fail closed, including raw -S/-c which bypass the backend. */
+static int tape_domain_available(const char *route) {
+    for (int i=0;i<PS;i++)
+        if (!strcmp(STAGES[i].route,route) && !strcmp(STAGES[i].name,"tapecheck")) return 1;
+    return 0;
+}
+static int tape_domain(const char *route, Buf *in, const char *src) {
+    if (!tape_domain_available(route)) return clierror("tape domain: required tapecheck model is missing");
+    return runroute_range(route,"tapecheck","tapecheck",in,src);
+}
 static int tapebin_path(const char *path) {
     size_t n=strlen(path);return n>=8&&!strcmp(path+n-8,".tapebin");
 }
@@ -695,6 +706,10 @@ int main(int argc, char **argv) {
 
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
+    if (mode!=1 && mode!=4 && !tape_domain_available(route)) {
+        unpackage();
+        return clierror("tape domain: required tapecheck model is missing");
+    }
     Buf in = {0}; int rc=0;
     if (linking) in=linked;
     else if (nsources==1) {
@@ -789,13 +804,14 @@ int main(int argc, char **argv) {
         }
     }
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
+    if (!rc && tape_input) rc=tape_domain(route,&in,src); /* decoded Tapebin uses the same model */
     if (!rc && !(tape_input && mode==2)) {
         if (fwdwant) {
             rc = runroute_range(route,NULL,"e3",&in,src);
             if (!rc) {
                 Buf tape={0}; int fr=fwd_sidecar(&in,&tape);
                 if (fr<0) rc=1;
-                else if (fr==0) { free(in.b); in=tape; rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* the stage after e3, as for tape input */
+                else if (fr==0) { free(in.b); in=tape; rc=tape_domain(route,&in,src); if (!rc) rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* side-car extraction precedes Tape validation */
                 else {
 #ifdef __linux__
                     if (runit && host_dl_slot(1)==0) {
@@ -812,7 +828,8 @@ int main(int argc, char **argv) {
                     int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
                     if (fast>0) {
                         free(in.b); free(tape.b); in=merged;
-                        rc=runroute_from(route,level ? "e4" : "prune",&in,src);
+                        rc=tape_domain(route,&in,src);
+                        if (!rc) rc=runroute_from(route,level ? "e4" : "prune",&in,src);
                     } else if (fast<0) { free(tape.b); rc=1; }
                     else { free(tape.b); fwd_restart=1; }
                 }

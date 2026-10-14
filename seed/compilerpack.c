@@ -222,6 +222,20 @@ int main(int argc, char **argv) {
             }
         }
     for (int t = 0; t < nt; t++) add(&rows, cat(tg[t].name, "/nativeabi"), "nativeabi", "USLSIG2", "USLNCAR1", abir);
+    /* Keep the canonical route declaration byte-equal to compilerpack.py.
+       No new stage slots in the image leaf manifest: validation is inserted
+       after every E3 consumer, including warning/multi/object routes. */
+    {
+        Rows checked = {0}; char *tc = model(mdir,"tapecheck");
+        size_t tc_n; unsigned char *tc_b = slurp(tc,&tc_n);
+        if (!tc_n) die("empty tapecheck model",tc);
+        free(tc_b);
+        for (int i=0;i<rows.n;i++) {
+            Row r=rows.r[i]; add(&checked,r.c[0],r.c[1],r.c[2],r.c[3],r.c[4]);
+            if (!strcmp(r.c[1],"e3")) add(&checked,r.c[0],"tapecheck",r.c[3],r.c[3],tc);
+        }
+        rows=checked; free(tc);
+    }
     mkdirs(out);
     {   char *p = cat(out, "/routes.tsv"); FILE *f = fopen(p, "wb"); if (!f) die("cannot write", p);
         for (int i = 0; i < rows.n; i++) fprintf(f, "%s\t%s\t%s\t%s\t%s\n", rows.r[i].c[0], rows.r[i].c[1], rows.r[i].c[2], rows.r[i].c[3], rows.r[i].c[4]);

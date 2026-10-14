@@ -16,7 +16,9 @@
 
 Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输入模式/目标/调用能力，并使参考承认同一合同；该一致性证据未齐前，Windows 接受不得记产品绿。条款全文见 [spec.md 的 TP-7／TP-8／L-4](spec.md#c43-refusal-ruling)。归属与承诺已裁，实现与补验仍未完成；E3及lower接受样本不扩为完整拒绝域资格。历史待裁提案与观测保留在 [裁定摘要](research/c43-refusal-ruling-summary.md)。本裁定不授签名、Latest或公开，不改变7000历史结果或env-pin。
 
-实施接线采用独立 `exec/tapecheck` 有限转移模型：成功才透传整条原始输入，失败不输出字节、诊断标明原因与行号；包内普通/warning/multi/object 路由在 E3 后插入该阶段；forwarding 的 E3 side-car 先由现有适配器抽出/合并 Tape 再验域；公共 raw Tape/Tapebin 在任何输出之前单独调用同一模型。构造与打包两实现须同拍；Windows 库模式参考暂列待证，不顺手扩为产品绿。
+机房主任追加代裁：Tape 整数字面量为 64 位字，范围 `[-2^63, 2^64−1]`；超出由前置验域具名拒绝（integer 与行号），模型与 Python 参考同步，不复制 Python 的 4300 位宿主转换上限。负号先于进制前缀，适用于十进制/十六进制；保留既有 Python/模型二进制、八进制拼写同样的字范围。此前4301位分歧在实现与对拍后应消除，不能靠调宿主环境计绿。下划线整数当前仍为已登记未覆盖，固定动态 C 用例单列，不冒充产品接受。
+
+实施接线采用独立 `exec/tapecheck` 有限转移模型：成功才透传整条原始输入，失败不输出字节、诊断标明原因与行号；包内普通/warning/multi/object 路由在 E3 后插入该阶段；forwarding 的 E3 side-car 先由现有适配器抽出/合并 Tape 再验域；公共 raw Tape/Tapebin 在任何输出之前单独调用同一模型。缺少包内 tapecheck 阶段时 driver 显式拒绝，不复用旧包或信任源后缀；构造与打包两实现须同拍；Windows 库模式参考暂列待证，不顺手扩为产品绿。
 
 ## 2. 当前版本
 
@@ -1355,3 +1357,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔1906 续测旁核，2026-10-11；实际核过材料/哈希，未重跑套件〕m4pro com SHA256 50ab4c213feedb2f1a4f1f39c8bfca7d8d63c74a1d6b50915db8ceb233f5cf58 / 2243662 B 与公开候选记录相同，version 日志 0.0.40；build.json stale 保留。bootstrap 产品 UA 红 B=1/U=0，参考 UA 绿三 tape=9266b52f…/421304 行，与1532一致；acceptance 10-* 五项 rc0 比较的是 tape（B/U 镜像哈希不同），-o/run 16/0。纠偏：rc/v0.0.40 的 a82b9bda 是 annotated tag 对象，剥离提交为1db30835，与v0.0.40/公开回执相同，不能记为 tip 漂移。测试 B/U 的 ad-hoc 签名与发行补签分账；签/全量验收仍 OPEN。21份 HASHES 全匹配；本旁核只读及文档落盘，未动发布/资产/签/tag/窗口，续测自身禁项及未抢K6仅有回执自报、未见反证。详见 research/c40-post-release-test-1906/post-release-review-cdx-1906.md。
 
 〔机房主任代裁·0.0.43 拒绝域，2026-10-14〕采用A：前置Tape验域拥有语法/形状/记录拒绝，lower只接已验字节流，目标能力拒绝仍留lower；raw .tape是产品承诺，?\n经-S/-c成功原样写出属于缺陷，须在输出前拒绝rc1并点名原因；Windows .hostcall/.hostaddr是有意库模式合同，须显式模式输入与同合同参考对拍，未齐前不能记产品绿。授权按0.0.43落实，产品封存身份须重新建立；0.0.42既有Draft/rc/candidate不回填、不改旧7000或env-pin；禁签/Latest/公开。不以手写宿主语法判断替代核心字节流＋模型的验域阶段。
+
+〔0.0.43 Tape验域接线与TP-9收口，2026-10-14；实际跑过〕仓外候选92236ce3：动态C黑盒78格rc0，模型三片rc0（445例：441判定匹配、4条下划线整数写法已登记欠覆盖，不计产品接受）。cc独立复核driver核心模式原命令暖缓存24秒rc0、27项不缩减，以及新旧产品50源Tape/Tapebin/两入口镜像与退出码差分全同。本宿主com-tapebin三片是既有裁定基线超时，不作新产品证据，真机证据留CI。冷compilerpack约47秒导致整窗超时；既有内容缓存暖后通过，准备/执行拆分只另列设计。未seal、未开整闸、未修改发布面；Win库合同仍待证。

@@ -279,6 +279,42 @@ def _strip_comment(raw):
     return raw
 
 
+def _tape_integer(token, lineno, decimal=False):
+    """TP-9: ASCII literal, explicit word bounds; never Python's host digit limit.
+
+    Keep int(token, 0)'s prefix/underscore/leading-zero syntax for ordinary
+    operands, and int(token)'s decimal syntax for .bss. Accumulation is bounded
+    before multiply/add; even arbitrarily many leading zeroes stay deterministic.
+    """
+    text = token
+    negative = text.startswith("-")
+    if text[:1] in ("+", "-"):
+        text = text[1:]
+    base = 10
+    prefixed = not decimal and text[:2].lower() in ("0x", "0o", "0b")
+    if prefixed:
+        base = {"0x": 16, "0o": 8, "0b": 2}[text[:2].lower()]
+        text = text[2:]
+        if text.startswith("_"):
+            text = text[1:]
+    alphabet = "0123456789abcdef"[:base]
+    digits = text.lower()
+    if (not digits or digits[0] == "_" or digits[-1] == "_" or "__" in digits
+            or any(c != "_" and c not in alphabet for c in digits)):
+        raise ValueError("line %d: invalid integer literal" % lineno)
+    plain = digits.replace("_", "")
+    if not decimal and not prefixed and len(plain) > 1 and plain[0] == "0" and any(c != "0" for c in plain):
+        raise ValueError("line %d: invalid integer literal" % lineno)
+    limit = (1 << 63) if negative else (1 << 64) - 1
+    value = 0
+    for c in plain:
+        digit = alphabet.index(c)
+        if value > (limit - digit) // base:
+            raise ValueError("line %d: integer literal out of 64-bit word range" % lineno)
+        value = value * base + digit
+    return -value if negative else value
+
+
 def parse(text):
     t = Tape()
     pending = []
@@ -288,9 +324,12 @@ def parse(text):
             continue
         if line.startswith(".bss "):
             name, n = line[5:].split()
+            size = _tape_integer(n, lineno, decimal=True)
+            if size < 0:
+                raise ValueError("line %d: invalid .bss size" % lineno)
             before = len(t.records)
-            t.string(name, int(n), align=8)   # R3': zeros by size
-            record = ("bss", name, int(n))
+            t.string(name, size, align=8)   # R3': zeros by size
+            record = ("bss", name, size)
             if len(t.records) == before:
                 t.records.append(record)
             else:
@@ -342,8 +381,12 @@ def parse(text):
                 assert tok in REGS, "line %d: %r is not a register" % (lineno, tok)
                 args.append(tok)
             elif kind in ("i",):
-                args.append(int(tok, 0))
+                args.append(_tape_integer(tok, lineno))
             else:
+                # C raw reader treats a numeric-looking s operand as a word;
+                # preserve its spelling for symbol/target lowering after validation.
+                if kind == "s" and tok[:1] in "+-0123456789":
+                    _tape_integer(tok, lineno)
                 args.append(tok)
         t.code.append(Insn(op, args, lineno))
         t.records.append(("insn", op, tuple(args)))
