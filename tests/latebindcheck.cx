@@ -19,17 +19,18 @@
 
    Checked, in this order (a failed control stops the run: nothing after it would mean much):
      1 control    a C program that calls a host libc function: its contract stream has at
-                  least one record and names slot 2; otherwise nothing is being checked.
+                  least one record and names slot 1 (the host symbol lookup, which every forwarded
+                  call needs); otherwise nothing is being checked.
      2 stream     two emissions are byte-identical; the stream holds no address (every record
                   is well formed, abi = 0, reserved = 0, slots ascending, no trailing bytes).
      3 no-op      mask 15 gives the same image as no provider file at all.
-     4 contract   under mask 11 (slot 2 removed) -o is refused at binding, yet the contract
+     4 contract   under mask 13 (slot 1 removed) -o is refused at binding, yet the contract
                   stream is still written and is the same bytes as under mask 15: the lowering
                   side accepted the program and does not see the provider.  (That the lowering
                   output itself is unchanged is not visible from outside; the model self-test
                   owns that.)
-     5 refusal    under mask 11, -o and -run exit 1 with nothing on stdout, a diagnostic that
-                  says "bind", "missing-provider" and "slot 2", an existing output file byte for
+     5 refusal    under mask 13, -o and -run exit 1 with nothing on stdout, a diagnostic that
+                  says "bind", "missing-provider" and "slot 1", an existing output file byte for
                   byte unchanged, and the program not executed (it would have created a file).
      6 provider   a malformed provider file (bad magic, bad length, reserved bits, wrong target,
                   absent) is refused with exit 1 and a diagnostic that is NOT "missing-provider".
@@ -84,7 +85,7 @@ int main(int argc, char **argv) {
     char own[] = "/tmp/latebindXXXXXX", *args3[3], src[8192], *out, *err; size_t on, en; int rc, target, mask;
     if (argc != 2 && argc != 3) { fprintf(stderr, "usage: latebindcheck.cx PRODUCT [SCRATCH]\n"); return 2; }
     if (argc == 2) {
-        static const char *LEFT[] = {"ctl.c", "sym", "sym2", "sym11", "p15", "p11", "pbad", "img", "img15", "out.bin", "ran", "neg.tape", "err", 0}; const char **l;
+        static const char *LEFT[] = {"ctl.c", "sym", "sym2", "sym13", "p15", "p13", "pbad", "img", "img15", "out.bin", "ran", "neg.tape", "err", 0}; const char **l;
         if (!mkdtemp(own)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
         args3[0] = argv[0]; args3[1] = argv[1]; args3[2] = own; rc = main(3, args3);
         D = own; for (l = LEFT; *l; l++) drop(*l);
@@ -98,17 +99,17 @@ int main(int argc, char **argv) {
 
     /* 1 control: creat() records that the program ran; sysconf() is the host libc call */
     snprintf(src, sizeof src, "int creat(const char *, int);\nlong sysconf(int);\nint main(void) { creat(\"%s/ran\", 0644); return sysconf(29) > 0 ? 0 : 3; }\n", D);
-    if (put("ctl.c", src, strlen(src)) || provider("p15", target, 15) || provider("p11", target, 11)) { fprintf(stderr, "cannot write into %s\n", D); return 2; }
+    if (put("ctl.c", src, strlen(src)) || provider("p15", target, 15) || provider("p13", target, 13)) { fprintf(stderr, "cannot write into %s\n", D); return 2; }
     drop("sym"); drop("ran");
     drop("img");
     rc = run("-o '%s/img' --emit-host-symbols '%s/sym' '%s/ctl.c'", 0, 0);
     mask = rc == 0 ? stream_slots("sym", target) : -1;
     if (rc != 0) { printf("  FAIL control: -o with --emit-host-symbols exits %d\n", rc); return 1; }
     if (mask < 0) { printf("  FAIL control: the contract stream is missing or malformed\n"); return 1; }
-    if (!(mask & 4)) { printf("  FAIL control: the contract stream does not name slot 2 (mask %d); nothing would be checked\n", mask); return 1; }
+    if (!(mask & 2)) { printf("  FAIL control: the contract stream does not name slot 1 (mask %d); nothing would be checked\n", mask); return 1; }
     drop("ran"); rc = run("-run '%s/ctl.c'", &out, &on); free(out);
     if (rc != 0 || !present("ran")) { printf("  FAIL control: the program does not run on this host (rc %d)\n", rc); return 1; }
-    printf("  ok   control: contract stream names slot 2 (mask %d); the program runs\n", mask);
+    printf("  ok   control: contract stream names slot 1 (mask %d); the program runs\n", mask);
 
     /* 2 stream */
     drop("sym2"); drop("img15");
@@ -124,17 +125,17 @@ int main(int argc, char **argv) {
            if (rc != 0 || !same("img", "img15")) fail("no-op: mask 15 does not give the image built without a provider file"); else ok("no-op: mask 15 is the same image as no provider file"); }
 
     /* 4 contract */
-    drop("sym11");
+    drop("sym13");
     put("out.bin", SENTINEL, strlen(SENTINEL));
-    rc = run("-o '%s/out.bin' --emit-host-symbols '%s/sym11' --host-provider '%s/p11' '%s/ctl.c'", 0, 0);
-    if (rc != 1) fail("contract: -o under mask 11 is not refused");
-    else if (!present("sym11")) fail("contract: no contract stream is left when binding refuses (the lowering side must have accepted)");
-    else if (!same("sym", "sym11")) fail("contract: the contract stream changes with the provider");
+    rc = run("-o '%s/out.bin' --emit-host-symbols '%s/sym13' --host-provider '%s/p13' '%s/ctl.c'", 0, 0);
+    if (rc != 1) fail("contract: -o under mask 13 is not refused");
+    else if (!present("sym13")) fail("contract: no contract stream is left when binding refuses (the lowering side must have accepted)");
+    else if (!same("sym", "sym13")) fail("contract: the contract stream changes with the provider");
     else ok("contract: the contract stream is written before binding and does not depend on the provider");
 
     /* 5 refusal */
     {
-        static const char *MODE[] = {"-o '%s/out.bin' --host-provider '%s/p11' '%s/ctl.c'", "-run --host-provider '%s/p11' '%s/ctl.c'", 0};
+        static const char *MODE[] = {"-o '%s/out.bin' --host-provider '%s/p13' '%s/ctl.c'", "-run --host-provider '%s/p13' '%s/ctl.c'", 0};
         static const char *NAME[] = {"-o", "-run"}; int i; char what[256];
         for (i = 0; MODE[i]; i++) {
             int before = bad; size_t kn; char *k;
@@ -142,7 +143,7 @@ int main(int argc, char **argv) {
             rc = run(MODE[i], &out, &on); err = slurp("err", &en);
             if (rc != 1) { snprintf(what, sizeof what, "refusal %s: exit %d, want 1", NAME[i], rc); fail(what); }
             if (on) { snprintf(what, sizeof what, "refusal %s: %zu bytes on stdout", NAME[i], on); fail(what); }
-            if (rc == 1 && !(has(err, "bind") && has(err, "missing-provider") && has(err, "slot 2"))) { snprintf(what, sizeof what, "refusal %s: diagnostic does not say bind / missing-provider / slot 2", NAME[i]); fail(what); }
+            if (rc == 1 && !(has(err, "bind") && has(err, "missing-provider") && has(err, "slot 1"))) { snprintf(what, sizeof what, "refusal %s: diagnostic does not say bind / missing-provider / slot 1", NAME[i]); fail(what); }
             k = slurp("out.bin", &kn);
             if (!k || kn != strlen(SENTINEL) || memcmp(k, SENTINEL, kn)) { snprintf(what, sizeof what, "refusal %s: an existing output file was changed", NAME[i]); fail(what); }
             if (present("ran")) { snprintf(what, sizeof what, "refusal %s: the program was executed", NAME[i]); fail(what); }
