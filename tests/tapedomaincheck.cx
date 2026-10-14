@@ -1,0 +1,109 @@
+#!/usr/bin/env -S unisacc.com -run
+/* tapedomaincheck.cx PRODUCT SCRATCH -- a raw .tape outside the Tape domain is refused before
+   anything is written (spec.md TP-7, TP-8; owner ruling 2026-10-14).
+
+   Black box: it runs PRODUCT on .tape files and looks only at the exit status, stdout, stderr
+   and the output path.  It does not read the model, the tables or the reference.
+
+   Control first.  A tape the product itself writes from a C source must be accepted again and
+   come back byte for byte under -S; without that, "everything is refused" would pass.
+
+   Then every negative, in each of the four modes (-S -o -, -c -o F, -o F, -run), must
+     - exit 1 (124 = timeout, 128+N = signal, 127 = could not start: none of those is a refusal),
+     - write nothing to stdout,
+     - leave the output path absent,
+     - name the reason on stderr: the case's own word, and the line number,
+     - not be the tail encoder's "not covered" refusal standing in for the domain check.
+
+   Each negative differs from an accepted line of the control in one respect only.
+
+   Exit 0: control accepted and every negative refused as above.  Exit 1: a contract failure
+   (each is printed).  Exit 2: usage, or the scratch directory cannot be written.
+   SCRATCH must exist; the files written there are small and are left for inspection. */
+#include <cx.h>
+
+struct neg { const char *id, *tape, *word; };
+static const struct neg NEGS[] = {
+    {"unknown-op",      "?\n",                          "unknown op"},
+    {"unknown-op-body", "_start:\n  frob r0, r1\n  ret\n", "unknown op"},
+    {"operand-count",   "_start:\n  imm r2\n  ret\n",   "operand"},
+    {"bad-register",    "_start:\n  imm r9, 0\n  ret\n", "register"},
+    {"bad-integer",     "_start:\n  imm r2, zz\n  ret\n", "integer"},
+    {"bad-string",      "_start:\n  ret\n.str s \"abc\n", "string"},
+    {0, 0, 0}
+};
+struct mode { const char *id, *args; int writes; };
+static const struct mode MODES[] = {
+    {"S",   "-S -o -", 0},
+    {"c",   "-c -o %s/out.bin", 1},
+    {"o",   "-o %s/out.bin", 1},
+    {"run", "-run", 0},
+    {0, 0, 0}
+};
+
+static int bad;
+static void fail(const char *id, const char *mode, const char *what) {
+    printf("  FAIL %s/%s: %s\n", id, mode, what); bad++;
+}
+static int exists(const char *path) { struct stat st; return stat(path, &st) == 0; }
+static int contains_nocase(const char *hay, const char *needle) {
+    size_t n = strlen(needle), i;
+    for (; *hay; hay++) {
+        for (i = 0; i < n && hay[i] && tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i]); i++) ;
+        if (i == n) return 1;
+    }
+    return 0;
+}
+
+/* run PRODUCT in one mode on SCRATCH/in.tape; stdout is returned, stderr goes to SCRATCH/err */
+static int run(const char *product, const char *scratch, const struct mode *m, char **out, size_t *n) {
+    char args[4096], cmd[16384], outpath[4096];
+    snprintf(outpath, sizeof outpath, "%s/out.bin", scratch); unlink(outpath);
+    snprintf(args, sizeof args, m->args, scratch);
+    snprintf(cmd, sizeof cmd, "sh '%s' %s '%s/in.tape' 2>'%s/err'", product, args, scratch, scratch);
+    return cx_run_timeout(cmd, 10, out, n);
+}
+
+int main(int argc, char **argv) {
+    char path[4096], cmd[16384], *tape, *out, *err; size_t tn, on, en; int rc, checked = 0;
+    const struct neg *g; const struct mode *m;
+    if (argc != 3) { fprintf(stderr, "usage: tapedomaincheck.cx PRODUCT SCRATCH\n"); return 2; }
+
+    snprintf(path, sizeof path, "%s/control.c", argv[2]);
+    if (cx_write(path, "int main(void){return 0;}\n", 26)) { fprintf(stderr, "cannot write %s\n", path); return 2; }
+    snprintf(cmd, sizeof cmd, "sh '%s' -S -o '%s/in.tape' '%s/control.c' 2>'%s/err'", argv[1], argv[2], argv[2], argv[2]);
+    rc = cx_run_timeout(cmd, 10, 0, 0);
+    snprintf(path, sizeof path, "%s/in.tape", argv[2]); tape = cx_read(path, &tn);
+    if (rc != 0 || !tape || !tn) { printf("  FAIL control: product did not write a tape from C (rc %d)\n", rc); return 1; }
+    rc = run(argv[1], argv[2], &MODES[0], &out, &on);
+    if (rc != 0 || on != tn || memcmp(out, tape, tn)) { printf("  FAIL control: a product-written tape is not accepted byte for byte (rc %d, %zu of %zu bytes)\n", rc, on, tn); return 1; }
+    printf("  ok   control: %zu-byte tape accepted and returned unchanged\n", tn);
+    free(out); free(tape);
+
+    for (g = NEGS; g->id; g++) {
+        snprintf(path, sizeof path, "%s/in.tape", argv[2]);
+        if (cx_write(path, g->tape, strlen(g->tape))) { fprintf(stderr, "cannot write %s\n", path); return 2; }
+        for (m = MODES; m->id; m++) {
+            int before = bad; char what[256];
+            rc = run(argv[1], argv[2], m, &out, &on);
+            snprintf(path, sizeof path, "%s/err", argv[2]); err = cx_read(path, &en);
+            snprintf(path, sizeof path, "%s/out.bin", argv[2]);
+            if (rc != 1) { snprintf(what, sizeof what, "exit %d, want 1%s", rc, rc == 0 ? " (accepted)" : rc == 124 ? " (timeout is not a refusal)" : rc > 128 ? " (signal is not a refusal)" : ""); fail(g->id, m->id, what); }
+            if (on) { snprintf(what, sizeof what, "%zu bytes on stdout, want none", on); fail(g->id, m->id, what); }
+            if (m->writes && exists(path)) fail(g->id, m->id, "output file was created");
+            if (rc == 1) {
+                if (!err || !en) fail(g->id, m->id, "no diagnostic on stderr");
+                else {
+                    if (contains_nocase(err, "encoder")) fail(g->id, m->id, "refused by the tail encoder, not by the domain check");
+                    if (!contains_nocase(err, g->word)) { snprintf(what, sizeof what, "diagnostic does not name the reason (\"%s\")", g->word); fail(g->id, m->id, what); }
+                    if (!contains_nocase(err, "line ")) fail(g->id, m->id, "diagnostic gives no line number");
+                }
+            }
+            if (bad == before) printf("  ok   %s/%s: refused, nothing written, reason named\n", g->id, m->id);
+            free(out); free(err); checked++;
+        }
+    }
+    if (!checked) { printf("  FAIL nothing checked\n"); return 1; }
+    printf("tapedomaincheck  %d case-modes  %d failures  %s\n", checked, bad, bad ? "FAILED" : "raw tape domain enforced");
+    return bad ? 1 : 0;
+}
