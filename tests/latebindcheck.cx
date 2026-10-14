@@ -1,0 +1,178 @@
+#!/usr/bin/env -S unisacc.com -run
+/* latebindcheck.cx PRODUCT [SCRATCH] -- the host-symbol contract is a deterministic stream
+   without host facts, and a host that does not provide a declared symbol is refused at the
+   binding step, not by the lowering model (0.0.43 late-binding first cut, owner ruling
+   2026-10-14; design research/c43-late-binding-step0.md).
+
+   Black box: it runs PRODUCT and looks at exit status, stdout, stderr and files.
+
+   Interfaces under test (diagnostic, not a stable promise):
+     --emit-host-symbols FILE   with -S: write the contract stream.  "UNISYM1\n", target:u8,
+                                mode:u8, count:u8, indirect_hostcall:u8, then count records of
+                                8 bytes: id:LE32 (slot+1), slot:u8, kind:u8, abi:u8, reserved:u8.
+     --host-provider FILE       12 bytes: "UHPROV1\n", target:u8, mask:u8 (low 4 bits = slots
+                                the host provides), 2 reserved zero bytes.  It can only remove
+                                capabilities; it carries no address.
+
+   Checked, in this order (a failed control stops the run: nothing after it would mean much):
+     1 control    a C program that calls a host libc function: its contract stream has at
+                  least one record and names slot 2; otherwise nothing is being checked.
+     2 stream     two emissions are byte-identical; the stream holds no address (every record
+                  is well formed, abi = 0, reserved = 0, slots ascending, no trailing bytes).
+     3 no-op      mask 15 gives the same image as no provider file at all.
+     4 contract   under mask 11 (slot 2 removed) the tape and the contract stream are the same
+                  bytes as under mask 15: the lowering model does not see the provider.
+     5 refusal    under mask 11, -o and -run exit 1 with nothing on stdout, a diagnostic that
+                  says "bind", "missing-provider" and "slot 2", an existing output file byte for
+                  byte unchanged, and the program not executed (it would have created a file).
+     6 provider   a malformed provider file (bad magic, bad length, reserved bits, wrong target,
+                  absent) is refused with exit 1 and a diagnostic that is NOT "missing-provider".
+     7 lowering   .hostaddr with index 4 or -1 is refused (exit 1, names "hostaddr") and no
+                  contract stream is written, an existing one left unchanged.
+   Exit 124, 127 and 128+N are never refusals.
+
+   Exit 0: all of the above.  Exit 1: a contract failure.  Exit 2: usage or scratch trouble.
+   Exit 77: the host is not Linux or macOS on x86_64 or arm64 (nothing can be checked here). */
+#include <cx.h>
+
+#define SENTINEL "KEEP-THIS-FILE\n"
+static const char *P, *D;       /* product, scratch */
+static int bad;
+static void fail(const char *what) { printf("  FAIL %s\n", what); bad++; }
+static void ok(const char *what) { printf("  ok   %s\n", what); }
+static char *slurp(const char *name, size_t *n) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); return cx_read(p, n); }
+static int put(const char *name, const void *b, size_t n) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); return cx_write(p, b, n); }
+static void drop(const char *name) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); unlink(p); }
+static int present(const char *name) { char p[4096]; struct stat st; snprintf(p, sizeof p, "%s/%s", D, name); return stat(p, &st) == 0; }
+static int same(const char *a, const char *b) {
+    size_t an, bn; char *x = slurp(a, &an), *y = slurp(b, &bn); int r = x && y && an == bn && !memcmp(x, y, an);
+    free(x); free(y); return r;
+}
+static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != 0; }
+
+/* sh PRODUCT ARGS, cwd-independent: every %s in ARGS is the scratch directory (at most 6) */
+static int run(const char *args, char **out, size_t *n) {
+    char a[8192], cmd[16384];
+    snprintf(a, sizeof a, args, D, D, D, D, D, D);
+    snprintf(cmd, sizeof cmd, "sh '%s' %s 2>'%s/err'", P, a, D);
+    return cx_run_timeout(cmd, 12, out, n);
+}
+static int provider(const char *name, int target, int mask) {
+    unsigned char b[12]; memcpy(b, "UHPROV1\n", 8); b[8] = (unsigned char)target; b[9] = (unsigned char)mask; b[10] = b[11] = 0;
+    return put(name, b, 12);
+}
+
+/* the contract stream is well formed and holds only what the format allows; returns the slot mask or -1 */
+static int stream_slots(const char *name, int target) {
+    size_t n, i; unsigned char *s = (unsigned char *)slurp(name, &n); int mask = 0, last = -1;
+    if (!s || n < 12 || memcmp(s, "UNISYM1\n", 8) || s[8] != target || s[9] != 0 || s[10] > 4 || s[11] > 1 || n != 12 + 8u * s[10]) { free(s); return -1; }
+    for (i = 0; i < s[10]; i++) {
+        unsigned char *r = s + 12 + 8 * i; unsigned id = r[0] | r[1] << 8 | r[2] << 16 | (unsigned)r[3] << 24;
+        if (r[4] > 3 || id != r[4] + 1u || r[5] != 1 || r[6] != 0 || r[7] != 0 || (int)r[4] <= last) { free(s); return -1; }
+        last = r[4]; mask |= 1 << r[4];
+    }
+    free(s); return mask;
+}
+
+int main(int argc, char **argv) {
+    char own[] = "/tmp/latebindXXXXXX", *args3[3], src[8192], *out, *err; size_t on, en; int rc, target, mask;
+    if (argc != 2 && argc != 3) { fprintf(stderr, "usage: latebindcheck.cx PRODUCT [SCRATCH]\n"); return 2; }
+    if (argc == 2) {
+        static const char *LEFT[] = {"ctl.c", "ctl.tape", "ctl2.tape", "m11.tape", "sym", "sym2", "sym11", "p15", "p11", "pbad", "img", "img15", "out.bin", "ran", "neg.tape", "err", 0}; const char **l;
+        if (!mkdtemp(own)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
+        args3[0] = argv[0]; args3[1] = argv[1]; args3[2] = own; rc = main(3, args3);
+        D = own; for (l = LEFT; *l; l++) drop(*l);
+        rmdir(own); return rc;
+    }
+    P = argv[1]; D = argv[2];
+    rc = cx_run_timeout("uname -sm", 5, &out, &on);
+    target = has(out, "Linux x86_64") ? 1 : has(out, "Linux aarch64") || has(out, "Linux arm64") ? 2 : has(out, "Darwin x86_64") ? 3 : has(out, "Darwin arm64") ? 4 : 0;
+    free(out);
+    if (!target) { printf("latebindcheck  UNVERIFIED: host is not lnx/osx on x86_64/arm64\n"); return 77; }
+
+    /* 1 control: creat() records that the program ran; sysconf() is the host libc call */
+    snprintf(src, sizeof src, "int creat(const char *, int);\nlong sysconf(int);\nint main(void) { creat(\"%s/ran\", 0644); return sysconf(29) > 0 ? 0 : 3; }\n", D);
+    if (put("ctl.c", src, strlen(src)) || provider("p15", target, 15) || provider("p11", target, 11)) { fprintf(stderr, "cannot write into %s\n", D); return 2; }
+    drop("sym"); drop("ran");
+    rc = run("-S -o '%s/ctl.tape' --emit-host-symbols '%s/sym' '%s/ctl.c'", 0, 0);
+    mask = rc == 0 ? stream_slots("sym", target) : -1;
+    if (rc != 0) { printf("  FAIL control: -S with --emit-host-symbols exits %d\n", rc); return 1; }
+    if (mask < 0) { printf("  FAIL control: the contract stream is missing or malformed\n"); return 1; }
+    if (!(mask & 4)) { printf("  FAIL control: the contract stream does not name slot 2 (mask %d); nothing would be checked\n", mask); return 1; }
+    drop("ran"); rc = run("-run '%s/ctl.c'", &out, &on); free(out);
+    if (rc != 0 || !present("ran")) { printf("  FAIL control: the program does not run on this host (rc %d)\n", rc); return 1; }
+    printf("  ok   control: contract stream names slot 2 (mask %d); the program runs\n", mask);
+
+    /* 2 stream */
+    rc = run("-S -o '%s/ctl2.tape' --emit-host-symbols '%s/sym2' '%s/ctl.c'", 0, 0);
+    if (rc != 0 || !same("sym", "sym2") || !same("ctl.tape", "ctl2.tape")) fail("stream: two emissions differ"); else ok("stream: two emissions are byte-identical and well formed");
+
+    /* 3 no-op */
+    drop("img"); drop("img15");
+    rc = run("-o '%s/img' '%s/ctl.c'", 0, 0);
+    if (rc != 0) fail("no-op: -o without a provider file fails");
+    else { rc = run("-o '%s/img15' --host-provider '%s/p15' '%s/ctl.c'", 0, 0);
+           if (rc != 0 || !same("img", "img15")) fail("no-op: mask 15 does not give the image built without a provider file"); else ok("no-op: mask 15 is the same image as no provider file"); }
+
+    /* 4 contract */
+    drop("sym11");
+    rc = run("-S -o '%s/m11.tape' --emit-host-symbols '%s/sym11' --host-provider '%s/p11' '%s/ctl.c'", 0, 0);
+    if (rc != 0) fail("contract: -S is refused under mask 11 (the lowering side must not see the provider)");
+    else if (!same("sym", "sym11") || !same("ctl.tape", "m11.tape")) fail("contract: tape or contract stream changes with the provider");
+    else ok("contract: tape and contract stream do not depend on the provider");
+
+    /* 5 refusal */
+    {
+        static const char *MODE[] = {"-o '%s/out.bin' --host-provider '%s/p11' '%s/ctl.c'", "-run --host-provider '%s/p11' '%s/ctl.c'", 0};
+        static const char *NAME[] = {"-o", "-run"}; int i; char what[256];
+        for (i = 0; MODE[i]; i++) {
+            int before = bad; size_t kn; char *k;
+            put("out.bin", SENTINEL, strlen(SENTINEL)); drop("ran");
+            rc = run(MODE[i], &out, &on); err = slurp("err", &en);
+            if (rc != 1) { snprintf(what, sizeof what, "refusal %s: exit %d, want 1", NAME[i], rc); fail(what); }
+            if (on) { snprintf(what, sizeof what, "refusal %s: %zu bytes on stdout", NAME[i], on); fail(what); }
+            if (rc == 1 && !(has(err, "bind") && has(err, "missing-provider") && has(err, "slot 2"))) { snprintf(what, sizeof what, "refusal %s: diagnostic does not say bind / missing-provider / slot 2", NAME[i]); fail(what); }
+            k = slurp("out.bin", &kn);
+            if (!k || kn != strlen(SENTINEL) || memcmp(k, SENTINEL, kn)) { snprintf(what, sizeof what, "refusal %s: an existing output file was changed", NAME[i]); fail(what); }
+            if (present("ran")) { snprintf(what, sizeof what, "refusal %s: the program was executed", NAME[i]); fail(what); }
+            if (bad == before) { snprintf(what, sizeof what, "refusal %s: missing provider refused at binding, nothing written or run", NAME[i]); ok(what); }
+            free(k); free(out); free(err);
+        }
+    }
+
+    /* 6 provider */
+    {
+        unsigned char b[13]; int i, before = bad; char what[256];
+        static const char *NAME[] = {"bad magic", "short file", "long file", "reserved bits", "mask high bits", "wrong target", "absent file"};
+        for (i = 0; i < 7; i++) {
+            size_t n = 12;
+            memcpy(b, "UHPROV1\n", 8); b[8] = (unsigned char)target; b[9] = 15; b[10] = b[11] = 0; b[12] = 0;
+            if (i == 0) b[0] = 'X'; if (i == 1) n = 11; if (i == 2) n = 13; if (i == 3) b[11] = 1; if (i == 4) b[9] = 0x1f; if (i == 5) b[8] = (unsigned char)(target % 4 + 1);
+            if (i == 6) drop("pbad"); else put("pbad", b, n);
+            put("out.bin", SENTINEL, strlen(SENTINEL));
+            rc = run("-o '%s/out.bin' --host-provider '%s/pbad' '%s/ctl.c'", &out, &on); err = slurp("err", &en);
+            if (rc != 1 || on || !err || !en || has(err, "missing-provider")) { snprintf(what, sizeof what, "provider: %s is not refused as a provider-file error (rc %d)", NAME[i], rc); fail(what); }
+            free(out); free(err);
+        }
+        if (bad == before) ok("provider: seven malformed provider files refused, none reported as a missing provider");
+    }
+
+    /* 7 lowering */
+    {
+        static const char *TAPE[] = {"_start:\n  .hostaddr r0, 4\n  ret\n", "_start:\n  .hostaddr r0, -1\n  ret\n", 0}; int i, before = bad; char what[256];
+        for (i = 0; TAPE[i]; i++) {
+            size_t kn; char *k;
+            put("neg.tape", TAPE[i], strlen(TAPE[i])); put("sym2", SENTINEL, strlen(SENTINEL)); put("out.bin", SENTINEL, strlen(SENTINEL));
+            rc = run("-o '%s/out.bin' --emit-host-symbols '%s/sym2' '%s/neg.tape'", &out, &on); err = slurp("err", &en);
+            if (rc != 1 || on || !has(err, "hostaddr")) { snprintf(what, sizeof what, "lowering: case %d is not refused by name (rc %d)", i, rc); fail(what); }
+            if (has(err, "missing-provider")) { snprintf(what, sizeof what, "lowering: case %d is reported as a missing provider", i); fail(what); }
+            k = slurp("sym2", &kn);
+            if (!k || kn != strlen(SENTINEL) || memcmp(k, SENTINEL, kn)) { snprintf(what, sizeof what, "lowering: case %d wrote a contract stream", i); fail(what); }
+            free(k); free(out); free(err);
+        }
+        if (bad == before) ok("lowering: .hostaddr index 4 and -1 refused by name, no contract stream written");
+    }
+
+    printf("latebindcheck  %d failures  %s\n", bad, bad ? "FAILED" : "host-symbol contract and binding refusal hold");
+    return bad ? 1 : 0;
+}
