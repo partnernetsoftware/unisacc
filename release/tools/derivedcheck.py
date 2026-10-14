@@ -73,6 +73,11 @@ def export(base, over, rows, tmp):
     over: a commit, None (the index) or 'WORKTREE' (the working-tree bytes the commit would take)."""
     archive = subprocess.run(['git', 'archive', base], cwd=R, capture_output=True, check=True).stdout
     subprocess.run(['tar', '-x', '-C', str(tmp)], input=archive, check=True)
+    # the checks that call git (rev-parse HEAD) need a repository: a fresh one with one commit of this export
+    env = dict(os.environ, GIT_AUTHOR_NAME='derived', GIT_AUTHOR_EMAIL='d@d', GIT_COMMITTER_NAME='derived', GIT_COMMITTER_EMAIL='d@d')
+    subprocess.run(['git', 'init', '-q'], cwd=tmp, check=True, env=env)
+    subprocess.run(['git', 'add', '-A', '--', '.'], cwd=tmp, check=True, env=env, capture_output=True)
+    subprocess.run(['git', 'commit', '-q', '-m', 'derived export'], cwd=tmp, check=True, env=env, capture_output=True)
     for status, path in rows:
         dst = tmp / path
         if status == 'D':
