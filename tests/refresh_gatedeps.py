@@ -164,6 +164,23 @@ def main():
         'files': ['tests/subtractsafety.py', 'prd.md', 'spec.md', '.gitignore', '.gitattributes'],
         'trees': ['apps', 'bench', 'docs', 'plans', 'research', 'release', 'scripts', '.github']}
     changed.append(('step4-readsets', 'declared ledgercheck, docs, subtract-safety'))
+    # 0.0.43 step 6, batch 1 of the outside-the-name-list audit (research/c43-flow-reuse-step6.md).
+    # decision-ledger opens research/decision-ledger.json (measured).
+    d['suites']['decision-ledger'] = {
+        'command': ['python3', './tests/decisionledger.py'],
+        'files': ['tests/decisionledger.py', 'research/decision-ledger.json']}
+    # exittable opens plans/v0.0.42.md (the version in src/version.h) and archive/plans/v0.0.38.md (measured);
+    # the plan of a later version is read after a bump, so plans/ is declared as a whole tree (as ledgercheck).
+    d['suites']['exittable'] = {
+        'command': ['python3', './tests/exittablecheck.py'],
+        'files': ['tests/exittablecheck.py', 'archive/plans/v0.0.38.md'],
+        'trees': ['plans']}
+    # k2b walks every tracked file (tests/k2bcheck.py:10 git ls-files -co) and the partial strace (timed out at 55 s)
+    # opened every tracked top-level directory; declared as those trees outside the name list.
+    d['suites']['k2b'] = {
+        'command': ['python3', './tests/k2bcheck.py'],
+        'trees': ['apps', 'archive', 'bench', 'docs', 'plans', 'research', 'ujs', '.github']}
+    changed.append(('step6-batch1', 'declared decision-ledger, exittable, k2b'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
