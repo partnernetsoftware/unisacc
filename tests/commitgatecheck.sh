@@ -83,4 +83,28 @@ COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/delm "$R/release/tools/commitgate.sh" -
 [ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a member deleted under the pathspec during the gate was committed"
 git checkout -q -- weights/m/one.tsv
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 -- weights/gold.tsv > /dev/null 2>&1 || fail "stable covered input was not committed"
+# 0.0.43 step 4: the derived-consistency step (release/tools/derivedcheck.py) in this scratch repository.  Its map and
+# its suite are the scratch repository's own: src/front_pp.c is derived into exec/facts/front.tsv (a sha of the source).
+mkdir -p release/tools tests exec/facts
+cp "$R/release/tools/derivedcheck.py" release/tools/
+printf 'src/front_pp.c\tfacts-export\n' > release/derived-map.tsv
+cat > tests/gatedeps.json <<'JSON'
+{"suites": {"facts-export": {"command": ["python3", "-c", "import hashlib,pathlib,sys; h=hashlib.sha256(pathlib.Path('src/front_pp.c').read_bytes()).hexdigest(); sys.exit(0 if pathlib.Path('exec/facts/front.tsv').read_text().strip()==h else 1)"]}}}
+JSON
+echo 'int v = 1;' > src/front_pp.c; sha256sum src/front_pp.c | cut -d' ' -f1 > exec/facts/front.tsv
+git add release tests exec src && git -c user.name=t -c user.email=t@t commit -q -m 'derived-consistency fixture'
+echo 'int v = 2;' > src/front_pp.c; git add src/front_pp.c
+before=$(git rev-parse HEAD)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m x --suite difftest_o-1 -- src/front_pp.c > /dev/null 2>&1
+[ $? -eq 5 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a changed derived source without its regenerated facts was committed"
+sha256sum src/front_pp.c | cut -d' ' -f1 > exec/facts/front.tsv; git add exec/facts/front.tsv
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m ok --suite difftest_o-1 --suite exec-driver-core-modes -- src/front_pp.c exec/facts/front.tsv > /dev/null 2>&1 || fail "a changed derived source with its regenerated facts was refused"
+[ "$(git rev-parse HEAD)" != "$before" ] || fail "the consistent pair did not commit"
+# a research-only commit adds no derived check: the facts are still stale here (not regenerated), yet it commits
+echo note > research-note.md; git add research-note.md
+echo 'int v = 3;' > src/front_pp.c; git add src/front_pp.c
+before=$(git rev-parse HEAD)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m doc -- research-note.md > /dev/null 2>&1 || fail "a research-only commit was refused by the derived step"
+[ "$(git rev-parse HEAD)" != "$before" ] || fail "the research-only commit did not commit"
+git checkout -q -- src/front_pp.c 2>/dev/null || true
 echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified in either naming order, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit"

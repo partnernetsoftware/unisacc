@@ -87,5 +87,12 @@ before=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; 
 "$R/release/tools/checkrun.sh" "$log" -- "$gate" ${suites[@]+"${suites[@]}"} || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
 after=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; }
 [ "$before" = "$after" ] || { echo "commitgate: inputs changed while the gate ran ($before -> $after), nothing committed (log $log)" >&2; exit 4; }
+# 0.0.43 step 4 (research/c43-derived-consistency.md): the derived files of the committed paths must agree with their
+# sources.  release/tools/derivedcheck.py maps the paths to their derived-consistency suites (release/derived-map.tsv),
+# runs them in a clean export of HEAD with these paths' working-tree bytes, and fails on any non-zero rc.  It is a
+# separate step with its own bound (55 s), not part of the named gate's limit; an empty mapping costs one git call.
+dlog=$(mktemp "${TMPDIR:-/tmp}/derivedcheck.XXXXXX")
+python3 -I "$R/tests/bound.py" 55 python3 -I "$R/release/tools/derivedcheck.py" --root "$top" --worktree -- "$@" > "$dlog" 2>&1 \
+  || { echo "commitgate: derived consistency refused, nothing committed (log $dlog)" >&2; cat "$dlog" >&2; exit 5; }
 UNISACC_COMMITGATE_RUN=1 git commit -q -m "$msg" -- "$@" || { echo "commitgate: gate was green but git commit failed" >&2; exit 3; }
 echo "commitgate: committed $(git rev-parse --short HEAD) after gate rc=0 (log $log)"

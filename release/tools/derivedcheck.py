@@ -14,12 +14,29 @@ nothing in the checkout.  Exit 0 only when every mapped suite ran and returned 0
 """
 import fnmatch, json, os, pathlib, shutil, subprocess, sys, tempfile
 
-R = pathlib.Path(__file__).resolve().parents[2]
-MAP = R / 'release/derived-map.tsv'
+REPO = pathlib.Path(__file__).resolve().parents[2]   # the checkout this tool lives in (default)
+R = REPO                                              # set by --root (commitgate passes the checked repository)
+MAP = None
 ROOT_PRODUCT = ('unisacc.com', 'unisacc.com.build.json')
 
 def git(*args, check=True):
     return subprocess.run(['git', *args], cwd=R, capture_output=True, check=check).stdout.decode()
+
+def worktree_rows(paths):
+    """(status, path) for the working-tree content of the given paths, as a commit with --only would take it."""
+    files = []
+    for p in paths:   # a directory argument stands for its tracked and untracked files, as git commit -- DIR does
+        if (R / p).is_dir():
+            files += [q for q in subprocess.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', p],
+                                                cwd=R, capture_output=True, check=True).stdout.decode().split('\0') if q]
+        else:
+            files.append(p)
+    rows = []
+    for p in dict.fromkeys(files):
+        in_head = subprocess.run(['git', 'cat-file', '-e', 'HEAD:' + p], cwd=R, capture_output=True).returncode == 0
+        if not (R / p).exists() and not (R / p).is_symlink(): rows.append(('D', p))
+        else: rows.append(('M' if in_head else 'A', p))
+    return rows
 
 def changed(base, over):
     """(status, path) pairs between base and over; over=None means the index."""
@@ -38,7 +55,8 @@ def changed(base, over):
     return rows
 
 def suites_for(rows):
-    rules = [l.split('\t') for l in MAP.read_text().splitlines() if l.strip() and not l.startswith('#')]
+    # no map in this checkout means no derived-consistency rows: an empty mapping costs nothing
+    rules = [l.split('\t') for l in MAP.read_text().splitlines() if l.strip() and not l.startswith('#')] if MAP.exists() else []
     want, why = set(), {}
     for status, path in rows:
         for glob, suite in rules:
@@ -51,7 +69,8 @@ def suites_for(rows):
     return sorted(want), why
 
 def export(base, over, rows, tmp):
-    """clean export of base, with the overlay applied; the root product is linked read-only."""
+    """clean export of base, with the overlay applied; the root product is linked read-only.
+    over: a commit, None (the index) or 'WORKTREE' (the working-tree bytes the commit would take)."""
     archive = subprocess.run(['git', 'archive', base], cwd=R, capture_output=True, check=True).stdout
     subprocess.run(['tar', '-x', '-C', str(tmp)], input=archive, check=True)
     for status, path in rows:
@@ -60,9 +79,26 @@ def export(base, over, rows, tmp):
             if dst.exists() or dst.is_symlink(): dst.unlink()
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        spec = f'{over}:{path}' if over else f':{path}'
-        content = subprocess.run(['git', 'show', spec], cwd=R, capture_output=True, check=True).stdout
+        if over == 'WORKTREE':
+            content = (R / path).read_bytes()
+        else:
+            spec = f'{over}:{path}' if over else f':{path}'
+            content = subprocess.run(['git', 'show', spec], cwd=R, capture_output=True, check=True).stdout
         dst.write_bytes(content)
+    for name in ROOT_PRODUCT:
+        if (R / name).is_file():
+            (tmp / name).unlink(missing_ok=True)
+            (tmp / name).symlink_to(R / name)
+
+def export_worktree(base, rows, tmp):
+    export(base, None, [], tmp)              # base tree first (index entries are overwritten below)
+    for status, path in rows:
+        dst = tmp / path
+        if status == 'D':
+            if dst.exists() or dst.is_symlink(): dst.unlink()
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes((R / path).read_bytes())
     for name in ROOT_PRODUCT:
         if (R / name).is_file():
             (tmp / name).unlink(missing_ok=True)
@@ -73,10 +109,18 @@ def declared_commands():
     return {n: v['command'] for n, v in d.items() if 'command' in v}
 
 def main(argv):
+    global R, MAP
     base, over, paths = 'HEAD', None, None
+    if '--root' in argv:
+        R = pathlib.Path(argv[argv.index('--root') + 1]).resolve()
+    MAP = R / 'release/derived-map.tsv'
     if '--base' in argv: base = argv[argv.index('--base') + 1]
     if '--over' in argv: over = argv[argv.index('--over') + 1]
-    if '--paths' in argv:
+    if '--worktree' in argv:
+        paths = argv[argv.index('--worktree') + 1:]
+        if paths and paths[0] == '--': paths = paths[1:]
+        rows = worktree_rows(paths); over = 'WORKTREE'
+    elif '--paths' in argv:
         paths = argv[argv.index('--paths') + 1:]
         rows = [('M', p) for p in paths]
     else:
@@ -93,7 +137,7 @@ def main(argv):
     tmp = pathlib.Path(tempfile.mkdtemp(prefix='derivedcheck-'))
     worst = 0
     try:
-        export(base, over, rows, tmp)
+        export(base, None if over == 'WORKTREE' else over, rows, tmp) if over != 'WORKTREE' else export_worktree(base, rows, tmp)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         for s in suites:
             cmd = commands[s]
