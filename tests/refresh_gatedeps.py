@@ -145,6 +145,20 @@ def main():
     for name in ['com-tapebin-six', 'com-tapebin-cover'] + ['com-tapebin-%d' % k for k in range(1, 7)]:
         d['suites'][name] = json.loads(json.dumps(shard_entry))
     changed.append(('com-tapebin', 'declared 1-6, six, cover, ref'))
+    # 0.0.43 step 6, fifth cut: the outside-the-name-list reads the strace measured (research/c43-flow-reuse-step4.md).
+    # Only what was opened: ledgercheck reads three plan files (its version.h keys which ones), docs reads four files,
+    # subtract-safety walks every tracked directory except archive/ and ujs/ (its own check is "every tracked file").
+    d['suites']['ledgercheck'] = {
+        'command': ['python3', './tests/ledgercheck.py'],
+        'files': ['tests/ledgercheck.py', 'src/version.h', 'plans/roadmap-0.0.x.md', 'plans/v0.0.41.md', 'plans/v0.0.42.md']}
+    d['suites']['docs'] = {
+        'command': ['./tests/docs.sh'],
+        'files': ['tests/docs.sh', 'prd.md', 'spec.md', 'research/model-bytes.json', 'research/unisacc-paper.md']}
+    d['suites']['subtract-safety'] = {
+        'command': ['python3', './tests/subtractsafety.py'],
+        'files': ['tests/subtractsafety.py', 'prd.md', 'spec.md', '.gitignore', '.gitattributes'],
+        'trees': ['apps', 'bench', 'docs', 'plans', 'research', 'release', 'scripts', '.github']}
+    changed.append(('step4-readsets', 'declared ledgercheck, docs, subtract-safety'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
