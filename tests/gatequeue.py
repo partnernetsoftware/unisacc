@@ -240,9 +240,15 @@ def fingerprint(jobs, parts=None, revoked=()):
     if os.environ.get('SEED_DIR'):
         for name in ('unisacc-seed.com', 'unisacc-seed.com.build.json'):
             seed_inputs[name] = digest(str(pathlib.Path(os.environ['SEED_DIR']) / name))
+    # 0.0.43 (cc ruling): a queue that runs the ROOT product (no MODEL_COM, or MODEL_COM naming it) has that product
+    # in every job's identity.  unisacc.com is git-ignored, so no name list reaches it; without this, rebuilding the
+    # root product reused results of jobs that run it.  A queue with another candidate in MODEL_COM is not changed.
+    root_product = []
+    if not settings.get('MODEL_COM') or os.path.realpath(settings['MODEL_COM']) == os.path.realpath('unisacc.com'):
+        root_product = [{n: digest(n) for n in ('unisacc.com', 'unisacc.com.build.json')}]
     common = [provider_inputs, seed_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
-              {'tests/gatequeue.py':contract_digest('tests/gatequeue.py'), 'tests/bound.py':digest('tests/bound.py')}, gate_runner()]
+              {'tests/gatequeue.py':contract_digest('tests/gatequeue.py'), 'tests/bound.py':digest('tests/bound.py')}, gate_runner()] + root_product
     # 0.0.29 P7': gate.sh's job lines and gatedeps.json are no longer global identities -- a job's own
     # command, declared inputs and guards are in its stamp already, so editing one job line or refreshing
     # another suite's declaration keeps every other result (0.0.28 measured 0% reuse because of these two)
