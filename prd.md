@@ -1383,3 +1383,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔晚绑定头适配第二次构建纠偏〕Windows成员构建因sys/stat.h包装器引用禁用的_ux_call/_ux_fail/_ux_ft2unix而失败。首刀仅POSIX且Windows侧IO适配是拒绝stub，因此头引入也必须限定__UNISA__且Apple/Linux。补五个APE成员目标的同源UA编译证据，不能以本机core27覆盖非本机分支；新增fix提交，不改写先前提交或失败构建戳。
 
 〔晚绑定内存运行真红，实际定位〕同源码同模型包system cc驱动return7正确，自举驱动rc139；插桩停在绑定后数组指针写回。HostCompileContext的unsigned char (*dl)[8]成员下标写入改为平坦字节指针+8*j，仓外A/B恢复rc7。此为驱动窄修，不声称修复编译器误编：另立最小C复现案与待登记探针。core-modes原27项仅E/S/b，补三驱动-run/default六项return7控制；cc同意新fix后fresh验收。
+
+〔数组指针成员误编独立立案，实际跑过〕tests/c/array-pointer-member-store.c为待审探针，尚未登记闸。系统cc镜像rc0并输出pass；经典同源自举ua -run及其-o镜像均SIGSEGV（子进程rc−11/壳139）；模型产品fb68a994的-run/-o均在parse2具名拒绝not covered: array typedef pointer member。因此误编证据归经典参考/自举路径，不能把模型欠覆盖写成模型接受误编。仓外flat-byte A/B修复驱动运行不等于修复该语言缺陷；疑点与工具摘要见research/c43-array-pointer-member-miscompile.md。
