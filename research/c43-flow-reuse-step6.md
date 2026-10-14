@@ -12,3 +12,14 @@
 | rowcov-pp-locations | rc124 at 55 s (partial) | none in the part read | incomplete, not declared |
 | rowcov-pp-shared | rc124 at 55 s (partial) | none in the part read | incomplete, not declared |
 | rowcov-parse2-build | rc124 at 55 s (partial) | none (exec/parse2/../ paths normalise into exec/) | incomplete, not declared |
+
+## batch 2 (strace, rc as shown)
+| job | strace | reads outside the name list | result |
+|---|---|---|---|
+| seedpy, ccinterop, c99-ledger, exec-bridge-linux, rowcov-lower-build | rc0 | none | none |
+| realprog | rc0 | corpus/cJSON, corpus/jsmn, corpus/lua... (pinned external, realprog.sh) | external pinned, no declaration |
+| com-tools | rc0 | corpus/crypto-algorithms (pinned external, tools.sh) | external pinned, no declaration |
+| gate-infra | rc1 | unisacc.com, unisacc.com.build.json (root product) | declared (files) |
+| com-tapedomain, com-latebind | rc1 | unisacc.com (root product) | declared (files + executable_inputs) |
+
+Root-product jobs without MODEL_COM: 95. 17 undeclared (no product identity). Not fixed here; gatequeue change needed (product file is gitignored).

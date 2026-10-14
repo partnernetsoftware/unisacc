@@ -181,6 +181,19 @@ def main():
         'command': ['python3', './tests/k2bcheck.py'],
         'trees': ['apps', 'archive', 'bench', 'docs', 'plans', 'research', 'ujs', '.github']}
     changed.append(('step6-batch1', 'declared decision-ledger, exittable, k2b'))
+    # 0.0.43 step 6, batch 2.  gate-infra, com-tapedomain and com-latebind run the ROOT product (unisacc.com, which
+    # is git-ignored, so it is in no global name list) when MODEL_COM is unset; their measured reads include it.
+    # Declared with executable_inputs so the root product's bytes enter the fingerprint (tests/gatequeue.py:410).
+    rootfiles = ['unisacc.com', 'unisacc.com.build.json']
+    gi = d['suites']['gate-infra']
+    gi['files'] = sorted(set(gi.get('files', [])) | set(rootfiles))
+    d['suites']['com-tapedomain'] = {
+        'command': ['sh', './unisacc.com', '-run', 'tests/tapedomaincheck.cx', '--', './unisacc.com'],
+        'files': ['tests/tapedomaincheck.cx'] + rootfiles, 'executable_inputs': True}
+    d['suites']['com-latebind'] = {
+        'command': ['sh', './unisacc.com', '-run', 'tests/latebindcheck.cx', '--', './unisacc.com'],
+        'files': ['tests/latebindcheck.cx'] + rootfiles, 'executable_inputs': True}
+    changed.append(('step6-batch2', 'root product declared for gate-infra, com-tapedomain, com-latebind'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
