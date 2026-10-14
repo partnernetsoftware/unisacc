@@ -10,7 +10,7 @@ Python cold construction and unmeasured flags/COM remain UNKNOWN.
 import argparse, hashlib, pathlib, stat, subprocess, sys, platform, shutil, re, tempfile, os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 C_SHA='b802e4f2d2d7f10ad13dd9392792e085de2dfdcd30fd2c2f0c8bbd42d9190cdb'
-REFERENCE_KEYS={'gen':'26af43a34bb53b95','parse2':'833d3f6504128e12'}
+REFERENCE_KEYS={'gen':'8103012af730a59f','parse2':'15718a9bbe4d5fba'}
 BINARY_SHA='f997b25d8f8391e12034871bd14e20523fa6cc88720cadb3bc6a71a41c591e64'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
@@ -61,11 +61,19 @@ def available(meminfo=pathlib.Path('/proc/meminfo'),cgroup=pathlib.Path('/proc/s
         current=current.parent
     return observed
 
+def read_set(family):
+    # Files the measured routes open (strace, clean HEAD export, see research/c43-seedmemory-readset.md).
+    lines=(ROOT/'tests/seedmemory-reads.tsv').read_text().splitlines()[1:]
+    return [l.split('\t')[1] for l in lines if l.split('\t')[0]==family]
+
 def reference_key(family):
-    # Exact existing suite cache key, not a second cache protocol.
-    files='exec/assemble.py exec/build/*.py exec/parse2/* exec/facts/*.tsv' if family=='parse2' else 'exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exec/facts/*.tsv weights/gold/*.tsv'
-    r=subprocess.run(['sh','-c','cat '+files+' 2>/dev/null | shasum | cut -c1-16'],cwd=ROOT,capture_output=True,text=True,timeout=10,check=True)
-    return r.stdout.strip()
+    # sha256 over each read file's path and content, in list order; unlisted files cannot change it.
+    h=hashlib.sha256()
+    for rel in read_set(family):
+        try: data=(ROOT/rel).read_bytes()
+        except FileNotFoundError:return None
+        h.update(rel.encode()+b'\0'+hashlib.sha256(data).digest())
+    return h.hexdigest()[:16]
 
 def execution_identity(family):
     script=ROOT/'tests'/('seedparse2check.sh' if family=='parse2' else 'seedgencheck.sh')

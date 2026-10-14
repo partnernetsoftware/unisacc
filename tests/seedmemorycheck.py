@@ -113,4 +113,19 @@ class Memory(unittest.TestCase):
   with patch.object(sys,'argv',['seedmemory.py','gen']),patch.object(m,'assess',return_value=(77,4096,100,'measured')),contextlib.redirect_stdout(io.StringIO()) as out:
    self.assertEqual(m.main(),77)
   self.assertEqual(out.getvalue().strip(),'UNVERIFIED: required=mem>=4096B observed=100B missing=memory')
+ def test_pinned_keys_match_read_files(self):
+  # real tree, not patched: a changed read file moves the key and this goes red, forcing an strace re-measure
+  for f in ('gen','parse2'):self.assertEqual(m.reference_key(f),m.REFERENCE_KEYS[f],'read-set key moved for '+f+': re-measure with strace (research/c43-seedmemory-readset.md), then update REFERENCE_KEYS')
+ def test_reference_key_reads_only_listed_files(self):
+  with tempfile.TemporaryDirectory() as d:
+   root=pathlib.Path(d);(root/'tests').mkdir();(root/'tests/seedmemory-reads.tsv').write_text((m.ROOT/'tests/seedmemory-reads.tsv').read_text())
+   for f in m.read_set('gen'):(root/f).parent.mkdir(parents=True,exist_ok=True);(root/f).write_bytes(b'x')
+   (root/'exec/librarypartition').mkdir(parents=True);(root/'exec/librarypartition/librarypartition-byte.tsv').write_bytes(b'x')
+   with patch.object(m,'ROOT',root):
+    before=m.reference_key('gen')
+    (root/'exec/librarypartition/librarypartition-byte.tsv').write_bytes(b'changed')
+    self.assertEqual(m.reference_key('gen'),before)
+    (root/'exec/lower/armfuse-byte.tsv').write_bytes(b'changed')
+    self.assertNotEqual(m.reference_key('gen'),before)
+
 if __name__=='__main__':unittest.main()
