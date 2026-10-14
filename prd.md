@@ -1434,3 +1434,8 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 ### 流推导的默认可复用切面（2026-10-14 政委定调）
 
 函数＝调用模型做流式推导；IO＝字节流（≈iostream）。共用字节输入/输出通道形态、执行器与有限表，接口须显式；阶段语义和拒绝归属留给各阶段/调用方，外部合同显式入流，宿主地址/环境仅在适配与绑定层。优先固化可复用模块，不另造大阶段，也不以实现债否证抽象。2b沿此切面把归属、符号引用和span保持为模型流，宿主层只解帧与按span绑定。
+
+
+- 2c1 第0步（cc已审准，模型先行）：POSIX数据kind=1沿USLCON1与六操作数.libraryaddr；模型按合同name→稳定ID标定数据引用/UNILOW1 role=0 span，provider地址只在relocate填入。四接口沿cdx3草稿定名；lower getter与2b一致只读已产收据，须先relocate，缺provider失败仍保留。readonly-write由未绑定lower在provider解析前拒；extent/type/missing-provider由绑定层拒。供给extent≥需求，独立类型描述比较，不复制要求计签名证据；其余运行桥/Windows未迁移。不计已实施或全lower无地址。
+
+- 2c1第一模型笔（cc批准）：扩展既有exec-librarypartition-model，不新增登记；USLPAR1 header11=1显式数据迁移，kind1 owner4（独立位），header11=0旧数据owner2不变。审计route-mask不复用3，双归属拒绝。只读取址/读取须接受，写入由未绑定lower拒绝；本笔无消费者接线或产品行为证明。
