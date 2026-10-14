@@ -16,6 +16,7 @@
 #include "tapebin_emit.h"
 #include "memory.c"
 #include "../../src/host_dl.h"
+#include "bind.h"
 #ifdef _WIN32
 #include "winprocess.c"
 #endif
@@ -49,6 +50,8 @@ static int tape_domain(const char *route, Buf *in, const char *src) {
     if (!tape_domain_available(route)) return clierror("tape domain: required tapecheck model is missing");
     return runroute_range(route,"tapecheck","tapecheck",in,src);
 }
+#include "bind.c"
+
 static int tapebin_path(const char *path) {
     size_t n=strlen(path);return n>=8&&!strcmp(path+n-8,".tapebin");
 }
@@ -470,6 +473,7 @@ int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
     int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0, defrun=0;
+    const char *host_symbols_path=0,*host_provider_path=0;
     const char **deptargets=xrealloc(0,argc*sizeof(char *)); int *depquoted=xrealloc(0,argc*sizeof(int));
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
@@ -488,7 +492,7 @@ int main(int argc, char **argv) {
         if (a[0]!='-') continue;
         if (a[1]=='o'||a[1]=='b'||a[1]=='t'||a[1]=='S'||a[1]=='c'||a[1]=='E'||a[1]=='M') modeflag=1;
         if (!strcmp(a,"-run")||!strcmp(a,"-dump-tokens")||!strcmp(a,"--tapebin")||!strcmp(a,"--version")||!strcmp(a,"-version")) modeflag=1;
-        if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")) i++;   /* skip the option's argument */
+        if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")||!strcmp(a,"--emit-host-symbols")||!strcmp(a,"--host-provider")) i++;   /* skip the option's argument */
       }
       if (!modeflag) { runit=1; defrun=1; } }
     for (int i = 1; i < argc; i++) {
@@ -516,6 +520,9 @@ int main(int argc, char **argv) {
             if (++i>=argc) return clierror("missing dependency target");
             deptargets[ndeptargets]=argv[i]; depquoted[ndeptargets]=a[2]=='Q'; ndeptargets++;
         }
+        else if (!strcmp(a,"--emit-host-symbols")) { if(host_symbols_path||++i>=argc)return clierror("invalid --emit-host-symbols argument");host_symbols_path=argv[i]; }
+        else if (!strcmp(a,"--host-provider")) { if(host_provider_path||++i>=argc)return clierror("invalid --host-provider argument");host_provider_path=argv[i]; }
+        else if (!strcmp(a,"--help")) { puts("unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)");return 0; }
         else if (!strcmp(a,"-MP")) depphony=1;
         else if (!strcmp(a,"-MF")) {
             if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
@@ -617,6 +624,28 @@ int main(int argc, char **argv) {
     int execrun=fwd_exec && runit;
     if (execrun) { runit=0; mode=0; if (!deponly) deps=0; }
 #endif
+    unsigned host_target=host_target_id(target),host_filter=15;
+    if((host_symbols_path||host_provider_path)&&(!host_target||mode==1||mode==4||mode==5||emitbin||asmwant))return clierror("bind: diagnostic option mode/target not supported");
+    if(host_symbols_path&&(runit||!strcmp(host_symbols_path,"-")))return clierror("bind: --emit-host-symbols cannot be used with -run or stdout");
+    if(host_symbols_path){
+        const char *effective_out=out;
+        if(!effective_out&&!mode&&!explicit_image&&!runit)effective_out="a.out";
+        int same=host_same_output(host_symbols_path,effective_out);
+        if(same)return clierror(same>0?"bind: symbol-stream and output are the same path":"bind: cannot-check-symbol-stream path");
+        if(deps){
+            const char *effective_deps=deps;char depname[4096];
+            if(!deps[0]&&deponly)effective_deps=out?out:"-";
+            else if(!deps[0]){
+                const char *base=out?out:src;int len=(int)strlen(base),dot=len,b=0;
+                for(int k=0;k<len;k++){if(base[k]=='/'){dot=len;if(!out)b=k+1;}else if(base[k]=='.')dot=k;}
+                if(dot-b+3>(int)sizeof depname)return clierror("bind: dependency path too long");
+                memcpy(depname,base+b,(size_t)(dot-b));depname[dot-b]='.';depname[dot-b+1]='d';depname[dot-b+2]=0;effective_deps=depname;
+            }
+            same=host_same_output(host_symbols_path,effective_deps);
+            if(same)return clierror(same>0?"bind: symbol-stream and dependency output are the same path":"bind: cannot-check-symbol-stream path");
+        }
+    }
+    if(host_provider_path&&host_filter_file(host_provider_path,host_target,&host_filter))return 1;
     char route[96];
     int n = mode == 4 ? snprintf(route,sizeof route,"tokens") :
         mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
@@ -657,8 +686,8 @@ int main(int argc, char **argv) {
 #if defined(__APPLE__) || defined(__linux__)
         static const char *dlkeys[4] = {"\0process/dl/0", "\0process/dl/1", "\0process/dl/2", "\0process/dl/3"};
         for (int j=0;j<4;j++) {
-            resource_u64(process_dl[j],host_dl_slot(j));
-            cli[NRI].name=(const unsigned char *)dlkeys[j]; cli[NRI].n=13;
+            memset(process_dl[j],0,8); /* host addresses are bound only after lower */
+            cli[NRI].name=(const unsigned char *)dlkeys[j]; cli[NRI].n=0;
             cli[NRI].data=process_dl[j]; cli[NRI].len=8; NRI++;
         }
         nimports=4;
@@ -706,6 +735,9 @@ int main(int argc, char **argv) {
 
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
+    HostCompileContext host_context={host_target,host_filter,mode,runit,host_symbols_path,cli,process_dl};
+    if(host_target&&(mode==0||mode==3||host_symbols_path)&&!host_stage_present("host-symbols","symbols")){unpackage();return clierror("bind: required host-symbols model is missing");}
+
     if (mode!=1 && mode!=4 && !tape_domain_available(route)) {
         unpackage();
         return clierror("tape domain: required tapecheck model is missing");
@@ -811,14 +843,14 @@ int main(int argc, char **argv) {
             if (!rc) {
                 Buf tape={0}; int fr=fwd_sidecar(&in,&tape);
                 if (fr<0) rc=1;
-                else if (fr==0) { free(in.b); in=tape; rc=tape_domain(route,&in,src); if (!rc) rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* side-car extraction precedes Tape validation */
+                else if (fr==0) { free(in.b); in=tape; rc=tape_domain(route,&in,src); if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context); }   /* side-car extraction precedes Tape validation */
                 else {
 #ifdef __linux__
                     if (runit && host_dl_slot(1)==0) {
                         /* Static compiler image: finish as the image route does and exec the result
                            (forward_exec).  Stages up to e3 are the same models on both routes; the
                            run's process and loader resources are withdrawn, as an image has none. */
-                        fwd_exec=1; execrun=1; runit=0; mode=0; if (!deponly) deps=0;
+                        fwd_exec=1; execrun=1; runit=0; mode=0; if (!deponly) deps=0; host_context.native=0;host_context.mode=0;
                         for (int j=5;j<13;j++) cli[j].n=0;
                         n=snprintf(route,sizeof route,"%s/%s%simage/O%d",target,warnings ? "warn/" : "",nsources>1 ? "multi/" : "",level);
                         if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
@@ -829,13 +861,13 @@ int main(int argc, char **argv) {
                     if (fast>0) {
                         free(in.b); free(tape.b); in=merged;
                         rc=tape_domain(route,&in,src);
-                        if (!rc) rc=runroute_from(route,level ? "e4" : "prune",&in,src);
+                        if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context);
                     } else if (fast<0) { free(tape.b); rc=1; }
                     else { free(tape.b); fwd_restart=1; }
                 }
             }
         } else
-        rc = tape_input ? runroute_from(route,level ? "e4" : "prune",&in,src) : runroute(route,&in,src);
+        rc = host_compile(route,tape_input ? (level ? "e4" : "prune") : 0,&in,src,&host_context);
     }
     if (!rc && fwd_restart) {                    /* compile again with the stubs as the last unit */
         unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
@@ -844,6 +876,7 @@ int main(int argc, char **argv) {
         av[j]=0; fwd_second=1;
         return main(j,av);
     }
+    if(!rc&&mode==2&&host_symbols_path){Buf symbols={0};HostRequirements requirements;rc=host_symbol_stream(route,&in,src,&host_context,&symbols,&requirements);if(!rc)rc=host_side_write(host_symbols_path,&symbols);free(symbols.b);}
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
         snprintf(route,sizeof route,"%s/memory",target);

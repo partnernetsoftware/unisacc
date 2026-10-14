@@ -1,4 +1,5 @@
 #include <cx.h>
+#include "../exec/c/bind.h"
 /* LB-1 model selftest. Old product is only the dynamic-C observation runner.
    Lower replay is a narrow frozen-model witness, not new product freshness. */
 static int same(const char*a,const char*b){size_t x,y;char*p=cx_read(a,&x),*q=cx_read(b,&y);int ok=p&&q&&x==y&&!memcmp(p,q,x);free(p);free(q);return ok;}
@@ -24,5 +25,35 @@ int main(int argc,char**argv){
  unsigned char frame[sizeof tape+10];memcpy(frame,"USLSYM1\n",8);frame[8]=1;frame[9]=0;memcpy(frame+10,tape,sizeof tape-1);if(cx_write(in,frame,sizeof tape+9))return 2;
  for(int j=0;j<2;j++){snprintf(cmd,sizeof cmd,"'%s/run' --bundle '%s/symbols-%c.pkg' test '%s' >'%s' 2>'%s'",argv[1],argv[1],j?'b':'a',in,j?bpath:a,me);if(cx_run_timeout(cmd,5,0,0))return bad("symbols provider replay");}
  if(!same(a,bpath))return bad("provider addresses contaminated symbol contract");
+ /* Explicit domain ownership: TP-7 rejects these before side-model entry. */
+ char *outside=cx_read("tests/hostsymbols-outside-domain.tsv",&n);if(!outside)return 2;int domain_count=0;
+ for(char*p=outside;*p;){char*e=strchr(p,'\n');if(!e)return 2;*e=0;if(*p!='#'){char*hex=strchr(p,'\t');if(!hex)return 2;*hex++=0;char*owner=strchr(hex,'\t');if(!owner)return 2;*owner++=0;if(strcmp(owner,"TP-7"))return bad("wrong domain owner");size_t hn=strlen(hex);unsigned char*b=malloc(hn/2+1);if(hn%2)return 2;for(size_t k=0;k<hn;k+=2){unsigned v;if(sscanf(hex+k,"%2x",&v)!=1)return 2;b[k/2]=v;}if(cx_write(in,b,hn/2))return 2;free(b);snprintf(cmd,sizeof cmd,"'%s/run' '%s/tapecheck.net' '%s' >'%s' 2>'%s'",argv[1],argv[1],in,mo,me);if(cx_run_timeout(cmd,3,0,0)!=1)return bad("TP-7 out-of-domain input was not refused");char*x=cx_read(mo,&n);if(!x||n)return bad("TP-7 emitted invalid stream");free(x);x=cx_read(me,&n);if(!x||!strstr(x,"tape domain"))return bad("TP-7 refusal ownership");free(x);domain_count++;}p=e+1;}free(outside);if(domain_count!=2)return bad("empty/changed domain ownership sample");
+ unsigned char contract[]={ 'U','N','I','S','Y','M','1',10,1,0,2,1, 1,0,0,0,0,1,0,0, 2,0,0,0,1,1,0,0 };
+ HostRequirements req;HostProvider pa={1,2,15,{0x11223344,0x11223345,0x11223346,0x11223347}},pb={1,2,15,{0x55667788,0x55667789,0x5566778a,0x5566778b}};HostBindPlan ba,bb;char error[256];unsigned mask;
+ if(host_requirements(contract,sizeof contract,&req,error,sizeof error)||host_bind(&req,&pa,15,&ba,error,sizeof error)||host_bind(&req,&pb,15,&bb,error,sizeof error))return bad("binding control");
+ if(ba.mask!=bb.mask||ba.address[0]==bb.address[0])return bad("only provider binding addresses may differ");
+ if(host_bind(&req,&pa,13,&ba,error,sizeof error)!=1||!strstr(error,"missing-provider symbol 2 slot 1")||ba.mask||ba.address[0])return bad("missing-provider refusal and empty plan");
+ unsigned char filter[]={ 'U','H','P','R','O','V','1',10,1,15,0,0 };
+ if(host_provider_filter(filter,sizeof filter,1,&mask,error,sizeof error)||mask!=15)return bad("mask15 control");
+ filter[10]=1;if(host_provider_filter(filter,sizeof filter,1,&mask,error,sizeof error)!=1||strstr(error,"missing-provider"))return bad("malformed filter distinct from missing provider");
+ /* Missing-stage routes cannot reach side-model inference in the driver. */
+ const char *missing[]={"tapecheck","symbols"};
+ for(int j=0;j<2;j++){char receipt[4096],image[4096];snprintf(receipt,sizeof receipt,"%s/absent-receipt-%d",argv[1],j);snprintf(image,sizeof image,"%s/sentinel-%d",argv[1],j);if(cx_write(image,"keep",4))return 2;if(cx_write(in,"_start:\nret\n",12))return 2;
+ snprintf(cmd,sizeof cmd,"'%s/driver' --models '%s/%s-missing.pkg' '%s' -o '%s' --emit-host-symbols '%s' >'%s' 2>'%s'",argv[1],argv[1],missing[j],in,image,receipt,mo,me);
+ if(cx_run_timeout(cmd,3,0,0)!=1)return bad("missing-stage route did not refuse");char*x=cx_read(mo,&n);if(!x||n)return bad("missing-stage stdout");free(x);x=cx_read(image,&n);if(!x||n!=4||memcmp(x,"keep",4))return bad("missing-stage overwrote image");free(x);
+ struct stat st;if(stat(receipt,&st)==0||errno!=ENOENT)return bad("missing-stage wrote receipt");x=cx_read(me,&n);if(!x||!strstr(x,"required")||!strstr(x,"missing"))return bad("missing-stage diagnostic");free(x);}
+ /* Early destination guards cover default image and explicit/derived dependencies. */
+ char cwd[4096];if(!getcwd(cwd,sizeof cwd)||chdir(argv[1]))return 2;
+ for(int j=0;j<3;j++){const char *dest=j==0?"a.out":j==1?"receipt":"input.d";if(cx_write(dest,"keep",4))return 2;
+ snprintf(cmd,sizeof cmd,"'%s/driver' --models '%s/tapecheck-missing.pkg' '%s' -MD %s --emit-host-symbols '%s' >'%s' 2>'%s'",argv[1],argv[1],in,j==1?"-MF receipt -o image":"",dest,mo,me);
+ if(cx_run_timeout(cmd,3,0,0)!=1)return bad("destination alias did not refuse");char*x=cx_read(me,&n);if(!x||!strstr(x,"same path"))return bad("destination alias ownership");free(x);x=cx_read(dest,&n);if(!x||n!=4||memcmp(x,"keep",4))return bad("destination alias changed sentinel");free(x);}
+ if(chdir(cwd))return 2;
+ /* Existing reference oracle agrees on host-side binding, not model inputs. */
+ if(cx_write(in,contract,sizeof contract))return 2;
+ snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.hostbind import bind;bind(open(sys.argv[1],\"rb\").read(),1,2,15,[287454020,287454021,287454022,287454023],13)' '%s' >'%s' 2>'%s'",in,ro,re);
+ if(cx_run_timeout(cmd,3,0,0)!=1)return bad("reference missing-provider verdict");char*referr=cx_read(re,&n);if(!referr||!strstr(referr,"missing-provider symbol 2 slot 1"))return bad("reference missing-provider diagnostic");free(referr);
+ snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.hostbind import bind;x=bind(open(sys.argv[1],\"rb\").read(),1,2,15,[287454020,287454021,287454022,287454023]);assert x==(1,2,3,(287454020,287454021,287454022,287454023))' '%s' >'%s' 2>'%s'",in,ro,re);
+ if(cx_run_timeout(cmd,3,0,0))return bad("reference binding control");
+ printf("host-bind adapter: native controls=2 missing-provider=1 malformed-filter=1; TP-7 domain exclusions=2; missing-stage routes=2; reference binding controls=2; early-output-aliases=3\n");
  if(!yes||!no)return bad("empty coverage");printf("hostsymbols-model: accept=%d refuse=%d reference/network byte matches; provider-A/B lower and contract unchanged (frozen lower witness only)\n",yes,no);return 0;
 }

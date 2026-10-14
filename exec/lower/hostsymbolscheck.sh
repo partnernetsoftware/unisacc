@@ -12,6 +12,10 @@ cmp "$T/c.json" "$T/hostsymbols.json"
 b python3 exec/c/tbl.py "$T/hostsymbols.json" "$T/hostsymbols.tbl"
 b python3 exec/c/net.py "$T/hostsymbols.tbl" "$T/hostsymbols.net"
 b cc -O2 exec/c/run.c -o "$T/run"
+b cc -O2 exec/c/compiler.c -o "$T/driver"
+b "$T/gen" tapecheck "$T/tapecheck.json"
+b python3 exec/c/tbl.py "$T/tapecheck.json" "$T/tapecheck.tbl"
+b python3 exec/c/net.py "$T/tapecheck.tbl" "$T/tapecheck.net"
 b "$T/run" --check-net "$T/hostsymbols.tbl" "$T/hostsymbols.net"
 b python3 - "$T" <<'PY'
 import sys, pathlib, struct
@@ -31,6 +35,16 @@ for kind,model in [('lower',m),('symbols',p/'hostsymbols.net')]:
   res=p/tag;res.mkdir(exist_ok=True)
   for i in range(4):(res/str(i)).write_bytes(struct.pack('<Q',address+i))
   (p/(kind+'-'+tag+'.pkg')).write_bytes(build([route],[('0070726f636573732f646c2f',res)]))
+for missing in ('tapecheck','symbols'):
+ route=p/(missing+'-missing.tsv')
+ rows=[]
+ if missing=='tapecheck':
+  rows.append('host-symbols\tsymbols\texplicit-frame\thost-contract\t'+str(p/'hostsymbols.net'))
+  rows.append('lnx/x86_64/image/O0\te2\tsrc.c\ttape.text\t'+str(p/'tapecheck.net'))
+ else:
+  rows.append('lnx/x86_64/image/O0\ttapecheck\ttape.text\ttape.text\t'+str(p/'tapecheck.net'))
+ route.write_text('\n'.join(rows)+'\n')
+ (p/(missing+'-missing.pkg')).write_bytes(build([route]))
 PY
 runner=${MODEL_COM:-./unisacc.com}
 "$R/tests/bound" 35 sh "$runner" -run tests/hostsymbolscheck.cx -- "$T"

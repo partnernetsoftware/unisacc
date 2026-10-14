@@ -97,10 +97,10 @@ def main():
     d['suites']['exec-hostsymbols-model'] = {
         'command': ['./exec/lower/hostsymbolscheck.sh'],
         'files': ['exec/lower/hostsymbolscheck.sh', 'tests/hostsymbolscheck.cx',
-                  'tests/hostsymbols-cases.tsv', 'tests/seals/middleflow-step0/manifest.tsv',
+                  'tests/hostsymbols-cases.tsv', 'tests/hostsymbols-outside-domain.tsv', 'tests/seals/middleflow-step0/manifest.tsv',
                   'tests/seals/middleflow-step0/lower/model.net', 'tests/bound',
                   'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'],
-        'trees': ['exec/lower', 'exec/build', 'exec/facts', 'exec/c',
+        'trees': ['exec/lower', 'exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c',
                   'exec/pp', 'seed', 'include', 'unisa'],
         'executable_inputs': True,
         'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}

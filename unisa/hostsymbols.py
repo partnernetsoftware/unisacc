@@ -1,5 +1,7 @@
 """LB-1 reference: deterministic loader requirements, never a host resolver.
-The caller supplies validated Tape and explicit target/program mode. Python is
+The domain is Tape ACCEPTED BY TAPECHECK, with explicit target/program mode.
+parse() is a reference convenience, not extra acceptance/rejection obligations
+owned by this stage. Unvalidated input is outside the equivalence claim. Python is
 only a reference oracle for the finite stage, not its product execution path.
 """
 import struct
