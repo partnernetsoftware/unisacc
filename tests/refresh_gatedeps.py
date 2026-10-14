@@ -106,6 +106,33 @@ def main():
         'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
     # 2a isolated address-free declaration model; Python is reference only.
     d['suites']['exec-librarycontract-model'] = {'command': ['./exec/librarycontract/check.sh'], 'files': ['exec/librarycontract/check.sh', 'tests/librarycontractcheck.cx', 'tests/librarycontract-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycontract', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
+    # 0.0.43 T-1: com-tapebin is split.  The reference is prepared once by com-tapebin-ref (keyed by
+    # content inside tests/tapebinref.py); six file slices, the fixed-cost part and a global cover read it.
+    # The guards are the HEAD stamps the old declaration already pinned, minus the product-facing script,
+    # which the slices now own; nothing here is a new stamp.
+    tb_guards = {k: v for k, v in d['suites'].get('com-tapebin-1', {}).get('guards', {}).items()
+                 if k != 'tests/tapebinproduct.py'}
+    tb_trees = ['examples', 'exec', 'include', 'iterate', 'kernel', 'seed', 'src', 'tests/c', 'unisa', 'weights']
+    tb_files = ['Makefile', 'examples/hello.c', 'exec/c/chain.knownfail', 'exec/c/compiler.c', 'exec/c/tapebin.h',
+                'exec/c/tapebin_emit.h', 'src/tapebin_encode.inc', 'src/tapebin_shape.inc', 'tests/bound', 'tests/bound.c',
+                'tests/bound.py', 'tests/build_ref.sh', 'tests/export_ref.sh', 'tests/knownfail.py', 'tests/knownfail.sh',
+                'tests/lib.sh', 'tests/par.sh', 'tests/product-refusals.knownfail', 'tests/reffoot.h', 'tests/refshim.h',
+                'tests/tapebinproduct.py', 'tests/tapebinref.py', 'unisa/__init__.py', 'unisa/bits.py', 'unisa/fp.py',
+                'unisa/tape.py', 'unisa/tapebin.py', 'unisacc.c', 'unisacc.com', 'unisacc.com.build.json']
+    for name in [n for n in d['suites'] if n.startswith('com-tapebin-')]:
+        del d['suites'][name]; changed.append((name, 'dropped'))
+    d['suites']['com-tapebin-ref'] = {
+        'command': ['python3', './tests/tapebinref.py', 'prepare'],
+        'files': ['tests/tapebinref.py', 'tests/export_ref.sh', 'tests/build_ref.sh', 'tests/refshim.h', 'tests/reffoot.h', 'unisacc.c'],
+        'guards': {k: v for k, v in tb_guards.items() if k in ('tests/bound', 'tests/bound.c', 'tests/bound.py',
+                                                             'tests/build_ref.sh', 'tests/export_ref.sh', 'tests/reffoot.h', 'tests/refshim.h', 'unisacc.c')},
+        'trees': ['exec', 'include', 'kernel', 'seed', 'src', 'unisa'],
+        'executable_inputs': False}
+    shard_entry = {'command': ['python3', './tests/tapebinproduct.py'], 'files': tb_files, 'guards': tb_guards,
+                   'match': 'contains', 'trees': tb_trees, 'executable_inputs': True}
+    for name in ['com-tapebin-six', 'com-tapebin-cover'] + ['com-tapebin-%d' % k for k in range(1, 7)]:
+        d['suites'][name] = json.loads(json.dumps(shard_entry))
+    changed.append(('com-tapebin', 'declared 1-6, six, cover, ref'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

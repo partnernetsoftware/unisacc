@@ -742,7 +742,10 @@ if [ "$COM" = 1 ]; then
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
     for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 python3 ./tests/declmatrix.py; done   # the same matrix on the product (found functions named r0..r7)
     job com-auditnet MODEL_COM="$PRODUCT" python3 ./tests/auditnet.py   # 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
-    for k in 1 2 3; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/3 python3 ./tests/tapebinproduct.py; done   # one pass was 45-53 s
+    job com-tapebin-ref python3 ./tests/tapebinref.py prepare   # 0.0.43 T-1: the reference compiler, built once per content key; the shards only locate it
+    job com-tapebin-six MODEL_COM="$PRODUCT" TAPEBIN_PART=six python3 ./tests/tapebinproduct.py   # fixed cost: calls, six-target images, host run, origin guard
+    for k in 1 2 3 4 5 6; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/6 python3 ./tests/tapebinproduct.py; done   # 0.0.43: six slices of ~43 files, ~24 s quiet against the 42 s window
+    job com-tapebin-cover MODEL_COM="$PRODUCT" TAPEBIN_PART=cover python3 ./tests/tapebinproduct.py   # slices partition the file set; known upstream tape diffs checked globally
     job com-elfobj OBJ_PRODUCT="$PRODUCT" ./tests/elfobj.sh   # R17-1: the product writes the reference's Linux object bytes
     job com-linkunits LINK_PRODUCT="$PRODUCT" ./tests/linkunits.sh   # R17-2: the product links reference-built unit objects
     job com-closure UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/closure.sh examples/*.c
