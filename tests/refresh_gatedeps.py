@@ -148,12 +148,17 @@ def main():
     # 0.0.43 step 6, fifth cut: the outside-the-name-list reads the strace measured (research/c43-flow-reuse-step4.md).
     # Only what was opened: ledgercheck reads three plan files (its version.h keys which ones), docs reads four files,
     # subtract-safety walks every tracked directory except archive/ and ujs/ (its own check is "every tracked file").
+    # ledgercheck reads the plan of the version that src/version.h names, and the one before it; a version bump
+    # makes it read a plan file that did not exist when it was measured.  Declared as the whole plans/ tree so
+    # that editing a new plan file (plans/v0.0.43.md) reruns it, instead of reusing the old result (0.0.43 step 6).
     d['suites']['ledgercheck'] = {
         'command': ['python3', './tests/ledgercheck.py'],
-        'files': ['tests/ledgercheck.py', 'src/version.h', 'plans/roadmap-0.0.x.md', 'plans/v0.0.41.md', 'plans/v0.0.42.md']}
+        'files': ['tests/ledgercheck.py', 'src/version.h'],
+        'trees': ['plans']}
     d['suites']['docs'] = {
         'command': ['./tests/docs.sh'],
-        'files': ['tests/docs.sh', 'prd.md', 'spec.md', 'research/model-bytes.json', 'research/unisacc-paper.md']}
+        # docs.sh opens these by fixed name (no directory listing); the English paper was missing from the first measure
+        'files': ['tests/docs.sh', 'prd.md', 'spec.md', 'research/model-bytes.json', 'research/unisacc-paper.md', 'research/unisacc-paper.en.md']}
     d['suites']['subtract-safety'] = {
         'command': ['python3', './tests/subtractsafety.py'],
         'files': ['tests/subtractsafety.py', 'prd.md', 'spec.md', '.gitignore', '.gitattributes'],
