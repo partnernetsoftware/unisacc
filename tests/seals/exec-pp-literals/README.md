@@ -1,6 +1,6 @@
 # exec-pp-literals measured leaf seal
 
-实际测量，非 fixture。重新封存于提交 01262f28（exec/c/run.c 为其已提交内容）。
+实际测量，非 fixture。重新封存于提交 826233c4；其 exec/pp 表、exec/c/run.c 与 src 与 e7c05741 相同（之后无改动这些路径的提交）。
 
 **测量命令**：`python3 exec/pp/literalcheck.py`，在仓外以 `strace -ff -yy -s10485760 -e trace=%file,read,write,getdents64` 运行，共 74 个进程、74 个 trace 文件。采集用 `tests/ppleafcapture.cx TRACE ROOT OUT`，校验用 `tests/ppleafseal.cx`。
 
