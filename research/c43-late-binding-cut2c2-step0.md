@@ -35,8 +35,10 @@
 
 2c3 variadic（`callkind=2`，固定参数数与 promoted-tail 类型，callsite 帧）→ 2c4 callback（`callkind=3`，嵌套签名图与生命周期）→ 2c5 运行服务与上下文（exit/mmap/callable，与 mapping/argv 等实例状态分开，见 2c 第0步第3节）。
 
-## 6. 待 cc 定
+## 6. cc 裁定（2026-10-15）
 
-1. 确认 2c2 范围仅为 fixed typed（不含 callback、variadic）。
-2. 确认 2c1 数据符号已落地，作为 2c2 的前置。
-3. 确认 P6 的“逐字节回归”基线取自哪一个提交。
+1. **批准**：2c2 = fixed typed（不含 variadic、callback、运行桥）为下一刀。
+2. **前置**：2c1（数据符号 kind=1）合流后才派发 2c2。
+3. **P6 基线**：2c1 合流提交的 HEAD（逐字节回归以该提交的输出为准，不取更早的提交）。
+
+在 2c1 合流前，本页只作预稿，不开工、不改产品树。
