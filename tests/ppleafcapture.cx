@@ -25,6 +25,7 @@ static void dependency(const char *absolute){const char *rel;char candidate[4096
 }
 static void save(const char *name,Buf *b,char hash[65]){char path[4096];snprintf(path,sizeof path,"%s/%s",outdir,name);cx_sha256_hex(b->b?b->b:"",b->n,hash);if(cx_write(path,b->b?b->b:"",b->n))exit(2);}
 static int pidexit(const char *trace,long pid){char path[4096],*b,*p;size_t n;DIR*d=opendir(trace);struct dirent*e;int rc=-1;char marker[64];snprintf(marker,sizeof marker,"si_pid=%ld,",pid);while((e=readdir(d))){if(strncmp(e->d_name,"trace.",6))continue;snprintf(path,sizeof path,"%s/%s",trace,e->d_name);b=cx_read(path,&n);if(!b)continue;p=strstr(b,marker);if(p){p=strstr(p,"si_status=");if(p)rc=atoi(p+10);}free(b);if(rc>=0)break;}closedir(d);return rc;}
+static int same_input(const char*file,const char*input){size_t fn=strlen(file),in=strlen(input);return input[0]=='/'?!strcmp(file,input):(fn>in&&file[fn-in-1]=='/'&&!strcmp(file+fn-in,input));}
 static void scan(const char *trace,const char *name,int id){char path[4096],*b,*p,*end,*q,*exec=0,*inputpath=0;size_t n;Buf in={0},net={0},stdout_={0},stderr_={0},headers[64];char *headerkeys[64];int nh=0,rh=0;memset(headers,0,sizeof headers);int isrun=0,rc;char a[128],o[128],er[128],model[128],hi[65],ho[65],he[65],hm[65];
  snprintf(path,sizeof path,"%s/%s",trace,name);b=cx_read(path,&n);if(!b)exit(2);
  p=b;while(*p){end=strchr(p,'\n');if(!end)end=p+strlen(p);*end=0;
@@ -43,7 +44,7 @@ static void scan(const char *trace,const char *name,int id){char path[4096],*b,*
  }
  if(!strncmp(p,"read(",5)){char *start=strchr(p,'<'),*stop=start?strchr(start,'>'):0;long got;char*res=result_suffix(p);if(res&&(got=atol(res+4))>=0&&start&&stop){char*file=capture_dup(start+1,stop-start-1);int header=-1,j;size_t rn=strlen(root);dependency(file);
   if(isrun&&!strncmp(file,root,rn)&&!strncmp(file+rn,"/include/",9)){for(j=0;j<nh;j++)if(!strcmp(headerkeys[j],file+rn+9))header=j;if(header<0){if(nh==64)exit(2);header=nh;headerkeys[nh++]=capture_dup(file+rn+9,strlen(file+rn+9));}}
-  q=strchr(stop,'"');if(q&&isrun&&((inputpath&&!strcmp(file,inputpath))||(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))||header>=0)){Buf bytes=quoted(q,(const char**)&q);if(bytes.n!=(size_t)got){fprintf(stderr,"truncated capture %s decoded=%lu got=%ld\n",file,(unsigned long)bytes.n,got);exit(2);}if(inputpath&&!strcmp(file,inputpath))add(&in,bytes.b,bytes.n);if(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))add(&net,bytes.b,bytes.n);if(header>=0)add(&headers[header],bytes.b,bytes.n);free(bytes.b);}
+  q=strchr(stop,'"');if(q&&isrun&&((inputpath&&same_input(file,inputpath))||(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))||header>=0)){Buf bytes=quoted(q,(const char**)&q);if(bytes.n!=(size_t)got){fprintf(stderr,"truncated capture %s decoded=%lu got=%ld\n",file,(unsigned long)bytes.n,got);exit(2);}if(inputpath&&same_input(file,inputpath))add(&in,bytes.b,bytes.n);if(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))add(&net,bytes.b,bytes.n);if(header>=0)add(&headers[header],bytes.b,bytes.n);free(bytes.b);}
   if(header>=0&&got==0&&headers[header].n){char hash[65],object[128];cx_sha256_hex(headers[header].b,headers[header].n,hash);snprintf(object,sizeof object,"resource-%s.bytes",hash);save(object,&headers[header],hash);fprintf(resources,"resource\t%02d\t%d\thdr/%s\t%s\t%lu\t%s\n",id,rh++,headerkeys[header],object,(unsigned long)headers[header].n,hash);headers[header].n=0;}
   free(file);
  }}
@@ -56,12 +57,14 @@ static void scan(const char *trace,const char *name,int id){char path[4096],*b,*
  for(int j=0;j<nh;j++){if(headers[j].n){fprintf(stderr,"header stream not closed\n");exit(2);}free(headers[j].b);free(headerkeys[j]);}
  free(b);free(in.b);free(net.b);free(stdout_.b);free(stderr_.b);
 }
+static int bypid(const void*a,const void*b){long x=atol(*(char*const*)a+6),y=atol(*(char*const*)b+6);return x<y?-1:x>y;}
 int main(int argc,char**argv){DIR*d;struct dirent*e;char *names[2048],path[4096],hex[65],*b;size_t n;int count=0,i;FILE*dep,*expected;
  if(argc==2&&!strcmp(argv[1],"--selftest")){const char *tail;Buf x=quoted("\"a\\n\\101\\0z\"",&tail);char sample[]="read(3<file>, \"x) = 0\", 6) = 6";int bad=x.n!=5||memcmp(x.b,"a\nA\0z",5)||strcmp(result_suffix(sample),") = 6");free(x.b);puts(bad?"ppcapture selftest FAIL":"ppcapture selftest PASS octal/NUL and syscall-like payload parsed exactly");return bad;}
  if(argc!=4){fprintf(stderr,"usage: ppcapture TRACE_DIR ROOT OUT_DIR\n");return 2;}root=argv[2];outdir=argv[3];mkdir(outdir,0700);
  snprintf(path,sizeof path,"%s/streams.tsv",outdir);streams=fopen(path,"w");snprintf(path,sizeof path,"%s/observation.tsv",outdir);observations=fopen(path,"w");if(!streams||!observations)return 2;
  snprintf(path,sizeof path,"%s/resources.tsv",outdir);resources=fopen(path,"w");if(!resources)return 2;snprintf(path,sizeof path,"%s/queries.tsv",outdir);queries=fopen(path,"w");if(!queries)return 2;
  d=opendir(argv[1]);while((e=readdir(d))){if(!strncmp(e->d_name,"trace.",6))names[count++]=capture_dup(e->d_name,strlen(e->d_name));}closedir(d);
+ qsort(names,count,sizeof(char*),bypid); /* readdir order is not stable; stream order feeds the output proof */
  for(i=0;i<count;i++)scan(argv[1],names[i],i);
  fclose(streams);fclose(observations);fclose(resources);fclose(queries);qsort(deps,nd,sizeof(Dep),cmp);
  snprintf(path,sizeof path,"%s/dependencies.tsv",outdir);dep=fopen(path,"w");snprintf(path,sizeof path,"%s/closure.expected.tsv",outdir);expected=fopen(path,"w");

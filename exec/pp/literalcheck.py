@@ -49,6 +49,7 @@ rejected = ['18446744073709551615', '9223372036854775808L',
 
 with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
     t = pathlib.Path(td)
+    os.chdir(t)  # source names are relative: the seal records no host path
     call([os.environ.get('CC', 'cc'), '-O2', R/'exec/c/run.c', '-o', t/'run'])
     for mode in ([], ['--locations']):
         call([sys.executable, R/'exec/build/gen.py', 'pp', t/'pp.json', *mode])
@@ -57,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
         call([t/'run', '--check-net', t/'pp.tbl', t/'pp.net'])
         source = ''.join('#if '+e+'\nYES'+str(i)+'\n#else\nNO'+str(i)+'\n#endif\n'
                          for i, e in enumerate(expressions))
-        f = t/'literal.c'; f.write_text(source)
+        f = pathlib.Path('literal.c'); f.write_text(source)
         got = call([t/'run', t/'pp.net', f, f, R/'include'])
         if mode:
             import struct
@@ -89,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
             'SELF==0 && A==0', 'M==0', '0 && ID(1/0)', '1 || ID(1/0)',
             'OPEN 1,2)==2', 'APPLY(INC,M(1,2))==3', 'FN(3)==4',
             '(EMPTY 1)==1', '3*DUP(2)==8', '(1 ? M(1,2) : ID(1/0))==2']
-        f = t/'ifmacro.c'
+        f = pathlib.Path('ifmacro.c')
         f.write_text(macro_prefix + ''.join('#if '+e+'\nYES'+str(i)+'\n#else\nNO'+str(i)+'\n#endif\n'
                                            for i,e in enumerate(macro_exprs)) + 'INC(4) SELF\n')
         got = call([t/'run', t/'pp.net', f, f, R/'include'])
@@ -111,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
         # named by a macro switches the trimming off by rule, so both sides see every header body
         # (0.0.31 F3: a plain quoted #include no longer does -- quoted headers are scanned instead).
         (t/'nothing.h').write_text('')
-        f = t/'b_ppif.c'; f.write_text('#define NOTHING "nothing.h"\n#include NOTHING\n'+(R/'tests/c/b_ppif.c').read_text())
+        f = pathlib.Path('b_ppif.c'); f.write_text('#define NOTHING "nothing.h"\n#include NOTHING\n'+(R/'tests/c/b_ppif.c').read_text())
         got = call([t/'run', t/'pp.net', f, f, R/'include'])
         if mode:
             length, _, _, ns, ni = struct.unpack_from('<5I', got, 7)
