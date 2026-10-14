@@ -3179,6 +3179,7 @@ int binary(int level) {
     int k; int e; int lp; int lax; int rax; int ck; int res; int cl;
     int lf; int rf; int lk; int lfr; int rfr; int re; int rp; int lpd; int rpd; int lbase; int rbase;
     int lsst; int rsst;           /* the struct each side points at, if any */
+    int ld2; int ld3; int rd2; int rd3; int le; int rstep;
     char cb[4];
     if (level > 7) {
         if (havepre) { havepre = 0; return 0; }     /* parsed already, by expr */
@@ -3189,7 +3190,8 @@ int binary(int level) {
         k = cur();
         if (binop_level(k) != level) break;
         loadval();
-        e = curelem;
+        le = curelem; ld2 = curdim2; ld3 = curdim3;
+        e = le; if (ld2 > 0) e = e * ld2;
         lp = curptr;
         /* The struct a pointer points AT: `p + 2` is still a `struct V *`,
            so `(p + 2)->val` must find the member.  It was dropped here --
@@ -3210,7 +3212,8 @@ int binary(int level) {
         loadval();
         rf = 0; if (curptr == 0) { if (curstruct < 0) rf = curflt; }
         rfr = curflt; re = curelem; rp = curptr; rpd = curpd; rbase = curbase;
-        rsst = curstruct;
+        rsst = curstruct; rd2 = curdim2; rd3 = curdim3;
+        rstep = re; if (rd2 > 0) rstep = rstep * rd2;
         rax = tyax();
         ck = tyask(lax, "+", 1, rax);              /* the conversion row */
         cl = tycanon(k, cb);
@@ -3245,10 +3248,10 @@ int binary(int level) {
         }
         binuns = tyuns(ck);
         binwid = tysize(ck);
-        if (lp == 0) { if (rp) { if (re > 1) { if (k == tidx("+", 1)) {
+        if (lp == 0) { if (rp) { if (rstep > 1) { if (k == tidx("+", 1)) {
             /* `n + p`: the INTEGER is on the stack; scale it there */
             es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @mem.load r0, [r7+8]\n");
-            eimm(2, re); es("  @alu.mul r0, r0, r2\n  @mem.store [r7+8], r0\n");
+            eimm(2, rstep); es("  @alu.mul r0, r0, r2\n  @mem.store [r7+8], r0\n");
             es("  @mem.load r0, [r7+0]\n  @call.frame -8\n");
         } } } }
         if (lp) { if (e > 1) {
@@ -3264,12 +3267,12 @@ int binary(int level) {
         if (tyis(res, "ptr", 3) == 0) { if (tyuns(res)) zext(tysize(res)); }
         binuns = 0; binwid = 8;
         lvalue = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
-        if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
+        if (tyis(res, "ptr", 3)) { curelem = le; curptr = lp; curuns = 0; cursize = 8;
                                    curflt = lfr; curpd = lpd; curbase = lbase;
-                                   if (lp) curstruct = lsst;
+                                   if (lp) { curstruct = lsst; curdim2 = ld2; curdim3 = ld3; }
                                    if (lp == 0) { curptr = 1; curelem = re; curflt = rfr;
                                                   curpd = rpd; curbase = rbase;
-                                                  curstruct = rsst; } }
+                                                  curstruct = rsst; curdim2 = rd2; curdim3 = rd3; } }
         else { curptr = 0; cursize = tysize(res); curelem = cursize;
                curuns = tyuns(res); curflt = 0; }
     }
@@ -6005,6 +6008,7 @@ int unit(void) {
             } else if (kind(tp + 1) == tidx("*", 1)) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1; gfpd = 1;
                 if (fpfn >= 0) { fnresume = tp; tp = fpfn; gfpfn = 1; }
+                if (fpadim > 0) { decldim2 = fpadim; declptr = 1; }
             } else t = adv(); }
             else t = adv();
             gbind = scopebind("top", 3, t);
