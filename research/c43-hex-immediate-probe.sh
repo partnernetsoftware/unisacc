@@ -23,7 +23,10 @@ for t in dec hex neghex hi64 lo64 oct bin; do
     (cd "$T" && sh "$P" $a in.tape > "$T/sp.txt" 2> "$T/ep.txt"); rp=$?
     (cd "$T" && "$R" $b in.tape > "$T/sr.txt" 2> "$T/er.txt"); rr=$?
     if [ "$rp" -ne "$rr" ]; then echo "FAIL $t $m rc product=$rp ref=$rr: $(head -c 100 "$T/ep.txt")"; fail=1; continue; fi
-    [ "$rr" -eq 0 ] || continue   # both refused with the same rc: nothing more to compare
+    if [ "$rr" -ne 0 ]; then   # both refused with the same rc: each side must name the refusal (cc ruling)
+      [ -s "$T/ep.txt" ] && [ -s "$T/er.txt" ] || { echo "FAIL $t $m refused without a named diagnostic"; fail=1; }
+      continue
+    fi
     case $m in S) cmp -s "$T/out-p.txt" "$T/out-r.txt" 2>/dev/null || { echo "FAIL $t $m text differs"; fail=1; } ;;
       c|o) cmp -s "$T/out-p.bin" "$T/out-r.bin" 2>/dev/null || { echo "FAIL $t $m bytes differ"; fail=1; } ;;
       run) cmp -s "$T/sp.txt" "$T/sr.txt" || { echo "FAIL $t $m stdout differs"; fail=1; } ;;

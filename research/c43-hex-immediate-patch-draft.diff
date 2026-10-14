@@ -1,0 +1,69 @@
+--- a/exec/c/run.c
++++ b/exec/c/run.c
+@@ -691,6 +691,58 @@
+     if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
+     return 1;
+ }
++/* c43 hex-immediate draft (case A): the image encoders (elf, macho, pe) scan their lowered input with a
++   decimal-only table, so an integer operand written 0x (optionally signed) is rewritten to its decimal
++   spelling first.  Header lines (leading @), tokens that are not such integers and tokens outside the
++   64-bit range are copied unchanged, so refusals stay where they are.  -S never reaches an encoder stage. */
++static int canon_image_stage(const char *name) {
++    return !strcmp(name,"elf") || !strcmp(name,"macho") || !strcmp(name,"pe");
++}
++static int canon_sep(int c) { return c==' ' || c=='\t' || c==',' || c=='\n' || c=='\r'; }
++static int canon_digit(int c,int base) {
++    int d;
++    if (c>='0' && c<='9') d=c-'0';
++    else if (c>='a' && c<='f') d=c-'a'+10;
++    else if (c>='A' && c<='F') d=c-'A'+10;
++    else return -1;
++    return d<base ? d : -1;
++}
++static void canon_ints(Buf *in) {
++    unsigned char *b=in->b; int n=in->n, i=0, on=0, bol=1;
++    unsigned char *o=xrealloc(0, (size_t)n*3+64);
++    while (i<n) {
++        if (bol && b[i]=='@') { while (i<n && b[i]!='\n') o[on++]=b[i++]; bol=0; continue; }
++        if (canon_sep(b[i])) { bol = b[i]=='\n'; o[on++]=b[i++]; continue; }
++        bol=0;
++        int e=i; while (e<n && !canon_sep(b[e])) e++;
++        int j=i, neg=0, base=0, k=j;
++        if (b[j]=='-') { neg=1; j++; }
++        if (e-j>2 && b[j]=='0') {
++            int c=b[j+1]|32;
++            if (c=='x') base=16;   /* 0o/0b stay as they are: the reference refuses them (cc ruling) */
++        }
++        unsigned long v=0; int ok=base!=0;
++        if (ok) {
++            k=j+2;
++            if (k>=e) ok=0;
++            while (ok && k<e) {
++                int d=canon_digit(b[k],base);
++                if (d<0) { ok=0; break; }
++                if (v > (~0UL - (unsigned long)d)/(unsigned long)base) { ok=0; break; }
++                v=v*(unsigned long)base+(unsigned long)d; k++;
++            }
++        }
++        if (ok && neg && v > 9223372036854775808UL) ok=0;
++        if (ok && !neg && base==0) ok=0;
++        if (!ok) { while (i<e) o[on++]=b[i++]; continue; }
++        char t[24]; int tn=0; unsigned long w=v;
++        do { t[tn++]=(char)('0'+w%10); w=w/10; } while (w);
++        if (neg) o[on++]='-';
++        while (tn) o[on++]=(unsigned char)t[--tn];
++        i=e;
++    }
++    in->b=o; in->n=on;
++}
+ static int runroute_range(const char *route, const char *first_stage, const char *last_stage, Buf *in, const char *src) {
+     int count = 0, ready = first_stage == 0, ended = last_stage == 0;
+     for (int i = 0; i < PS; i++) {
+@@ -716,6 +768,7 @@
+             if (slot) { model_capture(slot); slot->loaded = 1; }
+             MODEL_LOADING = 0;
+         }
++        if (canon_image_stage(STAGES[i].name)) canon_ints(in);
+         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
+         if (!rc) attr_strip(&out);
+         if (!slot) unload();
