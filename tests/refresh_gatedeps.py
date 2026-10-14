@@ -106,6 +106,7 @@ def main():
         'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
     # 2a isolated address-free declaration model; Python is reference only.
     d['suites']['exec-librarycontract-model'] = {'command': ['./exec/librarycontract/check.sh'], 'files': ['exec/librarycontract/check.sh', 'tests/librarycontractcheck.cx', 'tests/librarycontract-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycontract', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
+    d['suites']['exec-librarypartition-model'] = {'command': ['./exec/librarypartition/check.sh'], 'files': ['exec/librarypartition/check.sh', 'tests/librarypartitioncheck.cx', 'tests/librarypartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
     # Forwarding registration deliberately retains broad trees; no audited reuse claim.
     d['suites']['forward-multi'] = {
         'command': ['./tests/forwardmulti.sh'],

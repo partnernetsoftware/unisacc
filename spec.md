@@ -838,3 +838,5 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 
 
 **LB-3**（0.0.43 2a，非稳定诊断接口）`us_binding_contract(ctx,target,&length)`只读查询显式声明的USLCON1快照；target由调用方显式传入，接口不解析宿主符号、不修改Tape或镜像。地址与支持能力不得进入此合同；声明序列按名字规范化，不用宿主解析成功集合决定声明有无。接受由有限表模型验证并产流，Python仅作对照。返回借用字节；下次查询、声明/绑定配置变更或上下文销毁使其失效；失败返回NULL、length置0并写具名us_error，不能返回旧成功快照。新模型缺失仅查询失败，旧库接口与USBIND消费者不改变。本步不证明库地址已退出旧模型输入，也不证明签名ABI已核。typed V2/V3描述可保持为显式合同字节，缺描述、未覆盖与零签名不得计签名比较绿。2b普通函数迁移及后续数据/typed/运行桥须另验。
+
+**LB-4**（0.0.43 2b，非稳定接口合同，实施中）普通函数kind=0/callkind=0的归属只由无地址声明及显式target/版本的模型分区决定；typed/variadic/callback、数据和运行桥保持旧路。每条外部需求只能有一条归属，duplicate-owner/missing-owner拒绝；provider缺失不允许回落旧路。.libraryfn rN,ID表示普通函数稳定引用，不复用现有数据.libraryaddr；前置Tape验形，程序模式由lower具名拒绝libraryfn。未绑定普通片段由模型标定并附重定位span，绑定器仅核ID/范围/非重叠/占位并按span填址，不扫描Tape；地址首次进入迁移片段在relocate之后，旧桥地址仍属未迁移债。非稳定us_declare_injected_import(ctx,name,const us_signature*)仅声明且禁宿主解析回退；us_library_e3_fragment(ctx,&length)和us_library_lower_unbound(ctx,&length)只读模型标定普通函数片段，后者为UNILOW1收据。借用字节至下一compile/配置改变/free；失败NULL、length=0、具名us_error。声明与provider独立，缺provider在relocate拒绝并无可调用镜像。旧us_add_symbol保持声明加provider的组合语义。片段A/B相同不能计作整份lower输入或输出无地址，也不计ABI签名核验。条款是验收义务，不声称尚未接线实现已绿。

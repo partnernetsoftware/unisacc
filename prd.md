@@ -1399,3 +1399,9 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔转发路径修复收口，实际跑过〕新鲜候选0556ea9f…在/tmp/c43-forward-paths/final；com-forward-multi rc0/8s，含12组相对/绝对非转发输出对拍和incremental/full-replay，relative-o/-MF实物均在调用目录。五非本机APE driver目标自举编译rc0（仅编译）；绝对-include在cwd已删除时与旧产品rc/stdout/stderr一致（保留sh启动warning）。只对合成单元的相对forced资源加cwd前缀并恢复，绝对项不额外查询cwd；-I/原源引号include未改，-iquote仍具名未迁移。
 
 〔2b第0步待审与转发登记〕补forward-multi显式输入登记，保持广覆盖回退，不改变已结证闸。2b只迁普通函数；当前lower仍注入上下文私有process_slots（exec/c/libunisacc.c:1007），因此保留运行桥时两个上下文完整lower字节相同不是可承诺的验收。设计须区分迁移片段无地址与旧桥遗留，不以投影冒充完整封存；cc审定前不动2b产品。
+
+〔2b证明边界代裁〕cc同意黑盒仅断言普通函数路径片段不含地址、A/B片段不变，不断言完整lower输入/输出无地址；后者待运行桥迁移。第0步仍只是设计，显式.libraryaddr需要同步TP-7形状表，不能借四槽.hostaddr表示库符号ID。新旧路由归属由无地址声明字段模型判定，地址可用性不得决定回退。
+
+〔2b①实现范围〕已获cc通过：先新增声明分区有限模型，输入无地址声明/target；输出每ID唯一new/legacy归属。audit模式读实际路由掩码，0=missing-owner、3=duplicate-owner，与模型推导不符拒绝；适配器不以provider是否存在分类。随后E3/lower再消费分区。本批不接线，不把模型自测冒充新库产品行为。
+
+〔2b操作名纠正〕cc实核.libraryaddr已有数据操作r s i i i i；先前第0步漏查不能复用。普通函数ID新操作改.libraryfn rN,ID，旧数据操作不变；程序模式由lower具名拒绝not covered: libraryfn requires library mode。须同步参考/TP-7形状表，不靠操作数个数重载。
