@@ -63,8 +63,10 @@ for r in $REPOS; do
     if [ -d "$CACHE/$name" ]; then
         # a cache at any other commit is refused, never used silently (c43 batch 05): remove it to re-fetch
         got=$(git -C "$CACHE/$name" rev-parse -q --verify HEAD 2>/dev/null) || got=
-        [ "$got" = "$commit" ] && continue
-        echo "tools: $CACHE/$name is at ${got:-no commit}, not the pinned $commit; remove it to re-fetch" >&2; exit 1
+        [ "$got" = "$commit" ] || { echo "tools: $CACHE/$name is at ${got:-no commit}, not the pinned $commit; remove it to re-fetch" >&2; exit 1; }
+        # a tracked file edited in the cache (HEAD unchanged) is refused too, never used silently
+        [ -z "$(git -C "$CACHE/$name" status --porcelain --untracked-files=no)" ] || { echo "tools: $CACHE/$name has modified tracked files; remove it to re-fetch" >&2; exit 1; }
+        continue
     fi
     [ "${FETCH:-1}" = "1" ] || { echo "tools corpus absent (FETCH=0)"; exit 1; }
     bound 30 git clone -q "$url" "$CACHE/$name" || { echo "clone failed"; exit 1; }
