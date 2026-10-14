@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
     char own[] = "/tmp/latebindXXXXXX", *args3[3], src[8192], *out, *err; size_t on, en; int rc, target, mask;
     if (argc != 2 && argc != 3) { fprintf(stderr, "usage: latebindcheck.cx PRODUCT [SCRATCH]\n"); return 2; }
     if (argc == 2) {
-        static const char *LEFT[] = {"ctl.c", "sym", "sym2", "sym13", "p15", "p13", "pbad", "img", "img15", "out.bin", "ran", "neg.tape", "err", 0}; const char **l;
+        static const char *LEFT[] = {"ctl.c", "sym", "sym2", "sym13", "p15", "p13", "pbad", "img", "imge", "img15", "out.bin", "ran", "neg.tape", "plain.c", "err", 0}; const char **l;
         if (!mkdtemp(own)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
         args3[0] = argv[0]; args3[1] = argv[1]; args3[2] = own; rc = main(3, args3);
         D = own; for (l = LEFT; *l; l++) drop(*l);
@@ -112,17 +112,29 @@ int main(int argc, char **argv) {
     drop("ran"); rc = run("-run '%s/ctl.c'", &out, &on); free(out);
     if (rc != 0 || !present("ran")) { printf("  FAIL control: the program does not run on this host (rc %d)\n", rc); return 1; }
     printf("  ok   control: contract stream names slot 1 (mask %d); the program runs\n", mask);
+    /* the host-symbol route must not disturb programs that need no host symbol: they run in
+       memory, not through the forwarding image, so the control above does not cover them */
+    {
+        static const char *PLAIN = "int main(void) { return 7; }\n";
+        if (put("plain.c", PLAIN, strlen(PLAIN))) { fprintf(stderr, "cannot write into %s\n", D); return 2; }
+        rc = run("-run '%s/plain.c'", &out, &on); free(out);
+        if (rc != 7) { printf("  FAIL control: a program without host symbols exits %d under -run, want 7\n", rc); return 1; }
+        drop("img");
+        rc = run("-o '%s/img' '%s/plain.c'", 0, 0);
+        if (rc != 0) { printf("  FAIL control: -o of a program without host symbols exits %d\n", rc); return 1; }
+        printf("  ok   control: a program without host symbols runs (exit 7)\n");
+    }
 
     /* 2 stream */
-    drop("sym2"); drop("img15");
-    rc = run("-o '%s/img15' --emit-host-symbols '%s/sym2' '%s/ctl.c'", 0, 0);
-    if (rc != 0 || !same("sym", "sym2") || !same("img", "img15")) fail("stream: two emissions differ"); else ok("stream: two emissions are byte-identical and well formed");
+    drop("sym2"); drop("imge");
+    rc = run("-o '%s/imge' --emit-host-symbols '%s/sym2' '%s/ctl.c'", 0, 0);
+    if (rc != 0 || !same("sym", "sym2") || !same("img", "imge")) fail("stream: two emissions differ"); else ok("stream: two emissions are byte-identical and well formed");
 
     /* 3 no-op */
     drop("img"); drop("img15");
     rc = run("-o '%s/img' '%s/ctl.c'", 0, 0);
     if (rc != 0) fail("no-op: -o without a provider file fails");
-    else if (!same("img", "img15")) fail("no-op: --emit-host-symbols changes the image");
+    else if (!same("img", "imge")) fail("no-op: --emit-host-symbols changes the image");
     else { rc = run("-o '%s/img15' --host-provider '%s/p15' '%s/ctl.c'", 0, 0);
            if (rc != 0 || !same("img", "img15")) fail("no-op: mask 15 does not give the image built without a provider file"); else ok("no-op: mask 15 is the same image as no provider file"); }
 
