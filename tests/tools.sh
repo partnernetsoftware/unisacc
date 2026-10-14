@@ -60,7 +60,12 @@ for r in $REPOS; do
     name=$(echo "$r" | cut -d'|' -f1)
     url=$(echo "$r" | cut -d'|' -f2)
     commit=$(echo "$r" | cut -d'|' -f3)
-    [ -d "$CACHE/$name" ] && continue
+    if [ -d "$CACHE/$name" ]; then
+        # a cache at any other commit is refused, never used silently (c43 batch 05): remove it to re-fetch
+        got=$(git -C "$CACHE/$name" rev-parse -q --verify HEAD 2>/dev/null) || got=
+        [ "$got" = "$commit" ] && continue
+        echo "tools: $CACHE/$name is at ${got:-no commit}, not the pinned $commit; remove it to re-fetch" >&2; exit 1
+    fi
     [ "${FETCH:-1}" = "1" ] || { echo "tools corpus absent (FETCH=0)"; exit 1; }
     bound 30 git clone -q "$url" "$CACHE/$name" || { echo "clone failed"; exit 1; }
     (cd "$CACHE/$name" && bound 15 git checkout -q "$commit") || exit 1
