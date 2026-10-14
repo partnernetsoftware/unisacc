@@ -214,6 +214,36 @@ static void missing_case(const char *package,const char *target) {
     report(ok,"missing: injected-only data stays compiled/unbound, bind refuses by code/name");
 done:free(d.p);free(e.p);free(l.p);us_free(c);
 }
+/* lifecycle: the unbound receipt is provider-independent across bind attempts in one context.
+   success_first: bind ok, re-offer a provider of the other signedness, bind again -> refused by type,
+   the earlier exports are gone, the receipt bytes are unchanged.
+   missing_first: bind refused (no provider), then register one, bind again -> ok, the receipt
+   equals the one held while refused. */
+static void lifecycle_case(const char *package,const char *target,int success_first) {
+    us_context *c=us_new(package);us_signature s=data_signature(4,1,0),other=data_signature(4,1,1);
+    struct snapshot l1={0,0},l2={0,0};int v=5,ok=0,(*r)(void);
+    if(!c || !declare_source(c,&s,READ) ||
+       (success_first && us_register_data_provider(c,NAME,&v,&s)) || us_compile(c,target,1)){
+        report(0,"lifecycle setup failed");goto done;
+    }
+    if(success_first){
+        r=(int(*)(void))0;
+        ok=!us_relocate(c) && (r=(int(*)(void))us_sym(c,"read_value")) && r()==5;
+        l1=lower(c);
+        ok=ok && l1.p && l1.n && !us_register_data_provider(c,NAME,&v,&other);
+        ok=ok && us_relocate(c)!=0 && named_error(c,ERR_TYPE) && no_exports(c);
+        if(ok){l2=lower(c);ok=same(l1,l2);}
+        report(ok,"lifecycle: success then signedness-conflicting re-offer refused, old exports gone, receipt unchanged");
+    } else {
+        ok=us_relocate(c)!=0 && named_error(c,ERR_MISSING) && no_exports(c);
+        if(ok){l1=lower(c);ok=l1.p && l1.n;}
+        ok=ok && !us_register_data_provider(c,NAME,&v,&s) && !us_relocate(c);
+        r=ok?(int(*)(void))us_sym(c,"read_value"):0;ok=ok && r && r()==5;
+        if(ok){l2=lower(c);ok=same(l1,l2);}
+        report(ok,"lifecycle: missing refused, provider added, bind ok, receipt unchanged");
+    }
+done:free(l1.p);free(l2.p);us_free(c);
+}
 int main(int argc,char **argv) {
     if(argc!=3){fprintf(stderr,"usage: liblatebind2c1 PACKAGE TARGET\n");return 2;}
     /* Fail fast: a missing placeholder/model is a failure, never KNOWN/SKIP. */
@@ -222,5 +252,7 @@ int main(int argc,char **argv) {
     mismatch_case(argv[1],argv[2],1);if(bad)return 1;
     mismatch_case(argv[1],argv[2],0);if(bad)return 1;
     missing_case(argv[1],argv[2]);
+    if(bad)return 1;
+    lifecycle_case(argv[1],argv[2],1);lifecycle_case(argv[1],argv[2],0);
     printf("liblatebind 2c1 draft: %d failures\n",bad);return bad?1:0;
 }
