@@ -1,7 +1,7 @@
 /* LB-1: typed framing/host adaptation only; Tape decisions stay in models. */
 /* run.c's native branch has these; the product branch uses private syscall IO.
    Use the existing shipped headers, never a host-header search override. */
-#ifdef __UNISA__
+#if defined(__UNISA__) && (defined(__APPLE__) || defined(__linux__))
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
