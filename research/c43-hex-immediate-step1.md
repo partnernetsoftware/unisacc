@@ -56,3 +56,15 @@
 **仍须核对的一项（开放）**：`arith_x86_64.S:5` 在 `_WIN32` 下 `#error Windows_x64_binding_not_implemented`，所以 Windows x86-64 不编译这份汇编算术。但 `win/x86_64` 目标在本机构建成功，因此那条目标的执行核选择未在本步追到；C oracle 的 `alu64` 提供同样的 64 位运算，无论哪条路径，64 位原语都存在。需要 cc 在派 cdx 前确认 Windows 目标用的核。
 
 **结论**：A′ 的执行器侧不需要新原语（lnx/osx 的 x86-64 与 arm64 由汇编核，各目标的 oracle 由 C 核提供）。实现只需：intcanon 的表（用既有 A64/A64I/C64U 动作）、Python 参考、`compilerpack.py` 挂接（2c1 合流后）。
+
+## 7. Windows 目标的执行核（只读追，2026-10-15）
+
+**结论**：`win/x86_64` 与 `lnx/x86_64` 使用**同一份**产品汇编执行核（同一 `asmcompiler.c`、同一 x86-64 内核 blob），不走 C oracle。64 位除与取余的证据是同一份 `arith_x86_64.S` 的 `idivq`、`divq`（第 6 节）。但 Windows x86-64 的 **Win64 调用约定绑定在源码中明确未实现**，本机无法验证其运行正确性，须由 CI 的 winsuite 裁定。
+
+**证据链**：
+- `exec/c/buildcompiler.sh:243–244`：对 `win/x86_64` 与其他目标一样，执行 `b $via -O2 -b "$t" exec/c/asmcompiler.c`；`exec/c/asmcompiler.c:3` 定义 `UNISA_CORE_BLOB`，因此执行核取自包内资源（`run.c:26`、`:737`）。Windows 切片与 Linux 切片只差目标参数，不差执行核选择。
+- 内核 blob 由 `exec/c/asm/blob.py` 按 ISA 构建，单元为 `transition/arith/buffer/memory/intern/bytes/format/stack/action/run` 加 `bridge`，源文件是 `*_x86_64.S`，不随目标分叉。`compilerpack.py:204–213` 只接受 `arm64` 与 `x86_64` 两个内核目录。因此 `lnx`、`osx`、`win` 三目标共享同一个 x86-64 内核 blob。
+- `_WIN32` 相关：`action_x86_64.S:4`、`transition_x86_64.S:9`、`arith_x86_64.S:5` 都是 `#ifdef _WIN32 #error Windows_x64_binding_not_implemented`。**这个 #error 只在宿主为 Windows 而编译这些汇编时触发**；交叉生成 `-b win/x86_64` 时不触发，因此 win 切片能构建成功（已在本机验证）。`binding.c:57`、`:69` 的 `_WIN32` 分支只改内存映射（`0x3000`、`mprotect 0x20`），`binding.c:78` 的分支只针对 `aarch64`。
+- 未核（开放）：内核 blob 按 System V 约定生成，Windows x64 的参数传递约定（rcx、rdx 等）由 `bridge_x86_64.S` 与绑定层如何衔接，本步未追到。因此“同一 blob 在 Windows 上正确运行”未证明。
+
+**对 A′ 的含义**：三目标的 64 位算术（`A64` 与 `A64I` 的除、取余、移位）都由同一份汇编提供；Windows 的运行正确性与其他目标一样依赖 CI 的 winsuite（CLAUDE.md 规定 Windows 验证以 CI 为准），本机只能证明编译与交叉构建。派 A′ 实现时，**Windows 证据必须走 CI**，不得以本机交叉构建代替。
