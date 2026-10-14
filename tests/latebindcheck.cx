@@ -34,8 +34,10 @@
                   byte unchanged, and the program not executed (it would have created a file).
      6 provider   a malformed provider file (bad magic, bad length, reserved bits, wrong target,
                   absent) is refused with exit 1 and a diagnostic that is NOT "missing-provider".
-     7 lowering   .hostaddr with index 4 or -1 is refused (exit 1, names "hostaddr") and no
-                  contract stream is written, an existing one left unchanged.
+     7 lowering   .hostaddr with index 4 or -1 is refused (exit 1, names "hostaddr"), a tape
+                  that is not valid Tape is refused by the tape domain before the contract
+                  stage sees it, and in neither case is a contract stream written (an existing
+                  one is left unchanged).
    Exit 124, 127 and 128+N are never refusals.
 
    Exit 0: all of the above.  Exit 1: a contract failure.  Exit 2: usage or scratch trouble.
@@ -171,18 +173,20 @@ int main(int argc, char **argv) {
 
     /* 7 lowering */
     {
-        static const char *TAPE[] = {"_start:\n  .hostaddr r0, 4\n  ret\n", "_start:\n  .hostaddr r0, -1\n  ret\n", 0}; int i, before = bad; char what[256];
+        /* the third is not valid Tape at all (a leading zero): the tape-domain stage, which runs
+           before the contract stage, owns that refusal, and the diagnostic still names the line */
+        static const char *TAPE[] = {"_start:\n  .hostaddr r0, 4\n  ret\n", "_start:\n  .hostaddr r0, -1\n  ret\n", "_start:\n  .hostaddr r0, 01\n  ret\n", 0}; int i, before = bad; char what[256];
         for (i = 0; TAPE[i]; i++) {
             size_t kn; char *k;
             put("neg.tape", TAPE[i], strlen(TAPE[i])); put("sym2", SENTINEL, strlen(SENTINEL)); put("out.bin", SENTINEL, strlen(SENTINEL));
             rc = run("-o '%s/out.bin' --emit-host-symbols '%s/sym2' '%s/neg.tape'", &out, &on); err = slurp("err", &en);
-            if (rc != 1 || on || !has(err, "hostaddr")) { snprintf(what, sizeof what, "lowering: case %d is not refused by name (rc %d)", i, rc); fail(what); }
+            if (rc != 1 || on || !has(err, i == 2 ? "tape domain" : "hostaddr")) { snprintf(what, sizeof what, "lowering: case %d is not refused by name (rc %d)", i, rc); fail(what); }
             if (has(err, "missing-provider")) { snprintf(what, sizeof what, "lowering: case %d is reported as a missing provider", i); fail(what); }
             k = slurp("sym2", &kn);
             if (!k || kn != strlen(SENTINEL) || memcmp(k, SENTINEL, kn)) { snprintf(what, sizeof what, "lowering: case %d wrote a contract stream", i); fail(what); }
             free(k); free(out); free(err);
         }
-        if (bad == before) ok("lowering: .hostaddr index 4 and -1 refused by name, no contract stream written");
+        if (bad == before) ok("lowering: .hostaddr index 4 and -1 refused by name, invalid Tape refused by the tape domain; no contract stream written");
     }
 
     printf("latebindcheck  %d failures  %s\n", bad, bad ? "FAILED" : "host-symbol contract and binding refusal hold");
