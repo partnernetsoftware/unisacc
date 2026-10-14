@@ -283,10 +283,12 @@ def _strip_comment(raw):
 def _tape_integer(token, lineno, decimal=False):
     """TP-9: ASCII literal, explicit word bounds; never Python's host digit limit.
 
-    Keep int(token, 0)'s prefix/underscore/leading-zero syntax for ordinary
-    operands, and int(token)'s decimal syntax for .bss. Accumulation is bounded
+    Integer underscores are invalid, matching the C reference reader.
+    Retain ordinary prefix/leading-zero and .bss decimal rules. Accumulation is bounded
     before multiply/add; even arbitrarily many leading zeroes stay deterministic.
     """
+    if "_" in token:
+        raise ValueError("line %d: invalid integer literal" % lineno)
     text = token
     negative = text.startswith("-")
     if text[:1] in ("+", "-"):
@@ -296,14 +298,11 @@ def _tape_integer(token, lineno, decimal=False):
     if prefixed:
         base = {"0x": 16, "0o": 8, "0b": 2}[text[:2].lower()]
         text = text[2:]
-        if text.startswith("_"):
-            text = text[1:]
     alphabet = "0123456789abcdef"[:base]
     digits = text.lower()
-    if (not digits or digits[0] == "_" or digits[-1] == "_" or "__" in digits
-            or any(c != "_" and c not in alphabet for c in digits)):
+    if not digits or any(c not in alphabet for c in digits):
         raise ValueError("line %d: invalid integer literal" % lineno)
-    plain = digits.replace("_", "")
+    plain = digits
     if not decimal and not prefixed and len(plain) > 1 and plain[0] == "0" and any(c != "0" for c in plain):
         raise ValueError("line %d: invalid integer literal" % lineno)
     limit = (1 << 63) if negative else (1 << 64) - 1

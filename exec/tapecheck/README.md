@@ -18,9 +18,12 @@ literal bound, `.bss`, `.unit 2`, and linkage records (including the unit prereq
 for `.gdef`). `shape.tsv` documents the ordinary opcode schema; the transition
 tables are the executable rule source, not generated runtime output.
 
-Known coverage boundaries are not acceptance claims: underscore integer spellings
-are explicitly refused as `not covered`; quoted ordinary symbol operands are
-likewise not covered. Exotic label spellings and duplicate-resource corner cases
+Integer literals must not contain underscores, matching the C reference reader
+(TP-9 owner ruling). Python and the model reject them as `invalid integer literal`
+with a physical line number; underscores in symbol names remain valid.
+
+Known coverage boundaries are not acceptance claims: quoted ordinary symbol
+operands are not covered. Exotic label spellings and duplicate-resource corner cases
 are not certified by this sample set. This lexical stage does not claim undefined
 reference-resolution rules or target capability checks. No trusted flag substitutes
 for running the model on the exact bytes passed to lower.

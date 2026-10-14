@@ -2,7 +2,7 @@
 # Build the declared finite stage; dynamic C owns the decision/output contract.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-part=${1:?part 1..3}; case $part in 1) lo=0; hi=140;; 2) lo=140; hi=280;; 3) lo=280; hi=448;; *) exit 2;; esac
+part=${1:?part 1..3}; case $part in 1) lo=0; hi=140;; 2) lo=140; hi=280;; 3) lo=280; hi=453;; *) exit 2;; esac
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-tapecheck.XXXXXX")
 trap 'rm -rf "$T"' EXIT HUP INT TERM
 b() { "$R/tests/bound" 15 "$@"; }
