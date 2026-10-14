@@ -98,10 +98,24 @@ def export(base, over, rows, tmp):
             spec = f'{over}:{path}' if over else f':{path}'
             content = run_step(['git', 'show', spec], cwd=R, capture_output=True, check=True).stdout
         dst.write_bytes(content)
+        dst.chmod(git_file_mode(path, over))
     for name in ROOT_PRODUCT:
         if (R / name).is_file():
             (tmp / name).unlink(missing_ok=True)
             (tmp / name).symlink_to(R / name)
+
+def git_file_mode(path, over=None):
+    """The mode git would check the file out with: 0755 for an executable entry, else 0644.
+    A plain write_bytes leaves the writer's umask mode (a new shell script came out 0644 where git
+    records 0755), and st_mode goes into the reviewed_trees snapshot, so an export carries git's
+    mode, not the writer's."""
+    if over in (None, 'WORKTREE'):
+        if over == 'WORKTREE':
+            return 0o755 if os.stat(R / path).st_mode & 0o111 else 0o644
+        out = run_step(['git', 'ls-files', '-s', '--', path], cwd=R, capture_output=True, check=True).stdout.split()
+    else:
+        out = run_step(['git', 'ls-tree', over, '--', path], cwd=R, capture_output=True, check=True).stdout.split()
+    return 0o755 if out and out[0] == b'100755' else 0o644
 
 def export_worktree(base, rows, tmp):
     export(base, None, [], tmp)              # base tree first (index entries are overwritten below)
@@ -112,6 +126,7 @@ def export_worktree(base, rows, tmp):
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes((R / path).read_bytes())
+        dst.chmod(git_file_mode(path, 'WORKTREE'))
     for name in ROOT_PRODUCT:
         if (R / name).is_file():
             (tmp / name).unlink(missing_ok=True)
