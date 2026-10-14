@@ -41,3 +41,18 @@
 
 1. 认可推荐 A′，并接受“64 位 ALU 原语先行、单独一笔”。
 2. `compilerpack.py` 的挂接在 cdx 2c1 合流后再动。
+
+## 6. 更正与复核（cc 裁定后，只读，2026-10-15）
+
+**更正**：第1节与推荐中“需要通用执行器的 64 位原语，`alu32` 只有 32 位”**不成立**。我把 `alu32` 当成了全部 ALU。真实情况如下：
+
+- **产品执行核是包内每架构汇编**（`exec/c/asm/`：`action_{x86_64,arm64}.S`、`transition_*.S`、`arith_*.S`、`binding.c`；`asmcompiler.c` 定义 `UNISA_CORE_BLOB`）。C 的 `exec/c/core.c` 是独立跑与参考用的 oracle，不是产品核（上一条的基础有误，已纠正）。
+- **动作分派**：`action_x86_64.S:62–75`、`action_arm64.S:70–75`：`A64`/`A64I` 的操作号达到 `OP_A64` 阈值后走 `core_alu64`，较小的走 `core_alu32`。C oracle 同样：`core.c:297` `case A64: case A64I` → `alu64`（`core.c:223–237`）。
+- **64 位运算齐全**：`core_alu64` 的操作号 0–15 在两侧都有：加、减、乘（0–2），有符号与无符号的除、取余（10–13），与、或、异或、非（5–7、14），左移、算术右移、逻辑右移（8、9、15）。x86-64：`arith_x86_64.S` 的 `Lx64table`（约第 97–101 行）、`idivq`（约第 149 行）、`divq`（约第 160 行）；arm64：`arith_arm64.S` 的 `sdiv`/`udiv`/`msub`（`La64udiv`、`La64urem`）。
+- **表已可达**：`exec/enc/x86-operand-result.tsv` 已有一行 `A64`，说明扫描表可以直接使用 64 位动作。
+
+**对 A′ 的影响**：十六进制累加用 `A64I`（左移 4、或），十进制输出用 `A64I`（无符号除、取余 10）。**两者都已存在，A′ 不需要新增执行器原语**。第3节的“先行一笔”取消。
+
+**仍须核对的一项（开放）**：`arith_x86_64.S:5` 在 `_WIN32` 下 `#error Windows_x64_binding_not_implemented`，所以 Windows x86-64 不编译这份汇编算术。但 `win/x86_64` 目标在本机构建成功，因此那条目标的执行核选择未在本步追到；C oracle 的 `alu64` 提供同样的 64 位运算，无论哪条路径，64 位原语都存在。需要 cc 在派 cdx 前确认 Windows 目标用的核。
+
+**结论**：A′ 的执行器侧不需要新原语（lnx/osx 的 x86-64 与 arm64 由汇编核，各目标的 oracle 由 C 核提供）。实现只需：intcanon 的表（用既有 A64/A64I/C64U 动作）、Python 参考、`compilerpack.py` 挂接（2c1 合流后）。
