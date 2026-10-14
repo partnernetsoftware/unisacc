@@ -15,9 +15,17 @@ nothing in the checkout.  Exit 0 only when every mapped suite ran and returned 0
 import fnmatch, json, os, pathlib, shutil, subprocess, sys, tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]   # the checkout this tool lives in (default)
+# every step has its own bound (<= 55 s): each git call of the export and each mapped suite.  The bound is not a
+# sum: several suites together may exceed 55 s, each one still runs inside its own limit.  DERIVEDCHECK_BOUND
+# lowers it for the self-test only (the self-test checks the sum rule with small numbers).
+BOUND = min(55, int(os.environ.get('DERIVEDCHECK_BOUND', '55')))
 R = REPO                                              # set by --root (commitgate passes the checked repository)
 MAP = None
 ROOT_PRODUCT = ('unisacc.com', 'unisacc.com.build.json')
+
+def run_step(argv, **kw):
+    """one bounded step: tests/bound.py with BOUND seconds; 142 on timeout (the bound helper's own code)"""
+    return subprocess.run([sys.executable, '-I', str(REPO / 'tests/bound.py'), str(BOUND)] + list(argv), **kw)
 
 def git(*args, check=True):
     return subprocess.run(['git', *args], cwd=R, capture_output=True, check=check).stdout.decode()
@@ -71,13 +79,13 @@ def suites_for(rows):
 def export(base, over, rows, tmp):
     """clean export of base, with the overlay applied; the root product is linked read-only.
     over: a commit, None (the index) or 'WORKTREE' (the working-tree bytes the commit would take)."""
-    archive = subprocess.run(['git', 'archive', base], cwd=R, capture_output=True, check=True).stdout
-    subprocess.run(['tar', '-x', '-C', str(tmp)], input=archive, check=True)
+    archive = run_step(['git', 'archive', base], cwd=R, capture_output=True, check=True).stdout
+    run_step(['tar', '-x', '-C', str(tmp)], input=archive, check=True)
     # the checks that call git (rev-parse HEAD) need a repository: a fresh one with one commit of this export
     env = dict(os.environ, GIT_AUTHOR_NAME='derived', GIT_AUTHOR_EMAIL='d@d', GIT_COMMITTER_NAME='derived', GIT_COMMITTER_EMAIL='d@d')
-    subprocess.run(['git', 'init', '-q'], cwd=tmp, check=True, env=env)
-    subprocess.run(['git', 'add', '-A', '--', '.'], cwd=tmp, check=True, env=env, capture_output=True)
-    subprocess.run(['git', 'commit', '-q', '-m', 'derived export'], cwd=tmp, check=True, env=env, capture_output=True)
+    run_step(['git', 'init', '-q'], cwd=tmp, check=True, env=env)
+    run_step(['git', 'add', '-A', '--', '.'], cwd=tmp, check=True, env=env, capture_output=True)
+    run_step(['git', 'commit', '-q', '-m', 'derived export'], cwd=tmp, check=True, env=env, capture_output=True)
     for status, path in rows:
         dst = tmp / path
         if status == 'D':
@@ -88,7 +96,7 @@ def export(base, over, rows, tmp):
             content = (R / path).read_bytes()
         else:
             spec = f'{over}:{path}' if over else f':{path}'
-            content = subprocess.run(['git', 'show', spec], cwd=R, capture_output=True, check=True).stdout
+            content = run_step(['git', 'show', spec], cwd=R, capture_output=True, check=True).stdout
         dst.write_bytes(content)
     for name in ROOT_PRODUCT:
         if (R / name).is_file():
@@ -146,11 +154,11 @@ def main(argv):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         for s in suites:
             cmd = commands[s]
-            try:
-                p = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, timeout=55)
-                rc, tail = p.returncode, (p.stdout + p.stderr).decode(errors='replace').strip().splitlines()[-1:]
-            except subprocess.TimeoutExpired:
-                rc, tail = 124, ['timeout 55 s']
+            # the declared command may carry its own bound (tests/bound N); this step's bound replaces it
+            if len(cmd) >= 2 and cmd[0].endswith('tests/bound') and cmd[1].isdigit(): cmd = cmd[2:]
+            p = run_step(cmd, cwd=tmp, env=env, capture_output=True)
+            rc, tail = p.returncode, (p.stdout + p.stderr).decode(errors='replace').strip().splitlines()[-1:]
+            if rc == 142: tail = ['timeout %d s (bound)' % BOUND]
             worst = max(worst, 0 if rc == 0 else 1)
             print('  %-16s rc=%-3d %s   (because: %s)' % (s, rc, (tail[0] if tail else '')[:90], ', '.join(why[s][:3])))
     finally:

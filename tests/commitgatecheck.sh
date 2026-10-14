@@ -107,4 +107,22 @@ before=$(git rev-parse HEAD)
 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m doc -- research-note.md > /dev/null 2>&1 || fail "a research-only commit was refused by the derived step"
 [ "$(git rev-parse HEAD)" != "$before" ] || fail "the research-only commit did not commit"
 git checkout -q -- src/front_pp.c 2>/dev/null || true
+# 0.0.43 step 5: the derived step bounds each suite on its own.  Four suites whose sum exceeds the bound (scaled to
+# 3 s here, DERIVEDCHECK_BOUND) pass when each finishes inside it; one suite over its own bound is refused.
+cat > tests/gatedeps.json <<'JSON'
+{"suites": {"facts-export": {"command": ["python3", "-c", "import hashlib,pathlib,sys; h=hashlib.sha256(pathlib.Path('src/front_pp.c').read_bytes()).hexdigest(); sys.exit(0 if pathlib.Path('exec/facts/front.tsv').read_text().strip()==h else 1)"]},
+  "slow1": {"command": ["python3", "-c", "import time; time.sleep(2)"]}, "slow2": {"command": ["python3", "-c", "import time; time.sleep(2)"]},
+  "slow3": {"command": ["python3", "-c", "import time; time.sleep(2)"]}, "slow4": {"command": ["python3", "-c", "import time; time.sleep(2)"]},
+  "slowbad": {"command": ["python3", "-c", "import time; time.sleep(5)"]}}}
+JSON
+printf 'src/front_pp.c\tfacts-export\nsrc/multi.c\tslow1\nsrc/multi.c\tslow2\nsrc/multi.c\tslow3\nsrc/multi.c\tslow4\nsrc/bad.c\tslowbad\n' > release/derived-map.tsv
+git add tests/gatedeps.json release/derived-map.tsv && git -c user.name=t -c user.email=t@t commit -q -m 'derived bounds fixture'
+echo 'int m = 1;' > src/multi.c; git add src/multi.c
+before=$(git rev-parse HEAD)
+DERIVEDCHECK_BOUND=3 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m multi --suite difftest_o-1 -- src/multi.c > /dev/null 2>&1 || fail "four suites whose sum exceeds the bound, each inside it, were refused"
+[ "$(git rev-parse HEAD)" != "$before" ] || fail "the multi-suite commit did not commit"
+echo 'int bad = 1;' > src/bad.c; git add src/bad.c
+before=$(git rev-parse HEAD)
+DERIVEDCHECK_BOUND=3 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m bad --suite difftest_o-1 -- src/bad.c > /dev/null 2>&1
+[ $? -eq 5 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a suite over its own bound was committed"
 echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified in either naming order, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit"
