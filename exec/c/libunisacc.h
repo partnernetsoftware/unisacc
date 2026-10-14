@@ -65,6 +65,14 @@ US_API int us_declare_import(us_context *ctx, const char *name, const us_signatu
 US_API int us_declare_injected_import(us_context *,const char *,const us_signature *);
 US_API const void *us_library_e3_fragment(us_context *,size_t *);
 US_API const void *us_library_lower_unbound(us_context *,size_t *);
+/* Non-stable 2c1: requirements are separate from borrowed provider offers.
+ * Caller keeps provider objects alive; replacing an offer invalidates the image,
+ * requiring relocate before another call. Snapshot bytes are borrowed until
+ * the next relevant compile/relocate, declaration change, or context free. */
+US_API int us_declare_injected_data(us_context *,const char *,const us_signature *);
+US_API int us_register_data_provider(us_context *,const char *,void *,const us_signature *);
+US_API const void *us_library_data_fragment(us_context *,size_t *);
+US_API const void *us_library_data_lower_unbound(us_context *,size_t *);
 /* Typed fixed or variadic native declarations use the exact model USLSIG2/3 single-record
    protocol. The record name must equal name; bytes are deep-owned on success.
    Old us_signature/API layout is unchanged. Mutation follows the same generation

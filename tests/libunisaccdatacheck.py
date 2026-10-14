@@ -1,7 +1,7 @@
 """Real borrowed host objects read/written through E3/lower model decisions.
 Consumes a built candidate; C compiler only builds the host API library.
 """
-import argparse,ctypes,concurrent.futures,pathlib,platform,shutil,subprocess,tempfile,json,hashlib
+import argparse,ctypes,concurrent.futures,pathlib,platform,shutil,subprocess,tempfile,json,hashlib,re
 from libunisaccbindingscheck import Type,Signature,integer,pointer
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 P=ctypes.c_void_p
@@ -50,8 +50,28 @@ def main():
    data(c,'hostvalue',host,integer(4));compiled(c,b'extern int hostvalue;int read(void){return hostvalue;}int hostvalue=7;',0)
    fn=L.us_sym(c,b'read');assert fn,L.us_error(c);assert ctypes.CFUNCTYPE(ctypes.c_int)(fn)()==7;assert host.value==99
   finally:L.us_free(c)
+  # Readonly is a permission to read borrowed storage, not a blanket ABI refusal.
+  host=ctypes.c_int(99);c=L.us_new(pkg);assert c
+  try:
+   readonly=data(c,'hostvalue',host,integer(4),0)
+   compiled(c,b'extern int hostvalue;int read(void){return hostvalue;}',0)
+   fn=L.us_sym(c,b'read');assert fn,L.us_error(c)
+   assert ctypes.CFUNCTYPE(ctypes.c_int)(fn)()==99;assert host.value==99
+  finally:L.us_free(c)
+  # An actual write must fail before publishing a callable image or changing host data.
+  host=ctypes.c_int(99);c=L.us_new(pkg);assert c
+  try:
+   readonly=data(c,'hostvalue',host,integer(4),0)
+   assert not L.us_add_source(c,b'readonly-write.c',b'extern int hostvalue;int write(void){hostvalue=9;return hostvalue;}')
+   rc=L.us_compile(c,target.encode(),0)
+   if rc==0:rc=L.us_relocate(c)
+   diagnostic=L.us_error(c) or b''
+   assert rc==1,('readonly-write',rc,diagnostic)
+   assert b'readonly-write' in diagnostic and re.search(rb'(?<![0-9])256(?![0-9])',diagnostic) and re.search(rb'\bhostvalue\b',diagnostic),diagnostic
+   assert not L.us_sym(c,b'write');assert host.value==99
+  finally:L.us_free(c)
   high_depth=pointer();high_depth.depth=(1<<32)+1
-  for tag,t,writable in [('wrong-width',integer(8),1),('wrong-kind',pointer(),1),('readonly',integer(4),0),('high-depth',high_depth,1)]:
+  for tag,t,writable in [('wrong-width',integer(8),1),('wrong-kind',pointer(),1),('high-depth',high_depth,1)]:
    c=L.us_new(pkg);assert c
    try:
     obj=ctypes.c_ulonglong(99);data(c,'hostvalue',obj,t,writable)
@@ -59,5 +79,5 @@ def main():
     assert not L.us_add_source(c,b'bad.c',source)
     assert L.us_compile(c,target.encode(),0)!=0,(tag,'invalid binding accepted');assert L.us_error(c)
    finally:L.us_free(c)
-  print(json.dumps({'scope':target+' borrowed scalar/data-pointer objects','contexts':4,'optimisation_levels':[0,1,2],'actual_host_mutation':True,'mixed_function_and_data':True,'address_alias':True,'source_definition_precedes_injection':True,'invalid_abi_and_readonly_rejected':True,'package_sha256':hashlib.sha256(pathlib.Path(a.package).read_bytes()).hexdigest(),'source_sha256':hashlib.sha256(SOURCE).hexdigest()}))
+  print(json.dumps({'scope':target+' borrowed scalar/data-pointer objects','contexts':4,'optimisation_levels':[0,1,2],'actual_host_mutation':True,'mixed_function_and_data':True,'address_alias':True,'source_definition_precedes_injection':True,'invalid_abi_rejected':True,'readonly_read_allowed':True,'readonly_write_named_rejection':True,'readonly_host_unchanged':True,'package_sha256':hashlib.sha256(pathlib.Path(a.package).read_bytes()).hexdigest(),'source_sha256':hashlib.sha256(SOURCE).hexdigest()}))
 if __name__=='__main__':main()

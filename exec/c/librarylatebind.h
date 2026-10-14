@@ -9,7 +9,7 @@ static int us_late_owner(const unsigned char *contract,size_t n,const unsigned c
  unsigned count=us_late_u32(contract+12);if(count>4096||us_late_u32(sel+8)!=count||sn!=12+5*(size_t)count)return 1;
  size_t at=16,nn=strlen(name);for(unsigned i=0;i<count;i++){
   if(n-at<36)return 1;size_t z=us_late_u32(contract+at),nm=us_late_u32(contract+at+12),sig=us_late_u32(contract+at+16);
-  if(z<32||z>n-at-4||nm>z-32||sig!=z-32-nm||us_late_u32(contract+at+4)!=256+i||us_late_u32(sel+12+5*i)!=256+i||sel[16+5*i]<1||sel[16+5*i]>2)return 1;
+  if(z<32||z>n-at-4||nm>z-32||sig!=z-32-nm||us_late_u32(contract+at+4)!=256+i||us_late_u32(sel+12+5*i)!=256+i||(sel[16+5*i]!=1&&sel[16+5*i]!=2&&sel[16+5*i]!=4))return 1;
   if(nn==nm&&!memcmp(contract+at+36,name,nn)){*owner=sel[16+5*i];*ident=256+i;return 0;}
   at+=4+z;
  }
@@ -34,16 +34,30 @@ static void us_late_unwrap(Buf *input,const char *magic,unsigned char **fragment
  us_late_snapshot(fragment,fragmentn,input->b+24+(size_t)main,(size_t)side);
  memmove(input->b,input->b+24,(size_t)main);input->n=(int)main;
 }
-typedef struct UsLateState {unsigned char *contract,*selection,*e3,*lower;size_t cn,sn,en,ln;} UsLateState;
-static UsLateState us_late_detach(us_context *c){
- UsLateState old={c->late_contract,c->late_selection,c->late_e3,c->late_lower,c->late_contract_n,c->late_selection_n,c->late_e3_n,c->late_lower_n};
- c->late_contract=c->late_selection=c->late_e3=c->late_lower=NULL;c->late_contract_n=c->late_selection_n=c->late_e3_n=c->late_lower_n=0;return old;
+/* Three independent model products: main, ordinary function side, data side.
+   Validate all lengths before changing either observation snapshot or main. */
+static void us_late_unwrap3(Buf *input,const char *magic,unsigned char **ordinary,size_t *ordinaryn,unsigned char **data,size_t *datan){
+ if(!input||!input->b||input->n<32||memcmp(input->b,magic,8))__us_panic("library fragment: malformed three-part envelope");
+ uint64_t main=us_lr_u64(input->b+8),side=us_lr_u64(input->b+16),third=us_lr_u64(input->b+24);size_t available=(size_t)input->n-32;
+ if(main>available||side>available-main||third!=available-main-side)__us_panic("library fragment: malformed three-part envelope");
+ unsigned char *ordinary_copy=malloc(side?(size_t)side:1),*data_copy=malloc(third?(size_t)third:1);
+ if(!ordinary_copy||!data_copy){free(ordinary_copy);free(data_copy);__us_panic("library fragment: allocation failed");}
+ memcpy(ordinary_copy,input->b+32+(size_t)main,(size_t)side);
+ memcpy(data_copy,input->b+32+(size_t)main+(size_t)side,(size_t)third);
+ free(*ordinary);free(*data);*ordinary=ordinary_copy;*ordinaryn=(size_t)side;*data=data_copy;*datan=(size_t)third;
+ memmove(input->b,input->b+32,(size_t)main);input->n=(int)main;
 }
-static void us_late_release(UsLateState *s){free(s->contract);free(s->selection);free(s->e3);free(s->lower);memset(s,0,sizeof *s);}
+typedef struct UsLateState {unsigned char *contract,*selection,*e3,*lower,*data_e3,*data_lower;size_t cn,sn,en,ln,den,dln;} UsLateState;
+static UsLateState us_late_detach(us_context *c){
+ UsLateState old={c->late_contract,c->late_selection,c->late_e3,c->late_lower,c->late_data_e3,c->late_data_lower,c->late_contract_n,c->late_selection_n,c->late_e3_n,c->late_lower_n,c->late_data_e3_n,c->late_data_lower_n};
+ c->late_contract=c->late_selection=c->late_e3=c->late_lower=c->late_data_e3=c->late_data_lower=NULL;c->late_contract_n=c->late_selection_n=c->late_e3_n=c->late_lower_n=c->late_data_e3_n=c->late_data_lower_n=0;return old;
+}
+static void us_late_release(UsLateState *s){free(s->contract);free(s->selection);free(s->e3);free(s->lower);free(s->data_e3);free(s->data_lower);memset(s,0,sizeof *s);}
 static void us_late_rollback(us_context *c,UsLateState *old){
  UsLateState fresh=us_late_detach(c);us_late_release(&fresh);
  c->late_contract=old->contract;c->late_selection=old->selection;c->late_e3=old->e3;c->late_lower=old->lower;
- c->late_contract_n=old->cn;c->late_selection_n=old->sn;c->late_e3_n=old->en;c->late_lower_n=old->ln;memset(old,0,sizeof *old);
+ c->late_data_e3=old->data_e3;c->late_data_lower=old->data_lower;
+ c->late_contract_n=old->cn;c->late_selection_n=old->sn;c->late_e3_n=old->en;c->late_lower_n=old->ln;c->late_data_e3_n=old->den;c->late_data_lower_n=old->dln;memset(old,0,sizeof *old);
 }
 static int us_late_prepare(us_context *c,const char *target){
  unsigned char *frame=NULL;size_t size=0;
@@ -63,35 +77,70 @@ static int us_late_prepare(us_context *c,const char *target){
   Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
   rc=runroute("library-contract",&input,"binding-contract");
   if(!rc){us_late_snapshot(&c->late_contract,&c->late_contract_n,input.b,(size_t)input.n);
-   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;
+   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=1;
    rc=runroute("library-selection",&input,"binding-ownership");
    if(!rc)us_late_snapshot(&c->late_selection,&c->late_selection_n,input.b,(size_t)input.n);
   }
  }
  free(frame);cache_settle();cleanup();active=NULL;RI=NULL;NRI=0;
  free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
+ free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
  if(rc){free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;}
  return rc;
 }
+static int us_late_data_error(us_context *c,const char *reason,uint32_t id,const char *name){
+ snprintf(c->error,sizeof c->error,"unisacc: relocate: %s symbol %u name %s",reason,id,name);return 1;
+}
+/* Provider descriptors stay host-side. All six fields are compared against the
+   canonical declaration; offer capability never changes model permissions. */
+static int us_late_data_offer(us_context *c,const us_binding *x,const unsigned char *record,size_t nm,uint32_t id,const char *name,uint64_t *address){
+ const unsigned char *t=record+36+nm;uint64_t extent=us_lr_u64(record+20),width=us_lr_u64(t+32);
+ if(record[9]||record[10]||us_late_u32(record+16)!=48||us_late_u32(record+28)||record[32])return us_late_data_error(c,"data-type-mismatch",id,name);
+ if(!x||x->kind!=1||x->typed||x->count||x->variadic||
+    x->result.depth!=us_lr_u64(t)||x->result.base!=us_lr_u64(t+8)||x->result.shape!=us_lr_u64(t+16)||
+    x->result.kind!=us_lr_u64(t+24)||x->result.width!=width||x->result.uns!=us_lr_u64(t+40))
+  return us_late_data_error(c,"data-type-mismatch",id,name);
+ if(!width||extent<width||x->extent<extent)return us_late_data_error(c,"data-extent-mismatch",id,name);
+ if((record[11]&1)&&!x->writable)return us_late_data_error(c,"data-permission-mismatch",id,name);
+ if(!x->address)return us_late_data_error(c,"missing-provider",id,name);
+ *address=x->address;return 0;
+}
 static int us_late_provider(void *context,uint32_t id,uint64_t *address){
  us_context *c=context;*address=0;size_t at=16;char name[4097];
- unsigned count=us_late_u32(c->late_contract+12);
+ if(!c->late_contract||c->late_contract_n<16)return us_late_data_error(c,"malformed-contract",id,"unknown");
+ unsigned count=us_late_u32(c->late_contract+12);if(count>4096)return us_late_data_error(c,"malformed-contract",id,"unknown");
  for(unsigned i=0;i<count;i++){
-  size_t z=us_late_u32(c->late_contract+at),nm=us_late_u32(c->late_contract+at+12);
-  if(us_late_u32(c->late_contract+at+4)==id){
-   if(nm>=sizeof name)return 1;memcpy(name,c->late_contract+at+36,nm);name[nm]=0;
-   const us_binding *x=us_resolver_find(&c->bindings,name);
-   if(x&&x->address){*address=x->address;return 0;}
+  if(at>c->late_contract_n||c->late_contract_n-at<36)return us_late_data_error(c,"malformed-contract",id,"unknown");
+  const unsigned char *record=c->late_contract+at;size_t z=us_late_u32(record),nm=us_late_u32(record+12),sig=us_late_u32(record+16);
+  if(z<32||z>c->late_contract_n-at-4||nm>z-32||sig!=z-32-nm)return us_late_data_error(c,"malformed-contract",id,"unknown");
+  if(us_late_u32(record+4)==id){
+   if(!nm||nm>=sizeof name)return us_late_data_error(c,"malformed-contract",id,"unknown");memcpy(name,record+36,nm);name[nm]=0;
+   unsigned owner,selected_id;if(us_late_owner(c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,name,&owner,&selected_id)||selected_id!=id)return us_late_data_error(c,"missing-owner",id,name);
+   const us_binding *x=NULL;
+   if(record[8]==1){
+    if(owner!=4)return us_late_data_error(c,"wrong-owner",id,name);
+    if(sig!=48||record[9]||record[10]||us_late_u32(record+28)||record[32])return us_late_data_error(c,"data-type-mismatch",id,name);
+    uint64_t width=us_lr_u64(record+36+nm+32),extent=us_lr_u64(record+20);
+    if(!width||extent<width)return us_late_data_error(c,"data-extent-mismatch",id,name);
+    x=us_resolver_find(&c->data_providers,name);
+    if(!x){const us_binding *legacy=us_resolver_find(&c->bindings,name);if(legacy&&legacy->kind==1)x=legacy;}
+    if(x)return us_late_data_offer(c,x,record,nm,id,name,address);
+   }else{
+    if(record[8]||owner!=1)return us_late_data_error(c,"wrong-owner",id,name);
+    x=us_resolver_find(&c->bindings,name);if(x&&x->address){*address=x->address;return 0;}
+   }
 #if !defined(_WIN32)
-   if(!us_late_policy(c,name)){
+   /* Process/module fallback has declaration metadata only: no claim that
+      dlsym verified extent, six fields, ABI, or writable capability. */
+   if(!(record[11]&2)&&!us_late_policy(c,name)){
     dlerror();void *a=dlsym(RTLD_DEFAULT,name);const char *e=dlerror();if(!e&&a){*address=(uintptr_t)a;return 0;}
     for(size_t j=0;j<c->resolver.handle_count;j++){dlerror();a=dlsym(c->resolver.handles[j].handle,name);e=dlerror();if(!e&&a){*address=(uintptr_t)a;return 0;}}
    }
 #endif
-   snprintf(c->error,sizeof c->error,"unisacc: relocate: missing-provider symbol %u name %s",id,name);return 1;
+   return us_late_data_error(c,"missing-provider",id,name);
   }
   at+=4+z;
  }
- return 1;
+ return us_late_data_error(c,"missing-provider",id,"unknown");
 }
 #endif

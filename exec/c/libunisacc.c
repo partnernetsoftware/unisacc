@@ -45,6 +45,7 @@ struct us_context {
     us_exports exports;
     LibraryCarrierExport *carrier_exports;
     us_bindings bindings;
+    us_bindings data_providers; /* independent supply; never serialized into model inputs */
     us_resolver resolver;
     us_native_plans native_plans;
     us_native_templates native_templates;
@@ -55,8 +56,8 @@ struct us_context {
     LibraryImportAlias *import_aliases;size_t import_alias_count;us_native_plans import_alias_plans;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *contract_snapshot; size_t contract_snapshot_length;
-    unsigned char *late_contract,*late_selection,*late_e3,*late_lower;
-    size_t late_contract_n,late_selection_n,late_e3_n,late_lower_n;
+    unsigned char *late_contract,*late_selection,*late_e3,*late_lower,*late_data_e3,*late_data_lower;
+    size_t late_contract_n,late_selection_n,late_e3_n,late_lower_n,late_data_e3_n,late_data_lower_n;
     char **injected_only;size_t injected_only_n;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -180,7 +181,10 @@ static void library_package(us_context *c) {
 static void diagnostic(int status,const char *reason,int n,const void *errors) {
     if (!status) return;
     const Buf *e=errors;
-    if (reason && (n || *reason)) snprintf(active->error,sizeof active->error,"%.*s",n ? n : (int)strlen(reason),reason);
+    /* A model refusal owns its explicit diagnostic byte stream. Runtime failure
+       and budget exhaustion retain their status reason, not a refusal label. */
+    if (status==1 && e && e->n) snprintf(active->error,sizeof active->error,"%.*s",e->n,(const char *)e->b);
+    else if (reason && (n || *reason)) snprintf(active->error,sizeof active->error,"%.*s",n ? n : (int)strlen(reason),reason);
     else if (e && e->n) snprintf(active->error,sizeof active->error,"%.*s",e->n,(const char *)e->b);
     else snprintf(active->error,sizeof active->error,"compiler status %d",status);
 }
@@ -252,8 +256,8 @@ API void us_free(us_context *c) {
     us_native_templates_clear(&c->native_templates);
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
-    us_bindings_clear(&c->bindings);free(c->binding_blob);free(c->contract_snapshot);
-    free(c->late_contract);free(c->late_selection);free(c->late_e3);free(c->late_lower);
+    us_bindings_clear(&c->bindings);us_bindings_clear(&c->data_providers);free(c->binding_blob);free(c->contract_snapshot);
+    free(c->late_contract);free(c->late_selection);free(c->late_e3);free(c->late_lower);free(c->late_data_e3);free(c->late_data_lower);
     for(size_t i=0;i<c->injected_only_n;i++)free(c->injected_only[i]);free(c->injected_only);
     if (c->cache) { cache_release(c->cache); free(c->cache); }
     free(c->package); free(c->definitions); free(c->target);
@@ -441,6 +445,8 @@ static void invalidate_bindings(us_context *c) {
     free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;
     free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;
     free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
+    free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;
+    free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
     free(c->target);c->target=0;c->error[0]=0;
 }
 static us_binding_type binding_type(us_type_descriptor t) {
@@ -490,6 +496,30 @@ API int us_declare_injected_import(us_context *c,const char *name,const us_signa
  int rc=us_declare_import(c,name,signature);if(rc){free(copy);return rc;}
  c->injected_only[c->injected_only_n++]=copy;return 0;
 }
+/* Provider offers do not change declarations or compiled Tape. Only image capability is invalidated. */
+API int us_declare_injected_data(us_context *c,const char *name,const us_signature *sig){
+ if(!c||!name||!us_binding_name(name)||!sig||sig->kind!=1||sig->count||sig->variadic||active||c->input_is_tape)return error(c,"invalid injected-only data declaration");
+ if(us_late_policy(c,name))return error(c,"duplicate injected-only declaration");
+ char *copy=copy_string(name);if(!copy)return error(c,"out of memory");
+ char **list=realloc(c->injected_only,(c->injected_only_n+1)*sizeof *list);if(!list){free(copy);return error(c,"out of memory");}c->injected_only=list;
+ int rc=us_declare_import(c,name,sig);if(rc){free(copy);return rc;}
+ c->injected_only[c->injected_only_n++]=copy;return 0;
+}
+API int us_register_data_provider(us_context *c,const char *name,void *address,const us_signature *offer){
+ if(!c||active||c->input_is_tape||!offer||offer->kind!=1||offer->count||offer->variadic)return error(c,"invalid data provider registration");
+ us_binding_type type=binding_type(offer->result);us_bindings candidate={0};
+ if(us_bindings_add_data(&candidate,name,(uintptr_t)address,&type,offer->extent,offer->writable,c->error,sizeof c->error))return 1;
+ size_t i=0;while(i<c->data_providers.count&&strcmp(c->data_providers.items[i].name,name))i++;
+ if(i==c->data_providers.count){
+  if(i>=4096){us_bindings_clear(&candidate);return error(c,"data provider registry exceeds limit");}
+  us_binding *items=realloc(c->data_providers.items,(i+1)*sizeof *items);if(!items){us_bindings_clear(&candidate);return error(c,"out of memory");}
+  c->data_providers.items=items;c->data_providers.count++;
+ }else free(c->data_providers.items[i].name);
+ c->data_providers.items[i]=candidate.items[0];free(candidate.items);
+ discard_image(c);c->error[0]=0;return 0;
+}
+API const void *us_library_data_fragment(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_data_e3){error(c,"library data E3 fragment is unavailable");return NULL;}if(n)*n=c->late_data_e3_n;return c->late_data_e3;}
+API const void *us_library_data_lower_unbound(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_data_lower){error(c,"library data lower fragment is unavailable");return NULL;}if(n)*n=c->late_data_lower_n;return c->late_data_lower;}
 API const void *us_library_e3_fragment(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_e3){error(c,"library E3 fragment is unavailable");return NULL;}if(n)*n=c->late_e3_n;return c->late_e3;}
 API const void *us_library_lower_unbound(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_lower){error(c,"library lower fragment is unavailable");return NULL;}if(n)*n=c->late_lower_n;return c->late_lower;}
 
@@ -645,6 +675,8 @@ API int us_compile(us_context *c,const char *target,int level) {
         free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;
         free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;
         free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
+        free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;
+        free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
     }
     if(freeze_injected->count || freeze_resolver->declarations.count || freeze_resolver->handle_count){
         if(strcmp(target,library_native_target())){free(late_injected.items);free(late_declared.items);us_late_rollback(c,&prior);return error(c,"native resolver target differs from host");}
@@ -668,7 +700,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
         library_package(c);
-        ResourceInput resources[12]; memset(resources,0,sizeof resources);
+        ResourceInput resources[15]; memset(resources,0,sizeof resources);
         unsigned char callable_values[2][8];resource_u64(callable_values[0],(uintptr_t)library_callable_make_dispatch);resource_u64(callable_values[1],(uintptr_t)library_callable_call_dispatch);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
         unsigned char signature_request[8]={3,0,0,0,0,0,0,0};
@@ -700,7 +732,11 @@ API int us_compile(us_context *c,const char *target,int level) {
             resources[NRI].name=(const unsigned char *)"\0library/signatureversion";resources[NRI].n=25;resources[NRI].data=signature_request;resources[NRI].len=8;NRI++;
             resources[NRI].name=(const unsigned char *)"\0library/sourcefacts";resources[NRI].n=20;resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
         }
-        if(c->late_contract){resources[NRI].name=(const unsigned char *)"\0library/contract";resources[NRI].n=17;resources[NRI].data=c->late_contract;resources[NRI].len=(int)c->late_contract_n;NRI++;}
+        if(c->late_contract){
+            resources[NRI]=(ResourceInput){(const unsigned char *)"\0library/contract",17,c->late_contract,(int)c->late_contract_n};NRI++;
+            resources[NRI]=(ResourceInput){(const unsigned char *)"\0library/selection",18,c->late_selection,(int)c->late_selection_n};NRI++;
+            resources[NRI]=(ResourceInput){(const unsigned char *)"\0library/data-contract",22,library_request,8};NRI++;
+        }
         Buf input={0};
         char route[128];
         int z=snprintf(route,sizeof route,"%s/%stape/O%d",target,c->source_count>1 ? "multi/" : "",level);
@@ -725,7 +761,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         }
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
-            if(c->late_contract)us_late_unwrap(&input,"USTFLOW1",&c->late_e3,&c->late_e3_n);
+            if(c->late_contract)us_late_unwrap3(&input,"USTFLOW2",&c->late_e3,&c->late_e3_n,&c->late_data_e3,&c->late_data_e3_n);
             size_t begin=0,length=(size_t)input.n;
             if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9) || !memcmp(input.b,"USLTAPE3\n",9))) {
                 int version3=!memcmp(input.b,"USLTAPE3\n",9);
@@ -762,7 +798,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     cache_settle();cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
     if(!rc)rc=library_variadic_sites_prepare(c);
-    if(rc){free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+    if(rc){free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
         free(c->tape);c->tape=0;c->tape_length=0;}
     return rc;
@@ -1043,7 +1079,7 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        size_t capacity=22;
+        size_t capacity=23;
 #if defined(_WIN32) && !defined(__UNISA__)
         capacity+=(size_t)winimports.count;
 #endif
@@ -1074,10 +1110,13 @@ API int us_relocate(us_context *c) {
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/latebind",17,enabled,8};NRI++;
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/selection",18,c->late_selection,(int)c->late_selection_n};NRI++;
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/contract",17,c->late_contract,(int)c->late_contract_n};NRI++;
+            actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/data-latebind",22,enabled,8};NRI++;
+            free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
+            free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
             rc=runroute_range(route,"tapecheck","tapecheck",&input,source);
             if(!rc)rc=runroute_range(route,"prune","lower",&input,source);
             if(!rc){
-                us_late_unwrap(&input,"USLOWP1\n",&c->late_lower,&c->late_lower_n);
+                us_late_unwrap3(&input,"USLOWP2\n",&c->late_lower,&c->late_lower_n,&c->late_data_lower,&c->late_data_lower_n);
                 unsigned char *bound=NULL;size_t boundn=0;
                 char binderror[1024]={0};
                 rc=us_library_relocate(input.b,(size_t)input.n,c->late_selection,c->late_selection_n,us_late_provider,c,&bound,&boundn,binderror,sizeof binderror);

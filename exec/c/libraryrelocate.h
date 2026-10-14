@@ -20,14 +20,14 @@ static int us_library_relocate(const unsigned char *f,size_t fn,const unsigned c
  if(count>tail/20||tail!=(size_t)count*20)return us_lr_bad(error,errorn);
  for(uint32_t i=0;i<oc;i++){
   const unsigned char *p=owners+12+5*(size_t)i;uint32_t id=us_lr_u32(p);
-  if(id!=256+i||(p[4]!=1&&p[4]!=2))return us_lr_bad(error,errorn);
+  if(id!=256+i||(p[4]!=1&&p[4]!=2&&p[4]!=4))return us_lr_bad(error,errorn);
  }
  const unsigned char *text=f+20,*records=text+tn;uint64_t previous=0;
  for(uint32_t i=0;i<count;i++){
   const unsigned char *p=records+20*(size_t)i;uint64_t off=us_lr_u64(p);uint32_t id=us_lr_u32(p+12);
   if(us_lr_u32(p+8)!=1||off>=tn||(i&&off<previous)||text[(size_t)off]!='0'||p[16]||p[17]||p[18]||p[19])return us_lr_bad(error,errorn);
   previous=off+1;int found=0;
-  for(uint32_t j=0;j<oc;j++){const unsigned char *q=owners+12+5*(size_t)j;if(us_lr_u32(q)==id){if(q[4]!=1)return us_lr_bad(error,errorn);found=1;break;}}
+  for(uint32_t j=0;j<oc;j++){const unsigned char *q=owners+12+5*(size_t)j;if(us_lr_u32(q)==id){if(q[4]!=1&&q[4]!=4)return us_lr_bad(error,errorn);found=1;break;}}
   if(!found)return us_lr_bad(error,errorn);
  }
  if((size_t)count>((size_t)-1)/sizeof(uint64_t))return us_lr_bad(error,errorn);
@@ -38,7 +38,11 @@ static int us_library_relocate(const unsigned char *f,size_t fn,const unsigned c
   uint32_t id=us_lr_u32(records+20*(size_t)i+12);uint64_t address=0;
   int frozen=0;
   for(uint32_t j=0;j<i;j++)if(us_lr_u32(records+20*(size_t)j+12)==id){address=addresses[j];frozen=1;break;}
-  if(!frozen&&(!provider||provider(context,id,&address)||!address)){free(addresses);snprintf(error,errorn,"unisacc: relocate: missing-provider symbol %u",id);return 1;}
+  if(!frozen){
+   if(error&&errorn)error[0]=0;
+   int failed=!provider||provider(context,id,&address)||!address;
+   if(failed){free(addresses);if(error&&errorn&&!error[0])snprintf(error,errorn,"unisacc: relocate: missing-provider symbol %u",id);return 1;}
+  }
   addresses[i]=address;int n=snprintf(digits,sizeof digits,"%llu",(unsigned long long)address);
   if(n<1||(size_t)n>=sizeof digits||total==(size_t)-1||(size_t)(n-1)>((size_t)-1)-total-1){free(addresses);return us_lr_bad(error,errorn);}total+=(size_t)n-1;
  }

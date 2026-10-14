@@ -852,3 +852,6 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 
 
 **LB-7**（0.0.43 2c1，未绑定lower模型接口，库接线待后续）显式library/data-latebind=LE64(1)连同module/latebind合同资源启用数据owner4；六形.libraryaddr按合同name解析稳定ID，源内已定义对象优先自有路径，不为其产生外部span。USLOWP2封套为magic8、full/ordinary/data三小端u64长度与三份UNILOW1；数据role=0、占位字节0及非重叠span由模型在发射点产生，无新资源保持USLOWP1。只读取址与读取接受，追踪寄存器及支持的栈槽来源后，写入具名readonly-write symbol ID name；相关来源不明或不可精确支持时具名未覆盖拒绝、stdout空。融合优化须消费被跳过指令的来源效果，合法发射字节不得因此改变。provider不参与此模型输入；本合同不证明API绑定、完整lower无地址或所有控制流覆盖。
+
+
+**LB-8**（0.0.43 2c1，非稳定库数据接线）`us_declare_injected_data`声明无地址kind1需求并限制injected-only，`us_register_data_provider`独立登记/替换借用地址与有效供给描述，不修改需求合同；更换供给使镜像失效，须重新relocate。`us_library_data_fragment`返回最近成功E3数据片段，`us_library_data_lower_unbound`返回本轮成功未绑定lower数据UNILOW1收据；缺provider保留收据，模型拒绝不返回上轮成功收据。重定位逐项比较六类型字段、要求供给extent≥需求extent≥类型宽度且供给自身extent≥宽度；writable需求必须有可写供给，只读需求不因供给可写而扩权。data-type-mismatch、data-extent-mismatch、missing-provider具名ID/name，失败不得发布可调用镜像。旧us_add_symbol数据注入兼容；旧外部自动解析仅沿用声明metadata，不计独立ABI核验。类型/供给地址不得回流模型，Windows另案。
