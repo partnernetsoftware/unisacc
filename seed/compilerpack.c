@@ -238,6 +238,7 @@ int main(int argc, char **argv) {
     }
     { char *hs=model(mdir,"hostsymbols");size_t hn;unsigned char *hb=slurp(hs,&hn);if(!hn)die("empty host-symbols model",hs);free(hb);add(&rows,"host-symbols","symbols","explicit-frame","host-contract",hs);free(hs); }
     { char *lc=model(mdir,"librarycontract");size_t ln;unsigned char *lb=slurp(lc,&ln);if(!ln)die("empty library-contract model",lc);free(lb);add(&rows,"library-contract","contract","declarations","library-contract",lc);free(lc); }
+    { char *lp=model(mdir,"librarypartition");size_t pn;unsigned char *pb=slurp(lp,&pn);if(!pn)die("empty library-selection model",lp);free(pb);add(&rows,"library-selection","ownership","declarations","library-selection",lp);free(lp); }
     mkdirs(out);
     {   char *p = cat(out, "/routes.tsv"); FILE *f = fopen(p, "wb"); if (!f) die("cannot write", p);
         for (int i = 0; i < rows.n; i++) fprintf(f, "%s\t%s\t%s\t%s\t%s\n", rows.r[i].c[0], rows.r[i].c[1], rows.r[i].c[2], rows.r[i].c[3], rows.r[i].c[4]);

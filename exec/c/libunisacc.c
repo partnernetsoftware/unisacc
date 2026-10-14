@@ -55,6 +55,9 @@ struct us_context {
     LibraryImportAlias *import_aliases;size_t import_alias_count;us_native_plans import_alias_plans;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *contract_snapshot; size_t contract_snapshot_length;
+    unsigned char *late_contract,*late_selection,*late_e3,*late_lower;
+    size_t late_contract_n,late_selection_n,late_e3_n,late_lower_n;
+    char **injected_only;size_t injected_only_n;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
     Symbol *symbols; size_t symbol_count;
@@ -250,6 +253,8 @@ API void us_free(us_context *c) {
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);free(c->binding_blob);free(c->contract_snapshot);
+    free(c->late_contract);free(c->late_selection);free(c->late_e3);free(c->late_lower);
+    for(size_t i=0;i<c->injected_only_n;i++)free(c->injected_only[i]);free(c->injected_only);
     if (c->cache) { cache_release(c->cache); free(c->cache); }
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
@@ -307,6 +312,11 @@ API const void *us_binding_contract(us_context *c,const char *target,size_t *len
  unsigned selected=us_contract_target(target);if(!selected){error(c,"library contract: unknown target");return NULL;}
  unsigned char *frame=NULL;size_t size=0;
  if(us_contract_input(&c->bindings,&c->resolver.declarations,selected,&frame,&size,c->error,sizeof c->error))return NULL;
+ size_t record_at=16;for(unsigned i=0;i<((unsigned)frame[12]|((unsigned)frame[13]<<8)|((unsigned)frame[14]<<16)|((unsigned)frame[15]<<24));i++){
+  unsigned z=0,nm=0;for(int j=0;j<4;j++){z|=(unsigned)frame[record_at+j]<<(8*j);nm|=(unsigned)frame[record_at+12+j]<<(8*j);}
+  for(size_t j=0;j<c->injected_only_n;j++)if(strlen(c->injected_only[j])==nm&&!memcmp(frame+record_at+36,c->injected_only[j],nm))frame[record_at+11]|=2;
+  record_at+=4+z;
+ }
  active=c;volatile int rc=1;
  if(!setjmp(failure)){
   RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;
@@ -325,6 +335,7 @@ API const void *us_binding_contract(us_context *c,const char *target,size_t *len
  if(length)*length=c->contract_snapshot_length;return c->contract_snapshot;
 }
 
+#include "librarylatebind.h"
 static uint64_t library_u64(const Buf *b,size_t *at);
 static int library_lookup(void *owner,const char *name,const void **raw,int *kind);
 static const char *library_native_target(void);
@@ -426,6 +437,10 @@ static void invalidate_bindings(us_context *c) {
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
     free(c->contract_snapshot);c->contract_snapshot=0;c->contract_snapshot_length=0;
+    free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;
+    free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;
+    free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;
+    free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
     free(c->target);c->target=0;c->error[0]=0;
 }
 static us_binding_type binding_type(us_type_descriptor t) {
@@ -467,6 +482,17 @@ API int us_declare_import(us_context *c,const char *name,const us_signature *sig
           sig->count,sig->variadic,sig->extent,sig->writable,c->error,sizeof c->error);
     free(args);if(rc)return rc;invalidate_bindings(c);return 0;
 }
+API int us_declare_injected_import(us_context *c,const char *name,const us_signature *signature){
+ if(!c||!name||!us_binding_name(name)||!signature||signature->kind||signature->variadic||active)return error(c,"invalid injected-only declaration");
+ if(us_late_policy(c,name))return error(c,"duplicate injected-only declaration");
+ char *copy=copy_string(name);if(!copy)return error(c,"out of memory");
+ char **list=realloc(c->injected_only,(c->injected_only_n+1)*sizeof *list);if(!list){free(copy);return error(c,"out of memory");}c->injected_only=list;
+ int rc=us_declare_import(c,name,signature);if(rc){free(copy);return rc;}
+ c->injected_only[c->injected_only_n++]=copy;return 0;
+}
+API const void *us_library_e3_fragment(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_e3){error(c,"library E3 fragment is unavailable");return NULL;}if(n)*n=c->late_e3_n;return c->late_e3;}
+API const void *us_library_lower_unbound(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_lower){error(c,"library lower fragment is unavailable");return NULL;}if(n)*n=c->late_lower_n;return c->late_lower;}
+
 API int us_add_symbol_typed(us_context *c,const char *name,void *address,const void *signature,size_t length) {
     if(!c || active || c->input_is_tape || !address)return error(c,"invalid typed symbol registration");
     if(us_resolver_accept_injection_typed_bridge(&c->resolver,name,signature,length,c->error,sizeof c->error))return 1;
@@ -603,13 +629,32 @@ API int us_compile(us_context *c,const char *target,int level) {
     c->error[0]=0;
     unsigned char *frozen=0;size_t frozen_length=0;us_native_plans plans={0};us_native_templates templates={0};
     LibraryCarrierOwner carrier_owner={c,target};plans.carrier_provider=library_carrier_provider;plans.carrier_owner=&carrier_owner;
-    if(c->bindings.count || c->resolver.declarations.count || c->resolver.handle_count){
-        if(strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
-        if(us_resolver_freeze_with_templates_bridge(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,(uintptr_t)library_variadic_dispatch,&plans,&templates,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
+    if((c->bindings.count||c->resolver.declarations.count||c->resolver.handle_count)&&strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
+    UsLateState prior=us_late_detach(c);
+    us_bindings late_injected={0},late_declared={0};us_resolver late_resolver;
+    const us_bindings *freeze_injected=&c->bindings;const us_resolver *freeze_resolver=&c->resolver;
+    if(us_contract_target(target)){
+        if(us_late_prepare(c,target)){us_late_rollback(c,&prior);return 1;}
+        if(us_late_legacy_view(&c->bindings,c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,&late_injected,c->error,sizeof c->error) ||
+           us_late_legacy_view(&c->resolver.declarations,c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,&late_declared,c->error,sizeof c->error)){
+            free(late_injected.items);free(late_declared.items);us_late_rollback(c,&prior);return 1;
+        }
+        late_resolver=c->resolver;late_resolver.declarations=late_declared;freeze_resolver=&late_resolver;freeze_injected=&late_injected;
+    }else {
+        free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;
+        free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;
+        free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;
+        free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
     }
+    if(freeze_injected->count || freeze_resolver->declarations.count || freeze_resolver->handle_count){
+        if(strcmp(target,library_native_target())){free(late_injected.items);free(late_declared.items);us_late_rollback(c,&prior);return error(c,"native resolver target differs from host");}
+        if(us_resolver_freeze_with_templates_bridge(freeze_resolver,freeze_injected,(uintptr_t)library_native_dispatch,(uintptr_t)library_variadic_dispatch,&plans,&templates,&frozen,&frozen_length,c->error,sizeof c->error)){free(late_injected.items);free(late_declared.items);us_late_rollback(c,&prior);return 1;}
+    }
+    free(late_injected.items);free(late_declared.items);
     plans.carrier_provider=NULL;plans.carrier_owner=NULL;
-    if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"bindings too large");}
-    char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"out of memory");}
+    if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);us_late_rollback(c,&prior);return error(c,"bindings too large");}
+    char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);us_late_rollback(c,&prior);return error(c,"out of memory");}
+    us_late_release(&prior);
     discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);
     c->native_plans=plans;c->native_templates=templates;
@@ -623,7 +668,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
         library_package(c);
-        ResourceInput resources[11]; memset(resources,0,sizeof resources);
+        ResourceInput resources[12]; memset(resources,0,sizeof resources);
         unsigned char callable_values[2][8];resource_u64(callable_values[0],(uintptr_t)library_callable_make_dispatch);resource_u64(callable_values[1],(uintptr_t)library_callable_call_dispatch);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
         unsigned char signature_request[8]={3,0,0,0,0,0,0,0};
@@ -655,6 +700,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             resources[NRI].name=(const unsigned char *)"\0library/signatureversion";resources[NRI].n=25;resources[NRI].data=signature_request;resources[NRI].len=8;NRI++;
             resources[NRI].name=(const unsigned char *)"\0library/sourcefacts";resources[NRI].n=20;resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
         }
+        if(c->late_contract){resources[NRI].name=(const unsigned char *)"\0library/contract";resources[NRI].n=17;resources[NRI].data=c->late_contract;resources[NRI].len=(int)c->late_contract_n;NRI++;}
         Buf input={0};
         char route[128];
         int z=snprintf(route,sizeof route,"%s/%stape/O%d",target,c->source_count>1 ? "multi/" : "",level);
@@ -679,6 +725,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         }
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
+            if(c->late_contract)us_late_unwrap(&input,"USTFLOW1",&c->late_e3,&c->late_e3_n);
             size_t begin=0,length=(size_t)input.n;
             if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9) || !memcmp(input.b,"USLTAPE3\n",9))) {
                 int version3=!memcmp(input.b,"USLTAPE3\n",9);
@@ -715,7 +762,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     cache_settle();cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
     if(!rc)rc=library_variadic_sites_prepare(c);
-    if(rc){library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+    if(rc){free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
         free(c->tape);c->tape=0;c->tape_length=0;}
     return rc;
@@ -996,11 +1043,11 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        size_t capacity=19;
+        size_t capacity=22;
 #if defined(_WIN32) && !defined(__UNISA__)
         capacity+=(size_t)winimports.count;
 #endif
-        ResourceInput *actual=tracked_calloc(capacity,sizeof *actual);unsigned char scalar[17][8];
+        ResourceInput *actual=tracked_calloc(capacity,sizeof *actual);unsigned char scalar[17][8],enabled[8]={1};
         const char *names[]={"\0process/argc","\0process/argv","\0memory/text","\0memory/reserve",
             "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process","\0library/callables","\0library/callablemake","\0library/callablecall"};
         uint64_t vals[]={c->argc,(uintptr_t)c->argv,(uintptr_t)mapping.base,mapping.reserved,1,(uintptr_t)library_exit,(uintptr_t)library_mmap,(uintptr_t)library_munmap,
@@ -1022,7 +1069,22 @@ API int us_relocate(us_context *c) {
         Buf input={0};input.n=(int)c->tape_length;input.b=tracked_realloc(0,c->tape_length);memcpy(input.b,c->tape,c->tape_length);
         char route[128];int z=snprintf(route,sizeof route,"%s/run/O%d",c->target,c->optimisation);
         if (z<0 || z>=(int)sizeof route) __us_panic("target too long");
-        rc=runroute_from(route,"prune",&input,c->sources ? c->sources->name : "library.tape");
+        const char *source=c->sources ? c->sources->name : "library.tape";
+        if(c->late_contract){
+            actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/latebind",17,enabled,8};NRI++;
+            actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/selection",18,c->late_selection,(int)c->late_selection_n};NRI++;
+            actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/contract",17,c->late_contract,(int)c->late_contract_n};NRI++;
+            rc=runroute_range(route,"tapecheck","tapecheck",&input,source);
+            if(!rc)rc=runroute_range(route,"prune","lower",&input,source);
+            if(!rc){
+                us_late_unwrap(&input,"USLOWP1\n",&c->late_lower,&c->late_lower_n);
+                unsigned char *bound=NULL;size_t boundn=0;
+                char binderror[1024]={0};
+                rc=us_library_relocate(input.b,(size_t)input.n,c->late_selection,c->late_selection_n,us_late_provider,c,&bound,&boundn,binderror,sizeof binderror);
+                if(rc&&!c->error[0])snprintf(c->error,sizeof c->error,"%s",binderror);
+                if(!rc){input.b=tracked_realloc(NULL,boundn?boundn:1);memcpy(input.b,bound,boundn);input.n=(int)boundn;free(bound);}
+            }
+        }else rc=runroute_from(route,"prune",&input,source);
         if (!rc) {snprintf(route,sizeof route,"%s/memory",c->target);rc=runroute(route,&input,"library.tape");}
         if (!rc) {
             MemoryImage m;library_image(c,&input,&m,&mapping);memory_commit(&m,&mapping);

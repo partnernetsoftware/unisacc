@@ -841,4 +841,8 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 
 **LB-4**（0.0.43 2b，非稳定接口合同，实施中）普通函数kind=0/callkind=0的归属只由无地址声明及显式target/版本的模型分区决定；typed/variadic/callback、数据和运行桥保持旧路。每条外部需求只能有一条归属，duplicate-owner/missing-owner拒绝；provider缺失不允许回落旧路。.libraryfn rN,ID表示普通函数稳定引用，不复用现有数据.libraryaddr；前置Tape验形，程序模式由lower具名拒绝libraryfn。未绑定普通片段由模型标定并附重定位span，绑定器仅核ID/范围/非重叠/占位并按span填址，不扫描Tape；地址首次进入迁移片段在relocate之后，旧桥地址仍属未迁移债。非稳定us_declare_injected_import(ctx,name,const us_signature*)仅声明且禁宿主解析回退；us_library_e3_fragment(ctx,&length)和us_library_lower_unbound(ctx,&length)只读模型标定普通函数片段，后者为UNILOW1收据。借用字节至下一compile/配置改变/free；失败NULL、length=0、具名us_error。声明与provider独立，缺provider在relocate拒绝并无可调用镜像。旧us_add_symbol保持声明加provider的组合语义。片段A/B相同不能计作整份lower输入或输出无地址，也不计ABI签名核验。条款是验收义务，不声称尚未接线实现已绿。
 
+
+**LB-5**（0.0.43 2b 非稳定观测与绑定接口）`us_declare_injected_import`显式声明普通函数及 injected-only 来源，不注册 provider 地址；其需求由模型决定，源内定义/未引用声明不强制绑定。`us_library_e3_fragment`返回最后成功编译的普通函数包装片段；`us_library_lower_unbound`返回本轮 lower 成功产出的未绑定普通取址片段及 UNILOW1 span，绑定失败时此收据仍可观测，不能把它计作镜像可调用。快照借用至下一编译、绑定声明配置变更或 free；源/define/include 的添加仅影响下一次编译，不使旧快照冒称新配置结果。未产出时 NULL、length=0、具名 us_error。编译在提交新编译态前失败时，合同/归属/片段必须一起回滚，不能配旧 Tape/镜像使用新合同；接线需要的 contract/ownership/tapecheck 模型缺失必须拒绝。普通 provider 仅在重定位时按注入、process、owned module 次序解析；injected-only 禁止后两者回退，缺失具名 symbol ID/name，不能发布可调用镜像。零/legacy 描述不计 ABI 签名比较，Windows 与 typed/data/桥迁移另案。
+
+
 **FLOW-1**（流推导可复用模式，2026-10-14）核心语义函数通过调用模型做流式推导；IO采用显式字节流，阶段共用通道形态与执行器＋有限表，而不是复用宿主状态。各阶段拥有自己的语义与拒绝责任，调用方显式处理失败/拒绝状态；外部符号、ABI等合同作为显式输入，宿主能力/地址的解析绑定留在适配层。协议编解码不得代替核心语法或语义模型，复用模块不得把不同阶段的拒绝责任合并成一个隐式大阶段。该模式是实现边界，不自动授予测试结果摘钩、重验预算或完整确定性结论；这些仍需具体完整流与模型合同实证。

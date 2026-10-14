@@ -1427,6 +1427,10 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 - 提交门诊断：现有 abi-manifest 命名闸无 gatedeps 声明，commitgate 在跑闸前 fail-closed；补输入声明与 refresh 持久项（exec/src/include、C 检查、清单、运行器与 bound），不改 ABI 判据。
 
+- 2b 接线审查：公共 API 定义留 libunisacc.c（ABI 生成器能核声明/定义一致），合同快照采用提交前事务回滚，防新合同配旧 Tape；getter 观测最近编译/lower 代际而非待编译 source 配置。协议解码不扫描 Tape；已修必需模型存在性与 scalar 资源生命周期。系统 cc 语法检查实际 rc0，仍待 fresh 黑盒与库回归。
+
+- 2b 首次库黑盒定位（实际）：新 us_relocate 在 run/O1 的 lower 后错误请求 elf；该路由止于 lower，encoder 在单独 target/memory 路由。修为 span 绑定后沿原 memory 路由编码；包本身旧运行时可用（cc 交叉实测）。lower getter 仅观测 lower 已产出的收据，须先 relocate（成功或缺 provider 失败）；不是惰性执行接口。修后先私有运行时诊断，再 fresh 新候选，不沿用旧 freshness 结论。
+
 ### 流推导的默认可复用切面（2026-10-14 政委定调）
 
 函数＝调用模型做流式推导；IO＝字节流（≈iostream）。共用字节输入/输出通道形态、执行器与有限表，接口须显式；阶段语义和拒绝归属留给各阶段/调用方，外部合同显式入流，宿主地址/环境仅在适配与绑定层。优先固化可复用模块，不另造大阶段，也不以实现债否证抽象。2b沿此切面把归属、符号引用和span保持为模型流，宿主层只解帧与按span绑定。

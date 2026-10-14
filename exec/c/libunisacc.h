@@ -61,6 +61,10 @@ US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const
    Success invalidates code/exports; failure preserves the prior generation.
    Handles remain owned until us_free, after compiled code is destroyed. */
 US_API int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
+/* Non-stable 2b APIs; fragments are borrowed until compile/configuration/free. */
+US_API int us_declare_injected_import(us_context *,const char *,const us_signature *);
+US_API const void *us_library_e3_fragment(us_context *,size_t *);
+US_API const void *us_library_lower_unbound(us_context *,size_t *);
 /* Typed fixed or variadic native declarations use the exact model USLSIG2/3 single-record
    protocol. The record name must equal name; bytes are deep-owned on success.
    Old us_signature/API layout is unchanged. Mutation follows the same generation

@@ -154,6 +154,7 @@ modeljob() {   # modeljob NAME: one compilerpack model job into $T/models/NAME.{
         tapecheck) set -- "$1" tapecheck;;
         hostsymbols) set -- "$1" lower/hostsymbols;;
         librarycontract) set -- "$1" librarycontract/gen;;
+        librarypartition) set -- "$1" librarypartition/gen;;
         warnparse) set -- "$1" parse2 --warnings --errors;; errorparse) set -- "$1" parse2 --errors;;
         warnunits) set -- "$1" parse2/units --locations;; warnlex) set -- "$1" lex --locations;; tokenlex) set -- "$1" lex;;
         tokenpp) set -- "$1" pp --shared-predefines --no-autoinc;; warnpp-shared) set -- "$1" pp --locations --shared-predefines;;
@@ -181,7 +182,7 @@ pack_prep() {
     if [ "${SEED_GEN:-1}" = 1 ]; then
         case $1 in
             1) jobs=warnparse;; 2) jobs=errorparse;;
-            3) jobs="warnunits warnlex tokenlex tokenpp warnpp-shared object-lower-arm64 object-lower-x86_64 object-enc-arm64 object-enc-x86_64 tapecheck hostsymbols librarycontract";;
+            3) jobs="warnunits warnlex tokenlex tokenpp warnpp-shared object-lower-arm64 object-lower-x86_64 object-enc-arm64 object-enc-x86_64 tapecheck hostsymbols librarycontract librarypartition";;
         esac
         for j in $jobs; do modeljob "$j"; done
     else
