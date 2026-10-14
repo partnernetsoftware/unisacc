@@ -5,6 +5,6 @@
  *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             b3ff45a5f1fd
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           5e45bf5e018c
+ *   weights/built.json           20e0395e9e9a
  *   unisa/ckernel.py             db184ffec275 */
   "\x01\x00\x00\x01\x01\x00\x01\x00\x01\x00\x02\x02\x03\x03\x03\x03\x03\x03"
