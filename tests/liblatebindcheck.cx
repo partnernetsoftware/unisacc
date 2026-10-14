@@ -1,0 +1,41 @@
+#!/usr/bin/env -S unisacc.com -run
+/* liblatebindcheck.cx PRODUCT -- library late binding (0.0.43 second cut), from the outside.
+
+   Builds tests/liblatebind.c with the host C compiler against a private copy of the runtime
+   (the same way the lib-lifecycle suite builds its native probe) and runs it on PRODUCT's
+   model package.  The probe's own header lists what each step checks; today: step 2a, the
+   address-free declaration contract.
+
+   Exit 0: the probe built and every group held.  Exit 1: the probe failed a group, or it
+   could not be built against this tree (an API it uses is missing).  Exit 2: usage.
+   Exit 77: the host is not Linux or macOS on x86_64 or arm64. */
+#include <cx.h>
+
+int main(int argc, char **argv) {
+    char dir[] = "/tmp/liblatebindXXXXXX", cmd[16384], *out, *arch, *target; size_t n; int rc;
+    if (argc != 2) { fprintf(stderr, "usage: liblatebindcheck.cx PRODUCT\n"); return 2; }
+    rc = cx_run_timeout("uname -sm", 5, &out, &n);
+    if (rc || !out) return 2;
+    arch = strstr(out, "x86_64") ? "x86_64" : (strstr(out, "aarch64") || strstr(out, "arm64")) ? "arm64" : 0;
+    target = strstr(out, "Linux") ? (arch && arch[0] == 'x' ? "lnx/x86_64" : "lnx/arm64") :
+             strstr(out, "Darwin") ? (arch && arch[0] == 'x' ? "osx/x86_64" : "osx/arm64") : 0;
+    free(out);
+    if (!arch || !target) { printf("liblatebindcheck  UNVERIFIED: host is not lnx/osx on x86_64/arm64\n"); return 77; }
+    if (!mkdtemp(dir)) return 2;
+    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. tests/liblatebind.c exec/c/librarycall_%s.S -lffi -o '%s/probe' 2>'%s/build.err'", arch, dir, dir);
+    rc = cx_run_timeout(cmd, 40, 0, 0);
+    if (rc) {
+        char path[4096]; char *e; snprintf(path, sizeof path, "%s/build.err", dir); e = cx_read(path, &n);
+        printf("  FAIL probe does not build against this tree (rc %d)\n%.600s\n", rc, e ? e : "");
+        free(e); unlink(path); rmdir(dir);
+        printf("liblatebindcheck  FAILED\n"); return 1;
+    }
+    snprintf(cmd, sizeof cmd, "'%s/probe' '%s' %s", dir, argv[1], target);
+    rc = cx_run_timeout(cmd, 15, &out, &n);
+    if (out) fputs(out, stdout);
+    free(out);
+    snprintf(cmd, sizeof cmd, "%s/probe", dir); unlink(cmd);
+    snprintf(cmd, sizeof cmd, "%s/build.err", dir); unlink(cmd); rmdir(dir);
+    printf("liblatebindcheck  %s (probe exit %d)\n", rc == 0 ? "library contract holds" : "FAILED", rc);
+    return rc == 0 ? 0 : 1;
+}
