@@ -10,6 +10,12 @@
 - **交付物**：签名的 `unisacc.com` 与公证的 macOS dmg（公开资产只有这两个，主人 2026-09-30 裁定）；中间形式 `.tape`/`.tapebin`（[docs/tapebin-v1.md](docs/tapebin-v1.md)，内容寻址、C/Python/产品三方编码逐字节同）。
 - **公开入口仓**（主人 2026-10-05，拟注册商标 UNISA）：[partnernetsoftware/unisa](https://github.com/partnernetsoftware/unisa)，只收副本：unisacc、ujs 的最终发行包（`releases/`，定期从本仓 release 抄过去），产品介绍（`docs/`）与论文（`papers/`，不定时抄）；以后做 unisacc 的包管理入口和 agenterm 的“插件与应用”入口。开发不在那里。
 
+### 0.0.43 拒绝域裁定（机房主任代裁，2026-10-14）
+
+选择方案 **A：前置 Tape 验域**。raw 字节先经显式验域，lower 只接与同一输入绑定的已验流；目标 syscall/ABI/外部能力拒绝仍属于 lower。raw `.tape` 是产品承诺；NEG-001 `?\n` 在 `-S`/`-c` 下 rc0 原样输出已裁为产品缺陷，须经前置验域返回 rc1 与具名诊断，不能以末端编码器拒绝或上游保证改记通过。
+
+Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输入模式/目标/调用能力，并使参考承认同一合同；该一致性证据未齐前，Windows 接受不得记产品绿。条款全文见 [spec.md 的 TP-7／TP-8／L-4](spec.md#c43-refusal-ruling)。归属与承诺已裁，实现与补验仍未完成；E3及lower接受样本不扩为完整拒绝域资格。历史待裁提案与观测保留在 [裁定摘要](research/c43-refusal-ruling-summary.md)。本裁定不授签名、Latest或公开，不改变7000历史结果或env-pin。
+
 ## 2. 当前版本
 
 ### 版本状态与历史身份
@@ -1345,3 +1351,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔0.0.39 版本冻结起点，2026-10-10；实际跑过〕机房主任 unisacc10m 15:42 代裁开闸（方案1 B 链）：A1/A2 R9、A3–A5 暖C 具备、A6 F4″ 顺延 0.0.40、A7 examples 脏删 ACCEPT-AS-KNOWN（冻结/queue 一律干净 worktree）。版本号升 0.0.39；随后 B.2 同源参考/候选、B.3 comboot 定点、B.4 gatedeps 冻结稳定点、B.5 queue 出口。升版本不是封版；Draft v0.0.39 仍挂 0.0.38 演练字节，B.8 前不换挂、不公开。
 
 〔1906 续测旁核，2026-10-11；实际核过材料/哈希，未重跑套件〕m4pro com SHA256 50ab4c213feedb2f1a4f1f39c8bfca7d8d63c74a1d6b50915db8ceb233f5cf58 / 2243662 B 与公开候选记录相同，version 日志 0.0.40；build.json stale 保留。bootstrap 产品 UA 红 B=1/U=0，参考 UA 绿三 tape=9266b52f…/421304 行，与1532一致；acceptance 10-* 五项 rc0 比较的是 tape（B/U 镜像哈希不同），-o/run 16/0。纠偏：rc/v0.0.40 的 a82b9bda 是 annotated tag 对象，剥离提交为1db30835，与v0.0.40/公开回执相同，不能记为 tip 漂移。测试 B/U 的 ad-hoc 签名与发行补签分账；签/全量验收仍 OPEN。21份 HASHES 全匹配；本旁核只读及文档落盘，未动发布/资产/签/tag/窗口，续测自身禁项及未抢K6仅有回执自报、未见反证。详见 research/c40-post-release-test-1906/post-release-review-cdx-1906.md。
+
+〔机房主任代裁·0.0.43 拒绝域，2026-10-14〕采用A：前置Tape验域拥有语法/形状/记录拒绝，lower只接已验字节流，目标能力拒绝仍留lower；raw .tape是产品承诺，?\n经-S/-c成功原样写出属于缺陷，须在输出前拒绝rc1并点名原因；Windows .hostcall/.hostaddr是有意库模式合同，须显式模式输入与同合同参考对拍，未齐前不能记产品绿。授权按0.0.43落实，产品封存身份须重新建立；0.0.42既有Draft/rc/candidate不回填、不改旧7000或env-pin；禁签/Latest/公开。不以手写宿主语法判断替代核心字节流＋模型的验域阶段。
