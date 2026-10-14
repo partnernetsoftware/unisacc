@@ -227,6 +227,13 @@ def main():
                   'docs/tapebin-v1.shape.tsv', 'docs/tapebin-v1.records.tsv', 'exec/c/tapebin.h', 'src/tapebin_shape.inc'],
         'trees': ['unisa']}
     changed.append(('seed-c-ports', 'declared unisa-tape, unisa-tapebin, unisa-tapebin-shape'))
+    # 0.0.43 (reviewed_trees as a derived file): the snapshot check, routed from exec/, src/ and unisa/ by
+    # release/derived-map.tsv, so a commit that changes those trees carries the refreshed snapshot.  It reads the three
+    # trees and the declaration only.
+    d['suites']['reviewed-trees'] = {
+        'command': ['python3', './tests/reviewedtreescheck.py'],
+        'files': ['tests/reviewedtreescheck.py', 'tests/gatedeps.json'], 'trees': ['exec', 'src', 'unisa']}
+    changed.append(('reviewed-trees', 'declared the snapshot check'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

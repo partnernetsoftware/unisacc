@@ -588,6 +588,7 @@ job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-speci
 job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
 job freezecheck python3 ./tests/freezecheck.py   # 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
 job revivedscan python3 ./tests/revivedscan.py   # 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
+job reviewed-trees python3 ./tests/reviewedtreescheck.py   # 0.0.43: compilercheck reviewed_trees snapshots equal their trees (refreshed in the same commit)
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
