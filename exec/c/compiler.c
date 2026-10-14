@@ -735,7 +735,7 @@ int main(int argc, char **argv) {
 
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
-    HostCompileContext host_context={host_target,host_filter,mode,runit,host_symbols_path,cli,process_dl};
+    HostCompileContext host_context={host_target,host_filter,mode,runit,host_symbols_path,cli,process_dl[0]};
     if(host_target&&(mode==0||mode==3||host_symbols_path)&&!host_stage_present("host-symbols","symbols")){unpackage();return clierror("bind: required host-symbols model is missing");}
 
     if (mode!=1 && mode!=4 && !tape_domain_available(route)) {

@@ -6,7 +6,7 @@
 #include <unistd.h>
 #endif
 typedef struct { unsigned target, filter; int mode, native; const char *symbols;
- ResourceInput *cli; unsigned char (*dl)[8]; } HostCompileContext;
+ ResourceInput *cli; unsigned char *dl; } HostCompileContext;
 static int host_stage_present(const char *route,const char *name){for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,route)&&!strcmp(STAGES[i].name,name))return 1;return 0;}
 static int host_filter_file(const char *path,unsigned target,unsigned *mask){
  if(!path){*mask=15;return 0;}unsigned char bytes[13];char error[160];FILE*f=fopen(path,"rb");
@@ -61,7 +61,7 @@ static int host_compile(const char*route,const char*first,Buf*in,const char*src,
  if(c->native){for(int j=0;j<4;j++){provider.address[j]=(uint64_t)host_dl_slot(j);if(provider.address[j])provider.available|=1u<<j;}}
  else provider.available=15; /* existing target-loader import provider, not host addresses */
  HostBindPlan plan;char error[160];if(host_bind(&requirements,&provider,c->filter,&plan,error,sizeof error)){fprintf(stderr,"%s\n",error);return 1;}
- if(c->native){for(int j=0;j<4;j++){resource_u64(c->dl[j],plan.address[j]);c->cli[9+j].n=13;}}
+ if(c->native){for(int j=0;j<4;j++){resource_u64(c->dl+8*j,plan.address[j]);c->cli[9+j].n=13;}}
  return host_stage_present(route,"elf")?runroute_from(route,"elf",in,src):0;
 }
 

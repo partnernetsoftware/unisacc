@@ -38,6 +38,16 @@ if part in ('all','core','core-modes'):
                 got=ok([*base,src,*flags]);want=ok([ua,src,*flags]);assert got==want,(exe,flags)
                 n+=1
     print(f'compiler driver core-modes: {n} mode/level matches pass',flush=True)
+    # Execute generated memory code, including the self-hosted driver.
+    # The 27 stream-only checks above never enter this route.
+    memory_src=p/'memory-return7.c';memory_src.write_text('int main(void){return 7;}\n')
+    memory_count=0
+    for exe in drivers:
+        for flags in (['-run'], []):
+            r=run([exe,'--models',p/'compiler.pkg',*flags,memory_src])
+            assert r.returncode==7 and not r.stdout and not r.stderr,(exe,flags,r.returncode,r.stdout,r.stderr)
+            memory_count+=1
+    print(f'compiler driver core-modes: {memory_count} in-memory -run/default controls pass',flush=True)
 if part in ('all','core','core-contracts'):
     for exe in drivers:
         base=[exe,'--models',p/'compiler.pkg']

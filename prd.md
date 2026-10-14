@@ -1381,3 +1381,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔晚绑定驱动构建修正〕pack-driver失败根因是run.c仅native分支引入sys/stat.h与unistd.h，__UNISA__分支原有io_stamp不用stat；新别名适配缺产品头定义（并非产品头缺字段）。bind.c在__UNISA__下显式引入仓内既有sys/stat.h/unistd.h，保留inode判同；不改include/、不新增宿主依赖。新fix提交，不改写03936e9f；提交前须用同源UA实际编compiler.c，后续驱动改动同时点名含driver-ua的exec-driver-core-modes。
 
 〔晚绑定头适配第二次构建纠偏〕Windows成员构建因sys/stat.h包装器引用禁用的_ux_call/_ux_fail/_ux_ft2unix而失败。首刀仅POSIX且Windows侧IO适配是拒绝stub，因此头引入也必须限定__UNISA__且Apple/Linux。补五个APE成员目标的同源UA编译证据，不能以本机core27覆盖非本机分支；新增fix提交，不改写先前提交或失败构建戳。
+
+〔晚绑定内存运行真红，实际定位〕同源码同模型包system cc驱动return7正确，自举驱动rc139；插桩停在绑定后数组指针写回。HostCompileContext的unsigned char (*dl)[8]成员下标写入改为平坦字节指针+8*j，仓外A/B恢复rc7。此为驱动窄修，不声称修复编译器误编：另立最小C复现案与待登记探针。core-modes原27项仅E/S/b，补三驱动-run/default六项return7控制；cc同意新fix后fresh验收。
