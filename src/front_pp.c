@@ -1223,7 +1223,7 @@ int diag_at(long p, char *msg, char *kind) {
     if (p > nsrc) p = nsrc;
     /* the line and column IN THE BUFFER -- macro expansion rewrites a line
        but never adds or removes one, so the line survives it */
-    line = 1 - prelines; col = 1; q = 0;
+    line = 1; col = 1; q = 0;
     while (q < p) {
         if (src[q] == 10) { line = line + 1; col = 1; } else col = col + 1;
         q = q + 1;
@@ -1243,7 +1243,7 @@ int diag_at(long p, char *msg, char *kind) {
     if (warnonly) { warnonly = 0; if (inside >= 0) { nwarn = nwarn - 1; return 0; } }
     if (inside >= 0) { int h; long l0; h = 0; l0 = line; while (h < nisp) { if (isp_reg[h] == inside && isp_at[h] < l0) line = line + 1; h = h + 1; } }   /* the header's own joins */
     if (inside < 0) {
-        line = line - nautoinc;   /* the headers we added on the user's behalf */
+        line = line - nautoinc - prelines;   /* the headers we added on the user's behalf */
         /* each joined continuation line is a line the file has that this
            buffer does not: spl_at holds file lines in ascending order, and
            every join at or before the line in hand pushes it down by one */
@@ -1278,7 +1278,7 @@ long line_at(long p) {
     long q; long line; int i; int inside;
     if (p < 0) p = 0;
     if (p > nsrc) p = nsrc;
-    line = 1 - prelines; q = 0;
+    line = 1; q = 0;
     while (q < p) { if (src[q] == 10) line = line + 1; q = q + 1; }
     inside = 0 - 1;
     i = nireg - 1;
@@ -1289,7 +1289,7 @@ long line_at(long p) {
     }
     if (inside >= 0) { int h; long l0; h = 0; l0 = line; while (h < nisp) { if (isp_reg[h] == inside && isp_at[h] < l0) line = line + 1; h = h + 1; } }   /* the header's own joins */
     if (inside < 0) {
-        line = line - nautoinc;
+        line = line - nautoinc - prelines;
         i = 0;
         while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
     }
