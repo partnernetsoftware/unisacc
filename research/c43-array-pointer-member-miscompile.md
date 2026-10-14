@@ -1,7 +1,7 @@
 # 数组指针成员写入：经典自举误编案
 
 实际跑过；语言缺陷未修。驱动规避提交 ecdbd98d 不关闭本案。
-待审独立探针：`tests/c/array-pointer-member-store.c`，未新增套件或登记进 gatedeps。
+待审独立探针：`tests/c/candidates/array-pointer-member-store.c`，未新增套件或登记进 gatedeps；放在 candidates 子目录以免现有 tests/c/*.c 通配套件自动执行。
 
 源码完整见上述文件（SHA256 `922a4a76811394b44d61db23ea99ba97d6dcdc0da4bbeec60253ac31f866c999`）。
 要点是 `struct Slots { unsigned char (*dl)[8]; };`，以真实四行数组初始化成员，

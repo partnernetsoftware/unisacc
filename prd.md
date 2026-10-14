@@ -1384,4 +1384,6 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 〔晚绑定内存运行真红，实际定位〕同源码同模型包system cc驱动return7正确，自举驱动rc139；插桩停在绑定后数组指针写回。HostCompileContext的unsigned char (*dl)[8]成员下标写入改为平坦字节指针+8*j，仓外A/B恢复rc7。此为驱动窄修，不声称修复编译器误编：另立最小C复现案与待登记探针。core-modes原27项仅E/S/b，补三驱动-run/default六项return7控制；cc同意新fix后fresh验收。
 
-〔数组指针成员误编独立立案，实际跑过〕tests/c/array-pointer-member-store.c为待审探针，尚未登记闸。系统cc镜像rc0并输出pass；经典同源自举ua -run及其-o镜像均SIGSEGV（子进程rc−11/壳139）；模型产品fb68a994的-run/-o均在parse2具名拒绝not covered: array typedef pointer member。因此误编证据归经典参考/自举路径，不能把模型欠覆盖写成模型接受误编。仓外flat-byte A/B修复驱动运行不等于修复该语言缺陷；疑点与工具摘要见research/c43-array-pointer-member-miscompile.md。
+〔数组指针成员误编独立立案，实际跑过〕tests/c/candidates/array-pointer-member-store.c为待审探针，尚未登记闸。系统cc镜像rc0并输出pass；经典同源自举ua -run及其-o镜像均SIGSEGV（子进程rc−11/壳139）；模型产品fb68a994的-run/-o均在parse2具名拒绝not covered: array typedef pointer member。因此误编证据归经典参考/自举路径，不能把模型欠覆盖写成模型接受误编。仓外flat-byte A/B修复驱动运行不等于修复该语言缺陷；疑点与工具摘要见research/c43-array-pointer-member-miscompile.md。
+
+〔待审探针隔离〕现有opt/difftest/all会glob tests/c/*.c；因此未登记不等于不执行。数组指针误编候选移至tests/c/candidates/，保持主人要求的待审状态，不把已知缺陷自动混入整套对拍；明确注册须另审。
