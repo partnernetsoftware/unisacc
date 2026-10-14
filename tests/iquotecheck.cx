@@ -1,0 +1,81 @@
+#!/usr/bin/env -S unisacc.com -run
+/* iquotecheck.cx PRODUCT [--cc]: ordered quote-only include directories.
+   Each child has a process-group watchdog. Pending owner gate registration. */
+#include <cx.h>
+static char D[4096], P[4096];
+static int systemcc, checks;
+static int put(const char *name, const char *body) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);
+    return cx_write(path,body,strlen(body));
+}
+static int check(const char *name,const char *flags,int angle,int expect,int local,int forward) {
+    char body[4096],args[8192],cmd[16384],path[8192],*out=0,*err=0;
+    const char *file=local ? "local/probe.c" : "src/probe.c";
+    size_t n;int rc,ok;
+    snprintf(body,sizeof body,"#include %sx.h%s\n%sint main(void){%sreturn VALUE==%d%s?0:9;}\n",
+        angle ? "<" : "\"",angle ? ">" : "\"",
+        forward ? "long sysconf(int);\n" : "", "",expect,forward ? " && sysconf(29)>0" : "");
+    if (put(file,body)) return 1;
+    snprintf(args,sizeof args,systemcc ? "%s %s -o out" : "-run %s %s",flags,file);
+    snprintf(cmd,sizeof cmd,"cd '%s' && %s'%s' %s 2>err",D,
+        !systemcc && strstr(P,".com") ? "sh " : "",P,args);
+    rc=cx_run_timeout(cmd,10,&out,&n);
+    if (systemcc && expect>=0 && rc==0) {
+        free(out);out=0;snprintf(cmd,sizeof cmd,"cd '%s' && ./out 2>err",D);
+        rc=cx_run_timeout(cmd,10,&out,&n);
+    }
+    snprintf(path,sizeof path,"%s/err",D);err=cx_read(path,&n);
+    ok=expect<0 ? rc==1 && err && (strstr(err,"no such file for #include") ||
+        (strstr(err,"x.h") && strstr(err,"No such file"))) : rc==0 && out && out[0]==0;
+    printf("iquote %-24s %s\n",name,ok ? "pass" : "FAIL");
+    if(!ok)fprintf(stderr,"rc=%d stdout=%s stderr=%s\n",rc,out?out:"<missing>",err?err:"<missing>");
+    free(out);free(err);checks++;return !ok;
+}
+int main(int argc,char **argv) {
+    char own[]="/tmp/iquoteXXXXXX",cwd[4096],path[8192],cmd[16384],*out=0,*err=0;
+    size_t n;int i,rc,fail=0;
+    const char *dirs[]={"q1","q2","i1","i2","src","local",0};
+    const char *files[]={"q1/x.h","q2/x.h","i1/x.h","i2/x.h","local/x.h","src/probe.c","local/probe.c","q1/outer.h","q1/nested.h","out","err",0};
+    if(argc<2 || argc>3 || (argc==3 && strcmp(argv[2],"--cc")))return 2;
+    systemcc=argc==3;
+    if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
+    snprintf(D,sizeof D,"%s",own);
+    if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
+    if(strchr(P,39))return 2;
+    for(i=0;dirs[i];i++){snprintf(path,sizeof path,"%s/%s",D,dirs[i]);if(mkdir(path,0700))return 2;}
+    if(put("q1/x.h","#define VALUE 11\n") || put("q2/x.h","#define VALUE 12\n") ||
+       put("i1/x.h","#define VALUE 21\n") || put("i2/x.h","#define VALUE 22\n") ||
+       put("local/x.h","#define VALUE 31\n") ||
+       put("q1/outer.h","#include \"nested.h\"\n") || put("q1/nested.h","#define NESTED 7\n"))return 2;
+    if(check("I baseline","-I i1",0,21,0,0))goto red;
+    if(check("quote-only","-iquote q1",0,11,0,0))goto red;
+    if(check("angle excludes quote","-iquote q1",1,-1,0,0))goto red;
+    if(check("quote before I","-iquote q1 -I i1",0,11,0,0))goto red;
+    if(check("quote after I","-I i1 -iquote q1",0,11,0,0))goto red;
+    if(check("angle uses I","-iquote q1 -I i1",1,21,0,0))goto red;
+    if(check("including dir first","-iquote q1 -I i1",0,31,1,0))goto red;
+    if(check("quote list order","-iquote q2 -iquote q1 -I i1",0,12,0,0))goto red;
+    if(check("I list order","-iquote q1 -I i2 -I i1",1,22,0,0))goto red;
+    if(check("quote miss falls to I","-iquote src -I i1",0,21,0,0))goto red;
+    if(check("joined option","-iquoteq1",0,11,0,0))goto red;
+    if(check("forwarding","-iquote q1 -I i1",0,11,0,1))goto red;
+    if(put("src/probe.c","#include \"outer.h\"\nint main(void){return NESTED==7?0:9;}\n"))return 2;
+    snprintf(cmd,sizeof cmd,"cd '%s' && %s'%s' %s-iquote q1 src/probe.c %s2>err",D,
+        !systemcc && strstr(P,".com")?"sh ":"",P,systemcc?"":"-run ",systemcc?"-o out ":"");
+    rc=cx_run_timeout(cmd,10,&out,&n);free(out);out=0;
+    if(systemcc && rc==0){snprintf(cmd,sizeof cmd,"cd '%s' && ./out 2>err",D);rc=cx_run_timeout(cmd,10,&out,&n);free(out);out=0;}
+    printf("iquote nested quoted header     %s\n",rc==0?"pass":"FAIL");checks++;if(rc)goto red;
+    snprintf(cmd,sizeof cmd,"cd '%s' && %s'%s' -iquote 2>err",D,
+        !systemcc && strstr(P,".com")?"sh ":"",P);
+    rc=cx_run_timeout(cmd,10,&out,&n);free(out);
+    snprintf(path,sizeof path,"%s/err",D);err=cx_read(path,&n);
+    i=rc==1 && err && (strstr(err,"quote include path") || strstr(err,"-iquote"));
+    printf("iquote missing argument         %s\n",i?"pass":"FAIL");free(err);checks++;if(!i)goto red;
+    printf("iquotecheck %d checks PASS\n",checks);goto cleanup;
+red:fail=1;
+cleanup:
+    if(fail)fprintf(stderr,"scratch %s\n",D);
+    else {for(i=0;files[i];i++){snprintf(path,sizeof path,"%s/%s",D,files[i]);unlink(path);}
+        for(i=0;dirs[i];i++){snprintf(path,sizeof path,"%s/%s",D,dirs[i]);rmdir(path);}rmdir(D);}
+    return fail;
+}

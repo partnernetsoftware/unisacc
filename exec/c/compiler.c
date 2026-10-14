@@ -478,7 +478,7 @@ int main(int argc, char **argv) {
     const char **deptargets=xrealloc(0,argc*sizeof(char *)); int *depquoted=xrealloc(0,argc*sizeof(int));
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
-    Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
+    Buf defs={0}, undefs={0}, forced={0}, incdir={0}, quotedir={0}, nostd={0}, libneed={0}, notrim={0};
     if (argc>=2 && !strcmp(argv[1],"ar")) return product_ar(argc,argv);   /* R17-3 */
     if (argc>=2 && !strcmp(argv[1],"as")) return product_as(argc,argv);   /* R18-1 */
     if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) return product_view(argc,argv);   /* R18-4 */
@@ -493,7 +493,7 @@ int main(int argc, char **argv) {
         if (a[0]!='-') continue;
         if (a[1]=='o'||a[1]=='b'||a[1]=='t'||a[1]=='S'||a[1]=='c'||a[1]=='E'||a[1]=='M') modeflag=1;
         if (!strcmp(a,"-run")||!strcmp(a,"-dump-tokens")||!strcmp(a,"--tapebin")||!strcmp(a,"--version")||!strcmp(a,"-version")) modeflag=1;
-        if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")||!strcmp(a,"--emit-host-symbols")||!strcmp(a,"--host-provider")) i++;   /* skip the option's argument */
+        if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-iquote")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")||!strcmp(a,"--emit-host-symbols")||!strcmp(a,"--host-provider")) i++;   /* skip the option's argument */
       }
       if (!modeflag) { runit=1; defrun=1; } }
     for (int i = 1; i < argc; i++) {
@@ -551,6 +551,11 @@ int main(int argc, char **argv) {
         } else if (!strcmp(a,"-o")) {
             if (++i >= argc) return clierror("missing output path"); out = argv[i];
         } else if (a[0]=='-' && a[1]=='o' && a[2]) out = a+2;
+        else if (!strncmp(a,"-iquote",7)) {
+            const char *value=a+7;
+            if (!*value) { if (++i >= argc) return clierror("missing quote include path"); value=argv[i]; }
+            if (quotedir.n) bput(&quotedir,'\n',0); argbytes(&quotedir,value); quotedir.n--;
+        }
         else if (!strcmp(a,"-I")) {
             if (++i >= argc) return clierror("missing include path"); INCDIR = argv[i];
             if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--;   /* every -I, in order (R13-0b #22) */
@@ -706,6 +711,7 @@ int main(int argc, char **argv) {
     { Buf srcbuf={0}; if (src) argbytes(&srcbuf,src); }
     srcres.n=0; if (src) argbytes(&srcres,src);
     ARGRESOURCE(NRI,"\0cli/source",srcres); NRI++;
+    ARGRESOURCE(NRI,"\0cli/quote-dir",quotedir); NRI++;
     ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     static const unsigned char fwd_one=1;
@@ -910,6 +916,7 @@ int main(int argc, char **argv) {
     unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
+    free(quotedir.b); free(quotedir.at);
     free(srcres.b); free(srcres.at);
     free(werror.b); free(werror.at);
     if (rc) return rc;

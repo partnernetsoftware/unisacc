@@ -6371,6 +6371,16 @@ int fe_load(char *path, char *t) {
         optincs[q] = incdir[q];
         q = q + 1;
       } }
+    { int q; q = 0;
+      while (q < noptquote) {
+        char *d; int k2;
+        d = optquotes[q]; k2 = 0;
+        while (d[k2] && k2 < 508) { quotdir[q][k2] = d[k2]; k2 = k2 + 1; }
+        if (k2 > 0 && quotdir[q][k2 - 1] != 47) { quotdir[q][k2] = 47; k2 = k2 + 1; }
+        quotdir[q][k2] = 0; iquotdl[q] = k2;
+        optquotes[q] = quotdir[q];
+        q = q + 1;
+      } }
     toinit = 0; hasinit = 0; unevaluated = 0;
     fnresume = 0 - 1;
     /* `-` is standard input: the whole of it, in pieces */

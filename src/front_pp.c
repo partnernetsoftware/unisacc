@@ -761,6 +761,8 @@ char *optinc; int noptd; char *optd[16];
    directories failed with a location-less `no such file for #include`
    (R13-0b #22).  -D had the right shape all along; -I now matches it. */
 char *optincs[16]; int noptinc;
+char *optquotes[16]; int noptquote;
+int iquotdl[16]; char quotdir[16][512];
 /* The rest of what a Makefile passes [S-15 C1]: -U names, -include files,
    -nostdinc, and stdin as an input. */
 int noptu; char *optu[16];
@@ -1069,6 +1071,9 @@ int incdo(int ls, int le, int from) {
         dl = 0; k = 0;
         while (a[k]) { if (a[k] == 47) dl = k + 1; k = k + 1; }
         n = inctry(a, dl, nm, nl);
+    }
+    if (n < 0 && q == 34) { int qi; qi = 0;
+        while (qi < noptquote) { if (n < 0) n = inctry(optquotes[qi], iquotdl[qi], nm, nl); qi = qi + 1; }
     }
     /* every -I in the order given; the including file's own directory has
        already been tried above, and the bundled include/ comes after */
@@ -1976,6 +1981,8 @@ int qscan(char *text, int b, int e, char *from) {
                     if (j >= e || text[j] != 34) return 0 - 1;
                     if (text[nm] == 47) r = qadd("", 0, text + nm, j - nm);
                     else r = qadd(from, dl, text + nm, j - nm);
+                    q = 0;
+                    while (r == 0 && q < noptquote) { r = qadd(optquotes[q], iquotdl[q], text + nm, j - nm); q = q + 1; }
                     q = 0;
                     while (r == 0 && q < noptinc) { r = qadd(optincs[q], iincdl[q], text + nm, j - nm); q = q + 1; }
                     if (r == 0) { if (vfind(HDR_NAMES, NHDR, text + nm, j - nm) >= 0) r = 1; }   /* a carried header, as "stdio.h" falls back to */

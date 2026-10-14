@@ -308,10 +308,12 @@ def _truth(expr, macros, live=True):
     return r
 
 
-def _find_header(name, angled, here, paths):
+def _find_header(name, angled, here, paths, quote_paths=()):
     cand = []
     if not angled and here:
         cand.append(os.path.join(here, name))
+    for p in (() if angled else quote_paths):
+        cand.append(os.path.join(p, name))
     for p in paths:
         cand.append(os.path.join(p, name))
     for c in cand:
@@ -419,7 +421,7 @@ _PUSHED = {}
 
 
 def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
-               _seen=None):
+               _seen=None, quote_paths=()):
     """Returns (text, macros).
 
     Skipped lines become blank so positions hold.  `#include` splices the named
@@ -558,7 +560,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
             m2 = re.match(r'^\s*([<"])([^>"]+)[>"]', rest)
             if m2 and _depth < 32:
                 angled = m2.group(1) == "<"
-                found = _find_header(m2.group(2), angled, here, includes)
+                found = _find_header(m2.group(2), angled, here, includes, quote_paths)
                 if not found:
                     raise ValueError("%s: no such file for #include: %s"
                                      % (path or "<input>", m2.group(2)))
@@ -575,7 +577,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                     with open(found, encoding="latin-1") as f:
                         sub, macros = preprocess(f.read(), oracle, macros,
                                                  found, includes,
-                                                 _depth + 1, _seen)
+                                                 _depth + 1, _seen, quote_paths=quote_paths)
                     out.append(lead + sub)
                     # ... and whatever it defined applies from here on
                     pending[0] = True

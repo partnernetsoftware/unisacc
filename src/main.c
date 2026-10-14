@@ -80,6 +80,7 @@ int main(void) {
             if (strsame(a, "-run") || strsame(a, "-dump-tokens") || strsame(a, "--tapebin")
                 || strsame(a, "--version") || strsame(a, "-version") || strsame(a, "--check-oracle")) j = 1;
         }
+        if (strsame(a, "-iquote")) i = i + 1;
         i = i + 1;
     }
     if (j == 0) runit = 1;                 /* R11-3: library bodies on demand by default; -fno-trim-libc restores the full set */
@@ -106,6 +107,11 @@ int main(void) {
         if (a[0] == 45 && a[1]) {
             if (strsame(a, "--force-origin")) { force_origin = 1;
             } else { if (strsame(a, "--tapebin")) { emitbin = 1;
+            } else { if (a[1] == 105 && a[2] == 113 && a[3] == 117 && a[4] == 111 && a[5] == 116 && a[6] == 101) {
+                char *d; d = a + 7;
+                if (d[0] == 0) { i = i + 1; if (i >= __argc()) return emsg("unisacc: error: missing quote include path", ""); d = __argv(i); }
+                if (noptquote >= 16) return emsg("unisacc: error: too many quote include paths", "");
+                optquotes[noptquote] = d; noptquote = noptquote + 1;
             } else { if (a[1] == 73) {                              /* -I */
                 /* every -I, in order -- it used to keep only the last one */
                 if (noptinc < 16) {
@@ -180,7 +186,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { if (j == 0 && fi) return emsg("unisacc: error: unknown option (arguments for the program go after --) ", a); return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } } }
+            } else { if (j == 0 && fi) return emsg("unisacc: error: unknown option (arguments for the program go after --) ", a); return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
