@@ -1,0 +1,94 @@
+#!/usr/bin/env -S unisacc.com -run
+/* hostenvcheck.cx PRODUCT -- which host environment variables change what the product
+   produces (0.0.43 decoupling, plan step 1: host state must not reach the core stages).
+
+   A recording, not a verdict.  For each variable the product source reads with getenv, run
+   the same compilations with the variable unset and set to a few values, and report whether
+   the exit status, stdout, stderr or the written file differ from the unset baseline.
+   Programs: a plain one (-S, -o, -run) and one that calls a host libc function (-run, which
+   takes the forwarding route).
+
+   A variable that changes a result is listed as INFLUENCES; it may be legitimate (an
+   execution budget, a scratch directory) or a leak of host state into a core stage.  Which
+   is which is a design decision recorded in research/, not here.
+
+   Exit 77: the recording finished.  Exit 1: the baseline itself failed (nothing recorded).
+   Exit 2: usage or scratch trouble. */
+#include <cx.h>
+
+struct var { const char *name; const char *values[4]; };
+static const struct var VARS[] = {
+    {"UNISA_MAXSTEPS",       {"1000", "100000000", "0", 0}},
+    {"UNISA_ATTRIBUTES",     {"/nonexistent/attrs", 0}},
+    {"UNISA_CONTAINER",      {"/nonexistent/container", 0}},
+    {"UNISA_JOBS",           {"1", "0", 0}},
+    {"UNISA_FWD_UNITCACHE",  {"/nonexistent/cache", 0}},
+    {"UNISA_FWD_REPLAY",     {"1", "0", 0}},
+    {"UNISA_MEMORY_TWOPASS", {"1", "0", 0}},
+    {"TMPDIR",               {"/nonexistent/tmp", 0}},
+    {0, {0}}
+};
+static const char *RUNS[] = {
+    "-S -o %s/out %s/plain.c", "-o %s/out %s/plain.c", "-run %s/plain.c", "-run %s/fwd.c", 0
+};
+static const char *P, *D;
+
+/* run one compilation under ENV ("" for none); fingerprint = rc, stdout, stderr, output file */
+static void fingerprint(const char *env, const char *args, char hex[65]) {
+    char a[4096], cmd[16384], path[4096], *out, *err, *file; size_t on = 0, en = 0, fn = 0; int rc; char *all; size_t n;
+    snprintf(path, sizeof path, "%s/out", D); unlink(path);
+    snprintf(a, sizeof a, args, D, D);
+    snprintf(cmd, sizeof cmd, "env %s sh '%s' %s 2>'%s/err'", env, P, a, D);
+    rc = cx_run_timeout(cmd, 20, &out, &on);
+    snprintf(path, sizeof path, "%s/err", D); err = cx_read(path, &en);
+    snprintf(path, sizeof path, "%s/out", D); file = cx_read(path, &fn);
+    n = 16 + on + en + fn; all = malloc(n + 1);
+    snprintf(all, 16, "%d|", rc); n = strlen(all);
+    if (on) { memcpy(all + n, out, on); n += on; }
+    all[n++] = '|'; if (en) { memcpy(all + n, err, en); n += en; }
+    all[n++] = '|'; if (fn) { memcpy(all + n, file, fn); n += fn; }
+    cx_sha256_hex(all, n, hex);
+    free(all); free(out); free(err); free(file);
+}
+
+int main(int argc, char **argv) {
+    char own[] = "/tmp/hostenvXXXXXX", base[8][65], hex[65], env[512];
+    const struct var *v; int r, k, nruns, influences = 0;
+    if (argc != 2) { fprintf(stderr, "usage: hostenvcheck.cx PRODUCT\n"); return 2; }
+    P = argv[1];
+    if (!mkdtemp(own)) return 2;
+    D = own;
+    {
+        char p[4096];
+        snprintf(p, sizeof p, "%s/plain.c", D);
+        if (cx_write(p, "int main(void) { return 3; }\n", 29)) return 2;
+        snprintf(p, sizeof p, "%s/fwd.c", D);
+        if (cx_write(p, "long sysconf(int);\nint main(void) { return sysconf(29) > 0 ? 4 : 5; }\n", 70)) return 2;
+    }
+    for (nruns = 0; RUNS[nruns]; nruns++) {
+        /* every variable is cleared for the baseline, so the host's own setting cannot leak in */
+        char clear[1024] = ""; for (v = VARS; v->name; v++) { strcat(clear, "-u "); strcat(clear, v->name); strcat(clear, " "); }
+        fingerprint(clear, RUNS[nruns], base[nruns]);
+    }
+    for (v = VARS; v->name; v++) {
+        for (k = 0; v->values[k]; k++) {
+            int changed = 0; char which[256] = "";
+            for (r = 0; r < nruns; r++) {
+                char clear[1024] = ""; const struct var *w;
+                for (w = VARS; w->name; w++) if (w != v) { strcat(clear, "-u "); strcat(clear, w->name); strcat(clear, " "); }
+                snprintf(env, sizeof env, "%s%s=%s", clear, v->name, v->values[k]);
+                fingerprint(env, RUNS[r], hex);
+                if (strcmp(hex, base[r])) { changed = 1; strcat(which, r == 0 ? " -S" : r == 1 ? " -o" : r == 2 ? " -run" : " -run(forward)"); }
+            }
+            printf("  %-11s %s=%s%s%s\n", changed ? "INFLUENCES" : "no effect", v->name, v->values[k], changed ? " :" : "", which);
+            influences += changed;
+        }
+    }
+    {
+        char p[4096]; static const char *LEFT[] = {"plain.c", "fwd.c", "out", "err", 0}; const char **l;
+        for (l = LEFT; *l; l++) { snprintf(p, sizeof p, "%s/%s", D, *l); unlink(p); }
+        rmdir(D);
+    }
+    printf("hostenvcheck  %d variable settings change a result  RECORDED\n", influences);
+    return 77;
+}
