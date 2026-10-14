@@ -741,6 +741,8 @@ if [ "$COM" = 1 ]; then
     job com-hostenv tests/bound 58 sh "$PRODUCT" -run tests/hostenvcheck.cx -- "$PRODUCT"   # 0.0.43 plan step 1: no host environment variable changes a product result (UNISA_MAXSTEPS is a build constant in the shipped driver)
     job com-latebind tests/bound 58 sh "$PRODUCT" -run tests/latebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-1: host-symbol contract stream, binding refusal, in-memory -run of plain programs
     job lib-latebind tests/bound 58 sh "$PRODUCT" -run tests/liblatebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-2a: the library declaration contract carries no host address
+    job com-forceinclude tests/bound 58 sh "$PRODUCT" -run tests/forceincludecheck.cx -- "$PRODUCT"   # 0.0.43: __FILE__, diagnostics and nested includes inside -include headers, forwarded and not
+    job com-iquote tests/bound 58 sh "$PRODUCT" -run tests/iquotecheck.cx -- "$PRODUCT"   # 0.0.43: -iquote searched by quoted includes only, before -I
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
