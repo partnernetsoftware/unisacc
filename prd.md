@@ -1441,3 +1441,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 - 2c1第一模型笔（cc批准）：扩展既有exec-librarypartition-model，不新增登记；USLPAR1 header11=1显式数据迁移，kind1 owner4（独立位），header11=0旧数据owner2不变。审计route-mask不复用3，双归属拒绝。只读取址/读取须接受，写入由未绑定lower拒绝；本笔无消费者接线或产品行为证明。
 
 - 2c1 E3模型笔：显式library/data-contract=LE64(1)，规范selection数据owner4、普通owner1，cli/target与合同target一致；无开关保留USTFLOW1，启用则USTFLOW2三LE64长度依次main/ordinary/data，数据片段由六形.libraryaddr发射点模型标定。只读取址/读取在E3接受，写拒归未绑定lower；本笔不接provider/API，不计完整lower无地址。C/Python构造及四类数据片段参考对拍实际已跑，命名自测与干净导出读集/RSS仍在收口。
+
+- 2c1 lower模型窗口已获cc准：先独立合同取址/role0 span与只读写拒，不接provider/API；共享登记仍须另问。真实E3写链含.frame8→store64[r7],data指针→imm覆盖→load64恢复→.frame-8→.st，须跟踪寄存器与栈槽；不能只盯紧邻.libraryaddr或一律拒只读取址。USLCON保留字节11始终0，data模式只USLPAR分类输入11=1与显式lower资源。仓外27夹具现已完成实时参考/表/网/动态C对拍；Linux 4310、ARM 4712状态C/P构造逐字节同，旧13例与混合2例、真实读写、源定义优先级通过。PF/PL/AF/AI融合跳过指令曾漏来源，现metadata预消费后保留原发射字节，原误收负例具名拒绝；只计窄模型证据，非平台/API绿。丢失data来源的未知provenance可窄拒未覆盖，不能泛拒所有数字store。
+
+- cc裁定2c1只读语义变更：旧libunisaccdatacheck/resolvercheck把只读读取列为拒，这是旧库模式不支持语义；随API接线同笔改为真实宿主值读取正例，并各补具名readonly-write ID/name、不导出/不变对象的写负例。wrong-width/wrong-kind/high-depth不动。本模型笔不提前改检查；源自已审2c1合同，不称凑绿或仅覆盖修复。

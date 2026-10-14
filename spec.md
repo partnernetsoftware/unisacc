@@ -849,3 +849,6 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 
 
 **LB-6**（0.0.43 2c1，模型接口，库接线待后续）显式library/data-contract=LE64(1)使数据kind=1由USLCON1无地址合同与规范USLSEL1 owner4进入E3；cli/target须与合同一致，普通函数owner1不变，缺失/错误/重复归属具名拒绝。六形.libraryaddr保留，模型在发射点标定数据引用片段；USTFLOW2封套为magic8、main/ordinary/data三u64长度及对应三段，均小端。无新资源时保留既有USTFLOW1。只读取址/读取在E3接受，写权限拒绝归未绑定lower。数据provider地址及支持状态不得决定核心归属；本模型片段证据不计库API行为、完整lower无地址、ABI资格或重验摘钩。
+
+
+**LB-7**（0.0.43 2c1，未绑定lower模型接口，库接线待后续）显式library/data-latebind=LE64(1)连同module/latebind合同资源启用数据owner4；六形.libraryaddr按合同name解析稳定ID，源内已定义对象优先自有路径，不为其产生外部span。USLOWP2封套为magic8、full/ordinary/data三小端u64长度与三份UNILOW1；数据role=0、占位字节0及非重叠span由模型在发射点产生，无新资源保持USLOWP1。只读取址与读取接受，追踪寄存器及支持的栈槽来源后，写入具名readonly-write symbol ID name；相关来源不明或不可精确支持时具名未覆盖拒绝、stdout空。融合优化须消费被跳过指令的来源效果，合法发射字节不得因此改变。provider不参与此模型输入；本合同不证明API绑定、完整lower无地址或所有控制流覆盖。

@@ -12,7 +12,7 @@ Python cold construction and unmeasured flags/COM remain UNKNOWN.
 import argparse, hashlib, pathlib, stat, subprocess, sys, platform, shutil, re, tempfile, os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 C_SHA='b802e4f2d2d7f10ad13dd9392792e085de2dfdcd30fd2c2f0c8bbd42d9190cdb'
-REFERENCE_KEYS={'gen':'a0f1253495dbefa6','parse2':'1292f970a84806f1'}
+REFERENCE_KEYS={'gen':'07496d0240e2c51a','parse2':'1292f970a84806f1'}
 BINARY_SHA='f997b25d8f8391e12034871bd14e20523fa6cc88720cadb3bc6a71a41c591e64'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
@@ -29,9 +29,9 @@ ENV_KEYS=('CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','OBJC_INCLUDE_PATH',
  'GCC_SPECS','CFLAGS','CPPFLAGS','LDFLAGS')
 EQUIVALENT_FLAGS=('-std=c99 -O2 -w -Iseed','-std=c99 -O2 -Iseed')
 C_RSS={'e2':184,'e1':330,'e3':1268,'e4':40,'o1':14,'prune':32,
- 'nativeabi':298,'lower-lnx-x':211,'lower-lnx-a':234,'lower-osx-x':204,'lower-osx-a':230,'lower-win-x':149,
- 'lower-win-a':176,'errorparse':2134,'warnparse':2148,'warnunits':196,'warnlex':741,'tokenlex':119,
- 'tokenpp':38,'warnpp':180,'obj-lower-x':215,'obj-lower-a':238,'obj-enc-x':156,'obj-enc-a':159,
+ 'nativeabi':298,'lower-lnx-x':238,'lower-lnx-a':263,'lower-osx-x':232,'lower-osx-a':258,'lower-win-x':177,
+ 'lower-win-a':204,'errorparse':2134,'warnparse':2148,'warnunits':196,'warnlex':741,'tokenlex':119,
+ 'tokenpp':38,'warnpp':180,'obj-lower-x':242,'obj-lower-a':267,'obj-enc-x':156,'obj-enc-a':159,
  'enc-elf':142,'arm-elf':142,'enc-macho':208,'arm-macho':208,'enc-pe':263,'arm-pe':264}
 SUITES={
  'seedparse2-1':('parse2',['x','locations','warnings','errors']),
