@@ -1,40 +1,85 @@
 #!/usr/bin/env python3
-"""List gate suites whose declared inputs (tests/gatedeps.json) cover the given paths.
+"""Read-only: which gate suites a set of changed paths can affect, by the gatedeps declarations.
 
-  python3 tests/affected.py [PATH...]     default: paths changed vs HEAD (git diff + untracked)
-
-Pre-merge check: run the printed suites before committing a change, instead of
-waiting for the release queue to find it (0.0.30: a compiler.c change voided a
-signed candidate).  Suites with no declared inputs depend on everything and are
-not listed; the full queue still covers them.
+usage: affected.py (--rev A..B | --rev C | PATH...)     (0.0.43 step 6: a recording tool, not a gate)
+Declared suites: a path affects a suite if it is in its files, under its trees, a guard key, or
+(executable_inputs) inside the product closure; family suites use the family's reviewed trees.
+Undeclared gate jobs use the queue's global inputs, so they count as affected by any change.
+Reports paths that no declaration claims (the risk: a missed suite), and never edits anything.
 """
-import json, subprocess, sys
+import json, pathlib, subprocess, sys
 
-def entry_paths(e):
-    files = list(e.get('files', []))
-    trees = []
-    for k in ('trees', 'code_trees', 'all_files_trees', 'reviewed_trees'):
-        trees += e.get(k, [])
-    files += [c for c in e.get('command', []) if '/' in c and not c.startswith('-')]
-    return [f.removeprefix('./') for f in files], [t.rstrip('/') + '/' for t in trees]
+import os
+R = pathlib.Path(os.environ.get("AFFECTED_ROOT") or pathlib.Path(__file__).resolve().parents[1])   # AFFECTED_ROOT: the replays point it at the checkout
+PRODUCT = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/', 'seed/')
+PRODUCT_FILES = ('unisacc.c',)
 
-def covers(paths, e):
-    files, trees = entry_paths(e)
-    return any(p in files or any(p.startswith(t) for t in trees) for p in paths)
+def in_tree(path, tree):
+    tree = tree.rstrip('/')
+    return path == tree or path.startswith(tree + '/')
 
-def main():
-    paths = sys.argv[1:]
-    if not paths:
-        out = subprocess.run(['git', 'diff', '--name-only', 'HEAD'], capture_output=True, text=True).stdout
-        out += subprocess.run(['git', 'ls-files', '--others', '--exclude-standard'], capture_output=True, text=True).stdout
-        paths = sorted(set(out.split()))
-    d = json.load(open('tests/gatedeps.json'))
-    fam = d['families']
-    hit = [n for n, e in d['suites'].items() if covers(paths, e) or covers(paths, fam.get(e.get('family'), {}))]
-    for n in hit:
-        print(n)
-    print(f'affected {len(hit)} of {len(d["suites"])} suites for {len(paths)} paths', file=sys.stderr)
+def family_hit(fam, path):
+    trees = fam.get('reviewed_trees') or {}
+    for t in trees:
+        if not in_tree(path, t):
+            continue
+        if path in (fam.get('files') or []):
+            return True
+        suffix = pathlib.PurePosixPath(path).suffix
+        if t in (fam.get('all_files_trees') or []) or suffix in (fam.get('inventory_suffixes') or []):
+            if not any(in_tree(path, x) for x in (fam.get('excluded_dirs') or [])):
+                return True
+    return path in (fam.get('guards') or {}) or path in (fam.get('files') or [])
+
+def reasons(name, e, fams, path):
+    out = []
+    if path in (e.get('files') or []): out.append('files')
+    if any(in_tree(path, t) for t in (e.get('trees') or [])): out.append('trees')
+    if path in (e.get('guards') or {}): out.append('guard')
+    if e.get('executable_inputs') and (path.startswith(PRODUCT) or path in PRODUCT_FILES): out.append('product')
+    fam = fams.get(e.get('family')) if e.get('family') else None
+    if fam and family_hit(fam, path): out.append('family')
+    return out
+
+def changed(args):
+    if args and args[0] == '--rev':
+        spec = args[1]
+        if '..' in spec:
+            a, b = spec.split('..', 1)
+        else:
+            a, b = spec + '^', spec
+        return subprocess.run(['git', 'diff', '--name-only', a, b], cwd=R, capture_output=True, text=True, check=True).stdout.split()
+    return args
+
+def main(argv):
+    paths = changed(argv)
+    d = json.loads((R / 'tests/gatedeps.json').read_text())
+    suites, fams = d['suites'], d['families']
+    jobs = subprocess.run([str(R / 'tests/gate.sh'), '--list', '--com'], cwd=R, capture_output=True, text=True).stdout.split()
+    undeclared = [j for j in jobs if j not in suites]
+    affected, unclaimed = {}, []
+    for p in paths:
+        claimed = False
+        for n, e in suites.items():
+            why = reasons(n, e, fams, p)
+            if why:
+                claimed = True
+                affected.setdefault(n, set()).update(why)
+        if not claimed and not p.startswith(('.git/',)):
+            unclaimed.append(p)
+    # the queue's global inputs: every tracked or untracked file under these, for undeclared jobs
+    GLOBAL = ('src', 'exec', 'tests', 'include', 'kernel', 'weights', 'unisa', 'examples', 'iterate', 'release', 'scripts', 'unisacc.c', 'README.md', 'ARCHITECTURE.md', 'AGENTS.md', 'Makefile')
+    global_hit = any(p.split('/')[0] in GLOBAL or p in GLOBAL for p in paths)
+    job_set = set(jobs)
+    declared_jobs = {n for n in affected if n in job_set}
+    undeclared_hit = set(undeclared) if (global_hit and paths) else set()
+    print('changed paths: %d' % len(paths))
+    print('gate jobs affected: %d of %d  (declared %d, undeclared %d)' % (
+        len(declared_jobs | undeclared_hit), len(jobs), len(declared_jobs), len(undeclared_hit)))
+    print('declared-only suites not in gate list (affected, informational): %d' % len({n for n in affected if n not in job_set}))
+    print('paths no declaration claims: %d' % len(unclaimed))
+    for p in unclaimed[:40]: print('  UNCLAIMED', p)
     return 0
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
