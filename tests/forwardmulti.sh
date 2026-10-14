@@ -18,5 +18,9 @@ check() { if [ "$2" -eq 0 ]; then ok=$((ok+1)); echo "  ok   $1"; else bad=$((ba
 if (cd "$T" && "$_BOUND" 30 "$UA_RUN" -o m.out m1.c m2.c) 2>"$T/err"; then
     chmod +x "$T/m.out"; "$_BOUND" 10 "$T/m.out" 2>"$T/err"; check "two units, -o image" $?
 else check "two units, -o compile" 1; fi
+# The product-only path regression uses the product as a dynamic-C observer.
+if [ -n "${MODEL_COM:-}" ] && [ "$UA_RUN" = "$MODEL_COM" ]; then
+    "$_BOUND" 40 "$UA_RUN" -run "$R/tests/forwardpaths.cx" -- "$UA_RUN" 2>"$T/err"; check "relative paths, incremental and replay" $?
+fi
 echo; echo "forwardmulti  ok $ok   wrong $bad"
 [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]

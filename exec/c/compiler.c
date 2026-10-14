@@ -242,6 +242,7 @@ static void ucache_replay(int k) {                /* append unit k's attribute r
     if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
 }
 static char fwd_path[600];
+#include "fwdpaths.h"
 static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1: stubs written; -1: error */
     size_t at=0,n=(size_t)in->n; const unsigned char *b=in->b; uint64_t tl=0,cnt=0;
     if (n<7 || memcmp(b,"USLFW1\n",7)) { fputs("unisacc: error: forwarding side-car missing\n",stderr); return -1; }
@@ -813,7 +814,7 @@ int main(int argc, char **argv) {
             } else {
                 long before = ATTRS.n ? ATTRS.n : 4;
                 unit.b=source_read(sources[j],&unit.n);
-                rc=runroute(unitroute,&unit,sources[j]);
+                rc=fwd_second&&!strcmp(sources[j],fwd_path) ? fwd_front(unitroute,0,&unit,sources[j]) : runroute(unitroute,&unit,sources[j]);
                 if (rc) { free(unit.b); break; }
                 if (cacheon && fwdwant && nucache < 256) {
                     int k=nucache++; ucache[k].path=sources[j];

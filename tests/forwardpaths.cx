@@ -1,0 +1,30 @@
+#include <cx.h>
+/* Product regression. Paths are inputs to the host IO adapter, not C syntax. */
+static int put(const char*d,const char*n,const char*s){char p[4096];snprintf(p,sizeof p,"%s/%s",d,n);return cx_write(p,s,strlen(s));}
+int main(int argc,char**argv){
+ if(argc!=2)return 2;char d[]="/tmp/forwardpathsXXXXXX",path[4096],cmd[16384];if(!mkdtemp(d))return 2;
+ snprintf(path,sizeof path,"%s/sub",d);mkdir(path,0700);snprintf(path,sizeof path,"%s/nested",d);mkdir(path,0700);snprintf(path,sizeof path,"%s/out",d);mkdir(path,0700);
+ if(put(d,"sub/extra.h","#define EXTRA 7\n")||put(d,"sub/search.h","#define EXTRA 7\n")||put(d,"nested/local.h","#define EXTRA 7\n"))return 2;
+ const char*names[]={"forced","search","quote"};int count=0;
+ for(int k=0;k<3;k++){
+  const char*head=k==0?"":k==1?"#include <search.h>\n":"#include \"local.h\"\n";
+  for(int f=0;f<2;f++){
+   char name[80],src[2048];snprintf(name,sizeof name,"%s%s%d.c",k==2?"nested/":"",names[k],f);
+   snprintf(src,sizeof src,"%s#include <stdio.h>\nlong sysconf(int);int main(void){printf(\"paths:%%d\\n\",EXTRA);return %sEXTRA==7?0:3;}\n",head,f?"sysconf(29)>0&&":"");if(put(d,name,src))return 2;
+  }
+  char flags[4096];snprintf(flags,sizeof flags,k==0?"-include '%s/sub/extra.h'":k==1?"-I '%s/sub'":"",d);
+  snprintf(cmd,sizeof cmd,"cd '%s' && '%s' -run %s '%s%s0.c'",d,argv[1],flags,k==2?"nested/":"",names[k]);size_t wantn;char*want;int rc=cx_run_timeout(cmd,8,&want,&wantn);
+  if(rc||!want||wantn!=8||memcmp(want,"paths:7\n",8)){printf("forwardpaths FAIL nonforward absolute control %s rc%d\n",names[k],rc);return 1;}
+  snprintf(flags,sizeof flags,"%s",k==0?"-include sub/extra.h":k==1?"-I sub":"");
+  for(int f=0;f<2;f++)for(int replay=0;replay<2;replay++){
+   snprintf(cmd,sizeof cmd,"cd '%s' && env %s '%s' -run %s '%s%s%d.c'",d,replay?"UNISA_FWD_REPLAY=1":"-u UNISA_FWD_REPLAY",argv[1],flags,k==2?"nested/":"",names[k],f);
+   char*got;size_t n;rc=cx_run_timeout(cmd,8,&got,&n);int ok=!rc&&got&&n==wantn&&!memcmp(got,want,n);free(got);
+   if(!ok){printf("forwardpaths FAIL %s forwarded=%d replay=%d rc%d\n",names[k],f,replay,rc);return 1;}count++;
+  }free(want);
+ }
+ snprintf(cmd,sizeof cmd,"cd '%s' && '%s' -o out/image -MMD -MF out/deps.d -include sub/extra.h forced1.c",d,argv[1]);if(cx_run_timeout(cmd,8,0,0)){printf("forwardpaths FAIL relative output compile\n");return 1;}
+ snprintf(path,sizeof path,"%s/out/deps.d",d);size_t n;char*dep=cx_read(path,&n);if(!dep||!n){printf("forwardpaths FAIL relative MF missing\n");return 1;}free(dep);
+ snprintf(cmd,sizeof cmd,"cd '%s' && ./out/image",d);char*out;int rc=cx_run_timeout(cmd,8,&out,&n);if(rc||!out||n!=8||memcmp(out,"paths:7\n",8)){printf("forwardpaths FAIL output image rc%d\n",rc);return 1;}free(out);
+ printf("forwardpaths %d relative/absolute nonforward comparisons, incremental/replay; cwd -o/-MF passed\n",count);
+ snprintf(cmd,sizeof cmd,"rm -rf '%s'",d);cx_run_timeout(cmd,5,0,0);return 0;
+}

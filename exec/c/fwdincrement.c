@@ -28,7 +28,7 @@ static int fwd_incremental(const char *target,int level,const Buf *base,int unit
     Buf oldattrs=ATTRS; int oldunit=ATTR_UNIT;
     ATTRS.b=0; ATTRS.n=0; ATTRS.cap=0; ATTR_UNIT=0;
     if (ATTR_SLOT>=0) { RI[ATTR_SLOT].data=0; RI[ATTR_SLOT].len=0; }
-    int rc=runroute_range(route,NULL,"e1",&unit_tape,fwd_path);
+    int rc=fwd_front(route,"e1",&unit_tape,fwd_path);
     static const unsigned char funit_one=1;
     if (!rc && NRI<255) {
         RI[NRI].name=(const unsigned char *)"\0cli/funit";

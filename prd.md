@@ -1393,3 +1393,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔第二刀拆分代裁：先2a〕cc认可方向但要求窄切：2a仅声明→USLCON1模型/参考及非稳定只读快照，所有旧消费者保留；2b仅普通函数路径，数据/typed/variadic/callback/运行桥另案。2a getter使用显式target，可编译前查询，缺新模型仅查询失败，不改变旧编译/执行行为；地址不进入新合同，旧USBIND仍未迁移，不宣称已拆库输入。
 
 〔2a本机收口，实际跑过〕新声明模型C/Python构造同，153状态/6099字节；动态C自测438例71收367拒，拒空stdout/具名；仓外fresh d21861a0…黑盒八条均rc0。七指定lib回归+seedpack（1478路由对拍）均rc0，五非本机APE driver目标经同源UA编译rc0（仅编译不冒称外平台执行）。旧USBIND/E3/lower仍保持原消费者；新contractgetter仅观测声明，不证明地址已迁移或ABI签名已核。core缓存预热三片应分别限时，曾误用外层循环超60秒已停；剩余单片原限时收口，不将中断计验收。登记独立笔等模型/产品笔之后。
+
+〔转发相对forced-include窄修，实际复现〕d21861a0候选从调用cwd执行相对-include失败，绝对路径通过；相对-I与原源目录引号include均通过；-iquote具名未迁移，非路径错位。本刀仅合成转发单元临时把cli/includes按调用cwd绝对化，原源单元/非转发资源保留；增量与完整replay均须覆盖。输出-o/-MF不改变cwd，另用实测确认；不扩大-I或-iquote支持。
+
+〔转发路径修复收口，实际跑过〕新鲜候选0556ea9f…在/tmp/c43-forward-paths/final；com-forward-multi rc0/8s，含12组相对/绝对非转发输出对拍和incremental/full-replay，relative-o/-MF实物均在调用目录。五非本机APE driver目标自举编译rc0（仅编译）；绝对-include在cwd已删除时与旧产品rc/stdout/stderr一致（保留sh启动warning）。只对合成单元的相对forced资源加cwd前缀并恢复，绝对项不额外查询cwd；-I/原源引号include未改，-iquote仍具名未迁移。
