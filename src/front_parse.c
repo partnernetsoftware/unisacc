@@ -4214,6 +4214,7 @@ int stbody(int si) {
                 t = fpdecl(); declptr = 1; mst = 0 - 1;
                 mfn = fpdim == 0 && fpadim == 0;
                 if (fpdim > 0) n = fpdim;
+                if (fpadim > 0) mdim2 = fpadim;   /* `T (*m)[k]`: m[i] strides a row of k elements */
             } }
             flex = 0;
             if (t < 0) { if (cur() != tidx(":", 1)) t = adv(); }   /* `unsigned : 2;` names nothing */
