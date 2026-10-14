@@ -7,7 +7,10 @@
    Black box: it runs PRODUCT and looks at exit status, stdout, stderr and files.
 
    Interfaces under test (diagnostic, not a stable promise):
-     --emit-host-symbols FILE   with -S: write the contract stream.  "UNISYM1\n", target:u8,
+     --emit-host-symbols FILE   with -o (a C source that calls host functions is refused under
+                                -S today, so the stream is taken on the forwarding route, from
+                                the tape after it passed the lowering contract and before
+                                binding): write the contract stream.  "UNISYM1\n", target:u8,
                                 mode:u8, count:u8, indirect_hostcall:u8, then count records of
                                 8 bytes: id:LE32 (slot+1), slot:u8, kind:u8, abi:u8, reserved:u8.
      --host-provider FILE       12 bytes: "UHPROV1\n", target:u8, mask:u8 (low 4 bits = slots
@@ -20,8 +23,11 @@
      2 stream     two emissions are byte-identical; the stream holds no address (every record
                   is well formed, abi = 0, reserved = 0, slots ascending, no trailing bytes).
      3 no-op      mask 15 gives the same image as no provider file at all.
-     4 contract   under mask 11 (slot 2 removed) the tape and the contract stream are the same
-                  bytes as under mask 15: the lowering model does not see the provider.
+     4 contract   under mask 11 (slot 2 removed) -o is refused at binding, yet the contract
+                  stream is still written and is the same bytes as under mask 15: the lowering
+                  side accepted the program and does not see the provider.  (That the lowering
+                  output itself is unchanged is not visible from outside; the model self-test
+                  owns that.)
      5 refusal    under mask 11, -o and -run exit 1 with nothing on stdout, a diagnostic that
                   says "bind", "missing-provider" and "slot 2", an existing output file byte for
                   byte unchanged, and the program not executed (it would have created a file).
@@ -78,7 +84,7 @@ int main(int argc, char **argv) {
     char own[] = "/tmp/latebindXXXXXX", *args3[3], src[8192], *out, *err; size_t on, en; int rc, target, mask;
     if (argc != 2 && argc != 3) { fprintf(stderr, "usage: latebindcheck.cx PRODUCT [SCRATCH]\n"); return 2; }
     if (argc == 2) {
-        static const char *LEFT[] = {"ctl.c", "ctl.tape", "ctl2.tape", "m11.tape", "sym", "sym2", "sym11", "p15", "p11", "pbad", "img", "img15", "out.bin", "ran", "neg.tape", "err", 0}; const char **l;
+        static const char *LEFT[] = {"ctl.c", "sym", "sym2", "sym11", "p15", "p11", "pbad", "img", "img15", "out.bin", "ran", "neg.tape", "err", 0}; const char **l;
         if (!mkdtemp(own)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
         args3[0] = argv[0]; args3[1] = argv[1]; args3[2] = own; rc = main(3, args3);
         D = own; for (l = LEFT; *l; l++) drop(*l);
@@ -94,9 +100,10 @@ int main(int argc, char **argv) {
     snprintf(src, sizeof src, "int creat(const char *, int);\nlong sysconf(int);\nint main(void) { creat(\"%s/ran\", 0644); return sysconf(29) > 0 ? 0 : 3; }\n", D);
     if (put("ctl.c", src, strlen(src)) || provider("p15", target, 15) || provider("p11", target, 11)) { fprintf(stderr, "cannot write into %s\n", D); return 2; }
     drop("sym"); drop("ran");
-    rc = run("-S -o '%s/ctl.tape' --emit-host-symbols '%s/sym' '%s/ctl.c'", 0, 0);
+    drop("img");
+    rc = run("-o '%s/img' --emit-host-symbols '%s/sym' '%s/ctl.c'", 0, 0);
     mask = rc == 0 ? stream_slots("sym", target) : -1;
-    if (rc != 0) { printf("  FAIL control: -S with --emit-host-symbols exits %d\n", rc); return 1; }
+    if (rc != 0) { printf("  FAIL control: -o with --emit-host-symbols exits %d\n", rc); return 1; }
     if (mask < 0) { printf("  FAIL control: the contract stream is missing or malformed\n"); return 1; }
     if (!(mask & 4)) { printf("  FAIL control: the contract stream does not name slot 2 (mask %d); nothing would be checked\n", mask); return 1; }
     drop("ran"); rc = run("-run '%s/ctl.c'", &out, &on); free(out);
@@ -104,22 +111,26 @@ int main(int argc, char **argv) {
     printf("  ok   control: contract stream names slot 2 (mask %d); the program runs\n", mask);
 
     /* 2 stream */
-    rc = run("-S -o '%s/ctl2.tape' --emit-host-symbols '%s/sym2' '%s/ctl.c'", 0, 0);
-    if (rc != 0 || !same("sym", "sym2") || !same("ctl.tape", "ctl2.tape")) fail("stream: two emissions differ"); else ok("stream: two emissions are byte-identical and well formed");
+    drop("sym2"); drop("img15");
+    rc = run("-o '%s/img15' --emit-host-symbols '%s/sym2' '%s/ctl.c'", 0, 0);
+    if (rc != 0 || !same("sym", "sym2") || !same("img", "img15")) fail("stream: two emissions differ"); else ok("stream: two emissions are byte-identical and well formed");
 
     /* 3 no-op */
     drop("img"); drop("img15");
     rc = run("-o '%s/img' '%s/ctl.c'", 0, 0);
     if (rc != 0) fail("no-op: -o without a provider file fails");
+    else if (!same("img", "img15")) fail("no-op: --emit-host-symbols changes the image");
     else { rc = run("-o '%s/img15' --host-provider '%s/p15' '%s/ctl.c'", 0, 0);
            if (rc != 0 || !same("img", "img15")) fail("no-op: mask 15 does not give the image built without a provider file"); else ok("no-op: mask 15 is the same image as no provider file"); }
 
     /* 4 contract */
     drop("sym11");
-    rc = run("-S -o '%s/m11.tape' --emit-host-symbols '%s/sym11' --host-provider '%s/p11' '%s/ctl.c'", 0, 0);
-    if (rc != 0) fail("contract: -S is refused under mask 11 (the lowering side must not see the provider)");
-    else if (!same("sym", "sym11") || !same("ctl.tape", "m11.tape")) fail("contract: tape or contract stream changes with the provider");
-    else ok("contract: tape and contract stream do not depend on the provider");
+    put("out.bin", SENTINEL, strlen(SENTINEL));
+    rc = run("-o '%s/out.bin' --emit-host-symbols '%s/sym11' --host-provider '%s/p11' '%s/ctl.c'", 0, 0);
+    if (rc != 1) fail("contract: -o under mask 11 is not refused");
+    else if (!present("sym11")) fail("contract: no contract stream is left when binding refuses (the lowering side must have accepted)");
+    else if (!same("sym", "sym11")) fail("contract: the contract stream changes with the provider");
+    else ok("contract: the contract stream is written before binding and does not depend on the provider");
 
     /* 5 refusal */
     {
