@@ -41,6 +41,25 @@ def reasons(name, e, fams, path):
     if fam and family_hit(fam, path): out.append('family')
     return out
 
+# 0.0.43 step 6, second cut (hypothetical): the pp family reads the pp networks it constructs from
+# tables (read-set by strace: exec/pp/*.tsv, exec/facts/pp-*.tsv, the builder, the executor and
+# unisa/front/pp.py), not the candidate's bytes.  --model-identity pp drops the candidate ('product')
+# reason for these suites only when the candidate's pp route hashes are equal.
+PP_SUITES = ('exec-pp-directives', 'exec-pp-literals', 'exec-pp-pragmas', 'exec-pp-object', 'exec-pploc', 'pptruth')
+PP_DEPS = ('exec/pp/', 'exec/facts/pp-', 'exec/facts/locations.tsv', 'exec/build/gen.py', 'exec/build/graph.py',
+           'exec/c/tbl.py', 'exec/c/net.py', 'exec/c/core.c', 'exec/c/core.h', 'exec/c/codec.h', 'exec/c/packagefooter.h',
+           'exec/c/run.c', 'exec/c/refsource.py', 'unisa/front/pp.py')
+PP_ROUTES = ('e2', 'e1', 'units')
+
+def pp_identity_equal(prev_dir, cur_dir):
+    """True when the pp-stage network hashes (e2, e1, units, e3, e4) of two candidates are equal, read from
+    the routes.tsv and models.tsv that tests/modelstreamextract.cx writes."""
+    def stage_hashes(d):
+        routes = [l.split('\t') for l in (pathlib.Path(d) / 'routes.tsv').read_text().splitlines() if l]
+        models = {int(l.split('\t')[0]): l.split('\t')[2] for l in (pathlib.Path(d) / 'models.tsv').read_text().splitlines() if l}
+        return {(r[1], models[int(r[4])]) for r in routes if r[1] in PP_ROUTES + ('e3', 'e4')}
+    return stage_hashes(prev_dir) == stage_hashes(cur_dir)
+
 def changed(args):
     if args and args[0] == '--rev':
         spec = args[1]
@@ -52,6 +71,12 @@ def changed(args):
     return args
 
 def main(argv):
+    identity = None
+    if '--model-identity' in argv:
+        i = argv.index('--model-identity'); mode = argv[i + 1]
+        prev, cur = argv[argv.index('--identity-prev') + 1], argv[argv.index('--identity-cur') + 1]
+        argv = argv[:i] + argv[i + 2:]
+        identity = (mode, pp_identity_equal(prev, cur))
     paths = changed(argv)
     d = json.loads((R / 'tests/gatedeps.json').read_text())
     suites, fams = d['suites'], d['families']
@@ -62,6 +87,11 @@ def main(argv):
         claimed = False
         for n, e in suites.items():
             why = reasons(n, e, fams, p)
+            if identity and identity[0] == 'pp' and n in PP_SUITES:
+                # the pp family's read-set is its construction inputs and its own script: the candidate reason
+                # and the declared whole trees are replaced by that read-set (measured with strace, see PP_DEPS)
+                script = [a.lstrip('./') for a in (e.get('command') or []) if a.endswith(('.py', '.sh'))]
+                why = ['pp-deps'] if (p.startswith(PP_DEPS) or p in script) else []
             if why:
                 claimed = True
                 affected.setdefault(n, set()).update(why)
@@ -74,6 +104,7 @@ def main(argv):
     declared_jobs = {n for n in affected if n in job_set}
     undeclared_hit = set(undeclared) if (global_hit and paths) else set()
     print('changed paths: %d' % len(paths))
+    if identity: print('model identity pp: pp-stage hashes %s' % ('EQUAL (candidate reason dropped for pp suites)' if identity[1] else 'DIFFER (candidate reason kept)'))
     print('gate jobs affected: %d of %d  (declared %d, undeclared %d)' % (
         len(declared_jobs | undeclared_hit), len(jobs), len(declared_jobs), len(undeclared_hit)))
     print('declared-only suites not in gate list (affected, informational): %d' % len({n for n in affected if n not in job_set}))
