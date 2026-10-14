@@ -831,3 +831,7 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 **L-4** Windows `.hostcall`/`.hostaddr` 是有意的库模式合同。模式、目标与调用能力须为显式输入；参考与模型必须对同一合同一致，不能以普通模式参考拒绝对库模式模型接受作虚假对拍。非法索引及不支持的模式/能力须保留具名拒绝。Windows 接受在显式合同与参考一致性证据未齐前不得记产品绿；模型接受正例本身不证明原生执行或完整 ABI 资格。
 
 上述是归属与验收义务裁定，不表示实现已完成；不授签名、Latest或公开，不改历史候选/闸结果。
+
+**LB-1**（0.0.43 loader 首切片）lower 的 loader 槽位需求为确定性旁生字节流 UNISYM1；主lower输出不改变。合同含显式target/program模式、按slot排序去重的ID=slot+1、legacy/untyped标志与间接hostcall存在标志；不得含宿主地址、路径或时间，不得把寄存器hostcall改解释为slot引用。零/未声明签名不证明ABI。provider地址与能力只在lower之后的装配绑定阶段输入；先完整校验再编码、写出或执行。缺provider具名rc1、空stdout、已有输出不变。library/bindings/codeprivate嵌地址尚未迁移，Win L-4另案。
+
+**LB-2** `--emit-host-symbols FILE` 与 `--host-provider FILE` 是非稳定诊断/测试接口。前者支持Tape输出及-o诊断，首刀不与-run同用；lower/索引/provider语法/侧流IO失败不得创建或改写目标，lower接受后绑定失败可保留侧流收据但不得输出镜像；与主输出同路径须拒绝；后者严格读取12字节UHPROV1（目标、低四位能力mask、零保留位），仅削减默认provider，不能注入地址。畸形、缺文件、错目标/保留位必须具名拒绝，区别于missing-provider；mask15等价默认，mask变化不得改变合同侧流或-S输出。缺侧流模型的需绑定路径必须拒绝，不能猜无需求。

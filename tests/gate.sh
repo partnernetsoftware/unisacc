@@ -333,6 +333,7 @@ job pp-leaf-capture-selftest tests/bound 58 sh ./unisacc.com -run tests/ppleafca
 job middle-flow-e3 tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-e3 tests/seals/middleflow-step0
 job middle-flow-lower-accept tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-lower tests/seals/middleflow-step0
 for k in 1 2 3; do job tapecheck-model-$k ./exec/tapecheck/check.sh $k; done
+job exec-hostsymbols-model ./exec/lower/hostsymbolscheck.sh
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults

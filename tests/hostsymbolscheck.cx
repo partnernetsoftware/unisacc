@@ -1,0 +1,28 @@
+#include <cx.h>
+/* LB-1 model selftest. Old product is only the dynamic-C observation runner.
+   Lower replay is a narrow frozen-model witness, not new product freshness. */
+static int same(const char*a,const char*b){size_t x,y;char*p=cx_read(a,&x),*q=cx_read(b,&y);int ok=p&&q&&x==y&&!memcmp(p,q,x);free(p);free(q);return ok;}
+static int bad(const char*s){fprintf(stderr,"hostsymbolscheck FAIL: %s\n",s);return 1;}
+int main(int argc,char**argv){
+ if(argc!=2)return 2;char listpath[4096],in[4096],mo[4096],me[4096],ro[4096],re[4096],cmd[16384];size_t n;int yes=0,no=0;
+ snprintf(listpath,sizeof listpath,"tests/hostsymbols-cases.tsv");char*list=cx_read(listpath,&n);if(!list)return 2;
+ snprintf(in,sizeof in,"%s/input",argv[1]);snprintf(mo,sizeof mo,"%s/model.out",argv[1]);snprintf(me,sizeof me,"%s/model.err",argv[1]);snprintf(ro,sizeof ro,"%s/reference.out",argv[1]);snprintf(re,sizeof re,"%s/reference.err",argv[1]);
+ for(char*p=list;*p;){char*e=strchr(p,'\n');if(!e)return 2;*e=0;if(*p!='#'){
+ char*hex=strchr(p,'\t');if(!hex)return 2;*hex++=0;char*rcs=strchr(hex,'\t');if(!rcs)return 2;*rcs++=0;int want=atoi(rcs);size_t hn=strlen(hex);if(hn%2)return 2;unsigned char*b=malloc(hn/2+1);for(size_t k=0;k<hn;k+=2){unsigned v;if(sscanf(hex+k,"%2x",&v)!=1)return 2;b[k/2]=v;}if(cx_write(in,b,hn/2))return 2;free(b);
+ snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.hostsymbols import produce;sys.stdout.buffer.write(produce(open(sys.argv[1],\"rb\").read()))' '%s' >'%s' 2>'%s'",in,ro,re);int r=cx_run_timeout(cmd,3,0,0);
+ snprintf(cmd,sizeof cmd,"'%s/run' '%s/hostsymbols.net' '%s' >'%s' 2>'%s'",argv[1],argv[1],in,mo,me);int m=cx_run_timeout(cmd,3,0,0);
+ if(r!=want||m!=want){printf("CONTRACT_RED %s model=%d reference=%d expected=%d\n",p,m,r,want);return 1;}
+ if(!want){if(!same(mo,ro))return bad("reference/model bytes differ");yes++;}
+ else {char*x=cx_read(mo,&n);if(!x||n)return bad("refusal emitted output");free(x);x=cx_read(me,&n);if(!x||!strstr(x,"lower symbols:")||strstr(x,"unreachable"))return bad("refusal diagnostic");free(x);no++;}
+ }p=e+1;}free(list);
+ /* Actual provider address bytes differ; package inputs to frozen lower differ.
+    Main lower output must remain identical, and side contract likewise. */
+ const char tape[]="_start:\n.hostaddr r0, 2\n.hostcall r1, r0\nret\n";if(cx_write(in,tape,sizeof tape-1))return 2;
+ char a[4096],bpath[4096];snprintf(a,sizeof a,"%s/lower-a.out",argv[1]);snprintf(bpath,sizeof bpath,"%s/lower-b.out",argv[1]);
+ for(int j=0;j<2;j++){snprintf(cmd,sizeof cmd,"'%s/run' --bundle '%s/lower-%c.pkg' test '%s' >'%s' 2>'%s'",argv[1],argv[1],j?'b':'a',in,j?bpath:a,me);if(cx_run_timeout(cmd,5,0,0))return bad("frozen lower control execution");}
+ if(!same(a,bpath))return bad("provider addresses contaminated main lower output");
+ unsigned char frame[sizeof tape+10];memcpy(frame,"USLSYM1\n",8);frame[8]=1;frame[9]=0;memcpy(frame+10,tape,sizeof tape-1);if(cx_write(in,frame,sizeof tape+9))return 2;
+ for(int j=0;j<2;j++){snprintf(cmd,sizeof cmd,"'%s/run' --bundle '%s/symbols-%c.pkg' test '%s' >'%s' 2>'%s'",argv[1],argv[1],j?'b':'a',in,j?bpath:a,me);if(cx_run_timeout(cmd,5,0,0))return bad("symbols provider replay");}
+ if(!same(a,bpath))return bad("provider addresses contaminated symbol contract");
+ if(!yes||!no)return bad("empty coverage");printf("hostsymbols-model: accept=%d refuse=%d reference/network byte matches; provider-A/B lower and contract unchanged (frozen lower witness only)\n",yes,no);return 0;
+}

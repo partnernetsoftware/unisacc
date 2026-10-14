@@ -93,6 +93,17 @@ def main():
         if d['suites'].get(name) != entry:
             d['suites'][name] = entry
             changed.append((name, 'declared'))
+    # LB-1: isolated finite lower side-stream; reference is an oracle only.
+    d['suites']['exec-hostsymbols-model'] = {
+        'command': ['./exec/lower/hostsymbolscheck.sh'],
+        'files': ['exec/lower/hostsymbolscheck.sh', 'tests/hostsymbolscheck.cx',
+                  'tests/hostsymbols-cases.tsv', 'tests/seals/middleflow-step0/manifest.tsv',
+                  'tests/seals/middleflow-step0/lower/model.net', 'tests/bound',
+                  'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'],
+        'trees': ['exec/lower', 'exec/build', 'exec/facts', 'exec/c',
+                  'exec/pp', 'seed', 'include', 'unisa'],
+        'executable_inputs': True,
+        'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

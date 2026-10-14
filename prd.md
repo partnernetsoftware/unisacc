@@ -1363,3 +1363,9 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔机房主任代裁·0.0.43 拒绝域，2026-10-14〕采用A：前置Tape验域拥有语法/形状/记录拒绝，lower只接已验字节流，目标能力拒绝仍留lower；raw .tape是产品承诺，?\n经-S/-c成功原样写出属于缺陷，须在输出前拒绝rc1并点名原因；Windows .hostcall/.hostaddr是有意库模式合同，须显式模式输入与同合同参考对拍，未齐前不能记产品绿。授权按0.0.43落实，产品封存身份须重新建立；0.0.42既有Draft/rc/candidate不回填、不改旧7000或env-pin；禁签/Latest/公开。不以手写宿主语法判断替代核心字节流＋模型的验域阶段。
 
 〔0.0.43 Tape验域接线与TP-9收口，2026-10-14；实际跑过〕仓外候选92236ce3：动态C黑盒78格rc0，模型三片rc0（445例：441判定匹配、4条下划线整数写法已登记欠覆盖，不计产品接受）。cc独立复核driver核心模式原命令暖缓存24秒rc0、27项不缩减，以及新旧产品50源Tape/Tapebin/两入口镜像与退出码差分全同。本宿主com-tapebin三片是既有裁定基线超时，不作新产品证据，真机证据留CI。冷compilerpack约47秒导致整窗超时；既有内容缓存暖后通过，准备/执行拆分只另列设计。未seal、未开整闸、未修改发布面；Win库合同仍待证。
+
+〔晚绑定第0步，设计待cc复核〕首切口采用lower旁生的确定性loader槽位需求流，主输出/布局不变；hostcall是寄存器间接调用不冒充槽号。宿主provider仅在lower之后、编码/写出/执行之前绑定；首刀legacy/untyped不声称ABI已核，missing-provider作为首负例。库模式library/bindings及codeprivate地址立即数保留为未迁移债，Windows不关闭L-4。确切接口见research/c43-late-binding-step0.md；cc回信前不动产品。
+
+〔晚绑定第0步复核通过，2026-10-14〕cc同意动产品，先侧流模型/参考字节对拍/base自测，再bind适配器/诊断开关，最后仓外fresh。开关是非稳定诊断接口；provider文件仅削减能力；侧流输出失败不创建/改写文件；缺模型的绑定路径拒绝；slot4/−1由lower合同拒绝；不迁移library/bindings、不关闭Win L-4。每步小提交、信封报实际结果，不推送。
+
+〔晚绑定①模型自测，实际跑过〕base gate exec-hostsymbols-model rc0；85例74接受/11拒绝、C/Python构造逐字节同、15740观察网络/表同。provider地址变化下合同与冻结lower主输出同是窄见证，未接产品。黑盒首负例经cc改为真实转发需要的slot1，mask13；第0步页已同步(a)。
