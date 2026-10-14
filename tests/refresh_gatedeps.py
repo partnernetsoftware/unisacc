@@ -78,6 +78,21 @@ def main():
         e = json.loads(json.dumps(tmpl)); e['command'] = ['python3', './tests/seedconstructcheck.py', '--part', q]
         if name != 'seed-construct-parse2' and d['suites'].get(name) != e:
             d['suites'][name] = e; changed.append((name, 'declared'))
+    # C43: isolated finite Tape-domain model; dynamic C checks existing parse oracle.
+    for k in range(1, 4):
+        name = 'tapecheck-model-' + str(k)
+        entry = {
+            'command': ['./exec/tapecheck/check.sh', str(k)],
+            'files': ['exec/tapecheck/check.sh', 'tests/tapecheckmodel.cx',
+                      'tests/tapecheck-cases.tsv', 'tests/bound', 'tests/bound.c',
+                      'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'],
+            'trees': ['exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c',
+                      'exec/pp', 'seed', 'include', 'unisa'],
+            'executable_inputs': True,
+            'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'tail']}
+        if d['suites'].get(name) != entry:
+            d['suites'][name] = entry
+            changed.append((name, 'declared'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

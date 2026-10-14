@@ -16,6 +16,8 @@
 
 Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输入模式/目标/调用能力，并使参考承认同一合同；该一致性证据未齐前，Windows 接受不得记产品绿。条款全文见 [spec.md 的 TP-7／TP-8／L-4](spec.md#c43-refusal-ruling)。归属与承诺已裁，实现与补验仍未完成；E3及lower接受样本不扩为完整拒绝域资格。历史待裁提案与观测保留在 [裁定摘要](research/c43-refusal-ruling-summary.md)。本裁定不授签名、Latest或公开，不改变7000历史结果或env-pin。
 
+实施接线采用独立 `exec/tapecheck` 有限转移模型：成功才透传整条原始输入，失败不输出字节、诊断标明原因与行号；包内普通/warning/multi/object 路由在 E3 后插入该阶段；forwarding 的 E3 side-car 先由现有适配器抽出/合并 Tape 再验域；公共 raw Tape/Tapebin 在任何输出之前单独调用同一模型。构造与打包两实现须同拍；Windows 库模式参考暂列待证，不顺手扩为产品绿。
+
 ## 2. 当前版本
 
 ### 版本状态与历史身份

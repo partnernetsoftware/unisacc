@@ -56,7 +56,7 @@ unisa-gold-lex-label unisa-gold-type-label unisa-gold-binsel-label unisa-gold-op
 unisa-gold-peep-label unisa-gold-scope-label unisa-gold-pp-label unisa-gold-reloc-label
 unisa-gold-irsel-label unisa-gold-parse-label
 """.split())   # c42: the 0.0.41 K6 C-reference vs Python point-sample checks: one subsystem each, not a route or target
-STAGE_PREFIX = ("exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
+STAGE_PREFIX = ("tapecheck-model-", "exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
                 "warn-", "diag-", "referee-", "shared-e2-", "seedgen-")
 
 

@@ -1,0 +1,21 @@
+#include <cx.h>
+/* Observation helper: existing unisa.tape.parse is the oracle; the model is the subject. */
+/* CASES LO HI SCRATCH BUILDDIR; bounds are per-shard and per subprocess.
+   Python supplies only the existing parse oracle, never product validation. */
+int main(int argc,char**argv){
+ if(argc!=6)return 2;size_t n;char lp[4096],cmd[16384],mout[4096],merr[4096],*p,*list=cx_read(argv[1],&n);int i=0,lo=atoi(argv[2]),hi=atoi(argv[3]),yes=0,no=0,under=0;
+ if(!list)return 2;p=list;snprintf(mout,sizeof mout,"%s/model.stdout",argv[4]);snprintf(merr,sizeof merr,"%s/model.stderr",argv[4]);snprintf(lp,sizeof lp,"%s/input.tape",argv[4]);
+ while(*p){char*e=strchr(p,'\n');if(e)*e=0;if(*p=='#'){if(!e)break;p=e+1;continue;}char *hex=strchr(p,'\t');if(!hex)return 2;*hex++=0;if(i>=lo&&i<hi){
+  size_t hn=strlen(hex);if(hn%2)return 2;unsigned char*bytes=malloc(hn/2+1);for(size_t z=0;z<hn;z+=2){unsigned v;if(sscanf(hex+z,"%2x",&v)!=1)return 2;bytes[z/2]=v;}if(cx_write(lp,bytes,hn/2))return 2;free(bytes);
+  snprintf(cmd,sizeof cmd,"PYTHONOPTIMIZE=0 python3 -c 'import sys;from unisa.tape import parse;parse(open(sys.argv[1],encoding=\"latin-1\").read())' '%s' >'%s/ref.stdout' 2>'%s/ref.stderr'",lp,argv[4],argv[4]);
+  int r=cx_run_timeout(cmd,3,0,0);if(r!=0&&r!=1){printf("ORACLE_TOOL rc=%d case=%d\n",r,i);return 2;}
+  snprintf(cmd,sizeof cmd,"'%s/run' '%s/tapecheck.net' '%s' >'%s' 2>'%s'",argv[5],argv[5],lp,mout,merr);
+  int m=cx_run_timeout(cmd,3,0,0);if(m!=0&&m!=1){printf("MODEL_TOOL rc=%d case=%d\n",m,i);return 2;}
+  if(m==0&&r==1){printf("CONTRACT_RED accepted-invalid case=%d input=%s\n",i,p);return 1;}
+  if(m==1&&r==0){size_t z;char*s=cx_read(merr,&z);printf("UNDERCOVER case=%d input=%s diag=%s\n",i,p,s?s:"");free(s);under++;}
+  if(m==0){size_t a,b;char*x=cx_read(lp,&a),*y=cx_read(mout,&b);if(!x||!y||a!=b||memcmp(x,y,a)){printf("CONTRACT_RED output changed case=%d\n",i);return 1;}free(x);free(y);yes++;}
+  else {size_t a,b;char*x=cx_read(mout,&a),*y=cx_read(merr,&b);if(!x||a||!y||!strstr(y,"line ")||strstr(y,"unreachable")){printf("UNDERCOVER diagnostic case=%d input=%s\n",i,p);return 3;}free(x);free(y);no++;}
+ }i++;if(!e)break;p=e+1;}
+ if(yes==0||no==0){printf("empty acceptance/refusal coverage\n");return 2;}
+ printf("tapecheck-model %d..%d accepted=%d refused=%d undercovered=%d\n",lo,hi,yes,no,under);free(list);return under?3:0;
+}
