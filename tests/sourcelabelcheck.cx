@@ -56,19 +56,25 @@ static const char *ext_of(const char *mode) {
 }
 
 /* one run of PRODUCT in MODE on DIR/PROBE.c; stdout, stderr and the written file land beside it */
-static int run(const char *product, const char *dir, const char *probe, const char *mode, int *rc) {
-    char cmd[8192], src[3300], out[3300], err[3300], res[3300];
-    snprintf(src, sizeof src, "%s/%s.c", dir, probe);
+static int run(const char *product, const char *dir, const char *probe, const char *mode, int rel, int *rc) {
+    char cmd[8192], src[3300], out[3300], err[3300], res[3300], cd[3400];
+    /* rel: the probe is named as typed from its own directory (cd first), the command-line spelling */
+    if (rel) { snprintf(cd, sizeof cd, "cd '%s' && ", dir); snprintf(src, sizeof src, "%s.c", probe); }
+    else { cd[0] = 0; snprintf(src, sizeof src, "%s/%s.c", dir, probe); }
     snprintf(err, sizeof err, "%s/%s.err", dir, probe);
     snprintf(out, sizeof out, "%s/%s.out", dir, probe);
     snprintf(res, sizeof res, "%s/%s.%s", dir, probe, ext_of(mode));
     snprintf(cmd, sizeof cmd, "rm -f '%s' '%s' '%s' '%s/%s.dobj'", out, err, res, dir, probe);
     cx_run(cmd, 0, 0);
-    if (!strcmp(mode, "S"))        snprintf(cmd, sizeof cmd, "sh '%s' -S '%s' >'%s' 2>'%s'", product, src, out, err);
-    else if (!strcmp(mode, "c"))   snprintf(cmd, sizeof cmd, "sh '%s' -c '%s' -o '%s' 2>'%s'", product, src, res, err);
-    else if (!strcmp(mode, "o"))   snprintf(cmd, sizeof cmd, "sh '%s' '%s' -o '%s' 2>'%s'", product, src, res, err);
-    else if (!strcmp(mode, "d"))   snprintf(cmd, sizeof cmd, "sh '%s' -c '%s' -o '%s/%s.dobj' -MF '%s' 2>'%s'", product, src, dir, probe, res, err);
-    else                           snprintf(cmd, sizeof cmd, "sh '%s' -run '%s' >'%s' 2>'%s'", product, src, out, err);
+    /* every product command below is prefixed with cd (empty for the absolute spelling) */
+    char prod[8192];
+    if (!strcmp(mode, "S"))        snprintf(prod, sizeof prod, "sh '%s' -S '%s' >'%s' 2>'%s'", product, src, out, err);
+    else if (!strcmp(mode, "c"))   snprintf(prod, sizeof prod, "sh '%s' -c '%s' -o '%s' 2>'%s'", product, src, res, err);
+    else if (!strcmp(mode, "o"))   snprintf(prod, sizeof prod, "sh '%s' '%s' -o '%s' 2>'%s'", product, src, res, err);
+    else if (!strcmp(mode, "d") && rel) snprintf(prod, sizeof prod, "sh '%s' -c '%s' -o '%s.dobj' -MF '%s.d' 2>'%s'", product, src, probe, probe, err);
+    else if (!strcmp(mode, "d"))   snprintf(prod, sizeof prod, "sh '%s' -c '%s' -o '%s/%s.dobj' -MF '%s' 2>'%s'", product, src, dir, probe, res, err);
+    else                           snprintf(prod, sizeof prod, "sh '%s' -run '%s' >'%s' 2>'%s'", product, src, out, err);
+    snprintf(cmd, sizeof cmd, "%s%s", cd, prod);
     *rc = cx_run(cmd, 0, 0);
     return 0;
 }
@@ -99,13 +105,17 @@ int main(int argc, char **argv) {
     }
     printf("sourcelabel record: product=%s\n", product);
     printf("  A=%s\n  B=%s\n", DIRA, DIRB);
+    int cases = 0, differ = 0, rcases = 0, rdiffer = 0;
+    for (int pass = 0; pass < 2; pass++) {
+    int rel = pass;   /* pass 0: absolute spelling (the leak table); pass 1: relative spelling, cd first */
+    printf(rel ? "relative spelling (cd into the directory, probe named as typed; expected no difference)\n"
+               : "absolute spelling (physical directory on the command line)\n");
     printf("  %-11s %-4s %-4s  %-8s %-8s %-8s  %s\n", "probe", "mode", "rc", "stdout", "stderr", "file", "physical dir in (A out/err/file | B out/err/file)");
-    int cases = 0, differ = 0;
     for (int i = 0; PROBE[i]; i++) {
         for (int m = 0; MODE[m]; m++) {
             int rcA = 0, rcB = 0;
-            run(product, DIRA, PROBE[i], MODE[m], &rcA);
-            run(product, DIRB, PROBE[i], MODE[m], &rcB);
+            run(product, DIRA, PROBE[i], MODE[m], rel, &rcA);
+            run(product, DIRB, PROBE[i], MODE[m], rel, &rcB);
             char pa[3300], pb[3300], oa[3400], ob[3400], ea[3400], eb[3400], ra[3400], rb[3400];
             snprintf(pa, sizeof pa, "%s/%s", DIRA, PROBE[i]); snprintf(pb, sizeof pb, "%s/%s", DIRB, PROBE[i]);
             snprintf(oa, sizeof oa, "%s.out", pa); snprintf(ob, sizeof ob, "%s.out", pb);
@@ -126,8 +136,8 @@ int main(int argc, char **argv) {
                 if (carries(ba, na, "dir-a")) carA |= 4;
                 if (carries(bb, nb, "dir-b")) carB |= 4;
             }
-            cases++;
-            if (!so || !se || sfile == 0) differ++;
+            if (rel) { rcases++; if (!so || !se || sfile == 0 || rcA != rcB) rdiffer++; }
+            else { cases++; if (!so || !se || sfile == 0) differ++; }
             printf("  %-11s %-4s %-4d  %-8s %-8s %-8s  A:%s%s%s  B:%s%s%s\n",
                    PROBE[i], MODE[m], rcA == rcB ? rcA : -999,
                    so ? "same" : "DIFF", se ? "same" : "DIFF",
@@ -137,7 +147,9 @@ int main(int argc, char **argv) {
             if (rcA != rcB) printf("      rc differs: A=%d B=%d\n", rcA, rcB);
         }
     }
-    printf("record complete: %d cases, %d with a difference between the two physical directories\n", cases, differ);
+    }
+    printf("record complete: %d absolute cases, %d with a difference between the two physical directories\n", cases, differ);
+    printf("relative spelling: %d cases, %d with a difference (expected 0)\n", rcases, rdiffer);
     if (harness) return 1;
     return 77;
 }
