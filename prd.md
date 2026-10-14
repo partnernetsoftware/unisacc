@@ -1397,3 +1397,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔转发相对forced-include窄修，实际复现〕d21861a0候选从调用cwd执行相对-include失败，绝对路径通过；相对-I与原源目录引号include均通过；-iquote具名未迁移，非路径错位。本刀仅合成转发单元临时把cli/includes按调用cwd绝对化，原源单元/非转发资源保留；增量与完整replay均须覆盖。输出-o/-MF不改变cwd，另用实测确认；不扩大-I或-iquote支持。
 
 〔转发路径修复收口，实际跑过〕新鲜候选0556ea9f…在/tmp/c43-forward-paths/final；com-forward-multi rc0/8s，含12组相对/绝对非转发输出对拍和incremental/full-replay，relative-o/-MF实物均在调用目录。五非本机APE driver目标自举编译rc0（仅编译）；绝对-include在cwd已删除时与旧产品rc/stdout/stderr一致（保留sh启动warning）。只对合成单元的相对forced资源加cwd前缀并恢复，绝对项不额外查询cwd；-I/原源引号include未改，-iquote仍具名未迁移。
+
+〔2b第0步待审与转发登记〕补forward-multi显式输入登记，保持广覆盖回退，不改变已结证闸。2b只迁普通函数；当前lower仍注入上下文私有process_slots（exec/c/libunisacc.c:1007），因此保留运行桥时两个上下文完整lower字节相同不是可承诺的验收。设计须区分迁移片段无地址与旧桥遗留，不以投影冒充完整封存；cc审定前不动2b产品。

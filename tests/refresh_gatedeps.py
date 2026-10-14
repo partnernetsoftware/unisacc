@@ -106,6 +106,16 @@ def main():
         'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
     # 2a isolated address-free declaration model; Python is reference only.
     d['suites']['exec-librarycontract-model'] = {'command': ['./exec/librarycontract/check.sh'], 'files': ['exec/librarycontract/check.sh', 'tests/librarycontractcheck.cx', 'tests/librarycontract-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycontract', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
+    # Forwarding registration deliberately retains broad trees; no audited reuse claim.
+    d['suites']['forward-multi'] = {
+        'command': ['./tests/forwardmulti.sh'],
+        'files': ['tests/forwardmulti.sh', 'tests/forwardpaths.cx', 'tests/lib.sh',
+                  'tests/build_ref.sh', 'tests/export_ref.sh', 'tests/refshim.h',
+                  'tests/reffoot.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py',
+                  'unisacc.c', 'unisacc.com', 'unisacc.com.build.json'],
+        'trees': ['exec', 'include', 'iterate', 'kernel', 'seed', 'src', 'unisa', 'weights'],
+        'executable_inputs': True,
+        'tools': ['cc', 'python3', 'sh', 'chmod', 'mktemp', 'rm', 'uname', 'head', 'sed', 'env']}
     # 0.0.43 T-1: com-tapebin is split.  The reference is prepared once by com-tapebin-ref (keyed by
     # content inside tests/tapebinref.py); six file slices, the fixed-cost part and a global cover read it.
     # The guards are the HEAD stamps the old declaration already pinned, minus the product-facing script,
