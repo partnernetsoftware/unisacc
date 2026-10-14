@@ -14,7 +14,7 @@
  * operand counts are refused at build time (python: assert in emit); an unknown register or label is
  * refused at run time (python: KeyError), with nothing printed.  A halt is a normal result, not a refusal.
  * Not covered (refused by this reference): floating-point ops, .lea, .zero, .write, callr, callm,
- * .sys/.sys6/.argc/.argv and the .hostcall/.librarycall/.libraryaddr/.hostaddr family, and any access that
+ * .sys/.sys6/.argc/.argv and the .hostcall/.librarycall/.libraryaddr/.libraryfn/.hostaddr family, and any access that
  * would straddle the end of memory.  Point-sample equivalence over the listed programs only; not a full
  * opcode sweep; not a real OS file or syscall product closure; keeps unisa/vm.py and the closed deps.
  */
@@ -46,7 +46,7 @@ static const OpShape SH[] = {
     {"slt64", "rrr"}, {"sle64", "rrr"}, {"ult64", "rrr"}, {"ule64", "rrr"}, {"eq", "rrr"}, {"ne", "rrr"},
     {"load64", "rri"}, {"store64", "rir"}, {".ld", "rrii"}, {".st", "riri"}, {".lea", "rs"},
     {".zero", "rii"}, {"jump", "L"}, {"jumpz", "rL"}, {"call", "L"}, {"callr", "r"}, {"callm", "ri"},
-    {".hostcall", "rr"}, {".librarycall", "rr"}, {".libraryaddr", "rsiiii"}, {".hostaddr", "ri"},
+    {".hostcall", "rr"}, {".librarycall", "rr"}, {".libraryaddr", "rsiiii"}, {".libraryfn", "ri"}, {".hostaddr", "ri"},
     {"ret", ""}, {".frame", "i"}, {".arg", "ir"}, {".print", "r"}, {".write", "rr"}, {".exit", "r"},
     {".sys", "srrr"}, {".sys6", "srrrrrr"}, {".argc", "r"}, {".argv", "rr"}, {"nop", ""},
 };

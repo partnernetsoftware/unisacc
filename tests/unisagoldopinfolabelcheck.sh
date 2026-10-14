@@ -1,6 +1,6 @@
 #!/bin/sh
 # K6-23: unisa.gold opinfo_label C reference (seed/unisa_gold_opinfo_label.c) vs unisa/gold.py on the finite op
-# domain OPINFO_OPS (tape.SHAPE's 71 ops incl. the fp ops, then "other": 72 rows, full byte-equal table), plus
+# domain OPINFO_OPS (tape.SHAPE's 72 ops incl. the fp ops, then "other": 73 rows, full byte-equal table), plus
 # named and boundary points ("none" and an unknown name fall through to the default classes).  The python side
 # does NOT import gold.py (its module-level build() is not called): it extracts the definitions _tape_ops,
 # OPINFO_OPS, OPINFO_SIMPLE, OPINFO_ALU, PEEP_B and opinfo_label with ast; _tape_ops' relative import of tape is
@@ -75,7 +75,7 @@ for op in imm load64 store64 mov jump jumpz add64 mul64 sub64 eq slt64 ult64 .ld
     pair call "$op"
 done
 set +f
-echo "SAME $same of $total points (full 72-row OPINFO_OPS table; 18 named and boundary points)"
+echo "SAME $same of $total points (full 73-row OPINFO_OPS table; 18 named and boundary points)"
 
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 neg() {   # neg NAME ARGS... -- both refuse, empty stdout

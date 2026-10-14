@@ -1,7 +1,7 @@
 /* seed/unisa_gold_opinfo_label.c -- C99 reference for unisa.gold opinfo_label (K6-23), finite-domain samples.
  *
  *   unisa-gold-opinfo-label table       "OP<TAB>SIMPLE<TAB>ACLS<TAB>BCLS" for every OPINFO_OPS entry
- *                                       (tape.SHAPE in order, 71 ops incl. the fp ops, then "other": 72 rows)
+ *                                       (tape.SHAPE in order, 72 ops incl. the fp ops, then "other": 73 rows)
  *   unisa-gold-opinfo-label call OP     one line "SIMPLE ACLS BCLS" for OP
  *
  * Mirrors unisa/gold.py opinfo_label(op): simple = 1 for OPINFO_SIMPLE; acls = the op itself for the six
@@ -20,7 +20,7 @@ static const char *OPS[] = {
     ".mod", ".udiv", ".umod", "slt64", "sle64", "ult64",
     "ule64", "eq", "ne", "load64", "store64", ".ld",
     ".st", ".lea", ".zero", "jump", "jumpz", "call",
-    "callr", "callm", ".hostcall", ".librarycall", ".libraryaddr", ".hostaddr",
+    "callr", "callm", ".hostcall", ".librarycall", ".libraryaddr", ".libraryfn", ".hostaddr",
     "ret", ".frame", ".arg", ".print", ".write", ".exit",
     ".sys", ".sys6", ".argc", ".argv", "nop", "fadd64",
     "fsub64", "fmul64", "fdiv64", "flt64", "fle64", "feq64",

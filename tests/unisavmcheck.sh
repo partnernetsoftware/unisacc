@@ -95,6 +95,21 @@ neg() {   # neg NAME PROGRAM -- both refuse, empty stdout
 printf 'I frob r0\n' > "$T/n1.txt"; neg unknown-op "$T/n1.txt"
 printf 'I imm r9 1\nI .exit r0\n' > "$T/n2.txt"; neg bad-register "$T/n2.txt"
 printf 'I jump nowhere\n' > "$T/n3.txt"; neg unknown-label "$T/n3.txt"
+# .libraryfn: in the shape table, not executed by either reference; both refuse by name (c43, cc ruling).
+# C 与 Python 参考的拒绝措辞不同，均点名操作码：each side is asserted on its own text.
+negnamed() {   # negnamed NAME PROGRAM C_TEXT PY_TEXT -- both refuse, empty stdout, diagnostics name the op
+    nm=$1; src=$2
+    "$B" 10 "$T/vmc" run 1000 "$src" >"$T/n-c.out" 2>"$T/n-c.err"; c=$?
+    PYTHONPATH="$R" "$B" 10 python3 "$T/pydump.py" "$src" 1000 >"$T/n-p.out" 2>"$T/n-p.err"; p=$?
+    refused "$c" || fail "NEG-$nm C accepted (rc=$c): first red"
+    refused "$p" || fail "NEG-$nm python accepted (rc=$p): first red"
+    [ ! -s "$T/n-c.out" ] || fail "NEG-$nm C printed stdout: first red"
+    [ ! -s "$T/n-p.out" ] || fail "NEG-$nm python printed stdout: first red"
+    grep -q "$3" "$T/n-c.err" || fail "NEG-$nm C diagnostic lacks '$3': $(tail -1 "$T/n-c.err")"
+    grep -q "$4" "$T/n-p.err" || fail "NEG-$nm python diagnostic lacks '$4': $(tail -1 "$T/n-p.err")"
+    echo "NEG-$nm both refuse by name (c_rc=$c py_rc=$p) c_err=$(tail -1 "$T/n-c.err") py_err=$(tail -1 "$T/n-p.err")"
+}
+printf 'I .libraryfn r1 256\n' > "$T/n4.txt"; negnamed libraryfn-not-covered "$T/n4.txt" 'operation not covered by this reference' ".libraryfn"
 
 echo "---- identity ----"
 echo "HEAD $H"
@@ -106,5 +121,5 @@ echo "bits.py $(sha256sum unisa/bits.py | cut -d' ' -f1)"
 echo "unisa_vm.c $(sha256sum seed/unisa_vm.c | cut -d' ' -f1)"
 echo "unisavmcheck.sh $(sha256sum tests/unisavmcheck.sh | cut -d' ' -f1)"
 cc --version 2>&1 | head -1 | sed 's/^/host-cc /'
-echo "unisavm  same $same  diff 0  neg 3/3"
+echo "unisavm  same $same  diff 0  neg 4/4"
 exit 0
