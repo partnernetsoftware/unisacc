@@ -3,16 +3,37 @@
 
    Builds tests/liblatebind.c with the host C compiler against a private copy of the runtime
    (the same way the lib-lifecycle suite builds its native probe) and runs it on PRODUCT's
-   model package.  The probe's own header lists what each step checks; today: step 2a, the
-   address-free declaration contract.
+   model package.  Each probe's header lists what it checks: tests/liblatebind.c is step 2a
+   (the address-free declaration contract); tests/liblatebind2b.c is step 2b (one ordinary-
+   function path with address-free fragments), run once exec/c/libunisacc.h declares it.
 
    Exit 0: the probe built and every group held.  Exit 1: the probe failed a group, or it
    could not be built against this tree (an API it uses is missing).  Exit 2: usage.
    Exit 77: the host is not Linux or macOS on x86_64 or arm64. */
 #include <cx.h>
 
+/* build SOURCE as a native probe in DIR and run it; 0 when every group held */
+static int probe(const char *dir, const char *source, const char *arch, const char *product, const char *target) {
+    char cmd[16384], path[4096], *out, *e; size_t n; int rc;
+    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. %s exec/c/librarycall_%s.S -lffi -o '%s/probe' 2>'%s/build.err'", source, arch, dir, dir);
+    rc = cx_run_timeout(cmd, 40, 0, 0);
+    snprintf(path, sizeof path, "%s/build.err", dir);
+    if (rc) {
+        e = cx_read(path, &n);
+        printf("  FAIL %s does not build against this tree (rc %d)\n%.600s\n", source, rc, e ? e : "");
+        free(e); unlink(path); return 1;
+    }
+    unlink(path);
+    snprintf(cmd, sizeof cmd, "'%s/probe' '%s' %s", dir, product, target);
+    rc = cx_run_timeout(cmd, 15, &out, &n);
+    if (out) fputs(out, stdout);
+    free(out);
+    snprintf(path, sizeof path, "%s/probe", dir); unlink(path);
+    return rc;
+}
+
 int main(int argc, char **argv) {
-    char dir[] = "/tmp/liblatebindXXXXXX", cmd[16384], *out, *arch, *target; size_t n; int rc;
+    char dir[] = "/tmp/liblatebindXXXXXX", *out, *arch, *target; size_t n; int rc;
     if (argc != 2) { fprintf(stderr, "usage: liblatebindcheck.cx PRODUCT\n"); return 2; }
     rc = cx_run_timeout("uname -sm", 5, &out, &n);
     if (rc || !out) return 2;
@@ -22,20 +43,16 @@ int main(int argc, char **argv) {
     free(out);
     if (!arch || !target) { printf("liblatebindcheck  UNVERIFIED: host is not lnx/osx on x86_64/arm64\n"); return 77; }
     if (!mkdtemp(dir)) return 2;
-    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. tests/liblatebind.c exec/c/librarycall_%s.S -lffi -o '%s/probe' 2>'%s/build.err'", arch, dir, dir);
-    rc = cx_run_timeout(cmd, 40, 0, 0);
-    if (rc) {
-        char path[4096]; char *e; snprintf(path, sizeof path, "%s/build.err", dir); e = cx_read(path, &n);
-        printf("  FAIL probe does not build against this tree (rc %d)\n%.600s\n", rc, e ? e : "");
-        free(e); unlink(path); rmdir(dir);
-        printf("liblatebindcheck  FAILED\n"); return 1;
+    rc = probe(dir, "tests/liblatebind.c", arch, argv[1], target);
+    /* step 2b joins once the tree declares its entry points; until then it is reported, not run */
+    {
+        size_t hn; char *h = cx_read("exec/c/libunisacc.h", &hn);
+        int has2b = h && strstr(h, "us_library_e3_fragment") != 0;
+        free(h);
+        if (has2b) { int r2 = probe(dir, "tests/liblatebind2b.c", arch, argv[1], target); if (r2) rc = r2; }
+        else printf("  info 2b: exec/c/libunisacc.h does not declare the 2b entry points yet; not run\n");
     }
-    snprintf(cmd, sizeof cmd, "'%s/probe' '%s' %s", dir, argv[1], target);
-    rc = cx_run_timeout(cmd, 15, &out, &n);
-    if (out) fputs(out, stdout);
-    free(out);
-    snprintf(cmd, sizeof cmd, "%s/probe", dir); unlink(cmd);
-    snprintf(cmd, sizeof cmd, "%s/build.err", dir); unlink(cmd); rmdir(dir);
+    rmdir(dir);
     printf("liblatebindcheck  %s (probe exit %d)\n", rc == 0 ? "library contract holds" : "FAILED", rc);
     return rc == 0 ? 0 : 1;
 }
