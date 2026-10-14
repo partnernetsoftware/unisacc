@@ -67,7 +67,7 @@ static const OpShape SH[] = {
     {"slt64", "rrr"}, {"sle64", "rrr"}, {"ult64", "rrr"}, {"ule64", "rrr"}, {"eq", "rrr"}, {"ne", "rrr"},
     {"load64", "rri"}, {"store64", "rir"}, {".ld", "rrii"}, {".st", "riri"}, {".lea", "rs"},
     {".zero", "rii"}, {"jump", "L"}, {"jumpz", "rL"}, {"call", "L"}, {"callr", "r"}, {"callm", "ri"},
-    {".hostcall", "rr"}, {".librarycall", "rr"}, {".libraryaddr", "rsiiii"}, {".hostaddr", "ri"},
+    {".hostcall", "rr"}, {".librarycall", "rr"}, {".libraryaddr", "rsiiii"}, {".libraryfn", "ri"}, {".hostaddr", "ri"},
     {"ret", ""}, {".frame", "i"}, {".arg", "ir"}, {".print", "r"}, {".write", "rr"}, {".exit", "r"},
     {".sys", "srrr"}, {".sys6", "srrrrrr"}, {".argc", "r"}, {".argv", "rr"}, {"nop", ""},
 };
@@ -388,6 +388,10 @@ static void parse_insn(char *s, int lineno) {
         } else gr[ng++] = (char *)t;
     }
     if ((int)strlen(shape_of(op)) != ng) { fprintf(stderr, "unisa-tape: line %d: wrong operand count for %s\n", lineno, op); exit(1); }
+    for (i = 0; i < ng; i++) {           /* integer operands: the python reader names the line (underscores refused) */
+        long long v;
+        if (shape_of(op)[i] == 'i' && !int_lit(gr[i], 1, &v)) { fprintf(stderr, "unisa-tape: line %d: invalid integer literal\n", lineno); exit(1); }
+    }
     t_emit(op, ng, gr, 1);               /* appends the code slot and its record */
 }
 
