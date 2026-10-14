@@ -1,5 +1,5 @@
 #!/usr/bin/env -S unisacc.com -run
-/* tapedomaincheck.cx PRODUCT SCRATCH -- a raw .tape outside the Tape domain is refused before
+/* tapedomaincheck.cx PRODUCT [SCRATCH] -- a raw .tape outside the Tape domain is refused before
    anything is written (spec.md TP-7, TP-8; owner ruling 2026-10-14).
 
    Black box: it runs PRODUCT on .tape files and looks only at the exit status, stdout, stderr
@@ -21,7 +21,8 @@
 
    Exit 0: control accepted and every negative refused as above.  Exit 1: a contract failure
    (each is printed).  Exit 2: usage, or the scratch directory cannot be written.
-   SCRATCH must exist; the files written there are small and are left for inspection. */
+   A given SCRATCH must exist; the small files written there are left for inspection.
+   Without it a temporary directory is made and removed. */
 #include <cx.h>
 
 struct neg { const char *id, *tape, *word; };
@@ -79,7 +80,17 @@ static int run(const char *product, const char *scratch, const struct mode *m, i
 int main(int argc, char **argv) {
     char path[4096], cmd[16384], *tape, *out, *err; size_t tn, on, en; int rc, checked = 0;
     const struct neg *g; const struct mode *m;
-    if (argc != 3) { fprintf(stderr, "usage: tapedomaincheck.cx PRODUCT SCRATCH\n"); return 2; }
+    char own[] = "/tmp/tapedomainXXXXXX", *args3[3];
+    if (argc != 2 && argc != 3) { fprintf(stderr, "usage: tapedomaincheck.cx PRODUCT [SCRATCH]\n"); return 2; }
+    if (argc == 2) {
+        static const char *LEFT[] = {"control.c", "in.tape", "err", "out.bin", 0}; const char **l;
+        if (!mkdtemp(own)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
+        args3[0] = argv[0]; args3[1] = argv[1]; args3[2] = own;
+        rc = main(3, args3);
+        for (l = LEFT; *l; l++) { snprintf(path, sizeof path, "%s/%s", own, *l); unlink(path); }
+        rmdir(own);
+        return rc;
+    }
 
     snprintf(path, sizeof path, "%s/control.c", argv[2]);
     if (cx_write(path, "int main(void){return 0;}\n", 26)) { fprintf(stderr, "cannot write %s\n", path); return 2; }

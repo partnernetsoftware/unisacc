@@ -732,6 +732,7 @@ if [ "$COM" = 1 ]; then
     job com-luatests MODEL_COM="$PRODUCT" ./tests/luatests.sh com   # 0.0.34 L1: the same lua testes built by the product (build cached by product+source sha)
     job com-forward UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forward.sh   # 0.0.28 N1': posix2 (glob callback), var (variadic), host functions on the product
     job com-forward-multi UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forwardmulti.sh   # 0.0.26 N5: the product failed here up to 0.0.25
+    job com-tapedomain tests/bound 58 sh "$PRODUCT" -run tests/tapedomaincheck.cx -- "$PRODUCT"   # 0.0.43 TP-7/TP-8/TP-9: a raw .tape outside the Tape domain is refused before anything is written
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
