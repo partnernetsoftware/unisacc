@@ -184,7 +184,10 @@ def fingerprint(jobs, parts=None, revoked=()):
     raw = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
                                   '--', 'src', 'exec', 'tests', 'include', 'kernel', 'weights', 'unisa', 'examples',
                                   'unisacc.c', 'README.md', 'ARCHITECTURE.md', 'AGENTS.md',
-                                  'prd.tree.md', 'prd.map.md', 'research/referee.tsv', 'iterate', 'release', 'scripts', 'Makefile'])
+                                  'prd.tree.md', 'prd.map.md', 'research/referee.tsv', 'iterate', 'release', 'scripts', 'Makefile',
+                                  # 0.0.43 (research/c43-flow-reuse-step3.md): warnprep and driver-language suites compile the
+                                  # construction tools under seed/; outside this list a change there reused stale results
+                                  'seed'])
     names = sorted(set(raw.decode().split('\0')) - {''})
     # 0.0.38 ②: the files under a tree prefix, by binary search on the sorted list -- the same set the
     # per-job scan `any(n.startswith(prefix+'/') ...)` produced, without 10.8M startswith calls per
