@@ -1377,3 +1377,5 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔晚绑定②源码旁核〕默认a.out与-MF晚写出也属于侧流别名冲突，前置路径检查须按有效默认输出和依赖输出做规范化/既有inode核对，拒绝后保留哨兵；普通显式-o别名检查不足。此为实现修正，须随②单位回归验证。
 
 〔晚绑定②base收口，实际跑过〕模型自测85例仍74收11拒；新增bind两native控制/缺slot1/坏filter、两条TP-7域外固定例、两条缺模型路由与三个输出别名哨兵均通过；对应host绑定参考两项通过。seedpack两实现1477路由+审计同字节。只作模型/适配器与native驱动入口证据，旧92236ce3用于动态C观察，不冒充新产品fresh；下一步仓外同源重建再黑盒。
+
+〔晚绑定驱动构建修正〕pack-driver失败根因是run.c仅native分支引入sys/stat.h与unistd.h，__UNISA__分支原有io_stamp不用stat；新别名适配缺产品头定义（并非产品头缺字段）。bind.c在__UNISA__下显式引入仓内既有sys/stat.h/unistd.h，保留inode判同；不改include/、不新增宿主依赖。新fix提交，不改写03936e9f；提交前须用同源UA实际编compiler.c，后续驱动改动同时点名含driver-ua的exec-driver-core-modes。

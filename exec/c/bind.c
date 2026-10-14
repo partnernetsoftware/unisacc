@@ -1,4 +1,10 @@
 /* LB-1: typed framing/host adaptation only; Tape decisions stay in models. */
+/* run.c's native branch has these; the product branch uses private syscall IO.
+   Use the existing shipped headers, never a host-header search override. */
+#ifdef __UNISA__
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 typedef struct { unsigned target, filter; int mode, native; const char *symbols;
  ResourceInput *cli; unsigned char (*dl)[8]; } HostCompileContext;
 static int host_stage_present(const char *route,const char *name){for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,route)&&!strcmp(STAGES[i].name,name))return 1;return 0;}
