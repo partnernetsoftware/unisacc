@@ -28,3 +28,10 @@
 3. `UNISA_ATTRIBUTES` 写宿主文件的副作用应移出出货产品，或限定为测试接口。
 
 登记：`tests/hostenvcheck.cx` 不入闸，记录完成返回 77。
+
+## 补充：编译时实际打开的宿主文件（实际跑过，strace）
+
+候选 0556ea9f，`-S -o out.s a.c`，`a.c` 含 `#include <stdio.h>` 与 `#include "loc.h"`：
+- 启动器（sh 脚本）执行 `uname -s`、`uname -m`、`mkdir -p ~/.cache/unisacc`，再 exec 缓存里按内容哈希命名的镜像（`~/.cache/unisacc/unisacc-<hash>`）；读 libc、locale 文件属于 sh 与这些命令本身。
+- 编译器本体只打开了 `a.c`、`loc.h`（引号 include，按资源请求经 `core_host_fetch` 读盘）和输出 `out.s`。`<stdio.h>` 没有读盘，来自随包头文件。
+- 结论：今天的磁盘回退只服务于用户自己的源文件和引号 include，没有读到其他宿主文件。第 1 步的“严格模式”要做的是把这类读取变成显式的请求/应答记录（已有 `FILE_READ_*` 账本的雏形，`run.c:596–607`），而不是禁止读取用户文件。
