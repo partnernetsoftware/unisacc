@@ -12,7 +12,8 @@ fail() { echo "queuetimeout: $*"; exit 1; }
 # macOS has no GNU timeout(1); in-repo tests/bound is the watchdog (1..60s), as in queuestartlaunchcheck (e2e961d1)
 _BOUND=$("$R/tests/bound" --helper) || { echo "queuetimeout: need tests/bound (native watchdog)"; exit 2; }
 D=$T/cand; S=$T/seed; W=$T/wt; mkdir -p "$D" "$S" "$W/tests"
-printf 'candidate' > "$D/unisacc-next.com"; art=$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)
+cp "$R/unisacc.com" "$D/unisacc-next.com"   # real product bytes: queue.sh pre-flights the static-image contract on the candidate
+ art=$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)
 printf '{"artifact_sha256":"%s"}\n' "$art" > "$D/unisacc-next.com.build.json"
 printf 'seed' > "$S/unisacc-seed.com"; printf '#!/bin/sh\nexit 0\n' > "$T/ua"; chmod +x "$T/ua"
 # the fake launcher: rc sequence from $T/rcs (one per line, last repeats); first window writes a result into GATE_STATE

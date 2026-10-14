@@ -6,7 +6,8 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qlaunch.XXXXXX"); trap 'rm -rf "$T"' EXIT
 fail() { echo "queuestartlaunch: $*"; exit 1; }
 D=$T/cand; S=$T/seed; W=$T/wt; B=$T/bak; mkdir -p "$D" "$S" "$W/tests" "$B/state"
-printf 'candidate' > "$D/unisacc-next.com"; art=$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)
+cp "$R/unisacc.com" "$D/unisacc-next.com"   # real product bytes: queue.sh pre-flights the static-image contract on the candidate
+ art=$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)
 printf '{"artifact_sha256":"%s"}\n' "$art" > "$D/unisacc-next.com.build.json"
 printf 'seed' > "$S/unisacc-seed.com"; printf '#!/bin/sh\nexit 0\n' > "$T/ua"; chmod +x "$T/ua"
 # the fake launcher: one line per window, then a finished, green window

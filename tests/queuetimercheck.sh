@@ -9,7 +9,8 @@ fail() { echo "queuetimer: $*"; exit 1; }
 ALARM=${QUEUETIMER_ALARM:-4}
 _BOUND=$("$R/tests/bound" --helper) || { echo "queuetimer: need tests/bound"; exit 2; }
 D=$T/cand; S=$T/seed; W=$T/wt; mkdir -p "$D" "$S" "$W/tests"
-printf c > "$D/unisacc-next.com"; printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
+cp "$R/unisacc.com" "$D/unisacc-next.com"   # real product bytes: queue.sh pre-flights the static-image contract on the candidate
+ printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
 printf s > "$S/unisacc-seed.com"; printf '#!/bin/sh\nexit 0\n' > "$T/ua"; chmod +x "$T/ua"
 cp "$R/tests/term.sh" "$R/tests/bound.py" "$W/tests/"
 # the window body: records its start and its parent's argv, sleeps past the alarm, and would record a finish it must
