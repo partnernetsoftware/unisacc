@@ -212,6 +212,21 @@ def main():
                   'exec/facts/parse-words.tsv', 'exec/facts/parse2-extra.tsv', 'exec/facts/valueranks.tsv'],
         'trees': ['exec/build']}
     changed.append(('derived-step1', 'declared facts-export and gate-layers (measured reads)'))
+    # 0.0.43 seed C references (fix: seed C ports follow unisa/tape.py).  Declared from the measured reads: the three
+    # checks read tests/bound, unisa/ (the Python side), and for the shape check docs/tapebin-v1.{shape,records}.tsv,
+    # exec/c/tapebin.h and src/tapebin_shape.inc; the C reference each compiles is seed/unisa_*.c.
+    d['suites']['unisa-tape'] = {
+        'command': ['sh', './tests/unisatapecheck.sh'],
+        'files': ['tests/unisatapecheck.sh', 'tests/bound', 'tests/bound.c', 'seed/unisa_tape.c'], 'trees': ['unisa']}
+    d['suites']['unisa-tapebin'] = {
+        'command': ['sh', './tests/unisatapebincheck.sh'],
+        'files': ['tests/unisatapebincheck.sh', 'tests/bound', 'tests/bound.c', 'seed/unisa_tapebin.c'], 'trees': ['unisa']}
+    d['suites']['unisa-tapebin-shape'] = {
+        'command': ['sh', './tests/unisatapebinshapecheck.sh'],
+        'files': ['tests/unisatapebinshapecheck.sh', 'tests/bound', 'tests/bound.c', 'seed/unisa_tapebin_shape.c',
+                  'docs/tapebin-v1.shape.tsv', 'docs/tapebin-v1.records.tsv', 'exec/c/tapebin.h', 'src/tapebin_shape.inc'],
+        'trees': ['unisa']}
+    changed.append(('seed-c-ports', 'declared unisa-tape, unisa-tapebin, unisa-tapebin-shape'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

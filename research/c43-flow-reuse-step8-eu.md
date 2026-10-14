@@ -37,3 +37,17 @@
 | unisa-gold-opinfo-label | 1 | 无（读集在名单内；rc1 未分析，待单独判断） |
 
 结论：批次 03 名单外没有读取。
+
+## 批次 04（unisa-gold 与 exec 混合，10 个）
+| 作业 | rc | 名单外读取 |
+|---|---|---|
+| unisa-gold-reloc-label、unisa-gold-irsel-label、unisa-gold-parse-label | 0 | 无 |
+| exec-formats-f1 | 124（部分读集，名单内） | 无 |
+| exec-bridge-linux | 1（读集很小，名单内） | 无 |
+| exec-chain-1..5 | 0 | 无（读 .net/.tbl 为构造产物） |
+
+结论：批次 04 名单外没有读取。
+
+## 三个 C 参考移植（unisa-tape、unisa-tapebin、unisa-tapebin-shape）
+- 实测读集（strace）：unisa-tape、unisa-tapebin 只读 tests/bound、tests/bound.c 与 unisa/（Python 侧）；unisa-tapebin-shape 另读 docs/tapebin-v1.shape.tsv、docs/tapebin-v1.records.tsv、exec/c/tapebin.h、src/tapebin_shape.inc（名单外的 docs/ 已声明）。
+- 以上三项已在 gatedeps 中声明（files 与 trees，`tests/refresh_gatedeps.py`），并加入 release/derived-map.tsv 对 unisa/tape.py、unisa/tapebin*.py、seed/unisa_*.c 的映射。
