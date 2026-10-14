@@ -4,7 +4,9 @@
 
    Interfaces (non-stable, research/c43-late-binding-cut2b-step0.md):
      us_library_e3_fragment(c, &n)    the model-marked ordinary wrapper fragment of the E3 tape
-     us_library_lower_unbound(c, &n)  the matching unbound lower fragment (spans included)
+     us_library_lower_unbound(c, &n)  the matching unbound lower fragment (spans included); a
+                                      read-only receipt produced by us_relocate, so it is queried
+                                      after relocate (successful or refused for a missing provider)
      us_declare_injected_import(c, name, sig)  declare an ordinary function, no address
 
    Proof boundary: the fragments only.  The whole lower input still carries runtime-bridge
@@ -55,6 +57,8 @@ int main(int argc, char **argv) {
     }
     p = us_library_e3_fragment(ca, &ea); e1 = p ? copy(p, ea) : 0;
     p = us_library_e3_fragment(cb, &eb); e2 = p ? copy(p, eb) : 0;
+    {   int ra = us_relocate(ca), rb = us_relocate(cb);
+        if (ra || rb) printf("  info relocate: %s / %s\n", ra ? us_error(ca) : "ok", rb ? us_error(cb) : "ok"); }
     p = us_library_lower_unbound(ca, &la); l1 = p ? copy(p, la) : 0;
     p = us_library_lower_unbound(cb, &lb); l2 = p ? copy(p, lb) : 0;
     if (!e1 || !e2 || !l1 || !l2) { printf("  FAIL fragment query failed: %s / %s\n", us_error(ca), us_error(cb)); return 1; }
@@ -65,7 +69,7 @@ int main(int argc, char **argv) {
            !holds(l1, la, (uintptr_t)add_a) && !holds(l1, la, (uintptr_t)add_b), "clean: no host address in either fragment");
     {
         long (*fa)(void) = 0, (*fb)(void) = 0;
-        if (!us_relocate(ca) && !us_relocate(cb)) { fa = (long (*)(void))us_sym(ca, "answer"); fb = (long (*)(void))us_sym(cb, "answer"); }
+        fa = (long (*)(void))us_sym(ca, "answer"); fb = (long (*)(void))us_sym(cb, "answer");
         report(fa && fb && fa() == 1027 && fb() == 2027, "bound: each context calls its own host function after relocate");
     }
     {
@@ -74,6 +78,8 @@ int main(int argc, char **argv) {
         if (!ok) { printf("  info missing: setup failed: %s\n", us_error(cm)); }
         ok = ok && us_relocate(cm) != 0;
         e = us_error(cm);
+        if (ok) { size_t mn = 0; const void *mp = us_library_lower_unbound(cm, &mn);
+                  if (!mp || !mn) printf("  info missing: no unbound lower receipt after the refused relocate\n"); }
         ok = ok && e && strstr(e, "missing-provider") && strstr(e, "hostadd");
         ok = ok && !us_sym(cm, "answer");
         report(ok, "missing: an injected-only import without a provider is refused at relocate by name");
