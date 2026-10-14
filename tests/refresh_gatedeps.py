@@ -197,6 +197,21 @@ def main():
         'command': ['sh', './unisacc.com', '-run', 'tests/latebindcheck.cx', '--', './unisacc.com'],
         'files': ['tests/latebindcheck.cx'] + rootfiles, 'executable_inputs': True}
     changed.append(('step6-batch2', 'root product declared for gate-infra, com-tapedomain, com-latebind'))
+    # 0.0.43 derived-consistency step 1 (research/c43-derived-consistency.md): the two checks the commit gate
+    # will append.  Declared from the measured reads (strace, read-only): facts-export opens exec/, include/ and
+    # the unisa/, weights/gold/, src/front_pp.c files of its TABLES; gate-layers opens the exec/facts tables and
+    # the tests/ helpers below.  Declared trees are the directories it lists or reads whole.
+    d['suites']['facts-export'] = {
+        'command': ['python3', './exec/facts/export.py', '--check'],
+        'files': ['exec/facts/export.py', 'src/front_pp.c', 'iterate/kernel/typekw.tsv'],
+        'trees': ['exec', 'include', 'unisa', 'weights/gold']}
+    d['suites']['gate-layers'] = {
+        'command': ['python3', './tests/gatelayers.py', '--check'],
+        'files': ['tests/gatelayers.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/lib.sh',
+                  'tests/seedconstructcheck.py', 'exec/facts/parse-constants.tsv', 'exec/facts/parse-tokens.tsv',
+                  'exec/facts/parse-words.tsv', 'exec/facts/parse2-extra.tsv', 'exec/facts/valueranks.tsv'],
+        'trees': ['exec/build']}
+    changed.append(('derived-step1', 'declared facts-export and gate-layers (measured reads)'))
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
