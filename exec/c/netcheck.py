@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
     missing=d/'must-not-be-opened.net'
     r=run([*argv,reset,reject,missing]);assert (r.returncode,r.stdout,r.stderr)==(1,b'',b'reject: stopped\n')
     r=run(['env','UNISA_MAXSTEPS=2',*argv,reset,loop,missing])
-    assert (r.returncode,r.stdout,r.stderr)==(3,b'',b'timeout\n')
+    assert (r.returncode,r.stdout,r.stderr)==(3,b'',b'step budget exhausted (budget 2 steps)\n')
     r=run([*argv]);assert r.returncode==2 and not r.stdout
     manifest=d/'routes.tsv'
     manifest.write_text('first\ta\tbytes\tbytes\treset.net\nfirst\tb\tbytes\tbytes\treset.net\nsecond\ta\tbytes\tbytes\tempty-output.net\nthird\ta\tbytes\tbytes\treset.net\n')

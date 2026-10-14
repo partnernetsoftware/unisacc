@@ -644,14 +644,18 @@ static void bput(Buf *o,int c,I at) {
 #endif
 static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
     CoreModel m; core_model(&m);
+#ifdef UNISA_PRODUCT_BUILD
+    I maxsteps=UNISA_DEFAULT_MAXSTEPS;   /* shipped: a build constant, the host environment has no say */
+#else
     I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : UNISA_DEFAULT_MAXSTEPS;
+#endif
     CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
 #ifdef UNISA_RUNTIME_DIAGNOSTIC
     UNISA_RUNTIME_DIAGNOSTIC(status,r.reason,r.reason_n,&r.err);
 #endif
     if (status==1 && r.reason_n) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
     if (status==2) fprintf(stderr,"run: %s\n",r.reason);
-    if (status==3) fprintf(stderr,"timeout\n");
+    if (status==3) fprintf(stderr,"step budget exhausted (budget %lld steps)\n",(long long)maxsteps);
     if (r.err.n) fwrite(r.err.b,1,r.err.n,stderr);
     free(r.err.b); result->b=r.out.b; result->n=r.out.n;
     return status;
