@@ -336,6 +336,7 @@ for k in 1 2 3; do job tapecheck-model-$k ./exec/tapecheck/check.sh $k; done
 job exec-hostsymbols-model ./exec/lower/hostsymbolscheck.sh
 job exec-librarycontract-model ./exec/librarycontract/check.sh
 job exec-librarypartition-model ./exec/librarypartition/check.sh
+job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults

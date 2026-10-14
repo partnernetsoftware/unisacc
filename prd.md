@@ -1405,3 +1405,11 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔2b①实现范围〕已获cc通过：先新增声明分区有限模型，输入无地址声明/target；输出每ID唯一new/legacy归属。audit模式读实际路由掩码，0=missing-owner、3=duplicate-owner，与模型推导不符拒绝；适配器不以provider是否存在分类。随后E3/lower再消费分区。本批不接线，不把模型自测冒充新库产品行为。
 
 〔2b操作名纠正〕cc实核.libraryaddr已有数据操作r s i i i i；先前第0步漏查不能复用。普通函数ID新操作改.libraryfn rN,ID，旧数据操作不变；程序模式由lower具名拒绝not covered: libraryfn requires library mode。须同步参考/TP-7形状表，不靠操作数个数重载。
+
+〔2b模型边界进行中〕E3新USLCON普通声明append旧表，稳定ID独立bank，旧/新/同名冲突/源定义/unused五项sim探索通过；动态C合同准备遇窗超时未计绿，须拆准备/执行。libraryfn形状新增只验r,i，程序模式lower拒；lower模型记录真实最终span并另产materialization片段。E3完整包装片段拟模型OCUT/复制收集并在显式USLTAPE4包追加，C仅解帧不扫Tape。未接库consumer/未fresh，不计产品完成。
+
+〔2b片段承载实现细化〕E3以模型OCUT/恢复收集新普通wrapper全片段，最终USTFLOW1外包（8字magic、主流长度u64、片段长度u64、主流、片段）保留内层USLTAPE1/2/3原格式；C只解帧。先前拟USLTAPE4改为外包，避免typed/callback元数据协议扩域。lower内部USLOWP1同样双帧，full/fragment均UNILOW1，片段仅普通地址物化行；绑定只用full，观测getter只返片段。
+
+〔2b E3独立收口〕实际seed/Python构造同JSON，10048状态/1067079字节；动态C七fixture普通完整wrapper与窄参考逐字节同，旧路不变、unused/source-defined无新片段、duplicate/truncated具名拒。A/B原生观察provider地址留RI之外，对拍输出同；不冒称未接线库API两上下文已验。E3组件可独立落；lower/librarycall还需普通ABI与可消耗模板授权，当前占位绿不等于完整wrapper运行绿。Tape新操作识别表+三形状用例在第三片原窗rc0，留接线同笔。
+
+〔流式模式默认前提〕政委定调：执行器+表的模式可复用，接近iostream的公共字节进出通道；每阶段调用方拥有失败/拒绝状态与责任，宿主/环境不混进核心流。不再争论能否复用，不另造大阶段；后续按显式输入、拒绝归属和每阶段实测合同实施。仓外短评/tmp/c43-model-stream-pattern-review.md仅设计。
