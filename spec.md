@@ -835,3 +835,6 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 **LB-1**（0.0.43 loader 首切片）lower 的 loader 槽位需求为确定性旁生字节流 UNISYM1；主lower输出不改变。合同含显式target/program模式、按slot排序去重的ID=slot+1、legacy/untyped标志与间接hostcall存在标志；不得含宿主地址、路径或时间，不得把寄存器hostcall改解释为slot引用。零/未声明签名不证明ABI。provider地址与能力只在lower之后的装配绑定阶段输入；先完整校验再编码、写出或执行。缺provider具名rc1、空stdout、已有输出不变。library/bindings/codeprivate嵌地址尚未迁移，Win L-4另案。
 
 **LB-2** `--emit-host-symbols FILE` 与 `--host-provider FILE` 是非稳定诊断/测试接口。前者支持Tape输出及-o诊断，首刀不与-run同用；lower/索引/provider语法/侧流IO失败不得创建或改写目标，lower接受后绑定失败可保留侧流收据但不得输出镜像；与主输出同路径须拒绝；后者严格读取12字节UHPROV1（目标、低四位能力mask、零保留位），仅削减默认provider，不能注入地址。畸形、缺文件、错目标/保留位必须具名拒绝，区别于missing-provider；mask15等价默认，mask变化不得改变合同侧流或-S输出。缺侧流模型的需绑定路径必须拒绝，不能猜无需求。
+
+
+**LB-3**（0.0.43 2a，非稳定诊断接口）`us_binding_contract(ctx,target,&length)`只读查询显式声明的USLCON1快照；target由调用方显式传入，接口不解析宿主符号、不修改Tape或镜像。地址与支持能力不得进入此合同；声明序列按名字规范化，不用宿主解析成功集合决定声明有无。接受由有限表模型验证并产流，Python仅作对照。返回借用字节；下次查询、声明/绑定配置变更或上下文销毁使其失效；失败返回NULL、length置0并写具名us_error，不能返回旧成功快照。新模型缺失仅查询失败，旧库接口与USBIND消费者不改变。本步不证明库地址已退出旧模型输入，也不证明签名ABI已核。typed V2/V3描述可保持为显式合同字节，缺描述、未覆盖与零签名不得计签名比较绿。2b普通函数迁移及后续数据/typed/运行桥须另验。

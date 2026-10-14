@@ -92,6 +92,10 @@ US_API void *us_sym_typed(us_context *ctx, const char *name,
 US_API int us_call_status(const us_context *ctx, int *exit_status);
 US_API const char *us_error(const us_context *ctx);
 US_API const void *us_tape(const us_context *ctx, size_t *length);
+/* Non-stable 2a observation API. Explicit target; borrowed bytes until the next
+   query, binding configuration mutation or free. NULL + length=0 + us_error on failure.
+   No host resolution, compilation/image mutation, or ABI qualification. */
+US_API const void *us_binding_contract(us_context *ctx, const char *target, size_t *length);
 #ifdef __cplusplus
 }
 #endif

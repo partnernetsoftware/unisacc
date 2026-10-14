@@ -17,6 +17,7 @@
 #include "librarynative.h"
 #include "librarybindings.h"
 #include "libraryresolver.h"
+#include "librarycontract.h"
 #define US_CALLABLES_IMPLEMENTATION
 #include "librarycallables.h"
 #include "librarycarrierplan.h"
@@ -53,6 +54,7 @@ struct us_context {
     LibraryCallableSite *callable_sites;size_t callable_site_count;
     LibraryImportAlias *import_aliases;size_t import_alias_count;us_native_plans import_alias_plans;
     unsigned char *binding_blob; size_t binding_length;
+    unsigned char *contract_snapshot; size_t contract_snapshot_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
     Symbol *symbols; size_t symbol_count;
@@ -247,7 +249,7 @@ API void us_free(us_context *c) {
     us_native_templates_clear(&c->native_templates);
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
-    us_bindings_clear(&c->bindings);free(c->binding_blob);
+    us_bindings_clear(&c->bindings);free(c->binding_blob);free(c->contract_snapshot);
     if (c->cache) { cache_release(c->cache); free(c->cache); }
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
@@ -297,6 +299,32 @@ API const char *us_error(const us_context *c) { return c ? c->error : "null cont
 API const void *us_tape(const us_context *c,size_t *length) {
     if (length) *length=c ? c->tape_length : 0; return c ? c->tape : 0;
 }
+/* Declaration observer only: model output is kept outside old binding_blob. */
+API const void *us_binding_contract(us_context *c,const char *target,size_t *length) {
+ if(length)*length=0;if(!c)return NULL;
+ if(active){error(c,"library contract: recursive query");return NULL;}
+ free(c->contract_snapshot);c->contract_snapshot=NULL;c->contract_snapshot_length=0;c->error[0]=0;
+ unsigned selected=us_contract_target(target);if(!selected){error(c,"library contract: unknown target");return NULL;}
+ unsigned char *frame=NULL;size_t size=0;
+ if(us_contract_input(&c->bindings,&c->resolver.declarations,selected,&frame,&size,c->error,sizeof c->error))return NULL;
+ active=c;volatile int rc=1;
+ if(!setjmp(failure)){
+  RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;
+  library_package(c);
+  int found=0;for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))found=1;
+  if(!found)__us_panic("library contract: required model is missing");
+  Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
+  rc=runroute("library-contract",&input,"binding-contract");
+  if(!rc){
+   c->contract_snapshot=malloc((size_t)input.n);if(!c->contract_snapshot)__us_panic("library contract: snapshot allocation failed");
+   memcpy(c->contract_snapshot,input.b,(size_t)input.n);c->contract_snapshot_length=(size_t)input.n;
+  }
+ }
+ free(frame);cache_settle();cleanup();active=NULL;RI=NULL;NRI=0;
+ if(rc){free(c->contract_snapshot);c->contract_snapshot=NULL;c->contract_snapshot_length=0;return NULL;}
+ if(length)*length=c->contract_snapshot_length;return c->contract_snapshot;
+}
+
 static uint64_t library_u64(const Buf *b,size_t *at);
 static int library_lookup(void *owner,const char *name,const void **raw,int *kind);
 static const char *library_native_target(void);
@@ -397,6 +425,7 @@ static void invalidate_bindings(us_context *c) {
     us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
+    free(c->contract_snapshot);c->contract_snapshot=0;c->contract_snapshot_length=0;
     free(c->target);c->target=0;c->error[0]=0;
 }
 static us_binding_type binding_type(us_type_descriptor t) {

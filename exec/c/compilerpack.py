@@ -23,7 +23,7 @@ PREP_PARTS=[
     ['warnparse'],
     ['errorparse'],
     ['warnunits','warnlex','tokenlex','tokenpp','warnpp-shared','plainpp','nativeabi',
-     'object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64','tapecheck','hostsymbols'],
+     'object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64','tapecheck','hostsymbols','librarycontract'],
 ]
 
 def _digest(path):
@@ -170,7 +170,8 @@ def model_jobs(targets, shared_e2=None, shared_nativeabi=None):
         jobs.append(('object-lower-'+arch,gen,['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])))
         jobs.append(('object-enc-'+arch,gen,['enc/arm' if arch=='arm64' else 'enc','--object']))
     if shared_e2 is None: jobs.append(('plainpp',gen,['pp','--shared-predefines']))
-    jobs+=[('hostsymbols',gen,['lower/hostsymbols']),
+    jobs+=[('librarycontract',gen,['librarycontract/gen']),
+           ('hostsymbols',gen,['lower/hostsymbols']),
            ('tapecheck',gen,['tapecheck']),
            ('tokenpp',gen,['pp','--shared-predefines','--no-autoinc']),
            ('tokenlex',gen,['lex']),
@@ -337,6 +338,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                 checked.append('\t'.join([cols[0],'tapecheck',cols[3],cols[3],str(tapecheck)]))
         rows=checked
         rows.append('\t'.join(['host-symbols','symbols','explicit-frame','host-contract',str(job('hostsymbols'))]))
+        rows.append('\t'.join(['library-contract','contract','declarations','library-contract',str(job('librarycontract'))]))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         payload=build([manifest],mounts,compressed=compressed,cache=MODEL_CACHE)
         if audit_dir is not None: retain_models(audit_dir, rows)

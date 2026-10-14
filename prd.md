@@ -1387,3 +1387,9 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔数组指针成员误编独立立案，实际跑过〕tests/c/candidates/array-pointer-member-store.c为待审探针，尚未登记闸。系统cc镜像rc0并输出pass；经典同源自举ua -run及其-o镜像均SIGSEGV（子进程rc−11/壳139）；模型产品fb68a994的-run/-o均在parse2具名拒绝not covered: array typedef pointer member。因此误编证据归经典参考/自举路径，不能把模型欠覆盖写成模型接受误编。仓外flat-byte A/B修复驱动运行不等于修复该语言缺陷；疑点与工具摘要见research/c43-array-pointer-member-miscompile.md。
 
 〔待审探针隔离〕现有opt/difftest/all会glob tests/c/*.c；因此未登记不等于不执行。数组指针误编候选移至tests/c/candidates/，保持主人要求的待审状态，不把已知缺陷自动混入整套对拍；明确注册须另审。
+
+〔晚绑定第二刀第0步，只读设计待审〕USBIND真实冻结路径为V3且E3已输出ADDRESS/DISPATCH/PLAN，故不能仅改lower/codeprivate；必须申请parse2/libraryimports、共享modelbindings、libraryresolver文件域。拟分无地址声明合同与仅绑定层provider，合同从全部声明生成而非宿主解析成功集合；lower后显式重定位绑定，v3签名须调用方/提供方独立来源实比较。步骤页research/c43-late-binding-cut2-step0.md；cc复核前不动产品。
+
+〔第二刀拆分代裁：先2a〕cc认可方向但要求窄切：2a仅声明→USLCON1模型/参考及非稳定只读快照，所有旧消费者保留；2b仅普通函数路径，数据/typed/variadic/callback/运行桥另案。2a getter使用显式target，可编译前查询，缺新模型仅查询失败，不改变旧编译/执行行为；地址不进入新合同，旧USBIND仍未迁移，不宣称已拆库输入。
+
+〔2a本机收口，实际跑过〕新声明模型C/Python构造同，153状态/6099字节；动态C自测438例71收367拒，拒空stdout/具名；仓外fresh d21861a0…黑盒八条均rc0。七指定lib回归+seedpack（1478路由对拍）均rc0，五非本机APE driver目标经同源UA编译rc0（仅编译不冒称外平台执行）。旧USBIND/E3/lower仍保持原消费者；新contractgetter仅观测声明，不证明地址已迁移或ABI签名已核。core缓存预热三片应分别限时，曾误用外层循环超60秒已停；剩余单片原限时收口，不将中断计验收。登记独立笔等模型/产品笔之后。

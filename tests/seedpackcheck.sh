@@ -34,7 +34,7 @@ printf 'r1\tprune\ttape\tx\tprune.net\nr1\tabi\ttape\tabi\tnativeabi.net\n' > "$
 # predefines, kernel checks, model audit), on stand-in networks: the rows, not the models, are tested
 "$B" 50 cc -std=c99 -O2 -w -Iseed -o "$T/cpk" seed/compilerpack.c || fail "compilerpack.c does not build"
 mkdir -p "$T/models" "$T/k" "$T/sh"
-for n in object-lower-arm64 object-lower-x86_64 object-enc-arm64 object-enc-x86_64 tokenpp tokenlex warnlex warnparse warnunits errorparse warnpp-shared tapecheck hostsymbols; do
+for n in object-lower-arm64 object-lower-x86_64 object-enc-arm64 object-enc-x86_64 tokenpp tokenlex warnlex warnparse warnunits errorparse warnpp-shared tapecheck hostsymbols librarycontract; do
     cp "$T/prune.net" "$T/models/$n.net"; cp "$T/prune.tbl" "$T/models/$n.tbl"
 done
 for n in e2 o1 nativeabi; do cp "$T/nativeabi.net" "$T/sh/$n.net"; cp "$T/nativeabi.tbl" "$T/sh/$n.tbl"; done
