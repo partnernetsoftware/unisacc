@@ -169,9 +169,12 @@ def main():
     changed.append(('step4-readsets', 'declared ledgercheck, docs, subtract-safety'))
     # 0.0.43 step 6, batch 1 of the outside-the-name-list audit (research/c43-flow-reuse-step6.md).
     # decision-ledger opens research/decision-ledger.json (measured).
+    # c43 declaration gap (measured): decision-ledger walks exec/**/*.py (rglob) and the exec manifests (glob), and
+    # reads tests/decisionledger.allow 2638 times, so exec/ is declared as a tree.
     d['suites']['decision-ledger'] = {
         'command': ['python3', './tests/decisionledger.py'],
-        'files': ['tests/decisionledger.py', 'research/decision-ledger.json']}
+        'files': ['tests/decisionledger.py', 'research/decision-ledger.json', 'tests/decisionledger.allow'],
+        'trees': ['exec']}
     # exittable opens plans/v0.0.42.md (the version in src/version.h) and archive/plans/v0.0.38.md (measured);
     # the plan of a later version is read after a bump, so plans/ is declared as a whole tree (as ledgercheck).
     d['suites']['exittable'] = {
@@ -180,8 +183,11 @@ def main():
         'trees': ['plans']}
     # k2b walks every tracked file (tests/k2bcheck.py:10 git ls-files -co) and the partial strace (timed out at 55 s)
     # opened every tracked top-level directory; declared as those trees outside the name list.
+    # c43 measured (batch A): the script itself is declared.  k2b reads every tracked file by design (whole-tree
+    # identity), so this declaration cannot narrow it; see research/c43-k2b-enable-assessment.md.
     d['suites']['k2b'] = {
         'command': ['python3', './tests/k2bcheck.py'],
+        'files': ['tests/k2bcheck.py'],
         'trees': ['apps', 'archive', 'bench', 'docs', 'plans', 'research', 'ujs', '.github']}
     changed.append(('step6-batch1', 'declared decision-ledger, exittable, k2b'))
     # 0.0.43 step 6, batch 2.  gate-infra, com-tapedomain and com-latebind run the ROOT product (unisacc.com, which
@@ -190,12 +196,13 @@ def main():
     rootfiles = ['unisacc.com', 'unisacc.com.build.json']
     gi = d['suites']['gate-infra']
     gi['files'] = sorted(set(gi.get('files', [])) | set(rootfiles))
+    # c43 measured (batch A): the gate runs tests/bound around the product, and bound's sources are read too.
     d['suites']['com-tapedomain'] = {
         'command': ['sh', './unisacc.com', '-run', 'tests/tapedomaincheck.cx', '--', './unisacc.com'],
-        'files': ['tests/tapedomaincheck.cx'] + rootfiles, 'executable_inputs': True}
+        'files': ['tests/tapedomaincheck.cx', 'tests/bound', 'tests/bound.c'] + rootfiles, 'executable_inputs': True}
     d['suites']['com-latebind'] = {
         'command': ['sh', './unisacc.com', '-run', 'tests/latebindcheck.cx', '--', './unisacc.com'],
-        'files': ['tests/latebindcheck.cx'] + rootfiles, 'executable_inputs': True}
+        'files': ['tests/latebindcheck.cx', 'tests/bound', 'tests/bound.c'] + rootfiles, 'executable_inputs': True}
     changed.append(('step6-batch2', 'root product declared for gate-infra, com-tapedomain, com-latebind'))
     # 0.0.43 derived-consistency step 1 (research/c43-derived-consistency.md): the two checks the commit gate
     # will append.  Declared from the measured reads (strace, read-only): facts-export opens exec/, include/ and
