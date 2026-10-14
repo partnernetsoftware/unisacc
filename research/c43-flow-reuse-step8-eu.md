@@ -21,3 +21,11 @@
 | unisa-bits、unisa-hostabi、unisa-peversion、unisa-padded、unisa-zdata、unisa-linalg、unisa-libneed、unisa-uns1 | 0 | 无 |
 
 结论：批次 01 名单外没有读取。
+
+## 批次 02（unisa- 未声明 10 个）
+| 作业 | rc | 名单外读取 |
+|---|---|---|
+| unisa-catalog、unisa-fp、unisa-tape、unisa-image-fat、unisa-image-elf、unisa-image-macho、unisa-image-pe、unisa-ape | 0 | 无 |
+| unisa-tapebin、unisa-tapebin-shape | 1 | 无（读集在名单内） |
+
+结论：批次 02 名单外没有读取。注意两项 rc1 是真实失败，不是读取问题：单独直接运行仍是 rc1（`unisatapebincheck.sh`：`DIFF encode`；`unisatapebinshapecheck.sh`：`DIFF render`）。输入文件在工作区没有未提交改动，最近的相关提交是 fdc1c1ab、701d76e8、7b4ac452，尚未定位，需要 owner 判断。
