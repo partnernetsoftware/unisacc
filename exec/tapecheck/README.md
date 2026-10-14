@@ -11,7 +11,7 @@ physical line in stderr. CRLF counts as one line. Target syscall/ABI/library
 capability checks remain in lower. Validation has no filesystem or host-symbol
 resource lookups.
 
-Covered rules: the 71 `unisa.tape.SHAPE` opcodes, operand counts, r0–r7, signed
+Covered rules: the 72 `unisa.tape.SHAPE` opcodes, operand counts, r0–r7, signed
 integer lexical forms (decimal/base prefixes), grouped register displacements,
 labels/comments, `.str` quoted/escaped bytes and the reference reader's 1 MiB
 literal bound, `.bss`, `.unit 2`, and linkage records (including the unit prerequisite
@@ -139,3 +139,5 @@ These independent runs are reported by cc, separate from our own executions.
 attempts supplied no new product evidence. Their native-machine evidence is left
 to CI. The cold-preparation timeout is recorded separately from model rejection
 and integer-domain NEG results; no limit was increased or fixture removed.
+
+2b adds independent `.libraryfn rN, ID` syntax; it shares the generic r/i operand validator with hostaddr but never its capability semantics. Ordinary program refusal belongs to lower, not Tape validation. Old six-operand `.libraryaddr` data syntax remains intact.

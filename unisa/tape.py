@@ -62,6 +62,7 @@ SHAPE = {
     ".hostcall": ("r", "r"), # native fixed-six integer/pointer ABI bridge
     ".librarycall": ("r", "r"), # model-declared injected library function, gated by resources
     ".libraryaddr": ("r", "s", "i", "i", "i", "i"), # declared borrowed data address and canonical ABI facts
+    ".libraryfn": ("r", "i"), # ordinary library function stable ID; lower owns capability
     ".hostaddr": ("r", "i"), # one of four dynamic-loader bootstrap slots
     "ret":     (),
     ".frame":  ("i",),

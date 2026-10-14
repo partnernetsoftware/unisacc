@@ -47,7 +47,7 @@ PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff
 
 # A single delta, builder stage, or library subsystem is checked in isolation.
 STAGE = set("""
-exec-libraryfunctionimports-model exec-librarypartition-model strconvert-host libneed apps-structure seed-construct seedfacts seedparse2-1 seedparse2-2 seed-matrix-shared
+exec-libraryfn-model exec-libraryfunctionimports-model exec-librarypartition-model strconvert-host libneed apps-structure seed-construct seedfacts seedparse2-1 seedparse2-2 seed-matrix-shared
 seed-matrix-object seedgen seedape seedpack exec-bridge-linux warn diag target-package prevheaders
 unisa-bits unisa-hostabi unisa-peversion unisa-padded unisa-zdata unisa-linalg unisa-libneed unisa-uns1
 unisa-catalog unisa-fp unisa-tape unisa-tapebin unisa-tapebin-shape unisa-image-fat unisa-image-elf

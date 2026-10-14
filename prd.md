@@ -1413,3 +1413,12 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 〔2b E3独立收口〕实际seed/Python构造同JSON，10048状态/1067079字节；动态C七fixture普通完整wrapper与窄参考逐字节同，旧路不变、unused/source-defined无新片段、duplicate/truncated具名拒。A/B原生观察provider地址留RI之外，对拍输出同；不冒称未接线库API两上下文已验。E3组件可独立落；lower/librarycall还需普通ABI与可消耗模板授权，当前占位绿不等于完整wrapper运行绿。Tape新操作识别表+三形状用例在第三片原窗rc0，留接线同笔。
 
 〔流式模式默认前提〕政委定调：执行器+表的模式可复用，接近iostream的公共字节进出通道；每阶段调用方拥有失败/拒绝状态与责任，宿主/环境不混进核心流。不再争论能否复用，不另造大阶段；后续按显式输入、拒绝归属和每阶段实测合同实施。仓外短评/tmp/c43-model-stream-pattern-review.md仅设计。
+
+### 0.0.43 2b 恢复与接线边界（2026-10-14）
+
+- -iquote 已独立提交并合流后，恢复暂存的 lower/Tape 17 路径，逐文件摘要一致；ABI 接线提交按干净 HEAD 导出加本笔文件生成，不吸入共享工作区。
+- 新普通函数归属由 librarypartition 模型的 USLSEL1 决定，适配器仅解码该选择；旧 typed/data/callback 与运行桥保留。普通函数 provider 只在 span 绑定时查询，缺 provider 不降级旧路径。仍只证明普通函数片段无地址；本批不封存整流、不改旧闸与发布。
+
+- lower 独立模型收口：3530 状态，13 固定夹具在 tbl/net 两种格式实际 rc0；补单标签/双标签/跳转目标与重复调用 NEG，poison 跨标签保留、consumed 仅在边界释放。旧 typed 单独与成功新包装后旧 typed 两控制完整输出不变。仍未计 fresh 库 API 行为；provider/ABI 接线另笔。
+
+- 提交门诊断：现有 abi-manifest 命名闸无 gatedeps 声明，commitgate 在跑闸前 fail-closed；补输入声明与 refresh 持久项（exec/src/include、C 检查、清单、运行器与 bound），不改 ABI 判据。

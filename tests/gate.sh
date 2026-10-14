@@ -337,6 +337,7 @@ job exec-hostsymbols-model ./exec/lower/hostsymbolscheck.sh
 job exec-librarycontract-model ./exec/librarycontract/check.sh
 job exec-librarypartition-model ./exec/librarypartition/check.sh
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
+job exec-libraryfn-model ./exec/lower/libraryfncheck.sh
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults

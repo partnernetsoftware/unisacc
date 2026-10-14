@@ -198,6 +198,8 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
         tape = prune(tape)
     from .tape import DATA_BASE
     os_, arch = target.split("/")
+    if any(ins.op == ".libraryfn" for ins in tape.code):
+        raise ValueError("not covered: libraryfn requires library mode")
     win = os_ == "win"
     tail = SCRATCH + PRINTMAX + (WIN_EXTRA - SCRATCH - PRINTMAX if win else 0)
     data, syms, used = zero_last(tape.data, tape.syms, DATA_BASE, tail)
