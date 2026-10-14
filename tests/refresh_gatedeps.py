@@ -177,9 +177,13 @@ def main():
         'trees': ['exec']}
     # exittable opens plans/v0.0.42.md (the version in src/version.h) and archive/plans/v0.0.38.md (measured);
     # the plan of a later version is read after a bump, so plans/ is declared as a whole tree (as ledgercheck).
+    # c43 declaration gap (measured, batch B): exittable also reads the release ledgers and tools, the version
+    # header and the gate-order/gate-layer/queue sources it prints from.
     d['suites']['exittable'] = {
         'command': ['python3', './tests/exittablecheck.py'],
-        'files': ['tests/exittablecheck.py', 'archive/plans/v0.0.38.md'],
+        'files': ['tests/exittablecheck.py', 'archive/plans/v0.0.38.md', 'release/preauth.tsv', 'release/rulings.tsv',
+                  'release/tools/exittable.py', 'release/tools/h1source.py', 'src/version.h', 'tests/gatelayers.py',
+                  'tests/gateorder.json', 'tests/gatequeue.py'],
         'trees': ['plans']}
     # k2b walks every tracked file (tests/k2bcheck.py:10 git ls-files -co) and the partial strace (timed out at 55 s)
     # opened every tracked top-level directory; declared as those trees outside the name list.
