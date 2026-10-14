@@ -199,6 +199,7 @@ job seedmemory python3 ./tests/seedmemorycheck.py
 # c43 watchdog scope tokens: orphaned and escaped children, and the caller EOF (macOS branch not verified yet)
 job watchdog-orphan sh ./tests/watchdogregression.sh orphan tests/bound.py
 job watchdog-eof sh ./tests/watchdogregression.sh eof tests/bound.py
+job watchdog-success sh ./tests/watchdogregression.sh success tests/bound.py
 job stagelog python3 ./tests/stagelogcheck.py
 job exittable python3 ./tests/exittablecheck.py
 job h1source python3 ./tests/h1sourcecheck.py   # 0.0.40 (机房主任 22:45 A/C): build_candidate settles its H1 table before any write or make

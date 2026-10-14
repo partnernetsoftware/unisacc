@@ -114,6 +114,13 @@ def main():
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    # c43: a command that exits normally may still leave an escaped descendant (reparented, own session).
+    # Kill everything carrying this scope's token; no freeze needed once the command has ended.
+    for pid in scoped_pids(token):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     return rc if rc >= 0 else 128 - rc
 
 
