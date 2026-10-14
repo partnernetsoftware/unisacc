@@ -13,3 +13,11 @@
 | exec-srcelf-1 | rc124（55 秒） | 无（部分读集，名单内） | 不完整，未声明 |
 
 结论：批次 00 在名单之外没有读取。
+
+## 批次 01（exec- 未声明 2 个 + unisa- 未声明 8 个）
+| 作业 | rc | 名单外读取 |
+|---|---|---|
+| exec-srcelf-2、exec-srcelf-3 | 0 | 无（读候选：构造缓存的模型包） |
+| unisa-bits、unisa-hostabi、unisa-peversion、unisa-padded、unisa-zdata、unisa-linalg、unisa-libneed、unisa-uns1 | 0 | 无 |
+
+结论：批次 01 名单外没有读取。
