@@ -112,6 +112,11 @@ def main():
         entry = {'command': ['./exec/librarycallsitepartition/check.sh', 'PLACEHOLDER'], 'files': ['exec/librarycallsitepartition/check.sh', 'tests/librarycallsitepartitioncheck.cx', 'tests/librarycallsitepartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycallsitepartition', 'exec/librarytypedpartition', 'exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
         entry['command'][-1] = str(shard)
         d['suites']['exec-librarycallsitepartition-model-%d' % shard] = entry
+    # 2c4 callback partition: explicit overlay, reference ledger only.
+    for shard in range(1, 17):
+        entry = {'command': ['./exec/librarycallbackpartition/check.sh', '1'], 'files': ['exec/librarycallbackpartition/check.sh', 'tests/librarycallbackpartitioncheck.cx', 'tests/librarycallbackpartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycallbackpartition', 'exec/librarycallsitepartition', 'exec/librarytypedpartition', 'exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
+        entry['command'][-1] = str(shard)
+        d['suites']['exec-librarycallbackpartition-model-%d' % shard] = entry
     # 2c3 callsite models: stage-only, no native ABI/runtime/V0-V7 completion claim.
     shared_files = ['exec/finite_rules.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json']
     model_tools = ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir']

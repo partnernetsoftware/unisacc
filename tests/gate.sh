@@ -373,6 +373,22 @@ job exec-librarycallsitepartition-model-5 ./exec/librarycallsitepartition/check.
 job exec-librarycallsitepartition-model-6 ./exec/librarycallsitepartition/check.sh 6
 job exec-librarycallsitepartition-model-7 ./exec/librarycallsitepartition/check.sh 7
 job exec-librarycallsitepartition-model-8 ./exec/librarycallsitepartition/check.sh 8
+job exec-librarycallbackpartition-model-1 ./exec/librarycallbackpartition/check.sh 1
+job exec-librarycallbackpartition-model-2 ./exec/librarycallbackpartition/check.sh 2
+job exec-librarycallbackpartition-model-3 ./exec/librarycallbackpartition/check.sh 3
+job exec-librarycallbackpartition-model-4 ./exec/librarycallbackpartition/check.sh 4
+job exec-librarycallbackpartition-model-5 ./exec/librarycallbackpartition/check.sh 5
+job exec-librarycallbackpartition-model-6 ./exec/librarycallbackpartition/check.sh 6
+job exec-librarycallbackpartition-model-7 ./exec/librarycallbackpartition/check.sh 7
+job exec-librarycallbackpartition-model-8 ./exec/librarycallbackpartition/check.sh 8
+job exec-librarycallbackpartition-model-9 ./exec/librarycallbackpartition/check.sh 9
+job exec-librarycallbackpartition-model-10 ./exec/librarycallbackpartition/check.sh 10
+job exec-librarycallbackpartition-model-11 ./exec/librarycallbackpartition/check.sh 11
+job exec-librarycallbackpartition-model-12 ./exec/librarycallbackpartition/check.sh 12
+job exec-librarycallbackpartition-model-13 ./exec/librarycallbackpartition/check.sh 13
+job exec-librarycallbackpartition-model-14 ./exec/librarycallbackpartition/check.sh 14
+job exec-librarycallbackpartition-model-15 ./exec/librarycallbackpartition/check.sh 15
+job exec-librarycallbackpartition-model-16 ./exec/librarycallbackpartition/check.sh 16
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh
 job exec-librarycallsite-reader-model ./exec/parse2/librarycallsitecheck.sh
