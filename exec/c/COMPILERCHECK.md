@@ -12,7 +12,10 @@ A complete driver result requires all seven gate receipts.
 | `exec-driver-core-modes` | Version queries and 27 mode/optimization-level comparisons |
 | `exec-driver-core-contracts` | Compatibility flags, stdin, output preservation, source/output IO and undefined-function checks |
 | `exec-driver-core-dependencies` | Dependency resource-read ledger and token dump |
-| `exec-driver-resources` | Macro/include resources, printf fallback, isolated ASM package and APE CLI/memory/native checks |
+| `exec-driver-resources-macros` | Macro resources (cli defines, -include, VALUE define) |
+| `exec-driver-resources-headers` | Quoted, -I, carried and -nostdinc header resources |
+| `exec-driver-resources-printf` | Printf fallback: undeclared printf, signed formatting, nine conversions |
+| `exec-driver-resources-isolated` | Isolated ASM package and APE CLI/memory/native checks (builds driver.com, ~40 s) |
 | `exec-driver-language-1`, `exec-driver-language-2` | The same 25 positive probes, split by alternating list positions (13/12); ASM network memory O0/O2 and native O2 versus host cc; all six conditional rejection variants in shard 1 only |
 
 The six conditional negative cases require rc 1, empty stdout and the observed
@@ -26,7 +29,7 @@ there is no new cache or result reuse. Set `UNISACC_MODEL_CACHE` and `UA` explic
 for isolated runs. Use the existing rolling queue with the six actual gate names:
 
 ```sh
-./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-build --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources --suite exec-driver-language-1 --suite exec-driver-language-2
+./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-build --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources-macros --suite exec-driver-resources-headers --suite exec-driver-resources-printf --suite exec-driver-resources-isolated --suite exec-driver-language-1 --suite exec-driver-language-2
 ```
 
 Each invocation has a maximum 55-second window. Exit 75 means unfinished work:

@@ -636,7 +636,10 @@ exec-driver-core-dependencies
 exec-driver-core-modes
 exec-driver-language-1
 exec-driver-language-2
-exec-driver-resources
+exec-driver-resources-macros
+exec-driver-resources-headers
+exec-driver-resources-printf
+exec-driver-resources-isolated
 exec-macself
 exec-macself-package
 exec-macxself
