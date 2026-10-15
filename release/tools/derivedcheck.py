@@ -162,6 +162,13 @@ def main(argv):
     if missing:
         print('FAIL: suite(s) without a gatedeps declaration (fail closed): ' + ', '.join(missing))
         return 1
+    # A derived check runs on a clean export with only the (stale) root product linked: a suite whose declared
+    # command names the product under test ({MODEL_COM}) cannot be checked here and must not be mapped (c43: the
+    # stage-contract job got the literal "{MODEL_COM}" and blocked an unrelated commit).
+    product = [s for s in suites if any('{MODEL_COM}' in a for a in commands[s])]
+    if product:
+        print('FAIL: product-dependent suite(s) mapped in release/derived-map.tsv (fail closed; run them in the gate with MODEL_COM): ' + ', '.join(product))
+        return 1
     tmp = pathlib.Path(tempfile.mkdtemp(prefix='derivedcheck-'))
     worst = 0
     try:
