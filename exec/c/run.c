@@ -590,6 +590,7 @@ static int checknet(const char *table, const char *net) {
 
 #endif
 
+#include "resourceledger.h"
 /* Exact resource lookup and filesystem naming belong to the host adapter. */
 void core_host_panic(const char *reason) { die(reason); }
 UNISA_RUNTIME_STATE const char *INCDIR=0;
@@ -607,7 +608,49 @@ static void record_file_read(const char *path) {
     memcpy(FILE_READ_PATHS[FILE_READ_COUNT++],path,n);
 }
 
+/* S step 1 strict resource flow (opt-in: --strict-resource-flow --resource-ledger DIR).  The ledger is the only source;
+   RI, package resources and disk are not consulted.  A key the ledger does not list is MISSING: a named interface failure. */
+UNISA_RUNTIME_STATE int RF_STRICT=0, RF_LOADED=0;
+UNISA_RUNTIME_STATE RLLedger RF_LEDGER;
+static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len);
+/* capture (fixture building only; env UNISACC_RF_CAPTURE=DIR): every key the default path answers is written to DIR as a
+   ledger row (first answer wins, repeats are checked for agreement); the default answer itself is unchanged. */
+static const char *rf_capture_dir(void) { static int init = 0; static const char *d = 0; if (!init) { init = 1; d = getenv("UNISACC_RF_CAPTURE"); } return d; }
+static unsigned char *RF_CAPK[4096]; static int RF_CAPKN[4096]; static int RF_CAPC = 0;
+static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned char *bytes,int len) {
+    char path[4096], hex[1025], sha[65]; FILE *f; int i;
+    for (i = 0; i < RF_CAPC; i++) if (RF_CAPKN[i] == n && !memcmp(RF_CAPK[i], p, n)) return;
+    if (RF_CAPC >= 4096 || n > 512) return;
+    RF_CAPK[RF_CAPC] = malloc(n ? n : 1); memcpy(RF_CAPK[RF_CAPC], p, n); RF_CAPKN[RF_CAPC] = n; RF_CAPC++;
+    for (i = 0; i < n; i++) { hex[2*i] = "0123456789abcdef"[p[i] >> 4]; hex[2*i+1] = "0123456789abcdef"[p[i] & 15]; } hex[2*n] = 0;
+    snprintf(path, sizeof path, "%s/resources.tsv", rf_capture_dir());
+    f = fopen(path, "a"); if (!f) return;
+    if (!owned) fprintf(f, "%s\t0\t-\t0\t-\n", hex);
+    else {
+        char name[64]; snprintf(name, sizeof name, "resource-%03d.bytes", RF_CAPC - 1);
+        snprintf(path, sizeof path, "%s/%s", rf_capture_dir(), name);
+        { FILE *g = fopen(path, "wb"); if (g) { if (len) fwrite(bytes, 1, (size_t)len, g); fclose(g); } }
+        unisa_sha256_hex(bytes, (size_t)len, sha);
+        fprintf(f, "%s\t1\t%s\t%d\t%s\n", hex, name, len, sha);
+    }
+    fclose(f);
+}
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
+    if (RF_STRICT) {
+        static char msg[1200]; char h[1025]; int i;
+        if (n > 512) die("resource key too long");
+        for (i = 0; i < n; i++) { h[2*i] = "0123456789abcdef"[p[i] >> 4]; h[2*i+1] = "0123456789abcdef"[p[i] & 15]; } h[2*n] = 0;
+        const RLRow *r = rl_find(&RF_LEDGER, p, n);
+        if (!r) { snprintf(msg, sizeof msg, "MISSING_EXPLICIT_RESOURCE %s", h); die(msg); }
+        if (!r->present) return 0;
+        *bytes = r->value; *len = r->vn; return 1;
+    }
+    {   int owned = rf_default_fetch(p,n,bytes,len);
+        if (rf_capture_dir()) rf_capture_record(p,n,owned,*bytes,*len);
+        return owned;
+    }
+}
+static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
     for (int j=0;j<NRI;j++) if (RI[j].n==n && !memcmp(RI[j].name,p,n)) {
         *bytes=(unsigned char *)RI[j].data; *len=RI[j].len; return 1;
     }

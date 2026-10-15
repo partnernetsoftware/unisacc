@@ -4,6 +4,7 @@
 #define UNISA_CORE_EXTERNAL
 #define core_host_fetch middle_original_fetch
 #include "../exec/c/run.c"
+#include "../exec/c/resourceledger.h"
 #undef core_host_fetch
 #include "../include/cx.h"
 #define MF_LIMIT 256
@@ -21,7 +22,16 @@ int core_host_fetch(const unsigned char*p,int n,unsigned char**bytes,int*len){in
 static void writeblob(const char*name,const void*b,size_t n){char path[4096];snprintf(path,sizeof path,"%s/%s",outdir,name);if(cx_write(path,b,n))die("write witness failed");}
 static void resources_save(void){char path[4096],key[1025],sha[65],name[50];int i;FILE*f;snprintf(path,sizeof path,"%s/resources.tsv",outdir);f=fopen(path,"wb");if(!f)die("resource ledger output");for(i=0;i<nr_seen;i++){MFResource*r=&seen[i];if(r->kn>512)die("resource key size");keyhex(r->key,r->kn,key);snprintf(name,sizeof name,"resource-%03d.bytes",i);if(r->present){writeblob(name,r->value,r->vn);cx_sha256_hex(r->value,r->vn,sha);}else{strcpy(name,"-");strcpy(sha,"-");}fprintf(f,"%s\t%d\t%s\t%d\t%s\n",key,r->present,name,r->vn,sha);}fclose(f);}
 static int digit(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;die("hex key malformed");return 0;}
-static void resources_load(const char*dir){char path[4096],*b,*p,*e,*q,*fields[5],sha[65];size_t n,len;int k;snprintf(path,sizeof path,"%s/resources.tsv",dir);b=cx_read(path,&n);if(!b)die("resource ledger absent");p=b;while(*p){e=strchr(p,'\n');if(!e)die("resource row truncated");*e=0;fields[0]=p;k=1;for(q=p;*q;q++)if(*q=='\t'){*q=0;if(k==5)die("resource fields");fields[k++]=q+1;}if(k!=5||nr_seen==MF_LIMIT||strlen(fields[0])%2)die("resource fields");MFResource*r=&seen[nr_seen++];r->kn=strlen(fields[0])/2;r->key=malloc(r->kn?r->kn:1);for(k=0;k<r->kn;k++)r->key[k]=(digit(fields[0][2*k])<<4)|digit(fields[0][2*k+1]);for(k=0;k<nr_seen-1;k++)if(seen[k].kn==r->kn&&!memcmp(seen[k].key,r->key,r->kn)){fprintf(stderr,"INTERFACE_ERROR duplicate-resource-key %s\n",fields[0]);exit(2);}r->present=atoi(fields[1]);r->vn=atoi(fields[3]);if(r->present){snprintf(path,sizeof path,"%s/%s",dir,fields[2]);r->value=(unsigned char*)cx_read(path,&len);if(!r->value||len!=(size_t)r->vn)die("resource bytes absent");cx_sha256_hex(r->value,len,sha);if(strcmp(sha,fields[4]))die("resource hash mismatch");}else if(r->vn||strcmp(fields[2],"-")||strcmp(fields[4],"-"))die("absent resource malformed");p=e+1;}free(b);}
+/* the ledger parser is the shared one (exec/c/resourceledger.h): strict rows, named failures, no second implementation */
+static void resources_load(const char*dir){
+ RLLedger L; char err[512];
+ if(rl_load(dir,&L,err,sizeof err)){fprintf(stderr,"%s\n",err);exit(2);}
+ for(int i=0;i<L.n;i++){
+  if(nr_seen==MF_LIMIT)die("resource witness capacity");
+  MFResource*r=&seen[nr_seen++];
+  r->key=L.rows[i].key; r->kn=L.rows[i].kn; r->present=L.rows[i].present; r->value=L.rows[i].value; r->vn=L.rows[i].vn;
+ }
+}
 static void defaults(const char*label){static ResourceInput cli[32];static unsigned char one=1;static const char*keys[]={"\0cli/defines","\0cli/undefines","\0cli/includes","\0cli/include-dir","\0cli/nostdinc","\0cli/source","\0cli/fno-trim-libc","\0cli/werror","\0cli/error-limit","\0cli/f1","\0cli/attributes","\0cli/target"};int i;RI=cli;NRI=12;for(i=0;i<12;i++){cli[i].name=(const unsigned char*)keys[i];cli[i].n=1+strlen(keys[i]+1);cli[i].data=(const unsigned char*)"";cli[i].len=0;}cli[5].data=(const unsigned char*)label;cli[5].len=strlen(label)+1;cli[9].data=&one;cli[9].len=1;ATTR_SLOT=10;cli[11].data=(const unsigned char*)"lnx/x86_64";cli[11].len=10;}
 int main(int argc,char**argv){const char*label="leaf/middle.c";char path[4096],*input;size_t n;Buf in={0},out={0};int rc,expected;
  setenv("UNISA_MAXSTEPS","400000000000",1); /* explicit execution budget, never ambient */

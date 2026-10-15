@@ -113,70 +113,13 @@ static int cx_run_timeout(const char *__u_cmd, int __u_secs, char **__u_out, siz
 }
 #endif
 
-/* FIPS 180-4 SHA-256 */
+/* FIPS 180-4 SHA-256: the shared implementation lives in include/unisa_sha256.h (one copy for product and cx). */
+#include "unisa_sha256.h"
 #if !__UNISA_FTRIM_LIBC || __UN_cx_sha256
-static void cx_sha256(const void *__u_buf, size_t __u_len, unsigned char __u_md[32]) {
-    static const unsigned long __u_k[64] = {
-        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
-    unsigned long __u_h[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
-    const unsigned char *__u_p = (const unsigned char *)__u_buf;
-    unsigned char __u_blk[64]; unsigned long __u_w[64], __u_a[8], __u_t1, __u_t2;
-    size_t __u_off = 0, __u_total = __u_len + 9, __u_nblk = (__u_total + 63) / 64, __u_b;
-    int __u_i, __u_j;
-    for (__u_b = 0; __u_b < __u_nblk; __u_b++) {
-        for (__u_i = 0; __u_i < 64; __u_i++, __u_off++) {
-            if (__u_off < __u_len) __u_blk[__u_i] = __u_p[__u_off];
-            else if (__u_off == __u_len) __u_blk[__u_i] = 0x80;
-            else if (__u_off >= __u_nblk * 64 - 8)
-                __u_blk[__u_i] = (unsigned char)(((unsigned long long)__u_len * 8) >> (8 * (__u_nblk * 64 - 1 - __u_off)));
-            else __u_blk[__u_i] = 0;
-        }
-        for (__u_i = 0; __u_i < 16; __u_i++)
-            __u_w[__u_i] = ((unsigned long)__u_blk[4*__u_i] << 24) | ((unsigned long)__u_blk[4*__u_i+1] << 16) |
-                           ((unsigned long)__u_blk[4*__u_i+2] << 8) | __u_blk[4*__u_i+3];
-#define _CX_R(x,n) ((((x) >> (n)) | ((x) << (32 - (n)))) & 0xffffffffUL)
-        for (__u_i = 16; __u_i < 64; __u_i++) {
-            unsigned long __u_s0 = _CX_R(__u_w[__u_i-15],7) ^ _CX_R(__u_w[__u_i-15],18) ^ (__u_w[__u_i-15] >> 3);
-            unsigned long __u_s1 = _CX_R(__u_w[__u_i-2],17) ^ _CX_R(__u_w[__u_i-2],19) ^ (__u_w[__u_i-2] >> 10);
-            __u_w[__u_i] = (__u_w[__u_i-16] + __u_s0 + __u_w[__u_i-7] + __u_s1) & 0xffffffffUL;
-        }
-        for (__u_j = 0; __u_j < 8; __u_j++) __u_a[__u_j] = __u_h[__u_j];
-        for (__u_i = 0; __u_i < 64; __u_i++) {
-            __u_t1 = (__u_a[7] + (_CX_R(__u_a[4],6) ^ _CX_R(__u_a[4],11) ^ _CX_R(__u_a[4],25)) +
-                      ((__u_a[4] & __u_a[5]) ^ (~__u_a[4] & __u_a[6])) + __u_k[__u_i] + __u_w[__u_i]) & 0xffffffffUL;
-            __u_t2 = ((_CX_R(__u_a[0],2) ^ _CX_R(__u_a[0],13) ^ _CX_R(__u_a[0],22)) +
-                      ((__u_a[0] & __u_a[1]) ^ (__u_a[0] & __u_a[2]) ^ (__u_a[1] & __u_a[2]))) & 0xffffffffUL;
-            for (__u_j = 7; __u_j > 0; __u_j--) __u_a[__u_j] = __u_a[__u_j-1];
-            __u_a[4] = (__u_a[4] + __u_t1) & 0xffffffffUL;
-            __u_a[0] = (__u_t1 + __u_t2) & 0xffffffffUL;
-        }
-#undef _CX_R
-        for (__u_j = 0; __u_j < 8; __u_j++) __u_h[__u_j] = (__u_h[__u_j] + __u_a[__u_j]) & 0xffffffffUL;
-    }
-    for (__u_j = 0; __u_j < 8; __u_j++) {
-        __u_md[4*__u_j] = (unsigned char)(__u_h[__u_j] >> 24); __u_md[4*__u_j+1] = (unsigned char)(__u_h[__u_j] >> 16);
-        __u_md[4*__u_j+2] = (unsigned char)(__u_h[__u_j] >> 8); __u_md[4*__u_j+3] = (unsigned char)__u_h[__u_j];
-    }
-}
+static void cx_sha256(const void *__u_buf, size_t __u_len, unsigned char __u_md[32]) { unisa_sha256(__u_buf, __u_len, __u_md); }
 #endif
-
 #if !__UNISA_FTRIM_LIBC || __UN_cx_sha256_hex
-static void cx_sha256_hex(const void *__u_buf, size_t __u_len, char __u_hex[65]) {
-    unsigned char __u_md[32]; int __u_i;
-    cx_sha256(__u_buf, __u_len, __u_md);
-    for (__u_i = 0; __u_i < 32; __u_i++) {
-        __u_hex[2*__u_i] = "0123456789abcdef"[__u_md[__u_i] >> 4];
-        __u_hex[2*__u_i+1] = "0123456789abcdef"[__u_md[__u_i] & 15];
-    }
-    __u_hex[64] = 0;
-}
+static void cx_sha256_hex(const void *__u_buf, size_t __u_len, char __u_hex[65]) { unisa_sha256_hex(__u_buf, __u_len, __u_hex); }
 #endif
 /* 0.0.35 K0: argv processes (no /bin/sh; cx_run/cx_run_timeout above still use sh and are
    being retired) and a directory walk. */

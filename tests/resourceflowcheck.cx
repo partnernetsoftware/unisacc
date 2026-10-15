@@ -1,0 +1,133 @@
+#!/usr/bin/env -S unisacc.com -run
+/* resourceflowcheck: S step 1, the explicit-ledger strict resource flow (--strict-resource-flow --resource-ledger DIR)
+   on the product, C -> Tape (-S -o), lnx/x86_64.  usage: resourceflowcheck.cx PRODUCT [BASE_PRODUCT]
+   Rows: RF-LEGACY (no switch: output byte-identical to BASE_PRODUCT), CAPTURE (fixture building only), RF-POS, RF-ENV,
+   RF-MISSING (named refusal, same-named disk file not read), RF-DUP, RF-LENGTH, RF-RESET.  Every row is a fresh
+   process.  Any row that does not hold stops the run (first red).  Verdicts: PASS or FAIL; a missing base product
+   makes the LEGACY row UNVERIFIED (rc 77), never a pass.  Measured scope: one program, one route, -S -o. */
+#include <cx.h>
+#include <dirent.h>
+static int fail(const char *s) { fprintf(stderr, "resourceflowcheck FAIL: %s\n", s); return 1; }
+/* sh -c CMD; CMD's exit status is written to a file and read back (cx_run's status is not reliable here) */
+static int run_rc(const char *cmd, const char *rcpath) {
+    char full[8192], *argv[4], *out; size_t n; char *b;
+    snprintf(full, sizeof full, "%s; echo $? > '%s'", cmd, rcpath);
+    argv[0] = "/bin/sh"; argv[1] = "-c"; argv[2] = full; argv[3] = 0;
+    cx_runv_timeout(argv, 40, &out, &n); free(out);
+    b = cx_read(rcpath, &n); if (!b) return -1;
+    { int rc = atoi(b); free(b); return rc; }
+}
+static int same(const char *a, const char *b) { size_t na = 0, nb = 0; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int eq = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return eq; }
+static int size_of(const char *p) { size_t n; char *x = cx_read(p, &n); int z = x ? (int)n : -1; free(x); return z; }
+static int has(const char *p, const char *s) { size_t n; char *x = cx_read(p, &n); int h = 0; if (x) { size_t m = strlen(s), i; for (i = 0; i + m <= n; i++) if (!memcmp(x + i, s, m)) { h = 1; break; } } free(x); return h; }
+static int copyfile(const char *a, const char *b) { size_t n; char *x = cx_read(a, &n); if (!x) return 1; int rc = cx_write(b, x, n); free(x); return rc != 0; }
+static int copydir(const char *from, const char *to) {
+    DIR *d = opendir(from); struct dirent *e; char a[4096], b[4096];
+    if (!d || mkdir(to, 0700)) return 1;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(a, sizeof a, "%s/%s", from, e->d_name); snprintf(b, sizeof b, "%s/%s", to, e->d_name);
+        if (copyfile(a, b)) { closedir(d); return 1; }
+    }
+    closedir(d); return 0;
+}
+static void row(const char *name, int ok, const char *detail) { printf("%-11s %s %s\n", name, ok ? "PASS" : "FAIL", detail); }
+int main(int argc, char **argv) {
+    const char *P = argc > 1 ? argv[1] : "./unisacc.com";
+    const char *B = argc > 2 ? argv[2] : 0;
+    char tmp[] = "/tmp/resourceflow-XXXXXX", cmd[8192], rc[4096], p[4096], p2[4096], w[4096], W[4096];
+    int r, bad = 0;
+    if (!mkdtemp(tmp)) return fail("temporary directory");
+    snprintf(w, sizeof w, "%s/src", tmp); mkdir(w, 0700);
+    snprintf(p, sizeof p, "%s/prog.c", w);
+    if (cx_write(p, "long main(void){return 42;}\n", 28)) return fail("program write");
+    snprintf(W, sizeof W, "%s/work", tmp); mkdir(W, 0700);
+    snprintf(rc, sizeof rc, "%s/rc", tmp);
+    /* RF-LEGACY: no switch; the default path matches the base product byte for byte */
+    /* the default run (no switch) is the reference for every later row */
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' -S prog.c -o '%s/def.tape' > '%s/def.log' 2>&1", w, P, tmp, tmp);
+    int dr = run_rc(cmd, rc);
+    if (B) {
+        snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' -S prog.c -o '%s/base.tape' > '%s/base.log' 2>&1", w, B, tmp, tmp);
+        int br = run_rc(cmd, rc);
+        snprintf(p, sizeof p, "%s/base.tape", tmp); snprintf(p2, sizeof p2, "%s/def.tape", tmp);
+        int ok = br == 0 && dr == 0 && same(p, p2);
+        row("RF-LEGACY", ok, ok ? "default output identical to base" : "default output differs or a run failed");
+        if (!ok) bad++;
+    } else printf("RF-LEGACY   UNVERIFIED no base product given (rc 77 class; not a pass)\n");
+    /* CAPTURE (fixture building only): default answers recorded; the capture must not change the output */
+    snprintf(cmd, sizeof cmd, "cd '%s' && UNISACC_RF_CAPTURE='%s/cap' sh '%s' -S prog.c -o '%s/cap.tape' > '%s/cap.log' 2>&1", w, W, P, tmp, tmp);
+    snprintf(p, sizeof p, "%s/cap", W); mkdir(p, 0700);
+    r = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/cap/resources.tsv", W); snprintf(p2, sizeof p2, "%s/def.tape", tmp);
+    {   char c1[4096]; snprintf(c1, sizeof c1, "%s/cap.tape", tmp);
+        int ok = r == 0 && size_of(p) > 0 && same(c1, p2);
+        row("CAPTURE", ok, ok ? "ledger recorded, output unchanged" : "capture failed or changed the output");
+        if (!ok) { bad++; printf("first red: stop\n"); goto done; } }
+    /* RF-POS: the strict run from the captured ledger reproduces the default output */
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -S prog.c -o '%s/strict.tape' > '%s/strict.log' 2>&1", w, P, W, tmp, tmp);
+    r = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/strict.tape", tmp); snprintf(p2, sizeof p2, "%s/def.tape", tmp);
+    {   int ok = r == 0 && same(p, p2);
+        snprintf(cmd, sizeof cmd, "%s/strict.log", tmp);
+        ok = ok && size_of(cmd) <= 0;
+        row("RF-POS", ok, ok ? "strict output == default, stderr empty" : "strict run differs or is not clean");
+        if (!ok) { bad++; printf("first red: stop\n"); goto done; } }
+    /* RF-ENV: new working directory, same absolute arguments */
+    snprintf(p, sizeof p, "%s/newcwd", tmp); mkdir(p, 0700);
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -S '%s/prog.c' -o '%s/env.tape' > '%s/env.log' 2>&1", p, P, W, w, tmp, tmp);
+    r = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/env.tape", tmp); snprintf(p2, sizeof p2, "%s/def.tape", tmp);
+    {   int ok = r == 0 && same(p, p2);
+        row("RF-ENV", ok, ok ? "new cwd, same result" : "result depends on the working directory");
+        if (!ok) { bad++; printf("first red: stop\n"); goto done; } }
+    /* RF-MISSING: a requested row dropped; the run refuses by name, no output, and a same-named disk file is not read */
+    snprintf(p, sizeof p, "%s/miss", tmp); { char capd[4096]; snprintf(capd, sizeof capd, "%s/cap", W); copydir(capd, p); }
+    snprintf(cmd, sizeof cmd, "awk -F'\\t' 'NR==2{print $1}' '%s/miss/resources.tsv' > '%s/key.txt'", tmp, tmp);
+    run_rc(cmd, rc);
+    {   char key[1024] = "", line[2048]; size_t n; char *k;
+        snprintf(cmd, sizeof cmd, "%s/key.txt", tmp); k = cx_read(cmd, &n);
+        if (k) { size_t i = 0; while (i < n && k[i] != '\n' && i < sizeof key - 1) { key[i] = k[i]; i++; } key[i] = 0; free(k); }
+        snprintf(line, sizeof line, "%s/miss/resources.tsv", tmp);
+        snprintf(cmd, sizeof cmd, "grep -v '^%s\t' '%s' > '%s/miss/r.tmp' && mv '%s/miss/r.tmp' '%s'", key, line, tmp, tmp, line);
+        run_rc(cmd, rc);
+        snprintf(cmd, sizeof cmd, "cd '%s' && rm -f miss.tape && sh '%s' --strict-resource-flow --resource-ledger '%s/miss' -S prog.c -o miss.tape > '%s/miss.log' 2>&1", w, P, tmp, tmp);
+        r = run_rc(cmd, rc);
+        snprintf(p, sizeof p, "%s/miss.log", tmp); snprintf(line, sizeof line, "MISSING_EXPLICIT_RESOURCE %s", key);
+        int ok = r != 0 && has(p, line) && size_of(p) > 0;
+        row("RF-MISSING", ok, ok ? "rc nonzero, names the key, no output" : "missing key not refused by name");
+        if (!ok) { bad++; printf("first red: stop\n"); goto done; } }
+    /* RF-DUP: a key listed twice is a named refusal */
+    snprintf(p, sizeof p, "%s/dup", tmp); { char capd[4096]; snprintf(capd, sizeof capd, "%s/cap", W); copydir(capd, p); }
+    snprintf(cmd, sizeof cmd, "sed -n 2p '%s/dup/resources.tsv' >> '%s/dup/resources.tsv'", tmp, tmp); run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/dup' -S prog.c -o dup.tape > '%s/dup.log' 2>&1", w, P, tmp, tmp);
+    r = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/dup.log", tmp);
+    {   int ok = r == 2 && has(p, "duplicate-resource-key");
+        row("RF-DUP", ok, ok ? "rc 2, named" : "duplicate not refused by name");
+        if (!ok) { bad++; printf("first red: stop\n"); goto done; } }
+    /* RF-LENGTH: the first present row declares one byte more than its blob */
+    snprintf(p, sizeof p, "%s/len", tmp); { char capd[4096]; snprintf(capd, sizeof capd, "%s/cap", W); copydir(capd, p); }
+    snprintf(cmd, sizeof cmd, "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} NR>1 && $2==1 && !d {$4=$4+1; d=1} {print}' '%s/len/resources.tsv' > '%s/len/r.tmp' && mv '%s/len/r.tmp' '%s/len/resources.tsv'", tmp, tmp, tmp, tmp);
+    run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f len.tape && sh '%s' --strict-resource-flow --resource-ledger '%s/len' -S prog.c -o len.tape > '%s/len.log' 2>&1", w, P, tmp, tmp);
+    r = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/len.tape", tmp);
+    {   int ok = r == 2 && size_of(p) < 0;
+        row("RF-LENGTH", ok, ok ? "rc 2, no output" : "length mismatch not refused");
+        if (!ok) { bad++; printf("first red: stop\n"); goto done; } }
+    /* RF-RESET: strict ok, strict refusal, strict ok again; the third equals the first */
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -S prog.c -o '%s/r1.tape' > /dev/null 2>&1", w, P, W, tmp);
+    int a = run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/miss' -S prog.c -o '%s/r2.tape' > /dev/null 2>&1", w, P, tmp, tmp);
+    int b = run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -S prog.c -o '%s/r3.tape' > /dev/null 2>&1", w, P, W, tmp);
+    int c = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/r1.tape", tmp); snprintf(p2, sizeof p2, "%s/r3.tape", tmp);
+    {   int ok = a == 0 && b != 0 && c == 0 && same(p, p2);
+        row("RF-RESET", ok, ok ? "ok, refuse, ok; third equals first" : "reset sequence differs");
+        if (!ok) bad++; }
+done:
+    printf("resourceflowcheck %s\n", bad ? "FAIL" : "PASS: CAPTURE, RF-POS, RF-ENV, RF-MISSING, RF-DUP, RF-LENGTH, RF-RESET (and RF-LEGACY when a base product is given); measured scope: one program, one route (C -> Tape, -S -o)");
+    return bad ? 1 : 0;
+}

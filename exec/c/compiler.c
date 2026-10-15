@@ -471,6 +471,22 @@ static int forward_exec(const Buf *image,char **argv) {
 #endif
 
 int main(int argc, char **argv) {
+    /* S step 1 (opt-in, non-stable CLI): --strict-resource-flow --resource-ledger DIR are taken out of argv first, so the
+       option loops below never see the ledger directory as a source. */
+    {   int w = 1;
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i],"--strict-resource-flow")) { RF_STRICT = 1; continue; }
+            if (!strcmp(argv[i],"--resource-ledger")) {
+                char err[512];
+                if (i + 1 >= argc) { fprintf(stderr, "unisacc: --resource-ledger needs DIR\n"); return 2; }
+                if (rl_load(argv[++i], &RF_LEDGER, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
+                RF_LOADED = 1; continue;
+            }
+            argv[w++] = argv[i];
+        }
+        argc = w; argv[argc] = 0;
+        if (RF_STRICT && !RF_LOADED) { fprintf(stderr, "unisacc: --strict-resource-flow needs --resource-ledger DIR\n"); return 2; }
+    }
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
     int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0, defrun=0;

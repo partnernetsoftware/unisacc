@@ -25,6 +25,7 @@ hostcheck seedmemory stagelog exittable h1source warmup gate-infra-38 installpai
 watchdog-orphan watchdog-eof watchdog-success
 stage-contract-e1e3
 latebind-p6
+resourceflow
 """.split())   # 0.0.38 P1-P7 pipeline contracts
 CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "tools-")
 
