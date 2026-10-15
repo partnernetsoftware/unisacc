@@ -79,6 +79,9 @@ O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
 # Snapshots (<job>.snapshot: ps -eo pid,stat,etime,args + uptime) are diagnostics: they list other processes
 # and their arguments.  Never upload them as CI artifacts and never send them outside the host.
 TD="$O.timing"; mkdir -p "$TD"   # timing sidecars: outside $O, which holds exactly the job results
+# monotonic seconds for every duration (CLOCK_MONOTONIC, not moved by a wall-clock step).
+# The wall clock (date +%s) is only recorded beside it, for comparison.  A 440 s wall reading against 37 s monotonic is a step.
+mono() { python3 -c 'import time;print("%.3f" % time.monotonic())'; }   # CLOCK_MONOTONIC, the same clock gatesummary.sh subtracts from
 TC=$(ls tests/c/*.c)
 n=0; PIDS=
 job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
@@ -163,21 +166,21 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     # Timing sidecar (research/c43-watchdog-402s.md section 4): start, bound return, the subshell's end, and a
     # snapshot only when the job is still alive at GATE_SNAPSHOT_SECS (default 70; the job bound is 60).  The
     # job file keeps its one-line contract (tests/gatesummary.sh reads it); the timing goes to $f.timing.
-    ( t0=$(date +%s); tb_=$(basename "$f"); tmp="$TD/$tb_.run"
+    ( t0=$(mono); w0=$(date +%s); tb_=$(basename "$f"); tmp="$TD/$tb_.run"
       python3 "$R/tests/bound.py" 60 env "$@" > "$tmp" 2>&1 & jp=$!
       ( sp=; trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; exit 0' TERM
         sleep "${GATE_SNAPSHOT_SECS:-70}" & sp=$!; wait "$sp"
         if kill -0 "$jp" 2>/dev/null; then { ps -eo pid,stat,etime,args; echo "uptime: $(uptime)"; } > "$TD/$tb_.snapshot" 2>&1; fi ) & wp=$!
-      wait "$jp"; rc=$?; tb=$(date +%s)
+      wait "$jp"; rc=$?; tb=$(mono); wb=$(date +%s)
       kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null
       out=$(cat "$tmp")
-      printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(( tb-t0 ))" \
+      printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(awk "BEGIN{printf \"%d\", $tb - $t0}")" \
           "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f"
-      printf 'start=%s bound_return=%s bound_rc=%s subshell_end=%s\n' "$t0" "$tb" "$rc" "$(date +%s)" > "$TD/$tb_.timing"
+      printf 'start=%s bound_return=%s bound_rc=%s subshell_end=%s wall_start=%s wall_return=%s\n' "$t0" "$tb" "$rc" "$(mono)" "$w0" "$wb" > "$TD/$tb_.timing"
       rm -f "$tmp" ) &
     PIDS="$PIDS $!"
 }
-T0=$(date +%s)
+T0=$(mono)
 # longest first, so the tail of the run is short
 job tools-1     env SHARD=1/3 ./tests/tools.sh   # 0.0.34 rc4: the single job ran 42.9-51.1 s against 51
 job tools-2     env SHARD=2/3 ./tests/tools.sh   # 0.0.35 P10: regex2 alone takes 29 s; 2/2 was 36 s against 49 (26%); 2/3 is 33 s

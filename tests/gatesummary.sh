@@ -5,10 +5,10 @@
 # suite or no files at all is a failure.  Prints the summary; exits 1 if anything failed, 4 if any unverified
 # (77) and none failed, else 0.
 set -u
-O=${1:?result dir}; T0=${2:-$(date +%s)}
+O=${1:?result dir}; T0=${2:-$(python3 -c 'import time;print("%.3f" % time.monotonic())')}
 python3 - "$O" "$T0" <<'PY'
 import os, re, sys, time
-d, t0 = sys.argv[1], int(sys.argv[2])
+d, t0 = sys.argv[1], float(sys.argv[2])
 head = re.compile(r'^(\S+) +rc=(\d+) ')
 files = sorted(os.listdir(d)) if os.path.isdir(d) else []
 bad = unverified = 0; seen = set(); why = []
@@ -25,6 +25,6 @@ for f in files:
     elif rc != 0: bad += 1
 if not files: bad += 1; why.append('no result files (nothing was checked)')
 for w in why: print('gate: ' + w)
-print('gate  suites %d   failed %d   unverified %d   %ds wall' % (len(files), bad, unverified, int(time.time()) - t0))
+print('gate  suites %d   failed %d   unverified %d   %ds wall' % (len(files), bad, unverified, int(time.monotonic() - t0)))
 sys.exit(1 if bad else 4 if unverified else 0)
 PY
