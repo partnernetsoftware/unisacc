@@ -1,0 +1,202 @@
+#!/usr/bin/env -S unisacc.com -run
+/* resourceflowcheck DRAFT (research only; not registered, not in any gate).  S step 1 probes per
+   research/c43-stream-interface-S-step1.md (14fd4670) section 6.
+   usage: resourceflowcheck.cx --fixture DIR --product PATH        (run from the repository root)
+   Oracle rows drive the S replay runner (tests/middleflowrunner.c, unchanged) on the frozen fixture: they measure
+   the ledger semantics the strict product mode must match.  Product rows (--strict-resource-flow) run only when
+   PRODUCT --help advertises the flag; this draft has no invocation for it, so they report PENDING and never PASS.
+   Verdicts: PASS (oracle prediction held), UNKNOWN (no prediction; recorded), PENDING (not run), FAIL (stop). */
+#include <cx.h>
+#include <dirent.h>
+static int nPass, nUnknown, nPending;
+static const char *g_runner, *g_sha;
+static int fail(const char *s) { fprintf(stderr, "resourceflowcheck FAIL: %s\n", s); return 1; }
+static int copyfile(const char *a, const char *b) { size_t n; char *x = cx_read(a, &n); if (!x) return 1; int rc = cx_write(b, x, n); free(x); return rc != 0; }
+static int same(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int eq = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return eq; }
+static int copydir(const char *from, const char *to) {
+    DIR *d = opendir(from); struct dirent *e; char a[4096], b[4096];
+    if (!d || mkdir(to, 0700)) return 1;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(a, sizeof a, "%s/%s", from, e->d_name); snprintf(b, sizeof b, "%s/%s", to, e->d_name);
+        if (copyfile(a, b)) { closedir(d); return 1; }
+    }
+    closedir(d); return 0;
+}
+static int shell(const char *cmd, int secs) { char *argv[] = {"/bin/sh", "-c", (char *)cmd, 0}; char *out; size_t n; return cx_runv_timeout(argv, secs, &out, &n); }
+static int contains(const char *b, size_t n, const char *s) { size_t m = strlen(s), i; for (i = 0; i + m <= n; i++) if (!memcmp(b + i, s, m)) return 1; return 0; }
+static int file_has(const char *path, const char *s) { size_t n; char *x = cx_read(path, &n); int h = x && contains(x, n, s); free(x); return h; }
+static int filesize(const char *path) { size_t n; char *x = cx_read(path, &n); int z = x ? (int)n : -1; free(x); return z; }
+/* replay through the S runner.  PREFIX.out stdout, PREFIX.stderr diagnostics (and the trace when TRACED), rc returned (-1 none).
+   CWD, when set, is the directory the runner starts in; the arguments stay absolute. */
+static int replay(const char *model, const char *data, const char *prefix, int traced, const char *cwd, int secs) {
+    char cmd[8192], rcpath[4096], *b; size_t n;
+    snprintf(cmd, sizeof cmd, "%s%s%s MF_MODEL_SHA256=%s %s%s replay \"%s\" \"%s\" \"%s\" > \"%s.out\"; echo $? > \"%s.rc\"",
+             cwd ? "cd \"" : "", cwd ? cwd : "", cwd ? "\" && " : "", g_sha, traced ? "MF_TRACE=1 " : "", g_runner, model, data, prefix, prefix, prefix);
+    shell(cmd, secs);
+    snprintf(rcpath, sizeof rcpath, "%s.rc", prefix); b = cx_read(rcpath, &n);
+    if (!b) return -1;
+    { int r = atoi(b); free(b); return r; }
+}
+static void verdict(const char *tag, const char *row, const char *what) {
+    printf("%-8s %-12s %s\n", tag, row, what);
+    if (!strcmp(tag, "PASS")) nPass++; else if (!strcmp(tag, "UNKNOWN")) nUnknown++; else if (!strcmp(tag, "PENDING")) nPending++;
+}
+/* the flag is advertised only if PRODUCT --help names it; nothing is assumed */
+static int product_advertises(const char *product, const char *tmp) {
+    char cmd[8192], help[4096];
+    snprintf(help, sizeof help, "%s/help.txt", tmp);
+    snprintf(cmd, sizeof cmd, "sh \"%s\" --help > \"%s\" 2>&1", product, help);
+    shell(cmd, 20);
+    return file_has(help, "--strict-resource-flow");
+}
+/* the first ledger row for KEY (hex) becomes ROW (or is dropped when ROW is NULL); returns rows matched, -1 on error */
+static int edit_row(const char *dir, const char *key, const char *row) {
+    char path[4096], *b, *p, *e; size_t n, on = 0; int matched = 0, done = 0;
+    char *out = malloc(1 << 20); snprintf(path, sizeof path, "%s/resources.tsv", dir);
+    b = cx_read(path, &n); if (!b || !out) return -1;
+    for (p = b; p < b + n;) {
+        e = memchr(p, '\n', (b + n) - p); size_t L = e ? (size_t)(e - p) + 1 : (size_t)((b + n) - p);
+        if (!strncmp(p, key, strlen(key)) && p[strlen(key)] == '\t') {
+            matched++;
+            if (!done && row) { size_t rl = strlen(row); memcpy(out + on, row, rl); on += rl; out[on++] = '\n'; }
+            done = 1;
+        } else { memcpy(out + on, p, L); on += L; }
+        p = p + L;
+    }
+    int rc = cx_write(path, out, on); free(b); free(out);
+    return rc ? -1 : matched;
+}
+static int append_row(const char *dir, const char *row) {
+    char path[4096], *b, *out; size_t n, rl = strlen(row);
+    snprintf(path, sizeof path, "%s/resources.tsv", dir);
+    b = cx_read(path, &n); if (!b) return -1;
+    out = malloc(n + rl + 1); if (!out) { free(b); return -1; }
+    memcpy(out, b, n); memcpy(out + n, row, rl); out[n + rl] = '\n';
+    int rc = cx_write(path, out, n + rl + 1); free(b); free(out);
+    return rc ? -1 : 0;
+}
+/* "name<TAB>value" from the fixture's boundary.tsv */
+static int field_value(const char *dir, const char *name, char *out, size_t sz) {
+    char path[4096], *t; size_t n, nl = strlen(name); const char *p, *e;
+    snprintf(path, sizeof path, "%s/boundary.tsv", dir); t = cx_read(path, &n); if (!t) return -1;
+    for (p = t, e = t + n; p < e;) {
+        const char *q = memchr(p, '\n', e - p); size_t L = q ? (size_t)(q - p) : (size_t)(e - p);
+        if (L > nl && !memcmp(p, name, nl) && p[nl] == '\t' && L - nl - 1 < sz) { memcpy(out, p + nl + 1, L - nl - 1); out[L - nl - 1] = 0; free(t); return 0; }
+        p = q ? q + 1 : e;
+    }
+    free(t); return -1;
+}
+int main(int argc, char **argv) {
+    char tmp[] = "/tmp/resourceflow-XXXXXX", fixture[4096] = "", product[4096] = "", key[1025], sha[65], model_name[256];
+    char runner[4096], model[4096], accept[4096], dir[4096], pre[4096], path[4096], row[512], want[1200], absent[4096];
+    int i, rc, arc, erc, prc;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--fixture") && i + 1 < argc) snprintf(fixture, sizeof fixture, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) snprintf(product, sizeof product, "%s", argv[++i]);
+        else return fail("usage: resourceflowcheck.cx --fixture DIR --product PATH");
+    }
+    if (!*fixture || !*product) return fail("usage: resourceflowcheck.cx --fixture DIR --product PATH");
+    /* the runner may start in another directory (RF-ENV): every path handed to it is absolute */
+    if (fixture[0] != '/') { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) return fail("getcwd"); char abs[4096]; snprintf(abs, sizeof abs, "%s/%s", cwd, fixture); snprintf(fixture, sizeof fixture, "%s", abs); }
+    if (!mkdtemp(tmp)) return fail("temporary directory");
+    if (field_value(fixture, "key", key, sizeof key) || field_value(fixture, "sha256", sha, sizeof sha) || field_value(fixture, "model", model_name, sizeof model_name))
+        return fail("boundary.tsv incomplete");
+    g_sha = sha;
+    snprintf(accept, sizeof accept, "%s/accept", fixture); snprintf(model, sizeof model, "%s/%s", fixture, model_name);
+    snprintf(runner, sizeof runner, "%s/runner", tmp); g_runner = runner;
+    snprintf(path, sizeof path, "cc -std=gnu99 -O2 -w -o \"%s\" tests/middleflowrunner.c exec/c/core.c", runner);
+    shell(path, 55);
+    if (filesize(runner) < 0) return fail("oracle runner build (run from the repository root)");
+
+    /* RF-POS oracle: the accept capture reproduces output.bytes byte for byte */
+    snprintf(pre, sizeof pre, "%s/pos", tmp);
+    if (replay(model, accept, pre, 0, 0, 20) != 0) return fail("RF-POS oracle did not accept");
+    snprintf(path, sizeof path, "%s/output.bytes", accept);
+    { char o[4096]; snprintf(o, sizeof o, "%s.out", pre); if (!same(o, path)) return fail("RF-POS oracle stdout differs from output.bytes"); }
+    verdict("PASS", "RF-POS", "oracle: accept reproduces output.bytes");
+
+    /* RF-MISSING oracle: the requested key's row is dropped; a same-named decoy file on disk must not rescue it */
+    snprintf(dir, sizeof dir, "%s/missing", tmp); snprintf(pre, sizeof pre, "%s/missing", tmp);
+    if (copydir(accept, dir)) return fail("missing copy");
+    snprintf(path, sizeof path, "%s/%s", dir, key); if (cx_write(path, "DECOY", 5)) return fail("decoy write");
+    if (edit_row(dir, key, 0) != 1) return fail("RF-MISSING expected exactly one row dropped");
+    rc = replay(model, dir, pre, 0, 0, 10);
+    snprintf(want, sizeof want, "MISSING_EXPLICIT_RESOURCE %s", key);
+    snprintf(path, sizeof path, "%s.stderr", pre);
+    if (rc != 2 || !file_has(path, want)) return fail("RF-MISSING oracle must refuse rc 2 naming the key (the decoy must not rescue it)");
+    verdict("PASS", "RF-MISSING", "oracle: rc 2 naming the key; same-named disk decoy not read");
+
+    /* RF-ABSENT oracle: the key answered ABSENT; the outcome is the stage's, recorded (UNKNOWN) */
+    snprintf(dir, sizeof dir, "%s/absent", tmp); snprintf(absent, sizeof absent, "%s/absent", tmp);
+    if (copydir(accept, dir)) return fail("absent copy");
+    snprintf(row, sizeof row, "%s\t0\t-\t0\t-", key);
+    if (edit_row(dir, key, row) != 1) return fail("RF-ABSENT expected one row");
+    arc = replay(model, dir, absent, 1, 0, 10);
+    snprintf(path, sizeof path, "%s.stderr", absent);
+    if (file_has(path, "MISSING_EXPLICIT_RESOURCE")) return fail("RF-ABSENT reported as missing (an answered absence must not be missing)");
+    verdict("UNKNOWN", "RF-ABSENT", "oracle: absence answered, not missing; outcome is the stage's (recorded, not a pass)");
+
+    /* RF-EMPTY oracle: PRESENT zero-length stays present (the trace shows present 1 len 0) */
+    snprintf(dir, sizeof dir, "%s/empty", tmp); snprintf(pre, sizeof pre, "%s/empty", tmp);
+    if (copydir(accept, dir)) return fail("empty copy");
+    snprintf(path, sizeof path, "%s/resource-empty.bytes", dir); if (cx_write(path, "", 0)) return fail("empty blob write");
+    snprintf(row, sizeof row, "%s\t1\tresource-empty.bytes\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", key);
+    if (edit_row(dir, key, row) != 1) return fail("RF-EMPTY expected one row");
+    erc = replay(model, dir, pre, 1, 0, 10);
+    snprintf(path, sizeof path, "%s.stderr", pre);
+    if (!file_has(path, "present 1 len 0")) return fail("RF-EMPTY trace does not show a present zero-length answer");
+    { char a[4096], c[4096]; snprintf(a, sizeof a, "%s.out", pre); snprintf(c, sizeof c, "%s.out", absent);
+      verdict("UNKNOWN", "RF-EMPTY", same(a, c) && erc == arc ? "oracle: present zero-length answered; stdout equals ABSENT here (not a claimed synonym)" : "oracle: present zero-length answered; differs from ABSENT here (recorded)"); }
+
+    /* RF-ENV oracle: a new working directory with the same absolute arguments does not change the result */
+    snprintf(dir, sizeof dir, "%s/newcwd", tmp); if (mkdir(dir, 0700)) return fail("newcwd");
+    snprintf(pre, sizeof pre, "%s/env", tmp);
+    rc = replay(model, accept, pre, 0, dir, 10);
+    snprintf(path, sizeof path, "%s/output.bytes", accept);
+    { char o[4096]; snprintf(o, sizeof o, "%s.out", pre); if (rc != 0 || !same(o, path)) return fail("RF-ENV oracle changed under a new working directory"); }
+    verdict("PASS", "RF-ENV", "oracle: new working directory, same absolute inputs, same stdout");
+
+    /* RF-DUP oracle: the same key twice with different answers refuses, naming the key */
+    snprintf(dir, sizeof dir, "%s/dup", tmp); snprintf(pre, sizeof pre, "%s/dup", tmp);
+    if (copydir(accept, dir)) return fail("dup copy");
+    snprintf(row, sizeof row, "%s\t0\t-\t0\t-", key);
+    if (append_row(dir, row)) return fail("dup append");
+    rc = replay(model, dir, pre, 0, 0, 10);
+    snprintf(path, sizeof path, "%s.stderr", pre);
+    if (rc != 2 || !file_has(path, "duplicate-resource-key")) return fail("RF-DUP oracle must refuse rc 2 by name");
+    verdict("PASS", "RF-DUP", "oracle: rc 2, duplicate-resource-key named");
+
+    /* RF-LENGTH oracle: the declared length (5) disagrees with the 4-byte blob */
+    snprintf(dir, sizeof dir, "%s/length", tmp); snprintf(pre, sizeof pre, "%s/length", tmp);
+    if (copydir(accept, dir)) return fail("length copy");
+    snprintf(path, sizeof path, "%s/resource-frame.bytes", dir); if (cx_write(path, "frame", 4)) return fail("frame blob write");
+    { char fsha[65]; cx_sha256_hex("frame", 4, fsha); snprintf(row, sizeof row, "%s\t1\tresource-frame.bytes\t5\t%s", key, fsha); }
+    if (edit_row(dir, key, row) != 1) return fail("RF-LENGTH expected one row");
+    rc = replay(model, dir, pre, 0, 0, 10);
+    if (rc != 2) return fail("RF-LENGTH oracle must refuse rc 2");
+    verdict("PASS", "RF-LENGTH", "oracle: rc 2 on declared length against the blob");
+
+    /* RF-RESET oracle: accept, refuse (the dropped-key ledger), accept again; the last equals the first */
+    snprintf(pre, sizeof pre, "%s/reset1", tmp);
+    if (replay(model, accept, pre, 0, 0, 10) != 0) return fail("RF-RESET first accept");
+    snprintf(dir, sizeof dir, "%s/missing", tmp); snprintf(path, sizeof path, "%s/reset2", tmp);
+    if (replay(model, dir, path, 0, 0, 10) != 2) return fail("RF-RESET refusal step did not refuse");
+    snprintf(pre, sizeof pre, "%s/reset3", tmp);
+    if (replay(model, accept, pre, 0, 0, 10) != 0) return fail("RF-RESET third accept");
+    { char a[4096], c[4096]; snprintf(a, sizeof a, "%s/reset1.out", tmp); snprintf(c, sizeof c, "%s/reset3.out", tmp);
+      if (!same(a, c)) return fail("RF-RESET third accept differs from the first"); }
+    verdict("PASS", "RF-RESET", "oracle: accept, refuse, accept; the last equals the first");
+
+    /* product rows: PENDING unless PRODUCT --help advertises the flag; the draft has no invocation for it yet */
+    prc = product_advertises(product, tmp);
+    {
+        static const char *rows[] = {"RF-POS", "RF-MISSING", "RF-ABSENT", "RF-EMPTY", "RF-ENV", "RF-DUP", "RF-LENGTH", "RF-STAGE", "RF-RESET", "RF-LEGACY"};
+        for (i = 0; i < 10; i++) {
+            if (!prc) verdict("PENDING", rows[i], "product: --strict-resource-flow not advertised by PRODUCT --help (not faked)");
+            else verdict("PENDING", rows[i], "product: flag advertised, but this draft has no invocation written yet");
+        }
+    }
+    printf("resourceflowcheck summary: oracle PASS %d, UNKNOWN %d; product PENDING %d (PENDING is never a pass)\n", nPass, nUnknown, nPending);
+    return 0;
+}
