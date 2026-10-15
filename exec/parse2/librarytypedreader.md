@@ -1,4 +1,4 @@
-# Typed USLCON reader (2c2, reader commit only)
+# Typed USLCON reader and terminal wrapper overlay (2c2)
 
 The default parse2 entry is unchanged. `parse2/librarytyped --librarytyped`
 constructs an opt-in overlay at the existing USLCON reader installation point.
@@ -15,11 +15,22 @@ retains the existing LX.signature / MG.compatible source-prototype check.
 Provider addresses are absent. PLAN and DISPATCH are zero, and the stable ID uses
 an independent bank; the ordinary-function and data side streams stay untouched.
 
-This commit does NOT install the tail overlay. Its old tail still emits dispatch
-literal zero. The self-test executes only the model and observes this unconnected
-metadata; its output must never be executed or described as a usable typed closure.
-The later overlay will replace the literal with libraryfn; the later binding step
-must construct the native plan and closure. No P1–P6 or full ABI proof is claimed.
+The reader-only commit left the old dispatcher literal zero. The subsequent
+terminal overlay now replaces that literal with `.libraryfn r1, ID` and bypasses
+only the old alias route for the new typed ID. It reuses the existing frame and
+tail, preserving PLAN=0; it does not instantiate a native plan or closure. Its
+main-only typed wrapper is not executable before the later lower/binding work.
+No P1–P6 or full ABI proof is claimed.
+
+`librarytypedoverlaycheck.cx` extracts actual symbol256 references from the E3
+output: a typed dispatcher site claims logical consumer8; an ordinary side
+fragment claims consumer1 and must exactly mirror its main wrapper. That mirror
+is one consumer, not two. Each observed claim is fed to the partition model in
+audit2 mode and checked against its reference; crossed claims and mask9 refuse.
+These are one typed and one ordinary emitted-symbol witnesses, not a proof for
+arbitrary declarations or lower consumers. The ordinary control uses a captured
+complete E1 UNITOK/sourcefacts frame; its side matches the existing reference,
+and A/B observations must preserve the full E3 output.
 
 ## Reproduction (each command separately bounded to 58 seconds)
 
@@ -33,6 +44,7 @@ tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-tables-o
 tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-net-base
 tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-net-off
 tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-typed
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-audit
 tests/bound 58 ./tests/gate.sh --suite exec-librarytypedreader-model
 ```
 

@@ -1,10 +1,10 @@
 #!/bin/sh
-# Reader only: staged preparation prevents hiding cold construction in a 58s job.
+# Reader+overlay: staged preparation prevents hiding cold construction in a 58s job.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 b(){ "$R/tests/bound" 55 "$@"; }
 UA=${MODEL_COM:-$R/unisacc.com}
-K=$({ rg --files exec seed unisa include | rg '\.(tsv|py|c|h|sh|inc|json)$' | LC_ALL=C sort | xargs sha256sum; sha256sum tests/librarytypedreadercheck.cx tests/librarytypedreader-cases.tsv; cc --version; printf '%s\n' "$R"; } | sha256sum | cut -d' ' -f1)
+K=$({ rg --files exec seed unisa include | rg '\.(tsv|py|c|h|sh|inc|json)$' | LC_ALL=C sort | xargs sha256sum; sha256sum tests/librarytypedreadercheck.cx tests/librarytypedreader-cases.tsv tests/librarytypedoverlaycheck.cx tests/librarytypedoverlay-ordinary.tsv; cc --version; printf '%s\n' "$R"; } | sha256sum | cut -d' ' -f1)
 D=${TMPDIR:-/tmp}/unisacc-librarytypedreader-$K
 mkdir -p "$D"
 check(){ b sh "$UA" -run tests/librarytypedreadercheck.cx -- "$@"; }
@@ -62,6 +62,15 @@ case ${1:-check} in
  check --same "$D/base.net" "$D/off.net" >"$D/base-off-net.log"
  (cd "$D" && sha256sum -c --status base-c.sha256 && sha256sum -c --status base-off.sha256 && sha256sum -c --status base-reference.sha256 && sha256sum -c --status base-tables-base.sha256 && sha256sum -c --status base-tables-off.sha256 && sha256sum -c --status base-net-base.sha256 && sha256sum base.json base.tbl base.net off.json off.tbl off.net off-c.json >base.sha256)
  ;;
+--prepare-audit)
+ (cd "$D" && sha256sum -c --status tools.sha256)
+ b "$D/gen" librarytypedpartition/gen "$D/audit-c.json"
+ b python3 exec/build/gen.py librarytypedpartition/gen "$D/audit.json"
+ check --same "$D/audit-c.json" "$D/audit.json"
+ b python3 exec/c/tbl.py "$D/audit.json" "$D/audit.tbl"
+ b python3 exec/c/net.py "$D/audit.tbl" "$D/audit.net"
+ (cd "$D" && sha256sum audit-c.json audit.json audit.tbl audit.net >audit.sha256)
+ ;;
 --prepare-typed)
  (cd "$D" && sha256sum -c --status tools.sha256)
  b "$D/gen" parse2/librarytyped "$D/typed-c.json" --librarytyped --locations
@@ -72,17 +81,18 @@ case ${1:-check} in
  (cd "$D" && sha256sum typed-c.json typed.json model.tbl model.net >typed.sha256)
  ;;
 check)
- for phase in tools base typed;do
+ for phase in tools base typed audit;do
   if ! (cd "$D" && sha256sum -c --status "$phase.sha256");then
    echo "reader: preparation unavailable/corrupt; run the preparation steps listed in exec/parse2/librarytypedreader.md as separate bounded commands" >&2;exit 2
   fi
  done
  T=$(mktemp -d "${TMPDIR:-/tmp}/librarytypedreader-check.XXXXXX")
  trap 'rm -rf "$T"' EXIT HUP INT TERM
- cp "$D/runner" "$D/model.tbl" "$D/model.net" "$T/"
+ cp "$D/runner" "$D/model.tbl" "$D/model.net" "$D/audit.net" "$T/"
  cp tests/librarytypedreader-cases.tsv "$T/cases.tsv"
  mkdir "$T/A" "$T/B"
  check "$T"
+ b sh "$UA" -run tests/librarytypedoverlaycheck.cx -- "$T"
  # parse2base.check must reject repeated P definitions in both constructors.
  set +e
  b "$D/gen" parse2/librarytypedduplicate "$T/duplicate-c.json" >"$T/duplicate-c.out" 2>"$T/duplicate-c.err";cr=$?

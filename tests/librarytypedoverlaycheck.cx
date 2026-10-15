@@ -1,0 +1,72 @@
+#include <cx.h>
+#include <stdint.h>
+/* Actual E3 consumer -> partition audit2. Narrow emitted-symbol witness only. */
+static uint64_t le(const char*p,int n){uint64_t v=0;for(int i=0;i<n;i++)v|=(uint64_t)(unsigned char)p[i]<<(8*i);return v;}
+static int hexfile(const char*p,const char*h){if(!strcmp(h,"-"))return cx_write(p,"",0);size_t n=strlen(h);if(n%2)return 2;char*b=malloc(n/2);for(size_t i=0;i<n;i+=2){unsigned v;if(sscanf(h+i,"%2x",&v)!=1)return 2;b[i/2]=v;}int r=cx_write(p,b,n/2);free(b);return r;}
+static int status(int r){if(r==124||r==142)return 142;if(r!=0&&r!=1)return 2;return 0;}
+static int occurrences(const char*b,const char*needle){int n=0;while((b=strstr(b,needle))){n++;b+=strlen(needle);}return n;}
+static int audit(const char*t,const char*contract,const char*out,size_t n,int expected){
+ size_t cn;char*c=cx_read(contract,&cn);if(!c||cn<52||le(c+12,4)!=1||le(c+20,4)!=256)return 2;
+ if(n<32||memcmp(out,"USTFLOW2",8))return 1;
+ size_t mn=le(out+8,8),fn=le(out+16,8),dn=le(out+24,8);if(mn+fn+dn!=n-32)return 1;
+ char*m=malloc(mn+1),*f=malloc(fn+1);memcpy(m,out+32,mn);m[mn]=0;memcpy(f,out+32+mn,fn);f[fn]=0;
+ const char*ref="  .libraryfn r1, 256\n";
+ /* Ordinary side is a projection of its main wrapper, not a second consumer.
+  * Identify typed by its frame dispatcher site, then require each remaining
+  * main reference to be exactly the ordinary side projection. */
+ int mainref=occurrences(m,ref),tm=occurrences(m,"  store64 [r7+40], r1\n  .libraryfn r1, 256\n"),fm=occurrences(f,ref),claim=(tm?8:0)|(fm?1:0);
+ if(mainref!=tm+fm||(fm&&(!fn||!strstr(m,f))))return 1;
+ if(tm+fm!=1||claim!=expected||dn){printf("CONTRACT_RED emitted owner main=%d side=%d expected=%d\n",tm,fm,expected);return 1;}
+ if(expected==8&&(!strstr(m,"  imm r1, 0\n  store64 [r7+0], r1\n")||!strstr(m,"  store64 [r7+40], r1\n  .libraryfn r1, 256\n  mov r0, r7\n  .librarycall r1, r0\n")))return 1;
+ char path[4096],mo[4096],me[4096],ro[4096],re[4096],cmd[24576];snprintf(path,sizeof path,"%s/audit.input",t);snprintf(mo,sizeof mo,"%s/audit.out",t);snprintf(me,sizeof me,"%s/audit.err",t);snprintf(ro,sizeof ro,"%s/audit.ref",t);snprintf(re,sizeof re,"%s/audit.referr",t);
+ char*b=malloc(cn+1);memcpy(b,c,cn);memcpy(b,"USLPAR1\n",8);b[10]=2;b[11]=3;
+ for(int pass=0;pass<3;pass++){
+  int want=pass!=0;b[cn]=pass==0?claim:pass==1?(claim==8?1:8):9;
+  if(cx_write(path,b,cn+1))return 2;
+  snprintf(cmd,sizeof cmd,"'%s/runner' '%s/audit.net' '%s' '%s' '%s/selection' '%s/attributes' '%s/mode' A >'%s' 2>'%s'",t,t,path,contract,t,t,t,mo,me);
+  int r=cx_run_timeout(cmd,3,0,0);int s=status(r);if(s)return s;
+  snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.librarytypedpartition import produce;sys.stdout.buffer.write(produce(open(sys.argv[1],\"rb\").read()))' '%s' >'%s' 2>'%s'",path,ro,re);
+  int rr=cx_run_timeout(cmd,3,0,0);s=status(rr);if(s)return s;
+  size_t on,en,rn;char*o=cx_read(mo,&on),*e=cx_read(me,&en),*refout=cx_read(ro,&rn);if(!o||!e||!refout)return 2;
+  if(r!=want||rr!=want||on!=rn||memcmp(o,refout,on)||(want&&(on||!strstr(e,pass==1?"wrong-owner":"duplicate-owner")))){printf("CONTRACT_RED audit2 actual-claim=%d mutation=%d model=%d ref=%d\n",claim,pass,r,rr);return 1;}
+  if(!want&&(on!=17||memcmp(o,"USLSEL1\n",8)||le(o+12,4)!=256||o[16]!=1))return 1;
+  free(o);free(e);free(refout);
+ }
+ free(b);free(c);free(m);free(f);printf("audit2 emitted symbol256 consumer%d: accept; crossed and mask9 refuse\n",claim);return 0;
+}
+int main(int argc,char**argv){
+ if(argc!=2)return 2;const char*t=argv[1];char file[4096],p[6][4096],cmd[24576];const char*names[]={"tokens","attributes","contract","selection","mode","out"};for(int i=0;i<6;i++)snprintf(p[i],4096,"%s/%s",t,names[i]);
+ snprintf(file,sizeof file,"%s/cases.tsv",t);size_t z;char*all=cx_read(file,&z);if(!all)return 2;int seen=0;
+ for(char*b=all;*b;){char*end=strchr(b,'\n');if(!end)return 2;*end=0;if(*b!='#'){
+  char*f[10];f[0]=b;int nf=1;for(char*q=b;*q;q++)if(*q=='\t'){*q=0;if(nf==10)return 2;f[nf++]=q+1;}
+  if(nf!=10)return 2;
+  if(!strcmp(f[0],"fixed-two-int")){
+   for(int i=0;i<5;i++)if(hexfile(p[i],f[i+1]))return 2;
+   snprintf(cmd,sizeof cmd,"'%s/runner' '%s/model.net' '%s' '%s' '%s' '%s' '%s' A >'%s' 2>'%s/err'",t,t,p[0],p[2],p[3],p[1],p[4],p[5],t);
+   int r=cx_run_timeout(cmd,3,0,0);if(r)return status(r)?status(r):1;size_t n;char*out=cx_read(p[5],&n);if(!out)return 2;r=audit(t,p[2],out,n,8);free(out);if(r)return r;seen++;
+  }
+ }b=end+1;}
+ free(all);if(seen!=1)return 1;
+ /* Ordinary control uses a captured complete E1 layout frame. */
+ all=cx_read("tests/librarytypedoverlay-ordinary.tsv",&z);if(!all)return 2;int ordinary=0;
+ for(char*b=all;*b;){char*end=strchr(b,'\n');if(!end)return 2;*end=0;
+  if(*b!='#'){char*f[5];f[0]=b;int nf=1;for(char*q=b;*q;q++)if(*q=='\t'){*q=0;if(nf==5)return 2;f[nf++]=q+1;}if(nf!=5)return 2;
+   if(hexfile(p[0],f[1])||hexfile(p[1],f[2])||hexfile(p[2],f[3]))return 2;
+   const char sel[17]={'U','S','L','S','E','L','1','\n',1,0,0,0,0,1,0,0,1};const char mode[8]={1};
+   if(cx_write(p[3],sel,17)||cx_write(p[4],mode,8))return 2;
+   char refpath[4096];snprintf(refpath,sizeof refpath,"%s/ordinary.expected",t);if(hexfile(refpath,f[4]))return 2;
+   snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.libraryfunctionimports import produce;sys.stdout.buffer.write(produce(open(sys.argv[1],\"rb\").read(),used=[\"hostadd\"]))' '%s' >'%s/ordinary.ref' 2>'%s/err'",p[2],t,t);
+   int rc=cx_run_timeout(cmd,3,0,0);if(rc)return status(rc)?status(rc):1;char rp[4096];snprintf(rp,sizeof rp,"%s/ordinary.ref",t);size_t wn,rn;char*w=cx_read(refpath,&wn),*rr=cx_read(rp,&rn);if(!w||!rr||wn!=rn||memcmp(w,rr,wn))return 1;free(rr);
+   char*first=NULL;size_t firstn=0;
+   for(int pass=0;pass<2;pass++){
+    snprintf(cmd,sizeof cmd,"'%s/runner' '%s/model.net' '%s' '%s' '%s' '%s' '%s' %s >'%s' 2>'%s/err'",t,t,p[0],p[2],p[3],p[1],p[4],pass?"B":"A",p[5],t);
+    rc=cx_run_timeout(cmd,3,0,0);if(rc){printf("ordinary E3 control rc%d\n",rc);return status(rc)?status(rc):1;}
+    size_t n;char*out=cx_read(p[5],&n);if(!out)return 2;if(n<32)return 1;size_t mn=le(out+8,8),fn=le(out+16,8);if(mn+fn>n-32||fn!=wn||memcmp(out+32+mn,w,wn))return 1;
+    rc=audit(t,p[2],out,n,1);if(rc)return rc;
+    if(!pass){first=malloc(n);memcpy(first,out,n);firstn=n;}else if(n!=firstn||memcmp(first,out,n))return 1;free(out);
+   }
+   free(first);free(w);ordinary++;
+  }b=end+1;
+ }
+ free(all);if(ordinary!=1)return 1;puts("overlay actual E3->audit2 typed+ordinary witnesses PASS; lower/binding/P1-P6 unproved");return 0;
+}

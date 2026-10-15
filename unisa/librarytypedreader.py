@@ -2,7 +2,8 @@
 
 Explicit source facts (used/defined/prototype-compatible) come from frozen E1
 fixtures. This does not parse C or certify the entire typed signature domain.
-The reader commit leaves the old wrapper tail unconnected (dispatch literal 0).
+The opt-in overlay replaces only the dispatcher literal with stable-ID libraryfn.
+PLAN remains zero; binding and lower consumption are not proved here.
 """
 import struct
 from .librarycontract import produce as validate
@@ -38,7 +39,7 @@ def produce(frame, selection, mode, source_state):
     text+="  store64 [r7+48], r0\n  store64 [r7+56], r1\n  imm r1, 0\n  store64 [r7+0], r1\n"
     text+="  imm r1, 48\n  add64 r1, r7, r1\n  store64 [r7+8], r1\n  imm r1, 64\n  add64 r1, r7, r1\n  store64 [r7+16], r1\n"
     text+="  imm r1, 2\n  store64 [r7+24], r1\n  imm r1, 0\n  store64 [r7+32], r1\n  imm r1, 0\n  store64 [r7+40], r1\n"
-    text+="  imm r1, 0\n  mov r0, r7\n  .librarycall r1, r0\n  load64 r1, [r7+16]\n  load64 r0, [r1+0]\n"
+    text+="  .libraryfn r1, 256\n  mov r0, r7\n  .librarycall r1, r0\n  load64 r1, [r7+16]\n  load64 r0, [r1+0]\n"
     text+="  .frame -72\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n"
     return text.encode()
 
