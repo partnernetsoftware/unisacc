@@ -57,10 +57,22 @@ static int drop_key(const char *dir, const char *key) {
 int main(int argc, char **argv) {
     char tmp[] = "/tmp/stagecontract-XXXXXX", ledger_blob[4096], runner[4096], accept[4096], model[4096], pos[4096], neg[4096], negdir[4096], reset[4096], cmd[8192], ledger[4096];
     int rc, removed; char *out; size_t n;
-    if (argc != 3 || strcmp(argv[1], "--fixture")) return fail("usage: stagecontractcheck.cx --fixture DIR");
+    const char *product = "./unisacc.com";
+    if (argc == 5 && !strcmp(argv[3], "--product")) product = argv[4];
+    else if (argc != 3) return fail("usage: stagecontractcheck.cx --fixture DIR [--product PATH]");
+    if (strcmp(argv[1], "--fixture")) return fail("usage: stagecontractcheck.cx --fixture DIR [--product PATH]");
     if (!mkdtemp(tmp)) return fail("temporary directory");
     snprintf(accept, sizeof accept, "%s/accept", argv[2]); snprintf(model, sizeof model, "%s/e3.net", argv[2]);
     snprintf(runner, sizeof runner, "%s/runner", tmp);
+    /* STALE guard: re-extract the e3 network from the product under test and compare with the frozen one */
+    { char live[4096], liveout[4096], frozen[4096]; snprintf(live, sizeof live, "%s/live", tmp); snprintf(liveout, sizeof liveout, "%s/e3.net", live);
+      snprintf(frozen, sizeof frozen, "%s/e3.net", argv[2]);
+      if (mkdir(live, 0700)) return fail("live extraction directory");
+      snprintf(cmd, sizeof cmd, "sh \"%s\" -run tests/modelstreamextract.cx -- \"%s\" \"%s\" > \"%s/extract.log\" 2>&1", product, product, live, live);
+      shell(cmd, 40);
+      if (filesize(liveout) < 0) return fail("e3 extraction from the product under test wrote no e3.net (see extract.log)");
+      if (!same(liveout, frozen)) { printf("STALE e3 network: %s no longer matches the frozen e3.net (re-capture the fixture)\n", product); return 1; }
+    }
     snprintf(cmd, sizeof cmd, "cc -std=gnu99 -O2 -w -o \"%s\" tests/middleflowrunner.c exec/c/core.c", runner);
     shell(cmd, 55);
     if (filesize(runner) < 0) return fail("runner build (tests/middleflowrunner.c with exec/c/core.c)");
