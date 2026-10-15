@@ -646,6 +646,8 @@ static int rf_identity_gate(const unsigned char *input,int n,int mode,const char
     if (rf_capture_dir()) {
         char path[4096]; FILE *f;
         snprintf(path, sizeof path, "%s/resources.tsv", rf_capture_dir());
+        f = fopen(path, "rb");
+        if (f) { int c = fgetc(f); fclose(f); if (c != EOF) { fprintf(stderr, "unisacc: INTERFACE_ERROR capture-ledger-rows-before-identity %s\n", path); return 2; } }
         f = fopen(path, "wb");
         if (!f) { fprintf(stderr, "unisacc: resource ledger output\n"); return 2; }
         rl_write_identity(f, stage, input, n); fclose(f);

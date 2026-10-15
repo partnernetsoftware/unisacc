@@ -774,6 +774,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             for (int j=0;j<unit.n;j++) bput(&input,unit.b[j],0);
             tracked_free(unit.b);
         }
+        if (!rc && rf_capture_dir()) rc=rf_identity_gate(input.b,input.n,2,route);   /* SC1 identity, as on the CLI: the capture writes the header */
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
             if(c->late_callsite_enabled&&input.n>=8&&!memcmp(input.b,"USCSFLW1",8)){
