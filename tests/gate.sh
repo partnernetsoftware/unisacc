@@ -607,6 +607,7 @@ job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_C
 job lib-latebind-W tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/liblatebindWcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # W: private runtime + frozen r4 six snapshots; product is model/runner input
 job latebind-p6 tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/latebindp6check.cx -- "${MODEL_COM:-./unisacc.com}" tests/seals/latebind-p6-baseline   # P6: untyped library-mode baseline (26 WBASE1 snapshots, public-API observers); lnx/x86_64 else UNVERIFIED 77
 job resourceflow tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/resourceflowcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # S1: explicit-ledger strict resource flow on the product (C -> Tape); RF-LEGACY needs a base product and is not run here
+job include-key tests/bound 58 sh ./tests/includekeycheck.sh "${MODEL_COM:-./unisacc.com}"   # S2 prerequisite: sim.py and the product request the same include keys (product capture vs reference)
 job lib-resolver-host python3 ./tests/libraryresolverhostcheck.py
 job lib-word64 python3 ./tests/librarywordcheck.py --native-only
 job exec-binaryio python3 ./tests/runtimeiocheck.py
