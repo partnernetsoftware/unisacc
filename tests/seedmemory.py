@@ -7,13 +7,15 @@ Final -w/no-w builds byte-identical; four-worker groups sum serial route peaks.
 Cgroup accounting peaks and ASan diagnostics are separate from these RSS values.
 2c1 E3/errorparse/warnparse remeasure: research/c43-e3-data-receipt.md;
 os.wait4 direct serial process RSS, floor KiB/1024 plus the existing one-MiB guard.
+Reader generic parse2base refresh: all 30 C routes and six additional parse2 flag routes
+were remeasured directly; serial C/P traces pin both family read sets.
 Python cold construction and unmeasured flags/COM remain UNKNOWN.
 """
 import argparse, hashlib, pathlib, stat, subprocess, sys, platform, shutil, re, tempfile, os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-C_SHA='b802e4f2d2d7f10ad13dd9392792e085de2dfdcd30fd2c2f0c8bbd42d9190cdb'
-REFERENCE_KEYS={'gen': 'd4c2a2bd7aeb8c17', 'parse2': '1292f970a84806f1'}
-BINARY_SHA='f997b25d8f8391e12034871bd14e20523fa6cc88720cadb3bc6a71a41c591e64'
+C_SHA='d608f0262febc5be95ce4a05077d1ee6340af5c97d64da9e3f97c247897eb9c8'
+REFERENCE_KEYS={'gen': '8bf338cd591f36b4', 'parse2': '4b6f5aa3198f52f9'}
+BINARY_SHA='ba107a7aa5630e3b8f0fb7be9c7e9521717e3aaedc27082abfe2eaa6df09f8ae'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
 EVIDENCE_IDENTITY={'host':'Linux/x86_64',
@@ -28,11 +30,7 @@ ENV_KEYS=('CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','OBJC_INCLUDE_PATH',
  'GCC_EXEC_PREFIX','COMPILER_PATH','LIBRARY_PATH','LD_PRELOAD','LD_LIBRARY_PATH',
  'GCC_SPECS','CFLAGS','CPPFLAGS','LDFLAGS')
 EQUIVALENT_FLAGS=('-std=c99 -O2 -w -Iseed','-std=c99 -O2 -Iseed')
-C_RSS={'e2':184,'e1':330,'e3':1268,'e4':40,'o1':14,'prune':32,
- 'nativeabi':298,'lower-lnx-x':242,'lower-lnx-a':266,'lower-osx-x':235,'lower-osx-a':261,'lower-win-x':180,
- 'lower-win-a':207,'errorparse':2134,'warnparse':2148,'warnunits':196,'warnlex':741,'tokenlex':119,
- 'tokenpp':38,'warnpp':180,'obj-lower-x':245,'obj-lower-a':269,'obj-enc-x':156,'obj-enc-a':159,
- 'enc-elf':142,'arm-elf':142,'enc-macho':208,'arm-macho':208,'enc-pe':263,'arm-pe':264}
+C_RSS={'e2': 184, 'e1': 330, 'e3': 1268, 'e4': 40, 'o1': 27, 'prune': 33, 'nativeabi': 298, 'enc-elf': 141, 'enc-macho': 208, 'enc-pe': 263, 'arm-elf': 142, 'arm-macho': 208, 'arm-pe': 264, 'lower-lnx-x': 241, 'lower-lnx-a': 266, 'lower-osx-x': 235, 'lower-osx-a': 261, 'lower-win-x': 180, 'lower-win-a': 207, 'obj-lower-x': 245, 'obj-lower-a': 270, 'obj-enc-x': 156, 'obj-enc-a': 159, 'tokenpp': 41, 'tokenlex': 119, 'warnlex': 741, 'warnparse': 2149, 'warnunits': 196, 'errorparse': 2134, 'warnpp': 180, 'locations': 1346, 'warnings': 1360, 'locations,warnings': 1360, 'locations,errors': 2134, 'warnings,errors': 2149, 'locations,warnings,errors': 2149}
 SUITES={
  'seedparse2-1':('parse2',['x','locations','warnings','errors']),
  'seedparse2-2':('parse2',['locations,warnings','locations,errors','warnings,errors','locations,warnings,errors']),
@@ -133,7 +131,7 @@ def requirement(family,names,tmpdir=None):
     names=names or DEFAULTS[family]
     peaks=[]
     for name in names:
-        route={'x':'e3','errors':'errorparse'}.get(name) if family=='parse2' else name
+        route={'x':'e3','errors':'errorparse',**{n:n for n in ('locations','warnings','locations,warnings','locations,errors','warnings,errors','locations,warnings,errors')}}.get(name) if family=='parse2' else name
         if route not in C_RSS:return None,'unmeasured C flags: '+name
         peaks.append((C_RSS[route]+1)*1024**2)
     import os

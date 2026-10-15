@@ -3695,6 +3695,18 @@ static char *manifest_interp(const char *v, Value *env) {
     buf_char(&out, 0);
     return out.s;
 }
+/* parse2base.check observes P construction, not g.labels insertion.  Generic
+   manifests cannot invoke P.label; label definitions inside the fixed token
+   base remain the same audited build_parse2_token_graph implementation. */
+static Value *parse2base_procedures;
+static void parse2base_define_p(const char *name) {
+    if (!parse2base_procedures) return;
+    if (value_get(parse2base_procedures, name)) {
+        fprintf(stderr, "seed-gen: parse2base defined twice: (%s, P)\n", name);
+        die("parse2base duplicate procedure definition");
+    }
+    value_put(parse2base_procedures, name, value_string("P"));
+}
 static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
     /* Run.value: v = self.interp(v) before the form is read */
     if (strchr(cell, '{') && env) cell = manifest_interp(cell, env);
@@ -3791,6 +3803,7 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
         } else {
             if (strncmp(owner, "U:", 2) && strncmp(owner, "S:", 2) && strncmp(owner, "P:", 2))
                 die("manifest fresh scope is not yet covered");
+            if (!strncmp(owner, "P:", 2)) parse2base_define_p(owner + 2);
             name = fresh_label(owner + 2, last + 1);
         }
         v = value_string(name); free(name); free(owner); free(scope); return v;
@@ -4000,6 +4013,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
                     Value *prior = value_get(bindings, owner[0] == '$' ? owner + 1 : owner);
                     if (prior) { char *resolved = copy(value_text(prior)); free(owner); owner = resolved; }
                 }
+                if (!manifest_truth(value_get(spec, "holder"))) parse2base_define_p(owner);
                 label = fresh_label(owner, kind);
                 value_put(bindings, key, value_string(label));
                 free(key); free(owner); free(kind); free(label);
@@ -4046,6 +4060,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
                         Value *prior = value_get(bindings, owner[0] == '$' ? owner + 1 : owner);
                         if (prior) { char *resolved = copy(value_text(prior)); free(owner); owner = resolved; }
                     }
+                    if (!manifest_truth(value_get(spec, "holder"))) parse2base_define_p(owner);
                     label = fresh_label(owner, kind);
                     value_put(bindings, key, value_string(label));
                     free(key); free(owner); free(kind); free(label);
@@ -4372,6 +4387,8 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                         fmt += adv;
                     }
                     owner[o] = 0;
+                    Value *scope = value_get(opts, "scope");
+                    if (scope && !strcmp(value_text(scope), "P")) parse2base_define_p(owner);
                     label = fresh_label(owner, field[kd]);
                     value_put(env, field[ki], value_string(label)); free(label);
                 }
@@ -4386,6 +4403,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             die("holder name too long");
         if (strncmp(spec, "P:", 2) && strncmp(spec, "U:", 2) && strncmp(spec, "S:", 2))
             die("manifest holder kind is not yet covered");
+        if (!strncmp(spec, "P:", 2)) parse2base_define_p(spec + 2);
         value_put(env, key, value_string(value_get(opts, "cur") ?
                                          value_text(value_get(opts, "cur")) : spec + 2));
     } else if (!strcmp(row->cell[0], "label")) {
@@ -4595,6 +4613,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                 if (strncmp(scope, "P:", 2) && strncmp(scope, "U:", 2) &&
                     strncmp(scope, "S:", 2))
                     die("manifest template fresh scope is not yet covered");
+                if (!strncmp(scope, "P:", 2)) parse2base_define_p(scope + 2);
                 owner = copy(scope + 2);
             }
             free(scope);
@@ -8957,14 +8976,17 @@ int main(int argc, char **argv) {
         /* gen.py's generic driver for a parsebase manifest: flags from `#! flags`,
            start from `#! start` (a literal or $env name). */
         char man[512], *slash = strchr(argv[1], '/'), *s; FILE *f; char flagline[512] = "", start[256] = "START";
-        int other = 0;
+        int other = 0, parse2base = 0;
         if (slash) snprintf(man, sizeof man, "exec/%.*s/%s-manifest.tsv", (int)(slash - argv[1]), argv[1], slash + 1);
         else snprintf(man, sizeof man, "exec/%s/gen-manifest.tsv", argv[1]);
         if (!(f = fopen(man, "rb"))) die("usage: seed-gen STAGE OUT.json [--FLAG...]");
         while ((s = line(f))) {
             if (!strncmp(s, "#! flags ", 9)) snprintf(flagline, sizeof flagline, " %s ", s + 9);
             else if (!strncmp(s, "#! start ", 9)) snprintf(start, sizeof start, "%s", s + 9);
-            else if (!strncmp(s, "#! base ", 8)) { if (strcmp(s + 8, "build/parsebase.py") && strcmp(s + 8, "build/graph.py")) other = 1; }
+            else if (!strncmp(s, "#! base ", 8)) {
+                if (!strcmp(s + 8, "build/parse2base.py")) parse2base = 1;
+                else if (strcmp(s + 8, "build/parsebase.py") && strcmp(s + 8, "build/graph.py")) other = 1;
+            }
             else if (!strcmp(s, "#! graph G")) { }   /* the same G parsebase uses */
             else if (!strncmp(s, "#! ", 3)) other = 1;
             free(s);
@@ -8985,6 +9007,10 @@ int main(int argc, char **argv) {
                 value_put(flags, p, v);
             }
             snprintf(dir, sizeof dir, "%s", man); *strrchr(dir, '/') = 0;
+            if (parse2base) {
+                build_parse2_token_graph(&g);
+                parse2base_procedures = value_new(JOBJ);
+            }
             ctx.graph = &g; ctx.dir = dir; ctx.flags = flags; ctx.accum = value_new(JOBJ);
             manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
             if (start[0] == '$') st = value_text(value_get(env, start + 1));

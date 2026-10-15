@@ -41,7 +41,17 @@ class Memory(unittest.TestCase):
    self.assertEqual(rc,2);self.assertIsNone(required)
    self.assertIn('generator inputs differ',reason)
  def test_unknown_com_and_unmeasured_parse2_flags(self):
-  self.assertIsNone(m.requirement('com',[])[0]);self.assertIsNone(m.requirement('parse2',['locations'])[0])
+  self.assertIsNone(m.requirement('com',[])[0]);self.assertIsNone(m.requirement('parse2',['unmeasured-test-flag'])[0])
+ def test_all_measured_parse2_flags_still_require_warm_reference(self):
+  good={**m.EVIDENCE_IDENTITY,'flags':m.EQUIVALENT_FLAGS[1]}
+  names=m.DEFAULTS['parse2']
+  with tempfile.TemporaryDirectory() as d,patch.object(m,'execution_identity',return_value=good):
+   self.assertIsNone(m.requirement('parse2',names,d)[0])
+   cache=pathlib.Path(d)/'unisacc-seedparse2';cache.mkdir()
+   for name in names:(cache/('py-'+m.REFERENCE_KEYS['parse2']+'-'+name+'.json')).write_text('{}')
+   self.assertIsNotNone(m.requirement('parse2',names,d)[0])
+   (cache/('py-'+m.REFERENCE_KEYS['parse2']+'-locations.json')).unlink()
+   self.assertIsNone(m.requirement('parse2',names,d)[0])
  def test_gate_low_memory_exits_before_generator(self):
   for low_group in (False,True):
    with self.subTest(low_cgroup=low_group),tempfile.TemporaryDirectory() as d:
