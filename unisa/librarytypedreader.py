@@ -4,11 +4,56 @@ Explicit source facts (used/defined/prototype-compatible) come from frozen E1
 fixtures. This does not parse C or certify the entire typed signature domain.
 The opt-in overlay replaces only the dispatcher literal with stable-ID libraryfn.
 PLAN remains zero; binding and lower consumption are not proved here.
+Optional actual E1 callsite tokens enable arity checking; without them this
+remains a declaration/frame projection, not callsite eligibility.
 """
 import struct
 from .librarycontract import produce as validate
 
-def produce(frame, selection, mode, source_state):
+def call_arities(tokens, name):
+    """Read actual frozen E1 token records for direct calls in function bodies.
+
+    Narrow witness oracle, not a replacement C parser. The product model counts
+    arguments during its existing expression walk; this only observes UNITOK1.
+    """
+    start = tokens.find(b"UNITOK1\0", 0, 32)
+    if start < 0 or start + 12 > len(tokens):
+        raise ValueError("reference callsite requires complete UNITOK1")
+    at = start + 12 + struct.unpack_from("<I", tokens, start + 8)[0]
+    words = []
+    while at < len(tokens) and tokens[at] == 64:
+        if at + 6 > len(tokens) or tokens[at + 5] != 10:
+            raise ValueError("reference callsite token framing")
+        end = tokens.find(b"\n", at + 6)
+        if end < 0:
+            raise ValueError("reference callsite token truncated")
+        words.append(tokens[at + 6:end].decode("ascii"))
+        at = end + 1
+        if words[-1] == "eof":
+            break
+    if not words or words[-1] != "eof":
+        raise ValueError("reference callsite missing eof")
+    braces = 0
+    for i, token in enumerate(words):
+        if token == "{": braces += 1
+        elif token == "}": braces -= 1
+        if braces <= 0 or token != "id=" + name or words[i + 1:i + 2] != ["("]:
+            continue
+        depth, count, used = 1, 0, False
+        for token in words[i + 2:]:
+            if token == ")" and depth == 1:
+                yield count + int(used)
+                break
+            if token == "," and depth == 1:
+                count += 1
+            else:
+                used = True
+            if token in ("(", "[", "{"): depth += 1
+            elif token in (")", "]", "}"): depth -= 1
+        else:
+            raise ValueError("reference callsite unclosed arguments")
+
+def produce(frame, selection, mode, source_state, tokens=None):
     def fail(): raise ValueError("not covered: library typed contract import")
     validate(b"USLDEC1\n" + frame[8:])
     if frame[:8] != b"USLCON1\n" or frame[12:16] != b"\1\0\0\0" or mode != b"\1"+bytes(7): fail()
@@ -35,6 +80,8 @@ def produce(frame, selection, mode, source_state):
     if source_state=="source-mismatch": raise ValueError("not covered: library import binding or signature")
     if source_state in ("unused","defined"):return b""
     if source_state!="used":fail()
+    if tokens is not None and any(n != count for n in call_arities(tokens, name)):
+        raise ValueError("library typed arity mismatch symbol " + name)
     text=name+":\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 72\n"
     text+="  store64 [r7+48], r0\n  store64 [r7+56], r1\n  imm r1, 0\n  store64 [r7+0], r1\n"
     text+="  imm r1, 48\n  add64 r1, r7, r1\n  store64 [r7+8], r1\n  imm r1, 64\n  add64 r1, r7, r1\n  store64 [r7+16], r1\n"
@@ -46,6 +93,6 @@ def produce(frame, selection, mode, source_state):
 if __name__=="__main__":
     import sys
     from pathlib import Path
-    try: out=produce(*(Path(x).read_bytes() for x in sys.argv[1:4]),sys.argv[4])
+    try: out=produce(*(Path(x).read_bytes() for x in sys.argv[1:4]),sys.argv[4],Path(sys.argv[5]).read_bytes() if len(sys.argv)>5 else None)
     except (ValueError,struct.error,UnicodeError) as e:print(e,file=sys.stderr);sys.exit(1)
     sys.stdout.buffer.write(out)
