@@ -144,7 +144,9 @@ static const RLRow *rl_find(const RLLedger *L, const unsigned char *key, int kn)
 
 typedef struct { const unsigned char *key; int kn; const unsigned char *data; int len; } RLBlob;
 #define RL_SNAP_MAX 1024
-/* stage labels: "<stage>:<route>", stage in the registered table, route "[warn/][multi/]<target>/<arch>/<format>/O<digit>" */
+/* stage labels: "<stage>:<route>", stage in the registered table.  The route is the driver's own shape (compiler.c:674-677,889;
+   the only grammar authority): "<target>/<arch>/[warn/][multi/]<format>/O<digit>", target lnx|osx|win, arch x86_64|arm64,
+   format tape|image|run|object, warn before multi.  A prefix before the target is not a driver shape and is refused. */
 static inline int rl_token_is(const char *p, size_t n, const char *tok) { return strlen(tok) == n && !memcmp(p, tok, n); }
 static inline int rl_stage_label_ok(const char *label) {
     static const char *stages[] = {"e3", "lower"}, *targets[] = {"lnx", "osx", "win"}, *arches[] = {"x86_64", "arm64"},
@@ -154,15 +156,16 @@ static inline int rl_stage_label_ok(const char *label) {
     ok = 0; for (i = 0; i < sizeof stages / sizeof stages[0]; i++) if (rl_token_is(label, (size_t)(colon - label), stages[i])) ok = 1;
     if (!ok) return 0;
     r = colon + 1;
-    if (!strncmp(r, "warn/", 5)) r += 5;
-    if (!strncmp(r, "multi/", 6)) r += 6;
     q = strchr(r, '/'); if (!q) return 0; n = (size_t)(q - r);
     ok = 0; for (i = 0; i < 3; i++) if (rl_token_is(r, n, targets[i])) ok = 1;
     if (!ok) return 0;
     r = q + 1; q = strchr(r, '/'); if (!q) return 0; n = (size_t)(q - r);
     ok = 0; for (i = 0; i < 2; i++) if (rl_token_is(r, n, arches[i])) ok = 1;
     if (!ok) return 0;
-    r = q + 1; q = strchr(r, '/'); if (!q) return 0; n = (size_t)(q - r);
+    r = q + 1;
+    if (!strncmp(r, "warn/", 5)) r += 5;
+    if (!strncmp(r, "multi/", 6)) r += 6;
+    q = strchr(r, '/'); if (!q) return 0; n = (size_t)(q - r);
     ok = 0; for (i = 0; i < 4; i++) if (rl_token_is(r, n, formats[i])) ok = 1;
     if (!ok) return 0;
     r = q + 1;

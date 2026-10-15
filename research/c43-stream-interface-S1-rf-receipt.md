@@ -75,3 +75,13 @@
 - 并行：UNISA_JOBS>1 的并行 worker 同写一本账，实测 JOBS=4 账本与 JOBS=1 不同（38 行含 12 个重复键 vs 23 行），输出相同。故 capture 与 strict 的多源运行在 UNISA_JOBS>1 时在任何 unit 行前具名拒（resource-capture-parallel-unsupported，rc2，无输出）。**未设 UNISA_JOBS 时默认 8，故多源 capture/strict 须显式 UNISA_JOBS=1。**
 - 记债：并行 capture 支持（worker 各写分片、确定性归并）不在本笔。
 - 账本分文件（(a)）设计备案：/home/box/c43/S12/design-a-per-stage-ledgers.md，未立项。
+
+## 九、路由形状修正（S25 回归，2026-10-16）
+
+更正：本收据前文与 exec/c/resourceledger.h 注释写的标签语法 `[warn/][multi/]<target>/<arch>/<format>/O<digit>` 与驱动实际产出不一致。驱动（exec/c/compiler.c:674-677、889）产出的路由是 `<target>/<arch>/[warn/][multi/]<format>/O<digit>`：warn 位于 arch 之后，且先于 multi。
+
+后果：`-Wall`（或 `-Wextra`、`-Werror`）下的 tape 路由标签 `e3:lnx/x86_64/warn/tape/O0` 被旧检查拒为 `capture-stage-label`；快照写（rl_snapshot_write）经同一检查，故 `-Wall` 下快照也被误拒。ede4ccb5 前已如此，属 S25 回归。
+
+修法：rl_stage_label_ok 只认驱动真实形状：stage ∈ {e3, lower}；target ∈ {lnx, osx, win}；arch ∈ {x86_64, arm64}；可选 `warn/` 再可选 `multi/`；format ∈ {tape, image, run, object}；`O<digit>`。驱动不产出的前缀（target 之前的 warn/multi，或 multi 先于 warn）具名拒。
+
+验证：tests/ri-snapshot-core.c 枚举 576 个驱动形状全部接受、20 个非驱动形状全部具名拒（SNAPTEST PASS）。

@@ -108,6 +108,24 @@ int main(int argc, char **argv) {
             int okc = r != 0 && strstr(err, want) != NULL;
             printf("%s neg-%s: %s\n", okc ? "ok  " : "FAIL", cases[c], okc ? want : err); if (!okc) fails++; } }
     }
+    /* stage-label shapes (the driver's own route assembly, compiler.c:674-677,889): every combination of stage x target x arch x
+       [warn/][multi/] x format x level is accepted; the prefixes the driver never emits (before the target, or multi before warn)
+       and the malformed routes are refused.  The same checker is the product gate's and the snapshot writer's. */
+    { static const char *st[] = {"e3", "lower"}, *tg[] = {"lnx", "osx", "win"}, *ar[] = {"x86_64", "arm64"},
+      *pre[] = {"", "warn/", "multi/", "warn/multi/"}, *fm[] = {"tape", "image", "run", "object"};
+      int i1, i2, i3, i4, i5, i6, nacc = 0, nbad = 0;
+      for (i1 = 0; i1 < 2; i1++) for (i2 = 0; i2 < 3; i2++) for (i3 = 0; i3 < 2; i3++) for (i4 = 0; i4 < 4; i4++) for (i5 = 0; i5 < 4; i5++) for (i6 = 0; i6 < 3; i6++) {
+          char lab[160]; snprintf(lab, sizeof lab, "%s:%s/%s/%s%s/O%d", st[i1], tg[i2], ar[i3], pre[i4], fm[i5], i6);
+          if (rl_stage_label_ok(lab)) nacc++; else { nbad++; printf("FAIL driver shape refused: %s\n", lab); fails++; } }
+      printf("ok   driver shapes accepted: %d (refused: %d)\n", nacc, nbad);
+      { static const char *neg[] = {"warn/lnx/x86_64/tape/O0", "multi/lnx/x86_64/tape/O0", "warn/multi/lnx/x86_64/tape/O0",
+            "e3:lnx/warn/tape/O0", "e3:lnx/x86_64/multi/warn/tape/O0", "e3:lnx/x86_64/warn/warn/tape/O0", "e3:lnx/x86_64/warn/", "e3:lnx/x86_64/warn/multi/O0",
+            "e3:lnx/x86_64/unit/O0", "e3:lnx/x86_64/memory/O0", "e3:lnx/x86_64/pp", "e3:tokens", "e3:lnx/unit",
+            "e3:freebsd/x86_64/tape/O0", "e3:lnx/x86_64/tape/O10", "e3:lnx/x86_64/tape/O", "e3:lnx/x86_64/tape/O0/x",
+            "e3:lnx/x86_64/tape/O0 ", "e1:lnx/x86_64/tape/O0", "lnx/x86_64/tape/O0"};
+        int k, nn = (int)(sizeof neg / sizeof neg[0]), nrefused = 0;
+        for (k = 0; k < nn; k++) { if (!rl_stage_label_ok(neg[k])) nrefused++; else { printf("FAIL non-driver shape accepted: %s\n", neg[k]); fails++; } }
+        printf("%s non-driver shapes refused: %d of %d\n", nrefused == nn ? "ok  " : "FAIL", nrefused, nn); } }
     printf("%s\n", fails ? "SNAPTEST FAIL" : "SNAPTEST PASS");
     return fails;
 }

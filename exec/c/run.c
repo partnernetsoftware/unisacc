@@ -665,10 +665,18 @@ static int rf_identity_write_capture(const char *dir, const char *stage, const u
     return 0;
 #endif
 }
+/* Shared identity label constructor. Both the gate and witnesses use the
+   caller's actual stage/route; no independent label grammar in a runner. */
+static int rf_stage_label(char *dst,size_t cap,const char *stage_name,const char *route) {
+    int n;
+    if (!dst || !stage_name || !route || !cap) return 0;
+    n=snprintf(dst,cap,"%s:%s",stage_name,route);
+    return n>=0 && (size_t)n<cap && rl_stage_label_ok(dst);
+}
 static int rf_identity_gate(const unsigned char *input,int n,int mode,const char *route,const char *stage_name) {
     char err[512], stage[160];
     if (mode != 2) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover the tape route only)\n", route); return 2; }
-    snprintf(stage, sizeof stage, "%s:%s", stage_name, route);   /* e3 keeps its bytes: "e3:<route>"; lower passes "lower" */
+    if (!rf_stage_label(stage,sizeof stage,stage_name,route)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
     if (rf_capture_dir() && rf_identity_write_capture(rf_capture_dir(), stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     if (RF_STRICT && rl_check_identity(&RF_LEDGER, stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     return 0;
