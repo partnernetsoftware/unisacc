@@ -2,11 +2,12 @@
 /* resourceflowcheck: S step 1, the explicit-ledger strict resource flow (--strict-resource-flow --resource-ledger DIR)
    on the product, C -> Tape (-S -o), lnx/x86_64.  usage: resourceflowcheck.cx PRODUCT [BASE_PRODUCT]
    Rows: RF-LEGACY (no switch: output byte-identical to BASE_PRODUCT), CAPTURE (fixture building only), RF-POS, RF-ENV,
-   RF-MISSING (named refusal, same-named disk file not read), RF-DUP, RF-LENGTH, RF-RESET.  Every row is a fresh
+   RF-MISSING (named refusal, same-named disk file not read), RF-DUP, RF-LENGTH, RF-RESET, RF-ABSENT, RF-EMPTY, RF-LOWER, RF-STAGE.  Every row is a fresh
    process.  Any row that does not hold stops the run (first red).  Verdicts: PASS or FAIL; a missing base product
    makes the LEGACY row UNVERIFIED (rc 77), never a pass.  Measured scope: one program, one route, -S -o. */
 #include <cx.h>
 #include <dirent.h>
+#define EMPTY_SHA "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" /* sha256 of zero bytes */
 static int fail(const char *s) { fprintf(stderr, "resourceflowcheck FAIL: %s\n", s); return 1; }
 /* sh -c CMD; CMD's exit status is written to a file and read back (cx_run's status is not reliable here) */
 static int run_rc(const char *cmd, const char *rcpath) {
@@ -110,7 +111,7 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/len", tmp); { char capd[4096]; snprintf(capd, sizeof capd, "%s/cap", W); copydir(capd, p); }
     snprintf(cmd, sizeof cmd, "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} NR>1 && $2==1 && !d {$4=$4+1; d=1} {print}' '%s/len/resources.tsv' > '%s/len/r.tmp' && mv '%s/len/r.tmp' '%s/len/resources.tsv'", tmp, tmp, tmp, tmp);
     run_rc(cmd, rc);
-    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f len.tape && sh '%s' --strict-resource-flow --resource-ledger '%s/len' -S prog.c -o len.tape > '%s/len.log' 2>&1", w, P, tmp, tmp);
+    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f '%s/len.tape' && sh '%s' --strict-resource-flow --resource-ledger '%s/len' -S prog.c -o '%s/len.tape' > '%s/len.log' 2>&1", w, tmp, P, tmp, tmp, tmp);
     r = run_rc(cmd, rc);
     snprintf(p, sizeof p, "%s/len.tape", tmp);
     {   int ok = r == 2 && size_of(p) < 0;
@@ -127,7 +128,55 @@ int main(int argc, char **argv) {
     {   int ok = a == 0 && b != 0 && c == 0 && same(p, p2);
         row("RF-RESET", ok, ok ? "ok, refuse, ok; third equals first" : "reset sequence differs");
         if (!ok) bad++; }
+    /* RF-ABSENT (cli/defines; this key does not distinguish): an explicit absent answer is answered, never MISSING; on this key
+       the stage gives the default output */
+    snprintf(cmd, sizeof cmd, "cp -r '%s/cap' '%s/abs'", W, tmp); run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} $1==\"00636c692f646566696e6573\"{$2=0;$3=\"-\";$4=0;$5=\"-\"} {print}' '%s/abs/resources.tsv' > '%s/abs/r.tmp' && mv '%s/abs/r.tmp' '%s/abs/resources.tsv'", tmp, tmp, tmp, tmp); run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/abs' -S prog.c -o '%s/abs.tape' > '%s/abs.log' 2>&1", w, P, tmp, tmp, tmp); int ab = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/abs.log", tmp); snprintf(p2, sizeof p2, "%s/abs.tape", tmp);
+    {   char q[4096]; snprintf(q, sizeof q, "%s/def.tape", tmp);
+        int ok = ab == 0 && !has(p, "MISSING_EXPLICIT_RESOURCE") && same(p2, q);
+        row("RF-ABSENT", ok, ok ? "cli/defines: absent answered, not MISSING, output equals default (this key does not distinguish)" : "cli/defines: absent not answered, or output differs from default");
+        if (!ok) bad++; }
+    /* RF-EMPTY (cli/defines; this key does not distinguish): the same key present with a zero-length blob is answered, not
+       MISSING; on this key it gives the default output too */
+    snprintf(cmd, sizeof cmd, "cp -r '%s/cap' '%s/emp' && : > '%s/emp/resource-empty.bytes' && awk -F'\\t' 'BEGIN{OFS=\"\\t\"} $1==\"00636c692f646566696e6573\"{$2=1;$3=\"resource-empty.bytes\";$4=0;$5=\"%s\"} {print}' '%s/emp/resources.tsv' > '%s/emp/r.tmp' && mv '%s/emp/r.tmp' '%s/emp/resources.tsv'", W, tmp, tmp, EMPTY_SHA, tmp, tmp, tmp, tmp); run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/emp' -S prog.c -o '%s/empty.tape' > '%s/empty.log' 2>&1", w, P, tmp, tmp, tmp); int em = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/empty.log", tmp); snprintf(p2, sizeof p2, "%s/empty.tape", tmp);
+    {   char q[4096]; snprintf(q, sizeof q, "%s/def.tape", tmp);
+        int ok = em == 0 && !has(p, "MISSING_EXPLICIT_RESOURCE") && !has(p, "INTERFACE_ERROR") && same(p2, q);
+        row("RF-EMPTY", ok, ok ? "cli/defines: zero-length answered, not MISSING, output equals default (this key does not distinguish)" : "cli/defines: zero-length refused, misread, or output differs from default");
+        if (!ok) bad++; }
+    /* RF-LOWER (library/module, lower stage; fixture tests/seals/stagecontract-tape-lower with its frozen lower.net): ABSENT is
+       accepted with the fixture output; EMPTY is refused by name (rc 1, not covered); the two outcomes differ. The runner is the
+       repo's tests/middleflowrunner.c built with exec/c/core.c, as stagecontractcheck.cx does */
+    {   char fx[] = "tests/seals/stagecontract-tape-lower", exp[4096], q[4096];
+        snprintf(cmd, sizeof cmd, "cc -std=gnu99 -O2 -w -o '%s/rrunner' tests/middleflowrunner.c exec/c/core.c", tmp); run_rc(cmd, rc);
+        snprintf(cmd, sizeof cmd, "cp -r '%s/accept' '%s/lab' && MF_STAGE_ID=lower:lnx/x86_64/image/O0 MF_MODEL_SHA256=$(awk '$1==\"sha256\"{print $2}' '%s/boundary.tsv') '%s/rrunner' replay '%s/lower.net' '%s/lab' '%s/lab' > '%s/lab.out'", fx, tmp, fx, tmp, fx, tmp, tmp, tmp);
+        snprintf(q, sizeof q, "%s/lab.rc", tmp);
+        int la = run_rc(cmd, q);
+        snprintf(cmd, sizeof cmd, "cp -r '%s/accept' '%s/lem' && : > '%s/lem/resource-empty.bytes' && awk -F'\\t' 'BEGIN{OFS=\"\\t\"} $1==\"006c6962726172792f6d6f64756c65\"{$2=1;$3=\"resource-empty.bytes\";$4=0;$5=\"%s\"} {print}' '%s/lem/resources.tsv' > '%s/lem/r.tmp' && mv '%s/lem/r.tmp' '%s/lem/resources.tsv' && MF_STAGE_ID=lower:lnx/x86_64/image/O0 MF_MODEL_SHA256=$(awk '$1==\"sha256\"{print $2}' '%s/boundary.tsv') '%s/rrunner' replay '%s/lower.net' '%s/lem' '%s/lem' > '%s/lem.out'", fx, tmp, tmp, EMPTY_SHA, tmp, tmp, tmp, tmp, fx, tmp, fx, tmp, tmp, tmp);
+        snprintf(q, sizeof q, "%s/lem.rc", tmp);
+        int le = run_rc(cmd, q);
+        snprintf(exp, sizeof exp, "%s/accept/output.bytes", fx);
+        snprintf(p, sizeof p, "%s/lab.out", tmp); snprintf(p2, sizeof p2, "%s/lem.stderr", tmp);
+        {   char lo[4096];
+            snprintf(lo, sizeof lo, "%s/lem.out", tmp);
+            int oka = la == 0 && same(p, exp);
+            int oke = le == 1 && has(p2, "not covered") && size_of(lo) <= 0;
+            int ok = oka && oke && la != le;
+            row("RF-LOWER", ok, ok ? "library/module on lower: ABSENT accepted (fixture output), EMPTY refused by name (not covered); outcomes differ" : "lower ABSENT/EMPTY outcomes not as recorded (ABSENT rc0 == fixture output; EMPTY rc1 named not covered)");
+            if (!ok) bad++; }
+    }
+    /* RF-STAGE: a ledger captured from another program must be refused by name (INTERFACE_ERROR, rc 2, no primary output);
+       a silent reuse is red, even when the bytes happen to match */
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s/w2' '%s/cap2' && printf 'int main(void){return 7;}\\n' > '%s/w2/prog.c' && cd '%s/w2' && UNISACC_RF_CAPTURE='%s/cap2' sh '%s' -S prog.c -o cap2.tape > /dev/null 2>&1", tmp, tmp, tmp, tmp, tmp, P); run_rc(cmd, rc);
+    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f '%s/stage.tape' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap2' -S prog.c -o '%s/stage.tape' > '%s/stage.log' 2>&1", w, tmp, P, tmp, tmp, tmp); int sg = run_rc(cmd, rc);
+    snprintf(p, sizeof p, "%s/stage.log", tmp); snprintf(p2, sizeof p2, "%s/stage.tape", tmp);
+    {   int ok = sg == 2 && size_of(p2) < 0 && has(p, "INTERFACE_ERROR");
+        row("RF-STAGE", ok, ok ? "foreign-stage ledger: rc 2, INTERFACE_ERROR named, no primary output" : "foreign-stage ledger silently reused or refused without the interface name; equal bytes do not pass");
+        if (!ok) bad++; }
 done:
-    printf("resourceflowcheck %s\n", bad ? "FAIL" : "PASS: CAPTURE, RF-POS, RF-ENV, RF-MISSING, RF-DUP, RF-LENGTH, RF-RESET (and RF-LEGACY when a base product is given); measured scope: one program, one route (C -> Tape, -S -o)");
+    printf("resourceflowcheck %s\n", bad ? "FAIL" : "PASS: CAPTURE, RF-POS, RF-ENV, RF-MISSING, RF-DUP, RF-LENGTH, RF-RESET, RF-ABSENT, RF-EMPTY, RF-LOWER, RF-STAGE (and RF-LEGACY when a base product is given); measured scope: one program, one route (C -> Tape, -S -o)");
     return bad ? 1 : 0;
 }

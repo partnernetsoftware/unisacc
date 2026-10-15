@@ -4,6 +4,9 @@
      presence 1 = PRESENT: blob file in the ledger directory, exactly `length` bytes, sha256 must match (0 bytes is EMPTY, still present)
      presence 0 = ABSENT:  blob "-", length 0, sha "-" (the ledger explicitly says the resource does not exist)
    A key missing from the ledger is MISSING (the caller fails by name), never ABSENT and never a disk fallback.
+   Identity (SC1): the first line may be a header  #SC1<TAB>stage=ID<TAB>input_sha256=HEX  binding the ledger to one stage
+   label and to the input bytes of the run that wrote it.  Strict runs require it and check it (rl_check_identity); a
+   mismatch or a missing header is a named INTERFACE_ERROR, never a silent reuse.
    Errors are returned as text; the caller prints it and fails (rc 2, empty stdout). */
 #ifndef UNISA_RESOURCELEDGER_H
 #define UNISA_RESOURCELEDGER_H
@@ -13,7 +16,7 @@
 #include "../../include/unisa_sha256.h"
 
 typedef struct { unsigned char *key; int kn; int present; unsigned char *value; int vn; } RLRow;
-typedef struct { RLRow *rows; int n; } RLLedger;
+typedef struct { RLRow *rows; int n; int has_id; char stage[128]; char input_hex[65]; } RLLedger;
 
 static int rl_hexv(int c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -36,10 +39,26 @@ static unsigned char *rl_readfile(const char *path, size_t *n) {
     if (sz && fread(b, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(b); return 0; }
     fclose(f); *n = (size_t)sz; return b;
 }
+/* the header line  #SC1<TAB>stage=ID<TAB>input_sha256=HEX  (ID: no TAB, 1..127 bytes; HEX: 64 lowercase digits) */
+static int rl_parse_identity(const char *line, RLLedger *L) {
+    const char *s = line + 5, *t = strchr(s, '\t'), *v; size_t sn, j;
+    if (!t || strncmp(s, "stage=", 6)) return 0;
+    sn = (size_t)(t - (s + 6));
+    if (sn == 0 || sn >= sizeof L->stage) return 0;
+    memcpy(L->stage, s + 6, sn); L->stage[sn] = 0;
+    v = t + 1;
+    if (strncmp(v, "input_sha256=", 13)) return 0;
+    v += 13;
+    if (strlen(v) != 64) return 0;
+    for (j = 0; j < 64; j++) if (!((v[j] >= '0' && v[j] <= '9') || (v[j] >= 'a' && v[j] <= 'f'))) return 0;
+    memcpy(L->input_hex, v, 64); L->input_hex[64] = 0;
+    L->has_id = 1;
+    return 1;
+}
 /* 0: loaded; otherwise err holds the named reason (INTERFACE_ERROR <reason> ...) */
 static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
     char path[4096]; unsigned char *b; size_t n = 0, at = 0; int cap = 0;
-    L->rows = 0; L->n = 0;
+    L->rows = 0; L->n = 0; L->has_id = 0; L->stage[0] = 0; L->input_hex[0] = 0;
     snprintf(path, sizeof path, "%s/resources.tsv", dir);
     b = rl_readfile(path, &n);
     if (!b) { snprintf(err, errn, "INTERFACE_ERROR resource-ledger-absent %s", path); return 1; }
@@ -50,6 +69,13 @@ static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
         if (e == n) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-truncated"); return 1; }
         L2 = e - at; line = malloc(L2 + 1); if (!line) { free(b); return 1; }
         memcpy(line, b + at, L2); line[L2] = 0; at = e + 1;
+        if (!strncmp(line, "#SC1\t", 5)) {
+            /* identity header: the first line only, at most once */
+            int ok = e == L2 && !L->has_id && rl_parse_identity(line, L);
+            free(line);
+            if (!ok) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-identity-malformed"); return 1; }
+            continue;
+        }
         { char *p = line; for (k = 0; k < 5; k++) { char *t = strchr(p, '\t'); if (k < 4 && !t) { nf = -1; break; } if (k == 4 && strchr(p, '\t')) { nf = -2; break; } snprintf(f[k], sizeof f[k], "%.*s", (int)(t ? (size_t)(t - p) : strlen(p)), p); p = t ? t + 1 : p + strlen(p); } nf = nf < 0 ? nf : 5; }
         if (nf != 5) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-fields"); return 1; }
         {   /* key */
@@ -83,6 +109,24 @@ static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
     }
     free(b);
     return 0;
+}
+/* SC1 identity of a run: the ledger's stage and input must be this run's stage label and this run's input bytes */
+static void rl_input_hex(const unsigned char *input, int inputn, char hex[65]) {
+    static const unsigned char none[1] = {0};
+    unisa_sha256_hex(input ? input : none, (size_t)(inputn < 0 ? 0 : inputn), hex);
+}
+static int rl_check_identity(const RLLedger *L, const char *stage, const unsigned char *input, int inputn, char *err, size_t errn) {
+    char hex[65];
+    if (!L->has_id) { snprintf(err, errn, "INTERFACE_ERROR resource-identity-absent"); return 1; }
+    if (strcmp(L->stage, stage)) { snprintf(err, errn, "INTERFACE_ERROR resource-identity-mismatch stage ledger=%s run=%s", L->stage, stage); return 1; }
+    rl_input_hex(input, inputn, hex);
+    if (strcmp(L->input_hex, hex)) { snprintf(err, errn, "INTERFACE_ERROR resource-identity-mismatch input ledger=%s run=%s", L->input_hex, hex); return 1; }
+    return 0;
+}
+/* writes the header line for a capture (stage label and the sha256 of the input bytes the capture runs on) */
+static void rl_write_identity_hex(FILE *f, const char *stage, const char *hex) { fprintf(f, "#SC1\tstage=%s\tinput_sha256=%s\n", stage, hex); }
+static void rl_write_identity(FILE *f, const char *stage, const unsigned char *input, int inputn) {
+    char hex[65]; rl_input_hex(input, inputn, hex); rl_write_identity_hex(f, stage, hex);
 }
 /* exact key lookup: the row, or NULL when the ledger does not list the key (MISSING for the caller) */
 static const RLRow *rl_find(const RLLedger *L, const unsigned char *key, int kn) {

@@ -20,8 +20,9 @@
 #include <dirent.h>
 #define MAX_B 8
 #define EMPTY_SHA "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"   /* sha256 of zero bytes */
-typedef struct { char dir[4096], model[256], sha[65], key[1025], label[256]; } Boundary;
-static char cur_sha[65];   /* the identity the replay checks: the current boundary's frozen model sha256 */
+typedef struct { char dir[4096], model[256], sha[65], key[1025], label[256], stage[128]; } Boundary;
+static char cur_sha[65];
+static char cur_stage[128];   /* the SC1 stage label the replay checks against the ledger header (boundary.tsv stage) */   /* the identity the replay checks: the current boundary's frozen model sha256 */
 static const char *env_prefix = "";   /* "MF_TRACE=1 " for the traced replays only: the trace goes to stderr */
 static int fail(const char *s) { fprintf(stderr, "stagecontractcheck FAIL: %s\n", s); return 1; }
 static int copyfile(const char *a, const char *b) { size_t n; char *x = cx_read(a, &n); if (!x) return 1; int rc = cx_write(b, x, n); free(x); return rc != 0; }
@@ -44,7 +45,7 @@ static int shell(const char *cmd, int secs) {
 /* replay MODEL DATA PREFIX: PREFIX.out is stdout, PREFIX.stderr is written by the runner, PREFIX.rc the status */
 static int replay(const char *runner, const char *model, const char *data, const char *prefix, int secs) {
     char cmd[8192], rcpath[4096], *b; size_t n;
-    snprintf(cmd, sizeof cmd, "MF_MODEL_SHA256=%s %s\"%s\" replay \"%s\" \"%s\" \"%s\" > \"%s.out\"; echo $? > \"%s.rc\"", cur_sha, env_prefix, runner, model, data, prefix, prefix, prefix);
+    snprintf(cmd, sizeof cmd, "MF_MODEL_SHA256=%s MF_STAGE_ID=\"%s\" %s\"%s\" replay \"%s\" \"%s\" \"%s\" > \"%s.out\"; echo $? > \"%s.rc\"", cur_sha, cur_stage, env_prefix, runner, model, data, prefix, prefix, prefix);
     shell(cmd, secs);
     snprintf(rcpath, sizeof rcpath, "%s.rc", prefix);
     b = cx_read(rcpath, &n);
@@ -72,7 +73,7 @@ static int read_boundary(const char *dir, Boundary *b) {
     t = cx_read(path, &n); if (!t) return -1;
     snprintf(b->dir, sizeof b->dir, "%s", dir);
     int rc = field_value(t, n, "model", b->model, sizeof b->model) | field_value(t, n, "sha256", b->sha, sizeof b->sha)
-           | field_value(t, n, "key", b->key, sizeof b->key) | field_value(t, n, "label", b->label, sizeof b->label);
+           | field_value(t, n, "key", b->key, sizeof b->key) | field_value(t, n, "label", b->label, sizeof b->label) | field_value(t, n, "stage", b->stage, sizeof b->stage);
     free(t); return rc ? -1 : 0;
 }
 /* the ledger row for KEY (hex) without its newline; -1 when absent */
@@ -156,6 +157,7 @@ static int run_boundary(const char *runner, const char *tmp, const char *live, B
     snprintf(accept, sizeof accept, "%s/accept", b->dir); snprintf(model, sizeof model, "%s/%s", b->dir, b->model);
     snprintf(live_model, sizeof live_model, "%s/%s", live, b->model);
     snprintf(cur_sha, sizeof cur_sha, "%s", b->sha);
+    snprintf(cur_stage, sizeof cur_stage, "%s", b->stage);
     printf("BOUNDARY %s\n", b->label);
     if (!identity_ok(model, b->sha)) return fail("frozen model does not match its boundary.tsv sha256 (fixture corrupt)");
     if (!same(live_model, model)) { printf("STALE %s: the product under test no longer matches the frozen %s (re-capture the fixture)\n", b->dir, b->model); return 1; }

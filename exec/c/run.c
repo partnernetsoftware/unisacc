@@ -635,6 +635,22 @@ static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned ch
     }
     fclose(f);
 }
+/* SC1 identity (exec/c/resourceledger.h): the stage label of this product path and the input bytes it runs on.  A capture
+   writes the header first; a strict run checks the ledger's header against this run and refuses by name (rc 2, no output).
+   Default runs (no --strict-resource-flow, no capture) never reach this. */
+#define RF_STAGE_ID "e3:lnx/x86_64/tape/O0"
+static int rf_identity_gate(const unsigned char *input,int n) {
+    char err[512];
+    if (rf_capture_dir()) {
+        char path[4096]; FILE *f;
+        snprintf(path, sizeof path, "%s/resources.tsv", rf_capture_dir());
+        f = fopen(path, "wb");
+        if (!f) { fprintf(stderr, "unisacc: resource ledger output\n"); return 2; }
+        rl_write_identity(f, RF_STAGE_ID, input, n); fclose(f);
+    }
+    if (RF_STRICT && rl_check_identity(&RF_LEDGER, RF_STAGE_ID, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
+    return 0;
+}
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
     if (RF_STRICT) {
         static char msg[1200]; char h[1025]; int i;

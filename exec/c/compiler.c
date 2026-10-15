@@ -859,6 +859,7 @@ int main(int argc, char **argv) {
         }
     }
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
+    if (RF_STRICT || rf_capture_dir()) { int g = rf_identity_gate(in.b,in.n); if (g) return g; }   /* SC1 identity, before any stage */
     if (!rc && tape_input) rc=tape_domain(route,&in,src); /* decoded Tapebin uses the same model */
     if (!rc && !(tape_input && mode==2)) {
         if (fwdwant) {
