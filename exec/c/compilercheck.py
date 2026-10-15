@@ -9,7 +9,7 @@ def ok(cmd, **kw):
 src=pathlib.Path('examples/hello.c').resolve();n=0
 drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
 part=sys.argv[4] if len(sys.argv)>4 else 'all'
-assert part in ('all','core','core-build','core-modes','core-contracts','core-dependencies','resources','language','language-1','language-2'),part
+assert part in ('all','core','core-build','core-modes','core-contracts','core-dependencies','resources','resources-macros','resources-headers','resources-printf','resources-isolated','language','language-1','language-2'),part
 def assembly_package(directory):
     isolated=p/directory;isolated.mkdir()
     asm=isolated/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
@@ -203,7 +203,7 @@ if part in ('all','core','core-dependencies'):
             assert got==want,(text,exe,got,want)
     print('token dump: plain lexer network, macros/literals/predefines match reference')
     print('compiler driver core-dependencies: dependency ledger and token dump contracts pass',flush=True)
-if part in ('all','resources'):
+if part in ('all','resources','resources-macros','resources-headers','resources-printf'):
     # Raw CLI resources are interpreted by E2, in both the Python action oracle
     # and the actual threshold-network runtime. No C-side macro parser is used.
     sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()))
@@ -228,6 +228,7 @@ if part in ('all','resources'):
         files.cache[b'\0cli/nostdinc']=b'\1' if nostd else b''
         verdict,out,_=sim.run(delta,probe.read_bytes(),str(probe),files,maxsteps=50000000,loaded=loaded)
         assert verdict=='accept' and out==want,(opts,verdict,out,want)
+if part in ('all','resources','resources-macros'):
     for opts,ds,us in [(['-DX=3'],['X=3'],[]),(['-D','X'],['X'],[]),
         (['-DX='],['X='],[]),(['-DX=1+2'],['X=1+2'],[]),(['-DX=-3'],['X=-3'],[]),
         (['-DX=1','-DX=2'],['X=1','X=2'],[]),(['-DX=1','-UX'],['X=1'],['X']),
@@ -236,6 +237,12 @@ if part in ('all','resources'):
     h1=p/'first.h';h2=p/'second.h'
     h1.write_text('#define X 7\n');h2.write_text('#undef X\n#define X 9\n')
     cli(['-include',h1,'-include',h2,'-DX=4'],['X=4'],includes=[h1,h2])
+    probe.write_text('int main(void) { return VALUE; }\n')
+    flags=['-DVALUE=7','-b',target,'-O2']
+    for exe in drivers:
+        assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
+    print('compiler driver resources-macros: macros and VALUE pass',flush=True)
+if part in ('all','resources','resources-headers'):
     # Quoted source-relative headers outrank -I; -I outranks carried headers.
     idir=p/'headers';idir.mkdir();(idir/'stdio.h').write_text('#define PICK 29\n')
     (p/'local.h').write_text('#define LOCAL 31\n');(idir/'local.h').write_text('#define LOCAL 99\n')
@@ -246,6 +253,8 @@ if part in ('all','resources'):
     for exe in drivers:
         r=run([exe,'--models',p/'compiler.pkg','-nostdinc',probe,'-b',target,'-S'])
         assert r.returncode!=0 and not r.stdout and b'no such file for #include' in r.stderr,(exe,r.returncode,r.stdout,r.stderr)
+    print('compiler driver resources-headers: quoted, -I, carried and nostdinc headers pass',flush=True)
+if part in ('all','resources','resources-printf'):
     probe.write_text('int main(void){ printf("hi %d\\n",42); return 0; }\n')
     # The preprocessor must leave an undeclared printf untouched, without autoinc.
     cli(['-nostdinc'],nostd=True)
@@ -272,10 +281,7 @@ if part in ('all','resources'):
     print('printf fallback: nine conversions, nested slots/pools, escapes/adjacent formats pass')
 
 
-    probe.write_text('int main(void) { return VALUE; }\n')
-    flags=['-DVALUE=7','-b',target,'-O2']
-    for exe in drivers:
-        assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
+if part in ('all','resources','resources-isolated'):
     # Assembly driver consumes the same explicit package from an isolated cwd;
     # this is the real compiler CLI, not a standalone core_run harness.
     asmdir,base=assembly_package('asm-isolated')
