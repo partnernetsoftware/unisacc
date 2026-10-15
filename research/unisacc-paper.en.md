@@ -4,6 +4,8 @@ September 2026 · Code, weights and all evidence: this repository (Appendix A)
 
 > English version of [`unisacc-paper.md`](unisacc-paper.md), synchronised with it for the v0.0.9 release.
 
+**arXiv (when submitted):** primary **cs.AI** (Artificial Intelligence); optional cross-list **cs.PL** (Programming Languages). Primary was cs.PL; aligned to cs.AI per 政委 2026-10-16.
+
 ---
 
 ## Abstract

@@ -25,6 +25,8 @@ A 研究给定有限控制表到网络的精确构造，不证明控制表自动
 | 文件 | 角色 |
 |---|---|
 | [`unisacc-paper.md`](unisacc-paper.md) | 正文 |
+| [`unisacc-paper.en.md`](unisacc-paper.en.md) | 英文正文（与中文同步） |
+| [`arxiv-paper-a/`](arxiv-paper-a/) | arXiv LaTeX 草稿（主类 **cs.AI**，可选交叉 cs.PL；未投稿） |
 | [`paper-a-notes.md`](paper-a-notes.md) | 实现侧的修改建议与投稿待办（含原始日志归档、历史性能版本核对）；已并入正文的条目删去，余下移入投稿待办后再删文件 |
 | [`delta-framework.md`](delta-framework.md) | 理论草稿：编译 = 通用执行器 ∘ δ*（未证；只此一份，A §2.2 与 C 交叉引用其定义） |
 | [`formalization-roadmap.md`](formalization-roadmap.md) | 形式化义务：Lean 4 L0–L3 |
