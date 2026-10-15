@@ -1032,9 +1032,9 @@ static void template_group_visit(Value *scope, void *arg) {
             d = template_subst_ctx(r->d, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
             for (size_t j = 0; j < rowlabels->n; j++)
                 value_put(g->prev, rowlabels->items[j].key, rowlabels->items[j].value);
-            if (!strcmp(r->kind, "rule") || !strcmp(r->kind, "rule:r")) {
-                if (g->modes && !strcmp(r->kind, "rule:r"))
-                    value_put(g->modes, a, value_string("r"));
+            if (!strcmp(r->kind, "rule") || !strncmp(r->kind, "rule:", 5)) {
+                if (g->modes && strcmp(r->kind, "rule"))
+                    value_put(g->modes, a, value_string(r->kind + 5));
                 buf_add(g->out, a, strlen(a)); buf_char(g->out, '\t');
                 buf_add(g->out, b, strlen(b)); buf_char(g->out, '\t');
                 buf_add(g->out, c, strlen(c)); buf_char(g->out, '\t');

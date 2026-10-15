@@ -32,6 +32,7 @@ CASES = [
                        "main\tclone2\t-\t-\tcopy\tCP.CLONE2\tCP.CLONE\t-\t-\n"
                        "main\tcl2-app\t-\t-\tappend\tCP.CLONE2\t*\t-\t[[\"OUT\",68]]\n"),
     case('drop-edge', ''),
+    case('mode-b', ''), case('mode-t', ''), case('mode-r', ''), case('mode-bare', ''),
     case('copy-state', "main\tclone\t-\t-\tcopy-state\tCP.SRC\tCP.CLONE\t-\t-\n"
                        "main\tcl-app\t-\t-\tappend\tCP.CLONE\t*\t-\t[[\"OUT\",66]]\n"),
     case('copy-replace', "main\tclone\t-\t-\tcopy-replace\tCP.SRC\tCP.CLONE\t[\"OUT\",65]\t[[\"OUT\",69]]\n"),
@@ -44,10 +45,19 @@ DROP_ROWS = ("main\tk65\t-\t-\trule:b\tCP.SRC\t65\tCP.DONE\t[[\"OUT\",70]]\n"
              "main\tclone\t-\t-\tcopy\tCP.CLONE\tCP.SRC\t-\t-\n"
              "main\tdrop\t-\t-\tdrop-edge\tCP.CLONE\t65\t-\t-\n")
 
+def mode_rows(kind):
+    k = kind
+    return ("main\tk65\t-\t-\t%s\tCP.SRC\t65\tCP.DONE\t[[\"OUT\",70]]\n"
+            "main\tk66\t-\t-\t%s\tCP.SRC\t66\tCP.DONE\t[[\"OUT\",71]]\n"
+            "main\tsrc\t-\t-\t%s\tCP.SRC\t*\tCP.DONE\t[[\"OUT\",65]]\n"
+            "main\tdone\t-\t-\trule\tCP.DONE\t*\tDEAD\t[[\"ACCEPT\"]]\n") % (k, k, k)
+
 def write_tree(tree, name, body, start):
     d = tree / 'exec' / ('cc-' + name)
     d.mkdir(parents=True, exist_ok=True)
-    rows = DROP_ROWS if name == 'drop-edge' else RULE_SRC + RULE_DONE + body
+    if name == 'drop-edge': rows = DROP_ROWS
+    elif name.startswith('mode-'): rows = mode_rows({'mode-b':'rule:b','mode-t':'rule:t','mode-r':'rule:r','mode-bare':'rule'}[name])
+    else: rows = RULE_SRC + RULE_DONE + body
     (d / 'copyprobe-template.tsv').write_text(rows)
     (d / 'gen-manifest.tsv').write_text(HEAD.format(start=start))
 
@@ -73,9 +83,10 @@ def run_cases(tree, c_gen, work):
     passed = 0
     for name, body in CASES:
         if only and name != only: continue
-        if name == 'drop-edge' and os.environ.get('DROP') != '1':
-            print('SKIP drop-edge (DEBT C-constructor rejects rule:MODE: "template edit state missing"; repro: ONLY=drop-edge DROP=1 python3 copycontractcheck.py TREE E3/gen WORK)'); skipped.append(name); continue
-        for start, inp in [(x, b'') for x in ('CP.SRC', 'CP.CLONE')] + ([(x, b'A') for x in ('CP.SRC', 'CP.CLONE')] if name == 'drop-edge' else []):
+        if name.startswith('mode-'): plan = [('CP.SRC', b''), ('CP.SRC', b'A')]
+        elif name == 'drop-edge': plan = [(x, i) for x in ('CP.SRC', 'CP.CLONE') for i in (b'', b'A')]
+        else: plan = [(x, b'') for x in ('CP.SRC', 'CP.CLONE')]
+        for start, inp in plan:
             tag = f'{name}-{start.split(".")[1].lower()}-{inp.hex() or "e"}'
             write_tree(tree, name, body, start)
             p_json = work / f'{tag}.p.json'; c_json = work / f'{tag}.c.json'
@@ -83,8 +94,9 @@ def run_cases(tree, c_gen, work):
             build_c(c_gen, tree, name, c_json)
             p_rc, p_out = run_table(tree, p_json, tag, inp)
             c_rc, c_out = run_table(tree, c_json, tag + '-c', inp)
-            ok = p_rc == c_rc and p_out == c_out
-            print(f'{tag}: C={c_out!r} rc{c_rc} P={p_out!r} rc{p_rc} {"PASS" if ok else "FAIL"}')
+            same_json = p_json.read_bytes() == c_json.read_bytes()
+            ok = p_rc == c_rc and p_out == c_out and same_json
+            print(f'{tag}: C={c_out!r} rc{c_rc} P={p_out!r} rc{p_rc} json_exact={same_json} {"PASS" if ok else "FAIL"}')
             if not ok:
                 print('first red:', tag); sys.exit(1)
             passed += 1
