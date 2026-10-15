@@ -73,6 +73,12 @@ JOBS=${JOBS:-4}
 UA=${UA:-/tmp/ua_ref}; export UA
 . "$R/tests/lib.sh"; [ "$LIST" != 0 ] || ua_ready
 O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
+# Timing sidecars live in $O.timing (outside $O, which holds exactly the job results, so gate counts stay right).
+# Lifecycle: the gate never deletes $O.timing; it outlives the run, like $O.timing from an earlier run, and is
+# removed by hand (rm -rf "$O.timing" for the run, or rm -rf /tmp/tmp.*.timing). Keep it only while diagnosing.
+# Snapshots (<job>.snapshot: ps -eo pid,stat,etime,args + uptime) are diagnostics: they list other processes
+# and their arguments.  Never upload them as CI artifacts and never send them outside the host.
+TD="$O.timing"; mkdir -p "$TD"   # timing sidecars: outside $O, which holds exactly the job results
 TC=$(ls tests/c/*.c)
 n=0; PIDS=
 job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
@@ -154,10 +160,21 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
         PIDS=$live; [ "$c" -lt "$JOBS" ] && break; sleep 0.1
     done
     n=$((n+1)); f="$O/$(printf %03d $n).$name"
-    ( t0=$(date +%s)
-      out=$(python3 "$R/tests/bound.py" 60 env "$@" 2>&1); rc=$?
-      printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(( $(date +%s)-t0 ))" \
-          "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f" ) &
+    # Timing sidecar (research/c43-watchdog-402s.md section 4): start, bound return, the subshell's end, and a
+    # snapshot only when the job is still alive at GATE_SNAPSHOT_SECS (default 70; the job bound is 60).  The
+    # job file keeps its one-line contract (tests/gatesummary.sh reads it); the timing goes to $f.timing.
+    ( t0=$(date +%s); tb_=$(basename "$f"); tmp="$TD/$tb_.run"
+      python3 "$R/tests/bound.py" 60 env "$@" > "$tmp" 2>&1 & jp=$!
+      ( sp=; trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; exit 0' TERM
+        sleep "${GATE_SNAPSHOT_SECS:-70}" & sp=$!; wait "$sp"
+        if kill -0 "$jp" 2>/dev/null; then { ps -eo pid,stat,etime,args; echo "uptime: $(uptime)"; } > "$TD/$tb_.snapshot" 2>&1; fi ) & wp=$!
+      wait "$jp"; rc=$?; tb=$(date +%s)
+      kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null
+      out=$(cat "$tmp")
+      printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(( tb-t0 ))" \
+          "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f"
+      printf 'start=%s bound_return=%s bound_rc=%s subshell_end=%s\n' "$t0" "$tb" "$rc" "$(date +%s)" > "$TD/$tb_.timing"
+      rm -f "$tmp" ) &
     PIDS="$PIDS $!"
 }
 T0=$(date +%s)
