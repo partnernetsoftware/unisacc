@@ -1,0 +1,75 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Dynamic-C judge for native observation adapters. Inputs are independent
+ * r4/normal-W/test-kind7 run directories, never product PASS cache entries.
+ * Snapshot comparisons are narrow witnesses, not complete stream identities. */
+#include <cx.h>
+static int bad,checks;
+static void check(int ok,const char *name){checks++;printf("%s %s\n",ok?"ok":"FAIL",name);if(!ok)bad++;}
+static int same(const char *a,const char *b){size_t na=0,nb=0;char *x=cx_read(a,&na),*y=cx_read(b,&nb);int ok=x&&y&&na&&na==nb&&!memcmp(x,y,na);free(x);free(y);return ok;}
+static char *logfile(const char *dir){char p[4096];size_t n;snprintf(p,sizeof p,"%s/observation.tsv",dir);return cx_read(p,&n);}
+static int has(const char *s,const char *p){return s&&strstr(s,p)!=0;}
+static int judge(int argc,char **argv){
+ if(argc!=4){fprintf(stderr,"usage: liblatebindWcheck.cx R4_OBSERVATIONS W_OBSERVATIONS KIND7_OBSERVATIONS\n");return 2;}
+ const char *tags[3]={"success","before-failure","after-failure"};char a[4096],b[4096],name[160];
+ for(int t=0;t<3;t++)for(int i=0;i<6;i++){
+  snprintf(a,sizeof a,"%s/%s-%d.bin",argv[1],tags[t],i);snprintf(b,sizeof b,"%s/%s-%d.bin",argv[2],tags[t],i);
+  snprintf(name,sizeof name,"r4/W %s snapshot %d",tags[t],i);check(same(a,b),name);
+  snprintf(a,sizeof a,"%s/%s-%d.bin",argv[2],tags[t],i);snprintf(b,sizeof b,"%s/%s-%d.bin",argv[3],tags[t],i);
+  snprintf(name,sizeof name,"W/kind7 %s snapshot %d",tags[t],i);check(same(a,b),name);
+ }
+ for(int d=1;d<=3;d++)for(int i=0;i<6;i++){
+  snprintf(a,sizeof a,"%s/before-failure-%d.bin",argv[d],i);snprintf(b,sizeof b,"%s/after-failure-%d.bin",argv[d],i);
+  snprintf(name,sizeof name,"atomic failure directory %d snapshot %d",d,i);check(same(a,b),name);
+ }
+ char *old=logfile(argv[1]),*normal=logfile(argv[2]),*fake=logfile(argv[3]);
+ const char *common[5]={"compile\t0\tACCEPT\n","relocate\t0\tACCEPT\n","answer\t1038\n","failed-export\t0\n","host-values\t11\t22\n"};
+ for(int i=0;i<5;i++)check(has(old,common[i])&&has(normal,common[i])&&has(fake,common[i]),common[i]);
+ const char *diagnostic="interleaved\t1\tunisacc: relocate: data-type-mismatch symbol 258 name real_value\n";
+ check(has(old,diagnostic)&&has(normal,diagnostic)&&has(fake,diagnostic),"same named semantic refusal as r4");
+ check(has(normal,"macro-off\t1\tunknown library late-binding kind or invalid declaration\n"),"unregistered kind rejected (macro off)");
+ check(has(fake,"kind7-validator-hits\t1\n"),"own kind7 table validator used");
+ check(has(fake,"fake-conflict\t1\tunisacc: relocate: fake-kind7-provider-token-mismatch symbol 256 name fake_value\n")&&has(fake,"fake-export\t0\n"),"kind7 conflict named; partial success has no export");
+ const char *states[4]={"refusal-0\t1\tnot covered: library data provenance symbol 256 name real_value", "refusal-export-0\t0\n", "refusal-1\t1\tlibrary data: readonly-write symbol 256 name real_value", "refusal-export-1\t0\n"};
+ for(int i=0;i<4;i++)check(has(old,states[i])&&has(normal,states[i])&&has(fake,states[i]),states[i]);
+ printf("Path classification: ACCEPT control; NOT_COVERED unknown readonly alias (not PASS); SEMANTIC_REJECT readonly-write/provider mismatch; timeout/signal not refusal.\n");
+ free(old);free(normal);free(fake);printf("W witnesses: %d assertions, %d failures; semantic refusals are not ACCEPT\n",checks,bad);return bad?1:0;
+}
+
+/* Frozen r4 observations: native lnx/x86_64; no host addresses or paths.
+ * Other hosts report UNVERIFIED rather than compare a different target to it. */
+static int frozen(const char *dir){
+ size_t n=0;unsigned char *b=(unsigned char *)cx_read("tests/liblatebindWcheck.baseline",&n);size_t at=0;
+ if(!b){return 1;}
+ while(at<n&&b[at]=='#'){while(at<n&&b[at]!='\n')at++;if(at==n){free(b);return 1;}at++;}
+ if(at>4096||n-at<8||memcmp(b+at,"WBASE1\n\0",8)||!strstr((char *)b,"runtime-commit: 394b57f6")||!strstr((char *)b,"# generate: cc ")||!strstr((char *)b,"# capture: tests/bound 58 ")){free(b);return 1;}at+=8;
+ const char *tags[3]={"success","before-failure","after-failure"};char path[4096];
+ for(int i=0;i<19;i++){
+  if(n-at<4){free(b);return 1;}size_t z=(size_t)b[at]|((size_t)b[at+1]<<8)|((size_t)b[at+2]<<16)|((size_t)b[at+3]<<24);at+=4;
+  if(!z||z>n-at){free(b);return 1;}
+  if(i==18)snprintf(path,sizeof path,"%s/observation.tsv",dir);
+  else snprintf(path,sizeof path,"%s/%s-%d.bin",dir,tags[i/6],i%6);
+  if(cx_write(path,b+at,z)){free(b);return 1;}at+=z;
+ }
+ int rc=at!=n;free(b);return rc;
+}
+int main(int argc,char **argv){
+ if(argc==4)return judge(argc,argv);
+ if(argc!=2){fprintf(stderr,"usage: liblatebindWcheck.cx PRODUCT [or R4DIR WDIR KIND7DIR]\n");return 2;}
+ char *platform=0;size_t n=0;int rc=cx_run_timeout("uname -sm",5,&platform,&n);
+ int host=!rc&&platform&&strstr(platform,"Linux")&&strstr(platform,"x86_64");free(platform);
+ if(!host){printf("UNVERIFIED_HOST W baseline is native Linux x86_64\n");return 77;}
+ char dir[]="/tmp/liblatebindWXXXXXX",old[4096],normal[4096],fake[4096],cmd[16384],path[4096];
+ if(!mkdtemp(dir))return 2;
+ snprintf(old,sizeof old,"%s/old",dir);snprintf(normal,sizeof normal,"%s/normal",dir);snprintf(fake,sizeof fake,"%s/fake",dir);
+ if(mkdir(old,0700)||mkdir(normal,0700)||mkdir(fake,0700)||frozen(old))return 2;
+ for(int k=0;k<2;k++){
+  snprintf(cmd,sizeof cmd,"cc -O2 -DW_NEW=1 -DW_FAKE=%d -I. tests/liblatebindWcheck.c exec/c/librarycall_x86_64.S -lffi -ldl -o '%s/probe%d'",k,dir,k);
+  rc=cx_run_timeout(cmd,20,0,0);if(rc){printf("MECHANISM build rc%d\n",rc);return rc==142?142:2;}
+  snprintf(cmd,sizeof cmd,"'%s/probe%d' '%s' lnx/x86_64 '%s' unused",dir,k,argv[1],k?fake:normal);
+  char *out=0;rc=cx_run_timeout(cmd,20,&out,&n);
+  if(rc){printf("%s adapter rc%d\n",rc==142?"HOST_TIMEOUT":"MECHANISM",rc);free(out);return rc==142?142:2;}
+  snprintf(path,sizeof path,"%s/observation.tsv",k?fake:normal);if(!out||cx_write(path,out,n)){free(out);return 2;}free(out);
+ }
+ char *args[4]={argv[0],old,normal,fake};rc=judge(4,args);
+ printf("W evidence directory %s\n",dir);return rc;
+}

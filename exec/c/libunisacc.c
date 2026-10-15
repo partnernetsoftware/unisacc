@@ -31,6 +31,9 @@ typedef struct LibraryCallableSite {uint64_t site,key,fixed;us_exports graph;us_
 /* Trusted E3 pairs exact source bytes with one frozen candidate; ABI is certified later. */
 typedef struct LibraryImportAlias {uint64_t id,key,frozen,raw,plan;unsigned char *source;size_t source_length;} LibraryImportAlias;
 typedef struct LibraryCarrierExport {us_export *source;us_carrier_certificate certificate;struct LibraryCarrierExport *next;} LibraryCarrierExport;
+enum {US_LATE_E3=0,US_LATE_LOWER=1,US_LATE_PHASES=2,US_LATE_PARTITIONS=2};
+typedef struct UsLateBuffer {unsigned char *bytes;size_t n;} UsLateBuffer;
+typedef struct UsLateOrigin {char *name;unsigned kind;struct UsLateOrigin *next;} UsLateOrigin;
 struct UnisaCache;   /* run.c: the context's parsed package and decoded models */
 struct us_context {
     char *package, *definitions, *include_path, *target;
@@ -56,8 +59,10 @@ struct us_context {
     LibraryImportAlias *import_aliases;size_t import_alias_count;us_native_plans import_alias_plans;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *contract_snapshot; size_t contract_snapshot_length;
-    unsigned char *late_contract,*late_selection,*late_e3,*late_lower,*late_data_e3,*late_data_lower;
-    size_t late_contract_n,late_selection_n,late_e3_n,late_lower_n,late_data_e3_n,late_data_lower_n;
+    unsigned char *late_contract,*late_selection;
+    size_t late_contract_n,late_selection_n;
+    UsLateBuffer late_buffers[US_LATE_PHASES*US_LATE_PARTITIONS];
+    UsLateOrigin *late_origins;
     char **injected_only;size_t injected_only_n;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -68,6 +73,11 @@ struct us_context {
     char error[1024];
 };
 _Static_assert(sizeof(((us_context *)0)->process_slots)==16,"process protocol requires two 64-bit slots");
+static void us_late_clear_phase(us_context *c,unsigned phase){
+ for(unsigned part=0;part<US_LATE_PARTITIONS;part++){UsLateBuffer *b=&c->late_buffers[phase*US_LATE_PARTITIONS+part];free(b->bytes);b->bytes=NULL;b->n=0;}
+}
+static void us_late_clear_all(us_context *c){for(unsigned phase=0;phase<US_LATE_PHASES;phase++)us_late_clear_phase(c,phase);}
+
 static _Thread_local us_context *active;
 static _Thread_local Allocation *allocations;
 #define ALLOCATION_BUCKETS 4096
@@ -257,7 +267,8 @@ API void us_free(us_context *c) {
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);us_bindings_clear(&c->data_providers);free(c->binding_blob);free(c->contract_snapshot);
-    free(c->late_contract);free(c->late_selection);free(c->late_e3);free(c->late_lower);free(c->late_data_e3);free(c->late_data_lower);
+    free(c->late_contract);free(c->late_selection);us_late_clear_all(c);
+    while(c->late_origins){UsLateOrigin *n=c->late_origins;c->late_origins=n->next;free(n->name);free(n);}
     for(size_t i=0;i<c->injected_only_n;i++)free(c->injected_only[i]);free(c->injected_only);
     if (c->cache) { cache_release(c->cache); free(c->cache); }
     free(c->package); free(c->definitions); free(c->target);
@@ -443,10 +454,7 @@ static void invalidate_bindings(us_context *c) {
     free(c->contract_snapshot);c->contract_snapshot=0;c->contract_snapshot_length=0;
     free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;
     free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;
-    free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;
-    free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
-    free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;
-    free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
+    us_late_clear_all(c);
     free(c->target);c->target=0;c->error[0]=0;
 }
 static us_binding_type binding_type(us_type_descriptor t) {
@@ -518,10 +526,10 @@ API int us_register_data_provider(us_context *c,const char *name,void *address,c
  c->data_providers.items[i]=candidate.items[0];free(candidate.items);
  discard_image(c);c->error[0]=0;return 0;
 }
-API const void *us_library_data_fragment(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_data_e3){error(c,"library data E3 fragment is unavailable");return NULL;}if(n)*n=c->late_data_e3_n;return c->late_data_e3;}
-API const void *us_library_data_lower_unbound(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_data_lower){error(c,"library data lower fragment is unavailable");return NULL;}if(n)*n=c->late_data_lower_n;return c->late_data_lower;}
-API const void *us_library_e3_fragment(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_e3){error(c,"library E3 fragment is unavailable");return NULL;}if(n)*n=c->late_e3_n;return c->late_e3;}
-API const void *us_library_lower_unbound(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;if(!c->late_lower){error(c,"library lower fragment is unavailable");return NULL;}if(n)*n=c->late_lower_n;return c->late_lower;}
+API const void *us_library_data_fragment(us_context *c,size_t *n){return us_late_query(c,1,US_LATE_E3,n);}
+API const void *us_library_data_lower_unbound(us_context *c,size_t *n){return us_late_query(c,1,US_LATE_LOWER,n);}
+API const void *us_library_e3_fragment(us_context *c,size_t *n){return us_late_query(c,0,US_LATE_E3,n);}
+API const void *us_library_lower_unbound(us_context *c,size_t *n){return us_late_query(c,0,US_LATE_LOWER,n);}
 
 API int us_add_symbol_typed(us_context *c,const char *name,void *address,const void *signature,size_t length) {
     if(!c || active || c->input_is_tape || !address)return error(c,"invalid typed symbol registration");
@@ -673,10 +681,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     }else {
         free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;
         free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;
-        free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;
-        free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
-        free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;
-        free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
+        us_late_clear_all(c);
     }
     if(freeze_injected->count || freeze_resolver->declarations.count || freeze_resolver->handle_count){
         if(strcmp(target,library_native_target())){free(late_injected.items);free(late_declared.items);us_late_rollback(c,&prior);return error(c,"native resolver target differs from host");}
@@ -761,7 +766,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         }
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
-            if(c->late_contract)us_late_unwrap3(&input,"USTFLOW2",&c->late_e3,&c->late_e3_n,&c->late_data_e3,&c->late_data_e3_n);
+            if(c->late_contract)us_late_decode(c,&input,"USTFLOW2",US_LATE_E3);
             size_t begin=0,length=(size_t)input.n;
             if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9) || !memcmp(input.b,"USLTAPE3\n",9))) {
                 int version3=!memcmp(input.b,"USLTAPE3\n",9);
@@ -798,7 +803,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     cache_settle();cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
     if(!rc)rc=library_variadic_sites_prepare(c);
-    if(rc){free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+    if(rc){us_late_clear_phase(c,US_LATE_E3);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
         free(c->tape);c->tape=0;c->tape_length=0;}
     return rc;
@@ -1111,12 +1116,12 @@ API int us_relocate(us_context *c) {
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/selection",18,c->late_selection,(int)c->late_selection_n};NRI++;
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/contract",17,c->late_contract,(int)c->late_contract_n};NRI++;
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/data-latebind",22,enabled,8};NRI++;
-            free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
-            free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
+            us_late_clear_phase(c,US_LATE_LOWER);
+            
             rc=runroute_range(route,"tapecheck","tapecheck",&input,source);
             if(!rc)rc=runroute_range(route,"prune","lower",&input,source);
             if(!rc){
-                us_late_unwrap3(&input,"USLOWP2\n",&c->late_lower,&c->late_lower_n,&c->late_data_lower,&c->late_data_lower_n);
+                us_late_decode(c,&input,"USLOWP2\n",US_LATE_LOWER);
                 unsigned char *bound=NULL;size_t boundn=0;
                 char binderror[1024]={0};
                 rc=us_library_relocate(input.b,(size_t)input.n,c->late_selection,c->late_selection_n,us_late_provider,c,&bound,&boundn,binderror,sizeof binderror);

@@ -566,6 +566,7 @@ job lib-module-exports python3 ./tests/libunisaccexportcheck.py --package "${MOD
 job lib-bindings python3 ./tests/libunisaccbindingscheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-data python3 ./tests/libunisaccdatacheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-latebind-W tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/liblatebindWcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # W: private runtime + frozen r4 six snapshots; product is model/runner input
 job lib-resolver-host python3 ./tests/libraryresolverhostcheck.py
 job lib-word64 python3 ./tests/librarywordcheck.py --native-only
 job exec-binaryio python3 ./tests/runtimeiocheck.py

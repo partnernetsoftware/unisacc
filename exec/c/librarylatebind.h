@@ -27,37 +27,33 @@ static int us_late_policy(us_context *c,const char *name){for(size_t i=0;i<c->in
 static void us_late_snapshot(unsigned char **p,size_t *n,const unsigned char *b,size_t z){
  unsigned char *copy=malloc(z?z:1);if(!copy)__us_panic("library fragment: allocation failed");memcpy(copy,b,z);free(*p);*p=copy;*n=z;
 }
-static void us_late_unwrap(Buf *input,const char *magic,unsigned char **fragment,size_t *fragmentn){
- if(input->n<24||memcmp(input->b,magic,8))__us_panic("library fragment: malformed envelope");
- uint64_t main=us_lr_u64(input->b+8),side=us_lr_u64(input->b+16);size_t available=(size_t)input->n-24;
- if(main>available||side!=available-main)__us_panic("library fragment: malformed envelope");
- us_late_snapshot(fragment,fragmentn,input->b+24+(size_t)main,(size_t)side);
- memmove(input->b,input->b+24,(size_t)main);input->n=(int)main;
-}
-/* Three independent model products: main, ordinary function side, data side.
-   Validate all lengths before changing either observation snapshot or main. */
-static void us_late_unwrap3(Buf *input,const char *magic,unsigned char **ordinary,size_t *ordinaryn,unsigned char **data,size_t *datan){
- if(!input||!input->b||input->n<32||memcmp(input->b,magic,8))__us_panic("library fragment: malformed three-part envelope");
+/* Fixed physical partitions; logical categories may alias a partition. */
+static void us_late_decode(us_context *c,Buf *input,const char *magic,unsigned phase){
+ if(!input||!input->b||input->n<32||memcmp(input->b,magic,8)||phase>=US_LATE_PHASES)__us_panic("library fragment: malformed three-part envelope");
  uint64_t main=us_lr_u64(input->b+8),side=us_lr_u64(input->b+16),third=us_lr_u64(input->b+24);size_t available=(size_t)input->n-32;
  if(main>available||side>available-main||third!=available-main-side)__us_panic("library fragment: malformed three-part envelope");
- unsigned char *ordinary_copy=malloc(side?(size_t)side:1),*data_copy=malloc(third?(size_t)third:1);
- if(!ordinary_copy||!data_copy){free(ordinary_copy);free(data_copy);__us_panic("library fragment: allocation failed");}
- memcpy(ordinary_copy,input->b+32+(size_t)main,(size_t)side);
- memcpy(data_copy,input->b+32+(size_t)main+(size_t)side,(size_t)third);
- free(*ordinary);free(*data);*ordinary=ordinary_copy;*ordinaryn=(size_t)side;*data=data_copy;*datan=(size_t)third;
+ UsLateBuffer copies[US_LATE_PARTITIONS];copies[0].n=(size_t)side;copies[1].n=(size_t)third;
+ for(unsigned i=0;i<US_LATE_PARTITIONS;i++)copies[i].bytes=NULL;
+ for(unsigned i=0;i<US_LATE_PARTITIONS;i++){
+  copies[i].bytes=malloc(copies[i].n?copies[i].n:1);
+  if(!copies[i].bytes){for(unsigned j=0;j<US_LATE_PARTITIONS;j++)free(copies[j].bytes);__us_panic("library fragment: allocation failed");}
+ }
+ size_t at=32+(size_t)main;
+ for(unsigned i=0;i<US_LATE_PARTITIONS;i++){memcpy(copies[i].bytes,input->b+at,copies[i].n);at+=copies[i].n;}
+ us_late_clear_phase(c,phase);
+ for(unsigned i=0;i<US_LATE_PARTITIONS;i++)c->late_buffers[phase*US_LATE_PARTITIONS+i]=copies[i];
  memmove(input->b,input->b+32,(size_t)main);input->n=(int)main;
 }
-typedef struct UsLateState {unsigned char *contract,*selection,*e3,*lower,*data_e3,*data_lower;size_t cn,sn,en,ln,den,dln;} UsLateState;
+typedef struct UsLateState {unsigned char *contract,*selection;size_t cn,sn;UsLateBuffer buffers[US_LATE_PHASES*US_LATE_PARTITIONS];} UsLateState;
 static UsLateState us_late_detach(us_context *c){
- UsLateState old={c->late_contract,c->late_selection,c->late_e3,c->late_lower,c->late_data_e3,c->late_data_lower,c->late_contract_n,c->late_selection_n,c->late_e3_n,c->late_lower_n,c->late_data_e3_n,c->late_data_lower_n};
- c->late_contract=c->late_selection=c->late_e3=c->late_lower=c->late_data_e3=c->late_data_lower=NULL;c->late_contract_n=c->late_selection_n=c->late_e3_n=c->late_lower_n=c->late_data_e3_n=c->late_data_lower_n=0;return old;
+ UsLateState old;memset(&old,0,sizeof old);old.contract=c->late_contract;old.selection=c->late_selection;old.cn=c->late_contract_n;old.sn=c->late_selection_n;
+ c->late_contract=c->late_selection=NULL;c->late_contract_n=c->late_selection_n=0;
+ for(unsigned i=0;i<US_LATE_PHASES*US_LATE_PARTITIONS;i++){old.buffers[i]=c->late_buffers[i];c->late_buffers[i].bytes=NULL;c->late_buffers[i].n=0;}return old;
 }
-static void us_late_release(UsLateState *s){free(s->contract);free(s->selection);free(s->e3);free(s->lower);free(s->data_e3);free(s->data_lower);memset(s,0,sizeof *s);}
+static void us_late_release(UsLateState *s){free(s->contract);free(s->selection);for(unsigned i=0;i<US_LATE_PHASES*US_LATE_PARTITIONS;i++)free(s->buffers[i].bytes);memset(s,0,sizeof *s);}
 static void us_late_rollback(us_context *c,UsLateState *old){
- UsLateState fresh=us_late_detach(c);us_late_release(&fresh);
- c->late_contract=old->contract;c->late_selection=old->selection;c->late_e3=old->e3;c->late_lower=old->lower;
- c->late_data_e3=old->data_e3;c->late_data_lower=old->data_lower;
- c->late_contract_n=old->cn;c->late_selection_n=old->sn;c->late_e3_n=old->en;c->late_lower_n=old->ln;c->late_data_e3_n=old->den;c->late_data_lower_n=old->dln;memset(old,0,sizeof *old);
+ UsLateState fresh=us_late_detach(c);us_late_release(&fresh);c->late_contract=old->contract;c->late_selection=old->selection;c->late_contract_n=old->cn;c->late_selection_n=old->sn;
+ for(unsigned i=0;i<US_LATE_PHASES*US_LATE_PARTITIONS;i++)c->late_buffers[i]=old->buffers[i];memset(old,0,sizeof *old);
 }
 static int us_late_prepare(us_context *c,const char *target){
  unsigned char *frame=NULL;size_t size=0;
@@ -83,8 +79,7 @@ static int us_late_prepare(us_context *c,const char *target){
   }
  }
  free(frame);cache_settle();cleanup();active=NULL;RI=NULL;NRI=0;
- free(c->late_e3);c->late_e3=NULL;c->late_e3_n=0;free(c->late_lower);c->late_lower=NULL;c->late_lower_n=0;
- free(c->late_data_e3);c->late_data_e3=NULL;c->late_data_e3_n=0;free(c->late_data_lower);c->late_data_lower=NULL;c->late_data_lower_n=0;
+ us_late_clear_all(c);
  if(rc){free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;}
  return rc;
 }
@@ -105,6 +100,56 @@ static int us_late_data_offer(us_context *c,const us_binding *x,const unsigned c
  if(!x->address)return us_late_data_error(c,"missing-provider",id,name);
  *address=x->address;return 0;
 }
+static int us_late_function_provider(void *context,const unsigned char *record,size_t nm,uint32_t id,const char *name,uint64_t *address){
+ us_context *c=context;const us_binding *x=us_resolver_find(&c->bindings,name);
+ if(x&&x->address){*address=x->address;return 0;}return 2;
+}
+static int us_late_data_provider(void *context,const unsigned char *record,size_t nm,uint32_t id,const char *name,uint64_t *address){
+ us_context *c=context;size_t sig=us_late_u32(record+16);
+ if(sig!=48||record[9]||record[10]||us_late_u32(record+28)||record[32])return us_late_data_error(c,"data-type-mismatch",id,name);
+ uint64_t width=us_lr_u64(record+36+nm+32),extent=us_lr_u64(record+20);
+ if(!width||extent<width)return us_late_data_error(c,"data-extent-mismatch",id,name);
+ const us_binding *x=us_resolver_find(&c->data_providers,name);
+ if(!x){const us_binding *legacy=us_resolver_find(&c->bindings,name);if(legacy&&legacy->kind==1)x=legacy;}
+ if(x)return us_late_data_offer(c,x,record,nm,id,name,address);return 2;
+}
+typedef int (*UsLateVerify)(void *,const unsigned char *,size_t,uint32_t,const char *,uint64_t *);
+typedef struct UsLateClass {unsigned kind,wire_kind,owner,partition;const char *e3_missing,*lower_missing;int (*declare)(us_context *,const char *,const us_signature *);UsLateVerify verify;} UsLateClass;
+#ifndef US_LATE_EXTRA_CLASSES
+#define US_LATE_EXTRA_CLASSES(X)
+#endif
+#define US_LATE_CLASSES(X) \
+ X(0,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",us_declare_injected_import,us_late_function_provider) \
+ X(1,1,4,1,"library data E3 fragment is unavailable","library data lower fragment is unavailable",us_declare_injected_data,us_late_data_provider) \
+ US_LATE_EXTRA_CLASSES(X)
+#define US_LATE_VERIFY_DECL(k,w,o,p,e,l,d,v) static int v(void *,const unsigned char *,size_t,uint32_t,const char *,uint64_t *);
+US_LATE_CLASSES(US_LATE_VERIFY_DECL)
+#undef US_LATE_VERIFY_DECL
+#define US_LATE_CLASS_ROW(k,w,o,p,e,l,d,v) {k,w,o,p,e,l,d,v},
+static const UsLateClass us_late_classes[]={US_LATE_CLASSES(US_LATE_CLASS_ROW)};
+#undef US_LATE_CLASS_ROW
+static const UsLateClass *us_late_class(unsigned kind){
+ for(size_t i=0;i<sizeof us_late_classes/sizeof us_late_classes[0];i++)if(us_late_classes[i].kind==kind)return &us_late_classes[i];return NULL;
+}
+static const UsLateClass *us_late_origin_class(us_context *c,const char *name,unsigned wire){
+ for(UsLateOrigin *o=c->late_origins;o;o=o->next)if(!strcmp(o->name,name))return us_late_class(o->kind);return us_late_class(wire);
+}
+static const void *us_late_query(us_context *c,unsigned kind,unsigned phase,size_t *n){
+ if(n)*n=0;if(!c)return NULL;const UsLateClass *d=us_late_class(kind);
+ if(!d||phase>=US_LATE_PHASES||d->partition>=US_LATE_PARTITIONS){error(c,"unknown library late-binding kind or phase");return NULL;}
+ UsLateBuffer *b=&c->late_buffers[phase*US_LATE_PARTITIONS+d->partition];
+ if(!b->bytes){error(c,phase==US_LATE_E3?d->e3_missing:d->lower_missing);return NULL;}if(n)*n=b->n;return b->bytes;
+}
+static int us_late_declare_kind(us_context *c,unsigned kind,const char *name,const us_signature *sig){
+ const UsLateClass *d=us_late_class(kind);if(!c||!d||!sig||!name)return error(c,"unknown library late-binding kind or invalid declaration");
+ if(!d->declare||d->partition>=US_LATE_PARTITIONS)return error(c,"unknown library late-binding kind");
+ UsLateOrigin *origin=NULL;
+ if(kind!=d->wire_kind){origin=calloc(1,sizeof *origin);if(!origin)return error(c,"out of memory");origin->name=copy_string(name);if(!origin->name){free(origin);return error(c,"out of memory");}origin->kind=kind;}
+ us_signature normalized=*sig;normalized.kind=d->wire_kind;
+ int rc=d->declare(c,name,&normalized);
+ if(rc){if(origin){free(origin->name);free(origin);}return rc;}
+ if(origin){origin->next=c->late_origins;c->late_origins=origin;}return 0;
+}
 static int us_late_provider(void *context,uint32_t id,uint64_t *address){
  us_context *c=context;*address=0;size_t at=16;char name[4097];
  if(!c->late_contract||c->late_contract_n<16)return us_late_data_error(c,"malformed-contract",id,"unknown");
@@ -116,22 +161,11 @@ static int us_late_provider(void *context,uint32_t id,uint64_t *address){
   if(us_late_u32(record+4)==id){
    if(!nm||nm>=sizeof name)return us_late_data_error(c,"malformed-contract",id,"unknown");memcpy(name,record+36,nm);name[nm]=0;
    unsigned owner,selected_id;if(us_late_owner(c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,name,&owner,&selected_id)||selected_id!=id)return us_late_data_error(c,"missing-owner",id,name);
-   const us_binding *x=NULL;
-   if(record[8]==1){
-    if(owner!=4)return us_late_data_error(c,"wrong-owner",id,name);
-    if(sig!=48||record[9]||record[10]||us_late_u32(record+28)||record[32])return us_late_data_error(c,"data-type-mismatch",id,name);
-    uint64_t width=us_lr_u64(record+36+nm+32),extent=us_lr_u64(record+20);
-    if(!width||extent<width)return us_late_data_error(c,"data-extent-mismatch",id,name);
-    x=us_resolver_find(&c->data_providers,name);
-    if(!x){const us_binding *legacy=us_resolver_find(&c->bindings,name);if(legacy&&legacy->kind==1)x=legacy;}
-    if(x)return us_late_data_offer(c,x,record,nm,id,name,address);
-   }else{
-    if(record[8]||owner!=1)return us_late_data_error(c,"wrong-owner",id,name);
-    x=us_resolver_find(&c->bindings,name);if(x&&x->address){*address=x->address;return 0;}
-   }
+   const UsLateClass *d=us_late_origin_class(c,name,record[8]);
+   if(!d||d->wire_kind!=record[8]||d->owner!=owner)return us_late_data_error(c,"wrong-owner",id,name);
+   int verified=d->verify(context,record,nm,id,name,address);if(verified!=2)return verified;
 #if !defined(_WIN32)
-   /* Process/module fallback has declaration metadata only: no claim that
-      dlsym verified extent, six fields, ABI, or writable capability. */
+   /* Process/module fallback trusts declarations, not discovered ABI/capability. */
    if(!(record[11]&2)&&!us_late_policy(c,name)){
     dlerror();void *a=dlsym(RTLD_DEFAULT,name);const char *e=dlerror();if(!e&&a){*address=(uintptr_t)a;return 0;}
     for(size_t j=0;j<c->resolver.handle_count;j++){dlerror();a=dlsym(c->resolver.handles[j].handle,name);e=dlerror();if(!e&&a){*address=(uintptr_t)a;return 0;}}
