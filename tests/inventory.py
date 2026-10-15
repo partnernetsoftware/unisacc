@@ -24,11 +24,14 @@ gate_src = text(R / 'tests/gate.sh')
 for m in re.finditer(r'^\s*(?:for [^;]*; do )?job\s+(\S+)\s+(.*)$', gate_src, re.M):
     jobs.setdefault(m.group(1), m.group(2))
 names = {rel(p): p for p in SCRIPTS}
+ref_patterns = [(n, pathlib.Path(n).name, re.compile(r'(^|[\s"\'(=/])' + re.escape(pathlib.Path(n).name) + r'\b')) for n in names]
 def refs(src):
     out = set()
-    for n in names:
-        b = pathlib.Path(n).name
-        if n in src or ('/' + b) in src or re.search(r'(^|[\s"\'(=/])' + re.escape(b) + r'\b', src):
+    for n, b, pattern in ref_patterns:
+        # Every original match contains the basename; skip impossible searches.
+        if b not in src:
+            continue
+        if n in src or ('/' + b) in src or pattern.search(src):
             out.add(n)
     return out
 reached, frontier = set(), set()
