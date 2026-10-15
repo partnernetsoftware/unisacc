@@ -1,0 +1,101 @@
+#!/usr/bin/env -S unisacc.com -run
+/* stagecontractcheck: S step 0 witnesses on the frozen E1->e3 fixture (tests/seals/stagecontract-e1-e3).
+   S-POS-01: a replay through the extracted e3 network reproduces the captured output byte for byte.
+   S-NEG-RESOURCE: one resource the capture actually requested (present) is removed from the ledger; its blob
+   stays on disk as a decoy.  The replay must refuse with the named key, rc 2, empty stdout.
+   S-NEG-RESET: accept, the named refusal, accept again; the second accept equals the first byte for byte.
+   Each replay is a fresh process; in-process reset is not tested here.  Measured scope only: this is not a
+   whole-stage or whole-candidate verdict.  Runner: tests/middleflowrunner.c (unchanged), built with core.c. */
+#include <cx.h>
+#include <dirent.h>
+#define KEY_ATTR "00636c692f61747472696275746573"   /* "\0cli/attributes", requested and present in the capture */
+static int fail(const char *s) { fprintf(stderr, "stagecontractcheck FAIL: %s\n", s); return 1; }
+static int copyfile(const char *a, const char *b) { size_t n; char *x = cx_read(a, &n); if (!x) return 1; int rc = cx_write(b, x, n); free(x); return rc != 0; }
+static int same(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int eq = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return eq; }
+static int copydir(const char *from, const char *to) {
+    DIR *d = opendir(from); struct dirent *e; char a[4096], b[4096];
+    if (!d || mkdir(to, 0700)) return 1;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(a, sizeof a, "%s/%s", from, e->d_name); snprintf(b, sizeof b, "%s/%s", to, e->d_name);
+        if (copyfile(a, b)) { closedir(d); return 1; }
+    }
+    closedir(d); return 0;
+}
+/* sh -c CMD with a timeout; CMD's exit status is written to RCFILE by the caller's command text */
+static int shell(const char *cmd, int secs) {
+    char *argv[] = {"/bin/sh", "-c", (char *)cmd, 0}; char *out; size_t n;
+    return cx_runv_timeout(argv, secs, &out, &n);
+}
+/* replay MODEL DATA PREFIX: PREFIX.out is stdout, PREFIX.stderr is written by the runner, PREFIX.rc the status */
+static int replay(const char *runner, const char *model, const char *data, const char *prefix) {
+    char cmd[8192], rcpath[4096], *b; size_t n;
+    snprintf(cmd, sizeof cmd, "\"%s\" replay \"%s\" \"%s\" \"%s\" > \"%s.out\"; echo $? > \"%s.rc\"", runner, model, data, prefix, prefix, prefix);
+    shell(cmd, 20);
+    snprintf(rcpath, sizeof rcpath, "%s.rc", prefix);
+    b = cx_read(rcpath, &n);
+    if (!b) return -1;
+    int rc = atoi(b); free(b); return rc;
+}
+static int contains(const char *b, size_t n, const char *s) { size_t m = strlen(s), i; for (i = 0; i + m <= n; i++) if (!memcmp(b + i, s, m)) return 1; return 0; }
+static int filesize(const char *path) { size_t n; char *x = cx_read(path, &n); int z = x ? (int)n : -1; free(x); return z; }
+/* the ledger without the rows for KEY (hex); returns the number of rows removed */
+static int drop_key(const char *dir, const char *key) {
+    char path[4096], *b, *p, *e; size_t n; int removed = 0; char *out = malloc(1 << 20); size_t on = 0;
+    snprintf(path, sizeof path, "%s/resources.tsv", dir);
+    b = cx_read(path, &n); if (!b || !out) return -1;
+    p = b;
+    while (p < b + n) {
+        e = memchr(p, '\n', (b + n) - p); size_t L = e ? (size_t)(e - p) + 1 : (size_t)((b + n) - p);
+        if (!strncmp(p, key, strlen(key)) && p[strlen(key)] == '\t') removed++;
+        else { memcpy(out + on, p, L); on += L; }
+        p += L;
+    }
+    int rc = cx_write(path, out, on); free(b); free(out);
+    return rc ? -1 : removed;
+}
+int main(int argc, char **argv) {
+    char tmp[] = "/tmp/stagecontract-XXXXXX", ledger_blob[4096], runner[4096], accept[4096], model[4096], pos[4096], neg[4096], negdir[4096], reset[4096], cmd[8192], ledger[4096];
+    int rc, removed; char *out; size_t n;
+    if (argc != 3 || strcmp(argv[1], "--fixture")) return fail("usage: stagecontractcheck.cx --fixture DIR");
+    if (!mkdtemp(tmp)) return fail("temporary directory");
+    snprintf(accept, sizeof accept, "%s/accept", argv[2]); snprintf(model, sizeof model, "%s/e3.net", argv[2]);
+    snprintf(runner, sizeof runner, "%s/runner", tmp);
+    snprintf(cmd, sizeof cmd, "cc -std=gnu99 -O2 -w -o \"%s\" tests/middleflowrunner.c exec/c/core.c", runner);
+    shell(cmd, 55);
+    if (filesize(runner) < 0) return fail("runner build (tests/middleflowrunner.c with exec/c/core.c)");
+    snprintf(pos, sizeof pos, "%s/pos", tmp);
+    /* S-POS-01 */
+    rc = replay(runner, model, accept, pos);
+    if (rc != 0) return fail("S-POS-01 replay of the accept capture did not accept");
+    snprintf(cmd, sizeof cmd, "%s/output.bytes", accept);
+    { char out_path[4096]; snprintf(out_path, sizeof out_path, "%s.out", pos);
+      snprintf(cmd, sizeof cmd, "%s/output.bytes", accept);
+      if (!same(out_path, cmd)) return fail("S-POS-01 stdout differs from the captured output.bytes"); }
+    { char e_path[4096]; snprintf(e_path, sizeof e_path, "%s.stderr", pos); if (filesize(e_path) != 0) return fail("S-POS-01 stderr is not empty"); }
+    /* S-NEG-RESOURCE: the requested present key is dropped from a copy; the blob stays on disk */
+    snprintf(negdir, sizeof negdir, "%s/neg", tmp);
+    if (copydir(accept, negdir)) return fail("neg copy");
+    snprintf(ledger_blob, sizeof ledger_blob, "%s/resource-000.bytes", negdir);   /* decoy: the dropped key's blob stays on disk */
+    snprintf(ledger, sizeof ledger, "%s/resources.tsv", accept);
+    { char *lb; size_t ln; lb = cx_read(ledger, &ln); int has = lb && contains(lb, ln, KEY_ATTR); free(lb); if (!has) return fail("fixture does not request the key"); }
+    removed = drop_key(negdir, KEY_ATTR);
+    if (removed != 1) return fail("S-NEG-RESOURCE expected exactly one row removed");
+    snprintf(neg, sizeof neg, "%s/neg", tmp);
+    rc = replay(runner, model, negdir, neg);
+    if (rc != 2) return fail("S-NEG-RESOURCE must refuse with rc 2 (MISSING_EXPLICIT_RESOURCE)");
+    { char o_path[4096], e_path[4096], want[256]; snprintf(o_path, sizeof o_path, "%s.out", neg); snprintf(e_path, sizeof e_path, "%s.stderr", neg);
+      if (filesize(o_path) != 0) return fail("S-NEG-RESOURCE produced stdout");
+      snprintf(want, sizeof want, "MISSING_EXPLICIT_RESOURCE %s", KEY_ATTR);
+      { char *eb; size_t en; eb = cx_read(e_path, &en); int ok = eb && en >= strlen(want) && !memcmp(eb, want, strlen(want)); free(eb);
+        if (!ok) return fail("S-NEG-RESOURCE diagnostic does not name the missing key"); } }
+    if (filesize(ledger_blob) < 0) return fail("decoy blob missing from the fixture");
+    /* S-NEG-RESET: accept, the named refusal, accept again; the second accept equals the first */
+    snprintf(reset, sizeof reset, "%s/reset", tmp);
+    rc = replay(runner, model, accept, reset);
+    if (rc != 0) return fail("S-NEG-RESET second accept did not accept");
+    { char a_path[4096], r_path[4096]; snprintf(a_path, sizeof a_path, "%s.out", reset); snprintf(r_path, sizeof r_path, "%s.out", pos);
+      if (!same(a_path, r_path)) return fail("S-NEG-RESET second accept differs from the first"); }
+    printf("stagecontractcheck PASS: S-POS-01, S-NEG-RESOURCE, S-NEG-RESET (fresh processes; measured scope only)\n");
+    return 0;
+}

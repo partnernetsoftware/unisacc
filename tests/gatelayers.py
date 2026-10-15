@@ -23,6 +23,7 @@ publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cac
 lib-bindings-registry
 hostcheck seedmemory stagelog exittable h1source warmup gate-infra-38 installpair attemptchain c99precheck rulingwait namedrefuse checkrun commitgate whyrerun draftfetch draftguard precommithook k2b queuestart queuestart-strict queuestart-launch queuetimeout gatesummary observation gqalive queuetimer docedit
 watchdog-orphan watchdog-eof watchdog-success
+stage-contract-e1e3
 """.split())   # 0.0.38 P1-P7 pipeline contracts
 CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "tools-")
 
