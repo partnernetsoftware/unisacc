@@ -5,6 +5,9 @@
 typedef struct us_native_plan {
     struct us_native_plan *next; us_exports graph,carrier; ffi_cif cif; ffi_type **args;
     uintptr_t target;unsigned bridge_required;us_export_signature signature;
+    /* Optional dependent resource; same plan owner, released before ABI graph.
+       calloc leaves this empty on every existing construction path. */
+    void *attachment;void (*release_attachment)(void *);
 } us_native_plan;
 typedef struct us_native_plans us_native_plans;
 /* Internal provider classifies model declarations; users cannot supply carriers. */
@@ -23,7 +26,7 @@ typedef struct us_native_arena {
     us_native_plan *plan; void **values; void **owned; void *native_result;
     void *result_target; size_t count;us_native_boundary boundary;
 } us_native_arena;
-static void us_native_plan_free(us_native_plan *p){if(!p)return;free(p->args);us_exports_clear(&p->graph);us_exports_clear(&p->carrier);free(p);}
+static void us_native_plan_free(us_native_plan *p){if(!p)return;if(p->release_attachment)p->release_attachment(p->attachment);free(p->args);us_exports_clear(&p->graph);us_exports_clear(&p->carrier);free(p);}
 static void us_native_plans_clear(us_native_plans *p){if(!p)return;while(p->head){us_native_plan *n=p->head->next;us_native_plan_free(p->head);p->head=n;}p->carrier_provider=NULL;p->carrier_owner=NULL;}
 static us_native_plan *us_native_plan_find(const us_native_plans *p,uint64_t handle){
     if(p)for(us_native_plan *n=p->head;n;n=n->next)if((uint64_t)(uintptr_t)n==handle)return n;return NULL;

@@ -5,6 +5,15 @@
    or untracked ffi_call is present. Define IMPLEMENTATION in exactly one TU. */
 #include "librarycallplans.h"
 #include <stdatomic.h>
+/* Mechanism only: caller retains callback semantics, registry and lifetime. */
+static void us_ffi_closure_drop(ffi_closure **closure,void **code){
+    if(*closure)ffi_closure_free(*closure);*closure=NULL;*code=NULL;
+}
+static int us_ffi_closure_make(ffi_cif *cif,void (*callback)(ffi_cif *,void *,void **,void *),void *owner,ffi_closure **closure,void **code){
+    *closure=ffi_closure_alloc(sizeof **closure,code);
+    if(!*closure||ffi_prep_closure_loc(*closure,cif,callback,owner,*code)!=FFI_OK){us_ffi_closure_drop(closure,code);return 1;}
+    return 0;
+}
 #ifdef US_CALLABLES_IMPLEMENTATION
 _Atomic uint64_t us_callable_global_token=1;
 #else
@@ -51,7 +60,7 @@ static void us_callable_conversion_free(us_callable_conversion *p){
     us_callable_conversion_free(p->element);free(p->members);free(p);
 }
 static void us_callable_free(us_callable *p){
-    if(!p)return;if(p->closure)ffi_closure_free(p->closure);
+    if(!p)return;us_ffi_closure_drop(&p->closure,&p->code);
     us_callable_conversion_free(p->result_plan);
     if(p->arg_plans)for(size_t i=0;i<p->graph.signatures[0]->count;i++)us_callable_conversion_free(p->arg_plans[i]);
     free(p->arg_plans);free(p->opaque_args);free(p->args);us_export_graph_clear(&p->graph);us_export_graph_clear(&p->carrier_graph);free(p);
@@ -363,8 +372,7 @@ static int us_callable_pointer(us_callables *r,uint64_t h,const us_export_signat
     if(!p||!us_callable_signature_equal(p->graph.signatures[0],s))return us_callable_error(error,cap,"stale foreign or incompatible callable handle");
     if(p->origin==US_CALLABLE_NATIVE){*out=(void*)p->target;return 0;}
     if(p->graph.signatures[0]->variadic)return us_callable_error(error,cap,"variadic script closure requires concrete specialization");
-    if(!p->closure){p->closure=ffi_closure_alloc(sizeof *p->closure,&p->code);
-        if(!p->closure||ffi_prep_closure_loc(p->closure,&p->cif,us_callable_callback,p,p->code)!=FFI_OK){if(p->closure)ffi_closure_free(p->closure);p->closure=NULL;p->code=NULL;return 1;}
+    if(!p->closure){if(us_ffi_closure_make(&p->cif,us_callable_callback,p,&p->closure,&p->code))return 1;
         us_callable_lock();p->global_next=us_callable_global_closures;us_callable_global_closures=p;us_callable_unlock();}
     *out=p->code;return 0;
 }
