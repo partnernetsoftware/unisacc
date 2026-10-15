@@ -254,6 +254,11 @@ def main():
         'command': ['python3', './tests/inventoryderivedcheck.py'],
         'files': ['tests/inventoryderivedcheck.py', 'tests/inventory.py', 'tests/INVENTORY.md'],
         'trees': ['tests', 'exec', '.github/workflows'], 'tools': ['python3']}
+    # 0.0.43: checkrun (one of the default base three) had no declaration, so naming suites in commitgate was refused
+    # by the input guard.  It reads only its own script and the wrapper it tests.
+    d['suites']['checkrun'] = {
+        'command': ['./tests/checkruncheck.sh'],
+        'files': ['tests/checkruncheck.sh', 'release/tools/checkrun.sh'], 'tools': ['sh']}
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
