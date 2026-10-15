@@ -22,6 +22,24 @@ for bound in ([native], [sys.executable, str(root/'bound.py')]):
         state=subprocess.run(['/bin/ps','-p',marker.read_text(),'-o','stat='],capture_output=True,text=True,timeout=2).stdout.strip()   # ps exits 1 once the pid is gone: that is the pass case
         assert not state or state.startswith('Z'), state
     print('bound: normal/signal exits and detached descendant timeout pass')
+# Defensive stop budget (tests/bound.py): the SIGKILLs are INJECTED off, so the direct child stays stopped.  This is
+# an injection that exercises the unreaped path on Linux; it is NOT a real uninterruptible (D state) child.  The stop
+# must still return 142 within its budget and name the unreaped pid.  The survivor is killed here afterwards.
+import re
+env=dict(os.environ,UNISACC_BOUND_TEST_NO_KILL="1",UNISACC_BOUND_STOP_SECS="2")
+start=time.monotonic()
+with tempfile.TemporaryDirectory(prefix="bound-stop-") as td:   # files, not pipes: the injected survivor keeps them open
+    out,err=pathlib.Path(td)/"out",pathlib.Path(td)/"err"
+    with open(out,"w") as fo, open(err,"w") as fe:
+        rc=subprocess.run([sys.executable,str(root/"bound.py"),"1","sleep","100"],env=env,stdout=fo,stderr=fe,timeout=20).returncode
+    elapsed=time.monotonic()-start
+    stderr=err.read_text()
+m=re.search(r"bound: unreaped pid (\d+) \(state (\S+), wchan",stderr)
+try:
+    assert rc==142 and m and elapsed<8,(rc,stderr,elapsed)
+finally:
+    if m: os.kill(int(m.group(1)),signal.SIGKILL)
+print("bound: stop budget returns 142 and names the unreaped pid (injected, not a D state)")
 
 # Signals delivered to the watchdog itself must also reap a stopped,
 # detached descendant. Repeated termination must not interrupt cleanup.

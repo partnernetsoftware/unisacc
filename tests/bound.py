@@ -6,19 +6,51 @@ import secrets
 import signal
 import subprocess
 import sys
+import time
 CHAIN = "UNISACC_BOUND_CHAIN"
+# Defensive (research/c43-bound-stop-889s-readonly.md): stop() has a total budget, so a child that cannot be
+# reaped cannot hold the wall clock.  The root cause of the 889 s case is NOT located; this only makes the
+# cleanup finite and visible.  Outcome is unchanged: a timeout is always 142, and an unreaped child is never green.
+STOP_SECS = float(os.environ.get('UNISACC_BOUND_STOP_SECS', '10'))
+# Test-only injection (tests/boundcheck.py): skip the SIGKILLs so the direct child stays stopped.  This exercises the
+# unreaped path on Linux; it is NOT a real uninterruptible (D state) child.
+TEST_NO_KILL = os.environ.get('UNISACC_BOUND_TEST_NO_KILL') == '1'
+TRACE = os.environ.get('BOUND_TRACE')   # phase timestamps, written only when set (probe / diagnosis)
+_T0 = [None]
 
 
+def mark(what):
+    now = time.monotonic()
+    if _T0[0] is None: _T0[0] = now
+    if TRACE:
+        with open(TRACE, 'a') as f: f.write('%8.3f %s\n' % (now - _T0[0], what))
 
-def scoped_pids(token):
+
+def describe(pid):
+    """state and wchan of a process for the unreaped diagnostic; '?' where /proc is not available."""
+    state = wchan = '?'
+    try:
+        with open('/proc/%d/stat' % pid) as f: state = f.read().rsplit(')', 1)[1].split()[0]
+    except (OSError, IndexError):
+        pass
+    try:
+        with open('/proc/%d/wchan' % pid) as f: wchan = f.read().strip() or '-'
+    except OSError:
+        pass
+    return state, wchan
+
+
+def scoped_pids(token, deadline=None):
     """Every live process whose environment carries this bound's token.
     Linux reads /proc/<pid>/environ.  macOS asks ps for the environment (-E): THE macOS BRANCH IS NOT VERIFIED
     on Darwin yet (c43 watchdog, m4pro check pending); until it is, macOS must not be recorded green.
-    Unreadable entries are skipped; a failing ps yields nothing rather than an error."""
+    Unreadable entries are skipped; a failing ps yields nothing rather than an error.
+    With a deadline, a scan that runs past it stops early and returns what it has (defensive)."""
     found = set()
     needle = ('%s=' % CHAIN).encode()
     if os.path.isdir('/proc/self'):
         for name in os.listdir('/proc'):
+            if deadline is not None and time.monotonic() > deadline: break
             if not name.isdigit(): continue
             try:
                 with open('/proc/%s/environ' % name, 'rb') as f: env = f.read()
@@ -39,6 +71,8 @@ def stop(process, code, token=None):
     # Cleanup must not be interrupted after descendants have been stopped.
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, signal.SIG_IGN)
+    deadline = time.monotonic() + STOP_SECS
+    mark('stop begin')
     owned = {process.pid}
     def send(pid, sig):
         try:
@@ -47,7 +81,9 @@ def stop(process, code, token=None):
             pass
     send(process.pid, signal.SIGSTOP)
     try:
-        while True:
+        rounds = 0
+        while time.monotonic() < deadline:
+            rounds += 1
             rows = subprocess.check_output(
                 ['/bin/ps', '-axo', 'pid=,ppid='], text=True,
                 stderr=subprocess.DEVNULL,
@@ -59,27 +95,44 @@ def stop(process, code, token=None):
                     owned.add(pid)
                     send(pid, signal.SIGSTOP)
                     added = True
+            mark('tree round %d owned=%d' % (rounds, len(owned)))
             if not added:
                 break
     except (OSError, subprocess.CalledProcessError, ValueError):
         # A restricted host may deny ps. The child still owns a new process
         # group, so kill that group even when descendant enumeration fails.
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    for pid in owned:
-        send(pid, signal.SIGKILL)
+    mark('tree done')
+    if not TEST_NO_KILL:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        for pid in owned:
+            send(pid, signal.SIGKILL)
+    mark('killpg + SIGKILL owned')
     # c43: anything in this scope (orphaned, setsid'd or nested) carries the token; freeze, then kill all of them
-    for _ in range(50):
-        fresh = scoped_pids(token) - owned
+    for n in range(50):
+        if time.monotonic() >= deadline: break
+        fresh = scoped_pids(token, deadline) - owned
         if not fresh: break
         owned |= fresh
         for pid in fresh: send(pid, signal.SIGSTOP)
-    for pid in scoped_pids(token) | owned:
-        send(pid, signal.SIGKILL)
-    process.wait()
+        mark('scope loop %d fresh=%d' % (n + 1, len(fresh)))
+    mark('scope loop end')
+    if not TEST_NO_KILL:
+        for pid in scoped_pids(token, deadline) | owned:
+            send(pid, signal.SIGKILL)
+    mark('final SIGKILL sweep')
+    # Finite reap: poll (WNOHANG through Popen.poll) until the deadline, never an unbounded wait.
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    mark('reap finished')
+    if process.poll() is None:
+        state, wchan = describe(process.pid)
+        sys.stderr.write('bound: unreaped pid %d (state %s, wchan %s) after %.1fs stop budget\n'
+                         % (process.pid, state, wchan, STOP_SECS))
+        sys.stderr.flush()
     return code
 
 
