@@ -1,18 +1,28 @@
 #!/usr/bin/env -S unisacc.com -run
-/* stagecontractcheck: S step 0 witnesses on the frozen E1->e3 fixture (tests/seals/stagecontract-e1-e3).
-   S-POS-01: a replay through the extracted e3 network reproduces the captured output byte for byte.
-   S-NEG-RESOURCE: one resource the capture actually requested (present) is removed from the ledger; its blob
-   stays on disk as a decoy.  The replay must refuse with the named key, rc 2, empty stdout.
-   S-NEG-RESET: accept, the named refusal, accept again; the second accept equals the first byte for byte.
-   S-NEG-DUP: the key twice with different responses -> refusal naming the key (first entry must not win).
-   S-NEG-FRAME: declared length disagrees with the blob -> refusal, empty stdout.  S-NEG-MODEL: one model byte
-   flipped under the old identity -> refusal.  S-NEG-ABSENT and S-NEG-EMPTY have no predicted outcome: they are
-   reported as UNKNOWN (only a missing-resource refusal for the answered key fails them).
-   Each replay is a fresh process; in-process reset is not tested here.  Measured scope only: this is not a
-   whole-stage or whole-candidate verdict.  Runner: tests/middleflowrunner.c (unchanged), built with core.c. */
+/* stagecontractcheck: the stage-contract witnesses (SC1), one set of checks for every boundary fixture.
+   usage: stagecontractcheck.cx --fixture DIR [--fixture DIR ...] [--product PATH]
+   Each DIR holds boundary.tsv (model FILE, sha256 HEX of the frozen model, key HEX of a resource the accept capture
+   requests, label TEXT), accept/ (the captured directory), and the frozen model FILE.  Nothing else is per-boundary.
+   Per boundary:
+     S-POS-01: a replay of accept/ reproduces output.bytes byte for byte, stderr empty.
+     S-NEG-RESOURCE: the requested key's row is dropped from a copy; the replay refuses rc 2, empty stdout,
+       "MISSING_EXPLICIT_RESOURCE <key>".  A present row's blob stays on disk as a decoy.
+     S-NEG-RESET: accept, the named refusal, accept again; the second accept equals the first byte for byte.
+     S-NEG-DUP: the key twice with different responses -> refusal naming the key (the first entry must not win).
+     S-NEG-FRAME: declared length disagrees with the blob -> refusal, empty stdout, a diagnostic present.
+     S-NEG-MODEL: one model byte flipped under the old identity -> refusal, empty stdout.
+     S-NEG-ABSENT and S-NEG-EMPTY have no predicted outcome: UNKNOWN, with the runner's trace as evidence.
+       Only a missing-resource refusal for the answered key fails them.
+   The product is extracted once (tests/modelstreamextract.cx), and each frozen model must match its extraction (STALE).
+   Each replay is a fresh process.  Measured scope only: this is not a whole-stage or whole-candidate verdict.
+   Runner: tests/middleflowrunner.c (unchanged apart from the identity and duplicate checks), built with core.c. */
 #include <cx.h>
 #include <dirent.h>
-#define KEY_ATTR "00636c692f61747472696275746573"   /* "\0cli/attributes", requested and present in the capture */
+#define MAX_B 8
+#define EMPTY_SHA "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"   /* sha256 of zero bytes */
+typedef struct { char dir[4096], model[256], sha[65], key[1025], label[256]; } Boundary;
+static char cur_sha[65];   /* the identity the replay checks: the current boundary's frozen model sha256 */
+static const char *env_prefix = "";   /* "MF_TRACE=1 " for the traced replays only: the trace goes to stderr */
 static int fail(const char *s) { fprintf(stderr, "stagecontractcheck FAIL: %s\n", s); return 1; }
 static int copyfile(const char *a, const char *b) { size_t n; char *x = cx_read(a, &n); if (!x) return 1; int rc = cx_write(b, x, n); free(x); return rc != 0; }
 static int same(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int eq = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return eq; }
@@ -26,17 +36,15 @@ static int copydir(const char *from, const char *to) {
     }
     closedir(d); return 0;
 }
-/* sh -c CMD with a timeout; CMD's exit status is written to RCFILE by the caller's command text */
+/* sh -c CMD with a timeout */
 static int shell(const char *cmd, int secs) {
     char *argv[] = {"/bin/sh", "-c", (char *)cmd, 0}; char *out; size_t n;
     return cx_runv_timeout(argv, secs, &out, &n);
 }
 /* replay MODEL DATA PREFIX: PREFIX.out is stdout, PREFIX.stderr is written by the runner, PREFIX.rc the status */
-#define E3_SHA "5e9ab6c45354f7ffa29c3ca8407d6330041b91dc49c0fd8a712eaa25e0ed0ea6"   /* sha256 of the frozen e3.net (README); the replay refuses any other model */
-static const char *env_prefix = "";   /* "MF_TRACE=1 " for the traced replays only: the trace goes to stderr */
 static int replay(const char *runner, const char *model, const char *data, const char *prefix, int secs) {
     char cmd[8192], rcpath[4096], *b; size_t n;
-    snprintf(cmd, sizeof cmd, "MF_MODEL_SHA256=%s %s\"%s\" replay \"%s\" \"%s\" \"%s\" > \"%s.out\"; echo $? > \"%s.rc\"", E3_SHA, env_prefix, runner, model, data, prefix, prefix, prefix);
+    snprintf(cmd, sizeof cmd, "MF_MODEL_SHA256=%s %s\"%s\" replay \"%s\" \"%s\" \"%s\" > \"%s.out\"; echo $? > \"%s.rc\"", cur_sha, env_prefix, runner, model, data, prefix, prefix, prefix);
     shell(cmd, secs);
     snprintf(rcpath, sizeof rcpath, "%s.rc", prefix);
     b = cx_read(rcpath, &n);
@@ -45,6 +53,43 @@ static int replay(const char *runner, const char *model, const char *data, const
 }
 static int contains(const char *b, size_t n, const char *s) { size_t m = strlen(s), i; for (i = 0; i + m <= n; i++) if (!memcmp(b + i, s, m)) return 1; return 0; }
 static int filesize(const char *path) { size_t n; char *x = cx_read(path, &n); int z = x ? (int)n : -1; free(x); return z; }
+/* the value of NAME in a "name<TAB>value" text; -1 when absent */
+static int field_value(const char *t, size_t n, const char *name, char *out, size_t sz) {
+    size_t nl = strlen(name); const char *p = t, *e = t + n;
+    while (p < e) {
+        const char *q = memchr(p, '\n', e - p); size_t L = q ? (size_t)(q - p) : (size_t)(e - p);
+        if (L > nl && !memcmp(p, name, nl) && p[nl] == '\t') {
+            if (L - nl - 1 >= sz) return -1;
+            memcpy(out, p + nl + 1, L - nl - 1); out[L - nl - 1] = 0; return 0;
+        }
+        p = q ? q + 1 : e;
+    }
+    return -1;
+}
+static int read_boundary(const char *dir, Boundary *b) {
+    char path[4096], *t; size_t n;
+    snprintf(path, sizeof path, "%s/boundary.tsv", dir);
+    t = cx_read(path, &n); if (!t) return -1;
+    snprintf(b->dir, sizeof b->dir, "%s", dir);
+    int rc = field_value(t, n, "model", b->model, sizeof b->model) | field_value(t, n, "sha256", b->sha, sizeof b->sha)
+           | field_value(t, n, "key", b->key, sizeof b->key) | field_value(t, n, "label", b->label, sizeof b->label);
+    free(t); return rc ? -1 : 0;
+}
+/* the ledger row for KEY (hex) without its newline; -1 when absent */
+static int key_row(const char *dir, const char *key, char *out, size_t sz) {
+    char path[4096], *b, *p, *e; size_t n, L;
+    snprintf(path, sizeof path, "%s/resources.tsv", dir);
+    b = cx_read(path, &n); if (!b) return -1;
+    for (p = b; p < b + n; p = e + 1) {
+        e = memchr(p, '\n', (b + n) - p); if (!e) e = b + n;
+        L = (size_t)(e - p);
+        if (L > strlen(key) && !strncmp(p, key, strlen(key)) && p[strlen(key)] == '\t') {
+            if (L >= sz) { free(b); return -1; }
+            memcpy(out, p, L); out[L] = 0; free(b); return 0;
+        }
+    }
+    free(b); return -1;
+}
 /* the ledger without the rows for KEY (hex); returns the number of rows removed */
 static int drop_key(const char *dir, const char *key) {
     char path[4096], *b, *p, *e; size_t n; int removed = 0; char *out = malloc(1 << 20); size_t on = 0;
@@ -60,8 +105,6 @@ static int drop_key(const char *dir, const char *key) {
     int rc = cx_write(path, out, on); free(b); free(out);
     return rc ? -1 : removed;
 }
-#define EMPTY_SHA "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"   /* sha256 of zero bytes */
-#define SHA_ATTR "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"    /* sha256 of resource-000.bytes */
 /* replace the first row for KEY (hex) with ROW; later rows for KEY stay as they are; returns rows matched, -1 on error */
 static int replace_row(const char *dir, const char *key, const char *row) {
     char path[4096], *b, *p, *e; size_t n, on = 0; int matched = 0, done = 0;
@@ -100,121 +143,133 @@ static void unknown(const char *label, const char *prefix, int rc) {
     if (x && n) printf("     trace: %.*s", (int)n, x);
     free(x);
 }
-/* negatives beyond S-NEG-RESOURCE/RESET: each derives its variant at run time from the accept capture */
-static int run_negatives(const char *runner, const char *model, const char *accept, const char *tmp) {
-    char dir[4096], pre[4096], absent[4096], path[4096], row[512];
-    int rc, arc, erc;
-    /* S-NEG-ABSENT: the requested attribute is answered ABSENT.  No outcome is predicted, so it is recorded as UNKNOWN; it must not be reported as missing */
-    snprintf(dir, sizeof dir, "%s/absent", tmp); snprintf(absent, sizeof absent, "%s/absent", tmp);
-    if (copydir(accept, dir)) return fail("absent copy");
-    snprintf(row, sizeof row, "%s\t0\t-\t0\t-", KEY_ATTR);
-    if (replace_row(dir, KEY_ATTR, row) != 1) return fail("S-NEG-ABSENT expected exactly one row replaced");
-    env_prefix = "MF_TRACE=1 "; arc = replay(runner, model, dir, absent, 10); env_prefix = "";
-    if (stderr_has(absent, "MISSING_EXPLICIT_RESOURCE")) return fail("S-NEG-ABSENT reported as a missing resource (an answered request must not be missing)");
-    unknown("S-NEG-ABSENT", absent, arc);
-    /* S-NEG-EMPTY: the attribute is PRESENT with a zero-length blob; it must not be reported as missing.  Outcome UNKNOWN, as above */
-    snprintf(dir, sizeof dir, "%s/empty", tmp); snprintf(pre, sizeof pre, "%s/empty", tmp);
-    if (copydir(accept, dir)) return fail("empty copy");
-    snprintf(path, sizeof path, "%s/resource-empty.bytes", dir);
+/* the frozen model file's sha256 matches the boundary descriptor */
+static int identity_ok(const char *path, const char *sha) {
+    size_t n; char *x = cx_read(path, &n); char hex[65]; if (!x) return 0;
+    cx_sha256_hex(x, n, hex); free(x); return !strcmp(hex, sha);
+}
+/* one boundary: the shared checks, run against this fixture's accept capture and frozen model */
+static int run_boundary(const char *runner, const char *tmp, const char *live, Boundary *b, int idx) {
+    char work[4096], accept[4096], model[4096], live_model[4096], pos[4096], neg[4096], negdir[4096], reset[4096], path[4096], row[512], blob[256];
+    char *x; size_t n; int rc, arc, erc;
+    snprintf(work, sizeof work, "%s/b%d", tmp, idx); if (mkdir(work, 0700)) return fail("boundary work directory");
+    snprintf(accept, sizeof accept, "%s/accept", b->dir); snprintf(model, sizeof model, "%s/%s", b->dir, b->model);
+    snprintf(live_model, sizeof live_model, "%s/%s", live, b->model);
+    snprintf(cur_sha, sizeof cur_sha, "%s", b->sha);
+    printf("BOUNDARY %s\n", b->label);
+    if (!identity_ok(model, b->sha)) return fail("frozen model does not match its boundary.tsv sha256 (fixture corrupt)");
+    if (!same(live_model, model)) { printf("STALE %s: the product under test no longer matches the frozen %s (re-capture the fixture)\n", b->dir, b->model); return 1; }
+    if (key_row(accept, b->key, row, sizeof row)) return fail("the boundary key is not in the accept ledger");
+    /* S-POS-01 */
+    snprintf(pos, sizeof pos, "%s/pos", work);
+    if (replay(runner, model, accept, pos, 20) != 0) return fail("S-POS-01 replay of the accept capture did not accept");
+    { char out_path[4096]; snprintf(out_path, sizeof out_path, "%s.out", pos); snprintf(path, sizeof path, "%s/output.bytes", accept);
+      if (!same(out_path, path)) return fail("S-POS-01 stdout differs from the captured output.bytes"); }
+    if (err_size(pos) != 0) return fail("S-POS-01 stderr is not empty");
+    /* S-NEG-RESOURCE: the requested key is dropped from a copy; a present row's blob stays on disk as a decoy */
+    snprintf(negdir, sizeof negdir, "%s/neg", work);
+    if (copydir(accept, negdir)) return fail("neg copy");
+    if (contains(row, strlen(row), "\t1\t")) {
+        const char *t1 = strchr(row, '\t') + 1; t1 = strchr(t1, '\t') + 1;
+        const char *t2 = strchr(t1, '\t'); size_t bl = (size_t)(t2 - t1);
+        if (bl >= sizeof blob) return fail("decoy blob name too long");
+        memcpy(blob, t1, bl); blob[bl] = 0;
+    } else blob[0] = 0;
+    if (drop_key(negdir, b->key) != 1) return fail("S-NEG-RESOURCE expected exactly one row removed");
+    if (blob[0]) { snprintf(path, sizeof path, "%s/%s", negdir, blob); if (filesize(path) < 0) return fail("decoy blob missing from the fixture"); }
+    snprintf(neg, sizeof neg, "%s/neg", work);
+    if (replay(runner, model, negdir, neg, 20) != 2) return fail("S-NEG-RESOURCE must refuse with rc 2 (MISSING_EXPLICIT_RESOURCE)");
+    if (out_size(neg) != 0) return fail("S-NEG-RESOURCE produced stdout");
+    { char want[1200]; snprintf(want, sizeof want, "MISSING_EXPLICIT_RESOURCE %s", b->key);
+      if (!stderr_has(neg, want)) return fail("S-NEG-RESOURCE diagnostic does not name the missing key"); }
+    /* S-NEG-RESET: accept, the named refusal, accept again; the second accept equals the first */
+    snprintf(reset, sizeof reset, "%s/reset", work);
+    if (replay(runner, model, accept, reset, 20) != 0) return fail("S-NEG-RESET second accept did not accept");
+    { char a_path[4096], r_path[4096]; snprintf(a_path, sizeof a_path, "%s.out", reset); snprintf(r_path, sizeof r_path, "%s.out", pos);
+      if (!same(a_path, r_path)) return fail("S-NEG-RESET second accept differs from the first"); }
+    /* S-NEG-ABSENT: the key answered ABSENT; no outcome predicted (UNKNOWN); it must not be reported as missing */
+    snprintf(negdir, sizeof negdir, "%s/absent", work); snprintf(neg, sizeof neg, "%s/absent", work);
+    if (copydir(accept, negdir)) return fail("absent copy");
+    snprintf(row, sizeof row, "%s\t0\t-\t0\t-", b->key);
+    if (replace_row(negdir, b->key, row) != 1) return fail("S-NEG-ABSENT expected exactly one row replaced");
+    env_prefix = "MF_TRACE=1 "; arc = replay(runner, model, negdir, neg, 10); env_prefix = "";
+    if (stderr_has(neg, "MISSING_EXPLICIT_RESOURCE")) return fail("S-NEG-ABSENT reported as a missing resource (an answered request must not be missing)");
+    unknown("S-NEG-ABSENT", neg, arc);
+    /* S-NEG-EMPTY: the key PRESENT with a zero-length blob; it must not be reported as missing; UNKNOWN as above */
+    snprintf(negdir, sizeof negdir, "%s/empty", work); snprintf(neg, sizeof neg, "%s/empty", work);
+    if (copydir(accept, negdir)) return fail("empty copy");
+    snprintf(path, sizeof path, "%s/resource-empty.bytes", negdir);
     if (cx_write(path, "", 0)) return fail("empty blob write");
-    snprintf(row, sizeof row, "%s\t1\tresource-empty.bytes\t0\t%s", KEY_ATTR, EMPTY_SHA);
-    if (replace_row(dir, KEY_ATTR, row) != 1) return fail("S-NEG-EMPTY expected exactly one row replaced");
-    env_prefix = "MF_TRACE=1 "; erc = replay(runner, model, dir, pre, 10); env_prefix = "";
-    if (stderr_has(pre, "MISSING_EXPLICIT_RESOURCE")) return fail("S-NEG-EMPTY: a present zero-length resource reported as missing");
-    unknown("S-NEG-EMPTY", pre, erc);
-    { char a[4096], b[4096]; snprintf(a, sizeof a, "%s.out", pre); snprintf(b, sizeof b, "%s.out", absent);
+    snprintf(row, sizeof row, "%s\t1\tresource-empty.bytes\t0\t%s", b->key, EMPTY_SHA);
+    if (replace_row(negdir, b->key, row) != 1) return fail("S-NEG-EMPTY expected exactly one row replaced");
+    env_prefix = "MF_TRACE=1 "; erc = replay(runner, model, negdir, neg, 10); env_prefix = "";
+    if (stderr_has(neg, "MISSING_EXPLICIT_RESOURCE")) return fail("S-NEG-EMPTY: a present zero-length resource reported as missing");
+    unknown("S-NEG-EMPTY", neg, erc);
+    { char a[4096], c[4096]; snprintf(a, sizeof a, "%s.out", neg); snprintf(c, sizeof c, "%s/absent.out", work);
       printf("     S-NEG-EMPTY vs S-NEG-ABSENT: rc %s, stdout %s; the traces above show the two answers differ\n",
-             erc == arc ? "equal" : "differ", same(a, b) ? "identical" : "differ");
-      if (erc == arc && same(a, b)) printf("     stage does not distinguish ABSENT from EMPTY on this input: both answers reach the same output (evidence: traces + identical stdout); no semantic difference is claimed\n"); }
+             erc == arc ? "equal" : "differ", same(a, c) ? "identical" : "differ");
+      if (erc == arc && same(a, c)) printf("     stage does not distinguish ABSENT from EMPTY on this input: both answers reach the same output (evidence: traces + identical stdout); no semantic difference is claimed\n"); }
     /* S-NEG-DUP: the same key twice with different responses (present, then absent) must refuse by name; taking the first entry is a red */
-    snprintf(dir, sizeof dir, "%s/dup", tmp); snprintf(pre, sizeof pre, "%s/dup", tmp);
-    if (copydir(accept, dir)) return fail("dup copy");
-    snprintf(row, sizeof row, "%s\t0\t-\t0\t-", KEY_ATTR);
-    if (append_row(dir, row)) return fail("dup append");
-    rc = replay(runner, model, dir, pre, 10);
+    snprintf(negdir, sizeof negdir, "%s/dup", work); snprintf(neg, sizeof neg, "%s/dup", work);
+    if (copydir(accept, negdir)) return fail("dup copy");
+    snprintf(row, sizeof row, "%s\t0\t-\t0\t-", b->key);
+    if (append_row(negdir, row)) return fail("dup append");
+    rc = replay(runner, model, negdir, neg, 10);
     if (rc == 0) return fail("S-NEG-DUP accepted a key with two different responses (first entry taken)");
     if (rc < 0) return fail("S-NEG-DUP produced no result");
-    if (out_size(pre) != 0) return fail("S-NEG-DUP produced stdout");
-    if (!stderr_has(pre, KEY_ATTR)) return fail("S-NEG-DUP refusal does not name the duplicated key");
+    if (out_size(neg) != 0) return fail("S-NEG-DUP produced stdout");
+    if (!stderr_has(neg, b->key)) return fail("S-NEG-DUP refusal does not name the duplicated key");
     printf("ok   S-NEG-DUP refused: rc %d, stdout empty, names the key\n", rc);
-    /* S-NEG-FRAME: the declared length (5) disagrees with the blob (4 bytes): interface error, empty primary output */
-    snprintf(dir, sizeof dir, "%s/frame", tmp); snprintf(pre, sizeof pre, "%s/frame", tmp);
-    if (copydir(accept, dir)) return fail("frame copy");
-    snprintf(row, sizeof row, "%s\t1\tresource-000.bytes\t5\t%s", KEY_ATTR, SHA_ATTR);
-    if (replace_row(dir, KEY_ATTR, row) != 1) return fail("S-NEG-FRAME expected exactly one row replaced");
-    rc = replay(runner, model, dir, pre, 10);
+    /* S-NEG-FRAME: a fresh 4-byte blob declared with length 5: interface error, empty primary output */
+    snprintf(negdir, sizeof negdir, "%s/frame", work); snprintf(neg, sizeof neg, "%s/frame", work);
+    if (copydir(accept, negdir)) return fail("frame copy");
+    x = "frame"; snprintf(path, sizeof path, "%s/resource-frame.bytes", negdir);
+    if (cx_write(path, x, 4)) return fail("frame blob write");
+    { char fsha[65]; cx_sha256_hex(x, 4, fsha); snprintf(row, sizeof row, "%s\t1\tresource-frame.bytes\t5\t%s", b->key, fsha); }
+    if (replace_row(negdir, b->key, row) != 1) return fail("S-NEG-FRAME expected exactly one row replaced");
+    rc = replay(runner, model, negdir, neg, 10);
     if (rc == 0) return fail("S-NEG-FRAME accepted a declared length that disagrees with the blob");
     if (rc < 0) return fail("S-NEG-FRAME produced no result");
-    if (out_size(pre) != 0) return fail("S-NEG-FRAME produced stdout");
-    if (err_size(pre) == 0) return fail("S-NEG-FRAME refusal has no diagnostic");
+    if (out_size(neg) != 0) return fail("S-NEG-FRAME produced stdout");
+    if (err_size(neg) == 0) return fail("S-NEG-FRAME refusal has no diagnostic");
     printf("ok   S-NEG-FRAME refused: rc %d, stdout empty, diagnostic present\n", rc);
     /* S-NEG-MODEL: one model byte flipped, identity unchanged; the swapped model must not be accepted, and no earlier result is reused */
     { char *mb; size_t mn = 0; mb = cx_read(model, &mn); if (!mb || !mn) return fail("model read");
-      mb[mn - 1] ^= 0x01; snprintf(path, sizeof path, "%s/swapped.net", tmp);
+      mb[mn - 1] ^= 0x01; snprintf(path, sizeof path, "%s/swapped.net", work);
       if (cx_write(path, mb, mn)) return fail("swapped model write"); free(mb); }
-    snprintf(pre, sizeof pre, "%s/model", tmp);
-    rc = replay(runner, path, accept, pre, 10);
+    snprintf(neg, sizeof neg, "%s/model", work);
+    rc = replay(runner, path, accept, neg, 10);
     if (rc == 0) return fail("S-NEG-MODEL accepted a model whose bytes changed under the old identity");
     if (rc < 0) return fail("S-NEG-MODEL produced no result");
-    if (out_size(pre) != 0) return fail("S-NEG-MODEL produced stdout");
+    if (out_size(neg) != 0) return fail("S-NEG-MODEL produced stdout");
     printf("ok   S-NEG-MODEL refused: rc %d, stdout empty\n", rc);
     return 0;
 }
 int main(int argc, char **argv) {
-    char tmp[] = "/tmp/stagecontract-XXXXXX", ledger_blob[4096], runner[4096], accept[4096], model[4096], pos[4096], neg[4096], negdir[4096], reset[4096], cmd[8192], ledger[4096];
-    int rc, removed; char *out; size_t n;
+    char tmp[] = "/tmp/stagecontract-XXXXXX", live[4096], runner[4096], cmd[8192], live_model[4096];
+    Boundary bs[MAX_B]; int nb = 0, i;
     const char *product = "./unisacc.com";
-    if (argc == 5 && !strcmp(argv[3], "--product")) product = argv[4];
-    else if (argc != 3) return fail("usage: stagecontractcheck.cx --fixture DIR [--product PATH]");
-    if (strcmp(argv[1], "--fixture")) return fail("usage: stagecontractcheck.cx --fixture DIR [--product PATH]");
-    if (!mkdtemp(tmp)) return fail("temporary directory");
-    snprintf(accept, sizeof accept, "%s/accept", argv[2]); snprintf(model, sizeof model, "%s/e3.net", argv[2]);
-    snprintf(runner, sizeof runner, "%s/runner", tmp);
-    /* STALE guard: re-extract the e3 network from the product under test and compare with the frozen one */
-    { char live[4096], liveout[4096], frozen[4096]; snprintf(live, sizeof live, "%s/live", tmp); snprintf(liveout, sizeof liveout, "%s/e3.net", live);
-      snprintf(frozen, sizeof frozen, "%s/e3.net", argv[2]);
-      if (mkdir(live, 0700)) return fail("live extraction directory");
-      snprintf(cmd, sizeof cmd, "sh \"%s\" -run tests/modelstreamextract.cx -- \"%s\" \"%s\" > \"%s/extract.log\" 2>&1", product, product, live, live);
-      shell(cmd, 40);
-      if (filesize(liveout) < 0) return fail("e3 extraction from the product under test wrote no e3.net (see extract.log)");
-      if (!same(liveout, frozen)) { printf("STALE e3 network: %s no longer matches the frozen e3.net (re-capture the fixture)\n", product); return 1; }
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--fixture") && i + 1 < argc && nb < MAX_B) { if (read_boundary(argv[i + 1], &bs[nb])) return fail("boundary.tsv missing or incomplete"); nb++; i++; }
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) product = argv[++i];
+        else return fail("usage: stagecontractcheck.cx --fixture DIR [--fixture DIR ...] [--product PATH]");
     }
+    if (!nb) return fail("usage: stagecontractcheck.cx --fixture DIR [--fixture DIR ...] [--product PATH]");
+    if (!mkdtemp(tmp)) return fail("temporary directory");
+    snprintf(runner, sizeof runner, "%s/runner", tmp);
+    /* one extraction of the product under test serves every boundary (it writes all stage networks) */
+    snprintf(live, sizeof live, "%s/live", tmp);
+    if (mkdir(live, 0700)) return fail("live extraction directory");
+    snprintf(cmd, sizeof cmd, "sh \"%s\" -run tests/modelstreamextract.cx -- \"%s\" \"%s\" > \"%s/extract.log\" 2>&1", product, product, live, live);
+    shell(cmd, 40);
     snprintf(cmd, sizeof cmd, "cc -std=gnu99 -O2 -w -o \"%s\" tests/middleflowrunner.c exec/c/core.c", runner);
     shell(cmd, 55);
     if (filesize(runner) < 0) return fail("runner build (tests/middleflowrunner.c with exec/c/core.c)");
-    snprintf(pos, sizeof pos, "%s/pos", tmp);
-    /* S-POS-01 */
-    rc = replay(runner, model, accept, pos, 20);
-    if (rc != 0) return fail("S-POS-01 replay of the accept capture did not accept");
-    snprintf(cmd, sizeof cmd, "%s/output.bytes", accept);
-    { char out_path[4096]; snprintf(out_path, sizeof out_path, "%s.out", pos);
-      snprintf(cmd, sizeof cmd, "%s/output.bytes", accept);
-      if (!same(out_path, cmd)) return fail("S-POS-01 stdout differs from the captured output.bytes"); }
-    { char e_path[4096]; snprintf(e_path, sizeof e_path, "%s.stderr", pos); if (filesize(e_path) != 0) return fail("S-POS-01 stderr is not empty"); }
-    /* S-NEG-RESOURCE: the requested present key is dropped from a copy; the blob stays on disk */
-    snprintf(negdir, sizeof negdir, "%s/neg", tmp);
-    if (copydir(accept, negdir)) return fail("neg copy");
-    snprintf(ledger_blob, sizeof ledger_blob, "%s/resource-000.bytes", negdir);   /* decoy: the dropped key's blob stays on disk */
-    snprintf(ledger, sizeof ledger, "%s/resources.tsv", accept);
-    { char *lb; size_t ln; lb = cx_read(ledger, &ln); int has = lb && contains(lb, ln, KEY_ATTR); free(lb); if (!has) return fail("fixture does not request the key"); }
-    removed = drop_key(negdir, KEY_ATTR);
-    if (removed != 1) return fail("S-NEG-RESOURCE expected exactly one row removed");
-    snprintf(neg, sizeof neg, "%s/neg", tmp);
-    rc = replay(runner, model, negdir, neg, 20);
-    if (rc != 2) return fail("S-NEG-RESOURCE must refuse with rc 2 (MISSING_EXPLICIT_RESOURCE)");
-    { char o_path[4096], e_path[4096], want[256]; snprintf(o_path, sizeof o_path, "%s.out", neg); snprintf(e_path, sizeof e_path, "%s.stderr", neg);
-      if (filesize(o_path) != 0) return fail("S-NEG-RESOURCE produced stdout");
-      snprintf(want, sizeof want, "MISSING_EXPLICIT_RESOURCE %s", KEY_ATTR);
-      { char *eb; size_t en; eb = cx_read(e_path, &en); int ok = eb && en >= strlen(want) && !memcmp(eb, want, strlen(want)); free(eb);
-        if (!ok) return fail("S-NEG-RESOURCE diagnostic does not name the missing key"); } }
-    if (filesize(ledger_blob) < 0) return fail("decoy blob missing from the fixture");
-    /* S-NEG-RESET: accept, the named refusal, accept again; the second accept equals the first */
-    snprintf(reset, sizeof reset, "%s/reset", tmp);
-    rc = replay(runner, model, accept, reset, 20);
-    if (rc != 0) return fail("S-NEG-RESET second accept did not accept");
-    { char a_path[4096], r_path[4096]; snprintf(a_path, sizeof a_path, "%s.out", reset); snprintf(r_path, sizeof r_path, "%s.out", pos);
-      if (!same(a_path, r_path)) return fail("S-NEG-RESET second accept differs from the first"); }
-    if (run_negatives(runner, model, accept, tmp)) return 1;
-    printf("stagecontractcheck PASS: S-POS-01, S-NEG-RESOURCE, S-NEG-RESET, S-NEG-DUP, S-NEG-FRAME, S-NEG-MODEL; UNKNOWN (recorded, not a pass): S-NEG-ABSENT, S-NEG-EMPTY (fresh processes; measured scope only)\n");
+    for (i = 0; i < nb; i++) {
+        snprintf(live_model, sizeof live_model, "%s/%s", live, bs[i].model);
+        if (filesize(live_model) < 0) return fail("extraction of the product under test wrote no network for a boundary (see extract.log)");
+        if (run_boundary(runner, tmp, live, &bs[i], i)) return 1;
+    }
+    printf("stagecontractcheck PASS: %d boundaries; per boundary S-POS-01, S-NEG-RESOURCE, S-NEG-RESET, S-NEG-DUP, S-NEG-FRAME, S-NEG-MODEL; UNKNOWN (recorded, not a pass): S-NEG-ABSENT, S-NEG-EMPTY (fresh processes; measured scope only)\n", nb);
     return 0;
 }
