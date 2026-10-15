@@ -4419,6 +4419,23 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         }
         free(names); ctx->labels++;
     } else if (!strcmp(row->cell[0], "let")) {
+        /* assemble.py: raise SystemExit(opts["exit"]) before let updates.
+           Conditions/once were already applied by the common manifest walker. */
+        Value *exit_value = value_get(opts, "exit");
+        if (exit_value) {
+            if (exit_value->kind == JNULL) exit(0);
+            if (exit_value->kind == JINT || exit_value->kind == JBOOL)
+                exit((unsigned long long)exit_value->number & 255u);
+            if (exit_value->kind == JUINT) exit(exit_value->unumber & 255u);
+            if (exit_value->kind == JSTR) {
+                fwrite(exit_value->s, 1, exit_value->n, stderr);
+            } else {
+                char *message = seed_str(exit_value);
+                fwrite(message, 1, strlen(message), stderr);
+            }
+            fputc('\n', stderr);
+            exit(1);
+        }
         Value *mapseq = value_get(opts, "mapseq"), *bindmap = value_get(opts, "bindmap");
         Value *freshrows = value_get(opts, "freshrows"), *accumulate = value_get(opts, "accumulate");
         Value *keep = value_get(opts, "keep"), *textrows = value_get(opts, "textrows");

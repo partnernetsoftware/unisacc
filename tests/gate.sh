@@ -101,6 +101,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           exec-bootstrap-osxarm) req='darwin-arm64|osx/arm64|cc|cdx|native-bootstrap';;
           exec-bootstrap-osxx86) req='darwin-x86_64|osx/x86_64|cc|cdx|native-bootstrap';;
           exec-native-*) req='native-posix|host|cc|cdx|native-network-runtime';;
+          seedgen-let-exit) req='native-posix|host|cc,python3|cdx2|seed-let-exit-byte-pair';;
           seedgen-opt) req='native-posix|host|cc,python3|cdx|seed-gen-opt-byte-pair';;
           unisa-bits) req='native-posix|host|cc,python3|cdx|unisa-bits-byte-pair';;
           unisa-hostabi) req='native-posix|host|cc,python3|cdx|unisa-hostabi-tsv-sample';;
@@ -216,6 +217,7 @@ job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && u
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
 job hostcheck python3 ./tests/hostcheckcheck.py
 job seedmemory python3 ./tests/seedmemorycheck.py
+job seedgen-let-exit python3 ./tests/seedletexitcheck.py   # generic constructor exit before write, C/P byte parity
 # c43 watchdog scope tokens: orphaned and escaped children, and the caller EOF (macOS branch not verified yet)
 job watchdog-orphan sh ./tests/watchdogregression.sh orphan tests/bound.py
 job watchdog-eof sh ./tests/watchdogregression.sh eof tests/bound.py

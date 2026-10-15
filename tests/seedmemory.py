@@ -15,9 +15,9 @@ Python cold construction and unmeasured flags/COM remain UNKNOWN.
 """
 import argparse, hashlib, pathlib, stat, subprocess, sys, platform, shutil, re, tempfile, os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-C_SHA='3b6bb2fdeef82deafd7fa772e08ef6505384c262096915e59a8ccb7e345c5ba2'
+C_SHA='66a9f691f6734eff15654de8218e70857fb4329291e94d50a28cc392caf03915'
 REFERENCE_KEYS={'gen': 'e19d9b21be835750', 'parse2': '506f259d917b2ac9'}
-BINARY_SHA='adf347fc0adac78d0b3d6da6958d8af5249c5734be5053e5a182fbb8ec34250b'
+BINARY_SHA='6f24b1f3ab62b96323604a58ac2edee8561abfd15139c4b0e248c20ea86ecacc'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
 EVIDENCE_IDENTITY={'host':'Linux/x86_64',
@@ -32,7 +32,7 @@ ENV_KEYS=('CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','OBJC_INCLUDE_PATH',
  'GCC_EXEC_PREFIX','COMPILER_PATH','LIBRARY_PATH','LD_PRELOAD','LD_LIBRARY_PATH',
  'GCC_SPECS','CFLAGS','CPPFLAGS','LDFLAGS')
 EQUIVALENT_FLAGS=('-std=c99 -O2 -w -Iseed','-std=c99 -O2 -Iseed')
-C_RSS={'e2': 185, 'e1': 330, 'e3': 1268, 'e4': 40, 'o1': 14, 'prune': 33, 'nativeabi': 298, 'enc-elf': 142, 'enc-macho': 208, 'enc-pe': 263, 'arm-elf': 142, 'arm-macho': 208, 'arm-pe': 264, 'lower-lnx-x': 241, 'lower-lnx-a': 266, 'lower-osx-x': 235, 'lower-osx-a': 262, 'lower-win-x': 180, 'lower-win-a': 207, 'obj-lower-x': 245, 'obj-lower-a': 270, 'obj-enc-x': 156, 'obj-enc-a': 159, 'tokenpp': 39, 'tokenlex': 119, 'warnlex': 741, 'warnparse': 2148, 'warnunits': 196, 'errorparse': 2134, 'warnpp': 181, 'locations': 1346, 'warnings': 1360, 'locations,warnings': 1360, 'locations,errors': 2134, 'warnings,errors': 2149, 'locations,warnings,errors': 2149}
+C_RSS={'e2': 185, 'e1': 330, 'e3': 1268, 'e4': 40, 'o1': 14, 'prune': 32, 'nativeabi': 298, 'enc-elf': 141, 'enc-macho': 208, 'enc-pe': 263, 'arm-elf': 142, 'arm-macho': 208, 'arm-pe': 264, 'lower-lnx-x': 241, 'lower-lnx-a': 266, 'lower-osx-x': 235, 'lower-osx-a': 262, 'lower-win-x': 180, 'lower-win-a': 207, 'obj-lower-x': 245, 'obj-lower-a': 270, 'obj-enc-x': 156, 'obj-enc-a': 159, 'tokenpp': 39, 'tokenlex': 119, 'warnlex': 742, 'warnparse': 2148, 'warnunits': 196, 'errorparse': 2134, 'warnpp': 181, 'locations': 1346, 'warnings': 1360, 'locations,warnings': 1360, 'locations,errors': 2134, 'warnings,errors': 2149, 'locations,warnings,errors': 2148}
 SUITES={
  'seedparse2-1':('parse2',['x','locations','warnings','errors']),
  'seedparse2-2':('parse2',['locations,warnings','locations,errors','warnings,errors','locations,warnings,errors']),
