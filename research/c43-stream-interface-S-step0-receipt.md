@@ -43,6 +43,15 @@ ABSENT/EMPTY 的答复逻辑未改：presence 位原本就逐行生效。新增�
   - 构造器侧：`exec/c/networkformat.py` 的 `encode` 只是把文本网络逐字段序列化，二进制是文本网络的纯函数；文本行 `H 0 0 256 0 10513 455` 来自构造器输出。产品级确定性由 STALE 守卫（整文件逐字节比对，包含该字节）覆盖；本步**未**核对 unisa 构造器（Python）与 C/P 对该行的写法是否一致。
   - **风险（列为风险，未闭合）**：模型身份校验（`MF_MODEL_SHA256`）覆盖整个文件，因此任何字节改动都会被拒，身份本身没有漏洞。但回放在**本路由**上对该状态的 `bq` 不敏感：若别的输入能进入状态 10513，本夹具就无法见证该字段的改动。“10513 是否对其他输入可达”未查证，需要另做可达性分析（不在本步范围内）。
 
+## 第二边界：tape 验域 → lower，ABSENT 与 EMPTY 的区分（提交 6484e621）
+
+- 夹具：`tests/seals/stagecontract-tape-lower/`，同一份 SC1 检查（`stagecontractcheck.cx`，边界描述见 `boundary.tsv`），HEAD 产品 83e6e7e4，包 71832a39。冻结 lower.net sha256 `55e70758…6be6883d`（根产品的 lower 为另一个 build，不用于本边界）。
+- 结果：POS、NEG-RESOURCE、NEG-RESET、NEG-DUP、NEG-FRAME、NEG-MODEL 全部通过（与 e1-e3 边界相同的一组）。
+- **ABSENT**（该键显式不存在）：rc 0，stdout 1119 字节，接受。阶段自行决定了输出。
+- **EMPTY**（该键存在，0 字节）：rc 1，stdout 0 字节，诊断 `reject: not covered: lnx/x86_64 lowering`。阶段拒绝。
+- 两者在本边界上**确实不同**（e1-e3 边界上两者输出相同，即该阶段不区分）。这两项仍按约定记 UNKNOWN，不判红；拒绝是阶段自身的“不覆盖”判定，不是回放适配器的错误。
+- 含义：ABSENT 的结果由阶段决定（不能由适配器预填）；EMPTY 被保存为存在的输入，阶段可以拒绝它。这是 S 第 1 步的实证依据：在 lower 上，presence 的三态（absent、empty、bytes）会改变阶段决策，不能合并成一种。
+
 ## 未做 / 边界
 
 - 根产品 `./unisacc.com` 上的检查未重跑（此前为 STALE，需先重抽 e3.net）。
