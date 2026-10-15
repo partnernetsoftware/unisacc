@@ -85,3 +85,7 @@
 修法：rl_stage_label_ok 只认驱动真实形状：stage ∈ {e3, lower}；target ∈ {lnx, osx, win}；arch ∈ {x86_64, arm64}；可选 `warn/` 再可选 `multi/`；format ∈ {tape, image, run, object}；`O<digit>`。驱动不产出的前缀（target 之前的 warn/multi，或 multi 先于 warn）具名拒。
 
 验证：tests/ri-snapshot-core.c 枚举 576 个驱动形状全部接受、20 个非驱动形状全部具名拒（SNAPTEST PASS）。
+
+## 十、未验证项（UNVERIFIED，2026-10-16）
+
+- MF_TARGET=lnx/arm64 的真实包实采未做：runner 的 arm64 路由标签与 target 资源仅在 x86 默认路径上验证（默认标签与四份封存 ledger 字节不变，已验）。arm64 需含 arm64 模型的包，待补；在此之前不得据此声称 arm64 路由通过。

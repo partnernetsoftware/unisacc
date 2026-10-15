@@ -2,6 +2,13 @@
 # build_candidate.sh DIR UA -- shared, six targets, pack-prep-1..3, pack-models, pack-driver; each step bounded 58 s; stops at
 # the first failure.  UA must be a same-source reference (tests/build_ref.sh SRC OUT from this tree).
 set -u; D=${1:?candidate dir}; UA=${2:?same-source reference}; R=$(cd "$(dirname "$0")/../.." && pwd); cd "${ROOT:-$R}"
+# step_report STEP RC START_EPOCH STATUS_FILE: bound returns 142 when its watchdog killed the step (the bound
+# status file keeps the raw wait status); any other non-zero rc is the step's own failure.  Both are named.
+step_report() {
+    local st=$1 rc=$2 s0=$3 sf=$4 el=$(( $(date +%s) - $3 ))
+    if [ "$rc" -eq 142 ]; then echo "step $st WATCHDOG: killed by bound after ${STEP_BOUND:-58} s (raw wait status $(cat "$sf" 2>/dev/null || echo unknown)) ${el}s"
+    else echo "step $st rc=$rc $(date +%H:%M:%S) ${el}s"; fi
+}
 # 0.0.40 (机房主任 22:45 A): the H1 table the exit table will use is settled before anything is written or built
 python3 "$R/release/tools/h1source.py" . || exit 2
 mkdir -p "$D"; D=$(cd "$D" && pwd)
@@ -13,14 +20,14 @@ for f in unisacc.com unisacc.com.build.json; do [ -f "$f" ] || { echo "build_can
 fi
 for step in shared osx/arm64 osx/x86_64 lnx/arm64 lnx/x86_64 win/arm64 win/x86_64; do
   log=$D/step-${step//\//-}.log; s0=$(date +%s)
-  tests/bound 58 make model-com MODEL_DIR=$D MODEL_STEP=$step > $log 2>&1; rc=$?
-  echo "step $step rc=$rc $(date +%H:%M:%S) $(( $(date +%s)-s0 ))s"; [ $rc -eq 0 ] || exit $rc
+  tests/bound --status $D/status-${step//\//-} ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step > $log 2>&1; rc=$?
+  step_report "$step" "$rc" "$s0" "$D/status-${step//\//-}"; [ $rc -eq 0 ] || exit $rc
 done
 rm -rf $D/model-cache   # fresh construction per candidate
 for step in pack-prep-1 pack-prep-2 pack-prep-3 pack-models pack-driver; do
   s0=$(date +%s)
-  tests/bound 58 make model-com MODEL_DIR=$D MODEL_STEP=$step UA=$UA > $D/step-$step.log 2>&1; rc=$?
-  echo "step $step rc=$rc $(date +%H:%M:%S) $(( $(date +%s)-s0 ))s"; [ $rc -eq 0 ] || exit $rc
+  tests/bound --status $D/status-$step ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step UA=$UA > $D/step-$step.log 2>&1; rc=$?
+  step_report "$step" "$rc" "$s0" "$D/status-$step"; [ $rc -eq 0 ] || exit $rc
 done
 shasum -a 256 $D/unisacc-next.com
 # B5: the seed-built ident checks the record when the build made it; Python only as fallback
