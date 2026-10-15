@@ -1480,7 +1480,7 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 
 - W 接线层固化（7b3e36af，cc验收合流）：只读类别表+扁平快照槽，单解包/事务/provider分派，四公开查询为薄包装；逻辑kind与物理分区分离。测试宏假kind7只经表映射既有数据通道，自有validator与具名诊断，不宣称第三物理通道；出货无fake行，未注册kind声明入口具名拒；旧/新/假运行时18快照全同，入闸lib-latebind-W用可追溯冻结基线。
 
-- 2c2 fixed typed 模型域（cc授，2026-10-15）：开工实测typed仍owner2且编译期即建native plan，只加接线行改不了归属——归属与span由模型表决定。授typed类别专属partition/E3需求/lower span表及构造器、参考自测，新文件优先（librarytyped*），改共享表先报；C/P逐字节同并穷举；数据与普通路线模型输出不变；W通用decode/query/事务/分派零改；编译期不建plan作为接线笔验收项。证明边界：typed符号需求/重定位拟留main，普通/数据side原样，不开第三物理通道；以模型实证是否足够，不足报缺口，不以C强改归属。公开头暂不新增。首笔独立分区模型exec/librarytypedpartition（仓外）189状态，C/P同字节，48764观察全同；模式0/1保旧，bit1显式启用fixed-V3 owner8，按kind/callkind/sigv判，不查地址。
+- 2c2 fixed typed 模型域（cc授，2026-10-15）：开工实测typed仍owner2且编译期即建native plan，只加接线行改不了归属——归属与span由模型表决定。授typed类别专属partition/E3需求/lower span表及构造器、参考自测，新文件优先（librarytyped*），改共享表先报；C/P逐字节同并穷举；数据与普通路线模型输出不变；W通用decode/query/事务/分派零改；编译期不建plan作为接线笔验收项。证明边界：typed符号需求/重定位拟留main，普通/数据side原样，不开第三物理通道；以模型实证是否足够，不足报缺口，不以C强改归属。公开头暂不新增。首笔独立分区模型exec/librarytypedpartition（仓外）189状态，C/P同字节，48764观察全同；模式0/1保旧，bit1显式启用fixed-V3 owner8，按kind/callkind/sigv判，不查地址。更正（cc裁定）：owner8会迫使改libraryrelocate.h通用校验（只认owner1/2/4），与W零改动冲突；typed改为独立逻辑类别、物理复用function owner1（同W kind7的逻辑/物理分离），按(kind0,callkind1,V3,显式启用)选路；owner8仓外试验不计产品合同。须证：普通/typed审计互斥、两向交叉provider具名拒不降级、普通路线片段收据逐字节不变；typed validator返回frame-dispatch closure，plan与closure在绑定阶段构造（编译期plan为空）。
 
 - 2c1 API首红分诊：8c67bddf模型包与隔离运行时实际A/B数据合同/E3/lower无地址及绑定读写8项通过；readonly双函数源拒绝但模型stderr为具名not-covered，API丢为常量provenance refused。拒绝输出流为阶段所有的诊断，API只传字节：status1优先显式err流，其他状态仍保留运行/燃料理由，不能把not-covered改写readonly-write。真实Tape采证后决定是否需拓宽已提交lower支持域；未计负例绿。
 
