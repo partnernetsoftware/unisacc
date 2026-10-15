@@ -784,7 +784,7 @@ int main(int argc, char **argv) {
             unsigned char **cb=xrealloc(0,nsources*sizeof *cb); int *cl=xrealloc(0,nsources*sizeof *cl);
             for (int j=0;j<nsources;j++) { cl[j]=0; cb[j]=source_read(sources[j],&cl[j]); }
             int fn=0; unsigned char *fb=rf_source_frame(nsources,sources,(const unsigned char **)cb,cl,&fn);
-            int g = fb ? rf_identity_gate(fb,fn,mode,route) : 2;
+            int g = fb ? rf_identity_gate(fb,fn,mode,route,"e3") : 2;
             free(fb); for (int j=0;j<nsources;j++) free(cb[j]); free(cb); free(cl);
             if (g) return g;
         }
@@ -869,7 +869,7 @@ int main(int argc, char **argv) {
         }
     }
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
-    if (nsources<=1 && (RF_STRICT || rf_capture_dir())) { int g = rf_identity_gate(in.b,in.n,mode,route); if (g) return g; }   /* SC1 identity of a single-source run, before any stage */
+    if (nsources<=1 && (RF_STRICT || rf_capture_dir())) { int g = rf_identity_gate(in.b,in.n,mode,route,"e3"); if (g) return g; }   /* SC1 identity of a single-source run, before any stage */
     if (!rc && tape_input) rc=tape_domain(route,&in,src); /* decoded Tapebin uses the same model */
     if (!rc && !(tape_input && mode==2)) {
         if (fwdwant) {

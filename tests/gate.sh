@@ -219,6 +219,8 @@ job hostcheck python3 ./tests/hostcheckcheck.py
 job seedmemory python3 ./tests/seedmemorycheck.py
 job seedgen-let-exit python3 ./tests/seedletexitcheck.py   # generic constructor exit before write, C/P byte parity
 job copy-contract python3 ./tests/copycontractcheck.py   # copy/copy-state independent clone: C/P parity over five cases (drop-edge is debt)
+job ri-snapshot-overlay sh ./tests/risnapshotcheck.sh   # RI snapshot overlay: sealed E3 accept hit + fall-through visible in capture
+job ri-snapshot-core sh ./tests/risnapshotcore.sh   # RI snapshot writer/loader: positive, refusals, capacity, write failure
 # c43 watchdog scope tokens: orphaned and escaped children, and the caller EOF (macOS branch not verified yet)
 job watchdog-orphan sh ./tests/watchdogregression.sh orphan tests/bound.py
 job watchdog-eof sh ./tests/watchdogregression.sh eof tests/bound.py

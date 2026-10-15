@@ -763,7 +763,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             if (!names || !bytes || !lens) __us_panic("out of memory");
             for (Source *s=c->sources;s;s=s->next,i++) { names[i]=s->name; bytes[i]=(const unsigned char *)s->bytes; lens[i]=(int)strlen(s->bytes); }
             unsigned char *fb=rf_source_frame(count,names,bytes,lens,&fn);
-            rc = fb ? rf_identity_gate(fb,fn,2,route) : 2;
+            rc = fb ? rf_identity_gate(fb,fn,2,route,"e3") : 2;
             free(fb); free(names); free(bytes); free(lens);
         }
         if (!rc) for (Source *s=c->sources;s;s=s->next) {
@@ -783,7 +783,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             for (int j=0;j<unit.n;j++) bput(&input,unit.b[j],0);
             tracked_free(unit.b);
         }
-        if (!rc && c->source_count==1 && rf_capture_dir()) rc=rf_identity_gate(input.b,input.n,2,route);   /* SC1 identity of a single source: the capture writes the header */
+        if (!rc && c->source_count==1 && rf_capture_dir()) rc=rf_identity_gate(input.b,input.n,2,route,"e3");   /* SC1 identity of a single source: the capture writes the header */
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
             if(c->late_callsite_enabled&&input.n>=8&&!memcmp(input.b,"USCSFLW1",8)){
