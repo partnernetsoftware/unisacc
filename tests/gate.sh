@@ -364,6 +364,10 @@ job exec-librarytypedpartition-model-3 ./exec/librarytypedpartition/check.sh 3
 job exec-librarytypedpartition-model-4 ./exec/librarytypedpartition/check.sh 4
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh
+job exec-librarytypedlower-model-1 ./exec/lower/librarytypedcheck.sh 1
+job exec-librarytypedlower-model-2 ./exec/lower/librarytypedcheck.sh 2
+job exec-librarytypedlower-model-3 ./exec/lower/librarytypedcheck.sh 3
+job exec-librarytypedlower-model-4 ./exec/lower/librarytypedcheck.sh 4
 job exec-libraryfn-model ./exec/lower/libraryfncheck.sh
 job exec-librarydata-model ./exec/lower/librarydatacheck.sh
 job proc-enum python3 ./tests/procenumcheck.py
