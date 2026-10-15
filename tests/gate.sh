@@ -218,7 +218,7 @@ job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh
 job hostcheck python3 ./tests/hostcheckcheck.py
 job seedmemory python3 ./tests/seedmemorycheck.py
 job seedgen-let-exit python3 ./tests/seedletexitcheck.py   # generic constructor exit before write, C/P byte parity
-job copy-contract python3 ./tests/copycontractcheck.py   # copy/copy-state independent clone: C/P parity over five cases (drop-edge is debt)
+job copy-contract python3 ./tests/copycontractcheck.py   # copy/copy-state/rule:MODE C/P parity, thin wrapper over tests/cpparity.py (drop-edge live)
 job ri-snapshot-overlay sh ./tests/risnapshotcheck.sh   # RI snapshot overlay: sealed E3 accept hit + fall-through visible in capture
 job ri-snapshot-core sh ./tests/risnapshotcore.sh   # RI snapshot writer/loader: positive, refusals, capacity, write failure
 # c43 watchdog scope tokens: orphaned and escaped children, and the caller EOF (macOS branch not verified yet)
