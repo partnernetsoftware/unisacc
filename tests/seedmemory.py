@@ -32,7 +32,7 @@ ENV_KEYS=('CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','OBJC_INCLUDE_PATH',
  'GCC_EXEC_PREFIX','COMPILER_PATH','LIBRARY_PATH','LD_PRELOAD','LD_LIBRARY_PATH',
  'GCC_SPECS','CFLAGS','CPPFLAGS','LDFLAGS')
 EQUIVALENT_FLAGS=('-std=c99 -O2 -w -Iseed','-std=c99 -O2 -Iseed')
-C_RSS={'e2': 184, 'e1': 330, 'e3': 1268, 'e4': 40, 'o1': 14, 'prune': 33, 'nativeabi': 298, 'enc-elf': 142, 'enc-macho': 208, 'enc-pe': 263, 'arm-elf': 142, 'arm-macho': 208, 'arm-pe': 264, 'lower-lnx-x': 241, 'lower-lnx-a': 266, 'lower-osx-x': 235, 'lower-osx-a': 262, 'lower-win-x': 180, 'lower-win-a': 207, 'obj-lower-x': 245, 'obj-lower-a': 270, 'obj-enc-x': 156, 'obj-enc-a': 159, 'tokenpp': 38, 'tokenlex': 119, 'warnlex': 741, 'warnparse': 2148, 'warnunits': 196, 'errorparse': 2134, 'warnpp': 180, 'locations': 1346, 'warnings': 1360, 'locations,warnings': 1360, 'locations,errors': 2134, 'warnings,errors': 2149, 'locations,warnings,errors': 2149}
+C_RSS={'e2': 185, 'e1': 330, 'e3': 1268, 'e4': 40, 'o1': 14, 'prune': 33, 'nativeabi': 298, 'enc-elf': 142, 'enc-macho': 208, 'enc-pe': 263, 'arm-elf': 142, 'arm-macho': 208, 'arm-pe': 264, 'lower-lnx-x': 241, 'lower-lnx-a': 266, 'lower-osx-x': 235, 'lower-osx-a': 262, 'lower-win-x': 180, 'lower-win-a': 207, 'obj-lower-x': 245, 'obj-lower-a': 270, 'obj-enc-x': 156, 'obj-enc-a': 159, 'tokenpp': 39, 'tokenlex': 119, 'warnlex': 741, 'warnparse': 2148, 'warnunits': 196, 'errorparse': 2134, 'warnpp': 181, 'locations': 1346, 'warnings': 1360, 'locations,warnings': 1360, 'locations,errors': 2134, 'warnings,errors': 2149, 'locations,warnings,errors': 2149}
 SUITES={
  'seedparse2-1':('parse2',['x','locations','warnings','errors']),
  'seedparse2-2':('parse2',['locations,warnings','locations,errors','warnings,errors','locations,warnings,errors']),
