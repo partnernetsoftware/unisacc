@@ -1,5 +1,7 @@
 # 晚绑定 2c3 第0步｜variadic 类别设计（只是设计）
 
+> 修订（2026-10-15，cc 裁定 + 实测）：kind 取 3；callsite 帧用新文件；callcontrol 拒绝行经实测不覆盖库变参（§1、§9）；§4 的编译期 plan 挂点改为依赖 2c2 接线笔的实例化推迟（§4）。
+
 **证据边界：** 现状为读源码与读 gate 清单所得，未跑新实现、未改仓库。建议均为“只是设计”。依据：`research/c43-late-binding-cut2c-step0.md` §2.3、W（7b3e36af，`exec/c/librarylatebind.h` 的 `UsLateClass` 表）、2c2 裁定（prd：typed 归属由模型表决定，逻辑类别与物理 owner 分离，物理复用 function owner1，只加接线行改不了归属）。
 
 ## 1. 现状（读源码）
@@ -9,7 +11,13 @@
 - **libunisacc 调用路径。** `libunisacc.c` 在 compile 后替换 native plan 与模板（`:694–697`，`c->native_plans=plans`），调用期经 callable scope（`:854` 起）。
 - **E3 已有变参模板。** `exec/parse2/libraryvariadic-*`：17 行模板、117 行结果；`hookcall` 输出 `vcall/plan1/tape2`，含 `SITEFN/SITEBIND/COUNT/DEPTH/BASE/SHAPE/NAMES/REQUESTS` 字段（`libraryvariadic-manifest.tsv:3–4`）。它是 K2 翻译的 E3 片段，不是 W 类别。
 - **lower 没有变参调用模型。** lower 中唯一的 variadic 命中是 `librarydataspan-result.tsv:247,265–267` 的 `ldn_variadic`，那是数据名记录的标志位，不是调用点模型。
-- **源码前端拒绝。** `parse2/callcontrol-result.tsv:117`：`DEAD.vc` 路径报 `not covered: call to a variadic function`。它属于 parse2 调用控制；库变参调用是否经过这一行，本步未核实，不作结论。
+- **源码前端拒绝（已核实：不覆盖库变参）。** `parse2/callcontrol-result.tsv:117` 的 `DEAD.vc` 行在生成表中只出现这一处，没有任何生成器输入产生 `vc` 状态的可见来源。只读探针（仓外 `/home/box/c43/P6/var/`，HEAD 候选 `cand2`，`lnx/x86_64`）结果：
+  - 库变参声明走注入式接口时直接拒绝：`us_declare_injected_import` 对 `variadic=1` 报 `invalid injected-only declaration`（`libunisacc.c:500`），因此变参库调用根本进不到 callcontrol。
+  - 源内定义的变参函数并被调用：compile rc 0（不报 `call to a variadic function`）。
+  - 源内声明的变参函数但未调用：compile rc 0。
+  - 未声明的外部变参调用：报 `undefined function`，不是 `DEAD.vc` 行。
+  因而 `DEAD.vc` 行在这些输入上都不可达，库变参路径不经过它。结论：不覆盖库变参；“是否在别处可达”未证，仅记录。
+- **库变参的公开入口。** 变参声明只能用类型化字节接口：`us_add_symbol_typed` / `us_declare_import_typed`（`exec/c/libunisacc.h:84–86`），字节由 `tests/libraryabi/variadic_bidirectional.c:20` 读取的 `.sig` 提供。注入式接口拒绝变参（见上）。
 - **现有闸。** `lib-variadic-native`（`gate.sh:524`，产品层原生调用，带 sanitize）与 `lib-variadic-resolver-host`（`gate.sh:447`，冻结模板候选）。即变参运行路径今天已有实测，但不经 W 分派。
 
 结论：变参今天是“E3 模板 + 调用期 concrete cif”的旁路；W 的类别表里没有它。
@@ -17,7 +25,7 @@
 ## 2. 类别与物理 owner（能否复用 owner1）
 
 **能。** 建议：
-- 逻辑类别：新增 variadic 逻辑 kind（编号待定；W 的 kind7 仅为测试类，不占用产品编号），wire 与普通函数相同（函数 wire），物理 owner 复用 **function owner1**，partition 与函数相同。
+- 逻辑类别：**kind=3**（§9 第1条已取，理由见该条），wire 与普通函数相同（函数 wire，`wire_kind=0`），物理 owner 复用 **function owner1**，partition 与函数相同。
 - 类别由分区模型选择：`(kind=函数 wire, callkind=2, V3 显式启用)`，依据 2c2 typed 的办法（`exec/librarytypedpartition`，不查地址）。模型输出仍是每 ID 唯一归属，缺归属或重复归属拒绝。
 - 只加接线行不能改归属：归属由分区模型表决定，W 表的新行只提供该逻辑类别的 declare/verify/缺失诊断。
 - **不能**把 variadic 校验写进 owner1 的通用 `us_late_function_provider` 分支。依据 2c2 的修正：owner8 会迫使 `libraryrelocate.h` 通用校验改动，与 W 零改动冲突；变参应是独立的 verify 函数指针（类比 kind7 的 `w_kind7_verify`），通用函数路径不变。
@@ -39,7 +47,7 @@
 3. lower 的 span 表：`exec/lower/librarycallsite-*`（新文件），只声明 ID 与 span 行，不改 `librarydataspan`。
 4. W 表：一行新的 `X(...)`（逻辑类别 → 函数 wire、owner1、partition 同普通函数，verify 指向新的 `us_late_callsite_provider`）。这是 W 表唯一的共享改动，需先报 cc。
 
-挂点：`libunisacc.c` 只在 relocate 后把 callsite 框交给 callable 层（不改 compile 期的 plan 构造，`:694–697` 保持）。
+挂点与依赖（修正）：variadic 的实例化点与 2c2 接线笔的验收项一致：**编译期不建 native plan，绑定后实例化**（2c2 裁定，`librarytypedpartition` 设计中的“编译期不建 plan”）。variadic 复用该推迟后的同一实例化点，不保留 `libunisacc.c:694–697` 的编译期旧路径（那一行是当前现状，不是本设计的挂点）。依赖：2c2 接线笔先落地；在它落地前，variadic 的 callsite 帧只允许停在模型输出，不得接线，不得在编译期构造 cif。
 
 ## 5. 与 typed 共享多少（fixed 部分）
 
@@ -71,6 +79,6 @@ A/B（同源，不同实际 tail 或不同目标）：
 
 ## 9. 待 cc 定的点
 
-1. 逻辑 kind 的编号（建议占下一个未用编号，不占 kind7）。
+1. **已取 kind=3。** 0 为函数、1 为数据，产品在用；`kind=2` 在 cut-2c step-0 §2 中已为运行服务的 USLCON1 概念保留（尚未实现），故跳过 2；kind7 仅为测试类，不占产品编号。typed 的 mask8/mask9 是分区模型的观测掩码，不是 kind，不冲突。
 2. callsite 帧放 E3 的新文件，还是并入 `libraryvariadic` 模板（建议新文件，避免改已有模板）。
-3. `callcontrol-result.tsv:117` 的覆盖边界是否与库变参一致，需先核实再决定是否要改该拒绝行。
+3. **已核实（见 §1）：** `callcontrol-result.tsv:117` 不覆盖库变参，且在三条库/源输入上不可达。是否要改该拒绝行：不需要为 2c3 改，它与库变参无关；其在别处的可达性未证，留给 cc 单独立项。
