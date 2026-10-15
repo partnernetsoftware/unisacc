@@ -74,11 +74,17 @@ for bound in ([native], [sys.executable, str(root/'bound.py')]):
         assert not state or state.startswith('Z'),state
     print('bound: TERM/INT/HUP stopped detached cleanup and successful background cleanup pass')
 
-# Exercise the Terminal ownership protocol without opening a user's windows.
-with tempfile.TemporaryDirectory(prefix='term-ownership-') as td:
-    mock=pathlib.Path(td); log=mock/'closed'
-    (mock/'uname').write_text('#!/bin/sh\necho Darwin\n')
-    script = """import os,pathlib,re,subprocess,sys
+# Terminal ownership cases need Darwin: term.sh is the macOS Terminal.app wrapper (BSD sed syntax). On any other
+# host they are UNVERIFIED, named, and the job exits 77 after every other check; Darwin keeps the original asserts.
+import platform as _platform
+TERM_UNVERIFIED = _platform.system() != "Darwin"
+if TERM_UNVERIFIED:
+    print("UNVERIFIED term.sh requires Darwin: Terminal ownership cases not run on this host (rc 77)")
+else:
+    with tempfile.TemporaryDirectory(prefix='term-ownership-') as td:
+        mock=pathlib.Path(td); log=mock/'closed'
+        (mock/'uname').write_text('#!/bin/sh\necho Darwin\n')
+        script = """import os,pathlib,re,subprocess,sys
 text=' '.join(sys.argv[1:])
 if 'to close' in text:
     assert 'id is 4242' in text
@@ -88,21 +94,21 @@ else:
     subprocess.Popen(['/bin/sh',match.group(1)],start_new_session=True)
     print('4242')
 """
-    (mock/'osascript').write_text('#!'+sys.executable+'\n'+script)
-    for name in ('uname','osascript'): (mock/name).chmod(0o755)
-    env=dict(os.environ,PATH=str(mock)+os.pathsep+os.environ['PATH'],TERM_TEST_CLOSED=str(log),TERM_SH='1',TERM_SH_NOFALLBACK='1',TERM_SH_ALARM='3')
-    env.pop('TERM_SH_INSIDE',None)
-    for command,want in (([sys.executable,'-c','print("done")'],0),([sys.executable,'-c','raise SystemExit(2)'],2),([sys.executable,'-c','import time;time.sleep(30)'],142)):
+        (mock/'osascript').write_text('#!'+sys.executable+'\n'+script)
+        for name in ('uname','osascript'): (mock/name).chmod(0o755)
+        env=dict(os.environ,PATH=str(mock)+os.pathsep+os.environ['PATH'],TERM_TEST_CLOSED=str(log),TERM_SH='1',TERM_SH_NOFALLBACK='1',TERM_SH_ALARM='3')
+        env.pop('TERM_SH_INSIDE',None)
+        for command,want in (([sys.executable,'-c','print("done")'],0),([sys.executable,'-c','raise SystemExit(2)'],2),([sys.executable,'-c','import time;time.sleep(30)'],142)):
+            log.unlink(missing_ok=True)
+            result=subprocess.run([str(root/'term.sh'),*command],env=env,capture_output=True,text=True,timeout=10)
+            assert result.returncode==want,(result.returncode,result.stderr)
+            assert log.read_text()=='4242'
         log.unlink(missing_ok=True)
-        result=subprocess.run([str(root/'term.sh'),*command],env=env,capture_output=True,text=True,timeout=10)
-        assert result.returncode==want,(result.returncode,result.stderr)
+        process=subprocess.Popen([str(root/'term.sh'),sys.executable,'-c','import time;time.sleep(30)'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        time.sleep(.5);process.terminate()
+        assert process.wait(timeout=7)==143
         assert log.read_text()=='4242'
-    log.unlink(missing_ok=True)
-    process=subprocess.Popen([str(root/'term.sh'),sys.executable,'-c','import time;time.sleep(30)'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    time.sleep(.5);process.terminate()
-    assert process.wait(timeout=7)==143
-    assert log.read_text()=='4242'
-    print('term: owned window closes on success, failure, timeout and signal (mock UI)')
+        print('term: owned window closes on success, failure, timeout and signal (mock UI)')
 
 # Run the real Linux wrapper against an isolated mock guest, including its tar
 # transfer and shell traps. This checks deletion scope, not VM compatibility.
@@ -138,3 +144,5 @@ else:
     assert subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=10).returncode==0
     assert (guest/'unisa-linux-last-failure.log').read_text()=='latest-failure\n'
     print('linux: old scratch cleared; failure tree removed; latest failure log retained (mock guest)')
+if TERM_UNVERIFIED:
+    sys.exit(77)   # UNVERIFIED (not a pass): the Terminal ownership cases were not run on this host
