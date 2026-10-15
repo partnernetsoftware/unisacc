@@ -910,7 +910,9 @@ int main(int argc, char **argv) {
     sres[0].name = (const unsigned char *)"\0cli/f1"; sres[0].n = 7; sres[0].data = &f1one; sres[0].len = 1;
     sres[1].name = (const unsigned char *)"\0cli/attributes"; sres[1].n = 15; sres[1].data = 0; sres[1].len = 0;
     sres[2].name = (const unsigned char *)"\0cli/source"; sres[2].n = 11; sres[2].data = (const unsigned char *)src; sres[2].len = strlen(src);
-    if (!RI) { RI = sres; NRI = 3; ATTR_SLOT = 1; }
+    /* --ri-snapshot: the snapshot is the producer's complete RI, so the standalone built-ins (cli/f1, cli/attributes, cli/source)
+       are not added; a key the snapshot lacks answers as the API does (default fetch, absent).  Without a snapshot: unchanged. */
+    if (!RI && !run_snap) { RI = sres; NRI = 3; ATTR_SLOT = 1; }
     { const char *ap = getenv("UNISA_ATTRIBUTES"); if (ap && *ap) { int an = 0; unsigned char *ab = readfile(ap, &an, 1);
         if (ab) { ATTRS.b = ab; ATTRS.n = an; ATTRS.cap = an; sres[1].data = ab; sres[1].len = an; } } }
     Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
