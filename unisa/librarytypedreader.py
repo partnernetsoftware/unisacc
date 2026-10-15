@@ -146,6 +146,55 @@ def variadic_frames(frame, selection, source_state, tokens):
         records.append(struct.pack("<5Q",32+len(concrete),ordinal,ident,fixed,len(concrete))+concrete)
     return b"USLCSF1\n"+struct.pack("<Q",len(records))+b"".join(records)
 
+def callback_frames(frame, selection, source_state, tokens):
+    """Graph identity witness, using the single shared SIG3 reference component.
+
+    This is MS canonical, not raw USLSIG3 decoder input. No hash or ABI claim.
+    """
+    from .signature3 import oracle
+    from pathlib import Path
+    import importlib.util
+    length, ident, kind, callkind, version, flags, nn, sn, extent, count, var, reserved = struct.unpack_from("<IIBBBBIIQIB3s", frame, 16)
+    name = frame[52:52+nn].decode("ascii"); signature = frame[52+nn:]
+    def fail(cause="library callback graph mismatch symbol "):
+        raise ValueError(cause + name)
+    if (kind,callkind,version,flags,extent,var)!=(0,3,3,0,0,0): fail()
+    try: graph, canonical = oracle(signature)
+    except (AssertionError,IndexError,struct.error,ValueError): fail()
+    active, visited = set(), set()
+    def visit(node):
+        key=id(node)
+        if key in active: fail("not covered: library callback cyclic graph symbol ")
+        if key in visited: return
+        active.add(key)
+        for child in node["edges"]: visit(child)
+        active.remove(key); visited.add(key)
+    visit(graph)
+    positions=[i for i,node in enumerate(graph["edges"][1:]) if node["fields"][1]==4 and node["edges"]]
+    if not positions: fail()
+    if source_state=="source-mismatch": raise ValueError("not covered: library import binding or signature")
+    if source_state in ("unused","defined"): return b"USLCBG1\n"+struct.pack("<Q",0)
+    if source_state!="used": fail()
+    if tokens is not None and any(n != count for n in call_arities(tokens,name)):
+        raise ValueError("library typed arity mismatch symbol " + name)
+    # Reuse generic facts reader; both E3 and binding consume these authoritative rows.
+    root=Path(__file__).resolve().parents[1]
+    spec=importlib.util.spec_from_file_location("_callback_layout_facts",root/"exec/facts/load.py")
+    facts=importlib.util.module_from_spec(spec);spec.loader.exec_module(facts)
+    layout=facts.manifest_facts("../parse2/librarycallsite-layout")
+    records=[]
+    for pos in positions:
+        values={"record_length":layout["callback_graph_base"]-layout["word_width"]+len(canonical),"symbol":ident,"param_index":pos,"callkind":3,"signature_version":3,"graph_length":len(canonical)}
+        header=bytearray()
+        for field in layout["callback_header"]:
+            offset=field["offset"]
+            if offset < len(header): fail("library callback frame-layout mismatch symbol ")
+            header.extend(bytes(offset-len(header)));header.extend(struct.pack("<Q",values[field["name"]]))
+        if layout["callback_graph_base"] < len(header): fail("library callback frame-layout mismatch symbol ")
+        header.extend(bytes(layout["callback_graph_base"]-len(header)))
+        records.append(bytes(header)+canonical)
+    return b"USLCBG1\n"+struct.pack("<Q",len(records))+b"".join(records)
+
 def stage_capabilities(names=()):
     """Generic capability-set adapter; authoritative names are the model manifest flags.
 
@@ -180,6 +229,8 @@ def produce(frame, selection, mode, source_state, tokens=None, *, capabilities=(
     if selection[:12] != b"USLSEL1\n"+struct.pack("<I",1) or len(selection)!=17 or int.from_bytes(selection[12:16],"little")!=ident: fail()
     owner=selection[16]
     if owner==2 and kind==0 and (callkind in (2,3) or callkind==1 and version!=3): return b""
+    if {"librarytyped","librarycallback"} <= caps and owner==1 and callkind==3:
+        return callback_frames(frame, selection, source_state, tokens)
     if {"librarytyped","librarycallsite"} <= caps and owner==1 and callkind==2:
         return variadic_frames(frame, selection, source_state, tokens)
     if owner!=1 or (ident,kind,callkind,version,flags,extent,count,var) != (256,0,1,3,0,0,2,0): fail()

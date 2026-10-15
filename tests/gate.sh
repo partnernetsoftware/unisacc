@@ -398,6 +398,12 @@ job exec-librarycallbackpartition-model-15 ./exec/librarycallbackpartition/check
 job exec-librarycallbackpartition-model-16 ./exec/librarycallbackpartition/check.sh 16
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh
+job exec-librarycallback-reader-model sh tests/librarycallbacke3check.sh check
+job exec-librarycallbacklower-model-1 sh tests/librarycallbacklowercheck.sh 1
+job exec-librarycallbacklower-model-2 sh tests/librarycallbacklowercheck.sh 2
+job exec-librarycallbacklower-model-3 sh tests/librarycallbacklowercheck.sh 3
+job exec-librarycallbacklower-model-4 sh tests/librarycallbacklowercheck.sh 4
+job lib-callback-candidate-auth sh tests/librarycallbackauthcheck.sh check
 job exec-librarycallsite-reader-model ./exec/parse2/librarycallsitecheck.sh
 job exec-librarycallsitelower-model-1 ./exec/lower/librarycallsitecheck.sh 1
 job exec-librarycallsitelower-model-2 ./exec/lower/librarycallsitecheck.sh 2
