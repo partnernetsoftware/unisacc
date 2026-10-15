@@ -50,7 +50,24 @@
 2. **新机制？**：没有。适配器只是把现有 `rf_default_fetch` 的宿主读取移到宿主侧，输出的仍是 S1 账本格式。
 3. **默认路径逐字节？**：要求不变，由 §4 的三个套件核验。
 4. **MISSING / ABSENT / EMPTY**：保持 S1 区分；include 缺失为 ABSENT，账本缺键为 MISSING，空文件为 EMPTY。
-5. **与 2c2 / SC1 的关系**：未触碰 2c2 文件。注意：“SC1”在 `research/c38-ledger19.md` 指 seed 构造的一个待修项，与本步无关；若 cc 所指的“SC1 合同”是别的契约，请明确，本文不替它作答。
+5. **与 2c2 / SC1 的关系**：未触碰 2c2 文件。SC1 指 `research/c43-stream-interface-S-step0.md:11` 的最小阶段合同（字段定义提案），落位见 §8。
+
+## 8. SC1 resources 字段落位（新逻辑键、S1 账本、三态语义）
+
+SC1 的 `resources` 字段定义（step0 `:11` 表）：完整显式 `key → PRESENT(bytes, length, hash)` 或 `ABSENT`；每个请求必须匹配一个条目；无条目为 `MISSING_RESOURCE` 合同失败，**绝不能等同 ABSENT**；同 key 重复请求必须返回相同 presence 与 bytes。本步在此之上的落位：
+
+- **键的表示**：`\0inc/q|a/<写法>` 含 NUL 前缀，SC1 不以 C 字符串标识 key，统一写长度加 hex（step0 同条款）。账本行 `key` 列即该 hex，与 S1 `rl_load` 格式一致。
+- **条目来源**：适配器对核心发出的每个 include 逻辑键必须产出一条账本行：找到 → `present=1`，附 bytes 与 sha256；所有根都找不到 → `present=0`（ABSENT）。适配器**不得**对找不到的键静默不写行，否则严格回放会把它判成 MISSING_RESOURCE，把“真的不存在”误报为合同失败。
+- **搜索顺序**：引号形式先查包含者的逻辑目录，再查 quote-dir / `-I`；尖括号形式只查 `-I`。搜索顺序是适配器的合同部分，记入账本元数据（列出用到的根序列与其摘要），使重放可核对同一搜索。物理路径只进元数据，不进 key。
+- **请求轨迹**：step0 的“stage 请求序列/响应摘要”由核心侧记录（已请求的逻辑键序列），严格回放时逐条核对 key 命中；请求了账本未收录的键即 MISSING。
+- **三态语义保持**：
+  - `MISSING`：账本无此键 → 合同失败（S1 已有 `MISSING_EXPLICIT_RESOURCE`，rc 2）。
+  - `ABSENT`：账本有行且 `present=0` → E2 既有 “no such file for #include” 拒绝，属正常拒绝而非合同失败。
+  - `EMPTY`：`present=1` 且 `len=0` → 合法的空文件，PRESENT_EMPTY，不是 ABSENT。
+- **同 key 一致**：适配器对同一逻辑键只解析一次并缓存；账本内出现重复 key 直接拒绝（S1 的 `duplicate-resource-key` 已覆盖）。
+- **RI/包资源优先级**：step0 要求在适配器解析成唯一响应；严格回放只读账本，不再重查宿主。
+
+这一节不新增资源机制：键、条目、三态都是 S1 账本与 SC1 字段的既有形式，适配器只是把原先在核心 `rf_default_fetch` 中的宿主读取，换成产出同一账本格式的步骤。
 
 ## 6. 待主人/cc 裁定
 
