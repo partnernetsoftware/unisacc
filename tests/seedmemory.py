@@ -16,7 +16,7 @@ Python cold construction and unmeasured flags/COM remain UNKNOWN.
 import argparse, hashlib, pathlib, stat, subprocess, sys, platform, shutil, re, tempfile, os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 C_SHA='66a9f691f6734eff15654de8218e70857fb4329291e94d50a28cc392caf03915'
-REFERENCE_KEYS={'gen': 'e19d9b21be835750', 'parse2': '506f259d917b2ac9'}
+REFERENCE_KEYS={'gen': '07a863b4069f8074', 'parse2': 'a3ad62a362c1c0c1'}
 BINARY_SHA='6f24b1f3ab62b96323604a58ac2edee8561abfd15139c4b0e248c20ea86ecacc'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.

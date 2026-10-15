@@ -36,7 +36,7 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `append` a=STATE d=JSON actions (actions run after every edge of STATE),
     `drop-edge` a=STATE b=KEY (KEY must exist),
     `set-mode` a=STATE b=OLD c=NEW (OLD must match).
-    `copy-state` a=SOURCE b=NEW (shallow alias, no target rewriting),
+    `copy-state` a=SOURCE b=NEW (independent clone of SOURCE's mode and edges now; no target rewriting),
     `move-state` a=OLD b=NEW (move without target rewriting); `move` is its short form;
     `drop-state` a=STATE (STATE must exist; removed with its edges, no target rewriting);
     `copy` a=NEW b=SOURCE is the destination-first hook form of `copy-state`;
@@ -660,7 +660,8 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
         if kind == "copy":
             if a in g.st or b not in g.st:
                 raise ValueError(f"{where}: copy precondition failed {b} -> {a}")
-            g.st[a] = g.st[b]
+            smode, source = g.st[b]
+            g.st[a] = (smode, dict(source))   # independent row: mode and edges as of now; seq ids are immutable and shared
             continue
         if a not in g.st and kind != "fill-edge":
             raise ValueError(f"{where}: {kind} of absent state {a}")
@@ -670,7 +671,11 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
         if kind in ("copy-state", "move-state"):
             if b in g.st:
                 raise ValueError(f"{where}: {kind} onto existing state {b}")
-            g.st[b] = g.st[a] if kind == "copy-state" else g.st.pop(a)
+            if kind == "copy-state":
+                smode, source = g.st[a]
+                g.st[b] = (smode, dict(source))   # independent clone, as in seed/gen.c copy-state
+            else:
+                g.st[b] = g.st.pop(a)
             continue
         if kind == "copy-replace":
             if b in g.st:
