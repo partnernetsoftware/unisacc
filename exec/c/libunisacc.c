@@ -757,7 +757,16 @@ API int us_compile(us_context *c,const char *target,int level) {
         int z=snprintf(route,sizeof route,"%s/%stape/O%d",target,c->source_count>1 ? "multi/" : "",level);
         if (z<0 || z>=(int)sizeof route) __us_panic("target too long");
         rc=0;
-        for (Source *s=c->sources;s;s=s->next) {
+        if (c->source_count>1 && rf_capture_dir()) {   /* SC1 multi-source identity: the source frame, before the first unit row */
+            int count=c->source_count, i=0, fn=0;
+            const char **names=malloc((size_t)count*sizeof *names); const unsigned char **bytes=malloc((size_t)count*sizeof *bytes); int *lens=malloc((size_t)count*sizeof *lens);
+            if (!names || !bytes || !lens) __us_panic("out of memory");
+            for (Source *s=c->sources;s;s=s->next,i++) { names[i]=s->name; bytes[i]=(const unsigned char *)s->bytes; lens[i]=(int)strlen(s->bytes); }
+            unsigned char *fb=rf_source_frame(count,names,bytes,lens,&fn);
+            rc = fb ? rf_identity_gate(fb,fn,2,route) : 2;
+            free(fb); free(names); free(bytes); free(lens);
+        }
+        if (!rc) for (Source *s=c->sources;s;s=s->next) {
             size_t n=strlen(s->bytes); if (n>=INT_MAX) __us_panic("source too large");
             Buf unit={0}; unit.b=tracked_realloc(0,n); memcpy(unit.b,s->bytes,n); unit.n=(int)n;
             if (c->source_count==1) { input=unit; break; }
@@ -774,7 +783,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             for (int j=0;j<unit.n;j++) bput(&input,unit.b[j],0);
             tracked_free(unit.b);
         }
-        if (!rc && rf_capture_dir()) rc=rf_identity_gate(input.b,input.n,2,route);   /* SC1 identity, as on the CLI: the capture writes the header */
+        if (!rc && c->source_count==1 && rf_capture_dir()) rc=rf_identity_gate(input.b,input.n,2,route);   /* SC1 identity of a single source: the capture writes the header */
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
             if(c->late_callsite_enabled&&input.n>=8&&!memcmp(input.b,"USCSFLW1",8)){

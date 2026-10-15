@@ -67,3 +67,11 @@
 - `RF_STAGE_ID` 仍是本路线（C→Tape，-S -o）的固定标签，不是逐阶段模型标识符；阶段内部 cache 结构未测。
 - 候选树是 fbcefbda 加本笔；主线随后已前进到 22e46738（纯文档 #338，与本笔路径无交）。
 - 无 CI 证据；本收据不是发布证据。
+
+## 八、多源身份头（运行起点）与并行约束
+
+- 多源运行在任何 unit 行记录之前写头：输入为源帧（每源：u32le 名长、名、u32le 字节数、字节，按源序），标签 `e3:<target>/multi/tape/O<级>`，同一 rf_identity_gate，mode 取真实值。单源仍在 E3 输入处，输入为源字节（不变）。
+- 多源 CLI 与 API 头逐字节同；多源↔单源互喂具名拒；多源 strict 对自身账本 rc0、输出与默认逐字节同。
+- 并行：UNISA_JOBS>1 的并行 worker 同写一本账，实测 JOBS=4 账本与 JOBS=1 不同（38 行含 12 个重复键 vs 23 行），输出相同。故 capture 与 strict 的多源运行在 UNISA_JOBS>1 时在任何 unit 行前具名拒（resource-capture-parallel-unsupported，rc2，无输出）。**未设 UNISA_JOBS 时默认 8，故多源 capture/strict 须显式 UNISA_JOBS=1。**
+- 记债：并行 capture 支持（worker 各写分片、确定性归并）不在本笔。
+- 账本分文件（(a)）设计备案：/home/box/c43/S12/design-a-per-stage-ledgers.md，未立项。

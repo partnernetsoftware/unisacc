@@ -655,6 +655,23 @@ static int rf_identity_gate(const unsigned char *input,int n,int mode,const char
     if (RF_STRICT && rl_check_identity(&RF_LEDGER, stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     return 0;
 }
+/* SC1 multi-source identity input: the source frame, per source in order: u32le name length, name, u32le byte count, bytes.
+   Built from the sources, not from the unit outputs, so it exists before the first unit row is recorded. */
+static unsigned char *rf_source_frame(int count,const char **names,const unsigned char **bytes,const int *lens,int *out_n) {
+    size_t total=0; int i, j; unsigned char *b, *p;
+    for (i=0;i<count;i++) total+=8+strlen(names[i])+(size_t)lens[i];
+    b=malloc(total?total:1); if (!b) return 0;
+    p=b;
+    for (i=0;i<count;i++) {
+        size_t nl=strlen(names[i]);
+        for (j=0;j<4;j++) *p++=(unsigned char)(nl>>(8*j));
+        memcpy(p,names[i],nl); p+=nl;
+        for (j=0;j<4;j++) *p++=(unsigned char)((unsigned)lens[i]>>(8*j));
+        if (lens[i]) memcpy(p,bytes[i],(size_t)lens[i]);
+        p+=lens[i];
+    }
+    *out_n=(int)total; return b;
+}
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
     if (RF_STRICT) {
         static char msg[1200]; char h[1025]; int i;

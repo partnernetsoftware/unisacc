@@ -778,6 +778,16 @@ int main(int argc, char **argv) {
         }
     }
     else {
+        if (RF_STRICT || rf_capture_dir()) {   /* SC1 multi-source identity: before the first unit row is recorded */
+            const char *uj0=getenv("UNISA_JOBS"); int rfjobs = uj0 ? atoi(uj0) : 8;   /* the parallel unit path is the default (8) */
+            if (rfjobs>1) { fprintf(stderr,"unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=%d (capture and strict multi-source runs need UNISA_JOBS=1)\n", rfjobs); return 2; }
+            unsigned char **cb=xrealloc(0,nsources*sizeof *cb); int *cl=xrealloc(0,nsources*sizeof *cl);
+            for (int j=0;j<nsources;j++) { cl[j]=0; cb[j]=source_read(sources[j],&cl[j]); }
+            int fn=0; unsigned char *fb=rf_source_frame(nsources,sources,(const unsigned char **)cb,cl,&fn);
+            int g = fb ? rf_identity_gate(fb,fn,mode,route) : 2;
+            free(fb); for (int j=0;j<nsources;j++) free(cb[j]); free(cb); free(cl);
+            if (g) return g;
+        }
         char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/%sunit",target,warnings ? "warn/" : "");
         const char *uc=getenv("UNISA_FWD_UNITCACHE");
         int cacheon = !deps && !(uc && !strcmp(uc,"0"));
@@ -859,7 +869,7 @@ int main(int argc, char **argv) {
         }
     }
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
-    if (RF_STRICT || rf_capture_dir()) { int g = rf_identity_gate(in.b,in.n,mode,route); if (g) return g; }   /* SC1 identity, before any stage */
+    if (nsources<=1 && (RF_STRICT || rf_capture_dir())) { int g = rf_identity_gate(in.b,in.n,mode,route); if (g) return g; }   /* SC1 identity of a single-source run, before any stage */
     if (!rc && tape_input) rc=tape_domain(route,&in,src); /* decoded Tapebin uses the same model */
     if (!rc && !(tape_input && mode==2)) {
         if (fwdwant) {
