@@ -67,13 +67,21 @@ static int us_late_prepare(us_context *c,const char *target){
  active=c;volatile int rc=1;
  if(!setjmp(failure)){
   RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;library_package(c);
-  int contract_found=0,selection_found=0;
-  for(int i=0;i<PS;i++){if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))contract_found=1;if(!strcmp(STAGES[i].route,"library-selection")&&!strcmp(STAGES[i].name,"ownership"))selection_found=1;}
+  int contract_found=0,selection_found=0;c->late_typed_enabled=0;
+  for(int i=0;i<PS;i++){
+   if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))contract_found=1;
+   if(!strcmp(STAGES[i].route,"library-selection")){
+    if(!strcmp(STAGES[i].name,"ownership"))selection_found++;
+    else if(!strcmp(STAGES[i].name,"ownership-fixedtyped")){selection_found++;c->late_typed_enabled=1;}
+    else __us_panic("library selection: unknown ownership capability");
+   }
+  }
+  if(selection_found>1)__us_panic("library selection: duplicate ownership capability");
   if(!contract_found||!selection_found)__us_panic("library selection: required model is missing");
   Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
   rc=runroute("library-contract",&input,"binding-contract");
   if(!rc){us_late_snapshot(&c->late_contract,&c->late_contract_n,input.b,(size_t)input.n);
-   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=1;
+   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=c->late_typed_enabled?3:1;
    rc=runroute("library-selection",&input,"binding-ownership");
    if(!rc)us_late_snapshot(&c->late_selection,&c->late_selection_n,input.b,(size_t)input.n);
   }
@@ -113,8 +121,90 @@ static int us_late_data_provider(void *context,const unsigned char *record,size_
  if(!x){const us_binding *legacy=us_resolver_find(&c->bindings,name);if(legacy&&legacy->kind==1)x=legacy;}
  if(x)return us_late_data_offer(c,x,record,nm,id,name,address);return 2;
 }
+/* Fixed typed is a logical class on the existing function physical channel.
+   Native plans own their closure attachment; no independent registry/owner. */
+typedef struct UsLateTypedFrame {
+ us_context *context;us_native_plan *plan;ffi_cif cif;ffi_type *args[6];
+ ffi_closure *closure;void *code;size_t wire_n;unsigned char wire[];
+} UsLateTypedFrame;
+#if defined(US_LATE_TEST_OBSERVERS)
+static size_t us_late_typed_release_count;
+#endif
+static void us_late_typed_release(void *value){
+ UsLateTypedFrame *f=value;if(!f)return;
+ us_ffi_closure_drop(&f->closure,&f->code);
+#if defined(US_LATE_TEST_OBSERVERS)
+ us_late_typed_release_count++;
+#endif
+ free(f);
+}
+static void us_late_typed_callback(ffi_cif *cif,void *result,void **args,void *value){
+ UsLateTypedFrame *f=value;(void)cif;
+ uint64_t a[6];for(unsigned i=0;i<6;i++)memcpy(a+i,args[i],8);
+ uint64_t rc=library_typed_frame_dispatch(f->context,f->plan,a[0],a[1],a[2],a[3],a[4],a[5]);memcpy(result,&rc,8);
+}
+static int us_late_typed_origins(us_context *c){
+ if(!c->late_typed_enabled)return 0;
+ size_t at=16;unsigned count=us_late_u32(c->late_contract+12);
+ for(unsigned i=0;i<count;i++){
+  const unsigned char *r=c->late_contract+at;size_t z=us_late_u32(r),nm=us_late_u32(r+12);
+  char name[4097];if(nm>=sizeof name)return us_late_data_error(c,"malformed-contract",us_late_u32(r+4),"unknown");
+  memcpy(name,r+36,nm);name[nm]=0;unsigned owner,id;
+  if(us_late_owner(c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,name,&owner,&id))return us_late_data_error(c,"missing-owner",us_late_u32(r+4),name);
+  /* The model's ownership result authorizes migration, never an address. */
+  if(owner==1&&r[8]==0&&r[9]==1){
+   if(c->signature_version!=3){snprintf(c->error,sizeof c->error,"unisacc: compile: fixed typed requires signature version 3 symbol %u name %s",id,name);return 1;}
+   UsLateOrigin *o=c->late_origins;for(;o&&strcmp(o->name,name);o=o->next){}
+   if(o&&o->kind!=2)return us_late_data_error(c,"duplicate-owner",id,name);
+   if(!o){o=calloc(1,sizeof *o);if(!o)return error(c,"out of memory");o->name=copy_string(name);if(!o->name){free(o);return error(c,"out of memory");}o->kind=2;o->next=c->late_origins;c->late_origins=o;}
+  }
+  at+=4+z;
+ }
+ return 0;
+}
+static int us_late_typed_prepare(us_context *c,const unsigned char *record,size_t nm,uint32_t id,const char *name,us_native_plans *pending){
+ const unsigned char *wire=record+36+nm;size_t wn=us_late_u32(record+16);us_carrier_certificate cert={0};uint64_t handle=0;
+ int rc=library_carrier_model(c,c->target,wire,wn,&cert);
+ if(rc){us_carrier_certificate_clear(&cert);return us_late_data_error(c,"not covered: typed-native-ABI",id,name);}
+ rc=us_carrier_certificate_native_prepare(pending,&cert,&handle,c->error,sizeof c->error);us_carrier_certificate_clear(&cert);
+ if(rc||!handle)return us_late_data_error(c,"typed-signature-unsupported",id,name);
+ us_native_plan *plan=us_native_plan_find(pending,handle);
+ if(plan->target)return us_late_data_error(c,"typed-plan-premature-address",id,name);
+ UsLateTypedFrame *f=calloc(1,sizeof *f+wn);if(!f)return error(c,"out of memory");
+ f->context=c;f->plan=plan;f->wire_n=wn;memcpy(f->wire,wire,wn);plan->attachment=f;plan->release_attachment=us_late_typed_release;return 0;
+}
+static int us_late_typed_provider(void *context,const unsigned char *record,size_t nm,uint32_t id,const char *name,uint64_t *address){
+ us_context *c=context;const unsigned char *wire=record+36+nm;size_t wn=us_late_u32(record+16);
+ if(record[8]||record[9]!=1||record[10]!=3||wn<16||memcmp(wire,"USLSIG3\n",8))return us_late_data_error(c,"typed-signature-mismatch",id,name);
+ if(us_resolver_find(&c->data_providers,name))return us_late_data_error(c,"typed-provider-kind-mismatch",id,name);
+ const us_binding *x=us_resolver_find(&c->bindings,name);uintptr_t raw=0;
+ if(x){if(x->kind||!x->typed||x->variadic||x->signature_length!=wn||memcmp(x->signature,wire,wn))return us_late_data_error(c,"typed-signature-mismatch",id,name);raw=x->address;}
+#if !defined(_WIN32)
+ else if(!(record[11]&2)&&!us_late_policy(c,name)){
+  /* Fallback trusts explicit declaration; it is not independent ABI evidence. */
+  dlerror();void *a=dlsym(RTLD_DEFAULT,name);const char *e=dlerror();if(!e&&a)raw=(uintptr_t)a;
+  for(size_t j=0;!raw&&j<c->resolver.handle_count;j++){dlerror();a=dlsym(c->resolver.handles[j].handle,name);e=dlerror();if(!e&&a)raw=(uintptr_t)a;}
+ }
+#endif
+ if(!raw)return us_late_data_error(c,"missing-provider",id,name);
+ if(!c->late_preparing)return us_late_data_error(c,"typed-plan-owner-unavailable",id,name);
+ us_native_plan *plan=NULL;UsLateTypedFrame *f=NULL;
+ for(us_native_plan *n=c->late_preparing->head;n;n=n->next)if(n->release_attachment==us_late_typed_release){UsLateTypedFrame *a=n->attachment;if(a->wire_n==wn&&!memcmp(a->wire,wire,wn)){plan=n;f=a;break;}}
+ if(!plan||!f)return us_late_data_error(c,"typed-plan-not-prepared",id,name);
+ if(f->code){if(plan->target!=raw)return us_late_data_error(c,"typed-provider-changed",id,name);*address=(uintptr_t)f->code;return 0;}
+ plan->target=raw;
+ for(unsigned i=0;i<6;i++)f->args[i]=&ffi_type_uint64;
+ if(ffi_prep_cif(&f->cif,FFI_DEFAULT_ABI,6,&ffi_type_uint64,f->args)!=FFI_OK||us_ffi_closure_make(&f->cif,us_late_typed_callback,f,&f->closure,&f->code))return us_late_data_error(c,"typed-frame-closure-failed",id,name);
+ *address=(uintptr_t)f->code;return 0;
+}
+#if defined(US_LATE_TEST_OBSERVERS)
+API const void *us_private_native_plan_bytes(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;size_t z=0;for(us_native_plan *p=c->native_plans.head;p;p=p->next)z+=sizeof *p;if(n)*n=z;return z?c->native_plans.head:NULL;}
+API const void *us_private_typed_plan_bytes(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;for(us_native_plan *p=c->native_plans.head;p;p=p->next)if(p->release_attachment==us_late_typed_release){UsLateTypedFrame *f=p->attachment;if(n)*n=f->wire_n;return f->wire;}return NULL;}
+API size_t us_private_typed_release_count(void){return us_late_typed_release_count;}
+#endif
 typedef int (*UsLateVerify)(void *,const unsigned char *,size_t,uint32_t,const char *,uint64_t *);
-typedef struct UsLateClass {unsigned kind,wire_kind,owner,partition;const char *e3_missing,*lower_missing;int (*declare)(us_context *,const char *,const us_signature *);UsLateVerify verify;} UsLateClass;
+typedef int (*UsLatePrepare)(us_context *,const unsigned char *,size_t,uint32_t,const char *,us_native_plans *);
+typedef struct UsLateClass {unsigned kind,wire_kind,owner,partition;const char *e3_missing,*lower_missing;int (*declare)(us_context *,const char *,const us_signature *);UsLateVerify verify;UsLatePrepare prepare;} UsLateClass;
 #ifndef US_LATE_EXTRA_CLASSES
 #define US_LATE_EXTRA_CLASSES(X)
 #endif
@@ -125,14 +215,33 @@ typedef struct UsLateClass {unsigned kind,wire_kind,owner,partition;const char *
 #define US_LATE_VERIFY_DECL(k,w,o,p,e,l,d,v) static int v(void *,const unsigned char *,size_t,uint32_t,const char *,uint64_t *);
 US_LATE_CLASSES(US_LATE_VERIFY_DECL)
 #undef US_LATE_VERIFY_DECL
-#define US_LATE_CLASS_ROW(k,w,o,p,e,l,d,v) {k,w,o,p,e,l,d,v},
-static const UsLateClass us_late_classes[]={US_LATE_CLASSES(US_LATE_CLASS_ROW)};
+#define US_LATE_CLASS_ROW(k,w,o,p,e,l,d,v) {k,w,o,p,e,l,d,v,NULL},
+static const UsLateClass us_late_classes[]={US_LATE_CLASSES(US_LATE_CLASS_ROW)
+ {2,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_typed_provider,us_late_typed_prepare}};
 #undef US_LATE_CLASS_ROW
 static const UsLateClass *us_late_class(unsigned kind){
  for(size_t i=0;i<sizeof us_late_classes/sizeof us_late_classes[0];i++)if(us_late_classes[i].kind==kind)return &us_late_classes[i];return NULL;
 }
 static const UsLateClass *us_late_origin_class(us_context *c,const char *name,unsigned wire){
  for(UsLateOrigin *o=c->late_origins;o;o=o->next)if(!strcmp(o->name,name))return us_late_class(o->kind);return us_late_class(wire);
+}
+/* One binding preparation loop; semantic preparation belongs to each class. */
+static int us_late_prepare_bindings(us_context *c,us_native_plans *pending){
+ if(!c->late_contract)return 0;
+ size_t at=16;unsigned count=us_late_u32(c->late_contract+12);
+ for(unsigned i=0;i<count;i++){
+  const unsigned char *r=c->late_contract+at;size_t z=us_late_u32(r),nm=us_late_u32(r+12);char name[4097];
+  if(nm>=sizeof name)return us_late_data_error(c,"malformed-contract",us_late_u32(r+4),"unknown");
+  memcpy(name,r+36,nm);name[nm]=0;unsigned owner,id;
+  if(us_late_owner(c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,name,&owner,&id))return us_late_data_error(c,"missing-owner",us_late_u32(r+4),name);
+  const UsLateClass *d=us_late_origin_class(c,name,r[8]);
+  if(owner!=2){
+   if(!d||d->wire_kind!=r[8]||d->owner!=owner)return us_late_data_error(c,"wrong-owner",id,name);
+   if(d->prepare&&d->prepare(c,r,nm,id,name,pending))return 1;
+  }
+  at+=4+z;
+ }
+ return 0;
 }
 static const void *us_late_query(us_context *c,unsigned kind,unsigned phase,size_t *n){
  if(n)*n=0;if(!c)return NULL;const UsLateClass *d=us_late_class(kind);

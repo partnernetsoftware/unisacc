@@ -51,6 +51,8 @@ struct us_context {
     us_bindings data_providers; /* independent supply; never serialized into model inputs */
     us_resolver resolver;
     us_native_plans native_plans;
+    us_native_plans *late_preparing; /* borrowed pending us_native_plans owner, relocate only */
+    int late_typed_enabled;
     us_native_templates native_templates;
     us_native_callsites native_callsites;
     us_callables callables;uint64_t image_generation;
@@ -350,6 +352,8 @@ API const void *us_binding_contract(us_context *c,const char *target,size_t *len
  if(length)*length=c->contract_snapshot_length;return c->contract_snapshot;
 }
 
+static uint64_t library_typed_frame_dispatch(us_context *,us_native_plan *,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static int library_carrier_model(us_context *,const char *,const void *,size_t,us_carrier_certificate *);
 #include "librarylatebind.h"
 static uint64_t library_u64(const Buf *b,size_t *at);
 static int library_lookup(void *owner,const char *name,const void **raw,int *kind);
@@ -672,7 +676,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     us_bindings late_injected={0},late_declared={0};us_resolver late_resolver;
     const us_bindings *freeze_injected=&c->bindings;const us_resolver *freeze_resolver=&c->resolver;
     if(us_contract_target(target)){
-        if(us_late_prepare(c,target)){us_late_rollback(c,&prior);return 1;}
+        if(us_late_prepare(c,target)||us_late_typed_origins(c)){us_late_rollback(c,&prior);return 1;}
         if(us_late_legacy_view(&c->bindings,c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,&late_injected,c->error,sizeof c->error) ||
            us_late_legacy_view(&c->resolver.declarations,c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,&late_declared,c->error,sizeof c->error)){
             free(late_injected.items);free(late_declared.items);us_late_rollback(c,&prior);return 1;
@@ -737,6 +741,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             resources[NRI].name=(const unsigned char *)"\0library/signatureversion";resources[NRI].n=25;resources[NRI].data=signature_request;resources[NRI].len=8;NRI++;
             resources[NRI].name=(const unsigned char *)"\0library/sourcefacts";resources[NRI].n=20;resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
         }
+        if(c->late_typed_enabled){resources[NRI]=(ResourceInput){(const unsigned char *)"\0library/typed-mode",19,library_request,8};NRI++;}
         if(c->late_contract){
             resources[NRI]=(ResourceInput){(const unsigned char *)"\0library/contract",17,c->late_contract,(int)c->late_contract_n};NRI++;
             resources[NRI]=(ResourceInput){(const unsigned char *)"\0library/selection",18,c->late_selection,(int)c->late_selection_n};NRI++;
@@ -950,6 +955,12 @@ static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t 
     }else plan=us_native_plan_find(&c->native_plans,handle);
     return library_native_invoke(c,frame,plan,slots,result,count);
 }
+static uint64_t library_typed_frame_dispatch(us_context *c,us_native_plan *plan,uint64_t zero,uint64_t slots,uint64_t result,uint64_t count,uint64_t site,uint64_t reserved){
+    ScriptFrame *frame=script_frames;
+    if(!c||active!=c||!frame||frame->owner!=c)return 1;
+    if(zero||site||reserved)return library_dispatch_error(c,"invalid typed frame reserved fields");
+    return library_native_invoke(c,frame,plan,slots,result,count);
+}
 static uint64_t library_variadic_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
                                          uint64_t count,uint64_t site,uint64_t reserved0) {
     us_context *c=active;ScriptFrame *frame=script_frames;
@@ -1076,7 +1087,11 @@ API int us_relocate(us_context *c) {
         library_winimports_free(&winimports);return error(c,"cannot enumerate Windows OS exports");
     }
 #endif
-    discard_image(c);c->error[0]=0;active=c;volatile int rc=1;
+    discard_image(c);c->error[0]=0;
+    us_native_plans *prepared=calloc(1,sizeof *prepared);if(!prepared)return error(c,"out of memory");
+    c->late_preparing=prepared;
+    if(us_late_prepare_bindings(c,prepared)){c->late_preparing=NULL;us_native_plans_clear(prepared);free(prepared);return 1;}
+    active=c;volatile int rc=1;
     /* Mapping identity must survive longjmp on a malformed model output. */
     if (!setjmp(failure)) {
         RI=0;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=0;
@@ -1143,6 +1158,10 @@ API int us_relocate(us_context *c) {
     library_winimports_free(&winimports);
 #endif
     if(!rc)rc=library_carrier_exports_prepare(c);
+    c->late_preparing=NULL;
+    if(rc){if(prepared){us_native_plans_clear(prepared);free(prepared);}discard_image(c);return rc;}
+    if(c->image_generation==UINT64_MAX){if(prepared){us_native_plans_clear(prepared);free(prepared);}discard_image(c);return error(c,"image generation capacity exceeded");}
+    if(prepared){us_native_plans_commit_attachments(&c->native_plans,prepared);us_native_plans_clear(prepared);free(prepared);}
     if (rc) discard_image(c);
     else if(c->image_generation==UINT64_MAX){discard_image(c);return error(c,"image generation capacity exceeded");}
     else {us_callables_init(&c->callables,c,c->image_generation,library_invoke_frame,library_callable_native_hook,library_callable_failure_hook);c->callables.script_call=library_callable_script_hook;}

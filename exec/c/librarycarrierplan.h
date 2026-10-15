@@ -59,10 +59,10 @@ bad:us_carrier_certificate_clear(&tmp);return 1;
 }
 /* Consume the decoded model certificate only after every mechanical check and
    CIF preparation succeeds. All frame memory continues to use the original. */
-static int us_carrier_certificate_native_add(us_native_plans *plans,uintptr_t raw,
+static int us_carrier_certificate_native_prepare(us_native_plans *plans,
                                              us_carrier_certificate *certificate,uint64_t *handle,
                                              char *error,size_t cap){
-    if(!plans||!raw||!certificate||!handle)return us_export_error(error,cap,"invalid carrier native plan output");
+    if(!plans||!certificate||!handle)return us_export_error(error,cap,"invalid carrier native plan output");
     *handle=0;us_export_signature original,carrier;
     if(certificate->original.count!=1||certificate->carrier.count!=1||!certificate->target[0]||
        us_callable_export_signature(certificate->original.items,&original)||
@@ -78,10 +78,18 @@ static int us_carrier_certificate_native_add(us_native_plans *plans,uintptr_t ra
     ffi_type *result=us_export_ffitype(&carrier.result,1);if(!result||
        ffi_prep_cif(&plan->cif,FFI_DEFAULT_ABI,(unsigned)carrier.count,result,plan->args)!=FFI_OK)goto bad;
 publish:
-    plan->graph=certificate->original;plan->carrier=certificate->carrier;plan->signature=original;plan->target=raw;
+    plan->graph=certificate->original;plan->carrier=certificate->carrier;plan->signature=original;plan->target=0;
     memset(certificate,0,sizeof *certificate);
     plan->next=plans->head;plans->head=plan;*handle=(uintptr_t)plan;return 0;
 bad:us_native_plan_free(plan);return us_export_error(error,cap,"carrier native ffi signature rejected");
+}
+/* Existing address-bearing entry retains its nonzero-target contract. */
+static int us_carrier_certificate_native_add(us_native_plans *plans,uintptr_t raw,
+                                             us_carrier_certificate *certificate,uint64_t *handle,
+                                             char *error,size_t cap){
+    if(!plans||!raw||!certificate||!handle)return us_export_error(error,cap,"invalid carrier native plan output");
+    int rc=us_carrier_certificate_native_prepare(plans,certificate,handle,error,cap);
+    if(!rc)us_native_plan_find(plans,*handle)->target=raw;return rc;
 }
 /* Variadic concrete site: the certified fixed concrete graph is the original,
    the CIF is prepared from the carrier with ffi_prep_cif_var over the model's

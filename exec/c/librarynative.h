@@ -28,6 +28,18 @@ typedef struct us_native_arena {
 } us_native_arena;
 static void us_native_plan_free(us_native_plan *p){if(!p)return;if(p->release_attachment)p->release_attachment(p->attachment);free(p->args);us_exports_clear(&p->graph);us_exports_clear(&p->carrier);free(p);}
 static void us_native_plans_clear(us_native_plans *p){if(!p)return;while(p->head){us_native_plan *n=p->head->next;us_native_plan_free(p->head);p->head=n;}p->carrier_provider=NULL;p->carrier_owner=NULL;}
+/* Commit newly prepared attachments under the existing plan owner. */
+static void us_native_plans_commit_attachments(us_native_plans *owner,us_native_plans *pending){
+    /* Unfilled target-zero preparations are never published. */
+    us_native_plan **q=&pending->head;
+    while(*q){us_native_plan *n=*q;if(!n->target){*q=n->next;us_native_plan_free(n);}else q=&n->next;}
+    us_native_plan **p=&owner->head;
+    while(*p){us_native_plan *n=*p;int replaced=0;
+        if(n->release_attachment)for(us_native_plan *r=pending->head;r;r=r->next)if(r->release_attachment==n->release_attachment){replaced=1;break;}
+        if(replaced){*p=n->next;us_native_plan_free(n);}else p=&n->next;
+    }
+    if(pending->head){us_native_plan *last=pending->head;while(last->next)last=last->next;last->next=owner->head;owner->head=pending->head;pending->head=NULL;}
+}
 static us_native_plan *us_native_plan_find(const us_native_plans *p,uint64_t handle){
     if(p)for(us_native_plan *n=p->head;n;n=n->next)if((uint64_t)(uintptr_t)n==handle)return n;return NULL;
 }

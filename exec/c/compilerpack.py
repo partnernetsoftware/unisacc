@@ -161,7 +161,7 @@ def retain_models(directory, rows):
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
 
-def model_jobs(targets, shared_e2=None, shared_nativeabi=None):
+def model_jobs(targets, shared_e2=None, shared_nativeabi=None, librarytyped=False):
     """Every model compiler_package constructs, as (name, script, args), in order."""
     gen=Path(__file__).resolve().parent.parent/'build/gen.py'
     jobs=[]
@@ -171,33 +171,41 @@ def model_jobs(targets, shared_e2=None, shared_nativeabi=None):
         jobs.append(('object-enc-'+arch,gen,['enc/arm' if arch=='arm64' else 'enc','--object']))
     if shared_e2 is None: jobs.append(('plainpp',gen,['pp','--shared-predefines']))
     jobs+=[('librarycontract',gen,['librarycontract/gen']),
-           ('librarypartition',gen,['librarypartition/gen']),
+           ('librarypartition',gen,['librarytypedpartition/gen' if librarytyped else 'librarypartition/gen']),
            ('hostsymbols',gen,['lower/hostsymbols']),
            ('tapecheck',gen,['tapecheck']),
            ('tokenpp',gen,['pp','--shared-predefines','--no-autoinc']),
            ('tokenlex',gen,['lex']),
            ('warnlex',gen,['lex','--locations']),
-           ('warnparse',gen,['parse2','--warnings','--errors']),
+           ('warnparse',gen,['parse2/librarytyped','--librarytyped','--warnings','--errors'] if librarytyped else ['parse2','--warnings','--errors']),
            ('warnunits',gen,['parse2/units','--locations']),
-           ('errorparse',gen,['parse2','--errors']),
+           ('errorparse',gen,['parse2/librarytyped','--librarytyped','--errors'] if librarytyped else ['parse2','--errors']),
            ('warnpp-shared',gen,['pp','--locations','--shared-predefines'])]
     if shared_nativeabi is None: jobs.append(('nativeabi',gen,['nativeabi']))
+    if librarytyped:
+        jobs.append(('typed-parse',gen,['parse2/librarytyped','--librarytyped']))
+        for target in sorted(set(targets)):
+            osname,arch=target.split('/')
+            flags=['--full','--librarytyped']+(['--arm64'] if arch=='arm64' else [])+(['--'+osname] if osname in ('osx','win') else [])
+            jobs.append(('typed-lower-'+osname+'-'+arch,gen,['lower/librarytyped-model']+flags))
+        jobs=[(n,sc,(['lower/librarytyped-model']+a[1:]+['--librarytyped']) if n.startswith('object-lower-') else a) for n,sc,a in jobs]
     return jobs
 
 def manifest_targets(manifests):
     return {next(x for x in Path(m).read_text().splitlines() if x and not x.startswith('#')).split('\t')[0] for m in manifests}
 
-def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None):
+def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, librarytyped=False):
     """Construct part PART (1-based) of PARTS into the model cache; no package."""
-    if parts!=len(PREP_PARTS) or not 1<=part<=parts: raise ValueError('--part must be K/%d'%len(PREP_PARTS))
-    jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi)}
-    named=[n for g in PREP_PARTS for n in g]
+    jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi,librarytyped)}
+    groups=PREP_PARTS+[[n] for n in jobs if n.startswith('typed-')]
+    if parts!=len(groups) or not 1<=part<=parts: raise ValueError('--part must be K/%d'%len(groups))
+    named=[n for g in groups for n in g]
     if len(named)!=len(set(named)) or not set(jobs)<=set(named): raise ValueError('PREP_PARTS does not cover the model jobs once each')
     with tempfile.TemporaryDirectory(prefix='compiler-prepare-') as td:
-        for n in PREP_PARTS[part-1]:
+        for n in groups[part-1]:
             if n in jobs: built_model(td,n,*jobs[n]); print('prepared',n,flush=True)
 
-def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None):
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None, librarytyped=False):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -241,18 +249,23 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         # Offline construction of the shared unit-framing network. Runtime
         # does not invoke these Python tools or parse declarations in C.
         here=Path(__file__).resolve().parent
-        jobs={n:(sc,a) for n,sc,a in model_jobs(targets,shared_e2,shared_nativeabi)}
+        jobs={n:(sc,a) for n,sc,a in model_jobs(targets,shared_e2,shared_nativeabi,librarytyped)}
         def job(name): return built_model(td,name,*jobs[name])
         object_models={}
         for target in sorted(targets & {'lnx/x86_64','lnx/arm64'}):
             arch=target.split('/')[1]
             object_models[target]={
                 'lower':job('object-lower-'+arch),'elf':job('object-enc-'+arch)}
+        typed_models={target:job('typed-lower-'+target.replace('/','-')) for target in sorted(targets)} if librarytyped else {}
+        typed_parse=job('typed-parse') if librarytyped else None
         for i,row in enumerate(rows):
             cols=row.split('\t')
             for target,models in object_models.items():
                 if cols[0].startswith(target+'/object/') and cols[1] in models:
                     cols[4]=str(models[cols[1]]);break
+            if librarytyped and cols[1]=='e3': cols[4]=str(typed_parse)
+            if librarytyped and cols[1]=='lower' and not '/object/' in cols[0]:
+                cols[4]=str(typed_models['/'.join(cols[0].split('/')[:2])])
             rows[i]='\t'.join(cols)
         # Declare all target macro lists as resources; choosing and parsing
         # the list remains in the shared E2 delta. The driver supplies target.
@@ -340,7 +353,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         rows=checked
         rows.append('\t'.join(['host-symbols','symbols','explicit-frame','host-contract',str(job('hostsymbols'))]))
         rows.append('\t'.join(['library-contract','contract','declarations','library-contract',str(job('librarycontract'))]))
-        rows.append('\t'.join(['library-selection','ownership','declarations','library-selection',str(job('librarypartition'))]))
+        rows.append('\t'.join(['library-selection','ownership-fixedtyped' if librarytyped else 'ownership','declarations','library-selection',str(job('librarypartition'))]))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         payload=build([manifest],mounts,compressed=compressed,cache=MODEL_CACHE)
         if audit_dir is not None: retain_models(audit_dir, rows)
@@ -357,6 +370,7 @@ if __name__=='__main__':
     ap.add_argument('--shared-nativeabi',type=Path,help='fresh shared model-certified ABI carrier network')
     ap.add_argument('--compressed',dest='compressed',action='store_true',default=True,help='P3 binary+DEFLATE models (default)')
     ap.add_argument('--legacy-package',dest='compressed',action='store_false',help='legacy uncompressed P1/P2')
+    ap.add_argument('--librarytyped',action='store_true',help='explicitly package fixed-typed partition, E3 and lower overlays (experimental)')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
     ap.add_argument('--prepare-only',action='store_true',help='construct models of --part into the cache; write no package')
     ap.add_argument('--part',help='K/N: which prepare group (with --prepare-only)')
@@ -369,10 +383,10 @@ if __name__=='__main__':
         try:
             k,n=map(int,(a.part or '').split('/'))
         except ValueError: ap.exit(2,'compilerpack: --prepare-only needs --part K/N\n')
-        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi)
+        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi,a.librarytyped)
         except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
         raise SystemExit(0)
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2,a.shared_nativeabi);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2,a.shared_nativeabi,a.librarytyped);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')
