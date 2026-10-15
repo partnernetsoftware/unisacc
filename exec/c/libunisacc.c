@@ -53,6 +53,8 @@ struct us_context {
     us_native_plans native_plans;
     us_native_plans *late_preparing; /* borrowed pending us_native_plans owner, relocate only */
     int late_typed_enabled;
+    int late_callsite_enabled;
+    unsigned char *late_callsites;size_t late_callsites_n;
     us_native_templates native_templates;
     us_native_callsites native_callsites;
     us_callables callables;uint64_t image_generation;
@@ -266,6 +268,7 @@ API void us_free(us_context *c) {
     discard_image(c);library_callable_catalog_clear(c);
     us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);
+    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);us_bindings_clear(&c->data_providers);free(c->binding_blob);free(c->contract_snapshot);
@@ -353,6 +356,7 @@ API const void *us_binding_contract(us_context *c,const char *target,size_t *len
 }
 
 static uint64_t library_typed_frame_dispatch(us_context *,us_native_plan *,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static uint64_t library_callsite_frame_dispatch(us_context *,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static int library_carrier_model(us_context *,const char *,const void *,size_t,us_carrier_certificate *);
 #include "librarylatebind.h"
 static uint64_t library_u64(const Buf *b,size_t *at);
@@ -452,7 +456,7 @@ static const us_export_signature *library_callable_signature(us_context *c,uint6
 }
 static void invalidate_bindings(us_context *c) {
     discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
-    us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
+    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
     free(c->contract_snapshot);c->contract_snapshot=0;c->contract_snapshot_length=0;
@@ -698,6 +702,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     us_late_release(&prior);
     discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);
+    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;
     c->native_plans=plans;c->native_templates=templates;
     free(c->binding_blob);c->binding_blob=frozen;c->binding_length=frozen_length;
     free(c->target); c->target=chosen; c->optimisation=level;
@@ -771,6 +776,13 @@ API int us_compile(us_context *c,const char *target,int level) {
         }
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
+            if(c->late_callsite_enabled&&input.n>=8&&!memcmp(input.b,"USCSFLW1",8)){
+                if(input.n<24)__us_panic("library callsite: malformed frame envelope");
+                uint64_t core=us_lr_u64(input.b+8),side=us_lr_u64(input.b+16);
+                if(core>(size_t)input.n-24||side!=(size_t)input.n-24-core||side<16||memcmp(input.b+24+core,"USLCSF1\n",8))__us_panic("library callsite: malformed frame envelope");
+                us_late_snapshot(&c->late_callsites,&c->late_callsites_n,input.b+24+(size_t)core,(size_t)side);
+                memmove(input.b,input.b+24,(size_t)core);input.n=(int)core;
+            }
             if(c->late_contract)us_late_decode(c,&input,"USTFLOW2",US_LATE_E3);
             size_t begin=0,length=(size_t)input.n;
             if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9) || !memcmp(input.b,"USLTAPE3\n",9))) {
@@ -808,7 +820,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     cache_settle();cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
     if(!rc)rc=library_variadic_sites_prepare(c);
-    if(rc){us_late_clear_phase(c,US_LATE_E3);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+    if(rc){free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;us_late_clear_phase(c,US_LATE_E3);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
         free(c->tape);c->tape=0;c->tape_length=0;}
     return rc;
@@ -961,6 +973,12 @@ static uint64_t library_typed_frame_dispatch(us_context *c,us_native_plan *plan,
     if(zero||site||reserved)return library_dispatch_error(c,"invalid typed frame reserved fields");
     return library_native_invoke(c,frame,plan,slots,result,count);
 }
+static uint64_t library_callsite_frame_dispatch(us_context *c,uint64_t symbol,uint64_t zero,uint64_t slots,uint64_t result,uint64_t count,uint64_t site,uint64_t reserved){
+ ScriptFrame *frame=script_frames;if(!c||active!=c||!frame||frame->owner!=c)return 1;
+ if(zero||reserved||!site)return library_dispatch_error(c,"invalid callsite frame reserved fields");
+ for(us_native_plan *p=c->native_plans.head;p;p=p->next)if(p->release_attachment==us_late_callsite_release){UsLateTypedFrame *f=p->attachment;if(f->symbol==symbol&&f->ordinal==site)return library_native_invoke(c,frame,p,slots,result,count);}
+ return library_dispatch_error(c,"unknown callsite ordinal");
+}
 static uint64_t library_variadic_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
                                          uint64_t count,uint64_t site,uint64_t reserved0) {
     us_context *c=active;ScriptFrame *frame=script_frames;
@@ -1099,7 +1117,7 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        size_t capacity=23;
+        size_t capacity=24;
 #if defined(_WIN32) && !defined(__UNISA__)
         capacity+=(size_t)winimports.count;
 #endif
@@ -1131,6 +1149,9 @@ API int us_relocate(us_context *c) {
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/selection",18,c->late_selection,(int)c->late_selection_n};NRI++;
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/contract",17,c->late_contract,(int)c->late_contract_n};NRI++;
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/data-latebind",22,enabled,8};NRI++;
+            if(c->late_callsite_enabled&&c->late_callsites){
+                actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/callsites",18,c->late_callsites,(int)c->late_callsites_n};NRI++;
+            }
             us_late_clear_phase(c,US_LATE_LOWER);
             
             rc=runroute_range(route,"tapecheck","tapecheck",&input,source);

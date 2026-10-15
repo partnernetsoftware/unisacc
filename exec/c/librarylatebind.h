@@ -67,12 +67,13 @@ static int us_late_prepare(us_context *c,const char *target){
  active=c;volatile int rc=1;
  if(!setjmp(failure)){
   RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;library_package(c);
-  int contract_found=0,selection_found=0;c->late_typed_enabled=0;
+  int contract_found=0,selection_found=0;c->late_typed_enabled=0;c->late_callsite_enabled=0;
   for(int i=0;i<PS;i++){
    if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))contract_found=1;
    if(!strcmp(STAGES[i].route,"library-selection")){
     if(!strcmp(STAGES[i].name,"ownership"))selection_found++;
     else if(!strcmp(STAGES[i].name,"ownership-fixedtyped")){selection_found++;c->late_typed_enabled=1;}
+    else if(!strcmp(STAGES[i].name,"ownership-callsite")){selection_found++;c->late_typed_enabled=1;c->late_callsite_enabled=1;}
     else __us_panic("library selection: unknown ownership capability");
    }
   }
@@ -81,7 +82,7 @@ static int us_late_prepare(us_context *c,const char *target){
   Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
   rc=runroute("library-contract",&input,"binding-contract");
   if(!rc){us_late_snapshot(&c->late_contract,&c->late_contract_n,input.b,(size_t)input.n);
-   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=c->late_typed_enabled?3:1;
+   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=c->late_callsite_enabled?7:c->late_typed_enabled?3:1;
    rc=runroute("library-selection",&input,"binding-ownership");
    if(!rc)us_late_snapshot(&c->late_selection,&c->late_selection_n,input.b,(size_t)input.n);
   }
@@ -125,7 +126,7 @@ static int us_late_data_provider(void *context,const unsigned char *record,size_
    Native plans own their closure attachment; no independent registry/owner. */
 typedef struct UsLateTypedFrame {
  us_context *context;us_native_plan *plan;ffi_cif cif;ffi_type *args[6];
- ffi_closure *closure;void *code;size_t wire_n;unsigned char wire[];
+ ffi_closure *closure;void *code;uint64_t symbol,ordinal;size_t wire_n;unsigned char wire[];
 } UsLateTypedFrame;
 #if defined(US_LATE_TEST_OBSERVERS)
 static size_t us_late_typed_release_count;
@@ -152,11 +153,12 @@ static int us_late_typed_origins(us_context *c){
   memcpy(name,r+36,nm);name[nm]=0;unsigned owner,id;
   if(us_late_owner(c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,name,&owner,&id))return us_late_data_error(c,"missing-owner",us_late_u32(r+4),name);
   /* The model's ownership result authorizes migration, never an address. */
-  if(owner==1&&r[8]==0&&r[9]==1){
+  if(owner==1&&r[8]==0&&(r[9]==1||(c->late_callsite_enabled&&r[9]==2))){
    if(c->signature_version!=3){snprintf(c->error,sizeof c->error,"unisacc: compile: fixed typed requires signature version 3 symbol %u name %s",id,name);return 1;}
    UsLateOrigin *o=c->late_origins;for(;o&&strcmp(o->name,name);o=o->next){}
-   if(o&&o->kind!=2)return us_late_data_error(c,"duplicate-owner",id,name);
-   if(!o){o=calloc(1,sizeof *o);if(!o)return error(c,"out of memory");o->name=copy_string(name);if(!o->name){free(o);return error(c,"out of memory");}o->kind=2;o->next=c->late_origins;c->late_origins=o;}
+   unsigned logical=r[9]==2?3:2;
+   if(o&&o->kind!=logical)return us_late_data_error(c,"duplicate-owner",id,name);
+   if(!o){o=calloc(1,sizeof *o);if(!o)return error(c,"out of memory");o->name=copy_string(name);if(!o->name){free(o);return error(c,"out of memory");}o->kind=logical;o->next=c->late_origins;c->late_origins=o;}
   }
   at+=4+z;
  }
@@ -197,9 +199,69 @@ static int us_late_typed_provider(void *context,const unsigned char *record,size
  if(ffi_prep_cif(&f->cif,FFI_DEFAULT_ABI,6,&ffi_type_uint64,f->args)!=FFI_OK||us_ffi_closure_make(&f->cif,us_late_typed_callback,f,&f->closure,&f->code))return us_late_data_error(c,"typed-frame-closure-failed",id,name);
  *address=(uintptr_t)f->code;return 0;
 }
+/* Callsite category shares the pending plan owner and closure component.
+   The symbol contract and per-callsite concrete signature remain separate. */
+static void us_late_callsite_release(void *value){us_late_typed_release(value);}
+static void us_late_callsite_callback(ffi_cif *cif,void *result,void **args,void *value){
+ UsLateTypedFrame *f=value;(void)cif;uint64_t a[6];for(unsigned i=0;i<6;i++)memcpy(a+i,args[i],8);
+ uint64_t rc=library_callsite_frame_dispatch(f->context,f->symbol,a[0],a[1],a[2],a[3],a[4],a[5]);memcpy(result,&rc,8);
+}
+static int us_late_callsite_prepare(us_context *c,const unsigned char *record,size_t nm,uint32_t id,const char *name,us_native_plans *pending){
+ if(!c->late_callsites)return 0;
+ if(c->late_callsites_n<16||memcmp(c->late_callsites,"USLCSF1\n",8))return us_late_data_error(c,"missing-callsite",id,name);
+ size_t at=16;uint64_t count=us_lr_u64(c->late_callsites+8);if(count>8192)return us_late_data_error(c,"callsite-malformed-frame",id,name);
+ for(uint64_t i=0;i<count;i++){
+  if(at>c->late_callsites_n||c->late_callsites_n-at<40)return us_late_data_error(c,"callsite-malformed-frame",id,name);
+  const unsigned char *r=c->late_callsites+at;uint64_t z=us_lr_u64(r),ordinal=us_lr_u64(r+8),symbol=us_lr_u64(r+16),fixed=us_lr_u64(r+24),wn=us_lr_u64(r+32);
+  if(z<32||z>c->late_callsites_n-at-8||wn!=z-32||!ordinal)return us_late_data_error(c,"callsite-malformed-frame",id,name);
+  if(symbol==id){
+   unsigned char *canon=malloc(wn?wn:1);if(!canon)return error(c,"out of memory");memcpy(canon,r+40,wn);
+   size_t q=8;uint64_t records=0,nn=0,argc=0;
+   if(us_export_u64(canon,wn,&q,&records)||records!=1||us_export_u64(canon,wn,&q,&nn)||nn>wn-q||wn-q-nn<12){free(canon);return us_late_data_error(c,"callsite-signature-mismatch",id,name);}
+   size_t mode=q+(size_t)nn+3,ca=mode+1;
+   if(us_export_u64(canon,wn,&ca,&argc)){free(canon);return us_late_data_error(c,"callsite-signature-mismatch",id,name);}
+   canon[mode]=argc>6?1:0;
+   us_carrier_certificate cert={0};uint64_t handle=0;int rc=library_carrier_model(c,c->target,canon,wn,&cert);free(canon);
+   if(rc){us_carrier_certificate_clear(&cert);return us_late_data_error(c,"not covered: callsite-native-ABI",id,name);}
+   rc=us_carrier_certificate_native_prepare_mode(pending,&cert,1,fixed,&handle,c->error,sizeof c->error);us_carrier_certificate_clear(&cert);
+   if(rc||!handle)return us_late_data_error(c,"callsite-signature-unsupported",id,name);
+   us_native_plan *plan=us_native_plan_find(pending,handle);UsLateTypedFrame *f=calloc(1,sizeof *f+(size_t)wn);if(!f)return error(c,"out of memory");
+   f->context=c;f->plan=plan;f->symbol=id;f->ordinal=ordinal;f->wire_n=wn;memcpy(f->wire,r+40,wn);plan->attachment=f;plan->release_attachment=us_late_callsite_release;
+  }
+  at+=8+(size_t)z;
+ }
+ if(at!=c->late_callsites_n)return us_late_data_error(c,"callsite-malformed-frame",id,name);return 0;
+}
+static int us_late_callsite_provider(void *context,const unsigned char *record,size_t nm,uint32_t id,const char *name,uint64_t *address){
+ us_context *c=context;const unsigned char *wire=record+36+nm;size_t wn=us_late_u32(record+16);uintptr_t raw=0;
+ if(record[8]||record[9]!=2||record[10]!=3)return us_late_data_error(c,"callsite-signature-mismatch",id,name);
+ if(us_resolver_find(&c->data_providers,name))return us_late_data_error(c,"callsite-provider-kind-mismatch",id,name);
+ const us_binding *x=us_resolver_find(&c->bindings,name);
+ if(x){if(x->kind||!x->typed||!x->variadic||x->signature_length!=wn||memcmp(x->signature,wire,wn))return us_late_data_error(c,"callsite-signature-mismatch",id,name);raw=x->address;}
+#if !defined(_WIN32)
+ else if(!(record[11]&2)&&!us_late_policy(c,name)){
+  dlerror();void *a=dlsym(RTLD_DEFAULT,name);const char *e=dlerror();if(!e&&a)raw=(uintptr_t)a;
+  for(size_t j=0;!raw&&j<c->resolver.handle_count;j++){dlerror();a=dlsym(c->resolver.handles[j].handle,name);e=dlerror();if(!e&&a)raw=(uintptr_t)a;}
+ }
+#endif
+ if(!raw)return us_late_data_error(c,"missing-provider",id,name);
+ if(!c->late_preparing)return us_late_data_error(c,"callsite-plan-owner-unavailable",id,name);
+ *address=0;
+ for(us_native_plan *p=c->late_preparing->head;p;p=p->next)if(p->release_attachment==us_late_callsite_release){
+  UsLateTypedFrame *f=p->attachment;if(f->symbol!=id)continue;
+  p->target=raw;for(unsigned j=0;j<6;j++)f->args[j]=&ffi_type_uint64;
+  if(ffi_prep_cif(&f->cif,FFI_DEFAULT_ABI,6,&ffi_type_uint64,f->args)!=FFI_OK||us_ffi_closure_make(&f->cif,us_late_callsite_callback,f,&f->closure,&f->code))return us_late_data_error(c,"callsite-frame-closure-failed",id,name);
+  if(!*address)*address=(uintptr_t)f->code;
+ }
+ if(!*address)return us_late_data_error(c,"callsite-plan-not-prepared",id,name);return 0;
+}
 #if defined(US_LATE_TEST_OBSERVERS)
 API const void *us_private_native_plan_bytes(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;size_t z=0;for(us_native_plan *p=c->native_plans.head;p;p=p->next)z+=sizeof *p;if(n)*n=z;return z?c->native_plans.head:NULL;}
-API const void *us_private_typed_plan_bytes(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;for(us_native_plan *p=c->native_plans.head;p;p=p->next)if(p->release_attachment==us_late_typed_release){UsLateTypedFrame *f=p->attachment;if(n)*n=f->wire_n;return f->wire;}return NULL;}
+API const void *us_private_typed_plan_bytes(us_context *c,size_t *n){if(n)*n=0;if(!c)return NULL;for(us_native_plan *p=c->native_plans.head;p;p=p->next)if(p->release_attachment==us_late_typed_release||p->release_attachment==us_late_callsite_release){UsLateTypedFrame *f=p->attachment;if(n)*n=f->wire_n;return f->wire;}return NULL;}
+API const void *us_private_callsite_frame_bytes(us_context *c,unsigned index,size_t *n){
+ if(n)*n=0;if(!c||!c->late_callsites||c->late_callsites_n<16)return NULL;size_t at=16;uint64_t count=us_lr_u64(c->late_callsites+8);
+ for(uint64_t i=0;i<count;i++){if(at>c->late_callsites_n||c->late_callsites_n-at<40)return NULL;uint64_t z=us_lr_u64(c->late_callsites+at),wn=us_lr_u64(c->late_callsites+at+32);if(z<32||z>c->late_callsites_n-at-8||wn!=z-32)return NULL;if(i==index){if(n)*n=wn;return c->late_callsites+at+40;}at+=8+(size_t)z;}return NULL;
+}
 API size_t us_private_typed_release_count(void){return us_late_typed_release_count;}
 #endif
 typedef int (*UsLateVerify)(void *,const unsigned char *,size_t,uint32_t,const char *,uint64_t *);
@@ -217,7 +279,8 @@ US_LATE_CLASSES(US_LATE_VERIFY_DECL)
 #undef US_LATE_VERIFY_DECL
 #define US_LATE_CLASS_ROW(k,w,o,p,e,l,d,v) {k,w,o,p,e,l,d,v,NULL},
 static const UsLateClass us_late_classes[]={US_LATE_CLASSES(US_LATE_CLASS_ROW)
- {2,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_typed_provider,us_late_typed_prepare}};
+ {2,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_typed_provider,us_late_typed_prepare},
+ {3,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_callsite_provider,us_late_callsite_prepare}};
 #undef US_LATE_CLASS_ROW
 static const UsLateClass *us_late_class(unsigned kind){
  for(size_t i=0;i<sizeof us_late_classes/sizeof us_late_classes[0];i++)if(us_late_classes[i].kind==kind)return &us_late_classes[i];return NULL;
