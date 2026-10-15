@@ -8,9 +8,10 @@ Optional actual E1 callsite tokens enable arity checking; without them this
 remains a declaration/frame projection, not callsite eligibility.
 """
 import struct
+import re
 from .librarycontract import produce as validate
 
-def call_arguments(tokens, name):
+def call_arguments(tokens, name, *, with_types=False):
     """One E1 observer shared by fixed arity and variadic frames; direct calls only."""
     start = tokens.find(b"UNITOK1\0", 0, 32)
     if start < 0 or start + 12 > len(tokens):
@@ -29,9 +30,34 @@ def call_arguments(tokens, name):
     if not words or words[-1] != "eof":
         raise ValueError("reference callsite missing eof")
     braces = 0
+    scopes = []
+    statement = []
     for i, token in enumerate(words):
-        if token == "{": braces += 1
-        elif token == "}": braces -= 1
+        if token == "{":
+            braces += 1; scopes.append({}); statement = []
+        elif token == "}":
+            braces -= 1
+            if scopes: scopes.pop()
+            statement = []
+        elif token == ";":
+            if scopes and statement and statement[0].startswith("type="):
+                # Narrow declaration observer; unsupported declarations shadow too.
+                ids = [j for j, w in enumerate(statement) if w.startswith("id=")]
+                if ids:
+                    j = ids[0]; typ = tuple(statement[:j]); ident = statement[j][3:]
+                    scalar_types = {
+                        ("type=signed", "type=char"): "int",
+                        ("type=char",): "int", ("type=short",): "int",
+                        ("type=signed", "type=short"): "int",
+                        ("type=int",): "int", ("type=long",): "long",
+                        ("type=float",): "double", ("type=double",): "double",
+                    }
+                    tail = statement[j+1:]
+                    simple = not tail or (len(tail) == 2 and tail[0] == "=" and tail[1].startswith("num="))
+                    scopes[-1][ident] = scalar_types.get(typ) if simple else None
+            statement = []
+        else:
+            statement.append(token)
         if braces <= 0 or token != "id=" + name or words[i + 1:i + 2] != ["("]:
             continue
         depth, args, arg = 1, [], []
@@ -39,7 +65,11 @@ def call_arguments(tokens, name):
             if token == ")" and depth == 1:
                 if arg: args.append(tuple(arg))
                 elif args: raise ValueError("reference callsite empty argument")
-                yield tuple(args)
+                if with_types:
+                    bindings = {}
+                    for scope in scopes: bindings.update(scope)
+                    yield tuple(args), bindings
+                else: yield tuple(args)
                 break
             if token == "," and depth == 1:
                 if not arg: raise ValueError("reference callsite empty argument")
@@ -54,11 +84,11 @@ def call_arities(tokens, name):
     for args in call_arguments(tokens, name): yield len(args)
 
 def variadic_frames(frame, selection, source_state, tokens):
-    """Narrow integer-literal witness of address-free callsite bytes, not an ABI oracle.
+    """Narrow promoted-scalar witness of address-free callsite bytes, not an ABI oracle.
 
     The product derives descriptors in LV/LX. Here the existing reader reference
     observes frozen E1 direct literal calls and canonical scalar declarations.
-    General expressions, floats/aggregates and multiple declared symbols are
+    General expressions, aggregates and multiple declared symbols are
     outside this reference witness and fail closed.
     """
     def fail(reason="type"):
@@ -84,21 +114,35 @@ def variadic_frames(frame, selection, source_state, tokens):
     if source_state=="source-mismatch":raise ValueError("not covered: library import binding or signature")
     if source_state in ("unused","defined"):return b"USLCSF1\n"+struct.pack("<Q",0)
     if source_state!="used":fail()
-    def promoted(arg):
+    def promoted(arg, bindings, *, tail=False):
         word="".join(arg)
         if word.startswith("-"): word=word[1:]
-        if not word.startswith("num="):fail()
+        kind = None
+        if len(arg) == 1 and arg[0].startswith("id="):
+            kind = bindings.get(arg[0][3:])
+            if kind is None: fail()
+        elif word.startswith("num="):
+            number = word[4:]
+            if re.fullmatch(r"(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+[eE][+-]?[0-9]+)(?:[eE][+-]?[0-9]+)?[fF]?", number):
+                kind = "double"
+        if kind == "double":
+            if not tail: fail()
+            # LV promotes to DBL/rank2; LTY.double supplies class3/width8.
+            return struct.pack("<7QBBQBBBBQ",0,64,0,3,8,0,8,2,2,8,0,3,1,0,0)
+        if kind in ("int", "long"):
+            word = "num=0" + ("L" if kind == "long" else "")
+        if not word.startswith("num="): fail()
         val=word[4:]; suffix=val[-1:].lower(); digits=val[:-1] if suffix=="l" else val
         if not digits or not digits.isdigit():fail()
         width=8 if suffix=="l" else 4
         if int(digits) >= 1 << (width*8-1):fail()
         return struct.pack("<7QBBQBBBBQ",0,width,0,1,width,0,width,0,0,width,0,3,1,0,0)
     records=[]
-    for ordinal,args in enumerate(call_arguments(tokens,name),1):
+    for ordinal,(args,bindings) in enumerate(call_arguments(tokens,name,with_types=True),1):
         if len(args)<fixed:fail("arity")
         # Fixed inputs are converted by the product into the declared prefix.
-        for arg in args[:fixed]:promoted(arg)
-        concrete=(b"USLSIG3\n"+struct.pack("<QQ",1,len(name))+name.encode()+b"\0\1\0\1"+struct.pack("<Q",len(args))+result+struct.pack("<Q",len(args))+b"".join(prefix)+b"".join(promoted(arg) for arg in args[fixed:])+b"\0")
+        for arg in args[:fixed]:promoted(arg,bindings)
+        concrete=(b"USLSIG3\n"+struct.pack("<QQ",1,len(name))+name.encode()+b"\0\1\0\1"+struct.pack("<Q",len(args))+result+struct.pack("<Q",len(args))+b"".join(prefix)+b"".join(promoted(arg,bindings,tail=True) for arg in args[fixed:])+b"\0")
         records.append(struct.pack("<5Q",32+len(concrete),ordinal,ident,fixed,len(concrete))+concrete)
     return b"USLCSF1\n"+struct.pack("<Q",len(records))+b"".join(records)
 
