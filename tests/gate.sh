@@ -365,6 +365,14 @@ job exec-librarytypedpartition-model-1 ./exec/librarytypedpartition/check.sh 1
 job exec-librarytypedpartition-model-2 ./exec/librarytypedpartition/check.sh 2
 job exec-librarytypedpartition-model-3 ./exec/librarytypedpartition/check.sh 3
 job exec-librarytypedpartition-model-4 ./exec/librarytypedpartition/check.sh 4
+job exec-librarycallsitepartition-model-1 ./exec/librarycallsitepartition/check.sh 1
+job exec-librarycallsitepartition-model-2 ./exec/librarycallsitepartition/check.sh 2
+job exec-librarycallsitepartition-model-3 ./exec/librarycallsitepartition/check.sh 3
+job exec-librarycallsitepartition-model-4 ./exec/librarycallsitepartition/check.sh 4
+job exec-librarycallsitepartition-model-5 ./exec/librarycallsitepartition/check.sh 5
+job exec-librarycallsitepartition-model-6 ./exec/librarycallsitepartition/check.sh 6
+job exec-librarycallsitepartition-model-7 ./exec/librarycallsitepartition/check.sh 7
+job exec-librarycallsitepartition-model-8 ./exec/librarycallsitepartition/check.sh 8
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh
 job exec-librarytypedlower-model-1 ./exec/lower/librarytypedcheck.sh 1

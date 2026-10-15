@@ -1,0 +1,38 @@
+#include <cx.h>
+/* Model contract checker. Python is an observation-only batched oracle.
+ * The ledger header binds all fixture bytes; each selected model run remains
+ * independent, bounded, and compared to both fixture and actual reference. */
+static char *field(char **p){char *a=*p,*t=strchr(a,'\t');if(t){*t=0;*p=t+1;}else *p=0;return a;}
+static int hex_equal(const char *h,const char *b,size_t n){if(strlen(h)!=2*n)return 0;for(size_t i=0;i<n;i++){unsigned v;if(sscanf(h+2*i,"%2x",&v)!=1||(unsigned char)b[i]!=(unsigned char)v)return 0;}return 1;}
+int main(int argc,char **argv){
+ if(argc!=3)return 2;int shard=atoi(argv[2]);if(shard<0||shard>7)return 2;
+ char in[4096],mo[4096],me[4096],ledger[4096],cmd[16384],digest[65];size_t n,ln;
+ snprintf(in,sizeof in,"%s/input",argv[1]);snprintf(mo,sizeof mo,"%s/model.out",argv[1]);snprintf(me,sizeof me,"%s/model.err",argv[1]);snprintf(ledger,sizeof ledger,"%s/reference.tsv",argv[1]);
+ char*list=cx_read("tests/librarycallsitepartition-cases.tsv",&n);if(!list)return 2;cx_sha256_hex(list,n,digest);
+ snprintf(cmd,sizeof cmd,"python3 -m unisa.librarycallsitepartition --oracle tests/librarycallsitepartition-cases.tsv '%s'",ledger);
+ int rr=cx_run_timeout(cmd,15,0,0);if(rr)return rr==142?142:2;
+ char*ref=cx_read(ledger,&ln);if(!ref)return 2;char*head=strchr(ref,'\n');if(!head)return 2;*head=0;
+ if(strncmp(ref,"#sha256\t",8)||strcmp(ref+8,digest)){puts("MECHANISM reference ledger input hash");return 2;}
+ char*q=head+1;int accepted=0,refused=0,index=0;
+ for(char*p=list;*p;){char*end=strchr(p,'\n');if(!end)return 2;*end=0;
+  if(*p!='#'){
+   char*qe=strchr(q,'\n');if(!qe)return 2;*qe=0;char*qr=q;char*rn=field(&qr);if(!qr)return 2;char*rcs=field(&qr);if(!qr)return 2;char*rh=field(&qr);if(!qr)return 2;char*reason=qr;
+   if((index++%8)==shard){
+    char*fp=p;char*name=field(&fp);if(!fp)return 2;char*hex=field(&fp);if(!fp)return 2;char*cs=field(&fp);if(!fp)return 2;char*expected=field(&fp);if(!fp)return 2;char*why=fp;int want=atoi(cs),rc=atoi(rcs);
+    if(strcmp(name,rn)||(rc!=0&&rc!=1)){puts("MECHANISM reference row alignment/status");return 2;}
+    if(rc!=want||strcmp(rh,expected)||(want&&(!strstr(reason,"library partition")||!strstr(reason,why)))){printf("CONTRACT_RED %s reference expectation/reason\n",name);return 1;}
+    size_t hn=strlen(hex);if(hn%2)return 2;unsigned char*b=malloc(hn/2+1);if(!b)return 2;
+    for(size_t i=0;i<hn;i+=2){unsigned v;if(sscanf(hex+i,"%2x",&v)!=1)return 2;b[i/2]=(unsigned char)v;}if(cx_write(in,b,hn/2))return 2;free(b);
+    snprintf(cmd,sizeof cmd,"'%s/run' '%s/model.net' '%s' >'%s' 2>'%s'",argv[1],argv[1],in,mo,me);int m=cx_run_timeout(cmd,3,0,0);
+    if(m!=0&&m!=1){printf("%s %s model=%d (not refusal)\n",m==142?"HOST_TIMEOUT":"MECHANISM",name,m);return m==142?142:2;}
+    size_t mn,en;char*x=cx_read(mo,&mn),*e=cx_read(me,&en);if(!x||!e)return 2;
+    if(m!=want||(!want&&!hex_equal(rh,x,mn))||(want&&(mn||!strstr(e,"library partition")||!strstr(e,why)))){printf("CONTRACT_RED %s model=%d reference=%d reason=%s\n",name,m,rc,e);return 1;}
+    free(x);free(e);if(want)refused++;else accepted++;
+   }
+   q=qe+1;
+  }
+  p=end+1;
+ }
+ if(*q||(!accepted&&!refused))return 2;free(list);free(ref);
+ printf("librarycallsitepartition-model: accept=%d refuse=%d exact reference bytes and named reasons\n",accepted,refused);return 0;
+}
