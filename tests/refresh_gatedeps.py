@@ -250,6 +250,10 @@ def main():
     d['suites']['script-inventory-self'] = {
         'command': ['python3', './tests/inventorycheck.py'],
         'files': ['tests/inventorycheck.py', 'tests/inventory.py'], 'tools': ['python3']}
+    d['suites']['inventory-derived'] = {
+        'command': ['python3', './tests/inventoryderivedcheck.py'],
+        'files': ['tests/inventoryderivedcheck.py', 'tests/inventory.py', 'tests/INVENTORY.md'],
+        'trees': ['tests', 'exec', '.github/workflows'], 'tools': ['python3']}
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
