@@ -143,6 +143,8 @@ class Files:
         if path not in self.cache:
             try:
                 p = path.decode("latin-1")
+                if p.startswith("\0inc/q/") or p.startswith("\0inc/a/"):   # S2: logical include key, read cwd-relative
+                    p = p[7:]
                 if p.startswith("\0hdr/"):       # the bundled copies: include/ of this tree
                     p = os.path.join(self.bundled, p[5:])
                 try:

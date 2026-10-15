@@ -17,7 +17,7 @@ LAYERS = ("contract", "stage", "pipeline", "platform")
 CONTRACT = set("""
 reviewed-trees finite-template decision-ledger dsl-ops modelbenchcheck bound qprefix
 pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck
-revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin staticimage staticimage-selftest abi-manifest abi-manifest-selftest early-stage-seal-selftest pp-leaf-seal pp-leaf-seal-negative pp-leaf-capture-selftest middle-flow-e3 middle-flow-lower-accept
+revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin staticimage staticimage-selftest abi-manifest abi-manifest-selftest early-stage-seal-selftest pp-leaf-seal pp-leaf-seal-negative pp-leaf-capture-selftest middle-flow-e3 middle-flow-lower-accept middle-flow-ledger
 script-inventory script-inventory-self inventory-derived subtract-safety subtract-safety-selftest c99-ledger
 publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
 lib-bindings-registry

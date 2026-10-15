@@ -356,6 +356,8 @@ job pp-leaf-seal-negative tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.
 job pp-leaf-capture-selftest tests/bound 58 sh ./unisacc.com -run tests/ppleafcapture.cx -- --selftest
 job middle-flow-e3 tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-e3 tests/seals/middleflow-step0
 job middle-flow-lower-accept tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-lower tests/seals/middleflow-step0
+# S2 (0.0.43): middle-flow ledger assertion: the live resource ledger of the e3 and lower captures equals the sealed resources.tsv
+job middle-flow-ledger sh -c 'sh "${MODEL_COM:-./unisacc.com}" -run tests/middleflowcheck.cx -- --ledger "$(dirname "${MODEL_COM:-./unisacc.com}")/compiler.pkg" .'
 job stage-contract-e1e3 tests/bound 58 sh ./unisacc.com -run tests/stagecontractcheck.cx -- --fixture tests/seals/stagecontract-e1-e3 --fixture tests/seals/stagecontract-tape-lower --product "${MODEL_COM:-./unisacc.com}"   # c43 S step 0: E1->e3 replay, resource refusal, reset (measured scope)
 for k in 1 2 3; do job tapecheck-model-$k ./exec/tapecheck/check.sh $k; done
 job exec-hostsymbols-model ./exec/lower/hostsymbolscheck.sh

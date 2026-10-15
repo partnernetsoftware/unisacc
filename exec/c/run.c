@@ -658,6 +658,8 @@ static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,i
         *bytes=PB+RES[j].data; *len=RES[j].len; return 1;
     }
     char path[4096];
+    /* S2: a logical include key \0inc/q|a/NAME names a cwd-relative file: the prefix is stripped here, on the host side */
+    if (n>=7 && p[0]==0 && !memcmp(p+1,"inc/",4) && (p[5]=='q'||p[5]=='a') && p[6]=='/') { p+=7; n-=7; }
     int header=n>=5 && !memcmp(p,"\0hdr/",5);
     /* A bundled header that cannot be produced is NOT this layer's error to
        report: the resource is simply absent (return 0), which is what the E2
