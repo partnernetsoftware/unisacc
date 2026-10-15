@@ -69,3 +69,30 @@ provider signature comparison, compile-time-empty native plans and P1–P6 remai
 for subsequent commits. P6 warehouse data is not registered or copied into this
 commit. Full arbitrary-input reference equivalence is not claimed. The S probe,
 old queue/env-pin and release surfaces are untouched.
+
+## Cold preparation follow-up (after c9f4d792)
+
+Review found the former combined `--prepare-base` exceeded its 58-second cold
+window. It now refuses with rc2 and names seven explicit preparation steps;
+limits and verdicts are unchanged. New script content selects a new cache key.
+After the first successful run, all seven base artifacts and all base completion
+SHA files were explicitly removed; the following cold replay used external
+`time.monotonic()` measurements (each command also bound to 58 seconds):
+
+| Step | rc | Wall seconds |
+|---|---:|---:|
+| c | 0 | 4.23 |
+| off | 0 | 19.65 |
+| reference | 0 | 20.27 |
+| tables-base | 0 | 2.37 |
+| tables-off | 0 | 3.72 |
+| net-base | 0 | 0.31 |
+| net-off | 0 | 1.97 |
+
+Tools: 6.58s; typed preparation: 26.29s, both rc0 on the new content key.
+Each step verifies its prerequisite artifact hashes. Only final network equality
+publishes the complete base receipt; absent/corrupt preparation remains rc2.
+The original seedparse2-1/-2 UNVERIFIED publication obligations are unchanged.
+ABI regenerated on clean HEAD plus these files: 447 entries, unchanged bytes.
+Raw per-step logs and external timings are observation-layer warehouse evidence
+(`reader-prep-split/cold-results.json`); physical paths are not core identity.

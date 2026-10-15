@@ -16,23 +16,51 @@ case ${1:-check} in
  (cd "$D" && sha256sum gen runner >tools.sha256)
  ;;
 --prepare-base)
+ echo "reader: use --prepare-base-c, -off, -reference, -tables-base, -tables-off, -net-base, -net-off separately (each bounded to 58s)" >&2
+ exit 2
+ ;;
+--prepare-base-c)
  (cd "$D" && sha256sum -c --status tools.sha256)
  b "$D/gen" parse2/librarytyped "$D/off-c.json"
+ (cd "$D" && sha256sum off-c.json >base-c.sha256)
+ ;;
+--prepare-base-off)
+ (cd "$D" && sha256sum -c --status base-c.sha256)
  b python3 exec/build/gen.py parse2/librarytyped "$D/off.json"
  check --same "$D/off-c.json" "$D/off.json" >"$D/off-cp.log"
+ (cd "$D" && sha256sum off.json >base-off.sha256)
+ ;;
+--prepare-base-reference)
+ (cd "$D" && sha256sum -c --status base-off.sha256)
  T=$(mktemp -d "${TMPDIR:-/tmp}/reader-base.XXXXXX")
  trap 'rm -rf "$T"' EXIT HUP INT TERM
  cp -R exec "$T/exec"
  check --baseline "$T/exec/parse2/libraryimports-manifest.tsv"
  (cd "$T" && b python3 exec/build/gen.py parse2 "$D/base.json")
  check --same "$D/base.json" "$D/off.json" >"$D/base-off-json.log"
+ (cd "$D" && sha256sum base.json >base-reference.sha256)
+ ;;
+--prepare-base-tables-base)
+ (cd "$D" && sha256sum -c --status base-reference.sha256)
  b python3 exec/c/tbl.py "$D/base.json" "$D/base.tbl"
+ (cd "$D" && sha256sum base.tbl >base-tables-base.sha256)
+ ;;
+--prepare-base-tables-off)
+ (cd "$D" && sha256sum -c --status base-off.sha256 && sha256sum -c --status base-tables-base.sha256)
  b python3 exec/c/tbl.py "$D/off.json" "$D/off.tbl"
  check --same "$D/base.tbl" "$D/off.tbl" >"$D/base-off-tbl.log"
+ (cd "$D" && sha256sum off.tbl >base-tables-off.sha256)
+ ;;
+--prepare-base-net-base)
+ (cd "$D" && sha256sum -c --status base-tables-base.sha256)
  b python3 exec/c/net.py "$D/base.tbl" "$D/base.net"
+ (cd "$D" && sha256sum base.net >base-net-base.sha256)
+ ;;
+--prepare-base-net-off)
+ (cd "$D" && sha256sum -c --status base-tables-off.sha256 && sha256sum -c --status base-net-base.sha256)
  b python3 exec/c/net.py "$D/off.tbl" "$D/off.net"
  check --same "$D/base.net" "$D/off.net" >"$D/base-off-net.log"
- (cd "$D" && sha256sum base.json base.tbl base.net off.json off.tbl off.net off-c.json >base.sha256)
+ (cd "$D" && sha256sum -c --status base-c.sha256 && sha256sum -c --status base-off.sha256 && sha256sum -c --status base-reference.sha256 && sha256sum -c --status base-tables-base.sha256 && sha256sum -c --status base-tables-off.sha256 && sha256sum -c --status base-net-base.sha256 && sha256sum base.json base.tbl base.net off.json off.tbl off.net off-c.json >base.sha256)
  ;;
 --prepare-typed)
  (cd "$D" && sha256sum -c --status tools.sha256)
@@ -46,7 +74,7 @@ case ${1:-check} in
 check)
  for phase in tools base typed;do
   if ! (cd "$D" && sha256sum -c --status "$phase.sha256");then
-   echo "reader: preparation unavailable/corrupt; run --prepare-tools, --prepare-base, --prepare-typed as separate bounded commands" >&2;exit 2
+   echo "reader: preparation unavailable/corrupt; run the preparation steps listed in exec/parse2/librarytypedreader.md as separate bounded commands" >&2;exit 2
   fi
  done
  T=$(mktemp -d "${TMPDIR:-/tmp}/librarytypedreader-check.XXXXXX")

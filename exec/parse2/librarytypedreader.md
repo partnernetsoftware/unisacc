@@ -25,12 +25,21 @@ must construct the native plan and closure. No P1–P6 or full ABI proof is clai
 
 ```
 tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-tools
-tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-c
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-off
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-reference
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-tables-base
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-tables-off
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-net-base
+tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-base-net-off
 tests/bound 58 sh exec/parse2/librarytypedreadercheck.sh --prepare-typed
 tests/bound 58 ./tests/gate.sh --suite exec-librarytypedreader-model
 ```
 
 Preparation is split rather than hiding cold construction in the test window.
+The former combined --prepare-base is refused (rc2): cold review exceeded its
+58-second window. Each new step validates its prerequisite content hashes; only
+the final network comparison publishes base.sha256. No timeout was increased.
 Every cached artifact is hashed and rechecked; a missing preparation returns rc2,
 not PASS. Root unisacc.com is only the dynamic-C observation tool, not a fresh
 product under test. The native generic executor is likewise observation tooling.
