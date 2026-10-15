@@ -112,6 +112,20 @@ def main():
         entry = {'command': ['./exec/librarycallsitepartition/check.sh', 'PLACEHOLDER'], 'files': ['exec/librarycallsitepartition/check.sh', 'tests/librarycallsitepartitioncheck.cx', 'tests/librarycallsitepartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycallsitepartition', 'exec/librarytypedpartition', 'exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}
         entry['command'][-1] = str(shard)
         d['suites']['exec-librarycallsitepartition-model-%d' % shard] = entry
+    # 2c3 callsite models: stage-only, no native ABI/runtime/V0-V7 completion claim.
+    shared_files = ['exec/finite_rules.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json']
+    model_tools = ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir']
+    d['suites']['exec-librarycallsite-reader-model'] = {
+        'command': ['./exec/parse2/librarycallsitecheck.sh'],
+        'files': shared_files + ['exec/parse2/librarycallsitecheck.sh', 'exec/parse2/librarycallsitecheck.cx', 'exec/parse2/librarycallsite-cases.tsv', 'exec/parse2/librarytypedreader-observer.c', 'exec/parse2/librarytypedreadercheck.sh'],
+        'trees': ['exec/parse2', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'],
+        'executable_inputs': True, 'tools': model_tools}
+    for shard in range(1, 5):
+        d['suites']['exec-librarycallsitelower-model-%d' % shard] = {
+            'command': ['./exec/lower/librarycallsitecheck.sh', str(shard)],
+            'files': shared_files + ['exec/lower/librarycallsitecheck.sh', 'exec/lower/librarycallsite-observer.c', 'exec/lower/librarycallsite-oracle.c', 'exec/lower/librarycallsite-oracle.py', 'exec/lower/librarytypedcheck.sh', 'tests/librarycallsitelowercheck.cx', 'tests/librarycallsitelower-cases.tsv'],
+            'trees': ['exec/lower', 'exec/parse2', 'exec/tapecheck', 'exec/nativeabi', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'],
+            'executable_inputs': True, 'tools': model_tools + ['env']}
     d['suites']['exec-librarytypedreader-model'] = {'command': ['./exec/parse2/librarytypedreadercheck.sh'], 'files': ['exec/parse2/librarytypedreadercheck.sh', 'exec/parse2/librarytypedreader-observer.c', 'tests/librarytypedreadercheck.cx', 'tests/librarytypedreader-cases.tsv', 'tests/librarytypedoverlaycheck.cx', 'tests/librarytypedoverlay-ordinary.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarytypedpartition', 'exec/parse2', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir', 'env']}
     # Existing ABI contract job lacked declared inputs, blocking scoped commitgate.
     d['suites']['abi-manifest'] = {'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/abimanifestcheck.cx', '--', '--check'], 'files': ['tests/abimanifestcheck.cx', 'tests/abi.manifest', 'unisacc.com', 'unisacc.com.build.json', 'tests/bound', 'tests/bound.c', 'tests/bound.py'], 'trees': ['exec', 'src', 'include'], 'executable_inputs': True, 'tools': ['sh']}

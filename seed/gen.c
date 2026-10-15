@@ -2093,6 +2093,9 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             memset(rewritten, 0, original_ns * sizeof(*rewritten));
             memset(remainder, 0, original_ns * sizeof(*remainder));
             for (size_t si = 0; si < original_n; si++) {
+                /* Optional owner-prefix: '-' and empty retain the full graph. */
+                if (field[4][0] && strcmp(field[4], "-") &&
+                    strncmp(g->state[si].name, field[4], strlen(field[4]))) continue;
                 for (size_t ei = 0; ei < g->state[si].n; ei++) {
                     Edge *edge = &g->state[si].edge[ei];
                     int oldseq = edge->seq;

@@ -45,7 +45,8 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `copy-replace` a=SOURCE b=NEW c=JSON action d=JSON actions (copy SOURCE with every
     occurrence of the action c replaced by the actions d; c must occur in SOURCE).
     `split-at` a=JSON action sequence b=RESUME c=TARGET: on every edge whose action
-    sequence contains a (first occurrence), the actions from a on are replaced by
+    sequence contains a (first occurrence), optionally limited to owner-prefix d
+    (empty or - preserves the original full graph), the actions from a on are replaced by
     PUSH RESUME and the target by TARGET; RESUME (a return label, mode r) takes on
     every observation the first such edge's target and the actions after a.
     `rewrite-tail` a=JSON action patterns c=TARGET (empty: keep) d=JSON actions:
@@ -595,7 +596,9 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
         if kind == "split-at":
             cut = [tuple(x) for x in json.loads(a)]
             n = len(cut)
-            for _, row in list(g.st.values()):
+            for name, (_, row) in list(g.st.items()):
+                if d not in ("", "-") and not name.startswith(d):
+                    continue
                 for key, (target, seq) in list(row.items()):
                     acts = list(g.seqs[seq])
                     at = next((i for i in range(len(acts) - n + 1) if acts[i:i + n] == cut), None)

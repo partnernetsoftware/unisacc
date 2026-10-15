@@ -375,6 +375,11 @@ job exec-librarycallsitepartition-model-7 ./exec/librarycallsitepartition/check.
 job exec-librarycallsitepartition-model-8 ./exec/librarycallsitepartition/check.sh 8
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh
+job exec-librarycallsite-reader-model ./exec/parse2/librarycallsitecheck.sh
+job exec-librarycallsitelower-model-1 ./exec/lower/librarycallsitecheck.sh 1
+job exec-librarycallsitelower-model-2 ./exec/lower/librarycallsitecheck.sh 2
+job exec-librarycallsitelower-model-3 ./exec/lower/librarycallsitecheck.sh 3
+job exec-librarycallsitelower-model-4 ./exec/lower/librarycallsitecheck.sh 4
 job exec-librarytypedlower-model-1 ./exec/lower/librarytypedcheck.sh 1
 job exec-librarytypedlower-model-2 ./exec/lower/librarytypedcheck.sh 2
 job exec-librarytypedlower-model-3 ./exec/lower/librarytypedcheck.sh 3

@@ -20,3 +20,11 @@
 **负例**（`--negative`）：在私有镜像上漏实际规则依赖、给 predefines.tsv 增加一行、给 b_ppif.c 间接使用的 stdarg.h 增加一行，三项均必须判红；共享源码不改。
 
 **两份 net 模型**保留实际执行字节，尚未证明构建器可逐字节确定性重建，因此不能只留哈希。
+
+## 2c3 split-at owner-prefix 后同源重采
+
+在 HEAD4e2c266a+本笔的干净导出（index-tree 见仓外 source.json）上，以同源私有P3产品 `665334b0edf32df52e845539e3a53db0f19430f1b1120c6b2dce33a9365454e8` 执行仓内 `tests/reseal-pp-literals.sh`（含 `ppleafseal.cx --write-seal`）。12产品构建步全rc0、最大20.669s；四重采步全rc0、最大33.65s。
+
+逐项变化只有 `dependencies.tsv` 中 builder `exec/finite_rules.py`：长度38371→38562、SHA4a8151fa…→2a858163…，原因是通用 split-at 可选owner-prefix。全部case输入/输出/错误/源名、两个model产物、resources/streams/closure.expected/identity/measurement均逐字节不变。原件实际93依赖（上方91是历史说明），6收38拒/两模型/core/output-proof保持原值。没有手填新identity或放宽seal，也不授复用。
+
+仓外保留 source.json、12步build-steps.json、raw trace、reseal.tsv、file-comparison.json；保存于仓外本轮 `2c3/joint/pp-reseal/`，不把宿主绝对路径放入封存输入。
