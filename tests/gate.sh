@@ -341,6 +341,10 @@ for k in 1 2 3; do job tapecheck-model-$k ./exec/tapecheck/check.sh $k; done
 job exec-hostsymbols-model ./exec/lower/hostsymbolscheck.sh
 job exec-librarycontract-model ./exec/librarycontract/check.sh
 job exec-librarypartition-model ./exec/librarypartition/check.sh
+job exec-librarytypedpartition-model-1 ./exec/librarytypedpartition/check.sh 1
+job exec-librarytypedpartition-model-2 ./exec/librarytypedpartition/check.sh 2
+job exec-librarytypedpartition-model-3 ./exec/librarytypedpartition/check.sh 3
+job exec-librarytypedpartition-model-4 ./exec/librarytypedpartition/check.sh 4
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
 job exec-libraryfn-model ./exec/lower/libraryfncheck.sh
 job exec-librarydata-model ./exec/lower/librarydatacheck.sh
