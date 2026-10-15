@@ -3,6 +3,7 @@
  * r4/normal-W/test-kind7 run directories, never product PASS cache entries.
  * Snapshot comparisons are narrow witnesses, not complete stream identities. */
 #include <cx.h>
+#include "snapbase.h"
 static int bad,checks;
 static void check(int ok,const char *name){checks++;printf("%s %s\n",ok?"ok":"FAIL",name);if(!ok)bad++;}
 static int same(const char *a,const char *b){size_t na=0,nb=0;char *x=cx_read(a,&na),*y=cx_read(b,&nb);int ok=x&&y&&na&&na==nb&&!memcmp(x,y,na);free(x);free(y);return ok;}
@@ -38,26 +39,18 @@ static int judge(int argc,char **argv){
 /* Frozen r4 observations: native lnx/x86_64; no host addresses or paths.
  * Other hosts report UNVERIFIED rather than compare a different target to it. */
 static int frozen(const char *dir){
- size_t n=0;unsigned char *b=(unsigned char *)cx_read("tests/liblatebindWcheck.baseline",&n);size_t at=0;
- if(!b){return 1;}
- while(at<n&&b[at]=='#'){while(at<n&&b[at]!='\n')at++;if(at==n){free(b);return 1;}at++;}
- if(at>4096||n-at<8||memcmp(b+at,"WBASE1\n\0",8)||!strstr((char *)b,"runtime-commit: 394b57f6")||!strstr((char *)b,"# generate: cc ")||!strstr((char *)b,"# capture: tests/bound 58 ")){free(b);return 1;}at+=8;
- const char *tags[3]={"success","before-failure","after-failure"};char path[4096];
- for(int i=0;i<19;i++){
-  if(n-at<4){free(b);return 1;}size_t z=(size_t)b[at]|((size_t)b[at+1]<<8)|((size_t)b[at+2]<<16)|((size_t)b[at+3]<<24);at+=4;
-  if(!z||z>n-at){free(b);return 1;}
-  if(i==18)snprintf(path,sizeof path,"%s/observation.tsv",dir);
-  else snprintf(path,sizeof path,"%s/%s-%d.bin",dir,tags[i/6],i%6);
-  if(cx_write(path,b+at,z)){free(b);return 1;}at+=z;
- }
- int rc=at!=n;free(b);return rc;
+ static const char *const need[3]={"runtime-commit: 394b57f6","# generate: cc ","# capture: tests/bound 58 "};
+ static const char *const tags[3]={"success","before-failure","after-failure"};
+ const char *names[19];char buf[18][64];int i;
+ for(i=0;i<18;i++){snprintf(buf[i],sizeof buf[i],"%s-%d.bin",tags[i/6],i%6);names[i]=buf[i];}
+ names[18]="observation.tsv";
+ return snapbase_read("tests/liblatebindWcheck.baseline",need,3,names,19,dir,0);
 }
 int main(int argc,char **argv){
  if(argc==4)return judge(argc,argv);
  if(argc!=2){fprintf(stderr,"usage: liblatebindWcheck.cx PRODUCT [or R4DIR WDIR KIND7DIR]\n");return 2;}
- char *platform=0;size_t n=0;int rc=cx_run_timeout("uname -sm",5,&platform,&n);
- int host=!rc&&platform&&strstr(platform,"Linux")&&strstr(platform,"x86_64");free(platform);
- if(!host){printf("UNVERIFIED_HOST W baseline is native Linux x86_64\n");return 77;}
+ size_t n=0;int rc=0;
+ if(!snapbase_host("W"))return 77;
  char dir[]="/tmp/liblatebindWXXXXXX",old[4096],normal[4096],fake[4096],cmd[16384],path[4096];
  if(!mkdtemp(dir))return 2;
  snprintf(old,sizeof old,"%s/old",dir);snprintf(normal,sizeof normal,"%s/normal",dir);snprintf(fake,sizeof fake,"%s/fake",dir);

@@ -1,0 +1,63 @@
+#!/usr/bin/env -S unisacc.com -run
+/* latebindp6check: P6 regression check for the untyped library-mode baseline (tests/seals/latebind-p6-baseline).
+   usage: latebindp6check.cx [PRODUCT] [FIXTURE_DIR]        (run from the repository root)
+   The frozen snapshots (snapshots/<source>.snap, WBASE1 container shared with lib-latebind-W: tests/snapbase.h) are
+   compared segment by segment with a fresh regeneration: observers/p6probe.c (unbound fragments) and observers/p6run.c
+   (behaviour) call only libunisacc.h.  A missing artifact or a non-zero observer rc is a FAIL, never ABSENT or a pass.
+   The first mismatch stops the run.  Native Linux x86_64 only; any other host is UNVERIFIED (rc 77). */
+#include <cx.h>
+#include <dirent.h>
+#include "snapbase.h"
+static const char *const NEED[3] = {"runtime-commit: 4a842759", "# generate: ", "# capture: "};
+static const char *const ARTS[5] = {"e3.bin", "lower.bin", "datae3.bin", "datalower.bin", "run.txt"};
+static int fail(const char *s) { fprintf(stderr, "latebindp6check FAIL: %s\n", s); return 1; }
+/* sh -c CMD, with CMD's own exit status written to RCPATH and read back, so a failing observer is seen */
+static int run_rc(const char *cmd, const char *rcpath, int secs) {
+    char full[8192], *argv[] = {"/bin/sh", "-c", full, 0}, *out, *b; size_t n;
+    snprintf(full, sizeof full, "%s; echo $? > '%s'", cmd, rcpath);
+    cx_runv_timeout(argv, secs, &out, &n); free(out);
+    b = cx_read(rcpath, &n); if (!b) return -1;
+    { int rc = atoi(b); free(b); return rc; }
+}
+int main(int argc, char **argv) {
+    const char *product = argc > 1 ? argv[1] : "./unisacc.com";
+    const char *fx = argc > 2 ? argv[2] : "tests/seals/latebind-p6-baseline";
+    char tmp[] = "/tmp/latebindp6-XXXXXX", rc[4096], cmd[8192], probe[4096], runner[4096], snapdir[4096], snap[4096];
+    char src[4096], calls[4096], dir[4096], outdir[4096], name[512], *bad = 0;
+    const char *first_bad = 0;
+    DIR *d; struct dirent *e; int ncases = 0, r, k;
+    if (!snapbase_host("latebind-p6")) return 77;
+    if (!mkdtemp(tmp)) return fail("temporary directory");
+    snprintf(rc, sizeof rc, "%s/build.rc", tmp);
+    snprintf(probe, sizeof probe, "%s/p6probe", tmp); snprintf(runner, sizeof runner, "%s/p6run", tmp);
+    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. %s/observers/p6probe.c exec/c/libunisacc.c exec/c/librarycall_x86_64.S -lffi -o '%s'", fx, probe);
+    if (run_rc(cmd, rc, 55) != 0) return fail("build of the p6probe observer");
+    snprintf(cmd, sizeof cmd, "cc -std=c11 -O2 -w -I. %s/observers/p6run.c exec/c/libunisacc.c exec/c/librarycall_x86_64.S -lffi -o '%s'", fx, runner);
+    if (run_rc(cmd, rc, 55) != 0) return fail("build of the p6run observer");
+    snprintf(snapdir, sizeof snapdir, "%s/snapshots", fx);
+    d = opendir(snapdir); if (!d) return fail("snapshot directory");
+    while ((e = readdir(d))) {
+        size_t L = strlen(e->d_name);
+        if (L < 6 || strcmp(e->d_name + L - 5, ".snap")) continue;
+        snprintf(name, sizeof name, "%.*s", (int)(L - 5), e->d_name);
+        snprintf(snap, sizeof snap, "%s/%s.snap", snapdir, name);
+        snprintf(src, sizeof src, "%s/cases/%s.c", fx, name);
+        snprintf(calls, sizeof calls, "%s/cases/%s.calls", fx, name);
+        snprintf(outdir, sizeof outdir, "%s/out/%s", tmp, name);
+        snprintf(cmd, sizeof cmd, "mkdir -p '%s'", outdir); if (system(cmd)) { closedir(d); return fail("regeneration directory"); }
+        snprintf(cmd, sizeof cmd, "'%s' '%s' lnx/x86_64 '%s' '%s'", probe, product, src, outdir);
+        r = run_rc(cmd, rc, 30);
+        if (r != 0) { closedir(d); printf("latebindp6: %s p6probe rc %d\n", name, r); return fail("observer p6probe did not return 0"); }
+        snprintf(cmd, sizeof cmd, "'%s' '%s' lnx/x86_64 '%s' '%s' '%s'", runner, product, src, calls, outdir);
+        r = run_rc(cmd, rc, 30);
+        if (r != 0) { closedir(d); printf("latebindp6: %s p6run rc %d\n", name, r); return fail("observer p6run did not return 0"); }
+        k = snapbase_check(snap, NEED, 3, ARTS, 5, outdir, &first_bad, 1);
+        if (k == 2) { closedir(d); printf("latebindp6: %s snapshot malformed\n", name); return fail("baseline snapshot"); }
+        if (k == 1) { closedir(d); printf("latebindp6: %s/%s differs from the baseline (or is missing)\n", name, first_bad); return fail("artifact differs (first mismatch stops the run)"); }
+        ncases++;
+    }
+    closedir(d); (void)dir; (void)bad;
+    if (ncases != 26) { printf("latebindp6: %d snapshots found, 26 expected\n", ncases); return fail("baseline snapshot count"); }
+    printf("latebindp6 PASS: %d sources, %d artifacts byte-identical to the frozen snapshots (lnx/x86_64, public API observers)\n", ncases, ncases * 5);
+    return 0;
+}
