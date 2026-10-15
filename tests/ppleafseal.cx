@@ -3,6 +3,8 @@
 #include <cx.h>
 #define LIMIT 2048
 static const char *roles[]={"builder","executor","resource","rule","harness",0};
+/* --write-seal: the same checks, then measurement.tsv and identity.tsv are written instead of compared (reseal). */
+static int writing;
 typedef struct {char *path,*role,*sha;unsigned long size;} Dep;
 typedef struct {char *b;size_t n,cap;} Text;
 static Dep deps[LIMIT];static int nd;
@@ -17,7 +19,9 @@ static int match(const char*dir,const char*name,const char*length,const char*sha
 static int cmpstr(const void*a,const void*b){return strcmp(*(char*const*)a,*(char*const*)b);}
 static void identity(char**rows,int n,char hex[65]){Text t={0};int i;qsort(rows,n,sizeof(char*),cmpstr);for(i=0;i<n;i++){put(&t,rows[i],strlen(rows[i]));put(&t,"\n",1);}cx_sha256_hex(t.b?t.b:"",t.n,hex);free(t.b);}
 static int expected(const char*data){char*b,*p,*end,*f[3];size_t n;int seen[LIMIT]={0},i,count=0;b=load(data,"closure.expected.tsv",&n);if(!b)return bad("independent closure inventory missing");p=b;while(*p){end=strchr(p,'\n');if(!end)return bad("closure inventory truncated");*end=0;if(fields(p,f,3)!=2)return bad("closure inventory record");for(i=0;i<nd;i++)if(!strcmp(deps[i].path,f[1]))break;if(i==nd||strcmp(deps[i].role,f[0])||seen[i]++)return bad("measured dependency omitted/relabeled");count++;p=end+1;}free(b);if(count!=nd)return bad("dependency inventory differs");return 0;}
-static int metadata(const char *data){size_t n;char *b=load(data,"measurement.tsv",&n);const char *want="schema\tpp-literals-seal-v1\nleaf\texec-pp-literals\nstage\te2\ntarget\tlnx/x86_64\nmodes\tplain+locations\nprotocol\tpp.text+UNIPP1\ncoverage\tnamed-leaf\nscope\tmeasured\nreview\trequired\nexternal-contract\tnone-read\n";if(!b||n!=strlen(want)||memcmp(b,want,n)){free(b);return bad("unsupported/missing measurement identity");}free(b);return 0;}
+static int putfile(const char*dir,const char*name,const char*text){char p[4096];FILE*f;if(!safe(name)||snprintf(p,sizeof p,"%s/%s",dir,name)>=sizeof p)return bad("seal path");f=fopen(p,"wb");if(!f)return bad("seal write");fwrite(text,1,strlen(text),f);return fclose(f)?bad("seal write"):0;}
+static int metadata(const char *data){size_t n;char *b=load(data,"measurement.tsv",&n);const char *want="schema\tpp-literals-seal-v1\nleaf\texec-pp-literals\nstage\te2\ntarget\tlnx/x86_64\nmodes\tplain+locations\nprotocol\tpp.text+UNIPP1\ncoverage\tnamed-leaf\nscope\tmeasured\nreview\trequired\nexternal-contract\tnone-read\n";if(writing){free(b);return putfile(data,"measurement.tsv",want);}
+ if(!b||n!=strlen(want)||memcmp(b,want,n)){free(b);return bad("unsupported/missing measurement identity");}free(b);return 0;}
 static int check(const char*data,const char*root,const char*override,int observer){char*b,*p,*end,*f[24],h[65],*rows[LIMIT];size_t n;int i,k,nrows=0,accepts=0,refusals=0,models=0,ac[4]={0},rf[4]={0},located[4]={0};char*modelsha[4],*ids[64];int nids=0;unsigned long rc;char core[65],proof[65];Text result={0};
  if(metadata(data))return 1;nd=0;b=load(data,override?override:"dependencies.tsv",&n);if(!b)return bad("dependencies missing");p=b;
  while(*p){end=strchr(p,'\n');if(!end)return bad("dependency record truncated");*end=0;if(fields(p,f,5)!=4||!safe(f[1])||!decimal(f[2],&rc)||!hex64(f[3]))return bad("bad dependency record");for(i=0;roles[i]&&strcmp(roles[i],f[0]);i++);if(!roles[i]||nd==LIMIT)return bad("unknown/capacity dependency role");for(i=0;i<nd;i++)if(!strcmp(f[1],deps[i].path))return bad("duplicate dependency");
@@ -41,7 +45,7 @@ static int check(const char*data,const char*root,const char*override,int observe
  while(*p){end=strchr(p,'\n');if(!end)return bad("resource transcript truncated");*end=0;if(fields(p,f,8)!=7||strcmp(f[0],"resource")||strncmp(f[3],"hdr/",4)||!safe(f[3]+4)||!match(data,f[4],f[5],f[6],0))return bad("resource response changed");for(i=0;i<nids;i++)if(!strcmp(ids[i],f[1]))break;if(i==nids)return bad("resource transcript has no case");{char tuple[512];snprintf(tuple,sizeof tuple,"resource=%s sha=%s",f[3],f[6]);rows[nrows++]=strdup(tuple);}k++;p=end+1;}free(b);if(k!=14)return bad("measured header response coverage lost");
  rows[nrows++]=strdup("e2 target=lnx/x86_64 modes=plain+locations protocol=pp.text+UNIPP1");
  identity(rows,nrows,core);cx_sha256_hex(result.b,result.n,proof);free(result.b);for(i=0;i<nrows;i++)free(rows[i]);
- {char want[160];snprintf(want,sizeof want,"core\t%s\nproof\t%s\n",core,proof);b=load(data,"identity.tsv",&n);if(!b||n!=strlen(want)||memcmp(b,want,n)){free(b);return bad("frozen core/output identity differs");}free(b);}
+ {char want[160];snprintf(want,sizeof want,"core\t%s\nproof\t%s\n",core,proof);if(writing)return putfile(data,"identity.tsv",want);b=load(data,"identity.tsv",&n);if(!b||n!=strlen(want)||memcmp(b,want,n)){free(b);return bad("frozen core/output identity differs");}free(b);}
  if(observer)puts("ppleafseal observation: NOT_RULED; archived host/tool identity is a separate record, neither PASS nor FAIL");
  printf("ppleafseal: %d dependencies; 6 accepts, 38 refusals, 2 models; core-inputs %s; output-proof %s; observer %s; review required/no reuse grant\n",nd,core,proof,observer?"checked":"separate");return 0;
 }
@@ -68,4 +72,4 @@ static int negative(const char*data,const char*root){char*b,*p,*end;size_t n;cha
 
  {DIR*d=opendir(dir);struct dirent*e;while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;snprintf(path,sizeof path,"%s/%s",dir,e->d_name);unlink(path);}closedir(d);rmdir(dir);}free(t.b);if(!rc)return bad("omitted real rule escaped closure inventory");puts("ppleafseal negative: PASS omission, predefines content change, included stdarg header content change rejected; shared inputs untouched");return 0;
 }
-int main(int argc,char**argv){if(argc==4&&!strcmp(argv[1],"--check-core"))return check(argv[2],argv[3],0,0);if(argc==4&&!strcmp(argv[1],"--check-observation")){puts("ppleafseal observation: NOT_RULED; record only, no core PASS/FAIL decision");return 0;}if(argc==4&&!strcmp(argv[1],"--negative"))return negative(argv[2],argv[3]);fprintf(stderr,"usage: ppleafseal.cx --check-core|--check-observation|--negative DATA ROOT\n");return 2;}
+int main(int argc,char**argv){if(argc==4&&!strcmp(argv[1],"--check-core"))return check(argv[2],argv[3],0,0);if(argc==4&&!strcmp(argv[1],"--write-seal")){writing=1;return check(argv[2],argv[3],0,0);}if(argc==4&&!strcmp(argv[1],"--check-observation")){puts("ppleafseal observation: NOT_RULED; record only, no core PASS/FAIL decision");return 0;}if(argc==4&&!strcmp(argv[1],"--negative"))return negative(argv[2],argv[3]);fprintf(stderr,"usage: ppleafseal.cx --check-core|--write-seal|--check-observation|--negative DATA ROOT\n");return 2;}
