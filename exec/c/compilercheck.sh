@@ -15,6 +15,25 @@ b python3 exec/build/gen.py opt "$T/o1.json"
 b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
 b "$T/run" --check-net "$T/o1.tbl" "$T/o1.net"
+# Preparation jobs (gate exec-driver-core-prep-K, bindprep pattern): prep-0 builds elf and the o1 chain into the content-addressed
+# cache and asserts that a second elf.sh run is a cache hit; prep-K builds part K of PREP_PARTS and then requires it cached
+# (--require-cached, so the cache entries and their keys are checked, not rebuilt).  A missing product is rebuilt by the
+# same bounded step, as bindprep self-prepares its segment.  Neither is a test verdict.
+case ${1:-all} in
+prep-0)
+    mkdir -p "$T/again"
+    b ./exec/pipeline/elf.sh "$T/again" examples/hello.c > "$T/again.log" 2>&1 || { cat "$T/again.log"; exit 1; }
+    grep -q "model preparation: hit" "$T/again.log" || { echo "prep-0: second elf run was not a cache hit" >&2; exit 1; }
+    echo "prep-0: elf and o1 chain cached; second elf run hit"; exit 0 ;;
+prep-1|prep-2|prep-3)
+    K=${1#prep-}
+    "$_BOUND" 55 python3 exec/c/compilerpack.py --prepare-only --part "$K/3" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || exit 1
+    "$_BOUND" 55 python3 exec/c/compilerpack.py --require-cached --prepare-only --part "$K/3" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || { echo "prep-$K: part $K not cached after preparation" >&2; exit 1; }
+    echo "prep-$K: part $K constructed and cached"; exit 0 ;;
+esac
+# Model construction in the three PREP_PARTS groups (compilerpack.py, buildcompiler pack-prep-K), each bounded at 55 s
+# on its own; the package step below then reads the cache.  One cold bounded step cannot hold all of them (1210-bank).
+for k in 1 2 3; do "$_BOUND" 55 python3 exec/c/compilerpack.py --prepare-only --part "$k/3" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || exit 1; done
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
 case ${1:-all} in all|core|core-modes|core-contracts|core-dependencies|resources)
 b cc -O2 -Wall -Wextra exec/c/compiler.c -o "$T/driver-cc"

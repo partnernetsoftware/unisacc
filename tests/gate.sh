@@ -415,6 +415,8 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 for part in build modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
+# S3 (0.0.43): core-modes preparation as four independent jobs (bindprep pattern): prep-0 = elf and o1 chain, prep-1..3 = parts 1..3 of PREP_PARTS; each <= 55 s cold
+for k in 0 1 2 3; do job exec-driver-core-prep-$k ./exec/c/compilercheck.sh prep-$k; done
 job exec-driver-resources ./exec/c/compilercheck.sh resources
 for shard in 1 2; do job exec-driver-language-$shard ./exec/c/compilercheck.sh language-$shard; done
 for driver in cc asm; do job exec-warningdriver-$driver ./exec/c/warningcheck.sh "$driver"; done
