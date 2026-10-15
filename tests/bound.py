@@ -168,12 +168,21 @@ def main():
     except ProcessLookupError:
         pass
     # c43: a command that exits normally may still leave an escaped descendant (reparented, own session).
-    # Kill everything carrying this scope's token; no freeze needed once the command has ended.
-    for pid in scoped_pids(token):
+    # Kill everything carrying this scope's token.  The cleanup has the same total budget as stop() (defensive,
+    # 0b7e7920 covered only the timeout path; 447 s after a rc0 exit was seen, research note: normal-exit tail).
+    # A cleanup that runs out of budget is reported and is not green: the command rc is replaced by 142.
+    deadline = time.monotonic() + STOP_SECS
+    mark('normal exit: cleanup begin')
+    for pid in scoped_pids(token, deadline):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    mark('normal exit: cleanup scan end')
+    if time.monotonic() >= deadline:
+        sys.stderr.write('bound: cleanup after normal exit unfinished after %.1fs budget (not green)\n' % STOP_SECS)
+        sys.stderr.flush()
+        return 142
     return rc if rc >= 0 else 128 - rc
 
 

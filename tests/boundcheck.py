@@ -40,6 +40,11 @@ try:
 finally:
     if m: os.kill(int(m.group(1)),signal.SIGKILL)
 print("bound: stop budget returns 142 and names the unreaped pid (injected, not a D state)")
+# Normal exit with a zero cleanup budget (injected): the command rc is replaced by 142 and the unfinished cleanup is named.
+env2=dict(os.environ,UNISACC_BOUND_STOP_SECS="0")
+p2=subprocess.run([sys.executable,str(root/"bound.py"),"5","true"],env=env2,capture_output=True,text=True,timeout=20)
+assert p2.returncode==142 and "cleanup after normal exit unfinished" in p2.stderr,(p2.returncode,p2.stderr)
+print("bound: normal-exit cleanup budget enforced (injected zero budget, not green)")
 
 # Signals delivered to the watchdog itself must also reap a stopped,
 # detached descendant. Repeated termination must not interrupt cleanup.
