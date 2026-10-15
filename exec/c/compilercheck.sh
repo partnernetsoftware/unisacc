@@ -45,6 +45,6 @@ case ${1:-all} in core-build) ;; *) b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.
 # Only the resources contract executes the packaged container. Core checks
 # use the three raw drivers; rebuilding an unused APE costs their time budget.
 case ${1:-all} in all|resources|resources-isolated)
-b python3 -m unisa ape exec/c/compiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" -o "$T/driver.com" > "$T/ape.log" 2>&1 || { cat "$T/ape.log"; exit 1; }
+b python3 exec/c/apecache.py "$T/driver.com" "$UA" "$T/compiler.pkg" > "$T/ape.log" 2>&1 || { cat "$T/ape.log"; exit 1; }   # APE by read-set key (apecache.py); hit re-verifies the artifact
 ;; esac
 b python3 exec/c/compilercheck.py "$T" "$TARGET" "$UA" "$@"
