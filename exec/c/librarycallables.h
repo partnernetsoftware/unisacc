@@ -5,6 +5,14 @@
    or untracked ffi_call is present. Define IMPLEMENTATION in exactly one TU. */
 #include "librarycallplans.h"
 #include <stdatomic.h>
+/* Observer-only attachment accounting. Each class keeps its own cleanup;
+   a non-null class attachment is counted once by its release wrapper. */
+#if defined(US_LATE_TEST_OBSERVERS)
+static size_t us_late_typed_release_count;
+#define US_LATE_NOTE_RELEASE() (++us_late_typed_release_count)
+#else
+#define US_LATE_NOTE_RELEASE() ((void)0)
+#endif
 /* Mechanism only: caller retains callback semantics, registry and lifetime. */
 static void us_ffi_closure_drop(ffi_closure **closure,void **code){
     if(*closure)ffi_closure_free(*closure);*closure=NULL;*code=NULL;
@@ -317,20 +325,10 @@ done:
     if(rc&&!reported&&r->failure)r->failure(r->owner,error);
     if(owned)for(size_t i=0;i<s->count;i++)free(owned[i]);free(owned);free(slots);free(converted);(void)cif;
 }
-static int us_callable_make_impl(us_callables *r,unsigned origin,const us_export_signature *s,const us_export_signature *carrier,uintptr_t raw,uint64_t *handle,char *error,size_t cap){
-    if(!r||!handle||!r->owner||!r->generation||!s||(origin!=US_CALLABLE_SCRIPT&&origin!=US_CALLABLE_NATIVE))return us_callable_error(error,cap,"invalid declared callable introduction");
-    *handle=0;
-    if(!carrier){
-        if(s->count>1024 || (s->count&&!s->argtypes))return us_callable_error(error,cap,"invalid callable argument graph");
-        if(s->result.wire_version==3)return us_callable_error(error,cap,"V3 callable requires model carrier certificate");
-        for(size_t i=0;i<s->count;i++)if(s->argtypes[i].wire_version==3)return us_callable_error(error,cap,"V3 callable requires model carrier certificate");
-    }
-    if(carrier&&!us_callable_carrier_valid(s,carrier))return us_callable_error(error,cap,"invalid callable carrier certificate");if(!raw)return 0;
-    if((origin==US_CALLABLE_SCRIPT&&!r->script_call&&!r->invoke_frame)||(origin==US_CALLABLE_NATIVE&&!r->native_call))return us_callable_error(error,cap,"missing declared callable owner hook");
-    for(us_callable *p=r->head;p;p=p->next)if(p->generation==r->generation&&p->origin==origin&&p->target==raw&&us_callable_signature_equal(p->graph.signatures[0],s)&&
-       ((!carrier&&!p->carrier_graph.count)||(carrier&&p->carrier_graph.count&&us_callable_signature_equal(p->carrier_graph.signatures[0],carrier)))){*handle=p->token;return 0;}
-    us_callable *p=calloc(1,sizeof *p);if(!p)return us_callable_error(error,cap,"callable allocation failed");
-    p->registry=r;p->origin=origin;p->generation=r->generation;p->target=raw;
+/* Address-free graph/conversion/CIF preparation. The caller owns p and
+   cleanup; this helper neither introduces a registry token nor reads an
+   address, registry, origin, generation or closure. */
+static int us_callable_prepare_graph(us_callable *p,const us_export_signature *s,const us_export_signature *carrier){
     if(us_callable_clone_graph(&p->graph,s)||(carrier&&us_callable_clone_graph(&p->carrier_graph,carrier)))goto bad;
     us_export_signature *x=carrier?p->carrier_graph.signatures[0]:p->graph.signatures[0];
     if(carrier){const us_export_signature *original=p->graph.signatures[0];
@@ -353,6 +351,24 @@ static int us_callable_make_impl(us_callables *r,unsigned origin,const us_export
     ffi_type *ret=us_callable_layout(&x->result,1,0);if(!ret)goto bad;
     for(size_t i=0;i<x->count;i++)if(!(p->args[i]=us_callable_layout(x->argtypes+i,0,0)))goto bad;
     if(!x->variadic&&ffi_prep_cif(&p->cif,FFI_DEFAULT_ABI,(unsigned)x->count,ret,p->args)!=FFI_OK)goto bad;
+    return 0;
+bad:return 1;
+}
+static int us_callable_make_impl(us_callables *r,unsigned origin,const us_export_signature *s,const us_export_signature *carrier,uintptr_t raw,uint64_t *handle,char *error,size_t cap){
+    if(!r||!handle||!r->owner||!r->generation||!s||(origin!=US_CALLABLE_SCRIPT&&origin!=US_CALLABLE_NATIVE))return us_callable_error(error,cap,"invalid declared callable introduction");
+    *handle=0;
+    if(!carrier){
+        if(s->count>1024 || (s->count&&!s->argtypes))return us_callable_error(error,cap,"invalid callable argument graph");
+        if(s->result.wire_version==3)return us_callable_error(error,cap,"V3 callable requires model carrier certificate");
+        for(size_t i=0;i<s->count;i++)if(s->argtypes[i].wire_version==3)return us_callable_error(error,cap,"V3 callable requires model carrier certificate");
+    }
+    if(carrier&&!us_callable_carrier_valid(s,carrier))return us_callable_error(error,cap,"invalid callable carrier certificate");if(!raw)return 0;
+    if((origin==US_CALLABLE_SCRIPT&&!r->script_call&&!r->invoke_frame)||(origin==US_CALLABLE_NATIVE&&!r->native_call))return us_callable_error(error,cap,"missing declared callable owner hook");
+    for(us_callable *p=r->head;p;p=p->next)if(p->generation==r->generation&&p->origin==origin&&p->target==raw&&us_callable_signature_equal(p->graph.signatures[0],s)&&
+       ((!carrier&&!p->carrier_graph.count)||(carrier&&p->carrier_graph.count&&us_callable_signature_equal(p->carrier_graph.signatures[0],carrier)))){*handle=p->token;return 0;}
+    us_callable *p=calloc(1,sizeof *p);if(!p)return us_callable_error(error,cap,"callable allocation failed");
+    if(us_callable_prepare_graph(p,s,carrier))goto bad;
+    p->registry=r;p->origin=origin;p->generation=r->generation;p->target=raw;
     uint64_t token=atomic_load_explicit(&us_callable_global_token,memory_order_relaxed);
     do {if(!token||token==UINT64_MAX)goto bad;}while(!atomic_compare_exchange_weak_explicit(&us_callable_global_token,&token,token+1,memory_order_relaxed,memory_order_relaxed));
     p->token=token;p->next=r->head;r->head=p;*handle=token;return 0;

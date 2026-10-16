@@ -161,8 +161,9 @@ def retain_models(directory, rows):
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
 
-def model_jobs(targets, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False):
+def model_jobs(targets, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False):
     """Every model compiler_package constructs, as (name, script, args), in order."""
+    if librarycallback and not librarytyped: raise ValueError('--librarycallback requires --librarytyped')
     if librarycallsite and not librarytyped: raise ValueError('--librarycallsite requires --librarytyped')
     gen=Path(__file__).resolve().parent.parent/'build/gen.py'
     jobs=[]
@@ -172,7 +173,7 @@ def model_jobs(targets, shared_e2=None, shared_nativeabi=None, librarytyped=Fals
         jobs.append(('object-enc-'+arch,gen,['enc/arm' if arch=='arm64' else 'enc','--object']))
     if shared_e2 is None: jobs.append(('plainpp',gen,['pp','--shared-predefines']))
     jobs+=[('librarycontract',gen,['librarycontract/gen']),
-           ('librarypartition',gen,['librarycallsitepartition/gen' if librarycallsite else 'librarytypedpartition/gen' if librarytyped else 'librarypartition/gen']),
+           ('librarypartition',gen,['librarycallbackpartition/gen','--librarycallback'] if librarycallback else ['librarycallsitepartition/gen' if librarycallsite else 'librarytypedpartition/gen' if librarytyped else 'librarypartition/gen']),
            ('hostsymbols',gen,['lower/hostsymbols']),
            ('tapecheck',gen,['tapecheck']),
            ('tokenpp',gen,['pp','--shared-predefines','--no-autoinc']),
@@ -192,14 +193,16 @@ def model_jobs(targets, shared_e2=None, shared_nativeabi=None, librarytyped=Fals
         jobs=[(n,sc,(['lower/librarytyped-model']+a[1:]+['--librarytyped']) if n.startswith('object-lower-') else a) for n,sc,a in jobs]
     if librarycallsite:
         jobs=[(n,sc,[("parse2/librarycallsite" if x=="parse2/librarytyped" else "lower/librarycallsite-model" if x=="lower/librarytyped-model" else x) for x in a]+(['--librarycallsite'] if '--librarytyped' in a else [])) for n,sc,a in jobs]
+    if librarycallback:
+        jobs=[(n,sc,[("parse2/librarycallbacke3" if x in ("parse2/librarytyped","parse2/librarycallsite") else "lower/librarycallback-model" if x in ("lower/librarytyped-model","lower/librarycallsite-model") else x) for x in a]+(['--librarycallback'] if '--librarytyped' in a else [])) for n,sc,a in jobs]
     return jobs
 
 def manifest_targets(manifests):
     return {next(x for x in Path(m).read_text().splitlines() if x and not x.startswith('#')).split('\t')[0] for m in manifests}
 
-def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False):
+def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False):
     """Construct part PART (1-based) of PARTS into the model cache; no package."""
-    jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi,librarytyped,librarycallsite)}
+    jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi,librarytyped,librarycallsite,librarycallback)}
     groups=PREP_PARTS+[[n] for n in jobs if n.startswith('typed-')]
     if parts!=len(groups) or not 1<=part<=parts: raise ValueError('--part must be K/%d'%len(groups))
     named=[n for g in groups for n in g]
@@ -208,7 +211,7 @@ def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, libra
         for n in groups[part-1]:
             if n in jobs: built_model(td,n,*jobs[n]); print('prepared',n,flush=True)
 
-def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False):
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -252,7 +255,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         # Offline construction of the shared unit-framing network. Runtime
         # does not invoke these Python tools or parse declarations in C.
         here=Path(__file__).resolve().parent
-        jobs={n:(sc,a) for n,sc,a in model_jobs(targets,shared_e2,shared_nativeabi,librarytyped,librarycallsite)}
+        jobs={n:(sc,a) for n,sc,a in model_jobs(targets,shared_e2,shared_nativeabi,librarytyped,librarycallsite,librarycallback)}
         def job(name): return built_model(td,name,*jobs[name])
         object_models={}
         for target in sorted(targets & {'lnx/x86_64','lnx/arm64'}):
@@ -356,7 +359,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         rows=checked
         rows.append('\t'.join(['host-symbols','symbols','explicit-frame','host-contract',str(job('hostsymbols'))]))
         rows.append('\t'.join(['library-contract','contract','declarations','library-contract',str(job('librarycontract'))]))
-        rows.append('\t'.join(['library-selection','ownership-callsite' if librarycallsite else 'ownership-fixedtyped' if librarytyped else 'ownership','declarations','library-selection',str(job('librarypartition'))]))
+        rows.append('\t'.join(['library-selection','ownership-callback-callsite' if librarycallback and librarycallsite else 'ownership-callback' if librarycallback else 'ownership-callsite' if librarycallsite else 'ownership-fixedtyped' if librarytyped else 'ownership','declarations','library-selection',str(job('librarypartition'))]))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         payload=build([manifest],mounts,compressed=compressed,cache=MODEL_CACHE)
         if audit_dir is not None: retain_models(audit_dir, rows)
@@ -375,6 +378,7 @@ if __name__=='__main__':
     ap.add_argument('--legacy-package',dest='compressed',action='store_false',help='legacy uncompressed P1/P2')
     ap.add_argument('--librarytyped',action='store_true',help='explicitly package fixed-typed partition, E3 and lower overlays (experimental)')
     ap.add_argument('--librarycallsite',action='store_true',help='explicit variadic callsite capability; requires --librarytyped (experimental)')
+    ap.add_argument('--librarycallback',action='store_true',help='explicit callback graph capability; requires --librarytyped (experimental)')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
     ap.add_argument('--prepare-only',action='store_true',help='construct models of --part into the cache; write no package')
     ap.add_argument('--part',help='K/N: which prepare group (with --prepare-only)')
@@ -387,10 +391,10 @@ if __name__=='__main__':
         try:
             k,n=map(int,(a.part or '').split('/'))
         except ValueError: ap.exit(2,'compilerpack: --prepare-only needs --part K/N\n')
-        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi,a.librarytyped,a.librarycallsite)
+        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi,a.librarytyped,a.librarycallsite,a.librarycallback)
         except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
         raise SystemExit(0)
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2,a.shared_nativeabi,a.librarytyped,a.librarycallsite);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2,a.shared_nativeabi,a.librarytyped,a.librarycallsite,a.librarycallback);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')

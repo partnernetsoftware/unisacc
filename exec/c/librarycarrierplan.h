@@ -57,13 +57,62 @@ static int us_carrier_certificate_load(us_carrier_certificate *dest,
 shape:us_export_error(error,cap,"model carrier signature storage mismatch");
 bad:us_carrier_certificate_clear(&tmp);return 1;
 }
-/* Consume the decoded model certificate only after every mechanical check and
-   CIF preparation succeeds. All frame memory continues to use the original. */
+/* One preparation entry with an explicit mechanism parameter. Existing
+   numeric 0/1 callers retain their fixed/variadic meaning. */
+typedef enum us_native_prepare_kind {
+    US_NATIVE_PREPARE_FIXED=0,
+    US_NATIVE_PREPARE_VARIADIC=1,
+    US_NATIVE_PREPARE_CALLBACK_GRAPH=2
+} us_native_prepare_kind;
+/* Distinct class attachment identity, common address-free callable cleanup.
+   This is owned by the existing pending native plan, not a callable registry. */
+static void us_callback_graph_release(void *value){if(!value)return;us_callable_free(value);US_LATE_NOTE_RELEASE();}
+/* Mechanism parameters select validation/CIF work; no class test enters the
+   common owner/rollback/publish path. Logical kinds remain owned by W rows. */
+typedef int (*us_native_prepare_validate_fn)(const us_carrier_certificate *,const us_export_signature *,const us_export_signature *,uint64_t,char *,size_t);
+typedef int (*us_native_prepare_cif_fn)(us_native_plan *,const us_carrier_certificate *,const us_export_signature *,const us_export_signature *,uint64_t,int);
+typedef struct us_native_prepare_mode_ops {us_native_prepare_validate_fn validate;us_native_prepare_cif_fn cif;int variadic;} us_native_prepare_mode_ops;
+static int us_native_prepare_fixed_validate(const us_carrier_certificate *c,const us_export_signature *o,const us_export_signature *v,uint64_t fixed,char *error,size_t cap){return 0;}
+static int us_native_prepare_variadic_validate(const us_carrier_certificate *c,const us_export_signature *o,const us_export_signature *v,uint64_t fixed,char *error,size_t cap){
+    if(!fixed||fixed>o->count||o->variadic||v->variadic||us_export_has_callbacks(c->original.items))
+        return us_export_error(error,cap,"invalid variadic carrier plan certificate");
+    for(size_t i=(size_t)fixed;i<v->count;i++){
+        const us_export_type *t=v->argtypes+i;
+        if((t->kind==3&&t->width==4)||(t->kind==1&&t->width<4))return us_export_error(error,cap,"variadic tail requires promoted types");
+    }
+    return 0;
+}
+static int us_native_prepare_graph_validate(const us_carrier_certificate *c,const us_export_signature *o,const us_export_signature *v,uint64_t fixed,char *error,size_t cap){
+    if(o->variadic||v->variadic||!us_export_has_callbacks(c->original.items))return us_export_error(error,cap,"carrier native ffi signature rejected");return 0;
+}
+static int us_native_prepare_scalar_cif(us_native_plan *plan,const us_carrier_certificate *certificate,const us_export_signature *o,const us_export_signature *v,uint64_t fixed,int variadic){
+    if(us_export_has_callbacks(certificate->original.items)){plan->bridge_required=1;return 0;}
+    plan->args=calloc(v->count?(size_t)v->count:1,sizeof *plan->args);if(!plan->args)return 1;
+    for(size_t i=0;i<v->count;i++)if(!(plan->args[i]=us_export_ffitype(v->argtypes+i,0)))return 1;
+    ffi_type *result=us_export_ffitype(&v->result,1);if(!result)return 1;
+    ffi_status status=variadic ? ffi_prep_cif_var(&plan->cif,FFI_DEFAULT_ABI,(unsigned)fixed,(unsigned)v->count,result,plan->args) :
+        ffi_prep_cif(&plan->cif,FFI_DEFAULT_ABI,(unsigned)v->count,result,plan->args);
+    return status!=FFI_OK;
+}
+static int us_native_prepare_graph_cif(us_native_plan *plan,const us_carrier_certificate *certificate,const us_export_signature *o,const us_export_signature *v,uint64_t fixed,int variadic){
+    us_callable *prepared=calloc(1,sizeof *prepared);if(!prepared)return 1;
+    if(us_callable_prepare_graph(prepared,o,v)){us_callable_free(prepared);return 1;}
+    plan->attachment=prepared;plan->release_attachment=us_callback_graph_release;plan->bridge_required=1;return 0;
+}
+static const us_native_prepare_mode_ops US_NATIVE_PREPARE_MODES[]={
+    {us_native_prepare_fixed_validate,us_native_prepare_scalar_cif,0},
+    {us_native_prepare_variadic_validate,us_native_prepare_scalar_cif,1},
+    {us_native_prepare_graph_validate,us_native_prepare_graph_cif,0}
+};
+/* One preparation entry and one pending-owner publish point, modes 0/1/2. */
 static int us_carrier_certificate_native_prepare_mode(us_native_plans *plans,
-                                             us_carrier_certificate *certificate,int variadic,uint64_t fixed_count,uint64_t *handle,
+                                             us_carrier_certificate *certificate,us_native_prepare_kind kind,uint64_t fixed_count,uint64_t *handle,
                                              char *error,size_t cap){
     if(!plans||!certificate||!handle)return us_export_error(error,cap,"invalid carrier native plan output");
     *handle=0;us_export_signature original,carrier;
+    if((unsigned)kind>=sizeof US_NATIVE_PREPARE_MODES/sizeof US_NATIVE_PREPARE_MODES[0])
+        return us_export_error(error,cap,"invalid native preparation kind");
+    const us_native_prepare_mode_ops *ops=US_NATIVE_PREPARE_MODES+(unsigned)kind;
     if(certificate->original.count!=1||certificate->carrier.count!=1||!certificate->target[0]||
        us_callable_export_signature(certificate->original.items,&original)||
        us_callable_export_signature(certificate->carrier.items,&carrier)||
@@ -71,23 +120,9 @@ static int us_carrier_certificate_native_prepare_mode(us_native_plans *plans,
        strcmp(certificate->original.items->name,certificate->carrier.items->name)||
        !(us_export_supported(certificate->carrier.items)||us_export_bridge_supported(certificate->carrier.items)))
         return us_export_error(error,cap,"invalid carrier native plan certificate");
-    if(variadic){
-        if(!fixed_count||fixed_count>original.count||original.variadic||carrier.variadic||us_export_has_callbacks(certificate->original.items))
-            return us_export_error(error,cap,"invalid variadic carrier plan certificate");
-        for(size_t i=(size_t)fixed_count;i<carrier.count;i++){
-            const us_export_type *t=carrier.argtypes+i;
-            if((t->kind==3&&t->width==4)||(t->kind==1&&t->width<4))return us_export_error(error,cap,"variadic tail requires promoted types");
-        }
-    }
+    if(ops->validate(certificate,&original,&carrier,fixed_count,error,cap))return 1;
     us_native_plan *plan=calloc(1,sizeof *plan);if(!plan)return us_export_error(error,cap,"carrier native plan allocation failed");
-    if(us_export_has_callbacks(certificate->original.items)){plan->bridge_required=1;goto publish;}
-    plan->args=calloc(carrier.count?(size_t)carrier.count:1,sizeof *plan->args);if(!plan->args)goto bad;
-    for(size_t i=0;i<carrier.count;i++)if(!(plan->args[i]=us_export_ffitype(carrier.argtypes+i,0)))goto bad;
-    ffi_type *result=us_export_ffitype(&carrier.result,1);if(!result)goto bad;
-    ffi_status status=variadic ? ffi_prep_cif_var(&plan->cif,FFI_DEFAULT_ABI,(unsigned)fixed_count,(unsigned)carrier.count,result,plan->args) :
-        ffi_prep_cif(&plan->cif,FFI_DEFAULT_ABI,(unsigned)carrier.count,result,plan->args);
-    if(status!=FFI_OK)goto bad;
-publish:
+    if(ops->cif(plan,certificate,&original,&carrier,fixed_count,ops->variadic))goto bad;
     plan->graph=certificate->original;plan->carrier=certificate->carrier;plan->signature=original;plan->target=0;
     memset(certificate,0,sizeof *certificate);
     plan->next=plans->head;plans->head=plan;*handle=(uintptr_t)plan;return 0;

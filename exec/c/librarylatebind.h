@@ -67,13 +67,15 @@ static int us_late_prepare(us_context *c,const char *target){
  active=c;volatile int rc=1;
  if(!setjmp(failure)){
   RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;library_package(c);
-  int contract_found=0,selection_found=0;c->late_typed_enabled=0;c->late_callsite_enabled=0;
+  int contract_found=0,selection_found=0;c->late_typed_enabled=0;c->late_callsite_enabled=0;c->late_callback_enabled=0;
   for(int i=0;i<PS;i++){
    if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))contract_found=1;
    if(!strcmp(STAGES[i].route,"library-selection")){
     if(!strcmp(STAGES[i].name,"ownership"))selection_found++;
     else if(!strcmp(STAGES[i].name,"ownership-fixedtyped")){selection_found++;c->late_typed_enabled=1;}
     else if(!strcmp(STAGES[i].name,"ownership-callsite")){selection_found++;c->late_typed_enabled=1;c->late_callsite_enabled=1;}
+    else if(!strcmp(STAGES[i].name,"ownership-callback")){selection_found++;c->late_typed_enabled=1;c->late_callback_enabled=1;}
+    else if(!strcmp(STAGES[i].name,"ownership-callback-callsite")){selection_found++;c->late_typed_enabled=1;c->late_callsite_enabled=1;c->late_callback_enabled=1;}
     else __us_panic("library selection: unknown ownership capability");
    }
   }
@@ -82,7 +84,7 @@ static int us_late_prepare(us_context *c,const char *target){
   Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
   rc=runroute("library-contract",&input,"binding-contract");
   if(!rc){us_late_snapshot(&c->late_contract,&c->late_contract_n,input.b,(size_t)input.n);
-   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=c->late_callsite_enabled?7:c->late_typed_enabled?3:1;
+   memcpy(input.b,"USLPAR1\n",8);input.b[10]=0;input.b[11]=(c->late_typed_enabled?3:1)|(c->late_callsite_enabled?4:0)|(c->late_callback_enabled?8:0);
    rc=runroute("library-selection",&input,"binding-ownership");
    if(!rc)us_late_snapshot(&c->late_selection,&c->late_selection_n,input.b,(size_t)input.n);
   }
@@ -128,15 +130,10 @@ typedef struct UsLateTypedFrame {
  us_context *context;us_native_plan *plan;ffi_cif cif;ffi_type *args[6];
  ffi_closure *closure;void *code;uint64_t symbol,ordinal;size_t wire_n;unsigned char wire[];
 } UsLateTypedFrame;
-#if defined(US_LATE_TEST_OBSERVERS)
-static size_t us_late_typed_release_count;
-#endif
 static void us_late_typed_release(void *value){
  UsLateTypedFrame *f=value;if(!f)return;
  us_ffi_closure_drop(&f->closure,&f->code);
-#if defined(US_LATE_TEST_OBSERVERS)
- us_late_typed_release_count++;
-#endif
+ US_LATE_NOTE_RELEASE();
  free(f);
 }
 static void us_late_typed_callback(ffi_cif *cif,void *result,void **args,void *value){
@@ -153,10 +150,11 @@ static int us_late_typed_origins(us_context *c){
   memcpy(name,r+36,nm);name[nm]=0;unsigned owner,id;
   if(us_late_owner(c->late_contract,c->late_contract_n,c->late_selection,c->late_selection_n,name,&owner,&id))return us_late_data_error(c,"missing-owner",us_late_u32(r+4),name);
   /* The model's ownership result authorizes migration, never an address. */
-  if(owner==1&&r[8]==0&&(r[9]==1||(c->late_callsite_enabled&&r[9]==2))){
+  if(owner==1&&r[8]==0&&(r[9]==1||(c->late_callsite_enabled&&r[9]==2)||(c->late_callback_enabled&&r[9]==3))){
    if(c->signature_version!=3){snprintf(c->error,sizeof c->error,"unisacc: compile: fixed typed requires signature version 3 symbol %u name %s",id,name);return 1;}
    UsLateOrigin *o=c->late_origins;for(;o&&strcmp(o->name,name);o=o->next){}
-   unsigned logical=r[9]==2?3:2;
+   static const unsigned logical_kinds[]={0,2,3,4};
+   unsigned logical=logical_kinds[r[9]];
    if(o&&o->kind!=logical)return us_late_data_error(c,"duplicate-owner",id,name);
    if(!o){o=calloc(1,sizeof *o);if(!o)return error(c,"out of memory");o->name=copy_string(name);if(!o->name){free(o);return error(c,"out of memory");}o->kind=logical;o->next=c->late_origins;c->late_origins=o;}
   }
@@ -264,6 +262,41 @@ API const void *us_private_callsite_frame_bytes(us_context *c,unsigned index,siz
 }
 API size_t us_private_typed_release_count(void){return us_late_typed_release_count;}
 #endif
+/* Callback logical class: address-free graph preparation only.
+   No execution bridge or canonical identity claim is introduced by this draft. */
+#if defined(US_LATE_TEST_OBSERVERS) && US_LATE_TEST_OBSERVERS
+static int us_late_test_callback_carrier_status; /* default 0, test build only */
+#endif
+static int us_late_callback_prepare(us_context *c,const unsigned char *record,size_t nm,uint32_t id,const char *name,us_native_plans *pending){
+ const unsigned char *wire=record+36+nm;size_t wn=us_late_u32(record+16);
+ if(record[8]||record[9]!=3||record[10]!=3||wn<16||memcmp(wire,"USLSIG3\n",8))
+  return us_late_data_error(c,"callback-signature-mismatch",id,name);
+ us_carrier_certificate cert={0};uint64_t handle=0;
+ int rc=library_carrier_model(c,c->target,wire,wn,&cert);
+#if defined(US_LATE_TEST_OBSERVERS) && US_LATE_TEST_OBSERVERS
+ /* Never replace the production model: inject only after a real certificate. */
+ if(!rc&&us_late_test_callback_carrier_status){rc=us_late_test_callback_carrier_status;snprintf(c->error,sizeof c->error,"test callback certificate mechanism failure");}
+#endif
+ if(rc){
+  us_carrier_certificate_clear(&cert);
+  if(rc==2)return us_late_data_error(c,"not covered: callback-native-ABI",id,name);
+  if(rc==1)return 1; /* Preserve the certificate/mechanism owner's named error. */
+  return us_late_data_error(c,"internal callback-native-ABI status",id,name);
+ }
+ rc=us_carrier_certificate_native_prepare_mode(pending,&cert,US_NATIVE_PREPARE_CALLBACK_GRAPH,0,&handle,c->error,sizeof c->error);
+ us_carrier_certificate_clear(&cert);
+ if(rc||!handle)return us_late_data_error(c,"callback-signature-unsupported",id,name);
+ us_native_plan *plan=us_native_plan_find(pending,handle);
+ if(!plan||plan->target||!plan->attachment||plan->release_attachment!=us_callback_graph_release)
+  return us_late_data_error(c,"callback-plan-not-prepared",id,name);
+ return 0;
+}
+static int us_late_callback_provider(void *context,const unsigned char *record,size_t nm,uint32_t id,const char *name,uint64_t *address){
+ us_context *c=context;(void)record;(void)nm;if(address)*address=0;
+ /* Deliberately no publication: canonical identity/provider qualification and
+    a callable frame address are a later wiring step, not this prepare draft. */
+ return us_late_data_error(c,"not covered: callback-provider-bridge",id,name);
+}
 typedef int (*UsLateVerify)(void *,const unsigned char *,size_t,uint32_t,const char *,uint64_t *);
 typedef int (*UsLatePrepare)(us_context *,const unsigned char *,size_t,uint32_t,const char *,us_native_plans *);
 typedef struct UsLateClass {unsigned kind,wire_kind,owner,partition;const char *e3_missing,*lower_missing;int (*declare)(us_context *,const char *,const us_signature *);UsLateVerify verify;UsLatePrepare prepare;} UsLateClass;
@@ -280,7 +313,8 @@ US_LATE_CLASSES(US_LATE_VERIFY_DECL)
 #define US_LATE_CLASS_ROW(k,w,o,p,e,l,d,v) {k,w,o,p,e,l,d,v,NULL},
 static const UsLateClass us_late_classes[]={US_LATE_CLASSES(US_LATE_CLASS_ROW)
  {2,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_typed_provider,us_late_typed_prepare},
- {3,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_callsite_provider,us_late_callsite_prepare}};
+ {3,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_callsite_provider,us_late_callsite_prepare},
+ {4,0,1,0,"library E3 fragment is unavailable","library lower fragment is unavailable",NULL,us_late_callback_provider,us_late_callback_prepare}};
 #undef US_LATE_CLASS_ROW
 static const UsLateClass *us_late_class(unsigned kind){
  for(size_t i=0;i<sizeof us_late_classes/sizeof us_late_classes[0];i++)if(us_late_classes[i].kind==kind)return &us_late_classes[i];return NULL;

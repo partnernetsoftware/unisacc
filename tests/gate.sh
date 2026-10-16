@@ -405,6 +405,7 @@ job exec-librarycallbacklower-model-2 sh tests/librarycallbacklowercheck.sh 2
 job exec-librarycallbacklower-model-3 sh tests/librarycallbacklowercheck.sh 3
 job exec-librarycallbacklower-model-4 sh tests/librarycallbacklowercheck.sh 4
 job lib-callback-candidate-auth sh tests/librarycallbackauthcheck.sh check
+job exec-librarycallback-wiring-prepare sh tests/librarycallbackwiringcheck.sh check
 job exec-librarycallsite-reader-model ./exec/parse2/librarycallsitecheck.sh
 job exec-librarycallsitelower-model-1 ./exec/lower/librarycallsitecheck.sh 1
 job exec-librarycallsitelower-model-2 ./exec/lower/librarycallsitecheck.sh 2

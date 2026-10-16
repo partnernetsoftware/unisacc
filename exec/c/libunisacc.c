@@ -54,6 +54,8 @@ struct us_context {
     us_native_plans *late_preparing; /* borrowed pending us_native_plans owner, relocate only */
     int late_typed_enabled;
     int late_callsite_enabled;
+    int late_callback_enabled;
+    unsigned char *late_callbackgraphs;size_t late_callbackgraphs_n;
     unsigned char *late_callsites;size_t late_callsites_n;
     us_native_templates native_templates;
     us_native_callsites native_callsites;
@@ -268,7 +270,7 @@ API void us_free(us_context *c) {
     discard_image(c);library_callable_catalog_clear(c);
     us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);
-    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;
+    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;free(c->late_callbackgraphs);c->late_callbackgraphs=NULL;c->late_callbackgraphs_n=0;
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);us_bindings_clear(&c->data_providers);free(c->binding_blob);free(c->contract_snapshot);
@@ -456,7 +458,7 @@ static const us_export_signature *library_callable_signature(us_context *c,uint6
 }
 static void invalidate_bindings(us_context *c) {
     discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
-    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
+    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;free(c->late_callbackgraphs);c->late_callbackgraphs=NULL;c->late_callbackgraphs_n=0;us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
     free(c->contract_snapshot);c->contract_snapshot=0;c->contract_snapshot_length=0;
@@ -668,6 +670,16 @@ static int library_carrier_provider(void *owner,us_native_plans *plans,uintptr_t
     else us_export_error(message,cap,request->context->error);
     us_carrier_certificate_clear(&cert);return rc;
 }
+/* Outer sibling-stream transport only. Semantic payload validation belongs to
+   the class-owned model. Both existing callsite and callback use this channel. */
+static void library_side_unwrap(Buf *input,const char *magic,const char *side_magic,unsigned char **out,size_t *outn,const char *reason,int required){
+    if(input->n<8||memcmp(input->b,magic,8)){if(required)__us_panic(reason);return;}
+    if(input->n<24)__us_panic(reason);
+    uint64_t core=us_lr_u64(input->b+8),side=us_lr_u64(input->b+16);
+    if(core>(size_t)input->n-24||side!=(size_t)input->n-24-core||side<16||memcmp(input->b+24+core,side_magic,8))__us_panic(reason);
+    us_late_snapshot(out,outn,input->b+24+(size_t)core,(size_t)side);
+    memmove(input->b,input->b+24,(size_t)core);input->n=(int)core;
+}
 API int us_compile(us_context *c,const char *target,int level) {
     if (!c || !target || level<0 || level>2) return error(c,"invalid compilation options");
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
@@ -702,7 +714,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     us_late_release(&prior);
     discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);
-    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;
+    free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;free(c->late_callbackgraphs);c->late_callbackgraphs=NULL;c->late_callbackgraphs_n=0;
     c->native_plans=plans;c->native_templates=templates;
     free(c->binding_blob);c->binding_blob=frozen;c->binding_length=frozen_length;
     free(c->target); c->target=chosen; c->optimisation=level;
@@ -786,13 +798,8 @@ API int us_compile(us_context *c,const char *target,int level) {
         if (!rc && c->source_count==1 && rf_capture_dir()) rc=rf_identity_gate(input.b,input.n,2,route,"e3");   /* SC1 identity of a single source: the capture writes the header */
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
-            if(c->late_callsite_enabled&&input.n>=8&&!memcmp(input.b,"USCSFLW1",8)){
-                if(input.n<24)__us_panic("library callsite: malformed frame envelope");
-                uint64_t core=us_lr_u64(input.b+8),side=us_lr_u64(input.b+16);
-                if(core>(size_t)input.n-24||side!=(size_t)input.n-24-core||side<16||memcmp(input.b+24+core,"USLCSF1\n",8))__us_panic("library callsite: malformed frame envelope");
-                us_late_snapshot(&c->late_callsites,&c->late_callsites_n,input.b+24+(size_t)core,(size_t)side);
-                memmove(input.b,input.b+24,(size_t)core);input.n=(int)core;
-            }
+            if(c->late_callback_enabled)library_side_unwrap(&input,"USCBFLW1","USLCBG1\n",&c->late_callbackgraphs,&c->late_callbackgraphs_n,"library callback: malformed graph envelope",1);
+            if(c->late_callsite_enabled)library_side_unwrap(&input,"USCSFLW1","USLCSF1\n",&c->late_callsites,&c->late_callsites_n,"library callsite: malformed frame envelope",0);
             if(c->late_contract)us_late_decode(c,&input,"USTFLOW2",US_LATE_E3);
             size_t begin=0,length=(size_t)input.n;
             if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9) || !memcmp(input.b,"USLTAPE3\n",9))) {
@@ -830,7 +837,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     cache_settle();cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
     if(!rc)rc=library_variadic_sites_prepare(c);
-    if(rc){free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;us_late_clear_phase(c,US_LATE_E3);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+    if(rc){free(c->late_callsites);c->late_callsites=NULL;c->late_callsites_n=0;free(c->late_callbackgraphs);c->late_callbackgraphs=NULL;c->late_callbackgraphs_n=0;us_late_clear_phase(c,US_LATE_E3);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
         free(c->tape);c->tape=0;c->tape_length=0;}
     return rc;
@@ -1127,7 +1134,7 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        size_t capacity=24;
+        size_t capacity=25;
 #if defined(_WIN32) && !defined(__UNISA__)
         capacity+=(size_t)winimports.count;
 #endif
@@ -1161,6 +1168,9 @@ API int us_relocate(us_context *c) {
             actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/data-latebind",22,enabled,8};NRI++;
             if(c->late_callsite_enabled&&c->late_callsites){
                 actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/callsites",18,c->late_callsites,(int)c->late_callsites_n};NRI++;
+            }
+            if(c->late_callback_enabled&&c->late_callbackgraphs){
+                actual[NRI]=(ResourceInput){(const unsigned char *)"\0library/callbackgraphs",23,c->late_callbackgraphs,(int)c->late_callbackgraphs_n};NRI++;
             }
             us_late_clear_phase(c,US_LATE_LOWER);
             
