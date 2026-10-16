@@ -80,11 +80,41 @@ jobs:
         r\\n'), 'output_windows_path': str(flat)})\n    checked('export-bash-version', [bash, '--noprofile', '--norc', '--version'],\
         \ 5, bash_env)\n    posix_flat = checked('export-path', [git_root / 'usr/bin/cygpath.exe', '-u', str(flat)], 5, bash_env)\n\
         \    assert posix_flat.startswith('/'), 'EXPORT_OUTPUT_NOT_POSIX_ABSOLUTE'\n    checked('export', [bash, '--noprofile',\
-        \ '--norc', '-x', 'tests/export_ref.sh', posix_flat], 10, bash_env)\n    full = out / 'U0.ref.c'\n    full.write_bytes((root\
-        \ / 'tests/refshim.h').read_bytes() + flat.read_bytes() + (root / 'tests/reffoot.h').read_bytes())\n    save('source-inputs.json',\
-        \ {n: digest(p) for n, p in [('SELF.c', flat), ('U0.ref.c', full), ('tests/refshim.h', root / 'tests/refshim.h'),\
-        \ ('tests/reffoot.h', root / 'tests/reffoot.h')]})\n    vswhere = pathlib.Path(os.environ['ProgramFiles(x86)']) /\
-        \ 'Microsoft Visual Studio/Installer/vswhere.exe'\n    vsraw = checked('vswhere', [vswhere, '-latest', '-products',\
+        \ '--norc', '-x', 'tests/export_ref.sh', posix_flat], 10, bash_env)\n    full = out / 'U0.ref.c'\n    diagnostic_shim\
+        \ = out / 'win-refshim-diagnostic.h'\n    diagnostic_shim.write_text('/* TEMPORARY DIAGNOSTIC BRIDGE ONLY. Never execute\
+        \ U0 built from this wrapper.\\n   Native pointer/handle types remain pointer-sized; caller long/int narrowing\\n\
+        \   is deliberately visible to clang diagnostics. No product type macros. */\\n#ifndef _WIN32\\n#error Windows diagnostic\
+        \ bridge requires a Windows compiler target\\n#endif\\n#define WIN32_LEAN_AND_MEAN\\n#define NOMINMAX\\n#include <windows.h>\\\
+        n#include <stdint.h>\\n#include <stdio.h>\\n#include <stdlib.h>\\nstatic HANDLE probe_handle(intptr_t fd) {\\n   \
+        \ if (fd == 0) return GetStdHandle(STD_INPUT_HANDLE);\\n    if (fd == 1) return GetStdHandle(STD_OUTPUT_HANDLE);\\\
+        n    if (fd == 2) return GetStdHandle(STD_ERROR_HANDLE);\\n    return (HANDLE)fd;\\n}\\nstatic intptr_t probe_open(const\
+        \ char *path, unsigned long access, unsigned long creation) {\\n    HANDLE h = CreateFileA(path, (DWORD)access, FILE_SHARE_READ\
+        \ | FILE_SHARE_WRITE,\\n                           NULL, (DWORD)creation, FILE_ATTRIBUTE_NORMAL, NULL);\\n    return\
+        \ h == INVALID_HANDLE_VALUE ? (intptr_t)-1 : (intptr_t)h;\\n}\\nstatic int probe_read(intptr_t fd, void *buf, int\
+        \ count) {\\n    DWORD actual = 0;\\n    if (count < 0 || !ReadFile(probe_handle(fd), buf, (DWORD)count, &actual,\
+        \ NULL)) return -1;\\n    return (int)actual;\\n}\\nstatic int probe_write(intptr_t fd, const void *buf, int count)\
+        \ {\\n    DWORD actual = 0;\\n    if (count < 0 || !WriteFile(probe_handle(fd), buf, (DWORD)count, &actual, NULL))\
+        \ return -1;\\n    return (int)actual;\\n}\\nstatic int probe_close(intptr_t fd) { return CloseHandle(probe_handle(fd))\
+        \ ? 0 : -1; }\\nstatic int64_t probe_lseek(intptr_t fd, int64_t offset, int method) {\\n    LARGE_INTEGER distance,\
+        \ result;\\n    distance.QuadPart = offset;\\n    if (!SetFilePointerEx(probe_handle(fd), distance, &result, (DWORD)method))\
+        \ return -1;\\n    return result.QuadPart;\\n}\\nstatic intptr_t probe_mmap(intptr_t address, size_t length, unsigned\
+        \ long allocation,\\n                           unsigned long protection, intptr_t descriptor, int64_t offset) {\\\
+        n    /* The actual _WIN32 callers request anonymous VirtualAlloc mappings. */\\n    if (descriptor != 0 || offset\
+        \ != 0) { SetLastError(ERROR_NOT_SUPPORTED); return -1; }\\n    return (intptr_t)VirtualAlloc((void *)address, length,\
+        \ (DWORD)allocation, (DWORD)protection);\\n}\\nstatic int probe_mprotect(intptr_t address, size_t length, unsigned\
+        \ long protection) {\\n    DWORD old;\\n    if (!VirtualProtect((void *)address, length, (DWORD)protection, &old))\
+        \ return -1;\\n    if ((protection & 0xf0) && !FlushInstructionCache(GetCurrentProcess(), (void *)address, length))\
+        \ return -1;\\n    return 0;\\n}\\nstatic int probe_munmap(intptr_t address, size_t length) {\\n    (void)length;\\\
+        n    return VirtualFree((void *)address, 0, MEM_RELEASE) ? 0 : -1;\\n}\\n#define __open(...) probe_open(__VA_ARGS__)\\\
+        n#define __read(f,b,n) probe_read((f),(b),(n))\\n#define __write(f,b,n) probe_write((f),(b),(n))\\n#define __close(f)\
+        \ probe_close(f)\\n#define __lseek(f,o,w) probe_lseek((f),(o),(w))\\n#define __mmap(a,n,p,f,d,o) probe_mmap((a),(n),(p),(f),(d),(o))\\\
+        n#define __mprotect(a,n,p) probe_mprotect((a),(n),(p))\\n#define __munmap(a,n) probe_munmap((a),(n))\\n#define __exit(c)\
+        \ ExitProcess((unsigned int)(c))\\nstatic int G_argc;\\nstatic char **G_argv;\\n#define __argc() G_argc\\n#define\
+        \ __argv(i) G_argv[i]\\n#define main unisacc_main\\n', encoding='utf-8')\n    full.write_bytes(diagnostic_shim.read_bytes()\
+        \ + flat.read_bytes() + (root / 'tests/reffoot.h').read_bytes())\n    save('source-inputs.json', {n: digest(p) for\
+        \ n, p in [('SELF.c', flat), ('U0.ref.c', full), ('tests/refshim.h-original-not-used', root / 'tests/refshim.h'),\
+        \ ('win-refshim-diagnostic.h', diagnostic_shim), ('tests/reffoot.h', root / 'tests/reffoot.h')]})\n    vswhere = pathlib.Path(os.environ['ProgramFiles(x86)'])\
+        \ / 'Microsoft Visual Studio/Installer/vswhere.exe'\n    vsraw = checked('vswhere', [vswhere, '-latest', '-products',\
         \ '*', '-property', 'installationPath'], 5)\n    assert vsraw, 'VS_INSTALLATION_NOT_READY'\n    vs = pathlib.Path(vsraw)\n\
         \    # No cmd.exe/VsDevCmd quoting or imported shell environment.\n    candidates = [vs / 'VC/Tools/Llvm' / sub /\
         \ 'bin/clang-cl.exe' for sub in ('ARM64', 'x64', '')] if arch == 'arm64' else [vs / 'VC/Tools/Llvm' / sub / 'bin/clang-cl.exe'\
@@ -108,22 +138,22 @@ jobs:
         \ 'scope': 'U0_BUILD_DIAGNOSTIC_ONLY_NO_N_GENERATIONS'}\n    save('tools.json', tools)\n    tools['compiler_version']\
         \ = checked('compiler-version', [compiler, '--version'], 5, env)\n    save('tools.json', tools)\n    triple = {'x64':\
         \ 'x86_64-pc-windows-msvc', 'arm64': 'aarch64-pc-windows-msvc'}[arch]\n    exe = out / 'U0.exe'\n    flags = ['--target='\
-        \ + triple, '/TC', '/O2', '/clang:-std=c99', '/clang:-ferror-limit=0', '/clang:-fuse-ld=lld']\n    rc = run('compile-u0',\
-        \ [compiler, *flags, full, '/Fo' + str(out / 'U0.obj'), '/Fe' + str(exe)], 55, env)\n    diagnostics = (out / 'compile-u0.stderr.log').read_text(errors='replace')\
-        \ + (out / 'compile-u0.stdout.log').read_text(errors='replace')\n    save('diagnostics.json', {'raw_rc': rc, 'diagnostic_lines':\
-        \ [line for line in diagnostics.splitlines() if re.search(r'error|warning|fatal', line, re.I)], 'unreached_diagnostics':\
-        \ 'UNKNOWN; a fatal header error can stop subsequent analysis'})\n    if rc:\n        raise SystemExit(rc)\n    data\
-        \ = exe.read_bytes()\n    pe = struct.unpack_from('<I', data, 0x3c)[0]\n    assert data[:2] == b'MZ' and data[pe:pe\
-        \ + 4] == b'PE\\0\\0', 'U0_PE_FORMAT_MISMATCH'\n    machine = struct.unpack_from('<H', data, pe + 4)[0]\n    assert\
-        \ machine == {'x64': 0x8664, 'arm64': 0xaa64}[arch], 'U0_PE_TARGET_MISMATCH'\n    save('U0.build.json', {'sha256':\
-        \ digest(exe), 'source_sha': head, 'self_sha256': digest(flat), 'wrapped_source_sha256': digest(full), 'compiler_sha256':\
-        \ digest(compiler), 'flags': flags, 'machine': machine, 'status': 'COMPILED_ONLY_EXECUTION_AND_LLP64_SEMANTICS_NOT_CERTIFIED'})\n\
+        \ + triple, '/TC', '/O2', '/clang:-std=c99', '/clang:-ferror-limit=0', '/clang:-Wconversion', '/clang:-fuse-ld=lld']\n\
+        \    rc = run('compile-u0', [compiler, *flags, full, '/Fo' + str(out / 'U0.obj'), '/Fe' + str(exe)], 55, env)\n  \
+        \  diagnostics = (out / 'compile-u0.stderr.log').read_text(errors='replace') + (out / 'compile-u0.stdout.log').read_text(errors='replace')\n\
+        \    save('diagnostics.json', {'raw_rc': rc, 'diagnostic_lines': [line for line in diagnostics.splitlines() if re.search(r'error|warning|fatal',\
+        \ line, re.I)], 'unreached_diagnostics': 'UNKNOWN; a fatal header error can stop subsequent analysis'})\n    if rc:\n\
+        \        raise SystemExit(rc)\n    data = exe.read_bytes()\n    pe = struct.unpack_from('<I', data, 0x3c)[0]\n   \
+        \ assert data[:2] == b'MZ' and data[pe:pe + 4] == b'PE\\0\\0', 'U0_PE_FORMAT_MISMATCH'\n    machine = struct.unpack_from('<H',\
+        \ data, pe + 4)[0]\n    assert machine == {'x64': 0x8664, 'arm64': 0xaa64}[arch], 'U0_PE_TARGET_MISMATCH'\n    save('U0.build.json',\
+        \ {'sha256': digest(exe), 'source_sha': head, 'self_sha256': digest(flat), 'wrapped_source_sha256': digest(full),\
+        \ 'compiler_sha256': digest(compiler), 'flags': flags, 'machine': machine, 'status': 'DIAGNOSTIC_SHIM_COMPILED_ONLY_U0_EXECUTION_FORBIDDEN_LLP64_UNRESOLVED'})\n\
         except BaseException as error:\n    (out / 'probe-exception.stderr.log').write_text(traceback.format_exc(), encoding='utf-8')\n\
         \    save('probe-status.json', {'status': 'FAILED', 'exception_type': type(error).__name__, 'message': str(error),\
         \ 'compile_reached': any(r['name'] == 'compile-u0' for r in rows)})\n    raise\nfinally:\n    save('EVIDENCE.json',\
         \ {p.relative_to(out).as_posix(): {'sha256': digest(p), 'bytes': p.stat().st_size} for p in out.rglob('*') if p.is_file()\
-        \ and p.name != 'EVIDENCE.json' and p.suffix.lower() in ('.json', '.log', '.py', '.c')})\n'@\nNew-Item -ItemType Directory\
-        \ -Force -Path $env:U0_EVIDENCE | Out-Null\n$path = Join-Path $env:U0_EVIDENCE 'probe.py'\n[IO.File]::WriteAllText($path,\
+        \ and p.name != 'EVIDENCE.json' and p.suffix.lower() in ('.json', '.log', '.py', '.c', '.h')})\n'@\nNew-Item -ItemType\
+        \ Directory -Force -Path $env:U0_EVIDENCE | Out-Null\n$path = Join-Path $env:U0_EVIDENCE 'probe.py'\n[IO.File]::WriteAllText($path,\
         \ $script, [Text.UTF8Encoding]::new($false))\npython $path\nexit $LASTEXITCODE\n"
     - name: Always recover raw diagnostic evidence
       if: always()
@@ -137,6 +167,8 @@ jobs:
           ${{ env.U0_EVIDENCE }}/*.py
 
           ${{ env.U0_EVIDENCE }}/*.c
+
+          ${{ env.U0_EVIDENCE }}/*.h
 
           '
         if-no-files-found: error
