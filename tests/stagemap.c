@@ -25,7 +25,7 @@
 #include <stdlib.h>
 
 static char *rules[] = {
-    "meta", "c99-ledger decision-ledger ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
+    "meta", "identity-product-negative identity-include-negative identity-prep-negative c99-ledger decision-ledger ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
             " subtract-safety* freezecheck revivedscan facts-export publish-order gate-infra gate-layers"
             " tsv-build-account pipeline-cache docs kernel source-layout front-bounds bound fresh-order*"
             " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools"

@@ -233,6 +233,9 @@ job attemptchain python3 ./tests/attemptchaincheck.py   # 0.0.39 WF5: offline at
 job c99precheck python3 ./tests/c99precheckcheck.py   # 0.0.39 WF1: dynamic-route PRECHECK parsing and shard map
 job rulingwait python3 ./tests/rulingwaitcheck.py   # 0.0.39 WF4: ruling request ledger and waits
 job namedrefuse ./tests/namedrefusecheck.sh   # 0.0.39 COV1: named refusals exact at every -O, REVIVED fails
+job identity-product-negative python3 ./tests/identitynegativecheck.py product --candidate "${MODEL_COM:-./unisacc.com}"
+job identity-include-negative python3 ./tests/identitynegativecheck.py include
+job identity-prep-negative python3 ./tests/identitynegativecheck.py prep --ua "${UA:-/tmp/ua_ref}"
 job checkrun ./tests/checkruncheck.sh   # 0.0.39: check status never taken from a pipe
 job commitgate ./tests/commitgatecheck.sh   # 0.0.39: red gate leaves no commit (scratch repo)
 job k2b K2B_UA=${UA:-/tmp/ua_ref} python3 ./tests/k2bcheck.py   # 0.0.40 K2b: narrow whitelist, whole-tree fallbacks, missed-run RED (scratch copy)
