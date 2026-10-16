@@ -47,6 +47,48 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaisesRegex(m.SelectionError, word):
             thunk()
 
+    def test_fast_feedback_exclusion_categories_and_direct_override(self):
+        for category in ('whole-root-tree','product-transitive','global-fallback'):
+            with self.subTest(category=category):
+                f=fixture(); job=copy.deepcopy(f['jobs'][-1]); job['name']='deferred'
+                job['primary']='lib'; job['also']=[]; job['after']=[]
+                job['declaration']='unknown' if category=='global-fallback' else 'known'
+                f['jobs'].append(job); f['affected']=['deferred']
+                f['changes']=[dict(status='M',paths=['exec/lower/rule.tsv'])]
+                f['dev_direct']=[]; f['dev_exclusion_groups']={category:['deferred']}
+                p=self.plan(f); self.assertNotIn('deferred',p['suites'])
+                self.assertEqual(p['dev_exclusions'][category],dict(count=1,suites=['deferred']))
+                self.assertEqual(p['claim'],'FAST_FEEDBACK_NOT_PROOF')
+                self.assertTrue({'lower','parse','lex','prep'} <= set(p['suites']))
+                m.verify(p,f,P)
+                self.assertIn('deferred',self.plan(f,tier='merge')['suites'])
+                f['dev_direct']=['deferred']; p=self.plan(f)
+                self.assertIn('deferred',p['suites']); self.assertEqual(p['dev_exclusions'][category]['count'],0)
+
+    def test_fast_feedback_unknown_owner_and_metadata_are_global(self):
+        for metadata,path in ((False,'unknown/file.c'),(True,'exec/lower/rule.tsv')):
+            f=fixture(); f['dev_direct']=[]; f['metadata_changed']=metadata
+            f['changes']=[dict(status='M',paths=[path])]
+            self.assertEqual(len(self.plan(f)['suites']),len(f['jobs']))
+
+    def test_fast_feedback_tamper_cannot_delete_required_stage(self):
+        f=fixture(); f['changes']=[dict(status='M',paths=['exec/lower/rule.tsv'])]; f['dev_direct']=[]
+        p=self.plan(f); p['suites'].remove('lower')
+        self.rejects(lambda:m.verify(p,f,P),'missing-A-or-B')
+
+    def test_argv_direct_exact_repo_path(self):
+        self.assertTrue(m.argv_direct_hit(['python3','./tests/probe.py','tests/input.c'],'tests/probe.py'))
+        self.assertTrue(m.argv_direct_hit(['python3','./tests/probe.py','tests/input.c'],'tests/input.c'))
+
+    def test_argv_direct_absolute_is_confined_to_checkout(self):
+        self.assertTrue(m.argv_direct_hit(['/repo/tests/probe.py'],'tests/probe.py',Path('/repo')))
+        self.assertFalse(m.argv_direct_hit(['/other/tests/probe.py'],'tests/probe.py',Path('/repo')))
+
+    def test_argv_direct_basename_and_substring_do_not_match(self):
+        self.assertFalse(m.argv_direct_hit(['python3','./elsewhere/probe.py'],'tests/probe.py'))
+        self.assertFalse(m.argv_direct_hit(['python3','./tests/probe.py.extra'],'tests/probe.py'))
+        self.assertFalse(m.argv_direct_hit(['python3','../tests/probe.py'],'tests/probe.py'))
+
     def test_single_file(self):
         f = fixture(); p = self.plan(f)
         self.assertEqual(set(p["suites"]), set(P["smokes"]) | {"prep", "lex", "parse"})
@@ -196,7 +238,7 @@ class SelectorTests(unittest.TestCase):
         self.rejects(lambda: m.parse_policy(POLICY_TEXT.replace("smoke\tproduct-control\tproduct-control\n", "")), "missing-smoke")
 
     def test_policy_illegal_expression(self):
-        self.rejects(lambda: m.parse_policy(POLICY_TEXT.replace("A+B+H", "fastest(5)")), "policy-value")
+        self.rejects(lambda: m.parse_policy(POLICY_TEXT.replace("D+Sdown+B+H", "fastest(5)")), "policy-value")
 
     def test_policy_budget_not_a_cap(self):
         q=m.parse_policy(POLICY_TEXT.replace("\t180\n", "\t1\n"));f=fixture();f["affected"]=[j["name"] for j in f["jobs"]]

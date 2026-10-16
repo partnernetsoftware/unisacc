@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 FIXED = {
-    ("tier", "dev.expand"): "A+B+H",
+    ("tier", "dev.expand"): "D+Sdown+B+H",
     ("tier", "merge.expand"): "A+B+L(A)+H+M",
     ("tier", "candidate.expand"): "U",
     ("tier", "release.expand"): "U",
@@ -40,6 +40,7 @@ def digest(value):
 
 def parse_policy(text):
     values, smokes, aliases, asks = {}, {}, {}, {}
+    ownership, downstream, broad_trees = {}, {}, []
     vocabulary = None
     header = False
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -62,6 +63,16 @@ def parse_policy(text):
         elif pair == ("tier", "merge.include"):
             names = value.split(",")
             require(all(names) and len(set(names)) == len(names), "merge-include-empty-or-duplicate")
+        elif record == "input.stage":
+            require(not key.startswith('/') and '..' not in key.split('/'), 'input-stage-path')
+            ownership[key] = value
+        elif record == "stage.downstream":
+            tags = value.split(',')
+            require(tags and len(tags)==len(set(tags)) and key in tags, 'downstream-shape')
+            downstream[key] = tags
+        elif pair == ('dev', 'broad_trees'):
+            broad_trees = value.split(',')
+            require(all(broad_trees) and len(broad_trees)==len(set(broad_trees)), 'broad-trees-shape')
         elif record == "stage.alias":
             tags = value.split(",")
             require(tags == sorted(set(tags)) and all(tags) and not any(c.isspace() for c in value), "alias-values")
@@ -94,11 +105,29 @@ def parse_policy(text):
     require(not asks or vocabulary is not None, "ask-axis-disabled")
     for tags in asks.values():
         require(set(tags) <= set(vocabulary) and tags == sorted(tags, key=vocabulary.index), "ask-label-order-or-unknown")
-    return {"aliases": aliases, "ask_vocabulary": vocabulary, "ask_suites": asks, "values": [[r, k, v] for (r, k), v in sorted(values.items())],
+    return {"ownership": ownership, "downstream": downstream, "broad_trees": broad_trees, "aliases": aliases, "ask_vocabulary": vocabulary, "ask_suites": asks, "values": [[r, k, v] for (r, k), v in sorted(values.items())],
             "smokes": all_smokes,
             "merge_suites": values[("tier", "merge.include")].split(","),
             "hot_seconds": int(values[("tier", "dev.hot_seconds")]),
             "cold_seconds": int(values[("tier", "dev.cold_seconds")])}
+
+
+def argv_direct_hit(argv, path, root=None):
+    """Exact repository argv paths, not basename or substring inference."""
+    for token in argv:
+        if not token or token.startswith('-') or '..' in Path(token).parts:
+            continue
+        candidate = Path(token)
+        if candidate.is_absolute():
+            if root is None:
+                continue
+            try:
+                candidate = candidate.relative_to(root)
+            except ValueError:
+                continue
+        if candidate.as_posix() == path:
+            return True
+    return False
 
 
 def validate_fixture(f):
@@ -126,6 +155,7 @@ def validate_fixture(f):
         require(isinstance(j.get("command"), list) and j["command"] and all(isinstance(a, str) for a in j["command"]), "command-shape")
         require(j.get("declaration") in ("known", "unknown"), "declaration-not-normalized")
     require(set(f.get("affected", [])) <= universe, "affected-not-in-universe")
+    require(set(f.get("dev_direct", [])) <= universe, "dev-direct-not-in-universe")
     changes = f.get("changes", [])
     require(isinstance(changes, list), "changes-shape")
     for change in changes:
@@ -200,6 +230,28 @@ def select(fixture, policy, tier="dev", layers=(), stages=(), asks=()):
         affected = set(universe)
         for n in names:
             reason[n].append("unclaimed-or-metadata:global")
+    dev_required = set(affected)
+    dev_unknown_stage = False
+    if tier == 'dev' and 'dev_direct' in fixture:
+        dev_required = set(fixture['dev_direct'])
+        tags = set()
+        for path in changed:
+            matches = [prefix for prefix in policy['ownership']
+                       if path == prefix or (prefix.endswith('/') and path.startswith(prefix))]
+            if not matches:
+                dev_unknown_stage = True
+                continue
+            stage = policy['ownership'][max(matches,key=len)]
+            if stage != 'direct':
+                require(stage in policy['downstream'], 'input-stage-no-downstream '+stage)
+                tags.update(policy['downstream'][stage])
+        require(tags <= stage_catalog, 'downstream-unknown-stage')
+        for j in jobs:
+            if tags & {j['primary'], *j.get('also', [])}:
+                dev_required.add(j['name'])
+                reason[j['name']].append('dev-stage-downstream')
+        if dev_unknown_stage or fixture.get('unclaimed') or fixture.get('metadata_changed'):
+            dev_required = set(universe)
     extra = set()
     if layers or stages:
         for j in jobs:
@@ -223,7 +275,7 @@ def select(fixture, policy, tier="dev", layers=(), stages=(), asks=()):
     elif tier == "inspect":
         chosen = extra if layers or stages or asks else set(universe)
     else:
-        chosen = affected | smoke | extra
+        chosen = (dev_required if tier == "dev" else affected) | smoke | extra
         if tier == "merge":
             require(set(policy["merge_suites"]) <= universe, "merge-control-not-in-universe")
             chosen.update(policy["merge_suites"])
@@ -256,6 +308,11 @@ def select(fixture, policy, tier="dev", layers=(), stages=(), asks=()):
                        "cold_seconds": policy["cold_seconds"] if tier == "dev" else None,
                        "enforcement": "REPORT_ONLY_NEVER_TRUNCATE"},
             "breadth": "ESCALATE_BREADTH" if broad and tier in ("dev", "merge") else "NORMAL",
+            "claim": "FAST_FEEDBACK_NOT_PROOF" if tier == 'dev' else "NOT_ASSESSED",
+            "dev_required": [n for n in names if n in dev_required] if tier == 'dev' else [],
+            "dev_exclusions": {category: {'count': len(set(group)-chosen),
+                               'suites': [n for n in names if n in set(group)-chosen]}
+                               for category, group in fixture.get('dev_exclusion_groups', {}).items()} if tier == 'dev' else {},
             "coverage_verdict": "NOT_ASSESSED",
             "adapter": "NORMALIZED_FIXTURE_ONLY"}
 
@@ -273,7 +330,7 @@ def verify(plan, fixture, policy):
     expected = select(fixture, policy, plan.get("tier"), filters.get("layers", []), filters.get("stages", []), filters.get("asks", []))
     if plan["tier"] != "inspect":
         # Independent invariants use the trusted fixture/step1 result, never plan's A/B.
-        require(set(expected["affected"]) | set(policy["smokes"]) <= set(selected), "plan-missing-A-or-B")
+        require(set(expected["dev_required"] if plan["tier"] == "dev" else expected["affected"]) | set(policy["smokes"]) <= set(selected), "plan-missing-A-or-B")
         for n in selected:
             require(set(by_name[n].get("after", [])) <= set(selected), "plan-missing-predecessor " + n)
         if plan["tier"] in ("candidate", "release"):
@@ -422,9 +479,15 @@ def real_inputs(root, request, policy_path):
     deps = json.loads((root / 'tests/gatedeps.json').read_text())
     after = json.loads((root / 'tests/gateorder.json').read_text()).get('after', {})
     require(isinstance(deps.get('suites'), dict) and isinstance(deps.get('families'), dict), 'declarations-shape')
+    policy = parse_policy(policy_path.read_text())
     hit_reasons = {}; unclaimed = set(changed); affected = set()
+    direct = set(); excluded = {'whole-root-tree': set(), 'product-transitive': set(), 'global-fallback': set()}
     for j in jobs:
         n = j['name']; entry = deps['suites'].get(n)
+        for path in changed:
+            if argv_direct_hit(j['command'], path, root):
+                direct.add(n)
+                hit_reasons.setdefault(n, []).append('changed:argv-direct:'+path)
         if entry is not None:
             require(isinstance(entry, dict), 'declaration-entry-shape ' + n)
             if entry.get('family'):
@@ -434,7 +497,17 @@ def real_inputs(root, request, policy_path):
                 why = decl.declared_reasons(entry, deps['families'], p)
                 if why:
                     affected.add(n); unclaimed.discard(p)
+                    narrow = ('files' in why or 'guard' in why or 'family' in why or
+                              any(decl.in_tree(p,t) and t.rstrip('/') not in policy['broad_trees']
+                                  for t in entry.get('trees', [])))
+                    if narrow:
+                        direct.add(n)
+                    elif 'trees' in why:
+                        excluded['whole-root-tree'].add(n)
+                    else:
+                        excluded['product-transitive'].add(n)
                     hit_reasons.setdefault(n, []).extend('changed:%s:%s' % (w, p) for w in why)
+        if entry is None and changed: excluded['global-fallback'].add(n)
         j['declaration'] = 'known' if entry is not None else 'unknown'
         j['primary'], j['also'] = mapped[n]
         prior = after.get(n, [])
@@ -454,7 +527,8 @@ def real_inputs(root, request, policy_path):
     f = {'mode': 'FIXTURE_ONLY', 'catalog': {'layers': list(layers.LAYERS),
          'stages': sorted({tag for primary, also in mapped.values() for tag in [primary, *also]})},
          'jobs': jobs, 'changes': changes, 'affected': sorted(affected), 'unclaimed': sorted(unclaimed),
-         'metadata_changed': bool(set(changed) & metadata)}
+         'metadata_changed': bool(set(changed) & metadata), 'dev_direct': sorted(direct),
+         'dev_exclusion_groups': {k: sorted(v-direct) for k,v in excluded.items()}}
     policy = parse_policy(policy_path.read_text())
     if policy.get('ask_vocabulary') is not None:
         f['ask_catalog_sha256'] = bind_ask_catalog(policy, (root / 'kernel/unisa_model.inc').read_bytes())
@@ -567,8 +641,8 @@ def execute_plan(root, plan, plan_path, state, jobs):
     import time
     command = queue_argv(root, plan, state, jobs)
     sha = hashlib.sha256(plan_path.read_bytes()).hexdigest()
-    print('gateselect run: DEVELOPMENT_ONLY plan=%s sha256=%s suites=%d budget=%s' %
-          (plan_path, sha, len(plan['suites']), json.dumps(plan['budget'], sort_keys=True)), flush=True)
+    print('gateselect run: DEVELOPMENT_ONLY claim=%s plan=%s sha256=%s suites=%d budget=%s' %
+          (plan.get('claim','NOT_ASSESSED'), plan_path, sha, len(plan['suites']), json.dumps(plan['budget'], sort_keys=True)), flush=True)
     print('gateselect run: executor=' + shlex.join(command), flush=True)
     started = time.monotonic()
     result = subprocess.run(command, cwd=root)

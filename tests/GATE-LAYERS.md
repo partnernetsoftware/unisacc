@@ -36,7 +36,10 @@ per-suite time and input fingerprints.
 ## 开发者如何只测相关部分
 
 先准备与当前产品源一致的 `UA`、`MODEL_COM`（需要时还有 `SEED_DIR`），沿用已有
-prepare/require-cached 约定；本入口不构建产品或伪造缺件通过。dev/merge 的 `--run`
+prepare/require-cached 约定；本入口不构建产品或伪造缺件通过。
+`staticimage` 和 SC1 冒烟当前直接用根目录 `./unisacc.com`，须先准备该文件；
+本次实跑将与 `MODEL_COM` 同字节、已验新鲜度的候选放在该位置，单设 `MODEL_COM` 不足以替代它。
+dev/merge 的 `--run`
 把 **完整计划选集**交给既有 gatequeue，每次一个 50 秒窗口，外层既有 bound 55 秒。
 默认含工作区变更；共享检出用 `--path` 指定自己的输入域，不能把改动文件漏出该域。
 state 和 PLAN 放仓外，首次 state 必须新建或为空，PLAN 必须是新文件。
@@ -49,6 +52,26 @@ python3 tests/gateselect.py --com --tier merge --base HEAD --head HEAD --path te
 # 干净工作树，只追加 E3 阶段（仍保留冒烟、also 和传递前驱）。
 python3 tests/gateselect.py --com --tier dev --base HEAD --head HEAD --stage E3 --run --state /tmp/dev-stage-1 --out /tmp/dev-stage-1.plan.json
 ```
+
+dev 标为 **FAST_FEEDBACK_NOT_PROOF**：策略表声明变更文件的归属阶段及下游，
+加窄目录/family/具名文件声明和 gate argv 精确路径直接命中、冒烟、显式层/阶段/ask及前驱。
+PLAN 保留完整 A，同时具名列出被延后的整根树、仅产品传递、无声明全局回退三类及套件数。
+这些延后义务仍属于 merge（全 A 不变）；dev 绿不证明覆盖 A。
+未登记文件归属、未认领输入与门元数据变更仍保守升级全清单。
+**开发期先跑 dev，再刷新 gatedeps/门元数据**；刷新后升级全清单是有意的保守行为。
+
+41cb32d7 私有副本上的真实单文件编辑实测（规划不是执行）：
+
+| 改动 | dev 套件数 | 规划单调钟 | 执行 |
+|---|---:|---:|---|
+| lower 数据来源表的一条拒绝文案 | 149/825 | 0.90s | 未跑 |
+| `src/front_parse.c` 的输出缓冲上限 | 358/825 | 0.85s | 未跑 |
+| `tests/c99precheckcheck.py` 动态求探针所在分片 | 7/825 | 0.90s | jobs1 两窗 75→0，7门全0 |
+
+第三例执行窗口单调钟累计14.86s（8.84s+6.02s），不含两窗调用间隔、产品准备和规划。
+该例脚本编辑是仓外收口修补，不随 selector 提交；原缺根产品的失败 state 另保留。
+180/480秒是策略热/冷目标，**不是**这三个选集的执行耗时估算；前两例无执行证据。
+三例 merge 与旧规则逐项有序对拍相同（均825），不以 dev 代替合流。
 
 不加 `--run` 只产 `PLAN_ONLY`。七段别名及独立 `--ask` 仍读 `gateselect.tsv`，
 套件的主/also 阶段只读 `stagemap.c`；`enc` 展开 E5∪E6，未登记 ask 消费者具名拒。
