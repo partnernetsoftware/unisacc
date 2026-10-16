@@ -8,6 +8,8 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import tempfile
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 LAYERS = ("contract", "stage", "pipeline", "platform")
@@ -99,6 +101,52 @@ def gate_names(com=True):
     return names
 
 
+def parse_stage_rows(raw, names, vocabulary):
+    """Validate the sole C authority's stage/also wire, preserving gate order."""
+    rows = raw.splitlines()
+    if len(rows) != len(names):
+        raise ValueError("stage-map incomplete gate coverage")
+    result = {}
+    for expected, row in zip(names, rows):
+        fields = row.split("\t")
+        if len(fields) != 3:
+            raise ValueError("stage-map invalid column count")
+        primary, name, wire = fields
+        if name != expected or name in result or primary not in vocabulary:
+            raise ValueError("stage-map invalid suite or primary: " + name)
+        tags = [] if wire == "-" else wire.split(",")
+        if (not wire or tags != sorted(set(tags)) or
+                any(not tag or tag not in vocabulary or tag == primary for tag in tags)):
+            raise ValueError("stage-map invalid also: " + name)
+        result[name] = (primary, tuple(tags))
+    return result
+
+
+def stage_labels(names):
+    """Compile and query stagemap.c; never duplicate its stage assignments."""
+    with tempfile.TemporaryDirectory(prefix="stagemap-audit-") as tmp:
+        binary = str(Path(tmp) / "stagemap")
+        subprocess.run([sys.executable, str(ROOT / "tests/bound.py"), "55",
+                        "cc", "-std=c99", "-Wall", "-Wextra", "-Werror",
+                        str(ROOT / "tests/stagemap.c"), "-o", binary],
+                       check=True, timeout=58)
+        vocabulary = set(subprocess.check_output([binary, "--stages"], text=True, timeout=5).splitlines())
+        raw = subprocess.check_output([binary, "--list"], input="\n".join(names) + "\n",
+                                      text=True, timeout=5)
+    return parse_stage_rows(raw, names, vocabulary)
+
+
+def check_stage_wire():
+    vocabulary = {"E3", "build", "meta"}
+    parse_stage_rows("E3\tx\tbuild,meta\n", ["x"], vocabulary)
+    for wire in ("", "build,build", "meta,build", "build,", "build, meta", "E3", "unknown"):
+        try:
+            parse_stage_rows("E3\tx\t" + wire + "\n", ["x"], vocabulary)
+        except ValueError:
+            continue
+        raise AssertionError("invalid also wire accepted: " + repr(wire))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="audit every base and product suite")
@@ -112,6 +160,8 @@ def main():
         raise ValueError("--com gate list must extend the base list")
     labels = [(name, layer(name)) for name in all_names]
     if args.check:
+        check_stage_wire()
+        stage_labels(all_names)
         inventory = dict.fromkeys(all_names)
         assert list(select(inventory, through="platform")) == all_names
         assert set().union(*(set(select(inventory, exact=k)) for k in LAYERS)) == set(all_names)

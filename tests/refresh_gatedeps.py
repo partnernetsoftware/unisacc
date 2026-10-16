@@ -245,7 +245,7 @@ def main():
         'trees': ['exec', 'include', 'unisa', 'weights/gold']}
     d['suites']['gate-layers'] = {
         'command': ['python3', './tests/gatelayers.py', '--check'],
-        'files': ['tests/gatelayers.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/lib.sh',
+        'files': ['tests/gatelayers.py', 'tests/stagemap.c', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/lib.sh',
                   'tests/seedconstructcheck.py', 'exec/facts/parse-constants.tsv', 'exec/facts/parse-tokens.tsv',
                   'exec/facts/parse-words.tsv', 'exec/facts/parse2-extra.tsv', 'exec/facts/valueranks.tsv'],
         'trees': ['exec/build']}
