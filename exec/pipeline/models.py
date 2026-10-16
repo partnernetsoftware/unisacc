@@ -43,19 +43,24 @@ def closure(h):
     h.update(bytes.fromhex(digest(path)))
     return h
 
-def identity(target, network, compiler):
+def identity(target, network, compiler, native_ua=None):
     exe = pathlib.Path(shutil.which(compiler) or compiler).resolve(strict=True)
     version = subprocess.run([str(exe), '--version'], capture_output=True, timeout=5, check=True)
     h = hashlib.sha256(json.dumps([str(ROOT), target, network, str(exe), digest(exe),
                                   platform.platform(), sys.version, version.stdout.hex()]).encode())
+    if native_ua is not None:
+        for path in (pathlib.Path(native_ua).resolve(strict=True), ROOT/'exec/c/nativecheck.sh', ROOT/'tests/sourceflat.py', ROOT/'tests/export_ref.sh'):
+            h.update(str(path).encode()+b'\0'+bytes.fromhex(digest(path)))
+        h.update(b'native-resources-preparation-v1')
     return closure(h).hexdigest()
 
-def valid(cache, network):
+def valid(cache, network, native_ua=None, target=None):
     try:
         manifest = json.loads((cache / 'manifest.json').read_text())
         required = {'run'} | {s+'.'+ext for s in ('e2','e1','e3','e4','prune','lower','elf')
                              for ext in (('json','tbl','net') if network == '1' else ('json','tbl'))}
         if network == '1': required |= {'models.pkg', 'route.tsv'}
+        if native_ua is not None:required |= {'run-ua','run.'+('pe' if target.startswith('win/') else 'macho' if target.startswith('osx/') else 'elf')}
         if not isinstance(manifest, dict) or set(manifest) != required:
             return False
         for name, value in manifest.items():
@@ -65,17 +70,26 @@ def valid(cache, network):
     except (FileNotFoundError, ValueError):
         return False
 
-def prepare(out, target, network, compiler):
+def prepare(out, target, network, compiler, native_ua=None, require_cached=False):
     start = time.monotonic()
-    key = identity(target, network, compiler)
+    if native_ua is not None:
+        hostos={'Linux':'lnx','Darwin':'osx'}.get(platform.system())
+        hostarch={'x86_64':'x86_64','arm64':'arm64','aarch64':'arm64'}.get(platform.machine())
+        if not hostos or not hostarch or target!=hostos+'/'+hostarch:
+            print('not covered: native resources preparation host/target mismatch',file=sys.stderr)
+            raise SystemExit(2)
+    key = identity(target, network, compiler, native_ua)
     base = pathlib.Path(os.environ.get('UNISACC_MODEL_CACHE', tempfile.gettempdir() + '/unisacc-model-cache'))
     base.mkdir(parents=True, exist_ok=True)
     cache = base / key
     with (base / (key + '.lock')).open('a') as lock:
         if fcntl is None: raise RuntimeError("model construction lock needs fcntl (POSIX); this is a read-only host")
         fcntl.flock(lock, fcntl.LOCK_EX)
-        manifest = valid(cache, network)
+        manifest = valid(cache, network, native_ua, target)
         hit = bool(manifest)
+        if not hit and require_cached:
+            print('NEED_PREPARE native resources: run exec-native-resources-prep',file=sys.stderr)
+            raise SystemExit(75)
         if not hit and os.environ.get('UNISACC_REQUIRE_PREPARED'):
             raise SystemExit('not prepared: run exec-driver-core-prep-0 first (UNISACC_REQUIRE_PREPARED: no construction here)')
         if not hit:
@@ -84,6 +98,11 @@ def prepare(out, target, network, compiler):
                 subprocess.run(['python3', str(ROOT / 'tests/bound.py'), '60', 'sh',
                                 str(ROOT / 'exec/pipeline/prepare.sh'), str(work),
                                 target, network, compiler], cwd=ROOT, check=True)
+                if native_ua is not None:
+                    subprocess.run(['python3', str(ROOT/'tests/bound.py'),'55','sh',str(ROOT/'exec/c/nativecheck.sh'),'--build-prepared',str(work)],cwd=ROOT,env=dict(os.environ,UA=str(pathlib.Path(native_ua).resolve()),TARGET=target),check=True)
+                    keep={'run','run-ua','models.pkg','route.tsv','run.'+('pe' if target.startswith('win/') else 'macho' if target.startswith('osx/') else 'elf')}|{x+'.'+ext for x in ('e2','e1','e3','e4','prune','lower','elf') for ext in ('json','tbl','net')}
+                    for path in work.iterdir():
+                        if path.is_file() and path.name not in keep:path.unlink()
                 manifest = {p.name: digest(p) for p in sorted(work.iterdir()) if p.is_file()}
                 (work / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
                 try: cache.stat()
@@ -101,6 +120,7 @@ def prepare(out, target, network, compiler):
           ('hit' if hit else 'built', target, time.monotonic() - start, key), flush=True)
 
 if __name__ == '__main__':
-    if len(sys.argv) != 5 or sys.argv[3] not in ('0', '1'):
-        raise SystemExit('usage: models.py OUT TARGET NETWORK COMPILER')
-    prepare(pathlib.Path(sys.argv[1]).resolve(), *sys.argv[2:])
+    import argparse
+    p=argparse.ArgumentParser();p.add_argument('out',type=pathlib.Path);p.add_argument('target');p.add_argument('network',choices=('0','1'));p.add_argument('compiler');p.add_argument('--native-ua');p.add_argument('--require-cached',action='store_true');a=p.parse_args()
+    if a.native_ua and a.network!='1':p.error('native resource preparation requires network=1')
+    prepare(a.out.resolve(),a.target,a.network,a.compiler,a.native_ua,a.require_cached)

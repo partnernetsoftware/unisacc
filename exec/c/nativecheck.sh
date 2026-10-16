@@ -13,8 +13,17 @@ case "$(uname -s)/$(uname -m)" in
  *) printf 'UNVERIFIED: required=native-posix observed=%s missing=execution-host target=host\n' "$(uname -s)/$(uname -m)"; exit 77;;
 esac
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
+b() { "$_BOUND" 55 "$@"; }
+# Cache producer callback: reuse the original preparation, with already-built models.
+if [ "${1:-}" = --build-prepared ]; then
+ T=${2:?prepared models directory}; U=$(mktemp -d); trap 'rm -rf "$U"' EXIT
+ b env STAGE_MODELS_READY=1 EXEC_CC=cc NETWORK=1 TARGET="$TARGET" ./exec/pipeline/elf.sh "$T" exec/c/run.c > "$U/log" 2>&1 || { cat "$U/log"; exit 1; }
+ b python3 tests/sourceflat.py "$U/unisacc.c"
+ b "$UA" -O2 "$U/unisacc.c" -o "$U/compiler"
+ b "$U/compiler" -O2 exec/c/run.c -o "$T/run-ua"
+ exit 0
+fi
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { "$_BOUND" 60 "$@"; }
 PART=${NATIVE_PART:-all}
 case $PART in
  all|stages) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
@@ -22,10 +31,18 @@ case $PART in
  resources) INPUTS="exec/c/run.c";;
  *) echo 'unknown NATIVE_PART' >&2; exit 2;;
 esac
+if [ "$PART" = resources ]; then
+ case ${1:---require-cached} in
+  --prepare) b python3 exec/pipeline/models.py "$T" "$TARGET" 1 cc --native-ua "$UA"; echo 'native resources prepared'; exit 0;;
+  --require-cached) b python3 exec/pipeline/models.py "$T" "$TARGET" 1 cc --native-ua "$UA" --require-cached || exit $?;;
+  *) echo 'native resources: expected --prepare or --require-cached' >&2; exit 2;;
+ esac
+else
 b env EXEC_CC=cc NETWORK=1 TARGET="$TARGET" ./exec/pipeline/elf.sh "$T" $INPUTS > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 b python3 tests/sourceflat.py "$T/unisacc.c"
 b "$UA" -O2 "$T/unisacc.c" -o "$T/compiler"
 b "$T/compiler" -O2 exec/c/run.c -o "$T/run-ua"
+fi
 if [ "$PART" = all ] || [ "$PART" = stages ]; then
  b env EXEC_CC="$T/compiler" python3 exec/c/netcheck.py
  b env EXEC_CC="$T/compiler" ./exec/c/neg.sh

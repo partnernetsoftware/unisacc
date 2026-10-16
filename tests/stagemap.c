@@ -56,6 +56,8 @@ static char *rules[] = {
  * The 13 owner-reviewed cases are resolved (bits: C reference migration -> build).
  */
 static char *extra[] = {
+    /* Existing model-cache producer plus native UA artifacts; nativecheck.sh --prepare. */
+    "build", "exec-native-resources-prep", "-",
     /* Same six-target closure assertion, first lane split by source workload; tests/gate.sh. */
     "chain", "stages-1a", "-",
     "chain", "stages-1b", "-",

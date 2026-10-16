@@ -371,7 +371,9 @@ job exec-winx86self-package env SELF_PART=package TARGET=win/x86_64 ./exec/pipel
 job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, relocations, real ARM images
 job exec-winself env SELF_PART=stages TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
 job exec-winself-package env SELF_PART=package TARGET=win/arm64 ./exec/pipeline/selfcheck.sh
-for part in stages chain resources; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
+job exec-native-resources-prep env NATIVE_PART=resources ./exec/c/nativecheck.sh --prepare
+for part in stages chain; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
+job exec-native-resources env NATIVE_PART=resources ./exec/c/nativecheck.sh --require-cached
 job exec-net python3 ./exec/c/netcheck.py
 job exec-codec ./exec/c/codeccheck.sh
 job exec-package ./exec/c/packagecheck.sh
