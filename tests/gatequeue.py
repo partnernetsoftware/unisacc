@@ -153,6 +153,25 @@ def gate_runner():
     keep = [l for l in text.splitlines() if not re.match(r'\s*(job |for .*; do .*job |\[ .*\] \|\| job )', l)]
     return hashlib.sha256('\n'.join(keep).encode()).hexdigest()
 
+def file_identity(name):
+    """One declared input's identity, in git's terms.  A tracked symlink (mode 120000) is identified by its target
+    string and is never followed: git stores the link's content, and a link to a directory must not reach the
+    regular-file guard (ujs/cloudflare -> ujs/practice/cloudflare).  A dangling link is still a link.  Any other
+    non-regular entry stays refused by name; a missing path is 'missing'.  Regular files keep the 0.0.31 mode rule:
+    only the execute bit is content (a 0600 copy of a 0644 file voided half the queue across worktrees)."""
+    try:
+        lst = os.lstat(name)
+    except FileNotFoundError:
+        return ['missing']
+    if stat.S_ISLNK(lst.st_mode):
+        return [0o120000, hashlib.sha256(os.readlink(name).encode('utf-8', 'surrogateescape')).hexdigest()]
+    if not stat.S_ISREG(lst.st_mode): raise SystemExit('queue nonregular input: '+name)
+    h = hashlib.sha256()
+    with open(name, 'rb') as f:
+        for block in iter(lambda:f.read(1024*1024), b''): h.update(block)
+    return [0o100755 if lst.st_mode & 0o111 else 0o100644, h.hexdigest()]
+
+
 def fingerprint(jobs, parts=None, revoked=()):
     """One tree inventory and one hash per file, shared by all suite stamps.
 
@@ -165,18 +184,7 @@ def fingerprint(jobs, parts=None, revoked=()):
     files = {}
     def digest(name):
         if name not in files:
-            p = pathlib.Path(name)
-            try:
-                mode = p.stat().st_mode
-                if not stat.S_ISREG(mode): raise SystemExit('queue nonregular input: '+name)
-                h = hashlib.sha256()
-                with p.open('rb') as f:
-                    for block in iter(lambda:f.read(1024*1024), b''): h.update(block)
-                # git's view of a mode: only the execute bit is content (cdx/cc 0.0.31: a 0600 copy of a
-                # 0644 file voided half the queue across worktrees)
-                files[name] = [0o100755 if mode & 0o111 else 0o100644, h.hexdigest()]
-            except FileNotFoundError:
-                files[name] = ['missing']
+            files[name] = file_identity(name)
         return files[name]
     declaration = 'tests/gatedeps.json'
     manifest = json.loads(pathlib.Path(declaration).read_text()) if digest(declaration) != ['missing'] else {}

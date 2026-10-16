@@ -227,6 +227,7 @@ job watchdog-eof sh ./tests/watchdogregression.sh eof tests/bound.py
 job watchdog-success sh ./tests/watchdogregression.sh success tests/bound.py
 job stagelog python3 ./tests/stagelogcheck.py
 job exittable python3 ./tests/exittablecheck.py
+job gatequeue-symlink python3 ./tests/gatequeuesymlinkcheck.py   # tracked-symlink input identity (120000, never followed)
 job h1source python3 ./tests/h1sourcecheck.py   # 0.0.40 (机房主任 22:45 A/C): build_candidate settles its H1 table before any write or make
 job attemptchain python3 ./tests/attemptchaincheck.py   # 0.0.39 WF5: offline attempt-chain replay
 job c99precheck python3 ./tests/c99precheckcheck.py   # 0.0.39 WF1: dynamic-route PRECHECK parsing and shard map
