@@ -58,4 +58,6 @@ rm -f "$T/launches"; printf '0\n' > "$T/rcs"
 env -u QUEUE_START -u QUEUE_SELFTEST QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-g" QUEUE_STATE="$T/q-g" UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out-g" 2>&1; grc=$?
 [ "$grc" = 2 ] && grep -q 'another queue.sh is running' "$T/out-g" || fail "singleton guard did not refuse beside a live queue.sh: rc=$grc $(cat "$T/out-g")"
 kill -0 $stub 2>/dev/null || fail "an unrelated gatequeue.py was killed by a selftest queue.sh"
+# rc 142 settlement (gatequeue): a truncated attempt is pending, a full-budget attempt is terminal, a retry needs a full window
+python3 "$R/tests/gatequeuetimeoutcheck.py" > "$T/settle.out" 2>&1 || fail "rc142 settlement self-check: $(tail -n 3 "$T/settle.out")"
 echo "queuetimeout  real queue.sh: one window ending 142 exits 142 with no second window; watchdog 142 to the window cap exits 142 (logged, state kept); an outer kill 124 stops at once with 124 (state kept); 142 then a completed window is 0; 75/142 then a red window is that red rc; a timed-out admitted start is never recorded as a refusal"

@@ -153,6 +153,18 @@ def gate_runner():
     keep = [l for l in text.splitlines() if not re.match(r'\s*(job |for .*; do .*job |\[ .*\] \|\| job )', l)]
     return hashlib.sha256('\n'.join(keep).encode()).hexdigest()
 
+def retry_admissible(left, span):
+    """A retry (the second, solo attempt after a 142) starts only with a full window's budget; otherwise it waits for the
+    next window, first.  A retry given the window remainder would be a truncated attempt, not a full one."""
+    return left >= span - 3
+
+
+def rc142_settles(kind, limit, span):
+    """A rc 142 is a terminal result only for an attempt that had a full-window budget (limit >= span-4) and was not a
+    tail fill.  A cut (tail, or any attempt with the remainder only) is pending, never a terminal TIMEOUT."""
+    return kind != 'tail' and limit >= span - 4
+
+
 def file_identity(name):
     """One declared input's identity, in git's terms.  A tracked symlink (mode 120000) is identified by its target
     string and is never followed: git stores the link's content, and a link to a directory must not reach the
@@ -757,7 +769,9 @@ def main():
                 # 0.0.35 P12: a job deferred out of a tail runs only at a full window, first (rc4 tools-1 was
                 # deferred twice, from 13 s and 36 s tails: 49 s of slot time lost)
                 full = set(data.get('fullwindow', []))
+                retried_now = set(data.get('retried', []))
                 fits = [n for n in pending if estimate(n) <= left-1 and (n not in full or left >= span-3)
+                        and (n not in retried_now or retry_admissible(left, span))
                         and all(p not in jobs or p in data['results'] for p in PREDS.get(n, ()))]
                 if not fits: break
                 first = [n for n in fits if n in full]
@@ -803,7 +817,7 @@ def main():
                 log.close(); elapsed = time.monotonic()-t
                 progress = True
                 kind = data.get('inflight', {}).get(n, {}).get('kind', 'full')
-                if rc == 142 and kind == 'tail':
+                if rc == 142 and not rc142_settles(kind, limit, span):
                     # A late fill used only the window remainder, not a full
                     # attempt. Keep it pending and give it an early slot next.
                     # 0.0.38 P3: deferring a job that already had its early slot is not progress
