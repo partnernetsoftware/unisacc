@@ -9,10 +9,25 @@ from models import digest
 TARGETS=tuple(re.search(r'^TARGETS="([^"]+)"$',(ROOT/'tests/closure.sh').read_text(),re.M).group(1).split())
 def need(reason):
  print('NEED_PREPARE closure target artifacts: '+str(reason),file=sys.stderr);raise SystemExit(75)
-p=argparse.ArgumentParser();p.add_argument('--prepare',action='store_true');p.add_argument('--target',choices=TARGETS);p.add_argument('--require-cached',action='store_true');p.add_argument('files',nargs='+');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--prepare',action='store_true');p.add_argument('--target',choices=TARGETS);p.add_argument('--require-cached',action='store_true');p.add_argument('--source-part');p.add_argument('--source-cuts');p.add_argument('files',nargs='+');a=p.parse_args()
 if a.prepare==a.require_cached or (a.require_cached and not a.target) or (a.prepare and a.target):p.error('choose --prepare or --target TARGET --require-cached')
 files=a.files
 if len(files)!=len(set(files)) or len({pathlib.Path(n).stem for n in files})!=len(files):p.error('duplicate source or basename')
+# Selection changes the assertion workload only; preparation identity remains full-source.
+consume_files=files
+if a.prepare and (a.source_part is not None or a.source_cuts is not None):p.error('source selection is consumption only')
+if a.source_cuts is not None and a.source_part is None:p.error('source-cuts requires source-part')
+if a.source_part is not None:
+ match=re.fullmatch(r'([1-9][0-9]*)/([1-9][0-9]*)',a.source_part)
+ if not match:p.error('source-part must be K/N with positive integers')
+ try:
+  part,parts=map(int,match.groups())
+  cuts=[int(v) for v in a.source_cuts.split(',')] if a.source_cuts is not None else [len(files)*i//parts for i in range(1,parts)] if parts<=len(files) else []
+ except ValueError:p.error('source selection contains an invalid integer')
+ if not 1<=part<=parts<=len(files):p.error('source-part is out of range or would select an empty group')
+ if len(cuts)!=parts-1 or any(not 0<x<len(files) for x in cuts) or any(x>=y for x,y in zip(cuts,cuts[1:])):p.error('source-cuts must be N-1 strictly increasing interior boundaries')
+ boundaries=[0,*cuts,len(files)];consume_files=files[boundaries[part-1]:boundaries[part]]
+ if not consume_files:p.error('source selection is empty')
 ua=pathlib.Path(os.environ.get('UA','/tmp/ua_ref')).resolve()
 try:ua.stat()
 except FileNotFoundError:need('reference compiler absent; supply same-source UA')
@@ -73,5 +88,5 @@ if a.prepare:
 folder=verify(a.target)
 with tempfile.TemporaryDirectory(prefix='closure-target-consume-') as td:
  scratch=pathlib.Path(td);shutil.copytree(folder,scratch/'artifacts');env=dict(os.environ,UA=str(ua),_CLOSURE_ARTIFACT_DIR=str(scratch/'artifacts'),_CLOSURE_REPLAY='1',_CLOSURE_TARGET=a.target);env.pop('_CLOSURE_CAPTURE',None)
- q=subprocess.run([sys.executable,str(ROOT/'tests/bound.py'),'10','bash',str(ROOT/'tests/closure.sh'),*files],cwd=ROOT,env=env)
+ q=subprocess.run([sys.executable,str(ROOT/'tests/bound.py'),'10','bash',str(ROOT/'tests/closure.sh'),*consume_files],cwd=ROOT,env=env)
  raise SystemExit(q.returncode)
