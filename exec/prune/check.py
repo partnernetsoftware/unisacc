@@ -12,7 +12,7 @@ from unisa.prune import prune_text
 
 def sha(x):return hashlib.sha256(x).hexdigest()
 # prune-*.tsv opcode/register facts were expanded from unisa.tape at this digest (was exec/prune/gen.py)
-SCHEMA_SHA='2008f75dfb75ecd52509ecb3e0b6536796691003451bbdffc28071d906e3cf42'
+SCHEMA_SHA='9a339c66dec4da07c6dcf9090fbf19b172cf62e795e41d025c600c63b5d8e5f5'
 def schema():
  from unisa.tape import SHAPE,REGS
  if sha(json.dumps({'shape':SHAPE,'regs':REGS},sort_keys=True,separators=(',',':')).encode())!=SCHEMA_SHA:raise SystemExit('prune table schema stale: review opcode/register facts')
@@ -58,6 +58,7 @@ def main():
  for name,raw in controls.items():
   p=ns.output/(name+'.tape');p.write_bytes(raw);samples.append(p)
  leading=ns.output/'bss-leadingzeros.tape';leading.write_bytes(base.replace(b'dead:\n',b'.bss data 001024\ndead:\n'));samples.append(leading)
+ libraryfn=ns.output/'libraryfn.tape';libraryfn.write_bytes(base.replace(b'main:\n',b'main:\n  .libraryfn r0, 1\n'));samples.append(libraryfn)
  records=[]
  assert ns.start>=0 and ns.count>0 and ns.start<len(samples),'empty qualification slice'
  # Missing input must fail explicitly, never count as a successful comparison.
