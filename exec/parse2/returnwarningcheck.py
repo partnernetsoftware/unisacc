@@ -9,17 +9,23 @@ sys.path.insert(0,str(R/'exec/c'));from refsource import source_text,compile_com
 from compilerpack import built_model
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import run
+import argparse
+ap=argparse.ArgumentParser();ap.add_argument('--require-cached',action='store_true');ap.add_argument('--tools-dir',type=pathlib.Path,default=os.environ.get('UNISACC_WARN_TOOLS'));ap.add_argument('--int-conversion',action='store_true');ap.add_argument('--unused',action='store_true');ap.add_argument('--format',action='store_true');ap.add_argument('--shard');options=ap.parse_args()
 
 def call(args):
     p=run(args);assert p.returncode==0,(p.args,p.returncode,p.stderr[-1200:]);return p.stdout
 
 with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
     t=pathlib.Path(td)
-    source=source_text(R)
-    (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
-    call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
-    for name,script,flag in [('pp','build/gen.py','pp --locations'),('lex','build/gen.py','lex --locations'),('parse','build/gen.py','parse2 --warnings'),('plain','build/gen.py','parse2 --locations')]:
-        built_model(t,name,R/'exec'/script,flag.split())   # shared content-keyed cache (compilerpack), digest-verified on hit
+    specs=[('pp',['pp','--locations']),('lex',['lex','--locations']),('parse',['parse2','--warnings']),('plain',['parse2','--locations'])]
+    if options.require_cached:
+        from warnprep import cached_inputs
+        runner,reference=cached_inputs(t,specs,options.tools_dir,'return warnings')
+    else:
+        source=source_text(R)
+        (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
+        call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run']);runner=t/'run';reference=t/'ref'
+        for name,flags in specs:built_model(t,name,R/'exec/build/gen.py',flags)
     cases=[('empty','int f(void){}'),('void','void f(void){}'),('main',''),
            ('return','int f(void){return 1;}'),('if-only','int f(int x){if(x)return 1;}'),
            ('if-else','int f(int x){if(x)return 1;else return 2;}'),
@@ -189,14 +195,14 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
             expected=b'' if name=='float-truth' else b'1.5 2.5\n'
             call(['cc','-O0',f,'-o',t/'truth'])
             assert call([t/'truth'])==expected
-            assert call([t/'ref',f,'-run'])==expected
-        ref=run([t/'ref',f,'-Wall','-S','-o','-']);assert ref.returncode==0,(name,ref.stderr)
-        pp=call([t/'run',t/'pp.net',f,f,R/'include']);(t/'pp').write_bytes(pp)
-        tok=call([t/'run',t/'lex.net',t/'pp']);(t/'tokens').write_bytes(tok)
-        got=run([t/'run',t/'parse.net',t/'tokens',f])
+            assert call([reference,f,'-run'])==expected
+        ref=run([reference,f,'-Wall','-S','-o','-']);assert ref.returncode==0,(name,ref.stderr)
+        pp=call([runner,t/'pp.net',f,f,R/'include']);(t/'pp').write_bytes(pp)
+        tok=call([runner,t/'lex.net',t/'pp']);(t/'tokens').write_bytes(tok)
+        got=run([runner,t/'parse.net',t/'tokens',f])
         assert got.returncode==0,(name,got.stderr)
-        baseline=run([t/'run',t/'plain.net',t/'tokens',f])
-        quiet=run([t/'ref',f,'-S','-o','-']);assert quiet.returncode==0,(name,quiet.stderr)
+        baseline=run([runner,t/'plain.net',t/'tokens',f])
+        quiet=run([reference,f,'-S','-o','-']);assert quiet.returncode==0,(name,quiet.stderr)
         assert baseline.returncode==0 and baseline.stdout==quiet.stdout and not baseline.stderr,(name,'quiet tape')
         assert got.stdout==ref.stdout,(name,'warning tape')
         assert ref.stdout==quiet.stdout,(name,'-Wall changed tape')

@@ -2,7 +2,9 @@
 """Located parser error/recovery results against the actual reference CLI."""
 import os,pathlib,subprocess,sys,tempfile
 R=pathlib.Path(__file__).resolve().parents[2]
-warnings='--warnings' in sys.argv
+import argparse
+ap=argparse.ArgumentParser();ap.add_argument('--warnings',action='store_true');ap.add_argument('--require-cached',action='store_true');ap.add_argument('--tools-dir',type=pathlib.Path,default=os.environ.get('UNISACC_WARN_TOOLS'));options=ap.parse_args()
+warnings=options.warnings
 ref_flags=['-Wall'] if warnings else []
 sys.path.insert(0,str(R/'exec/c'));from pack import build
 from compilerpack import built_model
@@ -13,10 +15,15 @@ def call(args):
  p=run(args);assert p.returncode==0,(p.args,p.returncode,p.stderr[-2000:]);return p.stdout
 with tempfile.TemporaryDirectory(prefix='parser-errors-') as td:
  t=pathlib.Path(td)
- call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
- for name,script,flags in [('pp','build/gen.py',['pp','--locations']),('lex','build/gen.py',['lex','--locations']),('parse','build/gen.py',(['parse2','--warnings','--errors'] if warnings else ['parse2','--errors']))]:
-  built_model(t,name,R/'exec'/script,flags)   # shared content-keyed cache (compilerpack), digest-verified on hit
-  call([t/'run','--check-net',t/(name+'.tbl'),t/(name+'.net')])
+ specs=[('pp',['pp','--locations']),('lex',['lex','--locations']),('parse',(['parse2','--warnings','--errors'] if warnings else ['parse2','--errors']))]
+ if options.require_cached:
+  from warnprep import cached_inputs
+  runner,reference=cached_inputs(t,specs,options.tools_dir,'parser errors')
+ else:
+  call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run']);runner=t/'run';reference=pathlib.Path(os.environ.get('UA','/tmp/ua_ref'))
+  for name,flags in specs:built_model(t,name,R/'exec/build/gen.py',flags)
+ for name,flags in specs:
+  call([runner,'--check-net',t/(name+'.tbl'),t/(name+'.net')])
  route=t/'route.tsv';route.write_text('error\te2\tsource\tpp\tpp.net\nerror\te1\tpp\ttokens\tlex.net\nerror\te3\ttokens\ttape\tparse.net\n')
  resources=t/'cli';resources.mkdir();(resources/'error-limit').write_bytes(b'')
  pkg=t/'pkg'
@@ -38,28 +45,28 @@ with tempfile.TemporaryDirectory(prefix='parser-errors-') as td:
  for name,src in cases:
   f=t/(name+'.c');f.write_text(src)
   pkg.write_bytes(build([route],[('00636c692f',resources),('006864722f',R/'include')]))
-  got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
-  ref=run([os.environ.get('UA','/tmp/ua_ref'),*ref_flags,'-t','lnx/x86_64',f,'-o','-'])
+  got=run([runner,'--bundle',pkg,'error',f,f,R/'include'])
+  ref=run([reference,*ref_flags,'-t','lnx/x86_64',f,'-o','-'])
   expected_err=ref.stderr.replace(b'UNCOVERED\tref.parse\t',b'UNCOVERED\te3\t',1) if name=='complex' else ref.stderr
   assert (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,expected_err),(name,got.returncode,ref.returncode,got.stderr,expected_err)
   print('parser errors',name,'full result identical',flush=True)
  f=t/'struct-return.c';f.write_text('typedef struct { int a; int b; } T;\nstatic T mk(int n){T t;t.a=n;t.b=n;return t;}\nstatic T g(int n){return mk(n);}\nint main(void){return g(2).a-2;}\n')
- got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
- ref=run([os.environ.get('UA','/tmp/ua_ref'),*ref_flags,'-t','lnx/x86_64',f,'-o','-'])
+ got=run([runner,'--bundle',pkg,'error',f,f,R/'include'])
+ ref=run([reference,*ref_flags,'-t','lnx/x86_64',f,'-o','-'])
  assert ref.returncode==0 and (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,ref.stderr),(got.returncode,ref.returncode,got.stderr,ref.stderr)
  print('parser errors struct-return call full result identical',flush=True)
  for limit in ('1','2','0','3','20'):
   f=t/'limit.c';f.write_text(cases[3][1])
   (resources/'error-limit').write_text(limit)
   pkg.write_bytes(build([route],[('00636c692f',resources),('006864722f',R/'include')]))
-  got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
-  ref=run([os.environ.get('UA','/tmp/ua_ref'),*ref_flags,'-ferror-limit='+limit,'-t','lnx/x86_64',f,'-o','-'])
+  got=run([runner,'--bundle',pkg,'error',f,f,R/'include'])
+  ref=run([reference,*ref_flags,'-ferror-limit='+limit,'-t','lnx/x86_64',f,'-o','-'])
   assert (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,ref.stderr),(limit,got.stderr,ref.stderr)
   print('error limit',limit,'full result identical',flush=True)
  f=t/'unsupported.c';f.write_text('int main(void){int arr[2];int *p; p=&arr[1]\n*p=0;return arr[1];}\n')
  (resources/'error-limit').write_bytes(b'')
  pkg.write_bytes(build([route],[('00636c692f',resources),('006864722f',R/'include')]))
- got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
+ got=run([runner,'--bundle',pkg,'error',f,f,R/'include'])
  assert got.returncode==1 and not got.stdout and b':2:3: error: not covered: pointer arithmetic' in got.stderr,got
  assert got.stderr.endswith(b'1 error generated.\n')
  print('prototype limitation retains its reason and gains a location; not reference-equivalence evidence')
@@ -69,14 +76,14 @@ with tempfile.TemporaryDirectory(prefix='parser-errors-') as td:
  for name,src in [('wide-size','int main(void){return sizeof(L"ab");}\n'),
                   ('wide-global','int *p=L"ab"; int main(void){return 0;}\n')]:
   f=t/(name+'.c');f.write_text(src)
-  got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
+  got=run([runner,'--bundle',pkg,'error',f,f,R/'include'])
   assert got.returncode==0 and got.stdout and not got.stderr,(name,got.returncode,got.stderr)
  print('supported wide prefixes: 2 accepted without diagnostics; semantics checked by language gate')
  # Rejected token syntax must not be parsed again merely to locate its error.
  for name,src in [('utf16-size','int main(void){return sizeof(u"ab");}\n'),
                   ('utf16-global','int *p=u"ab"; int main(void){return 0;}\n')]:
   f=t/(name+'.c');f.write_text(src)
-  got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
+  got=run([runner,'--bundle',pkg,'error',f,f,R/'include'])
   assert got.returncode==1 and not got.stdout,(name,got.returncode,got.stderr)
   assert b'error: not covered: string prefix' in got.stderr,(name,got.stderr)
   assert (str(f)+':1:'+str(src.index('u"')+1)+':').encode() in got.stderr,got.stderr

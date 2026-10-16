@@ -335,9 +335,10 @@ job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual refere
 # warnprep fills the shared content-keyed cache (compilerpack.built_model, digest-checked
 # on hit); the checks still self-build on a miss, so queue order does not matter.
 for g in 0 1 2 3; do job exec-warnprep-$g python3 ./exec/parse2/warnprep.py $g; done
-job exec-errors python3 ./exec/parse2/errorcheck.py
-job exec-errors-warn python3 ./exec/parse2/errorcheck.py --warnings
-job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py  # first warning kind and FP conditions
+job exec-warnprep-tools python3 ./exec/parse2/warnprep.py --tools
+job exec-errors python3 ./exec/parse2/errorcheck.py --require-cached
+job exec-errors-warn python3 ./exec/parse2/errorcheck.py --warnings --require-cached
+job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py --require-cached  # first warning kind and FP conditions
 job exec-intwarn python3 ./exec/parse2/returnwarningcheck.py --int-conversion
 job exec-unusedwarn python3 ./exec/parse2/returnwarningcheck.py --unused
 job exec-formatwarn0 python3 ./exec/parse2/returnwarningcheck.py --format --shard 0/2
