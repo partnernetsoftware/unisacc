@@ -12,6 +12,29 @@ CHAIN = "UNISACC_BOUND_CHAIN"
 # reaped cannot hold the wall clock.  The root cause of the 889 s case is NOT located; this only makes the
 # cleanup finite and visible.  Outcome is unchanged: a timeout is always 142, and an unreaped child is never green.
 STOP_SECS = float(os.environ.get('UNISACC_BOUND_STOP_SECS', '10'))
+# One absolute deadline covers command wait plus cleanup, not N then another ten seconds.
+# With scale=1, the scheduled process budget is N+2s (external startup allowance: 1s).
+TOTAL_EXTRA_SECS = 2.0
+PS_CALL_SECS = 0.5
+_TOTAL_DEADLINE = None
+
+class CleanupTimeout(Exception):
+    pass
+
+def cleanup_deadline():
+    local = time.monotonic() + STOP_SECS
+    return local if _TOTAL_DEADLINE is None else min(local, _TOTAL_DEADLINE)
+
+def ps_output(argv, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CleanupTimeout('cleanup budget exhausted before ps')
+    try:
+        return subprocess.check_output(argv, text=True, stderr=subprocess.DEVNULL,
+                                       timeout=min(PS_CALL_SECS, remaining))
+    except subprocess.TimeoutExpired:
+        raise CleanupTimeout('cleanup ps timed out') from None
+
 # Test-only injection (tests/boundcheck.py): skip the SIGKILLs so the direct child stays stopped.  This exercises the
 # unreaped path on Linux; it is NOT a real uninterruptible (D state) child.
 TEST_NO_KILL = os.environ.get('UNISACC_BOUND_TEST_NO_KILL') == '1'
@@ -60,7 +83,8 @@ def scoped_pids(token, deadline=None):
                 if item.startswith(needle) and token.encode() in item:
                     found.add(int(name)); break
     else:
-        out = subprocess.run(['ps', '-axwwE', '-o', 'pid=,command='], capture_output=True, text=True).stdout
+        out = ps_output(['ps', '-axwwE', '-o', 'pid=,command='],
+                        cleanup_deadline() if deadline is None else deadline)
         for line in out.splitlines():
             if CHAIN + '=' in line and token in line:
                 found.add(int(line.split(None, 1)[0]))
@@ -71,7 +95,9 @@ def stop(process, code, token=None):
     # Cleanup must not be interrupted after descendants have been stopped.
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, signal.SIG_IGN)
-    deadline = time.monotonic() + STOP_SECS
+    deadline = cleanup_deadline()
+    effective_stop_budget = max(0.0, deadline - time.monotonic())
+    failure = None
     mark('stop begin')
     owned = {process.pid}
     def send(pid, sig):
@@ -84,10 +110,7 @@ def stop(process, code, token=None):
         rounds = 0
         while time.monotonic() < deadline:
             rounds += 1
-            rows = subprocess.check_output(
-                ['/bin/ps', '-axo', 'pid=,ppid='], text=True,
-                stderr=subprocess.DEVNULL,
-            ).splitlines()
+            rows = ps_output(['/bin/ps', '-axo', 'pid=,ppid='], deadline).splitlines()
             added = False
             for row in rows:
                 pid, parent = map(int, row.split())
@@ -98,6 +121,8 @@ def stop(process, code, token=None):
             mark('tree round %d owned=%d' % (rounds, len(owned)))
             if not added:
                 break
+    except CleanupTimeout as error:
+        failure = str(error)
     except (OSError, subprocess.CalledProcessError, ValueError):
         # A restricted host may deny ps. The child still owns a new process
         # group, so kill that group even when descendant enumeration fails.
@@ -114,14 +139,23 @@ def stop(process, code, token=None):
     # c43: anything in this scope (orphaned, setsid'd or nested) carries the token; freeze, then kill all of them
     for n in range(50):
         if time.monotonic() >= deadline: break
-        fresh = scoped_pids(token, deadline) - owned
+        try:
+            fresh = scoped_pids(token, deadline) - owned
+        except CleanupTimeout as error:
+            failure = failure or str(error)
+            break
         if not fresh: break
         owned |= fresh
         for pid in fresh: send(pid, signal.SIGSTOP)
         mark('scope loop %d fresh=%d' % (n + 1, len(fresh)))
     mark('scope loop end')
     if not TEST_NO_KILL:
-        for pid in scoped_pids(token, deadline) | owned:
+        try:
+            final = scoped_pids(token, deadline)
+        except CleanupTimeout as error:
+            failure = failure or str(error)
+            final = set()
+        for pid in final | owned:
             send(pid, signal.SIGKILL)
     mark('final SIGKILL sweep')
     # Finite reap: poll (WNOHANG through Popen.poll) until the deadline, never an unbounded wait.
@@ -129,10 +163,14 @@ def stop(process, code, token=None):
         time.sleep(0.05)
     mark('reap finished')
     if process.poll() is None:
-        state, wchan = describe(process.pid)
+        state, wchan = describe(process.pid) if time.monotonic() < deadline else ('?', '?')
         sys.stderr.write('bound: unreaped pid %d (state %s, wchan %s) after %.1fs stop budget\n'
-                         % (process.pid, state, wchan, STOP_SECS))
+                         % (process.pid, state, wchan, effective_stop_budget))
         sys.stderr.flush()
+    if failure:
+        sys.stderr.write('bound: '+failure+' (not green)\n')
+        sys.stderr.flush()
+        return 142
     return code
 
 
@@ -149,6 +187,9 @@ def main():
     if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 60:
         print('bound: timeout must be 1..60 seconds, followed by a command', file=sys.stderr)
         return 2
+    global _TOTAL_DEADLINE
+    command_budget = int(sys.argv[1]) * scale()
+    _TOTAL_DEADLINE = time.monotonic() + command_budget + TOTAL_EXTRA_SECS
     token = secrets.token_hex(8)
     env = dict(os.environ)
     env[CHAIN] = (env.get(CHAIN, "") + " " + token).strip()
@@ -159,7 +200,8 @@ def main():
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     try:
-        rc = process.wait(timeout=int(sys.argv[1]) * scale())
+        remaining = max(0.0, _TOTAL_DEADLINE - TOTAL_EXTRA_SECS - time.monotonic())
+        rc = process.wait(timeout=remaining)
     except subprocess.TimeoutExpired:
         return stop(process, 142, token)
     # The direct child may exit while background children remain in its session.
@@ -171,13 +213,17 @@ def main():
     # Kill everything carrying this scope's token.  The cleanup has the same total budget as stop() (defensive,
     # 0b7e7920 covered only the timeout path; 447 s after a rc0 exit was seen, research note: normal-exit tail).
     # A cleanup that runs out of budget is reported and is not green: the command rc is replaced by 142.
-    deadline = time.monotonic() + STOP_SECS
+    deadline = cleanup_deadline()
     mark('normal exit: cleanup begin')
-    for pid in scoped_pids(token, deadline):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    try:
+        for pid in scoped_pids(token, deadline):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except CleanupTimeout as error:
+        sys.stderr.write('bound: '+str(error)+' (not green)\n')
+        return 142
     mark('normal exit: cleanup scan end')
     if time.monotonic() >= deadline:
         sys.stderr.write('bound: cleanup after normal exit unfinished after %.1fs budget (not green)\n' % STOP_SECS)
