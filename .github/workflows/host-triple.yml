@@ -1,0 +1,155 @@
+# Proposed destination: .github/workflows/host-triple.yml
+# Manual current-source proof only; no product pack or release.
+name: Current-source native triple (Linux ARM64)
+"on":
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Approved full 40-hex source commit (not a branch or product seal)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  native-source-triple:
+    timeout-minutes: 5
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_TARGET: lnx/arm64
+      EXPECTED_SYSTEM: Linux
+      EXPECTED_MACHINE: aarch64
+      TRIPLE_EVIDENCE: ${{ runner.temp }}/native-triple-linux-arm64-evidence
+      UNISACC_MODEL_CACHE: ${{ runner.temp }}/native-triple-linux-arm64-cache
+      TMPDIR: ${{ runner.temp }}/native-triple-linux-arm64-tmp
+      UNISACC_TIME_SCALE: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      CFLAGS: '-O2'
+    steps:
+      - name: Validate full source commit before checkout
+        run: |
+          python3 - <<'PY'
+          import os,re,sys
+          if not re.fullmatch('[0-9a-fA-F]{40}',os.environ['SOURCE_SHA']):
+              sys.exit('SOURCE_SHA must be a full 40-hex commit')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Pin source and native runner; no candidate/product input
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,platform,re,shutil,subprocess,sys
+          out=pathlib.Path(os.environ['TRIPLE_EVIDENCE']);out.mkdir(parents=True,exist_ok=True)
+          for name in ('UNISACC_MODEL_CACHE','TMPDIR'):
+              pathlib.Path(os.environ[name]).mkdir(parents=True,exist_ok=True)
+          source=os.environ['SOURCE_SHA']
+          if not re.fullmatch('[0-9a-fA-F]{40}',source):
+              sys.exit('SOURCE_SHA must be a full commit, not a branch')
+          head=subprocess.check_output(['git','rev-parse','HEAD']).decode().strip()
+          if head.lower()!=source.lower():sys.exit('SOURCE_IDENTITY_MISMATCH')
+          if subprocess.check_output(['git','status','--porcelain']):sys.exit('SOURCE_TREE_DIRTY')
+          if (platform.system(),platform.machine())!=(os.environ['EXPECTED_SYSTEM'],os.environ['EXPECTED_MACHINE']):
+              sys.exit('PLATFORM_UNVERIFIED unexpected native runner')
+          cc=pathlib.Path(shutil.which('cc')).resolve(strict=True)
+          rec={'source_sha':head,'workflow_sha':os.environ.get('GITHUB_WORKFLOW_SHA'),
+               'run_id':os.environ.get('GITHUB_RUN_ID'),'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
+               'runner_label':os.environ.get('RUNNER_NAME'),'runner_image':os.environ.get('ImageVersion'),
+               'platform':list(platform.uname()),'target':os.environ['EXPECTED_TARGET'],
+               'cc_path':str(cc),'cc_sha256':hashlib.sha256(cc.read_bytes()).hexdigest(),
+               'cc_version':subprocess.check_output([str(cc),'--version'],timeout=5).decode(),
+               'cc_target':subprocess.check_output([str(cc),'-dumpmachine'],timeout=5).decode().strip(),
+               'bound_scale':os.environ['UNISACC_TIME_SCALE'],'scope':'CURRENT_SOURCE_CLASSIC_ONLY_NOT_PRODUCT_PACK'}
+          (out/'source-runner.json').write_text(json.dumps(rec,indent=2)+'\n')
+          PY
+      - name: Prepare U0 once; preparation is not a test
+        env:
+          TRIPLE_PHASE: prepare
+          TRIPLE_BOUND: '55'
+        run: &observe_original_entry |
+          python3 - <<'PY'
+          import json,os,pathlib,resource,subprocess,sys,time
+          out=pathlib.Path(os.environ['TRIPLE_EVIDENCE']);out.mkdir(parents=True,exist_ok=True)
+          phase=os.environ['TRIPLE_PHASE'];limit=int(os.environ['TRIPLE_BOUND'])
+          env=dict(os.environ)
+          for key in ('UA','UA_RUN','MODEL_COM','TOOLS_UA','CORPUS_UA','CC','BOUND_CACHE',
+                      'UNISACC_BOUND_STOP_SECS','UNISACC_BOUND_TEST_NO_KILL'):
+              env.pop(key,None)
+          env['UNISACC_TIME_SCALE']='1'
+          argv=[sys.executable,'tests/bound.py',str(limit),'sh','tests/nativeboot.sh']
+          argv+=['--host-triple-prepare'] if phase=='prepare' else ['--host-triple',phase]
+          start=time.monotonic();cpu0=resource.getrusage(resource.RUSAGE_CHILDREN)
+          with (out/(phase+'.stdout.log')).open('wb') as stdout, (out/(phase+'.stderr.log')).open('wb') as stderr:
+              # Existing bound owns timeout/signals/descendant cleanup; this is a log wrapper only.
+              rc=subprocess.run(argv,env=env,stdout=stdout,stderr=stderr).returncode
+          cpu1=resource.getrusage(resource.RUSAGE_CHILDREN);seconds=time.monotonic()-start
+          row={'phase':phase,'argv':argv,'raw_rc':rc,'bound':limit,'scale':1,
+               'seconds_monotonic':seconds,'cpu_user':cpu1.ru_utime-cpu0.ru_utime,
+               'cpu_system':cpu1.ru_stime-cpu0.ru_stime,'preparation_not_test':phase=='prepare',
+               'target_debt_over_5s':phase!='prepare' and seconds>5}
+          (out/(phase+'.record.json')).write_text(json.dumps(row,indent=2)+'\n')
+          if rc:sys.exit(rc)  # 75/77/142 remain failure; no continue-on-error or synthetic PASS.
+          if seconds>limit:sys.exit('HOST_TRIPLE_STEP_BUDGET_EXCEEDED; raw_rc preserved in record')
+          PY
+      - name: host-triple-u0 (verify prepared U0; never build)
+        env:
+          TRIPLE_PHASE: u0
+          TRIPLE_BOUND: '10'
+        run: *observe_original_entry
+      - name: host-triple-n1 (U0 compiles the same SELF)
+        env:
+          TRIPLE_PHASE: n1
+          TRIPLE_BOUND: '10'
+        run: *observe_original_entry
+      - name: host-triple-n2 (N1 compiles the same SELF)
+        env:
+          TRIPLE_PHASE: n2
+          TRIPLE_BOUND: '10'
+        run: *observe_original_entry
+      - name: host-triple-n3 (N2 compiles; original two byte comparisons)
+        env:
+          TRIPLE_PHASE: n3
+          TRIPLE_BOUND: '10'
+        run: *observe_original_entry
+      - name: Collect original metadata and three hashes even on failure
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          out=pathlib.Path(os.environ['TRIPLE_EVIDENCE']);out.mkdir(parents=True,exist_ok=True)
+          cache=pathlib.Path(os.environ['UNISACC_MODEL_CACHE']);summaries=[];sidecars=[]
+          for phase in ('prepare','u0','n1','n2','n3'):
+              record=out/(phase+'.record.json')
+              summaries.append(json.loads(record.read_text()) if record.is_file() else {'phase':phase,'status':'NOT_RUN'})
+          for source in sorted(cache.glob('host-triple-*/*.json')):
+              # Metadata only: no U0/N compiler or raw SELF publication.
+              dest=out/'prepared-metadata'/source.parent.name/source.name;dest.parent.mkdir(parents=True,exist_ok=True)
+              dest.write_bytes(source.read_bytes());sidecars.append({'path':str(dest.relative_to(out)),
+                  'sha256':hashlib.sha256(dest.read_bytes()).hexdigest()})
+          images={}
+          n3=out/'n3.stdout.log'
+          if n3.is_file():
+              for line in n3.read_text(errors='replace').splitlines():
+                  try:observed=json.loads(line)
+                  except ValueError:continue
+                  if isinstance(observed,dict) and observed.get('phase')=='n3':images=observed.get('images',{})
+          (out/'three-images.sha256').write_text(''.join(images[name]+'  '+name+'\n' for name in ('N1','N2','N3') if name in images))
+          (out/'collection.json').write_text(json.dumps({'steps':summaries,'observed_images':images,
+              'metadata':sidecars,'scope':'OBSERVATION_ONLY; ORIGINAL_N3_ENTRY_OWNS_COMPARISONS'},indent=2)+'\n')
+          manifest={p.relative_to(out).as_posix():{'bytes':p.stat().st_size,
+                    'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+                    for p in sorted(out.rglob('*')) if p.is_file() and p.name!='EVIDENCE.json'}
+          (out/'EVIDENCE.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          PY
+      - name: Upload logs and identity metadata (never release binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-triple-linux-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TRIPLE_EVIDENCE }}/
+          if-no-files-found: error
+          retention-days: 14
