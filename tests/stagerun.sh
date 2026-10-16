@@ -5,7 +5,14 @@
 # Needs UA, UNISACC_FFI_X86_PROVIDER; MODEL_COM defaults to the snapshot's unisacc.com; JOBS default 4.
 # Run it directly (not under term.sh): each window is its own term.sh hand-off.
 # Prints the queue line per window; exit 0 all green, 1 a failure, 2 usage.
-[ $# -ge 1 ] || { echo 'usage: tests/stagerun.sh STAGE...' >&2; exit 2; }
+plan_only=0
+if [ "${1:-}" = --plan-only ]; then plan_only=1; shift; fi
+[ $# -ge 1 ] || { echo 'usage: tests/stagerun.sh [--plan-only] STAGE...' >&2; exit 2; }
+# Preserve the user's stage arguments before the original mapper replaces argv.
+stage_args=$(mktemp "${TMPDIR:-/tmp}/stagerun-stages.XXXXXX") || exit 2
+trap 'rm -f "$stage_args"' EXIT
+printf '%s\n' "$@" > "$stage_args"
+
 R=$(cd "$(dirname "$0")/.." && pwd); head=$(git -C "$R" rev-parse HEAD) || exit 2
 snap=${TMPDIR:-/tmp}/unisacc-stage-$(echo "$head" | cut -c1-12)
 if [ ! -d "$snap/.git" ]; then
@@ -22,6 +29,18 @@ cd "$snap" || exit 2
 com=${MODEL_COM:-$snap/unisacc.com}
 set --  $(UNISACC_FFI_X86_PROVIDER=LIST ./tests/gate.sh --list --com | "$com" -run tests/stagemap.c -- --stage "$@") || exit 2
 [ $# -gt 0 ] || { echo 'stagerun: no suites selected' >&2; exit 2; }
+# Delegate recommendations to the same planner, but keep the legacy mapper's
+# actual execution set. A subshell preserves that original argv exactly.
+(
+  for n in "$@"; do set -- "$@" --actual-suite "$n"; done
+  # Drop the leading legacy names; retain only their explicit comparison options.
+  while [ "$#" -gt 0 ] && [ "$1" != --actual-suite ]; do shift; done
+  while IFS= read -r stage; do set -- "$@" --stage "$stage"; done < "$stage_args"
+  env UNISACC_TIME_SCALE=1 python3 "$R/tests/bound.py" 5 python3 "$R/tests/gateselect.py" --root "$snap" \
+    --com --tier dev --base "$head" --head "$head" --shadow-report --comparison-label legacy-stage "$@"
+) || echo 'stagerun: gateselect shadow UNAVAILABLE (5s budget or planning refusal); legacy selection retained' >&2
+printf 'stagerun legacy: suites=%s names=%s\n' "$#" "$*"
+[ "$plan_only" -eq 0 ] || exit 0
 sel=""; for n in "$@"; do sel="$sel --suite $n"; done
 state=$snap/.stagestate-$(echo "$sel" | cksum | cut -d' ' -f1)
 log=$state.log; : > "$log"; n=0

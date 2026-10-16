@@ -487,6 +487,28 @@ def real_plan(root, request, policy_path, tier, filters):
     return selected
 
 
+def shadow_report(plan, actual, gate_log=None, label="commitgate"):
+    """Observation only: neither this report nor missing observations select jobs."""
+    require(plan.get("status") == "PLAN_ONLY", "shadow-needs-plan")
+    expected = list(dict.fromkeys(actual))
+    observed = expected
+    if gate_log is not None:
+        observed = list(dict.fromkeys(re.findall(r"^([A-Za-z0-9_.-]+)[ \t]+rc=[ \t]*[0-9]+[ \t]", gate_log, re.M)))
+    recommended = set(plan["suites"])
+    missing = [n for n in observed if n not in recommended]
+    unseen = [n for n in expected if n not in observed]
+    coverage = "NO" if missing else "UNKNOWN" if gate_log is not None and (unseen or not observed) else "YES"
+    prefix = "gateselect shadow: "
+    return "\n".join([
+        prefix + "tier=%s recommendation-only coverage=NOT_ASSESSED" % plan["tier"],
+        prefix + "recommended[%d]=%s" % (len(plan["suites"]), ",".join(plan["suites"])),
+        prefix + "changed-closure[%d]=%s" % (len(plan["affected"]), ",".join(plan["affected"])),
+        prefix + "comparison=%s actual[%d]=%s" % (label, len(observed), ",".join(observed)),
+        prefix + "recommended-covers-actual=%s missing=%s unobserved=%s" % (coverage, ",".join(missing) or "-", ",".join(unseen) or "-"),
+        prefix + "recommended-only=%s" % (",".join(n for n in plan["suites"] if n not in set(observed)) or "-"),
+    ]) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--fixture', type=Path)
@@ -500,8 +522,14 @@ def main():
     ap.add_argument('--path', action='append', default=[])
     ap.add_argument('--com', action='store_true')
     ap.add_argument('--verify', type=Path); ap.add_argument('--out', type=Path)
+    ap.add_argument('--shadow-report', action='store_true')
+    ap.add_argument('--actual-suite', action='append', default=[])
+    ap.add_argument('--gate-log', type=Path)
+    ap.add_argument('--comparison-label', choices=('commitgate', 'legacy-stage'), default='commitgate')
     a = ap.parse_args()
     try:
+        require(not (a.actual_suite or a.gate_log or a.comparison_label != 'commitgate') or a.shadow_report, 'shadow-options-need-report')
+        require(not a.shadow_report or not a.verify, 'shadow-verify-conflict')
         policy_path = a.policy.resolve()
         if a.fixture:
             f = json.loads(a.fixture.read_text()); p = parse_policy(policy_path.read_text())
@@ -519,8 +547,12 @@ def main():
         text = json.dumps(result, indent=2) + '\n'
         if a.out:
             a.out.write_text(text)
-        else:
+        elif not a.shadow_report:
             print(text, end='')
+        if a.shadow_report:
+            print(shadow_report(result, a.actual_suite,
+                                a.gate_log.read_text(errors='replace') if a.gate_log is not None else None,
+                                a.comparison_label), end='')
     except (SelectionError, ValueError, OSError, KeyError, TypeError, AttributeError) as e:
         ap.exit(2, 'gateselect: ' + str(e) + '\n')
 

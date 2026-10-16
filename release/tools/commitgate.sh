@@ -84,7 +84,22 @@ print(h.hexdigest())
 PY_SNAP
 }
 before=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; }
-"$R/release/tools/checkrun.sh" "$log" -- "$gate" ${suites[@]+"${suites[@]}"} || { rc=$?; echo "commitgate: gate rc=$rc, nothing committed (log $log)" >&2; exit 1; }
+"$R/release/tools/checkrun.sh" "$log" -- "$gate" ${suites[@]+"${suites[@]}"}; gate_rc=$?
+# Shadow only. The existing selected suites, exit status, coverage and derived gate
+# remain authoritative. Scratch self-tests have no real gate universe to compare.
+if [ "$top" = "$R" ] && [ "${COMMITGATE_SELFTEST:-}" != 1 ]; then
+  shadow_actual=(); shadow_paths=()
+  for n in "${suites[@]}"; do [ "$n" = --suite ] || shadow_actual+=(--actual-suite "$n"); done
+  for p in "$@"; do shadow_paths+=(--path "$p"); done
+  if ! env UNISACC_TIME_SCALE=1 python3 "$R/tests/bound.py" 5 python3 "$R/tests/gateselect.py" --root "$R" \
+      --com --tier dev --base HEAD --head HEAD --worktree "${shadow_paths[@]}" \
+      --shadow-report --gate-log "$log" "${shadow_actual[@]}" --out "$log.shadow.json"; then
+    echo "commitgate: gateselect shadow UNAVAILABLE (5s budget or planning refusal); original gate rc=$gate_rc" >&2
+  fi
+else
+  echo "commitgate: gateselect shadow UNAVAILABLE (scratch self-test; original gate retained)"
+fi
+[ "$gate_rc" -eq 0 ] || { echo "commitgate: gate rc=$gate_rc, nothing committed (log $log)" >&2; exit 1; }
 after=$(snap "$@") || { echo "commitgate: cannot snapshot inputs" >&2; exit 2; }
 [ "$before" = "$after" ] || { echo "commitgate: inputs changed while the gate ran ($before -> $after), nothing committed (log $log)" >&2; exit 4; }
 # 0.0.43 step 4 (research/c43-derived-consistency.md): the derived files of the committed paths must agree with their

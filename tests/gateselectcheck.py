@@ -292,12 +292,12 @@ class SelectorTests(unittest.TestCase):
         self.assertTrue((source_root / "tests/bound.py").is_file(), "test tool inputs missing")
         with tempfile.TemporaryDirectory(prefix="gateselect-adapter-test-") as tmp:
             root=Path(tmp);(root/"tests").mkdir();(root/"release/tools").mkdir(parents=True)
-            for rel in ["tests/bound.py","tests/bound.c","tests/bound","tests/gatedecl.py","tests/gatelayers.py","release/tools/derivedcheck.py"]:
+            for rel in ["tests/bound.py","tests/bound.c","tests/bound","tests/gatedecl.py","tests/gatelayers.py","release/tools/derivedcheck.py","tests/stagerun.sh","tests/gateselect.py"]:
                 shutil.copy2(source_root/rel,root/rel)
             names=["gate-layers","script-inventory","checkrun","stage-contract-e1e3","cli","exec-lower","abi-manifest","exec-elf"]
             raw=b"".join(n.encode()+b"\0"+b"2\0fixture-runner\0"+n.encode()+b"\0" for n in names)
-            gate=root/"tests/gate.sh";gate.write_text("#!/bin/sh\nprintf '"+"".join("\\%03o"%v for v in raw)+"'\n")
-            mapper = '#include <stdio.h>\n#include <string.h>\nint main(void){char n[256];while(fgets(n,sizeof n,stdin)){n[strcspn(n,"\\n")]=0;printf("meta\\t%s\\t-\\n",n);}return 0;}\n'
+            gate=root/"tests/gate.sh";gate.write_text("#!/bin/sh\ncase $* in *--list*) printf '%s\\n' "+" ".join(names)+"; exit 0;; esac\nprintf '"+"".join("\\%03o"%v for v in raw)+"'\n");gate.chmod(0o755)
+            mapper = '#include <stdio.h>\n#include <string.h>\nint main(int argc,char**argv){int stage=0;for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--stage"))stage=1;char n[256];while(fgets(n,sizeof n,stdin)){n[strcspn(n,"\\n")]=0;if(stage)puts(n);else printf("meta\\t%s\\t-\\n",n);}return 0;}\n'
             (root/"tests/stagemap.c").write_text(mapper)
             decl={"families":{"F":{"files":["known.h"]}},"suites":{n:{"command":["fixture-runner",n],"files":[]} for n in names}}
             decl["suites"]["exec-lower"].update(family="F",files=["own.h"])
@@ -317,6 +317,26 @@ class SelectorTests(unittest.TestCase):
             self.assertEqual(plan,m.real_plan(root,req,policy,"dev",{}))
             full=m.real_plan(root,req,policy,"candidate",{})
             self.assertEqual(full["suites"],names)
+            # Exercise the real stagerun shell around a fixture mapper, without queues.
+            subprocess.run(["cc",str(root/"tests/stagemap.c"),"-o",str(root/"mapper")],check=True,capture_output=True,timeout=5)
+            product=root/"fixture-product";product.write_text('#!/bin/sh\n[ "$1" = -run ] || exit 2\nshift 2\n[ "$1" = -- ] && shift\nexec "'+str(root/'mapper')+'" "$@"\n');product.chmod(0o755)
+            temp=root/"tmp";temp.mkdir()
+            env.update(MODEL_COM=str(product),TMPDIR=str(temp),UNISACC_TIME_SCALE="1")
+            command=["sh",str(root/"tests/stagerun.sh"),"--plan-only","meta"]
+            observed=subprocess.run(command,cwd=root,env=env,capture_output=True,timeout=10)
+            self.assertEqual(observed.returncode,0,observed.stderr)
+            expected_line="stagerun legacy: suites=8 names="+" ".join(names)
+            self.assertIn(expected_line,observed.stdout.decode())
+            self.assertIn(b"recommended-covers-actual=YES",observed.stdout)
+            # Refusal and timeout are information only: legacy selection is identical.
+            for body in ("raise SystemExit(2)\n", "import time;time.sleep(30)\n"):
+                (root/"tests/gateselect.py").write_text(body)
+                observed=subprocess.run(command,cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(observed.returncode,0,observed.stderr)
+                self.assertIn(expected_line,observed.stdout.decode())
+                self.assertIn(b"shadow UNAVAILABLE",observed.stderr)
+            self.assertFalse(list(temp.glob("**/.stagestate-*")),"plan-only created queue state")
+
 
     def test_paper_alias_expansion(self):
         for alias, targets in P["aliases"].items():
@@ -370,6 +390,44 @@ class SelectorTests(unittest.TestCase):
             elif field=="reasons":q[field]["lex"]=[]
             else:q[field]="forged"
             self.rejects(lambda:m.verify(q,f,P),"mismatch")
+
+    def test_shadow_report_observed_coverage(self):
+        p=self.plan()
+        report=m.shadow_report(p,["parse","checkrun"],"parse rc=0 1s :: ok\ncheckrun rc=1 0s :: red\n")
+        self.assertIn("recommended-covers-actual=YES",report)
+        self.assertIn("changed-closure[1]=parse",report)
+        self.assertIn("coverage=NOT_ASSESSED",report)
+        self.assertIn("recommended-covers-actual=NO",m.shadow_report(p,["platform"],"platform rc=0 0s :: ok\n"))
+
+    def test_shadow_report_partial_is_not_yes(self):
+        p=self.plan()
+        for log in ("gate suites 2 failed 0\n", "parse rc=0 1s :: ok\n"):
+            self.assertIn("recommended-covers-actual=UNKNOWN",m.shadow_report(p,["parse","checkrun"],log))
+        self.assertIn("unobserved=checkrun",m.shadow_report(p,["parse","checkrun"],"parse rc=0 1s :: ok\n"))
+
+    def test_shadow_report_legacy_does_not_select(self):
+        p=self.plan(stages=["E3"]);old=copy.deepcopy(p)
+        report=m.shadow_report(p,["parse"],label="legacy-stage")
+        self.assertEqual(p,old)
+        self.assertIn("comparison=legacy-stage actual[1]=parse",report)
+        self.assertIn("recommended-only=",report)
+        self.rejects(lambda:m.shadow_report(self.plan(tier="inspect"),[]),"shadow-needs-plan")
+
+    def test_shadow_cli_delegates_same_plan(self):
+        import subprocess,tempfile
+        with tempfile.TemporaryDirectory(prefix="selector-shadow-") as t:
+            t=Path(t);f=t/"fixture.json";f.write_text(json.dumps(fixture()))
+            policy=t/"policy.tsv";policy.write_text(POLICY_TEXT)
+            log=t/"gate.log";log.write_text("parse rc=0 1s :: ok\n")
+            output=t/"plan.json"
+            argv=[sys.executable,str(B/"tests/gateselect.py"),"--fixture",str(f),"--policy",str(policy),"--shadow-report","--gate-log",str(log),"--actual-suite","parse","--out",str(output)]
+            p=subprocess.run(argv,capture_output=True,timeout=5)
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertIn(b"recommended-covers-actual=YES",p.stdout)
+            self.assertEqual(json.loads(output.read_text()),self.plan())
+            q=subprocess.run([*argv,"--verify",str(output)],capture_output=True,timeout=5)
+            self.assertEqual(q.returncode,2)
+            self.assertIn(b"shadow-verify-conflict",q.stderr)
 
     def test_exhaustive_five_job_affected_masks(self):
         f=fixture(); candidates=["lex","parse","lower","abi","platform"]
