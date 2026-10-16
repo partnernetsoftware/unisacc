@@ -50,10 +50,17 @@ with tempfile.TemporaryDirectory() as d:
  else:raise AssertionError('duplicate insert accepted')
  h.on('SRC',[0],'E',[],'b')
  F.install_template(h,d,'t',{},fresh,section='m')
- assert 'E' not in h.st and h.st['E.copy'] is h.st['E.moved']
+ assert 'E' not in h.st and h.st['E.copy']==h.st['E.moved'] and h.st['E.copy'] is not h.st['E.moved']
+ # copy contract (ccb0ecc3): an independent row clone; a copy edit must not reach the source
+ snap=repr(h.st['E.moved']); cc_=h.st['E.copy'][1]; cc_[99]=('X',0)
+ assert 99 not in h.st['E.moved'][1] and repr(h.st['E.moved'])==snap
+ del cc_[99]
  assert h.st['SRC'][1][0][0]=='E'  # move is intentionally not a target rewrite
  F.install_template(h,d,'t',{},fresh,section='q')
- assert h.st['E.dest'] is h.st['E.copy']
+ assert h.st['E.dest']==h.st['E.copy'] and h.st['E.dest'] is not h.st['E.copy']
+ snap=repr(h.st['E.copy']); dd=h.st['E.dest'][1]; dd[98]=('X',0)
+ assert 98 not in h.st['E.copy'][1] and repr(h.st['E.copy'])==snap
+ del dd[98]
  z=type(M.g)();z.on('R',[0,1],'W',[('MARK','tpos'),('PUSH','OLD')],'r')
  F.install_template(z,d,'t',{},fresh,section='p')
  assert 'CONT' in z.labels and z.st['R.copy'][0]=='r'
