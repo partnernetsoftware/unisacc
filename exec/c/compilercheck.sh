@@ -10,6 +10,8 @@ b() { "$_BOUND" 60 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) echo 'unsupported test host' >&2; exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 TARGET=$OS/$ARCH; export TARGET
+# resources-* never construct: they need the prep-0..3 jobs (gateorder.json) to have cached the models first
+case ${1:-all} in resources-macros|resources-headers|resources-printf|resources-isolated) export UNISACC_REQUIRE_PREPARED=1; REQ=--require-cached;; *) REQ=;; esac
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 b python3 exec/build/gen.py opt "$T/o1.json"
 b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
@@ -33,8 +35,8 @@ prep-1|prep-2|prep-3)
 esac
 # Model construction in the three PREP_PARTS groups (compilerpack.py, buildcompiler pack-prep-K), each bounded at 55 s
 # on its own; the package step below then reads the cache.  One cold bounded step cannot hold all of them (1210-bank).
-for k in 1 2 3; do "$_BOUND" 55 python3 exec/c/compilerpack.py --prepare-only --part "$k/3" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || exit 1; done
-b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
+for k in 1 2 3; do "$_BOUND" 55 python3 exec/c/compilerpack.py $REQ --prepare-only --part "$k/3" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || { [ -z "$REQ" ] || echo "not prepared: run exec-driver-core-prep-$k first" >&2; exit 1; }; done
+b python3 exec/c/compilerpack.py $REQ --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
 case ${1:-all} in all|core|core-modes|core-contracts|core-dependencies|resources|resources-macros|resources-headers|resources-printf|resources-isolated)
 b cc -O2 -Wall -Wextra exec/c/compiler.c -o "$T/driver-cc"
 b "$UA" -O2 exec/c/compiler.c -o "$T/driver-ua"

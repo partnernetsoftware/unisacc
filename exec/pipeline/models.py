@@ -76,6 +76,8 @@ def prepare(out, target, network, compiler):
         fcntl.flock(lock, fcntl.LOCK_EX)
         manifest = valid(cache, network)
         hit = bool(manifest)
+        if not hit and os.environ.get('UNISACC_REQUIRE_PREPARED'):
+            raise SystemExit('not prepared: run exec-driver-core-prep-0 first (UNISACC_REQUIRE_PREPARED: no construction here)')
         if not hit:
             work = pathlib.Path(tempfile.mkdtemp(prefix=key + '.build-', dir=base))
             try:
