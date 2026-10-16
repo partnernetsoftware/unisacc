@@ -1519,3 +1519,9 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 - dev 快反馈裁定：按策略表取变更归属阶段及下游、窄目录/family直接声明、冒烟及前驱；仅整根树/产品传递/未知声明回退延后至merge，并在PLAN列出排除。dev明确FAST_FEEDBACK_NOT_PROOF，merge全A与candidate全集不变。未知输入归属与门元数据仍保守全清单。
 
 - dev 直接输入还包括 gate.sh 既有 argv 解析后直接点名的仓内文件，不论该门是否有GD条目；仅精确路径命中，同名不同目录不命中。无GD的约145门仍是声明债，收口后按真实读集补，不由选择器猜测全读集。
+
+
+<!-- c43 classic declaration width narrow fix -->
+Classic 声明续项须从同一 DeclSpecSnapshot 恢复声明说明符返回的元素宽度与类型归属；指针数组的存储宽度不得泄漏到逗号后的声明符。该参考路径与模型产品分账，仓外最小探针已证 main/new UA 同错，系统 cc 为48。
+
+同一声明快照也拥有初始化目标：表达式内 cast/sizeof/复合字面量解析不得改写目标的结构大小、指针或类型归属。结构返回值初始化的拷贝长度取求值前快照，求值后恢复同一声明工作态。

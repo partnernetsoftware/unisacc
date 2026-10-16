@@ -3625,6 +3625,7 @@ int cprec(int k) {
    initialized separately for each name. Never use the global scratch snapshot
    as the lifetime owner of a declaration: initializers can parse nested types. */
 typedef struct {
+    int element_width; /* declaration owner captures declspec() return, distinct from sizeof */
     int declbase;
     int declbool;
     int declenum;
@@ -3650,6 +3651,7 @@ typedef struct {
     int declbytes;
 } DeclSpecSnapshot;
 void declspec_save(DeclSpecSnapshot *s) {
+    s->element_width = declbase; /* default for non-declaration scratch snapshots */
     s->declbase = declbase;
     s->declbool = declbool;
     s->declenum = declenum;
@@ -3700,6 +3702,7 @@ void declspec_restore(DeclSpecSnapshot *s) {
     declbytes = s->declbytes;
 }
 void declspec_copy(DeclSpecSnapshot *dst, DeclSpecSnapshot *src_) {
+    dst->element_width = src_->element_width;
     dst->declbase = src_->declbase;
     dst->declbool = src_->declbool;
     dst->declenum = src_->declenum;
@@ -5280,16 +5283,20 @@ int block_prototype(int t, int w) {
 
 int local_decl_in(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool; int tdhere; int lreg;
-    DeclSpecSnapshot spec; DeclSpecSnapshot proto;
+    DeclSpecSnapshot spec; DeclSpecSnapshot proto; DeclSpecSnapshot init;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
     lflt0 = declflt; lbool = declbool; /* initializers may contain type names */
     lstat = declstatic; lreg = declreg;
     declspec_save(&spec);
+    spec.element_width = w;
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declspec_restore(&spec);
+        w = spec.element_width;
+        sst = spec.declstruct;
+        lfpret = 0;
         declsymreg = lreg;   /* every declarator of this declaration, comma-continued ones too */
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
@@ -5388,6 +5395,7 @@ int local_decl_in(void) {
             else { if (declptr == 0) { if (sst >= 0) {
                 symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symelem[nsym - 1] = declsz; } } }
             if (eat(tidx("=", 1))) {
+                declspec_save(&init);
                 /* once, at program start: into __init, like a global's */
                 lk2 = dkind(lflt0);
                 initflt = valuekind(ew, declpd, declunsigned, lflt0, declbool);
@@ -5402,6 +5410,7 @@ int local_decl_in(void) {
                     es("  @mem.lea r1, ls"); en(slabel); ec(10);
                     if (sptr) estore(8); else estore(w); } }
                 toinit = 0;
+                declspec_restore(&init);
             }
             if (eat(tidx(",", 1))) continue;
             break;
@@ -5496,17 +5505,20 @@ int local_decl_in(void) {
                 symkind[nsym - 1] = 3;
                 if (eat(tidx("=", 1))) {
                     int cpn; cpn = 0 - 1;
+                    declspec_save(&init);
                     if (cur() == tidx("(", 1)) cpn = cplit();
                     if (cpn >= 0 || cur() == tidx("{", 1)) {
-                        initaggr(0, 0, off, w, sst, declsz);
+                        declspec_restore(&init);
+                        initaggr(0, 0, off, w, sst, init.declsz);
                         while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
                     } else {
                         /* `struct S b = a;` -- a whole-struct copy */
                         eframe(0, 0, off);
                         push(); expr(); loadval();
                         es("  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -8\n");
-                        scopy(declsz);
+                        scopy(init.declsz);
                     }
+                    declspec_restore(&init);
                 }
                 if (eat(tidx(",", 1))) continue;
                 break;
@@ -5520,6 +5532,7 @@ int local_decl_in(void) {
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
             int lk; int lptr; int lpd;
+            declspec_save(&init);
             lk = dkind(lflt0);
             /* Whether the thing being initialised is a POINTER, taken now:
                the initialiser can contain a type name of its own -- a
@@ -5552,6 +5565,7 @@ int local_decl_in(void) {
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 eframe(1, 2, off);
                 if (lptr) estore(8); else estore(w); } }
+            declspec_restore(&init);
         }
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
@@ -6071,9 +6085,12 @@ int unit(void) {
         gstruct = declstruct;
         gflt0 = declflt; gbool = declbool;
         declspec_save(&spec);
+        spec.element_width = w;
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declspec_restore(&spec);
+            w = spec.element_width;
+            gstruct = spec.declstruct;
             declstruct = gstruct;
             decldim2 = 0; decldim3 = 0; declfp = declspecfp;
             declptr = declspecptr; declpd = declspecpd;
