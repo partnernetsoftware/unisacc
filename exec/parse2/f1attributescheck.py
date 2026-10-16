@@ -1,4 +1,5 @@
 """F1 attribute marks: E1 sidecar and E3 tape against the C reference."""
+import argparse
 import json
 import pathlib
 import struct
@@ -11,6 +12,14 @@ sys.path.insert(0, str(ROOT / "exec" / "pp"))
 sys.path.insert(0, str(ROOT / "exec"))
 import sim
 import assemble
+sys.path.insert(0, str(ROOT / "exec" / "c"))
+import compilerpack
+
+ap = argparse.ArgumentParser(description=__doc__)
+ap.add_argument('--require-cached', action='store_true')
+ap.add_argument('--ua', required=True, type=pathlib.Path)
+options = ap.parse_args()
+compilerpack.REQUIRE_CACHED = options.require_cached
 
 
 class Files:
@@ -23,10 +32,17 @@ class Files:
 
 
 def model(stage, path, *flags):
-    subprocess.run([sys.executable, str(ROOT / "exec" / "build" / "gen.py"),
-                    stage, str(path), *flags], cwd=ROOT, check=True,
-                   stdout=subprocess.DEVNULL, timeout=40)
-    delta = json.loads(path.read_text())
+    names = {"pp": "warnpp-shared", "lex": "warnlex", "parse2": "errorparse"}
+    name = names[stage]
+    try:
+        compilerpack.built_model(path.parent, name, ROOT / "exec/build/gen.py",
+                                 [stage, *flags], want_json=True)
+    except ValueError as error:
+        prep = "exec-driver-core-prep-2" if stage == "parse2" else "exec-driver-core-prep-3"
+        print("NEED_PREPARE F1 attributes: " + str(error) + "; run " + prep, file=sys.stderr)
+        raise SystemExit(75)
+    # Adapt only this private decoded copy; never rewrite the cached JSON.
+    delta = json.loads((path.parent / (name + ".json")).read_text())
     delta["states"]["HALT"] = ["b", {}]
     if stage == "lex":
         delta["seqs"] = [[["ALUI", "add", a[1], a[1], 1] if a[0] == "INC" else a
@@ -36,9 +52,12 @@ def model(stage, path, *flags):
 
 with tempfile.TemporaryDirectory(prefix="f1-attributes-") as td:
     tmp = pathlib.Path(td)
-    ref = tmp / "ua"
-    subprocess.run([str(ROOT / "tests" / "build_ref.sh"), str(tmp / "ua.c"), str(ref)],
-                   cwd=ROOT, check=True, stdout=subprocess.DEVNULL, timeout=40)
+    ref = options.ua.resolve()
+    try:
+        ref.stat()
+    except FileNotFoundError:
+        print("NEED_PREPARE F1 attributes: reference UA missing: " + str(ref), file=sys.stderr)
+        raise SystemExit(75)
     e2 = model("pp", tmp / "e2.json", "--locations", "--shared-predefines")
     e1 = model("lex", tmp / "e1.json", "--locations")
     e3 = model("parse2", tmp / "e3.json", "--errors")

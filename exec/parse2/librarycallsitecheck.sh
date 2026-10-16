@@ -1,6 +1,11 @@
 #!/bin/sh
 # E3 callsite model only. Reuse typed reader's cache/tools owner; cold steps are explicit.
 set -eu
+# Consumption is strictly prepared-only; this explicit flag cannot prepare.
+if [ "${1:-}" = --require-cached ]; then
+ shift
+ case ${1:-check} in --*) echo 'require-cached: prepare options forbidden' >&2; exit 2;; esac
+fi
 R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 B=$("$R/tests/bound" --helper)
 b(){ "$B" 55 "$@"; }
@@ -14,7 +19,9 @@ seal(){ (cd "$D" && sha256sum "$@" >"$STEP.sha256"); }
 case ${1:-check} in
 --cache-dir) printf '%s\n' "$D";exit 0;;
 --prepare-tools)
- b sh exec/parse2/librarytypedreadercheck.sh --prepare-tools
+ if ! { [ -r "$BASE/tools.sha256" ] && (cd "$BASE" && sha256sum -c --status tools.sha256); }; then
+  b sh exec/parse2/librarytypedreadercheck.sh --prepare-tools
+ fi
  (cd "$BASE" && sha256sum -c --status tools.sha256)
  cp "$BASE/gen" "$BASE/runner" "$D/"
  b cc -O2 -w exec/c/run.c -o "$D/run"

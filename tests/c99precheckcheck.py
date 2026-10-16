@@ -96,10 +96,14 @@ for bad in ('', 'difftest_o SHARD=1/1 probes=3  agree 9   wrong 0   refuse 0   k
     assert all(x['got'] == 'unproven' and not x['ok'] for x in u.values()), (bad, u)
 # an inherited PROBES never narrows a formal run: without WF1_PRECHECK=1 difftest_o keeps the whole shard
 import os
+probe = 'tests/c/fb12-31-unused-static-refs-undefined.c'
+probe_suites = P.shard_of(probe)
+assert probe_suites is not None, 'precheck control probe missing'
+probe_k = probe_suites[0].removeprefix('difftest_o-')
 full = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
-                      env=dict(os.environ, SH_N='4', SH_K='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
+                      env=dict(os.environ, SH_N=str(P.SHARDS), SH_K=probe_k, PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
 narrow = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
-                        env=dict(os.environ, SH_N='4', SH_K='1', WF1_PRECHECK='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
+                        env=dict(os.environ, SH_N=str(P.SHARDS), SH_K=probe_k, WF1_PRECHECK='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
 assert int(full) > 1 and narrow == '1', (full, narrow)
 # Shell-internal failures cannot be hidden by a valid-looking final echo.
 with tempfile.TemporaryDirectory() as tmp:

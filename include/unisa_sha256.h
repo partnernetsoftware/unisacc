@@ -4,7 +4,10 @@
    Allocation-free (cx.h is compiled by the product's trimmed libc): full blocks are read from the input, the padded
    tail is at most two blocks on the stack.  Byte output unisa_sha256, hex output unisa_sha256_hex.
    Checked against the standard vectors (empty, abc, million-a) in both the cx and product paths. */
+#if !__UNISA_FTRIM_LIBC || __UN_unisa_rotr
 static unsigned long unisa_rotr(unsigned long x, int k) { return ((x >> k) | (x << (32 - k))) & 0xffffffffUL; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_unisa_sha256_block
 static void unisa_sha256_block(unsigned long h[8], const unsigned char *b) {
     static const unsigned long k[64] = {
         0x428a2f98UL,0x71374491UL,0xb5c0fbcfUL,0xe9b5dba5UL,0x3956c25bUL,0x59f111f1UL,0x923f82a4UL,0xab1c5ed5UL,
@@ -36,6 +39,8 @@ static void unisa_sha256_block(unsigned long h[8], const unsigned char *b) {
     h[0] = (h[0] + a) & 0xffffffffUL; h[1] = (h[1] + bb) & 0xffffffffUL; h[2] = (h[2] + c) & 0xffffffffUL; h[3] = (h[3] + d) & 0xffffffffUL;
     h[4] = (h[4] + e) & 0xffffffffUL; h[5] = (h[5] + f) & 0xffffffffUL; h[6] = (h[6] + g) & 0xffffffffUL; h[7] = (h[7] + hh) & 0xffffffffUL;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_unisa_sha256
 static void unisa_sha256(const void *in, size_t len, unsigned char md[32]) {
     const unsigned char *msg = (const unsigned char *)in;
     unsigned long h[8] = {0x6a09e667UL,0xbb67ae85UL,0x3c6ef372UL,0xa54ff53aUL,0x510e527fUL,0x9b05688cUL,0x1f83d9abUL,0x5be0cd19UL};
@@ -53,10 +58,13 @@ static void unisa_sha256(const void *in, size_t len, unsigned char md[32]) {
     if (nt == 128) unisa_sha256_block(h, tail + 64);
     for (i = 0; i < 8; i++) { md[4*i] = (unsigned char)(h[i] >> 24); md[4*i+1] = (unsigned char)(h[i] >> 16); md[4*i+2] = (unsigned char)(h[i] >> 8); md[4*i+3] = (unsigned char)h[i]; }
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_unisa_sha256_hex
 static void unisa_sha256_hex(const void *in, size_t len, char hex[65]) {
     unsigned char md[32]; int i;
     unisa_sha256(in, len, md);
     for (i = 0; i < 32; i++) { hex[2*i] = "0123456789abcdef"[md[i] >> 4]; hex[2*i+1] = "0123456789abcdef"[md[i] & 15]; }
     hex[64] = 0;
 }
+#endif
 #endif

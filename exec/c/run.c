@@ -925,9 +925,15 @@ int main(int argc, char **argv) {
         RI_SNAP_ON = 1;
     }
     if (run_out) {   /* consumer capture: a new (empty) directory, distinct from the snapshot, with the consumer's own header */
-        char err[512]; struct stat sa, sb;
+        char err[512];
         if (!run_stage) { fprintf(stderr, "run: --capture-out needs --stage\n"); return 2; }
+#if !defined(_WIN32) && !defined(__UNISA__)
+        /* Same platform contract as rl_snapshot_load: unsupported builds have
+           already returned its named refusal before reaching this guard. */
+        { struct stat sa, sb;
         if (run_snap && !stat(run_snap, &sa) && !stat(run_out, &sb) && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) { fprintf(stderr, "run: INTERFACE_ERROR snapshot-output-same-path\n"); return 2; }
+        }
+#endif
         if (rf_capture_begin(run_out, run_stage, in.b, in.n, err, sizeof err)) { fprintf(stderr, "run: %s\n", err); return 2; }
         rf_capture_set = run_out;
     }

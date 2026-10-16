@@ -276,10 +276,37 @@ CLOSURE_C1_B=$(( (2 * CLOSURE_C1_N + 2) / 3 ))
 job closure-c1a ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C1" | awk -v a="$CLOSURE_C1_A" 'NR<=a')
 job closure-c1b ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C1" | awk -v a="$CLOSURE_C1_A" -v b="$CLOSURE_C1_B" 'NR>a && NR<=b')
 job closure-c1c ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C1" | awk -v b="$CLOSURE_C1_B" 'NR>b')
-job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # remaining lanes retain their original modulo-4 inputs
-job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==3')
-job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
-for k in 1 2 3; do job stages-$k SHARD=$k/3 ./tests/stages.sh examples/*.c tests/c/*.c; done   # R4: 50.4/53 s whole
+CLOSURE_C2=$(printf '%s\n' "$TC" | awk 'NR%4==2')
+CLOSURE_C2_N=$(printf '%s\n' "$CLOSURE_C2" | wc -l)
+job closure-c2a ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C2" | awk -v n="$CLOSURE_C2_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+job closure-c2b ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C2" | awk -v n="$CLOSURE_C2_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+job closure-c2c ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C2" | awk -v n="$CLOSURE_C2_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+CLOSURE_C3=$(printf '%s\n' "$TC" | awk 'NR%4==3')
+CLOSURE_C3_N=$(printf '%s\n' "$CLOSURE_C3" | wc -l)
+job closure-c3a ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+job closure-c3b ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+job closure-c3c ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+CLOSURE_C4=$(printf '%s\n' "$TC" | awk 'NR%4==0')
+CLOSURE_C4_N=$(printf '%s\n' "$CLOSURE_C4" | wc -l)
+job closure-c4a ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+job closure-c4b ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+job closure-c4c ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+STAGES_ALL=$(printf '%s\n' examples/*.c tests/c/*.c)
+STAGES_1=$(printf '%s\n' "$STAGES_ALL" | awk '(NR-1)%3==0')
+STAGES_1_N=$(printf '%s\n' "$STAGES_1" | wc -l)
+job stages-1a env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_1" | awk -v n="$STAGES_1_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+job stages-1b env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_1" | awk -v n="$STAGES_1_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+job stages-1c env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_1" | awk -v n="$STAGES_1_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+STAGES_2=$(printf '%s\n' "$STAGES_ALL" | awk '(NR-1)%3==1')
+STAGES_2_N=$(printf '%s\n' "$STAGES_2" | wc -l)
+job stages-2a env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_2" | awk -v n="$STAGES_2_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+job stages-2b env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_2" | awk -v n="$STAGES_2_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+job stages-2c env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_2" | awk -v n="$STAGES_2_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+STAGES_3=$(printf '%s\n' "$STAGES_ALL" | awk '(NR-1)%3==2')
+STAGES_3_N=$(printf '%s\n' "$STAGES_3" | wc -l)
+job stages-3a env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v n="$STAGES_3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+job stages-3b env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v n="$STAGES_3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+job stages-3c env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v n="$STAGES_3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
 for k in 1 2 3 4 5; do job exec-chain-$k env CHAINSHARD=$k/5 CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt) examples/*.c tests/c/*.c; done   # S-17: all C probes, historical floor, named parity debt; five shards keep each job under 60 s with --jobs 4 (three hit 142 in the 0.0.23 queue)
 job exec-macros python3 ./exec/pp/macrocheck.py
 job exec-pp-literals python3 ./exec/pp/literalcheck.py
@@ -298,7 +325,7 @@ job exec-objectfacts python3 ./tests/objectfactscheck.py       # object tape fac
 job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent ET_REL layout oracle
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity
 job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
-job exec-f1-attributes python3 ./exec/parse2/f1attributescheck.py # marked definitions against reference tape
+job exec-f1-attributes python3 ./exec/parse2/f1attributescheck.py --require-cached --ua "$UA" # marked definitions against reference tape
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering
 # Cold parse2 models (30-45 s each) moved out of the seven warning/error checks below:
 # warnprep fills the shared content-keyed cache (compilerpack.built_model, digest-checked
@@ -407,25 +434,42 @@ job exec-librarycallbackpartition-model-14 ./exec/librarycallbackpartition/check
 job exec-librarycallbackpartition-model-15 ./exec/librarycallbackpartition/check.sh 15
 job exec-librarycallbackpartition-model-16 ./exec/librarycallbackpartition/check.sh 16
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
-job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh
-job exec-librarycallback-reader-model sh tests/librarycallbacke3check.sh check
-job exec-librarycallbacklower-model-1 sh tests/librarycallbacklowercheck.sh 1
-job exec-librarycallbacklower-model-2 sh tests/librarycallbacklowercheck.sh 2
-job exec-librarycallbacklower-model-3 sh tests/librarycallbacklowercheck.sh 3
-job exec-librarycallbacklower-model-4 sh tests/librarycallbacklowercheck.sh 4
-job lib-callback-candidate-auth sh tests/librarycallbackauthcheck.sh check
-job exec-librarycallback-wiring-prepare sh tests/librarycallbackwiringcheck.sh check
-job exec-librarycallsite-reader-model ./exec/parse2/librarycallsitecheck.sh
-job exec-librarycallsitelower-model-1 ./exec/lower/librarycallsitecheck.sh 1
-job exec-librarycallsitelower-model-2 ./exec/lower/librarycallsitecheck.sh 2
-job exec-librarycallsitelower-model-3 ./exec/lower/librarycallsitecheck.sh 3
-job exec-librarycallsitelower-model-4 ./exec/lower/librarycallsitecheck.sh 4
-job exec-librarytypedlower-model-1 ./exec/lower/librarytypedcheck.sh 1
-job exec-librarytypedlower-model-2 ./exec/lower/librarytypedcheck.sh 2
-job exec-librarytypedlower-model-3 ./exec/lower/librarytypedcheck.sh 3
-job exec-librarytypedlower-model-4 ./exec/lower/librarytypedcheck.sh 4
+# Preparation declarations: compose original producers with the existing job executor.
+PREP_JOBS=$(python3 - <<'PREP_DECL'
+import json,re,shlex
+p=json.load(open('tests/prepgroups.json'))
+assert p['version']==1
+seen=set()
+for row in p['groups']:
+    name=row['name']
+    assert re.fullmatch(r'exec-prepare-[a-z0-9-]+',name) and name not in seen
+    seen.add(name)
+    command=['sh','-ec','\n'.join(shlex.join(m['argv']) for m in row['members'])]
+    assert row['command']==command
+    print(shlex.join(['job',name,*command]))
+PREP_DECL
+) || exit 2
+eval "$PREP_JOBS"
+unset PREP_JOBS
+job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh --require-cached
+job exec-librarycallback-reader-model sh tests/librarycallbacke3check.sh --require-cached check
+job exec-librarycallbacklower-model-1 sh tests/librarycallbacklowercheck.sh --require-cached 1
+job exec-librarycallbacklower-model-2 sh tests/librarycallbacklowercheck.sh --require-cached 2
+job exec-librarycallbacklower-model-3 sh tests/librarycallbacklowercheck.sh --require-cached 3
+job exec-librarycallbacklower-model-4 sh tests/librarycallbacklowercheck.sh --require-cached 4
+job lib-callback-candidate-auth sh tests/librarycallbackauthcheck.sh --require-cached check
+job exec-librarycallback-wiring-prepare sh tests/librarycallbackwiringcheck.sh --require-cached check
+job exec-librarycallsite-reader-model ./exec/parse2/librarycallsitecheck.sh --require-cached
+job exec-librarycallsitelower-model-1 ./exec/lower/librarycallsitecheck.sh --require-cached 1
+job exec-librarycallsitelower-model-2 ./exec/lower/librarycallsitecheck.sh --require-cached 2
+job exec-librarycallsitelower-model-3 ./exec/lower/librarycallsitecheck.sh --require-cached 3
+job exec-librarycallsitelower-model-4 ./exec/lower/librarycallsitecheck.sh --require-cached 4
+job exec-librarytypedlower-model-1 ./exec/lower/librarytypedcheck.sh --require-cached 1
+job exec-librarytypedlower-model-2 ./exec/lower/librarytypedcheck.sh --require-cached 2
+job exec-librarytypedlower-model-3 ./exec/lower/librarytypedcheck.sh --require-cached 3
+job exec-librarytypedlower-model-4 ./exec/lower/librarytypedcheck.sh --require-cached 4
 job exec-libraryfn-model ./exec/lower/libraryfncheck.sh
-job exec-librarydata-model ./exec/lower/librarydatacheck.sh
+job exec-librarydata-model ./exec/lower/librarydatacheck.sh --require-cached
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
@@ -457,6 +501,7 @@ job exec-embedded python3 ./exec/c/embeddedcheck.py
 for part in build modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
 # S3 (0.0.43): core-modes preparation as four independent jobs (bindprep pattern): prep-0 = elf and o1 chain, prep-1..3 = parts 1..3 of PREP_PARTS; each <= 55 s cold
 for k in 0 1 2 3; do job exec-driver-core-prep-$k ./exec/c/compilercheck.sh prep-$k; done
+job exec-driver-core-prep-f1json ./exec/c/compilercheck.sh prep-f1json
 job exec-driver-resources-macros ./exec/c/compilercheck.sh resources-macros
 job exec-driver-resources-headers ./exec/c/compilercheck.sh resources-headers
 job exec-driver-resources-printf ./exec/c/compilercheck.sh resources-printf

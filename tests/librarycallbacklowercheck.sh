@@ -1,6 +1,11 @@
 #!/bin/sh
 # Four named model shards; common execution/timeout/cache owner are existing ones.
 set -eu
+# Consumption is strictly prepared-only; this explicit flag cannot prepare.
+if [ "${1:-}" = --require-cached ]; then
+ shift
+ case ${1:-check} in --*) echo 'require-cached: prepare options forbidden' >&2; exit 2;; esac
+fi
 R=$(cd "$(dirname "$0")/.." && pwd);cd "$R"
 UA=${MODEL_COM:-$R/unisacc.com}
 # Entry selftests are deliberately independent of construction/cache preparation.
@@ -28,7 +33,9 @@ flags(){
 case ${1:-} in
  --cache-dir) printf '%s\n' "$D";exit 0;;
  --prepare-tools)
-  b sh exec/lower/librarytypedcheck.sh --prepare-tools
+  if ! { [ -r "$BASE/tools/artifacts.sha256" ] && (cd "$BASE/tools" && sha256sum -c --status artifacts.sha256); }; then
+   b sh exec/lower/librarytypedcheck.sh --prepare-tools
+  fi
   (cd "$BASE/tools" && sha256sum -c --status artifacts.sha256)
   mkdir -p "$D/tools";cp "$BASE/tools/gen" "$BASE/tools/run" "$D/tools/"
   b cc -O2 -w tests/librarycallbackcapture.c -o "$D/tools/runner"

@@ -11,7 +11,7 @@ which has exactly git's content and git's modes, and only the json is written
 back.  Run it as the LAST commit before a release queue: any later exec/ or
 src/ change makes the stamp stale again.   usage: make gatedeps
 """
-import hashlib, io, json, os, pathlib, subprocess, sys, tarfile, tempfile
+import hashlib, io, json, os, pathlib, subprocess, sys, tarfile, tempfile, copy, shlex
 R = pathlib.Path(__file__).resolve().parents[1]
 
 def digest(path):
@@ -290,6 +290,58 @@ def main():
     d['suites']['exec-librarycallback-wiring-prepare'] = {'command': ['sh', 'tests/librarycallbackwiringcheck.sh', 'check'], 'files': ['.gitignore', 'exec/c/compilerpack.py', 'exec/c/librarycall_arm64.S', 'exec/c/librarycall_x86_64.S', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'exec/pipeline/elf.sh', 'exec/pipeline/models.py', 'release/tools/build_candidate.sh', 'release/tools/model-reseal.py', 'src/host_dl.h', 'src/tapebin_encode.inc', 'src/tapebin_shape.inc', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/checklib.py', 'tests/fixtures/librarycallback/auth-A.c', 'tests/fixtures/librarycallback/auth-B.c', 'tests/gatelayers.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallbackauthcheck.cx', 'tests/librarycallbackauthcheck.sh', 'tests/librarycallbackauthprobe.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbackproduce.py', 'tests/librarycallbacksignaturecapture.c', 'tests/librarycallbackwiringcheck.c', 'tests/librarycallbackwiringcheck.sh', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/c', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cut', 'find', 'mktemp', 'python3', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}
     d['suites']['gate-select'] = {'command': ['python3', 'tests/gateselectcheck.py'], 'files': ['tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gateselectcheck.py', 'tests/gatedecl.py', 'tests/gatelayers.py', 'tests/stagemap.c', 'tests/gate.sh', 'tests/gateorder.json', 'tests/gatedeps.json', 'tests/bound', 'tests/bound.py', 'tests/bound.c', 'release/derived-map.tsv', 'release/tools/derivedcheck.py', 'kernel/unisa_model.inc', 'release/tools/commitgate.sh', 'tests/stagerun.sh', 'tests/gatequeue.py', 'tests/env_pin.py'], 'tools': ['cc', 'git', 'python3', 'sh']}
     d['suites']['commitgate'] = {'command': ['./tests/commitgatecheck.sh'], 'files': ['kernel/unisa_model.inc', 'release/derived-map.tsv', 'release/tools/checkrun.sh', 'release/tools/commitgate.sh', 'release/tools/derivedcheck.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/commitgatecheck.sh', 'tests/freezecheck.py', 'tests/gate.sh', 'tests/gatedecl.py', 'tests/gatedeps.json', 'tests/gatelayers.py', 'tests/gateorder.json', 'tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gateselectcheck.py', 'tests/stagemap.c', 'tests/stagerun.sh', 'tests/gatequeue.py', 'tests/env_pin.py'], 'tools': ['bash', 'cc', 'git', 'python3', 'sh', 'sha256sum']}
+    # Preparation uses gate.sh's existing argv authority and the same parser as
+    # selection; declarations inherit the conservative consumer input closure.
+    sys.path.insert(0, str(R / 'tests'))
+    from gateselect import parse_gate_plan
+    owners = {
+        'exec/parse2/librarytypedreadercheck.sh': 'exec-librarytypedreader-model',
+        'exec/parse2/librarycallsitecheck.sh': 'exec-librarycallsite-reader-model',
+        'exec/lower/librarytypedcheck.sh': 'exec-librarytypedlower-model-1',
+        'exec/lower/librarycallsitecheck.sh': 'exec-librarycallsitelower-model-1',
+        'exec/lower/librarydatacheck.sh': 'exec-librarydata-model',
+        'tests/librarycallbacke3check.sh': 'exec-librarycallback-reader-model',
+        'tests/librarycallbacklowercheck.sh': 'exec-librarycallbacklower-model-1',
+        'tests/librarycallbackwiringcheck.sh': 'exec-librarycallback-wiring-prepare',
+        'tests/librarycallbackauthcheck.sh': 'lib-callback-candidate-auth',
+    }
+    jobs = parse_gate_plan(subprocess.check_output(
+        ['sh', 'tests/gate.sh', '--plan'], cwd=R, timeout=55))
+    packed = {row['name']: row for row in json.loads((R / 'tests/prepgroups.json').read_text())['groups']}
+    active = {job['name'] for job in jobs}
+    for stale in list(d['suites']):
+        if stale.startswith('exec-prepare-') and stale not in active:
+            del d['suites'][stale]
+    d['suites']['gate-layers']['files'] = sorted(set(d['suites']['gate-layers'].get('files', [])) | {'tests/prepgroups.json'})
+    for job in jobs:
+        name, argv = job['name'], job['command']
+        scripts = [a[2:] if a.startswith('./') else a for a in argv]
+        matches = [script for script in owners if script in scripts]
+        if name.startswith('exec-prepare-'):
+            row = packed.get(name)
+            if row is None or row['command'] != argv:
+                raise ValueError('preparation-declaration-owner-missing ' + name)
+            expected = ['sh', '-ec', '\n'.join(shlex.join(m['argv']) for m in row['members'])]
+            if expected != argv:
+                raise ValueError('preparation-command-mismatch ' + name)
+            entries = [d['suites'][m['declaration_owner']] for m in row['members']]
+            entry = {'command': argv, 'executable_inputs': any(e.get('executable_inputs') for e in entries)}
+            for field in ('files', 'trees', 'tools'):
+                entry[field] = sorted({v for e in entries for v in e.get(field, [])})
+            entry['files'] = sorted(set(entry['files']) | {'tests/prepgroups.json'})
+            guards = {}
+            for e in entries:
+                if e.get('family'):
+                    raise ValueError('preparation-owner-family-needs-flattening ' + name)
+                for key, value in e.get('guards', {}).items():
+                    if key in guards and guards[key] != value:
+                        raise ValueError('preparation-owner-guard-conflict ' + name + ' ' + key)
+                    guards[key] = value
+            guards['tests/prepgroups.json'] = hashlib.sha256((R / 'tests/prepgroups.json').read_bytes()).hexdigest()
+            entry['guards'] = guards
+            d['suites'][name] = entry
+        elif matches and name in d['suites'] and '--require-cached' in argv:
+            d['suites'][name]['command'] = argv
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

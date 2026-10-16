@@ -1,6 +1,11 @@
 #!/bin/sh
 # Callsite-only overlay witness. Reuse the existing typed preparation/cache owner.
 set -eu
+# Consumption is strictly prepared-only; this explicit flag cannot prepare.
+if [ "${1:-}" = --require-cached ]; then
+ shift
+ case ${1:-check} in --*) echo 'require-cached: prepare options forbidden' >&2; exit 2;; esac
+fi
 R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 B=$("$R/tests/bound" --helper)
 b(){ "$B" 55 "$@"; }
@@ -24,7 +29,9 @@ flags(){
 case ${1:-} in
  --cache-dir) printf '%s\n' "$D";exit 0;;
  --prepare-tools)
-  b sh exec/lower/librarytypedcheck.sh --prepare-tools
+  if ! { [ -r "$BASE/tools/artifacts.sha256" ] && (cd "$BASE/tools" && sha256sum -c --status artifacts.sha256); }; then
+   b sh exec/lower/librarytypedcheck.sh --prepare-tools
+  fi
   (cd "$BASE/tools" && sha256sum -c --status artifacts.sha256)
   mkdir -p "$D/tools";cp "$BASE/tools/gen" "$BASE/tools/run" "$D/tools/"
   b cc -O2 -w exec/lower/librarycallsite-observer.c -o "$D/tools/runner"
@@ -39,7 +46,9 @@ case ${1:-} in
   mkdir -p "$D/$v"
   case $step in
    --prepare-legacy)
-    b sh exec/lower/librarytypedcheck.sh --prepare "$v"
+    if ! { [ -r "$BASE/$v/artifacts.sha256" ] && (cd "$BASE/$v" && sha256sum -c --status artifacts.sha256); }; then
+     b sh exec/lower/librarytypedcheck.sh --prepare "$v"
+    fi
     (cd "$BASE/$v" && sha256sum -c --status artifacts.sha256)
     for name in base.json base.tbl base.net off-c.json off.json off.tbl off.net;do cp "$BASE/$v/$name" "$D/$v/$name";done
     (cd "$D/$v" && sha256sum base.json base.tbl base.net off-c.json off.json off.tbl off.net >legacy.sha256);;

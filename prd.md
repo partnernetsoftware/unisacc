@@ -1525,3 +1525,29 @@ r19 二次只读核对：本轮 csih1 实际工具body同时含 passed=true、ac
 Classic 声明续项须从同一 DeclSpecSnapshot 恢复声明说明符返回的元素宽度与类型归属；指针数组的存储宽度不得泄漏到逗号后的声明符。该参考路径与模型产品分账，仓外最小探针已证 main/new UA 同错，系统 cc 为48。
 
 同一声明快照也拥有初始化目标：表达式内 cast/sizeof/复合字面量解析不得改写目标的结构大小、指针或类型归属。结构返回值初始化的拷贝长度取求值前快照，求值后恢复同一声明工作态。
+
+- state6 收口合修（仓外备验，未计通过）：declsnapshot 用既有 pyfront 模型缺口登记（typedef 逗号语法拒，非模型覆盖）；c99precheck 通过同一 shard_of 动态找控制源分片。closure-c2/3/4 与 stages-1/2/3 沿同一执行器按各自有序有效源再拆三片，互斥/顺序/并集逐条核且旧身份不转裁定；F1 复用同一 built_model 缓存可选 JSON 产物+摘要与既有 core-prep，消费 require-cached/UA，不私建参考、不改模型。各片门内目标≤30秒，冷验实数另记，state6 旧红原件不回填。
+
+- state6 LDP 加载缺口（合修中）：三条已执行 REJECT 的边指向未定义 LDP.reject/LDP.dead，改指既有 DEAD，动作与诊断不变；新 JSON 的 sim.load 与 lower fixture 须实跑。构造/打包/执行器对未定义目标的合同不一致另列债，本笔不改通用构造器或 tbl。
+
+- F1 JSON 准备按原缓存的可选产物单列：既有 core-prep-1/2/3 不请求 JSON，F1 JSON 新门在同一键/锁/index 下仅补 gen 的原始 JSON（tbl/net 已验证即不重做）；JSON 摘要同 manifest 验证，消费缺件具名拒，F1 仍复用 UA。prep-2 顺序复跑50.94秒触发拆分，原证据保留。
+
+- 合修验收冻结规则：prep-f1json 先以 require-cached 核三模型基础 tbl/net，缺件具名75且不私构；全部源码冻结后从 prep0 顺序重跑，中途源码改动则该轮作废并重新准备。此前因 prep0 后作者改 compilerpack 导致 ELF 冷建的142保留为无效性能对照。
+
+- state6 batch2 合修增域（未验）：快照同路径 dev/ino 校验仅在既有快照支持平台编译，_WIN32/__UNISA__ 仍由同一共享快照入口具名 unsupported；SHA 四函数各自 FTRIM guard；auth 两个既有 prepare 注册正式前驱。enum_forward 是前向枚举扩展/局部遮蔽正例，不测不兼容指针，局部指针改在枚举完成后声明，不降 GCC14 诊断。17 缺准备逐门待对 gateorder，源重新冻结后才冷验。
+
+- 准备DAG复用同一owner：callsite/callback的工具准备、callsite legacy准备先校验既有typed产物摘要再复用，避免新前驱并发后重复改写同一BASE。没有第二缓存/锁/owner；缺件时仍只由显式prepare委托原typed入口。DAG显式等待typed对应variant完成，消费者不构造。
+
+- stages 显式文件分片必须在正式作业 argv 清空 SHARD，避免继承环境二次切片；消费层用原 stages.sh 选片代码核有序文件全集。closure 直接逐 argv 遍历，无 SHARD/分片环境读取，保持原机制。
+
+- prep 收敛只按真实缓存键/原生产入口复用：193 个步骤的20组静态候选保留所有证明边；组 DAG 无环不等于≤55秒资格。尤其 typed/callsite/callback 不同能力模型不得仅因目标相同冒充同键，冷时长 UNKNOWN 必须实测，不以装箱数达标宣称可冻结。
+
+- LDP三终止边改指既有DEAD会改变lower序列化，callback off12旧baseline摘要随本笔重采；保留旧摘要与源/产物归因，对每变体先核C/P及base/off同字节，不回填历史验收JSON。首次off-lnx-a的rc1归冻结摘要陈旧，不记产品红；新摘要仍须原prepare/check重验。
+
+- 合修开发节奏以dev+变更闭包为主：冷采/state6为旁证，之后不再为冷采STOP监督器；组合prep门冷验未跑如实列债，不阻塞本笔开发。193步骤实测装成43组+F1json=44门，最大步骤和32.136秒；只复用既有prepare生产者、gate job/sh -ec执行、gateorder与摘要缓存，43组共同声明表不另起runner或cache。
+
+- enum_forward正例仅测前向enum与局部遮蔽，显式unsigned int positive:3避免enum位域符号的实现定义差；Alias/forward enum其余覆盖保留，不改classic/模型。UA enum位域取-1与GCC取7的ABI兼容差仓外记债，收口后另裁。
+
+- prep共用owner的次序在装箱后仍显式保留：typedlower工具组先于callsite工具组；同组reader工具先于E3 callsite工具，后者校验原tools.sha256再复用，缺/坏才委托原owner构造，避免准备组并发改写同一BASE。只增加真实依赖，不增加缓存/锁/runner。
+
+PP leaf reseal: identical constructor tree with only pp-autoinc-gen.tsv replaced exactly reproduces both old and new networks. The two +2493-byte changes are fully attributable to regenerated SHA function facts; table diffs retained in warehouse evidence. declsnapshot remains a classic/host fixture: model typedef comma refusal is registered in existing named-product/refusal ledgers, never counted as model coverage.

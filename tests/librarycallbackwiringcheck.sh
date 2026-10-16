@@ -1,6 +1,11 @@
 #!/bin/sh
 # Preparation follows the existing compilercheck/typedlower cache and bounded steps.
 set -eu
+# Consumption is strictly prepared-only; this explicit flag cannot prepare.
+if [ "${1:-}" = --require-cached ]; then
+ shift
+ case ${1:-check} in --*) echo 'require-cached: prepare options forbidden' >&2; exit 2;; esac
+fi
 R=$(cd "$(dirname "$0")/.." && pwd);cd "$R"
 B=$(tests/bound --helper);b(){ "$B" 55 "$@"; }
 PRODUCT=${MODEL_COM:-$R/unisacc.com}

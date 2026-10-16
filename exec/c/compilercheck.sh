@@ -10,6 +10,35 @@ b() { "$_BOUND" 60 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) echo 'unsupported test host' >&2; exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 TARGET=$OS/$ARCH; export TARGET
+# F1 consumes raw JSON from the same model cache, independently of core prep.
+case ${1:-all} in
+prep-f1json)
+    "$_BOUND" 55 python3 - "$TARGET" <<'PYJSON'
+import sys,tempfile
+sys.path.insert(0,'exec/c')
+import compilerpack as pack
+names=('errorparse','warnlex','warnpp-shared')
+jobs={n:(script,args) for n,script,args in pack.model_jobs({sys.argv[1]})}
+with tempfile.TemporaryDirectory(prefix='f1-json-prepare-') as td:
+    # This job only supplements prepared pairs; missing base never constructs.
+    pack.REQUIRE_CACHED=True
+    try:
+        for name in names:
+            pack.built_model(td,name,*jobs[name])
+    except ValueError as error:
+        print('NEED_PREPARE F1 JSON base: '+str(error)+'; run core-prep-0..3',file=sys.stderr)
+        raise SystemExit(75)
+    pack.REQUIRE_CACHED=False
+    for name in names:
+        pack.built_model(td,name,*jobs[name],want_json=True)
+        print('prepared JSON',name,flush=True)
+    pack.REQUIRE_CACHED=True
+    for name in names:
+        pack.built_model(td,name,*jobs[name],want_json=True)
+        print('verified JSON',name,flush=True)
+PYJSON
+    exit $? ;;
+esac
 # resources-* never construct: they need the prep-0..3 jobs (gateorder.json) to have cached the models first
 case ${1:-all} in resources-macros|resources-headers|resources-printf|resources-isolated) export UNISACC_REQUIRE_PREPARED=1; REQ=--require-cached;; *) REQ=;; esac
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }

@@ -1,4 +1,6 @@
-/* Forward enums are an intentional compatibility extension. */
+/* Forward enums are an intentional compatibility extension.
+   Complete the local tag before its pointer declaration: this positive does
+   not exercise incompatible-pointer diagnostics (an error in GCC 14). */
 #include <stdio.h>
 enum E;
 typedef enum E Alias;
@@ -9,7 +11,7 @@ enum E { ZERO, SEVEN = 7 };
 enum N;
 typedef enum N Neg;
 enum N { MINUS = -2 };
-struct Bits { Alias positive:3; Neg negative:3; };
+struct Bits { unsigned int positive:3; Neg negative:3; };
 enum E identity(enum E x) { return x; }
 int use(enum E x) { return x; }
 int main(void) {
@@ -20,7 +22,7 @@ int main(void) {
     bits.positive = SEVEN;
     bits.negative = MINUS;
     printf("%d %d %d %d %d\n", x, *early, identity(x), parameter(x), (int)sizeof(*early));
-    { enum E; enum E *inside; enum E { INNER = 3 }; enum E y=INNER; inside=&y;
+    { enum E; enum E { INNER = 3 }; enum E *inside; enum E y=INNER; inside=&y;
       printf("%d %d %d\n", *inside, *early, (int)sizeof(*inside)); }
     x += 1;
     printf("%d %d %d %d\n", x, bits.positive, bits.negative, (int)sizeof(enum E));

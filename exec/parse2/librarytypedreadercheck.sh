@@ -1,6 +1,11 @@
 #!/bin/sh
 # Reader+overlay: staged preparation prevents hiding cold construction in a 58s job.
 set -eu
+# Consumption is strictly prepared-only; this explicit flag cannot prepare.
+if [ "${1:-}" = --require-cached ]; then
+ shift
+ case ${1:-check} in --*) echo 'require-cached: prepare options forbidden' >&2; exit 2;; esac
+fi
 R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 b(){ "$R/tests/bound" 55 "$@"; }
 UA=${MODEL_COM:-$R/unisacc.com}

@@ -52,7 +52,7 @@ def _keybase():
 def _valid(cache):
     try:
         manifest=json.loads((cache/'manifest.json').read_text())
-        return set(manifest)=={'m.tbl','m.net'} and all(_digest(cache/k)==v for k,v in manifest.items())
+        return set(manifest) in ({'m.tbl','m.net'}, {'m.tbl','m.net','m.json'}) and all(_digest(cache/k)==v for k,v in manifest.items())
     except (FileNotFoundError,ValueError):
         return False
 
@@ -85,7 +85,7 @@ def _stamp(root,names):
             except IsADirectoryError: out[k]='dir'
     return out
 
-def built_model(td,name,script,args,env=None):
+def built_model(td,name,script,args,env=None,want_json=False):
     """Construct NAME.tbl/.net in td, reusing a verified content-keyed cache."""
     j=Path(td)/(name+'.json');t=Path(td)/(name+'.tbl');n=Path(td)/(name+'.net')
     if not MODEL_CACHE:
@@ -107,25 +107,49 @@ def built_model(td,name,script,args,env=None):
     job=hashlib.sha256(json.dumps(['compilerpack-readset-v1',sys.version,sname,list(map(str,args)),envs]).encode()).hexdigest()
     index=base/('index-'+job+'.json')
     def readkey(stamp): return hashlib.sha256(json.dumps([job,stamp],sort_keys=True).encode()).hexdigest()
+    def copy_cached(cache):
+        if want_json:
+            manifest=json.loads((cache/'manifest.json').read_text())
+            if 'm.json' not in manifest:
+                if REQUIRE_CACHED:
+                    raise ValueError('model %s prepared-without-json (run core prep with --keep-json)'%name)
+                # Optional artifact preparation uses the same verified cache
+                # identity and lock; the table/network pair is never rebuilt.
+                with tempfile.TemporaryDirectory(prefix='json-',dir=base) as td:
+                    pending=Path(td)/'m.json'
+                    subprocess.run([sys.executable,str(script),str(pending),*map(str,args)],
+                                   check=True,timeout=55,env=env)
+                    manifest['m.json']=_digest(pending)
+                    pending.replace(cache/'m.json')
+                temporary=cache/'manifest.json.tmp'
+                temporary.write_text(json.dumps(manifest,sort_keys=True))
+                temporary.replace(cache/'manifest.json')
+            shutil.copyfile(cache/'m.json',j)
+        shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n)
+        return True
     with (base/('index-'+job+'.lock')).open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         try: seen=json.loads(index.read_text())
         except FileNotFoundError: seen=[]
         for names_ in seen:
             cache=base/('pack-'+readkey(_stamp(root,names_)))
-            if _valid(cache):
-                shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n); return n
+            if _valid(cache) and copy_cached(cache): return n
         cache=base/('pack-'+wholekey)
-        if _valid(cache):
-            shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n); return n
+        if _valid(cache) and copy_cached(cache): return n
         if REQUIRE_CACHED: raise ValueError('model %s not prepared (run the pack-prep steps first)'%name)
         work=Path(tempfile.mkdtemp(prefix='pack-'+job+'.build-',dir=base))
         try:
             _construct(script,args,env,work/'m.json',work/'m.tbl',work/'m.net',trace=work)
             stamp=_readset(root,work)
-            for k in ('m.json','read0.json','read1.json','read2.json'): (work/k).unlink()
-            (work/'manifest.json').write_text(json.dumps({k:_digest(work/k) for k in ('m.tbl','m.net')},sort_keys=True))
+            for k in ('read0.json','read1.json','read2.json'): (work/k).unlink()
+            artifacts=('m.tbl','m.net','m.json') if want_json else ('m.tbl','m.net')
+            if not want_json: (work/'m.json').unlink()
+            (work/'manifest.json').write_text(json.dumps({k:_digest(work/k) for k in artifacts},sort_keys=True))
             cache=base/('pack-'+(wholekey if stamp is None else readkey(stamp)))
+            if want_json and _valid(cache):
+                for artifact in ('m.tbl','m.net'):
+                    if _digest(cache/artifact) != _digest(work/artifact):
+                        raise ValueError('model %s optional-json changed %s'%(name,artifact))
             try: cache.stat()
             except FileNotFoundError: pass
             else: shutil.rmtree(cache)
@@ -136,7 +160,7 @@ def built_model(td,name,script,args,env=None):
             try: work.stat()
             except FileNotFoundError: pass
             else: shutil.rmtree(work)
-        shutil.copyfile(cache/'m.tbl',t); shutil.copyfile(cache/'m.net',n)
+        if not copy_cached(cache): raise ValueError('model %s prepared-without-json'%name)
     return n
 
 def retain_models(directory, rows):
@@ -200,7 +224,7 @@ def model_jobs(targets, shared_e2=None, shared_nativeabi=None, librarytyped=Fals
 def manifest_targets(manifests):
     return {next(x for x in Path(m).read_text().splitlines() if x and not x.startswith('#')).split('\t')[0] for m in manifests}
 
-def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False):
+def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False, keep_json=False):
     """Construct part PART (1-based) of PARTS into the model cache; no package."""
     jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi,librarytyped,librarycallsite,librarycallback)}
     groups=PREP_PARTS+[[n] for n in jobs if n.startswith('typed-')]
@@ -209,7 +233,7 @@ def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, libra
     if len(named)!=len(set(named)) or not set(jobs)<=set(named): raise ValueError('PREP_PARTS does not cover the model jobs once each')
     with tempfile.TemporaryDirectory(prefix='compiler-prepare-') as td:
         for n in groups[part-1]:
-            if n in jobs: built_model(td,n,*jobs[n]); print('prepared',n,flush=True)
+            if n in jobs: built_model(td,n,*jobs[n],want_json=keep_json); print('prepared',n,flush=True)
 
 def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False):
     mounts=[('006864722f',includes)]
@@ -381,17 +405,19 @@ if __name__=='__main__':
     ap.add_argument('--librarycallback',action='store_true',help='explicit callback graph capability; requires --librarytyped (experimental)')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
     ap.add_argument('--prepare-only',action='store_true',help='construct models of --part into the cache; write no package')
+    ap.add_argument('--keep-json',action='store_true',help='prepare optional verified JSON under the same model cache key')
     ap.add_argument('--part',help='K/N: which prepare group (with --prepare-only)')
     ap.add_argument('--require-cached',action='store_true',help='fail if any model is not already in the cache')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
     MODEL_CACHE=not a.no_model_cache
     REQUIRE_CACHED=a.require_cached
+    if a.keep_json and not a.prepare_only: ap.error('--keep-json requires --prepare-only')
     if a.prepare_only:
         try:
             k,n=map(int,(a.part or '').split('/'))
         except ValueError: ap.exit(2,'compilerpack: --prepare-only needs --part K/N\n')
-        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi,a.librarytyped,a.librarycallsite,a.librarycallback)
+        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi,a.librarytyped,a.librarycallsite,a.librarycallback,a.keep_json)
         except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
         raise SystemExit(0)
     try:

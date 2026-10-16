@@ -48,7 +48,7 @@ static char *rules[] = {
              " exec-multi-* multi fb12-multi realprog luatests* sqlspeed* minicon apps-* bigclosure",
     "lib", "lib-*",
     "build", "seed* exec-*self* exec-selfprep-* exec-bootstrap-* nativeboot-* comboot-* exec-driver-*"
-             " exec-tableself",
+             " exec-tableself exec-prepare-*",
     0
 };
 /* Exact additions are the sole stage records for formerly unclassified suites.
@@ -57,6 +57,15 @@ static char *rules[] = {
  */
 static char *extra[] = {
     /* Same six-target closure assertion, first lane split by source workload; tests/gate.sh. */
+    "chain", "stages-1a", "-",
+    "chain", "stages-1b", "-",
+    "chain", "stages-1c", "-",
+    "chain", "stages-2a", "-",
+    "chain", "stages-2b", "-",
+    "chain", "stages-2c", "-",
+    "chain", "stages-3a", "-",
+    "chain", "stages-3b", "-",
+    "chain", "stages-3c", "-",
     "chain", "closure-c1a", "build",
     "chain", "closure-c1b", "build",
     "chain", "closure-c1c", "build",
