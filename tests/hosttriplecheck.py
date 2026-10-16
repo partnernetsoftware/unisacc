@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepared U0 and three nativeboot generations, only native lnx/x86_64."""
+"""Prepared U0 and three nativeboot generations, only the actual native Linux target."""
 import argparse,hashlib,json,os,pathlib,platform,shutil,subprocess,sys,tempfile,time
 sys.dont_write_bytecode=True
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -7,8 +7,12 @@ sys.path[:0]=[str(ROOT/'exec/c'),str(ROOT/'tests')]
 import provenance,sourceflat
 from models import digest
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('phase',choices=('prepare','u0','n1','n2','n3'));a=p.parse_args();start=time.monotonic()
-if platform.system()!='Linux' or platform.machine()!='x86_64':
- print('PLATFORM_UNVERIFIED host-triple requires native lnx/x86_64',file=sys.stderr);raise SystemExit(77)
+if platform.system()!='Linux':
+ print('PLATFORM_UNVERIFIED host-triple requires native Linux',file=sys.stderr);raise SystemExit(77)
+native=subprocess.run([sys.executable,str(ROOT/'tests/bound.py'),'3','bash',ROOT/'tests/nativeboot.sh','--host-triple-target'],capture_output=True,text=True,timeout=5)
+if native.returncode:
+ sys.stderr.write(native.stderr);raise SystemExit(native.returncode)
+target=native.stdout.strip()
 import fcntl
 base=pathlib.Path(os.environ.get('UNISACC_MODEL_CACHE',tempfile.gettempdir()+'/unisacc-model-cache'))
 cc=pathlib.Path(shutil.which('cc')).resolve(strict=True)
@@ -19,11 +23,11 @@ def host_actor_closure():
 sources=provenance.source_digest();actors,actor_edges=host_actor_closure()
 assert {'tests/lib.sh','tests/bound','tests/bound.c'}<=set(actors)
 
-basis={'sources':sources,'actors':actors,'host':'lnx/x86_64','cc':str(cc),'cc_sha256':digest(cc),'cc_version':version.hex(),'CFLAGS':'-O2','compiler_environment':{k:os.environ.get(k) for k in ('PATH','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','SDKROOT','MACOSX_DEPLOYMENT_TARGET','SOURCE_DATE_EPOCH','CC','BOUND_CACHE','GITHUB_ACTIONS','UNISACC_BOUND_STOP_SECS','UNISACC_BOUND_TEST_NO_KILL')}}
+basis={'sources':sources,'actors':actors,'host':target,'cc':str(cc),'cc_sha256':digest(cc),'cc_version':version.hex(),'CFLAGS':'-O2','compiler_environment':{k:os.environ.get(k) for k in ('PATH','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','SDKROOT','MACOSX_DEPLOYMENT_TARGET','SOURCE_DATE_EPOCH','CC','BOUND_CACHE','GITHUB_ACTIONS','UNISACC_BOUND_STOP_SECS','UNISACC_BOUND_TEST_NO_KILL')}}
 key=hashlib.sha256(json.dumps(basis,sort_keys=True).encode()).hexdigest();u0=base/('host-triple-u0-'+key)
 def need(name,reason):
  print('NEED_PREPARE host-triple-'+name+': '+reason,file=sys.stderr);raise SystemExit(75)
-def role(stage,self_sha,parent_sha):return {'stage':stage,'target':'lnx/x86_64','identity':key,'self_sha256':self_sha,'parent_sha256':parent_sha}
+def role(stage,self_sha,parent_sha):return {'stage':stage,'target':target,'identity':key,'self_sha256':self_sha,'parent_sha256':parent_sha}
 def check(folder,name,expected):
  try:
   record=provenance.verify(folder/name)
@@ -71,7 +75,7 @@ if a.phase=='prepare':
     run(['sh',ROOT/'tests/build_ref.sh',work/'U0.ref.c',work/'U0'],55)
     attest(work/'U0',role('u0',digest(work/'self.c'),digest(cc)));publish(work,u0)
   selfsha=verify_u0()
- print(json.dumps({'status':'PREPARED_U0','scope':'NATIVE_LNX_X86_64_ONLY','sources':sources,'identity':key,'U0':str(u0/'U0'),'self_sha256':selfsha,'seconds_monotonic':time.monotonic()-start,'preparation_not_test':True,'actors':actors,'actor_edges':actor_edges},sort_keys=True));raise SystemExit(0)
+ print(json.dumps({'status':'PREPARED_U0','scope':'NATIVE_'+target.replace('/','_').upper()+'_ONLY','sources':sources,'identity':key,'U0':str(u0/'U0'),'self_sha256':selfsha,'seconds_monotonic':time.monotonic()-start,'preparation_not_test':True,'actors':actors,'actor_edges':actor_edges},sort_keys=True));raise SystemExit(0)
 selfsha=verify_u0();chain=[(u0,'U0')];parent_sha=digest(u0/'U0');dirs={}
 for n in range(1,int(a.phase[-1])+1 if a.phase!='u0' else 1):
  name='N'+str(n);stage=name.lower();dest=base/('host-triple-'+stage+'-'+hashlib.sha256((key+parent_sha).encode()).hexdigest());expected=role(stage,selfsha,parent_sha)
@@ -89,4 +93,4 @@ for n in range(1,int(a.phase[-1])+1 if a.phase!='u0' else 1):
     attest(work/name,expected);publish(work,dest)
   check(dest,name,expected)
  chain.append((dest,name));parent_sha=digest(dest/name);dirs[name]=str(dest/name)
-print(json.dumps({'status':'PASS','scope':'NATIVE_LNX_X86_64_ONLY_NOT_SIX_TARGETS_OR_PRODUCT_PACK','phase':a.phase,'identity':key,'images':{name:digest(folder/name) for folder,name in chain},'seconds_monotonic':time.monotonic()-start,'three_images_compared':a.phase=='n3','command_times':command_times,'missing_predecessor_never_constructs':True,'actors':actors,'actor_edges':actor_edges},sort_keys=True))
+print(json.dumps({'status':'PASS','scope':'NATIVE_'+target.replace('/','_').upper()+'_ONLY_NOT_SIX_TARGETS_OR_PRODUCT_PACK','phase':a.phase,'identity':key,'images':{name:digest(folder/name) for folder,name in chain},'seconds_monotonic':time.monotonic()-start,'three_images_compared':a.phase=='n3','command_times':command_times,'missing_predecessor_never_constructs':True,'actors':actors,'actor_edges':actor_edges},sort_keys=True))

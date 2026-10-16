@@ -16,6 +16,14 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 case "${1:-}" in
+    --host-triple-target)
+        [ "$#" = 1 ] || exit 2
+        . "$R/tests/lib.sh"
+        target=$(host_target)
+        case "$target" in lnx/*) ;; *) echo 'PLATFORM_UNVERIFIED host-triple unsupported native target' >&2; exit 77;; esac
+        # Validate the authoritative spelling against the actual kernel architecture.
+        python3 "$R/tests/bound.py" 2 python3 -c 'import platform,sys; actual=platform.machine().replace("aarch64","arm64"); sys.exit(0 if platform.system()=="Linux" and sys.argv[1]=="lnx/"+actual else 77)' "$target" || { echo 'PLATFORM_UNVERIFIED host-triple inconsistent native target' >&2; exit 77; }
+        printf '%s\n' "$target"; exit 0;;
     --host-triple) [ "$#" = 2 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" "$2";;
     --host-triple-prepare) [ "$#" = 1 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" prepare;;
     --host-triple-build) [ "$#" = 4 ] || exit 2; mode=hostcompile; SELF=$2; COMPILER=$3; OUTPUT=$4;;
@@ -83,9 +91,9 @@ windows() {
     echo "  ok on Windows: $target rebuilt itself byte for byte"
 }
 if [ "$mode" = hostcompile ]; then
-    [ "$(host_target)" = lnx/x86_64 ] || { echo "PLATFORM_UNVERIFIED host-triple" >&2; exit 77; }
+    target=$("$0" --host-triple-target) || exit $?
     NATIVEBOOT_COMPILE_BOUND=9
-    compile "$OUTPUT" "$COMPILER" lnx/x86_64 || exit 1
+    compile "$OUTPUT" "$COMPILER" "$target" || exit 1
     runnable "$OUTPUT" "$OUTPUT.executable" || exit 1
     mv "$OUTPUT.executable" "$OUTPUT" || exit 1
     exit 0
