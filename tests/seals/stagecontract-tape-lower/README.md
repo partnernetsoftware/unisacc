@@ -15,3 +15,19 @@
 ## 与 e1-e3 的关系
 
 两个边界共用一份 `stagecontractcheck.cx` 和同一个回放器；差别只在 `boundary.tsv`（模型文件名、sha256、边界键、标签）和 `accept/`、冻结模型。e1-e3 的 `boundary.tsv` 同样只描述这些值。
+
+## LDP 三边修复后重封（当前）
+
+`de87f540` 将 LDP 的三个未定义目标改指既有 DEAD。用仓内 `networkformat.decode` 对真实旧/新产品网络逐行归因：3 个边目标变化，两个未引用空态删除，4397→4395 与 stack 上界4396→4394；S/Q/C、动作、字符串与其余状态不变。旧资料与 Python 另一构造路径的反事实记录保留，不以其物理字节作产品网络等价证明。
+
+本次产品 SHA256 `305f5948802ebaef32ce866086f56d218b12ba2d0f6adc60e52d2d785670f303`；实际提取的新 lower SHA256 `9b7416b5b6ced06846af9c08544a505c0805fb449351bdfe306e4574d36451ea`。使用既有 `tests/modelstreamextract.cx` 提取产品原字节；`tests/middleflowrunner.c` 与 `exec/c/core.c` 按既有 capture-lower 入口重采同源包和 accept-source，六文件（input/output/status/attributes/source-label/resources）全与旧 accept 逐字节相同，故不重写它们。boundary 的 sha256 行由提取文件计算生成，不手填摘要。`middleflow-step0` 的旧模型是历史原件，不覆写。
+
+复采步骤（从仓根运行，PRODUCT/PACKAGE 为同一次构建；OUT 为新目录，每条加 `python3 tests/bound.py 55`）：
+
+```sh
+cc -O2 tests/middleflowrunner.c exec/c/core.c -o "$OUT/runner"
+"$OUT/runner" capture-lower "$PACKAGE" tests/seals/middleflow-step0/accept-source.bytes "$OUT/accept" 0
+sh "$PRODUCT" -run tests/modelstreamextract.cx -- "$PRODUCT" "$OUT/models"
+```
+
+先创建 OUT/accept 与 OUT/models；比较 accept 全文件后，封存模型取 models/lower.net 原件，pin 从该文件的 SHA256 自动生成。复核仍用 `tests/stagecontractcheck.cx --fixture tests/seals/stagecontract-e1-e3 --fixture tests/seals/stagecontract-tape-lower --product PRODUCT`，不放宽任何正负断言。
