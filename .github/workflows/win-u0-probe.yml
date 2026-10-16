@@ -34,69 +34,96 @@ jobs:
         ref: ${{ inputs.source_sha }}
         persist-credentials: false
     - name: Require unchanged checkout bytes
-      run: |
-        git -c core.autocrlf=false checkout --force HEAD -- .
+      run: 'git -c core.autocrlf=false checkout --force HEAD -- .
+
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        '
     - name: Original complete export and native clang-cl U0 diagnostic
-      run: |
-        $script = @'
-        import os,sys,pathlib,subprocess,json,time,hashlib,re,shutil,struct
-        root=pathlib.Path.cwd();out=pathlib.Path(os.environ['U0_EVIDENCE']);out.mkdir(parents=True,exist_ok=True);rows=[]
-        def digest(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
-        def run(name,args,limit,env=None):
-         start=time.monotonic();rc=None;timed=False
-         with (out/(name+'.stdout.log')).open('wb') as o,(out/(name+'.stderr.log')).open('wb') as e:
-          p=subprocess.Popen(list(map(str,args)),stdout=o,stderr=e,env=env,cwd=root)
-          try:rc=p.wait(timeout=limit)
-          except subprocess.TimeoutExpired:
-           timed=True
-           # Diagnostic probe only. Keep the timeout distinct from compiler diagnostics.
-           subprocess.run(['taskkill','/PID',str(p.pid),'/T','/F'],stdout=e,stderr=e,timeout=3)
-           rc=142
-         row={'name':name,'argv':list(map(str,args)),'rc':rc,'timeout':timed,'bound':limit,'seconds_monotonic':time.monotonic()-start}
-         rows.append(row);(out/'steps.json').write_text(json.dumps(rows,indent=2)+'\n');return rc
-        try:
-         source=os.environ['SOURCE_SHA'];assert re.fullmatch('[0-9a-fA-F]{40}',source),'FULL_SHA_REQUIRED'
-         head=subprocess.check_output(['git','rev-parse','HEAD'],timeout=5).decode().strip();assert head.lower()==source.lower(),'SOURCE_IDENTITY_MISMATCH'
-         assert not subprocess.check_output(['git','status','--porcelain'],timeout=5),'SOURCE_TREE_DIRTY'
-         arch=os.environ['U0_ARCH'];native=subprocess.check_output(['powershell','-NoProfile','-Command','(Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture'],timeout=5).decode().strip();assert native=={'x64':'9','arm64':'12'}[arch],'NATIVE_ARCH_MISMATCH'
-         vswhere=pathlib.Path(os.environ['ProgramFiles(x86)'])/'Microsoft Visual Studio/Installer/vswhere.exe'
-         vs=subprocess.check_output([str(vswhere),'-latest','-products','*','-property','installationPath'],timeout=5).decode().strip();assert vs,'VS_ENV_NOT_READY'
-         bat=pathlib.Path(vs)/'Common7/Tools/VsDevCmd.bat'
-         cmd=f'""{bat}" -arch={arch} -host_arch={arch} >nul && set"'
-         envout=subprocess.check_output(['cmd.exe','/d','/s','/c',cmd],timeout=10).decode(errors='replace');env=dict(os.environ)
-         for line in envout.splitlines():
-          if '=' in line and not line.startswith('='):
-           k,v=line.split('=',1);env[k]=v
-         compiler=shutil.which('clang-cl.exe',path=env.get('Path',env.get('PATH','')));assert compiler,'CLANG_CL_NOT_READY_NO_INSTALL_FALLBACK'
-         (out/'tools.json').write_text(json.dumps({'source_sha':head,'target':arch,'native_architecture_code':native,'compiler':compiler,'compiler_sha256':digest(compiler),'compiler_version':subprocess.check_output([compiler,'--version'],env=env,timeout=5).decode(),'INCLUDE':env.get('INCLUDE'),'LIB':env.get('LIB'),'scope':'U0_BUILD_DIAGNOSTIC_ONLY_NO_N_GENERATIONS'},indent=2)+'\n')
-         # Git Bash's original export_ref; convert evidence path to slash spelling for Bash.
-         flat=out/'SELF.c';rc=run('export',['bash','tests/export_ref.sh',flat.as_posix()],10,env);assert rc==0,'EXPORT_FAILED'
-         full=out/'U0.ref.c';full.write_bytes((root/'tests/refshim.h').read_bytes()+flat.read_bytes()+(root/'tests/reffoot.h').read_bytes())
-         (out/'source-inputs.json').write_text(json.dumps({n:digest(p) for n,p in [('SELF.c',flat),('U0.ref.c',full),('tests/refshim.h',root/'tests/refshim.h'),('tests/reffoot.h',root/'tests/reffoot.h')]},indent=2)+'\n')
-         triple={'x64':'x86_64-pc-windows-msvc','arm64':'aarch64-pc-windows-msvc'}[arch];exe=out/'U0.exe'
-         rc=run('compile-u0',[compiler,'--target='+triple,'/TC','/O2','/clang:-std=c99','/clang:-ferror-limit=0',str(full),'/Fo'+str(out/'U0.obj'),'/Fe'+str(exe)],55,env)
-         diagnostics=(out/'compile-u0.stderr.log').read_text(errors='replace')+(out/'compile-u0.stdout.log').read_text(errors='replace')
-         (out/'diagnostics.json').write_text(json.dumps({'raw_rc':rc,'diagnostic_lines':[l for l in diagnostics.splitlines() if re.search(r'error|warning|fatal',l,re.I)],'unreached_diagnostics':'UNKNOWN; missing header can stop subsequent analysis'},indent=2)+'\n')
-         if rc:sys.exit(rc)
-         data=exe.read_bytes();pe=struct.unpack_from('<I',data,0x3c)[0];machine=struct.unpack_from('<H',data,pe+4)[0];assert machine=={'x64':0x8664,'arm64':0xaa64}[arch],'U0_PE_TARGET_MISMATCH'
-         (out/'U0.build.json').write_text(json.dumps({'sha256':digest(exe),'source_sha':head,'self_sha256':digest(flat),'wrapped_source_sha256':digest(full),'compiler_sha256':digest(compiler),'flags':['/TC','/O2','/clang:-std=c99'],'machine':machine,'status':'COMPILED_ONLY_EXECUTION_AND_LLP64_SEMANTICS_NOT_CERTIFIED'},indent=2)+'\n')
-        finally:
-         if out.is_dir():
-          (out/'EVIDENCE.json').write_text(json.dumps({p.relative_to(out).as_posix():{'sha256':digest(p),'bytes':p.stat().st_size} for p in out.rglob('*') if p.is_file() and p.name!='EVIDENCE.json'},indent=2)+'\n')
-        '@
-        New-Item -ItemType Directory -Force -Path $env:U0_EVIDENCE | Out-Null
-        $path = Join-Path $env:U0_EVIDENCE 'probe.py'
-        [IO.File]::WriteAllText($path, $script, [Text.UTF8Encoding]::new($false))
-        python $path
-        exit $LASTEXITCODE
+      run: "$script = @'\nimport os, sys, pathlib, subprocess, json, time, hashlib, re, shutil, struct, traceback\nroot =\
+        \ pathlib.Path.cwd()\nout = pathlib.Path(os.environ['U0_EVIDENCE'])\nout.mkdir(parents=True, exist_ok=True)\nrows\
+        \ = []\ndef digest(p):\n    return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()\ndef save(name, obj):\n\
+        \    (out / name).write_text(json.dumps(obj, indent=2) + '\\n', encoding='utf-8')\ndef run(name, args, limit, env=None):\n\
+        \    args = list(map(str, args))\n    row = {'name': name, 'argv': args, 'bound': limit, 'status': 'STARTED'}\n  \
+        \  rows.append(row)\n    save('steps.json', rows)\n    start = time.monotonic()\n    try:\n        with (out / (name\
+        \ + '.stdout.log')).open('wb') as stdout, (out / (name + '.stderr.log')).open('wb') as stderr:\n            try:\n\
+        \                proc = subprocess.Popen(args, cwd=root, env=env, stdout=stdout, stderr=stderr)\n                try:\n\
+        \                    row['rc'] = proc.wait(timeout=limit)\n                except subprocess.TimeoutExpired:\n   \
+        \                 row['timeout'] = True\n                    subprocess.run(['taskkill', '/PID', str(proc.pid), '/T',\
+        \ '/F'], stdout=stderr, stderr=stderr, timeout=3)\n                    row['rc'] = 142\n            except Exception:\n\
+        \                stderr.write(traceback.format_exc().encode('utf-8'))\n                row['status'] = 'EXCEPTION'\n\
+        \                raise\n        row['status'] = 'FINISHED'\n        return row['rc']\n    finally:\n        row['seconds_monotonic']\
+        \ = time.monotonic() - start\n        save('steps.json', rows)\ndef checked(name, args, limit, env=None):\n    rc\
+        \ = run(name, args, limit, env)\n    if rc:\n        raise RuntimeError(name + ' failed rc=' + str(rc))\n    return\
+        \ (out / (name + '.stdout.log')).read_text(encoding='utf-8-sig', errors='replace').strip()\ndef newest(paths, reason):\n\
+        \    paths = list(paths)\n    if not paths:\n        raise RuntimeError(reason)\n    def version(p):\n        return\
+        \ tuple(int(x) for x in p.name.split('.'))\n    return max(paths, key=version)\ntry:\n    source = os.environ['SOURCE_SHA']\n\
+        \    assert re.fullmatch('[0-9a-fA-F]{40}', source), 'FULL_SHA_REQUIRED'\n    head = checked('source-head', ['git',\
+        \ 'rev-parse', 'HEAD'], 5)\n    assert head.lower() == source.lower(), 'SOURCE_IDENTITY_MISMATCH'\n    assert not\
+        \ checked('source-clean', ['git', 'status', '--porcelain'], 5), 'SOURCE_TREE_DIRTY'\n    arch = os.environ['U0_ARCH']\n\
+        \    architecture = {k: os.environ.get(k) for k in ('PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432', 'RUNNER_ARCH')}\n\
+        \    expected = {'x64': ('AMD64', 'X64'), 'arm64': ('ARM64', 'ARM64')}[arch]\n    save('architecture.json', {'target':\
+        \ arch, 'observed': architecture, 'expected': expected})\n    assert (architecture['PROCESSOR_ARCHITECTURE'] or '').upper()\
+        \ == expected[0], 'PROCESSOR_ARCHITECTURE_MISMATCH'\n    assert (architecture['RUNNER_ARCH'] or '').upper() == expected[1],\
+        \ 'RUNNER_ARCH_MISMATCH'\n    # Export first: tool discovery failure must still preserve the original source/export\
+        \ logs.\n    flat = out / 'SELF.c'\n    checked('export', ['bash', 'tests/export_ref.sh', flat.as_posix()], 10)\n\
+        \    full = out / 'U0.ref.c'\n    full.write_bytes((root / 'tests/refshim.h').read_bytes() + flat.read_bytes() + (root\
+        \ / 'tests/reffoot.h').read_bytes())\n    save('source-inputs.json', {n: digest(p) for n, p in [('SELF.c', flat),\
+        \ ('U0.ref.c', full), ('tests/refshim.h', root / 'tests/refshim.h'), ('tests/reffoot.h', root / 'tests/reffoot.h')]})\n\
+        \    vswhere = pathlib.Path(os.environ['ProgramFiles(x86)']) / 'Microsoft Visual Studio/Installer/vswhere.exe'\n \
+        \   vsraw = checked('vswhere', [vswhere, '-latest', '-products', '*', '-property', 'installationPath'], 5)\n    assert\
+        \ vsraw, 'VS_INSTALLATION_NOT_READY'\n    vs = pathlib.Path(vsraw)\n    # No cmd.exe/VsDevCmd quoting or imported\
+        \ shell environment.\n    candidates = [vs / 'VC/Tools/Llvm' / sub / 'bin/clang-cl.exe' for sub in ('ARM64', 'x64',\
+        \ '')] if arch == 'arm64' else [vs / 'VC/Tools/Llvm' / sub / 'bin/clang-cl.exe' for sub in ('x64', '')]\n    compiler\
+        \ = None\n    for candidate in candidates:\n        try:\n            candidate.stat()\n        except FileNotFoundError:\n\
+        \            continue\n        compiler = candidate.resolve(strict=True)\n        break\n    save('tool-discovery.json',\
+        \ {'vs_installation': str(vs), 'compiler_candidates': list(map(str, candidates)), 'compiler': str(compiler) if compiler\
+        \ else None})\n    assert compiler, 'CLANG_CL_NOT_READY_NO_INSTALL_FALLBACK'\n    linker = compiler.with_name('lld-link.exe')\n\
+        \    linker.resolve(strict=True)\n    msvc = newest((p for p in (vs / 'VC/Tools/MSVC').iterdir() if re.fullmatch(r'\\\
+        d+(\\.\\d+)+', p.name) and (p / 'include').is_dir() and (p / 'lib' / arch).is_dir()), 'MSVC_HEADERS_LIBS_NOT_READY')\n\
+        \    sdk = pathlib.Path(os.environ['ProgramFiles(x86)']) / 'Windows Kits/10'\n    sdkversion = newest((p for p in\
+        \ (sdk / 'Include').iterdir() if re.fullmatch(r'\\d+(\\.\\d+)+', p.name) and all((p / sub).is_dir() for sub in ('ucrt',\
+        \ 'shared', 'um', 'winrt')) and all((sdk / 'Lib' / p.name / sub / arch).is_dir() for sub in ('ucrt', 'um'))), 'WINDOWS_SDK_NOT_READY')\n\
+        \    includes = [msvc / 'include'] + [sdkversion / sub for sub in ('ucrt', 'shared', 'um', 'winrt')]\n    libs = [msvc\
+        \ / 'lib' / arch] + [sdk / 'Lib' / sdkversion.name / sub / arch for sub in ('ucrt', 'um')]\n    env = dict(os.environ)\n\
+        \    # Windows environment variable names are case-insensitive; remove aliases first.\n    for key in list(env):\n\
+        \        if key.upper() in ('PATH', 'INCLUDE', 'LIB', 'CL', '_CL_', 'LINK', '_LINK_'):\n            del env[key]\n\
+        \    env.update(PATH=str(compiler.parent) + os.pathsep + os.environ.get('PATH', ''), INCLUDE=';'.join(map(str, includes)),\
+        \ LIB=';'.join(map(str, libs)))\n    tools = {'source_sha': head, 'target': arch, 'architecture': architecture, 'compiler':\
+        \ str(compiler), 'compiler_sha256': digest(compiler), 'linker': str(linker), 'linker_sha256': digest(linker), 'msvc':\
+        \ str(msvc), 'sdk': str(sdkversion), 'INCLUDE': env['INCLUDE'], 'LIB': env['LIB'], 'scope': 'U0_BUILD_DIAGNOSTIC_ONLY_NO_N_GENERATIONS'}\n\
+        \    save('tools.json', tools)\n    tools['compiler_version'] = checked('compiler-version', [compiler, '--version'],\
+        \ 5, env)\n    save('tools.json', tools)\n    triple = {'x64': 'x86_64-pc-windows-msvc', 'arm64': 'aarch64-pc-windows-msvc'}[arch]\n\
+        \    exe = out / 'U0.exe'\n    flags = ['--target=' + triple, '/TC', '/O2', '/clang:-std=c99', '/clang:-ferror-limit=0',\
+        \ '/clang:-fuse-ld=lld']\n    rc = run('compile-u0', [compiler, *flags, full, '/Fo' + str(out / 'U0.obj'), '/Fe' +\
+        \ str(exe)], 55, env)\n    diagnostics = (out / 'compile-u0.stderr.log').read_text(errors='replace') + (out / 'compile-u0.stdout.log').read_text(errors='replace')\n\
+        \    save('diagnostics.json', {'raw_rc': rc, 'diagnostic_lines': [line for line in diagnostics.splitlines() if re.search(r'error|warning|fatal',\
+        \ line, re.I)], 'unreached_diagnostics': 'UNKNOWN; a fatal header error can stop subsequent analysis'})\n    if rc:\n\
+        \        raise SystemExit(rc)\n    data = exe.read_bytes()\n    pe = struct.unpack_from('<I', data, 0x3c)[0]\n   \
+        \ assert data[:2] == b'MZ' and data[pe:pe + 4] == b'PE\\0\\0', 'U0_PE_FORMAT_MISMATCH'\n    machine = struct.unpack_from('<H',\
+        \ data, pe + 4)[0]\n    assert machine == {'x64': 0x8664, 'arm64': 0xaa64}[arch], 'U0_PE_TARGET_MISMATCH'\n    save('U0.build.json',\
+        \ {'sha256': digest(exe), 'source_sha': head, 'self_sha256': digest(flat), 'wrapped_source_sha256': digest(full),\
+        \ 'compiler_sha256': digest(compiler), 'flags': flags, 'machine': machine, 'status': 'COMPILED_ONLY_EXECUTION_AND_LLP64_SEMANTICS_NOT_CERTIFIED'})\n\
+        except BaseException as error:\n    (out / 'probe-exception.stderr.log').write_text(traceback.format_exc(), encoding='utf-8')\n\
+        \    save('probe-status.json', {'status': 'FAILED', 'exception_type': type(error).__name__, 'message': str(error),\
+        \ 'compile_reached': any(r['name'] == 'compile-u0' for r in rows)})\n    raise\nfinally:\n    save('EVIDENCE.json',\
+        \ {p.relative_to(out).as_posix(): {'sha256': digest(p), 'bytes': p.stat().st_size} for p in out.rglob('*') if p.is_file()\
+        \ and p.name != 'EVIDENCE.json' and p.suffix.lower() in ('.json', '.log', '.py', '.c')})\n'@\nNew-Item -ItemType Directory\
+        \ -Force -Path $env:U0_EVIDENCE | Out-Null\n$path = Join-Path $env:U0_EVIDENCE 'probe.py'\n[IO.File]::WriteAllText($path,\
+        \ $script, [Text.UTF8Encoding]::new($false))\npython $path\nexit $LASTEXITCODE\n"
     - name: Always recover raw diagnostic evidence
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: windows-u0-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-        path: |
-          ${{ env.U0_EVIDENCE }}/*.log
+        path: '${{ env.U0_EVIDENCE }}/*.log
+
           ${{ env.U0_EVIDENCE }}/*.json
+
+          ${{ env.U0_EVIDENCE }}/*.py
+
+          ${{ env.U0_EVIDENCE }}/*.c
+
+          '
         if-no-files-found: error
         retention-days: 14
