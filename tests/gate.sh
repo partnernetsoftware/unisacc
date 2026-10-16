@@ -631,9 +631,31 @@ job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
 job lib-union-native python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-carrier-factory python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
 job lib-carrier-relay python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
+if [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ]; then
+job lib-union-scalar-prepare python3 ./tests/libraryunionscalarcheck.py --prepare --cases int8,float4,double8,mixed2,mixed3,mixed-reordered --pressures plain,gp9,fp9 --sanitize
+job lib-union-scalar-int8-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures plain --sanitize --require-cached
+job lib-union-scalar-int8-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-int8-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-float4-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures plain --sanitize --require-cached
+job lib-union-scalar-float4-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-float4-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-double8-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures plain --sanitize --require-cached
+job lib-union-scalar-double8-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-double8-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-mixed2-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures plain --sanitize --require-cached
+job lib-union-scalar-mixed2-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-mixed2-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-mixed3-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures plain --sanitize --require-cached
+job lib-union-scalar-mixed3-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-mixed3-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-mixed-reordered-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures plain --sanitize --require-cached
+job lib-union-scalar-mixed-reordered-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-mixed-reordered-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures fp9 --sanitize --require-cached
+else
 job lib-union-scalar-1 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8,float4 --sanitize
 job lib-union-scalar-2 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8,mixed2 --sanitize
 job lib-union-scalar-3 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3,mixed-reordered --sanitize
+fi
 job lib-union-composite-direct-1 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize
 job lib-union-composite-direct-2 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize
 job lib-union-composite-direct-3 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize
