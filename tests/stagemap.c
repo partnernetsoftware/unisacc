@@ -47,7 +47,7 @@ static char *rules[] = {
     "chain", "difftest* csmithdiff* corpus* ccrun* closure* stages exec-chain exec-native-* exec-formats*"
              " exec-multi-* multi fb12-multi realprog luatests* sqlspeed* minicon apps-* bigclosure",
     "lib", "lib-*",
-    "build", "seed* exec-*self* exec-selfprep-* exec-bootstrap-* nativeboot-* comboot-* exec-driver-*"
+    "build", "host-triple-* seed* exec-*self* exec-selfprep-* exec-bootstrap-* nativeboot-* comboot-* exec-driver-*"
              " exec-tableself exec-prepare-*",
     0
 };

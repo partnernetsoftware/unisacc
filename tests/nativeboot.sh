@@ -16,6 +16,9 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 case "${1:-}" in
+    --host-triple) [ "$#" = 2 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" "$2";;
+    --host-triple-prepare) [ "$#" = 1 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" prepare;;
+    --host-triple-build) [ "$#" = 4 ] || exit 2; mode=hostcompile; SELF=$2; COMPILER=$3; OUTPUT=$4;;
     "") mode=local;;
     --windows)
         case "${2:-}" in win/arm64|win/x86_64) ;; *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;; esac
@@ -25,13 +28,15 @@ case "${1:-}" in
     *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;;
 esac
 . "$R/tests/lib.sh"
+if [ "$mode" != hostcompile ]; then
 T=$(scratch)
 SELF="$T/unisacc.flat.c"
 bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
+fi
 fail() { echo "  FAIL $*"; return 1; }
 compile() { # output, compiler, target: a failed/empty compile is never comparable.
     local output=$1 compiler=$2 target=$3 rc
-    bound 55 "$compiler" "$SELF" -b "$target" > "$output" 2> "$output.err"
+    bound "${NATIVEBOOT_COMPILE_BOUND:-55}" "$compiler" "$SELF" -b "$target" > "$output" 2> "$output.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then cat "$output.err" >&2; fail "compile $target exited $rc"; return 1; fi
     [ -s "$output" ] || { fail "compile $target produced an empty image"; return 1; }
@@ -77,6 +82,14 @@ windows() {
     [ -s "$T/got" ] && cmp -s "$T/W" "$T/got" || { fail "$target guest self-build empty or different"; return 1; }
     echo "  ok on Windows: $target rebuilt itself byte for byte"
 }
+if [ "$mode" = hostcompile ]; then
+    [ "$(host_target)" = lnx/x86_64 ] || { echo "PLATFORM_UNVERIFIED host-triple" >&2; exit 77; }
+    NATIVEBOOT_COMPILE_BOUND=9
+    compile "$OUTPUT" "$COMPILER" lnx/x86_64 || exit 1
+    runnable "$OUTPUT" "$OUTPUT.executable" || exit 1
+    mv "$OUTPUT.executable" "$OUTPUT" || exit 1
+    exit 0
+fi
 # Reference construction is also bounded, including the caller-selected UA.
 bound 55 env UA="$UA" bash -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' _ "$R" || exit 1
 if [ "$mode" = windows ]; then windows "$2"; exit $?; fi

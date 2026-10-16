@@ -558,7 +558,9 @@ job exec-srcelf-3 env ELF_SHARD=3/3 ./exec/pipeline/check-elf.sh
 for k in 1 2 3 4; do job difftest_o-$k SHARD=$k/4 ./tests/difftest_o.sh; done
 job warn        ./tests/warn.sh
 job diag-units  ./tests/diagunits.sh
-for part in self cross-a cross-b; do job nativeboot-$part env NB_PART=$part ./tests/nativeboot.sh; done  # 0.0.31: one window no longer holds all eight compiles
+job host-triple-u0-prepare ./tests/nativeboot.sh --host-triple-prepare  # preparation only, excluded from the four test gates
+for generation in u0 n1 n2 n3; do job host-triple-$generation ./tests/nativeboot.sh --host-triple "$generation"; done
+for part in cross-a cross-b; do job nativeboot-$part env NB_PART=$part ./tests/nativeboot.sh; done  # 0.0.31: one window no longer holds all eight compiles  # 0.0.31: one window no longer holds all eight compiles
 job staticinit  ./tests/staticinit.sh
 job tagforward ./tests/tagforward.sh
 job parserbounds ./tests/parserbounds.sh
