@@ -64,7 +64,7 @@
 \author{Yunzuo Chen\\
 PartnerNet Software Pty Ltd, Australia\\
 \texttt{wanjochan@partnernetsoftware.com}}
-\date{September 2026\thanks{Code, weights and all evidence: \url{https://github.com/partnernetsoftware/unisacc} (repository links in this paper are pinned to commit \texttt{05e5d249}; see Appendix~\ref{artifacts-and-evidence}).}}
+\date{September 2026\thanks{Code, weights and all evidence: \url{https://github.com/partnernetsoftware/unisacc} (repository links in this paper are pinned to commit \texttt{910f1e0a}; see Appendix~\ref{artifacts-and-evidence}).}}
 
 \hypersetup{pdftitle={Tables as Networks: A Byte-for-Byte Self-Hosting C Compiler Whose Weights Are Constructed, Not Trained},pdfauthor={Yunzuo Chen},pdfkeywords={weight-compiled networks; weight construction; exact networks; exhaustive verification; finite control; byte-for-byte self-hosting; reproducible builds},pdfcreator={pdfLaTeX},pdfproducer={pdfTeX}}
 \newcommand{\KTwoSourceTip}{61c81afc}
@@ -81,516 +81,93 @@ PartnerNet Software Pty Ltd, Australia\\
 \maketitle
 
 \begin{abstract}
-We study a neural-network-based compiler: its compilation stages run on integer threshold networks and a generic executor, while the weights are deterministically constructed from a TSV table DSL rather than trained. Compiler decisions such as character classes, production choice, type promotion, instruction and calling-convention selection, and image field layout are finite functions. Each decision is a truth table, total on a finite Cartesian product; a small integer network is built directly from the table and checked against it by enumerating every key. \textbf{Our core claim} is that there exist constructed weights, derived from the table, such that on the table's declared domain the integer threshold network yields the table's exact executable form (identical key-by-key), not a learned approximation; layers, thresholds and width are chosen network structure, not compiler behaviour learned from data. Work over unbounded structure is split into finite control plus generic storage, so the control's transition function is again a table that can be constructed and enumerated. We implement this in unisacc, a C99-subset compiler for Linux, macOS and Windows on x86-64 and arm64. In one instance, classic code queries a DENSE answer table enumerated from 18 constructed networks (8,509 keys, op-74 vocabulary identity, all exact under T1 / exhaustive key-by-key equality on the declared domain (Definition~2), not sample fit or training accuracy; the Chinese internal draft Table 1 currently uses the distinct op-87 identity 8,769/569 — a different identity, not interchangeable before a seal); direct network inference remains a checked construction artifact, and the neural-network-based label is likewise anchored on construction and T1, not on live weight inference at every product ask, and the decision-network instance self-hosts byte-for-byte (N1 = N2 = N3) on five named targets---that criterion asserts only unsigned successive-generation binary identity under the named checks, not a semantic self-hosting theorem, C99 completeness, or a proof that tables agree with C semantics (table semantics still rest on external referees and the stated boundaries). In a second, the whole pipeline runs as seven byte-stream stages (preprocess pp, lex, parse/parse2, opt, prune, lowering, encode+image enc), each a constructed threshold network driven by one generic executor. Rejection on out-of-domain or uncovered keys is an error; there is never a fallback to a classic compiler. \textbf{The product and our claims rely on construction, not training}; construction plus enumeration is not a substitute for---or approximation of---training, but a distinct verification discipline (weights constructed from tables, not trained). §7.3 records one illustrative historical Adam comparison only, and preregistered study A2 owns systematic training comparisons. After rules on a table change, a full deterministic reconstruction from the updated tables yields networks exact on every key again (T1)---not a proved locality theorem for single-rule edits or zero error on unrelated keys (preregistered A2 RQ2). The Adam rows did not align with construction under the limits stated in §7.3 (illustrative history under that protocol, not a width- or reachability-superiority theorem). The cost of step-by-step execution is real, but this draft does not quote a speed ratio: this tip has no same-identity speed measurement, so this draft claims no speed ratio. Enumeration proves that a network equals its table, not that the table agrees with C semantics, which external referees cover only partially.
+unisacc is a neural-network-based compiler: compilation stages run on integer threshold networks and one generic executor; weights are constructed from a TSV table DSL, not trained. T1 is key-by-key equality on the declared domain (Definition~2), not sample fit. The decision-network instance is 18 decision stages. The network-compiler instance is seven byte-stream stages (pp, lex, parse/parse2, opt, prune, lowering, enc). An out-of-domain key is rejected; there is no fallback. N1 = N2 = N3 holds on five named targets as unsigned successive-generation identity, not a semantic self-host. Key identities: op-74 totals 8,509 keys; op-87 totals 8,769 keys; not interchangeable before a seal. Source \texttt{910f1e0a} / \texttt{0.0.42} is not a sealed release measurement. Systematic training comparison is preregistered study A2. Enumeration proves network = table, not table = C.
 
 \medskip
-\noindent\textbf{Keywords:} neural-network-based compiler; TSV table DSL; weight construction; exact networks; exhaustive verification; finite control; byte-for-byte self-hosting
+\noindent\textbf{Keywords:} neural-network-based compiler; TSV table DSL; weight construction; T1; finite control; byte-for-byte self-hosting
 \end{abstract}
 
-\section{Introduction}\label{introduction}
-
-There are two mainstream ways to put neural networks into a compiler. One learns the source-to-target mapping end to end and cannot give correctness guarantees. The other uses learned models to assist heuristic decisions (register allocation, inlining, scheduling), while hand-written code still determines the final behaviour. Both share a premise: the weights come from training, so the network's behaviour can only be characterised statistically.
-
-We call this a neural-network-based compiler because constructed threshold networks are the execution path for compilation stages; its weights come from declarative TSV tables and a constructor, not from sample training. We do \textbf{not} claim to have ``learned a compiler'': on the table-covered domain, the threshold network is an exact executable form of the table (identical key-by-key on the declared domain, not a learned statistical surrogate), with weights exported by the constructor. We observe that the ``table-shaped'' decisions in a compiler --- given a discrete description, choose a discrete action --- can have their inputs \textbf{designed} to be a finite Cartesian product. On such a domain, whether the network is correct is no longer a question of generalisation but a \textbf{model-checking problem} decidable by exhaustion: run the deployed inference once on every key and compare with the truth table. Moreover, the weights need not be trained: every finite total function has a constructive exact network, and the only engineering question left is how to make it small.
-
-The consequence is not limited to ``replacing a single table with a single network''. By the classic decomposition of computation theory, any deterministic algorithm can be written as finite control plus unbounded storage. A single transition of the finite control is a finite function, so it too can be constructed as a network and driven by a language-independent executor. In principle, therefore, constructed networks can carry the declared finite transitions of compilation stages, while classic code remains responsible for storage, I/O, host adaptation, and the product routes enumerated in §4.4.
-
-\textbf{Contributions.}
+\section{Contributions}\label{introduction}
 
 \begin{enumerate}
-\def\labelenumi{\arabic{enumi}.}
-\tightlist
-\item
-  \textbf{Method.} A ``TSV table DSL → network construction → enumeration'' method: decisions are total functions on finite domains; weights are constructed from tables rather than trained---on the declared domain they yield the table's exact executable form (identical key-by-key), not a learned approximation / statistical surrogate; the release criterion is key-by-key equality decided by exhaustion on the declared domain (T1 / model checking), not sample fit or training accuracy (§2, §3).
-\item
-  \textbf{From decisions to a pipeline.} The network-compiler instance expresses compilation as seven byte-stream stages, finite transition functions \(\delta\) composed with one generic executor \(E\), together with two runtime improvements that change no answer: threshold-prefix evaluation and declared returns (§4). The decision-network instance remains a separate set of 18 decision stages.
-\item
-  \textbf{Implementation.} unisacc, a six-target C99-subset compiler with both a decision-network instance and a network-compiler instance; the former self-hosts byte-for-byte on five targets without Python. The source identity is Appendix~\ref{artifacts-and-evidence}.
-\item
-  \textbf{A verification discipline and its findings.} Construction plus enumeration is not a substitute for---or approximation of---training, but a distinct verification discipline (weights constructed from tables, not trained---on the declared domain they yield the table's exact executable form (identical key-by-key), not a learned approximation); layered verification by exhaustive enumeration, byte-level differential testing and external referees, including defects in hand-written code that enumeration found and sampling could not (§6, §7.4).
-\item
-  \textbf{Construction versus training (illustrative).} §7.3 records one historical Adam schedule under stated limits; preregistered study A2 may later widen or narrow any claim about training comparisons (§7.3).
+\item \textbf{Method.} TSV table DSL $\to$ constructed weights $\to$ exhaustion on the declared domain (T1). The weights are not trained.
+\item \textbf{Two layers.} The network-compiler contract is seven byte-stream stages: one generic executor $E$ runs finite transitions $\delta$. The decision-network instance is 18 decision stages, queried at ask points or via the enumerated DENSE table.
+\item \textbf{Implementation.} unisacc, a six-target C99 subset. The decision-network instance self-hosts byte-for-byte on five targets without Python. Source identity: Appendix~\ref{artifacts-and-evidence}.
 \end{enumerate}
 
-We deliberately do \textbf{not} claim that the tables agree with C99 semantics, that whole-compiler semantics is preserved, or that the network compiler is fast. These boundaries are discussed in §8.
+Not claimed: table = C99, whole-compiler semantic preservation (T3), or a speed advantage.
 
-\section{Problem Formulation}\label{problem-formulation}
+\section{Definitions}\label{problem-formulation}
 
-\subsection{Finite decisions and exactness}\label{finite-decisions-and-exactness}
+\textbf{Definition 1 (decision stage).} Stage $s$ has fields $(f_1{:}V_1,\ldots,f_m{:}V_m)$, output vocabulary $Y$, and total $G_s:K_s\to Y$ on the finite product $K_s$. These 18 stages are the decision-network instance, not the seven byte-stream stages.
 
-\textbf{Definition 1 (stage).} A stage \(s\) consists of fields \((f_1{:}V_1,\dots,f_m{:}V_m)\), an output vocabulary \(Y\), and a truth table \(G_s:K_s\to Y\), where \(K_s=V_1\times\cdots\times V_m\) is a finite Cartesian product and \(G_s\) is total on \(K_s\). A multi-head stage has several output vocabularies, one table per head.
+\textbf{Definition 2 (exact / T1).} $N$ is exact for $s$ iff for every $k\in K_s$, $\operatorname{argmax} N(k)$ is unique and equals $G_s(k)$.
 
-\textbf{Definition 2 (exactness).} A network \(N\) is exact for stage \(s\) iff for every \(k\in K_s\), \(\operatorname{argmax}N(k)\) is unique and equals \(G_s(k)\). This criterion is key-by-key equality decided by exhaustion on the declared domain (T1 / model checking), not sample fit or training accuracy.
-
-\textbf{Definition 3 (query discipline).} The compiler uses networks only through an opaque interface \texttt{ask(s,\ k)}: it never reads logits and never falls back to the truth table when a network rejects; every queried \(k\) satisfies \(k\in K_s\), otherwise an assertion fails immediately. A query with \(k\notin K_s\) is not a test of learning or generalisation but partial coverage and explicit failure: semantics are fixed by the declared domain and rejection discipline, not by inferring rules from unseen keys. Relative to a larger ambient space of observations or keys, deployed \texttt{ask} is a partial function: defined and exact on the declared \(K_s\), and an error outside; this is intentional design, not holdout generalisation, and leave-out or training-based generalisation experiments belong to preregistered A2, not Paper A's product claim.
-
-Under the query discipline, if every stage is exact, the network-driven compiler behaves identically to the table-driven compiler (P-5 in §3.4). Because \(K_s\) is finite, exactness is fully decidable and needs no statistical argument.
-
-\subsection{Finite control and generic execution}\label{finite-control-and-generic-execution}
-
-Work that depends on unbounded structure is decomposed into finite control and generic storage. Compilation is written as
+\textbf{Definition 3 (query discipline).} Use only $\mathrm{ask}(s,k)$. Do not read logits. Do not fall back to the table on rejection. $k\notin K_s$ fails.
 
 \[
-\mathrm{Compile}(x)=\mathrm{dec}\bigl(\mathrm{Run}_{E,\delta}(\mathrm{enc}(x))\bigr),
-\]
-where δ is the transition function of the finite control: its input is the current control state and a \textbf{finite} observation (the next input byte, the top stack symbol, or the comparison result of the previous action); its output is the next state and the index of an action sequence. E is a language-independent executor performing generic actions --- reading and writing, stack operations, output; \texttt{enc} and \texttt{dec} perform only explicit representation changes. \texttt{Run} repeatedly observes, evaluates δ and executes actions; its outcome is accept, reject or divergence.
-
-The decomposition rests on a standard result of computation theory: a deterministic algorithm can be realised by finite control, a finite alphabet and unbounded tape storage, and each step reads only finite information. A single transition is therefore a finite function, and can be constructed as an exact network as in §3.1. Existence does not imply that the network is small or fast, and it has explicit preconditions: unbounded constants, identifiers, addresses and type structures must be encoded as finite symbol sequences accessed through generic storage, never as a single input value of δ; language-specific work such as ``is this a typedef'' or ``convert types by C rules'' must be unfolded into δ, not hidden inside E.
-
-\paragraph{Syntax and semantics of the TSV table DSL.} A basic product-pipeline row has \texttt{state, observation, next, actions}, with a leading \texttt{section} in sectioned tables: an observation is a value, a finite set, or a \texttt{*} default, and actions form an ordered sequence. Parameterised template rows may refer to build-time facts and declare repeated expansion, continuation labels, and state hooks. The constructor instantiates these variables at build time; runtime Python does not evaluate them. Expansion gives exactly one transition for every state and key in the declared observation domain; duplicate explicit keys and missing defaults are rejected. Thus the DSL denotes a finite total function \(G_s:(q,o)\mapsto(q',a^*)\). The constructor writes the complete \texttt{.tbl}, deterministically builds a threshold network \(N_s\), and enumerates the domain to check \(N_s=G_s\). This establishes equality with the table, not C99 correctness. The build-time Python expander, fact binding and packer belong to the trusted base; compilation decisions at runtime use the networks and generic executor. The parse2 construction entry is \texttt{exec/build/gen.py parse2}: a stage manifest and domain-fact TSV files are expanded by the common assembler into the complete transition table. The manifest names templates and finite iteration over fact rows; facts describe language or target-domain data rather than transition edges. This distinction makes the stage-specific control auditable as data while leaving the common expander in the trusted base. The DSL boundary forbids embedded Python operations and predicates over a partly built state graph. A counted operation-vocabulary audit from an older tip is not repeated here. These are construction constraints, not a proof that the declared transitions implement C99.
-
-\paragraph{Core claim and construction method.} Paper A studies a neural-network-based compiler: networks and a generic executor advance the control and decisions of compilation stages. TSV declarations and expanded finite transition tables are the construction, inspection and verification tools used here, not a defining requirement for this class of compiler. Direct construction from rules, programs or IR is a possible research route, not an implemented or validated result of this paper. Our exact-construction and exhaustive-verification results remain scoped to the given finite tables and execution conditions.
-
-\textbf{Relationship to Paper E.} This paper studies a neural-network-based compiler, using exact construction from given finite control tables as its method and implementation evidence. It does not claim automatic synthesis of complete C99 control tables or a proof of their language semantics. Systematic construction of reliable tables from grammars, attribute rules, explicit context and state invariants is a separate research candidate, Paper E (a research proposal, not a result), to be investigated through continued unisacc development. This paper remains responsible for documenting table provenance, the constructor trusted base, coverage boundaries and known defects; network–table equality does not establish C99 correctness.
-
-\paragraph{What the network replaces.}
-For a modelled stage, the controller maps a finite control state and observation to a next state and an action-sequence identifier. Stage semantics is carried jointly by the weights, declared-return data, action catalogue and constants. The catalogue and constants are declarations interpreted by the same generic executor; their language-specific information has not disappeared. Thus the replacement claim concerns runtime control selection by constructed networks. It does not assert that all compiler information is stored exclusively in numerical weights, nor that changing its representation reduces the information or maintenance required.
-
-\paragraph{Exact threshold construction.}
-Fix a state $q$ and a finite ordered observation domain $[l_q,h_q]\cap\mathbb Z$.
-Encode the table output as a vector $f_q(k)=(q',a)$, including a distinguished rejection sentinel.
-Let $b_q=f_q(l_q)$ and $w_t=f_q(t)-f_q(t-1)$.
-Then the threshold network
-\[
- N_q(k)=b_q+\sum_{t=l_q+1}^{h_q}w_t\,\mathbf 1[k\ge t]
-\]
-equals $f_q(k)$ for every declared observation by telescoping.
-Zero differences can be omitted. A prefix-search implementation preserves this sum if it selects exactly the active thresholds and evaluates their signed weights without overflow.
-This is an existence and representation-equality result, not a semantic specification of the source language.
-
-\paragraph{Controller substitution (T2a).}
-This is a conditional proof sketch, not a Lean proof of the deployed C/assembly loops. Write a machine configuration as $c=(q,m,i,o,\sigma)$, where $m$ includes generic storage, stacks and any effect-response state, and $\sigma$ records the terminal status.
-Suppose two controllers agree for every observation reachable from a shared initial configuration.
-Assume the observation function, action catalogue, primitive semantics, strings and constants, initialization, terminal conventions and logical step budget are identical, and that the two evaluations satisfy their range and domain requirements.
-Then replacing one controller with the other preserves every finite configuration and observable event prefix.
-\emph{Proof sketch.} Equal configurations yield equal observations; pointwise controller equality yields the same next state and action sequence; the common action semantics yields equal successor configurations and events. Induct on the number of steps. Consequently both runs accept or reject with identical output at the same logical step, reach the same logical timeout, or have the same infinite execution prefixes.
-For effectful primitives, this statement is relative to the same input snapshot or coupled effect responses. It does not preserve wall-clock time, physical allocation success or total resident memory.
-
-\paragraph{Pipeline composition.}
-A finite sequence of substituted stages preserves the pipeline outcome when every stage's full interface is preserved: bytes, status and any provenance, flags, resources or metadata carried between stages. Induction on stage position composes the substitution result; a matching terminal error stops both pipelines. This does not require all stages to use the same network shape or numeric representation. It also does not imply bounded-memory online streaming.
-
-\paragraph{Declared-return factoring.}
-For a fixed stage, continuation symbols have a finite alphabet even if the continuation stack has unbounded height. The top-symbol observation therefore remains a finite decision.
-Rows with $f_q(k)=(k,a_q)$ may be factored into an explicit declared-return set $R_q$:
-\[
- \widehat f_q(k)=\begin{cases}(k,a_q),&k\in R_q,\\N_q^{\rm rest}(k),&k\notin R_q.\end{cases}
-\]
-If the membership set and shared sequence match those rows and the residual network agrees on the complement, then $\widehat f_q=f_q$ on the entire declared domain.
-The deployed controller comprises the network and this factored primitive; the artifact checker must evaluate both paths.
-
-\paragraph{Independent semantic obligation (T2b and T3).}
-T2a compares controllers inside the same machine. Simulation of an independently implemented classical compiler (T2b) instead requires an initial-state relation, preserved semantic invariants, matching observable effects and terminal states, and appropriate progress/divergence obligations. Neither local table enumeration nor a self-hosting fixed point establishes that relation.
-Agreement with the source language (T3) is a further obligation. A wrong language rule is reproduced exactly by a correctly constructed network. Differential testing and combination matrices provide empirical evidence, not a full-language proof.
-
-\paragraph{A finite expansion, not an implementation claim.}
-A fixed stage has a finite catalogue of finite action sequences. It is therefore possible to introduce finitely many internal control states that emit one generic primitive at a time, preserving action order and the original observation. Hiding these internal states yields a finite microstep refinement of the original control step, provided primitive effects and termination are unchanged and the resource accounting charges the same original logical step. This explains why keeping action sequencing in a separate catalogue is a representation choice, not an impossibility of placing that sequencing in finite control. The current product does not perform this expansion, and the construction promises no size or performance improvement; primitive semantics and literal data still require an explicit account.
-
-\subsection{Levels of assurance}\label{levels-of-assurance}
-
-\begingroup\small\setlength{\tabcolsep}{4pt}
-
-\stepcounter{paperTableAnchor}
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.0655}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4673}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4673}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Level
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Content
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Status
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-\textbf{T1} & Every released network equals its table on its declared domain (Definition~2's $K_s$; the pipeline DSL's ``declared observation domain'' names that same finite key domain) & Proved: constructive existence + full-domain enumeration (= T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy) \\
-\textbf{E} & Byte-level comparison with the classic reference on measured inputs; scoped by the named gates of this source, not by an older ledger & Empirical evidence, scoped in §5.5 \\
-\textbf{T2a} & Pointwise-equal controller substitution in the same executor & Conditional stepwise induction; implementation assumptions not mechanised \\
-\textbf{T2b} & The network compiler simulates an independent reference compiler over whole runs & Open: needs initial-state relation, state invariants, final-state match and divergence sensitivity \\
-\textbf{T3} & Compilation preserves the observable behaviour of the declared source language & Open: requires fixing the language subset, ABI and undefined behaviour first \\
-\end{longtable}
-
-\addtocounter{table}{-1}
-
-\endgroup
-
-T1 is the theorem-level result of this paper; E is engineering evidence; the implementation bridge for T2a, T2b and T3 are explicit open obligations.
-
-\section{Weight Construction}\label{weight-construction}
-
-\subsection{Existence}\label{existence}
-
-One-hot encode a key \(k=(k_1,\dots,k_m)\) and allocate one hidden unit \(u_k\) per key:
-
-\[
-W_1[\mathrm{coord}(i,k_i),u_k]=1,\quad b_1[u_k]=-(m-\tfrac12),\quad W_2[u_k,G(k)]=1 .
+\mathrm{Compile}(x)=\mathrm{dec}(\mathrm{Run}_{E,\delta}(\mathrm{enc}(x))).
 \]
 
-On input \(k\), exactly \(u_k\) has pre-activation \(\tfrac12\); every other unit is at most \(-\tfrac12\). After ReLU only \(u_k\) survives, and argmax is \(G(k)\). An exact network therefore always exists, with width at most \(|K|\). This is known (network encodings of finite-state machines, e.g.~\citealp{omlin1996}, and the lookup-style MLP construction in Tracr, \citealp{lindner2023}); our work is to make it small and to use it for a complete compiler. The released construction (cube cover in §3.2 and byte-stream threshold networks) exports weights from the table within an explicitly chosen layer-and-threshold form; runtime DENSE lookup is a different deployment shape, but the T1 criterion is unchanged: on the declared domain, deployed integer-threshold inference agrees with the table key-by-key.
-
-\subsection{Minimum cover}\label{minimum-cover}
-
-The naive construction needs 796,490 parameters across the 18 tables. We regard each hidden unit as a \textbf{cube} in key space --- a conjunction of value sets, one per field, with unconstrained fields as ``don't care'' --- so construction becomes a prioritised set cover:
-
-\begin{lstlisting}
-Algorithm 1  Decision-list construction
-Input: truth table G : K → Y
-1  Quotient: merge field values indistinguishable by the labels
-2  R ← empty list; U ← K
-3  while U ≠ ∅:
-4      c ← the cube (fields may take value sets) covering the most keys of U with
-           one label, without conflicting with earlier rules
-5      R.append((c, that label)); U ← U \ c
-6  Remove redundant cubes; assign positive integer output weights in reverse order
-   of R so that more specific rules win strictly
-7  Multi-head stages: share cubes across heads
-8  Enumerate every key of the original (unquotiented) K; reject on any error or tie
-\end{lstlisting}
-
-The Lean theorem \texttt{decision\_list\_exact} applies to a first-hit decision list only when its cubes cover the domain and every hit is globally monochrome under \(G\). The released construction permits overlapping cubes and uses weighted votes, and some heads use additive decomposition; that theorem does not prove Algorithm~1 or the released network. \texttt{naive\_exact} directly restates the one-unit-per-key construction, and the L3 domain-closure example is a typed toy walker. For the released weights, the release check exhaustively evaluates every original key with strict argmax, rejecting any wrong answer or tie.
-
-The greedy cover of lines 3--5 alone reduces the parameter count from 796,490 to 71,828. The resulting networks satisfy \(W_1\in\lbrace 0,1\rbrace\); the threshold \(b_1=-(|F|-1)\) is determined by the number \(|F|\) of fields a cube constrains and need not be stored; hidden activations are in \(\lbrace 0,1\rbrace\); \(W_2\) is a positive integer (at most 16 in most stages, at most 512 in the type stage). The hidden layer degenerates to a \textbf{Boolean conjunction} and the output layer to an integer-weighted vote. For five small tables we computed the exact minimum within the cube representation (35 → 20 units); we do not claim this equals the minimum width over arbitrary networks. That aggregate is exact only within the cube representation over those five tables (no per-table breakdown here); it is a separate exact-enumeration control---not a certificate that Algorithm~1's greedy cover is optimal or for the 796,490 → 71,828 reduction on the full 18-stage suite---and Paper~A does not elevate either figure into an optimality theorem (greedy runtime and optimality-gap analysis remain open; see \texttt{research/paper-a-notes.md}).
-
-The key spaces of the 18 decision stages are the truth tables in \texttt{weights/gold} at this commit. The op-74 total (8,509 keys) and the op-87 total (8,769 keys) are two identities and are not interchangeable before a seal. The combo row remains a hand-merged isel/abi control, off the ship path, and is not a merge theorem.
-
-\subsection{Deployment kernel and determinism}\label{deployment-kernel-and-determinism}
-
-\begin{figure}
-\centering
-\includegraphics[width=1\textwidth,height=\textheight]{figures/fig1-deterministic-intnet.pdf}
-\caption{Deterministic integer feed-forward network: verification path (top) and deployment kernel (bottom). The key space is a finite product \(K\); the output is the class name given by strict argmax.}
-\end{figure}
+$\delta$ takes the control state plus one finite observation and returns the next state and an action-sequence index. $E$ performs storage, stack, and output only. A TSV row \texttt{state, observation, next, actions} expands to a finite total $G_s$; the constructor emits $N_s$; the check proves only $N_s=G_s$. DSL syntax and the T2/T3 obligations are in \texttt{research/paper-a-notes.md}. T2a, T2b, and T3 are not theorems of this paper.
 
-Verification runs every key with integer gemv semantics: one-hot input, integer affine, \(\max(0,\cdot)\), integer affine, strict argmax. The deployment kernel exploits the Boolean \(W_1\) and hidden activations, turning the first layer into a conjunction of stage-local masks and the second into integer addition; it agrees pointwise with the verification path on the domain. It uses no softmax, floating point, multiplication, libm or dynamic memory. The weight-byte total is a property of the constructed weights at this source tip and is not quoted here.
+\section{Construction}\label{weight-construction}
 
-\textbf{Axiom of stage-independent representation.} The structure and numeric representation of stage \(s\) are determined by its own finite key domain, vocabularies, output heads and value ranges; other stages impose no common shape. Construction chooses the mask width with \texttt{maskw(st)} separately for each stage. Q-8 chooses, per stage, the smallest representation by byte size that preserves its outputs and checks the corresponding arithmetic ranges. Stages agree only on category and byte-stream interfaces; they need not share a mask width, weight dtype or accumulator width. The basis is that exactness, \(\forall k\in K_s:N_s(k)=G_s(k)\), is decided separately for each \(s\). Enumeration of one stage neither requires another to use the same structure nor proves that either truth table agrees with C99.
+A one-hidden-unit-per-key one-hot construction yields an exact network of width at most $|K|$ (Lean \texttt{naive\_exact}). Shipped decision stages use a cube cover: the hidden layer is a Boolean conjunction and the output layer an integer vote (Algorithm~1; the 796,490$\to$71,828 parameter count is in the notes). \texttt{decision\_list\_exact} covers only the globally monochrome first-hit case and does not prove the shipped networks. The release check is the integer network with strict argmax on the declared domain; a wrong answer or a tie rejects the build.
 
-Byte-level reproducibility rests on two facts: \textbf{construction is deterministic} --- the same truth tables yield byte-identical weights; and \textbf{inference is integer-only} --- within the kernel's integer width and accumulation range, the result for a given input is unique. Together they make cross-target folding (§6.2) and the self-hosting fixed point (§5.3) possible; consistency across machines and compilers must still be verified on the target platforms.
+Keys of the 18 decision stages are \texttt{weights/gold} at this commit. The op-74 total (8,509 keys) and the op-87 total (8,769 keys) are two identities. combo is an isel$\cup$abi control and is off the ship path.
 
-\subsection{Formal obligations}\label{formal-obligations}
+The deployment kernel is integer: one-hot, integer affine, ReLU, integer affine, strict argmax. No softmax, floating point, multiplication, or libm. The same table constructs the same weights. This paper does not quote a weight-byte total.
 
-\begingroup\small\setlength{\tabcolsep}{4pt}
+\section{Seven byte-stream stages and two instances}\label{from-decisions-to-a-pipeline-the-network-compiler}
 
-\stepcounter{paperTableAnchor}
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.1153}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4122}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4726}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Proposition
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Content
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Discharged by
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-\textbf{P-8} & Every total function \(G:K\to Y\) has an exact network & Lean \texttt{naive\_exact} (restates a known result) \\
-\textbf{P-3} & Released network ≡ truth table & Full-domain enumeration of the released integer network (= T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy); \texttt{decision\_list\_exact} proves only the globally monochrome first-hit subcase \\
-\textbf{P-1} & Query discipline (Definition 3) & Engineering discipline; premise of P-5 \\
-\textbf{P-5} & Network-driven ≡ table-driven & Lean \texttt{cong\_of\_pointwise}, \texttt{p5\_of\_p3\_trace} (under P-1 and P-3) \\
-\textbf{P-2} & Every queried key ∈ \(K_s\) & Runtime assertion; a Lean template on a toy walker; open for the full walkers \\
-\textbf{P-6} & Truth table ≡ C99 semantics & External referees (§6.3); not claimed \\
-\textbf{P-7} & Observable behaviour on six targets equals the reference VM & Empirical folding, fault injection and native suites \\
-\end{longtable}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Stage & Input $\to$ output \\
+\midrule
+Preprocess (pp) & source bytes $\to$ preprocessed text \\
+Lex (lex) & preprocessed text $\to$ token stream \\
+Parse (parse/parse2) & token stream $\to$ tape \\
+Opt (opt) & tape $\to$ tape \\
+Prune (prune) & tape $\to$ tape (public tape output skips prune) \\
+Lowering & tape $\to$ target instructions and data \\
+Encode and image (enc) & target instructions $\to$ ELF / Mach-O / PE or a memory image \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\addtocounter{table}{-1}
+The tape has eight 64-bit registers and 71 operations in \texttt{SHAPE}. The executor has no primitive for C, the tape, an ISA, or an image format.
 
-\endgroup
+The decision-network instance calls \texttt{ask} from classic recursive descent, lowering, and image writing; no fallback. The network-compiler instance runs the seven stages; a model rejection is an error. This tip has no same-identity size or speed measurement; this paper claims none.
 
-Deliberately out of scope: machine proofs of the self-hosting fixed point and the six ABIs, a proof that the truth tables equal C99, and complexity arguments for the minimum number of units.
+Threshold-prefix evaluation and declared returns do not change network answers: same network, same sum; the network--table check still covers every observation, including returns. Host code still loads packages and retains \texttt{src/tapelink.c}, \texttt{src/asmtext.c}, and \texttt{src/fwdstub.c}. Build-time Python is in the trusted base.
 
-\section{From Decisions to a Pipeline: the Network Compiler}\label{from-decisions-to-a-pipeline-the-network-compiler}
+\section{Self-host, T1, and referees}\label{implementation}
 
-\subsection{Partitioning principle: shape, not difficulty}\label{partitioning-principle-shape-not-difficulty}
+Decision-network instance, byte equality: (1) front-end fixed point, B = C, matching the Python front end; (2) back-end closure, 94 probes $\times$ 6 targets, 564/564, and the compiler itself 6/6; (3) no Python, N1 = N2 = N3 on osx/arm64, lnx/arm64, lnx/x86-64, win/arm64, and win/x86-64 (the last under system emulation). N1 = N2 = N3 asserts only unsigned successive-generation identity. The network compiler's driver self-host is N1 = N2 = N3 on macOS arm64 for a fixed network package and does not construct that package.
 
-A decision that is a function from finite keys to finite classes goes into a table. Work that depends on unbounded structure (nesting, recursion, address arithmetic) goes to finite control and generic storage, but only the declared finite transition choices are represented by the constructed network. In the decision-network instance, the deployed C code reads the enumerated DENSE answer table rather than evaluating weights for each query. A common division is \textbf{structure proposes, the table decides}: in peephole optimisation, structural code finds a candidate instruction pair and computes their relation (same slot, constant operand, jump to next, dead destination register); whether to rewrite, and how, is answered by the table. Operator precedence, operation classes, and the mapping from operator and signedness to instruction variant were all hard-coded at first and later moved into tables.
+T1 runs every cube network with deployment arithmetic on every key of its declared domain; an error or a tie fails construction. On the normal C path the decision-network instance reads DENSE and compares table lookup with direct inference.
 
-\subsection{Pipeline structure}\label{pipeline-structure}
+Six-target fold: the machine model recognises only the (OS, call number) from lowering. The six (stdout, exit) pairs agree with each other and with a tape reference VM. Clearing the class bits of macOS system-call numbers must yield 4/6. This tip has no native-versus-emulation matrix.
 
-The network compiler splits compilation into seven \textbf{byte-stream-in, byte-stream-out} stages. Each is a finite transition function constructed from declared rules, compiled into an integer threshold network, and run by the same generic executor:
+Eight of the 18 decision stages have a named referee (\texttt{research/referee.tsv}). The checks are pointers, not a proof of C: preprocess (\texttt{exec/pp/macrocheck.py}, \texttt{tests/ccparity.sh}); parse (\texttt{tests/warn.sh}); type, 1,400 of 4,275 keys via \texttt{\_Generic}; ABI against host system-call headers; precedence, 324 pairs (291 distinguishable and consistent, 33 indistinguishable); type info, 11 sizes and 8 integer signedness/narrowness facts; binary-operator selection (\texttt{tests/binsel\_audit.py}, 7 of 16 operators); printf (\texttt{tests/pfconv\_audit.py}, 9 letters).
 
-\begingroup\small\setlength{\tabcolsep}{4pt}
+Recorded decision-network acceptance checks, not a new seal of this tip: T1 is 1.000 on 18 stages; type table matches cc on 1,399 of 1,400 keys, with 1 intentional difference; c-testsuite 216/220 pass, 0 errors, 4 out of scope; C99 probes 59/59; differential tests 93/93; three optimisation levels 279/279; two front ends 190/190; known-answer libraries 11/11; back-end closure 564/564 and the compiler 6/6; \texttt{\%f/\%e/\%g} matches platform libc bit for bit.
 
-\stepcounter{paperTableAnchor}
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.1495}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4073}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4432}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Stage
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Input → output
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Main responsibilities
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-Preprocessing (pp) & source bytes → preprocessed text & line splicing and comments, directives, macro expansion and rescanning, conditional expressions, inclusion \\
-Lexing (lex) & preprocessed text → typed token stream & keywords and type words, identifiers and operators, literals, longest match \\
-Parsing (parse/parse2) & token stream → tape & declarations and scope, types and conversions, precedence, statements and control, initialisation, calls \\
-Optimisation (opt) & tape → tape & stack operations to register moves, basic blocks and liveness, peephole fusion \\
-Pruning (prune) & tape → tape & conservatively removes unreachable whole functions on the image and execution routes, keeping data; public tape output bypasses this stage \\
-Lowering & tape → target instructions and data & ABI, register mapping, system-call gates, data layout and relocation \\
-Encoding and image (enc) & target instructions → ELF / Mach-O / PE (or an in-memory image) & instruction encoding, branch layout, relocation, headers and segments, Mach-O signing \\
-\end{longtable}
+\section{Boundaries}\label{discussion-and-limitations}
 
-\addtocounter{table}{-1}
+Systematic construction-versus-training comparison is preregistered study A2. This paper has no training table.
 
-\endgroup
+The verification discipline has exposed cross-table combination gaps under one identity. Details are in \texttt{archive/research/r20/design-review-2026-10-01.md} and \texttt{research/paper-a-notes.md} and are not restated here. T1 asserts only network = table on one table's declared domain.
 
-The tape is a target-independent intermediate representation: eight 64-bit registers (one is the stack pointer) and 71 operations in the current \texttt{SHAPE} manifest. Floating-point values travel as IEEE bit patterns in general registers. Tape operation encodings do not bind an ISA; lowering and host-interaction boundaries still handle target ABI facts.
+This tip has no same-identity census of the seven stages, no speed measurement, and no platform matrix. The corpus does not extend to arbitrary C99. Build-time Python is in the trusted base.
 
-\textbf{One executor step.} The current control state selects an observation bank; the observation is the next input byte, the top of the continuation stack, or the comparison result of the previous action; the network maps the observation to the next state and an action-sequence index; the executor then performs the generic actions of that sequence: advance, mark and rewind, register and indexed-memory reads and writes, output, push and pop, string interning. The executor contains no primitive specific to C, the tape, an instruction set or an image format.
-
-\textbf{Network form.} These networks use an ordered-threshold representation per state: the units of an observation bank are sorted by threshold, and the next state and action index are a base value plus the accumulated differences of the activated units. It is the same method as the cube networks of §3, in a different form: the former suits finite control over byte streams, the latter classification over multi-field discrete descriptions.
-
-\subsection{Two runtime improvements that change no answer}\label{two-runtime-improvements-that-change-no-answer}
-
-Profiling showed that a program containing only \texttt{\#include\ \textless{}stdio.h\textgreater{}} took 3.29M steps in the parsing stage and scanned 602 million threshold units, 97\% of them in a single state --- continuation return.
-
-\textbf{Threshold-prefix evaluation.} Thresholds within a bank are strictly increasing (the loader rejects anything else), so the units activated by an observation always form a prefix. The executor binary-searches the prefix length and accumulates only those differences --- the same network and the same sum, with no answer table stored.
-
-\textbf{Declared returns.} Rows of a stack-keyed bank of the form ``continuation k → k, sharing one action sequence'' mean ``pop and continue at the state the stack names''. The continuation alphabet of a fixed stage is finite; unbounded stack height does not make the top observation an infinite decision. The constructor factors these rows into a declared return set and a generic pop action, building threshold units only for the remaining rows. The return fast path and threshold path together constitute the complete controller. The finite-domain factoring argument in §2.2 applies to both paths; weights alone do not describe this controller. The network--table check still compares every observation, returns included (1,549,292 in the parsing stage), and is fully equal before and after the change.
-
-This tip has no same-identity speed measurement, so this draft claims no speed-up for these two changes.
-
-\subsection{What is not the model}\label{what-is-not-the-model}
-
-Command-line handling, file and resource adaptation, package reading and checking, and network decompression and loading are classic code. In the decision-network instance, \texttt{src/front\_parse.c::inf} reads DENSE, a table generated by enumerating the constructed networks; direct inference is checked against it, not used for each runtime query. Accordingly, calling this work a neural-network-based compiler is anchored on constructor weights from the TSV table DSL and on T1 (the network equals the table on the declared domain), not on the claim that every product ask in the decision-network instance evaluates live network weights; the DENSE lookup above is a deployment form of that same constructed exact network on the enumerated table---it does not withdraw the naming claim and does not weaken T1. Each threshold bank in a byte-stream stage computes a one-dimensional step function, equivalent to a run-length lookup over that bank's finite key range. In the network-compiler instance, the seven stage transitions do run through constructed networks, but the generic executor also implements storage, action dispatch and declared continuation returns. Selected product routes additionally retain hand-written tape linking (\texttt{src/tapelink.c}), assembly-text handling (\texttt{src/asmtext.c}) and host-forwarding stubs (\texttt{src/fwdstub.c}). The last step of \texttt{-run} is not step-by-step network interpretation either: the host reserves an address chosen by the operating system and hands it to the loaded encoding stage; constructed networks and the generic executor emit the final bound memory image in one pass; the host checks the lengths recorded in it, commits, sets permissions, flushes the instruction cache and jumps to the entry, without interpreting C, the tape or instructions, and without a large language model generating source. The offline constructor still binds target facts, vocabularies and parameterised templates. The constructed networks carry the declared finite stage transitions, not all program code or rule information; ``the runtime path became networks'' and ``the language logic to maintain shrank'' are two conclusions that must be checked separately.
-
-\section{Implementation}\label{implementation}
-
-\subsection{Two instances}\label{two-instances}
-
-The decision-network instance is driven by classic recursive descent, lowering and image writing, which query the constructed networks at decision points and do not fall back. The network-compiler instance runs each stage network under one generic executor and reports a model rejection as an error. Key counts, unit counts, weight bytes and executable size are whatever a new seal of this source measures. This tip has no same-identity size measurement. This draft claims no key count, unit count, weight-byte total or executable size.
-
-\subsection{Size and sharing (unmeasured)}\label{size-and-sharing-in-the-network-compiler}
-
-This tip has no same-identity census of the seven byte-stream stages, and no measurement of whether sharing means identical weight bytes across platforms. This draft claims neither.
-
-\subsection{Self-hosting}\label{self-hosting}
-
-The decision-network instance self-hosts in three layers, each judged by byte equality:
-
-\begin{enumerate}
-\def\labelenumi{\arabic{enumi}.}
-\tightlist
-\item
-  \textbf{Front-end fixed point.} The compiler compiles itself to tape: A compiles itself to B, B compiles itself to C; we require B = C, identical to the result of an independent implementation (the Python front end).
-\item
-  \textbf{Back-end closure.} For every probe and target, the image written by the C back end must be byte-identical to the image written by the Python back end from the same tape: 94 probes × 6 targets, 564/564; the compiler itself 6/6.
-\item
-  \textbf{Native self-hosting without Python.} The native compiler writes itself as N1, N1 writes N2, N2 writes N3; we require N1 = N2 = N3 and consistent cross output for the other five targets. This holds on osx/arm64, lnx/arm64, lnx/x86-64, win/arm64 and win/x86-64 (the latter under system emulation), without invoking Python.
-\end{enumerate}
-
-Byte-identical bootstrap (N1 = N2 = N3) asserts only unsigned successive-generation binary identity under the named checks; it is not a semantic self-hosting theorem, not C99 completeness, and not a proof that tables agree with C semantics (table semantics still rest on external referees and the stated boundaries).
-
-The network compiler self-hosts its driver with a fixed network package (N1 = N2 = N3 on macOS arm64); this does not include self-construction of the network package or of the multi-platform container.
-
-Release notes from 0.0.10 through 0.0.21 (byte sizes, gate counts, named-difference ledgers, commit hashes) are not claims about this source. They stay in the archive and the release receipts and are not mixed into this draft.
-
-\subsection{Full-domain enumeration (T1)}\label{full-domain-enumeration-t1}
-
-Every cube network is run with deployment arithmetic on \textbf{every} key of the original domain (this is T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy); any wrong key or tie fails construction and blocks release. On the normal path, the C side of the decision-network instance queries a dense table obtained by enumeration, and an acceptance command compares table answers with direct inference. The old counts of key--head questions and of transition networks are not reused.
-
-\subsection{Byte-level differential testing and six-target folding}\label{byte-level-differential-testing-and-six-target-folding}
-
-After the tape is lowered to six targets, each image is executed by a machine model \textbf{interpreting that target's ABI}: the model holds the architecture's named registers, and the system-call dispatcher recognises only the (OS, call number) produced by lowering, never looking back at the tape. The six (stdout, exit) pairs must agree with each other and with a tape reference VM. To show that 6/6 is not vacuous we inject a fault: removing the class bits of macOS system-call numbers must degrade the result to 4/6. Six-target folding is a methodological check. Which runs were native and which were emulated has to be recorded on this source identity. This draft does not fill that matrix from an older receipt.
-
-\textbf{Are the networks really deciding?} Tests that compare only answers cannot detect ``a hand-written rule that happens to agree with the table''. Both front ends therefore report how often each stage is queried, and every stage one front end queries on a probe must also be queried by the other. This check caught a drift in which one front end queried only three stages.
-
-\subsection{External referees}\label{external-referees}
-
-Enumeration closes only ``network = table''; it says nothing about ``table = C''. We register a referee for each of the 18 decision stages: eight of those stages have named external referees (preprocessing, parsing, type, ABI, precedence, type info, binary-operator selection, printf conversion), six have only cross-implementation agreement, two have no direct referee yet (scope, irsel --- unnamed in the ledger), and two are not on the main compilation path; the ledger is \texttt{research/referee.tsv}.
-
-\begingroup\small\setlength{\tabcolsep}{4pt}
-
-\stepcounter{paperTableAnchor}
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 2\tabcolsep) * \real{0.3050}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 2\tabcolsep) * \real{0.6950}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-External referee
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Coverage and limits
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-Preprocessing & Macro-expansion tokens aligned one by one with the host \texttt{cc\ -E\ -P} (\texttt{exec/pp/macrocheck.py}, \texttt{tests/ccparity.sh}) \\
-Parsing & The (line, kind) diagnostic set equals the host \texttt{cc\ -Wall} in both directions (\texttt{tests/warn.sh}, probes and corpus) \\
-Type & Result types checked with the host cc's C11 \texttt{\_Generic}; 1,400 of 4,275 keys \\
-ABI & Numbers checked against host system-call headers; only the actual host OS and architecture \\
-Precedence & 324 ordered operator pairs: 291 distinguishable on the chosen constants and consistent, 33 indistinguishable \\
-Type info & Sizes of 11 types; signedness and narrowness of 8 integer types \\
-Binary-operator selection & The host cc compares signed and unsigned 64-bit results per operator: 7 of 16 operators depend on signedness, and the table names an unsigned flavour exactly there (\texttt{tests/binsel\_audit.py}) \\
-printf conversion & The host printf output shape for the 9 conversion letters matches the routine class the table assigns (\texttt{tests/pfconv\_audit.py}) \\
-\end{longtable}
-
-\addtocounter{table}{-1}
-
-\endgroup
-
-The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 8/18 stages have external referees of stated coverage. \textbf{Measurement} is a third kind of evidence: the peephole cost table is revised from measurements (§7.4), but that stage is registered in the ledger as cross-implementation agreement and is not counted among the six.
-
-\section{Evaluation}\label{evaluation}
-
-We answer four questions. \textbf{RQ1}: Can the method support a real compiler? \textbf{RQ2}: What does it cost? \textbf{RQ3}: How does construction compare with training? \textbf{RQ4}: Does this verification discipline find defects that conventional testing misses?
-
-\subsection{RQ1: Correctness and coverage}\label{rq1-correctness-and-coverage}
-
-\begingroup\small\setlength{\tabcolsep}{4pt}
-
-\stepcounter{paperTableAnchor}
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.2285}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3560}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4154}}@{}}
-\caption{Acceptance record of the decision-network instance}\tabularnewline
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Item
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Criterion
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Result
-\end{minipage} \\
-\midrule\noalign{}
-\endfirsthead
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Item
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Criterion
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Result
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-Stage T1 & Full-domain enumeration (= T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy) & all 18 stages 1.000 \\
-Truth table vs cc & Type table key by key against the system cc & 1,400 keys: 1,399 agree, 1 intentional deviation \\
-External corpus c-testsuite & Output equals the system cc & 216 of 220 pass, 0 errors; 4 outside the supported subset \\
-C99 probes & One by one against the system cc & 59/59 \\
-Differential tests & Against the system cc & 93/93 \\
-Optimisation levels & -O0/-O1/-O2 output equals cc -O2 & 279/279 \\
-Two optimisers agree & Same tape through both optimisers & 190/190 \\
-Real library code & Known-answer tests of crypto-algorithms etc. & 11/11 \\
-Back-end closure & Images byte-identical to the reference back end & 564/564; the compiler itself 6/6 \\
-Float formatting & \texttt{\%f/\%e/\%g} bit-identical to the platform libc & identical; no floating-point arithmetic in the formatter \\
-\end{longtable}
-
-\endgroup
-
-\subsection{RQ2: Cost}\label{rq2-cost}
-
-Step-by-step interpretation of the seven byte-stream stages by a generic executor has a real cost. This tip has no same-identity speed measurement. This draft claims no speed for the network-compiler pipeline or for the decision-network instance.
-
-\subsection{RQ3: Construction versus training}\label{rq3-construction-versus-training}
-
-\textbf{The product and our claims do not depend on training}; what follows is illustrative history only. This is not a pre-registered training study; companion work A2 reserves the right to rewrite these claims. In the abstract, ``exact rebuild'' means rerunning the constructor on the updated full table and remaining exact on the whole domain (T1); locality of single-rule weight edits and zero error on unrelated keys is A2/RQ2, not a theorem proved here. The Adam training-run accuracy drops and ``must widen'' figures in the table below are illustrative history under this section's stated protocol and limits---not a Paper A theorem that construction beats training on width or reachability, nor a denial that training could reach exactness under other settings; contests of \(W^*\) versus training width and systematic construct-versus-train comparisons belong to A2, and if all three of A2's falsification conditions hold, Paper A's advantage language shrinks to determinism, provability, and cost---do not elevate ``Adam did not hit 1.000'' into a theory claim here. We once ran an \textbf{Adam} control on the same cube architecture. Optimizer: Adam (β₁ = 0.9, β₂ = 0.999), batch 16, learning rate stepped 0.032 → 0.014 → 0.006 → 0.0025, \textbf{freezing each stage at the first epoch where training-run accuracy hit 1.000} (a keep-as-training control metric under this Adam schedule; $\neq$ T1 / declared-domain exhaustive key-by-key equality). Only \textbf{11 of the 18} compiler stages took part (21,925 θ). The merge, extension and many-target rows used \textbf{synthetic targets beyond the six shipping platforms}; only the first six targets are real product targets.
-
-\begingroup\small\setlength{\tabcolsep}{4pt}
-
-\stepcounter{paperTableAnchor}
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.2554}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4164}}
-  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3282}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Situation
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Adam (freeze at first training-run accuracy 1.000; keep-as-training, $\neq$ T1)
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Construction
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-Single tables (11 stages, 21,925 θ) & all reach training-run accuracy 1.000, 18.8 s & exact \\
-Merging adjacent stages & stuck at 0.8143 even with 12.8× the parameters (45,209 θ) & exact \\
-Extending a table (adding float types) & the type stage drops to 0.9514 at the original width and must be widened & rebuilt once, 3 s, exact \\
-More than 24 targets (synthetic beyond 6) & collapses to 0.4419 & exact (T1); unit-count size grows empirically roughly as \(39 + 4.2\log_2(\text{targets})\) (size fit, not table approximation or training surrogate) \\
-\end{longtable}
-
-\addtocounter{table}{-1}
-
-\endgroup
-
-\textbf{Stability (different protocol).} With the same Adam hyperparameters but \textbf{without} the freeze-at-first-training-run-accuracy-1.000 rule, 30 of 99 runs touched training-run accuracy 1.000 and later fell back. That stopping rule is not the same as the frozen rows above and cannot be read as a single experiment.
-
-\textbf{Mechanism illustration.} In the cube representation, changing a rule requires a \textbf{joint discrete jump} in \((W_1,b_1)\): adding or removing a field constraint while changing the threshold. Small gradient steps along \(W_1\) can only switch units off; they cannot perform this jump in a coordinated way (we call this the trapdoor phenomenon). The trapdoor label here names only an informal mechanism sketch under this section's cube representation---not a Paper A unreachability theorem and not a proof that Adam or SGD cannot reach exactness on compiler-scale table merges and extensions. Construction unfolds rule by rule. This picture aligns with the known family of results that exact solutions can exist yet be unreachable by gradient methods (§9); whether Adam or SGD \textbf{systematically} fails on compiler-scale merges and extensions is left to preregistered study A2.
-
-On quantisation, mixed precision saves only 4.5\%, and 2-bit quantisation fails in every stage.
-
-\subsection{RQ4: What the verification discipline found}\label{rq4-what-the-verification-discipline-found}
-
-\textbf{Truth tables can be wrong.} The type table once contained a wrong rule: the result type of \texttt{int\ +\ int} was \texttt{long}. It survived the whole project --- enumeration 1.000 (= T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy), every suite green --- because evaluation happened to be done in 64 bits and the printed numbers were right; it showed only in \texttt{sizeof} and signedness, which no probe asked about. The external referee found 200 wrong keys on its first run (all of the same origin); fixing the truth table and rebuilding the weights was enough. \textbf{Enumeration guarantees that the network copies the table exactly; if the table is wrong, it copies the error exactly.} Every cell of a table should therefore have an external referee.
-
-\textbf{The referee of a cost table is measurement.} In the peephole table, ``multiply by a power of two → shift'' is semantically correct, yet it made x86 images 24 KB larger (a tape shift on x86 must go through the \texttt{cl} register). The cell was changed to keep the multiplication --- the decision lives in the table, so measuring leads to editing the table, not the code. Overall the peephole table made the shipped compiler's arm64 image 29\% smaller and brought self-compilation from about 11× to 4.0× relative to cc -O2.
-
-\textbf{Turning enumeration back onto hand-written code.} The ``enumerate the whole domain'' discipline applies equally to hand-written code, provided the object under test is a pure function and an independent implementation exists for differential comparison. The data-layout function (non-zero blocks first, all-zero blocks last, each keeping addresses mod 8) meets both conditions. We enumerated every data-definition sequence of length at most 3 (an alphabet of six representative blocks), plus variants that define one symbol twice: 762 tapes × 6 targets = 4,572 byte-level image comparisons, in 12 seconds.
-
-It immediately found a semantic divergence between the two implementations: when a symbol is defined twice, one interns it (no second allocation) and the other reallocates and moves the symbol, so the images differ by 8 bytes. Why did sampling miss it? The trigger, ``declaration order ≠ address order'', almost never arises naturally in small programs: 90 probes, 220 external corpus programs and a 540/540 byte-level closure were all green. The only input that naturally grows this shape is the compiler itself --- 707 KB, 1,874 data symbols, order regressing at the 282nd --- and it made all six targets \textbf{segfault}.
-
-\textbf{Byte-level criteria expose errors an interpreter cannot see.} Truncated upper 32 bits of multi-level pointers, static locals not preserved, argc read from the wrong place on one platform, 87 MB of zeros written into an image (after the fix the compiler's own image went from 91 MB to 639 KB) --- all surfaced only when programs compiled by the compiler itself were run natively.
-
-\textbf{The unit of verification is not the unit of failure.} User reports in 0.0.18--0.0.19 concentrated on combinations of constructs: functions returning structs, used in \texttt{return\ f()}, initialisers, assignments or argument positions, compiled correctly in the reference implementation but were refused by the network product, and reported as ``unknown identifier''; with a cross-unit prototype involving \texttt{FILE\ *}, \texttt{\%.4f} in the same function was refused; two same-named globals with initialisers were silently merged into one object. Full-domain enumeration holds table by table, but what failed were combinations across stages and units, which are keys of no table. These product failures do not falsify Theorem T1: T1 asserts only that each released network equals its own table on that table's declared domain; cross-stage, cross-unit and construct-combination gaps are engineering and product obligations outside any single table's key space (they may inform T2/T3 or later table-key closure) and are not counterexamples to network = table. A gate that generates programs by ``construct × type × position'' and compares them against the reference found 10 such product failures on its first run (the reference side agreed with cc 42/42). The direction of improvement is in the \href{https://github.com/partnernetsoftware/unisacc/blob/05e5d249/archive/research/r20/design-review-2026-10-01.md}{design review}: emit a structured refusal record at the first miss and name the construct; fold the state passed between stages into the table keys and check closure; add a link stage for whole-program facts such as duplicate definitions.
-
-Two lessons transfer: construction plus enumeration is not a substitute for---or approximation of---training, but a distinct verification discipline that can run through an entire implementation (weights are constructed from tables, not trained---on the declared domain they yield the table's exact executable form (identical key-by-key), not a learned approximation); and ``byte-identical'' is far stronger than ``same output'' --- it leaves the implementation no freedom, and differential comparison keeps it checkable without a formal specification.
-
-\section{Discussion and Limitations}\label{discussion-and-limitations}
-
-\textbf{Correctness of the tables.} Enumeration proves network = table, not table = C. External referees cover only the keys or behaviour they name. Finite-corpus agreement is not full-domain equivalence. Named-difference ledgers of older release identities are not restated here.
-
-\textbf{Speed.} This tip has no same-identity speed measurement. This draft claims none.
-
-\textbf{Language and product scope.} The language is a C99 subset. Networks are defined only on enumerated domains: extending the language means extending the tables and rebuilding. An unseen key fails under the query discipline or by structured rejection; that is not described as learning. Object formats, the external ABI and the libc boundary are whatever the current source and its gates say, not a chronicle of older increments.
-
-\textbf{Representation versus maintenance cost.} Encoding control in tables does not by itself shrink the language logic that must be maintained. This draft does not claim that the maintenance surface has shrunk.
-
-\textbf{Non-network code and the trusted base.} The generic executor performs storage and output actions. Drivers, loading and host adaptation remain ordinary programs. The build-time Python that reads TSV, binds target facts and constructs networks is in the trusted base.
-
-\textbf{Capacity.} The compiler uses static limits and warns when its own use passes half of any limit.
-
-\textbf{Threats to validity.} Older single-machine timings and cross-version artifacts are not measurements of this source. Corpus coverage does not extend to arbitrary C99.
-
-\textbf{Where the open problems go.} T2/T3, referee coverage, speed, the maintenance surface, self-construction of the network package and capacity remain obligations on the roadmap. A plan is not a result.
-
-\subsection{Conditions not yet met before submission}\label{conditions-not-yet-met-before-submission-registered-as-r20-11}
-
-The source identity is \texttt{05e5d249} / \texttt{0.0.42} (\texttt{src/version.h}), not a sealed release measurement. Before submission, decision-stage key space, seven-stage size and speed, and the platform matrix must be remeasured on this identity, or the text must keep saying they are unmeasured.
-
-\section{Related Work}\label{related-work}
-
-\textbf{Network encodings of automata and programs.} Exact encoding of finite-state machines into recurrent networks dates back to \citet{omlin1996}; \citet{siegelmann1995} proved Turing completeness of rational-weight recurrent networks, a theoretical precedent for neuralising ``finite control + storage''. RASP \citep{weiss2021} is a language for sequence computations, and Tracr \citep{lindner2023} compiles RASP programs into transformer weights with known structure. Our TSV table DSL describes finite-state transitions of compiler stages; the target is an integer threshold network repeatedly run by a generic executor. We do not identify the two DSLs or network architectures. Both lines construct weights from explicit programs rather than training them; here each released network is additionally checked against its table over the full declared domain (= T1 / exhaustive key-by-key equality / Definition~2, not sample fit or training accuracy). Related work learns transformer programs that can be read back as discrete code \citep{friedman2023}, analyses transformers with a compiler-based framework \citep{shaw2024}, augments language models with compiled neural networks \citep{weng2023}, and shows that looped transformers can act as programmable computers \citep{giannou2023}. Earlier, \citet{gruau1995} compiled Pascal programs into neural networks through an intermediate cellular code. Compared with these, we carry construction to a complete, self-hosting compiler for six real targets, treat network size systematically as an engineering problem, and use full-domain enumeration (= T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy) as the release criterion.
-
-\textbf{Table-driven compilers.} Compilers have long used tables: LALR parser generators such as yacc \citep{johnson1975} emit parse tables; \citet{glanville1978} drove code generation by tables; BURS and iburg \citep*{fraser1992} select instructions with tree-pattern tables. Our difference is not ``using tables'' but \textbf{constructing and exhaustively checking networks from tables, then using their enumerated answers or finite transitions in a self-hosting compiler}, and expressing the control of the whole pipeline --- not only parsing or instruction selection --- as constructible, enumerable finite transitions.
-
-\textbf{Learned compilation and neural program execution.} End-to-end neural translation and learned heuristics (for example, MLGO, \citealp{trofin2021}), and large language models trained for compiler optimisation \citep{cummins2024} or decompilation \citep{tan2024}, obtain weights by training, so their behaviour can only be characterised statistically. Neural Turing Machines \citep{graves2014} learn a controller that reads and writes memory; differentiable interpreters learn program parts by gradient descent \citep{bosnjak2016,gaunt2016}; neural algorithmic reasoning trains networks to execute classical algorithms \citep{velickovic2021,velickovic2022}. Our controller is constructed, and its behaviour is fully decidable.
-
-\textbf{Verified compilers and trusted builds.} CompCert \citep{leroy2009} and CakeML \citep{kumar2014} prove whole-compiler semantic preservation, the T3 we explicitly do not claim. Diverse double-compiling \citep{wheeler2009} counters ``trusting trust'' attacks with byte-level comparison; our self-hosting fixed points and multi-implementation byte-level closures share its spirit.
-
-\textbf{Unreachability for gradient methods.} \citet*{shalevshwartz2017}, \citet{shamir2018}, \citet{malach2020} and \citet{barak2022} describe failure modes of gradient methods on several discrete targets. §7.3 gives an illustrative instance on one historical Adam schedule; systematic claims are deferred to study A2.
+Related work, as pointers only: exact network encodings of finite-state machines \citep{omlin1996,siegelmann1995}; weights constructed from programs \citep{weiss2021,lindner2023}; table-driven compilers \citep{johnson1975,glanville1978,fraser1992}; trained controllers \citep{graves2014}; proved semantic preservation \citep{leroy2009,kumar2014}; diverse double-compiling \citep{wheeler2009}. Gradient-method failures are left to A2.
 
 \section{Conclusion}\label{conclusion}
 
-For table-shaped decisions in a compiler, exactness is a property that can be decided by exhaustion; the weights are constructed from the tables rather than trained---and on the declared domain those constructed weights yield the table's exact executable form (identical key-by-key), not a learned approximation. Through the decomposition into finite control plus generic storage, the method extends from single decisions to an entire compilation pipeline: unisacc carries the control and decisions of compilation stages on constructed networks, targets six platforms; the decision-network instance self-hosts byte-for-byte under the named checks on five targets (N1 = N2 = N3; five-target list in \S\ref{self-hosting}, not all six shipping platforms, and not a semantic self-hosting theorem). Named gates constrain byte-level parity with the reference on this source identity. Older ledgers are not restated. Speed can be claimed only after a same-identity remeasurement. The tables themselves still need external referees. We take construction + enumeration + byte-for-byte differencing not as a substitute for---or approximation of---training, but as a distinct verification discipline (weights constructed from tables, not trained), whose value is not limited to neural networks: it also finds defects in hand-written code that sampled testing cannot.
+On table-shaped decisions, exactness is decidable by exhaustion. unisacc runs constructed weights on two layers: 18 decision stages, and seven byte-stream stages. The decision-network instance meets N1 = N2 = N3 on the five targets in \S\ref{implementation}. Whether a table equals C is answered only by the named referees, inside their coverage.
 
 \begin{thebibliography}{27}
 \providecommand{\natexlab}[1]{#1}
@@ -760,7 +337,6 @@ David~A. Wheeler.
 \end{thebibliography}
 
 \appendix
-
 \section{Artifacts and Evidence}\label{artifacts-and-evidence}
 
 \begin{center}
@@ -768,26 +344,20 @@ David~A. Wheeler.
 \toprule
 Identity & Content \\
 \midrule
-Source tree & main \texttt{05e5d249}; \texttt{src/version.h} is \texttt{0.0.42}. This is the identity the paper is aligned to. It is not public Latest and not a sealed release measurement. \\
+Source tree & main \texttt{910f1e0a}; \texttt{src/version.h} is \texttt{0.0.42}. Not public Latest and not a sealed release measurement. \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{Data sources.} Referee registry: \texttt{research/referee.tsv}. Formalisation: \texttt{research/formalization-roadmap.md}, \texttt{research/lean/}. Bibliographic details: \texttt{prior-art.md}. Older benchmarks and size ledgers are not data sources of this draft.
+Pointers: \texttt{research/referee.tsv}, \texttt{research/formalization-roadmap.md}, \texttt{research/lean/}, \texttt{prior-art.md}, \texttt{research/paper-a-notes.md}.
 
-\textbf{Reproduction.} Constructing and verifying the decision-network instance needs the Python 3.11+ standard library and a system C compiler; using a built compiler, native self-hosting and the network compiler need neither Python nor a GPU. Repository rules limit each step to 60 seconds; long suites run in batches.
-
-\par\noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[language=bash,basicstyle=\ttfamily\scriptsize]
-python3 -m unisa build-weights                  # construct all networks from truth tables and enumerate
-python3 -m unisa acc                            # Table 1: full-domain accuracy (T1 / exhaustive key-by-key equality on the declared domain / Definition~2, not sample fit or training accuracy)
-python3 -m unisa run examples/hello.c --fold    # six-target folding, expect 6/6
-./tests/closure.sh examples/*.c tests/c/*.c     # byte-level image closure
-./tests/nativeboot.sh                           # N1 = N2 = N3, no Python
-./tests/gate.sh --list --com                    # list all gates, then run in batches with --suite
+python3 -m unisa build-weights
+python3 -m unisa acc
+python3 -m unisa run examples/hello.c --fold
+./tests/closure.sh examples/*.c tests/c/*.c
+./tests/nativeboot.sh
+./tests/gate.sh --list --com
 \end{lstlisting}
-\end{minipage}\par
-
-The construction and acceptance entry points of the network compiler are in \href{https://github.com/partnernetsoftware/unisacc/blob/05e5d249/exec/c/BUILDING.md}{\texttt{exec/c/BUILDING.md}}. The transfer of the same method to JavaScript and WebAssembly is the companion Paper B (\href{https://github.com/partnernetsoftware/unisacc/blob/05e5d249/research/ujs-paper.md}{\texttt{ujs-paper.md}}).
 
 \end{document}
