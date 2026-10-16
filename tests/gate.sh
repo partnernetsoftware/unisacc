@@ -336,8 +336,10 @@ job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual refere
 # on hit); the checks still self-build on a miss, so queue order does not matter.
 for g in 0 1 2 3; do job exec-warnprep-$g python3 ./exec/parse2/warnprep.py $g; done
 job exec-warnprep-tools python3 ./exec/parse2/warnprep.py --tools
-job exec-errors python3 ./exec/parse2/errorcheck.py --require-cached
-job exec-errors-warn python3 ./exec/parse2/errorcheck.py --warnings --require-cached
+for part in 1 2 3; do
+  job exec-errors-$part python3 ./exec/parse2/errorcheck.py --require-cached --part $part
+  job exec-errors-warn-$part python3 ./exec/parse2/errorcheck.py --warnings --require-cached --part $part
+done
 job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py --require-cached  # first warning kind and FP conditions
 job exec-intwarn python3 ./exec/parse2/returnwarningcheck.py --int-conversion
 job exec-unusedwarn python3 ./exec/parse2/returnwarningcheck.py --unused

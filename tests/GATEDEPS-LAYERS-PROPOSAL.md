@@ -105,8 +105,12 @@ diag-units
 exec-decimal
 exec-diag
 exec-e3self
-exec-errors
-exec-errors-warn
+exec-errors-1
+exec-errors-2
+exec-errors-3
+exec-errors-warn-1
+exec-errors-warn-2
+exec-errors-warn-3
 exec-f1-attributes
 exec-formatwarn0
 exec-formatwarn1
