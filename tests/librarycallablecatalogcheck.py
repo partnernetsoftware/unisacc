@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent USLCALL1/2/3 exact wire and context-owned graph transaction checks."""
+from checklib import copy_runtime
 import argparse
 import os
 import platform
@@ -52,9 +53,7 @@ bad=[pack(sites=[site(0)]),pack(sites=[site(key=999)]),pack(sites=[site(),site()
  pack(sites=[site(record=b'USLSIG1\n'+u(0))]),pack(sites=[site(number=1,record=CONCRETE[:65])])]
 with tempfile.TemporaryDirectory(prefix='r10-callcatalog-') as tmp:
  t=Path(tmp);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir()
- for f in (ROOT/'exec/c').iterdir():
-  if f.is_file() and f.suffix in ('.c','.h','.S'):shutil.copy2(f,rt/f.name)
- shutil.copy2(ROOT/'src/host_dl.h',t/'src/host_dl.h')
+ copy_runtime(ROOT,t)
  files=[]
  for i,data in enumerate([one,two,three,*bad,*bad3]):
   f=t/(str(i)+'.catalog');f.write_bytes(data);files.append(f)

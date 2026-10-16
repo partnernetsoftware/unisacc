@@ -2,6 +2,7 @@
 """Actual recursive callback values through the public model compiler.
 Requires callable-capable E3 and lower networks in the supplied package.
 """
+from checklib import copy_runtime
 import argparse,pathlib,platform,shutil,subprocess,tempfile,json,hashlib,os,struct
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def command(args):
@@ -18,9 +19,7 @@ def main():
  package=pathlib.Path(a.package).resolve()
  with tempfile.TemporaryDirectory(prefix='r10-callback-native-') as name:
   td=pathlib.Path(name);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
-  for p in (ROOT/'exec/c').iterdir():
-   if p.is_file() and p.suffix in ('.h','.c','.S'):shutil.copy2(p,runtime/p.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
+  copy_runtime(ROOT,td)
   san=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if a.sanitize else []
   lib=td/'library.dylib';command(['cc',*flags,*san,'-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',runtime/'libunisacc.c',runtime/('librarycall_'+arch+'.S'),'-lffi','-o',lib])
   probe=td/'probe';command(['cc',*flags,*san,'-std=c11','-O2','-Wall','-Wextra','-I',runtime,ROOT/'tests/libraryabi/callback_graph_bidirectional.c',lib,'-o',probe])

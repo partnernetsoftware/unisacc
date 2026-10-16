@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Internal model-certificate framing, not native union ABI qualification."""
+from checklib import copy_runtime
 import argparse
 import json
 import hashlib
@@ -33,7 +34,7 @@ def main():
     if args.model_plan:cases.append((0,args.model_plan.read_bytes()))
     with tempfile.TemporaryDirectory(prefix='r10-carrier-frame-') as td:
         t=Path(td);rt=t/'exec/c';rt.mkdir(parents=True)
-        for p in (ROOT/'exec/c').glob('*.h'):shutil.copy2(p,rt/p.name)
+        copy_runtime(ROOT,t)
         shutil.copy2(ROOT/'tests/librarycarrierplancheck.c',t/'probe.c')
         (t/'cases').write_bytes(U(len(cases))+b''.join(U(w)+U(len(p))+p for w,p in cases))
         commands=[]

@@ -1,16 +1,15 @@
 """Actual in-process library execution; consumes an already constructed package.
 This is host-native evidence, not a six-platform or full-signature claim.
 """
+from checklib import copy_runtime
 import argparse,ctypes,pathlib,shutil,subprocess,tempfile,time,json,concurrent.futures,hashlib
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--package',required=True);ap.add_argument('--iterations',type=int,default=100);a=ap.parse_args()
  assert 1<=a.iterations<=1000
  with tempfile.TemporaryDirectory(prefix='unisacc-library-run-') as name:
-  td=pathlib.Path(name);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
-  for f in (ROOT/'exec/c').iterdir():
-   if f.is_file() and f.suffix in ('.h','.c','.S'):shutil.copy2(f,runtime/f.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
+  td=pathlib.Path(name);runtime=td/'exec/c'
+  copy_runtime(ROOT,td)
   out=td/'library.dylib'
   wrapper=td/'test-library.c'
   wrapper.write_text('#define _DEFAULT_SOURCE 1\n#include "'+str(runtime/'libunisacc.c')+'"\n'+r'''

@@ -1,6 +1,7 @@
 """Real borrowed host objects read/written through E3/lower model decisions.
 Consumes a built candidate; C compiler only builds the host API library.
 """
+from checklib import copy_runtime
 import argparse,ctypes,concurrent.futures,pathlib,platform,shutil,subprocess,tempfile,json,hashlib,re
 from libunisaccbindingscheck import Type,Signature,integer,pointer
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -12,9 +13,7 @@ def main():
  pkg=str(pathlib.Path(a.package).resolve()).encode()
  with tempfile.TemporaryDirectory(prefix='r10-data-injection-') as folder:
   td=pathlib.Path(folder);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
-  for f in (ROOT/'exec/c').iterdir():
-   if f.is_file() and f.suffix in ('.h','.c','.S'):shutil.copy2(f,runtime/f.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
+  copy_runtime(ROOT,td)
   library=td/'library.dylib';subprocess.run(['cc','-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+arch+'.S')),'-lffi','-o',str(library)],check=True,timeout=25)
   L=ctypes.CDLL(str(library));L.us_new.argtypes=[ctypes.c_char_p];L.us_new.restype=P
   L.us_add_source.argtypes=[P,ctypes.c_char_p,ctypes.c_char_p];L.us_add_symbol.argtypes=[P,ctypes.c_char_p,P,ctypes.POINTER(Signature)]

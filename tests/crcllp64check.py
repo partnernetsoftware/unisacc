@@ -1,15 +1,13 @@
 """CRC32 width and real P3 header reader; private host, unisacc and Windows COFF probes."""
+from checklib import copy_runtime
 import argparse,hashlib,json,pathlib,shutil,subprocess,tempfile,time,re
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def main():
  p=argparse.ArgumentParser();p.add_argument('--ua',type=pathlib.Path,required=True);p.add_argument('--evidence',type=pathlib.Path);p.add_argument('--keep',type=pathlib.Path);p.add_argument('--native-only',action='store_true');a=p.parse_args()
  td=a.keep or pathlib.Path(tempfile.mkdtemp(prefix='r10-crc-llp64-'));td.mkdir(parents=True,exist_ok=True)
- source=td/'source';(source/'exec/c').mkdir(parents=True,exist_ok=True);(source/'tests').mkdir(exist_ok=True)
- for f in (ROOT/'exec/c').iterdir():
-  if f.is_file() and f.suffix in ('.h','.c'):shutil.copy2(f,source/'exec/c'/f.name)
+ source=td/'source';(source/'exec/c').mkdir(parents=True,exist_ok=True);(source/'tests').mkdir(exist_ok=True);copy_runtime(ROOT,source)
  shutil.copy2(ROOT/'tests/crcllp64check.c',source/'tests/crcllp64check.c')
  shutil.copytree(ROOT/'include',source/'include',dirs_exist_ok=True)
- shutil.copytree(ROOT/'exec/c/asm',source/'exec/c/asm',dirs_exist_ok=True)
  def flatten(path):
   return re.sub(r'^#include "([^"\n]+)"\s*$',lambda m: flatten(path.parent/m.group(1)),path.read_text(),flags=re.M)
  (source/'tests/probe-flat.c').write_text(flatten(source/'tests/crcllp64check.c'))

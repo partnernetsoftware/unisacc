@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """True public composite/array/callback union ABI; actual rejection is red."""
+from checklib import copy_runtime
 import argparse,hashlib,json,os,platform,shlex,shutil,struct,subprocess,tempfile
 from pathlib import Path
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
@@ -53,9 +54,7 @@ def main():
   print(json.dumps({'target':target,'status':record['status'],'actual_runner_rc':rc,'variants':[{'case':v['case'],'pressure':v['pressure'],'rc':v['rc'],'calls_100':[e['opt'] for e in v['events'] if e['stage']=='calls_100']} for v in record['variants']]}));return rc
  with tempfile.TemporaryDirectory(prefix='r10-union16-') as tmp:
   t=Path(tmp);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir();inputs={}
-  for f in sorted((ROOT/'exec/c').iterdir()):
-   if f.is_file() and f.suffix in ('.c','.h','.S'):shutil.copy2(f,rt/f.name);inputs[str(f.relative_to(ROOT))]=sha(rt/f.name)
-  shutil.copy2(ROOT/'src/host_dl.h',t/'src/host_dl.h');inputs['src/host_dl.h']=sha(t/'src/host_dl.h')
+  inputs.update(copy_runtime(ROOT,t))
   shutil.copy2(ROOT/'tests/libraryabi/union16.c',t/'probe.c');inputs['tests/libraryunion16check.py']=sha(Path(__file__));inputs['tests/libraryabi/union16.c']=sha(t/'probe.c');record['source_closure']=inputs
   frozen=t/'compiler.pkg';shutil.copy2(package,frozen);assert sha(frozen)==record['package_sha256']
   san=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if a.sanitize else []

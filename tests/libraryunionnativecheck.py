@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Public union chain acceptance. Current rejection is a failure, never green."""
+from checklib import copy_runtime
 import argparse, hashlib, json, pathlib, platform, shutil, struct, subprocess, tempfile
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import sha
@@ -12,9 +13,7 @@ def main():
  record={'schema':1,'scope':'actual public native->script union->typed native union; rejection is failure','target':target,'mode':'script-relay' if a.relay else 'native-factory' if a.factory else 'export-only' if a.export_only else 'bidirectional','native_or_emulated':'Rosetta' if host!=arch else 'native','package_path':str(package),'package_sha256':sha(package),'commands':[],'events':[],'status':'failed'}
  with tempfile.TemporaryDirectory(prefix='r10-union-native-') as name:
   td=pathlib.Path(name);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir();inputs={}
-  for p in sorted((ROOT/'exec/c').iterdir()):
-   if p.is_file() and p.suffix in ('.h','.c','.S'):shutil.copy2(p,runtime/p.name);inputs[str(p.relative_to(ROOT))]=sha(runtime/p.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h');inputs['src/host_dl.h']=sha(td/'src/host_dl.h')
+  inputs.update(copy_runtime(ROOT,td))
   shutil.copy2(ROOT/'tests/libraryabi/union_native.c',td/'probe.c');inputs['tests/libraryabi/union_native.c']=sha(td/'probe.c')
   frozen=td/'models.pkg';shutil.copy2(package,frozen);assert sha(frozen)==record['package_sha256'],'package changed while snapshotting'
   record['runtime_inputs']=inputs;flags=['-arch',arch] if platform.system()=='Darwin' else []

@@ -1,3 +1,4 @@
+from checklib import copy_runtime
 import ctypes, concurrent.futures, subprocess, tempfile, pathlib, argparse, shutil, sys
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
@@ -24,9 +25,8 @@ def main():
  ap=argparse.ArgumentParser();ap.add_argument('--package',required=True);a=ap.parse_args()
  with tempfile.TemporaryDirectory(prefix='unisacc-lib-context-') as name:
   td=pathlib.Path(name);runtime=td/'exec/c';runtime.mkdir(parents=True)
-  (td/'src').mkdir();shutil.copyfile(ROOT/'src/host_dl.h',td/'src/host_dl.h')
-  for p in (ROOT/'exec/c').iterdir():
-   if p.is_file() and p.suffix in ('.c','.h','.S'):shutil.copyfile(p,runtime/p.name)
+  (td/'src').mkdir();
+  copy_runtime(ROOT,td)
   lib=td/'library.dylib';candidate=td/'candidate.com';shutil.copy2(a.package,candidate)
   subprocess.run(['cc','-std=c11','-O2','-fvisibility=hidden','-shared','-fPIC',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+('arm64' if __import__('platform').machine() in ('arm64','aarch64') else 'x86_64')+'.S')),'-lffi','-o',str(lib)],check=True,timeout=30)
   L=ctypes.CDLL(str(lib));pkg=str(candidate).encode()

@@ -1,6 +1,7 @@
 """Native POSIX resolver through public API and actual product network routes.
 Host C builds only the library adaptation and real shared-library fixtures.
 """
+from checklib import copy_runtime
 import argparse,ctypes,hashlib,json,pathlib,platform,shutil,subprocess,tempfile,re
 from libunisaccbindingscheck import Type,Signature,integer
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -12,9 +13,7 @@ def main():
  target=('osx/' if platform.system()=='Darwin' else 'lnx/')+arch
  with tempfile.TemporaryDirectory(prefix='r10-resolver-native-') as folder:
   td=pathlib.Path(folder);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
-  for f in (ROOT/'exec/c').iterdir():
-   if f.is_file() and f.suffix in ('.h','.c','.S'):shutil.copy2(f,runtime/f.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
+  copy_runtime(ROOT,td)
   def shared(name,body):
    src=td/(name+'.c');out=td/(name+'.dylib');src.write_text(body)
    subprocess.run(['cc','-std=c11','-O2','-shared','-fPIC',str(src),'-o',str(out)],check=True,timeout=15);return out

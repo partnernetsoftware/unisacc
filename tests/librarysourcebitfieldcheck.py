@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Actual public source-certified bitfield calls; any rejection is failure."""
+from checklib import copy_runtime
 import argparse,hashlib,json,os,pathlib,platform,shutil,subprocess,tempfile,sys
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
 from checklib import sha
@@ -16,11 +17,10 @@ def main():
  package=a.package.resolve(strict=True);e={'schema':1,'status':'failed','target':target,'scope':__doc__,'package_sha256':sha(package),'commands':[]}
  try:
   with tempfile.TemporaryDirectory(prefix='r10-source-bitfield-') as name:
-   t=pathlib.Path(name);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir()
-   sources=[p for p in (ROOT/'exec/c').iterdir() if p.is_file() and p.suffix in ('.c','.h','.S')]+[ROOT/'src/host_dl.h',ROOT/'tests/libraryabi/source-bitfield.c']
+   t=pathlib.Path(name);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir();runtime_inputs=copy_runtime(ROOT,t)
+   sources=[ROOT/p for p in runtime_inputs]+[ROOT/'tests/libraryabi/source-bitfield.c']
    before={str(p.relative_to(ROOT)):sha(p) for p in sources}
-   for p in sources:
-    to=t/('probe.c' if p.name=='source-bitfield.c' else p.relative_to(ROOT));shutil.copy2(p,to)
+   shutil.copy2(ROOT/'tests/libraryabi/source-bitfield.c',t/'probe.c')
    frozen=t/'compiler.pkg';shutil.copy2(package,frozen)
    def run(command):
     cmd=[str(ROOT/'tests/bound'),'20',*map(str,command)];r=subprocess.run(cmd,capture_output=True,text=True,timeout=25);e['commands'].append({'command':cmd,'rc':r.returncode,'stdout':r.stdout,'stderr':r.stderr});assert r.returncode==0,e['commands'][-1];return r.stdout

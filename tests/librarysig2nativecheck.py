@@ -2,6 +2,7 @@
 """Complete native signatures through the real public library, private sources.
 This proves host->script fixed scalar/Pair cases, not full bidirectional FFI.
 """
+from checklib import copy_runtime
 import argparse,pathlib,platform,shutil,subprocess,tempfile,json,hashlib,os
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def command(args):
@@ -18,9 +19,7 @@ def main():
  package=pathlib.Path(a.package).resolve()
  with tempfile.TemporaryDirectory(prefix='r10-sig2-native-') as name:
   td=pathlib.Path(name);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
-  for p in (ROOT/'exec/c').iterdir():
-   if p.is_file() and p.suffix in ('.h','.c','.S'):shutil.copy2(p,runtime/p.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
+  copy_runtime(ROOT,td)
   lib=td/'library.dylib';command(['cc',*flags,'-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',runtime/'libunisacc.c',runtime/('librarycall_'+arch+'.S'),'-lffi','-o',lib])
   probe=td/'probe';command(['cc',*flags,'-std=c11','-O2','-Wall','-Wextra','-I',runtime,ROOT/'tests/libraryabi/nine_mixed_native.c',lib,'-o',probe])
   output=command([*(['arch','-x86_64'] if host=='arm64' and arch=='x86_64' else []),probe,package,target]);print(output,end='')

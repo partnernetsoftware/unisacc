@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Actual incoming aggregate forwarding with declared callable scope ownership."""
+from checklib import copy_runtime
 import argparse
 import hashlib
 import json
@@ -22,9 +23,8 @@ def main():
   return r.stdout.decode()
  with tempfile.TemporaryDirectory(prefix='r10-callback-forward-') as tmp:
   t=Path(tmp);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir()
-  for f in (ROOT/'exec/c').iterdir():
-   if f.is_file() and f.suffix in ('.c','.h','.S'):shutil.copy2(f,rt/f.name)
-  shutil.copy2(ROOT/'src/host_dl.h',t/'src/host_dl.h');package=t/'compiler.pkg';shutil.copy2(Path(a.package).resolve(strict=True),package)
+  copy_runtime(ROOT,t)
+  package=t/'compiler.pkg';shutil.copy2(Path(a.package).resolve(strict=True),package)
   u=lambda n:struct.pack('<Q',n)
   def desc(k,w,al,depth=0,tag=0,payload=b''):return b''.join(u(n) for n in (depth,0,0,k,w,0,al))+bytes([tag])+u(len(payload))+payload
   I=desc(1,4,4);D=desc(3,8,8);pair=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I)

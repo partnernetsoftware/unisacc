@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Private public-API sticky outcome proof; not callback parameter ABI proof."""
+from checklib import copy_runtime
 import argparse
 import os
 import platform
@@ -25,9 +26,7 @@ def desc(k,w,a,tag=0,payload=b''):return b''.join(u(n) for n in (0,0,0,k,w,0,a))
 I=desc(1,4,4);D=desc(3,8,8);PAIR=desc(5,16,8,1,u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I)
 with tempfile.TemporaryDirectory(prefix='r10-outcome-') as tmp:
  t=Path(tmp);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir()
- for f in (ROOT/'exec/c').iterdir():
-  if f.is_file() and f.suffix in ('.c','.h','.S'):shutil.copy2(f,rt/f.name)
- shutil.copy2(ROOT/'src/host_dl.h',t/'src/host_dl.h')
+ copy_runtime(ROOT,t)
  package=t/'package.com';shutil.copy2(Path(o.package).resolve(),package)
  sig=t/'host_drive.sig';sig.write_bytes(b'USLSIG2\n'+u(1)+u(10)+b'host_drive'+bytes([0,1,0,0])+u(1)+PAIR+u(1)+I+bytes([1]))
  for san in (False,True) if not o.baseline else (False,):

@@ -1,4 +1,5 @@
 """Actual E3 declarations -> native callable exports, host-native scoped."""
+from checklib import copy_runtime
 import argparse,ctypes,concurrent.futures,pathlib,platform,shutil,subprocess,tempfile,json
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def main():
@@ -7,9 +8,7 @@ def main():
  target=('osx/' if platform.system()=='Darwin' else 'lnx/')+arch
  with tempfile.TemporaryDirectory(prefix='r10-native-exports-context-') as folder:
   td=pathlib.Path(folder);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
-  for p in (ROOT/'exec/c').iterdir():
-   if p.is_file() and p.suffix in ('.h','.c','.S'):shutil.copy2(p,runtime/p.name)
-  shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
+  copy_runtime(ROOT,td)
   lib=td/'library.dylib'
   subprocess.run(['cc','-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+arch+'.S')),'-lffi','-o',str(lib)],check=True,timeout=20)
   L=ctypes.CDLL(str(lib));P=ctypes.c_void_p
