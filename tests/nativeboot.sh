@@ -20,13 +20,14 @@ case "${1:-}" in
         [ "$#" = 1 ] || exit 2
         . "$R/tests/lib.sh"
         target=$(host_target)
-        case "$target" in lnx/*) ;; *) echo 'PLATFORM_UNVERIFIED host-triple unsupported native target' >&2; exit 77;; esac
+        case "$target" in lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64) ;; *) echo 'PLATFORM_UNVERIFIED host-triple unsupported native target' >&2; exit 77;; esac
         # Validate the authoritative spelling against the actual kernel architecture.
-        python3 "$R/tests/bound.py" 2 python3 -c 'import platform,sys; actual=platform.machine().replace("aarch64","arm64"); sys.exit(0 if platform.system()=="Linux" and sys.argv[1]=="lnx/"+actual else 77)' "$target" || { echo 'PLATFORM_UNVERIFIED host-triple inconsistent native target' >&2; exit 77; }
+        python3 "$R/tests/bound.py" 2 python3 -c 'import platform,sys; actual=platform.machine().replace("aarch64","arm64"); system={"Linux":"lnx","Darwin":"osx"}.get(platform.system()); sys.exit(0 if system and sys.argv[1]==system+"/"+actual else 77)' "$target" || { echo 'PLATFORM_UNVERIFIED host-triple inconsistent native target' >&2; exit 77; }
         printf '%s\n' "$target"; exit 0;;
     --host-triple) [ "$#" = 2 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" "$2";;
     --host-triple-prepare) [ "$#" = 1 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" prepare;;
     --host-triple-build) [ "$#" = 4 ] || exit 2; mode=hostcompile; SELF=$2; COMPILER=$3; OUTPUT=$4;;
+    --host-triple-runnable) [ "$#" = 3 ] || exit 2; mode=hostrunnable; ORIGINAL=$2; EXECUTABLE=$3;;
     "") mode=local;;
     --windows)
         case "${2:-}" in win/arm64|win/x86_64) ;; *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;; esac
@@ -36,7 +37,7 @@ case "${1:-}" in
     *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;;
 esac
 . "$R/tests/lib.sh"
-if [ "$mode" != hostcompile ]; then
+if [ "$mode" != hostcompile ] && [ "$mode" != hostrunnable ]; then
 T=$(scratch)
 SELF="$T/unisacc.flat.c"
 bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
@@ -94,12 +95,14 @@ windows() {
     [ -s "$T/got" ] && cmp -s "$T/W" "$T/got" || { fail "$target guest self-build empty or different"; return 1; }
     echo "  ok on Windows: $target rebuilt itself byte for byte"
 }
+if [ "$mode" = hostrunnable ]; then
+    runnable "$ORIGINAL" "$EXECUTABLE" || exit 1
+    exit 0
+fi
 if [ "$mode" = hostcompile ]; then
     target=$("$0" --host-triple-target) || exit $?
     NATIVEBOOT_COMPILE_BOUND=9
     compile "$OUTPUT" "$COMPILER" "$target" || exit 1
-    runnable "$OUTPUT" "$OUTPUT.executable" || exit 1
-    mv "$OUTPUT.executable" "$OUTPUT" || exit 1
     exit 0
 fi
 # Reference construction is also bounded, including the caller-selected UA.

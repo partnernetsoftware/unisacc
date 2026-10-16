@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepared U0 and three nativeboot generations, only the actual native Linux target."""
+"""Prepared U0 and three nativeboot generations, only the actual native Linux or Darwin target."""
 import argparse,hashlib,json,os,pathlib,platform,shutil,subprocess,sys,tempfile,time
 sys.dont_write_bytecode=True
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -7,8 +7,8 @@ sys.path[:0]=[str(ROOT/'exec/c'),str(ROOT/'tests')]
 import provenance,sourceflat
 from models import digest
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('phase',choices=('prepare','u0','n1','n2','n3'));a=p.parse_args();start=time.monotonic()
-if platform.system()!='Linux':
- print('PLATFORM_UNVERIFIED host-triple requires native Linux',file=sys.stderr);raise SystemExit(77)
+if platform.system() not in ('Linux','Darwin'):
+ print('PLATFORM_UNVERIFIED host-triple requires native Linux or Darwin',file=sys.stderr);raise SystemExit(77)
 native=subprocess.run([sys.executable,str(ROOT/'tests/bound.py'),'3','bash',ROOT/'tests/nativeboot.sh','--host-triple-target'],capture_output=True,text=True,timeout=5)
 if native.returncode:
  sys.stderr.write(native.stderr);raise SystemExit(native.returncode)
@@ -85,7 +85,14 @@ for n in range(1,int(a.phase[-1])+1 if a.phase!='u0' else 1):
   with lock(dest):
    with tempfile.TemporaryDirectory(prefix='host-triple-generation-',dir=base) as td:
     work=pathlib.Path(td);previous=chain[-1][0]/chain[-1][1];before=digest(previous)
-    run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-build',u0/'self.c',previous,work/name],9)
+    executable=work/(name+'.parent-executable')
+    run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-runnable',previous,executable],9)
+    if digest(previous)!=before:raise SystemExit('host-triple signing changed original parent')
+    execution_sha=digest(executable)
+    run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-build',u0/'self.c',executable,work/name],9)
+    if digest(executable)!=execution_sha:raise SystemExit('host-triple execution copy changed during compilation')
+    (work/(name+'.execution.json')).write_text(json.dumps({'parent_sha256':before,'execution_sha256':execution_sha,'target':target,'original_and_execution_copy_separate':True},sort_keys=True)+'\n')
+    executable.unlink()
     if digest(previous)!=before:raise SystemExit('host-triple parent changed during compilation')
     if stage=='n3':
      run(['cmp','--',chain[1][0]/'N1',chain[2][0]/'N2'],1)
