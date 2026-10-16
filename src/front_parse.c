@@ -6734,9 +6734,62 @@ int ud_nblk;
 int ud_nedge;
 int ud_queue[UD_MAXBLK];
 
+/* One index per completed block table.  Slots hold the first block plus
+   one; collisions still compare the complete name.  The tape may be rewritten
+   after reachability, so no lookup outside that pass reuses these offsets. */
+#define UD_HASH_SIZE 65536
+int ud_name_slot[UD_HASH_SIZE];
+int ud_name_len[UD_MAXBLK];
+int ud_index_ready;
+int ud_name_hash(char *nm, int L) {
+    unsigned long h; int k;
+    h = 5381; k = 0;
+    while (k < L) { h = (h * 33 + (nm[k] & 255)) & 4294967295; k = k + 1; }
+    return h & (UD_HASH_SIZE - 1);
+}
+int ud_name_same(int b, char *nm, int L) {
+    int k;
+    if (ud_name_len[b] != L) return 0;
+    k = 0;
+    while (k < L) { if (out[ud_lbl[b] + k] != nm[k]) return 0; k = k + 1; }
+    return 1;
+}
+int ud_name_index(void) {
+    int i; int e; int L; int h; int b; int legacy;
+    i = 0; while (i < UD_HASH_SIZE) { ud_name_slot[i] = 0; i = i + 1; }
+    legacy = 0; i = 0;
+    while (i < ud_nblk) {
+        if (ud_lbl[i] >= 0) {
+            e = ud_lbl[i]; while (e < nout && out[e] != 10) e = e + 1;
+            L = e - 1 - ud_lbl[i]; ud_name_len[i] = L;
+            b = 0; while (b < L) { if (out[ud_lbl[i] + b] == 58) legacy = 1; b = b + 1; }
+            h = ud_name_hash(out + ud_lbl[i], L);
+            while (ud_name_slot[h]) {
+                b = ud_name_slot[h] - 1;
+                if (ud_name_same(b, out + ud_lbl[i], L)) break;
+                h = (h + 1) & (UD_HASH_SIZE - 1);
+            }
+            if (ud_name_slot[h] == 0) ud_name_slot[h] = i + 1;
+        }
+        i = i + 1;
+    }
+    /* A noncanonical label with an inner colon had prefix-match semantics;
+       retain the original walk for that table instead of narrowing it. */
+    ud_index_ready = legacy == 0;
+    return 0;
+}
 /* the block whose label is the name nm[0..L), or -1 */
 int ud_byname(char *nm, int L) {
-    int i; int k; int ok;
+    int i; int k; int ok; int h;
+    if (ud_index_ready && L >= 0) {
+        h = ud_name_hash(nm, L);
+        while (ud_name_slot[h]) {
+            i = ud_name_slot[h] - 1;
+            if (ud_name_same(i, nm, L)) return i;
+            h = (h + 1) & (UD_HASH_SIZE - 1);
+        }
+        return 0 - 1;
+    }
     i = 0;
     while (i < ud_nblk) {
         if (ud_lbl[i] >= 0) {
@@ -6814,6 +6867,7 @@ int ud_target(int a, int e, int *blk) {
 int undef_reach(void) {
     int i; int e; int p; int b; int q; int head; int tail; int tgt;
     i = 0; while (i < UD_SIZE) { ud_reach[i] = 0; i = i + 1; }
+    ud_index_ready = 0;
     ud_nblk = 0; ud_nedge = 0;
     /* PASS 1: one block per `name:` line, in tape order */
     i = 0;
@@ -6836,6 +6890,7 @@ int undef_reach(void) {
         if (i + 1 < ud_nblk) ud_end[i] = ud_lbl[i + 1]; else ud_end[i] = nout;
         i = i + 1;
     }
+    ud_name_index();
     /* PASS 2: the edges, resolved once */
     i = 0;
     while (i < ud_nblk) {
@@ -6874,6 +6929,7 @@ int undef_reach(void) {
             i = i + 1;
         }
     }
+    ud_index_ready = 0;
     return 0;
 }
 int xtrn_at[256]; int xtrn_len[256]; int nxtrn;
