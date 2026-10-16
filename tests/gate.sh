@@ -798,6 +798,7 @@ job seed-matrix-object python3 ./tests/seedconstructmatrix.py object
 job gate-infra python3 ./tests/queuecheck.py
 job gate-infra-38 python3 ./tests/queuecheck38.py   # 0.0.38 scheduler controls (split to keep both under 60 s)
 job gate-layers python3 ./tests/gatelayers.py --check
+job gate-select python3 tests/gateselectcheck.py   # offline selector contracts; never executes gate jobs
 # R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that
 # print a Usage line and the one that fails on this HEAD are NOT here -- see the

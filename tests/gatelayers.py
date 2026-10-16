@@ -17,6 +17,7 @@ LAYERS = ("contract", "stage", "pipeline", "platform")
 # Single declaration, format, inventory, and runner contracts.  They need no
 # whole-program behavior to establish their claim.
 CONTRACT = set("""
+gate-select
 reviewed-trees finite-template decision-ledger dsl-ops modelbenchcheck bound qprefix
 pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck
 revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin staticimage staticimage-selftest abi-manifest abi-manifest-selftest early-stage-seal-selftest pp-leaf-seal pp-leaf-seal-negative pp-leaf-capture-selftest middle-flow-e3 middle-flow-lower-accept middle-flow-ledger
