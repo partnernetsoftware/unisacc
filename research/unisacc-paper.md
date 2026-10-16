@@ -44,29 +44,31 @@ $$
 
 op-74 合计 8,509 键与 op-87 标签合计 8,769 键是两套身份，封口前不可互换。本 tip 活 `weights/gold` 十八阶段 `#field` 域积为 8,770（相对 `research/seal-remeasure-20261009.md` 的 8,769，差在 opinfo 72→73；`weights/gold/opinfo.tsv` 头为 73 keys）。隐藏单元合计 569，与 README stages 表及 `weights/built.json` 一致。8,770 不是 8,509，也不与标签 8,769 混写。combo 是 isel∪abi 的对照，不在出货路径上；下表合计含该行。
 
-下表由 `python3 -m unisa docs` 从 `unisa/gold.py` 与构造权重生成（`tests/docs.sh` 在不一致时失败）。
+下表由 `python3 -m unisa docs` 写入标记之间（`tests/docs.sh` 在不一致时失败）。
 
-| stage | key | out | keys | units |
-|---|---|---|---:|---:|
-| pp | dir(9) x defined(2) | 4 classes | 18 | 6 |
-| lex | c(12) x peek(12) | 10 classes | 144 | 11 |
-| parse | nt(5) x tok(68) | 36 classes | 340 | 34 |
-| type | t1(15) x op(19) x t2(15) | 16 classes | 4,275 | 62 |
-| scope | ctx(6) x kind(5) | 7 classes | 30 | 9 |
-| irsel | family(6) x flavor(70) | 70 classes | 420 | 75 |
-| enc | op(87) x os(3) x arch(2) | 5 classes | 522 | 5 |
-| reloc | kind(3) x arch(2) | 3 classes | 6 | 3 |
-| regmap | treg(8) x arch(2) | 16 classes | 16 | 10 |
-| tyinfo | t(16) | 3 heads | 16 | 6 |
-| pfconv | conv(9) | 7 classes | 9 | 7 |
-| peep | a(8) x b(17) x rel(12) | 10 classes | 1,632 | 18 |
-| opinfo | op(73) | 3 heads | 73 | 16 |
-| prec | op(19) | 11 classes | 19 | 11 |
-| binsel | op(16) x sign(2) | 23 classes | 32 | 18 |
-| isel | op(87) x arch(2) | 2 heads | 174 | 88 |
-| abi | op(87) x os(3) x arch(2) | 13 heads | 522 | 69 |
-| combo | op(87) x os(3) x arch(2) | 15 heads | 522 | 121 |
-| total | | | 8,770 | 569 |
+<!-- stages-zh:begin -->
+| 阶段 | 键字段 × 词表大小 | 输出 | 键数 | 单元 | T1 |
+|---|---|---|---:|---:|---:|
+| pp | 指令 9 × 已定义 2 | 4 | 18 | 6 | 1.000 |
+| lex | 字符类 12 × 前瞻 12 | 10 | 144 | 11 | 1.000 |
+| parse | 非终结符 5 × 记号 68 | 36 | 340 | 34 | 1.000 |
+| type | 类型 15 × 操作 19 × 类型 15 | 16 | 4,275 | 62 | 1.000 |
+| scope | 上下文 6 × 种类 5 | 7 | 30 | 9 | 1.000 |
+| irsel | 族 6 × 变体 70 | 70 | 420 | 75 | 1.000 |
+| enc | 操作 87 × OS 3 × 架构 2 | 5 | 522 | 5 | 1.000 |
+| reloc | 种类 3 × 架构 2 | 3 | 6 | 3 | 1.000 |
+| regmap | tape 寄存器 8 × 架构 2 | 16 | 16 | 10 | 1.000 |
+| tyinfo | 类型 16 | 3 头 | 16 | 6 | 1.000 |
+| pfconv | 转换符 9 | 7 | 9 | 7 | 1.000 |
+| peep | 指令 A 8 × 指令 B 17 × 关系 12 | 10 | 1,632 | 18 | 1.000 |
+| opinfo | 操作 73 | 3 头 | 73 | 16 | 1.000 |
+| prec | 操作 19 | 11 | 19 | 11 | 1.000 |
+| binsel | 操作 16 × sign 2 | 23 | 32 | 18 | 1.000 |
+| isel | 操作 87 × 架构 2 | 2 头 | 174 | 88 | 1.000 |
+| abi | 操作 87 × OS 3 × 架构 2 | 13 头 | 522 | 69 | 1.000 |
+| combo | 操作 87 × OS 3 × 架构 2 | 15 头 | 522 | 121 | 1.000 |
+| **合计** | | | **8,770** | **569** | |
+<!-- stages-zh:end -->
 
 精确性由构造得到：权重从 gold 表派生（`weights/gold/*.tsv` 即表），`W1` 取 {0,1}，`b1` 可由 `W1` 恢复，`W2` 为 2 的小幂。隐藏激活恒为 0 或 1，推理无乘法、无浮点。验证是穷举：每个阶段在有限域上是全函数，枚举每个键判定网络 = 表（合计见上表）。这不证明表 = C；表对 C 是否成立另由系统编译器核对（`tests/gold_audit.py`，`difftest`）。
 
@@ -108,7 +110,7 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 
 六目标折叠：机器模型只认 lowering 给出的（OS，调用号）。六份 (stdout, exit) 彼此一致并与 tape 参考 VM 一致。去掉 macOS 系统调用号的 class 位必须得到 4/6。本 tip 无原生/仿真矩阵，本文不填这张表。
 
-外部裁判只覆盖登记范围。18 个决策阶段中 8 个有具名裁判，台账 `research/referee.tsv`。表列 8 个为 ledger 的 external；另有 agreement 等见该文件。下表是指针，不是全域 C 证明。
+外部裁判只覆盖登记范围。台账 `research/referee.tsv`：8 个阶段有具名的外部裁判，6 个阶段只有实现间一致性，2 个阶段尚无直接裁判。因此 8/18 个阶段有覆盖范围明确的外部裁判。下表只列 external 行，是指针，不是全域 C 证明。
 
 | 裁判 | 核对 |
 |---|---|

@@ -106,7 +106,7 @@ T1: every cube network is run with deployment arithmetic on every key of its dec
 
 Six-target fold: the machine model recognises only the (OS, call number) produced by lowering. The six (stdout, exit) pairs agree with each other and with a tape reference VM. Clearing the class bits of macOS system-call numbers must yield 4/6. This tip has no native-versus-emulation matrix; this paper does not fill one.
 
-External referees cover only what they name. Eight of the 18 decision stages have a named referee. The ledger is `research/referee.tsv`. The eight rows below are the ledger's external entries; agreement and the rest are in that file. The table is a pointer, not a proof of C.
+External referees cover only what they name. The ledger is `research/referee.tsv`: eight stages have named external referees, six have only cross-implementation agreement, two have no direct referee yet. So 8/18 stages have external referees. The table below lists the external rows. It is a pointer, not a proof of C.
 
 | Referee | Check |
 |---|---|
