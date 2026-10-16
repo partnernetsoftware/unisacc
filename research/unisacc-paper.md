@@ -8,15 +8,17 @@
 
 ## 摘要
 
-unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与通用执行器运行，权重由 TSV 表 DSL 构造，不由训练得到。T1 是声明域上逐键相等（定义 2），不是样本拟合。决策网络实例是 18 个决策阶段。网络编译器实例是七个字节流阶段：preprocess (pp)、lex、parse、opt、prune、lowering、encode + image (enc)；parse2 是同合同的实现名，不另开阶段。域外键失败；不读 logits；拒绝不回退到表。N1 = N2 = N3 是五个具名目标（osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64）上未签名连续代字节同一，不是语义自举。键身份：op-74 合计 8,509 键；op-87 标签合计 8,769 键；封口前不可互换。源身份 `910f1e0a` / `0.0.42` 不是密封发布测量。裁判台账为 `research/referee.tsv`。系统训练对照见预注册 A2。枚举证明网络 = 表，不证明表 = C。
+unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与通用执行器运行，权重由 TSV 表 DSL 构造，不由训练得到。T1 是声明域上逐键相等（定义 2），不是样本拟合。决策网络实例是 18 个决策阶段。网络编译器实例是七个字节流阶段：preprocess (pp)、lex、parse、opt、prune、lowering、encode + image (enc)；parse2 是同合同的实现名，不另开阶段。域外键失败；不读 logits；拒绝不回退到表。N1 = N2 = N3 是五个具名目标（osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64）上未签名连续代字节同一，不是语义自举。键身份：op-74 合计 8,509 键；op-87 标签合计 8,769 键；封口前不可互换。源身份 `910f1e0a` / `0.0.42` 不是密封发布测量。裁判台账为 `research/referee.tsv`。本文贡献是构造精确整数决策网络并以 T1 穷举核对；学习式训练对照不在本文，见预注册 A2。枚举证明网络 = 表，不证明表 = C。
 
-**关键词**：neural-network-based compiler；TSV 表 DSL；权重构造；T1；有限控制；N1=N2=N3
+**关键词**：neural-network-based compiler；constructed weights；T1；byte-for-byte self-hosting；N1=N2=N3
 
 ## 1　贡献
 
 1. **方法。** TSV 表 DSL → 构造权重 → 声明域穷举（T1）。权重不是训练得到的。
 2. **两层。** 网络编译器合同是七个字节流阶段，由一个通用执行器 E 运行有限转移 δ。决策网络实例是另外 18 个决策阶段，在询问点查构造网络（或由其穷举得到的 DENSE 表）。
-3. **实现。** 六目标 C99 子集编译器 unisacc。决策网络实例不经 Python 在五个目标上逐字节自举。源身份见附录 A。
+3. **实现。** 六目标 C99 子集编译器 unisacc。决策网络实例不经 Python 在五个目标上逐字节自举。出货六目标含 osx/x86-64；N1 五名单不含它。网络编译器驱动自举不是包自构造。源身份见附录 A。
+
+本文贡献是构造精确整数决策网络并以 T1 穷举核对；学习式训练对照不在本文，见预注册 A2。
 
 不声称：表 = C99、整机语义保持（T3）、或速度优势。
 
@@ -28,7 +30,7 @@ unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与
 
 **检查 / 产物。** `python3 -m unisa build-weights --from-tsv --check` 用 TSV 对照已出货权重，不写文件。`python3 -m unisa acc` 在声明域穷举；错或并列则失败。目标读法 T1 = 1.000。表是 `weights/gold/*.tsv`；构造权重是 `weights/built.json`。
 
-**定义 3（询问纪律）。** 只用 `ask(s,k)`。不读 logits。拒绝时不回退到表。$k\notin K_s$ 即失败。
+**定义 3（询问纪律）。** 只用 `ask(s,k)`。不读 logits。拒绝时不回退到表。$k\notin K_s$ 即失败。正常 C 路径读的 DENSE 是网络穷举出的出货查找；拒绝与域外失败仍不回退 gold 表。
 
 $$
 \mathrm{Compile}(x)=\mathrm{dec}(\mathrm{Run}_{E,\delta}(\mathrm{enc}(x))).
@@ -84,6 +86,8 @@ op-74 合计 8,509 键与 op-87 标签合计 8,769 键是两套身份，封口�
 | lowering | tape → target ops + data | ABI, regmap, syscalls, layout, reloc |
 | encode + image (enc) | target ops → ELF / Mach-O / PE (or in-memory image) | encoding, branches, reloc, headers, Mach-O ad-hoc signature |
 
+pp、lex、parse、enc 这些短名可以与 18 个决策阶段同名，但它们是七段字节流合同，与 ask 域表不可互换。
+
 tape：8 个 64 位寄存器与 `SHAPE` 中 71 种操作。执行器不含 C、tape、ISA 或镜像专用原语。
 
 **决策网络实例。** 经典递归下降、lowering 与镜像写出在决策点 `ask`；无回退。**网络编译器实例。** 通用执行器跑上表七段；模型拒绝即报错。本 tip 无同身份规模或速度测量，本文不主张这些数字。
@@ -104,7 +108,7 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 
 六目标折叠：机器模型只认 lowering 给出的（OS，调用号）。六份 (stdout, exit) 彼此一致并与 tape 参考 VM 一致。去掉 macOS 系统调用号的 class 位必须得到 4/6。本 tip 无原生/仿真矩阵，本文不填这张表。
 
-外部裁判只覆盖登记范围。18 个决策阶段中 8 个有具名裁判，台账 `research/referee.tsv`。下表是指针，不是全域 C 证明。
+外部裁判只覆盖登记范围。18 个决策阶段中 8 个有具名裁判，台账 `research/referee.tsv`。表列 8 个为 ledger 的 external；另有 agreement 等见该文件。下表是指针，不是全域 C 证明。
 
 | 裁判 | 核对 |
 |---|---|
@@ -117,7 +121,7 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 | 二元运算选择 | `tests/binsel_audit.py`；16 个运算符中 7 个受符号性影响 |
 | printf | `tests/pfconv_audit.py`；9 个转换字母 |
 
-已记录；非本 tip 新封口。
+下表为已记录结果，非本 tip `910f1e0a` 新封口重测；不证明表=C。
 
 | 项 | 记录 |
 |---|---|

@@ -4,7 +4,7 @@ LaTeX conversion of `research/unisacc-paper.en.md` for arXiv (primary **cs.AI**;
 
 - `main.tex` + `figures/` — arXiv source (pdflatex, TeX Live; tar these two for upload)
 - `main.pdf` — local build (**8 pages**, 2026-10-16). Facts-only. Source pin `910f1e0a`, `UNISACC_VERSION` `0.0.42`. Not a sealed release measurement. Unused `\KTwo*` macros removed.
-- `abstract.txt` — arXiv metadata abstract (1,112 chars, under the 1,920 limit), aligned with the TeX abstract.
+- `abstract.txt` — arXiv metadata abstract (1,231 chars, under the 1,920 limit), aligned with the TeX abstract.
 
 Byline: Yunzuo Chen, PartnerNet Software Pty Ltd, Australia (wanjochan@partnernetsoftware.com).
 References: 27 entries, each checked against Crossref / arXiv / original sources.
