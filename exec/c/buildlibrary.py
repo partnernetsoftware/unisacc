@@ -6,7 +6,7 @@ package is delivered separately beside the libraries and passed to us_new().
 """
 import argparse,hashlib,json,os,pathlib,platform,shlex,shutil,subprocess,tempfile,time
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
-from checklib import sha
+from checklib import sha, copy_runtime
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 def host_target():
  osname={'Darwin':'osx','Linux':'lnx'}.get(platform.system())
@@ -39,9 +39,8 @@ def build(package,out,cc,ar,cflags,ldflags,target=None,provider=None):
  from targetpackage import package_bytes
  package_bytes(package.read_bytes()) # validate carried P1/P2/P3 model envelope
  package_sha=sha(package);out.mkdir(parents=True,exist_ok=True)
- sources=sorted(p for p in (ROOT/'exec/c').iterdir() if p.is_file() and p.suffix in ('.c','.h','.S'))+[ROOT/'src/host_dl.h']
- before={str(p.relative_to(ROOT)):sha(p) for p in sources};commands=[]
- builder_paths=[pathlib.Path(__file__).resolve(),ROOT/'exec/c/targetpackage.py',ROOT/'exec/c/packageformat.py',ROOT/'exec/c/networkformat.py',ROOT/'tests/libraryabi/ffi-provider.c']
+ commands=[]
+ builder_paths=[pathlib.Path(__file__).resolve(),ROOT/'exec/c/targetpackage.py',ROOT/'exec/c/packageformat.py',ROOT/'exec/c/networkformat.py',ROOT/'tests/libraryabi/ffi-provider.c',ROOT/'tests/checklib.py']
  builder_sources={str(p.relative_to(ROOT)):sha(p) for p in builder_paths}
  def run(args):
   t=time.monotonic();r=subprocess.run(list(map(str,args)),capture_output=True,timeout=30,env=dict(os.environ,ZERO_AR_DATE='1'))
@@ -49,8 +48,9 @@ def build(package,out,cc,ar,cflags,ldflags,target=None,provider=None):
   if r.returncode:raise RuntimeError(json.dumps(commands[-1]))
   return r.stdout
  with tempfile.TemporaryDirectory(prefix='unisacc-library-build-',dir=out) as folder:
-  d=pathlib.Path(folder);runtime=d/'exec/c';runtime.mkdir(parents=True);(d/'src').mkdir()
-  for p in sources:shutil.copy2(p,d/p.relative_to(ROOT))
+  d=pathlib.Path(folder);runtime=d/'exec/c'
+  before=copy_runtime(ROOT,d)
+  sources=[ROOT/name for name in before]
   arch=host.split('/')[1];common=cc+['-std=c11','-O2','-fPIC','-fvisibility=hidden']+cflags
   # Execute the selected FFI backend, including mixed register exhaustion.
   # A version label or a successful linker is not ABI qualification.

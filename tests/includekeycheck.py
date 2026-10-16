@@ -46,10 +46,25 @@ def product_requests(product, d, flags, capdir):
     shutil.rmtree(capdir, ignore_errors=True)
     capdir.mkdir(parents=True)
     env = dict(os.environ, UNISACC_RF_CAPTURE=str(capdir))
-    subprocess.run(['sh', product] + flags + ['-S', 'm.c', '-o', str(capdir / 'out.tape')], cwd=d, env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=50)
+    result = subprocess.run(['sh', product] + flags + ['-S', 'm.c', '-o', str(capdir / 'out.tape')], cwd=d, env=env,
+                            capture_output=True, timeout=50)
+    expected_rc = 1 if d.name == 'missing' else 0
+    if result.returncode != expected_rc:
+        raise ValueError('include-key-product-rc expected=%d actual=%d: %s' %
+                         (expected_rc, result.returncode, result.stderr.decode(errors='replace')))
+    lines = (capdir / 'resources.tsv').read_text().splitlines()
+    if lines and lines[0].startswith('#SC1'):
+        fields = lines[0].split('\t')
+        if (len(fields) != 3 or fields[0] != '#SC1' or not fields[1].startswith('stage=') or
+            not 1 <= len(fields[1][6:]) <= 127 or any(ord(c) < 32 or ord(c) == 127 for c in fields[1][6:]) or
+            not fields[2].startswith('input_sha256=') or len(fields[2][13:]) != 64 or
+            any(c not in '0123456789abcdef' for c in fields[2][13:])):
+            raise ValueError('include-key-resource-identity-malformed')
+        lines = lines[1:]
     cli, inc = {}, []
-    for line in (capdir / 'resources.tsv').read_text().splitlines():
+    for line in lines:
+        if line.startswith('#SC1'):
+            raise ValueError('include-key-resource-identity-misplaced')
         keyhex, present, fname, _len, _sha = line.split('\t')
         key = bytes.fromhex(keyhex)
         value = (capdir / fname).read_bytes() if present == '1' else None
