@@ -2,8 +2,8 @@
 # K5-1b (机房主任 00:42): pp δ -- seed/gen.c vs exec/build/gen.py byte-identical for the six flag sets the
 # Python call sites use (none, --osx, --win, --arm64, --osx --arm64, --win --arm64); a corrupted
 # exec/pp/autoinc-result.tsv (line 2, last column dropped) is refused by name by both; --osx --win is refused by
-# both (C's reason is "manifest let option is not yet covered", not a named exclusion -- a finding, the generator
-# is not changed here); exec/pp/gen-delta.sh prefers seed-gen with no silent Python fallback.  No consumer is
+# both name the manifest semantic exclusion (choose one OS); the generator is not changed here.
+# exec/pp/gen-delta.sh prefers seed-gen with no silent Python fallback.  No consumer is
 # changed.  Same harness as tests/seedoptcheck.sh: private scratch tree from one commit, fail-closed evidence
 # export (SEEDPP_EVIDENCE), checkout conservation.  Split beforehand (00:42 §5):
 #   tests/seedppcheck.sh 1   none --osx --win; both negatives; helper flag/fallback checks; export fault branches
@@ -121,7 +121,7 @@ grep -q 'seed-gen: plain rule column count' "$S/neg-c.err" || no "NEG-tsv C refu
 evw "NEG-tsv rc py=$py_rc c=$c_rc"
 tar -x -C "$W" -f "$S/tree.tar" "$NEG" || exit 2   # restore the scratch copy
 
-# negative 2: --osx --win.  Python names the exclusion; C refuses through an uncovered let option (finding)
+# negative 2: --osx --win. Both constructors name the manifest semantic exclusion.
 rm -f "$S/ow-py.json" "$S/ow-c.json"
 "$B" 55 python3 exec/build/gen.py pp "$S/ow-py.json" --osx --win 2>"$S/ow-py.err"; py_rc=$?
 "$B" 55 "$G" pp "$S/ow-c.json" --osx --win 2>"$S/ow-c.err"; c_rc=$?
@@ -129,10 +129,10 @@ neg0=$bad
 refused "$py_rc" || no "NEG-osxwin Python did not refuse normally (rc=$py_rc)"
 refused "$c_rc" || no "NEG-osxwin C did not refuse normally (rc=$c_rc)"
 grep -q 'choose one OS' "$S/ow-py.err" || no "NEG-osxwin Python refuse not named ($(tail -1 "$S/ow-py.err"))"
-grep -q 'manifest let option is not yet covered' "$S/ow-c.err" || no "NEG-osxwin C refuse changed ($(tail -1 "$S/ow-c.err"))"
+grep -q 'choose one OS' "$S/ow-c.err" || no "NEG-osxwin C refuse not named ($(tail -1 "$S/ow-c.err"))"
 [ ! -e "$S/ow-py.json" ] && [ ! -e "$S/ow-c.json" ] || no "NEG-osxwin wrote output despite refuse"
-[ "$bad" -eq "$neg0" ] && ok "NEG-osxwin both refuse, no output (py_rc=$py_rc c_rc=$c_rc; C reason is an uncovered let option, not a named exclusion)"
-evw "NEG-osxwin rc py=$py_rc c=$c_rc  kind py=semantic-exclusion c=unsupported-let (not a C exclusion check)"
+[ "$bad" -eq "$neg0" ] && ok "NEG-osxwin both refuse by name, no output (py_rc=$py_rc c_rc=$c_rc)"
+evw "NEG-osxwin rc py=$py_rc c=$c_rc  kind py=semantic-exclusion c=semantic-exclusion"
 
 # exec/pp/gen-delta.sh (the scratch copy): flags, no silent fallback, 0/1 only
 D=$W/exec/pp/gen-delta.sh

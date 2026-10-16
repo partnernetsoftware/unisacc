@@ -49,7 +49,7 @@ SEED_WHITELIST = ('exec/finite_rules.py', 'exec/assemble.py', 'exec/facts/export
                   'exec/c/', 'exec/pipeline/', 'exec/build/',
                   'exec/lex/tbl.py', 'exec/lex/net.py', 'exec/lex/stage.py')   # executors / converters
 # check and reference-simulator tools: to move to the tests/ side, not counted
-SEED_TOOLS = re.compile(r'(check|sim|compare|roundtrip|cut)\.py$')
+SEED_TOOLS = re.compile(r'(check|sim|compare|roundtrip|cut|-oracle|prep)\.py$')  # roles: reference oracles (-oracle) and cache warm-up (prep)
 
 SEEDPY_CAP, ASSEMBLE_CAP = 1, 420   # X8': combined manifest assembler after deleting manifest_support.py
 
