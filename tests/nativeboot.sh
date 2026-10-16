@@ -44,7 +44,11 @@ fi
 fail() { echo "  FAIL $*"; return 1; }
 compile() { # output, compiler, target: a failed/empty compile is never comparable.
     local output=$1 compiler=$2 target=$3 rc
+    if [ "$mode" = hostcompile ]; then
+        bound "${NATIVEBOOT_COMPILE_BOUND:-55}" "$compiler" "$SELF" -O2 -b "$target" > "$output" 2> "$output.err"
+    else
     bound "${NATIVEBOOT_COMPILE_BOUND:-55}" "$compiler" "$SELF" -b "$target" > "$output" 2> "$output.err"
+    fi
     rc=$?
     if [ "$rc" -ne 0 ]; then cat "$output.err" >&2; fail "compile $target exited $rc"; return 1; fi
     [ -s "$output" ] || { fail "compile $target produced an empty image"; return 1; }

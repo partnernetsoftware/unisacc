@@ -23,11 +23,11 @@ def host_actor_closure():
 sources=provenance.source_digest();actors,actor_edges=host_actor_closure()
 assert {'tests/lib.sh','tests/bound','tests/bound.c'}<=set(actors)
 
-basis={'sources':sources,'actors':actors,'host':target,'cc':str(cc),'cc_sha256':digest(cc),'cc_version':version.hex(),'CFLAGS':'-O2','compiler_environment':{k:os.environ.get(k) for k in ('PATH','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','SDKROOT','MACOSX_DEPLOYMENT_TARGET','SOURCE_DATE_EPOCH','CC','BOUND_CACHE','GITHUB_ACTIONS','UNISACC_BOUND_STOP_SECS','UNISACC_BOUND_TEST_NO_KILL')}}
+basis={'sources':sources,'actors':actors,'host':target,'cc':str(cc),'cc_sha256':digest(cc),'cc_version':version.hex(),'CFLAGS':'-O2','native_flags':['-O2'],'compiler_environment':{k:os.environ.get(k) for k in ('PATH','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','SDKROOT','MACOSX_DEPLOYMENT_TARGET','SOURCE_DATE_EPOCH','CC','BOUND_CACHE','GITHUB_ACTIONS','UNISACC_BOUND_STOP_SECS','UNISACC_BOUND_TEST_NO_KILL')}}
 key=hashlib.sha256(json.dumps(basis,sort_keys=True).encode()).hexdigest();u0=base/('host-triple-u0-'+key)
 def need(name,reason):
  print('NEED_PREPARE host-triple-'+name+': '+reason,file=sys.stderr);raise SystemExit(75)
-def role(stage,self_sha,parent_sha):return {'stage':stage,'target':target,'identity':key,'self_sha256':self_sha,'parent_sha256':parent_sha}
+def role(stage,self_sha,parent_sha):return {'stage':stage,'target':target,'identity':key,'self_sha256':self_sha,'parent_sha256':parent_sha,'native_flags':['-O2']}
 def check(folder,name,expected):
  try:
   record=provenance.verify(folder/name)
