@@ -14,11 +14,18 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # On this host the images of this host's targets are also run, and must
 # print what the reference VM prints for that tape.
 set -u
+case "${1:-}" in --prepare|--target) exec python3 "$(dirname "$0")/closureprepared.py" "$@";; esac
 R=$(cd "$(dirname "$0")/.." && pwd)
 . "$R/tests/lib.sh"; ua_ready
-T=$(scratch)
+if [ -n "${_CLOSURE_ARTIFACT_DIR:-}" ]; then T=$_CLOSURE_ARTIFACT_DIR; else T=$(scratch); fi
+REPLAY=${_CLOSURE_REPLAY:-0}
 TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
 HOSTT=$(host_target)
+if [ -n "${_CLOSURE_TARGET:-}" ]; then
+    case " $TARGETS " in *" $_CLOSURE_TARGET "*) TARGETS=$_CLOSURE_TARGET;; *) echo 'closure: unknown target' >&2; exit 2;; esac
+    [ "$HOSTT" = "$_CLOSURE_TARGET" ] || HOSTT=
+fi
+[ "${_CLOSURE_CAPTURE:-0}" = 1 ] && HOSTT=
 PAR_WAIT=4   # the host run waits on the first-launch scan
 . "$R/tests/par.sh"
 # tests/c also holds the red examples the reference is known to refuse
@@ -35,18 +42,24 @@ for f in "$@"; do
     throttle
     (
     D="$T/$b.d"; mkdir -p "$D"
-    "$_BOUND" 20 "$UA" "$f" -c > "$D/tape" 2>"$D/errors"; rc=$?
+    if [ "$REPLAY" = 1 ]; then rc=$(cat "$D/initial.rc"); else
+        "$_BOUND" 20 "$UA" "$f" -c > "$D/tape" 2>"$D/errors"; rc=$?
+        printf '%s\n' "$rc" > "$D/initial.rc"
+    fi
     if [ "$rc" -ne 0 ] || [ ! -s "$D/tape" ]; then echo "DIFF tool $f initial compiler rc=$rc" >"$D/verdict"; cat "$D/errors"; exit 1; fi
     : > "$D/verdict"
     for t in $TARGETS; do
         tt=$(echo "$t" | tr / _)
         # a tape is compiled FOR an OS (<stdio.h> reads __linux__, _WIN32),
         # so each target's image is checked against that target's tape
-        if ! "$_BOUND" 20 "$UA" "$f" -t "$t" > "$D/tape.$tt" 2>>"$D/errors" || [ ! -s "$D/tape.$tt" ]; then echo "DIFF tool $t tape" >>"$D/verdict"; continue; fi
-        if ! "$_BOUND" 25 python3 -m unisa compile "$D/tape.$tt" --from-tape -o "$D/py.$tt" \
-            --target "$t" --drive built >>"$D/errors" 2>&1 || [ ! -s "$D/py.$tt" ]; then echo "DIFF tool $t reference" >>"$D/verdict"; continue; fi
-        if ! "$_BOUND" 20 "$UA" "$f" -b "$t" > "$D/ua.$tt" 2>>"$D/errors" || [ ! -s "$D/ua.$tt" ]; then echo "DIFF tool $t candidate" >>"$D/verdict"; continue; fi
-        if cmp -s "$D/py.$tt" "$D/ua.$tt"; then echo "same $t" >> "$D/verdict"
+        if { [ "$REPLAY" != 1 ] && ! "$_BOUND" 20 "$UA" "$f" -t "$t" > "$D/tape.$tt" 2>>"$D/errors"; } || [ ! -s "$D/tape.$tt" ]; then echo "DIFF tool $t tape" >>"$D/verdict"; continue; fi
+        printf 'CLOSURE_UNIT\t%s\t%s\t%s\n' "$f" "$t" target_tape_nonempty
+        if { [ "$REPLAY" != 1 ] && ! "$_BOUND" 25 python3 -m unisa compile "$D/tape.$tt" --from-tape -o "$D/py.$tt" \
+            --target "$t" --drive built >>"$D/errors" 2>&1; } || [ ! -s "$D/py.$tt" ]; then echo "DIFF tool $t reference" >>"$D/verdict"; continue; fi
+        printf 'CLOSURE_UNIT\t%s\t%s\t%s\n' "$f" "$t" reference_image_nonempty
+        if { [ "$REPLAY" != 1 ] && ! "$_BOUND" 20 "$UA" "$f" -b "$t" > "$D/ua.$tt" 2>>"$D/errors"; } || [ ! -s "$D/ua.$tt" ]; then echo "DIFF tool $t candidate" >>"$D/verdict"; continue; fi
+        printf 'CLOSURE_UNIT\t%s\t%s\t%s\n' "$f" "$t" candidate_image_nonempty
+        if cmp -s "$D/py.$tt" "$D/ua.$tt"; then echo "same $t" >> "$D/verdict"; printf 'CLOSURE_UNIT\t%s\t%s\t%s\n' "$f" "$t" image_bytes_exact
         else echo "DIFF $t $(cmp "$D/py.$tt" "$D/ua.$tt" 2>&1 | head -1)" >> "$D/verdict"; fi
     done
     if [ -n "$HOSTT" ]; then
