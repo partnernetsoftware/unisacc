@@ -66,44 +66,58 @@ jobs:
         \ arch, 'observed': architecture, 'expected': expected})\n    assert (architecture['PROCESSOR_ARCHITECTURE'] or '').upper()\
         \ == expected[0], 'PROCESSOR_ARCHITECTURE_MISMATCH'\n    assert (architecture['RUNNER_ARCH'] or '').upper() == expected[1],\
         \ 'RUNNER_ARCH_MISMATCH'\n    # Export first: tool discovery failure must still preserve the original source/export\
-        \ logs.\n    flat = out / 'SELF.c'\n    checked('export', ['bash', 'tests/export_ref.sh', flat.as_posix()], 10)\n\
-        \    full = out / 'U0.ref.c'\n    full.write_bytes((root / 'tests/refshim.h').read_bytes() + flat.read_bytes() + (root\
-        \ / 'tests/reffoot.h').read_bytes())\n    save('source-inputs.json', {n: digest(p) for n, p in [('SELF.c', flat),\
-        \ ('U0.ref.c', full), ('tests/refshim.h', root / 'tests/refshim.h'), ('tests/reffoot.h', root / 'tests/reffoot.h')]})\n\
-        \    vswhere = pathlib.Path(os.environ['ProgramFiles(x86)']) / 'Microsoft Visual Studio/Installer/vswhere.exe'\n \
-        \   vsraw = checked('vswhere', [vswhere, '-latest', '-products', '*', '-property', 'installationPath'], 5)\n    assert\
-        \ vsraw, 'VS_INSTALLATION_NOT_READY'\n    vs = pathlib.Path(vsraw)\n    # No cmd.exe/VsDevCmd quoting or imported\
-        \ shell environment.\n    candidates = [vs / 'VC/Tools/Llvm' / sub / 'bin/clang-cl.exe' for sub in ('ARM64', 'x64',\
-        \ '')] if arch == 'arm64' else [vs / 'VC/Tools/Llvm' / sub / 'bin/clang-cl.exe' for sub in ('x64', '')]\n    compiler\
-        \ = None\n    for candidate in candidates:\n        try:\n            candidate.stat()\n        except FileNotFoundError:\n\
-        \            continue\n        compiler = candidate.resolve(strict=True)\n        break\n    save('tool-discovery.json',\
-        \ {'vs_installation': str(vs), 'compiler_candidates': list(map(str, candidates)), 'compiler': str(compiler) if compiler\
-        \ else None})\n    assert compiler, 'CLANG_CL_NOT_READY_NO_INSTALL_FALLBACK'\n    linker = compiler.with_name('lld-link.exe')\n\
-        \    linker.resolve(strict=True)\n    msvc = newest((p for p in (vs / 'VC/Tools/MSVC').iterdir() if re.fullmatch(r'\\\
-        d+(\\.\\d+)+', p.name) and (p / 'include').is_dir() and (p / 'lib' / arch).is_dir()), 'MSVC_HEADERS_LIBS_NOT_READY')\n\
-        \    sdk = pathlib.Path(os.environ['ProgramFiles(x86)']) / 'Windows Kits/10'\n    sdkversion = newest((p for p in\
-        \ (sdk / 'Include').iterdir() if re.fullmatch(r'\\d+(\\.\\d+)+', p.name) and all((p / sub).is_dir() for sub in ('ucrt',\
-        \ 'shared', 'um', 'winrt')) and all((sdk / 'Lib' / p.name / sub / arch).is_dir() for sub in ('ucrt', 'um'))), 'WINDOWS_SDK_NOT_READY')\n\
-        \    includes = [msvc / 'include'] + [sdkversion / sub for sub in ('ucrt', 'shared', 'um', 'winrt')]\n    libs = [msvc\
-        \ / 'lib' / arch] + [sdk / 'Lib' / sdkversion.name / sub / arch for sub in ('ucrt', 'um')]\n    env = dict(os.environ)\n\
-        \    # Windows environment variable names are case-insensitive; remove aliases first.\n    for key in list(env):\n\
-        \        if key.upper() in ('PATH', 'INCLUDE', 'LIB', 'CL', '_CL_', 'LINK', '_LINK_'):\n            del env[key]\n\
-        \    env.update(PATH=str(compiler.parent) + os.pathsep + os.environ.get('PATH', ''), INCLUDE=';'.join(map(str, includes)),\
-        \ LIB=';'.join(map(str, libs)))\n    tools = {'source_sha': head, 'target': arch, 'architecture': architecture, 'compiler':\
-        \ str(compiler), 'compiler_sha256': digest(compiler), 'linker': str(linker), 'linker_sha256': digest(linker), 'msvc':\
-        \ str(msvc), 'sdk': str(sdkversion), 'INCLUDE': env['INCLUDE'], 'LIB': env['LIB'], 'scope': 'U0_BUILD_DIAGNOSTIC_ONLY_NO_N_GENERATIONS'}\n\
-        \    save('tools.json', tools)\n    tools['compiler_version'] = checked('compiler-version', [compiler, '--version'],\
-        \ 5, env)\n    save('tools.json', tools)\n    triple = {'x64': 'x86_64-pc-windows-msvc', 'arm64': 'aarch64-pc-windows-msvc'}[arch]\n\
-        \    exe = out / 'U0.exe'\n    flags = ['--target=' + triple, '/TC', '/O2', '/clang:-std=c99', '/clang:-ferror-limit=0',\
-        \ '/clang:-fuse-ld=lld']\n    rc = run('compile-u0', [compiler, *flags, full, '/Fo' + str(out / 'U0.obj'), '/Fe' +\
-        \ str(exe)], 55, env)\n    diagnostics = (out / 'compile-u0.stderr.log').read_text(errors='replace') + (out / 'compile-u0.stdout.log').read_text(errors='replace')\n\
-        \    save('diagnostics.json', {'raw_rc': rc, 'diagnostic_lines': [line for line in diagnostics.splitlines() if re.search(r'error|warning|fatal',\
-        \ line, re.I)], 'unreached_diagnostics': 'UNKNOWN; a fatal header error can stop subsequent analysis'})\n    if rc:\n\
-        \        raise SystemExit(rc)\n    data = exe.read_bytes()\n    pe = struct.unpack_from('<I', data, 0x3c)[0]\n   \
-        \ assert data[:2] == b'MZ' and data[pe:pe + 4] == b'PE\\0\\0', 'U0_PE_FORMAT_MISMATCH'\n    machine = struct.unpack_from('<H',\
-        \ data, pe + 4)[0]\n    assert machine == {'x64': 0x8664, 'arm64': 0xaa64}[arch], 'U0_PE_TARGET_MISMATCH'\n    save('U0.build.json',\
-        \ {'sha256': digest(exe), 'source_sha': head, 'self_sha256': digest(flat), 'wrapped_source_sha256': digest(full),\
-        \ 'compiler_sha256': digest(compiler), 'flags': flags, 'machine': machine, 'status': 'COMPILED_ONLY_EXECUTION_AND_LLP64_SEMANTICS_NOT_CERTIFIED'})\n\
+        \ logs.\n    flat = out / 'SELF.c'\n    # Bind Git for Windows Bash; a bare bash can select the Windows/WSL launcher.\n\
+        \    git_path = pathlib.Path(shutil.which('git') or '').resolve(strict=True)\n    git_root = None\n    for parent\
+        \ in list(git_path.parents)[:4]:\n        try:\n            (parent / 'bin/bash.exe').stat()\n            (parent\
+        \ / 'usr/bin/cygpath.exe').stat()\n        except FileNotFoundError:\n            continue\n        git_root = parent\n\
+        \        break\n    assert git_root, 'GIT_FOR_WINDOWS_BASH_NOT_READY'\n    bash = git_root / 'bin/bash.exe'\n    bash_env\
+        \ = dict(os.environ)\n    for key in list(bash_env):\n        if key.upper() in ('PATH', 'BASH_ENV', 'ENV'):\n   \
+        \         del bash_env[key]\n    bash_env['PATH'] = os.pathsep.join([str(git_root / 'bin'), str(git_root / 'usr/bin'),\
+        \ os.environ.get('PATH', '')])\n    script_bytes = (root / 'tests/export_ref.sh').read_bytes()\n    save('export-tools.json',\
+        \ {'git': str(git_path), 'git_sha256': digest(git_path), 'bash': str(bash), 'bash_sha256': digest(bash), 'cygpath':\
+        \ str(git_root / 'usr/bin/cygpath.exe'), 'cygpath_sha256': digest(git_root / 'usr/bin/cygpath.exe'), 'bare_bash_resolved':\
+        \ shutil.which('bash'), 'script_sha256': digest(root / 'tests/export_ref.sh'), 'script_CRLF_count': script_bytes.count(b'\\\
+        r\\n'), 'output_windows_path': str(flat)})\n    checked('export-bash-version', [bash, '--noprofile', '--norc', '--version'],\
+        \ 5, bash_env)\n    posix_flat = checked('export-path', [git_root / 'usr/bin/cygpath.exe', '-u', str(flat)], 5, bash_env)\n\
+        \    assert posix_flat.startswith('/'), 'EXPORT_OUTPUT_NOT_POSIX_ABSOLUTE'\n    checked('export', [bash, '--noprofile',\
+        \ '--norc', '-x', 'tests/export_ref.sh', posix_flat], 10, bash_env)\n    full = out / 'U0.ref.c'\n    full.write_bytes((root\
+        \ / 'tests/refshim.h').read_bytes() + flat.read_bytes() + (root / 'tests/reffoot.h').read_bytes())\n    save('source-inputs.json',\
+        \ {n: digest(p) for n, p in [('SELF.c', flat), ('U0.ref.c', full), ('tests/refshim.h', root / 'tests/refshim.h'),\
+        \ ('tests/reffoot.h', root / 'tests/reffoot.h')]})\n    vswhere = pathlib.Path(os.environ['ProgramFiles(x86)']) /\
+        \ 'Microsoft Visual Studio/Installer/vswhere.exe'\n    vsraw = checked('vswhere', [vswhere, '-latest', '-products',\
+        \ '*', '-property', 'installationPath'], 5)\n    assert vsraw, 'VS_INSTALLATION_NOT_READY'\n    vs = pathlib.Path(vsraw)\n\
+        \    # No cmd.exe/VsDevCmd quoting or imported shell environment.\n    candidates = [vs / 'VC/Tools/Llvm' / sub /\
+        \ 'bin/clang-cl.exe' for sub in ('ARM64', 'x64', '')] if arch == 'arm64' else [vs / 'VC/Tools/Llvm' / sub / 'bin/clang-cl.exe'\
+        \ for sub in ('x64', '')]\n    compiler = None\n    for candidate in candidates:\n        try:\n            candidate.stat()\n\
+        \        except FileNotFoundError:\n            continue\n        compiler = candidate.resolve(strict=True)\n    \
+        \    break\n    save('tool-discovery.json', {'vs_installation': str(vs), 'compiler_candidates': list(map(str, candidates)),\
+        \ 'compiler': str(compiler) if compiler else None})\n    assert compiler, 'CLANG_CL_NOT_READY_NO_INSTALL_FALLBACK'\n\
+        \    linker = compiler.with_name('lld-link.exe')\n    linker.resolve(strict=True)\n    msvc = newest((p for p in (vs\
+        \ / 'VC/Tools/MSVC').iterdir() if re.fullmatch(r'\\d+(\\.\\d+)+', p.name) and (p / 'include').is_dir() and (p / 'lib'\
+        \ / arch).is_dir()), 'MSVC_HEADERS_LIBS_NOT_READY')\n    sdk = pathlib.Path(os.environ['ProgramFiles(x86)']) / 'Windows\
+        \ Kits/10'\n    sdkversion = newest((p for p in (sdk / 'Include').iterdir() if re.fullmatch(r'\\d+(\\.\\d+)+', p.name)\
+        \ and all((p / sub).is_dir() for sub in ('ucrt', 'shared', 'um', 'winrt')) and all((sdk / 'Lib' / p.name / sub / arch).is_dir()\
+        \ for sub in ('ucrt', 'um'))), 'WINDOWS_SDK_NOT_READY')\n    includes = [msvc / 'include'] + [sdkversion / sub for\
+        \ sub in ('ucrt', 'shared', 'um', 'winrt')]\n    libs = [msvc / 'lib' / arch] + [sdk / 'Lib' / sdkversion.name / sub\
+        \ / arch for sub in ('ucrt', 'um')]\n    env = dict(os.environ)\n    # Windows environment variable names are case-insensitive;\
+        \ remove aliases first.\n    for key in list(env):\n        if key.upper() in ('PATH', 'INCLUDE', 'LIB', 'CL', '_CL_',\
+        \ 'LINK', '_LINK_'):\n            del env[key]\n    env.update(PATH=str(compiler.parent) + os.pathsep + os.environ.get('PATH',\
+        \ ''), INCLUDE=';'.join(map(str, includes)), LIB=';'.join(map(str, libs)))\n    tools = {'source_sha': head, 'target':\
+        \ arch, 'architecture': architecture, 'compiler': str(compiler), 'compiler_sha256': digest(compiler), 'linker': str(linker),\
+        \ 'linker_sha256': digest(linker), 'msvc': str(msvc), 'sdk': str(sdkversion), 'INCLUDE': env['INCLUDE'], 'LIB': env['LIB'],\
+        \ 'scope': 'U0_BUILD_DIAGNOSTIC_ONLY_NO_N_GENERATIONS'}\n    save('tools.json', tools)\n    tools['compiler_version']\
+        \ = checked('compiler-version', [compiler, '--version'], 5, env)\n    save('tools.json', tools)\n    triple = {'x64':\
+        \ 'x86_64-pc-windows-msvc', 'arm64': 'aarch64-pc-windows-msvc'}[arch]\n    exe = out / 'U0.exe'\n    flags = ['--target='\
+        \ + triple, '/TC', '/O2', '/clang:-std=c99', '/clang:-ferror-limit=0', '/clang:-fuse-ld=lld']\n    rc = run('compile-u0',\
+        \ [compiler, *flags, full, '/Fo' + str(out / 'U0.obj'), '/Fe' + str(exe)], 55, env)\n    diagnostics = (out / 'compile-u0.stderr.log').read_text(errors='replace')\
+        \ + (out / 'compile-u0.stdout.log').read_text(errors='replace')\n    save('diagnostics.json', {'raw_rc': rc, 'diagnostic_lines':\
+        \ [line for line in diagnostics.splitlines() if re.search(r'error|warning|fatal', line, re.I)], 'unreached_diagnostics':\
+        \ 'UNKNOWN; a fatal header error can stop subsequent analysis'})\n    if rc:\n        raise SystemExit(rc)\n    data\
+        \ = exe.read_bytes()\n    pe = struct.unpack_from('<I', data, 0x3c)[0]\n    assert data[:2] == b'MZ' and data[pe:pe\
+        \ + 4] == b'PE\\0\\0', 'U0_PE_FORMAT_MISMATCH'\n    machine = struct.unpack_from('<H', data, pe + 4)[0]\n    assert\
+        \ machine == {'x64': 0x8664, 'arm64': 0xaa64}[arch], 'U0_PE_TARGET_MISMATCH'\n    save('U0.build.json', {'sha256':\
+        \ digest(exe), 'source_sha': head, 'self_sha256': digest(flat), 'wrapped_source_sha256': digest(full), 'compiler_sha256':\
+        \ digest(compiler), 'flags': flags, 'machine': machine, 'status': 'COMPILED_ONLY_EXECUTION_AND_LLP64_SEMANTICS_NOT_CERTIFIED'})\n\
         except BaseException as error:\n    (out / 'probe-exception.stderr.log').write_text(traceback.format_exc(), encoding='utf-8')\n\
         \    save('probe-status.json', {'status': 'FAILED', 'exception_type': type(error).__name__, 'message': str(error),\
         \ 'compile_reached': any(r['name'] == 'compile-u0' for r in rows)})\n    raise\nfinally:\n    save('EVIDENCE.json',\
