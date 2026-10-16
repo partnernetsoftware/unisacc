@@ -18,7 +18,7 @@ LAYERS = ("contract", "stage", "pipeline", "platform")
 # whole-program behavior to establish their claim.
 CONTRACT = set("""
 gate-select
-identity-product-negative identity-include-negative identity-prep-negative
+identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative
 reviewed-trees finite-template decision-ledger dsl-ops modelbenchcheck bound qprefix
 pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck
 revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin staticimage staticimage-selftest abi-manifest abi-manifest-selftest early-stage-seal-selftest pp-leaf-seal pp-leaf-seal-negative pp-leaf-capture-selftest middle-flow-e3 middle-flow-lower-accept middle-flow-ledger
