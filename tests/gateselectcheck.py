@@ -292,7 +292,7 @@ class SelectorTests(unittest.TestCase):
         self.assertTrue((source_root / "tests/bound.py").is_file(), "test tool inputs missing")
         with tempfile.TemporaryDirectory(prefix="gateselect-adapter-test-") as tmp:
             root=Path(tmp);(root/"tests").mkdir();(root/"release/tools").mkdir(parents=True)
-            for rel in ["tests/bound.py","tests/bound.c","tests/bound","tests/gatedecl.py","tests/gatelayers.py","release/tools/derivedcheck.py","tests/stagerun.sh","tests/gateselect.py"]:
+            for rel in ["tests/bound.py","tests/bound.c","tests/bound","tests/gatedecl.py","tests/gatelayers.py","release/tools/derivedcheck.py","tests/stagerun.sh","tests/gateselect.py","tests/env_pin.py"]:
                 shutil.copy2(source_root/rel,root/rel)
             names=["gate-layers","script-inventory","checkrun","stage-contract-e1e3","cli","exec-lower","abi-manifest","exec-elf"]
             raw=b"".join(n.encode()+b"\0"+b"2\0fixture-runner\0"+n.encode()+b"\0" for n in names)
@@ -304,6 +304,8 @@ class SelectorTests(unittest.TestCase):
             (root/"tests/gatedeps.json").write_text(json.dumps(decl));(root/"tests/gateorder.json").write_text(json.dumps({"after":{"exec-lower":"checkrun"}}))
             (root/"release/derived-map.tsv").write_text("# fixture only\n")
             policy=root/"tests/gateselect.tsv";policy.write_text("\n".join(line for line in POLICY_TEXT.splitlines() if not line.startswith(("ask\t", "stage.alias\t"))).replace("sc1-control\tsc1-control","sc1-control\tstage-contract-e1e3").replace("product-control\tproduct-control","product-control\tcli").replace("checkrun,abi", "checkrun,abi-manifest").replace("merge.include\timage", "merge.include\texec-elf"))
+            # Test double for the existing executor: record argv and propagate its rc.
+            (root/"tests/gatequeue.py").write_text("import sys,json,pathlib,os\na=sys.argv[1:]\ns=pathlib.Path(a[a.index('--state')+1]);s.mkdir(parents=True,exist_ok=True)\n(s/'results.json').write_text('{\"fixture-only\":true}')\nprint('FIXTURE_GATEQUEUE_ARGV='+json.dumps(a),flush=True)\nsys.exit(int(os.environ.get('FIXTURE_QUEUE_RC','75')))\n")
             (root/"known.h").write_text("old\n");(root/"own.h").write_text("stable\n")
             env=dict(os.environ,GIT_AUTHOR_NAME="fixture",GIT_AUTHOR_EMAIL="f@local",GIT_COMMITTER_NAME="fixture",GIT_COMMITTER_EMAIL="f@local")
             def git(*a):return subprocess.check_output(["git",*a],cwd=root,env=env,stderr=subprocess.DEVNULL).decode().strip()
@@ -317,6 +319,39 @@ class SelectorTests(unittest.TestCase):
             self.assertEqual(plan,m.real_plan(root,req,policy,"dev",{}))
             full=m.real_plan(root,req,policy,"candidate",{})
             self.assertEqual(full["suites"],names)
+            # Real CLI -> existing bound -> executor test double, not real suite results.
+            with tempfile.TemporaryDirectory(prefix="selector-run-state-") as evidence:
+                evidence=Path(evidence);state=evidence/"queue";artifact=evidence/"plan.json"
+                command=[sys.executable,str(root/"tests/gateselect.py"),"--root",str(root),"--policy",str(policy),"--run","--tier","dev","--base",head,"--head",head,"--com","--state",str(state),"--out",str(artifact)]
+                run=subprocess.run(command,cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(run.returncode,75,run.stderr)
+                plan=json.loads(artifact.read_text());self.assertEqual(len(plan["suites"]),6)
+                line=next(l for l in run.stdout.decode().splitlines() if l.startswith("FIXTURE_GATEQUEUE_ARGV="))
+                args=json.loads(line.split("=",1)[1]);self.assertEqual([args[i+1] for i,x in enumerate(args) if x=="--suite"],plan["suites"])
+                sha=__import__('hashlib').sha256(artifact.read_bytes()).hexdigest()
+                self.assertIn(sha.encode(),run.stdout);self.assertIn(b"INCOMPLETE",run.stdout)
+                cont=[sys.executable,str(root/"tests/gateselect.py"),"--root",str(root),"--policy",str(policy),"--continue-plan",str(artifact),"--plan-sha",sha,"--state",str(state),"--jobs","1"]
+                for rc in (0,1,4,75,142):
+                    actual=subprocess.run(cont,cwd=root,env=dict(env,FIXTURE_QUEUE_RC=str(rc)),capture_output=True,timeout=10)
+                    self.assertEqual(actual.returncode,rc,actual.stderr)
+                again=subprocess.run(command,cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(again.returncode,2);self.assertIn(b"execution-state-not-empty",again.stderr)
+                before=artifact.read_bytes();artifact.write_bytes(before+b" ")
+                bad=subprocess.run(cont,cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(bad.returncode,2);self.assertIn(b"plan-sha-mismatch",bad.stderr);artifact.write_bytes(before)
+                (root/"own.h").write_text("changed input\n")
+                bad=subprocess.run(cont,cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(bad.returncode,2);self.assertIn(b"use-new-state",bad.stderr);(root/"own.h").write_text("stable\n")
+                wrong=evidence/"wrong";wrong.mkdir();(wrong/"sentinel").write_text("keep")
+                bad=subprocess.run([*cont[:-3],str(wrong),"--jobs","1"],cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(bad.returncode,2);self.assertEqual((wrong/"sentinel").read_text(),"keep")
+                for tier in ("candidate","release"):
+                    bad=subprocess.run([sys.executable,str(root/"tests/gateselect.py"),"--run","--tier",tier],capture_output=True,timeout=5)
+                    self.assertEqual(bad.returncode,2);self.assertIn(b"release.sh",bad.stderr)
+                stale=[x for x in command];stale[stale.index("--head")+1]=base;stale[stale.index("--state")+1]=str(evidence/"stale");stale[stale.index("--out")+1]=str(evidence/"stale.json")
+                bad=subprocess.run(stale,cwd=root,env=env,capture_output=True,timeout=10)
+                self.assertEqual(bad.returncode,2);self.assertIn(b"head-must-equal",bad.stderr);self.assertFalse((evidence/"stale.json").is_file())
+
             # Exercise the real stagerun shell around a fixture mapper, without queues.
             subprocess.run(["cc",str(root/"tests/stagemap.c"),"-o",str(root/"mapper")],check=True,capture_output=True,timeout=5)
             product=root/"fixture-product";product.write_text('#!/bin/sh\n[ "$1" = -run ] || exit 2\nshift 2\n[ "$1" = -- ] && shift\nexec "'+str(root/'mapper')+'" "$@"\n');product.chmod(0o755)
@@ -428,6 +463,21 @@ class SelectorTests(unittest.TestCase):
             q=subprocess.run([*argv,"--verify",str(output)],capture_output=True,timeout=5)
             self.assertEqual(q.returncode,2)
             self.assertIn(b"shadow-verify-conflict",q.stderr)
+
+    def test_execution_budget_reports_without_truncation(self):
+        from unittest.mock import patch
+        import io,contextlib,tempfile,subprocess
+        p=self.plan();p["identity"]={"head":"same","checkout_head":"same"}
+        p["request"]={"com":True,"execution":{"policy":"/tmp/policy.tsv"}}
+        with tempfile.TemporaryDirectory() as d:
+            plan=Path(d)/"plan.json";plan.write_text(json.dumps(p));state=Path(d)/"state"
+            output=io.StringIO()
+            with patch('subprocess.run',return_value=subprocess.CompletedProcess([],75)) as call, patch('time.monotonic',side_effect=[0,200]),contextlib.redirect_stdout(output):
+                rc=m.execute_plan(B,p,plan,state,1)
+            self.assertEqual(rc,75)
+            args=call.call_args.args[0]
+            self.assertEqual([args[i+1] for i,x in enumerate(args) if x=="--suite"],p["suites"])
+            self.assertIn("BUDGET_EXCEEDED",output.getvalue());self.assertIn("--plan-sha",output.getvalue());self.assertIn(str(state),output.getvalue())
 
     def test_exhaustive_five_job_affected_masks(self):
         f=fixture(); candidates=["lex","parse","lower","abi","platform"]

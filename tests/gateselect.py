@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Offline tier planner using the shared gate declarations and stage map.
-Dev/merge accept additive scopes; candidate/release always plan the full list.
-No gate execution, queue state access, environment pin, or result cache.
+"""Tier planner using the shared gate declarations and stage map.
+Dev/merge accept additive scopes and delegate --run to the existing gatequeue.
+Candidate/release always plan the full list; execution remains in release.sh.
+No independent scheduler, result cache, environment pin or result import.
 """
 import argparse
 import hashlib
@@ -282,7 +283,7 @@ def verify(plan, fixture, policy):
     return {"status": "VALID_PLAN_ONLY", "coverage_verdict": "NOT_ASSESSED"}
 
 
-# Real sources below only plan. They never import gatequeue or execute a gate job.
+# The declaration adapter only plans; execution below delegates to gatequeue.
 def load_module(path, name):
     import importlib.util
     import sys
@@ -392,7 +393,8 @@ def real_inputs(root, request, policy_path):
     import tempfile
     source_names = ['tests/gate.sh', 'tests/gatedeps.json', 'tests/gatedecl.py', 'tests/gatelayers.py',
                     'tests/stagemap.c', 'tests/gateorder.json', 'release/derived-map.tsv',
-                    'release/tools/derivedcheck.py', 'tests/bound.py', 'tests/bound', 'tests/bound.c']
+                    'release/tools/derivedcheck.py', 'tests/bound.py', 'tests/bound', 'tests/bound.c',
+                    'tests/gatequeue.py', 'tests/env_pin.py']
     if parse_policy(policy_path.read_text()).get('ask_vocabulary') is not None:
         source_names.append('kernel/unisa_model.inc')
     before = {p: path_identity(root / p) for p in source_names}
@@ -448,7 +450,7 @@ def real_inputs(root, request, policy_path):
     suites, derived_why = derived.suites_for(derived_rows)
     require(all(n in deps['suites'] for n in suites), 'derived-suite-undeclared')
     # Metadata invalidation is intentionally broad; it does not change gatequeue result identities.
-    metadata = set(source_names[:6]) | {'tests/gateselect.py', 'tests/gateselect.tsv', 'release/derived-map.tsv'}
+    metadata = set(source_names[:6]) | {'tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gatequeue.py', 'tests/env_pin.py', 'release/derived-map.tsv'}
     f = {'mode': 'FIXTURE_ONLY', 'catalog': {'layers': list(layers.LAYERS),
          'stages': sorted({tag for primary, also in mapped.values() for tag in [primary, *also]})},
          'jobs': jobs, 'changes': changes, 'affected': sorted(affected), 'unclaimed': sorted(unclaimed),
@@ -509,6 +511,81 @@ def shadow_report(plan, actual, gate_log=None, label="commitgate"):
     ]) + "\n"
 
 
+def execution_tier(tier):
+    require(tier not in ("candidate", "release"), "full-tier-execution-use-tests/release.sh")
+    require(tier in ("dev", "merge"), "execution-needs-dev-or-merge")
+
+
+def execution_state(root, path, fresh):
+    import stat
+    require(path is not None, "execution-needs-explicit-state")
+    path = path.absolute()
+    require(not path.resolve().is_relative_to(root), "execution-state-must-be-outside-checkout")
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        require(fresh, "execution-state-missing")
+    else:
+        require(stat.S_ISDIR(mode), "execution-state-not-real-directory")
+        if fresh:
+            require(next(path.iterdir(), None) is None, "execution-state-not-empty-use-continue-plan")
+    return path
+
+
+def checked_real_plan(root, policy, path, sha=None):
+    raw = path.read_bytes()
+    if sha is not None:
+        require(re.fullmatch(r"[0-9a-f]{64}", sha) is not None and hashlib.sha256(raw).hexdigest() == sha,
+                "execution-plan-sha-mismatch-use-new-state")
+    old = json.loads(raw)
+    require(old.get('format') == 'GATESELECT1', 'plan-format')
+    expected = real_plan(root, old['request'], policy, old['tier'], old['filters'])
+    require(old == expected, 'plan-changed-or-tampered-use-new-state')
+    return old
+
+
+def queue_argv(root, plan, state, jobs):
+    import sys
+    execution_tier(plan['tier'])
+    require(plan.get('status') == 'PLAN_ONLY', 'execution-needs-valid-plan')
+    require(plan['identity']['head'] == plan['identity']['checkout_head'], 'execution-head-must-equal-checkout-head')
+    require(1 <= jobs <= 4, 'execution-jobs-1-through-4')
+    command = [sys.executable, str(root/'tests/bound.py'), '55', sys.executable,
+               str(root/'tests/gatequeue.py'), '--state', str(state), '--jobs', str(jobs), '--window', '50']
+    if plan['request']['com']:
+        command.append('--com')
+    for name in plan['suites']:
+        command += ['--suite', name]
+    return command
+
+
+def execute_plan(root, plan, plan_path, state, jobs):
+    """One invocation of the existing queue; no result import, scheduling or loop."""
+    import shlex
+    import subprocess
+    import sys
+    import time
+    command = queue_argv(root, plan, state, jobs)
+    sha = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+    print('gateselect run: DEVELOPMENT_ONLY plan=%s sha256=%s suites=%d budget=%s' %
+          (plan_path, sha, len(plan['suites']), json.dumps(plan['budget'], sort_keys=True)), flush=True)
+    print('gateselect run: executor=' + shlex.join(command), flush=True)
+    started = time.monotonic()
+    result = subprocess.run(command, cwd=root)
+    elapsed = time.monotonic() - started
+    budgets = [x for x in (plan['budget']['hot_seconds'], plan['budget']['cold_seconds']) if x is not None]
+    if any(elapsed > x for x in budgets):
+        print('gateselect run: BUDGET_EXCEEDED report-only; split work/preparation, required suites were not truncated', flush=True)
+    rc = result.returncode if result.returncode >= 0 else 128 - result.returncode
+    print('gateselect run: rc=%d window_monotonic_s=%.3f release_acceptance=NOT_ASSESSED' % (rc, elapsed), flush=True)
+    if rc == 75:
+        continuation = [sys.executable, str(Path(__file__).resolve()), '--root', str(root), '--policy',
+                        str(plan['request']['execution']['policy']), '--continue-plan', str(plan_path), '--plan-sha', sha,
+                        '--state', str(state), '--jobs', str(jobs)]
+        print('gateselect run: INCOMPLETE; all pending obligations retained; continue=' + shlex.join(continuation), flush=True)
+    return rc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--fixture', type=Path)
@@ -526,25 +603,59 @@ def main():
     ap.add_argument('--actual-suite', action='append', default=[])
     ap.add_argument('--gate-log', type=Path)
     ap.add_argument('--comparison-label', choices=('commitgate', 'legacy-stage'), default='commitgate')
+    ap.add_argument('--run', action='store_true', help='dev/merge: delegate one window to gatequeue')
+    ap.add_argument('--continue-plan', type=Path, help='revalidate a frozen execution plan before another queue window')
+    ap.add_argument('--plan-sha')
+    ap.add_argument('--state', type=Path)
+    ap.add_argument('--jobs', type=int, default=None)
     a = ap.parse_args()
     try:
         require(not (a.actual_suite or a.gate_log or a.comparison_label != 'commitgate') or a.shadow_report, 'shadow-options-need-report')
         require(not a.shadow_report or not a.verify, 'shadow-verify-conflict')
         policy_path = a.policy.resolve()
+        root = a.root.resolve()
+        require(not (a.state or a.jobs is not None or a.plan_sha) or a.run or a.continue_plan, 'execution-options-need-run-or-continue')
+        require(not (a.run or a.continue_plan) or not (a.fixture or a.verify or a.shadow_report), 'execution-real-plan-only')
+        require(not a.run or not a.continue_plan, 'execution-mode-conflict')
+        require(not a.plan_sha or a.continue_plan is not None, 'plan-sha-needs-continuation')
+        if a.continue_plan:
+            require(a.plan_sha is not None, 'execution-continuation-needs-plan-sha')
+            require(not (a.base or a.head or a.worktree or a.path or a.layer or a.stage or a.ask or a.out or a.com or a.tier != 'dev'), 'continuation-request-conflict')
+            result = checked_real_plan(root, policy_path, a.continue_plan, a.plan_sha)
+            execution_tier(result['tier'])
+            state = execution_state(root, a.state, False)
+            record = result['request'].get('execution', {})
+            jobs = record.get('jobs') if a.jobs is None else a.jobs
+            require(record == {'state': str(state), 'jobs': jobs, 'window': 50, 'policy': str(policy_path)}, 'execution-request-changed-use-new-state')
+            raise SystemExit(execute_plan(root, result, a.continue_plan.resolve(), state, jobs))
+        if a.run:
+            execution_tier(a.tier)
+            require(a.out is not None, 'execution-needs-out-plan')
+            require(not a.out.resolve().is_relative_to(root), 'execution-plan-must-be-outside-checkout')
+            state = execution_state(root, a.state, True)
+            require(not a.out.resolve().is_relative_to(state.resolve()), 'execution-plan-must-be-outside-state')
+            jobs = 1 if a.jobs is None else a.jobs
+            require(1 <= jobs <= 4, 'execution-jobs-1-through-4')
         if a.fixture:
             f = json.loads(a.fixture.read_text()); p = parse_policy(policy_path.read_text())
             result = verify(json.loads(a.verify.read_text()), f, p) if a.verify else select(f, p, a.tier, a.layer, a.stage, a.ask)
         elif a.verify:
             require(not (a.base or a.head or a.worktree or a.path or a.layer or a.stage or a.ask), 'verify-request-conflict')
-            old = json.loads(a.verify.read_text()); require(old.get('format') == 'GATESELECT1', 'plan-format')
-            expected = real_plan(a.root.resolve(), old['request'], policy_path, old['tier'], old['filters'])
-            require(old == expected, 'plan-changed-or-tampered')
+            checked_real_plan(root, policy_path, a.verify)
             result = {'status': 'VALID_PLAN_ONLY', 'coverage_verdict': 'NOT_ASSESSED'}
         else:
             require(a.base and a.head, 'real-plan-needs-explicit-base-head')
-            request = {'base': a.base, 'head': a.head, 'worktree': a.worktree, 'com': a.com, 'paths': a.path}
+            request = {'base': a.base, 'head': a.head, 'worktree': a.worktree or a.run, 'com': a.com, 'paths': a.path}
+            if a.run:
+                request['execution'] = {'state': str(state), 'jobs': jobs, 'window': 50, 'policy': str(policy_path)}
             result = real_plan(a.root.resolve(), request, policy_path, a.tier, {'layers': a.layer, 'stages': a.stage, 'asks': a.ask})
         text = json.dumps(result, indent=2) + '\n'
+        if a.run:
+            # Validate before creating any execution artifact or invoking the queue.
+            queue_argv(root, result, state, jobs)
+            with a.out.open('x') as output:
+                output.write(text)
+            raise SystemExit(execute_plan(root, result, a.out.resolve(), state, jobs))
         if a.out:
             a.out.write_text(text)
         elif not a.shadow_report:
