@@ -7,6 +7,7 @@
 #if !__UNISA_FTRIM_LIBC || __UN_unisa_rotr
 static unsigned long unisa_rotr(unsigned long x, int k) { return ((x >> k) | (x << (32 - k))) & 0xffffffffUL; }
 #endif
+#include <stddef.h>   /* size_t; outside the per-function FTRIM guards */
 #if !__UNISA_FTRIM_LIBC || __UN_unisa_sha256_block
 static void unisa_sha256_block(unsigned long h[8], const unsigned char *b) {
     static const unsigned long k[64] = {
