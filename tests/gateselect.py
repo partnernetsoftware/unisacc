@@ -419,6 +419,7 @@ def changed_paths(root, request):
     paths = request.get('paths', [])
     require(all(p and not p.startswith(('-', ':', '/')) and '..' not in Path(p).parts for p in paths), 'unsafe-scope-path')
     def commit(value):
+        require(value != 'WORKTREE', 'worktree-is-not-a-revision: use --head HEAD --worktree')
         return bounded(root, ['git', 'rev-parse', '--verify', '--end-of-options', value + '^{commit}']).decode().strip()
     base, head = commit(request['base']), commit(request['head'])
     args = ['git', 'diff', '--name-status', '-z', '--find-renames', base, head, '--', *paths]

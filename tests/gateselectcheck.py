@@ -40,6 +40,15 @@ def fixture():
 
 
 class SelectorTests(unittest.TestCase):
+    def test_worktree_literal_has_named_usage_error(self):
+        for slot in ('base', 'head'):
+            request = dict(base='HEAD', head='HEAD', worktree=True)
+            request[slot] = 'WORKTREE'
+            from unittest.mock import patch
+            with patch.object(m, 'bounded', return_value=b'fixture-commit\n'):
+                with self.assertRaisesRegex(m.SelectionError, 'worktree-is-not-a-revision: use --head HEAD --worktree'):
+                    m.changed_paths(B, request)
+
     def plan(self, f=None, **kw):
         return m.select(f or fixture(), P, **kw)
 

@@ -88,3 +88,5 @@ PLAN 保留完整 A，同时具名列出被延后的整根树、仅产品传递�
 最多 5 秒，拒绝/超时记 `UNAVAILABLE`，部分实跑观察记 `UNKNOWN`，不变造原 rc。
 `MODEL_COM=/absolute/product sh tests/stagerun.sh --plan-only E3` 只对照新推荐与旧 C
 mapper 集；普通 stagerun 仍执行旧集。开发选集绿不等于 state6、新树全闸或发布验收绿。
+
+工作树规划使用 `--base <提交> --head HEAD --worktree`，同时包含已暂存与未暂存改动。`WORKTREE` 不是修订名，不可传给 `--base` 或 `--head`。
