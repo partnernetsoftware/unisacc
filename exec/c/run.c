@@ -616,7 +616,8 @@ UNISA_RUNTIME_STATE RLLedger RF_LEDGER;
 static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len);
 /* capture (fixture building only; env UNISACC_RF_CAPTURE=DIR): every key the default path answers is written to DIR as a
    ledger row (first answer wins, repeats are checked for agreement); the default answer itself is unchanged. */
-static const char *rf_capture_dir(void) { static int init = 0; static const char *d = 0; if (!init) { init = 1; d = getenv("UNISACC_RF_CAPTURE"); } return d; }
+static const char *rf_capture_set = 0;   /* standalone --capture-out: held here, not round-tripped through the environment (C99-clean) */
+static const char *rf_capture_dir(void) { static int init = 0; static const char *d = 0; if (rf_capture_set) return rf_capture_set; if (!init) { init = 1; d = getenv("UNISACC_RF_CAPTURE"); } return d; }
 static unsigned char *RF_CAPK[4096]; static int RF_CAPKN[4096]; static int RF_CAPC = 0;
 static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned char *bytes,int len) {
     char path[4096], hex[1025], sha[65]; FILE *f; int i;
@@ -928,7 +929,7 @@ int main(int argc, char **argv) {
         if (!run_stage) { fprintf(stderr, "run: --capture-out needs --stage\n"); return 2; }
         if (run_snap && !stat(run_snap, &sa) && !stat(run_out, &sb) && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) { fprintf(stderr, "run: INTERFACE_ERROR snapshot-output-same-path\n"); return 2; }
         if (rf_capture_begin(run_out, run_stage, in.b, in.n, err, sizeof err)) { fprintf(stderr, "run: %s\n", err); return 2; }
-        setenv("UNISACC_RF_CAPTURE", run_out, 1);
+        rf_capture_set = run_out;
     }
     if (bundled) {
         int rc = runroute(argv[routearg], &in, src); unpackage();
