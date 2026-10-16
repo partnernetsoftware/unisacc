@@ -27,11 +27,13 @@ TARGET=$OS/$ARCH; export TARGET
 # The package prep does not depend on DRIVER_KIND or MEMORY_SHARD: 18 gate jobs built it 18 times and
 # one hit the 60 s window under load.  On a clean tree it is cached by the tracked inputs' blob ids.
 prep() {
+# Same model set as prep-0..3 (gateorder.json): prepared models only, a cold cache fails by name and never constructs here
+REQ=--require-cached; export UNISACC_REQUIRE_PREPARED=1
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 b python3 exec/build/gen.py opt "$T/o1.json"
 b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
-b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
+b python3 exec/c/compilerpack.py $REQ --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
 }
 KEY=
 if git rev-parse -q --verify HEAD >/dev/null 2>&1 && [ -z "$(git status --porcelain --untracked-files=no -- exec unisa include src kernel weights tests examples/hello.c 2>/dev/null)" ]; then
