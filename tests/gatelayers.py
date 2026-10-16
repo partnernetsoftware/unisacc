@@ -27,6 +27,7 @@ stage-contract-e1e3
 latebind-p6
 resourceflow
 include-key
+gatequeue-symlink
 """.split())   # 0.0.38 P1-P7 pipeline contracts
 CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "tools-")
 
