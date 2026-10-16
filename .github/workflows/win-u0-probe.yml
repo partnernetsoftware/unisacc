@@ -1,0 +1,102 @@
+name: Windows current-source U0 diagnostic (review draft)
+'on':
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Approved full 40-hex source commit
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  u0-probe:
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - runner: windows-latest
+          arch: x64
+        - runner: windows-11-arm
+          arch: arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      U0_ARCH: ${{ matrix.arch }}
+      U0_EVIDENCE: ${{ github.workspace }}-u0-evidence-${{ matrix.arch }}
+    steps:
+    - name: Checkout bytes from approved source
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.source_sha }}
+        persist-credentials: false
+    - name: Require unchanged checkout bytes
+      run: |
+        git -c core.autocrlf=false checkout --force HEAD -- .
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Original complete export and native clang-cl U0 diagnostic
+      run: |
+        $script = @'
+        import os,sys,pathlib,subprocess,json,time,hashlib,re,shutil,struct
+        root=pathlib.Path.cwd();out=pathlib.Path(os.environ['U0_EVIDENCE']);out.mkdir(parents=True,exist_ok=True);rows=[]
+        def digest(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+        def run(name,args,limit,env=None):
+         start=time.monotonic();rc=None;timed=False
+         with (out/(name+'.stdout.log')).open('wb') as o,(out/(name+'.stderr.log')).open('wb') as e:
+          p=subprocess.Popen(list(map(str,args)),stdout=o,stderr=e,env=env,cwd=root)
+          try:rc=p.wait(timeout=limit)
+          except subprocess.TimeoutExpired:
+           timed=True
+           # Diagnostic probe only. Keep the timeout distinct from compiler diagnostics.
+           subprocess.run(['taskkill','/PID',str(p.pid),'/T','/F'],stdout=e,stderr=e,timeout=3)
+           rc=142
+         row={'name':name,'argv':list(map(str,args)),'rc':rc,'timeout':timed,'bound':limit,'seconds_monotonic':time.monotonic()-start}
+         rows.append(row);(out/'steps.json').write_text(json.dumps(rows,indent=2)+'\n');return rc
+        try:
+         source=os.environ['SOURCE_SHA'];assert re.fullmatch('[0-9a-fA-F]{40}',source),'FULL_SHA_REQUIRED'
+         head=subprocess.check_output(['git','rev-parse','HEAD'],timeout=5).decode().strip();assert head.lower()==source.lower(),'SOURCE_IDENTITY_MISMATCH'
+         assert not subprocess.check_output(['git','status','--porcelain'],timeout=5),'SOURCE_TREE_DIRTY'
+         arch=os.environ['U0_ARCH'];native=subprocess.check_output(['powershell','-NoProfile','-Command','(Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture'],timeout=5).decode().strip();assert native=={'x64':'9','arm64':'12'}[arch],'NATIVE_ARCH_MISMATCH'
+         vswhere=pathlib.Path(os.environ['ProgramFiles(x86)'])/'Microsoft Visual Studio/Installer/vswhere.exe'
+         vs=subprocess.check_output([str(vswhere),'-latest','-products','*','-property','installationPath'],timeout=5).decode().strip();assert vs,'VS_ENV_NOT_READY'
+         bat=pathlib.Path(vs)/'Common7/Tools/VsDevCmd.bat'
+         cmd=f'""{bat}" -arch={arch} -host_arch={arch} >nul && set"'
+         envout=subprocess.check_output(['cmd.exe','/d','/s','/c',cmd],timeout=10).decode(errors='replace');env=dict(os.environ)
+         for line in envout.splitlines():
+          if '=' in line and not line.startswith('='):
+           k,v=line.split('=',1);env[k]=v
+         compiler=shutil.which('clang-cl.exe',path=env.get('Path',env.get('PATH','')));assert compiler,'CLANG_CL_NOT_READY_NO_INSTALL_FALLBACK'
+         (out/'tools.json').write_text(json.dumps({'source_sha':head,'target':arch,'native_architecture_code':native,'compiler':compiler,'compiler_sha256':digest(compiler),'compiler_version':subprocess.check_output([compiler,'--version'],env=env,timeout=5).decode(),'INCLUDE':env.get('INCLUDE'),'LIB':env.get('LIB'),'scope':'U0_BUILD_DIAGNOSTIC_ONLY_NO_N_GENERATIONS'},indent=2)+'\n')
+         # Git Bash's original export_ref; convert evidence path to slash spelling for Bash.
+         flat=out/'SELF.c';rc=run('export',['bash','tests/export_ref.sh',flat.as_posix()],10,env);assert rc==0,'EXPORT_FAILED'
+         full=out/'U0.ref.c';full.write_bytes((root/'tests/refshim.h').read_bytes()+flat.read_bytes()+(root/'tests/reffoot.h').read_bytes())
+         (out/'source-inputs.json').write_text(json.dumps({n:digest(p) for n,p in [('SELF.c',flat),('U0.ref.c',full),('tests/refshim.h',root/'tests/refshim.h'),('tests/reffoot.h',root/'tests/reffoot.h')]},indent=2)+'\n')
+         triple={'x64':'x86_64-pc-windows-msvc','arm64':'aarch64-pc-windows-msvc'}[arch];exe=out/'U0.exe'
+         rc=run('compile-u0',[compiler,'--target='+triple,'/TC','/O2','/clang:-std=c99','/clang:-ferror-limit=0',str(full),'/Fo'+str(out/'U0.obj'),'/Fe'+str(exe)],55,env)
+         diagnostics=(out/'compile-u0.stderr.log').read_text(errors='replace')+(out/'compile-u0.stdout.log').read_text(errors='replace')
+         (out/'diagnostics.json').write_text(json.dumps({'raw_rc':rc,'diagnostic_lines':[l for l in diagnostics.splitlines() if re.search(r'error|warning|fatal',l,re.I)],'unreached_diagnostics':'UNKNOWN; missing header can stop subsequent analysis'},indent=2)+'\n')
+         if rc:sys.exit(rc)
+         data=exe.read_bytes();pe=struct.unpack_from('<I',data,0x3c)[0];machine=struct.unpack_from('<H',data,pe+4)[0];assert machine=={'x64':0x8664,'arm64':0xaa64}[arch],'U0_PE_TARGET_MISMATCH'
+         (out/'U0.build.json').write_text(json.dumps({'sha256':digest(exe),'source_sha':head,'self_sha256':digest(flat),'wrapped_source_sha256':digest(full),'compiler_sha256':digest(compiler),'flags':['/TC','/O2','/clang:-std=c99'],'machine':machine,'status':'COMPILED_ONLY_EXECUTION_AND_LLP64_SEMANTICS_NOT_CERTIFIED'},indent=2)+'\n')
+        finally:
+         if out.is_dir():
+          (out/'EVIDENCE.json').write_text(json.dumps({p.relative_to(out).as_posix():{'sha256':digest(p),'bytes':p.stat().st_size} for p in out.rglob('*') if p.is_file() and p.name!='EVIDENCE.json'},indent=2)+'\n')
+        '@
+        New-Item -ItemType Directory -Force -Path $env:U0_EVIDENCE | Out-Null
+        $path = Join-Path $env:U0_EVIDENCE 'probe.py'
+        [IO.File]::WriteAllText($path, $script, [Text.UTF8Encoding]::new($false))
+        python $path
+        exit $LASTEXITCODE
+    - name: Always recover raw diagnostic evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-u0-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ env.U0_EVIDENCE }}/*.log
+          ${{ env.U0_EVIDENCE }}/*.json
+        if-no-files-found: error
+        retention-days: 14
