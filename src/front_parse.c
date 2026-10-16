@@ -3612,8 +3612,125 @@ int cprec(int k) {
     pr_done[k] = 1;
     return pr_val[k];
 }
+/* A constant expression can contain a CAST or a sizeof(TYPE), and both call
+   declspec() -- which overwrites the whole decl* family.  Inside an array
+   bound that family is the OUTER declaration's: `char b[(int)(2 * sizeof(
+   double))]` left declsz 8 (double) where the declarator, and the symbol it
+   registers, still meant char's 1.  Snapshot and restore rather than hand-
+   copying the fields at each call site: the list must be every decl*
+   declspec assigns, or the next one added silently reintroduces this. */
+/* One complete specifier snapshot, shared by nested type parsing and comma
+   declarators. char/short/long are represented by size/base; qualifiers have
+   no retained type bits here (isqual consumes them). Declarator-only state is
+   initialized separately for each name. Never use the global scratch snapshot
+   as the lifetime owner of a declaration: initializers can parse nested types. */
+typedef struct {
+    int declbase;
+    int declbool;
+    int declenum;
+    int declflt;
+    int declspecfp;
+    int declspecfpst;
+    int declspecpd;
+    int declspecptr;
+    int declstatic;
+    int declstruct;
+    int declsz;
+    int declunsigned;
+    int declpd;
+    int declextern;
+    int declreg;
+    int declspectdn;
+    int declspectdsz;
+    int declvoid;
+    int declptr;
+    int declfp;
+    int decldim2;
+    int decldim3;
+    int declbytes;
+} DeclSpecSnapshot;
+void declspec_save(DeclSpecSnapshot *s) {
+    s->declbase = declbase;
+    s->declbool = declbool;
+    s->declenum = declenum;
+    s->declflt = declflt;
+    s->declspecfp = declspecfp;
+    s->declspecfpst = declspecfpst;
+    s->declspecpd = declspecpd;
+    s->declspecptr = declspecptr;
+    s->declstatic = declstatic;
+    s->declstruct = declstruct;
+    s->declsz = declsz;
+    s->declunsigned = declunsigned;
+    s->declpd = declpd;
+    s->declextern = declextern;
+    s->declreg = declreg;
+    s->declspectdn = declspectdn;
+    s->declspectdsz = declspectdsz;
+    s->declvoid = declvoid;
+    s->declptr = declptr;
+    s->declfp = declfp;
+    s->decldim2 = decldim2;
+    s->decldim3 = decldim3;
+    s->declbytes = declbytes;
+}
+void declspec_restore(DeclSpecSnapshot *s) {
+    declbase = s->declbase;
+    declbool = s->declbool;
+    declenum = s->declenum;
+    declflt = s->declflt;
+    declspecfp = s->declspecfp;
+    declspecfpst = s->declspecfpst;
+    declspecpd = s->declspecpd;
+    declspecptr = s->declspecptr;
+    declstatic = s->declstatic;
+    declstruct = s->declstruct;
+    declsz = s->declsz;
+    declunsigned = s->declunsigned;
+    declpd = s->declpd;
+    declextern = s->declextern;
+    declreg = s->declreg;
+    declspectdn = s->declspectdn;
+    declspectdsz = s->declspectdsz;
+    declvoid = s->declvoid;
+    declptr = s->declptr;
+    declfp = s->declfp;
+    decldim2 = s->decldim2;
+    decldim3 = s->decldim3;
+    declbytes = s->declbytes;
+}
+void declspec_copy(DeclSpecSnapshot *dst, DeclSpecSnapshot *src_) {
+    dst->declbase = src_->declbase;
+    dst->declbool = src_->declbool;
+    dst->declenum = src_->declenum;
+    dst->declflt = src_->declflt;
+    dst->declspecfp = src_->declspecfp;
+    dst->declspecfpst = src_->declspecfpst;
+    dst->declspecpd = src_->declspecpd;
+    dst->declspecptr = src_->declspecptr;
+    dst->declstatic = src_->declstatic;
+    dst->declstruct = src_->declstruct;
+    dst->declsz = src_->declsz;
+    dst->declunsigned = src_->declunsigned;
+    dst->declpd = src_->declpd;
+    dst->declextern = src_->declextern;
+    dst->declreg = src_->declreg;
+    dst->declspectdn = src_->declspectdn;
+    dst->declspectdsz = src_->declspectdsz;
+    dst->declvoid = src_->declvoid;
+    dst->declptr = src_->declptr;
+    dst->declfp = src_->declfp;
+    dst->decldim2 = src_->decldim2;
+    dst->decldim3 = src_->decldim3;
+    dst->declbytes = src_->declbytes;
+}
+static DeclSpecSnapshot declsv;
+void declsave(void) { declspec_save(&declsv); }
+void declrestore(void) { declspec_restore(&declsv); }
+
+
 long cunary(void) {
-    int w;
+    int w; DeclSpecSnapshot spec;
     if (eat(tidx("-", 1))) return 0 - cunary();
     if (eat(tidx("+", 1))) return cunary();
     if (eat(tidx("!", 1))) { if (cunary()) return 0; return 1; }
@@ -3623,12 +3740,12 @@ long cunary(void) {
         if (kind(tp + 1) == tidx("(", 1)) { if (is_typeat(tp + 2)) {
             int w2; int ds;
             adv(); adv();
-            declsave();
+            declspec_save(&spec);
             w = declspec(); w = declsz;
             while (eatstar()) w = 8;
             need(tidx(")", 1), ")");
             ds = declstruct; w2 = w;
-            declrestore();
+            declspec_restore(&spec);
             if (ds >= 0 && w2 == 0) err_tok(tp, "sizeof incomplete structure");
             return w2;
         } }
@@ -3654,7 +3771,9 @@ long cunary(void) {
                 int nsave; int isave;
                 nsave = nout; isave = nibuf;
                 unevaluated = unevaluated + 1; cursize = 8; curvla = 0;
+                declspec_save(&spec);
                 exprc();
+                declspec_restore(&spec);
                 unevaluated = unevaluated - 1; nout = nsave; nibuf = isave;
                 w = cursize; curvla = 0;
             }
@@ -3666,10 +3785,10 @@ long cunary(void) {
     /* a cast inside a constant expression: `(int)7` */
     if (cur() == tidx("(", 1)) { if (is_typeat(tp + 1)) {
         adv();
-        declsave();
+        declspec_save(&spec);
         declspec(); while (eatstar()) { }
         need(tidx(")", 1), ")");
-        declrestore();
+        declspec_restore(&spec);
         return cunary();
     } }
     return catom();
@@ -3904,33 +4023,6 @@ int mbfind(int si, int t) {
     return 0 - 1;
 }
 
-/* A constant expression can contain a CAST or a sizeof(TYPE), and both call
-   declspec() -- which overwrites the whole decl* family.  Inside an array
-   bound that family is the OUTER declaration's: `char b[(int)(2 * sizeof(
-   double))]` left declsz 8 (double) where the declarator, and the symbol it
-   registers, still meant char's 1.  Snapshot and restore rather than hand-
-   copying the fields at each call site: the list must be every decl*
-   declspec assigns, or the next one added silently reintroduces this. */
-static int declsv[13];
-void declsave(void) {
-    declsv[0] = declbase;      declsv[1] = declbool;
-    declsv[2] = declenum;      declsv[3] = declflt;
-    declsv[4] = declspecfp;    declsv[5] = declspecfpst;
-    declsv[6] = declspecpd;    declsv[7] = declspecptr;
-    declsv[8] = declstatic;    declsv[9] = declstruct;
-    declsv[10] = declsz;       declsv[11] = declunsigned;
-    declsv[12] = declpd;       /* eatstar() increments it, and it is what
-                                  makes the array a pointer array */
-}
-void declrestore(void) {
-    declbase = declsv[0];      declbool = declsv[1];
-    declenum = declsv[2];      declflt = declsv[3];
-    declspecfp = declsv[4];    declspecfpst = declsv[5];
-    declspecpd = declsv[6];    declspecptr = declsv[7];
-    declstatic = declsv[8];    declstruct = declsv[9];
-    declsz = declsv[10];       declunsigned = declsv[11];
-    declpd = declsv[12];
-}
 
 int is_typeat(int i) {
     if (kind(i) == T_TYPE) return 1;
@@ -4082,9 +4174,10 @@ int declspec(void) {                       /* -> element width */
            member (a function-pointer typedef) left declspecptr set, and
            `typedef struct Reg {...} Reg;` became an 8-byte pointer type
            (lua's luaL_Reg tables) */
-        { int sti; int sv[13]; int q; for (q = 0; q < 13; q++) sv[q] = declsv[q];
-          { int rsv; rsv = declreg; declsave(); sti = stparse(0); declrestore(); declstruct = sti; declreg = rsv; }
-          for (q = 0; q < 13; q++) declsv[q] = sv[q]; }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
+        { int sti; DeclSpecSnapshot sv; DeclSpecSnapshot outer;
+          declspec_copy(&sv, &declsv); declspec_save(&outer);
+          sti = stparse(0); declspec_restore(&outer); declstruct = sti;
+          declspec_copy(&declsv, &sv); }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
         declsz = stsize[declstruct];
         declbase = declsz;
         skipspecq();
@@ -4095,9 +4188,10 @@ int declspec(void) {                       /* -> element width */
            member (a function-pointer typedef) left declspecptr set, and
            `typedef struct Reg {...} Reg;` became an 8-byte pointer type
            (lua's luaL_Reg tables) */
-        { int sti; int sv[13]; int q; for (q = 0; q < 13; q++) sv[q] = declsv[q];
-          { int rsv; rsv = declreg; declsave(); sti = stparse(1); declrestore(); declstruct = sti; declreg = rsv; }
-          for (q = 0; q < 13; q++) declsv[q] = sv[q]; }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
+        { int sti; DeclSpecSnapshot sv; DeclSpecSnapshot outer;
+          declspec_copy(&sv, &declsv); declspec_save(&outer);
+          sti = stparse(1); declspec_restore(&outer); declstruct = sti;
+          declspec_copy(&declsv, &sv); }   /* an outer declsave() (cexpr's `sizeof(struct S)`) survives: its declsz came back 4 and `char a[sizeof(struct S)]` was 4x */
         declsz = stsize[declstruct];
         declbase = declsz;
         skipspecq();
@@ -4145,6 +4239,7 @@ int declspec(void) {                       /* -> element width */
    them, and the total is rounded up to that -- because a struct's layout is
    observable through `sizeof` and through every pointer into it. */
 int stbody(int si) {
+    DeclSpecSnapshot spec;
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     int own[4096]; int nown;   /* 0.0.28 H4: SQLite's sqlite3_api_routines has ~300 members */ int j; int bitpos; int bw; int isbf; int menum; int mflt;
@@ -4161,6 +4256,7 @@ int stbody(int si) {
         if (cur() == T_EOF) break;
         w = declspec();
         sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum; mflt = declflt;
+        declspec_save(&spec);
 
         mbl = declbool;   /* saved like muns: declspec runs again per member */
         if (cur() == tidx(";", 1)) { if (mst >= 0) {
@@ -4205,6 +4301,8 @@ int stbody(int si) {
             continue;
         } }
         while (1) {
+            declspec_restore(&spec);
+            sz = declsz; mst = declstruct;
             declptr = declspecptr; declpd = declspecpd;
             mfn = declspecfp != 0;
             while (eatstar()) { declptr = 1; mfn = 0; }
@@ -4438,10 +4536,13 @@ int block(void) {
 
 /* `typedef TYPE name, *other;` -- one entry per declarator. */
 int do_typedef(void) {
+    DeclSpecSnapshot spec;
     int tw; int tsz; int tsi; int tptr; int nt; int tcnt;
     adv();
     tw = declspec(); tsz = declsz; tsi = declstruct;
+    declspec_save(&spec);
     while (1) {
+        declspec_restore(&spec);
         tptr = declspecptr; declpd = declspecpd;
         while (eatstar()) tptr = 1;
         /* `typedef int (*binop)(int, int);` -- a pointer to a function */
@@ -5179,14 +5280,16 @@ int block_prototype(int t, int w) {
 
 int local_decl_in(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool; int tdhere; int lreg;
-    int psave[9];
+    DeclSpecSnapshot spec; DeclSpecSnapshot proto;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
     lflt0 = declflt; lbool = declbool; /* initializers may contain type names */
     lstat = declstatic; lreg = declreg;
+    declspec_save(&spec);
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
+        declspec_restore(&spec);
         declsymreg = lreg;   /* every declarator of this declaration, comma-continued ones too */
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
@@ -5220,25 +5323,9 @@ int local_decl_in(void) {
         else t = adv();
         /* A block prototype declares a callable signature, not an object. */
         if (cur() == tidx("(", 1)) {
-            psave[0] = declspecptr;
-            psave[1] = declspecpd;
-            psave[2] = declspecfp;
-            psave[3] = declspecfpst;
-            psave[4] = declbase;
-            psave[5] = declsz;
-            psave[6] = declunsigned;
-            psave[7] = declenum;
-            psave[8] = declvoid;
+            declspec_save(&proto);
             block_prototype(t, w);
-            declspecptr = psave[0];
-            declspecpd = psave[1];
-            declspecfp = psave[2];
-            declspecfpst = psave[3];
-            declbase = psave[4];
-            declsz = psave[5];
-            declunsigned = psave[6];
-            declenum = psave[7];
-            declvoid = psave[8];
+            declspec_restore(&proto);
             if (eat(tidx(",", 1))) continue;
             need(tidx(";", 1), ";");
             return 0;
@@ -5962,6 +6049,7 @@ int ustat_prescan(void) {
 }
 
 int unit(void) {
+    DeclSpecSnapshot spec;
     int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd; int gfpd; int gbool;
     while (1) {
         if (panic) {
@@ -5982,8 +6070,10 @@ int unit(void) {
         w = declspec();
         gstruct = declstruct;
         gflt0 = declflt; gbool = declbool;
+        declspec_save(&spec);
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
+            declspec_restore(&spec);
             declstruct = gstruct;
             decldim2 = 0; decldim3 = 0; declfp = declspecfp;
             declptr = declspecptr; declpd = declspecpd;
