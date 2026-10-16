@@ -9,6 +9,7 @@ outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
 import argparse, bisect, re, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 from gatelayers import LAYERS, select as select_layers
+import gatedecl
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # comboot records its stages in ROOT/out/comboot/stages.json: a seed result from another
@@ -346,9 +347,7 @@ def fingerprint(jobs, parts=None, revoked=()):
     extra_trees = {}
     result = {}
     for name, command in jobs.items():
-        entry = manifest.get('suites', {}).get(name)
-        if entry and 'family' in entry:
-            entry = dict(manifest['families'][entry['family']], command=entry['command'], family=entry['family'])
+        entry = gatedecl.effective_entry(manifest, name)   # the queue reading: a family's inputs whole (tests/gatedecl.py)
         # a declared command may name the candidate as {MODEL_COM}: gate.sh expands
         # ${MODEL_COM:-./unisacc.com} at list time, so the path differs between runs while the
         # job does not (its bytes are an executable input either way)

@@ -11,35 +11,14 @@ import json, pathlib, subprocess, sys
 
 import os
 R = pathlib.Path(os.environ.get("AFFECTED_ROOT") or pathlib.Path(__file__).resolve().parents[1])   # AFFECTED_ROOT: the replays point it at the checkout
-PRODUCT = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/', 'seed/')
-PRODUCT_FILES = ('unisacc.c',)
-
-def in_tree(path, tree):
-    tree = tree.rstrip('/')
-    return path == tree or path.startswith(tree + '/')
-
-def family_hit(fam, path):
-    trees = fam.get('reviewed_trees') or {}
-    for t in trees:
-        if not in_tree(path, t):
-            continue
-        if path in (fam.get('files') or []):
-            return True
-        suffix = pathlib.PurePosixPath(path).suffix
-        if t in (fam.get('all_files_trees') or []) or suffix in (fam.get('inventory_suffixes') or []):
-            if not any(in_tree(path, x) for x in (fam.get('excluded_dirs') or [])):
-                return True
-    return path in (fam.get('guards') or {}) or path in (fam.get('files') or [])
+# declaration reading: the shared selection semantics (tests/gatedecl.py): union of the suite's own inputs and its
+# family's reviewed hits.  The queue reading (family replaces the entry) is gatedecl.effective_entry, not used here.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import gatedecl
+PRODUCT, PRODUCT_FILES, in_tree, family_hit = gatedecl.PRODUCT, gatedecl.PRODUCT_FILES, gatedecl.in_tree, gatedecl.family_hit
 
 def reasons(name, e, fams, path):
-    out = []
-    if path in (e.get('files') or []): out.append('files')
-    if any(in_tree(path, t) for t in (e.get('trees') or [])): out.append('trees')
-    if path in (e.get('guards') or {}): out.append('guard')
-    if e.get('executable_inputs') and (path.startswith(PRODUCT) or path in PRODUCT_FILES): out.append('product')
-    fam = fams.get(e.get('family')) if e.get('family') else None
-    if fam and family_hit(fam, path): out.append('family')
-    return out
+    return gatedecl.declared_reasons(e, fams, path)
 
 # 0.0.43 step 6, second cut (hypothetical): the pp family reads the pp networks it constructs from
 # tables (read-set by strace: exec/pp/*.tsv, exec/facts/pp-*.tsv, the builder, the executor and

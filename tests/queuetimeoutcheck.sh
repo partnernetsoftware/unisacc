@@ -60,4 +60,6 @@ env -u QUEUE_START -u QUEUE_SELFTEST QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-g"
 kill -0 $stub 2>/dev/null || fail "an unrelated gatequeue.py was killed by a selftest queue.sh"
 # rc 142 settlement (gatequeue): a truncated attempt is pending, a full-budget attempt is terminal, a retry needs a full window
 python3 "$R/tests/gatequeuetimeoutcheck.py" > "$T/settle.out" 2>&1 || fail "rc142 settlement self-check: $(tail -n 3 "$T/settle.out")"
+# shared declaration semantics (tests/gatedecl.py): queue identity unchanged, affected reasons unchanged
+python3 "$R/tests/gatedeclcheck.py" > "$T/decl.out" 2>&1 || fail "gatedecl self-check: $(tail -n 3 "$T/decl.out")"
 echo "queuetimeout  real queue.sh: one window ending 142 exits 142 with no second window; watchdog 142 to the window cap exits 142 (logged, state kept); an outer kill 124 stops at once with 124 (state kept); 142 then a completed window is 0; 75/142 then a red window is that red rc; a timed-out admitted start is never recorded as a refusal"
