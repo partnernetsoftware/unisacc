@@ -78,22 +78,24 @@ if part in ('all', 'chain'):
             if got!=want.read_bytes():raise SystemExit(f'{exe} in-memory chain differs: {src}')
     print('stream chain: three runtime builds, including network self-rebuild, equal')
 if part in ('all', 'resources'):
-    isolated=p/'isolated';isolated.mkdir()
-    shutil.copyfile(root/'exec/c/run.c',isolated/'runtime.c')
-    for name in ['core.c','core.h','codec.h','packagefooter.h']: shutil.copyfile(root/'exec/c'/name,isolated/name)
-    (isolated/'asm').mkdir()
-    shutil.copyfile(root/'exec/c/asm/binding.c',isolated/'asm/binding.c')
+    isolated_root=p/'isolated'
+    sys.path.insert(0,str(root/'tests'))
+    from checklib import copy_runtime
+    copied=copy_runtime(root,isolated_root)
+    isolated=isolated_root/'exec/c'
+    shutil.copyfile(isolated/'run.c',isolated/'runtime.c')
+    (p/'resource-runtime-inputs.json').write_text(__import__('json').dumps(copied,sort_keys=True,indent=2)+'\n')
     shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
     for exe in [p/'run',ua,netrun]:
         got=run([exe,'--bundle','models.pkg',target,'runtime.c','runtime.c'],cwd=isolated)
         if got!=netrun.read_bytes():raise SystemExit(f'{exe} resource-packaged self route differs')
-    print('resource package: three runtime builds reproduce self, no include directory, isolated cwd')
+    print('resource package: three runtime builds reproduce self, local quoted-include closure, isolated cwd')
     sys.path.insert(0,str(root/'exec/c'))
     from pack import build as package_build
     (isolated/'without-resources.pkg').write_bytes(package_build([p/'route.tsv']))
     r=subprocess.run([str(netrun),'--bundle','without-resources.pkg',target,'runtime.c','runtime.c'],cwd=isolated,capture_output=True,timeout=60)
     # Since R13-0b #07 the runtime no longer dies on an absent header resource: E2
-    # rejects.  With no include directory the first header to fail is one the
+    # rejects.  With no package header resources the first header to fail is one the
     # autoinc pass inserted, which has no source line -- so the reject carries no
     # position (a negative line was the bug this guards).
     assert r.returncode==1 and not r.stdout and r.stderr==b'reject: no such file for #include\n',(r.returncode,r.stderr)
