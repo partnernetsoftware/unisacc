@@ -6,7 +6,7 @@
 
 ## Abstract
 
-unisacc is a neural-network-based compiler: compilation stages run on integer threshold networks and one generic executor; weights are constructed from a TSV table DSL, not trained. A finite decision is a total truth table. T1 is key-by-key equality on the declared domain (Definition 2), not sample fit. Two layers stay separate. The decision-network instance is 18 decision stages. The network-compiler instance is seven byte-stream stages (pp, lex, parse/parse2, opt, prune, lowering, enc). An out-of-domain key is rejected; there is no fallback. The decision-network instance meets N1 = N2 = N3 on five named targets (unsigned successive-generation bytes, not a semantic self-host). Key identities: op-74 totals 8,509 keys; op-87 totals 8,769 keys; they are not interchangeable before a seal. Source `910f1e0a` / `0.0.42` is not a sealed release measurement. Systematic training comparison is preregistered study A2. Enumeration proves network = table, not table = C.
+unisacc is a neural-network-based compiler: compilation stages run on integer threshold networks and one generic executor; weights are constructed from a TSV table DSL, not trained. T1 is key-by-key equality on the declared domain (Definition 2), not sample fit. The decision-network instance is 18 decision stages. The network-compiler instance is seven byte-stream stages: preprocess (pp), lex, parse, opt, prune, lowering, encode + image (enc). parse2 is an implementation name of the same contract, not a separate stage. An out-of-domain key fails; logits are not read; rejection does not fall back to the table. N1 = N2 = N3 is unsigned successive-generation byte identity on five named targets (osx/arm64, lnx/arm64, lnx/x86-64, win/arm64, win/x86-64), not a semantic self-host. Key identities: op-74 totals 8,509 keys; the op-87 label total is 8,769 keys; not interchangeable before a seal. Source `910f1e0a` / `0.0.42` is not a sealed release measurement. The referee ledger is `research/referee.tsv`. Systematic training comparison is preregistered study A2. Enumeration proves network = table, not table = C.
 
 **Keywords:** neural-network-based compiler; TSV table DSL; weight construction; T1; finite control; N1=N2=N3
 
@@ -24,6 +24,8 @@ Not claimed: table = C99, whole-compiler semantic preservation (T3), or a speed 
 
 **Definition 2 (exact / T1).** $N$ is exact for $s$ iff for every $k\in K_s$, $\operatorname{argmax} N(k)$ is unique and equals $G_s(k)$.
 
+**Check / artifacts.** `python3 -m unisa build-weights --from-tsv --check` compares TSV-built weights with the shipped file and writes nothing. `python3 -m unisa acc` enumerates the declared domain; an error or a tie fails. The reading is T1 = 1.000. Tables are `weights/gold/*.tsv`. Constructed weights are `weights/built.json`.
+
 **Definition 3 (query discipline).** Use only `ask(s,k)`. Do not read logits. Do not fall back to the table on rejection. $k\notin K_s$ fails.
 
 $$
@@ -34,25 +36,51 @@ $$
 
 ## 3 Construction
 
-A one-hidden-unit-per-key one-hot construction yields an exact network of width at most $|K|$ (Lean `naive_exact`). Shipped decision stages use a cube cover so the hidden layer is a Boolean conjunction and the output layer an integer vote (Algorithm 1; the 796,490→71,828 parameter count is in the notes). `decision_list_exact` covers only the globally monochrome first-hit case and does not prove the shipped networks. The release check is the integer network with strict argmax on the declared domain; a wrong answer or a tie rejects the build.
+A one-hidden-unit-per-key one-hot construction yields an exact network of width at most $|K|$ (Lean `naive_exact`). Shipped decision stages use a cube cover: the hidden layer is a Boolean conjunction and the output layer an integer vote (cube cover; details in `research/paper-a-notes.md`). The parameter count 796,490→71,828 in the notes is not a new measurement on this tip. `decision_list_exact` covers only the globally monochrome first-hit case and does not prove the shipped networks. The release check is the integer network with strict argmax on the declared domain; a wrong answer or a tie rejects the build.
 
-Keys of the 18 decision stages are `weights/gold` at this commit. The op-74 total (8,509 keys) and the op-87 total (8,769 keys) are two identities. combo is an isel∪abi control and is off the ship path.
+The op-74 total of 8,509 keys and the op-87 label total of 8,769 keys are two identities and are not interchangeable before a seal. On this tip the live `weights/gold` eighteen-stage `#field` domain product is 8,770 (against 8,769 in `research/seal-remeasure-20261009.md`; the difference is opinfo 72→73; the header of `weights/gold/opinfo.tsv` says 73 keys). Hidden units total 569, matching the README stages table and `weights/built.json`. 8,770 is not 8,509 and is not written as the label 8,769. combo is an isel∪abi control and is off the ship path; the census total below includes that row.
+
+The table is generated by `python3 -m unisa docs` from `unisa/gold.py` and the constructed weights (`tests/docs.sh` fails when it differs).
+
+| stage | key | out | keys | units |
+|---|---|---|---:|---:|
+| pp | dir(9) x defined(2) | 4 classes | 18 | 6 |
+| lex | c(12) x peek(12) | 10 classes | 144 | 11 |
+| parse | nt(5) x tok(68) | 36 classes | 340 | 34 |
+| type | t1(15) x op(19) x t2(15) | 16 classes | 4,275 | 62 |
+| scope | ctx(6) x kind(5) | 7 classes | 30 | 9 |
+| irsel | family(6) x flavor(70) | 70 classes | 420 | 75 |
+| enc | op(87) x os(3) x arch(2) | 5 classes | 522 | 5 |
+| reloc | kind(3) x arch(2) | 3 classes | 6 | 3 |
+| regmap | treg(8) x arch(2) | 16 classes | 16 | 10 |
+| tyinfo | t(16) | 3 heads | 16 | 6 |
+| pfconv | conv(9) | 7 classes | 9 | 7 |
+| peep | a(8) x b(17) x rel(12) | 10 classes | 1,632 | 18 |
+| opinfo | op(73) | 3 heads | 73 | 16 |
+| prec | op(19) | 11 classes | 19 | 11 |
+| binsel | op(16) x sign(2) | 23 classes | 32 | 18 |
+| isel | op(87) x arch(2) | 2 heads | 174 | 88 |
+| abi | op(87) x os(3) x arch(2) | 13 heads | 522 | 69 |
+| combo | op(87) x os(3) x arch(2) | 15 heads | 522 | 121 |
+| total | | | 8,770 | 569 |
+
+Exactness is constructed. The weights are derived from the gold tables (`weights/gold/*.tsv` is the tables as data): `W1` is in {0,1}, `b1` is recoverable from `W1`, and `W2` is a small power of two. The hidden activation is always 0 or 1, so inference has no multiply and no float. Verification is exhaustive. Each stage is a total function on a finite domain, so network = table is decided by enumerating every key (the total is the table above). That does not prove table = C. Whether the table is right about C is checked separately against the system compiler (`tests/gold_audit.py`, `difftest`).
 
 The deployment kernel is integer: one-hot, integer affine, ReLU, integer affine, strict argmax. No softmax, floating point, multiplication, or libm. The same table constructs the same weights. This paper does not quote a weight-byte total.
 
 ## 4 Seven byte-stream stages and two instances
 
-The network-compiler contract is the seven stages below. Each is a constructed integer threshold network run by one generic executor.
+The decision-network instance is 18 ask stages. The network-compiler instance is the seven stages below. They are not interchangeable. Each stage is a constructed integer threshold network run by one generic executor. parse2 is an implementation name of the same contract, not a separate stage.
 
-| Stage | Input → output |
-|---|---|
-| Preprocess (pp) | source bytes → preprocessed text |
-| Lex (lex) | preprocessed text → token stream |
-| Parse (parse/parse2) | token stream → tape |
-| Opt (opt) | tape → tape |
-| Prune (prune) | tape → tape (public tape output skips prune) |
-| Lowering | tape → target instructions and data |
-| Encode and image (enc) | target instructions → ELF / Mach-O / PE or a memory image |
+| stage | input → output | role |
+|---|---|---|
+| preprocess (pp) | source bytes → preprocessed text | line continuation, comments, directives, macros, conditionals, includes |
+| lex | preprocessed text → typed token stream | keywords, identifiers, operators, literals, longest match |
+| parse | token stream → tape | declarations, scopes, types, precedence, statements, init, calls |
+| opt | tape → tape | peephole / stack-to-reg style rewrites on tape |
+| prune | tape → tape | drop unreachable whole functions on image/run routes (public tape out skips prune) |
+| lowering | tape → target ops + data | ABI, regmap, syscalls, layout, reloc |
+| encode + image (enc) | target ops → ELF / Mach-O / PE (or in-memory image) | encoding, branches, reloc, headers, Mach-O ad-hoc signature |
 
 The tape has eight 64-bit registers and 71 operations in `SHAPE`. The executor has no primitive for C, the tape, an ISA, or an image format.
 
@@ -87,7 +115,20 @@ External referees cover only what they name. Eight of the 18 decision stages hav
 | Binary-operator selection | `tests/binsel_audit.py`; 7 of 16 operators depend on signedness |
 | printf | `tests/pfconv_audit.py`; 9 conversion letters |
 
-Recorded decision-network acceptance checks (not a new seal of this tip): T1 is 1.000 on 18 stages; the type table matches cc on 1,399 of 1,400 keys, with 1 intentional difference; c-testsuite 216/220 pass, 0 errors, 4 out of scope; C99 probes 59/59; differential tests 93/93; three optimisation levels 279/279; two front ends 190/190; known-answer libraries 11/11; back-end closure 564/564 and the compiler 6/6; `%f/%e/%g` matches platform libc bit for bit.
+Recorded; not a new seal of this tip.
+
+| Item | Record |
+|---|---|
+| T1 | 18×1.000 |
+| type↔cc | 1399/1400 (1 intentional difference) |
+| c-testsuite | 216/220 |
+| C99 | 59/59 |
+| difftest | 93/93 |
+| opts | 279/279 |
+| frontends | 190/190 |
+| libs | 11/11 |
+| closure | 564/564 + self 6/6 |
+| `%f/%e/%g` | bit-identical with platform libc |
 
 ## 6 Boundaries
 
@@ -109,7 +150,7 @@ On table-shaped decisions, exactness is decidable by exhaustion. unisacc runs co
 |---|---|
 | Source tree | main `910f1e0a`; `src/version.h` is `0.0.42`. Not public Latest and not a sealed release measurement. |
 
-Pointers: `research/referee.tsv`, `research/formalization-roadmap.md`, `research/lean/`, `prior-art.md`, `research/paper-a-notes.md`.
+Pointers: `research/referee.tsv`, `research/formalization-roadmap.md`, `research/lean/`, `research/prior-art.md`, `research/paper-a-notes.md`.
 
 ```bash
 python3 -m unisa build-weights

@@ -8,7 +8,7 @@
 
 ## 摘要
 
-unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与通用执行器运行，权重由 TSV 表 DSL 构造，不由训练得到。有限决策写成全函数真值表；T1 是声明域上逐键相等（定义 2），不是样本拟合。两层分开：决策网络实例是 18 个决策阶段；网络编译器实例是七个字节流阶段（pp、lex、parse/parse2、opt、prune、lowering、enc）。域外键拒绝，不回退。决策网络实例在五个具名目标上 N1 = N2 = N3（未签名连续代字节相同，不是语义自举）。键身份：op-74 合计 8,509 键，op-87 合计 8,769 键，封口前不可互换。源身份 `910f1e0a` / `0.0.42` 不是密封发布测量。系统训练对照见预注册 A2。枚举证明网络 = 表，不证明表 = C。
+unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与通用执行器运行，权重由 TSV 表 DSL 构造，不由训练得到。T1 是声明域上逐键相等（定义 2），不是样本拟合。决策网络实例是 18 个决策阶段。网络编译器实例是七个字节流阶段：preprocess (pp)、lex、parse、opt、prune、lowering、encode + image (enc)；parse2 是同合同的实现名，不另开阶段。域外键失败；不读 logits；拒绝不回退到表。N1 = N2 = N3 是五个具名目标（osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64）上未签名连续代字节同一，不是语义自举。键身份：op-74 合计 8,509 键；op-87 标签合计 8,769 键；封口前不可互换。源身份 `910f1e0a` / `0.0.42` 不是密封发布测量。裁判台账为 `research/referee.tsv`。系统训练对照见预注册 A2。枚举证明网络 = 表，不证明表 = C。
 
 **关键词**：neural-network-based compiler；TSV 表 DSL；权重构造；T1；有限控制；N1=N2=N3
 
@@ -26,6 +26,8 @@ unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与
 
 **定义 2（精确 / T1）。** $N$ 对 $s$ 精确，当且仅当每个 $k\in K_s$ 上 $\operatorname{argmax} N(k)$ 唯一且等于 $G_s(k)$。
 
+**检查 / 产物。** `python3 -m unisa build-weights --from-tsv --check` 用 TSV 对照已出货权重，不写文件。`python3 -m unisa acc` 在声明域穷举；错或并列则失败。目标读法 T1 = 1.000。表是 `weights/gold/*.tsv`；构造权重是 `weights/built.json`。
+
 **定义 3（询问纪律）。** 只用 `ask(s,k)`。不读 logits。拒绝时不回退到表。$k\notin K_s$ 即失败。
 
 $$
@@ -36,25 +38,51 @@ $$
 
 ## 3　构造
 
-对每个键一个隐藏单元的 one-hot 构造给出精确网络，宽度上界 $|K|$（Lean `naive_exact`）。出货决策阶段用立方体覆盖把隐藏层收成布尔合取、输出层收成整数投票（算法 1；细节与 796,490→71,828 的参数计数见 notes）。`decision_list_exact` 只覆盖全局单色的首次命中子情形，不证明出货网络。发布检查是声明域上的整数网络与严格 argmax，错或并列即拒绝。
+对每个键一个隐藏单元的 one-hot 构造给出精确网络，宽度上界 $|K|$（Lean `naive_exact`）。出货决策阶段用立方体覆盖把隐藏层收成布尔合取、输出层收成整数投票（立方体覆盖；细节见 `research/paper-a-notes.md`）。notes 中的参数计数 796,490→71,828 不是本 tip 的新测。`decision_list_exact` 只覆盖全局单色的首次命中子情形，不证明出货网络。发布检查是声明域上的整数网络与严格 argmax，错或并列即拒绝。
 
-18 个决策阶段的键以 `weights/gold` 为准。op-74 合计 8,509 键与 op-87 合计 8,769 键是两套身份。combo 是 isel∪abi 的对照，不在出货路径上。
+op-74 合计 8,509 键与 op-87 标签合计 8,769 键是两套身份，封口前不可互换。本 tip 活 `weights/gold` 十八阶段 `#field` 域积为 8,770（相对 `research/seal-remeasure-20261009.md` 的 8,769，差在 opinfo 72→73；`weights/gold/opinfo.tsv` 头为 73 keys）。隐藏单元合计 569，与 README stages 表及 `weights/built.json` 一致。8,770 不是 8,509，也不与标签 8,769 混写。combo 是 isel∪abi 的对照，不在出货路径上；下表合计含该行。
+
+下表由 `python3 -m unisa docs` 从 `unisa/gold.py` 与构造权重生成（`tests/docs.sh` 在不一致时失败）。
+
+| stage | key | out | keys | units |
+|---|---|---|---:|---:|
+| pp | dir(9) x defined(2) | 4 classes | 18 | 6 |
+| lex | c(12) x peek(12) | 10 classes | 144 | 11 |
+| parse | nt(5) x tok(68) | 36 classes | 340 | 34 |
+| type | t1(15) x op(19) x t2(15) | 16 classes | 4,275 | 62 |
+| scope | ctx(6) x kind(5) | 7 classes | 30 | 9 |
+| irsel | family(6) x flavor(70) | 70 classes | 420 | 75 |
+| enc | op(87) x os(3) x arch(2) | 5 classes | 522 | 5 |
+| reloc | kind(3) x arch(2) | 3 classes | 6 | 3 |
+| regmap | treg(8) x arch(2) | 16 classes | 16 | 10 |
+| tyinfo | t(16) | 3 heads | 16 | 6 |
+| pfconv | conv(9) | 7 classes | 9 | 7 |
+| peep | a(8) x b(17) x rel(12) | 10 classes | 1,632 | 18 |
+| opinfo | op(73) | 3 heads | 73 | 16 |
+| prec | op(19) | 11 classes | 19 | 11 |
+| binsel | op(16) x sign(2) | 23 classes | 32 | 18 |
+| isel | op(87) x arch(2) | 2 heads | 174 | 88 |
+| abi | op(87) x os(3) x arch(2) | 13 heads | 522 | 69 |
+| combo | op(87) x os(3) x arch(2) | 15 heads | 522 | 121 |
+| total | | | 8,770 | 569 |
+
+精确性由构造得到：权重从 gold 表派生（`weights/gold/*.tsv` 即表），`W1` 取 {0,1}，`b1` 可由 `W1` 恢复，`W2` 为 2 的小幂。隐藏激活恒为 0 或 1，推理无乘法、无浮点。验证是穷举：每个阶段在有限域上是全函数，枚举每个键判定网络 = 表（合计见上表）。这不证明表 = C；表对 C 是否成立另由系统编译器核对（`tests/gold_audit.py`，`difftest`）。
 
 部署内核是整数：one-hot、整数仿射、ReLU、整数仿射、严格 argmax；无 softmax、浮点、乘法、libm。同一表构造出相同权重。本文不引用权重合计字节。
 
 ## 4　七段字节流与两个实例
 
-网络编译器合同是下表七个字节流阶段。每个阶段是构造出的整数阈值网络，由同一个通用执行器逐步运行。
+决策网络实例是 18 个 ask 阶段；网络编译器实例是下表七段；二者不互换。每个阶段是构造出的整数阈值网络，由同一个通用执行器逐步运行。parse2 为同合同的实现名，不另开阶段。
 
-| 阶段 | 输入 → 输出 |
-|---|---|
-| 预处理（pp） | 源字节 → 预处理文本 |
-| 词法（lex） | 预处理文本 → 记号流 |
-| 解析（parse/parse2） | 记号流 → tape |
-| 优化（opt） | tape → tape |
-| 剪枝（prune） | tape → tape（公开 tape 输出跳过） |
-| lowering | tape → 目标指令与数据 |
-| 编码与镜像（enc） | 目标指令 → ELF / Mach-O / PE 或内存镜像 |
+| stage | input → output | role |
+|---|---|---|
+| preprocess (pp) | source bytes → preprocessed text | line continuation, comments, directives, macros, conditionals, includes |
+| lex | preprocessed text → typed token stream | keywords, identifiers, operators, literals, longest match |
+| parse | token stream → tape | declarations, scopes, types, precedence, statements, init, calls |
+| opt | tape → tape | peephole / stack-to-reg style rewrites on tape |
+| prune | tape → tape | drop unreachable whole functions on image/run routes (public tape out skips prune) |
+| lowering | tape → target ops + data | ABI, regmap, syscalls, layout, reloc |
+| encode + image (enc) | target ops → ELF / Mach-O / PE (or in-memory image) | encoding, branches, reloc, headers, Mach-O ad-hoc signature |
 
 tape：8 个 64 位寄存器与 `SHAPE` 中 71 种操作。执行器不含 C、tape、ISA 或镜像专用原语。
 
@@ -89,7 +117,20 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 | 二元运算选择 | `tests/binsel_audit.py`；16 个运算符中 7 个受符号性影响 |
 | printf | `tests/pfconv_audit.py`；9 个转换字母 |
 
-已记录的决策网络实例验收（不是本 tip 的新封口）：T1 为 18 阶段 1.000；类型表对 cc 为 1,400 键中 1,399 一致、1 个有意偏离；c-testsuite 220 中 216 通过、0 错误、4 个超出范围；C99 探针 59/59；差分 93/93；三优化级 279/279；两前端 190/190；已知答案库 11/11；后端闭环 564/564 与自身 6/6；`%f/%e/%g` 与平台 libc 逐位一致。
+已记录；非本 tip 新封口。
+
+| 项 | 记录 |
+|---|---|
+| T1 | 18×1.000 |
+| type↔cc | 1399/1400（1 有意偏离） |
+| c-testsuite | 216/220 |
+| C99 | 59/59 |
+| difftest | 93/93 |
+| opts | 279/279 |
+| frontends | 190/190 |
+| libs | 11/11 |
+| closure | 564/564 + self 6/6 |
+| `%f/%e/%g` | 与平台 libc 逐位一致 |
 
 ## 6　事实边界
 
@@ -111,7 +152,7 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 |---|---|
 | 源树 | main `910f1e0a`；`src/version.h` 为 `0.0.42`。不是公开 Latest，也不是密封发布测量。 |
 
-指针：`research/referee.tsv`，`research/formalization-roadmap.md`，`research/lean/`，`prior-art.md`，`research/paper-a-notes.md`。
+指针：`research/referee.tsv`，`research/formalization-roadmap.md`，`research/lean/`，`research/prior-art.md`，`research/paper-a-notes.md`。
 
 ```bash
 python3 -m unisa build-weights
