@@ -19,6 +19,7 @@ def check(cond, msg):
 old, new = {}, {}
 for name in manifest.get('suites', {}):
     entry = manifest['suites'][name]
+    if entry.get('partial') is True: entry = None
     if entry and 'family' in entry:   # the former inline substitution (gatequeue before tests/gatedecl.py)
         entry = dict(manifest['families'][entry['family']], command=entry['command'], family=entry['family'])
     old[name] = entry
@@ -29,7 +30,7 @@ check(h(old) == h(new), 'effective entries of all %d manifest suites are byte-id
 # the former affected reasons(): the same logic, kept here as the reference
 PRODUCT = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/', 'seed/')
 def former_reasons(e, fams, path):
-    out = []
+    out = ['global'] if e.get('partial') is True else []
     if path in (e.get('files') or []): out.append('files')
     if any(gatedecl.in_tree(path, t) for t in (e.get('trees') or [])): out.append('trees')
     if path in (e.get('guards') or {}): out.append('guard')

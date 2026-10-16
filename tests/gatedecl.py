@@ -13,8 +13,19 @@ PRODUCT = ('exec/', 'unisa/', 'src/', 'kernel/', 'include/', 'weights/', 'seed/'
 PRODUCT_FILES = ('unisacc.c',)
 
 
+def is_partial(entry):
+    """Partial evidence adds direct hits; it never discharges global obligations."""
+    if entry is None:
+        return False
+    if 'partial' in entry and type(entry['partial']) is not bool:
+        raise ValueError('declaration-partial-must-be-boolean')
+    return entry.get('partial', False)
+
+
 def effective_entry(manifest, name):
     entry = manifest.get('suites', {}).get(name)
+    if is_partial(entry):
+        return None  # Preserve the queue's undeclared/global fingerprint reading.
     if entry and 'family' in entry:
         entry = dict(manifest['families'][entry['family']], command=entry['command'], family=entry['family'])
     return entry
@@ -40,7 +51,7 @@ def family_hit(fam, path):
 
 
 def declared_reasons(entry, families, path):
-    out = []
+    out = ['global'] if is_partial(entry) else []
     if path in (entry.get('files') or []): out.append('files')
     if any(in_tree(path, t) for t in (entry.get('trees') or [])): out.append('trees')
     if path in (entry.get('guards') or {}): out.append('guard')

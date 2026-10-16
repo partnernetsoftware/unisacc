@@ -496,8 +496,16 @@ def real_inputs(root, request, policy_path):
             # Raw suite entry, not effective_entry: selection conservatively unions suite/family.
             for p in changed:
                 why = decl.declared_reasons(entry, deps['families'], p)
+                if 'global' in why:
+                    excluded['global-fallback'].add(n)
+                    affected.add(n)
+                    hit_reasons.setdefault(n, []).append('changed:global:'+p)
+                why = [w for w in why if w != 'global']
                 if why:
-                    affected.add(n); unclaimed.discard(p)
+                    affected.add(n)
+                    # Partial evidence must not claim that an otherwise unknown change is covered.
+                    if not decl.is_partial(entry):
+                        unclaimed.discard(p)
                     narrow = ('files' in why or 'guard' in why or 'family' in why or
                               any(decl.in_tree(p,t) and t.rstrip('/') not in policy['broad_trees']
                                   for t in entry.get('trees', [])))
@@ -509,7 +517,7 @@ def real_inputs(root, request, policy_path):
                         excluded['product-transitive'].add(n)
                     hit_reasons.setdefault(n, []).extend('changed:%s:%s' % (w, p) for w in why)
         if entry is None and changed: excluded['global-fallback'].add(n)
-        j['declaration'] = 'known' if entry is not None else 'unknown'
+        j['declaration'] = 'known' if entry is not None and not decl.is_partial(entry) else 'unknown'
         j['primary'], j['also'] = mapped[n]
         prior = after.get(n, [])
         j['after'] = [prior] if isinstance(prior, str) else prior

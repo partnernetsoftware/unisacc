@@ -49,6 +49,28 @@ class SelectorTests(unittest.TestCase):
                 with self.assertRaisesRegex(m.SelectionError, 'worktree-is-not-a-revision: use --head HEAD --worktree'):
                     m.changed_paths(B, request)
 
+    def test_partial_shared_readings(self):
+        decl=m.load_module(B/"tests/gatedecl.py","_partial_decl")
+        entry={'partial':True,'files':['helper.py'],'command':['python3','check.py']}
+        manifest={'suites':{'lex':entry},'families':{}}
+        self.assertIsNone(decl.effective_entry(manifest,'lex'))
+        self.assertEqual(decl.declared_reasons(entry,{},'helper.py'),['global','files'])
+        self.assertEqual(decl.declared_reasons(entry,{},'unknown.py'),['global'])
+        for bad in [0,1,'true',None,[],{}]:
+            with self.assertRaisesRegex(ValueError,'declaration-partial-must-be-boolean'):
+                decl.effective_entry({'suites':{'s':dict(entry,partial=bad)}},'s')
+        f=fixture(); f['jobs'][6]['declaration']='unknown'
+        f['affected']=[]; f['dev_direct']=[]; f['dev_stage_seeds']=[]
+        merge=self.plan(f,tier='merge')
+        self.assertIn('lex',merge['affected'])
+        self.assertIn('lex',merge['suites'])
+        f['changes']=[dict(status='M',paths=['tests/unknown.py'])]
+        self.assertNotIn('lex',self.plan(f,tier='dev')['suites'])
+        f['changes']=[dict(status='M',paths=['tests/helper.py'])]
+        f['dev_direct']=['lex']
+        self.assertIn('lex',self.plan(f,tier='dev')['suites'])
+        self.assertEqual(merge['suites'],self.plan(f,tier='merge')['suites'])
+
     def plan(self, f=None, **kw):
         return m.select(f or fixture(), P, **kw)
 
