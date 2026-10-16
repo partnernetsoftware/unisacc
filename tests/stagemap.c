@@ -69,6 +69,7 @@ static char *extra[] = {
     "chain", "stages-3b", "-",
     "chain", "stages-3c", "-",
     "build", "closure-c4a-prepare closure-c4b-prepare", "-",
+    "build", "closure-c3a-prepare closure-c3b-prepare closure-c3c-prepare", "-",
     "build", "closure-c4c-prepare", "-",
     "chain", "closure-c1a", "build",
     "chain", "closure-c1b", "build",
