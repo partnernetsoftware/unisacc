@@ -56,6 +56,10 @@ static char *rules[] = {
  * The 13 owner-reviewed cases are resolved (bits: C reference migration -> build).
  */
 static char *extra[] = {
+    /* Same six-target closure assertion, first lane split by source workload; tests/gate.sh. */
+    "chain", "closure-c1a", "build",
+    "chain", "closure-c1b", "build",
+    "chain", "closure-c1c", "build",
     /* hostcheck: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:218 */
     "meta", "hostcheck", "-",
     /* copy-contract: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:221 */

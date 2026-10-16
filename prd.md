@@ -291,6 +291,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 ## 4. 质量体系
 
 - **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
+- **closure 窗口分片**（2026-10-16）：旧 `closure-c1` 的主要成本是逐源六目标 Python 镜像与 VM 对拍，已准备 UA 不是瓶颈。将原第一组按源顺序三等分为 `closure-c1a`、`closure-c1b`、`closure-c1c`（当前各 21 源，给队列约 40–44 秒套件窗留出余量），复用同一 `closure.sh` 与逐步看门狗，断言和语料并集不变；不新造准备/缓存机制，不把旧门的历史超时或 H1 裁定转给新门。
 - **诊断分层**：[tests/GATE-LAYERS.md](tests/GATE-LAYERS.md) 把同一门禁清单按断言跨度分为 contract、stage、pipeline、platform；`gatequeue.py --layer/--through-layer` 只筛选日常排查范围，耗时仍由实测历史调度。`gate-layers` 校验全部套件均归类且四层并集等于原清单；未筛选的发布全量门禁保持原样。
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。

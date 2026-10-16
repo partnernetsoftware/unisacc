@@ -266,8 +266,17 @@ for k in 1 2 3 4 5 6 7 8; do job opt-run-$k OPT_PART=run SHARD=$k/8 ./tests/opt.
 # fixtures' expected values come from the host cc, and the defects they record
 # are all on the product side.
 job closure-ex  ./tests/closure.sh examples/*.c
-job closure-c1  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==1')   # four shards: three ran 22 s alone
-job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # but 61 s beside three other suites
+# The former first lane is source work, not model preparation. Keep its ordered
+# input union while dividing its source workload into three balanced contiguous
+# shards. This leaves margin for the queue's shorter per-suite window.
+CLOSURE_C1=$(printf '%s\n' "$TC" | awk 'NR%4==1')
+CLOSURE_C1_N=$(printf '%s\n' "$CLOSURE_C1" | wc -l)
+CLOSURE_C1_A=$(( (CLOSURE_C1_N + 2) / 3 ))
+CLOSURE_C1_B=$(( (2 * CLOSURE_C1_N + 2) / 3 ))
+job closure-c1a ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C1" | awk -v a="$CLOSURE_C1_A" 'NR<=a')
+job closure-c1b ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C1" | awk -v a="$CLOSURE_C1_A" -v b="$CLOSURE_C1_B" 'NR>a && NR<=b')
+job closure-c1c ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C1" | awk -v b="$CLOSURE_C1_B" 'NR>b')
+job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # remaining lanes retain their original modulo-4 inputs
 job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==3')
 job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
 for k in 1 2 3; do job stages-$k SHARD=$k/3 ./tests/stages.sh examples/*.c tests/c/*.c; done   # R4: 50.4/53 s whole
