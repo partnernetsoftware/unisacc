@@ -159,6 +159,14 @@ def retry_admissible(left, span):
     return left >= span - 3
 
 
+def stored_142_pending(results, jobs, span):
+    """Load-time judgement of a stored result (state reuse): a stored rc 142 that is not a terminal attempt under the
+    same rule as settlement (rc142_settles) is pending, not a result.  Returns the names to drop; the caller re-queues
+    them.  Records written before the kind field existed count as full attempts."""
+    return [n for n, r in results.items() if n in jobs and r.get('rc') == 142
+            and not rc142_settles(r.get('kind', 'full'), r.get('limit') or 0, span)]
+
+
 def rc142_settles(kind, limit, span):
     """A rc 142 is a terminal result only for an attempt that had a full-window budget (limit >= span-4) and was not a
     tail fill.  A cut (tail, or any attempt with the remainder only) is pending, never a terminal TIMEOUT."""
@@ -718,6 +726,11 @@ def main():
     data['stalled'] = stall
     data['window'] = {'completed': 0}
     atomic(path, data)
+    # state reuse (0.0.41): a stored truncated 142 is pending again, judged by the same rule as settlement
+    for n in stored_142_pending(data['results'], jobs, deadline - start):
+        print('RECLASSIFIED', n, 'stored rc=142 kind=%s limit=%s is not a full-budget attempt: pending' % (data['results'][n].get('kind'), data['results'][n].get('limit')), flush=True)
+        data['results'].pop(n)
+        if n not in data.setdefault('fullwindow', []): data['fullwindow'].append(n)
     pending = [n for n in jobs if n not in data['results']]
     if stall >= 3:
         print('queue: STALLED -- %s; no legal completion in the last windows (stop, do not repeat with 75)' %

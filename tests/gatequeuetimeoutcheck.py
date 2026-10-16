@@ -29,5 +29,11 @@ check(gq.retry_admissible(SPAN - 4, SPAN) is False, 'retry is not admitted when 
 check(gq.retry_admissible(SPAN - 3, SPAN) is True, 'retry is admitted with a full window (left >= span-3)')
 check(gq.retry_admissible(SPAN, SPAN) is True, 'retry is admitted with the whole window')
 
+# state reuse: a stored truncated 142 (state4's closure-c1: solo, limit 14) is pending on load; full-budget and rc 0 are kept
+jobs = {'closure-c1': 1, 'full-ok': 1, 'legacy': 1, 'ok': 1}
+stored = {'closure-c1': {'rc': 142, 'kind': 'solo', 'limit': 14}, 'full-ok': {'rc': 142, 'kind': 'full', 'limit': SPAN - 3},
+          'legacy': {'rc': 142, 'limit': SPAN - 3}, 'ok': {'rc': 0, 'kind': 'full', 'limit': 14}}
+check(gq.stored_142_pending(stored, jobs, SPAN) == ['closure-c1'], 'stored truncated 142 (solo, limit 14) is pending on load')
+check(gq.stored_142_pending(stored, {'full-ok': 1}, SPAN) == [], 'stored full-budget 142 stays terminal on load')
 print('gatequeue timeout settlement: PASS' if fails == 0 else 'gatequeue timeout settlement: FAIL %d' % fails)
 sys.exit(1 if fails else 0)
