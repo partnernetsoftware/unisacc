@@ -142,12 +142,12 @@ int bk_sign_end(void) {               /* the partial last page, if any */
 }
 
 /* big-endian, for the signature blob (everything else here is little) */
-int wb32(long v) { wb((v >> 24) & 255); wb((v >> 16) & 255); wb((v >> 8) & 255); wb(v & 255); return 0; }
-int wb64(long v) { wb32((v >> 32) & 4294967295); wb32(v & 4294967295); return 0; }
+int wb32(us_i64 v) { wb((v >> 24) & 255); wb((v >> 16) & 255); wb((v >> 8) & 255); wb(v & 255); return 0; }
+int wb64(us_i64 v) { wb32((v >> 32) & 4294967295); wb32(v & 4294967295); return 0; }
 int wz(long n) { while (n > 0) { wb(0); n = n - 1; } return 0; }
-int w16(long v) { wb(v & 255); wb((v >> 8) & 255); return 0; }
-int w32(long v) { w16(v & 65535); w16((v >> 16) & 65535); return 0; }
-int w64(long v) { w32(v & 4294967295); w32((v >> 32) & 4294967295); return 0; }
+int w16(us_i64 v) { wb(v & 255); wb((v >> 8) & 255); return 0; }
+int w32(us_i64 v) { w16(v & 65535); w16((v >> 16) & 65535); return 0; }
+int w64(us_i64 v) { w32(v & 4294967295); w32((v >> 32) & 4294967295); return 0; }
 int wname(char *s, int n) {                       /* s padded with NULs to n */
     int k; k = 0;
     while (s[k] && k < n) { wb(s[k]); k = k + 1; }
@@ -198,7 +198,7 @@ int bk_elf_dyn(void) {
     wz(24);                                                                  /* dynsym 360..480 */
     i = 0; while (i < 4) { w32(i == 0 ? 11 : (i == 1 ? 18 : (i == 2 ? 24 : 32))); wb(0x12); wb(0); w16(0); w64(0); w64(0); i = i + 1; }
     w32(1); w32(5); wz(24);                                                  /* hash 480..512: one empty bucket */
-    i = 0; while (i < 4) { w64(slots + 8 * i); w64(((long)(i + 1) << 32) | (bkarch ? 1025 : 6)); w64(0); i = i + 1; }   /* rela 512..608 */
+    i = 0; while (i < 4) { w64(slots + 8 * i); w64(((us_i64)(i + 1) << 32) | (bkarch ? 1025 : 6)); w64(0); i = i + 1; }   /* rela 512..608 */
     w64(1); w64(1); w64(4); w64(B + 480); w64(5); w64(B + 320); w64(6); w64(B + 360);       /* dynamic 608..784 */
     w64(10); w64(40); w64(11); w64(24); w64(7); w64(B + 512); w64(8); w64(96); w64(9); w64(24);
     w64(30); w64(8); w64(0); w64(0);                                         /* DT_FLAGS BIND_NOW; DT_NULL */
@@ -783,15 +783,15 @@ int bk_pe(void) {
    our own image, walk its import descriptors and take the address of each
    slot BY NAME -- by name, because the order is only ours if the compiler
    that built this binary was ours. [S-9] */
-long bk_rd32(long p) {
+us_u64 bk_rd32(us_addr p) {
     char *c; c = (char *)p;
-    return (c[0] & 255) | ((c[1] & 255) << 8) | ((c[2] & 255) << 16) | ((long)(c[3] & 255) << 24);
+    return (c[0] & 255) | ((c[1] & 255) << 8) | ((c[2] & 255) << 16) | ((us_u64)(c[3] & 255) << 24);
 }
-long bk_rd64(long p) { return bk_rd32(p) | (bk_rd32(p + 4) << 32); }
+us_u64 bk_rd64(us_addr p) { return bk_rd32(p) | (bk_rd32(p + 4) << 32); }
 
-int bk_win_imports(long here) {
-    long base; long pe; long dd; long imp; long d; long ilt; long iat; long k;
-    long nrva; char *nm; int i; int j; int ok;
+int bk_win_imports(us_addr here) {
+    us_addr base; us_addr pe; us_addr dd; us_addr imp; us_addr d; us_addr ilt; us_addr iat; us_size k;
+    us_u64 nrva; char *nm; int i; int j; int ok;
     base = here & (0 - 4096);
     while (base > 65536) {                     /* the MZ our image starts with */
         char *c; c = (char *)base;
@@ -844,13 +844,13 @@ int bk_win_imports(long here) {
 }
 
 /* Compile the tape into memory and hand back the entry address. [S-9] */
-long bk_run(char *t, int n, long argc, long argv) {
+us_addr bk_run(char *t, int n, us_size argc, us_addr argv) {
     int a; long k; char *d; char *c;
     bkos = BK_HOST_OS; bkarch = BK_HOST_ARCH; bk_runmode = 1;
 #ifdef _WIN32
     /* the gate calls through import slots; in memory there is no import
        table, so it uses this process's own [S-9] */
-    bk_win_imports((long)bk_win_imports);
+    bk_win_imports((us_addr)bk_win_imports);
 #endif
     t = tp_prune(t, n); n = tp_prune_length;
     bk_parse(t, n);

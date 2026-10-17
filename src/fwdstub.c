@@ -34,10 +34,10 @@ int fwd_s(char *s) { while (*s && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = *s; nfwd
 int fwd_n(char *s, int n) { int k; k = 0; while (k < n && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; } return 0; }
 int fwd_d(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; fwdsrc[nfwdsrc] = d[n]; nfwdsrc = nfwdsrc + 1; } return 0; }
 char *fwd_ctype(int kind, int w, int uns) {
-    if (kind == 1) return w == 8 && uns ? "unsigned long" : "void *";
+    if (kind == 1) return w == 8 && uns ? "uintptr_t" : "void *";
     if (kind == 8) return "double";
     if (kind == 4) return "float";
-    if (w == 8) return uns ? "unsigned long" : "long";
+    if (w == 8) return uns ? "uint64_t" : "int64_t";
     if (w == 2) return uns ? "unsigned short" : "short";
     if (w == 1) return uns ? "unsigned char" : "signed char";
     return uns ? "unsigned int" : "int";
@@ -59,7 +59,7 @@ int fwd_pclear(void) { int k; k = 0; while (k < 64) { fwd_ptype[k] = 0; k = k + 
 /* 0.0.30 H3: the stubs look a name up through one helper -- the process's global symbols first,
    then, on Linux, libm.so.6, where glibc keeps fenv.h's functions (macOS has them in libSystem) */
 int fwd_prologue(void) {
-    fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
+    fwd_s("#include <stdint.h>\n#include <unisacc_ffi.h>\n#include <unistd.h>\n#include <stdlib.h>\n");
     if (fwd_ccw) fwd_s("void *__unisa_ccw_of(void *);\n");
     fwd_s("static void *__unisa_fwdsym(const char *n) {\n    void *f; f = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, n);\n");
     fwd_s("#ifdef __linux__\n    if (f == 0) { static void *m; if (m == 0) m = uffi_dlopen(\"libm.so.6\", 2); if (m) f = uffi_dlsym(m, n); }\n#endif\n");
@@ -80,10 +80,10 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
             fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
             k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
             if (np == 0) fwd_s("void");
-            fwd_s(") {\n    static void *fn; long v[10];\n");
+            fwd_s(") {\n    static void *fn; int64_t v[10];\n");
             fwd_s("    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
             fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
-            k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(long)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s("(long)a"); fwd_d(k); } } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
+            k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(int64_t)(intptr_t)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s(kind[k] == 1 ? "(int64_t)(intptr_t)a" : "(int64_t)a"); fwd_d(k); } } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
             if (isvoid) fwd_s("    __hostcall(fn, v);\n");
             else { fwd_s("    return ("); fwd_s(rt); fwd_s(")__hostcall(fn, v);\n"); }
             fwd_s("}\n");
@@ -122,18 +122,18 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rk
     fwd_s("#include <stdarg.h>\n");
     fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
     k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
-    fwd_s(", ...) {\n    static void *fn; long x[4]; va_list ap;");
+    fwd_s(", ...) {\n    static void *fn; int64_t x[4]; va_list ap;");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
     fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
     fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
-    fwd_s("    va_start(ap, a"); fwd_d(np - 1); fwd_s("); x[0] = va_arg(ap, long); x[1] = va_arg(ap, long); x[2] = va_arg(ap, long); x[3] = va_arg(ap, long); va_end(ap);\n");
+    fwd_s("    va_start(ap, a"); fwd_d(np - 1); fwd_s("); x[0] = va_arg(ap, int64_t); x[1] = va_arg(ap, int64_t); x[2] = va_arg(ap, int64_t); x[3] = va_arg(ap, int64_t); va_end(ap);\n");
     fwd_s("#if defined(__APPLE__) && defined(__aarch64__)\n    { int kinds[9]; void *vals[9];\n");
     k = 0; while (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("    a"); fwd_d(k); fwd_s(" = __unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(");\n"); } k = k + 1; }
     k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(kind[k], w[k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
     k = 0; while (k < 4) { fwd_s("    kinds["); fwd_d(np + k); fwd_s("] = 3; vals["); fwd_d(np + k); fwd_s("] = &x["); fwd_d(k); fwd_s("];\n"); k = k + 1; }
     fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np + 4); fwd_s(", "); fwd_d(np); fwd_s(", "); fwd_s(isvoid ? "0" : "&r"); fwd_s("); }\n");
-    fwd_s("#else\n    { long v[10];\n");
-    k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(long)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s("(long)a"); fwd_d(k); } } else if (k < np + 4) { fwd_s("x["); fwd_d(k - np); fwd_s("]"); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
+    fwd_s("#else\n    { int64_t v[10];\n");
+    k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(int64_t)(intptr_t)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s(kind[k] == 1 ? "(int64_t)(intptr_t)a" : "(int64_t)a"); fwd_d(k); } } else if (k < np + 4) { fwd_s("x["); fwd_d(k - np); fwd_s("]"); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
     if (isvoid) fwd_s("    __hostcall(fn, v); }\n");
     else { fwd_s("    r = ("); fwd_s(rt); fwd_s(")__hostcall(fn, v); }\n"); }
     fwd_s("#endif\n");

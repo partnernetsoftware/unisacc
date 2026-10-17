@@ -27,7 +27,7 @@ char *tp_regnames[tp_NREGS] = {"r0","r1","r2","r3","r4","r5","r6","r7"};
 #define tp_EDGEMAX 65536
 char *tp_input; int tp_inputn;
 int tp_rs[tp_ROWMAX],tp_re[tp_ROWMAX],tp_rk[tp_ROWMAX],tp_rp[tp_ROWMAX],tp_ro[tp_ROWMAX],tp_rn[tp_ROWMAX],tp_owner[tp_ROWMAX];
-long tp_av[tp_ROWMAX*8]; int tp_an[tp_ROWMAX*8]; int tp_numeric[tp_ROWMAX*8];
+us_i64 tp_av[tp_ROWMAX*8]; int tp_an[tp_ROWMAX*8]; int tp_numeric[tp_ROWMAX*8];
 int tp_ns[tp_NAMEMAX],tp_nl[tp_NAMEMAX],tp_lab[tp_NAMEMAX],tp_datum[tp_NAMEMAX],tp_pro[tp_NAMEMAX],tp_anchor[tp_NAMEMAX];int tp_nn;
 int tp_firstlab[tp_ROWMAX],tp_startmark[tp_ROWMAX],tp_us[tp_ROWMAX],tp_ue[tp_ROWMAX],tp_alive[tp_ROWMAX],tp_roots[tp_ROWMAX],tp_hascallr[tp_ROWMAX],tp_head[tp_ROWMAX],tp_queue[tp_ROWMAX];int tp_un;
 int tp_edge_to[tp_EDGEMAX],tp_edge_next[tp_EDGEMAX],tp_ne;
@@ -42,12 +42,12 @@ int tp_validname(int at,int n){int i;if(n<1)return 0;for(i=0;i<n;i++)if(!tp_name
 int tp_intern(int at,int n){int i;for(i=0;i<tp_nn;i++)if(tp_nl[i]==n&&tp_equal(tp_input+tp_ns[i],tp_input+at,n))return i;
  if(tp_nn>=tp_NAMEMAX){tp_bad=1;return 0;}i=tp_nn++;tp_ns[i]=at;tp_nl[i]=n;tp_lab[i]=-1;return i;}
 int tp_lookup(char *s){int i;for(i=0;i<tp_nn;i++)if(tp_same(tp_ns[i],tp_nl[i],s))return i;return -1;}
-int tp_number(int at,int n,long *out){unsigned long value;int neg,leading_zero;
+int tp_number(int at,int n,us_i64 *out){us_u64 value;int neg,leading_zero;
  if(!ts_integer(tp_input+at,n,&value,&neg,&leading_zero))return 0;
  /* Canonical decimal/hex spelling only; ambiguous legacy octal stays whole. */
  if(leading_zero&&value!=0)return 0;
  if(value>(neg?9223372036854775808UL:9223372036854775807UL))return 0;
- *out=neg?(long)(0UL-value):(long)value;return 1;}
+ *out=neg?(us_i64)(0UL-value):(us_i64)value;return 1;}
 int tp_getreg(int at,int n){int i;for(i=0;i<tp_NREGS;i++)if(tp_same(at,n,tp_regnames[i]))return i;return -1;}
 int tp_getop(int at,int n){int i;for(i=0;i<tp_NOPS;i++)if(tp_same(at,n,tp_opnames[i]))return i;return -1;}
 int tp_token(int at,int n){if(tp_nt>=16){tp_bad=1;return 0;}tp_tstart[tp_nt]=at;tp_tlen[tp_nt]=n;tp_nt++;return 1;}
@@ -55,7 +55,7 @@ int tp_tokenize(int p,int end){int s,i,cut;tp_nt=0;while(p<end){while(p<end&&(tp
  if(p==end)break;s=p;while(p<end&&!tp_space(tp_input[p])&&tp_input[p]!=','&&tp_input[p]!='['&&tp_input[p]!=']')p++;
  cut=-1;if(tp_input[s]=='r')for(i=s+1;i<p;i++)if(tp_input[i]=='+'||tp_input[i]=='-'){cut=i;break;}
  if(cut>=0){tp_token(s,cut-s);tp_token(cut,p-cut);}else tp_token(s,p-s);if(tp_bad)return 0;}return 1;}
-int tp_parse(void){int p=0,end,textend,start,q,quoted,esc,i,op,shape,idx,id;long value;
+int tp_parse(void){int p=0,end,textend,start,q,quoted,esc,i,op,shape,idx,id;us_i64 value;
  for(i=0;i<tp_ROWMAX;i++)tp_firstlab[i]=-1;
  while(p<tp_inputn){if(tp_nrows>=tp_ROWMAX){tp_bad=1;return 0;}idx=tp_nrows++;start=p;while(p<tp_inputn&&tp_input[p]!=10)p++;end=p;if(p<tp_inputn)p++;
   tp_rs[idx]=start;tp_re[idx]=p;tp_rp[idx]=tp_npc;tp_rk[idx]=0;

@@ -1,3 +1,4 @@
+#include "internal_types.h"
 /* Four loader symbols are the only native bootstrap dependencies.
    macOS: the image imports them (LC_LOAD_DYLIB libSystem).  Linux (0.0.21
    R21-4a'): a cc-built compiler takes them from its own libc; a compiler
@@ -10,7 +11,10 @@
 #if (defined(__APPLE__) || defined(__linux__)) && !defined(__UNISA__)
 #include <dlfcn.h>
 #endif
-static long host_dl_slot(int i) {
+#if defined(_WIN32) && !defined(__UNISA__)
+#include <windows.h>
+#endif
+static us_addr host_dl_slot(int i) {
 #ifdef __APPLE__
 #ifdef __UNISA__
     if (i == 0) return __hostaddr0();
@@ -18,17 +22,23 @@ static long host_dl_slot(int i) {
     if (i == 2) return __hostaddr2();
     if (i == 3) return __hostaddr3();
 #else
-    if (i == 0) return (long)dlopen;
-    if (i == 1) return (long)dlsym;
-    if (i == 2) return (long)dlclose;
-    if (i == 3) return (long)dlerror;
+    if (i == 0) return (us_addr)dlopen;
+    if (i == 1) return (us_addr)dlsym;
+    if (i == 2) return (us_addr)dlclose;
+    if (i == 3) return (us_addr)dlerror;
 #endif
 #endif
 #if defined(__linux__) && !defined(__UNISA__)
-    if (i == 0) return (long)dlopen;
-    if (i == 1) return (long)dlsym;
-    if (i == 2) return (long)dlclose;
-    if (i == 3) return (long)dlerror;
+    if (i == 0) return (us_addr)dlopen;
+    if (i == 1) return (us_addr)dlsym;
+    if (i == 2) return (us_addr)dlclose;
+    if (i == 3) return (us_addr)dlerror;
+#endif
+#if defined(_WIN32) && !defined(__UNISA__)
+    if (i == 0) return (us_addr)LoadLibraryA;
+    if (i == 1) return (us_addr)GetProcAddress;
+    if (i == 2) return (us_addr)FreeLibrary;
+    if (i == 3) return (us_addr)GetLastError;
 #endif
     return 0;
 }

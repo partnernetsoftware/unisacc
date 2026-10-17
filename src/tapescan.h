@@ -1,10 +1,11 @@
+#include "internal_types.h"
 /* Bounded, policy-free scanning of a tape integer token.  Callers decide
    whether an unsigned value or a leading-zero decimal is permitted. */
 #ifndef UNISACC_TAPESCAN_H
 #define UNISACC_TAPESCAN_H
-static int ts_integer(char *s, int n, unsigned long *magnitude, int *negative,
+static int ts_integer(char *s, int n, us_u64 *magnitude, int *negative,
                       int *leading_zero) {
-    unsigned long value; int i; int base; int digit; int c;
+    us_u64 value; int i; int base; int digit; int c;
     if (n <= 0) return 0;
     i = 0; base = 10; value = 0; *negative = 0; *leading_zero = 0;
     if (s[i] == '+' || s[i] == '-') { *negative = s[i] == '-'; i = i + 1; }
@@ -17,7 +18,7 @@ static int ts_integer(char *s, int n, unsigned long *magnitude, int *negative,
         if (c >= '0' && c <= '9') digit = c - '0';
         else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
         else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
-        if (digit < 0 || digit >= base || value > (~0UL - digit) / base) return 0;
+        if (digit < 0 || digit >= base || value > (~(us_u64)0 - digit) / base) return 0;
         value = value * base + digit; i = i + 1;
     }
     *magnitude = value;

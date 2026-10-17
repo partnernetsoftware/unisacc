@@ -2,7 +2,7 @@
 /* ---- encoding, shared ------------------------------------------------- */
 char *bkout;                        /* where the current instruction's bytes go */
 int bkol;                           /* how many so far */
-long bk_textva; long bk_shift; int bk_sizing;
+us_u64 bk_textva; us_i64 bk_shift; int bk_sizing;
 /* ---- object mode (-c -b lnx/ARCH): a relocatable ELF, docs/toolchain.md §4.
    Text is based at 0 and data at 2^32, so every address the encoders see is
    a text offset (< 2^32) or a data offset (>= 2^32).  The two encoders that
@@ -46,7 +46,7 @@ int bk_relo(long off, int type, long target) {
 #define BK_NIMP 22                  /* pe.IMPORTS */
 #define BK_NIMPMAX 26               /* + LoadLibraryA GetProcAddress FreeLibrary GetLastError (R21-4a') */
 char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000CreateProcessW\000WaitForSingleObject\000GetExitCodeProcess\000TerminateProcess\000SetStdHandle\000GetCurrentProcess\000GetCurrentProcessId\000GetModuleFileNameW\000LoadLibraryA\000GetProcAddress\000FreeLibrary\000GetLastError\000";
-long bk_imp[BK_NIMPMAX];               /* Windows: the IAT slot of each import */
+us_u64 bk_imp[BK_NIMPMAX];               /* Windows: the IAT slot of each import */
 /* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]
    says instruction i is a branch encoded in its short form; tjk[i] is that
    form's length (0: not a relaxable branch) and tjt[i] its target label. */
@@ -1226,10 +1226,10 @@ char *bktext; long bktlen; long bkcaptext;
 int bk_growtext(long need) {        /* 0.0.29 H4': the machine code grows like the tape (back_lower.c) */
     long n; n = bkcaptext ? bkcaptext : BK_MAXTEXT;
     while (n < need) n = n * 2;
-    if (n != bkcaptext) { bktext = (char *)bk_regrow((long)bktext, bkcaptext, n); bkcaptext = n; }
+    if (n != bkcaptext) { bktext = (char *)bk_regrow((us_addr)bktext, bkcaptext, n); bkcaptext = n; }
     return 0;
 }
-long bk_datava; long bk_entry;
+us_u64 bk_datava; us_offset bk_entry;
 int bk_enc(int i, long off) { if (bkarch) return bk_arm(i, off); return bk_x86(i, off); }
 long bk_round(long v, long a) { return (v + a - 1) / a * a; }
 
@@ -1312,11 +1312,11 @@ int bk_assemble(void) {
            2 GB apart -- which is an access violation, not a bad call. */
         bk_runtext = __mmap(0, bk_runtsz + bk_rundsz, 0x3000, 4, 0, 0);
         bk_rundata = bk_runtext + bk_runtsz;
-        {   long tbl; int q;
+        {   us_addr tbl; int q;
             tbl = bk_runtext + bk_runtsz - 8 * 16;   /* the import slots */
             q = 0;
             while (q < BK_NIMP) {
-                char *c; long v; int b;
+                char *c; us_addr v; int b;
                 c = (char *)(tbl + 8 * q); v = bk_impval[q]; b = 0;
                 while (b < 8) { c[b] = (v >> (8 * b)) & 255; b = b + 1; }
                 bk_imp[q] = tbl + 8 * q;
@@ -1338,7 +1338,7 @@ int bk_assemble(void) {
             __write(2, "unisacc: host forwarding under -run needs a compiler that can reach the host loader (this build cannot); write the program with -o instead\n", 136); __exit(1);
         }
         if (bkos == 1 || (bkos == 0 && bk_dyn)) {
-            int q; int b; long v; char *slots;
+            int q; int b; us_addr v; char *slots;
             slots = (char *)bk_rundata; q = 0;
             while (q < 4) {
                 v = host_dl_slot(q); b = 0;

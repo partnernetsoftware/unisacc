@@ -218,7 +218,7 @@ int tidx(char *n, int L) { return vfind(TOKV, NTOKV, n, L); }
 int expr(void);
 int exprc(void);
 int unary(void);
-long cexpr(void);
+us_i64 cexpr(void);
 int cond(void);
 int mbfind(int si, int t);
 int eload(int w);
@@ -264,21 +264,21 @@ int bkfd = 1;    /* where the image goes: -o, else stdout.  DEFINED here,
                     once: two definitions of one global become two .bss
                     lines, and the two back ends disagree about which of the
                     two addresses the name means. */
-long bk_run(char *t, int n, long argc, long argv);   /* -run [S-9] */
+us_addr bk_run(char *t, int n, us_size argc, us_addr argv);   /* -run [S-9] */
 char *runargv[4096];   /* argv, NULL, envp, NULL */
 int symlea(int i, int t, char *reg);
 int dkind(int flt);
 int valuekind(int width, int ptr, int uns, int flt, int bl);
 int setkind(int k);
 int fltlit(int t);
-unsigned long fdec2bin(int p, int n, int f32);
-unsigned long fhex2bin(int p, int n, int f32);
+us_u64 fdec2bin(int p, int n, int f32);
+us_u64 fhex2bin(int p, int n, int f32);
 int fconv(int from, int to);
 int fkind(void);
 int argconv(int si, int k);
 int callres(int si);
 int ftruthy(void);
-long fone(int k);
+us_i64 fone(int k);
 int skipparen(void);
 int iswide(int t);
 int wdecode(int t, int *cp);
@@ -301,10 +301,10 @@ int loadval(void);
 int zext(int w);
 int newlab(void);
 int elab(char *p, int n);
-int en(long v);
+int en(us_i64 v);
 int ec(int c);
 int etok(int i);
-long numval(int t);
+us_i64 numval(int t);
 int alloc_local(int n);
 int sadd(int t, int kind, int off, int elem);
 int addlit(char *b, int n);
@@ -504,8 +504,8 @@ int es(char *s) {
     return 0;
 }
 
-int en(long v) {
-    char b[24]; int n; int neg; unsigned long u;
+int en(us_i64 v) {
+    char b[24]; int n; int neg; us_u64 u;
     neg = 0;
     /* through an unsigned: -v of LONG_MIN is itself, and a signed loop over
        it printed a bare '-' -- the sign bit of a double is exactly that */
@@ -523,8 +523,8 @@ int en(long v) {
    finds its operands by the commas of the same string */
 char el_b[96]; int el_n;
 int el_s(char *t) { int k; k = 0; while (t[k]) { el_b[el_n] = t[k]; el_n = el_n + 1; k = k + 1; } return 0; }
-int el_num(long v) {
-    char b[24]; int n; unsigned long u;
+int el_num(us_i64 v) {
+    char b[24]; int n; us_u64 u;
     u = v; n = 0;
     if (v < 0) { el_s("-"); u = 0 - u; }
     if (u == 0) { b[0] = 48; n = 1; }
@@ -534,9 +534,9 @@ int el_num(long v) {
 }
 int el_out(void) { el_b[el_n] = 10; el_b[el_n + 1] = 0; el_n = 0; return es(el_b); }
 /* one immediate into rR: `  @lit.imm rR, V` */
-int eimm(int r, long v) { el_s("  @lit.imm r"); el_num(r); el_s(", "); el_num(v); return el_out(); }
+int eimm(int r, us_i64 v) { el_s("  @lit.imm r"); el_num(r); el_s(", "); el_num(v); return el_out(); }
 /* rD = the frame address FP - off, through scratch rT */
-int eframe(int d, int t, long off) {
+int eframe(int d, int t, us_i64 off) {
     eimm(t, off);
     el_s("  @alu.sub r"); el_num(d); el_s(", r6, r"); el_num(t); return el_out();
 }
@@ -545,8 +545,8 @@ int eframe(int d, int t, long off) {
    may carry a u/U/l/L suffix.  Four copies of `v = v * 10 + (c - 48)` got all
    three wrong -- `0xff` came out 7794, `010` came out 10, and `5L` came out
    78, because 'L' - '0' is 28. */
-long numval(int t) {
-    int k; int n; long v; int c; int base; int d;
+us_i64 numval(int t) {
+    int k; int n; us_i64 v; int c; int base; int d;
     k = 0; n = tlen[t]; v = 0; base = 10;
     /* A character constant is a NUMBER token too, and it had never been
        evaluated: the decimal loop read `'b'` as quote-minus-'0' and so on,
@@ -1117,14 +1117,14 @@ int estore(int w) {                              /* [r1] = r0 */
     if (w >= BFTAG) {
         /* Store the field and return its converted value, including for
            assignment and prefix/compound expressions. */
-        long mask;
+        us_i64 mask;
         mask = -1;
-        if (bfwidth(w) < 64) mask = (unsigned long)mask >> (64 - bfwidth(w));
+        if (bfwidth(w) < 64) mask = (us_u64)mask >> (64 - bfwidth(w));
         eimm(2, mask); es("  @alu.and r3, r0, r2\n");
         eimm(2, bfofs(w)); es("  @alu.shl r3, r3, r2\n");
         if (bfunit(w) == 8) es("  @mem.load r4, [r1+0]\n");
         else { es("  @mem.ld r4, [r1+0], "); en(bfunit(w)); ec(10); }
-        eimm(2, ~((unsigned long)mask << bfofs(w)));
+        eimm(2, ~((us_u64)mask << bfofs(w)));
         es("  @alu.and r4, r4, r2\n  @alu.or r4, r4, r3\n");
         if (bfunit(w) == 8) es("  @mem.store [r1+0], r4\n");
         else { es("  @mem.st [r1+0], r4, "); en(bfunit(w)); ec(10); }
@@ -1276,7 +1276,7 @@ int unary(void) {
     p = ask(2);
     if (p == P_NEG) { adv(); unary(); loadval();
         if (curflt) { if (curptr == 0) {        /* -x flips the sign bit, -0.0 too */
-            eimm(1, curflt == 8 ? (long)1 << 63 : 2147483648); es("  @alu.xor r0, r0, r1\n");
+            eimm(1, curflt == 8 ? (us_i64)1 << 63 : 2147483648); es("  @alu.xor r0, r0, r1\n");
             return 0; } }
         es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n");
         if (curptr == 0) { if (curuns) { if (cursize == 4) zext(4); } }
@@ -1744,7 +1744,7 @@ int vcall(int var) {
 }
 
 int primary(void) {
-    int t; int i; long v; int k;
+    int t; int i; us_i64 v; int k;
     t = cur();
     curuns = 0; curflt = 0;
     if (t == T_NUM) { if (fltlit(tp)) {
@@ -2779,31 +2779,31 @@ int emit_binop(int k) {
    M * 2^s / 10^-e with its remainder as the sticky bit.  One rounding, at
    the precision the result actually has -- a subnormal's included. */
 #define FB_L 160                       /* 32-bit limbs: 5120 bits */
-unsigned long fbA[FB_L]; int fbAn;     /* the working number */
-unsigned long fbD[FB_L]; int fbDn;     /* the divisor, 10^k */
-unsigned long fbQ[FB_L]; int fbQn;
-int fb_bits(unsigned long *a, int n) {  /* bit length */
-    unsigned long t; int b;
+us_u64 fbA[FB_L]; int fbAn;     /* the working number */
+us_u64 fbD[FB_L]; int fbDn;     /* the divisor, 10^k */
+us_u64 fbQ[FB_L]; int fbQn;
+int fb_bits(us_u64 *a, int n) {  /* bit length */
+    us_u64 t; int b;
     while (n > 0) { if (a[n - 1] != 0) break; n = n - 1; }
     if (n == 0) return 0;
     t = a[n - 1]; b = 0;
     while (t) { b = b + 1; t = t >> 1; }
     return (n - 1) * 32 + b;
 }
-int fb_bit(unsigned long *a, int n, int i) {
+int fb_bit(us_u64 *a, int n, int i) {
     if (i < 0) return 0;
     if (i / 32 >= n) return 0;
     return (a[i / 32] >> (i % 32)) & 1;
 }
-int fb_mul(unsigned long *a, int n, unsigned long m) {   /* a *= m, m < 2^32 */
-    unsigned long c; unsigned long t; int j;
+int fb_mul(us_u64 *a, int n, us_u64 m) {   /* a *= m, m < 2^32 */
+    us_u64 c; us_u64 t; int j;
     c = 0; j = 0;
     while (j < n) { t = a[j] * m + c; a[j] = t & 4294967295; c = t >> 32; j = j + 1; }
     if (c) { if (n < FB_L) { a[n] = c; n = n + 1; } }
     return n;
 }
-int fb_add(unsigned long *a, int n, unsigned long v) {   /* a += v, carried */
-    int j; unsigned long t;
+int fb_add(us_u64 *a, int n, us_u64 v) {   /* a += v, carried */
+    int j; us_u64 t;
     j = 0;
     while (v) {
         if (j >= n) { if (n < FB_L) { a[n] = 0; n = n + 1; } else break; }
@@ -2811,14 +2811,14 @@ int fb_add(unsigned long *a, int n, unsigned long v) {   /* a += v, carried */
     }
     return n;
 }
-int fb_shl1(unsigned long *a, int n) {                   /* a <<= 1 */
-    unsigned long c; unsigned long t; int j;
+int fb_shl1(us_u64 *a, int n) {                   /* a <<= 1 */
+    us_u64 c; us_u64 t; int j;
     c = 0; j = 0;
     while (j < n) { t = (a[j] << 1) | c; c = t >> 32; a[j] = t & 4294967295; j = j + 1; }
     if (c) { if (n < FB_L) { a[n] = c; n = n + 1; } }
     return n;
 }
-int fb_cmp(unsigned long *a, int an, unsigned long *b, int bn) {
+int fb_cmp(us_u64 *a, int an, us_u64 *b, int bn) {
     int j;
     while (an > 0) { if (a[an - 1] != 0) break; an = an - 1; }
     while (bn > 0) { if (b[bn - 1] != 0) break; bn = bn - 1; }
@@ -2827,12 +2827,12 @@ int fb_cmp(unsigned long *a, int an, unsigned long *b, int bn) {
     while (j >= 0) { if (a[j] != b[j]) return a[j] > b[j] ? 1 : 0 - 1; j = j - 1; }
     return 0;
 }
-int fb_sub(unsigned long *a, int an, unsigned long *b, int bn) {   /* a -= b, a >= b */
-    long t; long br; int j;
+int fb_sub(us_u64 *a, int an, us_u64 *b, int bn) {   /* a -= b, a >= b */
+    us_i64 t; us_i64 br; int j;
     br = 0; j = 0;
     while (j < an) {
-        t = (long)a[j] - br;
-        if (j < bn) t = t - (long)b[j];
+        t = (us_i64)a[j] - br;
+        if (j < bn) t = t - (us_i64)b[j];
         if (t < 0) { t = t + 4294967296; br = 1; } else br = 0;
         a[j] = t; j = j + 1;
     }
@@ -2844,11 +2844,11 @@ int fb_sub(unsigned long *a, int an, unsigned long *b, int bn) {   /* a -= b, a 
    so there is no long division here: the hex digits are the significand,
    `p` is a power of two, and the only rounding is the final fit into 52
    (or 23) bits, to nearest, ties to even. */
-unsigned long fhex2bin(int p, int n, int f32) {
+us_u64 fhex2bin(int p, int n, int f32) {
     int k; int c; int d; int fr; int nf; int sticky; int top; int e2;
     int mbits; int bias; int emax; int neg; int shift; int biased;
-    long ev;
-    unsigned long m; unsigned long half; unsigned long rem; unsigned long out;
+    us_i64 ev;
+    us_u64 m; us_u64 half; us_u64 rem; us_u64 out;
     mbits = f32 ? 23 : 52; bias = f32 ? 127 : 1023; emax = f32 ? 255 : 2047;
     k = 2; m = 0; fr = 0; nf = 0; sticky = 0;
     while (k < n) {
@@ -2889,8 +2889,8 @@ unsigned long fhex2bin(int p, int n, int f32) {
     if (shift > 0) {
         if (shift >= 64) { rem = m; m = 0; half = 0; }
         else {
-            rem = m & (((unsigned long)1 << shift) - 1);
-            half = (unsigned long)1 << (shift - 1);
+            rem = m & (((us_u64)1 << shift) - 1);
+            half = (us_u64)1 << (shift - 1);
             m = m >> shift;
         }
         if (shift < 64) {
@@ -2906,15 +2906,15 @@ unsigned long fhex2bin(int p, int n, int f32) {
     /* rounding may have carried into a new top bit */
     if ((m >> (mbits + 1)) & 1) { m = m >> 1; biased = biased + 1; }
     if (biased >= emax) return f32 ? 0x7F800000 : 0x7FF0000000000000;
-    out = ((unsigned long)biased << mbits) | (m & (((unsigned long)1 << mbits) - 1));
+    out = ((us_u64)biased << mbits) | (m & (((us_u64)1 << mbits) - 1));
     return out;
 }
 
-unsigned long fdec2bin(int p, int n, int f32) {
+us_u64 fdec2bin(int p, int n, int f32) {
     int e10; int k; int seen; int c; int fr; int neg; int j;
     int prec; int emin; int bias; int mbits; int lead; int keep; int drop;
     int s; int L; int sticky; int exp;
-    unsigned long m; unsigned long bitsout;
+    us_u64 m; us_u64 bitsout;
     fbAn = 1; fbA[0] = 0; e10 = 0; fr = 0; seen = 0; k = 0;
     while (k < n) {                       /* the significand's digits */
         c = src[p + k] & 255;
@@ -2957,7 +2957,7 @@ unsigned long fdec2bin(int p, int n, int f32) {
         if (s < 0) s = 0;
         j = 0; while (j < s) { fbAn = fb_shl1(fbA, fbAn); j = j + 1; }
         /* long division, a bit at a time: R in fbA's place, Q built up */
-        {   unsigned long R[FB_L]; int Rn; int i; int nb;
+        {   us_u64 R[FB_L]; int Rn; int i; int nb;
             Rn = 1; R[0] = 0; fbQn = fbAn; j = 0; while (j < fbQn) { fbQ[j] = 0; j = j + 1; }
             nb = fb_bits(fbA, fbAn); i = nb - 1;
             while (i >= 0) {
@@ -2965,7 +2965,7 @@ unsigned long fdec2bin(int p, int n, int f32) {
                 R[0] = R[0] | fb_bit(fbA, fbAn, i);
                 if (fb_cmp(R, Rn, fbD, fbDn) >= 0) {
                     Rn = fb_sub(R, Rn, fbD, fbDn);
-                    fbQ[i / 32] = fbQ[i / 32] | ((unsigned long)1 << (i % 32));
+                    fbQ[i / 32] = fbQ[i / 32] | ((us_u64)1 << (i % 32));
                 }
                 i = i - 1;
             }
@@ -2992,14 +2992,14 @@ unsigned long fdec2bin(int p, int n, int f32) {
     if (m >> prec) { m = m >> 1; exp = exp + 1; }     /* rounded up to 2^prec */
     if (m == 0) return 0;
     lead = exp + prec - 1;
-    if (m < ((unsigned long)1 << (prec - 1))) {        /* subnormal */
+    if (m < ((us_u64)1 << (prec - 1))) {        /* subnormal */
         bitsout = m;
     } else {
         if (lead + bias >= 2 * bias + 1) {             /* overflow: inf */
             if (f32) return 2139095040;
             return 9218868437227405312;
         }
-        bitsout = ((unsigned long)(lead + bias) << mbits) | (m & (((unsigned long)1 << mbits) - 1));
+        bitsout = ((us_u64)(lead + bias) << mbits) | (m & (((us_u64)1 << mbits) - 1));
     }
     return bitsout;
 }
@@ -3122,7 +3122,7 @@ int ftruthy(void) {
     return 0;
 }
 /* the bits of 1.0 in a floating kind */
-long fone(int k) { if (k == 8) return 4607182418800017408; return 1065353216; }
+us_i64 fone(int k) { if (k == 8) return 4607182418800017408; return 1065353216; }
 
 /* the data label of global symbol i (token t): g_NAME, or a static local's */
 int symlea(int i, int t, char *reg) {
@@ -3553,7 +3553,7 @@ int vlaback(int dep) {
    known once the body has been walked.  The control value goes to a frame
    slot first: the chain reloads it for every comparison, and the body may
    have clobbered every register by then. */
-long swval[4096]; int swlab[4096]; int nswv;   /* 0.0.28 H4: SQLite's yy_reduce has ~400 cases */
+us_i64 swval[4096]; int swlab[4096]; int nswv;   /* 0.0.28 H4: SQLite's yy_reduce has ~400 cases */
 int swdef[16]; int swslot[16]; int swsize[16]; int swuns[16]; int nsw;
 
 int patchnum(int at, int w, int v) {
@@ -3565,10 +3565,10 @@ int patchnum(int at, int w, int v) {
     return 0;
 }
 
-long cexpr(void);
+us_i64 cexpr(void);
 
-long catom(void) {
-    long v; int k; int i;
+us_i64 catom(void) {
+    us_i64 v; int k; int i;
     if (cur() == T_NUM) {
         v = 0; k = 0;
         v = numval(tp);
@@ -3732,7 +3732,7 @@ void declsave(void) { declspec_save(&declsv); }
 void declrestore(void) { declspec_restore(&declsv); }
 
 
-long cunary(void) {
+us_i64 cunary(void) {
     int w; DeclSpecSnapshot spec;
     if (eat(tidx("-", 1))) return 0 - cunary();
     if (eat(tidx("+", 1))) return cunary();
@@ -3796,8 +3796,8 @@ long cunary(void) {
     } }
     return catom();
 }
-long cbin(int minp) {
-    long v; long r; int k; int pr;
+us_i64 cbin(int minp) {
+    us_i64 v; us_i64 r; int k; int pr;
     v = cunary();
     while (1) {
         k = cur(); pr = cprec(k);
@@ -3861,8 +3861,8 @@ int isconstdim(int j) {
     return 1;
 }
 
-long cexpr(void) {
-    long c; long a; long b;
+us_i64 cexpr(void) {
+    us_i64 c; us_i64 a; us_i64 b;
     c = cbin(1);
     if (eat(tidx("?", 1))) {
         a = cexpr(); need(tidx(":", 1), ":"); b = cexpr();
@@ -7076,7 +7076,7 @@ int ccx_emit(char *nm, int nl) {
         /* FP and/or stacked: the raw tape values (double bits, float bits in
            the low half) in an array, the signature as `imm r2, 0x7C..` right
            before .hostcall -- the back end reads it and generates the moves */
-        long sig; int A; char dg[24]; int nd;
+        us_i64 sig; int A; char dg[24]; int nd;
         A = 8 * np; if (A < 16) A = 16; A = (A + 15) / 16 * 16;
         es("  .frame "); en(A); es("\n");
         k = 0;
@@ -7085,11 +7085,11 @@ int ccx_emit(char *nm, int nl) {
             else { es("  store64 [r6-"); en(A - 8 * k); es("], r"); en(k); es("\n"); }
             k = k + 1;
         }
-        sig = 0; k = 0; while (k < np) { sig = sig | ((long)ccx_cls(si, k) << (8 + 3 * k)); k = k + 1; }
-        sig = sig | ((long)np << 2);
+        sig = 0; k = 0; while (k < np) { sig = sig | ((us_i64)ccx_cls(si, k) << (8 + 3 * k)); k = k + 1; }
+        sig = sig | ((us_i64)np << 2);
         if (symflt[si] == 8 && symptr[si] == 0) sig = sig | 1;
         if (symflt[si] == 4 && symptr[si] == 0) sig = sig | 2;
-        sig = sig | ((long)124 << 56);
+        sig = sig | ((us_i64)124 << 56);
         es("  imm r2, "); en(A); es("\n  sub64 r1, r6, r2\n  .lea r0, __ccx_");
         k = 0; while (k < nl) { ec(nm[k] & 255); k = k + 1; }
         es("\n  imm r2, ");

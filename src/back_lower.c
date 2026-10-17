@@ -54,8 +54,8 @@ int bk_elf_hdrs(void) { return bk_dyn ? 784 : 176; }   /* ELF header bytes befor
    code -- are anonymous mappings doubled on demand, not fixed bss.  sqlite3.c + shell.c is 1.36 M
    tape instructions against the old fixed 1 M, and 8x fixed tables (a gigabyte of bss) no longer
    load on macOS.  A mapping is zero-filled like bss; the outgrown one is left mapped. */
-long bk_map(long n) {
-    long p;
+us_addr bk_map(us_size n) {
+    us_addr p;
 #ifdef _WIN32
     p = __mmap(0, n, 0x3000, 4, 0, 0);
 #else
@@ -64,11 +64,11 @@ long bk_map(long n) {
     if (p == 0 - 1 || p == 0) { __write(2, "back end: cannot map memory\n", 28); __exit(1); }
     return p;
 }
-long bk_regrow(long old, long oldn, long newn) {
-    long p; long k; long *d; long *s; char *dc; char *sc;
+us_addr bk_regrow(us_addr old, us_size oldn, us_size newn) {
+    us_addr p; us_size k; us_u64 *d; us_u64 *s; char *dc; char *sc;
     p = bk_map(newn);
     if (old == 0) return p;
-    d = (long *)p; s = (long *)old; k = 0;
+    d = (us_u64 *)p; s = (us_u64 *)old; k = 0;
     while (k + 8 <= oldn) { d[k / 8] = s[k / 8]; k = k + 8; }
     dc = (char *)p; sc = (char *)old;
     while (k < oldn) { dc[k] = sc[k]; k = k + 1; }
@@ -286,10 +286,10 @@ int *bklab_first;                  /* per tape pc, the first label there (+4: lo
 int bkni; long bkcapi;
 int bk_growi(void) {
     long n; n = bkcapi ? bkcapi * 2 : BK_MAXI;
-    bkop = (int *)bk_regrow((long)bkop, bkcapi * 4, n * 4);
-    bkak = (int *)bk_regrow((long)bkak, bkcapi * 32, n * 32);
-    bkav = (long *)bk_regrow((long)bkav, bkcapi * 8 * sizeof(long), n * 8 * sizeof(long));
-    bklab_first = (int *)bk_regrow((long)bklab_first, (bkcapi + 4) * 4, (n + 4) * 4);
+    bkop = (int *)bk_regrow((us_addr)bkop, bkcapi * 4, n * 4);
+    bkak = (int *)bk_regrow((us_addr)bkak, bkcapi * 32, n * 32);
+    bkav = (long *)bk_regrow((us_addr)bkav, bkcapi * 8 * sizeof(long), n * 8 * sizeof(long));
+    bklab_first = (int *)bk_regrow((us_addr)bklab_first, (bkcapi + 4) * 4, (n + 4) * 4);
     bkcapi = n;
     return 0;
 }
@@ -320,7 +320,7 @@ char *bkc_ptr[16]; int bkc_slot[16];  /* pointer -> slot, direct-mapped (see v_s
 int bk_index(char *list) {           /* the slot holding this list's offsets */
     int i; int k; int n; int h;
     if (list == bk_lastlist) return bk_lastslot;
-    h = (int)(((long)list >> 3) & 15);
+    h = (int)(((uintptr_t)list >> 3) & (uintptr_t)15);
     if (bkc_ptr[h] == list) { bk_lastlist = list; bk_lastslot = bkc_slot[h]; return bkc_slot[h]; }
     i = 0;
     while (i < bk_nlists) {
@@ -383,7 +383,7 @@ int bk_tape_bad(void) {
 /* Strict token conversion for externally supplied tape.  bk_num also reads
    fixed-width catalog fields, whose trailing NUL is not part of a token. */
 int bk_tape_num(char *s, int n, long *out) {
-    unsigned long v; int neg; int leading_zero;
+    us_u64 v; int neg; int leading_zero;
     if (!ts_integer(s, n, &v, &neg, &leading_zero)) return 0;
     if (neg && v > 9223372036854775808UL) return 0;
     *out = neg ? (long)(0UL - v) : (long)v;
@@ -561,8 +561,8 @@ int bkrel;                          /* the reloc answer for the branch being low
    in memory this process maps, instead of into an image on disk.  Nothing
    about the code changes -- the same encoders, the same tables -- only where
    text and data are placed and the fact that nobody writes a header. */
-long bk_impval[26];                 /* run mode on Windows: the real routines */
-int bk_runmode; long bk_runtext; long bk_rundata; long bk_runtsz; long bk_rundsz;
+us_addr bk_impval[26];                 /* run mode on Windows: the real routines */
+int bk_runmode; us_addr bk_runtext; us_addr bk_rundata; us_size bk_runtsz; us_size bk_rundsz;
 int bkf_nr;                         /* the syscall-number register (abi nrreg) */
 int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;
 int bkf_arg[6]; int bkf_ret;        /* machine register numbers, -1 none */
@@ -688,22 +688,22 @@ char *tshort; char *tfit; int *tjk; int *tjt; long *tsz;
 long bkcapt;
 int bk_growt(void) {
     long n; long o; long L; n = bkcapt ? bkcapt * 2 : BK_MAXT; o = bkcapt; L = sizeof(long);
-    tkop = (int *)bk_regrow((long)tkop, o * 4, n * 4);
-    tka = (long *)bk_regrow((long)tka, o * 4 * L, n * 4 * L);
-    tkk = (int *)bk_regrow((long)tkk, o * 16, n * 16);
-    tkg_rc = (int *)bk_regrow((long)tkg_rc, o * 4, n * 4);
-    tkg_wi = (int *)bk_regrow((long)tkg_wi, o * 4, n * 4);
-    tkg_rel = (int *)bk_regrow((long)tkg_rel, o * 4, n * 4);
-    tkg_form = (int *)bk_regrow((long)tkg_form, o * 4, n * 4);
-    tkg_gate = (int *)bk_regrow((long)tkg_gate, o * 4, n * 4);
-    tkg_cop = (int *)bk_regrow((long)tkg_cop, o * 4, n * 4);
-    tkg_ret = (int *)bk_regrow((long)tkg_ret, o * 4, n * 4);
-    toff = (long *)bk_regrow((long)toff, (o + 1) * L, (n + 1) * L);
-    tshort = (char *)bk_regrow((long)tshort, o, n);
-    tfit = (char *)bk_regrow((long)tfit, o, n);
-    tjk = (int *)bk_regrow((long)tjk, o * 4, n * 4);
-    tjt = (int *)bk_regrow((long)tjt, o * 4, n * 4);
-    tsz = (long *)bk_regrow((long)tsz, o * L, n * L);
+    tkop = (int *)bk_regrow((us_addr)tkop, o * 4, n * 4);
+    tka = (long *)bk_regrow((us_addr)tka, o * 4 * L, n * 4 * L);
+    tkk = (int *)bk_regrow((us_addr)tkk, o * 16, n * 16);
+    tkg_rc = (int *)bk_regrow((us_addr)tkg_rc, o * 4, n * 4);
+    tkg_wi = (int *)bk_regrow((us_addr)tkg_wi, o * 4, n * 4);
+    tkg_rel = (int *)bk_regrow((us_addr)tkg_rel, o * 4, n * 4);
+    tkg_form = (int *)bk_regrow((us_addr)tkg_form, o * 4, n * 4);
+    tkg_gate = (int *)bk_regrow((us_addr)tkg_gate, o * 4, n * 4);
+    tkg_cop = (int *)bk_regrow((us_addr)tkg_cop, o * 4, n * 4);
+    tkg_ret = (int *)bk_regrow((us_addr)tkg_ret, o * 4, n * 4);
+    toff = (long *)bk_regrow((us_addr)toff, (o + 1) * L, (n + 1) * L);
+    tshort = (char *)bk_regrow((us_addr)tshort, o, n);
+    tfit = (char *)bk_regrow((us_addr)tfit, o, n);
+    tjk = (int *)bk_regrow((us_addr)tjk, o * 4, n * 4);
+    tjt = (int *)bk_regrow((us_addr)tjt, o * 4, n * 4);
+    tsz = (long *)bk_regrow((us_addr)tsz, o * L, n * L);
     bkcapt = n;
     return 0;
 }

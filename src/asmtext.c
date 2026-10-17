@@ -1,3 +1,4 @@
+#include "internal_types.h"
 /* ---- GNU assembly text for unisacc's ELF objects (0.0.18 R18-1, R18-2) ----
    `-S -b lnx/ARCH` writes the object that `-c -b lnx/ARCH` would write, as
    GNU assembly (AT&T syntax on x86-64): at_dis() reads the ELF bytes -- text,
@@ -26,7 +27,7 @@ int at_wr(char *p, long n) { if (at_wfail) return 0; __write(at_fd, p, n); retur
 int at_wr(char *p, long n);
 #endif
 char *at_err;
-char *at_cap; long at_capn;                    /* -S: bk_object writes into memory */
+char *at_cap; us_i64 at_capn;                    /* -S: bk_object writes into memory */
 #ifndef AT_PRODUCT
 char at_src[33554432];
 #endif
@@ -42,8 +43,8 @@ int at_idc(int c) {
     return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 46 || c == 36;
 }
 int at_sp(int c) { return c == 32 || c == 9 || c == 13; }
-unsigned long at_rd(char *p, int n) {          /* little-endian */
-    unsigned long v; int k; v = 0; k = n - 1;
+us_u64 at_rd(char *p, int n) {          /* little-endian */
+    us_u64 v; int k; v = 0; k = n - 1;
     while (k >= 0) { v = (v << 8) | (p[k] & 255); k = k - 1; }
     return v;
 }
@@ -59,7 +60,7 @@ char at_lb[512]; int at_ln;
 int at_lc(int c) { if (at_ln < 500) { at_lb[at_ln] = c; at_ln = at_ln + 1; } return 0; }
 int at_ls(char *s) { while (*s) { at_lc(*s); s = s + 1; } return 0; }
 int at_lsn(char *s, int n) { int k; k = 0; while (k < n) { at_lc(s[k]); k = k + 1; } return 0; }
-int at_lhex(unsigned long v) {
+int at_lhex(us_u64 v) {
     char d[24]; int n; n = 0;
     at_ls("0x");
     if (v == 0) { at_lc(48); return 0; }
@@ -67,8 +68,8 @@ int at_lhex(unsigned long v) {
     while (n > 0) { n = n - 1; at_lc(d[n]); }
     return 0;
 }
-int at_lnum(long v) { if (v < 0) { at_lc(45); return at_lhex((unsigned long)0 - (unsigned long)v); } return at_lhex(v); }
-int at_ldec(long v) {
+int at_lnum(us_i64 v) { if (v < 0) { at_lc(45); return at_lhex((us_u64)0 - (us_u64)v); } return at_lhex(v); }
+int at_ldec(us_i64 v) {
     char d[24]; int n; n = 0;
     if (v < 0) { at_lc(45); v = 0 - v; }
     if (v == 0) { at_lc(48); return 0; }
@@ -78,8 +79,8 @@ int at_ldec(long v) {
 }
 
 /* ---- numbers and symbol expressions: [name][+|-number] or number ---- */
-int at_num(char *s, int n, long *v) {          /* the whole of s[0..n) is a number */
-    int k; int neg; unsigned long x; int d;
+int at_num(char *s, int n, us_i64 *v) {          /* the whole of s[0..n) is a number */
+    int k; int neg; us_u64 x; int d;
     k = 0; neg = 0; x = 0;
     if (n > 0 && s[0] == 45) { neg = 1; k = 1; }
     if (n > 0 && s[0] == 43) k = 1;
@@ -94,11 +95,11 @@ int at_num(char *s, int n, long *v) {          /* the whole of s[0..n) is a numb
     } else {
         while (k < n) { d = s[k]; if (d < 48 || d > 57) return 0; x = x * 10 + (d - 48); k = k + 1; }
     }
-    *v = neg ? (long)((unsigned long)0 - x) : (long)x;
+    *v = neg ? (us_i64)((us_u64)0 - x) : (us_i64)x;
     return 1;
 }
 /* expression: name (may be empty) and addend */
-char *at_xn; int at_xl; long at_xa;
+char *at_xn; int at_xl; us_i64 at_xa;
 int at_expr(char *s, int n) {
     int k;
     while (n > 0 && at_sp(s[0])) { s = s + 1; n = n - 1; }
@@ -121,16 +122,16 @@ int at_expr(char *s, int n) {
    `.Ldata`/`.Lbss` the section starts, anything else undefined. */
 #define AT_MAXS 262144
 #define AT_MAXT 16777216                       /* text, data, tape: bytes */
-int at_nsym; int at_sname[AT_MAXS]; int at_snl[AT_MAXS]; int at_ssect[AT_MAXS]; long at_sval[AT_MAXS];
+int at_nsym; int at_sname[AT_MAXS]; int at_snl[AT_MAXS]; int at_ssect[AT_MAXS]; us_i64 at_sval[AT_MAXS];
 char at_sglob[AT_MAXS]; char at_sref[AT_MAXS]; char at_sdef[AT_MAXS]; char at_splaced[AT_MAXS];
 int at_unk;                                     /* the target is a text label not yet placed (first layout round) */
-int at_lround; long at_fwd;                      /* layout round; how far this item moved since the last round */
+int at_lround; us_i64 at_fwd;                      /* layout round; how far this item moved since the last round */
 char at_pool[8388608]; int at_pooln;
 #define AT_HASH 524288
 int at_hash[AT_HASH];                           /* symbol index + 1 */
 int at_dismode;
 int at_hfind(char *s, int n) {
-    unsigned long h; int k; int i;
+    us_u64 h; int k; int i;
     h = 5381; k = 0; while (k < n) { h = h * 33 + (s[k] & 255); k = k + 1; }
     i = (int)(h & (AT_HASH - 1));
     while (at_hash[i]) {
@@ -156,7 +157,7 @@ int at_sym(char *s, int n) {                    /* find or create */
 int at_local(char *s, int n) { return n >= 2 && s[0] == 46 && s[1] == 76; }   /* `.L...`: never in the symbol table */
 /* resolve the expression just parsed: section and value; *id is the symbol
    (for an undefined one) or -1 */
-int at_rsect; long at_rval; int at_rid;
+int at_rsect; us_i64 at_rval; int at_rid;
 int at_resolve(void) {
     int j;
     at_rid = 0 - 1;
@@ -165,7 +166,7 @@ int at_resolve(void) {
         if (at_is(at_xn, at_xl, ".Ldata")) { at_rsect = 2; at_rval = at_xa; return 1; }
         if (at_is(at_xn, at_xl, ".Lbss")) { at_rsect = 3; at_rval = at_xa; return 1; }
         if (at_xl > 2 && at_local(at_xn, at_xl)) {
-            long v; char tmp[24]; int k;
+            us_i64 v; char tmp[24]; int k;
             if (at_xl - 2 > 20) return 0;
             tmp[0] = 48; tmp[1] = 120; k = 2; while (k < at_xl) { tmp[k] = at_xn[k]; k = k + 1; }
             if (!at_num(tmp, at_xl, &v)) return 0;
@@ -190,8 +191,8 @@ int at_resolve(void) {
 
 /* ---- relocations produced by one instruction ----
    type: ELF type; rsect 1..3 section-relative, 0 a symbol (rid / name) */
-int at_nr; int at_roff[2]; int at_rtype[2]; int at_rs[2]; long at_radd[2]; int at_rsym[2]; char *at_rnm[2]; int at_rnl[2];
-int at_addrel(int off, int type, long add) {
+int at_nr; int at_roff[2]; int at_rtype[2]; int at_rs[2]; us_i64 at_radd[2]; int at_rsym[2]; char *at_rnm[2]; int at_rnl[2];
+int at_addrel(int off, int type, us_i64 add) {
     at_roff[at_nr] = off; at_rtype[at_nr] = type; at_rs[at_nr] = at_rsect; at_radd[at_nr] = add;
     at_rsym[at_nr] = at_rid; at_rnm[at_nr] = at_xn; at_rnl[at_nr] = at_xl;
     at_nr = at_nr + 1; return 0;
@@ -255,7 +256,7 @@ int at_xreg(char *s, int n, int *cls, int *hi) {
     }
     k = 0; while (k < 4) { if (at_is(s, n, at_r8h[k])) { *cls = 8; *hi = 1; return k + 4; } k = k + 1; }
     if (n >= 4 && n <= 5 && at_is(s, 3, "xmm")) {
-        long v; if (at_num(s + 3, n - 3, &v) && v >= 0 && v < 16) { *cls = 128; return (int)v; }
+        us_i64 v; if (at_num(s + 3, n - 3, &v) && v >= 0 && v < 16) { *cls = 128; return (int)v; }
     }
     return 0 - 1;
 }
@@ -265,9 +266,9 @@ int at_xreg(char *s, int n, int *cls, int *hi) {
 #define XO_MEM 3
 #define XO_TGT 4
 #define XO_IND 5                                /* *%reg */
-int xo_k[4]; int xo_cls[4]; int xo_r[4]; int xo_hi[4]; long xo_imm[4];
+int xo_k[4]; int xo_cls[4]; int xo_r[4]; int xo_hi[4]; us_i64 xo_imm[4];
 int xo_base[4]; int xo_idx[4]; int xo_sc[4]; int xo_rip[4];
-char *xo_xn[4]; int xo_xl[4]; long xo_xa[4]; int xo_got[4];   /* displacement / target expression */
+char *xo_xn[4]; int xo_xl[4]; us_i64 xo_xa[4]; int xo_got[4];   /* displacement / target expression */
 int at_xop(int i, char *s, int n) {
     int k; int cls; int hi; int r;
     xo_base[i] = 0 - 1; xo_idx[i] = 0 - 1; xo_sc[i] = 1; xo_rip[i] = 0; xo_xn[i] = s; xo_xl[i] = 0; xo_xa[i] = 0; xo_got[i] = 0;
@@ -310,7 +311,7 @@ int at_xop(int i, char *s, int n) {
                     if (e - b < 2 || p[b] != 37) return 0;
                     r = at_xreg(p + b + 1, e - b - 1, &c, &hi); if (r < 0 || c != 64 || r == 4) return 0; xo_idx[i] = r;
                 } else { if (part == 2) {
-                    long v; if (!at_num(p + b, e - b, &v)) return 0;
+                    us_i64 v; if (!at_num(p + b, e - b, &v)) return 0;
                     if (v != 1 && v != 2 && v != 4 && v != 8) return 0; xo_sc[i] = (int)v;
                 } else return 0; } }
             }
@@ -431,9 +432,9 @@ struct at_xrow at_xt[] = {
 /* encoding one x86 instruction */
 char *at_eo; int at_el;                         /* output, length */
 int at_eb(int b) { at_eo[at_el] = b; at_el = at_el + 1; return 0; }
-int at_e32(long v) { at_eb(v & 255); at_eb((v >> 8) & 255); at_eb((v >> 16) & 255); at_eb((v >> 24) & 255); return 0; }
-int at_fits8(long v) { return v >= -128 && v <= 127; }
-int at_fits32(long v) { return v >= -2147483648L && v <= 2147483647L; }
+int at_e32(us_i64 v) { at_eb(v & 255); at_eb((v >> 8) & 255); at_eb((v >> 16) & 255); at_eb((v >> 24) & 255); return 0; }
+int at_fits8(us_i64 v) { return v >= -128 && v <= 127; }
+int at_fits32(us_i64 v) { return v >= -2147483648L && v <= 2147483647L; }
 /* the REX byte for: W, reg field, rm operand i (or -1), opcode register (or -1) */
 int at_xrexw(int w, int reg, int i, int oreg, int byteregs) {
     int r; int x; int b; int need;
@@ -448,9 +449,9 @@ int at_xrexw(int w, int reg, int i, int oreg, int byteregs) {
 }
 /* modrm (+ SIB + displacement) for rm operand i with reg field reg; records
    the rip displacement position.  Returns 0 if the operand cannot be encoded. */
-int at_mpos; long at_mdisp; int at_mreloc;      /* rip field: where; value; relocated */
+int at_mpos; us_i64 at_mdisp; int at_mreloc;      /* rip field: where; value; relocated */
 int at_xmodrm(int reg, int i) {
-    int b; int mod; long d;
+    int b; int mod; us_i64 d;
     at_mpos = 0 - 1;
     if (xo_k[i] == XO_REG) { at_eb(192 | ((reg & 7) << 3) | (xo_r[i] & 7)); return 1; }
     if (xo_k[i] != XO_MEM) return 0;
@@ -478,8 +479,8 @@ int at_xbyte(int i, int *forbid) {
     return xo_r[i] >= 4 && xo_r[i] < 8;
 }
 /* fill the rip displacement once the length is known; relocations as needed */
-int at_xrip(int i, long addr) {
-    long end;
+int at_xrip(int i, us_i64 addr) {
+    us_i64 end;
     if (at_mpos < 0) return 1;
     end = addr + at_el;
     at_xn = xo_xn[i]; at_xl = xo_xl[i]; at_xa = xo_xa[i];
@@ -491,7 +492,7 @@ int at_xrip(int i, long addr) {
         return 1;
     }
     if (at_rsect == 1) {
-        long d; d = at_rval - end;
+        us_i64 d; d = at_rval - end;
         if (!at_fits32(d)) return 0;
         at_eo[at_mpos] = d & 255; at_eo[at_mpos + 1] = (d >> 8) & 255; at_eo[at_mpos + 2] = (d >> 16) & 255; at_eo[at_mpos + 3] = (d >> 24) & 255;
         return 1;
@@ -502,7 +503,7 @@ int at_xrip(int i, long addr) {
 int at_regcls(int i, int cls) { return xo_k[i] == XO_REG && xo_cls[i] == cls; }
 int at_rmcls(int i, int cls) { return (xo_k[i] == XO_REG && xo_cls[i] == cls) || xo_k[i] == XO_MEM; }
 /* try one row; 1 on success (bytes at at_eo) */
-int at_xtry(struct at_xrow *r, long addr, int forcelong) {
+int at_xtry(struct at_xrow *r, us_i64 addr, int forcelong) {
     int f; int forbid; int byt;
     f = r->form; forbid = 0; at_el = 0; at_nr = 0; at_mpos = 0 - 1;
     if (f == XF_NONE) {
@@ -530,7 +531,7 @@ int at_xtry(struct at_xrow *r, long addr, int forcelong) {
         return at_xrip(rm, addr);
     }
     if (f == XF_RM || f == XF_CLRM || f == XF_I8RM || f == XF_I32RM || f == XF_I8RMU) {
-        int rm; long imm;
+        int rm; us_i64 imm;
         rm = 0; imm = 0;
         if (f == XF_RM) { if (at_nop != 1) return 0; }
         else {
@@ -554,14 +555,14 @@ int at_xtry(struct at_xrow *r, long addr, int forcelong) {
         return at_xrip(rm, addr);
     }
     if (f == XF_OI32 || f == XF_OI64) {
-        long imm;
+        us_i64 imm;
         if (at_nop != 2 || xo_k[0] != XO_IMM || !at_regcls(1, r->sz)) return 0;
         imm = xo_imm[0];
         if (f == XF_OI32 && !(imm >= -2147483648L && imm <= 4294967295L)) return 0;
         at_xrexw(r->w, 0, 0 - 1, xo_r[1], 0);
         at_eb(r->op + (xo_r[1] & 7));
         at_e32(imm);
-        if (f == XF_OI64) at_e32((unsigned long)imm >> 32);
+        if (f == XF_OI64) at_e32((us_u64)imm >> 32);
         return 1;
     }
     if (f == XF_O) {
@@ -579,7 +580,7 @@ int at_xtry(struct at_xrow *r, long addr, int forcelong) {
         return 1;
     }
     if (f == XF_J8 || f == XF_J32 || f == XF_CALL) {
-        long d; int n;
+        us_i64 d; int n;
         if (at_nop != 1 || xo_k[0] != XO_TGT) return 0;
         at_xn = xo_xn[0]; at_xl = xo_xl[0]; at_xa = xo_xa[0];
         if (!at_resolve()) return 0;
@@ -626,7 +627,7 @@ int at_xtry(struct at_xrow *r, long addr, int forcelong) {
    not in the subset.  at_short tells the layout whether a short branch form
    was taken (so it can be forced long). */
 int at_short; int at_j32;
-int at_xenc(char *s, int n, long addr, int forcelong, char *out) {
+int at_xenc(char *s, int n, us_i64 addr, int forcelong, char *out) {
     int k; int i;
     at_eo = out; at_unk = 0;
     if (!at_split(s, n)) return 0 - 1;
@@ -652,23 +653,23 @@ int at_xname(int cls, int r, int rexp) {
     return at_ls(at_r8[r]);
 }
 /* relocation context for the instruction being decoded */
-long at_dbase;                                  /* text offset of the instruction */
-int at_drel; long at_drelo; int at_dtype; int at_dsym; long at_dadd;   /* a reloc in it */
+us_i64 at_dbase;                                  /* text offset of the instruction */
+int at_drel; us_i64 at_drelo; int at_dtype; int at_dsym; us_i64 at_dadd;   /* a reloc in it */
 char *at_dsnm[AT_MAXS]; int at_dsnl[AT_MAXS];   /* ELF symbol names, by index */
-int at_dsshn[AT_MAXS]; long at_dsval[AT_MAXS];
-char *at_tx; long at_txl;                       /* the text being decoded */
+int at_dsshn[AT_MAXS]; us_i64 at_dsval[AT_MAXS];
+char *at_tx; us_i64 at_txl;                       /* the text being decoded */
 char at_tgt[AT_MAXT]; char at_bnd[AT_MAXT];     /* label wanted at (1 branch target, 2 symbol); instruction starts at */
 /* print a target: section+offset, an ELF symbol, or a text label */
-int at_ltgt(int sym, long add) {
+int at_ltgt(int sym, us_i64 add) {
     if (sym == 1 && add >= 0 && add <= at_txl) at_tgt[add] = at_tgt[add] | 1;   /* a label is printed there */
-    if (sym == 1) { at_ls(".L"); { char d[24]; int n; unsigned long v; v = add; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v) { d[n] = "0123456789abcdef"[v & 15]; v = v >> 4; n = n + 1; } while (n > 0) { n = n - 1; at_lc(d[n]); } } return 0; }
+    if (sym == 1) { at_ls(".L"); { char d[24]; int n; us_u64 v; v = add; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v) { d[n] = "0123456789abcdef"[v & 15]; v = v >> 4; n = n + 1; } while (n > 0) { n = n - 1; at_lc(d[n]); } } return 0; }
     if (sym == 2) at_ls(".Ldata"); else { if (sym == 3) at_ls(".Lbss"); else at_lsn(at_dsnm[sym], at_dsnl[sym]); }
     if (add > 0) { at_lc(43); at_lhex(add); }
     if (add < 0) { at_lc(45); at_lhex(0 - add); }
     return 0;
 }
 int at_xmemprint(char *p, int len, int *k, int mod, int rm, int rex, int *ok) {
-    int b; int idx; int sc; long d;
+    int b; int idx; int sc; us_i64 d;
     if (rm == 4) {
         int sib; if (*k >= len) { *ok = 0; return 0; }
         sib = p[*k] & 255; *k = *k + 1;
@@ -677,7 +678,7 @@ int at_xmemprint(char *p, int len, int *k, int mod, int rm, int rex, int *ok) {
         if ((sib & 7) == 5 && mod == 0) { *ok = 0; return 0; }
     } else { b = rm | ((rex & 1) << 3); idx = 0 - 1; sc = 1; }
     if (mod == 0 && rm == 5) {                  /* rip */
-        long fo; fo = *k;
+        us_i64 fo; fo = *k;
         if (*k + 4 > len) { *ok = 0; return 0; }
         d = (int)at_rd(p + *k, 4); *k = *k + 4;
         /* displacement is relative to the END: printed once the length is known */
@@ -693,7 +694,7 @@ int at_xmemprint(char *p, int len, int *k, int mod, int rm, int rex, int *ok) {
     return 0;
 }
 /* decode one x86 instruction at text offset off; 0 if unknown, else length */
-int at_xdec(long off) {
+int at_xdec(us_i64 off) {
     char *p; int len; int k; int pfx; int rex; int op; int op2; int r; int m;
     p = at_tx + off; len = (int)(at_txl - off); if (len > 15) len = 15;
     k = 0; pfx = 0; rex = 0;
@@ -714,15 +715,15 @@ int at_xdec(long off) {
                 if (rex == 16) at_ls("{rex} ");
                 if (f == XF_NONE) { at_ls(t->mn); return kk; }
                 if (f == XF_OI32 || f == XF_OI64) {
-                    long imm; int rr; rr = (op & 7) | ((rex & 1) << 3);
-                    if (f == XF_OI32) { if (kk + 4 > len) return 0; imm = (long)at_rd(p + kk, 4); kk = kk + 4; }
-                    else { if (kk + 8 > len) return 0; imm = (long)at_rd(p + kk, 8); kk = kk + 8; }
+                    us_i64 imm; int rr; rr = (op & 7) | ((rex & 1) << 3);
+                    if (f == XF_OI32) { if (kk + 4 > len) return 0; imm = (us_i64)at_rd(p + kk, 4); kk = kk + 4; }
+                    else { if (kk + 8 > len) return 0; imm = (us_i64)at_rd(p + kk, 8); kk = kk + 8; }
                     at_ls(t->mn); at_lc(9); at_lc(36); at_lnum(imm); at_ls(", "); at_xname(t->sz, rr, 1);
                     return kk;
                 }
                 if (f == XF_O) { at_ln = 0; if (rex == 16) at_ls("{rex} "); at_ls(t->mn); at_lc(9); at_xname(64, (op & 7) | ((rex & 1) << 3), 1); return kk; }
                 if (f == XF_J8 || f == XF_J32 || f == XF_CALL) {
-                    long d; long tg;
+                    us_i64 d; us_i64 tg;
                     if (f == XF_J8) { if (kk >= len) return 0; d = (signed char)p[kk]; kk = kk + 1; }
                     else {
                         if (kk + 4 > len) return 0;
@@ -748,7 +749,7 @@ int at_xdec(long off) {
                 if (t->ext >= 0 && ((modrm >> 3) & 7) != t->ext) { m = m + 1; continue; }
                 if (f == XF_IND && mod != 3) { m = m + 1; continue; }
                 /* operands, printed into a scratch area then assembled in AT&T order */
-                {   char a1[160]; int l1; char a2[160]; int l2; int save; long imm; int fo;
+                {   char a1[160]; int l1; char a2[160]; int l2; int save; us_i64 imm; int fo;
                     l1 = 0; l2 = 0; fo = 0 - 1; imm = 0;
                     /* the rm operand */
                     save = at_ln;
@@ -773,14 +774,14 @@ int at_xdec(long off) {
                     if (f == XF_XXI) { if (kk >= len || (p[kk] & 255) != t->imm) { m = m + 1; continue; } kk = kk + 1; }
                     /* now a rip operand can be printed: the end is known */
                     if (ripf >= 0) {
-                        long d; d = (int)at_rd(p + ripf, 4);
+                        us_i64 d; d = (int)at_rd(p + ripf, 4);
                         at_ln = 0;
                         if (at_drel && at_drelo == off + ripf) {
                             if ((at_dtype != 2 && at_dtype != 9) || d != 0) return 0;
                             at_ltgt(at_dsym, at_dadd + (kk - ripf));
                             if (at_dtype == 9) at_ls("@GOTPCREL");
                         } else {
-                            long tg; tg = off + kk + d;
+                            us_i64 tg; tg = off + kk + d;
                             if (tg < 0 || tg > at_txl) return 0;
                             at_tgt[tg] = at_tgt[tg] | 1; at_ltgt(1, tg);
                         }
@@ -895,22 +896,22 @@ struct at_arow at_at[] = {
 };
 char *at_cond[16] = { "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv" };
 /* DecodeBitMasks for a 64-bit logical immediate; 0 when the fields are not valid */
-int at_bmdec(int nbit, int immr, int imms, unsigned long *out) {
-    int len; int esize; int levels; int s; int r; unsigned long welem; unsigned long v; int k;
+int at_bmdec(int nbit, int immr, int imms, us_u64 *out) {
+    int len; int esize; int levels; int s; int r; us_u64 welem; us_u64 v; int k;
     len = 6; if (nbit == 0) { len = 5; while (len > 0 && ((imms >> len) & 1)) len = len - 1; }
     if (nbit == 0 && len < 1) return 0;
     esize = 1 << len; levels = esize - 1;
     s = imms & levels; r = immr & levels;
     if (s == levels) return 0;
-    welem = (s + 1 == 64) ? ~(unsigned long)0 : (((unsigned long)1 << (s + 1)) - 1);
+    welem = (s + 1 == 64) ? ~(us_u64)0 : (((us_u64)1 << (s + 1)) - 1);
     if (r) { welem = (welem >> r) | (welem << (esize - r)); }
-    if (esize < 64) welem = welem & (((unsigned long)1 << esize) - 1);
+    if (esize < 64) welem = welem & (((us_u64)1 << esize) - 1);
     v = 0; k = 0; while (k < 64) { v = v | (welem << k); k = k + esize; }
     *out = v;
     return 1;
 }
-int at_bmenc(unsigned long v, unsigned int *field) {   /* N:immr:imms at [22:10], by search */
-    int nbit; int immr; int imms; unsigned long x;
+int at_bmenc(us_u64 v, unsigned int *field) {   /* N:immr:imms at [22:10], by search */
+    int nbit; int immr; int imms; us_u64 x;
     nbit = 0;
     while (nbit < 2) {
         imms = 0;
@@ -928,7 +929,7 @@ int at_bmenc(unsigned long v, unsigned int *field) {   /* N:immr:imms at [22:10]
 }
 /* ---- arm64 operand parse helpers ---- */
 int at_areg(char *s, int n, int want) {       /* want: 'x' 'X'(sp ok) 'w' 'd' 's'; register number or -1 */
-    long v;
+    us_i64 v;
     if (n < 2) return 0 - 1;
     if (want == 120 || want == 88) {
         if (at_is(s, n, "xzr")) return want == 120 ? 31 : 0 - 1;
@@ -943,18 +944,18 @@ int at_areg(char *s, int n, int want) {       /* want: 'x' 'X'(sp ok) 'w' 'd' 's
     }
     return (int)v;
 }
-int at_aimm(char *s, int n, long *v) {          /* #number */
+int at_aimm(char *s, int n, us_i64 *v) {          /* #number */
     if (n < 2 || s[0] != 35) return 0;
     return at_num(s + 1, n - 1, v);
 }
 /* "lsl #N" */
-int at_alsl(char *s, int n, long *v) {
+int at_alsl(char *s, int n, us_i64 *v) {
     if (n < 6 || !at_is(s, 4, "lsl ")) return 0;
     s = s + 4; n = n - 4; while (n > 0 && at_sp(s[0])) { s = s + 1; n = n - 1; }
     return at_aimm(s, n, v);
 }
 /* memory "[base]" / "[base, #off]" / "[base, xm, lsl #3]": fills at_mb, at_mo, at_mm */
-int at_mb; long at_mo; int at_mm;
+int at_mb; us_i64 at_mo; int at_mm;
 int at_amem(char *s, int n, int kind) {
     int k; int e; char *q; int ql;
     if (n < 4 || s[0] != 91 || s[n - 1] != 93) return 0;
@@ -971,7 +972,7 @@ int at_amem(char *s, int n, int kind) {
         return 1;
     }
     if (kind == 82) {
-        long sh; int c;
+        us_i64 sh; int c;
         c = 0; while (c < ql && q[c] != 44) c = c + 1;
         { int ce; ce = c; while (ce > 0 && at_sp(q[ce - 1])) ce = ce - 1; at_mm = at_areg(q, ce, 120); }
         if (at_mm < 0 || c >= ql) return 0;
@@ -983,7 +984,7 @@ int at_amem(char *s, int n, int kind) {
 }
 /* encode the arm64 line at s[0..n) as a word; -1 when not in the subset */
 unsigned int at_aw;
-int at_atry(struct at_arow *r, long addr) {
+int at_atry(struct at_arow *r, us_i64 addr) {
     char *sp; int oi; unsigned int w; int c;
     w = r->match; at_nr = 0;
     sp = r->spec; oi = 0;
@@ -998,7 +999,7 @@ int at_atry(struct at_arow *r, long addr) {
         char *o; int ol; c = *sp;
         if (c == 66) { sp = sp + 1; continue; }   /* B: done above */
         if (c == 72 || c == 83) {               /* optional shift operand */
-            long v;
+            us_i64 v;
             if (oi >= at_nop) { sp = sp + 1; continue; }
             if (!at_alsl(at_op[oi], at_opl[oi], &v)) return 0;
             if (c == 72) { if (v < 0 || v > 48 || v % 16) return 0; w = w | ((unsigned int)(v / 16) << 21); }
@@ -1022,7 +1023,7 @@ int at_atry(struct at_arow *r, long addr) {
             rr = at_areg(o, ol, want); if (rr < 0) return 0;
             w = w | ((unsigned int)rr << sh);
         } else { if (c == 105) {                 /* #imm12 */
-            long v; if (!at_aimm(o, ol, &v) || v < 0 || v > 4095) return 0;
+            us_i64 v; if (!at_aimm(o, ol, &v) || v < 0 || v > 4095) return 0;
             w = w | ((unsigned int)v << 10);
         } else { if (c == 111) {                 /* :lo12:expr */
             if (ol < 7 || !at_is(o, 6, ":lo12:")) return 0;
@@ -1030,10 +1031,10 @@ int at_atry(struct at_arow *r, long addr) {
             if (!at_resolve()) return 0;
             at_addrel(0, 277, at_rsect == 0 ? at_rval : at_rval);
         } else { if (c == 107) {                 /* #imm16 */
-            long v; if (!at_aimm(o, ol, &v) || v < 0 || v > 65535) return 0;
+            us_i64 v; if (!at_aimm(o, ol, &v) || v < 0 || v > 65535) return 0;
             w = w | ((unsigned int)v << 5);
         } else { if (c == 75) {                  /* #-(imm16+1) */
-            long v; if (!at_aimm(o, ol, &v) || v > -1 || v < -65536) return 0;
+            us_i64 v; if (!at_aimm(o, ol, &v) || v > -1 || v < -65536) return 0;
             w = w | ((unsigned int)(0 - v - 1) << 5);
         } else { if (c == 56 || c == 52 || c == 50 || c == 49) {
             int size; size = c - 48;
@@ -1052,7 +1053,7 @@ int at_atry(struct at_arow *r, long addr) {
             if (q >= 14) return 0;
             w = w | ((unsigned int)(q ^ 1) << 12);
         } else { if (c == 108 || c == 76 || c == 65) {   /* labels */
-            long d; int bits;
+            us_i64 d; int bits;
             if (!at_expr(o, ol) || at_xl == 0) return 0;
             if (!at_resolve()) return 0;
             if (at_rsect == 0 && c == 76 && r->match == 0x94000000) {   /* bl to a name defined elsewhere */
@@ -1067,7 +1068,7 @@ int at_atry(struct at_arow *r, long addr) {
                     if (d & 3) return 0;
                     bits = c == 76 ? 26 : 19;
                     d = d >> 2;
-                    if (d < -((long)1 << (bits - 1)) || d >= ((long)1 << (bits - 1))) return 0;
+                    if (d < -((us_i64)1 << (bits - 1)) || d >= ((us_i64)1 << (bits - 1))) return 0;
                     if (c == 76) w = w | (unsigned int)(d & 0x3FFFFFF); else w = w | ((unsigned int)(d & 0x7FFFF) << 5);
                 }
             }
@@ -1079,14 +1080,14 @@ int at_atry(struct at_arow *r, long addr) {
             if (got && at_rsect != 0) return 0;
             at_addrel(0, got ? 311 : 275, at_rval);
         } else { if (c == 90) {                  /* lsl #s = ubfm immr=-s, imms=63-s */
-            long v; if (!at_aimm(o, ol, &v) || v < 1 || v > 63) return 0;
+            us_i64 v; if (!at_aimm(o, ol, &v) || v < 1 || v > 63) return 0;
             w = w | ((unsigned int)((64 - v) & 63) << 16) | ((unsigned int)(63 - v) << 10);
         } else { if (c == 89) {
-            long v; if (!at_aimm(o, ol, &v) || v < 0 || v > 63) return 0;
+            us_i64 v; if (!at_aimm(o, ol, &v) || v < 0 || v > 63) return 0;
             w = w | ((unsigned int)v << 16);
         } else { if (c == 98) {
-            long v; unsigned int fld; if (!at_aimm(o, ol, &v)) return 0;
-            if (!at_bmenc((unsigned long)v, &fld)) return 0;
+            us_i64 v; unsigned int fld; if (!at_aimm(o, ol, &v)) return 0;
+            if (!at_bmenc((us_u64)v, &fld)) return 0;
             w = w | fld;
         } else return 0; } } } } } } } } } } } } }
         oi = oi + 1; sp = sp + 1;
@@ -1095,7 +1096,7 @@ int at_atry(struct at_arow *r, long addr) {
     at_aw = w;
     return 1;
 }
-int at_aenc(char *s, int n, long addr, char *out) {
+int at_aenc(char *s, int n, us_i64 addr, char *out) {
     int k;
     at_eo = out; at_el = 0; at_unk = 0;
     if (!at_split(s, n) || at_rex) return 0 - 1;
@@ -1117,7 +1118,7 @@ int at_aname(int kind, int r) {
     if (kind == 119) { if (r == 31) return at_ls("wzr"); at_lc(119); return at_ldec(r); }
     at_lc(kind); return at_ldec(r);
 }
-int at_adec_row(struct at_arow *r, unsigned int w, long off) {
+int at_adec_row(struct at_arow *r, unsigned int w, us_i64 off) {
     char *sp; int first; int c;
     at_ln = 0;
     if (r->mn[0] == 98 && r->mn[1] == 46) { at_ls("b."); if ((w & 15) >= 14) return 0; at_ls(at_cond[w & 15]); }
@@ -1154,22 +1155,22 @@ int at_adec_row(struct at_arow *r, unsigned int w, long off) {
             at_ls(":lo12:"); at_ltgt(at_dsym, at_dadd);
         }
         if (c == 107) { at_lc(35); at_lhex((w >> 5) & 65535); }
-        if (c == 75) { at_lc(35); at_lnum(0 - (long)((w >> 5) & 65535) - 1); }
+        if (c == 75) { at_lc(35); at_lnum(0 - (us_i64)((w >> 5) & 65535) - 1); }
         if (c == 56 && at_drel && at_drelo == off) {
             if (at_dtype != 312 || ((w >> 10) & 4095) || at_dsym < 4) return 0;
             at_lc(91); at_aname(88, (w >> 5) & 31); at_ls(", :got_lo12:"); at_ltgt(at_dsym, at_dadd); at_lc(93);
         } else if (c == 56 || c == 52 || c == 50 || c == 49) {
-            long o; o = ((w >> 10) & 4095) * (c - 48);
+            us_i64 o; o = ((w >> 10) & 4095) * (c - 48);
             at_lc(91); at_aname(88, (w >> 5) & 31); if (o) { at_ls(", #"); at_lhex(o); } at_lc(93);
         }
         if (c == 85) {
-            long o; o = (w >> 12) & 511; if (o & 256) o = o - 512;
+            us_i64 o; o = (w >> 12) & 511; if (o & 256) o = o - 512;
             at_lc(91); at_aname(88, (w >> 5) & 31); if (o) { at_ls(", #"); at_lnum(o); } at_lc(93);
         }
         if (c == 82) { at_lc(91); at_aname(88, (w >> 5) & 31); at_ls(", "); at_aname(120, (w >> 16) & 31); at_ls(", lsl #3]"); }
         if (c == 99) { int q; q = ((w >> 12) & 15) ^ 1; if (q >= 14) return 0; at_ls(at_cond[q]); }
         if (c == 108 || c == 76 || c == 65) {
-            long d; long tg;
+            us_i64 d; us_i64 tg;
             if (c == 76 && at_drel && at_drelo == off) {
                 if (at_dtype != 283 || (w & 0x3FFFFFF) || at_dsym < 4) return 0;
                 at_ltgt(at_dsym, at_dadd);
@@ -1194,7 +1195,7 @@ int at_adec_row(struct at_arow *r, unsigned int w, long off) {
         }
         if (c == 89) { at_lc(35); at_ldec((w >> 16) & 63); }
         if (c == 98) {
-            unsigned long v; if (!at_bmdec((w >> 22) & 1, (w >> 16) & 63, (w >> 10) & 63, &v)) return 0;
+            us_u64 v; if (!at_bmdec((w >> 22) & 1, (w >> 16) & 63, (w >> 10) & 63, &v)) return 0;
             at_lc(35); at_lhex(v);
         }
         sp = sp + 1;
@@ -1205,16 +1206,16 @@ int at_adec_row(struct at_arow *r, unsigned int w, long off) {
 /* ==== the disassembler ==== */
 int at_arch;                                    /* 0 x86-64, 1 arm64 */
 char at_chk[32];
-long at_nfall;                                  /* instructions printed as bytes */
-int at_secto(char *o, long n, int i, long *off, long *size, long shoff) {
+us_i64 at_nfall;                                  /* instructions printed as bytes */
+int at_secto(char *o, us_i64 n, int i, us_i64 *off, us_i64 *size, us_i64 shoff) {
     char *h; h = o + shoff + 64 * i;
-    *off = (long)at_rd(h + 24, 8); *size = (long)at_rd(h + 32, 8);
+    *off = (us_i64)at_rd(h + 24, 8); *size = (us_i64)at_rd(h + 32, 8);
     if (*off < 0 || *size < 0 || (at_rd(h + 4, 4) != 8 && *off + *size > n)) return 0;
     return 1;
 }
 /* check the instruction just printed: assembled again it must give these bytes */
-long at_rofs[262144]; int at_rty[262144]; int at_rsy[262144]; long at_rad[262144]; int at_nrel;
-int at_verify(long off, int len) {
+us_i64 at_rofs[262144]; int at_rty[262144]; int at_rsy[262144]; us_i64 at_rad[262144]; int at_nrel;
+int at_verify(us_i64 off, int len) {
     int got; int k;
     at_dismode = 1;
     if (at_arch) got = at_aenc(at_lb, at_ln, off, at_chk);
@@ -1231,8 +1232,8 @@ int at_verify(long off, int len) {
     } else { if (at_nr != 0) return 0; }
     return 1;
 }
-int at_bytes(char *p, long n, int perline) {
-    long k; int c;
+int at_bytes(char *p, us_i64 n, int perline) {
+    us_i64 k; int c;
     k = 0;
     while (k < n) {
         at_s("\t.byte\t");
@@ -1247,9 +1248,9 @@ int at_bytes(char *p, long n, int perline) {
     return 0;
 }
 /* the instruction at text offset off: length (0: not decodable); text in at_lb */
-long at_relcur;
-int at_decode(long off) {
-    int len; long e;
+us_i64 at_relcur;
+int at_decode(us_i64 off) {
+    int len; us_i64 e;
     /* the relocation inside this instruction, if any */
     at_drel = 0;
     while (at_relcur < at_nrel && at_rofs[at_relcur] < off) at_relcur = at_relcur + 1;
@@ -1274,14 +1275,14 @@ int at_decode(long off) {
     if (!at_verify(off, len)) return 0;
     return len;
 }
-int at_dis(char *o, long n) {
-    long shoff; int shnum; long toff; long dsz; long doff; long bsz; long roff; long rsz; long soff; long ssz; long stoff; long stsz; long tpoff; long tpsz; long x;
-    int i; int nsym; int nloc; long off;
+int at_dis(char *o, us_i64 n) {
+    us_i64 shoff; int shnum; us_i64 toff; us_i64 dsz; us_i64 doff; us_i64 bsz; us_i64 roff; us_i64 rsz; us_i64 soff; us_i64 ssz; us_i64 stoff; us_i64 stsz; us_i64 tpoff; us_i64 tpsz; us_i64 x;
+    int i; int nsym; int nloc; us_i64 off;
     at_err = 0; at_on = 0; at_nfall = 0;
     if (n < 64 || at_rd(o, 4) != 0x464C457F || (o[4] & 255) != 2 || at_rd(o + 16, 2) != 1) { at_err = "not an ELF relocatable object"; return 1; }
-    x = (long)at_rd(o + 18, 2);
+    x = (us_i64)at_rd(o + 18, 2);
     if (x == 62) at_arch = 0; else { if (x == 183) at_arch = 1; else { at_err = "ELF machine is neither x86-64 nor arm64"; return 1; } }
-    shoff = (long)at_rd(o + 40, 8); shnum = (int)at_rd(o + 60, 2);
+    shoff = (us_i64)at_rd(o + 40, 8); shnum = (int)at_rd(o + 60, 2);
     if ((shnum != 8 && shnum != 9) || shoff + 64 * shnum > n) { at_err = "not an object unisacc wrote (section count)"; return 1; }
     if (!at_secto(o, n, 1, &toff, &at_txl, shoff) || !at_secto(o, n, 2, &doff, &dsz, shoff) || !at_secto(o, n, 3, &x, &bsz, shoff)
         || !at_secto(o, n, 4, &roff, &rsz, shoff) || !at_secto(o, n, 5, &soff, &ssz, shoff) || !at_secto(o, n, 6, &stoff, &stsz, shoff)) { at_err = "section outside the file"; return 1; }
@@ -1293,10 +1294,10 @@ int at_dis(char *o, long n) {
     if (nsym > AT_MAXS || nsym < 4) { at_err = "symbol table"; return 1; }
     i = 0;
     while (i < nsym) {
-        char *s; long nm; s = o + soff + 24 * i;
-        nm = (long)at_rd(s, 4); if (nm >= stsz) { at_err = "symbol name"; return 1; }
+        char *s; us_i64 nm; s = o + soff + 24 * i;
+        nm = (us_i64)at_rd(s, 4); if (nm >= stsz) { at_err = "symbol name"; return 1; }
         at_dsnm[i] = o + stoff + nm; at_dsnl[i] = at_slen(at_dsnm[i]);
-        at_dsshn[i] = (int)at_rd(s + 6, 2); at_dsval[i] = (long)at_rd(s + 8, 8);
+        at_dsshn[i] = (int)at_rd(s + 6, 2); at_dsval[i] = (us_i64)at_rd(s + 8, 8);
         if (i >= 4) {
             int q; q = 0;
             if (at_dsnl[i] == 0 || (at_dsnm[i][0] >= 48 && at_dsnm[i][0] <= 57) || at_local(at_dsnm[i], at_dsnl[i])) { at_err = "a symbol name assembly cannot spell"; return 1; }
@@ -1309,7 +1310,7 @@ int at_dis(char *o, long n) {
     i = 0;
     while (i < at_nrel) {
         char *r; r = o + roff + 24 * i;
-        at_rofs[i] = (long)at_rd(r, 8); at_rty[i] = (int)at_rd(r + 8, 4); at_rsy[i] = (int)at_rd(r + 12, 4); at_rad[i] = (long)at_rd(r + 16, 8);
+        at_rofs[i] = (us_i64)at_rd(r, 8); at_rty[i] = (int)at_rd(r + 8, 4); at_rsy[i] = (int)at_rd(r + 12, 4); at_rad[i] = (us_i64)at_rd(r + 16, 8);
         if (at_rsy[i] >= nsym || at_rsy[i] < 1 || (i > 0 && at_rofs[i] <= at_rofs[i - 1])) { at_err = "relocations out of order"; return 1; }
         i = i + 1;
     }
@@ -1365,7 +1366,7 @@ int at_dis(char *o, long n) {
     at_s("\t.data\n\t.p2align 4\n.Ldata:\n");
     off = 0;
     while (off <= dsz) {
-        long nx;
+        us_i64 nx;
         i = 4; while (i < nsym) { if (at_dsshn[i] == 2 && at_dsval[i] == off) { at_sn(at_dsnm[i], at_dsnl[i]); at_s(":\n"); } i = i + 1; }
         if (off == dsz) break;
         nx = dsz; i = 4; while (i < nsym) { if (at_dsshn[i] == 2 && at_dsval[i] > off && at_dsval[i] < nx) nx = at_dsval[i]; i = i + 1; }
@@ -1375,7 +1376,7 @@ int at_dis(char *o, long n) {
     at_s("\t.bss\n\t.p2align 4\n.Lbss:\n");
     off = 0;
     while (off <= bsz) {
-        long nx;
+        us_i64 nx;
         i = 4; while (i < nsym) { if (at_dsshn[i] == 3 && at_dsval[i] == off) { at_sn(at_dsnm[i], at_dsnl[i]); at_s(":\n"); } i = i + 1; }
         if (off == bsz) break;
         nx = bsz; i = 4; while (i < nsym) { if (at_dsshn[i] == 3 && at_dsval[i] > off && at_dsval[i] < nx) nx = at_dsval[i]; i = i + 1; }
@@ -1383,7 +1384,7 @@ int at_dis(char *o, long n) {
         off = nx;
     }
     if (tpsz) {
-        long k;
+        us_i64 k;
         at_s(at_arch ? "\t.section\t.unisa.tape,\"\",%progbits\n" : "\t.section\t.unisa.tape,\"\",@progbits\n");
         k = 0;
         while (k < tpsz) {
@@ -1412,21 +1413,21 @@ int at_nmlt(int a, int b) {                    /* name a sorts before name b (by
     }
     return at_dsnl[a] < at_dsnl[b];
 }
-int at_nm(char *o, long n) {
-    long shoff; int shnum; long soff; long ssz; long stoff; long stsz; int nsym; int nloc; int i; int m;
+int at_nm(char *o, us_i64 n) {
+    us_i64 shoff; int shnum; us_i64 soff; us_i64 ssz; us_i64 stoff; us_i64 stsz; int nsym; int nloc; int i; int m;
     at_err = 0; at_on = 0;
     if (n < 64 || at_rd(o, 4) != 0x464C457F || (o[4] & 255) != 2 || at_rd(o + 16, 2) != 1) { at_err = "not an ELF relocatable object"; return 1; }
-    shoff = (long)at_rd(o + 40, 8); shnum = (int)at_rd(o + 60, 2);
+    shoff = (us_i64)at_rd(o + 40, 8); shnum = (int)at_rd(o + 60, 2);
     if ((shnum != 8 && shnum != 9) || shoff + 64 * shnum > n) { at_err = "not an object unisacc wrote (section count)"; return 1; }
     if (!at_secto(o, n, 5, &soff, &ssz, shoff) || !at_secto(o, n, 6, &stoff, &stsz, shoff)) { at_err = "section outside the file"; return 1; }
     nsym = (int)(ssz / 24); nloc = (int)at_rd(o + shoff + 64 * 5 + 44, 4);
     if (nsym > AT_MAXS) { at_err = "symbol table"; return 1; }
     m = 0; i = 4;
     while (i < nsym) {
-        char *s; long nm; s = o + soff + 24 * i;
-        nm = (long)at_rd(s, 4); if (nm >= stsz) { at_err = "symbol name"; return 1; }
+        char *s; us_i64 nm; s = o + soff + 24 * i;
+        nm = (us_i64)at_rd(s, 4); if (nm >= stsz) { at_err = "symbol name"; return 1; }
         at_dsnm[i] = o + stoff + nm; at_dsnl[i] = at_slen(at_dsnm[i]);
-        at_dsshn[i] = (int)at_rd(s + 6, 2); at_dsval[i] = (long)at_rd(s + 8, 8);
+        at_dsshn[i] = (int)at_rd(s + 6, 2); at_dsval[i] = (us_i64)at_rd(s + 8, 8);
         {   int j; j = m; while (j > 0 && at_nmlt(i, at_nmord[j - 1])) { at_nmord[j] = at_nmord[j - 1]; j = j - 1; } at_nmord[j] = i; }
         m = m + 1; i = i + 1;
     }
@@ -1437,7 +1438,7 @@ int at_nm(char *o, long n) {
         else {
             c = at_dsshn[j] == 1 ? 116 : (at_dsshn[j] == 2 ? 100 : 98);
             if (j >= nloc) c = c - 32;
-            {   char d[17]; int k; unsigned long v; v = at_dsval[j]; k = 15;
+            {   char d[17]; int k; us_u64 v; v = at_dsval[j]; k = 15;
                 while (k >= 0) { d[k] = "0123456789abcdef"[v & 15]; v = v >> 4; k = k - 1; }
                 at_sn(d, 16); }
             at_c(32); at_c(c); at_c(32);
@@ -1452,31 +1453,31 @@ int at_nm(char *o, long n) {
 /* ==== the assembler ==== */
 /* items: one per text line that emits (instruction or bytes) or defines a label */
 #define AT_MAXI 2097152
-char *at_il[AT_MAXI]; int at_ilen[AT_MAXI]; int at_iline[AT_MAXI]; long at_iaddr[AT_MAXI]; char at_ik[AT_MAXI]; char at_ilong[AT_MAXI]; int at_isym[AT_MAXI]; int at_isz[AT_MAXI];
+char *at_il[AT_MAXI]; int at_ilen[AT_MAXI]; int at_iline[AT_MAXI]; us_i64 at_iaddr[AT_MAXI]; char at_ik[AT_MAXI]; char at_ilong[AT_MAXI]; int at_isym[AT_MAXI]; int at_isz[AT_MAXI];
 int at_ni;
-char at_ttext[AT_MAXT]; long at_tn;              /* final text */
-char at_tdata[AT_MAXT]; long at_dn; long at_bn;
-char at_ttape[AT_MAXT]; long at_tpn;
-long at_aoff[262144]; int at_atype[262144]; int at_asect[262144]; int at_asym[262144]; long at_aadd[262144]; int at_nar;
+char at_ttext[AT_MAXT]; us_i64 at_tn;              /* final text */
+char at_tdata[AT_MAXT]; us_i64 at_dn; us_i64 at_bn;
+char at_ttape[AT_MAXT]; us_i64 at_tpn;
+us_i64 at_aoff[262144]; int at_atype[262144]; int at_asect[262144]; int at_asym[262144]; us_i64 at_aadd[262144]; int at_nar;
 int at_cursec;                                  /* 1 text 2 data 3 bss 4 tape */
 int at_lineno;
 int at_aerr(char *m) { at_err = m; return 1; }
 /* define a label in the current section at the current offset */
-int at_deflabel(char *s, int n, long val) {
+int at_deflabel(char *s, int n, us_i64 val) {
     int j; j = at_sym(s, n); if (j < 0) return 1;
     if (at_sdef[j] && !(at_ssect[j] == at_cursec && at_sval[j] == val)) return at_aerr("as: symbol defined twice");
     at_sdef[j] = 1; at_ssect[j] = at_cursec; at_sval[j] = val;
     return 0;
 }
 /* data directives: bytes into buf at *len */
-int at_datadir(char *s, int n, char *buf, long *len, int nobits) {
+int at_datadir(char *s, int n, char *buf, us_i64 *len, int nobits) {
     int k; k = 0; while (k < n && !at_sp(s[k])) k = k + 1;
     if (at_is(s, k, ".byte")) {
         char *p; int pl; int a; int b;
         if (nobits) return at_aerr("as: .byte in .bss");
         p = s + k; pl = n - k; a = 0;
         while (a < pl) {
-            long v; b = a; while (b < pl && p[b] != 44) b = b + 1;
+            us_i64 v; b = a; while (b < pl && p[b] != 44) b = b + 1;
             { int x; int y; x = a; y = b; while (x < y && at_sp(p[x])) x = x + 1; while (y > x && at_sp(p[y - 1])) y = y - 1;
               if (!at_num(p + x, y - x, &v) || v < -128 || v > 255) return at_aerr("as: bad .byte value"); }
             if (*len >= AT_MAXT) return at_aerr("as: section too large");
@@ -1485,9 +1486,9 @@ int at_datadir(char *s, int n, char *buf, long *len, int nobits) {
         return 0;
     }
     if (at_is(s, k, ".zero") || at_is(s, k, ".skip") || at_is(s, k, ".space")) {
-        long v; int x; x = k; while (x < n && at_sp(s[x])) x = x + 1;
+        us_i64 v; int x; x = k; while (x < n && at_sp(s[x])) x = x + 1;
         if (!at_num(s + x, n - x, &v) || v < 0 || *len + v >= AT_MAXT) return at_aerr("as: bad .zero size");
-        if (!nobits) { long q; q = 0; while (q < v) { buf[*len + q] = 0; q = q + 1; } }
+        if (!nobits) { us_i64 q; q = 0; while (q < v) { buf[*len + q] = 0; q = q + 1; } }
         *len = *len + v; return 0;
     }
     if (at_is(s, k, ".ascii") || at_is(s, k, ".asciz") || at_is(s, k, ".string")) {
@@ -1511,10 +1512,10 @@ int at_datadir(char *s, int n, char *buf, long *len, int nobits) {
         return 0;
     }
     if (at_is(s, k, ".p2align") || at_is(s, k, ".balign") || at_is(s, k, ".align")) {
-        long v; long a; int x; int e; x = k; while (x < n && at_sp(s[x])) x = x + 1;
+        us_i64 v; us_i64 a; int x; int e; x = k; while (x < n && at_sp(s[x])) x = x + 1;
         e = x; while (e < n && s[e] != 44) e = e + 1;
         { int y; y = e; while (y > x && at_sp(s[y - 1])) y = y - 1; if (!at_num(s + x, y - x, &v)) return at_aerr("as: bad alignment"); }
-        a = at_is(s, k, ".p2align") ? ((long)1 << v) : v;
+        a = at_is(s, k, ".p2align") ? ((us_i64)1 << v) : v;
         if (a <= 0 || a > 4096 || (a & (a - 1))) return at_aerr("as: bad alignment");
         if (a > 16) return at_aerr("as: alignment above 16 is not in the subset");
         while (*len % a) { if (!nobits) buf[*len] = 0; *len = *len + 1; }
@@ -1523,11 +1524,11 @@ int at_datadir(char *s, int n, char *buf, long *len, int nobits) {
     return at_aerr("as: directive not in the subset");
 }
 /* one pass over the source: sections, labels, directives; text lines become items */
-int at_parse(char *src, long n) {
-    long p; at_ni = 0; at_cursec = 1; at_dn = 0; at_bn = 0; at_tpn = 0; at_lineno = 0;
+int at_parse(char *src, us_i64 n) {
+    us_i64 p; at_ni = 0; at_cursec = 1; at_dn = 0; at_bn = 0; at_tpn = 0; at_lineno = 0;
     p = 0;
     while (p < n) {
-        long e; char *s; int l; int k;
+        us_i64 e; char *s; int l; int k;
         e = p; while (e < n && src[e] != 10) e = e + 1;
         s = src + p; l = (int)(e - p); p = e + 1; at_lineno = at_lineno + 1;
         /* comments: `#` at line start; `//` (arm64) or `#` after an operand (x86) */
@@ -1616,7 +1617,7 @@ int at_rawitem(int i, char *out) {
     char *s; int l; int k; int n;
     s = at_il[i]; l = at_ilen[i]; k = 0; while (k < l && !at_sp(s[k])) k = k + 1;
     if (at_is(s, k, ".inst")) {
-        long v; int x; x = k; while (x < l && at_sp(s[x])) x = x + 1;
+        us_i64 v; int x; x = k; while (x < l && at_sp(s[x])) x = x + 1;
         if (!at_num(s + x, l - x, &v)) return 0 - 1;
         out[0] = v & 255; out[1] = (v >> 8) & 255; out[2] = (v >> 16) & 255; out[3] = (v >> 24) & 255;
         return 4;
@@ -1624,7 +1625,7 @@ int at_rawitem(int i, char *out) {
     n = 0;
     {   int a; int b; a = k;
         while (a < l) {
-            long v; b = a; while (b < l && s[b] != 44) b = b + 1;
+            us_i64 v; b = a; while (b < l && s[b] != 44) b = b + 1;
             { int x; int y; x = a; y = b; while (x < y && at_sp(s[x])) x = x + 1; while (y > x && at_sp(s[y - 1])) y = y - 1;
               if (!at_num(s + x, y - x, &v) || v < -128 || v > 255 || n >= 32) return 0 - 1; }
             out[n] = v & 255; n = n + 1; a = b + 1;
@@ -1634,7 +1635,7 @@ int at_rawitem(int i, char *out) {
 }
 /* lay out .text until stable, then write it with its relocations */
 int at_layout(void) {
-    int changed; int round; int i; long addr; char buf[64];
+    int changed; int round; int i; us_i64 addr; char buf[64];
     /* every text label is known to be text before the first round */
     i = 0;
     while (i < at_ni) {
@@ -1701,16 +1702,16 @@ int at_layout(void) {
 /* ELF output, exactly the layout of bk_elfobj */
 char at_wbuf[65536]; int at_wn;
 int at_wb(int b) { at_wbuf[at_wn] = b; at_wn = at_wn + 1; if (at_wn == 65536) { at_wr(at_wbuf, at_wn); at_wn = 0; } return 0; }
-int at_w16(long v) { at_wb(v & 255); at_wb((v >> 8) & 255); return 0; }
-int at_w32(long v) { at_w16(v & 65535); at_w16((v >> 16) & 65535); return 0; }
-int at_w64(long v) { at_w32(v & 4294967295L); at_w32((v >> 32) & 4294967295L); return 0; }
-int at_wz(long n) { while (n > 0) { at_wb(0); n = n - 1; } return 0; }
+int at_w16(us_i64 v) { at_wb(v & 255); at_wb((v >> 8) & 255); return 0; }
+int at_w32(us_i64 v) { at_w16(v & 65535); at_w16((v >> 16) & 65535); return 0; }
+int at_w64(us_i64 v) { at_w32(v & 4294967295L); at_w32((v >> 32) & 4294967295L); return 0; }
+int at_wz(us_i64 n) { while (n > 0) { at_wb(0); n = n - 1; } return 0; }
 int at_wstr(char *s, int n) { int k; k = 0; while (k < n) { at_wb(s[k]); k = k + 1; } return 0; }
-long at_round(long v, long a) { return (v + a - 1) / a * a; }
+us_i64 at_round(us_i64 v, us_i64 a) { return (v + a - 1) / a * a; }
 int at_kind[AT_MAXS]; int at_pos[AT_MAXS];
 int at_elf(void) {
-    long L; long bss; long tend; long doff; long roff; long soff; long stoff; long shsoff; long shoff; long nsym; long strl; long tlen; long toff8;
-    int j; int kind; int n1; int n2; int n3; long name; int k;
+    us_i64 L; us_i64 bss; us_i64 tend; us_i64 doff; us_i64 roff; us_i64 soff; us_i64 stoff; us_i64 shsoff; us_i64 shoff; us_i64 nsym; us_i64 strl; us_i64 tlen; us_i64 toff8;
+    int j; int kind; int n1; int n2; int n3; us_i64 name; int k;
     L = at_dn; bss = at_bn;
     j = 0; n1 = 0; n2 = 0; n3 = 0;
     while (j < at_nsym) {
@@ -1749,11 +1750,11 @@ int at_elf(void) {
     at_w64(0); at_w64(0); at_w64(shoff);
     at_w32(0); at_w16(64); at_w16(0); at_w16(0); at_w16(64); at_w16(tlen ? 9 : 8); at_w16(7);
     at_wstr(at_ttext, (int)at_tn); at_wz(doff - tend);
-    { long q; q = 0; while (q < L) { at_wb(at_tdata[q]); q = q + 1; } }
+    { us_i64 q; q = 0; while (q < L) { at_wb(at_tdata[q]); q = q + 1; } }
     at_wz(roff - (doff + L));
     k = 0;
     while (k < at_nar) {
-        long sym;
+        us_i64 sym;
         if (at_asect[k] >= 1 && at_asect[k] <= 3) sym = at_asect[k]; else sym = 4 + at_pos[at_asym[k]];
         at_w64(at_aoff[k]); at_w32(at_atype[k]); at_w32(sym); at_w64(at_aadd[k]);
         k = k + 1;
@@ -1766,7 +1767,7 @@ int at_elf(void) {
         j = 0;
         while (j < at_nsym) {
             if (at_kind[j] == kind) {
-                int info; int shn; long val;
+                int info; int shn; us_i64 val;
                 info = kind == 1 ? 0 : 16; shn = 0; val = 0;
                 if (kind != 3) {
                     shn = at_ssect[j]; val = at_sval[j];
@@ -1783,7 +1784,7 @@ int at_elf(void) {
     while (kind <= 3) { j = 0; while (j < at_nsym) { if (at_kind[j] == kind) { at_wstr(at_pool + at_sname[j], at_snl[j]); at_wb(0); } j = j + 1; } kind = kind + 1; }
     at_wstr("", 1); at_wstr(".text", 6); at_wstr(".data", 6); at_wstr(".bss", 5); at_wstr(".rela.text", 11);
     at_wstr(".symtab", 8); at_wstr(".strtab", 8); at_wstr(".shstrtab", 10);
-    if (tlen) { at_wstr(".unisa.tape", 12); { long q; q = 0; while (q < tlen) { at_wb(at_ttape[q]); q = q + 1; } } }
+    if (tlen) { at_wstr(".unisa.tape", 12); { us_i64 q; q = 0; while (q < tlen) { at_wb(at_ttape[q]); q = q + 1; } } }
     at_wz(shoff - (toff8 + tlen));
 #define AT_SH(nm, ty, fl, of, sz, ln, inf, al, es) { at_w32(nm); at_w32(ty); at_w64(fl); at_w64(0); at_w64(of); at_w64(sz); at_w32(ln); at_w32(inf); at_w64(al); at_w64(es); }
     AT_SH(0, 0, 0, 0, 0, 0, 0, 0, 0);
@@ -1800,7 +1801,7 @@ int at_elf(void) {
     return 0;
 }
 /* assemble src[0..n) for arch (0 x86-64, 1 arm64); the object goes through at_wr */
-int at_asm(char *src, long n, int arch) {
+int at_asm(char *src, us_i64 n, int arch) {
     int k;
     at_err = 0; at_arch = arch; at_nsym = 0; at_pooln = 0;
     k = 0; while (k < AT_HASH) { at_hash[k] = 0; k = k + 1; }
@@ -1820,7 +1821,7 @@ int at_asm(char *src, long n, int arch) {
 int at_say(char *m) { __write(2, m, blen(m)); return 0; }
 /* `unisacc nm FILE.o`, `unisacc objdump -d FILE.o` (Linux objects; R18-4) */
 int at_view(int argc) {
-    char *a; char *f; int fd; long n; int dis;
+    char *a; char *f; int fd; us_i64 n; int dis;
     a = __argv(1); dis = a[0] == 111;
     f = __argv(dis ? 3 : 2);
     if (dis && (argc != 4 || !strsame(__argv(2), "-d"))) { at_say("usage: unisacc objdump -d FILE.o\n"); return 2; }
@@ -1833,7 +1834,7 @@ int at_view(int argc) {
     return 0;
 }
 int at_main(int argc) {
-    int i; char *in; char *out; int arch; int fd; long n; char *a;
+    int i; char *in; char *out; int arch; int fd; us_i64 n; char *a;
     in = 0; out = "a.out"; arch = 0 - 1;
     i = 2;
     while (i < argc) {

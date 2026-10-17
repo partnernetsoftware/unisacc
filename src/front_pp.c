@@ -52,7 +52,7 @@ char *vc_ptr[16]; int vc_slot[16];
 int v_slot(char *v) {
     int i; int p; int n; int h;
     if (v == v_last) return v_lastslot;
-    h = (int)(((long)v >> 3) & 15);
+    h = (int)(((uintptr_t)v >> 3) & (uintptr_t)15);
     if (vc_ptr[h] == v) { v_last = v; v_lastslot = vc_slot[h]; return vc_slot[h]; }
     i = 0;
     while (i < v_nlists) {
@@ -131,7 +131,7 @@ int vfind(char *v, int n, char *s, int slen) {
     sl = v_slot(v);
     if (sl < 0) return vfind_walk(v, n, s, slen);
     if (v_n[sl] < n) return vfind_walk(v, n, s, slen);
-    c = ((int)((long)s & 1048575) * 7 + slen) & (VC_SIZE - 1);
+    c = ((int)((uintptr_t)s & (uintptr_t)1048575) * 7 + slen) & (VC_SIZE - 1);
     if (vc_s[c] == s) { if (vc_v[c] == v) { if (vc_l[c] == slen) {
         e = vc_r[c];
         if (vsame(v, v_idx[sl * V_NIDX + e], s, slen)) { if (e < n) return e; return 0 - 1; }

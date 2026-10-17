@@ -55,9 +55,9 @@ int fe_units_fwd(char **inputs, int *ninput, char *t, int fwd) {
 }
 int main(void) {
     int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror; int force_origin; int emitbin;
-    char *a; char *t; long e; int n; int j;
+    char *a; char *t; us_addr e; int n; int j;
     char *outpath;
-    int (*entry)(long, long);
+    int (*entry)(us_i64, us_addr);
     int objwant; int bgiven; int funit; int asmwant; int sgiven;
     srcroom(0);
     asmwant = 0; sgiven = 0;
@@ -280,8 +280,8 @@ int main(void) {
         runargv[k] = 0;
         /* bk_run writes argc/argv into the program's own cells, so this call
            assumes nobody's calling convention */
-        e = bk_run(out, nout, n, (long)runargv);
-        entry = (int (*)(long, long))e;
+        e = bk_run(out, nout, (us_size)n, (us_addr)runargv);
+        entry = (int (*)(us_i64, us_addr))e;
         return entry(0, 0);
     }
     /* No mode given: what `cc FILE.c` does -- an executable for this machine,

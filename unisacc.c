@@ -7,6 +7,7 @@
 #define _UNISA_NO_HOSTCALL 1
 #include <stdio.h> /* explicit library dependency of the classic compiler */
 #include <stdlib.h> /* 0.0.28 H1': calloc/free for the run-time sized source buffers */
+#include "src/internal_types.h"
 #include "src/version.h"
 #include "kernel/unisa_model.inc"
 #include "kernel/unisa_headers.inc"
