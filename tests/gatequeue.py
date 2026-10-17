@@ -474,7 +474,7 @@ def k2b_output_digest(log):
 # so no suite ever sees it and it is no execution identity (the two sides must have the same inputs).
 K2B_FORCE_TREE = os.environ.pop('K2B_FORCE_TREE', None) == '1'
 
-K2B_SCHEDULING = {'stamp', 'seconds', 'started', 'ended', 'attempt', 'limit', 'kind', 'k2b'}   # scheduling and provenance, not the result
+K2B_SCHEDULING = {'stamp', 'seconds', 'started', 'ended', 'attempt', 'limit', 'kind', 'k2b', 'memory'}   # scheduling and provenance, not the result
 
 def k2b_compare(state, suite, reused, actual):
     """K2b missed-run check: a narrow-reused RESULT against the same-input whole-tree run's RESULT.
@@ -586,6 +586,102 @@ def contract_digest(name):
         if not skip: out.append(line)
     if skip: raise SystemExit('queue: unterminated SCHEDULING-BEGIN in '+name)
     return hashlib.sha256(''.join(out).encode()).hexdigest()
+
+# Per-attempt memory observations only: never used by admission or limits.
+class MemoryObservedProcess(subprocess.Popen):
+    """Original Popen command, with wait4 and optional delegated cgroup v2 peak."""
+    def __init__(self, *args, **kwargs):
+        self.memory_usage = None
+        self.memory_group = None
+        self.memory_reason = None
+        group = None
+        if sys.platform.startswith('linux'):
+            try:
+                rel = next(l.split(':', 2)[2].strip() for l in pathlib.Path('/proc/self/cgroup').read_text().splitlines() if l.startswith('0::'))
+                parent = pathlib.Path('/sys/fs/cgroup') / rel.lstrip('/')
+                group = parent / ('gatequeue-' + str(os.getpid()) + '-' + os.urandom(8).hex())
+                group.mkdir()
+                # No controller enablement, memory limit, or movement of the queue itself.
+                (group / 'memory.peak').stat()
+                readfd, writefd = os.pipe()
+                def attach():
+                    os.close(readfd)
+                    try:
+                        fd = os.open(str(group / 'cgroup.procs'), os.O_WRONLY)
+                        try: os.write(fd, str(os.getpid()).encode())
+                        finally: os.close(fd)
+                        os.write(writefd, b'1')
+                    except OSError:
+                        os.write(writefd, b'0')
+                    finally: os.close(writefd)
+                kwargs['preexec_fn'] = attach
+                kwargs['pass_fds'] = (writefd,)
+            except (OSError, StopIteration) as e:
+                self.memory_reason = 'cgroup unavailable: ' + str(e)
+                if group is not None:
+                    try: group.rmdir()
+                    except OSError: pass
+                group = None
+        else:
+            self.memory_reason = 'cgroup v2 unavailable on this platform'
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException:
+            if group is not None:
+                os.close(readfd); os.close(writefd)
+                try: group.rmdir()
+                except OSError: pass
+            raise
+        if group is not None:
+            os.close(writefd)
+            try: joined = os.read(readfd, 1) == b'1'
+            finally: os.close(readfd)
+            if joined: self.memory_group = group
+            else:
+                self.memory_reason = 'cgroup child attachment unavailable'
+                try: group.rmdir()
+                except OSError: pass
+
+    def _try_wait(self, wait_flags):
+        try: pid, status, usage = os.wait4(self.pid, wait_flags)
+        except ChildProcessError:
+            self.memory_reason = 'child reaped elsewhere; wait4 unavailable'
+            return self.pid, 0   # same Popen treatment of an already-reaped child
+        if pid == self.pid: self.memory_usage = usage
+        return pid, status
+
+    def poll(self):
+        if self.returncode is not None: return self.returncode
+        if not self._waitpid_lock.acquire(False): return None
+        try:
+            if self.returncode is None:
+                try: pid, status = self._try_wait(os.WNOHANG)
+                except ChildProcessError:
+                    self.returncode = 0
+                    self.memory_reason = 'child reaped elsewhere; wait4 unavailable'
+                else:
+                    if pid == self.pid: self._handle_exitstatus(status)
+        finally: self._waitpid_lock.release()
+        return self.returncode
+
+    def memory_record(self):
+        usage = self.memory_usage
+        fallback = None if usage is None else int(usage.ru_maxrss) * (1 if sys.platform == 'darwin' else 1024)
+        result = {'source': 'wait4', 'peak_bytes': fallback,
+                  'scope': 'maximum individual process RSS in waited subtree; NOT concurrent aggregate',
+                  'fallback_reason': self.memory_reason, 'wait4_peak_bytes': fallback}
+        if self.memory_group is not None:
+            try:
+                peak = int((self.memory_group / 'memory.peak').read_text().strip())
+                if peak <= 0: raise ValueError('nonpositive memory.peak')
+                result.update(source='cgroup-v2-memory.peak', peak_bytes=peak,
+                              scope='aggregate cgroup memory including descendants; kernel-accounted, not RSS only',
+                              cgroup_path=str(self.memory_group), fallback_reason=None)
+            except (OSError, ValueError) as e: result['fallback_reason'] = 'cgroup peak unavailable: ' + str(e)
+            try: self.memory_group.rmdir()
+            except OSError as e: result['cleanup_note'] = str(e)
+            self.memory_group = None
+        return result
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -819,7 +915,7 @@ def main():
                 kind = 'solo' if n in data.get('retried', []) else ('full' if left >= span - 3 else 'tail')
                 data.setdefault('inflight', {})[n] = {'limit': limit, 'kind': kind, 'left': round(left, 3)}; atomic(path, data)
                 log = (state/(n+'.log')).open('wb')
-                p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=subprocess_environment())
+                p = MemoryObservedProcess(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=subprocess_environment())
                 active[n] = (p, log, time.monotonic(), limit)
                 print('START',n,'limit='+str(limit),'kind='+kind,'left=%.1f'%left,flush=True)   # 0.0.38: the attempt kind stays in the log
                 left = deadline-time.monotonic()
@@ -845,6 +941,7 @@ def main():
                     note(n, lb=elapsed)
                 else:
                     data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit,'kind':kind}
+                    data['results'][n]['memory'] = p.memory_record()
                     # 0.0.38 P7: rc 77 is a suite's UNVERIFIED (its host lacks a declared requirement):
                     # neither PASS nor FAILED; the release check lists it and does not pass it
                     if rc == 77: data['results'][n]['status'] = 'UNVERIFIED'
@@ -860,6 +957,8 @@ def main():
                 atomic(path,data); atomic(histpath,history)
                 lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
                 print('DONE' if n in data['results'] else 'DEFER',n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
+                if n not in data['results']:
+                    data.setdefault('memory_attempts', []).append({'name': n, 'rc': rc, 'kind': kind, 'memory': p.memory_record()})
                 del active[n]
             # 0.0.38: nothing running and memory admits nothing -- end the window (the stall stop counts it)
             if not active and mem_blocked: break
@@ -882,6 +981,7 @@ def main():
         for n, (p, log, t, limit) in active.items():
             log.close()
             data['results'][n] = {'rc':142,'seconds':round(time.monotonic()-t,3),'limit':limit}
+            data['results'][n]['memory'] = p.memory_record()
             data.get('inflight', {}).pop(n, None)
             data['window']['completed'] = data['window'].get('completed', 0) + 1
         # 0.0.38 P3: three windows in a row without a legal completion stop the driver

@@ -218,7 +218,8 @@ def main():
     # identity), so this declaration cannot narrow it; see research/c43-k2b-enable-assessment.md.
     d['suites']['k2b'] = {
         'command': ['python3', './tests/k2bcheck.py'],
-        'files': ['tests/k2bcheck.py'],
+        'files': ['tests/k2bcheck.py', 'tests/gatequeue.py'],
+        'guards': head_shas(['tests/gatequeue.py']),
         'trees': ['apps', 'archive', 'bench', 'docs', 'plans', 'research', 'ujs', '.github']}
     changed.append(('step6-batch1', 'declared decision-ledger, exittable, k2b'))
     # 0.0.43 step 6, batch 2.  gate-infra, com-tapedomain and com-latebind run the ROOT product (unisacc.com, which
