@@ -27,6 +27,24 @@ def sha(p):
     return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 
 
+def verify_cached_file(path, expected_sha256, *, executable=False):
+    """Shared require-cached artifact invariant; callers supply their named refusal."""
+    import os
+    import re
+    import stat
+    path = pathlib.Path(path)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+        raise ValueError('cached artifact is not a nonempty regular file: ' + str(path))
+    if not isinstance(expected_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_sha256):
+        raise ValueError('cached artifact has invalid digest: ' + str(path))
+    if executable and (not info.st_mode & 0o111 or not os.access(path, os.X_OK)):
+        raise ValueError('cached artifact is not executable: ' + str(path))
+    if sha(path) != expected_sha256:
+        raise ValueError('cached artifact SHA mismatch: ' + str(path))
+    return path
+
+
 def copy_runtime(root, destination):
     """Copy runtime sources and their local quoted-include closure, preserving paths.
 

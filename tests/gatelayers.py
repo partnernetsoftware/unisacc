@@ -60,6 +60,7 @@ PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff
 STAGE = set("""
 exec-librarycallback-wiring-prepare
 exec-librarycallsite-reader-model exec-librarycallsitelower-model-1 exec-librarycallsitelower-model-2 exec-librarycallsitelower-model-3 exec-librarycallsitelower-model-4 exec-librarytypedlower-model-1 exec-librarytypedlower-model-2 exec-librarytypedlower-model-3 exec-librarytypedlower-model-4 exec-libraryfn-model exec-librarydata-model exec-libraryfunctionimports-model exec-librarytypedreader-model exec-librarypartition-model strconvert-host libneed apps-structure seed-construct seedfacts seedparse2-1 seedparse2-2 seed-matrix-shared
+seed-matrix-shared-prepare seed-matrix-shared-e2 seed-matrix-shared-e1 seed-matrix-shared-e3 seed-matrix-shared-e4 seed-matrix-shared-o1 seed-matrix-shared-prune seed-matrix-shared-nativeabi
 seed-matrix-object seedgen seedgen-let-exit copy-contract ri-snapshot-overlay ri-snapshot-core seedape seedpack exec-bridge-linux warn diag target-package prevheaders
 unisa-bits unisa-hostabi unisa-peversion unisa-padded unisa-zdata unisa-linalg unisa-libneed unisa-uns1
 unisa-catalog unisa-fp unisa-tape unisa-tapebin unisa-tapebin-shape unisa-image-fat unisa-image-elf

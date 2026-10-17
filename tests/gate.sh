@@ -918,7 +918,14 @@ scparts=$(python3 "$R/tests/seedconstructcheck.py" --list) || scparts=""
 [ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.py --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
 job seedgen-construct-prep python3 ./tests/seedconstructcheck.py --prep   # one content-keyed build of seed/gen.c for every seed-construct shard (3 shards compiling it at once exceeded the 20 s compile limit under load)
 for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
-job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
+job seed-matrix-shared-prepare python3 ./tests/seedmatrixprepared.py --prepare
+job seed-matrix-shared-e2 python3 ./tests/seedmatrixprepared.py --require-cached --unit e2
+job seed-matrix-shared-e1 python3 ./tests/seedmatrixprepared.py --require-cached --unit e1
+job seed-matrix-shared-e3 python3 ./tests/seedmatrixprepared.py --require-cached --unit e3
+job seed-matrix-shared-e4 python3 ./tests/seedmatrixprepared.py --require-cached --unit e4
+job seed-matrix-shared-o1 python3 ./tests/seedmatrixprepared.py --require-cached --unit o1
+job seed-matrix-shared-prune python3 ./tests/seedmatrixprepared.py --require-cached --unit prune
+job seed-matrix-shared-nativeabi python3 ./tests/seedmatrixprepared.py --require-cached --unit nativeabi
 for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
 job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
 job seed-matrix-lnx-x86_64 python3 ./tests/seedconstructmatrix.py lnx/x86_64
