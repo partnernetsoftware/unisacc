@@ -700,6 +700,22 @@ job lib-union-composite-direct-3 python3 ./tests/libraryunioncompositecheck.py -
 job lib-union-composite-callback-1 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize --callback
 job lib-union-composite-callback-2 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize --callback
 job lib-union-composite-callback-3 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize --callback
+# F3 (union-composite) split: one content-keyed runtime preparation, then require-cached variant shards by pressure; the original gates above stay
+job lib-union-composite-prepare python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
+job lib-union-composite-direct-1-a python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures plain,gp9
+job lib-union-composite-direct-1-b python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures fp9
+job lib-union-composite-callback-1-plain python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures plain
+job lib-union-composite-callback-1-gp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures gp9
+job lib-union-composite-callback-1-fp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures fp9
+job lib-union-composite-direct-2-a python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --pressures plain,gp9
+job lib-union-composite-direct-2-b python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --pressures fp9
+job lib-union-composite-callback-2-plain python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures plain
+job lib-union-composite-callback-2-gp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures gp9
+job lib-union-composite-callback-2-fp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures fp9
+job lib-union-composite-direct-3-req python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5
+job lib-union-composite-callback-3-plain python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures plain
+job lib-union-composite-callback-3-gp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures gp9
+job lib-union-composite-callback-3-fp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures fp9
 job lib-union16-direct-1 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize
 job lib-union16-callback-1 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback
 job lib-union16-direct-2 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize
