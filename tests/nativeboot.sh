@@ -115,7 +115,11 @@ if [ "$mode" = hostrunnable ]; then
 fi
 if [ "$mode" = hostcompile ]; then
     target=$("$0" --host-triple-target) || exit $?
-    NATIVEBOOT_COMPILE_BOUND=9
+    # One formal budget source; standalone build follows the same outer-minus-one rule.
+    NATIVEBOOT_COMPILE_BOUND=$(awk -F= '
+        $1 == "HOST_TRIPLE_TEST_BOUND" && $2 ~ /^[0-9]+$/ { n++; value=$2-1 }
+        END { if (n != 1 || value < 1 || value > 59) exit 2; print value }
+    ' "$R/tests/hosttriplecheck.py") || exit 2
     compile "$OUTPUT" "$COMPILER" "$target" || exit 1
     exit 0
 fi

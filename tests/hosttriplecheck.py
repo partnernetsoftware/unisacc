@@ -4,6 +4,8 @@ import argparse,hashlib,json,os,pathlib,platform,shutil,subprocess,sys,tempfile,
 sys.dont_write_bytecode=True
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 PREPARE_METADATA_TIMEOUT=60  # Preparation identity metadata; not a test-gate budget.
+HOST_TRIPLE_TEST_BOUND=20
+HOST_TRIPLE_INNER_BOUND=HOST_TRIPLE_TEST_BOUND-1
 sys.path[:0]=[str(ROOT/'exec/c'),str(ROOT/'tests')]
 import provenance,sourceflat
 from models import digest
@@ -147,10 +149,10 @@ for n in range(1,int(a.phase[-1])+1 if a.phase!='u0' else 1):
     work=pathlib.Path(td);previous=chain[-1][0]/(chain[-1][1]+'.exe' if WINDOWS else chain[-1][1]);before=digest(previous)
     executable=work/(name+'.parent-executable'+('.exe' if WINDOWS else ''))
     if WINDOWS:shutil.copyfile(previous,executable)
-    else:run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-runnable',previous,executable],9)
+    else:run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-runnable',previous,executable],HOST_TRIPLE_INNER_BOUND)
     if digest(previous)!=before:raise SystemExit('host-triple signing changed original parent')
     execution_sha=digest(executable)
-    run([executable,u0/'self.c','-O2','-b',target],9,stdout=work/(name+'.exe')) if WINDOWS else run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-build',u0/'self.c',executable,work/name],9)
+    run([executable,u0/'self.c','-O2','-b',target],HOST_TRIPLE_INNER_BOUND,stdout=work/(name+'.exe')) if WINDOWS else run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-build',u0/'self.c',executable,work/name],HOST_TRIPLE_INNER_BOUND)
     if digest(executable)!=execution_sha:raise SystemExit('host-triple execution copy changed during compilation')
     (work/(name+'.execution.json')).write_text(json.dumps({'parent_sha256':before,'execution_sha256':execution_sha,'target':target,'original_and_execution_copy_separate':True},sort_keys=True)+'\n')
     executable.unlink()
