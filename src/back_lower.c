@@ -84,7 +84,7 @@ int bklab_pc[BK_MAXN];              /* a code label's tape pc, or -1 */
 int bkhash[262144];                 /* open addressing: name id + 1, or 0 */
 
 int bk_hashof(char *s, int n) {
-    unsigned long h; int k;
+    us_u64 h; int k;
     h = 5381; k = 0;
     while (k < n) { h = (h * 33 + (s[k] & 255)) & 4294967295; k = k + 1; }
     return h & 262143;
@@ -125,10 +125,10 @@ int bk_find(char *s, int n) {       /* -1 when absent */
 
 /* ---- the tape's data: initialised bytes, and runs of zeros ------------- */
 char bkdata[BK_MAXDATA];
-long bkdlen;                        /* the data's full length, zeros included */
+us_i64 bkdlen;                        /* the data's full length, zeros included */
 int bkstored;                       /* how much of bkdata is in use */
-long bkz_at[BK_MAXZ]; long bkz_len[BK_MAXZ]; int bknz;
-long bkd_at[BK_MAXZ]; int bkd_off[BK_MAXZ]; int bkd_len[BK_MAXZ]; int bknd;
+us_i64 bkz_at[BK_MAXZ]; us_i64 bkz_len[BK_MAXZ]; int bknz;
+us_i64 bkd_at[BK_MAXZ]; int bkd_off[BK_MAXZ]; int bkd_len[BK_MAXZ]; int bknd;
 int bkds_id[BK_MAXZ]; int bknds;     /* data symbols, each one ONCE */
 int bk_dsym(int id) {
     int i;
@@ -142,7 +142,7 @@ int bk_dsym(int id) {
     bkds_id[bknds] = id; bknds = bknds + 1; return 0;
 }
 
-int bk_zeros(long n) {
+int bk_zeros(us_i64 n) {
     if (n <= 0) return 0;
     if (bknz > 0) { if (bkz_at[bknz - 1] + bkz_len[bknz - 1] == bkdlen) {
         bkz_len[bknz - 1] = bkz_len[bknz - 1] + n; bkdlen = bkdlen + n; return 0; } }
@@ -166,12 +166,12 @@ int bk_bytes(char *b, int n) {
    bytes up to the next symbol).  A stored run lies inside its own symbol's
    blob, so a blob is nonzero exactly when one of its runs has a nonzero
    byte.  The zeros end up as one tail the image does not store. */
-long bkb_s[BK_MAXZ]; long bkb_e[BK_MAXZ]; long bkb_new[BK_MAXZ];
+us_i64 bkb_s[BK_MAXZ]; us_i64 bkb_e[BK_MAXZ]; us_i64 bkb_new[BK_MAXZ];
 int bkb_nz[BK_MAXZ]; int bkb_r0[BK_MAXZ]; int bkb_r1[BK_MAXZ]; int bknb;
-long bkt_at[BK_MAXZ]; int bkt_off[BK_MAXZ]; int bkt_len[BK_MAXZ];
-long bk_nzend;                       /* where the all-zero blobs begin, after repack (object .data/.bss split) */
+us_i64 bkt_at[BK_MAXZ]; int bkt_off[BK_MAXZ]; int bkt_len[BK_MAXZ];
+us_i64 bk_nzend;                       /* where the all-zero blobs begin, after repack (object .data/.bss split) */
 int bk_repack(void) {
-    int i; int b; int a; int r; int pass; int nt; long o; long cur; long k; long at;
+    int i; int b; int a; int r; int pass; int nt; us_i64 o; us_i64 cur; us_i64 k; us_i64 at;
     /* The blob starts are the symbols' offsets, SORTED and deduplicated --
        lower.zero_last says `sorted(set(...))` and means it.  A symbol is
        allocated in declaration order, which is address order only until a
@@ -264,8 +264,8 @@ int bk_repack(void) {
     return 0;
 }
 /* the data up to its last nonzero byte: what an image stores */
-long bk_nzlen(void) {
-    int a; long k;
+us_i64 bk_nzlen(void) {
+    int a; us_i64 k;
     a = bknd - 1;
     while (a >= 0) {
         k = bkd_len[a] - 1;
@@ -281,14 +281,14 @@ long bk_nzlen(void) {
 #define BK_I 2                      /* an immediate */
 #define BK_N 3                      /* a name: label or data symbol */
 int *bkop;
-int *bkak; long *bkav;              /* up to 8 operands each: `.sys6` */
+int *bkak; us_i64 *bkav;              /* up to 8 operands each: `.sys6` */
 int *bklab_first;                  /* per tape pc, the first label there (+4: lookahead reads pc + 3) */
-int bkni; long bkcapi;
+int bkni; us_i64 bkcapi;
 int bk_growi(void) {
-    long n; n = bkcapi ? bkcapi * 2 : BK_MAXI;
+    us_i64 n; n = bkcapi ? bkcapi * 2 : BK_MAXI;
     bkop = (int *)bk_regrow((us_addr)bkop, bkcapi * 4, n * 4);
     bkak = (int *)bk_regrow((us_addr)bkak, bkcapi * 32, n * 32);
-    bkav = (long *)bk_regrow((us_addr)bkav, bkcapi * 8 * sizeof(long), n * 8 * sizeof(long));
+    bkav = (us_i64 *)bk_regrow((us_addr)bkav, bkcapi * 8 * sizeof(us_i64), n * 8 * sizeof(us_i64));
     bklab_first = (int *)bk_regrow((us_addr)bklab_first, (bkcapi + 4) * 4, (n + 4) * 4);
     bkcapi = n;
     return 0;
@@ -362,8 +362,8 @@ int bk_is(int op, char *nm) {       /* is op the tape op spelled nm? */
 }
 
 /* ---- parse the tape text ---------------------------------------------- */
-long bk_num(char *s, int n) {       /* int(tok, 0): decimal, 0x, a sign */
-    long v; int k; int neg; int c; int base;
+us_i64 bk_num(char *s, int n) {       /* int(tok, 0): decimal, 0x, a sign */
+    us_i64 v; int k; int neg; int c; int base;
     v = 0; k = 0; neg = 0; base = 10;
     if (k < n) { if (s[k] == 45) { neg = 1; k = k + 1; } else { if (s[k] == 43) k = k + 1; } }
     if (k + 1 < n) { if (s[k] == 48) { if ((s[k + 1] | 32) == 120) { base = 16; k = k + 2; } } }
@@ -382,11 +382,11 @@ int bk_tape_bad(void) {
 }
 /* Strict token conversion for externally supplied tape.  bk_num also reads
    fixed-width catalog fields, whose trailing NUL is not part of a token. */
-int bk_tape_num(char *s, int n, long *out) {
+int bk_tape_num(char *s, int n, us_i64 *out) {
     us_u64 v; int neg; int leading_zero;
     if (!ts_integer(s, n, &v, &neg, &leading_zero)) return 0;
     if (neg && v > 9223372036854775808UL) return 0;
-    *out = neg ? (long)(0UL - v) : (long)v;
+    *out = neg ? (us_i64)(0UL - v) : (us_i64)v;
     return 1;
 }
 int bk_tape_space(int c) { return c == ' ' || c == '\t' || c == '\r'; }
@@ -396,7 +396,7 @@ int bk_tape_sep(int c) {
 char bkstrbuf[1048576];
 int bk_parse(char *t, int n) {
     int i; int e; int lineend; int j; int k; int op; int na; int s0; int s1; char *sh; int id;
-    long value;
+    us_i64 value;
     if (n < 0) return bk_tape_bad();
     i = 0; bkni = 0; bkentry = 0 - 1;
     if (bkcapi == 0) bk_growi();
@@ -442,7 +442,7 @@ int bk_parse(char *t, int n) {
         }
         if (e - j >= 5 && t[j] == 46 && t[j + 1] == 98 && t[j + 2] == 115 && t[j + 3] == 115 && bk_tape_space(t[j + 4])) {
             /* .bss NAME N: zeros, 8-aligned */
-            long cnt;
+            us_i64 cnt;
             j = j + 5; while (j < e && bk_tape_space(t[j])) j = j + 1;
             s0 = j; while (j < e && !bk_tape_space(t[j])) j = j + 1; s1 = j;
             if (s0 == s1 || j == e) return bk_tape_bad();
@@ -564,7 +564,7 @@ int bkrel;                          /* the reloc answer for the branch being low
 us_addr bk_impval[26];                 /* run mode on Windows: the real routines */
 int bk_runmode; us_addr bk_runtext; us_addr bk_rundata; us_size bk_runtsz; us_size bk_rundsz;
 int bkf_nr;                         /* the syscall-number register (abi nrreg) */
-int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;
+int bkf_form; int bkf_gate; us_i64 bkf_sysno; int bkf_hasno;
 int bkf_arg[6]; int bkf_ret;        /* machine register numbers, -1 none */
 int bkf_sym;                        /* the symbol class index (isel), unused in bytes */
 int bkf_argshape; int bkf_retconv; int bkf_winimp;   /* [I4] abi heads */
@@ -589,7 +589,7 @@ int bk_regnum(char *nm) {
    target (one process can write several) starts the cache over. */
 #define BKF_MAXC 128
 int bkfc_ok[BKF_MAXC]; int bkfc_os; int bkfc_arch;
-int bkfc_hasno[BKF_MAXC]; long bkfc_sysno[BKF_MAXC]; int bkfc_arg[BKF_MAXC * 6];
+int bkfc_hasno[BKF_MAXC]; us_i64 bkfc_sysno[BKF_MAXC]; int bkfc_arg[BKF_MAXC * 6];
 int bkfc_ret[BKF_MAXC]; int bkfc_gate[BKF_MAXC]; int bkfc_nr[BKF_MAXC];
 int bkfc_shape[BKF_MAXC]; int bkfc_rc[BKF_MAXC]; int bkfc_wi[BKF_MAXC]; int bkfc_form[BKF_MAXC];
 int bk_facts_ask(int cop);
@@ -675,7 +675,7 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
 #define SK_REG 2
 #define SK_MEM 3
 #define SK_ADDR 4
-int *tkop; long *tka; int *tkk; int tkn;
+int *tkop; us_i64 *tka; int *tkk; int tkn;
 /* gate metadata: form, gate, catalog op, return register */
 int *tkg_rc; int *tkg_wi;
 int bk_impof(int c);                /* the IAT slot `winimp` names */
@@ -683,13 +683,13 @@ int bk_impof(int c);                /* the IAT slot `winimp` names */
 int enc_ix(char *tab, int n, char *o) { int L; L = 0; while (o[L]) L = L + 1; return vfind(tab, n, o, L); }
 int *tkg_rel; int *tkg_form; int *tkg_gate; int *tkg_cop; int *tkg_ret;
 /* the assembler's per-instruction tables (back_encode.c), grown with these */
-long *toff;                         /* each lowered instruction's byte offset (+1: the end) */
-char *tshort; char *tfit; int *tjk; int *tjt; long *tsz;
-long bkcapt;
+us_i64 *toff;                         /* each lowered instruction's byte offset (+1: the end) */
+char *tshort; char *tfit; int *tjk; int *tjt; us_i64 *tsz;
+us_i64 bkcapt;
 int bk_growt(void) {
-    long n; long o; long L; n = bkcapt ? bkcapt * 2 : BK_MAXT; o = bkcapt; L = sizeof(long);
+    us_i64 n; us_i64 o; us_i64 L; n = bkcapt ? bkcapt * 2 : BK_MAXT; o = bkcapt; L = sizeof(us_i64);
     tkop = (int *)bk_regrow((us_addr)tkop, o * 4, n * 4);
-    tka = (long *)bk_regrow((us_addr)tka, o * 4 * L, n * 4 * L);
+    tka = (us_i64 *)bk_regrow((us_addr)tka, o * 4 * L, n * 4 * L);
     tkk = (int *)bk_regrow((us_addr)tkk, o * 16, n * 16);
     tkg_rc = (int *)bk_regrow((us_addr)tkg_rc, o * 4, n * 4);
     tkg_wi = (int *)bk_regrow((us_addr)tkg_wi, o * 4, n * 4);
@@ -698,19 +698,19 @@ int bk_growt(void) {
     tkg_gate = (int *)bk_regrow((us_addr)tkg_gate, o * 4, n * 4);
     tkg_cop = (int *)bk_regrow((us_addr)tkg_cop, o * 4, n * 4);
     tkg_ret = (int *)bk_regrow((us_addr)tkg_ret, o * 4, n * 4);
-    toff = (long *)bk_regrow((us_addr)toff, (o + 1) * L, (n + 1) * L);
+    toff = (us_i64 *)bk_regrow((us_addr)toff, (o + 1) * L, (n + 1) * L);
     tshort = (char *)bk_regrow((us_addr)tshort, o, n);
     tfit = (char *)bk_regrow((us_addr)tfit, o, n);
     tjk = (int *)bk_regrow((us_addr)tjk, o * 4, n * 4);
     tjt = (int *)bk_regrow((us_addr)tjt, o * 4, n * 4);
-    tsz = (long *)bk_regrow((us_addr)tsz, o * L, n * L);
+    tsz = (us_i64 *)bk_regrow((us_addr)tsz, o * L, n * L);
     bkcapt = n;
     return 0;
 }
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_next[BK_MAXN];
-long bk_scr0; long bk_scr1; long bk_plen; long bk_pbuf; long bk_argc; long bk_argv;
-long bk_sysa; long bk_sysfp; long bk_syssp; long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
+us_i64 bk_scr0; us_i64 bk_scr1; us_i64 bk_plen; us_i64 bk_pbuf; us_i64 bk_argc; us_i64 bk_argv;
+us_i64 bk_sysa; us_i64 bk_sysfp; us_i64 bk_syssp; us_i64 bk_argva; us_i64 bk_hstd; us_i64 bk_written; us_i64 bk_save; us_i64 bk_stacktop; us_i64 bk_bss;
 int bk_rmap[8];                     /* tape register -> machine register */
 
 int bk_isccw(int j) {                /* a `__ccw_` label: cc interop inbound wrapper */
@@ -718,7 +718,7 @@ int bk_isccw(int j) {                /* a `__ccw_` label: cc interop inbound wra
     p = bkpool + bkname_at[j];
     return p[0] == 95 && p[1] == 95 && p[2] == 99 && p[3] == 99 && p[4] == 119 && p[5] == 95;
 }
-int tk(int op, long a0, long a1, long a2, long a3) {
+int tk(int op, us_i64 a0, us_i64 a1, us_i64 a2, us_i64 a3) {
     if (tkn >= bkcapt) bk_growt();
     tkop[tkn] = op; tka[tkn * 4] = a0; tka[tkn * 4 + 1] = a1; tka[tkn * 4 + 2] = a2; tka[tkn * 4 + 3] = a3;
     tkk[tkn * 4] = BK_I; tkk[tkn * 4 + 1] = BK_I; tkk[tkn * 4 + 2] = BK_I; tkk[tkn * 4 + 3] = BK_I;
@@ -727,7 +727,7 @@ int tk(int op, long a0, long a1, long a2, long a3) {
     return tkn - 1;
 }
 /* setreg dst, (kind, value) -- the kind rides in a3 */
-int tk_setreg(int dst, int kind, long v) { return tk(TO_SETREG, dst, v, 0, kind); }
+int tk_setreg(int dst, int kind, us_i64 v) { return tk(TO_SETREG, dst, v, 0, kind); }
 /* A SYSTEM CALL with no number that is not a WinAPI call: the gate would
    enter the kernel with whatever the number register held.  Refused, as
    lower.py refuses.  (Jumps and calls ask bk_facts too and have no number
@@ -742,7 +742,7 @@ int bk_needno(void) {
 }
 
 /* lower.syscall_seq */
-int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
+int bk_syscall6(int cop, us_i64 cell) {      /* six arguments, all spilled */
     int g; int i;
     bk_facts(cop);
     bk_needno();
@@ -768,7 +768,7 @@ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
 /* R19-9 (3): the generic gate -- the call number is the first spilled cell,
    the five arguments follow.  Same gate, return register and save/restore
    as the six-argument form; no WinAPI form (headers do not use it there). */
-int bk_syscalln(int cop, long cell) {
+int bk_syscalln(int cop, us_i64 cell) {
     int g; int i;
     bk_facts(cop);
     if (bkos == 2) { __write(2, "__syscall6 has no Windows form\n", 31); __exit(1); }
@@ -782,8 +782,8 @@ int bk_syscalln(int cop, long cell) {
 }
 
 /* a fifth argument, for the one call that has one (renameat2); used once */
-int bk_a4k = 0 - 1; long bk_a4v;
-int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k3, long v3) {
+int bk_a4k = 0 - 1; us_i64 bk_a4v;
+int bk_syscall(int cop, int k0, us_i64 v0, int k1, us_i64 v1, int k2, us_i64 v2, int k3, us_i64 v3) {
     int g;
     bk_facts(cop);
     bk_needno();
@@ -843,9 +843,9 @@ int bk_sext_trip(int pc) {
     if (bkav[st * 8 + 3] != 1 && bkav[st * 8 + 3] != 2 && bkav[st * 8 + 3] != 4) return 0;
     return 1;
 }
-int bkf_op; long bkf_v;               /* the fused form: TO_ADDI.., its constant */
+int bkf_op; us_i64 bkf_v;               /* the fused form: TO_ADDI.., its constant */
 int bk_fuse_imm(int pc) {
-    int b; long c; long v; int k; int lg;
+    int b; us_i64 c; us_i64 v; int k; int lg;
     if (pc + 1 >= bkni || bklab_first[pc + 1] >= 0) return 0;
     b = pc + 1;
     if (bk_is(bkop[pc], "imm") == 0) return 0;
@@ -908,7 +908,7 @@ int bk_sys6_private(int cop, char *nm, int pc) {
     return 0;
 }
 int bk_lower(void) {
-    long base; int pc; int op; int k; int cw;
+    us_i64 base; int pc; int op; int k; int cw;
     int j; int ccw;
     ccw = 0;
     bkrel = 0 - 1;
@@ -1015,7 +1015,7 @@ int bk_lower(void) {
                 /* cc interop FP/stack thunk: `imm r2, 0x7C..` right before
                    carries the signature (front_parse.c ccx_emit); anything
                    else is the fixed BK_HOST_* sequence */
-                long sg; sg = 0;
+                us_i64 sg; sg = 0;
                 if (pc > 0 && bk_is(bkop[pc - 1], "imm") && bkak[(pc - 1) * 8] == BK_R && bkav[(pc - 1) * 8] == 2
                     && bkak[(pc - 1) * 8 + 1] == BK_I && ((bkav[(pc - 1) * 8 + 1] >> 56) & 255) == 124) sg = bkav[(pc - 1) * 8 + 1];
                 tk(TO_HOSTCALL, bk_rmap[bkav[pc*8]], bk_rmap[bkav[pc*8+1]], sg, 0);

@@ -3,6 +3,7 @@
 import argparse,hashlib,json,os,pathlib,platform,shutil,subprocess,sys,tempfile,time
 sys.dont_write_bytecode=True
 ROOT=pathlib.Path(__file__).resolve().parents[1]
+PREPARE_METADATA_TIMEOUT=60  # Preparation identity metadata; not a test-gate budget.
 sys.path[:0]=[str(ROOT/'exec/c'),str(ROOT/'tests')]
 import provenance,sourceflat
 from models import digest
@@ -55,7 +56,7 @@ def windows_tool():
 compiler_env=dict(os.environ);windows_context=None
 if WINDOWS:cc,compiler_env,windows_context=windows_tool()
 else:cc=pathlib.Path(shutil.which('cc')).resolve(strict=True)
-version=subprocess.run([str(cc),'--version'],capture_output=True,check=True,timeout=2,env=compiler_env).stdout
+version=subprocess.run([str(cc),'--version'],capture_output=True,check=True,timeout=PREPARE_METADATA_TIMEOUT,env=compiler_env).stdout
 from actorclosure import actor_closure
 def host_actor_closure():
  return actor_closure(ROOT,['tests/hosttriplecheck.py','tests/nativeboot.sh','tests/build_ref.sh','tests/sourceflat.py','tests/bound.py']+(['tests/refshim.h','tests/reffoot.h'] if WINDOWS else []))

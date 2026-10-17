@@ -30,7 +30,7 @@ int pk_emitreg(int r) {
     if (r >= 10) ol_c(48 + r / 10);
     return ol_c(48 + r % 10);
 }
-int pk_emitnum(long v) {
+int pk_emitnum(us_i64 v) {
     char b[24]; int n;
     n = 0;
     if (v == 0) { b[0] = 48; n = 1; }
@@ -643,9 +643,9 @@ int pk_store2(int l) {
     return y;
 }
 /* `  imm rK, N` -> K, N in pk_imm (decimal digits only, at most 18) */
-long pk_imm;
+us_i64 pk_imm;
 int pk_immat(int l) {
-    int p; int e; int q; int k; long v;
+    int p; int e; int q; int k; us_i64 v;
     if (ol_pre(l, "  imm r") == 0) return 0 - 1;
     p = ol_s[l] + 6; e = ol_e[l]; q = p;
     while (q < e && out[q] != 44) q = q + 1;
@@ -762,7 +762,7 @@ int pk_stfuse(int i) {
 int pk_asks;
 int peep_round(void) {
     int i; int n; int a; int b; int rel; int act; int key[4]; int t; int u; int k; int x; int y;
-    int hits; int p; int e; int q; long v; int lg; int d; int none;
+    int hits; int p; int e; int q; us_i64 v; int lg; int d; int none;
     if (ol_lines() == 0) return 0;
     ol_labels();
     k = 0; while (k <= 5) { ol_zok[k] = 1; k = k + 1; }

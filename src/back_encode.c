@@ -13,18 +13,18 @@ us_u64 bk_textva; us_i64 bk_shift; int bk_sizing;
 #define BK_OBJUND 34359738368           /* object mode: undefined name id is BK_OBJUND + (id << 20) + offset */
 #define BK_MAXRELO 262144
 int bk_objmode;
-long bkro_off[BK_MAXRELO]; int bkro_type[BK_MAXRELO]; int bkro_sect[BK_MAXRELO]; long bkro_add[BK_MAXRELO]; int bknro;
-long bk_objnz;                       /* the .data length: offsets at or past it are .bss */
+us_i64 bkro_off[BK_MAXRELO]; int bkro_type[BK_MAXRELO]; int bkro_sect[BK_MAXRELO]; us_i64 bkro_add[BK_MAXRELO]; int bknro;
+us_i64 bk_objnz;                       /* the .data length: offsets at or past it are .bss */
 /* a call to a name no unit here defines (-funit .extern): type 900 is an
    x86-64 `call rel32` field, 901 an arm64 `bl`; the writers map them */
-int bk_relcall(long off, int id, int type) {
+int bk_relcall(us_i64 off, int id, int type) {
     if (bk_sizing || bk_objmode == 0) return 0;
     if (bknro >= BK_MAXRELO) { __write(2, "object: too many relocations\n", 29); __exit(1); }
     bkro_off[bknro] = off; bkro_type[bknro] = type; bkro_sect[bknro] = 1000 + id;
     bkro_add[bknro] = type == 900 ? 0 - 4 : 0; bknro = bknro + 1;
     return 0;
 }
-int bk_relo(long off, int type, long target) {
+int bk_relo(us_i64 off, int type, us_i64 target) {
     if (bk_sizing || bk_objmode == 0) return 0;
     /* the four host-FFI slots sit 32 bytes BELOW the data base (TO_HOSTADDR);
        an object has no such cells -- refuse rather than mislink */
@@ -56,11 +56,11 @@ us_u64 bk_imp[BK_NIMPMAX];               /* Windows: the IAT slot of each import
    stored -- it overran into bkz_at and became "data gap" (0.0.37 g5) */
 char bkscr[8192];
 int ob(int b) { if (bkout != bkscr || bkol < 8192) bkout[bkol] = b; bkol = bkol + 1; return 0; }
-int ow(unsigned long v) {           /* a 32-bit little-endian word */
+int ow(us_u64 v) {           /* a 32-bit little-endian word */
     ob(v & 255); ob((v >> 8) & 255); ob((v >> 16) & 255); ob((v >> 24) & 255); return 0;
 }
 /* a label's byte offset -- 0 while sizing, as size() passes {k: 0} */
-long bk_label(int id) {
+us_i64 bk_label(int id) {
     int t;
     if (bk_sizing) return 0;
     t = bklab_tpc[id];
@@ -68,27 +68,27 @@ long bk_label(int id) {
     return toff[t];
 }
 /* the address `.lea` names: a data symbol, a code label, or a number */
-long bk_leaaddr(int i) {
+us_i64 bk_leaaddr(int i) {
     int id;
     if (bk_sizing) return 0;
     if (tkk[i * 4 + 1] == BK_N) {
         id = tka[i * 4 + 1];
         if (bksym_addr[id] >= 0) return bksym_addr[id] + bk_shift;
         if (bklab_tpc[id] >= 0) return bk_textva + bk_label(id);
-        if (bk_objmode) return BK_OBJUND + ((long)id << 20);   /* defined in another unit */
+        if (bk_objmode) return BK_OBJUND + ((us_i64)id << 20);   /* defined in another unit */
         return 0;
     }
     return tka[i * 4 + 1] + bk_shift;
 }
 
 /* Fixed host ABI bridge: mirrored from exec/enc/hostbridge.tsv. */
-unsigned long BK_HOST_ARM[] = {0x910003e9,0xd101c0ea,0x927ced4a,0x9100015f,0xf90003e1,0xf90007e2,0xf9000be3,0xf9000fe4,0xf90013e5,0xf90017e6,0xf9001be7,0xf9001fe9,0xf90023fe,0xf9400220,0xf9400621,0xf9400a22,0xf9400e23,0xf9401224,0xf9401625,0xd63f0200,0xf94003e1,0xf94007e2,0xf9400be3,0xf9400fe4,0xf94013e5,0xf94017e6,0xf9401be7,0xf9401fe9,0xf94023fe,0x9100013f};
+us_u64 BK_HOST_ARM[] = {0x910003e9,0xd101c0ea,0x927ced4a,0x9100015f,0xf90003e1,0xf90007e2,0xf9000be3,0xf9000fe4,0xf90013e5,0xf90017e6,0xf9001be7,0xf9001fe9,0xf90023fe,0xf9400220,0xf9400621,0xf9400a22,0xf9400e23,0xf9401224,0xf9401625,0xd63f0200,0xf94003e1,0xf94007e2,0xf9400be3,0xf9400fe4,0xf94013e5,0xf94017e6,0xf9401be7,0xf9401fe9,0xf94023fe,0x9100013f};
 char *BK_HOST_X86 = "\123\110\211\303\110\211\340\110\203\354\140\110\203\344\360\110\211\074\044\110\211\164\044\010\110\211\124\044\020\114\211\104\044\030\114\211\124\044\040\114\211\114\044\050\110\211\104\044\070\110\213\073\110\213\163\010\110\213\123\020\110\213\113\030\114\213\103\040\114\213\113\050\061\300\101\377\323\110\213\074\044\110\213\164\044\010\110\213\124\044\020\114\213\104\044\030\114\213\124\044\040\114\213\114\044\050\110\213\144\044\070\133";
 /* R21-4a': Win64 passes four GP args in registers and args 5-10 after the
    32-byte shadow space; preserve all six live tape GP registers and old rsp. */
 char *BK_HOST_WIN_X86 = "\123\110\211\303\110\211\340\110\201\354\260\000\000\000\110\203\344\360\110\211\174\044\120\110\211\164\044\130\110\211\124\044\140\110\211\114\044\150\114\211\104\044\160\114\211\114\044\170\110\211\204\044\210\000\000\000\110\213\103\040\110\211\104\044\040\110\213\103\050\110\211\104\044\050\110\213\103\060\110\211\104\044\060\110\213\103\070\110\211\104\044\070\110\213\103\100\110\211\104\044\100\110\213\103\110\110\211\104\044\110\110\213\013\110\213\123\010\114\213\103\020\114\213\113\030\101\377\323\110\213\174\044\120\110\213\164\044\130\110\213\124\044\140\110\213\114\044\150\114\213\104\044\160\114\213\114\044\170\110\213\244\044\210\000\000\000\133";
 #define BK_HOST_WIN_X86_N 167
-long BK_HOST_WIN_ARM[] = {0x910003e9, 0xd102012a, 0x927ced4a, 0x9100015f, 0xf9000be1, 0xf9000fe2, 0xf90013e3, 0xf90017e4, 0xf9001be5, 0xf9001fe6, 0xf90023e7, 0xf90027e9, 0xf9002bfe, 0xf940222b, 0xf90003eb, 0xf940262b, 0xf90007eb, 0xf9400220, 0xf9400621, 0xf9400a22, 0xf9400e23, 0xf9401224, 0xf9401625, 0xf9401a26, 0xf9401e27, 0xd63f0200, 0xf9400be1, 0xf9400fe2, 0xf94013e3, 0xf94017e4, 0xf9401be5, 0xf9401fe6, 0xf94023e7, 0xf94027e9, 0xf9402bfe, 0x9100013f};
+us_i64 BK_HOST_WIN_ARM[] = {0x910003e9, 0xd102012a, 0x927ced4a, 0x9100015f, 0xf9000be1, 0xf9000fe2, 0xf90013e3, 0xf90017e4, 0xf9001be5, 0xf9001fe6, 0xf90023e7, 0xf90027e9, 0xf9002bfe, 0xf940222b, 0xf90003eb, 0xf940262b, 0xf90007eb, 0xf9400220, 0xf9400621, 0xf9400a22, 0xf9400e23, 0xf9401224, 0xf9401625, 0xf9401a26, 0xf9401e27, 0xd63f0200, 0xf9400be1, 0xf9400fe2, 0xf94013e3, 0xf94017e4, 0xf9401be5, 0xf9401fe6, 0xf94023e7, 0xf94027e9, 0xf9402bfe, 0x9100013f};
 #define BK_HOST_WIN_ARM_N 36
 #define BK_HOST_ARM_N 30
 #define BK_HOST_X86_N 112
@@ -96,7 +96,7 @@ long BK_HOST_WIN_ARM[] = {0x910003e9, 0xd102012a, 0x927ced4a, 0x9100015f, 0xf900
 /* ---- arm64: emit_arm.py, line for line ---------------------------------- */
 #define A_IP0 16
 #define A_IP1 17
-unsigned long a_ls(int store, int wd, int scaled) {  /* LDS STS LDU STU */
+us_u64 a_ls(int store, int wd, int scaled) {  /* LDS STS LDU STU */
     if (scaled) {
         if (store) { if (wd == 8) return 0xF9000000; if (wd == 4) return 0xB9000000; if (wd == 2) return 0x79000000; return 0x39000000; }
         if (wd == 8) return 0xF9400000; if (wd == 4) return 0xB9800000; if (wd == 2) return 0x79800000; return 0x39800000;
@@ -104,9 +104,9 @@ unsigned long a_ls(int store, int wd, int scaled) {  /* LDS STS LDU STU */
     if (store) { if (wd == 8) return 0xF8000000; if (wd == 4) return 0xB8000000; if (wd == 2) return 0x78000000; return 0x38000000; }
     if (wd == 8) return 0xF8400000; if (wd == 4) return 0xB8800000; if (wd == 2) return 0x78800000; return 0x38800000;
 }
-int a_movimm(int d, unsigned long v, int fixed);
-int a_mem(int store, int rt, int rn, long off, int wd) {
-    long a;
+int a_movimm(int d, us_u64 v, int fixed);
+int a_mem(int store, int rt, int rn, us_i64 off, int wd) {
+    us_i64 a;
     if (off >= 0) { if (off % wd == 0) { if (off / wd < 4096) {
         ow(a_ls(store, wd, 1) | ((off / wd) << 10) | (rn << 5) | rt); return 0; } } }
     if (off >= 0 - 256) { if (off < 256) {
@@ -117,8 +117,8 @@ int a_mem(int store, int rt, int rn, long off, int wd) {
     ow(a_ls(store, wd, 1) | (A_IP0 << 5) | rt);
     return 0;
 }
-int a_movimm(int d, unsigned long v, int fixed) {
-    int n; int sh; unsigned long part;
+int a_movimm(int d, us_u64 v, int fixed) {
+    int n; int sh; us_u64 part;
     ow(0xD2800000 | ((v & 0xFFFF) << 5) | d);
     n = 1; sh = 1;
     while (sh <= 3) {
@@ -128,8 +128,8 @@ int a_movimm(int d, unsigned long v, int fixed) {
     }
     return 0;
 }
-int a_adr(int d, long pc, long target) {
-    long imm; imm = target - pc;
+int a_adr(int d, us_i64 pc, us_i64 target) {
+    us_i64 imm; imm = target - pc;
     ow(0x10000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5) | d);
     return 0;
 }
@@ -138,8 +138,8 @@ int a_adr(int d, long pc, long target) {
    pointer, so two threads in a system call no longer share them.  The
    displacement for an address in the block, or 1 when it is not a cell.
    Within 128 bytes: the x86-64 kernel skips that red zone on a signal. */
-long bk_tcell(long target) {
-    long o;
+us_i64 bk_tcell(us_i64 target) {
+    us_i64 o;
     if (bk_threads == 0) return 1;
     o = target - bk_shift - bk_scr0;
     if (o == 0) return 0 - 8;
@@ -151,9 +151,9 @@ long bk_tcell(long target) {
     if (o == 136) return 0 - 112;
     return 1;
 }
-int a_adrp_add(int d, long pc, long target) {
-    long page; long lo12;
-    {   long td; td = bk_tcell(target);
+int a_adrp_add(int d, us_i64 pc, us_i64 target) {
+    us_i64 page; us_i64 lo12;
+    {   us_i64 td; td = bk_tcell(target);
         if (td != 1) { ow(0xD1000000 | ((0 - td) << 10) | (7 << 5) | d); ow(0xD503201F); return 0; }   /* sub d, x7, #-td; nop */
     }
     if (bk_objmode && target >= BK_OBJUND && bkos != 2) {   /* a name no unit defines may live in a shared library: load its address from the GOT */
@@ -172,15 +172,15 @@ int a_adrp_add(int d, long pc, long target) {
     ow(0x91000000 | (lo12 << 10) | (d << 5) | d);
     return 0;
 }
-long a_disp(long bytes, int bits) {
-    long v; long lim;
+us_i64 a_disp(us_i64 bytes, int bits) {
+    us_i64 v; us_i64 lim;
     v = bytes >> 2;
-    lim = (long)1 << (bits - 1);
+    lim = (us_i64)1 << (bits - 1);
     if (v < 0 - lim || v >= lim) { __write(2, "arm64: branch does not fit\n", 27); __exit(1); }
     return v;
 }
 /* the reloc stage's answer IS the displacement field (emit_arm.RELFIELD) */
-long a_relf(int i, long d) {
+us_i64 a_relf(int i, us_i64 d) {
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
@@ -189,20 +189,20 @@ long a_relf(int i, long d) {
     __write(2, "back end: reloc class has no arm field\n", 39); __exit(1);
     return 0;
 }
-int a_ldr(int rt, int rn, long off) { ow(0xF9400000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
-int a_str(int rt, int rn, long off) { ow(0xF9000000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
-int a_movz(int d, long v) { ow(0xD2800000 | ((v & 0xFFFF) << 5) | d); return 0; }
-int a_movn(int d, long v) { ow(0x92800000 | (((0 - v - 1) & 0xFFFF) << 5) | d); return 0; }
+int a_ldr(int rt, int rn, us_i64 off) { ow(0xF9400000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
+int a_str(int rt, int rn, us_i64 off) { ow(0xF9000000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
+int a_movz(int d, us_i64 v) { ow(0xD2800000 | ((v & 0xFFFF) << 5) | d); return 0; }
+int a_movn(int d, us_i64 v) { ow(0x92800000 | (((0 - v - 1) & 0xFFFF) << 5) | d); return 0; }
 /* the Windows command-line splitter, the same words emit_arm/emit_x86 hold */
-long BK_WA_ARM[34] = {0x39400004, 0x7100809F, 0x54000060, 0x7100249F, 0x54000061, 0x91000400, 0x17FFFFFA, 0x34000364, 0xF100FC5F, 0x5400032A, 0xF8227861, 0x91000442, 0xD2800005, 0x39400004, 0x34000264, 0x7100889F, 0x54000081, 0xD24000A5, 0x91000400, 0x17FFFFFA, 0xB50000A5, 0x7100809F, 0x540000E0, 0x7100249F, 0x540000A0, 0x39000024, 0x91000421, 0x91000400, 0x17FFFFF1, 0x3900003F, 0x91000421, 0x91000400, 0x17FFFFE0, 0x3900003F};
+us_i64 BK_WA_ARM[34] = {0x39400004, 0x7100809F, 0x54000060, 0x7100249F, 0x54000061, 0x91000400, 0x17FFFFFA, 0x34000364, 0xF100FC5F, 0x5400032A, 0xF8227861, 0x91000442, 0xD2800005, 0x39400004, 0x34000264, 0x7100889F, 0x54000081, 0xD24000A5, 0x91000400, 0x17FFFFFA, 0xB50000A5, 0x7100809F, 0x540000E0, 0x7100249F, 0x540000A0, 0x39000024, 0x91000421, 0x91000400, 0x17FFFFF1, 0x3900003F, 0x91000421, 0x91000400, 0x17FFFFE0, 0x3900003F};
 char BK_WA_X86[93] = {15, 182, 6, 60, 32, 116, 4, 60, 9, 117, 5, 72, 255, 198, 235, 240, 132, 192, 116, 73, 72, 131, 249, 63, 125, 67, 73, 137, 60, 200, 72, 255, 193, 69, 49, 201, 15, 182, 6, 132, 192, 116, 47, 60, 34, 117, 9, 65, 131, 241, 1, 72, 255, 198, 235, 236, 69, 133, 201, 117, 8, 60, 32, 116, 14, 60, 9, 116, 10, 136, 7, 72, 255, 199, 72, 255, 198, 235, 213, 198, 7, 0, 72, 255, 199, 72, 255, 198, 235, 166, 198, 7, 0};
-int a_callimp(long pc, int k) {
+int a_callimp(us_i64 pc, int k) {
     a_adrp_add(A_IP1, pc, bk_sizing ? 0 : bk_imp[k]);
     a_ldr(A_IP1, A_IP1, 0);
     ow(0xD63F0000 | (A_IP1 << 5));
     return 0;
 }
-int a_fd2handle(long pc, long hstd) {
+int a_fd2handle(us_i64 pc, us_i64 hstd) {
     ow(0xF1000C1F);                                  /* cmp x0, #3 */
     ow(0x54000002 | (4 << 5));                       /* b.hs over 12 bytes (+1) */
     a_adrp_add(A_IP0, pc + 8, hstd);
@@ -210,7 +210,7 @@ int a_fd2handle(long pc, long hstd) {
     return 0;
 }
 /* body, then the abi table's `retconv` tail; the import is `winimp` [I4] */
-int a_wintail(int rc, long pc, long written) {
+int a_wintail(int rc, us_i64 pc, us_i64 written) {
     char *n; n = bk_nth(BH_ABI_RETCONV, rc);
     if (strsame(n, "wcount")) { a_adrp_add(A_IP0, pc, written); a_ldr(0, A_IP0, 0); return 0; }
     if (strsame(n, "bool_inv")) { ow(0xF100001F); ow(0x9A9F17E0); return 0; }   /* cmp; cset eq */
@@ -218,16 +218,16 @@ int a_wintail(int rc, long pc, long written) {
     if (strsame(n, "dword_sx")) { ow(0x93407C00); return 0; }                   /* sxtw x0, w0 */
     return 0;
 }
-int a_winbody(int i, long off);
-int a_winapi(int i, long off) {
-    int s; long pc;
+int a_winbody(int i, us_i64 off);
+int a_winapi(int i, us_i64 off) {
+    int s; us_i64 pc;
     s = bkol; pc = bk_textva + off;
     if (a_winbody(i, off) == 0) return 0;
     a_wintail(tkg_rc[i], pc + (bkol - s), bk_written + bk_shift);
     return 1;
 }
-int a_winbody(int i, long off) {
-    long pc; long hstd; long written; char *nm; int s;
+int a_winbody(int i, us_i64 off) {
+    us_i64 pc; us_i64 hstd; us_i64 written; char *nm; int s;
     pc = bk_textva + off;
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
@@ -245,7 +245,7 @@ int a_winbody(int i, long off) {
         return 1;
     }
     if (strsame(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
-        long scr0; long scr1;
+        us_i64 scr0; us_i64 scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         a_adrp_add(3, pc, written);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
@@ -293,7 +293,7 @@ int a_winbody(int i, long off) {
     bkol = s;
     return 0;
 }
-int a_itoa(long pc, long src, long buf, long lenp) {
+int a_itoa(us_i64 pc, us_i64 src, us_i64 buf, us_i64 lenp) {
     int s; s = bkol;
     a_adrp_add(9, pc, src); a_ldr(10, 9, 0);
     a_movz(11, 0);
@@ -306,7 +306,7 @@ int a_itoa(long pc, long src, long buf, long lenp) {
     a_movz(14, 0);
     ow(0x9AC00800 | (12 << 16) | (13 << 5) | 13);
     ow(0x91000400 | (14 << 5) | 14);
-    ow(0xB5000000 | ((((long)0 - 2) & 0x7FFFF) << 5) | 13);
+    ow(0xB5000000 | ((((us_i64)0 - 2) & 0x7FFFF) << 5) | 13);
     ow(0x8B000000 | (11 << 16) | (14 << 5) | 14);
     a_adrp_add(9, pc + (bkol - s), lenp); a_str(14, 9, 0);
     a_adrp_add(9, pc + (bkol - s), buf);
@@ -317,7 +317,7 @@ int a_itoa(long pc, long src, long buf, long lenp) {
     ow(0xD1000400 | (13 << 5) | 13);
     ow(0x39000000 | (13 << 5) | 17);
     ow(0xAA0003E0 | (15 << 16) | 10);
-    ow(0xB5000000 | ((((long)0 - 6) & 0x7FFFF) << 5) | 10);
+    ow(0xB5000000 | ((((us_i64)0 - 6) & 0x7FFFF) << 5) | 10);
     ow(0xB4000000 | (3 << 5) | 11);
     a_movz(17, 45);
     ow(0x39000000 | (9 << 5) | 17);
@@ -326,8 +326,8 @@ int a_itoa(long pc, long src, long buf, long lenp) {
 /* floating point: through v16/v17 */
 int a_fmov_to(int v, int x, int dbl) { ow((dbl ? 0x9E670000 : 0x1E270000) | (x << 5) | v); return 0; }
 int a_fmov_from(int x, int v, int dbl) { ow((dbl ? 0x9E660000 : 0x1E260000) | (v << 5) | x); return 0; }
-int a_fp(char *o, long *a) {
-    int dbl; unsigned long ty; unsigned long fa; int fc;
+int a_fp(char *o, us_i64 *a) {
+    int dbl; us_u64 ty; us_u64 fa; int fc;
     fa = 0; fc = 0 - 1;
     if (o[0] == 102 && o[1] == 97) fa = 0x1E202800;               /* fadd */
     if (o[0] == 102 && o[1] == 115 && o[2] == 117) fa = 0x1E203800;  /* fsub */
@@ -366,7 +366,7 @@ int a_fp(char *o, long *a) {
    array of raw tape values.  Same frame and saves as BK_HOST_*, plus the
    outgoing stack area of S bytes at the bottom.  bk_hs_* computes it. */
 int bk_hs_kind[16]; int bk_hs_reg[16]; int bk_hs_off[16]; int bk_hs_w[16];
-int bk_hs_plan(long sig, int arm, int darwin) {
+int bk_hs_plan(us_i64 sig, int arm, int darwin) {
     int n; int k; int c; int ni; int nf; int so; int w;
     n = (sig >> 2) & 31; ni = 0; nf = 0; so = 0;
     k = 0;
@@ -383,7 +383,7 @@ int bk_hs_plan(long sig, int arm, int darwin) {
     }
     return (so + 15) / 16 * 16;
 }
-int bk_hostsig_arm(long sig) {
+int bk_hostsig_arm(us_i64 sig) {
     int S; int n; int k; int q;
     S = bk_hs_plan(sig, 1, bkos == 1); n = (sig >> 2) & 31;
     ow(0x910003e9); ow(0xD100000A | ((0x70 + S) << 10) | (7 << 5)); ow(0x927ced4a); ow(0x9100015f);
@@ -421,7 +421,7 @@ int bk_x_mem(int opc, int reg, int base, int disp) {
     ob(disp & 255); ob((disp >> 8) & 255); ob((disp >> 16) & 255); ob((disp >> 24) & 255);
     return 0;
 }
-int bk_hostsig_x86(long sig) {
+int bk_hostsig_x86(us_i64 sig) {
     int S; int n; int k; int q; int sv[6]; int so[6]; int ir[6];
     S = bk_hs_plan(sig, 0, 0); n = (sig >> 2) & 31;
     sv[0] = 7; sv[1] = 6; sv[2] = 2; sv[3] = 8; sv[4] = 10; sv[5] = 9;
@@ -456,8 +456,8 @@ int bk_hostsig_x86(long sig) {
 }
 
 /* one lowered instruction -> bytes at bkout; 0 when it has no encoding */
-int bk_arm(int i, long off) {
-    int op; long *a; char *o; long pc; long v; int k; int d; int n;
+int bk_arm(int i, us_i64 off) {
+    int op; us_i64 *a; char *o; us_i64 pc; us_i64 v; int k; int d; int n;
     op = tkop[i]; a = tka + i * 4;
     pc = bk_textva + off;
     if (op == TO_HOSTCALL) {
@@ -555,14 +555,14 @@ int bk_arm(int i, long off) {
     o = bk_nth(BKOPS, op);
     if (strsame(o, "mov")) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
     if (strsame(o, "imm")) {
-        unsigned long u; u = a[1];
+        us_u64 u; u = a[1];
         ow(0xD2800000 | ((u & 0xFFFF) << 5) | a[0]);
         k = 1;
         while (k <= 3) { v = (u >> (16 * k)) & 0xFFFF;
             if (v) ow(0xF2800000 | (k << 21) | (v << 5) | a[0]); k = k + 1; }
         return 1;
     }
-    {   unsigned long alu; int j;              /* [I5] catalog.ENCSPEC */
+    {   us_u64 alu; int j;              /* [I5] catalog.ENCSPEC */
         j = enc_ix(ENC_ARM_ALU3, NENC_ARM_ALU3, o);
         if (j >= 0) { alu = ENC_ARM_ALU3_V(j); ow(alu | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
     }
@@ -593,7 +593,7 @@ int bk_arm(int i, long off) {
     if (strsame(o, ".st")) { a_mem(1, a[2], a[0], a[1], a[3]); return 1; }
     if (a_fp(o, a)) return 1;
     if (strsame(o, ".zero")) {
-        long kk; int wd;
+        us_i64 kk; int wd;
         kk = 0;
         while (kk < a[2]) {
             wd = 8; while (kk + wd > a[2]) wd = wd / 2;
@@ -658,7 +658,7 @@ int x_rex(int w, int r, int x, int b) { ob(64 | (w << 3) | (r << 2) | (x << 1) |
 int x_modrm(int mod, int reg, int rm) { ob((mod << 6) | ((reg & 7) << 3) | (rm & 7)); return 0; }
 int x_alu(int opc, int d, int s) { x_rex(1, s >> 3, 0, d >> 3); ob(opc); x_modrm(3, s, d); return 0; }
 int x_movrr(int d, int s) { return x_alu(0x89, d, s); }
-int x_movri(int d, unsigned long imm) {
+int x_movri(int d, us_u64 imm) {
     /* SHORT form -- see emit_x86.mov_ri: mov r32, imm32 zero-extends. */
     if ((imm >> 32) == 0) {
         if (d >= 8) ob(0x41);
@@ -669,14 +669,14 @@ int x_movri(int d, unsigned long imm) {
     ow(imm & 0xFFFFFFFF); ow(imm >> 32);
     return 0;
 }
-int x_d32(long v) { ow(v & 0xFFFFFFFF); return 0; }
-int x_rel8(long d) {                  /* a short branch's displacement */
+int x_d32(us_i64 v) { ow(v & 0xFFFFFFFF); return 0; }
+int x_rel8(us_i64 d) {                  /* a short branch's displacement */
     if (bk_sizing == 0) { if (d < 0 - 128 || d > 127) {
         __write(2, "back end: rel8 out of range\n", 28); __exit(1); } }
     ob(d & 255);
     return 0;
 }
-int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
+int x_rel(int i, us_i64 d) {          /* emit_x86.RELBYTES */
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
@@ -685,7 +685,7 @@ int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
     return 0;
 }
 /* mem: opc may be two bytes (0x0F 0xBE); w is REX.W */
-int x_mem(int opc, int opc2, int r, int b, long disp, int w) {
+int x_mem(int opc, int opc2, int r, int b, us_i64 disp, int w) {
     x_rex(w, r >> 3, 0, b >> 3);
     ob(opc); if (opc2 >= 0) ob(opc2);
     /* SHORT forms -- see emit_x86.mem.  disp is a frame offset or a small
@@ -697,21 +697,21 @@ int x_mem(int opc, int opc2, int r, int b, long disp, int w) {
     x_modrm(2, r, b); if ((b & 7) == 4) ob(0x24); x_d32(disp);
     return 0;
 }
-int x_load(int r, int b, long disp, int wd) {
+int x_load(int r, int b, us_i64 disp, int wd) {
     if (wd == 8) return x_mem(0x8B, 0 - 1, r, b, disp, 1);
     if (wd == 4) return x_mem(0x63, 0 - 1, r, b, disp, 1);
     if (wd == 1) return x_mem(0x0F, 0xBE, r, b, disp, 1);
     return x_mem(0x0F, 0xBF, r, b, disp, 1);
 }
-int x_store(int r, int b, long disp, int wd) {
+int x_store(int r, int b, us_i64 disp, int wd) {
     if (wd == 8) return x_mem(0x89, 0 - 1, r, b, disp, 1);
     if (wd == 4) return x_mem(0x89, 0 - 1, r, b, disp, 0);
     if (wd == 2) { ob(0x66); return x_mem(0x89, 0 - 1, r, b, disp, 0); }
     return x_mem(0x88, 0 - 1, r, b, disp, 0);
 }
 /* [rip+disp32], 7 bytes fixed */
-int x_rip(int opc, int r, long pcnext, long target) {
-    {   long td; td = bk_tcell(target);
+int x_rip(int opc, int r, us_i64 pcnext, us_i64 target) {
+    {   us_i64 td; td = bk_tcell(target);
         if (td != 1) { x_rex(1, r >> 3, 0, 0); ob(opc); ob(0x44 | ((r & 7) << 3)); ob(0x24); ob(td & 255); ob(0x66); ob(0x90); return 0; }   /* [rsp+d8]; 2-byte nop */
     }
     if (bk_objmode && opc == 0x8D && target >= BK_OBJUND && bkos != 2) {   /* lea of a name no unit defines: mov from its GOT slot */
@@ -739,13 +739,13 @@ int x_cmpset(int cc, int d, int ra, int rb) {
 /* `op r64, imm` with /opc -- see emit_x86.alu_imm.  SHORT form: 0x83 takes a
    sign-extended imm8, four bytes rather than seven.  n is a frame size or a
    literal, never an address, so the width is final in the sizing pass. */
-int x_aluimm(int d, int opc, long n) {
+int x_aluimm(int d, int opc, us_i64 n) {
     x_rex(1, 0, 0, d >> 3);
     if (n >= 0 - 128 && n <= 127) { ob(0x83); x_modrm(3, opc, d); ob(n & 255); return 0; }
     ob(0x81); x_modrm(3, opc, d); x_d32(n);
     return 0;
 }
-int x_spadj(long n, int opc) {                  /* on the tape SP: rsp */
+int x_spadj(us_i64 n, int opc) {                  /* on the tape SP: rsp */
     return x_aluimm(X_RSP, opc, n);
 }
 int x_push(int r) { if (r >= 8) x_rex(0, 0, 0, 1); ob(0x50 | (r & 7)); return 0; }
@@ -759,7 +759,7 @@ int x_alignpre(int extra) {
     return 0;
 }
 int x_alignpost(void) { return x_movrr(X_RSP, X_RBX); }
-int x_stackarg(int slot, long val) {
+int x_stackarg(int slot, us_i64 val) {
     x_rex(1, 0, 0, 0); ob(0xC7); x_modrm(1, 0, 4); ob(0x24); ob(slot); x_d32(val);
     return 0;
 }
@@ -769,12 +769,12 @@ int bk_impof(int c) {
     n = bk_nth(BH_ABI_WINIMP, c); L = 0; while (n[L]) L = L + 1;
     return vfind(BK_IMPS, BK_NIMP, n, L);
 }
-int x_callimp(long pc, int k) {
+int x_callimp(us_i64 pc, int k) {
     x_rip(0x8B, X_RAX, pc + 7, bk_sizing ? 0 : bk_imp[k]);
     ob(0xFF); ob(0xD0);
     return 0;
 }
-int x_fd2handle(long pc, long hstd) {
+int x_fd2handle(us_i64 pc, us_i64 hstd) {
     x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 1); ob(0x03);    /* cmp rcx, 3 */
     ob(0x73); ob(7 + 4);                                          /* jae over the body */
     x_rip(0x8D, X_R11, pc + 4 + 2 + 7, hstd);
@@ -784,7 +784,7 @@ int x_fd2handle(long pc, long hstd) {
 /* a WinAPI gate is the op's own moves and call (x_winbody), then the
    conversion of its answer to POSIX's (x_wintail): the import is the abi
    table's `winimp`, the tail its `retconv` [I4] */
-int x_wintail(int rc, long pc, long written) {
+int x_wintail(int rc, us_i64 pc, us_i64 written) {
     char *n; n = bk_nth(BH_ABI_RETCONV, rc);
     if (strsame(n, "wcount")) { x_rip(0x8B, X_RAX, pc + 7, written); return 0; }
     if (strsame(n, "bool_inv")) {
@@ -802,16 +802,16 @@ int x_wintail(int rc, long pc, long written) {
     if (strsame(n, "dword_sx")) { ob(0x48); ob(0x63); ob(0xC0); return 0; }   /* movsxd */
     return 0;
 }
-int x_winbody(int i, long off);
-int x_winapi(int i, long off) {
-    int s; long pc;
+int x_winbody(int i, us_i64 off);
+int x_winapi(int i, us_i64 off) {
+    int s; us_i64 pc;
     s = bkol; pc = bk_textva + off;
     if (x_winbody(i, off) == 0) return 0;
     x_wintail(tkg_rc[i], pc + (bkol - s), bk_written + bk_shift);
     return 1;
 }
-int x_winbody(int i, long off) {
-    long pc; long hstd; long written; char *nm; int s;
+int x_winbody(int i, us_i64 off) {
+    us_i64 pc; us_i64 hstd; us_i64 written; char *nm; int s;
     pc = bk_textva + off;
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
@@ -834,7 +834,7 @@ int x_winbody(int i, long off) {
         return 1;
     }
     if (strsame(nm, "mprotect")) {
-        long scr0; long scr1;
+        us_i64 scr0; us_i64 scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);   /* r9 = &old */
         x_alignpre(0);
@@ -890,7 +890,7 @@ int x_winbody(int i, long off) {
     bkol = s;
     return 0;
 }
-int x_itoa(long pc, long src, long buf, long lenp) {
+int x_itoa(us_i64 pc, us_i64 src, us_i64 buf, us_i64 lenp) {
     int s; int l0; int l1;
     s = bkol;
     x_rip(0x8B, X_RAX, pc + (bkol - s) + 7, src);
@@ -964,7 +964,7 @@ int x_u2f(int ra, int dbl) {
     bkout[s + 1] = bigl;
     return 0;
 }
-int x_fp(char *o, long *a) {
+int x_fp(char *o, us_i64 *a) {
     int dbl; int pfx; int fa; int fc; int L;
     fa = 0; fc = 0 - 1;
     if (o[0] == 102 && o[1] == 97) fa = 0x58;
@@ -1000,7 +1000,7 @@ int x_fp(char *o, long *a) {
         bigstart = bkol;
         bkout[s + 1] = bigstart - (s + 2);
         x_ssex(0xF2, 0x5C, 0, 1, 0 - 1); x_sseg(0xF2, 0x2C, 0, a[0], 1, 1);
-        x_movri(X_R11, (unsigned long)1 << 63); x_alu(0x31, a[0], X_R11);
+        x_movri(X_R11, (us_u64)1 << 63); x_alu(0x31, a[0], X_R11);
         bkout[bigstart - 1] = bkol - bigstart;
         return 1;
     }
@@ -1017,8 +1017,8 @@ int x_alias(int d, int s1, int s2) {
     return s2;
 }
 
-int bk_x86(int i, long off) {
-    int op; long *a; char *o; long pc; int s2; int k;
+int bk_x86(int i, us_i64 off) {
+    int op; us_i64 *a; char *o; us_i64 pc; int s2; int k;
     op = tkop[i]; a = tka + i * 4;
     pc = bk_textva + off;
     if (op == TO_HOSTCALL) {
@@ -1151,7 +1151,7 @@ int bk_x86(int i, long off) {
         if (cc >= 0) { x_cmpset(cc, a[0], a[1], a[2]); return 1; }
     }
     if (strsame(o, ".frame")) {
-        long n; n = a[0];
+        us_i64 n; n = a[0];
         x_aluimm(X_RSP, n >= 0 ? 5 : 0, n >= 0 ? n : 0 - n);
         return 1;
     }
@@ -1160,7 +1160,7 @@ int bk_x86(int i, long off) {
     if (strsame(o, ".st")) { x_store(a[2], a[0], a[1], a[3]); return 1; }
     if (x_fp(o, a)) return 1;
     if (strsame(o, ".zero")) {
-        long kk; int wd;
+        us_i64 kk; int wd;
         ob(0x4D); ob(0x31); ob(0xDB);
         kk = 0;
         while (kk < a[2]) {
@@ -1222,23 +1222,23 @@ int bk_x86(int i, long off) {
 }
 
 /* ---- the assembler: assemble.py ---------------------------------------- */
-char *bktext; long bktlen; long bkcaptext;
-int bk_growtext(long need) {        /* 0.0.29 H4': the machine code grows like the tape (back_lower.c) */
-    long n; n = bkcaptext ? bkcaptext : BK_MAXTEXT;
+char *bktext; us_i64 bktlen; us_i64 bkcaptext;
+int bk_growtext(us_i64 need) {        /* 0.0.29 H4': the machine code grows like the tape (back_lower.c) */
+    us_i64 n; n = bkcaptext ? bkcaptext : BK_MAXTEXT;
     while (n < need) n = n * 2;
     if (n != bkcaptext) { bktext = (char *)bk_regrow((us_addr)bktext, bkcaptext, n); bkcaptext = n; }
     return 0;
 }
 us_u64 bk_datava; us_offset bk_entry;
-int bk_enc(int i, long off) { if (bkarch) return bk_arm(i, off); return bk_x86(i, off); }
-long bk_round(long v, long a) { return (v + a - 1) / a * a; }
+int bk_enc(int i, us_i64 off) { if (bkarch) return bk_arm(i, off); return bk_x86(i, off); }
+us_i64 bk_round(us_i64 v, us_i64 a) { return (v + a - 1) / a * a; }
 
 /* Windows' import section layout (pe._idata) -- the same arithmetic */
-long bk_idata_len; long bk_iat_off; long bk_cfg_off;
+us_i64 bk_idata_len; us_i64 bk_iat_off; us_i64 bk_cfg_off;
 /* a Windows image that forwards (bk_dyn) imports four more kernel32 names */
 int bk_nimp(void) { return BK_NIMP + ((bkos == 2 && bk_dyn) ? 4 : 0); }
 int bk_idata_layout(void) {
-    long off; int k; int L; char *e;
+    us_i64 off; int k; int L; char *e;
     off = 40 + (bk_nimp() + 1) * 8 * 2;               /* desc + ILT + IAT */
     k = 0;
     while (k < bk_nimp()) {
@@ -1252,10 +1252,10 @@ int bk_idata_layout(void) {
     bk_idata_len = off + 320;                        /* LOADCFG 0x140 */
     return 0;
 }
-long bk_macho_hdrs(void) { return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 + 48 + 24 + 80 + 16) + 156; }
+us_i64 bk_macho_hdrs(void) { return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 + 48 + 24 + 80 + 16) + 156; }
 
 int bk_assemble(void) {
-    long off; int i; int ok; int id;
+    us_i64 off; int i; int ok; int id;
     bk_sizing = 1; bk_textva = 0; bk_shift = 0;
     i = 0;
     while (i < tkn) { tshort[i] = 0; tfit[i] = 0; tjk[i] = 0; i = i + 1; }
@@ -1269,7 +1269,7 @@ int bk_assemble(void) {
     }
     /* rounds: lay out, mark every branch whose short form reaches, repeat */
     while (1) {
-        int nfit; long d; int t;
+        int nfit; us_i64 d; int t;
         off = 0; i = 0;
         while (i < tkn) { toff[i] = off; off = off + tsz[i]; i = i + 1; }
         toff[tkn] = off;
@@ -1350,15 +1350,15 @@ int bk_assemble(void) {
         bk_textva = bk_runtext;
         bk_datava = bk_rundata;
     } else { if (bkos == 1) {
-        long h; h = bk_macho_hdrs();
+        us_i64 h; h = bk_macho_hdrs();
         bk_textva = 4294967296 + h;
         bk_datava = 4294967296 + bk_round(h + bktlen, 16384) + 32;
     } else { if (bkos == 0) {
-        long h; h = bk_elf_hdrs();
+        us_i64 h; h = bk_elf_hdrs();
         bk_textva = 4194304 + h;
         bk_datava = 4194304 + bk_round(h + bktlen, 4096) + (bk_dyn ? 32 : 0);
     } else {
-        long rd;
+        us_i64 rd;
         bk_textva = 5368709120 + 4096;
         rd = 4096 + bk_round(bktlen, 4096);
         bk_datava = 5368709120 + rd + bk_round(bk_idata_len, 4096);
