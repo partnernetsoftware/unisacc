@@ -136,7 +136,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-gold-parse-label) req='native-posix|host|cc,python3|cdx|unisa-gold-parse-label-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1|seedgen-ppconsumer-2|seedgen-ppconsumer-2-*) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
-          seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
+          seedgen-ppchain-1|seedgen-ppchain-1-*|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
           seedgen-pprun) req='native-posix|host|cc,python3|cdx|seed-gen-pp-run';;
           seedgen-optconsumer-1|seedgen-optconsumer-2|seedgen-optconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-opt-consumer';;
           seedgen-pruneconsumer-1|seedgen-pruneconsumer-2|seedgen-pruneconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-prune-consumer';;
@@ -898,7 +898,9 @@ job seedgen-ppconsumer-2-prepare python3 ./tests/seedppconsumerprepared.py --pre
 job seedgen-ppconsumer-2-osx-arm64 python3 ./tests/seedppconsumerprepared.py --require-cached --target osx/arm64
 job seedgen-ppconsumer-2-win-x86_64 python3 ./tests/seedppconsumerprepared.py --require-cached --target win/x86_64
 job seedgen-ppconsumer-2-win-arm64 python3 ./tests/seedppconsumerprepared.py --require-cached --target win/arm64
-job seedgen-ppchain-1 sh ./tests/seedppchaincheck.sh 1   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled; K5-1i (07:53): + parse2 helper, three slices
+job seedgen-ppchain-1-prepare python3 ./tests/seedppchainprepared.py --prepare
+job seedgen-ppchain-1-default python3 ./tests/seedppchainprepared.py --require-cached --part default
+job seedgen-ppchain-1-inherited python3 ./tests/seedppchainprepared.py --require-cached --part inherited   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled; K5-1i (07:53): + parse2 helper, three slices
 job seedgen-ppchain-2 sh ./tests/seedppchaincheck.sh 2
 job seedgen-ppchain-3 sh ./tests/seedppchaincheck.sh 3
 job seedgen-pprun sh ./tests/seedpprun.sh   # 0.0.40 K5-1e (机房主任 02:59): exec/pp/run.sh d.json through gen-delta, controlled

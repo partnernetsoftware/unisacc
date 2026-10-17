@@ -25,7 +25,16 @@
 # usage: tests/seedppchaincheck.sh 1|2|3
 set -u
 case "${1:-}" in 1|2|3) SLICE=$1;; *) echo "usage: tests/seedppchaincheck.sh 1|2|3"; exit 2;; esac
+PART=${2-}
+if [ "$#" -gt 1 ]; then
+    [ "$SLICE" = 1 ] || { echo "seedppch: part is slice 1 only" >&2; exit 2; }
+    case "$PART" in default|inherited) ;; *) echo "seedppch: part must be default or inherited" >&2; exit 2;; esac
+    [ -n "${SEEDPPCH_PREPARED:-}" ] && [ -n "${SEEDPPCH_UA:-}" ] || { echo "NEED_PREPARE seed pp chain: reference/tools absent" >&2; exit 75; }
+else
+    unset SEEDPPCH_PREPARED SEEDPPCH_UA
+fi
 case $SLICE in 1) JSONS="e2.json e2-py.json e2-c-ref.json e3.json e3-c-ref.json";; 2) JSONS=;; 3) JSONS="e2.json e3.json e2-sg0.json e3-py.json";; esac
+[ "$PART" != inherited ] || JSONS=
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 _td=${TMPDIR:-/tmp}; S=$(mktemp -d "${_td%/}/seedppch.XXXXXX") || exit 2
 EV=${SEEDPPCH_EVIDENCE:-}
@@ -147,6 +156,21 @@ SHIM
 cat > "$S/shim/cc" <<SHIM || exit 2
 #!/bin/sh
 log() { [ -n "\${SHIMLOG:-}" ] && printf '%s\t%s\n' "\$1" "\$2" >> "\$SHIMLOG" || { echo "cc shim: log write failed" >&2; exit 96; }; }
+copy_prepared() {
+    "$REALPY" - "\$@" <<'COPYCHAINTOOLS'
+import hashlib,json,os,pathlib,shutil,sys
+args=sys.argv[1:];tools=pathlib.Path(os.environ['SEEDPPCH_PREPARED'])
+if args[:4]==['-O2','-std=c99','-w','-o'] and len(args)==6 and args[-1]=='exec/c/run.c':
+    name='run';output=args[4]
+else:
+    assert args[:4]==['-std=c99','-O2','-Wall','-Wextra'] and len(args)==7 and args[-2]=='-o' and args[4].endswith('/tests/bound.c')
+    name='bound';output=args[-1]
+record=json.loads((tools/'manifest.json').read_text());source=tools/name
+assert hashlib.sha256(source.read_bytes()).hexdigest()==record['outputs'][name]
+assert source.stat().st_mode & 0o111
+shutil.copy2(source,output)
+COPYCHAINTOOLS
+}
 srcs=0; run=; known=
 for a in "\$@"; do
     case "\$a" in *.c) srcs=\$((srcs + 1));; esac
@@ -156,9 +180,15 @@ for a in "\$@"; do
     esac
 done
 if [ "\$#" -eq 1 ] && [ "\$1" = --version ]; then log pass "cc \$*"; exec "$REALCC" "\$@"; fi
-if [ -n "\$run" ] && [ "\$srcs" -eq 1 ]; then log pass "cc \$*"; exec "$REALCC" "\$@"; fi
+if [ -n "\$run" ] && [ "\$srcs" -eq 1 ]; then
+    if [ -n "\${SEEDPPCH_PREPARED:-}" ]; then copy_prepared "\$@"; r=\$?; log prepared "cc \$*"; exit \$r; fi
+    log pass "cc \$*"; exec "$REALCC" "\$@"
+fi
 case " \$* " in *seed/gen.c*) if [ -z "\$run" ] && [ "\$srcs" -eq 1 ]; then log pass-gen-c "cc \$*"; exec "$REALCC" "\$@"; fi;; esac
-if [ -n "\$known" ] && [ -z "\$run" ] && [ "\$srcs" -eq 1 ]; then log pass "cc \$*"; exec "$REALCC" "\$@"; fi
+if [ -n "\$known" ] && [ -z "\$run" ] && [ "\$srcs" -eq 1 ]; then
+    if [ -n "\${SEEDPPCH_PREPARED:-}" ]; then copy_prepared "\$@"; r=\$?; log prepared "cc \$*"; exit \$r; fi
+    log pass "cc \$*"; exec "$REALCC" "\$@"
+fi
 log UNKNOWN "cc \$*"; exit 97
 SHIM
 chmod +x "$S/shim/sh" "$S/shim/python3" "$S/shim/cc"
@@ -167,7 +197,7 @@ ok() { echo "SAME $1"; evw "SAME $1"; same=$((same + 1)); }
 no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 # shim negatives
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
-if [ "$SLICE" = 1 ]; then
+if [ "$SLICE" = 1 ] && [ "$PART" != default ]; then
 "$S/shim/python3" exec/c/other.py >/dev/null 2>&1; r=$?
 [ "$r" -eq 97 ] && ok "python3 shim refuses an unknown script" || no "python3 shim did not refuse (rc=$r)"
 "$S/shim/cc" -o x >/dev/null 2>&1; r=$?
@@ -198,8 +228,9 @@ open(p, "w").write(s.replace(old, new))
 PY
 
 # UA: copy current reference so ua_ready short-circuits (UA != /tmp/ua_ref)
-if [ ! -x /tmp/ua_ref ]; then echo "seedppch: /tmp/ua_ref missing"; exit 2; fi
-cp -f /tmp/ua_ref "$S/ua" && chmod +x "$S/ua" || exit 2
+REFUA=${SEEDPPCH_UA:-/tmp/ua_ref}
+if [ ! -x "$REFUA" ]; then echo "seedppch: reference UA missing"; exit 2; fi
+cp -f "$REFUA" "$S/ua" && chmod +x "$S/ua" || exit 2
 
 helpers() { awk -F '\t' '$1 ~ /^helper-(pp|parse2)$/ { sub(/^helper-/, "", $1); printf "%s ", $1 }' "$1"; }
 KEYSTEP="python3 - cc -std=c99 -O2 -w"
@@ -225,6 +256,7 @@ run_chain() {   # run_chain CAP LOG [ENV...]: run scratch chain; prints rc; CAP 
 }
 
 if [ "$SLICE" = 1 ]; then
+if [ "$PART" != inherited ]; then
 # --- positive default C path ---
 cap=$S/cap-pos; log=$S/log-pos
 r=$(run_chain "$cap" "$log")
@@ -235,8 +267,12 @@ hasclass "$log" pass-lex && ok "positive reaches lex after E2" || no "positive l
 # independent refs
 g=$(ls "$cap/cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
 rm -f "$S/e2-c-ref.json" "$S/e2-py.json"
+if [ -n "$PART" ]; then
+    cp "$SEEDPPCH_PREPARED/e2-c-ref.json" "$S/e2-c-ref.json" && cp "$SEEDPPCH_PREPARED/e2-py.json" "$S/e2-py.json" || exit 75
+else
 [ -n "$g" ] && "$W/tests/bound" 55 "$g" pp "$S/e2-c-ref.json" 2>/dev/null
 "$W/tests/bound" 55 "$REALPY" exec/build/gen.py pp "$S/e2-py.json" 2>/dev/null
+fi
 cp -f "$cap/e2.json" "$S/e2.json" 2>/dev/null || :
 [ -f "$S/e2.json" ] && [ -f "$S/e2-c-ref.json" ] && cmp -s "$S/e2.json" "$S/e2-c-ref.json" \
     && ok "positive e2 = seed-gen pp (no flags)" || no "positive e2 differs from seed-gen"
@@ -260,12 +296,18 @@ evw "POS snap_rc pp=$(cat "$sd/after-pp.rc" 2>/dev/null || echo none) parse2=$(c
     || no "positive cache snapshots differ or are not exactly two members"
 { ! hasclass "$log" pass-parse2 && ! hasclass "$log" short-parse2; } && ok "positive no Python parse2" || no "positive Python parse2 called"
 rm -f "$S/e3-c-ref.json"; rr=none
+if [ -n "$PART" ]; then
+    cp "$SEEDPPCH_PREPARED/e3-c-ref.json" "$S/e3-c-ref.json"; rr=$?
+else
 [ -n "$g" ] && { "$W/tests/bound" 55 "$g" parse2 "$S/e3-c-ref.json" 2>/dev/null; rr=$?; }
+fi
 cp -f "$cap/e3.json" "$S/e3.json" 2>/dev/null || :
 evw "POS e3_ref_rc=$rr"
 { [ "$rr" = 0 ] && [ -f "$S/e3.json" ] && cmp -s "$S/e3.json" "$S/e3-c-ref.json"; } \
     && ok "positive e3 = seed-gen parse2 (reference rc 0)" || no "positive e3 vs seed-gen parse2 (reference rc=$rr)"
 evw "C_E2_SHA $(shaf "$S/e2.json")"; evw "C_E3_SHA $(shaf "$S/e3.json")"
+fi
+if [ "$PART" != default ]; then
 # inherited SEED_GEN_DIR overridden (sentinel untouched)
 mkdir -p "$S/sentinel-dir" && echo sentinel > "$S/sentinel-dir/sentinel"
 cap=$S/cap-inh; log=$S/log-inh
@@ -276,6 +318,7 @@ r=$(run_chain "$cap" "$log" SEED_GEN_DIR="$S/sentinel-dir" SEEDPPCH_STOP_AFTER_E
 { [ "$r" -eq 1 ] && grep -q 'E1 gen failed' "$log.out" && via_helper "$cap" "$log"; } \
     && ok "inherited-override E2 through helper (early-stop after E2)" || no "inherited-override path (rc=$r)"
 
+fi
 fi
 
 if [ "$SLICE" = 2 ]; then
@@ -394,15 +437,17 @@ evw "SEEDGEN0 chain_rc=$r helpers=$(helpers "$log")"
 fi
 
 cd "$R" || exit 2
+if [ "$PART" != default ]; then
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$CHAIN") || exit 2
 after_gd=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' exec/pp/gen-delta.sh) || exit 2
 [ "$before" = "$after" ] && ok "checkout $CHAIN untouched" || no "checkout $CHAIN changed"
 [ "$before_gd" = "$after_gd" ] && ok "checkout exec/pp/gen-delta.sh untouched" || no "checkout gen-delta.sh changed"
 after_p2=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' exec/parse2gen/gen-delta.sh) || exit 2
 [ "$before_p2" = "$after_p2" ] && ok "checkout exec/parse2gen/gen-delta.sh untouched" || no "checkout parse2gen/gen-delta.sh changed"
+fi
 if [ -n "$EV" ]; then
     case $SLICE in
-        1) files="shimneg log-pos log-inh"; dirs="cap-pos.snap";;
+        1) case "$PART" in default) files="log-pos"; dirs="cap-pos.snap";; inherited) files="shimneg log-inh"; dirs="";; *) files="shimneg log-pos log-inh"; dirs="cap-pos.snap";; esac;;
         2) files="neglog-red neglog-missing neglog-badsg np2log-red np2log-missing mut2log mutlog"; dirs="np2-red.snap np2-missing.snap";;
         3) files="log-py c3-pp.err c3-parse2.err"; dirs="cap-py.snap";;
     esac
@@ -413,8 +458,10 @@ if [ -n "$EV" ]; then
     for d in $dirs; do
         cp -R "$S/$d" "$EV/$d" || { evfail=1; echo "seedppch: EVIDENCE copy of $d failed" >&2; }
     done
+    if [ "$PART" != default ]; then
     printf 'before_chain %s\nafter_chain %s\nbefore_gendeelta %s\nafter_gendeelta %s\ntree %s\n' \
         "$before" "$after" "$before_gd" "$after_gd" "$H" >> "$EV/identity.txt" || evfail=1
+    fi
 fi
 echo "seedppch  slice $SLICE  same $same  bad $bad"
 evw "seedppch  slice $SLICE  same $same  bad $bad  tree $H"
