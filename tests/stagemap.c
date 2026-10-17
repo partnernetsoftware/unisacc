@@ -41,7 +41,7 @@ static char *rules[] = {
              " ccinterop ffi-* exec-bridge-linux windows-resolver-host exec-bind* libneed",
     "E5", "exec-e5 exec-arm exec-sha exec-asm* rowcov-enc* asmtext combo exec-memory-asm exec-memx86-asm",
     "E6", "exec-elf* exec-armelf exec-mach* exec-x86win exec-armwin exec-pe* exec-object* exec-modelobject"
-          " elfobj linkunits run fat exec-memory-* exec-memx86-* exec-memwin* exec-binaryio exec-crcllp64"
+          " elfobj linkunits run fat exec-memory-* exec-memx86-* exec-memwin* exec-binaryio exec-crcllp64*"
           " malloc memalign hosthdr syscall6 winposix auditnet exec-container exec-package exec-net"
           " exec-codec exec-core exec-embedded target-package lifecycle exec-srcelf",
     "chain", "difftest* csmithdiff* corpus* ccrun* closure* stages exec-chain exec-native-* exec-formats*"

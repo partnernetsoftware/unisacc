@@ -777,7 +777,7 @@ job include-key tests/bound 58 sh ./tests/includekeycheck.sh "${MODEL_COM:-./uni
 job lib-resolver-host python3 ./tests/libraryresolverhostcheck.py
 job lib-word64 python3 ./tests/librarywordcheck.py --native-only
 job exec-binaryio python3 ./tests/runtimeiocheck.py
-job exec-crcllp64 python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only
+for part in host unisacc sanitised; do job exec-crcllp64-$part python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only --part "$part"; done
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
 job lib-windows-imports python3 ./tests/librarywinimportscheck.py
 job lib-windows-gp python3 ./exec/enc/windowshostbridgecheck.py --part cross
