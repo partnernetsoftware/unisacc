@@ -487,6 +487,11 @@ class VM:
         return pc
 
     def run(self):
+        # Inlining may bypass these reference hooks only for their base semantics.
+        # Resolve on the concrete type so inherited overrides retain their meaning.
+        if any(getattr(type(self), name) is not getattr(VM, name)
+               for name in ('ld', 'st', '_addr')):
+            return self.run_reference()
         dec = self._decode()
         code = self.t.code
         labels = self.t.labels

@@ -48,6 +48,36 @@ except Exception as e:
 sys.stdout.write('CODE %d\nSTEPS %d\nOUT %s\n' % (code, steps, out.hex()))
 PY
 
+# Subclass hooks must retain reference call order, including inherited overrides.
+PYTHONPATH="$R" "$B" 10 python3 - <<'PYHOOK' || fail "subclass hook equivalence"
+from unisa.tape import Tape
+from unisa.vm import VM
+
+t = Tape()
+t.emit('imm', 'r6', 8192)
+t.emit('imm', 'r0', 42)
+t.emit('store64', 'r6', 0, 'r0')
+t.emit('load64', 'r1', 'r6', 0)
+t.emit('.st', 'r6', 8, 'r1', 1)
+t.emit('.ld', 'r2', 'r6', 8, 1)
+t.emit('call', 'sub')
+t.emit('.exit', 'r2')
+t.label('sub')
+t.emit('ret')
+for name in ('ld', 'st', '_addr'):
+    def hook(self, *args, _name=name, **kw):
+        self.calls.append((args, kw))
+        return getattr(VM, _name)(self, *args, **kw)
+    parent = type('Hook_' + name, (VM,), {name: hook})
+    child = type('Inherited_' + name, (parent,), {})
+    for cls in (parent, child):
+        a, b = cls(t), cls(t)
+        a.calls, b.calls = [], []
+        expected, actual = a.run_reference(), b.run()
+        assert expected == actual and a.calls == b.calls and a.calls, (name, cls, a.calls, b.calls)
+        print('subclass hook exact', cls.__name__, len(a.calls))
+PYHOOK
+
 same=0; total=0
 pair() {   # pair NAME MAXSTEPS -- C and python outputs byte-equal; C double-run
     nm=$1; ms=$2; total=$((total + 1))
