@@ -1,0 +1,207 @@
+name: Windows U0 Tape first-difference diagnostic
+'on':
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+        description: Full approved 40-hex current source SHA
+permissions:
+  contents: read
+jobs:
+  linux-reference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        include: &id001
+        - target: win/x86_64
+          tag: win-x86_64
+          runner: windows-latest
+        - target: win/arm64
+          tag: win-arm64
+          runner: windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      DIAG_TARGET: ${{ matrix.target }}
+      DIAG_OUT: ${{ github.workspace }}-diag-${{ matrix.tag }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      CFLAGS: -O2
+      UNISACC_TIME_SCALE: '1'
+      DIAG_MODE: linux
+    steps:
+    - run: git config --global core.autocrlf false
+    - &id002
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.source_sha }}
+        persist-credentials: false
+    - name: Pin source
+      run: 'python3 - <<''PY''
+
+        import os,re,subprocess,pathlib
+
+        sha=os.environ[''SOURCE_SHA''];assert re.fullmatch(''[0-9a-fA-F]{40}'',sha)
+
+        assert subprocess.check_output([''git'',''rev-parse'',''HEAD'']).decode().strip().lower()==sha.lower()
+
+        assert not subprocess.check_output([''git'',''status'',''--porcelain''])
+
+        pathlib.Path(os.environ[''DIAG_OUT'']).mkdir(parents=True,exist_ok=True)
+
+        PY'
+    - name: Prepare Linux reference UA (not a test)
+      run: 'python3 tests/bound.py 55 sh tests/build_ref.sh diag-ref.c diag-ua
+
+        mkdir -p reference
+
+        python3 tests/bound.py 10 sh tests/export_ref.sh reference/SELF.c'
+    - name: Fixed inputs and observable stage references
+      run: "python3 - <<'PY'\nimport pathlib,subprocess,sys,os,time,json,hashlib\nroot=pathlib.Path.cwd();out=pathlib.Path(os.environ['DIAG_OUT']);out.mkdir(parents=True,exist_ok=True)\n\
+        mode=os.environ['DIAG_MODE'];target=os.environ['DIAG_TARGET'];ref=pathlib.Path('reference')/target.replace('/','-')\n\
+        files=['examples/hello.c','tests/c/b_bitand.c','tests/c/a_arr3v.c','tests/c/a_struct2.c','tests/c/b_funcptr.c','tests/c/b_compound_result.c','reference/SELF.c']\n\
+        stages=[('preprocess',['-E']),('tokens',['-dump-tokens']),('tape',['-S']),('image',[])]\nrows=[];first=None\n\
+        if mode=='windows':\n prep=out/'prepare.stdout';lines=prep.read_text().splitlines();ready=[json.loads(x)\
+        \ for x in lines if x.startswith('{')];ua=pathlib.Path(ready[-1]['U0']);assert ua.stat().st_size>0\nelse:ua=pathlib.Path('diag-ua').resolve()\n\
+        for i,name in enumerate(files):\n src=pathlib.Path(name);assert src.stat().st_size>0\n for stage,flags in\
+        \ stages:\n  prefix=f'{i:02}-{stage}';argv=[sys.executable,'tests/bound.py','10',str(ua),name,'-O2','-b',target,*flags];start=time.monotonic()\n\
+        \  with (out/(prefix+'.out')).open('wb') as f,(out/(prefix+'.err')).open('wb') as e:rc=subprocess.run(argv,stdout=f,stderr=e).returncode\n\
+        \  data=(out/(prefix+'.out')).read_bytes();row={'input':name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'stage':stage,'argv':argv,'rc':rc,'seconds_monotonic':time.monotonic()-start,'stdout_sha256':hashlib.sha256(data).hexdigest(),'stderr_sha256':hashlib.sha256((out/(prefix+'.err')).read_bytes()).hexdigest()}\n\
+        \  if mode=='windows':\n   rr=json.loads((ref/'records.json').read_text());expected=next(x for x in rr if\
+        \ x['input']==name and x['stage']==stage);rd=(ref/(prefix+'.out')).read_bytes();assert row['source_sha256']==expected['source_sha256'],'INPUT_IDENTITY_MISMATCH'\n\
+        \   row['reference_rc']=expected['rc'];row['same']=rc==expected['rc']==0 and data==rd\n   if not row['same']:\n\
+        \    pos=next((n for n,(a,b) in enumerate(zip(data,rd)) if a!=b),min(len(data),len(rd)));row['first_byte_offset']=pos;row['actual_bytes']=len(data);row['reference_bytes']=len(rd);first=row\n\
+        \  row['compiler_sha256']=hashlib.sha256(ua.read_bytes()).hexdigest();rows.append(row);(out/'records.json').write_text(json.dumps(rows,indent=2)+'\\\
+        n')\n  if rc or first:break\n if first or rc:break\n(out/'FIRST-DIFFERENCE.json').write_text(json.dumps({'scope':'DIAGNOSTIC_ONLY_NOT_CELL_PASS','first':first,'last':rows[-1]\
+        \ if rows else None},indent=2)+'\\n')\nif rc or first:sys.exit(1)\n\nPY"
+    - name: Index raw evidence
+      if: always()
+      run: 'python3 - <<''PY''
+
+        import os,pathlib,json,hashlib
+
+        p=pathlib.Path(os.environ[''DIAG_OUT'']);p.mkdir(parents=True,exist_ok=True)
+
+        files={x.relative_to(p).as_posix():{''bytes'':x.stat().st_size,''sha256'':hashlib.sha256(x.read_bytes()).hexdigest()}
+        for x in p.rglob(''*'') if x.is_file() and x.name!=''EVIDENCE.json''}
+
+        (p/''EVIDENCE.json'').write_text(json.dumps(files,indent=2)+''\n'')
+
+        PY'
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: linux-reference-${{ matrix.tag }}
+        path: ${{ env.DIAG_OUT }}/
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: shared-self-${{ matrix.tag }}
+        path: reference/SELF.c
+        if-no-files-found: error
+  windows-diagnostic:
+    needs: linux-reference
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        include: *id001
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      DIAG_TARGET: ${{ matrix.target }}
+      DIAG_OUT: ${{ github.workspace }}-diag-${{ matrix.tag }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      CFLAGS: -O2
+      UNISACC_TIME_SCALE: '1'
+      DIAG_MODE: windows
+      UNISACC_MODEL_CACHE: ${{ github.workspace }}-diag-cache-${{ matrix.tag }}
+      TMPDIR: ${{ github.workspace }}-diag-tmp-${{ matrix.tag }}
+    steps:
+    - run: git config --global core.autocrlf false
+    - *id002
+    - name: Pin source
+      run: 'python3 - <<''PY''
+
+        import os,re,subprocess,pathlib
+
+        sha=os.environ[''SOURCE_SHA''];assert re.fullmatch(''[0-9a-fA-F]{40}'',sha)
+
+        assert subprocess.check_output([''git'',''rev-parse'',''HEAD'']).decode().strip().lower()==sha.lower()
+
+        assert not subprocess.check_output([''git'',''status'',''--porcelain''])
+
+        pathlib.Path(os.environ[''DIAG_OUT'']).mkdir(parents=True,exist_ok=True)
+
+        PY'
+    - uses: actions/download-artifact@v4
+      with:
+        name: linux-reference-${{ matrix.tag }}
+        path: reference/${{ matrix.tag }}
+    - uses: actions/download-artifact@v4
+      with:
+        name: shared-self-${{ matrix.tag }}
+        path: reference
+    - name: Create private preparation directories
+      run: python3 -c "import os,pathlib;[pathlib.Path(os.environ[k]).mkdir(parents=True,exist_ok=True) for k in
+        ('TMPDIR','UNISACC_MODEL_CACHE')]"
+    - name: Fresh formal Windows U0 prepare only
+      run: 'python3 - <<''PY''
+
+        import os,pathlib,subprocess,sys,time,json
+
+        p=pathlib.Path(os.environ[''DIAG_OUT'']);a=[sys.executable,''tests/bound.py'',''55'',''sh'',''tests/nativeboot.sh'',''--host-triple-prepare''];t=time.monotonic()
+
+        with (p/''prepare.stdout'').open(''wb'') as o,(p/''prepare.stderr'').open(''wb'') as e:r=subprocess.run(a,stdout=o,stderr=e).returncode
+
+        (p/''prepare.json'').write_text(json.dumps({''argv'':a,''rc'':r,''seconds_monotonic'':time.monotonic()-t})+''\n'')
+
+        sys.exit(r)
+
+        PY'
+    - name: Find first input and observable stage difference
+      run: "python3 - <<'PY'\nimport pathlib,subprocess,sys,os,time,json,hashlib\nroot=pathlib.Path.cwd();out=pathlib.Path(os.environ['DIAG_OUT']);out.mkdir(parents=True,exist_ok=True)\n\
+        mode=os.environ['DIAG_MODE'];target=os.environ['DIAG_TARGET'];ref=pathlib.Path('reference')/target.replace('/','-')\n\
+        files=['examples/hello.c','tests/c/b_bitand.c','tests/c/a_arr3v.c','tests/c/a_struct2.c','tests/c/b_funcptr.c','tests/c/b_compound_result.c','reference/SELF.c']\n\
+        stages=[('preprocess',['-E']),('tokens',['-dump-tokens']),('tape',['-S']),('image',[])]\nrows=[];first=None\n\
+        if mode=='windows':\n prep=out/'prepare.stdout';lines=prep.read_text().splitlines();ready=[json.loads(x)\
+        \ for x in lines if x.startswith('{')];ua=pathlib.Path(ready[-1]['U0']);assert ua.stat().st_size>0\nelse:ua=pathlib.Path('diag-ua').resolve()\n\
+        for i,name in enumerate(files):\n src=pathlib.Path(name);assert src.stat().st_size>0\n for stage,flags in\
+        \ stages:\n  prefix=f'{i:02}-{stage}';argv=[sys.executable,'tests/bound.py','10',str(ua),name,'-O2','-b',target,*flags];start=time.monotonic()\n\
+        \  with (out/(prefix+'.out')).open('wb') as f,(out/(prefix+'.err')).open('wb') as e:rc=subprocess.run(argv,stdout=f,stderr=e).returncode\n\
+        \  data=(out/(prefix+'.out')).read_bytes();row={'input':name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'stage':stage,'argv':argv,'rc':rc,'seconds_monotonic':time.monotonic()-start,'stdout_sha256':hashlib.sha256(data).hexdigest(),'stderr_sha256':hashlib.sha256((out/(prefix+'.err')).read_bytes()).hexdigest()}\n\
+        \  if mode=='windows':\n   rr=json.loads((ref/'records.json').read_text());expected=next(x for x in rr if\
+        \ x['input']==name and x['stage']==stage);rd=(ref/(prefix+'.out')).read_bytes();assert row['source_sha256']==expected['source_sha256'],'INPUT_IDENTITY_MISMATCH'\n\
+        \   row['reference_rc']=expected['rc'];row['same']=rc==expected['rc']==0 and data==rd\n   if not row['same']:\n\
+        \    pos=next((n for n,(a,b) in enumerate(zip(data,rd)) if a!=b),min(len(data),len(rd)));row['first_byte_offset']=pos;row['actual_bytes']=len(data);row['reference_bytes']=len(rd);first=row\n\
+        \  row['compiler_sha256']=hashlib.sha256(ua.read_bytes()).hexdigest();rows.append(row);(out/'records.json').write_text(json.dumps(rows,indent=2)+'\\\
+        n')\n  if rc or first:break\n if first or rc:break\n(out/'FIRST-DIFFERENCE.json').write_text(json.dumps({'scope':'DIAGNOSTIC_ONLY_NOT_CELL_PASS','first':first,'last':rows[-1]\
+        \ if rows else None},indent=2)+'\\n')\nif rc or first:sys.exit(1)\n\nPY"
+    - name: Index all raw artifacts even on first stop
+      if: always()
+      run: 'python3 - <<''PY''
+
+        import os,pathlib,json,hashlib
+
+        p=pathlib.Path(os.environ[''DIAG_OUT'']);p.mkdir(parents=True,exist_ok=True)
+
+        files={x.relative_to(p).as_posix():{''bytes'':x.stat().st_size,''sha256'':hashlib.sha256(x.read_bytes()).hexdigest()}
+        for x in p.rglob(''*'') if x.is_file() and x.name!=''EVIDENCE.json''}
+
+        (p/''EVIDENCE.json'').write_text(json.dumps(files,indent=2)+''\n'')
+
+        PY'
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: windows-tape-diagnostic-${{ matrix.tag }}-${{ github.run_id }}
+        path: ${{ env.DIAG_OUT }}/
+        if-no-files-found: error
