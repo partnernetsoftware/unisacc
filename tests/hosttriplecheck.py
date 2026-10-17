@@ -65,7 +65,7 @@ assert {'tests/lib.sh','tests/bound','tests/bound.c'}<=set(actors)
 basis={'sources':sources,'actors':actors,'host':target,'cc':str(cc),'cc_sha256':digest(cc),'cc_version':version.hex(),'CFLAGS':'-O2','native_flags':['-O2'],'compiler_environment':{k:os.environ.get(k) for k in ('PATH','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','SDKROOT','MACOSX_DEPLOYMENT_TARGET','SOURCE_DATE_EPOCH','CC','BOUND_CACHE','GITHUB_ACTIONS','UNISACC_BOUND_STOP_SECS','UNISACC_BOUND_TEST_NO_KILL')}}
 if WINDOWS:
  basis['windows_tool']=windows_context
- basis['windows_shell']={'bash':bash,'bash_sha256':digest(bash),'cygpath':str(cygpath),'cygpath_sha256':digest(cygpath)}
+ basis['windows_shell']={'bash':bash,'bash_sha256':digest(pathlib.Path(bash)),'cygpath':str(cygpath),'cygpath_sha256':digest(pathlib.Path(cygpath))}
 key=hashlib.sha256(json.dumps(basis,sort_keys=True).encode()).hexdigest();u0=base/('host-triple-u0-'+key)
 def need(name,reason):
  print('NEED_PREPARE host-triple-'+name+': '+reason,file=sys.stderr);raise SystemExit(75)
