@@ -1,4 +1,4 @@
-name: Windows U0 Tape first-difference diagnostic
+name: Windows U0 all-input Tape diagnostic r2
 'on':
   workflow_dispatch:
     inputs:
@@ -60,24 +60,30 @@ jobs:
         mkdir -p reference
 
         python3 tests/bound.py 10 sh tests/export_ref.sh reference/SELF.c'
-    - name: Fixed inputs and observable stage references
-      run: "python3 - <<'PY'\nimport pathlib,subprocess,sys,os,time,json,hashlib\nroot=pathlib.Path.cwd();out=pathlib.Path(os.environ['DIAG_OUT']);out.mkdir(parents=True,exist_ok=True)\n\
+    - name: 'All fixed inputs: -E, Tape -S, image; preserve compiler failures'
+      run: "python3 - <<'PY'\nimport pathlib,subprocess,sys,os,time,json,hashlib,difflib,shutil\nout=pathlib.Path(os.environ['DIAG_OUT']);out.mkdir(parents=True,exist_ok=True)\n\
         mode=os.environ['DIAG_MODE'];target=os.environ['DIAG_TARGET'];ref=pathlib.Path('reference')/target.replace('/','-')\n\
         files=['examples/hello.c','tests/c/b_bitand.c','tests/c/a_arr3v.c','tests/c/a_struct2.c','tests/c/b_funcptr.c','tests/c/b_compound_result.c','reference/SELF.c']\n\
-        stages=[('preprocess',['-E']),('tokens',['-dump-tokens']),('tape',['-S']),('image',[])]\nrows=[];first=None\n\
-        if mode=='windows':\n prep=out/'prepare.stdout';lines=prep.read_text().splitlines();ready=[json.loads(x)\
-        \ for x in lines if x.startswith('{')];ua=pathlib.Path(ready[-1]['U0']);assert ua.stat().st_size>0\nelse:ua=pathlib.Path('diag-ua').resolve()\n\
-        for i,name in enumerate(files):\n src=pathlib.Path(name);assert src.stat().st_size>0\n for stage,flags in\
-        \ stages:\n  prefix=f'{i:02}-{stage}';argv=[sys.executable,'tests/bound.py','10',str(ua),name,'-O2','-b',target,*flags];start=time.monotonic()\n\
+        stages=[('preprocess',['-E']),('tape',['-S']),('image',[])]\nrows=[];first_tape=None\nif mode=='windows':\n\
+        \ ready=[json.loads(x) for x in (out/'prepare.stdout').read_text().splitlines() if x.startswith('{')];ua=pathlib.Path(ready[-1]['U0'])\n\
+        else:ua=pathlib.Path('diag-ua').resolve()\ncompiler_sha=hashlib.sha256(ua.read_bytes()).hexdigest()\nreferences=json.loads((ref/'records.json').read_text())\
+        \ if mode=='windows' else []\nfor i,name in enumerate(files):\n src=pathlib.Path(name);source_sha=hashlib.sha256(src.read_bytes()).hexdigest()\n\
+        \ for stage,flags in stages:\n  prefix=f'{i:02}-{stage}';argv=[sys.executable,'tests/bound.py','10',str(ua),name,'-O2','-b',target,*flags];start=time.monotonic()\n\
         \  with (out/(prefix+'.out')).open('wb') as f,(out/(prefix+'.err')).open('wb') as e:rc=subprocess.run(argv,stdout=f,stderr=e).returncode\n\
-        \  data=(out/(prefix+'.out')).read_bytes();row={'input':name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'stage':stage,'argv':argv,'rc':rc,'seconds_monotonic':time.monotonic()-start,'stdout_sha256':hashlib.sha256(data).hexdigest(),'stderr_sha256':hashlib.sha256((out/(prefix+'.err')).read_bytes()).hexdigest()}\n\
-        \  if mode=='windows':\n   rr=json.loads((ref/'records.json').read_text());expected=next(x for x in rr if\
-        \ x['input']==name and x['stage']==stage);rd=(ref/(prefix+'.out')).read_bytes();assert row['source_sha256']==expected['source_sha256'],'INPUT_IDENTITY_MISMATCH'\n\
-        \   row['reference_rc']=expected['rc'];row['same']=rc==expected['rc']==0 and data==rd\n   if not row['same']:\n\
-        \    pos=next((n for n,(a,b) in enumerate(zip(data,rd)) if a!=b),min(len(data),len(rd)));row['first_byte_offset']=pos;row['actual_bytes']=len(data);row['reference_bytes']=len(rd);first=row\n\
-        \  row['compiler_sha256']=hashlib.sha256(ua.read_bytes()).hexdigest();rows.append(row);(out/'records.json').write_text(json.dumps(rows,indent=2)+'\\\
-        n')\n  if rc or first:break\n if first or rc:break\n(out/'FIRST-DIFFERENCE.json').write_text(json.dumps({'scope':'DIAGNOSTIC_ONLY_NOT_CELL_PASS','first':first,'last':rows[-1]\
-        \ if rows else None},indent=2)+'\\n')\nif rc or first:sys.exit(1)\n\nPY"
+        \  data=(out/(prefix+'.out')).read_bytes();row={'input':name,'source_sha256':source_sha,'compiler_sha256':compiler_sha,'stage':stage,'argv':argv,'rc':rc,'seconds_monotonic':time.monotonic()-start,'stdout_sha256':hashlib.sha256(data).hexdigest(),'stderr_sha256':hashlib.sha256((out/(prefix+'.err')).read_bytes()).hexdigest()}\n\
+        \  if stage=='tape':row['unexpected_image_magic']=data.startswith((b'MZ',b'\\x7fELF'))\n  if mode=='windows':\n\
+        \   expected=next(x for x in references if x['input']==name and x['stage']==stage);rd=(ref/(prefix+'.out')).read_bytes();assert\
+        \ source_sha==expected['source_sha256'],'INPUT_IDENTITY_MISMATCH'\n   row['reference_rc']=expected['rc'];row['same_bytes']=data==rd;row['same_success']=rc==expected['rc']==0\
+        \ and data==rd\n   if not row['same_success']:\n    row['first_byte_offset']=next((n for n,(a,b) in enumerate(zip(data,rd))\
+        \ if a!=b),min(len(data),len(rd)));row['actual_bytes']=len(data);row['reference_bytes']=len(rd)\n    if\
+        \ stage=='tape' and first_tape is None:\n     first_tape=row.copy();shutil.copyfile(ref/(prefix+'.out'),out/'first-tape-reference.txt');shutil.copyfile(out/(prefix+'.out'),out/'first-tape-windows.txt')\n\
+        \     diff=list(difflib.unified_diff(rd.decode('utf-8',errors='replace').splitlines(True),data.decode('utf-8',errors='replace').splitlines(True),fromfile='Linux-reference.Tape',tofile='Windows-U0.Tape'))\n\
+        \     (out/'first-tape-diff.txt').write_text(''.join(diff));(out/'first-tape-diff-first40.txt').write_text(''.join(diff[:40]))\n\
+        \  rows.append(row);(out/'records.json').write_text(json.dumps(rows,indent=2)+'\\n')\nsummary={stage:{'total':len([x\
+        \ for x in rows if x['stage']==stage]),'nonzero':[x['input'] for x in rows if x['stage']==stage and x['rc']!=0],'different':[x['input']\
+        \ for x in rows if x['stage']==stage and x.get('same_success') is False]} for stage,_ in stages}\n(out/'STAGE-SUMMARY.json').write_text(json.dumps({'scope':'DIAGNOSTIC_ONLY_NOT_CELL_PASS','summary':summary,'first_tape_difference':first_tape},indent=2)+'\\\
+        n')\n# Compiler failure/difference is data: continue all cases. Only identity/tool/harness failures stop.\n\
+        \nPY"
     - name: Index raw evidence
       if: always()
       run: 'python3 - <<''PY''
@@ -167,24 +173,30 @@ jobs:
         sys.exit(r)
 
         PY'
-    - name: Find first input and observable stage difference
-      run: "python3 - <<'PY'\nimport pathlib,subprocess,sys,os,time,json,hashlib\nroot=pathlib.Path.cwd();out=pathlib.Path(os.environ['DIAG_OUT']);out.mkdir(parents=True,exist_ok=True)\n\
+    - name: 'All fixed inputs: -E, Tape -S, image; preserve compiler failures'
+      run: "python3 - <<'PY'\nimport pathlib,subprocess,sys,os,time,json,hashlib,difflib,shutil\nout=pathlib.Path(os.environ['DIAG_OUT']);out.mkdir(parents=True,exist_ok=True)\n\
         mode=os.environ['DIAG_MODE'];target=os.environ['DIAG_TARGET'];ref=pathlib.Path('reference')/target.replace('/','-')\n\
         files=['examples/hello.c','tests/c/b_bitand.c','tests/c/a_arr3v.c','tests/c/a_struct2.c','tests/c/b_funcptr.c','tests/c/b_compound_result.c','reference/SELF.c']\n\
-        stages=[('preprocess',['-E']),('tokens',['-dump-tokens']),('tape',['-S']),('image',[])]\nrows=[];first=None\n\
-        if mode=='windows':\n prep=out/'prepare.stdout';lines=prep.read_text().splitlines();ready=[json.loads(x)\
-        \ for x in lines if x.startswith('{')];ua=pathlib.Path(ready[-1]['U0']);assert ua.stat().st_size>0\nelse:ua=pathlib.Path('diag-ua').resolve()\n\
-        for i,name in enumerate(files):\n src=pathlib.Path(name);assert src.stat().st_size>0\n for stage,flags in\
-        \ stages:\n  prefix=f'{i:02}-{stage}';argv=[sys.executable,'tests/bound.py','10',str(ua),name,'-O2','-b',target,*flags];start=time.monotonic()\n\
+        stages=[('preprocess',['-E']),('tape',['-S']),('image',[])]\nrows=[];first_tape=None\nif mode=='windows':\n\
+        \ ready=[json.loads(x) for x in (out/'prepare.stdout').read_text().splitlines() if x.startswith('{')];ua=pathlib.Path(ready[-1]['U0'])\n\
+        else:ua=pathlib.Path('diag-ua').resolve()\ncompiler_sha=hashlib.sha256(ua.read_bytes()).hexdigest()\nreferences=json.loads((ref/'records.json').read_text())\
+        \ if mode=='windows' else []\nfor i,name in enumerate(files):\n src=pathlib.Path(name);source_sha=hashlib.sha256(src.read_bytes()).hexdigest()\n\
+        \ for stage,flags in stages:\n  prefix=f'{i:02}-{stage}';argv=[sys.executable,'tests/bound.py','10',str(ua),name,'-O2','-b',target,*flags];start=time.monotonic()\n\
         \  with (out/(prefix+'.out')).open('wb') as f,(out/(prefix+'.err')).open('wb') as e:rc=subprocess.run(argv,stdout=f,stderr=e).returncode\n\
-        \  data=(out/(prefix+'.out')).read_bytes();row={'input':name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'stage':stage,'argv':argv,'rc':rc,'seconds_monotonic':time.monotonic()-start,'stdout_sha256':hashlib.sha256(data).hexdigest(),'stderr_sha256':hashlib.sha256((out/(prefix+'.err')).read_bytes()).hexdigest()}\n\
-        \  if mode=='windows':\n   rr=json.loads((ref/'records.json').read_text());expected=next(x for x in rr if\
-        \ x['input']==name and x['stage']==stage);rd=(ref/(prefix+'.out')).read_bytes();assert row['source_sha256']==expected['source_sha256'],'INPUT_IDENTITY_MISMATCH'\n\
-        \   row['reference_rc']=expected['rc'];row['same']=rc==expected['rc']==0 and data==rd\n   if not row['same']:\n\
-        \    pos=next((n for n,(a,b) in enumerate(zip(data,rd)) if a!=b),min(len(data),len(rd)));row['first_byte_offset']=pos;row['actual_bytes']=len(data);row['reference_bytes']=len(rd);first=row\n\
-        \  row['compiler_sha256']=hashlib.sha256(ua.read_bytes()).hexdigest();rows.append(row);(out/'records.json').write_text(json.dumps(rows,indent=2)+'\\\
-        n')\n  if rc or first:break\n if first or rc:break\n(out/'FIRST-DIFFERENCE.json').write_text(json.dumps({'scope':'DIAGNOSTIC_ONLY_NOT_CELL_PASS','first':first,'last':rows[-1]\
-        \ if rows else None},indent=2)+'\\n')\nif rc or first:sys.exit(1)\n\nPY"
+        \  data=(out/(prefix+'.out')).read_bytes();row={'input':name,'source_sha256':source_sha,'compiler_sha256':compiler_sha,'stage':stage,'argv':argv,'rc':rc,'seconds_monotonic':time.monotonic()-start,'stdout_sha256':hashlib.sha256(data).hexdigest(),'stderr_sha256':hashlib.sha256((out/(prefix+'.err')).read_bytes()).hexdigest()}\n\
+        \  if stage=='tape':row['unexpected_image_magic']=data.startswith((b'MZ',b'\\x7fELF'))\n  if mode=='windows':\n\
+        \   expected=next(x for x in references if x['input']==name and x['stage']==stage);rd=(ref/(prefix+'.out')).read_bytes();assert\
+        \ source_sha==expected['source_sha256'],'INPUT_IDENTITY_MISMATCH'\n   row['reference_rc']=expected['rc'];row['same_bytes']=data==rd;row['same_success']=rc==expected['rc']==0\
+        \ and data==rd\n   if not row['same_success']:\n    row['first_byte_offset']=next((n for n,(a,b) in enumerate(zip(data,rd))\
+        \ if a!=b),min(len(data),len(rd)));row['actual_bytes']=len(data);row['reference_bytes']=len(rd)\n    if\
+        \ stage=='tape' and first_tape is None:\n     first_tape=row.copy();shutil.copyfile(ref/(prefix+'.out'),out/'first-tape-reference.txt');shutil.copyfile(out/(prefix+'.out'),out/'first-tape-windows.txt')\n\
+        \     diff=list(difflib.unified_diff(rd.decode('utf-8',errors='replace').splitlines(True),data.decode('utf-8',errors='replace').splitlines(True),fromfile='Linux-reference.Tape',tofile='Windows-U0.Tape'))\n\
+        \     (out/'first-tape-diff.txt').write_text(''.join(diff));(out/'first-tape-diff-first40.txt').write_text(''.join(diff[:40]))\n\
+        \  rows.append(row);(out/'records.json').write_text(json.dumps(rows,indent=2)+'\\n')\nsummary={stage:{'total':len([x\
+        \ for x in rows if x['stage']==stage]),'nonzero':[x['input'] for x in rows if x['stage']==stage and x['rc']!=0],'different':[x['input']\
+        \ for x in rows if x['stage']==stage and x.get('same_success') is False]} for stage,_ in stages}\n(out/'STAGE-SUMMARY.json').write_text(json.dumps({'scope':'DIAGNOSTIC_ONLY_NOT_CELL_PASS','summary':summary,'first_tape_difference':first_tape},indent=2)+'\\\
+        n')\n# Compiler failure/difference is data: continue all cases. Only identity/tool/harness failures stop.\n\
+        \nPY"
     - name: Index all raw artifacts even on first stop
       if: always()
       run: 'python3 - <<''PY''
