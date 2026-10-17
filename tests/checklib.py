@@ -45,6 +45,90 @@ def verify_cached_file(path, expected_sha256, *, executable=False):
     return path
 
 
+def parse_cc_make_dependencies(text):
+    """Parse the supported cc -M prerequisite spelling; reject ambiguous syntax."""
+    names = []
+    word = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in "\"'":
+            raise ValueError('unsupported quote in cc Make dependencies')
+        if c == '\\':
+            if i + 1 == len(text):
+                raise ValueError('unpaired escape in cc Make dependencies')
+            following = text[i + 1]
+            if following == '\n':
+                # A Make continuation is whitespace, not token concatenation.
+                if word:
+                    names.append(''.join(word)); word = []
+            elif following in (' ', '\t', '#'):
+                word.append(following)
+            else:
+                raise ValueError('unsupported escape in cc Make dependencies')
+            i += 2
+            continue
+        if c == '$':
+            if i + 1 >= len(text) or text[i + 1] != '$':
+                raise ValueError('unsupported dollar expression in cc Make dependencies')
+            word.append('$'); i += 2; continue
+        if c == '#' or c == ':' or c == '\r' or c == '\x00':
+            raise ValueError('unsupported syntax in cc Make dependencies')
+        if c.isspace():
+            if word:
+                names.append(''.join(word)); word = []
+        else:
+            word.append(c)
+        i += 1
+    if word:
+        names.append(''.join(word))
+    return names
+
+
+def cc_read_set_identity(compiler, sources, flags=(), *, cwd=None, env=None, timeout=55):
+    """Ask cc for each translation unit's full (including system) header read set.
+
+    Dependency-only preprocessing builds no object or executable. Preserve the
+    caller's actual compiler flags/environment; return paths plus content SHA.
+    Cache users must recompute this before accepting a prepared artifact.
+    """
+    base = pathlib.Path(cwd or pathlib.Path.cwd()).resolve()
+    compiler = str(pathlib.Path(compiler).resolve(strict=True))
+    files = {}
+    commands = []
+    for source in sources:
+        command = [compiler, *map(str, flags), '-M', '-MT', '__checklib_readset__', str(source)]
+        result = subprocess.run(command, cwd=base, env=env, capture_output=True,
+                                text=True, timeout=timeout)
+        commands.append(command)
+        if result.returncode:
+            raise ValueError('cc dependency scan failed rc=' + str(result.returncode) + ': ' + result.stderr[-1000:])
+        text = result.stdout
+        prefix = '__checklib_readset__:'
+        if not text.startswith(prefix):
+            raise ValueError('cc dependency scan has no expected target')
+        names = parse_cc_make_dependencies(text[len(prefix):])
+        if not names:
+            raise ValueError('cc dependency scan returned an empty read set')
+        resolved_source = (base / source).resolve(strict=True)
+        seen = set()
+        for name in names:
+            path = (base / name).absolute()
+            real = path.resolve(strict=True)
+            info = real.stat()
+            if not real.is_file():
+                raise ValueError('cc dependency is not a regular file: ' + str(real))
+            files[str(path)] = {'resolved': str(real), 'sha256': sha(real)}
+            seen.add(real)
+        if resolved_source not in seen:
+            raise ValueError('cc dependency scan omitted its source: ' + str(source))
+    if not files:
+        raise ValueError('cc dependency scan has no translation units')
+    return {'schema': 'cc-header-readset-v1', 'compiler': compiler,
+            'compiler_sha256': sha(compiler), 'commands': commands,
+            'files': dict(sorted(files.items()))}
+
+
 def copy_runtime(root, destination):
     """Copy runtime sources and their local quoted-include closure, preserving paths.
 

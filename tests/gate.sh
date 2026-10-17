@@ -135,7 +135,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-gold-irsel-label) req='native-posix|host|cc,python3|cdx|unisa-gold-irsel-label-point-sample';;
           unisa-gold-parse-label) req='native-posix|host|cc,python3|cdx|unisa-gold-parse-label-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
-          seedgen-ppconsumer-1|seedgen-ppconsumer-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
+          seedgen-ppconsumer-1|seedgen-ppconsumer-2|seedgen-ppconsumer-2-*) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
           seedgen-pprun) req='native-posix|host|cc,python3|cdx|seed-gen-pp-run';;
           seedgen-optconsumer-1|seedgen-optconsumer-2|seedgen-optconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-opt-consumer';;
@@ -894,7 +894,10 @@ job unisa-gold-parse-label sh ./tests/unisagoldparselabelcheck.sh   # 0.0.41 K6-
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
 job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
-job seedgen-ppconsumer-2 sh ./tests/seedppconsumercheck.sh 2
+job seedgen-ppconsumer-2-prepare python3 ./tests/seedppconsumerprepared.py --prepare
+job seedgen-ppconsumer-2-osx-arm64 python3 ./tests/seedppconsumerprepared.py --require-cached --target osx/arm64
+job seedgen-ppconsumer-2-win-x86_64 python3 ./tests/seedppconsumerprepared.py --require-cached --target win/x86_64
+job seedgen-ppconsumer-2-win-arm64 python3 ./tests/seedppconsumerprepared.py --require-cached --target win/arm64
 job seedgen-ppchain-1 sh ./tests/seedppchaincheck.sh 1   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled; K5-1i (07:53): + parse2 helper, three slices
 job seedgen-ppchain-2 sh ./tests/seedppchaincheck.sh 2
 job seedgen-ppchain-3 sh ./tests/seedppchaincheck.sh 3

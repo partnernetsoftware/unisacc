@@ -22,6 +22,15 @@ case "${1:-}" in
     *) echo "usage: tests/seedppconsumercheck.sh 1|2"; exit 2;;
 esac
 SHARD=$1
+# Only the new shard-2 target consumers use the content-verified prepared tools.
+SPLIT_TARGET=${2:-}
+if [ -n "$SPLIT_TARGET" ]; then
+    [ "$SHARD" = 2 ] || { echo "seedppc: target selection is shard 2 only" >&2; exit 2; }
+    case "$SPLIT_TARGET" in osx/arm64|win/x86_64|win/arm64) TARGETS=$SPLIT_TARGET;; *) exit 2;; esac
+    [ -n "${SEEDPPC_PREPARED_TOOLS:-}" ] || { echo "NEED_PREPARE seedppc: tools absent" >&2; exit 75; }
+else
+    unset SEEDPPC_PREPARED_TOOLS
+fi
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 S=$(mktemp -d "${TMPDIR:-/tmp}/seedppc.XXXXXX") || exit 2
@@ -121,7 +130,31 @@ if [ -n "\$run" ] && [ "\$srcs" -eq 1 ]; then
     [ -n "\$o" ] || { log UNKNOWN "cc \$*"; exit 97; }
     log short "cc \$*"; printf '#!/bin/sh\nexit 0\n' > "\$o" && chmod +x "\$o"; exit \$?
 fi
-if [ -n "\$known" ] && [ -z "\$run" ] && [ "\$srcs" -eq 1 ]; then log pass "cc \$*"; exec "$REALCC" "\$@"; fi
+if [ -n "\$known" ] && [ -z "\$run" ] && [ "\$srcs" -eq 1 ]; then
+    if [ -n "\${SEEDPPC_PREPARED_TOOLS:-}" ]; then
+        # Build-only work moved to the preparation job; keep the helper's real key,
+        # private cache publication, output path and SHA checks under test.
+        python3 - "\$@" <<'COPYTOOLS'
+import hashlib,json,os,pathlib,shutil,sys
+args=sys.argv[1:];tools=pathlib.Path(os.environ['SEEDPPC_PREPARED_TOOLS'])
+src=[x for x in args if x.endswith('.c')]
+assert len(src)==1
+name='seed-gen' if src[0].endswith('/seed/gen.c') or src[0]=='seed/gen.c' else 'bound'
+assert name=='seed-gen' or src[0].endswith('/tests/bound.c') or src[0]=='tests/bound.c'
+out=args.index('-o');assert out==len(args)-2
+flags=args[:out-1];want=['-std=c99','-O2','-w'] if name=='seed-gen' else ['-std=c99','-O2','-Wall','-Wextra']
+if name=='seed-gen':
+    assert flags[-1]=='-I'+str(pathlib.Path(src[0]).resolve().parent)
+    flags=flags[:-1]
+assert flags==want
+record=json.loads((tools/'manifest.json').read_text());source=tools/name
+assert hashlib.sha256(source.read_bytes()).hexdigest()==record['outputs'][name]
+shutil.copy2(source,args[out+1])
+COPYTOOLS
+        r=\$?; log prepared "cc \$*"; exit \$r
+    fi
+    log pass "cc \$*"; exec "$REALCC" "\$@"
+fi
 log UNKNOWN "cc \$*"; exit 97
 SHIM
 chmod +x "$S/shim/python3" "$S/shim/cc"
@@ -130,12 +163,14 @@ ok() { echo "SAME $1"; evw "SAME $1"; same=$((same + 1)); }
 no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 # the shims refuse what they do not know (rc 97, recorded UNKNOWN)
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
+if [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = osx/arm64 ]; then
 for bad_argv in "-c foo.c" "-O2 -o x exec/c/run.c seed/gen.c" "-o x"; do   # not "bad": that is the failure count
     "$S/shim/cc" $bad_argv >/dev/null 2>&1; r=$?
     [ "$r" -eq 97 ] && ok "cc shim refuses '$bad_argv'" || no "cc shim did not refuse '$bad_argv' (rc=$r)"
 done
 "$S/shim/python3" exec/c/other.py >/dev/null 2>&1; r=$?
 [ "$r" -eq 97 ] && ok "python3 shim refuses an unknown script" || no "python3 shim did not refuse (rc=$r)"
+fi
 unset SHIMLOG
 flags() { case $1 in lnx/x86_64) ;; lnx/arm64) echo --arm64;; osx/x86_64) echo --osx;; osx/arm64) echo --osx --arm64;; win/x86_64) echo --win;; win/arm64) echo --win --arm64;; esac; }
 slug() { echo "$1" | tr / -; }
@@ -202,7 +237,7 @@ r=$(prep "$t" "$o" "$l" "$M")
 evw "MUTANT rc prepare=$r"
 fi
 
-if [ "$SHARD" = 2 ]; then
+if [ "$SHARD" = 2 ] && { [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = win/arm64 ]; }; then
 t=win/arm64; s=$(slug "$t"); o=$S/py-$s; l=$S/pylog-$s
 r=$(prep "$t" "$o" "$l" "$PREP" SEED_GEN=0)
 { [ "$r" -eq 0 ] && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $o/e2.json --win --arm64" && cmp -s "$o/e2.json" "$S/out-$s/e2.json"; } \
@@ -212,10 +247,13 @@ fi
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
+if [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = win/arm64 ]; then
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
+fi
 if [ -n "$EV" ]; then   # the shard's own logs, by name; a failed copy marks the export
     logs="shimneg"; for t in $TARGETS; do logs="$logs log-$(slug "$t")"; done
-    if [ "$SHARD" = 1 ]; then logs="$logs neglog-red neglog-missing neglog-badsg mutlog"; else logs="$logs pylog-win-arm64"; fi
+    if [ "$SHARD" = 1 ]; then logs="$logs neglog-red neglog-missing neglog-badsg mutlog"; elif [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = win/arm64 ]; then logs="$logs pylog-win-arm64"; fi
+    if [ -n "$SPLIT_TARGET" ] && [ "$SPLIT_TARGET" != osx/arm64 ]; then logs=${logs#shimneg }; fi
     for f in $logs; do cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedppc: EVIDENCE copy of $f failed" >&2; }; done
 fi
 echo "seedppc  shard $SHARD  same $same  bad $bad"
