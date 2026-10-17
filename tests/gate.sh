@@ -665,7 +665,16 @@ job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py
 job lib-carrier-callback python3 ./tests/librarycarriercallbackcheck.py
-job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
+case "$(uname -s)" in
+    Linux|Darwin)
+        job lib-carrier-import-model-prepare python3 ./tests/carrierimportprepared.py --prepare
+        job lib-carrier-import-model-import python3 ./tests/carrierimportprepared.py --require-cached --part import
+        job lib-carrier-import-model-package python3 ./tests/carrierimportprepared.py --require-cached --part package
+        ;;
+    *)
+        job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
+        ;;
+esac
 job lib-union-native python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-carrier-factory python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
 job lib-carrier-relay python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
