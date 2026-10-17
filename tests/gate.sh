@@ -424,6 +424,13 @@ job exec-codec ./exec/c/codeccheck.sh
 job exec-package ./exec/c/packagecheck.sh
 job modelbenchcheck python3 ./tests/modelbenchcheck.py       # performance evidence fails on functional errors
 job bound python3 ./tests/boundcheck.py
+job boundreason sh -c './tests/bound 20 cc -std=c99 -O2 -Wall -Wextra -Itests tests/boundreason.c -o "${TMPDIR:-/tmp}/boundreason-$$" && ./tests/bound 20 "${TMPDIR:-/tmp}/boundreason-$$"'   # r7: pure composition matrix; each compile and each run is its own bound
+job boundstall-r7g python3 ./tests/boundstall_r7g.py . --gate   # r7g: clean stall cases S1-S3 plus setsid, ledger identity harness, C entry
+job boundnested-1 python3 ./tests/boundnested.py . --gate --only 1,2   # r7: cases 1-2, C and py longer child (~16 s)
+job boundnested-2 python3 ./tests/boundnested.py . --gate --only 3,4   # r7: cases 3-4, py parent and py longer child (~16 s)
+job boundnested-3 python3 ./tests/boundnested.py . --gate --only 5,6   # r7: shorter child (case 5), shorter parent (case 6); theoretical 14.5 s
+job boundnested-4 python3 ./tests/boundnested.py . --gate --only 7   # r7: grandchild reaped (case 7) plus its pgrep; theoretical 5.25 s
+job boundnested-5 python3 ./tests/boundnested.py . --gate --only 8   # r7: independent deadline propagation call; parent N 8, theoretical 10.25 s
 job qprefix python3 ./exec/c/qprefixcheck.py --artifact "${MODEL_COM:-./unisacc.com}"
 if [ "$(uname -s)" = Darwin ]; then
     job ffi-bridge python3 ./exec/ffi/bridgecheck.py

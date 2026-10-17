@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bound one command and its descendants. Test infrastructure only."""
+import math
 import os
 import re
 import secrets
@@ -15,6 +16,8 @@ STOP_SECS = float(os.environ.get('UNISACC_BOUND_STOP_SECS', '10'))
 # One absolute deadline covers command wait plus cleanup, not N then another ten seconds.
 # With scale=1, the scheduled process budget is N+2s (external startup allowance: 1s).
 TOTAL_EXTRA_SECS = 2.0
+# Shared hard deadline across nested bounds: an absolute time.monotonic() value (same machine), passed down.
+PARENT_DEADLINE = 'UNISACC_BOUND_DEADLINE_MONO'
 PS_CALL_SECS = 0.5
 _TOTAL_DEADLINE = None
 
@@ -258,6 +261,21 @@ def windows_main(command_budget):
         if job:kill_tree()
 
 
+def parent_deadline():
+    """The inherited absolute hard deadline, or None.  Non-finite or non-positive values refuse to start."""
+    raw = os.environ.get(PARENT_DEADLINE)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float('nan')
+    if not math.isfinite(value) or value <= 0:
+        sys.stderr.write('bound: bad %s=%r, refusing to start (not green)\n' % (PARENT_DEADLINE, raw))
+        raise SystemExit(2)
+    return value
+
+
 def main():
     if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 60:
         print('bound: timeout must be 1..60 seconds, followed by a command', file=sys.stderr)
@@ -269,6 +287,13 @@ def main():
     token = secrets.token_hex(8)
     env = dict(os.environ)
     env[CHAIN] = (env.get(CHAIN, "") + " " + token).strip()
+    parent = parent_deadline()
+    if parent is not None:
+        if parent <= time.monotonic():
+            sys.stderr.write('bound: inherited deadline already passed, refusing to start (not green)\n')
+            return 142
+        _TOTAL_DEADLINE = min(_TOTAL_DEADLINE, parent)
+    env[PARENT_DEADLINE] = repr(_TOTAL_DEADLINE)
     process = subprocess.Popen(sys.argv[2:], start_new_session=True, env=env)
     def interrupted(sig, frame):
         raise SystemExit(stop(process, 128 + sig, token))
