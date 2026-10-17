@@ -183,6 +183,81 @@ def scale():
     return int(v) if v.isdigit() and 1 <= int(v) <= 5 else 1
 
 
+def windows_main(command_budget):
+    # Windows owns descendants through a kill-on-close Job Object; no POSIX ps/signals.
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    class BASIC(ctypes.Structure):
+        _fields_=[('ProcessTime',ctypes.c_longlong),('JobTime',ctypes.c_longlong),
+                  ('LimitFlags',wintypes.DWORD),('MinWorking',ctypes.c_size_t),
+                  ('MaxWorking',ctypes.c_size_t),('ActiveLimit',wintypes.DWORD),
+                  ('Affinity',ctypes.c_size_t),('Priority',wintypes.DWORD),('Scheduling',wintypes.DWORD)]
+    class IO(ctypes.Structure):
+        _fields_=[(n,ctypes.c_ulonglong) for n in ('ReadOps','WriteOps','OtherOps','ReadBytes','WriteBytes','OtherBytes')]
+    class EXTENDED(ctypes.Structure):
+        _fields_=[('Basic',BASIC),('IO',IO),('ProcessMemory',ctypes.c_size_t),
+                  ('JobMemory',ctypes.c_size_t),('PeakProcess',ctypes.c_size_t),('PeakJob',ctypes.c_size_t)]
+    kernel.CreateJobObjectW.argtypes=[ctypes.c_void_p,wintypes.LPCWSTR];kernel.CreateJobObjectW.restype=wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+    kernel.AssignProcessToJobObject.argtypes=[wintypes.HANDLE,wintypes.HANDLE]
+    kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+    job=kernel.CreateJobObjectW(None,None)
+    limits=EXTENDED();limits.Basic.LimitFlags=0x2000 # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not job or not kernel.SetInformationJobObject(job,9,ctypes.byref(limits),ctypes.sizeof(limits)):
+        if job:kernel.CloseHandle(job)
+        print('bound: Windows Job Object setup failed',file=sys.stderr);return 2
+    process=None
+    def kill_tree():
+        kernel.CloseHandle(job) # kills every assigned descendant, including reparented children
+        if process is not None and process.poll() is None:
+            try:subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1)
+            except subprocess.TimeoutExpired:print('bound: Windows taskkill timed out (not green)',file=sys.stderr)
+    try:
+        process=subprocess.Popen(sys.argv[2:],env=dict(os.environ),creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x4) # CREATE_SUSPENDED: assign job before any child can spawn
+        if not kernel.AssignProcessToJobObject(job,wintypes.HANDLE(process._handle)):
+            print('bound: Windows Job Object assignment failed (not green)',file=sys.stderr)
+            kill_tree();job=None;return 2
+        # Popen closes the primary thread handle; enumerate its suspended thread through Win32.
+        class THREADENTRY(ctypes.Structure):
+            _fields_=[('size',wintypes.DWORD),('usage',wintypes.DWORD),('tid',wintypes.DWORD),
+                      ('pid',wintypes.DWORD),('priority',wintypes.LONG),('delta',wintypes.LONG),('flags',wintypes.DWORD)]
+        kernel.CreateToolhelp32Snapshot.argtypes=[wintypes.DWORD,wintypes.DWORD];kernel.CreateToolhelp32Snapshot.restype=wintypes.HANDLE
+        kernel.Thread32First.argtypes=[wintypes.HANDLE,ctypes.POINTER(THREADENTRY)]
+        kernel.Thread32Next.argtypes=[wintypes.HANDLE,ctypes.POINTER(THREADENTRY)]
+        kernel.OpenThread.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];kernel.OpenThread.restype=wintypes.HANDLE
+        kernel.ResumeThread.argtypes=[wintypes.HANDLE];kernel.ResumeThread.restype=wintypes.DWORD
+        snapshot=kernel.CreateToolhelp32Snapshot(4,0);resumed=False
+        if snapshot and snapshot!=ctypes.c_void_p(-1).value:
+            entry=THREADENTRY();entry.size=ctypes.sizeof(entry)
+            available=kernel.Thread32First(snapshot,ctypes.byref(entry))
+            while available and time.monotonic()<_TOTAL_DEADLINE:
+                if entry.pid==process.pid:
+                    thread=kernel.OpenThread(2,False,entry.tid) # THREAD_SUSPEND_RESUME
+                    if thread:
+                        resumed=kernel.ResumeThread(thread)!=0xffffffff;kernel.CloseHandle(thread)
+                    break
+                available=kernel.Thread32Next(snapshot,ctypes.byref(entry))
+            kernel.CloseHandle(snapshot)
+        if not resumed:
+            print('bound: Windows suspended process resume failed (not green)',file=sys.stderr)
+            kill_tree();job=None;return 2
+        def interrupted(sig,frame):
+            raise SystemExit(128+sig)
+        signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
+        remaining=max(0.0,_TOTAL_DEADLINE-TOTAL_EXTRA_SECS-time.monotonic())
+        try:rc=process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            print('bound: Windows process tree timeout',file=sys.stderr);rc=142
+        kill_tree();job=None
+        try:process.wait(timeout=max(0.01,min(1,_TOTAL_DEADLINE-time.monotonic())))
+        except subprocess.TimeoutExpired:
+            print('bound: Windows process tree unreaped (not green)',file=sys.stderr);return 142
+        return rc if rc>=0 else 128-rc
+    finally:
+        if job:kill_tree()
+
+
 def main():
     if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 60:
         print('bound: timeout must be 1..60 seconds, followed by a command', file=sys.stderr)
@@ -190,6 +265,7 @@ def main():
     global _TOTAL_DEADLINE
     command_budget = int(sys.argv[1]) * scale()
     _TOTAL_DEADLINE = time.monotonic() + command_budget + TOTAL_EXTRA_SECS
+    if os.name == 'nt':return windows_main(command_budget)
     token = secrets.token_hex(8)
     env = dict(os.environ)
     env[CHAIN] = (env.get(CHAIN, "") + " " + token).strip()

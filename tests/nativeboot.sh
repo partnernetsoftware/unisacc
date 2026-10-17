@@ -18,12 +18,26 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 case "${1:-}" in
     --host-triple-target)
         [ "$#" = 1 ] || exit 2
-        . "$R/tests/lib.sh"
-        target=$(host_target)
-        case "$target" in lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64) ;; *) echo 'PLATFORM_UNVERIFIED host-triple unsupported native target' >&2; exit 77;; esac
-        # Validate the authoritative spelling against the actual kernel architecture.
-        python3 "$R/tests/bound.py" 2 python3 -c 'import platform,sys; actual=platform.machine().replace("aarch64","arm64"); system={"Linux":"lnx","Darwin":"osx"}.get(platform.system()); sys.exit(0 if system and sys.argv[1]==system+"/"+actual else 77)' "$target" || { echo 'PLATFORM_UNVERIFIED host-triple inconsistent native target' >&2; exit 77; }
-        printf '%s\n' "$target"; exit 0;;
+        # One target authority; Windows uses the native kernel machine, not Python emulation.
+        python3 "$R/tests/bound.py" 2 python3 - <<'PYTARGET'
+import platform,sys
+system={"Linux":"lnx","Darwin":"osx","Windows":"win"}.get(platform.system())
+machine={"AMD64":"x86_64","ARM64":"arm64","aarch64":"arm64"}.get(platform.machine(),platform.machine())
+if system=="win":
+    import ctypes
+    from ctypes import wintypes
+    k=ctypes.WinDLL('kernel32',use_last_error=True)
+    k.GetCurrentProcess.restype=wintypes.HANDLE
+    k.IsWow64Process2.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.WORD),ctypes.POINTER(wintypes.WORD)]
+    process=wintypes.WORD();native=wintypes.WORD()
+    if not k.IsWow64Process2(k.GetCurrentProcess(),ctypes.byref(process),ctypes.byref(native)):
+        print('WINDOWS_NATIVE_MACHINE_QUERY_FAILED',file=sys.stderr);sys.exit(2)
+    machine={0x8664:'x86_64',0xaa64:'arm64'}.get(native.value,'unsupported')
+if system is None or machine not in ('x86_64','arm64'):
+    print('PLATFORM_UNVERIFIED host-triple unsupported native target',file=sys.stderr);sys.exit(77)
+print(system+'/'+machine)
+PYTARGET
+        exit $?;;
     --host-triple) [ "$#" = 2 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" "$2";;
     --host-triple-prepare) [ "$#" = 1 ] || exit 2; exec python3 "$R/tests/hosttriplecheck.py" prepare;;
     --host-triple-build) [ "$#" = 4 ] || exit 2; mode=hostcompile; SELF=$2; COMPILER=$3; OUTPUT=$4;;
