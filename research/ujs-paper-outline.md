@@ -37,7 +37,7 @@
 
 ## 写作红线
 
-- 正文校准（2026-10）：UJS **10** 表 vs UNISA **18** 事实网；`intnet.build(..., stages=ujs.STAGES)`；`irsel` 仅 `acc`、非全线 `ask`；|K| 例与 wasm 出货对比见 [`ujs-paper.md`](ujs-paper.md) §4。
+- 正文校准（2026-10）：UJS **10** 表阶段 vs UNISA **18** 事实决策网（≠18 管线阶段）；unisacc 另有 **7** 段字节流契约（两层见 A / README）；`intnet.build(..., stages=ujs.STAGES)`；`irsel` 仅 `acc`、非全线 `ask`；|K| 例与 wasm 出货对比见 [`ujs-paper.md`](ujs-paper.md) §4。
 - 不把 A 的 Lean 证明抄进 B 当新定理。
 - 不写假 latency；精确性 = 契约 + 绿套件；fold want 只引自 `expect.json`。
 - 出货路径写 **core**，勿仍把 Python `web-build` 写成唯一真源（它是 path-A 开发/引擎残线）。
