@@ -14,12 +14,12 @@
 
 ## Abstract
 
-We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; shipping accuracy is exact by construction and checked by full key-space enumeration. **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel and *instantiates* a dynamic-language / Web pipeline with product gates; it does **not** claim that A’s discharges automatically transfer to every UJS table walker or to the M3 classical compiler.
+We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; exactness on table stages is checked by full key-space enumeration (`acc`). **Paper B’s claim center** is the **constructed IntNet / table stages / (target) stream-derivation pipeline** for closed JS → **`\0asm`** (gold → IntNet → flow → bytes; provisional **m4** contract in `research/m4-flow-net-contract-draft.md`). **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel; it does **not** re-prove IntNet existence and does **not** claim that A’s discharges automatically transfer to every UJS walker.
 
-Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline on the **construct / jtape spine** (lex…irsel [+ IC], wasm lower when tables ship)—and ships browser/Node/Bun surfaces whose **product compile / step path** no longer requires Python. Separately, the **M3 spine** ships a *hand-written* UJS subset compiler (`compiler.ujs` → `compiler_core.wasm`) with **main-body** twin-tests (stage2 ≡ stage1; sim/drone body ≡ stage0—see §5.2). M3 is twin-test evidence for Python-free ship, **not** a claim that the shipping compiler is itself an IntNet. Claims are suite names already in the repository; we invent no throughput numbers.
+Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline on the **construct / jtape spine** (lex…irsel [+ IC], wasm lower when tables ship). The **M3 spine** (`compiler.ujs` → `compiler_core.wasm`, twin-tests in §5.2) is **product scaffolding / 旁路** for Pages ship—Python-free delivery evidence, **not** Paper B’s main contribution and **not** a claim that the shipping compiler is an IntNet. **现状出货 ≠ 主张中心** (Appendix D). Claims are suite names already in the repository; we invent no throughput numbers.
 
 **摘要（可选）**  
-UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：方法核在 A；B **引用**并加可命名产品门禁，**不**声称 A 的卸责自动覆盖每张 UJS 表或 M3 手写编译器。验收有两条脊——**构造/jtape**（表→IntNet）与 **M3 出货编译器**（手写子集自举、**mainBody** 字节对照）；后者不是「Web 编译器 = 表网络」。出货默认 `compiler_core.wasm`；Python 限于构造臂，非 Pages/ship 必经。语言子集写 **UJS-1_ship（M3 已交付面）**，勿与全表 UJS-1 规格等同。
+UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：**主张中心** = 构造 IntNet / 表阶段 /（目标）流推导管线（闭合 JS→`\0asm`；见 `research/m4-flow-net-contract-draft.md`）。方法核在 A；B **引用**，**不**声称 A 卸责自动覆盖每张 UJS 表。**M3 出货**（`compiler_core`、**mainBody** 字节对照）= 工程旁路/脚手架，**不是**主贡献，也不是「Web 编译器 = 表网络」。**现状出货 ≠ 主张中心**。语言子集写 **UJS-1_ship**，勿与全表 UJS-1 等同。
 
 ---
 
@@ -35,8 +35,8 @@ Neural components in compilers and runtimes are usually *trained* heuristics wit
 
 ## 2. Contributions
 
-1. **Method transfer (not re-proof).** Same Shell proposition and P-discipline as [cite A], applied to UJS-1 *table* stages including **IC** (`shape × op × guard`) and wasm `isel`/`enc`/`reloc` when those tables ship. Novel writing is the *transfer* and product packaging; IntNet proofs stay in A.
-2. **Two spines, one discipline.** (a) **jtape / fold / acc / icfold** — construct path; method acceptance. (b) **M3** — `compiler.ujs` → `compiler_core.wasm`; **code-section main body** (`fi===1`) stage2 ≡ stage1 and sim/drone body ≡ stage0 — product compile without Python emit. Spines share P-style honesty; they are **not** the same artifact.
+1. **Claim center (construct spine).** **Constructed IntNet / UJS table stages / (target) stream pipeline** for a closed JS subset → **`\0asm`**, with gold → IntNet → flow → bytes as the paper figure (provisional **4 × 10 → `\0asm`** mnemonic; `research/m4-flow-net-contract-draft.md`). Method transfer (not re-proof): same Shell proposition and P-discipline as [cite A], including **IC** and wasm `isel`/`enc`/`reloc` when tables ship; IntNet proofs stay in A.
+2. **M3 as scaffolding, not thesis.** **M3** (`compiler.ujs` → `compiler_core.wasm`; main-body twin-tests) documents **现状出货** and Python-free ship—it is **旁路 / historical scaffolding**, not the main Paper B contribution and not an IntNet instance. Construct path (**jtape / fold / acc / icfold**) carries method acceptance.
 3. **Web product surface**: `wasm_run` / UXE Pages; default compile path **`compiler_core.wasm`** (P0); Python construct is not a ship dependency (`web-build` remains a *dev / engine* path, not Pages emit).
 4. **Cross-host front parity** where dual fronts still exist; parity reduces drift, it does not replace [cite A].
 5. **Layered ship gates** without selling compression over tables [cite A; Boniol et al.].
@@ -103,7 +103,7 @@ Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `
 
 **Wasm ship surface (UJS vs UNISACC).** UJS **ships** WebAssembly today: **`compiler_core.wasm`** (M3 product compile) and **`sim.wasm`** (Pages step). Python **`ujs2wasm`** remains the **method / control factory** for full-table emit, fold probes, and path-B tooling — not the P0 ship bridge (`compile.mjs` defaults to core). **UNISACC** wasm (tape → wasm as a **seventh output target**; FX-3 in `plans/ideas.md`) is a **roadmap** item for the C product; it currently has **no ship surface** — the public compiler still delivers native objects and `.tape`, not a browser-facing wasm artifact.
 
-**unisacc ↔ UJS (spine mnemonic, not identity).** [cite A]’s shipped C product is **seven byte-stream stages × eighteen fact/decision nets → native** (six platforms); UJS’s shipped Web product is **one M3 spine × ten table nets (`ujs.STAGES`, not UNISA’s default eighteen) → `\0asm`**. The construct/jtape path is a **method-comparison arm** alongside M3—it is not a third numerator in that ship mnemonic. Layered horizontal map (overview, pipeline *role* alignment, net surface, name lists): **Appendix D**.
+**unisacc ↔ UJS (spine mnemonic, not identity).** [cite A]’s shipped C product is **seven byte-stream stages × eighteen fact/decision nets → native** (six platforms). **Paper B claim center (provisional m4 method arc):** **four stream segments × ten UJS table nets (`ujs.STAGES`) → `\0asm`**—stream count **N may differ from seven**; nets are the closed-JS table surface, not UNISA’s eighteen fact nets. **现状出货（≠ 主张中心）：** UJS’s current Web product remains **one M3 ship spine × ten table nets → `\0asm`** (`compiler_core`); cite it only as product scaffolding (footnote), not as the thesis numerator. Construct/jtape is the method arm feeding the m4 figure. Layered horizontal map (overview, pipeline *role* alignment, net surface, name lists): **Appendix D**.
 
 ---
 
@@ -256,6 +256,7 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “UNISACC already ships wasm like UJS” | UJS ships `compiler_core` / `sim`; UNISACC wasm (FX-3 / target #7) is roadmap; product IR is still `.tape` |
 | “UJS ship = construct/jtape in the mnemonic” | Ship spine is M3 → `\0asm`; construct is method对照—do not fold it into the product numerator (Appendix D) |
 | “unisacc stage *i* = UJS stage *i*” | Appendix D aligns *roles* across pipelines; same short name (e.g. `lex`) ≠ same byte-stream position or ask wiring |
+| “Appendix D M3×10→`\0asm` = Paper B thesis” | That row is **现状出货** mnemonic only; thesis center is **4×10 stream×nets → `\0asm`** (m4 contract)—do not equate ship spine with claim center |
 
 ---
 
@@ -267,8 +268,9 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 
 | | unisacc ([cite A] C product) | UJS (this paper) |
 |---|---|---|
-| **Compressed spine** | 7 byte-stream stages × 18 fact/decision nets → **native** (six platforms) | 1 **M3 ship** spine × 10 table nets → **`\0asm`** |
-| **Method arm (not ship numerator)** | exec / table-driven reference (Paper C) | **construct / jtape** → emit / `ujs2wasm` (when tables ship) |
+| **Claim center (provisional m4)** | — | **4 stream × 10 table nets → `\0asm`** (method proof arc; `research/m4-flow-net-contract-draft.md`) |
+| **Compressed spine (现状出货 ≠ 主张中心)** | 7 byte-stream stages × 18 fact/decision nets → **native** (six platforms) | 1 **M3 ship** spine × 10 table nets → **`\0asm`** — **product footnote only** |
+| **Method arm (not ship numerator)** | exec / table-driven reference (Paper C) | **construct / jtape** → emit / `ujs2wasm` (when tables ship); seeds **m4** figure |
 
 ### D.2 Overview
 
