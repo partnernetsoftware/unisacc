@@ -95,7 +95,7 @@ src ──► iterate/compiler.ujs (M3) ──► compiler_core.wasm
 
 Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships). M3 expands a **classical** AST→wasm subset independently of baking those golds.
 
-**Ten UJS stages vs eighteen UNISA fact networks.** UJS carries **ten** table stages (listed above). Paper A’s C pipeline registers **eighteen** fact networks in `unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`). Shared *names* (e.g. `type`, `irsel`, `isel`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
+**Ten UJS stages vs eighteen UNISA fact networks.** UJS carries **ten** table stages (listed above; one gold table = one stage). Paper A’s C product is **two layers** [cite A]: a **seven-stage byte-stream pipeline** (`preprocess` → `lex` → `parse` → `opt` → `prune` → `lowering` → `encode`+image; `README.md`, `exec/pipeline/image-stages.tsv`) and, orthogonally, **eighteen** fact/decision networks in `unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`)—the eighteen are **ask nets**, not eighteen pipeline stages. Shared *names* across UJS, the byte-stream stages, and those nets (e.g. `type`, `irsel`, `isel`, `lex`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
 
 **Key-space scale (FULL gold; counts from `ujs/seed/construct/gold.py` and `unisa/gold.py`).** Illustrative |K|: UJS `irsel` 117, `type` 1863, `isel` 42; same-named UNISA stages are larger (`irsel` ≈ 420, `type` ≈ 4275, `isel` ≈ 174), before counting UNISA-only stages.
 
@@ -248,7 +248,8 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |
 | “`construct/` holds the reusable weights” | Generators are `seed/`; artifacts are `weights/` (A/C rule) |
 | “need a new UJS bytecode VM next” | Product path already emits `\0asm`; companion `tinyvm` validate is optional hygiene—not a third IR or finished execute twin |
-| “UJS and UNISA share the same ten tables” | UJS has 10 stages; UNISA has 18 fact nets; same *names* ≠ same K / vocab |
+| “UJS and UNISA share the same ten tables” | UJS has 10 table stages; UNISA has 18 fact nets **and** a separate 7-stage byte-stream pipeline ([cite A] two layers); same *names* ≠ same K / vocab |
+| “UNISA / unisacc = 18 compile stages” | 18 = fact/decision nets at `ask` points; product byte-stream compile is 7 stages—not the same layer |
 | “all ten stages use oracle.ask at compile time” | `irsel` is `acc` only; runtime asks are lex/parse/scope/type/shape/ic plus isel/enc/reloc on wasm lower |
 | “UNISACC already ships wasm like UJS” | UJS ships `compiler_core` / `sim`; UNISACC wasm (FX-3 / target #7) is roadmap; product IR is still `.tape` |
 
