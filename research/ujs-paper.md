@@ -103,6 +103,8 @@ Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `
 
 **Wasm ship surface (UJS vs UNISACC).** UJS **ships** WebAssembly today: **`compiler_core.wasm`** (M3 product compile) and **`sim.wasm`** (Pages step). Python **`ujs2wasm`** remains the **method / control factory** for full-table emit, fold probes, and path-B tooling — not the P0 ship bridge (`compile.mjs` defaults to core). **UNISACC** wasm (tape → wasm as a **seventh output target**; FX-3 in `plans/ideas.md`) is a **roadmap** item for the C product; it currently has **no ship surface** — the public compiler still delivers native objects and `.tape`, not a browser-facing wasm artifact.
 
+**unisacc ↔ UJS (spine mnemonic, not identity).** [cite A]’s shipped C product is **seven byte-stream stages × eighteen fact/decision nets → native** (six platforms); UJS’s shipped Web product is **one M3 spine × ten table nets (`ujs.STAGES`, not UNISA’s default eighteen) → `\0asm`**. The construct/jtape path is a **method-comparison arm** alongside M3—it is not a third numerator in that ship mnemonic. Layered horizontal map (overview, pipeline *role* alignment, net surface, name lists): **Appendix D**.
+
 ---
 
 ## 5. Method
@@ -252,6 +254,68 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “UNISA / unisacc = 18 compile stages” | 18 = fact/decision nets at `ask` points; product byte-stream compile is 7 stages—not the same layer |
 | “all ten stages use oracle.ask at compile time” | `irsel` is `acc` only; runtime asks are lex/parse/scope/type/shape/ic plus isel/enc/reloc on wasm lower |
 | “UNISACC already ships wasm like UJS” | UJS ships `compiler_core` / `sim`; UNISACC wasm (FX-3 / target #7) is roadmap; product IR is still `.tape` |
+| “UJS ship = construct/jtape in the mnemonic” | Ship spine is M3 → `\0asm`; construct is method对照—do not fold it into the product numerator (Appendix D) |
+| “unisacc stage *i* = UJS stage *i*” | Appendix D aligns *roles* across pipelines; same short name (e.g. `lex`) ≠ same byte-stream position or ask wiring |
+
+---
+
+## Appendix D — unisacc↔UJS layered horizontal map（分层横向对照）
+
+*Draft appendix for warm review. **Role alignment**, not same-name or same-index equivalence. Construct/jtape is the **method** arm; it is **not** part of the UJS **ship** mnemonic below.*
+
+### D.1 Mnemonic (construct excluded from ship numerator)
+
+| | unisacc ([cite A] C product) | UJS (this paper) |
+|---|---|---|
+| **Compressed spine** | 7 byte-stream stages × 18 fact/decision nets → **native** (six platforms) | 1 **M3 ship** spine × 10 table nets → **`\0asm`** |
+| **Method arm (not ship numerator)** | exec / table-driven reference (Paper C) | **construct / jtape** → emit / `ujs2wasm` (when tables ship) |
+
+### D.2 Overview
+
+| Layer | unisacc | UJS |
+|---|---|---|
+| **Language** | C99 (closed subset) | UJS (UJS-1 spec; **UJS-1_ship** on M3 path) |
+| **Pipeline** | Seven byte-stream stages (generic executor + δ) | **M3** single product spine (`compiler.ujs` → `compiler_core.wasm`) |
+| **Nets (ask stages)** | 18 fact/decision nets | 10 `STAGES` in `ujs.STAGES` |
+| **IR** | Compiler **tape** (byte-stream contract) | **jtape** / M3 wasm opcode lowering (classical on ship spine) |
+| **Ship** | Six-platform **native** object / image | **`\0asm`** (+ Host/Pages packaging) |
+| **Wasm** | **Not shipped** (roadmap / tape-side lower) | **Shipped** (`compiler_core`, sim/drone, construct `ujs2wasm` when enabled) |
+| **Kernel** | Shared **IntNet** construction kernel [cite A] | Same intnet kernel; walker passes **`stages=ujs.STAGES`** (10), not UNISA default 18 |
+
+### D.3 Pipeline (horizontal roles)
+
+**unisacc byte-stream (seven stages, [cite A]):**
+
+`preprocess (e2)` → `lex (e1)` → `parse (e3)` → `opt (e4)` → `prune` → `lower` → `elf/encode + image`
+
+**UJS product ship (collapses to):**
+
+`compiler_core` (M3 classical subset) → **`\0asm`**
+
+**UJS method arm (construct, not M3 numerator):**
+
+`front + ask` → **jtape** → `emit` / **`ujs2wasm`**
+
+*Alignment rule:* e.g. unisacc `lex` and UJS `lex` share vocabulary and gold-shaped tables on the construct path, but UJS **ship** does not replay unisacc’s seven-stream schedule; M3 is a separate classical compiler under twin-tests (§5.3).
+
+### D.4 Net-layer surface
+
+| Topic | unisacc | UJS |
+|---|---|---|
+| **Shared stage names** (vocab / backends differ) | `lex`, `parse`, `type`, `scope`, `irsel`, `isel`, `enc`, `reloc` | same set where table-backed on construct path |
+| **UJS-only** | — | `shape`, `ic` |
+| **unisacc-only** | `pp`, `abi`, `combo`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, … | — |
+| **`irsel`** | Wired for real **`ask("irsel", …)`** on the C pipeline | Table / **`acc`** on construct path; **no** `ask("irsel")` on the shipping M3 spine |
+
+Eighteen ≠ seven: decision nets are **ask points**; byte-stream stages are the **compiler executor contract** (two-layer framing in [cite A]). UJS’s ten nets are the closed JS/wasm table surface for the construct spine; M3 may compile without baking every gold.
+
+### D.5 Name lists (stable checklist)
+
+**unisacc — 18 decision stages:**  
+`pp` · `lex` · `parse` · `type` · `scope` · `irsel` · `enc` · `reloc` · `regmap` · `tyinfo` · `pfconv` · `peep` · `opinfo` · `prec` · `binsel` · `isel` · `abi` · `combo`
+
+**UJS — 10 table stages (`ujs.STAGES`):**  
+`lex` · `parse` · `type` · `scope` · `shape` · `irsel` · `ic` · `isel` · `enc` · `reloc`
 
 ---
 

@@ -45,6 +45,7 @@
 - 不把全量 `ujs2wasm` corpus（含 `str`/`arrow`/…）写成 core 已覆盖。
 - 规格与门禁以 `ujs/prd.md` 为准。
 - 对 Paper C：B = **可复现门禁下的迁移实例**，非「全 walker Lean 闭合」。
+- **unisacc↔UJS 分层横向对照**（七流×18 网 vs M3×10 网、构造臂不进出货口诀、管线按*角色*对齐非同名等同）：见 `research/ujs-paper.md` **Appendix D**；§4 仅一句口诀+指针。
 
 ## 温故检查（改摘要前过一遍）
 
