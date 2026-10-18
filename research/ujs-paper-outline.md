@@ -46,7 +46,7 @@
 - 规格与门禁以 `ujs/prd.md` 为准。
 - 对 Paper C：B = **可复现门禁下的迁移实例**，非「全 walker Lean 闭合」。
 - **unisacc↔UJS 分层横向对照**（七流×18 网 vs M3×10 网、构造臂不进出货口诀、管线按*角色*对齐非同名等同）：见 `research/ujs-paper.md` **Appendix D**；§4 仅一句口诀+指针。
-- **Paper B 初心（2026-10-18）**：见 [`paper-b-intent-decision-20261018.md`](paper-b-intent-decision-20261018.md)；**暂定 B+m4（A 种子）**；M3 / 出货面不是 B 的主张中心，勿写成主贡献；`ujs-paper.md` 主张措辞待 m4 最小合同草案后再改。
+- **Paper B 初心（2026-10-18）**：见 [`paper-b-intent-decision-20261018.md`](paper-b-intent-decision-20261018.md) + [`m4-flow-net-contract-draft.md`](m4-flow-net-contract-draft.md)；**暂定 B+m4（A 种子）**；主张中心 = gold→IntNet→flow→bytes（**4×10→`\0asm`**）；**现状出货 ≠ 主张中心**（M3 口诀仅脚注）；`ujs-paper.md` 已做主张翻转最小补丁，全篇重写另裁。
 
 ## 温故检查（改摘要前过一遍）
 
