@@ -73,10 +73,11 @@ The living tree mirrors Paper C’s seed / reusable-data / iterate split (`ujs/A
 | **Practice** | `ujs/practice/` | `core/` (`wasm_run`, path-A), `uxe/` (Host/Pages), `web/` |
 
 ```
-src ──► walk (lex…irsel [+ IC]) ──► Fn(jtape, meta)     [construct / bytecode spine]
-              │ oracle.ask(stage, key)
+src ──► walk (front + jtape [+ IC]) ──► Fn(jtape, meta)   [construct / bytecode spine]
+              │ runtime oracle.ask on a subset only (see below)
+              │ irsel: gold → acc exact; no ask("irsel")
               ▼
-         constructed IntNet  [cite A: same kernel]
+         unisa.intnet.build(..., stages=ujs.STAGES)  [cite A: same kernel; UJS keys]
               │
               ▼  (optional) emit_wasm / path-B tools — method & full-surface emit
 
@@ -87,12 +88,20 @@ src ──► iterate/compiler.ujs (M3) ──► compiler_core.wasm
 ```
 
 - **Classic code:** seed walkers / stage0; **and** iterate M3 sources.
-- **Network:** last-mile table selection on the construct spine only; proofs in [cite A]; weight *bytes* land in `weights/` (and shared root `weights/` for A).
+- **Network:** last-mile table selection on the construct spine only; proofs in [cite A]; weight *bytes* land in `weights/` (and shared root `weights/` for A). Construction calls `unisa.intnet.build(name, stages=ujs.STAGES)` with UJS’s explicit `STAGES` registration (`ujs/seed/construct/gold.py`) — **not** UNISA’s default eighteen-network map.
 - **Product compile:** `ujs/iterate/compile.mjs` (symlink `ujs/compile.mjs`) defaults to `compiler_core.wasm`; stage0 `compiler.wasm` is bootstrap and body≡ oracle. **Do not read M3 as “the Web compiler is driven by table nets.”**
 - **API:** `practice/core` `wasm_run` / `practice/uxe` Host; Pages load game wasm + host, not a Python emit at request time.
 - **Dev residual:** `python3 -m ujs web-build` still builds path-A `ujs_full` under `practice/core` when forced; it is **out of** the P0 ship path.
 
 Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships). M3 expands a **classical** AST→wasm subset independently of baking those golds.
+
+**Ten UJS stages vs eighteen UNISA fact networks.** UJS carries **ten** table stages (listed above). Paper A’s C pipeline registers **eighteen** fact networks in `unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`). Shared *names* (e.g. `type`, `irsel`, `isel`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
+
+**Key-space scale (FULL gold; counts from `ujs/seed/construct/gold.py` and `unisa/gold.py`).** Illustrative |K|: UJS `irsel` 117, `type` 1863, `isel` 42; same-named UNISA stages are larger (`irsel` ≈ 420, `type` ≈ 4275, `isel` ≈ 174), before counting UNISA-only stages.
+
+**Runtime `ask` vs enumeration (`acc`).** Do **not** claim that all ten stages drive compilation via `oracle.ask`. On the construct path, walkers call `ask` on `lex`, `parse`, `scope`, `type`, `shape`, and `ic` (`ujs/seed/construct/front/`, `vm.py`); wasm emit/lower call `isel`, `enc`, and `reloc` when enabled (`emit_wasm.py`, `lower_wasm.py`). **`irsel` is checked only by full-key `acc` against gold** — there is no runtime `ask("irsel", …)` in the UJS tree.
+
+**Wasm ship surface (UJS vs UNISACC).** UJS **ships** WebAssembly today: **`compiler_core.wasm`** (M3 product compile) and **`sim.wasm`** (Pages step). Python **`ujs2wasm`** remains the **method / control factory** for full-table emit, fold probes, and path-B tooling — not the P0 ship bridge (`compile.mjs` defaults to core). **UNISACC** wasm (tape → wasm as a **seventh output target**; FX-3 in `plans/ideas.md`) is a **roadmap** item for the C product; it currently has **no ship surface** — the public compiler still delivers native objects and `.tape`, not a browser-facing wasm artifact.
 
 ---
 
@@ -239,6 +248,9 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |
 | “`construct/` holds the reusable weights” | Generators are `seed/`; artifacts are `weights/` (A/C rule) |
 | “need a new UJS bytecode VM next” | Product path already emits `\0asm`; companion `tinyvm` validate is optional hygiene—not a third IR or finished execute twin |
+| “UJS and UNISA share the same ten tables” | UJS has 10 stages; UNISA has 18 fact nets; same *names* ≠ same K / vocab |
+| “all ten stages use oracle.ask at compile time” | `irsel` is `acc` only; runtime asks are lex/parse/scope/type/shape/ic plus isel/enc/reloc on wasm lower |
+| “UNISACC already ships wasm like UJS” | UJS ships `compiler_core` / `sim`; UNISACC wasm (FX-3 / target #7) is roadmap; product IR is still `.tape` |
 
 ---
 
