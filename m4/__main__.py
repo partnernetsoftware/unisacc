@@ -17,6 +17,7 @@ from . import flows
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 CORPUS = os.path.join(ROOT, "tests", "ujs2wasm", "corpus")
+NEG = os.path.join(ROOT, "tests", "ujs2wasm", "neg")
 
 
 def cmd_acc(a):
@@ -89,8 +90,33 @@ def cmd_check(a):
             else:
                 print("DIFF  %-24s m4=%d ref=%d" % (name, len(mine), len(ref)))
                 differ += 1
-    print("check: same %d differ %d skipped %d" % (same, differ, skipped))
-    if differ or not same:
+    # 负例：语料外的坏程序必须被拒绝（不软表正确性）
+    neg_files = sorted(glob.glob(os.path.join(NEG, "*.ujs")))
+    # 已知分歧：下列 5 个在 ujs 的 gold 编译与直出里也被接受（已实测），而 ujs 套件说应拒绝。
+    # 这是 ujs 参考与其负例集之间的未决问题，不由 m4 掩盖。任何新增接受或旧接受消失都使闸失败。
+    KNOWN_ACCEPT = {"dict_key9.ujs", "str_escape.ujs", "str_lit256.ujs",
+                    "str_nonascii.ujs", "str_nul.ujs"}
+    accepted = set()
+    with tempfile.TemporaryDirectory() as td:
+        for p in neg_files:
+            name = os.path.basename(p)
+            with open(p) as f:
+                src = f.read()
+            try:
+                flows.run(src, nets, os.path.join(td, "neg.wasm"))
+            except Exception as e:
+                print("reject %-24s %s" % (name, type(e).__name__))
+            else:
+                accepted.add(name)
+                tag = "known " if name in KNOWN_ACCEPT else "NEW   "
+                print("ACCEPT %-24s %s" % (name, tag))
+    unexpected = accepted ^ KNOWN_ACCEPT if neg_files else {"no neg files"}
+    print("check: same %d differ %d skipped %d | neg %d rejected %d accepted %d (known %d)" % (
+        same, differ, skipped, len(neg_files), len(neg_files) - len(accepted),
+        len(accepted), len(KNOWN_ACCEPT)))
+    if differ or not same or unexpected:
+        if unexpected:
+            print("neg gate: unexpected", sorted(unexpected))
         return 1
     return 0
 
