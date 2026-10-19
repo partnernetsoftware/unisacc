@@ -135,6 +135,7 @@ int tdbool[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
 int tdfpst[MAXTD];        /* ...and the struct its call returns a pointer to */
 int tdflt[MAXTD]; int tdpd[MAXTD];
+int tdvoid[MAXTD];        /* the typedef names void, not a pointer to void */
 /* `typedef long jmp_buf[8];`: the element count (0: not an array typedef).
    tdsz stays the whole size, which is what sizeof(jmp_buf) reports; a
    declarator of that type becomes an array of tdn elements (tdarrdecl). */
@@ -3984,6 +3985,7 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
     tduns[ntd] = declunsigned; tdbool[ntd] = declbool;
     tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1; tdflt[ntd] = declflt; tdn[ntd] = 0;
+    tdvoid[ntd] = declvoid && isptr == 0;
     ntd = ntd + 1;
     return ntd - 1;
 }
@@ -4182,6 +4184,7 @@ int declspec(void) {                       /* -> element width */
     declspecfp = 0; declspecfpst = 0 - 1;
     declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0; declextern = 0; declreg = 0;
     declspectdn = 0; declspectdsz = 0;
+    declvoid = 0;                          /* a typedef or struct spec does not call kindsize */
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -4198,6 +4201,7 @@ int declspec(void) {                       /* -> element width */
            struct table's NOW, not the zero recorded at typedef time */
         if (declstruct >= 0 && tdptr[td] == 0) declsz = stsize[declstruct] * (tdn[td] > 0 ? tdn[td] : 1);
         declspectdn = tdn[td]; declspectdsz = declsz;
+        declvoid = tdvoid[td];             /* `typedef void V; V x;` stays a void object */
         skipspecq();
         return tdw[td];
     }
