@@ -225,6 +225,16 @@ printf 'int main(void){return 0;}\n' > "$T/pathmark_9f3a.c"
 pathhit=no
 grep -a -q pathmark_9f3a "$T/pathmark.out" "$T/pathmark.s" "$T/pathmark.o" "$T/pathmark.e" && pathhit=yes
 say "outputs omit the source path" "no" "$pathhit"
+mkdir -p "$T/dirmark_c4e1"
+printf 'int k;\n' > "$T/dirmark_c4e1/local.h"
+printf '#include "local.h"\nint main(void){return k;}\n' > "$T/dirmark_c4e1/use.c"
+(cd "$T" && bound 20 "$UA_RUN" -E dirmark_c4e1/use.c -o inc.e >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S dirmark_c4e1/use.c -o inc.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c dirmark_c4e1/use.c -o inc.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" dirmark_c4e1/use.c -o inc.out >/dev/null 2>&1)
+dirhit=no
+grep -a -q dirmark_c4e1 "$T/inc.e" "$T/inc.s" "$T/inc.o" "$T/inc.out" && dirhit=yes
+say "outputs omit the include directory" "no" "$dirhit"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
