@@ -708,9 +708,11 @@ class Walker:
         enum_here, named_here = self.decl_enum, self.named_agg
         if self.eat(";"):
             # C99 6.7p2: no declarator, so this must have introduced a tag
-            # or an enumeration. `int ;` does neither.
+            # or an enumeration. `int ;` does neither. The semicolon is
+            # already consumed; peek() would be the next declaration.
+            semi = self.tk[self.i - 1]
             if not enum_here and not named_here:
-                raise CError("line %d: empty declaration" % self.peek().line)
+                raise CError("line %d: empty declaration" % semi.line)
             return
         while True:
             ty, name = self.declarator(base)
@@ -1286,8 +1288,9 @@ class Walker:
         static = self.saw_static
         enum_here, named_here = self.decl_enum, self.named_agg
         if self.eat(";"):
+            semi = self.tk[self.i - 1]
             if not enum_here and not named_here:
-                raise CError("line %d: empty declaration" % self.peek().line)
+                raise CError("line %d: empty declaration" % semi.line)
             return
         while True:
             ty, name = self.declarator(base)
