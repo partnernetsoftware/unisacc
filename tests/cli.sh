@@ -217,6 +217,14 @@ say "assembly bytes repeat" "same" "$(cmp -s "$T/ok.s" "$T/ok.s2" && echo same |
 say "preprocess bytes repeat" "same" "$(cmp -s "$T/ok.e" "$T/ok.e2" && echo same || echo differ)"
 (cd "$T" && bound 20 "$UA_RUN" -c ok.c -o ok.o2 >/dev/null 2>&1)
 say "object bytes repeat" "same" "$(cmp -s "$T/ok.o" "$T/ok.o2" && echo same || echo differ)"
+printf 'int main(void){return 0;}\n' > "$T/pathmark_9f3a.c"
+(cd "$T" && bound 20 "$UA_RUN" pathmark_9f3a.c -o pathmark.out >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S pathmark_9f3a.c -o pathmark.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c pathmark_9f3a.c -o pathmark.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -E pathmark_9f3a.c -o pathmark.e >/dev/null 2>&1)
+pathhit=no
+grep -a -q pathmark_9f3a "$T/pathmark.out" "$T/pathmark.s" "$T/pathmark.o" "$T/pathmark.e" && pathhit=yes
+say "outputs omit the source path" "no" "$pathhit"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
