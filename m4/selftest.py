@@ -18,7 +18,8 @@ from .nets import build_nets
 
 # 基线（实测）：lex、parse 的 shift 直接决定字节；isel 的算术/逻辑族由形态分派，
 # 错形态被拒收，trap 也拒收（isel 只决定合法形态的选择与拒收，合法形态唯一）；
-# enc 只决定拒收（trap），模板尚未被消费；type/scope/shape/ic/reloc 未被观测到。
+# enc：每条指令的模板须落在 emit.py 钉死的合法集合内，换模板即拒收（同 isel 的机制：只决定合法/拒收，
+# 文本不随模板变化）；type/scope/shape/ic/reloc 未被观测到。
 EXPECT = {
     "lex": {"shift"},
     "parse": {"shift"},
@@ -27,7 +28,7 @@ EXPECT = {
     "shape": set(),
     "ic": set(),
     "isel": {"shift", "trap"},
-    "enc": {"trap"},
+    "enc": {"shift", "trap"},
     "reloc": set(),
 }
 

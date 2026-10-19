@@ -20,14 +20,15 @@ python3 -m m4 selftest            # 变异测试：每张网是否真的决定�
 | lex | shift | 说谎会改字节或拒收：真决定输出 |
 | parse | shift | 同上 |
 | isel | shift, trap | 算术/逻辑族由形态分派（`m4/emit.py`）：错形态被拒收，trap 被拒收；合法形态唯一，故字节由形态决定但形态不可替换 |
-| enc | trap | 只决定拒收；字节不随其模板变化 |
+| enc | shift, trap | 每条指令的模板须在 `emit.py` 钉死的合法集合内，否则拒收；合法模板唯一，文本不随模板变化 |
 | type, scope, shape, ic, reloc | 无 | 说谎不改变语料上的任何结果：未证明在决策 |
 
 `emit.py` 是 ujs `emit_wasm` 的 m4 副本：算术/逻辑族（add、sub、mul、div、mod、比较、and/or）的
 运行时辅助函数由 isel 形态选出，其余 op 仍写死。闸：m4 的 WAT 与 ujs 的 WAT 在语料 28/28 逐字相等。
 
 仍是缺口：
-- enc 只决定拒收；模板尚未被消费（emit 的 load/store/const/跳转等仍写死）。
+- isel 与 enc 的决策都是“合法/拒收”：每个 op 的合法形态与模板各唯一，所以网不在多个合法选项之间选择文本。
+  要真正“选文本”，需要同一 op 存在多个合法实现（例如同一算术的不同指令序列），这一步尚未做。
 - type、scope、shape、ic、reloc 未被观测到任何结果（说谎不改输出）。
 - div 的形态是 f64_bin，但发出的仍是通用 op_bin，形态与语义不完全一一对应。
 `EXPECT` 把现状钉死：某网的决策种类一旦变化，闸就失败，逼着同步更新口径。

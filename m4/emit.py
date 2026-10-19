@@ -24,6 +24,47 @@ _LEGAL_FORM = {
 }
 
 
+# 每个 op 允许的 enc 模板（实测于语料：gold 对 (isel 形态, 立即数类) 的映射）。
+# enc 给出别的模板即明确拒收；未列入的 op 也拒收（m4 不声称覆盖它）。
+_LEGAL_ENC = {
+    "nop": ("empty",), "drop": ("empty",), "ic_enter": ("empty",),
+    "const": ("op", "op_imm"),
+    "load_l": ("op_slot",), "load_g": ("op_slot",),
+    "store_l": ("op_slot",), "store_g": ("op_slot",),
+    "jump": ("op_label",), "jumpz": ("op_label",), "jumpnz": ("op_label",),
+    "mklist": ("op_imm",), "mkdict": ("op_imm",), "dot": ("op_imm",),
+    "call": ("op",), "ret": ("op",), "typeof": ("op",),
+    "idx": ("op",), "len": ("op",), "setidx": ("op",),
+    "add": ("op",), "sub": ("op",), "mul": ("op",), "div": ("op",), "mod": ("op",),
+    "lt": ("op",), "le": ("op",), "gt": ("op",), "ge": ("op",), "eq": ("op",), "ne": ("op",),
+    "and": ("op",), "or": ("op",), "not": ("op",),
+}
+
+
+def _imm_of(ins):
+    op = ins.op
+    if op == "const":
+        return {"i64": "i64", "f64": "f64", "bool": "bool", "str": "str_ix"}.get(ins.a, "none")
+    if op in ("load_l", "store_l", "load_g", "store_g"):
+        return "slot"
+    if op in ("jump", "jumpz", "jumpnz"):
+        return "label"
+    if op in ("mklist", "mkdict", "mktup", "call"):
+        return "count"
+    if op == "dot":
+        return "str_ix"
+    return "none"
+
+
+def _enc_gate(ins, oracle):
+    if ins.op not in _LEGAL_ENC:
+        raise DirectEmitError("m4: no pinned enc template for op %s" % ins.op)
+    form = oracle.ask("isel", (ins.op,))
+    tmpl = oracle.ask("enc", (form, _imm_of(ins)))
+    if tmpl not in _LEGAL_ENC[ins.op]:
+        raise DirectEmitError("m4: enc %r illegal for %s (form %s)" % (tmpl, ins.op, form))
+
+
 def emit_wasm(fn, out_path, oracle=None):
     """与 ujs emit_wasm 同：WAT → wat2wasm；WAT 由 m4 的 emit_wat 生成。"""
     import os
@@ -96,6 +137,7 @@ def _body(fn: Fn, str_off: list[tuple[int, int]], fn_index: dict[str, int],
 
     for i, ins in enumerate(fn.code):
         parts.append(")")
+        _enc_gate(ins, oracle)
         op, a, b = ins.op, ins.a, ins.b
         if op in ("nop", "ic_enter"):
             parts.append(npc(i))
