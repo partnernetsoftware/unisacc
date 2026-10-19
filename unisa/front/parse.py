@@ -712,7 +712,9 @@ class Walker:
             # already consumed; peek() would be the next declaration.
             semi = self.tk[self.i - 1]
             if not enum_here and not named_here:
-                raise CError("line %d: empty declaration" % semi.line)
+                err = CError("line %d: empty declaration" % semi.line)
+                err.tok = semi
+                raise err
             return
         while True:
             ty, name = self.declarator(base)
@@ -1290,7 +1292,9 @@ class Walker:
         if self.eat(";"):
             semi = self.tk[self.i - 1]
             if not enum_here and not named_here:
-                raise CError("line %d: empty declaration" % semi.line)
+                err = CError("line %d: empty declaration" % semi.line)
+                err.tok = semi
+                raise err
             return
         while True:
             ty, name = self.declarator(base)
