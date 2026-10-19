@@ -265,10 +265,15 @@ mkdir -p "$T/force_a91c"
 printf 'int from_inc;\n' > "$T/force_a91c/force.h"
 printf 'int main(void){return from_inc;}\n' > "$T/force.c"
 (cd "$T" && bound 20 "$UA_RUN" -E -include force_a91c/force.h force.c -o force.e >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_a91c/force.h force.c -o force.e2 >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_a91c/force.h force.c -o force.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_a91c/force.h force.c -o force.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -include force_a91c/force.h force.c -o force.out >/dev/null 2>&1)
 forcehit=no
-grep -a -q force_a91c "$T/force.e" && forcehit=yes
+grep -a -q force_a91c "$T/force.e" "$T/force.s" "$T/force.o" "$T/force.out" && forcehit=yes
 say "forced include omits its directory" "no" "$forcehit"
 say "forced include is in the stream" "yes" "$(grep -q from_inc "$T/force.e" && echo yes)"
+say "forced include bytes repeat" "same" "$(cmp -s "$T/force.e" "$T/force.e2" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
