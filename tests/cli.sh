@@ -181,6 +181,13 @@ printf 'int f(void){return;}\n' > "$T/bare.c"
 printf 'KEEP' > "$T/bare.s"
 (cd "$T" && bound 20 "$UA_RUN" -S bare.c -o bare.s >/dev/null 2>&1)
 say "assembly refusal leaves an existing file" "KEEP" "$(cat "$T/bare.s" 2>/dev/null)"
+printf 'KEEP' > "$T/bare.o"
+(cd "$T" && bound 20 "$UA_RUN" -c bare.c -o bare.o >/dev/null 2>&1)
+say "object refusal leaves an existing file" "KEEP" "$(cat "$T/bare.o" 2>/dev/null)"
+printf 'int main(void){return 0;}\n' > "$T/ok.c"
+printf 'KEEP' > "$T/ok.out"
+(cd "$T" && bound 20 "$UA_RUN" ok.c -o ok.out >/dev/null 2>&1)
+say "success replaces an existing file" "ELF" "$(od -An -tx1 -N4 "$T/ok.out" | tr -d ' \n' | grep -q '^7f454c46$' && echo ELF || echo kept)"
 printf '#include <stdio.h>\nint main(int c,char**v){printf("%%d %%s\\n",c,v[1]);return 0;}\n' > "$T/argv.c"
 say "FILE.c args go to the program" "2 hi" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c hi) 2>&1)"
 say "-- passes dash arguments" "2 --flag" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c -- --flag) 2>&1)"
