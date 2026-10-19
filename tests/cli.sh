@@ -255,6 +255,12 @@ iqhit=no
 grep -a -q iquote_d17b "$T/iq.e" "$T/iq.s" "$T/iq.o" "$T/iq.out" && iqhit=yes
 say "outputs omit the dash-I directory" "no" "$iqhit"
 say "dash-I preprocess bytes repeat" "same" "$(cmp -s "$T/iq.e" "$T/iq.e2" && echo same || echo differ)"
+printf '#include "missing_q.h"\nint main(void){return 0;}\n' > "$T/missq.c"
+printf 'KEEP' > "$T/missq.e"
+missq_out=$(cd "$T" && bound 20 "$UA_RUN" -E missq.c -o missq.e 2>"$T/missq.err")
+say "missing quote include leaves an existing file" "KEEP" "$(cat "$T/missq.e" 2>/dev/null)"
+say "missing quote include stdout is empty" "" "$missq_out"
+say "missing quote include is named" "named" "$(grep -q 'no such file' "$T/missq.err" && echo named)"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
