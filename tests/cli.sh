@@ -243,6 +243,18 @@ printf '#include <stdio.h>\nint main(void){return 0;}\n' > "$T/sys.c"
 syshit=no
 grep -a -q -e /usr -e /lib -e stdio.h "$T/sys.e" "$T/sys.s" "$T/sys.o" "$T/sys.out" && syshit=yes
 say "system header outputs omit host paths" "no" "$syshit"
+mkdir -p "$T/iquote_d17b"
+printf 'int k;\n' > "$T/iquote_d17b/q.h"
+printf '#include "q.h"\nint main(void){return k;}\n' > "$T/iq.c"
+(cd "$T" && bound 20 "$UA_RUN" -E -I iquote_d17b iq.c -o iq.e >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -E -I iquote_d17b iq.c -o iq.e2 >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S -I iquote_d17b iq.c -o iq.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c -I iquote_d17b iq.c -o iq.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -I iquote_d17b iq.c -o iq.out >/dev/null 2>&1)
+iqhit=no
+grep -a -q iquote_d17b "$T/iq.e" "$T/iq.s" "$T/iq.o" "$T/iq.out" && iqhit=yes
+say "outputs omit the dash-I directory" "no" "$iqhit"
+say "dash-I preprocess bytes repeat" "same" "$(cmp -s "$T/iq.e" "$T/iq.e2" && echo same || echo differ)"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
