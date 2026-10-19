@@ -17,6 +17,8 @@ from . import flows
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 CORPUS = os.path.join(ROOT, "tests", "ujs2wasm", "corpus")
+PROBES = os.path.join(ROOT, "m4", "probes")
+M4NEG = os.path.join(ROOT, "m4", "neg")
 NEG = os.path.join(ROOT, "tests", "ujs2wasm", "neg")
 
 
@@ -63,7 +65,7 @@ def _ref_bytes(src, path):
 def cmd_check(a):
     check_contract()
     nets = build_nets(verify=False)
-    files = sorted(glob.glob(os.path.join(CORPUS, "*.ujs")))
+    files = sorted(glob.glob(os.path.join(CORPUS, "*.ujs"))) + sorted(glob.glob(os.path.join(PROBES, "*.ujs")))
     if a.limit:
         files = files[: a.limit]
     same = differ = skipped = 0
@@ -91,7 +93,7 @@ def cmd_check(a):
                 print("DIFF  %-24s m4=%d ref=%d" % (name, len(mine), len(ref)))
                 differ += 1
     # 负例：语料外的坏程序必须被拒绝（不软表正确性）
-    neg_files = sorted(glob.glob(os.path.join(NEG, "*.ujs")))
+    neg_files = sorted(glob.glob(os.path.join(NEG, "*.ujs"))) + sorted(glob.glob(os.path.join(M4NEG, "*.ujs")))
     # 已知分歧：下列 5 个在 ujs 的 gold 编译与直出里也被接受（已实测），而 ujs 套件说应拒绝。
     # 这是 ujs 参考与其负例集之间的未决问题，不由 m4 掩盖。任何新增接受或旧接受消失都使闸失败。
     KNOWN_ACCEPT = {"dict_key9.ujs", "str_escape.ujs", "str_lit256.ujs",

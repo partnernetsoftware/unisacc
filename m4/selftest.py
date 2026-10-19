@@ -12,14 +12,13 @@ import sys
 import tempfile
 
 from . import flows
-from .__main__ import CORPUS, _ref_bytes
-from .contract import wired
+from .__main__ import CORPUS, PROBES, _ref_bytes
+from .contract import NETS
 from .nets import build_nets
 
-# 基线（实测）：lex、parse 的 shift 直接决定字节；isel 的算术/逻辑族由形态分派，
-# 错形态被拒收，trap 也拒收（isel 只决定合法形态的选择与拒收，合法形态唯一）；
-# enc：每条指令的模板须落在 emit.py 钉死的合法集合内，换模板即拒收（同 isel 的机制：只决定合法/拒收，
-# 文本不随模板变化）；type/scope/shape/ic/reloc 未被观测到。
+# 基线（实测）。全部 10 张网都测，漂移即失败。
+# 决策类：lex、parse 的 shift 改字节或拒收；isel、enc 的 shift/trap 拒收。
+# 未决策类：type、shape、ic（侧信道，答案被丢弃）、scope（分支不可达）、irsel、reloc（不在路径上）。
 EXPECT = {
     "lex": {"shift"},
     "parse": {"shift"},
@@ -27,6 +26,7 @@ EXPECT = {
     "scope": set(),
     "shape": set(),
     "ic": set(),
+    "irsel": set(),
     "isel": {"shift", "trap"},
     "enc": {"shift", "trap"},
     "reloc": set(),
@@ -61,7 +61,7 @@ class _Trap:
 
 def _programs():
     out = []
-    for p in sorted(glob.glob(os.path.join(CORPUS, "*.ujs"))):
+    for p in sorted(glob.glob(os.path.join(CORPUS, "*.ujs"))) + sorted(glob.glob(os.path.join(PROBES, "*.ujs"))):
         with open(p) as f:
             src = f.read()
         out.append((p, src))
@@ -95,7 +95,7 @@ def measure():
                 raise RuntimeError("ref not direct-covered: %s" % p)
             refs[p] = r
         got = {}
-        for n in wired():
+        for n in NETS:
             kinds = set()
             if _decided(nets, _Shift, n, programs, refs, td):
                 kinds.add("shift")
@@ -109,7 +109,7 @@ def measure():
 def run(verbose=True):
     got = measure()
     bad = []
-    for n in wired():
+    for n in NETS:
         ok = got[n] == EXPECT[n]
         if not ok:
             bad.append(n)
