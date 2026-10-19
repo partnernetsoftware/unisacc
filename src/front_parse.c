@@ -170,6 +170,7 @@ int curbool;                /* the lvalue in hand is _Bool [C99 6.3.1.2] */
 int fntok = 0 - 1;          /* the name token of the function being walked,
                                for C99's predefined `__func__` */
 int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
+int retvoid;          /* the function being parsed returns void, not void * */
 /* Pointer DEPTH.  `int **q` is a pointer to a pointer: *q is itself eight
    bytes, and only **q is the int.  A 0/1 pointer flag read *q as a 4-byte
    int -- right in the interpreter, whose addresses fit in 32 bits, and a
@@ -5790,6 +5791,13 @@ int stmt_(void) {
     }
     if (p == P_RETURN) {
         adv();
+        /* C99 6.8.6.4: a void function returns no value, and only a void
+           function may return without one. Checked before any tape is emitted. */
+        if (cur() == vfind(TOKV, NTOKV, ";", 1)) {
+            if (retvoid == 0) { err_tok(tp, "return with no value"); return 0; }
+        } else {
+            if (retvoid) { err_tok(tp, "return with a value in a void function"); return 0; }
+        }
         if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval();
             if (retst < 0) {
                 fconv(fkind(), retkind);
@@ -5902,6 +5910,7 @@ int function(int t, int w) {
     if (objextern && unitmode == 0 && declstatic == 0) ccw_note(t, declextern);
     fnglobal = declstatic == 0;              /* -funit: exported (bundled-header bodies are all static) */
     fnvoid = declvoid;                       /* before the parameters' types overwrite it */
+    retvoid = fnvoid && declptr == 0;
     fntok = t;
     start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;

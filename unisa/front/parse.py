@@ -1226,9 +1226,14 @@ class Walker:
             self.case_stmt(True)
         elif p == "return":
             self.next()
+            fr = getattr(self, "fn_ret", None)
+            voidfn = fr is not None and fr.kind == "void"
+            # C99 6.8.6.4: checked before the return value is emitted.
             if not self.at(";"):
+                if voidfn:
+                    raise CError("line %d: return with a value in a void function"
+                                 % self.peek().line)
                 rt = self.rvalue()
-                fr = getattr(self, "fn_ret", None)
                 self.convto(rt, fr)
                 # C99 6.8.6.4p3: the value is converted to the function's
                 # type -- a uint32_t function must not hand back 64 bits of
@@ -1245,6 +1250,8 @@ class Walker:
                     self.em.load(LHS, FP, 0 - self.sret_off)
                     self.em.blockcopy(LHS, ACC,
                                       self.fn_ret.size(self.sc.structs))
+            elif not voidfn:
+                raise CError("line %d: return with no value" % self.peek().line)
             self.expect(";")
             self.em.jump(self.ret_label)
         elif p == "goto":
