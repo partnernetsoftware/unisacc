@@ -3,6 +3,8 @@ import pathlib,subprocess,sys,tempfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import notcovered
 from unisa.assemble import assemble
 assert len(sys.argv)==4
 source='''@target win/x86_64
@@ -32,7 +34,7 @@ with tempfile.TemporaryDirectory() as d:
   f.write_text(src)
   for cmd in commands:
    r=subprocess.run(cmd+[str(f)],capture_output=True,timeout=60)
-   assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(cmd,r.returncode,r.stderr)
+   assert notcovered(r),(cmd,r.returncode,r.stderr)
  print('Windows x86 setup: invalid return register, target and arity rejected, both executors')
  from unisa.__main__ import _oracle
  from unisa.lower import lower
@@ -54,5 +56,5 @@ with tempfile.TemporaryDirectory() as d:
   f.write_text('@target win/x86_64\n'+line+'\n')
   for cmd in commands:
    r=subprocess.run(cmd+[str(f)],capture_output=True,timeout=60)
-   assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(line,cmd,r.returncode,r.stderr)
+   assert notcovered(r),(line,cmd,r.returncode,r.stderr)
  print('Windows x86 invalid gate contracts:',len(bad),'rejected on both executors')

@@ -8,7 +8,7 @@ import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).res
 from tins import parse
 from unisa.assemble import assemble
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
-from checklib import run
+from checklib import run, notcovered
 
 
 
@@ -51,7 +51,7 @@ def check(args,native_host):
         for source in ['a:\na:\n','jump absent\n','jumpz x0, absent\n',':\n','a: nop\n','jumpz 0, a\na:\n']:
             f.write_text(source)
             for cmd in cmds:
-                r=run(cmd+[str(f)]);assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(source,r.returncode,r.stderr)
+                r=run(cmd+[str(f)]);assert notcovered(r),(source,r.returncode,r.stderr)
         print('ARM64 branches: 10 fixtures on both executors; 6 worked byte expectations; call absent = offset 0; 6 rejects')
         # Synthetic helper contexts: exercise the actual BR.range states without
         # materialising a 128 MB section. These are not full-layout fixtures.

@@ -11,7 +11,7 @@ PARTS=('import','package')
 OUTPUTS={'e3.json','e3.tbl','e3.net','nc.json','nc.tbl','nc.net','run','dump'}
 SEEDS=['tests/carrierimportprepared.py','tests/modelnativecarrierimportcheck.py','tests/bound','tests/bound.py','tests/build_ref.sh','tests/export_ref.sh','exec/c/provenance.py']
 ENV_KEYS=('CC','CFLAGS','PATH','CPATH','C_INCLUDE_PATH','LIBRARY_PATH','COMPILER_PATH','GCC_EXEC_PREFIX','SOURCE_DATE_EPOCH','PYTHONPATH','PYTHONHASHSEED','LANG','LC_ALL','LD_LIBRARY_PATH','LD_PRELOAD','LD_AUDIT')
-def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+from checklib import sha  # same body as checklib.sha (tests/checklib.py:26)
 def need(reason):
  print('NEED_PREPARE carrier import: '+str(reason),file=sys.stderr);raise SystemExit(75)
 def identity():

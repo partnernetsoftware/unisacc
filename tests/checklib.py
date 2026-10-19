@@ -3,6 +3,7 @@
 Before this module 74 scripts carried their own `run()`, 25 their own `call()`
 and 14 their own `sha()`; the byte-identical copies now import from here.
     run(args, timeout=60, **kw)  -> CompletedProcess, output captured, args str()-ed
+    notcovered(r)                -> r is the standard `not covered` rejection (predicate)
     bounded(*cmd, secs=20)       -> the command under tests/bound, check=True
     sha(path)                    -> sha256 hex of the file's bytes
 Import from anywhere in the repository with
@@ -10,6 +11,7 @@ Import from anywhere in the repository with
 """
 import hashlib
 import pathlib
+import sys
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -19,8 +21,18 @@ def run(args, timeout=60, **kw):
     return subprocess.run(list(map(str, args)), capture_output=True, timeout=timeout, **kw)
 
 
+def notcovered(r):
+    """The declared-input-boundary reply: exit 1, empty stdout, 'not covered' on stderr."""
+    return r.returncode == 1 and not r.stdout and b'not covered' in r.stderr
+
+
 def bounded(*cmd, secs=20):
     subprocess.run([str(ROOT / 'tests/bound'), str(secs), *map(str, cmd)], check=True)
+
+
+def bound_cmd(secs, *argv):
+    """argv for tests/bound.py: [python, bound.py, secs, *argv] (no -B). Shape shared by csmithdiff, declmatrix, declshape, gateaudit, gatelayers."""
+    return [sys.executable, str(ROOT / 'tests/bound.py'), str(secs), *argv]   # argv passed through unchanged: element types as at the call site
 
 
 def sha(p):

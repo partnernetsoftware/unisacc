@@ -3,7 +3,7 @@
 import argparse,hashlib,importlib.util,json,os,pathlib,shutil,subprocess,sys,tempfile,time
 sys.dont_write_bytecode=True
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+from checklib import sha  # same body as checklib.sha (tests/checklib.py:26)
 def present(p):
  try:p.stat()
  except FileNotFoundError:raise SystemExit('NEED_PREPARE identity smoke input: '+str(p))

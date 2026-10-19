@@ -34,11 +34,21 @@ with tempfile.TemporaryDirectory(prefix="bound-stop-") as td:   # files, not pip
         rc=subprocess.run([sys.executable,str(root/"bound.py"),"1","sleep","100"],env=env,stdout=fo,stderr=fe,timeout=20).returncode
     elapsed=time.monotonic()-start
     stderr=err.read_text()
-m=re.search(r"bound: unreaped pid (\d+) \(state (\S+), wchan",stderr)
+import os as _os
+def unreaped_pattern(fmt):
+    """Regex derived from BOUND_UNREAPED_FMT (tests/bound.c): %s -> reason, %ld -> pid, every other character literal."""
+    out = []
+    for piece in re.split(r'(%ld|%s)', fmt):
+        if piece == '%s': out.append('(?P<reason>.*?)')
+        elif piece == '%ld': out.append('(?P<pid>-?\\d+)')
+        else: out.append(re.escape(piece))
+    return ''.join(out)
+_UNREAPED_FMT = re.search(r'#define BOUND_UNREAPED_FMT "([^"]*)"', open(os.path.join(str(root), 'bound.c'), encoding='utf-8').read()).group(1)
+m=re.search(unreaped_pattern(_UNREAPED_FMT)+r" state (?P<state>\S+), wchan (?P<wchan>\S+)",stderr)
 try:
-    assert rc==142 and m and elapsed<8,(rc,stderr,elapsed)
+    assert rc==142 and m and m.group("state") is not None and m.group("wchan") is not None and elapsed<8,(rc,stderr,elapsed)
 finally:
-    if m: os.kill(int(m.group(1)),signal.SIGKILL)
+    if m: os.kill(int(m.group("pid")),signal.SIGKILL)
 print("bound: stop budget returns 142 and names the unreaped pid (injected, not a D state)")
 # Normal exit with a zero cleanup budget (injected): the command rc is replaced by 142 and the unfinished cleanup is named.
 env2=dict(os.environ,UNISACC_BOUND_STOP_SECS="0")

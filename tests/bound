@@ -31,7 +31,7 @@ if [ ! -x "$bin" ]; then
         sleep 1
     done
     temporary=$cache/.$key.$$
-    trap 'rm -f "$temporary"; rmdir "$lock" 2>/dev/null || :' EXIT HUP INT TERM
+    trap 'rm -f "$temporary" "$temporary.sha256"; rmdir "$lock" 2>/dev/null || :' EXIT HUP INT TERM
     if [ ! -x "$bin" ]; then
         if command -v python3 >/dev/null 2>&1; then
             python3 "$here/bound.py" 55 "$compiler" -std=c99 -O2 -Wall -Wextra "$here/bound.c" -o "$temporary"
@@ -39,7 +39,15 @@ if [ ! -x "$bin" ]; then
             "$compiler" -std=c99 -O2 -Wall -Wextra "$here/bound.c" -o "$temporary"
         fi
         chmod 755 "$temporary"
+        # Publish readiness only after a successful build. Existing legacy cache
+        # entries without this certificate remain usable by the wrapper, but
+        # bound.py cannot delegate to them until a certified build exists.
+        built_digest=$("$hashcmd" dgst -sha256 "$temporary")
+        built_sha=${built_digest##* }
+        case "$built_sha" in *[!0123456789abcdef]*|'') echo 'bound: invalid artifact digest' >&2; exit 2;; esac
+        printf '%s %s\n' "$key" "$built_sha" > "$temporary.sha256"
         mv -f "$temporary" "$bin"
+        mv -f "$temporary.sha256" "$bin.sha256"
     fi
     rmdir "$lock"
     trap - EXIT HUP INT TERM

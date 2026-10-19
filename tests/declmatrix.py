@@ -10,7 +10,7 @@ and, when MODEL_COM is set, the product; any difference is a failure.  Nothing c
 """
 import itertools, os, pathlib, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BOUND = [sys.executable, str(ROOT / 'tests/bound.py')]
+from checklib import bound_cmd
 ELEMS = [('char', "'a'+%d"), ('short', '100+%d'), ('int', '1000+%d'), ('long', '100000+%d'), ('double', '0.5+%d')]
 FMT = {'char': '%d', 'short': '%d', 'int': '%d', 'long': '%ld', 'double': '%g'}
 
@@ -58,7 +58,7 @@ def launch(comp):
     return ['sh', comp] if comp.endswith('.com') else [comp]
 
 def run(cmd, timeout=30):
-    r = subprocess.run(BOUND + [str(timeout)] + cmd, capture_output=True)
+    r = subprocess.run(bound_cmd(timeout, *cmd), capture_output=True)
     return r.returncode, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace')
 
 ua = os.environ.get('UA')

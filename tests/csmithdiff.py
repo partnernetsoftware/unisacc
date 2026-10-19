@@ -10,7 +10,7 @@ Seeds: SEEDS=a-b (default 1-40), split by SHARD=k/n.  Needs csmith (Homebrew) on
 """
 import hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BOUND = [sys.executable, str(ROOT / 'tests/bound.py')]
+from checklib import bound_cmd
 CSMITH = shutil.which('csmith') or sys.exit('csmithdiff: csmith not found (brew install csmith)')
 from hostcheck import csmith_include, header_identity, digest, CSMITH_OPTS
 try: INC=csmith_include(CSMITH)
@@ -18,7 +18,7 @@ except FileNotFoundError as e: sys.exit('csmithdiff: '+str(e))
 OPTS = CSMITH_OPTS
 
 def run(cmd, timeout, cwd=None):
-    r = subprocess.run(BOUND + [str(timeout)] + cmd, capture_output=True, cwd=cwd)
+    r = subprocess.run(bound_cmd(timeout, *cmd), capture_output=True, cwd=cwd)
     return r.returncode, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace')
 
 # cc's verdict per seed depends only on csmith, its headers, cc and OPTS: cache it, so the

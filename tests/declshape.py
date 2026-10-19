@@ -8,12 +8,12 @@ reported as uncovered; an accepted wrong output is always a failure.
 """
 import os
 from pathlib import Path
+from checklib import bound_cmd
 import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BOUND = [sys.executable, str(ROOT / 'tests/bound.py'), '12']
 CASES = {
     'plain-array': r'''
         #include <stdio.h>
@@ -50,7 +50,7 @@ CASES = {
 
 
 def run(args):
-    p = subprocess.run(BOUND + [str(x) for x in args], capture_output=True)
+    p = subprocess.run(bound_cmd(12, *[str(x) for x in args]), capture_output=True)
     return p.returncode, p.stdout, p.stderr.decode(errors='replace')
 
 

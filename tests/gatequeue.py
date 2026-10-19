@@ -683,12 +683,19 @@ class MemoryObservedProcess(subprocess.Popen):
             self.memory_group = None
         return result
 
+def terminal_nonpass(results, jobs):
+    """Only settled selected results; DEFER/retry attempts have no result."""
+    return sorted(n for n, rec in results.items() if n in jobs and
+                  (rec['rc'] != 0 or rec.get('status') in ('UNVERIFIED', 'INTERRUPTED')))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--state', type=pathlib.Path)
     ap.add_argument('--com', action='store_true')
     ap.add_argument('--jobs', type=int, default=2)
     ap.add_argument('--window', type=int, default=55)
+    ap.add_argument('--stop-on-fail', action='store_true', help='stop admitting new jobs after a settled non-PASS result; finish active jobs and return 1')
     ap.add_argument('--suite', action='append', default=[])
     layers = ap.add_mutually_exclusive_group()
     layers.add_argument('--layer', choices=LAYERS, help='run exactly one diagnostic breadth layer')
@@ -868,11 +875,13 @@ def main():
         while pending or active:
             left = deadline-time.monotonic()
             while pending and len(active) < args.jobs and left > 2:
+                if args.stop_on_fail and terminal_nonpass(data['results'], jobs): break
                 if exclusive.intersection(active): break
                 for n in [n for n in pending if any(p in data['results'] and data['results'][p]['rc'] != 0 for p in PREDS.get(n, ()))]:
                     bad = [p for p in PREDS[n] if p in data['results'] and data['results'][p]['rc'] != 0]
                     pending.remove(n); data['results'][n] = {'rc': 1, 'seconds': 0, 'limit': 0}
                     print('DONE', n, 'rc=1 0.00s predecessor', ' '.join(bad), 'failed', flush=True)
+                if args.stop_on_fail and terminal_nonpass(data['results'], jobs): break
                 # SCHEDULING-BEGIN
                 # 0.0.35 P12: a job deferred out of a tail runs only at a full window, first (rc4 tools-1 was
                 # deferred twice, from 13 s and 36 s tails: 49 s of slot time lost)
@@ -961,6 +970,7 @@ def main():
                     data.setdefault('memory_attempts', []).append({'name': n, 'rc': rc, 'kind': kind, 'memory': p.memory_record()})
                 del active[n]
             # 0.0.38: nothing running and memory admits nothing -- end the window (the stall stop counts it)
+            if args.stop_on_fail and not active and terminal_nonpass(data['results'], jobs): break
             if not active and mem_blocked: break
             if not active and (not pending or not any(estimate(n) <= deadline-time.monotonic()-1 for n in pending)): break
             if time.monotonic() >= deadline: break
@@ -1015,6 +1025,9 @@ def main():
     if data.get('stalled', 0) >= 3 and missing:
         print('queue: STALLED -- 3 windows without a legal completion (stop, do not repeat with 75)', flush=True)
         return 3
+    if args.stop_on_fail and terminal_nonpass(data['results'], jobs):
+        print('queue: STOP_ON_FAIL settled non-PASS:', ' '.join(terminal_nonpass(data['results'], jobs)), flush=True)
+        return 1
     return 75 if missing else (1 if bad else (4 if unv else 0))
 
 if __name__ == '__main__':

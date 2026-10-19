@@ -350,6 +350,17 @@ def main():
             d['suites'][name] = entry
         elif matches and name in d['suites'] and '--require-cached' in argv:
             d['suites'][name]['command'] = argv
+    # 0.0.44 (cc 裁): fixed declarations the derivation does not produce.  The two hard-coded declarations above
+    # (gate-layers, gate-select) omit files their gates read; they are added here from one table, never by a branch.
+    # Appended in table order; existing order and all other suites are untouched.
+    FIXED_EXTRA = {
+        'gate-layers': ['tests/checklib.py'],
+        'gate-select': ['.gitignore', 'tests/checklib.py'],
+    }
+    for name, extra in FIXED_EXTRA.items():
+        files = d['suites'][name]['files']
+        for f in extra:
+            if f not in files: files.append(f)
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

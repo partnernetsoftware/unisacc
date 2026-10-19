@@ -7,6 +7,7 @@ queue.  An unknown suite is an error so a new gate must be assigned deliberately
 import argparse
 import os
 from pathlib import Path
+from checklib import bound_cmd
 import subprocess
 import tempfile
 import sys
@@ -131,9 +132,9 @@ def stage_labels(names):
     """Compile and query stagemap.c; never duplicate its stage assignments."""
     with tempfile.TemporaryDirectory(prefix="stagemap-audit-") as tmp:
         binary = str(Path(tmp) / "stagemap")
-        subprocess.run([sys.executable, str(ROOT / "tests/bound.py"), "55",
+        subprocess.run(bound_cmd(55,
                         "cc", "-std=c99", "-Wall", "-Wextra", "-Werror",
-                        str(ROOT / "tests/stagemap.c"), "-o", binary],
+                        str(ROOT / "tests/stagemap.c"), "-o", binary),
                        check=True, timeout=58)
         vocabulary = set(subprocess.check_output([binary, "--stages"], text=True, timeout=5).splitlines())
         raw = subprocess.check_output([binary, "--list"], input="\n".join(names) + "\n",

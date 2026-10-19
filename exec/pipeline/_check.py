@@ -1,4 +1,5 @@
 """Shared driver for check_<fmt>.py: main(line_ok, whole_ok) -> exit status."""
+import re
 import sys
 
 
@@ -26,3 +27,27 @@ def main(line_ok=None, whole_ok=None):
                 sys.stderr.write("line %d: %r\n" % (n, l[:80]))
                 return 1
     return 0
+
+
+TOK = re.compile(r"^[a-z_]+=.*$|^\S+$|^\d+ tokens$")
+# kind -> (is the mutually-exclusive form present?, message)
+_TOKEN_KINDS = {
+    "plain": (lambda ls: any(l.startswith(b"type=") for l in ls),
+              "a type token carries a spelling (that is tokens.typed)"),
+    "typed": (lambda ls: b"type" in ls,
+              "a bare `type` token without its spelling (that is tokens.plain)"),
+}
+
+
+def tokens(kind):
+    """Exit status for a tokens.<kind> dump (kind: plain | typed)."""
+    foreign, why = _TOKEN_KINDS[kind]
+
+    def whole(b):
+        ls = b.rstrip(b"\n").split(b"\n")
+        if len(ls) < 2 or ls[-2] != b"eof" or ls[-1] != b"%d tokens" % (len(ls) - 1):
+            return "does not end with `eof` and `N tokens` (N = token lines incl. eof)"
+        if foreign(ls):
+            return why
+
+    sys.exit(main(lambda l: bool(TOK.match(l)), whole))

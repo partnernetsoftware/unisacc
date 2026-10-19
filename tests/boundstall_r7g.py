@@ -42,8 +42,16 @@ os.environ['BOUND_CACHE'] = os.path.join(WORK, 'cache')
 PID = os.getpid()
 N = 2
 results = []
-REPORT = re.compile(r'bound: (?P<reason>.*?) \(not green\); unreaped child pid (-?\d+);'
-                    r'(?: unreaped ps pid (-?\d+);)? known tree pids:((?: -?\d+)+)')
+def unreaped_pattern(fmt):
+    """Regex derived from BOUND_UNREAPED_FMT (tests/bound.c): %s -> reason, %ld -> pid, every other character literal."""
+    out = []
+    for piece in re.split(r'(%ld|%s)', fmt):
+        if piece == '%s': out.append('(?P<reason>.*?)')
+        elif piece == '%ld': out.append('(?P<pid>-?\\d+)')
+        else: out.append(re.escape(piece))
+    return ''.join(out)
+_UNREAPED_FMT = re.search(r'#define BOUND_UNREAPED_FMT "([^"]*)"', open(os.path.join(os.path.join(REPO, 'tests'), 'bound.c'), encoding='utf-8').read()).group(1)
+REPORT = re.compile(unreaped_pattern(_UNREAPED_FMT) + r' ?(?:unreaped ps pid (?P<ps>-?\d+);)? known tree pids:(?P<tree>(?: -?\d+)+)')
 _DEF = dict(re.findall(r'#define BOUND_REASON_(\w+) "([^"]*)"', open(os.path.join(REPO, 'tests', 'bound.c')).read()))
 DEADLINE = _DEF['DEADLINE']
 ENUM = _DEF['ENUM']
@@ -135,11 +143,11 @@ def case(label, ps, command, rc_want, lo, hi):
     if not m:
         why.append('no named report on one line')
     else:
-        reported = {int(x) for x in m.group(4).split()}
-        if m.group(2):
-            reported.add(int(m.group(2)))
-        if m.group(3):
-            reported.add(int(m.group(3)))
+        reported = {int(x) for x in m.group('tree').split()}
+        if m.group('pid'):
+            reported.add(int(m.group('pid')))
+        if m.group('ps'):
+            reported.add(int(m.group('ps')))
     ledger_pids = {pid for _, pid, _ in rows}
     missing = sorted(reported - ledger_pids)
     if missing:

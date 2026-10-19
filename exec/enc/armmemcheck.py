@@ -5,6 +5,8 @@ import sys
 import tempfile
 import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import notcovered
 from unisa.emit_arm import encode
 
 
@@ -30,7 +32,7 @@ def check(args, native_host):
         for text in ['.zero x1, 0, -1','.zero x16, 32768, 8','.zero x1, 9223372036854775807, 15','.ld x0, x1, 0, 3','.st x1, 0, x2, 16','.ld x0, x16, 32768, 8','.st x1, -257, x16, 8']:
             f.write_text(text+'\n')
             for cmd in cmds:
-                r=call(cmd+[str(f)]);assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr
+                r=call(cmd+[str(f)]);assert notcovered(r)
         print('ARM64 memory: width and fallback scratch rejection passed')
         if not native_host:
             print('ARM64 memory native: SKIPPED (needs macOS arm64)'); return

@@ -42,6 +42,8 @@
 #define CAUSE_DEADLINE 2
 /* Exit code of every stop that is not green.  It never depends on the reason text. */
 #define BOUND_STOP_RC 142
+/* The unreaped report: the one spelling.  tests/bound.py, tests/boundcheck.py and tests/boundstall_r7g.py read it from here. */
+#define BOUND_UNREAPED_FMT "bound: %s (not green); unreaped child pid %ld;"
 #define TREE_MAX 4096
 #define PS_OUTPUT_MAX (16u * 1024u * 1024u)   /* a ps listing larger than this is a refusal, not a green */
 #define SLICE_SECS 0.01
@@ -130,7 +132,7 @@ static void trace_mark(const char *what) {
     if (!path || !*path) return;
     FILE *f = fopen(path, "a");
     if (!f) return;
-    fprintf(f, "%.6f %s\n", mono_now(), what);
+    fprintf(f, "%.6f pid=%ld %s\n", mono_now(), (long)getpid(), what);   /* every event carries the writing PID */
     fclose(f);
 }
 static double snapshot_until(void) {
@@ -362,7 +364,7 @@ static int report_stop(pid_t child, int cause) {
     while (mono_now() < hard_at && waitpid(-1, NULL, WNOHANG) > 0) {}   /* best effort, within the deadline */
     char reason[160];
     reason_text(cause, past_hard(), reason, sizeof reason);
-    fprintf(stderr, "bound: %s (not green); unreaped child pid %ld;", reason, (long)child);
+    fprintf(stderr, BOUND_UNREAPED_FMT, reason, (long)child);
     if (ps_child) fprintf(stderr, " unreaped ps pid %ld;", (long)ps_child);
     fprintf(stderr, " known tree pids:");
     for (size_t i = 0; i < tree_n; i++) fprintf(stderr, " %ld", (long)tree[i]);

@@ -63,7 +63,7 @@ if os.path.exists(trace_path):
     for line in open(trace_path):
         parts = line.split(None, 1)
         if len(parts) == 2:
-            marks.append((float(parts[0]), parts[1].strip()))
+            marks.append((float(parts[0]), re.sub(r'^pid=\d+ ', '', parts[1].strip())))   # r4: every line carries pid=
 left = []
 for d in os.listdir('/proc'):
     if not d.isdigit():

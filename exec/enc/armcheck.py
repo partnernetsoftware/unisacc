@@ -11,7 +11,7 @@ from unisa.emit_arm import encode
 import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
-from checklib import run
+from checklib import run, notcovered
 
 
 
@@ -35,7 +35,7 @@ def main():
         for bad in ['imm x0, 18446744073709551616','imm x0, -9223372036854775809','imm x0, -','mov x31, x0','mov x0, 1','add64 x0, x1','ret x0','mov x0, x1,','jump L','mov x0, x1 unknown=a','callr x17','callr x7']:
             inp.write_text(bad+'\n')
             for cmd in cmds:
-                r=run(cmd+[str(inp)]); assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(bad,r.returncode,r.stderr)
+                r=run(cmd+[str(inp)]); assert notcovered(r),(bad,r.returncode,r.stderr)
         print('ARM64 declared input boundary: 12 rejects on both executors')
         native_host = sys.platform=='darwin' and platform.machine()=='arm64'
         from armmemcheck import check

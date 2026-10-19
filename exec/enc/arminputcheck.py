@@ -5,6 +5,8 @@ import sys
 import tempfile
 import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import parse
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import notcovered
 from unisa.assemble import assemble
 
 
@@ -36,5 +38,5 @@ def check(args,native):
             f.write_text(source+'\n')
             for cmd in cmds:
                 r=subprocess.run(cmd+[str(f)],capture_output=True,timeout=60)
-                assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(source,r.returncode,r.stderr)
+                assert notcovered(r),(source,r.returncode,r.stderr)
         print('ARM64 input: 5 whole fixtures, 3 worked setup/syscall encodings, 17 rejects; both runtimes')

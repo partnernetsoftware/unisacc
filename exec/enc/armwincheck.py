@@ -7,6 +7,8 @@ from unisa.tape import parse
 from unisa.assemble import assemble
 import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).resolve().parents[2] / 'tests' / 'enc'))  # tins: TIns text tool lives in tests/enc
 from tins import dump
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import notcovered
 
 def main():
     assert len(sys.argv)==4
@@ -32,6 +34,6 @@ def main():
             f.write_text(prefix+b+'\n')
             for cmd in cmds:
                 r=subprocess.run(cmd+[str(f)],capture_output=True,timeout=60)
-                assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(b,r.returncode,r.stderr)
+                assert notcovered(r),(b,r.returncode,r.stderr)
         print('ARM Windows:',len(bad),'invalid contracts rejected; both executors')
 if __name__=='__main__':main()

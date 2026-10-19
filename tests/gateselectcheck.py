@@ -23,6 +23,14 @@ def fixture():
     def job(name, layer="contract", primary="meta", also=(), after=()):
         return dict(name=name, layer=layer, primary=primary, also=list(also), after=list(after),
                     declaration="known", command=["fixture-only", name])
+    base = _fixture(job)
+    # Every production smoke role owner must exist in the synthetic universe; derived from P, no name list here.
+    have = {j["name"] for j in base["jobs"]}
+    base["jobs"][-1:-1] = [job(n) for n in sorted(P["smokes"]) if n not in have and not n.startswith("PENDING_")]  # insert before last: keeps jobs[-1] stable
+    return base
+
+
+def _fixture(job):
     return dict(mode="FIXTURE_ONLY", catalog={"layers": ["contract", "stage", "pipeline", "platform"],
                 "stages": ["E2", "E1", "E3", "E4", "lower", "E5", "E6", "chain", "lib", "build", "meta"]}, jobs=[
         job("gate-layers"), job("script-inventory"), job("checkrun"),
@@ -349,7 +357,7 @@ class SelectorTests(unittest.TestCase):
         if any(n.startswith("PENDING_") for n in policy["smokes"]):
             self.rejects(lambda:m.select(fixture(),policy),"smoke-role-unresolved")
         else:
-            self.assertEqual(set(policy["smokes"]),{"gate-layers","script-inventory","checkrun","staticimage","stage-contract-e1e3","com-iquote"})
+            self.assertEqual(set(policy["smokes"]),{"gate-layers","script-inventory","checkrun","staticimage","stage-contract-e1e3","com-iquote","identity-product-negative","identity-include-negative","identity-include-consumer-negative","identity-prep-negative"})
             self.assertEqual(policy["merge_suites"],["com-cli"])
 
     def test_candidate_without_com_rejected_before_tools(self):
@@ -365,9 +373,9 @@ class SelectorTests(unittest.TestCase):
         self.assertTrue((source_root / "tests/bound.py").is_file(), "test tool inputs missing")
         with tempfile.TemporaryDirectory(prefix="gateselect-adapter-test-") as tmp:
             root=Path(tmp);(root/"tests").mkdir();(root/"release/tools").mkdir(parents=True)
-            for rel in ["tests/bound.py","tests/bound.c","tests/bound","tests/gatedecl.py","tests/gatelayers.py","release/tools/derivedcheck.py","tests/stagerun.sh","tests/gateselect.py","tests/env_pin.py"]:
+            for rel in [".gitignore","tests/bound.py","tests/bound.c","tests/bound","tests/checklib.py","tests/gatedecl.py","tests/gatelayers.py","release/tools/derivedcheck.py","tests/stagerun.sh","tests/gateselect.py","tests/env_pin.py"]:
                 shutil.copy2(source_root/rel,root/rel)
-            names=["gate-layers","script-inventory","checkrun","stage-contract-e1e3","cli","exec-lower","abi-manifest","exec-elf"]
+            names=sorted(set(["gate-layers","script-inventory","checkrun","stage-contract-e1e3","cli","exec-lower","abi-manifest","exec-elf"])|set(m.parse_policy((source_root/"tests/gateselect.tsv").read_text())["smokes"]))  # smoke owners from the raw production table
             raw=b"".join(n.encode()+b"\0"+b"2\0fixture-runner\0"+n.encode()+b"\0" for n in names)
             gate=root/"tests/gate.sh";gate.write_text("#!/bin/sh\ncase $* in *--list*) printf '%s\\n' "+" ".join(names)+"; exit 0;; esac\nprintf '"+"".join("\\%03o"%v for v in raw)+"'\n");gate.chmod(0o755)
             mapper = '#include <stdio.h>\n#include <string.h>\nint main(int argc,char**argv){int stage=0;for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--stage"))stage=1;char n[256];while(fgets(n,sizeof n,stdin)){n[strcspn(n,"\\n")]=0;if(stage)puts(n);else printf("meta\\t%s\\t-\\n",n);}return 0;}\n'
@@ -398,7 +406,7 @@ class SelectorTests(unittest.TestCase):
                 command=[sys.executable,str(root/"tests/gateselect.py"),"--root",str(root),"--policy",str(policy),"--run","--tier","dev","--base",head,"--head",head,"--com","--state",str(state),"--out",str(artifact)]
                 run=subprocess.run(command,cwd=root,env=env,capture_output=True,timeout=10)
                 self.assertEqual(run.returncode,75,run.stderr)
-                plan=json.loads(artifact.read_text());self.assertEqual(len(plan["suites"]),6)
+                plan=json.loads(artifact.read_text());self.assertEqual(len(plan["suites"]),len(set(m.parse_policy((source_root/"tests/gateselect.tsv").read_text())["smokes"])))  # --base head: no diff, dev plan is the smoke set
                 line=next(l for l in run.stdout.decode().splitlines() if l.startswith("FIXTURE_GATEQUEUE_ARGV="))
                 args=json.loads(line.split("=",1)[1]);self.assertEqual([args[i+1] for i,x in enumerate(args) if x=="--suite"],plan["suites"])
                 sha=__import__('hashlib').sha256(artifact.read_bytes()).hexdigest()
@@ -433,7 +441,7 @@ class SelectorTests(unittest.TestCase):
             command=["sh",str(root/"tests/stagerun.sh"),"--plan-only","meta"]
             observed=subprocess.run(command,cwd=root,env=env,capture_output=True,timeout=10)
             self.assertEqual(observed.returncode,0,observed.stderr)
-            expected_line="stagerun legacy: suites=8 names="+" ".join(names)
+            expected_line="stagerun legacy: suites=%d names=%s"%(len(names)," ".join(names))
             self.assertIn(expected_line,observed.stdout.decode())
             self.assertIn(b"recommended-covers-actual=YES",observed.stdout)
             # Refusal and timeout are information only: legacy selection is identical.

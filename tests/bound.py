@@ -9,6 +9,15 @@ import subprocess
 import sys
 import time
 CHAIN = "UNISACC_BOUND_CHAIN"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+def c_constant(name):
+    """A string #define from tests/bound.c: the single spelling shared with the C binary and the parsers."""
+    text = open(os.path.join(ROOT, 'bound.c'), encoding='utf-8').read()
+    m = re.search(r'#define %s "([^"]*)"' % re.escape(name), text)
+    if not m: raise SystemExit('bound: %s missing from bound.c (not green)' % name)
+    return m.group(1)
+BOUND_UNREAPED_FMT = c_constant('BOUND_UNREAPED_FMT')
+BOUND_REASON_DEADLINE = c_constant('BOUND_REASON_DEADLINE')
 # Defensive (research/c43-bound-stop-889s-readonly.md): stop() has a total budget, so a child that cannot be
 # reaped cannot hold the wall clock.  The root cause of the 889 s case is NOT located; this only makes the
 # cleanup finite and visible.  Outcome is unchanged: a timeout is always 142, and an unreaped child is never green.
@@ -167,8 +176,8 @@ def stop(process, code, token=None):
     mark('reap finished')
     if process.poll() is None:
         state, wchan = describe(process.pid) if time.monotonic() < deadline else ('?', '?')
-        sys.stderr.write('bound: unreaped pid %d (state %s, wchan %s) after %.1fs stop budget\n'
-                         % (process.pid, state, wchan, effective_stop_budget))
+        fmt = BOUND_UNREAPED_FMT.replace('%ld', '%d')
+        sys.stderr.write((fmt % (BOUND_REASON_DEADLINE, process.pid)) + ' state %s, wchan %s\n' % (state, wchan))
         sys.stderr.flush()
     if failure:
         sys.stderr.write('bound: '+failure+' (not green)\n')
@@ -261,6 +270,33 @@ def windows_main(command_budget):
         if job:kill_tree()
 
 
+def delegate_target(environ=None):
+    """Verified ready C binary when this call may run in C: Linux, and none of the Python-only
+    switches is set (test injections, the legacy BOUND_TRACE).  Otherwise None: the Python path runs unchanged."""
+    env = os.environ if environ is None else environ
+    if sys.platform != 'linux': return None
+    if 'UNISACC_BOUND_TEST_NO_KILL' in env or 'UNISACC_BOUND_STOP_SECS' in env or 'BOUND_TRACE' in env: return None
+    # Readiness is read-only: never call the wrapper, take a lock, or build here.
+    import hashlib, pathlib, shutil, stat
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))  # same-directory helpers also under -I
+    from checklib import verify_cached_file
+    compiler = shutil.which((env.get('CC') or 'cc'), path=env.get('PATH'))
+    if compiler is None: return None
+    try:
+        source = pathlib.Path(ROOT, 'bound.c').read_bytes()
+        key = hashlib.sha256((compiler + '\n' + os.uname().machine + '\n').encode() + source).hexdigest()
+        cache = (env.get('BOUND_CACHE') or os.path.join(env.get('TMPDIR') or '/tmp', 'unisacc-bound-%d' % os.getuid()))
+        binary = pathlib.Path(cache, key)
+        certificate = pathlib.Path(str(binary) + '.sha256')
+        if not stat.S_ISREG(certificate.lstat().st_mode): return None
+        fields = certificate.read_text(encoding='ascii').split()
+        if len(fields) != 2 or fields[0] != key: return None
+        verify_cached_file(binary, fields[1], executable=True)
+        return str(binary)  # exec the verified ready binary, never the building wrapper
+    except (OSError, ValueError, UnicodeError):
+        return None  # absent, unreadable, malformed, or damaged => original Python path
+
+
 def parent_deadline():
     """The inherited absolute hard deadline, or None.  Non-finite or non-positive values refuse to start."""
     raw = os.environ.get(PARENT_DEADLINE)
@@ -280,6 +316,9 @@ def main():
     if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 60:
         print('bound: timeout must be 1..60 seconds, followed by a command', file=sys.stderr)
         return 2
+    target = delegate_target()
+    if target is not None:
+        os.execv(target, [target] + sys.argv[1:])   # same PID; N and UNISACC_BOUND_DEADLINE_MONO unchanged
     global _TOTAL_DEADLINE
     command_budget = int(sys.argv[1]) * scale()
     _TOTAL_DEADLINE = time.monotonic() + command_budget + TOTAL_EXTRA_SECS

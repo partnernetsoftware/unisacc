@@ -7,7 +7,7 @@ import sys as _ts, pathlib as _tp; _ts.path.insert(0, str(_tp.Path(__file__).res
 from tins import parse
 from unisa.emit_arm import encode
 import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
-from checklib import run
+from checklib import run, notcovered
 
 
 
@@ -31,7 +31,7 @@ def check(args,native):
         for source in bad:
             f.write_text(source+'\n')
             for cmd in cmds:
-                r=run(cmd+[str(f)]);assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr
+                r=run(cmd+[str(f)]);assert notcovered(r)
         print('ARM64 integer/frame: 10 signed-domain/field-width/scratch rejects, both executors')
         if not native:
             print('ARM64 integer/frame native: SKIPPED');return

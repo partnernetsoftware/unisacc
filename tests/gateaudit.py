@@ -10,6 +10,7 @@ did not declare.  usage: tests/gateaudit.py NAME [NAME...]   (each run bounded t
 """
 import json, os, pathlib, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+from checklib import bound_cmd
 sys.path.insert(0, str(ROOT / 'tests'))
 HELPERS = ['tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/gate.sh', 'tests/gatequeue.py', 'tests/gatedeps.json']
 
@@ -52,7 +53,7 @@ def main(names):
         files = files | {'unisacc.com', 'unisacc.com.build.json'} if mc == './unisacc.com' else files
         with tempfile.NamedTemporaryFile('w', suffix='.sb', delete=False) as f:
             f.write(profile(files, trees)); sb = f.name
-        r = subprocess.run([sys.executable, str(ROOT / 'tests/bound.py'), '55', 'sandbox-exec', '-f', sb] + command,
+        r = subprocess.run(bound_cmd(55, 'sandbox-exec', '-f', sb, *command),
                            cwd=ROOT, capture_output=True, text=True)
         os.unlink(sb)
         out = r.stdout + r.stderr
