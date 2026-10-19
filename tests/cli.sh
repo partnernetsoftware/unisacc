@@ -295,6 +295,15 @@ valhit=no
 grep -a -q force_b22d "$T/runforce.bin" && valhit=yes
 say "forced initializer omits its directory" "no" "$valhit"
 say "forced initializer link repeats" "same" "$(cmp -s "$T/runforce.bin" "$T/runforce.bin2" && echo same || echo differ)"
+bin_rc=0
+"$T/runforce.bin" >/dev/null 2>&1 || bin_rc=$?
+say "forced initializer file runs" "7" "$bin_rc"
+printf 'int from_inc = 8;\n' > "$T/force_b22d/eight.h"
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/eight.h runforce.c -o runforce8.bin >/dev/null 2>&1)
+eight_rc=0
+"$T/runforce8.bin" >/dev/null 2>&1 || eight_rc=$?
+say "other initializer file runs" "8" "$eight_rc"
+say "initializer value changes the file" "differ" "$(cmp -s "$T/runforce.bin" "$T/runforce8.bin" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
