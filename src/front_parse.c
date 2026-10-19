@@ -1395,7 +1395,7 @@ int unary(void) {
         unevaluated = unevaluated - 1;
         nout = nsave; nibuf = isave;
         /* C99 6.5.3.4p1: sizeof shall not be applied to a bit-field member */
-        if (curelem >= BFTAG) err_tok(tp, "sizeof applied to a bit-field");
+        if (lvalue && curelem >= BFTAG) err_tok(tp, "sizeof applied to a bit-field");
         if (toinit && curvla) err_tok(tp, "static initializer requires a constant size");
         sz = cursize;
         if (curstruct >= 0 && curptr == 0 && stsize[curstruct] == 0) err_tok(tp, "sizeof incomplete structure");
@@ -3737,7 +3737,8 @@ void declrestore(void) { declspec_restore(&declsv); }
 us_i64 cunary(void) {
     int w; DeclSpecSnapshot spec;
     if (eat(tidx("-", 1))) return 0 - cunary();
-    if (eat(tidx("+", 1))) return cunary();
+    /* unary + is an rvalue operator: its operand undergoes lvalue conversion (C99 6.3.2.1p2) */
+    if (eat(tidx("+", 1))) { w = cunary(); if (lvalue) loadval(); return w; }
     if (eat(tidx("!", 1))) { if (cunary()) return 0; return 1; }
     if (eat(tidx("~", 1))) return (0 - cunary()) - 1;
     if (cur() == tidx("sizeof", 6)) {
