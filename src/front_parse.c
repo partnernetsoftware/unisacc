@@ -1394,6 +1394,8 @@ int unary(void) {
         unary();
         unevaluated = unevaluated - 1;
         nout = nsave; nibuf = isave;
+        /* C99 6.5.3.4p1: sizeof shall not be applied to a bit-field member */
+        if (curelem >= BFTAG) err_tok(tp, "sizeof applied to a bit-field");
         if (toinit && curvla) err_tok(tp, "static initializer requires a constant size");
         sz = cursize;
         if (curstruct >= 0 && curptr == 0 && stsize[curstruct] == 0) err_tok(tp, "sizeof incomplete structure");

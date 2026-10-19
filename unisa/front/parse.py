@@ -626,10 +626,14 @@ class Walker:
         t.label("__argv_done")
 
     def do_typedef(self):
+        """`typedef TYPE name, *other;` -- one entry per declarator."""
         self.expect("typedef")
         base = self.declspec()
-        ty, name = self.declarator(base)
-        self.sc.typedef(name, ty)
+        while True:
+            ty, name = self.declarator(base)
+            self.sc.typedef(name, ty)
+            if not self.eat(","):
+                break
         self.expect(";")
 
     def enum_type(self):
@@ -2309,6 +2313,10 @@ class Walker:
             else:
                 m = self.mark()
                 t = self.unary()
+                # C99 6.5.3.4p1: sizeof shall not be applied to a bit-field.
+                if self.lbits is not None:
+                    raise CError("line %d: sizeof applied to a bit-field"
+                                 % self.peek().line)
                 n = (t or I64).size(self.sc.structs)
                 if t is not None and t.kind == "struct" and n == 0:
                     raise CError("sizeof incomplete structure")
