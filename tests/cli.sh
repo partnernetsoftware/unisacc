@@ -312,6 +312,10 @@ say "initializer assemblies have one size" "same" "$( [ "$(wc -c < "$T/runforce.
 (cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/eight.h runforce.c -o runforce8.o >/dev/null 2>&1)
 say "initializer value changes the object" "differ" "$(cmp -s "$T/runforce.o" "$T/runforce8.o" && echo same || echo differ)"
 say "initializer objects have one size" "same" "$( [ "$(wc -c < "$T/runforce.o")" = "$(wc -c < "$T/runforce8.o")" ] && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/force.h runforce.c -o runforce.e >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/eight.h runforce.c -o runforce8.e >/dev/null 2>&1)
+say "initializer preprocess has one size" "same" "$( [ "$(wc -c < "$T/runforce.e")" = "$(wc -c < "$T/runforce8.e")" ] && echo same || echo differ)"
+say "initializer preprocess differs by one byte" "1" "$(cmp -l "$T/runforce.e" "$T/runforce8.e" | wc -l | tr -d ' ')"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
