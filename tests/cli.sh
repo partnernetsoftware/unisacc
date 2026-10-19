@@ -261,6 +261,19 @@ missq_out=$(cd "$T" && bound 20 "$UA_RUN" -E missq.c -o missq.e 2>"$T/missq.err"
 say "missing quote include leaves an existing file" "KEEP" "$(cat "$T/missq.e" 2>/dev/null)"
 say "missing quote include stdout is empty" "" "$missq_out"
 say "missing quote include is named" "named" "$(grep -q 'no such file' "$T/missq.err" && echo named)"
+mkdir -p "$T/force_a91c"
+printf 'int from_inc;\n' > "$T/force_a91c/force.h"
+printf 'int main(void){return from_inc;}\n' > "$T/force.c"
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_a91c/force.h force.c -o force.e >/dev/null 2>&1)
+forcehit=no
+grep -a -q force_a91c "$T/force.e" && forcehit=yes
+say "forced include omits its directory" "no" "$forcehit"
+say "forced include is in the stream" "yes" "$(grep -q from_inc "$T/force.e" && echo yes)"
+printf 'KEEP' > "$T/forcemiss.e"
+forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
+say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
+say "missing forced include stdout is empty" "" "$forcemiss_out"
+say "missing forced include is named" "named" "$(grep -q 'no such file' "$T/forcemiss.err" && echo named)"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
