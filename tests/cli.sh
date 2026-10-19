@@ -304,6 +304,10 @@ eight_rc=0
 "$T/runforce8.bin" >/dev/null 2>&1 || eight_rc=$?
 say "other initializer file runs" "8" "$eight_rc"
 say "initializer value changes the file" "differ" "$(cmp -s "$T/runforce.bin" "$T/runforce8.bin" && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/force.h runforce.c -o runforce.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/eight.h runforce.c -o runforce8.s >/dev/null 2>&1)
+say "initializer value changes assembly" "differ" "$(cmp -s "$T/runforce.s" "$T/runforce8.s" && echo same || echo differ)"
+say "initializer assemblies have one size" "same" "$( [ "$(wc -c < "$T/runforce.s")" = "$(wc -c < "$T/runforce8.s")" ] && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
