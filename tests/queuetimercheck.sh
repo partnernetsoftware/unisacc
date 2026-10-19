@@ -12,7 +12,9 @@ D=$T/cand; S=$T/seed; W=$T/wt; mkdir -p "$D" "$S" "$W/tests"
 cp "$R/unisacc.com" "$D/unisacc-next.com"   # real product bytes: queue.sh pre-flights the static-image contract on the candidate
  printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
 printf s > "$S/unisacc-seed.com"; printf '#!/bin/sh\nexit 0\n' > "$T/ua"; chmod +x "$T/ua"
-cp "$R/tests/term.sh" "$R/tests/bound.py" "$W/tests/"
+cp "$R/tests/term.sh" "$W/tests/"
+bound_files=$(python3 "$R/tests/bound.py" --deployment-files) || exit $?
+for name in $bound_files; do cp "$R/tests/$name" "$W/tests/" || exit $?; done
 # the window body: records its start and its parent's argv, sleeps past the alarm, and would record a finish it must
 # never reach
 cat > "$W/tests/release.sh" <<BODY
@@ -33,7 +35,8 @@ took=$(( $(date +%s) - t0 ))
 [ "$rc" = 142 ] || fail "queue rc=$rc, want 142 from the inner watchdog ($(cat "$T/out"))"
 [ "$(wc -l < "$T/body-started" 2>/dev/null | tr -d ' ')" = 1 ] || fail "window body launches: $(cat "$T/body-started" 2>/dev/null | wc -l) (want exactly 1)"
 [ ! -e "$T/body-finished" ] || fail "the window body ran past the alarm"
-grep -qE "bound\.py $ALARM " "$T/body-parent" || fail "the window body was not run under bound.py $ALARM: $(cat "$T/body-parent")"
+watchdog_prefix=$(python3 "$W/tests/bound.py" --exec-prefix "$ALARM" ./tests/release.sh --com) || exit $?
+grep -qF -- "$watchdog_prefix " "$T/body-parent" || fail "the window body was not run under selected watchdog $watchdog_prefix: $(cat "$T/body-parent")"
 [ "$took" -ge "$ALARM" ] && [ "$took" -lt 45 ] || fail "took ${took}s: not the ${ALARM}s inner alarm (the outer 50s bound would mean >= 50)"
 [ "$(grep -c '^window ' "$Q/release-queue.log")" = 1 ] && grep -q '^window 1 rc=142 ' "$Q/release-queue.log" && grep -q '^final rc=142$' "$Q/release-queue.log" || fail "window lines: $(grep -E '^window|^final' "$Q/release-queue.log")"
 grep -q '^mode=fresh$' "$Q/start-receipt.txt" && grep -q '^restored=no$' "$Q/start-receipt.txt" && grep -q '^source=none$' "$Q/start-receipt.txt" || fail "receipt: $(cat "$Q/start-receipt.txt")"

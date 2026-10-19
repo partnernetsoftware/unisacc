@@ -4,7 +4,9 @@ import hashlib,json,os,pathlib,shutil,subprocess,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='release-contract-') as td:
     p=pathlib.Path(td);t=p/'tests';t.mkdir()
-    for name in ('release.sh','bound.py'):shutil.copy2(ROOT/'tests'/name,t/name)
+    shutil.copy2(ROOT/'tests/release.sh',t/'release.sh')
+    bound_files=subprocess.check_output(['python3',str(ROOT/'tests/bound.py'),'--deployment-files'],text=True,timeout=5).splitlines()
+    for name in bound_files:shutil.copy2(ROOT/'tests'/name,t/name)
     candidate=p/'candidate';candidate.write_text('#!/bin/sh\nexit 0\n');candidate.chmod(0o755)
     reference=p/'reference';shutil.copy2(candidate,reference)
     (t/'gatequeue.py').write_text('''import json,os,pathlib,sys

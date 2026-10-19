@@ -10,6 +10,11 @@ import sys
 import time
 CHAIN = "UNISACC_BOUND_CHAIN"
 ROOT = os.path.dirname(os.path.abspath(__file__))
+# Single deployment authority for copied Python watchdog fixtures.
+DEPLOYMENT_FILES = ("bound.py", "bound.c", "checklib.py")
+if __name__ == "__main__" and sys.argv[1:] == ["--deployment-files"]:
+    print("\n".join(DEPLOYMENT_FILES))
+    raise SystemExit(0)
 def c_constant(name):
     """A string #define from tests/bound.c: the single spelling shared with the C binary and the parsers."""
     text = open(os.path.join(ROOT, 'bound.c'), encoding='utf-8').read()
@@ -312,7 +317,21 @@ def parent_deadline():
     return value
 
 
+def execution_prefix(command_budget):
+    """Read-only actual watchdog argv prefix, using the same ready-only selector as main."""
+    target = delegate_target()
+    if target is not None:
+        return [target, str(command_budget)]
+    interpreter = sys.orig_argv[:len(sys.orig_argv) - len(sys.argv)]
+    return interpreter + [sys.argv[0], str(command_budget)]
+
+
 def main():
+    if len(sys.argv) >= 4 and sys.argv[1] == "--exec-prefix":
+        if not sys.argv[2].isdigit() or not 1 <= int(sys.argv[2]) <= 60:
+            raise SystemExit("bound: prefix timeout must be 1..60")
+        print(" ".join(execution_prefix(int(sys.argv[2]))))
+        return 0
     if len(sys.argv) < 3 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 60:
         print('bound: timeout must be 1..60 seconds, followed by a command', file=sys.stderr)
         return 2

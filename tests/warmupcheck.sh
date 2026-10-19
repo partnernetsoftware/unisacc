@@ -9,7 +9,9 @@ R=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-warmup.XXXXXX"); trap 'rm -rf "$T"' EXIT
 fail() { echo "warmup: $*"; exit 1; }
 mkdir -p "$T/root/tests" "$T/root/exec/c/asm" "$T/root/exec/pipeline" "$T/root/release/tools" "$T/s1" "$T/s2" "$T/s3" "$T/s4"
-cp "$R/tests/bound.py" "$T/root/tests/"; cp "$R/release/tools/warmup.sh" "$T/root/release/tools/"; cp "$R/release/tools/stagelog.py" "$T/root/release/tools/"
+bound_files=$(python3 "$R/tests/bound.py" --deployment-files) || exit $?
+for name in $bound_files; do cp "$R/tests/$name" "$T/root/tests/" || exit $?; done
+cp "$R/release/tools/warmup.sh" "$T/root/release/tools/"; cp "$R/release/tools/stagelog.py" "$T/root/release/tools/"
 # model key stub: prints "KEY STATE" from $T/key and $T/state; a successful build makes the cache valid
 printf '#!/bin/sh\necho "$(cat %s/key) $(cat %s/state)"\n' "$T" "$T" > "$T/modelkey"; chmod +x "$T/modelkey"
 step() { for f in exec/c/warningcheck.sh exec/c/asm/bindprep.sh exec/pipeline/elf.sh; do
