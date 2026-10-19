@@ -171,6 +171,7 @@ int fntok = 0 - 1;          /* the name token of the function being walked,
                                for C99's predefined `__func__` */
 int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
 int retvoid;          /* the function being parsed returns void, not void * */
+int curvoid;          /* the expression just parsed has type void */
 /* Pointer DEPTH.  `int **q` is a pointer to a pointer: *q is itself eight
    bytes, and only **q is the int.  A 0/1 pointer flag read *q as a 4-byte
    int -- right in the interpreter, whose addresses fit in 32 bits, and a
@@ -1404,9 +1405,12 @@ int unary(void) {
         unevaluated = unevaluated + 1;
         cursize = 8;                       /* an expression with no symbol */
         curvla = 0;
+        curvoid = 0;
         unary();
         unevaluated = unevaluated - 1;
         nout = nsave; nibuf = isave;
+        /* C99 6.5.3.4: sizeof(void) includes a call or cast of type void */
+        if (curvoid) err_tok(tp, "sizeof(void)");
         /* C99 6.5.3.4p1: sizeof shall not be applied to a bit-field member */
         if (lvalue && curelem >= BFTAG) err_tok(tp, "sizeof applied to a bit-field");
         if (toinit && curvla) err_tok(tp, "static initializer requires a constant size");
@@ -1439,9 +1443,9 @@ int unary(void) {
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd; int cb; int cptr; int cfpt;
+            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd; int cb; int cptr; int cfpt; int cv;
             adv();
-            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt; cb = declbool;
+            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt; cb = declbool; cv = declvoid;
             cfpt = declspecfp;
             declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) { declptr = 1; csz = 8; }
@@ -1486,6 +1490,8 @@ int unary(void) {
                 }
             } }
             lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns; curflt = cflt; curbool = cb;
+            curvoid = cv && cptr == 0;
+            if (curvoid) cursize = 0;
             curfn = 0; curfnst = 0 - 1; /* the cast supplies its own type */
             curelem = cw;
             curpd = 0; curbase = cw;
@@ -1761,7 +1767,7 @@ int vcall(int var) {
 int primary(void) {
     int t; int i; us_i64 v; int k;
     t = cur();
-    curuns = 0; curflt = 0;
+    curuns = 0; curflt = 0; curvoid = 0;
     if (t == T_NUM) { if (fltlit(tp)) {
         /* a floating constant: its bits, rounded once from the decimal */
         int fk; fk = fltlit(tp);
@@ -2437,6 +2443,12 @@ int callres(int si) {
         curflt = symflt[si]; cursize = curflt; curelem = curflt;
     } } } }
     if (si >= 0) { if (symkind[si] == 2) { if (symretw[si]) { cursize = symretw[si]; curelem = cursize; } } }
+    curvoid = 0;
+    if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si] == 0) {
+        if (symstruct[si] < 0) { if (symelem[si] == 0) {
+            cursize = 0; curelem = 0; curvoid = 1;
+        } } }
+    } } }
     return 0;
 }
 
@@ -3119,6 +3131,7 @@ int fconv(int from, int to) {
 /* ...and the value's description follows it */
 int setkind(int k) {
     lvalue = 0; curptr = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0; curbool = 0;
+    curvoid = 0;
     if (k == 9) { curbool = 1; curflt = 0; cursize = 1; curelem = 1; curuns = 1; return 0; }
     if (k >= 4) { curflt = k; cursize = k; curelem = k; curuns = 0; return 0; }
     curflt = 0;
@@ -6156,6 +6169,7 @@ int unit(void) {
                 declbytes = 8;
                 declfp = 0;
                 sadd(t, 2, 0, 8);
+                if (declvoid && declptr == 0) symelem[nsym - 1] = 0;
                 /* `binop pick(void)`, `int (*f1(int, int))(int, int)`: a call
                    of it yields a function pointer */
                 if (declspecfp || gfpfn) symfpret[nsym - 1] = 1;

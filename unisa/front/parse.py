@@ -2350,6 +2350,8 @@ class Walker:
             else:
                 m = self.mark()
                 t = self.unary()
+                if t is not None and t.kind == "void":
+                    raise CError("line %d: sizeof(void)" % self.peek().line)
                 # C99 6.5.3.4p1: sizeof shall not be applied to a bit-field.
                 if self.lbits is not None:
                     raise CError("line %d: sizeof applied to a bit-field"
