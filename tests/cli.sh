@@ -282,6 +282,19 @@ say "forced include assembly repeats" "same" "$(cmp -s "$T/force.s" "$T/force.s2
 say "forced include reaches object" "yes" "$(grep -a -q from_inc "$T/force.o" && echo yes)"
 say "forced include object repeats" "same" "$(cmp -s "$T/force.o" "$T/force.o2" && echo same || echo differ)"
 say "forced include link repeats" "same" "$(cmp -s "$T/force.out" "$T/force.out2" && echo same || echo differ)"
+mkdir -p "$T/force_b22d"
+printf 'int from_inc = 7;\n' > "$T/force_b22d/force.h"
+printf 'int main(void){return from_inc;}\n' > "$T/runforce.c"
+run_rc=0
+(cd "$T" && bound 20 "$UA_RUN" -run -include force_b22d/force.h runforce.c -o runforce.out >/dev/null 2>&1) || run_rc=$?
+say "forced initializer runs" "7" "$run_rc"
+say "forced initializer leaves no file" "none" "$([ -e "$T/runforce.out" ] && echo left || echo none)"
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/force.h runforce.c -o runforce.bin >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/force.h runforce.c -o runforce.bin2 >/dev/null 2>&1)
+valhit=no
+grep -a -q force_b22d "$T/runforce.bin" && valhit=yes
+say "forced initializer omits its directory" "no" "$valhit"
+say "forced initializer link repeats" "same" "$(cmp -s "$T/runforce.bin" "$T/runforce.bin2" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
