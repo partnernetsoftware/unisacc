@@ -173,6 +173,14 @@ say "-run -b leaves no file" "none" "$([ -e "$T/runb" ] && echo left || echo non
 printf 'KEEP' > "$T/runkeep"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -o runkeep >/dev/null 2>&1)
 say "-run leaves an existing file" "KEEP" "$(cat "$T/runkeep" 2>/dev/null)"
+printf 'int ;\n' > "$T/nomain.c"
+printf 'KEEP' > "$T/nomain.out"
+(cd "$T" && bound 20 "$UA_RUN" nomain.c -o nomain.out >/dev/null 2>&1)
+say "refusal leaves an existing file" "KEEP" "$(cat "$T/nomain.out" 2>/dev/null)"
+printf 'int f(void){return;}\n' > "$T/bare.c"
+printf 'KEEP' > "$T/bare.s"
+(cd "$T" && bound 20 "$UA_RUN" -S bare.c -o bare.s >/dev/null 2>&1)
+say "assembly refusal leaves an existing file" "KEEP" "$(cat "$T/bare.s" 2>/dev/null)"
 printf '#include <stdio.h>\nint main(int c,char**v){printf("%%d %%s\\n",c,v[1]);return 0;}\n' > "$T/argv.c"
 say "FILE.c args go to the program" "2 hi" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c hi) 2>&1)"
 say "-- passes dash arguments" "2 --flag" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c -- --flag) 2>&1)"
