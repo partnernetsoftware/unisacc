@@ -19,7 +19,8 @@ def refused_by_compiler(pkg, src, out):
         elf = fh.read(4) == b'\x7fELF'
     cmd = [pkg] if elf else ['sh', pkg]
     p = subprocess.run(cmd + [src, '-o', out], capture_output=True, timeout=30)
-    return p.returncode != 0 and bool(p.stderr) and not os.path.exists(out)
+    # a refusal is a normal exit with a positive status: a signal death (negative returncode) is not a refusal
+    return p.returncode > 0 and bool(p.stderr) and not os.path.exists(out)
 
 
 def refused_by_reference(src, out):
@@ -27,11 +28,32 @@ def refused_by_reference(src, out):
     return p.returncode != 0
 
 
+def selftest():
+    """controls: a compiler that kills itself after writing a diagnostic must not count as a refusal"""
+    with tempfile.TemporaryDirectory() as td:
+        fake = os.path.join(td, 'fake.sh')
+        with open(fake, 'w') as fh:
+            fh.write('#!/bin/sh\necho "fake: refused" >&2\nkill -TERM $$\n')
+        os.chmod(fake, 0o755)
+        src = os.path.join(td, 'x.c')
+        open(src, 'w').write('int main(void){return 0;}\n')
+        out = os.path.join(td, 'x.bin')
+        if refused_by_compiler(fake, src, out):
+            print('selftest FAIL: signal death counted as refusal'); return 1
+    print('selftest ok: signal death is not a refusal')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--package', required=True)
+    ap.add_argument('--package')
     ap.add_argument('--case', action='append', default=[])
+    ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args()
+    if a.selftest:
+        return selftest()
+    if not a.package:
+        ap.error('--package is required unless --selftest')
     files = sorted(glob.glob(os.path.join(CASES, '*.c')))
     if a.case:
         files = [f for f in files if os.path.basename(f)[:-2] in a.case]
