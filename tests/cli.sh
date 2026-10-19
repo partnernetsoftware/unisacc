@@ -190,14 +190,25 @@ printf 'KEEP' > "$T/bare.o"
 say "object refusal leaves an existing file" "KEEP" "$(cat "$T/bare.o" 2>/dev/null)"
 printf 'int main(void){return 0;}\n' > "$T/ok.c"
 printf 'KEEP' > "$T/ok.out"
-(cd "$T" && bound 20 "$UA_RUN" ok.c -o ok.out >/dev/null 2>&1)
+ok_out=$(cd "$T" && bound 20 "$UA_RUN" ok.c -o ok.out 2>"$T/ok.err")
 say "success replaces an existing file" "ELF" "$(od -An -tx1 -N4 "$T/ok.out" | tr -d ' \n' | grep -q '^7f454c46$' && echo ELF || echo kept)"
+say "success stdout is empty" "" "$ok_out"
+say "success stderr is empty" "0" "$(wc -c < "$T/ok.err" | tr -d ' ')"
 printf 'KEEP' > "$T/ok.s"
-(cd "$T" && bound 20 "$UA_RUN" -S ok.c -o ok.s >/dev/null 2>&1)
+s_out=$(cd "$T" && bound 20 "$UA_RUN" -S ok.c -o ok.s 2>"$T/ok.serr")
 say "assembly replaces an existing file" "_start:" "$(head -1 "$T/ok.s")"
+say "assembly success stdout is empty" "" "$s_out"
+say "assembly success stderr is empty" "0" "$(wc -c < "$T/ok.serr" | tr -d ' ')"
 printf 'KEEP' > "$T/ok.e"
-(cd "$T" && bound 20 "$UA_RUN" -E ok.c -o ok.e >/dev/null 2>&1)
+e_out=$(cd "$T" && bound 20 "$UA_RUN" -E ok.c -o ok.e 2>"$T/ok.eerr")
 say "preprocess replaces an existing file" "same" "$(cmp -s "$T/ok.c" "$T/ok.e" && echo same || echo kept)"
+say "preprocess success stdout is empty" "" "$e_out"
+say "preprocess success stderr is empty" "0" "$(wc -c < "$T/ok.eerr" | tr -d ' ')"
+printf 'KEEP' > "$T/ok.o"
+c_out=$(cd "$T" && bound 20 "$UA_RUN" -c ok.c -o ok.o 2>"$T/ok.cerr")
+say "object success replaces an existing file" "replaced" "$(grep -q KEEP "$T/ok.o" && echo KEEP || echo replaced)"
+say "object success stdout is empty" "" "$c_out"
+say "object success stderr is empty" "0" "$(wc -c < "$T/ok.cerr" | tr -d ' ')"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
