@@ -16,8 +16,9 @@ from .__main__ import CORPUS, _ref_bytes
 from .contract import wired
 from .nets import build_nets
 
-# 基线（实测）：lex、parse 的 shift 直接决定字节；isel、enc 只决定拒收（trap）；
-# type/scope/shape/ic/reloc 在语料上 shift 与 trap 都不改变结果 —— 这是待补的缺口。
+# 基线（实测）：lex、parse 的 shift 直接决定字节；isel 的算术/逻辑族由形态分派，
+# 错形态被拒收，trap 也拒收（isel 只决定合法形态的选择与拒收，合法形态唯一）；
+# enc 只决定拒收（trap），模板尚未被消费；type/scope/shape/ic/reloc 未被观测到。
 EXPECT = {
     "lex": {"shift"},
     "parse": {"shift"},
@@ -25,7 +26,7 @@ EXPECT = {
     "scope": set(),
     "shape": set(),
     "ic": set(),
-    "isel": {"trap"},
+    "isel": {"shift", "trap"},
     "enc": {"trap"},
     "reloc": set(),
 }

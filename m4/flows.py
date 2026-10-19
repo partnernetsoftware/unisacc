@@ -8,11 +8,12 @@
 """
 import os
 
-from ujs.seed.construct.emit_wasm import can_emit_direct, emit_wasm
+from ujs.seed.construct.emit_wasm import can_emit_direct
 from ujs.seed.construct.front.compile import compile_src
 from ujs.seed.construct.oracle import Oracle
 
 from .contract import wired
+from .emit import emit_wasm
 
 
 def _snap(o):
