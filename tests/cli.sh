@@ -209,6 +209,14 @@ c_out=$(cd "$T" && bound 20 "$UA_RUN" -c ok.c -o ok.o 2>"$T/ok.cerr")
 say "object success replaces an existing file" "replaced" "$(grep -q KEEP "$T/ok.o" && echo KEEP || echo replaced)"
 say "object success stdout is empty" "" "$c_out"
 say "object success stderr is empty" "0" "$(wc -c < "$T/ok.cerr" | tr -d ' ')"
+(cd "$T" && bound 20 "$UA_RUN" ok.c -o ok.out2 >/dev/null 2>&1)
+say "link bytes repeat" "same" "$(cmp -s "$T/ok.out" "$T/ok.out2" && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -S ok.c -o ok.s2 >/dev/null 2>&1)
+say "assembly bytes repeat" "same" "$(cmp -s "$T/ok.s" "$T/ok.s2" && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -E ok.c -o ok.e2 >/dev/null 2>&1)
+say "preprocess bytes repeat" "same" "$(cmp -s "$T/ok.e" "$T/ok.e2" && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -c ok.c -o ok.o2 >/dev/null 2>&1)
+say "object bytes repeat" "same" "$(cmp -s "$T/ok.o" "$T/ok.o2" && echo same || echo differ)"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
