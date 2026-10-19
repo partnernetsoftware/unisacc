@@ -316,6 +316,13 @@ say "initializer objects have one size" "same" "$( [ "$(wc -c < "$T/runforce.o")
 (cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/eight.h runforce.c -o runforce8.e >/dev/null 2>&1)
 say "initializer preprocess has one size" "same" "$( [ "$(wc -c < "$T/runforce.e")" = "$(wc -c < "$T/runforce8.e")" ] && echo same || echo differ)"
 say "initializer preprocess differs by one byte" "1" "$(cmp -l "$T/runforce.e" "$T/runforce8.e" | wc -l | tr -d ' ')"
+printf 'int from_inc = 17;\n' > "$T/force_b22d/seventeen.h"
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/seventeen.h runforce.c -o runforce17.e >/dev/null 2>&1)
+say "two-digit initializer adds one preprocess byte" "1" "$(( $(wc -c < "$T/runforce17.e") - $(wc -c < "$T/runforce.e") ))"
+seventeen_rc=0
+(cd "$T" && bound 20 "$UA_RUN" -run -include force_b22d/seventeen.h runforce.c -o runforce17.out >/dev/null 2>&1) || seventeen_rc=$?
+say "two-digit initializer runs" "17" "$seventeen_rc"
+say "two-digit initializer leaves no file" "none" "$([ -e "$T/runforce17.out" ] && echo left || echo none)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
