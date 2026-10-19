@@ -274,6 +274,9 @@ grep -a -q force_a91c "$T/force.e" "$T/force.s" "$T/force.o" "$T/force.out" && f
 say "forced include omits its directory" "no" "$forcehit"
 say "forced include is in the stream" "yes" "$(grep -q from_inc "$T/force.e" && echo yes)"
 say "forced include bytes repeat" "same" "$(cmp -s "$T/force.e" "$T/force.e2" && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_a91c/force.h force.c -o force.s2 >/dev/null 2>&1)
+say "forced include reaches assembly" "yes" "$(grep -q from_inc "$T/force.s" && echo yes)"
+say "forced include assembly repeats" "same" "$(cmp -s "$T/force.s" "$T/force.s2" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
