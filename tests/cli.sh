@@ -159,13 +159,17 @@ printf '#include <stdio.h>\nint main(void){puts("plain build");return 0;}\n' > "
 rm -f "$T/a.out"
 say "FILE.c alone runs" "plain build" "$( (cd "$T" && bound 60 "$UA_RUN" plain.c) 2>&1)"
 say "FILE.c alone leaves no a.out" "none" "$([ -e "$T/a.out" ] && echo left || echo none)"
-rm -f "$T/runout" "$T/runs" "$T/runc"
+rm -f "$T/runout" "$T/runs" "$T/runc" "$T/rune" "$T/runb"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -o runout >/dev/null 2>&1)
 say "-run -o leaves no file" "none" "$([ -e "$T/runout" ] && echo left || echo none)"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -S -o runs >/dev/null 2>&1)
 say "-run -S leaves no file" "none" "$([ -e "$T/runs" ] && echo left || echo none)"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -c -o runc >/dev/null 2>&1)
 say "-run -c leaves no file" "none" "$([ -e "$T/runc" ] && echo left || echo none)"
+(cd "$T" && bound 20 "$UA_RUN" plain.c -run -E -o rune >/dev/null 2>&1)
+say "-run -E leaves no file" "none" "$([ -e "$T/rune" ] && echo left || echo none)"
+(cd "$T" && bound 20 "$UA_RUN" plain.c -run -b lnx/x86_64 -o runb >/dev/null 2>&1)
+say "-run -b leaves no file" "none" "$([ -e "$T/runb" ] && echo left || echo none)"
 printf '#include <stdio.h>\nint main(int c,char**v){printf("%%d %%s\\n",c,v[1]);return 0;}\n' > "$T/argv.c"
 say "FILE.c args go to the program" "2 hi" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c hi) 2>&1)"
 say "-- passes dash arguments" "2 --flag" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c -- --flag) 2>&1)"
