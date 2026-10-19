@@ -128,9 +128,13 @@ def main(argv=None):
     b = sp.add_parser("build")
     b.add_argument("src")
     b.add_argument("-o", dest="o", required=True)
+    sp.add_parser("selftest", help="网是否真在决策（变异测试，基线钉死）")
     c = sp.add_parser("check")
     c.add_argument("--limit", type=int, default=0)
     a = p.parse_args(argv)
+    if a.cmd == "selftest":
+        from . import selftest
+        return 0 if selftest.run() else 1
     return {"acc": cmd_acc, "build": cmd_build, "check": cmd_check}[a.cmd](a)
 
 

@@ -9,8 +9,23 @@
 python3 -m m4 acc                 # 10 张网：构造 + 全键穷举 exact
 python3 -m m4 build SRC -o OUT    # 源 → 四流 → \0asm，打印各流网命中
 python3 -m m4 check               # tests/ujs2wasm/corpus 逐个对 ujs 的 gold 路径
-./tests/m4.sh                     # 以上两项，逐步 60 秒看门狗
+python3 -m m4 selftest            # 变异测试：每张网是否真的决定输出（基线钉死）
+./tests/m4.sh                     # 以上全部，逐步 60 秒看门狗
 ```
+
+## 自检结论（selftest，2026-10-19 实测）
+
+| 网 | 决策种类 | 含义 |
+|---|---|---|
+| lex | shift | 说谎会改字节或拒收：真决定输出 |
+| parse | shift | 同上 |
+| isel | trap | 只决定拒收；字节不随其 form 变化 |
+| enc | trap | 只决定拒收；字节不随其模板变化 |
+| type, scope, shape, ic, reloc | 无 | 说谎不改变语料上的任何结果：未证明在决策 |
+
+这是**方法轨的真缺口**：`emit_wasm` 的字节由写死的 op 处理生成，`isel`/`enc` 只做覆盖检查。
+要让网真决定字节，需要让 emit 消费 form 与模板（表驱动的指令选择与编码），这一步尚未做。
+`EXPECT` 把现状钉死：某网的决策种类一旦变化，闸就失败，逼着同步更新口径。
 
 ## 结构
 

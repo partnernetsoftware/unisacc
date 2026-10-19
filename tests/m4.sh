@@ -9,6 +9,7 @@ B="python3 tests/bound.py 55"
 
 $B python3 -m m4 acc
 $B python3 -m m4 check
+$B python3 -m m4 selftest
 
 # 可跑：m4 产出的模块在 Node 里实例化并求值，与 expect.json 的 fact=120 一致
 TMP="$(mktemp -d)"
