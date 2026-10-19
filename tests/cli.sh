@@ -235,6 +235,14 @@ printf '#include "local.h"\nint main(void){return k;}\n' > "$T/dirmark_c4e1/use.
 dirhit=no
 grep -a -q dirmark_c4e1 "$T/inc.e" "$T/inc.s" "$T/inc.o" "$T/inc.out" && dirhit=yes
 say "outputs omit the include directory" "no" "$dirhit"
+printf '#include <stdio.h>\nint main(void){return 0;}\n' > "$T/sys.c"
+(cd "$T" && bound 20 "$UA_RUN" -E sys.c -o sys.e >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S sys.c -o sys.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c sys.c -o sys.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" sys.c -o sys.out >/dev/null 2>&1)
+syshit=no
+grep -a -q -e /usr -e /lib -e stdio.h "$T/sys.e" "$T/sys.s" "$T/sys.o" "$T/sys.out" && syshit=yes
+say "system header outputs omit host paths" "no" "$syshit"
 printf '#include <no-such-hdr.h>\n' > "$T/miss.c"
 printf 'KEEP' > "$T/miss.e"
 miss_out=$(cd "$T" && bound 20 "$UA_RUN" -E miss.c -o miss.e 2>"$T/miss.err")
