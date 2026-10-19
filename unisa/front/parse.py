@@ -344,6 +344,13 @@ class Walker:
         self.named_agg = named
         return Type("struct", tag=tag)
 
+    def _void_object(self, ty):
+        """An object whose type is void, or an array of void. A function
+        returning void and a pointer to void are not void objects."""
+        while ty is not None and ty.kind == "arr":
+            ty = ty.to
+        return ty is not None and ty.kind == "void"
+
     def declarator(self, base, named=True):
         """The full C99 declarator grammar, built inside out.
 
@@ -708,6 +715,8 @@ class Walker:
         while True:
             ty, name = self.declarator(base)
             p = self.ask("after_name")                           # [W-3]
+            if p != "fn_sig" and self._void_object(ty):
+                raise CError("line %d: void object" % self.peek().line)
             if p == "fn_sig":
                 # Normally the parameter list is still ahead of us and `ty` is
                 # the return type.  But a function that RETURNS a function
@@ -1276,6 +1285,8 @@ class Walker:
         while True:
             ty, name = self.declarator(base)
             dims = self.vla_dims
+            if not self.at("(") and self._void_object(ty):
+                raise CError("line %d: void object" % self.peek().line)
             lkind = self.bind("local", self.name_tok)
             if static:                       # static storage, zero-initialised
                 lab = "g_%s_%d%s" % (name, self.i, self.unit_tag)
@@ -2324,6 +2335,8 @@ class Walker:
                 self.next()
                 base = self.abstract_type()
                 self.expect(")")
+                if self._void_object(base):
+                    raise CError("line %d: sizeof(void)" % self.peek().line)
                 n = base.size(self.sc.structs)
                 if base.kind == "struct" and n == 0:
                     raise CError("sizeof incomplete structure")

@@ -1381,9 +1381,14 @@ int unary(void) {
                 adv();
                 declspec();                          /* handles struct too */
                 sz = declsz;
-                while (eatstar()) sz = 8;
+                { int stars; stars = 0;
+                while (eatstar()) { sz = 8; stars = 1; }
+                /* C99 6.5.3.4: sizeof shall not be applied to void. A pointer
+                   to void has a size; void itself does not. */
+                if (stars == 0 && declvoid) err_tok(tp, "sizeof(void)");
                 if (cur() == tidx("[", 1)) {
                     adv(); sz = sz * cexpr(); need(tidx("]", 1), "]");
+                }
                 }
                 need(tidx(")", 1), ")");
                 if (declstruct >= 0 && sz == 0) err_tok(tp, "sizeof incomplete structure");
@@ -5350,6 +5355,8 @@ int local_decl_in(void) {
             need(tidx(";", 1), ";");
             return 0;
         }
+        /* void is incomplete: an object or an array of void is not an object */
+        if (declvoid && declptr == 0) { err_tok(t, "void object"); return 0; }
         /* 0.0.35 H1: `extern int x;` in a block names the file-scope object -- it was taken
            for a fresh automatic and read garbage.  Covered when that object is already
            declared at file scope and nothing nearer hides it; otherwise refused by name. */
@@ -6152,6 +6159,7 @@ int unit(void) {
                 if (function(t, w) == 2) { adv(); continue; }
                 break;
             }
+            if (declvoid && declptr == 0) { err_tok(t, "void object"); break; }
             n = 1;
             isarr = 0;
             /* `void (*tab[4])(void)` at file scope: an array of fpdim
