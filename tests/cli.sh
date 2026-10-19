@@ -330,6 +330,9 @@ say "two-digit initializer adds one assembly byte" "1" "$(( $(wc -c < "$T/runfor
 say "two-digit initializer adds one object byte" "1" "$(( $(wc -c < "$T/runforce17.o") - $(wc -c < "$T/runforce.o") ))"
 say "two-digit initializer link keeps its size" "same" "$( [ "$(wc -c < "$T/runforce17.bin")" = "$(wc -c < "$T/runforce.bin")" ] && echo same || echo differ)"
 say "two-digit initializer changes the link" "differ" "$(cmp -s "$T/runforce.bin" "$T/runforce17.bin" && echo same || echo differ)"
+seventeen_bin_rc=0
+"$T/runforce17.bin" >/dev/null 2>&1 || seventeen_bin_rc=$?
+say "two-digit initializer file runs" "17" "$seventeen_bin_rc"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
