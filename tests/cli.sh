@@ -170,6 +170,9 @@ say "-run -c leaves no file" "none" "$([ -e "$T/runc" ] && echo left || echo non
 say "-run -E leaves no file" "none" "$([ -e "$T/rune" ] && echo left || echo none)"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -b lnx/x86_64 -o runb >/dev/null 2>&1)
 say "-run -b leaves no file" "none" "$([ -e "$T/runb" ] && echo left || echo none)"
+printf 'KEEP' > "$T/runkeep"
+(cd "$T" && bound 20 "$UA_RUN" plain.c -run -o runkeep >/dev/null 2>&1)
+say "-run leaves an existing file" "KEEP" "$(cat "$T/runkeep" 2>/dev/null)"
 printf '#include <stdio.h>\nint main(int c,char**v){printf("%%d %%s\\n",c,v[1]);return 0;}\n' > "$T/argv.c"
 say "FILE.c args go to the program" "2 hi" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c hi) 2>&1)"
 say "-- passes dash arguments" "2 --flag" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c -- --flag) 2>&1)"
