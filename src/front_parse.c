@@ -143,6 +143,13 @@ int declspectdn;          /* declspec's typedef was an array of this many */
 int declspectdsz;         /* ...whose whole size is this */
 int declspecfp;           /* what declspec's typedef said about that */
 int declenum;             /* the specifier was an enum */
+/* A declaration with no declarator is a constraint violation unless it
+   introduces a tagged struct/union or an enumeration (C99 6.7p2). */
+int bare_decl_ok(void) {
+    if (declenum) return 1;
+    if (declstruct >= 0 && stname[declstruct * NAMEW] != 0) return 1;
+    return 0;
+}
 int enumneg;              /* some enumerator seen so far is negative */
 int ntd;
 int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
@@ -5294,7 +5301,10 @@ int local_decl_in(void) {
     lstat = declstatic; lreg = declreg;
     declspec_save(&spec);
     spec.element_width = w;
-    if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
+    if (cur() == tidx(";", 1)) {                     /* `struct X { ... };` */
+        if (bare_decl_ok() == 0) { err_tok(tp, "empty declaration"); return 0; }
+        adv(); return 0;
+    }
     while (1) {
         declspec_restore(&spec);
         w = spec.element_width;
@@ -6089,7 +6099,10 @@ int unit(void) {
         gflt0 = declflt; gbool = declbool;
         declspec_save(&spec);
         spec.element_width = w;
-        if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
+        if (cur() == tidx(";", 1)) {                     /* `struct X {...};` */
+            if (bare_decl_ok() == 0) { err_tok(tp, "empty declaration"); continue; }
+            adv(); continue;
+        }
         while (1) {
             declspec_restore(&spec);
             w = spec.element_width;

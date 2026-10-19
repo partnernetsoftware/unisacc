@@ -136,6 +136,8 @@ class Walker:
         # so it has to exist from the start.
         self.saw_static = False
         self.saw_extern = False
+        self.decl_enum = False
+        self.named_agg = False
         # One Walker walks EVERY translation unit, so that a call in one file
         # can reach a definition in another without a linker.  The price is
         # that file-scope `static` must stop meaning "the whole program":
@@ -239,6 +241,8 @@ class Walker:
         words = []
         self.saw_static = False
         self.saw_extern = False
+        self.decl_enum = False
+        self.named_agg = False
         while True:
             t = self.peek()
             if t.kind == "type":
@@ -289,7 +293,8 @@ class Walker:
     def struct_type(self):
         isu = self.at("union")
         self.next()                                   # struct | union
-        name = self.next().text if self.at("id") else "anon%d" % self.i
+        named = self.at("id")
+        name = self.next().text if named else "anon%d" % self.i
         tag = self.sc.tag_bind(name, self.at("{") or self.at(";"), self.i)
         if self.at("{"):
             self.next()
@@ -335,6 +340,8 @@ class Walker:
             self.expect("}")
             st.finish()
         self.sc.structs.setdefault(tag, Struct(tag, isu))
+        # member specifiers clear this; the tag decision belongs to this aggregate
+        self.named_agg = named
         return Type("struct", tag=tag)
 
     def declarator(self, base, named=True):
@@ -641,6 +648,7 @@ class Walker:
         enumerators go into scope; the tag is remembered so `enum E e;` can
         name the type later."""
         self.expect("enum")
+        self.decl_enum = True
         tag = None
         if self.at("id"):
             tag = self.next().text
@@ -668,6 +676,7 @@ class Walker:
         if tag:
             self.sc.enum_neg[tag] = neg
         self.enum_neg = neg
+        self.decl_enum = True
         return I32
 
     def do_enum(self):
@@ -689,7 +698,12 @@ class Walker:
             base = self.declspec()
         static = self.saw_static     # a nested declspec will clear it
         extern = self.saw_extern
+        enum_here, named_here = self.decl_enum, self.named_agg
         if self.eat(";"):
+            # C99 6.7p2: no declarator, so this must have introduced a tag
+            # or an enumeration. `int ;` does neither.
+            if not enum_here and not named_here:
+                raise CError("line %d: empty declaration" % self.peek().line)
             return
         while True:
             ty, name = self.declarator(base)
@@ -1254,7 +1268,10 @@ class Walker:
             return
         base = self.declspec()
         static = self.saw_static
+        enum_here, named_here = self.decl_enum, self.named_agg
         if self.eat(";"):
+            if not enum_here and not named_here:
+                raise CError("line %d: empty declaration" % self.peek().line)
             return
         while True:
             ty, name = self.declarator(base)
