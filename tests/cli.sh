@@ -323,6 +323,13 @@ seventeen_rc=0
 (cd "$T" && bound 20 "$UA_RUN" -run -include force_b22d/seventeen.h runforce.c -o runforce17.out >/dev/null 2>&1) || seventeen_rc=$?
 say "two-digit initializer runs" "17" "$seventeen_rc"
 say "two-digit initializer leaves no file" "none" "$([ -e "$T/runforce17.out" ] && echo left || echo none)"
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/seventeen.h runforce.c -o runforce17.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/seventeen.h runforce.c -o runforce17.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/seventeen.h runforce.c -o runforce17.bin >/dev/null 2>&1)
+say "two-digit initializer adds one assembly byte" "1" "$(( $(wc -c < "$T/runforce17.s") - $(wc -c < "$T/runforce.s") ))"
+say "two-digit initializer adds one object byte" "1" "$(( $(wc -c < "$T/runforce17.o") - $(wc -c < "$T/runforce.o") ))"
+say "two-digit initializer link keeps its size" "same" "$( [ "$(wc -c < "$T/runforce17.bin")" = "$(wc -c < "$T/runforce.bin")" ] && echo same || echo differ)"
+say "two-digit initializer changes the link" "differ" "$(cmp -s "$T/runforce.bin" "$T/runforce17.bin" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
