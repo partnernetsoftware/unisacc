@@ -29,6 +29,13 @@
 #define M_2_PI     0.636619772367581343076
 #define M_SQRT2    1.41421356237309504880
 #define M_SQRT1_2  0.707106781186547524401
+#define FP_NAN       0
+#define FP_INFINITE  1
+#define FP_ZERO      2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL    4
+#define FP_ILOGB0    (0 - 2147483647 - 1)
+#define FP_ILOGBNAN  (0 - 2147483647 - 1)
 
 #if !__UNISA_FTRIM_LIBC || __UN__m_hi
 static int _m_hi(double __u_x) { return *(1 + (int *)&__u_x); }
@@ -97,6 +104,18 @@ static int islessgreater(double __u_a, double __u_b) { if (isnan(__u_a) || isnan
 #if !__UNISA_FTRIM_LIBC || __UN_isunordered
 static int isunordered(double __u_a, double __u_b) { return isnan(__u_a) || isnan(__u_b); }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_fpclassify
+static int fpclassify(double __u_x) {
+    int __u_ix; unsigned int __u_lx;
+    __u_ix = _m_hi(__u_x) & 2147483647; __u_lx = _m_lo(__u_x);
+    if (__u_ix >= 2146435072) return ((__u_ix & 1048575) | __u_lx) != 0 ? FP_NAN : FP_INFINITE;
+    if ((__u_ix | __u_lx) == 0) return FP_ZERO;
+    return __u_ix < 1048576 ? FP_SUBNORMAL : FP_NORMAL;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_isnormal
+static int isnormal(double __u_x) { return fpclassify(__u_x) == FP_NORMAL; }
+#endif
 
 /* integral parts: exact.  Past 2^52 every double is already an integer. */
 #if !__UNISA_FTRIM_LIBC || __UN_trunc
@@ -136,6 +155,18 @@ static double round(double __u_x) {                  /* halfway away from zero *
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_lround
 static long lround(double __u_x) { return (long)round(__u_x); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_rint
+static double rint(double __u_x) {                   /* halfway to even (default rounding) */
+    double __u_t; double __u_d;
+    __u_t = trunc(__u_x);                            /* x itself for nan, inf, |x| >= 2^52 */
+    __u_d = fabs(__u_x - __u_t);                     /* exact: |x| < 2^52 */
+    if (__u_d > 0.5 || (__u_d == 0.5 && ((long)__u_t & 1) != 0)) __u_t = __u_t + copysign(1.0, __u_x);
+    return __u_t;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_lrint
+static long lrint(double __u_x) { return (long)rint(__u_x); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_floorf
 static float floorf(float __u_x) { return (float)floor((double)__u_x); }
@@ -181,6 +212,31 @@ static double ldexp(double __u_x, int __u_n) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_scalbn
 static double scalbn(double __u_x, int __u_n) { return ldexp(__u_x, __u_n); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_scalbln
+static double scalbln(double __u_x, long __u_n) {
+    if (__u_n > 100000) __u_n = 100000;              /* past any exponent either way */
+    if (__u_n < 0 - 100000) __u_n = 0 - 100000;
+    return ldexp(__u_x, (int)__u_n);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_ilogb
+static int ilogb(double __u_x) {                     /* unbiased exponent as an int; subnormals exact via frexp */
+    int __u_e;
+    if (__u_x != __u_x) return FP_ILOGBNAN;
+    if (isinf(__u_x)) return 2147483647;
+    if (__u_x == 0.0) return FP_ILOGB0;
+    frexp(__u_x, &__u_e);
+    return __u_e - 1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_logb
+static double logb(double __u_x) {
+    if (__u_x != __u_x) return __u_x + __u_x;
+    if (isinf(__u_x)) return fabs(__u_x);
+    if (__u_x == 0.0) return 0 - 1.0 / 0.0;          /* -HUGE_VAL, also for -0.0 */
+    return (double)ilogb(__u_x);
+}
 #endif
 /* float forms of the exact bit manipulations (route table: math stays in the bundled library) */
 #if !__UNISA_FTRIM_LIBC || __UN_ldexpf
@@ -916,5 +972,30 @@ static double fmin(double __u_a, double __u_b) { if (__u_a != __u_a) return __u_
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fdim
 static double fdim(double __u_a, double __u_b) { return __u_a > __u_b ? __u_a - __u_b : 0.0; }
+#endif
+/* nan: the tag is not interpreted */
+#if !__UNISA_FTRIM_LIBC || __UN_nan
+static double nan(const char *__u_tag) { return 0.0 / 0.0; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_nextafter
+static double nextafter(double __u_x, double __u_y) {            /* fdlibm s_nextafter.c: step the bit pattern */
+    int __u_hx; int __u_hy; unsigned int __u_lx; unsigned int __u_ly;
+    if (__u_x != __u_x || __u_y != __u_y) return __u_x + __u_y;
+    if (__u_x == __u_y) return __u_y;
+    __u_hx = _m_hi(__u_x); __u_lx = _m_lo(__u_x); __u_hy = _m_hi(__u_y); __u_ly = _m_lo(__u_y);
+    if (((__u_hx & 2147483647) | __u_lx) == 0) return _m_mk(__u_hy & (0 - 2147483647 - 1), 1);   /* +-smallest subnormal */
+    if (__u_hx >= 0 ? (__u_hx > __u_hy || (__u_hx == __u_hy && __u_lx > __u_ly))
+                    : (__u_hy >= 0 || __u_hx > __u_hy || (__u_hx == __u_hy && __u_lx > __u_ly))) {
+        if (__u_lx == 0) __u_hx = __u_hx - 1;                      /* toward zero in magnitude */
+        __u_lx = __u_lx - 1;
+    } else {
+        __u_lx = __u_lx + 1;                                       /* away from zero; overflows to inf */
+        if (__u_lx == 0) __u_hx = __u_hx + 1;
+    }
+    return _m_mk(__u_hx, __u_lx);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_nexttoward
+static double nexttoward(double __u_x, double __u_y) { return nextafter(__u_x, __u_y); }
 #endif
 #endif
