@@ -8,6 +8,7 @@
 #ifndef _UNISA_INTTYPES_H
 #define _UNISA_INTTYPES_H
 #include <stdint.h>
+#include <stdlib.h>   /* strtol and strtoul, which strtoimax and strtoumax wrap */
 
 #define PRId8   "d"
 #define PRId16  "d"
@@ -47,5 +48,12 @@ static long imaxabs(long __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v;
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_imaxdiv
 static imaxdiv_t imaxdiv(long __u_a, long __u_b) { imaxdiv_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
+#endif
+/* intmax_t is long here, so the C99 7.8.2 conversions are strtol/strtoul exactly. */
+#if !__UNISA_FTRIM_LIBC || __UN_strtoimax
+static long strtoimax(const char *__u_s, char **__u_end, int __u_base) { return strtol(__u_s, __u_end, __u_base); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_strtoumax
+static unsigned long strtoumax(const char *__u_s, char **__u_end, int __u_base) { return strtoul(__u_s, __u_end, __u_base); }
 #endif
 #endif
