@@ -45,4 +45,7 @@ typedef struct { long quot; long rem; } imaxdiv_t;
 #if !__UNISA_FTRIM_LIBC || __UN_imaxabs
 static long imaxabs(long __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v; }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_imaxdiv
+static imaxdiv_t imaxdiv(long __u_a, long __u_b) { imaxdiv_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
+#endif
 #endif

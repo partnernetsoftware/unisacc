@@ -592,6 +592,9 @@ static div_t div(int __u_a, int __u_b) { div_t __u_r; __u_r.quot = __u_a / __u_b
 #if !__UNISA_FTRIM_LIBC || __UN_ldiv
 static ldiv_t ldiv(long __u_a, long __u_b) { ldiv_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_lldiv
+static lldiv_t lldiv(long long __u_a, long long __u_b) { lldiv_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_swap
 static void _unisa_swap(char *__u_a, char *__u_b, long __u_n) {
