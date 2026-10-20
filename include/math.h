@@ -79,6 +79,24 @@ static int isfinite(double __u_x) { return (_m_hi(__u_x) & 2146435072) != 214643
 #if !__UNISA_FTRIM_LIBC || __UN_signbit
 static int signbit(double __u_x) { return _m_hi(__u_x) < 0; }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_isgreater
+static int isgreater(double __u_a, double __u_b) { if (isnan(__u_a) || isnan(__u_b)) return 0; return __u_a > __u_b; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_isgreaterequal
+static int isgreaterequal(double __u_a, double __u_b) { if (isnan(__u_a) || isnan(__u_b)) return 0; return __u_a >= __u_b; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_isless
+static int isless(double __u_a, double __u_b) { if (isnan(__u_a) || isnan(__u_b)) return 0; return __u_a < __u_b; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_islessequal
+static int islessequal(double __u_a, double __u_b) { if (isnan(__u_a) || isnan(__u_b)) return 0; return __u_a <= __u_b; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_islessgreater
+static int islessgreater(double __u_a, double __u_b) { if (isnan(__u_a) || isnan(__u_b)) return 0; return __u_a < __u_b || __u_a > __u_b; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_isunordered
+static int isunordered(double __u_a, double __u_b) { return isnan(__u_a) || isnan(__u_b); }
+#endif
 
 /* integral parts: exact.  Past 2^52 every double is already an integer. */
 #if !__UNISA_FTRIM_LIBC || __UN_trunc
