@@ -565,6 +565,14 @@ static int fseeko(FILE *__u_f, long __u_off, int __u_whence) { return fseek(__u_
 #if !__UNISA_FTRIM_LIBC || __UN_ftello
 static long ftello(FILE *__u_f) { return ftell(__u_f); }
 #endif
+/* fgetpos/fsetpos (C99 7.19.9.1, 7.19.9.3) over ftell/fseek: the fpos_t holds
+   the byte offset in its first field; nonzero on failure. */
+#if !__UNISA_FTRIM_LIBC || __UN_fgetpos
+static int fgetpos(FILE *__u_f, fpos_t *__u_p) { long __u_r; __u_r = ftell(__u_f); if (__u_r < 0) return -1; __u_p->__u_pos = __u_r; __u_p->__u_count = 0; __u_p->__u_wch = 0; return 0; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_fsetpos
+static int fsetpos(FILE *__u_f, const fpos_t *__u_p) { return fseek(__u_f, __u_p->__u_pos, SEEK_SET); }
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_flockfile
 static void flockfile(FILE *__u_f) { (void)__u_f; }
 #endif

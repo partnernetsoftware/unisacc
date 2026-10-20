@@ -18,7 +18,7 @@ ROOT=pathlib.Path(__file__).resolve().parents[1]
 C_SHA='c1be454cf86c7d4c01af985d437c21116e5f69b880bd763b370a1461ae426187'
 # 2026-10-16 layer-1 resample (2f685550): gen/parse2 keys moved after facts regeneration; old 708bce25978a757c / a3ad62a362c1c0c1 kept for history
 # 2026-10-16 prune-fix resample (ee03f79f): gen key moved; old gen 780232368a2b4d6b kept for history
-REFERENCE_KEYS={'gen': '0e82bb556552faa3', 'parse2': '397951e3aa8990b9'}
+REFERENCE_KEYS={'gen': '3f0e4986136087cf', 'parse2': '2f9545e2103250e2'}
 BINARY_SHA='96cf5ebbc66e5f2092cc5b68c4bf29695c8c7fdb0d110c15c9e2f12a23ec7fc7'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
