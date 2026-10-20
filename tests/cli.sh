@@ -379,6 +379,12 @@ say "negative initializer assembly grows by 31" "31" "$(( $(wc -c < "$T/runforce
 say "negative initializer object grows by 31" "31" "$(( $(wc -c < "$T/runforceneg.o") - $(wc -c < "$T/runforce.o") ))"
 say "negative initializer link keeps its size" "same" "$( [ "$(wc -c < "$T/runforceneg.link")" = "$(wc -c < "$T/runforce.bin")" ] && echo same || echo differ)"
 say "negative initializer changes the link" "differ" "$(cmp -s "$T/runforce.bin" "$T/runforceneg.link" && echo same || echo differ)"
+printf 'int main(void){return 0;}\n' > "$T/baremain.c"
+printf 'int x;\n' > "$T/force_b22d/unused.h"
+(cd "$T" && bound 20 "$UA_RUN" -c baremain.c -o baremain.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/unused.h baremain.c -o unuseddecl.o >/dev/null 2>&1)
+say "unused declaration grows the object by 11" "11" "$(( $(wc -c < "$T/unuseddecl.o") - $(wc -c < "$T/baremain.o") ))"
+say "unused declaration changes the object" "differ" "$(cmp -s "$T/baremain.o" "$T/unuseddecl.o" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
