@@ -355,6 +355,13 @@ say "negative initializer leaves no file" "none" "$([ -e "$T/runforceneg.out" ] 
 (cd "$T" && bound 20 "$UA_RUN" -include force_b22d/neg.h runforce.c -o runforceneg.bin >/dev/null 2>&1)
 "$T/runforceneg.bin" >/dev/null 2>&1 || neg_bin_rc=$?
 say "negative initializer file runs" "255" "$neg_bin_rc"
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/neg.h runforce.c -o runforceneg.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/neg.h runforce.c -o runforceneg.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/neg.h runforce.c -o runforceneg.link >/dev/null 2>&1)
+say "negative initializer assembly grows by 31" "31" "$(( $(wc -c < "$T/runforceneg.s") - $(wc -c < "$T/runforce.s") ))"
+say "negative initializer object grows by 31" "31" "$(( $(wc -c < "$T/runforceneg.o") - $(wc -c < "$T/runforce.o") ))"
+say "negative initializer link keeps its size" "same" "$( [ "$(wc -c < "$T/runforceneg.link")" = "$(wc -c < "$T/runforce.bin")" ] && echo same || echo differ)"
+say "negative initializer changes the link" "differ" "$(cmp -s "$T/runforce.bin" "$T/runforceneg.link" && echo same || echo differ)"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
