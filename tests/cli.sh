@@ -333,6 +333,18 @@ say "two-digit initializer changes the link" "differ" "$(cmp -s "$T/runforce.bin
 seventeen_bin_rc=0
 "$T/runforce17.bin" >/dev/null 2>&1 || seventeen_bin_rc=$?
 say "two-digit initializer file runs" "17" "$seventeen_bin_rc"
+printf 'int from_inc = 0;\n' > "$T/force_b22d/zero.h"
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/zero.h runforce.c -o runforce0.e >/dev/null 2>&1)
+say "zero initializer preprocess has one size" "same" "$( [ "$(wc -c < "$T/runforce0.e")" = "$(wc -c < "$T/runforce.e")" ] && echo same || echo differ)"
+say "zero initializer preprocess differs by one byte" "1" "$(cmp -l "$T/runforce0.e" "$T/runforce.e" | wc -l | tr -d ' ')"
+(cd "$T" && bound 20 "$UA_RUN" -run -include force_b22d/zero.h runforce.c -o runforce0.out >/dev/null 2>&1)
+zero_rc=$?
+say "zero initializer runs" "0" "$zero_rc"
+say "zero initializer leaves no file" "none" "$([ -e "$T/runforce0.out" ] && echo left || echo none)"
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/zero.h runforce.c -o runforce0.bin >/dev/null 2>&1)
+"$T/runforce0.bin" >/dev/null 2>&1
+zero_bin_rc=$?
+say "zero initializer file runs" "0" "$zero_bin_rc"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
