@@ -355,6 +355,18 @@ say "negative initializer leaves no file" "none" "$([ -e "$T/runforceneg.out" ] 
 (cd "$T" && bound 20 "$UA_RUN" -include force_b22d/neg.h runforce.c -o runforceneg.bin >/dev/null 2>&1)
 "$T/runforceneg.bin" >/dev/null 2>&1 || neg_bin_rc=$?
 say "negative initializer file runs" "255" "$neg_bin_rc"
+printf 'int from_inc=7;\n' > "$T/force_b22d/tight.h"
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/tight.h runforce.c -o runforcetight.e >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/tight.h runforce.c -o runforcetight.s >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/tight.h runforce.c -o runforcetight.o >/dev/null 2>&1)
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/tight.h runforce.c -o runforcetight.bin >/dev/null 2>&1)
+say "spacing changes preprocess" "differ" "$(cmp -s "$T/runforce.e" "$T/runforcetight.e" && echo same || echo differ)"
+say "spacing leaves assembly unchanged" "same" "$(cmp -s "$T/runforce.s" "$T/runforcetight.s" && echo same || echo differ)"
+say "spacing leaves the object unchanged" "same" "$(cmp -s "$T/runforce.o" "$T/runforcetight.o" && echo same || echo differ)"
+say "spacing leaves the link unchanged" "same" "$(cmp -s "$T/runforce.bin" "$T/runforcetight.bin" && echo same || echo differ)"
+"$T/runforcetight.bin" >/dev/null 2>&1 || tight_rc=$?
+tight_rc=${tight_rc:-0}
+say "tight initializer file runs" "7" "$tight_rc"
 (cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/neg.h runforce.c -o runforceneg.s >/dev/null 2>&1)
 (cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/neg.h runforce.c -o runforceneg.o >/dev/null 2>&1)
 (cd "$T" && bound 20 "$UA_RUN" -include force_b22d/neg.h runforce.c -o runforceneg.link >/dev/null 2>&1)
