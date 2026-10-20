@@ -236,6 +236,37 @@ static wchar_t *wcspbrk(const wchar_t *__u_s, const wchar_t *__u_accept) {
 }
 #endif
 
+/* wcstok (C99 7.24.4.5.7): the wide form of strtok, except that the standard
+ * gives it a third argument: the caller's own save pointer, so the place is
+ * kept in *ptr between calls, not in a static.  A null s continues from *ptr.
+ * Leading delimiters are skipped; the token is terminated with a null wide
+ * character; after the last token *ptr is set to NULL (as strtok's static
+ * and glibc's wcstok do) so the next call returns NULL. */
+#if !__UNISA_FTRIM_LIBC || __UN_wcstok
+static wchar_t *wcstok(wchar_t *__u_s, const wchar_t *__u_delim, wchar_t **__u_ptr) {
+    wchar_t *__u_start; long __u_k; int __u_isd;
+    if (__u_s == 0) __u_s = *__u_ptr;
+    if (__u_s == 0) return NULL;
+    /* skip leading delimiters */
+    while (*__u_s) {
+        __u_isd = 0; __u_k = 0;
+        while (__u_delim[__u_k]) { if (__u_delim[__u_k] == *__u_s) __u_isd = 1; __u_k = __u_k + 1; }
+        if (__u_isd == 0) break;
+        __u_s = __u_s + 1;
+    }
+    if (*__u_s == 0) { *__u_ptr = 0; return NULL; }
+    __u_start = __u_s;
+    while (*__u_s) {
+        __u_isd = 0; __u_k = 0;
+        while (__u_delim[__u_k]) { if (__u_delim[__u_k] == *__u_s) __u_isd = 1; __u_k = __u_k + 1; }
+        if (__u_isd) { *__u_s = 0; *__u_ptr = __u_s + 1; return __u_start; }
+        __u_s = __u_s + 1;
+    }
+    *__u_ptr = 0;
+    return __u_start;
+}
+#endif
+
 /* wcstol/wcstoul (C99 7.24.4.1.5, 7.24.4.1.6): <stdlib.h>'s strtol/strtoul
  * over wide characters, in the C locale.  White space is the six ASCII
  * characters of isspace(); the sign, the 0x prefix and the digits are the
