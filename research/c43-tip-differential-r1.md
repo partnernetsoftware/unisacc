@@ -46,3 +46,12 @@
 未验证：`type_enum` 与 `tb` 在该状态下的取值；typedef、union、`enum E;`；匿名结构体（文件作用域修复会接受 `struct {int a;};`，块作用域会继承该行为）；`tests/gatedeps.json` 与 `tests/seedmemory.py` 的哈希刷新；`exec/prune/prune-result.tsv` 与 `exec/modelsignature-result.tsv` 是否需要重生成。
 
 本窗口不实施：需要表改动、产品重建、门禁套件、gatedeps 刷新，以及与 `JOBS=1` 同样的 commitgate 声明问题。
+
+## 块作用域空声明修复：已验证，未落主（2026-10-20 13:50）
+
+- 改动（只在独立副本 `/home/box/c43/0043-block-empty/clone`，基于 135da816）：`exec/parse2/control-result.tsv` 中 `local0-common` 的 `$local_local0_599_S_b_1 @token3` 行，改为 `S.semitest`（`CMPI type_enum 0`）→ `S.semitb`（`CMPI tb SBB`，非 SBB 经 `local_reject0`）→ `S.empty`。
+- 构建：JOBS=1 分步链 11 步全部 rc0，产物 `2486914` 字节。
+- 探针（对照宿主 `cc -std=c99 -pedantic-errors`）：`int ;` 拒绝；`struct T{int a;};`、`enum E{A};`、`int x;`、`;` 接受，与宿主一致；`struct{int a;};` 仍接受、宿主拒绝（与文件作用域修复相同的既有缺口）。
+- 差集：修复产品与 tip 产品在 132 行修复刀输入上无差异，在 915 行语料上无差异。
+- 未做：`tests/gatedeps.json` 的 exec 戳与 `tests/seedmemory.py` 的 `REFERENCE_KEYS` 未刷新（`make gatedeps` 读 HEAD，需先提交表改动）。
+- 阻塞：提交表改动需经 commitgate；唯一声明 `exec/parse2/control-result.tsv` 的套件 `identity-include-consumer-negative` 被归为契约套件，commitgate 拒收产品闭包改动。落主需要先补一个非契约产品套件的声明（gatedeps 改动），这是一个需要单独裁定的决定。
