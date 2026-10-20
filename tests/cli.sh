@@ -392,6 +392,11 @@ printf 'int x = 2;\n' > "$T/force_b22d/two.h"
 say "initializer one and two are both 650" "650 650" "$(wc -c < "$T/initone.o" | tr -d ' ') $(wc -c < "$T/inittwo.o" | tr -d ' ')"
 got=$(python3 -c 'a=open("'"$T"'/initone.o","rb").read(); b=open("'"$T"'/inittwo.o","rb").read(); i=next(i for i,(x,y) in enumerate(zip(a,b)) if x!=y); print(i, f"{a[i]:02x}", f"{b[i]:02x}")')
 say "initializer digits differ at one object byte" "584 31 32" "$got"
+printf 'int x = -1;\n' > "$T/force_b22d/negone.h"
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/negone.h baremain.c -o initneg.o >/dev/null 2>&1)
+say "negative initializer grows the object by 31" "31" "$(( $(wc -c < "$T/initneg.o") - $(wc -c < "$T/initone.o") ))"
+negat=$(python3 -c 'a=open("'"$T"'/initneg.o","rb").read(); b=open("'"$T"'/initone.o","rb").read(); i=next(i for i,(x,y) in enumerate(zip(a,b)) if x!=y); print(i, f"{a[i]:02x}", f"{b[i]:02x}")')
+say "negative initializer first differs at 588" "588 69 2e" "$negat"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
