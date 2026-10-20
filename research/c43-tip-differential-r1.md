@@ -33,3 +33,16 @@
 - 只比较了返回码与输出哈希，没有比较目标文件以外的全部中间形式；
 - 模型表的其余行（`global3-common` 的新分支）没有对应的单独输入；
 - 未测其它目标平台。
+
+## 候选刀：块作用域空声明（未实施）
+
+位置（只读定位，见 `/home/box/c43/0043-diff-r1/block-empty-decl.md`）：
+- C 参考：`src/front_parse.c:5326-5329`（块作用域）与 `:6135-6137`（文件作用域）都在 `bare_decl_ok()` 为假时报 `empty declaration`；
+- 模型：`exec/parse2/control-result.tsv` 的 `local0-common` 段，第 1665 行把裸类型后的 `;` 直接送到 `S.empty`，没有检查；
+- 文件作用域的对应修复（b5cded8d）在 `global3-common` 段把 `FN.semi * NEXT` 拆成四行，检查 `type_enum` 与 `rb == SBB`，拒绝经 `global_reject6`。
+
+不能直接改 `S.empty`：第 227 行的空语句 `;` 也用它。需要的是第 1665 行改指向新的检查状态。
+
+未验证：`type_enum` 与 `tb` 在该状态下的取值；typedef、union、`enum E;`；匿名结构体（文件作用域修复会接受 `struct {int a;};`，块作用域会继承该行为）；`tests/gatedeps.json` 与 `tests/seedmemory.py` 的哈希刷新；`exec/prune/prune-result.tsv` 与 `exec/modelsignature-result.tsv` 是否需要重生成。
+
+本窗口不实施：需要表改动、产品重建、门禁套件、gatedeps 刷新，以及与 `JOBS=1` 同样的 commitgate 声明问题。
