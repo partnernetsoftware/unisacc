@@ -370,6 +370,8 @@ say "tight initializer file runs" "7" "$tight_rc"
 printf 'int from_inc = 7; /* c */\n' > "$T/force_b22d/comment.h"
 (cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/comment.h runforce.c -o runforcecomment.s >/dev/null 2>&1)
 say "block comment leaves assembly unchanged" "same" "$(cmp -s "$T/runforce.s" "$T/runforcecomment.s" && echo same || echo differ)"
+(cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/comment.h runforce.c -o runforcecomment.o >/dev/null 2>&1)
+say "block comment leaves the object unchanged" "same" "$(cmp -s "$T/runforce.o" "$T/runforcecomment.o" && echo same || echo differ)"
 (cd "$T" && bound 20 "$UA_RUN" -S -include force_b22d/neg.h runforce.c -o runforceneg.s >/dev/null 2>&1)
 (cd "$T" && bound 20 "$UA_RUN" -c -include force_b22d/neg.h runforce.c -o runforceneg.o >/dev/null 2>&1)
 (cd "$T" && bound 20 "$UA_RUN" -include force_b22d/neg.h runforce.c -o runforceneg.link >/dev/null 2>&1)
