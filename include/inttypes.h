@@ -9,6 +9,7 @@
 #define _UNISA_INTTYPES_H
 #include <stdint.h>
 #include <stdlib.h>   /* strtol and strtoul, which strtoimax and strtoumax wrap */
+#include <wchar.h>    /* wcstol and wcstoul, which wcstoimax and wcstoumax wrap */
 
 #define PRId8   "d"
 #define PRId16  "d"
@@ -55,5 +56,11 @@ static long strtoimax(const char *__u_s, char **__u_end, int __u_base) { return 
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtoumax
 static unsigned long strtoumax(const char *__u_s, char **__u_end, int __u_base) { return strtoul(__u_s, __u_end, __u_base); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcstoimax
+static long wcstoimax(const wchar_t *__u_s, wchar_t **__u_end, int __u_base) { return wcstol(__u_s, __u_end, __u_base); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcstoumax
+static unsigned long wcstoumax(const wchar_t *__u_s, wchar_t **__u_end, int __u_base) { return wcstoul(__u_s, __u_end, __u_base); }
 #endif
 #endif
