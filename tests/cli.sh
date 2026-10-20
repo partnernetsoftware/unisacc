@@ -345,6 +345,16 @@ say "zero initializer leaves no file" "none" "$([ -e "$T/runforce0.out" ] && ech
 "$T/runforce0.bin" >/dev/null 2>&1
 zero_bin_rc=$?
 say "zero initializer file runs" "0" "$zero_bin_rc"
+printf 'int from_inc = -1;\n' > "$T/force_b22d/neg.h"
+(cd "$T" && bound 20 "$UA_RUN" -E -include force_b22d/neg.h runforce.c -o runforceneg.e >/dev/null 2>&1)
+say "negative initializer adds one preprocess byte" "1" "$(( $(wc -c < "$T/runforceneg.e") - $(wc -c < "$T/runforce.e") ))"
+say "negative initializer names its sign" "1" "$(grep -o -F '-' "$T/runforceneg.e" | wc -l | tr -d ' ')"
+(cd "$T" && bound 20 "$UA_RUN" -run -include force_b22d/neg.h runforce.c -o runforceneg.out >/dev/null 2>&1) || neg_rc=$?
+say "negative initializer runs" "255" "$neg_rc"
+say "negative initializer leaves no file" "none" "$([ -e "$T/runforceneg.out" ] && echo left || echo none)"
+(cd "$T" && bound 20 "$UA_RUN" -include force_b22d/neg.h runforce.c -o runforceneg.bin >/dev/null 2>&1)
+"$T/runforceneg.bin" >/dev/null 2>&1 || neg_bin_rc=$?
+say "negative initializer file runs" "255" "$neg_bin_rc"
 printf 'KEEP' > "$T/forcemiss.e"
 forcemiss_out=$(cd "$T" && bound 20 "$UA_RUN" -E -include nope.h force.c -o forcemiss.e 2>"$T/forcemiss.err")
 say "missing forced include leaves an existing file" "KEEP" "$(cat "$T/forcemiss.e" 2>/dev/null)"
