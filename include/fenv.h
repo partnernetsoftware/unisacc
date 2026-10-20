@@ -30,6 +30,7 @@ typedef unsigned long fexcept_t;
 #define FE_TOWARDZERO 0xC00
 #endif
 #define FE_ALL_EXCEPT (FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT)
+#define FE_DFL_ENV ((const fenv_t *) -1)   /* the default environment, as glibc names it */
 int feclearexcept(int __u_e);
 int fegetexceptflag(fexcept_t *__u_f, int __u_e);
 int feraiseexcept(int __u_e);

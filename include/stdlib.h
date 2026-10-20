@@ -585,6 +585,7 @@ static long long llabs(long long __u_v) { if (__u_v < 0) return 0 - __u_v; retur
 #endif
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
+typedef struct { long long quot; long long rem; } lldiv_t;
 #if !__UNISA_FTRIM_LIBC || __UN_div
 static div_t div(int __u_a, int __u_b) { div_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
 #endif

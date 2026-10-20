@@ -21,6 +21,9 @@
 #endif
 
 typedef struct _UNISA_FILE FILE;
+/* C99 7.19.1p2: an object type recording every position in a file.  The host's
+   (glibc _G_fpos_t) is an off_t and an mbstate_t: sixteen bytes. */
+typedef struct { long __u_pos; int __u_count; unsigned int __u_wch; } fpos_t;
 /* A FILE* IS the descriptor cast to a pointer (fopen returns `(FILE *)(long)fd`),
    so the three standard streams used to be ((FILE *)0/1/2) -- which made
    `stdin == NULL` TRUE.  Programs test the result of fopen for NULL and then
