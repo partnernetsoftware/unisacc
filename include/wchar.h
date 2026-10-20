@@ -34,6 +34,208 @@ static long wcslen(const wchar_t *__u_s) {
 }
 #endif
 
+/* Wide memory (C99 7.24.4.6) and wide string (7.24.4.1-7.24.4.5) functions:
+ * <string.h>'s loops over wchar_t, no locale, no allocation.  The three
+ * comparisons compare elements as wchar_t (int, as the host's glibc does)
+ * and return -1, 0 or 1, the sign the host returns. */
+#if !__UNISA_FTRIM_LIBC || __UN_wmemcpy
+static wchar_t *wmemcpy(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
+    return __u_d;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wmemmove
+static wchar_t *wmemmove(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
+    long __u_i;
+    if (__u_d < __u_s) {
+        __u_i = 0;
+        while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
+        return __u_d;
+    }
+    __u_i = __u_n;
+    while (__u_i > 0) { __u_i = __u_i - 1; __u_d[__u_i] = __u_s[__u_i]; }
+    return __u_d;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wmemcmp
+static int wmemcmp(const wchar_t *__u_a, const wchar_t *__u_b, long __u_n) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_i < __u_n) {
+        if (__u_a[__u_i] < __u_b[__u_i]) return -1;
+        if (__u_a[__u_i] > __u_b[__u_i]) return 1;
+        __u_i = __u_i + 1;
+    }
+    return 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wmemchr
+static wchar_t *wmemchr(const wchar_t *__u_s, wchar_t __u_c, long __u_n) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_i < __u_n) {
+        if (__u_s[__u_i] == __u_c) return (wchar_t *)(__u_s + __u_i);
+        __u_i = __u_i + 1;
+    }
+    return NULL;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wmemset
+static wchar_t *wmemset(wchar_t *__u_s, wchar_t __u_c, long __u_n) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_i < __u_n) { __u_s[__u_i] = __u_c; __u_i = __u_i + 1; }
+    return __u_s;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcscpy
+static wchar_t *wcscpy(wchar_t *__u_d, const wchar_t *__u_s) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_s[__u_i]) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
+    __u_d[__u_i] = 0;
+    return __u_d;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsncpy
+static wchar_t *wcsncpy(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_i < __u_n && __u_s[__u_i]) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
+    while (__u_i < __u_n) { __u_d[__u_i] = 0; __u_i = __u_i + 1; }
+    return __u_d;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcscat
+static wchar_t *wcscat(wchar_t *__u_d, const wchar_t *__u_s) {
+    long __u_i; long __u_j;
+    __u_i = 0; while (__u_d[__u_i]) __u_i = __u_i + 1;
+    __u_j = 0;
+    while (__u_s[__u_j]) { __u_d[__u_i + __u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
+    __u_d[__u_i + __u_j] = 0;
+    return __u_d;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsncat
+static wchar_t *wcsncat(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
+    long __u_i; long __u_j;
+    __u_i = 0; while (__u_d[__u_i]) __u_i = __u_i + 1;
+    __u_j = 0;
+    while (__u_j < __u_n) { if (__u_s[__u_j] == 0) break; __u_d[__u_i + __u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
+    __u_d[__u_i + __u_j] = 0;
+    return __u_d;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcscmp
+static int wcscmp(const wchar_t *__u_a, const wchar_t *__u_b) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_a[__u_i] == __u_b[__u_i]) {
+        if (__u_a[__u_i] == 0) return 0;
+        __u_i = __u_i + 1;
+    }
+    if (__u_a[__u_i] < __u_b[__u_i]) return -1;
+    return 1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsncmp
+static int wcsncmp(const wchar_t *__u_a, const wchar_t *__u_b, long __u_n) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_i < __u_n) {
+        if (__u_a[__u_i] != __u_b[__u_i]) {
+            if (__u_a[__u_i] < __u_b[__u_i]) return -1;
+            return 1;
+        }
+        if (__u_a[__u_i] == 0) return 0;
+        __u_i = __u_i + 1;
+    }
+    return 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcschr
+static wchar_t *wcschr(const wchar_t *__u_s, wchar_t __u_c) {
+    long __u_i;
+    __u_i = 0;
+    while (__u_s[__u_i] != __u_c) {
+        if (__u_s[__u_i] == 0) return NULL;
+        __u_i = __u_i + 1;
+    }
+    return (wchar_t *)(__u_s + __u_i);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsrchr
+static wchar_t *wcsrchr(const wchar_t *__u_s, wchar_t __u_c) {
+    long __u_i; long __u_last;
+    __u_i = 0; __u_last = -1;
+    while (1) {
+        if (__u_s[__u_i] == __u_c) __u_last = __u_i;
+        if (__u_s[__u_i] == 0) break;
+        __u_i = __u_i + 1;
+    }
+    if (__u_last < 0) return NULL;
+    return (wchar_t *)(__u_s + __u_last);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsstr
+static wchar_t *wcsstr(const wchar_t *__u_h, const wchar_t *__u_n) {
+    long __u_i; long __u_j;
+    __u_i = 0;
+    while (1) {
+        __u_j = 0;
+        while (__u_n[__u_j]) { if (__u_h[__u_i + __u_j] != __u_n[__u_j]) break; __u_j = __u_j + 1; }
+        if (__u_n[__u_j] == 0) return (wchar_t *)(__u_h + __u_i);
+        if (__u_h[__u_i] == 0) return NULL;
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsspn
+static long wcsspn(const wchar_t *__u_s, const wchar_t *__u_accept) {
+    long __u_i; long __u_j;
+    __u_i = 0;
+    while (__u_s[__u_i]) {
+        __u_j = 0;
+        while (__u_accept[__u_j] && __u_accept[__u_j] != __u_s[__u_i]) __u_j = __u_j + 1;
+        if (__u_accept[__u_j] == 0) return __u_i;
+        __u_i = __u_i + 1;
+    }
+    return __u_i;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcscspn
+static long wcscspn(const wchar_t *__u_s, const wchar_t *__u_reject) {
+    long __u_i; long __u_j;
+    __u_i = 0;
+    while (__u_s[__u_i]) {
+        __u_j = 0;
+        while (__u_reject[__u_j]) {
+            if (__u_reject[__u_j] == __u_s[__u_i]) return __u_i;
+            __u_j = __u_j + 1;
+        }
+        __u_i = __u_i + 1;
+    }
+    return __u_i;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcspbrk
+static wchar_t *wcspbrk(const wchar_t *__u_s, const wchar_t *__u_accept) {
+    long __u_i; long __u_j;
+    __u_i = 0;
+    while (__u_s[__u_i]) {
+        __u_j = 0;
+        while (__u_accept[__u_j]) {
+            if (__u_s[__u_i] == __u_accept[__u_j]) return (wchar_t *)(__u_s + __u_i);
+            __u_j = __u_j + 1;
+        }
+        __u_i = __u_i + 1;
+    }
+    return NULL;
+}
+#endif
+
 /* wcstol/wcstoul (C99 7.24.4.1.5, 7.24.4.1.6): <stdlib.h>'s strtol/strtoul
  * over wide characters, in the C locale.  White space is the six ASCII
  * characters of isspace(); the sign, the 0x prefix and the digits are the
