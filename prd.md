@@ -247,6 +247,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | ② 本轮候选有效闸与收口收据 | **ABSENT** | 不用旧门绿、旧包或封存数量顶替 |
 | ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
 
+**根对重建受 H1 裁定阻塞（2026-10-21 18:5x AWST 实测）**：本机根对 provenance 已红（`product inputs changed`，根 `unisacc.com` 为 10-20 构建，闭包其后多次变更；seed 对与 `compiler.pkg` 缺失，裸根下 `middle-flow-ledger` 因此红，配 `MODEL_COM=out/model-com/unisacc-next.com` 即绿）。按 §193 在冻结工作树重建候选，`build_candidate.sh` 第一步即被 `h1source` 拒绝：`plans/v0.0.43.md` 无 H1 行也无 H1-INHERIT 声明。41/42 的 INHERIT 行（沿用 0.0.38，sha 仍相符）均注明政委授权，本会话不代写；**待政委/机房主任裁定 43 的 H1 承接**后，候选重建与 `install_root.sh` 一步可达。
+
 “约1/3”仅指上述三格已有第一格，不是模型覆盖率、时间完成率或发布授权。当前版本声明见[src/version.h](src/version.h)，Latest于2026-10-21通过GitHub releases/latest API只读核对。
 
 查看：[七流表](#seven-stream-contracts) · [十八网表](#eighteen-net-contracts) · [流×网关系及边级夹具](#flow-net-relation)。本节更新状态口径，不改三表原观测数据。
