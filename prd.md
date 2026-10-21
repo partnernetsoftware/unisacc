@@ -10,6 +10,17 @@
 - **交付物**：签名的 `unisacc.com` 与公证的 macOS dmg（公开资产只有这两个，主人 2026-09-30 裁定）；中间形式 `.tape`/`.tapebin`（[docs/tapebin-v1.md](docs/tapebin-v1.md)，内容寻址、C/Python/产品三方编码逐字节同）。
 - **公开入口仓**（主人 2026-10-05，拟注册商标 UNISA）：[partnernetsoftware/unisa](https://github.com/partnernetsoftware/unisa)，只收副本：unisacc、ujs 的最终发行包（`releases/`，定期从本仓 release 抄过去），产品介绍（`docs/`）与论文（`papers/`，不定时抄）；以后做 unisacc 的包管理入口和 agenterm 的“插件与应用”入口。开发不在那里。
 
+### 流/网合同三表
+
+7 流（字节管道，`image-stages.tsv`）与 18 网（ask 事实表，`gold.STAGES`）**同名不可互换**。合同表含「是否封存」列（`tests/seals` 有点名原件 ≠ 已冻）：
+
+- 入口与勿混：[docs/flow-net/INDEX.md](docs/flow-net/INDEX.md)
+- 7 流表：[docs/flow-net/seven-streams.md](docs/flow-net/seven-streams.md)
+- 18 网表：[docs/flow-net/eighteen-nets.md](docs/flow-net/eighteen-nets.md)
+- 流×网关系（✓/◐/·/⊘ + 边级夹具）：[docs/flow-net/flow-net-relation.md](docs/flow-net/flow-net-relation.md)
+
+观测基线 tip `70f61992`（2026-10-21 AWST）：流有封 3/7、网有封 1/18（仅 pp 叶）。
+
 ### 范式层：表、执行器、流推导与晚绑定接线
 
 unisacc 的设计应按可组合的范式组织，而不只按编译器特例记账：**表表达决策，共用执行器提供机制，显式流接口连接阶段，晚绑定合同隔离声明需求与宿主供给。** 各刀优先补强这四者之间可核验、可复用的边界；具体语法或平台修复仍须完成，但应说明它修复了哪类共同规则，避免复制分支替代抽象。
