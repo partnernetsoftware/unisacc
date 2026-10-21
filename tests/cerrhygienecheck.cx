@@ -1,0 +1,95 @@
+#!/usr/bin/env -S unisacc.com -run
+/* cerrhygienecheck.cx PRODUCT: output hygiene of the C source route when the
+   compile fails -- the tapedomaincheck discipline applied to the C front end.
+   The diag suites assert messages; nothing locked the files until now.
+   Control first: a good C source builds in every writing mode (file written,
+   stdout empty).  Then each negative, one failure per stage (preprocessor:
+   missing include; lexer: stray character; parser: broken expression;
+   semantics: unknown identifier), in each writing mode (-o, -c, -S,
+   --tapebin -c, each with -o F), must exit 1, write nothing to stdout, leave
+   the output path as it was (absent stays absent, an existing file stays byte
+   for byte), and name its reason on stderr.  Timeouts and signals are not
+   refusals. */
+#include <cx.h>
+static char D[4096], P[4096];
+static int checks, bad;
+struct neg { const char *id, *src, *word; };
+static const struct neg NEGS[] = {
+    {"pp-include", "#include \"nosuch.h\"\nint main(void){return 0;}\n", "no such file for #include"},
+    {"lex-char",   "int main(void){return 0;} @\n",                      "unexpected character"},
+    {"parse-expr", "int main(void){return (;}\n",                        "not the start of an expression"},
+    {"sema-ident", "int main(void){return x;}\n",                        "unknown identifier"},
+    {0, 0, 0}
+};
+struct mode { const char *id, *args; };
+static const struct mode MODES[] = {
+    {"o",  "-o"},
+    {"c",  "-c -o"},
+    {"S",  "-S -o"},
+    {"tb", "--tapebin -c -o"},
+    {0, 0}
+};
+#define SENTINEL "KEEP-THIS-FILE\n"
+static int note(const char *id, const char *label, int ok) {
+    printf("cerr %-12s %-12s %s\n", id, label, ok ? "pass" : "FAIL");
+    checks++; if (!ok) bad++; return !ok;
+}
+static int run1(const struct mode *m, int sentinel, char **out, size_t *on, char **err, size_t *en) {
+    char cmd[16384], outpath[8192], errpath[8192]; int rc;
+    snprintf(outpath, sizeof outpath, "%s/out.bin", D); unlink(outpath);
+    if (sentinel && cx_write(outpath, SENTINEL, strlen(SENTINEL))) return -99;
+    snprintf(errpath, sizeof errpath, "%s/err", D);
+    snprintf(cmd, sizeof cmd, "%s'%s' '%s/in.c' %s '%s' 2>'%s'",
+        strstr(P, ".com") ? "sh " : "", P, D, m->args, outpath, errpath);
+    rc = cx_run_timeout(cmd, 15, out, on);
+    *err = cx_read(errpath, en);
+    return rc;
+}
+int main(int argc, char **argv) {
+    char own[] = "/tmp/cerrXXXXXX", cwd[4096], path[8192];
+    const struct neg *g; const struct mode *m;
+    if (argc != 2) return 2;
+    if (!getcwd(cwd, sizeof cwd) || !mkdtemp(own)) return 2;
+    snprintf(D, sizeof D, "%s", own);
+    if (argv[1][0] == '/') snprintf(P, sizeof P, "%s", argv[1]);
+    else snprintf(P, sizeof P, "%s/%s", cwd, argv[1]);
+    if (strchr(P, 39) || strchr(D, 39)) return 2;
+    snprintf(path, sizeof path, "%s/in.c", D);
+    if (cx_write(path, "int main(void){return 0;}\n", 26)) return 2;
+    for (m = MODES; m->id; m++) {
+        char *out = 0, *err = 0, *b; size_t on = 0, en = 0, bn = 0; int rc;
+        rc = run1(m, 0, &out, &on, &err, &en);
+        snprintf(path, sizeof path, "%s/out.bin", D); b = cx_read(path, &bn);
+        note("control", m->id, rc == 0 && on == 0 && b && bn > 0);
+        free(out); free(err); free(b);
+    }
+    for (g = NEGS; g->id; g++) {
+        snprintf(path, sizeof path, "%s/in.c", D);
+        if (cx_write(path, g->src, strlen(g->src))) return 2;
+        for (m = MODES; m->id; m++) {
+            int sentinel;
+            for (sentinel = 0; sentinel <= 1; sentinel++) {
+                char *out = 0, *err = 0; size_t on = 0, en = 0; int rc, ok;
+                char label[32];
+                snprintf(label, sizeof label, "%s%s", m->id, sentinel ? "+keep" : "");
+                rc = run1(m, sentinel, &out, &on, &err, &en);
+                snprintf(path, sizeof path, "%s/out.bin", D);
+                ok = rc == 1 && on == 0 && err && strstr(err, g->word);
+                if (ok) {
+                    struct stat st;
+                    if (!sentinel) ok = stat(path, &st) != 0;
+                    else {
+                        size_t kn; char *k = cx_read(path, &kn);
+                        ok = k && kn == strlen(SENTINEL) && !memcmp(k, SENTINEL, kn);
+                        free(k);
+                    }
+                }
+                if (note(g->id, label, ok))
+                    fprintf(stderr, "rc=%d stdout(%zu) stderr=%s\n", rc, on, err ? err : "<missing>");
+                free(out); free(err);
+            }
+        }
+    }
+    printf("cerr checks %d bad %d\n", checks, bad);
+    return bad ? 1 : 0;
+}

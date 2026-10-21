@@ -420,6 +420,8 @@ static char *extra[] = {
     "lower", "com-bindings-neg", "meta",
     /* com-tapebin-neg: Tapebin载体拒绝域（产品自回环与origin载体均与文本路由逐字节同；magic/截断/digest/尾部/origin失配具名拒绝不写输出）; tests/gate.sh */
     "E3", "com-tapebin-neg", "meta",
+    /* com-cerr-hygiene: C路由编译失败的输出卫生（pp/lex/parse/sema负例×写盘模式：rc1、stdout空、输出路径不动、具名原因）; tests/gate.sh */
+    "chain", "com-cerr-hygiene", "E1,E2,E3,meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */
