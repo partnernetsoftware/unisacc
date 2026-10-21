@@ -422,6 +422,8 @@ static char *extra[] = {
     "E3", "com-tapebin-neg", "meta",
     /* com-cerr-hygiene: C路由编译失败的输出卫生（pp/lex/parse/sema负例×写盘模式：rc1、stdout空、输出路径不动、具名原因）; tests/gate.sh */
     "chain", "com-cerr-hygiene", "E1,E2,E3,meta",
+    /* com-input-contract: 驱动输入合同（tape路单源具名拒绝；C路多余输入与空输入现行口径登记；空tape镜像与参考逐字节同）; tests/gate.sh */
+    "meta", "com-input-contract", "-",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */

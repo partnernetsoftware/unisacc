@@ -1,0 +1,99 @@
+#!/usr/bin/env -S unisacc.com -run
+/* inputcontractcheck.cx PRODUCT: the driver's command-line input contract.
+   The first input picks the route; the tape/tapebin route takes exactly one
+   source and refuses more by name; on the C route an extra tape or carrier is
+   parsed as C and refused with the C front end's own diagnostic -- that naming
+   is REGISTERED here as today's behaviour (a later contract-level diagnostic
+   turns the assertion red for revisiting, never a silent widening).
+   The empty inputs: an empty .c refuses by name ('no main'); an empty .tape
+   is INSIDE the tape domain -- -S returns it empty, -b builds an image
+   byte-identical to the Python reference's -- while -run exits 2 with
+   'bad memory image bounds', an error, not a refusal; all three registered.
+   Every refusal: exit 1, empty stdout, no output file. */
+#include <cx.h>
+static char D[4096], P[4096];
+static int checks, bad;
+static char *slurp(const char *name, size_t *n) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
+}
+static int put(const char *name, const char *body) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);
+    return cx_write(path,body,strlen(body));
+}
+static int note(const char *name, int ok) {
+    printf("input %-18s %s\n",name,ok ? "pass" : "FAIL");
+    checks++;if(!ok)bad++;return !ok;
+}
+/* inputs: one or two space-separated file names under D */
+static int refuse(const char *name, const char *inputs, const char *word, int wantrc) {
+    char cmd[16384],in[8192],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
+    const char *sp=strchr(inputs,' ');
+    struct stat st;char outpath[8192];
+    snprintf(outpath,sizeof outpath,"%s/ref.out",D);unlink(outpath);
+    if(sp)snprintf(in,sizeof in,"'%s/%.*s' '%s/%s'",D,(int)(sp-inputs),inputs,D,sp+1);
+    else snprintf(in,sizeof in,"'%s/%s'",D,inputs);
+    snprintf(cmd,sizeof cmd,"%s'%s' %s -o '%s' 2>'%s/%s.err'",
+        strstr(P,".com") ? "sh " : "",P,in,outpath,D,name);
+    rc=cx_run_timeout(cmd,15,&out,&on);
+    { char e[8192];snprintf(e,sizeof e,"%s.err",name);err=slurp(e,&en); }
+    ok=rc==wantrc && on==0 && stat(outpath,&st)!=0 && err && strstr(err,word);
+    if(note(name,ok))fprintf(stderr,"rc=%d stdout(%zu) stderr=%s\n",rc,on,err?err:"<missing>");
+    free(out);free(err);return !ok;
+}
+int main(int argc,char **argv) {
+    char own[]="/tmp/inputXXXXXX",cwd[4096],cmd[16384],*a,*b;size_t an,bn;int rc;
+    if(argc!=2)return 2;
+    if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
+    snprintf(D,sizeof D,"%s",own);
+    if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
+    if(strchr(P,39)||strchr(D,39))return 2;
+    if(put("g.c","int main(void){return 0;}\n") ||
+       put("a.tape","_start:\n  ret\n") ||
+       put("b.tape","_start:\n  imm r0, 0\n  ret\n") ||
+       put("empty.c","") || put("empty.tape",""))return 2;
+    /* controls: each single-kind input builds */
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/a.tape' --tapebin -c -o '%s/a.tapebin' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    note("emit",cx_run_timeout(cmd,15,0,0)==0);
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/g.c' -o '%s/g.out' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    note("control-c",cx_run_timeout(cmd,15,0,0)==0);
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/a.tape' -b lnx/x86_64 -o '%s/a.out' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    note("control-tape",cx_run_timeout(cmd,15,0,0)==0);
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/a.tapebin' -b lnx/x86_64 -o '%s/ab.out' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    note("control-tapebin",cx_run_timeout(cmd,15,0,0)==0);
+    /* the tape route takes exactly one source, named at the driver */
+    refuse("tape+tape",   "a.tape b.tape",   "tape needs one source",1);
+    refuse("tape+c",      "a.tape g.c",      "tape needs one source",1);
+    refuse("tapebin+c",   "a.tapebin g.c",   "tape needs one source",1);
+    /* the C route parses extra inputs as C: today's registered naming */
+    refuse("c+tape",      "g.c a.tape",      "top-level construct",1);
+    refuse("c+tapebin",   "g.c a.tapebin",   "unexpected character",1);
+    /* empty inputs */
+    refuse("empty-c",     "empty.c",         "no main",1);
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/empty.tape' -S -o '%s/e.S' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    rc=cx_run_timeout(cmd,15,0,0);
+    { size_t n=0;char *s=slurp("e.S",&n);note("empty-tape-S",rc==0&&s&&n==0);free(s); }
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/empty.tape' -b lnx/x86_64 -o '%s/e.img' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    note("empty-tape-b",cx_run_timeout(cmd,15,0,0)==0);
+    snprintf(cmd,sizeof cmd,
+        "python3 -m unisa compile '%s/empty.tape' --from-tape -o '%s/e.pyimg' --target lnx/x86_64 --drive built >/dev/null 2>&1",D,D);
+    note("empty-tape-ref",cx_run_timeout(cmd,25,0,0)==0);
+    a=slurp("e.img",&an);b=slurp("e.pyimg",&bn);
+    note("empty-img-bytes",a&&b&&an==bn&&!memcmp(a,b,an));
+    free(a);free(b);
+    /* -run of the empty tape: an error (exit 2), not a refusal -- registered */
+    { char *err;size_t en;
+      snprintf(cmd,sizeof cmd,"%s'%s' '%s/empty.tape' -run >/dev/null 2>'%s/erun.err'",
+          strstr(P,".com") ? "sh " : "",P,D,D);
+      rc=cx_run_timeout(cmd,15,0,0);
+      err=slurp("erun.err",&en);
+      note("empty-tape-run",rc==2&&err&&strstr(err,"bad memory image bounds"));
+      free(err); }
+    printf("input checks %d bad %d\n",checks,bad);
+    return bad?1:0;
+}
