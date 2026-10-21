@@ -1,0 +1,99 @@
+#!/usr/bin/env -S unisacc.com -run
+/* tapebinnegcheck.cx PRODUCT: the Tapebin binary route's refusal domain,
+   target lnx/x86_64 (TP-7/TP-8 discipline on the binary carrier; the raw text
+   route is tapedomaincheck.cx, the positive six-target route is com-tapebin-*).
+   Controls first, or "everything is refused" would pass:
+   - the product's own --tapebin -c output builds back to an image byte-equal
+     to the text route (pure product round trip);
+   - a reference-encoded Tapebin carrying origin_target=lnx/x86_64 is accepted
+     on that target, image byte-equal to the text route.
+   Negatives, each one corruption of an accepted carrier: bad magic, truncation,
+   a flipped digest byte, trailing garbage, and the valid origin carrier built
+   for osx/arm64 (origin mismatch).  Each must exit 1, write nothing to stdout,
+   leave no output file, and name the refusal on stderr
+   ("invalid tapebin or origin target mismatch"); timeouts and signals are not
+   refusals. */
+#include <cx.h>
+static char D[4096], P[4096];
+static int checks, bad;
+static const char *TAPE = "_start:\n  imm r0, 0\n  ret\n";
+static char *slurp(const char *name, size_t *n) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
+}
+static int save(const char *name, const char *body, size_t n) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);
+    return cx_write(path,body,n);
+}
+static int note(const char *name, int ok) {
+    printf("tapebin %-18s %s\n",name,ok ? "pass" : "FAIL");
+    checks++;if(!ok)bad++;return !ok;
+}
+/* Build DIR/in for TARGET into DIR/name.img.  expect 0: accept, image written.
+   expect 1: rc1, empty stdout, no output file, named refusal. */
+static int build(const char *name, const char *in, const char *target, int expect) {
+    char cmd[16384],img[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
+    snprintf(img,sizeof img,"%s/%s.img",D,name);
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -b %s -o '%s' 2>'%s/%s.err'",
+        strstr(P,".com") ? "sh " : "",P,D,in,target,img,D,name);
+    rc=cx_run_timeout(cmd,15,&out,&on);
+    { char e[8192];snprintf(e,sizeof e,"%s.err",name);err=slurp(e,&en); }
+    if (expect==0) {
+        char *b;size_t bn=0;char nm[8192];snprintf(nm,sizeof nm,"%s.img",name);
+        b=slurp(nm,&bn);ok=rc==0 && on==0 && b && bn>0;free(b);
+    } else {
+        struct stat st;
+        ok=rc==1 && on==0 && stat(img,&st)!=0 &&
+           err && strstr(err,"invalid tapebin or origin target mismatch");
+    }
+    if(note(name,ok))fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
+    free(out);free(err);return !ok;
+}
+static int bytes_equal(const char *name, const char *x, const char *y) {
+    char ha[65],*a,*b;size_t an=0,bn=0;int ok;
+    a=slurp(x,&an);b=slurp(y,&bn);ok=a&&b&&an==bn&&!memcmp(a,b,an);
+    if(ok){cx_sha256_hex(a,an,ha);printf("tapebin %-18s pass (%zu B sha256 %.16s)\n",name,an,ha);checks++;}
+    else note(name,0);
+    free(a);free(b);return !ok;
+}
+int main(int argc,char **argv) {
+    char own[]="/tmp/tapebinXXXXXX",cwd[4096],cmd[16384],*b;size_t n;int rc;
+    if(argc!=2)return 2;
+    if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
+    snprintf(D,sizeof D,"%s",own);
+    if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
+    if(strchr(P,39)||strchr(D,39))return 2;
+    if(save("in.tape",TAPE,strlen(TAPE)))return 2;
+    /* text route image: the yardstick for both carriers */
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/in.tape' -b lnx/x86_64 -o '%s/text.img' 2>'%s/text.err'",
+        strstr(P,".com") ? "sh " : "",P,D,D,D);
+    if(note("text-route",cx_run_timeout(cmd,15,0,0)==0))return 1;
+    /* pure product round trip */
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/in.tape' --tapebin -c -o '%s/own.tapebin' 2>'%s/emit.err'",
+        strstr(P,".com") ? "sh " : "",P,D,D,D);
+    if(note("emit",cx_run_timeout(cmd,15,0,0)==0))return 1;
+    build("ctl-roundtrip","own.tapebin","lnx/x86_64",0);
+    bytes_equal("roundtrip-bytes","ctl-roundtrip.img","text.img");
+    /* reference-encoded carrier with an explicit origin */
+    snprintf(cmd,sizeof cmd,
+        "python3 -c \"from unisa.tapebin import encode,target_id;import sys;"
+        "t=open('%s/in.tape').read();sys.stdout.buffer.write(encode(t,target_id('lnx/x86_64')))\""
+        " > '%s/origin.tapebin' 2>'%s/enc.err'",D,D,D);
+    if(note("ref-encode",cx_run_timeout(cmd,25,0,0)==0))return 1;
+    build("ctl-origin","origin.tapebin","lnx/x86_64",0);
+    bytes_equal("origin-bytes","ctl-origin.img","text.img");
+    /* one corruption each of the accepted own.tapebin */
+    b=slurp("own.tapebin",&n);
+    if(!b||n<16)return 2;
+    { char *m=malloc(n);memcpy(m,b,n);m[0]='X';rc=save("bad-magic.tapebin",m,n);free(m);if(rc)return 2; }
+    if(save("bad-trunc.tapebin",b,n/2))return 2;
+    { char *m=malloc(n);memcpy(m,b,n);m[n-1]^=0xff;rc=save("bad-digest.tapebin",m,n);free(m);if(rc)return 2; }
+    { char *m=malloc(n+1);memcpy(m,b,n);m[n]='Z';rc=save("bad-tail.tapebin",m,n+1);free(m);if(rc)return 2; }
+    free(b);
+    build("neg-magic", "bad-magic.tapebin", "lnx/x86_64",1);
+    build("neg-trunc", "bad-trunc.tapebin", "lnx/x86_64",1);
+    build("neg-digest","bad-digest.tapebin","lnx/x86_64",1);
+    build("neg-tail",  "bad-tail.tapebin",  "lnx/x86_64",1);
+    build("neg-origin","origin.tapebin",    "osx/arm64", 1);
+    printf("tapebin checks %d bad %d\n",checks,bad);
+    return bad?1:0;
+}

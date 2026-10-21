@@ -418,6 +418,8 @@ static char *extra[] = {
     "lower", "com-extent-neg", "meta",
     /* com-bindings-neg: .librarycall拒绝归属（缺bindings归绑定层、坏寄存器/操作数归tape域；plain与lnx .hostcall控制件逐字节同）; tests/gate.sh */
     "lower", "com-bindings-neg", "meta",
+    /* com-tapebin-neg: Tapebin载体拒绝域（产品自回环与origin载体均与文本路由逐字节同；magic/截断/digest/尾部/origin失配具名拒绝不写输出）; tests/gate.sh */
+    "E3", "com-tapebin-neg", "meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */
