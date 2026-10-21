@@ -150,6 +150,44 @@ int main(int argc,char **argv) {
         refuse_mode(CORRUPT[i].name,CORRUPT[i].in,MODE[m]);
     }
     build("neg-origin","origin.tapebin","osx/arm64",1);
+    /* unit-2 linkage tapes ride the carrier too: the product emits one, the
+       reference codec produces the identical bytes (encoder parity), the
+       decoded text re-encodes to the same carrier (fixpoint), and a standalone
+       image build refuses the same way on both routes (a translation unit is
+       not a standalone image; the refusal owner must not move between routes). */
+    { static const char UNIT2[]=".unit 2\n.global foo\n.extern bar\n.gdef baz\n_start:\n  ret\nfoo:\n  ret\nbaz:\n  ret\n";
+      if(save("unit2.tape",UNIT2,strlen(UNIT2)))return 2;
+      snprintf(cmd,sizeof cmd,"%s'%s' '%s/unit2.tape' --tapebin -c -o '%s/unit2.tapebin' 2>'%s/u2.err'",
+          strstr(P,".com") ? "sh " : "",P,D,D,D);
+      note("unit2-emit",cx_run_timeout(cmd,15,0,0)==0);
+      snprintf(cmd,sizeof cmd,
+          "python3 -c \"from unisa.tapebin import encode;import sys;"
+          "sys.stdout.buffer.write(encode(open('%s/unit2.tape').read()))\" > '%s/unit2-py.tapebin' 2>/dev/null",D,D);
+      note("unit2-ref-encode",cx_run_timeout(cmd,25,0,0)==0);
+      bytes_equal("unit2-parity","unit2.tapebin","unit2-py.tapebin");
+      snprintf(cmd,sizeof cmd,"%s'%s' '%s/unit2.tapebin' -S -o '%s/unit2-dec.tape' 2>'%s/u2d.err'",
+          strstr(P,".com") ? "sh " : "",P,D,D,D);
+      note("unit2-decode",cx_run_timeout(cmd,15,0,0)==0);
+      snprintf(cmd,sizeof cmd,"%s'%s' '%s/unit2-dec.tape' --tapebin -c -o '%s/unit2-re.tapebin' 2>'%s/u2r.err'",
+          strstr(P,".com") ? "sh " : "",P,D,D,D);
+      note("unit2-re-encode",cx_run_timeout(cmd,15,0,0)==0);
+      bytes_equal("unit2-fixpoint","unit2-re.tapebin","unit2.tapebin");
+      { static const char *IN[]={"unit2.tape","unit2.tapebin",0};
+        static const char *NM[]={"unit2-img-text","unit2-img-bin",0};
+        int i;char *err;size_t en;struct stat st;char img[16384];
+        for(i=0;IN[i];i++){
+          char e[8192];int rc2,ok;
+          snprintf(img,sizeof img,"%s/%s.img",D,NM[i]);
+          snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -b lnx/x86_64 -o '%s' 2>'%s/%s.err'",
+              strstr(P,".com") ? "sh " : "",P,D,IN[i],img,D,NM[i]);
+          rc2=cx_run_timeout(cmd,15,0,0);
+          snprintf(e,sizeof e,"%s.err",NM[i]);err=slurp(e,&en);
+          ok=rc2==1 && stat(img,&st)!=0 && err && strstr(err,"an op outside the first encoder slice");
+          if(note(NM[i],ok))fprintf(stderr,"rc=%d stderr=%s\n",rc2,err?err:"<missing>");
+          free(err);
+        }
+      }
+    }
     printf("tapebin checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }
