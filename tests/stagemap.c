@@ -160,6 +160,8 @@ static char *extra[] = {
     "E2", "pp-leaf-capture-selftest", "meta",
     /* lex-e1-seal: 封存lex流（e1，pp.text录制输入）回放与构造依赖核验，含负例; tests/gate.sh:453 */
     "E1", "lex-e1-seal", "meta",
+    /* opt-e4-seal: 封存opt流（e4，-O0 tape录制输入）回放与构造依赖核验，含负例; tests/gate.sh:454 */
+    "E4", "opt-e4-seal", "meta",
     /* middle-flow-e3: --sealed-e3严格回放及拒绝; tests/gate.sh:363 */
     "E3", "middle-flow-e3", "meta",
     /* middle-flow-lower-accept: --sealed-lower接受投影回放; tests/gate.sh:364 */

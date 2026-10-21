@@ -451,6 +451,7 @@ job pp-leaf-seal tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.cx -- --c
 job pp-leaf-seal-negative tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.cx -- --negative tests/seals/exec-pp-literals .
 job pp-leaf-capture-selftest tests/bound 58 sh ./unisacc.com -run tests/ppleafcapture.cx -- --selftest
 job lex-e1-seal tests/bound 58 sh ./unisacc.com -run tests/lexseal.cx -- --gate tests/seals/exec-lex-e1 .   # c43: lex cell leaf seal (e1 on recorded pp.text; pp is an input): frozen bytes + replay of the sealed net, then the negatives; no pp path in its closure
+job opt-e4-seal tests/bound 58 sh ./unisacc.com -run tests/optseal.cx -- --gate tests/seals/exec-opt-e4 .   # c43: opt cell leaf seal (e4 = opt --o2 on the recorded -O0 tape; the front end is an input): frozen bytes + replay of the sealed net, then the negatives; no pp path or sealed header in its closure
 job middle-flow-e3 tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-e3 tests/seals/middleflow-step0
 job middle-flow-lower-accept tests/bound 58 sh ./unisacc.com -run tests/middleflowcheck.cx -- --sealed-lower tests/seals/middleflow-step0
 # S2 (0.0.43): middle-flow ledger assertion: the live resource ledger of the e3 and lower captures equals the sealed resources.tsv
