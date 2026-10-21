@@ -166,6 +166,8 @@ static char *extra[] = {
     "E6", "elf-seal", "meta",
     /* prune-seal: 封存prune流（gen.py prune，-O2 tape录制输入）回放与构造依赖核验，含负例; tests/gate.sh:456 */
     "E4", "prune-seal", "meta",
+    /* net-prec-seal: 封存单网prec（内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:457 */
+    "E3", "net-prec-seal", "meta",
     /* middle-flow-e3: --sealed-e3严格回放及拒绝; tests/gate.sh:363 */
     "E3", "middle-flow-e3", "meta",
     /* middle-flow-lower-accept: --sealed-lower接受投影回放; tests/gate.sh:364 */

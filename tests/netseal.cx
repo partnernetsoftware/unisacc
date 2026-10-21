@@ -1,0 +1,529 @@
+#!/usr/bin/env -S unisacc.com -run
+/* exec-net-<net> leaf seal (tests/seals/exec-net-NET): the per-net KERNEL cell -- one constructed net of the
+ * classic grid (kernel/weight.NET.inc) run by the integer kernel (kernel/unisa_core.c) over the net's whole gold
+ * domain (weights/gold/NET.tsv, the exhaustive reference), with the decisions frozen as bytes.  The cell is an
+ * include-list reorganisation of the kernel self-test (kernel/unisa_self.c): unisa_core.c is copied beside a
+ * one-net shim named unisa_model.inc (MODEL = the net's own literal at offset 0, the net's shape as STAGE_*), so the
+ * `#include "unisa_model.inc"` inside unisa_core.c resolves to the shim and kernel/unisa_model.inc -- the only file
+ * of the self-test that includes weight.pp.inc -- is never opened.  Nothing generated is changed: no kernel/ file,
+ * no weight bytes, no pp file.  Table-driven: the net's name and shape are the sealed folder's net.tsv, the shape is
+ * re-derived at every check from the gold table (fields, heads, mask width) and the weight literal (units, by the
+ * literal's own length), and must equal the frozen shape.  No generator, no oracle, no stamp or reuse grant.
+ * Mirrors tests/pruneseal.cx (role vocabulary, closure.expected.tsv, identity.tsv = core over sorted
+ * dependency+case rows, proof over verdict+stdout+stderr shas).
+ *
+ *   netseal.cx --check-core DATA ROOT    frozen bytes + replay (cases re-derived from the gold table, the kernel rebuilt)
+ *   netseal.cx --negative   DATA ROOT    omitted dependency, changed kernel/weight/gold, changed record: each must FAIL
+ *   netseal.cx --gate       DATA ROOT    --check-core then --negative in one process (one gate job)
+ *   netseal.cx --write-seal DATA ROOT    the same checks, then measurement.tsv and identity.tsv are written (reseal)
+ *   netseal.cx --produce    WORK ROOT NET    reseal only: the cell's chain in WORK (net.tsv, model.inc, cases/NET.*)
+ *   netseal.cx --capture    WORK ROOT DATA   reseal only: strace files + WORK records -> the sealed data
+ *
+ * The closure refuses every pp path and the shared model: kernel/unisa_model.inc, kernel/unisa_self.c,
+ * kernel/unisa_cases.inc, kernel/weight.pp.inc, kernel/dense.pp.inc, weights/gold/pp.tsv, weights/built.json,
+ * exec/pp/, exec/facts/pp-*, *autoinc*, src/front_pp.c, tests/seals/, and every header under include/. */
+#include <cx.h>
+#define LIMIT 256
+#define CASES 4
+#define ACCEPTS 1
+#define REFUSALS 0
+#define MAXF 4
+#define MAXH 16
+#define MAXV 512
+static const char *roles[] = {"kernel", "model", "reference", "harness", 0};
+static int writing;                 /* --write-seal */
+typedef struct { char *path, *role, *sha; unsigned long size; } Dep;
+typedef struct { char *b; size_t n, cap; } Text;
+typedef struct { char net[64]; int m, H, mw, nh; int ncls[MAXH]; int vn[MAXF]; } Shape;
+static Dep deps[LIMIT]; static int nd;
+static Shape shape;                 /* the sealed net's shape (net.tsv), read once per check */
+static char harness[4096];          /* the built one-net kernel, once per (data, root) check */
+static char harness_root[4096];
+/* the self-test main, appended to the copied kernel: one decision per case line "h k0 k1 k2 k3 want" */
+static const char *self_main =
+    "#include <stdio.h>\n#include \"unisa_core.c\"\n"
+    "int main(int argc, char **argv) {\n"
+    "    FILE *f; int h, k0, k1, k2, k3, want, got, n = 0, bad = 0, key[4];\n"
+    "    model_dims();\n"
+    "    if (argc != 2) return 2; f = fopen(argv[1], \"r\"); if (!f) return 2;\n"
+    "    while (fscanf(f, \"%d %d %d %d %d %d\", &h, &k0, &k1, &k2, &k3, &want) == 6) {\n"
+    "        key[0] = k0; key[1] = k1; key[2] = k2; key[3] = k3;\n"
+    "        got = infer(0, key, h);\n"
+    "        printf(\"%d\\t%d\\t%d\\t%d\\t%d\\t%d\\t%d\\n\", h, k0, k1, k2, k3, want, got);\n"
+    "        if (got != want) bad++; n++;\n"
+    "    }\n"
+    "    printf(\"%d decisions, %d wrong\\n\", n, bad);\n"
+    "    return bad != 0;\n"
+    "}\n";
+
+static void put(Text *t, const char *s, size_t n) {
+    if (t->n + n + 1 > t->cap) { t->cap = (t->n + n + 1) * 2 + 64; t->b = realloc(t->b, t->cap); if (!t->b) exit(2); }
+    memcpy(t->b + t->n, s, n); t->n += n; t->b[t->n] = 0;
+}
+static int bad(const char *s) { printf("netseal: FAIL %s\n", s); return 1; }
+static int bad2(const char *s, const char *what) { printf("netseal: FAIL %s: %s\n", s, what); return 1; }
+static int safe(const char *s) {
+    const char *p = s, *q;
+    if (!*s || *s == '/' || strchr(s, '\\')) return 0;
+    while (*p) { q = strchr(p, '/'); if (!q) q = p + strlen(p);
+        if (q == p || (q - p == 1 && *p == '.') || (q - p == 2 && p[0] == '.' && p[1] == '.')) return 0;
+        p = *q ? q + 1 : q; }
+    return 1;
+}
+static int hex64(const char *s) { int i; if (strlen(s) != 64) return 0; for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0; return 1; }
+static int decimal(const char *s, unsigned long *n) { unsigned long v = 0, d; int i; if (!*s) return 0; for (i = 0; s[i]; i++) { d = s[i] - '0'; if (d > 9 || v > (~0UL - d) / 10) return 0; v = v * 10 + d; } *n = v; return 1; }
+static int fields(char *p, char **f, int max) { int n = 1; f[0] = p; while (*p) { if (*p == '\t') { *p = 0; if (n == max) return -1; f[n++] = p + 1; } p++; } return n; }
+static char *load(const char *dir, const char *name, size_t *n) { char p[4096]; if (!safe(name) || snprintf(p, sizeof p, "%s/%s", dir, name) >= (int)sizeof p) return 0; return cx_read(p, n); }
+static int match(const char *dir, const char *name, const char *length, const char *sha, Text *out) {
+    size_t n; unsigned long want; char h[65], *b;
+    if (!safe(name) || !decimal(length, &want) || !hex64(sha)) return 0;
+    b = load(dir, name, &n); if (!b) return 0;
+    cx_sha256_hex(b, n, h); if (out) put(out, b, n); free(b);
+    return n == want && !strcmp(h, sha);
+}
+static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void identity(char **rows, int n, char hex[65]) {
+    Text t = {0}; int i; qsort(rows, n, sizeof(char *), cmpstr);
+    for (i = 0; i < n; i++) { put(&t, rows[i], strlen(rows[i])); put(&t, "\n", 1); }
+    cx_sha256_hex(t.b ? t.b : "", t.n, hex); free(t.b);
+}
+/* the pp cell, the shared model and the sealed headers are never part of a net cell's closure */
+static int forbidden(const char *rel) {
+    return !strncmp(rel, "exec/pp/", 8) || !strncmp(rel, "exec/facts/pp-", 14) || strstr(rel, "autoinc") != 0
+        || !strncmp(rel, "tests/seals/", 12) || !strcmp(rel, "src/front_pp.c") || !strncmp(rel, "include/", 8)
+        || !strcmp(rel, "kernel/unisa_model.inc") || !strcmp(rel, "kernel/unisa_self.c") || !strcmp(rel, "kernel/unisa_cases.inc")
+        || !strcmp(rel, "kernel/weight.pp.inc") || !strcmp(rel, "kernel/dense.pp.inc") || !strcmp(rel, "weights/gold/pp.tsv")
+        || !strcmp(rel, "weights/built.json");
+}
+static int putfile(const char *dir, const char *name, const void *text, size_t n) {
+    char p[4096]; if (!safe(name) || snprintf(p, sizeof p, "%s/%s", dir, name) >= (int)sizeof p) return bad("seal path");
+    return cx_write(p, text, n) ? bad("seal write") : 0;
+}
+static int expected(const char *data) {
+    char *b, *p, *end, *f[3]; size_t n; int seen[LIMIT] = {0}, i, count = 0;
+    b = load(data, "closure.expected.tsv", &n); if (!b) return bad("independent closure inventory missing");
+    p = b;
+    while (*p) { end = strchr(p, '\n'); if (!end) return bad("closure inventory truncated"); *end = 0;
+        if (fields(p, f, 3) != 2) return bad("closure inventory record");
+        for (i = 0; i < nd; i++) if (!strcmp(deps[i].path, f[1])) break;
+        if (i == nd || strcmp(deps[i].role, f[0]) || seen[i]++) return bad2("measured dependency omitted/relabeled", f[1]);
+        count++; p = end + 1; }
+    free(b); if (count != nd) return bad("dependency inventory differs"); return 0;
+}
+static void measurement(Text *t) {
+    char line[512];
+    snprintf(line, sizeof line, "schema\tnet-seal-v1\nleaf\texec-net-%s\nstage\t%s\ninput\tgold-cases\noutput\tdecisions\n", shape.net, shape.net);
+    put(t, line, strlen(line));
+    snprintf(line, sizeof line, "reference\tweights/gold/%s.tsv (exhaustive gold table; the cases are derived from it by the gate, every key, every head)\ncoverage\tnamed-leaf\n", shape.net);
+    put(t, line, strlen(line));
+    put(t, "scope\tmeasured\nreview\trequired\nexternal-contract\tnone-read\npp\tnot-read\n", strlen("scope\tmeasured\nreview\trequired\nexternal-contract\tnone-read\npp\tnot-read\n"));
+}
+static int metadata(const char *data) {
+    size_t n; char *b = load(data, "measurement.tsv", &n); Text want = {0}; int same;
+    measurement(&want);
+    if (writing) { free(b); same = putfile(data, "measurement.tsv", want.b, want.n); free(want.b); return same; }
+    same = b && n == want.n && !memcmp(b, want.b, n); free(b); free(want.b);
+    return same ? 0 : bad("unsupported/missing measurement identity");
+}
+/* net.tsv: the sealed shape, one "key\tvalue" per line; ncls and vn are space-separated lists */
+static int ints(const char *s, int *out, int max) { int n = 0; unsigned long v; char buf[2048], *p, *q; snprintf(buf, sizeof buf, "%s", s); p = buf;
+    while (*p) { q = strchr(p, ' '); if (q) *q = 0; if (!decimal(p, &v) || n == max || v > 65535) return -1; out[n++] = (int)v; if (!q) break; p = q + 1; }
+    return n; }
+static void shape_text(const Shape *s, Text *t) {
+    char line[2048]; int i, k;
+    snprintf(line, sizeof line, "net\t%s\nm\t%d\nH\t%d\nmw\t%d\nheads\t%d\nncls\t", s->net, s->m, s->H, s->mw, s->nh); put(t, line, strlen(line));
+    for (i = 0; i < s->nh; i++) { k = snprintf(line, sizeof line, "%s%d", i ? " " : "", s->ncls[i]); put(t, line, k); }
+    put(t, "\nvn\t", 4);
+    for (i = 0; i < s->m; i++) { k = snprintf(line, sizeof line, "%s%d", i ? " " : "", s->vn[i]); put(t, line, k); }
+    put(t, "\n", 1);
+}
+static int read_shape(const char *data) {
+    char *b, *p, *end, *f[3]; size_t n; unsigned long v; int seen = 0;
+    memset(&shape, 0, sizeof shape);
+    b = load(data, "net.tsv", &n); if (!b) return bad("net.tsv missing"); p = b;
+    while (*p) { end = strchr(p, '\n'); if (!end) return bad("net.tsv truncated"); *end = 0;
+        if (fields(p, f, 3) != 2) return bad("net.tsv record");
+        if (!strcmp(f[0], "net")) { int i; if (!*f[1] || strlen(f[1]) > 32) return bad("net name"); for (i = 0; f[1][i]; i++) if (!((f[1][i] >= 'a' && f[1][i] <= 'z') || (f[1][i] >= '0' && f[1][i] <= '9'))) return bad("net name"); strcpy(shape.net, f[1]); seen |= 1; }
+        else if (!strcmp(f[0], "m")) { if (!decimal(f[1], &v) || v < 1 || v > MAXF) return bad("net.tsv m"); shape.m = (int)v; seen |= 2; }
+        else if (!strcmp(f[0], "H")) { if (!decimal(f[1], &v) || v < 1 || v > 4096) return bad("net.tsv H"); shape.H = (int)v; seen |= 4; }
+        else if (!strcmp(f[0], "mw")) { if (!decimal(f[1], &v) || v < 1 || v > 8) return bad("net.tsv mw"); shape.mw = (int)v; seen |= 8; }
+        else if (!strcmp(f[0], "heads")) { if (!decimal(f[1], &v) || v < 1 || v > MAXH) return bad("net.tsv heads"); shape.nh = (int)v; seen |= 16; }
+        else if (!strcmp(f[0], "ncls")) { if ((v = ints(f[1], shape.ncls, MAXH)) < 1 || v > MAXH) return bad("net.tsv ncls"); if ((int)v != shape.nh) return bad("net.tsv ncls count"); seen |= 32; }
+        else if (!strcmp(f[0], "vn")) { if ((v = ints(f[1], shape.vn, MAXF)) < 1 || v > MAXF) return bad("net.tsv vn"); if ((int)v != shape.m) return bad("net.tsv vn count"); seen |= 64; }
+        else return bad2("net.tsv unknown key", f[0]);
+        p = end + 1; }
+    free(b);
+    if (seen != 127) return bad("net.tsv incomplete");
+    { Text t = {0}; int same; b = load(data, "net.tsv", &n); shape_text(&shape, &t); same = b && n == t.n && !memcmp(b, t.b, n); free(b); free(t.b);
+      if (!same) return bad("net.tsv is not in canonical form"); }
+    return 0;
+}
+/* the C string literal(s) of kernel/weight.NET.inc decoded to bytes (only \xHH escapes are emitted there) */
+static int decode_literal(const char *src, size_t n, Text *out) {
+    size_t i = 0; int inq = 0, x, k;
+    while (i < n) { char c = src[i];
+        if (!inq) { if (c == '"') inq = 1; else if (c == '/' && i + 1 < n && src[i + 1] == '*') { i += 2; while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++; i++; }
+            i++; continue; }
+        if (c == '"') { inq = 0; i++; continue; }
+        if (c != '\\' || i + 3 >= n || src[i + 1] != 'x') return 0;
+        x = 0; for (k = 2; k < 4; k++) { char d = src[i + k]; x <<= 4; if (d >= '0' && d <= '9') x |= d - '0'; else if (d >= 'a' && d <= 'f') x |= d - 'a' + 10; else return 0; }
+        c = (char)x; put(out, &c, 1); i += 4; }
+    return !inq;
+}
+/* the gold table ROOT/weights/gold/NET.tsv: the shape it implies (fields, heads, mask width) and the case lines */
+static char *vocab[MAXF][MAXV]; static char *classes[MAXH][MAXV];
+static int derive(const char *root, Shape *s, Text *cases, const char *netname) {
+    char path[4096], *b, *p, *end, *f[MAXV + 2]; size_t n; int nf, i, hi, k, nrows = 0, keyed = 0;
+    memset(s, 0, sizeof *s); strcpy(s->net, netname);
+    snprintf(path, sizeof path, "%s/weights/gold/%s.tsv", root, netname); b = cx_read(path, &n); if (!b) return bad2("gold table unreadable", path);
+    p = b;
+    while (*p) { end = strchr(p, '\n'); if (!end) return bad("gold table truncated"); *end = 0;
+        if (p[0] == '#' && p[1] == ' ') { p = end + 1; continue; }
+        nf = fields(p, f, MAXV + 2); if (nf < 0) return bad("gold table record too wide");
+        if (!strcmp(f[0], "#field")) { if (keyed || s->m == MAXF || nf < 3) return bad("gold table fields"); for (i = 2; i < nf; i++) vocab[s->m][i - 2] = f[i]; s->vn[s->m++] = nf - 2; }
+        else if (!strcmp(f[0], "#head")) { if (keyed || s->nh == MAXH || nf < 4) return bad("gold table heads"); for (i = 3; i < nf; i++) classes[s->nh][i - 3] = f[i]; s->ncls[s->nh++] = nf - 3; }
+        else if (!keyed) { if (nf != s->m + s->nh || !s->m || !s->nh) return bad("gold table schema row"); keyed = 1; }
+        else { int key[MAXF] = {0, 0, 0, 0}; char line[256];
+            if (nf != s->m + s->nh) return bad("gold table row width");
+            for (i = 0; i < s->m; i++) { for (k = 0; k < s->vn[i] && strcmp(vocab[i][k], f[i]); k++); if (k == s->vn[i]) return bad2("gold key outside the field vocabulary", f[i]); key[i] = k; }
+            for (hi = 0; hi < s->nh; hi++) { for (k = 0; k < s->ncls[hi] && strcmp(classes[hi][k], f[s->m + hi]); k++); if (k == s->ncls[hi]) return bad2("gold label outside the head classes", f[s->m + hi]);
+                snprintf(line, sizeof line, "%d %d %d %d %d %d\n", hi, key[0], key[1], key[2], key[3], k); put(cases, line, strlen(line)); nrows++; }
+        }
+        p = end + 1; }
+    free(b);
+    if (!keyed || !nrows) return bad("gold table has no keys");
+    s->mw = 1; for (i = 0; i < s->m; i++) if ((s->vn[i] + 63) / 64 > s->mw) s->mw = (s->vn[i] + 63) / 64;
+    return 0;
+}
+/* H from the literal alone: [H units][m fields][mw words of 8 bytes], u32 ne, 7 bytes per entry -- the one H whose
+   layout fills the literal exactly; two candidates would be an ambiguous literal, refused */
+static int units(const Text *lit, const Shape *s, int *H) {
+    int h, found = 0; size_t p; unsigned long ne; const unsigned char *b = (const unsigned char *)lit->b;
+    for (h = 1; h <= 4096; h++) { p = (size_t)h * s->m * s->mw * 8; if (p + 4 > lit->n) break;
+        ne = (unsigned long)b[p] | ((unsigned long)b[p + 1] << 8) | ((unsigned long)b[p + 2] << 16) | ((unsigned long)b[p + 3] << 24);
+        if (p + 4 + 7 * ne == lit->n) { if (found) return bad("ambiguous weight literal layout"); found = 1; *H = h; } }
+    return found ? 0 : bad("weight literal layout does not fit any unit count");
+}
+/* ARGV with stdout -> OUT, stderr -> ERR, bounded by SECS; exit code, 124 on timeout, -1 on error */
+static int runcase(char *const argv[], int secs, const char *out, const char *err) {
+    pid_t pid = fork(), w; int st = 0; long ticks = (long)secs * 100;
+    if (pid < 0) return -1;
+    if (pid == 0) { setpgid(0, 0); if (!freopen(out, "wb", stdout) || !freopen(err, "wb", stderr)) _exit(126); execv(argv[0], argv); _exit(127); }
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) return (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff;
+        if (w < 0) return -1;
+        if (ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); return 124; }
+        usleep(10000);
+    }
+}
+/* the cell's chain in DIR: copy ROOT/kernel/unisa_core.c and ROOT/kernel/weight.NET.inc beside the one-net shim
+   unisa_model.inc, append the self-test main, build with the host cc.  The shim is the include-list change: the
+   kernel's own `#include "unisa_model.inc"` resolves beside the copied kernel.  Returns the model literal in MODEL. */
+static int build_cell(const char *root, const char *dir, const Shape *s, Text *model) {
+    char path[4096], src[4096], shim[4096]; char *b; size_t n; int i, k; Text t = {0}; char *argv[8]; int rc;
+    snprintf(src, sizeof src, "%s/kernel/unisa_core.c", root); b = cx_read(src, &n); if (!b) return bad("kernel/unisa_core.c unreadable");
+    snprintf(path, sizeof path, "%s/unisa_core.c", dir); if (cx_write(path, b, n)) return bad("cell scratch"); free(b);
+    snprintf(src, sizeof src, "%s/kernel/weight.%s.inc", root, s->net); b = cx_read(src, &n); if (!b) return bad2("weight literal unreadable", src);
+    snprintf(path, sizeof path, "%s/weight.%s.inc", dir, s->net); if (cx_write(path, b, n)) return bad("cell scratch"); put(model, b, n); free(b);
+    k = snprintf(shim, sizeof shim,
+        "/* netseal one-net shim: replaces kernel/unisa_model.inc in the include list (net %s, offset 0) */\n"
+        "#ifndef UNISA_MODEL_INC\n#define UNISA_MODEL_INC\nchar *MODEL =\n#include \"weight.%s.inc\"\n;\n#define NSTAGE 1\n"
+        "int STAGE_M[1]; int STAGE_H[1]; int STAGE_OFF[1]; int STAGE_NCLS[16]; int STAGE_MW[1]; int STAGE_VN[4];\nint act[4096]; int z[512];\n"
+        "int model_dims(void) { STAGE_M[0] = %d; STAGE_H[0] = %d; STAGE_OFF[0] = 0; STAGE_MW[0] = %d;", s->net, s->net, s->m, s->H, s->mw);
+    put(&t, shim, k);
+    for (i = 0; i < s->nh; i++) { k = snprintf(shim, sizeof shim, " STAGE_NCLS[%d] = %d;", i, s->ncls[i]); put(&t, shim, k); }
+    for (i = 0; i < s->m; i++) { k = snprintf(shim, sizeof shim, " STAGE_VN[%d] = %d;", i, s->vn[i]); put(&t, shim, k); }
+    put(&t, " return 0; }\n#endif\n", strlen(" return 0; }\n#endif\n"));
+    snprintf(path, sizeof path, "%s/unisa_model.inc", dir); if (cx_write(path, t.b, t.n)) return bad("cell scratch"); free(t.b);
+    snprintf(path, sizeof path, "%s/self.c", dir); if (cx_write(path, self_main, strlen(self_main))) return bad("cell scratch");
+    snprintf(src, sizeof src, "%s/self", dir);
+    argv[0] = "cc"; argv[1] = "-O2"; argv[2] = "-w"; argv[3] = path; argv[4] = "-o"; argv[5] = src; argv[6] = 0;
+    rc = cx_runv_timeout(argv, 50, 0, 0);
+    if (rc) return bad("one-net kernel build (cc -O2 self.c)");
+    return 0;
+}
+static void drop_cell(const char *dir) {
+    const char *names[] = {"self", "self.c", "unisa_model.inc", "unisa_core.c", 0}; char p[4096]; int i;
+    for (i = 0; names[i]; i++) { snprintf(p, sizeof p, "%s/%s", dir, names[i]); unlink(p); }
+    snprintf(p, sizeof p, "%s/weight.%s.inc", dir, shape.net); unlink(p); rmdir(dir);
+}
+static void drop_harness(void) { if (harness[0]) { char *slash = strrchr(harness, '/'); if (slash) { *slash = 0; drop_cell(harness); } harness[0] = 0; } }
+/* run the one-net kernel on the frozen cases; stdout/stderr/rc must equal the frozen record */
+static int replay(const char *data, const char *input, unsigned long rc, Text *out, Text *err) {
+    char dir[] = "/tmp/netseal-case-XXXXXX", o[4096], e[4096], in[4096], cwd[2048]; char *argv[3]; int got, same; size_t n; char *b;
+    if (!getcwd(cwd, sizeof cwd) || !mkdtemp(dir)) return bad("replay scratch");
+    snprintf(o, sizeof o, "%s/out", dir); snprintf(e, sizeof e, "%s/err", dir);
+    snprintf(in, sizeof in, "%s%s%s/%s", data[0] == '/' ? "" : cwd, data[0] == '/' ? "" : "/", data, input);
+    argv[0] = harness; argv[1] = in; argv[2] = 0;
+    got = runcase(argv, 20, o, e);
+    b = cx_read(o, &n); same = b && n == out->n && !memcmp(b, out->b ? out->b : "", n); free(b);
+    b = cx_read(e, &n); same = same && b && n == err->n && !memcmp(b, err->b ? err->b : "", n); free(b);
+    unlink(o); unlink(e); rmdir(dir);
+    if (got != (int)rc) return bad2("replay rc differs from the frozen record", input);
+    if (!same) return bad2("replay output differs from the frozen record", input);
+    return 0;
+}
+static int check(const char *data, const char *root, const char *override) {
+    char *b, *p, *end, *f[24], *rows[LIMIT + CASES + 4], *modelsha = 0, *ids[CASES]; size_t n;
+    int i, k, nrows = 0, accepts = 0, refusals = 0, nids = 0, H; unsigned long rc; char core[65], proof[65], hex[65]; Text result = {0}, cases = {0}, model = {0}, lit = {0}; Shape derived;
+    if (read_shape(data) || metadata(data)) return 1;
+    nd = 0; b = load(data, override ? override : "dependencies.tsv", &n); if (!b) return bad("dependencies missing"); p = b;
+    while (*p) { end = strchr(p, '\n'); if (!end) return bad("dependency record truncated"); *end = 0;
+        if (fields(p, f, 5) != 4 || !safe(f[1]) || !decimal(f[2], &rc) || !hex64(f[3])) return bad("bad dependency record");
+        for (i = 0; roles[i] && strcmp(roles[i], f[0]); i++); if (!roles[i] || nd == LIMIT) return bad("unknown/capacity dependency role");
+        for (i = 0; i < nd; i++) if (!strcmp(f[1], deps[i].path)) return bad("duplicate dependency");
+        if (forbidden(f[1])) return bad2("forbidden pp/shared-model dependency in the net closure", f[1]);
+        deps[nd].path = strdup(f[1]); deps[nd].role = strdup(f[0]); deps[nd].sha = strdup(f[3]); deps[nd++].size = rc;
+        if (strcmp(f[0], "harness") != 0 && !match(root, f[1], f[2], f[3], 0)) return bad2("kernel/model/reference identity changed", f[1]);
+        p = end + 1; }
+    free(b);
+    if (nd == 0) return bad("empty closure: no measured dependency");
+    if (expected(data)) return 1;
+    /* the reference: the gold table re-derived into cases and a shape; the weight literal re-derived into a unit count */
+    if (derive(root, &derived, &cases, shape.net)) return 1;
+    { char path[4096]; snprintf(path, sizeof path, "%s/kernel/weight.%s.inc", root, shape.net); b = cx_read(path, &n); if (!b) return bad("weight literal unreadable"); put(&model, b, n); free(b); }
+    if (!decode_literal(model.b, model.n, &lit) || units(&lit, &derived, &H)) return bad("weight literal");
+    derived.H = H;
+    { Text t = {0}, u = {0}; int same; shape_text(&derived, &t); shape_text(&shape, &u); same = t.n == u.n && !memcmp(t.b, u.b, t.n); free(t.b); free(u.b);
+      if (!same) return bad("derived shape (gold table + weight literal) differs from the frozen net.tsv"); }
+    if (!harness[0] || strcmp(harness_root, root)) { char dir[] = "/tmp/netseal-cell-XXXXXX"; Text again = {0}; drop_harness();
+        if (!mkdtemp(dir)) return bad("cell scratch");
+        if (build_cell(root, dir, &derived, &again)) { drop_cell(dir); return 1; } free(again.b);
+        snprintf(harness, sizeof harness, "%s/self", dir); snprintf(harness_root, sizeof harness_root, "%s", root); }
+    cx_sha256_hex(model.b, model.n, hex);
+    b = load(data, "streams.tsv", &n); if (!b) return bad("streams missing"); p = b;
+    while (*p) { Text err = {0}, out = {0}, in = {0}; char tuple[512];
+        end = strchr(p, '\n'); if (!end) return bad("stream record truncated"); *end = 0;
+        if (fields(p, f, 24) != 18 || strcmp(f[0], "case") || !decimal(f[3], &rc)) return bad("bad stream record");
+        for (k = 4; k <= 13; k += 3) if (!match(data, f[k], f[k + 1], f[k + 2], k == 10 ? &err : (k == 7 ? &out : (k == 4 ? &in : 0)))) return bad2("input/model/output byte identity changed", f[k]);
+        if (strcmp(f[15], hex)) return bad2("sealed model differs from the checkout's weight literal", f[13]);
+        if (in.n != cases.n || memcmp(in.b ? in.b : "", cases.b ? cases.b : "", in.n)) return bad2("frozen cases differ from the gold table's derivation", f[4]);
+        for (i = 0; i < nids; i++) if (!strcmp(ids[i], f[1])) return bad("duplicate case identity");
+        if (nids == CASES) return bad("too many cases"); ids[nids++] = strdup(f[1]);
+        if (!modelsha) modelsha = strdup(f[15]); else if (strcmp(modelsha, f[15])) return bad("unexpected model count");
+        if (!strcmp(f[2], "accept")) {
+            if (rc || strcmp(f[16], "ref-rc=0") || strcmp(f[17], "ref-equal=1")) return bad2("accepted case is not equal to the reference", f[1]);
+            if (out.n < 12 || !strstr(out.b, " wrong\n") || !strstr(out.b, ", 0 wrong\n")) return bad2("frozen decisions are not all right", f[1]);
+            accepts++;
+        } else return bad("unknown verdict");
+        if (replay(data, f[4], rc, &out, &err)) return 1;
+        snprintf(tuple, sizeof tuple, "input=%s model=%s", f[6], f[15]); rows[nrows++] = strdup(tuple);
+        put(&result, f[2], strlen(f[2])); put(&result, f[9], 64); put(&result, f[12], 64);
+        free(err.b); free(out.b); free(in.b); p = end + 1; }
+    free(b); free(cases.b); free(model.b); free(lit.b);
+    if (accepts != ACCEPTS || refusals != REFUSALS || !modelsha || nrows != ACCEPTS + REFUSALS) return bad("measured accept/refuse coverage lost");
+    for (i = 0; i < nd; i++) { char tuple[4096]; snprintf(tuple, sizeof tuple, "dep=%s role=%s sha=%s", deps[i].path, deps[i].role, deps[i].sha); rows[nrows++] = strdup(tuple); }
+    { char tuple[256]; snprintf(tuple, sizeof tuple, "net %s input=gold-cases output=decisions", shape.net); rows[nrows++] = strdup(tuple); }
+    identity(rows, nrows, core); cx_sha256_hex(result.b ? result.b : "", result.n, proof); free(result.b);
+    for (i = 0; i < nrows; i++) free(rows[i]);
+    { char want[160]; snprintf(want, sizeof want, "core\t%s\nproof\t%s\n", core, proof);
+      if (writing) return putfile(data, "identity.tsv", want, strlen(want));
+      b = load(data, "identity.tsv", &n);
+      if (!b || n != strlen(want) || memcmp(b, want, n)) { free(b); return bad("frozen core/output identity differs"); } free(b); }
+    printf("netseal %s: %d dependencies (no pp path, no shared model); %d accepts, %d refusals, 1 model, %d replays equal, shape m=%d H=%d heads=%d; core-inputs %s; output-proof %s; review required/no reuse grant\n",
+           shape.net, nd, accepts, refusals, accepts + refusals, shape.m, shape.H, shape.nh, core, proof);
+    return 0;
+}
+/* scratch copies only; the shared checkout and the sealed folder are never written */
+static int linkall(const char *data, const char *dir, const char *skip) {
+    DIR *d = opendir(data); struct dirent *e; char src[4096], dst[4096], cwd[2048];
+    if (!d || !getcwd(cwd, sizeof cwd)) return 1;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || (skip && !strcmp(e->d_name, skip))) continue;
+        snprintf(src, sizeof src, "%s%s%s/%s", data[0] == '/' ? "" : cwd, data[0] == '/' ? "" : "/", data, e->d_name);
+        snprintf(dst, sizeof dst, "%s/%s", dir, e->d_name);
+        if (symlink(src, dst)) { closedir(d); return 1; }
+    }
+    closedir(d); return 0;
+}
+static void rmtree(const char *dir) {
+    DIR *d = opendir(dir); struct dirent *e; char p[4096]; struct stat st;
+    if (!d) return;
+    while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (!lstat(p, &st) && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p); }
+    closedir(d); rmdir(dir);
+}
+/* one byte appended to NAME inside DIR (a symlink is replaced by a changed copy); restore relinks the original */
+static int mutate(const char *dir, const char *name) {
+    char dst[4096], *original; size_t size; Text changed = {0}; int rc;
+    snprintf(dst, sizeof dst, "%s/%s", dir, name);
+    original = cx_read(dst, &size); if (!original) return bad2("mutation target absent", name);
+    unlink(dst); put(&changed, original, size); put(&changed, "\n", 1); rc = cx_write(dst, changed.b, changed.n); free(changed.b); free(original);
+    return rc ? bad("mutation write") : 0;
+}
+static int restore(const char *dir, const char *name, const char *srcdir) {
+    char dst[4096], src[4096], cwd[2048]; if (!getcwd(cwd, sizeof cwd)) return 1;
+    snprintf(dst, sizeof dst, "%s/%s", dir, name); unlink(dst);
+    snprintf(src, sizeof src, "%s%s%s/%s", srcdir[0] == '/' ? "" : cwd, srcdir[0] == '/' ? "" : "/", srcdir, name);
+    return symlink(src, dst) ? bad("restore link") : 0;
+}
+static int negative(const char *data, const char *root) {
+    char *b, *p, *end; size_t n; char path[4096], scratch[] = "/tmp/netseal-negative-XXXXXX", mirror[] = "/tmp/netseal-root-XXXXXX", src[4096], dst[4096], cwd[2048];
+    Text t = {0}; int omitted = 0, j, rc; const char *model = 0; char weight[256], gold[256], input[256], stdoutname[256];
+    /* 1. omission: the kernel row is dropped from a scratch dependency list */
+    b = load(data, "dependencies.tsv", &n); if (!b || !mkdtemp(scratch) || !getcwd(cwd, sizeof cwd)) return bad("negative setup");
+    p = b; while (*p) { end = strchr(p, '\n'); if (!end) return bad("negative record truncated");
+        if (!strncmp(p, "kernel\tkernel/unisa_core.c\t", 27) && !omitted) omitted = 1; else put(&t, p, end + 1 - p); p = end + 1; }
+    free(b); if (!omitted) return bad("no measured kernel row to omit");
+    snprintf(path, sizeof path, "%s/dependencies.tsv", scratch); cx_write(path, t.b, t.n); free(t.b);
+    if (linkall(data, scratch, "dependencies.tsv")) return bad("scratch seal links");
+    rc = check(scratch, root, 0); if (!rc) return bad("omitted kernel row escaped closure inventory");
+    if (restore(scratch, "dependencies.tsv", data)) return 1;
+    if (check(scratch, root, 0)) return bad("restored dependency baseline failed");
+    /* 2. changed kernel, changed weight literal, changed gold table in a private root of links (the checkout is never written) */
+    if (!mkdtemp(mirror)) return bad("private root setup");
+    for (j = 0; j < nd; j++) { char *slash;
+        snprintf(dst, sizeof dst, "%s/%s", mirror, deps[j].path);
+        for (slash = dst + strlen(mirror) + 1; *slash; slash++) if (*slash == '/') { *slash = 0; mkdir(dst, 0700); *slash = '/'; }
+        snprintf(src, sizeof src, "%s%s%s/%s", root[0] == '/' ? "" : cwd, root[0] == '/' ? "" : "/", root, deps[j].path);
+        if (symlink(src, dst)) return bad("private dependency link"); }
+    if (check(data, mirror, 0)) return bad("private root baseline failed");
+    snprintf(weight, sizeof weight, "kernel/weight.%s.inc", shape.net); snprintf(gold, sizeof gold, "weights/gold/%s.tsv", shape.net);
+    { const char *targets[3]; targets[0] = "kernel/unisa_core.c"; targets[1] = weight; targets[2] = gold;
+      for (j = 0; j < 3; j++) { if (mutate(mirror, targets[j])) return 1; drop_harness();
+          if (!check(data, mirror, 0)) return bad2("changed measured dependency escaped", targets[j]);
+          if (restore(mirror, targets[j], root)) return 1; } }
+    drop_harness();
+    if (check(data, mirror, 0)) return bad("restored private root failed");
+    /* 3. changed frozen cases, decisions and sealed model in the scratch seal (links replaced by changed copies) */
+    { DIR *d = opendir(data); struct dirent *e; if (!d) return bad("seal listing");
+      while ((e = readdir(d))) if (!strncmp(e->d_name, "model-", 6)) model = strdup(e->d_name); closedir(d);
+      if (!model) return bad("sealed model absent"); }
+    snprintf(input, sizeof input, "%s.input", shape.net); snprintf(stdoutname, sizeof stdoutname, "%s.stdout", shape.net);
+    { const char *targets[3]; targets[0] = input; targets[1] = stdoutname; targets[2] = model;
+      for (j = 0; j < 3; j++) { if (mutate(scratch, targets[j])) return 1;
+          if (!check(scratch, root, 0)) return bad2("changed frozen record escaped", targets[j]);
+          if (restore(scratch, targets[j], data)) return 1; } }
+    if (check(scratch, root, 0)) return bad("restored scratch seal failed");
+    rmtree(scratch); rmtree(mirror);
+    printf("netseal %s negative: PASS omitted kernel row, changed unisa_core.c / weight literal / gold table, changed cases / decisions / model rejected; shared inputs untouched\n", shape.net);
+    return 0;
+}
+/* --produce: the cell's own chain for a reseal, in WORK (run it under strace to measure the closure): WORK/net.tsv,
+   WORK/model.inc (the weight literal as read from ROOT), WORK/cases.tsv, WORK/cases/NET.{input,stdout,stderr,rc} */
+static int produce(const char *work, const char *root, const char *netname) {
+    Shape s; Text cases = {0}, model = {0}, lit = {0}, t = {0}; char path[4096], cell[4096], o[4096], e[4096], in[4096]; char *argv[3]; int H, rc, i;
+    for (i = 0; netname[i]; i++) if (!((netname[i] >= 'a' && netname[i] <= 'z') || (netname[i] >= '0' && netname[i] <= '9'))) return bad("net name");
+    if (!*netname || strlen(netname) > 32 || !strcmp(netname, "pp")) return bad("net name");
+    if (derive(root, &s, &cases, netname)) return 1;
+    snprintf(cell, sizeof cell, "%s/cell", work); mkdir(cell, 0755); snprintf(path, sizeof path, "%s/cases", work); mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/kernel/weight.%s.inc", root, netname); model.b = cx_read(path, &model.n); if (!model.b) return bad("weight literal unreadable");
+    if (!decode_literal(model.b, model.n, &lit) || units(&lit, &s, &H)) return bad("weight literal"); s.H = H;
+    memcpy(&shape, &s, sizeof shape);
+    if (build_cell(root, cell, &s, &t)) return 1; free(t.b);
+    snprintf(path, sizeof path, "%s/net.tsv", work); t.n = 0; shape_text(&s, &t); if (cx_write(path, t.b, t.n)) return bad("produce write"); free(t.b);
+    snprintf(path, sizeof path, "%s/model.inc", work); if (cx_write(path, model.b, model.n)) return bad("produce write");
+    snprintf(path, sizeof path, "%s/cases.tsv", work); t.b = 0; t.n = t.cap = 0; put(&t, netname, strlen(netname)); put(&t, "\n", 1); if (cx_write(path, t.b, t.n)) return bad("produce write"); free(t.b);
+    snprintf(in, sizeof in, "%s/cases/%s.input", work, netname); if (cx_write(in, cases.b, cases.n)) return bad("produce write");
+    snprintf(o, sizeof o, "%s/cases/%s.stdout", work, netname); snprintf(e, sizeof e, "%s/cases/%s.stderr", work, netname);
+    snprintf(path, sizeof path, "%s/self", cell); argv[0] = path; argv[1] = in; argv[2] = 0;
+    rc = runcase(argv, 20, o, e);
+    snprintf(path, sizeof path, "%s/cases/%s.rc", work, netname); { char line[32]; snprintf(line, sizeof line, "%d\n", rc); if (cx_write(path, line, strlen(line))) return bad("produce write"); }
+    snprintf(path, sizeof path, "%s/cases/%s.ref.rc", work, netname); if (cx_write(path, "0\n", 2)) return bad("produce write");
+    printf("netseal produce %s: m=%d H=%d mw=%d heads=%d, %lu case bytes, kernel rc %d\n", netname, s.m, s.H, s.mw, s.nh, (unsigned long)cases.n, rc);
+    return rc != 0;
+}
+/* --capture: WORK/trace/* (strace -ff -e trace=%file of the --produce chain, cwd ROOT) + WORK records -> DATA */
+static char *unquote(const char *p, const char **next) {
+    Text b = {0}; int x, i;
+    if (*p != '"') return 0; p++;
+    while (*p && *p != '"') { unsigned char c = *p++;
+        if (c == '\\') { c = *p++;
+            if (c >= '0' && c <= '7') { x = c - '0'; for (i = 0; i < 2 && *p >= '0' && *p <= '7'; i++) x = x * 8 + (*p++ - '0'); c = x; }
+            else if (c == 'n') c = '\n'; else if (c == 't') c = '\t'; else if (c == 'r') c = '\r'; }
+        put(&b, (char *)&c, 1); }
+    if (*p != '"') { free(b.b); return 0; }
+    if (next) *next = p + 1; return b.b ? b.b : strdup("");
+}
+static void normalize(char *p) {   /* collapse "//", "/./" and "/x/../" in an absolute path */
+    char *parts[512]; int n = 0, i; char *s = p + 1, *q; Text t = {0};
+    if (*p != '/') return;
+    while (*s) { char *next; q = strchr(s, '/'); if (!q) q = s + strlen(s); next = *q ? q + 1 : q;
+        if (q == s || (q - s == 1 && *s == '.')) ; else if (q - s == 2 && s[0] == '.' && s[1] == '.') { if (n) n--; } else { parts[n] = s; parts[n][q - s] = 0; n++; }
+        s = next; if (n == 512) return; }
+    for (i = 0; i < n; i++) { put(&t, "/", 1); put(&t, parts[i], strlen(parts[i])); }
+    strcpy(p, t.n ? t.b : "/"); free(t.b);
+}
+static const char *role_of(const char *rel) {
+    if (!strncmp(rel, "kernel/weight.", 14)) return "model";
+    if (!strncmp(rel, "kernel/", 7)) return "kernel";
+    if (!strncmp(rel, "weights/gold/", 13)) return "reference";
+    return "harness";
+}
+static int runtime_headers;         /* include/*.h the .cx runner read for the checker itself (counted, never a dependency) */
+static int cmpdep(const void *a, const void *b) { return strcmp(((const Dep *)a)->path, ((const Dep *)b)->path); }
+static void dependency(const char *root, const char *path) {
+    char abs[4096]; const char *rel; struct stat st; int i; size_t rn = strlen(root);
+    if (path[0] == '/') snprintf(abs, sizeof abs, "%s", path); else snprintf(abs, sizeof abs, "%s/%s", root, path);
+    normalize(abs);
+    if (strncmp(abs, root, rn) || abs[rn] != '/') return;
+    rel = abs + rn + 1; if (!*rel || strstr(rel, "__pycache__") || !strncmp(rel, ".git/", 5)) return;
+    if (lstat(abs, &st) || !S_ISREG(st.st_mode)) return;
+    /* the gate's checker runtime (this file on unisacc.com with its include/cx.h) is the same for every sealed cell
+       and runs the chain; it is not the cell's chain, and no other seal lists its runner either */
+    if (!strcmp(rel, "unisacc.com") || !strcmp(rel, "tests/netseal.cx") || !strncmp(rel, "include/", 8)) { if (!strncmp(rel, "include/", 8)) runtime_headers++; return; }
+    for (i = 0; i < nd; i++) if (!strcmp(deps[i].path, rel)) return;
+    if (nd == LIMIT) exit(2);
+    deps[nd].path = strdup(rel); deps[nd].role = (char *)role_of(rel); nd++;
+}
+static int capture(const char *work, const char *rootarg, const char *data) {
+    char root[4096], path[4096], *b, *p, *end, *names[CASES]; size_t n; int count = 0, i; DIR *d; struct dirent *e; FILE *out;
+    char netsha[65], modelname[128]; char *net; size_t netn; int accepts = 0, refusals = 0;
+    if (!realpath(rootarg, root)) return bad("capture root");
+    mkdir(data, 0755);
+    snprintf(path, sizeof path, "%s/net.tsv", work); b = cx_read(path, &n); if (!b) return bad("capture: net.tsv missing"); if (putfile(data, "net.tsv", b, n)) return 1; free(b);
+    if (read_shape(data)) return 1;
+    /* the sealed network: the weight literal as read from the checkout */
+    snprintf(path, sizeof path, "%s/model.inc", work); net = cx_read(path, &netn); if (!net) return bad("capture: model.inc missing");
+    cx_sha256_hex(net, netn, netsha); snprintf(modelname, sizeof modelname, "model-%s.inc", netsha);
+    if (putfile(data, modelname, net, netn)) return 1;
+    snprintf(path, sizeof path, "%s/cases.tsv", work); b = cx_read(path, &n); if (!b) return bad("capture: cases.tsv missing");
+    p = b; while (*p) { end = strchr(p, '\n'); if (!end) break; *end = 0; if (*p && count < CASES) names[count++] = strdup(p); p = end + 1; } free(b);
+    snprintf(path, sizeof path, "%s/streams.tsv", data); out = fopen(path, "wb"); if (!out) return bad("capture: streams");
+    for (i = 0; i < count; i++) {
+        const char *ext[] = {"input", "stdout", "stderr"}; char sha[3][65]; unsigned long len[3]; int k; unsigned long rc, refrc; int refeq = 0;
+        for (k = 0; k < 3; k++) { char name[256]; snprintf(path, sizeof path, "%s/cases/%s.%s", work, names[i], ext[k]); b = cx_read(path, &n); if (!b) return bad2("capture: case record missing", path);
+            cx_sha256_hex(b, n, sha[k]); len[k] = n; snprintf(name, sizeof name, "%s.%s", names[i], ext[k]); if (putfile(data, name, b, n)) return 1;
+            if (k == 1) refeq = strstr(b, ", 0 wrong\n") != 0;   /* the reference is the gold table the cases carry: all right */
+            free(b); }
+        snprintf(path, sizeof path, "%s/cases/%s.rc", work, names[i]); b = cx_read(path, &n); if (!b || !decimal(strtok(b, "\n"), &rc)) return bad("capture: rc record"); free(b);
+        snprintf(path, sizeof path, "%s/cases/%s.ref.rc", work, names[i]); b = cx_read(path, &n); if (!b || !decimal(strtok(b, "\n"), &refrc)) return bad("capture: ref rc record"); free(b);
+        if (rc) refusals++; else accepts++;
+        fprintf(out, "case\t%s\t%s\t%lu\t%s.input\t%lu\t%s\t%s.stdout\t%lu\t%s\t%s.stderr\t%lu\t%s\t%s\t%lu\t%s\tref-rc=%lu\tref-equal=%d\n",
+                names[i], rc ? "refuse" : "accept", rc, names[i], len[0], sha[0], names[i], len[1], sha[1], names[i], len[2], sha[2], modelname, (unsigned long)netn, netsha, refrc, refrc == 0 && refeq);
+    }
+    fclose(out); free(net);
+    /* the read-set: every repository file opened/executed/stat'ed by a traced process */
+    nd = 0; snprintf(path, sizeof path, "%s/trace", work); d = opendir(path); if (!d) return bad("capture: trace dir");
+    while ((e = readdir(d))) { if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof path, "%s/trace/%s", work, e->d_name); b = cx_read(path, &n); if (!b) continue; p = b;
+        while (*p) { char *q; end = strchr(p, '\n'); if (!end) end = p + strlen(p); *end = 0;
+            if (!strstr(p, "ENOENT") && !strstr(p, "O_DIRECTORY") && !(!strncmp(p, "openat(", 7) && (strstr(p, "O_WRONLY") || strstr(p, "O_RDWR")))
+                && (!strncmp(p, "openat(", 7) || !strncmp(p, "open(", 5) || !strncmp(p, "execve(", 7) || !strncmp(p, "stat(", 5) || !strncmp(p, "newfstatat(", 11))
+                && (q = strchr(p, '"')) != 0) { char *v = unquote(q, 0); if (v) { dependency(root, v); free(v); } }
+            if (end == b + n) break; p = end + 1; }
+        free(b); }
+    closedir(d); qsort(deps, nd, sizeof(Dep), cmpdep);
+    for (i = 0; i < nd; i++) if (forbidden(deps[i].path)) return bad2("capture: the measured closure reads a pp path or the shared model", deps[i].path);
+    { FILE *dep, *exp; char hex[65];
+      snprintf(path, sizeof path, "%s/dependencies.tsv", data); dep = fopen(path, "wb"); snprintf(path, sizeof path, "%s/closure.expected.tsv", data); exp = fopen(path, "wb");
+      if (!dep || !exp) return bad("capture: dependency output");
+      for (i = 0; i < nd; i++) { snprintf(path, sizeof path, "%s/%s", root, deps[i].path); b = cx_read(path, &n); if (!b) return bad2("capture: dependency unreadable", deps[i].path);
+          cx_sha256_hex(b, n, hex); free(b); fprintf(dep, "%s\t%s\t%lu\t%s\n", deps[i].role, deps[i].path, (unsigned long)n, hex); fprintf(exp, "%s\t%s\n", deps[i].role, deps[i].path); }
+      fclose(dep); fclose(exp); }
+    printf("netseal capture %s: %d dependencies (no pp path, no shared model; %d checker-runtime headers under include/ dropped), %d cases (%d accept, %d refuse), model %s\n", shape.net, nd, runtime_headers, count, accepts, refusals, netsha);
+    return 0;
+}
+int main(int argc, char **argv) {
+    int rc;
+    if (argc == 4 && !strcmp(argv[1], "--check-core")) { rc = check(argv[2], argv[3], 0); drop_harness(); return rc; }
+    if (argc == 4 && !strcmp(argv[1], "--write-seal")) { writing = 1; rc = check(argv[2], argv[3], 0); drop_harness(); return rc; }
+    if (argc == 4 && !strcmp(argv[1], "--negative")) { rc = negative(argv[2], argv[3]); drop_harness(); return rc; }
+    if (argc == 4 && !strcmp(argv[1], "--gate")) { rc = check(argv[2], argv[3], 0); if (!rc) rc = negative(argv[2], argv[3]); drop_harness(); return rc; }
+    if (argc == 5 && !strcmp(argv[1], "--produce")) return produce(argv[2], argv[3], argv[4]);
+    if (argc == 5 && !strcmp(argv[1], "--capture")) return capture(argv[2], argv[3], argv[4]);
+    fprintf(stderr, "usage: netseal.cx --check-core|--write-seal|--negative|--gate DATA ROOT | --produce WORK ROOT NET | --capture WORK ROOT DATA\n");
+    return 2;
+}
