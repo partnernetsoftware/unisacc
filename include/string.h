@@ -267,6 +267,11 @@ static int strcoll(const char *__u_a, const char *__u_b) {
 #ifndef _WIN32
 char *strdup(const char *__u_s);
 #endif
+/* C99 7.21.4.5 strxfrm: prototype-only, forwarded to the host's C library on Linux and macOS
+ * (the bundled locale is C, whose transformation is the identity). */
+#ifndef _WIN32
+size_t strxfrm(char *__u_d, const char *__u_s, size_t __u_n);
+#endif
 /* 0.0.34 L2 (SQLite's Apple path): forwarded to the system C library */
 #ifdef __APPLE__
 size_t strlcpy(char *__u_d, const char *__u_s, size_t __u_n);
