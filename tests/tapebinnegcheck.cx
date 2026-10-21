@@ -188,6 +188,40 @@ int main(int argc,char **argv) {
         }
       }
     }
+    /* extreme-value torture: 64-bit integer bounds (LEB128's ten-byte edge)
+       and the .str escape spectrum (NUL, 0xff, tab, quote, backslash, empty)
+       plus .bss and .lea -- encoder parity with the reference codec, decode
+       fixpoint, carrier image equal to the text route, and the text image
+       equal to the reference compiler's.  Hex immediates stay out: the image
+       route refuses them today (registered defect, v0.0.43 baseline list;
+       covering them here would freeze the defect into a gate). */
+    { static const char TORT[]=
+        ".str s1 \"a\\tb\\x41\\\"q\\\\\"\n.str s2 \"\\x00\\xff\\x7f\"\n.str s3 \"\"\n"
+        ".bss z 4096\n_start:\n  imm r1, 18446744073709551615\n"
+        "  imm r2, -9223372036854775808\n  imm r4, 0\n  .lea r0, s2\n  ret\n";
+      if(save("tort.tape",TORT,strlen(TORT)))return 2;
+      snprintf(cmd,sizeof cmd,"%s'%s' '%s/tort.tape' --tapebin -c -o '%s/tort.tapebin' 2>'%s/to.err'",
+          strstr(P,".com") ? "sh " : "",P,D,D,D);
+      note("tort-emit",cx_run_timeout(cmd,15,0,0)==0);
+      snprintf(cmd,sizeof cmd,
+          "python3 -c \"from unisa.tapebin import encode;import sys;"
+          "sys.stdout.buffer.write(encode(open('%s/tort.tape').read()))\" > '%s/tort-py.tapebin' 2>/dev/null",D,D);
+      note("tort-ref-encode",cx_run_timeout(cmd,25,0,0)==0);
+      bytes_equal("tort-parity","tort.tapebin","tort-py.tapebin");
+      snprintf(cmd,sizeof cmd,"%s'%s' '%s/tort.tapebin' -S -o '%s/tort-dec.tape' 2>/dev/null && "
+          "%s'%s' '%s/tort-dec.tape' --tapebin -c -o '%s/tort-re.tapebin' 2>/dev/null",
+          strstr(P,".com") ? "sh " : "",P,D,D,
+          strstr(P,".com") ? "sh " : "",P,D,D);
+      note("tort-decode",cx_run_timeout(cmd,15,0,0)==0);
+      bytes_equal("tort-fixpoint","tort-re.tapebin","tort.tapebin");
+      build("tort-text","tort.tape","lnx/x86_64",0);
+      build("tort-bin","tort.tapebin","lnx/x86_64",0);
+      bytes_equal("tort-route-img","tort-text.img","tort-bin.img");
+      snprintf(cmd,sizeof cmd,
+          "python3 -m unisa compile '%s/tort.tape' --from-tape -o '%s/tort.pyimg' --target lnx/x86_64 --drive built >/dev/null 2>&1",D,D);
+      note("tort-ref-img",cx_run_timeout(cmd,25,0,0)==0);
+      bytes_equal("tort-ref-bytes","tort-text.img","tort.pyimg");
+    }
     printf("tapebin checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }
