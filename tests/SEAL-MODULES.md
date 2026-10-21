@@ -51,6 +51,19 @@ netseal.cx --capture ...
 
 网名来自叶内 `net.tsv`；金表 `weights/gold/<网>.tsv` 在 check 时重派生全域 case。
 
+## 独立测套（可单跑）
+
+| 入口 | 作用 |
+|------|------|
+| `./tests/seal-modules.sh` | manifest+xy 适用性检查 + 4×`streamseal` + 17×`netseal` 闸回放（内层 `JOBS` 并行，默认 4） |
+| `./tests/seal-modules.sh --check-only` | 只读结构/适用性，不跑封回放 |
+| `tests/seal-modules.manifest.tsv` | 流叶/网叶登记（与上表闸 job 对齐） |
+| `python3 tests/sealmodulescheck.py --check` | 同上检查，供脚本与 CI 复用 |
+
+出货闸仍可逐 job 跑（`lex-e1-seal`、`net-*-seal`）；本测套是**聚合入口**，不替代单 job，也不读 middle-flow ledger。
+
 ## 历史
 
 2026-10-21：四份近副本 `lexseal/optseal/pruneseal/elfseal.cx` 已删除；行为由 `streamseal.cx` + 各 `cell.tsv` 覆盖。过程笔记：`/home/box/c43/csr-paradigm-mod-1801/`。
+
+2026-10-21：独立测套 `seal-modules.sh` + manifest；x流×y网适用性见 `sealmodulescheck.py`（4 流挂 streamseal、17 网挂 netseal、pp/e2/e3/lower 记 shape-gap）。过程笔记：`/home/box/c43/csr-suite-xy-1936/`。
