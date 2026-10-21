@@ -324,8 +324,8 @@ def check_xy_matrix() -> int:
         "sealmodulescheck: xy matrix structural "
         f"({len(FLOWS)}×{len(NETS)}={len(FLOWS)*len(NETS)} cells; not a coverage count)"
     )
-    print(f"  streamseal leaves: {stream_leaves} (e1,e4,prune,elf)")
-    print(f"  netseal wired nets: {wired_grid_nets} (gold nets except pp)")
+    print(f"  stream leaves (streamseal): {stream_leaves}")
+    print(f"  wired_grid={wired_grid_nets}")
     print(
         f"  shape-gap flows: {','.join(sorted(SHAPE_GAP_STREAM))}, pp separate paradigm"
     )
