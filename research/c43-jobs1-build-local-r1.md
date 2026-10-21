@@ -35,3 +35,9 @@
 
 1. 为 `exec/c/buildcompiler.sh` 在某个非契约产品套件的 `tests/gatedeps.json` 中补声明，并通过 commitgate；或
 2. 由 机房主任 另授根包替换，并重新验证新鲜度。
+
+## 附录（2026-10-21 22:3x–23:0x）：落主、重建与本机 seed-gen 偶发卡死
+
+- JOBS=1 已以声明刀落主（8408128c）：commitgate 点名 exec-core / exec-librarycontract-model / lib-typed-host（gatedeps 已含 exec 树声明，本笔记「唯一契约套件声明」的旧状已过时）；reviewed-trees 戳按 reviewedtreescheck 规则对工作树自算后单戳替换（refresh_gatedeps 按 HEAD 归档算戳的 catch-22 仍在）。
+- 冻结树 wt44（tip 8408128c）候选与 wt43（c5b028fc）候选逐字节同：com `ada5f0f7…`、seed `4fae4286…`——JOBS 未设时路径逐字节不变的声明由两次独立构建印证。
+- **本机新坑**：`seed-gen parse2 --warnings --errors` 偶发启动即卡死（user 0.02s、内核态、`tests/bound` SIGKILL 收割不动，一次挂 11 分钟；strace 下同二进制同参数 15 秒退 0；四次观测 2 卡 2 过）。当时 16GB 内存并驻多会话用到 13.1GB，seed-gen 峰值 ~2GB，卡点在 brk/mmap 段，疑宿主沙箱层偶发；非仓库回归。处置：`build_candidate.sh` 外层整轮重试（全新目录、绿即停），一次端到端全绿即收据。机器变钝先查 D 态进程与大 RSS。
