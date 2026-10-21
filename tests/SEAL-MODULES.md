@@ -58,12 +58,13 @@ netseal.cx --capture ...
 | 入口 | 作用 |
 |------|------|
 | `./tests/seal-modules.sh --check-only` | **出货闸 `seal-modules` job**：manifest + xy + edges 结构（默认快路径） |
-| `./tests/seal-modules.sh` | 同上检查 + 可选 4×`streamseal` + 17×`netseal` 闸回放（开发用；全闸回放走单叶 `*-seal` job） |
+| `./tests/seal-modules.sh` | 同上检查 + 可选 6×`streamseal` + 17×`netseal` 闸回放（开发用；全闸回放走单叶 `*-seal` job） |
 | `tests/seal-modules.manifest.tsv` | 流叶/网叶登记（与上表闸 job 对齐） |
-| `python3 tests/sealmodulescheck.py --check` | 同上检查，供脚本与 CI 复用 |
+| `tests/sealparadigm.cx --audit ROOT` | 范式审计真源（`seal-modules --check-only` 与闸 `seal-paradigm-audit`） |
+| `python3 tests/sealmodulescheck.py --check` | 遗留同口径（未增厚；新能力只进 `.cx`） |
 | `tests/seal-edges.tsv` | 边级登记（prd §3.0c(3) 主边全集 + 次边 + 对照臂）：`asked_evidence`=「问过」比对闸 job，`edge_frozen`=边级冻结原件路径（现全 none，0/17）；`--edges-only` 单查 |
 
-**边级口径**：比对闸（stages-1*–3*、stages-back）证「Python 问过则 C 必问过」，**不是**按探针冻结的边级封存原件；原件落成后把该边 `edge_frozen` 从 `none` 改为叶目录，检查器计数即前进。主边全集硬编码在 `sealmodulescheck.py`（`PRIMARY_EDGES`），表与 prd 任何一边改动而另一边没改都会红。
+**边级口径**：比对闸（stages-1*–3*、stages-back）证「Python 问过则 C 必问过」，**不是**按探针冻结的边级封存原件；原件落成后把该边 `edge_frozen` 从 `none` 改为叶目录，检查器计数即前进。主边全集硬编码在 `sealparadigm.cx`（与 `sealmodulescheck.py` 同表），表与 prd 任何一边改动而另一边没改都会红。
 
 **边级原件形态**（`tests/edgeseal.py`；设计依据：脱敏设计简报的推荐一「规范化键答映射叶」，实测收窄：每边 distinct 键仅 3–84，全序列双跑确定故 refcount 入判等）：叶 `tests/seals/edge-<流>-<网>/` = `manifest.tsv`（探针/金表/叶体三重 sha 钉扎）+ `asks.tsv`（排序去重的 key→answer→refcount，参考路线分相位归边）。`--produce` 双录判等才写（拒空边、拒不确定）；`--gate` 回放逐字节判等 + 空集即败 + 三类负例（删行/改答案/改键）在闸内必红；金表演进时 `table_sha256` 钉扎主动红，不静默过期。证明力是组合推理：边原件（边消费哪些键）× stages/stages-back（问过）× oracle-cache（DENSE≡weights）× net-*-seal（weights≡gold）——原件冻的是参考端边使用面，不直接观测生产端逐问。首叶 `edge-e4-peep`（闸 `edge-e4-peep-seal`，探针 fib.c，8 键）。
 

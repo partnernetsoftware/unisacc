@@ -25,7 +25,7 @@ case "${1:-}" in
     *) echo "seal-modules: unknown option $1" >&2; exit 2;;
 esac
 
-python3 "$R/tests/sealmodulescheck.py" --check || exit 1
+"$PRODUCT" -run "$R/tests/sealparadigm.cx" -- --audit "$R" || exit 1
 [ "$MODE" = check ] && { echo "seal-modules: check-only ok"; exit 0; }
 
 TMP=$(mktemp -d) || exit 2

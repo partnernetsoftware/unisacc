@@ -458,7 +458,9 @@ job lower-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gat
 job opt-e4-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-opt-e4 .
 job elf-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-elf .
 job prune-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-prune .
-job seal-modules tests/bound 58 ./tests/seal-modules.sh --check-only   # c43: manifest+xy/edges structure only; seal replay stays on lex-e1-seal + net-*-seal (no nested 21× bound)
+job seal-paradigm-audit tests/bound 58 sh ./unisacc.com -run tests/sealparadigm.cx -- --audit .   # c43: stream/net paradigm registry (manifest+xy+edges); .cx only
+job seal-paradigm-selftest tests/bound 58 sh ./unisacc.com -run tests/sealparadigm.cx -- --selftest
+job seal-modules tests/bound 58 ./tests/seal-modules.sh --check-only   # c43: same audit via sealparadigm.cx; seal replay stays on lex-e1-seal + net-*-seal (no nested 21× bound)
 job edge-e4-peep-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e4-peep .   # c43: first edge-level frozen original (e4->peep, probe fib.c): reference-route normalized ask surface replayed byte-equal, pinned to probe+gold shas, three negatives in-gate (tests/SEAL-MODULES.md 边级)
 job edge-e2-pp-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e2-pp .   # c43: edge-level frozen original (e2->pp, probe fib.c), same checker as edge-e4-peep-seal
 job edge-e1-lex-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e1-lex .   # c43: edge-level frozen original (e1->lex, probe fib.c), same checker as edge-e4-peep-seal

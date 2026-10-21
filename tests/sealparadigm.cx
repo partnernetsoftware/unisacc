@@ -1,0 +1,434 @@
+#!/usr/bin/env -S unisacc.com -run
+/* sealparadigm.cx --audit ROOT | --selftest
+ *
+ * Stream/grid paradigm registry audit (manifest, x流×y网适用性, seal-edges).
+ * Replaces sealmodulescheck.py on the seal-modules --check-only path.
+ */
+#include <cx.h>
+#define MAX_ROWS 64
+#define MAX_EDGES 48
+
+typedef struct {
+    char paradigm[24], id[24], leaf[256], checker[128], gate_job[64];
+} MRow;
+
+typedef struct { char stage[16], in_fmt[64], out_fmt[64], product[64]; } Stage;
+
+typedef struct {
+    char flow[16], net[16], relation[32], asked[128], frozen[256], fixtures[512];
+} ERow;
+
+static const char *FLOWS[] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf", 0};
+static const char *NETS[] = {
+    "pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc", "tyinfo", "pfconv",
+    "regmap", "isel", "abi", "combo", "binsel", "prec", "opinfo", "peep", 0
+};
+static const char *STREAM_WIRED[] = {"e1", "e3", "e4", "prune", "lower", "elf", 0};
+static const char *PRIMARY[][2] = {
+    {"e2", "pp"}, {"e1", "lex"}, {"e4", "opinfo"}, {"e4", "peep"}, {"elf", "enc"},
+    {"lower", "abi"}, {"lower", "regmap"}, {"lower", "reloc"},
+    {"e3", "parse"}, {"e3", "type"}, {"e3", "scope"}, {"e3", "irsel"},
+    {"e3", "tyinfo"}, {"e3", "pfconv"}, {"e3", "binsel"}, {"e3", "prec"}, {0, 0}
+};
+static const char *EDGE_REL[] = {"primary", "primary-embedded", "secondary", "empty", "control", 0};
+
+static int bad(const char *s) { printf("sealparadigm: FAIL %s\n", s); return 1; }
+static int fields(char *p, char **f, int max) {
+    int n = 1; f[0] = p;
+    while (*p) { if (*p == '\t') { *p = 0; if (n == max) return -1; f[n++] = p + 1; } p++; }
+    return n;
+}
+static char *slurp(const char *path, size_t *n) { return cx_read(path, n); }
+static int path_stat(const char *path, int want_dir) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return want_dir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode);
+}
+static int join(char *out, size_t cap, const char *a, const char *b) {
+    return snprintf(out, cap, "%s/%s", a, b) >= (int)cap ? -1 : 0;
+}
+static int in_list(const char *s, const char **list) {
+    int i; for (i = 0; list[i]; i++) if (!strcmp(s, list[i])) return 1; return 0;
+}
+static int job_known(char jobs[][64], int nj, const char *job);
+static void foreach_csv(const char *csv, void (*fn)(const char *tok, void *ctx), void *ctx) {
+    char buf[512], *p = buf, *start;
+    strncpy(buf, csv, sizeof buf - 1); buf[sizeof buf - 1] = 0;
+    start = p;
+    while (*p) {
+        if (*p == ',') { *p = 0; if (*start) fn(start, ctx); start = p + 1; }
+        p++;
+    }
+    if (*start) fn(start, ctx);
+}
+typedef struct { char jobs[256][64]; int nj; int err; const char *edge; } JobCtx;
+static void check_job_tok(const char *tok, void *ctx) {
+    JobCtx *j = ctx;
+    if (!job_known(j->jobs, j->nj, tok))
+        { printf("sealparadigm: FAIL edge %s unknown gate job %s\n", j->edge, tok); j->err++; }
+}
+typedef struct { const char *root; int err; const char *edge; } FxCtx;
+static void check_fixture_tok(const char *tok, void *ctx) {
+    FxCtx *f = ctx; char dp[4096];
+    if (!*tok) return;
+    join(dp, sizeof dp, f->root, tok);
+    if (!path_stat(dp, 1)) {
+        printf("sealparadigm: FAIL edge %s missing fixture %s\n", f->edge, tok); f->err++;
+    }
+}
+static int load_stages(const char *root, Stage *st, int *nst) {
+    char path[4096], *b, *p, *end, *f[4]; size_t n; int c = 0;
+    join(path, sizeof path, root, "exec/pipeline/image-stages.tsv");
+    b = slurp(path, &n); if (!b) return bad("image-stages.tsv unreadable");
+    for (p = b; *p && c < 16; ) {
+        end = strchr(p, '\n'); if (!end) break; *end = 0;
+        if (!*p || p[0] == '#') { p = end + 1; continue; }
+        if (fields(p, f, 4) < 4) { free(b); return bad("image-stages row"); }
+        strncpy(st[c].stage, f[0], 15);
+        strncpy(st[c].in_fmt, f[1], 63);
+        strncpy(st[c].out_fmt, f[2], 63);
+        strncpy(st[c].product, f[3], 63);
+        c++; p = end + 1;
+    }
+    free(b); *nst = c; return 0;
+}
+static Stage *find_stage(Stage *st, int n, const char *name) {
+    int i; for (i = 0; i < n; i++) if (!strcmp(st[i].stage, name)) return st + i;
+    return 0;
+}
+static const char *stage_product(Stage *st, int n, const char *stage) {
+    Stage *s = find_stage(st, n, stage); return s ? s->product : 0;
+}
+
+static int load_manifest(const char *root, MRow *rows, int *nr) {
+    char path[4096], *b, *p, *end, *f[8]; size_t n; int c = 0;
+    join(path, sizeof path, root, "tests/seal-modules.manifest.tsv");
+    b = slurp(path, &n); if (!b) return bad("seal-modules.manifest.tsv unreadable");
+    for (p = b; *p && c < MAX_ROWS; ) {
+        end = strchr(p, '\n'); if (!end) break; *end = 0;
+        if (!*p || p[0] == '#') { p = end + 1; continue; }
+        { int nf = fields(p, f, 8);
+        if (nf < 2) { p = end + 1; continue; }
+        if (!strcmp(f[0], "schema")) { p = end + 1; continue; }
+        if (!strcmp(f[0], "paradigm") && !strcmp(f[1], "id")) { p = end + 1; continue; }
+        if (nf < 6) { free(b); return bad("manifest row"); }
+        }
+        strncpy(rows[c].paradigm, f[0], 23);
+        strncpy(rows[c].id, f[1], 23);
+        strncpy(rows[c].leaf, f[2], 255);
+        strncpy(rows[c].checker, f[3], 127);
+        strncpy(rows[c].gate_job, f[4], 63);
+        c++; p = end + 1;
+    }
+    free(b); *nr = c; return 0;
+}
+
+static int load_gate_jobs(const char *root, char jobs[][64], int *nj) {
+    char path[4096], *b, *p, *end; size_t n; int c = 0;
+    join(path, sizeof path, root, "tests/gate.sh");
+    b = slurp(path, &n); if (!b) return bad("gate.sh unreadable");
+    for (p = b; *p && c < 256; ) {
+        end = strchr(p, '\n'); if (!end) end = p + strlen(p);
+        if ((size_t)(end - p) > 4 && !memcmp(p, "job ", 4)) {
+            char *q = p + 4, *sp = q;
+            while (sp < end && *sp != ' ' && *sp != '\t') sp++;
+            if (sp > q && (size_t)(sp - q) < 63) {
+                memcpy(jobs[c], q, sp - q); jobs[c][sp - q] = 0; c++;
+            }
+        }
+        p = *end ? end + 1 : end;
+    }
+    free(b); *nj = c; return 0;
+}
+static int job_known(char jobs[][64], int nj, const char *job) {
+    int i; if (!strcmp(job, "-")) return 1;
+    for (i = 0; i < nj; i++) if (!strcmp(jobs[i], job)) return 1;
+    return 0;
+}
+
+static int cell_get(const char *root, const char *leaf, const char *key, char *val, size_t vcap) {
+    char path[4096], *b, *p, *end, *f[3]; size_t n;
+    val[0] = 0;
+    join(path, sizeof path, root, leaf);
+    strncat(path, "/cell.tsv", sizeof path - strlen(path) - 1);
+    b = slurp(path, &n); if (!b) return 0;
+    for (p = b; *p; ) {
+        end = strchr(p, '\n'); if (!end) break; *end = 0;
+        if (fields(p, f, 3) >= 2 && !strcmp(f[0], key)) strncpy(val, f[1], vcap - 1);
+        p = end + 1;
+    }
+    free(b); return val[0] != 0;
+}
+
+typedef struct { char dirs[64][256]; int n; } GridDirs;
+static void scan_exec_net_dirs(const char *root, GridDirs *g) {
+    char dir[4096]; DIR *d; struct dirent *e;
+    join(dir, sizeof dir, root, "tests/seals");
+    d = opendir(dir); if (!d) return;
+    while ((e = readdir(d))) {
+        if (!strncmp(e->d_name, "exec-net-", 9) && g->n < 64) {
+            snprintf(g->dirs[g->n], 256, "tests/seals/%s", e->d_name);
+            g->n++;
+        }
+    }
+    closedir(d);
+}
+
+static int audit_manifest(const char *root, MRow *rows, int nr, Stage *st, int nst, char jobs[][64], int nj) {
+    int i, err = 0, n_stream = 0, n_grid = 0, n_gap = 0;
+    char manifest_grid[64][256]; int n_mg = 0;
+    for (i = 0; i < nr; i++) {
+        MRow *r = rows + i;
+        char leafp[4096], chkp[4096];
+        if (!strcmp(r->paradigm, "stream")) n_stream++;
+        else if (!strcmp(r->paradigm, "grid")) { n_grid++; if (n_mg < 64) strncpy(manifest_grid[n_mg++], r->leaf, 255); }
+        else if (!strcmp(r->paradigm, "shape-gap")) n_gap++;
+        join(leafp, sizeof leafp, root, r->leaf);
+        if (!path_stat(leafp, 1)) { printf("sealparadigm: FAIL missing leaf_dir %s\n", r->leaf); err++; continue; }
+        join(chkp, sizeof chkp, root, r->checker);
+        if (strstr(r->checker, ".cx") && !path_stat(chkp, 0)) {
+            printf("sealparadigm: FAIL missing checker %s\n", r->checker); err++;
+        }
+        if (!job_known(jobs, nj, r->gate_job)) {
+            printf("sealparadigm: FAIL %s:%s gate_job %s not in gate.sh\n", r->paradigm, r->id, r->gate_job);
+            err++;
+        }
+        if (!strcmp(r->paradigm, "stream")) {
+            char stage[32], inp[64], out[64], cap[64], cellp[4096];
+            Stage *s;
+            if (strcmp(r->checker, "tests/streamseal.cx")) {
+                printf("sealparadigm: FAIL stream %s checker must be streamseal.cx\n", r->id); err++; continue;
+            }
+            join(cellp, sizeof cellp, root, r->leaf); strncat(cellp, "/cell.tsv", sizeof cellp - strlen(cellp) - 1);
+            if (!path_stat(cellp, 0)) { printf("sealparadigm: FAIL %s missing cell.tsv\n", r->leaf); err++; continue; }
+            cell_get(root, r->leaf, "stage", stage, sizeof stage);
+            cell_get(root, r->leaf, "input", inp, sizeof inp);
+            cell_get(root, r->leaf, "output", out, sizeof out);
+            cell_get(root, r->leaf, "capture_net", cap, sizeof cap);
+            s = find_stage(st, nst, stage);
+            if (!s) { printf("sealparadigm: FAIL stream %s unknown stage %s\n", r->id, stage); err++; continue; }
+            if (inp[0] && strcmp(inp, s->in_fmt)) {
+                printf("sealparadigm: FAIL %s input %s != image-stages %s\n", r->id, inp, s->in_fmt); err++;
+            }
+            if (out[0] && strcmp(out, s->out_fmt)) {
+                printf("sealparadigm: FAIL %s output %s != image-stages %s\n", r->id, out, s->out_fmt); err++;
+            }
+            if (cap[0] && strcmp(cap, s->product)) {
+                printf("sealparadigm: FAIL %s capture_net %s != %s\n", r->id, cap, s->product); err++;
+            }
+        } else if (!strcmp(r->paradigm, "grid")) {
+            char netp[4096], gold[4096], *b, *p, *end, *f[2], net[64];
+            if (strcmp(r->checker, "tests/netseal.cx")) {
+                printf("sealparadigm: FAIL grid %s checker must be netseal.cx\n", r->id); err++; continue;
+            }
+            join(netp, sizeof netp, root, r->leaf); strncat(netp, "/net.tsv", sizeof netp - strlen(netp) - 1);
+            b = slurp(netp, 0); if (!b) { printf("sealparadigm: FAIL %s missing net.tsv\n", r->leaf); err++; continue; }
+            net[0] = 0;
+            for (p = b; *p; ) { end = strchr(p, '\n'); if (!end) break; *end = 0;
+                if (fields(p, f, 2) >= 2 && !strcmp(f[0], "net")) strncpy(net, f[1], 63);
+                p = end + 1; }
+            free(b);
+            if (!net[0] || strcmp(net, r->id)) {
+                printf("sealparadigm: FAIL grid %s net.tsv net %s\n", r->id, net); err++;
+            }
+            snprintf(gold, sizeof gold, "%s/weights/gold/%s.tsv", root, r->id);
+            if (!path_stat(gold, 0)) { printf("sealparadigm: FAIL missing gold %s\n", gold); err++; }
+        } else if (!strcmp(r->paradigm, "shape-gap")) {
+            if (!strcmp(r->checker, "tests/streamseal.cx") || !strcmp(r->checker, "tests/netseal.cx")) {
+                printf("sealparadigm: FAIL shape-gap %s must not use stream/net checker\n", r->id); err++;
+            }
+        }
+    }
+    for (i = 0; STREAM_WIRED[i]; i++) {
+        int j, found = 0;
+        for (j = 0; j < nr; j++)
+            if (!strcmp(rows[j].paradigm, "stream") && !strcmp(rows[j].id, STREAM_WIRED[i])) found = 1;
+        if (!found) { printf("sealparadigm: FAIL manifest missing stream %s\n", STREAM_WIRED[i]); err++; }
+    }
+    {
+        GridDirs extra = {0}; int j;
+        scan_exec_net_dirs(root, &extra);
+        for (i = 0; i < extra.n; i++) {
+            int found = 0;
+            for (j = 0; j < n_mg; j++) if (!strcmp(manifest_grid[j], extra.dirs[i])) found = 1;
+            if (!found) { printf("sealparadigm: FAIL exec-net leaf not in manifest: %s\n", extra.dirs[i]); err++; }
+        }
+    }
+    {
+        char shp[4096], *b; size_t n;
+        join(shp, sizeof shp, root, "tests/seal-modules.sh");
+        b = slurp(shp, &n);
+        if (!b || strstr(b, "$1==\"shape-gap\"")) {
+            printf("sealparadigm: FAIL seal-modules.sh must not awk-select shape-gap rows\n"); err++;
+        }
+        free(b);
+    }
+    if (n_stream != 6) { printf("sealparadigm: FAIL stream leaf count %d (want 6)\n", n_stream); err++; }
+    if (n_grid != 17) { printf("sealparadigm: FAIL grid net count %d (want 17)\n", n_grid); err++; }
+    printf("sealparadigm: manifest ok (%d stream, %d grid, %d shape-gap)\n", n_stream, n_grid, n_gap);
+    printf("sealparadigm: seal-modules replay = stream+grid only (%d+%d); shape-gap excluded\n", n_stream, n_grid);
+    return err;
+}
+
+static int grid_wired(const char *root, const char *net) {
+    char p[4096];
+    if (!strcmp(net, "pp")) return 0;
+    snprintf(p, sizeof p, "%s/tests/seals/exec-net-%s/net.tsv", root, net);
+    return path_stat(p, 0);
+}
+
+static int audit_xy(const char *root, Stage *st, int nst) {
+    int fi, ni, err = 0, gap_cells = 0, wired = 0;
+    (void)st; (void)nst;
+    for (ni = 0; NETS[ni]; ni++) if (grid_wired(root, NETS[ni])) wired++;
+    if (wired != 17) {
+        printf("sealparadigm: FAIL wired_grid %d != 17\n", wired); err++;
+    }
+    for (fi = 0; FLOWS[fi]; fi++) {
+        for (ni = 0; NETS[ni]; ni++) {
+            const char *flow = FLOWS[fi], *net = NETS[ni];
+            int sm = in_list(flow, STREAM_WIRED) ? 0 : (!strcmp(flow, "e2") ? 1 : 0);
+            int gm = (!strcmp(net, "pp") ? 1 : 0);
+            if (sm || gm) gap_cells++;
+            if (!strcmp(net, "pp")) continue;
+            if (!grid_wired(root, net)) {
+                printf("sealparadigm: FAIL unexpected grid gap %s x %s\n", flow, net); err++;
+            }
+        }
+    }
+    printf("sealparadigm: xy matrix structural (7x18=126 cells; not coverage count)\n");
+    printf("  stream leaves (streamseal): 6  # e1,e3,e4,prune,lower,elf\n");
+    printf("  wired_grid=%d\n", wired);
+    printf("  shape-gap flows: e2, pp separate paradigm\n");
+    printf("sealparadigm: e2 not in streamseal: closure would read exec/pp/ and autoinc; streamseal forbidden() rejects pp paths — keep ppleafseal.cx\n");
+    if (!err) printf("sealparadigm: xy applicability ok (shape-gap class cells=%d)\n", gap_cells);
+    return err;
+}
+
+static int load_edges(const char *root, ERow *rows, int *nr) {
+    char path[4096], *b, *p, *end, *f[8]; size_t n; int c = 0;
+    join(path, sizeof path, root, "tests/seal-edges.tsv");
+    b = slurp(path, &n); if (!b) return bad("seal-edges.tsv unreadable");
+    for (p = b; *p && c < MAX_EDGES; ) {
+        int nf;
+        end = strchr(p, '\n'); if (!end) break; *end = 0;
+        if (!*p || p[0] == '#') { p = end + 1; continue; }
+        nf = fields(p, f, 8);
+        if (nf < 2) { p = end + 1; continue; }
+        if (!strcmp(f[0], "schema")) { p = end + 1; continue; }
+        if (!strcmp(f[0], "flow") && !strcmp(f[1], "net")) { p = end + 1; continue; }
+        if (nf < 7) { free(b); return bad("edges row"); }
+        strncpy(rows[c].flow, f[0], 15);
+        strncpy(rows[c].net, f[1], 15);
+        strncpy(rows[c].relation, f[2], 31);
+        strncpy(rows[c].asked, f[3], 127);
+        strncpy(rows[c].frozen, f[4], 255);
+        strncpy(rows[c].fixtures, f[5], 511);
+        c++; p = end + 1;
+    }
+    free(b); *nr = c; return 0;
+}
+static int edge_primary_declared(ERow *rows, int nr, const char *flow, const char *net) {
+    int i;
+    for (i = 0; i < nr; i++)
+        if (!strcmp(rows[i].flow, flow) && !strcmp(rows[i].net, net)
+            && (!strcmp(rows[i].relation, "primary") || !strcmp(rows[i].relation, "primary-embedded")))
+            return 1;
+    return 0;
+}
+static int audit_edges(const char *root, char jobs[][64], int nj) {
+    ERow rows[MAX_EDGES]; int nr = 0, i, err = 0, frozen = 0, witness = 0;
+    char seen[32][32]; int nseen = 0;
+    if (load_edges(root, rows, &nr)) return 1;
+    for (i = 0; i < nr; i++) {
+        ERow *r = rows + i;
+        char key[32]; int j, dup = 0;
+        snprintf(key, sizeof key, "%s|%s", r->flow, r->net);
+        for (j = 0; j < nseen; j++) if (!strcmp(seen[j], key)) dup = 1;
+        if (dup) { printf("sealparadigm: FAIL duplicate edge (%s,%s)\n", r->flow, r->net); err++; }
+        if (nseen < 32) strncpy(seen[nseen++], key, 31);
+        if (!in_list(r->flow, FLOWS) && strcmp(r->flow, "*")) {
+            printf("sealparadigm: FAIL edge unknown flow %s\n", r->flow); err++;
+        }
+        if (!in_list(r->net, NETS) && strcmp(r->net, "-")) {
+            printf("sealparadigm: FAIL edge unknown net %s\n", r->net); err++;
+        }
+        if (!in_list(r->relation, EDGE_REL)) {
+            printf("sealparadigm: FAIL edge (%s,%s) relation %s\n", r->flow, r->net, r->relation); err++;
+        }
+        if (strcmp(r->asked, "-")) {
+            JobCtx jc; char elbl[64];
+            snprintf(elbl, sizeof elbl, "(%s,%s)", r->flow, r->net);
+            memcpy(jc.jobs, jobs, sizeof jc.jobs); jc.nj = nj; jc.err = 0; jc.edge = elbl;
+            foreach_csv(r->asked, check_job_tok, &jc);
+            err += jc.err;
+        }
+        if (strcmp(r->frozen, "none")) {
+            char fp[4096], man[4096], asks[4096], wit[4096];
+            join(fp, sizeof fp, root, r->frozen);
+            if (strncmp(r->frozen, "tests/seals/", 12) || !path_stat(fp, 1)) {
+                printf("sealparadigm: FAIL edge (%s,%s) bad edge_frozen\n", r->flow, r->net); err++;
+            } else {
+                join(man, sizeof man, fp, "manifest.tsv");
+                join(asks, sizeof asks, fp, "asks.tsv");
+                join(wit, sizeof wit, fp, "witness.tsv");
+                if (!path_stat(man, 0) || (!path_stat(asks, 0) && !path_stat(wit, 0))) {
+                    printf("sealparadigm: FAIL edge (%s,%s) frozen leaf incomplete\n", r->flow, r->net); err++;
+                } else if (path_stat(asks, 0)) frozen++;
+                else witness++;
+            }
+        }
+        {
+            FxCtx fc; char elbl[64];
+            snprintf(elbl, sizeof elbl, "(%s,%s)", r->flow, r->net);
+            fc.root = root; fc.err = 0; fc.edge = elbl;
+            foreach_csv(r->fixtures, check_fixture_tok, &fc);
+            err += fc.err;
+        }
+    }
+    for (i = 0; PRIMARY[i][0]; i++)
+        if (!edge_primary_declared(rows, nr, PRIMARY[i][0], PRIMARY[i][1])) {
+            printf("sealparadigm: FAIL primary edge missing (%s,%s)\n", PRIMARY[i][0], PRIMARY[i][1]); err++;
+        }
+    {
+        int sec_ok = 0;
+        for (i = 0; i < nr; i++)
+            if (!strcmp(rows[i].flow, "lower") && !strcmp(rows[i].net, "enc") && !strcmp(rows[i].relation, "secondary"))
+                sec_ok = 1;
+        if (!sec_ok) { printf("sealparadigm: FAIL secondary edge lower,enc\n"); err++; }
+    }
+    if (err) printf("sealparadigm: edges %d problem(s)\n", err);
+    else printf("sealparadigm: edges ok (%d rows; edge originals %d shipping: %d key-map + %d witness)\n",
+                nr, frozen + witness, frozen, witness);
+    return err;
+}
+
+static int audit(const char *root) {
+    MRow rows[MAX_ROWS]; Stage stages[16];
+    char jobs[256][64];
+    int nr = 0, nst = 0, nj = 0, err = 0;
+    if (load_stages(root, stages, &nst)) return 1;
+    if (load_manifest(root, rows, &nr)) return 1;
+    if (load_gate_jobs(root, jobs, &nj)) return 1;
+    err += audit_manifest(root, rows, nr, stages, nst, jobs, nj);
+    err += audit_xy(root, stages, nst);
+    err += audit_edges(root, jobs, nj);
+    if (err) { printf("sealparadigm: audit %d problem(s)\n", err); return 1; }
+    puts("sealparadigm: audit ok");
+    return 0;
+}
+
+static int selftest(void) {
+    char root[4096];
+    if (!getcwd(root, sizeof root)) return bad("cwd");
+    if (audit(root)) return bad("selftest audit on repo");
+    puts("sealparadigm selftest: PASS");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--selftest")) return selftest();
+    if (argc == 3 && !strcmp(argv[1], "--audit")) return audit(argv[2]);
+    fprintf(stderr, "usage: sealparadigm.cx --audit ROOT | --selftest\n");
+    return 2;
+}
