@@ -459,5 +459,12 @@ static size_t wcsrtombs(char *__u_dst, const wchar_t **__u_src, size_t __u_len, 
     }
 }
 #endif
+/* C99 7.24.4.4.2 wcscoll, 7.24.4.4.4 wcsxfrm: prototype-only, forwarded to the host's C library
+ * on Linux and macOS (the bundled locale is C, whose collation is wcscmp and whose
+ * transformation is the identity). */
+#ifndef _WIN32
+int wcscoll(const wchar_t *__u_a, const wchar_t *__u_b);
+size_t wcsxfrm(wchar_t *__u_d, const wchar_t *__u_s, size_t __u_n);
+#endif
 
 #endif
