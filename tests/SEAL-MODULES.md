@@ -5,7 +5,7 @@
 | 范式 | 检查器 | 叶配置 | 闸登记 |
 |------|--------|--------|--------|
 | **网格**（一网一封，金表全域） | `tests/netseal.cx` | `tests/seals/exec-net-<网>/net.tsv` | `net-<网>-seal`（17 网；**无 pp**） |
-| **流格**（image-stages 一行，上游当夹具） | `tests/streamseal.cx` | `tests/seals/<叶>/cell.tsv` | `lex-e1-seal`、`opt-e4-seal`、`prune-seal`、`elf-seal` |
+| **流格**（image-stages 一行，上游当夹具） | `tests/streamseal.cx` | `tests/seals/<叶>/cell.tsv` | `lex-e1-seal`、`e3-seal`、`opt-e4-seal`、`prune-seal`、`elf-seal` |
 
 ## streamseal 接口
 
@@ -26,6 +26,7 @@ Reseal：`tests/reseal-{lex-e1,opt-e4,prune,elf}.sh` 在 capture 前拷 `cell.ts
 | stage | 叶目录 | gate job |
 |-------|--------|----------|
 | e1 | `exec-lex-e1` | lex-e1-seal |
+| e3 | `exec-e3` | e3-seal |
 | e4 | `exec-opt-e4` | opt-e4-seal |
 | prune | `exec-prune` | prune-seal |
 | elf | `exec-elf` | elf-seal |
@@ -35,7 +36,7 @@ Reseal：`tests/reseal-{lex-e1,opt-e4,prune,elf}.sh` 在 capture 前拷 `cell.ts
 | stage | 现状 | 原因 |
 |-------|------|------|
 | **e2** | `exec-pp-literals` + `ppleafseal.cx` | 资源/双 model 叶；STALE 与 pp 头资源；非「单 net + exec/c/run」模板 |
-| **e3** | `stagecontract-e1-e3` 等 | 阶段合同/库夹具，**不是**测量叶；待 tokens→tape 同名叶封再挂 cell |
+| **e3** | （已迁 `exec-e3`） | 阶段合同 `stagecontract-e1-e3` 等仍并存；流格测量叶见 `exec-e3` |
 | **lower** | `stagecontract-tape-lower` 等 | 同上；待 tape→target.text 测量叶 |
 | **pp** | 无 `exec-net-pp` | **永远不是网格**；流侧也不走 streamseal 四叶模板 |
 

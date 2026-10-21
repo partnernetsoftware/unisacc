@@ -453,6 +453,7 @@ job pp-leaf-seal tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.cx -- --c
 job pp-leaf-seal-negative tests/bound 58 sh ./unisacc.com -run tests/ppleafseal.cx -- --negative tests/seals/exec-pp-literals .
 job pp-leaf-capture-selftest tests/bound 58 sh ./unisacc.com -run tests/ppleafcapture.cx -- --selftest
 job lex-e1-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-lex-e1 .   # c43: stream cell via streamseal.cx + cell.tsv (gate and reseal-* scripts share one checker)
+job e3-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-e3 .   # c43: e3 measurement leaf tokens.typed->tape.text (streamseal + cell.tsv)
 job opt-e4-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-opt-e4 .
 job elf-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-elf .
 job prune-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gate tests/seals/exec-prune .

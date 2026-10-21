@@ -23,8 +23,8 @@ NETS = (
 )
 FLOWS = ("e2", "e1", "e3", "e4", "prune", "lower", "elf")
 
-STREAM_WIRED = frozenset({"e1", "e4", "prune", "elf"})
-SHAPE_GAP_STREAM = frozenset({"e2", "e3", "lower"})
+STREAM_WIRED = frozenset({"e1", "e3", "e4", "prune", "elf"})
+SHAPE_GAP_STREAM = frozenset({"e2", "lower"})
 GRID_NETS = frozenset(n for n in NETS if n != "pp")
 
 # prd §3.0c(3) 主边全集（出货主脊 ✓；isel/combo 对照臂、prune 空边不在内）
@@ -324,7 +324,7 @@ def check_xy_matrix() -> int:
         "sealmodulescheck: xy matrix structural "
         f"({len(FLOWS)}×{len(NETS)}={len(FLOWS)*len(NETS)} cells; not a coverage count)"
     )
-    print(f"  stream leaves (streamseal): {stream_leaves}")
+    print(f"  stream leaves (streamseal): {stream_leaves}  # e1,e3,e4,prune,elf")
     print(f"  wired_grid={wired_grid_nets}")
     print(
         f"  shape-gap flows: {','.join(sorted(SHAPE_GAP_STREAM))}, pp separate paradigm"
