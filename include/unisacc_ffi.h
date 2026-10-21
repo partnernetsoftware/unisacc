@@ -140,7 +140,15 @@ static int uffi_init(void) {
     if (__uffi_ready) return 0;
     if (sizeof(long) != 8 || sizeof(void *) != 8 ||
         sizeof(struct uffi_cif) != UFFI_CIF_SIZE) return 0 - 1;
+#ifdef __APPLE__
     if (__uffi_handle == 0) __uffi_handle = uffi_dlopen("/usr/lib/libffi.dylib", 2);
+#else
+    /* glibc: the soname the distribution ships (libffi 3.4 = .8, 3.3 = .7, 3.2 = .6), then the dev link */
+    if (__uffi_handle == 0) __uffi_handle = uffi_dlopen("libffi.so.8", 2);
+    if (__uffi_handle == 0) __uffi_handle = uffi_dlopen("libffi.so.7", 2);
+    if (__uffi_handle == 0) __uffi_handle = uffi_dlopen("libffi.so.6", 2);
+    if (__uffi_handle == 0) __uffi_handle = uffi_dlopen("libffi.so", 2);
+#endif
     if (__uffi_handle == 0) return 0 - 2;
     __uffi_prep = uffi_dlsym(__uffi_handle, "ffi_prep_cif");
     __uffi_prep_var = uffi_dlsym(__uffi_handle, "ffi_prep_cif_var");
