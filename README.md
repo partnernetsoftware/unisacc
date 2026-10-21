@@ -436,7 +436,7 @@ ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are e
 |---|---|---|---|---|---|
 | Language (clause 6) | 98 | 95 | 1 | 2 | 96% |
 | Environment (clause 5) | 16 | 13 | 2 | 1 | 81% |
-| Library (clause 7) | 361 | 175 | 40 | 146 | 48% |
+| Library (clause 7) | 349 | 241 | 41 | 67 | 69% |
 | Annexes F, G | 19 | 0 | 0 | 19 | 0% |
 <!-- c99-ledger:end -->
 
