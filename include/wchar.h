@@ -466,5 +466,11 @@ static size_t wcsrtombs(char *__u_dst, const wchar_t **__u_src, size_t __u_len, 
 int wcscoll(const wchar_t *__u_a, const wchar_t *__u_b);
 size_t wcsxfrm(wchar_t *__u_d, const wchar_t *__u_s, size_t __u_n);
 #endif
+/* C99 7.24.4.1.2 wcstoll, wcstoull: prototype-only, forwarded to the host's C library on Linux
+ * and macOS (long long is an integer signature; the wcstol/wcstoul bodies above stay as they are). */
+#ifndef _WIN32
+long long wcstoll(const wchar_t *__u_s, wchar_t **__u_end, int __u_base);
+unsigned long long wcstoull(const wchar_t *__u_s, wchar_t **__u_end, int __u_base);
+#endif
 
 #endif
