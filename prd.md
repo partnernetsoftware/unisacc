@@ -127,7 +127,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 流名 | 输入→输出 | 产品网 | 功能 | 是否封存 | 备注 |
 |------|-----------|--------|------|----------|------|
 | **e2** | `src.c` → `pp.text` | `e2.net` | 预处理：续行/注释/指令/宏/条件/include | **有** · `tests/seals/exec-pp-literals/`（measured leaf；STALE风险：头/资源闭包持续进封件） | 近 tip 常被库头→autoinc→叶封拖动；纯转发原型刀可守冻哨 |
-| **e1** | `pp.text` → `tokens.typed` | `e1.net` | 词法：关键字/标识/算符/字面量最长匹配 | **有** · `tests/seals/exec-lex-e1/`（流侧，e1 对录制 pp.text 输入的冻结回放；lex-e1-seal） | 流封只证录制样本；另有网级叶 `exec-net-lex/`（内核×金表，非流内 ask） |
+| **e1** | `pp.text` → `tokens.typed` | `e1.net` | 词法：关键字/标识/算符/字面量最长匹配 | **有** · `tests/seals/exec-lex-e1/` + `cell.tsv`；闸 `lex-e1-seal` 走 **`tests/streamseal.cx`**（`lexseal.cx` 仅 reseal capture） | 流封只证录制样本；另有网级叶 `exec-net-lex/`（内核×金表，非流内 ask） |
 | **e3** | `tokens.typed` → `tape.text` | `e3.net` | 语法+类型等合成段 → tape（parse/type 等物理嵌此） | **有** · `stagecontract-e1-e3/` + `middleflow-step0/e3/` + `librarycallbacke3/`（librarytyped* 历史≠PASS→STALE风险） | STAGE-IDENTITIES：parse/type **未拆**仍嵌 e3 |
 | **e4** | `tape.text` → `tape.text` | `e4.net` | opt：tape 上 peephole / 栈→寄存器类改写 | **有** · `tests/seals/exec-opt-e4/` + `cell.tsv`；闸 `opt-e4-seal` 走 **`tests/streamseal.cx`**（流格模块试点；`optseal.cx` 仅 reseal capture） | 前端是输入；另有网级叶 `exec-net-opinfo/`、`exec-net-peep/` |
 | **prune** | `tape.text` → `tape.text` | `prune.net` | 按根/导出剪不可达整函数（公开 tape 路径可跳） | **有** · `tests/seals/exec-prune/`（gen.py prune 对录制 -O2 tape，对 Python referee 冻字节；prune-seal） | 仍**不消费** 18 金网 |
