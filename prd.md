@@ -115,61 +115,61 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **逻辑边界不等于物理嵌套。** parse/type等逻辑阶段目前集成于e3，enc/image集成于elf，不声称已有独立产物。七流模型并非十八张ask事实网的简单一对一替换；下表消费关系含经典ask定位与产品归属，不能只因同名pp就把有限金表的叶证据当完整E2验证。流级封不推出内嵌每张网有独立封存。
 
-以下三表保留70f61992、2026-10-21 AWST观测口径；近窗提交数量是当时记录，不是持续更新仪表。**有封≠已冻**，未在本次文档整理中重验封件。
+以下三表更新到 tip `25f720ab`（2026-10-21 17:33 AWST 观测）；近窗提交数量是当时记录，不是持续更新仪表。**有封≠已冻**：本次整理重验了被引封件闸（pp-leaf-seal(-negative)、exec-pp-literals、stage-contract-e1e3、lex-e1-seal、opt-e4-seal、elf-seal、prune-seal、middle-flow-e3/lower-accept、17×net-*-seal 各两遍，全部 rc 0），但过闸只证封件自身一致，不证封件范围覆盖了流的全部行为。
 
 <a id="seven-stream-contracts"></a>
 ### 3.0a 七流合同表
 
-- tip `70f61992` · 观测 2026-10-21 AWST
+- tip `25f720ab` · 观测 2026-10-21 17:33 AWST（封件闸当日重验）
 - 真源：`exec/pipeline/image-stages.tsv`
 - **是否封存** = `tests/seals/` 有点名该流的冻结夹具/叶封原件；可标 STALE风险。**有封 ≠ 已冻**。
 
 | 流名 | 输入→输出 | 产品网 | 功能 | 是否封存 | 备注 |
 |------|-----------|--------|------|----------|------|
 | **e2** | `src.c` → `pp.text` | `e2.net` | 预处理：续行/注释/指令/宏/条件/include | **有** · `tests/seals/exec-pp-literals/`（measured leaf；STALE风险：头/资源闭包持续进封件） | 近 tip 常被库头→autoinc→叶封拖动；纯转发原型刀可守冻哨 |
-| **e1** | `pp.text` → `tokens.typed` | `e1.net` | 词法：关键字/标识/算符/字面量最长匹配 | **无** | `stagecontract-e1-e3` README 写明不含 e1 网；earlystageseal 不封 e1 |
+| **e1** | `pp.text` → `tokens.typed` | `e1.net` | 词法：关键字/标识/算符/字面量最长匹配 | **有** · `tests/seals/exec-lex-e1/`（流侧，e1 对录制 pp.text 输入的冻结回放；lex-e1-seal） | 流封只证录制样本；另有网级叶 `exec-net-lex/`（内核×金表，非流内 ask） |
 | **e3** | `tokens.typed` → `tape.text` | `e3.net` | 语法+类型等合成段 → tape（parse/type 等物理嵌此） | **有** · `stagecontract-e1-e3/` + `middleflow-step0/e3/` + `librarycallbacke3/`（librarytyped* 历史≠PASS→STALE风险） | STAGE-IDENTITIES：parse/type **未拆**仍嵌 e3 |
-| **e4** | `tape.text` → `tape.text` | `e4.net` | opt：tape 上 peephole / 栈→寄存器类改写 | **无** | seals 无 e4/opt 点名封；tip 窗 `exec/opt` 基本静，仍算未冻 |
-| **prune** | `tape.text` → `tape.text` | `prune.net` | 按根/导出剪不可达整函数（公开 tape 路径可跳） | **无** | 仅中段路由；无 `prune.net` 点名冻结夹具；**不消费** 18 金网 |
+| **e4** | `tape.text` → `tape.text` | `e4.net` | opt：tape 上 peephole / 栈→寄存器类改写 | **有** · `tests/seals/exec-opt-e4/`（opt --o2 对录制 -O0 tape 的冻结回放；opt-e4-seal） | 前端是输入；另有网级叶 `exec-net-opinfo/`、`exec-net-peep/` |
+| **prune** | `tape.text` → `tape.text` | `prune.net` | 按根/导出剪不可达整函数（公开 tape 路径可跳） | **有** · `tests/seals/exec-prune/`（gen.py prune 对录制 -O2 tape，对 Python referee 冻字节；prune-seal） | 仍**不消费** 18 金网 |
 | **lower** | `tape.text` → `target.text` | `lower.net` | ABI/regmap/syscall/布局/reloc 降到目标 ops | **有** · `stagecontract-tape-lower/` + `middleflow-step0/lower/` + `librarytypedlower/` + `librarycallbacklower/`（历史≠PASS→STALE风险） | tip≈99-commit 窗 **0** 笔改 lower 封/构造；有封且近窗不拖 |
-| **elf** | `target.text` → `image.bytes` | `elf.net` | 编码 + ELF/Mach-O/PE（或内存镜像）写出 | **无** | 无 elf/enc/image 点名封；STAGE-IDENTITIES：enc/image **集成于 elf** |
+| **elf** | `target.text` → `image.bytes` | `elf.net` | 编码 + ELF/Mach-O/PE（或内存镜像）写出 | **有** · `tests/seals/exec-elf/`（enc --elf，**仅 lnx/x86_64 一个目标**，对录制 target.text；elf-seal） | Mach-O/PE/内存镜像未封；STAGE-IDENTITIES：enc/image **集成于 elf**；另有网级叶 `exec-net-enc/` |
 
-**汇总**：有封存原件 **3/7**（e2、e3、lower）。勿与「在调 6/7」混读——在调口径含未冻/耦合/未拆，见观测 `seal-count-7x18-1049awst.md`。
+**汇总**：有封存原件 **7/7**，但范围各异：e1/e4/prune/elf 是对录制输入的点名流封（elf 仅一目标），e2/e3/lower 为此前的叶封/阶段合同封。**有封≠已冻**，更不等于该流全行为已覆盖。勿与「在调 6/7」混读——在调口径含未冻/耦合/未拆，见观测 `seal-count-7x18-1049awst.md`。
 
 <a id="eighteen-net-contracts"></a>
 ### 3.0b 十八网合同表
 
-- tip `70f61992` · 观测 2026-10-21 AWST
+- tip `25f720ab` · 观测 2026-10-21 17:33 AWST
 - 真源：`unisa/gold.py` → `STAGES`；README stages 表；金表在 `weights/gold/*.tsv`
 - **是否封存** = `tests/seals/` 有点名该网的叶封/夹具原件；可标 STALE风险。**有封 ≠ 已冻**。金表 tsv ≠ seal 夹具。
 
 | 网名 | 功能 | 主要落流 | 是否封存 | 备注（出货/对照） |
 |------|------|----------|----------|-------------------|
 | **pp** | dir×defined → take/skip/pop/macro（指令条件） | **e2** | **有** · `tests/seals/exec-pp-literals/`（STALE风险：autoinc/头资源耦合） | 出货主脊；唯一有点名叶封的金网；tip 窗重封多为库存货身份，非 `pp.tsv` 语义行 |
-| **lex** | c×peek → token 类 | **e1** | **无** | 出货主脊；earlystageseal 不验证 E1/lex |
-| **parse** | nt×tok → 归约/动作类 | **e3**（嵌） | **无** | 出货；STAGE-IDENTITIES：无单独产物，集成 e3 |
-| **type** | t1×op×t2 → 结果类型 | **e3**（嵌） | **无** | 出货；当前集成 e3 |
-| **scope** | ctx×kind → 作用域动作 | **e3**（嵌） | **无** | 出货 |
-| **irsel** | family×flavor → IR 形 | **e3** | **无** | 出货（ask 在 e3） |
-| **enc** | op×os×arch → 编码类 | **elf**（主嵌）；lower 次要 ask | **无** | 出货；身份合同钉 elf；经典 lowering 仍问 form |
-| **reloc** | kind×arch → 重定位类 | **lower** | **无** | 出货；决策在 lower，image 只落记录 |
-| **tyinfo** | t → size/uns/narrow | **e3** | **无** | 出货（类型旁路） |
-| **pfconv** | conv → 指针/函数转换类 | **e3** | **无** | 出货 |
-| **regmap** | treg×arch → 机器寄存器 | **lower** | **无** | 出货 |
-| **isel** | op×arch → form/symbol | （构造有；主脊不问） | **无** | **对照**：金表仍构造；lowering **不 ask**（form 由 enc 覆盖） |
-| **abi** | op×os×arch → syscall/形/门… | **lower** | **无** | 出货；`abi.tsv` 是金表非封存夹具 |
-| **combo** | isel∪abi 对照臂 | 对照 / 非出货主脊 | **无** | **不出货主脊**；`drive=="combo"` 实验路径；research `seal-combo-*` ≠ 金网夹具 |
-| **binsel** | op×sign → ALU 味 | **e3** | **无** | 出货 |
-| **prec** | op → 优先级 | **e3** | **无** | 出货（表达式） |
-| **opinfo** | op → 优化用属性 | **e4** | **无** | 出货 |
-| **peep** | a×b×rel → peephole 动作 | **e4** | **无** | 出货 |
+| **lex** | c×peek → token 类 | **e1** | **有** · `tests/seals/exec-net-lex/`（per-net cell，144 键 144 判定，0 wrong） | 出货主脊；earlystageseal 不验证 E1/lex |
+| **parse** | nt×tok → 归约/动作类 | **e3**（嵌） | **有** · `tests/seals/exec-net-parse/`（per-net cell，340 键 340 判定，0 wrong） | 出货；STAGE-IDENTITIES：无单独产物，集成 e3 |
+| **type** | t1×op×t2 → 结果类型 | **e3**（嵌） | **有** · `tests/seals/exec-net-type/`（per-net cell，4275 键 4275 判定，0 wrong） | 出货；当前集成 e3 |
+| **scope** | ctx×kind → 作用域动作 | **e3**（嵌） | **有** · `tests/seals/exec-net-scope/`（per-net cell，30 键 30 判定，0 wrong） | 出货 |
+| **irsel** | family×flavor → IR 形 | **e3** | **有** · `tests/seals/exec-net-irsel/`（per-net cell，420 键 420 判定，0 wrong） | 出货（ask 在 e3） |
+| **enc** | op×os×arch → 编码类 | **elf**（主嵌）；lower 次要 ask | **有** · `tests/seals/exec-net-enc/`（per-net cell，522 键 522 判定，0 wrong） | 出货；身份合同钉 elf；经典 lowering 仍问 form |
+| **reloc** | kind×arch → 重定位类 | **lower** | **有** · `tests/seals/exec-net-reloc/`（per-net cell，6 键 6 判定，0 wrong） | 出货；决策在 lower，image 只落记录 |
+| **tyinfo** | t → size/uns/narrow | **e3** | **有** · `tests/seals/exec-net-tyinfo/`（per-net cell，48 判定，0 wrong） | 出货（类型旁路） |
+| **pfconv** | conv → 指针/函数转换类 | **e3** | **有** · `tests/seals/exec-net-pfconv/`（per-net cell，9 判定，0 wrong） | 出货 |
+| **regmap** | treg×arch → 机器寄存器 | **lower** | **有** · `tests/seals/exec-net-regmap/`（per-net cell，16 判定，0 wrong） | 出货 |
+| **isel** | op×arch → form/symbol | （构造有；主脊不问） | **有** · `tests/seals/exec-net-isel/`（per-net cell，174 键 348 判定，0 wrong） | **对照**：金表仍构造；lowering **不 ask**（form 由 enc 覆盖） |
+| **abi** | op×os×arch → syscall/形/门… | **lower** | **有** · `tests/seals/exec-net-abi/`（per-net cell，522 键 6786 判定，0 wrong） | 出货；`abi.tsv` 是金表非封存夹具 |
+| **combo** | isel∪abi 对照臂 | 对照 / 非出货主脊 | **有** · `tests/seals/exec-net-combo/`（per-net cell，522 键 7830 判定，0 wrong） | **不出货主脊**；`drive=="combo"` 实验路径；research `seal-combo-*` ≠ 金网夹具 |
+| **binsel** | op×sign → ALU 味 | **e3** | **有** · `tests/seals/exec-net-binsel/`（per-net cell，32 判定，0 wrong） | 出货 |
+| **prec** | op → 优先级 | **e3** | **有** · `tests/seals/exec-net-prec/`（per-net cell，19 判定，0 wrong） | 出货（表达式） |
+| **opinfo** | op → 优化用属性 | **e4** | **有** · `tests/seals/exec-net-opinfo/`（per-net cell，73 键 219 判定，0 wrong） | 出货 |
+| **peep** | a×b×rel → peephole 动作 | **e4** | **有** · `tests/seals/exec-net-peep/`（per-net cell，1632 键 1632 判定，0 wrong） | 出货 |
 
-**汇总**：有封存原件 **1/18**（仅 pp）。tip 窗 `weights/gold/*.tsv` / `unisa/gold.py` **无提交**——「18/18 在调」是未冻/未拆/耦合仪表盘，不是语义全线在改。
+**汇总**：有点名封存原件 **18/18**（pp 叶封 + 17 个 per-net kernel cell，80eca415/2ebf3f7c/25f720ab，闸 net-<网>-seal）。**范围要读清**：per-net cell 封的是整数内核对该网金表**全域判定**的冻结回放（闭包只有 unisa_core.c + 该网权重字面量 + 该网金表，零 pp 路径），**不**覆盖该网在产品流内的运行时 ask、不覆盖 dense.*.inc、不覆盖权重构造。`weights/gold/*.tsv` / `unisa/gold.py` 本窗仍**无语义行提交**。
 
 <a id="flow-net-relation"></a>
 ### 3.0c 流×网关系与边级夹具
 
-- tip `70f61992` · 观测 2026-10-21 10:59 AWST
+- tip `25f720ab` · 观测 2026-10-21 17:33 AWST
 - 真源：`image-stages.tsv`、`gold.STAGES`、`tests/STAGE-IDENTITIES.md`、经典 ask/`inf` 位点、`compilerpack` 路由
 - **勿混**：7 流 = 字节管道；18 网 = ask 事实表；同名不可互换。
 
@@ -213,19 +213,19 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 边（流→网） | 关系 | 有无夹具 | 路径简述 |
 |-------------|------|----------|----------|
 | e2 → pp | ✓ | **有（网级叶 + 流侧）** | `tests/seals/exec-pp-literals/`；STALE风险（头/autoinc） |
-| e1 → lex | ✓ | **无** | stagecontract-e1-e3 不含 e1；earlystageseal 不验 E1/lex |
-| e3 → parse/type/scope/irsel/tyinfo/pfconv/binsel/prec | ✓（嵌） | **有（流级，非按网点名）** | `stagecontract-e1-e3/`、`middleflow-step0/e3/`、`librarycallbacke3/`；金网无一单独叶封 |
-| e4 → opinfo, peep | ✓ | **无** | 无 e4/opt 点名封 |
-| prune → ∅ | · | **无** | 无网可封；无 prune.net 夹具 |
-| lower → abi, regmap, reloc | ✓ | **有（流级，非按网点名）** | `stagecontract-tape-lower/`、`middleflow-step0/lower/`、`library*lower/`；STALE风险；abi/regmap/reloc 无网级叶封 |
-| lower → enc | ◐ | **无（enc 无点名）** | 经典 ask 在 lower；身份合同属 elf |
-| elf → enc | ✓ | **无** | enc/image 集成于 elf；无 elf/enc 点名封 |
-| * → isel / combo | ⊘ | **无** | 对照臂；research `seal-combo-*` ≠ 金网夹具 |
+| e1 → lex | ✓ | **有（流侧 + 网级叶）** | `exec-lex-e1/`（录制输入流封）+ `exec-net-lex/`（内核×金表）；边上运行时 ask 仍无点名夹具 |
+| e3 → parse/type/scope/irsel/tyinfo/pfconv/binsel/prec | ✓（嵌） | **有（流级 + 八网网级叶）** | `stagecontract-e1-e3/`、`middleflow-step0/e3/`、`librarycallbacke3/`；八网各有 `exec-net-*`；嵌在 e3 内的运行时 ask 仍无边级点名 |
+| e4 → opinfo, peep | ✓ | **有（流侧 + 网级叶）** | `exec-opt-e4/` + `exec-net-opinfo/`、`exec-net-peep/`；边级 ask 无点名 |
+| prune → ∅ | · | **有（流侧）** | `exec-prune/`（录制 -O2 tape，referee 冻字节）；无金网可封 |
+| lower → abi, regmap, reloc | ✓ | **有（流级 + 网级叶）** | `stagecontract-tape-lower/`、`middleflow-step0/lower/`、`library*lower/` + `exec-net-abi/regmap/reloc`；边级 ask 无点名 |
+| lower → enc | ◐ | **有（网级叶，非边级）** | `exec-net-enc/` 点名 enc 网本身；经典 lowering ask 这条边仍无夹具 |
+| elf → enc | ✓ | **有（流侧 + 网级叶）** | `exec-elf/`（仅 lnx/x86_64）+ `exec-net-enc/`；其余容器目标未封 |
+| * → isel / combo | ⊘ | **有（网级叶）** | `exec-net-isel/`、`exec-net-combo/`（内核×金表）；仍是对照臂，不在出货主脊 ask |
 
 ##### 脚注
 
 1. **流级封 ≠ 网级封**：e3/lower 有阶段合同封，只证明该段管道原件存在，**不**等于嵌在内的每张金网已点名冻结。
-2. **唯一网级叶封**：目前仅 **pp**（`exec-pp-literals`）。
+2. **网级点名原件 18/18**（25f720ab）：pp 的 `exec-pp-literals` 叶封 + 17 个 `exec-net-*` per-net kernel cell。cell 只冻内核×金表全域判定；**不**替代边级（流内运行时 ask）夹具，该层仍空。
 3. **isel/combo**：矩阵列上对所有流出货主脊标 ⊘（对照/不问或 off ship）；不单独为每行再写夹具行。
 
 #### 4) 物理嵌套（勿读成路由扇出）
@@ -239,7 +239,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ### 3.0d 可核验进度
 
 
-封存清点沿用本页观测基线：**流3/7、网1/18（仅pp叶）**，不是处理器完成比例。**有封≠已冻**：封件是否仍适用须核输入闭包与模型身份，STALE风险不靠重封自动消除。
+封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级夹具仍 0）；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
 
 | 发布链三格（2026-10-21协调口径） | 状态 | 证据边界 |
 |---|---|---|
