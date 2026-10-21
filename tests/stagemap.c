@@ -414,6 +414,8 @@ static char *extra[] = {
     "E3", "com-tapedomain", "lower",
     /* com-hostaddr-neg: .hostaddr索引0..3拒绝域（control与参考逐字节同，-1/4双方具名拒绝）; tests/gate.sh */
     "lower", "com-hostaddr-neg", "meta",
+    /* com-extent-neg: tape数据extent拒绝域（稀疏control逐字节同；2^31单项/累计产品具名拒绝，参考接受已登记）; tests/gate.sh */
+    "lower", "com-extent-neg", "meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */
