@@ -11,7 +11,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tests/seal-modules.manifest.tsv"
+EDGES = ROOT / "tests/seal-edges.tsv"
 IMAGE_STAGES = ROOT / "exec/pipeline/image-stages.tsv"
+GATE_SH = ROOT / "tests/gate.sh"
 GOLD_DIR = ROOT / "weights/gold"
 
 # prd §3.0b 十八网（含 pp）；lexcls/lexword 非独立 STAGES
@@ -24,6 +26,15 @@ FLOWS = ("e2", "e1", "e3", "e4", "prune", "lower", "elf")
 STREAM_WIRED = frozenset({"e1", "e4", "prune", "elf"})
 SHAPE_GAP_STREAM = frozenset({"e2", "e3", "lower"})
 GRID_NETS = frozenset(n for n in NETS if n != "pp")
+
+# prd §3.0c(3) 主边全集（出货主脊 ✓；isel/combo 对照臂、prune 空边不在内）
+PRIMARY_EDGES = frozenset(
+    [("e2", "pp"), ("e1", "lex"), ("e4", "opinfo"), ("e4", "peep"), ("elf", "enc"),
+     ("lower", "abi"), ("lower", "regmap"), ("lower", "reloc")]
+    + [("e3", n) for n in ("parse", "type", "scope", "irsel", "tyinfo", "pfconv", "binsel", "prec")]
+)
+SECONDARY_EDGES = frozenset([("lower", "enc")])  # ◐：经典 lowering ask
+EDGE_RELATIONS = frozenset({"primary", "primary-embedded", "secondary", "empty", "control"})
 
 
 def load_image_product_nets() -> dict[str, str]:
@@ -142,6 +153,87 @@ def check_manifest(rows: list[dict[str, str]]) -> int:
     return bad
 
 
+def parse_edges() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in EDGES.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if parts[0] in ("schema", "flow"):
+            continue
+        if len(parts) < 7:
+            raise SystemExit(f"sealmodulescheck: bad edges row: {line}")
+        rows.append(dict(zip(("flow", "net", "relation", "asked_evidence", "edge_frozen", "fixtures", "note"), parts)))
+    return rows
+
+
+def gate_job_names() -> frozenset[str]:
+    names = set()
+    for line in GATE_SH.read_text().splitlines():
+        if line.startswith("job "):
+            names.add(line.split()[1])
+    return frozenset(names)
+
+
+def check_edges(rows: list[dict[str, str]]) -> int:
+    """边级登记表：结构、主边全集、夹具与点名闸真实性、冻结原件计数。"""
+    bad = 0
+    jobs = gate_job_names()
+    seen: set[tuple[str, str]] = set()
+    frozen = 0
+    for r in rows:
+        key = (r["flow"], r["net"])
+        if key in seen:
+            print(f"sealmodulescheck: FAIL duplicate edge {key}")
+            bad += 1
+        seen.add(key)
+        if r["flow"] not in FLOWS and r["flow"] != "*":
+            print(f"sealmodulescheck: FAIL edge unknown flow {r['flow']}")
+            bad += 1
+        if r["net"] not in NETS and r["net"] != "-":
+            print(f"sealmodulescheck: FAIL edge unknown net {r['net']}")
+            bad += 1
+        if r["relation"] not in EDGE_RELATIONS:
+            print(f"sealmodulescheck: FAIL edge {key} unknown relation {r['relation']}")
+            bad += 1
+        for fx in r["fixtures"].split(","):
+            if fx and not (ROOT / fx).is_dir():
+                print(f"sealmodulescheck: FAIL edge {key} missing fixture dir {fx}")
+                bad += 1
+        if r["asked_evidence"] != "-":
+            for j in r["asked_evidence"].split(","):
+                if j not in jobs:
+                    print(f"sealmodulescheck: FAIL edge {key} names unknown gate job {j}")
+                    bad += 1
+        if r["edge_frozen"] != "none":
+            if not r["edge_frozen"].startswith("tests/seals/") or not (ROOT / r["edge_frozen"]).is_dir():
+                print(f"sealmodulescheck: FAIL edge {key} edge_frozen not a tests/seals/ dir: {r['edge_frozen']}")
+                bad += 1
+            else:
+                frozen += 1
+    declared = {(r["flow"], r["net"]) for r in rows if r["relation"] in ("primary", "primary-embedded")}
+    for miss in sorted(PRIMARY_EDGES - declared):
+        print(f"sealmodulescheck: FAIL primary edge missing from seal-edges.tsv: {miss}")
+        bad += 1
+    for extra in sorted(declared - PRIMARY_EDGES):
+        print(f"sealmodulescheck: FAIL undeclared primary edge in seal-edges.tsv: {extra}")
+        bad += 1
+    sec = {(r["flow"], r["net"]) for r in rows if r["relation"] == "secondary"}
+    if sec != SECONDARY_EDGES:
+        print(f"sealmodulescheck: FAIL secondary edges mismatch: {sorted(sec)} != {sorted(SECONDARY_EDGES)}")
+        bad += 1
+    shipping = len(PRIMARY_EDGES) + len(SECONDARY_EDGES)
+    if bad:
+        print(f"sealmodulescheck: edges {bad} problem(s)")
+    else:
+        print(
+            f"sealmodulescheck: edges ok ({len(rows)} rows; frozen edge originals "
+            f"{frozen}/{shipping} shipping edges -- 比对闸≠冻结回放，边级封存原件待立)"
+        )
+    return bad
+
+
 def stream_module_cell(flow: str, net: str, product_nets: dict[str, str]) -> tuple[str, str]:
     """streamseal 能否参数化吃下该 (流, 网) 组合（结构口径，非行为覆盖）。"""
     prod = product_nets.get(flow, "")
@@ -217,8 +309,9 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="manifest + xy structure (default)")
     ap.add_argument("--manifest-only", action="store_true")
     ap.add_argument("--xy-only", action="store_true")
+    ap.add_argument("--edges-only", action="store_true")
     args = ap.parse_args()
-    if not (args.manifest_only or args.xy_only):
+    if not (args.manifest_only or args.xy_only or args.edges_only):
         args.check = True
     bad = 0
     rows = parse_manifest()
@@ -226,6 +319,8 @@ def main() -> int:
         bad += check_manifest(rows)
     if args.check or args.xy_only:
         bad += check_xy_matrix()
+    if args.check or args.edges_only:
+        bad += check_edges(parse_edges())
     return 1 if bad else 0
 
 

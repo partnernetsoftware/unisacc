@@ -59,6 +59,9 @@ netseal.cx --capture ...
 | `./tests/seal-modules.sh --check-only` | 只读结构/适用性，不跑封回放 |
 | `tests/seal-modules.manifest.tsv` | 流叶/网叶登记（与上表闸 job 对齐） |
 | `python3 tests/sealmodulescheck.py --check` | 同上检查，供脚本与 CI 复用 |
+| `tests/seal-edges.tsv` | 边级登记（prd §3.0c(3) 主边全集 + 次边 + 对照臂）：`asked_evidence`=「问过」比对闸 job，`edge_frozen`=边级冻结原件路径（现全 none，0/17）；`--edges-only` 单查 |
+
+**边级口径**：比对闸（stages-1*–3*、stages-back）证「Python 问过则 C 必问过」，**不是**按探针冻结的边级封存原件；原件落成后把该边 `edge_frozen` 从 `none` 改为叶目录，检查器计数即前进。主边全集硬编码在 `sealmodulescheck.py`（`PRIMARY_EDGES`），表与 prd 任何一边改动而另一边没改都会红。
 
 出货闸仍可逐 job 跑（`lex-e1-seal`、`net-*-seal`）；本测套是**聚合入口**，不替代单 job，也不读 middle-flow ledger。
 
@@ -67,3 +70,5 @@ netseal.cx --capture ...
 2026-10-21：四份近副本 `lexseal/optseal/pruneseal/elfseal.cx` 已删除；行为由 `streamseal.cx` + 各 `cell.tsv` 覆盖。过程笔记：`/home/box/c43/csr-paradigm-mod-1801/`。
 
 2026-10-21：独立测套 `seal-modules.sh` + manifest；x流×y网适用性见 `sealmodulescheck.py`（4 流挂 streamseal、17 网挂 netseal、pp/e2/e3/lower 记 shape-gap）。过程笔记：`/home/box/c43/csr-suite-xy-1936/`。
+
+2026-10-21：边级登记表 `seal-edges.tsv` 入套（17 出货边、冻结原件 0/17 起步计数；负例实测三类破坏均红）。
