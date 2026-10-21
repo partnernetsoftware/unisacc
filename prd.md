@@ -247,7 +247,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | ② 本轮候选有效闸与收口收据 | **ABSENT** | 不用旧门绿、旧包或封存数量顶替 |
 | ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
 
-**根对重建受 H1 裁定阻塞（2026-10-21 18:5x AWST 实测）**：本机根对 provenance 已红（`product inputs changed`，根 `unisacc.com` 为 10-20 构建，闭包其后多次变更；seed 对与 `compiler.pkg` 缺失，裸根下 `middle-flow-ledger` 因此红，配 `MODEL_COM=out/model-com/unisacc-next.com` 即绿）。按 §193 在冻结工作树重建候选，`build_candidate.sh` 第一步即被 `h1source` 拒绝：`plans/v0.0.43.md` 无 H1 行也无 H1-INHERIT 声明。41/42 的 INHERIT 行（沿用 0.0.38，sha 仍相符）均注明政委授权，本会话不代写；**待政委/机房主任裁定 43 的 H1 承接**后，候选重建与 `install_root.sh` 一步可达。
+**根对已归位（2026-10-21 20:0x AWST 实测）**：H1-INHERIT 落 `plans/v0.0.43.md`（c5b028fc）后 `h1source` 放行。按 §193 在冻结工作树 `scratchpad/wt43`（tip c5b028fc，本树同源 UA）重建候选：`build_candidate.sh` 全步绿（model steps 97.877s），候选 `unisacc-next.com` sha256 `ada5f0f7…`，seed `4fae4286…`。`install_root.sh` 把 com 对、seed 对与 model-audit 归位根部；subtract-safety 过、版本相等（com=seed=0.0.43）；另把候选 `compiler.pkg` 归位根部并入 .gitignore，裸根 `middle-flow-ledger` 由红转 **PASS**。**唯一余项**：主检出 `ident . check unisacc.com` 仍报 `product inputs changed`，红因只有一个——已裁「本地保留、本拍不落主」的 `exec/c/buildcompiler.sh` JOBS=1 改动（见 `research/c43-jobs1-build-local-r1.md`；`exec/` 整目录在输入闭包内），同一候选在冻结树 wt43 内核验绿（`product freshness: verified`）。该 diff 落主（需单独声明刀）或撤除之日，裸根 provenance 即绿。坑位：首轮构建在 15 分钟负载均值 49（8 核）下，pack-models 三个内层 `bound 50` 子步全部撞死线（步时 209s）；负载回落后重跑 8.7s 即过——候选构建前先看 `uptime`。
 
 “约1/3”仅指上述三格已有第一格，不是模型覆盖率、时间完成率或发布授权。当前版本声明见[src/version.h](src/version.h)，Latest于2026-10-21通过GitHub releases/latest API只读核对。
 
