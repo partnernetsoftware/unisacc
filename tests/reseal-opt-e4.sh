@@ -2,7 +2,7 @@
 # reseal-opt-e4.sh: regenerate tests/seals/exec-opt-e4 (measured leaf seal of the opt cell, stage e4 = gen.py opt --o2; README in that folder).
 # Ungated tool (reseal).  Run from a clean repository root (export).  Mirrors tests/reseal-lex-e1.sh: each step is
 # bounded (<= 58 s) and writes one TSV row; nothing in the repository is written, OUTDIR/capture is the new seal.
-#   usage: tests/reseal-opt-e4.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/optseal.cx)
+#   usage: tests/reseal-opt-e4.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/streamseal.cx)
 #   env:   SHARED_E4=PATH   a product build's shared/e4.net; the sealed network must be byte-equal (fatal)
 # The front end (pp, lex, parse) is an INPUT: fixtures are the reference's -O0 -S tape on fixed corpus sources, recorded
 # once as bytes; the reference output is the same reference's -O2 -S tape.  The closure (dependencies.tsv) is the
@@ -12,6 +12,7 @@ P=${1:?product}; O=${2:?outdir}
 [ -e "$O" ] && { echo "reseal: $O exists" >&2; exit 2; }
 mkdir -p "$O/work/trace" "$O/work/cases" "$O/fixtures" || exit 2
 ROOT=$(pwd)
+SEAL=tests/seals/exec-opt-e4
 TSV="$O/reseal.tsv"
 printf 'step\targv\trc\tmonotonic_s\tproduct_sha\tsource_hash\tartifact_sha\n' > "$TSV"
 sha() { if [ -d "$1" ]; then (cd "$1" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-64); else sha256sum "$1" | cut -c1-64; fi; }
@@ -46,12 +47,13 @@ run reference "$W/cases" tests/reseal-opt-e4.sh $B sh -c 'for s in $2; do n=$(ba
 #    row per source in OUTDIR/corpus.tsv (name, rc, equal); any inequality or refusal is fatal.  Not sealed.
 run corpus "$O/corpus.tsv" exec/pipeline/keep-elf.txt $B sh -c ': > "$2"; bad=0; for s in $(cat exec/pipeline/keep-elf.txt); do n=$(basename "$s" .c); "$1/ua_ref" -S -o - "$s" > "$1/corpus.in" 2>/dev/null || exit 1; "$1/ua_ref" -O2 -S -o - "$s" > "$1/corpus.ref" 2>/dev/null || exit 1; "$1/run" "$1/e4.net" "$1/corpus.in" > "$1/corpus.out" 2>/dev/null; rc=$?; cmp -s "$1/corpus.out" "$1/corpus.ref" && eq=1 || eq=0; printf "%s\t%s\t%s\n" "$n" "$rc" "$eq" >> "$2"; [ "$rc" = 0 ] && [ "$eq" = 1 ] || bad=1; done; rm -f "$1/corpus.in" "$1/corpus.ref" "$1/corpus.out"; exit $bad' corpus "$W" "$O/corpus.tsv" || exit 1
 # 6. capture: trace files + case records -> the sealed data (model, cases, streams, dependencies, closure.expected); refuses pp paths
-run capture "$O/capture" tests/optseal.cx $B sh "$P" -run tests/optseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
-# 7. writer: the repo checker's --write-seal (same checks and replay, then measurement.tsv and identity.tsv are written)
-run writer "$O/capture" tests/optseal.cx $B sh "$P" -run tests/optseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
+mkdir -p "$O/capture" && cp "$ROOT/$SEAL/cell.tsv" "$ROOT/$SEAL/measurement.tsv" "$O/capture/" || exit 1
+run capture "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
+# 7. writer: the repo checker's --write-seal (same checks and replay, then identity.tsv is written; measurement.tsv from SEAL)
+run writer "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
 # 8. the gate's own checks on the new data
-run seal-check "$O/capture" tests/optseal.cx $B sh "$P" -run tests/optseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
-run negative "$O/capture" tests/optseal.cx $B sh "$P" -run tests/optseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
+run seal-check "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
+run negative "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
 # 9. the sealed network against a product build's shared/e4.net (SHARED_E4), byte for byte
 if [ -n "${SHARED_E4:-}" ]; then
   run product-e4 "$O/capture" "$SHARED_E4" $B cmp "$SHARED_E4" "$O"/capture/model-*.net || exit 1
@@ -82,7 +84,7 @@ to it (`ref-equal=1`); the reseal's `corpus` step replays all 96 keep-elf source
 (recorded in the reseal's corpus.tsv, not sealed: 96 accepted / 0 refused / 96 byte-equal at
 the 2026-10-21 reseal).
 
-Gate (tests/gate.sh job opt-e4-seal, tests/optseal.cx --gate): frozen bytes (dependencies
+Gate (tests/gate.sh job opt-e4-seal, tests/streamseal.cx --gate): frozen bytes (dependencies
 against the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
 identity.tsv), then a **replay**: the executor built from exec/c/run.c runs the sealed
 `model-<sha>.net` on every frozen input and must give the frozen stdout, stderr and rc; then

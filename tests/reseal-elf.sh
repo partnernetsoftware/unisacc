@@ -3,7 +3,7 @@
 # lnx/x86_64; README in that folder).  Ungated tool (reseal).  Run from a clean repository root (export).  Mirrors
 # tests/reseal-opt-e4.sh: each step is bounded (<= 58 s) and writes one TSV row; nothing in the repository is written,
 # OUTDIR/capture is the new seal.
-#   usage: tests/reseal-elf.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/elfseal.cx)
+#   usage: tests/reseal-elf.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/streamseal.cx)
 #   env:   SHARED_ELF=PATH   a product build's lnx-x86_64/elf.net; the sealed network must be byte-equal (fatal)
 # Everything upstream of the cell is an INPUT: fixtures are target.text streams, produced once by the pipeline's own
 # prune.net and lower.net (gen.py prune, gen.py lower --full; both UNTRACED fixture producers, not dependencies) on the
@@ -15,6 +15,7 @@ P=${1:?product}; O=${2:?outdir}
 [ -e "$O" ] && { echo "reseal: $O exists" >&2; exit 2; }
 mkdir -p "$O/work/trace" "$O/work/cases" "$O/work/producer" "$O/fixtures" || exit 2
 ROOT=$(pwd)
+SEAL=tests/seals/exec-elf
 TSV="$O/reseal.tsv"
 printf 'step\targv\trc\tmonotonic_s\tproduct_sha\tsource_hash\tartifact_sha\n' > "$TSV"
 sha() { if [ -d "$1" ]; then (cd "$1" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-64); else sha256sum "$1" | cut -c1-64; fi; }
@@ -56,12 +57,13 @@ run reference "$W/cases" tests/reseal-elf.sh $B sh -c 'for s in $2; do n=$(basen
 #    Not sealed.
 run corpus "$O/corpus.tsv" exec/pipeline/keep-elf.txt $B sh -c ': > "$2"; bad=0; for s in $(cat exec/pipeline/keep-elf.txt); do n=$(basename "$s" .c); "$1/ua_ref" -O2 -S -o - "$s" > "$1/corpus.o2" 2>/dev/null || exit 1; "$1/run" "$1/producer/prune.net" "$1/corpus.o2" > "$1/corpus.pruned" 2>/dev/null || exit 1; "$1/run" "$1/producer/lower.net" "$1/corpus.pruned" > "$1/corpus.in" 2>/dev/null || exit 1; rm -f "$1/corpus.ref"; "$1/ua_ref" -O2 -b lnx/x86_64 -o "$1/corpus.ref" "$s" >/dev/null 2>&1 || exit 1; "$1/run" "$1/elf.net" "$1/corpus.in" > "$1/corpus.out" 2>/dev/null; rc=$?; cmp -s "$1/corpus.out" "$1/corpus.ref" && eq=1 || eq=0; printf "%s\t%s\t%s\n" "$n" "$rc" "$eq" >> "$2"; [ "$rc" = 0 ] && [ "$eq" = 1 ] || bad=1; done; rm -f "$1/corpus.o2" "$1/corpus.pruned" "$1/corpus.in" "$1/corpus.ref" "$1/corpus.out"; exit $bad' corpus "$W" "$O/corpus.tsv" || exit 1
 # 7. capture: trace files + case records -> the sealed data (model, cases, streams, dependencies, closure.expected); refuses pp paths
-run capture "$O/capture" tests/elfseal.cx $B sh "$P" -run tests/elfseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
-# 8. writer: the repo checker's --write-seal (same checks and replay, then measurement.tsv and identity.tsv are written)
-run writer "$O/capture" tests/elfseal.cx $B sh "$P" -run tests/elfseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
+mkdir -p "$O/capture" && cp "$ROOT/$SEAL/cell.tsv" "$ROOT/$SEAL/measurement.tsv" "$O/capture/" || exit 1
+run capture "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
+# 8. writer: the repo checker's --write-seal (same checks and replay, then identity.tsv is written; measurement.tsv from SEAL)
+run writer "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
 # 9. the gate's own checks on the new data
-run seal-check "$O/capture" tests/elfseal.cx $B sh "$P" -run tests/elfseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
-run negative "$O/capture" tests/elfseal.cx $B sh "$P" -run tests/elfseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
+run seal-check "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
+run negative "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
 # 10. the sealed network against a product build's lnx-x86_64/elf.net (SHARED_ELF), byte for byte
 if [ -n "${SHARED_ELF:-}" ]; then
   run product-elf "$O/capture" "$SHARED_ELF" $B cmp "$SHARED_ELF" "$O"/capture/model-*.net || exit 1
@@ -101,7 +103,7 @@ costs ~0.01 s per case, so the gate bound is not the limit; the subset keeps the
 ~2.6 MB (each target.text fixture is ~100 KB, each image ~25 KB) and mirrors exec-opt-e4's
 corpus so the two cells freeze the same sources.
 
-Gate (tests/gate.sh job elf-seal, tests/elfseal.cx --gate): frozen bytes (dependencies against
+Gate (tests/gate.sh job elf-seal, tests/streamseal.cx --gate): frozen bytes (dependencies against
 the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
 identity.tsv), then a **replay**: the executor built from exec/c/run.c runs the sealed
 `model-<sha>.net` on every frozen input and must give the frozen stdout, stderr and rc; then

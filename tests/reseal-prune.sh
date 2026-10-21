@@ -3,13 +3,13 @@
 # README in that folder).  Ungated tool (reseal).  Run from a clean repository root (export).  Mirrors
 # tests/reseal-opt-e4.sh and tests/reseal-elf.sh: each step is bounded (<= 58 s) and writes one TSV row; nothing in
 # the repository is written, OUTDIR/capture is the new seal.
-#   usage: tests/reseal-prune.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/pruneseal.cx)
+#   usage: tests/reseal-prune.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/streamseal.cx)
 #   env:   SHARED_PRUNE=PATH   a product build's shared/prune.net; the sealed network must be byte-equal (fatal)
 # Everything upstream of the cell is an INPUT: fixtures are the reference's `-O2 -S -o -` tape (tape.text) of fixed
 # corpus sources, recorded as bytes.  The reference output (SELF-RULED choice, recorded in the README) is the Python
 # referee unisa.prune.prune_text -- the one exec/prune/check.py qualifies the cell against; the C reference's -S tape
 # is pre-prune (src/back_image.c), so no C-side post-prune stream exists.  The referee runs HERE, once, untraced, to
-# freeze the expected bytes; the gate (tests/pruneseal.cx) replays only the product's prune net against those frozen
+# freeze the expected bytes; the gate (tests/streamseal.cx) replays only the product's prune net against those frozen
 # bytes and never runs the referee.  The closure (dependencies.tsv) is the strace read-set of the cell's own chain; any
 # pp path or sealed header in it refuses the reseal.
 set -u
@@ -17,6 +17,7 @@ P=${1:?product}; O=${2:?outdir}
 [ -e "$O" ] && { echo "reseal: $O exists" >&2; exit 2; }
 mkdir -p "$O/work/trace" "$O/work/cases" "$O/work/corpus" "$O/fixtures" || exit 2
 ROOT=$(pwd)
+SEAL=tests/seals/exec-prune
 TSV="$O/reseal.tsv"
 printf 'step\targv\trc\tmonotonic_s\tproduct_sha\tsource_hash\tartifact_sha\n' > "$TSV"
 sha() { if [ -d "$1" ]; then (cd "$1" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-64); else sha256sum "$1" | cut -c1-64; fi; }
@@ -60,12 +61,13 @@ run corpus-tapes "$W/corpus" exec/pipeline/keep-elf.txt $B sh -c 'for s in $(cat
 run corpus-referee "$W/corpus" unisa/prune.py $B python3 -c "$REFEREE" "$ROOT" "$W/corpus" .o2 || exit 1
 run corpus "$O/corpus.tsv" exec/pipeline/keep-elf.txt $B sh -c ': > "$2"; bad=0; for f in "$1"/corpus/*.o2; do n=$(basename "$f" .o2); "$1/run" "$1/prune.net" "$f" > "$1/corpus/$n.out" 2>/dev/null; rc=$?; cmp -s "$1/corpus/$n.out" "$1/corpus/$n.ref.stdout" && eq=1 || eq=0; printf "%s\t%s\t%s\n" "$n" "$rc" "$eq" >> "$2"; [ "$rc" = 0 ] && [ "$eq" = 1 ] || bad=1; done; [ "$(grep -c . "$2")" = "$(grep -c . exec/pipeline/keep-elf.txt)" ] || bad=1; exit $bad' corpus "$W" "$O/corpus.tsv" || exit 1
 # 6. capture: trace files + case records -> the sealed data (model, cases, streams, dependencies, closure.expected); refuses pp paths
-run capture "$O/capture" tests/pruneseal.cx $B sh "$P" -run tests/pruneseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
-# 7. writer: the repo checker's --write-seal (same checks and replay, then measurement.tsv and identity.tsv are written)
-run writer "$O/capture" tests/pruneseal.cx $B sh "$P" -run tests/pruneseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
+mkdir -p "$O/capture" && cp "$ROOT/$SEAL/cell.tsv" "$ROOT/$SEAL/measurement.tsv" "$O/capture/" || exit 1
+run capture "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
+# 7. writer: the repo checker's --write-seal (same checks and replay, then identity.tsv is written; measurement.tsv from SEAL)
+run writer "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
 # 8. the gate's own checks on the new data
-run seal-check "$O/capture" tests/pruneseal.cx $B sh "$P" -run tests/pruneseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
-run negative "$O/capture" tests/pruneseal.cx $B sh "$P" -run tests/pruneseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
+run seal-check "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
+run negative "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
 # 9. the sealed network against a product build's shared/prune.net (SHARED_PRUNE), byte for byte
 if [ -n "${SHARED_PRUNE:-}" ]; then
   run product-prune "$O/capture" "$SHARED_PRUNE" $B cmp "$SHARED_PRUNE" "$O"/capture/model-*.net || exit 1
@@ -99,7 +101,7 @@ reference compiler has no post-prune stream to compare with: its `-S` tape is th
 (src/back_image.c prunes only on the way to an image), so a C-side `-S` post-prune dump would be
 a new product feature, not a seal.  Hence the referee is frozen as bytes: tests/reseal-prune.sh
 runs it once, untraced (it is the reference, not a dependency; it appears in no closure row), to
-write each case's `ref.stdout`; the gate (tests/pruneseal.cx) replays ONLY the product's prune
+write each case's `ref.stdout`; the gate (tests/streamseal.cx) replays ONLY the product's prune
 net on the frozen inputs and requires byte-equality with the frozen `NAME.stdout`, and never
 imports or runs the referee.  Every sealed case is accepted and byte-equal to the referee
 (`ref-equal=1`); the reseal's `corpus` step replays all 96 keep-elf sources the same way
@@ -111,7 +113,7 @@ costs ~0.02 s per case, so the gate bound is not the limit; the subset keeps the
 ~3.7 MB (each -O2 tape fixture and its pruned output are ~85 KB) and mirrors exec-opt-e4 and
 exec-elf so the three cells freeze the same sources.
 
-Gate (tests/gate.sh job prune-seal, tests/pruneseal.cx --gate): frozen bytes (dependencies against
+Gate (tests/gate.sh job prune-seal, tests/streamseal.cx --gate): frozen bytes (dependencies against
 the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
 identity.tsv), then a **replay**: the executor built from exec/c/run.c runs the sealed
 `model-<sha>.net` on every frozen input and must give the frozen stdout, stderr and rc; then

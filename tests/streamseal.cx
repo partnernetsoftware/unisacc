@@ -34,6 +34,7 @@ typedef struct {
     int n_negative_deps;
     char negative_fixtures[4][256];
     int n_negative_fixtures;
+    char capture_net[64];
 } Cell;
 static Cell cell;
 static int bad(const char *s);
@@ -86,6 +87,7 @@ static int load_cell(const char *data) {
         else if (!strcmp(f[0], "omit_rule_prefix")) strncpy(cell.omit_rule_prefix, f[1], sizeof cell.omit_rule_prefix - 1);
         else if (!strcmp(f[0], "negative_dep") && cell.n_negative_deps < 8) strncpy(cell.negative_deps[cell.n_negative_deps++], f[1], 255);
         else if (!strcmp(f[0], "negative_fixture") && cell.n_negative_fixtures < 4) strncpy(cell.negative_fixtures[cell.n_negative_fixtures++], f[1], 255);
+        else if (!strcmp(f[0], "capture_net")) strncpy(cell.capture_net, f[1], sizeof cell.capture_net - 1);
         p = end + 1;
     }
     free(b);
@@ -307,8 +309,7 @@ static int negative(const char *data, const char *root) {
     puts("streamseal negative: PASS omitted rule, changed deps/fixtures/model rejected; shared inputs untouched");
     return 0;
 }
-/* --capture: WORK/trace/* (strace -ff -e trace=%file of the whole chain, cwd ROOT), WORK/e4.net, WORK/cases.tsv
-   (name per line, in order), WORK/cases/NAME.{input,stdout,stderr,rc,ref.rc,ref.stdout} -> DATA */
+/* --capture: WORK/trace/*, WORK/<capture_net from cell.tsv>, WORK/cases.tsv + cases/* -> DATA (reseal) */
 static char *unquote(const char *p, const char **next) {
     Text b = {0}; int x, i;
     if (*p != '"') return 0; p++;
@@ -353,8 +354,11 @@ static int capture(const char *work, const char *rootarg, const char *data) {
     char netsha[65], modelname[128]; char *net; size_t netn; int accepts = 0, refusals = 0;
     if (!realpath(rootarg, root)) return bad("capture root");
     mkdir(data, 0755);
-    /* the sealed network */
-    snprintf(path, sizeof path, "%s/e4.net", work); net = cx_read(path, &netn); if (!net) return bad("capture: e4.net missing");
+    if (load_cell(data)) return 1;
+    if (!cell.capture_net[0]) return bad("cell.tsv capture_net missing");
+    snprintf(path, sizeof path, "%s/%s", work, cell.capture_net);
+    net = cx_read(path, &netn);
+    if (!net) return bad2("capture: sealed network missing in WORK", cell.capture_net);
     cx_sha256_hex(net, netn, netsha); snprintf(modelname, sizeof modelname, "model-%s.net", netsha);
     if (putfile(data, modelname, net, netn)) return 1;
     /* the cases, in the recorded order */

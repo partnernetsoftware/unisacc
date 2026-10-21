@@ -2,7 +2,7 @@
 # reseal-lex-e1.sh: regenerate tests/seals/exec-lex-e1 (measured leaf seal of the lex cell, stage e1; README in that folder).
 # Ungated tool (reseal).  Run from a clean repository root (export).  Mirrors tests/reseal-pp-literals.sh: each step is
 # bounded (<= 58 s) and writes one TSV row; nothing in the repository is written, OUTDIR/capture is the new seal.
-#   usage: tests/reseal-lex-e1.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/lexseal.cx)
+#   usage: tests/reseal-lex-e1.sh PRODUCT OUTDIR      (OUTDIR must not exist; PRODUCT runs tests/streamseal.cx)
 #   env:   SHARED_E1=PATH   a product build's shared/e1.net; the sealed network must be byte-equal (fatal)
 # The pp stage is an INPUT: fixtures are the reference's -E output on fixed corpus sources, recorded once as bytes.
 # The closure (dependencies.tsv) is the strace read-set of the whole chain; any pp path in it refuses the reseal.
@@ -11,6 +11,7 @@ P=${1:?product}; O=${2:?outdir}
 [ -e "$O" ] && { echo "reseal: $O exists" >&2; exit 2; }
 mkdir -p "$O/work/trace" "$O/work/cases" "$O/fixtures" || exit 2
 ROOT=$(pwd)
+SEAL=tests/seals/exec-lex-e1
 TSV="$O/reseal.tsv"
 printf 'step\targv\trc\tmonotonic_s\tproduct_sha\tsource_hash\tartifact_sha\n' > "$TSV"
 sha() { if [ -d "$1" ]; then (cd "$1" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-64); else sha256sum "$1" | cut -c1-64; fi; }
@@ -42,12 +43,13 @@ run check-net "$W/e1.net" exec/c/run.c $B $ST "$W/run" --check-net "$W/e1.tbl" "
 run cases "$W/cases" tests/reseal-lex-e1.sh $B sh -c ': > "$1/cases.tsv"; for f in "$2"/*.pp.text; do n=$(basename "$f" .pp.text); c="$1/cases/$n"; cp "$f" "$c.input"; echo "$n" >> "$1/cases.tsv"; strace -ff -yy -s 4096 -e trace=%file -o "$1/trace/r" "$1/run" "$1/e1.net" "$f" > "$c.stdout" 2> "$c.stderr"; echo $? > "$c.rc"; done' cases "$W" "$O/fixtures" || exit 1
 run reference "$W/cases" exec/parse/mkdump.sh $B sh -c 'for f in "$2"/*.pp.text; do n=$(basename "$f" .pp.text); c="$1/cases/$n"; UA_TYPESPELL=1 "$1/ua_tdump" -dump-tokens "$f" -nostdinc > "$c.ref.stdout" 2> /dev/null; echo $? > "$c.ref.rc"; done' reference "$W" "$O/fixtures" || exit 1
 # 5. capture: trace files + case records -> the sealed data (model, cases, streams, dependencies, closure.expected); refuses pp paths
-run capture "$O/capture" tests/lexseal.cx $B sh "$P" -run tests/lexseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
-# 6. writer: the repo checker's --write-seal (same checks and replay, then measurement.tsv and identity.tsv are written)
-run writer "$O/capture" tests/lexseal.cx $B sh "$P" -run tests/lexseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
+mkdir -p "$O/capture" && cp "$ROOT/$SEAL/cell.tsv" "$ROOT/$SEAL/measurement.tsv" "$O/capture/" || exit 1
+run capture "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --capture "$W" "$ROOT" "$O/capture" || exit 1
+# 6. writer: the repo checker's --write-seal (same checks and replay, then identity.tsv is written; measurement.tsv from SEAL)
+run writer "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --write-seal "$O/capture" "$ROOT" || exit 1
 # 7. the gate's own checks on the new data
-run seal-check "$O/capture" tests/lexseal.cx $B sh "$P" -run tests/lexseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
-run negative "$O/capture" tests/lexseal.cx $B sh "$P" -run tests/lexseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
+run seal-check "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --check-core "$O/capture" "$ROOT" || exit 1
+run negative "$O/capture" tests/streamseal.cx $B sh "$P" -run tests/streamseal.cx -- --negative "$O/capture" "$ROOT" || exit 1
 # 8. the sealed network against a product build's shared/e1.net (SHARED_E1), byte for byte
 if [ -n "${SHARED_E1:-}" ]; then
   run product-e1 "$O/capture" "$SHARED_E1" $B cmp "$SHARED_E1" "$O"/capture/model-*.net || exit 1
@@ -75,7 +77,7 @@ the tests/build_ref.sh export), the reference exec/pipeline/run.py uses for E1. 
 cases are byte-equal to it (`ref-equal=1`); refusals are `reject: ...` on stderr, empty
 stdout, rc 1..125, with the reference also refusing (`ref-rc` nonzero).
 
-Gate (tests/gate.sh job lex-e1-seal, tests/lexseal.cx --gate): frozen bytes (dependencies
+Gate (tests/gate.sh job lex-e1-seal, tests/streamseal.cx --gate): frozen bytes (dependencies
 against the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
 identity.tsv), then a **replay**: the executor built from exec/c/run.c runs the sealed
 `model-<sha>.net` on every frozen input and must give the frozen stdout, stderr and rc; then
