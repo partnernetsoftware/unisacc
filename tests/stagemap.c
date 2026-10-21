@@ -168,6 +168,14 @@ static char *extra[] = {
     "E4", "prune-seal", "meta",
     /* net-prec-seal: 封存单网prec（内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:457 */
     "E3", "net-prec-seal", "meta",
+    /* net-binsel-seal: 封存单网binsel（C二元运算符+符号性→ALU flavour；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:458 */
+    "E3", "net-binsel-seal", "meta",
+    /* net-tyinfo-seal: 封存单网tyinfo（标量类型→size/uns/narrow三头；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:459 */
+    "E3", "net-tyinfo-seal", "meta",
+    /* net-pfconv-seal: 封存单网pfconv（printf转换字母→打印例程；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:460 */
+    "E3", "net-pfconv-seal", "meta",
+    /* net-regmap-seal: 封存单网regmap（tape寄存器+arch→机器寄存器；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:461 */
+    "lower", "net-regmap-seal", "meta",
     /* middle-flow-e3: --sealed-e3严格回放及拒绝; tests/gate.sh:363 */
     "E3", "middle-flow-e3", "meta",
     /* middle-flow-lower-accept: --sealed-lower接受投影回放; tests/gate.sh:364 */
