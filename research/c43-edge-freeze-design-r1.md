@@ -25,3 +25,9 @@
 首叶 `tests/seals/edge-e4-peep/`（8 键），检查器 `tests/edgeseal.py`，闸 `edge-e4-peep-seal`；边表 `tests/seal-edges.tsv` 计数 1/17。负例：闸内三类变异 + 落盘改一字节，均实测红。
 
 简报与报告原文：会话 scratchpad（edge-freeze-brief.md / edge-freeze-report.md），要点已尽录于此。
+
+## r2 追加：余两边的考古与收口（同日）
+
+- **pfconv 可达性**：ask 点是 `do_printf`（`src/front_parse.c` 内建 printf 降级）；991d3373（2026-09-26）起任何 `printf(` 触发 autoinc stdio.h 走库调用，内建路径唯 `-nostdinc` 可达（`src/front_pp.c:2097`）。全 9 转换探针实测 asked 9，输出字节确定（含 `%p`，传定值指针）。参考侧 `unisa/front/parse.py` 的 `PFCONVS` 是死 import，无任何 ask——stages 存在性比对对该边空真，边表 asked_evidence 改记 `-`。
+- **elf→enc**：`unisa/image/` 无 oracle 调用；C 全构建的 enc 计数即 elf 流 ask（hello.c 实测 20）。参考侧 enc 问全在 lower 相位，键答映射件 `edge-lower-enc` 已冻那条 ◐ 边。
+- **收口方案（自裁，未改产品）**：`tests/edgewitness.sh` 产品侧见证件——冻（探针 sha、该网 asked 计数、程序 stdout 字节、退出码），产品双观测判等才写，闸内三类负例。强度弱于键答映射件（不枚举键；pfconv 探针例外全枚举 9/9），`sealmodulescheck` 分类计数：**17/17 = 15 键答映射 + 2 产品侧见证**。设计报告点名的 T3 冲突（产品加 trace）以冻结既有可见面绕开；其推荐二（抽样消融慢闸）仍是把见证升格为因果证据的后续路。
