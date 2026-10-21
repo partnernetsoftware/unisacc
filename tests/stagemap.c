@@ -426,6 +426,8 @@ static char *extra[] = {
     "meta", "com-input-contract", "-",
     /* com-tape-struct: 程序结构级具名拒绝（未定义/重复标签、encoder-slice宽度；无行号的not covered）与重复数据符号接受登记（与参考逐字节同）; tests/gate.sh */
     "E3", "com-tape-struct", "meta",
+    /* com-source-name: 逻辑源名裁定判定叶（argv写法即源名：跨物理目录-S/__FILE__/诊断逐字节同，绝对写法原样）; tests/gate.sh */
+    "E2", "com-source-name", "meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */
