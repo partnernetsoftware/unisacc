@@ -416,6 +416,8 @@ static char *extra[] = {
     "lower", "com-hostaddr-neg", "meta",
     /* com-extent-neg: tape数据extent拒绝域（稀疏control逐字节同；2^31单项/累计产品具名拒绝，参考接受已登记）; tests/gate.sh */
     "lower", "com-extent-neg", "meta",
+    /* com-bindings-neg: .librarycall拒绝归属（缺bindings归绑定层、坏寄存器/操作数归tape域；plain与lnx .hostcall控制件逐字节同）; tests/gate.sh */
+    "lower", "com-bindings-neg", "meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */

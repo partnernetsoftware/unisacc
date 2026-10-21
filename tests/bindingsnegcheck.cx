@@ -1,0 +1,97 @@
+#!/usr/bin/env -S unisacc.com -run
+/* bindingsnegcheck.cx PRODUCT: library-call refusal domain and ownership, target
+   lnx/x86_64 (research/c43-lower-refusal-domain-proposal.md family 4; the model
+   executors are paired by exec/lower/libraryimportscheck.py -- this leaf is the
+   product-side witness, with the empty-stdout + named-stderr strength the
+   proposal says the model check still lacks).
+   Controls: a plain tape and a lnx .hostcall tape are accepted by product and
+   Python reference, images byte-identical each.
+   Negatives and their owners:
+   - .librarycall with no bindings: the product refuses rc1, empty stdout, no
+     output file, named "not covered: library import binding or signature"
+     (binding layer).  The reference ACCEPTS today (rc0): registered divergence,
+     same discipline as the extent/underscore registrations -- a reference
+     change turns this leaf red, never a silent widening.
+   - .librarycall r8 (bad register) and .librarycall r1 (wrong operand count):
+     owned by the tape domain, NOT the binding layer; both sides refuse at the
+     same check point, the product names the owner and the line. */
+#include <cx.h>
+static char D[4096], P[4096];
+static int checks;
+static char *slurp(const char *name, size_t *n) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
+}
+static int put(const char *name, const char *body) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);
+    return cx_write(path,body,strlen(body));
+}
+/* refusal==NULL: accept, image written.  Otherwise: rc1, empty stdout, no
+   output file, stderr carries the named refusal and, when given, the line. */
+static int product(const char *name, const char *tape, const char *refusal, const char *line) {
+    char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -b lnx/x86_64 -o '%s/%s.img' 2>'%s/%s.err'",
+        strstr(P,".com") ? "sh " : "",P,D,tape,D,name,D,name);
+    rc=cx_run_timeout(cmd,15,&out,&on);
+    { char e[8192];snprintf(e,sizeof e,"%s.err",name);err=slurp(e,&en); }
+    if (!refusal) {
+        char img[8192],*b;size_t bn=0;
+        snprintf(img,sizeof img,"%s.img",name);b=slurp(img,&bn);
+        ok=rc==0 && on==0 && b && bn>0;
+        free(b);
+    } else {
+        char img[16384];struct stat st;
+        snprintf(img,sizeof img,"%s/%s.img",D,name);
+        ok=rc==1 && on==0 && stat(img,&st)!=0 &&
+           err && strstr(err,refusal) && (!line || strstr(err,line));
+    }
+    printf("bindings %-22s %s\n",name,ok ? "pass" : "FAIL");
+    if(!ok)fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
+    free(out);free(err);checks++;return !ok;
+}
+/* refusal==NULL: today's registered reference acceptance or a plain accept. */
+static int reference(const char *name, const char *tape, const char *refusal) {
+    char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
+    snprintf(cmd,sizeof cmd,"python3 -m unisa compile '%s/%s' --from-tape -o '%s/%s.py.img' --target lnx/x86_64 --drive built >/dev/null 2>'%s/%s.py.err'",
+        D,tape,D,name,D,name);
+    rc=cx_run_timeout(cmd,25,&out,&on);
+    { char e[8192];snprintf(e,sizeof e,"%s.py.err",name);err=slurp(e,&en); }
+    ok=!refusal ? rc==0 : (rc!=0 && err && strstr(err,refusal));
+    printf("bindings %-22s %s\n",name,ok ? "pass" : "FAIL");
+    if(!ok)fprintf(stderr,"rc=%d stderr=%s\n",rc,err?err:"<missing>");
+    free(out);free(err);checks++;return !ok;
+}
+static int bytes_equal(const char *name, const char *prod, const char *ref) {
+    char ha[65],*a,*b;size_t an=0,bn=0;int ok;
+    a=slurp(prod,&an);b=slurp(ref,&bn);
+    ok=a&&b&&an==bn&&!memcmp(a,b,an);
+    if(ok){cx_sha256_hex(a,an,ha);printf("bindings %-22s pass (%zu B sha256 %.16s)\n",name,an,ha);}
+    else printf("bindings %-22s FAIL (%zu vs %zu B)\n",name,a?an:0,b?bn:0);
+    free(a);free(b);checks++;return !ok;
+}
+int main(int argc,char **argv) {
+    char own[]="/tmp/bindingsXXXXXX",cwd[4096];int bad=0;
+    if(argc!=2)return 2;
+    if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
+    snprintf(D,sizeof D,"%s",own);
+    if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
+    if(strchr(P,39)||strchr(D,39))return 2;
+    if(put("plain.tape","_start:\n  ret\n") ||
+       put("hostcall.tape","_start:\n.hostcall r1, r0\nret\n") ||
+       put("nobind.tape","f:\n.librarycall r1, r0\nret\n_start:\n  ret\n") ||
+       put("badreg.tape","f:\n.librarycall r8, r0\nret\n_start:\n  ret\n") ||
+       put("badops.tape","f:\n.librarycall r1\nret\n_start:\n  ret\n"))return 2;
+    bad+=product("control-plain",   "plain.tape",NULL,NULL);
+    bad+=product("control-hostcall","hostcall.tape",NULL,NULL);
+    bad+=product("neg-no-bindings", "nobind.tape","not covered: library import binding or signature",NULL);
+    bad+=product("neg-register",    "badreg.tape","tape domain: invalid register","line 2");
+    bad+=product("neg-operands",    "badops.tape","tape domain: wrong operand count","line 2");
+    bad+=reference("control-plain-ref",   "plain.tape",NULL);
+    bad+=reference("control-hostcall-ref","hostcall.tape",NULL);
+    bad+=reference("neg-no-bindings-ref", "nobind.tape",NULL);   /* registered reference acceptance */
+    bad+=reference("neg-register-ref",    "badreg.tape","is not a register");
+    bad+=reference("neg-operands-ref",    "badops.tape","wrong operand count");
+    bad+=bytes_equal("plain-bytes",   "control-plain.img",   "control-plain-ref.py.img");
+    bad+=bytes_equal("hostcall-bytes","control-hostcall.img","control-hostcall-ref.py.img");
+    printf("bindings checks %d bad %d\n",checks,bad);
+    return bad?1:0;
+}

@@ -1046,6 +1046,7 @@ if [ "$COM" = 1 ]; then
     job com-tapedomain tests/bound 58 sh "$PRODUCT" -run tests/tapedomaincheck.cx -- "$PRODUCT"   # 0.0.43 TP-7/TP-8/TP-9: a raw .tape outside the Tape domain is refused before anything is written
     job com-hostaddr-neg tests/bound 58 sh "$PRODUCT" -run tests/hostaddrnegcheck.cx -- "$PRODUCT"   # 0.0.43: .hostaddr index 0..3 refusal domain (control byte-equal to the reference; -1/4 named lower refusals both sides)
     job com-extent-neg tests/bound 58 sh "$PRODUCT" -run tests/extentnegcheck.cx -- "$PRODUCT"   # 0.0.43: tape data-extent refusal domain (sparse control byte-equal; 2^31 single/cumulative product-refused, reference acceptance registered)
+    job com-bindings-neg tests/bound 58 sh "$PRODUCT" -run tests/bindingsnegcheck.cx -- "$PRODUCT"   # 0.0.43: .librarycall refusal ownership (missing bindings named by the binding layer, bad register/operands by the tape domain; plain and lnx .hostcall controls byte-equal)
     job com-hostenv tests/bound 58 sh "$PRODUCT" -run tests/hostenvcheck.cx -- "$PRODUCT"   # 0.0.43 plan step 1: no host environment variable changes a product result (UNISA_MAXSTEPS is a build constant in the shipped driver)
     job com-latebind tests/bound 58 sh "$PRODUCT" -run tests/latebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-1: host-symbol contract stream, binding refusal, in-memory -run of plain programs
     job lib-latebind tests/bound 58 sh "$PRODUCT" -run tests/liblatebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-2a: the library declaration contract carries no host address
