@@ -424,6 +424,8 @@ static char *extra[] = {
     "chain", "com-cerr-hygiene", "E1,E2,E3,meta",
     /* com-input-contract: 驱动输入合同（tape路单源具名拒绝；C路多余输入与空输入现行口径登记；空tape镜像与参考逐字节同）; tests/gate.sh */
     "meta", "com-input-contract", "-",
+    /* com-tape-struct: 程序结构级具名拒绝（未定义/重复标签、encoder-slice宽度；无行号的not covered）与重复数据符号接受登记（与参考逐字节同）; tests/gate.sh */
+    "E3", "com-tape-struct", "meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */
