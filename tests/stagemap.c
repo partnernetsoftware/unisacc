@@ -176,6 +176,30 @@ static char *extra[] = {
     "E3", "net-pfconv-seal", "meta",
     /* net-regmap-seal: 封存单网regmap（tape寄存器+arch→机器寄存器；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:461 */
     "lower", "net-regmap-seal", "meta",
+    /* net-lex-seal: 封存单网lex（字符类+前瞻类→词法动作；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:462 */
+    "E1", "net-lex-seal", "meta",
+    /* net-parse-seal: 封存单网parse（非终结符+前瞻token→产生式；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:463 */
+    "E3", "net-parse-seal", "meta",
+    /* net-type-seal: 封存单网type（t1 op t2→结果类型；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:464 */
+    "E3", "net-type-seal", "meta",
+    /* net-scope-seal: 封存单网scope（作用域上下文+声明种类→符号表动作；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:465 */
+    "E3", "net-scope-seal", "meta",
+    /* net-irsel-seal: 封存单网irsel（IR family+flavor→下降配方；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:466 */
+    "E3", "net-irsel-seal", "meta",
+    /* net-isel-seal: 封存单网isel（tape op+arch→指令form与symbol两头；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:467 */
+    "lower", "net-isel-seal", "meta",
+    /* net-enc-seal: 封存单网enc（tape op+os+arch→编码form；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:468 */
+    "E5", "net-enc-seal", "meta",
+    /* net-reloc-seal: 封存单网reloc（跳转种类+arch→重定位种类；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:469 */
+    "lower", "net-reloc-seal", "meta",
+    /* net-abi-seal: 封存单网abi（tape op+os+arch→ABI十三头；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:470 */
+    "lower", "net-abi-seal", "meta",
+    /* net-combo-seal: 封存单网combo（tape op+os+arch→isel+ABI十五头；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:471 */
+    "lower", "net-combo-seal", "meta",
+    /* net-opinfo-seal: 封存单网opinfo（tape op→simple/acls/bcls三头；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:472 */
+    "E4", "net-opinfo-seal", "meta",
+    /* net-peep-seal: 封存单网peep（指令类对+关系→窥孔动作；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:473 */
+    "E4", "net-peep-seal", "meta",
     /* middle-flow-e3: --sealed-e3严格回放及拒绝; tests/gate.sh:363 */
     "E3", "middle-flow-e3", "meta",
     /* middle-flow-lower-accept: --sealed-lower接受投影回放; tests/gate.sh:364 */
