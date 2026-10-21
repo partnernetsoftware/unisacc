@@ -9,10 +9,12 @@
      on that target, image byte-equal to the text route.
    Negatives, each one corruption of an accepted carrier: bad magic, truncation,
    a flipped digest byte, trailing garbage, and the valid origin carrier built
-   for osx/arm64 (origin mismatch).  Each must exit 1, write nothing to stdout,
-   leave no output file, and name the refusal on stderr
-   ("invalid tapebin or origin target mismatch"); timeouts and signals are not
-   refusals. */
+   for osx/arm64 (origin mismatch).  Each corruption is refused in all four
+   modes (-S, -c, -b, -run; the origin mismatch only in the targeted modes):
+   exit 1, nothing on stdout, the output path left as it was -- absent when
+   absent, an existing file byte for byte unchanged -- and the named refusal
+   on stderr ("invalid tapebin or origin target mismatch"); timeouts and
+   signals are not refusals. */
 #include <cx.h>
 static char D[4096], P[4096];
 static int checks, bad;
@@ -48,6 +50,41 @@ static int build(const char *name, const char *in, const char *target, int expec
     if(note(name,ok))fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
     free(out);free(err);return !ok;
 }
+/* One refused carrier in one mode: rc1, empty stdout, named refusal; a writing
+   mode is run twice, against an absent path (stays absent) and against an
+   existing file (stays byte for byte). */
+static int refuse_mode(const char *name, const char *in, const char *modeid) {
+    static const char SENTINEL[]="keep these bytes\n";
+    char cmd[16384],args[8192],outpath[16384],*out=0,*err=0;size_t on=0,en=0,bn=0;
+    int rc,ok,writes=0,pass;
+    outpath[0]=0;
+    if(!strcmp(modeid,"S"))snprintf(args,sizeof args,"-S -o -");
+    else if(!strcmp(modeid,"c")){snprintf(outpath,sizeof outpath,"%s/%s.out",D,name);snprintf(args,sizeof args,"-c -o '%s'",outpath);writes=1;}
+    else if(!strcmp(modeid,"b")){snprintf(outpath,sizeof outpath,"%s/%s.out",D,name);snprintf(args,sizeof args,"-b lnx/x86_64 -o '%s'",outpath);writes=1;}
+    else snprintf(args,sizeof args,"-run");
+    for(pass=0;pass<(writes?2:1);pass++){
+        char *b=0;
+        if(writes){unlink(outpath);if(pass==1&&cx_write(outpath,SENTINEL,sizeof SENTINEL-1))return note(name,0);}
+        snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' %s 2>'%s/%s.err'",
+            strstr(P,".com") ? "sh " : "",P,D,in,args,D,name);
+        rc=cx_run_timeout(cmd,15,&out,&on);
+        { char e[8192];snprintf(e,sizeof e,"%s.err",name);err=slurp(e,&en); }
+        ok=rc==1 && on==0 && err && strstr(err,"invalid tapebin or origin target mismatch");
+        if(ok&&writes){
+            struct stat st;
+            if(pass==0)ok=stat(outpath,&st)!=0;
+            else{b=cx_read(outpath,&bn);ok=b&&bn==sizeof SENTINEL-1&&!memcmp(b,SENTINEL,bn);}
+        }
+        if(!ok){
+            char label[128];snprintf(label,sizeof label,"%s/%s%s",name,modeid,pass?"+existing":"");
+            note(label,0);fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
+            free(out);free(err);free(b);return 1;
+        }
+        free(out);out=0;free(err);err=0;free(b);
+    }
+    { char label[128];snprintf(label,sizeof label,"%s/%s",name,modeid);note(label,1); }
+    return 0;
+}
 static int bytes_equal(const char *name, const char *x, const char *y) {
     char ha[65],*a,*b;size_t an=0,bn=0;int ok;
     a=slurp(x,&an);b=slurp(y,&bn);ok=a&&b&&an==bn&&!memcmp(a,b,an);
@@ -73,6 +110,18 @@ int main(int argc,char **argv) {
     if(note("emit",cx_run_timeout(cmd,15,0,0)==0))return 1;
     build("ctl-roundtrip","own.tapebin","lnx/x86_64",0);
     bytes_equal("roundtrip-bytes","ctl-roundtrip.img","text.img");
+    /* decode round trip: the carrier's -S text re-encodes to the same carrier
+       and builds to the same image (its rendering differs from the source
+       spacing, so the law is the fixpoint, not text equality) */
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/own.tapebin' -S -o '%s/decoded.tape' 2>'%s/dec.err'",
+        strstr(P,"com") ? "sh " : "",P,D,D,D);
+    note("decode",cx_run_timeout(cmd,15,0,0)==0);
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/decoded.tape' --tapebin -c -o '%s/re.tapebin' 2>'%s/re.err'",
+        strstr(P,"com") ? "sh " : "",P,D,D,D);
+    note("re-encode",cx_run_timeout(cmd,15,0,0)==0);
+    bytes_equal("decode-fixpoint","re.tapebin","own.tapebin");
+    build("ctl-decoded","decoded.tape","lnx/x86_64",0);
+    bytes_equal("decoded-img","ctl-decoded.img","text.img");
     /* reference-encoded carrier with an explicit origin */
     snprintf(cmd,sizeof cmd,
         "python3 -c \"from unisa.tapebin import encode,target_id;import sys;"
@@ -89,11 +138,18 @@ int main(int argc,char **argv) {
     { char *m=malloc(n);memcpy(m,b,n);m[n-1]^=0xff;rc=save("bad-digest.tapebin",m,n);free(m);if(rc)return 2; }
     { char *m=malloc(n+1);memcpy(m,b,n);m[n]='Z';rc=save("bad-tail.tapebin",m,n+1);free(m);if(rc)return 2; }
     free(b);
-    build("neg-magic", "bad-magic.tapebin", "lnx/x86_64",1);
-    build("neg-trunc", "bad-trunc.tapebin", "lnx/x86_64",1);
-    build("neg-digest","bad-digest.tapebin","lnx/x86_64",1);
-    build("neg-tail",  "bad-tail.tapebin",  "lnx/x86_64",1);
-    build("neg-origin","origin.tapebin",    "osx/arm64", 1);
+    { static const struct { const char *name, *in; } CORRUPT[] = {
+        {"neg-magic", "bad-magic.tapebin"},
+        {"neg-trunc", "bad-trunc.tapebin"},
+        {"neg-digest","bad-digest.tapebin"},
+        {"neg-tail",  "bad-tail.tapebin"},
+        {0,0} };
+      static const char *MODE[]={"S","c","b","run",0};
+      int i,m;
+      for(i=0;CORRUPT[i].name;i++)for(m=0;MODE[m];m++)
+        refuse_mode(CORRUPT[i].name,CORRUPT[i].in,MODE[m]);
+    }
+    build("neg-origin","origin.tapebin","osx/arm64",1);
     printf("tapebin checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }
