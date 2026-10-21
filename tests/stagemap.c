@@ -174,6 +174,34 @@ static char *extra[] = {
     "chain", "seal-modules", "E1,E3,E4,E6,meta",
     /* edge-e4-peep-seal: 边级冻结原件（e4->peep 规范化问答面回放），tests/edgeseal.py; tests/gate.sh:460 */
     "E4", "edge-e4-peep-seal", "meta",
+    /* edge-e2-pp-seal: 边级冻结原件（e2->pp），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E2", "edge-e2-pp-seal", "meta",
+    /* edge-e1-lex-seal: 边级冻结原件（e1->lex），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E1", "edge-e1-lex-seal", "meta",
+    /* edge-e3-parse-seal: 边级冻结原件（e3->parse），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-parse-seal", "meta",
+    /* edge-e3-type-seal: 边级冻结原件（e3->type），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-type-seal", "meta",
+    /* edge-e3-scope-seal: 边级冻结原件（e3->scope），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-scope-seal", "meta",
+    /* edge-e3-irsel-seal: 边级冻结原件（e3->irsel），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-irsel-seal", "meta",
+    /* edge-e3-tyinfo-seal: 边级冻结原件（e3->tyinfo），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-tyinfo-seal", "meta",
+    /* edge-e3-binsel-seal: 边级冻结原件（e3->binsel），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-binsel-seal", "meta",
+    /* edge-e3-prec-seal: 边级冻结原件（e3->prec），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E3", "edge-e3-prec-seal", "meta",
+    /* edge-e4-opinfo-seal: 边级冻结原件（e4->opinfo），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "E4", "edge-e4-opinfo-seal", "meta",
+    /* edge-lower-abi-seal: 边级冻结原件（lower->abi），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "lower", "edge-lower-abi-seal", "meta",
+    /* edge-lower-regmap-seal: 边级冻结原件（lower->regmap），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "lower", "edge-lower-regmap-seal", "meta",
+    /* edge-lower-reloc-seal: 边级冻结原件（lower->reloc），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "lower", "edge-lower-reloc-seal", "meta",
+    /* edge-lower-enc-seal: 边级冻结原件（lower->enc），同 edge-e4-peep-seal; tests/edgeseal.py */
+    "lower", "edge-lower-enc-seal", "meta",
     /* net-prec-seal: 封存单网prec（内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:457 */
     "E3", "net-prec-seal", "meta",
     /* net-binsel-seal: 封存单网binsel（C二元运算符+符号性→ALU flavour；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:458 */
@@ -530,7 +558,7 @@ static int also_stages(char *name, char *primary, char *out) {
     return count;
 }
 int main(int argc, char **argv) {
-    static char names[1024][128]; int n = 0, i, j, bad = 0, nover = 0;
+    static char names[2048][128]; int n = 0, i, j, bad = 0, nover = 0;
     char line[256], tags[256], *mode = argc > 1 ? argv[1] : "--check";
     if (!schema_ok()) return 1;
     if (!strcmp(mode, "--stages")) { for (i = 0; rules[i]; i += 2) printf("%s\n", rules[i]); return 0; }
@@ -548,7 +576,7 @@ int main(int argc, char **argv) {
         if (!strchr(line, '\n') && !feof(stdin)) { fprintf(stderr, "stagemap: input name too long\n"); return 1; }
         line[strcspn(line, "\r\n")] = 0;
         if (*line) {
-            if (n == 1024) { fprintf(stderr, "stagemap: input list overflow\n"); return 1; }
+            if (n == 2048) { fprintf(stderr, "stagemap: input list overflow\n"); return 1; }
             if (strlen(line) >= 128) { fprintf(stderr, "stagemap: input name too long\n"); return 1; }
             strcpy(names[n++], line);
         }
