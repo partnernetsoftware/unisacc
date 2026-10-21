@@ -172,6 +172,8 @@ static char *extra[] = {
     "E6", "elf-seal", "meta",
     /* prune-seal: 封存prune流（gen.py prune，-O2 tape录制输入）回放与构造依赖核验，含负例; tests/gate.sh:456 */
     "E4", "prune-seal", "meta",
+    /* lower-seal: 封存lower测量叶（tape.text->target.text）回放与构造依赖核验，含负例; tests/gate.sh */
+    "lower", "lower-seal", "meta",
     /* seal-modules: manifest+xy/edges 结构（--check-only）；回放由 *-seal 单叶 job；tests/gate.sh */
     "chain", "seal-modules", "E1,E3,E4,E6,meta",
     /* edge-e4-peep-seal: 边级冻结原件（e4->peep 规范化问答面回放），tests/edgeseal.py; tests/gate.sh:460 */
