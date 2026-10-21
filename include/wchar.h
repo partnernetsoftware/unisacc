@@ -8,6 +8,7 @@
 #ifndef _UNISA_WCHAR_H
 #define _UNISA_WCHAR_H
 #include <stdlib.h>   /* errno, ERANGE, LONG_MIN/LONG_MAX and _unisa_strdigit for wcstol/wcstoul */
+#include <time.h>     /* struct tm and strftime for wcsftime */
 
 #ifndef _UNISA_WCHAR_T
 #define _UNISA_WCHAR_T
@@ -337,6 +338,35 @@ static unsigned long wcstoul(const wchar_t *__u_s, wchar_t **__u_end, int __u_ba
     __u_v = ((unsigned long)__u_hi << 32) | (unsigned long)__u_lo;
     if (__u_neg) return (unsigned long)0 - __u_v;
     return __u_v;
+}
+#endif
+
+/* wcsftime (C99 7.24.5.1): strftime over wide characters, in the C locale.
+ * The wide format is narrowed into a malloc'd string; a wide character
+ * outside 0..127 is not a C-locale format, so 0 is returned and s is left
+ * alone (locale-specific formats are out of scope).  strftime then formats
+ * into the first maxsize bytes of s itself, and that result -- every byte
+ * ASCII in the C locale -- is widened in place from its end (wide element k
+ * occupies bytes 4k..4k+3, past every narrow byte still to be read), so no
+ * second buffer is needed.  Did not fit (narrow length >= maxsize): 0, and
+ * the array's contents are indeterminate, as the standard allows. */
+#if !__UNISA_FTRIM_LIBC || __UN_wcsftime
+static size_t wcsftime(wchar_t *__u_s, size_t __u_max, const wchar_t *__u_f, const struct tm *__u_tm) {
+    char *__u_nf; char *__u_b; size_t __u_n; size_t __u_k;
+    __u_n = 0;
+    while (__u_f[__u_n]) { if (__u_f[__u_n] < 0 || __u_f[__u_n] > 127) return 0; __u_n = __u_n + 1; }
+    __u_nf = (char *)malloc((long)__u_n + 1);
+    if (__u_nf == 0) return 0;
+    __u_k = 0;
+    while (__u_k <= __u_n) { __u_nf[__u_k] = (char)__u_f[__u_k]; __u_k = __u_k + 1; }
+    __u_b = (char *)__u_s;
+    __u_n = strftime(__u_b, __u_max, __u_nf, __u_tm);
+    free(__u_nf);
+    if (__u_n == 0) { if (__u_max) __u_s[0] = 0; return 0; }
+    __u_s[__u_n] = 0;
+    __u_k = __u_n;
+    while (__u_k > 0) { __u_k = __u_k - 1; __u_s[__u_k] = (wchar_t)__u_b[__u_k]; }
+    return __u_n;
 }
 #endif
 
