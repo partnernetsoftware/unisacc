@@ -370,4 +370,94 @@ static size_t wcsftime(wchar_t *__u_s, size_t __u_max, const wchar_t *__u_f, con
 }
 #endif
 
+/* Restartable multibyte/wide conversion (C99 7.24.6) in the C locale: one
+ * byte per character, a byte below 128 is the character with the same value,
+ * a byte of 128 or more is an invalid multibyte character (EILSEQ), a wide
+ * character outside 0..127 has no multibyte form.  There is no shift state,
+ * so every call is stateless; the mbstate_t is never written, and mbsinit
+ * reports the host's rule (a null pointer or a zero count is initial).
+ * Return values and errno follow the host's C-locale behaviour exactly;
+ * errno is not touched on success.  wcrtomb with a null s stores into no
+ * buffer and reports 1 for every wc, as the host does. */
+#if !__UNISA_FTRIM_LIBC || __UN_mbsinit
+static int mbsinit(const mbstate_t *__u_ps) {
+    return __u_ps == 0 || __u_ps->__u_count == 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_btowc
+static wint_t btowc(int __u_c) {
+    if (__u_c < 0 || __u_c > 127) return WEOF;
+    return (wint_t)__u_c;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wctob
+static int wctob(wint_t __u_c) {
+    if (__u_c > 127) return -1;
+    return (int)__u_c;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_mbrtowc
+static size_t mbrtowc(wchar_t *__u_pwc, const char *__u_s, size_t __u_n, mbstate_t *__u_ps) {
+    unsigned char __u_c;
+    if (__u_s == 0) return 0;
+    if (__u_n == 0) return (size_t)-2;
+    __u_c = (unsigned char)__u_s[0];
+    if (__u_c >= 128) { errno = EILSEQ; return (size_t)-1; }
+    if (__u_pwc) *__u_pwc = (wchar_t)__u_c;
+    return __u_c == 0 ? 0 : 1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_mbrlen
+static size_t mbrlen(const char *__u_s, size_t __u_n, mbstate_t *__u_ps) {
+    unsigned char __u_c;
+    if (__u_s == 0) return 0;
+    if (__u_n == 0) return (size_t)-2;
+    __u_c = (unsigned char)__u_s[0];
+    if (__u_c >= 128) { errno = EILSEQ; return (size_t)-1; }
+    return __u_c == 0 ? 0 : 1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcrtomb
+static size_t wcrtomb(char *__u_s, wchar_t __u_wc, mbstate_t *__u_ps) {
+    if (__u_s == 0) return 1;
+    if (__u_wc < 0 || __u_wc > 127) { errno = EILSEQ; return (size_t)-1; }
+    __u_s[0] = (char)__u_wc;
+    return 1;
+}
+#endif
+/* mbsrtowcs/wcsrtombs: with a null dst the whole source is counted (len is
+ * ignored) and *src is left alone, even on EILSEQ.  With a dst, up to len
+ * elements are stored; *src becomes null once the terminating null has been
+ * stored, otherwise the address just past the last element converted, or on
+ * EILSEQ the address of the offending character (the elements before it are
+ * already stored). */
+#if !__UNISA_FTRIM_LIBC || __UN_mbsrtowcs
+static size_t mbsrtowcs(wchar_t *__u_dst, const char **__u_src, size_t __u_len, mbstate_t *__u_ps) {
+    const char *__u_s; size_t __u_i; unsigned char __u_c;
+    __u_s = *__u_src; __u_i = 0;
+    for (;;) {
+        if (__u_dst && __u_i >= __u_len) { *__u_src = __u_s + __u_i; return __u_i; }
+        __u_c = (unsigned char)__u_s[__u_i];
+        if (__u_c >= 128) { if (__u_dst) *__u_src = __u_s + __u_i; errno = EILSEQ; return (size_t)-1; }
+        if (__u_dst) __u_dst[__u_i] = (wchar_t)__u_c;
+        if (__u_c == 0) { if (__u_dst) *__u_src = 0; return __u_i; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcsrtombs
+static size_t wcsrtombs(char *__u_dst, const wchar_t **__u_src, size_t __u_len, mbstate_t *__u_ps) {
+    const wchar_t *__u_s; size_t __u_i; wchar_t __u_wc;
+    __u_s = *__u_src; __u_i = 0;
+    for (;;) {
+        if (__u_dst && __u_i >= __u_len) { *__u_src = __u_s + __u_i; return __u_i; }
+        __u_wc = __u_s[__u_i];
+        if (__u_wc < 0 || __u_wc > 127) { if (__u_dst) *__u_src = __u_s + __u_i; errno = EILSEQ; return (size_t)-1; }
+        if (__u_dst) __u_dst[__u_i] = (char)__u_wc;
+        if (__u_wc == 0) { if (__u_dst) *__u_src = 0; return __u_i; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+
 #endif

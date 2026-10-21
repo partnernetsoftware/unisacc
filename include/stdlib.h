@@ -806,6 +806,62 @@ static int system(const char *__u_cmd) {
 }
 #endif
 #endif
+/* mbtowc/wctomb/mbstowcs/wcstombs (C99 7.20.7, 7.20.8) in the C locale,
+ * where the multibyte encoding is one byte per character: a byte below 128
+ * is the character with the same value, a byte of 128 or more is an invalid
+ * multibyte character (EILSEQ), and no shift state exists.  Return values
+ * and errno follow the host's C-locale behaviour exactly; a wide character
+ * outside 0..127 has no multibyte form.  No function touches errno on
+ * success.  mbtowc with n == 0: the empty string still converts to 0, any
+ * other string is "incomplete" and gives -1 without errno. */
+#if !__UNISA_FTRIM_LIBC || __UN_mbtowc
+static int mbtowc(wchar_t *__u_pwc, const char *__u_s, size_t __u_n) {
+    unsigned char __u_c;
+    if (__u_s == 0) return 0;
+    if (__u_s[0] == 0) { if (__u_pwc) *__u_pwc = 0; return 0; }
+    if (__u_n == 0) return -1;
+    __u_c = (unsigned char)__u_s[0];
+    if (__u_c >= 128) { errno = EILSEQ; return -1; }
+    if (__u_pwc) *__u_pwc = (wchar_t)__u_c;
+    return 1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wctomb
+static int wctomb(char *__u_s, wchar_t __u_wc) {
+    if (__u_s == 0) return 0;
+    if (__u_wc < 0 || __u_wc > 127) { errno = EILSEQ; return -1; }
+    __u_s[0] = (char)__u_wc;
+    return 1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_mbstowcs
+static size_t mbstowcs(wchar_t *__u_dst, const char *__u_src, size_t __u_n) {
+    size_t __u_i; unsigned char __u_c;
+    __u_i = 0;
+    for (;;) {
+        if (__u_dst && __u_i >= __u_n) return __u_i;
+        __u_c = (unsigned char)__u_src[__u_i];
+        if (__u_c >= 128) { errno = EILSEQ; return (size_t)-1; }
+        if (__u_dst) __u_dst[__u_i] = (wchar_t)__u_c;
+        if (__u_c == 0) return __u_i;
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_wcstombs
+static size_t wcstombs(char *__u_dst, const wchar_t *__u_src, size_t __u_n) {
+    size_t __u_i; wchar_t __u_wc;
+    __u_i = 0;
+    for (;;) {
+        if (__u_dst && __u_i >= __u_n) return __u_i;
+        __u_wc = __u_src[__u_i];
+        if (__u_wc < 0 || __u_wc > 127) { errno = EILSEQ; return (size_t)-1; }
+        if (__u_dst) __u_dst[__u_i] = (char)__u_wc;
+        if (__u_wc == 0) return __u_i;
+        __u_i = __u_i + 1;
+    }
+}
+#endif
 /* 0.0.34 L2 (SQLite's Apple path): forwarded to the system C library */
 #ifdef __APPLE__
 long random(void);
