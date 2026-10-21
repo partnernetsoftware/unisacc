@@ -23,15 +23,17 @@ to it (`ref-equal=1`); the reseal's `corpus` step replays all 96 keep-elf source
 (recorded in the reseal's corpus.tsv, not sealed: 96 accepted / 0 refused / 96 byte-equal at
 the 2026-10-21 reseal).
 
-Gate (tests/gate.sh job opt-e4-seal, tests/optseal.cx --gate): frozen bytes (dependencies
+Gate (tests/gate.sh job opt-e4-seal, tests/streamseal.cx --gate, leaf config `cell.tsv`): frozen bytes (dependencies
 against the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
 identity.tsv), then a **replay**: the executor built from exec/c/run.c runs the sealed
 `model-<sha>.net` on every frozen input and must give the frozen stdout, stderr and rc; then
 the negatives (omitted rule, changed rule/executor source, changed fixture/record/model each
 FAIL).  Verification only: no stamp, no cache or reuse grant.
 
-Files: `streams.tsv` (one row per case: verdict, rc, input/stdout/stderr/model with length and
-sha256, `ref-rc`, `ref-equal`), `dependencies.tsv` (role, path, length, sha256),
+Files: `cell.tsv` (stream-seal module config: stage, formats, accept/refuse counts, negative
+targets; checker is tests/streamseal.cx), `streams.tsv` (one row per case: verdict, rc,
+input/stdout/stderr/model with length and sha256, `ref-rc`, `ref-equal`), `dependencies.tsv`
+(role, path, length, sha256),
 `closure.expected.tsv` (role, path), `measurement.tsv`, `identity.tsv` (core = sha256 of the
 sorted dependency+case rows; proof = sha256 over verdict+stdout+stderr shas).
 

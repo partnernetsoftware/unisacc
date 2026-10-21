@@ -129,7 +129,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | **e2** | `src.c` → `pp.text` | `e2.net` | 预处理：续行/注释/指令/宏/条件/include | **有** · `tests/seals/exec-pp-literals/`（measured leaf；STALE风险：头/资源闭包持续进封件） | 近 tip 常被库头→autoinc→叶封拖动；纯转发原型刀可守冻哨 |
 | **e1** | `pp.text` → `tokens.typed` | `e1.net` | 词法：关键字/标识/算符/字面量最长匹配 | **有** · `tests/seals/exec-lex-e1/`（流侧，e1 对录制 pp.text 输入的冻结回放；lex-e1-seal） | 流封只证录制样本；另有网级叶 `exec-net-lex/`（内核×金表，非流内 ask） |
 | **e3** | `tokens.typed` → `tape.text` | `e3.net` | 语法+类型等合成段 → tape（parse/type 等物理嵌此） | **有** · `stagecontract-e1-e3/` + `middleflow-step0/e3/` + `librarycallbacke3/`（librarytyped* 历史≠PASS→STALE风险） | STAGE-IDENTITIES：parse/type **未拆**仍嵌 e3 |
-| **e4** | `tape.text` → `tape.text` | `e4.net` | opt：tape 上 peephole / 栈→寄存器类改写 | **有** · `tests/seals/exec-opt-e4/`（opt --o2 对录制 -O0 tape 的冻结回放；opt-e4-seal） | 前端是输入；另有网级叶 `exec-net-opinfo/`、`exec-net-peep/` |
+| **e4** | `tape.text` → `tape.text` | `e4.net` | opt：tape 上 peephole / 栈→寄存器类改写 | **有** · `tests/seals/exec-opt-e4/` + `cell.tsv`；闸 `opt-e4-seal` 走 **`tests/streamseal.cx`**（流格模块试点；`optseal.cx` 仅 reseal capture） | 前端是输入；另有网级叶 `exec-net-opinfo/`、`exec-net-peep/` |
 | **prune** | `tape.text` → `tape.text` | `prune.net` | 按根/导出剪不可达整函数（公开 tape 路径可跳） | **有** · `tests/seals/exec-prune/`（gen.py prune 对录制 -O2 tape，对 Python referee 冻字节；prune-seal） | 仍**不消费** 18 金网 |
 | **lower** | `tape.text` → `target.text` | `lower.net` | ABI/regmap/syscall/布局/reloc 降到目标 ops | **有** · `stagecontract-tape-lower/` + `middleflow-step0/lower/` + `librarytypedlower/` + `librarycallbacklower/`（历史≠PASS→STALE风险） | tip≈99-commit 窗 **0** 笔改 lower 封/构造；有封且近窗不拖 |
 | **elf** | `target.text` → `image.bytes` | `elf.net` | 编码 + ELF/Mach-O/PE（或内存镜像）写出 | **有** · `tests/seals/exec-elf/`（enc --elf，**仅 lnx/x86_64 一个目标**，对录制 target.text；elf-seal） | Mach-O/PE/内存镜像未封；STAGE-IDENTITIES：enc/image **集成于 elf**；另有网级叶 `exec-net-enc/` |
@@ -239,7 +239,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ### 3.0d 可核验进度
 
 
-封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级点名夹具仍 0；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对前端 8 网「Python 问过则 C 必问过」——缺的是 prec/binsel/opinfo/peep/abi/regmap/reloc/enc 八边的点名 ask 证据）；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
+封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级点名夹具仍 0；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对 10 网「Python 问过则 C 必问过」（前端 8 网 + prec/binsel，-c -v 打印已扩）——缺的是 opinfo/peep/abi/regmap/reloc/enc 六边的点名 ask 证据，Python 参照侧的这些 ask 在 unisa/opt.py 与 unisa/lower.py，compile_file 前端路线不触达，需全程路线另开一刀）；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
 
 | 发布链三格（2026-10-21协调口径） | 状态 | 证据边界 |
 |---|---|---|
