@@ -33,7 +33,8 @@ import os
 if os.environ.get("SHARD"):
     k, n = map(int, os.environ["SHARD"].split("/"))
     files = files[k - 1::n]
-FRONT = ("pp", "lex", "parse", "type", "scope", "irsel", "tyinfo", "pfconv")
+FRONT = ("pp", "lex", "parse", "type", "scope", "irsel", "tyinfo", "pfconv",
+         "prec", "binsel")
 nets = _built()
 # a probe the two front ends are KNOWN to disagree on is listed, with its
 # reason, in one place -- ccrun.knownwrong -- and is not re-judged here

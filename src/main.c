@@ -360,6 +360,7 @@ int main(void) {
             es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
             es(" scope "); en(nask[S_SCOPE]); es(" irsel "); en(nask[S_IRSEL]);
             es(" tyinfo "); en(nask[S_TYINFO]); es(" pfconv "); en(nask[S_PFCONV]);
+            es(" prec "); en(nask[S_PREC]); es(" binsel "); en(nask[S_BINSEL]);
             ec(10);
             __write(2, out, nout);
         }
