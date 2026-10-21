@@ -162,6 +162,8 @@ static char *extra[] = {
     "E1", "lex-e1-seal", "meta",
     /* opt-e4-seal: 封存opt流（e4，-O0 tape录制输入）回放与构造依赖核验，含负例; tests/gate.sh:454 */
     "E4", "opt-e4-seal", "meta",
+    /* elf-seal: 封存elf流（enc --elf，lnx/x86_64，target.text录制输入）回放与构造依赖核验，含负例; tests/gate.sh:455 */
+    "E6", "elf-seal", "meta",
     /* middle-flow-e3: --sealed-e3严格回放及拒绝; tests/gate.sh:363 */
     "E3", "middle-flow-e3", "meta",
     /* middle-flow-lower-accept: --sealed-lower接受投影回放; tests/gate.sh:364 */
