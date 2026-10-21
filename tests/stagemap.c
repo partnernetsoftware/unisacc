@@ -68,6 +68,8 @@ static char *extra[] = {
     "chain", "stages-3a", "-",
     "chain", "stages-3b", "-",
     "chain", "stages-3c", "-",
+    /* oracle-cache: 全阶段ask漏斗inf()（DENSE缓存）双向全域对拍infer()权重直算（A-49）; tests/gate.sh:352 */
+    "chain", "oracle-cache", "meta",
     "build", "closure-c4a-prepare closure-c4b-prepare", "-",
     "build", "closure-c3a-prepare closure-c3b-prepare closure-c3c-prepare", "-",
     "build", "closure-c4c-prepare", "-",

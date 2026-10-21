@@ -239,7 +239,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ### 3.0d 可核验进度
 
 
-封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级夹具仍 0）；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
+封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级点名夹具仍 0；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对前端 8 网「Python 问过则 C 必问过」——缺的是 prec/binsel/opinfo/peep/abi/regmap/reloc/enc 八边的点名 ask 证据）；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
 
 | 发布链三格（2026-10-21协调口径） | 状态 | 证据边界 |
 |---|---|---|

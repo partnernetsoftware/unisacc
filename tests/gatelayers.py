@@ -51,7 +51,7 @@ PIPELINE = set("""
 closure-c1a closure-c1b closure-c1c
 declshape volatile-comma malloc asmtext combo forward forward-multi
 linkunits staticinit tagforward parserbounds formatonce staticunits cli
-ccparity run multi hostile source target kernel source-layout
+ccparity run multi hostile source target kernel source-layout oracle-cache
 """.split())
 PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff-",
                    "ccrun-", "opt-run-", "closure-", "declmatrix-", "com-",
