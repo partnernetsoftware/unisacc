@@ -413,11 +413,10 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 
 ## Status
 
-The latest release is **v0.0.36** (2026-10-09): signed `unisacc.com`,
-SHA-256 `baf296dd…`, plus the notarized macOS dmg; receipt in
-[research/r36-release-acceptance.json](research/r36-release-acceptance.json).
-0.0.37 is in development ([plan](plans/v0.0.37.md)). Verification, platform gaps
-and signing work are recorded in [prd](prd.md).
+Current version, Latest, verification state and the active plan are maintained
+only in [PRD: current status and plans](prd.md#current-plans).
+The seven-stream / eighteen-network contracts, seal inventory and verifiable
+progress are in [PRD: pipeline design](prd.md#flow-net-contracts).
 
 The decision-network table above describes classic finite fact decisions; the
 seven-stage byte-stream contract is in the same section. Current whole-stage
