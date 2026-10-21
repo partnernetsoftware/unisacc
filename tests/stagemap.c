@@ -176,6 +176,10 @@ static char *extra[] = {
     "lower", "lower-seal", "meta",
     /* seal-modules: manifest+xy/edges 结构（--check-only）；回放由 *-seal 单叶 job；tests/gate.sh */
     "chain", "seal-modules", "E1,E3,E4,E6,meta",
+    /* seal-paradigm-audit: 流/网范式登记结构（manifest+xy+edges，--audit，.cx）；tests/gate.sh:461 */
+    "chain", "seal-paradigm-audit", "E1,E3,E4,E6,meta",
+    /* seal-paradigm-selftest: 范式登记审计器正负例自测; tests/gate.sh:462 */
+    "meta", "seal-paradigm-selftest", "-",
     /* edge-e4-peep-seal: 边级冻结原件（e4->peep 规范化问答面回放），tests/edgeseal.py; tests/gate.sh:460 */
     "E4", "edge-e4-peep-seal", "meta",
     /* edge-e3-pfconv-witness: 产品侧边级见证（-nostdinc 内建 printf 路径），tests/edgewitness.sh */
