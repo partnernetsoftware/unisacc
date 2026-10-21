@@ -412,6 +412,8 @@ static char *extra[] = {
     "E3", "unisa-gold-parse-label", "build",
     /* com-tapedomain: raw Tape域前置拒绝，--S/-c不得写成功输出; tests/gate.sh:831 */
     "E3", "com-tapedomain", "lower",
+    /* com-hostaddr-neg: .hostaddr索引0..3拒绝域（control与参考逐字节同，-1/4双方具名拒绝）; tests/gate.sh */
+    "lower", "com-hostaddr-neg", "meta",
     /* com-hostenv: 宿主环境扰动不改产品输出，无法归单阶段; tests/gate.sh:832 */
     "chain", "com-hostenv", "meta",
     /* com-latebind: hostsymbol合同/绑定拒绝/普通-run产品路径; tests/gate.sh:833 */

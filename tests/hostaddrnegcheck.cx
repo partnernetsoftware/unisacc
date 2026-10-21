@@ -1,0 +1,83 @@
+#!/usr/bin/env -S unisacc.com -run
+/* hostaddrnegcheck.cx PRODUCT: .hostaddr index refusal domain, target osx/x86_64
+   (research/c43-lower-refusal-domain-proposal.md 04:58: HOSTADDR-CONTROL/-NEG-LOW/-NEG-HIGH).
+   Control: product and Python reference both accept, images byte-identical.
+   Negatives (index -1 and 4, only the index changed): product rc1, empty stdout,
+   no output file, stderr names "hostaddr index must be 0..3" with the line;
+   reference refuses at the same check point (unisa/lower.py).  Timeouts, signals
+   and wrapper errors are not refusals: any unexpected shape is a FAIL, not KNOWN. */
+#include <cx.h>
+static char D[4096], P[4096];
+static int checks;
+static char *slurp(const char *name, size_t *n) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
+}
+static int put(const char *name, const char *body) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);
+    return cx_write(path,body,strlen(body));
+}
+static int fail(const char *name, int rc, const char *out, const char *err) {
+    printf("hostaddr %-16s FAIL\n",name);
+    fprintf(stderr,"rc=%d stdout=%s stderr=%s\n",rc,out?out:"<missing>",err?err:"<missing>");
+    return 1;
+}
+/* expect_rc 0: accept, image written.  expect_rc 1: named refusal, no image. */
+static int product(const char *name, const char *tape, int expect_rc) {
+    char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -b osx/x86_64 -o '%s/%s.img' 2>'%s/%s.err'",
+        strstr(P,".com") ? "sh " : "",P,D,tape,D,name,D,name);
+    rc=cx_run_timeout(cmd,15,&out,&on);
+    { char e[8192];snprintf(e,sizeof e,"%s.err",name);err=slurp(e,&en); }
+    if (expect_rc==0) {
+        char img[8192],*b;size_t bn=0;
+        snprintf(img,sizeof img,"%s.img",name);b=slurp(img,&bn);
+        ok=rc==0 && on==0 && b && bn>0;
+        free(b);
+    } else {
+        char img[16384];struct stat st;
+        snprintf(img,sizeof img,"%s/%s.img",D,name);
+        ok=rc==1 && on==0 && stat(img,&st)!=0 &&
+           err && strstr(err,"hostaddr index must be 0..3") && strstr(err,"line 2");
+    }
+    printf("hostaddr %-16s %s\n",name,ok ? "pass" : "FAIL");
+    if(!ok)fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
+    free(out);free(err);checks++;return !ok;
+}
+static int reference(const char *name, const char *tape, int expect_rc) {
+    char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
+    snprintf(cmd,sizeof cmd,"python3 -m unisa compile '%s/%s' --from-tape -o '%s/%s.py.img' --target osx/x86_64 --drive built 2>'%s/%s.py.err'",
+        D,tape,D,name,D,name);
+    rc=cx_run_timeout(cmd,25,&out,&on);
+    { char e[8192];snprintf(e,sizeof e,"%s.py.err",name);err=slurp(e,&en); }
+    if (expect_rc==0) ok=rc==0;
+    else ok=rc!=0 && err && strstr(err,"hostaddr index must be 0..3");
+    printf("hostaddr %-16s %s\n",name,ok ? "pass" : "FAIL");
+    if(!ok)return fail(name,rc,out,err);
+    free(out);free(err);checks++;return 0;
+}
+int main(int argc,char **argv) {
+    char own[]="/tmp/hostaddrXXXXXX",cwd[4096],ha[65],hb[65],*a,*b;size_t an,bn;int bad=0;
+    if(argc!=2)return 2;
+    if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
+    snprintf(D,sizeof D,"%s",own);
+    if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
+    if(strchr(P,39)||strchr(D,39))return 2;
+    if(put("ctl.tape","_start:\n.hostaddr r0, 2\nret\n") ||
+       put("low.tape","_start:\n.hostaddr r0, -1\nret\n") ||
+       put("high.tape","_start:\n.hostaddr r0, 4\nret\n"))return 2;
+    bad+=product("control",      "ctl.tape",0);
+    bad+=product("neg-low",      "low.tape",1);
+    bad+=product("neg-high",     "high.tape",1);
+    bad+=reference("control-ref","ctl.tape",0);
+    bad+=reference("neg-low-ref","low.tape",1);
+    bad+=reference("neg-high-ref","high.tape",1);
+    /* The accepted control must mean the same thing in both implementations. */
+    a=slurp("control.img",&an);b=slurp("control-ref.py.img",&bn);
+    if(a&&b&&an==bn&&!memcmp(a,b,an)){
+        cx_sha256_hex(a,an,ha);cx_sha256_hex(b,bn,hb);
+        printf("hostaddr %-16s pass (%zu B sha256 %.16s)\n","control-bytes",an,ha);checks++;
+    } else { printf("hostaddr %-16s FAIL (%zu vs %zu B)\n","control-bytes",a?an:0,b?bn:0);bad++; }
+    free(a);free(b);
+    printf("hostaddr checks %d bad %d\n",checks,bad);
+    return bad?1:0;
+}

@@ -1044,6 +1044,7 @@ if [ "$COM" = 1 ]; then
     job com-forward UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forward.sh   # 0.0.28 N1': posix2 (glob callback), var (variadic), host functions on the product
     job com-forward-multi UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/forwardmulti.sh   # 0.0.26 N5: the product failed here up to 0.0.25
     job com-tapedomain tests/bound 58 sh "$PRODUCT" -run tests/tapedomaincheck.cx -- "$PRODUCT"   # 0.0.43 TP-7/TP-8/TP-9: a raw .tape outside the Tape domain is refused before anything is written
+    job com-hostaddr-neg tests/bound 58 sh "$PRODUCT" -run tests/hostaddrnegcheck.cx -- "$PRODUCT"   # 0.0.43: .hostaddr index 0..3 refusal domain (control byte-equal to the reference; -1/4 named lower refusals both sides)
     job com-hostenv tests/bound 58 sh "$PRODUCT" -run tests/hostenvcheck.cx -- "$PRODUCT"   # 0.0.43 plan step 1: no host environment variable changes a product result (UNISA_MAXSTEPS is a build constant in the shipped driver)
     job com-latebind tests/bound 58 sh "$PRODUCT" -run tests/latebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-1: host-symbol contract stream, binding refusal, in-memory -run of plain programs
     job lib-latebind tests/bound 58 sh "$PRODUCT" -run tests/liblatebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-2a: the library declaration contract carries no host address
