@@ -21,6 +21,8 @@ knownfail_load "$R/tests/corpus.knownfail" "$T/corpus.keys" || exit 1
 CORPUS_KEYS=$KNOWNFAIL_KEYS
 knownfail_load "$R/tests/difftest.knownfail" "$T/difftest.keys" || exit 1
 DIFFTEST_KEYS=$KNOWNFAIL_KEYS
+knownfail_load "$R/tests/opt.tape-refuse" "$T/tape-refuse.keys" || exit 1
+TAPE_REFUSE_KEYS=$KNOWNFAIL_KEYS
 SELF="$T/unisacc.flat.c"
 bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 OPT_PART=${OPT_PART:-all}; SHARD=${SHARD:-1/1}
@@ -42,10 +44,16 @@ for f in examples/*.c tests/c/*.c tests/c99/*.c corpus/c-testsuite/tests/single-
             # Known non-C99 corpus inputs remain explicit exclusions, never passes.
             if [[ "$f" == corpus/* ]] && grep -Fxqs "$(basename "$f" .c)" "$CORPUS_KEYS"; then
                 echo "  KNOWN $f $o: non-C99 input refused"
+            elif grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
+                echo "  KNOWN $f $o: forward-only probe; tape mode refuses by design (opt.tape-refuse)"
             elif grep -Fxqs "$(basename "$f" .c)" "$DIFFTEST_KEYS"; then
                 echo "  KNOWN $f $o: the reference refuses this probe on purpose (difftest.knownfail)"
             else fail "$f $o: tape build failed or empty"; cat "$T/compile$o.log"; fi
             valid=0; continue
+        fi
+        # Inverted knownfail discipline: a listed probe whose tape build passes is a revived entry.
+        if grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
+            fail "$f $o: listed in opt.tape-refuse but the tape build passed (delete its line)"; valid=0; continue
         fi
         rm -f "$T/status$o"
         (cd "$T" && "$_BOUND" --status "$T/status$o" 5 "$UA" $o -I "$d" "$R/$f" -run > "$T/out$o" 2>&1 </dev/null
