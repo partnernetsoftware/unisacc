@@ -998,4 +998,21 @@ static double nextafter(double __u_x, double __u_y) {            /* fdlibm s_nex
 #if !__UNISA_FTRIM_LIBC || __UN_nexttoward
 static double nexttoward(double __u_x, double __u_y) { return nextafter(__u_x, __u_y); }
 #endif
+/* C99 functions without a body here: prototype-only, forwarded to the host's C library on Linux and
+ * macOS the way fenv.h's functions are (libffi for the floating-point arguments and results). */
+#ifndef _WIN32
+long long int llround(double);
+long long int llrint(double);
+double remainder(double, double);
+double remquo(double, double, int *);
+double nearbyint(double);
+double fma(double, double, double);
+double acosh(double);
+double asinh(double);
+double atanh(double);
+double erf(double);
+double erfc(double);
+double lgamma(double);
+double tgamma(double);
+#endif
 #endif
