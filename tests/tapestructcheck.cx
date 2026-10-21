@@ -69,6 +69,42 @@ int main(int argc,char **argv) {
     a=slurp("ctl-dup-data.img",&an);b=slurp("dupdata.pyimg",&bn);
     note("dup-data-bytes",a&&b&&an==bn&&!memcmp(a,b,an));
     free(a);free(b);
+    /* text-form edges.  No trailing newline, a 5000-char symbol name and a
+       UTF-8 BOM (which both sides treat as ordinary label bytes) are accepted
+       with product/reference image parity.  CRLF line endings are a REGISTERED
+       split (ledger 2c): the tape domain itself accepts them (-S echoes the
+       bytes) but the image route refuses with the encoder-slice naming, while
+       the reference accepts and builds -- if any side moves, this goes red. */
+    if(put("noeol.tape","_start:\n  ret") ||
+       put("bom.tape","\xef\xbb\xbf_start:\n  ret\n") ||
+       put("crlf.tape","_start:\r\n  imm r0, 0\r\n  ret\r\n"))return 2;
+    { char nm[6000];size_t i;for(i=0;i<5000;i++)nm[i]='n';nm[5000]=0;
+      char body[8192];snprintf(body,sizeof body,".str %s \"x\"\n_start:\n  ret\n",nm);
+      if(put("longname.tape",body))return 2; }
+    { static const char *T[]={"noeol","bom","longname",0};int i;
+      for(i=0;T[i];i++){
+        char tp[64];snprintf(tp,sizeof tp,"%s.tape",T[i]);
+        char lbl[64];snprintf(lbl,sizeof lbl,"ctl-%s",T[i]);
+        build(lbl,tp,NULL);
+        snprintf(cmd,sizeof cmd,
+            "python3 -m unisa compile '%s/%s' --from-tape -o '%s/%s.pyimg' --target lnx/x86_64 --drive built >/dev/null 2>&1",D,tp,D,T[i]);
+        { char ok=cx_run_timeout(cmd,25,0,0)==0;char rl[64];snprintf(rl,sizeof rl,"%s-ref",T[i]);note(rl,ok); }
+        { char ia[64],ib2[64],bl[64];size_t xn=0,yn=0;char *x,*y;
+          snprintf(ia,sizeof ia,"ctl-%s.img",T[i]);snprintf(ib2,sizeof ib2,"%s.pyimg",T[i]);
+          x=slurp(ia,&xn);y=slurp(ib2,&yn);
+          snprintf(bl,sizeof bl,"%s-bytes",T[i]);
+          note(bl,x&&y&&xn==yn&&!memcmp(x,y,xn));free(x);free(y); }
+      } }
+    snprintf(cmd,sizeof cmd,"%s'%s' '%s/crlf.tape' -S -o '%s/crlf.S' 2>/dev/null",
+        strstr(P,".com") ? "sh " : "",P,D,D);
+    note("crlf-domain",cx_run_timeout(cmd,15,0,0)==0);
+    { static const char CRLF[]="_start:\r\n  imm r0, 0\r\n  ret\r\n";
+      size_t n=0;char *s=slurp("crlf.S",&n);
+      note("crlf-identity",s&&n==sizeof CRLF-1&&!memcmp(s,CRLF,n));free(s); }
+    build("crlf-build","crlf.tape","not covered: an op outside the first encoder slice");
+    snprintf(cmd,sizeof cmd,
+        "python3 -m unisa compile '%s/crlf.tape' --from-tape -o '%s/crlf.pyimg' --target lnx/x86_64 --drive built >/dev/null 2>&1",D,D);
+    note("crlf-ref-accepts",cx_run_timeout(cmd,25,0,0)==0);
     printf("struct checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }
