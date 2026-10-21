@@ -174,6 +174,10 @@ static char *extra[] = {
     "chain", "seal-modules", "E1,E3,E4,E6,meta",
     /* edge-e4-peep-seal: 边级冻结原件（e4->peep 规范化问答面回放），tests/edgeseal.py; tests/gate.sh:460 */
     "E4", "edge-e4-peep-seal", "meta",
+    /* edge-e3-pfconv-witness: 产品侧边级见证（-nostdinc 内建 printf 路径），tests/edgewitness.sh */
+    "E3", "edge-e3-pfconv-witness", "meta",
+    /* edge-elf-enc-witness: 产品侧边级见证（elf 流 enc ask），tests/edgewitness.sh */
+    "E6", "edge-elf-enc-witness", "meta",
     /* edge-e2-pp-seal: 边级冻结原件（e2->pp），同 edge-e4-peep-seal; tests/edgeseal.py */
     "E2", "edge-e2-pp-seal", "meta",
     /* edge-e1-lex-seal: 边级冻结原件（e1->lex），同 edge-e4-peep-seal; tests/edgeseal.py */

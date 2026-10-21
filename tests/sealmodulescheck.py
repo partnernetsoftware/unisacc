@@ -210,6 +210,7 @@ def check_edges(rows: list[dict[str, str]]) -> int:
     jobs = gate_job_names()
     seen: set[tuple[str, str]] = set()
     frozen = 0
+    witness = 0
     for r in rows:
         key = (r["flow"], r["net"])
         if key in seen:
@@ -239,11 +240,13 @@ def check_edges(rows: list[dict[str, str]]) -> int:
             if not r["edge_frozen"].startswith("tests/seals/") or not d.is_dir():
                 print(f"sealmodulescheck: FAIL edge {key} edge_frozen not a tests/seals/ dir: {r['edge_frozen']}")
                 bad += 1
-            elif not ((d / "asks.tsv").is_file() and (d / "manifest.tsv").is_file()):
-                print(f"sealmodulescheck: FAIL edge {key} frozen leaf lacks asks.tsv/manifest.tsv")
+            elif not (d / "manifest.tsv").is_file() or not ((d / "asks.tsv").is_file() or (d / "witness.tsv").is_file()):
+                print(f"sealmodulescheck: FAIL edge {key} frozen leaf lacks manifest.tsv + (asks.tsv|witness.tsv)")
                 bad += 1
-            else:
+            elif (d / "asks.tsv").is_file():
                 frozen += 1
+            else:
+                witness += 1
     declared = {(r["flow"], r["net"]) for r in rows if r["relation"] in ("primary", "primary-embedded")}
     for miss in sorted(PRIMARY_EDGES - declared):
         print(f"sealmodulescheck: FAIL primary edge missing from seal-edges.tsv: {miss}")
@@ -260,8 +263,8 @@ def check_edges(rows: list[dict[str, str]]) -> int:
         print(f"sealmodulescheck: edges {bad} problem(s)")
     else:
         print(
-            f"sealmodulescheck: edges ok ({len(rows)} rows; frozen edge originals "
-            f"{frozen}/{shipping} shipping edges -- 比对闸≠冻结回放，边级封存原件待立)"
+            f"sealmodulescheck: edges ok ({len(rows)} rows; edge originals {frozen + witness}/{shipping} "
+            f"shipping edges: {frozen} key-map (edgeseal) + {witness} product-witness (edgewitness))"
         )
     return bad
 

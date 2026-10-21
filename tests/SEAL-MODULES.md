@@ -65,7 +65,7 @@ netseal.cx --capture ...
 
 **边级原件形态**（`tests/edgeseal.py`；设计依据：脱敏设计简报的推荐一「规范化键答映射叶」，实测收窄：每边 distinct 键仅 3–84，全序列双跑确定故 refcount 入判等）：叶 `tests/seals/edge-<流>-<网>/` = `manifest.tsv`（探针/金表/叶体三重 sha 钉扎）+ `asks.tsv`（排序去重的 key→answer→refcount，参考路线分相位归边）。`--produce` 双录判等才写（拒空边、拒不确定）；`--gate` 回放逐字节判等 + 空集即败 + 三类负例（删行/改答案/改键）在闸内必红；金表演进时 `table_sha256` 钉扎主动红，不静默过期。证明力是组合推理：边原件（边消费哪些键）× stages/stages-back（问过）× oracle-cache（DENSE≡weights）× net-*-seal（weights≡gold）——原件冻的是参考端边使用面，不直接观测生产端逐问。首叶 `edge-e4-peep`（闸 `edge-e4-peep-seal`，探针 fib.c，8 键）。
 
-**边级已知空洞**：pfconv 在 fib/hello 与整型 printf 探针上两侧均 0 ask（C 侧 ask 点在 `src/front_parse.c` printf 展开路径，未达）；e3→pfconv 暂无见证探针，stages 的存在性比对对它空真。该边的原件须先找到触发探针。**elf→enc 同类**：参考路线的 enc 问全部发生在 lower 相位（即 ◐ 边 lower→enc，已冻）；`unisa/image/` 不问 oracle，elf 流的 enc ask 是产品侧独有，参考端录不到。这两条边是 15/17 之外的余项，各需先解决见证通道。
+**产品侧见证件**（`tests/edgewitness.sh`；两条参考侧录不到的边）：e3→pfconv 的 ask 点在 `src/front_parse.c` 的内建 printf 降级（`do_printf`），自 991d3373（2026-09-26）起任何 `printf(` 都 autoinc stdio.h、走库调用，**唯 `-nostdinc` 可达**（探针全 9 键，asked 9 实测）；参考侧 `PFCONVS` 是死 import、永不问，stages 存在性比对对它空真（边表 asked_evidence 已改记 `-`）。elf→enc：参考路线 enc 问全在 lower 相位（◐ 边已由键答映射件冻），elf 流 enc ask 产品侧独有（`unisa/image/` 不问 oracle）。见证件冻（探针 sha + 该网 asked 计数 + 程序 stdout 字节 + 退出码，产品双观测判等才写）；答案面由 net-*-seal 金表全域兜底，行为字节钉「答案被用」。**强度弱于键答映射件**（不枚举键；pfconv 件经 9 键探针例外地全枚举），分类计数不混同。未改产品代码——设计报告点名的 T3 冲突（产品加 trace）以冻结既有可见面绕开。
 
 出货闸仍可逐 job 跑（`lex-e1-seal`、`net-*-seal`）；本测套是**聚合入口**，不替代单 job，也不读 middle-flow ledger。
 
@@ -80,3 +80,5 @@ netseal.cx --capture ...
 2026-10-21：首个边级冻结原件 `edge-e4-peep` 落闸（`edgeseal.py`，1/17）；pfconv 零见证探针记为已知空洞。
 
 2026-10-21：批量铺满参考路线可达的全部边原件（+14，合计 **15/17**；探针 fib.c，各叶双录判等）；余 e3→pfconv、elf→enc 两条见「边级已知空洞」。
+
+2026-10-21：余两边以产品侧见证件收口（`edgewitness.sh`，闸 `edge-e3-pfconv-witness`、`edge-elf-enc-witness`），合计 **17/17 = 15 键答映射 + 2 产品侧见证**。pfconv 可达性考古：`-nostdinc` + 字面量 printf。
