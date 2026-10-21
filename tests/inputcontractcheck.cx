@@ -94,6 +94,38 @@ int main(int argc,char **argv) {
       err=slurp("erun.err",&en);
       note("empty-tape-run",rc==2&&err&&strstr(err,"bad memory image bounds"));
       free(err); }
+    /* output-path failures: a directory, a missing parent and a read-only file
+       each refuse by name at the driver with empty stdout, and the read-only
+       file's bytes are untouched -- on both the C and the tape route. */
+    { static const char KEEP[]="hold these bytes\n";
+      char ro[8192],od[8192],*err,*k;size_t en,kn;int i;
+      static const char *IN[]={"g.c","a.tape",0};
+      snprintf(od,sizeof od,"%s/outdir",D);
+      if(mkdir(od,0700))return 2;
+      snprintf(ro,sizeof ro,"%s/ro.out",D);
+      if(cx_write(ro,KEEP,sizeof KEEP-1)||chmod(ro,0444))return 2;
+      for(i=0;IN[i];i++){
+        const char *tag=i?"tape":"c";char lbl[64];
+        snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -o '%s' 2>'%s/od.err'",
+            strstr(P,".com") ? "sh " : "",P,D,IN[i],od,D);
+        rc=cx_run_timeout(cmd,15,0,0);err=slurp("od.err",&en);
+        snprintf(lbl,sizeof lbl,"outdir-%s",tag);
+        note(lbl,rc==1&&err&&strstr(err,"cannot open output"));free(err);
+        snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -o '%s/nodir/xx' 2>'%s/np.err'",
+            strstr(P,".com") ? "sh " : "",P,D,IN[i],D,D);
+        rc=cx_run_timeout(cmd,15,0,0);err=slurp("np.err",&en);
+        snprintf(lbl,sizeof lbl,"noparent-%s",tag);
+        note(lbl,rc==1&&err&&strstr(err,"cannot open output"));free(err);
+        snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -o '%s' 2>'%s/ro.err'",
+            strstr(P,".com") ? "sh " : "",P,D,IN[i],ro,D);
+        rc=cx_run_timeout(cmd,15,0,0);err=slurp("ro.err",&en);
+        k=cx_read(ro,&kn);
+        snprintf(lbl,sizeof lbl,"readonly-%s",tag);
+        note(lbl,rc==1&&err&&strstr(err,"cannot open output")&&
+             k&&kn==sizeof KEEP-1&&!memcmp(k,KEEP,kn));
+        free(err);free(k);
+      }
+      chmod(ro,0644); }
     printf("input checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }
