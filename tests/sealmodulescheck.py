@@ -141,6 +141,34 @@ def check_manifest(rows: list[dict[str, str]]) -> int:
             print(f"sealmodulescheck: FAIL exec-net leaf not in manifest: {rel}")
             bad += 1
 
+    jobs = gate_job_names()
+    for r in rows:
+        gj = r["gate_job"]
+        if gj == "-":
+            continue
+        if gj not in jobs:
+            print(
+                f"sealmodulescheck: FAIL {r['paradigm']}:{r['id']} "
+                f"gate_job {gj!r} not a gate.sh job name"
+            )
+            bad += 1
+
+    sh = (ROOT / "tests/seal-modules.sh").read_text()
+    if '$1=="shape-gap"' in sh:
+        print("sealmodulescheck: FAIL seal-modules.sh must not awk-select shape-gap rows")
+        bad += 1
+    run_rows = [r for r in rows if r["paradigm"] in ("stream", "grid")]
+    if any(r["paradigm"] == "shape-gap" for r in run_rows):
+        print("sealmodulescheck: FAIL shape-gap row in seal-modules replay set")
+        bad += 1
+    n_run_stream = sum(1 for r in run_rows if r["paradigm"] == "stream")
+    n_run_grid = sum(1 for r in run_rows if r["paradigm"] == "grid")
+    if not bad:
+        print(
+            f"sealmodulescheck: seal-modules.sh replay set = stream+grid only "
+            f"({n_run_stream} stream, {n_run_grid} grid); shape-gap rows excluded"
+        )
+
     if bad:
         print(f"sealmodulescheck: manifest {bad} problem(s)")
     else:
@@ -207,8 +235,12 @@ def check_edges(rows: list[dict[str, str]]) -> int:
                     print(f"sealmodulescheck: FAIL edge {key} names unknown gate job {j}")
                     bad += 1
         if r["edge_frozen"] != "none":
-            if not r["edge_frozen"].startswith("tests/seals/") or not (ROOT / r["edge_frozen"]).is_dir():
+            d = ROOT / r["edge_frozen"]
+            if not r["edge_frozen"].startswith("tests/seals/") or not d.is_dir():
                 print(f"sealmodulescheck: FAIL edge {key} edge_frozen not a tests/seals/ dir: {r['edge_frozen']}")
+                bad += 1
+            elif not ((d / "asks.tsv").is_file() and (d / "manifest.tsv").is_file()):
+                print(f"sealmodulescheck: FAIL edge {key} frozen leaf lacks asks.tsv/manifest.tsv")
                 bad += 1
             else:
                 frozen += 1
@@ -265,33 +297,34 @@ def check_xy_matrix() -> int:
     product = load_image_product_nets()
     bad = 0
     gaps: list[str] = []
-    wired_stream = wired_grid = 0
+    wired_grid_nets = sum(
+        1 for net in NETS if grid_module_cell(FLOWS[0], net)[0] == "wired"
+    )
+    stream_leaves = len(STREAM_WIRED)
     for flow in FLOWS:
         for net in NETS:
             sm, snote = stream_module_cell(flow, net, product)
             gm, gnote = grid_module_cell(flow, net)
             if sm == "shape-gap" or gm == "shape-gap":
                 gaps.append(f"{flow}\t{net}\tstream={sm}\tgrid={gm}\t{snote}; {gnote}")
-            if sm == "wired":
-                wired_stream += 1
-            if gm == "wired":
-                wired_grid += 1
             if sm == "gap" or gm == "gap":
                 print(f"sealmodulescheck: FAIL unexpected gap {flow}×{net} stream={sm} grid={gm}")
                 bad += 1
 
-    # 适用性摘要：任意流叶 -> 仅 4 叶 streamseal；任意网 -> 17 叶 netseal（pp 除外）
+    if wired_grid_nets != len(GRID_NETS):
+        print(
+            f"sealmodulescheck: FAIL wired_grid nets {wired_grid_nets} != expected {len(GRID_NETS)}"
+        )
+        bad += 1
+
     print(
-        "sealmodulescheck: xy matrix "
-        f"({len(FLOWS)} flows × {len(NETS)} nets = {len(FLOWS)*len(NETS)} cells)"
+        "sealmodulescheck: xy matrix structural "
+        f"({len(FLOWS)}×{len(NETS)}={len(FLOWS)*len(NETS)} cells; not a coverage count)"
     )
+    print(f"  streamseal leaves: {stream_leaves} (e1,e4,prune,elf)")
+    print(f"  netseal wired nets: {wired_grid_nets} (gold nets except pp)")
     print(
-        f"  streamseal parameterized leaves: {len(STREAM_WIRED)}/{len(FLOWS)} flows "
-        f"(e1,e4,prune,elf); shape-gap: {','.join(sorted(SHAPE_GAP_STREAM))}, pp paradigm separate"
-    )
-    print(
-        f"  netseal parameterized nets: {len(GRID_NETS)}/{len(NETS)} gold nets "
-        f"(all except pp); grid wired cells per column: {len(FLOWS)}×{len(GRID_NETS)}"
+        f"  shape-gap flows: {','.join(sorted(SHAPE_GAP_STREAM))}, pp separate paradigm"
     )
     if gaps:
         print(f"  shape-gap samples ({min(8, len(gaps))} of {len(gaps)}):")

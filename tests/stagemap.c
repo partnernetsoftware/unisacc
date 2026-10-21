@@ -170,8 +170,10 @@ static char *extra[] = {
     "E6", "elf-seal", "meta",
     /* prune-seal: 封存prune流（gen.py prune，-O2 tape录制输入）回放与构造依赖核验，含负例; tests/gate.sh:456 */
     "E4", "prune-seal", "meta",
-    /* seal-modules: 聚合测套（manifest+xy 适用性 + 4 流封 + 17 网封回放），tests/seal-modules.sh; tests/gate.sh:459 */
+    /* seal-modules: manifest+xy/edges 结构（--check-only）；回放由 *-seal 单叶 job；tests/gate.sh */
     "chain", "seal-modules", "E1,E3,E4,E6,meta",
+    /* edge-e4-peep-seal: 边级冻结原件（e4->peep 规范化问答面回放），tests/edgeseal.py; tests/gate.sh:460 */
+    "E4", "edge-e4-peep-seal", "meta",
     /* net-prec-seal: 封存单网prec（内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:457 */
     "E3", "net-prec-seal", "meta",
     /* net-binsel-seal: 封存单网binsel（C二元运算符+符号性→ALU flavour；内核+该网权重字面量，金表全域回放）与构造依赖核验，含负例; tests/gate.sh:458 */
