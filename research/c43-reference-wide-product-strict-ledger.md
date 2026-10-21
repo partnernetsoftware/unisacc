@@ -44,6 +44,12 @@
 
 **选项**：(A) 域收紧——tapecheck 对 `\r` 给具名拒绝（动模型+参考同步，域/镜像口径合一）；(B) 双方剥 `\r`（CRLF 透明，动 src/+unisa/）；(C·现状) 登记分叉。**建议 (A)**：发射器不产 `\r`，域内合法性没有 CRLF 的根据，且能顺带消掉产品内两层不一致。现状由 com-tape-struct 的 `crlf-domain/identity/build/ref-accepts` 四断言写死。
 
+**修正（2026-10-22 08:0x，撤回 (A)）**：`exec/tapecheck/README.md` 明写「CRLF counts as one line」——域对 CRLF 的接受是**授权规则**，参考 `splitlines()` 同口径；(A) 与之相抵，撤回。真正的分叉点已定位到 **lower 阶段的分词分隔符类**：`exec/lower/code-scan-byte.tsv` 的 `C.line 32,9,10`、`C.word 32,9,10,256`、`C.args 32,9,44,91,93,43`、`C.arg …,10,256` 与 `exec/lower/data-byte.tsv` 的 `LS/WORD/D.ws/D.name/D.value` 的 `32,9` 类都**不含 13**；tab(9) 在类内所以 tab 分隔的 tape 两目标都建像成功（实测），`\r` 不在类内就被并进记号（`ret\r`）原样传给 enc，enc 的 `x86-shell dispatch` / `armcontract fail` 具名拒绝（`an op outside the first encoder slice` / `ARM64 operand or instruction`）。同目录 `hostsymbols-byte.tsv` 已有完整 CR 处理（`LINE 13 → CR`）与 DEC/HEX/OCT/BIN 数字态——同树先例。
+
+与 hex-A′ 同族：lower 把操作数拼写原样传给 enc，而 enc 的 `x86-operand AN` 只认 `-`/0–9，非十进制拼写在 enc 拒；两条都是「lower/enc 词法面比域窄」。
+
+**正确修向 (B-lower)**：把 13 加入上述分隔符类（9 行表项，纯授权表编辑），数据记录行的 `COPY` 直通与 `.str` 字面量内的 `\r` 要单独核对（字面量内的 `\r` 是数据，必须保留）。**代价**：lower 模型变 → 候选重建 + 根对归位；`lower-seal`（streamseal 测量叶）与 `edge-lower-abi/regmap/reloc/enc-seal` 四边封件按「有模型变更实证」重封；arm/x86 两目标各加 CRLF 正例进 com-tape-struct 并翻转 `crlf-build` 断言。属产品闭包 + 重封，须具名派刀；本文不代落。
+
 ## 2b. 另一类观察：双实现同宽于 C99（登记，不入前两类）
 
 2026-10-22 04:4x 采证 com-cerr-hygiene 时发现：`int *p = 1.5;`（double 初始化指针，C99 约束违例，gcc error）被**产品与 Python 参考双双接受**（两边 rc0）。产品与参考互相一致（对拍纪律无违例），但共同宽于 C99；`int *p = 3;` 的整数→指针则是常见扩展（gcc 仅警告），不算。该类不属「参考宽/产品严」，单列为 conformance 面待裁：是否照 R13 缺陷账或 difftest 负域另立登记、以及双实现同步收紧的授权归属。本文不代裁，未入任何叶（叶里语义负例改用 unknown identifier 规避未裁面）。
