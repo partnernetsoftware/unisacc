@@ -26,7 +26,7 @@ reference compiler has no post-prune stream to compare with: its `-S` tape is th
 (src/back_image.c prunes only on the way to an image), so a C-side `-S` post-prune dump would be
 a new product feature, not a seal.  Hence the referee is frozen as bytes: tests/reseal-prune.sh
 runs it once, untraced (it is the reference, not a dependency; it appears in no closure row), to
-write each case's `ref.stdout`; the gate (tests/pruneseal.cx) replays ONLY the product's prune
+write each case's `ref.stdout`; the gate (`tests/streamseal.cx`) replays ONLY the product's prune
 net on the frozen inputs and requires byte-equality with the frozen `NAME.stdout`, and never
 imports or runs the referee.  Every sealed case is accepted and byte-equal to the referee
 (`ref-equal=1`); the reseal's `corpus` step replays all 96 keep-elf sources the same way
@@ -38,7 +38,7 @@ costs ~0.02 s per case, so the gate bound is not the limit; the subset keeps the
 ~3.7 MB (each -O2 tape fixture and its pruned output are ~85 KB) and mirrors exec-opt-e4 and
 exec-elf so the three cells freeze the same sources.
 
-Gate (tests/gate.sh job prune-seal, tests/pruneseal.cx --gate): frozen bytes (dependencies against
+Gate (tests/gate.sh job prune-seal, tests/streamseal.cx --gate, leaf config `cell.tsv`): frozen bytes (dependencies against
 the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
 identity.tsv), then a **replay**: the executor built from exec/c/run.c runs the sealed
 `model-<sha>.net` on every frozen input and must give the frozen stdout, stderr and rc; then
@@ -46,8 +46,9 @@ the negatives (omitted rule, changed rule/executor source, changed fixture/recor
 FAIL; every negative baseline re-check replays too).  Verification only: no stamp, no cache or
 reuse grant.
 
-Files: `streams.tsv` (one row per case: verdict, rc, input/stdout/stderr/model with length and
-sha256, `ref-rc`, `ref-equal`), `dependencies.tsv` (role, path, length, sha256),
+Files: `cell.tsv` (stream-seal config incl. `referee_note`; checker is tests/streamseal.cx),
+`streams.tsv` (one row per case: verdict, rc, input/stdout/stderr/model with length and sha256,
+`ref-rc`, `ref-equal`), `dependencies.tsv` (role, path, length, sha256),
 `closure.expected.tsv` (role, path), `measurement.tsv`, `identity.tsv` (core = sha256 of the
 sorted dependency+case rows; proof = sha256 over verdict+stdout+stderr shas).
 
