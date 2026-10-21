@@ -18,6 +18,8 @@
 
 **建议：(B) 维持，(C) 列为可另授的扩表刀；不采 (A)。**
 
+**追加（2026-10-22 03:4x，载体路由归属分叉）**：同一 extent 程序在两条路由上拒绝**归属不同**——文本路 `.tape` 归 lower 表（`not covered: tape data directive`），Tapebin 载体路在 ≥2^31 时被产品**解码器**先拒（驱动层 `invalid tapebin or origin target mismatch`），而参考 codec（LEB128 无界）与参考编译都接受该载体。可表示边界 2^31−1 两路同归 `tape data directive`（归属平价成立）。对照 hostaddr/bindings 两类 NEG：载体路归属、具名、行号与文本路完全一致——分叉只在 extent 的解码器界限上。prd 拒绝归属条（语言级拒绝归声明终态的阶段，不得改记）之下，裁向有二：(i) 产品解码器放行 LEB128 全域、让 lower 表以同一具名拒绝（归属两路合一，动 src/ 须另授）；(ii) 登记解码器 32 位界为载体格式承诺（参考 codec 向产品收紧，动 unisa/ 须另授）。现状已由 com-extent-neg 的 `neg-single-bin`/`neg-max-bin`/`neg-max-text` 三断言写死，com-hostaddr-neg 的 `neg-high-bin` 写死了归属平价的对照面。
+
 ## 2. 缺 bindings 的 `.librarycall`（族 4）
 
 **实测**：

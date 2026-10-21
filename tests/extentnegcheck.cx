@@ -20,14 +20,15 @@ static int put(const char *name, const char *body) {
     char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);
     return cx_write(path,body,strlen(body));
 }
-/* expect_rc 0: accept, image written.  expect_rc 1: named refusal, no image. */
-static int product(const char *name, const char *tape, int expect_rc) {
+/* refusal==NULL: accept, image written.  Otherwise: rc1, empty stdout, no
+   output file, stderr carries that named refusal. */
+static int product_named(const char *name, const char *tape, const char *refusal) {
     char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
     snprintf(cmd,sizeof cmd,"%s'%s' '%s/%s' -b lnx/x86_64 -o '%s/%s.img' 2>'%s/%s.err'",
         strstr(P,".com") ? "sh " : "",P,D,tape,D,name,D,name);
     rc=cx_run_timeout(cmd,15,&out,&on);
     { char e[8192];snprintf(e,sizeof e,"%s.err",name);err=slurp(e,&en); }
-    if (expect_rc==0) {
+    if (!refusal) {
         char img[8192],*b;size_t bn=0;
         snprintf(img,sizeof img,"%s.img",name);b=slurp(img,&bn);
         ok=rc==0 && on==0 && b && bn>0;
@@ -35,12 +36,14 @@ static int product(const char *name, const char *tape, int expect_rc) {
     } else {
         char img[16384];struct stat st;
         snprintf(img,sizeof img,"%s/%s.img",D,name);
-        ok=rc==1 && on==0 && stat(img,&st)!=0 &&
-           err && strstr(err,"not covered: tape data directive");
+        ok=rc==1 && on==0 && stat(img,&st)!=0 && err && strstr(err,refusal);
     }
     printf("extent %-20s %s\n",name,ok ? "pass" : "FAIL");
     if(!ok)fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
     free(out);free(err);checks++;return !ok;
+}
+static int product(const char *name, const char *tape, int expect_rc) {
+    return product_named(name,tape,expect_rc ? "not covered: tape data directive" : NULL);
 }
 /* expect_rc is today's registered reference behaviour, not an endorsement. */
 static int reference(const char *name, const char *tape, int expect_rc) {
@@ -70,6 +73,28 @@ int main(int argc,char **argv) {
     bad+=reference("control-ref",       "ctl.tape",0);
     bad+=reference("neg-single-ref",    "one.tape",0);   /* registered reference acceptance */
     bad+=reference("neg-cumulative-ref","sum.tape",0);   /* registered reference acceptance */
+    /* Carrier route: at the representable edge (2^31-1) the Tapebin route
+       keeps the same refusal owner as the text route ('tape data directive');
+       at 2^31 the product's carrier DECODER refuses first with the driver's
+       'invalid tapebin or origin target mismatch' while the text route names
+       the tape-data table and the reference codec decodes fine -- a
+       route-ownership split, REGISTERED here (ledger:
+       research/c43-reference-wide-product-strict-ledger.md), never widened
+       silently: if either diagnostic moves, this leaf goes red. */
+    { char cmd[16384];
+      snprintf(cmd,sizeof cmd,
+        "python3 -c \"from unisa.tapebin import encode;import sys;"
+        "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" one.tape > '%s/one.tapebin' 2>/dev/null && "
+        "printf '.bss a 2147483647\\n_start:\\n  ret\\n' > '%s/max.tape' && "
+        "python3 -c \"from unisa.tapebin import encode;import sys;"
+        "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" max.tape > '%s/max.tapebin' 2>/dev/null",
+        D,D,D,D,D);
+      if(cx_run_timeout(cmd,25,0,0)==0){
+        bad+=product_named("neg-max-text","max.tape","not covered: tape data directive");
+        bad+=product_named("neg-max-bin","max.tapebin","not covered: tape data directive");
+        bad+=product_named("neg-single-bin","one.tapebin","invalid tapebin or origin target mismatch");
+      } else { printf("extent %-20s FAIL (encode)\n","carrier");bad++; }
+    }
     /* The accepted control must mean the same thing in both implementations. */
     a=slurp("control.img",&an);b=slurp("control-ref.py.img",&bn);
     if(a&&b&&an==bn&&!memcmp(a,b,an)){
