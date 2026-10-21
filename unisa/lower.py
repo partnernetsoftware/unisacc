@@ -193,6 +193,14 @@ def zero_last(data, syms, base, tail=0):
 
 def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
     """Lower one tape stage; complete image callers explicitly enable prune."""
+    # Same contract as .libraryfn below: this route has no bindings channel, so a
+    # .librarycall has no provider here and must not lower into an unbound call
+    # (ledger 2026-10-22, option A; the bundle route with \0library/bindings is
+    # the library mode and is unchanged).  Checked before prune, like the
+    # product's contract check: an unreachable library call is still a library
+    # requirement of the tape.
+    if any(ins.op == ".librarycall" for ins in tape.code):
+        raise ValueError("not covered: librarycall requires library bindings")
     if prune_input:
         from .prune import prune
         tape = prune(tape)

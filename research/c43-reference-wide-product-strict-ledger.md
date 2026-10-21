@@ -36,6 +36,8 @@
 
 **建议：(A)，另授后实施；未授期间 (B) 由叶守住。**
 
+**已落（2026-10-22 07:4x，机房主任 07:30 放刀「从待裁清单落具名产品刀」）**：`unisa/lower.py` 的 `lower()` 在剪枝**之前**对任何 `.librarycall` 具名拒绝 `not covered: librarycall requires library bindings`（与同函数 `.libraryfn` 的既有检查同形；放在剪枝前是因为产品的合同检查也不看可达性——不可达的库调用仍是该 tape 的库需求，首次尝试放在剪枝后被 `prune_input=True` 剪掉了死函数而未生效）。bundle 路由（`\0library/bindings`）不变。com-bindings-neg 的 `neg-no-bindings-ref` 由「登记接受」翻为「具名拒绝」，同拍落。
+
 ## 2c. CRLF 行尾（第四条「参考宽／产品严」，2026-10-22 05:4x）
 
 **实测**：`_start:\r\n  ret\r\n` 这类 CRLF 行尾的 tape——产品 tape 验域**接受**（`-S` 原样回显含 `\r`），但镜像路（`-b`/`-run`）拒绝 `not covered: an op outside the first encoder slice`（`ret\r` 作为 op 记号不可分类）；参考全路接受并建像。产品内部还有域/镜像两层口径不一。发射器从不写 `\r`。对照组：无尾换行、5000 字符符号名、UTF-8 BOM（双方都当普通标签字节）三者双实现接受且镜像逐字节同。
