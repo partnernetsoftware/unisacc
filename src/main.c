@@ -53,6 +53,25 @@ int fe_units_fwd(char **inputs, int *ninput, char *t, int fwd) {
     fwdrun = 0;
     return 0;
 }
+/* `-v`: how many times each shipped net was asked, one line on stderr, so a
+   test can check that no table-shaped stage is decided in code.  The full
+   build route prints it after bk_build/bk_object, when the back end's asks
+   (abi, regmap, reloc, enc, opinfo, peep) have happened; isel and combo are
+   the off-ship contrast arms and are not printed. */
+int askedline(void) {
+    nout = 0;
+    es("asked pp "); en(nask[S_PP]); es(" lex "); en(nask[S_LEX]);
+    es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
+    es(" scope "); en(nask[S_SCOPE]); es(" irsel "); en(nask[S_IRSEL]);
+    es(" tyinfo "); en(nask[S_TYINFO]); es(" pfconv "); en(nask[S_PFCONV]);
+    es(" prec "); en(nask[S_PREC]); es(" binsel "); en(nask[S_BINSEL]);
+    es(" opinfo "); en(nask[S_OPINFO]); es(" peep "); en(nask[S_PEEP]);
+    es(" abi "); en(nask[S_ABI]); es(" regmap "); en(nask[S_REGMAP]);
+    es(" reloc "); en(nask[S_RELOC]); es(" enc "); en(nask[S_ENC]);
+    ec(10);
+    __write(2, out, nout);
+    return 0;
+}
 int main(void) {
     int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror; int force_origin; int emitbin;
     char *a; char *t; us_addr e; int n; int j;
@@ -349,21 +368,10 @@ int main(void) {
             if (ofd != 1) __close(ofd);
             return 0;
         }
-        if (dump == 2) { if (objwant) bk_object(out, nout, t); else bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
+        if (dump == 2) { if (objwant) bk_object(out, nout, t); else bk_build(out, nout, t); if (ofd != 1) __close(ofd); if (verb) askedline(); return 0; }
         __write(ofd, out, nout);
         if (ofd != 1) __close(ofd);
-        /* `-c -v`: how many times each stage was asked, so a test can check
-           that no table-shaped stage is decided in code */
-        if (verb) {
-            nout = 0;
-            es("asked pp "); en(nask[S_PP]); es(" lex "); en(nask[S_LEX]);
-            es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
-            es(" scope "); en(nask[S_SCOPE]); es(" irsel "); en(nask[S_IRSEL]);
-            es(" tyinfo "); en(nask[S_TYINFO]); es(" pfconv "); en(nask[S_PFCONV]);
-            es(" prec "); en(nask[S_PREC]); es(" binsel "); en(nask[S_BINSEL]);
-            ec(10);
-            __write(2, out, nout);
-        }
+        if (verb) askedline();
         return 0;
     }
     /* the token dump: the lexer's instrument.  No header selection here --

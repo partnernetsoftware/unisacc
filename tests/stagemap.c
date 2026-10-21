@@ -70,6 +70,8 @@ static char *extra[] = {
     "chain", "stages-3c", "-",
     /* oracle-cache: 全阶段ask漏斗inf()（DENSE缓存）双向全域对拍infer()权重直算（A-49）; tests/gate.sh:352 */
     "chain", "oracle-cache", "meta",
+    /* stages-back: 全程构建的六个后端网（opinfo/peep/abi/regmap/reloc/enc）「Python问过则C必问过」（A-33全程扩展）; tests/gate.sh:353 */
+    "chain", "stages-back", "-",
     "build", "closure-c4a-prepare closure-c4b-prepare", "-",
     "build", "closure-c3a-prepare closure-c3b-prepare closure-c3c-prepare", "-",
     "build", "closure-c4c-prepare", "-",

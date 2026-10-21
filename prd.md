@@ -239,7 +239,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ### 3.0d 可核验进度
 
 
-封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级点名夹具仍 0；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对 10 网「Python 问过则 C 必问过」（前端 8 网 + prec/binsel，-c -v 打印已扩）——缺的是 opinfo/peep/abi/regmap/reloc/enc 六边的点名 ask 证据，Python 参照侧的这些 ask 在 unisa/opt.py 与 unisa/lower.py，compile_file 前端路线不触达，需全程路线另开一刀）；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
+封存清点（tip `25f720ab`，2026-10-21）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级点名夹具仍 0；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对 10 网「Python 问过则 C 必问过」（前端 8 网 + prec/binsel，-c -v 打印已扩），后端六边（opinfo/peep/abi/regmap/reloc/enc）由 stages-back 闸以全程路线比对（Python compile_file+optimise -O2+lower vs C 全构建 -v 的 askedline，两探针，负例实测旧源二进制即红）——16 张出货网的「问过」证据至此全部入闸；仍缺的是按探针冻结的边级封存原件（比对式≠冻结回放））；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ dense.*.inc 与权重构造（build-weights）均不在任何封内；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
 
 | 发布链三格（2026-10-21协调口径） | 状态 | 证据边界 |
 |---|---|---|

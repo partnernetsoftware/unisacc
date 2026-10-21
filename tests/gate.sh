@@ -350,6 +350,7 @@ job stages-3a env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v 
 job stages-3b env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v n="$STAGES_3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
 job stages-3c env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v n="$STAGES_3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
 job oracle-cache bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 "$UA" --check-oracle'   # c43: the runtime ask funnel inf() (DENSE cache) answers every question of every stage identically to infer() over the weights, both directions (A-49); closes gold==weights (net-*-seal) == DENSE (this) for all 18 nets; 22694 questions, <1 s
+job stages-back ./tests/backstages.sh   # c43: A-33 extended to the full route -- the six back-end nets (opinfo/peep via opt, abi/regmap/reloc via lower, enc) that only a full build asks: every net the Python full route (compile_file + optimise -O2 + lower) asks, the C full build (-O2 -o BIN -v, askedline after bk_build) must also ask; presence not counts (memoisation differs; answer equality is oracle-cache + difftest)
 for k in 1 2 3 4 5; do job exec-chain-$k env CHAINSHARD=$k/5 CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt) examples/*.c tests/c/*.c; done   # S-17: all C probes, historical floor, named parity debt; five shards keep each job under 60 s with --jobs 4 (three hit 142 in the 0.0.23 queue)
 job exec-macros python3 ./exec/pp/macrocheck.py
 job exec-pp-literals python3 ./exec/pp/literalcheck.py
