@@ -241,7 +241,9 @@ pack_driver() {
         via=$UA; [ "$(head -c 2 "$UA")" = MZ ] && via="sh $UA"
         pids=
         for t in win/x86_64 lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64; do
-            b $via -O2 -b "$t" exec/c/asmcompiler.c -o "$T/slice-$(echo "$t" | tr / -)" & pids="$pids $!"
+            # JOBS=1 runs the slices one after another (host load); default keeps them parallel
+            if [ "${JOBS:-0}" = 1 ]; then b $via -O2 -b "$t" exec/c/asmcompiler.c -o "$T/slice-$(echo "$t" | tr / -)"
+            else b $via -O2 -b "$t" exec/c/asmcompiler.c -o "$T/slice-$(echo "$t" | tr / -)" & pids="$pids $!"; fi
         done
         for p in $pids; do wait "$p"; done
         b "$T/seedbin/ape" --payload "$T/compiler.pkg" --product Unisacc "$product_version" "$T/unisacc-next.com" \
@@ -264,6 +266,7 @@ case $step in
             set -eu
             script=$1; out=$2
             pair() {
+                if [ "${JOBS:-0}" = 1 ]; then sh "$script" "$out" "$1" || return $?; sh "$script" "$out" "$2"; return $?; fi
                 sh "$script" "$out" "$1" & a=$!
                 sh "$script" "$out" "$2" & b=$!
                 ra=0; wait "$a" || ra=$?
