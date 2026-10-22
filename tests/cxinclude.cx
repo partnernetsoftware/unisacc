@@ -1,0 +1,131 @@
+#!/usr/bin/env -S unisacc.com -run
+/* cxinclude.cx -- CX0 ratchet of plans/cx-modules.md: per tracked .cx file, the number of preprocessor include
+   directives, i.e. lines that are optional blanks, a hash mark, optional blanks, then the word include.  A .cx unit
+   has its prelude (include/cx.h) built in, so this count only goes down, and a new .cx starts and stays at 0.
+   This file itself has none: everything it calls comes from the prelude.
+   usage, from the repo root:
+     sh ./unisacc.com -run tests/cxinclude.cx -- --check   rc 1 naming each file whose count rose above its row in
+                                                           tests/cxinclude.tsv, or that has no row and a count
+                                                           above 0; rc 0 otherwise.  Ends with a one-line summary.
+     sh ./unisacc.com -run tests/cxinclude.cx -- --write   rewrite tests/cxinclude.tsv from the work tree
+   The files are `git ls-files -z '*.cx'` (tracked or staged; an untracked scratch .cx is not a module of the tree
+   and is ignored on purpose), read from the work tree; a tracked file missing there counts 0.
+   tests/cxinclude.tsv rows are PATH<TAB>COUNT, written only for counts above 0: a file without a row is held at 0,
+   so the baseline only lists what is still to remove.  Lines of the .tsv that start with a hash mark are comments.
+   A stale row (file no longer tracked) is reported and ignored.  rc 2: usage, not at the repo root, git or I/O
+   trouble. */
+
+#define BASELINE "tests/cxinclude.tsv"
+#define MAXROWS 4096
+
+typedef struct { char *path; int count; int used; } Row;
+static Row rows[MAXROWS];
+static int nrows;
+
+/* include directives in b[0..n) */
+static int count_includes(const char *b, size_t n) {
+    size_t i = 0, j; int c = 0;
+    while (i < n) {
+        j = i;
+        while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+        if (j < n && b[j] == '#') {
+            j++;
+            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (n - j >= 7 && !memcmp(b + j, "include", 7)) c++;
+        }
+        while (i < n && b[i] != '\n') i++;
+        i++;
+    }
+    return c;
+}
+
+/* the baseline rows; -1 when it cannot be read or a row is malformed */
+static int load_baseline(void) {
+    size_t n, i = 0, e, t; char *b = cx_read(BASELINE, &n);
+    if (!b) { fprintf(stderr, "cxinclude: cannot read %s (run --write once)\n", BASELINE); return -1; }
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e < n) b[e] = 0;                         /* cx_read leaves b[n] == 0 for a last line without newline */
+        if (e > i && b[e - 1] == '\r') b[e - 1] = 0;
+        if (e > i && b[i] != '#') {
+            char *line = b + i, *tab = strchr(line, '\t'), *end; long v;
+            if (!tab || nrows == MAXROWS) { fprintf(stderr, "cxinclude: %s: bad row '%s'\n", BASELINE, line); free(b); return -1; }
+            *tab = 0; v = strtol(tab + 1, &end, 10);
+            if (end == tab + 1 || *end || v < 0) { fprintf(stderr, "cxinclude: %s: bad count for %s\n", BASELINE, line); free(b); return -1; }
+            t = strlen(line) + 1; rows[nrows].path = malloc(t); memcpy(rows[nrows].path, line, t);
+            rows[nrows].count = (int)v; rows[nrows].used = 0; nrows++;
+        }
+        i = e + 1;
+    }
+    free(b); return 0;
+}
+
+static Row *find_row(const char *path) {
+    int k;
+    for (k = 0; k < nrows; k++) if (!strcmp(rows[k].path, path)) return &rows[k];
+    return 0;
+}
+
+static int append(char **buf, size_t *len, size_t *cap, const char *s) {
+    size_t n = strlen(s); char *t;
+    if (*len + n + 1 > *cap) {
+        *cap = (*len + n + 1) * 2; t = realloc(*buf, *cap);
+        if (!t) return -1;
+        *buf = t;
+    }
+    memcpy(*buf + *len, s, n + 1); *len += n; return 0;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *cdup = 0, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
+    int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
+    if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
+        fprintf(stderr, "usage: cxinclude.cx --check | --write   (from the repo root)\n"); return 2;
+    }
+    check = !strcmp(argv[1], "--check");
+    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxinclude: run from the repo root\n"); return 2; }
+    if (check && load_baseline() < 0) return 2;
+    rc = cx_run("git ls-files -z -- '*.cx'", &list, &ln);
+    if (rc != 0 || !list) { fprintf(stderr, "cxinclude: git ls-files failed (rc %d)\n", rc); return 2; }
+    if (!check) {
+        append(&out, &olen, &ocap, "# tests/cxinclude.tsv -- written by tests/cxinclude.cx --write; per tracked .cx file its include directives.\n");
+        append(&out, &olen, &ocap, "# Rows only for counts above 0 (no row = held at 0). The CX0 ratchet: counts only go down (plans/cx-modules.md).\n");
+        append(&out, &olen, &ocap, "# path\tincludes\n");
+    }
+    for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
+        size_t n; char *src; int c; Row *r;
+        if (!*p) continue;
+        src = cx_read(p, &n);
+        c = src ? count_includes(src, n) : 0;
+        free(src);
+        files++; total += c;
+        if (check) {
+            r = find_row(p);
+            if (r) r->used = 1;
+            if (c > (r ? r->count : 0)) {
+                if (r) printf("cxinclude: %s has %d include lines, baseline %d\n", p, c, r->count);
+                else printf("cxinclude: %s has %d include lines and no baseline row (a new .cx must have 0)\n", p, c);
+                over++;
+            } else if (r && c < r->count) under++;
+        } else if (c > 0) {
+            if (strlen(p) + 16 > sizeof line) { fprintf(stderr, "cxinclude: path too long: %s\n", p); return 2; }
+            snprintf(line, sizeof line, "%s\t%d\n", p, c);
+            if (append(&out, &olen, &ocap, line) < 0) { fprintf(stderr, "cxinclude: out of memory\n"); return 2; }
+        }
+    }
+    free(list); free(cdup);
+    if (!check) {
+        if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxinclude: cannot write %s\n", BASELINE); return 2; }
+        free(out);
+        printf("cxinclude: wrote %s: %d .cx files, %d include lines\n", BASELINE, files, total);
+        return 0;
+    }
+    for (k = 0; k < nrows; k++) {
+        base_total += rows[k].count;
+        if (!rows[k].used) printf("cxinclude: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
+    }
+    printf("cxinclude: %s: %d .cx files, %d include lines (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
+           over ? "FAIL" : "ok", files, total, base_total, over, under);
+    return over ? 1 : 0;
+}

@@ -898,6 +898,7 @@ job script-inventory-self python3 ./tests/inventorycheck.py   # matching and glo
 job inventory-derived python3 ./tests/inventoryderivedcheck.py   # exact generated inventory bytes
 job subtract-safety tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve (.cx port of subtractsafety.py, 2026-10-22)
 job subtract-safety-selftest tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx -- --selftest   # R16-9: both 0.0.15 counterexamples are still caught; --fix repoints an archived path
+job cxinclude tests/bound 58 sh ./unisacc.com -run tests/cxinclude.cx -- --check   # CX0 (plans/cx-modules.md): .cx include lines only go down (tests/cxinclude.tsv); a .cx without a row must have none
 job flownet-w0-module tests/bound 58 sh ./unisacc.com -run tests/flownetw0.cx tests/flownetw0mod.cx -- .   # flownet W0 (plans/m4-flownet-cx-module.md): one .cx uses another, compiled as one program; external .tsv read with named errors
 job flownet-w0-module-negative tests/bound 58 sh ./unisacc.com -run tests/flownetw0.cx tests/flownetw0mod.cx -- --negative .   # flownet W0: the consumer compiled without the module is refused by name (rc 127), never a silent pass
 job realprog    ./tests/realprog.sh   # R16-12: pinned real programs (kilo, jsmn, cJSON, lua, sqlite) built by us and cc, same run, same bytes; ratchet list
