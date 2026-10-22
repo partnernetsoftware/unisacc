@@ -50,3 +50,22 @@
 
 - `array-pointer-member-store.c`：经典参考 UA（HEAD 同源 build_ref）、根部产品 `unisacc.com`（32dd5156）、Python 参考三者 `-run` 均输出 `array member writes: pass`、退出 0——本案原缺陷在当前树上**已不复现**（修于何提交未追）。
 - **新缺陷（产品静默误编，接受即错）**：同目录 `array-pointer-arith.c` 在产品 `-run`/`-o` 下退出 **10**（cc、经典参考、Python 参考均 `pass`）。定位：`int (*ip)[3]` 下 `sizeof *(PTR±n)` 产品得 8（指针宽），应为 12；`sizeof(*(ip+2))`、`sizeof *(ip+2)`、`sizeof(*(2+ip))`、`sizeof(*(ip-0))`、`sizeof(*(ints+1))` 均错，`sizeof(*ip)`、`sizeof(ip[2])`、`sizeof(ints[1])`、`sizeof(*ints)` 正确；经 `*(ip+2)` 的读写本身正确。即产品 sizeof 对「指针算术结果再解引用」丢了数组指向类型。`unsigned char (*)[8]` 恰因 8==指针宽而被掩盖。修向：parse2 sizeof 段表刀（另派，验证中）；修前该探针仍不入闸。
+
+## sizeof 误编根因（2026-10-22 15:5x AWST；定位实际跑过，补丁只是设计）
+
+产品 `-run` 实测（32dd5156 根部 `unisacc.com`，对 gcc）：
+`sizeof(*(ip))`=12 ✓，`sizeof(**(ip+1))`=4 ✓，`sizeof(ip+1)`=8 ✓，`(ip+1)[1][2]`、`(*(ip+1))[1]` 取值 ✓；
+`sizeof *(ip+1)`、`sizeof((ip+1)[0])`、`sizeof *(q+0)`=8（应 12），`char(*)[5]` 得 8（应 5），
+`int(*)[3][2]` 得 8（应 24），`sizeof *(a+1)`（`int a[4][3]`）得 8（应 12）。
+
+- 求值侧没丢形状：`operator-pointer-add/sub`（`exec/parse2/control-result.tsv:833-852`）经 `lshapeok/lshape/lrank`
+  把 `rkok/vid/rk` 还原；`UD.dn`（`shape-result.tsv:176`）在 `rkok=1, rk>1` 走 `UD.row`（`rk-1`，不加载、`vt` 不变）。
+- 丢在 sizeof 总路径：`SZ.exprsize`（`control-result.tsv:2085`）只用 `ELSZ(td=vt, tb=vb)`，不看 `rkok/rk/vid`。
+  行结果的 `vt` 仍是行指针的深度 → 指针宽 8。`sizeof(*ip)` 走 `SZ.star → SZ.shapecheck` 才对。
+- 形状约定（由 `SZ.ar`、`SH.WIDTH` 的读法推出）：`int(*)[3]` 的形状 `ARR=2`、`DIM[1]=3`、`vt=1`。
+
+候选补丁（只是设计，未建未测）：`SZ.exprsize` 前加一格——`rkok=1` 且 `1 ≤ rk < ARR[vid]` 且确为行
+（经 `UD.row`/`PX` 得来）时，`sz = ELSZ(vt-1, vb) × Π DIM[vid*8+i]，i ∈ [ARR-rk, ARR)`。
+陷阱：`UD.scalar` 不清 `rkok`，`**(ip+1)` 之后仍 `rkok=1, rk=1`，仅凭 `rk<ARR` 会把标量当行；需要
+`UD.row` 置、`UD.scalar` 与各运算 `RET` 清的行标记，或在 `UD.scalar` 清 `rkok`（后者改求值面，须全差分）。
+落地须重建产品并做 c989780c 同款 1480 行差分；当前宿主可用内存约 2G，pack-prep 会卡，故本刀停在定位。
