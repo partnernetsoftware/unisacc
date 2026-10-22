@@ -1,0 +1,226 @@
+/* archbounded.cx -- the shared frame of the host library probe checks that take `--arch {arm64,x86_64}` and run
+   every step through checklib.bounded (tests/bound 20, stdio inherited, check=True), as a .cx module (2026-10-23,
+   the py->cx port wave; first users tests/libraryvariadicresolvercheck.cx and tests/librarycallplanscheck.cx).
+   Use it with `#pragma unisa use cxlib.archbounded` from a .cx file in tests/.
+     ab_setup(argc, argv, PROG, &ctx)
+         argparse for `PROG [-h] [--arch {arm64,x86_64}]` (help on stdout rc 0; usage errors rc 2 on stderr, the
+         text byte-identical to argparse with PROG as its prog name; --arch=V, unique prefixes such as --ar, last one
+         wins); then ctx.root = Path(__file__).resolve().parents[1] (argv[0] is the .cx under -run; a compiled binary
+         falls back to the working directory, the repository root of every gate job), ctx.host = 'arm64' for a
+         machine of arm64/aarch64 else 'x86_64', ctx.arch = --arch or the host, ctx.darwin = platform.system() ==
+         'Darwin'; a cross --arch off Darwin is SystemExit('cross execution requires a native runner') (stderr, rc 1).
+     ab_tempdir(&ctx, PREFIX)    tempfile.TemporaryDirectory(prefix=PREFIX): ctx.td (removed by ab_done/ab_bounded's
+                                 failure path, as the with-block's exit does)
+     ab_done(&ctx)               leave the with-block: remove ctx.td
+     ab_bounded(&ctx, CMD)       checklib.bounded(*CMD): ROOT/tests/bound 20 CMD..., stdin/stdout/stderr inherited;
+                                 nonzero is the .py's uncaught CalledProcessError: ctx.td removed, then the traceback's
+                                 last line `subprocess.CalledProcessError: Command '[...]' returned non-zero exit status
+                                 N.` (or `died with <Signals.SIGNAME: N>.`) on stderr, rc 1; an unrunnable tests/bound
+                                 is its FileNotFoundError/PermissionError line, rc 1
+     ab_runprefix(&ctx, CMD, &n) the `arch -x86_64` prefix an arm64 host puts before an x86_64 probe (n entries added)
+     ab_put/ab_puts/ab_byte/ab_u(&buf, ...)   bytes building; ab_u is struct.pack('<Q', N)
+     ab_desc(KIND, WIDTH, ALIGN, TAG, PAYLOAD)  the probes' type descriptor:
+                                 u(0,0,0,KIND,WIDTH,0,ALIGN) + bytes([TAG]) + u(len(PAYLOAD)) + PAYLOAD
+     ab_writefile(&ctx, PATH, &buf)   Path.write_bytes (an OSError line and rc 1 on failure)
+   Exported types: ab_ctx, ab_buf.  No exported objects or macros (CXIF v0). */
+#pragma unisa module archbounded
+#pragma unisa use pyrun
+#pragma unisa use pytempfile
+#pragma unisa use runtimecopy
+
+typedef struct ab_ctx {
+    char root[4096], td[4200], prog[256];
+    const char *arch, *host;
+    int darwin;
+} ab_ctx;
+typedef struct ab_buf { unsigned char *p; size_t n, cap; } ab_buf;
+
+/* ---- bytes ---------------------------------------------------------------------------------------------------- */
+void ab_put(ab_buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64; unsigned char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+void ab_puts(ab_buf *b, const char *s) { ab_put(b, s, strlen(s)); }
+void ab_byte(ab_buf *b, unsigned v) { unsigned char c = (unsigned char)v; ab_put(b, &c, 1); }
+void ab_u(ab_buf *b, unsigned long long v) {
+    unsigned char q[8]; int i;
+    for (i = 0; i < 8; i++) q[i] = (unsigned char)(v >> (8 * i));
+    ab_put(b, q, 8);
+}
+ab_buf ab_desc(unsigned kind, unsigned width, unsigned align, unsigned tag, const ab_buf *payload) {
+    ab_buf o = { 0, 0, 0 };
+    ab_u(&o, 0); ab_u(&o, 0); ab_u(&o, 0); ab_u(&o, kind); ab_u(&o, width); ab_u(&o, 0); ab_u(&o, align);
+    ab_byte(&o, tag); ab_u(&o, payload ? payload->n : 0);
+    if (payload && payload->n) ab_put(&o, payload->p, payload->n);
+    return o;
+}
+
+/* ---- leaving with an uncaught exception ------------------------------------------------------------------------ */
+void ab_done(ab_ctx *c) { if (c->td[0]) { ptf_rmtree(c->td); c->td[0] = 0; } }
+static void ab_raise(ab_ctx *c, const char *line) {
+    fflush(stdout);
+    ab_done(c);
+    fprintf(stderr, "%s\n", line);
+    fflush(stderr);
+    exit(1);
+}
+void ab_writefile(ab_ctx *c, const char *path, const ab_buf *b) {
+    if (cx_write(path, b->p ? (const char *)b->p : "", b->n) != 0) {
+        char why[8192]; rtc_oserror(errno ? errno : EIO, path, why, sizeof why); ab_raise(c, why);
+    }
+}
+void ab_tempdir(ab_ctx *c, const char *prefix) {
+    if (ptf_mkdtemp(0, prefix, c->td, sizeof c->td) != 0) {
+        char why[8192], path[4200];
+        snprintf(path, sizeof path, "%s", c->td); c->td[0] = 0;
+        rtc_oserror(errno, path, why, sizeof why); ab_raise(c, why);
+    }
+}
+
+/* ---- argparse ([-h] [--arch {arm64,x86_64}]) ----------------------------------------------------------------- */
+static void ab_usage_line(const ab_ctx *c, FILE *f) { fprintf(f, "usage: %s [-h] [--arch {arm64,x86_64}]\n", c->prog); }
+static void ab_usage_error(const ab_ctx *c, const char *msg, const char *a) {
+    fflush(stdout);
+    ab_usage_line(c, stderr); fprintf(stderr, "%s: error: ", c->prog); fprintf(stderr, msg, a); fputc('\n', stderr);
+    exit(2);
+}
+static int ab_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+static int ab_prefix(const char *p, size_t n, const char *opt) { return n >= 3 && n <= strlen(opt) && !strncmp(p, opt, n); }
+/* which option a '--' token names: 1 help, 2 arch, 0 none; EQ gets the explicit value after '=' */
+static int ab_long(const char *s, const char **eq) {
+    const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s);
+    *eq = e ? e + 1 : 0;
+    if (ab_prefix(s, n, "--help")) return 1;
+    if (ab_prefix(s, n, "--arch")) return 2;
+    return 0;
+}
+static int ab_is_option(const char *s) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && ab_long(s, &eq)) return 1;
+    if (s[1] == 'h') return 1;
+    if (ab_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+static void ab_parse(ab_ctx *c, int argc, char **argv) {
+    static char extras[8192]; size_t xl = 0; int i, help = 0;
+    extras[0] = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int o = 0;
+        if (!strcmp(s, "--")) {
+            for (; i < argc; i++) xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", argv[i]);
+            break;
+        }
+        if (s[0] == '-' && s[1] == '-') o = ab_long(s, &eq);
+        else if (s[0] == '-' && s[1] == 'h') o = 1;
+        if (o == 1) {
+            if (eq && s[1] == '-') ab_usage_error(c, "argument -h/--help: ignored explicit argument '%s'", eq);
+            if (s[1] == '-' || (s[2] != '=' && s[2] != '-')) { help = 1; break; }
+            ab_usage_error(c, "argument -h/--help: ignored explicit argument '%s'", s + 2 + (s[2] == '='));
+        } else if (o == 2) {
+            const char *v = eq;
+            if (!v) {
+                if (i + 1 >= argc || ab_is_option(argv[i + 1])) ab_usage_error(c, "argument --arch: expected one argument", 0);
+                v = argv[++i];
+            }
+            if (strcmp(v, "arm64") && strcmp(v, "x86_64"))
+                ab_usage_error(c, "argument --arch: invalid choice: '%s' (choose from 'arm64', 'x86_64')", v);
+            c->arch = v;
+        } else xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", s);
+    }
+    if (help) {
+        ab_usage_line(c, stdout);
+        printf("\noptions:\n  -h, --help            show this help message and exit\n  --arch {arm64,x86_64}\n");
+        fflush(stdout);
+        exit(0);
+    }
+    if (xl) ab_usage_error(c, "unrecognized arguments: %s", extras);
+}
+
+static char *ab_uname(char *flag) {   /* platform.machine() / platform.system(): uname's first line, "" if it fails */
+    char *a[3], *out = 0; size_t n = 0;
+    a[0] = "uname"; a[1] = flag; a[2] = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+
+void ab_setup(int argc, char **argv, const char *prog, ab_ctx *c) {
+    char self[4096], *mach, *sys; size_t l; int k;
+    memset(c, 0, sizeof *c);
+    snprintf(c->prog, sizeof c->prog, "%s", prog);
+    ab_parse(c, argc, argv);
+    l = argc > 0 ? strlen(argv[0]) : 0;
+    if (l > 3 && !strcmp(argv[0] + l - 3, ".cx") && realpath(argv[0], self)) {
+        for (k = 0; k < 2; k++) { char *s = strrchr(self, '/'); if (s && s != self) *s = 0; else { strcpy(self, "/"); break; } }
+        snprintf(c->root, sizeof c->root, "%s", self);
+    } else if (!getcwd(c->root, sizeof c->root)) snprintf(c->root, sizeof c->root, ".");
+    mach = ab_uname("-m"); sys = ab_uname("-s");
+    c->host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    if (!c->arch) c->arch = c->host;
+    c->darwin = !strcmp(sys, "Darwin");
+    if (strcmp(c->arch, c->host) && !c->darwin) {
+        fflush(stdout); fputs("cross execution requires a native runner\n", stderr); exit(1);
+    }
+}
+
+int ab_runprefix(const ab_ctx *c, char **cmd, int *n) {
+    if (!strcmp(c->host, "arm64") && !strcmp(c->arch, "x86_64")) { cmd[(*n)++] = "arch"; cmd[(*n)++] = "-x86_64"; return 2; }
+    return 0;
+}
+
+/* ---- checklib.bounded ------------------------------------------------------------------------------------------ */
+static const char *ab_signame(int s) {   /* signal.Signals(N).name; the prelude's <signal.h> lacks SIGTRAP, SIGBUS,
+                                            SIGUSR1/2, SIGPIPE and SIGALRM (those fall to "unknown signal N") */
+    if (s == SIGHUP) return "SIGHUP"; if (s == SIGINT) return "SIGINT"; if (s == SIGQUIT) return "SIGQUIT";
+    if (s == SIGILL) return "SIGILL"; if (s == SIGABRT) return "SIGABRT"; if (s == SIGFPE) return "SIGFPE";
+    if (s == SIGKILL) return "SIGKILL"; if (s == SIGSEGV) return "SIGSEGV"; if (s == SIGTERM) return "SIGTERM";
+    return 0;
+}
+void ab_bounded(ab_ctx *c, char **cmd) {
+    char bound[4200], *a[96], why[16384], *list; int k = 0, i, st = 0, rc, pfd[2], err = 0; pid_t pid; ssize_t r;
+    snprintf(bound, sizeof bound, "%s/tests/bound", c->root);
+    a[k++] = bound; a[k++] = "20";
+    for (i = 0; cmd[i] && k < 95; i++) a[k++] = cmd[i];
+    a[k] = 0;
+    fflush(stdout); fflush(stderr);
+    if (pipe(pfd) != 0) ab_raise(c, "OSError: cannot create a pipe");
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) ab_raise(c, "OSError: fork failed");
+    if (pid == 0) {
+        close(pfd[0]);
+        execv(a[0], a);
+        err = errno; r = write(pfd[1], &err, sizeof err); (void)r;
+        _exit(255);
+    }
+    close(pfd[1]);
+    r = read(pfd[0], &err, sizeof err);
+    close(pfd[0]);
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) ab_raise(c, "ChildProcessError: wait failed");
+    if (r == (ssize_t)sizeof err) { rtc_oserror(err, bound, why, sizeof why); ab_raise(c, why); }
+    rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    if (!rc) return;
+    list = pr_repr_strlist(a, (size_t)k);
+    if (rc < 0 && ab_signame(-rc))
+        snprintf(why, sizeof why, "subprocess.CalledProcessError: Command '%s' died with <Signals.%s: %d>.", list, ab_signame(-rc), -rc);
+    else if (rc < 0)
+        snprintf(why, sizeof why, "subprocess.CalledProcessError: Command '%s' died with unknown signal %d.", list, -rc);
+    else
+        snprintf(why, sizeof why, "subprocess.CalledProcessError: Command '%s' returned non-zero exit status %d.", list, rc);
+    free(list);
+    ab_raise(c, why);
+}

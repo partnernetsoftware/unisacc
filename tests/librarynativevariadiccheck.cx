@@ -1,0 +1,90 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarynativevariadiccheck.cx -- host variadic-call plan only; no public/model variadic coverage claim.
+   Ported from tests/librarynativevariadiccheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarynativevariadiccheck.cx -- [-h] [--arch {arm64,x86_64}]
+   In a fresh temporary directory (tempfile.TemporaryDirectory, prefix r10-nativevar-) it twice (plain, then
+   -fsanitize=address,undefined -g) builds
+     $CC (default cc) [-arch ARCH on Darwin] -std=c99 -I ROOT -Wall -Wextra -Wno-unused-function
+        ROOT/tests/librarynativevariadiccheck.c -lffi -o DIR/probe [sanitizer flags]
+   and runs `[arch -x86_64 on an arm64 host for --arch x86_64] DIR/probe DIR/call.sig NAME FIXED` for the three
+   accepted plans (mixed: double result, D,I + 9 x (I,D), fixed 2; zero: D,I fixed 2; pair: Pair result, I,Pair,D,I
+   fixed 1) and the four rejection controls (D,I,F / D,I,C fixed 2; D,I fixed 0 and 3, mode `reject`), call.sig being
+   rewritten each time with the USLSIG2 declaration the .py packed with struct (name `exchange`, flags 0,1,0,1,
+   trailing byte 1) -- every step through tests/bound 20 with stdio inherited, rc 0 required -- then prints
+     variadic host: normal + ASan/UBSan; promoted mixed20, zero-tail, aggregate and rejection controls passed
+   rc 0.  A failing step is the .py's uncaught CalledProcessError: the directory removed, the traceback's last line
+   on stderr, rc 1.  --arch other than the host off Darwin: `cross execution requires a native runner`, rc 1.
+   argparse errors are rc 2 with argparse's text (prog name librarynativevariadiccheck.py, as the .py printed).
+   The argparse/bounded/struct frame is tests/cxlib/archbounded.cx (shared with the other host probe checks).
+   Include-free: everything used comes with the cx.h prelude and the modules. */
+#pragma unisa use cxlib.archbounded
+
+static ab_buf I, D, F, C, PAIR;
+
+/* signature(result,args): b'USLSIG2\n'+u(1)+u(8)+b'exchange'+bytes([0,1,0,1])+u(len(args))+result+u(len(args))
+   +b''.join(args)+bytes([1]) */
+static ab_buf signature(const ab_buf *result, const ab_buf *const *args, int n) {
+    ab_buf s = { 0, 0, 0 }; int i;
+    ab_puts(&s, "USLSIG2\n"); ab_u(&s, 1); ab_u(&s, 8); ab_puts(&s, "exchange");
+    ab_byte(&s, 0); ab_byte(&s, 1); ab_byte(&s, 0); ab_byte(&s, 1);
+    ab_u(&s, (unsigned long long)n); ab_put(&s, result->p, result->n); ab_u(&s, (unsigned long long)n);
+    for (i = 0; i < n; i++) ab_put(&s, args[i]->p, args[i]->n);
+    ab_byte(&s, 1);
+    return s;
+}
+
+/* sig.write_bytes(signature(result,args)); run([arch -x86_64,] exe, sig, name, fixed) */
+static void probe(ab_ctx *c, const char *exe, const char *sigpath, const ab_buf *result, const ab_buf *const *args,
+                  int n, const char *name, int fixed) {
+    ab_buf s = signature(result, args, n); char *r[8], fx[32]; int m = 0;
+    ab_writefile(c, sigpath, &s);
+    free(s.p);
+    snprintf(fx, sizeof fx, "%d", fixed);
+    ab_runprefix(c, r, &m);
+    r[m++] = (char *)exe; r[m++] = (char *)sigpath; r[m++] = (char *)name; r[m++] = fx; r[m] = 0;
+    ab_bounded(c, r);
+}
+
+int main(int argc, char **argv) {
+    ab_ctx c; ab_buf pp = { 0, 0, 0 }; char exe[4400], sig[4400], src[4400]; const char *cc; int san, k;
+    const ab_buf *mixed[20], *zero[2], *pair[4], *rej[4][3];
+    static const int rejn[4] = { 3, 3, 2, 2 }, rejfixed[4] = { 2, 2, 0, 3 };
+    ab_setup(argc, argv, "librarynativevariadiccheck.py", &c);
+    cc = getenv("CC"); if (!cc) cc = "cc";   /* os.environ.get('CC','cc') */
+    /* I=desc(1,4,4); D=desc(3,8,8); F=desc(3,4,4); C=desc(1,1,1) */
+    I = ab_desc(1, 4, 4, 0, 0); D = ab_desc(3, 8, 8, 0, 0); F = ab_desc(3, 4, 4, 0, 0); C = ab_desc(1, 1, 1, 0, 0);
+    /* PAIR=desc(5,16,8,1,u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I) */
+    ab_u(&pp, 2); ab_u(&pp, 0); ab_u(&pp, 0); ab_u(&pp, 0); ab_u(&pp, 8); ab_put(&pp, D.p, D.n);
+    ab_u(&pp, 8); ab_u(&pp, 0); ab_u(&pp, 0); ab_u(&pp, 4); ab_put(&pp, I.p, I.n);
+    PAIR = ab_desc(5, 16, 8, 1, &pp);
+    /* [D,I]+[I,D]*9 */
+    mixed[0] = &D; mixed[1] = &I;
+    for (k = 0; k < 9; k++) { mixed[2 + 2 * k] = &I; mixed[3 + 2 * k] = &D; }
+    zero[0] = &D; zero[1] = &I;
+    pair[0] = &I; pair[1] = &PAIR; pair[2] = &D; pair[3] = &I;
+    /* [([D,I,F],2),([D,I,C],2),([D,I],0),([D,I],3)] */
+    for (k = 0; k < 4; k++) { rej[k][0] = &D; rej[k][1] = &I; rej[k][2] = 0; }
+    rej[0][2] = &F; rej[1][2] = &C;
+
+    ab_tempdir(&c, "r10-nativevar-");
+    snprintf(exe, sizeof exe, "%s/probe", c.td);
+    snprintf(sig, sizeof sig, "%s/call.sig", c.td);
+    snprintf(src, sizeof src, "%s/tests/librarynativevariadiccheck.c", c.root);
+    for (san = 0; san < 2; san++) {   /* for sanitized in (False,True) */
+        char *b[32]; int n = 0;
+        b[n++] = (char *)cc;
+        if (c.darwin) { b[n++] = "-arch"; b[n++] = (char *)c.arch; }
+        b[n++] = "-std=c99"; b[n++] = "-I"; b[n++] = c.root; b[n++] = "-Wall"; b[n++] = "-Wextra";
+        b[n++] = "-Wno-unused-function"; b[n++] = src; b[n++] = "-lffi"; b[n++] = "-o"; b[n++] = exe;
+        if (san) { b[n++] = "-fsanitize=address,undefined"; b[n++] = "-g"; }
+        b[n] = 0;
+        ab_bounded(&c, b);
+        probe(&c, exe, sig, &D, mixed, 20, "mixed", 2);
+        probe(&c, exe, sig, &D, zero, 2, "zero", 2);
+        probe(&c, exe, sig, &PAIR, pair, 4, "pair", 1);
+        for (k = 0; k < 4; k++) probe(&c, exe, sig, &D, rej[k], rejn[k], "reject", rejfixed[k]);
+    }
+    ab_done(&c);
+    printf("variadic host: normal + ASan/UBSan; promoted mixed20, zero-tail, aggregate and rejection controls passed\n");
+    return fflush(stdout) ? 1 : 0;
+}

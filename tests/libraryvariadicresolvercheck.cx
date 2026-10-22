@@ -1,0 +1,48 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libraryvariadicresolvercheck.cx -- frozen template candidates only; concrete model callsites are separate.
+   Ported from tests/libraryvariadicresolvercheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/libraryvariadicresolvercheck.cx -- [-h] [--arch {arm64,x86_64}]
+   In a fresh temporary directory (tempfile.TemporaryDirectory, prefix r10-varresolver-) it writes the USLSIG2
+   declaration `prototype` (one variadic `exchange`: double result, two fixed parameters double, int) that the .py
+   packed with struct, then twice (plain, then -fsanitize=address,undefined -g) builds
+   `cc [-arch ARCH on Darwin] -std=c99 -I ROOT -Wall -Wextra -Wno-unused-function ROOT/tests/libraryvariadicresolvercheck.c
+   -lffi -o DIR/check` and runs `[arch -x86_64 on an arm64 host for --arch x86_64] DIR/check DIR/prototype` -- every
+   step through tests/bound 20 with stdio inherited, rc 0 required -- then prints
+     variadic resolver normal + ASan/UBSan passed
+   rc 0.  A failing step is the .py's uncaught CalledProcessError: the directory removed, the traceback's last line
+   on stderr, rc 1.  --arch other than the host off Darwin: `cross execution requires a native runner`, rc 1.
+   argparse errors are rc 2 with argparse's text (prog name libraryvariadicresolvercheck.py, as the .py printed).
+   The argparse/bounded/struct frame is shared with tests/librarycallplanscheck.cx through tests/cxlib/archbounded.cx.
+   Include-free: everything used comes with the cx.h prelude and the modules. */
+#pragma unisa use cxlib.archbounded
+
+int main(int argc, char **argv) {
+    ab_ctx c; ab_buf D, I, sig = { 0, 0, 0 }; char sp[4400], exe[4400], src[4400]; int san;
+    ab_setup(argc, argv, "libraryvariadicresolvercheck.py", &c);
+    /* desc(kind,width) = u(0,0,0,kind,width,0,width) + b'\0' + u(0) */
+    D = ab_desc(3, 8, 8, 0, 0); I = ab_desc(1, 4, 4, 0, 0);
+    /* b'USLSIG2\n'+u(1)+u(8)+b'exchange'+bytes([0,1,1,1])+u(2)+D+u(2)+D+I+b'\0' */
+    ab_puts(&sig, "USLSIG2\n"); ab_u(&sig, 1); ab_u(&sig, 8); ab_puts(&sig, "exchange");
+    ab_byte(&sig, 0); ab_byte(&sig, 1); ab_byte(&sig, 1); ab_byte(&sig, 1);
+    ab_u(&sig, 2); ab_put(&sig, D.p, D.n); ab_u(&sig, 2); ab_put(&sig, D.p, D.n); ab_put(&sig, I.p, I.n); ab_byte(&sig, 0);
+    ab_tempdir(&c, "r10-varresolver-");
+    snprintf(sp, sizeof sp, "%s/prototype", c.td); ab_writefile(&c, sp, &sig);
+    snprintf(exe, sizeof exe, "%s/check", c.td);
+    snprintf(src, sizeof src, "%s/tests/libraryvariadicresolvercheck.c", c.root);
+    for (san = 0; san < 2; san++) {
+        char *b[32], *r[8]; int n = 0, m = 0;
+        b[n++] = "cc";
+        if (c.darwin) { b[n++] = "-arch"; b[n++] = (char *)c.arch; }
+        b[n++] = "-std=c99"; b[n++] = "-I"; b[n++] = c.root; b[n++] = "-Wall"; b[n++] = "-Wextra";
+        b[n++] = "-Wno-unused-function"; b[n++] = src; b[n++] = "-lffi"; b[n++] = "-o"; b[n++] = exe;
+        if (san) { b[n++] = "-fsanitize=address,undefined"; b[n++] = "-g"; }
+        b[n] = 0;
+        ab_bounded(&c, b);
+        ab_runprefix(&c, r, &m);
+        r[m++] = exe; r[m++] = sp; r[m] = 0;
+        ab_bounded(&c, r);
+    }
+    ab_done(&c);
+    printf("variadic resolver normal + ASan/UBSan passed\n");
+    return fflush(stdout) ? 1 : 0;
+}

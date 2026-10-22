@@ -1,0 +1,74 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallplanscheck.cx -- owned host variadic templates and transactional model call declarations.
+   Ported from tests/librarycallplanscheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarycallplanscheck.cx -- [-h] [--arch {arm64,x86_64}]
+   In a fresh temporary directory (tempfile.TemporaryDirectory, prefix r10-callplans-) it writes the five USLSIG2
+   declarations 0.sig .. 4.sig the .py packed with struct (mixed(double,int,...)->double variadic and fixed, a fixed
+   mixed with 20 parameters, pair(int,...)->Pair variadic, pair(int,Pair,double,int)->Pair fixed; Pair = {double;
+   int} 16/8), then twice (plain, then -fsanitize=address,undefined -g) builds `$CC (default cc) [-arch ARCH on
+   Darwin] -std=c99 -I ROOT -Wall -Wextra -Wno-unused-function ROOT/tests/librarycallplanscheck.c -lffi -o DIR/probe`
+   and runs `[arch -x86_64 on an arm64 host for --arch x86_64] DIR/probe DIR/0.sig .. DIR/4.sig` -- every step
+   through tests/bound 20 with stdio inherited, rc 0 required -- then prints
+     callsite host: normal + ASan/UBSan; real va_arg, aggregate returns, ownership and rollback passed
+   rc 0.  A failing step is the .py's uncaught CalledProcessError: the directory removed, the traceback's last line
+   on stderr, rc 1.  --arch other than the host off Darwin: `cross execution requires a native runner`, rc 1.
+   argparse errors are rc 2 with argparse's text (prog name librarycallplanscheck.py, as the .py printed).
+   The argparse/bounded/struct frame is shared with tests/libraryvariadicresolvercheck.cx through
+   tests/cxlib/archbounded.cx.  Include-free: everything used comes with the cx.h prelude and the modules. */
+#pragma unisa use cxlib.archbounded
+
+/* signature(name,result,args,variadic) */
+static ab_buf signature(const char *name, const ab_buf *result, const ab_buf *const *args, int nargs, int variadic) {
+    ab_buf o = { 0, 0, 0 }; int i;
+    ab_puts(&o, "USLSIG2\n"); ab_u(&o, 1); ab_u(&o, strlen(name)); ab_puts(&o, name);
+    ab_byte(&o, 0); ab_byte(&o, 1); ab_byte(&o, (unsigned)variadic); ab_byte(&o, 1);
+    ab_u(&o, (unsigned long long)nargs); ab_put(&o, result->p, result->n);
+    ab_u(&o, (unsigned long long)nargs);
+    for (i = 0; i < nargs; i++) ab_put(&o, args[i]->p, args[i]->n);
+    ab_byte(&o, variadic ? 0 : 1);
+    return o;
+}
+
+int main(int argc, char **argv) {
+    ab_ctx c; ab_buf I, D, PAIR, pp = { 0, 0, 0 }, sigs[5]; char files[5][4400], exe[4400], src[4400];
+    const ab_buf *a0[2], *a2[20], *a3[1], *a4[4]; const char *cc; int i, san;
+    ab_setup(argc, argv, "librarycallplanscheck.py", &c);
+    I = ab_desc(1, 4, 4, 0, 0); D = ab_desc(3, 8, 8, 0, 0);   /* F=desc(3,4,4) and C=desc(1,1,1) are unused */
+    /* PAIR=desc(5,16,8,1,u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I) */
+    ab_u(&pp, 2); ab_u(&pp, 0); ab_u(&pp, 0); ab_u(&pp, 0); ab_u(&pp, 8); ab_put(&pp, D.p, D.n);
+    ab_u(&pp, 8); ab_u(&pp, 0); ab_u(&pp, 0); ab_u(&pp, 4); ab_put(&pp, I.p, I.n);
+    PAIR = ab_desc(5, 16, 8, 1, &pp);
+    /* specs=[('mixed',D,[D,I],1),('mixed',D,[D,I],0),('mixed',D,[D,I]+[I,D]*9,0),('pair',PAIR,[I],1),
+              ('pair',PAIR,[I,PAIR,D,I],0)] */
+    a0[0] = &D; a0[1] = &I;
+    a2[0] = &D; a2[1] = &I; for (i = 0; i < 9; i++) { a2[2 + 2 * i] = &I; a2[3 + 2 * i] = &D; }
+    a3[0] = &I;
+    a4[0] = &I; a4[1] = &PAIR; a4[2] = &D; a4[3] = &I;
+    sigs[0] = signature("mixed", &D, a0, 2, 1);
+    sigs[1] = signature("mixed", &D, a0, 2, 0);
+    sigs[2] = signature("mixed", &D, a2, 20, 0);
+    sigs[3] = signature("pair", &PAIR, a3, 1, 1);
+    sigs[4] = signature("pair", &PAIR, a4, 4, 0);
+    ab_tempdir(&c, "r10-callplans-");
+    snprintf(exe, sizeof exe, "%s/probe", c.td);
+    for (i = 0; i < 5; i++) { snprintf(files[i], sizeof files[i], "%s/%d.sig", c.td, i); ab_writefile(&c, files[i], &sigs[i]); }
+    snprintf(src, sizeof src, "%s/tests/librarycallplanscheck.c", c.root);
+    cc = getenv("CC"); if (!cc) cc = "cc";   /* os.environ.get('CC','cc') */
+    for (san = 0; san < 2; san++) {
+        char *b[32], *r[16]; int n = 0, m = 0;
+        b[n++] = (char *)cc;
+        if (c.darwin) { b[n++] = "-arch"; b[n++] = (char *)c.arch; }
+        b[n++] = "-std=c99"; b[n++] = "-I"; b[n++] = c.root; b[n++] = "-Wall"; b[n++] = "-Wextra";
+        b[n++] = "-Wno-unused-function"; b[n++] = src; b[n++] = "-lffi"; b[n++] = "-o"; b[n++] = exe;
+        if (san) { b[n++] = "-fsanitize=address,undefined"; b[n++] = "-g"; }
+        b[n] = 0;
+        ab_bounded(&c, b);
+        ab_runprefix(&c, r, &m);
+        r[m++] = exe; for (i = 0; i < 5; i++) r[m++] = files[i];
+        r[m] = 0;
+        ab_bounded(&c, r);
+    }
+    ab_done(&c);
+    printf("callsite host: normal + ASan/UBSan; real va_arg, aggregate returns, ownership and rollback passed\n");
+    return fflush(stdout) ? 1 : 0;
+}

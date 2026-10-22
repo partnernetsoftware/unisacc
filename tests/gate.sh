@@ -694,9 +694,9 @@ job lib-stack-x86 python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.
 job lib-stack-x86-hostabi python3 ./tests/r10stackx86check.py
 job lib-sig2-host tests/bound 58 sh ./unisacc.com -run tests/librarysig2hostcheck.cx   # (.cx port, 2026-10-23) own synthetic V2 declarations + native libffi closure oracle, native + ASan/UBSan
 job lib-typed-host sh ./unisacc.com -run tests/librarynativehostcheck.cx   # (.cx port, 2026-10-23)
-job lib-variadic-host python3 ./tests/librarynativevariadiccheck.py
-job lib-callplans-host python3 ./tests/librarycallplanscheck.py
-job lib-variadic-resolver-host python3 ./tests/libraryvariadicresolvercheck.py
+job lib-variadic-host tests/bound 58 sh ./tests/cxbin tests/librarynativevariadiccheck.cx   # (.cx port, 2026-10-23)
+job lib-callplans-host tests/bound 58 sh ./unisacc.com -run tests/librarycallplanscheck.cx   # (.cx port, 2026-10-23)
+job lib-variadic-resolver-host tests/bound 58 sh ./unisacc.com -run tests/libraryvariadicresolvercheck.cx   # (.cx port, 2026-10-23)
 job lib-variadic-protocol ./tests/modelvariadicprotocolcheck.sh
 job lib-callback-graph-host python3 ./tests/librarycallbackgraphcheck.py
 job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
@@ -828,8 +828,8 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callable-variadic-native-rosetta python3 ./tests/librarycallablevariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-sig2-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-typed-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
-    job lib-variadic-rosetta python3 ./tests/librarynativevariadiccheck.py --arch x86_64
-    job lib-callplans-rosetta python3 ./tests/librarycallplanscheck.py --arch x86_64
+    job lib-variadic-rosetta tests/bound 58 sh ./tests/cxbin tests/librarynativevariadiccheck.cx --arch x86_64
+    job lib-callplans-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycallplanscheck.cx -- --arch x86_64
     job lib-callback-graph-rosetta python3 ./tests/librarycallbackgraphcheck.py --arch x86_64
     job lib-callback-outcome-rosetta python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
@@ -861,7 +861,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-union16-callback-4-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback --arch x86_64
     job lib-union16-direct-5-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --arch x86_64
     job lib-union16-callback-5-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback --arch x86_64
-    job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
+    job lib-variadic-resolver-rosetta tests/bound 58 sh ./unisacc.com -run tests/libraryvariadicresolvercheck.cx -- --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
 job lib-artifacts python3 ./tests/libraryartifactcheck.py --package "${MODEL_COM:-./unisacc.com}"
