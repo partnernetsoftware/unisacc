@@ -49,7 +49,7 @@ PLATFORM_PREFIX = ("bigclosure-", "host-triple-", "nativeboot-", "fat-", "ffi-",
 # A complete compiler route, probe corpus, or shipped product is exercised.
 PIPELINE = set("""
 closure-c1a closure-c1b closure-c1c
-declshape volatile-comma malloc asmtext combo forward forward-multi
+declshape tdescprobe-oracle tdescprobe-classic volatile-comma malloc asmtext combo forward forward-multi
 linkunits staticinit tagforward parserbounds formatonce staticunits cli
 ccparity run multi hostile source target kernel source-layout oracle-cache
 """.split())

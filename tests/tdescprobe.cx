@@ -1,0 +1,130 @@
+#!/usr/bin/env -S unisacc.com -run
+/* tdescprobe.cx -- the "declarator loses a level / a dimension" bug class as an enumerated gate (refactor R3, research/c43-cx-paradigm-experiments.md).
+   Every derivation of {P, A3, F(int)} of depth 1..3 over int is a canonical type descriptor (TDESC, e.g. P.A3.int for
+   int (*x)[3]); for each valid one and each of eight contexts (x, *x, **x, ***x, x[0], x[0][0], (*x)[0], *x[0]) whose type
+   is complete, the size follows from the descriptor alone -- two pure functions, sz() and ap() below, nothing per path.
+   usage: sh ./unisacc.com -run tests/tdescprobe.cx -- --oracle CC WORK          the model equals CC on all probes (one program)
+          sh ./unisacc.com -run tests/tdescprobe.cx -- --check COMPILER BASELINE WORK K/N   shard K of N against the baseline
+          sh ./unisacc.com -run tests/tdescprobe.cx -- --baseline COMPILER WORK K/N        print this shard's verdicts
+   A verdict is OK (the compiler's -run prints the model size), REFUSE (it refuses the probe), or WRONG (it prints another
+   size: silent wrong code).  --check fails on any verdict that differs from BASELINE, in either direction: a new WRONG or a
+   lost OK is red, and so is an improvement until the baseline records it (as chain.sh's "revived").  The measure of the
+   refactor is OK rising and WRONG reaching zero by making the descriptor the only source of these sizes -- not by patches. */
+#include <cx.h>
+#include <fcntl.h>
+
+static const char *OPS[3] = { "P", "A3", "F(int)" };
+static const char *CTX[] = { "x", "*x", "**x", "***x", "x[0]", "x[0][0]", "(*x)[0]", "*x[0]", 0 };
+
+static int sz(const int *o, int n, int i) {      /* size of the type o[i..n) then int; -1 = incomplete (a function) */
+    if (i == n) return 4;
+    if (o[i] == 0) return 8;
+    if (o[i] == 2) return -1;
+    { int e = sz(o, n, i + 1); return e < 0 ? -1 : 3 * e; }
+}
+static int valid(const int *o, int n) {          /* C: no arrays of functions, no functions returning arrays or functions */
+    int i; for (i = 0; i + 1 < n; i++) { if (o[i] == 2 && o[i + 1] != 0) return 0; if (o[i] == 1 && o[i + 1] == 2) return 0; } return 1;
+}
+static int ap(const int *o, int n, int i, char c) {   /* apply '*' or '[' to the type at o[i]; the new start, or -1 */
+    if (i == n) return -1;                         /* int: neither */
+    if (o[i] == 2) return c == '*' ? i : -1;       /* *f is f; f[0] is not C */
+    if (o[i] == 0 && i + 1 < n && o[i + 1] == 2 && c == '[') return -1;   /* arithmetic on a function pointer */
+    return i + 1;
+}
+
+#define MAXP 128
+typedef struct { char decl[64]; const char *ctx; int size; } Probe;
+static Probe P[MAXP]; static int np;
+
+static void enumerate(void) {
+    int n, k, o[3];
+    for (n = 1; n <= 3; n++) for (k = 0; k < (n == 1 ? 3 : n == 2 ? 9 : 27); k++) {
+        char dc[64], t[64]; int i, c, v = k;
+        for (i = 0; i < n; i++) { o[i] = v % 3; v /= 3; }
+        strcpy(dc, "x");
+        for (i = 0; i < n; i++) {
+            if (o[i] == 0) snprintf(t, 64, "*%s", dc);
+            else if (dc[0] == '*') snprintf(t, 64, "(%s)%s", dc, o[i] == 1 ? "[3]" : "(int)");
+            else snprintf(t, 64, "%s%s", dc, o[i] == 1 ? "[3]" : "(int)");
+            strcpy(dc, t);
+        }
+        if (!valid(o, n)) continue;
+        for (c = 0; CTX[c]; c++) {
+            const char *q = CTX[c]; int s = 0, j, ok = 1, size; char ops[4]; int no = 0, nst = 0;
+            for (j = 0; q[j] == '*'; j++) nst++;
+            if (q[j] == '(') { ops[no++] = '*'; ops[no++] = '['; }            /* (*x)[0] */
+            else { const char *b = q + j + 1; while ((b = strstr(b, "[0]")) != 0) { ops[no++] = '['; b += 3; } for (j = 0; j < nst; j++) ops[no++] = '*'; }
+            for (j = 0; j < no && ok; j++) { s = ap(o, n, s, ops[j]); if (s < 0) ok = 0; }
+            size = ok ? sz(o, n, s) : -1;
+            if (size < 0) continue;
+            if (np >= MAXP) { fprintf(stderr, "tdescprobe: too many probes\n"); exit(2); }
+            strcpy(P[np].decl, dc); P[np].ctx = q; P[np].size = size; np++;
+        }
+    }
+}
+
+static int shard(const char *spec, int *lo, int *hi) {
+    int k, n; if (sscanf(spec, "%d/%d", &k, &n) != 2 || n < 1 || k < 1 || k > n) return 1;
+    *lo = np * (k - 1) / n; *hi = np * k / n; return 0;
+}
+static const char *verdict(const char *compiler, const char *work, int i) {
+    char src[4200], line[256], *out = 0; size_t len = 0; int rc;
+    snprintf(src, sizeof src, "%s/p%03d.c", work, i + 1);
+    {   char text[512]; int m = snprintf(text, sizeof text, "#include <stdio.h>\nint main(void) {\n  int %s;\n  printf(\"%%d\\n\", (int)sizeof(%s));\n  return 0;\n}\n", P[i].decl, P[i].ctx);
+        if (cx_write(src, text, m)) { fprintf(stderr, "tdescprobe: cannot write %s\n", src); exit(2); } }
+    {   char *a[6]; int k = 0;
+        if (strlen(compiler) > 4 && !strcmp(compiler + strlen(compiler) - 4, ".com")) a[k++] = "sh";
+        a[k++] = (char *)compiler; a[k++] = src; a[k] = 0;
+        {   int saved, fd; fflush(stderr); saved = dup(2); fd = open("/dev/null", O_WRONLY, 0);   /* the refusal text is not the verdict */
+            if (saved >= 0 && fd >= 0) { dup2(fd, 2); close(fd); }
+            rc = cx_runv_timeout(a, 20, &out, &len);
+            if (saved >= 0) { fflush(stderr); dup2(saved, 2); close(saved); } } }
+    snprintf(line, sizeof line, "%d\n", P[i].size);
+    if (rc != 0) { free(out); return "REFUSE"; }
+    { int same = out && len == strlen(line) && !memcmp(out, line, len); free(out); return same ? "OK" : "WRONG"; }
+}
+
+int main(int argc, char **argv) {
+    int i, lo, hi, bad = 0, ok = 0, ref = 0, wrong = 0;
+    enumerate();
+    if (argc == 4 && !strcmp(argv[1], "--oracle")) {        /* the model against a system C compiler, one program */
+        char src[4200], bin[4200]; size_t cap = 65536, m = 0; char *text = malloc(cap); char *out = 0; size_t len = 0; int rc;
+        mkdir(argv[3], 0755);
+        snprintf(src, sizeof src, "%s/oracle.c", argv[3]); snprintf(bin, sizeof bin, "%s/oracle", argv[3]);
+        m += snprintf(text + m, cap - m, "#include <stdio.h>\n");
+        for (i = 0; i < np; i++) m += snprintf(text + m, cap - m, "static void t%d(void) { int %s; printf(\"%%d\\n\", (int)sizeof(%s)); }\n", i, P[i].decl, P[i].ctx);
+        m += snprintf(text + m, cap - m, "int main(void) {\n"); for (i = 0; i < np; i++) m += snprintf(text + m, cap - m, "  t%d();\n", i);
+        m += snprintf(text + m, cap - m, "  return 0;\n}\n");
+        if (cx_write(src, text, m)) return 2;
+        {   char *a[] = { argv[2], "-std=c99", "-w", src, "-o", bin, 0 }; if (cx_runv_timeout(a, 55, 0, 0)) { printf("tdescprobe oracle: %s failed to compile\n", argv[2]); return 1; } }
+        {   char *a[] = { bin, 0 }; rc = cx_runv_timeout(a, 20, &out, &len); }
+        if (rc) { printf("tdescprobe oracle: program exited %d\n", rc); return 1; }
+        {   char *p = out; for (i = 0; i < np; i++) { int v; if (!p || sscanf(p, "%d", &v) != 1 || v != P[i].size) { printf("tdescprobe oracle: MISMATCH int %s; sizeof(%s) model %d\n", P[i].decl, P[i].ctx, P[i].size); bad++; } p = p ? strchr(p, '\n') : 0; if (p) p++; } }
+        printf("tdescprobe oracle: %d probes, %d mismatches against %s\n", np, bad, argv[2]); free(text); free(out);
+        return bad ? 1 : 0;
+    }
+    if (argc == 5 && !strcmp(argv[1], "--baseline")) {
+        if (shard(argv[4], &lo, &hi)) return 2;
+        mkdir(argv[3], 0755);
+        for (i = lo; i < hi; i++) printf("%03d\tint %s\t%s\t%d\t%s\n", i + 1, P[i].decl, P[i].ctx, P[i].size, verdict(argv[2], argv[3], i));
+        return 0;
+    }
+    if (argc == 6 && !strcmp(argv[1], "--check")) {
+        size_t n; char *base = cx_read(argv[3], &n);
+        if (!base) { printf("tdescprobe: cannot read %s\n", argv[3]); return 2; }
+        if (shard(argv[5], &lo, &hi)) return 2;
+        mkdir(argv[4], 0755);
+        for (i = lo; i < hi; i++) {
+            const char *v = verdict(argv[2], argv[4], i); char want[32] = "", key[96]; char *p;
+            snprintf(key, sizeof key, "%03d\tint %s\t%s\t%d\t", i + 1, P[i].decl, P[i].ctx, P[i].size);
+            p = strstr(base, key);
+            if (p) sscanf(p + strlen(key), "%31s", want);
+            if (!strcmp(v, "OK")) ok++; else if (!strcmp(v, "REFUSE")) ref++; else wrong++;
+            if (strcmp(v, want)) { bad++; printf("  CHANGED int %s; sizeof(%s): baseline %s, now %s\n", P[i].decl, P[i].ctx, want[0] ? want : "(missing)", v); }
+        }
+        printf("tdescprobe %s  probes %d-%d of %d   OK %d   REFUSE %d   WRONG %d   changed %d\n", argv[5], lo + 1, hi, np, ok, ref, wrong, bad);
+        free(base); return bad ? 1 : 0;
+    }
+    fprintf(stderr, "usage: tdescprobe.cx --oracle CC WORK | --check COMPILER BASELINE WORK K/N | --baseline COMPILER WORK K/N\n");
+    return 2;
+}

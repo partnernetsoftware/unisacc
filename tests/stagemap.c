@@ -429,6 +429,15 @@ static char *extra[] = {
     "E3", "com-tapebin-neg", "meta",
     /* com-cerr-hygiene: C路由编译失败的输出卫生（pp/lex/parse/sema负例×写盘模式：rc1、stdout空、输出路径不动、具名原因）; tests/gate.sh */
     "chain", "com-cerr-hygiene", "E1,E2,E3,meta",
+    /* com-tdescprobe-1: 声明符派生×sizeof 上下文对 TDESC 模型（棘轮 tests/tdescprobe-product.tsv）; tests/tdescprobe.cx */
+    "chain", "com-tdescprobe-1", "E1,E2,E3,meta",
+    /* com-tdescprobe-2: 声明符派生×sizeof 上下文对 TDESC 模型（棘轮 tests/tdescprobe-product.tsv）; tests/tdescprobe.cx */
+    "chain", "com-tdescprobe-2", "E1,E2,E3,meta",
+    /* com-tdescprobe-3: 声明符派生×sizeof 上下文对 TDESC 模型（棘轮 tests/tdescprobe-product.tsv）; tests/tdescprobe.cx */
+    "chain", "com-tdescprobe-3", "E1,E2,E3,meta",
+    /* tdescprobe-oracle / -classic: TDESC 尺寸模型对系统 cc；经典参考的判定棘轮; tests/tdescprobe.cx */
+    "chain", "tdescprobe-oracle", "meta",
+    "chain", "tdescprobe-classic", "E1,E2,E3,meta",
     /* com-input-contract: 驱动输入合同（tape路单源具名拒绝；C路多余输入与空输入现行口径登记；空tape镜像与参考逐字节同）; tests/gate.sh */
     "meta", "com-input-contract", "-",
     /* com-tape-struct: 程序结构级具名拒绝（未定义/重复标签、encoder-slice宽度；无行号的not covered）与重复数据符号接受登记（与参考逐字节同）; tests/gate.sh */
