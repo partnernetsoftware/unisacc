@@ -1,0 +1,171 @@
+#!/usr/bin/env -S unisacc.com -run
+/* sourcefactscheck.cx -- exec/lex/sourcefactscheck.py in C (2026-10-23, the py->cx port wave; zero Python): private,
+   bounded simulator checks for the E1 stream-stage's provenance framing (USLFACT1).
+   usage (from the repository root; arguments are ignored, as by the Python check):
+       sh ./unisacc.com -run exec/lex/sourcefactscheck.cx tests/cxlib/lexdelta.cx
+   In a fresh e1-sourcefacts-XXXXXXXX directory under TMPDIR three E1 deltas are constructed -- plain
+   (`gen lex --sourcefacts`), positions (`--positions`), locations (`--locations`) -- by seed/gen.c (byte-identical
+   to exec/build/gen.py; its stderr passes through, timeout 25 s), each must start at SF.start, and each is simulated
+   with cxlib.lexdelta's port of exec/pp/sim.py as exec/lex/sim.py runs an SF.start delta (rowless HALT, INC as ALUI
+   add, source path "", maxsteps 300000) with the file dictionary {\0library/sourcefacts: RESOURCE}.  Per model and
+   sample: the default run accepts (located payloads join the positions tokens), a USLFACT1 frame with sourcefacts
+   enabled returns the level-1 frame (header byte 9 = 1) of the default output with status min(sticky, clean), twenty-eight malformed
+   frames and five malformed resources reject.  Success prints the counts as json.dumps(counts, sort_keys=True), rc 0;
+   a failed assertion is `AssertionError: ...` on stderr, rc 1.  The temporary directory is removed either way. */
+
+/* cxlib.lexdelta (named on the command line: `use` does not reach tests/cxlib from exec/lex) */
+typedef struct ld_delta ld_delta;
+typedef int (*ld_files_fn)(void *ctx, const unsigned char *key, size_t keyn, const unsigned char **val, size_t *valn);
+int ld_root(const char *file, int up, char *out, size_t cap);
+int ld_tempdir(const char *prefix, char *out, size_t cap);
+void ld_fail(const char *cls, const char *msg);
+void ld_cleanup(void);
+void ld_build(const char *root, const char *td, int what);
+void ld_construct(const char *root, const char *td, const char *target, const char *name, const char *flag, int net,
+                  double secs, int show);
+ld_delta *ld_load(const char *path, const char *start, int e1);
+const char *ld_start(const ld_delta *d);
+int ld_run(ld_delta *d, const unsigned char *x, size_t n, const char *srcpath, ld_files_fn files, void *ctx,
+           long long maxsteps, unsigned char **val, size_t *valn);
+void ld_put32(unsigned char *p, unsigned v);
+char *ld_repr(const void *s, size_t n);
+void ld_put64(unsigned char *p, unsigned long long v);
+
+static char ROOT[4096], TD[4096];
+
+typedef struct Res { const unsigned char *v; size_t n; int present; } Res;   /* Files(value): value, or None */
+typedef struct Buf { unsigned char *p; size_t n; } Buf;
+
+static int files(void *ctx, const unsigned char *key, size_t n, const unsigned char **v, size_t *vn) {
+    Res *r = ctx;
+    if (!r->present || n != 20 || memcmp(key, "\0library/sourcefacts", 20)) return 0;
+    *v = r->v; *vn = r->n; return 1;
+}
+static void check(int ok, const char *what) { if (!ok) ld_fail("AssertionError", what); }
+static const char *const RESULT[3] = { "accept", "reject", "timeout" };
+/* assert ..., (name, b) / (name, text, result, val): the tuple as Python prints it (a reject's val as its bytes) */
+static void fail_tuple(const char *name, Buf a, int r, Buf *v) {
+    char *x = ld_repr(a.p, a.n), *y = v && r != 2 ? ld_repr(v->p, v->n) : 0, *m = malloc(strlen(x) + (y ? strlen(y) : 0) + 300);
+    if (r < 0) sprintf(m, "('%s', %s)", name, x);
+    else sprintf(m, "('%s', %s, '%s', %s)", name, x, RESULT[r], y ? y : "None");
+    ld_fail("AssertionError", m);
+}
+static Buf cat(const void *a, size_t an, const void *b, size_t bn) {
+    Buf o; o.p = malloc(an + bn + 1); o.n = an + bn;
+    if (an) memcpy(o.p, a, an);
+    if (bn) memcpy(o.p + an, b, bn);
+    return o;
+}
+/* MAGIC + bytes((level, status, policy)) + pack('<Q', len(payload)) + payload */
+static Buf frame(Buf payload, int status, int level, int policy) {
+    Buf o; o.n = 20 + payload.n; o.p = malloc(o.n + 1);
+    memcpy(o.p, "USLFACT1\n", 9); o.p[9] = (unsigned char)level; o.p[10] = (unsigned char)status; o.p[11] = (unsigned char)policy;
+    ld_put64(o.p + 12, payload.n);
+    if (payload.n) memcpy(o.p + 20, payload.p, payload.n);
+    return o;
+}
+/* run(d, data, resource): (result, val) -- 0 accept, 1 reject, 2 timeout */
+static int run(ld_delta *d, Buf data, Res *resource, Buf *val) {
+    static Res none = { 0, 0, 0 };
+    unsigned char *v; size_t vn; int r = ld_run(d, data.p, data.n, "", files, resource ? resource : &none, 300000, &v, &vn);
+    if (val) { val->p = v; val->n = vn; } else free(v);
+    return r;
+}
+
+int main(void) {
+    static const char *const names[3] = { "plain", "positions", "locations" };
+    static const char *const flags[3] = { "--sourcefacts", "--positions", "--locations" };
+    static const struct { const char *text; int clean; } samples[9] = {
+        { "", 1 }, { "int x;", 1 }, { "int x __attribute__((aligned(16)));", 0 }, { "int x asm(\"x\");", 0 },
+        { "int x __asm__(\"x\");", 0 }, { "__attribute__ int x;", 1 }, { "__attribute__x int x;", 1 },
+        { "/* __attribute__((packed)) */ int x;", 1 }, { "char *x=\"__attribute__((packed))\";", 1 } };
+    unsigned char en8[8] = { 1, 0, 0, 0, 0, 0, 0, 0 };
+    Res enabled; ld_delta *models[3]; int m, s, counts_default = 0, counts_valid = 0, counts_malformed = 0, counts_resource = 0;
+    char path[4300]; Buf val, payload = { 0, 0 };
+    enabled.v = en8; enabled.n = 8; enabled.present = 1;
+    if (ld_root(__FILE__, 3, ROOT, sizeof ROOT)) ld_fail("FileNotFoundError", __FILE__);
+    if (ld_tempdir("e1-sourcefacts-", TD, sizeof TD)) ld_fail("OSError", "cannot create a temporary directory");
+    ld_build(ROOT, TD, 1);
+    for (m = 0; m < 3; m++) {
+        ld_construct(ROOT, TD, "lex", names[m], flags[m], 0, 25, 1);
+        snprintf(path, sizeof path, "%s/%s.json", TD, names[m]);
+        models[m] = ld_load(path, 0, 1);
+        check(!strcmp(ld_start(models[m]), "SF.start"), "");
+    }
+    {
+        Buf x; x.p = (unsigned char *)"int x;"; x.n = 6;
+        check(run(models[0], x, 0, &val) == 0 && val.n == 25 && !memcmp(val.p, "type\nid=x\n;\neof\n4 tokens\n", 25),
+              "");
+        free(val.p);
+    }
+    for (m = 0; m < 3; m++) {
+        ld_delta *d = models[m]; Buf good, bad[28]; int k, sticky;
+        for (s = 0; s < 9; s++) {
+            Buf text, expected;
+            text.p = (unsigned char *)samples[s].text; text.n = strlen(samples[s].text);
+            free(payload.p);
+            if (m == 2) {   /* b'UNIPP1\0' + pack('<5I', len(text), 0, 0, 0, 0) + text */
+                unsigned char h[27]; memcpy(h, "UNIPP1\0", 7); memset(h + 7, 0, 20); ld_put32(h + 7, (unsigned)text.n);
+                payload = cat(h, 27, text.p, text.n);
+            } else payload = cat(text.p, text.n, 0, 0);
+            { int r = run(d, payload, 0, &expected); if (r != 0) fail_tuple(names[m], text, r, &expected); }
+            counts_default++;
+            if (m == 2) {
+                Buf tokens, want; unsigned char h[12];
+                check(run(models[1], text, 0, &tokens) == 0, "");
+                memcpy(h, "UNITOK1\0", 8); ld_put32(h + 8, (unsigned)payload.n);
+                want = cat(h, 12, payload.p, payload.n);
+                { Buf w2 = cat(want.p, want.n, tokens.p, tokens.n); free(want.p); want = w2; }
+                check(expected.n == want.n && !memcmp(expected.p, want.p, want.n), "");
+                free(tokens.p); free(want.p);
+            }
+            for (sticky = 0; sticky < 2; sticky++) {
+                Buf f = frame(payload, sticky, 2, 1), got, w = frame(expected, sticky < samples[s].clean ? sticky : samples[s].clean, 1, 1);
+                { int r = run(d, f, &enabled, &got); if (!(r == 0 && got.n == w.n && !memcmp(got.p, w.p, w.n))) fail_tuple(names[m], text, r, &got); }
+                counts_valid++;
+                free(f.p); free(got.p); free(w.p);
+            }
+            free(expected.p);
+        }
+        good = frame(payload, 1, 2, 1);
+        for (k = 0; k < 20; k++) bad[k] = cat(good.p, (size_t)k < good.n ? (size_t)k : good.n, 0, 0);
+        bad[20] = cat(good.p, good.n, "x", 1);
+        bad[21] = cat(payload.p, payload.n, 0, 0);
+        bad[22] = frame(payload, 1, 1, 1);
+        bad[23] = frame(payload, 2, 2, 1);
+        bad[24] = frame(payload, 1, 2, 0);
+        bad[25] = cat("BADFACT1\n", 9, good.p + 9, good.n - 9);
+        {
+            unsigned char q[8];
+            ld_put64(q, payload.n + 1); bad[26] = cat(good.p, 12, q, 8);
+            { Buf t = cat(bad[26].p, bad[26].n, payload.p, payload.n); free(bad[26].p); bad[26] = t; }
+            ld_put64(q, 1ull << 63); bad[27] = cat(good.p, 12, q, 8);
+            { Buf t = cat(bad[27].p, bad[27].n, payload.p, payload.n); free(bad[27].p); bad[27] = t; }
+        }
+        for (k = 0; k < 28; k++) {
+            int r;
+            if ((r = run(d, bad[k], &enabled, 0)) != 1) fail_tuple(names[m], bad[k], -1, 0);
+            counts_malformed++;
+            free(bad[k].p);
+        }
+        {
+            unsigned char r1[1] = { '1' }, r8[8] = { 0, 0, 0, 0, 0, 0, 0, 0 }, r2[8] = { 2, 0, 0, 0, 0, 0, 0, 0 },
+                          r9[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 'x' };
+            Res res[5]; int z;
+            res[0].v = r1; res[0].n = 0; res[1].v = r1; res[1].n = 1; res[2].v = r8; res[2].n = 8;
+            res[3].v = r2; res[3].n = 8; res[4].v = r9; res[4].n = 9;
+            for (z = 0; z < 5; z++) {
+                Buf rb; rb.p = (unsigned char *)res[z].v; rb.n = res[z].n;
+                res[z].present = 1;
+                if (run(d, good, &res[z], 0) != 1) fail_tuple(names[m], rb, -1, 0);
+                counts_resource++;
+            }
+        }
+        free(good.p);
+    }
+    printf("{\"default\": %d, \"malformed\": %d, \"resource\": %d, \"valid\": %d}\n",
+           counts_default, counts_malformed, counts_resource, counts_valid);
+    fflush(stdout);
+    ld_cleanup();
+    return 0;
+}

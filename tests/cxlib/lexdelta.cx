@@ -1,0 +1,902 @@
+/* lexdelta.cx -- the shared half of the exec/lex E1 checks (f1sidecarcheck, locationcheck, positioncheck,
+   sourcefactscheck) as a .cx module (2026-10-23, the py->cx port wave).  It replaces the Python pieces those checks
+   imported: exec/pp/sim.py run()/load()/Files (the generic option-A simulator of a stream-stage's finite delta; the
+   E1 entry exec/lex/sim.py routes SF.start deltas there), and the constructor calls exec/build/gen.py,
+   exec/c/tbl.py and exec/c/net.py, which here are the C constructors seed/gen.c, seed/tbl.c and seed/net.c (byte
+   for byte the same JSON, table and Net -- gated by copy-contract and the seed-construct jobs), compiled into the
+   check's own temporary directory with $EXEC_CC (default cc).  No Python runs.
+   The checks live in exec/lex/, and `#pragma unisa use` resolves beside the using file only (no parent directory in
+   CX2a v1), so a check names this module on the command line instead:
+       sh ./unisacc.com -run exec/lex/CHECK.cx tests/cxlib/lexdelta.cx
+   and declares the prototypes it calls.  This module itself uses its sibling pyrun.
+     ld_root(FILE, UP, out, cap)        Path(FILE).resolve().parents[UP-1]: the repository root of a check
+     ld_tempdir(PREFIX, out, cap)       tempfile.TemporaryDirectory(prefix=PREFIX): removed by ld_cleanup(), at
+                                        ld_fail() and at exit (pr_rmtree of cxlib.pyrun, the one deletion path)
+     ld_fail(CLS, MSG)                  an uncaught Python exception: `CLS: MSG` on stderr, cleanup, rc 1
+     ld_capture(ARGV, CWD, SECS, &out, &outn, &err, &errn)   subprocess.run(capture_output=True, timeout=SECS):
+                                        the returncode; an OSError or a timeout is fatal (ld_fail)
+     ld_call(ARGV, CWD, SECS, &outn)    the same, asserting returncode 0 (the checks' call()): stdout, malloc'd
+     ld_build(ROOT, TD, WHAT)           compile into TD: 1 seed-gen, 2 seed-tbl, 4 seed-net, 8 run (exec/c/run.c,
+                                        $EXEC_CC -O2, as the checks built it)
+     ld_construct(ROOT, TD, TARGET, NAME, FLAG, NET, SECS, SHOW)   `gen.py TARGET TD/NAME.json FLAG` (cwd ROOT;
+                                        SHOW passes the constructor's stderr through, as stdout=DEVNULL did), then
+                                        with NET the table TD/NAME.tbl and the Net TD/NAME.net
+     ld_load(PATH, START, E1)           sim.load(json.load(PATH)): START (0 keeps it) overrides the start state;
+                                        E1 adds the rowless HALT state and spells INC as `ALUI add s s 1`, the two
+                                        fixes every E1 caller applies before simulating
+     ld_start(D)                        the delta's start state
+     ld_run(D, X, N, SRCPATH, FILES, CTX, MAXSTEPS, &val, &valn)   sim.run: 0 accept (VAL = o), 1 reject (VAL = the
+                                        diagnostic channel e), 2 timeout (VAL 0).  FILES(CTX, KEY, KEYN, &v, &vn) is
+                                        the file dictionary (1 found, 0 None); FILES 0 is sim.Files() reading the disk
+                                        with CTX the bundled include directory (\0hdr/).  What sim.py raises (a pop of
+                                        an empty stack, a missing row, an unknown action, ...) is fatal (ld_fail).
+     ld_le32(P), ld_put32(P, V), ld_put64(P, V)   struct '<I' / '<Q'
+     ld_repr(S, N)                      repr(bytes) of S, malloc'd (pr_repr_bytes of cxlib.pyrun), for assertion text
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module lexdelta
+#pragma unisa use pyrun
+
+/* ---- process, scratch and failure ------------------------------------------------------------------------------ */
+static char ld_td[8][4096];
+static int ld_ntd, ld_hooked;
+void ld_cleanup(void) {
+    while (ld_ntd > 0) { ld_ntd--; if (ld_td[ld_ntd][0]) pr_rmtree(ld_td[ld_ntd]); ld_td[ld_ntd][0] = 0; }
+}
+void ld_fail(const char *cls, const char *msg) {
+    fflush(stdout);
+    if (msg && *msg) fprintf(stderr, "Traceback (most recent call last):\n%s: %s\n", cls, msg);
+    else fprintf(stderr, "Traceback (most recent call last):\n%s\n", cls);   /* a bare `assert X` */
+    fflush(stderr);
+    ld_cleanup();
+    exit(1);
+}
+static void *ld_alloc(size_t n) { void *p = calloc(1, n ? n : 1); if (!p) ld_fail("MemoryError", ""); return p; }
+static void *ld_grow(void *p, size_t *cap, size_t need, size_t elem) {
+    size_t c = *cap ? *cap : 16;
+    if (need <= *cap) return p;
+    while (c < need) c *= 2;
+    p = realloc(p, c * elem);
+    if (!p) ld_fail("MemoryError", "");
+    *cap = c;
+    return p;
+}
+static void ld_atexit(void) { ld_cleanup(); }
+int ld_tempdir(const char *prefix, char *out, size_t cap) {
+    if (ld_ntd >= 8) return -1;
+    if (pr_tempdir(prefix, out, cap)) return -1;
+    snprintf(ld_td[ld_ntd++], sizeof ld_td[0], "%s", out);
+    if (!ld_hooked) { ld_hooked = 1; atexit(ld_atexit); }
+    return 0;
+}
+int ld_root(const char *file, int up, char *out, size_t cap) {
+    char t[4096], r[4096]; int i;
+    if (!realpath(file, r)) return -1;
+    for (i = 0; i < up; i++) { char *s = strrchr(r, '/'); if (!s) return -1; if (s == r) s[1] = 0; else *s = 0; }
+    snprintf(t, sizeof t, "%s", r);
+    snprintf(out, cap, "%s", t);
+    return 0;
+}
+char *ld_repr(const void *s, size_t n) { return pr_repr_bytes((const char *)s, n); }
+unsigned ld_le32(const unsigned char *p) { return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24; }
+void ld_put32(unsigned char *p, unsigned v) { int i; for (i = 0; i < 4; i++) p[i] = (unsigned char)(v >> (8 * i)); }
+void ld_put64(unsigned char *p, unsigned long long v) { int i; for (i = 0; i < 8; i++) p[i] = (unsigned char)(v >> (8 * i)); }
+
+int ld_capture(char *const argv[], const char *cwd, double secs, char **out, size_t *outn, char **err, size_t *errn) {
+    pr_result r; char why[2048];
+    if (pr_run(argv, cwd, 0, 0, secs, &r, why, sizeof why)) {
+        char *c = strchr(why, ':');
+        if (c) { *c = 0; ld_fail(why, c + 2); }
+        ld_fail("OSError", why);
+    }
+    if (out) *out = r.out; else free(r.out);
+    if (outn) *outn = r.outn;
+    if (err) *err = r.err; else free(r.err);
+    if (errn) *errn = r.errn;
+    return r.rc;
+}
+char *ld_call(char *const argv[], const char *cwd, double secs, size_t *outn) {
+    char *out, *err; size_t on, en; int rc = ld_capture(argv, cwd, secs, &out, &on, &err, &en);
+    if (rc != 0) {   /* assert p.returncode == 0, (p.args, p.returncode, p.stderr[-1000:]) */
+        size_t n = 0; char *l, *e, *m;
+        while (argv[n]) n++;
+        l = pr_repr_strlist(argv, n);
+        e = pr_repr_bytes(en > 1000 ? err + en - 1000 : err, en > 1000 ? 1000 : en);
+        m = ld_alloc(strlen(l) + strlen(e) + 64);
+        sprintf(m, "(%s, %d, %s)", l, rc, e);
+        ld_fail("AssertionError", m);
+    }
+    free(err);
+    if (outn) *outn = on;
+    return out;
+}
+static const char *ld_cc(void) { const char *c = getenv("EXEC_CC"); return c && *c ? c : "cc"; }
+void ld_build(const char *root, const char *td, int what) {
+    static const char *const src[4] = { "seed/gen.c", "seed/tbl.c", "seed/net.c", "exec/c/run.c" };
+    static const char *const exe[4] = { "seed-gen", "seed-tbl", "seed-net", "run" };
+    static const char *const opt[4] = { "-O0", "-O2", "-O2", "-O2" };
+    int i;
+    for (i = 0; i < 4; i++) if (what & (1 << i)) {
+        char s[4200], o[4200], inc[4200]; char *a[12]; int k = 0;
+        snprintf(s, sizeof s, "%s/%s", root, src[i]); snprintf(o, sizeof o, "%s/%s", td, exe[i]);
+        snprintf(inc, sizeof inc, "%s/seed", root);
+        a[k++] = (char *)ld_cc();
+        if (i < 3) { a[k++] = "-std=c99"; a[k++] = (char *)opt[i]; a[k++] = "-w"; a[k++] = "-I"; a[k++] = inc; }
+        else a[k++] = "-O2";
+        a[k++] = s; a[k++] = "-o"; a[k++] = o; a[k] = 0;
+        free(ld_call(a, 0, 60, 0));
+    }
+}
+void ld_construct(const char *root, const char *td, const char *target, const char *name, const char *flag, int net,
+                  double secs, int show) {
+    char g[4200], j[4200], t[4200], n[4200], *err; size_t en; int rc;
+    char *a[6];
+    snprintf(g, sizeof g, "%s/seed-gen", td); snprintf(j, sizeof j, "%s/%s.json", td, name);
+    snprintf(t, sizeof t, "%s/%s.tbl", td, name); snprintf(n, sizeof n, "%s/%s.net", td, name);
+    a[0] = g; a[1] = (char *)target; a[2] = j; a[3] = (char *)flag; a[4] = 0;
+    if (show) {   /* subprocess.run(check=True, stdout=DEVNULL, timeout=SECS): stderr is the caller's */
+        rc = ld_capture(a, root, secs, 0, 0, &err, &en);
+        fwrite(err, 1, en, stderr); fflush(stderr); free(err);
+        if (rc) {
+            char m[8400]; snprintf(m, sizeof m, "Command '[%s, %s, %s, %s]' returned non-zero exit status %d.", g, target, j, flag, rc);
+            ld_fail("subprocess.CalledProcessError", m);
+        }
+    } else free(ld_call(a, root, secs, 0));
+    if (!net) return;
+    snprintf(g, sizeof g, "%s/seed-tbl", td); a[0] = g; a[1] = j; a[2] = t; a[3] = 0;
+    free(ld_call(a, 0, secs, 0));
+    snprintf(g, sizeof g, "%s/seed-net", td); a[0] = g; a[1] = t; a[2] = n; a[3] = 0;
+    free(ld_call(a, 0, secs, 0));
+}
+
+/* ---- byte-string dictionary (interning, blob ids, names) ------------------------------------------------------- */
+typedef struct ld_ent { unsigned char *k; size_t n; long long v; } ld_ent;
+typedef struct ld_dict { ld_ent *e; size_t cap, used; } ld_dict;
+static unsigned long ld_hash(const unsigned char *k, size_t n) {
+    unsigned long h = 2166136261u; size_t i;
+    for (i = 0; i < n; i++) { h ^= k[i]; h *= 16777619u; }
+    return h;
+}
+static ld_ent *ld_slot(ld_dict *d, const void *k, size_t n) {
+    size_t i;
+    if (!d->cap) { d->cap = 64; d->e = ld_alloc(d->cap * sizeof *d->e); }
+    i = ld_hash(k, n) & (d->cap - 1);
+    while (d->e[i].k && !(d->e[i].n == n && !memcmp(d->e[i].k, k, n))) i = (i + 1) & (d->cap - 1);
+    return &d->e[i];
+}
+static ld_ent *ld_find(ld_dict *d, const void *k, size_t n) { ld_ent *e = ld_slot(d, k, n); return e->k ? e : 0; }
+static void ld_set(ld_dict *d, const void *k, size_t n, long long v) {
+    ld_ent *e = ld_slot(d, k, n);
+    if (!e->k) {
+        if (2 * (d->used + 1) > d->cap) {
+            ld_ent *old = d->e; size_t oc = d->cap, i;
+            d->cap *= 2; d->e = ld_alloc(d->cap * sizeof *d->e); d->used = 0;
+            for (i = 0; i < oc; i++) if (old[i].k) { ld_ent *f = ld_slot(d, old[i].k, old[i].n); *f = old[i]; d->used++; }
+            free(old);
+            e = ld_slot(d, k, n);
+        }
+        e->k = ld_alloc(n + 1); if (n) memcpy(e->k, k, n); e->n = n; d->used++;
+    }
+    e->v = v;
+}
+static void ld_dfree(ld_dict *d) { size_t i; for (i = 0; i < d->cap; i++) free(d->e[i].k); free(d->e); d->e = 0; d->cap = d->used = 0; }
+
+/* ---- json.loads of a delta file: an arena tree (cxlib.pyjson allocates per node, over 1 GB for a 3 MB delta under
+   the carried runtime).  Objects keep keys at items[2i] and values at items[2i+1]; integers keep their text. ---- */
+enum { J_NULL, J_BOOL, J_INT, J_FLOAT, J_STR, J_ARR, J_OBJ };
+typedef struct ldj { int type; int b; char *s; size_t n; struct ldj **items; size_t len; } ldj;
+typedef struct ld_chunk { struct ld_chunk *next; } ld_chunk;
+static ld_chunk *ld_chunks;
+static char *ld_cur; static size_t ld_left;
+static void *ld_arena(size_t n) {
+    char *p;
+    n = (n + 15) & ~(size_t)15;
+    if (n > ld_left) {
+        size_t c = n > ((size_t)1 << 20) ? n : (size_t)1 << 20; ld_chunk *k = malloc(16 + c);
+        if (!k) ld_fail("MemoryError", "");
+        k->next = ld_chunks; ld_chunks = k; ld_cur = (char *)k + 16; ld_left = c;
+    }
+    p = ld_cur; ld_cur += n; ld_left -= n;
+    return p;
+}
+static void ld_arena_free(void) { while (ld_chunks) { ld_chunk *k = ld_chunks->next; free(ld_chunks); ld_chunks = k; } ld_left = 0; }
+typedef struct ldj_src { const unsigned char *s; size_t n, i; ldj **stk; size_t ns, cap; } ldj_src;
+static void ldj_err(ldj_src *p, const char *what) {
+    char m[256]; snprintf(m, sizeof m, "%s: char %lu", what, (unsigned long)p->i); ld_fail("json.decoder.JSONDecodeError", m);
+}
+static void ldj_ws(ldj_src *p) { while (p->i < p->n && (p->s[p->i] == ' ' || p->s[p->i] == '\t' || p->s[p->i] == '\n' || p->s[p->i] == '\r')) p->i++; }
+static int ldj_hex(ldj_src *p, unsigned *u) {
+    size_t k; *u = 0;
+    if (p->i + 4 > p->n) return -1;
+    for (k = 0; k < 4; k++) {
+        unsigned char c = p->s[p->i + k]; unsigned v;
+        if (c >= '0' && c <= '9') v = c - '0'; else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10; else return -1;
+        *u = *u * 16 + v;
+    }
+    p->i += 4; return 0;
+}
+static ldj *ldj_value(ldj_src *p, int depth);
+static ldj *ldj_string(ldj_src *p) {   /* at the opening quote */
+    size_t j = p->i + 1, k = 0; char *o; ldj *v;
+    while (j < p->n && p->s[j] != '"') j += p->s[j] == '\\' ? 2 : 1;
+    if (j >= p->n) ldj_err(p, "Unterminated string starting at");
+    o = ld_arena(j - p->i + 1);
+    p->i++;
+    while (p->s[p->i] != '"') {
+        unsigned char c = p->s[p->i++];
+        if (c < 0x20) { p->i--; ldj_err(p, "Invalid control character at"); }
+        if (c != '\\') { o[k++] = (char)c; continue; }
+        c = p->s[p->i++];
+        switch (c) {
+        case '"': case '\\': case '/': o[k++] = (char)c; break;
+        case 'b': o[k++] = '\b'; break;
+        case 'f': o[k++] = '\f'; break;
+        case 'n': o[k++] = '\n'; break;
+        case 'r': o[k++] = '\r'; break;
+        case 't': o[k++] = '\t'; break;
+        case 'u': {
+            unsigned u, w;
+            if (ldj_hex(p, &u)) ldj_err(p, "Invalid \\uXXXX escape");
+            if (u >= 0xD800 && u < 0xDC00 && p->i + 6 <= p->n && p->s[p->i] == '\\' && p->s[p->i + 1] == 'u') {
+                size_t at = p->i; p->i += 2;
+                if (!ldj_hex(p, &w) && w >= 0xDC00 && w < 0xE000) u = 0x10000 + ((u - 0xD800) << 10) + (w - 0xDC00);
+                else p->i = at;
+            }
+            if (u < 0x80) o[k++] = (char)u;
+            else if (u < 0x800) { o[k++] = (char)(0xC0 | u >> 6); o[k++] = (char)(0x80 | (u & 63)); }
+            else if (u < 0x10000) { o[k++] = (char)(0xE0 | u >> 12); o[k++] = (char)(0x80 | (u >> 6 & 63)); o[k++] = (char)(0x80 | (u & 63)); }
+            else { o[k++] = (char)(0xF0 | u >> 18); o[k++] = (char)(0x80 | (u >> 12 & 63)); o[k++] = (char)(0x80 | (u >> 6 & 63)); o[k++] = (char)(0x80 | (u & 63)); }
+            break;
+        }
+        default: p->i -= 2; ldj_err(p, "Invalid \\escape");
+        }
+    }
+    p->i++;
+    o[k] = 0;
+    v = ld_arena(sizeof *v); memset(v, 0, sizeof *v); v->type = J_STR; v->s = o; v->n = k;
+    return v;
+}
+static ldj *ldj_list(ldj_src *p, int obj, int depth) {   /* at '[' or '{' */
+    size_t base = p->ns, k; ldj *v;
+    char close = obj ? '}' : ']';
+    p->i++; ldj_ws(p);
+    if (p->i < p->n && p->s[p->i] == close) p->i++;
+    else for (;;) {
+        ldj *x;
+        if (obj) {
+            ldj_ws(p);
+            if (p->i >= p->n || p->s[p->i] != '"') ldj_err(p, "Expecting property name enclosed in double quotes");
+            x = ldj_string(p);
+            p->stk = ld_grow(p->stk, &p->cap, p->ns + 1, sizeof *p->stk); p->stk[p->ns++] = x;
+            ldj_ws(p);
+            if (p->i >= p->n || p->s[p->i] != ':') ldj_err(p, "Expecting ':' delimiter");
+            p->i++;
+        }
+        x = ldj_value(p, depth + 1);
+        p->stk = ld_grow(p->stk, &p->cap, p->ns + 1, sizeof *p->stk); p->stk[p->ns++] = x;
+        ldj_ws(p);
+        if (p->i < p->n && p->s[p->i] == ',') { p->i++; continue; }
+        if (p->i < p->n && p->s[p->i] == close) { p->i++; break; }
+        ldj_err(p, "Expecting ',' delimiter");
+    }
+    v = ld_arena(sizeof *v); memset(v, 0, sizeof *v); v->type = obj ? J_OBJ : J_ARR;
+    v->len = p->ns - base; v->items = ld_arena((v->len + 1) * sizeof *v->items);
+    for (k = 0; k < v->len; k++) v->items[k] = p->stk[base + k];
+    p->ns = base;
+    return v;
+}
+static ldj *ldj_value(ldj_src *p, int depth) {
+    ldj *v; size_t at;
+    if (depth > 900) ldj_err(p, "RecursionError: maximum recursion depth exceeded at");
+    ldj_ws(p);
+    if (p->i >= p->n) ldj_err(p, "Expecting value");
+    switch (p->s[p->i]) {
+    case '{': return ldj_list(p, 1, depth);
+    case '[': return ldj_list(p, 0, depth);
+    case '"': return ldj_string(p);
+    }
+    v = ld_arena(sizeof *v); memset(v, 0, sizeof *v);
+    if (p->i + 4 <= p->n && !memcmp(p->s + p->i, "true", 4)) { p->i += 4; v->type = J_BOOL; v->b = 1; return v; }
+    if (p->i + 5 <= p->n && !memcmp(p->s + p->i, "false", 5)) { p->i += 5; v->type = J_BOOL; return v; }
+    if (p->i + 4 <= p->n && !memcmp(p->s + p->i, "null", 4)) { p->i += 4; v->type = J_NULL; return v; }
+    at = p->i; v->type = J_INT;
+    if (p->i < p->n && p->s[p->i] == '-') p->i++;
+    if (p->i >= p->n || p->s[p->i] < '0' || p->s[p->i] > '9') { p->i = at; ldj_err(p, "Expecting value"); }
+    if (p->s[p->i] == '0') p->i++; else while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') p->i++;
+    if (p->i < p->n && p->s[p->i] == '.') { v->type = J_FLOAT; p->i++; while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') p->i++; }
+    if (p->i < p->n && (p->s[p->i] == 'e' || p->s[p->i] == 'E')) {
+        v->type = J_FLOAT; p->i++;
+        if (p->i < p->n && (p->s[p->i] == '+' || p->s[p->i] == '-')) p->i++;
+        while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') p->i++;
+    }
+    v->n = p->i - at; v->s = ld_arena(v->n + 1); memcpy(v->s, p->s + at, v->n); v->s[v->n] = 0;
+    return v;
+}
+static ldj *ldj_loads(const char *text, size_t n) {
+    ldj_src p; ldj *v;
+    p.s = (const unsigned char *)text; p.n = n; p.i = 0; p.stk = 0; p.ns = p.cap = 0;
+    v = ldj_value(&p, 0);
+    ldj_ws(&p);
+    if (p.i != n) ldj_err(&p, "Extra data");
+    free(p.stk);
+    return v;
+}
+static ldj *ldj_get(const ldj *o, const char *key) {   /* dict.get: the last of repeated keys wins */
+    size_t i, kn = strlen(key); ldj *r = 0;
+    if (!o || o->type != J_OBJ) return 0;
+    for (i = 0; i + 1 < o->len; i += 2) if (o->items[i]->n == kn && !memcmp(o->items[i]->s, key, kn)) r = o->items[i + 1];
+    return r;
+}
+
+/* ---- the delta (sim.load) -------------------------------------------------------------------------------------- */
+enum { A_ADV, A_MARK, A_JUMP, A_LDI, A_COPYW, A_ALU, A_ALUI, A_CMP, A_CMPI, A_RLD, A_LDX, A_STX, A_OUT, A_OUTW,
+       A_COPY, A_COPYT, A_SPAN, A_SPANT, A_SPAN2, A_OLAST, A_ODROP, A_OLEN, A_OCUT, A_ORES, A_OFILL, A_OCLR, A_OSEL,
+       A_SETOT, A_XATTR, A_PUSH, A_POP, A_INTERN, A_SBINTERN, A_BLOBSAVE, A_SBSAVE, A_INPUSH, A_INPUSHX, A_INPUSHXE,
+       A_INPOP, A_SBCLR, A_SBOUT, A_SBSPAN, A_SBBLOB, A_SBFIND, A_BYTE, A_XLEN, A_BLEN, A_DIVMOD10, A_SWAP, A_ACCEPT,
+       A_REJECT, A_A64, A_A64I, A_C64, A_C64U, A_NOPS };
+static const char *const LD_OPS[A_NOPS] = { "ADV", "MARK", "JUMP", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "RLD",
+    "LDX", "STX", "OUT", "OUTW", "COPY", "COPYT", "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES",
+    "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN", "BLOBSAVE", "SBSAVE", "INPUSH",
+    "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND", "BYTE", "XLEN", "BLEN", "DIVMOD10",
+    "SWAP", "ACCEPT", "REJECT", "A64", "A64I", "C64", "C64U" };
+static const char *const LD_ALU[] = { "add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar", 0 };
+static const char *const LD_A64[] = { "add", "sub", "mul", "sdiv", "srem", "udiv", "urem", "and", "or", "xor", "not",
+                                      "shl", "shr", "sar", 0 };
+/* an operand: a W key (register name -> tag 1 and its id; an integer -> tag 0), an integer, or a name */
+typedef struct ld_arg { int tag; long long v; char *s; } ld_arg;
+typedef struct ld_act { int op; int n; char *opname; ld_arg a[5]; } ld_act;
+typedef struct ld_seq { ld_act *a; size_t n; } ld_seq;
+typedef struct ld_cell { int ok; long q; long seq; } ld_cell;
+typedef struct ld_row { int mode; ld_cell *c; size_t nc; } ld_row;   /* mode 'b', 't' or other; t: c indexed by symbol */
+typedef struct ld_delta {
+    char *start; long q0;
+    ld_row *rows; size_t nrows;
+    ld_seq *seqs; size_t nseqs;
+    ld_dict regs, syms;           /* register names -> W slot, stack symbols ("s"+name, "i"+int) -> id */
+    long nregs, nsyms, bot;
+} ld_delta;
+
+static void ld_bad(const char *path, const char *what) {
+    char m[4400]; snprintf(m, sizeof m, "%s: %s", path, what); ld_fail("KeyError", m);
+}
+static long long ld_int(const ldj *v, const char *path) {
+    char *e; long long x;
+    if (v->type == J_BOOL) return v->b;
+    if (v->type != J_INT) ld_bad(path, "not an integer");
+    errno = 0; x = strtoll(v->s, &e, 10);
+    if (*e || errno) ld_fail("lexdelta", "integer outside 64 bits not covered");
+    return x;
+}
+static long ld_sym(ld_delta *d, const ldj *v) {   /* a stack symbol: str or int, never equal to each other */
+    char t[4200]; size_t n; ld_ent *e;
+    if (v->type == J_STR) { t[0] = 's'; n = v->n < sizeof t - 1 ? v->n : sizeof t - 1; memcpy(t + 1, v->s, n); n++; }
+    else { snprintf(t, sizeof t, "i%lld", ld_int(v, "PUSH")); n = strlen(t); }
+    e = ld_find(&d->syms, t, n);
+    if (e) return (long)e->v;
+    ld_set(&d->syms, t, n, d->nsyms);
+    return d->nsyms++;
+}
+static void ld_key(ld_delta *d, const ldj *v, ld_arg *a) {   /* a W key */
+    if (v->type == J_STR) {
+        ld_ent *e = ld_find(&d->regs, v->s, v->n);
+        a->tag = 1;
+        if (e) a->v = e->v; else { ld_set(&d->regs, v->s, v->n, d->nregs); a->v = d->nregs++; }
+    } else { a->tag = 0; a->v = ld_int(v, "W key"); }
+}
+static int ld_name(const char *const *t, const ldj *v) {
+    int i;
+    if (v->type != J_STR) return -1;
+    for (i = 0; t[i]; i++) if (strlen(t[i]) == v->n && !memcmp(t[i], v->s, v->n)) return i;
+    return -1;
+}
+/* operand shapes: k W key, i integer, o ALU op, p A64 op, g stack symbol, s name (kept as text) */
+static const char *ld_shape(int op) {
+    switch (op) {
+    case A_MARK: case A_JUMP: case A_RLD: case A_OUTW: case A_OLEN: case A_SETOT: case A_XATTR: case A_SBINTERN:
+    case A_SBSAVE: case A_INPUSH: case A_INPUSHX: case A_SBBLOB: case A_SBFIND: case A_BYTE: case A_XLEN:
+    case A_DIVMOD10: return "k";
+    case A_SPAN: case A_SPANT: return "k";
+    case A_LDI: case A_CMPI: return "ki";
+    case A_COPYW: case A_CMP: case A_C64: case A_C64U: case A_OCUT: case A_BLEN: case A_INPUSHXE: case A_SBSPAN:
+    case A_SPAN2: return "kk";
+    case A_ALU: return "okkk";
+    case A_ALUI: return "okki";
+    case A_A64: return "pkkk";
+    case A_A64I: return "pkki";
+    case A_LDX: return "kki";
+    case A_STX: return "kik";
+    case A_OUT: case A_SBOUT: case A_OSEL: return "i";
+    case A_ORES: return "ki";
+    case A_OFILL: return "kki";
+    case A_PUSH: return "g";
+    case A_INTERN: case A_BLOBSAVE: return "kkk";
+    case A_REJECT: return "s";
+    default: return "";
+    }
+}
+static void ld_action(ld_delta *d, const ldj *v, ld_act *a) {
+    const char *sh; size_t i;
+    if (v->type != J_ARR || !v->len || v->items[0]->type != J_STR) ld_bad("seqs", "an action is not [OP, ...]");
+    a->op = ld_name(LD_OPS, v->items[0]);
+    a->opname = ld_alloc(v->items[0]->n + 1); memcpy(a->opname, v->items[0]->s, v->items[0]->n);
+    if (a->op < 0) {
+        if (v->items[0]->n == 3 && !memcmp(v->items[0]->s, "INC", 3)) a->op = -2;   /* E1's add-one, before the fix */
+        return;                                                                       /* ValueError(op) if run */
+    }
+    sh = ld_shape(a->op);
+    a->n = (int)strlen(sh);
+    if (v->len < (size_t)a->n + 1) ld_fail("IndexError", "tuple index out of range");
+    for (i = 0; sh[i]; i++) {
+        const ldj *x = v->items[i + 1]; ld_arg *g = &a->a[i];
+        switch (sh[i]) {
+        case 'k': ld_key(d, x, g); break;
+        case 'i': g->v = ld_int(x, LD_OPS[a->op]); break;
+        case 'o': g->v = ld_name(LD_ALU, x); if (x->type == J_STR) { g->s = ld_alloc(x->n + 1); memcpy(g->s, x->s, x->n); } break;
+        case 'p': g->v = ld_name(LD_A64, x); if (x->type == J_STR) { g->s = ld_alloc(x->n + 1); memcpy(g->s, x->s, x->n); } break;
+        case 'g': g->v = ld_sym(d, x); break;
+        case 's': if (x->type == J_STR) { g->s = ld_alloc(x->n + 1); memcpy(g->s, x->s, x->n); } else g->s = 0; break;
+        }
+    }
+}
+static long ld_pyindex(long long i, size_t n) {   /* list[i] with Python's negative indices; -1 when out of range */
+    if (i < 0) i += (long long)n;
+    return i < 0 || i >= (long long)n ? -1 : (long)i;
+}
+ld_delta *ld_load(const char *path, const char *start, int e1) {
+    size_t n, i, j; char *text = cx_read(path, &n); ldj *root, *st, *sq, *sv;
+    ld_delta *d = ld_alloc(sizeof *d);
+    ld_dict ix = { 0, 0, 0 };
+    const ldj **names; size_t nn = 0; long halt = -1;
+    if (!text) { char m[4400]; snprintf(m, sizeof m, "[Errno 2] No such file or directory: '%s'", path); ld_fail("FileNotFoundError", m); }
+    root = ldj_loads(text, n);
+    free(text);
+
+    st = ldj_get(root, "states"); sq = ldj_get(root, "seqs"); sv = ldj_get(root, "start");
+    if (!st || st->type != J_OBJ) ld_bad(path, "'states'");
+    if (!sq || sq->type != J_ARR) ld_bad(path, "'seqs'");
+    if (start) d->start = strdup(start);
+    else if (sv && sv->type == J_STR) { d->start = ld_alloc(sv->n + 1); memcpy(d->start, sv->s, sv->n); }
+    else ld_bad(path, "'start'");
+    /* names in dict order; E1: states['HALT'] = ['b', {}] (in place when present, else appended) */
+    names = ld_alloc((st->len / 2 + 1) * sizeof *names);
+    for (i = 0; i + 1 < st->len; i += 2) {
+        names[nn] = st->items[i];
+        if (e1 && st->items[i]->n == 4 && !memcmp(st->items[i]->s, "HALT", 4)) halt = (long)nn;
+        ld_set(&ix, st->items[i]->s, st->items[i]->n, (long long)nn); nn++;
+    }
+    if (e1 && halt < 0) { halt = (long)nn; ld_set(&ix, "HALT", 4, (long long)nn); nn++; }
+    d->nrows = nn; d->rows = ld_alloc(nn * sizeof *d->rows);
+    d->bot = -1;
+    { ldj bot; bot.type = J_STR; bot.s = "BOT"; bot.n = 3; d->bot = ld_sym(d, &bot); }
+    /* seqs: tuple(tuple(a) for a in s); E1: INC s -> ALUI add s s 1 */
+    d->nseqs = sq->len; d->seqs = ld_alloc((sq->len + 1) * sizeof *d->seqs);
+    for (i = 0; i < sq->len; i++) {
+        const ldj *s = sq->items[i];
+        if (s->type != J_ARR) ld_bad(path, "a seq is not a list");
+        d->seqs[i].n = s->len; d->seqs[i].a = ld_alloc((s->len + 1) * sizeof *d->seqs[i].a);
+        for (j = 0; j < s->len; j++) {
+            ld_act *a = &d->seqs[i].a[j];
+            ld_action(d, s->items[j], a);
+            if (a->op == -2 && e1) {
+                if (s->items[j]->len < 2) ld_fail("IndexError", "list index out of range");
+                a->op = A_ALUI; a->n = 4; a->a[0].v = 0; a->a[0].s = "add";
+                ld_key(d, s->items[j]->items[1], &a->a[1]); a->a[2] = a->a[1]; a->a[3].tag = 0; a->a[3].v = 1;
+            }
+        }
+    }
+    for (i = 0; i < nn; i++) {
+        const ldj *rv, *mode, *row; ld_row *r = &d->rows[i];
+        if ((long)i == halt) { r->mode = 'b'; r->nc = 257; r->c = ld_alloc(257 * sizeof *r->c); continue; }
+        rv = st->items[2 * i + 1];
+        if (rv->type != J_ARR || rv->len != 2) ld_bad(path, "a state is not [MODE, ROW]");
+        mode = rv->items[0]; row = rv->items[1];
+        if (mode->type != J_STR || row->type != J_OBJ) ld_bad(path, "a state is not [MODE, ROW]");
+        r->mode = mode->n == 1 && (mode->s[0] == 'b' || mode->s[0] == 't') ? mode->s[0] : 'r';
+        if (r->mode == 't') { r->nc = 0; r->c = 0; }
+        else { r->nc = 257; r->c = ld_alloc(257 * sizeof *r->c); }
+        for (j = 0; j + 1 < row->len; j += 2) {
+            const ldj *k = row->items[j], *v = row->items[j + 1]; ld_ent *t; long slot, sx;
+            if (v->type != J_ARR || v->len < 2 || v->items[0]->type != J_STR) ld_bad(path, "a row entry is not [TARGET, SEQ]");
+            t = ld_find(&ix, v->items[0]->s, v->items[0]->n);
+            if (!t) { char m[600]; snprintf(m, sizeof m, "'%.*s'", (int)(v->items[0]->n > 500 ? 500 : v->items[0]->n), v->items[0]->s); ld_fail("KeyError", m); }
+            sx = ld_pyindex(ld_int(v->items[1], "seq"), d->nseqs);
+            if (sx < 0) ld_fail("IndexError", "list index out of range");
+            if (r->mode == 't') {
+                long id = ld_sym(d, k);
+                if ((size_t)id >= r->nc) {
+                    size_t nc = (size_t)id + 16, q;
+                    r->c = realloc(r->c, nc * sizeof *r->c); if (!r->c) ld_fail("MemoryError", "");
+                    for (q = r->nc; q < nc; q++) r->c[q].ok = 0;
+                    r->nc = nc;
+                }
+                slot = id;
+            } else {
+                char tx[64], *e; long long kv;
+                if (k->n >= sizeof tx) ld_fail("ValueError", "invalid literal for int() with base 10");
+                memcpy(tx, k->s, k->n); tx[k->n] = 0;
+                kv = strtoll(tx, &e, 10);
+                if (e == tx || *e) ld_fail("ValueError", "invalid literal for int() with base 10");
+                slot = ld_pyindex(kv, 257);
+                if (slot < 0) ld_fail("IndexError", "list assignment index out of range");
+            }
+            r->c[slot].ok = 1; r->c[slot].q = (long)t->v; r->c[slot].seq = sx;
+        }
+    }
+    { ld_ent *t = ld_find(&ix, d->start, strlen(d->start));
+      if (!t) { char m[600]; snprintf(m, sizeof m, "'%.500s'", d->start); ld_fail("KeyError", m); }
+      d->q0 = (long)t->v; }
+    ld_dfree(&ix); free(names); ld_arena_free();
+    return d;
+}
+const char *ld_start(const ld_delta *d) { return d->start; }
+
+/* ---- the simulator (sim.run) ----------------------------------------------------------------------------------- */
+typedef struct ld_bytes { unsigned char *p; size_t n, cap; } ld_bytes;
+typedef struct ld_attrs { long long *p; size_t n, cap; } ld_attrs;
+typedef struct ld_frame { const unsigned char *b; size_t bn; const long long *attr; long long cur, end; } ld_frame;
+typedef struct ld_mem { long long *k, *v; unsigned char *u; size_t cap, used; } ld_mem;   /* W's integer keys */
+typedef struct ld_blob { unsigned char *p; size_t n; } ld_blob;
+
+static void ld_bput(ld_bytes *b, const unsigned char *s, size_t n) {
+    b->p = ld_grow(b->p, &b->cap, b->n + n + 1, 1);
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n;
+}
+static void ld_bpush(ld_bytes *b, long long c) {
+    unsigned char u;
+    if (c < 0 || c > 255) ld_fail("ValueError", "byte must be in range(0, 256)");
+    u = (unsigned char)c; ld_bput(b, &u, 1);
+}
+static void ld_apush(ld_attrs *a, long long v) { a->p = ld_grow(a->p, &a->cap, a->n + 1, sizeof *a->p); a->p[a->n++] = v; }
+static size_t ld_mslot(ld_mem *m, long long k) {
+    size_t i = (size_t)((unsigned long long)k * 0x9E3779B97F4A7C15ull >> 20) & (m->cap - 1);
+    while (m->u[i] && m->k[i] != k) i = (i + 1) & (m->cap - 1);
+    return i;
+}
+static long long ld_mget(ld_mem *m, long long k) { size_t i; if (!m->cap) return 0; i = ld_mslot(m, k); return m->u[i] ? m->v[i] : 0; }
+static void ld_mset(ld_mem *m, long long k, long long v) {
+    size_t i;
+    if (2 * (m->used + 1) > m->cap) {
+        ld_mem o = *m; size_t j;
+        m->cap = m->cap ? 2 * m->cap : 64; m->used = 0;
+        m->k = ld_alloc(m->cap * sizeof *m->k); m->v = ld_alloc(m->cap * sizeof *m->v); m->u = ld_alloc(m->cap);
+        for (j = 0; j < o.cap; j++) if (o.u[j]) { i = ld_mslot(m, o.k[j]); m->u[i] = 1; m->k[i] = o.k[j]; m->v[i] = o.v[j]; m->used++; }
+        free(o.k); free(o.v); free(o.u);
+    }
+    i = ld_mslot(m, k);
+    if (!m->u[i]) { m->u[i] = 1; m->k[i] = k; m->used++; }
+    m->v[i] = v;
+}
+
+static long long ld_w32(long long v) { unsigned u = (unsigned)((unsigned long long)v & 0xFFFFFFFFull); return u & 0x80000000u ? (long long)u - 0x100000000ll : (long long)u; }
+static long long ld_sar(long long a, int s) { return a < 0 ? ~((~a) >> s) : a >> s; }
+static long long ld_alu(int op, const char *name, long long a, long long b) {
+    long long q;
+    a = ld_w32(a); b = ld_w32(b);
+    switch (op) {
+    case 0: return ld_w32(a + b);
+    case 1: return ld_w32(a - b);
+    case 2: return ld_w32((long long)((unsigned long long)a * (unsigned long long)b));
+    case 3: case 4:
+        if (b == 0) return 0;
+        q = (a < 0 ? -a : a) / (b < 0 ? -b : b);
+        if ((a < 0) != (b < 0)) q = -q;
+        return op == 3 ? ld_w32(q) : ld_w32(a - ld_w32(q) * b);
+    case 5: return ld_w32(a & b);
+    case 6: return ld_w32(a | b);
+    case 7: return ld_w32(a ^ b);
+    case 8: return ld_w32((long long)((unsigned long long)a << (b & 31)));
+    case 9: return ld_w32(ld_sar(a, (int)(b & 31)));
+    }
+    { char m[256]; snprintf(m, sizeof m, "%s", name ? name : "None"); ld_fail("ValueError", m); }
+    return 0;
+}
+static long long ld_alu64(int op, const char *name, long long a, long long b, long long *r) {
+    unsigned long long ua = (unsigned long long)a, ub = (unsigned long long)b, mq; long long q;
+    *r = 0;
+    switch (op) {
+    case 3: case 4: case 5: case 6:
+        if (b == 0) { *r = 1; return 0; }
+        if (op == 5) return (long long)(ua / ub);
+        if (op == 6) return (long long)(ua % ub);
+        mq = (a < 0 ? 0 - ua : ua) / (b < 0 ? 0 - ub : ub);
+        q = (a < 0) == (b < 0) ? (long long)mq : (long long)(0 - mq);
+        return op == 3 ? q : (long long)(ua - (unsigned long long)q * ub);
+    case 0: return (long long)(ua + ub);
+    case 1: return (long long)(ua - ub);
+    case 2: return (long long)(ua * ub);
+    case 7: return (long long)(ua & ub);
+    case 8: return (long long)(ua | ub);
+    case 9: return (long long)(ua ^ ub);
+    case 10: return (long long)~ua;
+    case 11: return (long long)(ua << (ub & 63));
+    case 12: return (long long)(ua >> (ub & 63));
+    case 13: return ld_sar(a, (int)(ub & 63));
+    }
+    { char m[256]; snprintf(m, sizeof m, "'%s'", name ? name : "None"); ld_fail("KeyError", m); }
+    return 0;
+}
+
+/* sim.Files().get: the disk, cwd-relative, \0inc/q/ and \0inc/a/ stripped, \0hdr/ under BUNDLED; a path holding
+   NUL (os.stat's ValueError) or ENOENT is None; any other OSError propagates */
+static int ld_disk(const char *bundled, const unsigned char *key, size_t n, ld_blob *out) {
+    ld_bytes p = { 0, 0, 0 }; size_t i = 0; struct stat s; char *data; size_t dn;
+    if (n >= 7 && (!memcmp(key, "\0inc/q/", 7) || !memcmp(key, "\0inc/a/", 7))) i = 7;
+    else if (n >= 5 && !memcmp(key, "\0hdr/", 5)) {
+        i = 5;
+        if (!(n > 5 && key[5] == '/')) {   /* os.path.join(bundled, rest): an absolute rest wins */
+            ld_bput(&p, (const unsigned char *)bundled, strlen(bundled));
+            if (!p.n || p.p[p.n - 1] != '/') ld_bput(&p, (const unsigned char *)"/", 1);
+        }
+    }
+    for (; i < n; i++) {   /* the latin-1 text as the file system encoding (UTF-8) spells it */
+        unsigned char c = key[i];
+        if (!c) { free(p.p); return 0; }
+        if (c < 0x80) ld_bput(&p, &c, 1);
+        else { unsigned char u[2]; u[0] = (unsigned char)(0xC0 | c >> 6); u[1] = (unsigned char)(0x80 | (c & 63)); ld_bput(&p, u, 2); }
+    }
+    ld_bput(&p, (const unsigned char *)"", 1);
+    if (stat((char *)p.p, &s) != 0) {
+        if (errno == ENOENT) { free(p.p); return 0; }
+        { char m[4400]; snprintf(m, sizeof m, "[Errno %d] %s: '%s'", errno, strerror(errno), (char *)p.p); ld_fail("OSError", m); }
+    }
+    data = cx_read((char *)p.p, &dn);
+    if (!data || S_ISDIR(s.st_mode)) { char m[4400]; snprintf(m, sizeof m, "cannot read '%s'", (char *)p.p); ld_fail("OSError", m); }
+    free(p.p);
+    out->p = (unsigned char *)data; out->n = dn;
+    return 1;
+}
+
+typedef int (*ld_files_fn)(void *ctx, const unsigned char *key, size_t keyn, const unsigned char **val, size_t *valn);
+
+int ld_run(ld_delta *d, const unsigned char *x0, size_t xn0, const char *srcpath, ld_files_fn files, void *ctx,
+           long long maxsteps, unsigned char **val, size_t *valn) {
+    long long *R = ld_alloc((size_t)(d->nregs + 1) * sizeof *R), steps = 0, r = 0, OT = 0;
+    ld_mem M = { 0, 0, 0, 0, 0 };
+    long *stack = 0; size_t ns = 0, scap = 0;
+    ld_blob *blobs = 0; size_t nb = 0, bcap = 0;
+    ld_dict blobid = { 0, 0, 0 }, intern = { 0, 0, 0 };
+    ld_frame *fr = 0; size_t nf = 0, fcap = 0;
+    ld_bytes o = { 0, 0, 0 }, e = { 0, 0, 0 }, sb = { 0, 0, 0 };
+    ld_attrs oa = { 0, 0, 0 };
+    const unsigned char *x = x0; size_t xn = xn0; long long *xattr = ld_alloc((xn0 + 1) * sizeof *xattr);
+    long long osel = 0; long q = d->q0; int res = -1;
+    *val = 0; *valn = 0;
+#define W(g) ((g).tag ? R[(g).v] : ld_mget(&M, (g).v))
+#define WSET(g, val_) do { long long w_ = (val_); if ((g).tag) R[(g).v] = w_; else ld_mset(&M, (g).v, w_); } while (0)
+#define FR (fr[nf - 1])
+    blobs = ld_grow(blobs, &bcap, 2, sizeof *blobs);
+    blobs[0].p = (unsigned char *)""; blobs[0].n = 0;
+    blobs[1].p = (unsigned char *)srcpath; blobs[1].n = strlen(srcpath); nb = 2;
+    ld_set(&blobid, "\0cli/source", 11, 1);
+    fr = ld_grow(fr, &fcap, 1, sizeof *fr);
+    fr[0].b = x; fr[0].bn = xn; fr[0].attr = xattr; fr[0].cur = 0; fr[0].end = (long long)xn; nf = 1;
+    for (;;) {
+        ld_row *row; ld_cell *c; long key; size_t k; ld_seq *sq;
+        steps++;
+        if (maxsteps && steps > maxsteps) { res = 2; break; }
+        row = &d->rows[q];
+        if (row->mode == 'b') {
+            long long i = FR.cur;
+            if (i < FR.end) { long j = ld_pyindex(i, FR.bn); if (j < 0) ld_fail("IndexError", "index out of range"); key = FR.b[j]; }
+            else key = 256;
+        } else if (row->mode == 't') key = ns ? stack[ns - 1] : d->bot;
+        else key = r >= 0 && r <= 256 ? (long)r : 256;
+        c = row->mode == 't' ? ((size_t)key < row->nc ? &row->c[key] : 0) : &row->c[key];
+        if (!c || !c->ok) {
+            if (row->mode == 't') ld_fail("KeyError", "stack symbol");
+            ld_fail("TypeError", "cannot unpack non-iterable NoneType object");
+        }
+        q = c->q; sq = &d->seqs[c->seq];
+        for (k = 0; k < sq->n; k++) {
+            ld_act *a = &sq->a[k];
+            switch (a->op) {
+            case A_ADV: FR.cur++; break;
+            case A_MARK: WSET(a->a[0], FR.cur); break;
+            case A_JUMP: FR.cur = W(a->a[0]); break;
+            case A_COPYT: {
+                long long i = FR.cur;
+                if (i < FR.end) {
+                    long j = ld_pyindex(i, FR.bn); if (j < 0) ld_fail("IndexError", "index out of range");
+                    if (osel == 0) { ld_bput(&o, FR.b + j, 1); ld_apush(&oa, OT); } else ld_bput(&e, FR.b + j, 1);
+                }
+                break;
+            }
+            case A_COPY: {
+                long long i = FR.cur;
+                if (i < FR.end) {
+                    long j = ld_pyindex(i, FR.bn); if (j < 0) ld_fail("IndexError", "index out of range");
+                    if (osel == 0) { ld_bput(&o, FR.b + j, 1); ld_apush(&oa, FR.attr ? FR.attr[j] : OT); }
+                    else ld_bput(&e, FR.b + j, 1);
+                }
+                break;
+            }
+            case A_OUT: if (osel == 0) { ld_bpush(&o, a->a[0].v); ld_apush(&oa, OT); } else ld_bpush(&e, a->a[0].v); break;
+            case A_LDI: WSET(a->a[0], a->a[1].v); break;
+            case A_COPYW: WSET(a->a[0], W(a->a[1])); break;
+            case A_ALU: WSET(a->a[1], ld_alu((int)a->a[0].v, a->a[0].s, W(a->a[2]), W(a->a[3]))); break;
+            case A_ALUI: WSET(a->a[1], ld_alu((int)a->a[0].v, a->a[0].s, W(a->a[2]), a->a[3].v)); break;
+            case A_CMP: case A_CMPI: {
+                long long u = W(a->a[0]), v = a->op == A_CMP ? W(a->a[1]) : a->a[1].v;
+                r = u < v ? 0 : u == v ? 1 : 2; break;
+            }
+            case A_A64: case A_A64I: {
+                long long rr, v = ld_alu64((int)a->a[0].v, a->a[0].s, W(a->a[2]), a->op == A_A64 ? W(a->a[3]) : a->a[3].v, &rr);
+                WSET(a->a[1], v); r = rr; break;
+            }
+            case A_C64: { long long u = W(a->a[0]), v = W(a->a[1]); r = u < v ? 0 : u == v ? 1 : 2; break; }
+            case A_C64U: { unsigned long long u = (unsigned long long)W(a->a[0]), v = (unsigned long long)W(a->a[1]); r = u < v ? 0 : u == v ? 1 : 2; break; }
+            case A_RLD: { long long v = W(a->a[0]); r = v >= 0 && v <= 256 ? v : 256; break; }
+            case A_LDX: WSET(a->a[0], ld_mget(&M, W(a->a[1]) + a->a[2].v)); break;
+            case A_STX: ld_mset(&M, W(a->a[0]) + a->a[1].v, W(a->a[2])); break;
+            case A_OUTW: { unsigned char cc = (unsigned char)(W(a->a[0]) & 255);
+                if (osel == 0) { ld_bput(&o, &cc, 1); ld_apush(&oa, OT); } else ld_bput(&e, &cc, 1); break; }
+            case A_SPAN: case A_SPANT: case A_SPAN2: {
+                long long s0 = W(a->a[0]), s1 = a->op == A_SPAN2 ? W(a->a[1]) : FR.cur;
+                if (s0 < 0) s0 = 0;
+                if (s1 > FR.end) s1 = FR.end;
+                if (s0 < s1) {
+                    size_t m = (size_t)(s1 - s0), z;
+                    if (osel == 1) ld_bput(&e, FR.b + s0, m);
+                    else {
+                        ld_bput(&o, FR.b + s0, m);
+                        for (z = 0; z < m; z++) ld_apush(&oa, a->op == A_SPANT || !FR.attr ? OT : FR.attr[s0 + (long long)z]);
+                    }
+                }
+                break;
+            }
+            case A_OLAST: r = o.n ? o.p[o.n - 1] : 256; break;
+            case A_ODROP: if (o.n) { o.n--; oa.n--; } break;
+            case A_OLEN: WSET(a->a[0], (long long)o.n); break;
+            case A_OCUT: {
+                long long s0 = W(a->a[1]); ld_blob b;
+                if (s0 > (long long)o.n) s0 = (long long)o.n;
+                if (s0 < 0) s0 = 0;
+                b.n = o.n - (size_t)s0; b.p = ld_alloc(b.n + 1); if (b.n) memcpy(b.p, o.p + s0, b.n);
+                blobs = ld_grow(blobs, &bcap, nb + 1, sizeof *blobs); blobs[nb++] = b;
+                WSET(a->a[0], (long long)nb - 1);
+                o.n = (size_t)s0; oa.n = (size_t)s0;
+                break;
+            }
+            case A_ORES: {
+                long long z;
+                WSET(a->a[0], (long long)o.n);
+                for (z = 0; z < a->a[1].v; z++) { ld_bput(&o, (const unsigned char *)" ", 1); ld_apush(&oa, OT); }
+                break;
+            }
+            case A_OFILL: {
+                char t[32]; long long w = a->a[2].v, at = W(a->a[0]); size_t tl;
+                snprintf(t, sizeof t, "%lld", W(a->a[1])); tl = strlen(t);
+                if (at < 0 || at + w > (long long)o.n) ld_fail("RuntimeError", "fill past the reservation");
+                if ((long long)tl <= w) { memset(o.p + at, ' ', (size_t)(w - (long long)tl)); memcpy(o.p + at + w - (long long)tl, t, tl); }
+                else { res = 1; goto done_reject; }
+                break;
+            }
+            case A_OCLR: o.n = 0; oa.n = 0; break;
+            case A_OSEL: osel = a->a[0].v; break;
+            case A_SETOT: OT = W(a->a[0]); break;
+            case A_XATTR: {
+                long long i = FR.cur, v = 0;
+                if (FR.attr && i < FR.end) { long j = ld_pyindex(i, FR.bn); if (j < 0) ld_fail("IndexError", "list index out of range"); v = FR.attr[j]; }
+                WSET(a->a[0], v); break;
+            }
+            case A_PUSH: stack = ld_grow(stack, &scap, ns + 1, sizeof *stack); stack[ns++] = (long)a->a[0].v; break;
+            case A_POP: if (!ns) ld_fail("RuntimeError", "pop of an empty stack"); ns--; break;
+            case A_INTERN: case A_SBINTERN: {
+                const unsigned char *kp; size_t kn; ld_ent *t;
+                if (a->op == A_INTERN) {
+                    long long s0 = W(a->a[1]), s1 = W(a->a[2]);
+                    if (s0 < 0) s0 = 0;
+                    if (s1 > FR.end) s1 = FR.end;
+                    kp = FR.b + (s0 < s1 ? s0 : 0); kn = s0 < s1 ? (size_t)(s1 - s0) : 0;
+                } else { kp = sb.p ? sb.p : (const unsigned char *)""; kn = sb.n; }
+                t = ld_find(&intern, kp, kn);
+                if (!t) { ld_set(&intern, kp, kn, (long long)intern.used + 1); t = ld_find(&intern, kp, kn); }
+                WSET(a->a[0], t->v); break;
+            }
+            case A_BLOBSAVE: case A_SBSAVE: {
+                ld_blob b;
+                if (a->op == A_BLOBSAVE) {
+                    long long s0 = W(a->a[1]), s1 = W(a->a[2]);
+                    if (s0 < 0) s0 = 0;
+                    if (s1 > FR.end) s1 = FR.end;
+                    b.n = s0 < s1 ? (size_t)(s1 - s0) : 0; b.p = ld_alloc(b.n + 1); if (b.n) memcpy(b.p, FR.b + s0, b.n);
+                } else { b.n = sb.n; b.p = ld_alloc(b.n + 1); if (b.n) memcpy(b.p, sb.p, b.n); }
+                blobs = ld_grow(blobs, &bcap, nb + 1, sizeof *blobs); blobs[nb++] = b;
+                WSET(a->a[0], (long long)nb - 1); break;
+            }
+            case A_INPUSH: {
+                long j = ld_pyindex(W(a->a[0]), nb);
+                if (j < 0) ld_fail("IndexError", "list index out of range");
+                fr = ld_grow(fr, &fcap, nf + 1, sizeof *fr);
+                fr[nf].b = blobs[j].p; fr[nf].bn = blobs[j].n; fr[nf].attr = 0; fr[nf].cur = 0; fr[nf].end = (long long)blobs[j].n; nf++;
+                break;
+            }
+            case A_INPUSHX: case A_INPUSHXE: {
+                long long end = (long long)xn;
+                if (a->op == A_INPUSHXE) { long long v = W(a->a[1]); if (v < end) end = v; }
+                fr = ld_grow(fr, &fcap, nf + 1, sizeof *fr);
+                fr[nf].b = x; fr[nf].bn = xn; fr[nf].attr = xattr; fr[nf].cur = W(a->a[0]); fr[nf].end = end; nf++;
+                break;
+            }
+            case A_INPOP: nf--; if (!nf) ld_fail("IndexError", "list index out of range"); break;
+            case A_SBCLR: sb.n = 0; break;
+            case A_SBOUT: ld_bpush(&sb, a->a[0].v); break;
+            case A_SBSPAN: {
+                long long s0 = W(a->a[0]), s1 = W(a->a[1]);
+                if (s0 < 0) s0 = 0;
+                if (s1 > FR.end) s1 = FR.end;
+                if (s0 < s1) ld_bput(&sb, FR.b + s0, (size_t)(s1 - s0));
+                break;
+            }
+            case A_SBBLOB: {
+                long j = ld_pyindex(W(a->a[0]), nb);
+                if (j < 0) ld_fail("IndexError", "list index out of range");
+                ld_bput(&sb, blobs[j].p, blobs[j].n); break;
+            }
+            case A_SBFIND: {
+                const unsigned char *kp = sb.p ? sb.p : (const unsigned char *)""; ld_ent *t = ld_find(&blobid, kp, sb.n);
+                if (!t) {
+                    ld_blob b; int found;
+                    if (files) {
+                        const unsigned char *vp; size_t vn;
+                        found = files(ctx, kp, sb.n, &vp, &vn);
+                        if (found) { b.n = vn; b.p = ld_alloc(vn + 1); if (vn) memcpy(b.p, vp, vn); }
+                    } else found = ld_disk((const char *)ctx, kp, sb.n, &b);   /* blobid already caches per key */
+                    if (!found) ld_set(&blobid, kp, sb.n, 0);
+                    else {
+                        blobs = ld_grow(blobs, &bcap, nb + 1, sizeof *blobs); blobs[nb++] = b;
+                        ld_set(&blobid, kp, sb.n, (long long)nb - 1);
+                    }
+                    t = ld_find(&blobid, kp, sb.n);
+                }
+                WSET(a->a[0], t->v); break;
+            }
+            case A_BYTE: {
+                long long i = FR.cur, v = 0;
+                if (i < FR.end) { long j = ld_pyindex(i, FR.bn); if (j < 0) ld_fail("IndexError", "index out of range"); v = FR.b[j]; }
+                WSET(a->a[0], v); break;
+            }
+            case A_XLEN: WSET(a->a[0], FR.end); break;
+            case A_BLEN: {
+                long j = ld_pyindex(W(a->a[1]), nb);
+                if (j < 0) ld_fail("IndexError", "list index out of range");
+                WSET(a->a[0], (long long)blobs[j].n); break;
+            }
+            case A_DIVMOD10: {
+                unsigned long long v = (unsigned long long)W(a->a[0]) & 0xFFFFFFFFull;
+                WSET(a->a[0], (long long)(v / 10)); r = (long long)(v % 10) + (v / 10 == 0 ? 10 : 0); break;
+            }
+            case A_SWAP: {
+                unsigned char *nx = ld_alloc(o.n + 1); long long *na = ld_alloc((oa.n + 1) * sizeof *na);
+                if (x != x0) free((void *)x);
+                free(xattr);
+                if (o.n) memcpy(nx, o.p, o.n);
+                if (oa.n) memcpy(na, oa.p, oa.n * sizeof *na);
+                x = nx; xn = o.n; xattr = na;
+                o.n = 0; oa.n = 0;
+                nf = 1; fr[0].b = x; fr[0].bn = xn; fr[0].attr = xattr; fr[0].cur = 0; fr[0].end = (long long)xn;
+                break;
+            }
+            case A_ACCEPT: res = 0; goto done;
+            case A_REJECT: res = 1; goto done_reject;
+            default: { char m[512]; snprintf(m, sizeof m, "%s", a->opname); ld_fail("ValueError", m); }
+            }
+        }
+    }
+done:
+    if (res == 0) { *val = ld_alloc(o.n + 1); if (o.n) memcpy(*val, o.p, o.n); *valn = o.n; }
+    goto out;
+done_reject:
+    *val = ld_alloc(e.n + 1); if (e.n) memcpy(*val, e.p, e.n); *valn = e.n;
+out:
+#undef W
+#undef WSET
+#undef FR
+    free(R); free(M.k); free(M.v); free(M.u); free(stack); free(fr); free(o.p); free(e.p); free(sb.p); free(oa.p);
+    ld_dfree(&blobid); ld_dfree(&intern);
+    { size_t i; for (i = 2; i < nb; i++) free(blobs[i].p); } free(blobs);
+    if (x != x0) free((void *)x);
+    free(xattr);
+    return res;
+}

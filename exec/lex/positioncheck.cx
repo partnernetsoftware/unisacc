@@ -1,0 +1,168 @@
+#!/usr/bin/env -S unisacc.com -run
+/* positioncheck.cx -- exec/lex/positioncheck.py in C (2026-10-23, the py->cx port wave; zero Python): compare the
+   optional E1 offsets with the actual reference lexer's tpos array.  The reference and its input-buffer hook are
+   built only in scratch; every child has a 60 second bound; ordinary typed output is checked independently too.
+   usage (from the repository root; arguments are ignored, as by the Python check):
+       sh ./unisacc.com -run exec/lex/positioncheck.cx tests/cxlib/lexdelta.cx
+   In a fresh lex-positions-XXXXXXXX directory under TMPDIR: the reference source is exec/c/refsource.py's
+   source_text() -- tests/refshim.h + `tests/export_ref.sh FLAT` (FLAT in its own unisacc-refsource-XXXXXXXX
+   directory, 30 s) + tests/reffoot.h -- with four probe hooks spliced in at anchors that must each occur once
+   (a probe_word helper before main, the input buffer before the token loop, `@<I tpos>\n` before each token and
+   `=SPELLING` for identifiers); it is compiled with `cc -w -O1 -I kernel -I src`.  exec/c/run.c is built with
+   $EXEC_CC (default cc) -O2, and the positions and typed Nets are constructed from `gen lex --positions` /
+   `gen lex --typed` by seed/gen.c, seed/tbl.c and seed/net.c (byte-identical to exec/build/gen.py, exec/c/tbl.py,
+   exec/c/net.py).  For nine sources the reference's `-dump-tokens` output (buffer, then tokens) must equal the
+   positions Net's output on that buffer and the cxlib.lexdelta simulation (port of exec/pp/sim.py; start DISPATCH,
+   maxsteps 2000000), its offsets must end at the buffer length, and stripping the fixed six-byte `@<I>\n` prefixes
+   must give exactly the typed Net's output.  Output lines as the Python check printed them; a failed assertion is
+   `AssertionError: ...` on stderr, rc 1.  The temporary directories are removed either way. */
+
+/* cxlib.lexdelta (named on the command line: `use` does not reach tests/cxlib from exec/lex) */
+typedef struct ld_delta ld_delta;
+typedef int (*ld_files_fn)(void *ctx, const unsigned char *key, size_t keyn, const unsigned char **val, size_t *valn);
+int ld_root(const char *file, int up, char *out, size_t cap);
+int ld_tempdir(const char *prefix, char *out, size_t cap);
+void ld_fail(const char *cls, const char *msg);
+void ld_cleanup(void);
+char *ld_call(char *const argv[], const char *cwd, double secs, size_t *outn);
+void ld_build(const char *root, const char *td, int what);
+void ld_construct(const char *root, const char *td, const char *target, const char *name, const char *flag, int net,
+                  double secs, int show);
+ld_delta *ld_load(const char *path, const char *start, int e1);
+int ld_run(ld_delta *d, const unsigned char *x, size_t n, const char *srcpath, ld_files_fn files, void *ctx,
+           long long maxsteps, unsigned char **val, size_t *valn);
+unsigned ld_le32(const unsigned char *p);
+char *ld_repr(const void *s, size_t n);
+
+static char ROOT[4096], T[4096], INCLUDE[4200];
+
+static void check(int ok, const char *what) { if (!ok) ld_fail("AssertionError", what); }
+static char *tp(const char *name) {   /* t/NAME */
+    static char b[4][4300]; static int k;
+    k = (k + 1) & 3; snprintf(b[k], sizeof b[k], "%s/%s", T, name); return b[k];
+}
+static void put(const char *path, const void *b, size_t n) {
+    if (cx_write(path, b, n)) { char m[4400]; snprintf(m, sizeof m, "cannot write '%s'", path); ld_fail("OSError", m); }
+}
+static char *slurp(const char *path, size_t *n) {   /* Path.read_text(): universal newlines (\r\n, \r -> \n) */
+    char *b = cx_read(path, n); size_t i, k = 0;
+    if (!b) { char m[4400]; snprintf(m, sizeof m, "[Errno 2] No such file or directory: '%s'", path); ld_fail("FileNotFoundError", m); }
+    for (i = 0; i < *n; i++) {
+        if (b[i] == '\r') { b[k++] = '\n'; if (i + 1 < *n && b[i + 1] == '\n') i++; }
+        else b[k++] = b[i];
+    }
+    *n = k; b[k] = 0;
+    return b;
+}
+/* source = source.replace(anchor, add + anchor) (or anchor + add), after assert source.count(anchor) == 1 */
+static char *splice(char *s, size_t *n, const char *anchor, const char *add, int before) {
+    size_t an = strlen(anchor), dn = strlen(add), i, hits = 0, at = 0; char *o;
+    for (i = 0; i + an <= *n; ) {
+        if (!memcmp(s + i, anchor, an)) { if (!hits) at = i; hits++; i += an; } else i++;
+    }
+    if (hits != 1) ld_fail("AssertionError", "");
+    o = malloc(*n + dn + 1);
+    if (before) { memcpy(o, s, at); memcpy(o + at, add, dn); memcpy(o + at + dn, s + at, *n - at); }
+    else { memcpy(o, s, at + an); memcpy(o + at + an, add, dn); memcpy(o + at + an + dn, s + at + an, *n - at - an); }
+    *n += dn; o[*n] = 0; free(s);
+    return o;
+}
+
+int main(void) {
+    static const char *const cases[9][2] = {
+        { "", "empty" }, { "int x=123;\n", "plain" }, { "#define VALUE 12345\nint x=VALUE;\n", "macro" },
+        { "int x=1+\\\n2;\n", "splice" }, { "/* a\nb */ unsigned long x=0xabcdefUL;\n", "comment" },
+        { "char *s=\"a\" L\"b\"; int x=L'z';\n", "prefixes" }, { "double x=.12e+3; int y=a>>=2;\n", "lookahead" },
+        { "__attribute__((unused)) int x; __extension__ int y;\n", "attributes" }, { 0, "wide-offset" } };
+    char *source, *a, *b, *c, *argv[12], ref[4300], run[4300], posnet[4300], typnet[4300], input[4300], wide[300];
+    size_t sn, an, bn, cn; ld_delta *d; int i;
+    if (ld_root(__FILE__, 3, ROOT, sizeof ROOT)) ld_fail("FileNotFoundError", __FILE__);
+    snprintf(INCLUDE, sizeof INCLUDE, "%s/include", ROOT);
+    if (ld_tempdir("lex-positions-", T, sizeof T)) ld_fail("OSError", "cannot create a temporary directory");
+    {   /* refsource.source_text(R) */
+        char rd[4096], flat[4300], sh[4300], p[4300];
+        if (ld_tempdir("unisacc-refsource-", rd, sizeof rd)) ld_fail("OSError", "cannot create a temporary directory");
+        snprintf(flat, sizeof flat, "%s/ref.c", rd); snprintf(sh, sizeof sh, "%s/tests/export_ref.sh", ROOT);
+        argv[0] = sh; argv[1] = flat; argv[2] = 0;
+        free(ld_call(argv, 0, 30, 0));
+        snprintf(p, sizeof p, "%s/tests/refshim.h", ROOT); a = slurp(p, &an);
+        b = slurp(flat, &bn);
+        snprintf(p, sizeof p, "%s/tests/reffoot.h", ROOT); c = slurp(p, &cn);
+        sn = an + bn + cn; source = malloc(sn + 1);
+        memcpy(source, a, an); memcpy(source + an, b, bn); memcpy(source + an + bn, c, cn); source[sn] = 0;
+        free(a); free(b); free(c);
+    }
+    source = splice(source, &sn, "int main(void) {",
+                    "static void probe_word(long n) { unsigned char b[4]; int j; for(j=0;j<4;j++) b[j]=(n>>(8*j))&255; __write(1,b,4); }\n", 1);
+    source = splice(source, &sn, "    if (lex() < 0) return 1;\n    i = 0;\n    while (i < ntok) {",
+                    "    probe_word(nsrc); __write(1,src,nsrc);\n", 1);
+    source = splice(source, &sn, "        p = voff(TOKV, tkind[i]);",
+                    "        __write(1,\"@\",1); probe_word(tpos[i]); __write(1,\"\\n\",1);\n", 1);
+    source = splice(source, &sn, "        if (tkind[i] == 2) {",
+                    "        if (tkind[i] == 1) { __write(1,\"=\",1); __write(1,src+tpos[i],tlen[i]); }\n", 1);
+    put(tp("ref.c"), source, sn); free(source);
+    snprintf(ref, sizeof ref, "%s", tp("ref"));
+    {   /* compile_command(R, t/'ref.c', t/'ref') */
+        char ki[4300], si[4300], rc[4300];
+        snprintf(ki, sizeof ki, "%s/kernel", ROOT); snprintf(si, sizeof si, "%s/src", ROOT); snprintf(rc, sizeof rc, "%s", tp("ref.c"));
+        argv[0] = "cc"; argv[1] = "-w"; argv[2] = "-O1"; argv[3] = "-I"; argv[4] = ki; argv[5] = "-I"; argv[6] = si;
+        argv[7] = rc; argv[8] = "-o"; argv[9] = ref; argv[10] = 0;
+        free(ld_call(argv, 0, 60, 0));
+    }
+    ld_build(ROOT, T, 1 | 2 | 4 | 8);
+    ld_construct(ROOT, T, "lex", "positions", "--positions", 1, 60, 0);
+    ld_construct(ROOT, T, "lex", "typed", "--typed", 1, 60, 0);
+    d = ld_load(tp("positions.json"), "DISPATCH", 1);
+    snprintf(run, sizeof run, "%s", tp("run")); snprintf(posnet, sizeof posnet, "%s", tp("positions.net"));
+    snprintf(typnet, sizeof typnet, "%s", tp("typed.net")); snprintf(input, sizeof input, "%s", tp("input"));
+    memset(wide, '\n', 270); memcpy(wide + 270, "int end;\n", 10);
+    for (i = 0; i < 9; i++) {
+        const char *text = cases[i][0] ? cases[i][0] : wide, *name = cases[i][1];
+        char src[4300], fn[300], *raw, *got, *typed; size_t rawn, gotn, typedn, n, want_n, j = 0, pn = 0, nofs = 0;
+        unsigned char *val, *plain; size_t valn; unsigned last = 0;
+        snprintf(fn, sizeof fn, "%s.c", name); snprintf(src, sizeof src, "%s", tp(fn));
+        put(src, text, strlen(text));
+        argv[0] = ref; argv[1] = "-dump-tokens"; argv[2] = src; argv[3] = 0;
+        raw = ld_call(argv, 0, 60, &rawn);
+        if (rawn < 4) ld_fail("struct.error", "unpack_from requires a buffer of at least 4 bytes");
+        n = ld_le32((unsigned char *)raw);
+        check(4 + n <= rawn, "");
+        want_n = rawn - 4 - n;
+        put(input, raw + 4, n);
+        argv[0] = run; argv[1] = posnet; argv[2] = input; argv[3] = 0;
+        got = ld_call(argv, 0, 60, &gotn);
+        if (!(gotn == want_n && !memcmp(got, raw + 4 + n, want_n))) {   /* (name,got,want) */
+            char *g = ld_repr(got, gotn), *w = ld_repr(raw + 4 + n, want_n), *m = malloc(strlen(g) + strlen(w) + 300);
+            sprintf(m, "('%s', %s, %s)", name, g, w); ld_fail("AssertionError", m);
+        }
+        {   /* (name,result,val,want); a reject's val is shown as its diagnostic bytes */
+            static const char *const res[3] = { "accept", "reject", "timeout" };
+            int r = ld_run(d, (unsigned char *)raw + 4, n, src, 0, INCLUDE, 2000000, &val, &valn);
+            if (!(r == 0 && valn == want_n && !memcmp(val, raw + 4 + n, want_n))) {
+                char *g = r == 2 ? 0 : ld_repr(val, valn), *w = ld_repr(raw + 4 + n, want_n), *m = malloc((g ? strlen(g) : 4) + strlen(w) + 300);
+                sprintf(m, "('%s', '%s', %s, %s)", name, res[r], g ? g : "None", w); ld_fail("AssertionError", m);
+            }
+        }
+        plain = malloc(gotn + 1);
+        while (j < gotn && got[j] == '@') {   /* strip only the fixed six-byte prefix before each token */
+            char *nl;
+            check(j + 5 < gotn && got[j + 5] == '\n', "");
+            last = ld_le32((unsigned char *)got + j + 1); nofs++; j += 6;
+            nl = memchr(got + j, '\n', gotn - j);
+            if (!nl) ld_fail("ValueError", "subsection not found");
+            memcpy(plain + pn, got + j, (size_t)(nl + 1 - (got + j))); pn += (size_t)(nl + 1 - (got + j)); j = (size_t)(nl + 1 - got);
+        }
+        memcpy(plain + pn, got + j, gotn - j); pn += gotn - j;
+        check(nofs && last == n, "");
+        argv[0] = run; argv[1] = typnet; argv[2] = input; argv[3] = 0;
+        typed = ld_call(argv, 0, 60, &typedn);
+        check(typedn == pn && !memcmp(typed, plain, pn), name);
+        printf("token positions %s match reference\n", name);
+        fflush(stdout);
+        free(raw); free(got); free(typed); free(val); free(plain);
+    }
+    printf("token positions: 9 reference and Python oracle cases pass\n");
+    fflush(stdout);
+    ld_cleanup();
+    return 0;
+}

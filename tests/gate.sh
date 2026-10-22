@@ -370,9 +370,9 @@ job exec-pp-object tests/bound 58 sh ./tests/cxbin exec/pp/objectpredefinecheck.
 job exec-pp-directives tests/bound 58 sh ./unisacc.com -run exec/pp/directivecheck.cx   # (.cx port, 2026-10-23) R21: live #error, #include limit, stray #endif/#else, string prefixes = reference or named refusal
 job exec-r21-e3 python3 ./exec/parse2/r21check.py   # R21: E3 on this week's reference fixes = reference bytes or named refusal (never different bytes)
 job exec-pploc tests/bound 58 sh ./unisacc.com -run exec/pp/locationcheck.cx   # (.cx port, 2026-10-23) source-position metadata from actual preprocessing
-job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets against reference tpos
-job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location envelope
-job exec-f1-sidecar python3 ./exec/lex/f1sidecarcheck.py         # constructor/destructor mark framing
+job exec-lexpos tests/bound 58 sh ./unisacc.com -run exec/lex/positioncheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) token offsets against reference tpos
+job exec-lexloc tests/bound 58 sh ./unisacc.com -run exec/lex/locationcheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) E2/E1 location envelope
+job exec-f1-sidecar tests/bound 58 sh ./unisacc.com -run exec/lex/f1sidecarcheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) constructor/destructor mark framing
 job exec-objectplan python3 ./tests/objectplancheck.py         # ordered ELF symbol plan
 job exec-objectpack python3 ./tests/objectpackcheck.py         # target-scoped route declarations
 job exec-modelobject python3 ./tests/modelobjectcheck.py       # two ELF architectures against C reference
@@ -1075,7 +1075,7 @@ job gate-select python3 tests/gateselectcheck.py   # offline selector contracts;
 # print a Usage line and the one that fails on this HEAD are NOT here -- see the
 # tsv.  all.sh is deliberately unchanged.
 job exec-elfdata-bridge   python3 ./exec/enc/librarysymbolscheck.py
-job exec-lex-sourcefacts  python3 ./exec/lex/sourcefactscheck.py
+job exec-lex-sourcefacts tests/bound 58 sh ./unisacc.com -run exec/lex/sourcefactscheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) E1 provenance framing (USLFACT1)
 job exec-parse2-libimports python3 ./exec/parse2/libraryimportscheck.py
 for m in 0 1 2 3 4 5 6 7 8; do job fresh-order-$m tests/bound 58 sh ./unisacc.com -run tests/freshordercheck.cx -- $m; done   # T1d: global fresh order = tests/freshorder.tsv; (.cx port, 0.0.43) seed/gen.c + tests/freshorderhook.h, not gen.py (--errors modes ran 63-76 s)
 job lib-bindings-registry python3 ./tests/librarybindingscheck.py

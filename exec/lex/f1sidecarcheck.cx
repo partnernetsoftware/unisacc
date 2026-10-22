@@ -1,0 +1,102 @@
+#!/usr/bin/env -S unisacc.com -run
+/* f1sidecarcheck.cx -- exec/lex/f1sidecarcheck.py in C (2026-10-23, the py->cx port wave; zero Python): check the
+   optional F1 lexer sidecar of the E1 stream-stage without changing public token bytes.
+   usage (from the repository root; arguments are ignored, as by the Python check):
+       sh ./unisacc.com -run exec/lex/f1sidecarcheck.cx tests/cxlib/lexdelta.cx
+   In a fresh e1-f1-XXXXXXXX directory under TMPDIR the E1 delta is constructed as `gen lex OUT --sourcefacts`
+   (seed/gen.c, byte-identical to exec/build/gen.py; its stderr passes through, timeout 25 s) and simulated with
+   cxlib.lexdelta's port of exec/pp/sim.py (rowless HALT, INC as ALUI add).  Four sources are run plain and with the
+   file dictionary {\0cli/f1: \1}: the framed output is USLATTR1, the record count and token length, one <IB
+   record per constructor (1) / destructor (2) mark, then exactly the public tokens.  A USLFACT1-framed source with
+   \0library/sourcefacts enabled keeps the provenance frame after the records.  Success prints
+   `F1 E1 sidecar: 5 cases, public tokens unchanged`, rc 0; a failed assertion is `AssertionError: ...` on stderr,
+   rc 1.  The temporary directory is removed either way. */
+
+/* cxlib.lexdelta (named on the command line: `use` does not reach tests/cxlib from exec/lex) */
+typedef struct ld_delta ld_delta;
+typedef int (*ld_files_fn)(void *ctx, const unsigned char *key, size_t keyn, const unsigned char **val, size_t *valn);
+int ld_root(const char *file, int up, char *out, size_t cap);
+int ld_tempdir(const char *prefix, char *out, size_t cap);
+void ld_fail(const char *cls, const char *msg);
+void ld_cleanup(void);
+void ld_build(const char *root, const char *td, int what);
+void ld_construct(const char *root, const char *td, const char *target, const char *name, const char *flag, int net,
+                  double secs, int show);
+ld_delta *ld_load(const char *path, const char *start, int e1);
+int ld_run(ld_delta *d, const unsigned char *x, size_t n, const char *srcpath, ld_files_fn files, void *ctx,
+           long long maxsteps, unsigned char **val, size_t *valn);
+unsigned ld_le32(const unsigned char *p);
+void ld_put64(unsigned char *p, unsigned long long v);
+char *ld_repr(const void *s, size_t n);
+
+static char ROOT[4096], TD[4096], INCLUDE[4200];
+static const char *const RESULT[3] = { "accept", "reject", "timeout" };
+
+/* the check's Files: \0cli/f1 -> b"\1"; with SOURCEFACTS also \0library/sourcefacts -> pack('<Q', 1) */
+static int files(void *ctx, const unsigned char *key, size_t n, const unsigned char **v, size_t *vn) {
+    static const unsigned char one[1] = { 1 }, enabled[8] = { 1, 0, 0, 0, 0, 0, 0, 0 };
+    if (n == 7 && !memcmp(key, "\0cli/f1", 7)) { *v = one; *vn = 1; return 1; }
+    if (*(int *)ctx && n == 20 && !memcmp(key, "\0library/sourcefacts", 20)) { *v = enabled; *vn = 8; return 1; }
+    return 0;
+}
+static void check(int ok, const char *what) { if (!ok) ld_fail("AssertionError", what); }
+static unsigned need32(const unsigned char *b, size_t n, size_t at) {   /* struct.unpack_from('<I', b, at) */
+    if (at + 4 > n) ld_fail("struct.error", "unpack_from requires a buffer of at least more bytes");
+    return ld_le32(b + at);
+}
+
+int main(void) {
+    static const char *const src[4] = {
+        "int x;",
+        "__attribute__((constructor)) void boot(void){}",
+        "__attribute__((destructor)) void bye(void){}",
+        "__attribute__((constructor)) void a(void){} __attribute__((destructor)) void b(void){}" };
+    static const int kinds[4][2] = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 1, 2 } };
+    static const int nkinds[4] = { 0, 1, 1, 2 };
+    char path[4300]; ld_delta *d; int i, r, plain = 0, facts = 1;
+    unsigned char *pub, *fr; size_t pn, fn;
+    if (ld_root(__FILE__, 3, ROOT, sizeof ROOT)) ld_fail("FileNotFoundError", __FILE__);
+    snprintf(INCLUDE, sizeof INCLUDE, "%s/include", ROOT);
+    if (ld_tempdir("e1-f1-", TD, sizeof TD)) ld_fail("OSError", "cannot create a temporary directory");
+    ld_build(ROOT, TD, 1);
+    ld_construct(ROOT, TD, "lex", "lex", "--sourcefacts", 0, 25, 1);
+    snprintf(path, sizeof path, "%s/lex.json", TD);
+    d = ld_load(path, 0, 1);
+    for (i = 0; i < 4; i++) {
+        size_t n = strlen(src[i]), count, tl, k; char *sr = ld_repr(src[i], n), m[1024];
+        r = ld_run(d, (const unsigned char *)src[i], n, "f1.c", 0, INCLUDE, 200000, &pub, &pn);
+        snprintf(m, sizeof m, "(%s, '%s')", sr, RESULT[r]);
+        check(r == 0, m);   /* assert result == "accept", (source, result) */
+        r = ld_run(d, (const unsigned char *)src[i], n, "f1.c", files, &plain, 200000, &fr, &fn);
+        snprintf(m, sizeof m, "(%s, '%s')", sr, RESULT[r]);
+        check(r == 0 && fn >= 8 && !memcmp(fr, "USLATTR1", 8), m);
+        count = need32(fr, fn, 8); tl = need32(fr, fn, 12);
+        check(count == (size_t)nkinds[i] && tl == pn, "");
+        {   /* assert [kind for _, kind in records] == kinds, (source, records) */
+            int same = 1; size_t at; m[0] = 0;
+            for (k = 0; k < count; k++) if (16 + 5 * k + 5 > fn) ld_fail("struct.error", "unpack_from requires a buffer of at least 5 bytes");
+            snprintf(m, sizeof m, "(%s, [", sr); at = strlen(m);
+            for (k = 0; k < count; k++) {
+                if (fr[16 + 5 * k + 4] != kinds[i][k]) same = 0;
+                snprintf(m + at, sizeof m - at, "%s(%u, %u)", k ? ", " : "", ld_le32(fr + 16 + 5 * k), fr[16 + 5 * k + 4]); at = strlen(m);
+            }
+            snprintf(m + at, sizeof m - at, "])");
+            check(same, m);
+        }
+        check(fn >= 16 + 5 * count && fn - (16 + 5 * count) == pn && !memcmp(fr + 16 + 5 * count, pub, pn), sr);
+        free(pub); free(fr); free(sr);
+    }
+    {   /* b"USLFACT1\n" + bytes((2, 1, 1)) + pack('<Q', len(source)) + source */
+        const char *s = src[1]; size_t n = strlen(s), count, tl; unsigned char *x = malloc(20 + n + 1);
+        memcpy(x, "USLFACT1\n", 9); x[9] = 2; x[10] = 1; x[11] = 1; ld_put64(x + 12, n); memcpy(x + 20, s, n);
+        check(ld_run(d, x, 20 + n, "f1.c", files, &facts, 200000, &fr, &fn) == 0 && fn >= 8 && !memcmp(fr, "USLATTR1", 8), "");
+        count = need32(fr, fn, 8); tl = need32(fr, fn, 12);
+        check(count == 1 && fn >= 16 + 5 * count + 9 && !memcmp(fr + 16 + 5 * count, "USLFACT1\n", 9), "");
+        check(tl == fn - 16 - 5 * count, "");
+        free(x); free(fr);
+    }
+    printf("F1 E1 sidecar: 5 cases, public tokens unchanged\n");
+    fflush(stdout);
+    ld_cleanup();
+    return 0;
+}

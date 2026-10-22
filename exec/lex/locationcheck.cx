@@ -1,0 +1,144 @@
+#!/usr/bin/env -S unisacc.com -run
+/* locationcheck.cx -- exec/lex/locationcheck.py in C (2026-10-23, the py->cx port wave; zero Python): E2 -> located
+   E1 framing; compare all token bytes and retained metadata, and reject malformed framing without output.  The E2
+   reference-map test and the E1 tpos test independently check the contents; this checks their join.
+   usage (from the repository root; arguments are ignored, as by the Python check):
+       sh ./unisacc.com -run exec/lex/locationcheck.cx tests/cxlib/lexdelta.cx
+   In a fresh lex-location-chain-XXXXXXXX directory under TMPDIR: exec/c/run.c is built with $EXEC_CC (default cc)
+   -O2, and three Nets are constructed -- pp from `gen pp --locations`, lex from `gen lex --locations`, pos from
+   `gen lex --positions` -- by seed/gen.c, seed/tbl.c and seed/net.c (byte-identical to exec/build/gen.py,
+   exec/c/tbl.py and exec/c/net.py), every step captured with a 60 s bound.  For six sources (with inner.h/outer.h
+   beside them) the E2 Net's UNIPP1 output, framed as UNITOK1 + <I length + E2 bytes + the positions Net's tokens of
+   its text, must equal the located lexer Net's output and the cxlib.lexdelta simulation of the lex delta (port of
+   exec/pp/sim.py; maxsteps 3000000).  Eleven malformed UNIPP1 frames must each exit 1 with no stdout and
+   `malformed preprocessing locations` on stderr.  Output lines as the Python check printed them; a failed
+   assertion is `AssertionError: ...` on stderr, rc 1.  The temporary directory is removed either way. */
+
+/* cxlib.lexdelta (named on the command line: `use` does not reach tests/cxlib from exec/lex) */
+typedef struct ld_delta ld_delta;
+typedef int (*ld_files_fn)(void *ctx, const unsigned char *key, size_t keyn, const unsigned char **val, size_t *valn);
+int ld_root(const char *file, int up, char *out, size_t cap);
+int ld_tempdir(const char *prefix, char *out, size_t cap);
+void ld_fail(const char *cls, const char *msg);
+void ld_cleanup(void);
+int ld_capture(char *const argv[], const char *cwd, double secs, char **out, size_t *outn, char **err, size_t *errn);
+char *ld_call(char *const argv[], const char *cwd, double secs, size_t *outn);
+void ld_build(const char *root, const char *td, int what);
+void ld_construct(const char *root, const char *td, const char *target, const char *name, const char *flag, int net,
+                  double secs, int show);
+ld_delta *ld_load(const char *path, const char *start, int e1);
+int ld_run(ld_delta *d, const unsigned char *x, size_t n, const char *srcpath, ld_files_fn files, void *ctx,
+           long long maxsteps, unsigned char **val, size_t *valn);
+unsigned ld_le32(const unsigned char *p);
+void ld_put32(unsigned char *p, unsigned v);
+char *ld_repr(const void *s, size_t n);
+
+static char ROOT[4096], T[4096], INCLUDE[4200];
+
+static void check(int ok, const char *what) { if (!ok) ld_fail("AssertionError", what); }
+static char *tp(const char *name) {   /* t/NAME */
+    static char b[4][4300]; static int k;
+    k = (k + 1) & 3; snprintf(b[k], sizeof b[k], "%s/%s", T, name); return b[k];
+}
+static void put(const char *path, const void *b, size_t n) {
+    if (cx_write(path, b, n)) { char m[4400]; snprintf(m, sizeof m, "cannot write '%s'", path); ld_fail("OSError", m); }
+}
+/* text_of: the text after the UNIPP1 header, string table and include records */
+static size_t text_of(const unsigned char *b, size_t n, size_t *at) {
+    size_t length, ns, ni, i, k;
+    if (n < 7 || memcmp(b, "UNIPP1\0", 7)) ld_fail("AssertionError", "");
+    if (n < 27) ld_fail("struct.error", "unpack_from requires a buffer of at least 27 bytes");
+    length = ld_le32(b + 7); ns = ld_le32(b + 19); ni = ld_le32(b + 23);
+    i = 27 + 4 * ns;
+    for (k = 0; k < ni; k++) {
+        if (i + 12 > n) ld_fail("struct.error", "unpack_from requires a buffer of more bytes");
+        i += 12 + ld_le32(b + i + 8);
+    }
+    check(n == i + length, "");
+    *at = i;
+    return length;
+}
+
+int main(void) {
+    static const char *const cases[6] = { "", "int x;\n", "#define V 12345\nint x=V;\n", "int x=1+\\\n2;\n",
+                                          "#include \"outer.h\"\nint x=VALUE;\n",
+                                          "int main(void){printf(\"ok\\n\");return 0;}\n" };
+    static const char *const spec[3][3] = { { "pp", "pp", "--locations" }, { "lex", "lex", "--locations" },
+                                            { "pos", "lex", "--positions" } };
+    ld_delta *d; int i; char src[4300], run[4300], ppnet[4300], lexnet[4300], posnet[4300], ppf[4300], textf[4300], badf[4300];
+    char *argv[6];
+    if (ld_root(__FILE__, 3, ROOT, sizeof ROOT)) ld_fail("FileNotFoundError", __FILE__);
+    snprintf(INCLUDE, sizeof INCLUDE, "%s/include", ROOT);
+    if (ld_tempdir("lex-location-chain-", T, sizeof T)) ld_fail("OSError", "cannot create a temporary directory");
+    ld_build(ROOT, T, 1 | 2 | 4 | 8);
+    for (i = 0; i < 3; i++) ld_construct(ROOT, T, spec[i][1], spec[i][0], spec[i][2], 1, 60, 0);
+    d = ld_load(tp("lex.json"), 0, 1);
+    put(tp("inner.h"), "int header;\n", 12);
+    put(tp("outer.h"), "#include \"inner.h\"\n#define VALUE 7\n", 35);
+    snprintf(src, sizeof src, "%s", tp("source.c")); snprintf(run, sizeof run, "%s", tp("run"));
+    snprintf(ppnet, sizeof ppnet, "%s", tp("pp.net")); snprintf(lexnet, sizeof lexnet, "%s", tp("lex.net"));
+    snprintf(posnet, sizeof posnet, "%s", tp("pos.net")); snprintf(ppf, sizeof ppf, "%s", tp("pp"));
+    snprintf(textf, sizeof textf, "%s", tp("text")); snprintf(badf, sizeof badf, "%s", tp("bad"));
+    for (i = 0; i < 6; i++) {
+        char *pp, *tok, *got, m[32]; size_t ppn, tokn, gotn, at, tl, wn; unsigned char *want, *val; size_t valn;
+        put(src, cases[i], strlen(cases[i]));
+        argv[0] = run; argv[1] = ppnet; argv[2] = src; argv[3] = src; argv[4] = INCLUDE; argv[5] = 0;
+        pp = ld_call(argv, 0, 60, &ppn);
+        put(ppf, pp, ppn);
+        tl = text_of((const unsigned char *)pp, ppn, &at);
+        put(textf, pp + at, tl);
+        argv[0] = run; argv[1] = posnet; argv[2] = textf; argv[3] = 0;
+        tok = ld_call(argv, 0, 60, &tokn);
+        wn = 12 + ppn + tokn; want = malloc(wn + 1);
+        memcpy(want, "UNITOK1\0", 8); ld_put32(want + 8, (unsigned)ppn); memcpy(want + 12, pp, ppn); memcpy(want + 12 + ppn, tok, tokn);
+        argv[0] = run; argv[1] = lexnet; argv[2] = ppf; argv[3] = 0;
+        got = ld_call(argv, 0, 60, &gotn);
+        snprintf(m, sizeof m, "%d", i);
+        check(gotn == wn && !memcmp(got, want, wn), m);
+        {   /* assert result=='accept' and val==want,(i,result) */
+            static const char *const res[3] = { "accept", "reject", "timeout" };
+            int r = ld_run(d, (const unsigned char *)pp, ppn, src, 0, INCLUDE, 3000000, &val, &valn);
+            snprintf(m, sizeof m, "(%d, '%s')", i, res[r]);
+            check(r == 0 && valn == wn && !memcmp(val, want, wn), m);
+        }
+        printf("located lexer chain %d matches direct token positions\n", i);
+        fflush(stdout);
+        free(pp); free(tok); free(got); free(want); free(val);
+    }
+    {
+        unsigned char good[27], b[128]; size_t bn; int k;
+        memcpy(good, "UNIPP1\0", 7); memset(good + 7, 0, 20);
+        for (k = 0; k < 11; k++) {
+            char *out, *err; size_t on, en; int rc, hit = 0; size_t z;
+            unsigned w[5] = { 0, 0, 0, 0, 0 };
+            switch (k) {
+            case 0: bn = 0; break;
+            case 1: memcpy(b, good, 6); bn = 6; break;
+            case 2: memcpy(b, good, 26); bn = 26; break;
+            case 3: memcpy(b, "BADMAG!", 7); memcpy(b + 7, good + 7, 20); bn = 27; break;
+            case 4: memcpy(b, good, 27); b[27] = 'x'; bn = 28; break;
+            default:
+                memcpy(b, good, 7);
+                if (k == 5) w[0] = 1; else if (k == 6 || k == 7) w[3] = 1; else if (k == 10) w[0] = 0x80000000u; else w[4] = 1;
+                for (z = 0; z < 5; z++) ld_put32(b + 7 + 4 * z, w[z]);
+                bn = 27;
+                if (k == 7) { ld_put32(b + bn, 1); bn += 4; }
+                if (k == 8) { ld_put32(b + 27, 1); ld_put32(b + 31, 1); ld_put32(b + 35, 63); memset(b + 39, 'x', 63); bn = 102; }
+                if (k == 9) { ld_put32(b + 27, 1); ld_put32(b + 31, 1); ld_put32(b + 35, 2); b[39] = 'x'; bn = 40; }
+            }
+            put(badf, b, bn);
+            argv[0] = run; argv[1] = lexnet; argv[2] = badf; argv[3] = 0;
+            rc = ld_capture(argv, 0, 60, &out, &on, &err, &en);
+            for (z = 0; z + 33 <= en && !hit; z++) hit = !memcmp(err + z, "malformed preprocessing locations", 33);
+            if (!(rc == 1 && on == 0 && hit)) {   /* (i,p.returncode,p.stderr) */
+                char *r = ld_repr(err, en), *m = malloc(strlen(r) + 64);
+                sprintf(m, "(%d, %d, %s)", k, rc, r); ld_fail("AssertionError", m);
+            }
+            free(out); free(err);
+        }
+    }
+    printf("located lexer: 6 joined cases, 11 malformed frames rejected\n");
+    fflush(stdout);
+    ld_cleanup();
+    return 0;
+}
