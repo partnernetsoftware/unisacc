@@ -71,10 +71,11 @@ int main(int argc,char **argv) {
     free(a);free(b);
     /* text-form edges.  No trailing newline, a 5000-char symbol name and a
        UTF-8 BOM (which both sides treat as ordinary label bytes) are accepted
-       with product/reference image parity.  CRLF line endings are a REGISTERED
-       split (ledger 2c): the tape domain itself accepts them (-S echoes the
-       bytes) but the image route refuses with the encoder-slice naming, while
-       the reference accepts and builds -- if any side moves, this goes red. */
+       with product/reference image parity.  CRLF is one line (the tape
+       domain's authored rule): the domain echoes the bytes under -S, and since
+       the lower separator class and the carrier emitter learned CR (ledger 2c,
+       B-lower) the image route builds a CRLF tape byte-identical to its LF
+       twin, as the reference always did. */
     if(put("noeol.tape","_start:\n  ret") ||
        put("bom.tape","\xef\xbb\xbf_start:\n  ret\n") ||
        put("crlf.tape","_start:\r\n  imm r0, 0\r\n  ret\r\n"))return 2;
@@ -101,10 +102,16 @@ int main(int argc,char **argv) {
     { static const char CRLF[]="_start:\r\n  imm r0, 0\r\n  ret\r\n";
       size_t n=0;char *s=slurp("crlf.S",&n);
       note("crlf-identity",s&&n==sizeof CRLF-1&&!memcmp(s,CRLF,n));free(s); }
-    build("crlf-build","crlf.tape","not covered: an op outside the first encoder slice");
+    if(put("lf.tape","_start:\n  imm r0, 0\n  ret\n"))return 2;
+    build("crlf-build","crlf.tape",NULL);
+    build("lf-build","lf.tape",NULL);
+    a=slurp("crlf-build.img",&an);b=slurp("lf-build.img",&bn);
+    note("crlf-lf-bytes",a&&b&&an==bn&&!memcmp(a,b,an));free(a);free(b);
     snprintf(cmd,sizeof cmd,
         "python3 -m unisa compile '%s/crlf.tape' --from-tape -o '%s/crlf.pyimg' --target lnx/x86_64 --drive built >/dev/null 2>&1",D,D);
     note("crlf-ref-accepts",cx_run_timeout(cmd,25,0,0)==0);
+    a=slurp("crlf-build.img",&an);b=slurp("crlf.pyimg",&bn);
+    note("crlf-ref-bytes",a&&b&&an==bn&&!memcmp(a,b,an));free(a);free(b);
     printf("struct checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }

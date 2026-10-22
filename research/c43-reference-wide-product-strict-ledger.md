@@ -50,6 +50,8 @@
 
 **正确修向 (B-lower)**：把 13 加入上述分隔符类（9 行表项，纯授权表编辑），数据记录行的 `COPY` 直通与 `.str` 字面量内的 `\r` 要单独核对（字面量内的 `\r` 是数据，必须保留）。**代价**：lower 模型变 → 候选重建 + 根对归位；`lower-seal`（streamseal 测量叶）与 `edge-lower-abi/regmap/reloc/enc-seal` 四边封件按「有模型变更实证」重封；arm/x86 两目标各加 CRLF 正例进 com-tape-struct 并翻转 `crlf-build` 断言。属产品闭包 + 重封，须具名派刀；本文不代落。
 
+**B-lower 已实跑并落主（2026-10-22 08:3x 在私有冻结树实跑；08:39 机房主任代裁放刀，经 commitgate `--suite exec-core` 落主）**：改动 = `code-scan-byte.tsv` 4 行 + `data-byte.tsv` 5 行（把 13 加入 `32,9` 分隔符类）+ `src/tapebin_encode.inc` 1 行（行尾 CR 当行末空白；该编码器与经典参考共用，平价由构造保证）。实测：CRLF 与 LF 同程序在 lnx/x86_64、lnx/arm64、osx/arm64 建像**逐字节同**、`-run` 同退出码；数据记录行（`.str/.bss`）CRLF 直通镜像同；`.str "a\rb"` 字面量内的 CR 保留且与参考同像；载体发射 CRLF==LF==参考 codec、解码不动点；全部拒域叶绿（唯一翻转：com-tape-struct 的 `crlf-build` 由登记拒绝改为「建像且与 LF 孪生/参考逐字节同」）。封件影响：仅 `lower-seal` 转红；按新写的 `tests/reseal-lower.sh`（仿 reseal-elf.sh，traced 链 + prune.net fixture 生产 + 同输入断言）重封后，12 个 case 字节文件**全部不变**，只有 dependencies（两条 rule 的 sha）、identity、streams 与 model 名变；lower-seal/seal-modules 复验绿；候选重建全步绿（model steps 89s），`.com` 字节变（bd693565…，表入模型）。
+
 ## 2b. 另一类观察：双实现同宽于 C99（登记，不入前两类）
 
 2026-10-22 04:4x 采证 com-cerr-hygiene 时发现：`int *p = 1.5;`（double 初始化指针，C99 约束违例，gcc error）被**产品与 Python 参考双双接受**（两边 rc0）。产品与参考互相一致（对拍纪律无违例），但共同宽于 C99；`int *p = 3;` 的整数→指针则是常见扩展（gcc 仅警告），不算。该类不属「参考宽/产品严」，单列为 conformance 面待裁：是否照 R13 缺陷账或 difftest 负域另立登记、以及双实现同步收紧的授权归属。本文不代裁，未入任何叶（叶里语义负例改用 unknown identifier 规避未裁面）。

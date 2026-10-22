@@ -134,7 +134,8 @@ int tb_text_pass(int pass, int textlen) {
             else if (out[p] == 59) { end = p; break; }
             p = p + 1;
         }
-        while (end > line && (out[end - 1] == 32 || out[end - 1] == 9)) end = end - 1;
+        /* CRLF is one line (tape domain rule): a trailing CR is line-end whitespace, never part of a token */
+        while (end > line && (out[end - 1] == 32 || out[end - 1] == 9 || out[end - 1] == 13)) end = end - 1;
         p = line; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
         if (p == end) { line = next; continue; }
         tb_rec_count = tb_rec_count + 1;
