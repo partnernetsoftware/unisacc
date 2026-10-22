@@ -4531,6 +4531,7 @@ int block(void) {
     int savesym; int saveoff; int savetd; int savest; int k;
     need(vfind(TOKV, NTOKV, "{", 1), "{");
     savesym = nsym; saveoff = frameoff; savetd = ntd; savest = nstruct;
+    if (bdepth >= 63) { err_tok(tp, "block nesting exceeds capacity"); return 0; }
     bdepth = bdepth + 1;
     vlaslot[bdepth] = 0;
     laststmt = 0;
@@ -5682,6 +5683,7 @@ int stmt_(void) {
         need(vfind(TOKV, NTOKV, "(", 1), "(");
         exprc(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
+        if (nloop >= 32) { err_tok(tp, "loop nesting exceeds capacity"); return 0; }
         brkstack[nloop] = a; cntstack[nloop] = top;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
@@ -5694,6 +5696,7 @@ int stmt_(void) {
         int stept; int bodyt; int aftert;
         int savesym; int saveoff; int savetd; int savest;
         savesym = nsym; saveoff = frameoff; savetd = ntd; savest = nstruct;
+        if (bdepth >= 63) { err_tok(tp, "block nesting exceeds capacity"); return 0; }
         bdepth = bdepth + 1; vlaslot[bdepth] = 0;
         adv(); need(tidx("(", 1), "(");
         if (eat(tidx(";", 1)) == 0) {
@@ -5717,6 +5720,7 @@ int stmt_(void) {
         }
         adv();
         bodyt = tp;
+        if (nloop >= 32) { err_tok(tp, "loop nesting exceeds capacity"); return 0; }
         brkstack[nloop] = a; cntstack[nloop] = c;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
@@ -5756,6 +5760,7 @@ int stmt_(void) {
         nsw = nsw + 1;
         /* C99 6.8.6.2p1: `continue` belongs to the enclosing ITERATION
            statement.  A switch takes over `break` and nothing else. */
+        if (nloop >= 32) { err_tok(tp, "loop nesting exceeds capacity"); return 0; }
         brkstack[nloop] = end; brkdep[nloop] = bdepth;
         if (nloop > 0) { cntstack[nloop] = cntstack[nloop - 1]; cntdep[nloop] = cntdep[nloop - 1]; }
         else { cntstack[nloop] = end; cntdep[nloop] = bdepth; }
@@ -5864,6 +5869,7 @@ int stmt_(void) {
         adv();
         top = newlab(); a = newlab(); c = newlab();
         elab("__unisacc_L", top); es(":\n");
+        if (nloop >= 32) { err_tok(tp, "loop nesting exceeds capacity"); return 0; }
         brkstack[nloop] = a; cntstack[nloop] = c;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();

@@ -20,7 +20,8 @@ C_SHA='c1be454cf86c7d4c01af985d437c21116e5f69b880bd763b370a1461ae426187'
 # 2026-10-16 prune-fix resample (ee03f79f): gen key moved; old gen 780232368a2b4d6b kept for history
 # 2026-10-22 sizeof-row/(**p)[N] tables (exec/parse2): gen/parse2 keys moved; old df8b1cf75080e680 / a5db364d1ab00303 kept for history
 # 2026-10-22 (**p)(...) declarator tables: keys moved again; old b03a1f7419912378 / 26e6eb387ed7c803 kept for history
-REFERENCE_KEYS={'gen': 'e8432bb0c559184e', 'parse2': '6d292549649be6b8'}
+# 2026-10-22 classic capacity refusals (src/front_pp.c feeds k2-gen2) and facts re-export: keys moved; old e8432bb0c559184e / 6d292549649be6b8 kept for history
+REFERENCE_KEYS={'gen': 'bbcbf5972420a266', 'parse2': '5335a4d5352e305b'}
 BINARY_SHA='96cf5ebbc66e5f2092cc5b68c4bf29695c8c7fdb0d110c15c9e2f12a23ec7fc7'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.

@@ -864,11 +864,13 @@ int linedir(long ls, long ns, long ne, long le) {
     if (q < le) {
         if ((src[q] & 255) != 34) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
         q = q + 1; nm = nfnpool;
-        while (q < le && (src[q] & 255) != 34 && nfnpool < 8000) {
+        while (q < le && (src[q] & 255) != 34) {
+            if (nfnpool >= 8000) { err_at(ns, "#line file name capacity exceeded"); __exit(1); }
             if ((src[q] & 255) == 92) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }   /* escapes: not covered, as in E2 */
             fnpool[nfnpool] = src[q]; nfnpool = nfnpool + 1; q = q + 1;
         }
         if (q >= le) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }                  /* unterminated */
+        if (nfnpool >= 8000) { err_at(ns, "#line file name capacity exceeded"); __exit(1); }
         fnpool[nfnpool] = 0; nfnpool = nfnpool + 1;
         q = q + 1; while (q < le) { if (wsat(q) == 0) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; } q = q + 1; }
     }
@@ -1578,6 +1580,7 @@ int preprocess(void) {
                     }
                 } } }
                 if (d < 3) {                      /* ifdef ifndef if */
+                    if (ndepth >= 64) { err_at(ls, "#if nesting exceeds capacity"); __exit(1); }
                     takest[ndepth] = 0;
                     if (a == 0) { if (live) takest[ndepth] = 1; }
                     seenst[ndepth] = takest[ndepth];
