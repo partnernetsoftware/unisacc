@@ -24,7 +24,7 @@ c-testsuite corpus compile and run (`realprog`, `tools`, `corpus` gates), and
 since 0.0.18 so does the kilo editor; processes (`fork`, `execvp`, `waitpid`, `pipe`, `dup2`, `getcwd`, `sys/wait.h`) arrived in 0.0.19 on Linux and macOS. Lua is in the `realprog` passing baseline; SQLite still needs `pwd.h` (see `tests/realprog.sh`). The language-side gaps are complex
 types and trigraphs, and the bundled C library is a documented subset;
 all are itemised in [the limitations table](#known-limitations) below. unisacc is a
-**neural-network-based compiler**: in the default product, compilation stages
+**neural-network-based compiler**: in the default product, compilation stream-stages
 run on constructed integer threshold networks and a generic executor. Their
 weights come deterministically from a TSV table DSL for finite state
 transitions, not from training. The classic reference is a separate route; its
@@ -147,7 +147,7 @@ make classic-com                # explicit classic fallback in out/
 `unisacc.c` is the classic reference's ordered include entry (`kernel/` +
 `src/`), with no embedded weight literals. The generated
 `kernel/weight.<stage>.inc` and `kernel/dense.<stage>.inc` keep the 18 classic
-stages' data separate. `tests/export_ref.sh OUTPUT` expands the entry into one
+nets' data separate. `tests/export_ref.sh OUTPUT` expands the entry into one
 independent C file without Python; transfer and self-hosting tests use this
 full export rather than the short entry. `build_ref.sh` never rewrites the
 root source. The default product's shared networks remain in its separate P3
@@ -163,23 +163,23 @@ build a replacement or assert cross-platform release readiness. CI only re-runs 
 
 > **Shell = inferencer + executor + model data.**
 
-The default model product compiles through a **seven-stage byte-stream pipeline**
+The default model product compiles through a **seven-stream byte pipeline**
 (below). The **classic seed/reference (decision-network instance)** is a
 separate route: the walker, symbol table, relocation arithmetic and image
-writers are ordinary code. Its fact stages use cube networks at ask points,
+writers are ordinary code. Its fact nets use cube networks at ask points,
 with one kernel for all of them (`embed -> gemv -> ReLU -> gemv -> argmax`,
 integers only).
 
 ### Byte-stream pipeline (network-compiler instance)
 
-The default model product runs compilation as **seven byte-stream stages**.
-Each stage is a constructed integer threshold network driven by one generic
-executor. Stage boundaries are the I/O contract below (aligned with Paper A
+The default model product runs compilation as **seven stream-stages**.
+Each stream-stage is a constructed integer threshold network driven by one generic
+executor. Stream-stage boundaries are the I/O contract below (aligned with Paper A
 §4.2 in [research/unisacc-paper.en.md](research/unisacc-paper.en.md)). Tests
 and model keys should stop at these edges; this is not the same table as the
-eighteen classic decision stages later in this section.
+eighteen classic decision nets later in this section.
 
-| stage | input → output | role |
+| stream | input → output | role |
 |---|---|---|
 | preprocess | source bytes → preprocessed text | line continuation, comments, directives, macros, conditionals, includes |
 | lex | preprocessed text → typed token stream | keywords, identifiers, operators, literals, longest match |
@@ -190,11 +190,11 @@ eighteen classic decision stages later in this section.
 | encode + image | target ops → ELF / Mach-O / PE (or in-memory image) | encoding, branches, reloc, headers, Mach-O ad-hoc signature |
 
 `tape` is the target-independent IR (fixed register set + op vocabulary). The
-eighteen-stage table below is the **decision-network / classic-reference**
+eighteen-net table below is the **decision-network / classic-reference**
 instance (finite key → class at ask points). It does **not** replace the
-seven-stage byte-stream contract above.
+seven-stream byte-pipeline contract above.
 
-### Decision-network stages (classic-reference instance)
+### Decision nets (classic-reference instance)
 
 <!-- stages:begin -->
 | stage | key | out | keys | units |
@@ -230,7 +230,7 @@ gold decision tables (`weights/gold/*.tsv` is the tables as data): `W1` in
 {0,1}, `b1` recoverable from `W1`, `W2` small powers of two. The hidden
 activation is always 0 or 1, so inference has no multiply and no float.
 
-**Verification is exhaustive, not statistical.** Each stage is a total
+**Verification is exhaustive, not statistical.** Each net is a total
 function on a finite domain, so "the net equals the table" is decided by
 enumerating every key (the total is in the table above). That proves the net
 equals the *table*; whether the table is right about C is checked separately,
@@ -279,14 +279,14 @@ in a twentieth of a second, and the SGD control arm lives in
 | `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `selfhost` | `unisacc` built two ways agrees with the Python front end |
-| `stages` | every decision stage the Python front end asks a net about, the C front end asks too — the only suite that can see a hand-written rule that happens to agree with the table |
+| `stages` | every decision net the Python front end asks, the C front end asks too — the only suite that can see a hand-written rule that happens to agree with the table |
 | `selfgap` | how much C `unisacc`'s own front end still refuses that the Python one accepts — a ratchet, because that gap was growing unmeasured |
 | `multi` | two translation units compiled into one program, against `cc a.c b.c`.  Both ORDERS are run (`m1 m2` and `m2 m1`), because a file-scope `static` used to be registered when its definition was reached, so a header whose first function calls one defined below it spelled the call without its unit suffix and only the order that reached the definition first worked.  `tests/multi/fwd1.c` and `fwd2.c` are that case on its own, and `static1.c`/`static2.c` are two units with same-named statics that must NOT merge |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
 | `fb12-multi` | the fixture DIRECTORY suite, `tests/fb12/*/` through `tests/fb12multi.sh`, one case per real-world defect (23 miniz round trip, 27 signature pool, 28 multi-unit static declarator, 30 label naming, 34 arm64 fallback, 35/36 `__has_feature`, 22 multiple `-I`, 24 nested quoted include).  It runs in the gate's `--com` block only: each fixture needs an executable compiler, and the fixtures' expected values come from the host `cc` |
 | `closure` | the image `unisacc -b` writes is byte-identical to the Python back end's, for every probe on all six targets (this is a check of the C back end against the seed, not a proof of C semantics) |
 | `nativeboot` | `unisacc` builds itself and the result rebuilds itself to the same bytes — no Python anywhere |
-| `ablate` | each stage's answer is rotated to a wrong one: an image must change, or the compile must be refused — asking a net is not the same as obeying it |
+| `ablate` | each net's answer is rotated to a wrong one: an image must change, or the compile must be refused — asking a net is not the same as obeying it |
 | `run` | `unisacc -run` compiles a file and runs it in memory, against the system `cc` |
 | `cli` | the compiler as a tool, from a scratch directory: built-in headers, `-I`, `-D`, shebang, exit status |
 | `ccparity` | unisacc next to `cc -std=c99` as a user sees it: a.out, `-o`, exit status, stderr, files left after a failed compile, `-E`/`-D`/`-U`/`-I`, `-Werror`, and the documented `-c` difference |
@@ -419,10 +419,10 @@ The seven-stream / eighteen-network contracts, seal inventory and verifiable
 progress are in [PRD: pipeline design](prd.md#flow-net-contracts).
 
 The decision-network table above describes classic finite fact decisions; the
-seven-stage byte-stream contract is in the same section. Current whole-stage
+seven-stream byte-pipeline contract is in the same section. Current whole-stream
 networks and their limits are documented in
 [the pipeline design](prd.md#pipeline-design). Exhaustive network/table equality
-is distinct from C semantics, stage compatibility, platform execution and
+is distinct from C semantics, stream-stage compatibility, platform execution and
 package/container self-construction. Classical no-Python self-hosting and
 fixed-package model-driver self-hosting retain their separate evidence scopes.
 

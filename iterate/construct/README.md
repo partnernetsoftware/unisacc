@@ -26,32 +26,32 @@ it occurs:
 `check.sh [ua]` runs the whole comparison. Run it from the repo root. Every step
 has an alarm.
 
-### Selecting stages, and batches (2026-09-25)
+### Selecting nets, and batches (2026-09-25)
 
 A full run is ~32 s; the ceiling for one run is 60 s. So check.sh can run a
 subset, and can run the whole list as bounded batches.
 
-- **Stage list.** One table, `TABLE`, at the top of check.sh: stage name,
+- **Net list.** One table, `TABLE`, at the top of check.sh: net name,
   UNS2 blob tag (prec and reloc share `single`), whether it has a trace, and
-  whether it has invariant negatives (reloc has none). Every per-stage loop
+  whether it has invariant negatives (reloc has none). Every per-net loop
   (dump/UBSan, UNS2, trace, invariant negatives) is derived from it. To add a
-  stage, add one row there.
-- **Default** (neither `STAGES` nor `GLOBAL` set): every stage and every
+  net, add one row there.
+- **Default** (neither `STAGES` nor `GLOBAL` set): every net and every
   global check, the same output as before, plus `summary:` lines.
-- **`STAGES="peep type"`** runs those stages only. `all` means every stage.
-  The pseudo-stage `global` turns on the checks that belong to no stage:
+- **`STAGES="peep type"`** runs those nets only. `all` means every net.
+  The pseudo-net `global` turns on the checks that belong to no net:
   the qset `-Q` self-test, reader negatives, 63-key capacity positive, and
   the capacity, raw-key, field-group and class-count negatives, and (abi
   steps 1-4) the sum self-test and the rule, head and candidate positives
   and negatives (`sum capr caprn caph caphn capk capkn`). `GLOBAL=1/0`
   forces them on or off. Setting either variable makes the selection
   explicit, so `GLOBAL=1` alone runs the global checks only.
-- **Fails with exit 2**: an empty selection (`STAGES=`), an unknown stage,
+- **Fails with exit 2**: an empty selection (`STAGES=`), an unknown net,
   or any selection that checks nothing (`GLOBAL=0` alone,
   `STAGES=global GLOBAL=0`).
 - **Receipts.** Every individual check appends a pass mark at the point it
   succeeds (`P "s peep uns2 cc"`), and only there. `need()` lists the marks
-  each item requires: a stage needs dump cc+ua, UBSan, UNS2 cc+ua, shipped
+  each item requires: a net needs dump cc+ua, UBSan, UNS2 cc+ua, shipped
   section cc+ua and round trip cc+ua, plus its trace and its invariant
   negatives (bias, act x cc, ua) when `TABLE` says it has them; each global
   check needs all of its own builds and cases. An item gets a receipt only
@@ -59,7 +59,7 @@ subset, and can run the whole list as bounded batches.
   deleted leaves its item without one. A run ends with the receipt list,
   one line per item that PASSED and nothing else: `receipt stage peep`,
   `receipt global capq`.
-- **Summary.** Built from the marks, not from the selection: per stage and
+- **Summary.** Built from the marks, not from the selection: per net and
   per global check `attempted, passed`, `attempted, FAILED, no receipt;
   missing [...]` (naming the missing marks), or `skipped`, then
   `summary: attempted N, passed N, failed N, skipped N`. An attempted item
@@ -68,24 +68,24 @@ subset, and can run the whole list as bounded batches.
 - **`check.sh --batches [ua]`** runs `BATCHES` (a `stages|global` row per
   batch). Each batch is a separate check.sh run, bounded by `alarm 60`, and
   its time is printed. Before it starts, it checks that the PLANNED batches
-  together hold every stage in `TABLE` exactly once and the global checks
+  together hold every net in `TABLE` exactly once and the global checks
   exactly once. That is a plan; the result is the receipts. A batch with
   rc != 0 stops the run at once. Otherwise its `receipt` lines must equal
   exactly what that batch requested, or `batch N: RECEIPTS WRONG (rc 0):
   missing [..] extra [..] duplicate [..]` fails the run; at the end the
-  receipts of all batches together must be every stage of `TABLE` plus
+  receipts of all batches together must be every net of `TABLE` plus
   every global check, each exactly once (`batches: receipt union = all 15
   stages + 14 global checks, each exactly once (29 receipts)`). The current batches and their times:
   `prec reloc tyinfo regmap pp lex scope`+global 3.9 s,
   `pfconv binsel enc opinfo peep parse` 4.0 s, `type` 27.9 s. type on its
-  own takes ~28 s, so the next heavy stage should go in a new batch.
-  Since abi step 5 there are four batches: 5.3 s (7 stages + global),
+  own takes ~28 s, so the next heavy net should go in a new batch.
+  Since abi step 5 there are four batches: 5.3 s (7 nets + global),
   4.0 s, 28.0 s (type), 12.8 s (abi).
 
 
 ## Status (2026-10-02)
 
-The 2026-09-25 development log (what was proven per stage, capacity steps, audits) moved to
+The 2026-09-25 development log (what was proven per net, capacity steps, audits) moved to
 [archive/iterate/construct-log-20260925.md](../../archive/iterate/construct-log-20260925.md).
 It no longer passes on the current tables: research/r20-c99-seed-a-audit.md records `abi` rules over 96,
 an `isel` class count of 107 and a `combo` difference. The C99 seed constructor of archive/plans/v0.0.21.md (item 0)
