@@ -8,6 +8,12 @@
 # On macOS the whole gate runs inside Terminal.app (tests/term.sh), where
 # freshly written binaries are not held for the first-launch scan.
 set -u
+# H1 host recipe (0.0.43): a relative MODEL_COM names a file from the caller's directory, but jobs run from $R and
+# some hand it to tools that run elsewhere (resourceflow), so it is made absolute once, before the cd.
+case ${MODEL_COM:-} in
+    ''|/*) ;;
+    *) [ -e "$MODEL_COM" ] && MODEL_COM=$(cd "$(dirname "$MODEL_COM")" && pwd)/$(basename "$MODEL_COM") && export MODEL_COM;;
+esac
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 # F4 made the product driver default to 8 unit workers; gate jobs run several at once,
 # so each job gets 2 (R4 budget: outer jobs x UNISA_JOBS).  The csih F4 benchmark keeps 8.
@@ -230,7 +236,7 @@ job exittable python3 ./tests/exittablecheck.py
 job gatequeue-symlink python3 ./tests/gatequeuesymlinkcheck.py   # tracked-symlink input identity (120000, never followed)
 job h1source python3 ./tests/h1sourcecheck.py   # 0.0.40 (机房主任 22:45 A/C): build_candidate settles its H1 table before any write or make
 job attemptchain python3 ./tests/attemptchaincheck.py   # 0.0.39 WF5: offline attempt-chain replay
-job c99precheck python3 ./tests/c99precheckcheck.py   # 0.0.39 WF1: dynamic-route PRECHECK parsing and shard map
+job c99precheck env LC_ALL=C python3 ./tests/c99precheckcheck.py   # 0.0.39 WF1: dynamic-route PRECHECK parsing and shard map (LC_ALL=C, H1: the bash glob order it compares against byte-sorted shards is the locale's collation)
 job rulingwait python3 ./tests/rulingwaitcheck.py   # 0.0.39 WF4: ruling request ledger and waits
 job namedrefuse ./tests/namedrefusecheck.sh   # 0.0.39 COV1: named refusals exact at every -O, REVIVED fails
 job identity-product-negative python3 ./tests/identitynegativecheck.py product --candidate "${MODEL_COM:-./unisacc.com}"
@@ -859,7 +865,7 @@ job lib-data python3 ./tests/libunisaccdatacheck.py --package "${MODEL_COM:-./un
 job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-latebind-W tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/liblatebindWcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # W: private runtime + frozen r4 six snapshots; product is model/runner input
 job latebind-p6 tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/latebindp6check.cx -- "${MODEL_COM:-./unisacc.com}" tests/seals/latebind-p6-baseline   # P6: untyped library-mode baseline (26 WBASE1 snapshots, public-API observers); lnx/x86_64 else UNVERIFIED 77
-job resourceflow tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/resourceflowcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # S1: explicit-ledger strict resource flow on the product (C -> Tape); RF-LEGACY needs a base product and is not run here
+job resourceflow tests/bound 58 sh "${MODEL_COM:-$R/unisacc.com}" -run tests/resourceflowcheck.cx -- "${MODEL_COM:-$R/unisacc.com}"   # (H1: the product path must be absolute) S1: explicit-ledger strict resource flow on the product (C -> Tape); RF-LEGACY needs a base product and is not run here
 job include-key tests/bound 58 sh ./tests/includekeycheck.sh "${MODEL_COM:-./unisacc.com}"   # S2 prerequisite: sim.py and the product request the same include keys (product capture vs reference)
 job lib-resolver-host tests/bound 58 sh ./unisacc.com -run tests/libraryresolverhostcheck.cx   # (.cx port, 2026-10-23) R10: private native resolver candidate enumeration; owned handles close once, in reverse order
 job lib-word64 python3 ./tests/librarywordcheck.py --native-only
