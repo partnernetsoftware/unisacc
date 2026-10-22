@@ -1,0 +1,418 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libraryorderedcarriercheck.cx -- tests/libraryorderedcarriercheck.py in C (2026-10-23, the owner's direction: move
+   the toolchain off Python).  Mechanical model certificate seam; the manually supplied fixture is not ABI proof.
+   usage: sh ./unisacc.com -run tests/libraryorderedcarriercheck.cx [-- --out DIR]
+   As the Python checker did:
+     - OUT is --out DIR (pathlib-normalised, created with parents) or a fresh r10-ordered-host-XXXXXX directory under
+       TMPDIR/TEMP/TMP (else /tmp); every exec/c/*.h is copied (content and mode) into OUT/headers, and
+       tests/libraryorderedcarriercheck.c into OUT/probe.c;
+     - the USLNCAR1 certificate cases are built with the USLSIG3 wire helpers of tests/librarysignature3check.py
+       (U, d, entry, agg, wire; reimplemented here byte for byte): the good certificate (expect accept), each of its
+       proper prefixes, and six mutations (trailer, target, carrier name, carrier layout, carrier support byte,
+       original support byte), all expect reject; they go to OUT/cases;
+     - `cc -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -I OUT/headers OUT/probe.c -lffi -o
+       OUT/probe`, then `OUT/probe OUT/cases` (the second only when the first exits 0), each with a 20 s limit, stdout
+       and stderr captured as text (UTF-8, universal newlines);
+     - evidence {status, cases, commands, headers (sha256 per OUT/headers/*.h in directory order), scope} goes to
+       OUT/evidence.json (indent 2, ensure_ascii) and, compact, to stdout; rc 0 when passed, else 1.
+   What Python raised (a missing program, a step past 20 s, undecodable child output, an unwritable OUT) is one
+   `libraryorderedcarriercheck: ...` line on stderr, rc 1, where Python printed a traceback.  Argument errors follow
+   argparse (usage on stderr, rc 2) with this file's name as prog.  Limit of the port: copy2's timestamp copy is not
+   carried (no utime in the prelude); nothing reads the copies' times. */
+
+#define PATHN 4096
+#define PROG "libraryorderedcarriercheck.cx"
+typedef unsigned long long u64;
+
+static void die(const char *what, const char *detail) {
+    fflush(stdout);
+    fprintf(stderr, "libraryorderedcarriercheck: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    fflush(stderr); exit(1);
+}
+
+/* ---- byte buffers --------------------------------------------------------------------------------------------- */
+typedef struct { unsigned char *p; size_t n, cap; } B;
+static void bput(B *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *t;
+        while (c < b->n + n + 1) c *= 2;
+        t = realloc(b->p, c); if (!t) die("out of memory", 0);
+        b->p = t; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void b1(B *b, int c) { unsigned char x = (unsigned char)c; bput(b, &x, 1); }
+static void bs(B *b, const char *s) { bput(b, s, strlen(s)); }
+static void bb(B *b, const B *s) { bput(b, s->p, s->n); }
+/* U(x) = struct.pack('<Q', x) */
+static void bU(B *b, u64 x) { int i; for (i = 0; i < 8; i++) b1(b, (int)((x >> (8 * i)) & 0xff)); }
+static B bnew(void) { B b = {0, 0, 0}; bput(&b, "", 0); return b; }
+static B bcopy(const B *s) { B b = bnew(); bb(&b, s); return b; }
+
+/* ---- tests/librarysignature3check.py wire helpers (only the arguments this checker uses) ---------------------- */
+/* d(kind, width, alignment, tag=tag, payload=payload, version=version); depth/rank/fmt/natural/flags/known/origin 0 */
+static B D(int kind, int width, int alignment, int tag, const B *payload, int version) {
+    B o = bnew(); u64 w[7]; int i;
+    w[0] = 0; w[1] = 17; w[2] = 23; w[3] = (u64)kind; w[4] = (u64)width; w[5] = 0; w[6] = (u64)alignment;
+    for (i = 0; i < 7; i++) bU(&o, w[i]);
+    if (version == 1) { o.n = 48; o.p[48] = 0; return o; }
+    if (version == 3) { b1(&o, 0); b1(&o, 0); bU(&o, 0); b1(&o, 0); b1(&o, 0); b1(&o, 0); }
+    b1(&o, tag);
+    bU(&o, payload ? (u64)payload->n : 0);
+    if (payload) bb(&o, payload);
+    return o;
+}
+static B dflt(int version) { return D(1, 4, 4, 0, 0, version); }
+/* entry(i, k, child, off, bo, bw, storage=4, align=4) */
+static B ENTRY(u64 i, int k, const B *child, u64 off, u64 bo, u64 bw) {
+    B o = bnew();
+    bU(&o, i); b1(&o, k); bU(&o, 4); bU(&o, off); bU(&o, bo); bU(&o, bw); bU(&o, 4); bb(&o, child);
+    return o;
+}
+/* agg(entries, width=4, tag=1) */
+static B AGG(B *entries, int n) {
+    B pay = bnew(), o; int i;
+    bU(&pay, (u64)n); for (i = 0; i < n; i++) bb(&pay, &entries[i]);
+    o = D(5, 4, 4, 1, &pay, 3); free(pay.p);
+    return o;
+}
+/* wire(name, result, args, support, version) */
+static B WIRE(const char *name, const B *result, const B *args, int nargs, int support, int version) {
+    B o = bnew(); char hd[32]; int i;
+    snprintf(hd, sizeof hd, "USLSIG%d\n", version); bs(&o, hd);
+    bU(&o, 1); bU(&o, (u64)strlen(name)); bs(&o, name);
+    b1(&o, 0); b1(&o, 1); b1(&o, 0); if (version >= 2) b1(&o, 0);
+    bU(&o, (u64)nargs); bb(&o, result); bU(&o, (u64)nargs);
+    for (i = 0; i < nargs; i++) bb(&o, &args[i]);
+    b1(&o, support);
+    return o;
+}
+/* cert(original, carrier, target) */
+static B CERT(const B *original, const B *carrier, const char *target) {
+    B o = bnew();
+    bs(&o, "USLNCAR1\n");
+    bU(&o, (u64)strlen(target)); bs(&o, target);
+    bU(&o, (u64)original->n); bb(&o, original);
+    bU(&o, (u64)carrier->n); bb(&o, carrier);
+    return o;
+}
+
+/* ---- paths ---------------------------------------------------------------------------------------------------- */
+/* str(pathlib.PurePosixPath(s)): '' -> '.', repeated '/' collapsed (exactly two leading kept), '.' parts dropped,
+   trailing '/' dropped */
+static void pnorm(const char *s, char *out, size_t cap) {
+    B o = bnew(); const char *p = s; int lead = 0;
+    if (s[0] == '/') { lead = (s[1] == '/' && s[2] != '/') ? 2 : 1; }
+    while (*p == '/') p++;
+    while (*p) {
+        const char *q = p; size_t n;
+        while (*q && *q != '/') q++;
+        n = (size_t)(q - p);
+        if (!(n == 1 && p[0] == '.')) {
+            if (o.n) b1(&o, '/');
+            bput(&o, p, n);
+        }
+        p = q; while (*p == '/') p++;
+    }
+    if (lead == 2) snprintf(out, cap, "//%s", (char *)o.p);
+    else if (lead == 1) snprintf(out, cap, "/%s", (char *)o.p);
+    else snprintf(out, cap, "%s", o.n ? (char *)o.p : ".");
+    free(o.p);
+}
+/* path / name, as pathlib joins ('.' / x is x) */
+static void pjoin(char *out, size_t cap, const char *dir, const char *name) {
+    if (!strcmp(dir, ".")) snprintf(out, cap, "%s", name);
+    else if (dir[strlen(dir) - 1] == '/') snprintf(out, cap, "%s%s", dir, name);
+    else snprintf(out, cap, "%s/%s", dir, name);
+}
+static int isdir(const char *p) { struct stat s; return stat(p, &s) == 0 && S_ISDIR(s.st_mode); }
+/* Path.mkdir(parents=True, exist_ok=True) */
+static void mkdirs(const char *p) {
+    char t[PATHN]; size_t i, n;
+    snprintf(t, sizeof t, "%s", p); n = strlen(t);
+    for (i = 1; i <= n; i++) {
+        if (t[i] == '/' || t[i] == 0) {
+            char c = t[i]; t[i] = 0;
+            if (!isdir(t) && mkdir(t, 0777) != 0 && !isdir(t)) die("cannot create directory", t);
+            t[i] = c;
+        }
+    }
+}
+/* shutil.copy2 (content and permission bits) */
+static void copy2(const char *src, const char *dst) {
+    size_t n; char *b = cx_read(src, &n); struct stat s;
+    if (!b) die("FileNotFoundError", src);
+    if (cx_write(dst, b, n)) die("cannot write", dst);
+    free(b);
+    if (stat(src, &s) == 0) chmod(dst, s.st_mode & 07777);
+}
+static int endswith_h(const char *name) { size_t n = strlen(name); return n >= 2 && !strcmp(name + n - 2, ".h"); }
+
+/* ---- JSON (json.dumps defaults: ensure_ascii, ', ' and ': ') ------------------------------------------------- */
+static void jhex4(B *o, unsigned v) { char t[8]; snprintf(t, sizeof t, "\\u%04x", v & 0xffff); bs(o, t); }
+/* decode UTF-8; an invalid byte is an error (strict) or U+DC80+byte (surrogateescape); returns 0 when strict fails */
+static int jstr(B *o, const unsigned char *s, size_t n, int strict) {
+    size_t i = 0;
+    b1(o, '"');
+    while (i < n) {
+        unsigned c = s[i], cp = 0; size_t k = 0, j;
+        if (c < 0x80) {
+            if (c == '"') bs(o, "\\\""); else if (c == '\\') bs(o, "\\\\");
+            else if (c == '\n') bs(o, "\\n"); else if (c == '\r') bs(o, "\\r"); else if (c == '\t') bs(o, "\\t");
+            else if (c == '\b') bs(o, "\\b"); else if (c == '\f') bs(o, "\\f");
+            else if (c < 0x20 || c == 0x7f) jhex4(o, c);
+            else b1(o, (int)c);
+            i++; continue;
+        }
+        if (c >= 0xc2 && c <= 0xdf) { k = 1; cp = c & 0x1f; }
+        else if (c >= 0xe0 && c <= 0xef) { k = 2; cp = c & 0x0f; }
+        else if (c >= 0xf0 && c <= 0xf4) { k = 3; cp = c & 0x07; }
+        if (k && i + k < n + 0 + 1 && i + k <= n - 0) {
+            int ok = i + k < n + 1;
+            for (j = 1; ok && j <= k; j++) { if (i + j >= n || (s[i + j] & 0xc0) != 0x80) ok = 0; else cp = (cp << 6) | (s[i + j] & 0x3f); }
+            if (ok && k == 2 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff))) ok = 0;
+            if (ok && k == 3 && (cp < 0x10000 || cp > 0x10ffff)) ok = 0;
+            if (ok) {
+                if (cp >= 0x10000) { cp -= 0x10000; jhex4(o, 0xd800 + (cp >> 10)); jhex4(o, 0xdc00 + (cp & 0x3ff)); }
+                else jhex4(o, cp);
+                i += k + 1; continue;
+            }
+        }
+        if (strict) return 0;
+        jhex4(o, 0xdc00 + c); i++;
+    }
+    b1(o, '"');
+    return 1;
+}
+static void jpath(B *o, const char *s) { jstr(o, (const unsigned char *)s, strlen(s), 0); }
+
+/* ---- processes: subprocess.run(cmd, capture_output=True, text=True, timeout=20) -------------------------------- */
+typedef struct { int rc; B out, err; } Res;
+static char TMPD[PATHN];
+static void tmpdir(void) {
+    const char *v[3] = {"TMPDIR", "TEMP", "TMP"}; int i; const char *e;
+    for (i = 0; i < 3; i++) if ((e = getenv(v[i])) && *e && isdir(e)) { snprintf(TMPD, sizeof TMPD, "%s", e); return; }
+    snprintf(TMPD, sizeof TMPD, "/tmp");
+}
+/* text=True: strict UTF-8 (checked when the JSON is built), "\r\n" and "\r" become "\n" */
+static B slurp_text(const char *path) {
+    size_t n, i; char *b = cx_read(path, &n); B o = bnew();
+    if (!b) die("cannot read child output", path);
+    for (i = 0; i < n; i++) {
+        if (b[i] == '\r') { b1(&o, '\n'); if (i + 1 < n && b[i + 1] == '\n') i++; }
+        else b1(&o, b[i]);
+    }
+    free(b); return o;
+}
+static Res run(char *const argv[]) {
+    Res r; char po[PATHN], pe[PATHN], px[PATHN]; int st = 0, fdo, fde, fdx; pid_t pid, w;
+    long ticks = 20L * 100; size_t xn; char *xb;
+    snprintf(po, sizeof po, "%s/lockXXXXXX", TMPD);
+    snprintf(pe, sizeof pe, "%s/lockXXXXXX", TMPD);
+    snprintf(px, sizeof px, "%s/lockXXXXXX", TMPD);
+    fdo = mkstemp(po); fde = mkstemp(pe); fdx = mkstemp(px);
+    if (fdo < 0 || fde < 0 || fdx < 0) die("cannot create a temporary file in", TMPD);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("fork failed", argv[0]);
+    if (pid == 0) {
+        dup2(fdo, 1); dup2(fde, 2); close(fdo); close(fde);
+        execvp(argv[0], argv);
+        if (write(fdx, "x", 1) != 1) _exit(126);
+        _exit(127);
+    }
+    close(fdo); close(fde); close(fdx);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) die("waitpid failed", argv[0]);
+        if (ticks-- <= 0) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            unlink(po); unlink(pe); unlink(px);
+            die("subprocess.TimeoutExpired after 20 s", argv[0]);
+        }
+        usleep(10000);
+    }
+    xb = cx_read(px, &xn);
+    if (xb && xn) { unlink(po); unlink(pe); unlink(px); die("FileNotFoundError: cannot execute", argv[0]); }
+    free(xb);
+    r.rc = WIFEXITED(st) ? WEXITSTATUS(st) : -(st & 0x7f);
+    r.out = slurp_text(po); r.err = slurp_text(pe);
+    unlink(po); unlink(pe); unlink(px);
+    return r;
+}
+
+/* ---- main ------------------------------------------------------------------------------------------------------ */
+static void usage(FILE *f) { fprintf(f, "usage: %s [-h] [--out OUT]\n", PROG); }
+static void argerr(const char *msg) { usage(stderr); fprintf(stderr, "%s: error: %s\n", PROG, msg); exit(2); }
+static int isprefix(const char *a, const char *full) { size_t n = strlen(a); return n >= 3 && !strncmp(a, full, n); }
+
+#define NCMD 2
+int main(int argc, char **argv) {
+    char here[PATHN], ROOT[PATHN], OUT[PATHN], H[PATHN], p[PATHN], q[PATHN], *slash;
+    const char *outarg = 0; int i, ncases, ncmd = 0, passed; B unrec = bnew();
+    B ints[3], ents[3], t, o, c, d2, d2a[1], d8, d8a[1], tl[1], cw, good, cases, *cb;
+    int *cw_want; int ncb;
+    Res res[NCMD]; char *cmds[NCMD][20]; int cmdn[NCMD];
+    B ev, ec; DIR *dd; struct dirent *e;
+    char **hn = 0; char (*hx)[65] = 0; int nh = 0, ch = 0;
+
+    /* argparse: [-h] [--out OUT] */
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-h") || isprefix(a, "--help")) {
+            usage(stdout);
+            printf("\noptions:\n  -h, --help  show this help message and exit\n  --out OUT\n");
+            return 0;
+        }
+        if (!strncmp(a, "--", 2) && strchr(a, '=') && isprefix(a, "--out=") == 0) {
+            const char *eq = strchr(a, '='); char k[64]; size_t kn = (size_t)(eq - a);
+            if (kn < sizeof k) { memcpy(k, a, kn); k[kn] = 0; if (isprefix(k, "--out")) { outarg = eq + 1; continue; } }
+        }
+        if (!strncmp(a, "--out=", 6)) { outarg = a + 6; continue; }
+        if (isprefix(a, "--out")) {
+            if (i + 1 >= argc || (argv[i + 1][0] == '-' && argv[i + 1][1])) argerr("argument --out: expected one argument");
+            outarg = argv[++i]; continue;
+        }
+        if (unrec.n) b1(&unrec, ' ');
+        bs(&unrec, a);
+    }
+    if (unrec.n) { char m[PATHN + 64]; snprintf(m, sizeof m, "unrecognized arguments: %s", (char *)unrec.p); argerr(m); }
+    free(unrec.p);
+    tmpdir();
+
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char tt[PATHN]; snprintf(tt, sizeof tt, "%s/..", here); if (!realpath(tt, ROOT)) die("cannot resolve the repository root", tt); }
+
+    if (outarg) pnorm(outarg, OUT, sizeof OUT);
+    else {
+        char tt[PATHN]; snprintf(tt, sizeof tt, "%s/r10-ordered-host-XXXXXX", TMPD);
+        if (!mkdtemp(tt)) die("cannot create a temporary directory in", TMPD);
+        if (tt[0] != '/') { char cwd[PATHN], j[PATHN]; if (!getcwd(cwd, sizeof cwd)) die("getcwd failed", 0); snprintf(j, sizeof j, "%s/%s", cwd, tt); pnorm(j, OUT, sizeof OUT); }
+        else pnorm(tt, OUT, sizeof OUT);
+    }
+    mkdirs(OUT);
+    pjoin(H, sizeof H, OUT, "headers");
+    if (!isdir(H) && mkdir(H, 0777) != 0) die("cannot create directory", H);
+
+    /* exec/c/*.h -> OUT/headers, tests/libraryorderedcarriercheck.c -> OUT/probe.c */
+    snprintf(p, sizeof p, "%s/exec/c", ROOT);
+    dd = opendir(p);
+    if (dd) {
+        while ((e = readdir(dd))) {
+            char s[PATHN];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !endswith_h(e->d_name)) continue;
+            snprintf(s, sizeof s, "%s/%s", p, e->d_name); pjoin(q, sizeof q, H, e->d_name); copy2(s, q);
+        }
+        closedir(dd);
+    }
+    snprintf(p, sizeof p, "%s/tests/libraryorderedcarriercheck.c", ROOT); pjoin(q, sizeof q, OUT, "probe.c"); copy2(p, q);
+
+    /* t = agg([entry(0,1,d(),bw=3), entry(1,2,d(),bo=3,bw=5), entry(2,3,d(),off=4)]) */
+    for (i = 0; i < 3; i++) ints[i] = dflt(3);
+    ents[0] = ENTRY(0, 1, &ints[0], 0, 0, 3);
+    ents[1] = ENTRY(1, 2, &ints[1], 0, 3, 5);
+    ents[2] = ENTRY(2, 3, &ints[2], 4, 0, 0);
+    t = AGG(ents, 3);
+    tl[0] = t;
+    o = WIRE("round", &t, tl, 1, 0, 3);
+    d2 = dflt(2); d2a[0] = d2;
+    c = WIRE("round", &d2, d2a, 1, 1, 2);
+    good = CERT(&o, &c, "osx/arm64");
+    ncb = 1 + (int)good.n + 6;
+    cb = malloc(sizeof(B) * (size_t)ncb); cw_want = malloc(sizeof(int) * (size_t)ncb);
+    if (!cb || !cw_want) die("out of memory", 0);
+    ncases = 0;
+    cb[ncases] = bcopy(&good); cw_want[ncases++] = 0;
+    for (i = 0; i < (int)good.n; i++) { B x = bnew(); bput(&x, good.p, (size_t)i); cb[ncases] = x; cw_want[ncases++] = 1; }
+    { B x = bcopy(&good); b1(&x, 'x'); cb[ncases] = x; cw_want[ncases++] = 1; }
+    cb[ncases] = CERT(&o, &c, "lnx/arm64"); cw_want[ncases++] = 1;
+    cw = WIRE("other", &d2, d2a, 1, 1, 2); cb[ncases] = CERT(&o, &cw, "osx/arm64"); cw_want[ncases++] = 1;
+    d8 = D(1, 8, 8, 0, 0, 2); d8a[0] = d8;
+    cw = WIRE("round", &d8, d8a, 1, 1, 2); cb[ncases] = CERT(&o, &cw, "osx/arm64"); cw_want[ncases++] = 1;
+    cw = bcopy(&c); cw.p[cw.n - 1] = 0; cb[ncases] = CERT(&o, &cw, "osx/arm64"); cw_want[ncases++] = 1;
+    { B ow = bcopy(&o); ow.p[ow.n - 1] = 1; cb[ncases] = CERT(&ow, &c, "osx/arm64"); cw_want[ncases++] = 1; }
+    cases = bnew(); bU(&cases, (u64)ncases);
+    for (i = 0; i < ncases; i++) { bU(&cases, (u64)cw_want[i]); bU(&cases, (u64)cb[i].n); bb(&cases, &cb[i]); }
+    pjoin(q, sizeof q, OUT, "cases");
+    if (cx_write(q, cases.p, cases.n)) die("cannot write", q);
+
+    /* the two commands; the second only after the first exits 0 */
+    {
+        static char hs[PATHN], pc[PATHN], pr[PATHN], cs[PATHN];
+        snprintf(hs, sizeof hs, "%s", H); pjoin(pc, sizeof pc, OUT, "probe.c"); pjoin(pr, sizeof pr, OUT, "probe"); pjoin(cs, sizeof cs, OUT, "cases");
+        { char *v[] = {"cc", "-std=c11", "-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", hs, pc, "-lffi", "-o", pr, 0};
+          for (i = 0; v[i]; i++) cmds[0][i] = v[i]; cmds[0][i] = 0; cmdn[0] = i; }
+        cmds[1][0] = pr; cmds[1][1] = cs; cmds[1][2] = 0; cmdn[1] = 2;
+    }
+    for (ncmd = 0; ncmd < NCMD; ) {
+        res[ncmd] = run(cmds[ncmd]); ncmd++;
+        if (res[ncmd - 1].rc) break;
+    }
+    passed = ncmd == 2 && !res[ncmd - 1].rc;
+
+    /* headers = {p.name: sha256 for p in h.glob('*.h')}, directory order */
+    dd = opendir(H);
+    if (!dd) die("cannot list", H);
+    while ((e = readdir(dd))) {
+        size_t n; char *b;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !endswith_h(e->d_name)) continue;
+        if (nh == ch) {
+            ch = ch ? 2 * ch : 64;
+            hn = realloc(hn, sizeof(char *) * (size_t)ch); hx = realloc(hx, 65 * (size_t)ch);
+            if (!hn || !hx) die("out of memory", 0);
+        }
+        pjoin(q, sizeof q, H, e->d_name);
+        b = cx_read(q, &n); if (!b) die("cannot read", q);
+        hn[nh] = strdup(e->d_name); cx_sha256_hex(b, n, hx[nh]); free(b); nh++;
+    }
+    closedir(dd);
+
+    /* evidence: ev is indent=2, ec is compact */
+    ev = bnew(); ec = bnew();
+    {
+        char num[64]; int k, j;
+        bs(&ev, "{\n  \"status\": "); bs(&ec, "{\"status\": ");
+        bs(&ev, passed ? "\"passed\"" : "\"failed\""); bs(&ec, passed ? "\"passed\"" : "\"failed\"");
+        snprintf(num, sizeof num, "%d", ncases);
+        bs(&ev, ",\n  \"cases\": "); bs(&ev, num); bs(&ec, ", \"cases\": "); bs(&ec, num);
+        bs(&ev, ",\n  \"commands\": [\n"); bs(&ec, ", \"commands\": [");
+        for (k = 0; k < ncmd; k++) {
+            if (k) { bs(&ev, ",\n"); bs(&ec, ", "); }
+            bs(&ev, "    {\n      \"command\": [\n"); bs(&ec, "{\"command\": [");
+            for (j = 0; j < cmdn[k]; j++) {
+                if (j) { bs(&ev, ",\n"); bs(&ec, ", "); }
+                bs(&ev, "        "); jpath(&ev, cmds[k][j]); jpath(&ec, cmds[k][j]);
+            }
+            bs(&ev, "\n      ],\n      \"rc\": "); bs(&ec, "], \"rc\": ");
+            snprintf(num, sizeof num, "%d", res[k].rc); bs(&ev, num); bs(&ec, num);
+            bs(&ev, ",\n      \"stdout\": "); bs(&ec, ", \"stdout\": ");
+            if (!jstr(&ev, res[k].out.p, res[k].out.n, 1) || !jstr(&ec, res[k].out.p, res[k].out.n, 1)) die("UnicodeDecodeError: child stdout is not UTF-8", cmds[k][0]);
+            bs(&ev, ",\n      \"stderr\": "); bs(&ec, ", \"stderr\": ");
+            if (!jstr(&ev, res[k].err.p, res[k].err.n, 1) || !jstr(&ec, res[k].err.p, res[k].err.n, 1)) die("UnicodeDecodeError: child stderr is not UTF-8", cmds[k][0]);
+            bs(&ev, "\n    }"); bs(&ec, "}");
+        }
+        bs(&ev, "\n  ],\n  \"headers\": "); bs(&ec, "], \"headers\": ");
+        if (!nh) { bs(&ev, "{}"); bs(&ec, "{}"); }
+        else {
+            bs(&ev, "{\n"); bs(&ec, "{");
+            for (k = 0; k < nh; k++) {
+                if (k) { bs(&ev, ",\n"); bs(&ec, ", "); }
+                bs(&ev, "    "); jpath(&ev, hn[k]); jpath(&ec, hn[k]);
+                bs(&ev, ": \""); bs(&ev, hx[k]); b1(&ev, '"');
+                bs(&ec, ": \""); bs(&ec, hx[k]); b1(&ec, '"');
+            }
+            bs(&ev, "\n  }"); bs(&ec, "}");
+        }
+        bs(&ev, ",\n  \"scope\": \"internal mechanical certificate, not public ABI certification\"\n}\n");
+        bs(&ec, ", \"scope\": \"internal mechanical certificate, not public ABI certification\"}\n");
+    }
+    pjoin(q, sizeof q, OUT, "evidence.json");
+    if (cx_write(q, ev.p, ev.n)) die("cannot write", q);
+    fwrite(ec.p, 1, ec.n, stdout); fflush(stdout);
+    return passed ? 0 : 1;
+}

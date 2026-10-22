@@ -1,0 +1,146 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallablevarcheck.cx -- concrete variadic callable ABI tests; no model/public API success claim.  Ported from
+   tests/librarycallablevarcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarycallablevarcheck.cx   (arguments are ignored, as by the Python original)
+   Run from the repository root (ROOT is the working directory).  In a fresh temporary directory (TMPDIR, TEMP, TMP or
+   /tmp; prefix unisacc-callablevar-), for every architecture (arm64 and x86_64 on Darwin, else `uname -m`) and for
+   normal then sanitized: `cc -std=c11 -Wall -Wextra -Wno-unused-function -Wno-misleading-indentation -IROOT/exec/c
+   ROOT/tests/librarycallablevarcheck.c -lffi -o DIR/ARCH-normal|-asan` (+ -arch ARCH on Darwin, then -O2, or -O1 -g
+   -fsanitize=address,undefined -fno-omit-frame-pointer) is built and run, each under `tests/bound 20` with stdout and
+   stderr captured (an x86_64 run on Darwin goes through `arch -x86_64`).  Each pass prints
+   `ARCH normal|ASan/UBSan <the probe's stdout, stripped>`.
+   A step that exits nonzero ends the run with rc 1 and, on stderr, the final line of Python's traceback:
+   `AssertionError: (ARCH, SANITIZED, STDERR)` for a build, `AssertionError: (ARCH, SANITIZED, STDOUT, STDERR)` for a
+   run, the captured streams in Python's bytes repr.  The temporary directory is removed either way.
+   Include-free: everything used comes with the cx.h prelude. */
+
+static char ROOT[4096], TD[4200];
+
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char c[8192];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void die(const char *fmt, const char *a) {   /* what Python raised outside the assertions */
+    fflush(stdout); fprintf(stderr, fmt, a); fputc('\n', stderr);
+    if (TD[0]) rmtree(TD);
+    exit(1);
+}
+
+/* Python's repr() of a bytes object */
+static void repr_bytes(FILE *f, const unsigned char *b, size_t n) {
+    size_t i; int sq = 0, dq = 0; char q;
+    for (i = 0; i < n; i++) { if (b[i] == '\'') sq = 1; else if (b[i] == '"') dq = 1; }
+    q = (sq && !dq) ? '"' : '\'';
+    fputc('b', f); fputc(q, f);
+    for (i = 0; i < n; i++) {
+        unsigned c = b[i];
+        if (c == (unsigned char)q || c == '\\') { fputc('\\', f); fputc((int)c, f); }
+        else if (c == '\t') fputs("\\t", f);
+        else if (c == '\n') fputs("\\n", f);
+        else if (c == '\r') fputs("\\r", f);
+        else if (c < 0x20 || c >= 0x7f) fprintf(f, "\\x%02x", c);
+        else fputc((int)c, f);
+    }
+    fputc(q, f);
+}
+
+/* subprocess.run([ROOT/tests/bound, '20', *ARGS], capture_output=True): returncode (-N on signal N); the two
+   streams land in malloc'd buffers */
+static int run_capture(char **args, char **out, size_t *on, char **err, size_t *en) {
+    char *a[64], bound[4300], po[4300], pe[4300]; int k = 0, st = 0; pid_t pid;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    snprintf(po, sizeof po, "%s/.capture-stdout", TD);
+    snprintf(pe, sizeof pe, "%s/.capture-stderr", TD);
+    a[k++] = bound; a[k++] = "20";
+    while (*args && k < 63) a[k++] = *args++;
+    a[k] = 0;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("librarycallablevarcheck: fork failed for %s", bound);
+    if (pid == 0) {
+        if (!freopen(po, "wb", stdout) || !freopen(pe, "wb", stderr)) _exit(127);   /* onto descriptors 1 and 2 */
+        execvp(a[0], a); _exit(127);
+    }
+    if (waitpid(pid, &st, 0) != pid) die("librarycallablevarcheck: wait failed for %s", bound);
+    *on = *en = 0;
+    if (!(*out = cx_read(po, on))) die("librarycallablevarcheck: cannot read %s", po);
+    if (!(*err = cx_read(pe, en))) die("librarycallablevarcheck: cannot read %s", pe);
+    unlink(po); unlink(pe);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
+}
+
+/* uname FLAG, its first line; "" when uname cannot run */
+static char *uname_field(char *flag) {
+    char *a[] = { "uname", flag, 0 }, *out = 0; size_t n = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+
+static int ws(unsigned char c) { return c == ' ' || (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x1F); }
+
+int main(void) {
+    const char *tmp, *arches[2]; char *sys, src[4300], inc[4300]; int darwin, na, ai, san;
+    if (getcwd(ROOT, sizeof ROOT) == 0) return 2;
+    sys = uname_field("-s");   /* platform.system() */
+    darwin = !strcmp(sys, "Darwin");
+    if (darwin) { arches[0] = "arm64"; arches[1] = "x86_64"; na = 2; }
+    else { arches[0] = uname_field("-m"); na = 1; }   /* platform.machine() */
+    tmp = getenv("TMPDIR");   /* tempfile.gettempdir(): TMPDIR, TEMP, TMP, then /tmp */
+    if (!tmp || !*tmp) tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    if (tmp[0] == '/') snprintf(TD, sizeof TD, "%s/unisacc-callablevar-XXXXXX", tmp);
+    else snprintf(TD, sizeof TD, "%s/%s/unisacc-callablevar-XXXXXX", ROOT, tmp);
+    if (!mkdtemp(TD)) { const char *t = tmp; TD[0] = 0; die("librarycallablevarcheck: cannot create a temporary directory under %s", t); }
+    snprintf(inc, sizeof inc, "-I%s/exec/c", ROOT);
+    snprintf(src, sizeof src, "%s/tests/librarycallablevarcheck.c", ROOT);
+    for (ai = 0; ai < na; ai++) {
+        const char *arch = arches[ai];
+        for (san = 0; san <= 1; san++) {
+            char exe[4400], *b[32], *r[8], *out, *err; size_t on, en, s, e; int k = 0, j = 0, rc;
+            snprintf(exe, sizeof exe, "%s/%s%s", TD, arch, san ? "-asan" : "-normal");
+            b[k++] = "cc"; b[k++] = "-std=c11"; b[k++] = "-Wall"; b[k++] = "-Wextra"; b[k++] = "-Wno-unused-function";
+            b[k++] = "-Wno-misleading-indentation"; b[k++] = inc; b[k++] = src; b[k++] = "-lffi"; b[k++] = "-o"; b[k++] = exe;
+            if (darwin) { b[k++] = "-arch"; b[k++] = (char *)arch; }
+            if (san) { b[k++] = "-O1"; b[k++] = "-g"; b[k++] = "-fsanitize=address,undefined"; b[k++] = "-fno-omit-frame-pointer"; }
+            else b[k++] = "-O2";
+            b[k] = 0;
+            rc = run_capture(b, &out, &on, &err, &en);
+            if (rc != 0) {
+                fflush(stdout);
+                fprintf(stderr, "AssertionError: ('%s', %s, ", arch, san ? "True" : "False");
+                repr_bytes(stderr, (unsigned char *)err, en); fputs(")\n", stderr);
+                rmtree(TD); return 1;
+            }
+            free(out); free(err);
+            if (darwin && !strcmp(arch, "x86_64")) { r[j++] = "arch"; r[j++] = "-x86_64"; }
+            r[j++] = exe; r[j] = 0;
+            rc = run_capture(r, &out, &on, &err, &en);
+            if (rc != 0) {
+                fflush(stdout);
+                fprintf(stderr, "AssertionError: ('%s', %s, ", arch, san ? "True" : "False");
+                repr_bytes(stderr, (unsigned char *)out, on); fputs(", ", stderr);
+                repr_bytes(stderr, (unsigned char *)err, en); fputs(")\n", stderr);
+                rmtree(TD); return 1;
+            }
+            for (s = 0; s < on && ws((unsigned char)out[s]); s++) {}   /* p.stdout.decode().strip() */
+            for (e = on; e > s && ws((unsigned char)out[e - 1]); e--) {}
+            printf("%s %s %.*s\n", arch, san ? "ASan/UBSan" : "normal", (int)(e - s), out + s);
+            fflush(stdout);
+            free(out); free(err);
+        }
+    }
+    rmtree(TD);
+    return 0;
+}

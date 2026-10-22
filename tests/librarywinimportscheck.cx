@@ -1,0 +1,256 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarywinimportscheck.cx -- tests/librarywinimportscheck.py in C (2026-10-23, the owner's direction: move the
+   toolchain off Python).  Independent generic PE exports resource probe; no compiler semantic rules.  The host
+   executes the synthetic export enumeration (tests/librarywinimportscheck.c); SDK cross builds are compile evidence.
+   Gate name: lib-windows-imports.
+   usage: sh ./unisacc.com -run tests/librarywinimportscheck.cx -- [-h] [--cross]
+   What it does, as the Python did:
+     - in a temporary directory (TMPDIR or /tmp, prefix library-winimports-), for sanitizer '' then
+       'address,undefined': `cc -std=c11 -Wall -Wextra -Werror [-fsanitize=S] ROOT/tests/librarywinimportscheck.c
+       -o T/probeN` (20 s; cc's stdout and stderr pass through), then runs T/probeN (20 s; stdout captured as text,
+       stderr captured and dropped) and records {mode: S or 'native', result: stdout.strip()};
+     - with --cross: zig must be on PATH; T/sdk.c is the same wrapper text the Python wrote (it includes
+       ROOT/exec/c/librarywinimports.h by absolute path) and is compiled with `zig cc -target T -std=c11 -Wall
+       -Wextra -Werror -c` for x86_64-windows-gnu and aarch64-windows-gnu (45 s each), each recorded as
+       'real SDK COFF compile; not executed';
+     - prints json.dumps({'records': records}, indent=2) (ensure_ascii escapes) and exits 0.
+   Failures: where the Python raised (a nonzero or timed-out step, a missing program, zig absent, child output that
+   is not UTF-8) the port prints one `librarywinimportscheck: ...` line on stderr and exits 1, with nothing on
+   stdout, as the traceback path did.  Argument errors follow argparse: usage plus `error: ...` on stderr, rc 2;
+   -h/--help prints the help, rc 0 (the program name reads librarywinimportscheck.cx).  Unique prefixes of --cross
+   and --help are accepted, as argparse's allow_abbrev does.
+   Limit of the port: an exit status of 124 from a step is reported as a timeout (cx_runv_timeout's convention);
+   either way the result is rc 1. */
+#include <limits.h>
+
+static char ROOT[PATH_MAX], TMP[PATH_MAX];
+static const char *PROG = "librarywinimportscheck.cx";
+
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e; char q[PATH_MAX];
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    d = opendir(p);
+    if (d) {
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(q, sizeof q, "%s/%s", p, e->d_name); rmtree(q);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) { if (TMP[0]) { rmtree(TMP); TMP[0] = 0; } }
+static void die(const char *m, const char *a) {   /* Python raised: a traceback on stderr, rc 1 */
+    fflush(stdout);
+    fprintf(stderr, "librarywinimportscheck: %s%s%s\n", m, a ? ": " : "", a ? a : "");
+    cleanup(); exit(1);
+}
+
+/* ---- byte buffers ------------------------------------------------------------------------------------------- */
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *o, const void *p, size_t n) {
+    if (o->n + n + 1 > o->cap) {
+        size_t c = o->cap ? o->cap : 64; char *t;
+        while (c < o->n + n + 1) c *= 2;
+        t = realloc(o->b, c); if (!t) die("out of memory", 0);
+        o->b = t; o->cap = c;
+    }
+    memcpy(o->b + o->n, p, n); o->n += n; o->b[o->n] = 0;
+}
+static void bstr(Buf *o, const char *s) { bput(o, s, strlen(s)); }
+
+/* ---- text: strict UTF-8 decode, universal newlines, str.strip(), json.dumps string (ensure_ascii) ------------ */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+static int space(long c) {   /* str.isspace() */
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+typedef struct { long *v; size_t n; } Text;   /* decoded code points */
+/* bytes -> str as subprocess.run(text=True) gives it: strict UTF-8, then \r\n and \r become \n */
+static Text decode(const char *b, size_t n) {
+    Text t; size_t i = 0; int l; long c;
+    t.v = malloc((n + 1) * sizeof *t.v); t.n = 0;
+    if (!t.v) die("out of memory", 0);
+    while (i < n) {
+        c = cp_at((const unsigned char *)b, n, i, &l);
+        if (c < 0) die("UnicodeDecodeError: probe output is not UTF-8", 0);
+        i += l;
+        if (c == '\r') { c = '\n'; if (i < n && b[i] == '\n') i++; }
+        t.v[t.n++] = c;
+    }
+    return t;
+}
+static void json_str(Buf *o, const long *v, size_t n) {   /* json.dumps(str), ensure_ascii=True */
+    size_t i; char u[16];
+    bstr(o, "\"");
+    for (i = 0; i < n; i++) {
+        long c = v[i];
+        if (c == '"') bstr(o, "\\\"");
+        else if (c == '\\') bstr(o, "\\\\");
+        else if (c == '\n') bstr(o, "\\n");
+        else if (c == '\r') bstr(o, "\\r");
+        else if (c == '\t') bstr(o, "\\t");
+        else if (c == '\b') bstr(o, "\\b");
+        else if (c == '\f') bstr(o, "\\f");
+        else if (c < 0x20 || (c >= 0x7F && c < 0x10000)) {   /* outside ' '..'~' (DEL included) */
+            snprintf(u, sizeof u, "\\u%04lx", c); bstr(o, u);
+        } else if (c >= 0x10000) {
+            long s = c - 0x10000;
+            snprintf(u, sizeof u, "\\u%04lx", 0xD800 + (s >> 10)); bstr(o, u);
+            snprintf(u, sizeof u, "\\u%04lx", 0xDC00 + (s & 0x3FF)); bstr(o, u);
+        } else { char d = (char)c; bput(o, &d, 1); }
+    }
+    bstr(o, "\"");
+}
+
+/* ---- records ------------------------------------------------------------------------------------------------ */
+typedef struct { const char *mode; Text result; } Rec;
+static Rec RECS[8]; static int NREC;
+static void record(const char *mode, Text r) { RECS[NREC].mode = mode; RECS[NREC].result = r; NREC++; }
+static Text ascii(const char *s) {
+    Text t; size_t i, n = strlen(s);
+    t.v = malloc((n + 1) * sizeof *t.v); if (!t.v) die("out of memory", 0);
+    for (i = 0; i < n; i++) t.v[i] = (unsigned char)s[i];
+    t.n = n; return t;
+}
+
+/* ---- processes ---------------------------------------------------------------------------------------------- */
+/* subprocess.run(argv, check=True, timeout=SECS): stdout and stderr inherited (stdout passed on in order) */
+static void check_call(char *const argv[], int secs) {
+    char *out = 0; size_t n = 0; int rc;
+    fflush(stdout); fflush(stderr);
+    rc = cx_runv_timeout(argv, secs, &out, &n);
+    if (out && n) { fwrite(out, 1, n, stdout); fflush(stdout); }
+    free(out);
+    if (rc == 124) die("subprocess.TimeoutExpired", argv[0]);
+    if (rc == 127 && n == 0) die("FileNotFoundError or CalledProcessError (status 127)", argv[0]);
+    if (rc != 0) { char m[64]; snprintf(m, sizeof m, "CalledProcessError: status %d", rc); die(m, argv[0]); }
+}
+/* subprocess.run([prog], check=True, timeout=20, capture_output=True, text=True).stdout.strip() */
+static Text probe(const char *prog) {
+    char *argv[5], *out = 0; size_t n = 0, a, b; int rc; Text t;
+    argv[0] = "/bin/sh"; argv[1] = "-c"; argv[2] = "exec \"$0\" 2>/dev/null"; argv[3] = (char *)prog; argv[4] = 0;
+    fflush(stdout); fflush(stderr);
+    rc = cx_runv_timeout(argv, 20, &out, &n);
+    if (rc == 124) die("subprocess.TimeoutExpired", prog);
+    if (rc != 0) { char m[64]; snprintf(m, sizeof m, "CalledProcessError: status %d", rc); die(m, prog); }
+    t = decode(out ? out : "", out ? n : 0); free(out);
+    for (a = 0; a < t.n && space(t.v[a]); a++) {}
+    for (b = t.n; b > a && space(t.v[b - 1]); b--) {}
+    memmove(t.v, t.v + a, (b - a) * sizeof *t.v); t.n = b - a;
+    return t;
+}
+static int which(const char *name, char *res, size_t cap) {   /* shutil.which */
+    const char *path = getenv("PATH"), *p, *e; struct stat s;
+    if (!path) path = "/bin:/usr/bin";
+    for (p = path;; p = e + 1) {
+        e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        snprintf(res, cap, "%.*s/%s", (int)(e - p), e == p ? "." : p, name);
+        if (e == p) snprintf(res, cap, "%s", name);
+        if (stat(res, &s) == 0 && !S_ISDIR(s.st_mode) && access(res, X_OK) == 0) return 1;
+        if (!*e) break;
+    }
+    return 0;
+}
+
+/* ---- argparse: [-h] [--cross] ------------------------------------------------------------------------------- */
+static void usage_err(const char *msg) {
+    fprintf(stderr, "usage: %s [-h] [--cross]\n%s: error: %s\n", PROG, PROG, msg); exit(2);
+}
+static int prefix_of(const char *a, size_t n, const char *full) { return n >= 3 && n <= strlen(full) && !strncmp(a, full, n); }
+
+int main(int argc, char **argv) {
+    char here[PATH_MAX], *sl, p[PATH_MAX], src[PATH_MAX], out[PATH_MAX], zig[PATH_MAX], *tmpdir; int cross = 0, i, s;
+    Buf unk = {0, 0, 0}; Buf o = {0, 0, 0};
+    static const char *SAN[2] = {"", "address,undefined"};
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *eq = strchr(a, '='); size_t n = eq ? (size_t)(eq - a) : strlen(a);
+        if (a[0] == '-' && a[1] == '-' && a[2] && (prefix_of(a, n, "--cross") || prefix_of(a, n, "--help"))) {
+            int h = prefix_of(a, n, "--help");
+            if (eq) {
+                char m[PATH_MAX];
+                snprintf(m, sizeof m, "argument %s: ignored explicit argument '%s'", h ? "-h/--help" : "--cross", eq + 1);
+                usage_err(m);
+            }
+            if (h) goto help;
+            cross = 1; continue;
+        }
+        if (!strcmp(a, "-h")) goto help;
+        if (unk.n) bstr(&unk, " ");
+        bstr(&unk, a);
+    }
+    if (unk.n) { char m[PATH_MAX + 32]; snprintf(m, sizeof m, "unrecognized arguments: %s", unk.b); usage_err(m); }
+    goto run;
+help:
+    printf("usage: %s [-h] [--cross]\n\noptions:\n  -h, --help  show this help message and exit\n  --cross\n", PROG);
+    return 0;
+run:
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(__FILE__, here)) die("cannot resolve", __FILE__);
+    sl = strrchr(here, '/'); if (sl) *sl = 0;
+    snprintf(p, sizeof p, "%s/..", here);
+    if (!realpath(p, ROOT)) die("cannot resolve", p);
+    snprintf(src, sizeof src, "%s/tests/librarywinimportscheck.c", ROOT);
+
+    tmpdir = getenv("TMPDIR"); if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+    snprintf(TMP, sizeof TMP, "%s/library-winimports-XXXXXX", tmpdir);
+    if (!mkdtemp(TMP)) { TMP[0] = 0; die("cannot make a temporary directory", tmpdir); }
+
+    for (s = 0; s < 2; s++) {
+        char *cmd[12], fs[64]; int k = 0;
+        snprintf(out, sizeof out, "%s/probe%d", TMP, NREC);
+        cmd[k++] = "cc"; cmd[k++] = "-std=c11"; cmd[k++] = "-Wall"; cmd[k++] = "-Wextra"; cmd[k++] = "-Werror";
+        if (SAN[s][0]) { snprintf(fs, sizeof fs, "-fsanitize=%s", SAN[s]); cmd[k++] = fs; }
+        cmd[k++] = src; cmd[k++] = "-o"; cmd[k++] = out; cmd[k] = 0;
+        check_call(cmd, 20);
+        record(SAN[s][0] ? SAN[s] : "native", probe(out));
+    }
+    if (cross) {
+        static const char *TG[2] = {"x86_64-windows-gnu", "aarch64-windows-gnu"};
+        Buf w = {0, 0, 0}; char wrapper[PATH_MAX], obj[PATH_MAX];
+        if (!which("zig", zig, sizeof zig)) die("RuntimeError", "SDK cross check requires zig");
+        snprintf(wrapper, sizeof wrapper, "%s/sdk.c", TMP);
+        bstr(&w, "#include <stdint.h>\n#include <windows.h>\ntypedef struct { const unsigned char *name; int n; const unsigned char *data; int len; } ResourceInput;\n#include \"");
+        bstr(&w, ROOT); bstr(&w, "/exec/c/librarywinimports.h");
+        bstr(&w, "\"\n_Static_assert(sizeof(long)==4,\"LLP64\");\n_Static_assert(sizeof(uintptr_t)==8,\"address width\");\nint probe(void){LibraryWinImports x={0,0};int rc=library_winimports_init(&x);library_winimports_free(&x);return rc;}\n");
+        if (cx_write(wrapper, w.b, w.n) != 0) die("cannot write", wrapper);
+        for (s = 0; s < 2; s++) {
+            char *cmd[14]; int k = 0;
+            snprintf(obj, sizeof obj, "%s/%s.o", TMP, TG[s]);
+            cmd[k++] = zig; cmd[k++] = "cc"; cmd[k++] = "-target"; cmd[k++] = (char *)TG[s]; cmd[k++] = "-std=c11";
+            cmd[k++] = "-Wall"; cmd[k++] = "-Wextra"; cmd[k++] = "-Werror"; cmd[k++] = "-c"; cmd[k++] = wrapper;
+            cmd[k++] = "-o"; cmd[k++] = obj; cmd[k] = 0;
+            check_call(cmd, 45);
+            record(TG[s], ascii("real SDK COFF compile; not executed"));
+        }
+    }
+    cleanup();
+
+    /* print(json.dumps({'records': records}, indent=2)) */
+    bstr(&o, "{\n  \"records\": [");
+    for (i = 0; i < NREC; i++) {
+        Text m = ascii(RECS[i].mode);
+        bstr(&o, i ? ",\n    {\n      \"mode\": " : "\n    {\n      \"mode\": ");
+        json_str(&o, m.v, m.n);
+        bstr(&o, ",\n      \"result\": ");
+        json_str(&o, RECS[i].result.v, RECS[i].result.n);
+        bstr(&o, "\n    }");
+    }
+    bstr(&o, NREC ? "\n  ]\n}\n" : "]\n}\n");
+    fwrite(o.b, 1, o.n, stdout);
+    return 0;
+}

@@ -1,0 +1,496 @@
+#!/usr/bin/env -S unisacc.com -run
+/* windowsresolverhostcheck.cx -- tests/windowsresolverhostcheck.py in C (2026-10-23, the owner's direction: move the
+   toolchain off Python).  Real SDK two-ISA cross build; --native executes on Windows.  No VM lifecycle.
+   usage: sh ./unisacc.com -run tests/windowsresolverhostcheck.cx [-- [--output DIR] [--native]
+                                                                      [--target {aarch64-windows-gnu,x86_64-windows-gnu}]]
+   - zig is shutil.which('zig') (PATH, or confstr CS_PATH when PATH is unset).  None: one UNVERIFIED line on stdout,
+     rc 77 (section 28.7: a missing cross compiler is a host limit, not a wrong result).
+   - TD is pathlib.Path(--output) when given (made with parents), else tempfile.mkdtemp(prefix=
+     'r10-windows-resolver-host-') under gettempdir() (TMPDIR, TEMP, TMP, /tmp, /var/tmp, /usr/tmp, cwd); TD is kept.
+     exec/c/librarybindings.h, exec/c/libraryresolver.h and tests/windowsresolverhost.c are copied into it (data and
+     mode; access/modify times are not carried, nothing reads them).
+   - per target (--target, else aarch64-windows-gnu then x86_64-windows-gnu), STEM its first '-' field: two shared
+     fixtures STEM-fixture-{33,44}.dll (-DUS_RESOLVER_FIXTURE=N) and STEM-resolver.exe, each `zig cc -target T
+     -std=c11 -O1 -Wall -Wextra -Werror ...`; with --native the exe then runs on the two dlls.  Every command goes
+     through the native watchdog `tests/bound 45` (the .py used `python3 tests/bound.py 45`; same contract) with a
+     50 s outer limit, output captured.  After each command TD/runs.json is rewritten (json indent=2); a nonzero rc is
+     the .py's AssertionError: rc 1, nothing on stdout, the failing row on stderr.  A command over 50 s is its
+     TimeoutExpired (rc 1, stderr).
+   - on success TD/evidence.json (indent=2) and one JSON line on stdout: scope, runtime_executed, output,
+     source_sha256 (of the TD copies), artifacts (name -> path, bytes, sha256), runs; written as json.dumps wrote
+     them (", " / ": " separators, ASCII-only escapes, Python float repr for seconds, captured output decoded as
+     UTF-8 with errors='replace', paths as os.fsdecode with surrogateescape).
+   Argument errors follow argparse (usage + `windowsresolverhostcheck.py: error: ...` on stderr, rc 2; -h/--help
+   prints the help on stdout, rc 0); long options may be abbreviated (--out, --nat, --tar) and take `--opt=value`.
+   Limit of the port: combined single-dash flags (-hX) are not parsed as argparse does; they are refused as
+   unrecognized.  ROOT is the parent of the directory holding this file (Path(__file__).resolve().parents[1]). */
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+
+static char ROOT[4096], TD[4096], BASE[4096], BOUND[4200];
+
+typedef struct { char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 1024; char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->p, c))) exit(1);
+        b->p = t; b->cap = c;
+    }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
+
+/* the .py's uncaught exception: nothing on stdout, one message on stderr, rc 1 (TD is kept, as the .py kept it) */
+static void fail(const char *kind, const char *a, const char *b) {
+    fflush(stdout);
+    fprintf(stderr, "windowsresolverhostcheck: %s: %s%s%s\n", kind, a, b && *b ? " " : "", b ? b : "");
+    exit(1);
+}
+
+/* ---- argparse ---- */
+static const char *USAGE =
+    "usage: windowsresolverhostcheck.py [-h] [--output OUTPUT] [--native]\n"
+    "                                   [--target {aarch64-windows-gnu,x86_64-windows-gnu}]\n";
+static void argerr(const char *msg, const char *a, const char *b) {
+    fflush(stdout);
+    fputs(USAGE, stderr);
+    fprintf(stderr, "windowsresolverhostcheck.py: error: %s%s%s\n", msg, a ? a : "", b ? b : "");
+    exit(2);
+}
+static const char *LONGS[] = { "--help", "--output", "--native", "--target" };
+/* the option an argument names: exact, or a unique prefix of one long option (none of the four share a prefix
+   past '--'); -1 when it names none */
+static int optof(const char *s, size_t n) {
+    int i;
+    if (n == 2 && !memcmp(s, "-h", 2)) return 0;
+    if (n < 3 || s[0] != '-' || s[1] != '-') return -1;
+    for (i = 0; i < 4; i++) if (strlen(LONGS[i]) >= n && !memcmp(LONGS[i], s, n)) return i;
+    return -1;
+}
+static int negnum(const char *s) {   /* ^-\d+$|^-\d*\.\d+$ */
+    const char *p = s + 1; int d = 0;
+    if (*s != '-') return 0;
+    while (*p >= '0' && *p <= '9') { p++; d++; }
+    if (!*p) return d > 0;
+    if (*p != '.') return 0;
+    p++; d = 0;
+    while (*p >= '0' && *p <= '9') { p++; d++; }
+    return !*p && d > 0;
+}
+/* argparse's 'O' (an option string) versus 'A' (an argument) */
+static int is_opt(const char *s) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (optof(s, strlen(s)) >= 0) return 1;
+    if ((eq = strchr(s, '=')) && optof(s, (size_t)(eq - s)) >= 0) return 1;
+    if (negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+static void help(void) {
+    fputs(USAGE, stdout);
+    fputs("\noptions:\n"
+          "  -h, --help            show this help message and exit\n"
+          "  --output OUTPUT\n"
+          "  --native\n"
+          "  --target {aarch64-windows-gnu,x86_64-windows-gnu}\n", stdout);
+    fflush(stdout);
+    exit(0);
+}
+static const char *O_OUTPUT, *O_TARGET; static int O_NATIVE;
+static void parse(int argc, char **argv) {
+    Buf unk = { 0 }; int i, dashdash = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq, *val = 0; int o; size_t n = strlen(s);
+        if (dashdash || !is_opt(s)) { if (unk.n) put(&unk, " ", 1); puts_(&unk, s); continue; }
+        if (!strcmp(s, "--")) { dashdash = 1; if (unk.n) put(&unk, " ", 1); puts_(&unk, s); continue; }   /* kept in the extras */
+        o = optof(s, n);
+        if (o < 0 && (eq = strchr(s, '=')) && (o = optof(s, (size_t)(eq - s))) >= 0) val = eq + 1;
+        if (o < 0) { if (unk.n) put(&unk, " ", 1); puts_(&unk, s); continue; }
+        if (o == 0) { if (val) argerr("argument -h/--help: ignored explicit argument '", val, "'"); help(); }
+        if (o == 2) { if (val) argerr("argument --native: ignored explicit argument '", val, "'"); O_NATIVE = 1; continue; }
+        if (!val) {
+            if (i + 1 >= argc || is_opt(argv[i + 1])) argerr(o == 1 ? "argument --output: expected one argument" : "argument --target: expected one argument", 0, 0);
+            val = argv[++i];
+        }
+        if (o == 1) O_OUTPUT = val;
+        else {
+            if (strcmp(val, "aarch64-windows-gnu") && strcmp(val, "x86_64-windows-gnu"))
+                argerr("argument --target: invalid choice: '", val, "' (choose from 'aarch64-windows-gnu', 'x86_64-windows-gnu')");
+            O_TARGET = val;
+        }
+    }
+    if (unk.n) argerr("unrecognized arguments: ", unk.p, 0);
+}
+
+/* ---- JSON as json.dumps writes it ---- */
+/* one UTF-8 code point at s[i]; its length in *l.  Invalid: -1, and *l is the maximal subpart Python's decoder
+   replaces with one U+FFFD (errors='replace'); surrogateescape escapes byte by byte */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i], lo = 0x80, hi = 0xBF; int need, k; long cp;
+    *l = 1;
+    if (c < 0x80) return c;
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        unsigned d;
+        if (i + k >= n) { *l = k; return -1; }
+        d = s[i + k];
+        if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) { *l = k; return -1; }
+        cp = (cp << 6) | (d & 0x3F);
+    }
+    *l = need + 1; return cp;
+}
+/* REPLACE: bytes.decode(errors='replace'); otherwise a path's str (os.fsdecode, surrogateescape) */
+static void jstr(Buf *b, const char *s, size_t n, int replace) {
+    size_t i = 0; char u[16];
+    put(b, "\"", 1);
+    while (i < n) {
+        int l; long c = cp_at((const unsigned char *)s, n, i, &l);
+        if (c < 0) { if (replace) c = 0xFFFD; else { c = 0xDC00 + (unsigned char)s[i]; l = 1; } }
+        i += l;
+        if (c == '"') puts_(b, "\\\"");
+        else if (c == '\\') puts_(b, "\\\\");
+        else if (c == '\n') puts_(b, "\\n");
+        else if (c == '\r') puts_(b, "\\r");
+        else if (c == '\t') puts_(b, "\\t");
+        else if (c == '\b') puts_(b, "\\b");
+        else if (c == '\f') puts_(b, "\\f");
+        else if (c >= 0x20 && c <= 0x7E) { char ch = (char)c; put(b, &ch, 1); }
+        else if (c < 0x10000) { snprintf(u, sizeof u, "\\u%04lx", c); puts_(b, u); }
+        else { long v = c - 0x10000; snprintf(u, sizeof u, "\\u%04lx\\u%04lx", 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF)); puts_(b, u); }
+    }
+    put(b, "\"", 1);
+}
+static void jpath(Buf *b, const char *s) { jstr(b, s, strlen(s), 0); }
+/* repr(float): the shortest digits that read back, fixed for 1e-4 <= |x| < 1e16, else d.ddde[+-]XX */
+static void jfloat(Buf *b, double x) {
+    char e[64], d[32], o[64]; int p, nd = 0, ex, k, j = 0; const char *q;
+    for (p = 1; p <= 17; p++) { snprintf(e, sizeof e, "%.*e", p - 1, x); if (strtod(e, 0) == x) break; }
+    q = e; if (*q == '-') { o[j++] = '-'; q++; }
+    for (; *q && *q != 'e'; q++) if (*q >= '0' && *q <= '9') d[nd++] = *q;
+    ex = atoi(q + 1);
+    while (nd > 1 && d[nd - 1] == '0') nd--;
+    d[nd] = 0;
+    if (ex >= -4 && ex < 16) {
+        if (ex >= nd - 1) { for (k = 0; k < nd; k++) o[j++] = d[k]; for (k = nd - 1; k < ex; k++) o[j++] = '0'; o[j++] = '.'; o[j++] = '0'; }
+        else if (ex >= 0) { for (k = 0; k <= ex; k++) o[j++] = d[k]; o[j++] = '.'; for (; k < nd; k++) o[j++] = d[k]; }
+        else { o[j++] = '0'; o[j++] = '.'; for (k = 0; k < -ex - 1; k++) o[j++] = '0'; for (k = 0; k < nd; k++) o[j++] = d[k]; }
+        o[j] = 0;
+    } else {
+        o[j++] = d[0]; if (nd > 1) { o[j++] = '.'; for (k = 1; k < nd; k++) o[j++] = d[k]; }
+        o[j] = 0; snprintf(o + j, sizeof o - j, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex);
+    }
+    puts_(b, o);
+}
+/* indent=2 puts each item on its own line; the compact form separates with ", " */
+static void nl(Buf *b, int pretty, int depth) {
+    int i;
+    if (!pretty) return;
+    put(b, "\n", 1);
+    for (i = 0; i < depth; i++) put(b, "  ", 2);
+}
+static void sep(Buf *b, int pretty, int depth) { if (pretty) { put(b, ",", 1); nl(b, 1, depth); } else puts_(b, ", "); }
+
+/* ---- runs ---- */
+typedef struct { char **cmd; int argc, rc; double secs; char *out, *err; size_t on, en; } Run;
+static Run *RUNS; static int NRUNS;
+
+static void jrun(Buf *b, const Run *r, int pretty, int d) {
+    int i;
+    puts_(b, "{"); nl(b, pretty, d + 1);
+    puts_(b, "\"command\": ["); nl(b, pretty, d + 2);
+    for (i = 0; i < r->argc; i++) { if (i) sep(b, pretty, d + 2); jpath(b, r->cmd[i]); }
+    nl(b, pretty, d + 1); puts_(b, "]");
+    {   char t[32]; snprintf(t, sizeof t, "%d", r->rc); sep(b, pretty, d + 1); puts_(b, "\"rc\": "); puts_(b, t); }
+    sep(b, pretty, d + 1); puts_(b, "\"seconds\": "); jfloat(b, r->secs);
+    sep(b, pretty, d + 1); puts_(b, "\"stdout\": "); jstr(b, r->out, r->on, 1);
+    sep(b, pretty, d + 1); puts_(b, "\"stderr\": "); jstr(b, r->err, r->en, 1);
+    nl(b, pretty, d); puts_(b, "}");
+}
+static void jruns(Buf *b, int pretty, int d) {
+    int i;
+    puts_(b, "["); nl(b, pretty, d + 1);
+    for (i = 0; i < NRUNS; i++) { if (i) sep(b, pretty, d + 1); jrun(b, &RUNS[i], pretty, d + 1); }
+    nl(b, pretty, d); puts_(b, "]");
+}
+static void join(char *out, size_t cap, const char *dir, const char *name) {
+    if (!strcmp(dir, ".")) snprintf(out, cap, "%s", name);   /* Path('.') / name is name */
+    else if (dir[0] && dir[strlen(dir) - 1] == '/') snprintf(out, cap, "%s%s", dir, name);
+    else snprintf(out, cap, "%s/%s", dir, name);
+}
+/* Path.write_text: open(O_WRONLY|O_CREAT|O_TRUNC, 0666), so a new file gets 0666 less the umask (cx_write's fopen
+   creates 0644) and an old one keeps its mode */
+static void writefile(const char *path, const Buf *b) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666); size_t off = 0;
+    if (fd < 0) fail("OSError", "cannot write", path);
+    while (off < b->n) {
+        ssize_t w = write(fd, b->p + off, b->n - off);
+        if (w <= 0) { close(fd); fail("OSError", "cannot write", path); }
+        off += (size_t)w;
+    }
+    if (close(fd) != 0) fail("OSError", "cannot write", path);
+}
+
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static char *slurp_fd(int fd, size_t *n) {
+    Buf b = { 0 }; char chunk[65536]; ssize_t r;
+    if (lseek(fd, 0, SEEK_SET) != 0) { *n = 0; return calloc(1, 1); }
+    while ((r = read(fd, chunk, sizeof chunk)) > 0) put(&b, chunk, (size_t)r);
+    if (!b.p) b.p = calloc(1, 1);
+    *n = b.n; return b.p;
+}
+static int capfd(void) {
+    char t[4200]; int fd;
+    snprintf(t, sizeof t, "%s/r10-windows-resolver-cap-XXXXXX", BASE);
+    if ((fd = mkstemp(t)) < 0) fail("OSError", "cannot create a capture file under", BASE);
+    unlink(t);
+    return fd;
+}
+
+/* run(): subprocess.run([bound, '45', *cmd], capture_output=True, timeout=50); the row is recorded and runs.json
+   rewritten before the rc is checked */
+static void run(char **cmd, int argc) {
+    char **a = malloc((size_t)(argc + 3) * sizeof *a), rj[4200]; int ofd = capfd(), efd = capfd(), st = 0, rc, i;
+    pid_t pid, w; double t0; Run *r; Buf js = { 0 };
+    a[0] = BOUND; a[1] = "45";
+    for (i = 0; i < argc; i++) a[i + 2] = cmd[i];
+    a[argc + 2] = 0;
+    fflush(stdout); fflush(stderr);
+    t0 = now();
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed for", BOUND);
+    if (pid == 0) {
+        dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
+        execv(a[0], a); _exit(127);
+    }
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
+        if (w < 0) { rc = -1; break; }
+        if (now() - t0 > 50.0) {
+            Buf m = { 0 };
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            for (i = 0; a[i]; i++) { if (i) put(&m, " ", 1); puts_(&m, a[i]); }
+            fail("TimeoutExpired", m.p, "timed out after 50 seconds");
+        }
+        usleep(2000);
+    }
+    RUNS = realloc(RUNS, (size_t)(NRUNS + 1) * sizeof *RUNS);
+    r = &RUNS[NRUNS++];
+    r->secs = now() - t0;
+    r->cmd = malloc((size_t)(argc + 1) * sizeof *r->cmd);
+    for (i = 0; i < argc; i++) r->cmd[i] = strdup(cmd[i]);
+    r->cmd[argc] = 0; r->argc = argc; r->rc = rc;
+    r->out = slurp_fd(ofd, &r->on); r->err = slurp_fd(efd, &r->en);
+    close(ofd); close(efd); free(a);
+    jruns(&js, 1, 0); puts_(&js, "\n");
+    join(rj, sizeof rj, TD, "runs.json");
+    writefile(rj, &js); free(js.p);
+    if (rc != 0) {
+        Buf row = { 0 }; jrun(&row, r, 0, 0);
+        fail("AssertionError", row.p, 0);
+    }
+}
+
+/* ---- paths ---- */
+/* str(pathlib.Path(s)): empty and '.' components dropped, one leading '/' kept ('//' kept as two), '.' when empty */
+static void purepath(const char *in, char *out, size_t cap) {
+    Buf b = { 0 }; const char *s = in, *e; int lead = 0;
+    if (in[0] == '/') lead = (in[1] == '/' && in[2] != '/') ? 2 : 1;
+    if (lead) put(&b, "//", (size_t)lead);
+    while (*s) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (!(e - s == 1 && *s == '.')) {
+            if (b.n > (size_t)lead) put(&b, "/", 1);
+            put(&b, s, (size_t)(e - s));
+        }
+        s = e;
+    }
+    if (!b.n) puts_(&b, ".");
+    snprintf(out, cap, "%s", b.p); free(b.p);
+}
+static int isdir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
+/* Path.mkdir(parents=PARENTS, exist_ok=True) */
+static void mkdirs(const char *p, int parents) {
+    char t[4200]; size_t i;
+    snprintf(t, sizeof t, "%s", p);
+    if (parents) for (i = 1; t[i]; i++) if (t[i] == '/') { t[i] = 0; if (!isdir(t) && mkdir(t, 0777) != 0 && !isdir(t)) fail(errno == EEXIST ? "FileExistsError" : "OSError", "mkdir", t); t[i] = '/'; }
+    if (mkdir(t, 0777) != 0 && !isdir(t)) fail(errno == EEXIST ? "FileExistsError" : "OSError", "mkdir", t);
+}
+/* tempfile.gettempdir(): the first of $TMPDIR $TEMP $TMP /tmp /var/tmp /usr/tmp cwd we can write, made absolute */
+static void normpath(const char *in, char *out, size_t cap) {
+    char tmp[8192], *seg[1024]; int n = 0, i; char *s = tmp, *e;
+    if (in[0] == '/') snprintf(tmp, sizeof tmp, "%s", in);
+    else { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(tmp, sizeof tmp, "%s/%s", cwd, in); }
+    for (; *s; s = e) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (*e) *e++ = 0;
+        if (!strcmp(s, ".")) continue;
+        if (!strcmp(s, "..")) { if (n) n--; continue; }
+        if (n < 1024) seg[n++] = s;
+    }
+    out[0] = 0;
+    if (!n) { snprintf(out, cap, "/"); return; }
+    for (i = 0; i < n; i++) { size_t l = strlen(out); snprintf(out + l, cap - l, "/%s", seg[i]); }
+}
+static void gettempdir(void) {
+    const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" }; int i;
+    for (i = 0; i < 3; i++) { const char *v = getenv(env[i]); if (v && *v && isdir(v) && access(v, W_OK | X_OK) == 0) { normpath(v, BASE, sizeof BASE); return; } }
+    for (i = 0; i < 3; i++) if (isdir(fixed[i]) && access(fixed[i], W_OK | X_OK) == 0) { snprintf(BASE, sizeof BASE, "%s", fixed[i]); return; }
+    normpath(".", BASE, sizeof BASE);
+}
+/* tempfile.mkdtemp(prefix=...): prefix + 8 of [a-z0-9_], mode 0700, retried on a name clash */
+static void mkdtemp_py(const char *prefix) {
+    static const char AL[] = "abcdefghijklmnopqrstuvwxyz0123456789_";
+    FILE *u = fopen("/dev/urandom", "rb"); int tries, k;
+    for (tries = 0; tries < 10000; tries++) {
+        unsigned char r[8]; char name[16];
+        if (!u || fread(r, 1, 8, u) != 8) { for (k = 0; k < 8; k++) r[k] = (unsigned char)rand(); }
+        for (k = 0; k < 8; k++) name[k] = AL[r[k] % 37];
+        name[8] = 0;
+        snprintf(TD, sizeof TD, "%s/%s%s", BASE, prefix, name);
+        if (mkdir(TD, 0700) == 0) { if (u) fclose(u); return; }
+        if (errno != EEXIST) break;
+    }
+    fail("FileExistsError", "no usable temporary directory name under", BASE);
+}
+/* shutil.which('zig'): os.path.join(dir, 'zig') over PATH (deduplicated), first that exists, is X_OK, is no dir */
+static char *which_zig(void) {
+    const char *path = getenv("PATH"); char *dup, *s, *e, **seen; int ns = 0, i, dupl; static char hit[4200];
+    if (!path) path = "/bin:/usr/bin";
+    if (!*path) return 0;
+    dup = strdup(path); seen = malloc((strlen(path) + 2) * sizeof *seen);
+    for (s = dup;; s = e + 1) {
+        struct stat st;
+        e = strchr(s, ':'); if (e) *e = 0;
+        for (dupl = 0, i = 0; i < ns; i++) if (!strcmp(seen[i], s)) dupl = 1;
+        if (!dupl) {
+            seen[ns++] = s;
+            if (!*s) snprintf(hit, sizeof hit, "zig");
+            else if (s[strlen(s) - 1] == '/') snprintf(hit, sizeof hit, "%szig", s);
+            else snprintf(hit, sizeof hit, "%s/zig", s);
+            if (stat(hit, &st) == 0 && access(hit, X_OK) == 0 && !S_ISDIR(st.st_mode)) return hit;
+        }
+        if (!e) break;
+    }
+    return 0;
+}
+static void copyfile(const char *rel) {   /* shutil.copy2(ROOT/rel, TD/rel): data and mode */
+    char src[4200], dst[4200], *b; size_t n = 0; struct stat st;
+    snprintf(src, sizeof src, "%s/%s", ROOT, rel); join(dst, sizeof dst, TD, rel);
+    if (!(b = cx_read(src, &n))) fail("FileNotFoundError", "No such file or directory:", src);
+    if (cx_write(dst, b, n) != 0) fail("OSError", "cannot write", dst);
+    if (stat(src, &st) == 0) chmod(dst, st.st_mode & 07777);
+    free(b);
+}
+static void sha_of(const char *path, char hex[65], long long *bytes) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    if (!b) fail("FileNotFoundError", "No such file or directory:", path);
+    cx_sha256_hex(b, n, hex); free(b);
+    if (bytes) *bytes = (long long)n;
+}
+
+int main(int argc, char **argv) {
+    static const char *FILES[] = { "exec/c/librarybindings.h", "exec/c/libraryresolver.h", "tests/windowsresolverhost.c" };
+    static const char *TARGETS[] = { "aarch64-windows-gnu", "x86_64-windows-gnu" };
+    char self[4096], *slash, *zig, p[4200], src[4200];
+    Buf art = { 0 }, js = { 0 }; int t, nt, k, v, nart = 0;
+    parse(argc, argv);
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(argv[0], self)) { if (!getcwd(ROOT, sizeof ROOT)) return 1; }
+    else {
+        for (k = 0; k < 2; k++) { slash = strrchr(self, '/'); if (slash && slash != self) *slash = 0; else { strcpy(self, "/"); break; } }
+        snprintf(ROOT, sizeof ROOT, "%s", self);
+    }
+    snprintf(BOUND, sizeof BOUND, "%s/tests/bound", ROOT);
+    if (!(zig = which_zig())) {
+        fputs("UNVERIFIED: required=zig (real Windows SDK cross compiler, aarch64-windows-gnu and x86_64-windows-gnu) observed=no zig on PATH missing=zig\n", stdout);
+        fflush(stdout);
+        return 77;
+    }
+    gettempdir();
+    if (O_OUTPUT && *O_OUTPUT) purepath(O_OUTPUT, TD, sizeof TD);
+    else mkdtemp_py("r10-windows-resolver-host-");
+    mkdirs(TD, 1);
+    join(p, sizeof p, TD, "exec/c"); mkdirs(p, 1);
+    join(p, sizeof p, TD, "tests"); mkdirs(p, 0);
+    for (k = 0; k < 3; k++) copyfile(FILES[k]);
+    join(src, sizeof src, TD, "tests/windowsresolverhost.c");
+    nt = O_TARGET ? 1 : 2;
+    for (t = 0; t < nt; t++) {
+        const char *target = O_TARGET ? O_TARGET : TARGETS[t];
+        char stem[64], exe[4200], dll[2][4200], name[128], def[64], *a[20]; int n;
+        snprintf(stem, sizeof stem, "%.*s", (int)strcspn(target, "-"), target);
+        snprintf(name, sizeof name, "%s-resolver.exe", stem); join(exe, sizeof exe, TD, name);
+        for (v = 0; v < 2; v++) {
+            int val = v ? 44 : 33;
+            snprintf(name, sizeof name, "%s-fixture-%d.dll", stem, val); join(dll[v], sizeof dll[v], TD, name);
+            snprintf(def, sizeof def, "-DUS_RESOLVER_FIXTURE=%d", val);
+            n = 0;
+            a[n++] = zig; a[n++] = "cc"; a[n++] = "-target"; a[n++] = (char *)target; a[n++] = "-std=c11"; a[n++] = "-O1";
+            a[n++] = "-Wall"; a[n++] = "-Wextra"; a[n++] = "-Werror"; a[n++] = "-shared"; a[n++] = def; a[n++] = src;
+            a[n++] = "-o"; a[n++] = dll[v];
+            run(a, n);
+        }
+        n = 0;
+        a[n++] = zig; a[n++] = "cc"; a[n++] = "-target"; a[n++] = (char *)target; a[n++] = "-std=c11"; a[n++] = "-O1";
+        a[n++] = "-Wall"; a[n++] = "-Wextra"; a[n++] = "-Werror"; a[n++] = src; a[n++] = "-o"; a[n++] = exe;
+        run(a, n);
+        if (O_NATIVE) { a[0] = exe; a[1] = dll[0]; a[2] = dll[1]; run(a, 3); }
+        for (k = 0; k < 3; k++) {
+            const char *path = k ? dll[k - 1] : exe, *base = strrchr(path, '/'); char hex[65], num[32]; long long bytes;
+            base = base ? base + 1 : path;
+            sha_of(path, hex, &bytes);
+            if (nart++) sep(&art, 1, 2);   /* the separators are rewritten for the compact form below */
+            jpath(&art, base); puts_(&art, ": {\x01"); puts_(&art, "\"path\": "); jpath(&art, path);
+            snprintf(num, sizeof num, "%lld", bytes);
+            puts_(&art, "\x02\"bytes\": "); puts_(&art, num);
+            puts_(&art, "\x02\"sha256\": \""); puts_(&art, hex); puts_(&art, "\"\x03}");
+        }
+    }
+    {   int pretty;
+        Buf out[2] = { { 0 }, { 0 } };
+        for (pretty = 0; pretty < 2; pretty++) {
+            Buf *b = &out[pretty]; size_t i;
+            puts_(b, "{"); nl(b, pretty, 1);
+            puts_(b, "\"scope\": \"mechanical host candidates only; native runtime required separately unless --native\"");
+            sep(b, pretty, 1); puts_(b, "\"runtime_executed\": "); puts_(b, O_NATIVE ? "true" : "false");
+            sep(b, pretty, 1); puts_(b, "\"output\": "); jpath(b, TD);
+            sep(b, pretty, 1); puts_(b, "\"source_sha256\": {"); nl(b, pretty, 2);
+            for (k = 0; k < 3; k++) {
+                char hex[65]; join(p, sizeof p, TD, FILES[k]); sha_of(p, hex, 0);
+                if (k) sep(b, pretty, 2);
+                jpath(b, FILES[k]); puts_(b, ": \""); puts_(b, hex); puts_(b, "\"");
+            }
+            nl(b, pretty, 1); puts_(b, "}");
+            sep(b, pretty, 1); puts_(b, "\"artifacts\": {"); nl(b, pretty, 2);
+            /* art: items joined by ",\n    "; \x01 opens an artifact's object, \x02 separates its fields, \x03 closes */
+            for (i = 0; i < art.n; i++) {
+                char c = art.p[i];
+                if (c == ',' && i + 1 < art.n && art.p[i + 1] == '\n') { sep(b, pretty, 2); i += 5; }
+                else if (c == '\x01') nl(b, pretty, 3);
+                else if (c == '\x02') sep(b, pretty, 3);
+                else if (c == '\x03') nl(b, pretty, 2);
+                else put(b, &c, 1);
+            }
+            nl(b, pretty, 1); puts_(b, "}");
+            sep(b, pretty, 1); puts_(b, "\"runs\": "); jruns(b, pretty, 1);
+            nl(b, pretty, 0); puts_(b, "}\n");
+        }
+        join(p, sizeof p, TD, "evidence.json");
+        writefile(p, &out[1]);
+        js = out[0];
+    }
+    fwrite(js.p, 1, js.n, stdout);
+    return fflush(stdout) ? 1 : 0;
+}

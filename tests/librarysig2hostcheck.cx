@@ -1,0 +1,271 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarysig2hostcheck.cx -- own synthetic V2 declarations and native libffi closure oracle; no shared builds.
+   Ported from tests/librarysig2hostcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarysig2hostcheck.cx   (arguments are ignored, as by the Python checker)
+   In a fresh temporary directory (TMPDIR, TEMP, TMP, then /tmp, as tempfile does; prefix r10-sig2host-) it writes the
+   USLSIG2/USLSIG1 declaration files the .py packed with struct, then twice (plain, then -fsanitize=address,undefined
+   -g) builds tests/librarysig2hostcheck.c with $CC (default cc) -std=c99 -I ROOT -Wall -Wextra -Wno-unused-function
+   -lffi and runs the probe on valid.sig, many.sig (1024 int parameters) 'many', v1.sig 'many' and 'legacy',
+   array.sig 'decode' -- every command under tests/bound 20, stdout and stderr inherited, rc 0 required -- and then
+   on five malformed declarations (bad{0..4}.sig, output captured), each of which must exit 1 with
+   'malformed library signature declaration' on stderr.  Prints, as the .py did:
+     sig2 malformed layout/extent/parameters/payload controls rejected     (once per build)
+     sig2 host: native + ASan/UBSan passed
+   rc 0.  The .py's prints go through stdio, so (as with Python's buffered stdout) when stdout is not a terminal
+   they land after the children's lines.  A failure is the .py's uncaught exception (CalledProcessError,
+   AssertionError, OSError): one `librarysig2hostcheck: ...` line on stderr where Python printed a traceback, rc 1.
+   ROOT is the parent of the directory holding this file (Path(__file__).resolve().parents[1]). */
+
+static char ROOT[4096], TD[4096], BASE[4096];
+
+/* Python's sys.stdout: line-buffered on a terminal, else block-buffered (8 KiB, more than this checker prints), so
+   off a terminal the .py's own lines reach stdout only at exit, after everything its children wrote. */
+static char PEND[8192]; static size_t PN; static int TTY = -1;
+static void out_flush(void) { if (PN) { fwrite(PEND, 1, PN, stdout); PN = 0; } fflush(stdout); }
+static void say(const char *line) {   /* print(line) */
+    size_t n = strlen(line);
+    if (TTY < 0) TTY = isatty(1);
+    if (TTY) { printf("%s\n", line); fflush(stdout); return; }
+    if (PN + n + 1 > sizeof PEND) out_flush();
+    memcpy(PEND + PN, line, n); PEND[PN + n] = '\n'; PN += n + 1;
+}
+
+static void rmtree(const char *d) {
+    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
+    if (dp) {
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
+        }
+        closedir(dp);
+    }
+    rmdir(d);
+}
+/* the .py's uncaught exception: stdout as printed so far, one message on stderr, the directory removed, rc 1 */
+static void fail(const char *kind, const char *a, const char *b) {
+    fprintf(stderr, "librarysig2hostcheck: %s: %s%s%s\n", kind, a, b && *b ? "\n" : "", b ? b : "");
+    fflush(stderr);
+    if (TD[0]) { rmtree(TD); TD[0] = 0; }
+    out_flush();   /* Python flushes its pending prints at exit, after the traceback */
+    exit(1);
+}
+
+/* ---- byte buffers and the .py's struct packing ---------------------------------------------------------------- */
+typedef struct { unsigned char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->p, c))) fail("MemoryError", "out of memory", 0);
+        b->p = t; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void putb(Buf *b, const Buf *s) { put(b, s->p ? s->p : (const unsigned char *)"", s->n); }
+static void u(Buf *b, unsigned long long x) {   /* struct.pack('<Q', x) */
+    unsigned char t[8]; int i;
+    for (i = 0; i < 8; i++) t[i] = (unsigned char)(x >> (8 * i));
+    put(b, t, 8);
+}
+static void byte(Buf *b, int c) { unsigned char t = (unsigned char)c; put(b, &t, 1); }
+/* desc(kind,width,align,uns=0,depth=0,tag=0,payload=b''): depth,0,0,kind,width,uns,align as <Q, tag byte,
+   <Q len(payload), payload */
+static Buf desc(int kind, int width, int align, int uns, int depth, int tag, const Buf *payload) {
+    Buf d = { 0 };
+    u(&d, (unsigned long long)depth); u(&d, 0); u(&d, 0); u(&d, (unsigned long long)kind);
+    u(&d, (unsigned long long)width); u(&d, (unsigned long long)uns); u(&d, (unsigned long long)align);
+    byte(&d, tag); u(&d, payload ? payload->n : 0);
+    if (payload) putb(&d, payload);
+    return d;
+}
+/* pack(result, arglist, support=1) */
+static Buf pack(const Buf *result, const Buf *const *arglist, size_t nargs) {
+    Buf o = { 0 }; size_t i; static const unsigned char flags[4] = { 0, 1, 0, 1 };
+    put(&o, "USLSIG2\n", 8); u(&o, 1); u(&o, 8); put(&o, "exchange", 8); put(&o, flags, 4);
+    u(&o, nargs); putb(&o, result); u(&o, nargs);
+    for (i = 0; i < nargs; i++) putb(&o, arglist[i]);
+    byte(&o, 1);
+    return o;
+}
+static void writefile(const char *path, const Buf *b) {   /* Path.write_bytes */
+    if (cx_write(path, b->p ? (const void *)b->p : (const void *)"", b->n) != 0) fail("OSError", "cannot write", path);
+}
+
+/* ---- subprocesses ------------------------------------------------------------------------------------------- */
+/* waitpid status as subprocess.returncode: the exit code, or -N for signal N */
+static int waitrc(pid_t pid, const char *what) {
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) fail("OSError", "waitpid failed for", what);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
+}
+static void joincmd(Buf *m, char *const *args) {
+    int i;
+    for (i = 0; args[i]; i++) { if (i) put(m, " ", 1); put(m, args[i], strlen(args[i])); }
+}
+/* run(cmd): subprocess.run([tests/bound, '20', *cmd], check=True) -- stdout/stderr inherited, rc 0 required.
+   Our pending lines (say) are not flushed first, just as Python's buffered prints were not. */
+static void run(char *const *cmd) {
+    char bound[4200], *argv[64]; int n = 0, rc; pid_t pid;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv[n++] = bound; argv[n++] = "20";
+    while (*cmd && n < 63) argv[n++] = *cmd++;
+    argv[n] = 0;
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed for", bound);
+    if (pid == 0) { execv(argv[0], argv); _exit(127); }
+    rc = waitrc(pid, bound);
+    if (rc != 0) {
+        Buf m = { 0 }; char r[64];
+        put(&m, "Command '", 9); joincmd(&m, argv);
+        snprintf(r, sizeof r, "' returned non-zero exit status %d.", rc); put(&m, r, strlen(r));
+        fail("CalledProcessError", (const char *)m.p, 0);
+    }
+}
+/* subprocess.run([tests/bound, '20', exe, f], stdout=PIPE, stderr=PIPE): rc, with stderr into *err */
+static int run_captured(const char *exe, const char *f, char **err, size_t *en) {
+    char bound[4200], of[4200], ef[4200], *argv[5]; int ofd, efd, rc; pid_t pid;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv[0] = bound; argv[1] = "20"; argv[2] = (char *)exe; argv[3] = (char *)f; argv[4] = 0;
+    snprintf(of, sizeof of, "%s/.cap-out-XXXXXX", TD); snprintf(ef, sizeof ef, "%s/.cap-err-XXXXXX", TD);
+    if ((ofd = mkstemp(of)) < 0) fail("OSError", "cannot create a capture file under", TD);
+    if ((efd = mkstemp(ef)) < 0) { close(ofd); unlink(of); fail("OSError", "cannot create a capture file under", TD); }
+    pid = fork();
+    if (pid < 0) { close(ofd); close(efd); unlink(of); unlink(ef); fail("OSError", "fork failed for", bound); }
+    if (pid == 0) { dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd); execv(argv[0], argv); _exit(127); }
+    close(ofd); close(efd);
+    rc = waitrc(pid, bound);
+    *err = cx_read(ef, en);
+    if (!*err) { *err = calloc(1, 1); *en = 0; }
+    unlink(of); unlink(ef);
+    return rc;
+}
+static int contains(const char *h, size_t hn, const char *needle) {
+    size_t k = strlen(needle), i;
+    for (i = 0; i + k <= hn; i++) if (!memcmp(h + i, needle, k)) return 1;
+    return 0;
+}
+
+/* tempfile.gettempdir(): the first of $TMPDIR $TEMP $TMP /tmp /var/tmp /usr/tmp we can write, else the cwd */
+static void normpath(const char *in, char *out, size_t cap) {
+    char tmp[8192], *seg[1024]; int n = 0, i; char *s = tmp, *e;
+    if (in[0] == '/') snprintf(tmp, sizeof tmp, "%s", in);
+    else { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(tmp, sizeof tmp, "%s/%s", cwd, in); }
+    for (; *s; s = e) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (*e) *e++ = 0;
+        if (!strcmp(s, ".")) continue;
+        if (!strcmp(s, "..")) { if (n) n--; continue; }
+        if (n < 1024) seg[n++] = s;
+    }
+    out[0] = 0;
+    if (!n) { snprintf(out, cap, "/"); return; }
+    for (i = 0; i < n; i++) { size_t l = strlen(out); snprintf(out + l, cap - l, "/%s", seg[i]); }
+}
+static void gettempdir(void) {
+    const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" }; int i; struct stat st;
+    for (i = 0; i < 3; i++) { const char *v = getenv(env[i]); if (v && *v && stat(v, &st) == 0 && S_ISDIR(st.st_mode) && access(v, W_OK | X_OK) == 0) { normpath(v, BASE, sizeof BASE); return; } }
+    for (i = 0; i < 3; i++) if (stat(fixed[i], &st) == 0 && S_ISDIR(st.st_mode) && access(fixed[i], W_OK | X_OK) == 0) { snprintf(BASE, sizeof BASE, "%s", fixed[i]); return; }
+    normpath(".", BASE, sizeof BASE);
+}
+
+int main(int argc, char **argv) {
+    char self[4096], *slash, *cc, src[4200], exe[4200], valid[4200], many[4200], old[4200], arr[4200], bad[4200];
+    Buf I, D, P, PAIR, pairp = { 0 }, validb, manyb, oldb = { 0 }, ap = { 0 }, array, np = { 0 }, nested, arrb;
+    Buf blp = { 0 }, bad_layout, m[5], d38, t4p = { 0 }, t4, t3p = { 0 }, t3;
+    const Buf *args[9], **ones; int k, i;
+    (void)argc;
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(argv[0], self)) { if (!getcwd(ROOT, sizeof ROOT)) return 1; }
+    else {
+        for (k = 0; k < 2; k++) { slash = strrchr(self, '/'); if (slash && slash != self) *slash = 0; else { strcpy(self, "/"); break; } }
+        snprintf(ROOT, sizeof ROOT, "%s", self);
+    }
+    cc = getenv("CC"); if (!cc) cc = "cc";   /* os.environ.get('CC', 'cc') */
+
+    /* I=desc(1,4,4); D=desc(3,8,8); F=desc(3,4,4) (unused by the .py); P=desc(2,8,8,depth=1) */
+    I = desc(1, 4, 4, 0, 0, 0, 0); D = desc(3, 8, 8, 0, 0, 0, 0); P = desc(2, 8, 8, 0, 1, 0, 0);
+    {   Buf F = desc(3, 4, 4, 0, 0, 0, 0);
+        /* pair_payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I */
+        u(&pairp, 2); u(&pairp, 0); u(&pairp, 0); u(&pairp, 0); u(&pairp, 8); putb(&pairp, &D);
+        u(&pairp, 8); u(&pairp, 0); u(&pairp, 0); u(&pairp, 4); putb(&pairp, &I);
+        PAIR = desc(5, 16, 8, 0, 0, 1, &pairp);
+        /* args=[I,D,F,P,PAIR,I,D,I,I] */
+        args[0] = &I; args[1] = &D; args[2] = &F; args[3] = &P; args[4] = &PAIR; args[5] = &I; args[6] = &D; args[7] = &I; args[8] = &I;
+        validb = pack(&PAIR, args, 9);
+    }
+    if (!(ones = malloc(1025 * sizeof *ones))) fail("MemoryError", "out of memory", 0);
+    for (i = 0; i < 1025; i++) ones[i] = &I;
+    manyb = pack(&I, ones, 1024);
+    /* b'USLSIG1\n'+u(1)+u(8)+b'exchange'+bytes([0,1,0])+u(1)+I[:48]+u(1)+I[:48]+bytes([1]) */
+    put(&oldb, "USLSIG1\n", 8); u(&oldb, 1); u(&oldb, 8); put(&oldb, "exchange", 8);
+    byte(&oldb, 0); byte(&oldb, 1); byte(&oldb, 0);
+    u(&oldb, 1); put(&oldb, I.p, 48); u(&oldb, 1); put(&oldb, I.p, 48); byte(&oldb, 1);
+    /* array=desc(5,8,4,tag=3,payload=u(2)+u(4)+I) */
+    u(&ap, 2); u(&ap, 4); putb(&ap, &I); array = desc(5, 8, 4, 0, 0, 3, &ap);
+    /* nested=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(8)+array) */
+    u(&np, 2); u(&np, 0); u(&np, 0); u(&np, 0); u(&np, 8); putb(&np, &D);
+    u(&np, 8); u(&np, 0); u(&np, 0); u(&np, 8); putb(&np, &array);
+    nested = desc(5, 16, 8, 0, 0, 1, &np);
+    {   const Buf *one[1]; one[0] = &array; arrb = pack(&nested, one, 1); }
+    /* bad_layout=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(9)+u(0)+u(0)+u(4)+I) */
+    u(&blp, 2); u(&blp, 0); u(&blp, 0); u(&blp, 0); u(&blp, 8); putb(&blp, &D);
+    u(&blp, 9); u(&blp, 0); u(&blp, 0); u(&blp, 4); putb(&blp, &I);
+    bad_layout = desc(5, 16, 8, 0, 0, 1, &blp);
+    d38 = desc(3, 8, 4, 0, 0, 0, 0);
+    put(&t4p, "x", 1); t4 = desc(5, 16, 8, 0, 0, 4, &t4p);
+    u(&t3p, 2); u(&t3p, 8); putb(&t3p, &I); t3 = desc(5, 16, 8, 0, 0, 3, &t3p);
+    /* malformed=[pack(bad_layout),pack(desc(3,8,4)),pack(PAIR,[I]*1025),pack(desc(5,16,8,tag=4,payload=b'x')),
+                  pack(desc(5,16,8,tag=3,payload=u(2)+u(8)+I))] */
+    m[0] = pack(&bad_layout, args, 9); m[1] = pack(&d38, args, 9); m[2] = pack(&PAIR, ones, 1025);
+    m[3] = pack(&t4, args, 9); m[4] = pack(&t3, args, 9);
+
+    gettempdir();
+    snprintf(TD, sizeof TD, "%s/r10-sig2host-XXXXXX", BASE);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("OSError", "cannot create a temporary directory under", BASE); }
+    snprintf(valid, sizeof valid, "%s/valid.sig", TD); writefile(valid, &validb);
+    snprintf(exe, sizeof exe, "%s/probe", TD);
+    snprintf(src, sizeof src, "%s/tests/librarysig2hostcheck.c", ROOT);
+    snprintf(many, sizeof many, "%s/many.sig", TD);
+    snprintf(old, sizeof old, "%s/v1.sig", TD);
+    snprintf(arr, sizeof arr, "%s/array.sig", TD);
+    for (k = 0; k < 2; k++) {   /* for sanitize in (False, True) */
+        char *c[16]; int n = 0;
+        c[n++] = cc; c[n++] = src; c[n++] = "-o"; c[n++] = exe;
+        c[n++] = "-std=c99"; c[n++] = "-I"; c[n++] = ROOT; c[n++] = "-Wall"; c[n++] = "-Wextra";
+        c[n++] = "-Wno-unused-function"; c[n++] = "-lffi";
+        if (k) { c[n++] = "-fsanitize=address,undefined"; c[n++] = "-g"; }
+        c[n] = 0;
+        run(c);
+        { char *r[] = { exe, valid, 0 }; run(r); }
+        writefile(many, &manyb);
+        { char *r[] = { exe, many, "many", 0 }; run(r); }
+        writefile(old, &oldb);
+        { char *r[] = { exe, old, "many", 0 }; run(r); }
+        { char *r[] = { exe, old, "legacy", 0 }; run(r); }
+        writefile(arr, &arrb);
+        { char *r[] = { exe, arr, "decode", 0 }; run(r); }
+        for (i = 0; i < 5; i++) {
+            char *err; size_t en = 0; int rc; char msg[128];
+            snprintf(bad, sizeof bad, "%s/bad%d.sig", TD, i); writefile(bad, &m[i]);
+            rc = run_captured(exe, bad, &err, &en);
+            if (rc != 1) {
+                snprintf(msg, sizeof msg, "(%d, %d, stderr follows)", i, rc);
+                fail("AssertionError", msg, err);
+            }
+            if (!contains(err, en, "malformed library signature declaration")) {
+                snprintf(msg, sizeof msg, "(%d, stderr follows)", i);
+                fail("AssertionError", msg, err);
+            }
+            free(err);
+        }
+        say("sig2 malformed layout/extent/parameters/payload controls rejected");
+    }
+    say("sig2 host: native + ASan/UBSan passed");
+    rmtree(TD); TD[0] = 0;
+    out_flush();
+    return ferror(stdout) ? 1 : 0;
+}

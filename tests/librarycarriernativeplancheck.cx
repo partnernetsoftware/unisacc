@@ -1,0 +1,498 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycarriernativeplancheck.cx -- native plan carrier mechanics with explicit fixtures, not public acceptance.
+   Ported from tests/librarycarriernativeplancheck.py (2026-10-23, the owner's direction: the toolchain moves off
+   Python).
+   usage: sh ./unisacc.com -run tests/librarycarriernativeplancheck.cx -- [-h] [--arch {arm64,x86_64}]
+                                                                        [--evidence EVIDENCE]
+   Run from the repository root (ROOT is the working directory).  Seven explicit fixtures are built byte for byte as
+   the original's desc()/sig() helpers built them: the USLNCAR1 carrier certificate for TARGET (lnx/ARCH, osx/ARCH on
+   Darwin), the original union signature, the carrier signature, a plain supported signature, a variadic prototype,
+   an unsupported callback signature and a strict-wire-invalid support byte.  In a fresh temporary directory (TMPDIR,
+   TEMP, TMP or /tmp, prefix r10-carrier-nativeplan-) exec/c/*.h are copied to headers/,
+   tests/librarycarriernativeplancheck.c to probe.c and the fixtures to 0..6; the probe is then built with $CC
+   (default cc) -std=c11 -O1 -Wall -Wextra -Wno-unused-function -Wno-misleading-indentation -lffi and run as
+   `EXE TARGET 0 .. 6`, once plain and once with -fsanitize=address,undefined, every step under `tests/bound 20`
+   with stdout and stderr captured (decoded as UTF-8 with universal newlines, as text=True did).  Each step's stdout
+   is echoed.  A step that exits nonzero is fatal, rc 1, with `AssertionError: RECORD` on stderr where RECORD is the
+   Python repr of the step record {'arch', 'sanitize', 'command', 'rc', 'stdout', 'stderr'} (the traceback frames
+   the original printed above that line name its own source lines and are not reproduced).  Output that is not
+   UTF-8 is fatal the same way with the UnicodeDecodeError line.  On success `carrier native plan normal +
+   ASan/UBSan passed on ARCH` is printed and, with --evidence PATH, the record {scope, commands, inputs (sha256 of
+   exec/c/librarynative.h, exec/c/librarycarrierplan.h, tests/librarycarriernativeplancheck.c), status} is written
+   to PATH as json.dumps(indent=2) (ASCII, \uXXXX escapes) plus a newline, before that line is printed.  The
+   temporary directory is removed either way.  On Darwin the build gets -arch ARCH; an arm64 host running --arch
+   x86_64 runs the probe under `arch -x86_64`.
+   Arguments follow argparse: -h/--help, --arch VALUE|--arch=VALUE, --evidence VALUE|--evidence=VALUE (unique
+   prefixes too, last one wins); usage errors are rc 2 on stderr.  The usage text keeps argparse's prog name from
+   the original (librarycarriernativeplancheck.py) so help and error text are byte-identical to it. */
+#include <errno.h>
+#include <fcntl.h>
+
+static const char *PROG = "librarycarriernativeplancheck.py";
+static const char *USAGE = "usage: librarycarriernativeplancheck.py [-h] [--arch {arm64,x86_64}]\n"
+                           "                                        [--evidence EVIDENCE]\n";
+static char ROOT[4096], TD[4200];
+
+/* ---- byte buffers ---- */
+typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64;
+        while (c < b->n + n + 1) c *= 2;
+        b->p = realloc(b->p, c);
+        if (!b->p) { fputs("librarycarriernativeplancheck: out of memory\n", stderr); exit(1); }
+        b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bbyte(Buf *b, unsigned v) { unsigned char c = (unsigned char)v; bput(b, &c, 1); }
+static void bU(Buf *b, unsigned long long v) {   /* struct.pack('<Q', v) */
+    unsigned char q[8]; int i;
+    for (i = 0; i < 8; i++) q[i] = (unsigned char)(v >> (8 * i));
+    bput(b, q, 8);
+}
+static void bcat(Buf *b, const Buf *c) { bput(b, c->p, c->n); }
+
+/* desc(k, w, a, uns, depth, tag, payload) */
+static Buf desc(unsigned k, unsigned w, unsigned a, unsigned uns, unsigned depth, unsigned tag, const Buf *payload) {
+    Buf o = {0};
+    bU(&o, depth); bU(&o, 0); bU(&o, 0); bU(&o, k); bU(&o, w); bU(&o, uns); bU(&o, a);
+    bbyte(&o, tag); bU(&o, payload ? payload->n : 0);
+    if (payload) bcat(&o, payload);
+    return o;
+}
+/* sig(t, support, var, result): RESULT NULL means t */
+static Buf sig(const Buf *t, unsigned support, unsigned var, const Buf *result) {
+    Buf o = {0};
+    bputs(&o, "USLSIG2\n"); bU(&o, 1); bU(&o, 5); bputs(&o, "round");
+    bbyte(&o, 0); bbyte(&o, 1); bbyte(&o, var); bbyte(&o, 1);
+    bU(&o, 1); bcat(&o, result ? result : t); bU(&o, 1); bcat(&o, t); bbyte(&o, support);
+    return o;
+}
+
+/* ---- cleanup and fatal paths ---- */
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char c[8192];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+static void die(const char *fmt, const char *a) {
+    fflush(stdout); fprintf(stderr, fmt, a); fputc('\n', stderr);
+    cleanup(); exit(1);
+}
+static void usage_error(const char *msg, const char *a) {
+    fflush(stdout); fputs(USAGE, stderr); fprintf(stderr, "%s: error: ", PROG); fprintf(stderr, msg, a); fputc('\n', stderr);
+    exit(2);
+}
+/* an OSError line as Python prints it: Class: [Errno N] strerror: 'path' */
+static void pyrepr(Buf *o, const unsigned char *s, size_t n);
+static void os_error(int err, const char *path) {
+    const char *cls = err == ENOENT ? "FileNotFoundError" : err == EISDIR ? "IsADirectoryError"
+                    : err == ENOTDIR ? "NotADirectoryError" : (err == EACCES || err == EPERM) ? "PermissionError"
+                    : err == EEXIST ? "FileExistsError" : "OSError";
+    const char *why = err == ENOENT ? "No such file or directory" : err == EISDIR ? "Is a directory"   /* glibc wording; this
+                      libc's strerror lacks some */
+                    : err == ENOTDIR ? "Not a directory" : err == EACCES ? "Permission denied" : err == EPERM ? "Operation not permitted"
+                    : err == EEXIST ? "File exists" : err == ENOSPC ? "No space left on device" : err == EROFS ? "Read-only file system"
+                    : err == ENAMETOOLONG ? "File name too long" : err == ELOOP ? "Too many levels of symbolic links" : strerror(err);
+    Buf r = {0};
+    pyrepr(&r, (const unsigned char *)path, strlen(path));
+    fflush(stdout);
+    fprintf(stderr, "%s: [Errno %d] %s: %s\n", cls, err, why, (char *)r.p);
+    cleanup(); exit(1);
+}
+
+/* shutil.copy2 without the timestamps (the probe build ignores them): content, then permission bits */
+static void copy2(const char *src, const char *dst) {
+    size_t n = 0; char *b; struct stat s;
+    if (stat(src, &s) != 0) os_error(errno, src);
+    if (S_ISDIR(s.st_mode)) os_error(EISDIR, src);
+    b = cx_read(src, &n);
+    if (!b) os_error(errno ? errno : EIO, src);
+    if (cx_write(dst, b, n) != 0) os_error(errno ? errno : EIO, dst);
+    free(b);
+    chmod(dst, s.st_mode & 07777);
+}
+
+/* ---- text: UTF-8 validation (bytes.decode), universal newlines, Python repr, JSON ---- */
+/* one strict UTF-8 code point at s[i]; length in *l; -1 if invalid, with *bad = how many leading bytes are a valid
+   prefix (Python's error end) and *eod = 1 when the data ends inside the sequence */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l, int *bad, int *eod) {
+    unsigned c = s[i], lo = 0x80, hi = 0xBF; int need, k; long cp;
+    *eod = 0;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else { *bad = 1; return -1; }
+    for (k = 1; k <= need; k++) {
+        unsigned d;
+        if (i + k >= n) { *bad = k; *eod = 1; return -1; }
+        d = s[i + k];
+        if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) { *bad = k; return -1; }
+        cp = (cp << 6) | (d & 0x3F);
+    }
+    *l = need + 1; return cp;
+}
+/* Python's bytes.decode('utf-8') error, or 0 when S is valid */
+static int utf8_error(const unsigned char *s, size_t n, char *msg, size_t cap) {
+    size_t i = 0; int l, bad, eod;
+    while (i < n) {
+        if (cp_at(s, n, i, &l, &bad, &eod) < 0) {
+            size_t end = eod ? n : i + (size_t)bad;
+            const char *why = eod ? "unexpected end of data" : bad == 1 && (s[i] < 0xC2 || s[i] > 0xF4) ? "invalid start byte" : "invalid continuation byte";
+            if (end == i + 1) snprintf(msg, cap, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s", s[i], (unsigned long)i, why);
+            else snprintf(msg, cap, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: %s", (unsigned long)i, (unsigned long)(end - 1), why);
+            return 1;
+        }
+        i += (size_t)l;
+    }
+    return 0;
+}
+/* universal newlines: \r\n and lone \r become \n */
+static void newlines(char *s, size_t *n) {
+    size_t i, j = 0;
+    for (i = 0; i < *n; i++) {
+        if (s[i] == '\r') { s[j++] = '\n'; if (i + 1 < *n && s[i + 1] == '\n') i++; }
+        else s[j++] = s[i];
+    }
+    *n = j; s[j] = 0;
+}
+/* str.isprintable for the code points a compiler or probe can plausibly emit: C0/C1 controls, DEL, the Latin-1
+   NBSP and soft hyphen, zero-width and bidi formatting characters, line/paragraph separators, BOM, surrogates,
+   private use and noncharacters are not printable */
+static int printable(long c) {
+    if (c < 0x20 || (c >= 0x7F && c <= 0xA0) || c == 0xAD) return 0;
+    if (c == 0x1680 || (c >= 0x2000 && c <= 0x200F) || (c >= 0x2028 && c <= 0x202F) || (c >= 0x205F && c <= 0x206F)) return 0;
+    if (c == 0x3000 || c == 0xFEFF || (c >= 0xD800 && c <= 0xF8FF) || c == 0xFFFE || c == 0xFFFF) return 0;
+    if (c >= 0xFFF9 && c <= 0xFFFB) return 0;
+    if (c >= 0xF0000) return 0;
+    return 1;
+}
+/* repr(str) */
+static void pyrepr(Buf *o, const unsigned char *s, size_t n) {
+    int sq = 0, dq = 0, l, bad, eod; size_t i; char q, t[16];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    bbyte(o, (unsigned char)q);
+    for (i = 0; i < n; i += (size_t)l) {
+        long c = cp_at(s, n, i, &l, &bad, &eod);
+        if (c < 0) { c = s[i]; l = 1; }
+        if (c == q || c == '\\') { bbyte(o, '\\'); bbyte(o, (unsigned)c); }
+        else if (c == '\n') bputs(o, "\\n");
+        else if (c == '\r') bputs(o, "\\r");
+        else if (c == '\t') bputs(o, "\\t");
+        else if (printable(c)) bput(o, s + i, (size_t)l);
+        else {
+            if (c < 0x100) snprintf(t, sizeof t, "\\x%02x", (unsigned)c);
+            else if (c < 0x10000) snprintf(t, sizeof t, "\\u%04lx", c);
+            else snprintf(t, sizeof t, "\\U%08lx", c);
+            bputs(o, t);
+        }
+    }
+    bbyte(o, (unsigned char)q);
+}
+/* json.dumps(str) with ensure_ascii */
+static void jstr(Buf *o, const unsigned char *s, size_t n) {
+    size_t i; int l, bad, eod; char t[16];
+    bbyte(o, '"');
+    for (i = 0; i < n; i += (size_t)l) {
+        long c = cp_at(s, n, i, &l, &bad, &eod);
+        if (c < 0) { c = s[i]; l = 1; }
+        if (c == '"') bputs(o, "\\\"");
+        else if (c == '\\') bputs(o, "\\\\");
+        else if (c == '\n') bputs(o, "\\n");
+        else if (c == '\r') bputs(o, "\\r");
+        else if (c == '\t') bputs(o, "\\t");
+        else if (c == '\b') bputs(o, "\\b");
+        else if (c == '\f') bputs(o, "\\f");
+        else if (c >= 0x20 && c < 0x7F) bbyte(o, (unsigned)c);
+        else if (c < 0x10000) { snprintf(t, sizeof t, "\\u%04lx", c); bputs(o, t); }
+        else {
+            long v = c - 0x10000;
+            snprintf(t, sizeof t, "\\u%04lx\\u%04lx", 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF)); bputs(o, t);
+        }
+    }
+    bbyte(o, '"');
+}
+
+/* ---- the step records ---- */
+typedef struct Rec { int sanitize, rc; char *argv[40]; int argc; char *out, *err; size_t outn, errn; } Rec;
+static Rec RECS[8]; static int NREC;
+static const char *ARCH;
+
+static void rec_repr(Buf *o, const Rec *r) {
+    int i;
+    bputs(o, "{'arch': "); pyrepr(o, (const unsigned char *)ARCH, strlen(ARCH));
+    bputs(o, ", 'sanitize': "); bputs(o, r->sanitize ? "True" : "False");
+    bputs(o, ", 'command': [");
+    for (i = 0; i < r->argc; i++) { if (i) bputs(o, ", "); pyrepr(o, (const unsigned char *)r->argv[i], strlen(r->argv[i])); }
+    { char t[32]; snprintf(t, sizeof t, "], 'rc': %d", r->rc); bputs(o, t); }
+    bputs(o, ", 'stdout': "); pyrepr(o, (const unsigned char *)r->out, r->outn);
+    bputs(o, ", 'stderr': "); pyrepr(o, (const unsigned char *)r->err, r->errn);
+    bputs(o, "}");
+}
+
+/* subprocess.run([ROOT/tests/bound, '20', *COMMAND], capture_output=True, text=True); stdin inherited */
+static void run(char **command) {
+    char bound[4200], op[4300], ep[4300], *a[48]; int k = 0, st = 0, i, ofd, efd; pid_t pid;
+    Rec *r = &RECS[NREC]; size_t on = 0, en = 0; char *ob, *eb, msg[256];
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    a[k++] = bound; a[k++] = "20";
+    for (i = 0; command[i] && k < 47; i++) a[k++] = command[i];
+    a[k] = 0;
+    snprintf(op, sizeof op, "%s/.stdout", TD); snprintf(ep, sizeof ep, "%s/.stderr", TD);
+    fflush(stdout); fflush(stderr);
+    ofd = open(op, O_WRONLY | O_CREAT | O_TRUNC, 0666); efd = open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (ofd < 0 || efd < 0) die("librarycarriernativeplancheck: cannot create capture files in %s", TD);
+    pid = fork();
+    if (pid < 0) die("librarycarriernativeplancheck: fork failed for %s", bound);
+    if (pid == 0) { dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd); execvp(a[0], a); _exit(127); }
+    close(ofd); close(efd);
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) die("librarycarriernativeplancheck: wait failed for %s", bound);
+    ob = cx_read(op, &on); eb = cx_read(ep, &en);
+    unlink(op); unlink(ep);
+    if (!ob) { ob = calloc(1, 1); on = 0; }
+    if (!eb) { eb = calloc(1, 1); en = 0; }
+    if (utf8_error((unsigned char *)ob, on, msg, sizeof msg) || utf8_error((unsigned char *)eb, en, msg, sizeof msg)) {
+        fflush(stdout); fprintf(stderr, "%s\n", msg); cleanup(); exit(1);
+    }
+    newlines(ob, &on); newlines(eb, &en);
+    r->sanitize = 0; r->argc = 0;
+    for (i = 0; command[i] && i < 39; i++) r->argv[r->argc++] = command[i];
+    r->rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
+    r->out = ob; r->outn = on; r->err = eb; r->errn = en;
+    NREC++;
+    fwrite(ob, 1, on, stdout);
+    if (r->rc) {
+        Buf o = {0};
+        rec_repr(&o, r);
+        fflush(stdout); fprintf(stderr, "AssertionError: %s\n", (char *)o.p);
+        cleanup(); exit(1);
+    }
+}
+
+/* ---- argparse ---- */
+static int looks_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+static int prefix_of(const char *p, size_t n, const char *opt) { return n >= 3 && n <= strlen(opt) && !strncmp(p, opt, n); }
+/* which option a '--' token names: 1 help, 2 arch, 3 evidence, 0 none; EQ gets the explicit value after '=' */
+static int long_opt(const char *s, const char **eq) {
+    const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s);
+    *eq = e ? e + 1 : 0;
+    if (prefix_of(s, n, "--help")) return 1;
+    if (prefix_of(s, n, "--arch")) return 2;
+    if (prefix_of(s, n, "--evidence")) return 3;
+    return 0;
+}
+static int is_option(const char *s) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && long_opt(s, &eq)) return 1;
+    if (s[1] == 'h') return 1;
+    if (looks_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+static void parse(int argc, char **argv, const char **arch, const char **evidence) {
+    static char extras[8192]; size_t xl = 0; int i, help = 0;
+    extras[0] = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int o = 0;
+        if (!strcmp(s, "--")) {
+            for (; i < argc; i++) xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", argv[i]);
+            break;
+        }
+        if (s[0] == '-' && s[1] == '-') o = long_opt(s, &eq);
+        else if (s[0] == '-' && s[1] == 'h') o = 1;
+        if (o == 1) {
+            if (eq && s[1] == '-') usage_error("argument -h/--help: ignored explicit argument '%s'", eq);
+            if (s[1] == '-' || (s[2] != '=' && s[2] != '-')) { help = 1; break; }
+            usage_error("argument -h/--help: ignored explicit argument '%s'", s + 2 + (s[2] == '='));
+        } else if (o == 2 || o == 3) {
+            const char *v = eq;
+            if (!v) {
+                if (i + 1 >= argc || is_option(argv[i + 1]))
+                    usage_error(o == 2 ? "argument --arch: expected one argument" : "argument --evidence: expected one argument", 0);
+                v = argv[++i];
+            }
+            if (o == 2) {
+                if (strcmp(v, "arm64") && strcmp(v, "x86_64"))
+                    usage_error("argument --arch: invalid choice: '%s' (choose from 'arm64', 'x86_64')", v);
+                *arch = v;
+            } else *evidence = v;
+        } else xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", s);
+    }
+    if (help) {
+        printf("%s\noptions:\n  -h, --help            show this help message and exit\n  --arch {arm64,x86_64}\n"
+               "  --evidence EVIDENCE\n", USAGE);
+        exit(0);
+    }
+    if (xl) usage_error("unrecognized arguments: %s", extras);
+}
+
+/* str(Path(P)): repeated slashes collapse, '.' components drop, a trailing slash goes; '' is '.' */
+static void pathnorm(const char *p, char *o, size_t cap) {
+    size_t j = 0; const char *s = p;
+    if (p[0] == '/') { o[j++] = '/'; if (p[1] == '/' && p[2] != '/') o[j++] = '/'; }
+    while (*s && j + 1 < cap) {
+        const char *e; size_t n;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = strchr(s, '/'); n = e ? (size_t)(e - s) : strlen(s);
+        if (!(n == 1 && s[0] == '.')) {
+            if (j && o[j - 1] != '/') o[j++] = '/';
+            if (j + n + 1 > cap) n = cap - j - 1;
+            memcpy(o + j, s, n); j += n;
+        }
+        s += n;
+    }
+    if (!j) o[j++] = '.';
+    o[j] = 0;
+}
+
+static char *uname_field(char *flag) {
+    char *a[] = { "uname", flag, 0 }, *out = 0; size_t n = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+
+int main(int argc, char **argv) {
+    const char *arch = 0, *evidence = 0, *host, *cc, *tmp; int darwin, san, i; char *mach, *sys;
+    char rt[4300], probe[4300], src[4300], cdir[4300], target[64], names[7][4300];
+    Buf I, D, U3, P, un, original, carrier, cert = {0}, leaf = {0}, cb, files[7];
+    DIR *d; struct dirent *e;
+    parse(argc, argv, &arch, &evidence);
+    if (getcwd(ROOT, sizeof ROOT) == 0) return 2;
+    mach = uname_field("-m"); sys = uname_field("-s");   /* platform.machine(), platform.system() */
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    if (!arch) arch = host;
+    ARCH = arch;
+    darwin = !strcmp(sys, "Darwin");
+
+    /* the fixtures */
+    I = desc(1, 8, 8, 1, 0, 0, 0);
+    D = desc(3, 8, 8, 0, 0, 0, 0);
+    { Buf z = {0}; U3 = z; } bU(&U3, 0); bU(&U3, 0); bU(&U3, 0);
+    { Buf z = {0}; P = z; }
+    bU(&P, 2); bcat(&P, &U3); bU(&P, 8); bcat(&P, &D); bcat(&P, &U3); bU(&P, 8); bcat(&P, &I);
+    un = desc(5, 8, 8, 0, 0, 2, &P);
+    original = sig(&un, 0, 0, 0); carrier = sig(&I, 1, 0, 0);
+    snprintf(target, sizeof target, "%s/%s", darwin ? "osx" : "lnx", arch);
+    bputs(&cert, "USLNCAR1\n"); bU(&cert, strlen(target)); bputs(&cert, target);
+    bU(&cert, original.n); bcat(&cert, &original); bU(&cert, carrier.n); bcat(&cert, &carrier);
+    bbyte(&leaf, 1); bbyte(&leaf, 0); bU(&leaf, 1); bbyte(&leaf, 0); bbyte(&leaf, 0);
+    bU(&leaf, 1); bcat(&leaf, &I); bU(&leaf, 1); bcat(&leaf, &I); bbyte(&leaf, 1);
+    cb = desc(4, 8, 8, 0, 1, 4, &leaf);
+    files[0] = cert; files[1] = original; files[2] = carrier; files[3] = sig(&I, 0, 0, 0);
+    files[4] = sig(&un, 0, 1, 0); files[5] = sig(&cb, 0, 0, &I); files[6] = sig(&un, 1, 0, 0);
+
+    cc = getenv("CC"); if (!cc) cc = "cc";
+    tmp = getenv("TMPDIR");   /* tempfile.gettempdir(): TMPDIR, TEMP, TMP, then /tmp */
+    if (!tmp || !*tmp) tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    if (tmp[0] == '/') snprintf(TD, sizeof TD, "%s/r10-carrier-nativeplan-XXXXXX", tmp);
+    else snprintf(TD, sizeof TD, "%s/%s/r10-carrier-nativeplan-XXXXXX", ROOT, tmp);
+    if (!mkdtemp(TD)) { const char *t = tmp; TD[0] = 0; die("librarycarriernativeplancheck: cannot create a temporary directory under %s", t); }
+    snprintf(rt, sizeof rt, "%s/headers", TD);
+    if (mkdir(rt, 0777) != 0) os_error(errno, rt);
+    snprintf(cdir, sizeof cdir, "%s/exec/c", ROOT);
+    if ((d = opendir(cdir))) {   /* (ROOT/'exec/c').glob('*.h') */
+        while ((e = readdir(d))) {
+            size_t n = strlen(e->d_name); char from[8400], to[8400];
+            if (n < 2 || strcmp(e->d_name + n - 2, ".h")) continue;
+            snprintf(from, sizeof from, "%s/%s", cdir, e->d_name);
+            snprintf(to, sizeof to, "%s/%s", rt, e->d_name);
+            copy2(from, to);
+        }
+        closedir(d);
+    }
+    snprintf(src, sizeof src, "%s/tests/librarycarriernativeplancheck.c", ROOT);
+    snprintf(probe, sizeof probe, "%s/probe.c", TD);
+    copy2(src, probe);
+    for (i = 0; i < 7; i++) {
+        snprintf(names[i], sizeof names[i], "%s/%d", TD, i);
+        if (cx_write(names[i], files[i].p, files[i].n) != 0) os_error(errno ? errno : EIO, names[i]);
+    }
+    for (san = 0; san <= 1; san++) {
+        static char exes[2][4300]; char *b[32], *r[16]; int k = 0, j = 0;
+        char *exe = exes[san];
+        snprintf(exe, 4300, "%s/%s", TD, san ? "san" : "normal");
+        b[k++] = (char *)cc;
+        if (darwin) { b[k++] = "-arch"; b[k++] = (char *)arch; }
+        b[k++] = "-std=c11"; b[k++] = "-O1"; b[k++] = "-Wall"; b[k++] = "-Wextra"; b[k++] = "-Wno-unused-function";
+        b[k++] = "-Wno-misleading-indentation";
+        b[k++] = "-I"; b[k++] = rt; b[k++] = probe; b[k++] = "-lffi"; b[k++] = "-o"; b[k++] = exe;
+        if (san) { b[k++] = "-fsanitize=address,undefined"; b[k++] = "-fno-omit-frame-pointer"; b[k++] = "-g"; }
+        b[k] = 0;
+        RECS[NREC].sanitize = san; run(b); RECS[NREC - 1].sanitize = san;
+        if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { r[j++] = "arch"; r[j++] = "-x86_64"; }
+        r[j++] = exe; r[j++] = target;
+        for (i = 0; i < 7; i++) r[j++] = names[i];
+        r[j] = 0;
+        RECS[NREC].sanitize = san; run(r); RECS[NREC - 1].sanitize = san;
+    }
+    {   /* the record: commands as run, then the input digests (read after the runs, as the original did) */
+        static const char *inputs[] = { "exec/c/librarynative.h", "exec/c/librarycarrierplan.h", "tests/librarycarriernativeplancheck.c" };
+        char hex[3][65];
+        for (i = 0; i < 3; i++) {
+            char p[4400]; size_t n = 0; char *b;
+            snprintf(p, sizeof p, "%s/%s", ROOT, inputs[i]);
+            b = cx_read(p, &n);
+            if (!b) os_error(errno ? errno : ENOENT, p);
+            cx_sha256_hex(b, n, hex[i]); free(b);
+        }
+        if (evidence) {
+            Buf o = {0}; int c, x; char ep[4400]; FILE *f;
+            bputs(&o, "{\n  \"scope\": \"explicit fixtures; carrier native plan mechanism only, no model/public acceptance\",\n  \"commands\": [");
+            for (c = 0; c < NREC; c++) {
+                Rec *rr = &RECS[c]; char t[32];
+                bputs(&o, c ? ",\n    {\n" : "\n    {\n");
+                bputs(&o, "      \"arch\": "); jstr(&o, (const unsigned char *)arch, strlen(arch));
+                bputs(&o, ",\n      \"sanitize\": "); bputs(&o, rr->sanitize ? "true" : "false");
+                bputs(&o, ",\n      \"command\": [");
+                for (x = 0; x < rr->argc; x++) {
+                    bputs(&o, x ? ",\n        " : "\n        ");
+                    jstr(&o, (const unsigned char *)rr->argv[x], strlen(rr->argv[x]));
+                }
+                bputs(&o, rr->argc ? "\n      ]" : "]");
+                snprintf(t, sizeof t, ",\n      \"rc\": %d", rr->rc); bputs(&o, t);
+                bputs(&o, ",\n      \"stdout\": "); jstr(&o, (const unsigned char *)rr->out, rr->outn);
+                bputs(&o, ",\n      \"stderr\": "); jstr(&o, (const unsigned char *)rr->err, rr->errn);
+                bputs(&o, "\n    }");
+            }
+            bputs(&o, NREC ? "\n  ],\n  \"inputs\": {" : "],\n  \"inputs\": {");
+            for (i = 0; i < 3; i++) {
+                bputs(&o, i ? ",\n    " : "\n    ");
+                jstr(&o, (const unsigned char *)inputs[i], strlen(inputs[i])); bputs(&o, ": "); jstr(&o, (const unsigned char *)hex[i], 64);
+            }
+            bputs(&o, "\n  },\n  \"status\": \"passed\"\n}\n");
+            pathnorm(evidence, ep, sizeof ep);
+            errno = 0;
+            if (!(f = fopen(ep, "w"))) os_error(errno, ep);
+            if (fwrite(o.p, 1, o.n, f) != o.n || fclose(f) != 0) os_error(errno ? errno : EIO, ep);
+        }
+    }
+    cleanup();
+    printf("carrier native plan normal + ASan/UBSan passed on %s\n", arch);
+    return 0;
+}

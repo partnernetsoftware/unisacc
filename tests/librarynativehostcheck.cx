@@ -1,0 +1,260 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarynativehostcheck.cx -- typed native host (libffi) over the USBIND3 wire; ported from
+   tests/librarynativehostcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   Gate name: lib-typed-host.
+   usage: sh ./unisacc.com -run tests/librarynativehostcheck.cx   (arguments are ignored, as by the Python checker)
+   In a fresh temporary directory (TMPDIR, TEMP, TMP, then /tmp, as tempfile does; prefix r10-nativehost-) it builds
+   tests/librarynativehostcheck.c twice with $CC (default cc): `-std=c99 -I ROOT -Wall -Wextra -Wno-unused-function
+   ... -lffi`, plain and then with -fsanitize=address,undefined -g.  For each build and each case (pair, fp, int17) it
+   writes the USLSIG2 declaration of `exchange` (result and argument type descriptors) to CASE.sig and runs the probe
+   `probe CASE.sig CASE` with US_NATIVE_WIRE=DIR/wire.  Every command goes through `tests/bound 20` and inherits this
+   process's stdout/stderr (the probe's own success line passes through).  The wire must read: USBIND3 magic, two
+   entries, each sized exactly; kind/origin/ordinal/abi/variadic all 0 and a nonzero address; format 1 carries
+   dispatcher 123, a nonzero handle, argc = argument count and the exact declaration bytes; format 0 is `legacy`
+   with argc 0 and a 48-byte body; a trailing 1 byte; names exactly {exchange, legacy}; nothing left over.
+   Success: `native typed host: normal and ASan/UBSan passed` on stdout, rc 0.  Any failure is the .py's uncaught
+   exception (CalledProcessError, AssertionError, IndexError): one `librarynativehostcheck: ...` line on stderr, the
+   temporary directory removed, rc 1.
+   ROOT is the parent of the directory holding this file (Path(__file__).resolve().parents[1]). */
+
+extern char **environ;
+static char ROOT[4096], TD[4096], BASE[4096];
+
+/* ---- byte buffers -------------------------------------------------------------------------------------------- */
+typedef struct { unsigned char *p; size_t n, cap; } Buf;
+static void fail(const char *kind, const char *a);
+static void put(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->p, c))) fail("MemoryError", "out of memory");
+        b->p = t; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n;
+}
+static void u64(Buf *b, unsigned long long v) {   /* struct.pack('<Q', v) */
+    unsigned char t[8]; int i;
+    for (i = 0; i < 8; i++) t[i] = (unsigned char)(v >> (8 * i));
+    put(b, t, 8);
+}
+static void byte(Buf *b, int v) { unsigned char c = (unsigned char)v; put(b, &c, 1); }
+static void cat(Buf *b, const Buf *s) { put(b, s->p, s->n); }
+
+/* desc(kind, width, align, depth=0, tag=0, payload=b'') */
+static Buf desc(int kind, int width, int align, int depth, int tag, const Buf *payload) {
+    Buf r = { 0, 0, 0 };
+    u64(&r, (unsigned)depth); u64(&r, 0); u64(&r, 0); u64(&r, (unsigned)kind); u64(&r, (unsigned)width); u64(&r, 0); u64(&r, (unsigned)align);
+    byte(&r, tag);
+    u64(&r, payload ? payload->n : 0);
+    if (payload) cat(&r, payload);
+    return r;
+}
+/* signature(result, args) */
+static Buf signature(const Buf *result, Buf *const *args, int nargs) {
+    Buf r = { 0, 0, 0 }; int i;
+    put(&r, "USLSIG2\n", 8); u64(&r, 1); u64(&r, 8); put(&r, "exchange", 8);
+    byte(&r, 0); byte(&r, 1); byte(&r, 0); byte(&r, 1);
+    u64(&r, (unsigned)nargs); cat(&r, result); u64(&r, (unsigned)nargs);
+    for (i = 0; i < nargs; i++) cat(&r, args[i]);
+    byte(&r, 1);
+    return r;
+}
+
+/* ---- cleanup and failure ------------------------------------------------------------------------------------- */
+static void rmtree(const char *d) {
+    DIR *dp; struct dirent *e; char p[8192]; struct stat st;
+    if (lstat(d, &st) != 0) return;
+    if (!S_ISDIR(st.st_mode)) { unlink(d); return; }
+    if ((dp = opendir(d))) {
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+            rmtree(p);
+        }
+        closedir(dp);
+    }
+    rmdir(d);
+}
+static void fail(const char *kind, const char *a) {
+    fflush(stdout);
+    fprintf(stderr, "librarynativehostcheck: %s: %s\n", kind, a);
+    if (TD[0]) rmtree(TD);
+    exit(1);
+}
+
+/* ---- children: subprocess.run([bound, '20', *cmd], check=True, env=...) with inherited stdio ------------------ */
+static char **ENV; static int NENV;
+static void envinit(void) {   /* setenv() in the carried libc does not reach exec: build envp by hand */
+    char **e; int n = 0;
+    for (e = environ; e && *e; e++) n++;
+    ENV = malloc((size_t)(n + 2) * sizeof *ENV);
+    if (!ENV) fail("MemoryError", "out of memory");
+    for (e = environ; e && *e; e++) ENV[NENV++] = *e;
+    ENV[NENV] = 0;
+}
+/* env=None (inherit) when wire is 0; else dict(os.environ, US_NATIVE_WIRE=wire) */
+static void run(char **cmd, const char *wire) {
+    char bound[4200], *argv[32], **envp = environ, *kv = 0, **own = 0; int n = 0, i, st = 0; pid_t pid, w;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv[n++] = bound; argv[n++] = "20";
+    for (i = 0; cmd[i] && n < 31; i++) argv[n++] = cmd[i];
+    argv[n] = 0;
+    if (wire) {
+        size_t l = strlen("US_NATIVE_WIRE"); int k = 0, set = 0;
+        own = malloc((size_t)(NENV + 2) * sizeof *own);
+        kv = malloc(l + strlen(wire) + 2);
+        if (!own || !kv) fail("MemoryError", "out of memory");
+        sprintf(kv, "US_NATIVE_WIRE=%s", wire);
+        for (i = 0; i < NENV; i++) {
+            if (!strncmp(ENV[i], "US_NATIVE_WIRE", l) && ENV[i][l] == '=') { if (!set) { own[k++] = kv; set = 1; } }
+            else own[k++] = ENV[i];
+        }
+        if (!set) own[k++] = kv;
+        own[k] = 0; envp = own;
+    }
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed");
+    if (pid == 0) { execve(bound, argv, envp); _exit(127); }
+    while ((w = waitpid(pid, &st, 0)) < 0) ;
+    free(own); free(kv);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        char msg[8400]; int k;
+        snprintf(msg, sizeof msg, "Command [%s, 20", bound);
+        for (k = 2; argv[k]; k++) { size_t l = strlen(msg); snprintf(msg + l, sizeof msg - l, ", %s", argv[k]); }
+        { size_t l = strlen(msg);
+          if (WIFEXITED(st)) snprintf(msg + l, sizeof msg - l, "] returned non-zero exit status %d.", WEXITSTATUS(st));
+          else snprintf(msg + l, sizeof msg - l, "] died with signal %d.", WIFSIGNALED(st) ? WTERMSIG(st) : 0); }
+        fail("CalledProcessError", msg);
+    }
+}
+
+/* ---- tempfile.gettempdir() ----------------------------------------------------------------------------------- */
+static void normpath(const char *in, char *out, size_t cap) {
+    char tmp[8192], *seg[1024]; int n = 0, i; char *s = tmp, *e;
+    if (in[0] == '/') snprintf(tmp, sizeof tmp, "%s", in);
+    else { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(tmp, sizeof tmp, "%s/%s", cwd, in); }
+    for (; *s; s = e) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (*e) *e++ = 0;
+        if (!strcmp(s, ".")) continue;
+        if (!strcmp(s, "..")) { if (n) n--; continue; }
+        if (n < 1024) seg[n++] = s;
+    }
+    out[0] = 0;
+    if (!n) { snprintf(out, cap, "/"); return; }
+    for (i = 0; i < n; i++) { size_t l = strlen(out); snprintf(out + l, cap - l, "/%s", seg[i]); }
+}
+static void gettempdir(void) {
+    const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" }; int i; struct stat st;
+    for (i = 0; i < 3; i++) { const char *v = getenv(env[i]); if (v && *v && stat(v, &st) == 0 && S_ISDIR(st.st_mode) && access(v, W_OK | X_OK) == 0) { normpath(v, BASE, sizeof BASE); return; } }
+    for (i = 0; i < 3; i++) if (stat(fixed[i], &st) == 0 && S_ISDIR(st.st_mode) && access(fixed[i], W_OK | X_OK) == 0) { snprintf(BASE, sizeof BASE, "%s", fixed[i]); return; }
+    normpath(".", BASE, sizeof BASE);
+}
+
+/* ---- the wire reader (IndexError / struct.error on any read past the end) ------------------------------------ */
+static const unsigned char *DATA; static size_t LEN, AT;
+static unsigned long long q(void) {
+    unsigned long long v = 0; int i;
+    if (AT > LEN || LEN - AT < 8) fail("struct.error", "unpack_from requires a buffer of at least 8 bytes");
+    for (i = 7; i >= 0; i--) v = (v << 8) | DATA[AT + i];
+    AT += 8; return v;
+}
+static unsigned b1(void) {
+    if (AT >= LEN) fail("IndexError", "index out of range");
+    return DATA[AT++];
+}
+static void need(int ok, const char *what) { if (!ok) fail("AssertionError", what); }
+
+static void check_wire(const char *wire, const Buf *decl, int nargs) {
+    size_t n = 0; unsigned long long count, e; int seen_exchange = 0, seen_legacy = 0, seen_other = 0;
+    DATA = (const unsigned char *)cx_read(wire, &n);
+    if (!DATA) fail("FileNotFoundError", wire);
+    LEN = n; AT = 8;
+    need(LEN >= 8 && !memcmp(DATA, "USBIND3\n", 8), "data[:8]==b'USBIND3\\n'");
+    count = q(); need(count == 2, "count==2");
+    for (e = 0; e < count; e++) {
+        unsigned long long size, nl, end, ordinal, addr, argc; const unsigned char *nm; size_t nmn;
+        unsigned kind, origin, abi, var, fmt;
+        size = q(); end = AT + size;
+        nl = q();
+        nm = DATA + (AT < LEN ? AT : LEN);
+        nmn = AT >= LEN ? 0 : (LEN - AT < nl ? LEN - AT : (size_t)nl);
+        AT += (size_t)nl;
+        if (nmn == 8 && !memcmp(nm, "exchange", 8)) seen_exchange = 1;
+        else if (nmn == 6 && !memcmp(nm, "legacy", 6)) seen_legacy = 1;
+        else seen_other = 1;
+        if (AT > LEN || LEN - AT < 2) fail("ValueError", "not enough values to unpack");
+        kind = DATA[AT]; origin = DATA[AT + 1]; AT += 2;
+        ordinal = q();
+        if (AT > LEN || LEN - AT < 2) fail("ValueError", "not enough values to unpack");
+        abi = DATA[AT]; var = DATA[AT + 1]; AT += 2;
+        addr = q(); argc = q(); fmt = b1();
+        need(kind == 0 && origin == 0 && ordinal == 0 && abi == 0 && var == 0 && addr, "(kind,origin,ordinal,abi,var)==(0,0,0,0,0) and addr");
+        if (fmt == 1) {
+            unsigned long long dispatcher = q(), handle = q(), length = q();
+            need(dispatcher == 123 && handle && argc == (unsigned long long)nargs && length == decl->n && AT <= LEN && LEN - AT >= length
+                 && !memcmp(DATA + AT, decl->p, decl->n), "dispatcher==123 and handle and argc==len(args) and data[at:at+length]==decl");
+            AT += (size_t)length;
+        } else {
+            need(fmt == 0 && nmn == 6 && !memcmp(nm, "legacy", 6) && argc == 0, "fmt==0 and nm==b'legacy' and argc==0");
+            AT += 48;
+        }
+        need(b1() == 1, "data[at]==1");
+        need(AT == end, "at==end");
+    }
+    need(AT == LEN && seen_exchange && seen_legacy && !seen_other, "at==len(data) and seen=={b'exchange',b'legacy'}");
+    free((void *)DATA); DATA = 0;
+}
+
+int main(int argc, char **argv) {
+    char self[4096], *slash, exe[4200], src[4200], file[4200], wire[4200]; const char *cc; int k, sanitize, c, i;
+    Buf I, D, F, P, PAIR, pl = { 0, 0, 0 };
+    (void)argc;
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(argv[0], self)) { if (!getcwd(ROOT, sizeof ROOT)) return 1; }
+    else {
+        for (k = 0; k < 2; k++) { slash = strrchr(self, '/'); if (slash && slash != self) *slash = 0; else { strcpy(self, "/"); break; } }
+        snprintf(ROOT, sizeof ROOT, "%s", self);
+    }
+    envinit();
+    I = desc(1, 4, 4, 0, 0, 0); D = desc(3, 8, 8, 0, 0, 0); F = desc(3, 4, 4, 0, 0, 0); P = desc(2, 8, 8, 1, 0, 0);
+    u64(&pl, 2); u64(&pl, 0); u64(&pl, 0); u64(&pl, 0); u64(&pl, 8); cat(&pl, &D); u64(&pl, 8); u64(&pl, 0); u64(&pl, 0); u64(&pl, 4); cat(&pl, &I);
+    PAIR = desc(5, 16, 8, 0, 1, &pl);
+    gettempdir();
+    snprintf(TD, sizeof TD, "%s/r10-nativehost-XXXXXX", BASE);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("OSError", "cannot create a temporary directory"); }
+    snprintf(exe, sizeof exe, "%s/probe", TD);
+    snprintf(src, sizeof src, "%s/tests/librarynativehostcheck.c", ROOT);
+    snprintf(wire, sizeof wire, "%s/wire", TD);
+    cc = getenv("CC"); if (!cc) cc = "cc";
+    for (sanitize = 0; sanitize < 2; sanitize++) {
+        char *cmd[20]; int n = 0;
+        cmd[n++] = (char *)cc; cmd[n++] = "-std=c99"; cmd[n++] = "-I"; cmd[n++] = ROOT; cmd[n++] = "-Wall"; cmd[n++] = "-Wextra";
+        cmd[n++] = "-Wno-unused-function"; cmd[n++] = src; cmd[n++] = "-lffi"; cmd[n++] = "-o"; cmd[n++] = exe;
+        if (sanitize) { cmd[n++] = "-fsanitize=address,undefined"; cmd[n++] = "-g"; }
+        cmd[n] = 0;
+        run(cmd, 0);
+        for (c = 0; c < 3; c++) {
+            static const char *names[3] = { "pair", "fp", "int17" };
+            Buf *args[17], *result; int nargs; Buf decl;
+            if (c == 0) {
+                Buf *pa[9]; pa[0] = &I; pa[1] = &D; pa[2] = &F; pa[3] = &P; pa[4] = &PAIR; pa[5] = &I; pa[6] = &D; pa[7] = &I; pa[8] = &I;
+                result = &PAIR; nargs = 9; for (i = 0; i < 9; i++) args[i] = pa[i];
+            } else if (c == 1) { result = &D; nargs = 9; for (i = 0; i < 9; i++) args[i] = &D; }
+            else { result = &I; nargs = 17; for (i = 0; i < 17; i++) args[i] = &I; }
+            snprintf(file, sizeof file, "%s/%s.sig", TD, names[c]);
+            decl = signature(result, args, nargs);
+            if (cx_write(file, decl.p, decl.n) != 0) fail("OSError", file);
+            { char *cmd2[4]; cmd2[0] = exe; cmd2[1] = file; cmd2[2] = (char *)names[c]; cmd2[3] = 0; run(cmd2, wire); }
+            check_wire(wire, &decl, nargs);
+            free(decl.p);
+        }
+    }
+    rmtree(TD); TD[0] = 0;
+    puts("native typed host: normal and ASan/UBSan passed");
+    return fflush(stdout) ? 1 : 0;
+}

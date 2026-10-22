@@ -1,0 +1,480 @@
+#!/usr/bin/env -S unisacc.com -run
+/* inventoryderivedcheck.cx -- the inventory-derived gate in C, ported from tests/inventoryderivedcheck.py (2026-10-22,
+   the owner's direction: the toolchain moves off Python).  Regenerate tests/INVENTORY.md in a private input snapshot
+   and compare exact bytes:
+     1. read ROOT/tests/INVENTORY.md (the committed bytes);
+     2. copy ROOT/tests, ROOT/exec and ROOT/.github/workflows (when each is a directory) into a fresh temporary
+        directory (TMPDIR/TEMP/TMP or /tmp, prefix inventory-derived-), skipping every entry named __pycache__ or build;
+     3. run the snapshot's own generator there: `sh UNISACC -run tests/inventory.cx -- --write --check` (cwd TREE,
+        50 s, stdout and stderr captured); on a nonzero exit pass its stdout and stderr through and exit 1;
+     4. compare the regenerated TREE/tests/INVENTORY.md with the committed bytes; on a difference print STALE and a
+        unified diff of the two (difflib.unified_diff, n=3, same SequenceMatcher and autojunk) and exit 1.
+   An OSError or the 50 s timeout is a mechanism failure: one line on stderr, exit 2.
+   Step 3 is a subprocess, not a copy of the generator's logic: the .py ran the snapshot's inventory.py, and the gate's
+   question is whether the committed generator reproduces the committed bytes, so this runs the snapshot's (committed,
+   ported) tests/inventory.cx -- one generator, no second copy to drift.  inventory.cx takes its root from the path it
+   is run as, so cwd TREE plus the relative path keeps it inside the snapshot.  UNISACC is the container running this
+   check ($UNISA_CONTAINER, as sys.executable was the running interpreter), else ROOT-of-this-file/unisacc.com.
+   usage: sh ./unisacc.com -run tests/inventoryderivedcheck.cx [-- ROOT]
+   ROOT defaults to the directory above this file (Python's Path(__file__).resolve().parents[1]); exactly one argument
+   is taken as ROOT, any other count is ignored, as in the .py. */
+#include <errno.h>
+
+#define PMAX 8192
+static char TREE[PMAX];     /* the private snapshot, removed on every exit path */
+static char OUTF[PMAX], ERRF[PMAX];
+
+/* ---- small dynamic string ---- */
+typedef struct { char *s; size_t n, cap; } Str;
+static void sput(Str *b, const char *p, size_t n) {
+    if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2 + 64; b->s = realloc(b->s, b->cap); if (!b->s) exit(2); }
+    memcpy(b->s + b->n, p, n); b->n += n; b->s[b->n] = 0;
+}
+static void sputs(Str *b, const char *p) { sput(b, p, strlen(p)); }
+
+/* glibc's messages for the errors this program can meet (the carried libc's strerror knows only a few) */
+static const char *errtext(int e) {
+    switch (e) {
+    case EPERM: return "Operation not permitted";
+    case ENOENT: return "No such file or directory";
+    case EIO: return "Input/output error";
+    case EACCES: return "Permission denied";
+    case EEXIST: return "File exists";
+    case ENOTDIR: return "Not a directory";
+    case EISDIR: return "Is a directory";
+    case EINVAL: return "Invalid argument";
+    case EMFILE: return "Too many open files";
+    case ENOSPC: return "No space left on device";
+    case EROFS: return "Read-only file system";
+    case ENAMETOOLONG: return "File name too long";
+    case ELOOP: return "Too many levels of symbolic links";
+    case ENOMEM: return "Cannot allocate memory";
+    case EBUSY: return "Device or resource busy";
+    case ENOTEMPTY: return "Directory not empty";
+    }
+    return strerror(e);
+}
+/* Python's repr() of a str: single quotes unless the text has ' and no " */
+static void repr(Str *b, const char *s) {
+    char q = (strchr(s, '\'') && !strchr(s, '"')) ? '"' : '\'', t[8];
+    sput(b, &q, 1);
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == (unsigned char)q || c == '\\') { sput(b, "\\", 1); sput(b, s, 1); }
+        else if (c == '\n') sputs(b, "\\n");
+        else if (c == '\r') sputs(b, "\\r");
+        else if (c == '\t') sputs(b, "\\t");
+        else if (c < 0x20 || c == 0x7f) { snprintf(t, sizeof t, "\\x%02x", c); sputs(b, t); }
+        else sput(b, s, 1);
+    }
+    sput(b, &q, 1);
+}
+/* str(OSError) with a filename: [Errno N] TEXT: 'PATH' */
+static void oserr(Str *b, int e, const char *path) {
+    char t[64]; snprintf(t, sizeof t, "[Errno %d] ", e); sputs(b, t); sputs(b, errtext(e));
+    if (path) { sputs(b, ": "); repr(b, path); }
+}
+
+/* ---- removal of the snapshot (TemporaryDirectory cleanup) ---- */
+static void rmtree(const char *p) {
+    struct stat st; DIR *d; struct dirent *e;
+    if (lstat(p, &st) != 0) return;
+    if (!S_ISDIR(st.st_mode)) { unlink(p); return; }
+    chmod(p, 0700);
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char c[PMAX];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) {
+    if (OUTF[0]) { unlink(OUTF); OUTF[0] = 0; }
+    if (ERRF[0]) { unlink(ERRF); ERRF[0] = 0; }
+    if (TREE[0]) { rmtree(TREE); TREE[0] = 0; }
+}
+/* except (OSError, subprocess.TimeoutExpired): one line on stderr, exit 2 */
+static void mechanism(Str *msg) {
+    cleanup();
+    fflush(stdout);
+    fprintf(stderr, "inventory-derived: mechanism/timeout: %s\n", msg->s ? msg->s : "");
+    exit(2);
+}
+static void mech_errno(int e, const char *path) { Str m = { 0, 0, 0 }; oserr(&m, e, path); mechanism(&m); }
+
+/* ---- Path.resolve() (non-strict: symlinks resolved where they exist, the rest kept as written) ---- */
+static void resolve_into(char *path, const char *rest, int depth) {
+    const char *s = rest;
+    while (*s) {
+        const char *e = strchr(s, '/'); size_t n = e ? (size_t)(e - s) : strlen(s);
+        char name[PMAX], np[PMAX]; struct stat st;
+        if (n >= sizeof name) n = sizeof name - 1;
+        memcpy(name, s, n); name[n] = 0; s += n; while (*s == '/') s++;
+        if (!n || !strcmp(name, ".")) continue;
+        if (!strcmp(name, "..")) { char *l = strrchr(path, '/'); if (l) *l = 0; continue; }
+        snprintf(np, sizeof np, "%s/%s", path, name);
+        if (depth < 40 && lstat(np, &st) == 0 && S_ISLNK(st.st_mode)) {
+            char t[PMAX]; long k = readlink(np, t, sizeof t - 1);
+            if (k >= 0) {
+                t[k] = 0;
+                if (t[0] == '/') path[0] = 0;
+                resolve_into(path, t, depth + 1);
+                continue;
+            }
+        }
+        snprintf(path, PMAX, "%s", np);
+    }
+}
+static void resolve(const char *in, char *out) {
+    out[0] = 0;
+    if (in[0] != '/') { char cwd[PMAX]; if (!getcwd(cwd, sizeof cwd)) mech_errno(errno, 0); resolve_into(out, cwd, 0); }
+    resolve_into(out, in, 0);
+    if (!out[0]) strcpy(out, "/");
+}
+
+/* Path.read_bytes() */
+static char *readall(const char *p, size_t *len) {
+    struct stat st; Str b = { 0, 0, 0 }; char buf[65536]; size_t k; FILE *f;
+    if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) mech_errno(EISDIR, p);
+    if (!(f = fopen(p, "rb"))) mech_errno(errno, p);
+    sput(&b, "", 0);
+    while ((k = fread(buf, 1, sizeof buf, f)) > 0) sput(&b, buf, k);
+    if (ferror(f)) { int e = errno; fclose(f); mech_errno(e, 0); }
+    fclose(f); *len = b.n; return b.s;
+}
+
+/* ---- shutil.copytree(src, dst, ignore=ignore_patterns('__pycache__', 'build')) ---- */
+typedef struct { Str s; int n; } Errs;     /* the shutil.Error list, already as str(list) items */
+static void err_add(Errs *E, const char *src, const char *dst, Str *why) {
+    if (E->n++) sputs(&E->s, ", ");
+    sputs(&E->s, "("); repr(&E->s, src); sputs(&E->s, ", "); repr(&E->s, dst); sputs(&E->s, ", "); repr(&E->s, why->s ? why->s : ""); sputs(&E->s, ")");
+}
+static int makedirs(const char *p) {     /* os.makedirs(p): parents as needed, p itself must be new */
+    char t[PMAX], *s; snprintf(t, sizeof t, "%s", p);
+    for (s = t + 1; (s = strchr(s, '/')); s++) { struct stat st; *s = 0; if (stat(t, &st) != 0) mkdir(t, 0777); *s = '/'; }
+    return mkdir(t, 0777) == 0 ? 0 : errno;
+}
+/* shutil.copy2 (content and permission bits); 0, or the OSError text in *why */
+static int copyfile(const char *src, const char *dst, Str *why) {
+    struct stat st; char buf[65536]; size_t k; FILE *in, *out; int e;
+    if (stat(src, &st) != 0) st.st_mode = 0644;      /* fopen below reports the error */
+    if (S_ISFIFO(st.st_mode)) { sputs(why, "`"); sputs(why, src); sputs(why, "` is a named pipe"); return -1; }
+    if (!(in = fopen(src, "rb"))) { oserr(why, errno, src); return -1; }
+    if (!(out = fopen(dst, "wb"))) { e = errno; fclose(in); oserr(why, e, dst); return -1; }
+    while ((k = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, k, out) != k) { e = errno; fclose(in); fclose(out); oserr(why, e, 0); return -1; }
+    if (ferror(in)) { e = errno; fclose(in); fclose(out); oserr(why, e, 0); return -1; }
+    fclose(in);
+    if (fclose(out) != 0) { oserr(why, errno, 0); return -1; }
+    if (chmod(dst, st.st_mode & 07777) != 0) { oserr(why, errno, dst); return -1; }
+    return 0;
+}
+static void copytree(const char *src, const char *dst, Errs *E, int top) {
+    DIR *d; struct dirent *e; int r; struct stat st;
+    if (!(d = opendir(src))) {
+        Str w = { 0, 0, 0 }; int x = errno;
+        if (top) mech_errno(x, src);
+        oserr(&w, x, src); err_add(E, src, dst, &w); free(w.s); return;
+    }
+    if ((r = makedirs(dst)) != 0) {
+        Str w = { 0, 0, 0 }; closedir(d);
+        if (top) mech_errno(r, dst);
+        oserr(&w, r, dst); err_add(E, src, dst, &w); free(w.s); return;
+    }
+    while ((e = readdir(d))) {
+        char s[PMAX], t[PMAX]; Str w = { 0, 0, 0 };
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!strcmp(e->d_name, "__pycache__") || !strcmp(e->d_name, "build")) continue;
+        snprintf(s, sizeof s, "%s/%s", src, e->d_name); snprintf(t, sizeof t, "%s/%s", dst, e->d_name);
+        if (stat(s, &st) == 0 && S_ISDIR(st.st_mode)) copytree(s, t, E, 0);
+        else if (copyfile(s, t, &w) != 0) err_add(E, s, t, &w);
+        free(w.s);
+    }
+    closedir(d);
+    if (stat(src, &st) == 0 && chmod(dst, st.st_mode & 07777) != 0) { Str w = { 0, 0, 0 }; oserr(&w, errno, dst); err_add(E, src, dst, &w); free(w.s); }
+    if (top && E->n) { Str m = { 0, 0, 0 }; sputs(&m, "["); sputs(&m, E->s.s); sputs(&m, "]"); mechanism(&m); }
+}
+
+/* tempfile.gettempdir() */
+static void tempdir(char *out) {
+    const char *env[] = { "TMPDIR", "TEMP", "TMP", 0 }, *dirs[] = { "/tmp", "/var/tmp", "/usr/tmp", 0 }; int i;
+    for (i = 0; env[i]; i++) { const char *v = getenv(env[i]); if (v && *v && access(v, W_OK | X_OK) == 0) { resolve(v, out); return; } }
+    for (i = 0; dirs[i]; i++) if (access(dirs[i], W_OK | X_OK) == 0) { snprintf(out, PMAX, "%s", dirs[i]); return; }
+    if (!getcwd(out, PMAX)) strcpy(out, ".");
+}
+/* the unisacc container to run the generator with (sys.executable's role): the one running this check, else the one
+   beside this file's root SELF */
+static void container(const char *self, char *out) {
+    const char *c = getenv("UNISA_CONTAINER");
+    if (c && *c) resolve(c, out);
+    else snprintf(out, PMAX, "%s/unisacc.com", self);
+}
+
+/* ---- difflib.unified_diff(a, b, fromfile, tofile, lineterm='') over str.splitlines() ---- */
+typedef struct { const char *p; int n, id; } Line;
+static int utf8_check(const unsigned char *s, size_t n, size_t *pos, int *v, const char **why) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i]; int need, k; unsigned lo = 0x80, hi = 0xBF;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        else { *pos = i; *v = 1; *why = "invalid start byte"; return 1; }
+        for (k = 1; k <= need; k++) {
+            unsigned x;
+            if (i + k >= n) { *pos = i; *v = k; *why = "unexpected end of data"; return 1; }
+            x = s[i + k];
+            if (k == 1 ? (x < lo || x > hi) : (x < 0x80 || x > 0xBF)) { *pos = i; *v = k; *why = "invalid continuation byte"; return 1; }
+        }
+        i += need + 1;
+    }
+    return 0;
+}
+/* str.splitlines(): \n \r \r\n \v \f \x1c \x1d \x1e U+0085 U+2028 U+2029 */
+static Line *splitlines(const char *s, size_t n, int *count) {
+    Line *v = 0; int c = 0, cap = 0; size_t i = 0, st = 0;
+    while (i < n) {
+        unsigned char ch = (unsigned char)s[i]; size_t brk = 0;
+        if (ch == '\n' || ch == 0x0b || ch == 0x0c || ch == 0x1c || ch == 0x1d || ch == 0x1e) brk = 1;
+        else if (ch == '\r') brk = (i + 1 < n && s[i + 1] == '\n') ? 2 : 1;
+        else if (ch == 0xC2 && i + 1 < n && (unsigned char)s[i + 1] == 0x85) brk = 2;
+        else if (ch == 0xE2 && i + 2 < n && (unsigned char)s[i + 1] == 0x80 && ((unsigned char)s[i + 2] == 0xA8 || (unsigned char)s[i + 2] == 0xA9)) brk = 3;
+        if (brk) {
+            if (c == cap) { cap = cap ? cap * 2 : 256; v = realloc(v, cap * sizeof *v); }
+            v[c].p = s + st; v[c].n = (int)(i - st); c++; i += brk; st = i;
+        } else i++;
+    }
+    if (st < n) { if (c == cap) { cap = cap ? cap * 2 : 1; v = realloc(v, cap * sizeof *v); } v[c].p = s + st; v[c].n = (int)(n - st); c++; }
+    *count = c; return v;
+}
+/* intern lines of both sides: equal text <-> equal id */
+static int nids;
+static void intern(Line *a, int na, Line *b, int nb) {
+    int cap = 1, total = na + nb, i, *slot; Line **all = malloc((total + 1) * sizeof *all);
+    while (cap < 2 * total + 2) cap <<= 1;
+    slot = malloc(cap * sizeof *slot); for (i = 0; i < cap; i++) slot[i] = -1;
+    for (i = 0; i < total; i++) all[i] = i < na ? &a[i] : &b[i - na];
+    for (i = 0; i < total; i++) {
+        Line *l = all[i]; unsigned h = 2166136261u; int k, j;
+        for (k = 0; k < l->n; k++) h = (h ^ (unsigned char)l->p[k]) * 16777619u;
+        for (j = (int)(h & (unsigned)(cap - 1)); slot[j] >= 0; j = (j + 1) & (cap - 1)) {
+            Line *o = all[slot[j]];
+            if (o->n == l->n && !memcmp(o->p, l->p, l->n)) break;
+        }
+        if (slot[j] < 0) { slot[j] = i; l->id = nids++; } else l->id = all[slot[j]]->id;
+    }
+    free(slot); free(all);
+}
+static Line *A, *B; static int LA, LB;
+static int *b2j_start, *b2j_idx;           /* CSR: indices of B for each id; popular ids have none */
+static int *j2len[2]; static long *j2tick[2]; static long tick;
+static void chain_b(void) {
+    int *cnt = calloc(nids + 1, sizeof *cnt), *fill, i, ntest = LB / 100 + 1;
+    for (i = 0; i < LB; i++) cnt[B[i].id]++;
+    if (LB >= 200) for (i = 0; i < nids; i++) if (cnt[i] > ntest) cnt[i] = 0;    /* autojunk: popular elements leave b2j */
+    b2j_start = malloc((nids + 1) * sizeof *b2j_start); b2j_start[0] = 0;
+    for (i = 0; i < nids; i++) b2j_start[i + 1] = b2j_start[i] + cnt[i];
+    b2j_idx = malloc((b2j_start[nids] + 1) * sizeof *b2j_idx); fill = calloc(nids + 1, sizeof *fill);
+    for (i = 0; i < LB; i++) { int id = B[i].id; if (cnt[id]) b2j_idx[b2j_start[id] + fill[id]++] = i; }
+    free(cnt); free(fill);
+    for (i = 0; i < 2; i++) { j2len[i] = calloc(LB + 1, sizeof(int)); j2tick[i] = calloc(LB + 1, sizeof(long)); }
+}
+static void longest(int alo, int ahi, int blo, int bhi, int *oi, int *oj, int *ok) {
+    int besti = alo, bestj = blo, bestsize = 0, i, cur = 0;
+    tick += 2;                              /* j2len = {} */
+    for (i = alo; i < ahi; i++) {
+        int id = A[i].id, x, prev = cur ^ 1;
+        cur = prev; prev = cur ^ 1;         /* newj2len replaces j2len */
+        tick++;
+        for (x = b2j_start[id]; x < b2j_start[id + 1]; x++) {
+            int j = b2j_idx[x], k;
+            if (j < blo) continue;
+            if (j >= bhi) break;
+            k = (j > 0 && j2tick[prev][j - 1] == tick - 1 ? j2len[prev][j - 1] : 0) + 1;
+            j2len[cur][j] = k; j2tick[cur][j] = tick;
+            if (k > bestsize) { besti = i - k + 1; bestj = j - k + 1; bestsize = k; }
+        }
+    }
+    while (besti > alo && bestj > blo && A[besti - 1].id == B[bestj - 1].id) { besti--; bestj--; bestsize++; }
+    while (besti + bestsize < ahi && bestj + bestsize < bhi && A[besti + bestsize].id == B[bestj + bestsize].id) bestsize++;
+    *oi = besti; *oj = bestj; *ok = bestsize;
+}
+typedef struct { int i, j, k; } Match;
+static int mcmp(const void *x, const void *y) {
+    const Match *p = x, *q = y;
+    if (p->i != q->i) return p->i < q->i ? -1 : 1;
+    if (p->j != q->j) return p->j < q->j ? -1 : 1;
+    return p->k < q->k ? -1 : p->k > q->k;
+}
+typedef struct { char tag; int i1, i2, j1, j2; } Op;   /* tag: e r d i */
+static Op *opcodes(int *nops) {
+    int (*q)[4] = malloc((2 * (LA + LB) + 4) * sizeof *q), nq = 0, nm = 0, x, i, j, n;
+    Match *m = malloc((LA + LB + 2) * sizeof *m), *na = malloc((LA + LB + 2) * sizeof *na); int nn = 0, i1 = 0, j1 = 0, k1 = 0;
+    Op *ops = malloc((2 * (LA + LB) + 4) * sizeof *ops);
+    q[nq][0] = 0; q[nq][1] = LA; q[nq][2] = 0; q[nq][3] = LB; nq++;
+    while (nq) {
+        int alo, ahi, blo, bhi, bi, bj, bk;
+        nq--; alo = q[nq][0]; ahi = q[nq][1]; blo = q[nq][2]; bhi = q[nq][3];
+        longest(alo, ahi, blo, bhi, &bi, &bj, &bk);
+        if (bk) {
+            m[nm].i = bi; m[nm].j = bj; m[nm].k = bk; nm++;
+            if (alo < bi && blo < bj) { q[nq][0] = alo; q[nq][1] = bi; q[nq][2] = blo; q[nq][3] = bj; nq++; }
+            if (bi + bk < ahi && bj + bk < bhi) { q[nq][0] = bi + bk; q[nq][1] = ahi; q[nq][2] = bj + bk; q[nq][3] = bhi; nq++; }
+        }
+    }
+    qsort(m, nm, sizeof *m, mcmp);
+    for (x = 0; x < nm; x++) {
+        if (i1 + k1 == m[x].i && j1 + k1 == m[x].j) k1 += m[x].k;
+        else { if (k1) { na[nn].i = i1; na[nn].j = j1; na[nn].k = k1; nn++; } i1 = m[x].i; j1 = m[x].j; k1 = m[x].k; }
+    }
+    if (k1) { na[nn].i = i1; na[nn].j = j1; na[nn].k = k1; nn++; }
+    na[nn].i = LA; na[nn].j = LB; na[nn].k = 0; nn++;
+    i = j = 0; n = 0;
+    for (x = 0; x < nn; x++) {
+        int ai = na[x].i, bj = na[x].j, size = na[x].k; char tag = 0;
+        if (i < ai && j < bj) tag = 'r'; else if (i < ai) tag = 'd'; else if (j < bj) tag = 'i';
+        if (tag) { ops[n].tag = tag; ops[n].i1 = i; ops[n].i2 = ai; ops[n].j1 = j; ops[n].j2 = bj; n++; }
+        i = ai + size; j = bj + size;
+        if (size) { ops[n].tag = 'e'; ops[n].i1 = ai; ops[n].i2 = i; ops[n].j1 = bj; ops[n].j2 = j; n++; }
+    }
+    free(q); free(m); free(na);
+    *nops = n; return ops;
+}
+static void range(char *out, int start, int stop) {
+    int beginning = start + 1, length = stop - start;
+    if (length == 1) { sprintf(out, "%d", beginning); return; }
+    if (!length) beginning--;
+    sprintf(out, "%d,%d", beginning, length);
+}
+static void line(char c, const Line *l) { putchar(c); fwrite(l->p, 1, (size_t)l->n, stdout); putchar('\n'); }
+static void emit_group(Op *g, int ng, int *started) {
+    char r1[32], r2[32]; int x, y;
+    if (!*started) { *started = 1; printf("--- committed INVENTORY.md\n+++ regenerated INVENTORY.md\n"); }
+    range(r1, g[0].i1, g[ng - 1].i2); range(r2, g[0].j1, g[ng - 1].j2);
+    printf("@@ -%s +%s @@\n", r1, r2);
+    for (x = 0; x < ng; x++) {
+        Op *o = &g[x];
+        if (o->tag == 'e') { for (y = o->i1; y < o->i2; y++) line(' ', &A[y]); continue; }
+        if (o->tag == 'r' || o->tag == 'd') for (y = o->i1; y < o->i2; y++) line('-', &A[y]);
+        if (o->tag == 'r' || o->tag == 'i') for (y = o->j1; y < o->j2; y++) line('+', &B[y]);
+    }
+}
+static void unified_diff(void) {
+    int nc, x, n = 3, ng = 0, started = 0; Op *codes, *group, one;
+    chain_b();
+    codes = opcodes(&nc);
+    if (!nc) { one.tag = 'e'; one.i1 = 0; one.i2 = 1; one.j1 = 0; one.j2 = 1; codes[0] = one; nc = 1; }
+    if (codes[0].tag == 'e') { Op *c = &codes[0]; if (c->i2 - n > c->i1) c->i1 = c->i2 - n; if (c->j2 - n > c->j1) c->j1 = c->j2 - n; }
+    if (codes[nc - 1].tag == 'e') { Op *c = &codes[nc - 1]; if (c->i1 + n < c->i2) c->i2 = c->i1 + n; if (c->j1 + n < c->j2) c->j2 = c->j1 + n; }
+    group = malloc((2 * nc + 2) * sizeof *group);
+    for (x = 0; x < nc; x++) {
+        Op o = codes[x];
+        if (o.tag == 'e' && o.i2 - o.i1 > 2 * n) {
+            Op h = o; if (o.i1 + n < h.i2) h.i2 = o.i1 + n; if (o.j1 + n < h.j2) h.j2 = o.j1 + n;
+            group[ng++] = h;
+            emit_group(group, ng, &started); ng = 0;
+            if (o.i2 - n > o.i1) o.i1 = o.i2 - n;
+            if (o.j2 - n > o.j1) o.j1 = o.j2 - n;
+        }
+        group[ng++] = o;
+    }
+    if (ng && !(ng == 1 && group[0].tag == 'e')) emit_group(group, ng, &started);
+    free(group); free(codes);
+}
+
+/* subprocess.run([UNISACC-as-sh-script, -run, tests/inventory.cx, --, --write, --check], cwd=TREE, capture_output=True,
+   timeout=50); the child leads its own process group so a timeout also kills the compiled program under sh */
+static int run_inventory(const char *cc) {
+    char tmp[PMAX]; int fo, fe, st = 0, rc; pid_t pid; long ticks = 50L * 100; char *out, *err; size_t no, ne;
+    char *argv[] = { "sh", (char *)cc, "-run", "tests/inventory.cx", "--", "--write", "--check", 0 };
+    tempdir(tmp);
+    snprintf(OUTF, sizeof OUTF, "%s/inventory-derived-outXXXXXX", tmp); if ((fo = mkstemp(OUTF)) < 0) { OUTF[0] = 0; mech_errno(errno, tmp); }
+    snprintf(ERRF, sizeof ERRF, "%s/inventory-derived-errXXXXXX", tmp); if ((fe = mkstemp(ERRF)) < 0) { ERRF[0] = 0; mech_errno(errno, tmp); }
+    fflush(stdout); fflush(stderr);
+    if ((pid = fork()) < 0) mech_errno(errno, 0);
+    if (pid == 0) {
+        setpgid(0, 0);
+        dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        if (chdir(TREE) != 0) _exit(126);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fo); close(fe);
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) { if (errno == EINTR) continue; mech_errno(errno, 0); }
+        if (ticks-- <= 0) {
+            Str m = { 0, 0, 0 }; int i;
+            kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            sputs(&m, "Command '[");
+            for (i = 0; argv[i]; i++) { if (i) sputs(&m, ", "); repr(&m, argv[i]); }
+            sputs(&m, "]' timed out after 50 seconds");
+            mechanism(&m);
+        }
+        usleep(10000);
+    }
+    rc = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    if (rc) {
+        out = cx_read(OUTF, &no); err = cx_read(ERRF, &ne);
+        if (out) fwrite(out, 1, no, stdout);
+        fflush(stdout);
+        if (err) fwrite(err, 1, ne, stderr);
+        free(out); free(err);
+    }
+    unlink(OUTF); OUTF[0] = 0; unlink(ERRF); ERRF[0] = 0;
+    return rc;
+}
+
+static int check(const char *root, const char *self) {
+    char p[PMAX], tmp[PMAX], cc[PMAX]; char *expected, *actual; size_t ne, na;
+    static const char *rels[] = { "tests", "exec", ".github/workflows", 0 }; int i;
+    snprintf(p, sizeof p, "%s/tests/INVENTORY.md", root);
+    expected = readall(p, &ne);
+    tempdir(tmp);
+    snprintf(TREE, sizeof TREE, "%s/inventory-derived-XXXXXX", tmp);
+    if (!mkdtemp(TREE)) { int e = errno; TREE[0] = 0; mech_errno(e, tmp); }
+    for (i = 0; rels[i]; i++) {
+        char s[PMAX], d[PMAX]; struct stat st; Errs E = { { 0, 0, 0 }, 0 };
+        snprintf(s, sizeof s, "%s/%s", root, rels[i]); snprintf(d, sizeof d, "%s/%s", TREE, rels[i]);
+        if (stat(s, &st) == 0 && S_ISDIR(st.st_mode)) copytree(s, d, &E, 1);
+        free(E.s.s);
+    }
+    container(self, cc);
+    if (run_inventory(cc)) { cleanup(); return 1; }
+    snprintf(p, sizeof p, "%s/tests/INVENTORY.md", TREE);
+    actual = readall(p, &na);
+    cleanup();
+    if (na != ne || memcmp(actual, expected, ne)) {
+        size_t pos; int v; const char *why; char *bad = 0; size_t nbad = 0;
+        printf("STALE tests/INVENTORY.md: regenerate with inventory.py --write\n");
+        if (utf8_check((unsigned char *)expected, ne, &pos, &v, &why)) { bad = expected; nbad = ne; }
+        else if (utf8_check((unsigned char *)actual, na, &pos, &v, &why)) { bad = actual; nbad = na; }
+        if (bad) {      /* bytes.decode() raises UnicodeDecodeError: an uncaught traceback, exit 1 */
+            (void)nbad; fflush(stdout);
+            fprintf(stderr, "Traceback (most recent call last):\n");
+            if (v == 1) fprintf(stderr, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s\n", (unsigned char)bad[pos], (unsigned long)pos, why);
+            else fprintf(stderr, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: %s\n", (unsigned long)pos, (unsigned long)(pos + v - 1), why);
+            return 1;
+        }
+        A = splitlines(expected, ne, &LA); B = splitlines(actual, na, &LB);
+        intern(A, LA, B, LB);
+        unified_diff();
+        return 1;
+    }
+    printf("inventory-derived: regenerated bytes match tests/INVENTORY.md\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[PMAX], self[PMAX], *s;
+    resolve(argv[0], self);                     /* Path(__file__).resolve().parents[1] */
+    for (s = self + strlen(self); s > self && *s != '/'; s--) ;
+    *s = 0; s = strrchr(self, '/'); if (s) *s = 0; if (!self[0]) strcpy(self, "/");
+    if (argc == 2) resolve(argv[1], root); else snprintf(root, sizeof root, "%s", self);
+    return check(root, self);
+}

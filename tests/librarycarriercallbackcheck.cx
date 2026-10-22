@@ -1,0 +1,403 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycarriercallbackcheck.cx -- explicit graph-pair fixture; no model/public callback qualification claim.  Ported
+   from tests/librarycarriercallbackcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarycarriercallbackcheck.cx -- [-h] [--arch {arm64,x86_64}] [--evidence EVIDENCE]
+   Run from the repository root (ROOT is the working directory).  In a fresh temporary directory (TMPDIR, TEMP, TMP or
+   /tmp; prefix r10-carrier-callback-) exec/c/*.h are copied to headers/ (directory order, content and permission
+   bits) and tests/librarycarriercallbackcheck.c to probe.c; the probe is built with $CC (default cc) -std=c11 -O1
+   -Wall -Wextra -Wno-unused-function -Wno-misleading-indentation -I headers probe.c -lffi and run, once plain and
+   once with -fsanitize=address,undefined -fno-omit-frame-pointer -g, every step under `tests/bound 20` with both
+   streams captured as text (UTF-8, universal newlines).  Each step's stdout is echoed; at the end
+   `paired carrier callbacks normal + ASan/UBSan passed on ARCH`, rc 0.  On Darwin the build gets -arch ARCH; an
+   arm64 host running --arch x86_64 runs the probe under `arch -x86_64`.
+   A step that exits nonzero ends the run with rc 1 and, on stderr, the final line of Python's traceback:
+   `AssertionError: {'arch': ..., 'sanitize': ..., 'command': [...], 'rc': N, 'stdout': ..., 'stderr': ...}` in
+   Python's repr; as in Python, the echoed stdout comes out before that line.
+   --evidence PATH writes the JSON record Python wrote (json.dumps indent=2, ensure_ascii): status passed|failed,
+   scope (passed only), commands (every step run so far), inputs (header name -> sha256, directory order) and
+   probe_sha256 (passed only).
+   Arguments follow argparse: -h/--help, --arch VALUE|--arch=VALUE, --evidence VALUE|--evidence=VALUE (unique prefixes
+   too, last one wins); usage errors are rc 2 on stderr, with argparse's prog name (librarycarriercallbackcheck.py)
+   so the help and error text are byte-identical to the original.
+   Limits of the port: what Python raised outside the assertion (a header that cannot be copied, an evidence file
+   that cannot be written, a child's output that is not UTF-8) is one `librarycarriercallbackcheck: ...` line, rc 1,
+   where Python printed a traceback; repr() of a non-ASCII code point uses a fixed list of non-printable ranges
+   instead of the full Unicode database; copied headers keep their mode but not their timestamps.
+   Include-free: everything used comes with the cx.h prelude. */
+
+static const char *PROG = "librarycarriercallbackcheck.py";
+static const char *USAGE = "usage: librarycarriercallbackcheck.py [-h] [--arch {arm64,x86_64}]\n"
+                           "                                      [--evidence EVIDENCE]\n";
+static char ROOT[4096], TD[4200];
+
+/* ---- byte buffers ------------------------------------------------------------------------------------------- */
+typedef struct { char *b; size_t n, cap; } Buf;
+static void die(const char *fmt, const char *a);
+static void bput(Buf *o, const void *p, size_t n) {
+    if (o->n + n + 1 > o->cap) {
+        size_t c = o->cap ? o->cap : 256; char *t;
+        while (c < o->n + n + 1) c *= 2;
+        t = realloc(o->b, c); if (!t) die("librarycarriercallbackcheck: out of memory%s", "");
+        o->b = t; o->cap = c;
+    }
+    memcpy(o->b + o->n, p, n); o->n += n; o->b[o->n] = 0;
+}
+static void bstr(Buf *o, const char *s) { bput(o, s, strlen(s)); }
+
+static Buf PEND;   /* what print() put into Python's stdout buffer, flushed at exit and before a traceback */
+
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char c[8192];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void flush_pending(void) { if (PEND.n) fwrite(PEND.b, 1, PEND.n, stdout); PEND.n = 0; fflush(stdout); }
+static void die(const char *fmt, const char *a) {   /* what Python raised outside the assertion: rc 1 */
+    flush_pending();   /* Python flushes stdout before it prints the traceback */
+    fprintf(stderr, fmt, a); fputc('\n', stderr); fflush(stderr);
+    if (TD[0]) rmtree(TD);
+    exit(1);
+}
+static void usage_error(const char *msg, const char *a) {
+    fputs(USAGE, stderr); fprintf(stderr, "%s: error: ", PROG); fprintf(stderr, msg, a); fputc('\n', stderr);
+    exit(2);
+}
+
+/* ---- text: UTF-8 code points, Python's repr() and json.dumps ------------------------------------------------- */
+/* one UTF-8 code point at s[i] (strict); its length in *l, -1 if invalid */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+/* str.isprintable() for code points >= 0x7f: Cc, Zs/Zl/Zp, the common Cf, private use and noncharacters are not */
+static int printable(long c) {
+    if (c <= 0xA0 || c == 0xAD || c == 0x1680 || (c >= 0x2000 && c <= 0x200F) || (c >= 0x2028 && c <= 0x202F)) return 0;
+    if ((c >= 0x205F && c <= 0x206F) || c == 0x3000 || c == 0xFEFF || (c >= 0xFFF9 && c <= 0xFFFB)) return 0;
+    if ((c >= 0xE000 && c <= 0xF8FF) || c >= 0xF0000 || (c & 0xFFFE) == 0xFFFE || (c >= 0xFDD0 && c <= 0xFDEF)) return 0;
+    if (c == 0x061C || c == 0x180E || (c >= 0x0600 && c <= 0x0605) || c == 0x06DD || c == 0x070F || c == 0x08E2) return 0;
+    if (c == 0x110BD || c == 0x110CD || (c >= 0x1D173 && c <= 0x1D17A) || c == 0xE0001 || (c >= 0xE0020 && c <= 0xE007F)) return 0;
+    return 1;
+}
+/* repr(str) of the UTF-8 text S (already validated) */
+static void repr_str(FILE *f, const char *s0, size_t n) {
+    const unsigned char *s = (const unsigned char *)s0; size_t i; int sq = 0, dq = 0, l; char q;
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; else if (s[i] == '"') dq = 1; }
+    q = (sq && !dq) ? '"' : '\'';
+    fputc(q, f);
+    for (i = 0; i < n; i += (size_t)l) {
+        long c = cp_at(s, n, i, &l);
+        if (c < 0) { l = 1; c = s[i]; }
+        if (c == q || c == '\\') { fputc('\\', f); fputc((int)c, f); }
+        else if (c == '\t') fputs("\\t", f);
+        else if (c == '\n') fputs("\\n", f);
+        else if (c == '\r') fputs("\\r", f);
+        else if (c < 0x20 || c == 0x7f) fprintf(f, "\\x%02lx", c);
+        else if (c < 0x7f) fputc((int)c, f);
+        else if (printable(c)) fwrite(s + i, 1, (size_t)l, f);
+        else if (c <= 0xFF) fprintf(f, "\\x%02lx", c);
+        else if (c <= 0xFFFF) fprintf(f, "\\u%04lx", c);
+        else fprintf(f, "\\U%08lx", c);
+    }
+    fputc(q, f);
+}
+/* json.dumps(str) with ensure_ascii */
+static void json_str(Buf *o, const char *s0) {
+    const unsigned char *s = (const unsigned char *)s0; size_t i, n = strlen(s0); int l; char t[16];
+    bstr(o, "\"");
+    for (i = 0; i < n; i += (size_t)l) {
+        long c = cp_at(s, n, i, &l);
+        if (c < 0) { l = 1; c = 0xDC00 + s[i]; }   /* surrogateescape, as a file name would decode */
+        if (c == '"') bstr(o, "\\\"");
+        else if (c == '\\') bstr(o, "\\\\");
+        else if (c == '\n') bstr(o, "\\n");
+        else if (c == '\r') bstr(o, "\\r");
+        else if (c == '\t') bstr(o, "\\t");
+        else if (c == '\b') bstr(o, "\\b");
+        else if (c == '\f') bstr(o, "\\f");
+        else if (c >= 0x20 && c < 0x7f) { t[0] = (char)c; bput(o, t, 1); }
+        else if (c <= 0xFFFF) { snprintf(t, sizeof t, "\\u%04lx", c); bstr(o, t); }
+        else {
+            long v = c - 0x10000;
+            snprintf(t, sizeof t, "\\u%04lx", 0xD800 + (v >> 10)); bstr(o, t);
+            snprintf(t, sizeof t, "\\u%04lx", 0xDC00 + (v & 0x3FF)); bstr(o, t);
+        }
+    }
+    bstr(o, "\"");
+}
+
+/* ---- the steps -------------------------------------------------------------------------------------------------- */
+typedef struct { int san; char *cmd[32]; int rc; char *out, *err; } Rec;
+static Rec RECS[8]; static int NREC;
+static const char *ARCH;
+
+/* bytes.decode() under text=True: strict UTF-8, then \r\n and lone \r become \n */
+static char *text(char *b, size_t n, const char *what) {
+    size_t i, j = 0; int l;
+    for (i = 0; i < n; i += (size_t)l)
+        if (cp_at((unsigned char *)b, n, i, &l) < 0) die("librarycarriercallbackcheck: %s is not UTF-8 (UnicodeDecodeError)", what);
+    for (i = 0; i < n; i++) {
+        if (b[i] == '\r') { b[j++] = '\n'; if (i + 1 < n && b[i + 1] == '\n') i++; }
+        else b[j++] = b[i];
+    }
+    b[j] = 0;
+    return b;
+}
+
+/* subprocess.run([ROOT/tests/bound, '20', *COMMAND], capture_output=True, text=True), recorded */
+static Rec *run_step(char **command, int san) {
+    char *a[64], bound[4300], po[4300], pe[4300], *out, *err; int k = 0, st = 0, i; pid_t pid; size_t on = 0, en = 0;
+    Rec *r = &RECS[NREC];
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    snprintf(po, sizeof po, "%s/.capture-stdout", TD);
+    snprintf(pe, sizeof pe, "%s/.capture-stderr", TD);
+    a[k++] = bound; a[k++] = "20";
+    for (i = 0; command[i] && k < 63; i++) a[k++] = command[i];
+    a[k] = 0;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("librarycarriercallbackcheck: fork failed for %s", bound);
+    if (pid == 0) {
+        if (!freopen(po, "wb", stdout) || !freopen(pe, "wb", stderr)) _exit(127);   /* onto descriptors 1 and 2 */
+        execvp(a[0], a); _exit(127);
+    }
+    if (waitpid(pid, &st, 0) != pid) die("librarycarriercallbackcheck: wait failed for %s", bound);
+    if (!(out = cx_read(po, &on))) die("librarycarriercallbackcheck: cannot read %s", po);
+    if (!(err = cx_read(pe, &en))) die("librarycarriercallbackcheck: cannot read %s", pe);
+    unlink(po); unlink(pe);
+    r->rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
+    r->out = text(out, on, "stdout"); r->err = text(err, en, "stderr");
+    r->san = san;
+    for (i = 0; command[i] && i < 31; i++) r->cmd[i] = strdup(command[i]);
+    r->cmd[i] = 0;
+    NREC++;
+    return r;
+}
+
+/* inputs: header name -> sha256 hex, in headers/ directory order */
+static char *INAME[512], IHEX[512][65]; static int NIN;
+
+static void evidence(const char *path, int passed, const char *probe) {
+    Buf o = { 0, 0, 0 }; int i, j;
+    bstr(&o, "{\n  \"status\": "); json_str(&o, passed ? "passed" : "failed"); bstr(&o, ",\n");
+    if (passed) { bstr(&o, "  \"scope\": "); json_str(&o, "mechanical explicit graph-pair fixture, not model/public acceptance"); bstr(&o, ",\n"); }
+    bstr(&o, "  \"commands\": [");
+    for (i = 0; i < NREC; i++) {
+        Rec *r = &RECS[i]; char num[32];
+        bstr(&o, i ? ",\n    {\n" : "\n    {\n");
+        bstr(&o, "      \"arch\": "); json_str(&o, ARCH);
+        bstr(&o, ",\n      \"sanitize\": "); bstr(&o, r->san ? "true" : "false");
+        bstr(&o, ",\n      \"command\": [");
+        for (j = 0; r->cmd[j]; j++) { bstr(&o, j ? ",\n        " : "\n        "); json_str(&o, r->cmd[j]); }
+        bstr(&o, j ? "\n      ]" : "]");
+        snprintf(num, sizeof num, "%d", r->rc);
+        bstr(&o, ",\n      \"rc\": "); bstr(&o, num);
+        bstr(&o, ",\n      \"stdout\": "); json_str(&o, r->out);
+        bstr(&o, ",\n      \"stderr\": "); json_str(&o, r->err);
+        bstr(&o, "\n    }");
+    }
+    bstr(&o, NREC ? "\n  ],\n" : "],\n");
+    bstr(&o, "  \"inputs\": {");
+    for (i = 0; i < NIN; i++) {
+        bstr(&o, i ? ",\n    " : "\n    "); json_str(&o, INAME[i]); bstr(&o, ": "); json_str(&o, IHEX[i]);
+    }
+    bstr(&o, NIN ? "\n  }" : "}");
+    if (passed) {
+        size_t n = 0; char *b = cx_read(probe, &n), hex[65];
+        if (!b) die("librarycarriercallbackcheck: cannot read %s", probe);
+        cx_sha256_hex(b, n, hex); free(b);
+        bstr(&o, ",\n  \"probe_sha256\": "); json_str(&o, hex);
+    }
+    bstr(&o, "\n}\n");
+    if (cx_write(*path ? path : ".", o.b, o.n) != 0) die("librarycarriercallbackcheck: cannot write the evidence file %s", path);
+    free(o.b);
+}
+
+/* AssertionError(records[-1]): the last line of Python's traceback */
+static void assertion(void) {
+    Rec *r = &RECS[NREC - 1]; int j;
+    fputs("AssertionError: {'arch': ", stderr); repr_str(stderr, ARCH, strlen(ARCH));
+    fprintf(stderr, ", 'sanitize': %s, 'command': [", r->san ? "True" : "False");
+    for (j = 0; r->cmd[j]; j++) { if (j) fputs(", ", stderr); repr_str(stderr, r->cmd[j], strlen(r->cmd[j])); }
+    fprintf(stderr, "], 'rc': %d, 'stdout': ", r->rc); repr_str(stderr, r->out, strlen(r->out));
+    fputs(", 'stderr': ", stderr); repr_str(stderr, r->err, strlen(r->err)); fputs("}\n", stderr);
+    fflush(stderr);
+}
+
+/* shutil.copy2 (content and permission bits) */
+static void copy2(const char *src, const char *dst) {
+    size_t n = 0; char *b = cx_read(src, &n); struct stat s;
+    if (!b || stat(src, &s) != 0) die("librarycarriercallbackcheck: cannot read %s", src);
+    if (cx_write(dst, b, n) != 0) die("librarycarriercallbackcheck: cannot write %s", dst);
+    chmod(dst, s.st_mode & 07777);
+    free(b);
+}
+
+/* ---- argparse ---------------------------------------------------------------------------------------------------- */
+/* is this token an option string (not a value)?  '-' alone, negative numbers and '-x y' with a space are values */
+static int looks_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+static int prefix_of(const char *p, size_t n, const char *opt) { return n >= 3 && n <= strlen(opt) && !strncmp(p, opt, n); }
+/* which option a '--' token names: 1 help, 2 arch, 3 evidence, 0 none; EQ gets the explicit value after '=' or NULL */
+static int long_opt(const char *s, const char **eq) {
+    const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s);
+    *eq = e ? e + 1 : 0;
+    if (prefix_of(s, n, "--help")) return 1;
+    if (prefix_of(s, n, "--arch")) return 2;
+    if (prefix_of(s, n, "--evidence")) return 3;
+    return 0;
+}
+static int is_option(const char *s) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && long_opt(s, &eq)) return 1;
+    if (s[1] == 'h') return 1;
+    if (looks_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+static void parse(int argc, char **argv, const char **arch, const char **ev) {
+    static char extras[8192]; size_t xl = 0; int i, help = 0;
+    extras[0] = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int o = 0;
+        if (!strcmp(s, "--")) {   /* everything from here on is left over, '--' included */
+            for (; i < argc; i++) xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", argv[i]);
+            break;
+        }
+        if (s[0] == '-' && s[1] == '-') o = long_opt(s, &eq);
+        else if (s[0] == '-' && s[1] == 'h') o = 1;
+        if (o == 1) {   /* --help=X, -h=X and -h-X are refused; -hX is -h followed by -X, and help wins */
+            if (eq && s[1] == '-') usage_error("argument -h/--help: ignored explicit argument '%s'", eq);
+            if (s[1] == '-' || (s[2] != '=' && s[2] != '-')) { help = 1; break; }
+            usage_error("argument -h/--help: ignored explicit argument '%s'", s + 2 + (s[2] == '='));
+        } else if (o == 2 || o == 3) {
+            const char *v = eq;
+            if (!v) {
+                if (i + 1 >= argc || is_option(argv[i + 1]))
+                    usage_error(o == 2 ? "argument --arch: expected one argument" : "argument --evidence: expected one argument", 0);
+                v = argv[++i];
+            }
+            if (o == 3) *ev = v;
+            else {
+                if (strcmp(v, "arm64") && strcmp(v, "x86_64"))
+                    usage_error("argument --arch: invalid choice: '%s' (choose from 'arm64', 'x86_64')", v);
+                *arch = v;
+            }
+        } else xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", s);
+    }
+    if (help) {
+        printf("%s\noptions:\n  -h, --help            show this help message and exit\n  --arch {arm64,x86_64}\n"
+               "  --evidence EVIDENCE\n", USAGE);
+        exit(0);
+    }
+    if (xl) usage_error("unrecognized arguments: %s", extras);
+}
+
+/* uname FLAG, its first line; "" when uname cannot run */
+static char *uname_field(char *flag) {
+    char *a[] = { "uname", flag, 0 }, *out = 0; size_t n = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+
+int main(int argc, char **argv) {
+    const char *arch = 0, *ev = 0, *host, *cc, *tmp; int darwin, san; char *mach, *sys;
+    char rt[4300], probe[4300], src[4300], cdir[4300], line[256];
+    DIR *d; struct dirent *e;
+    parse(argc, argv, &arch, &ev);
+    if (getcwd(ROOT, sizeof ROOT) == 0) return 2;
+    mach = uname_field("-m"); sys = uname_field("-s");   /* platform.machine(), platform.system() */
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    if (!arch) arch = host;
+    ARCH = arch;
+    darwin = !strcmp(sys, "Darwin");
+    cc = getenv("CC"); if (!cc) cc = "cc";
+    tmp = getenv("TMPDIR");   /* tempfile.gettempdir(): TMPDIR, TEMP, TMP, then /tmp */
+    if (!tmp || !*tmp) tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    if (tmp[0] == '/') snprintf(TD, sizeof TD, "%s/r10-carrier-callback-XXXXXX", tmp);
+    else snprintf(TD, sizeof TD, "%s/%s/r10-carrier-callback-XXXXXX", ROOT, tmp);
+    if (!mkdtemp(TD)) { const char *t = tmp; TD[0] = 0; die("librarycarriercallbackcheck: cannot create a temporary directory under %s", t); }
+    snprintf(rt, sizeof rt, "%s/headers", TD);
+    if (mkdir(rt, 0777) != 0) die("librarycarriercallbackcheck: cannot create %s", rt);
+    snprintf(cdir, sizeof cdir, "%s/exec/c", ROOT);
+    if ((d = opendir(cdir))) {   /* (ROOT/'exec/c').glob('*.h'), scandir order */
+        while ((e = readdir(d))) {
+            size_t n = strlen(e->d_name); char from[8400], to[8400];
+            if (n < 2 || e->d_name[0] == '.' || strcmp(e->d_name + n - 2, ".h")) continue;
+            snprintf(from, sizeof from, "%s/%s", cdir, e->d_name);
+            snprintf(to, sizeof to, "%s/%s", rt, e->d_name);
+            copy2(from, to);
+        }
+        closedir(d);
+    }
+    snprintf(src, sizeof src, "%s/tests/librarycarriercallbackcheck.c", ROOT);
+    snprintf(probe, sizeof probe, "%s/probe.c", TD);
+    copy2(src, probe);
+    if ((d = opendir(rt))) {   /* {f.name: sha256 for f in rt.iterdir()} */
+        while ((e = readdir(d)) && NIN < 512) {
+            char p[8400], *b; size_t n = 0;
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", rt, e->d_name);
+            if (!(b = cx_read(p, &n))) die("librarycarriercallbackcheck: cannot read %s", p);
+            INAME[NIN] = strdup(e->d_name); cx_sha256_hex(b, n, IHEX[NIN]); NIN++; free(b);
+        }
+        closedir(d);
+    }
+    for (san = 0; san <= 1; san++) {
+        char exe[4300], *b[32], *r[8], **cmds[2]; int k = 0, j = 0, c;
+        snprintf(exe, sizeof exe, "%s/%s", TD, san ? "san" : "normal");
+        b[k++] = (char *)cc;
+        if (darwin) { b[k++] = "-arch"; b[k++] = (char *)arch; }
+        b[k++] = "-std=c11"; b[k++] = "-O1"; b[k++] = "-Wall"; b[k++] = "-Wextra"; b[k++] = "-Wno-unused-function";
+        b[k++] = "-Wno-misleading-indentation"; b[k++] = "-I"; b[k++] = rt; b[k++] = probe; b[k++] = "-lffi"; b[k++] = "-o"; b[k++] = exe;
+        if (san) { b[k++] = "-fsanitize=address,undefined"; b[k++] = "-fno-omit-frame-pointer"; b[k++] = "-g"; }
+        b[k] = 0;
+        if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { r[j++] = "arch"; r[j++] = "-x86_64"; }
+        r[j++] = exe; r[j] = 0;
+        cmds[0] = b; cmds[1] = r;
+        for (c = 0; c < 2; c++) {
+            Rec *x = run_step(cmds[c], san);
+            bstr(&PEND, x->out);   /* print(r.stdout, end='') */
+            if (x->rc) {
+                if (ev) evidence(ev, 0, probe);
+                flush_pending();
+                assertion();
+                rmtree(TD);
+                return 1;
+            }
+        }
+    }
+    if (ev) evidence(ev, 1, probe);
+    rmtree(TD);
+    snprintf(line, sizeof line, "paired carrier callbacks normal + ASan/UBSan passed on %s\n", arch);
+    bstr(&PEND, line);
+    flush_pending();
+    return 0;
+}

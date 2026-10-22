@@ -294,9 +294,9 @@ def main():
         'command': ['python3', './tests/inventorycheck.py'],
         'files': ['tests/inventorycheck.py', 'tests/inventory.py'], 'tools': ['python3']}
     d['suites']['inventory-derived'] = {
-        'command': ['python3', './tests/inventoryderivedcheck.py'],
-        'files': ['tests/inventoryderivedcheck.py', 'tests/inventory.py', 'tests/INVENTORY.md'],
-        'trees': ['tests', 'exec', '.github/workflows'], 'tools': ['python3']}
+        'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/inventoryderivedcheck.cx'],
+        'files': ['tests/inventoryderivedcheck.cx', 'tests/inventory.cx', 'tests/INVENTORY.md', 'tests/bound', 'tests/bound.c', 'unisacc.com', 'unisacc.com.build.json'],
+        'trees': ['tests', 'exec', '.github/workflows'], 'tools': ['sh']}
     # 0.0.43: checkrun (one of the default base three) had no declaration, so naming suites in commitgate was refused
     # by the input guard.  It reads only its own script and the wrapper it tests.
     d['suites']['checkrun'] = {

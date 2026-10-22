@@ -675,8 +675,8 @@ job lib-format python3 ./tests/libunisaccformatcheck.py
 job lib-stack-arm python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" arm64
 job lib-stack-x86 python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" x86_64
 job lib-stack-x86-hostabi python3 ./tests/r10stackx86check.py
-job lib-sig2-host python3 ./tests/librarysig2hostcheck.py
-job lib-typed-host python3 ./tests/librarynativehostcheck.py
+job lib-sig2-host tests/bound 58 sh ./unisacc.com -run tests/librarysig2hostcheck.cx   # (.cx port, 2026-10-23) own synthetic V2 declarations + native libffi closure oracle, native + ASan/UBSan
+job lib-typed-host sh ./unisacc.com -run tests/librarynativehostcheck.cx   # (.cx port, 2026-10-23)
 job lib-variadic-host python3 ./tests/librarynativevariadiccheck.py
 job lib-callplans-host python3 ./tests/librarycallplanscheck.py
 job lib-variadic-resolver-host python3 ./tests/libraryvariadicresolvercheck.py
@@ -690,7 +690,7 @@ job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py
 job referee-binsel python3 ./tests/binsel_audit.py        # external referee: host cc decides signedness-dependence
 job referee-pfconv python3 ./tests/pfconv_audit.py        # external referee: host printf decides each conversion
-job lib-ordered-carrier-host python3 ./tests/libraryorderedcarriercheck.py
+job lib-ordered-carrier-host tests/bound 58 sh ./unisacc.com -run tests/libraryorderedcarriercheck.cx   # (.cx port, 2026-10-23)
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-ordered-carrier-native python3 ./tests/modelorderedbitfieldnativecheck.py --target osx/arm64
     job lib-packed-carrier-native python3 ./tests/modelpackednativecheck.py --target osx/arm64
@@ -721,8 +721,8 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
 fi
 job lib-carrier-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx   # (.cx port, 2026-10-23)
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
-job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py
-job lib-carrier-callback python3 ./tests/librarycarriercallbackcheck.py
+job lib-carrier-native-plan sh ./unisacc.com -run tests/librarycarriernativeplancheck.cx   # (.cx port, 2026-10-23)
+job lib-carrier-callback tests/bound 58 sh ./unisacc.com -run tests/librarycarriercallbackcheck.cx   # (.cx port, 2026-10-23)
 case "$(uname -s)" in
     Linux|Darwin)
         job lib-carrier-import-model-prepare python3 ./tests/carrierimportprepared.py --prepare
@@ -793,7 +793,7 @@ job lib-union16-direct-4 python3 ./tests/libraryunion16check.py --package "${MOD
 job lib-union16-callback-4 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback
 job lib-union16-direct-5 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize
 job lib-union16-callback-5 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback
-job lib-callable-variadic-mechanism python3 ./tests/librarycallablevarcheck.py
+job lib-callable-variadic-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablevarcheck.cx   # (.cx port, 2026-10-23) concrete variadic callable ABI, normal + ASan/UBSan
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
 job lib-callback-plan python3 ./tests/librarycallbackplancheck.py
@@ -819,9 +819,9 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
     job lib-source-longdouble-import-rosetta python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
     job lib-carrier-mechanism-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx -- --arch x86_64
-    job lib-carrier-native-plan-rosetta python3 ./tests/librarycarriernativeplancheck.py --arch x86_64
+    job lib-carrier-native-plan-rosetta sh ./unisacc.com -run tests/librarycarriernativeplancheck.cx -- --arch x86_64
     job lib-union-native-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
-    job lib-carrier-callback-rosetta python3 ./tests/librarycarriercallbackcheck.py --arch x86_64
+    job lib-carrier-callback-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercallbackcheck.cx -- --arch x86_64
     job lib-carrier-factory-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --factory
     job lib-carrier-relay-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --relay
     job lib-union-scalar-1-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int8,float4 --sanitize
@@ -862,7 +862,7 @@ job lib-word64 python3 ./tests/librarywordcheck.py --native-only
 job exec-binaryio python3 ./tests/runtimeiocheck.py
 for part in host unisacc sanitised; do job exec-crcllp64-$part python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only --part "$part"; done
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
-job lib-windows-imports python3 ./tests/librarywinimportscheck.py
+job lib-windows-imports tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/librarywinimportscheck.cx   # (.cx port, 2026-10-23)
 job lib-windows-gp python3 ./exec/enc/windowshostbridgecheck.py --part cross
 job lib-windows-gp-native python3 ./exec/enc/windowshostbridgecheck.py --part native
 job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
@@ -895,7 +895,7 @@ job tapebin-shape python3 -m unisa.tapebin_shape --check
 job tape-reader python3 ./tests/tapereadercheck.py
 job script-inventory tests/bound 58 sh ./unisacc.com -run tests/inventory.cx -- --check   # (.cx port, 2026-10-22) R15-1: no test/check script without a gate, a caller or a disposition
 job script-inventory-self python3 ./tests/inventorycheck.py   # matching and global reachability regressions
-job inventory-derived python3 ./tests/inventoryderivedcheck.py   # exact generated inventory bytes
+job inventory-derived tests/bound 58 sh ./unisacc.com -run tests/inventoryderivedcheck.cx   # (.cx port, 2026-10-23) exact generated inventory bytes
 job subtract-safety tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve (.cx port of subtractsafety.py, 2026-10-22)
 job subtract-safety-selftest tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx -- --selftest   # R16-9: both 0.0.15 counterexamples are still caught; --fix repoints an archived path
 job cxinclude tests/bound 58 sh ./unisacc.com -run tests/cxinclude.cx -- --check   # CX0 (plans/cx-modules.md): .cx include lines only go down (tests/cxinclude.tsv); a .cx without a row must have none
@@ -1044,7 +1044,7 @@ job pipeline-cache python3 ./tests/pipelinecache.py
 # same instruction stream.  It failed for a year of commits' worth of reasons
 # that were not drift -- see archive/research/r12/r12-linuxbridgecheck-diagnosis.md.
 job exec-bridge-linux python3 ./exec/c/linuxbridgecheck.py
-job windows-resolver-host python3 ./tests/windowsresolverhostcheck.py
+job windows-resolver-host sh ./unisacc.com -run tests/windowsresolverhostcheck.cx   # (.cx port, 2026-10-23; unbounded as before: a cold zig cache took 50 s)
 if [ "$COM" = 1 ]; then
     PRODUCT=${MODEL_COM-$R/unisacc.com}
     case "$PRODUCT" in /*) ;; *) PRODUCT="$R/$PRODUCT";; esac
