@@ -1,7 +1,6 @@
-/* 0.0.43 candidate, not run by any suite: int (**p)(int) and int (**p) declarators.  The model kept one
-   pointer level (FPD.moreptr skipped the extra stars), so (*p)(x) called p's own value: v0.0.42 segfaults.
-   cc, the Python reference and the product agree; the classic reference still segfaults.  Move to tests/c/
-   when classic is fixed. */
+/* 0.0.43: int (**p)(int) and int (**p) declarators keep both pointer levels.  Both the model
+   (FPD.moreptr) and the classic reference (fpdecl) skipped the extra stars, so (*p)(x) called p's own
+   value: v0.0.42 segfaults.  research/c43-array-pointer-member-miscompile.md */
 #include <stdio.h>
 static int twice(int x) { return 2 * x; }
 static int thrice(int x) { return 3 * x; }

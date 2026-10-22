@@ -143,6 +143,7 @@ int tdn[MAXTD];
 int declspectdn;          /* declspec's typedef was an array of this many */
 int declspectdsz;         /* ...whose whole size is this */
 int declspecfp;           /* what declspec's typedef said about that */
+int declfpp;              /* fpdecl read `(**p)`: a pointer TO the function pointer, as a typedef `ft *p` */
 int declenum;             /* the specifier was an enum */
 /* A declaration with no declarator is a constraint violation unless it
    introduces a tagged struct/union or an enumeration (C99 6.7p2). */
@@ -882,7 +883,7 @@ int sadd(int t, int kind, int off, int elem) {
     sympkfirst[nsym] = nsympk;
     symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
     if (declptr) symptrd[nsym] = declpd > 0 ? declpd : 1;
-    symfpp[nsym] = declspecfp && declptr && declpd == 2;
+    symfpp[nsym] = (declspecfp && declptr && declpd == 2) || (declfp && declfpp);
     symbase[nsym] = declbase;
     sh_push(nsym, t);
     nsym = nsym + 1;
@@ -3725,7 +3726,7 @@ void declspec_restore(DeclSpecSnapshot *s) {
     declspectdsz = s->declspectdsz;
     declvoid = s->declvoid;
     declptr = s->declptr;
-    declfp = s->declfp;
+    declfp = s->declfp; declfpp = 0;
     decldim2 = s->decldim2;
     decldim3 = s->decldim3;
     declbytes = s->declbytes;
@@ -5180,9 +5181,13 @@ int parenname(void) {
     return t;
 }
 int fpdecl(void) {
-    int t; int var; int unsized;
+    int t; int var; int unsized; int stars;
     adv();
-    while (eatstar()) { }
+    stars = 0;
+    while (eatstar()) stars = stars + 1;
+    /* `(**p)(int)` is a pointer to a function pointer (symfpp, as `ft *p`); a third level and `(**p)[N]` are not kept */
+    declfpp = stars == 2;
+    if (stars > 2) err_tok(tp, "not covered: pointer to pointer to function pointer");
     /* the name may be absent: `int (*[4])(int)` as a parameter type */
     t = 0 - 1;
     if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -5213,6 +5218,7 @@ int fpdecl(void) {
         if (var) declfp = 2;
     } else { if (cur() == tidx("[", 1)) {
         /* `(*p)[4]`: a pointer to arrays of 4 -- p[1] strides a whole row */
+        if (declfpp) err_tok(tp, "not covered: pointer to pointer to array");
         adv(); fpadim = cexpr(); need(tidx("]", 1), "]");
     } }
     /* The initializer follows the whole declarator, not the inner [].
@@ -5244,7 +5250,7 @@ int parameter_decl(void) {
     pw = declspec(); pw0 = pw;
     paramreg = declreg;
     paramstruct = declstruct; paramflt = declflt;
-    declptr = declspecptr; declpd = declspecpd; declfp = declspecfp;
+    declptr = declspecptr; declpd = declspecpd; declfp = declspecfp; declfpp = 0;
     while (eatstar()) declptr = 1;
     paramnamed = 0;
     if (cur() == tidx("(", 1)) {
@@ -5336,7 +5342,7 @@ int local_decl_in(void) {
         lfpret = 0;
         declsymreg = lreg;   /* every declarator of this declaration, comma-continued ones too */
         declstruct = sst;
-        decldim2 = 0; decldim3 = 0; declfp = declspecfp;
+        decldim2 = 0; decldim3 = 0; declfp = declspecfp; declfpp = 0;
         declptr = declspecptr; declpd = declspecpd;
         declflt = lflt0; declbool = lbool; fpn = 0;
         while (eatstar()) { declptr = 1; }
@@ -6147,7 +6153,7 @@ int unit(void) {
             w = spec.element_width;
             gstruct = spec.declstruct;
             declstruct = gstruct;
-            decldim2 = 0; decldim3 = 0; declfp = declspecfp;
+            decldim2 = 0; decldim3 = 0; declfp = declspecfp; declfpp = 0;
             declptr = declspecptr; declpd = declspecpd;
             declflt = gflt0; declbool = gbool;
             while (eatstar()) declptr = 1;
