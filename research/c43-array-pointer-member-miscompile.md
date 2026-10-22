@@ -69,3 +69,19 @@
 陷阱：`UD.scalar` 不清 `rkok`，`**(ip+1)` 之后仍 `rkok=1, rk=1`，仅凭 `rk<ARR` 会把标量当行；需要
 `UD.row` 置、`UD.scalar` 与各运算 `RET` 清的行标记，或在 `UD.scalar` 清 `rkok`（后者改求值面，须全差分）。
 落地须重建产品并做 c989780c 同款 1480 行差分；当前宿主可用内存约 2G，pack-prep 会卡，故本刀停在定位。
+
+## sizeof 行修复与 (**p)[N] 拒绝（2026-10-22 21:xx HKT，实际跑过；新宿主 Linux x86_64 16 核）
+
+**根因修正**：仅凭 `rkok/rk/vid/vt` 无法区分「行」与「退化后的指针」——`*(ip+1)` 与 `*(ip+1)+1` 寄存器完全相同（指针加法原样拷回 rkok/rk）。所以设计稿的 `rk<ARR` 判据不可行，改为显式行标记：
+
+- `UD.row`（`*P`）与 `PX` 行路径（`P[i]` 仍是行）置 `szrow=1`，并记 `OLEN→szrowlen`、`vt→szrowt`。
+- `sizeof EXPR`：进入时清 `szrow`，操作数结束记 `OLEN→szend`；仅当 `szrow=1 ∧ szend=szrowlen ∧ vt=szrowt`（行之后没发射任何代码、类型未变）才按行算：`ELSZ(vt−1,vb) × Π DIM[vid*8+i], i∈[ARR−rk, ARR)`，与 `SZ.ar` 同式。
+- 不发码也不改 vt 的两种形状显式清标记：强制转换（`CP` 操作数返回处）与逗号表达式（`CEXPR` 见过逗号时在 `CX.e` 清；`szcomma` 随 `recipe_retseqs_stack0/1` 入栈，嵌套括号不串）。注意 `exec/parse2/return-stack.tsv` 是死文件，真源是 `gen2-actions-manifest.tsv` 的 recipe。
+- 实测（Python E3 模拟 + 产品）：16 行 50 余个 sizeof 形状与 gcc 全同（含 `int(*)[3][2]`、`int(*)[3][4]`、struct/double/char 行、`(P+n)[0]`、`*(A+n)`、`&*row`、`!row`、`(int*)row`、`(0,row)`、`?:`、嵌套 sizeof）。
+- 差分：HEAD 干净导出构建（34448c83…）对候选（664be410…），647 个 `tests/`、`examples/` C 文件 `-S` tape+rc+stderr：**646 同、1 异**，唯一差异即 `tests/c/candidates/array-pointer-arith.c` 的 8→12；该探针基线 rc10、候选 `pass` rc0。
+
+**新缺陷 J（产品静默误编，已拒绝）**：`int (**ipp)[3]` 的声明符在 `FPD.moreptr` 直接跳过多余的 `*`，形状只记一级指针（实测 vt=1，与 `int (*)[3]` 同），于是 `*ipp` 被当成行不加载：v0.0.42 产品上 `r = *ipp` 得到 `&ip`（`r - a` 输出 4，gcc 0）。修法按「接受即须同参考，否则具名拒绝」：`FPSTART` 清 `fp_more`，`FPD.moreptr` 置 1，`)` 之后的 `[`（`PD.tail.test→PD.array`）见 `fp_more=1` 即 `not covered: pointer to pointer to array`。`PD.tail` 只从 `FPD.c` 进入，`fp_more` 不会陈旧。函数指针形状不动：`void (**out)(…)` 形参探针（a_nested_fp_param）tape 逐字节不变。
+
+**仍未修（登记）**：
+- 局部 `int (**fpp)(int) = &fp; (*fpp)(21)`：v0.0.42 产品与经典参考都编译通过、运行段错误（同一 `FPD.moreptr` 丢级）；形参形状碰巧正确，故未一刀拒绝，待单独定界。
+- 经典参考在多维指针到数组上静默错：`int (*mp)[3][2]` 的 `sizeof mp` 得 16、`*mp` 得 8；`int (**ipp)[3]` 上 `*ipp` 得 24、`(*ipp)[1][2]=7` 程序段错误；`&*(ip+1)` 得 12。探针 `tests/c/candidates/sizeof-rows-classic-gaps.c`（cc、Python 参考、候选同；经典异），修好经典后再移入 `tests/c/`。

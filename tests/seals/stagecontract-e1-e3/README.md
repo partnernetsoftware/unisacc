@@ -5,3 +5,4 @@
 - 捕获：tests/middleflowrunner.c capture，源 tests/seals/middleflow-step0/accept-source.bytes，期望 0（accept）；accept/ 为整个捕获目录（input.bytes、attributes.bytes、resources.tsv、resource-*.bytes、output.bytes、status.txt）。
 - 消费网络：e3.net 由 tests/modelstreamextract.cx 原样抽取，sha256 5e9ab6c45354f7ffa29c3ca8407d6330041b91dc49c0fd8a712eaa25e0ed0ea6
 - 不含 e1 网络；e1 仅作为上游捕获来源。
+- 2026-10-22 重捕（sizeof 行 / (**p)[N] 表刀，exec/parse2）：e3.net 由工作树候选包（compiler.pkg）经 modelstreamextract.cx 原样抽取，sha256 39429de4881c47819e8188f76d4ffc45e6a22d29faf28f4248411de3f27390b7；accept/ 以 middleflowrunner capture 重捕，八个文件与旧捕获逐字节同。
