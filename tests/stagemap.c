@@ -188,10 +188,14 @@ static char *extra[] = {
     "E6", "edge-elf-enc-witness", "meta",
     /* edge-e2-pp-seal: 边级冻结原件（e2->pp），同 edge-e4-peep-seal; tests/edgeseal.py */
     "E2", "edge-e2-pp-seal", "meta",
+    /* edge-e2-pp-ablate: 边级抽样消融见证（e2->pp），tests/edgeablate.cx */
+    "E2", "edge-e2-pp-ablate", "meta",
     /* edge-e1-lex-seal: 边级冻结原件（e1->lex），同 edge-e4-peep-seal; tests/edgeseal.py */
     "E1", "edge-e1-lex-seal", "meta",
     /* edge-e3-parse-seal: 边级冻结原件（e3->parse），同 edge-e4-peep-seal; tests/edgeseal.py */
     "E3", "edge-e3-parse-seal", "meta",
+    /* edge-e3-parse-ablate: 边级抽样消融见证（e3->parse），tests/edgeablate.cx */
+    "E3", "edge-e3-parse-ablate", "meta",
     /* edge-e3-type-seal: 边级冻结原件（e3->type），同 edge-e4-peep-seal; tests/edgeseal.py */
     "E3", "edge-e3-type-seal", "meta",
     /* edge-e3-scope-seal: 边级冻结原件（e3->scope），同 edge-e4-peep-seal; tests/edgeseal.py */
