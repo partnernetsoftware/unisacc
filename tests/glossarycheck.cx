@@ -1,0 +1,407 @@
+#!/usr/bin/env -S unisacc.com -run
+/* glossarycheck.cx -- the terminology gate of docs/glossary.md section 6 (prd.md section 0 is the authority: stream /
+   net / segment / book phase / release phase, each word one meaning).  It holds the line where it can be decided
+   mechanically: on every tracked .cx file (the .cx system is where new names land; .py files are migration sources
+   and are not renamed, glossary section 4) and on every NEW tracked file -- a path not in the frozen list
+   tests/glossary-baseline.tsv (the tracked .cx .c .h .sh .md .yml .yaml, Makefile and extension-less files of
+   2026-10-23, this gate's own included).  The older documents are rewritten by hand, case by case (glossary section
+   5), not by this gate; the older files' Python calls are counted down by a separate ledger, not here.
+   Rules (a finding is one occurrence):
+     G1  .cx: a bare `stage` (prd.md 0.3: write stream-stage for a stream, net for a net; glossary 6 G1, stage used for
+         a net).  A token is a word of an identifier, split at '_', '-', '.', '/' and lower-to-upper case changes, that
+         is stage or stages in any case; `stream-stage(s)` and the L1 manifest name `image-stages` are qualified and
+         do not count.  Identifiers and comments both count (G1 says so); `stagechain` is one word and does not.
+     G2  .cx and new .md: the identifier PHASES (a release phase is written `release phase`; RELEASE_PHASES is the
+         name the code takes when it migrates).
+     G3  new .md: a bare `stage` as in G1, outside fenced code blocks and inline code spans, and not part of a path or
+         file name (a word with '/' or a file extension).
+     G4  .cx: STAGE_NETS (the two nets outside TABLES; the name is the third meaning of stage).
+     G7  .cx and new .md: a net name used as a flow name -- flow/flows/stream/streams next to (only blanks between) a
+         name that is a net and never a stream: pp tyinfo opinfo binsel irsel isel abi enc peep pfconv prec regmap
+         reloc combo lexcls lexword adj.  lex is both (m4's lex stream asks its lex net) and is not listed.
+     G5  any new file of the kinds above (owner 2026-10-23: zero Python dependency is a hard goal, prd.md section 1):
+         a Python invocation -- the word python3 or python2; python followed by an option (-m, -c, -I, -u, -S, -E) or
+         by a word ending in .py; "python" or 'python' as a whole quoted string (an argv entry); a #! first line that
+         names python; a word ending in .py run as ./PATH.py, or as the first word of a line of a .sh, Makefile or
+         extension-less file.  Code blocks and comments count: a new file is held from its first commit.  One finding
+         per line.  Merely naming a .py (ported from tests/x.py) is not an invocation.
+     G6  new .md: "4 流" / "4流" / "四流" on a line that says neither 字节段 nor 决策网 (prd.md 0.3: the bare 4 streams).
+   Not decidable here and left to review: `net` meaning a neural net (prd.md 0.3), a stage that is a stream but is
+   written bare in an older document.
+   Exceptions: tests/glossary-whitelist.tsv, rows RULE<TAB>PATH<TAB>COUNT<TAB>REASON.  A row allows up to COUNT
+   findings of RULE in PATH and must give its reason; findings above COUNT, or in a file without a row, are red and
+   every finding of that rule in that file is listed, so the new one can be found.  A count that fell is reported
+   (lower the row, the ratchet only goes down); a row for a file that has no finding of its rule is reported stale.
+   Neither is red.  Lines of either .tsv that start with '#' are comments.
+   usage, from the repo root (files are `git ls-files -z`, read from the work tree; a tracked file missing there is
+   skipped):
+     sh ./unisacc.com -run tests/glossarycheck.cx              rc 0 green, 1 red, 2 usage / not at the root / git or I/O
+     sh ./unisacc.com -run tests/glossarycheck.cx -- --counts  print every (rule, path, count) as whitelist rows, rc 0
+     sh ./unisacc.com -run tests/glossarycheck.cx -- --selftest   seeded violations and clean controls, in memory */
+
+#define WL "tests/glossary-whitelist.tsv"
+#define BASE "tests/glossary-baseline.tsv"
+#define MAXN 8192
+
+static const char *NETONLY[] = { "pp", "tyinfo", "opinfo", "binsel", "irsel", "isel", "abi", "enc", "peep", "pfconv",
+                                 "prec", "regmap", "reloc", "combo", "lexcls", "lexword", "adj", 0 };
+static const char *FLOWW[] = { "flow", "flows", "stream", "streams", 0 };
+
+/* ---- findings: per (rule, path) a count and the line numbers ---- */
+typedef struct { char rule[4]; char *path; int count; int *lines; int cap; } Hit;
+static Hit hits[MAXN];
+static int nhits;
+static int quiet;        /* the self-test counts without printing */
+
+static char *dupn(const char *s, size_t n) { char *d = malloc(n + 1); if (!d) { fprintf(stderr, "glossarycheck: out of memory\n"); exit(2); } memcpy(d, s, n); d[n] = 0; return d; }
+
+static void hit(const char *rule, const char *path, int line) {
+    int i; Hit *h = 0;
+    for (i = 0; i < nhits; i++) if (!strcmp(hits[i].rule, rule) && !strcmp(hits[i].path, path)) { h = &hits[i]; break; }
+    if (!h) {
+        if (nhits == MAXN) { fprintf(stderr, "glossarycheck: too many findings\n"); exit(2); }
+        h = &hits[nhits++]; strcpy(h->rule, rule); h->path = dupn(path, strlen(path)); h->count = 0; h->lines = 0; h->cap = 0;
+    }
+    if (h->count == h->cap) { h->cap = h->cap ? 2 * h->cap : 8; h->lines = realloc(h->lines, h->cap * sizeof(int)); if (!h->lines) exit(2); }
+    h->lines[h->count++] = line;
+}
+static int hitcount(const char *rule, const char *path) {
+    int i; for (i = 0; i < nhits; i++) if (!strcmp(hits[i].rule, rule) && !strcmp(hits[i].path, path)) return hits[i].count;
+    return 0;
+}
+static void reset_hits(void) { int i; for (i = 0; i < nhits; i++) { free(hits[i].path); free(hits[i].lines); } nhits = 0; }
+
+/* ---- words ---- */
+static int idch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int upper(int c) { return c >= 'A' && c <= 'Z'; }
+static int lower(int c) { return c >= 'a' && c <= 'z'; }
+static int ieq(const char *a, size_t n, const char *b) {   /* a[0..n) equals b ignoring ASCII case */
+    size_t i; for (i = 0; i < n; i++) { int x = a[i], y = b[i]; if (!y) return 0; if (upper(x)) x += 32; if (upper(y)) y += 32; if (x != y) return 0; }
+    return b[n] == 0;
+}
+static int in_list(const char *w, size_t n, const char **l) { int i; for (i = 0; l[i]; i++) if (ieq(w, n, l[i])) return 1; return 0; }
+
+/* does the identifier run r[0..n) hold a stage word?  Subwords split at '_' and at case changes (aB, ABc). */
+static int stage_words(const char *r, size_t n) {
+    size_t i = 0, s; int c = 0;
+    while (i < n) {
+        while (i < n && r[i] == '_') i++;
+        s = i;
+        if (i < n) i++;
+        while (i < n && r[i] != '_') {
+            if (upper(r[i]) && (lower(r[i - 1]) || (r[i - 1] >= '0' && r[i - 1] <= '9'))) break;
+            if (upper(r[i]) && i + 1 < n && lower(r[i + 1]) && upper(r[i - 1])) break;
+            i++;
+        }
+        if (i > s && (ieq(r + s, i - s, "stage") || ieq(r + s, i - s, "stages"))) c++;
+    }
+    return c;
+}
+
+/* is the run at line[a..b) qualified: stream-stage(s) or image-stages? */
+static int qualified(const char *line, size_t a, size_t b) {
+    if (a >= 7 && ieq(line + a - 7, 7, "stream-") && (ieq(line + a, b - a, "stage") || ieq(line + a, b - a, "stages"))) return 1;
+    if (a >= 6 && ieq(line + a - 6, 6, "image-") && ieq(line + a, b - a, "stages")) return 1;
+    return 0;
+}
+
+/* the whitespace-delimited word around line[a..b) names a path or a file (has '/' or a .ext) */
+static int pathword(const char *line, size_t len, size_t a, size_t b) {
+    size_t s = a, e = b, i;
+    while (s > 0 && line[s - 1] != ' ' && line[s - 1] != '\t') s--;
+    while (e < len && line[e] != ' ' && line[e] != '\t') e++;
+    for (i = s; i < e; i++) {
+        if (line[i] == '/') return 1;
+        if (line[i] == '.' && i + 1 < e && lower(line[i + 1]) && i > s && idch(line[i - 1])) return 1;
+    }
+    return 0;
+}
+
+/* one line of a file; kind 'c' (.cx) or 'm' (new .md, code already blanked) */
+static void scan_line(const char *path, int ln, const char *line, size_t len, int kind) {
+    size_t i = 0, a, prev_a = 0, prev_b = 0; int have_prev = 0;
+    while (i < len) {
+        if (!idch(line[i])) { i++; continue; }
+        a = i; while (i < len && idch(line[i])) i++;
+        {
+            int k = stage_words(line + a, i - a);
+            if (k && !qualified(line, a, i) && !(kind == 'm' && pathword(line, len, a, i))) {
+                while (k-- > 0) hit(kind == 'c' ? "G1" : "G3", path, ln);
+            }
+        }
+        if (i - a == 6 && !memcmp(line + a, "PHASES", 6)) hit("G2", path, ln);
+        if (kind == 'c') {
+            const char *p = line + a; size_t n = i - a, j;
+            for (j = 0; j + 10 <= n; j++) if (!memcmp(p + j, "STAGE_NETS", 10)) { hit("G4", path, ln); break; }
+        }
+        if (have_prev) {           /* G7: two adjacent words with only blanks between */
+            size_t j; int blanks = prev_b < a;
+            for (j = prev_b; j < a; j++) if (line[j] != ' ' && line[j] != '\t') blanks = 0;
+            if (blanks && ((in_list(line + prev_a, prev_b - prev_a, FLOWW) && in_list(line + a, i - a, NETONLY)) ||
+                           (in_list(line + prev_a, prev_b - prev_a, NETONLY) && in_list(line + a, i - a, FLOWW)))) hit("G7", path, ln);
+        }
+        prev_a = a; prev_b = i; have_prev = 1;
+    }
+    if (kind == 'm') {
+        static const char *four[] = { "4 流", "4流", "四流", 0 };
+        int f, has4 = 0;
+        char *t = dupn(line, len);
+        for (f = 0; four[f]; f++) if (strstr(t, four[f])) has4 = 1;
+        if (has4 && !strstr(t, "字节段") && !strstr(t, "决策网")) hit("G6", path, ln);
+        free(t);
+    }
+}
+
+/* a whole file: split lines; for .md blank fenced blocks and inline code spans first */
+static void scan_text(const char *path, char *b, size_t n, int kind) {
+    size_t i = 0, e, j; int ln = 0, fence = 0;
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        ln++;
+        if (kind == 'm') {
+            size_t s = i; while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+            if (e - s >= 3 && (!memcmp(b + s, "```", 3) || !memcmp(b + s, "~~~", 3))) { fence = !fence; i = e + 1; continue; }
+            if (fence) { i = e + 1; continue; }
+            {
+                int code = 0;
+                for (j = i; j < e; j++) {
+                    if (b[j] == '`') { code = !code; b[j] = ' '; }
+                    else if (code) b[j] = ' ';
+                }
+            }
+        }
+        scan_line(path, ln, b + i, e - i, kind);
+        i = e + 1;
+    }
+}
+
+/* ---- G5: a Python invocation in a new file; sh is 1 for .sh, Makefile and extension-less files ---- */
+static int wordend(int c) { return !idch(c) && c != '.' && c != '/' && c != '-'; }
+static int py_line(const char *l, size_t n, int first, int sh) {
+    size_t i = 0, a, j, s;
+    if (first && n >= 2 && l[0] == '#' && l[1] == '!') { for (j = 2; j + 6 <= n; j++) if (!memcmp(l + j, "python", 6)) return 1; }
+    while (i < n) {
+        if (!idch(l[i])) { i++; continue; }
+        a = i; while (i < n && idch(l[i])) i++;
+        if (i - a == 7 && (!memcmp(l + a, "python3", 7) || !memcmp(l + a, "python2", 7))) return 1;
+        if (i - a == 6 && !memcmp(l + a, "python", 6)) {
+            if (a > 0 && i < n && (l[a - 1] == '"' || l[a - 1] == '\'') && l[i] == l[a - 1]) return 1;
+            j = i; while (j < n && (l[j] == ' ' || l[j] == '\t')) j++;
+            if (j > i && j + 1 < n && l[j] == '-' && strchr("mcIuSE", l[j + 1]) && (j + 2 == n || !idch(l[j + 2]))) return 1;
+            if (j > i) { s = j; while (j < n && l[j] != ' ' && l[j] != '\t' && l[j] != '"' && l[j] != '\'') j++; if (j - s > 3 && !memcmp(l + j - 3, ".py", 3)) return 1; }
+        }
+    }
+    for (j = 0; j + 3 <= n; j++) {
+        if (memcmp(l + j, ".py", 3) || (j + 3 < n && !wordend(l[j + 3]))) continue;
+        s = j; while (s > 0 && l[s - 1] != ' ' && l[s - 1] != '\t' && l[s - 1] != '"' && l[s - 1] != '\'' && l[s - 1] != '`' && l[s - 1] != '(') s--;
+        if (s == j) continue;
+        if (j - s >= 2 && l[s] == '.' && l[s + 1] == '/') return 1;
+        if (sh) { size_t k = 0; while (k < n && (l[k] == ' ' || l[k] == '\t')) k++; if (k == s && l[k] != '#') return 1; }
+    }
+    return 0;
+}
+static void scan_python(const char *path, const char *b, size_t n, int sh) {
+    size_t i = 0, e; int ln = 0;
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        ln++;
+        if (py_line(b + i, e - i, ln == 1, sh)) hit("G5", path, ln);
+        i = e + 1;
+    }
+}
+
+/* ---- the frozen file list and the whitelist ---- */
+typedef struct { char rule[4]; char *path; int count; char *reason; int line; } Row;
+static Row wl[MAXN];
+static int nwl;
+static char **base;
+static int nbase;
+
+static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+/* lines of a file, '#' comments and blanks dropped; NULL when it cannot be read */
+static char **lines_of(const char *f, int *count) {
+    size_t n, i = 0, e; char *b = cx_read(f, &n), **v = 0; int c = 0, cap = 0;
+    if (!b) return 0;
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e > i && b[i] != '#') {
+            if (c == cap) { cap = cap ? 2 * cap : 256; v = realloc(v, cap * sizeof *v); if (!v) exit(2); }
+            v[c++] = dupn(b + i, e - i - (b[e - 1] == '\r'));
+        }
+        i = e + 1;
+    }
+    free(b); *count = c;
+    if (!v) v = malloc(sizeof *v);
+    return v;
+}
+
+static int load_whitelist_text(char **v, int c) {
+    int k;
+    for (k = 0; k < c; k++) {
+        char *f[4], *p = v[k], *end; int nf = 0; long cnt;
+        f[nf++] = p;
+        while (*p && nf < 4) { if (*p == '\t') { *p = 0; f[nf++] = p + 1; } p++; }
+        if (nf < 4 || strlen(f[0]) != 2 || f[0][0] != 'G' || f[0][1] < '1' || f[0][1] > '7' || !*f[1] || !*f[3]) {
+            fprintf(stderr, "glossarycheck: %s: row %d: want RULE<TAB>PATH<TAB>COUNT<TAB>REASON with a reason\n", WL, k + 1); return -1;
+        }
+        cnt = strtol(f[2], &end, 10);
+        if (end == f[2] || *end || cnt < 1) { fprintf(stderr, "glossarycheck: %s: row %d: bad count '%s'\n", WL, k + 1, f[2]); return -1; }
+        if (nwl == MAXN) return -1;
+        strcpy(wl[nwl].rule, f[0]); wl[nwl].path = f[1]; wl[nwl].count = (int)cnt; wl[nwl].reason = f[3]; wl[nwl].line = k + 1; nwl++;
+    }
+    return 0;
+}
+
+static int in_base(const char *p) { return bsearch(&p, base, nbase, sizeof *base, cmpstr) != 0; }
+/* the kinds the baseline covers: 0 not covered, 1 covered, 2 covered and shell-like (first word runs) */
+static int covered(const char *p) {
+    const char *b = strrchr(p, '/'), *d; size_t n = strlen(p);
+    b = b ? b + 1 : p; d = strrchr(b, '.');
+    if (!strcmp(b, "Makefile") || !strcmp(b, "makefile") || !strcmp(b, "GNUmakefile") || !d) return 2;
+    if (n > 3 && !strcmp(p + n - 3, ".sh")) return 2;
+    if (!strcmp(d, ".cx") || !strcmp(d, ".c") || !strcmp(d, ".h") || !strcmp(d, ".md") || !strcmp(d, ".yml") || !strcmp(d, ".yaml")) return 1;
+    return 0;
+}
+
+/* verdict over the collected hits and the whitelist; prints, returns the number of red (rule, path) pairs */
+static int judge(int *nfind, int *nallowed) {
+    int i, k, red = 0;
+    *nfind = 0; *nallowed = 0;
+    for (i = 0; i < nhits; i++) {
+        Row *r = 0;
+        for (k = 0; k < nwl; k++) if (!strcmp(wl[k].rule, hits[i].rule) && !strcmp(wl[k].path, hits[i].path)) { r = &wl[k]; break; }
+        *nfind += hits[i].count;
+        if (r && hits[i].count <= r->count) {
+            *nallowed += hits[i].count;
+            if (hits[i].count < r->count && !quiet)
+                printf("glossarycheck: note: %s %s has %d, its whitelist row allows %d -- lower the row\n", hits[i].rule, hits[i].path, hits[i].count, r->count);
+            continue;
+        }
+        red++;
+        if (!quiet) {
+            printf("glossarycheck: %s %s: %d finding(s)%s%d, line(s)", hits[i].rule, hits[i].path, hits[i].count,
+                   r ? ", whitelist allows " : ", no whitelist row; allowed ", r ? r->count : 0);
+            for (k = 0; k < hits[i].count; k++) printf(" %d", hits[i].lines[k]);
+            printf("\n");
+        }
+    }
+    for (k = 0; k < nwl; k++)
+        if (!hitcount(wl[k].rule, wl[k].path) && !quiet) printf("glossarycheck: note: stale whitelist row %d (%s %s): no finding\n", wl[k].line, wl[k].rule, wl[k].path);
+    return red;
+}
+
+/* ---- self-test: seeded violations and clean controls ---- */
+static int st_bad, st_n;
+static void expect(const char *what, const char *text, int kind, const char *rule, int want) {
+    char *b = dupn(text, strlen(text)); int got;
+    st_n++;
+    reset_hits();
+    if (kind == 'p' || kind == 'q') scan_python("seed", b, strlen(b), kind == 'p');
+    else scan_text("seed", b, strlen(b), kind);
+    got = hitcount(rule, "seed");
+    if (got != want) { printf("glossarycheck selftest: %s: %s found %d, want %d\n", what, rule, got, want); st_bad++; }
+    free(b);
+}
+static int selftest(void) {
+    int f, a, red; char *v[3];
+    quiet = 1;
+    /* G1, .cx */
+    expect("comment stage meaning a net", "/* the gold label functions, one per stage */", 'c', "G1", 1);
+    expect("camel-case net registry", "const UjsStage *S = ujsgold_stage(s);", 'c', "G1", 2);
+    expect("upper-case registry", "static const char *STAGES[] = {0};", 'c', "G1", 1);
+    expect("qualified stream-stage", "/* one stream-stage per row; see exec/pipeline/image-stages.tsv */", 'c', "G1", 0);
+    expect("one word stagechain", "the stagechain tool, an earlystageseal row", 'c', "G1", 0);
+    expect("clean net", "/* the gold label functions, one per net */ int net_count;", 'c', "G1", 0);
+    /* G2 */
+    expect("bare PHASES", "static const char *PHASES[] = {\"code\", \"matrix\"};", 'c', "G2", 1);
+    expect("RELEASE_PHASES", "static const char *RELEASE_PHASES[];", 'c', "G2", 0);
+    expect("PHASES in a new doc", "the PHASES list", 'm', "G2", 1);
+    /* G4 */
+    expect("STAGE_NETS", "if (in(STAGE_NETS, n)) return;", 'c', "G4", 1);
+    expect("no STAGE_NETS", "if (in(NETS, n)) return;", 'c', "G4", 0);
+    /* G7 */
+    expect("net name as flow", "/* the isel stream */", 'c', "G7", 1);
+    expect("flow named after a net", "flow pp e2", 'c', "G7", 1);
+    expect("lex is both", "flow lex lex", 'c', "G7", 0);
+    expect("a stream is a stream", "the e3 stream feeds lower", 'c', "G7", 0);
+    expect("punctuation between", "stream: pp", 'c', "G7", 0);
+    expect("net name as flow, new doc", "The enc flow writes bytes.", 'm', "G7", 1);
+    /* G3, new .md */
+    expect("bare stage in prose", "Each stage of the pipeline is a net.", 'm', "G3", 1);
+    expect("stage in inline code", "The column `stage` is kept.", 'm', "G3", 0);
+    expect("stage in a fenced block", "```\nstage e2\n```\nclean text\n", 'm', "G3", 0);
+    expect("stage in a path", "see exec/pipeline/stages.tsv and stages.tsv", 'm', "G3", 0);
+    expect("qualified in a doc", "seven stream-stages", 'm', "G3", 0);
+    expect("stage after a fence closes", "```\nok\n```\nthe parse stage\n", 'm', "G3", 1);
+    /* G5: Python in a new file ('p' shell-like, 'q' other) */
+    expect("env python shebang", "#!/usr/bin/env python3\nprint(1)\n", 'q', "G5", 1);
+    expect("plain python shebang", "#!/usr/bin/python\n", 'q', "G5", 1);
+    expect("system python3", "rc = system(\"python3 tools/x.py\");", 'q', "G5", 1);
+    expect("python -m", "python -m unisa build-weights", 'p', "G5", 1);
+    expect("python FILE.py", "  python exec/build/gen.py pp out", 'p', "G5", 1);
+    expect("argv python", "char *a[] = {\"python\", \"x.py\", 0};", 'q', "G5", 1);
+    expect("./x.py", "out=$(./tests/foo.py --check)", 'q', "G5", 1);
+    expect("first word .py in sh", "    tests/foo.py --check\n", 'p', "G5", 1);
+    expect("python3 in a fenced doc block", "```\npython3 -m unisa\n```\n", 'q', "G5", 1);
+    expect("naming a .py is clean", "/* ported from tests/foo.py; P is exec/build/gen.py */", 'q', "G5", 0);
+    expect("first word .py outside sh", "tests/foo.py was deleted", 'q', "G5", 0);
+    expect("comment .py in sh", "# tests/foo.py was deleted", 'p', "G5", 0);
+    expect("identifiers are clean", "int UNISA_PYTHON3_OK, pythonic; /* python bindings */", 'q', "G5", 0);
+    /* G6 */
+    expect("bare 4 streams", "m4 的 4 流", 'm', "G6", 1);
+    expect("4 streams with context", "m4 的 4 流（四个字节段）", 'm', "G6", 0);
+    expect("4 nets", "四流对应 4 张决策网", 'm', "G6", 0);
+    /* the whitelist: within its count green, above red, a row without a reason refused */
+    reset_hits(); nwl = 0;
+    { char t[] = "x /* stage */ y\nz /* stage */\n"; scan_text("w.cx", t, strlen(t), 'c'); }
+    v[0] = dupn("G1\tw.cx\t2\texisting symbol, section 4", strlen("G1\tw.cx\t2\texisting symbol, section 4"));
+    if (load_whitelist_text(v, 1) || judge(&f, &a) != 0 || f != 2 || a != 2) { printf("glossarycheck selftest: whitelist within count not green\n"); st_bad++; }
+    nwl = 0; v[1] = dupn("G1\tw.cx\t1\tone allowed", strlen("G1\tw.cx\t1\tone allowed"));
+    if (load_whitelist_text(v + 1, 1) || (red = judge(&f, &a)) != 1) { printf("glossarycheck selftest: count above whitelist not red\n"); st_bad++; }
+    nwl = 0; v[2] = dupn("G1\tw.cx\t2\t", strlen("G1\tw.cx\t2\t"));
+    fprintf(stderr, "glossarycheck selftest: (the next refusal is expected)\n");
+    if (load_whitelist_text(v + 2, 1) == 0) { printf("glossarycheck selftest: a row without a reason was accepted\n"); st_bad++; }
+    nwl = 0;
+    if (judge(&f, &a) != 1) { printf("glossarycheck selftest: a file without a row not red\n"); st_bad++; }
+    if (st_bad) { printf("glossarycheck selftest FAIL: %d\n", st_bad); return 1; }
+    printf("glossarycheck selftest PASS: %d seeded texts (G1-G7 violations and clean controls), whitelist within/above/no-reason/no-row\n", st_n);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *cdup = 0, *p, *end, **v; size_t ln = 0, cl = 0; int c, counts = 0, ncx = 0, nnew = 0, i, red, f, a, rc;
+    if (argc == 2 && !strcmp(argv[1], "--selftest")) return selftest();
+    if (argc == 2 && !strcmp(argv[1], "--counts")) counts = 1;
+    else if (argc != 1) { fprintf(stderr, "usage: glossarycheck.cx [--counts | --selftest]   (from the repo root)\n"); return 2; }
+    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "glossarycheck: run from the repo root of a git checkout\n"); return 2; }
+    if (!(base = lines_of(BASE, &nbase))) { fprintf(stderr, "glossarycheck: cannot read %s\n", BASE); return 2; }
+    qsort(base, nbase, sizeof *base, cmpstr);
+    if (!counts) {
+        if (!(v = lines_of(WL, &c))) { fprintf(stderr, "glossarycheck: cannot read %s\n", WL); return 2; }
+        if (load_whitelist_text(v, c)) return 2;
+    }
+    rc = cx_run("git ls-files -z", &list, &ln);
+    if (rc != 0 || !list) { fprintf(stderr, "glossarycheck: git ls-files failed (rc %d)\n", rc); return 2; }
+    for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
+        size_t n = strlen(p), bn; char *b; int kind = 0, cov = covered(p), fresh;
+        fresh = cov && !in_base(p);
+        if (n > 3 && !strcmp(p + n - 3, ".cx")) kind = 'c';
+        else if (n > 3 && !strcmp(p + n - 3, ".md") && fresh) kind = 'm';
+        if (!kind && !fresh) continue;
+        if (!(b = cx_read(p, &bn))) continue;
+        if (kind == 'c') ncx++;
+        if (fresh) { nnew++; scan_python(p, b, bn, cov == 2); }
+        if (kind) scan_text(p, b, bn, kind);
+        free(b);
+    }
+    if (counts) {
+        for (i = 0; i < nhits; i++) printf("%s\t%s\t%d\t-\n", hits[i].rule, hits[i].path, hits[i].count);
+        return 0;
+    }
+    red = judge(&f, &a);
+    if (red) { printf("glossarycheck FAIL: %d (rule, file) pair(s) over the whitelist; %d .cx and %d new files, %d findings, %d whitelisted (%s)\n", red, ncx, nnew, f, a, WL); return 1; }
+    printf("glossarycheck PASS: %d .cx and %d new files (baseline %d files), %d findings, all within %d whitelist rows\n", ncx, nnew, nbase, f, nwl);
+    return 0;
+}
