@@ -4,9 +4,50 @@
 
 ## 当前导航
 
+- **[概念与术语](#0-概念与术语先读歧义以本节为准)**：§0，流 / 网 / 段 / 阶段四个词各只有一个意思；六条常见误解逐条对照。
 - **[流/网合同三表与可核验进度](#flow-net-contracts)**：七流、十八网、关系表及是否封存；有封不等于已冻。
 - [当前版本与有效计划](#current-plans) · [当前架构](#pipeline-design)
 - [路线](#5-路线) · [未解决问题](#6-未解决问题) · [归档索引](#7-归档索引)
+
+## 0. 概念与术语（先读；歧义以本节为准）
+
+> 本节只做一件事：让「流 / 网 / 段 / 阶段」四个词各自只有一个意思。详细版与逐处核实见 [docs/glossary.md](docs/glossary.md)。
+
+### 0.1 五层，每层只有一个名字
+
+| 层 | 唯一名 | 含义 | 数量 | 真源 |
+|---|---|---|---|---|
+| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 → 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf）· m4/ujs **4**（lex/front/select/encode）· tdesc **3**（declare/context/size） | `exec/pipeline/image-stages.tsv` · `m4/contract.py FLOWS` · `flownet/tdesc/contract.tsv` |
+| L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键）· **10**（3677 键）· **3** | `unisa/gold.py` · `ujs/seed/construct/gold.py` |
+| L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | `unisa/control/segment.py` |
+| L4 | **Book phase** | 一次推导中 ask 的记账阶段 | 由 contract 声明 | `flownet/contract.cx` 的 `phase` 行 |
+| L5 | **Release phase** | 发布流程阶段 | 10 | `release/tools/stagelog.py` |
+
+### 0.2 六条常见误解（逐条对照，不要按直觉读）
+
+| 如果你这样理解 | 正确的是 | 为什么容易错 |
+|---|---|---|
+| 「7 流」与「18 网」是同一批东西的两种叫法 | 流是**字节管道阶段**，网是 **ask 事实表** | 旧句「勿混」只否定了互换，没说明二者各是什么 |
+| `class Stage`（`unisa/gold.py`）表示流 | 它表示**网**（18 张的规格定义） | 类名抢占了「流」的词 |
+| `unisa/control/net.py` 的 `Net` 是事实网 | 它是**神经网络模型**（TableNet / StageNet / UnisaNet） | `net` 一词被两处占用 |
+| m4 的「4 流」指 4 张决策网（lex/parse/isel/enc） | 4 流是**四个字节段**：lex / front / select / encode；决策网恰好也是 4 张，是数字巧合 | 两个「4」属不同维度 |
+| 所有 `phase` 都是编译阶段 | 三义：**book phase**（记账）/ **release phase**（发布）/ 历史 `compiler phase`（实为 segment） | 同一个词三次入场 |
+| `STAGE_NETS` 是「所有与流相关的网」 | 仅 **isel、abi** 两张不在 `TABLES` 里的网（15 + 2 + 1 = 18） | 名字里的 stage 是历史包袱 |
+
+### 0.3 禁用写法
+
+- 裸 `stage`：一律写 `stream-stage`（指流）或 `net`（指网）
+- 用 `net` 指神经网络：一律写 `model` / `neural net`
+- 用裸 `PHASES` 指发布阶段：写 `release phase`（代码侧待改 `RELEASE_PHASES`）
+- 单说「4 流」：必须带上下文——「m4 的四个字节段」或「4 张决策网」
+
+### 0.4 与 §3 的关系
+
+§3.0a 七流表、§3.0b 十八网表、§3.0c 关系总表都以本节定义为前提；三表与本节冲突时，**以本节为准**，并同步修表。
+
+### 0.5 一句话
+
+**流 = stream，网 = net，训练合并 = segment，记账 = book phase，发布 = release phase。**
 
 ## 1. 命题与产品
 
@@ -171,7 +212,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 - tip `25f720ab` · 观测 2026-10-21 17:33 AWST
 - 真源：`image-stages.tsv`、`gold.STAGES`、`tests/STAGE-IDENTITIES.md`、经典 ask/`inf` 位点、`compilerpack` 路由
-- **勿混**：7 流 = 字节管道；18 网 = ask 事实表；同名不可互换。
+- **勿混**：7 流 = 字节管道（**stream**）；18 网 = ask 事实表（**net**）；名词定义以 §0 为准，同名不可互换。
 
 #### 图例
 
