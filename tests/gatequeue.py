@@ -187,10 +187,18 @@ def file_identity(name):
     if stat.S_ISLNK(lst.st_mode):
         return [0o120000, hashlib.sha256(os.readlink(name).encode('utf-8', 'surrogateescape')).hexdigest()]
     if not stat.S_ISREG(lst.st_mode): raise SystemExit('queue nonregular input: '+name)
-    h = hashlib.sha256()
-    with open(name, 'rb') as f:
-        for block in iter(lambda:f.read(1024*1024), b''): h.update(block)
-    return [0o100755 if lst.st_mode & 0o111 else 0o100644, h.hexdigest()]
+    # One process re-fingerprints the same tree many times (start, end, every resume control); a file's bytes are
+    # re-read only when its inode identity changes.  ctime moves on every write and chmod, so an edit -- including
+    # one made during the queue, which the end-of-run fingerprint must see -- always rehashes.
+    key = (lst.st_dev, lst.st_ino, lst.st_size, lst.st_mtime_ns, lst.st_ctime_ns)
+    hexdigest = _CONTENT.get(key)
+    if hexdigest is None:
+        h = hashlib.sha256()
+        with open(name, 'rb') as f:
+            for block in iter(lambda:f.read(1024*1024), b''): h.update(block)
+        hexdigest = _CONTENT[key] = h.hexdigest()
+    return [0o100755 if lst.st_mode & 0o111 else 0o100644, hexdigest]
+_CONTENT = {}
 
 
 def fingerprint(jobs, parts=None, revoked=()):
