@@ -1,0 +1,210 @@
+/* libprobe.cx -- the scaffolding the library host-probe checks share (tests/library*check.py: argparse --arch,
+   platform.machine()/system(), struct.pack('<Q') byte packing, tempfile.TemporaryDirectory and checklib.bounded),
+   as a .cx module (2026-10-23, the py->cx port wave; first users tests/librarycallbackgraphcheck.cx and
+   tests/librarycallablecatalogcheck.cx).  Use it with `#pragma unisa use cxlib.libprobe` from a .cx file in tests/.
+     lp_buf, lp_put(B, S, N), lp_u(B, X), lp_byte(B, C), lp_cat(B, S), lp_free(B)
+         a growing byte string: bytes concatenation, struct.pack('<Q', X), bytes([C])
+     lp_parse_arch(ARGC, ARGV, PROG)
+         argparse with one option `--arch {arm64,x86_64}` (and -h/--help), prefixes and `--arch=V` as argparse takes
+         them, the last one wins; returns the value or 0.  -h prints the help on stdout, rc 0; a usage error prints
+         `usage: PROG [-h] [--arch {arm64,x86_64}]` and `PROG: error: ...` on stderr, rc 2.  PROG is the original
+         script's name (argparse's prog), so the text is byte-identical to the .py's.
+     lp_platform(ARCH_OPT, &arch, &host, &darwin)
+         host = arm64 when `uname -m` is arm64/aarch64, else x86_64; arch = ARCH_OPT or host; darwin = `uname -s` is
+         Darwin.  A foreign arch off Darwin is the .py's SystemExit: `cross execution requires native runner` on
+         stderr, rc 1.
+     lp_root(FILE, out, cap)       Path(FILE).resolve().parents[1] (FILE is the caller's __FILE__)
+     lp_tempdir(PREFIX, out, cap)  tempfile.TemporaryDirectory(prefix=PREFIX): removed by lp_cleanup() and by lp_fail()
+     lp_write(DIR, NAME, B, out, cap)  Path(DIR/NAME).write_bytes(B); the path in OUT; an OSError is fatal
+     lp_run(ROOT, CMD)             checklib.bounded(*CMD): [ROOT/tests/bound, '20', *CMD], stdio inherited, check=True
+     lp_fail(LINE)                 the .py's uncaught exception: LINE (the traceback's last line) on stderr, the
+                                   temporary directory removed, rc 1
+   A nonzero exit is `subprocess.CalledProcessError: Command '[...]' returned non-zero exit status N.` (or `died
+   with <Signals.SIGX: N>.` for a signal); an exec failure is the FileNotFoundError/PermissionError line.
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module libprobe
+#pragma unisa use pytempfile
+#pragma unisa use runtimecopy
+#pragma unisa use pyrun
+
+typedef struct lp_buf { unsigned char *p; size_t n, cap; } lp_buf;
+
+static char lp_tmp[4200];
+
+void lp_cleanup(void) { if (lp_tmp[0]) { ptf_rmtree(lp_tmp); lp_tmp[0] = 0; } }
+void lp_fail(const char *line) {
+    fflush(stdout);
+    fprintf(stderr, "%s\n", line); fflush(stderr);
+    lp_cleanup();
+    exit(1);
+}
+
+/* ---- bytes ---------------------------------------------------------------------------------------------------- */
+void lp_put(lp_buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->p, c))) lp_fail("MemoryError");
+        b->p = t; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+void lp_u(lp_buf *b, unsigned long long x) {
+    unsigned char t[8]; int i;
+    for (i = 0; i < 8; i++) t[i] = (unsigned char)(x >> (8 * i));
+    lp_put(b, t, 8);
+}
+void lp_byte(lp_buf *b, int c) { unsigned char t = (unsigned char)c; lp_put(b, &t, 1); }
+void lp_cat(lp_buf *b, const lp_buf *s) { lp_put(b, s->p ? (const void *)s->p : (const void *)"", s->n); }
+void lp_free(lp_buf *b) { free(b->p); b->p = 0; b->n = b->cap = 0; }
+
+/* ---- argparse --------------------------------------------------------------------------------------------------- */
+static const char *lp_prog;
+static void lp_usage(FILE *f) { fprintf(f, "usage: %s [-h] [--arch {arm64,x86_64}]\n", lp_prog); }
+static void lp_usage_error(const char *msg, const char *a) {
+    fflush(stdout); lp_usage(stderr); fprintf(stderr, "%s: error: ", lp_prog); fprintf(stderr, msg, a); fputc('\n', stderr);
+    exit(2);
+}
+static int lp_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+static int lp_prefix(const char *p, size_t n, const char *opt) { return n >= 3 && n <= strlen(opt) && !strncmp(p, opt, n); }
+static int lp_long(const char *s, const char **eq) {   /* 1 help, 2 arch, 0 none */
+    const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s);
+    *eq = e ? e + 1 : 0;
+    if (lp_prefix(s, n, "--help")) return 1;
+    if (lp_prefix(s, n, "--arch")) return 2;
+    return 0;
+}
+static int lp_is_option(const char *s) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && lp_long(s, &eq)) return 1;
+    if (s[1] == 'h') return 1;
+    if (lp_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+const char *lp_parse_arch(int argc, char **argv, const char *prog) {
+    static char extras[8192]; size_t xl = 0; int i, help = 0; const char *arch = 0;
+    lp_prog = prog; extras[0] = 0;
+#define LP_EXTRA(s) (xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", (s)))
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int o = 0;
+        if (!strcmp(s, "--")) { for (; i < argc; i++) LP_EXTRA(argv[i]); break; }
+        if (s[0] == '-' && s[1] == '-') o = lp_long(s, &eq);
+        else if (s[0] == '-' && s[1] == 'h') o = 1;
+        if (o == 1) {
+            if (eq && s[1] == '-') lp_usage_error("argument -h/--help: ignored explicit argument '%s'", eq);
+            if (s[1] == '-' || (s[2] != '=' && s[2] != '-')) { help = 1; break; }
+            lp_usage_error("argument -h/--help: ignored explicit argument '%s'", s + 2 + (s[2] == '='));
+        } else if (o == 2) {
+            const char *v = eq;
+            if (!v) {
+                if (i + 1 >= argc || lp_is_option(argv[i + 1])) lp_usage_error("argument --arch: expected one argument", 0);
+                v = argv[++i];
+            }
+            if (strcmp(v, "arm64") && strcmp(v, "x86_64"))
+                lp_usage_error("argument --arch: invalid choice: '%s' (choose from 'arm64', 'x86_64')", v);
+            arch = v;
+        } else LP_EXTRA(s);
+    }
+#undef LP_EXTRA
+    if (help) {
+        lp_usage(stdout);
+        printf("\noptions:\n  -h, --help            show this help message and exit\n  --arch {arm64,x86_64}\n");
+        fflush(stdout);
+        exit(0);
+    }
+    if (xl) lp_usage_error("unrecognized arguments: %s", extras);
+    return arch;
+}
+
+/* ---- platform ------------------------------------------------------------------------------------------------- */
+static void lp_uname(char *flag, char *out, size_t cap) {
+    char *a[3], *o = 0; size_t n = 0;
+    a[0] = "uname"; a[1] = flag; a[2] = 0;
+    out[0] = 0;
+    if (cx_runv_timeout(a, 10, &o, &n) != 0 || !o) { free(o); return; }
+    o[strcspn(o, "\r\n")] = 0;
+    snprintf(out, cap, "%s", o); free(o);
+}
+void lp_platform(const char *opt, const char **arch, const char **host, int *darwin) {
+    char m[256], s[256];
+    lp_uname("-m", m, sizeof m); lp_uname("-s", s, sizeof s);
+    *host = (!strcmp(m, "arm64") || !strcmp(m, "aarch64")) ? "arm64" : "x86_64";
+    *arch = opt ? opt : *host;
+    *darwin = !strcmp(s, "Darwin");
+    if (strcmp(*arch, *host) && !*darwin) lp_fail("cross execution requires native runner");
+}
+
+/* ---- paths and files ------------------------------------------------------------------------------------------ */
+void lp_root(const char *file, char *out, size_t cap) {
+    char why[8400], r[8192], *sl; int k;
+    if (rtc_resolve(file, 0, r, sizeof r, why, sizeof why) != 0) lp_fail(why);
+    for (k = 0; k < 2; k++) { sl = strrchr(r, '/'); if (sl && sl != r) *sl = 0; else { strcpy(r, "/"); break; } }
+    snprintf(out, cap, "%s", r);
+}
+void lp_tempdir(const char *prefix, char *out, size_t cap) {
+    char why[8400];
+    if (ptf_mkdtemp(0, prefix, out, cap) != 0) { rtc_oserror(errno, out, why, sizeof why); lp_fail(why); }
+    snprintf(lp_tmp, sizeof lp_tmp, "%s", out);
+}
+void lp_write(const char *dir, const char *name, const lp_buf *b, char *out, size_t cap) {
+    char why[8400];
+    snprintf(out, cap, "%s/%s", dir, name);
+    errno = 0;
+    if (cx_write(out, b->p ? (const void *)b->p : (const void *)"", b->n) != 0) {
+        rtc_oserror(errno ? errno : EIO, out, why, sizeof why); lp_fail(why);
+    }
+}
+
+/* ---- checklib.bounded ------------------------------------------------------------------------------------------ */
+static const char *lp_signame(int s) {
+    /* if-chain, not switch: some of these are not integer constant expressions in the prelude's signal.h */
+    if (s == SIGHUP) return "SIGHUP"; if (s == SIGINT) return "SIGINT"; if (s == SIGQUIT) return "SIGQUIT";
+    if (s == SIGILL) return "SIGILL"; if (s == SIGABRT) return "SIGABRT";
+    if (s == SIGFPE) return "SIGFPE"; if (s == SIGKILL) return "SIGKILL";
+    if (s == SIGSEGV) return "SIGSEGV";
+    if (s == SIGTERM) return "SIGTERM";
+    return 0;
+}
+void lp_run(const char *root, char *const *cmd) {
+    char bound[4300], *argv[128], *why, *list; int n = 0, st = 0, pfd[2], err = 0, rc; pid_t pid; ssize_t k; size_t len;
+    snprintf(bound, sizeof bound, "%s/tests/bound", root);
+    argv[n++] = bound; argv[n++] = "20";
+    while (*cmd && n < 127) argv[n++] = *cmd++;
+    argv[n] = 0;
+    fflush(stdout); fflush(stderr);
+    if (pipe(pfd) != 0) lp_fail("OSError: pipe failed");
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) lp_fail("OSError: fork failed");
+    if (pid == 0) {
+        close(pfd[0]);
+        execv(argv[0], argv);
+        err = errno; k = write(pfd[1], &err, sizeof err); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    k = read(pfd[0], &err, sizeof err);
+    close(pfd[0]);
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) lp_fail("ChildProcessError: wait failed");
+    if (k == (ssize_t)sizeof err) {
+        char w[8400]; rtc_oserror(err, bound, w, sizeof w); lp_fail(w);
+    }
+    rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    if (rc == 0) return;
+    list = pr_repr_strlist(argv, (size_t)n);
+    len = strlen(list) + 200;
+    if (!(why = malloc(len))) lp_fail("MemoryError");
+    if (rc > 0) snprintf(why, len, "subprocess.CalledProcessError: Command '%s' returned non-zero exit status %d.", list, rc);
+    else if (lp_signame(-rc)) snprintf(why, len, "subprocess.CalledProcessError: Command '%s' died with <Signals.%s: %d>.", list, lp_signame(-rc), -rc);
+    else snprintf(why, len, "subprocess.CalledProcessError: Command '%s' died with unknown signal %d.", list, -rc);
+    lp_fail(why);
+}

@@ -698,7 +698,7 @@ job lib-variadic-host tests/bound 58 sh ./tests/cxbin tests/librarynativevariadi
 job lib-callplans-host tests/bound 58 sh ./unisacc.com -run tests/librarycallplanscheck.cx   # (.cx port, 2026-10-23)
 job lib-variadic-resolver-host tests/bound 58 sh ./unisacc.com -run tests/libraryvariadicresolvercheck.cx   # (.cx port, 2026-10-23)
 job lib-variadic-protocol ./tests/modelvariadicprotocolcheck.sh
-job lib-callback-graph-host python3 ./tests/librarycallbackgraphcheck.py
+job lib-callback-graph-host tests/bound 58 sh ./unisacc.com -run tests/librarycallbackgraphcheck.cx   # (.cx port, 2026-10-23) exact USLSIG2 graph fixtures (tests/cxlib/libprobe.cx), native decoder oracle, normal + ASan/UBSan
 job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
 job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
 job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
@@ -811,7 +811,7 @@ job lib-union16-callback-4 sh ./unisacc.com -run tests/libraryunion16check.cx --
 job lib-union16-direct-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize
 job lib-union16-callback-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback
 job lib-callable-variadic-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablevarcheck.cx   # (.cx port, 2026-10-23) concrete variadic callable ABI, normal + ASan/UBSan
-job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
+job lib-callable-catalog tests/bound 58 sh ./unisacc.com -run tests/librarycallablecatalogcheck.cx   # (.cx port, 2026-10-23) USLCALL1/2/3 wire + context-owned graph transactions, normal + ASan/UBSan
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
 job lib-callback-plan sh ./tests/cxbin tests/librarycallbackplancheck.cx   # (.cx port, 2026-10-23) callback declaration/plan probe, normal + ASan/UBSan
 job lib-callable-model ./tests/modelcallablewirecheck.sh
@@ -830,10 +830,10 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-typed-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-variadic-rosetta tests/bound 58 sh ./tests/cxbin tests/librarynativevariadiccheck.cx --arch x86_64
     job lib-callplans-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycallplanscheck.cx -- --arch x86_64
-    job lib-callback-graph-rosetta python3 ./tests/librarycallbackgraphcheck.py --arch x86_64
+    job lib-callback-graph-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycallbackgraphcheck.cx -- --arch x86_64
     job lib-callback-outcome-rosetta sh ./tests/cxbin tests/librarycallbackoutcomecheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-callback-plan-rosetta sh ./tests/cxbin tests/librarycallbackplancheck.cx --arch x86_64
-    job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
+    job lib-callable-catalog-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycallablecatalogcheck.cx -- --arch x86_64
     job lib-source-longdouble-import-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
     job lib-carrier-mechanism-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx -- --arch x86_64
     job lib-carrier-native-plan-rosetta sh ./unisacc.com -run tests/librarycarriernativeplancheck.cx -- --arch x86_64

@@ -1,0 +1,218 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallbackgraphcheck.cx -- exact USLSIG2 graph fixtures, normal/sanitized native host decoder oracle.
+   Ported from tests/librarycallbackgraphcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarycallbackgraphcheck.cx -- [-h] [--arch {arm64,x86_64}]
+   In a fresh temporary directory (tempfile.gettempdir(), prefix r10-callbackgraph-) it writes the eleven fixture
+   pairs and twenty-two malformed declarations the .py packed with struct (self, shared, mutual, nine, limit, depth,
+   empty, unequal and three equal pairs; bad0..bad21.sig), then twice (plain, then -fsanitize=address,undefined -g)
+   builds tests/librarycallbackgraphcheck.c with $CC (default cc) [-arch ARCH on Darwin] -std=c99 -I ROOT -Wall
+   -Wextra -Wno-unused-function -lffi and runs `probe NAME FIXTURE OTHER-OR-FIXTURE bad0.sig ... bad21.sig` for
+   every fixture (under `arch -x86_64` for --arch x86_64 on an arm64 host) -- every command under `tests/bound 20`,
+   stdio inherited, rc 0 required.  Then prints `callback graph host: normal + ASan/UBSan passed on ARCH`, rc 0.
+   A foreign --arch off Darwin is `cross execution requires native runner`, rc 1; a failed step is the .py's
+   CalledProcessError (its last traceback line on stderr), rc 1; usage errors are argparse's, rc 2 (the prog name
+   stays librarycallbackgraphcheck.py so the text is byte-identical).  The temporary directory is removed either way.
+   Shared scaffolding (argparse, platform, tempdir, bounded run, byte packing): tests/cxlib/libprobe.cx.
+   ROOT is the parent of the directory holding this file (Path(__file__).resolve().parents[1]). */
+#pragma unisa use cxlib.libprobe
+
+static lp_buf I, D, F, P, PAIR;
+
+static lp_buf u8(unsigned long long x) { lp_buf b = { 0 }; lp_u(&b, x); return b; }
+/* desc(kind=1, width=4, align=4, depth=0, tag=0, payload=b'', local=0) */
+static lp_buf desc(int kind, int width, int align, int depth, int tag, const lp_buf *payload, int local) {
+    lp_buf d = { 0 };
+    lp_u(&d, (unsigned long long)depth); lp_u(&d, (unsigned long long)local); lp_u(&d, (unsigned long long)local);
+    lp_u(&d, (unsigned long long)kind); lp_u(&d, (unsigned long long)width); lp_u(&d, 0); lp_u(&d, (unsigned long long)align);
+    lp_byte(&d, tag); lp_u(&d, payload ? payload->n : 0);
+    if (payload) lp_cat(&d, payload);
+    return d;
+}
+/* callback(payload, align=8, depth=1, local=0) */
+static lp_buf callback(const lp_buf *payload, int align, int depth, int local) { return desc(4, 8, align, depth, 4, payload, local); }
+static lp_buf cb0(const lp_buf *payload) { return callback(payload, 8, 1, 0); }
+/* ref(i, local=0) */
+static lp_buf ref(unsigned long long i, int local) {
+    lp_buf p = { 0 }, r; lp_byte(&p, 1); lp_byte(&p, 1); lp_u(&p, i);
+    r = callback(&p, 8, 1, local); lp_free(&p); return r;
+}
+/* the argument list of a definition or pack: the joined descriptors and their count */
+typedef struct { lp_buf b; size_t n; } List;
+static void add(List *l, lp_buf d) { lp_cat(&l->b, &d); l->n++; lp_free(&d); }
+static void addc(List *l, const lp_buf *d) { lp_cat(&l->b, d); l->n++; }
+/* definition(i, args=(), result=I, var=0, mode=1, support=0, depth=1, align=8, local=0) */
+static lp_buf defx(unsigned long long i, const List *args, const lp_buf *result, int var, int mode, int support, int depth,
+                   int align, int local) {
+    lp_buf p = { 0 }, r; size_t n = args ? args->n : 0;
+    if (!result) result = &I;
+    lp_byte(&p, 1); lp_byte(&p, 0); lp_u(&p, i); lp_byte(&p, var); lp_byte(&p, mode);
+    lp_u(&p, n); lp_cat(&p, result); lp_u(&p, n);
+    if (args) lp_cat(&p, &args->b);
+    lp_byte(&p, support);
+    r = callback(&p, align, depth, local); lp_free(&p); return r;
+}
+static lp_buf def(unsigned long long i, const List *args) { return defx(i, args, 0, 0, 1, 0, 1, 8, 0); }
+/* pack(args, support=0) */
+static lp_buf pack(const List *args, int support) {
+    lp_buf o = { 0 }; size_t n = args ? args->n : 0;
+    lp_put(&o, "USLSIG2\n", 8); lp_u(&o, 1); lp_u(&o, 5); lp_put(&o, "graph", 5);
+    lp_byte(&o, 0); lp_byte(&o, 1); lp_byte(&o, 0); lp_byte(&o, 1);
+    lp_u(&o, n); lp_cat(&o, &I); lp_u(&o, n);
+    if (args) lp_cat(&o, &args->b);
+    lp_byte(&o, support);
+    return o;
+}
+static lp_buf pack1(lp_buf d) { List l = { { 0 }, 0 }; lp_buf o; add(&l, d); o = pack(&l, 0); lp_free(&l.b); return o; }
+static lp_buf pack2(lp_buf a, lp_buf b) { List l = { { 0 }, 0 }; lp_buf o; add(&l, a); add(&l, b); o = pack(&l, 0); lp_free(&l.b); return o; }
+/* definition(I, [ARG]) and definition(I, [A, B]) */
+static lp_buf def1(unsigned long long i, lp_buf a) { List l = { { 0 }, 0 }; lp_buf o; add(&l, a); o = def(i, &l); lp_free(&l.b); return o; }
+static lp_buf def2(unsigned long long i, lp_buf a, lp_buf b) {
+    List l = { { 0 }, 0 }; lp_buf o; add(&l, a); add(&l, b); o = def(i, &l); lp_free(&l.b); return o;
+}
+static lp_buf defI(unsigned long long i, int support) {   /* definition(i, [I], support=S) */
+    List l = { { 0 }, 0 }; lp_buf o; addc(&l, &I); o = defx(i, &l, 0, 0, 1, support, 1, 8, 0); lp_free(&l.b); return o;
+}
+/* chain(n, i=1) */
+static lp_buf chain(int n, unsigned long long i) {
+    if (n > 1) return def1(i, chain(n - 1, i + 1));
+    return def(i, 0);
+}
+/* definition(1, [definition(i) for i in range(2, END)]) */
+static lp_buf wide(unsigned long long end) {
+    List l = { { 0 }, 0 }; lp_buf o; unsigned long long i;
+    for (i = 2; i < end; i++) add(&l, def(i, 0));
+    o = def(1, &l); lp_free(&l.b); return o;
+}
+static List Is(int n) { List l = { { 0 }, 0 }; int k; for (k = 0; k < n; k++) addc(&l, &I); return l; }
+
+int main(int argc, char **argv) {
+    const char *opt, *arch, *host, *cc; int darwin, s, k, nf = 0;
+    static char ROOT[4096], T[4200], src[4300], exe[4300], files[64][4400], bad[22][4400];
+    struct { const char *name; int f, other; } fx[16];
+    lp_buf selfgraph, shared, mutual, renamed, x;
+    opt = lp_parse_arch(argc, argv, "librarycallbackgraphcheck.py");
+    lp_root(__FILE__, ROOT, sizeof ROOT);
+    lp_platform(opt, &arch, &host, &darwin);
+    cc = getenv("CC"); if (!cc) cc = "cc";
+
+    I = desc(1, 4, 4, 0, 0, 0, 0); D = desc(3, 8, 8, 0, 0, 0, 0); F = desc(3, 4, 4, 0, 0, 0, 0); P = desc(2, 8, 8, 1, 0, 0, 0);
+    {   /* PAIR = desc(5, 16, 8, tag=1, payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I) */
+        lp_buf p = { 0 };
+        lp_u(&p, 2); lp_u(&p, 0); lp_u(&p, 0); lp_u(&p, 0); lp_u(&p, 8); lp_cat(&p, &D);
+        lp_u(&p, 8); lp_u(&p, 0); lp_u(&p, 0); lp_u(&p, 4); lp_cat(&p, &I);
+        PAIR = desc(5, 16, 8, 0, 1, &p, 0); lp_free(&p);
+    }
+
+    lp_tempdir("r10-callbackgraph-", T, sizeof T);
+#define W(NAME, DATA) (x = (DATA), lp_write(T, NAME ".sig", &x, files[nf], sizeof files[nf]), lp_free(&x), nf++)
+#define FX(NAME, A, B) (fx[k].name = (NAME), fx[k].f = (A), fx[k].other = (B), k++)
+    selfgraph = pack1(def1(1, ref(1, 0)));
+    shared = pack2(def1(1, desc(1, 4, 4, 0, 0, 0, 0)), ref(1, 0));
+    mutual = pack1(def1(1, def1(2, ref(1, 0))));
+    {   /* renamed = pack([definition(1, [ref(1, local=89)], result=desc(local=71), local=12)]) */
+        List l = { { 0 }, 0 }; lp_buf r71 = desc(1, 4, 4, 0, 0, 0, 71);
+        add(&l, ref(1, 89));
+        renamed = pack1(defx(1, &l, &r71, 0, 1, 0, 1, 8, 12)); lp_free(&l.b); lp_free(&r71);
+    }
+    k = 0;
+    {   int a, b;
+        lp_write(T, "self.sig", &selfgraph, files[nf], sizeof files[nf]); a = nf++;
+        lp_write(T, "renamed.sig", &renamed, files[nf], sizeof files[nf]); b = nf++;
+        FX("self", a, b);
+        lp_write(T, "shared.sig", &shared, files[nf], sizeof files[nf]); a = nf++;
+        lp_write(T, "sharedcopy.sig", &shared, files[nf], sizeof files[nf]); b = nf++;
+        FX("shared", a, b);
+        lp_write(T, "mutual.sig", &mutual, files[nf], sizeof files[nf]); a = nf++;
+        lp_write(T, "mutualcopy.sig", &mutual, files[nf], sizeof files[nf]); b = nf++;
+        FX("mutual", a, b);
+        {   /* nine: pack([definition(1, [definition(2, [I, D, F, P, PAIR, I, D, I, I], PAIR, support=1)], PAIR)]) */
+            List in = { { 0 }, 0 }, out = { { 0 }, 0 };
+            addc(&in, &I); addc(&in, &D); addc(&in, &F); addc(&in, &P); addc(&in, &PAIR); addc(&in, &I); addc(&in, &D);
+            addc(&in, &I); addc(&in, &I);
+            add(&out, defx(2, &in, &PAIR, 0, 1, 1, 1, 8, 0));
+            a = W("nine", pack1(defx(1, &out, &PAIR, 0, 1, 0, 1, 8, 0))); FX("nine", a, -1);
+            lp_free(&in.b); lp_free(&out.b);
+        }
+        a = W("limit", pack1(wide(1025))); FX("limit", a, -1);
+        a = W("depth", pack1(chain(31, 1))); FX("depth", a, -1);
+        a = W("empty", pack1(cb0(0))); FX("empty", a, -1);
+        lp_write(T, "self2.sig", &selfgraph, files[nf], sizeof files[nf]); a = nf++;
+        {   List l = { { 0 }, 0 }; add(&l, ref(1, 0));
+            b = W("changed", pack1(defx(1, &l, &D, 0, 1, 0, 1, 8, 0))); lp_free(&l.b); }
+        FX("unequal", a, b);
+        lp_write(T, "mutual2.sig", &mutual, files[nf], sizeof files[nf]); a = nf++;
+        lp_write(T, "collapsed.sig", &selfgraph, files[nf], sizeof files[nf]); b = nf++;
+        FX("equal", a, b);
+        a = W("leaf-support0", pack1(defI(1, 0)));
+        b = W("leaf-support1", pack1(defI(1, 1)));
+        FX("equal", a, b);
+        a = W("shared2", pack1(def2(1, ref(1, 0), ref(1, 0))));
+        b = W("unshared", pack1(def2(1, ref(1, 0), def2(2, ref(2, 0), ref(2, 0)))));
+        FX("equal", a, b);
+    }
+#undef W
+    {   /* malformed */
+        lp_buf m[22]; int i = 0;
+        m[i++] = pack1(ref(1, 0));
+        m[i++] = pack2(def(1, 0), def(1, 0));
+        m[i++] = pack1(def(2, 0));
+        m[i++] = pack2(def1(1, ref(2, 0)), def(2, 0));
+        m[i++] = pack1(ref(0, 0));
+        m[i++] = pack1(ref(1025, 0));
+        { lp_buf p = { 0 }; lp_byte(&p, 2); lp_byte(&p, 1); lp_u(&p, 1); m[i++] = pack1(cb0(&p)); lp_free(&p); }
+        { lp_buf p = { 0 }; lp_byte(&p, 1); lp_byte(&p, 2); lp_u(&p, 1); m[i++] = pack1(cb0(&p)); lp_free(&p); }
+        m[i++] = pack1(defx(1, 0, 0, 0, 1, 0, 2, 8, 0));   /* depth=2 */
+        m[i++] = pack1(defx(1, 0, 0, 0, 1, 0, 1, 4, 0));   /* align=4 */
+        m[i++] = pack1(defx(1, 0, 0, 2, 1, 0, 1, 8, 0));   /* var=2 */
+        m[i++] = pack1(defx(1, 0, 0, 0, 2, 0, 1, 8, 0));   /* mode=2 */
+        m[i++] = pack1(defx(1, 0, 0, 0, 1, 2, 1, 8, 0));   /* support=2 */
+        { List l = Is(1025); m[i++] = pack1(def(1, &l)); lp_free(&l.b); }
+        m[i++] = pack1(chain(32, 1));
+        { List l = { { 0 }, 0 }; add(&l, def(1, 0)); m[i++] = pack(&l, 1); lp_free(&l.b); }
+        { List l = { { 0 }, 0 }; add(&l, ref(1, 0)); m[i++] = pack1(defx(1, &l, 0, 0, 1, 1, 1, 8, 0)); lp_free(&l.b); }
+        m[i++] = pack1(wide(1026));
+        {   List l = { { 0 }, 0 }, a15 = Is(15); unsigned long long j;
+            for (j = 1; j < 1025; j++) add(&l, def(j, &a15));
+            m[i++] = pack(&l, 0); lp_free(&l.b); lp_free(&a15.b);
+        }
+        { lp_buf p = { 0 }; lp_byte(&p, 1); lp_byte(&p, 1); lp_u(&p, 1); lp_put(&p, "x", 1); m[i++] = pack1(cb0(&p)); lp_free(&p); }
+        {   /* callback(bytes([1, 0])+u(1)+bytes([0, 1])+u(0)+I+u(1)+bytes([0])) */
+            lp_buf p = { 0 }; lp_byte(&p, 1); lp_byte(&p, 0); lp_u(&p, 1); lp_byte(&p, 0); lp_byte(&p, 1); lp_u(&p, 0);
+            lp_cat(&p, &I); lp_u(&p, 1); lp_byte(&p, 0); m[i++] = pack1(cb0(&p)); lp_free(&p);
+        }
+        {   lp_buf p = { 0 }; size_t n = 16777217;
+            lp_put(&p, "", 0);
+            while (p.n < n) { size_t c = n - p.n > 65536 ? 65536 : n - p.n; char t[65536]; memset(t, 'x', c); lp_put(&p, t, c); }
+            m[i++] = pack1(cb0(&p)); lp_free(&p);
+        }
+        for (i = 0; i < 22; i++) {
+            char name[32]; snprintf(name, sizeof name, "bad%d.sig", i);
+            lp_write(T, name, &m[i], bad[i], sizeof bad[i]); lp_free(&m[i]);
+        }
+    }
+    snprintf(src, sizeof src, "%s/tests/librarycallbackgraphcheck.c", ROOT);
+    snprintf(exe, sizeof exe, "%s/probe", T);
+    for (s = 0; s < 2; s++) {
+        char *c[32]; int n = 0, f;
+        c[n++] = (char *)cc;
+        if (darwin) { c[n++] = "-arch"; c[n++] = (char *)arch; }
+        c[n++] = "-std=c99"; c[n++] = "-I"; c[n++] = ROOT; c[n++] = "-Wall"; c[n++] = "-Wextra";
+        c[n++] = "-Wno-unused-function"; c[n++] = src; c[n++] = "-lffi"; c[n++] = "-o"; c[n++] = exe;
+        if (s) { c[n++] = "-fsanitize=address,undefined"; c[n++] = "-g"; }
+        c[n] = 0;
+        lp_run(ROOT, c);
+        for (f = 0; f < k; f++) {
+            char *r[40]; int q = 0, b;
+            if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { r[q++] = "arch"; r[q++] = "-x86_64"; }
+            r[q++] = exe; r[q++] = (char *)fx[f].name; r[q++] = files[fx[f].f];
+            r[q++] = files[fx[f].other >= 0 ? fx[f].other : fx[f].f];
+            for (b = 0; b < 22; b++) r[q++] = bad[b];
+            r[q] = 0;
+            lp_run(ROOT, r);
+        }
+    }
+    lp_cleanup();
+    printf("callback graph host: normal + ASan/UBSan passed on %s\n", arch);
+    fflush(stdout);
+    return 0;
+}

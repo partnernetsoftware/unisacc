@@ -1,0 +1,206 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallablecatalogcheck.cx -- independent USLCALL1/2/3 exact wire and context-owned graph transaction checks.
+   Ported from tests/librarycallablecatalogcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarycallablecatalogcheck.cx -- [-h] [--arch {arm64,x86_64}]
+   In a fresh temporary directory T (tempfile.gettempdir(), prefix r10-callcatalog-) it makes T/exec/c and T/src,
+   copies the runtime there (checklib.copy_runtime, tests/cxlib/runtimecopy.cx), writes the catalogue files the .py
+   packed with struct -- 0.catalog .. 41.catalog: USLCALL1, USLCALL2, USLCALL3, twenty-two malformed CALL2 and
+   seventeen malformed CALL3 -- then twice (plain, then -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+   builds tests/librarycallablecatalogcheck.c with $CC (default cc) [-arch ARCH on Darwin] -std=c11 -O1 -I T
+   -Wno-unused-function T/exec/c/librarycall_ARCH.S -lffi [-ldl off Darwin] -o T/probe and runs `probe 0.catalog ..
+   41.catalog` (under `arch -x86_64` for --arch x86_64 on an arm64 host) -- every command under `tests/bound 20`,
+   stdio inherited, rc 0 required.  Then prints `callable catalogue context: normal + ASan/UBSan passed on ARCH`.
+   A foreign --arch off Darwin is `cross execution requires native runner`, rc 1; a failed step is the .py's
+   CalledProcessError (or copy_runtime's exception: its last traceback line on stderr), rc 1; usage errors are
+   argparse's, rc 2 (the prog name stays librarycallablecatalogcheck.py so the text is byte-identical).  The
+   temporary directory is removed either way.
+   Shared scaffolding (argparse, platform, tempdir, bounded run, byte packing): tests/cxlib/libprobe.cx.
+   ROOT is the parent of the directory holding this file (Path(__file__).resolve().parents[1]). */
+#pragma unisa use cxlib.libprobe
+#pragma unisa use cxlib.runtimecopy
+
+static lp_buf I, D, F, C, FIXED, PROTO, CONCRETE, ZERO;
+
+/* desc(k, w, a) */
+static lp_buf desc(int k, int w, int a) {
+    lp_buf d = { 0 };
+    lp_u(&d, 0); lp_u(&d, 0); lp_u(&d, 0); lp_u(&d, (unsigned long long)k); lp_u(&d, (unsigned long long)w); lp_u(&d, 0);
+    lp_u(&d, (unsigned long long)a); lp_byte(&d, 0); lp_u(&d, 0);
+    return d;
+}
+/* sig(args=(I,), result=I, var=0, mode=1): ARGS is a NULL-terminated list (0 means (I,)) */
+static lp_buf sigx(const lp_buf *const *args, const lp_buf *result, int var, int mode) {
+    static const lp_buf *one[2]; lp_buf o = { 0 }; size_t n = 0, i;
+    if (!args) { one[0] = &I; one[1] = 0; args = one; }
+    if (!result) result = &I;
+    while (args[n]) n++;
+    lp_put(&o, "USLSIG2\n", 8); lp_u(&o, 1); lp_u(&o, 7); lp_put(&o, "catalog", 7);
+    lp_byte(&o, 0); lp_byte(&o, 1); lp_byte(&o, var); lp_byte(&o, mode);
+    lp_u(&o, n); lp_cat(&o, result); lp_u(&o, n);
+    for (i = 0; i < n; i++) lp_cat(&o, args[i]);
+    lp_byte(&o, var ? 0 : 1);
+    return o;
+}
+static lp_buf sig2(const lp_buf *a, const lp_buf *b, const lp_buf *result) {   /* sig((A, B), RESULT) */
+    const lp_buf *v[3]; v[0] = a; v[1] = b; v[2] = 0; return sigx(v, result, 0, 1);
+}
+
+/* the protos/sites/aliases of a catalogue: joined records and their count */
+typedef struct { lp_buf b; size_t n; } List;
+static void add(List *l, lp_buf d) { lp_cat(&l->b, &d); l->n++; lp_free(&d); }
+/* proto(key, record) */
+static void proto(List *l, unsigned long long key, const lp_buf *record) {
+    lp_buf p = { 0 }; lp_u(&p, key); lp_u(&p, record->n); lp_cat(&p, record); add(l, p);
+}
+/* site(number=100, key=22, fixed=1, record=CONCRETE, payload_delta=0, length_delta=0) */
+static lp_buf sitex(unsigned long long number, unsigned long long key, unsigned long long fixed, const lp_buf *record,
+                    long long pd, long long ld) {
+    lp_buf s = { 0 };
+    if (!record) record = &CONCRETE;
+    lp_u(&s, (unsigned long long)(32 + (long long)record->n + pd)); lp_u(&s, number); lp_u(&s, key); lp_u(&s, fixed);
+    lp_u(&s, (unsigned long long)((long long)record->n + ld)); lp_cat(&s, record);
+    return s;
+}
+static lp_buf site(void) { return sitex(100, 22, 1, 0, 0, 0); }
+static lp_buf siter(const lp_buf *record) { return sitex(100, 22, 1, record, 0, 0); }   /* site(record=R) */
+/* the default protos ((22, PROTO), (23, FIXED)) */
+static List dprotos(void) { List l = { { 0 }, 0 }; proto(&l, 22, &PROTO); proto(&l, 23, &FIXED); return l; }
+/* pack(version=2, protos=PROTOS, sites=SITES): PROTOS 0 means the default; SITES 0 means [site(), site(101, record=ZERO)] */
+static lp_buf pack(int version, const List *protos, const List *sites) {
+    lp_buf b = { 0 }; char h[16]; List dp, ds = { { 0 }, 0 };
+    snprintf(h, sizeof h, "USLCALL%d\n", version);
+    lp_put(&b, h, strlen(h));
+    if (!protos) { dp = dprotos(); protos = &dp; } else dp.b.p = 0;
+    lp_u(&b, protos->n); lp_cat(&b, &protos->b);
+    if (version == 2) {
+        if (!sites) { add(&ds, site()); add(&ds, sitex(101, 22, 1, &ZERO, 0, 0)); sites = &ds; }
+        lp_u(&b, sites->n); lp_cat(&b, &sites->b);
+    }
+    lp_free(&dp.b); lp_free(&ds.b);
+    return b;
+}
+static lp_buf pack_sites1(lp_buf s) { List l = { { 0 }, 0 }; lp_buf o; add(&l, s); o = pack(2, 0, &l); lp_free(&l.b); return o; }
+/* alias(ident=1, key=23, frozen=1, raw=1, source=FIXED, external=b'e'*90, payload_delta=0, source_delta=0) */
+static lp_buf aliasx(unsigned long long ident, unsigned long long key, unsigned long long frozen, unsigned long long raw,
+                     size_t extn, long long pd, long long sd) {
+    lp_buf a = { 0 }; const lp_buf *source = &FIXED; size_t i;
+    lp_u(&a, (unsigned long long)(48 + (long long)source->n + (long long)extn + pd));
+    lp_u(&a, ident); lp_u(&a, key); lp_u(&a, frozen); lp_u(&a, raw);
+    lp_u(&a, (unsigned long long)((long long)source->n + sd)); lp_cat(&a, source);
+    lp_u(&a, extn);
+    for (i = 0; i < extn; i++) lp_byte(&a, 'e');
+    return a;
+}
+static lp_buf alias(void) { return aliasx(1, 23, 1, 1, 90, 0, 0); }
+/* pack3(aliases=ALIASES): pack(2) with its USLCALL2 magic made USLCALL3, then u(len(aliases)) + aliases */
+static lp_buf pack3(const List *aliases) {
+    lp_buf b = pack(2, 0, 0);
+    b.p[7] = '3';
+    lp_u(&b, aliases ? aliases->n : 0);
+    if (aliases) lp_cat(&b, &aliases->b);
+    return b;
+}
+static lp_buf pack3a(lp_buf a) { List l = { { 0 }, 0 }; lp_buf o; add(&l, a); o = pack3(&l); lp_free(&l.b); return o; }
+static lp_buf pack3aa(lp_buf a, lp_buf b) { List l = { { 0 }, 0 }; lp_buf o; add(&l, a); add(&l, b); o = pack3(&l); lp_free(&l.b); return o; }
+static lp_buf plus(lp_buf b, const char *s, size_t n) { lp_put(&b, s, n); return b; }
+static lp_buf plusu(lp_buf b, unsigned long long x) { lp_u(&b, x); return b; }
+
+int main(int argc, char **argv) {
+    const char *opt, *arch, *host, *cc; int darwin, s, i, n = 0;
+    static char ROOT[4096], T[4200], rt[4300], srcd[4300], src[4300], asmf[4300], exe[4300], incl[4300], files[64][4400];
+    static lp_buf all[64];
+    lp_buf one, two, three;
+    opt = lp_parse_arch(argc, argv, "librarycallablecatalogcheck.py");
+    lp_root(__FILE__, ROOT, sizeof ROOT);
+    lp_platform(opt, &arch, &host, &darwin);
+    cc = getenv("CC"); if (!cc) cc = "cc";
+
+    I = desc(1, 4, 4); D = desc(3, 8, 8); F = desc(3, 4, 4); C = desc(1, 1, 1);
+    FIXED = sigx(0, 0, 0, 0); PROTO = sigx(0, 0, 1, 1); CONCRETE = sig2(&I, &D, 0); ZERO = sigx(0, 0, 0, 1);
+    { List l = { { 0 }, 0 }; proto(&l, 11, &FIXED); one = pack(1, &l, 0); lp_free(&l.b); }
+    two = pack(2, 0, 0);
+    three = pack3(0);
+    all[n++] = one; all[n++] = two; all[n++] = three;
+    /* bad */
+    all[n++] = pack_sites1(sitex(0, 22, 1, 0, 0, 0));
+    all[n++] = pack_sites1(sitex(100, 999, 1, 0, 0, 0));
+    { List l = { { 0 }, 0 }; add(&l, site()); add(&l, site()); all[n++] = pack(2, 0, &l); lp_free(&l.b); }
+    all[n++] = pack_sites1(sitex(100, 22, 2, 0, 0, 0));
+    all[n++] = pack_sites1(sitex(100, 23, 1, 0, 0, 0));
+    { lp_buf r = sigx(0, 0, 0, 0); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    { lp_buf r = sigx(0, 0, 1, 1); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    { const lp_buf *v[1]; lp_buf r; v[0] = 0; r = sigx(v, 0, 0, 1); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    { lp_buf r = sig2(&D, &D, 0); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    { lp_buf r = sig2(&I, &D, &D); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    { lp_buf r = sig2(&I, &F, 0); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    { lp_buf r = sig2(&I, &C, 0); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    all[n++] = plus(pack_sites1(sitex(100, 22, 1, 0, 1, 0)), "x", 1);
+    all[n++] = pack_sites1(sitex(100, 22, 1, 0, 0, 1));
+    { List p = { { 0 }, 0 }; proto(&p, 22, &PROTO); proto(&p, 22, &FIXED); all[n++] = pack(2, &p, 0); lp_free(&p.b); }
+    { List p = { { 0 }, 0 }, l = { { 0 }, 0 }; add(&l, site()); all[n++] = pack(2, &p, &l); lp_free(&l.b); }
+    { lp_buf b = { 0 }; lp_cat(&b, &one); all[n++] = plusu(b, 0); }
+    { lp_buf b = { 0 }; lp_put(&b, "USLCALL2\n", 9); all[n++] = plusu(b, 8193); }
+    { lp_buf b = { 0 }; lp_put(&b, "USLCALL2\n", 9); lp_u(&b, 0); all[n++] = plusu(b, 8193); }
+    { lp_buf b = { 0 }; lp_cat(&b, &two); all[n++] = plus(b, "x", 1); }
+    { lp_buf r = { 0 }; lp_put(&r, "USLSIG1\n", 8); lp_u(&r, 0); all[n++] = pack_sites1(siter(&r)); lp_free(&r); }
+    {   lp_buf r = { 0 }; lp_put(&r, CONCRETE.p, CONCRETE.n < 65 ? CONCRETE.n : 65);
+        all[n++] = pack_sites1(sitex(1, 22, 1, &r, 0, 0)); lp_free(&r); }
+    /* bad3 */
+    { lp_buf b = pack(2, 0, 0); b.p[7] = '3'; all[n++] = b; }
+    { lp_buf b = { 0 }; lp_cat(&b, &three); all[n++] = plus(b, "x", 1); }
+    { lp_buf b = pack3(0); b.n -= 8; all[n++] = plusu(b, 1025); }
+    all[n++] = pack3a(alias());
+    all[n++] = pack3a(aliasx(0, 23, 1, 1, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1, 0, 1, 1, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1, 23, 0, 1, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1, 23, 1, 0, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1025, 23, 1, 1, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1, 999, 1, 1, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1, 23, 1, 1, 90, -1, 0));
+    all[n++] = plus(pack3a(aliasx(1, 23, 1, 1, 90, 1, 0)), "x", 1);
+    all[n++] = pack3a(aliasx(1, 23, 1, 1, 90, 0, 1));
+    all[n++] = pack3a(aliasx(1, 23, 1, 1, 0, 0, 0));
+    all[n++] = pack3aa(alias(), aliasx(2, 23, 1, 1, 90, 0, 0));
+    all[n++] = pack3aa(alias(), aliasx(1, 22, 1, 1, 90, 0, 0));
+    all[n++] = pack3a(aliasx(1, 22, 1, 1, 90, 0, 0));
+
+    lp_tempdir("r10-callcatalog-", T, sizeof T);
+    snprintf(rt, sizeof rt, "%s/exec/c", T); snprintf(srcd, sizeof srcd, "%s/src", T);
+    {   char why[8400], ec[4300]; rtc_file *cf = 0; size_t cn = 0;
+        snprintf(ec, sizeof ec, "%s/exec", T);
+        if (mkdir(ec, 0777) != 0 || mkdir(rt, 0777) != 0 || mkdir(srcd, 0777) != 0) {
+            rtc_oserror(errno, errno == EEXIST ? srcd : rt, why, sizeof why); lp_fail(why);
+        }
+        if (rtc_copy_runtime(ROOT, T, &cf, &cn, why, sizeof why) != 0) lp_fail(why);
+    }
+    for (i = 0; i < n; i++) {
+        char name[32]; snprintf(name, sizeof name, "%d.catalog", i);
+        lp_write(T, name, &all[i], files[i], sizeof files[i]);
+    }
+    snprintf(src, sizeof src, "%s/tests/librarycallablecatalogcheck.c", ROOT);
+    snprintf(asmf, sizeof asmf, "%s/librarycall_%s.S", rt, arch);
+    snprintf(exe, sizeof exe, "%s/probe", T);
+    snprintf(incl, sizeof incl, "%s", T);
+    for (s = 0; s < 2; s++) {
+        char *c[40], *r[80]; int q = 0;
+        c[q++] = (char *)cc;
+        if (darwin) { c[q++] = "-arch"; c[q++] = (char *)arch; }
+        c[q++] = "-std=c11"; c[q++] = "-O1"; c[q++] = "-I"; c[q++] = incl; c[q++] = "-Wno-unused-function";
+        c[q++] = src; c[q++] = asmf; c[q++] = "-lffi";
+        if (!darwin) c[q++] = "-ldl";
+        c[q++] = "-o"; c[q++] = exe;
+        if (s) { c[q++] = "-fsanitize=address,undefined"; c[q++] = "-fno-omit-frame-pointer"; c[q++] = "-g"; }
+        c[q] = 0;
+        lp_run(ROOT, c);
+        q = 0;
+        if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { r[q++] = "arch"; r[q++] = "-x86_64"; }
+        r[q++] = exe;
+        for (i = 0; i < n; i++) r[q++] = files[i];
+        r[q] = 0;
+        lp_run(ROOT, r);
+    }
+    lp_cleanup();
+    printf("callable catalogue context: normal + ASan/UBSan passed on %s\n", arch);
+    fflush(stdout);
+    return 0;
+}
