@@ -1,0 +1,208 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallablescheck.cx -- mechanical callable ABI tests, no model/public API success claim; ported from
+   tests/librarycallablescheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   tests/librarycallablescheck.c is built with the host cc against exec/c and the real libffi, once plain (-O2) and
+   once under ASan/UBSan (-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer), and each binary is run; on
+   Darwin both arm64 and x86_64 are built (-arch ARCH; x86_64 runs under `arch -x86_64`), elsewhere the one machine
+   `uname -m` names.  Each compile and each run is limited by `tests/bound 20`; their stdout and stderr are captured.
+   A passing run prints `ARCH normal|ASan/UBSan <its stdout, stripped>`; a failed compile or run stops the check
+   with rc 1 and an AssertionError line on stderr carrying (arch, sanitized, [stdout,] stderr) as the .py's assert
+   did.  The binaries live in a fresh temporary directory (prefix unisacc-callables-) removed at the end.
+   usage: sh ./unisacc.com -run tests/librarycallablescheck.cx   (arguments are ignored, as by the Python checker)
+   ROOT is the resolved directory above this file's directory (Path(__file__).resolve().parents[1]). */
+#include <fcntl.h>
+#include <errno.h>
+
+static char ROOT[4096], D[4096];
+
+static void rmtree(const char *p) {   /* shutil.rmtree, errors ignored */
+    struct stat s; DIR *d; struct dirent *e; char q[8192];
+    if (lstat(p, &s)) return;
+    if (S_ISDIR(s.st_mode)) {
+        d = opendir(p);
+        if (d) {
+            while ((e = readdir(d))) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                snprintf(q, sizeof q, "%s/%s", p, e->d_name); rmtree(q);
+            }
+            closedir(d);
+        }
+        rmdir(p);
+    } else unlink(p);
+}
+static void cleanup(void) { if (D[0]) rmtree(D); D[0] = 0; }
+static void bail(void) { fflush(stdout); fflush(stderr); cleanup(); exit(1); }   /* after the AssertionError line */
+static void die(const char *m) {   /* an uncaught Python exception: message on stderr, rc 1 */
+    fflush(stdout); fprintf(stderr, "%s\n", m); fflush(stderr); cleanup(); exit(1);
+}
+
+/* repr(bytes) as CPython writes it */
+static void brepr(FILE *f, const unsigned char *b, size_t n) {
+    size_t i; int q = '\'', sq = 0, dq = 0;
+    for (i = 0; i < n; i++) { if (b[i] == '\'') sq = 1; else if (b[i] == '"') dq = 1; }
+    if (sq && !dq) q = '"';
+    fputc('b', f); fputc(q, f);
+    for (i = 0; i < n; i++) {
+        unsigned c = b[i];
+        if (c == (unsigned)q || c == '\\') { fputc('\\', f); fputc((int)c, f); }
+        else if (c == '\t') fputs("\\t", f);
+        else if (c == '\n') fputs("\\n", f);
+        else if (c == '\r') fputs("\\r", f);
+        else if (c < ' ' || c >= 0x7f) fprintf(f, "\\x%02x", c);
+        else fputc((int)c, f);
+    }
+    fputc(q, f);
+}
+
+static char *slurp(const char *p, size_t *n) {
+    char *b = cx_read(p, n);
+    if (!b) die("OSError: cannot read a captured stream");
+    return b;
+}
+
+/* subprocess.run(argv, capture_output=True): rc, stdout and stderr (malloc'd) */
+static int run(char **argv, char **out, size_t *on, char **err, size_t *en) {
+    char op[4200], ep[4200]; int ofd, efd, st = 0; pid_t pid, w;
+    if (access(argv[0], X_OK)) {
+        char m[8192];
+        snprintf(m, sizeof m, "%s: [Errno %d] %s: '%s'", errno == ENOENT ? "FileNotFoundError" : "PermissionError",
+                 errno, strerror(errno), argv[0]);
+        die(m);
+    }
+    snprintf(op, sizeof op, "%s/.stdout.XXXXXX", D); snprintf(ep, sizeof ep, "%s/.stderr.XXXXXX", D);
+    ofd = mkstemp(op); if (ofd < 0) die("OSError: cannot create a capture file");
+    efd = mkstemp(ep); if (efd < 0) die("OSError: cannot create a capture file");
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("OSError: fork failed");
+    if (pid == 0) {
+        dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
+        execv(argv[0], argv); _exit(127);
+    }
+    close(ofd); close(efd);
+    do w = waitpid(pid, &st, 0); while (w < 0 && errno == EINTR);
+    if (w < 0) die("OSError: waitpid failed");
+    *out = slurp(op, on); *err = slurp(ep, en);
+    unlink(op); unlink(ep);
+    if (st & 0x7f) return -(st & 0x7f);
+    return (st >> 8) & 0xff;
+}
+
+/* the first line of `uname OPT` (os.uname() field) */
+static void uname_field(const char *opt, char *out, size_t cap) {
+    char *a[3], *o = 0; size_t n = 0; int rc;
+    a[0] = "uname"; a[1] = (char *)opt; a[2] = 0;
+    rc = cx_runv_timeout(a, 20, &o, &n);
+    if (rc != 0 || !o) die("OSError: uname failed");
+    while (n && (o[n - 1] == '\n' || o[n - 1] == '\r')) n--;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, o, n); out[n] = 0; free(o);
+}
+
+/* strict UTF-8 code point at s[i]; length in *l; -1 if invalid */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+static int pyspace(long c) {   /* str.isspace */
+    return (c >= 9 && c <= 13) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+/* bytes.decode() then str.strip(): [*a, *b) of s */
+static void decode_strip(const unsigned char *s, size_t n, size_t *a, size_t *b) {
+    size_t i = 0, first = n, last = 0; int l; long c;
+    while (i < n) {
+        c = cp_at(s, n, i, &l);
+        if (c < 0) {
+            char m[256];
+            snprintf(m, sizeof m, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu", s[i],
+                     (unsigned long)i);
+            die(m);
+        }
+        if (!pyspace(c)) { if (first == n) first = i; last = i + (size_t)l; }
+        i += (size_t)l;
+    }
+    if (first == n) { *a = *b = 0; return; }
+    *a = first; *b = last;
+}
+
+int main(int argc, char **argv) {
+    char sysname[256], machine[256], src[4096], incl[4200], bound[4200], file[4096], exe[4300], *slash;
+    const char *archs[2]; int na, ai, san;
+    (void)argc; (void)argv;
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(__FILE__, file)) die("FileNotFoundError: cannot resolve this file");
+    snprintf(ROOT, sizeof ROOT, "%s", file);
+    slash = strrchr(ROOT, '/'); if (slash) *slash = 0;
+    slash = strrchr(ROOT, '/'); if (slash) { if (slash == ROOT) slash[1] = 0; else *slash = 0; }
+    snprintf(incl, sizeof incl, "-I%s/exec/c", ROOT);
+    snprintf(src, sizeof src, "%s/tests/librarycallablescheck.c", ROOT);
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    uname_field("-s", sysname, sizeof sysname);
+    /* tempfile.TemporaryDirectory(prefix='unisacc-callables-') */
+    {
+        const char *cand[6]; int k, nc = 0; char cwd[2048];
+        const char *e;
+        if ((e = getenv("TMPDIR")) && *e) cand[nc++] = e;
+        if ((e = getenv("TEMP")) && *e) cand[nc++] = e;
+        if ((e = getenv("TMP")) && *e) cand[nc++] = e;
+        cand[nc++] = "/tmp"; cand[nc++] = "/var/tmp"; cand[nc++] = "/usr/tmp";
+        if (!getcwd(cwd, sizeof cwd)) die("OSError: getcwd failed");
+        for (k = 0; k < nc; k++) {
+            if (cand[k][0] == '/') snprintf(D, sizeof D, "%s/unisacc-callables-XXXXXX", cand[k]);
+            else snprintf(D, sizeof D, "%s/%s/unisacc-callables-XXXXXX", cwd, cand[k]);
+            if (mkdtemp(D)) break;
+        }
+        if (k == nc) { D[0] = 0; die("FileNotFoundError: No usable temporary directory found"); }
+    }
+    if (!strcmp(sysname, "Darwin")) { archs[0] = "arm64"; archs[1] = "x86_64"; na = 2; }
+    else { uname_field("-m", machine, sizeof machine); archs[0] = machine; na = 1; }
+    for (ai = 0; ai < na; ai++) {
+        for (san = 0; san < 2; san++) {
+            char *a[32], *o, *er; size_t on, en, sa, sb; int i = 0, rc;
+            snprintf(exe, sizeof exe, "%s/%s%s", D, archs[ai], san ? "-asan" : "-normal");
+            a[i++] = bound; a[i++] = "20";
+            a[i++] = "cc"; a[i++] = "-std=c11"; a[i++] = "-Wall"; a[i++] = "-Wextra"; a[i++] = "-Wno-unused-function";
+            a[i++] = "-Wno-misleading-indentation"; a[i++] = incl; a[i++] = src; a[i++] = "-lffi"; a[i++] = "-o"; a[i++] = exe;
+            if (!strcmp(sysname, "Darwin")) { a[i++] = "-arch"; a[i++] = (char *)archs[ai]; }
+            if (san) { a[i++] = "-O1"; a[i++] = "-g"; a[i++] = "-fsanitize=address,undefined"; a[i++] = "-fno-omit-frame-pointer"; }
+            else a[i++] = "-O2";
+            a[i] = 0;
+            rc = run(a, &o, &on, &er, &en);
+            if (rc != 0) {
+                fflush(stdout);
+                fprintf(stderr, "AssertionError: ('%s', %s, ", archs[ai], san ? "True" : "False");
+                brepr(stderr, (unsigned char *)er, en); fputs(")\n", stderr);
+                bail();
+            }
+            free(o); free(er);
+            i = 0; a[i++] = bound; a[i++] = "20";
+            if (!strcmp(sysname, "Darwin") && !strcmp(archs[ai], "x86_64")) { a[i++] = "arch"; a[i++] = "-x86_64"; }
+            a[i++] = exe; a[i] = 0;
+            rc = run(a, &o, &on, &er, &en);
+            if (rc != 0) {
+                fflush(stdout);
+                fprintf(stderr, "AssertionError: ('%s', %s, ", archs[ai], san ? "True" : "False");
+                brepr(stderr, (unsigned char *)o, on); fputs(", ", stderr);
+                brepr(stderr, (unsigned char *)er, en); fputs(")\n", stderr);
+                bail();
+            }
+            decode_strip((unsigned char *)o, on, &sa, &sb);
+            printf("%s %s ", archs[ai], san ? "ASan/UBSan" : "normal");
+            fwrite(o + sa, 1, sb - sa, stdout); putchar('\n'); fflush(stdout);
+            free(o); free(er);
+        }
+    }
+    cleanup();
+    return 0;
+}

@@ -1,0 +1,350 @@
+#!/usr/bin/env -S unisacc.com -run
+/* copycontractcheck.cx -- tests/copycontractcheck.py in C (2026-10-23, the owner's direction: move the toolchain off
+   Python).  The Python checker was a thin wrapper, `tests/cpparity.py --family copy,mode`; this file carries that
+   run itself (the copy and mode families of tests/cpparity/cases.tsv), so the gate's copy-contract job no longer
+   goes through cpparity.py.  The constructors under test are unchanged: P is exec/build/gen.py and exec/c/tbl.py,
+   run as `python3 ...` (the checker invokes them, it does not reimplement them); C is seed/gen.c, and the executor
+   is exec/c/run.c, both compiled here with cc.
+   usage: sh ./unisacc.com -run tests/copycontractcheck.cx   (arguments are ignored, as by the Python checker)
+   Per case and per (start, input): the template rows and a two-line manifest go to TREE/exec/cc-CASE; P and C each
+   build the delta JSON, tbl.py turns each into a table, run.c runs each on the input; the JSON must match byte for
+   byte and the executor's rc and stdout must match.  One line per run in the cpparity format (outputs as Python's
+   repr of the latin-1 text), `first red: TAG` and rc 1 at the first mismatch, else the cpparity PASS line, rc 0.
+   The repository root is the parent of this file's directory (as cpparity.py's default); the scratch tree is a
+   cpparity-XXXXXX directory under TMPDIR (TEMP, TMP, /tmp) and is removed on every exit.  A failed P/C build, tbl
+   or a step past 55 s is fatal, rc 1, as the Python assertion/timeout was; child stderr is captured, never shown,
+   as capture_output did.  Known product gap honoured: no sizeof of a subscripted member. */
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <utime.h>
+
+#define PATHN 4096
+static char ROOT[PATHN], TMP[PATHN], TREE[PATHN], WORK[PATHN], GEN[PATHN], EX[PATHN], ERRF[PATHN];
+
+/* ---- scratch cleanup (TemporaryDirectory) ---- */
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e; char q[PATHN];
+    if (lstat(p, &s)) return;
+    if (S_ISDIR(s.st_mode)) {
+        d = opendir(p);
+        if (d) {
+            while ((e = readdir(d))) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                snprintf(q, sizeof q, "%s/%s", p, e->d_name); rmtree(q);
+            }
+            closedir(d);
+        }
+        rmdir(p);
+    } else unlink(p);
+}
+static void cleanup(void) { if (TMP[0]) { rmtree(TMP); TMP[0] = 0; } }
+/* an uncaught Python exception: message on stderr, rc 1 */
+static void die(const char *what, const char *detail) {
+    fflush(stdout);
+    fprintf(stderr, "copycontractcheck: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    fflush(stderr); cleanup(); exit(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory", 0); return p; }
+
+/* ---- shutil.copytree(src, dst, ignore=ignore_patterns('__pycache__')): follows symlinks, copy2 keeps mode/mtime ---- */
+static void copystat(const char *src, const char *dst) {
+    struct stat s; struct utimbuf t;
+    if (stat(src, &s)) die("stat", src);
+    t.actime = s.st_atime; t.modtime = s.st_mtime;
+    if (chmod(dst, s.st_mode & 07777) || utime(dst, &t)) die("copystat", dst);
+}
+static void copyfile(const char *src, const char *dst) {
+    size_t n; char *b = cx_read(src, &n);
+    if (!b) die("cannot read", src);
+    if (cx_write(dst, b, n)) die("cannot write", dst);
+    free(b); copystat(src, dst);
+}
+static void copytree(const char *src, const char *dst, int ignore_pycache) {
+    DIR *d; struct dirent *e; char a[PATHN], b[PATHN]; struct stat s;
+    if (mkdir(dst, 0777)) die("FileExistsError or mkdir failed", dst);
+    d = opendir(src);
+    if (!d) die("cannot list", src);
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (ignore_pycache && !strcmp(e->d_name, "__pycache__")) continue;
+        snprintf(a, sizeof a, "%s/%s", src, e->d_name); snprintf(b, sizeof b, "%s/%s", dst, e->d_name);
+        if (stat(a, &s)) die("cannot stat (dangling link?)", a);
+        if (S_ISDIR(s.st_mode)) copytree(a, b, ignore_pycache); else copyfile(a, b);
+    }
+    closedir(d);
+    copystat(src, dst);
+}
+
+/* ---- subprocess.run(argv, cwd=CWD, capture_output=True, timeout=55) ---- */
+typedef struct { int rc; char *out; size_t outn; char *err; size_t errn; } Res;
+static Res run(char **argv, const char *cwd) {
+    Res r; int save, ef; static char here[PATHN];
+    memset(&r, 0, sizeof r);
+    fflush(stdout); fflush(stderr);
+    if (!getcwd(here, sizeof here) || chdir(cwd)) die("cannot enter", cwd);
+    save = dup(2); ef = open(ERRF, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (save < 0 || ef < 0) die("cannot capture stderr", ERRF);
+    dup2(ef, 2); close(ef);
+    r.rc = cx_runv_timeout(argv, 55, &r.out, &r.outn);
+    dup2(save, 2); close(save);
+    if (chdir(here)) die("cannot return to the working directory", here);
+    if (!r.out) { r.out = xmalloc(1); r.out[0] = 0; r.outn = 0; }
+    r.err = cx_read(ERRF, &r.errn);
+    if (!r.err) { r.err = xmalloc(1); r.err[0] = 0; r.errn = 0; }
+    if (r.rc == 124) die("TimeoutExpired: a step ran past 55 s", argv[0]);
+    if (r.rc < 0) die("cannot start", argv[0]);
+    if (r.rc == 127 && r.outn == 0 && r.errn == 0) die("FileNotFoundError: cannot execute", argv[0]);
+    return r;
+}
+static void freeres(Res *r) { free(r->out); free(r->err); }
+
+/* ---- text: UTF-8 code points, str.splitlines(), str.strip() ---- */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+static int linebreak(long c) { return c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029; }
+static int space(long c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+static int blank(const char *s) {   /* not l.strip() */
+    size_t n = strlen(s), i; int l; long c;
+    for (i = 0; i < n; i += l) { c = cp_at((const unsigned char *)s, n, i, &l); if (c < 0) return 0; if (!space(c)) return 0; }
+    return 1;
+}
+
+typedef struct { char **v; int n, cap; } List;
+static void push(List *l, const char *s, size_t n) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 64; l->v = realloc(l->v, l->cap * sizeof *l->v); if (!l->v) die("out of memory", 0); }
+    l->v[l->n] = xmalloc(n + 1); memcpy(l->v[l->n], s, n); l->v[l->n][n] = 0; l->n++;
+}
+static void splitlines(const char *s, size_t n, List *out) {
+    size_t i = 0, st = 0; int l; long c;
+    while (i < n) {
+        c = cp_at((const unsigned char *)s, n, i, &l);
+        if (c < 0) die("UnicodeDecodeError: tests/cpparity/cases.tsv is not UTF-8", 0);
+        if (linebreak(c)) {
+            push(out, s + st, i - st);
+            i += l; if (c == '\r' && i < n && s[i] == '\n') i++;
+            st = i;
+        } else i += l;
+    }
+    if (st < n) push(out, s + st, n - st);
+}
+static void split(const char *s, char sep, List *out) {   /* str.split(sep) */
+    const char *p;
+    for (;;) { p = strchr(s, sep); if (!p) { push(out, s, strlen(s)); return; } push(out, s, p - s); s = p + 1; }
+}
+
+/* dec(): \t \n \\ escapes; any other escaped char is a KeyError */
+static char *dec(const char *s, size_t *on) {
+    size_t n = strlen(s), i = 0, k = 0; char *o = xmalloc(n + 1);
+    while (i < n) {
+        if (s[i] == '\\' && i + 1 < n) {
+            char c = s[i + 1];
+            if (c == 't') o[k++] = '\t'; else if (c == 'n') o[k++] = '\n'; else if (c == '\\') o[k++] = '\\';
+            else die("KeyError in dec(): unknown escape in the rows field", 0);
+            i += 2;
+        } else o[k++] = s[i++];
+    }
+    o[k] = 0; *on = k; return o;
+}
+
+/* print repr(bytes.decode('latin-1')) as Python 3 writes it to a UTF-8 stdout */
+static void pyrepr(const unsigned char *s, size_t n) {
+    size_t i; int sq = 0, dq = 0; char q;
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = (sq && !dq) ? '"' : '\'';
+    putchar(q);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == (unsigned)q || c == '\\') { putchar('\\'); putchar(c); }
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c < 0x20 || c == 0x7f) printf("\\x%02x", c);
+        else if (c < 0x7f) putchar(c);
+        else if (c <= 0xa0 || c == 0xad) printf("\\x%02x", c);   /* not printable: C1 controls, NBSP, soft hyphen */
+        else { putchar(0xC0 | (c >> 6)); putchar(0x80 | (c & 0x3F)); }
+    }
+    putchar(q);
+}
+
+/* ---- the case table ---- */
+#define NF 8
+static const char *HDR[NF] = {"case_id", "family", "stage", "rows", "starts", "inputs", "expect", "note"};
+typedef struct { char *f[NF]; int nf; } Case;
+static const char *field(Case *c, int k, const char *name) {
+    if (k >= c->nf) die("KeyError: a case row has no field", name);
+    return c->f[k];
+}
+
+static void writefile(const char *p, const char *b, size_t n) { if (cx_write(p, b, n)) die("cannot write", p); }
+
+static int copy_mode_case(Case *cs) {
+    const char *name = field(cs, 0, "case_id");
+    char stage[PATHN], d[PATHN], p[PATHN], tag[PATHN * 2], hexs[PATHN * 2], low[PATHN];
+    char pj[PATHN * 3], cj[PATHN * 3], tbl[PATHN * 3], inf[PATHN * 3], *rows, *head;
+    List starts = {0, 0, 0}, inputs = {0, 0, 0}, parts;
+    size_t rn, i, k, hn, pn, cn; int si, ii, ji, ok, same, rcs[2]; Res r; char *outs[2]; size_t outn[2];
+    char *pjb, *cjb;
+    snprintf(stage, sizeof stage, "cc-%s", name);
+    split(field(cs, 4, "starts"), ',', &starts);
+    split(field(cs, 5, "inputs"), '|', &inputs);   /* '' is the empty input; '|A' means ['', 'A'] */
+    for (si = 0; si < starts.n; si++) {
+        const char *start = starts.v[si];
+        snprintf(d, sizeof d, "%s/exec/%s", TREE, stage);
+        if (mkdir(d, 0777) && errno != EEXIST) die("mkdir", d);
+        rows = dec(field(cs, 3, "rows"), &rn);
+        snprintf(p, sizeof p, "%s/copyprobe-template.tsv", d); writefile(p, rows, rn); free(rows);
+        hn = strlen(start) + 128; head = xmalloc(hn);
+        hn = snprintf(head, hn, "#! base build/parsebase.py\n#! start %s\ntemplate\tcopyprobe\tmain\t-\t-\t-\t-\t-\t-\n", start);
+        snprintf(p, sizeof p, "%s/gen-manifest.tsv", d); writefile(p, head, hn); free(head);
+        for (ii = 0; ii < inputs.n; ii++) {
+            const char *inp = inputs.v[ii]; size_t il = strlen(inp);
+            parts.v = 0; parts.n = parts.cap = 0;
+            split(start, '.', &parts);
+            if (parts.n < 2) die("IndexError: a start has no '.'", start);
+            for (k = 0; parts.v[1][k] && k + 1 < sizeof low; k++) { char c = parts.v[1][k]; low[k] = (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+            low[k] = 0;
+            for (i = 0; i < il && 2 * i + 2 < sizeof hexs; i++) snprintf(hexs + 2 * i, 3, "%02x", (unsigned char)inp[i]);
+            hexs[2 * i] = 0;
+            snprintf(tag, sizeof tag, "%s-%s-%s", name, low, il ? hexs : "e");
+            for (k = 0; k < (size_t)parts.n; k++) free(parts.v[k]); free(parts.v);
+            snprintf(pj, sizeof pj, "%s/%s.p.json", WORK, tag); snprintf(cj, sizeof cj, "%s/%s.c.json", WORK, tag);
+            {
+                char *a[] = {"python3", "exec/build/gen.py", stage, pj, 0};
+                r = run(a, TREE); if (r.rc != 0) die("AssertionError: P build", tag); freeres(&r);
+            }
+            {
+                char *a[] = {GEN, stage, cj, 0};
+                r = run(a, TREE); if (r.rc != 0) die("AssertionError: C build", tag); freeres(&r);
+            }
+            for (ji = 0; ji < 2; ji++) {
+                const char *jp = ji ? cj : pj; size_t jl = strlen(jp) - 5;   /* strip ".json" */
+                snprintf(tbl, sizeof tbl, "%.*s.tbl", (int)jl, jp);
+                snprintf(inf, sizeof inf, "%.*s.in", (int)jl, jp);
+                {
+                    char *a[] = {"python3", "exec/c/tbl.py", (char *)jp, tbl, 0};
+                    r = run(a, TREE); if (r.rc != 0) die("AssertionError: tbl", tag); freeres(&r);
+                }
+                writefile(inf, inp, il);
+                {
+                    char *a[] = {EX, tbl, inf, 0};
+                    r = run(a, TREE);
+                    rcs[ji] = r.rc; outs[ji] = r.out; outn[ji] = r.outn; free(r.err);
+                }
+            }
+            pjb = cx_read(pj, &pn); cjb = cx_read(cj, &cn);
+            if (!pjb || !cjb) die("FileNotFoundError: a delta JSON is missing", tag);
+            same = pn == cn && !memcmp(pjb, cjb, pn);
+            free(pjb); free(cjb);
+            ok = rcs[0] == rcs[1] && outn[0] == outn[1] && !memcmp(outs[0], outs[1], outn[0]) && same;
+            printf("%s: C=", tag); pyrepr((unsigned char *)outs[1], outn[1]);
+            printf(" rc%d P=", rcs[1]); pyrepr((unsigned char *)outs[0], outn[0]);
+            printf(" rc%d json_exact=%s %s\n", rcs[0], same ? "True" : "False", ok ? "PASS" : "FAIL");
+            free(outs[0]); free(outs[1]);
+            if (!ok) { printf("first red: %s\n", tag); return 0; }
+        }
+    }
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash, casesp[PATHN], src[PATHN], dst[PATHN];
+    const char *tmp = getenv("TMPDIR");
+    char *text; size_t tn; List lines = {0, 0, 0}, hdr = {0, 0, 0};
+    Case *cases; int ncase = 0, i, j, n_copy = 0;
+    (void)argc; (void)argv;
+    /* ROOT = Path(__file__).resolve().parent.parent */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/..", here); if (!realpath(t, ROOT)) die("cannot resolve the repository root", t); }
+    snprintf(casesp, sizeof casesp, "%s/tests/cpparity/cases.tsv", ROOT);
+
+    /* load_cases */
+    text = cx_read(casesp, &tn);
+    if (!text) die("FileNotFoundError", casesp);
+    splitlines(text, tn, &lines); free(text);
+    if (lines.n < 1) die("IndexError: the case table is empty", casesp);
+    split(lines.v[0], '\t', &hdr);
+    if (hdr.n != NF) die("AssertionError: case table header", lines.v[0]);
+    for (j = 0; j < NF; j++) if (strcmp(hdr.v[j], HDR[j])) die("AssertionError: case table header", lines.v[0]);
+    cases = xmalloc(lines.n * sizeof *cases);
+    for (i = 1; i < lines.n; i++) {
+        List f = {0, 0, 0};
+        if (blank(lines.v[i])) continue;
+        split(lines.v[i], '\t', &f);
+        cases[ncase].nf = f.n < NF ? f.n : NF;
+        for (j = 0; j < NF; j++) cases[ncase].f[j] = j < f.n ? f.v[j] : 0;
+        ncase++;
+    }
+    for (i = 0; i < ncase; i++) for (j = 0; j < i; j++)
+        if (!strcmp(field(&cases[i], 0, "case_id"), field(&cases[j], 0, "case_id"))) die("AssertionError: duplicate case_id in the table", 0);
+    for (i = 0; i < ncase; i++) (void)field(&cases[i], 1, "family");   /* the family filter reads every row */
+
+    /* tempfile.TemporaryDirectory(prefix='cpparity-') */
+    if (!tmp || !*tmp) tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    if (tmp[0] != '/') { char cwd[2048]; if (!getcwd(cwd, sizeof cwd)) die("getcwd", 0); snprintf(TMP, sizeof TMP, "%s/%s/cpparity-XXXXXX", cwd, tmp); }
+    else snprintf(TMP, sizeof TMP, "%s/cpparity-XXXXXX", tmp);
+    if (!mkdtemp(TMP)) { TMP[0] = 0; die("mkdtemp failed", 0); }
+    snprintf(ERRF, sizeof ERRF, "%s/.stderr", TMP);
+
+    /* build_tree */
+    snprintf(TREE, sizeof TREE, "%s/tree", TMP);
+    if (mkdir(TREE, 0777)) die("mkdir", TREE);
+    snprintf(src, sizeof src, "%s/exec", ROOT); snprintf(dst, sizeof dst, "%s/exec", TREE); copytree(src, dst, 1);
+    snprintf(src, sizeof src, "%s/tests/fixtures/seed-let-exit", ROOT); snprintf(dst, sizeof dst, "%s/exec/letexit", TREE); copytree(src, dst, 0);
+    snprintf(GEN, sizeof GEN, "%s/seed-gen", TMP); snprintf(EX, sizeof EX, "%s/run", TMP);
+    {
+        char inc[PATHN], gc[PATHN], rc[PATHN]; Res r;
+        snprintf(inc, sizeof inc, "%s/seed", ROOT); snprintf(gc, sizeof gc, "%s/seed/gen.c", ROOT); snprintf(rc, sizeof rc, "%s/exec/c/run.c", ROOT);
+        {
+            char *a[] = {"cc", "-std=c99", "-O2", "-w", "-I", inc, gc, "-o", GEN, 0};
+            r = run(a, TMP);
+            if (r.rc) {   /* SystemExit('cpparity FAIL: build seed/gen.c: ' + stderr[:300]) */
+                size_t k, cps = 0; fflush(stdout); fputs("cpparity FAIL: build seed/gen.c: ", stderr);
+                for (k = 0; k < r.errn; k++) { if ((r.err[k] & 0xC0) != 0x80 && ++cps > 300) break; fputc(r.err[k], stderr); }
+                fputc('\n', stderr); cleanup(); exit(1);
+            }
+            freeres(&r);
+        }
+        {
+            char *a[] = {"cc", "-O2", "-w", rc, "-o", EX, 0};   /* default dialect: run.c calls setenv (POSIX) */
+            r = run(a, TMP);
+            if (r.rc) {
+                size_t k, cps = 0; fflush(stdout); fputs("cpparity FAIL: build exec/c/run.c: ", stderr);
+                for (k = 0; k < r.errn; k++) { if ((r.err[k] & 0xC0) != 0x80 && ++cps > 300) break; fputc(r.err[k], stderr); }
+                fputc('\n', stderr); cleanup(); exit(1);
+            }
+            freeres(&r);
+        }
+    }
+    snprintf(WORK, sizeof WORK, "%s/work", TMP);
+    if (mkdir(WORK, 0777)) die("mkdir", WORK);
+
+    for (i = 0; i < ncase; i++) {
+        const char *fam = field(&cases[i], 1, "family");
+        if (strcmp(fam, "copy") && strcmp(fam, "mode")) continue;   /* --family copy,mode */
+        if (!copy_mode_case(&cases[i])) { fflush(stdout); cleanup(); exit(1); }
+        n_copy++;
+    }
+    printf("cpparity PASS: %d copy/mode cases (C = P), 0 let-exit values (hit/miss exact)\n", n_copy);
+    fflush(stdout); cleanup();
+    return 0;
+}

@@ -1,0 +1,588 @@
+#!/usr/bin/env -S unisacc.com -run
+/* seedletexitcheck.cx -- tests/seedletexitcheck.py in C (2026-10-23, the owner's direction: move the toolchain off
+   Python).  The Python checker is a thin wrapper, `cpparity.py --family letexit`; this port carries that family of
+   tests/cpparity.py itself, so the gate needs no Python checker for it.  The P side under test is still Python:
+   exec/build/gen.py, run as `python3 <tree>/exec/build/gen.py letexit OUT [--stop]` (invoked, not reimplemented).
+   Gate name: seedgen-let-exit -- the generic constructor exit before write (hit/miss, NUL repr), C/P byte parity.
+   usage: sh ./unisacc.com -run tests/seedletexitcheck.cx   (arguments are ignored, as by the Python wrapper)
+   What it does, as cpparity.py did for family letexit:
+     - reads tests/cpparity/cases.tsv (header must be the eight columns; case_id unique over the whole table) and
+       keeps the rows whose family is `letexit`;
+     - copies exec/ (no __pycache__) and tests/fixtures/seed-let-exit (as exec/letexit) into a temporary tree and
+       builds seed/gen.c (cc -std=c99 -O2 -w) and exec/c/run.c (cc -O2 -w) with the host cc;
+     - per case: the `rows` field (\t \n \\ decoded) is JSON; json.dumps of it (Python's default separators,
+       ensure_ascii) replaces field 9 of line 5 (the `let` row) of the pristine fixture manifest; then a miss run and
+       a hit run (--stop) of C (seed-gen) and P (gen.py), cwd = the tree, each writing over a SENTINEL artifact:
+       rc, stdout and artifact must agree; on a hit stderr must agree and the artifact stay SENTINEL; on a miss rc 0
+       and the artifact written.
+   Output is the Python text: `cpparity PASS: 0 copy/mode cases (C = P), N let-exit values (hit/miss exact)`, rc 0;
+   the first red prints `first red: CASE (WHY...)` with Python's repr of the reason tuple, rc 1.  A build failure is
+   `cpparity FAIL: build ...` on stderr, rc 1.  What Python raised (bad table, bad JSON, a child over 55 s, a missing
+   program) is one `seedletexitcheck: ...` line on stderr, rc 1, where Python printed a traceback.
+   Limits of the port (no case in the table reaches them): repr() of a non-ASCII code point uses a fixed list of
+   non-printable ranges (C1 controls, NBSP and other separators, format characters, surrogates, private use,
+   noncharacters) instead of the full Unicode database; integers keep their JSON digits (no 4300-digit limit). */
+#include <math.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <limits.h>
+#include <utime.h>
+
+static char ROOT[PATH_MAX], TMP[PATH_MAX];
+
+/* ---- cleanup and failure ---------------------------------------------------------------------------------- */
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e; char q[PATH_MAX];
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    d = opendir(p);
+    if (d) {
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(q, sizeof q, "%s/%s", p, e->d_name); rmtree(q);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) { if (TMP[0]) { rmtree(TMP); TMP[0] = 0; } }
+static void die(const char *m, const char *a) {   /* Python raised: traceback on stderr, rc 1 */
+    fflush(stdout);
+    fprintf(stderr, "seedletexitcheck: %s%s%s\n", m, a ? ": " : "", a ? a : "");
+    cleanup(); exit(1);
+}
+
+/* ---- byte buffers ------------------------------------------------------------------------------------------- */
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *o, const void *p, size_t n) {
+    if (o->n + n + 1 > o->cap) {
+        size_t c = o->cap ? o->cap : 64; char *t;
+        while (c < o->n + n + 1) c *= 2;
+        t = realloc(o->b, c); if (!t) die("out of memory", 0);
+        o->b = t; o->cap = c;
+    }
+    memcpy(o->b + o->n, p, n); o->n += n; o->b[o->n] = 0;
+}
+static void bstr(Buf *o, const char *s) { bput(o, s, strlen(s)); }
+static void bch(Buf *o, char c) { bput(o, &c, 1); }
+static void butf8(Buf *o, long c) {   /* one code point as UTF-8 (surrogates too, as surrogatepass would) */
+    unsigned char t[4]; size_t n;
+    if (c < 0x80) { t[0] = (unsigned char)c; n = 1; }
+    else if (c < 0x800) { t[0] = (unsigned char)(0xC0 | (c >> 6)); t[1] = (unsigned char)(0x80 | (c & 0x3F)); n = 2; }
+    else if (c < 0x10000) { t[0] = (unsigned char)(0xE0 | (c >> 12)); t[1] = (unsigned char)(0x80 | ((c >> 6) & 0x3F)); t[2] = (unsigned char)(0x80 | (c & 0x3F)); n = 3; }
+    else { t[0] = (unsigned char)(0xF0 | (c >> 18)); t[1] = (unsigned char)(0x80 | ((c >> 12) & 0x3F)); t[2] = (unsigned char)(0x80 | ((c >> 6) & 0x3F)); t[3] = (unsigned char)(0x80 | (c & 0x3F)); n = 4; }
+    bput(o, t, n);
+}
+
+/* ---- UTF-8 text: strict decode, str.splitlines, str.strip ---------------------------------------------------- */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+/* Path.read_text(): strict UTF-8 (a NUL byte is a valid code point, so text is length-carried) */
+static char *read_text(const char *p, size_t *n) {
+    char *b = cx_read(p, n); size_t i; int l;
+    if (!b) die("cannot read", p);
+    for (i = 0; i < *n; i += l) if (cp_at((unsigned char *)b, *n, i, &l) < 0) die("not UTF-8 text", p);
+    return b;
+}
+static int linebreak(long c) { return c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029; }
+static int space(long c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+typedef struct { char *s; size_t n; } Str;   /* a slice, not NUL-terminated in general */
+typedef struct { Str *v; size_t n, cap; } Strs;
+static void spush(Strs *l, const char *s, size_t n) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 16; l->v = realloc(l->v, l->cap * sizeof *l->v); if (!l->v) die("out of memory", 0); }
+    l->v[l->n].s = (char *)s; l->v[l->n].n = n; l->n++;
+}
+static Strs splitlines(const char *b, size_t n) {   /* str.splitlines() */
+    Strs r = {0, 0, 0}; size_t i = 0, st = 0; int l; long c;
+    while (i < n) {
+        c = cp_at((const unsigned char *)b, n, i, &l);
+        if (linebreak(c)) {
+            spush(&r, b + st, i - st);
+            i += l; if (c == '\r' && i < n && b[i] == '\n') i++;
+            st = i;
+        } else i += l;
+    }
+    if (st < n) spush(&r, b + st, n - st);
+    return r;
+}
+static Strs split_tab(Str s) {   /* str.split('\t') */
+    Strs r = {0, 0, 0}; size_t i, st = 0;
+    for (i = 0; i < s.n; i++) if (s.s[i] == '\t') { spush(&r, s.s + st, i - st); st = i + 1; }
+    spush(&r, s.s + st, s.n - st);
+    return r;
+}
+static int blank(Str s) {   /* not l.strip() */
+    size_t i = 0; int l;
+    while (i < s.n) { if (!space(cp_at((unsigned char *)s.s, s.n, i, &l))) return 0; i += l; }
+    return 1;
+}
+static int seq(Str a, const char *b) { return a.n == strlen(b) && !memcmp(a.s, b, a.n); }
+static char *cstr(Str a) { char *p = malloc(a.n + 1); if (!p) die("out of memory", 0); memcpy(p, a.s, a.n); p[a.n] = 0; return p; }
+
+/* ---- dec(): \t \n \\ escapes of the table ------------------------------------------------------------------- */
+static Str dec(Str s) {
+    Buf o = {0, 0, 0}; size_t i = 0; Str r;
+    bput(&o, "", 0);
+    while (i < s.n) {
+        if (s.s[i] == '\\' && i + 1 < s.n) {
+            char c = s.s[i + 1];
+            if (c == 't') bch(&o, '\t'); else if (c == 'n') bch(&o, '\n'); else if (c == '\\') bch(&o, '\\');
+            else die("dec: KeyError on escape", 0);
+            i += 2;
+        } else bch(&o, s.s[i++]);
+    }
+    r.s = o.b; r.n = o.n; return r;
+}
+
+/* ---- JSON (json.loads) ---------------------------------------------------------------------------------------- */
+enum { J_NULL, J_FALSE, J_TRUE, J_INT, J_FLOAT, J_STR, J_ARR, J_OBJ };
+typedef struct J J;
+typedef struct { long *c; size_t n; } U;   /* a Python str: code points */
+struct J { int t; char *num; double d; U s; J **a; U *k; size_t cnt, cap; };
+static const char *JS; static size_t JN, JP;
+static void jfail(const char *m) { die("json.loads: JSONDecodeError", m); }
+static J *jnew(int t) { J *v = calloc(1, sizeof *v); if (!v) die("out of memory", 0); v->t = t; return v; }
+static void jws(void) { while (JP < JN && (JS[JP] == ' ' || JS[JP] == '\t' || JS[JP] == '\n' || JS[JP] == '\r')) JP++; }
+static int hexv(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static long hex4(size_t at) {
+    long v = 0; int k, h;
+    if (at + 4 > JN) jfail("Invalid \\uXXXX escape");
+    for (k = 0; k < 4; k++) { h = hexv(JS[at + k]); if (h < 0) jfail("Invalid \\uXXXX escape"); v = v * 16 + h; }
+    return v;
+}
+static void upush(U *u, size_t *cap, long c) {
+    if (u->n == *cap) { *cap = *cap ? *cap * 2 : 16; u->c = realloc(u->c, *cap * sizeof *u->c); if (!u->c) die("out of memory", 0); }
+    u->c[u->n++] = c;
+}
+static U jstring(void) {   /* JP just past the opening quote; strict=True */
+    U u = {0, 0}; size_t cap = 0; int l; long c;
+    for (;;) {
+        if (JP >= JN) jfail("Unterminated string");
+        c = cp_at((const unsigned char *)JS, JN, JP, &l);
+        if (c == '"') { JP++; break; }
+        if (c < 0x20) jfail("Invalid control character");
+        if (c != '\\') { upush(&u, &cap, c); JP += l; continue; }
+        JP++;
+        if (JP >= JN) jfail("Unterminated string");
+        switch (JS[JP]) {
+        case '"': c = '"'; break; case '\\': c = '\\'; break; case '/': c = '/'; break;
+        case 'b': c = 8; break; case 'f': c = 12; break; case 'n': c = 10; break; case 'r': c = 13; break; case 't': c = 9; break;
+        case 'u':
+            c = hex4(JP + 1); JP += 4;
+            if (c >= 0xD800 && c <= 0xDBFF && JP + 2 < JN && JS[JP + 1] == '\\' && JS[JP + 2] == 'u') {
+                long c2 = hex4(JP + 3);
+                if (c2 >= 0xDC00 && c2 <= 0xDFFF) { c = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00)); JP += 6; }
+            }
+            break;
+        default: jfail("Invalid \\escape");
+        }
+        JP++; upush(&u, &cap, c);
+    }
+    return u;
+}
+static int ueq(U a, U b) { return a.n == b.n && (!a.n || !memcmp(a.c, b.c, a.n * sizeof *a.c)); }
+static void jadd(J *v, U *key, J *x) {
+    size_t i;
+    if (key) for (i = 0; i < v->cnt; i++) if (ueq(v->k[i], *key)) { v->a[i] = x; return; }   /* dict: last value, first place */
+    if (v->cnt == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 8;
+        v->a = realloc(v->a, v->cap * sizeof *v->a); v->k = realloc(v->k, v->cap * sizeof *v->k);
+        if (!v->a || !v->k) die("out of memory", 0);
+    }
+    v->a[v->cnt] = x; if (key) v->k[v->cnt] = *key; v->cnt++;
+}
+static int lit(const char *w) { size_t n = strlen(w); if (JP + n <= JN && !memcmp(JS + JP, w, n)) { JP += n; return 1; } return 0; }
+static int isdig(char c) { return c >= '0' && c <= '9'; }
+static J *jvalue(void) {
+    J *v; char c;
+    if (JP >= JN) jfail("Expecting value");
+    c = JS[JP];
+    if (c == '"') { JP++; v = jnew(J_STR); v->s = jstring(); return v; }
+    if (c == '{') {
+        v = jnew(J_OBJ); JP++; jws();
+        if (JP < JN && JS[JP] == '}') { JP++; return v; }
+        for (;;) {
+            U key; J *x;
+            if (JP >= JN || JS[JP] != '"') jfail("Expecting property name enclosed in double quotes");
+            JP++; key = jstring(); jws();
+            if (JP >= JN || JS[JP] != ':') jfail("Expecting ':' delimiter");
+            JP++; jws(); x = jvalue(); jadd(v, &key, x); jws();
+            if (JP < JN && JS[JP] == '}') { JP++; return v; }
+            if (JP >= JN || JS[JP] != ',') jfail("Expecting ',' delimiter");
+            JP++; jws();
+        }
+    }
+    if (c == '[') {
+        v = jnew(J_ARR); JP++; jws();
+        if (JP < JN && JS[JP] == ']') { JP++; return v; }
+        for (;;) {
+            jadd(v, 0, jvalue()); jws();
+            if (JP < JN && JS[JP] == ']') { JP++; return v; }
+            if (JP >= JN || JS[JP] != ',') jfail("Expecting ',' delimiter");
+            JP++; jws();
+        }
+    }
+    if (lit("null")) return jnew(J_NULL);
+    if (lit("true")) return jnew(J_TRUE);
+    if (lit("false")) return jnew(J_FALSE);
+    /* infinities via HUGE_VAL: the carried strtod does not read "inf", and constant 1.0/0.0 is not folded to it */
+    if (lit("NaN")) { v = jnew(J_FLOAT); v->d = HUGE_VAL; v->d -= HUGE_VAL; return v; }
+    if (lit("Infinity")) { v = jnew(J_FLOAT); v->d = HUGE_VAL; return v; }
+    if (lit("-Infinity")) { v = jnew(J_FLOAT); v->d = -HUGE_VAL; return v; }
+    {   /* -?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)? */
+        size_t st = JP, i = JP, e; int fl = 0; char *t;
+        if (i < JN && JS[i] == '-') i++;
+        if (i < JN && JS[i] == '0') i++;
+        else if (i < JN && JS[i] >= '1' && JS[i] <= '9') { while (i < JN && isdig(JS[i])) i++; }
+        else jfail("Expecting value");
+        if (i + 1 < JN && JS[i] == '.' && isdig(JS[i + 1])) { fl = 1; i += 2; while (i < JN && isdig(JS[i])) i++; }
+        if (i < JN && (JS[i] == 'e' || JS[i] == 'E')) {
+            e = i + 1;
+            if (e < JN && (JS[e] == '+' || JS[e] == '-')) e++;
+            if (e < JN && isdig(JS[e])) { fl = 1; while (e < JN && isdig(JS[e])) e++; i = e; }
+        }
+        t = malloc(i - st + 1); if (!t) die("out of memory", 0);
+        memcpy(t, JS + st, i - st); t[i - st] = 0; JP = i;
+        if (fl) { v = jnew(J_FLOAT); v->d = strtod(t, 0); free(t); return v; }
+        v = jnew(J_INT); v->num = (!strcmp(t, "-0")) ? "0" : t; return v;
+    }
+}
+static J *json_loads(Str s) {
+    J *v;
+    JS = s.s; JN = s.n; JP = 0;
+    jws(); v = jvalue(); jws();
+    if (JP != JN) jfail("Extra data");
+    return v;
+}
+
+/* ---- float repr (shortest round trip, Python's 'r' format) ---------------------------------------------------- */
+static void float_repr(Buf *o, double d, int json) {
+    char t[64], dig[32]; int p, nd = 0, ex = 0, k; char *e;
+    if (d != d) { bstr(o, json ? "NaN" : "nan"); return; }
+    if (d == HUGE_VAL) { bstr(o, json ? "Infinity" : "inf"); return; }
+    if (d == -HUGE_VAL) { bstr(o, json ? "-Infinity" : "-inf"); return; }
+    if (d == 0) { bstr(o, (1.0 / d < 0) ? "-0.0" : "0.0"); return; }
+    for (p = 1; p <= 17; p++) { snprintf(t, sizeof t, "%.*e", p - 1, d); if (strtod(t, 0) == d) break; }
+    for (k = (t[0] == '-'); t[k] && t[k] != 'e'; k++) if (isdig(t[k])) dig[nd++] = t[k];
+    e = strchr(t, 'e'); ex = e ? atoi(e + 1) : 0;
+    while (nd > 1 && dig[nd - 1] == '0') nd--;
+    dig[nd] = 0;
+    if (d < 0) bch(o, '-');
+    if (ex < -4 || ex >= 16) {
+        bch(o, dig[0]);
+        if (nd > 1) { bch(o, '.'); bstr(o, dig + 1); }
+        snprintf(t, sizeof t, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex); bstr(o, t);
+    } else if (ex < 0) {
+        bstr(o, "0."); for (k = 0; k < -ex - 1; k++) bch(o, '0'); bstr(o, dig);
+    } else if (ex + 1 >= nd) {
+        bstr(o, dig); for (k = nd; k < ex + 1; k++) bch(o, '0'); bstr(o, ".0");
+    } else {
+        bput(o, dig, (size_t)ex + 1); bch(o, '.'); bstr(o, dig + ex + 1);
+    }
+}
+
+/* ---- json.dumps (ensure_ascii, ', ' and ': ') ---------------------------------------------------------------- */
+static void dump_str(Buf *o, U s) {
+    size_t i; char t[16]; long c;
+    bch(o, '"');
+    for (i = 0; i < s.n; i++) {
+        c = s.c[i];
+        if (c == '"') bstr(o, "\\\""); else if (c == '\\') bstr(o, "\\\\");
+        else if (c == '\n') bstr(o, "\\n"); else if (c == '\r') bstr(o, "\\r"); else if (c == '\t') bstr(o, "\\t");
+        else if (c == 8) bstr(o, "\\b"); else if (c == 12) bstr(o, "\\f");
+        else if (c >= 0x20 && c < 0x7F) bch(o, (char)c);
+        else if (c > 0xFFFF) {
+            long v = c - 0x10000;
+            snprintf(t, sizeof t, "\\u%04lx\\u%04lx", 0xD800 | (v >> 10), 0xDC00 | (v & 0x3FF)); bstr(o, t);
+        } else { snprintf(t, sizeof t, "\\u%04lx", c); bstr(o, t); }
+    }
+    bch(o, '"');
+}
+static void dumps(Buf *o, J *v) {
+    size_t i;
+    switch (v->t) {
+    case J_NULL: bstr(o, "null"); break;
+    case J_FALSE: bstr(o, "false"); break;
+    case J_TRUE: bstr(o, "true"); break;
+    case J_INT: bstr(o, v->num); break;
+    case J_FLOAT: float_repr(o, v->d, 1); break;
+    case J_STR: dump_str(o, v->s); break;
+    case J_ARR:
+        bch(o, '[');
+        for (i = 0; i < v->cnt; i++) { if (i) bstr(o, ", "); dumps(o, v->a[i]); }
+        bch(o, ']'); break;
+    default:
+        bch(o, '{');
+        for (i = 0; i < v->cnt; i++) { if (i) bstr(o, ", "); dump_str(o, v->k[i]); bstr(o, ": "); dumps(o, v->a[i]); }
+        bch(o, '}');
+    }
+}
+
+/* ---- repr() of the loaded value (str, dict, list, int, float, bool, None) ------------------------------------- */
+static int printable(long c) {   /* str.isprintable for one code point (see the header for the limit) */
+    if (c < 0x20 || c == 0x7F) return 0;
+    if (c < 0x7F) return 1;
+    if (c <= 0xA0 || c == 0xAD || c == 0x061C || c == 0x1680 || c == 0x180E) return 0;
+    if ((c >= 0x2000 && c <= 0x200F) || (c >= 0x2028 && c <= 0x202F) || (c >= 0x205F && c <= 0x206F)) return 0;
+    if (c == 0x3000 || c == 0xFEFF || (c >= 0xFFF9 && c <= 0xFFFB) || c == 0x110BD || c == 0x110CD) return 0;
+    if ((c >= 0xD800 && c <= 0xF8FF) || (c & 0xFFFE) == 0xFFFE || (c >= 0xFDD0 && c <= 0xFDEF)) return 0;
+    if ((c >= 0x1BCA0 && c <= 0x1BCA3) || (c >= 0x1D173 && c <= 0x1D17A) || c == 0xE0001 || (c >= 0xE0020 && c <= 0xE007F)) return 0;
+    if (c >= 0xF0000) return 0;
+    return 1;
+}
+static void repr_str(Buf *o, U s) {
+    size_t i; int sq = 0, dq = 0; char q, t[16]; long c;
+    for (i = 0; i < s.n; i++) { if (s.c[i] == '\'') sq = 1; if (s.c[i] == '"') dq = 1; }
+    q = (sq && !dq) ? '"' : '\'';
+    bch(o, q);
+    for (i = 0; i < s.n; i++) {
+        c = s.c[i];
+        if (c == q || c == '\\') { bch(o, '\\'); bch(o, (char)c); }
+        else if (c == '\t') bstr(o, "\\t"); else if (c == '\n') bstr(o, "\\n"); else if (c == '\r') bstr(o, "\\r");
+        else if (printable(c)) butf8(o, c);
+        else {
+            if (c <= 0xFF) snprintf(t, sizeof t, "\\x%02lx", c);
+            else if (c <= 0xFFFF) snprintf(t, sizeof t, "\\u%04lx", c);
+            else snprintf(t, sizeof t, "\\U%08lx", c);
+            bstr(o, t);
+        }
+    }
+    bch(o, q);
+}
+static void repr(Buf *o, J *v) {
+    size_t i;
+    switch (v->t) {
+    case J_NULL: bstr(o, "None"); break;
+    case J_FALSE: bstr(o, "False"); break;
+    case J_TRUE: bstr(o, "True"); break;
+    case J_INT: bstr(o, v->num); break;
+    case J_FLOAT: float_repr(o, v->d, 0); break;
+    case J_STR: repr_str(o, v->s); break;
+    case J_ARR:
+        bch(o, '[');
+        for (i = 0; i < v->cnt; i++) { if (i) bstr(o, ", "); repr(o, v->a[i]); }
+        bch(o, ']'); break;
+    default:
+        bch(o, '{');
+        for (i = 0; i < v->cnt; i++) { if (i) bstr(o, ", "); repr_str(o, v->k[i]); bstr(o, ": "); repr(o, v->a[i]); }
+        bch(o, '}');
+    }
+}
+
+/* ---- processes: subprocess.run(argv, cwd, capture_output=True, timeout=55) ------------------------------------- */
+typedef struct { int rc; char *out, *err; size_t nout, nerr; } Res;
+static Res run(char *const argv[], const char *cwd) {
+    Res r; char po[PATH_MAX], pe[PATH_MAX]; int fo, fe, pp[2], st = 0, e = 0; pid_t pid, w; long ticks = 55L * 100;
+    snprintf(po, sizeof po, "%s/.run-out", TMP); snprintf(pe, sizeof pe, "%s/.run-err", TMP);
+    fo = open(po, O_WRONLY | O_CREAT | O_TRUNC, 0600); fe = open(pe, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fo < 0 || fe < 0 || pipe(pp) != 0) die("cannot set up a child", argv[0]);
+    fcntl(pp[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("fork failed", argv[0]);
+    if (pid == 0) {
+        close(pp[0]);
+        if (chdir(cwd) != 0) { e = errno; write(pp[1], &e, sizeof e); _exit(127); }
+        dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        execvp(argv[0], argv);
+        e = errno; write(pp[1], &e, sizeof e); _exit(127);
+    }
+    close(pp[1]); close(fo); close(fe);
+    if (read(pp[0], &e, sizeof e) == (ssize_t)sizeof e) { close(pp[0]); waitpid(pid, &st, 0); die("cannot execute (FileNotFoundError)", argv[0]); }
+    close(pp[0]);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) die("waitpid failed", argv[0]);
+        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); die("subprocess.TimeoutExpired after 55 s", argv[0]); }
+        usleep(10000);
+    }
+    r.rc = WIFEXITED(st) ? WEXITSTATUS(st) : -(st & 0x7f);
+    r.out = cx_read(po, &r.nout); r.err = cx_read(pe, &r.nerr);
+    if (!r.out || !r.err) die("cannot read child output", argv[0]);
+    return r;
+}
+
+/* ---- shutil.copytree (copy2 for files, copystat for directories) ----------------------------------------------- */
+static void copystat(const char *src, const char *dst, struct stat *s) {
+    struct utimbuf u; (void)src;
+    u.actime = s->st_atime; u.modtime = s->st_mtime; utime(dst, &u);
+    chmod(dst, s->st_mode & 07777);
+}
+static void copytree(const char *src, const char *dst, int ignore_pycache) {
+    DIR *d; struct dirent *e; char a[PATH_MAX], b[PATH_MAX]; struct stat s, ds;
+    if (stat(src, &ds) != 0 || !S_ISDIR(ds.st_mode)) die("copytree: not a directory", src);
+    if (mkdir(dst, 0777) != 0) die("copytree: cannot make", dst);   /* FileExistsError too */
+    d = opendir(src); if (!d) die("copytree: cannot list", src);
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (ignore_pycache && !strcmp(e->d_name, "__pycache__")) continue;
+        snprintf(a, sizeof a, "%s/%s", src, e->d_name); snprintf(b, sizeof b, "%s/%s", dst, e->d_name);
+        if (stat(a, &s) != 0) die("copytree: shutil.Error", a);   /* symlinks are followed; a dangling one fails */
+        if (S_ISDIR(s.st_mode)) copytree(a, b, ignore_pycache);
+        else {
+            size_t n; char *buf = cx_read(a, &n);
+            if (!buf || cx_write(b, buf, n) != 0) die("copytree: shutil.Error", a);
+            free(buf); copystat(a, b, &s);
+        }
+    }
+    closedir(d);
+    copystat(src, dst, &ds);
+}
+
+/* ---- the letexit family ---------------------------------------------------------------------------------------- */
+static const char *HDR[8] = {"case_id", "family", "stage", "rows", "starts", "inputs", "expect", "note"};
+static char TREE[PATH_MAX], GEN[PATH_MAX], WORK[PATH_MAX];
+
+static void build(char *const argv[], const char *what) {
+    Res q = run(argv, TMP);
+    if (q.rc) {   /* SystemExit('cpparity FAIL: build X: ' + stderr.decode()[:300]) */
+        size_t i = 0; int l, k = 0;
+        for (i = 0; i < q.nerr; i += l) if (cp_at((unsigned char *)q.err, q.nerr, i, &l) < 0) die("UnicodeDecodeError in cc stderr", what);
+        for (i = 0; i < q.nerr && k < 300; i += l, k++) cp_at((unsigned char *)q.err, q.nerr, i, &l);
+        fflush(stdout);
+        fprintf(stderr, "cpparity FAIL: build %s: ", what); fwrite(q.err, 1, i, stderr); fputc('\n', stderr);
+        cleanup(); exit(1);
+    }
+    free(q.out); free(q.err);
+}
+
+/* 0 = green; otherwise *why gets the repr of the reason tuple */
+static int letexit_case(Str rows, Buf *why) {
+    J *values = json_loads(dec(rows));
+    char p[PATH_MAX], outp[2][PATH_MAX], *orig; size_t on; Strs lines, row; Buf js = {0, 0, 0}, man = {0, 0, 0};
+    size_t i; int hit, c;
+    snprintf(p, sizeof p, "%s/tests/fixtures/seed-let-exit/gen-manifest.tsv", ROOT);
+    orig = read_text(p, &on);
+    lines = splitlines(orig, on);
+    if (lines.n < 5) die("IndexError: list index out of range", p);
+    row = split_tab(lines.v[4]);
+    if (!(row.n == 9 && seq(row.v[0], "let"))) die("AssertionError: line 5 of the fixture is not a 9-field let row", p);
+    dumps(&js, values);
+    for (i = 0; i < lines.n; i++) {
+        if (i) bch(&man, '\n');
+        if (i == 4) {
+            size_t f;
+            for (f = 0; f < 9; f++) { if (f) bch(&man, '\t'); if (f == 8) bput(&man, js.b, js.n); else bput(&man, row.v[f].s, row.v[f].n); }
+        } else bput(&man, lines.v[i].s, lines.v[i].n);
+    }
+    bch(&man, '\n');
+    snprintf(p, sizeof p, "%s/exec/letexit/gen-manifest.tsv", TREE);
+    if (cx_write(p, man.b, man.n)) die("cannot write", p);
+    for (hit = 0; hit < 2; hit++) {
+        Res r[2]; char *data[2]; size_t dn[2];
+        for (c = 0; c < 2; c++) {
+            char *argv[8], gp[PATH_MAX]; int k = 0;
+            snprintf(outp[c], PATH_MAX, "%s/%d.json", WORK, c);
+            if (cx_write(outp[c], "SENTINEL", 8)) die("cannot write", outp[c]);
+            if (c == 0) argv[k++] = GEN;
+            else { snprintf(gp, sizeof gp, "%s/exec/build/gen.py", TREE); argv[k++] = "python3"; argv[k++] = gp; }
+            argv[k++] = "letexit"; argv[k++] = outp[c];
+            if (hit) argv[k++] = "--stop";
+            argv[k] = 0;
+            r[c] = run(argv, TREE);
+            data[c] = cx_read(outp[c], &dn[c]); if (!data[c]) die("FileNotFoundError", outp[c]);
+        }
+        if (!(r[0].rc == r[1].rc && r[0].nout == r[1].nout && !memcmp(r[0].out, r[1].out, r[0].nout)
+              && dn[0] == dn[1] && !memcmp(data[0], data[1], dn[0]))) {
+            bstr(why, "('rc/stdout/artifact', "); repr(why, values); bstr(why, hit ? ", True)" : ", False)"); return 1;
+        }
+        if (hit && !(r[0].nerr == r[1].nerr && !memcmp(r[0].err, r[1].err, r[0].nerr) && dn[0] == 8 && !memcmp(data[0], "SENTINEL", 8))) {
+            bstr(why, "('hit diagnostic', "); repr(why, values); bstr(why, ")"); return 1;
+        }
+        if (!hit && !(r[0].rc == 0 && !(dn[0] == 8 && !memcmp(data[0], "SENTINEL", 8)))) {
+            bstr(why, "('miss', "); repr(why, values); bstr(why, ")"); return 1;
+        }
+        for (c = 0; c < 2; c++) { free(r[c].out); free(r[c].err); free(data[c]); }
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char here[PATH_MAX], *sl, p[PATH_MAX], *tbl, *tmpdir; size_t tn, i, j; Strs lines, hdr;
+    Str *ids = 0; Strs *cases = 0; size_t nc = 0; int n_let = 0;
+    (void)argc; (void)argv;
+    /* HERE = Path(__file__).resolve().parent; root = HERE.parent */
+    if (!realpath(__FILE__, here)) die("cannot resolve", __FILE__);
+    sl = strrchr(here, '/'); if (sl) *sl = 0;
+    snprintf(p, sizeof p, "%s/..", here);
+    if (!realpath(p, ROOT)) die("cannot resolve", p);
+
+    /* load_cases(HERE/cpparity/cases.tsv) */
+    snprintf(p, sizeof p, "%s/cpparity/cases.tsv", here);
+    tbl = read_text(p, &tn);
+    lines = splitlines(tbl, tn);
+    if (!lines.n) die("IndexError: empty case table", p);
+    hdr = split_tab(lines.v[0]);
+    if (hdr.n != 8) die("AssertionError: case table header", p);
+    for (i = 0; i < 8; i++) if (!seq(hdr.v[i], HDR[i])) die("AssertionError: case table header", p);
+    ids = malloc((lines.n + 1) * sizeof *ids); cases = malloc((lines.n + 1) * sizeof *cases);
+    if (!ids || !cases) die("out of memory", 0);
+    for (i = 1; i < lines.n; i++) {
+        if (blank(lines.v[i])) continue;
+        cases[nc] = split_tab(lines.v[i]); ids[nc] = cases[nc].v[0]; nc++;
+    }
+    for (i = 0; i < nc; i++) for (j = i + 1; j < nc; j++)
+        if (ids[i].n == ids[j].n && !memcmp(ids[i].s, ids[j].s, ids[i].n)) die("AssertionError: duplicate case_id in the table", 0);
+    for (i = 0; i < nc; i++) if (cases[i].n < 2) die("KeyError: 'family'", cstr(ids[i]));
+
+    /* tempfile.TemporaryDirectory(prefix='cpparity-') and build_tree */
+    tmpdir = getenv("TMPDIR"); if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+    snprintf(TMP, sizeof TMP, "%s/cpparity-XXXXXX", tmpdir);
+    if (!mkdtemp(TMP)) { TMP[0] = 0; die("cannot make a temporary directory", tmpdir); }
+    snprintf(TREE, sizeof TREE, "%s/tree", TMP);
+    snprintf(p, sizeof p, "%s/exec", ROOT);
+    {
+        char t1[PATH_MAX], t2[PATH_MAX];
+        if (mkdir(TREE, 0777) != 0) die("cannot make", TREE);
+        snprintf(t1, sizeof t1, "%s/exec", TREE); copytree(p, t1, 1);
+        snprintf(p, sizeof p, "%s/tests/fixtures/seed-let-exit", ROOT);
+        snprintf(t2, sizeof t2, "%s/exec/letexit", TREE); copytree(p, t2, 0);
+    }
+    snprintf(GEN, sizeof GEN, "%s/seed-gen", TMP);
+    {
+        char ex[PATH_MAX], inc[PATH_MAX], src[PATH_MAX], runc[PATH_MAX];
+        char *a1[11], *a2[8];
+        snprintf(ex, sizeof ex, "%s/run", TMP);
+        snprintf(inc, sizeof inc, "%s/seed", ROOT); snprintf(src, sizeof src, "%s/seed/gen.c", ROOT);
+        snprintf(runc, sizeof runc, "%s/exec/c/run.c", ROOT);
+        a1[0] = "cc"; a1[1] = "-std=c99"; a1[2] = "-O2"; a1[3] = "-w"; a1[4] = "-I"; a1[5] = inc; a1[6] = src;
+        a1[7] = "-o"; a1[8] = GEN; a1[9] = 0;
+        build(a1, "seed/gen.c");
+        a2[0] = "cc"; a2[1] = "-O2"; a2[2] = "-w"; a2[3] = runc; a2[4] = "-o"; a2[5] = ex; a2[6] = 0;   /* run.c calls setenv (POSIX) */
+        build(a2, "exec/c/run.c");
+    }
+    snprintf(WORK, sizeof WORK, "%s/work", TMP);
+    if (mkdir(WORK, 0777) != 0) die("cannot make", WORK);
+
+    for (i = 0; i < nc; i++) {
+        Buf why = {0, 0, 0};
+        if (!seq(cases[i].v[1], "letexit")) continue;
+        if (cases[i].n < 4) die("KeyError: 'rows'", cstr(ids[i]));
+        if (letexit_case(cases[i].v[3], &why)) {
+            fwrite("first red: ", 1, 11, stdout); fwrite(ids[i].s, 1, ids[i].n, stdout);
+            fputc(' ', stdout); fwrite(why.b, 1, why.n, stdout); fputc('\n', stdout);
+            fflush(stdout); cleanup(); return 1;
+        }
+        n_let++;
+    }
+    printf("cpparity PASS: 0 copy/mode cases (C = P), %d let-exit values (hit/miss exact)\n", n_let);
+    fflush(stdout); cleanup();
+    return 0;
+}

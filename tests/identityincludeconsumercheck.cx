@@ -1,0 +1,492 @@
+#!/usr/bin/env -S unisacc.com -run
+/* identityincludeconsumercheck.cx -- tests/identityincludeconsumercheck.py in C (2026-10-23, the owner's direction: the
+   toolchain moves off Python).  Original buildlibrary consumer: include refusal and staging-only control; no library
+   compilation.
+     sh ./unisacc.com -run tests/identityincludeconsumercheck.cx -- --package PACKAGE
+   The HEAD tree (`python3 tests/bound.py 3 git -c tar.umask=022 archive HEAD`, run in ROOT = this file's directory/..)
+   is unpacked with tar(1) into a scratch source tree.  The tool under test is still that tree's exec/c/buildlibrary.py,
+   run as `python3 tests/bound.py 3 python3 <tree>/exec/c/buildlibrary.py --package P --output OUT --cc "python3
+   SENTINEL" --ar /bin/false` (4 s limit, PYTHONDONTWRITEBYTECODE=1, stdout and stderr captured):
+     missing   include/unisa_sha256.h removed: rc 1, no stdout, stderr exactly "buildlibrary: runtime include missing:
+               <header>\n", and the compiler boundary (the sentinel) is never reached;
+     complete  header restored: rc 1 with STAGING_COMPLETE_STOP_BEFORE_COMPILATION, and the sentinel's marker says
+               {"staging_complete": true, "library_compilation": false}.
+   Neither case may leave manifest.json or a library in its output.  The sentinel the compiler stand-in runs is the
+   .py's own sentinel text, byte for byte (buildlibrary records its argv, so the interpreter and file name are part of
+   the reported step).  The package is unchanged and the whole run takes at most 10 s; on success one JSON line (keys
+   sorted, Python json.dumps spelling) goes to stdout.  Any failed expectation: a message on stderr, no stdout, rc 1
+   (the .py's uncaught exception).  Arguments follow the .py's argparse (usage errors rc 2, -h prints help).
+   "python3" is the first one on PATH, as the gate's `python3 ./tests/...` resolved it (sys.executable). */
+#include <sys/types.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <time.h>
+
+typedef struct { char *b; size_t n, cap; } Buf;
+static void put(Buf *s, const char *p, size_t n) {
+    if (s->n + n + 1 > s->cap) {
+        size_t c = s->cap ? s->cap : 256; char *g;
+        while (c < s->n + n + 1) c *= 2;
+        g = realloc(s->b, c); if (!g) { fprintf(stderr, "out of memory\n"); exit(1); }
+        s->b = g; s->cap = c;
+    }
+    memcpy(s->b + s->n, p, n); s->n += n; s->b[s->n] = 0;
+}
+static void puts_(Buf *s, const char *p) { put(s, p, strlen(p)); }
+
+static char TMP[4096];        /* the TemporaryDirectory; removed on every exit */
+static char PROG[1024];
+
+static void rmtree(const char *d) {
+    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
+    if (dp) {
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
+        }
+        closedir(dp);
+    }
+    rmdir(d);
+}
+static void cleanup(void) { if (TMP[0]) { rmtree(TMP); TMP[0] = 0; } }
+static void die(const char *what, const char *detail) {   /* the .py's uncaught exception: no stdout, rc 1 */
+    fflush(stdout);
+    fprintf(stderr, "identityincludeconsumercheck: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    cleanup(); exit(1);
+}
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+
+/* ---------- Python spellings ---------- */
+/* repr(float), as json.dumps writes it: the shortest round-trip digits, exponent when decpt <= -4 or > 16 */
+static void pyfloat(Buf *o, double x) {
+    char s[64], dig[32], t[96]; int p, e = 0, nd = 0, decpt, i; char *q;
+    if (x == 0) { puts_(o, "0.0"); return; }
+    if (x < 0) { puts_(o, "-"); x = -x; }
+    for (p = 1; p <= 17; p++) { snprintf(s, sizeof s, "%.*e", p - 1, x); if (strtod(s, 0) == x) break; }
+    for (q = s; *q && *q != 'e'; q++) if (*q >= '0' && *q <= '9') dig[nd++] = *q;
+    if (*q == 'e') e = atoi(q + 1);
+    while (nd > 1 && dig[nd - 1] == '0') nd--;
+    dig[nd] = 0; decpt = e + 1;
+    if (decpt > -4 && decpt <= 16) {
+        if (decpt <= 0) { puts_(o, "0."); for (i = 0; i < -decpt; i++) puts_(o, "0"); puts_(o, dig); }
+        else if (decpt >= nd) { puts_(o, dig); for (i = nd; i < decpt; i++) puts_(o, "0"); puts_(o, ".0"); }
+        else { put(o, dig, decpt); puts_(o, "."); puts_(o, dig + decpt); }
+    } else {
+        put(o, dig, 1);
+        if (nd > 1) { puts_(o, "."); puts_(o, dig + 1); }
+        snprintf(t, sizeof t, "e%c%02d", decpt - 1 < 0 ? '-' : '+', decpt - 1 < 0 ? 1 - decpt : decpt - 1); puts_(o, t);
+    }
+}
+/* bytes.decode(errors='replace') then json.dumps (ensure_ascii): one U+FFFD per maximal invalid subpart */
+static void pyjsonstr(Buf *o, const unsigned char *s, size_t n) {
+    size_t i = 0; char t[16];
+    puts_(o, "\"");
+    while (i < n) {
+        unsigned c = s[i], cp = 0, lo = 0x80, hi = 0xBF; int need = 0, k;
+        if (c < 0x80) { cp = c; i++; }
+        else {
+            if (c >= 0xC2 && c <= 0xDF) need = 1;
+            else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+            else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+            if (!need) { cp = 0xFFFD; i++; }
+            else {
+                cp = c & (0x3F >> need);
+                for (k = 1; k <= need; k++) {
+                    unsigned d = i + k < n ? s[i + k] : 0x100;
+                    if (k == 1 ? (d < lo || d > hi) : (d < 0x80 || d > 0xBF)) break;
+                    cp = (cp << 6) | (d & 0x3F);
+                }
+                if (k <= need) { cp = 0xFFFD; i += k; } else i += need + 1;
+            }
+        }
+        if (cp == '"') puts_(o, "\\\"");
+        else if (cp == '\\') puts_(o, "\\\\");
+        else if (cp == '\n') puts_(o, "\\n");
+        else if (cp == '\r') puts_(o, "\\r");
+        else if (cp == '\t') puts_(o, "\\t");
+        else if (cp == '\b') puts_(o, "\\b");
+        else if (cp == '\f') puts_(o, "\\f");
+        else if (cp >= 0x20 && cp <= 0x7E) { t[0] = (char)cp; put(o, t, 1); }
+        else if (cp > 0xFFFF) {
+            unsigned v = cp - 0x10000;
+            snprintf(t, sizeof t, "\\u%04x\\u%04x", 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF)); puts_(o, t);
+        } else { snprintf(t, sizeof t, "\\u%04x", cp); puts_(o, t); }
+    }
+    puts_(o, "\"");
+}
+/* repr(str) of a path: single quotes unless it holds ' and no " */
+static void pyrepr(Buf *o, const char *s) {
+    char q = (strchr(s, '\'') && !strchr(s, '"')) ? '"' : '\'', t[8];
+    put(o, &q, 1);
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '\\' || c == (unsigned char)q) { t[0] = '\\'; t[1] = (char)c; put(o, t, 2); }
+        else if (c == '\n') puts_(o, "\\n");
+        else if (c == '\r') puts_(o, "\\r");
+        else if (c == '\t') puts_(o, "\\t");
+        else if (c < 0x20 || c == 0x7F) { snprintf(t, sizeof t, "\\x%02x", c); puts_(o, t); }
+        else put(o, (const char *)&c, 1);
+    }
+    put(o, &q, 1);
+}
+
+/* ---------- argparse (prog, -h/--help, --package PACKAGE; prefixes as allow_abbrev) ---------- */
+static const char *DESC = "Original buildlibrary consumer: include refusal and staging-only control; no library compilation.";
+static int columns(void) {
+    const char *c = getenv("COLUMNS"); long v = 0; char *end; struct winsize w;
+    if (c) { v = strtol(c, &end, 10); while (*end == ' ' || *end == '\t' || *end == '\n') end++; if (*end || end == c) v = 0; }
+    if (v <= 0) {
+        if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) v = w.ws_col; else v = 80;
+    }
+    return (int)v;
+}
+/* textwrap.wrap (argparse's _fill_text/_split_lines): greedy chunks (words split after an inner hyphen, single
+   spaces), whitespace dropped at line ends and line starts, long words broken (at a hyphen when one fits); the lines
+   are joined with "\n" + IND */
+static void fill(Buf *o, const char *text, int width, const char *ind) {
+    char chunks[64][128]; int nc = 0, top, nlines = 0; const char *p = text;
+    while (*p) {
+        if (*p == ' ') { strcpy(chunks[nc++], " "); p++; continue; }
+        { int k = 0; while (*p && *p != ' ') { chunks[nc][k++] = *p; if (*p == '-' && k > 1 && p[1] && p[1] != ' ' && p[1] != '-' && p[-1] != '-') { p++; break; } p++; } chunks[nc++][k] = 0; }
+    }
+    top = 0;   /* chunks[top..nc) remain, consumed from the front */
+    while (top < nc) {
+        char line[512]; int len = 0;
+        line[0] = 0;
+        if (nlines && chunks[top][0] == ' ') { top++; continue; }
+        while (top < nc && len + (int)strlen(chunks[top]) <= width) { strcat(line, chunks[top]); len += (int)strlen(chunks[top]); top++; }
+        if (top < nc && (int)strlen(chunks[top]) > width) {
+            char *c = chunks[top]; int space_left = width - len < 1 ? 1 : width - len, end = space_left, cl = (int)strlen(c), h, j, nondash = 0;
+            if (cl > space_left) {
+                for (h = space_left - 1; h > 0 && c[h] != '-'; h--) ;
+                for (j = 0; j < h; j++) if (c[j] != '-') nondash = 1;
+                if (h > 0 && nondash) end = h + 1;
+            }
+            strncat(line, c, (size_t)end); len += end;
+            memmove(c, c + end, strlen(c + end) + 1);
+            if (!c[0]) top++;
+        }
+        if (len && line[len - 1] == ' ') line[--len] = 0;
+        if (len) { if (nlines++) { puts_(o, "\n"); puts_(o, ind); } puts_(o, line); }
+    }
+}
+static void usage(Buf *o, int width) {
+    const char *parts[2] = { "[-h]", "--package PACKAGE" }; int text_width = width < 11 ? 11 : width, i;
+    char prefix[] = "usage: "; int plen = 7, prl = (int)strlen(PROG);
+    if (plen + prl + 1 + 4 + 1 + 17 <= text_width) { puts_(o, prefix); puts_(o, PROG); puts_(o, " [-h] --package PACKAGE"); return; }
+    if (plen + prl <= 0.75 * text_width) {   /* get_lines([prog] + parts, indent, prefix) */
+        int indent = plen + prl + 1, line_len = plen - 1, empty = 1;
+        puts_(o, prefix); puts_(o, PROG); line_len += prl + 1; empty = 0;
+        for (i = 0; i < 2; i++) {
+            int l = (int)strlen(parts[i]);
+            if (line_len + 1 + l > text_width && !empty) { int k; puts_(o, "\n"); for (k = 0; k < indent; k++) puts_(o, " "); line_len = indent - 1; empty = 1; }
+            if (!empty) puts_(o, " ");
+            puts_(o, parts[i]); line_len += l + 1; empty = 0;
+        }
+    } else {   /* [prog] then get_lines(parts, indent=len(prefix)) */
+        int line_len = plen - 1, empty = 1, k;
+        puts_(o, prefix); puts_(o, PROG);
+        puts_(o, "\n"); for (k = 0; k < plen; k++) puts_(o, " ");
+        for (i = 0; i < 2; i++) {
+            int l = (int)strlen(parts[i]);
+            if (line_len + 1 + l > text_width && !empty) { puts_(o, "\n"); for (k = 0; k < plen; k++) puts_(o, " "); line_len = plen - 1; empty = 1; }
+            if (!empty) puts_(o, " ");
+            puts_(o, parts[i]); line_len += l + 1; empty = 0;
+        }
+    }
+}
+static void help(void) {
+    Buf o = {0}; int width = columns() - 2, text_width = width < 11 ? 11 : width;
+    int max_help = width - 20 > 4 ? width - 20 : 4, help_pos, help_width, k;
+    if (max_help > 24) max_help = 24;
+    help_pos = 19 + 2 < max_help ? 19 + 2 : max_help;
+    help_width = width - help_pos > 11 ? width - help_pos : 11;
+    usage(&o, width); puts_(&o, "\n\n");
+    fill(&o, DESC, text_width, ""); puts_(&o, "\n\noptions:\n");
+    if (10 <= help_pos - 4) {
+        Buf ind = {0};
+        puts_(&o, "  -h, --help"); for (k = 12; k < help_pos; k++) puts_(&o, " ");
+        for (k = 0; k < help_pos; k++) puts_(&ind, " ");
+        fill(&o, "show this help message and exit", help_width, ind.b); free(ind.b);
+    } else {
+        Buf ind = {0};
+        puts_(&o, "  -h, --help\n"); for (k = 0; k < help_pos; k++) puts_(&ind, " ");
+        puts_(&o, ind.b); fill(&o, "show this help message and exit", help_width, ind.b); free(ind.b);
+    }
+    puts_(&o, "\n  --package PACKAGE\n");
+    fwrite(o.b, 1, o.n, stdout); fflush(stdout); exit(0);
+}
+static void argerror(const char *msg) {
+    Buf o = {0};
+    usage(&o, columns() - 2); puts_(&o, "\n"); puts_(&o, PROG); puts_(&o, ": error: "); puts_(&o, msg); puts_(&o, "\n");
+    fflush(stdout); fwrite(o.b, 1, o.n, stderr); exit(2);
+}
+static int is_prefix(const char *a, size_t n, const char *full) { return n >= 3 && n <= strlen(full) && !strncmp(a, full, n); }
+static int negnum(const char *a) {   /* ^-\d+$|^-\d*\.\d+$ */
+    const char *p = a + 1; int d = 0;
+    if (*a != '-') return 0;
+    while (*p >= '0' && *p <= '9') { p++; d++; }
+    if (!*p) return d > 0;
+    if (*p != '.') return 0;
+    p++; d = 0; while (*p >= '0' && *p <= '9') { p++; d++; }
+    return !*p && d > 0;
+}
+/* argparse's "looks like an optional" for a value candidate */
+static int optional_like(const char *a) {
+    if (a[0] != '-' || !a[1]) return 0;
+    if (!strcmp(a, "--")) return 1;
+    if (!strncmp(a, "--", 2)) {
+        const char *eq = strchr(a, '='); size_t n = eq ? (size_t)(eq - a) : strlen(a);
+        if (is_prefix(a, n, "--help") || is_prefix(a, n, "--package")) return 1;
+    }
+    if (!strcmp(a, "-h") || !strncmp(a, "-h", 2)) return 1;
+    if (negnum(a)) return 0;
+    if (strchr(a, ' ')) return 0;
+    return 1;
+}
+static const char *parse_args(int argc, char **argv) {
+    const char *package = 0; Buf extras = {0}; int i, nextra = 0, dd = 0;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!dd && !strcmp(a, "--")) { dd = 1; continue; }
+        if (!dd && a[0] == '-' && a[1]) {
+            const char *eq = strchr(a, '='); size_t n = eq ? (size_t)(eq - a) : strlen(a);
+            int ish = 0, isp = 0; const char *explicit_ = 0;
+            if (a[1] == '-') { ish = is_prefix(a, n, "--help") && n >= 3; isp = is_prefix(a, n, "--package"); if (eq) explicit_ = eq + 1; }
+            else if (a[1] == 'h') {   /* -hXYZ: flags packed after -h; -h=V and -h-V are refused, any other tail still helps */
+                const char *t = a + 2;
+                ish = 1;
+                while (*t == 'h') t++;
+                if (*t == '=') explicit_ = t + 1; else if (*t == '-') explicit_ = t;
+            }
+            if (ish) {
+                if (explicit_) { Buf m = {0}; puts_(&m, "argument -h/--help: ignored explicit argument "); pyrepr(&m, explicit_); argerror(m.b); }
+                help();
+            }
+            if (isp) {
+                if (explicit_) { package = explicit_; continue; }
+                if (i + 1 >= argc || (!dd && optional_like(argv[i + 1]))) argerror("argument --package: expected one argument");
+                package = argv[++i]; continue;
+            }
+            if (!negnum(a) && !strchr(a, ' ')) { if (nextra++) puts_(&extras, " "); puts_(&extras, a); continue; }
+        }
+        if (nextra++) puts_(&extras, " "); puts_(&extras, a);
+    }
+    if (!package) argerror("the following arguments are required: --package");
+    if (nextra) { Buf m = {0}; puts_(&m, "unrecognized arguments: "); puts_(&m, extras.b ? extras.b : ""); argerror(m.b); }
+    return package;
+}
+
+/* ---------- processes ---------- */
+static char PY[4096], ROOT[4096];
+static void find_python(void) {   /* sys.executable of `python3 ./tests/...`: the first python3 on PATH */
+    const char *path = getenv("PATH"); char dir[4096], cwd[4096]; struct stat st;
+    if (!path) path = "/bin:/usr/bin";
+    while (1) {
+        const char *c = strchr(path, ':'); size_t n = c ? (size_t)(c - path) : strlen(path);
+        snprintf(dir, sizeof dir, "%.*s", (int)n, path);
+        if (!dir[0]) strcpy(dir, ".");
+        if (dir[0] != '/') { if (!getcwd(cwd, sizeof cwd)) die("getcwd", 0); snprintf(PY, sizeof PY, "%s/%s/python3", cwd, dir); }
+        else snprintf(PY, sizeof PY, "%s/python3", dir);
+        if (stat(PY, &st) == 0 && S_ISREG(st.st_mode) && access(PY, X_OK) == 0) return;
+        if (!c) break;
+        path = c + 1;
+    }
+    die("python3 not found on PATH", 0);
+}
+/* subprocess.run(argv, capture stdout and stderr, timeout): rc; *out/*err malloc'd */
+static int run(char **argv, int secs, const char *cwd, char **out, size_t *on, char **err, size_t *en) {
+    char tmpl[] = "/tmp/cxerrXXXXXX", here[4096]; int fd = mkstemp(tmpl), saved, rc; struct stat st;
+    if (fd < 0) die("mkstemp failed", 0);
+    unlink(tmpl);
+    fflush(stdout); fflush(stderr);
+    if (cwd) { if (!getcwd(here, sizeof here)) die("getcwd", 0); if (chdir(cwd)) die("chdir", cwd); }
+    saved = dup(2); dup2(fd, 2);
+    rc = cx_runv_timeout(argv, secs, out, on);
+    dup2(saved, 2); close(saved);
+    if (cwd && chdir(here)) die("chdir back", here);
+    if (rc == 124) { close(fd); die("TimeoutExpired", argv[0]); }
+    if (rc < 0 || rc == 127) { close(fd); die("cannot run", argv[0]); }
+    if (!*out) { *out = strdup(""); *on = 0; }
+    if (fstat(fd, &st)) die("fstat", 0);
+    *en = (size_t)st.st_size; *err = malloc(*en + 1);
+    if (pread(fd, *err, *en, 0) != (ssize_t)*en) die("read stderr", 0);
+    (*err)[*en] = 0; close(fd);
+    return rc;
+}
+
+/* tempfile.gettempdir(): TMPDIR, TEMP, TMP, /tmp, /var/tmp, /usr/tmp, cwd -- the first usable directory, abspath'd */
+static void normpath(char *p) {
+    char out[4096]; size_t k = 0; const char *s = p;
+    char *seg[512]; int ns = 0, i; char copy[4096];
+    snprintf(copy, sizeof copy, "%s", s);
+    { char *t = strtok(copy, "/"); while (t) { if (!strcmp(t, "..")) { if (ns) ns--; } else if (strcmp(t, ".")) seg[ns++] = t; t = strtok(0, "/"); } }
+    out[k++] = '/';
+    for (i = 0; i < ns; i++) { size_t l = strlen(seg[i]); if (i) out[k++] = '/'; memcpy(out + k, seg[i], l); k += l; }
+    out[k] = 0; strcpy(p, out);
+}
+static void gettempdir(char *out) {
+    const char *envs[] = { "TMPDIR", "TEMP", "TMP" }, *dirs[] = { "/tmp", "/var/tmp", "/usr/tmp" };
+    char cand[4096], cwd[4096]; int i; struct stat st;
+    if (!getcwd(cwd, sizeof cwd)) die("getcwd", 0);
+    for (i = 0; i < 7; i++) {
+        const char *d = i < 3 ? getenv(envs[i]) : i < 6 ? dirs[i - 3] : cwd;
+        if (!d || !*d) continue;
+        if (d[0] == '/') snprintf(cand, sizeof cand, "%s", d); else snprintf(cand, sizeof cand, "%s/%s", cwd, d);
+        normpath(cand);
+        if (stat(cand, &st) == 0 && S_ISDIR(st.st_mode) && access(cand, W_OK | X_OK) == 0) { strcpy(out, cand); return; }
+    }
+    die("No usable temporary directory found", 0);
+}
+static void mkdtemp_prefix(const char *prefix) {   /* prefix + 8 of [a-z0-9_], mode 0700 */
+    static const char cs[] = "abcdefghijklmnopqrstuvwxyz0123456789_"; char base[4096]; int tries, k; unsigned seed;
+    struct timespec t; clock_gettime(CLOCK_REALTIME, &t); seed = (unsigned)t.tv_nsec ^ (unsigned)getpid() << 16;
+    gettempdir(base);
+    for (tries = 0; tries < 10000; tries++) {
+        char name[16];
+        for (k = 0; k < 8; k++) { seed = seed * 1103515245u + 12345u; name[k] = cs[(seed >> 16) % 37]; }
+        name[8] = 0;
+        snprintf(TMP, sizeof TMP, "%s/%s%s", base, prefix, name);
+        if (mkdir(TMP, 0700) == 0) return;
+        if (errno != EEXIST) { TMP[0] = 0; die("mkdtemp failed", strerror(errno)); }
+    }
+    TMP[0] = 0; die("No usable temporary directory name found", 0);
+}
+
+static char *readfile(const char *p, size_t *n) {   /* Path.read_bytes() */
+    struct stat st; char *b;
+    if (stat(p, &st)) die("FileNotFoundError", p);
+    if (S_ISDIR(st.st_mode)) die("IsADirectoryError", p);
+    if (!(b = cx_read(p, n))) die("cannot read", p);
+    return b;
+}
+static void sha_file(const char *p, char hex[65]) { size_t n; char *b = readfile(p, &n); cx_sha256_hex(b, n, hex); free(b); }
+
+typedef struct { const char *name; int rc; double secs; char *err; size_t en; char sha[65]; } Step;
+static Step steps[2]; static int nsteps;
+static char PACKAGE[4096], ROOTSRC[4096], HEADER[4096], MARKER[4096], SENTINEL[4096];
+
+static int invoke(const char *name, char **err, size_t *en, size_t *on) {
+    char outdir[4096], cc[8192], *argv[16], *out = 0, *e = 0; int rc, k = 0; double t; size_t n = 0, el = 0; char script[4096];
+    static const char *names[] = { "manifest.json", "libunisacc.a", "libunisacc.so", "libunisacc.dylib" };
+    snprintf(outdir, sizeof outdir, "%s/%s", TMP, name);
+    snprintf(cc, sizeof cc, "%s %s", PY, SENTINEL);
+    snprintf(script, sizeof script, "%s/exec/c/buildlibrary.py", ROOTSRC);
+    { static char bound[4096]; snprintf(bound, sizeof bound, "%s/tests/bound.py", ROOT);
+      argv[k++] = PY; argv[k++] = bound; argv[k++] = "3"; argv[k++] = PY; argv[k++] = script;
+      argv[k++] = "--package"; argv[k++] = PACKAGE; argv[k++] = "--output"; argv[k++] = outdir;
+      argv[k++] = "--cc"; argv[k++] = cc; argv[k++] = "--ar"; argv[k++] = "/bin/false"; argv[k] = 0; }
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+    t = now();
+    rc = run(argv, 4, 0, &out, &n, &e, &el);
+    steps[nsteps].name = name; steps[nsteps].rc = rc; steps[nsteps].secs = now() - t;
+    steps[nsteps].err = e; steps[nsteps].en = el; cx_sha256_hex(out, n, steps[nsteps].sha); nsteps++;
+    free(out);
+    for (k = 0; k < 4; k++) {
+        char p[8192]; struct stat st;
+        snprintf(p, sizeof p, "%s/%s", outdir, names[k]);
+        if (stat(p, &st) != 0) { if (errno == ENOENT) continue; die("stat", p); }
+        die("AssertionError: unexpected library output", names[k]);
+    }
+    *err = e; *en = el; *on = n;
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *pkgarg, *slash; char tmpbuf[8192], package_sha[65], again[65], archive[4096], *saved, *out, *err;
+    size_t savedn, on, en; double start, elapsed; int rc; struct stat st; Buf o = {0}, sen = {0}; int i;
+    slash = strrchr(argv[0], '/');
+    snprintf(PROG, sizeof PROG, "%s", slash ? slash + 1 : argv[0]);
+    pkgarg = parse_args(argc, argv);
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    snprintf(tmpbuf, sizeof tmpbuf, "%s", __FILE__);
+    { char *s = strrchr(tmpbuf, '/'); if (s) strcpy(s, "/.."); else strcpy(tmpbuf, ".."); }
+    if (!realpath(tmpbuf, ROOT)) die("cannot resolve the repository root", tmpbuf);
+    find_python();
+    start = now();
+    if (!realpath(*pkgarg ? pkgarg : ".", PACKAGE)) die("FileNotFoundError", pkgarg);
+    sha_file(PACKAGE, package_sha);
+
+    mkdtemp_prefix("include-consumer-smoke-");
+    snprintf(ROOTSRC, sizeof ROOTSRC, "%s/source", TMP);
+    if (mkdir(ROOTSRC, 0777)) die("mkdir", ROOTSRC);
+    snprintf(archive, sizeof archive, "%s/source.tar", TMP);
+    {   /* git archive HEAD (bounded), stdout to the archive file */
+        char bound[4096], *a[16]; int k = 0;
+        snprintf(bound, sizeof bound, "%s/tests/bound.py", ROOT);
+        a[k++] = PY; a[k++] = bound; a[k++] = "3"; a[k++] = "git"; a[k++] = "-c"; a[k++] = "tar.umask=022";
+        a[k++] = "archive"; a[k++] = "HEAD"; a[k] = 0;
+        out = 0; rc = run(a, 4, ROOT, &out, &on, &err, &en);
+        if (cx_write(archive, out, on)) die("cannot write", archive);
+        if (rc != 0) { char m[64]; snprintf(m, sizeof m, "AssertionError: ('archive', %d, ...)", rc); fwrite(err, 1, en, stderr); die(m, 0); }
+        free(out); free(err);
+    }
+    {   /* tarfile.extractall(root, filter='data') */
+        char *a[] = { "tar", "--no-same-owner", "--no-same-permissions", "-xf", archive, "-C", ROOTSRC, 0 };
+        rc = run(a, 50, 0, &out, &on, &err, &en);
+        if (rc != 0) { fwrite(err, 1, en, stderr); die("cannot extract the archive", archive); }
+        free(out); free(err);
+    }
+    snprintf(HEADER, sizeof HEADER, "%s/include/unisa_sha256.h", ROOTSRC);
+    saved = readfile(HEADER, &savedn);
+    snprintf(MARKER, sizeof MARKER, "%s/staging.json", TMP);
+    snprintf(SENTINEL, sizeof SENTINEL, "%s/stop-before-compiler.py", TMP);
+    /* the .py's sentinel, byte for byte */
+    puts_(&sen, "import json,pathlib,sys\np=pathlib.Path(sys.argv[-1]).parent\nassert (p/\"exec/c/libunisacc.c\").is_file()\n"
+                "assert (p/\"include/unisa_sha256.h\").read_bytes()==pathlib.Path(");
+    pyrepr(&sen, HEADER);
+    puts_(&sen, ").read_bytes()\npathlib.Path(");
+    pyrepr(&sen, MARKER);
+    puts_(&sen, ").write_text(json.dumps({\"staging_complete\":True,\"library_compilation\":False}))\n"
+                "print(\"STAGING_COMPLETE_STOP_BEFORE_COMPILATION\",file=sys.stderr)\nraise SystemExit(86)\n");
+    if (cx_write(SENTINEL, sen.b, sen.n)) die("cannot write", SENTINEL);
+
+    if (unlink(HEADER)) die("unlink", HEADER);
+    rc = invoke("missing", &err, &en, &on);
+    {
+        Buf want = {0};
+        puts_(&want, "buildlibrary: runtime include missing: "); puts_(&want, HEADER); puts_(&want, "\n");
+        if (!(rc == 1 && on == 0 && en == want.n && !memcmp(err, want.b, en))) {
+            fwrite(err, 1, en, stderr); die("AssertionError: case missing", 0);
+        }
+        free(want.b);
+    }
+    if (stat(MARKER, &st) == 0) die("AssertionError", "missing header reached compiler boundary");
+    else if (errno != ENOENT) die("stat", MARKER);
+    if (cx_write(HEADER, saved, savedn)) die("cannot write", HEADER);
+    rc = invoke("complete", &err, &en, &on);
+    {
+        static const char tag[] = "STAGING_COMPLETE_STOP_BEFORE_COMPILATION"; int found = 0; size_t j;
+        for (j = 0; j + sizeof tag - 1 <= en; j++) if (!memcmp(err + j, tag, sizeof tag - 1)) { found = 1; break; }
+        if (!(rc == 1 && found)) { fwrite(err, 1, en, stderr); die("AssertionError: case complete", 0); }
+    }
+    {
+        size_t mn; char *m = readfile(MARKER, &mn);
+        static const char want[] = "{\"staging_complete\": true, \"library_compilation\": false}";
+        if (mn != sizeof want - 1 || memcmp(m, want, mn)) die("AssertionError: marker", m);
+        free(m);
+    }
+    cleanup();
+    sha_file(PACKAGE, again);
+    if (strcmp(again, package_sha)) die("AssertionError: package changed", PACKAGE);
+    elapsed = now() - start;
+    if (!(elapsed <= 10)) { char m[64]; Buf b = {0}; pyfloat(&b, elapsed); snprintf(m, sizeof m, "AssertionError: %s", b.b); die(m, 0); }
+
+    puts_(&o, "{\"no_product_execution_or_cold_build\": true, \"package_sha256\": \""); puts_(&o, package_sha);
+    puts_(&o, "\", \"scope\": \"STAGING_ONLY_NOT_LIBRARY_COMPILATION\", \"seconds_monotonic\": "); pyfloat(&o, elapsed);
+    puts_(&o, ", \"status\": \"PASS_EXPECTED_REFUSAL_AND_STAGING_CONTROL\", \"steps\": [");
+    for (i = 0; i < nsteps; i++) {
+        char t[32];
+        if (i) puts_(&o, ", ");
+        puts_(&o, "{\"case\": \""); puts_(&o, steps[i].name); puts_(&o, "\", \"rc\": ");
+        snprintf(t, sizeof t, "%d", steps[i].rc); puts_(&o, t);
+        puts_(&o, ", \"seconds_monotonic\": "); pyfloat(&o, steps[i].secs);
+        puts_(&o, ", \"stderr\": "); pyjsonstr(&o, (const unsigned char *)steps[i].err, steps[i].en);
+        puts_(&o, ", \"stdout_sha256\": \""); puts_(&o, steps[i].sha); puts_(&o, "\"}");
+    }
+    puts_(&o, "]}\n");
+    fwrite(o.b, 1, o.n, stdout); fflush(stdout);
+    return 0;
+}

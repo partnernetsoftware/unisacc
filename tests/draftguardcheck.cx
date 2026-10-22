@@ -1,0 +1,257 @@
+#!/usr/bin/env -S unisacc.com -run
+/* draftguardcheck.cx -- tests/draftguardcheck.py (0.0.39 R3) in C (2026-10-23, the owner's direction: move the
+   toolchain off Python).  draftguard: run release-smoke.yml's own first-step bash guard (taken from the workflow
+   file, not a copy) on every all/none/partial combination of release_id, asset_id, tag_commit and on bad shas: only
+   all-empty, or all-set with a 40-hex tag_commit, pass.  The Defender workflow's pwsh twin is not executed here (no
+   pwsh).
+   usage: sh ./unisacc.com -run tests/draftguardcheck.cx   (arguments are ignored, as by the Python checker)
+   The workflow is found beside this file (__FILE__/../.github/workflows/release-smoke.yml).  The step is the first
+   step of jobs.smoke.steps whose name is `draft inputs are all-or-none (R3=A)`; its `run` is read with the YAML
+   subset the workflow uses (block mappings, `- ` sequences, a literal block scalar `|`/`|-`/`|+` or a one-line
+   scalar), and anything outside that subset is refused (rc 1) rather than guessed.  Each guard run is
+   `bash -eo pipefail -c RUN` with RID/AID/TC set over the inherited environment, its stdout and stderr discarded as
+   capture_output did, limited to 20 s (the Python original had no limit).  A failed assertion prints the
+   AssertionError line Python would end its traceback with on stderr and exits 1. */
+#include <fcntl.h>
+
+extern char **environ;
+
+static const char STEP[] = "draft inputs are all-or-none (R3=A)";
+static char *RUN;
+
+static void die(const char *m) {   /* the Python checker would raise: traceback on stderr, rc 1 */
+    fflush(stdout); fprintf(stderr, "draftguardcheck: %s\n", m); exit(1);
+}
+
+/* ---- the YAML subset: lines with their indentation ---- */
+static char **L; static int NL;
+static int indent(const char *s) { int i = 0; while (s[i] == ' ') i++; return i; }
+static int blank(const char *s) { s += indent(s); return !*s || *s == '#'; }   /* empty or comment-only */
+static char *rtrim(char *s) { size_t n = strlen(s); while (n && (s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = 0; return s; }
+/* a plain or quoted scalar on one line: strip a trailing ` #comment` (plain only) and the quotes */
+static char *scalar(const char *v) {
+    char *r = strdup(v), *c, *o; size_t n;
+    if (!r) die("out of memory");
+    rtrim(r);
+    n = strlen(r);
+    if (r[0] == '\'' ) {
+        if (n < 2 || r[n - 1] != '\'') die("unsupported YAML: multi-line single-quoted scalar");
+        r[n - 1] = 0;
+        for (c = r + 1, o = r; *c; c++) { *o++ = *c; if (*c == '\'' && c[1] == '\'') c++; }
+        *o = 0; return r;
+    }
+    if (r[0] == '"') {
+        if (n < 2 || r[n - 1] != '"') die("unsupported YAML: multi-line double-quoted scalar");
+        r[n - 1] = 0;
+        for (c = r + 1, o = r; *c; c++) {
+            if (*c == '\\') {
+                c++;
+                if (*c == '\\' || *c == '"' || *c == '/') *o++ = *c;
+                else if (*c == 'n') *o++ = '\n'; else if (*c == 't') *o++ = '\t';
+                else die("unsupported YAML: double-quoted escape");
+            } else *o++ = *c;
+        }
+        *o = 0; return r;
+    }
+    for (c = r; *c; c++) if (*c == '#' && c > r && (c[-1] == ' ' || c[-1] == '\t')) { *c = 0; break; }
+    return rtrim(r);
+}
+/* KEY: VALUE at s (s points at the key); returns VALUE (after ':' and spaces) or NULL if the key differs */
+static const char *keyval(const char *s, const char *key) {
+    size_t k = strlen(key);
+    if (strncmp(s, key, k) || s[k] != ':' || (s[k + 1] && s[k + 1] != ' ' && s[k + 1] != '\t')) return 0;
+    s += k + 1; while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+/* the mapping child KEY of the block at [from, to) whose keys sit at indentation `ind`; its line or -1 */
+static int child(int from, int to, int ind, const char *key) {
+    int i;
+    for (i = from; i < to; i++) {
+        if (blank(L[i]) || indent(L[i]) != ind) continue;
+        if (keyval(L[i] + ind, key)) return i;
+    }
+    return -1;
+}
+/* the end of the block opened by line `at` (indentation `ind`): first non-blank line indented <= ind */
+static int block_end(int at, int ind, int to) {
+    int i;
+    for (i = at + 1; i < to; i++) if (!blank(L[i]) && indent(L[i]) <= ind) return i;
+    return to;
+}
+/* the indentation of the first non-blank line in (at, to), or -1 */
+static int first_indent(int at, int to) {
+    int i;
+    for (i = at + 1; i < to; i++) if (!blank(L[i])) return indent(L[i]);
+    return -1;
+}
+/* the value of KEY: VALUE at line `ln` (key at column `col`, block lines up to `to`) */
+static char *value(int ln, int col, const char *key, int to) {
+    const char *v = keyval(L[ln] + col, key); char *r; size_t n = 0, cap = 64; int i, bi = -1, last = ln, keep = 0, strip = 0;
+    if (!v) die("internal: key");
+    if (*v != '|') {
+        if (*v == '>' || *v == '&' || *v == '*' || *v == '!' || *v == '[' || *v == '{') die("unsupported YAML value");
+        if (!*v || *v == '#') die("unsupported YAML: empty or multi-line scalar");
+        return scalar(v);
+    }
+    v++;
+    if (*v == '-') { strip = 1; v++; } else if (*v == '+') { keep = 1; v++; }
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v && *v != '#') die("unsupported YAML: block scalar indicator");
+    r = malloc(cap); if (!r) die("out of memory");
+    for (i = ln + 1; i < to; i++) {
+        int d = indent(L[i]);
+        if (!L[i][d]) continue;   /* empty line: part of the scalar if more text follows */
+        if (bi < 0) { if (d <= col) break; bi = d; }
+        if (d < bi) break;
+        last = i;
+    }
+    if (bi >= 0) for (i = ln + 1; i <= last; i++) {
+        const char *s = L[i]; size_t k;
+        s = strlen(s) > (size_t)bi ? s + bi : "";
+        k = strlen(s);
+        while (n + k + 2 > cap) { cap *= 2; if (!(r = realloc(r, cap))) die("out of memory"); }
+        memcpy(r + n, s, k); n += k; r[n++] = '\n';
+    }
+    if (keep) {   /* |+: the trailing empty lines belong to the scalar */
+        for (i = last + 1; i < to && !L[i][indent(L[i])]; i++) {
+            while (n + 2 > cap) { cap *= 2; if (!(r = realloc(r, cap))) die("out of memory"); }
+            r[n++] = '\n';
+        }
+    }
+    else if (strip) { while (n && r[n - 1] == '\n') n--; }
+    r[n] = 0;
+    return r;
+}
+
+static void load(const char *path) {
+    size_t n, i; char *b = cx_read(path, &n), *p; int cap = 256;
+    if (!b) die("FileNotFoundError: cannot read .github/workflows/release-smoke.yml");
+    L = malloc(cap * sizeof *L); if (!L) die("out of memory");
+    for (i = 0; i < n; i++) if (!b[i] || b[i] == '\t' && (i == 0 || b[i - 1] == '\n')) die("unsupported YAML: NUL or tab indentation");
+    for (p = b; *p; ) {
+        char *e = strchr(p, '\n');
+        if (e) *e = 0;
+        if (e && e > p && e[-1] == '\r') e[-1] = 0;
+        if (NL == cap) { cap *= 2; if (!(L = realloc(L, cap * sizeof *L))) die("out of memory"); }
+        L[NL++] = p;
+        if (!e) break;
+        p = e + 1;
+    }
+}
+
+/* wf['jobs']['smoke']['steps'], then the first step with s.get('name') == STEP; its ['run'] */
+static void find_step(void) {
+    int j, je, ji, s, se, si, t, te, ti, i;
+    j = child(0, NL, 0, "jobs"); if (j < 0) die("KeyError: 'jobs'");
+    je = block_end(j, 0, NL); ji = first_indent(j, je); if (ji <= 0) die("unsupported YAML: jobs is not a block mapping");
+    s = child(j + 1, je, ji, "smoke"); if (s < 0) die("KeyError: 'smoke'");
+    se = block_end(s, ji, je); si = first_indent(s, se); if (si <= ji) die("unsupported YAML: smoke is not a block mapping");
+    t = child(s + 1, se, si, "steps"); if (t < 0) die("KeyError: 'steps'");
+    if (*keyval(L[t] + si, "steps") && *keyval(L[t] + si, "steps") != '#') die("unsupported YAML: steps is not a block sequence");
+    /* the sequence may sit at the key's indentation (`steps:` then `- ...` at si) or deeper */
+    for (te = t + 1; te < se; te++) {
+        if (blank(L[te])) continue;
+        if (indent(L[te]) < si) break;
+        if (indent(L[te]) == si && L[te][si] != '-') break;
+    }
+    ti = first_indent(t, te);
+    if (ti < si) die("unsupported YAML: steps is not a block sequence");
+    for (i = t + 1; i < te; i++) {
+        int ie, ki, nl, rl; char *name;
+        if (blank(L[i])) continue;
+        if (indent(L[i]) != ti || L[i][ti] != '-' || (L[i][ti + 1] != ' ' && L[i][ti + 1])) die("unsupported YAML: a step is not a `- ` item");
+        for (ie = i + 1; ie < te; ie++) if (!blank(L[ie]) && indent(L[ie]) <= ti) break;
+        ki = ti + 1 + indent(L[i] + ti + 1);   /* column of the item's first key */
+        if (!L[i][ki] || L[i][ki] == '{' || L[i][ki] == '[' || L[i][ki] == '#') die("unsupported YAML: step is not a block mapping");
+        /* the item's own keys sit at column ki: the dash line (from ki) and following lines at indent ki */
+        nl = -1; rl = -1;
+        {
+            int k;
+            for (k = i; k < ie; k++) {
+                const char *at;
+                if (k > i) { if (blank(L[k]) || indent(L[k]) != ki) continue; }
+                at = L[k] + ki;
+                if (keyval(at, "name")) nl = k;
+                if (keyval(at, "run")) rl = k;
+            }
+        }
+        if (nl >= 0) {
+            name = value(nl, ki, "name", ie);
+            if (!strcmp(name, STEP)) {
+                if (rl < 0) die("KeyError: 'run'");
+                RUN = value(rl, ki, "run", ie);
+                free(name);
+                return;
+            }
+            free(name);
+        }
+        i = ie - 1;
+    }
+    die("StopIteration: no smoke step named 'draft inputs are all-or-none (R3=A)'");
+}
+
+/* subprocess.run(['bash', '-eo', 'pipefail', '-c', RUN], env=dict(os.environ, RID=, AID=, TC=)).returncode == 0 */
+static int ok(const char *rid, const char *aid, const char *tc) {
+    char *argv[] = {"bash", "-eo", "pipefail", "-c", RUN, 0}; char *out = 0; size_t n; int rc, saved, null;
+    static char **env; static int k;
+    const char *val[3]; static const char *names[] = {"RID=", "AID=", "TC="}; int i, j;
+    if (!env) {   /* os.environ minus RID/AID/TC, three slots after it (the carried libc's setenv does not reach exec) */
+        for (i = 0; environ[i]; i++) ;
+        if (!(env = malloc((i + 4) * sizeof *env))) die("out of memory");
+        for (i = 0; environ[i]; i++) {
+            for (j = 0; j < 3; j++) if (!strncmp(environ[i], names[j], strlen(names[j]))) break;
+            if (j == 3) env[k++] = environ[i];
+        }
+        env[k] = env[k + 1] = env[k + 2] = env[k + 3] = 0;
+        environ = env;
+    }
+    val[0] = rid; val[1] = aid; val[2] = tc;
+    for (j = 0; j < 3; j++) {
+        size_t m = strlen(names[j]) + strlen(val[j]) + 1;
+        free(env[k + j]);
+        if (!(env[k + j] = malloc(m))) die("out of memory");
+        snprintf(env[k + j], m, "%s%s", names[j], val[j]);
+    }
+    fflush(stdout); fflush(stderr);
+    saved = dup(2); null = open("/dev/null", O_WRONLY);
+    if (saved < 0 || null < 0) die("cannot redirect stderr");
+    dup2(null, 2); close(null);
+    rc = cx_runv_timeout(argv, 20, &out, &n);
+    dup2(saved, 2); close(saved);
+    free(out);
+    if (rc == 124) die("TimeoutExpired: the guard ran past 20 s");
+    if (rc < 0 || rc == 127) die("FileNotFoundError: cannot run bash");
+    return rc == 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], wf[4096], good[41], bad[5][42], *slash;
+    static const char *rids[] = {"", "7"}, *aids[] = {"", "11"};
+    const char *tcs[2]; int a, b, c;
+    (void)argc; (void)argv;
+    snprintf(root, sizeof root, "%s", __FILE__);
+    slash = strrchr(root, '/');
+    if (slash) *slash = 0; else snprintf(root, sizeof root, ".");
+    snprintf(wf, sizeof wf, "%s/../.github/workflows/release-smoke.yml", root);
+    load(wf);
+    find_step();
+    memset(good, 'a', 40); good[40] = 0;
+    tcs[0] = ""; tcs[1] = good;
+    for (a = 0; a < 2; a++) for (b = 0; b < 2; b++) for (c = 0; c < 2; c++) {
+        int want = (a == 0 && b == 0 && c == 0) || (a == 1 && b == 1 && c == 1);
+        if (ok(rids[a], aids[b], tcs[c]) != want) {   /* assert ..., (rid, aid, tc): the tuple's repr */
+            fflush(stdout);
+            fprintf(stderr, "AssertionError: ('%s', '%s', '%s')\n", rids[a], aids[b], tcs[c]);
+            return 1;
+        }
+    }
+    snprintf(bad[0], sizeof bad[0], "abc");
+    memset(bad[1], 'A', 40); bad[1][40] = 0;
+    memset(bad[2], 'a', 39); bad[2][39] = 0;
+    memset(bad[3], 'a', 41); bad[3][41] = 0;
+    memset(bad[4], 'g', 40); bad[4][40] = 0;
+    for (a = 0; a < 5; a++)
+        if (ok("7", "11", bad[a])) { fflush(stdout); fprintf(stderr, "AssertionError: %s\n", bad[a]); return 1; }
+    printf("draftguard  release-smoke guard: only all-empty or all-set with 40-hex tag_commit pass (8 combinations, 5 bad shas); pwsh twin not executed\n");
+    return 0;
+}

@@ -1,0 +1,372 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libraryresolverhostcheck.cx -- private native candidate enumeration, not a delta/native script proof; ported from
+   tests/libraryresolverhostcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   In a fresh temporary directory (TMPDIR, TEMP, TMP, then /tmp, as tempfile does; prefix r10-resolver-host-) it copies
+   exec/c/librarybindings.h, exec/c/libraryresolver.h and tests/libraryresolverhostcheck.c, builds two shared fixtures
+   (lib0, lib1: resolver_shared 33/44, resolver_data 34/45, a destructor that appends its index to
+   $US_RESOLVER_CLOSE_LOG), then compiles the host check plain and with -fsanitize=address,undefined and runs each on
+   the two fixtures.  Every command must exit 0 within 20 s and each run's close log must read lines 1, 0 (owned
+   handles close exactly once, in reverse order).  On success one JSON line goes to stdout, as json.dumps wrote it
+   (", " / ": " separators, ASCII-only escapes, Python float repr for seconds); any failure is the .py's uncaught
+   exception: nothing on stdout, a message on stderr, rc 1.
+   usage: sh ./unisacc.com -run tests/libraryresolverhostcheck.cx   (arguments are ignored, as by the Python checker)
+   ROOT is the parent of the directory holding this file (Path(__file__).resolve().parents[1]).  platform follows
+   platform.platform(): Linux system-release-machine[-processor]-with-glibcX.Y (getconf GNU_LIBC_VERSION is
+   confstr(CS_GNU_LIBC_VERSION)); macOS-ProductVersion-machine-processor-64bit-Mach-O on Darwin. */
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <dirent.h>
+#include <time.h>
+
+extern char **environ;
+static char ROOT[4096], TD[4096];
+
+typedef struct { char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 1024; char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->p, c))) exit(1);
+        b->p = t; b->cap = c;
+    }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
+
+static void rmtree(const char *d) {
+    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
+    if (dp) {
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
+        }
+        closedir(dp);
+    }
+    rmdir(d);
+}
+/* the .py's uncaught exception: nothing printed yet (the JSON is printed last), a message, the directory removed, rc 1 */
+static void fail(const char *kind, const char *a, const char *b) {
+    fflush(stdout);
+    fprintf(stderr, "libraryresolverhostcheck: %s: %s%s%s\n", kind, a, b && *b ? "\n" : "", b ? b : "");
+    if (TD[0]) rmtree(TD);
+    exit(1);
+}
+
+/* one UTF-8 code point at s[i] (strict: no overlong, surrogate or > U+10FFFF); its length in *l, -1 if invalid */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+/* json.dumps of a str (ensure_ascii): STRICT is bytes.decode() (invalid UTF-8 is fatal); otherwise the str of a
+   path, where os.fsdecode's surrogateescape turns an undecodable byte B into U+DC00+B */
+static void jstr(Buf *b, const char *s, size_t n, int strict) {
+    size_t i = 0; char u[16];
+    put(b, "\"", 1);
+    while (i < n) {
+        int l; long c = cp_at((const unsigned char *)s, n, i, &l);
+        if (c < 0) { if (strict) fail("UnicodeDecodeError", "'utf-8' codec can't decode the captured output", 0); c = 0xDC00 + (unsigned char)s[i]; l = 1; }
+        i += l;
+        if (c == '"') puts_(b, "\\\"");
+        else if (c == '\\') puts_(b, "\\\\");
+        else if (c == '\n') puts_(b, "\\n");
+        else if (c == '\r') puts_(b, "\\r");
+        else if (c == '\t') puts_(b, "\\t");
+        else if (c == '\b') puts_(b, "\\b");
+        else if (c == '\f') puts_(b, "\\f");
+        else if (c >= 0x20 && c <= 0x7E) { char ch = (char)c; put(b, &ch, 1); }
+        else if (c < 0x10000) { snprintf(u, sizeof u, "\\u%04lx", c); puts_(b, u); }
+        else { long v = c - 0x10000; snprintf(u, sizeof u, "\\u%04lx\\u%04lx", 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF)); puts_(b, u); }
+    }
+    put(b, "\"", 1);
+}
+/* repr(float): the shortest digits that read back, fixed for 1e-4 <= |x| < 1e16, else d.ddde[+-]XX */
+static void jfloat(Buf *b, double x) {
+    char e[64], d[32], o[64]; int p, nd = 0, ex, k, j = 0; const char *q;
+    for (p = 1; p <= 17; p++) { snprintf(e, sizeof e, "%.*e", p - 1, x); if (strtod(e, 0) == x) break; }
+    q = e; if (*q == '-') { o[j++] = '-'; q++; }
+    for (; *q && *q != 'e'; q++) if (*q >= '0' && *q <= '9') d[nd++] = *q;
+    ex = atoi(q + 1);
+    while (nd > 1 && d[nd - 1] == '0') nd--;
+    d[nd] = 0;
+    if (ex >= -4 && ex < 16) {
+        if (ex >= nd - 1) { for (k = 0; k < nd; k++) o[j++] = d[k]; for (k = nd - 1; k < ex; k++) o[j++] = '0'; o[j++] = '.'; o[j++] = '0'; }
+        else if (ex >= 0) { for (k = 0; k <= ex; k++) o[j++] = d[k]; o[j++] = '.'; for (; k < nd; k++) o[j++] = d[k]; }
+        else { o[j++] = '0'; o[j++] = '.'; for (k = 0; k < -ex - 1; k++) o[j++] = '0'; for (k = 0; k < nd; k++) o[j++] = d[k]; }
+        o[j] = 0;
+    } else {
+        o[j++] = d[0]; if (nd > 1) { o[j++] = '.'; for (k = 1; k < nd; k++) o[j++] = d[k]; }
+        o[j] = 0; snprintf(o + j, sizeof o - j, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex);
+    }
+    puts_(b, o);
+}
+
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static void tmpfile_in(char *out, size_t cap, const char *base, int *fd) {
+    snprintf(out, cap, "%s/r10-resolver-cap-XXXXXX", base);
+    if ((*fd = mkstemp(out)) < 0) fail("OSError", "cannot create a capture file under", base);
+}
+static char BASE[4096];
+
+/* command(): subprocess.run(ARGS, cwd=TD, env=ENV, capture_output=True, timeout=20); rc must be 0.  One record
+   {command, rc, seconds, stdout, stderr} is appended to RUNS.  CLOSELOG, when set, is the env's
+   US_RESOLVER_CLOSE_LOG (dict(os.environ, ...): the inherited environment with that one name replaced). */
+static void command(Buf *runs, int first, char **args, const char *closelog) {
+    char of[4200], ef[4200], *out = 0, *err = 0; int ofd, efd, st = 0, rc, i; long ticks = 20000; pid_t pid, w;
+    size_t on = 0, en = 0; double t0, secs; FILE *f;
+    tmpfile_in(of, sizeof of, BASE, &ofd); tmpfile_in(ef, sizeof ef, BASE, &efd);
+    fflush(stdout); fflush(stderr);
+    t0 = now();
+    pid = fork();
+    if (pid < 0) { close(ofd); close(efd); unlink(of); unlink(ef); fail("OSError", "fork failed for", args[0]); }
+    if (pid == 0) {
+        if (chdir(TD) != 0) _exit(127);
+        dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
+        if (closelog) {   /* the carried libc's setenv does not reach exec's environment; environ does */
+            char **e; int k = 0, m = 0; size_t len = strlen(closelog) + 24;
+            while (environ[k]) k++;
+            e = malloc((k + 2) * sizeof *e);
+            for (i = 0; i < k; i++) if (strncmp(environ[i], "US_RESOLVER_CLOSE_LOG=", 22)) e[m++] = environ[i];
+            e[m] = malloc(len); snprintf(e[m], len, "US_RESOLVER_CLOSE_LOG=%s", closelog); e[m + 1] = 0;
+            environ = e;
+        }
+        execvp(args[0], args); _exit(127);
+    }
+    close(ofd); close(efd);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
+        if (w < 0) { rc = -1; break; }
+        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); unlink(of); unlink(ef); fail("TimeoutExpired", args[0], "timed out after 20 seconds"); }
+        usleep(1000);
+    }
+    secs = now() - t0;
+    if ((f = fopen(of, "rb"))) { out = _cx_slurp(f, &on); fclose(f); }
+    if ((f = fopen(ef, "rb"))) { err = _cx_slurp(f, &en); fclose(f); }
+    unlink(of); unlink(ef);
+    if (!out) { out = calloc(1, 1); on = 0; }
+    if (!err) { err = calloc(1, 1); en = 0; }
+    if (rc != 0) {
+        Buf m = { 0 }; char r[32];
+        for (i = 0; args[i]; i++) { if (i) put(&m, " ", 1); puts_(&m, args[i]); }
+        snprintf(r, sizeof r, " -> rc %d", rc); puts_(&m, r);
+        if (on) { puts_(&m, "\n"); put(&m, out, on); }
+        fail("AssertionError", m.p, err);
+    }
+    if (!first) puts_(runs, ", ");
+    puts_(runs, "{\"command\": [");
+    for (i = 0; args[i]; i++) { if (i) puts_(runs, ", "); jstr(runs, args[i], strlen(args[i]), 0); }
+    puts_(runs, "], \"rc\": 0, \"seconds\": "); jfloat(runs, secs);
+    puts_(runs, ", \"stdout\": "); jstr(runs, out, on, 1);
+    puts_(runs, ", \"stderr\": "); jstr(runs, err, en, 1);
+    puts_(runs, "}");
+    free(out); free(err);
+}
+
+/* stdout of a helper command (uname, getconf); NULL when it fails -- check_output's CalledProcessError/OSError */
+static char *capture(char *const argv[]) {
+    char *o = 0; size_t n = 0; int rc = cx_runv_timeout(argv, 20, &o, &n);
+    if (rc != 0) { free(o); return 0; }
+    return o;
+}
+static char *strip(char *s) {   /* str.strip() on ASCII whitespace */
+    char *e;
+    if (!s) return s;
+    while (*s == ' ' || (*s >= '\t' && *s <= '\r')) s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || (e[-1] >= '\t' && e[-1] <= '\r'))) e--;
+    *e = 0; return s;
+}
+static char *quiet(char *const argv[]) {   /* stderr=DEVNULL */
+    int save, nul; char *o;
+    fflush(stderr); save = dup(2); nul = open("/dev/null", O_WRONLY);
+    if (nul >= 0) { dup2(nul, 2); close(nul); }
+    o = capture(argv);
+    if (save >= 0) { dup2(save, 2); close(save); }
+    return o;
+}
+/* platform._platform: join the nonempty parts with '-', map ' /\:;"()' to '_' or '-', drop 'unknown', fold '--' */
+static void pf_join(Buf *b, const char **parts, int n) {
+    Buf t = { 0 }; int i, first = 1; size_t r, w;
+    for (i = 0; i < n; i++) {
+        char *c; if (!parts[i] || !*parts[i]) continue;
+        c = strdup(parts[i]);
+        if (!first) put(&t, "-", 1);
+        puts_(&t, strip(c)); first = 0; free(c);
+    }
+    if (!t.p) puts_(&t, "");
+    for (r = 0; r < t.n; r++) {
+        char c = t.p[r];
+        if (c == ' ') t.p[r] = '_';
+        else if (c == '/' || c == '\\' || c == ':' || c == ';' || c == '"' || c == '(' || c == ')') t.p[r] = '-';
+    }
+    for (r = w = 0; r < t.n;) { if (t.n - r >= 7 && !memcmp(t.p + r, "unknown", 7)) { r += 7; continue; } t.p[w++] = t.p[r++]; }
+    t.n = w; t.p[w] = 0;
+    for (r = w = 0; r < t.n; r++) { if (t.p[r] == '-' && w && t.p[w - 1] == '-') continue; t.p[w++] = t.p[r]; }
+    while (w && t.p[w - 1] == '-') w--;
+    t.p[w] = 0;
+    jstr(b, t.p, w, 0); free(t.p);
+}
+static void platform_json(Buf *b, const char *sysname) {
+    char *a_r[] = { "uname", "-r", 0 }, *a_m[] = { "uname", "-m", 0 }, *a_p[] = { "uname", "-p", 0 };
+    char *rel = strip(capture(a_r)), *mach = strip(capture(a_m)), *proc = strip(quiet(a_p));
+    const char *system = sysname, *release = rel ? rel : "", *machine = mach ? mach : "", *processor = proc ? proc : "";
+    if (!strcmp(processor, "unknown")) processor = "";
+    if (!strcmp(machine, processor)) processor = "";
+    if (!strcmp(system, "Darwin")) {
+        char *pl = cx_read("/System/Library/CoreServices/SystemVersion.plist", 0), *k, *s, *e;
+        if (pl && (k = strstr(pl, "<key>ProductVersion</key>")) && (s = strstr(k, "<string>")) && (e = strstr(s + 8, "</string>"))) {
+            *e = 0; if (s[8]) { system = "macOS"; release = s + 8; }
+        }
+    }
+    if (!strcmp(system, "Linux")) {
+        char *a_g[] = { "getconf", "GNU_LIBC_VERSION", 0 }, *g = quiet(a_g), lib[512] = "";
+        if (g) {   /* 'glibc 2.35'.split(maxsplit=1) -> 'glibc' + '2.35' */
+            char *s = strip(g), *sp = s; while (*sp && *sp != ' ' && *sp != '\t') sp++;
+            if (*sp) { char *v = sp; *v++ = 0; while (*v == ' ' || *v == '\t') v++; if (*v) snprintf(lib, sizeof lib, "%s%s", s, v); }
+        }
+        { const char *parts[] = { system, release, machine, processor, "with", lib }; pf_join(b, parts, 6); }
+    } else {
+        char bits[16]; const char *link = !strcmp(sysname, "Darwin") ? "Mach-O" : "ELF";
+        snprintf(bits, sizeof bits, "%dbit", (int)sizeof(void *) * 8);
+        { const char *parts[] = { system, release, machine, processor, bits, link }; pf_join(b, parts, 6); }
+    }
+}
+
+/* tempfile.gettempdir(): the first of $TMPDIR $TEMP $TMP /tmp /var/tmp /usr/tmp cwd we can write, made absolute and
+   normalised (os.path.abspath) */
+static void normpath(const char *in, char *out, size_t cap) {
+    char tmp[8192], *seg[1024]; int n = 0, i; char *s = tmp, *e;
+    if (in[0] == '/') snprintf(tmp, sizeof tmp, "%s", in);
+    else { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(tmp, sizeof tmp, "%s/%s", cwd, in); }
+    for (; *s; s = e) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (*e) *e++ = 0;
+        if (!strcmp(s, ".")) continue;
+        if (!strcmp(s, "..")) { if (n) n--; continue; }
+        if (n < 1024) seg[n++] = s;
+    }
+    out[0] = 0;
+    if (!n) { snprintf(out, cap, "/"); return; }
+    for (i = 0; i < n; i++) { size_t l = strlen(out); snprintf(out + l, cap - l, "/%s", seg[i]); }
+}
+static void gettempdir(void) {
+    const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" }; int i; struct stat st;
+    for (i = 0; i < 3; i++) { const char *v = getenv(env[i]); if (v && *v && stat(v, &st) == 0 && S_ISDIR(st.st_mode) && access(v, W_OK | X_OK) == 0) { normpath(v, BASE, sizeof BASE); return; } }
+    for (i = 0; i < 3; i++) if (stat(fixed[i], &st) == 0 && S_ISDIR(st.st_mode) && access(fixed[i], W_OK | X_OK) == 0) { snprintf(BASE, sizeof BASE, "%s", fixed[i]); return; }
+    normpath(".", BASE, sizeof BASE);
+}
+
+static void copyfile(const char *rel, const char *dst) {
+    char src[4200], *b; size_t n = 0; struct stat st;
+    snprintf(src, sizeof src, "%s/%s", ROOT, rel);
+    if (!(b = cx_read(src, &n))) fail("FileNotFoundError", "cannot read", src);
+    if (cx_write(dst, b, n) != 0) fail("OSError", "cannot write", dst);
+    if (stat(src, &st) == 0) chmod(dst, st.st_mode & 07777);   /* copy2 keeps the mode */
+    free(b);
+}
+/* close.read_text().splitlines() == ['1', '0'] */
+static int is_break(const unsigned char *s, size_t n, size_t i) {
+    if (i >= n) return 0;
+    if (s[i] == '\r') return i + 1 < n && s[i + 1] == '\n' ? 2 : 1;
+    if (s[i] == '\n' || s[i] == 0x0B || s[i] == 0x0C || s[i] == 0x1C || s[i] == 0x1D || s[i] == 0x1E) return 1;
+    if (i + 1 < n && s[i] == 0xC2 && s[i + 1] == 0x85) return 2;
+    if (i + 2 < n && s[i] == 0xE2 && s[i + 1] == 0x80 && (s[i + 2] == 0xA8 || s[i + 2] == 0xA9)) return 3;
+    return 0;
+}
+static int closed_in_order(const char *path) {
+    size_t n = 0, i = 0; int l; unsigned char *s = (unsigned char *)cx_read(path, &n);
+    if (!s) fail("FileNotFoundError", "no such file", path);
+    if (i >= n || s[i] != '1') return 0;
+    i++;
+    if (!(l = is_break(s, n, i))) return 0;
+    i += l;
+    if (i >= n || s[i] != '0') return 0;
+    i++;
+    i += is_break(s, n, i);
+    return i == n;
+}
+
+int main(int argc, char **argv) {
+    char self[4096], *slash, sysname[256] = "", c[3][4200], lib[2][4200], dirs[4200], src[4200];
+    Buf runs = { 0 }, js = { 0 }; int i, k, first = 1, darwin;
+    const char *suffix;
+    (void)argc;
+#ifdef _WIN32
+    fail("AssertionError", "Windows helper unimplemented", 0);
+#endif
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(argv[0], self)) { if (!getcwd(ROOT, sizeof ROOT)) return 1; }
+    else {
+        for (k = 0; k < 2; k++) { slash = strrchr(self, '/'); if (slash && slash != self) *slash = 0; else { strcpy(self, "/"); break; } }
+        snprintf(ROOT, sizeof ROOT, "%s", self);
+    }
+    {   char *a_s[] = { "uname", "-s", 0 }, *s = strip(capture(a_s)); if (s) snprintf(sysname, sizeof sysname, "%s", s); }
+    if (!strcmp(sysname, "Windows")) fail("AssertionError", "Windows helper unimplemented", 0);
+    gettempdir();
+    snprintf(TD, sizeof TD, "%s/r10-resolver-host-XXXXXX", BASE);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("OSError", "cannot create a temporary directory under", BASE); }
+    snprintf(dirs, sizeof dirs, "%s/exec", TD); mkdir(dirs, 0777);
+    snprintf(dirs, sizeof dirs, "%s/exec/c", TD); if (mkdir(dirs, 0777) != 0) fail("OSError", "mkdir", dirs);
+    snprintf(dirs, sizeof dirs, "%s/tests", TD); if (mkdir(dirs, 0777) != 0) fail("OSError", "mkdir", dirs);
+    {   const char *hs[] = { "librarybindings.h", "libraryresolver.h" };
+        for (i = 0; i < 2; i++) { char rel[256], dst[4200]; snprintf(rel, sizeof rel, "exec/c/%s", hs[i]); snprintf(dst, sizeof dst, "%s/exec/c/%s", TD, hs[i]); copyfile(rel, dst); } }
+    snprintf(src, sizeof src, "%s/tests/libraryresolverhostcheck.c", TD);
+    copyfile("tests/libraryresolverhostcheck.c", src);
+    darwin = !strcmp(sysname, "Darwin"); suffix = darwin ? ".dylib" : ".so";
+    for (i = 0; i < 2; i++) {
+        static const int vd[2][2] = { { 33, 34 }, { 44, 45 } };
+        char text[1024];
+        snprintf(c[i], sizeof c[i], "%s/lib%d.c", TD, i);
+        snprintf(lib[i], sizeof lib[i], "%s/lib%d%s", TD, i, suffix);
+        snprintf(text, sizeof text, "int resolver_shared(void){return %d;}\nint resolver_data=%d;\n#include <stdio.h>\n#include <stdlib.h>\n__attribute__((destructor)) static void finished(void){const char*p=getenv(\"US_RESOLVER_CLOSE_LOG\");if(p){FILE*f=fopen(p,\"a\");if(f){fputs(\"%d\\n\",f);fclose(f);}}}\n", vd[i][0], vd[i][1], i);
+        if (cx_write(c[i], text, strlen(text)) != 0) fail("OSError", "cannot write", c[i]);
+        {   char *a[] = { "cc", "-shared", "-fPIC", c[i], "-o", lib[i], 0 }; command(&runs, first, a, 0); first = 0; }
+    }
+    for (k = 0; k < 2; k++) {
+        const char *stem = k ? "sanitised" : "plain"; char exe[4200], closef[4200], *a[16]; int n = 0;
+        snprintf(exe, sizeof exe, "%s/%s", TD, stem); snprintf(closef, sizeof closef, "%s/%s.closed", TD, stem);
+        a[n++] = "cc"; a[n++] = "-std=c11"; a[n++] = "-O1"; a[n++] = "-Wall"; a[n++] = "-Wextra";
+        if (k) a[n++] = "-fsanitize=address,undefined";
+        a[n++] = darwin ? "-Wl,-export_dynamic" : "-rdynamic";
+        a[n++] = src;
+        if (!darwin) a[n++] = "-ldl";
+        a[n++] = "-o"; a[n++] = exe; a[n] = 0;
+        command(&runs, 0, a, 0);
+        {   char *r[] = { exe, lib[0], lib[1], 0 }; command(&runs, 0, r, closef); }
+        if (!closed_in_order(closef)) fail("AssertionError", "owned handles must close exactly once, in reverse order", 0);
+    }
+    puts_(&js, "{\"scope\": \"host C candidate IO only; no model/script test; current native platform only\", \"platform\": ");
+    platform_json(&js, sysname);
+    puts_(&js, ", \"source_sha256\": {");
+    {   const char *fs[] = { "exec/c/libraryresolver.h", "exec/c/librarybindings.h", "tests/libraryresolverhostcheck.c" };
+        for (i = 0; i < 3; i++) {
+            char p[4200], hex[65], *b; size_t n = 0;
+            snprintf(p, sizeof p, "%s/%s", ROOT, fs[i]);
+            if (!(b = cx_read(p, &n))) fail("FileNotFoundError", "cannot read", p);
+            cx_sha256_hex(b, n, hex); free(b);
+            if (i) puts_(&js, ", ");
+            jstr(&js, fs[i], strlen(fs[i]), 0); puts_(&js, ": \""); puts_(&js, hex); puts_(&js, "\"");
+        } }
+    puts_(&js, "}, \"all_candidates\": 8, \"runs\": [");
+    put(&js, runs.p ? runs.p : "", runs.n);
+    puts_(&js, "]}\n");
+    rmtree(TD); TD[0] = 0;
+    fwrite(js.p, 1, js.n, stdout);
+    return fflush(stdout) ? 1 : 0;
+}

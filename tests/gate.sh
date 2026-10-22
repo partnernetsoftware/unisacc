@@ -217,8 +217,8 @@ job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && u
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
 job hostcheck python3 ./tests/hostcheckcheck.py
 job seedmemory python3 ./tests/seedmemorycheck.py
-job seedgen-let-exit python3 ./tests/seedletexitcheck.py   # generic constructor exit before write, C/P byte parity
-job copy-contract python3 ./tests/copycontractcheck.py   # copy/copy-state/rule:MODE C/P parity, thin wrapper over tests/cpparity.py (drop-edge live)
+job seedgen-let-exit tests/bound 58 sh ./unisacc.com -run tests/seedletexitcheck.cx   # (.cx port, 2026-10-23) generic constructor exit before write, C/P byte parity
+job copy-contract tests/bound 58 sh ./unisacc.com -run tests/copycontractcheck.cx   # (.cx port, 2026-10-23) copy/copy-state/rule:MODE C/P parity over tests/cpparity/cases.tsv families copy,mode (drop-edge live); P = exec/build/gen.py + exec/c/tbl.py, C = seed/gen.c
 job ri-snapshot-overlay sh ./tests/risnapshotcheck.sh   # RI snapshot overlay: sealed E3 accept hit + fall-through visible in capture
 job ri-snapshot-core sh ./tests/risnapshotcore.sh   # RI snapshot writer/loader: positive, refusals, capacity, write failure
 # c43 watchdog scope tokens: orphaned and escaped children, and the caller EOF (macOS branch not verified yet)
@@ -235,7 +235,7 @@ job rulingwait python3 ./tests/rulingwaitcheck.py   # 0.0.39 WF4: ruling request
 job namedrefuse ./tests/namedrefusecheck.sh   # 0.0.39 COV1: named refusals exact at every -O, REVIVED fails
 job identity-product-negative python3 ./tests/identitynegativecheck.py product --candidate "${MODEL_COM:-./unisacc.com}"
 job identity-include-negative python3 ./tests/identitynegativecheck.py include
-job identity-include-consumer-negative python3 ./tests/identityincludeconsumercheck.py --package "${MODEL_COM:-./unisacc.com}"
+job identity-include-consumer-negative tests/bound 58 sh ./unisacc.com -run tests/identityincludeconsumercheck.cx -- --package "${MODEL_COM:-./unisacc.com}"
 job identity-prep-negative python3 ./tests/identitynegativecheck.py prep --ua "${UA:-/tmp/ua_ref}"
 job checkrun ./tests/checkruncheck.sh   # 0.0.39: check status never taken from a pipe
 job commitgate ./tests/commitgatecheck.sh   # 0.0.39: red gate leaves no commit (scratch repo)
@@ -253,7 +253,7 @@ job queuetimer ./tests/queuetimercheck.sh   # 0.0.40: a real term.sh/bound.py al
 job docedit tests/bound 58 sh ./unisacc.com -run tests/doceditcheck.cx   # (.cx port, 2026-10-22) 0.0.40: ledger appends keep the old text as an exact prefix; the 0586f01a truncating write is RED
 job whyrerun python3 ./tests/whyreruncheck.py   # 0.0.39: invalidation explainer (reasons per suite)
 job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fetch identity checks
-job draftguard python3 ./tests/draftguardcheck.py   # 0.0.39 R3: workflow draft-input guard executed
+job draftguard tests/bound 58 sh ./unisacc.com -run tests/draftguardcheck.cx   # (.cx port, 2026-10-23) 0.0.39 R3: workflow draft-input guard executed
 job warmup ./tests/warmupcheck.sh   # 0.0.38: warm-up markers only for a built cache; COLD named
 job installpair ./tests/installpaircheck.sh   # 0.0.38: queue root pair = comboot's reinstall when same origin
 for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
@@ -685,7 +685,7 @@ job lib-callback-graph-host python3 ./tests/librarycallbackgraphcheck.py
 job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
 job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
 job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
-job lib-callable-mechanism python3 ./tests/librarycallablescheck.py
+job lib-callable-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablescheck.cx   # (.cx port, 2026-10-23) callable ABI mechanism: librarycallablescheck.c built with host cc + real libffi, plain and ASan/UBSan, each under tests/bound 20
 job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py
 job referee-binsel python3 ./tests/binsel_audit.py        # external referee: host cc decides signedness-dependence
@@ -719,7 +719,7 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-source-pointee-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode pointee
     job lib-source-longdouble-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble
 fi
-job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
+job lib-carrier-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx   # (.cx port, 2026-10-23)
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py
 job lib-carrier-callback python3 ./tests/librarycarriercallbackcheck.py
@@ -818,7 +818,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
     job lib-source-longdouble-import-rosetta python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
-    job lib-carrier-mechanism-rosetta python3 ./tests/librarycarriercheck.py --arch x86_64
+    job lib-carrier-mechanism-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx -- --arch x86_64
     job lib-carrier-native-plan-rosetta python3 ./tests/librarycarriernativeplancheck.py --arch x86_64
     job lib-union-native-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-carrier-callback-rosetta python3 ./tests/librarycarriercallbackcheck.py --arch x86_64
@@ -857,7 +857,7 @@ job lib-latebind-W tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/li
 job latebind-p6 tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/latebindp6check.cx -- "${MODEL_COM:-./unisacc.com}" tests/seals/latebind-p6-baseline   # P6: untyped library-mode baseline (26 WBASE1 snapshots, public-API observers); lnx/x86_64 else UNVERIFIED 77
 job resourceflow tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/resourceflowcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # S1: explicit-ledger strict resource flow on the product (C -> Tape); RF-LEGACY needs a base product and is not run here
 job include-key tests/bound 58 sh ./tests/includekeycheck.sh "${MODEL_COM:-./unisacc.com}"   # S2 prerequisite: sim.py and the product request the same include keys (product capture vs reference)
-job lib-resolver-host python3 ./tests/libraryresolverhostcheck.py
+job lib-resolver-host tests/bound 58 sh ./unisacc.com -run tests/libraryresolverhostcheck.cx   # (.cx port, 2026-10-23) R10: private native resolver candidate enumeration; owned handles close once, in reverse order
 job lib-word64 python3 ./tests/librarywordcheck.py --native-only
 job exec-binaryio python3 ./tests/runtimeiocheck.py
 for part in host unisacc sanitised; do job exec-crcllp64-$part python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only --part "$part"; done
@@ -1069,7 +1069,7 @@ if [ "$COM" = 1 ]; then
     job com-forceinclude tests/bound 58 sh "$PRODUCT" -run tests/forceincludecheck.cx -- "$PRODUCT"   # 0.0.43: __FILE__, diagnostics and nested includes inside -include headers, forwarded and not
     job com-iquote tests/bound 58 sh "$PRODUCT" -run tests/iquotecheck.cx -- "$PRODUCT"   # 0.0.43: -iquote searched by quoted includes only, before -I
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
-    job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
+    job com-full-signature tests/bound 58 sh "$PRODUCT" -run tests/fullsignaturecallcheck.cx -- --package "$PRODUCT"   # (.cx port, 2026-10-23) 21 actual product calls (fp9/mixed17/returned/pick/nested probe x -O0..-O2) exit 0 with empty stdout and stderr
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
     for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 python3 ./tests/declmatrix.py; done   # the same matrix on the product (found functions named r0..r7)
     job com-auditnet MODEL_COM="$PRODUCT" sh "$PRODUCT" -run tests/auditnet.cx   # (.cx port, 2026-10-22) 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product

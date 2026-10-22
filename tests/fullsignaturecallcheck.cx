@@ -1,0 +1,275 @@
+#!/usr/bin/env -S unisacc.com -run
+/* fullsignaturecallcheck.cx --package PRODUCT -- actual product calls, independent from parser-fact/query assertions;
+   ported from tests/fullsignaturecallcheck.py (the owner's direction: the toolchain moves off Python).
+   exec/parse2/probes/callback_full_signature.c is cut at its one `int main(void)`; six one-line mains (direct and
+   through a pointer, nine floats and sixteen ints plus a float, a returned function pointer, pick()) plus the whole
+   nested probe are each run by the product at -O0, -O1 and -O2 under tests/bound 10 (12 s outer limit): 21 calls,
+   every one must exit 0 with empty stdout and stderr.
+   usage: sh ./unisacc.com -run tests/fullsignaturecallcheck.cx -- --package PRODUCT
+   Follows the Python original: ROOT is the directory above this file (symlinks resolved), PRODUCT is resolved
+   strictly (a missing path is rc 1), the probe is read as UTF-8 text with universal newlines, the scratch directory
+   is r10-fullsignature-* under TMPDIR (else /tmp) and is removed on every exit.  A failing call prints
+   `full signature LABEL OOPT: rc=RC, stdout=B'..', stderr=B'..'` (Python bytes repr; a signal is rc=-N) and exits 1.
+   The command line is argparse's: --package VALUE / --package=VALUE / unique prefixes, -h/--help, usage errors rc 2
+   (prog is this file's basename). */
+#include <fcntl.h>
+#include <limits.h>
+#include <errno.h>
+
+static char ROOT[PATH_MAX], TD[PATH_MAX];
+static const char *PROG;
+
+static void rmtree(const char *d) {
+    DIR *dp = opendir(d); struct dirent *e; char p[PATH_MAX + 256]; struct stat st;
+    if (dp) {
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
+        }
+        closedir(dp);
+    }
+    rmdir(d);
+}
+/* an uncaught exception or SystemExit(str): the message on stderr, the scratch directory removed, rc 1 */
+static void fail(const char *msg) {
+    fflush(stdout); fputs(msg, stderr); fputc('\n', stderr);
+    if (TD[0]) rmtree(TD);
+    exit(1);
+}
+
+/* ---- argparse: ArgumentParser(); add_argument('--package', required=True) ---- */
+static void usage(FILE *f) { fprintf(f, "usage: %s [-h] --package PACKAGE\n", PROG); }
+static void argerror(const char *msg, const char *a) {
+    usage(stderr); fprintf(stderr, "%s: error: ", PROG); fprintf(stderr, msg, a); fputc('\n', stderr); exit(2);
+}
+static void help(void) {
+    usage(stdout);
+    printf("\noptions:\n  -h, --help         show this help message and exit\n  --package PACKAGE\n");
+    exit(0);
+}
+/* _negative_number_matcher.match: -\.?\d */
+static int negnum(const char *s) { return s[0] == '-' && ((s[1] >= '0' && s[1] <= '9') || (s[1] == '.' && s[2] >= '0' && s[2] <= '9')); }
+/* the long options a double-dash string (up to '=', length N) names, exactly or as a prefix: bit 1 --help, bit 2 --package */
+static int longmatch(const char *s, size_t n) {
+    int m = 0;
+    if (!(n == 6 && !strncmp(s, "--help", 6)) && !(n == 9 && !strncmp(s, "--package", 9))) {
+        if (n <= 6 && !strncmp("--help", s, n)) m |= 1;
+        if (n <= 9 && !strncmp("--package", s, n)) m |= 2;
+        return m;
+    }
+    return n == 6 ? 1 : 2;
+}
+/* _parse_optional: does S read as an option (pattern 'O') rather than a positional ('A') */
+static int optlike(const char *s) {
+    const char *eq;
+    if (s[0] != '-') return 0;
+    if (!strcmp(s, "-h") || !strcmp(s, "--help") || !strcmp(s, "--package")) return 1;
+    if (!s[1]) return 0;
+    eq = strchr(s, '=');
+    if (eq && ((eq - s == 2 && !strncmp(s, "-h", 2)) || (eq - s == 6 && !strncmp(s, "--help", 6)) || (eq - s == 9 && !strncmp(s, "--package", 9)))) return 1;
+    if (s[1] == '-') { if (longmatch(s, eq ? (size_t)(eq - s) : strlen(s))) return 1; }
+    else if (s[1] == 'h') return 1;   /* -h<tail>: the short prefix matches */
+    if (negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+static void ignored(const char *x) { argerror("argument -h/--help: ignored explicit argument '%s'", x); }
+static const char *parse(int argc, char **argv) {
+    const char *package = 0; char extras[8192] = ""; int i, dd = 0;
+    for (i = 1; i < argc; i++) {
+        char *s = argv[i];
+        if (!dd && !strcmp(s, "--")) dd = 1;          /* '--' and everything after it are positionals; none is wanted */
+        if (dd || !optlike(s)) goto extra;
+        if (s[1] != '-') {
+            const char *e;
+            if (s[1] != 'h') goto extra;              /* an unknown single-dash option */
+            if (s[2] == '=') ignored(s + 3);          /* -h=X: an explicit argument the flag cannot take */
+            for (e = s + 2; ; ) {                     /* -hhh..: more -h; another letter goes to extras; '-' or '=' is refused */
+                if (!*e) help();
+                if (*e == '-') ignored(e);
+                if (*e != 'h') help();
+                e++;
+                if (*e == '=') { ignored(e + 1); }
+            }
+        } else {
+            const char *eq = strchr(s, '='); size_t n = eq ? (size_t)(eq - s) : strlen(s); int m = longmatch(s, n);
+            if (m == 3) {
+                char msg[8400]; snprintf(msg, sizeof msg, "ambiguous option: %s could match --help, --package", s);
+                argerror("%s", msg);
+            }
+            if (m == 1) { if (eq) ignored(eq + 1); help(); }
+            if (m == 2) {
+                if (eq) { package = eq + 1; continue; }
+                if (i + 1 >= argc || !strcmp(argv[i + 1], "--") || optlike(argv[i + 1])) argerror("argument --package: expected one argument", "");
+                package = argv[++i];
+                continue;
+            }
+        }
+    extra:
+        if (strlen(extras) + strlen(s) + 2 < sizeof extras) { if (extras[0]) strcat(extras, " "); strcat(extras, s); }
+    }
+    if (!package) argerror("the following arguments are required: --package", "");
+    if (extras[0]) argerror("unrecognized arguments: %s", extras);
+    return package;
+}
+
+/* repr(bytes) */
+static char *brepr(const unsigned char *b, size_t n) {
+    size_t i; int sq = 0, dq = 0; char q, *r = malloc(4 * n + 4), *o = r;
+    for (i = 0; i < n; i++) { if (b[i] == '\'') sq = 1; if (b[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    *o++ = 'b'; *o++ = q;
+    for (i = 0; i < n; i++) {
+        unsigned c = b[i];
+        if (c == (unsigned)q || c == '\\') { *o++ = '\\'; *o++ = (char)c; }
+        else if (c == '\t') { *o++ = '\\'; *o++ = 't'; }
+        else if (c == '\n') { *o++ = '\\'; *o++ = 'n'; }
+        else if (c == '\r') { *o++ = '\\'; *o++ = 'r'; }
+        else if (c < 32 || c >= 127) { o += sprintf(o, "\\x%02x", c); }
+        else *o++ = (char)c;
+    }
+    *o++ = q; *o = 0;
+    return r;
+}
+static char *slurpfd(int fd, size_t *len) {
+    FILE *f; char *b;
+    lseek(fd, 0, SEEK_SET);
+    f = fdopen(fd, "rb");
+    if (!f) { close(fd); *len = 0; b = malloc(1); b[0] = 0; return b; }
+    b = _cx_slurp(f, len); fclose(f);
+    return b;
+}
+/* subprocess.run(ARGV, capture_output=True, timeout=12): rc (or -N for signal N), stdout, stderr */
+static int run(char *const argv[], char **out, size_t *on, char **err, size_t *en) {
+    char to[PATH_MAX], te[PATH_MAX]; int fo, fe, st = 0, rc; long ticks = 1200; pid_t pid, w;
+    const char *base = getenv("TMPDIR"); if (!base || !*base) base = "/tmp";
+    snprintf(to, sizeof to, "%s/fullsig-outXXXXXX", base); snprintf(te, sizeof te, "%s/fullsig-errXXXXXX", base);
+    if ((fo = mkstemp(to)) < 0) fail("fullsignaturecallcheck: cannot create a capture file");
+    if ((fe = mkstemp(te)) < 0) { close(fo); unlink(to); fail("fullsignaturecallcheck: cannot create a capture file"); }
+    unlink(to); unlink(te);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) { close(fo); close(fe); fail("fullsignaturecallcheck: fork failed"); }
+    if (pid == 0) {
+        dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
+        if (w < 0) { close(fo); close(fe); fail("fullsignaturecallcheck: waitpid failed"); }
+        if (ticks-- <= 0) {
+            char m[PATH_MAX * 3];
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); close(fo); close(fe);
+            snprintf(m, sizeof m, "subprocess.TimeoutExpired: Command '['%s', '%s', '%s', '%s', '%s', '%s', '%s']' timed out after 12 seconds",
+                     argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
+            fail(m);
+        }
+        usleep(10000);
+    }
+    *out = slurpfd(fo, on); *err = slurpfd(fe, en);
+    return rc;
+}
+
+/* Path.read_text(): strict UTF-8, universal newlines (\r\n and \r become \n) */
+static char *read_text(const char *path, size_t *len) {
+    size_t n = 0, i = 0, k = 0; unsigned char *b = (unsigned char *)cx_read(path, &n);
+    char m[PATH_MAX + 64];
+    if (!b) { snprintf(m, sizeof m, "FileNotFoundError: [Errno %d] %s: '%s'", errno, strerror(errno), path); fail(m); }
+    while (i < n) {
+        unsigned c = b[i]; int need, j; unsigned long cp, min;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+        else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+        else fail("UnicodeDecodeError: 'utf-8' codec can't decode the probe source");
+        for (j = 1; j <= need; j++) {
+            if (i + j >= n || (b[i + j] & 0xC0) != 0x80) fail("UnicodeDecodeError: 'utf-8' codec can't decode the probe source");
+            cp = (cp << 6) | (b[i + j] & 0x3F);
+        }
+        if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) fail("UnicodeDecodeError: 'utf-8' codec can't decode the probe source");
+        i += need + 1;
+    }
+    for (i = 0; i < n; i++) {
+        if (b[i] == '\r') { b[k++] = '\n'; if (i + 1 < n && b[i + 1] == '\n') i++; }
+        else b[k++] = b[i];
+    }
+    b[k] = 0; *len = k;
+    return (char *)b;
+}
+
+static const char *VARIANTS[][2] = {
+    {"direct9", "return weighted(1,2,3,4,5,6,7,8,9.0)!=285.0f;"},
+    {"ptr9", "F9 a=weighted;return a(1,2,3,4,5,6,7,8,9.0)!=285.0f;"},
+    {"direct17", "return seventeen(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17.0)!=153.0f;"},
+    {"ptr17", "F17 a=seventeen;return a(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17.0)!=153.0f;"},
+    {"returned9", "Relay r=pick;return r(weighted)(1,2,3,4,5,6,7,8,9.0)!=285.0f;"},
+    {"pick9", "F9 a=pick(weighted);return a(1,2,3,4,5,6,7,8,9.0)!=285.0f;"},
+};
+#define NVAR 6
+
+int main(int argc, char **argv) {
+    char self[PATH_MAX], product[PATH_MAX], src[PATH_MAX + 64], bound[PATH_MAX + 16], *source, *head, *hit;
+    const char *package, *base; size_t sn, hn; int v, opt, receipts = 0;
+    PROG = strrchr(argv[0], '/') ? strrchr(argv[0], '/') + 1 : argv[0];
+    package = parse(argc, argv);
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    if (!realpath(argv[0], self)) fail("fullsignaturecallcheck: cannot resolve this file");
+    strcpy(ROOT, self);
+    for (v = 0; v < 2; v++) { char *s = strrchr(ROOT, '/'); if (s == ROOT) { ROOT[1] = 0; } else if (s) *s = 0; }
+    /* a.package.resolve(strict=True); Path('') is '.' */
+    if (!realpath(*package ? package : ".", product)) {
+        char m[PATH_MAX + 128]; int e = errno;
+        snprintf(m, sizeof m, "FileNotFoundError: [Errno %d] %s: '%s'", e, strerror(e), package);
+        fail(m);
+    }
+    snprintf(src, sizeof src, "%s/exec/parse2/probes/callback_full_signature.c", ROOT);
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    source = read_text(src, &sn);
+    /* assert source.count('int main(void)')==1 (a NUL byte cannot hide a second one: the counts run over the bytes) */
+    {
+        int count = 0; size_t i;
+        for (i = 0; i + 14 <= sn; ) { if (!memcmp(source + i, "int main(void)", 14)) { count++; i += 14; } else i++; }
+        if (count != 1) fail("AssertionError: source.count('int main(void)')==1");
+        for (i = 0; i + 14 <= sn; i++) if (!memcmp(source + i, "int main(void)", 14)) break;
+        hit = source + i;
+    }
+    hn = (size_t)(hit - source);
+    head = source;
+    base = getenv("TMPDIR"); if (!base || !*base) base = "/tmp";
+    snprintf(TD, sizeof TD, "%s/r10-fullsignature-XXXXXX", base);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("fullsignaturecallcheck: cannot create the scratch directory"); }
+    for (v = 0; v <= NVAR; v++) {
+        const char *label = v < NVAR ? VARIANTS[v][0] : "nested";
+        char f[PATH_MAX + 64], *text; size_t tn;
+        if (v < NVAR) {   /* head + 'int main(void){' + body + '}\n' */
+            const char *body = VARIANTS[v][1]; size_t bn = strlen(body);
+            text = malloc(hn + 15 + bn + 3);
+            memcpy(text, head, hn); memcpy(text + hn, "int main(void){", 15); memcpy(text + hn + 15, body, bn);
+            memcpy(text + hn + 15 + bn, "}\n", 2); tn = hn + 15 + bn + 2;
+        } else { text = malloc(sn + 1); memcpy(text, source, sn); tn = sn; }
+        snprintf(f, sizeof f, "%s/%s.c", TD, label);
+        if (cx_write(f, text, tn)) fail("fullsignaturecallcheck: cannot write a probe");
+        free(text);
+        for (opt = 0; opt <= 2; opt++) {
+            char o[8], *out, *err; size_t on = 0, en = 0; int rc;
+            char *cmd[] = { bound, "10", "sh", product, o, "-run", f, 0 };
+            snprintf(o, sizeof o, "-O%d", opt);
+            rc = run(cmd, &out, &on, &err, &en);
+            if (rc || on || en) {
+                char *ro = brepr((unsigned char *)out, on), *re = brepr((unsigned char *)err, en);
+                char *m = malloc(strlen(ro) + strlen(re) + 128);
+                sprintf(m, "full signature %s O%d: rc=%d, stdout=%s, stderr=%s", label, opt, rc, ro, re);
+                fail(m);
+            }
+            free(out); free(err);
+            receipts++;
+        }
+    }
+    if (receipts != 21) fail("AssertionError: len(receipts)==21");
+    rmtree(TD); TD[0] = 0;
+    printf("{\"actual_product_calls\": 21, \"fp9\": true, \"mixed17\": true, \"returned_function_pointer\": true, \"nested_callback_types\": true, \"native_callback_bridge\": false}\n");
+    return 0;
+}
