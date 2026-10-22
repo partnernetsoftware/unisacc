@@ -21,7 +21,7 @@ python3 -m m4 selftest            # 变异测试：每张网是否真的决定�
 |---|---|---|---|
 | lex | 流 1 决策 | shift：改字节或拒收 | 词法分类 |
 | parse | 流 2 决策 | shift：改字节或拒收 | 产生式选择 |
-| isel | 流 3 决策 | shift、trap：拒收 | `emit.py` 按形态分派算术/逻辑族；每个 op 的合法形态唯一 |
+| isel | 流 3 决策 | shift、trap：拒收；另有选文本 | `emit.py` 按形态分派。多数 op 合法形态仍唯一。`eq`/`ne` 同时接受 `i64_cmp`（gold，与 ujs 逐字节）和 `f64_cmp`（另一段 WAT，Node 上 `ternary.ujs` 仍得 100） |
 | enc | 流 4 决策 | shift、trap：拒收 | `emit.py` 每条指令按钉死的合法模板门控；合法模板唯一 |
 | type、shape、ic | 观测（OBSERVED） | 无 | `front/compile.py` 的 `note_binop` 以侧信道发出，结果被丢弃 |
 | scope | 保留（RESERVED） | 无 | `front.bind` 只检查 `illegal`，调用点 ctx 恒为 mod/block，该分支不可达 |
@@ -30,8 +30,7 @@ python3 -m m4 selftest            # 变异测试：每张网是否真的决定�
 
 **这是对草案“4 流 × 10 网”的实测修订：只有 4 张网在决策。** 口径是否改由政委定；本文件如实记录。
 
-决策的性质：isel 与 enc 的决策都是“合法/拒收”，因为每个 op 的合法形态与模板各唯一，网不在多个合法实现之间选文本。
-要让网真正“选文本”，同一 op 需要多个合法实现，这一步尚未做。
+决策的性质：enc 仍是“合法/拒收”（每个 op 的合法模板唯一）。isel 对 `eq`/`ne` 已经在两个合法形态之间选文本（`contract.ISEL_CHOICE`）；selftest 的 choose 探针钉死“字节不同且都能跑”。其余 op 的 isel 仍是唯一形态，shift 落到别的类就拒收。
 
 要让 type、scope、shape、ic 真正决策，需要改 ujs 前端，让它消费这些答案（例如用 type 的结果做检查、让 scope 的非 ok 分支可达）。这是 ujs 侧的设计决定，不在 m4 内解决。
 

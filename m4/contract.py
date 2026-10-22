@@ -30,6 +30,14 @@ RESERVED = ("irsel", "reloc", "scope")
 # 结果被丢弃，不影响任何输出。
 OBSERVED = ("type", "shape", "ic")
 
+# 同一 op 的多个合法 isel 形态。第一项是 gold 形态（语料逐字节路径）；
+# 其余项是网可以改选的另一实现，emit 必须写出不同的 WAT，不得只做合法/拒收。
+# f64_cmp 是 WASM_FORMS 里紧挨 i64_cmp 的下一类，shift 变异会落到它。
+ISEL_CHOICE = {
+    "eq": ("i64_cmp", "f64_cmp"),
+    "ne": ("i64_cmp", "f64_cmp"),
+}
+
 
 def wired():
     """真决定输出或拒收的网（4 张）。"""
@@ -42,4 +50,9 @@ def check_contract():
     seen = [n for b in buckets for n in b]
     if sorted(seen) != sorted(NETS) or len(seen) != len(set(seen)):
         raise AssertionError("m4 contract: nets not partitioned exactly: %r" % seen)
+    for op, forms in ISEL_CHOICE.items():
+        if len(forms) < 2 or len(set(forms)) != len(forms):
+            raise AssertionError("m4 contract: %s needs two distinct forms" % op)
+        if forms[0] == forms[1]:
+            raise AssertionError("m4 contract: choice collapsed")
     return True

@@ -6,6 +6,8 @@
 from ujs.seed.construct import emit_wasm as _E
 from ujs.seed.construct.emit_wasm import DirectEmitError, can_emit_direct
 
+from .contract import ISEL_CHOICE
+
 # 运行时常量与辅助函数直接取自 ujs 模块
 globals().update({k: v for k, v in vars(_E).items() if not k.startswith("__")})
 
@@ -13,13 +15,15 @@ globals().update({k: v for k, v in vars(_E).items() if not k.startswith("__")})
 _FAMILY_OPS = ("add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne", "and", "or")
 _BIN_CODE = {"sub": 0, "mul": 1, "div": 2, "mod": 3}
 _CMP_CODE = {"lt": 0, "le": 1, "gt": 2, "ge": 3, "eq": 4, "ne": 5}
-# 每个 op 允许的 isel 形态；网给出别的形态即明确拒收
+# 每个 op 允许的 isel 形态；网给出别的形态即明确拒收。
+# eq/ne 有两个合法形态，由网选文本（见 contract.ISEL_CHOICE）。
 _LEGAL_FORM = {
     "add": ("poly_bin",),
     "sub": ("i64_bin",), "mul": ("i64_bin",), "mod": ("i64_bin",),
     "div": ("f64_bin",),
     "lt": ("i64_cmp",), "le": ("i64_cmp",), "gt": ("i64_cmp",),
-    "ge": ("i64_cmp",), "eq": ("i64_cmp",), "ne": ("i64_cmp",),
+    "ge": ("i64_cmp",),
+    "eq": ISEL_CHOICE["eq"], "ne": ISEL_CHOICE["ne"],
     "and": ("bool_logic",), "or": ("bool_logic",),
 }
 
@@ -179,6 +183,12 @@ def _body(fn: Fn, str_off: list[tuple[int, int]], fn_index: dict[str, int],
                 parts.append(f"(call $push (call $op_bin (i32.const {_BIN_CODE[op]}) (local.get $a) (local.get $b)))")
             elif form == "i64_cmp":
                 parts.append(f"(call $push (call $op_cmp (i32.const {_CMP_CODE[op]}) (local.get $a) (local.get $b)))")
+            elif form == "f64_cmp":
+                # 与 i64_cmp 不同的文本：按 f64 比较后再装箱。gold 不选这条，语料字节不变。
+                pred = {"eq": "f64.eq", "ne": "f64.ne"}[op]
+                parts.append(
+                    "(call $push (call $mk_bool (%s (call $as_f64 (local.get $a)) "
+                    "(call $as_f64 (local.get $b)))))" % pred)
             elif form == "bool_logic":
                 fnm = {"and": "i32.and", "or": "i32.or"}[op]
                 parts.append(f"(call $push (call $mk_bool ({fnm} (call $truthy (local.get $a)) (call $truthy (local.get $b)))))")
