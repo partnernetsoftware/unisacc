@@ -1,0 +1,104 @@
+/* flownet/api.cx -- the one public face of flownet (plans/m4-flownet-cx-module.md W2): the flow x net paradigm of m4
+   (gold -> integer net -> flows -> bytes) as a .cx module with no knowledge of any particular language or target.
+   A consumer compiles this unit with flownet/{contract,nets,flow}.cx and its own units into one program:
+       sh ./unisacc.com -run CONSUMER.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- ...
+   and declares the fn_ functions it calls.  The API is functions only (W0: a missing external object reads as zeros,
+   a missing function is refused by name), every name has the fn_ prefix, and every failure is a named refusal:
+   the call returns -1 / 0 and fn_error() says "PATH[:LINE]: reason" or what was asked and why it was refused.
+
+   construct    fn_open(DIR)                 contract.tsv + every net's NET.gold.tsv and NET.net.tsv, all checked
+   derive       fn_drive("built"|"gold"), fn_phase(NAME), fn_ask(NET, N, KEY) / fn_ask1..3, fn_gate(...),
+                fn_choice(NET, INPUT)
+   accept       fn_acc(NET, &exact, &total)  every key of the domain: integer net == gold
+   books        fn_trace_reset(), fn_trace_row(K, ...), fn_trace_check(), fn_asks()
+   contract     fn_nets(), fn_net(I), fn_role(NET), fn_list(ROLE, BUF, CAP), fn_phases(), fn_phase_name(I) */
+
+int fnc_load(const char *dir);
+int fnc_nnets(void);
+const char *fnc_net(int i);
+int fnc_find(const char *net);
+const char *fnc_role(int i);
+int fnc_list(const char *role, char *out, int cap);
+int fnc_nphases(void);
+const char *fnc_phase(int i);
+const char *fnc_choice(const char *net, const char *in);
+void fnn_reset(void);
+int fnn_load(const char *dir, const char *name);
+int fnn_find(const char *name);
+int fnn_keys(int i);
+int fnn_predict(int i, int key);
+int fnn_gold(int i, int key);
+void fnf_reset(void);
+int fnf_drive(const char *mode);
+int fnf_phase(const char *name);
+const char *fnf_ask(const char *net, int nk, const char *const *key);
+int fnf_gate(const char *net, const char *answer, const char *legal, const char *what);
+int fnf_trace_row(int want, const char **phase, const char **net, long *h, long *g);
+int fnf_trace_check(void);
+long fnf_asks(void);
+
+static char errbuf[1024];
+static int opened;
+
+/* every unit reports through here; the first failure since the last fn_open/fn_error_clear wins */
+void fnx_fail(const char *msg) {
+    if (!errbuf[0]) snprintf(errbuf, sizeof errbuf, "%s", msg);
+}
+const char *fn_error(void) { return errbuf[0] ? errbuf : "no error"; }
+void fn_error_clear(void) { errbuf[0] = 0; }
+
+int fn_open(const char *dir) {
+    int i;
+    errbuf[0] = 0; opened = 0;
+    fnn_reset(); fnf_reset();
+    if (fnc_load(dir)) return -1;
+    for (i = 0; i < fnc_nnets(); i++)
+        if (fnn_load(dir, fnc_net(i)) < 0) return -1;
+    fnf_drive("built");
+    opened = 1;
+    return 0;
+}
+
+static int need(void) {
+    if (!opened) { fnx_fail("flownet: no tables open (fn_open first)"); return -1; }
+    return 0;
+}
+
+int fn_nets(void) { return opened ? fnc_nnets() : 0; }
+const char *fn_net(int i) { return opened ? fnc_net(i) : 0; }
+const char *fn_role(const char *net) { return opened ? fnc_role(fnc_find(net)) : 0; }
+int fn_list(const char *role, char *out, int cap) { return opened ? fnc_list(role, out, cap) : -1; }
+int fn_phases(void) { return opened ? fnc_nphases() : 0; }
+const char *fn_phase_name(int i) { return opened ? fnc_phase(i) : 0; }
+const char *fn_choice(const char *net, const char *in) { return opened ? fnc_choice(net, in) : 0; }
+
+int fn_acc(const char *net, int *exact, int *total) {
+    int i, k, n;
+    *exact = *total = 0;
+    if (need()) return -1;
+    if ((i = fnn_find(net)) < 0) { char m[128]; snprintf(m, sizeof m, "acc: %.60s is not a contract net", net); fnx_fail(m); return -1; }
+    n = fnn_keys(i);
+    for (k = 0; k < n; k++) {
+        (*total)++;
+        if (fnn_predict(i, k) == fnn_gold(i, k)) (*exact)++;
+    }
+    return 0;
+}
+
+int fn_drive(const char *mode) { return need() ? -1 : fnf_drive(mode); }
+int fn_phase(const char *name) { return need() ? -1 : fnf_phase(name); }
+const char *fn_ask(const char *net, int nk, const char *const *key) { return need() ? 0 : fnf_ask(net, nk, key); }
+const char *fn_ask1(const char *net, const char *a) { const char *k[1]; k[0] = a; return fn_ask(net, 1, k); }
+const char *fn_ask2(const char *net, const char *a, const char *b) { const char *k[2]; k[0] = a; k[1] = b; return fn_ask(net, 2, k); }
+const char *fn_ask3(const char *net, const char *a, const char *b, const char *c) {
+    const char *k[3]; k[0] = a; k[1] = b; k[2] = c; return fn_ask(net, 3, k);
+}
+int fn_gate(const char *net, const char *answer, const char *legal, const char *what) {
+    return need() ? -1 : fnf_gate(net, answer, legal, what);
+}
+void fn_trace_reset(void) { fnf_reset(); }
+int fn_trace_row(int k, const char **phase, const char **net, long *hits, long *gold) {
+    return opened ? fnf_trace_row(k, phase, net, hits, gold) : 0;
+}
+int fn_trace_check(void) { return need() ? -1 : fnf_trace_check(); }
+long fn_asks(void) { return fnf_asks(); }

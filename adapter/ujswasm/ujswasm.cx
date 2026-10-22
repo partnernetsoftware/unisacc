@@ -1,0 +1,2375 @@
+/* adapter/ujswasm/ujswasm.cx -- the ujs -> \0asm consumer of flownet (plans/m4-flownet-cx-module.md W2): the m4 path
+   (m4/flows.py, m4/emit.py over ujs/seed/construct/front + emit_wasm) ported to .cx, with every decision asked of the
+   flownet nets through the fn_ API -- nothing here answers a net question itself, and nothing falls back to gold.
+     flow lex      the ujs lexer: each step asks lex (char class, next char class)
+     flow front    the ujs compiler: parse decides every production; type/shape/ic/isel are asked as m4's side channel
+     flow select   isel decides the form of every jtape op (eq/ne may take the contract's second form)
+     flow encode   enc gates every instruction against its pinned template; the WAT goes through wat2wasm
+   It is the temporary boundary adapter of W2: it may name ujs, flownet/ may not (D1).  W3 turns its label source and
+   emit hook into flownet's injection surface.
+   Build (repository root):
+     sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx \
+        -- COMMAND ...
+   Commands:
+     build SRC -o OUT [--tables DIR] [--wat FILE]   SRC -> OUT (\0asm); prints bytes, sha256 and the trace.  A refusal
+                    (anything not covered) is rc 1, stdout empty, OUT absent, stderr "ujswasm: SRC:LINE: reason"
+     check ROOT     the W1 baseline (tests/flownet-baseline.tsv), no Python: acc per net and the wired/reserved lists;
+                    every recorded program built through flownet -- output bytes + sha256 and the trace (phase, net,
+                    hits, gold fallbacks) equal the recorded m4 values; the negative programs accepted/refused as
+                    recorded; every refusal has the D5 shape
+     refuse ROOT    D5 over uncovered inputs beyond the negatives (emit gaps, out-of-domain tokens, non-ASCII outside
+                    strings, bad UTF-8, a missing source): each one rc 1, stdout empty, no OUT, a reason and a position
+     negative ROOT  the checks are not decorative: a mutated net, gold drive (fallbacks), a missing table, each red
+     d1 ROOT        D1/red line 3: no "ujs" and no "python" in flownet/*.cx
+     accepts ROOT   the 5 negatives ujs accepts (no bytes recorded in the baseline): flownet's bytes == the m4 oracle's
+                    (`python3 -m m4 build`, a child process; the only Python step, and outside flownet/) */
+
+int fn_open(const char *dir);
+const char *fn_error(void);
+void fn_error_clear(void);
+int fn_nets(void);
+const char *fn_net(int i);
+int fn_acc(const char *net, int *exact, int *total);
+int fn_list(const char *role, char *out, int cap);
+int fn_drive(const char *mode);
+int fn_phase(const char *name);
+const char *fn_ask1(const char *net, const char *a);
+const char *fn_ask2(const char *net, const char *a, const char *b);
+const char *fn_ask3(const char *net, const char *a, const char *b, const char *c);
+int fn_gate(const char *net, const char *answer, const char *legal, const char *what);
+const char *fn_choice(const char *net, const char *in);
+void fn_trace_reset(void);
+int fn_trace_row(int k, const char **phase, const char **net, long *hits, long *gold);
+int fn_trace_check(void);
+
+#define DEFAULT_TABLES "adapter/ujswasm/tables"
+#define PH_FRONT "front(lex+parse)"
+#define PH_SELECT "select+encode"
+
+/* ---------- growable text ---------- */
+typedef struct { char *s; size_t n, cap; } Buf;
+static void oom(void) { fprintf(stderr, "ujswasm: out of memory\n"); exit(1); }
+static void badd(Buf *b, const char *s, size_t k) {
+    if (b->n + k + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 4096; char *g;
+        while (c < b->n + k + 1) c *= 2;
+        if (!(g = realloc(b->s, c))) oom();
+        b->s = g; b->cap = c;
+    }
+    memcpy(b->s + b->n, s, k); b->n += k; b->s[b->n] = 0;
+}
+static void bs(Buf *b, const char *s) { badd(b, s, strlen(s)); }
+static void bi(Buf *b, long v) { char t[32]; snprintf(t, sizeof t, "%ld", v); bs(b, t); }
+static char *sdup(const char *s) { size_t k = strlen(s); char *d = malloc(k + 1); if (!d) oom(); memcpy(d, s, k + 1); return d; }
+static void *xrealloc(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) oom(); return q; }
+
+/* ---------- refusal: rc 1, stdout untouched, no output file, reason and position on stderr ---------- */
+static const char *g_src = "?";       /* the source being built, for positions */
+static char g_tmpdir[64];             /* scratch of this build; removed on any exit path through here */
+static void cleanup(void) {
+    char p[160];
+    if (!g_tmpdir[0]) return;
+    snprintf(p, sizeof p, "%s/p.wat", g_tmpdir); unlink(p);
+    snprintf(p, sizeof p, "%s/p.wasm", g_tmpdir); unlink(p);
+    rmdir(g_tmpdir); g_tmpdir[0] = 0;
+}
+static void refuse_at(int line, const char *why) {
+    cleanup();
+    if (line > 0) fprintf(stderr, "ujswasm: %s:%d: %s\n", g_src, line, why);
+    else fprintf(stderr, "ujswasm: %s: %s\n", g_src, why);
+    exit(1);
+}
+static void refuse2(int line, const char *a, const char *b) {
+    char m[600]; snprintf(m, sizeof m, "%s%s", a, b ? b : ""); refuse_at(line, m);
+}
+
+/* ======================================================================================================
+   source: bytes -> code points, as Python's text-mode open() sees them (UTF-8, \r\n and \r become \n)
+   ====================================================================================================== */
+static int *cp; static int ncp;
+static void load_source(const char *data, size_t n) {
+    size_t i = 0; int line = 1;
+    cp = xrealloc(0, (n + 1) * sizeof(int)); ncp = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)data[i]; int v, k, j;
+        if (c < 0x80) {
+            if (c == '\r') { cp[ncp++] = '\n'; line++; i += (i + 1 < n && data[i + 1] == '\n') ? 2 : 1; continue; }
+            if (c == '\n') line++;
+            cp[ncp++] = c; i++; continue;
+        }
+        if (c >= 0xC2 && c <= 0xDF) { k = 1; v = c & 0x1F; }
+        else if (c >= 0xE0 && c <= 0xEF) { k = 2; v = c & 0x0F; }
+        else if (c >= 0xF0 && c <= 0xF4) { k = 3; v = c & 0x07; }
+        else { char m[96]; snprintf(m, sizeof m, "not valid UTF-8 (byte 0x%02x at offset %ld)", c, (long)i); refuse_at(line, m); return; }
+        if (i + k >= n) { char m[80]; snprintf(m, sizeof m, "not valid UTF-8 (truncated at offset %ld)", (long)i); refuse_at(line, m); }
+        for (j = 1; j <= k; j++) {
+            unsigned char d = (unsigned char)data[i + j];
+            if ((d & 0xC0) != 0x80) { char m[80]; snprintf(m, sizeof m, "not valid UTF-8 (offset %ld)", (long)(i + j)); refuse_at(line, m); }
+            v = (v << 6) | (d & 0x3F);
+        }
+        if ((k == 2 && v < 0x800) || (k == 3 && (v < 0x10000 || v > 0x10FFFF)) || (v >= 0xD800 && v <= 0xDFFF)) {
+            char m[80]; snprintf(m, sizeof m, "not valid UTF-8 (offset %ld)", (long)i); refuse_at(line, m);
+        }
+        cp[ncp++] = v; i += k + 1;
+    }
+}
+
+/* a UTF-8 encoding of code points [a, b) */
+static char *utf8(int a, int b, int *len) {
+    Buf o; int i; memset(&o, 0, sizeof o); bs(&o, "");
+    for (i = a; i < b; i++) {
+        int v = cp[i]; char t[4]; int k;
+        if (v < 0x80) { t[0] = (char)v; k = 1; }
+        else if (v < 0x800) { t[0] = (char)(0xC0 | (v >> 6)); t[1] = (char)(0x80 | (v & 0x3F)); k = 2; }
+        else if (v < 0x10000) { t[0] = (char)(0xE0 | (v >> 12)); t[1] = (char)(0x80 | ((v >> 6) & 0x3F)); t[2] = (char)(0x80 | (v & 0x3F)); k = 3; }
+        else { t[0] = (char)(0xF0 | (v >> 18)); t[1] = (char)(0x80 | ((v >> 12) & 0x3F)); t[2] = (char)(0x80 | ((v >> 6) & 0x3F)); t[3] = (char)(0x80 | (v & 0x3F)); k = 4; }
+        badd(&o, t, k);
+    }
+    if (len) *len = (int)o.n;
+    return o.s;
+}
+
+/* ======================================================================================================
+   flow lex: ujs/seed/construct/front/lex.py
+   ====================================================================================================== */
+typedef struct { const char *kind; char *text; int tlen; int isfloat; int bval; int line; } Tok;
+
+/* Python's str.isalpha()/isdigit() for one code point.  ASCII exactly; beyond ASCII only ranges known to be letters
+   (Latin-1 and Latin Extended-A letters, basic Greek and Cyrillic, CJK unified ideographs, Hangul syllables); any other
+   code point that the lexer has to classify is refused as not covered (it never guesses a class). */
+static int g_line;
+static int uletter(int v) {
+    if ((v >= 0xC0 && v <= 0xD6) || (v >= 0xD8 && v <= 0xF6) || (v >= 0xF8 && v <= 0x17F)) return 1;
+    if ((v >= 0x391 && v <= 0x3A1) || (v >= 0x3A3 && v <= 0x3A9) || (v >= 0x3B1 && v <= 0x3C9)) return 1;
+    if (v >= 0x410 && v <= 0x44F) return 1;
+    if ((v >= 0x4E00 && v <= 0x9FEF) || (v >= 0xAC00 && v <= 0xD7A3)) return 1;
+    return 0;
+}
+static void uncovered(int v) {
+    char m[120]; snprintf(m, sizeof m, "not covered: the lexer would have to classify U+%04X (outside the covered letter ranges)", v);
+    refuse_at(g_line, m);
+}
+static int isalpha_cp(int v) {
+    if (v < 0x80) return (v >= 'a' && v <= 'z') || (v >= 'A' && v <= 'Z');
+    if (uletter(v)) return 1;
+    uncovered(v); return 0;
+}
+static int isdigit_cp(int v) {
+    if (v < 0) return 0;
+    if (v < 0x80) return v >= '0' && v <= '9';
+    if (uletter(v)) return 0;
+    uncovered(v); return 0;
+}
+static const char *charclass(int v) {
+    if (v < 0) return "eof";
+    if (v == '\n') return "nl";
+    if (v == ' ' || v == '\t' || v == '\r' || v == '\f' || v == '\v') return "ws";
+    if (v == '_' || isalpha_cp(v)) return "A";
+    if (isdigit_cp(v)) return "D";
+    if (v == '"') return "Q";
+    if (v == '\'') return "S";
+    if (v < 0x80 && v && strchr("{}()[];,:.?", v)) return "P";
+    if (v < 0x80 && v && strchr("=<>!+-*/%&|.", v)) return "O";
+    return "other";
+}
+
+static const char *KEYWORDS[] = { "let", "const", "var", "function", "if", "else", "while", "for", "return",
+    "break", "continue", "switch", "case", "default", "null", "true", "false", "typeof", "of", "in", 0 };
+/* lex.PUNCT: the explicit head, then gold.TOKS' punctuation by length (longest first, TOKS order within a length) */
+static const char *PUNCT[] = { "...", "===", "!==", "=>", "??", "+=", "-=", "*=", "/=", "%=",
+    "==", "!=", "<=", ">=", "&&", "||", "??", "=>", "+=", "-=", "*=", "/=",
+    "{", "}", "(", ")", "[", "]", ";", ",", ":", ".", "?", "=", "<", ">", "+", "-", "*", "/", "%", "!", 0 };
+
+static const char *ask_or_refuse(const char *ans) { if (!ans) refuse_at(g_line, fn_error()); return ans; }
+
+static Tok *lex(int whole, int *ntok) {
+    int i = 0, n = whole ? ncp : 0, line = 1, cap = 64, nt = 0;
+    Tok *out = xrealloc(0, cap * sizeof(Tok));
+#define PEEK(k) (i + (k) < n ? cp[i + (k)] : -1)
+#define PUSH(K, T, L) do { if (nt == cap) { cap *= 2; out = xrealloc(out, cap * sizeof(Tok)); } \
+    memset(&out[nt], 0, sizeof(Tok)); out[nt].kind = (K); out[nt].text = (T); out[nt].tlen = (L); out[nt].line = line; nt++; } while (0)
+    for (;;) {
+        const char *a, *b, *act; int start = i;
+        g_line = line;
+        a = charclass(PEEK(0)); b = charclass(PEEK(1));
+        act = ask_or_refuse(fn_ask2("lex", a, b));
+        if (!strcmp(act, "eof")) { PUSH("eof", sdup(""), 0); *ntok = nt; return out; }
+        if (!strcmp(act, "ws")) { while (!strcmp(charclass(PEEK(0)), "ws")) i++; continue; }
+        if (!strcmp(act, "nl")) { i++; line++; continue; }
+        if (!strcmp(act, "id")) {
+            int j = i, len, k; char *t; const char *kind = "id";
+            while (!strcmp(charclass(PEEK(0)), "A") || !strcmp(charclass(PEEK(0)), "D")) i++;
+            if (i == j) refuse_at(line, "the lexer made no progress on an identifier (lex answered id here)");
+            t = utf8(j, i, &len);
+            for (k = 0; KEYWORDS[k]; k++)
+                if (!strcmp(t, KEYWORDS[k])) { kind = (!strcmp(t, "const") || !strcmp(t, "var")) ? "let" : KEYWORDS[k]; break; }
+            PUSH(kind, t, len);
+            if (!strcmp(t, "true")) out[nt - 1].bval = 1;
+            continue;
+        }
+        if (!strcmp(act, "num")) {
+            int j = i, len, isf = 0;
+            while (isdigit_cp(PEEK(0))) i++;
+            if (PEEK(0) == '.' && isdigit_cp(PEEK(1))) { i++; while (isdigit_cp(PEEK(0))) i++; isf = 1; }
+            if (i == j) refuse_at(line, "not a number where lex answered num");
+            PUSH("num", utf8(j, i, &len), len);
+            out[nt - 1].isfloat = isf;
+            continue;
+        }
+        if (!strcmp(act, "str")) {
+            int quote = PEEK(0), j, len; Buf v; memset(&v, 0, sizeof v); bs(&v, "");
+            i++; j = i;
+            while (PEEK(0) >= 0 && PEEK(0) != quote) {
+                if (PEEK(0) == '\\' && PEEK(1) >= 0) {
+                    int e, ch; char *u;
+                    i++; e = PEEK(0);
+                    ch = e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : e;
+                    { int save = cp[i]; cp[i] = ch; u = utf8(i, i + 1, &len); cp[i] = save; }
+                    badd(&v, u, len); free(u);
+                    i++;
+                } else {
+                    char *u;
+                    if (PEEK(0) == '\n') line++;
+                    u = utf8(i, i + 1, &len); badd(&v, u, len); free(u);
+                    i++;
+                }
+            }
+            (void)j;
+            if (PEEK(0) != quote) { char m[64]; snprintf(m, sizeof m, "unterminated string (opened at line %d)", g_line); refuse_at(line, m); }
+            i++;
+            PUSH("str", v.s, (int)v.n);
+            continue;
+        }
+        if (!strcmp(act, "punct") || !strcmp(act, "op")) {
+            int k, m2 = -1;
+            if (PEEK(0) == '/' && PEEK(1) == '/') { while (PEEK(0) >= 0 && PEEK(0) != '\n') i++; continue; }
+            for (k = 0; PUNCT[k]; k++) {
+                int L = (int)strlen(PUNCT[k]), q;
+                for (q = 0; q < L; q++) if (PEEK(q) != (unsigned char)PUNCT[k][q]) break;
+                if (q == L) { m2 = k; break; }
+            }
+            if (m2 < 0) { char m[80]; snprintf(m, sizeof m, "bad punctuation U+%04X (lex answered %s)", PEEK(0) < 0 ? 0 : PEEK(0), act); refuse_at(line, m); }
+            i += (int)strlen(PUNCT[m2]);
+            PUSH(!strcmp(PUNCT[m2], "===") ? "==" : !strcmp(PUNCT[m2], "!==") ? "!=" : PUNCT[m2], sdup(PUNCT[m2]), (int)strlen(PUNCT[m2]));
+            continue;
+        }
+        { char m[96]; snprintf(m, sizeof m, "lex bad: no token starts at U+%04X (lex answered %s)", PEEK(0) < 0 ? 0 : PEEK(0), act); refuse_at(line, m); }
+        (void)start;
+    }
+#undef PEEK
+#undef PUSH
+}
+
+/* ======================================================================================================
+   jtape (ujs/seed/construct/jtape.py) and flow front: ujs/seed/construct/front/compile.py
+   ====================================================================================================== */
+typedef struct { const char *op; char *a; long ai; char *b; long bi; } Ins;
+/* const: a = kind (null bool i64 f64 str fn); bool: bi; i64/f64: b = literal text; str: bi = string index; fn: b = name.
+   load_l store_l load_g store_g: a = name.  jump jumpz jumpnz: ai = target.  mklist mkdict call: ai = count.
+   dot: a = name (normalized: a = 0, ai = index).  ic_enter: a = the source op. */
+typedef struct { char *p; int n; } Str;
+struct FnMap;
+typedef struct Fn {
+    Ins *code; int ncode, capcode;
+    char **slot; int nslot;
+    Str *str; int nstr;
+    int nparams; char *rest; char *name;
+    struct FnMap *fns;          /* meta["fns"], or 0 when the Fn has none */
+} Fn;
+typedef struct FnMap { char **name; Fn **fn; int n; } FnMap;
+
+static void map_set(FnMap *m, const char *name, Fn *f) {
+    int i;
+    for (i = 0; i < m->n; i++) if (!strcmp(m->name[i], name)) { m->fn[i] = f; return; }
+    m->name = xrealloc(m->name, (m->n + 1) * sizeof(char *)); m->fn = xrealloc(m->fn, (m->n + 1) * sizeof(Fn *));
+    m->name[m->n] = sdup(name); m->fn[m->n] = f; m->n++;
+}
+
+typedef struct { char **v; int n; } Set;
+static int set_has(Set *s, const char *x) { int i; for (i = 0; i < s->n; i++) if (!strcmp(s->v[i], x)) return 1; return 0; }
+static void set_add(Set *s, const char *x) { if (set_has(s, x)) return; s->v = xrealloc(s->v, (s->n + 1) * sizeof(char *)); s->v[s->n++] = sdup(x); }
+
+typedef struct { int *br; int nbr; int cont; } Loop;    /* cont -1 = None (switch) */
+
+typedef struct {
+    int whole;                  /* this compiler's src: the whole source, or "" (an arrow's) */
+    Tok *toks; int ntok; int i;
+    Ins *code; int ncode, capcode;
+    Str *str; int nstr;
+    char **slot; int nslot;
+    Set local_set;
+    Set *scopes; int nscope;
+    Loop *loops; int nloop;
+    FnMap meta_fns;
+} Comp;
+
+static Tok *g_toks; static int g_ntok;
+
+static void comp_init(Comp *c, int whole) {
+    Tok *t; int n;
+    memset(c, 0, sizeof *c);
+    c->whole = whole;
+    t = lex(whole, &n);                     /* Compiler.__init__ lexes its own src: asks are booked even if dropped */
+    c->toks = t; c->ntok = n;
+    c->scopes = xrealloc(0, sizeof(Set)); memset(c->scopes, 0, sizeof(Set)); c->nscope = 1;
+}
+
+static Tok *cur(Comp *c) { return &c->toks[c->i < c->ntok ? c->i : c->ntok - 1]; }
+static int at(Comp *c, const char *k) { return !strcmp(cur(c)->kind, k); }
+static void cerr(Comp *c, const char *a, const char *b) { refuse2(cur(c)->line, a, b); }
+static Tok *eat(Comp *c, const char *kind) {
+    Tok *t = cur(c);
+    if (kind && strcmp(t->kind, kind)) { char m[160]; snprintf(m, sizeof m, "expected %s got %s", kind, t->kind); refuse_at(t->line, m); }
+    c->i++;
+    return t;
+}
+static int emit(Comp *c, const char *op) {
+    if (c->ncode == c->capcode) { c->capcode = c->capcode ? c->capcode * 2 : 64; c->code = xrealloc(c->code, c->capcode * sizeof(Ins)); }
+    memset(&c->code[c->ncode], 0, sizeof(Ins));
+    c->code[c->ncode].op = op;
+    return c->ncode++;
+}
+static int emit_a(Comp *c, const char *op, const char *a) { int k = emit(c, op); c->code[k].a = sdup(a); return k; }
+static int emit_i(Comp *c, const char *op, long ai) { int k = emit(c, op); c->code[k].ai = ai; return k; }
+static void emit_const(Comp *c, const char *kind, const char *b, long bi) {
+    int k = emit(c, "const"); c->code[k].a = sdup(kind); c->code[k].b = b ? sdup(b) : 0; c->code[k].bi = bi;
+}
+static int str_id(Comp *c, const char *p, int n) {
+    int i;
+    for (i = 0; i < c->nstr; i++) if (c->str[i].n == n && !memcmp(c->str[i].p, p, n)) return i;
+    c->str = xrealloc(c->str, (c->nstr + 1) * sizeof(Str));
+    c->str[c->nstr].p = xrealloc(0, n + 1); memcpy(c->str[c->nstr].p, p, n); c->str[c->nstr].p[n] = 0; c->str[c->nstr].n = n;
+    return c->nstr++;
+}
+
+static const char *ask(Comp *c, const char *net, const char *a, const char *b, const char *d) {
+    const char *r;
+    g_line = cur(c)->line;
+    r = d ? fn_ask3(net, a, b, d) : b ? fn_ask2(net, a, b) : fn_ask1(net, a);
+    return ask_or_refuse(r);
+}
+
+static void bind(Comp *c, const char *name) {
+    const char *act = ask(c, "scope", c->nscope > 1 ? "block" : "mod", "bind", 0);
+    if (!strcmp(act, "illegal")) cerr(c, "cannot bind ", name);
+    if (!set_has(&c->local_set, name)) {
+        c->slot = xrealloc(c->slot, (c->nslot + 1) * sizeof(char *)); c->slot[c->nslot++] = sdup(name);
+        set_add(&c->local_set, name);
+    }
+    set_add(&c->scopes[c->nscope - 1], name);
+}
+static void push_scope(Comp *c) { c->scopes = xrealloc(c->scopes, (c->nscope + 1) * sizeof(Set)); memset(&c->scopes[c->nscope], 0, sizeof(Set)); c->nscope++; }
+static void pop_scope(Comp *c) { c->nscope--; }
+static int resolve_local(Comp *c, const char *name) {
+    int s;
+    for (s = c->nscope - 1; s >= 0; s--) if (set_has(&c->scopes[s], name)) return 1;
+    return 0;
+}
+static const char *pask(Comp *c, const char *nt) { return ask(c, "parse", nt, cur(c)->kind, 0); }
+
+static int in_list(const char *s, const char **list) { int i; for (i = 0; list[i]; i++) if (!strcmp(s, list[i])) return 1; return 0; }
+static const char *IC_OPS[] = { "add", "sub", "mul", "div", "mod", "lt", "eq", "idx", "setidx", "dot", "call", "len", "in", 0 };
+static const char *SHAPES[] = { "s_null", "s_bool", "s_i64", "s_f64", "s_str", "s_list", "s_tup", "s_fn",
+    "s_dict_empty", "s_dict_k1", "s_dict_k2", "s_dict_k3", "s_dict_k4", "s_dict_open", "s_unknown", 0 };
+static const char *JOPS[] = { "nop", "const", "load_l", "store_l", "load_g", "store_g", "drop",
+    "add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne",
+    "and", "or", "not", "idx", "setidx", "dot", "len", "keys", "in",
+    "mklist", "mkdict", "mktup", "jump", "jumpz", "jumpnz",
+    "call", "ret", "spread", "restpack", "typeof", "shapeof", "switch", "ic_enter", "print", 0 };
+
+static const char *ask_type(Comp *c, const char *t1, const char *op, const char *t2) { return ask(c, "type", t1, op, t2); }
+static const char *ask_shape(Comp *c, const char *ty) { return ask(c, "shape", ty, "empty", 0); }
+static void ask_ic(Comp *c, const char *shape, const char *op) {
+    if (!in_list(op, IC_OPS)) op = "add";
+    if (!in_list(shape, SHAPES)) shape = "s_i64";
+    ask(c, "ic", shape, op, "type_ok");
+}
+static void ask_isel(Comp *c, const char *jop) { if (!in_list(jop, JOPS)) jop = "add"; ask(c, "isel", jop, 0, 0); }
+
+static const char *mapop(const char *op, const char *const *pairs, const char *dflt) {
+    int i;
+    for (i = 0; pairs[i]; i += 2) if (!strcmp(pairs[i], op)) return pairs[i + 1];
+    return dflt;
+}
+static const char *BINOPS_T[] = { "+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "||", "in", 0 };
+static const char *ICOP_OF[] = { "+", "add", "-", "sub", "*", "mul", "/", "div", "%", "mod", "<", "lt", "==", "eq", "in", "in", 0 };
+static const char *JOP_OF[] = { "+", "add", "-", "sub", "*", "mul", "/", "div", "%", "mod", "<", "lt", ">", "gt", "<=", "le",
+    ">=", "ge", "==", "eq", "!=", "ne", "&&", "and", "||", "or", "in", "in", 0 };
+
+/* note_binop: the side-channel asks (type, shape, ic, isel); their answers do not reach the output (OBSERVED) */
+static void note_binop(Comp *c, const char *op) {
+    const char *ty = ask_type(c, "i64", in_list(op, BINOPS_T) ? op : "+", "i64"), *sh;
+    sh = ask_shape(c, (!strcmp(ty, "i64") || !strcmp(ty, "bool") || !strcmp(ty, "illegal")) ? "i64" : ty);
+    ask_ic(c, sh, mapop(op, ICOP_OF, "add"));
+    ask_isel(c, mapop(op, JOP_OF, "add"));
+}
+
+static void statement(Comp *c);
+static void expr(Comp *c);
+static void assign(Comp *c);
+static void ternary(Comp *c);
+static void arrow_fn(Comp *c, char **params, int np, const char *rest);
+
+static Fn *mkfn(Comp *n, int nparams, const char *rest, const char *name, FnMap *fns) {
+    Fn *f = calloc(1, sizeof(Fn)); if (!f) oom();
+    f->code = n->code; f->ncode = n->ncode; f->capcode = n->capcode;
+    f->slot = n->slot; f->nslot = n->nslot;
+    f->str = n->str; f->nstr = n->nstr;
+    f->nparams = nparams; f->rest = rest ? sdup(rest) : 0; f->name = name ? sdup(name) : 0;
+    f->fns = fns;
+    return f;
+}
+
+static void end_ret(Comp *c) {
+    if (!c->ncode || strcmp(c->code[c->ncode - 1].op, "ret")) { emit_const(c, "null", 0, 0); emit(c, "ret"); }
+}
+
+static void block(Comp *c) {
+    eat(c, "{");
+    push_scope(c);
+    while (!at(c, "}") && !at(c, "eof")) statement(c);
+    eat(c, "}");
+    pop_scope(c);
+}
+
+static void stmt_let(Comp *c) {
+    eat(c, "let");
+    for (;;) {
+        char *name = eat(c, "id")->text;
+        bind(c, name);
+        if (at(c, "=")) { eat(c, "="); expr(c); }
+        else emit_const(c, "null", 0, 0);
+        emit_a(c, "store_l", name);
+        if (at(c, ",")) { eat(c, ","); continue; }
+        break;
+    }
+    if (at(c, ";")) eat(c, ";");
+}
+
+static void stmt_if(Comp *c) {
+    int jz, jmp;
+    eat(c, "if"); eat(c, "("); expr(c); eat(c, ")");
+    jz = emit_i(c, "jumpz", 0);
+    statement(c);
+    if (at(c, "else")) {
+        eat(c, "else");
+        jmp = emit_i(c, "jump", 0);
+        c->code[jz].ai = c->ncode;
+        statement(c);
+        c->code[jmp].ai = c->ncode;
+    } else c->code[jz].ai = c->ncode;
+}
+
+static void push_loop(Comp *c, int cont) {
+    c->loops = xrealloc(c->loops, (c->nloop + 1) * sizeof(Loop));
+    c->loops[c->nloop].br = 0; c->loops[c->nloop].nbr = 0; c->loops[c->nloop].cont = cont; c->nloop++;
+}
+static void pop_loop_patch(Comp *c, int end) {
+    Loop *L = &c->loops[c->nloop - 1]; int k;
+    for (k = 0; k < L->nbr; k++) c->code[L->br[k]].ai = end;
+    free(L->br); c->nloop--;
+}
+static void add_break(Comp *c, int at_) {
+    Loop *L = &c->loops[c->nloop - 1];
+    L->br = xrealloc(L->br, (L->nbr + 1) * sizeof(int)); L->br[L->nbr++] = at_;
+}
+
+static void stmt_while(Comp *c) {
+    int head, jz;
+    eat(c, "while");
+    head = c->ncode;
+    eat(c, "("); expr(c); eat(c, ")");
+    jz = emit_i(c, "jumpz", 0);
+    push_loop(c, head);
+    statement(c);
+    emit_i(c, "jump", head);
+    c->code[jz].ai = c->ncode;
+    pop_loop_patch(c, c->ncode);
+}
+
+static void stmt_for(Comp *c) {
+    int head, jz, jmp_body, step, body, end;
+    eat(c, "for"); eat(c, "(");
+    push_scope(c);
+    if (at(c, "let") && c->i + 2 < c->ntok && !strcmp(c->toks[c->i + 1].kind, "id") && !strcmp(c->toks[c->i + 2].kind, "of")) {
+        char *name, arr[32], ixn[32]; int incr;
+        eat(c, "let");
+        name = eat(c, "id")->text;
+        eat(c, "of");
+        bind(c, name);
+        snprintf(arr, sizeof arr, "__a%d", c->nslot);
+        snprintf(ixn, sizeof ixn, "__i%d", c->nslot);
+        bind(c, arr); bind(c, ixn);
+        expr(c);
+        emit_a(c, "store_l", arr);
+        eat(c, ")");
+        emit_const(c, "i64", "0", 0);
+        emit_a(c, "store_l", ixn);
+        head = c->ncode;
+        emit_a(c, "load_l", ixn); emit_a(c, "load_l", arr); emit_a(c, "ic_enter", "len"); emit(c, "len"); emit(c, "lt");
+        jz = emit_i(c, "jumpz", 0);
+        jmp_body = emit_i(c, "jump", 0);
+        incr = c->ncode;
+        emit_a(c, "load_l", ixn); emit_const(c, "i64", "1", 0); emit(c, "add"); emit_a(c, "store_l", ixn);
+        emit_i(c, "jump", head);
+        body = c->ncode;
+        c->code[jmp_body].ai = body;
+        emit_a(c, "load_l", arr); emit_a(c, "load_l", ixn); emit_a(c, "ic_enter", "idx"); emit(c, "idx"); emit_a(c, "store_l", name);
+        push_loop(c, incr);
+        statement(c);
+        emit_i(c, "jump", incr);
+        end = c->ncode;
+        c->code[jz].ai = end;
+        pop_loop_patch(c, end);
+        pop_scope(c);
+        return;
+    }
+    if (at(c, "let")) stmt_let(c);
+    else if (!at(c, ";")) { expr(c); emit(c, "drop"); eat(c, ";"); }
+    else eat(c, ";");
+    head = c->ncode;
+    if (!at(c, ";")) expr(c);
+    else emit_const(c, "bool", 0, 1);
+    eat(c, ";");
+    jz = emit_i(c, "jumpz", 0);
+    jmp_body = emit_i(c, "jump", 0);
+    step = c->ncode;
+    if (!at(c, ")")) { expr(c); emit(c, "drop"); }
+    eat(c, ")");
+    emit_i(c, "jump", head);
+    body = c->ncode;
+    c->code[jmp_body].ai = body;
+    push_loop(c, step);
+    statement(c);
+    emit_i(c, "jump", step);
+    end = c->ncode;
+    c->code[jz].ai = end;
+    pop_loop_patch(c, end);
+    pop_scope(c);
+}
+
+/* the integer literal as Python's int(): no leading zeros */
+static char *int_text(const char *t) {
+    while (*t == '0' && t[1]) t++;
+    return sdup(t);
+}
+/* the float literal D+.D+ in the form Python's float repr gives for it in the plain range (leading zeros of the whole
+   part and trailing zeros of the fraction dropped, one digit kept each side); the same value whatever the form, and
+   wat2wasm reads the decimal text, so the bytes do not depend on the spelling */
+static char *float_text(const char *t) {
+    const char *dot = strchr(t, '.'); Buf o; const char *w = t, *fe;
+    memset(&o, 0, sizeof o);
+    while (*w == '0' && w + 1 < dot) w++;
+    badd(&o, w, (size_t)(dot - w));
+    fe = dot + strlen(dot) - 1;
+    while (fe > dot + 1 && *fe == '0') fe--;
+    badd(&o, dot, (size_t)(fe - dot + 1));
+    return o.s;
+}
+
+static void stmt_switch(Comp *c) {
+    int *ends = 0, nend = 0, end, k;
+    eat(c, "switch"); eat(c, "("); expr(c); eat(c, ")"); eat(c, "{");
+    bind(c, "__sw");
+    emit_a(c, "store_l", "__sw");
+    push_loop(c, -1);
+    while (!at(c, "}")) {
+        if (at(c, "case")) {
+            Tok *t; int jz;
+            eat(c, "case");
+            t = cur(c);
+            if (!strcmp(t->kind, "num")) {
+                eat(c, "num"); eat(c, ":");
+                emit_a(c, "load_l", "__sw");
+                if (t->isfloat) { char *f = float_text(t->text); emit_const(c, "f64", f, 0); free(f); }
+                else { char *v = int_text(t->text); emit_const(c, "i64", v, 0); free(v); }
+            } else if (!strcmp(t->kind, "str")) {
+                int s;
+                eat(c, "str"); eat(c, ":");
+                emit_a(c, "load_l", "__sw");
+                s = str_id(c, t->text, t->tlen);
+                emit_const(c, "str", 0, s);
+            } else if (!strcmp(t->kind, "true") || !strcmp(t->kind, "false")) {
+                eat(c, 0); eat(c, ":");
+                emit_a(c, "load_l", "__sw");
+                emit_const(c, "bool", 0, t->bval);
+            } else if (!strcmp(t->kind, "null")) {
+                eat(c, "null"); eat(c, ":");
+                emit_a(c, "load_l", "__sw");
+                emit_const(c, "null", 0, 0);
+            } else cerr(c, "case label", 0);
+            emit(c, "eq");
+            jz = emit_i(c, "jumpz", 0);
+            while (!at(c, "case") && !at(c, "default") && !at(c, "}")) {
+                if (at(c, "break")) {
+                    eat(c, "break");
+                    if (at(c, ";")) eat(c, ";");
+                    add_break(c, emit_i(c, "jump", 0));
+                    break;
+                }
+                statement(c);
+            }
+            ends = xrealloc(ends, (nend + 1) * sizeof(int)); ends[nend++] = emit_i(c, "jump", 0);
+            c->code[jz].ai = c->ncode;
+        } else if (at(c, "default")) {
+            eat(c, "default"); eat(c, ":");
+            while (!at(c, "case") && !at(c, "default") && !at(c, "}")) {
+                if (at(c, "break")) {
+                    eat(c, "break");
+                    if (at(c, ";")) eat(c, ";");
+                    add_break(c, emit_i(c, "jump", 0));
+                    break;
+                }
+                statement(c);
+            }
+            ends = xrealloc(ends, (nend + 1) * sizeof(int)); ends[nend++] = emit_i(c, "jump", 0);
+        } else cerr(c, "in switch", 0);
+    }
+    eat(c, "}");
+    end = c->ncode;
+    for (k = 0; k < nend; k++) c->code[ends[k]].ai = end;
+    pop_loop_patch(c, end);
+    free(ends);
+}
+
+static void stmt_return(Comp *c) {
+    eat(c, "return");
+    if (at(c, ";") || at(c, "}")) emit_const(c, "null", 0, 0);
+    else expr(c);
+    if (at(c, ";")) eat(c, ";");
+    emit(c, "ret");
+}
+static void stmt_break(Comp *c) {
+    eat(c, "break");
+    if (at(c, ";")) eat(c, ";");
+    if (!c->nloop) cerr(c, "break outside loop/switch", 0);
+    add_break(c, emit_i(c, "jump", 0));
+}
+static void stmt_continue(Comp *c) {
+    eat(c, "continue");
+    if (at(c, ";")) eat(c, ";");
+    if (!c->nloop || c->loops[c->nloop - 1].cont < 0) cerr(c, "continue outside loop", 0);
+    emit_i(c, "jump", c->loops[c->nloop - 1].cont);
+}
+
+static void stmt_function(Comp *c) {
+    char *name, **params = 0, *rest = 0; int np = 0, k; Comp n; Fn *f;
+    eat(c, "function");
+    name = eat(c, "id")->text;
+    eat(c, "(");
+    while (!at(c, ")")) {
+        if (at(c, "...")) { eat(c, "..."); rest = eat(c, "id")->text; break; }
+        params = xrealloc(params, (np + 1) * sizeof(char *)); params[np++] = eat(c, "id")->text;
+        if (at(c, ",")) eat(c, ",");
+    }
+    eat(c, ")");
+    if (!at(c, "{")) cerr(c, "function body", 0);
+    comp_init(&n, c->whole);                 /* Compiler(self.src, o): lexes this compiler's src again */
+    n.toks = c->toks; n.ntok = c->ntok; n.i = c->i;
+    for (k = 0; k < np; k++) set_add(&n.scopes[0], params[k]);
+    if (rest) set_add(&n.scopes[0], rest);
+    for (k = 0; k < n.scopes[0].n; k++) set_add(&n.local_set, n.scopes[0].v[k]);
+    for (k = 0; k < np; k++) { n.slot = xrealloc(n.slot, (n.nslot + 1) * sizeof(char *)); n.slot[n.nslot++] = sdup(params[k]); }
+    if (rest) { n.slot = xrealloc(n.slot, (n.nslot + 1) * sizeof(char *)); n.slot[n.nslot++] = sdup(rest); }
+    eat(&n, "{");
+    while (!at(&n, "}") && !at(&n, "eof")) statement(&n);
+    eat(&n, "}");
+    end_ret(&n);
+    c->i = n.i;
+    f = mkfn(&n, np, rest, name, 0);         /* no meta["fns"]: functions nested in it are dropped, as in ujs */
+    bind(c, name);
+    map_set(&c->meta_fns, name, f);
+    emit_const(c, "fn", name, 0);
+    emit_a(c, "store_l", name);
+    free(params);
+}
+
+static void statement(Comp *c) {
+    const char *p = pask(c, "stmt");
+    if (!strcmp(p, "block")) { block(c); return; }
+    if (!strcmp(p, "let")) { stmt_let(c); return; }
+    if (!strcmp(p, "if")) { stmt_if(c); return; }
+    if (!strcmp(p, "while")) { stmt_while(c); return; }
+    if (!strcmp(p, "for")) { stmt_for(c); return; }
+    if (!strcmp(p, "switch")) { stmt_switch(c); return; }
+    if (!strcmp(p, "return")) { stmt_return(c); return; }
+    if (!strcmp(p, "break")) { stmt_break(c); return; }
+    if (!strcmp(p, "continue")) { stmt_continue(c); return; }
+    if (!strcmp(p, "fn")) { stmt_function(c); return; }
+    expr(c);
+    if (at(c, ";")) eat(c, ";");
+    emit(c, "drop");
+}
+
+static void expr(Comp *c) { assign(c); }
+
+static void assign(Comp *c) {
+    const char *op; Ins last;
+    ternary(c);
+    if (!(at(c, "=") || at(c, "+=") || at(c, "-=") || at(c, "*=") || at(c, "/="))) return;
+    op = eat(c, 0)->kind;
+    if (!c->ncode) cerr(c, "bad assign", 0);
+    last = c->code[--c->ncode];
+    if (!strcmp(last.op, "idx") && c->ncode && !strcmp(c->code[c->ncode - 1].op, "ic_enter")) c->ncode--;
+    if (strcmp(op, "=")) {
+        static const char *SRC[] = { "+=", "+", "-=", "-", "*=", "*", "/=", "/", 0 };
+        static const char *JOP[] = { "+=", "add", "-=", "sub", "*=", "mul", "/=", "div", 0 };
+        if (!strcmp(last.op, "load_l")) emit_a(c, "load_l", last.a);
+        else if (!strcmp(last.op, "load_g")) emit_a(c, "load_g", last.a);
+        else cerr(c, "compound assign needs name", 0);
+        ternary(c);
+        emit_a(c, "ic_enter", mapop(op, SRC, "?"));
+        emit(c, mapop(op, JOP, "?"));
+    } else ternary(c);
+    if (!strcmp(last.op, "load_l")) { emit_a(c, "store_l", last.a); emit_a(c, "load_l", last.a); }
+    else if (!strcmp(last.op, "load_g")) { emit_a(c, "store_g", last.a); emit_a(c, "load_g", last.a); }
+    else if (!strcmp(last.op, "idx")) { emit_a(c, "ic_enter", "setidx"); emit(c, "setidx"); }
+    else cerr(c, "bad assign target ", last.op);
+}
+
+static void ternary(Comp *c);
+static void binary(Comp *c, int min_prec);
+static void unary(Comp *c);
+
+static void ternary(Comp *c) {
+    int jz, jmp;
+    binary(c, 0);
+    if (at(c, "?")) {
+        eat(c, "?");
+        jz = emit_i(c, "jumpz", 0);
+        assign(c);
+        jmp = emit_i(c, "jump", 0);
+        c->code[jz].ai = c->ncode;
+        eat(c, ":");
+        assign(c);
+        c->code[jmp].ai = c->ncode;
+    }
+}
+
+static int prec(const char *k) {
+    static const char *P[] = { "||", "1", "??", "1", "&&", "2", "==", "3", "!=", "3", "<", "4", ">", "4", "<=", "4", ">=", "4",
+        "in", "4", "+", "5", "-", "5", "*", "6", "/", "6", "%", "6", 0 };
+    const char *v = mapop(k, P, 0);
+    return v ? *v - '0' : -1;
+}
+
+static void binary(Comp *c, int min_prec) {
+    unary(c);
+    while (prec(cur(c)->kind) >= 0 && prec(cur(c)->kind) >= min_prec) {
+        const char *op = eat(c, 0)->kind;
+        binary(c, prec(op) + 1);
+        if (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "*") || !strcmp(op, "/") || !strcmp(op, "%")) {
+            note_binop(c, op);
+            emit_a(c, "ic_enter", op);
+            emit(c, mapop(op, JOP_OF, "?"));
+        } else if (!strcmp(op, "<") || !strcmp(op, ">") || !strcmp(op, "<=") || !strcmp(op, ">=") || !strcmp(op, "==") || !strcmp(op, "!=")) {
+            note_binop(c, op);
+            if (!strcmp(op, "<") || !strcmp(op, "==")) emit_a(c, "ic_enter", op);
+            emit(c, mapop(op, JOP_OF, "?"));
+        } else if (!strcmp(op, "in")) {
+            note_binop(c, "in"); emit_a(c, "ic_enter", "in"); emit(c, "in");
+        } else if (!strcmp(op, "&&")) {
+            note_binop(c, "&&"); emit(c, "and");
+        } else if (!strcmp(op, "||")) {
+            note_binop(c, "||"); emit(c, "or");
+        } else if (!strcmp(op, "??")) {
+            char tr[32], tl[32]; int jz, jmp, s;
+            ask_type(c, "null", "==", "str");
+            ask_isel(c, "typeof");
+            snprintf(tr, sizeof tr, "__nr%d", c->nslot);
+            snprintf(tl, sizeof tl, "__nl%d", c->nslot);
+            bind(c, tr); bind(c, tl);
+            emit_a(c, "store_l", tr); emit_a(c, "store_l", tl);
+            emit_a(c, "load_l", tl); emit(c, "typeof");
+            s = str_id(c, "null", 4); emit_const(c, "str", 0, s);
+            emit(c, "eq");
+            jz = emit_i(c, "jumpz", 0);
+            emit_a(c, "load_l", tr);
+            jmp = emit_i(c, "jump", 0);
+            c->code[jz].ai = c->ncode;
+            emit_a(c, "load_l", tl);
+            c->code[jmp].ai = c->ncode;
+        }
+    }
+}
+
+static void postfix(Comp *c);
+static void primary(Comp *c);
+
+static void unary(Comp *c) {
+    const char *p = pask(c, "unary");
+    if (!strcmp(p, "neg")) { eat(c, "-"); unary(c); emit_const(c, "i64", "-1", 0); emit(c, "mul"); return; }
+    if (!strcmp(p, "not")) { eat(c, "!"); unary(c); emit(c, "not"); return; }
+    if (!strcmp(p, "spread")) { eat(c, "..."); unary(c); emit(c, "spread"); return; }
+    if (!strcmp(p, "typeof")) { eat(c, "typeof"); unary(c); emit(c, "typeof"); return; }
+    postfix(c);
+}
+
+static void postfix(Comp *c) {
+    primary(c);
+    for (;;) {
+        const char *p = pask(c, "postfix");
+        if (!strcmp(p, "index")) {
+            eat(c, "["); expr(c); eat(c, "]");
+            emit_a(c, "ic_enter", "idx"); emit(c, "idx");
+        } else if (!strcmp(p, "call")) {
+            int argc = 0, spread = 0;
+            eat(c, "(");
+            while (!at(c, ")")) {
+                if (at(c, "...")) {
+                    if (spread) cerr(c, "multiple spreads in call", 0);
+                    eat(c, "...");
+                    expr(c);
+                    spread = 1;
+                    if (at(c, ",")) cerr(c, "spread must be last call argument", 0);
+                    break;
+                }
+                expr(c);
+                argc++;
+                if (at(c, ",")) eat(c, ",");
+            }
+            eat(c, ")");
+            emit_a(c, "ic_enter", "call");
+            emit_i(c, "call", spread ? 128 + argc : argc);
+        } else if (!strcmp(p, "dot")) {
+            char *name;
+            eat(c, ".");
+            name = eat(c, "id")->text;
+            emit_a(c, "ic_enter", "dot");
+            emit_a(c, "dot", name);
+        } else break;
+    }
+}
+
+static void primary(Comp *c) {
+    const char *p = pask(c, "primary");
+    if (!strcmp(p, "ident")) {
+        char *name = eat(c, "id")->text;
+        if (at(c, "=>")) { char *ps[1]; ps[0] = name; arrow_fn(c, ps, 1, 0); return; }
+        if ((!strcmp(name, "len") || !strcmp(name, "keys")) && at(c, "(")) {
+            eat(c, "("); expr(c); eat(c, ")");
+            if (!strcmp(name, "len")) emit_a(c, "ic_enter", "len");
+            emit(c, !strcmp(name, "len") ? "len" : "keys");
+            return;
+        }
+        emit_a(c, resolve_local(c, name) ? "load_l" : "load_g", name);
+        return;
+    }
+    if (!strcmp(p, "number")) {
+        Tok *t = eat(c, "num");
+        if (t->isfloat) { char *f = float_text(t->text); emit_const(c, "f64", f, 0); free(f); }
+        else { char *v = int_text(t->text); emit_const(c, "i64", v, 0); free(v); }
+        return;
+    }
+    if (!strcmp(p, "string")) { Tok *t = eat(c, "str"); emit_const(c, "str", 0, str_id(c, t->text, t->tlen)); return; }
+    if (!strcmp(p, "null")) { eat(c, "null"); emit_const(c, "null", 0, 0); return; }
+    if (!strcmp(p, "true")) { eat(c, "true"); emit_const(c, "bool", 0, 1); return; }
+    if (!strcmp(p, "false")) { eat(c, "false"); emit_const(c, "bool", 0, 0); return; }
+    if (!strcmp(p, "list")) {
+        int n = 0;
+        eat(c, "[");
+        while (!at(c, "]")) { expr(c); n++; if (at(c, ",")) eat(c, ","); }
+        eat(c, "]");
+        emit_i(c, "mklist", n);
+        return;
+    }
+    if (!strcmp(p, "dict")) {
+        int n = 0;
+        eat(c, "{");
+        while (!at(c, "}")) {
+            Tok *k;
+            if (at(c, "str")) k = eat(c, "str");
+            else if (at(c, "id")) k = eat(c, "id");
+            else cerr(c, "dict key", 0);
+            emit_const(c, "str", 0, str_id(c, k->text, k->tlen));
+            eat(c, ":");
+            expr(c);
+            n++;
+            if (at(c, ",")) eat(c, ",");
+        }
+        eat(c, "}");
+        emit_i(c, "mkdict", n);
+        return;
+    }
+    if (!strcmp(p, "paren")) {
+        eat(c, "(");
+        if (at(c, ")")) {
+            eat(c, ")");
+            if (at(c, "=>")) { arrow_fn(c, 0, 0, 0); return; }
+            cerr(c, "empty paren", 0);
+        }
+        if (at(c, "id") || at(c, "...")) {
+            int save = c->i, ok = 1, np = 0; char **ps = 0, *rest = 0;
+            while (!at(c, ")")) {
+                if (at(c, "...")) {
+                    eat(c, "...");
+                    rest = eat(c, "id")->text;
+                    ps = xrealloc(ps, (np + 1) * sizeof(char *)); ps[np++] = rest;
+                    break;
+                }
+                if (!at(c, "id")) { ok = 0; break; }
+                ps = xrealloc(ps, (np + 1) * sizeof(char *)); ps[np++] = eat(c, "id")->text;
+                if (at(c, ",")) eat(c, ",");
+                else if (!at(c, ")")) { ok = 0; break; }
+            }
+            if (ok && at(c, ")")) {
+                eat(c, ")");
+                if (at(c, "=>")) { arrow_fn(c, ps, np, rest); free(ps); return; }
+            }
+            free(ps);
+            c->i = save;
+        }
+        expr(c);
+        eat(c, ")");
+        return;
+    }
+    { char m[96]; snprintf(m, sizeof m, "primary near %s", cur(c)->kind); cerr(c, m, 0); }
+}
+
+static void arrow_fn(Comp *c, char **params, int np, const char *rest) {
+    char name[32]; Comp n; FnMap *inner; Fn *f; int k;
+    eat(c, "=>");
+    snprintf(name, sizeof name, "__arrow%d", c->meta_fns.n);
+    comp_init(&n, 0);                        /* Compiler("", o): lexes "" (one lex ask) */
+    n.toks = c->toks; n.ntok = c->ntok; n.i = c->i;
+    for (k = 0; k < np; k++) bind(&n, params[k]);
+    if (at(c, "{")) {
+        eat(&n, "{");
+        push_scope(&n);
+        while (!at(&n, "}")) statement(&n);
+        eat(&n, "}");
+        pop_scope(&n);
+    } else { expr(&n); emit(&n, "ret"); }
+    end_ret(&n);
+    c->i = n.i;
+    inner = calloc(1, sizeof(FnMap)); if (!inner) oom();
+    *inner = n.meta_fns;
+    f = mkfn(&n, np - (rest ? 1 : 0), rest, name, inner);
+    for (k = 0; k < n.nstr; k++) str_id(c, n.str[k].p, n.str[k].n);
+    map_set(&c->meta_fns, name, f);
+    emit_const(c, "fn", name, 0);
+}
+
+static Fn *compile_src(void) {
+    Comp c; Fn *f; FnMap *top;
+    comp_init(&c, 1);
+    g_toks = c.toks; g_ntok = c.ntok;
+    while (!at(&c, "eof")) statement(&c);
+    end_ret(&c);
+    top = calloc(1, sizeof(FnMap)); if (!top) oom();
+    *top = c.meta_fns;
+    f = mkfn(&c, 0, 0, 0, top);
+    return f;
+}
+
+/* ======================================================================================================
+   flows select + encode: m4/emit.py over ujs/seed/construct/emit_wasm.py (can_emit_direct, emit_wat)
+   ====================================================================================================== */
+#define TAG_LIST 5
+#define TAG_DICT 6
+#define TAG_FN 7
+#define TAG_TUP 8
+#define LOCALS0 589824
+#define SAVE0 590080
+#define GMAP0 590800
+#define LMAP0 591824
+#define STRDATA0 593000
+
+static const char *imm_of(Ins *x) {
+    const char *op = x->op;
+    if (!strcmp(op, "const")) {
+        const char *a = x->a;
+        return !strcmp(a, "i64") ? "i64" : !strcmp(a, "f64") ? "f64" : !strcmp(a, "bool") ? "bool" : !strcmp(a, "str") ? "str_ix" : "none";
+    }
+    if (!strcmp(op, "load_l") || !strcmp(op, "store_l") || !strcmp(op, "load_g") || !strcmp(op, "store_g")) return "slot";
+    if (!strcmp(op, "jump") || !strcmp(op, "jumpz") || !strcmp(op, "jumpnz")) return "label";
+    if (!strcmp(op, "mklist") || !strcmp(op, "mkdict") || !strcmp(op, "mktup") || !strcmp(op, "call")) return "count";
+    if (!strcmp(op, "dot")) return "str_ix";
+    return "none";
+}
+
+static int g_emit_ins;            /* the instruction index being emitted, for positions */
+static const char *g_emit_fn = "main";
+static void erefuse(const char *why) {
+    char m[700]; snprintf(m, sizeof m, "%s (function %s, instruction %d)", why, g_emit_fn, g_emit_ins);
+    refuse_at(0, m);
+}
+static const char *eask(const char *net, const char *a, const char *b) {
+    const char *r = b ? fn_ask2(net, a, b) : fn_ask1(net, a);
+    if (!r) erefuse(fn_error());
+    return r;
+}
+
+/* ujs _check_isel: every op needs a non-trap isel form and a non-trap enc template */
+static void check_isel(Fn *f, const char *fname) {
+    int k;
+    g_emit_fn = fname;
+    for (k = 0; k < f->ncode; k++) {
+        const char *form, *t; char m[160];
+        g_emit_ins = k;
+        form = eask("isel", f->code[k].op, 0);
+        if (!strcmp(form, "trap")) { snprintf(m, sizeof m, "direct emit not covered: isel trap for op %s", f->code[k].op); erefuse(m); }
+        t = eask("enc", form, imm_of(&f->code[k]));
+        if (!strcmp(t, "trap")) { snprintf(m, sizeof m, "direct emit not covered: enc trap form=%s imm=%s op=%s", form, imm_of(&f->code[k]), f->code[k].op); erefuse(m); }
+    }
+}
+static const char *UNSUPPORTED[] = { "print", "spread", "restpack", "keys", "in", "shapeof", "switch", 0 };
+static void can_emit_direct(Fn *f) {
+    int k, j; char m[96];
+    check_isel(f, "main");
+    if (f->fns) for (j = 0; j < f->fns->n; j++) check_isel(f->fns->fn[j], f->fns->name[j]);
+    g_emit_fn = "main";
+    for (k = 0; k < f->ncode; k++)
+        if (in_list(f->code[k].op, UNSUPPORTED)) { g_emit_ins = k; snprintf(m, sizeof m, "direct emit not covered: emit gap %s", f->code[k].op); erefuse(m); }
+    if (f->fns) for (j = 0; j < f->fns->n; j++) {
+        Fn *n = f->fns->fn[j];
+        g_emit_fn = f->fns->name[j];
+        for (k = 0; k < n->ncode; k++)
+            if (in_list(n->code[k].op, UNSUPPORTED)) { g_emit_ins = k; snprintf(m, sizeof m, "direct emit not covered: emit gap %s", n->code[k].op); erefuse(m); }
+    }
+}
+
+/* m4 _LEGAL_ENC: the pinned template(s) per op; an op not listed is not claimed */
+static const char *LEGAL_ENC[] = {
+    "nop", "empty", "drop", "empty", "ic_enter", "empty",
+    "const", "op op_imm",
+    "load_l", "op_slot", "load_g", "op_slot", "store_l", "op_slot", "store_g", "op_slot",
+    "jump", "op_label", "jumpz", "op_label", "jumpnz", "op_label",
+    "mklist", "op_imm", "mkdict", "op_imm", "dot", "op_imm",
+    "call", "op", "ret", "op", "typeof", "op",
+    "idx", "op", "len", "op", "setidx", "op",
+    "add", "op", "sub", "op", "mul", "op", "div", "op", "mod", "op",
+    "lt", "op", "le", "op", "gt", "op", "ge", "op", "eq", "op", "ne", "op",
+    "and", "op", "or", "op", "not", "op", 0 };
+/* m4 _LEGAL_FORM: the isel forms per family op; eq/ne take the contract's choice */
+static const char *LEGAL_FORM[] = {
+    "add", "poly_bin", "sub", "i64_bin", "mul", "i64_bin", "mod", "i64_bin", "div", "f64_bin",
+    "lt", "i64_cmp", "le", "i64_cmp", "gt", "i64_cmp", "ge", "i64_cmp",
+    "and", "bool_logic", "or", "bool_logic", 0 };
+static const char *FAMILY_OPS[] = { "add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne", "and", "or", 0 };
+
+static void enc_gate(Ins *x) {
+    const char *legal = mapop(x->op, LEGAL_ENC, 0), *form, *t; char what[160];
+    if (!legal) { snprintf(what, sizeof what, "no pinned enc template for op %s", x->op); erefuse(what); }
+    form = eask("isel", x->op, 0);
+    t = eask("enc", form, imm_of(x));
+    snprintf(what, sizeof what, "enc for %s (form %s)", x->op, form);
+    if (fn_gate("enc", t, legal, what)) erefuse(fn_error());
+}
+
+/* Python's dict {name: i for i, name in enumerate(list)}: the last index of NAME, -1 */
+static int last_index(char **v, int n, const char *name) {
+    int i, r = -1;
+    for (i = 0; i < n; i++) if (!strcmp(v[i], name)) r = i;
+    return r;
+}
+static int is_slot_op(const char *op) { return !strcmp(op, "load_l") || !strcmp(op, "store_l") || !strcmp(op, "load_g") || !strcmp(op, "store_g"); }
+
+/* _slot_names: the local slots, then names first loaded or stored */
+static char **slot_names(Fn *f, int *n) {
+    char **v = xrealloc(0, (f->nslot + f->ncode + 1) * sizeof(char *)); int k, m = 0;
+    for (k = 0; k < f->nslot; k++) v[m++] = f->slot[k];
+    for (k = 0; k < f->ncode; k++)
+        if (is_slot_op(f->code[k].op) && f->code[k].a && last_index(v, m, f->code[k].a) < 0) v[m++] = f->code[k].a;
+    *n = m;
+    return v;
+}
+
+typedef struct { int off, len; } Off;
+typedef struct { Str *s; int n; } Strings;
+static int strings_index(Strings *S, const char *p, int n) {
+    int i;
+    for (i = 0; i < S->n; i++) if (S->s[i].n == n && !memcmp(S->s[i].p, p, n)) return i;
+    return -1;
+}
+static void strings_add(Strings *S, const char *p, int n) {
+    if (strings_index(S, p, n) >= 0) return;
+    S->s = xrealloc(S->s, (S->n + 1) * sizeof(Str)); S->s[S->n].p = (char *)p; S->s[S->n].n = n; S->n++;
+}
+
+/* _normalize: string constants and dot names become indices into the module's string list */
+static Fn *normalize(Fn *f, Strings *S) {
+    Fn *g = calloc(1, sizeof(Fn)); int k;
+    if (!g) oom();
+    *g = *f;
+    g->code = xrealloc(0, (f->ncode + 1) * sizeof(Ins));
+    for (k = 0; k < f->ncode; k++) {
+        Ins x = f->code[k];
+        if (!strcmp(x.op, "const") && !strcmp(x.a, "str")) {
+            Str *s = &f->str[x.bi];
+            x.bi = strings_index(S, s->p, s->n);
+        } else if (!strcmp(x.op, "dot") && x.a) {
+            x.ai = strings_index(S, x.a, (int)strlen(x.a)); x.a = 0;
+        }
+        g->code[k] = x;
+    }
+    g->slot = slot_names(f, &g->nslot);
+    return g;
+}
+
+/* "\n".join(parts) */
+typedef struct { Buf b; int n; } Parts;
+static void pp(Parts *p, const char *s) { if (p->n++) bs(&p->b, "\n"); bs(&p->b, s); }
+static void ppf(Parts *p, const char *fmt, long a, long b) { char t[512]; snprintf(t, sizeof t, fmt, a, b); pp(p, t); }
+
+static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *name) {
+    Parts P; int k, n = f->ncode, nparams = f->nparams, rest_ix = -1; char t[512];
+    memset(&P, 0, sizeof P);
+    g_emit_fn = name;
+#define LA(nm) (snprintf(la, sizeof la, "(i32.add (i32.const %d) (i32.const %d))", LOCALS0, last_index(f->slot, f->nslot, nm) * 4), la)
+    if (f->rest && last_index(f->slot, f->nslot, f->rest) >= 0) rest_ix = last_index(f->slot, f->nslot, f->rest);
+    snprintf(t, sizeof t, "(func $%s (result i32)", name); pp(&P, t);
+    pp(&P, "(local $pc i32) (local $a i32) (local $b i32) (local $c i32)");
+    pp(&P, "(local $i i32) (local $p i32) (local $t i32) (local $nn i32)");
+    if (strcmp(name, "main_body")) {
+        int pi;
+        pp(&P, "(local.set $nn (global.get $call_argc))");
+        for (pi = 0; pi < nparams; pi++) {
+            snprintf(t, sizeof t, "(i32.store (i32.add (i32.const %d) (i32.const %d)) (i32.load (i32.add (i32.const %d) (i32.const %d))))",
+                     LOCALS0, pi * 4, SAVE0 + 256, pi * 4);
+            pp(&P, t);
+        }
+        if (rest_ix >= 0) {
+            char r[2000];
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $i (i32.sub (local.get $nn) (i32.const %d)))\n"
+                "          (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.const 0))))\n"
+                "          (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 4)))))\n"
+                "          (i32.store8 (local.get $p) (i32.const %d))\n"
+                "          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $i))\n"
+                "          (local.set $t (i32.const 0))\n"
+                "          (block $rd (loop $RL\n"
+                "            (br_if $rd (i32.ge_u (local.get $t) (local.get $i)))\n"
+                "            (i32.store (i32.add (i32.add (local.get $p) (i32.const 8)) (i32.mul (local.get $t) (i32.const 4)))\n"
+                "              (i32.load (i32.add (i32.const %d)\n"
+                "                (i32.mul (i32.add (local.get $t) (i32.const %d)) (i32.const 4)))))\n"
+                "            (local.set $t (i32.add (local.get $t) (i32.const 1)))\n"
+                "            (br $RL)))\n"
+                "          (i32.store (i32.add (i32.const %d) (i32.const %d)) (local.get $p))\n",
+                nparams, TAG_LIST, SAVE0 + 256, nparams, LOCALS0, rest_ix * 4);
+            pp(&P, r);
+        }
+    }
+    pp(&P, "(local.set $pc (i32.const 0))");
+    pp(&P, "(loop $dispatch");
+    for (k = n - 1; k >= 0; k--) { snprintf(t, sizeof t, "(block $bb%d", k); pp(&P, t); }
+    pp(&P, "(block $trap");
+    pp(&P, "(local.get $pc)");
+    {
+        Buf bt; memset(&bt, 0, sizeof bt); bs(&bt, "(br_table ");
+        for (k = 0; k < n; k++) { bi(&bt, k + 1); bs(&bt, " "); }
+        bs(&bt, "0)");
+        pp(&P, bt.s); free(bt.s);
+    }
+    pp(&P, ") (unreachable)");
+    for (k = 0; k < n; k++) {
+        Ins *x = &f->code[k]; const char *op = x->op; char la[96], npc[96];
+        g_emit_ins = k;
+        snprintf(npc, sizeof npc, "(i32.const %d) (local.set $pc) (br $dispatch)", k + 1);
+        pp(&P, ")");
+        enc_gate(x);
+        if (!strcmp(op, "nop") || !strcmp(op, "ic_enter")) pp(&P, npc);
+        else if (!strcmp(op, "const")) {
+            const char *a = x->a;
+            if (!strcmp(a, "null")) pp(&P, "(call $push (i32.const 0))");
+            else if (!strcmp(a, "bool")) ppf(&P, "(call $push (call $mk_bool (i32.const %ld)))", x->bi ? 1 : 0, 0);
+            else if (!strcmp(a, "i64")) { snprintf(t, sizeof t, "(call $push (call $mk_i64 (i64.const %s)))", x->b); pp(&P, t); }
+            else if (!strcmp(a, "f64")) { snprintf(t, sizeof t, "(call $push (call $mk_f64 (f64.const %s)))", x->b); pp(&P, t); }
+            else if (!strcmp(a, "str")) ppf(&P, "(call $push (call $mk_str (i32.const %ld) (i32.const %ld)))", so[x->bi].off, so[x->bi].len);
+            else if (!strcmp(a, "fn")) {
+                int q, ix = -1;
+                for (q = 0; q < nfn; q++) if (!strcmp(fnames[q], x->b)) ix = q;
+                if (ix < 0) { snprintf(t, sizeof t, "not covered: function %.60s is not a top-level function of the module (ujs drops nested ones)", x->b); erefuse(t); }
+                ppf(&P, "(call $push (call $mk_fn (i32.const %ld)))", ix, 0);
+            } else { snprintf(t, sizeof t, "const %.60s", a); erefuse(t); }
+            pp(&P, npc);
+        } else if (!strcmp(op, "load_l") || !strcmp(op, "load_g")) {
+            snprintf(t, sizeof t, "(call $push (i32.load %s))", LA(x->a)); pp(&P, t); pp(&P, npc);
+        } else if (!strcmp(op, "store_l") || !strcmp(op, "store_g")) {
+            snprintf(t, sizeof t, "(i32.store %s (call $pop))", LA(x->a)); pp(&P, t); pp(&P, npc);
+        } else if (!strcmp(op, "drop")) { pp(&P, "(drop (call $pop))"); pp(&P, npc); }
+        else if (in_list(op, FAMILY_OPS)) {
+            /* the form is the net's (isel); this only maps a legal form to its runtime helper */
+            const char *form = eask("isel", op, 0), *legal = fn_choice("isel", op); char what[96];
+            if (!legal) legal = mapop(op, LEGAL_FORM, "");
+            snprintf(what, sizeof what, "isel form for %s", op);
+            if (fn_gate("isel", form, legal, what)) erefuse(fn_error());
+            pp(&P, "(local.set $b (call $pop)) (local.set $a (call $pop))");
+            if (!strcmp(form, "poly_bin")) pp(&P, "(call $push (call $op_add (local.get $a) (local.get $b)))");
+            else if (!strcmp(form, "i64_bin") || !strcmp(form, "f64_bin")) {
+                int code = !strcmp(op, "sub") ? 0 : !strcmp(op, "mul") ? 1 : !strcmp(op, "div") ? 2 : !strcmp(op, "mod") ? 3 : -1;
+                if (code < 0) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
+                ppf(&P, "(call $push (call $op_bin (i32.const %ld) (local.get $a) (local.get $b)))", code, 0);
+            } else if (!strcmp(form, "i64_cmp")) {
+                int code = !strcmp(op, "lt") ? 0 : !strcmp(op, "le") ? 1 : !strcmp(op, "gt") ? 2 : !strcmp(op, "ge") ? 3 : !strcmp(op, "eq") ? 4 : !strcmp(op, "ne") ? 5 : -1;
+                if (code < 0) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
+                ppf(&P, "(call $push (call $op_cmp (i32.const %ld) (local.get $a) (local.get $b)))", code, 0);
+            } else if (!strcmp(form, "f64_cmp")) {
+                /* the contract's second form: different WAT (f64 compare, then box); gold never picks it */
+                const char *pred = !strcmp(op, "eq") ? "f64.eq" : !strcmp(op, "ne") ? "f64.ne" : 0;
+                if (!pred) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
+                snprintf(t, sizeof t, "(call $push (call $mk_bool (%s (call $as_f64 (local.get $a)) (call $as_f64 (local.get $b)))))", pred);
+                pp(&P, t);
+            } else if (!strcmp(form, "bool_logic")) {
+                const char *fnm = !strcmp(op, "and") ? "i32.and" : !strcmp(op, "or") ? "i32.or" : 0;
+                if (!fnm) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
+                snprintf(t, sizeof t, "(call $push (call $mk_bool (%s (call $truthy (local.get $a)) (call $truthy (local.get $b)))))", fnm);
+                pp(&P, t);
+            } else { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
+            pp(&P, npc);
+        } else if (!strcmp(op, "not")) {
+            pp(&P, "(local.set $a (call $pop))");
+            pp(&P, "(call $push (call $mk_bool (i32.eqz (call $truthy (local.get $a)))))");
+            pp(&P, npc);
+        } else if (!strcmp(op, "jump")) ppf(&P, "(i32.const %ld) (local.set $pc) (br $dispatch)", x->ai, 0);
+        else if (!strcmp(op, "jumpz") || !strcmp(op, "jumpnz")) {
+            pp(&P, "(local.set $a (call $pop))");
+            if (!strcmp(op, "jumpz")) ppf(&P, "(if (i32.eqz (call $truthy (local.get $a))) (then (i32.const %ld) (local.set $pc) (br $dispatch)))", x->ai, 0);
+            else ppf(&P, "(if (call $truthy (local.get $a)) (then (i32.const %ld) (local.set $pc) (br $dispatch)))", x->ai, 0);
+            pp(&P, npc);
+        } else if (!strcmp(op, "ret")) pp(&P, "(return (call $pop))");
+        else if (!strcmp(op, "mklist") || !strcmp(op, "mktup")) {
+            char r[1200];
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $nn (i32.const %ld))\n"
+                "          (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 4)))))\n"
+                "          (i32.store8 (local.get $p) (i32.const %d))\n"
+                "          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $nn))\n"
+                "          (local.set $i (local.get $nn))\n"
+                "          (block $done (loop $L\n"
+                "            (br_if $done (i32.eqz (local.get $i)))\n"
+                "            (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n"
+                "            (i32.store (i32.add (i32.add (local.get $p) (i32.const 8)) (i32.mul (local.get $i) (i32.const 4))) (call $pop))\n"
+                "            (br $L)))\n"
+                "          (call $push (local.get $p))\n",
+                x->ai, !strcmp(op, "mklist") ? TAG_LIST : TAG_TUP);
+            pp(&P, r); pp(&P, npc);
+        } else if (!strcmp(op, "mkdict")) {
+            char r[1400];
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $nn (i32.const %ld))\n"
+                "          (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 8)))))\n"
+                "          (i32.store8 (local.get $p) (i32.const %d))\n"
+                "          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $nn))\n"
+                "          (local.set $i (local.get $nn))\n"
+                "          (block $done (loop $L\n"
+                "            (br_if $done (i32.eqz (local.get $i)))\n"
+                "            (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n"
+                "            (local.set $b (call $pop)) (local.set $a (call $pop))\n"
+                "            (i32.store (i32.add (i32.add (local.get $p) (i32.const 8)) (i32.mul (local.get $i) (i32.const 8))) (local.get $a))\n"
+                "            (i32.store (i32.add (i32.add (i32.add (local.get $p) (i32.const 8)) (i32.mul (local.get $i) (i32.const 8))) (i32.const 4)) (local.get $b))\n"
+                "            (br $L)))\n"
+                "          (call $push (local.get $p))\n",
+                x->ai, TAG_DICT);
+            pp(&P, r); pp(&P, npc);
+        } else if (!strcmp(op, "len")) {
+            pp(&P, "(local.set $a (call $pop))");
+            pp(&P, "(call $push (call $mk_i64 (i64.extend_i32_u (call $len_of (local.get $a)))))");
+            pp(&P, npc);
+        } else if (!strcmp(op, "idx")) {
+            char r[1200];
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $b (call $pop)) (local.set $a (call $pop))\n"
+                "          (local.set $t (call $tag_of (local.get $a)))\n"
+                "          (if (i32.or (i32.eq (local.get $t) (i32.const %d))\n"
+                "                      (i32.eq (local.get $t) (i32.const %d)))\n"
+                "            (then (call $push (i32.load (i32.add (i32.add (local.get $a) (i32.const 8))\n"
+                "              (i32.mul (i32.wrap_i64 (call $i64_of (local.get $b))) (i32.const 4))))))\n"
+                "            (else (if (i32.eq (local.get $t) (i32.const %d))\n"
+                "              (then (call $push (call $dict_get (local.get $a) (local.get $b))))\n"
+                "              (else (unreachable)))))\n",
+                TAG_LIST, TAG_TUP, TAG_DICT);
+            pp(&P, r); pp(&P, npc);
+        } else if (!strcmp(op, "setidx")) {
+            char r[1400];
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $c (call $pop)) (local.set $b (call $pop)) (local.set $a (call $pop))\n"
+                "          (local.set $t (call $tag_of (local.get $a)))\n"
+                "          (if (i32.or (i32.eq (local.get $t) (i32.const %d))\n"
+                "                      (i32.eq (local.get $t) (i32.const %d)))\n"
+                "            (then (i32.store (i32.add (i32.add (local.get $a) (i32.const 8))\n"
+                "              (i32.mul (i32.wrap_i64 (call $i64_of (local.get $b))) (i32.const 4))) (local.get $c)))\n"
+                "            (else (if (i32.eq (local.get $t) (i32.const %d))\n"
+                "              (then (call $dict_set (local.get $a) (local.get $b) (local.get $c)))\n"
+                "              (else (unreachable)))))\n"
+                "          (call $push (local.get $c))\n",
+                TAG_LIST, TAG_TUP, TAG_DICT);
+            pp(&P, r); pp(&P, npc);
+        } else if (!strcmp(op, "dot")) {
+            char r[600];
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $a (call $pop))\n"
+                "          (local.set $b (call $mk_str (i32.const %d) (i32.const %d)))\n"
+                "          (call $push (call $dict_get (local.get $a) (local.get $b)))\n",
+                so[x->ai].off, so[x->ai].len);
+            pp(&P, r); pp(&P, npc);
+        } else if (!strcmp(op, "typeof")) {
+            pp(&P, "(local.set $a (call $pop))");
+            pp(&P, "(call $push (call $typeof_name (local.get $a)))");
+            pp(&P, npc);
+        } else if (!strcmp(op, "call")) {
+            long argc = x->ai, ai; char r[2400];
+            for (ai = 0; ai < argc; ai++) {
+                pp(&P, "(local.set $a (call $pop))");
+                ppf(&P, "(i32.store (i32.add (i32.const 590336) (i32.const %ld)) (local.get $a))", (argc - 1 - ai) * 4, 0);
+            }
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $a (call $pop))\n"
+                "          (if (i32.ne (call $tag_of (local.get $a)) (i32.const %d)) (then (unreachable)))\n"
+                "          (local.set $t (i32.load (i32.add (local.get $a) (i32.const 4))))\n"
+                "          (local.set $i (i32.const 0))\n"
+                "          (block $ds (loop $LS\n"
+                "            (br_if $ds (i32.ge_u (local.get $i) (i32.const 64)))\n"
+                "            (i32.store (i32.add (i32.const %d) (i32.mul (local.get $i) (i32.const 4)))\n"
+                "              (i32.load (i32.add (i32.const %d) (i32.mul (local.get $i) (i32.const 4)))))\n"
+                "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+                "            (br $LS)))\n"
+                "          (local.set $i (i32.const 0))\n"
+                "          (block $dc (loop $Lc\n"
+                "            (br_if $dc (i32.ge_u (local.get $i) (i32.const 64)))\n"
+                "            (i32.store (i32.add (i32.const %d) (i32.mul (local.get $i) (i32.const 4))) (i32.const 0))\n"
+                "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+                "            (br $Lc)))\n",
+                TAG_FN, SAVE0, LOCALS0, LOCALS0);
+            pp(&P, r);
+            ppf(&P, "(global.set $call_argc (i32.const %ld))", argc, 0);
+            pp(&P, "(call $push (call $dispatch_fn (local.get $t)))");
+            snprintf(r, sizeof r,
+                "\n"
+                "          (local.set $i (i32.const 0))\n"
+                "          (block $dr (loop $Lr\n"
+                "            (br_if $dr (i32.ge_u (local.get $i) (i32.const 64)))\n"
+                "            (i32.store (i32.add (i32.const %d) (i32.mul (local.get $i) (i32.const 4)))\n"
+                "              (i32.load (i32.add (i32.const %d) (i32.mul (local.get $i) (i32.const 4)))))\n"
+                "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+                "            (br $Lr)))\n",
+                LOCALS0, SAVE0);
+            pp(&P, r);
+            pp(&P, npc);
+        } else { snprintf(t, sizeof t, "emit gap %s", op); erefuse(t); }
+    }
+    pp(&P, "(unreachable)) (unreachable))");
+    badd(out, P.b.s, P.b.n);
+    free(P.b.s);
+#undef LA
+}
+
+/* WAT texts carried verbatim from ujs/seed/construct/emit_wasm.py (_helpers, the _host_api_wat body) and m4/emit.py
+   (the export tail of emit_wat); their constants are already substituted.  HOSTAPI's four %d are, in order: the local
+   map length, the global map length, the local map length, the global map length. */
+static const char *HELPERS =
+    "\n"
+    "  (memory (export \"memory\") 16)\n"
+    "  (global $freep (mut i32) (i32.const 65536))\n"
+    "  (global $sp (mut i32) (i32.const 524288))\n"
+    "  (global $call_argc (mut i32) (i32.const 0))\n"
+    "  (func $alloc (param $n i32) (result i32)\n"
+    "    (local $p i32)\n"
+    "    (local.set $p (global.get $freep))\n"
+    "    (global.set $freep\n"
+    "      (i32.and (i32.add (global.get $freep) (i32.add (local.get $n) (i32.const 7)))\n"
+    "               (i32.const -8)))\n"
+    "    (local.get $p))\n"
+    "  (func $push (param $h i32)\n"
+    "    (i32.store (global.get $sp) (local.get $h))\n"
+    "    (global.set $sp (i32.add (global.get $sp) (i32.const 4))))\n"
+    "  (func $pop (result i32)\n"
+    "    (global.set $sp (i32.sub (global.get $sp) (i32.const 4)))\n"
+    "    (i32.load (global.get $sp)))\n"
+    "  (func $tag_of (param $h i32) (result i32)\n"
+    "    (if (result i32) (i32.eqz (local.get $h))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (i32.load8_u (local.get $h)))))\n"
+    "  (func $len_of (param $h i32) (result i32)\n"
+    "    (if (result i32) (i32.eqz (local.get $h))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (i32.load (i32.add (local.get $h) (i32.const 4))))))\n"
+    "  (func $i64_of (param $h i32) (result i64)\n"
+    "    (i64.load (i32.add (local.get $h) (i32.const 8))))\n"
+    "  (func $mk_i64 (param $v i64) (result i32)\n"
+    "    (local $p i32)\n"
+    "    (local.set $p (call $alloc (i32.const 16)))\n"
+    "    (i32.store8 (local.get $p) (i32.const 2))\n"
+    "    (i64.store (i32.add (local.get $p) (i32.const 8)) (local.get $v))\n"
+    "    (local.get $p))\n"
+    "  (func $mk_f64 (param $v f64) (result i32)\n"
+    "    (local $p i32)\n"
+    "    (local.set $p (call $alloc (i32.const 16)))\n"
+    "    (i32.store8 (local.get $p) (i32.const 3))\n"
+    "    (f64.store (i32.add (local.get $p) (i32.const 8)) (local.get $v))\n"
+    "    (local.get $p))\n"
+    "  (func $f64_of (param $h i32) (result f64)\n"
+    "    (f64.load (i32.add (local.get $h) (i32.const 8))))\n"
+    "  (func $is_num (param $h i32) (result i32)\n"
+    "    (local $t i32)\n"
+    "    (local.set $t (call $tag_of (local.get $h)))\n"
+    "    (i32.or (i32.eq (local.get $t) (i32.const 2))\n"
+    "            (i32.eq (local.get $t) (i32.const 3))))\n"
+    "  (func $as_f64 (param $h i32) (result f64)\n"
+    "    (if (result f64) (i32.eq (call $tag_of (local.get $h)) (i32.const 3))\n"
+    "      (then (call $f64_of (local.get $h)))\n"
+    "      (else (f64.convert_i64_s (call $i64_of (local.get $h))))))\n"
+    "  (func $mk_bool (param $b i32) (result i32)\n"
+    "    (local $p i32)\n"
+    "    (local.set $p (call $alloc (i32.const 8)))\n"
+    "    (i32.store8 (local.get $p) (i32.const 1))\n"
+    "    (i32.store8 (i32.add (local.get $p) (i32.const 4)) (local.get $b))\n"
+    "    (local.get $p))\n"
+    "  (func $mk_str (param $src i32) (param $n i32) (result i32)\n"
+    "    (local $p i32) (local $i i32)\n"
+    "    (local.set $p (call $alloc (i32.add (i32.const 8) (local.get $n))))\n"
+    "    (i32.store8 (local.get $p) (i32.const 4))\n"
+    "    (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $n))\n"
+    "    (local.set $i (i32.const 0))\n"
+    "    (block $done (loop $L\n"
+    "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n"
+    "      (i32.store8\n"
+    "        (i32.add (i32.add (local.get $p) (i32.const 8)) (local.get $i))\n"
+    "        (i32.load8_u (i32.add (local.get $src) (local.get $i))))\n"
+    "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "      (br $L)))\n"
+    "    (local.get $p))\n"
+    "  (func $mk_fn (param $ix i32) (result i32)\n"
+    "    (local $p i32)\n"
+    "    (local.set $p (call $alloc (i32.const 8)))\n"
+    "    (i32.store8 (local.get $p) (i32.const 7))\n"
+    "    (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $ix))\n"
+    "    (local.get $p))\n"
+    "  (func $truthy (param $h i32) (result i32)\n"
+    "    (local $t i32)\n"
+    "    (local.set $t (call $tag_of (local.get $h)))\n"
+    "    (if (result i32) (i32.eq (local.get $t) (i32.const 0))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (if (result i32) (i32.eq (local.get $t) (i32.const 1))\n"
+    "        (then (i32.load8_u (i32.add (local.get $h) (i32.const 4))))\n"
+    "        (else (if (result i32) (i32.eq (local.get $t) (i32.const 2))\n"
+    "          (then (i64.ne (call $i64_of (local.get $h)) (i64.const 0)))\n"
+    "          (else (if (result i32) (i32.eq (local.get $t) (i32.const 3))\n"
+    "            (then (f64.ne (call $f64_of (local.get $h)) (f64.const 0)))\n"
+    "            (else (i32.ne (call $len_of (local.get $h)) (i32.const 0)))))))))))\n"
+    "  (func $str_eq (param $a i32) (param $b i32) (result i32)\n"
+    "    (local $n i32) (local $i i32)\n"
+    "    (local.set $n (call $len_of (local.get $a)))\n"
+    "    (if (i32.ne (local.get $n) (call $len_of (local.get $b)))\n"
+    "      (then (return (i32.const 0))))\n"
+    "    (local.set $i (i32.const 0))\n"
+    "    (block $done (loop $L\n"
+    "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n"
+    "      (if (i32.ne\n"
+    "            (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 8)) (local.get $i)))\n"
+    "            (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 8)) (local.get $i))))\n"
+    "        (then (return (i32.const 0))))\n"
+    "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "      (br $L)))\n"
+    "    (i32.const 1))\n"
+    "  (func $op_add (param $a i32) (param $b i32) (result i32)\n"
+    "    (local $na i32) (local $nb i32) (local $q i32) (local $i i32)\n"
+    "    (if (result i32)\n"
+    "        (i32.and (i32.eq (call $tag_of (local.get $a)) (i32.const 4))\n"
+    "                 (i32.eq (call $tag_of (local.get $b)) (i32.const 4)))\n"
+    "      (then\n"
+    "        (local.set $na (call $len_of (local.get $a)))\n"
+    "        (local.set $nb (call $len_of (local.get $b)))\n"
+    "        (local.set $q (call $alloc (i32.add (i32.const 8) (i32.add (local.get $na) (local.get $nb)))))\n"
+    "        (i32.store8 (local.get $q) (i32.const 4))\n"
+    "        (i32.store (i32.add (local.get $q) (i32.const 4)) (i32.add (local.get $na) (local.get $nb)))\n"
+    "        (local.set $i (i32.const 0))\n"
+    "        (block $c1 (loop $L1\n"
+    "          (br_if $c1 (i32.ge_u (local.get $i) (local.get $na)))\n"
+    "          (i32.store8 (i32.add (i32.add (local.get $q) (i32.const 8)) (local.get $i))\n"
+    "                      (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 8)) (local.get $i))))\n"
+    "          (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "          (br $L1)))\n"
+    "        (local.set $i (i32.const 0))\n"
+    "        (block $c2 (loop $L2\n"
+    "          (br_if $c2 (i32.ge_u (local.get $i) (local.get $nb)))\n"
+    "          (i32.store8 (i32.add (i32.add (i32.add (local.get $q) (i32.const 8)) (local.get $na)) (local.get $i))\n"
+    "                      (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 8)) (local.get $i))))\n"
+    "          (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "          (br $L2)))\n"
+    "        (local.get $q))\n"
+    "      (else (if (result i32)\n"
+    "          (i32.and (i32.eq (call $tag_of (local.get $a)) (i32.const 2))\n"
+    "                   (i32.eq (call $tag_of (local.get $b)) (i32.const 2)))\n"
+    "        (then (call $mk_i64 (i64.add (call $i64_of (local.get $a)) (call $i64_of (local.get $b)))))\n"
+    "        (else (call $mk_f64 (f64.add (call $as_f64 (local.get $a)) (call $as_f64 (local.get $b)))))))))\n"
+    "  (func $op_bin (param $op i32) (param $a i32) (param $b i32) (result i32)\n"
+    "    (local $va i64) (local $vb i64) (local $r i64) (local $fa f64) (local $fb f64) (local $fr f64)\n"
+    "    (if (result i32)\n"
+    "        (i32.and (i32.eq (call $tag_of (local.get $a)) (i32.const 2))\n"
+    "                 (i32.eq (call $tag_of (local.get $b)) (i32.const 2)))\n"
+    "      (then\n"
+    "        (local.set $va (call $i64_of (local.get $a)))\n"
+    "        (local.set $vb (call $i64_of (local.get $b)))\n"
+    "        (local.set $r (i64.const 0))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 0))\n"
+    "          (then (local.set $r (i64.sub (local.get $va) (local.get $vb)))))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 1))\n"
+    "          (then (local.set $r (i64.mul (local.get $va) (local.get $vb)))))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 2))\n"
+    "          (then (local.set $r (i64.div_s (local.get $va) (local.get $vb)))))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 3))\n"
+    "          (then (local.set $r (i64.rem_s (local.get $va) (local.get $vb)))))\n"
+    "        (call $mk_i64 (local.get $r)))\n"
+    "      (else\n"
+    "        (local.set $fa (call $as_f64 (local.get $a)))\n"
+    "        (local.set $fb (call $as_f64 (local.get $b)))\n"
+    "        (local.set $fr (f64.const 0))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 0))\n"
+    "          (then (local.set $fr (f64.sub (local.get $fa) (local.get $fb)))))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 1))\n"
+    "          (then (local.set $fr (f64.mul (local.get $fa) (local.get $fb)))))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 2))\n"
+    "          (then (local.set $fr (f64.div (local.get $fa) (local.get $fb)))))\n"
+    "        (if (i32.eq (local.get $op) (i32.const 3))\n"
+    "          (then (local.set $fr (f64.sub (local.get $fa)\n"
+    "            (f64.mul (local.get $fb) (f64.trunc (f64.div (local.get $fa) (local.get $fb))))))))\n"
+    "        (call $mk_f64 (local.get $fr)))))\n"
+    "  (func $op_cmp (param $op i32) (param $a i32) (param $b i32) (result i32)\n"
+    "    (local $c i32) (local $va i64) (local $vb i64) (local $fa f64) (local $fb f64)\n"
+    "    (local.set $c (i32.const 0))\n"
+    "    (if (result i32)\n"
+    "        (i32.and (i32.eq (call $tag_of (local.get $a)) (i32.const 4))\n"
+    "                 (i32.eq (call $tag_of (local.get $b)) (i32.const 4)))\n"
+    "      (then\n"
+    "        (if (i32.eq (local.get $op) (i32.const 4))\n"
+    "          (then (local.set $c (call $str_eq (local.get $a) (local.get $b))))\n"
+    "          (else (local.set $c (i32.eqz (call $str_eq (local.get $a) (local.get $b))))))\n"
+    "        (call $mk_bool (local.get $c)))\n"
+    "      (else (if (result i32)\n"
+    "          (i32.and (i32.eq (call $tag_of (local.get $a)) (i32.const 2))\n"
+    "                   (i32.eq (call $tag_of (local.get $b)) (i32.const 2)))\n"
+    "        (then\n"
+    "          (local.set $va (call $i64_of (local.get $a)))\n"
+    "          (local.set $vb (call $i64_of (local.get $b)))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 0))\n"
+    "            (then (local.set $c (i64.lt_s (local.get $va) (local.get $vb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 1))\n"
+    "            (then (local.set $c (i64.le_s (local.get $va) (local.get $vb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 2))\n"
+    "            (then (local.set $c (i64.gt_s (local.get $va) (local.get $vb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 3))\n"
+    "            (then (local.set $c (i64.ge_s (local.get $va) (local.get $vb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 4))\n"
+    "            (then (local.set $c (i64.eq (local.get $va) (local.get $vb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 5))\n"
+    "            (then (local.set $c (i64.ne (local.get $va) (local.get $vb)))))\n"
+    "          (call $mk_bool (local.get $c)))\n"
+    "        (else\n"
+    "          (local.set $fa (call $as_f64 (local.get $a)))\n"
+    "          (local.set $fb (call $as_f64 (local.get $b)))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 0))\n"
+    "            (then (local.set $c (f64.lt (local.get $fa) (local.get $fb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 1))\n"
+    "            (then (local.set $c (f64.le (local.get $fa) (local.get $fb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 2))\n"
+    "            (then (local.set $c (f64.gt (local.get $fa) (local.get $fb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 3))\n"
+    "            (then (local.set $c (f64.ge (local.get $fa) (local.get $fb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 4))\n"
+    "            (then (local.set $c (f64.eq (local.get $fa) (local.get $fb)))))\n"
+    "          (if (i32.eq (local.get $op) (i32.const 5))\n"
+    "            (then (local.set $c (f64.ne (local.get $fa) (local.get $fb)))))\n"
+    "          (call $mk_bool (local.get $c)))))))\n"
+    "  (func $dict_get (param $d i32) (param $key i32) (result i32)\n"
+    "    (local $n i32) (local $i i32) (local $k i32)\n"
+    "    (local.set $n (call $len_of (local.get $d)))\n"
+    "    (local.set $i (i32.const 0))\n"
+    "    (block $done (loop $L\n"
+    "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n"
+    "      (local.set $k (i32.load (i32.add (i32.add (local.get $d) (i32.const 8))\n"
+    "                                       (i32.mul (local.get $i) (i32.const 8)))))\n"
+    "      (if (call $str_eq (local.get $k) (local.get $key))\n"
+    "        (then (return (i32.load (i32.add (i32.add (i32.add (local.get $d) (i32.const 8))\n"
+    "                                                  (i32.mul (local.get $i) (i32.const 8)))\n"
+    "                                        (i32.const 4))))))\n"
+    "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "      (br $L)))\n"
+    "    (i32.const 0))\n"
+    "  (func $dict_set (param $d i32) (param $key i32) (param $val i32)\n"
+    "    (local $n i32) (local $i i32) (local $k i32)\n"
+    "    (local.set $n (call $len_of (local.get $d)))\n"
+    "    (local.set $i (i32.const 0))\n"
+    "    (block $done (loop $L\n"
+    "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n"
+    "      (local.set $k (i32.load (i32.add (i32.add (local.get $d) (i32.const 8))\n"
+    "                                       (i32.mul (local.get $i) (i32.const 8)))))\n"
+    "      (if (call $str_eq (local.get $k) (local.get $key))\n"
+    "        (then\n"
+    "          (i32.store (i32.add (i32.add (i32.add (local.get $d) (i32.const 8))\n"
+    "                                       (i32.mul (local.get $i) (i32.const 8)))\n"
+    "                             (i32.const 4)) (local.get $val))\n"
+    "          (return)))\n"
+    "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "      (br $L)))\n"
+    "    (unreachable))\n"
+    "  (func $typeof_name (param $h i32) (result i32)\n"
+    "    (local $t i32) (local $s i32) (local $n i32)\n"
+    "    (local.set $t (call $tag_of (local.get $h)))\n"
+    "    (local.set $s (i32.const 590080))\n"
+    "    (local.set $n (i32.const 0))\n"
+    "    (if (i32.eq (local.get $t) (i32.const 0)) (then\n"
+    "      (i32.store8 (local.get $s) (i32.const 110))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 1)) (i32.const 117))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 2)) (i32.const 108))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 3)) (i32.const 108))\n"
+    "      (local.set $n (i32.const 4))))\n"
+    "    (if (i32.eq (local.get $t) (i32.const 2)) (then\n"
+    "      (i32.store8 (local.get $s) (i32.const 105))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 1)) (i32.const 54))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 2)) (i32.const 52))\n"
+    "      (local.set $n (i32.const 3))))\n"
+    "    (if (i32.eq (local.get $t) (i32.const 4)) (then\n"
+    "      (i32.store8 (local.get $s) (i32.const 115))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 1)) (i32.const 116))\n"
+    "      (i32.store8 (i32.add (local.get $s) (i32.const 2)) (i32.const 114))\n"
+    "      (local.set $n (i32.const 3))))\n"
+    "    (call $mk_str (local.get $s) (local.get $n)))\n"
+    "";
+static const char *HOSTAPI =
+    "\n"
+    "  ;; clear/set slots used by load_g/store_g (and locals): flat LOCALS0 table\n"
+    "  (func $clear_slots (result i32)\n"
+    "    (local $i i32)\n"
+    "    (local.set $i (i32.const 0))\n"
+    "    (block $c (loop $L\n"
+    "      (br_if $c (i32.ge_u (local.get $i) (i32.const 64)))\n"
+    "      (i32.store (i32.add (i32.const 589824) (i32.mul (local.get $i) (i32.const 4))) (i32.const 0))\n"
+    "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "      (br $L)))\n"
+    "    (i32.const 0))\n"
+    "  (func $host_reset (result i32)\n"
+    "    (global.set $freep (i32.const 65536))\n"
+    "    (global.set $sp (i32.const 524288))\n"
+    "    (call $clear_slots))\n"
+    "  ;; run body without wiping injected slots / heap (sp only)\n"
+    "  (func $run_step (result i32)\n"
+    "    (global.set $sp (i32.const 524288))\n"
+    "    (call $main_body))\n"
+    "  (func $host_run (result i32) (call $run_step))\n"
+    "  (func $host_set_local (param $i i32) (param $h i32)\n"
+    "    (if (i32.ge_u (local.get $i) (i32.const %d)) (then (return)))\n"
+    "    (i32.store\n"
+    "      (i32.add (i32.const 589824)\n"
+    "        (i32.mul (i32.load (i32.add (i32.const 591824)\n"
+    "          (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))\n"
+    "      (local.get $h)))\n"
+    "  (func $host_set_global (param $i i32) (param $h i32)\n"
+    "    (if (i32.ge_u (local.get $i) (i32.const %d)) (then (return)))\n"
+    "    (i32.store\n"
+    "      (i32.add (i32.const 589824)\n"
+    "        (i32.mul (i32.load (i32.add (i32.const 590800)\n"
+    "          (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))\n"
+    "      (local.get $h)))\n"
+    "  (func $host_get_local (param $i i32) (result i32)\n"
+    "    (if (result i32) (i32.ge_u (local.get $i) (i32.const %d))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (i32.load\n"
+    "        (i32.add (i32.const 589824)\n"
+    "          (i32.mul (i32.load (i32.add (i32.const 591824)\n"
+    "            (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))))))\n"
+    "  (func $host_get_global (param $i i32) (result i32)\n"
+    "    (if (result i32) (i32.ge_u (local.get $i) (i32.const %d))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (i32.load\n"
+    "        (i32.add (i32.const 589824)\n"
+    "          (i32.mul (i32.load (i32.add (i32.const 590800)\n"
+    "            (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))))))\n"
+    "  (func $host_mk_null (result i32) (i32.const 0))\n"
+    "  (func $host_mk_bool (param $b i32) (result i32) (call $mk_bool (local.get $b)))\n"
+    "  (func $host_mk_i64 (param $v i64) (result i32) (call $mk_i64 (local.get $v)))\n"
+    "  (func $host_mk_f64 (param $v f64) (result i32) (call $mk_f64 (local.get $v)))\n"
+    "  (func $host_mk_str (param $ptr i32) (param $n i32) (result i32)\n"
+    "    (call $mk_str (local.get $ptr) (local.get $n)))\n"
+    "  (func $host_mk_list (param $n i32) (result i32)\n"
+    "    (local $p i32) (local $i i32)\n"
+    "    (if (result i32) (i32.gt_u (local.get $n) (i32.const 4096))\n"
+    "      (then (i32.const 0))\n"
+    "      (else\n"
+    "        (local.set $p (call $alloc (i32.add (i32.const 8)\n"
+    "          (i32.mul (local.get $n) (i32.const 4)))))\n"
+    "        (i32.store8 (local.get $p) (i32.const 5))\n"
+    "        (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $n))\n"
+    "        (local.set $i (i32.const 0))\n"
+    "        (block $done (loop $L\n"
+    "          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n"
+    "          (i32.store (i32.add (i32.add (local.get $p) (i32.const 8))\n"
+    "            (i32.mul (local.get $i) (i32.const 4))) (i32.const 0))\n"
+    "          (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "          (br $L)))\n"
+    "        (local.get $p))))\n"
+    "  (func $host_list_set (param $h i32) (param $i i32) (param $v i32)\n"
+    "    (if (i32.ne (call $tag_of (local.get $h)) (i32.const 5)) (then (return)))\n"
+    "    (if (i32.ge_u (local.get $i) (call $len_of (local.get $h))) (then (return)))\n"
+    "    (i32.store (i32.add (i32.add (local.get $h) (i32.const 8))\n"
+    "      (i32.mul (local.get $i) (i32.const 4))) (local.get $v)))\n"
+    "  (func $host_list_get (param $h i32) (param $i i32) (result i32)\n"
+    "    (if (result i32) (i32.ne (call $tag_of (local.get $h)) (i32.const 5))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (if (result i32) (i32.ge_u (local.get $i) (call $len_of (local.get $h)))\n"
+    "        (then (i32.const 0))\n"
+    "        (else (i32.load (i32.add (i32.add (local.get $h) (i32.const 8))\n"
+    "          (i32.mul (local.get $i) (i32.const 4)))))))))\n"
+    "  (func $host_mk_dict (param $n i32) (result i32)\n"
+    "    (local $p i32) (local $i i32)\n"
+    "    (if (result i32) (i32.gt_u (local.get $n) (i32.const 4096))\n"
+    "      (then (i32.const 0))\n"
+    "      (else\n"
+    "        (local.set $p (call $alloc (i32.add (i32.const 8)\n"
+    "          (i32.mul (local.get $n) (i32.const 8)))))\n"
+    "        (i32.store8 (local.get $p) (i32.const 6))\n"
+    "        (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $n))\n"
+    "        (local.set $i (i32.const 0))\n"
+    "        (block $done (loop $L\n"
+    "          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n"
+    "          (i32.store (i32.add (i32.add (local.get $p) (i32.const 8))\n"
+    "            (i32.mul (local.get $i) (i32.const 8))) (i32.const 0))\n"
+    "          (i32.store (i32.add (i32.add (i32.add (local.get $p) (i32.const 8))\n"
+    "            (i32.mul (local.get $i) (i32.const 8))) (i32.const 4)) (i32.const 0))\n"
+    "          (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
+    "          (br $L)))\n"
+    "        (local.get $p))))\n"
+    "  (func $host_dict_set (param $h i32) (param $i i32) (param $k i32) (param $v i32)\n"
+    "    (if (i32.ne (call $tag_of (local.get $h)) (i32.const 6)) (then (return)))\n"
+    "    (if (i32.ge_u (local.get $i) (call $len_of (local.get $h))) (then (return)))\n"
+    "    (i32.store (i32.add (i32.add (local.get $h) (i32.const 8))\n"
+    "      (i32.mul (local.get $i) (i32.const 8))) (local.get $k))\n"
+    "    (i32.store (i32.add (i32.add (i32.add (local.get $h) (i32.const 8))\n"
+    "      (i32.mul (local.get $i) (i32.const 8))) (i32.const 4)) (local.get $v)))\n"
+    "  (func $host_dict_key (param $h i32) (param $i i32) (result i32)\n"
+    "    (if (result i32) (i32.ne (call $tag_of (local.get $h)) (i32.const 6))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (if (result i32) (i32.ge_u (local.get $i) (call $len_of (local.get $h)))\n"
+    "        (then (i32.const 0))\n"
+    "        (else (i32.load (i32.add (i32.add (local.get $h) (i32.const 8))\n"
+    "          (i32.mul (local.get $i) (i32.const 8)))))))))\n"
+    "  (func $host_dict_val (param $h i32) (param $i i32) (result i32)\n"
+    "    (if (result i32) (i32.ne (call $tag_of (local.get $h)) (i32.const 6))\n"
+    "      (then (i32.const 0))\n"
+    "      (else (if (result i32) (i32.ge_u (local.get $i) (call $len_of (local.get $h)))\n"
+    "        (then (i32.const 0))\n"
+    "        (else (i32.load (i32.add (i32.add (i32.add (local.get $h) (i32.const 8))\n"
+    "          (i32.mul (local.get $i) (i32.const 8))) (i32.const 4))))))))\n"
+    "  (func $host_len (param $h i32) (result i32) (call $len_of (local.get $h)))\n"
+    "  (func $host_scratch (result i32) (i32.const 950000))\n"
+    "  (func $last_ic_stub_export (result i32) (i32.const 0))\n"
+    "  (func $host_prog_addr (result i32) (i32.const 0))\n"
+    "  (func $host_load_image (result i32) (i32.const 0))\n"
+    "";
+static const char *EXPORTS =
+    "\n"
+    "  (func $main_export (result i32)\n"
+    "    (drop (call $host_reset))\n"
+    "    (call $main_body))\n"
+    "  (func $tag_of_export (param $h i32) (result i32) (call $tag_of (local.get $h)))\n"
+    "  (func $i64_of_export (param $h i32) (result i64) (call $i64_of (local.get $h)))\n"
+    "  (func $f64_of_export (param $h i32) (result f64)\n"
+    "    (if (result f64) (i32.eq (call $tag_of (local.get $h)) (i32.const 3))\n"
+    "      (then (call $f64_of (local.get $h)))\n"
+    "      (else (f64.convert_i64_s (call $i64_of (local.get $h))))))\n"
+    "  (func $str_len_export (param $h i32) (result i32) (call $len_of (local.get $h)))\n"
+    "  (func $str_ptr_export (param $h i32) (result i32)\n"
+    "    (if (result i32) (i32.eqz (local.get $h)) (then (i32.const 0))\n"
+    "      (else (i32.add (local.get $h) (i32.const 8)))))\n"
+    "  (func $mem_base (result i32) (i32.const 0))\n"
+    "  (func $mem_size (result i32) (i32.const 1048576))\n"
+    "  (export \"main_export\" (func $main_export))\n"
+    "  (export \"clear_slots\" (func $clear_slots))\n"
+    "  (export \"run_step\" (func $run_step))\n"
+    "  (export \"host_reset\" (func $host_reset))\n"
+    "  (export \"host_run\" (func $host_run))\n"
+    "  (export \"host_set_local\" (func $host_set_local))\n"
+    "  (export \"host_set_global\" (func $host_set_global))\n"
+    "  (export \"host_get_local\" (func $host_get_local))\n"
+    "  (export \"host_get_global\" (func $host_get_global))\n"
+    "  (export \"host_mk_null\" (func $host_mk_null))\n"
+    "  (export \"host_mk_bool\" (func $host_mk_bool))\n"
+    "  (export \"host_mk_i64\" (func $host_mk_i64))\n"
+    "  (export \"host_mk_f64\" (func $host_mk_f64))\n"
+    "  (export \"host_mk_str\" (func $host_mk_str))\n"
+    "  (export \"host_mk_list\" (func $host_mk_list))\n"
+    "  (export \"host_list_set\" (func $host_list_set))\n"
+    "  (export \"host_list_get\" (func $host_list_get))\n"
+    "  (export \"host_mk_dict\" (func $host_mk_dict))\n"
+    "  (export \"host_dict_set\" (func $host_dict_set))\n"
+    "  (export \"host_dict_key\" (func $host_dict_key))\n"
+    "  (export \"host_dict_val\" (func $host_dict_val))\n"
+    "  (export \"host_len\" (func $host_len))\n"
+    "  (export \"host_scratch\" (func $host_scratch))\n"
+    "  (export \"host_prog_addr\" (func $host_prog_addr))\n"
+    "  (export \"host_load_image\" (func $host_load_image))\n"
+    "  (export \"last_ic_stub_export\" (func $last_ic_stub_export))\n"
+    "  (export \"tag_of_export\" (func $tag_of_export))\n"
+    "  (export \"i64_of_export\" (func $i64_of_export))\n"
+    "  (export \"f64_of_export\" (func $f64_of_export))\n"
+    "  (export \"str_len_export\" (func $str_len_export))\n"
+    "  (export \"str_ptr_export\" (func $str_ptr_export))\n"
+    "  (export \"mem_base\" (func $mem_base))\n"
+    "  (export \"mem_size\" (func $mem_size))\n"
+    ")\n"
+    "";
+
+static void esc(Buf *b, const char *p, int n) {
+    int i; char t[4];
+    for (i = 0; i < n; i++) { snprintf(t, sizeof t, "\\%02x", (unsigned char)p[i]); bs(b, t); }
+}
+static void map_data(Parts *P, int addr, int *v, int n) {
+    Buf b; int i;
+    if (!n) return;
+    memset(&b, 0, sizeof b);
+    bs(&b, "(data (i32.const "); bi(&b, addr); bs(&b, ") \"");
+    for (i = 0; i < n; i++) {
+        char le[4]; le[0] = (char)(v[i] & 255); le[1] = (char)((v[i] >> 8) & 255); le[2] = (char)((v[i] >> 16) & 255); le[3] = (char)((v[i] >> 24) & 255);
+        esc(&b, le, 4);
+    }
+    bs(&b, "\")");
+    pp(P, b.s); free(b.s);
+}
+
+static int cmpname(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static char *emit_wat(Fn *fn) {
+    Strings S; Off *so; Buf blob, wat; Parts out; char **fnames = 0; int nfn = 0, k, j, q;
+    can_emit_direct(fn);                      /* emit_wat runs it again (its asks are booked again) */
+    memset(&S, 0, sizeof S); memset(&blob, 0, sizeof blob); memset(&out, 0, sizeof out); memset(&wat, 0, sizeof wat);
+    for (k = 0; k < fn->nstr; k++) { S.s = xrealloc(S.s, (S.n + 1) * sizeof(Str)); S.s[S.n++] = fn->str[k]; }
+    if (fn->fns) for (j = 0; j < fn->fns->n; j++) { Fn *n = fn->fns->fn[j]; for (k = 0; k < n->nstr; k++) strings_add(&S, n->str[k].p, n->str[k].n); }
+    for (j = -1; j < (fn->fns ? fn->fns->n : 0); j++) {
+        Fn *o = j < 0 ? fn : fn->fns->fn[j];
+        for (k = 0; k < o->ncode; k++) if (!strcmp(o->code[k].op, "dot") && o->code[k].a) strings_add(&S, o->code[k].a, (int)strlen(o->code[k].a));
+    }
+    so = xrealloc(0, (S.n + 1) * sizeof(Off));
+    bs(&blob, "");
+    for (k = 0; k < S.n; k++) { so[k].off = STRDATA0 + (int)blob.n; so[k].len = S.s[k].n; badd(&blob, S.s[k].p, S.s[k].n); }
+    if (fn->fns && fn->fns->n) {
+        fnames = xrealloc(0, fn->fns->n * sizeof(char *));
+        for (j = 0; j < fn->fns->n; j++) fnames[j] = fn->fns->name[j];
+        nfn = fn->fns->n;
+        qsort(fnames, nfn, sizeof(char *), cmpname);
+    }
+    pp(&out, "(module");
+    pp(&out, HELPERS);
+    if (blob.n) {
+        Buf d; memset(&d, 0, sizeof d);
+        bs(&d, "(data (i32.const "); bi(&d, STRDATA0); bs(&d, ") \""); esc(&d, blob.s, (int)blob.n); bs(&d, "\")");
+        pp(&out, d.s); free(d.s);
+    }
+    for (k = 0; k < nfn; k++) {
+        Buf b; char nm[32]; Fn *nf = 0;
+        for (j = 0; j < fn->fns->n; j++) if (!strcmp(fn->fns->name[j], fnames[k])) nf = fn->fns->fn[j];
+        memset(&b, 0, sizeof b);
+        snprintf(nm, sizeof nm, "fn_%d", k);
+        body(&b, normalize(nf, &S), so, fnames, nfn, nm);
+        pp(&out, b.s); free(b.s);
+    }
+    if (!nfn) pp(&out, "(func $dispatch_fn (param $ix i32) (result i32) (unreachable))");
+    else {
+        Parts d; char t[64]; Buf bt;
+        memset(&d, 0, sizeof d); memset(&bt, 0, sizeof bt);
+        pp(&d, "(func $dispatch_fn (param $ix i32) (result i32)");
+        pp(&d, "(block $bad");
+        for (k = nfn - 1; k >= 0; k--) { snprintf(t, sizeof t, "(block $f%d", k); pp(&d, t); }
+        pp(&d, "(local.get $ix)");
+        bs(&bt, "(br_table ");
+        for (k = 0; k < nfn; k++) { bi(&bt, k); bs(&bt, " "); }
+        bi(&bt, nfn); bs(&bt, ")");
+        pp(&d, bt.s); free(bt.s);
+        for (k = 0; k < nfn; k++) { pp(&d, ")"); snprintf(t, sizeof t, "(return (call $fn_%d))", k); pp(&d, t); }
+        pp(&d, ")");
+        pp(&d, "(unreachable))");
+        pp(&out, d.b.s); free(d.b.s);
+    }
+    {
+        Buf b; memset(&b, 0, sizeof b);
+        body(&b, normalize(fn, &S), so, fnames, nfn, "main_body");
+        pp(&out, b.s); free(b.s);
+    }
+    {
+        /* _host_api_wat(_slot_names(fn), *_gl_names(fn)) */
+        int nflat, *lmap, *gmap, nl = 0, ng = 0; char **flat = slot_names(fn, &nflat), **lnames, **gnames;
+        Parts H; Buf h; const char *p; int which = 0;
+        lnames = xrealloc(0, (fn->nslot + fn->ncode + 1) * sizeof(char *));
+        gnames = xrealloc(0, (fn->ncode + 1) * sizeof(char *));
+        for (k = 0; k < fn->nslot; k++) if (last_index(lnames, nl, fn->slot[k]) < 0) lnames[nl++] = fn->slot[k];
+        for (k = 0; k < fn->ncode; k++) {
+            Ins *x = &fn->code[k];
+            if ((!strcmp(x->op, "load_l") || !strcmp(x->op, "store_l")) && x->a && last_index(lnames, nl, x->a) < 0) lnames[nl++] = x->a;
+        }
+        for (k = 0; k < fn->ncode; k++) {
+            Ins *x = &fn->code[k];
+            if ((!strcmp(x->op, "load_g") || !strcmp(x->op, "store_g")) && x->a && last_index(gnames, ng, x->a) < 0) gnames[ng++] = x->a;
+        }
+        lmap = xrealloc(0, (nl + 1) * sizeof(int)); gmap = xrealloc(0, (ng + 1) * sizeof(int));
+        for (k = 0; k < nl; k++) lmap[k] = last_index(flat, nflat, lnames[k]);
+        for (k = 0; k < ng; k++) gmap[k] = last_index(flat, nflat, gnames[k]);
+        memset(&H, 0, sizeof H); memset(&h, 0, sizeof h);
+        map_data(&H, LMAP0, lmap, nl);
+        map_data(&H, GMAP0, gmap, ng);
+        for (p = HOSTAPI; *p; p++) {
+            if (p[0] == '%' && p[1] == 'd') { bi(&h, (which == 0 || which == 2) ? nl : ng); which++; p++; }
+            else badd(&h, p, 1);
+        }
+        pp(&H, h.s); free(h.s);
+        pp(&out, H.b.s); free(H.b.s);
+        (void)q;
+    }
+    pp(&out, EXPORTS);
+    free(blob.s);
+    return out.b.s;
+}
+
+/* ======================================================================================================
+   flows.run: SRC -> front -> select+encode -> wat2wasm -> \0asm; the trace is checked (no gold fallback)
+   ====================================================================================================== */
+static int g_wasm_len; static char *g_wasm;
+
+static void run_flows(const char *src, size_t n, const char *watout) {
+    Fn *fn; char *wat, wp[128], op[128], *argv[6], *o = 0; size_t on = 0; int rc;
+    fn_trace_reset();
+    load_source(src, n);
+    if (fn_phase(PH_FRONT)) refuse_at(0, fn_error());
+    fn = compile_src();
+    if (fn_phase(PH_SELECT)) refuse_at(0, fn_error());
+    can_emit_direct(fn);
+    wat = emit_wat(fn);
+    if (watout && cx_write(watout, wat, strlen(wat))) refuse2(0, "cannot write ", watout);
+    if (fn_trace_check()) refuse_at(0, fn_error());
+    strcpy(g_tmpdir, "/tmp/ujswasmXXXXXX");
+    if (!mkdtemp(g_tmpdir)) { g_tmpdir[0] = 0; refuse_at(0, "cannot make a scratch directory"); }
+    snprintf(wp, sizeof wp, "%s/p.wat", g_tmpdir); snprintf(op, sizeof op, "%s/p.wasm", g_tmpdir);
+    if (cx_write(wp, wat, strlen(wat))) refuse_at(0, "cannot write the WAT");
+    argv[0] = "wat2wasm"; argv[1] = wp; argv[2] = "-o"; argv[3] = op; argv[4] = 0;
+    rc = cx_runv_timeout(argv, 30, &o, &on);
+    free(o);
+    if (rc) { char m[96]; snprintf(m, sizeof m, "wat2wasm failed (rc %d)", rc); refuse_at(0, m); }
+    {
+        size_t wl = 0; char *w = cx_read(op, &wl);
+        if (!w || wl < 4 || memcmp(w, "\0asm", 4)) refuse_at(0, "output is not \\0asm");
+        g_wasm = w; g_wasm_len = (int)wl;
+    }
+    cleanup();
+    free(wat);
+}
+
+static void print_trace(FILE *f) {
+    int k; const char *ph, *net; long h, g;
+    for (k = 0; fn_trace_row(k, &ph, &net, &h, &g); k++) fprintf(f, "trace\t%s\t%s\t%ld\t%ld\n", ph, net, h, g);
+}
+
+static char *read_source(const char *path, size_t *n) {
+    struct stat st; char *b;
+    if (stat(path, &st) != 0) refuse_at(0, "cannot read the source (missing?)");
+    if (!S_ISREG(st.st_mode)) refuse_at(0, "the source is not a regular file");
+    if (!(b = cx_read(path, n))) refuse_at(0, "cannot read the source");
+    return b;
+}
+
+static int cmd_build(int argc, char **argv) {
+    const char *src = 0, *out = 0, *tables = DEFAULT_TABLES, *watout = 0, *drive = "built"; int k; size_t n; char *data, hex[65];
+    for (k = 0; k < argc; k++) {
+        if (!strcmp(argv[k], "-o") && k + 1 < argc) out = argv[++k];
+        else if (!strcmp(argv[k], "--tables") && k + 1 < argc) tables = argv[++k];
+        else if (!strcmp(argv[k], "--wat") && k + 1 < argc) watout = argv[++k];
+        else if (!strcmp(argv[k], "--drive") && k + 1 < argc) drive = argv[++k];
+        else if (!src && argv[k][0] != '-') src = argv[k];
+        else { fprintf(stderr, "ujswasm: build: unexpected argument %s\n", argv[k]); return 2; }
+    }
+    if (!src || !out) { fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE]\n"); return 2; }
+    g_src = src;
+    unlink(out);                              /* OUT exists afterwards only if this build succeeded */
+    if (fn_open(tables)) refuse_at(0, fn_error());
+    if (fn_drive(drive)) refuse_at(0, fn_error());
+    data = read_source(src, &n);
+    run_flows(data, n, watout);
+    if (cx_write(out, g_wasm, g_wasm_len)) { unlink(out); refuse2(0, "cannot write ", out); }
+    cx_sha256_hex(g_wasm, g_wasm_len, hex);
+    printf("out\t%s\t%d\t%s\n", out, g_wasm_len, hex);
+    print_trace(stdout);
+    return 0;
+}
+
+/* ======================================================================================================
+   check / refuse / negative / d1: the W2 gate steps
+   ====================================================================================================== */
+#define BASE "tests/flownet-baseline.tsv"
+static char g_self_tables[2048];
+
+typedef struct { int rc; char *out; size_t nout; char *err; size_t nerr; } Child;
+
+/* one build in a forked child (a refusal exits that child only): rc, stdout and stderr */
+static Child build_child(const char *src, const char *outpath, const char *tables, const char *drive) {
+    Child r; char so[] = "/tmp/ujswasmoXXXXXX", se[] = "/tmp/ujswasmeXXXXXX"; int fo = mkstemp(so), fe = mkstemp(se), st = 0; pid_t p;
+    memset(&r, 0, sizeof r);
+    fflush(stdout); fflush(stderr);
+    p = fork();
+    if (p == 0) {
+        char *av[8]; int k = 0;
+        dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        av[k++] = (char *)src; av[k++] = "-o"; av[k++] = (char *)outpath; av[k++] = "--tables"; av[k++] = (char *)tables;
+        av[k++] = "--drive"; av[k++] = (char *)drive; av[k] = 0;
+        g_tmpdir[0] = 0;
+        exit(cmd_build(k, av));
+    }
+    close(fo); close(fe);
+    waitpid(p, &st, 0);
+    r.rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff;
+    r.out = cx_read(so, &r.nout); r.err = cx_read(se, &r.nerr);
+    if (!r.out) { r.out = sdup(""); r.nout = 0; }
+    if (!r.err) { r.err = sdup(""); r.nerr = 0; }
+    unlink(so); unlink(se);
+    return r;
+}
+
+static int fails;
+static void bad(const char *a, const char *b) { fprintf(stderr, "ujswasm-check: %s%s\n", a, b ? b : ""); fails++; }
+
+/* baseline rows: SECTION KIND fields... */
+typedef struct { char **f; int n; } Row;
+static Row *rows; static int nrows;
+static void load_baseline(const char *root) {
+    char path[2400], *b, *p; size_t n = 0;
+    snprintf(path, sizeof path, "%s/%s", root, BASE);
+    if (!(b = cx_read(path, &n)) || !n || b[n - 1] != '\n') { fprintf(stderr, "ujswasm-check: %s: cannot read, or no final newline\n", path); exit(1); }
+    for (p = b; *p; ) {
+        char *nl = strchr(p, '\n'), *s; Row r;
+        *nl = 0;
+        if (*p && *p != '#') {
+            r.f = 0; r.n = 0;
+            for (s = p;;) {
+                r.f = xrealloc(r.f, (r.n + 1) * sizeof(char *)); r.f[r.n++] = s;
+                if (!(s = strchr(s, '\t'))) break;
+                *s++ = 0;
+            }
+            rows = xrealloc(rows, (nrows + 1) * sizeof(Row)); rows[nrows++] = r;
+        }
+        p = nl + 1;
+    }
+}
+static int is_out(Row *r) { return r->n >= 2 && !strncmp(r->f[0], "out", 3) && r->f[0][3] >= '1' && r->f[0][3] <= '9' && !r->f[0][4]; }
+
+/* D5: rc 1, stdout empty, no output file, stderr one line naming the source and a reason */
+static void d5(const char *what, Child *c, const char *outpath, const char *src) {
+    struct stat st; char m[600];
+    if (c->rc != 1) { snprintf(m, sizeof m, "%s: refusal rc %d, want 1", what, c->rc); bad(m, 0); }
+    if (c->nout) { snprintf(m, sizeof m, "%s: refusal wrote %ld bytes to stdout", what, (long)c->nout); bad(m, 0); }
+    if (stat(outpath, &st) == 0) { snprintf(m, sizeof m, "%s: refusal left an output file", what); bad(m, 0); }
+    if (strncmp(c->err, "ujswasm: ", 9) || strncmp(c->err + 9, src, strlen(src)) || c->nerr < 9 + strlen(src) + 4
+        || !strchr(c->err, '\n') || strchr(c->err, '\n')[1]) {
+        snprintf(m, sizeof m, "%s: refusal stderr is not one line naming the source and a reason: %.200s", what, c->err); bad(m, 0);
+    }
+}
+
+/* the position part of a refusal: "SRC:LINE:" or "(function F, instruction K)" or a table "PATH:LINE:" */
+static int has_position(const char *err, const char *src) {
+    char pat[1200]; const char *p;
+    snprintf(pat, sizeof pat, "%s:", src);
+    p = strstr(err, pat);
+    if (p && p[strlen(pat)] >= '1' && p[strlen(pat)] <= '9') return 1;
+    if (strstr(err, "(function ") && strstr(err, ", instruction ")) return 1;
+    if (strstr(err, "(offset ") || strstr(err, " at offset ")) return 1;
+    return 0;
+}
+
+static int cmd_check(const char *root) {
+    char outp[2600], m[1200], tmp[] = "/tmp/ujswasmcXXXXXX"; int r, k, nprog = 0, same = 0, i, nacc = 0, accok = 0;
+    load_baseline(root);
+    if (chdir(root)) { fprintf(stderr, "ujswasm-check: cannot enter %s\n", root); return 1; }
+    snprintf(g_self_tables, sizeof g_self_tables, "%s", DEFAULT_TABLES);
+    if (fn_open(g_self_tables)) { fprintf(stderr, "ujswasm-check: %s\n", fn_error()); return 1; }
+    /* acc: every net exact on every key, (exact, total) as recorded; the wired and reserved lists as recorded */
+    for (r = 0; r < nrows; r++) {
+        Row *w = &rows[r];
+        if (strcmp(w->f[0], "acc")) continue;
+        if (!strcmp(w->f[1], "net") && w->n == 6) {
+            int e, t;
+            nacc++;
+            if (fn_acc(w->f[2], &e, &t)) { bad(fn_error(), 0); continue; }
+            if (e != atoi(w->f[3]) || t != atoi(w->f[4]) || e != t) { snprintf(m, sizeof m, "acc %s: %d/%d, recorded %s/%s", w->f[2], e, t, w->f[3], w->f[4]); bad(m, 0); }
+            else accok++;
+        } else if (!strcmp(w->f[1], "wired") || !strcmp(w->f[1], "reserved")) {
+            char l[256]; fn_list(w->f[1], l, sizeof l);
+            if (w->n != 3 || strcmp(l, w->f[2])) { snprintf(m, sizeof m, "acc %s: %s, recorded %s", w->f[1], l, w->n > 2 ? w->f[2] : "?"); bad(m, 0); }
+        }
+    }
+    if (!mkdtemp(tmp)) { fprintf(stderr, "ujswasm-check: no scratch\n"); return 1; }
+    snprintf(outp, sizeof outp, "%s/o.wasm", tmp);
+    /* every recorded program: bytes, sha256 and the whole trace equal the m4 record */
+    for (r = 0; r < nrows; r++) {
+        Row *w = &rows[r]; Child c; char hex[65], *src; size_t sn = 0; Buf want, got; int t;
+        if (!is_out(w) || strcmp(w->f[1], "out") || w->n != 6) continue;
+        nprog++;
+        src = cx_read(w->f[2], &sn);
+        if (!src) { bad("cannot read ", w->f[2]); continue; }
+        cx_sha256_hex(src, sn, hex); free(src);
+        if (strcmp(hex, w->f[3])) { bad("source changed since the baseline: ", w->f[2]); continue; }
+        c = build_child(w->f[2], outp, g_self_tables, "built");
+        if (c.rc) { snprintf(m, sizeof m, "%s: refused (rc %d): %.300s", w->f[2], c.rc, c.err); bad(m, 0); continue; }
+        {
+            size_t wl = 0; char *wb = cx_read(outp, &wl);
+            if (!wb) { bad("no output for ", w->f[2]); continue; }
+            cx_sha256_hex(wb, wl, hex); free(wb);
+            if ((long)wl != atol(w->f[4]) || strcmp(hex, w->f[5])) { snprintf(m, sizeof m, "%s: output %ld bytes %.16s.., recorded %s bytes %.16s..", w->f[2], (long)wl, hex, w->f[4], w->f[5]); bad(m, 0); continue; }
+        }
+        memset(&want, 0, sizeof want); memset(&got, 0, sizeof got); bs(&want, ""); bs(&got, "");
+        for (t = r + 1; t < nrows && is_out(&rows[t]) && !strcmp(rows[t].f[1], "trace") && rows[t].n == 7 && !strcmp(rows[t].f[2], w->f[2]); t++) {
+            bs(&want, "trace\t"); bs(&want, rows[t].f[3]); bs(&want, "\t"); bs(&want, rows[t].f[4]); bs(&want, "\t");
+            bs(&want, rows[t].f[5]); bs(&want, "\t"); bs(&want, rows[t].f[6]); bs(&want, "\n");
+        }
+        {
+            char *nl = strchr(c.out, '\n');
+            if (nl) bs(&got, nl + 1);
+        }
+        if (strcmp(want.s, got.s)) { snprintf(m, sizeof m, "%s: trace differs from the m4 record\n--- recorded\n%.400s--- flownet\n%.400s", w->f[2], want.s, got.s); bad(m, 0); continue; }
+        same++;
+        free(want.s); free(got.s); free(c.out); free(c.err);
+    }
+    /* the negative programs: accepted / refused as recorded (check section); every refusal in D5 shape */
+    {
+        int neg = 0, rej = 0, acc = 0;
+        for (r = 0; r < nrows; r++) {
+            Row *w = &rows[r]; char path[600]; Child c; struct stat st;
+            if (strcmp(w->f[0], "check") || (strcmp(w->f[1], "reject") && strcmp(w->f[1], "accept")) || w->n != 4) continue;
+            snprintf(path, sizeof path, "tests/ujs2wasm/neg/%s", w->f[2]);
+            if (stat(path, &st)) snprintf(path, sizeof path, "m4/neg/%s", w->f[2]);
+            neg++;
+            c = build_child(path, outp, g_self_tables, "built");
+            if (!strcmp(w->f[1], "reject")) {
+                if (!c.rc) { snprintf(m, sizeof m, "%s: accepted, the record says refused (%s)", path, w->f[3]); bad(m, 0); unlink(outp); continue; }
+                d5(path, &c, outp, path);
+                if (!has_position(c.err, path)) { snprintf(m, sizeof m, "%s: refusal without a position: %.200s", path, c.err); bad(m, 0); }
+                rej++;
+            } else {
+                if (c.rc) { snprintf(m, sizeof m, "%s: refused, the record says accepted: %.300s", path, c.err); bad(m, 0); continue; }
+                acc++; unlink(outp);
+            }
+        }
+        for (i = 0; i < nrows; i++) if (!strcmp(rows[i].f[0], "check") && !strcmp(rows[i].f[1], "summary")) break;
+        printf("ujswasm-check: acc %d/%d nets exact as recorded; programs %d/%d byte-identical with identical traces; negatives %d (refused %d, accepted %d)\n",
+               accok, nacc, same, nprog, neg, rej, acc);
+        if (nacc != 10 || !nprog || same != nprog || neg != 9) { snprintf(m, sizeof m, "want 10 acc rows (%d), every recorded program (%d) the same, 9 negatives (%d)", nacc, nprog, neg); bad(m, 0); }
+    }
+    rmdir(tmp);
+    (void)k;
+    if (fails) { fprintf(stderr, "ujswasm-check: %d failure(s)\n", fails); return 1; }
+    printf("ujswasm-check: PASS (D2: %d/%d programs byte-identical to the ujs gold record, acc %d/10, gold fallbacks 0)\n", same, nprog, accok);
+    return 0;
+}
+
+/* the negatives that ujs (and m4) accept have no recorded bytes in the baseline: each one is built through flownet
+   and through the m4 oracle (`python3 -m m4 build SRC -o OUT`, run as a child; nothing of it is imported) and the bytes
+   must be equal.  This is the only Python step of the adapter's checks; flownet/ itself never runs it. */
+static int cmd_accepts(const char *root) {
+    char tmp[] = "/tmp/ujswasmaXXXXXX", mine[2600], ref[2600], path[600], m[900]; int r, n = 0, ok = 0;
+    load_baseline(root);
+    if (chdir(root)) { fprintf(stderr, "ujswasm-accepts: cannot enter %s\n", root); return 1; }
+    if (!mkdtemp(tmp)) return 1;
+    snprintf(mine, sizeof mine, "%s/mine.wasm", tmp); snprintf(ref, sizeof ref, "%s/ref.wasm", tmp);
+    for (r = 0; r < nrows; r++) {
+        Row *w = &rows[r]; Child c; char *av[8], *o = 0; size_t on = 0, a = 0, b = 0; int rc; char *x, *y; struct stat st;
+        if (strcmp(w->f[0], "check") || strcmp(w->f[1], "accept") || w->n != 4) continue;
+        snprintf(path, sizeof path, "tests/ujs2wasm/neg/%s", w->f[2]);
+        if (stat(path, &st)) snprintf(path, sizeof path, "m4/neg/%s", w->f[2]);
+        n++;
+        c = build_child(path, mine, DEFAULT_TABLES, "built");
+        if (c.rc) { snprintf(m, sizeof m, "%s: refused: %.300s", path, c.err); bad(m, 0); continue; }
+        av[0] = "python3"; av[1] = "-m"; av[2] = "m4"; av[3] = "build"; av[4] = path; av[5] = "-o"; av[6] = ref; av[7] = 0;
+        unlink(ref);
+        rc = cx_runv_timeout(av, 20, &o, &on); free(o);
+        if (rc) { snprintf(m, sizeof m, "%s: the m4 oracle failed (rc %d)", path, rc); bad(m, 0); continue; }
+        x = cx_read(mine, &a); y = cx_read(ref, &b);
+        if (!x || !y || a != b || memcmp(x, y, a)) { snprintf(m, sizeof m, "%s: flownet %ld bytes, m4 %ld bytes: differ", path, (long)a, (long)b); bad(m, 0); }
+        else { ok++; printf("same\t%s\t%ld bytes\n", path, (long)a); }
+        free(x); free(y);
+    }
+    unlink(mine); unlink(ref); rmdir(tmp);
+    if (fails || n != 5) { fprintf(stderr, "ujswasm-accepts: %d failure(s), %d/%d the same (want the 5 recorded accepts)\n", fails, ok, n); return 1; }
+    printf("ujswasm-accepts: PASS (%d/%d known accepts byte-identical to python3 -m m4 build)\n", ok, n);
+    return 0;
+}
+
+/* D5 over inputs no recorded program covers; each must be refused with a reason and a position */
+static int cmd_refuse(const char *root) {
+    static const char *CASES[][3] = {
+        { "keys.ujs", "let d = {a: 1};\nreturn keys(d);\n", "emit gap keys" },
+        { "in.ujs", "let d = {a: 1};\nreturn \"a\" in d;\n", "emit gap in" },
+        { "spread.ujs", "let xs = [1, 2];\nreturn [...xs];\n", "emit gap spread" },
+        { "modassign.ujs", "let x = 5;\nx %= 2;\nreturn x;\n", "not in its domain" },
+        { "nonascii_id.ujs", "let \xce\xbb = 1;\nreturn \xe2\x82\xac;\n", "not covered" },
+        { "badutf8.ujs", "return \"\xff\";\n", "not valid UTF-8" },
+        { "unterminated.ujs", "return \"abc;\n", "unterminated string" },
+        { "break.ujs", "break;\nreturn 1;\n", "break outside" },
+        { "nested_fn.ujs", "function f() {\n  function g() { return 1; }\n  return g();\n}\nreturn f();\n", "not a top-level function" },
+        { 0, 0, 0 } };
+    char tmp[] = "/tmp/ujswasmrXXXXXX", src[2600], outp[2600], m[1200]; int k, n = 0;
+    if (chdir(root)) { fprintf(stderr, "ujswasm-refuse: cannot enter %s\n", root); return 1; }
+    if (!mkdtemp(tmp)) return 1;
+    snprintf(outp, sizeof outp, "%s/o.wasm", tmp);
+    for (k = 0; CASES[k][0]; k++) {
+        Child c;
+        snprintf(src, sizeof src, "%s/%s", tmp, CASES[k][0]);
+        if (cx_write(src, CASES[k][1], strlen(CASES[k][1]))) return 1;
+        cx_write(outp, "stale", 5);           /* a stale OUT must not survive a refusal */
+        c = build_child(src, outp, DEFAULT_TABLES, "built");
+        d5(CASES[k][0], &c, outp, src);
+        if (!strstr(c.err, CASES[k][2])) { snprintf(m, sizeof m, "%s: reason not named (want '%s'): %.300s", CASES[k][0], CASES[k][2], c.err); bad(m, 0); }
+        if (!has_position(c.err, src)) { snprintf(m, sizeof m, "%s: no position: %.300s", CASES[k][0], c.err); bad(m, 0); }
+        printf("refused\t%s\t%s", CASES[k][0], c.err);
+        unlink(src); n++;
+    }
+    {   /* a missing source and a directory as the source */
+        Child c;
+        snprintf(src, sizeof src, "%s/missing.ujs", tmp);
+        c = build_child(src, outp, DEFAULT_TABLES, "built");
+        d5("missing source", &c, outp, src);
+        if (!strstr(c.err, "cannot read the source")) bad("missing source: reason not named: ", c.err);
+        c = build_child(tmp, outp, DEFAULT_TABLES, "built");
+        d5("directory as source", &c, outp, tmp);
+        if (!strstr(c.err, "not a regular file")) bad("directory source: reason not named: ", c.err);
+        n += 2;
+    }
+    unlink(outp); rmdir(tmp);
+    if (fails) { fprintf(stderr, "ujswasm-refuse: %d failure(s)\n", fails); return 1; }
+    printf("ujswasm-refuse: PASS (%d uncovered inputs, each rc 1, stdout empty, no output file, reason + position named)\n", n);
+    return 0;
+}
+
+/* copy the tables to DIR (scratch), then apply one mutation */
+static void copy_tables(const char *dir) {
+    int i; char a[2600], b[2600]; size_t n; char *t;
+    static const char *F = "contract";
+    snprintf(a, sizeof a, "%s/%s.tsv", DEFAULT_TABLES, F); snprintf(b, sizeof b, "%s/%s.tsv", dir, F);
+    t = cx_read(a, &n); if (!t || cx_write(b, t, n)) { fprintf(stderr, "ujswasm-negative: cannot copy %s\n", a); exit(1); } free(t);
+    for (i = 0; i < 20; i++) {
+        static const char *N[10] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc" };
+        snprintf(a, sizeof a, "%s/%s.%s.tsv", DEFAULT_TABLES, N[i / 2], i % 2 ? "net" : "gold");
+        snprintf(b, sizeof b, "%s/%s.%s.tsv", dir, N[i / 2], i % 2 ? "net" : "gold");
+        t = cx_read(a, &n); if (!t || cx_write(b, t, n)) { fprintf(stderr, "ujswasm-negative: cannot copy %s\n", a); exit(1); } free(t);
+    }
+}
+
+/* every w2 entry of NET gets weight +W on CLASS: the net's answers move */
+static void mutate_w2(const char *dir, const char *net, int cls, int w) {
+    char p[2600]; size_t n; char *t, *q; Buf o; memset(&o, 0, sizeof o); bs(&o, "");
+    snprintf(p, sizeof p, "%s/%s.net.tsv", dir, net);
+    t = cx_read(p, &n);
+    for (q = t; *q; ) {
+        char *nl = strchr(q, '\n');
+        *nl = 0;
+        badd(&o, q, strlen(q));
+        if (!strncmp(q, "w2\t", 3)) { char e[32]; snprintf(e, sizeof e, "\t%d:%d", cls, w); bs(&o, e); }
+        bs(&o, "\n");
+        q = nl + 1;
+    }
+    cx_write(p, o.s, o.n); free(t); free(o.s);
+}
+
+static int cmd_negative(const char *root) {
+    char tmp[] = "/tmp/ujswasmnXXXXXX", outp[2600], m[600], p[2600]; int e, t, red = 0, total = 0; Child c;
+    const char *prog = "tests/ujs2wasm/corpus/arith.ujs";
+    if (chdir(root)) { fprintf(stderr, "ujswasm-negative: cannot enter %s\n", root); return 1; }
+    if (!mkdtemp(tmp)) return 1;
+    snprintf(outp, sizeof outp, "%s/o.wasm", tmp);
+    /* 1. clean copy: acc exact and the program builds (the mutations below are what turn it red) */
+    copy_tables(tmp);
+    if (fn_open(tmp) || fn_acc("isel", &e, &t) || e != t) { bad("negative: the clean copy is not exact: ", fn_error()); }
+    c = build_child(prog, outp, tmp, "built");
+    if (c.rc) bad("negative: the clean copy does not build: ", c.err);
+    /* 2. gold drive: every answer is a gold fallback -> the trace check refuses (red line 1) */
+    total++;
+    c = build_child(prog, outp, tmp, "gold");
+    if (c.rc == 1 && strstr(c.err, "fell back to gold")) { red++; printf("red\tgold drive\t%s", c.err); } else bad("negative: gold drive was not refused: ", c.err);
+    /* 3. a missing net table: named, rc 1 */
+    total++;
+    snprintf(p, sizeof p, "%s/enc.net.tsv", tmp);
+    { size_t n; char *keep = cx_read(p, &n); unlink(p);
+      c = build_child(prog, outp, tmp, "built");
+      if (c.rc == 1 && strstr(c.err, "enc.net.tsv") && strstr(c.err, "cannot read")) { red++; printf("red\tmissing table\t%s", c.err); } else bad("negative: missing table not named: ", c.err);
+      cx_write(p, keep, n); free(keep); }
+    /* 4. isel net mutated (every unit +1000 on class 1 = i64_bin): acc red, and the build refused or different */
+    total++;
+    mutate_w2(tmp, "isel", 1, 1000);
+    fn_error_clear();
+    if (fn_open(tmp) == 0 && fn_acc("isel", &e, &t) == 0 && e != t) { red++; snprintf(m, sizeof m, "red\tisel mutated\tacc %d/%d\n", e, t); printf("%s", m); }
+    else bad("negative: mutated isel still exact", 0);
+    total++;
+    c = build_child(prog, outp, tmp, "built");
+    if (c.rc == 1 && strstr(c.err, "not a legal answer")) { red++; printf("red\tisel mutated\t%s", c.err); } else bad("negative: mutated isel was not refused: ", c.err);
+    /* 5. lex net mutated: the lexer is decided by it -- refused */
+    copy_tables(tmp);
+    total++;
+    mutate_w2(tmp, "lex", 8, 1000);           /* class 8 = bad */
+    c = build_child(prog, outp, tmp, "built");
+    if (c.rc == 1 && strstr(c.err, "lex")) { red++; printf("red\tlex mutated\t%s", c.err); } else bad("negative: mutated lex was not refused: ", c.err);
+    /* 6. a gold label flipped: acc red (the label source is checked against the net) */
+    copy_tables(tmp);
+    total++;
+    {
+        size_t n; char *g; char *q;
+        snprintf(p, sizeof p, "%s/enc.gold.tsv", tmp);
+        g = cx_read(p, &n);
+        q = strstr(g, "\nnop\tnone\tempty\n");
+        if (q) { memcpy(q + 1 + 9, "trap\n", 5); memmove(q + 1 + 14, q + 1 + 15, strlen(q + 1 + 15) + 1); n--; }
+        cx_write(p, g, n);
+        free(g);
+        fn_error_clear();
+        if (q && fn_open(tmp) == 0 && fn_acc("enc", &e, &t) == 0 && e == t - 1) { red++; snprintf(m, sizeof m, "red\tenc gold flipped\tacc %d/%d\n", e, t); printf("%s", m); }
+        else bad("negative: flipped gold label not caught by acc", 0);
+    }
+    copy_tables(tmp);
+    {
+        int i; static const char *N[10] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc" };
+        for (i = 0; i < 20; i++) { snprintf(p, sizeof p, "%s/%s.%s.tsv", tmp, N[i / 2], i % 2 ? "net" : "gold"); unlink(p); }
+        snprintf(p, sizeof p, "%s/contract.tsv", tmp); unlink(p);
+    }
+    unlink(outp); rmdir(tmp);
+    if (fails || red != total) { fprintf(stderr, "ujswasm-negative: %d failure(s), %d/%d mutations red\n", fails, red, total); return 1; }
+    printf("ujswasm-negative: PASS (%d/%d mutations red: gold drive, missing table, isel acc + build, lex build, gold label)\n", red, total);
+    return 0;
+}
+
+/* D1 (grep -rn ujs flownet/ --include=*.cx is empty) and red line 3 (no Python in flownet/) */
+static int d1_hits, d1_files;
+static int d1_file(const char *path, void *ctx) {
+    size_t n, k, L = strlen(path); char *b; int line = 1; (void)ctx;
+    if (L < 3 || strcmp(path + L - 3, ".cx")) {
+        if (L > 3 && !strcmp(path + L - 3, ".py")) { fprintf(stderr, "ujswasm-d1: %s: a Python file in flownet/\n", path); d1_hits++; }
+        return 0;
+    }
+    d1_files++;
+    if (!(b = cx_read(path, &n))) { fprintf(stderr, "ujswasm-d1: %s: cannot read\n", path); d1_hits++; return 0; }
+    for (k = 0; k < n; k++) {
+        if (b[k] == '\n') line++;
+        if (k + 3 <= n && !memcmp(b + k, "ujs", 3)) { fprintf(stderr, "ujswasm-d1: %s:%d: names ujs\n", path, line); d1_hits++; }
+        if (k + 6 <= n && (!memcmp(b + k, "python", 6) || !memcmp(b + k, "Python", 6))) { fprintf(stderr, "ujswasm-d1: %s:%d: names Python\n", path, line); d1_hits++; }
+    }
+    free(b);
+    return 0;
+}
+static int cmd_d1(const char *root) {
+    char d[2400];
+    snprintf(d, sizeof d, "%s/flownet", root);
+    if (cx_walk(d, d1_file, 0) < 0) { fprintf(stderr, "ujswasm-d1: %s: cannot read\n", d); return 1; }
+    if (d1_files < 4) { fprintf(stderr, "ujswasm-d1: only %d .cx files under %s (want contract, nets, flow, api)\n", d1_files, d); return 1; }
+    if (d1_hits) return 1;
+    printf("ujswasm-d1: PASS (%d .cx files under flownet/: no ujs, no Python)\n", d1_files);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *cmd = argc > 1 ? argv[1] : "";
+    if (!strcmp(cmd, "build")) return cmd_build(argc - 2, argv + 2);
+    if (!strcmp(cmd, "check")) return cmd_check(argc > 2 ? argv[2] : ".");
+    if (!strcmp(cmd, "refuse")) return cmd_refuse(argc > 2 ? argv[2] : ".");
+    if (!strcmp(cmd, "negative")) return cmd_negative(argc > 2 ? argv[2] : ".");
+    if (!strcmp(cmd, "d1")) return cmd_d1(argc > 2 ? argv[2] : ".");
+    if (!strcmp(cmd, "accepts")) return cmd_accepts(argc > 2 ? argv[2] : ".");
+    fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE] | check ROOT | refuse ROOT | negative ROOT | d1 ROOT | accepts ROOT\n");
+    return 2;
+}

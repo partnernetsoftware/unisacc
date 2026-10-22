@@ -1,6 +1,6 @@
 # 需求：把 m4 的「流×网」范式做成可复用 `.cx` 模块
 
-> 提出：2026-10-23（董事长要求）· 执行：cc（cc-unisacc）· 状态：W0 已裁定（三问皆是；W2 读外部 `.tsv`，生成 `.cx` 表为备选；API 只导出函数）；W1 基线已落（`tests/flownet-baseline.tsv` 371 行，连跑两次逐字节相同，8 个闸步），待 W2
+> 提出：2026-10-23（董事长要求）· 执行：cc（cc-unisacc）· 状态：W0 已裁定（三问皆是；W2 读外部 `.tsv`，生成 `.cx` 表为备选；API 只导出函数）；W1 基线已落（`tests/flownet-baseline.tsv` 371 行，连跑两次逐字节相同，8 个闸步）；W2 已落（`flownet/{contract,nets,flow,api}.cx` + 边界适配器 `adapter/ujswasm/`，D1 成立、D2 33/33 逐字节 + 迹相同、acc 10/10、gold 回退 0、D5 11 例具名拒绝，7 个闸步），待 W3
 > 依据：`m4/README.md` 实测、`research/m4-flow-net-contract-draft.md`、`m4/flows.py` / `nets.py` 现状
 
 ## 0. 一句话
@@ -67,6 +67,7 @@ m4 已经证明「gold → IntNet → 四流 → 字节」这条链能逐字节�
 - 新增 `flownet/{contract,nets,flow,api}.cx`，语义对齐 m4 四模块。
 - 输入仅来自 W0 定的表机制；**此波允许临时适配器**（读 W1 基线做对拍），但不得 import ujs。
 - **闸**：D2 全绿（28/28、acc 10/10、gold 回退 0）；D1 已成立。
+**W2 结论（2026-10-23 实测）**：`flownet/` 四个单元只认表、不认语言：`contract.cx`（读 `contract.tsv`：网名单、流→决策网、reserved/observed、choice、记账阶段；三类恰好划分即 check_contract）、`nets.cx`（每网读 `NET.gold.tsv` 标签源 + `NET.net.tsv` 整数网，域/类序两文件互校；整数前向 + 全键 acc）、`flow.cx`（ask：键不在域内即具名拒绝；built 驱动记 hit、gold 驱动记 gold 回退；按阶段记账；gate 合法集；迹检查 gold 回退 >0 即红）、`api.cx`（唯一对外面，只导出 `fn_` 函数，错误「路径[:行]: 原因」）。ujs 侧全在边界外 `adapter/ujswasm/`：`ujswasm.cx` 把 m4 路径（ujs 前端 lex+compile、m4 emit 的 isel 分派/enc 门控与 WAT、wat2wasm）移植为 .cx，**每个决策都经 `fn_ask*`**（含 m4 的副信道询问与 Compiler 重词法的记账）；`tables.cx` 写表：contract 由 `m4/contract.py` 转为数据，gold 由 `ujs/.../gold.py` 的 .cx 移植给出，整数网由既有 CLI `python3 -m ujs build-weights`（oracle 子进程）构造后转文本。实测：acc 10/10 exact（3677 键；网是 Python 构造、gold 是 .cx 移植，两者全键一致即证移植正确）；W1 记录的 33 个程序（28 语料 + 5 探针）经 flownet 输出与 ujs gold 记录**逐字节相同 33/33，且每程序迹（阶段、网、hits、gold 回退）全同**，gold 回退 0；9 个负例拒 4 / 接受 5 与记录一致，5 个接受者与 `python3 -m m4 build` 逐字节相同。D1：`flownet/*.cx` 无 ujs、无 Python。D5：11 个未覆盖输入（keys/in/spread 发射缺口、`%=` 越域、字符串外非 ASCII、坏 UTF-8、未终止串、循环外 break、嵌套函数、缺源、目录源）各 rc 1、stdout 空、无输出文件（预置的旧 OUT 也被删）、stderr 一行点名原因与位置。变异即红：gold 驱动（回退 14 次）、缺 `enc.net.tsv`、isel 网变异（acc 3/42 且构建被 enc 门控拒）、lex 网变异、enc gold 标签翻转（acc 143/144）、基线 sha/迹/负例/acc 改一处、表文件改一字节、flownet 内写入 ujs。7 个闸步：`flownet-w2-{d1,tables-gold}`（contract 层）与 `flownet-w2-{parity,refuse,negative,accepts,tables}`（pipeline 层；accepts/tables 跑 oracle 子进程，其余无 Python），单步 3–22 s。如实记下的边界：(1) 字符串外的非 ASCII 只覆盖拉丁/希腊/西里尔/CJK/谚文字母区段，其余码点具名拒绝（Python 的 isalpha 全表未移植）；(2) f64 字面量以规范化十进制文本交给 wat2wasm（值相同即字节相同，非 Python repr 逐字）；(3) isel 的 eq/ne 第二形态（f64_cmp）已接线（`fn_choice` + 门控）但本波未做选择探针，留 W4；(4) 未登记 `release/derived-map.tsv`（要求 gatedeps 声明，本波不碰 gatedeps），表的派生一致性由 `flownet-w2-tables(-gold)` 每次闸跑核对。
 
 ### W3 —— 接口反转 + 第二消费方（可复用性的唯一证据）
 

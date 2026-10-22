@@ -1,0 +1,571 @@
+/* adapter/ujswasm/tables.cx -- the ujs side of flownet's tables (plans/m4-flownet-cx-module.md W2): writes the
+   external .tsv tables that flownet/ reads (the W0 ruling), for the m4 flow x net path ujs -> \0asm.
+     contract.tsv     m4/contract.py as data: the 10 nets, the 4 flows and the net each one is decided by, reserved,
+                      observed, the isel choice for eq/ne, and the two bookkeeping phases of m4/flows.py
+     NET.gold.tsv     the label source: ujs/seed/construct/gold.py STAGES -- each field's values and the classes in
+                      their order, and every key's gold label -- ported here to .cx (domains and label functions)
+     NET.net.tsv      the integer net for that gold, constructed by the existing ujs CLI as the oracle:
+                      `python3 -m ujs build-weights --out TMP` (unisa/intnet.build; this program only converts its
+                      built.json to text and checks that its classes are the gold table's classes)
+   The gold port is proven by acceptance, not by inspection: the oracle's nets are exact against the Python gold on
+   every key (W1 baseline, acc 10/10), so flownet's acc over these files (gold from this port, nets from the oracle)
+   is 10/10 exact only if the port agrees with gold.py on all 3677 keys.
+   Usage (repository root; every step under tests/bound 58):
+     sh ./unisacc.com -run adapter/ujswasm/tables.cx -- --write [ROOT]       re-write ROOT/adapter/ujswasm/tables
+     sh ./unisacc.com -run adapter/ujswasm/tables.cx -- --check [ROOT]       re-make all in a scratch dir (oracle), cmp
+     sh ./unisacc.com -run adapter/ujswasm/tables.cx -- --check-gold [ROOT]  no Python: contract + gold files only
+   Errors: "ujswasm-tables: reason" on stderr, rc 1, stdout empty.  This adapter may name ujs; flownet/ may not. */
+
+#define TDIR "adapter/ujswasm/tables"
+#define NNETS 10
+static const char *NETS[NNETS] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc" };
+
+static void die(const char *a, const char *b) { fprintf(stderr, "ujswasm-tables: %s%s\n", a, b ? b : ""); exit(1); }
+
+/* ---------- the ujs domains (gold.py, catalog.py), in their order ---------- */
+static const char *CHARC[] = { "eof", "nl", "ws", "A", "D", "Q", "S", "P", "O", "other", 0 };
+static const char *LEXACT[] = { "eof", "ws", "nl", "id", "num", "str", "punct", "op", "bad", 0 };
+static const char *NT[] = { "top", "stmt", "unary", "postfix", "primary", "pswitch", 0 };
+static const char *TOKS[] = { "eof", "id", "num", "str", "null", "true", "false",
+    "let", "function", "if", "else", "while", "for", "return",
+    "break", "continue", "switch", "case", "default",
+    "typeof", "of", "in",
+    "{", "}", "(", ")", "[", "]", ";", ",", ":", ".", "?",
+    "=", "==", "!=", "<", ">", "<=", ">=",
+    "+", "-", "*", "/", "%", "&&", "||", "!", "??",
+    "=>", "+=", "-=", "*=", "/=",
+    "...", 0 };
+static const char *PRODS[] = { "end", "fn", "let", "if", "while", "for", "switch", "case", "default",
+    "return", "break", "continue", "block", "expr",
+    "neg", "not", "spread", "typeof", "prim",
+    "index", "call", "dot", "done",
+    "ident", "number", "string", "null", "true", "false",
+    "list", "dict", "paren", "arrow", "bad", 0 };
+static const char *TYS[] = { "null", "bool", "i64", "f64", "str", "list", "dict", "fn", "tup", 0 };
+static const char *TOPS[] = { "+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=",
+    "&&", "||", "!", "=", "[]", ".", "call", "len", "keys", "in", "spread", ",", 0 };
+static const char *TYOUT[] = { "null", "bool", "i64", "f64", "str", "list", "dict", "fn", "tup", "illegal", 0 };
+static const char *CTX[] = { "mod", "fn", "block", "switch", "for", "expr", 0 };
+static const char *KIND[] = { "bind", "load", "store", "param", "rest", "label", "break", "continue", 0 };
+static const char *ACTS[] = { "ok", "shadow", "unbound", "readonly", "illegal", 0 };
+static const char *KEYSIG[] = { "empty", "k1", "k2", "k3", "k4", "open", 0 };
+static const char *SHAPES[] = { "s_null", "s_bool", "s_i64", "s_f64", "s_str", "s_list", "s_tup", "s_fn",
+    "s_dict_empty", "s_dict_k1", "s_dict_k2", "s_dict_k3", "s_dict_k4", "s_dict_open", "s_unknown", 0 };
+static const char *FAMILY[] = { "arith", "cmp", "logic", "mem", "ctrl", "call", "data", "ic", "host", 0 };
+static const char *FLAVOR[] = { "i64", "f64", "bool", "str", "list", "dict", "any",
+    "br", "br_if", "ret", "switch", "enter", "print", 0 };
+static const char *RECIPE[] = { "op_add", "op_sub", "op_mul", "op_div", "op_mod",
+    "op_cmp", "op_logic", "op_load", "op_store", "op_idx",
+    "op_jump", "op_call", "op_ret", "op_mk", "op_ic", "op_host", "bad", 0 };
+static const char *IC_OPS[] = { "add", "sub", "mul", "div", "mod", "lt", "eq", "idx", "setidx", "dot", "call", "len", "in", 0 };
+static const char *GUARDS[] = { "none", "type_ok", "len_ok", "key_ok", "mono", 0 };
+static const char *STUBS[] = { "interp", "add_i64", "add_f64", "sub_i64", "mul_i64", "div_f64",
+    "cmp_i64", "cmp_f64", "idx_list", "idx_dict", "idx_str", "set_list", "set_dict",
+    "dot_dict", "call_fn", "len_list", "len_str", "in_dict", "bad", 0 };
+static const char *JOPS[] = { "nop", "const", "load_l", "store_l", "load_g", "store_g", "drop",
+    "add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne",
+    "and", "or", "not", "idx", "setidx", "dot", "len", "keys", "in",
+    "mklist", "mkdict", "mktup", "jump", "jumpz", "jumpnz",
+    "call", "ret", "spread", "restpack", "typeof", "shapeof", "switch", "ic_enter", "print", 0 };
+static const char *WASM_FORMS[] = { "nop", "i64_bin", "f64_bin", "i64_cmp", "f64_cmp",
+    "bool_logic", "local", "global", "const", "br", "br_if", "call", "ret",
+    "poly_bin", "heap", "typeof", "host", "trap", 0 };
+static const char *IMMCLASS[] = { "none", "i64", "f64", "bool", "str_ix", "slot", "label", "count", 0 };
+static const char *ENCTMPL[] = { "empty", "op", "op_imm", "op_slot", "op_label", "op_host", "trap", 0 };
+static const char *RELKIND[] = { "none", "br_target", "fn_ref", "str_ref", 0 };
+static const char *JMPKIND[] = { "br", "br_if", "call", "switch", 0 };
+
+static int eq(const char *a, const char *b) { return !strcmp(a, b); }
+static int in(const char *s, const char *list) {          /* list: space-separated */
+    size_t k = strlen(s); const char *p = list;
+    for (;;) {
+        const char *e = strchr(p, ' ');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == k && !strncmp(p, s, k)) return 1;
+        if (!e) return 0;
+        p = e + 1;
+    }
+}
+
+/* ---------- the gold label functions (gold.py, catalog.py), one per stage ---------- */
+static const char *lex_label(const char *c, const char *peek) {
+    (void)peek;                                  /* `/` vs `//`: peek decides nothing ("op" either way) */
+    if (eq(c, "eof")) return "eof";
+    if (eq(c, "ws")) return "ws";
+    if (eq(c, "nl")) return "nl";
+    if (eq(c, "A")) return "id";
+    if (eq(c, "D")) return "num";
+    if (eq(c, "Q") || eq(c, "S")) return "str";
+    if (eq(c, "P")) return "punct";
+    if (eq(c, "O")) return "op";
+    return "bad";
+}
+
+static const char *parse_label(const char *nt, const char *tok) {
+    if (eq(nt, "top")) {
+        if (eq(tok, "eof")) return "end";
+        if (eq(tok, "function")) return "fn";
+        if (eq(tok, "let")) return "let";
+    }
+    if (eq(nt, "stmt")) {
+        if (eq(tok, "{")) return "block";
+        if (eq(tok, "function")) return "fn";
+        if (in(tok, "if while for switch return break continue let")) return tok;
+        if (in(tok, "case default")) return tok;
+    }
+    if (eq(nt, "unary")) {
+        if (eq(tok, "-")) return "neg";
+        if (eq(tok, "!")) return "not";
+        if (eq(tok, "...")) return "spread";
+        if (eq(tok, "typeof")) return "typeof";
+        return "prim";
+    }
+    if (eq(nt, "postfix")) {
+        if (eq(tok, "[")) return "index";
+        if (eq(tok, "(")) return "call";
+        if (eq(tok, ".")) return "dot";
+        return "done";
+    }
+    if (eq(nt, "primary")) {
+        if (eq(tok, "id")) return "ident";
+        if (eq(tok, "num")) return "number";
+        if (eq(tok, "str")) return "string";
+        if (in(tok, "null true false")) return tok;
+        if (eq(tok, "[")) return "list";
+        if (eq(tok, "{")) return "dict";
+        if (eq(tok, "(")) return "paren";
+        return "bad";
+    }
+    if (eq(nt, "pswitch")) {
+        if (in(tok, "case default }")) return eq(tok, "}") ? "done" : tok;
+        return "bad";
+    }
+    /* PARSE_DEFAULT */
+    if (eq(nt, "top") || eq(nt, "stmt")) return "expr";
+    if (eq(nt, "unary")) return "prim";
+    if (eq(nt, "postfix")) return "done";
+    return "bad";
+}
+
+static int num(const char *t) { return eq(t, "i64") || eq(t, "f64"); }
+
+static const char *type_label(const char *t1, const char *op, const char *t2) {
+    if (eq(op, "!")) return !eq(t1, "fn") ? "bool" : "illegal";
+    if (eq(op, "len")) return in(t1, "str list dict tup") ? "i64" : "illegal";
+    if (eq(op, "keys")) return eq(t1, "dict") ? "list" : "illegal";
+    if (eq(op, "spread")) return in(t1, "list tup") ? t1 : "illegal";
+    if (eq(op, ",")) return "tup";
+    if (eq(op, "call")) return !eq(t1, "fn") ? "illegal" : "null";
+    if (eq(op, ".")) return eq(t1, "dict") ? "null" : "illegal";
+    if (eq(op, "[]")) {
+        if (eq(t1, "list") && eq(t2, "i64")) return "null";
+        if (eq(t1, "dict") && eq(t2, "str")) return "null";
+        if (eq(t1, "str") && eq(t2, "i64")) return "str";
+        return "illegal";
+    }
+    if (eq(op, "in")) return eq(t1, "str") && eq(t2, "dict") ? "bool" : "illegal";
+    if (eq(op, "=")) return eq(t1, t2) || eq(t1, "null") ? t2 : "illegal";
+    if (eq(op, "&&") || eq(op, "||")) return eq(t1, "bool") && eq(t2, "bool") ? "bool" : "illegal";
+    if (eq(op, "==") || eq(op, "!=")) {
+        if (eq(t1, t2)) return "bool";
+        if (num(t1) && num(t2)) return "bool";
+        return "illegal";
+    }
+    if (in(op, "< <= > >=")) {
+        if (num(t1) && num(t2)) return "bool";
+        if (eq(t1, "str") && eq(t2, "str")) return "bool";
+        return "illegal";
+    }
+    if (in(op, "+ - * / %")) {
+        if (eq(t1, "i64") && eq(t2, "i64")) return eq(op, "/") ? "f64" : "i64";
+        if (num(t1) && num(t2)) return "f64";
+        if (eq(op, "+") && eq(t1, "str") && eq(t2, "str")) return "str";
+        return "illegal";
+    }
+    return "illegal";
+}
+
+static const char *scope_label(const char *ctx, const char *kind) {
+    if (eq(kind, "bind")) return in(ctx, "mod fn block for") ? "ok" : "illegal";
+    if (eq(kind, "param") || eq(kind, "rest")) return eq(ctx, "fn") ? "ok" : "illegal";
+    if (eq(kind, "load")) return "ok";
+    if (eq(kind, "store")) return !eq(ctx, "expr") ? "ok" : "illegal";
+    if (eq(kind, "label")) return eq(ctx, "switch") ? "ok" : "illegal";
+    if (in(kind, "break continue")) return in(ctx, "for switch block") ? "ok" : "illegal";
+    return "illegal";
+}
+
+static const char *shape_label(const char *ty, const char *keysig) {
+    static char buf[32];
+    if (eq(keysig, "empty")) {
+        if (in(ty, "null bool i64 f64 str list tup fn")) { snprintf(buf, sizeof buf, "s_%s", ty); return buf; }
+        if (eq(ty, "dict")) return "s_dict_empty";
+    }
+    if (eq(ty, "dict")) { snprintf(buf, sizeof buf, "s_dict_%s", keysig); return buf; }
+    return "s_unknown";
+}
+
+static const char *irsel_label(const char *fam, const char *fl) {
+    static const char *IR[][3] = {
+        { "arith", "i64", "op_add" }, { "arith", "f64", "op_div" }, { "arith", "str", "op_add" }, { "arith", "any", "op_add" },
+        { "cmp", "i64", "op_cmp" }, { "cmp", "f64", "op_cmp" }, { "cmp", "str", "op_cmp" }, { "cmp", "bool", "op_cmp" },
+        { "cmp", "any", "op_cmp" }, { "logic", "bool", "op_logic" }, { "logic", "any", "op_logic" },
+        { "mem", "any", "op_load" }, { "mem", "list", "op_idx" }, { "mem", "dict", "op_idx" }, { "mem", "str", "op_idx" },
+        { "ctrl", "br", "op_jump" }, { "ctrl", "br_if", "op_jump" }, { "ctrl", "ret", "op_ret" }, { "ctrl", "switch", "op_jump" },
+        { "call", "any", "op_call" }, { "data", "list", "op_mk" }, { "data", "dict", "op_mk" }, { "data", "any", "op_mk" },
+        { "ic", "enter", "op_ic" }, { "host", "print", "op_host" }, { 0, 0, 0 } };
+    int i;
+    for (i = 0; IR[i][0]; i++) if (eq(IR[i][0], fam) && eq(IR[i][1], fl)) return IR[i][2];
+    return "bad";
+}
+
+static const char *ic_label(const char *shape, const char *op, const char *guard) {
+    int tm = in(guard, "type_ok mono"), dict = !strncmp(shape, "s_dict", 6);
+    if (eq(guard, "none") || eq(shape, "s_unknown")) return "interp";
+    if (eq(op, "add")) {
+        if (eq(shape, "s_i64") && tm) return "add_i64";
+        if (eq(shape, "s_f64") && tm) return "add_f64";
+        return "interp";
+    }
+    if (eq(op, "sub") && eq(shape, "s_i64") && tm) return "sub_i64";
+    if (eq(op, "mul") && eq(shape, "s_i64") && tm) return "mul_i64";
+    if (eq(op, "div") && eq(shape, "s_f64") && tm) return "div_f64";
+    if (eq(op, "lt") || eq(op, "eq")) {
+        if (eq(shape, "s_i64") && tm) return "cmp_i64";
+        if (eq(shape, "s_f64") && tm) return "cmp_f64";
+        return "interp";
+    }
+    if (eq(op, "idx")) {
+        if (eq(shape, "s_list") && in(guard, "type_ok len_ok mono")) return "idx_list";
+        if (dict && in(guard, "type_ok key_ok mono")) return "idx_dict";
+        if (eq(shape, "s_str") && in(guard, "type_ok len_ok mono")) return "idx_str";
+        return "interp";
+    }
+    if (eq(op, "setidx")) {
+        if (eq(shape, "s_list") && in(guard, "type_ok len_ok mono")) return "set_list";
+        if (dict && in(guard, "type_ok key_ok mono")) return "set_dict";
+        return "interp";
+    }
+    if (eq(op, "dot") && dict && in(guard, "type_ok key_ok mono")) return "dot_dict";
+    if (eq(op, "call") && eq(shape, "s_fn") && tm) return "call_fn";
+    if (eq(op, "len")) {
+        if (eq(shape, "s_list") && tm) return "len_list";
+        if (eq(shape, "s_str") && tm) return "len_str";
+        return "interp";
+    }
+    if (eq(op, "in") && dict && in(guard, "type_ok key_ok mono")) return "in_dict";
+    return "interp";
+}
+
+static const char *isel_label(const char *op) {
+    if (in(op, "nop drop ic_enter")) return "nop";
+    if (eq(op, "add")) return "poly_bin";
+    if (in(op, "sub mul mod")) return "i64_bin";
+    if (eq(op, "div")) return "f64_bin";
+    if (in(op, "lt le gt ge eq ne")) return "i64_cmp";
+    if (in(op, "and or not")) return "bool_logic";
+    if (in(op, "load_l store_l")) return "local";
+    if (in(op, "load_g store_g")) return "global";
+    if (eq(op, "const")) return "const";
+    if (eq(op, "jump")) return "br";
+    if (in(op, "jumpz jumpnz switch")) return "br_if";
+    if (eq(op, "call")) return "call";
+    if (eq(op, "ret")) return "ret";
+    if (in(op, "idx setidx dot len keys in mklist mkdict mktup spread restpack")) return "heap";
+    if (in(op, "typeof shapeof")) return "typeof";
+    if (eq(op, "print")) return "host";
+    return "trap";
+}
+
+static const char *enc_label(const char *form, const char *imm) {
+    if (eq(form, "nop")) return "empty";
+    if (eq(form, "trap")) return "trap";
+    if (eq(form, "host")) return "op_host";
+    if (in(form, "br br_if")) return "op_label";
+    if (in(form, "local global")) return "op_slot";
+    if (eq(form, "const")) return !eq(imm, "none") ? "op_imm" : "op";
+    if (in(form, "i64_bin f64_bin i64_cmp f64_cmp bool_logic poly_bin typeof call ret")) return "op";
+    if (eq(form, "heap")) {
+        if (in(imm, "count str_ix")) return "op_imm";
+        if (eq(imm, "slot")) return "op_slot";
+        return "op";
+    }
+    return "trap";
+}
+
+static const char *reloc_label(const char *kind) {
+    if (in(kind, "br br_if switch")) return "br_target";
+    if (eq(kind, "call")) return "fn_ref";
+    return "none";
+}
+
+/* stage registry: field names and domains, classes, label */
+typedef struct { const char *name; int nf; const char *fname[3]; const char **dom[3]; const char **cls; } Stage;
+static const Stage ST[NNETS] = {
+    { "lex", 2, { "c", "peek", 0 }, { CHARC, CHARC, 0 }, LEXACT },
+    { "parse", 2, { "nt", "tok", 0 }, { NT, TOKS, 0 }, PRODS },
+    { "type", 3, { "t1", "op", "t2" }, { TYS, TOPS, TYS }, TYOUT },
+    { "scope", 2, { "ctx", "kind", 0 }, { CTX, KIND, 0 }, ACTS },
+    { "shape", 2, { "ty", "keysig", 0 }, { TYS, KEYSIG, 0 }, SHAPES },
+    { "irsel", 2, { "family", "flavor", 0 }, { FAMILY, FLAVOR, 0 }, RECIPE },
+    { "ic", 3, { "shape", "op", "guard" }, { SHAPES, IC_OPS, GUARDS }, STUBS },
+    { "isel", 1, { "op", 0, 0 }, { JOPS, 0, 0 }, WASM_FORMS },
+    { "enc", 2, { "form", "imm", 0 }, { WASM_FORMS, IMMCLASS, 0 }, ENCTMPL },
+    { "reloc", 1, { "kind", 0, 0 }, { JMPKIND, 0, 0 }, RELKIND },
+};
+
+static const char *label(int s, const char **k) {
+    switch (s) {
+    case 0: return lex_label(k[0], k[1]);
+    case 1: return parse_label(k[0], k[1]);
+    case 2: return type_label(k[0], k[1], k[2]);
+    case 3: return scope_label(k[0], k[1]);
+    case 4: return shape_label(k[0], k[1]);
+    case 5: return irsel_label(k[0], k[1]);
+    case 6: return ic_label(k[0], k[1], k[2]);
+    case 7: return isel_label(k[0]);
+    case 8: return enc_label(k[0], k[1]);
+    default: return reloc_label(k[0]);
+    }
+}
+
+static int dlen(const char **d) { int n = 0; while (d[n]) n++; return n; }
+static int dfind(const char **d, const char *s) { int i; for (i = 0; d[i]; i++) if (eq(d[i], s)) return i; return -1; }
+
+/* ---------- growable text ---------- */
+typedef struct { char *s; size_t n, cap; } Buf;
+static void badd(Buf *b, const char *s, size_t k) {
+    if (b->n + k + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 4096; char *g;
+        while (c < b->n + k + 1) c *= 2;
+        if (!(g = realloc(b->s, c))) die("out of memory", 0);
+        b->s = g; b->cap = c;
+    }
+    memcpy(b->s + b->n, s, k); b->n += k; b->s[b->n] = 0;
+}
+static void bs(Buf *b, const char *s) { badd(b, s, strlen(s)); }
+static void bi(Buf *b, long v) { char t[32]; snprintf(t, sizeof t, "%ld", v); bs(b, t); }
+
+static void domain(Buf *b, int s) {
+    const Stage *S = &ST[s]; int f, i;
+    bs(b, "net\t"); bs(b, S->name); bs(b, "\n");
+    for (f = 0; f < S->nf; f++) {
+        bs(b, "field\t"); bs(b, S->fname[f]);
+        for (i = 0; S->dom[f][i]; i++) { bs(b, "\t"); bs(b, S->dom[f][i]); }
+        bs(b, "\n");
+    }
+    bs(b, "class");
+    for (i = 0; S->cls[i]; i++) { bs(b, "\t"); bs(b, S->cls[i]); }
+    bs(b, "\n");
+}
+
+static void gold_file(Buf *b, int s) {
+    const Stage *S = &ST[s]; int n = 1, k, f, rem, d[3]; const char *key[3];
+    bs(b, "# "); bs(b, S->name);
+    bs(b, ".gold.tsv -- GENERATED by adapter/ujswasm/tables.cx from its .cx port of ujs/seed/construct/gold.py; do not edit.\n"
+          "# flownet label source: the domain, then one row per key in cartesian-product order: field values, gold class.\n");
+    domain(b, s);
+    for (f = 0; f < S->nf; f++) n *= dlen(S->dom[f]);
+    for (k = 0; k < n; k++) {
+        rem = k;
+        for (f = S->nf - 1; f >= 0; f--) { int r = dlen(S->dom[f]); d[f] = rem % r; rem /= r; }
+        for (f = 0; f < S->nf; f++) { key[f] = S->dom[f][d[f]]; if (f) bs(b, "\t"); bs(b, key[f]); }
+        bs(b, "\t"); bs(b, label(s, key)); bs(b, "\n");
+    }
+}
+
+static const char *CONTRACT =
+    "# contract.tsv -- GENERATED by adapter/ujswasm/tables.cx from m4/contract.py; do not edit.\n"
+    "# flownet contract for ujs -> \\0asm: 10 nets; 4 flows, each decided by one net; the measured revision of the\n"
+    "# 4 x 10 draft (only lex, parse, isel, enc decide output or refusal); the isel choice for eq/ne (first = gold).\n"
+    "net\tlex\tparse\ttype\tscope\tshape\tirsel\tic\tisel\tenc\treloc\n"
+    "flow\tlex\tlex\n"
+    "flow\tfront\tparse\n"
+    "flow\tselect\tisel\n"
+    "flow\tencode\tenc\n"
+    "reserved\tirsel\treloc\tscope\n"
+    "observed\ttype\tshape\tic\n"
+    "choice\tisel\teq\ti64_cmp\tf64_cmp\n"
+    "choice\tisel\tne\ti64_cmp\tf64_cmp\n"
+    "phase\tfront(lex+parse)\tselect+encode\n";
+
+/* ---------- a minimal JSON reader for built.json (objects, arrays, integers, strings, null) ---------- */
+typedef struct J { int t; long v; char *s; int n; struct J **a; char **k; } J;   /* t: 0 null 1 num 2 str 3 arr 4 obj */
+static const char *jp; static const char *jpath;
+static void jerr(const char *why) { fprintf(stderr, "ujswasm-tables: %s: offset %ld: %s\n", jpath, (long)0, why); exit(1); }
+static void jws(void) { while (*jp == ' ' || *jp == '\n' || *jp == '\t' || *jp == '\r') jp++; }
+static J *jnew(int t) { J *j = calloc(1, sizeof(J)); if (!j) die("out of memory", 0); j->t = t; return j; }
+static char *jstr(void) {
+    const char *s; char *o; size_t k;
+    if (*jp != '"') jerr("want a string");
+    s = ++jp;
+    while (*jp && *jp != '"') { if (*jp == '\\') jerr("escapes are not expected in built.json"); jp++; }
+    if (!*jp) jerr("unterminated string");
+    k = (size_t)(jp - s); o = malloc(k + 1); memcpy(o, s, k); o[k] = 0; jp++;
+    return o;
+}
+static J *jval(void) {
+    J *j;
+    jws();
+    if (*jp == '{' || *jp == '[') {
+        int obj = *jp == '{', cap = 0;
+        j = jnew(obj ? 4 : 3); jp++; jws();
+        if (*jp == (obj ? '}' : ']')) { jp++; return j; }
+        for (;;) {
+            if (j->n == cap) {
+                cap = cap ? cap * 2 : 8;
+                j->a = realloc(j->a, cap * sizeof(J *)); j->k = realloc(j->k, cap * sizeof(char *));
+                if (!j->a || !j->k) die("out of memory", 0);
+            }
+            if (obj) { jws(); j->k[j->n] = jstr(); jws(); if (*jp++ != ':') jerr("want ':'"); }
+            else j->k[j->n] = 0;
+            j->a[j->n++] = jval();
+            jws();
+            if (*jp == ',') { jp++; continue; }
+            if (*jp == (obj ? '}' : ']')) { jp++; return j; }
+            jerr("want ',' or a close");
+        }
+    }
+    if (*jp == '"') { j = jnew(2); j->s = jstr(); return j; }
+    if (!strncmp(jp, "null", 4)) { jp += 4; return jnew(0); }
+    if (*jp == '-' || (*jp >= '0' && *jp <= '9')) {
+        char *e; j = jnew(1); j->v = strtol(jp, &e, 10);
+        if (*e == '.' || *e == 'e' || *e == 'E') jerr("a non-integer number");
+        jp = e; return j;
+    }
+    jerr("unexpected byte");
+    return 0;
+}
+static J *jget(J *o, const char *key) {
+    int i;
+    if (!o || o->t != 4) return 0;
+    for (i = 0; i < o->n; i++) if (eq(o->k[i], key)) return o->a[i];
+    return 0;
+}
+static J *jneed(J *o, const char *key, int t, const char *net) {
+    J *j = jget(o, key); char m[160];
+    if (!j || j->t != t) { snprintf(m, sizeof m, "%s: built.json: %s.%s missing or of the wrong kind", jpath, net, key); die(m, 0); }
+    return j;
+}
+
+static void net_file(Buf *b, int s, J *root) {
+    const Stage *S = &ST[s]; J *o = jget(root, S->name), *H, *offs, *b1, *feeds, *heads, *w2, *y, *cl;
+    int i, j, h0 = 0; char m[200];
+    if (!o || o->t != 4) { snprintf(m, sizeof m, "built.json has no net %s", S->name); die(m, 0); }
+    H = jneed(o, "H", 1, S->name); offs = jneed(o, "offs", 3, S->name); b1 = jneed(o, "b1", 3, S->name);
+    feeds = jneed(o, "feeds", 3, S->name); heads = jneed(o, "heads", 3, S->name); w2 = jneed(o, "w2", 4, S->name);
+    /* one head "y" whose classes are the gold table's classes, in order */
+    if (heads->n != 1 || heads->a[0]->t != 3 || heads->a[0]->n != 2 || heads->a[0]->a[0]->t != 2 || !eq(heads->a[0]->a[0]->s, "y"))
+        { snprintf(m, sizeof m, "built.json: %s: want one head y", S->name); die(m, 0); }
+    cl = heads->a[0]->a[1];
+    if (cl->t != 3 || cl->n != dlen(S->cls)) { snprintf(m, sizeof m, "built.json: %s: class count differs from gold", S->name); die(m, 0); }
+    for (i = 0; i < cl->n; i++)
+        if (cl->a[i]->t != 2 || !eq(cl->a[i]->s, S->cls[i])) { snprintf(m, sizeof m, "built.json: %s: class %d differs from gold", S->name, i); die(m, 0); }
+    for (i = 0; i < S->nf; i++) h0 += dlen(S->dom[i]);
+    if (offs->n != S->nf || b1->n != H->v || feeds->n != h0) { snprintf(m, sizeof m, "built.json: %s: shape differs from the domain", S->name); die(m, 0); }
+    y = jneed(w2, "y", 3, S->name);
+    if (y->n != H->v) { snprintf(m, sizeof m, "built.json: %s: w2 rows != H", S->name); die(m, 0); }
+    bs(b, "# "); bs(b, S->name);
+    bs(b, ".net.tsv -- GENERATED by adapter/ujswasm/tables.cx from `python3 -m ujs build-weights` (unisa/intnet.build,\n"
+          "# the construction oracle); do not edit.  flownet integer net: domain, H, offs, b1, then W1 as one feed row per input\n"
+          "# coordinate (units it feeds) and W2 as one row per unit (class:weight).\n");
+    domain(b, s);
+    bs(b, "H\t"); bi(b, H->v); bs(b, "\n");
+    bs(b, "offs"); for (i = 0; i < offs->n; i++) { bs(b, "\t"); bi(b, offs->a[i]->v); } bs(b, "\n");
+    bs(b, "b1"); for (i = 0; i < b1->n; i++) { bs(b, "\t"); bi(b, b1->a[i]->v); } bs(b, "\n");
+    for (i = 0; i < feeds->n; i++) {
+        J *r = feeds->a[i];
+        if (r->t != 3) die("built.json: a feed row is not a list", 0);
+        bs(b, "feed\t"); bi(b, i);
+        for (j = 0; j < r->n; j++) { bs(b, "\t"); bi(b, r->a[j]->v); }
+        bs(b, "\n");
+    }
+    for (i = 0; i < y->n; i++) {
+        J *r = y->a[i];
+        if (r->t != 3) die("built.json: a w2 row is not a list", 0);
+        bs(b, "w2\t"); bi(b, i);
+        for (j = 0; j < r->n; j++) {
+            J *p = r->a[j];
+            if (p->t != 3 || p->n != 2) die("built.json: a w2 entry is not [class, weight]", 0);
+            bs(b, "\t"); bi(b, p->a[0]->v); bs(b, ":"); bi(b, p->a[1]->v);
+        }
+        bs(b, "\n");
+    }
+}
+
+/* ---------- write / check ---------- */
+static void put(const char *dir, const char *name, Buf *b) {
+    char path[2048];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (cx_write(path, b->s, b->n)) die("cannot write ", path);
+}
+
+static int make(const char *root, const char *out, int with_nets) {
+    Buf b; int s; char name[128], tmp[] = "/tmp/fnujsXXXXXX", bwdir[600], jsonp[700];
+    J *root_j = 0;
+    if (with_nets) {
+        char *argv[8], *o = 0; size_t n = 0; int rc; char *txt;
+        if (!mkdtemp(tmp)) die("cannot make a scratch directory", 0);
+        snprintf(bwdir, sizeof bwdir, "%s/bw", tmp);
+        argv[0] = "python3"; argv[1] = "-m"; argv[2] = "ujs"; argv[3] = "build-weights"; argv[4] = "--out"; argv[5] = bwdir; argv[6] = 0;
+        if (chdir(root)) die("cannot enter ", root);
+        rc = cx_runv_timeout(argv, 50, &o, &n);
+        free(o);
+        if (rc) { char m[64]; snprintf(m, sizeof m, "python3 -m ujs build-weights failed, rc %d", rc); die(m, 0); }
+        snprintf(jsonp, sizeof jsonp, "%s/built.json", bwdir);
+        if (!(txt = cx_read(jsonp, &n))) die("cannot read ", jsonp);
+        jp = txt; jpath = jsonp;
+        root_j = jval();
+        if (root_j->t != 4) die("built.json is not an object", 0);
+        unlink(jsonp); rmdir(bwdir); rmdir(tmp);
+    }
+    memset(&b, 0, sizeof b); bs(&b, CONTRACT); put(out, "contract.tsv", &b);
+    for (s = 0; s < NNETS; s++) {
+        b.n = 0; gold_file(&b, s);
+        snprintf(name, sizeof name, "%s.gold.tsv", ST[s].name); put(out, name, &b);
+        if (with_nets) {
+            b.n = 0; net_file(&b, s, root_j);
+            snprintf(name, sizeof name, "%s.net.tsv", ST[s].name); put(out, name, &b);
+        }
+    }
+    free(b.s);
+    return 0;
+}
+
+static int same(const char *a, const char *b) {
+    size_t na = 0, nb = 0; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int r;
+    r = x && y && na == nb && !memcmp(x, y, na);
+    free(x); free(y);
+    return r;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = argc > 1 ? argv[1] : "", *root = argc > 2 ? argv[2] : ".";
+    char dir[2048], tmp[] = "/tmp/fntabXXXXXX", a[2400], c[2400], name[128];
+    int s, k, bad = 0, nets = !eq(mode, "--check-gold");
+    static char rootabs[2048];
+    if (!eq(mode, "--write") && !eq(mode, "--check") && !eq(mode, "--check-gold"))
+        die("usage: tables.cx -- --write|--check|--check-gold [ROOT]", 0);
+    if (!realpath(root, rootabs)) die("no such root: ", root);
+    snprintf(dir, sizeof dir, "%s/%s", rootabs, TDIR);
+    if (eq(mode, "--write")) {
+        make(rootabs, dir, 1);
+        printf("ujswasm-tables: wrote %s (contract + %d nets x gold, net)\n", TDIR, NNETS);
+        return 0;
+    }
+    if (!mkdtemp(tmp)) die("cannot make a scratch directory", 0);
+    make(rootabs, tmp, nets);
+    for (s = -1; s < NNETS; s++)
+        for (k = 0; k < (s < 0 ? 1 : nets ? 2 : 1); k++) {
+            if (s < 0) snprintf(name, sizeof name, "contract.tsv");
+            else snprintf(name, sizeof name, "%s.%s.tsv", ST[s].name, k ? "net" : "gold");
+            snprintf(a, sizeof a, "%s/%s", dir, name); snprintf(c, sizeof c, "%s/%s", tmp, name);
+            if (!same(a, c)) { fprintf(stderr, "ujswasm-tables: %s/%s: differs from a fresh make (or is missing)\n", TDIR, name); bad++; }
+            unlink(c);
+        }
+    rmdir(tmp);
+    if (bad) return 1;
+    printf("ujswasm-tables: %s: contract + %d gold%s tables identical to a fresh make%s\n", TDIR, NNETS,
+           nets ? " + net" : "", nets ? " (oracle: python3 -m ujs build-weights)" : " (no Python)");
+    return 0;
+}
