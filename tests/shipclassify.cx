@@ -1,0 +1,527 @@
+#!/usr/bin/env -S unisacc.com -run
+/* shipclassify.cx -- the shipping-path classifier of release/tools/commitgate.sh (was its embedded PY_PRODUCT block)
+   and of release/tools/hooks/pre-commit, in C (2026-10-23, the owner's direction: the toolchain moves off Python).
+   Both run it through tests/cxbin (compiled once per source and compiler; the -run forms below behave the same).
+   The predicate is the freeze closure's product() (was tests/freezecheck.py; or the path is unisacc.c), copied from
+   tests/freezecheck.cx (no textual include); tests/gatelayers.py layer() is ported below over the tables it reads
+   from ROOT/tests/gatelayers.py itself (not copied, so they cannot drift); tests/gatedeps.json is read without
+   building a tree: it is checked as JSON once and only the named suites and the family they name are looked at.
+   usage:
+     sh ./unisacc.com -run tests/shipclassify.cx -- --commitgate ROOT "NAMED_SUITES" PATH...
+         PY_PRODUCT: every PATH (a leading ./ dropped) plus what `git ls-files -z --cached --others --exclude-standard
+         -- PATH` lists (git runs in the cwd) is a candidate; the shipping ones are sorted.  None: rc 0.  Otherwise
+         NAMED_SUITES (split as str.split()) must hold suites that gatelayers classifies, that ROOT/tests/gatedeps.json
+         declares, that include a non-contract one, and every shipping path must be covered by one non-contract
+         suite (its own or its family's files/trees/code_trees/all_files_trees/reviewed_trees).  A refusal is one
+         `commitgate: ...` line on stderr, rc 1, byte for byte the Python text.  Nothing goes to stdout.
+     sh ./unisacc.com -run tests/shipclassify.cx -- --product0
+         the pre-commit hook: NUL-separated paths on stdin (read as Python's text stdin: strict UTF-8, \r kept);
+         prints the shipping ones in input order joined by one space, then a newline; rc 0.
+     sh ./unisacc.com -run tests/shipclassify.cx -- --product PATH...
+         the same predicate over the arguments (a convenience; no caller uses it yet).
+   Where the Python block raised (a git call that fails, output or stdin that is not UTF-8, a missing or malformed
+   gatedeps.json, a JSON shape its code cannot index or iterate, too few arguments) Python printed a traceback and
+   exited 1; this port prints one `commitgate: shipclassify: ...` line on stderr and exits 1 too.  git's own stderr
+   passes through, as check_output let it.  Arguments are decoded as Python decodes argv (UTF-8, an undecodable byte
+   b standing for U+DC00+b, printed as \udcXX on stderr as Python's backslashreplace does). */
+
+/* one UTF-8 code point at s[i] (strict: no overlong, surrogate or > U+10FFFF); its length in *l, -1 if invalid */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+/* str.isspace (str.split()) on code points */
+static int space(long c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+/* length of one code point of an internal (UTF-8, surrogates as 3 bytes) string */
+static int cplen(const unsigned char *s, size_t n, size_t i) {
+    int l;
+    if (cp_at(s, n, i, &l) >= 0) return l;
+    if (s[i] == 0xED && i + 2 < n && (s[i + 1] & 0xE0) == 0xA0) return 3;
+    return 1;
+}
+
+static void crash(const char *what, const char *arg) {
+    fflush(stdout);
+    fprintf(stderr, "commitgate: shipclassify: %s%s (the Python block raised here: traceback, rc 1)\n", what, arg ? arg : "");
+    exit(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) crash("out of memory", 0); return p; }
+
+/* sys.argv decoding: UTF-8 with surrogateescape, kept as UTF-8 with the surrogates encoded in 3 bytes */
+static char *argstr(const char *raw) {
+    size_t n = strlen(raw), i = 0, o = 0; int l; char *s = xmalloc(3 * n + 1);
+    while (i < n) {
+        if (cp_at((const unsigned char *)raw, n, i, &l) >= 0) { memcpy(s + o, raw + i, l); o += l; i += l; }
+        else {
+            long cp = 0xDC00 + (unsigned char)raw[i++];
+            s[o++] = (char)(0xE0 | (cp >> 12)); s[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); s[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    s[o] = 0; return s;
+}
+/* stderr text as Python writes it (errors=backslashreplace: a surrogate prints as \udcXX) */
+static void eput(const char *s) {
+    size_t n = strlen(s), i = 0;
+    while (i < n) {
+        const unsigned char *u = (const unsigned char *)s; int l;
+        if (cp_at(u, n, i, &l) < 0 && u[i] == 0xED && i + 2 < n && (u[i + 1] & 0xE0) == 0xA0) {
+            long cp = ((long)(u[i] & 0x0F) << 12) | ((long)(u[i + 1] & 0x3F) << 6) | (u[i + 2] & 0x3F);
+            fprintf(stderr, "\\u%04lx", cp); i += 3;
+        } else { fputc(s[i], stderr); i++; }
+    }
+}
+static void no(const char *a, const char *mid, const char *b) {
+    fflush(stdout);
+    fputs("commitgate: ", stderr); eput(a); if (mid) eput(mid); if (b) eput(b); fputc('\n', stderr);
+    exit(1);
+}
+
+typedef struct { char **v; int n, cap; } List;
+static void push(List *l, const char *s, size_t n) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 64; l->v = realloc(l->v, l->cap * sizeof *l->v); if (!l->v) crash("out of memory", 0); }
+    l->v[l->n] = xmalloc(n + 1); memcpy(l->v[l->n], s, n); l->v[l->n][n] = 0; l->n++;
+}
+/* str.split() */
+static void splitws(const char *s, List *out) {
+    size_t n = strlen(s), i = 0, st = 0; int l, in = 0;
+    while (i < n) {
+        long c = cp_at((const unsigned char *)s, n, i, &l);
+        if (c < 0) l = 1;
+        if (c >= 0 && space(c)) { if (in) push(out, s + st, i - st); in = 0; }
+        else if (!in) { in = 1; st = i; }
+        i += l;
+    }
+    if (in) push(out, s + st, n - st);
+}
+static int startswith(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+static int endswith(const char *s, const char *p) { size_t a = strlen(s), b = strlen(p); return a >= b && !strcmp(s + a - b, p); }
+
+/* ---- tests/freezecheck.py product(), copied from tests/freezecheck.cx ---- */
+static const char *CLOSURE[] = { "exec/", "unisa/", "src/", "kernel/", "include/", "weights/", "seed/", 0 };
+static const char *EXT[] = { ".py", ".c", ".h", ".inc", ".tsv", ".json", ".sh", 0 };
+static const char *SEED[] = { "tbl.c", "net.c", "json.h", "gen.c", "facts.h", "ident.c", "blob.c", "sha256.h", "pack.c", "compilerpack.c", "ape.c", 0 };
+
+static int product(const char *path) {
+    int i, c = 0, e = 0, nparts = 1; const char *p, *last, *slash1, *slash2;
+    for (i = 0; CLOSURE[i]; i++) if (startswith(path, CLOSURE[i])) c = 1;
+    for (i = 0; EXT[i]; i++) if (endswith(path, EXT[i])) e = 1;
+    if (!c || !e) return 0;
+    for (p = path; *p; p++) if (*p == '/') nparts++;
+    last = strrchr(path, '/'); last = last ? last + 1 : path;
+    slash1 = strchr(path, '/');                        /* parts[0] is path up to the first '/' */
+    if (slash1 && slash1 - path == 4 && !strncmp(path, "seed", 4)) {   /* the seed tools the build runs (0.0.32 B5: gen.c) */
+        int in = 0; for (i = 0; SEED[i]; i++) if (!strcmp(last, SEED[i])) in = 1;
+        if (!in) return 0;
+    }
+    if (slash1 && slash1 - path == 4 && !strncmp(path, "exec", 4) && (endswith(path, "check.sh") || endswith(path, "check.py"))) return 0;   /* 0.0.32 X31: verifiers, not inputs */
+    slash2 = slash1 ? strchr(slash1 + 1, '/') : 0;
+    {   /* parts[:2] == ['exec', 'build']: "exec/build" whole, or "exec/build/..." */
+        int eb = slash1 && slash1 - path == 4 && !strncmp(path, "exec", 4)
+                 && (slash2 ? (slash2 - slash1 - 1 == 5 && !strncmp(slash1 + 1, "build", 5)) : !strcmp(slash1 + 1, "build"));
+        return !(eb && (nparts > 3 || !endswith(path, ".py")));
+    }
+}
+static int shipping(const char *p) { return *p && (!strcmp(p, "unisacc.c") || product(p)); }
+
+/* ---- tests/gatelayers.py layer(): 0 contract, 1 platform, 2 pipeline, 3 stage, -1 unclassified (ValueError) ----
+   The tables are not copied: ROOT/tests/gatelayers.py (the module PY_PRODUCT imports) is read at start and its
+   `NAME = set("""...""".split())` and `NAME_PREFIX = ("...", ...)` declarations are taken as written, so the two
+   cannot drift.  Each must be declared exactly once in that shape (no later `NAME |=` / `.add`); a file that does
+   not have it is refused (rc 1), as an import that fails was. */
+static const char *LAYERNAME[] = { "CONTRACT", "PLATFORM", "PIPELINE", "STAGE" };
+static List LSET[4], LPRE[4];
+static const char *glfind(const char *gl, const char *decl) {   /* DECL at the start of a line, exactly once */
+    const char *p = gl, *hit = 0; size_t n = strlen(decl);
+    while ((p = strstr(p, decl)) != 0) {
+        if (p == gl || p[-1] == '\n') { if (hit) crash("tests/gatelayers.py declares twice: ", decl); hit = p; }
+        p += n;
+    }
+    if (!hit) crash("tests/gatelayers.py has no declaration ", decl);
+    return hit + n;
+}
+static void glread(const char *R) {
+    char *path, *gl; size_t n; int k;
+    n = strlen(R) + 32; path = xmalloc(n); snprintf(path, n, "%s/tests/gatelayers.py", R);
+    gl = cx_read(path, &n);
+    if (!gl) crash("cannot import gatelayers: no ", path);
+    for (k = 0; k < 4; k++) {
+        char decl[64], *body, *end; const char *p; char q;
+        const char *ops[] = { " |=", " +=", ".add(", ".update(", ".discard(", ".remove(", " -=", " &=", 0 }; int o;
+        for (o = 0; ops[o]; o++) {
+            snprintf(decl, sizeof decl, "%s%s", LAYERNAME[k], ops[o]);
+            if (strstr(gl, decl)) crash("tests/gatelayers.py changes a layer table after declaring it: ", decl);
+            snprintf(decl, sizeof decl, "%s_PREFIX%s", LAYERNAME[k], ops[o]);
+            if (strstr(gl, decl)) crash("tests/gatelayers.py changes a layer table after declaring it: ", decl);
+        }
+        snprintf(decl, sizeof decl, "%s = set(\"\"\"", LAYERNAME[k]);
+        p = glfind(gl, decl);
+        end = strstr(p, "\"\"\"");
+        if (!end || strncmp(end, "\"\"\".split())", 12)) crash("tests/gatelayers.py: unexpected shape after ", decl);
+        body = xmalloc(end - p + 1); memcpy(body, p, end - p); body[end - p] = 0;
+        if (strchr(body, '\\')) crash("tests/gatelayers.py: a backslash in ", decl);
+        splitws(body, &LSET[k]); free(body);
+        snprintf(decl, sizeof decl, "%s_PREFIX = (", LAYERNAME[k]);
+        for (p = glfind(gl, decl); *p != ')'; p++) {
+            if (!*p) crash("tests/gatelayers.py: unterminated ", decl);
+            if (*p == '#') { while (*p && *p != '\n') p++; p--; continue; }
+            if (*p == '"' || *p == '\'') {
+                const char *s = p + 1; q = *p;
+                for (p = s; *p != q; p++) if (!*p || *p == '\\' || *p == '\n') crash("tests/gatelayers.py: an unsupported string in ", decl);
+                push(&LPRE[k], s, p - s);
+            } else if (!(*p == ' ' || *p == ',' || *p == '\n' || *p == '\t' || *p == '\r')) crash("tests/gatelayers.py: unexpected text in ", decl);
+        }
+    }
+    free(gl); free(path);
+}
+static int layer(const char *name) {
+    int k, i;
+    for (k = 0; k < 4; k++) {
+        for (i = 0; i < LSET[k].n; i++) if (!strcmp(LSET[k].v[i], name)) return k;
+        for (i = 0; i < LPRE[k].n; i++) if (startswith(name, LPRE[k].v[i])) return k;
+    }
+    return -1;
+}
+
+/* ---- tests/gatedeps.json, as json.load reads it: checked once, then walked by position ---- */
+static const unsigned char *J; static size_t JN;
+#define NONE ((size_t)-1)
+static void jbad(size_t at) { char m[64]; snprintf(m, sizeof m, " (byte %lu)", (unsigned long)at); crash("tests/gatedeps.json is not valid JSON", m); }
+static size_t jws(size_t i) { while (i < JN && (J[i] == ' ' || J[i] == '\t' || J[i] == '\n' || J[i] == '\r')) i++; return i; }
+static int hexd(int c) { return (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1; }
+static int digit(size_t i) { return i < JN && J[i] >= '0' && J[i] <= '9'; }
+static int lit(size_t i, const char *w) { size_t n = strlen(w); return i + n <= JN && !memcmp(J + i, w, n); }
+static size_t jstr_end(size_t i) {          /* J[i] == '"' */
+    for (i++;;) {
+        int c;
+        if (i >= JN) jbad(i);
+        c = J[i];
+        if (c == '"') return i + 1;
+        if (c < 0x20) jbad(i);
+        if (c == '\\') {
+            if (++i >= JN) jbad(i);
+            c = J[i];
+            if (c == 'u') { int k; for (k = 1; k <= 4; k++) if (i + k >= JN || hexd(J[i + k]) < 0) jbad(i); i += 5; }
+            else if (c == '"' || c == '\\' || c == '/' || c == 'b' || c == 'f' || c == 'n' || c == 'r' || c == 't') i++;
+            else jbad(i);
+        } else i++;
+    }
+}
+static size_t jnum_end(size_t i) {
+    if (J[i] == '-') i++;
+    if (i < JN && J[i] == '0') i++;
+    else if (i < JN && J[i] >= '1' && J[i] <= '9') { while (digit(i)) i++; }
+    else jbad(i);
+    if (i < JN && J[i] == '.' && digit(i + 1)) { i++; while (digit(i)) i++; }
+    if (i < JN && (J[i] == 'e' || J[i] == 'E')) {
+        size_t k = i + 1; if (k < JN && (J[k] == '+' || J[k] == '-')) k++;
+        if (digit(k)) { i = k; while (digit(i)) i++; }
+    }
+    return i;
+}
+static size_t jend(size_t i, int depth) {   /* J[i] starts a value; the index after it */
+    if (i >= JN) jbad(i);
+    if (depth > 900) crash("tests/gatedeps.json nests too deep", 0);
+    switch (J[i]) {
+    case '{':
+        i = jws(i + 1); if (i < JN && J[i] == '}') return i + 1;
+        for (;;) {
+            if (i >= JN || J[i] != '"') jbad(i);
+            i = jws(jstr_end(i));
+            if (i >= JN || J[i] != ':') jbad(i);
+            i = jws(jend(jws(i + 1), depth + 1));
+            if (i < JN && J[i] == ',') { i = jws(i + 1); continue; }
+            if (i < JN && J[i] == '}') return i + 1;
+            jbad(i);
+        }
+    case '[':
+        i = jws(i + 1); if (i < JN && J[i] == ']') return i + 1;
+        for (;;) {
+            i = jws(jend(i, depth + 1));
+            if (i < JN && J[i] == ',') { i = jws(i + 1); continue; }
+            if (i < JN && J[i] == ']') return i + 1;
+            jbad(i);
+        }
+    case '"': return jstr_end(i);
+    case 't': if (lit(i, "true")) return i + 4; jbad(i);
+    case 'f': if (lit(i, "false")) return i + 5; jbad(i);
+    case 'n': if (lit(i, "null")) return i + 4; jbad(i);
+    case 'N': if (lit(i, "NaN")) return i + 3; jbad(i);
+    case 'I': if (lit(i, "Infinity")) return i + 8; jbad(i);
+    case '-': if (lit(i, "-Infinity")) return i + 9; return jnum_end(i);
+    default: if (J[i] >= '0' && J[i] <= '9') return jnum_end(i); jbad(i);
+    }
+    return 0;
+}
+/* the decoded string at J[i] == '"' (surrogate pairs joined, a lone surrogate kept in 3 bytes) */
+static char *jstr(size_t i, size_t *len) {
+    size_t e = jstr_end(i), o = 0; char *s = xmalloc(e - i + 1);
+    for (i++; i < e - 1;) {
+        if (J[i] != '\\') { s[o++] = (char)J[i++]; continue; }
+        i++;
+        switch (J[i]) {
+        case 'b': s[o++] = '\b'; i++; break;
+        case 'f': s[o++] = '\f'; i++; break;
+        case 'n': s[o++] = '\n'; i++; break;
+        case 'r': s[o++] = '\r'; i++; break;
+        case 't': s[o++] = '\t'; i++; break;
+        case 'u': {
+            long cp = 0; int k;
+            for (k = 1; k <= 4; k++) cp = cp * 16 + hexd(J[i + k]);
+            i += 5;
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 5 < e && J[i] == '\\' && J[i + 1] == 'u') {
+                long lo = 0; for (k = 2; k <= 5; k++) lo = lo * 16 + hexd(J[i + k]);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 6; }
+            }
+            if (cp < 0x80) s[o++] = (char)cp;
+            else if (cp < 0x800) { s[o++] = (char)(0xC0 | (cp >> 6)); s[o++] = (char)(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { s[o++] = (char)(0xE0 | (cp >> 12)); s[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); s[o++] = (char)(0x80 | (cp & 0x3F)); }
+            else { s[o++] = (char)(0xF0 | (cp >> 18)); s[o++] = (char)(0x80 | ((cp >> 12) & 0x3F)); s[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); s[o++] = (char)(0x80 | (cp & 0x3F)); }
+            break;
+        }
+        default: s[o++] = (char)J[i++]; break;   /* " \ / */
+        }
+    }
+    s[o] = 0; *len = o; return s;
+}
+static int jstr_is(size_t i, const char *k) {
+    size_t n; char *s = jstr(i, &n); int eq = n == strlen(k) && !memcmp(s, k, n); free(s); return eq;
+}
+/* walking an array or object: each call yields an element (an array value, or an object key's string) */
+typedef struct { size_t i; int obj; } It;
+static It jit(size_t v) { It t; t.i = jws(v + 1); t.obj = J[v] == '{'; return t; }
+static size_t jnext(It *t, size_t *val) {
+    size_t at;
+    t->i = jws(t->i);
+    if (J[t->i] == ']' || J[t->i] == '}') return NONE;
+    if (J[t->i] == ',') t->i = jws(t->i + 1);
+    at = t->i;
+    if (t->obj) { size_t v = jws(jws(jstr_end(at)) + 1); if (val) *val = v; t->i = jend(v, 0); }
+    else { if (val) *val = at; t->i = jend(at, 0); }
+    return at;
+}
+/* dict[key] / dict.get(key): the value of the last KEY (json.load keeps the last duplicate), NONE if absent */
+static size_t jget(size_t obj, const char *k) {
+    It t = jit(obj); size_t key, v, found = NONE;
+    while ((key = jnext(&t, &v)) != NONE) if (jstr_is(key, k)) found = v;
+    return found;
+}
+static int jtruthy(size_t v) {
+    switch (J[v]) {
+    case '{': return J[jws(v + 1)] != '}';
+    case '[': return J[jws(v + 1)] != ']';
+    case '"': return J[v + 1] != '"';
+    case 't': case 'N': case 'I': return 1;
+    case 'f': case 'n': return 0;
+    default: {
+        size_t e; char *buf; int r;            /* int("-0") and float underflow ("1e-400") are 0, falsy */
+        if (lit(v, "-Infinity")) return 1;
+        e = jnum_end(v); buf = xmalloc(e - v + 1);
+        memcpy(buf, J + v, e - v); buf[e - v] = 0;
+        r = strtod(buf, 0) != 0; free(buf); return r;
+    }
+    }
+}
+static const char *jkind(size_t v) {
+    switch (J[v]) {
+    case '{': return "dict"; case '[': return "list"; case '"': return "str"; case 't': case 'f': return "bool";
+    case 'n': return "NoneType"; default: return "number";
+    }
+}
+static int contains(const char *hay, size_t hn, const char *p) {
+    size_t n = strlen(p), i;
+    if (n > hn) return 0;
+    for (i = 0; i + n <= hn; i++) if (!memcmp(hay + i, p, n)) return 1;
+    return 0;
+}
+/* `P in V` (V already past `or []` when ORLIST): list -> an equal str element, dict -> a key, str -> a substring */
+static int jin(size_t v, const char *p, int orlist, const char *what) {
+    It t; size_t e;
+    if (v == NONE || (orlist && !jtruthy(v))) { if (orlist) return 0; crash("`in` over None: ", what); }
+    if (J[v] == '"') { size_t n; char *s = jstr(v, &n); int r = contains(s, n, p); free(s); return r; }
+    if (J[v] != '[' && J[v] != '{') crash("`in` over a JSON scalar: ", what);
+    t = jit(v);
+    while ((e = jnext(&t, 0)) != NONE) if (J[e] == '"' && jstr_is(e, p)) return 1;
+    return 0;
+}
+/* p == t or p.startswith(t.rstrip('/') + '/') */
+static int under(const char *p, const char *t, size_t tn) {
+    size_t pn = strlen(p);
+    if (pn == tn && !memcmp(p, t, tn)) return 1;
+    while (tn && t[tn - 1] == '/') tn--;
+    return pn > tn && !memcmp(p, t, tn) && p[tn] == '/';
+}
+/* any(p == t or ... for t in (V or [])) */
+static int jtree(size_t v, const char *p, const char *what) {
+    It t; size_t e;
+    if (v == NONE || !jtruthy(v)) return 0;
+    if (J[v] == '"') {            /* a str iterates its characters */
+        size_t n, i; char *s = jstr(v, &n); int hit = 0;
+        for (i = 0; i < n && !hit; ) { int l = cplen((unsigned char *)s, n, i); hit = under(p, s + i, l); i += l; }
+        free(s); return hit;
+    }
+    if (J[v] != '[' && J[v] != '{') crash("iterating a JSON scalar: ", what);
+    t = jit(v);
+    while ((e = jnext(&t, 0)) != NONE) {
+        size_t n; char *s; int hit;
+        if (J[e] != '"') crash("a non-str tree entry (no .rstrip): ", what);
+        s = jstr(e, &n); hit = under(p, s, n); free(s);
+        if (hit) return 1;
+    }
+    return 0;
+}
+
+static size_t ROOTV, FAMILIES;
+static const char *TREEKEYS[] = { "trees", "code_trees", "all_files_trees", "reviewed_trees", 0 };
+static int covers(size_t s, const char *p) {
+    size_t fam, src[2]; int k, j;
+    if (FAMILIES == NONE) crash("d['families']: KeyError", 0);
+    if (J[FAMILIES] != '{') crash("d['families'].get on a ", jkind(FAMILIES));
+    if (J[s] != '{') crash("s.get on a suite that is a ", jkind(s));
+    fam = jget(s, "family");
+    src[0] = s; src[1] = NONE;
+    if (fam != NONE && (J[fam] == '[' || J[fam] == '{')) crash("unhashable family: ", jkind(fam));
+    if (fam != NONE && J[fam] == '"') { size_t n; char *f = jstr(fam, &n); src[1] = jget(FAMILIES, f); free(f); }
+    for (j = 0; j < 2; j++) {
+        if (j == 1 && src[1] == NONE) break;        /* d['families'].get(..., {}) */
+        if (J[src[j]] != '{') crash("src.get on a family that is a ", jkind(src[j]));
+        if (jin(jget(src[j], "files"), p, 1, "files")) return 1;
+        for (k = 0; TREEKEYS[k]; k++) if (jtree(jget(src[j], TREEKEYS[k]), p, TREEKEYS[k])) return 1;
+    }
+    return 0;
+}
+
+/* sorted(): a merge sort by strcmp (unsigned bytes: code point order); qsort is not used, it costs seconds of -run */
+static void msort(char **v, char **tmp, int n) {
+    int h = n / 2, i = 0, j = h, k = 0;
+    if (n < 2) return;
+    msort(v, tmp, h); msort(v + h, tmp, n - h);
+    while (i < h && j < n) tmp[k++] = strcmp(v[i], v[j]) <= 0 ? v[i++] : v[j++];
+    while (i < h) tmp[k++] = v[i++];
+    while (j < n) tmp[k++] = v[j++];
+    memcpy(v, tmp, n * sizeof *v);
+}
+
+static int commitgate(int argc, char **argv) {
+    const char *R; List paths = {0}, named = {0}, ship = {0}; size_t *specs; int nspecs = 0, i, j;
+    if (argc < 4) crash("too few arguments: --commitgate ROOT NAMED PATH...", 0);
+    R = argv[2];
+    glread(R);                                  /* `import gatelayers` comes first in PY_PRODUCT */
+    { char *n = argstr(argv[3]); splitws(n, &named); free(n); }
+    for (i = 4; i < argc; i++) {
+        const char *raw = argv[i]; char *gargv[9], *out = 0, *p; size_t n = 0, k, st; int rc;
+        if (!strncmp(raw, "./", 2)) raw += 2;
+        p = argstr(raw); push(&paths, p, strlen(p)); free(p);
+        gargv[0] = "git"; gargv[1] = "ls-files"; gargv[2] = "-z"; gargv[3] = "--cached"; gargv[4] = "--others";
+        gargv[5] = "--exclude-standard"; gargv[6] = "--"; gargv[7] = (char *)raw; gargv[8] = 0;
+        fflush(stdout); fflush(stderr);
+        rc = cx_runv_timeout(gargv, 0, &out, &n);
+        if (rc) { char m[32]; snprintf(m, sizeof m, "%d", rc); crash("git ls-files returned non-zero exit status ", m); }
+        if (!out && n) crash("git ls-files: no output", 0);
+        for (k = 0; k < n; ) {
+            int l;
+            if (cp_at((unsigned char *)out, n, k, &l) < 0) crash("git ls-files output is not UTF-8", 0);
+            k += l;
+        }
+        for (k = 0, st = 0; k <= n; k++) if (k == n || !out[k]) { if (k > st) push(&paths, out + st, k - st); st = k + 1; }
+        free(out);
+    }
+    for (i = 0; i < paths.n; i++) if (shipping(paths.v[i])) push(&ship, paths.v[i], strlen(paths.v[i]));
+    if (!ship.n) return 0;
+    { char **tmp = xmalloc(ship.n * sizeof *tmp); msort(ship.v, tmp, ship.n); free(tmp); }
+    for (i = j = 0; i < ship.n; i++) if (!j || strcmp(ship.v[i], ship.v[j - 1])) ship.v[j++] = ship.v[i];
+    ship.n = j;
+    if (!named.n) no("product closure changes need --suite naming a product (non-contract) suite that declares them", 0, 0);
+    {
+        char *path; size_t n;
+        n = strlen(R) + 32; path = xmalloc(n); snprintf(path, n, "%s/tests/gatedeps.json", R);
+        J = (const unsigned char *)cx_read(path, &JN);
+        if (!J) crash("cannot open ", path);
+        for (n = 0; n < JN; ) { int l; if (cp_at(J, JN, n, &l) < 0) crash("tests/gatedeps.json is not UTF-8", 0); n += l; }
+        ROOTV = jws(0);
+        if (jws(jend(ROOTV, 0)) != JN) jbad(jws(jend(ROOTV, 0)));
+        free(path);
+    }
+    FAMILIES = J[ROOTV] == '{' ? jget(ROOTV, "families") : NONE;
+    specs = xmalloc(named.n * sizeof *specs);
+    for (i = 0; i < named.n; i++) {
+        const char *nm = named.v[i]; int ly = layer(nm); size_t suites;
+        if (ly < 0) no("suite ", nm, " is not classified by tests/gatelayers.py (fail closed)");
+        if (J[ROOTV] != '{') crash("d['suites'] on a ", jkind(ROOTV));
+        suites = jget(ROOTV, "suites");
+        if (suites == NONE) crash("d['suites']: KeyError", 0);
+        if (!jin(suites, nm, 0, "d['suites']")) no("suite ", nm, " has no declared inputs in tests/gatedeps.json (fail closed)");
+        if (ly != 0) {
+            if (J[suites] != '{') crash("d['suites'][n] on a ", jkind(suites));
+            specs[nspecs++] = jget(suites, nm);
+        }
+    }
+    if (!nspecs) no("product closure changes need --suite naming at least one product (non-contract) suite", 0, 0);
+    {
+        List miss = {0}; size_t len = 1; char *msg;
+        for (i = 0; i < ship.n; i++) {
+            int hit = 0;
+            for (j = 0; j < nspecs && !hit; j++) hit = covers(specs[j], ship.v[i]);
+            if (!hit) push(&miss, ship.v[i], strlen(ship.v[i]));
+        }
+        if (!miss.n) return 0;
+        for (i = 0; i < miss.n && i < 20; i++) len += strlen(miss.v[i]) + 1;
+        msg = xmalloc(len + 8); msg[0] = 0; len = 0;
+        for (i = 0; i < miss.n && i < 20; i++) {
+            size_t l = strlen(miss.v[i]);
+            if (i) msg[len++] = ' ';
+            memcpy(msg + len, miss.v[i], l); len += l;
+        }
+        if (miss.n > 20) { memcpy(msg + len, " ...", 4); len += 4; }
+        msg[len] = 0;
+        no("no named product suite declares these shipping paths: ", msg, 0);
+    }
+    return 0;
+}
+
+/* the hook's classifier: python3 -c '... sys.stdin.read().split("\0") ...' */
+static int product0(void) {
+    char *b = 0, *t; size_t n = 0, cap = 0, r, i, o, st; int first = 1;
+    for (;;) {
+        if (n == cap) { cap = cap ? cap * 2 : 65536; b = realloc(b, cap + 1); if (!b) crash("out of memory", 0); }
+        r = fread(b + n, 1, cap - n, stdin);
+        if (!r) break;
+        n += r;
+    }
+    if (ferror(stdin)) crash("cannot read stdin", 0);
+    if (!b) { b = xmalloc(1); }
+    for (i = 0; i < n; ) { int l; if (cp_at((unsigned char *)b, n, i, &l) < 0) crash("stdin is not UTF-8", 0); i += l; }
+    t = b; o = n;                               /* Python's sys.stdin keeps \r and \r\n as they are (newline='\n') */
+    for (i = 0, st = 0; i <= o; i++) if (i == o || !t[i]) {
+        t[i < o ? i : o] = 0;
+        if (shipping(t + st)) { if (!first) putchar(' '); fputs(t + st, stdout); first = 0; }
+        st = i + 1;
+    }
+    putchar('\n');
+    return fflush(stdout) ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--commitgate")) return commitgate(argc, argv);
+    if (argc == 2 && !strcmp(argv[1], "--product0")) return product0();
+    if (argc >= 2 && !strcmp(argv[1], "--product")) {
+        int i, first = 1;
+        for (i = 2; i < argc; i++) if (shipping(argv[i])) { if (!first) putchar(' '); fputs(argv[i], stdout); first = 0; }
+        putchar('\n');
+        return fflush(stdout) ? 1 : 0;
+    }
+    fprintf(stderr, "usage: shipclassify.cx --commitgate ROOT NAMED_SUITES PATH... | --product0 < NUL-LIST | --product PATH...\n");
+    return 2;
+}

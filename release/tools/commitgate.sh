@@ -21,40 +21,10 @@ done
 # the same product predicate as the freeze closure. Keep standalone unisacc.c.
 # 0.0.40-prep (机房主任 18:28): every shipping path in the commit must be declared as an input of at least
 # one NAMED suite (tests/gatedeps.json files/trees, or its family's); "any non-contract suite" is not enough.
-# Unknown or unclassified suites fail closed.
+# Unknown or unclassified suites fail closed.  The classifier is tests/shipclassify.cx (no Python on the commit path),
+# compiled once per source/compiler by tests/cxbin (its -run compile is 3.4 s, its run 2 ms).
 named=$(printf '%s\n' ${suites[@]+"${suites[@]}"} | grep -v '^--suite$' || true)
-python3 - "$R" "$named" "$@" <<'PY_PRODUCT' || exit 2
-import json, subprocess, sys
-R, named, args = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
-sys.path.insert(0, R + '/tests')
-from freezecheck import product
-import gatelayers
-paths = set()
-for arg in args:
-    p = arg[2:] if arg.startswith('./') else arg
-    paths.add(p)
-    paths.update(subprocess.check_output(['git','ls-files','-z','--cached','--others','--exclude-standard','--',p]).decode().split('\0'))
-ship = sorted(p for p in paths if p and (p == 'unisacc.c' or product(p)))
-if not ship: sys.exit(0)
-def no(m): print('commitgate: ' + m, file=sys.stderr); sys.exit(1)
-if not named: no('product closure changes need --suite naming a product (non-contract) suite that declares them')
-d = json.load(open(R + '/tests/gatedeps.json'))
-specs = []
-for n in named:
-    try: layer = gatelayers.layer(n)
-    except ValueError: no('suite %s is not classified by tests/gatelayers.py (fail closed)' % n)
-    if n not in d['suites']: no('suite %s has no declared inputs in tests/gatedeps.json (fail closed)' % n)
-    if layer != 'contract': specs.append(d['suites'][n])
-if not specs: no('product closure changes need --suite naming at least one product (non-contract) suite')
-def covers(s, p):
-    for src in (s, d['families'].get(s.get('family'), {})):
-        if p in (src.get('files') or []): return True
-        for k in ('trees', 'code_trees', 'all_files_trees', 'reviewed_trees'):
-            if any(p == t or p.startswith(t.rstrip('/') + '/') for t in (src.get(k) or [])): return True
-    return False
-miss = [p for p in ship if not any(covers(s, p) for s in specs)]
-if miss: no('no named product suite declares these shipping paths: ' + ' '.join(miss[:20]) + (' ...' if len(miss) > 20 else ''))
-PY_PRODUCT
+sh "$R/tests/cxbin" "$R/tests/shipclassify.cx" --commitgate "$R" "$named" "$@" || exit 2
 [ ${#suites[@]} -gt 0 ] || suites=(--suite gate-layers --suite script-inventory --suite checkrun)
 gate=$R/tests/gate.sh
 if [ -n "${COMMITGATE_GATE:-}" ]; then

@@ -5,7 +5,7 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-hook.XXXXXX"); trap 'rm -rf "$T"' EXIT
 fail() { echo "precommithook: $*"; exit 1; }
-cd "$T" && git init -q . && mkdir -p tests release/tools/hooks && cp "$R/tests/freezecheck.py" tests/ && cp "$R/release/tools/hooks/pre-commit" release/tools/hooks/ && cp "$R/release/tools/install_hooks.sh" release/tools/
+cd "$T" && git init -q . && mkdir -p tests release/tools/hooks && cp "$R/tests/shipclassify.cx" "$R/tests/cxbin" tests/ && cp "$R/unisacc.com" . && cp "$R/release/tools/hooks/pre-commit" release/tools/hooks/ && cp "$R/release/tools/install_hooks.sh" release/tools/
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 git add -A && git commit -q -m base && release/tools/install_hooks.sh > /dev/null || fail "install failed"
 release/tools/install_hooks.sh > /dev/null || fail "reinstall of the same hook refused"
@@ -27,9 +27,9 @@ git mv research/a.md src/a.c; echo z > src/a.c && git add src/a.c
 mkdir -p shim && printf '#!/bin/sh\n[ "$1" = diff ] && exit 7\nexec /usr/bin/env -u PATH %s "$@"\n' "$(command -v git)" > shim/git && chmod +x shim/git
 before=$(git rev-parse HEAD); PATH=$PWD/shim:$PATH .git/hooks/pre-commit 2> /dev/null; [ $? -ne 0 ] || fail "a failing git diff in the hook was not fail-closed"
 rm -rf shim
-mv tests/freezecheck.py tests/fc.bak
+mv tests/shipclassify.cx tests/sc.bak
 before=$(git rev-parse HEAD); git commit -q -m x 2> /dev/null; [ $? -ne 0 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "unclassifiable state did not fail closed"
-mv tests/fc.bak tests/freezecheck.py; echo other > .git/hooks/pre-commit
+mv tests/sc.bak tests/shipclassify.cx; echo other > .git/hooks/pre-commit
 release/tools/install_hooks.sh > /dev/null 2>&1 && fail "a different existing hook was overwritten"
 rm .git/hooks/pre-commit; (cd / && "$T/release/tools/install_hooks.sh" > /dev/null) && [ -x "$T/.git/hooks/pre-commit" ] || fail "install from another cwd did not land in this clone"
 rm .git/hooks/pre-commit; ln -s /dev/null .git/hooks/pre-commit; release/tools/install_hooks.sh > /dev/null 2>&1 && fail "a symlinked hook was replaced"
