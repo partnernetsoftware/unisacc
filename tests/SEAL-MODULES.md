@@ -62,7 +62,8 @@ netseal.cx --capture ...
 | `tests/seal-modules.manifest.tsv` | 流叶/网叶登记（与上表闸 job 对齐） |
 | `tests/sealparadigm.cx --audit ROOT` | 范式审计真源（`seal-modules --check-only` 与闸 `seal-paradigm-audit`） |
 | `python3 tests/sealmodulescheck.py --check` | LEGACY shim -> `sealparadigm.cx --audit`（完整实现见 `archive/tests/legacy/sealmodulescheck.py`） |
-| `tests/edgeablate.cx --gate LEAF ROOT` | 边级抽样消融见证（`ablate.tsv` + `asks.tsv` 交叉校验；e4/lower 走 edgeseal 参考路线）；**仅**闸 `edge-e2-pp-ablate`、`edge-e3-parse-ablate`（其余 `ablate.tsv` 为草稿，不入闸） |
+| `tests/edgeablate.cx --gate LEAF ROOT` | 边级抽样消融见证（`ablate.tsv` + `asks.tsv` 交叉校验）；**仅**闸 `edge-e2-pp-ablate`、`edge-e3-parse-ablate`（其余 `ablate.tsv` 为草稿，不入闸） |
+| `tests/edgeablate.cx --produce LEAF ROOT` | 离线写 `ablate.tsv`（实现 `archive/tests/legacy/edgeablate.py`） |
 | `tests/edgeseal.cx --gate LEAF ROOT` | 边级键答映射回放（15 主边 `edge-*-seal` 热路径）；`--produce` 仍走 `archive/tests/legacy/edgeseal.py` |
 | `tests/seal-edges.tsv` | 边级登记（prd §3.0c(3) 主边全集 + 次边 + 对照臂）：`asked_evidence`=「问过」比对闸 job，`edge_frozen`=边级冻结原件路径（现全 none，0/17）；`--edges-only` 单查 |
 

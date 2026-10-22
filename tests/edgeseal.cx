@@ -105,30 +105,56 @@ static int cmp_body(const char *a, size_t an, const char *b, size_t bn) {
     return an == bn && !memcmp(a, b, an);
 }
 
-static int gate_neg(const char *body, size_t bn) {
-    char *dup, *p, *line, save;
-    if (bn < 4) return fail("negative setup");
-    dup = malloc(bn + 1);
-    if (!dup) return fail("neg alloc");
-    memcpy(dup, body, bn);
-    dup[bn] = 0;
-    line = dup;
-    while (*line == '#' || *line == '\n') {
-        p = strchr(line, '\n');
-        if (!p) { free(dup); return 0; }
-        line = p + 1;
+static void flip_field(char *line, int col) {
+    char *p = line;
+    int c;
+    for (c = 0; c < col; c++) {
+        p = strchr(p, '\t');
+        if (!p) return;
+        p++;
     }
-    p = strchr(line, '\t');
-    if (p) {
-        p = strchr(p + 1, '\t');
-        if (p) {
-            save = p[1];
-            p[1] = 'X';
-            if (cmp_body(body, bn, dup, bn)) { free(dup); return fail("negative flip-answer not caught"); }
-            p[1] = save;
-        }
+    if (!*p) return;
+    *p = (*p != 'X') ? 'X' : 'Y';
+}
+
+static size_t drop_last_row(const char *body, size_t bn) {
+    size_t end = bn;
+    size_t i, last_nl = 0;
+    while (end > 0 && body[end - 1] == '\n') end--;
+    for (i = 0; i < end; i++)
+        if (body[i] == '\n') last_nl = i + 1;
+    return last_nl;
+}
+
+static int gate_neg(const char *live, size_t ln) {
+    char *mut;
+    size_t drop_n;
+    char *line;
+    if (ln < 2) return fail("negative setup");
+    drop_n = drop_last_row(live, ln);
+    if (drop_n < ln && cmp_body(live, ln, live, drop_n))
+        return fail("negative drop-row not caught");
+    mut = malloc(ln + 1);
+    if (!mut) return fail("neg alloc");
+    memcpy(mut, live, ln);
+    mut[ln] = 0;
+    line = mut;
+    while (*line == '\n') line++;
+    flip_field(line, 1);
+    if (cmp_body(live, ln, mut, ln)) {
+        free(mut);
+        return fail("negative flip-answer not caught");
     }
-    free(dup);
+    memcpy(mut, live, ln);
+    mut[ln] = 0;
+    line = mut;
+    while (*line == '\n') line++;
+    flip_field(line, 0);
+    if (cmp_body(live, ln, mut, ln)) {
+        free(mut);
+        return fail("negative flip-key not caught");
+    }
+    free(mut);
     return 0;
 }
 
@@ -169,8 +195,8 @@ static int gate(const char *leaf, const char *root) {
         return 1;
     }
     if (gate_neg(frozen, fn)) { free(frozen); free(live); return 1; }
-    printf("edgeseal: edge %s->%s PASS probe %s: %d keys replayed byte-equal; negatives flip-answer caught\n", m.flow,
-           m.net, m.probe, nf);
+    printf("edgeseal: edge %s->%s PASS probe %s: %d keys replayed byte-equal; negatives drop-row/flip-answer/flip-key all caught\n",
+           m.flow, m.net, m.probe, nf);
     free(frozen);
     free(live);
     return 0;
