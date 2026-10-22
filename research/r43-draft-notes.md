@@ -29,6 +29,8 @@
 
 These are known defects, listed rather than fixed in 0.0.43. They are not regressions of this release unless stated.
 
+- **An enum tag defined inside an initializer designator.** `int (*fps[])(int) = { [sizeof(enum E { EA = 1, EB })] = f, f };` is refused by name (`not covered: enum tag redefinition`); gcc accepts it. The brace-list pre-scan parses the designator once before the real pass. Probe: `tests/c/candidates/designator-sizeof-enum-tag.c` (found by the R3a spike, `research/c43-r3a/REPORT.txt`).
+
 - **Declarator type shapes (tdescprobe).** The enumerated probe set `tests/tdescprobe.cx` covers the derivations of {pointer, `[3]`, function `(int)`} to depth 3 over `int` (18 distinct declarations such as `int *x[3]`, `int (*x)[3][3]`, `int (**x)(int)`) in up to eight `sizeof` contexts (`x`, `*x`, `**x`, `***x`, `x[0]`, `x[0][0]`, `(*x)[0]`, `*x[0]`): 106 probes, each size also computed by the system cc. Baseline for the shipped product: 83 OK, 23 REFUSE, **0 WRONG**.
   - **WRONG set (silent wrong code): empty** after the M3 refusal. Before it, `int (*x[3])[3]` probes 083 and 084 gave 4 for 12 (the baseline then read 86 OK / 18 REFUSE / 2 WRONG).
   - **REFUSE set (23 probes, all named, none produces code):**

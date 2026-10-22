@@ -1,0 +1,175 @@
+R3a TDESC feasibility spike -- report (2026-10-23)
+research/c43-roadmap-0043-and-refactor.md D.3 row R3a.  Scratch only; the repository was not edited and nothing was committed.
+
+Paths (all under S=/home/devali/.hermes/cache/scratch/claude-1001/-home-devali-repos/41bdac58-fc66-4720-85ce-d4853b027c7b/scratchpad/r3a)
+  S/tree                  scratch export of HEAD f9388c13 (git archive, tar.umask=022) + unisacc.com(.build.json), own git (commit e143b32 "base")
+  S/r3a-prototype.diff    THE PROTOTYPE DIFF (exec/parse2/declaration-result.tsv: DC.p -> TY.base plus 8 rows)
+  S/statecheck.cx.snapshot  tests/statecheck.cx copied from the live working tree (not in HEAD; another session has it staged)
+  S/tools/seqw.c          scratch C99 analysis tool (json.h of seed/): register/memory/side-effect write sets of a stretch of the delta:
+                          `states` (edges out of named states), `trace` (executed window), `pdregion` (static, context-sensitive pushdown
+                          reachability with call/return summaries; chain printing to the first write of a register)
+  S/tools/trace/          copy of exec/c/*.c with a trace hook in core.c (UNISA_TRACE=FILE: "S q key seq" per step, "I reg id hex" per SBINTERN)
+  S/tools/tbl.c           copy of seed/tbl.c that also dumps the state/register numbering (argv[3])
+  S/chain.sh, S/tchain.sh, S/cmpbatch.sh, S/tydecode.sh   shell drivers (no Python)
+  S/probes/               fpback1-5.c, ty1-3.c
+  S/w/                    built tools (host cc -O2), deltas, tables, nets, traces, outputs
+
+Build (实际跑过): seed/gen.c, tbl.c, net.c, exec/c/run.c with host cc -O2 in parallel: 9.1 s.
+  seed-gen pp / lex --typed / parse2: e2+e1 2.8 s; parse2 9.2 s (61,435,261-byte delta); seed-tbl 1.2 s; seed-net 0.05 s; run --check-net 0.13 s.
+  Baseline chain (run.c on e2.tbl -> e1.tbl -> e3.tbl) == product `unisacc.com -S -o -` on hello, fib, fact, a_char (byte-identical).
+
+======================================================================
+QUESTION 1: hash-cons a type descriptor in one action-table row with SBINTERN
+VERDICT: GO for the mechanism (one branch-free row per derivation step; tape byte-unchanged on 650/650).
+         PARTIAL for "TDESC by projecting the old registers": the projection is lossy in exactly the expected places.
+======================================================================
+Mechanism (只读推断 from exec/c/core.c:330 and seed/tbl.c, then 实际跑过):
+  - SBINTERN interns the scratch buffer in the SAME table as identifiers (core_intern, ids sequential ++n).  So equal byte strings
+    give equal ids, i.e. hash-consing for free and without a branch.  To keep type strings disjoint from identifiers the
+    interned key starts with byte 0x01 (no C token contains it).
+  - There is no opcode that writes a register's value into the scratch buffer (SBOUT takes an immediate only).  The operand n
+    (array length, base kind) gets there through the tape buffer: OLEN m; OUTW n; ALUI sar..8; OUTW (x4); OCUT blob m; SBBLOB blob.
+    OCUT truncates the tape back to m, so nothing remains in the output.  Safe only while osel==0: E3 sets OSEL 1 only inside
+    diagnostic emission (2 places, both restore 0), never at a declaration commit.
+  - Descriptor encoding: cells of 5 bytes, read from the name outward: op byte ('b' base, 'P' pointer, 'A' array) + 32-bit LE
+    operand; a cons prepends one cell to the child's body.  The cons row (one action sequence, no CMP, r-neutral, 25 actions):
+      COPYW kid,ty; LDX cb,ty,TYBLOB; OLEN m; OUTW n; (ALUI sar t,..,8; OUTW t) x3; OCUT nb,m;
+      SBCLR; SBOUT op; SBBLOB nb; SBBLOB cb; SBSAVE body; SBCLR; SBOUT 1; SBBLOB body; SBINTERN ty;
+      STX ty,TYBLOB,body; LDI t,op; STX ty,TYOP,t; STX ty,TYN,n; STX ty,TYKID,kid
+  - TY zone: memory banks TYBLOB/TYOP/TYN/TYKID at 2.000e15..2.003e15 (+ty), STY[v] at 2.004e15 (largest existing E3 base:
+    1.128e15).  Registers: tyx, tyx_* only (10 new names; checked absent before).
+
+Prototype (S/r3a-prototype.diff): local declarations only.  DC.p (the commit after DIMSAVE, declaration-result.tsv body) now goes
+to TY.base instead of RET.  Rows: TY.base cons 'b'(tb); TY.p.test loops td times consing 'P'; if dar, TY.k.test loops
+k = drk-1 .. 0 consing 'A'(TDIM[k]); TY.done: STX v,STY,tyx and re-establishes r=1 (the value both incoming paths leave)
+before RET.  Constructed by seed-gen (["constant","TDIM"] is not bound in this section: unknown constant binding; the
+numeric 29000000 was used).
+
+Evidence (实际跑过):
+  * write set of the new rows: `seqw states w/e3ty.json TY.`
+      TY.: 7 sequences, 5 states, 10 registers written: tyx tyx_body tyx_cb tyx_i tyx_k tyx_kid tyx_m tyx_n tyx_nb tyx_t
+      memory writes: bases 2000000000000000/2001../2002../2003.. key=tyx; 2004000000000000 key=v val=tyx
+      side effects: [tape/err-write(OUTW)] (cut again by OCUT) [blob-table] [intern-table]
+  * interned ids (tracer + tydecode.sh on probes/ty1.c, same program run through e3ty.tbl):
+      int *a1[3]; int *a2[3];      ty=245 / 245  A3.P.base(tb=4)
+      int (*p1)[3]; int (*p2)[3];  ty=244 / 244  P.base(tb=4)          <- LOSSY: equals int *ip1 (244)
+      int (*f1)(int); (*f2)(int)   ty=247 / 249  P.base(tb=129 / 130)  <- LOSSY other way: equal types, distinct ids
+      int m1[2][3]; m2[2][3]       ty=251 / 251  A2.A3.base(tb=4)
+      int m3[3][2]                 ty=253        A3.A2.base(tb=4)
+      int **pp                     ty=254        P.P.base(tb=4)
+      int *ip1; int *ip2           ty=244 / 244  P.base(tb=4)
+      int i1; int i2               ty=243 / 243  base(tb=4)
+      char c1; char c2             ty=255 / 255  base(tb=1)
+      int *a3[4] 256 A4.P..; int **a4[3] 257 A3.P.P..; char *cp[3] 259 A3.P.base(tb=1)
+    => equal descriptors give equal ids, distinct descriptors distinct ids, in every case (the cons is exact).
+    probes/ty3.c: five function-pointer locals get tb = 129,130,131,132,133: for fn pointers tb is a per-declarator signature
+    slot, not a canonical signature, so a projection from tb can never be canonical -- R3 S1 needs an F(sig) cons whose
+    operand is itself an interned parameter-list descriptor.
+    int (*x[3])[3]: rejected by baseline and prototype alike ("not covered: array of pointers to arrays").
+  * tape unchanged (table mode): hello, fib, fact, a_char: byte-identical (171746/173026/172819/172210 bytes).
+    Full corpus `find tests examples -name '*.c'` = 650 files, 9 parallel batches of <=80 (each < 58 s), per file E2->E1 once then
+    E3 on e3.tbl and on e3ty.tbl, comparing stdout, rc and stderr bytes: 650 identical, 0 differ (418 accepted by E3 on the
+    baseline; the rest identical rejects or stopped before E3).
+  * tape unchanged (network mode): seed-net e3ty.tbl -> 10193 banks, 14900 hidden units; `run --check-net e3ty.tbl e3ty.net`:
+    "network = table: 2629538 observations, 10193 states; actions/strings identical", rc 0.  Net-mode tapes of hello, fib, fact,
+    a_char, ty1: e3ty.net == e3.net, and ty1 == product -S.
+  * statecheck (snapshot) --check: identical findings on e3.json and e3ty.json (327 frame occurrences, 66/65 saves/restores,
+    5 unpaired, 10 partial (5 undeclared), 4 split -- already red on HEAD with the current regs-e3.tsv, not caused by the
+    prototype).  --regs: only the counts change (1407 -> 1417 registers, all 10 new ones read and written).
+  * construction cost of the change: 10188 -> 10193 states, 10236 -> 10241 sequences, +90 actions; seed-gen 7.8 s.
+
+Caveats found (实际跑过 unless marked):
+  - Shared intern table: every type string takes an id from the identifier sequence, so identifiers first seen after the first
+    local declaration get different ids than before (blob ids likewise).  650/650 shows no id leaks into the tape on this
+    corpus; that is an empirical result, not a proof (只读推断: no OFILL/OUTW of an intern id was found, not exhaustively audited).
+  - STY[v] is keyed by the symbol id: an inner declaration that shadows an outer one overwrites STY[v] and scope unwind
+    (scope-actions.tsv restore, UNDO_n frames) does not restore it (只读推断).  R3 S1 must add STY to the scope save/restore frame
+    (and declare it to statecheck), or key it by declaration rather than by name.
+  - Each cons allocates two blobs even when the type already exists (memory only).  Avoidable with a branch, or with the
+    branch-free alternative below.
+  - Alternative without SBINTERN (只读推断, not built): a pure-ALU memo (key = child<<34 | n<<2 | op in A64; id = MEMO[key];
+    isnew = (id-1) shr 63; id += isnew*(cnt+1); cnt += isnew; STX MEMO[key]) is also one branch-free row, uses a private id
+    counter (no identifier-id shift, no blobs) but needs bounds on n and child ids.
+
+======================================================================
+QUESTION 2: does the `JUMP fpback` shadow rescan write any scope or symbol register?
+VERDICT: NO-GO for the claim in general (statically reachable AND demonstrated: it binds scope entries and tags; one live
+         not-covered reject results).  PARTIAL: on initializers without `sizeof` in a designator it writes none.
+======================================================================
+What the path is (只读推断, exec/parse2/control-result.tsv:329-343): FPDECL with an open `[]` and `=`: $dimension_state3 does
+  COPYW fpback,tpos; vpush ips,ipe; INITCOUNT scans the initializer (counting elements, designators via CE), then
+  $dimension_state6: vpop ips,ipe; COPYW fpn,dm_n; JUMP fpback (rewind) and the declarator/initializer are parsed again.
+statecheck.cx has no per-path mode (its --regs is whole-network: "1407 registers in used sequences ..."), so the path proof uses
+S/tools/seqw.c on the constructed delta plus the instrumented executor.
+
+Dynamic (实际跑过; product == cc on all accepted probes):
+  fpback1.c `int (*fps[])(int) = { f, g, f };`  window 171 steps, 24 registers written:
+    dm_add dm_d dm_max dm_n dm_need dm_par dm_per dm_used fpback fpn ipe ips ixn pe pf_before pf_before2 pf_prev_e pf_prev_ord
+    pf_prev_s pf_previous ps tk tpos vsp;  memory: only the value stack (7000000+vsp) for ips/ipe.   -> no scope/symbol write
+  fpback2.c designators `[K] = f, [0] = f` (enum constant):  30 registers, adds ce_id ce_ok cv nd nv nx + intern-table lookup;
+    memory: only the value stack.   -> no scope/symbol write
+  fpback3.c `{ [sizeof(enum E { EA = 1, EB })] = f, f }`:  writes usp, v, tagusp, tg, en_*, rg_scope, vr_scope; STX into the
+    scope undo stack UNDO_0..43 (3000000..3000043 + usp), symbol banks keyed by v (LOC/PTR/BASE/... 8000000, 36000000,
+    35000000, 7696581394432, 57174604644352, 716881581309952, 12094627905536), tag banks (tagusp 1342177280..83, tg 1275068416).
+    Consequence: the rescan re-declares E -> E3 rejects "not covered: enum tag redefinition" (product -S and chain rc 1), gcc 12
+    accepts (exit 9).  A not-covered reject, not silent wrong code.
+  fpback4.c `{ [sizeof(struct S { int a; char b; })] = f }`: writes tagusp, tg, sid and struct banks; accepted twice-defined,
+    result equals cc (12).
+  fpback5.c `{ [sizeof(f(3))] = f }`: writes v (saved/restored around the sizeof), late-binding site registers (lv_*, lc_site),
+    emits and cuts tape (OUT/OUTW/SPAN2 + OCUT); result equals cc (7).
+Static (实际跑过): `seqw pdregion w/e3.json fpback` (context-sensitive: 15652 (entry,state) pairs, 3793 call sites, 514 rescan
+  edges reached, 0 escapes before the rescan): 6378 sequences, 1190 registers written, 583 distinct STX forms.  Scope/symbol
+  registers among them: cur dar decl_register dsz fid fns infunc max sid sv tagmark tagscope tagusp tg usp v.
+  Shortest chains (procedure level) printed by `seqw pdregion ... usp|tagusp|v`:
+    INITCOUNT -> CE -> CE1..CE10 -> CE.atom (CE.sizeof.t/in/expr) -> SZ.p -> UNARY -> U.deref.body -> ... -> EXPR -> ADR -> CALL
+      -> TSPEC -> ENUM -> BIND (usp)            [and ... ENUM -> TAG.SYNC -> EN.NEW -> TAG.bind (tagusp)]
+    INITCOUNT -> CE -> ... -> SZ.p -> UNARY -> U.deref.body (LOOKUP: INTERN v)
+  The direct route `sizeof(type)` (CE.sizeof.ty -> TSPEC) is the one fpback3/4 take.
+Conclusion: the existing rescan re-executes whatever the scanned text does; any rescan that goes back through CE / TSPEC / EXPR
+  repeats their bindings.  A TDESC shadow DECL (R4) therefore must NOT be a rewind-and-reparse through the shared subroutines.
+  Safe designs: (a) cons at each declarator event in the primary pass (one cons row per '*', '[N]', '(params)'; Q1 shows the
+  row is cheap, branch-free and output-neutral), so there is no rescan at all; or (b) a rescan whose constant operands are read
+  from what the primary pass stored (TDIM/nv), never re-evaluated.  The fpback3 reject is a candidate probe for
+  tests/c/candidates (not filed: no repo edits).
+
+======================================================================
+Cost estimate for R3 S1 (TY zone + cons rows + projection at the commit point + STY + gated trace)
+======================================================================
+Roadmap says 1.5 days; with this spike's findings: 2-2.5 days (设计估计, partially measured):
+  - cons rows / TY zone / output neutrality: proven here (0.25 d to turn into recipes in gen2-actions-manifest.tsv, one recipe
+    per op, instead of inline rows).
+  - projection for all six contexts (object local done here; global GV.e1, param, member, typedef, type-name): 0.5 d.
+  - faithful projection of row shapes ((*p)[N] needs type_rank/type_shape) and an F(sig) cons for function pointers
+    (tb is a per-declarator slot): 0.5 d.  The R3 witness "mismatches == the lossy-shape set" is then measurable with
+    tydecode-style trace output.
+  - STY into the scope save/restore frame + statecheck declaration: 0.25 d.
+  - trace only under resource e3/tdesc-trace (SBFIND), rc 2 on an unknown version: 0.25 d.
+  - fixed e3.net costs (reseal-e3, stage-contract, facts export + abi.manifest in the same commit, 8 variants): 0.5 d.
+  Measured budgets: host-cc seed-gen parse2 7.8-9.2 s, seed-tbl 1.2 s, seed-net 0.05 s, check-net 0.13 s per variant (far
+  inside 58 s); gate G (650 files, tape+rc+stderr) ran as 9 batches of <= 80 files, about 40-50 s each, 4-5 in parallel.
+
+======================================================================
+Plan B sketch (asked for the NO-GO case; applies to Q2 only -- Q1 is GO, so plan B is the differential oracle, not a replacement)
+======================================================================
+  - Outside the repo, a declarator stream (the E2 cell executor of research/c43-cx-paradigm-experiments.md, decl.tbl + tcheck.tbl,
+    include-free .cx) reads the E1 typed token stream (or the source declarator text) and emits, per declaration, NAME<TAB>TDESC
+    in the same cell encoding (b/P/A<n>/F(sig), name outward).  Constant dimensions come from the E1 stream as literal values;
+    anything else (sizeof, enum constants, typedef names) is a named NOT-COVERED in the stream, never re-evaluated -- so the
+    stream never binds anything.
+  - E3 (with the R3 S1 rows) prints its interned TDESC per declaration only under e3/tdesc-trace; a .cx comparator joins the
+    two by declaration order and reports EQUAL / LOSSY(projected != stream) / NOT-COVERED; the LOSSY set must equal the known
+    lossy shapes ((*p)[N] before the row-shape projection, every function pointer before F(sig)).
+  - Gate: tdescprobe domain (106 probes + 78 refusals) and the 650-file corpus, sharded <= 58 s.
+
+Commands that produced the evidence (all 实际跑过, from S/tree unless noted)
+  cc -O2 -std=c99 -w -Iseed seed/gen.c -o ../w/seed-gen   (and tbl.c, net.c, exec/c/run.c)
+  ../w/seed-gen parse2 ../w/e3.json ; ../tools/tbl-map ../w/e3.json ../w/e3.tbl ../w/e3.map   (cmp with seed-tbl output: same)
+  ../chain.sh ../w/e3.tbl examples/hello.c OUT ; sh ./unisacc.com examples/hello.c -S -o - | cmp - OUT
+  ../tchain.sh ../w/e3.tbl ../probes/fpbackN.c OUT TRACE ; ../tools/seqw trace ../w/e3.json TRACE fpback
+  ../tools/seqw pdregion ../w/e3.json fpback [usp|tagusp|v|cur]
+  (prototype) ../w/seed-gen parse2 ../w/e3ty.json ; ../tools/tbl-map ../w/e3ty.json ../w/e3ty.tbl ../w/e3ty.map
+  ../tchain.sh ../w/e3ty.tbl ../probes/ty1.c OUT TRACE ; ../tydecode.sh ../w/e3ty.map TRACE
+  ../cmpbatch.sh ../w/corpus.txt FROM TO   (9 batches, 650 files)
+  ../w/seed-net ../w/e3ty.tbl ../w/e3ty.net ; ../w/run --check-net ../w/e3ty.tbl ../w/e3ty.net
+  sh ./unisacc.com -run tests/statecheck.cx -- --check|--regs ../w/e3.json|../w/e3ty.json
+  ../tools/seqw states ../w/e3ty.json TY.
