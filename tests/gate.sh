@@ -951,7 +951,7 @@ job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger an
 job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
 job front-bounds tests/bound 58 sh ./unisacc.com -run tests/frontboundscheck.cx   # (.cx port, 2026-10-22) anonymous struct tags must not read token -1
 # 0.0.28 R4: one job per part that seedconstructcheck.py --list names (C99 seed tools vs Python, byte for byte);
-# a new part needs no edit here or in gatedeps.json (refresh_gatedeps.py declares it from seed-construct-parse2)
+# a new part needs no edit here or in gatedeps.json (refreshgatedeps.cx declares it from seed-construct-parse2)
 job seedfacts python3 ./tests/seedfactscheck.py   # 0.0.29 B4: seed/facts.h bindings and lets equal assemble.py on every manifest
 job seedparse2-1 ./tests/seedparse2check.sh x locations warnings errors   # 0.0.29 B4: seed/gen.c parse2 = gen.py, eight variants in two jobs
 job seedparse2-2 ./tests/seedparse2check.sh locations,warnings locations,errors warnings,errors locations,warnings,errors

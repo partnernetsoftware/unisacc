@@ -190,4 +190,4 @@ export-ref:
 # Reviewed-tree stamps for gate-infra, computed from HEAD in a temporary
 # extraction (git's content and modes), never from the shared checkout.
 gatedeps:
-	@python3 tests/bound.py 55 python3 tests/refresh_gatedeps.py
+	@tests/bound 55 sh ./unisacc.com -run tests/refreshgatedeps.cx

@@ -1,0 +1,1231 @@
+#!/usr/bin/env -S unisacc.com -run
+/* refreshgatedeps.cx -- recompute the reviewed-tree stamps and family/suite guards in tests/gatedeps.json from HEAD
+   (or, with --index, from the tree the next commit would record), and rewrite the declarations this tool owns.
+   Ported from tests/refresh_gatedeps.py (2026-10-23, the owner's direction: the toolchain moves off Python); the
+   output file is byte-identical to the Python one's (json.dumps(d, indent=2) + "\n": two-space indent, "," between
+   items, ": " after keys, keys in insertion order, non-ASCII escaped \uXXXX).
+   usage: sh ./unisacc.com -run tests/refreshgatedeps.cx [-- --index]        (make gatedeps)
+   The root is the directory above this file's (the .py's Path(__file__).resolve().parents[1]); when the program is
+   run as a compiled binary (tests/cxbin) it is the current directory.
+
+   Why an archive: gatequeue fingerprints each reviewed tree as sha256 over {path: [st_mode, sha256]}.  Computing that
+   in the shared checkout is wrong twice over: a teammate's uncommitted file lands in the stamp, and so do the
+   checkout's own permission bits (0711/0600 from a teammate's umask, where git checks out 0755/0644).  So the stamps
+   are computed from `git -c tar.umask=022 archive --format=tar REF TREES...`, which has exactly git's content and
+   git's modes (export-subst/export-ignore and filters included, as the archive applies them).  The .py extracted that
+   tar to a temporary directory; this reads it in memory (ustar + pax headers): a member's st_mode is S_IFREG | its
+   header mode, as tarfile's chmod leaves it, and a symlink is followed inside the archive as stat() would.
+   --index: REF = `git write-tree` (the index as a tree object; nothing in the checkout changes), so the refreshed
+   stamp can travel in the same commit as the change (commitgate's derived check wants exactly that).
+
+   Stamp rule (the .py's, Python 3.14): for each family (JSON order) with a truthy reviewed_trees object, for each TREE:
+     files = every regular file under TREE in the archive, kept when TREE is in all_files_trees or its suffix (3.14:
+             the name without leading dots, from its last dot) is in inventory_suffixes, and no excluded_dirs entry X
+             is the file or one of its parent directories;
+     stamp = sha256(json.dumps({relpath: [st_mode, sha256(content)]}, sort_keys=True)).
+   Guards: a guard path that is a file in the archive takes that file's sha256; any other is read from REF with one
+   `git cat-file --batch` (missing at REF: left as it is).  A family without reviewed_trees keeps its guards as they
+   are (the .py's `continue`); every suite's guards follow REF.
+   Then the declarations: seed-construct-* parts from `python3 tests/seedconstructcheck.py --list` (the part list
+   lives there), the fixed suite declarations below (Python literal syntax, read by pylit()), and the exec-prepare-*
+   groups from `sh tests/gate.sh --plan` and tests/prepgroups.json.  Any failure the Python raises is exit 1 with one
+   `refreshgatedeps: error: ...` line on stderr, and tests/gatedeps.json is not written. */
+
+static void die(const char *what, const char *arg) {
+    fflush(stdout);
+    fprintf(stderr, "refreshgatedeps: error: %s%s%s\n", what, arg ? ": " : "", arg ? arg : ""); exit(1);
+}
+
+/* growable byte buffer, always NUL-terminated */
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *x, const void *s, size_t n) {
+    if (x->n + n + 1 > x->cap) { x->cap = (x->n + n + 1) * 2 + 64; x->b = realloc(x->b, x->cap); if (!x->b) die("out of memory", 0); }
+    memcpy(x->b + x->n, s, n); x->n += n; x->b[x->n] = 0;
+}
+static void bputs(Buf *x, const char *s) { bput(x, s, strlen(s)); }
+static void bputc(Buf *x, int c) { char ch = (char)c; bput(x, &ch, 1); }
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory", 0); return p; }
+static char *xstrndup(const char *s, size_t n) { char *d = xmalloc(n + 1); memcpy(d, s, n); d[n] = 0; return d; }
+static char *xstrdup(const char *s) { return xstrndup(s, strlen(s)); }   /* not strdup: the carried libc has none */
+
+/* ---------- UTF-8 ---------- */
+/* length of the sequence at s[i] (0 when none starts there); its code point in *cp.  SURR admits encoded surrogates
+   (a "\udcXX" from json.loads is kept as its 3-byte form, so it dumps back as \udcXX). */
+static int utf8_at(const unsigned char *s, size_t n, size_t i, unsigned *cp, int surr) {
+    unsigned c = s[i], lo = 0x80, hi = 0xBF; int need, k;
+    if (c < 0x80) { *cp = c; return 1; }
+    if (c >= 0xC2 && c <= 0xDF) need = 1;
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED && !surr) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else return 0;
+    if (i + (size_t)need >= n) return 0;
+    *cp = c & (0x3F >> need);
+    for (k = 1; k <= need; k++) {
+        unsigned b = s[i + k];
+        if (k == 1 ? (b < lo || b > hi) : (b < 0x80 || b > 0xBF)) return 0;
+        *cp = (*cp << 6) | (b & 0x3F);
+    }
+    return need + 1;
+}
+static int utf8_valid(const char *s, size_t n) {
+    size_t i = 0; unsigned cp; int l;
+    while (i < n) { if (!(l = utf8_at((const unsigned char *)s, n, i, &cp, 0))) return 0; i += l; }
+    return 1;
+}
+/* bytes -> code points as Python sees the str: well-formed sequences (and kept surrogates) decode, any other byte is
+   U+DC00+byte (os.fsdecode's surrogateescape) */
+static unsigned *decode(const char *s, size_t n, size_t *len) {
+    unsigned *v = xmalloc((n + 1) * sizeof *v), cp; size_t i = 0, k = 0; int l;
+    while (i < n) {
+        l = utf8_at((const unsigned char *)s, n, i, &cp, 1);
+        if (l) { v[k++] = cp; i += l; } else { v[k++] = 0xDC00 + (unsigned char)s[i]; i++; }
+    }
+    *len = k; return v;
+}
+static void wtf8(Buf *x, unsigned c) {
+    char t[4];
+    if (c < 0x80) { t[0] = (char)c; bput(x, t, 1); }
+    else if (c < 0x800) { t[0] = (char)(0xC0 | c >> 6); t[1] = (char)(0x80 | (c & 0x3F)); bput(x, t, 2); }
+    else if (c < 0x10000) { t[0] = (char)(0xE0 | c >> 12); t[1] = (char)(0x80 | (c >> 6 & 0x3F)); t[2] = (char)(0x80 | (c & 0x3F)); bput(x, t, 3); }
+    else { t[0] = (char)(0xF0 | c >> 18); t[1] = (char)(0x80 | (c >> 12 & 0x3F)); t[2] = (char)(0x80 | (c >> 6 & 0x3F)); t[3] = (char)(0x80 | (c & 0x3F)); bput(x, t, 4); }
+}
+/* json.dumps of a str (ensure_ascii): \" \\ \n \r \t \b \f, every other code point outside ' '..'~' as \uXXXX */
+static void jescape(Buf *o, const char *s, size_t n) {
+    size_t cn, i; unsigned *cp = decode(s, n, &cn); char t[16];
+    bputc(o, '"');
+    for (i = 0; i < cn; i++) {
+        unsigned c = cp[i];
+        if (c == '"') bputs(o, "\\\""); else if (c == '\\') bputs(o, "\\\\");
+        else if (c == '\n') bputs(o, "\\n"); else if (c == '\r') bputs(o, "\\r"); else if (c == '\t') bputs(o, "\\t");
+        else if (c == '\b') bputs(o, "\\b"); else if (c == '\f') bputs(o, "\\f");
+        else if (c >= ' ' && c <= '~') bputc(o, (int)c);
+        else if (c < 0x10000) { sprintf(t, "\\u%04x", c); bputs(o, t); }
+        else { unsigned v = c - 0x10000; sprintf(t, "\\u%04x\\u%04x", 0xD800 | (v >> 10), 0xDC00 | (v & 0x3FF)); bputs(o, t); }
+    }
+    bputc(o, '"'); free(cp);
+}
+/* code-point order of two byte strings (Python's str <) */
+static int cpcmp(const char *a, size_t an, const char *b, size_t bn) {
+    size_t x, y, i; unsigned *p = decode(a, an, &x), *q = decode(b, bn, &y); int r = 0;
+    for (i = 0; i < x && i < y && !r; i++) if (p[i] != q[i]) r = p[i] < q[i] ? -1 : 1;
+    if (!r) r = x < y ? -1 : x > y;
+    free(p); free(q); return r;
+}
+
+/* ---------- the JSON value model: Python's dict (insertion order), list, str, int, bool, None ---------- */
+enum { JNULL, JFALSE, JTRUE, JNUM, JSTR, JARR, JOBJ };
+typedef struct J J;
+struct J { int t, isfloat; char *s; size_t sn; J **v; char **k; size_t *kn; int n, cap; };
+static J *jnew(int t) { J *j = calloc(1, sizeof *j); if (!j) die("out of memory", 0); j->t = t; return j; }
+static J *jstrn(const char *s, size_t n) { J *j = jnew(JSTR); j->s = xstrndup(s, n); j->sn = n; return j; }
+static J *jstr(const char *s) { return jstrn(s, strlen(s)); }
+static void jgrow(J *a) {
+    if (a->n < a->cap) return;
+    a->cap = a->cap ? a->cap * 2 : 8;
+    a->v = realloc(a->v, a->cap * sizeof *a->v); a->k = realloc(a->k, a->cap * sizeof *a->k); a->kn = realloc(a->kn, a->cap * sizeof *a->kn);
+    if (!a->v || !a->k || !a->kn) die("out of memory", 0);
+}
+static void apush(J *a, J *v) { jgrow(a); a->v[a->n] = v; a->k[a->n] = 0; a->kn[a->n] = 0; a->n++; }
+static int ofind(J *o, const char *k, size_t kn) {
+    int i; for (i = 0; i < o->n; i++) if (o->kn[i] == kn && !memcmp(o->k[i], k, kn)) return i;
+    return -1;
+}
+static J *ogetn(J *o, const char *k, size_t kn) { int i = o && o->t == JOBJ ? ofind(o, k, kn) : -1; return i < 0 ? 0 : o->v[i]; }
+static J *oget(J *o, const char *k) { return ogetn(o, k, strlen(k)); }
+static J *need(J *o, const char *k) {                  /* o[k]: KeyError when absent */
+    J *v; if (!o || o->t != JOBJ) die("not a dict where one is subscripted", k);
+    if (!(v = oget(o, k))) die("KeyError", k);
+    return v;
+}
+static void osetn(J *o, const char *k, size_t kn, J *v) {   /* d[k] = v: an existing key keeps its place */
+    int i = ofind(o, k, kn);
+    if (i >= 0) { o->v[i] = v; return; }
+    jgrow(o); o->v[o->n] = v; o->k[o->n] = xstrndup(k, kn); o->kn[o->n] = kn; o->n++;
+}
+static void oset(J *o, const char *k, J *v) { osetn(o, k, strlen(k), v); }
+static void odel(J *o, const char *k, size_t kn) {
+    int i = ofind(o, k, kn);
+    if (i < 0) die("KeyError", k);
+    memmove(o->v + i, o->v + i + 1, (o->n - i - 1) * sizeof *o->v);
+    memmove(o->k + i, o->k + i + 1, (o->n - i - 1) * sizeof *o->k);
+    memmove(o->kn + i, o->kn + i + 1, (o->n - i - 1) * sizeof *o->kn);
+    o->n--;
+}
+static J *jcopy(J *a) {                                 /* json.loads(json.dumps(a)) */
+    J *b = jnew(a->t); int i;
+    b->isfloat = a->isfloat;
+    if (a->s) { b->s = xstrndup(a->s, a->sn); b->sn = a->sn; }
+    for (i = 0; i < a->n; i++) {
+        if (a->t == JOBJ) osetn(b, a->k[i], a->kn[i], jcopy(a->v[i]));
+        else apush(b, jcopy(a->v[i]));
+    }
+    return b;
+}
+static int truthy(J *j) {
+    if (!j) return 0;
+    switch (j->t) {
+    case JNULL: case JFALSE: return 0;
+    case JTRUE: return 1;
+    case JNUM: { size_t i; if (j->isfloat) { char *e; return strtod(j->s, &e) != 0.0; }
+                 for (i = 0; i < j->sn; i++) if (j->s[i] >= '1' && j->s[i] <= '9') return 1; return 0; }
+    case JSTR: return j->sn > 0;
+    default: return j->n > 0;
+    }
+}
+static int numeric(J *j, double *v) {                    /* bool and int compare by value in Python */
+    if (j->t == JTRUE) { *v = 1; return 1; }
+    if (j->t == JFALSE) { *v = 0; return 1; }
+    if (j->t == JNUM) { *v = strtod(j->s, 0); return 1; }
+    return 0;
+}
+static int jeq(J *a, J *b) {                            /* Python ==: dicts ignore order, lists do not */
+    int i; double x, y;
+    if (!a || !b) return a == b;
+    if (a->t == JNUM && b->t == JNUM && !a->isfloat && !b->isfloat) {
+        const char *p = a->s, *q = b->s; size_t pn = a->sn, qn = b->sn;
+        if (!truthy(a) && !truthy(b)) return 1;         /* 0 == -0 */
+        return pn == qn && !memcmp(p, q, pn);
+    }
+    if (numeric(a, &x) && numeric(b, &y)) return x == y;
+    if (a->t != b->t) return 0;
+    switch (a->t) {
+    case JNULL: return 1;
+    case JSTR: return a->sn == b->sn && !memcmp(a->s, b->s, a->sn);
+    case JARR:
+        if (a->n != b->n) return 0;
+        for (i = 0; i < a->n; i++) if (!jeq(a->v[i], b->v[i])) return 0;
+        return 1;
+    case JOBJ:
+        if (a->n != b->n) return 0;
+        for (i = 0; i < a->n; i++) { J *w = ogetn(b, a->k[i], a->kn[i]); if (!w || !jeq(a->v[i], w)) return 0; }
+        return 1;
+    }
+    return 0;
+}
+static int jstreq(J *v, const char *s) { return v && v->t == JSTR && v->sn == strlen(s) && !memcmp(v->s, s, v->sn); }
+static int lhas(J *l, J *x) { int i; for (i = 0; i < l->n; i++) if (jeq(l->v[i], x)) return 1; return 0; }
+/* Python's `s in hay` for a str s: list elements, dict keys, or a substring of a str */
+static int py_in(const char *s, size_t n, J *hay, const char *what) {
+    int i;
+    if (hay->t == JARR) { for (i = 0; i < hay->n; i++) if (hay->v[i]->t == JSTR && hay->v[i]->sn == n && !memcmp(hay->v[i]->s, s, n)) return 1; return 0; }
+    if (hay->t == JOBJ) return ofind(hay, s, n) >= 0;
+    if (hay->t == JSTR) {
+        size_t j; if (!n) return 1;
+        for (j = 0; j + n <= hay->sn; j++) if (!memcmp(hay->s + j, s, n)) return 1;
+        return 0;
+    }
+    die("argument of `in` is not iterable", what); return 0;
+}
+static int scmp(const void *x, const void *y) {
+    J *a = *(J *const *)x, *b = *(J *const *)y; return cpcmp(a->s, a->sn, b->s, b->sn);
+}
+/* sorted(set(L1) | set(L2) | ...): the str elements of the given lists (a dict iterates its keys), deduplicated */
+static J *sorted_union(J **ls, int nl) {
+    J *r = jnew(JARR); int i, k;
+    for (k = 0; k < nl; k++) {
+        J *l = ls[k];
+        if (!l) continue;
+        if (l->t != JARR && l->t != JOBJ) die("not iterable in a set union", 0);
+        for (i = 0; i < l->n; i++) {
+            J *v = l->t == JOBJ ? jstrn(l->k[i], l->kn[i]) : l->v[i];
+            if (v->t != JSTR) die("a set member is not a str (unhashable or unorderable)", 0);
+            if (!lhas(r, v)) apush(r, jcopy(v));
+        }
+    }
+    if (r->n > 1) qsort(r->v, (size_t)r->n, sizeof *r->v, scmp);
+    return r;
+}
+
+/* ---------- json.loads (Python's scanner; a repeated key keeps its first place and the last value) ---------- */
+static const unsigned char *jp, *je; static const char *JWHAT;
+static void jerr(const char *what) { die(JWHAT, what); }
+static void jws(void) { while (jp < je && (*jp == ' ' || *jp == '\t' || *jp == '\n' || *jp == '\r')) jp++; }
+static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static int hex4(const unsigned char *p, unsigned *v) {
+    int i, h; *v = 0;
+    if (je - p < 4) return 0;
+    for (i = 0; i < 4; i++) { if ((h = hexv(p[i])) < 0) return 0; *v = *v << 4 | (unsigned)h; }
+    return 1;
+}
+static void jstring(Buf *o) {                           /* jp just past the opening quote */
+    bput(o, "", 0);
+    for (;;) {
+        unsigned c;
+        if (jp >= je) jerr("unterminated string");
+        c = *jp;
+        if (c == '"') { jp++; return; }
+        if (c < 0x20) jerr("invalid control character in string");
+        if (c != '\\') { bputc(o, (int)c); jp++; continue; }
+        if (++jp >= je) jerr("unterminated string");
+        switch (*jp) {
+        case '"': bputc(o, '"'); jp++; break;
+        case '\\': bputc(o, '\\'); jp++; break;
+        case '/': bputc(o, '/'); jp++; break;
+        case 'b': bputc(o, '\b'); jp++; break;
+        case 'f': bputc(o, '\f'); jp++; break;
+        case 'n': bputc(o, '\n'); jp++; break;
+        case 'r': bputc(o, '\r'); jp++; break;
+        case 't': bputc(o, '\t'); jp++; break;
+        case 'u':
+            if (!hex4(jp + 1, &c)) jerr("invalid \\uXXXX escape");
+            jp += 5;
+            if (c >= 0xD800 && c <= 0xDBFF && je - jp > 6 && jp[0] == '\\' && jp[1] == 'u') {
+                unsigned c2;
+                if (!hex4(jp + 2, &c2)) jerr("invalid \\uXXXX escape");
+                if (c2 >= 0xDC00 && c2 <= 0xDFFF) { c = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00); jp += 6; }
+            }
+            wtf8(o, c); break;
+        default: jerr("invalid \\escape");
+        }
+    }
+}
+static int jlit(const char *w) { size_t n = strlen(w); if ((size_t)(je - jp) >= n && !memcmp(jp, w, n)) { jp += n; return 1; } return 0; }
+static J *jvalue(int depth) {
+    J *j; const unsigned char *s = jp;
+    if (depth > 900) jerr("nested too deeply");
+    if (jp >= je) jerr("expecting value");
+    switch (*jp) {
+    case '"': { Buf o = {0}; jp++; jstring(&o); j = jnew(JSTR); j->s = o.b; j->sn = o.n; return j; }
+    case '{':
+        j = jnew(JOBJ); jp++; jws();
+        if (jp < je && *jp == '}') { jp++; return j; }
+        for (;;) {
+            Buf k = {0}; J *v;
+            if (jp >= je || *jp != '"') jerr("expecting property name enclosed in double quotes");
+            jp++; jstring(&k); jws();
+            if (jp >= je || *jp != ':') jerr("expecting ':' delimiter");
+            jp++; jws(); v = jvalue(depth + 1); osetn(j, k.b, k.n, v); free(k.b); jws();
+            if (jp < je && *jp == '}') { jp++; return j; }
+            if (jp >= je || *jp != ',') jerr("expecting ',' delimiter");
+            jp++; jws();
+        }
+    case '[':
+        j = jnew(JARR); jp++; jws();
+        if (jp < je && *jp == ']') { jp++; return j; }
+        for (;;) {
+            apush(j, jvalue(depth + 1)); jws();
+            if (jp < je && *jp == ']') { jp++; return j; }
+            if (jp >= je || *jp != ',') jerr("expecting ',' delimiter");
+            jp++; jws();
+        }
+    case 'n': if (jlit("null")) return jnew(JNULL); break;
+    case 't': if (jlit("true")) return jnew(JTRUE); break;
+    case 'f': if (jlit("false")) return jnew(JFALSE); break;
+    case 'N': if (jlit("NaN")) { j = jnew(JNUM); j->isfloat = 1; j->s = xstrdup("nan"); j->sn = 3; return j; } break;
+    case 'I': if (jlit("Infinity")) { j = jnew(JNUM); j->isfloat = 1; j->s = xstrdup("inf"); j->sn = 3; return j; } break;
+    }
+    if (*jp == '-' && jlit("-Infinity")) { j = jnew(JNUM); j->isfloat = 1; j->s = xstrdup("-inf"); j->sn = 4; return j; }
+    if (*jp == '-' || (*jp >= '0' && *jp <= '9')) {   /* -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)? */
+        int isfloat = 0;
+        if (*jp == '-') jp++;
+        if (jp >= je || *jp < '0' || *jp > '9') { jp = s; jerr("expecting value"); }
+        if (*jp == '0') jp++; else while (jp < je && *jp >= '0' && *jp <= '9') jp++;
+        if (je - jp > 1 && *jp == '.' && jp[1] >= '0' && jp[1] <= '9') { isfloat = 1; jp++; while (jp < je && *jp >= '0' && *jp <= '9') jp++; }
+        if (jp < je && (*jp == 'e' || *jp == 'E')) {
+            const unsigned char *q = jp + 1;
+            if (q < je && (*q == '+' || *q == '-')) q++;
+            if (q < je && *q >= '0' && *q <= '9') { isfloat = 1; while (q < je && *q >= '0' && *q <= '9') q++; jp = q; }
+        }
+        j = jnew(JNUM); j->isfloat = isfloat; j->s = xstrndup((const char *)s, (size_t)(jp - s)); j->sn = (size_t)(jp - s);
+        return j;
+    }
+    jerr("expecting value"); return 0;
+}
+static J *jparse(const char *text, size_t n, const char *what) {
+    J *d;
+    JWHAT = what;
+    if (!utf8_valid(text, n)) die(what, "not UTF-8");
+    jp = (const unsigned char *)text; je = jp + n;
+    jws(); d = jvalue(0); jws();
+    if (jp != je) jerr("extra data");
+    return d;
+}
+static J *jload(const char *path) {
+    size_t n; char *t = cx_read(path, &n), *what;
+    if (!t) die("cannot read", path);
+    what = xmalloc(strlen(path) + 32); sprintf(what, "%s is not valid JSON", path);
+    return jparse(t, n, what);
+}
+
+/* ---------- json.dumps(d, indent=2) ---------- */
+static void indent(Buf *o, int lvl) { int i; bputc(o, '\n'); for (i = 0; i < lvl; i++) bputs(o, "  "); }
+static void jdump(Buf *o, J *j, int lvl) {
+    int i;
+    switch (j->t) {
+    case JNULL: bputs(o, "null"); return;
+    case JFALSE: bputs(o, "false"); return;
+    case JTRUE: bputs(o, "true"); return;
+    case JNUM:
+        if (j->isfloat) die("a float in the output (repr(float) is not reproduced)", j->s);
+        if (!truthy(j)) bputs(o, "0"); else bput(o, j->s, j->sn);   /* int('-0') is 0 */
+        return;
+    case JSTR: jescape(o, j->s, j->sn); return;
+    case JARR:
+        if (!j->n) { bputs(o, "[]"); return; }
+        bputc(o, '[');
+        for (i = 0; i < j->n; i++) { if (i) bputc(o, ','); indent(o, lvl + 1); jdump(o, j->v[i], lvl + 1); }
+        indent(o, lvl); bputc(o, ']'); return;
+    case JOBJ:
+        if (!j->n) { bputs(o, "{}"); return; }
+        bputc(o, '{');
+        for (i = 0; i < j->n; i++) {
+            if (i) bputc(o, ',');
+            indent(o, lvl + 1); jescape(o, j->k[i], j->kn[i]); bputs(o, ": "); jdump(o, j->v[i], lvl + 1);
+        }
+        indent(o, lvl); bputc(o, '}'); return;
+    }
+}
+
+/* ---------- pylit: the fixed declarations, in the .py's own literal syntax ----------
+   dict/list displays (trailing commas allowed), '...' and "..." strings, ints, True/False/None, # comments, names
+   bound with env_set(), `A + B` (list or str concatenation), str(X) and head_shas([...]). */
+typedef struct { const char *name; J *v; } Env;
+static Env ENV[32]; static int NENV;
+static void env_set(const char *name, J *v) {
+    int i; for (i = 0; i < NENV; i++) if (!strcmp(ENV[i].name, name)) { ENV[i].v = v; return; }
+    if (NENV == 32) die("pylit: too many names", name);
+    ENV[NENV].name = name; ENV[NENV].v = v; NENV++;
+}
+static J *head_shas(J *paths);
+static const char *pp; static const char *PPSRC;
+static void perr(const char *what) {
+    char ctx[48]; size_t n = strlen(pp) < 40 ? strlen(pp) : 40; memcpy(ctx, pp, n); ctx[n] = 0;
+    fprintf(stderr, "refreshgatedeps: pylit at: %s\n", ctx); die("pylit", what);
+}
+static void pws(void) {
+    for (;;) {
+        while (*pp == ' ' || *pp == '\t' || *pp == '\n' || *pp == '\r') pp++;
+        if (*pp != '#') return;
+        while (*pp && *pp != '\n') pp++;
+    }
+}
+static int pname(const char **s, size_t *n) {
+    const char *a = pp;
+    if (!((*pp >= 'a' && *pp <= 'z') || (*pp >= 'A' && *pp <= 'Z') || *pp == '_')) return 0;
+    while ((*pp >= 'a' && *pp <= 'z') || (*pp >= 'A' && *pp <= 'Z') || (*pp >= '0' && *pp <= '9') || *pp == '_') pp++;
+    *s = a; *n = (size_t)(pp - a); return 1;
+}
+static J *pexpr(void);
+static J *patom(void) {
+    J *j; const char *nm; size_t nn;
+    pws();
+    if (*pp == '\'' || *pp == '"') {
+        char q = *pp++; Buf o = {0}; bput(&o, "", 0);
+        while (*pp != q) {
+            if (!*pp || *pp == '\n') perr("unterminated string");
+            if (*pp == '\\') {
+                pp++;
+                switch (*pp) {
+                case '\\': case '\'': case '"': bputc(&o, *pp); break;
+                case 'n': bputc(&o, '\n'); break;
+                case 't': bputc(&o, '\t'); break;
+                default: perr("unsupported escape");
+                }
+                pp++; continue;
+            }
+            bputc(&o, *pp++);
+        }
+        pp++; j = jnew(JSTR); j->s = o.b; j->sn = o.n; return j;
+    }
+    if (*pp == '{' || *pp == '[') {
+        char close = *pp == '{' ? '}' : ']'; int isobj = *pp == '{';
+        j = jnew(isobj ? JOBJ : JARR); pp++;
+        for (;;) {
+            pws();
+            if (*pp == close) { pp++; return j; }
+            if (isobj) {
+                J *k = pexpr(), *v;
+                if (k->t != JSTR) perr("a dict key is not a str");
+                pws(); if (*pp++ != ':') perr("expecting ':'");
+                v = pexpr(); osetn(j, k->s, k->sn, v);
+            } else apush(j, pexpr());
+            pws();
+            if (*pp == ',') { pp++; continue; }
+            if (*pp != close) perr("expecting ',' or a closing bracket");
+        }
+    }
+    if ((*pp >= '0' && *pp <= '9') || *pp == '-') {
+        const char *a = pp++;
+        while (*pp >= '0' && *pp <= '9') pp++;
+        j = jnew(JNUM); j->s = xstrndup(a, (size_t)(pp - a)); j->sn = (size_t)(pp - a); return j;
+    }
+    if (pname(&nm, &nn)) {
+        int i;
+        if (nn == 4 && !memcmp(nm, "True", 4)) return jnew(JTRUE);
+        if (nn == 5 && !memcmp(nm, "False", 5)) return jnew(JFALSE);
+        if (nn == 4 && !memcmp(nm, "None", 4)) return jnew(JNULL);
+        pws();
+        if (*pp == '(') {
+            J *a; pp++; a = pexpr(); pws(); if (*pp++ != ')') perr("expecting ')'");
+            if (nn == 3 && !memcmp(nm, "str", 3)) {
+                if (a->t == JSTR) return a;
+                if (a->t == JNUM && !a->isfloat) return jstrn(a->s, a->sn);
+                perr("str() of an unsupported value");
+            }
+            if (nn == 9 && !memcmp(nm, "head_shas", 9)) return head_shas(a);
+            perr("unknown function");
+        }
+        for (i = 0; i < NENV; i++) if (strlen(ENV[i].name) == nn && !memcmp(ENV[i].name, nm, nn)) return jcopy(ENV[i].v);
+        perr("unbound name");
+    }
+    perr("unexpected character"); return 0;
+}
+static J *pexpr(void) {
+    J *a = patom(), *b; int i;
+    for (;;) {
+        pws();
+        if (*pp != '+') return a;
+        pp++; b = patom();
+        if (a->t == JARR && b->t == JARR) { for (i = 0; i < b->n; i++) apush(a, b->v[i]); }
+        else if (a->t == JSTR && b->t == JSTR) { Buf o = {0}; bput(&o, a->s, a->sn); bput(&o, b->s, b->sn); a = jnew(JSTR); a->s = o.b; a->sn = o.n; }
+        else perr("unsupported +");
+    }
+}
+static J *pylit(const char *src) {
+    J *j; PPSRC = src; pp = src; j = pexpr(); pws();
+    if (*pp) perr("trailing text");
+    return j;
+}
+
+/* ---------- processes ---------- */
+static char *REF = "HEAD";
+static char *run(char *const argv[], int secs, size_t *len, int check) {   /* stdout; dies on a nonzero exit if CHECK */
+    char *out = 0; size_t n = 0; int rc = cx_runv_timeout(argv, secs, &out, &n);
+    if (rc == 124) die("timed out", argv[0]);
+    if (check && rc != 0) {
+        Buf m = {0}; int i; char t[32];
+        for (i = 0; argv[i]; i++) { if (i) bputc(&m, ' '); bputs(&m, argv[i]); }
+        sprintf(t, " (exit %d)", rc); bputs(&m, t);
+        die("command failed", m.b);
+    }
+    if (!out) { out = xstrdup(""); n = 0; }
+    if (len) *len = n;
+    return out;
+}
+
+/* ---------- the archive, in memory ---------- */
+typedef struct { char *path; size_t pn; int type; unsigned mode; const char *data; size_t size; char *link; char hex[65]; int hashed; } Mem;
+static Mem *mem; static int nmem, capmem;
+static unsigned long long octal(const char *f, int n) {
+    unsigned long long v = 0; int i = 0;
+    while (i < n && (f[i] == ' ' || f[i] == 0)) i++;
+    for (; i < n && f[i] >= '0' && f[i] <= '7'; i++) v = v * 8 + (unsigned)(f[i] - '0');
+    return v;
+}
+static char *field(const char *f, int n) { int l = 0; while (l < n && f[l]) l++; return xstrndup(f, (size_t)l); }
+/* Path normalisation as tarfile/pathlib leave a relative member name: empty and '.' parts dropped */
+static char *normpath(const char *s, size_t n) {
+    Buf o = {0}; size_t i = 0, a;
+    bput(&o, "", 0);
+    while (i <= n) {
+        a = i; while (i < n && s[i] != '/') i++;
+        if (i > a && !(i - a == 1 && s[a] == '.')) { if (o.n) bputc(&o, '/'); bput(&o, s + a, i - a); }
+        i++;
+    }
+    return o.b;
+}
+static void pax(const char *p, size_t n, char **path, char **link, long long *size) {
+    size_t i = 0;
+    while (i < n) {
+        size_t len = 0, j = i, eq;
+        while (j < n && p[j] >= '0' && p[j] <= '9') len = len * 10 + (size_t)(p[j++] - '0');
+        if (j >= n || p[j] != ' ' || !len || i + len > n) die("malformed pax header in the archive", 0);
+        j++;
+        for (eq = j; eq < i + len && p[eq] != '='; eq++) {}
+        if (eq >= i + len) die("malformed pax record in the archive", 0);
+        {   size_t kl = eq - j, vl = i + len - 1 - (eq + 1);
+            const char *k = p + j, *v = p + eq + 1;
+            if (kl == 4 && !memcmp(k, "path", 4)) { free(*path); *path = xstrndup(v, vl); }
+            else if (kl == 8 && !memcmp(k, "linkpath", 8)) { free(*link); *link = xstrndup(v, vl); }
+            else if (kl == 4 && !memcmp(k, "size", 4)) { char *t = xstrndup(v, vl); *size = atoll(t); free(t); }
+        }
+        i += len;
+    }
+}
+static void untar(const char *t, size_t n) {
+    size_t off = 0; char *xpath = 0, *xlink = 0; long long xsize = -1;
+    while (off + 512 <= n) {
+        const char *h = t + off; int zero = 1, i; unsigned long long size; char type; char *path, *link;
+        for (i = 0; i < 512; i++) if (h[i]) { zero = 0; break; }
+        if (zero) break;
+        size = octal(h + 124, 12); type = h[156];
+        if (type == 'x' || type == 'g') {
+            if (off + 512 + size > n) die("truncated archive", 0);
+            if (type == 'x') pax(h + 512, (size_t)size, &xpath, &xlink, &xsize);
+            off += 512 + (size + 511) / 512 * 512; continue;
+        }
+        if (xsize >= 0) size = (unsigned long long)xsize;
+        if (xpath) path = xpath;
+        else {
+            char *nm = field(h, 100), *pre = field(h + 345, 155);
+            if (*pre && !memcmp(h + 257, "ustar", 5)) { path = xmalloc(strlen(pre) + strlen(nm) + 2); sprintf(path, "%s/%s", pre, nm); free(nm); }
+            else path = nm;
+            free(pre);
+        }
+        link = xlink ? xlink : field(h + 157, 100);
+        if (off + 512 + (type == '0' || type == 0 || type == '7' ? size : 0) > n) die("truncated archive", 0);
+        if (nmem == capmem) { capmem = capmem ? capmem * 2 : 4096; mem = realloc(mem, capmem * sizeof *mem); if (!mem) die("out of memory", 0); }
+        {   Mem *m = &mem[nmem++];
+            memset(m, 0, sizeof *m);
+            m->path = normpath(path, strlen(path)); m->pn = strlen(m->path);
+            m->type = type == '0' || type == 0 || type == '7' ? 'f' : type == '5' ? 'd' : type == '2' ? 'l' : type == '1' ? 'h' : '?';
+            m->mode = (unsigned)(octal(h + 100, 8) & 07777);
+            m->data = h + 512; m->size = m->type == 'f' ? (size_t)size : 0; m->link = link;
+        }
+        free(path); xpath = 0; xlink = 0; xsize = -1;
+        off += 512 + (type == '0' || type == 0 || type == '7' ? (size + 511) / 512 * 512 : 0);
+    }
+}
+static Mem *mfind(const char *p, size_t n) {           /* the last member of that name (a later one overwrites) */
+    int i; for (i = nmem - 1; i >= 0; i--) if (mem[i].pn == n && !memcmp(mem[i].path, p, n)) return &mem[i];
+    return 0;
+}
+/* the member a path names with symlinks followed (stat()), or 0 when that is no regular file in the archive */
+static Mem *regular(const char *p, size_t n) {
+    char *cur = xstrndup(p, n); int hops;
+    for (hops = 0; hops < 40; hops++) {
+        Mem *m = mfind(cur, strlen(cur));
+        if (!m) { free(cur); return 0; }
+        if (m->type == 'f') { free(cur); return m; }
+        if (m->type == 'h') { char *t = normpath(m->link, strlen(m->link)); free(cur); cur = t; continue; }
+        if (m->type != 'l') { free(cur); return 0; }
+        {   Buf o = {0}; const char *sl = strrchr(cur, '/'); size_t i = 0, a, L = strlen(m->link);
+            if (m->link[0] == '/') die("absolute symlink in a reviewed tree (not followed here)", cur);
+            bput(&o, "", 0);
+            if (sl) bput(&o, cur, (size_t)(sl - cur));
+            while (i <= L) {                            /* resolve against the link's directory */
+                a = i; while (i < L && m->link[i] != '/') i++;
+                if (i - a == 2 && m->link[a] == '.' && m->link[a + 1] == '.') {
+                    char *q = strrchr(o.b, '/');
+                    if (!o.n) die("symlink leaves the archive (not followed here)", cur);
+                    if (q) { o.n = (size_t)(q - o.b); o.b[o.n] = 0; } else { o.n = 0; o.b[0] = 0; }
+                } else if (i > a && !(i - a == 1 && m->link[a] == '.')) { if (o.n) bputc(&o, '/'); bput(&o, m->link + a, i - a); }
+                i++;
+            }
+            free(cur); cur = o.b;
+        }
+    }
+    free(cur); return 0;
+}
+static const char *mhex(Mem *m) { if (!m->hashed) { cx_sha256_hex(m->data, m->size, m->hex); m->hashed = 1; } return m->hex; }
+
+/* ---------- head_shas: sha256 of each path's content at REF, one `git cat-file --batch` ---------- */
+static J *head_shas(J *paths) {                         /* {path: sha256 hex or None} in sorted order */
+    J *r = jnew(JOBJ), *s = sorted_union(&paths, 1); Buf in = {0}; char tmp[4096], *out; size_t n, i = 0; int fd, k;
+    const char *td = getenv("TMPDIR");
+    if (!s->n) return r;
+    for (k = 0; k < s->n; k++) { bputs(&in, REF); bputc(&in, ':'); bput(&in, s->v[k]->s, s->v[k]->sn); bputc(&in, '\n'); }
+    snprintf(tmp, sizeof tmp, "%s/unisacc-gatedeps-XXXXXX", td && *td ? td : "/tmp");
+    if ((fd = mkstemp(tmp)) < 0) die("cannot create a temporary file", tmp);
+    close(fd);
+    if (cx_write(tmp, in.b, in.n)) { unlink(tmp); die("cannot write", tmp); }
+    {   char *argv[] = { "sh", "-c", "exec git cat-file --batch < \"$1\"", "sh", tmp, 0 };
+        int rc = cx_runv_timeout(argv, 60, &out, &n);
+        unlink(tmp);
+        if (rc) die("git cat-file --batch failed", 0);
+    }
+    for (k = 0; k < s->n; k++) {
+        char *nl = memchr(out + i, '\n', n - i), *w[8]; int nw = 0; size_t j, a; char *head;
+        if (!nl) die("git cat-file --batch: short output", 0);
+        head = xstrndup(out + i, (size_t)(nl - (out + i))); i = (size_t)(nl - out) + 1;
+        for (j = 0; head[j] && nw < 8; ) {                /* bytes.split(): runs of whitespace */
+            while (head[j] == ' ' || head[j] == '\t' || head[j] == '\r' || head[j] == '\v' || head[j] == '\f') j++;
+            if (!head[j]) break;
+            a = j; while (head[j] && head[j] != ' ' && head[j] != '\t' && head[j] != '\r' && head[j] != '\v' && head[j] != '\f') j++;
+            w[nw++] = xstrndup(head + a, j - a);
+        }
+        if (nw && !strcmp(w[nw - 1], "missing")) { osetn(r, s->v[k]->s, s->v[k]->sn, jnew(JNULL)); free(head); continue; }
+        if (nw < 3) die("git cat-file --batch: unexpected header", head);
+        {   size_t sz = (size_t)strtoull(w[2], 0, 10); char hex[65];
+            if (i + sz > n) die("git cat-file --batch: short output", 0);
+            cx_sha256_hex(out + i, sz, hex); osetn(r, s->v[k]->s, s->v[k]->sn, jstr(hex)); i += sz + 1;
+        }
+        free(head);
+    }
+    free(out);
+    return r;
+}
+
+/* ---------- one tree's stamp ---------- */
+typedef struct { char *rel; size_t rn; unsigned mode; const char *hex; } Ent;
+static int ent_cmp(const void *x, const void *y) { const Ent *a = x, *b = y; return cpcmp(a->rel, a->rn, b->rel, b->rn); }
+static int excluded(const char *rel, size_t rn, const char *x, size_t xn) {   /* (base / x) == q or in q.parents */
+    char *X; size_t n; int r;
+    if (memchr(x, 0, xn)) die("embedded null byte in excluded_dirs", 0);
+    if (xn && x[0] == '/') return 0;                    /* an absolute X is never inside the extraction */
+    X = normpath(x, xn); n = strlen(X);
+    r = !n || (rn == n && !memcmp(rel, X, n)) || (rn > n && !memcmp(rel, X, n) && rel[n] == '/');
+    free(X); return r;
+}
+static int keep(J *entry, const char *tree, size_t tn, const char *rel, size_t rn) {
+    J *ex; int i;
+    if (!py_in(tree, tn, need(entry, "all_files_trees"), "all_files_trees")) {
+        const char *name = rel, *d, *suf; size_t k;
+        for (k = 0; k < rn; k++) if (rel[k] == '/') name = rel + k + 1;
+        while (*name == '.') name++;                    /* 3.14 PurePath.suffix */
+        d = strrchr(name, '.'); suf = d ? d : "";
+        if (!py_in(suf, strlen(suf), need(entry, "inventory_suffixes"), "inventory_suffixes")) return 0;
+    }
+    if ((ex = oget(entry, "excluded_dirs"))) {
+        if (ex->t == JARR) { for (i = 0; i < ex->n; i++) { if (ex->v[i]->t != JSTR) die("excluded_dirs entry is not a str", 0); if (excluded(rel, rn, ex->v[i]->s, ex->v[i]->sn)) return 0; } }
+        else if (ex->t == JOBJ) { for (i = 0; i < ex->n; i++) if (excluded(rel, rn, ex->k[i], ex->kn[i])) return 0; }
+        else if (ex->t == JSTR) {
+            size_t j = 0; unsigned cp; int l;
+            while (j < ex->sn) { l = utf8_at((const unsigned char *)ex->s, ex->sn, j, &cp, 1); if (!l) l = 1; if (excluded(rel, rn, ex->s + j, (size_t)l)) return 0; j += (size_t)l; }
+        } else die("excluded_dirs is not iterable", 0);
+    }
+    return 1;
+}
+static void stamp(J *entry, const char *tree, size_t tn, char hex[65]) {
+    char *T; size_t TL; Ent *ents = xmalloc((size_t)(nmem + 1) * sizeof *ents); int ne = 0, i; Buf o = {0};
+    if (memchr(tree, 0, tn)) die("embedded null byte in a tree name", 0);
+    if (tn && tree[0] == '/') die("an absolute reviewed tree is outside the archive", tree);
+    T = normpath(tree, tn); TL = strlen(T);
+    for (i = 0; i < nmem; i++) {
+        Mem *m = &mem[i], *f;
+        if (TL && !(m->pn > TL && !memcmp(m->path, T, TL) && m->path[TL] == '/')) continue;
+        if (mfind(m->path, m->pn) != m) continue;       /* a name the archive repeats is one file */
+        if (!(f = regular(m->path, m->pn))) continue;
+        if (!keep(entry, tree, tn, m->path, m->pn)) continue;
+        ents[ne].rel = m->path; ents[ne].rn = m->pn; ents[ne].mode = 0100000u | f->mode; ents[ne].hex = mhex(f); ne++;
+    }
+    if (ne > 1) qsort(ents, (size_t)ne, sizeof *ents, ent_cmp);
+    bputc(&o, '{');
+    for (i = 0; i < ne; i++) {
+        char t[64];
+        if (i) bputs(&o, ", ");
+        jescape(&o, ents[i].rel, ents[i].rn);
+        sprintf(t, ": [%u, \"", ents[i].mode); bputs(&o, t); bputs(&o, ents[i].hex); bputs(&o, "\"]");
+    }
+    bputc(&o, '}');
+    cx_sha256_hex(o.b, o.n, hex); free(o.b); free(ents); free(T);
+}
+
+/* ---------- Python repr() of the changed list, for the summary line ---------- */
+static void pyrepr(Buf *o, const char *s) {
+    char q = strchr(s, '\'') && !strchr(s, '"') ? '"' : '\''; char t[8];
+    bputc(o, q);
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '\\' || c == (unsigned char)q) { bputc(o, '\\'); bputc(o, c); }
+        else if (c == '\n') bputs(o, "\\n"); else if (c == '\r') bputs(o, "\\r"); else if (c == '\t') bputs(o, "\\t");
+        else if (c < 0x20 || c == 0x7f) { sprintf(t, "\\x%02x", c); bputs(o, t); }
+        else bputc(o, c);
+    }
+    bputc(o, q);
+}
+static Buf CHANGED; static int NCHANGED;
+static void changed(const char *a, const char *b) {
+    bputs(&CHANGED, NCHANGED++ ? ", (" : "[("); pyrepr(&CHANGED, a); bputs(&CHANGED, ", "); pyrepr(&CHANGED, b); bputc(&CHANGED, ')');
+}
+static void changedn(const char *a, size_t an, const char *b) { char *t = xstrndup(a, an); changed(t, b); free(t); }
+
+/* shlex.quote / shlex.join */
+static void shquote(Buf *o, const char *s, size_t n) {
+    size_t i; int safe = n > 0;
+    for (i = 0; i < n && safe; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strchr("_@%+=:,./-", c))) safe = 0;
+        if (!c) safe = 0;
+    }
+    if (safe) { bput(o, s, n); return; }
+    bputc(o, '\'');
+    for (i = 0; i < n; i++) { if (s[i] == '\'') bputs(o, "'\"'\"'"); else bputc(o, s[i]); }
+    bputc(o, '\'');
+}
+
+/* the guard refresh shared by families and suites */
+static void refresh_guards(J *entry, const char *owner, size_t on, J *outside) {
+    J *g = oget(entry, "guards"); int i;
+    if (!g) return;
+    if (g->t != JOBJ) die("guards is not a dict", owner);
+    for (i = 0; i < g->n; i++) {
+        Mem *f = 0; J *cur; char *nm;
+        if (!memchr(g->k[i], 0, g->kn[i]) && !(g->kn[i] && g->k[i][0] == '/')) { char *p = normpath(g->k[i], g->kn[i]); if (*p) f = regular(p, strlen(p)); free(p); }
+        cur = f ? jstr(mhex(f)) : ogetn(outside, g->k[i], g->kn[i]);
+        if (!cur) die("KeyError (guard not looked up)", g->k[i]);
+        if (truthy(cur) && !jeq(cur, g->v[i])) {
+            Buf b = {0}; bputs(&b, "guard:"); bput(&b, g->k[i], g->kn[i]);
+            nm = xstrndup(owner, on); changed(nm, b.b); free(nm); free(b.b);
+            g->v[i] = cur;
+        }
+    }
+}
+
+/* parse_gate_plan (tests/gateselect.py): NUL-separated NAME, ARGC, ARGV... records */
+static void plan_require(int ok, const char *what) { if (!ok) die("SelectionError", what); }
+static J *parse_gate_plan(const char *raw, size_t n) {
+    J *jobs = jnew(JARR); size_t nf = 1, i, a; const char **f; size_t *fl; size_t k = 0, x;
+    plan_require(n > 0 && raw[n - 1] == 0, "gate-plan-not-nul-terminated");
+    for (i = 0; i < n; i++) if (!raw[i]) nf++;
+    f = xmalloc(nf * sizeof *f); fl = xmalloc(nf * sizeof *fl);
+    for (i = 0, a = 0; i <= n; i++) if (i == n || !raw[i]) { f[k] = raw + a; fl[k] = i - a; k++; a = i + 1; }
+    i = 0;
+    while (i < nf - 1) {
+        long cnt = 0; size_t p = 0, q; int neg = 0, dig = 0; J *job, *cmd;
+        plan_require(fl[i] && i + 1 < nf, "gate-plan-record");
+        q = fl[i + 1];                                   /* int(): blanks around, a sign, digits with single '_' */
+        while (p < q && (f[i + 1][p] == ' ' || (f[i + 1][p] >= '\t' && f[i + 1][p] <= '\r'))) p++;
+        while (q > p && (f[i + 1][q - 1] == ' ' || (f[i + 1][q - 1] >= '\t' && f[i + 1][q - 1] <= '\r'))) q--;
+        if (p < q && (f[i + 1][p] == '+' || f[i + 1][p] == '-')) neg = f[i + 1][p++] == '-';
+        for (; p < q; p++) {
+            char c = f[i + 1][p];
+            if (c >= '0' && c <= '9') { cnt = cnt * 10 + (c - '0'); dig = 1; if (cnt > 100000000L) cnt = 100000000L; }
+            else if (c == '_' && dig && p + 1 < q && f[i + 1][p + 1] >= '0' && f[i + 1][p + 1] <= '9') continue;
+            else plan_require(0, "gate-plan-argc");
+        }
+        plan_require(dig, "gate-plan-argc");
+        if (neg) cnt = -cnt;
+        plan_require(cnt > 0 && i + 2 + (size_t)cnt <= nf - 1, "gate-plan-argv-extent");
+        job = jnew(JOBJ); cmd = jnew(JARR);
+        oset(job, "name", jstrn(f[i], fl[i]));
+        for (x = 0; x < (size_t)cnt; x++) apush(cmd, jstrn(f[i + 2 + x], fl[i + 2 + x]));
+        oset(job, "command", cmd); apush(jobs, job);
+        i += (size_t)cnt + 2;
+    }
+    plan_require(i == nf - 1 && jobs->n, "gate-plan-tail-or-empty");
+    for (i = 0; i < (size_t)jobs->n; i++) for (x = 0; x < i; x++) plan_require(!jeq(need(jobs->v[i], "name"), need(jobs->v[x], "name")), "gate-plan-duplicate");
+    return jobs;
+}
+
+static int startswith(const char *s, size_t n, const char *p) { size_t l = strlen(p); return n >= l && !memcmp(s, p, l); }
+
+int main(int argc, char **argv) {
+    J *d, *fams, *suites, *outside, *glist, *treeset, *o; Buf tb = {0}; char *blob, root[8192]; size_t bn; int i, f, t, k;
+    char **av;
+
+    /* the root: the directory above this file's (Path(__file__).resolve().parents[1]) */
+    {   size_t l = strlen(argv[0]);
+        if (l > 3 && !strcmp(argv[0] + l - 3, ".cx")) {
+            char *dir = xstrdup(argv[0]), *sl = strrchr(dir, '/');
+            if (sl) { *sl = 0; if (!*dir) strcpy(dir, "/"); if (chdir(dir)) die("cannot enter", dir); }
+            if (chdir("..")) die("cannot enter the parent of", argv[0]);
+            free(dir);
+        }
+        if (!getcwd(root, sizeof root)) die("cannot get the current directory", 0);
+    }
+    for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--index")) {
+        char *a[] = { "git", "write-tree", 0 }; size_t n; char *s = run(a, 60, &n, 1);
+        while (n && (s[n - 1] == '\n' || s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r')) s[--n] = 0;
+        while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+        REF = s; break;
+    }
+
+    d = jload("tests/gatedeps.json");
+    fams = need(d, "families");
+    if (fams->t != JOBJ) die("families is not a dict", 0);
+    treeset = jnew(JARR);
+    for (f = 0; f < fams->n; f++) {
+        J *rt = oget(fams->v[f], "reviewed_trees");
+        if (fams->v[f]->t != JOBJ) die("a family entry is not a dict", fams->k[f]);
+        if (truthy(rt)) apush(treeset, rt);
+    }
+    treeset = sorted_union(treeset->v, treeset->n);
+
+    /* git -c tar.umask=022 archive --format=tar REF TREES... (git's default archive umask is 002; a checkout has 0644/0755) */
+    av = xmalloc((size_t)(treeset->n + 8) * sizeof *av);
+    av[0] = "git"; av[1] = "-c"; av[2] = "tar.umask=022"; av[3] = "archive"; av[4] = "--format=tar"; av[5] = REF;
+    for (t = 0; t < treeset->n; t++) av[6 + t] = treeset->v[t]->s;
+    av[6 + treeset->n] = 0;
+    blob = run(av, 60, &bn, 1);
+    untar(blob, bn);
+
+    suites = oget(d, "suites");
+    glist = jnew(JARR);
+    for (k = 0; k < 2; k++) {
+        J *grp = k ? suites : fams;
+        if (!grp) continue;
+        if (grp->t != JOBJ) die("suites is not a dict", 0);
+        for (f = 0; f < grp->n; f++) {
+            J *g = oget(grp->v[f], "guards");
+            if (!g) continue;
+            if (g->t != JOBJ) die("guards is not a dict", grp->k[f]);
+            for (i = 0; i < g->n; i++) {
+                Mem *m = 0;
+                if (!memchr(g->k[i], 0, g->kn[i]) && !(g->kn[i] && g->k[i][0] == '/')) { char *p = normpath(g->k[i], g->kn[i]); if (*p) m = regular(p, strlen(p)); free(p); }
+                if (!m) apush(glist, jstrn(g->k[i], g->kn[i]));
+            }
+        }
+    }
+    outside = head_shas(glist);
+    for (f = 0; f < fams->n; f++) {
+        J *entry = fams->v[f], *rt = oget(entry, "reviewed_trees");
+        if (!truthy(rt)) continue;
+        if (rt->t != JOBJ) die("reviewed_trees is not a dict", fams->k[f]);
+        for (t = 0; t < rt->n; t++) {
+            char hex[65];
+            stamp(entry, rt->k[t], rt->kn[t], hex);
+            if (!jstreq(rt->v[t], hex)) { char *tr = xstrndup(rt->k[t], rt->kn[t]); changedn(fams->k[f], fams->kn[f], tr); free(tr); rt->v[t] = jstr(hex); }
+        }
+        refresh_guards(entry, fams->k[f], fams->kn[f], outside);
+    }
+    /* 0.0.23 E: per-suite guards (the audited lib-* declarations) follow HEAD too */
+    if (suites) for (f = 0; f < suites->n; f++) refresh_guards(suites->v[f], suites->k[f], suites->kn[f], outside);
+    if (!suites) die("KeyError", "suites");
+
+    /* 0.0.28 R4: seed-construct parts come from seedconstructcheck.py --list; each is declared like
+       seed-construct-parse2 (same inputs), with its own command, and parts that left the list are dropped */
+    {   char *a[] = { "python3", "tests/seedconstructcheck.py", "--list", 0 }; size_t n; char *s = run(a, 10, &n, 1);
+        J *tmpl = need(suites, "seed-construct-parse2"), *want = jnew(JOBJ); size_t p = 0, q;
+        while (p < n) {                                   /* str.split() */
+            while (p < n && (s[p] == ' ' || (s[p] >= '\t' && s[p] <= '\r'))) p++;
+            if (p >= n) break;
+            q = p; while (q < n && !(s[q] == ' ' || (s[q] >= '\t' && s[q] <= '\r'))) q++;
+            {   Buf nm = {0}; bputs(&nm, "seed-construct-"); bput(&nm, s + p, q - p); osetn(want, nm.b, nm.n, jstrn(s + p, q - p)); free(nm.b); }
+            p = q;
+        }
+        for (i = 0; i < suites->n; ) {
+            if (startswith(suites->k[i], suites->kn[i], "seed-construct-") && ofind(want, suites->k[i], suites->kn[i]) < 0) {
+                char *nm = xstrndup(suites->k[i], suites->kn[i]); odel(suites, nm, strlen(nm)); changed(nm, "dropped"); free(nm);
+            } else i++;
+        }
+        for (i = 0; i < want->n; i++) {
+            J *e = jcopy(tmpl), *cmd = pylit("['python3', './tests/seedconstructcheck.py', '--part']"), *cur;
+            apush(cmd, jcopy(want->v[i])); oset(e, "command", cmd);
+            cur = ogetn(suites, want->k[i], want->kn[i]);
+            if (strcmp(want->k[i], "seed-construct-parse2") && !jeq(cur, e)) { osetn(suites, want->k[i], want->kn[i], e); changedn(want->k[i], want->kn[i], "declared"); }
+        }
+    }
+    /* C43: isolated finite Tape-domain model; dynamic C checks existing parse oracle. */
+    for (k = 1; k < 4; k++) {
+        char name[64]; J *entry, *kk = jnew(JNUM);
+        kk->s = xmalloc(16); sprintf(kk->s, "%d", k); kk->sn = strlen(kk->s); env_set("k", kk);
+        sprintf(name, "tapecheck-model-%d", k);
+        entry = pylit("{\n"
+            "'command': ['./exec/tapecheck/check.sh', str(k)],\n"
+            "'files': ['exec/tapecheck/check.sh', 'tests/tapecheckmodel.cx',\n"
+            "'tests/tapecheck-cases.tsv', 'tests/bound', 'tests/bound.c',\n"
+            "'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'],\n"
+            "'trees': ['exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c',\n"
+            "'exec/pp', 'seed', 'include', 'unisa'],\n"
+            "'executable_inputs': True,\n"
+            "'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'tail']}");
+        if (!jeq(oget(suites, name), entry)) { oset(suites, name, entry); changed(name, "declared"); }
+    }
+    /* LB-1: isolated finite lower side-stream; reference is an oracle only. */
+    oset(suites, "exec-hostsymbols-model", pylit("{\n"
+            "'command': ['./exec/lower/hostsymbolscheck.sh'],\n"
+            "'files': ['exec/lower/hostsymbolscheck.sh', 'tests/hostsymbolscheck.cx',\n"
+            "'tests/hostsymbols-cases.tsv', 'tests/hostsymbols-outside-domain.tsv', 'tests/seals/middleflow-step0/manifest.tsv',\n"
+            "'tests/seals/middleflow-step0/lower/model.net', 'tests/bound',\n"
+            "'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'],\n"
+            "'trees': ['exec/lower', 'exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c',\n"
+            "'exec/pp', 'seed', 'include', 'unisa'],\n"
+            "'executable_inputs': True,\n"
+            "'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}"));
+    /* 2a isolated address-free declaration model; Python is reference only. */
+    oset(suites, "exec-librarycontract-model", pylit("{'command': ['./exec/librarycontract/check.sh'], 'files': ['exec/librarycontract/check.sh', 'tests/librarycontractcheck.cx', 'tests/librarycontract-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycontract', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}"));
+    oset(suites, "exec-librarypartition-model", pylit("{'command': ['./exec/librarypartition/check.sh'], 'files': ['exec/librarypartition/check.sh', 'tests/librarypartitioncheck.cx', 'tests/librarypartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}"));
+    oset(suites, "exec-libraryfunctionimports-model", pylit("{'command': ['./exec/parse2/libraryfunctionimportscheck.sh'], 'files': ['exec/parse2/libraryfunctionimportscheck.sh', 'exec/parse2/libraryfunctionimports-observer.c', 'tests/libraryfunctionimportscheck.cx', 'tests/libraryfunctionimports-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/parse2', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir', 'env']}"));
+    for (k = 1; k < 9; k++) {
+        char name[96], num[16]; J *entry = pylit("{'command': ['./exec/librarycallsitepartition/check.sh', 'PLACEHOLDER'], 'files': ['exec/librarycallsitepartition/check.sh', 'tests/librarycallsitepartitioncheck.cx', 'tests/librarycallsitepartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycallsitepartition', 'exec/librarytypedpartition', 'exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}"), *cmd = need(entry, "command");
+        sprintf(num, "%d", k); cmd->v[cmd->n - 1] = jstr(num);
+        sprintf(name, "exec-librarycallsitepartition-model-%d", k); oset(suites, name, entry);
+    }
+    /* 2c4 callback partition: explicit overlay, reference ledger only. */
+    for (k = 1; k < 17; k++) {
+        char name[96], num[16]; J *entry = pylit("{'command': ['./exec/librarycallbackpartition/check.sh', '1'], 'files': ['exec/librarycallbackpartition/check.sh', 'tests/librarycallbackpartitioncheck.cx', 'tests/librarycallbackpartition-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarycallbackpartition', 'exec/librarycallsitepartition', 'exec/librarytypedpartition', 'exec/librarypartition', 'exec/c', 'exec/build', 'exec/facts', 'exec/pp', 'seed', 'include', 'unisa'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm']}"), *cmd = need(entry, "command");
+        sprintf(num, "%d", k); cmd->v[cmd->n - 1] = jstr(num);
+        sprintf(name, "exec-librarycallbackpartition-model-%d", k); oset(suites, name, entry);
+    }
+    /* 2c3 callsite models: stage-only, no native ABI/runtime/V0-V7 completion claim. */
+    env_set("shared_files", pylit("['exec/finite_rules.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json']"));
+    env_set("model_tools", pylit("['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir']"));
+    oset(suites, "exec-librarycallsite-reader-model", pylit("{\n"
+            "'command': ['./exec/parse2/librarycallsitecheck.sh'],\n"
+            "'files': shared_files + ['exec/parse2/librarycallsitecheck.sh', 'exec/parse2/librarycallsitecheck.cx', 'exec/parse2/librarycallsite-cases.tsv', 'exec/parse2/librarytypedreader-observer.c', 'exec/parse2/librarytypedreadercheck.sh'],\n"
+            "'trees': ['exec/parse2', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'],\n"
+            "'executable_inputs': True, 'tools': model_tools}"));
+    for (k = 1; k < 5; k++) {
+        char name[96]; J *sh = jnew(JNUM);
+        sh->s = xmalloc(16); sprintf(sh->s, "%d", k); sh->sn = strlen(sh->s); env_set("shard", sh);
+        sprintf(name, "exec-librarycallsitelower-model-%d", k); oset(suites, name, pylit("{\n"
+            "'command': ['./exec/lower/librarycallsitecheck.sh', str(shard)],\n"
+            "'files': shared_files + ['exec/lower/librarycallsitecheck.sh', 'exec/lower/librarycallsite-observer.c', 'exec/lower/librarycallsite-oracle.c', 'exec/lower/librarycallsite-oracle.py', 'exec/lower/librarytypedcheck.sh', 'tests/librarycallsitelowercheck.cx', 'tests/librarycallsitelower-cases.tsv'],\n"
+            "'trees': ['exec/lower', 'exec/parse2', 'exec/tapecheck', 'exec/nativeabi', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'],\n"
+            "'executable_inputs': True, 'tools': model_tools + ['env']}"));
+    }
+    oset(suites, "exec-librarytypedreader-model", pylit("{'command': ['./exec/parse2/librarytypedreadercheck.sh'], 'files': ['exec/parse2/librarytypedreadercheck.sh', 'exec/parse2/librarytypedreader-observer.c', 'tests/librarytypedreadercheck.cx', 'tests/librarytypedreader-cases.tsv', 'tests/librarytypedoverlaycheck.cx', 'tests/librarytypedoverlay-ordinary.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/librarytypedpartition', 'exec/parse2', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir', 'env']}"));
+    /* Existing ABI contract job lacked declared inputs, blocking scoped commitgate. */
+    oset(suites, "abi-manifest", pylit("{'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/abimanifestcheck.cx', '--', '--check'], 'files': ['tests/abimanifestcheck.cx', 'tests/abi.manifest', 'unisacc.com', 'unisacc.com.build.json', 'tests/bound', 'tests/bound.c', 'tests/bound.py'], 'trees': ['exec', 'src', 'include'], 'executable_inputs': True, 'tools': ['sh']}"));
+    for (k = 1; k < 5; k++) {
+        char name[96]; J *sh = jnew(JNUM);
+        sh->s = xmalloc(16); sprintf(sh->s, "%d", k); sh->sn = strlen(sh->s); env_set("shard", sh);
+        sprintf(name, "exec-librarytypedlower-model-%d", k); oset(suites, name, pylit("{'command': ['./exec/lower/librarytypedcheck.sh', str(shard)], 'files': ['exec/lower/librarytypedcheck.sh', 'exec/lower/librarytyped-observer.c', 'exec/lower/librarytyped-oracle.c', 'exec/lower/librarytyped-oracle.py', 'tests/librarytypedlowercheck.cx', 'tests/librarytypedlower-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/lower', 'exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir', 'env']}"));
+    }
+    oset(suites, "exec-libraryfn-model", pylit("{'command': ['./exec/lower/libraryfncheck.sh'], 'files': ['exec/lower/libraryfncheck.sh', 'exec/lower/libraryfn-observer.c', 'tests/libraryfncheck.cx', 'tests/libraryfn-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/lower', 'exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir', 'env']}"));
+    oset(suites, "exec-librarydata-model", pylit("{'command': ['./exec/lower/librarydatacheck.sh'], 'files': ['exec/lower/librarydatacheck.sh', 'exec/lower/librarydata-observer.c', 'tests/librarydatacheck.cx', 'tests/librarydata-cases.tsv', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec/lower', 'exec/tapecheck', 'exec/build', 'exec/facts', 'exec/c', 'exec/pp', 'seed', 'include', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'python3', 'sh', 'cmp', 'mktemp', 'rm', 'rg', 'sort', 'xargs', 'sha256sum', 'cut', 'cp', 'mkdir', 'env']}"));
+    /* Forwarding registration deliberately retains broad trees; no audited reuse claim. */
+    oset(suites, "forward-multi", pylit("{\n"
+            "'command': ['./tests/forwardmulti.sh'],\n"
+            "'files': ['tests/forwardmulti.sh', 'tests/forwardpaths.cx', 'tests/lib.sh',\n"
+            "'tests/build_ref.sh', 'tests/export_ref.sh', 'tests/refshim.h',\n"
+            "'tests/reffoot.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py',\n"
+            "'unisacc.c', 'unisacc.com', 'unisacc.com.build.json'],\n"
+            "'trees': ['exec', 'include', 'iterate', 'kernel', 'seed', 'src', 'unisa', 'weights'],\n"
+            "'executable_inputs': True,\n"
+            "'tools': ['cc', 'python3', 'sh', 'chmod', 'mktemp', 'rm', 'uname', 'head', 'sed', 'env']}"));
+    /* 0.0.43 T-1: com-tapebin is split.  The reference is prepared once by com-tapebin-ref (keyed by content inside
+       tests/tapebinref.py); six file slices, the fixed-cost part and a global cover read it.  The guards are the HEAD
+       stamps the old declaration already pinned, minus the product-facing script, which the slices now own; nothing
+       here is a new stamp. */
+    {   J *old = oget(oget(suites, "com-tapebin-1"), "guards"), *tbg = jnew(JOBJ), *refg = jnew(JOBJ), *shard;
+        static const char *refkeys[] = { "tests/bound", "tests/bound.c", "tests/bound.py", "tests/build_ref.sh",
+                                         "tests/export_ref.sh", "tests/reffoot.h", "tests/refshim.h", "unisacc.c", 0 };
+        static const char *names[] = { "com-tapebin-six", "com-tapebin-cover", "com-tapebin-1", "com-tapebin-2",
+                                       "com-tapebin-3", "com-tapebin-4", "com-tapebin-5", "com-tapebin-6", 0 };
+        if (old && old->t != JOBJ) die("com-tapebin-1 guards is not a dict", 0);
+        if (old) for (i = 0; i < old->n; i++)
+            if (!(old->kn[i] == 23 && !memcmp(old->k[i], "tests/tapebinproduct.py", 23))) osetn(tbg, old->k[i], old->kn[i], old->v[i]);
+        for (i = 0; i < tbg->n; i++) { int r; for (r = 0; refkeys[r]; r++) if (strlen(refkeys[r]) == tbg->kn[i] && !memcmp(refkeys[r], tbg->k[i], tbg->kn[i])) { osetn(refg, tbg->k[i], tbg->kn[i], tbg->v[i]); break; } }
+        env_set("tb_trees", pylit("['examples', 'exec', 'include', 'iterate', 'kernel', 'seed', 'src', 'tests/c', 'unisa', 'weights']"));
+        env_set("tb_files", pylit("['Makefile', 'examples/hello.c', 'exec/c/chain.knownfail', 'exec/c/compiler.c', 'exec/c/tapebin.h',\n"
+            "'exec/c/tapebin_emit.h', 'src/tapebin_encode.inc', 'src/tapebin_shape.inc', 'tests/bound', 'tests/bound.c',\n"
+            "'tests/bound.py', 'tests/build_ref.sh', 'tests/export_ref.sh', 'tests/knownfail.py', 'tests/knownfail.sh',\n"
+            "'tests/lib.sh', 'tests/par.sh', 'tests/product-refusals.knownfail', 'tests/reffoot.h', 'tests/refshim.h',\n"
+            "'tests/tapebinproduct.py', 'tests/tapebinref.py', 'unisa/__init__.py', 'unisa/bits.py', 'unisa/fp.py',\n"
+            "'unisa/tape.py', 'unisa/tapebin.py', 'unisacc.c', 'unisacc.com', 'unisacc.com.build.json']"));
+        env_set("tb_guards", tbg); env_set("ref_guards", refg);
+        for (i = 0; i < suites->n; ) {
+            if (startswith(suites->k[i], suites->kn[i], "com-tapebin-")) { char *nm = xstrndup(suites->k[i], suites->kn[i]); odel(suites, nm, strlen(nm)); changed(nm, "dropped"); free(nm); }
+            else i++;
+        }
+        /* the .py's 'guards' here is {k: v for k, v in tb_guards.items() if k in (refkeys)}: ref_guards above */
+        oset(suites, "com-tapebin-ref", pylit(
+            "{'command': ['python3', './tests/tapebinref.py', 'prepare'],"
+            " 'files': ['tests/tapebinref.py', 'tests/export_ref.sh', 'tests/build_ref.sh', 'tests/refshim.h', 'tests/reffoot.h', 'unisacc.c'],"
+            " 'guards': ref_guards,"
+            " 'trees': ['exec', 'include', 'kernel', 'seed', 'src', 'unisa'],"
+            " 'executable_inputs': False}"));
+        shard = pylit("{'command': ['python3', './tests/tapebinproduct.py'], 'files': tb_files, 'guards': tb_guards,\n"
+            "'match': 'contains', 'trees': tb_trees, 'executable_inputs': True}");
+        for (i = 0; names[i]; i++) oset(suites, names[i], jcopy(shard));
+        changed("com-tapebin", "declared 1-6, six, cover, ref");
+    }
+    /* 0.0.43 step 6, fifth cut: the outside-the-name-list reads the strace measured (research/c43-flow-reuse-step4.md).
+       ledgercheck reads the plan of the version src/version.h names, and the one before it; declared as the whole
+       plans/ tree so that editing a new plan file reruns it. */
+    oset(suites, "ledgercheck", pylit("{\n"
+            "'command': ['python3', './tests/ledgercheck.py'],\n"
+            "'files': ['tests/ledgercheck.py', 'src/version.h'],\n"
+            "'trees': ['plans']}"));
+    oset(suites, "docs", pylit("{\n"
+            "'command': ['./tests/docs.sh'],\n"
+            "# docs.sh opens these by fixed name (no directory listing); the English paper was missing from the first measure\n"
+            "'files': ['tests/docs.sh', 'prd.md', 'spec.md', 'research/model-bytes.json', 'research/unisacc-paper.md', 'research/unisacc-paper.en.md']}"));
+    oset(suites, "subtract-safety", pylit("{\n"
+            "'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/subtractsafety.cx'],   # 2026-10-22: the .cx port\n"
+            "'files': ['tests/subtractsafety.cx', 'tests/bound', 'tests/bound.c', 'unisacc.com', 'unisacc.com.build.json',\n"
+            "'prd.md', 'spec.md', '.gitignore', '.gitattributes'],\n"
+            "'trees': ['apps', 'bench', 'docs', 'plans', 'research', 'release', 'scripts', '.github']}"));
+    changed("step4-readsets", "declared ledgercheck, docs, subtract-safety");
+    /* 0.0.43 step 6, batch 1 (research/c43-flow-reuse-step6.md): decision-ledger, exittable, k2b (measured reads) */
+    oset(suites, "decision-ledger", pylit("{\n"
+            "'command': ['python3', './tests/decisionledger.py'],\n"
+            "'files': ['tests/decisionledger.py', 'research/decision-ledger.json', 'tests/decisionledger.allow'],\n"
+            "'trees': ['exec']}"));
+    oset(suites, "exittable", pylit("{\n"
+            "'command': ['python3', './tests/exittablecheck.py'],\n"
+            "'files': ['tests/exittablecheck.py', 'archive/plans/v0.0.38.md', 'release/preauth.tsv', 'release/rulings.tsv',\n"
+            "'release/tools/exittable.py', 'release/tools/h1source.py', 'src/version.h', 'tests/gatelayers.py',\n"
+            "'tests/gateorder.json', 'tests/gatequeue.py'],\n"
+            "'trees': ['plans']}"));
+    oset(suites, "k2b", pylit("{\n"
+            "'command': ['python3', './tests/k2bcheck.py'],\n"
+            "'files': ['tests/k2bcheck.py', 'tests/gatequeue.py'],\n"
+            "'guards': head_shas(['tests/gatequeue.py']),\n"
+            "'trees': ['apps', 'archive', 'bench', 'docs', 'plans', 'research', 'ujs', '.github']}"));
+    changed("step6-batch1", "declared decision-ledger, exittable, k2b");
+    /* 0.0.43 step 6, batch 2: gate-infra, com-tapedomain and com-latebind run the ROOT product (git-ignored) */
+    env_set("rootfiles", pylit("['unisacc.com', 'unisacc.com.build.json']"));
+    {   J *gi = need(suites, "gate-infra"), *ls[2];
+        ls[0] = oget(gi, "files"); ls[1] = ENV[NENV - 1].v;
+        oset(gi, "files", sorted_union(ls, 2));
+    }
+    oset(suites, "com-tapedomain", pylit("{\n"
+            "'command': ['sh', './unisacc.com', '-run', 'tests/tapedomaincheck.cx', '--', './unisacc.com'],\n"
+            "'files': ['tests/tapedomaincheck.cx', 'tests/bound', 'tests/bound.c'] + rootfiles, 'executable_inputs': True}"));
+    oset(suites, "com-latebind", pylit("{\n"
+            "'command': ['sh', './unisacc.com', '-run', 'tests/latebindcheck.cx', '--', './unisacc.com'],\n"
+            "'files': ['tests/latebindcheck.cx', 'tests/bound', 'tests/bound.c'] + rootfiles, 'executable_inputs': True}"));
+    changed("step6-batch2", "root product declared for gate-infra, com-tapedomain, com-latebind");
+    /* c43 R1: regcheck reads exec/parse2 and tests/regs-e3.tsv, run by the root product */
+    {   static const char *rc[][2] = { { "regcheck", "--check" }, { "regcheck-negative", "--negative" } };
+        for (k = 0; k < 2; k++) { env_set("mode", jstr(rc[k][1])); oset(suites, rc[k][0], pylit("{\n"
+            "'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/regcheck.cx', '--', mode, '.'],\n"
+            "'files': ['tests/regcheck.cx', 'tests/regs-e3.tsv', 'tests/bound', 'tests/bound.c'] + rootfiles,\n"
+            "'trees': ['exec'], 'executable_inputs': True, 'tools': ['sh']}")); }
+    }
+    changed("c43-r1", "declared regcheck, regcheck-negative");
+    /* 0.0.43 derived-consistency step 1 (research/c43-derived-consistency.md): facts-export and gate-layers */
+    oset(suites, "facts-export", pylit("{\n"
+            "'command': ['python3', './exec/facts/export.py', '--check'],\n"
+            "'files': ['exec/facts/export.py', 'src/front_pp.c', 'iterate/kernel/typekw.tsv'],\n"
+            "'trees': ['exec', 'include', 'unisa', 'weights/gold']}"));
+    oset(suites, "gate-layers", pylit("{\n"
+            "'command': ['python3', './tests/gatelayers.py', '--check'],\n"
+            "'files': ['tests/gatelayers.py', 'tests/stagemap.c', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/lib.sh',\n"
+            "'tests/seedconstructcheck.py', 'exec/facts/parse-constants.tsv', 'exec/facts/parse-tokens.tsv',\n"
+            "'exec/facts/parse-words.tsv', 'exec/facts/parse2-extra.tsv', 'exec/facts/valueranks.tsv'],\n"
+            "'trees': ['exec/build']}"));
+    changed("derived-step1", "declared facts-export and gate-layers (measured reads)");
+    /* 0.0.43 seed C references (seed C ports follow unisa/tape.py) */
+    oset(suites, "unisa-tape", pylit("{\n"
+            "'command': ['sh', './tests/unisatapecheck.sh'],\n"
+            "'files': ['tests/unisatapecheck.sh', 'tests/bound', 'tests/bound.c', 'seed/unisa_tape.c'], 'trees': ['unisa']}"));
+    oset(suites, "unisa-tapebin", pylit("{\n"
+            "'command': ['sh', './tests/unisatapebincheck.sh'],\n"
+            "'files': ['tests/unisatapebincheck.sh', 'tests/bound', 'tests/bound.c', 'seed/unisa_tapebin.c'], 'trees': ['unisa']}"));
+    oset(suites, "unisa-tapebin-shape", pylit("{\n"
+            "'command': ['sh', './tests/unisatapebinshapecheck.sh'],\n"
+            "'files': ['tests/unisatapebinshapecheck.sh', 'tests/bound', 'tests/bound.c', 'seed/unisa_tapebin_shape.c',\n"
+            "'docs/tapebin-v1.shape.tsv', 'docs/tapebin-v1.records.tsv', 'exec/c/tapebin.h', 'src/tapebin_shape.inc'],\n"
+            "'trees': ['unisa']}"));
+    changed("seed-c-ports", "declared unisa-tape, unisa-tapebin, unisa-tapebin-shape");
+    /* 0.0.43 (reviewed_trees as a derived file): the snapshot check */
+    oset(suites, "reviewed-trees", pylit("{\n"
+            "'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/reviewedtreescheck.cx'],\n"
+            "'files': ['tests/reviewedtreescheck.cx', 'tests/gatedeps.json', 'tests/bound', 'tests/bound.c', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'src', 'unisa']}"));
+    changed("reviewed-trees", "declared the snapshot check");
+    /* the registered inventory matcher/global-reachability self-test */
+    oset(suites, "script-inventory-self", pylit("{\n"
+            "'command': ['python3', './tests/inventorycheck.py'],\n"
+            "'files': ['tests/inventorycheck.py', 'tests/inventory.py'], 'tools': ['python3']}"));
+    oset(suites, "inventory-derived", pylit("{\n"
+            "'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/inventoryderivedcheck.cx'],\n"
+            "'files': ['tests/inventoryderivedcheck.cx', 'tests/inventory.cx', 'tests/INVENTORY.md', 'tests/bound', 'tests/bound.c', 'unisacc.com', 'unisacc.com.build.json'],\n"
+            "'trees': ['tests', 'exec', '.github/workflows'], 'tools': ['sh']}"));
+    /* 0.0.43: checkrun (one of the default base three) reads only its own script and the wrapper it tests */
+    oset(suites, "checkrun", pylit("{\n"
+            "'command': ['./tests/checkruncheck.sh'],\n"
+            "'files': ['tests/checkruncheck.sh', 'release/tools/checkrun.sh'], 'tools': ['sh']}"));
+    /* 2c4 callback stage declarations, using existing cache and observation owners (dict.update: in literal order) */
+    o = pylit("{'exec-librarycallback-reader-model': {'command': ['sh', 'tests/librarycallbacke3check.sh', 'check'], 'files': ['.gitignore', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'release/tools/model-reseal.py', 'src/host_dl.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallback-refusalcheck.cx', 'tests/librarycallbackcapture.c', 'tests/librarycallbacke3capture.c', 'tests/librarycallbacke3check.cx', 'tests/librarycallbacke3check.sh', 'tests/librarycallbackproduce.py', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/build', 'exec/c', 'exec/facts', 'exec/parse2', 'exec/pp', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cp', 'cut', 'env', 'find', 'mkdir', 'mktemp', 'python3', 'rg', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}, 'exec-librarycallbacklower-model-1': {'command': ['sh', 'tests/librarycallbacklowercheck.sh', '1'], 'files': ['.gitignore', 'exec/lower/librarycallback-oracle.py', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'release/tools/model-reseal.py', 'src/host_dl.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallback-refusalcheck.cx', 'tests/librarycallbackcapture.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbacklowercheck.sh', 'tests/librarycallbackproduce.py', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/build', 'exec/c', 'exec/facts', 'exec/lower', 'exec/parse2', 'exec/pp', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'tests/seals/librarycallbacklower', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cp', 'cut', 'env', 'find', 'mkdir', 'mktemp', 'python3', 'rg', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}, 'exec-librarycallbacklower-model-2': {'command': ['sh', 'tests/librarycallbacklowercheck.sh', '2'], 'files': ['.gitignore', 'exec/lower/librarycallback-oracle.py', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'release/tools/model-reseal.py', 'src/host_dl.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallback-refusalcheck.cx', 'tests/librarycallbackcapture.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbacklowercheck.sh', 'tests/librarycallbackproduce.py', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/build', 'exec/c', 'exec/facts', 'exec/lower', 'exec/parse2', 'exec/pp', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'tests/seals/librarycallbacklower', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cp', 'cut', 'env', 'find', 'mkdir', 'mktemp', 'python3', 'rg', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}, 'exec-librarycallbacklower-model-3': {'command': ['sh', 'tests/librarycallbacklowercheck.sh', '3'], 'files': ['.gitignore', 'exec/lower/librarycallback-oracle.py', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'release/tools/model-reseal.py', 'src/host_dl.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallback-refusalcheck.cx', 'tests/librarycallbackcapture.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbacklowercheck.sh', 'tests/librarycallbackproduce.py', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/build', 'exec/c', 'exec/facts', 'exec/lower', 'exec/parse2', 'exec/pp', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'tests/seals/librarycallbacklower', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cp', 'cut', 'env', 'find', 'mkdir', 'mktemp', 'python3', 'rg', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}, 'exec-librarycallbacklower-model-4': {'command': ['sh', 'tests/librarycallbacklowercheck.sh', '4'], 'files': ['.gitignore', 'exec/lower/librarycallback-oracle.py', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'release/tools/model-reseal.py', 'src/host_dl.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallback-refusalcheck.cx', 'tests/librarycallbackcapture.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbacklowercheck.sh', 'tests/librarycallbackproduce.py', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/build', 'exec/c', 'exec/facts', 'exec/lower', 'exec/parse2', 'exec/pp', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'tests/seals/librarycallbacklower', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cp', 'cut', 'env', 'find', 'mkdir', 'mktemp', 'python3', 'rg', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}, 'lib-callback-candidate-auth': {'command': ['sh', 'tests/librarycallbackauthcheck.sh', 'check'], 'files': ['.gitignore', 'exec/c/librarycall_arm64.S', 'exec/c/librarycall_x86_64.S', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'release/tools/model-reseal.py', 'src/host_dl.h', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/fixtures/librarycallback/auth-A.c', 'tests/fixtures/librarycallback/auth-B.c', 'tests/librarycallback-reads.tsv', 'tests/librarycallbackauthcheck.cx', 'tests/librarycallbackauthcheck.sh', 'tests/librarycallbackauthprobe.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbackproduce.py', 'tests/librarycallbacksignaturecapture.c', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/c', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cut', 'find', 'mktemp', 'python3', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}}");
+    for (i = 0; i < o->n; i++) osetn(suites, o->k[i], o->kn[i], o->v[i]);
+    oset(suites, "exec-librarycallback-wiring-prepare", pylit("{'command': ['sh', 'tests/librarycallbackwiringcheck.sh', 'check'], 'files': ['.gitignore', 'exec/c/compilerpack.py', 'exec/c/librarycall_arm64.S', 'exec/c/librarycall_x86_64.S', 'exec/lower/librarytypedcheck.sh', 'exec/modelsignaturegraphguard-byte.tsv', 'exec/modelsignaturegraphguard-manifest.tsv', 'exec/modelsignaturegraphguard-result.tsv', 'exec/modelsignaturegraphguard-template.tsv', 'exec/pipeline/elf.sh', 'exec/pipeline/models.py', 'release/tools/build_candidate.sh', 'release/tools/model-reseal.py', 'src/host_dl.h', 'src/tapebin_encode.inc', 'src/tapebin_shape.inc', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/checklib.py', 'tests/fixtures/librarycallback/auth-A.c', 'tests/fixtures/librarycallback/auth-B.c', 'tests/gatelayers.py', 'tests/librarycallback-reads.tsv', 'tests/librarycallbackauthcheck.cx', 'tests/librarycallbackauthcheck.sh', 'tests/librarycallbackauthprobe.c', 'tests/librarycallbacklowercheck.cx', 'tests/librarycallbackproduce.py', 'tests/librarycallbacksignaturecapture.c', 'tests/librarycallbackwiringcheck.c', 'tests/librarycallbackwiringcheck.sh', 'tests/librarytypedlower-cases.tsv', 'tests/librarytypedlowercheck.cx', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'exec/c', 'include', 'kernel', 'release', 'seed', 'src', 'tests', 'tests/seals/librarycallbacke3', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'cmp', 'cut', 'find', 'mktemp', 'python3', 'rm', 'sh', 'sha256sum', 'sort', 'xargs']}"));
+    oset(suites, "boundreason", pylit("{'command': ['sh', '-c', './tests/bound 20 cc -std=c99 -O2 -Wall -Wextra -Itests tests/boundreason.c -o \"${TMPDIR:-/tmp}/boundreason-$$\" && ./tests/bound 20 \"${TMPDIR:-/tmp}/boundreason-$$\"'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'sh']}"));
+    oset(suites, "boundstall-r7g", pylit("{'command': ['python3', './tests/boundstall_r7g.py', '.', '--gate'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'python3', 'sh']}"));
+    oset(suites, "boundnested-1", pylit("{'command': ['python3', './tests/boundnested.py', '.', '--gate', '--only', '1,2'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'python3', 'sh']}"));
+    oset(suites, "boundnested-2", pylit("{'command': ['python3', './tests/boundnested.py', '.', '--gate', '--only', '3,4'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'python3', 'sh']}"));
+    oset(suites, "boundnested-3", pylit("{'command': ['python3', './tests/boundnested.py', '.', '--gate', '--only', '5,6'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'python3', 'sh']}"));
+    oset(suites, "boundnested-4", pylit("{'command': ['python3', './tests/boundnested.py', '.', '--gate', '--only', '7'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'python3', 'sh']}"));
+    oset(suites, "boundnested-5", pylit("{'command': ['python3', './tests/boundnested.py', '.', '--gate', '--only', '8'], 'files': ['tests/bound', 'tests/bound.py', 'tests/bound.c', 'tests/boundreason.c', 'tests/boundstall_r7g.py', 'tests/boundstall_ledger.sh', 'tests/boundstall_ps_flood_r7g.sh', 'tests/boundstall_ps_stall_r7g.sh', 'tests/boundnested.py', 'tests/admission_r7p.py', 'tests/gate.sh'], 'tools': ['cc', 'python3', 'sh']}"));
+    oset(suites, "gate-select", pylit("{'command': ['python3', 'tests/gateselectcheck.py'], 'files': ['tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gateselectcheck.py', 'tests/gatedecl.py', 'tests/gatelayers.py', 'tests/stagemap.c', 'tests/gate.sh', 'tests/gateorder.json', 'tests/gatedeps.json', 'tests/bound', 'tests/bound.py', 'tests/bound.c', 'release/derived-map.tsv', 'release/tools/derivedcheck.py', 'kernel/unisa_model.inc', 'release/tools/commitgate.sh', 'tests/stagerun.sh', 'tests/gatequeue.py', 'tests/env_pin.py'], 'tools': ['cc', 'git', 'python3', 'sh']}"));
+    oset(suites, "commitgate", pylit("{'command': ['./tests/commitgatecheck.sh'], 'files': ['kernel/unisa_model.inc', 'release/derived-map.tsv', 'release/tools/checkrun.sh', 'release/tools/commitgate.sh', 'release/tools/derivedcheck.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/commitgatecheck.sh', 'tests/shipclassify.cx', 'tests/cxbin', 'tests/gate.sh', 'tests/gatedecl.py', 'tests/gatedeps.json', 'tests/gatelayers.py', 'tests/gateorder.json', 'tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gateselectcheck.py', 'tests/stagemap.c', 'tests/stagerun.sh', 'tests/gatequeue.py', 'tests/env_pin.py', 'unisacc.com'], 'tools': ['bash', 'cc', 'git', 'python3', 'sh', 'sha256sum']}"));
+
+    /* Preparation uses gate.sh's existing argv authority and the same parser as selection; declarations inherit the
+       conservative consumer input closure. */
+    {   static const char *owners[] = { "exec/parse2/librarytypedreadercheck.sh", "exec/parse2/librarycallsitecheck.sh",
+            "exec/lower/librarytypedcheck.sh", "exec/lower/librarycallsitecheck.sh", "exec/lower/librarydatacheck.sh",
+            "tests/librarycallbacke3check.sh", "tests/librarycallbacklowercheck.sh", "tests/librarycallbackwiringcheck.sh",
+            "tests/librarycallbackauthcheck.sh", 0 };
+        char *a[] = { "sh", "tests/gate.sh", "--plan", 0 }; size_t n; char *raw = run(a, 55, &n, 1);
+        J *jobs = parse_gate_plan(raw, n), *groups = need(jload("tests/prepgroups.json"), "groups"), *packed = jnew(JOBJ), *gl, *ls[2];
+        J *pg = jstr("tests/prepgroups.json"), *pgl = jnew(JARR);
+        apush(pgl, pg);
+        if (groups->t != JARR) die("prepgroups groups is not a list", 0);
+        for (i = 0; i < groups->n; i++) { J *nm = need(groups->v[i], "name"); if (nm->t != JSTR) die("prepgroups name is not a str", 0); osetn(packed, nm->s, nm->sn, groups->v[i]); }
+        for (i = 0; i < suites->n; ) {
+            int active = 0, j;
+            if (startswith(suites->k[i], suites->kn[i], "exec-prepare-"))
+                for (j = 0; j < jobs->n && !active; j++) { J *jn = need(jobs->v[j], "name"); active = jn->sn == suites->kn[i] && !memcmp(jn->s, suites->k[i], jn->sn); }
+            if (startswith(suites->k[i], suites->kn[i], "exec-prepare-") && !active) odel(suites, xstrndup(suites->k[i], suites->kn[i]), suites->kn[i]);
+            else i++;
+        }
+        gl = need(suites, "gate-layers"); ls[0] = oget(gl, "files"); ls[1] = pgl;
+        oset(gl, "files", sorted_union(ls, 2));
+        for (i = 0; i < jobs->n; i++) {
+            J *job = jobs->v[i], *name = need(job, "name"), *argvj = need(job, "command"); int matches = 0, j, r;
+            char *nm = xstrndup(name->s, name->sn);
+            for (r = 0; owners[r] && !matches; r++)
+                for (j = 0; j < argvj->n; j++) {
+                    J *x = argvj->v[j]; const char *s = x->s; size_t sn = x->sn;
+                    if (sn >= 2 && s[0] == '.' && s[1] == '/') { s += 2; sn -= 2; }
+                    if (sn == strlen(owners[r]) && !memcmp(s, owners[r], sn)) { matches = 1; break; }
+                }
+            if (startswith(name->s, name->sn, "exec-prepare-")) {
+                J *row = ogetn(packed, name->s, name->sn), *members, *expected, *entry, *guards; Buf sc = {0}; int ex = 0;
+                static const char *fields[] = { "files", "trees", "tools" };
+                char hex[65]; size_t pn; char *pb;
+                if (!row || !jeq(need(row, "command"), argvj)) die("preparation-declaration-owner-missing", nm);
+                members = need(row, "members");
+                if (members->t != JARR) die("members is not a list", nm);
+                for (j = 0; j < members->n; j++) {
+                    J *mv = need(members->v[j], "argv"); int z;
+                    if (mv->t != JARR) die("member argv is not a list", nm);
+                    if (j) bputc(&sc, '\n');
+                    for (z = 0; z < mv->n; z++) { if (mv->v[z]->t != JSTR) die("member argv is not str", nm); if (z) bputc(&sc, ' '); shquote(&sc, mv->v[z]->s, mv->v[z]->sn); }
+                }
+                expected = jnew(JARR); apush(expected, jstr("sh")); apush(expected, jstr("-ec")); apush(expected, jstrn(sc.b ? sc.b : "", sc.n));
+                if (!jeq(expected, argvj)) die("preparation-command-mismatch", nm);
+                {   J **entries = xmalloc((size_t)(members->n + 1) * sizeof *entries), **fl = xmalloc((size_t)(members->n + 2) * sizeof *fl);
+                    for (j = 0; j < members->n; j++) {
+                        J *ow = need(members->v[j], "declaration_owner");
+                        if (ow->t != JSTR) die("declaration_owner is not a str", nm);
+                        entries[j] = ogetn(suites, ow->s, ow->sn);
+                        if (!entries[j]) die("KeyError", ow->s);
+                        if (truthy(oget(entries[j], "executable_inputs"))) ex = 1;
+                    }
+                    entry = jnew(JOBJ); oset(entry, "command", argvj); oset(entry, "executable_inputs", jnew(ex ? JTRUE : JFALSE));
+                    for (r = 0; r < 3; r++) {
+                        int z; for (z = 0; z < members->n; z++) fl[z] = oget(entries[z], fields[r]);
+                        oset(entry, fields[r], sorted_union(fl, members->n));
+                    }
+                    ls[0] = oget(entry, "files"); ls[1] = pgl; oset(entry, "files", sorted_union(ls, 2));
+                    guards = jnew(JOBJ);
+                    for (j = 0; j < members->n; j++) {
+                        J *g = oget(entries[j], "guards"); int z;
+                        if (truthy(oget(entries[j], "family"))) die("preparation-owner-family-needs-flattening", nm);
+                        if (!g) continue;
+                        if (g->t != JOBJ) die("guards is not a dict", nm);
+                        for (z = 0; z < g->n; z++) {
+                            J *prev = ogetn(guards, g->k[z], g->kn[z]);
+                            if (prev && !jeq(prev, g->v[z])) { Buf m = {0}; bputs(&m, nm); bputc(&m, ' '); bput(&m, g->k[z], g->kn[z]); die("preparation-owner-guard-conflict", m.b); }
+                            osetn(guards, g->k[z], g->kn[z], g->v[z]);
+                        }
+                    }
+                    if (!(pb = cx_read("tests/prepgroups.json", &pn))) die("cannot read", "tests/prepgroups.json");
+                    cx_sha256_hex(pb, pn, hex); free(pb);
+                    oset(guards, "tests/prepgroups.json", jstr(hex));
+                    oset(entry, "guards", guards);
+                    osetn(suites, name->s, name->sn, entry);
+                    free(entries); free(fl);
+                }
+                free(sc.b);
+            } else if (matches && ogetn(suites, name->s, name->sn)) {
+                int req = 0;
+                for (j = 0; j < argvj->n; j++) if (jstreq(argvj->v[j], "--require-cached")) req = 1;
+                if (req) oset(ogetn(suites, name->s, name->sn), "command", argvj);
+            }
+            free(nm);
+        }
+    }
+    /* 0.0.44 (cc ruling): fixed declarations the derivation does not produce.  The two hard-coded declarations above
+       (gate-layers, gate-select) omit files their gates read; they are added here from one table, never by a branch.
+       Appended in table order; existing order and all other suites are untouched. */
+    {   static const char *extra[][3] = { { "gate-layers", "tests/checklib.py", 0 }, { "gate-select", ".gitignore", "tests/checklib.py" } };
+        for (k = 0; k < 2; k++) {
+            J *files = need(need(suites, extra[k][0]), "files");
+            if (files->t != JARR) die("files is not a list", extra[k][0]);
+            for (i = 1; i < 3 && extra[k][i]; i++) { J *x = jstr(extra[k][i]); if (!lhas(files, x)) apush(files, x); }
+        }
+    }
+
+    jdump(&tb, d, 0); bputc(&tb, '\n');
+    if (cx_write("tests/gatedeps.json", tb.b, tb.n)) die("cannot write", "tests/gatedeps.json");
+    {   char **sa = xmalloc((size_t)(treeset->n + 5) * sizeof *sa); size_t n; char *s, *e;
+        sa[0] = "git"; sa[1] = "status"; sa[2] = "--porcelain"; sa[3] = "--";
+        for (t = 0; t < treeset->n; t++) sa[4 + t] = treeset->v[t]->s;
+        sa[4 + treeset->n] = 0;
+        s = run(sa, 60, &n, 0);
+        e = s + n;
+        while (s < e && (*s == ' ' || (*s >= '\t' && *s <= '\r'))) s++;          /* str.strip() */
+        while (e > s && (e[-1] == ' ' || (e[-1] >= '\t' && e[-1] <= '\r'))) e--;
+        *e = 0;
+        printf("gatedeps: reviewed stamps from %s; changed %s\n", strcmp(REF, "HEAD") ? "the index" : "HEAD",
+               NCHANGED ? (bputc(&CHANGED, ']'), CHANGED.b) : "none");
+        if (*s && !strcmp(REF, "HEAD")) printf("gatedeps: note -- uncommitted changes under reviewed trees are NOT in the stamp:\n%s\n", s);
+    }
+    (void)root;
+    return 0;
+}
