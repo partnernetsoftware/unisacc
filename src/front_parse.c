@@ -1188,6 +1188,10 @@ int cplitexpr(int w, int sst, int isarr, int n) {
     if (isarr) {
         if (n == 0) {
             n = initcountat(tp);
+            /* `(char[]){"python"}` is sized by the string, as `char a[] = {"python"}` (C99 6.7.8p14, p22): the
+               scalar count said 1, so the object had one byte for seven (the model has taken this path since 87b25961) */
+            if (el == 1 && pd == 0 && slotst < 0 && kind(tp + 2) == tidx("}", 1) && (src[tpos[tp + 1]] & 255) == 34)
+                n = decode(tp + 1, lbuf, sizeof(lbuf)) + 1;
             if (slotst >= 0) n = (n + structslots(slotst) - 1) / structslots(slotst);
         }
         size = n * el;
@@ -1632,6 +1636,9 @@ int postfix(void) {
             /* ...but `TS **hash` steps by pointers, not by TS (lua lstring.c tb->hash[i]) */
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) { if (curpd >= 2) curelem = 8; else curelem = stsize[curstruct]; } }
             curuns = mbuns[mi]; curbool = mbbool[mi];
+            /* C99 6.3.1.1p2: a bit-field narrower than int promotes to int, so `s.a - 4 < 0` is signed for an
+               unsigned a:8 (the model and gcc say 1; this said 0, and declsnapshot's bits.a == 3 masked to 32 bits) */
+            if (curelem >= BFTAG) { if (bfwidth(curelem) < 32) curuns = 0; }
             curflt = mbflt[mi];
             if (mbfn[mi]) { curfn = 1; curfnst = 0 - 1; }
             if (mbarr[mi]) {

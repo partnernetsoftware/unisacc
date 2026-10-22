@@ -1,0 +1,114 @@
+#!/usr/bin/env -S unisacc.com -run
+/* stagechain.cx -- the E2 -> E1 -> E3 network chain on C files, with no Python (exec/c/chain.sh's loop on the
+   C99 seed constructors).  usage: sh ./unisacc.com -run tests/stagechain.cx -- WORK REF FILE...
+   WORK  a private directory: the seed tools (seed/gen.c, tbl.c, net.c and exec/c/run.c built by ./unisacc.com,
+         kept while their source bytes are unchanged) and this run's networks (constructed afresh every run)
+   REF   the reference compiler: its `-S -o - FILE` tape is what E3 must write
+   Per file the verdict is chain.sh's: equal (all three stages accept and the tape is the reference's), not-covered
+   (a stage refuses with `reject: not covered`), rejected (another named reject), bad (anything else, including a
+   tape that differs).  Exit 0 only when nothing is bad and at least one file is equal.  Each step is bounded. */
+#include <cx.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+static char W[4096], REF[4096];
+
+static int run(char *const argv[], int secs, const char *outpath, const char *errpath) {
+    char *out = 0; size_t n = 0; int rc, saved = -1, fd = -1;
+    if (errpath) {                        /* the child's stderr goes to errpath: it inherits fd 2, no shell */
+        fflush(stderr); saved = dup(2); fd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (saved < 0 || fd < 0) { fprintf(stderr, "stagechain: cannot redirect stderr\n"); exit(2); }
+        dup2(fd, 2); close(fd);
+    }
+    rc = cx_runv_timeout(argv, secs, &out, &n);
+    if (errpath) { fflush(stderr); dup2(saved, 2); close(saved); }
+    if (outpath && cx_write(outpath, out ? out : "", out ? n : 0)) { fprintf(stderr, "stagechain: cannot write %s\n", outpath); exit(2); }
+    free(out);
+    return rc;
+}
+static void need(int rc, const char *what) { if (rc) { printf("stagechain: %s failed (rc %d)\n", what, rc); exit(1); } }
+static void path(char *buf, const char *name) { snprintf(buf, 4200, "%s/%s", W, name); }
+
+/* one seed tool, rebuilt only when its source bytes change (WORK/NAME.sha holds the source digest) */
+static void tool(const char *name, const char *src, const char *extra) {
+    char bin[4200], stamp[4200], hex[65]; size_t n; char *b = cx_read(src, &n), *old;
+    if (!b) { printf("stagechain: cannot read %s\n", src); exit(1); }
+    cx_sha256_hex(b, n, hex); free(b);
+    path(bin, name); snprintf(stamp, sizeof stamp, "%s.sha", bin);
+    old = cx_read(stamp, &n);
+    if (old && n >= 64 && !strncmp(old, hex, 64) && access(bin, X_OK) == 0) { free(old); return; }
+    free(old);
+    {   char *argv[10]; int k = 0;
+        argv[k++] = "sh"; argv[k++] = "./unisacc.com"; argv[k++] = "-O2"; argv[k++] = "-fno-trim-libc";
+        if (extra) argv[k++] = (char *)extra;
+        argv[k++] = (char *)src; argv[k++] = "-o"; argv[k++] = bin; argv[k] = 0;
+        need(run(argv, 55, 0, 0), src);
+    }
+    if (cx_write(stamp, hex, 64)) exit(2);
+}
+
+static void construct(const char *stage, const char *gen, const char *flag) {
+    char json[4200], tbl[4200], net[4200], g[4200], t[4200], nn[4200], r[4200], what[64];
+    snprintf(what, sizeof what, "%s.json", stage); path(json, what);
+    snprintf(what, sizeof what, "%s.tbl", stage); path(tbl, what);
+    snprintf(what, sizeof what, "%s.net", stage); path(net, what);
+    path(g, "seed-gen"); path(t, "seed-tbl"); path(nn, "seed-net"); path(r, "run");
+    {   char *a[] = {g, (char *)gen, json, (char *)flag, 0}; need(run(a, 58, 0, 0), "seed-gen"); }
+    {   char *a[] = {t, json, tbl, 0}; need(run(a, 58, 0, 0), "seed-tbl"); }
+    {   char *a[] = {nn, tbl, net, 0}; need(run(a, 58, 0, 0), "seed-net"); }
+    {   char *a[] = {r, "--check-net", tbl, net, 0}; need(run(a, 58, 0, 0), "check-net"); }
+}
+
+static int same(const char *a, const char *b) {
+    size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int s = x && y && na == nb && !memcmp(x, y, na);
+    free(x); free(y); return s;
+}
+
+int main(int argc, char **argv) {
+    int i, eq = 0, nc = 0, rj = 0, bad = 0;
+    char runb[4200], net[3][4200], out[3][4200], err[3][4200], ref[4200], attr[4200], envattr[4300];
+    static const char *stages[3] = {"e2", "e1", "e3"};
+    if (argc < 4) { fprintf(stderr, "usage: stagechain.cx WORK REF FILE...\n"); return 2; }
+    snprintf(W, sizeof W, "%s", argv[1]); snprintf(REF, sizeof REF, "%s", argv[2]);
+    mkdir(W, 0755);
+    tool("seed-gen", "seed/gen.c", "-Iseed"); tool("seed-tbl", "seed/tbl.c", 0); tool("seed-net", "seed/net.c", 0);
+    tool("run", "exec/c/run.c", 0);
+    construct("e2", "pp", 0); construct("e1", "lex", "--typed"); construct("e3", "parse2", 0);
+    path(runb, "run"); path(ref, "ref"); path(attr, "attributes");
+    snprintf(envattr, sizeof envattr, "UNISA_ATTRIBUTES=%s", attr);
+    for (i = 0; i < 3; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "%s.net", stages[i]); path(net[i], name);
+        snprintf(name, sizeof name, "%s.out", stages[i]); path(out[i], name);
+        snprintf(name, sizeof name, "%s.err", stages[i]); path(err[i], name);
+    }
+    for (i = 3; i < argc; i++) {
+        const char *f = argv[i], *in = f, *stage = 0; char why[512] = ""; int s, rc = 0, rr;
+        {   char *a[] = {REF, (char *)f, "-S", "-o", "-", 0}; rr = run(a, 10, ref, "/dev/null"); }
+        unlink(attr);                     /* E1's constructor/destructor records reach E3 through this file */
+        for (s = 0; s < 3; s++) {
+            char *a[9]; int k = 0;
+            a[k++] = "env"; a[k++] = envattr; a[k++] = runb; a[k++] = net[s]; a[k++] = (char *)in; a[k++] = (char *)f;
+            if (s == 0) a[k++] = "include";
+            a[k] = 0;
+            rc = run(a, 10, out[s], err[s]);
+            if (rc) {
+                size_t n; char *e = cx_read(err[s], &n), *nl;
+                stage = stages[s];
+                if (e) { nl = memchr(e, '\n', n); snprintf(why, sizeof why, "%.*s", (int)(nl ? nl - e : (long)n > 500 ? 500 : (int)n), e); free(e); }
+                break;
+            }
+            in = out[s];
+        }
+        if (rr >= 128 || rr < 0) { bad++; printf("  BAD %s  reference exited %d\n", f, rr); }
+        else if (!stage) {
+            if (rr == 0 && same(out[2], ref)) eq++;
+            else { bad++; printf("  BAD %s  tape differs (reference rc=%d)\n", f, rr); }
+        } else if (rc != 1) { bad++; printf("  BAD %s  at %s: exited %d: %s\n", f, stage, rc, why); }
+        else if (!strncmp(why, "reject: not covered", 19)) nc++;
+        else rj++;
+    }
+    printf("stagechain  files %d   equal %d   not-covered %d   rejected %d   bad %d\n", argc - 3, eq, nc, rj, bad);
+    return bad == 0 && eq > 0 ? 0 : 1;
+}
