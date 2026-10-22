@@ -6,11 +6,11 @@ Status legend: **[ran]** observed 2026-10-02 with `unisacc.com` (product, 2 Oct 
 ## 1. How a refusal is reported today [ran / read]
 
 - Executor (`exec/c/core.c:360`): a `REJECT` op sets `result->reason` (a string-table entry) and status 1.
-  `exec/c/run.c:470` prints `reject: <reason>` with **no position, no key, no stage**.
+  `exec/c/run.c:470` prints `reject: <reason>` with **no position, no key, no stream-stage**.
   `exec/pipeline/simrun.py` prints `REJECT <k>` then the diagnostic; `exec/pipeline/run.py:151-160`
   strips `REJECT `, and classifies by the prefix `not covered`. `exec/c/chain.sh:76` matches `"reject: not covered"*`.
 - Front-end refusals (shared with the reference, `src/front_pp.c:818`, `err_at`/`err_tok`) give
-  `file:line:col: error: not covered: <construct>` plus a caret line. These carry position but no stage/key.
+  `file:line:col: error: not covered: <construct>` plus a caret line. These carry position but no stream-stage/key.
 - Three inconsistent shapes thus exist: `reject: ...` (table δ, positionless), `file:l:c: error: not covered: ...`
   (front end), and plain errors (`unknown identifier`) that are really coverage gaps.
 - `tests/combo.py:73-86`: the product passes iff rc 0 and `-S` tape equals the reference; else if
@@ -29,9 +29,9 @@ UNCOVERED\t<stage>\t<key>\t<pos>\t<file>:<line>:<col>\t<construct>\t<reason>
 
 | field | content |
 |---|---|
-| `stage` | stage name exactly as in `exec/pipeline/stages.tsv` (front-end refusals use `pp`, `parse`, `sema`) |
-| `key` | the table key that missed, rendered as the stage's tape symbols, `,`-joined; `-` if the refusal is structural (no table lookup) |
-| `pos` | first-miss position: 0-based byte offset into that stage's **input tape** (makes the record comparable across product and reference independent of source mapping) |
+| `stage` | stream-stage name exactly as in `exec/pipeline/stages.tsv` (front-end refusals use `pp`, `parse`, `sema`) |
+| `key` | the table key that missed, rendered as the stream-stage's tape symbols, `,`-joined; `-` if the refusal is structural (no table lookup) |
+| `pos` | first-miss position: 0-based byte offset into that stream-stage's **input tape** (makes the record comparable across product and reference independent of source mapping) |
 | `file:line:col` | source position mapped back via the line table (1-based, col as today's carets) |
 | `construct` | innermost enclosing construct from a closed vocabulary (`decl.vla`, `expr.call.ret-struct`, `pp.line`, `type.struct.incomplete`, `type.complex`, ...); vocabulary lives in a data file shared by both routes |
 | `reason` | the existing `not covered: ...` text without the prefix |
@@ -77,7 +77,7 @@ Tried and dropped (both accept now) [ran]: compound literal address, designated 
 
 ## 5. Contract after cdx review (2026-10-02) — supersedes §2 where they differ
 
-1. **stage**: one spelling set only. Product stages use the `exec/pipeline/stages.tsv` names (`e1`, `e2`, `e3`, `e4`, `lower`, `elf`, …). A reference-only refusal with no matching product stage uses `ref.pp`, `ref.parse`, or `ref.sema`. No other spellings.
-2. **key**: the canonical text of the δ decision position, `(bank/state id, observed integer)`. A structural refusal uses `-`. **pos** is the 0-based byte offset into the current stage's input, or `-` when unknown. **file:line:col** is `-` when unknown. No `<p>` placeholders. The frame always has 7 columns.
+1. **stage**: one spelling set only. Product stream-stages use the `exec/pipeline/stages.tsv` names (`e1`, `e2`, `e3`, `e4`, `lower`, `elf`, …). A reference-only refusal with no matching product stream-stage uses `ref.pp`, `ref.parse`, or `ref.sema`. No other spellings.
+2. **key**: the canonical text of the δ decision position, `(bank/state id, observed integer)`. A structural refusal uses `-`. **pos** is the 0-based byte offset into the current stream-stage's input, or `-` when unknown. **file:line:col** is `-` when unknown. No `<p>` placeholders. The frame always has 7 columns.
 3. **Reference evidence**: the reference does not run the same δ tables, so matching key traces apply only to decisions that reuse `gold.inf`. Every other gap is judged from a same-source construct probe plus the product's located refusal, and recorded as `evidence=reference-accept`. `-trace-keys` must not grow into a second hand-written δ.
 4. **Rollout**: first get frames for `c_struct_ret` and `e_complex` working end to end. Turn on combo.py's "every refusal must carry a frame" rule only after both sides cover it, so older suites do not go falsely red.

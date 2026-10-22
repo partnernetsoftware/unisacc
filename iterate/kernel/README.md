@@ -6,7 +6,7 @@ and the `STAGE_*`/`act`/`z` declarations, `DENSE`, `DENSE_LEN`,
 `STAGE_DOFF/NH` and `model_dims()`.
 The second slice adds the 15 TSV vocabularies (`TOKV`, `PRODV`, `ACTV`, `DIRV`,
 `PPACTV`, `NTV`, `TYSV`, `TOPSV`, `TYOUTV`, `SCTXV`, `SKINDV`, `SACTV`, `IRFAMV`,
-`IRFLAV`, `IRRECV`) and `BF_*`/`BH_*`/`HD_*` for 11 stages (see "Second slice"
+`IRFLAV`, `IRRECV`) and `BF_*`/`BH_*`/`HD_*` for 11 nets (see "Second slice"
 below). The provenance header, `TYPEV` (lex.py TYPEKW) and `ENC_*` are still
 written by Python and are out of scope.
 
@@ -19,9 +19,9 @@ genmodel reads only the inputs named on the command line. It opens two paths
 counts those call sites. It never reads `built.json`, `kernel/`, `gold.py` or
 anything relative to the working directory.
 
-- **order.tsv**: the declared stage order. It holds `stage<TAB>name` lines in
-  stage-ID order (`S_<NAME>` = index) and `heads_max<TAB>16`, the stride of
-  `STAGE_NCLS`. There must be exactly 18 stage lines and no repeats.
+- **order.tsv**: the declared net order. It holds `stage<TAB>name` lines in
+  net-ID order (`S_<NAME>` = index) and `heads_max<TAB>16`, the stride of
+  `STAGE_NCLS`. There must be exactly 18 `stage` lines and no repeats.
   `order_check.py` asserts that it equals `gold.ALL` and `ckernel.HEADS_MAX`.
   **Transition:** `gold.ALL` is still what the Python side uses and what this
   file is compared against. order.tsv is not yet the only ordering authority.
@@ -36,7 +36,7 @@ anything relative to the working directory.
   values, classes, every key exactly once). Each TSV is identified by its
   `# stage NAME:` line, not by its file name or argument position.
 
-Stages are matched **by name**. Every order.tsv stage must be exactly one UNS2
+Nets are matched **by name**. Every order.tsv net must be exactly one UNS2
 section and exactly one TSV, and all three lists hold 18 names without repeats.
 If so, the three name sets are equal. Then UNS2 and the TSV must agree on the
 number of fields, the values per field, the number of heads and the classes per
@@ -45,11 +45,11 @@ head. Nothing is inferred by position.
 ## Outputs, as `ckernel.py` writes them
 
 - `MODEL`: sections in order.tsv order. For each unit and field there are `MW`
-  little-endian u64 masks (`MW = max(1, ceil(len/64))` over the stage's
+  little-endian u64 masks (`MW = max(1, ceil(len/64))` over the net's
   fields), and a full mask is written 0. Then come `u32 nEntries` and the
   7-byte entries `(unit u16, head u8, class u16, w u16)`, ordered by head,
   then unit, then row: the UNS2 payload order, which is `_blob`'s.
-- `DENSE`: one byte per stage, key and head. Keys run in field-major order (the
+- `DENSE`: one byte per net, key and head. Keys run in field-major order (the
   last field fastest, which is `S.keys()`), and heads are the minor index.
   Each byte is the index of **the TSV label** in that head's `#head` class list.
   It is taken straight from the TSV rows, never from `infer()`.
@@ -69,7 +69,7 @@ check has no receipt, the run fails.
 
 | check | what it proves |
 |---|---|
-| order | order.tsv = gold.ALL and HEADS_MAX (`order_check.py`); genmodel.c names no stage |
+| order | order.tsv = gold.ALL and HEADS_MAX (`order_check.py`); genmodel.c names no net |
 | build | genmodel built with cc -O2, unisacc -O2 (osx/arm64), cc -fsanitize=undefined,address; each runs on the declared inputs |
 | region | the Python **oracle**: `python3 -m unisa emit-kernel --out <scratch>` run at the same commit. Its region equals the shipped one, and genmodel's region is byte-identical to it in all three builds |
 | empty | genmodel run with its cwd set to a directory that holds only `order.tsv built.uns2 gold/` (no `kernel/`, no `built.json`). The output equals the repo-root run (cc, ua) |
@@ -78,7 +78,7 @@ check has no receipt, the run fails.
 | neg | 14 broken **copies**, each of which must exit 1 with its diagnostic and write no output, in cc, ua and san |
 | wfail | output is a directory or a path in a missing directory (the open fails), or a real short write under `ulimit -f 1` with SIGXFSZ ignored. Each must exit 7 in cc, ua and san |
 | label | one label changed in a temp copy of prec.tsv, with UNS2 unchanged. genmodel's output changes in exactly one DENSE line, and the semantic check REJECTS it (1 wrong) in cc and ua |
-| perm | order.tsv with its stages reversed. The region is byte-identical to `permoracle.py`, which is emit_core with `ckernel.ALL` permuted the same way in a scratch process, and it differs from the unpermuted region. `S_*` = the permuted positions, and sem passes |
+| perm | order.tsv with its nets reversed. The region is byte-identical to `permoracle.py`, which is emit_core with `ckernel.ALL` permuted the same way in a scratch process, and it differs from the unpermuted region. `S_*` = the permuted positions, and sem passes |
 | fault | `CHECKS=order SKIP=order`: the check's body is dropped and nothing inside it fails. The run must still exit non-zero, because `order` has no receipt |
 | vocab | `vocab_check.py`: vocab.tsv equals ckernel.py's tuples (second slice) |
 | region2 | `vregion.awk`: the oracle's vocab/BF/BH region equals the shipped one, and genmodel's is byte-identical to it in cc, ua and san |
@@ -96,7 +96,7 @@ else, including blank lines, is compared byte for byte.
 ## Results (2026-09-25)
 
 - region: 204,496 B and 2,514 lines. Oracle = shipped, and cc, ua and san are all identical.
-- sem, MIXED model.inc with the real kernel: 18 stages, 8,484 keys and 20,184
+- sem, MIXED model.inc with the real kernel: 18 nets, 8,484 keys and 20,184
   (key, head) decisions, with 0 wrong, 0 non-unique and 0 layout errors (cc and unisacc).
 - `--check-oracle` on the compiler built over the MIXED file: 20,184 questions and 0 differences.
 - negatives: 14 × 3 builds; wfail: 3 × 3 builds. The short write is reported
@@ -119,7 +119,7 @@ else, including blank lines, is compared byte for byte.
 ## heads_max contract (after review of 0197f45)
 
 The real kernel indexes `STAGE_NCLS[(s << 4) + head]` (kernel/unisa_core.c,
-inf): the per-stage stride is 16, fixed in the kernel's code.  heads_max in
+inf): the per-net stride is 16, fixed in the kernel's code.  heads_max in
 order.tsv is therefore that stride, not a free choice.  genmodel refuses any
 other value as soon as the number is read -- before the capacity check, before
 any layout, before the output is opened -- with exit 8 and "heads_max N, the
