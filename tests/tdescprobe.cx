@@ -4,12 +4,15 @@
    int (*x)[3]); for each valid one and each of eight contexts (x, *x, **x, ***x, x[0], x[0][0], (*x)[0], *x[0]) whose type
    is complete, the size follows from the descriptor alone, nothing per path.
    The derivation runs through flownet (plans/m4-flownet-cx-module.md W3: this file is flownet's second consumer, beside
-   the ujs adapter), and this file holds none of its knowledge (W3 fix 3): the descriptor algebra is flownet's tables
-   flownet/tdesc (contract.tsv and the gold of three finite nets -- adj: may this constructor hold that one; ap: apply *
-   or [ to the type at a position: the next position, the same, or not C; sz: a constructor's size from the size of
-   what it holds), flownet constructs the integer nets from them (fn_construct) and every validity, context step and
-   size below is asked of them.  This file only spells the declarators and contexts, asks, writes the answers as rows,
-   and judges.  The flows write one row per declarator (ok or bad) and one per context of a valid one (a size, inc for
+   the ujs adapter), and its code holds none of the algebra (W3 fix 3): the descriptor algebra is this consumer's data,
+   the tables tests/tdescprobe/ (contract.tsv and the gold of three finite nets -- adj: may this constructor hold that
+   one; ap: apply * or [ to the type at a position: the next position, the same, or not C; sz: a constructor's size from
+   the size of what it holds).  flownet holds no domain data (W6 B1): this file reads the tables and injects them --
+   the gold through flownet's label source (fn_label_source: the domain rows of each net, the label of each key, asked
+   once per key while flownet constructs the integer nets) and the contract as text (fn_build) -- and every row of
+   every gold table must be asked exactly once.  Every validity, context step and size below is then asked of the
+   integer nets.  The derivation only spells the declarators and contexts, asks, writes the answers as rows, and
+   judges.  The flows write one row per declarator (ok or bad) and one per context of a valid one (a size, inc for
    incomplete, none for not C), with the run's books pinned (fn_expect, BOOKS: adj 77, ap 283, sz 326 asks in their
    phases).  flownet's emit hook is this file's verdict path: it turns the rows into the declarator, probe and unsized
    tables -- they have no other source -- and judges them against the mode's reference, taken before the run and
@@ -39,7 +42,7 @@
 static const char *OPS[3] = { "P", "A3", "F" };     /* the constructors, as net values (F is F(int)) */
 static const char *CTX[] = { "x", "*x", "**x", "***x", "x[0]", "x[0][0]", "(*x)[0]", "*x[0]", 0 };
 enum { NCTX = 8 };
-static const char *TABLES = "flownet/tdesc";   /* the TDESC algebra: flownet's tables (contract + gold of adj, ap, sz) */
+static const char *TABLES = "tests/tdescprobe";   /* the TDESC algebra: this consumer's tables (contract + gold of adj, ap, sz) */
 static const char *BOOKS =           /* the run's exact books: every validity, context step and size asked of a net */
     "declare\tadj\t77\n"
     "context\tap\t283\n"
@@ -70,6 +73,100 @@ static void spell(int n, int k, int *o, char *dc) {
     }
 }
 static int nkeys(int n) { return n == 1 ? 3 : n == 2 ? 9 : 27; }
+
+/* ---------- the algebra: this consumer's tables, injected into flownet (W6 B1: flownet holds no domain data) ----------
+   TABLES/NET.gold.tsv for each net the contract names: comment lines (#), a net row naming NET, the field rows and the
+   class row (the domain flownet is given, as they stand), then one row per key: its field values and its class.
+   flownet asks the domain of each net and the label of each of its keys once, at construction (fn_build); a key with
+   no row is refused by flownet by name, a bad row here at TABLES/NET.gold.tsv:LINE, and after the construction every
+   row must have been asked exactly once (a row outside the domain, or a table no net asked, is refused).  The
+   derivation never reads these tables: it asks the integer nets (a copy that answers from the tables instead is named
+   key by key by flownet's sweep, tests/flownetw3.cx flow). */
+enum { GMAXN = 8, GMAXR = 256, GMAXF = 4 };
+typedef struct { char *name, *path, *domain; int nf, nr; char *col[GMAXR][GMAXF + 1]; int lno[GMAXR], asked[GMAXR]; } Gold;
+static Gold GT[GMAXN]; static int ngt;
+static void gold_bad(const char *path, int line, const char *why) { fprintf(stderr, "tdescprobe: %s:%d: %s\n", path, line, why); exit(2); }
+static char *gold_path(const char *file) {
+    size_t k = strlen(TABLES) + strlen(file) + 2; char *p = malloc(k);
+    if (!p) exit(2);
+    snprintf(p, k, "%s/%s", TABLES, file); return p;
+}
+/* the table of NET, read on first use */
+static Gold *gold_table(const char *net) {
+    int i, line = 0, seen_net = 0, seen_class = 0; size_t n, dl = 0; char *b, *p, *file; Gold *g;
+    for (i = 0; i < ngt; i++) if (is(GT[i].name, net)) return &GT[i];
+    if (ngt == GMAXN) { fprintf(stderr, "tdescprobe: more than %d nets\n", GMAXN); exit(2); }
+    g = &GT[ngt]; memset(g, 0, sizeof *g);
+    file = malloc(strlen(net) + 10); if (!file) exit(2);
+    snprintf(file, strlen(net) + 10, "%s.gold.tsv", net);
+    g->path = gold_path(file); free(file);
+    if (!(g->name = strdup(net))) exit(2);
+    if (!(b = cx_read(g->path, &n))) gold_bad(g->path, 0, "cannot read");
+    if (!n || b[n - 1] != '\n' || memchr(b, 0, n)) gold_bad(g->path, 0, "empty, a NUL byte, or no final newline");
+    if (!(g->domain = malloc(n + 1))) exit(2);
+    g->domain[0] = 0;
+    for (p = b; *p; ) {
+        char *nl = strchr(p, '\n'), *c[GMAXF + 2], *s; int k = 0;
+        line++; *nl = 0;
+        if (!*p || *p == '#') { p = nl + 1; continue; }
+        if (!strncmp(p, "field\t", 6) || !strncmp(p, "class\t", 6)) {        /* the domain, as it stands */
+            if (!seen_net || seen_class) gold_bad(g->path, line, "field rows, then the class row, come after the net row and before the keys");
+            if (p[0] == 'f' && ++g->nf > GMAXF) gold_bad(g->path, line, "more fields than a key holds here");
+            if (p[0] == 'c') seen_class = 1;
+            memcpy(g->domain + dl, p, (size_t)(nl - p)); dl += (size_t)(nl - p); g->domain[dl++] = '\n'; g->domain[dl] = 0;
+            p = nl + 1; continue;
+        }
+        c[k++] = p;
+        for (s = p; (s = strchr(s, '\t')) != 0; ) {
+            if (k == GMAXF + 2) gold_bad(g->path, line, "too many columns");
+            *s++ = 0; c[k++] = s;
+        }
+        if (is(c[0], "net")) {
+            if (seen_net || k != 2 || !is(c[1], net)) gold_bad(g->path, line, "want one net row, naming this table's net, first");
+            seen_net = 1;
+        } else {
+            int r, f;
+            if (!seen_class) gold_bad(g->path, line, "a key row before the class row");
+            if (k != g->nf + 1) gold_bad(g->path, line, "a key row is its field values and its class");
+            if (g->nr == GMAXR) gold_bad(g->path, line, "too many key rows");
+            for (r = 0; r < g->nr; r++) {
+                for (f = 0; f < g->nf && is(g->col[r][f], c[f]); f++) ;
+                if (f == g->nf) gold_bad(g->path, line, "a key given twice");
+            }
+            for (f = 0; f < k; f++) g->col[g->nr][f] = c[f];
+            g->lno[g->nr++] = line;
+        }
+        p = nl + 1;
+    }
+    if (!seen_class) gold_bad(g->path, line, "no class row");
+    ngt++;
+    return g;
+}
+/* the label source (flownet/fnx.cx): the domain rows of NET, and the class of a key */
+static const char *gold_domain(void *ctx, const char *net) { (void)ctx; return gold_table(net)->domain; }
+static const char *gold_label(void *ctx, const char *net, int nk, const char *const *key) {
+    Gold *g = gold_table(net); int r, f;
+    (void)ctx;
+    if (nk != g->nf) return 0;
+    for (r = 0; r < g->nr; r++) {
+        for (f = 0; f < nk && is(g->col[r][f], key[f]); f++) ;
+        if (f == nk) { g->asked[r]++; return g->col[r][nk]; }
+    }
+    return 0;                                         /* flownet refuses it by name: the label source gives no label */
+}
+/* the contract rows, as text */
+static char *gold_contract(void) {
+    char *path = gold_path("contract.tsv"), *b; size_t n;
+    if (!(b = cx_read(path, &n))) gold_bad(path, 0, "cannot read");
+    free(path); return b;
+}
+/* after the construction: every table a contract net, every row asked exactly once */
+static void gold_all_asked(void) {
+    int i, r;
+    if (ngt != fn_nets()) { fprintf(stderr, "tdescprobe: %d gold tables read, the contract names %d nets\n", ngt, fn_nets()); exit(2); }
+    for (i = 0; i < ngt; i++) for (r = 0; r < GT[i].nr; r++)
+        if (GT[i].asked[r] != 1) gold_bad(GT[i].path, GT[i].lno[r], GT[i].asked[r] ? "a key row asked more than once" : "a key row flownet never asked (outside the domain)");
+}
 
 /* ---------- the flows: every declarator of depth 1..3, every context; one output row per declarator and per context ---------- */
 /* the row, through flownet's output; nonzero when it does not fit or flownet refuses it */
@@ -312,10 +409,11 @@ static int collect(void *unused, const char *bytes, long len) {
 
 /* the derivation through flownet; 0, or 1 when the judge refused the tables (its lines printed), exit 2 otherwise */
 static int enumerate(void) {
-    if (fn_construct(TABLES) || fn_expect(BOOKS) || fn_run(derive, 0, collect, 0)) {
+    if (fn_label_source(gold_domain, gold_label, 0) || fn_build(gold_contract()) || fn_expect(BOOKS) || fn_run(derive, 0, collect, 0)) {
         if (!strncmp(fn_error(), "run: the emit hook refused (rc", 30)) { if (jlog) fputs(jlog, stdout); return 1; }   /* the judge, on the real run */
         fprintf(stderr, "tdescprobe: flownet: %s\n", fn_error()); exit(2);
     }
+    gold_all_asked();
     if (!np) { fprintf(stderr, "tdescprobe: flownet derived no probes\n"); exit(2); }
     return 0;
 }

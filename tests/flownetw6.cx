@@ -1,0 +1,222 @@
+#!/usr/bin/env -S unisacc.com -run
+/* flownetw6.cx -- the W6 gate of plans/m4-flownet-cx-module.md section 9 (flownet as the cornerstone).
+     usage (repository root):
+       sh ./unisacc.com -run tests/flownetw6.cx -- b1 ROOT
+           B1, mechanism and domain apart: ROOT/flownet holds mechanism only.  Three rules, each finding named:
+             files    every entry of ROOT/flownet is a regular file named *.cx (the code) or *.md (its documentation);
+                      a directory, a link, a table (*.tsv, *.gold.tsv, contract.tsv) or any other file is red -- a
+                      domain table belongs to its consumer, which hands it in (fn_label_source, fn_build, or a DIR
+                      it names)
+             names    no flownet/*.cx names a consumer, in code or comments, in any case: the consumers are found,
+                      not listed -- every .cx under ROOT/tests and ROOT/adapter with the line `#pragma unisa use
+                      flownet.api` (its file name, and its directory unless that is tests or adapter), every directory
+                      holding a flownet contract (a contract.tsv with a net row) under the same trees (its name, or
+                      its parent's when it is called tables), and the two domains prd.md section 0 names (tdesc, ujs)
+             literals no string literal in flownet/*.cx is a name a consumer's contract gives (a net, flow, phase,
+                      reserved or observed net, choice input or form): domain vocabulary as data in the mechanism
+           The scan proves itself first, in memory: seeded entries and texts (a table directory, a gold table, a
+           contract, a link, a consumer's file name in a comment, an upper-case consumer name, a contract's net and
+           phase names as literals) must give exactly the findings they seed, and a clean control (prose that
+           contains a short contract name inside a word, a mechanism literal) none.  The discovery must find at least
+           two consumers and one contract, else the scan is not trusted.
+   rc 0 PASS, 1 red (each finding named), 2 usage or I/O.  No #include: the prelude is built in. */
+
+static int quiet;                    /* the self-test counts without printing */
+static int nfound;
+
+static char *fmt(const char *f, ...) {
+    va_list ap; size_t cap = 256; int n; char *p = 0;
+    for (;;) {
+        char *g = realloc(p, cap);
+        if (!g) { free(p); fprintf(stderr, "flownetw6: out of memory\n"); exit(2); }
+        p = g; va_start(ap, f); n = vsnprintf(p, cap, f, ap); va_end(ap);
+        if (n < 0) { fprintf(stderr, "flownetw6: cannot format\n"); exit(2); }
+        if ((size_t)n < cap) return p;
+        cap = (size_t)n + 1;
+    }
+}
+static void finding(const char *where, int line, const char *why) {
+    nfound++;
+    if (quiet) return;
+    if (line > 0) printf("FAIL %s:%d: %s\n", where, line, why);
+    else printf("FAIL %s: %s\n", where, why);
+}
+static int ends(const char *s, const char *t) { size_t a = strlen(s), b = strlen(t); return a >= b && !strcmp(s + a - b, t); }
+static const char *base(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+
+/* ---------- the names: consumer identities (substring, any case) and contract names (exact literal) ---------- */
+#define MAXNAMES 512
+static char *ident[MAXNAMES]; static int nident;
+static char *lit[MAXNAMES]; static int nlit;
+static int nconsumers, ncontracts;
+static void add(char **v, int *n, const char *s, size_t k) {
+    int i;
+    if (!k) return;
+    for (i = 0; i < *n; i++) if (strlen(v[i]) == k && !strncmp(v[i], s, k)) return;
+    if (*n == MAXNAMES) { fprintf(stderr, "flownetw6: more than %d names\n", MAXNAMES); exit(2); }
+    v[*n] = malloc(k + 1); if (!v[*n]) exit(2);
+    memcpy(v[*n], s, k); v[*n][k] = 0;
+    for (k = 0; v[*n][k]; k++) v[*n][k] = v == ident ? (char)tolower((unsigned char)v[*n][k]) : v[*n][k];
+    (*n)++;
+}
+static void add_dir_of(const char *path, const char *skip) {   /* the name of PATH's directory, unless it is SKIP */
+    const char *e = strrchr(path, '/'), *s;
+    if (!e) return;
+    for (s = e; s > path && s[-1] != '/'; s--) ;
+    if ((size_t)(e - s) == strlen(skip) && !strncmp(s, skip, strlen(skip))) {   /* tables: the parent's name */
+        if (s == path) return;
+        e = s - 1; for (s = e; s > path && s[-1] != '/'; s--) ;
+    }
+    if (!((size_t)(e - s) == 5 && !strncmp(s, "tests", 5)) && !((size_t)(e - s) == 7 && !strncmp(s, "adapter", 7))) add(ident, &nident, s, (size_t)(e - s));
+}
+static int discover(const char *path, void *ctx) {
+    char *b; size_t n;
+    (void)ctx;
+    if (strstr(path, "/flownet/")) return 0;                 /* flownet itself, and the module links beside a consumer */
+    if (ends(path, ".cx")) {
+        if (!(b = cx_read(path, &n))) { fprintf(stderr, "flownetw6: %s: cannot read\n", path); exit(2); }
+        if (!strncmp(b, "#pragma unisa use flownet.api\n", 30) || strstr(b, "\n#pragma unisa use flownet.api\n")) {
+            const char *s = base(path);
+            nconsumers++;
+            add(ident, &nident, s, strlen(s) - 3);
+            add_dir_of(path, "");
+        }
+        free(b);
+    } else if (!strcmp(base(path), "contract.tsv")) {
+        char *p, *q;
+        if (!(b = cx_read(path, &n))) { fprintf(stderr, "flownetw6: %s: cannot read\n", path); exit(2); }
+        if (strncmp(b, "net\t", 4) && !strstr(b, "\nnet\t")) { free(b); return 0; }   /* not a flownet contract */
+        ncontracts++;
+        add_dir_of(path, "tables");
+        for (p = b; *p; p = q + 1) {             /* every row but comments: the fields after the row's kind */
+            char *nl = strchr(p, '\n'), *f;
+            q = nl ? nl : p + strlen(p);
+            if (*p != '#' && p < q) {
+                f = memchr(p, '\t', (size_t)(q - p));
+                while (f && f < q) {
+                    char *g = memchr(f + 1, '\t', (size_t)(q - f - 1)), *end = g ? g : q;
+                    add(lit, &nlit, f + 1, (size_t)(end - f - 1));
+                    f = g;
+                }
+            }
+            if (!nl) break;
+        }
+        free(b);
+    }
+    return 0;
+}
+
+/* ---------- the rules ---------- */
+/* files: one entry NAME of flownet/ of kind K ('f' regular, 'd' directory, 'l' link, 'o' other) */
+static void check_entry(const char *dir, const char *name, int k) {
+    char *w = fmt("%s/%s", dir, name);
+    if (k == 'd') finding(w, 0, "a directory in flownet/ (a domain's tables belong to its consumer)");
+    else if (k == 'l') finding(w, 0, "a link in flownet/ (flownet holds its own code only)");
+    else if (k != 'f') finding(w, 0, "not a regular file");
+    else if (ends(name, ".tsv")) finding(w, 0, "a table in flownet/ (domain data belongs to its consumer, handed in through fn_label_source / fn_build)");
+    else if (!ends(name, ".cx") && !ends(name, ".md")) finding(w, 0, "neither mechanism code (.cx) nor its documentation (.md)");
+    free(w);
+}
+/* names and literals: the text T of LABEL (a flownet .cx) */
+static void check_text(const char *label, const char *t) {
+    const char *p = t; int line = 1, i;
+    /* names: one finding per line, the longest name it holds */
+    while (*p) {
+        const char *e = strchr(p, '\n'); size_t L = e ? (size_t)(e - p) : strlen(p), j; char *low = malloc(L + 1); int best = -1;
+        if (!low) exit(2);
+        for (j = 0; j < L; j++) low[j] = (char)tolower((unsigned char)p[j]);
+        low[L] = 0;
+        for (i = 0; i < nident; i++) if (strstr(low, ident[i]) && (best < 0 || strlen(ident[i]) > strlen(ident[best]))) best = i;
+        if (best >= 0) { char *w = fmt("names the consumer '%s' (flownet names no consumer)", ident[best]); finding(label, line, w); free(w); }
+        free(low);
+        if (!e) break;
+        p = e + 1; line++;
+    }
+    /* literals: the C string literals outside comments and character constants */
+    for (p = t, line = 1; *p; p++) {
+        if (*p == '\n') { line++; continue; }
+        if (p[0] == '/' && p[1] == '*') { for (p += 2; *p && !(p[0] == '*' && p[1] == '/'); p++) if (*p == '\n') line++; if (!*p) break; p++; continue; }
+        if (p[0] == '/' && p[1] == '/') { while (p[1] && p[1] != '\n') p++; continue; }
+        if (*p == '\'') { for (p++; *p && *p != '\'' && *p != '\n'; p++) if (*p == '\\' && p[1]) p++; if (!*p) break; continue; }
+        if (*p == '"') {
+            const char *s = ++p;
+            for (; *p && *p != '"' && *p != '\n'; p++) if (*p == '\\' && p[1]) p++;
+            for (i = 0; i < nlit; i++)
+                if ((size_t)(p - s) == strlen(lit[i]) && !strncmp(s, lit[i], (size_t)(p - s))) {
+                    char *w = fmt("the string literal \"%s\" is a name a consumer's contract gives (domain vocabulary as data)", lit[i]);
+                    finding(label, line, w); free(w); break;
+                }
+            if (!*p) break;
+            if (*p == '\n') line++;
+        }
+    }
+}
+
+/* ---------- the self-test: seeded entries and texts, exactly the seeded findings ---------- */
+static int selftest(void) {
+    static const struct { const char *name; int kind, want; } E[] = {
+        { "api.cx", 'f', 0 }, { "README.md", 'f', 0 }, { "tdesc", 'd', 1 }, { "adj.gold.tsv", 'f', 1 },
+        { "contract.tsv", 'f', 1 }, { "nets.cx", 'l', 1 }, { "notes.txt", 'f', 1 }, { 0, 0, 0 } };
+    static const struct { const char *text; int want; } T[] = {
+        { "/* the gold of tests/tdescprobe.cx */\nint x;\n", 1 },
+        { "/* see adapter/UJSWASM */\n", 1 },
+        { "/* the TDESC algebra */\n", 1 },
+        { "static const char *a = \"adj\";\n", 1 },
+        { "int f(void) { return g(\"size\", \"x\"); }\n", 1 },
+        { "/* adjust the size of a flow; ap and sz */\nstatic const char *a = \"flow\", *b = \"net\"; char c = '\"';\n", 0 },
+        { 0, 0 } };
+    int i, ok = 1, got;
+    quiet = 1;
+    for (i = 0; E[i].name; i++) {
+        nfound = 0; check_entry("seed", E[i].name, E[i].kind);
+        if (nfound != E[i].want) { printf("FAIL self-test: entry %s (%c) gives %d findings, want %d\n", E[i].name, E[i].kind, nfound, E[i].want); ok = 0; }
+    }
+    for (i = 0; T[i].text; i++) {
+        nfound = 0; check_text("seed", T[i].text); got = nfound;
+        if (got != T[i].want) { printf("FAIL self-test: text %d gives %d findings, want %d\n", i + 1, got, T[i].want); ok = 0; }
+    }
+    quiet = 0; nfound = 0;
+    return ok;
+}
+
+static int cmd_b1(const char *root) {
+    char *fd = fmt("%s/flownet", root), *td = fmt("%s/tests", root), *ad = fmt("%s/adapter", root);
+    DIR *d; struct dirent *e; int nfiles = 0, ncx = 0, i;
+    if (cx_walk(td, discover, 0) < 0 || cx_walk(ad, discover, 0) < 0) { fprintf(stderr, "flownetw6: cannot walk %s or %s\n", td, ad); return 2; }
+    add(ident, &nident, "tdesc", 5); add(ident, &nident, "ujs", 3);   /* the domains of prd.md section 0 */
+    if (nconsumers < 2 || ncontracts < 1) {
+        printf("flownetw6 b1: FAIL (the discovery found %d consumers and %d contracts, want at least 2 and 1: not trusted)\n", nconsumers, ncontracts);
+        return 1;
+    }
+    if (!selftest()) { printf("flownetw6 b1: FAIL (the scan does not find what it seeds: not trusted)\n"); return 1; }
+    if (!(d = opendir(fd))) { fprintf(stderr, "flownetw6: %s: cannot read\n", fd); return 2; }
+    while ((e = readdir(d))) {
+        char *p; struct stat st; int k;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        p = fmt("%s/%s", fd, e->d_name);
+        if (lstat(p, &st)) { fprintf(stderr, "flownetw6: %s: cannot stat\n", p); return 2; }
+        k = S_ISLNK(st.st_mode) ? 'l' : S_ISDIR(st.st_mode) ? 'd' : S_ISREG(st.st_mode) ? 'f' : 'o';
+        nfiles++;
+        check_entry("flownet", e->d_name, k);
+        if (k == 'f' && ends(e->d_name, ".cx")) {
+            size_t n; char *b = cx_read(p, &n), *label = fmt("flownet/%s", e->d_name);
+            if (!b) { fprintf(stderr, "flownetw6: %s: cannot read\n", p); return 2; }
+            check_text(label, b); ncx++;
+            free(b); free(label);
+        }
+        free(p);
+    }
+    closedir(d);
+    if (ncx < 5) { printf("flownetw6 b1: FAIL (%d .cx files in flownet/, want fnx, contract, nets, flow, api)\n", ncx); return 1; }
+    if (nfound) { printf("flownetw6 b1: FAIL (%d finding(s) in flownet/)\n", nfound); return 1; }
+    printf("flownetw6 b1: PASS (flownet/: %d entries, %d .cx, mechanism only -- no table, no directory, no link; no consumer named, no contract name as a literal; consumers found: %d, contracts: %d; names:", nfiles, ncx, nconsumers, ncontracts);
+    for (i = 0; i < nident; i++) printf(" %s", ident[i]);
+    printf("; contract names: %d; self-test green)\n", nlit);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "b1")) return cmd_b1(argv[2]);
+    fprintf(stderr, "usage: flownetw6.cx b1 ROOT\n");
+    return 2;
+}
