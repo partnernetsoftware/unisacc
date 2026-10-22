@@ -168,6 +168,9 @@ int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)
 #include "forwardsignature.h"
 #include "../../src/fwdstub.c"
 #include "fwdmerge.c"
+/* CX2a: .cx modules (`#pragma unisa use NAME`) and their derived interfaces -- src/cxmod.c, the same code as the
+   reference driver's; its file access (cxm_rd, cxm_wr, cxm_say) follows fwdpaths.h, after <unistd.h> */
+#include "../../src/cxmod.c"
 /* The callback graph carries a C function-pointer type.  Scalar pointees
    are enough for glob's errfunc and similar host APIs; other graphs retain
    the named refusal until their declaration can be printed exactly. */
@@ -243,6 +246,24 @@ static void ucache_replay(int k) {                /* append unit k's attribute r
 }
 static char fwd_path[600];
 #include "fwdpaths.h"
+int cxm_rd(char *path, char *buf, int cap) {
+    FILE *f=fopen(path,"rb"); if (!f) return -1;
+    size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); fclose(f);
+    return bad ? -1 : n>=(size_t)cap ? -2 : (int)n;
+}
+int cxm_wr(char *path, char *buf, int n) {       /* beside it, then renamed: a reader never sees half a file */
+#ifdef _WIN32
+    FILE *f=fopen(path,"wb"); if (!f) return 1;
+    int bad=fwrite(buf,1,(size_t)n,f)!=(size_t)n; if (fclose(f)) bad=1; return bad;
+#else
+    char tmp[CXM_PATHW+32]; snprintf(tmp,sizeof tmp,"%s.%d",path,(int)getpid());
+    FILE *f=fopen(tmp,"wb"); if (!f) return 1;
+    int bad=fwrite(buf,1,(size_t)n,f)!=(size_t)n; if (fclose(f)) bad=1;
+    if (bad || rename(tmp,path)) { remove(tmp); return 1; }
+    return 0;
+#endif
+}
+int cxm_say(int fd, char *s, int n) { fwrite(s,1,(size_t)n,fd==1 ? stdout : stderr); return 0; }
 static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1: stubs written; -1: error */
     size_t at=0,n=(size_t)in->n; const unsigned char *b=in->b; uint64_t tl=0,cnt=0;
     if (n<7 || memcmp(b,"USLFW1\n",7)) { fputs("unisacc: error: forwarding side-car missing\n",stderr); return -1; }
@@ -393,9 +414,13 @@ static void argbytes(Buf *b, const char *s) {
     while (*s) { bput(b,(unsigned char)*s,0); s++; }
     bput(b,0,0);
 }
-/* the forced-include list one unit is compiled with: a .cx unit's starts with its built-in prelude cx.h */
+/* the forced-include list one unit is compiled with: a .cx unit's starts with its built-in prelude cx.h, and one
+   that uses modules ends with their interfaces (cxm_lists, CX2a) */
+static Buf *cxm_lists;
 static void unit_includes(ResourceInput *r, const char *path, const Buf *plain, const Buf *withcx) {
     size_t l=strlen(path); const Buf *b=(l>=3 && !strcmp(path+l-3,".cx")) ? withcx : plain;
+    int u=cxm_lists ? cxm_find((char *)path) : -1;
+    if (u>=0 && cxm_ninc[u]) b=&cxm_lists[u];
     r->data=b->b; r->len=b->n;
 }
 static char *process_environment(int argc,char **argv,int i) {
@@ -600,10 +625,30 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-O0")) level = 0;
         else if (!strcmp(a,"-O1")) level = 1;
         else if (!strcmp(a,"-O2")) level = 2;
+        else if (cxm_flag((char *)a)) { }           /* -cx-plan, -cx-interface (src/cxmod.c) */
         else if (a[0]=='-' && a[1]) return clierror(defrun && src ? "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)" : "option not migrated");
         else { sources[nsources++]=a; if (!src) src = a; }
     }
     if (!src) return clierror("expected a C source file");
+    /* CX2a: a .cx unit's `#pragma unisa use` adds the module's unit after the command-line sources (src/cxmod.c);
+       .c units are never scanned.  -cx-interface prints one module's interface, -cx-plan the units and their lists. */
+    if (cxm_wantif) return cxm_interface((char *)src);
+    cxm_on=0;
+    if (!object_path(src) && !tapebin_path(src) && !tape_path(src)) {
+        int anycx=cxm_wantplan;
+        for (int j=0;j<nsources;j++) if (cxm_iscxpath((char *)sources[j])) anycx=1;
+        if (anycx) {
+            if (cxm_plan((char **)sources,nsources)) return 1;
+            if (cxm_n>nsources) sources=xrealloc(sources,cxm_n*sizeof(char *));
+            for (int j=0;j<cxm_n;j++) sources[j]=cxm_arg[j];
+            nsources=cxm_n;
+        }
+    }
+    if (cxm_wantplan) {
+        const char **opt=xrealloc(0,(forced.n+1)*sizeof(char *)); int nopt=0;
+        for (int k=0;k<forced.n;k++) if (!k || !forced.b[k-1]) opt[nopt++]=(const char *)forced.b+k;
+        cxm_planprint((char **)opt,nopt); free(opt); return 0;
+    }
     /* -c with -b: an object (R17-1).  The product writes objects through its
        own route (\0cli/object, \0cli/funit; exec/enc, in progress) -- until
        that route exists the driver says so instead of writing a tape. */
@@ -708,7 +753,14 @@ int main(int argc, char **argv) {
        (No comment line here may begin with the include directive: -ftrim-libc's quotedinc() reads raw lines and a
        non-<...> one turns library trimming off for the whole unit -- it cost 45 KB per slice once.) */
     Buf forced_cx={0}; argbytes(&forced_cx,"cx.h"); for (int k=0;k<forced.n;k++) bput(&forced_cx,forced.b[k],0);
-    fwd_cx_prelude_list=forced_cx.b;            /* fwd_front drops the prelude for the forwarding unit */
+    fwd_plain_list=&forced;                      /* fwd_front: the forwarding unit has only the -include list */
+    if (cxm_on && cxm_n) {                       /* a unit that uses modules: cx.h, -include, then the interfaces */
+        cxm_lists=xrealloc(0,cxm_n*sizeof(Buf)); memset(cxm_lists,0,cxm_n*sizeof(Buf));
+        for (int u=0;u<cxm_n;u++) if (cxm_ninc[u]) {
+            for (int k=0;k<forced_cx.n;k++) bput(&cxm_lists[u],forced_cx.b[k],0);
+            for (int k=0;k<cxm_ninc[u];k++) argbytes(&cxm_lists[u],cxm_incpath(u,k));
+        }
+    }
 #define UNIT_INCLUDES(path) unit_includes(&cli[2],(path),&forced,&forced_cx)
     ARGRESOURCE(2,"\0cli/includes",forced);
     if (src) UNIT_INCLUDES(src);                 /* the single-source routes; the per-unit loops set it per unit */
@@ -959,6 +1011,7 @@ int main(int argc, char **argv) {
     unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(forced_cx.b); free(forced_cx.at); free(incdir.b); free(incdir.at);
+    if (cxm_lists) { for (int u=0;u<cxm_n;u++) { free(cxm_lists[u].b); free(cxm_lists[u].at); } free(cxm_lists); cxm_lists=0; }
     free(quotedir.b); free(quotedir.at);
     free(srcres.b); free(srcres.at);
     free(werror.b); free(werror.at);

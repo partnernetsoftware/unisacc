@@ -1,0 +1,215 @@
+#!/usr/bin/env -S unisacc.com -run
+/* cxmodcheck.cx -- the CX2a gate (research/cx2-module-design.md 4; plans/cx-modules.md CX2): `#pragma unisa use NAME`
+   and the derived interface (CXIF v0), on the fixtures in tests/cx/, against one compiler.
+     usage: sh ./unisacc.com -run tests/cxmodcheck.cx -- [--neg | --pos] COMPILER        (from the repository root)
+   COMPILER is the product (a .com, run with sh) or the classic reference (a native binary): both drivers share
+   src/cxmod.c, so both must give the same answers.
+   --neg: every refusal is rc 1, empty stdout and exactly one stderr line, the named one (N1-N17); and N11: a
+          consumer whose `use` is removed goes red (the call is named), never a silent pass.
+   --pos: P1 a module by name; P2 a diamond (one copy of the shared module); P3 a module also given on the command
+          line is one unit; P4 -cx-interface is deterministic and equals tests/cx/p1mod.cxif; P5 -o bytes do not depend
+          on TMPDIR; P6 each module's interface is self-contained (a unit made of the prelude and the interfaces
+          compiles, here and under the system cc); P7 the system cc oracle -- each unit of -cx-plan compiled by
+          `cc -std=c99 -D_DEFAULT_SOURCE -x c -include include/cx.h -include CXIF...`, linked and run -- prints what
+          -run prints; P8 a .c unit is never scanned (its `#pragma unisa use` is ignored: the same -o bytes as without
+          the line, no prelude in its plan row); P9 -ftrim-libc stays on with the quoted interface include (the -o size
+          equals the same program with the interface pasted in, which has no quoted include).
+   Neither mode writes outside a fresh directory under TMPDIR.  No #include: the prelude is built in. */
+
+static char T[512], CC[640];
+static int fails, checks;
+static void check(int ok, const char *what) { checks++; if (!ok) { fails++; printf("FAIL %s\n", what); } }
+
+/* CMD under sh with a 30 s limit; stdout into *out (NUL-terminated), stderr into *err; the exit code */
+static int run(const char *cmd, char **out, char **err) {
+    char full[8192], ep[600]; size_t n = 0; int rc;
+    snprintf(ep, sizeof ep, "%s/stderr", T);
+    snprintf(full, sizeof full, "%s 2>'%s'", cmd, ep);
+    rc = cx_run_timeout(full, 30, out, &n);
+    if (out && !*out) { *out = malloc(1); (*out)[0] = 0; }
+    if (err) { *err = cx_read(ep, &n); if (!*err) { *err = malloc(1); (*err)[0] = 0; } }
+    return rc;
+}
+static int sh(const char *cmd) { char *o, *e; int rc = run(cmd, &o, &e); free(o); free(e); return rc; }
+
+/* a refusal: rc 1, no stdout, exactly the line WANT on stderr */
+static void refused(const char *file, const char *want) {
+    char cmd[2048], line[1024], what[256]; char *o, *e; int rc;
+    snprintf(cmd, sizeof cmd, "%s -run tests/cx/%s", CC, file);
+    rc = run(cmd, &o, &e);
+    snprintf(line, sizeof line, "%s\n", want);
+    snprintf(what, sizeof what, "refusal %s", file);
+    check(rc == 1 && !o[0] && !strcmp(e, line), what);
+    if (rc != 1 || o[0] || strcmp(e, line)) printf("     rc %d stdout [%s] stderr [%s] want [%s]\n", rc, o, e, want);
+    free(o); free(e);
+}
+static void negatives(void) {
+    char cmd[2048]; char *o, *e; int rc;
+    refused("n1.cx", "cx: tests/cx/n1.cx:2: module nosuch: no file tests/cx/nosuch.cx");
+    refused("n2a.cx", "cx: module cycle: n2a -> n2b -> n2a");
+    refused("n3a.cx", "cx: tests/cx/n3a.cx:2: bad module name \"../x\"");
+    refused("n3b.cx", "cx: tests/cx/n3b.cx:2: bad module name \"Bad-Name\"");
+    refused("n4.cx", "cx: tests/cx/n4.cx:2: unknown unisa pragma usee");
+    refused("n5.cx", "cx: tests/cx/n5m.cx:2: module n5m exports object n5_count; make it static and export a function");
+    refused("n6.cx", "cx: tests/cx/n6m.cx:3: exported n6_row uses macro N6_MAX; make it an enum constant");
+    refused("n7.cx", "cx: dup_f exported by both n7b (tests/cx/n7b.cx:2) and n7c (tests/cx/n7c.cx:2)");
+    refused("n8.cx", "cx: module n8b defines main (a used module is a library)");
+    refused("n9.cx", "cx: tests/cx/n9.cx:2: unknown std module std.io");
+    refused("n10a.cx", "cx: tests/cx/n10a.cx:3: unisa pragma after first declaration");
+    refused("n10b.cx", "cx: tests/cx/n10b.cx:3: unisa pragma inside conditional");
+    refused("n12.cx", "cx: tests/cx/n12m.cx:2: module n12m declares n12_elsewhere but does not define it (a module exports its own definitions)");
+    refused("n13.cx", "cx: tests/cx/n13m.cx:3: module n13m exports n13_f under #if (conditional interface)");
+    refused("n14.cx", "cx: tests/cx/n14m.cx:2: module n14m exports cx_mine; the cx_ prefix is reserved for the prelude");
+    refused("n15.cx", "cx: tests/cx/n15.cx:3: dup_f is exported by n7b");
+    refused("n16.cx", "cx: type n16_row from n16b and n16c differ");
+    refused("n17.cx", "cx: tests/cx/n17.cx:2: module other is not the file stem n17");
+    /* N11: the same consumer with and without its use; without, the call is red by name (rc 127 at -run until CX3c
+       refuses the undeclared call at compile time) */
+    {   static const char body[] = "int main(void) { printf(\"%d\\n\", p1_radix(1)); return 0; }\n";
+        char f[600], text[256];
+        snprintf(cmd, sizeof cmd, "mkdir -p '%s/cx' && cp tests/cx/p1mod.cx '%s/cx/'", T, T);
+        snprintf(text, sizeof text, "#pragma unisa use p1mod\n%s", body); snprintf(f, sizeof f, "%s/cx/n11.cx", T);
+        if (sh(cmd) || cx_write(f, text, strlen(text))) cmd[0] = 0;
+        snprintf(text, sizeof text, "\n%s", body); snprintf(f, sizeof f, "%s/cx/n11x.cx", T);
+        if (cx_write(f, text, strlen(text))) cmd[0] = 0;
+    }
+    check(cmd[0] != 0, "N11 fixtures");
+    snprintf(cmd, sizeof cmd, "%s -run '%s/cx/n11.cx'", CC, T);
+    rc = run(cmd, &o, &e); check(rc == 0 && !strcmp(o, "3\n"), "N11 with the use: runs"); free(o); free(e);
+    snprintf(cmd, sizeof cmd, "%s -run '%s/cx/n11x.cx'", CC, T);
+    rc = run(cmd, &o, &e); check(rc != 0 && strstr(e, "p1_radix") != 0, "N11 without the use: red, p1_radix named");
+    if (rc == 0 || !strstr(e, "p1_radix")) printf("     rc %d stderr [%s]\n", rc, e);
+    free(o); free(e);
+}
+
+/* the stdout of `CC -run ARGS`, which must exit 0 */
+static char *runout(const char *args, const char *what) {
+    char cmd[2048]; char *o, *e; int rc;
+    snprintf(cmd, sizeof cmd, "%s -run %s", CC, args);
+    rc = run(cmd, &o, &e);
+    check(rc == 0, what);
+    if (rc) printf("     rc %d stderr [%s]\n", rc, e);
+    free(e); return o;
+}
+static int rows(const char *s) { int n = 0; for (; *s; s++) if (*s == '\n') n++; return n; }
+/* P7: every row of the plan of ARGS compiled by the system cc, linked, run: its stdout must be WANT */
+static void oracle(const char *args, const char *want, const char *what) {
+    char cmd[8192], obj[600], line[4096]; char *plan, *e, *o, *p, *nl; int rc, k = 0; size_t at;
+    snprintf(cmd, sizeof cmd, "%s -cx-plan %s", CC, args);
+    rc = run(cmd, &plan, &e); free(e);
+    check(rc == 0 && rows(plan) > 0, what);
+    snprintf(cmd, sizeof cmd, "rm -rf '%s/o' && mkdir '%s/o'", T, T); sh(cmd);
+    for (p = plan; *p; p = nl + 1, k++) {
+        char *f[64]; int nf = 0, i; char *q;
+        nl = strchr(p, '\n'); if (!nl) break; *nl = 0;
+        snprintf(line, sizeof line, "%s", p);
+        for (q = strtok(line, "\t"); q && nf < 64; q = strtok(0, "\t")) f[nf++] = q;
+        if (nf < 2) { check(0, "plan row"); continue; }
+        snprintf(obj, sizeof obj, "%s/o/%d.o", T, k);
+        at = (size_t)snprintf(cmd, sizeof cmd, "cc -std=c99 -D_DEFAULT_SOURCE -Wno-unknown-pragmas -w -x c");
+        for (i = 2; i < nf; i++)
+            at += (size_t)snprintf(cmd + at, sizeof cmd - at, " -include '%s'", strcmp(f[i], "cx.h") ? f[i] : "include/cx.h");
+        snprintf(cmd + at, sizeof cmd - at, " -c '%s' -o '%s'", f[1], obj);
+        rc = run(cmd, &o, &e);
+        if (rc) printf("     cc rc %d: %s\n%s", rc, cmd, e);
+        check(rc == 0, "cc compiles a plan row");
+        free(o); free(e);
+    }
+    free(plan);
+    snprintf(cmd, sizeof cmd, "cc '%s'/o/*.o -o '%s/o/prog' && '%s/o/prog'", T, T, T);
+    rc = run(cmd, &o, &e);
+    check(rc == 0 && !strcmp(o, want), what);
+    if (rc || strcmp(o, want)) printf("     oracle rc %d stdout [%s] stderr [%s]\n", rc, o, e);
+    free(o); free(e);
+}
+static long fsize(const char *path) { struct stat st; return stat(path, &st) ? -1 : (long)st.st_size; }
+static void positives(void) {
+    char cmd[4096], g[600], w[600]; char *o, *a, *b, *e, *gold; size_t gn; int rc;
+    const char *p1 = "module reference ok (2 units, 7 checks)\n", *p2 = "diamond ok (4 units, d once: 2)\n";
+    static const char *mods[] = { "p1mod", "p2b", "p2c", "p2d" };
+    int i;
+    /* P1, P2, P3 */
+    o = runout("tests/cx/p1.cx", "P1 runs"); check(!strcmp(o, p1), "P1 stdout"); free(o);
+    o = runout("tests/cx/p2a.cx", "P2 runs"); check(!strcmp(o, p2), "P2 stdout"); free(o);
+    snprintf(cmd, sizeof cmd, "%s -cx-plan tests/cx/p2a.cx", CC); rc = run(cmd, &o, &e);
+    check(rc == 0 && rows(o) == 4, "P2 plan: four units");
+    check(rc == 0 && strstr(o, "3\ttests/cx/p2d.cx\tcx.h\n") != 0, "P2 plan: p2d once, last, prelude only");
+    free(o); free(e);
+    o = runout("tests/cx/p1.cx tests/cx/p1mod.cx", "P3 runs"); check(!strcmp(o, p1), "P3 stdout"); free(o);
+    snprintf(cmd, sizeof cmd, "%s -cx-plan tests/cx/p1mod.cx tests/cx/p1.cx", CC); rc = run(cmd, &o, &e);
+    check(rc == 0 && rows(o) == 2 && !strncmp(o, "0\ttests/cx/p1mod.cx\tcx.h\n1\ttests/cx/p1.cx\tcx.h\t", strlen("0\ttests/cx/p1mod.cx\tcx.h\n1\ttests/cx/p1.cx\tcx.h\t")), "P3 plan: two units, command-line order");
+    free(o); free(e);
+    /* P4 */
+    snprintf(cmd, sizeof cmd, "%s -cx-interface tests/cx/p1mod.cx", CC);
+    run(cmd, &a, &e); free(e); run(cmd, &b, &e); free(e);
+    gold = cx_read("tests/cx/p1mod.cxif", &gn);
+    check(gold && a[0] && !strcmp(a, b) && !strcmp(a, gold), "P4 -cx-interface deterministic, equals tests/cx/p1mod.cxif");
+    if (!gold || strcmp(a, gold)) printf("     got [%s]\n", a);
+    free(a); free(b); free(gold);
+    /* P5 */
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s/ta' '%s/tb' && TMPDIR='%s/ta' %s -O2 tests/cx/p1.cx -o '%s/x1' && TMPDIR='%s/tb' %s -O2 tests/cx/p1.cx -o '%s/x2' && cmp -s '%s/x1' '%s/x2'",
+             T, T, T, CC, T, T, CC, T, T, T);
+    check(sh(cmd) == 0, "P5 -o bytes independent of TMPDIR");
+    /* P6: a unit made of the prelude and a module's interfaces, here and under cc */
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s/cx' && cp tests/cx/*.cx '%s/cx/'", T, T); check(sh(cmd) == 0, "P6 fixtures");
+    for (i = 0; i < 4; i++) {
+        char what[128];
+        snprintf(w, sizeof w, "%s/cx/self_%s.cx", T, mods[i]);
+        snprintf(cmd, sizeof cmd, "#pragma unisa use %s\nint main(void) { return 0; }\n", mods[i]);
+        cx_write(w, cmd, strlen(cmd));
+        snprintf(cmd, sizeof cmd, "%s -run '%s'", CC, w); rc = run(cmd, &o, &e);
+        snprintf(what, sizeof what, "P6 %s: prelude + interface compiles", mods[i]); check(rc == 0, what);
+        if (rc) printf("     rc %d stderr [%s]\n", rc, e);
+        free(o); free(e);
+        snprintf(cmd, sizeof cmd, "%s -cx-plan '%s'", CC, w); rc = run(cmd, &o, &e);
+        {   char *t = strchr(o, '\n'), inc[2048]; size_t at = 0; char *q, *r;
+            if (t) *t = 0;
+            q = strstr(o, "\tcx.h"); inc[0] = 0;
+            if (q) for (q = strtok(q + 5, "\t"); q; q = strtok(0, "\t")) at += (size_t)snprintf(inc + at, sizeof inc - at, " -include '%s'", q);
+            snprintf(cmd, sizeof cmd, "cc -std=c99 -D_DEFAULT_SOURCE -Wno-unknown-pragmas -fsyntax-only -x c -include include/cx.h%s '%s'", inc, w);
+            free(e); r = 0; rc = run(cmd, &r, &e);
+            snprintf(what, sizeof what, "P6 %s: cc accepts prelude + interface, no diagnostic", mods[i]);
+            check(rc == 0 && !e[0], what);
+            if (rc || e[0]) printf("     %s\n%s", cmd, e);
+            free(r); free(e);
+        }
+        free(o);
+    }
+    /* P7 */
+    oracle("tests/cx/p1.cx", p1, "P7 cc oracle p1");
+    oracle("tests/cx/p2a.cx", p2, "P7 cc oracle p2a");
+    /* P8: the .c unit's pragma is ignored -- the same bytes as without the line; its plan row has no prelude */
+    snprintf(cmd, sizeof cmd, "sed 's/^#pragma unisa use nosuch$//' tests/cx/p8.c > '%s/p8b.c' && ! cmp -s tests/cx/p8.c '%s/p8b.c' && %s -O2 tests/cx/p8.c -o '%s/c1' && %s -O2 '%s/p8b.c' -o '%s/c2' && cmp -s '%s/c1' '%s/c2'",
+             T, T, CC, T, CC, T, T, T, T);
+    check(sh(cmd) == 0, "P8 .c: #pragma unisa use is ignored (same -o bytes)");
+    snprintf(cmd, sizeof cmd, "%s -cx-plan tests/cx/p8.c", CC); rc = run(cmd, &o, &e);
+    check(rc == 0 && !strcmp(o, "0\ttests/cx/p8.c\n"), "P8 .c plan row: no prelude, no interface"); free(o); free(e);
+    o = runout("tests/cx/p8.c", "P8 .c runs"); check(!strcmp(o, "c ok\n"), "P8 stdout"); free(o);
+    /* P9: -ftrim-libc stays on with the quoted interface include */
+    snprintf(g, sizeof g, "%s/cx/p9.cx", T);
+    snprintf(cmd, sizeof cmd, "%s -cx-interface tests/cx/p1mod.cx > '%s' && sed 's/^#pragma unisa use p1mod$//' tests/cx/p1.cx >> '%s'"
+             " && %s -O2 tests/cx/p1.cx -o '%s/t1' && %s -O2 '%s' '%s/cx/p1mod.cx' -o '%s/t2'",
+             CC, g, g, CC, T, CC, g, T, T);
+    check(sh(cmd) == 0, "P9 builds");
+    snprintf(w, sizeof w, "%s/t1", T); { long s1 = fsize(w); snprintf(w, sizeof w, "%s/t2", T); long s2 = fsize(w);
+        check(s1 > 0 && s1 == s2, "P9 -ftrim-libc: the size equals the same program with the interface pasted in");
+        if (!(s1 > 0 && s1 == s2)) printf("     sizes use %ld pasted %ld\n", s1, s2); }
+}
+
+int main(int argc, char **argv) {
+    const char *td = getenv("TMPDIR"), *comp; int i = 1, neg = 1, pos = 1; size_t n;
+    if (argc > 1 && !strcmp(argv[1], "--neg")) { pos = 0; i++; }
+    else if (argc > 1 && !strcmp(argv[1], "--pos")) { neg = 0; i++; }
+    if (i >= argc) { fprintf(stderr, "usage: cxmodcheck.cx [--neg|--pos] COMPILER\n"); return 2; }
+    comp = argv[i]; n = strlen(comp);
+    snprintf(CC, sizeof CC, n > 4 && !strcmp(comp + n - 4, ".com") ? "sh '%s'" : "'%s'", comp);
+    snprintf(T, sizeof T, "%s/cxmodcheck.XXXXXX", td && *td ? td : "/tmp");
+    if (!mkdtemp(T)) { fprintf(stderr, "cxmodcheck: mkdtemp failed\n"); return 2; }
+    if (fsize("tests/cx/p1.cx") < 0) { fprintf(stderr, "cxmodcheck: run from the repository root\n"); return 2; }
+    if (neg) negatives();
+    if (pos) positives();
+    {   char cmd[600]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", T); cx_run(cmd, 0, 0); }
+    if (fails) { printf("cxmodule FAIL %d of %d checks (%s)\n", fails, checks, comp); return 1; }
+    printf("cxmodule ok: %d checks, %s%s(%s)\n", checks, neg ? "N1-N17 refused by name, N11 red " : "", pos ? "P1-P9 " : "", comp);
+    return 0;
+}

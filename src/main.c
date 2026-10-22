@@ -72,12 +72,30 @@ int askedline(void) {
     __write(2, out, nout);
     return 0;
 }
+/* src/cxmod.c's file access, for this driver */
+int cxm_rd(char *path, char *buf, int cap) {
+    int fd; int n;
+    fd = ropen(path);
+    if (fd < 0) return 0 - 1;
+    n = __read(fd, buf, cap); __close(fd);
+    if (n < 0) return 0 - 1;
+    if (n >= cap) return 0 - 2;
+    return n;
+}
+int cxm_wr(char *path, char *buf, int n) {
+    int fd; int w;
+    fd = wopen(path);
+    if (fd < 0) return 1;
+    w = __write(fd, buf, n); __close(fd);
+    return w != n;
+}
+int cxm_say(int fd, char *s, int n) { __write(fd, s, n); return 0; }
 int main(void) {
     int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror; int force_origin; int emitbin;
     char *a; char *t; us_addr e; int n; int j;
     char *outpath;
     int (*entry)(us_i64, us_addr);
-    int objwant; int bgiven; int funit; int asmwant; int sgiven;
+    int objwant; int bgiven; int funit; int asmwant; int sgiven; int ncli;
     srcroom(0);
     asmwant = 0; sgiven = 0;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
@@ -123,7 +141,8 @@ int main(void) {
             printf("unisacc %s\n", UNISACC_VERSION);
             return 0;
         }
-        if (a[0] == 45 && a[1]) {
+        if (cxm_flag(a)) {                         /* -cx-plan, -cx-interface (src/cxmod.c) */
+        } else if (a[0] == 45 && a[1]) {
             if (strsame(a, "--force-origin")) { force_origin = 1;
             } else { if (strsame(a, "--tapebin")) { emitbin = 1;
             } else { if (a[1] == 105 && a[2] == 113 && a[3] == 117 && a[4] == 111 && a[5] == 116 && a[6] == 101) {
@@ -228,6 +247,22 @@ int main(void) {
                "  -S  write the tape, this compiler's assembly-level IR"
                " (-c is a synonym: there are no object files)", 0);
     }
+    /* CX2a: a .cx unit's `#pragma unisa use` adds the module's unit after the command-line inputs (src/cxmod.c);
+       .c units are never scanned.  The program's own arguments still follow the inputs the line named (ncli). */
+    ncli = ninput;
+    if (cxm_wantif && ninput > 0) return cxm_interface(inputs[0]);
+    cxm_on = 0;
+    if (ninput > 0 && istapebin(inputs[0]) == 0 && istape(inputs[0]) == 0 && isobject(inputs[0]) == 0) {
+        k = cxm_wantplan; j = 0;
+        while (j < ninput) { if (cxm_iscxpath(inputs[j])) k = 1; j = j + 1; }
+        if (k) {
+            if (cxm_plan(inputs, ninput)) return 1;
+            if (cxm_n > 63) return emsg("cx: more than 63 units in one program", 0);
+            j = 0; while (j < cxm_n) { inputs[j] = cxm_arg[j]; j = j + 1; }
+            ninput = cxm_n;
+        }
+    }
+    if (cxm_wantplan) return cxm_planprint(opti, nopti);
     if (emitbin && dump == 0 && runit == 0) dump = 1;
     /* `-c` with an explicit `-b`: a relocatable object.  Bare `-c` stays the
        tape (86 suites spell -S that way) until Mach-O and COFF objects exist
@@ -283,8 +318,8 @@ int main(void) {
         if (werror && nwarn > 0) return 1;           /* -Werror: nothing runs */
         /* argv[0] is the program, which is its first source file; the rest
            of the line follows the inputs */
-        n = __argc() - (fi + ninput) + 1;
-        j = fi + ninput;                             /* the program's first argument... */
+        n = __argc() - (fi + ncli) + 1;
+        j = fi + ncli;                             /* the program's first argument... */
         if (j < __argc()) { if (strsame(__argv(j), "--")) { j = j + 1; n = n - 1; } }   /* ...not the `--` that ends the inputs */
         if (n > 255) n = 255;
         if (n < 1) n = 1;

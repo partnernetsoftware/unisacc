@@ -443,6 +443,11 @@ static char *extra[] = {
     /* tdescprobe-oracle / -classic: TDESC 尺寸模型对系统 cc；经典参考的判定棘轮; tests/tdescprobe.cx */
     "chain", "tdescprobe-oracle", "meta",
     "chain", "tdescprobe-classic", "E1,E2,E3,meta",
+    /* cxmodule-neg / -pos / -classic: CX2a .cx modules (#pragma unisa use, derived interface CXIF): the driver's unit
+       closure and per-unit forced includes, named refusals, the system cc oracle; tests/cxmodcheck.cx */
+    "chain", "cxmodule-neg", "E2,meta",
+    "chain", "cxmodule-pos", "E2,meta",
+    "chain", "cxmodule-classic", "E2,meta",
     /* com-input-contract: 驱动输入合同（tape路单源具名拒绝；C路多余输入与空输入现行口径登记；空tape镜像与参考逐字节同）; tests/gate.sh */
     "meta", "com-input-contract", "-",
     /* com-tape-struct: 程序结构级具名拒绝（未定义/重复标签、encoder-slice宽度；无行号的not covered）与重复数据符号接受登记（与参考逐字节同）; tests/gate.sh */
