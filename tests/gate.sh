@@ -215,6 +215,8 @@ for k in 1 2 3 4; do job difftest-py-$k env -u UA -u UA_RUN SHARD=$k/4 ./tests/d
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 sh ./tests/cxbin tests/declmatrix.cx; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects) (.cx port, 2026-10-23)
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
 job decision-ledger tests/bound 58 sh ./tests/cxbin tests/decisionledger.cx   # (.cx port, 2026-10-23) 0.0.23 I: build-time Python control (direct transition sites) may only fall
+job zeropython tests/bound 58 sh ./tests/cxbin tests/zeropython.cx --check   # (2026-10-23) owner's hard goal, zero Python (prd.md §1): python call sites, unisa importers and .py files may only fall against tests/zeropython.tsv
+job zeropython-selftest tests/bound 58 sh ./tests/cxbin tests/zeropython.cx --selftest   # the matcher on fixed snippets; seeded rises (a file, a total, a new .py, a new data line) must fail
 job manifest-entries-pp tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage pp   # (.cx port, 2026-10-23)
 job manifest-entries-lex tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage lex
 job manifest-entries-parse2 tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage parse2

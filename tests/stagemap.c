@@ -25,7 +25,7 @@
 #include <stdlib.h>
 
 static char *rules[] = {
-    "meta", "identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative c99-ledger decision-ledger ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
+    "meta", "identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative c99-ledger decision-ledger zeropython* ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
             " subtract-safety* cxinclude glossarycheck* freezecheck freezecheck-selftest revivedscan facts-export publish-order gate-infra gate-layers"
             " tsv-build-account pipeline-cache docs kernel source-layout front-bounds bound boundreason boundstall-r7g boundnested-1 boundnested-2 boundnested-3 boundnested-4 boundnested-5 fresh-order*"
             " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools tools-*-ref tools-*-build tools-*-run"

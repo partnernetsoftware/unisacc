@@ -1,0 +1,630 @@
+#!/usr/bin/env -S unisacc.com -run
+/* zeropython.cx -- the zero-python ledger (2026-10-23; prd.md §1 "零 Python 依赖", docs/glossary.md §4,
+   research/c43-roadmap-0043-and-refactor.md (E)): the owner's hard goal is 100% zero Python in the build, the gates
+   and the verification chain.  This counts what is left and keeps it from growing (a down-only ratchet).
+   usage: sh ./unisacc.com -run tests/zeropython.cx -- [--list [N] | --lines [PATH] | --check | --write | --selftest]
+          sh ./tests/cxbin tests/zeropython.cx [same]                                            (gate form)
+     (none)     the three numbers, with the call-site sub-counts and the raw grep figure the owner's baseline used
+     --list [N] per-file breakdown (all files with any count, or the top N by call sites): real data unisa py raw path
+     --lines    every counted line, `PATH:LINE: KIND: text` (KIND real | data | unisa; unisa: the first line), or only PATH's
+     --check    compare with tests/zeropython.tsv: rc 1 when a total or a file's count rose, or a file absent from the
+                baseline has a nonzero count; drops are reported (run --write to ratchet them in)
+     --write    rewrite tests/zeropython.tsv from the current counts; refused (rc 1) when any total rose.  Per-file
+                moves under non-rising totals (a rename, a split) are accepted here and listed -- deliberately, by hand
+     --selftest the matcher on fixed snippets and the ratchet on seeded rises (no repository access)
+     --scan F   one file F as if listed: its counted lines and counts (debugging the matcher)
+   The repository root is the parent of this file's directory (__FILE__; under tests/cxbin the cwd is the root).
+   Files: `git ls-files -z` run in the root, minus every path under archive/; a listed path that is not a regular
+   file in the work tree (deleted, a symlink, a submodule) is skipped, as is a file with a NUL in its first 8 KiB,
+   and so are tests/zeropython.cx and tests/zeropython.tsv (the matcher's own fixtures and table).
+
+   THE MATCHER (one count per line; a line is counted at most once per number).  This file is held to rule G5 of
+   tests/glossarycheck.cx (no Python invocation in a new file), so its text spells the interpreter's versioned names
+   as python<V> (V = 3, 3.12, ...) and its --selftest fixtures write @ for the bare word, expanded at run time.
+   python token: lowercase `python` + any run of [0-9.] (the bare word, python<3>, python<3.12>), not preceded by
+     [A-Za-z0-9_-] and not followed by [A-Za-z0-9_-] or `:` (so micropython, python<3>-config, python_exe, PYTHONPATH,
+     prose `Python` and the `(python: KeyError)` labels of C ports are not tokens); a trailing `.` is not part of the
+     version; also `sys.executable` (Python spawning itself).
+   In a string literal (C and PY rules) a token counts only when it ends the literal or is followed by a blank, a
+     quote, a backslash or one of ; | & ) -- argv[0], a command string, `command -v python<3>;` -- not a path or prose
+     fragment (`python@3.14/...`, `python<3>/true not found`).
+   A direct run: a word ./PATH whose PATH ends in .py.
+   Each file gets a class from its name: SH = *.sh *.bash Makefile GNUmakefile *.mk *.make *.yml *.yaml (CI) and
+     extensionless files with a sh/bash/dash/zsh/ksh shebang; C = *.c *.h *.cx *.inc *.js *.mjs *.cjs *.ts; PY = *.py
+     and extensionless files with a python shebang.  Every other file (docs, TSV/JSON data, ...) is not scanned: a
+     mention there runs nothing.
+   (a) python call sites, split REAL / DATA:
+     shebang  line 1 `#!...` holding a python token, any class: REAL.
+     SH       the code of the line (a `#` that starts a word outside quotes begins a comment; quotes reset per line)
+              holds a python token, or a direct run in command position (line start or after ; & | ( ` or the words
+              exec then do else, past VAR=value words): REAL.  A heredoc body (`<<[-]WORD`, outside quotes, until a
+              line that is WORD once leading blanks are dropped) is scanned as PY code when the opening line holds a
+              python token (the interpreter reading `- <<'PY'`), else as SH lines (a generated script still calls what
+              it says).
+     C        comments (block, across lines, and //) are dropped; a python token inside a string literal ("", '',
+              js ``) is REAL, except when the token sits between single quotes inside the literal (`"... '@',
+              ..."` with @ a token): that is a Python-literal declaration of another program's command or tools (the
+              gatedeps suite declarations in tests/refreshgatedeps.cx, mirroring tests/gate.sh): DATA.  A literal
+              that starts with a direct run is REAL.  Tokens outside literals are identifiers: none.
+     PY       comments and triple-quoted strings (docstrings, usage text; tracked across lines) are dropped; a python
+              token inside a remaining literal, a literal starting with a direct run, or `sys.executable` anywhere in
+              the code: REAL.
+   (b) unisa importers (files, outside unisa/ itself): any scanned line whose code (as above: comments, docstrings
+     dropped; literals kept) holds `import unisa` / `from unisa` (word-bounded), `-m unisa` or its argv form
+     (`'-m', 'unisa'`, `"-m", "unisa"`), or both `sys.path` and `unisa` (a path insertion into the package).
+   (c) .py files: listed paths ending in .py (present in the work tree).
+   raw: lines containing python<3> as a substring, in every listed file except *.json and *.inc -- the method of the
+     owner's 2026-10-23 baseline (2253): at edd8ab31 it gives 2251, with the owner's per-file numbers (tests/gate.sh
+     183, seedparse2consumercheck.sh 41, seedppchaincheck.sh 37, refreshgatedeps.cx 36, seedoptconsumercheck.sh 29,
+     seedppconsumercheck.sh 26).  Shown, never ratcheted: it counts docs and comments, which run nothing.
+   Known limits (named): a direct run behind a wrapper word other than those above (`job NAME`, `tests/bound 58`) is
+     not seen (none in the tree); a message that names the interpreter in SH code counts as REAL (`echo "needs
+     python<3>"`: a dependency hint all the same); PYTHONPATH/PYTHONHASHSEED settings are not counted.
+   No #include: the prelude is built in. */
+
+#define PATHN 4096
+static char ROOT[PATHN];
+static const char PYW[] = "pyth" "on", PYW3[] = "pyth" "on3";   /* spelled apart: G5 of tests/glossarycheck.cx */
+
+static void die(const char *a, const char *b) { fflush(stdout); fprintf(stderr, "zeropython: %s%s\n", a, b ? b : ""); exit(2); }
+static void *xrealloc(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) die("out of memory", 0); return q; }
+static char *xstrndup(const char *s, size_t n) { char *d = xrealloc(0, n + 1); memcpy(d, s, n); d[n] = 0; return d; }
+static char *xstrdup(const char *s) { return xstrndup(s, strlen(s)); }
+
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *x, const char *s, size_t n) {
+    if (x->n + n + 1 > x->cap) { x->cap = (x->n + n + 1) * 2 + 64; x->b = xrealloc(x->b, x->cap); }
+    memcpy(x->b + x->n, s, n); x->n += n; x->b[x->n] = 0;
+}
+#define PUT(x, s, n) do { if (x) bput((x), (s), (n)); } while (0)   /* a NULL code buffer: state only */
+static void bputs(Buf *x, const char *s) { bput(x, s, strlen(s)); }
+static void bprintf(Buf *x, const char *fmt, ...) {
+    char t[PATHN + 256]; va_list ap; int n;
+    va_start(ap, fmt); n = vsnprintf(t, sizeof t, fmt, ap); va_end(ap);
+    if (n < 0) die("format", 0);
+    bput(x, t, (size_t)n < sizeof t ? (size_t)n : sizeof t - 1);
+}
+
+/* ---------------- the matcher ---------------- */
+enum { K_NONE, K_SH, K_C, K_PY };
+static int startswith(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+static int endswith(const char *s, const char *suf) { size_t n = strlen(s), m = strlen(suf); return n >= m && !strcmp(s + n - m, suf); }
+static int wordc(int c) { return c == '_' || c == '-' || isalnum((unsigned char)c); }
+static int identc(int c) { return c == '_' || isalnum((unsigned char)c); }
+
+/* a python token at s[i]; its length (0 when none) */
+static size_t pytok_at(const char *s, size_t n, size_t i) {
+    size_t j;
+    if (i + 6 > n || memcmp(s + i, PYW, 6) || (i > 0 && wordc((unsigned char)s[i - 1]))) return 0;
+    for (j = i + 6; j < n && (isdigit((unsigned char)s[j]) || s[j] == '.'); j++) ;
+    while (j > i + 6 && s[j - 1] == '.') j--;                         /* a sentence's full stop is not the version */
+    if (j < n && (wordc((unsigned char)s[j]) || s[j] == ':')) return 0;      /* `python:` labels prose (python: KeyError) */
+    return j - i;
+}
+/* in a literal [a, i): a token that ends the literal or is followed by a blank or a quote or a shell
+   separator ; | & ) (argv[0], a command string) */
+static size_t lit_tok(const char *s, size_t a, size_t i, size_t k) {
+    size_t t = pytok_at(s, i, k);
+    if (t && k + t < i && !strchr(" \t'\"\\;|&)", s[k + t])) return 0;
+    (void)a; return t;
+}
+static int has_sysexe(const char *s, size_t n) {
+    size_t i;
+    for (i = 0; i + 14 <= n; i++)
+        if (!memcmp(s + i, "sys.executable", 14) && (i == 0 || !identc((unsigned char)s[i - 1])) && (i + 14 == n || !identc((unsigned char)s[i + 14]))) return 1;
+    return 0;
+}
+static int contains(const char *s, size_t n, const char *nd) {   /* memmem */
+    size_t m = strlen(nd); const char *p = s, *e = s + n;
+    while (e - p >= (long)m && (p = memchr(p, nd[0], (size_t)(e - p - (long)m + 1)))) { if (!memcmp(p, nd, m)) return 1; p++; }
+    return 0;
+}
+static int has_pytok(const char *s, size_t n) { size_t i; for (i = 0; i < n; i++) if (pytok_at(s, n, i)) return 1; return has_sysexe(s, n); }
+/* a direct run at s[i]: a word ./PATH whose PATH ends in .py (the word ends at a blank, quote, ; | & ) ` or the end) */
+static int dotpy_at(const char *s, size_t n, size_t i) {
+    size_t j;
+    if (i + 2 > n || s[i] != '.' || s[i + 1] != '/') return 0;
+    for (j = i + 2; j < n && !isspace((unsigned char)s[j]) && !strchr("'\";|&)`", s[j]); j++) ;
+    return j - i > 5 && !memcmp(s + j - 3, ".py", 3);
+}
+static int word_is(const char *s, size_t a, size_t b, const char *w) { return b - a == strlen(w) && !memcmp(s + a, w, b - a); }
+/* word-bounded NEEDLE in s[0,n) */
+static int has_word(const char *s, size_t n, const char *needle) {
+    size_t m = strlen(needle), i;
+    for (i = 0; i + m <= n; i++)
+        if (!memcmp(s + i, needle, m) && (i == 0 || !identc((unsigned char)s[i - 1])) && (i + m == n || !identc((unsigned char)s[i + m]))) return 1;
+    return 0;
+}
+/* (b) on a line's code */
+static int unisa_line(const char *s, size_t n) {
+    size_t i, j;
+    if (has_word(s, n, "import unisa") || has_word(s, n, "from unisa")) return 1;
+    for (i = 0; i + 2 <= n; i++) {
+        if (s[i] != '-' || s[i + 1] != 'm' || (i > 0 && !isspace((unsigned char)s[i - 1]) && s[i - 1] != '\'' && s[i - 1] != '"')) continue;
+        j = i + 2;
+        if (j < n && (s[j] == '\'' || s[j] == '"')) { j++; while (j < n && (s[j] == ',' || isspace((unsigned char)s[j]))) j++; if (j < n && (s[j] == '\'' || s[j] == '"')) j++; else continue; }
+        else if (j < n && isspace((unsigned char)s[j])) { while (j < n && isspace((unsigned char)s[j])) j++; }
+        else continue;
+        if (j + 5 <= n && !memcmp(s + j, "unisa", 5) && (j + 5 == n || !identc((unsigned char)s[j + 5]))) return 1;
+    }
+    { int sp = 0, un = 0; for (i = 0; i + 8 <= n; i++) if (!memcmp(s + i, "sys.path", 8)) sp = 1;
+      if (sp) for (i = 0; i + 5 <= n; i++) if (!memcmp(s + i, "unisa", 5)) un = 1;
+      if (sp && un) return 1; }
+    return 0;
+}
+
+typedef struct { int real, data, unisa, py, raw; } Counts;
+typedef struct { const char *path; int lines; const char *filter; } Ctx;     /* --lines output */
+static Ctx CTX;
+static void report(const char *path, int lineno, const char *kind, const char *s, size_t n) {
+    if (!CTX.lines) return;
+    if (CTX.filter && strcmp(CTX.filter, path)) return;
+    printf("%s:%d: %s: %.*s\n", path, lineno, kind, (int)(n > 200 ? 200 : n), s);
+}
+
+/* per-file scanner state */
+typedef struct {
+    int kind, in_comment, triple;            /* C block comment; PY triple quote char (0 none) */
+    char heredoc[128]; int hd_py, hd_triple; /* SH heredoc terminator (empty: none); body read as PY */
+} Scan;
+
+/* PY rules on one line; returns 1 REAL; *code_out/*cn the line's code (literals kept, comments/triples dropped) */
+static int py_line(const char *s, size_t n, int *triple, Buf *code) {
+    size_t i = 0; int real = 0;
+    if (code) { code->n = 0; if (code->b) code->b[0] = 0; }
+    while (i < n) {
+        char c = s[i];
+        if (*triple) {
+            if (i + 3 <= n && s[i] == *triple && s[i + 1] == *triple && s[i + 2] == *triple) { *triple = 0; i += 3; }
+            else i += (s[i] == '\\' && i + 1 < n) ? 2 : 1;
+            continue;
+        }
+        if (c == '#') break;
+        if (c == '"' || c == '\'') {
+            size_t a;
+            if (i + 3 <= n && s[i + 1] == c && s[i + 2] == c) { *triple = c; i += 3; continue; }
+            a = ++i;
+            while (i < n && s[i] != c) i += (s[i] == '\\' && i + 1 < n) ? 2 : 1;
+            if (code) { size_t k; for (k = a; k < i; k++) if (lit_tok(s, a, i, k)) real = 1; }
+            if (code && dotpy_at(s, i, a)) real = 1;
+            PUT(code, s + a - 1, (i < n ? i + 1 : i) - (a - 1));
+            if (i < n) i++;
+            continue;
+        }
+        PUT(code, &c, 1); i++;
+    }
+    if (code && code->b && has_sysexe(code->b, code->n)) real = 1;
+    return real;
+}
+
+/* C rules: 1 REAL, 2 DATA, 0 none */
+static int c_line(const char *s, size_t n, int *in_comment, Buf *code) {
+    size_t i = 0; int real = 0, data = 0;
+    if (code) { code->n = 0; if (code->b) code->b[0] = 0; }
+    while (i < n) {
+        char c = s[i];
+        if (*in_comment) {
+            if (i + 1 < n && s[i] == '*' && s[i + 1] == '/') { *in_comment = 0; i += 2; } else i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') { *in_comment = 1; i += 2; continue; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') break;
+        if (c == '"' || c == '\'' || c == '`') {
+            size_t a = ++i, k;
+            while (i < n && s[i] != c) i += (s[i] == '\\' && i + 1 < n) ? 2 : 1;
+            if (code) for (k = a; k < i; k++) {
+                size_t t = lit_tok(s, a, i, k);
+                if (!t) continue;
+                if (c != '\'' && k > a && s[k - 1] == '\'' && k + t < i && s[k + t] == '\'') data = 1; else real = 1;
+            }
+            if (code && dotpy_at(s, i, a)) real = 1;
+            PUT(code, s + a - 1, (i < n ? i + 1 : i) - (a - 1));
+            if (i < n) i++;
+            continue;
+        }
+        PUT(code, &c, 1); i++;
+    }
+    return real ? 1 : data ? 2 : 0;
+}
+
+/* SH rules: 1 REAL; heredoc opener recorded in sc */
+static int sh_line(const char *s, size_t n, Scan *sc, Buf *code) {
+    size_t i = 0, cmdpos = 1; char q = 0; int real = 0;
+    if (code) { code->n = 0; if (code->b) code->b[0] = 0; }
+    while (i < n) {
+        char c = s[i];
+        if (q) {
+            if (c == q) q = 0;
+            else if (q == '"' && c == '\\' && i + 1 < n) { PUT(code, s + i, 2); i += 2; continue; }
+            PUT(code, &c, 1); i++; continue;
+        }
+        if (c == '#' && (i == 0 || isspace((unsigned char)s[i - 1]) || strchr(";&|(", s[i - 1]))) break;
+        if (c == '\\' && i + 1 < n) { PUT(code, s + i, 2); i += 2; cmdpos = 0; continue; }
+        if (c == '\'' || c == '"') { q = c; PUT(code, &c, 1); i++; cmdpos = 0; continue; }
+        if (c == '<' && i + 1 < n && s[i + 1] == '<' && (i + 2 >= n || s[i + 2] != '<') && (i == 0 || s[i - 1] != '<') && !sc->heredoc[0]) {
+            size_t j = i + 2, a; char dq = 0;
+            if (j < n && s[j] == '-') j++;
+            while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+            if (j < n && (s[j] == '\'' || s[j] == '"')) dq = s[j++];
+            else if (j < n && s[j] == '\\') j++;
+            a = j;
+            while (j < n && (identc((unsigned char)s[j]) || s[j] == '.')) j++;
+            if (j > a && j - a < sizeof sc->heredoc && (isalpha((unsigned char)s[a]) || s[a] == '_')) {
+                memcpy(sc->heredoc, s + a, j - a); sc->heredoc[j - a] = 0;
+                if (dq && j < n && s[j] == dq) j++;
+                PUT(code, s + i, j - i); i = j; continue;
+            }
+        }
+        if (cmdpos && c == '.' && dotpy_at(s, n, i)) real = 1;
+        if (strchr(";&|(`", c)) cmdpos = 1;
+        else if (!isspace((unsigned char)c)) {
+            if (cmdpos) {   /* a word in command position: the words exec/then/do/else keep the next one there */
+                size_t j = i; while (j < n && !isspace((unsigned char)s[j]) && !strchr(";&|(`'\"", s[j])) j++;
+                PUT(code, s + i, j - i);
+                cmdpos = word_is(s, i, j, "exec") || word_is(s, i, j, "then") || word_is(s, i, j, "do") || word_is(s, i, j, "else") ||
+                         (memchr(s + i, '=', j - i) && (!memchr(s + i, '/', j - i) || (char *)memchr(s + i, '=', j - i) < (char *)memchr(s + i, '/', j - i)));   /* VAR=x */
+                i = j; continue;
+            }
+        }
+        PUT(code, &c, 1); i++;
+    }
+    if (code && code->b && has_pytok(code->b, code->n)) real = 1;
+    return real;
+}
+
+static int classify(const char *path, const char *b, size_t n) {
+    const char *base = strrchr(path, '/'), *dot; base = base ? base + 1 : path; dot = strrchr(base, '.');
+    if (endswith(base, ".py")) return K_PY;
+    if (endswith(base, ".sh") || endswith(base, ".bash") || !strcmp(base, "Makefile") || !strcmp(base, "GNUmakefile") ||
+        endswith(base, ".mk") || endswith(base, ".make") || endswith(base, ".yml") || endswith(base, ".yaml")) return K_SH;
+    if (endswith(base, ".c") || endswith(base, ".h") || endswith(base, ".cx") || endswith(base, ".inc") || endswith(base, ".js") ||
+        endswith(base, ".mjs") || endswith(base, ".cjs") || endswith(base, ".ts")) return K_C;
+    if (!dot && n > 2 && b[0] == '#' && b[1] == '!') {     /* #!INTERP or #!.../env [-S] INTERP */
+        size_t e = 2, a, z; while (e < n && b[e] != '\n') e++;
+        if (has_pytok(b, e)) return K_PY;
+        for (a = 2; a < e && isspace((unsigned char)b[a]); a++) ;
+        for (z = a; z < e && !isspace((unsigned char)b[z]); z++) ;
+        if (z - a >= 4 && !memcmp(b + z - 4, "/env", 4)) {
+            for (;;) {
+                for (a = z; a < e && isspace((unsigned char)b[a]); a++) ;
+                for (z = a; z < e && !isspace((unsigned char)b[z]); z++) ;
+                if (a < e && b[a] == '-') continue;
+                break;
+            }
+        }
+        { size_t s0 = z; while (s0 > a && b[s0 - 1] != '/') s0--;
+          if (word_is(b, s0, z, "sh") || word_is(b, s0, z, "bash") || word_is(b, s0, z, "dash") || word_is(b, s0, z, "zsh") || word_is(b, s0, z, "ksh")) return K_SH; }
+    }
+    return K_NONE;
+}
+
+/* count one file's text into *c */
+static void scan_text(const char *path, const char *b, size_t n, Counts *c) {
+    Scan sc; Buf code = {0}; size_t i = 0; int lineno = 0, under_unisa = startswith(path, "unisa/"), isjson = endswith(path, ".json") || endswith(path, ".inc");
+    memset(&sc, 0, sizeof sc); memset(c, 0, sizeof *c);
+    c->py = endswith(path, ".py");
+    sc.kind = classify(path, b, n);
+    while (i < n) {
+        size_t e = i, len; const char *s = b + i; int r = 0, u = 0; Buf *cp;
+        while (e < n && b[e] != '\n') e++;
+        len = e - i; if (len && s[len - 1] == '\r') len--;
+        lineno++;
+        if (!isjson && contains(s, len, PYW3)) c->raw++;
+        if (sc.kind == K_NONE) { i = e + 1; continue; }
+        cp = contains(s, len, PYW) || contains(s, len, "sys.executable") || contains(s, len, "unisa") || contains(s, len, ".py") ? &code : 0;
+        if (lineno == 1 && len > 2 && s[0] == '#' && s[1] == '!' && has_pytok(s, len)) r = 1;
+        if (r) { /* the shebang */ }
+        else if (sc.kind == K_SH && sc.heredoc[0]) {
+            size_t a = 0; while (a < len && (s[a] == ' ' || s[a] == '\t')) a++;
+            if (len - a == strlen(sc.heredoc) && !memcmp(s + a, sc.heredoc, len - a)) sc.heredoc[0] = 0;
+            else if (sc.hd_py) { r = py_line(s, len, &sc.hd_triple, cp); u = cp && unisa_line(code.b ? code.b : "", code.n); }
+            else { Scan inner = sc; inner.heredoc[0] = 0; r = sh_line(s, len, &inner, cp); u = cp && unisa_line(code.b ? code.b : "", code.n); }
+        } else if (sc.kind == K_SH) {
+            r = sh_line(s, len, &sc, cp); u = cp && unisa_line(code.b ? code.b : "", code.n);
+            if (sc.heredoc[0]) { sc.hd_py = r; sc.hd_triple = 0; }
+        } else if (sc.kind == K_C) {
+            r = c_line(s, len, &sc.in_comment, cp); u = cp && unisa_line(code.b ? code.b : "", code.n);
+        } else if (sc.kind == K_PY) {
+            r = py_line(s, len, &sc.triple, cp); u = cp && unisa_line(code.b ? code.b : "", code.n);
+        }
+        if (r == 1) { c->real++; report(path, lineno, "real", s, len); }
+        else if (r == 2) { c->data++; report(path, lineno, "data", s, len); }
+        if (u && !under_unisa) { if (!c->unisa) report(path, lineno, "unisa", s, len); c->unisa = 1; }
+        i = e + 1;
+    }
+    free(code.b);
+}
+
+/* ---------------- the ledger: per-file counts and totals ---------------- */
+typedef struct { char *path; Counts c; } Row;
+typedef struct { Row *v; int n, cap; Counts tot; } Ledger;
+static void led_add(Ledger *l, const char *path, const Counts *c) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 256; l->v = xrealloc(l->v, (size_t)l->cap * sizeof *l->v); }
+    l->v[l->n].path = xstrdup(path); l->v[l->n].c = *c; l->n++;
+    l->tot.real += c->real; l->tot.data += c->data; l->tot.unisa += c->unisa; l->tot.py += c->py; l->tot.raw += c->raw;
+}
+static int nonzero(const Counts *c) { return c->real || c->data || c->unisa || c->py; }
+static int rowcmp_path(const void *x, const void *y) { return strcmp(((const Row *)x)->path, ((const Row *)y)->path); }
+static int rowcmp_calls(const void *x, const void *y) {
+    const Row *a = x, *b = y; int ca = a->c.real + a->c.data, cb = b->c.real + b->c.data;
+    if (ca != cb) return cb - ca;
+    if (a->c.unisa != b->c.unisa) return b->c.unisa - a->c.unisa;
+    return strcmp(a->path, b->path);
+}
+static const Row *led_find(const Ledger *l, const char *path) {
+    Row key; key.path = (char *)path;
+    return l->n ? bsearch(&key, l->v, (size_t)l->n, sizeof *l->v, rowcmp_path) : 0;
+}
+
+/* the tracked files of ROOT, scanned (rows with any count, sorted by path) */
+static void measure(Ledger *l) {
+    char *out = 0, *p, *end; size_t n = 0; int rc; char *argv[] = { "git", "ls-files", "-z", 0 };
+    if (chdir(ROOT)) die("cannot enter the repository root ", ROOT);
+    rc = cx_runv_timeout(argv, 60, &out, &n);
+    if (rc != 0 || !out) die("git ls-files failed", 0);
+    for (p = out, end = out + n; p < end; p += strlen(p) + 1) {
+        struct stat st; size_t len; char *b; Counts c;
+        if (!*p || startswith(p, "archive/")) continue;
+        if (!strcmp(p, "tests/zeropython.cx") || !strcmp(p, "tests/zeropython.tsv")) continue;   /* its own fixtures and table */
+        if (lstat(p, &st) || !S_ISREG(st.st_mode)) continue;
+        if (!(b = cx_read(p, &len))) continue;
+        if (memchr(b, 0, len < 8192 ? len : 8192)) { free(b); continue; }
+        scan_text(p, b, len, &c);
+        free(b);
+        if (nonzero(&c) || c.raw) led_add(l, p, &c);
+    }
+    free(out);
+    if (l->n) qsort(l->v, (size_t)l->n, sizeof *l->v, rowcmp_path);
+}
+
+/* ---------------- tests/zeropython.tsv ---------------- */
+static const char *HEADER =
+"# tests/zeropython.tsv -- the zero-python ledger (owner's hard goal, prd.md §1: 100% zero Python dependency in the\n"
+"# build, the gates and the verification chain; then unisa/ moves to archive/).  Written by\n"
+"#   sh ./unisacc.com -run tests/zeropython.cx -- --write\n"
+"# and checked by gate suite `zeropython` (--check): no total and no file's count may rise, and a file absent from\n"
+"# this table must count zero; a drop is ratcheted in with --write (which refuses any rising total).  Columns:\n"
+"#   real   lines that invoke the interpreter (its commands, a shebang naming it, sys.executable, an execvp of it,\n"
+"#          a .py run directly as ./PATH) in shell/make/CI, C/.cx/js and .py code -- comments and docstrings excluded\n"
+"#   data   lines of C/.cx whose python token is a quoted Python-literal declaration of another program's command or\n"
+"#          tools (tests/refreshgatedeps.cx's gatedeps suite declarations mirroring tests/gate.sh)\n"
+"#   unisa  1 when the file imports the unisa package (import/from unisa, -m unisa, sys.path into unisa); unisa/\n"
+"#          itself is not counted\n"
+"#   py     1 when the file is a .py\n"
+"# The matcher, precisely: the comment at the top of tests/zeropython.cx.  archive/ is outside the ledger.\n"
+"# TOTAL row first, then one FILE row per file with a nonzero count, in path order.\n";
+
+static void led_format(const Ledger *l, Buf *o) {
+    int i;
+    bputs(o, HEADER);
+    bprintf(o, "TOTAL\t*\t%d\t%d\t%d\t%d\n", l->tot.real, l->tot.data, l->tot.unisa, l->tot.py);
+    for (i = 0; i < l->n; i++) {
+        const Counts *c = &l->v[i].c;
+        if (nonzero(c)) bprintf(o, "FILE\t%s\t%d\t%d\t%d\t%d\n", l->v[i].path, c->real, c->data, c->unisa, c->py);
+    }
+}
+/* split S at the separators SEP (one per field boundary, the last reused): [KIND] PATH N N N N; 0 ok */
+static int fields(char *s, const char *sep, char *kind, size_t kn, char *path, size_t pn, int *a, int *b, int *c, int *d) {
+    int *num[4]; int k; char *e; size_t m; const char *sp = sep;
+    num[0] = a; num[1] = b; num[2] = c; num[3] = d;
+    if (kind) { m = strcspn(s, sp); if (!s[m] || m >= kn) return -1; memcpy(kind, s, m); kind[m] = 0; s += m + 1; }
+    m = strcspn(s, sp); if (!s[m] || m >= pn || !m) return -1; memcpy(path, s, m); path[m] = 0; s += m + 1; if (sp[1]) sp++;
+    for (k = 0; k < 4; k++) {
+        long v = strtol(s, &e, 10);
+        if (e == s || v < 0 || v > 100000000) return -1;
+        *num[k] = (int)v; s = e;
+        if (k < 3) { if (*s != *sp) return -1; s++; if (sp[1]) sp++; }
+    }
+    return *s ? -1 : 0;
+}
+/* 0 ok, -1 malformed (*why) */
+static int led_parse(const char *text, Ledger *l, const char **why) {
+    const char *p = text; int have_total = 0;
+    memset(l, 0, sizeof *l);
+    while (*p) {
+        const char *e = strchr(p, '\n'); size_t len = e ? (size_t)(e - p) : strlen(p);
+        char line[PATHN + 128], kind[16], path[PATHN]; int a, b, c, d;
+        if (len && *p != '#') {
+            if (len >= sizeof line) { *why = "line too long"; return -1; }
+            memcpy(line, p, len); line[len] = 0;
+            if (fields(line, "\t", kind, sizeof kind, path, sizeof path, &a, &b, &c, &d)) { *why = "malformed row"; return -1; }
+            if (!strcmp(kind, "TOTAL")) { l->tot.real = a; l->tot.data = b; l->tot.unisa = c; l->tot.py = d; have_total = 1; }
+            else if (!strcmp(kind, "FILE")) {
+                Counts k; Counts save = l->tot; memset(&k, 0, sizeof k); k.real = a; k.data = b; k.unisa = c; k.py = d;
+                led_add(l, path, &k); l->tot = save;
+            } else { *why = "unknown row kind"; return -1; }
+        }
+        p = e ? e + 1 : p + len;
+    }
+    if (!have_total) { *why = "no TOTAL row"; return -1; }
+    if (l->n) qsort(l->v, (size_t)l->n, sizeof *l->v, rowcmp_path);
+    return 0;
+}
+
+/* compare CUR with BASE: the number of rises (totals, files, new files); drops counted in *drops; lines into o */
+static const char *COL[] = { "real", "data", "unisa", "py" };
+static int getc4(const Counts *c, int k) { return k == 0 ? c->real : k == 1 ? c->data : k == 2 ? c->unisa : c->py; }
+static int compare(const Ledger *base, const Ledger *cur, int *drops, int *total_rises, Buf *o) {
+    int i, k, rises = 0; Counts zero; memset(&zero, 0, sizeof zero);
+    *drops = 0; *total_rises = 0;
+    for (k = 0; k < 4; k++) {
+        int was = getc4(&base->tot, k), now = getc4(&cur->tot, k);
+        if (now > was) { rises++; (*total_rises)++; bprintf(o, "ROSE  TOTAL %s %d -> %d\n", COL[k], was, now); }
+        else if (now < was) { (*drops)++; bprintf(o, "DROP  TOTAL %s %d -> %d\n", COL[k], was, now); }
+    }
+    for (i = 0; i < cur->n; i++) {
+        const Row *r = &cur->v[i], *b = led_find(base, r->path);
+        const Counts *bc = b ? &b->c : &zero;
+        if (!nonzero(&r->c)) continue;
+        for (k = 0; k < 4; k++) {
+            int was = getc4(bc, k), now = getc4(&r->c, k);
+            if (now > was) { rises++; bprintf(o, "%s  %s %s %d -> %d\n", b ? "ROSE" : "NEW ", r->path, COL[k], was, now); }
+        }
+    }
+    for (i = 0; i < base->n; i++) {
+        const Row *b = &base->v[i], *r = led_find(cur, b->path);
+        const Counts *rc = r ? &r->c : &zero;
+        for (k = 0; k < 4; k++) {
+            int was = getc4(&b->c, k), now = getc4(rc, k);
+            if (now < was) { (*drops)++; bprintf(o, "DROP  %s %s %d -> %d\n", b->path, COL[k], was, now); }
+        }
+    }
+    return rises;
+}
+
+static void summary(const Ledger *l) {
+    printf("zeropython: (a) python call sites %d (real %d, data %d)  (b) unisa importers %d  (c) .py files %d   [raw %s lines outside *.json/*.inc: %d]\n",
+           l->tot.real + l->tot.data, l->tot.real, l->tot.data, l->tot.unisa, l->tot.py, PYW3, l->tot.raw);
+}
+static void ledger_path(char *p) { snprintf(p, PATHN, "%s/tests/zeropython.tsv", ROOT); }
+
+static int do_list(Ledger *l, int top) {
+    int i, shown = 0; Row *v = xrealloc(0, (size_t)(l->n ? l->n : 1) * sizeof *v);
+    memcpy(v, l->v, (size_t)l->n * sizeof *v);
+    qsort(v, (size_t)l->n, sizeof *v, rowcmp_calls);
+    printf("%6s %6s %5s %3s %5s  %s\n", "real", "data", "unisa", "py", "raw", "path");
+    for (i = 0; i < l->n && (!top || shown < top); i++) {
+        if (!nonzero(&v[i].c) && !top) continue;
+        printf("%6d %6d %5d %3d %5d  %s\n", v[i].c.real, v[i].c.data, v[i].c.unisa, v[i].c.py, v[i].c.raw, v[i].path); shown++;
+    }
+    summary(l);
+    free(v);
+    return 0;
+}
+
+static int do_check(Ledger *cur) {
+    char p[PATHN]; size_t n; char *t; Ledger base; const char *why = 0; Buf o = {0}; int drops, trises, rises;
+    ledger_path(p);
+    if (!(t = cx_read(p, &n))) { fprintf(stderr, "zeropython: no baseline %s (run --write)\n", p); return 1; }
+    if (led_parse(t, &base, &why)) { fprintf(stderr, "zeropython: %s: %s\n", p, why); return 1; }
+    rises = compare(&base, cur, &drops, &trises, &o);
+    if (o.n) fputs(o.b, stdout);
+    summary(cur);
+    printf("zeropython: baseline real %d data %d unisa %d py %d; %d rise(s), %d drop(s)%s\n", base.tot.real, base.tot.data,
+           base.tot.unisa, base.tot.py, rises, drops, drops && !rises ? " -- ratchet with --write" : "");
+    return rises ? 1 : 0;
+}
+
+static int do_write(Ledger *cur) {
+    char p[PATHN]; size_t n; char *t; Ledger base; const char *why = 0; Buf o = {0}, w = {0}; int drops, trises;
+    ledger_path(p);
+    if ((t = cx_read(p, &n))) {
+        if (led_parse(t, &base, &why)) { fprintf(stderr, "zeropython: %s: %s\n", p, why); return 1; }
+        compare(&base, cur, &drops, &trises, &o);
+        if (o.n) fputs(o.b, stdout);
+        if (trises) { fprintf(stderr, "zeropython: refused: a total rose (the ledger only goes down)\n"); return 1; }
+    }
+    led_format(cur, &w);
+    if (cx_write(p, w.b, w.n)) die("cannot write ", p);
+    summary(cur);
+    printf("zeropython: wrote %s\n", p);
+    return 0;
+}
+
+/* ---------------- --selftest ---------------- */
+static int FAILS;
+/* fixtures write ~ for the interpreter's bare word and ^ for .py (G5 of tests/glossarycheck.cx holds this file) */
+static void expect(const char *what, const char *path, const char *fixture, int real, int data, int unisa) {
+    Counts c; Buf t = {0}; const char *f;
+    for (f = fixture; *f; f++) { if (*f == '~') bputs(&t, PYW); else if (*f == '^') bputs(&t, ".py"); else bput(&t, f, 1); }
+    scan_text(path, t.b, t.n, &c); free(t.b);
+    if (c.real != real || c.data != data || c.unisa != unisa) {
+        FAILS++; printf("selftest FAIL %s: real %d data %d unisa %d, want %d %d %d\n", what, c.real, c.data, c.unisa, real, data, unisa);
+    } else printf("selftest ok   %s\n", what);
+}
+static void expect_rc(const char *what, int got, int want) {
+    if (got != want) { FAILS++; printf("selftest FAIL %s: %d, want %d\n", what, got, want); }
+    else printf("selftest ok   %s\n", what);
+}
+static void mk(Ledger *l, const char *spec) {   /* "path:real,data,unisa,py;..." */
+    const char *s = spec; memset(l, 0, sizeof *l);
+    while (*s) {
+        char path[256]; Counts c; memset(&c, 0, sizeof c);
+        char one[512]; size_t m = strcspn(s, ";"); snprintf(one, sizeof one, "%.*s", (int)m, s);
+        if (!fields(one, ":,,,", 0, 0, path, sizeof path, &c.real, &c.data, &c.unisa, &c.py)) led_add(l, path, &c);
+        s += strcspn(s, ";"); if (*s) s++;
+    }
+    if (l->n) qsort(l->v, (size_t)l->n, sizeof *l->v, rowcmp_path);
+}
+static int selftest(void) {
+    Ledger b, c, r; Buf o = {0}; int drops, tr; const char *why = 0;
+    /* the matcher */
+    expect("sh command, comment, echo", "t/a.sh", "~3 x.py\n# ~3 in a comment\nok=1  # ~3\necho \"needs ~3\"\n", 2, 0, 0);
+    expect("sh tokens and non-tokens", "t/b.sh", "micro~; ~3-config; ~_exe; PYTHONPATH=x; Python\n~3.12 -V\n/usr/bin/~ -c 1\n", 2, 0, 0);
+    expect("sh direct ./x^", "t/c.sh", "./tests/x^ --check\nX=1 ./y^\nif a; then ./z^; fi\ncat ./w^\n", 3, 0, 0);
+    expect("sh heredoc read by the interpreter", "t/d.sh", "~3 - \"$@\" <<'PY'\nimport unisa\nsubprocess.run([sys.executable, 'x'])\n# ~3\ns = 'plain'\nPY\n~3 y\n", 3, 0, 1);
+    expect("sh other heredoc", "t/e.sh", "cat > f.sh <<EOF\n~3 z\n  EOF\necho done\n", 1, 0, 0);
+    expect("make -m unisa", "t/Makefile", "all:\n\t@~3 -m unisa acc\n# ~3 -m unisa\n", 1, 0, 1);
+    expect("ci yaml", "t/ci.yml", "      - run: ~3 tests/x.py   # ~3\n        name: don't ~3\n", 2, 0, 0);
+    expect("c literals real/data", "t/f.cx", "/* ~3\n   ~3 */ int x;\nchar *a[] = { \"~3\", \"t.py\", 0 };\nJ *j = pylit(\"['~3', './x^']\");\n// ~3\nstatic char *~_exe(void);\n", 1, 1, 0);
+    expect("c argv -m unisa", "t/g.c", "execvp(\"~3\", av); /* ~3 */\nchar *v[] = {\"-m\", \"unisa\"};\n", 1, 0, 1);
+    expect("c prose labels are not calls", "t/p.c", "die(\"unknown op (~: KeyError)\", op);\nsnprintf(c, n, \"%s/~3\", d);\nputs(\"see ~3.\");\n", 1, 0, 0);
+    expect("c ./x^ literal", "t/h.c", "cx_run(\"./tests/x^ --check\", 0, 0);\nchar *f = \"tests/x.py\";\n", 1, 0, 0);
+    expect("py shebang, docstring, subprocess", "t/i.py", "#!/usr/bin/env ~3\n\"\"\"usage: ~3 t/i.py\n   ~3 -m unisa\"\"\"\nimport unisa.front\nsubprocess.run(['~3', '-c', '1'])  # ~3\nx = 1\n", 2, 0, 1);
+    expect("py sys.path into unisa", "t/j.py", "sys.path.insert(0, str(ROOT / 'unisa'))\n", 0, 0, 1);
+    expect("unisa/ itself is not an importer", "unisa/k.py", "from unisa import x\n", 0, 0, 0);
+    expect("extensionless interpreter shebang", "t/l", "#!/usr/bin/env -S ~3 -u\nprint(1)\n", 1, 0, 0);
+    expect("extensionless sh shebang", "t/m", "#!/usr/bin/env -S sh -eu\n~3 x\n# ~3\n", 1, 0, 0);
+    expect("docs are not scanned", "t/n.md", "~3 -m unisa\n", 0, 0, 0);
+    /* the ratchet, seeded rises */
+    mk(&b, "a.sh:3,0,0,0;b.cx:1,2,0,0;c.py:1,0,1,1");
+    mk(&c, "a.sh:3,0,0,0;b.cx:1,2,0,0;c.py:1,0,1,1");
+    o.n = 0; expect_rc("same counts pass", compare(&b, &c, &drops, &tr, &o), 0);
+    mk(&c, "a.sh:4,0,0,0;b.cx:1,2,0,0;c.py:1,0,1,1");
+    o.n = 0; expect_rc("seeded file rise fails", compare(&b, &c, &drops, &tr, &o) > 0, 1);
+    expect_rc("  ... and the total rose", tr, 1);
+    mk(&c, "a.sh:2,0,0,0;b.cx:2,2,0,0;c.py:1,0,1,1");
+    o.n = 0; expect_rc("seeded move (file rise, total flat) fails --check", compare(&b, &c, &drops, &tr, &o) > 0, 1);
+    expect_rc("  ... but no total rose (--write would accept it)", tr, 0);
+    mk(&c, "a.sh:3,0,0,0;b.cx:1,2,0,0;c.py:1,0,1,1;d.py:0,0,0,1");
+    o.n = 0; expect_rc("seeded new .py fails", compare(&b, &c, &drops, &tr, &o) > 0, 1);
+    mk(&c, "a.sh:3,0,0,0;b.cx:1,2,0,0;c.py:1,0,1,1;e.c:0,1,0,0");
+    o.n = 0; expect_rc("seeded new data line fails", compare(&b, &c, &drops, &tr, &o) > 0, 1);
+    mk(&c, "a.sh:3,0,0,0;b.cx:1,2,0,0;c.py:1,0,0,1");
+    o.n = 0; expect_rc("seeded unisa import drop passes", compare(&b, &c, &drops, &tr, &o), 0);
+    expect_rc("  ... and is reported (file + total)", drops, 2);
+    mk(&c, "a.sh:3,0,0,0;b.cx:1,2,0,0");
+    o.n = 0; expect_rc("deleted .py passes", compare(&b, &c, &drops, &tr, &o), 0);
+    expect_rc("  ... reported as drops", drops > 0, 1);
+    { Ledger t = b; t.tot.real -= 1;   /* a baseline whose TOTAL is below the sum of its rows: the total itself rose */
+      o.n = 0; expect_rc("seeded TOTAL rise fails", compare(&t, &c, &drops, &tr, &o) > 0 || compare(&t, &b, &drops, &tr, &o) > 0, 1); }
+    o.n = 0; led_format(&b, &o);
+    expect_rc("tsv round trip parses", led_parse(o.b, &r, &why), 0);
+    { Buf o2 = {0}; led_format(&r, &o2); expect_rc("tsv round trip is byte-identical", o2.n == o.n && !memcmp(o2.b, o.b, o.n), 1); }
+    expect_rc("malformed tsv refused", led_parse("TOTAL\t*\t1\n", &r, &why), -1);
+    printf("zeropython selftest: %s (%d failure(s))\n", FAILS ? "FAIL" : "ok", FAILS);
+    return FAILS ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char here[PATHN], t[PATHN], *slash; int i, list = 0, top = 0, check = 0, write = 0, self = 0, lines = 0; Ledger cur;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--list")) { list = 1; if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) top = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--lines")) { lines = 1; if (i + 1 < argc && argv[i + 1][0] != '-') CTX.filter = argv[++i]; }
+        else if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--write")) write = 1;
+        else if (!strcmp(argv[i], "--selftest")) self = 1;
+        else if (!strcmp(argv[i], "--scan") && i + 1 < argc) {   /* one file, as listed (debugging the matcher) */
+            size_t n; char *b = cx_read(argv[++i], &n); Counts c;
+            if (!b) die("cannot read ", argv[i]);
+            CTX.lines = 1; scan_text(argv[i], b, n, &c);
+            printf("real %d data %d unisa %d py %d raw %d\n", c.real, c.data, c.unisa, c.py, c.raw); return 0;
+        }
+        else { fprintf(stderr, "zeropython: unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (self) return selftest();
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/..", here);
+    if (!realpath(t, ROOT)) die("cannot resolve the repository root ", t);
+    CTX.lines = lines;
+    memset(&cur, 0, sizeof cur);
+    measure(&cur);
+    if (lines) return 0;
+    if (list) return do_list(&cur, top);
+    if (check) return do_check(&cur);
+    if (write) return do_write(&cur);
+    summary(&cur);
+    return 0;
+}
