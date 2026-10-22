@@ -44,7 +44,11 @@ def main():
    p=subprocess.run([runtime,'--bundle',str(pkg),'test',str(source)],capture_output=True,timeout=10)
    assert (p.returncode==0)==(status=='accept'),(status,p.returncode,p.stderr)
    if status=='accept':assert p.stdout==out
-   else:assert p.returncode==1
+   else:
+    # a refusal writes nothing to stdout and names itself on stderr (bindingsnegcheck.cx's strength)
+    assert p.returncode==1 and p.stdout==b'' and p.stderr.strip(),(p.returncode,p.stdout,p.stderr)
+    # the model's refusal (reason, partial output) must be the reason the native executor names
+    assert out[0].encode() in p.stderr,(out[0],p.stderr)
    return status,out
   values=dict(base);values[b'\0library/bindings']=valid
   status,out=check(raw,values)
@@ -66,7 +70,9 @@ def main():
   for tape in [b'f:\n.librarycall r8, r0\nret\n',b'f:\n.librarycall r1\nret\n']:
    assert check(tape,values)[0]=='reject';controls+=1
   if target.startswith('lnx/'):
-   assert check(b'f:\n.hostcall r1, r0\nret\n',values)[0]=='reject';controls+=1
+   # lnx accepts .hostcall beside library bindings (model and native agree; bindingsnegcheck.cx control-hostcall)
+   status,out=check(b'f:\n.hostcall r1, r0\nret\n',values)
+   assert status=='accept' and b'hostcall ' in out,(status,out)
   # All truncation positions are checked on the model; representative errors also above on native executor.
   for n in range(1,len(valid)):
    vals=dict(base);vals[b'\0library/bindings']=valid[:n]
