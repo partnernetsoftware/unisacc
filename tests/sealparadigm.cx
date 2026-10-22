@@ -49,7 +49,9 @@ static int join(char *out, size_t cap, const char *a, const char *b) {
 static int in_list(const char *s, const char **list) {
     int i; for (i = 0; list[i]; i++) if (!strcmp(s, list[i])) return 1; return 0;
 }
-static int job_known(char jobs[][64], int nj, const char *job);
+/* gate.sh job names, grown on demand: gate.sh has hundreds of jobs and keeps gaining them */
+typedef struct { char (*v)[64]; int n, cap; } Jobs;
+static int job_known(const Jobs *jobs, const char *job);
 static void foreach_csv(const char *csv, void (*fn)(const char *tok, void *ctx), void *ctx) {
     char buf[512], *p = buf, *start;
     strncpy(buf, csv, sizeof buf - 1); buf[sizeof buf - 1] = 0;
@@ -60,10 +62,10 @@ static void foreach_csv(const char *csv, void (*fn)(const char *tok, void *ctx),
     }
     if (*start) fn(start, ctx);
 }
-typedef struct { char jobs[256][64]; int nj; int err; const char *edge; } JobCtx;
+typedef struct { const Jobs *jobs; int err; const char *edge; } JobCtx;
 static void check_job_tok(const char *tok, void *ctx) {
     JobCtx *j = ctx;
-    if (!job_known(j->jobs, j->nj, tok))
+    if (!job_known(j->jobs, tok))
         { printf("sealparadigm: FAIL edge %s unknown gate job %s\n", j->edge, tok); j->err++; }
 }
 typedef struct { const char *root; int err; const char *edge; } FxCtx;
@@ -122,26 +124,33 @@ static int load_manifest(const char *root, MRow *rows, int *nr) {
     free(b); *nr = c; return 0;
 }
 
-static int load_gate_jobs(const char *root, char jobs[][64], int *nj) {
-    char path[4096], *b, *p, *end; size_t n; int c = 0;
+static int load_gate_jobs(const char *root, Jobs *jobs) {
+    char path[4096], *b, *p, *end; size_t n;
+    jobs->v = 0; jobs->n = jobs->cap = 0;
     join(path, sizeof path, root, "tests/gate.sh");
     b = slurp(path, &n); if (!b) return bad("gate.sh unreadable");
-    for (p = b; *p && c < 256; ) {
+    for (p = b; *p; ) {
         end = strchr(p, '\n'); if (!end) end = p + strlen(p);
         if ((size_t)(end - p) > 4 && !memcmp(p, "job ", 4)) {
             char *q = p + 4, *sp = q;
             while (sp < end && *sp != ' ' && *sp != '\t') sp++;
             if (sp > q && (size_t)(sp - q) < 63) {
-                memcpy(jobs[c], q, sp - q); jobs[c][sp - q] = 0; c++;
+                if (jobs->n == jobs->cap) {
+                    int cap = jobs->cap ? jobs->cap * 2 : 256;
+                    char (*v)[64] = realloc(jobs->v, (size_t)cap * sizeof *v);
+                    if (!v) { free(b); return bad("gate.sh jobs: out of memory"); }
+                    jobs->v = v; jobs->cap = cap;
+                }
+                memcpy(jobs->v[jobs->n], q, sp - q); jobs->v[jobs->n][sp - q] = 0; jobs->n++;
             }
         }
         p = *end ? end + 1 : end;
     }
-    free(b); *nj = c; return 0;
+    free(b); return 0;
 }
-static int job_known(char jobs[][64], int nj, const char *job) {
+static int job_known(const Jobs *jobs, const char *job) {
     int i; if (!strcmp(job, "-")) return 1;
-    for (i = 0; i < nj; i++) if (!strcmp(jobs[i], job)) return 1;
+    for (i = 0; i < jobs->n; i++) if (!strcmp(jobs->v[i], job)) return 1;
     return 0;
 }
 
@@ -173,7 +182,7 @@ static void scan_exec_net_dirs(const char *root, GridDirs *g) {
     closedir(d);
 }
 
-static int audit_manifest(const char *root, MRow *rows, int nr, Stage *st, int nst, char jobs[][64], int nj) {
+static int audit_manifest(const char *root, MRow *rows, int nr, Stage *st, int nst, const Jobs *jobs) {
     int i, err = 0, n_stream = 0, n_grid = 0, n_gap = 0;
     char manifest_grid[64][256]; int n_mg = 0;
     for (i = 0; i < nr; i++) {
@@ -188,7 +197,7 @@ static int audit_manifest(const char *root, MRow *rows, int nr, Stage *st, int n
         if (strstr(r->checker, ".cx") && !path_stat(chkp, 0)) {
             printf("sealparadigm: FAIL missing checker %s\n", r->checker); err++;
         }
-        if (!job_known(jobs, nj, r->gate_job)) {
+        if (!job_known(jobs, r->gate_job)) {
             printf("sealparadigm: FAIL %s:%s gate_job %s not in gate.sh\n", r->paradigm, r->id, r->gate_job);
             err++;
         }
@@ -335,7 +344,7 @@ static int edge_primary_declared(ERow *rows, int nr, const char *flow, const cha
             return 1;
     return 0;
 }
-static int audit_edges(const char *root, char jobs[][64], int nj) {
+static int audit_edges(const char *root, const Jobs *jobs) {
     ERow rows[MAX_EDGES]; int nr = 0, i, err = 0, frozen = 0, witness = 0;
     char seen[32][32]; int nseen = 0;
     if (load_edges(root, rows, &nr)) return 1;
@@ -358,7 +367,7 @@ static int audit_edges(const char *root, char jobs[][64], int nj) {
         if (strcmp(r->asked, "-")) {
             JobCtx jc; char elbl[64];
             snprintf(elbl, sizeof elbl, "(%s,%s)", r->flow, r->net);
-            memcpy(jc.jobs, jobs, sizeof jc.jobs); jc.nj = nj; jc.err = 0; jc.edge = elbl;
+            jc.jobs = jobs; jc.err = 0; jc.edge = elbl;
             foreach_csv(r->asked, check_job_tok, &jc);
             err += jc.err;
         }
@@ -404,14 +413,15 @@ static int audit_edges(const char *root, char jobs[][64], int nj) {
 
 static int audit(const char *root) {
     MRow rows[MAX_ROWS]; Stage stages[16];
-    char jobs[256][64];
-    int nr = 0, nst = 0, nj = 0, err = 0;
+    Jobs jobs;
+    int nr = 0, nst = 0, err = 0;
     if (load_stages(root, stages, &nst)) return 1;
     if (load_manifest(root, rows, &nr)) return 1;
-    if (load_gate_jobs(root, jobs, &nj)) return 1;
-    err += audit_manifest(root, rows, nr, stages, nst, jobs, nj);
+    if (load_gate_jobs(root, &jobs)) return 1;
+    err += audit_manifest(root, rows, nr, stages, nst, &jobs);
     err += audit_xy(root, stages, nst);
-    err += audit_edges(root, jobs, nj);
+    err += audit_edges(root, &jobs);
+    free(jobs.v);
     if (err) { printf("sealparadigm: audit %d problem(s)\n", err); return 1; }
     puts("sealparadigm: audit ok");
     return 0;
