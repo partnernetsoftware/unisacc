@@ -1,0 +1,439 @@
+/* e2bench.cx -- the bench the E2 preprocessor checks share (exec/pp/macrocheck.cx, exec/pp/pragmacheck.cx,
+   exec/pp/objectpredefinecheck.cx; 2026-10-23, the py->cx port wave).  E2 is the preprocessing stream-stage; its
+   delta is built from exec/pp/gen-manifest.tsv by the C99 constructor seed/gen.c, turned into the flat table by
+   seed/tbl.c and into the threshold network by seed/net.c (the three are byte-identical to exec/build/gen.py,
+   exec/c/tbl.py and exec/c/net.py on these deltas: plain, --locations, --shared-predefines, --osx/--win/--arm64), and
+   executed by exec/c/run.c.  Use it with `#pragma unisa use e2bench` from a .cx file in exec/pp/ (a module resolves
+   beside its user only, so the family's module lives here and not in tests/cxlib).
+     eb_root(FILE, out, cap)       Path(FILE).resolve().parents[2]: the repository root (FILE is the caller's __FILE__)
+     eb_workdir(NAME)              the check's work directory, GETTEMPDIR/unisacc-e2bench-UID/NAME (mode 0700, owned by
+                                   this user, never a symlink), held under an fcntl write lock for the whole run, so
+                                   two runs of one check take turns.  It is reused, not removed: every file a run
+                                   reads is first truncated (eb_fresh) or written in full by this run, so nothing of
+                                   an earlier run can be read back; the bench deletes nothing.
+     eb_rel(NAME)                  ROOT/NAME, malloc'd (after eb_root)
+     eb_path(NAME)                 WORKDIR/NAME, malloc'd
+     eb_has(B, N, NEEDLE)          NEEDLE in B[0..N) (bytes containment)
+     eb_fresh(PATH)                truncate PATH to zero bytes (created 0600 when absent)
+     eb_write(PATH, B, N)          PATH := B[0..N); an OSError is fatal
+     eb_run(ARGV, CWD, ENVKV, SECS, &res)
+                                   subprocess.run(ARGV, capture_output=True, timeout=SECS, cwd=CWD) with ENVKV ("K=V")
+                                   added to the environment (0: unchanged; the envp is built here and handed to
+                                   execve).  stdin is /dev/null; res.rc is Python's returncode (-N for signal N).
+                                   An exec failure is FileNotFoundError/PermissionError, a timeout
+                                   subprocess.TimeoutExpired (the child's process group is killed): both fatal, as
+                                   the uncaught Python exception was.
+     eb_style(SECS, TAIL, WITHRC)  the calling script's call(): its child limit, and the shape of its assertion
+                                   (default 60 s, 2000, 1)
+     eb_call(ARGV, CWD, &res)      eb_run with the style's limit, and a nonzero rc is the scripts' `assert
+                                   p.returncode == 0, (args, [rc,] stderr[-TAIL:])`
+     eb_model(ROOT, RUNNER, JSON, TBL, NET, FLAGS)
+                                   the E2 model chain of one delta variant: seed-gen pp JSON FLAGS... (cwd ROOT),
+                                   seed-tbl JSON TBL, seed-net TBL NET, RUNNER --check-net TBL NET, each a checked
+                                   call.  The three seed tools are built once per run with cc -O0 into the
+                                   work directory.
+     eb_tokens(B, N, &toks)        [x for x in unisa.front.pp._pieces(B.decode()) if not x.isspace()]: the token
+                                   spellings (byte spans of B); a strict UTF-8 decode error is Python's
+                                   UnicodeDecodeError, fatal
+     eb_toks_eq(A, B), eb_toks_free(T)
+     eb_unpack(B, N, &off)         the UNIPP1 envelope: OFF := the start of the text; 0, or -1 when B is not a
+                                   well-formed envelope (the scripts' assertion / struct.error)
+     eb_repr(B, N)                 repr(bytes) of B[0..N) on stderr (Python's quote choice and escapes)
+     eb_fail(LINE)                 the scripts' uncaught exception: LINE (the traceback's last line) on stderr, rc 1
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module e2bench
+
+typedef struct eb_res { int rc; char *out; size_t outn; char *err; size_t errn; } eb_res;
+typedef struct eb_toks { const char **p; size_t *n; size_t len, cap; } eb_toks;
+
+static char eb_wd[4200], eb_r[4096];
+static int eb_lockfd = -1;
+static int eb_built;
+
+void eb_fail(const char *line) {
+    fflush(stdout);
+    fprintf(stderr, "%s\n", line);
+    fflush(stderr);
+    exit(1);
+}
+static void eb_oom(void) { eb_fail("MemoryError"); }
+static void *eb_alloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) eb_oom(); return p; }
+static char *eb_join(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b); char *p = eb_alloc(la + lb + 2);
+    memcpy(p, a, la); p[la] = '/'; memcpy(p + la + 1, b, lb + 1);
+    return p;
+}
+
+/* ---- repr ---------------------------------------------------------------------------------------------------- */
+void eb_repr(const char *b, size_t n) {
+    size_t i; int sq = 0, dq = 0; char q;
+    for (i = 0; i < n; i++) { if (b[i] == '\'') sq = 1; if (b[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    fprintf(stderr, "b%c", q);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)b[i];
+        if (c == (unsigned char)q || c == '\\') fprintf(stderr, "\\%c", c);
+        else if (c == '\t') fputs("\\t", stderr);
+        else if (c == '\n') fputs("\\n", stderr);
+        else if (c == '\r') fputs("\\r", stderr);
+        else if (c < 32 || c >= 127) fprintf(stderr, "\\x%02x", c);
+        else fputc(c, stderr);
+    }
+    fputc(q, stderr);
+}
+static void eb_repr_argv(char *const argv[]) {
+    size_t i;
+    fputc('[', stderr);
+    for (i = 0; argv[i]; i++) fprintf(stderr, "%s'%s'", i ? ", " : "", argv[i]);
+    fputc(']', stderr);
+}
+
+/* ---- the repository root and the work directory -------------------------------------------------------------- */
+void eb_root(const char *file, char *out, size_t cap) {
+    char here[4096], t[4200], r[4096], *slash;
+    snprintf(here, sizeof here, "%s", file);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/../..", here);
+    if (!realpath(t, r)) {
+        fflush(stdout);
+        fprintf(stderr, "FileNotFoundError: [Errno %d] %s: '%s'\n", errno, strerror(errno), t);
+        exit(1);
+    }
+    snprintf(out, cap, "%s", r);
+    snprintf(eb_r, sizeof eb_r, "%s", r);
+}
+char *eb_rel(const char *name) { return eb_join(eb_r, name); }
+int eb_has(const char *b, size_t n, const char *needle) {
+    size_t l = strlen(needle), i;
+    for (i = 0; l <= n && i <= n - l; i++) if (!memcmp(b + i, needle, l)) return 1;
+    return 0;
+}
+static void eb_owned_dir(const char *d) {
+    struct stat st;
+    if (mkdir(d, 0700) != 0 && errno != EEXIST) {
+        fflush(stdout); fprintf(stderr, "OSError: [Errno %d] %s: '%s'\n", errno, strerror(errno), d); exit(1);
+    }
+    if (lstat(d, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
+        fflush(stdout); fprintf(stderr, "OSError: %s is not a directory owned by this user (refused)\n", d); exit(1);
+    }
+}
+const char *eb_workdir(const char *name) {
+    const char *names[3] = { "TMPDIR", "TEMP", "TMP" }, *base = 0; char top[4200], cwd[4096]; int i;
+    struct flock fl;
+    for (i = 0; i < 3 && !base; i++) { const char *v = getenv(names[i]); if (v && *v && access(v, W_OK | X_OK) == 0) base = v; }
+    if (!base) base = "/tmp";
+    if (base[0] != '/') { if (!getcwd(cwd, sizeof cwd)) eb_fail("OSError: getcwd failed"); snprintf(top, sizeof top, "%s/%s/unisacc-e2bench-%ld", cwd, base, (long)getuid()); }
+    else snprintf(top, sizeof top, "%s/unisacc-e2bench-%ld", base, (long)getuid());
+    eb_owned_dir(top);
+    snprintf(eb_wd, sizeof eb_wd, "%s/%s", top, name);
+    eb_owned_dir(eb_wd);
+    {
+        char *lp = eb_join(eb_wd, ".lock");
+        eb_lockfd = open(lp, O_RDWR | O_CREAT, 0600);
+        if (eb_lockfd < 0) { fflush(stdout); fprintf(stderr, "OSError: [Errno %d] %s: '%s'\n", errno, strerror(errno), lp); exit(1); }
+        free(lp);
+    }
+    memset(&fl, 0, sizeof fl);
+    fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET; fl.l_start = 0; fl.l_len = 0;
+    while (fcntl(eb_lockfd, F_SETLKW, &fl) != 0) if (errno != EINTR) eb_fail("OSError: cannot lock the work directory");
+    fcntl(eb_lockfd, F_SETFD, FD_CLOEXEC);
+    return eb_wd;
+}
+char *eb_path(const char *name) { return eb_join(eb_wd, name); }
+void eb_fresh(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { fflush(stdout); fprintf(stderr, "OSError: [Errno %d] %s: '%s'\n", errno, strerror(errno), path); exit(1); }
+    close(fd);
+}
+void eb_write(const char *path, const char *b, size_t n) {
+    if (cx_write(path, b, n) != 0) { fflush(stdout); fprintf(stderr, "OSError: cannot write '%s'\n", path); exit(1); }
+}
+
+/* ---- subprocess.run --------------------------------------------------------------------------------------------- */
+static char *eb_slurp(int fd, size_t *n) {
+    size_t cap = 65536, k = 0; char *b = eb_alloc(cap + 1); ssize_t r;
+    lseek(fd, 0, SEEK_SET);
+    for (;;) {
+        if (cap - k < 65536) { char *t = realloc(b, cap * 2 + 1); if (!t) eb_oom(); b = t; cap *= 2; }
+        r = read(fd, b + k, cap - k);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        k += (size_t)r;
+    }
+    b[k] = 0; *n = k;
+    return b;
+}
+/* the child: execve with ENVP, searching PATH as execvp does when ARGV[0] has no '/' */
+static void eb_exec(char *const argv[], char **envp) {
+    const char *path, *p, *e; char cand[4096]; int saw_eacces = 0;
+    if (strchr(argv[0], '/')) { execve(argv[0], argv, envp); return; }
+    path = getenv("PATH"); if (!path) path = "/bin:/usr/bin";
+    for (p = path; ; p = e + 1) {
+        size_t l; e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        l = (size_t)(e - p);
+        if (l) snprintf(cand, sizeof cand, "%.*s/%s", (int)l, p, argv[0]); else snprintf(cand, sizeof cand, "%s", argv[0]);
+        execve(cand, argv, envp);
+        if (errno == EACCES) saw_eacces = 1;
+        if (!*e) break;
+    }
+    errno = saw_eacces ? EACCES : ENOENT;
+}
+int eb_run(char *const argv[], const char *cwd, const char *envkv, int secs, eb_res *res) {
+    char *op = eb_path(".stdout"), *ep = eb_path(".stderr"), **envp = environ;
+    int of, ef, pfd[2], st = 0, err[2] = { 0, 0 }; pid_t pid; ssize_t k; long ticks = (long)secs * 1000;
+    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0;
+    if (envkv) {
+        size_t n = 0, m = 0, kl = (size_t)(strchr(envkv, '=') - envkv) + 1;
+        while (environ && environ[n]) n++;
+        envp = eb_alloc(sizeof *envp * (n + 2));
+        for (n = 0; environ && environ[n]; n++) if (strncmp(environ[n], envkv, kl)) envp[m++] = environ[n];
+        envp[m++] = (char *)envkv; envp[m] = 0;
+    }
+    of = open(op, O_RDWR | O_CREAT | O_TRUNC, 0600); ef = open(ep, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (of < 0 || ef < 0 || pipe(pfd) != 0) eb_fail("OSError: cannot capture the child's output");
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) eb_fail("OSError: fork failed");
+    if (pid == 0) {
+        int fd = open("/dev/null", O_RDONLY);
+        setpgid(0, 0);
+        close(pfd[0]);
+        if (fd >= 0) { dup2(fd, 0); close(fd); }
+        dup2(of, 1); dup2(ef, 2); close(of); close(ef);
+        if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pfd[1], err, sizeof err); _exit(255); }
+        eb_exec(argv, envp);
+        err[0] = 2; err[1] = errno; k = write(pfd[1], err, sizeof err); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    do k = read(pfd[0], err, sizeof err); while (k < 0 && errno == EINTR);
+    close(pfd[0]);
+    if (k == (ssize_t)sizeof err) {
+        waitpid(pid, &st, 0); close(of); close(ef);
+        fflush(stdout);
+        fprintf(stderr, "%s: [Errno %d] %s: '%s'\n", err[1] == ENOENT ? "FileNotFoundError" : err[1] == EACCES ? "PermissionError" : "OSError",
+                err[1], strerror(err[1]), err[0] == 1 ? cwd : argv[0]);
+        exit(1);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0 && errno != EINTR) eb_fail("ChildProcessError: wait failed");
+        if (ticks-- <= 0) {
+            kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); close(of); close(ef);
+            fflush(stdout);
+            fputs("subprocess.TimeoutExpired: Command '", stderr); eb_repr_argv(argv);
+            fprintf(stderr, "' timed out after %d seconds\n", secs);
+            exit(1);
+        }
+        usleep(1000);
+    }
+    res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    res->out = eb_slurp(of, &res->outn); res->err = eb_slurp(ef, &res->errn);
+    close(of); close(ef);
+    if (envp != environ) free(envp);
+    free(op); free(ep);
+    return 0;
+}
+void eb_free(eb_res *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; }
+static int eb_secs = 60, eb_withrc = 1; static size_t eb_tail = 2000;
+void eb_style(int secs, size_t tail, int withrc) { eb_secs = secs; eb_tail = tail; eb_withrc = withrc; }
+int eb_call(char *const argv[], const char *cwd, eb_res *res) {
+    eb_run(argv, cwd, 0, eb_secs, res);
+    if (res->rc != 0) {
+        size_t from = res->errn > eb_tail ? res->errn - eb_tail : 0;
+        fflush(stdout);
+        fputs("AssertionError: (", stderr); eb_repr_argv(argv);
+        if (eb_withrc) fprintf(stderr, ", %d, ", res->rc); else fputs(", ", stderr);
+        eb_repr(res->err + from, res->errn - from); fputs(")\n", stderr);
+        exit(1);
+    }
+    return 0;
+}
+
+/* ---- the E2 model chain ---------------------------------------------------------------------------------------- */
+static void eb_tools(const char *root) {
+    static const char *const tool[3] = { "gen", "tbl", "net" };
+    int i;
+    for (i = 0; i < 3; i++) {
+        char src[64], bin[64], *s, *b; eb_res r;
+        snprintf(src, sizeof src, "seed/%s.c", tool[i]); snprintf(bin, sizeof bin, "seed-%s", tool[i]);
+        s = eb_join(root, src); b = eb_path(bin);
+        { char *av[] = { "cc", "-O0", s, "-o", b, 0 }; eb_call(av, 0, &r); eb_free(&r); }
+        free(s); free(b);
+    }
+    eb_built = 1;
+}
+void eb_model(const char *root, const char *runner, const char *json, const char *tbl, const char *net, char *const flags[]) {
+    char *gen, *tb, *nt, *av[16]; int n = 0, i; eb_res r;
+    if (!eb_built) eb_tools(root);
+    gen = eb_path("seed-gen"); tb = eb_path("seed-tbl"); nt = eb_path("seed-net");
+    eb_fresh(json); eb_fresh(tbl); eb_fresh(net);
+    av[n++] = gen; av[n++] = "pp"; av[n++] = (char *)json;
+    for (i = 0; flags && flags[i] && n < 15; i++) av[n++] = flags[i];
+    av[n] = 0;
+    eb_call(av, root, &r); eb_free(&r);
+    { char *a[] = { tb, (char *)json, (char *)tbl, 0 }; eb_call(a, 0, &r); eb_free(&r); }
+    { char *a[] = { nt, (char *)tbl, (char *)net, 0 }; eb_call(a, 0, &r); eb_free(&r); }
+    { char *a[] = { (char *)runner, "--check-net", (char *)tbl, (char *)net, 0 }; eb_call(a, 0, &r); eb_free(&r); }
+    free(gen); free(tb); free(nt);
+}
+
+/* ---- tokens: unisa.front.pp._PPTOK over the decoded text, whitespace pieces dropped ---------------------------- */
+/* strict UTF-8 (Python's codec): the length of the sequence at s[i], or 0 with WHY set */
+static int eb_u8len(const unsigned char *s, size_t n, size_t i, const char **why, size_t *bad) {
+    unsigned char c = s[i]; int need, k; unsigned char lo = 0x80, hi = 0xBF;
+    if (c < 0x80) return 1;
+    if (c >= 0xC2 && c <= 0xDF) need = 1;
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else { *why = "invalid start byte"; *bad = 1; return 0; }
+    for (k = 1; k <= need; k++) {
+        if (i + (size_t)k >= n) { *why = "unexpected end of data"; *bad = (size_t)k; return 0; }
+        if (s[i + k] < (k == 1 ? lo : 0x80) || s[i + k] > (k == 1 ? hi : 0xBF)) { *why = "invalid continuation byte"; *bad = 1; return 0; }
+    }
+    return need + 1;
+}
+static unsigned long eb_cp(const unsigned char *s, size_t i, int l) {
+    if (l == 1) return s[i];
+    if (l == 2) return ((unsigned long)(s[i] & 0x1F) << 6) | (s[i + 1] & 0x3F);
+    if (l == 3) return ((unsigned long)(s[i] & 0x0F) << 12) | ((unsigned long)(s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F);
+    return ((unsigned long)(s[i] & 0x07) << 18) | ((unsigned long)(s[i + 1] & 0x3F) << 12) | ((unsigned long)(s[i + 2] & 0x3F) << 6) | (s[i + 3] & 0x3F);
+}
+/* str.isspace of one code point */
+static int eb_space(unsigned long c) {
+    return (c >= 9 && c <= 13) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+static int eb_alpha(int c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+static int eb_digit(int c) { return c >= '0' && c <= '9'; }
+static int eb_hex(int c) { return eb_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static size_t eb_hexrun(const unsigned char *s, size_t n, size_t i, size_t k) {
+    size_t j; for (j = 0; j < k; j++) if (i + j >= n || !eb_hex(s[i + j])) return 0; return 1;
+}
+/* the quoted literal (str / chr) after its opening quote at s[i]: (?:\\.|[^Q\\\n])*Q?  -- returns the end */
+static size_t eb_quoted(const unsigned char *s, size_t n, size_t i, unsigned char q, const int *len) {
+    i++;
+    while (i < n) {
+        if (s[i] == '\\') { if (i + 1 >= n) break; i += 1 + (size_t)len[i + 1]; continue; }
+        if (s[i] == q || s[i] == '\n') break;
+        i += (size_t)len[i];
+    }
+    if (i < n && s[i] == q) i++;
+    return i;
+}
+static void eb_push(eb_toks *t, const char *p, size_t n) {
+    if (t->len == t->cap) {
+        size_t c = t->cap ? t->cap * 2 : 256; const char **a = realloc(t->p, c * sizeof *a); size_t *b;
+        if (!a) eb_oom(); t->p = a;
+        b = realloc(t->n, c * sizeof *b); if (!b) eb_oom(); t->n = b;
+        t->cap = c;
+    }
+    t->p[t->len] = p; t->n[t->len] = n; t->len++;
+}
+int eb_tokens(const char *text, size_t n, eb_toks *t) {
+    static const char *const multi[] = { "...", "<<=", ">>=", "->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=",
+                                         "&&", "||", 0 };
+    const unsigned char *s = (const unsigned char *)text; size_t i = 0, j; int *len = eb_alloc(sizeof(int) * (n + 1));
+    t->p = 0; t->n = 0; t->len = t->cap = 0;
+    while (i < n) {   /* decode first: a strict error stops before any token, as b.decode() does */
+        const char *why = 0; size_t bad = 0; int l = eb_u8len(s, n, i, &why, &bad);
+        if (!l) {
+            fflush(stdout);
+            if (bad > 1) fprintf(stderr, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: %s\n", (unsigned long)i, (unsigned long)(i + bad - 1), why);
+            else fprintf(stderr, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s\n", s[i], (unsigned long)i, why);
+            exit(1);
+        }
+        for (j = 0; j < (size_t)l; j++) len[i + j] = (int)(l - j);
+        i += (size_t)l;
+    }
+    len[n] = 0;
+    i = 0;
+    while (i < n) {
+        size_t b = i, e = 0; int space = 0, m;
+        unsigned char c = s[i];
+        if (c == 3) {                                    /* lm: \x03[^\x03]*\x03 */
+            for (j = i + 1; j < n && s[j] != 3; j++) ;
+            if (j < n) e = j + 1;
+        }
+        if (!e && (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v')) {   /* ws */
+            for (j = i; j < n && (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\f' || s[j] == '\v'); j++) ;
+            e = j; space = 1;
+        }
+        if (!e && c == '\n') { e = i + 1; space = 1; }   /* nl */
+        if (!e) {                                        /* str: (?:u8|[LuU])?" */
+            size_t q = (size_t)-1;
+            if (c == 'u' && i + 2 < n && s[i + 1] == '8' && s[i + 2] == '"') q = i + 2;
+            else if ((c == 'L' || c == 'u' || c == 'U') && i + 1 < n && s[i + 1] == '"') q = i + 1;
+            else if (c == '"') q = i;
+            if (q != (size_t)-1) e = eb_quoted(s, n, q, '"', len);
+        }
+        if (!e) {                                        /* chr: [LuU]?' */
+            size_t q = (size_t)-1;
+            if ((c == 'L' || c == 'u' || c == 'U') && i + 1 < n && s[i + 1] == '\'') q = i + 1;
+            else if (c == '\'') q = i;
+            if (q != (size_t)-1) e = eb_quoted(s, n, q, '\'', len);
+        }
+        if (!e && (eb_digit(c) || (c == '.' && i + 1 < n && eb_digit(s[i + 1])))) {   /* num */
+            j = i + (c == '.' ? 2 : 1);
+            for (;;) {
+                if (j + 1 < n && (s[j] == 'e' || s[j] == 'E' || s[j] == 'p' || s[j] == 'P') && (s[j + 1] == '+' || s[j + 1] == '-')) j += 2;
+                else if (j < n && (eb_alpha(s[j]) || eb_digit(s[j]) || s[j] == '_' || s[j] == '.')) j++;
+                else break;
+            }
+            e = j;
+        }
+        if (!e && (eb_alpha(c) || c == '_')) {           /* id */
+            j = i + 1;
+            for (;;) {
+                if (j < n && (eb_alpha(s[j]) || eb_digit(s[j]) || s[j] == '_')) j++;
+                else if (j + 1 < n && s[j] == '\\' && s[j + 1] == 'u' && eb_hexrun(s, n, j + 2, 4)) j += 6;
+                else if (j + 1 < n && s[j] == '\\' && s[j + 1] == 'U' && eb_hexrun(s, n, j + 2, 8)) j += 10;
+                else break;
+            }
+            e = j;
+        }
+        if (!e) {                                        /* p */
+            for (m = 0; multi[m]; m++) { size_t l = strlen(multi[m]); if (i + l <= n && !memcmp(s + i, multi[m], l)) { e = i + l; break; } }
+            if (!e && i + 1 < n && s[i + 1] == '=' && strchr("*/%+-&^|", c) && c) e = i + 2;
+            if (!e && i + 1 < n && c == '#' && s[i + 1] == '#') e = i + 2;
+            if (!e) { e = i + (size_t)len[i]; space = eb_space(eb_cp(s, i, len[i])); }
+        }
+        if (!space) eb_push(t, text + b, e - b);
+        i = e;
+    }
+    free(len);
+    return 0;
+}
+int eb_toks_eq(const eb_toks *a, const eb_toks *b) {
+    size_t i;
+    if (a->len != b->len) return 0;
+    for (i = 0; i < a->len; i++) if (a->n[i] != b->n[i] || memcmp(a->p[i], b->p[i], a->n[i])) return 0;
+    return 1;
+}
+void eb_toks_free(eb_toks *t) { free(t->p); free(t->n); t->p = 0; t->n = 0; t->len = t->cap = 0; }
+
+/* ---- the UNIPP1 envelope ----------------------------------------------------------------------------------------- */
+static unsigned long eb_u32(const unsigned char *b) {
+    return (unsigned long)b[0] | ((unsigned long)b[1] << 8) | ((unsigned long)b[2] << 16) | ((unsigned long)b[3] << 24);
+}
+int eb_unpack(const char *buf, size_t n, size_t *off) {
+    const unsigned char *b = (const unsigned char *)buf; unsigned long length, ns, ni, k; size_t i;
+    if (n < 7 || memcmp(b, "UNIPP1\0", 7)) return -1;
+    if (n < 27) return -1;
+    length = eb_u32(b + 7); ns = eb_u32(b + 19); ni = eb_u32(b + 23);
+    if (ns > (n - 27) / 4) return -1;
+    i = 27 + 4 * (size_t)ns;
+    for (k = 0; k < ni; k++) {
+        unsigned long l;
+        if (i > n || n - i < 12) return -1;
+        l = eb_u32(b + i + 8);
+        if (l > n - i - 12) return -1;
+        i += 12 + (size_t)l;
+    }
+    if (i > n || n - i != length) return -1;
+    *off = i;
+    return 0;
+}

@@ -1,0 +1,243 @@
+#!/usr/bin/env -S unisacc.com -run
+/* objectpredefinecheck.cx -- exec/pp/objectpredefinecheck.py in C (2026-10-23, the py->cx port wave; zero Python).
+   The object-mode predefine of the E2 preprocessing stream-stage is driven by its resources, before -U; and the
+   standard predefines (__STDC__, __STDC_VERSION__, __STDC_HOSTED__) hold their C99 values, conditions, CLI
+   overrides and CLI undefines, for the default target and, in --shared-predefines, for every target of the
+   predefine resources (exec/facts/pp-gen.tsv `=predefres`, the last such row, as assemble.load_facts reads it).
+   usage: sh ./unisacc.com -run exec/pp/objectpredefinecheck.cx      (arguments are ignored, as by the .py)
+   Steps, as the .py: cc -O2 exec/c/run.c; per variant (plain, --locations, --shared-predefines) the E2 model chain
+   (exec/pp/e2bench.cx eb_model: seed/gen.c, seed/tbl.c, seed/net.c -- byte-identical to exec/build/gen.py,
+   exec/c/tbl.py, exec/c/net.py -- and run --check-net); the five standard contracts per target, then (not in
+   --shared-predefines) the five object/unit/undef combinations.  Each case is the delta executed as its flat table
+   (run on the .tbl, UNISA_MAXSTEPS=2000000) with the case's resources handed over as a resource-only package
+   (run --package: `\0cli/target`, `\0predefines/TARGET`, `\0cli/object`, `\0cli/funit`, `\0cli/undefines`,
+   `\0cli/defines` as the case sets them; a resource the case leaves out is absent, as the .py's None).  It must
+   accept; the plain output, whitespace-collapsed, must equal the expected words (in --locations every expected word
+   must occur and BAD must not).  stdout: the object verdict count line and the standard contract count line, rc 0.
+   Every child has the .py's 55 s limit.
+   Differences from the .py, by design: the .py ran its Python simulator (exec/pp/sim.py) on the delta JSON with the
+   resources in its file dictionary; here the delta is executed as its flat table by exec/c/run.c (the table is the
+   delta renumbered by seed/tbl.c) with the resources in a package, so the run's standing built-ins (\0cli/source =
+   the source path, which the simulator also answered, and \0cli/f1, \0cli/attributes, which E2 never asks) answer
+   as in every run; the work directory is reused under a lock instead of a fresh temporary one (e2bench.cx).  A
+   failed assertion, a child timeout or an OS error is the .py's uncaught exception: one `AssertionError: ...` (or
+   similar) line on stderr where Python printed a traceback (the repr of the assertion's tuple approximated), rc 1. */
+#pragma unisa use e2bench
+
+static char ROOT[4096];
+
+/* ---- the predefine resources: the last `=predefres<TAB>json<TAB>{...}` row of exec/facts/pp-gen.tsv ------------- */
+enum { MAXT = 32 };
+static char *TNAME[MAXT], *TVAL[MAXT]; static size_t TLEN[MAXT]; static int NT;
+
+/* one JSON string at s[i] (after the quote): the decoded bytes (UTF-8) and their length; the end after the quote */
+static char *jstring(const char *s, size_t n, size_t *i, size_t *len) {
+    char *o = malloc(n + 1); size_t k = 0;
+    if (!o) eb_fail("MemoryError");
+    while (*i < n && s[*i] != '"') {
+        unsigned long c = (unsigned char)s[*i];
+        if (c == '\\') {
+            char e; (*i)++; if (*i >= n) break;
+            e = s[(*i)++];
+            if (e == 'u') {
+                unsigned long v = 0; int d;
+                for (d = 0; d < 4; d++) {
+                    int h = *i < n ? s[(*i)++] : 0;
+                    v = v * 16 + (unsigned long)(h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : 0);
+                }
+                if (v < 0x80) o[k++] = (char)v;
+                else if (v < 0x800) { o[k++] = (char)(0xC0 | (v >> 6)); o[k++] = (char)(0x80 | (v & 0x3F)); }
+                else { o[k++] = (char)(0xE0 | (v >> 12)); o[k++] = (char)(0x80 | ((v >> 6) & 0x3F)); o[k++] = (char)(0x80 | (v & 0x3F)); }
+            } else o[k++] = e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : e == 'b' ? '\b' : e == 'f' ? '\f' : e;
+        } else { o[k++] = (char)c; (*i)++; }
+    }
+    if (*i >= n) eb_fail("json.decoder.JSONDecodeError: Unterminated string");
+    (*i)++;
+    o[k] = 0; *len = k;
+    return o;
+}
+static void predefres(void) {
+    char *p = eb_rel("exec/facts/pp-gen.tsv"), *text, *line, *last = 0; size_t n, i, ln = 0, lastn = 0;
+    text = cx_read(p, &n);
+    if (!text) { fflush(stdout); fprintf(stderr, "FileNotFoundError: [Errno 2] No such file or directory: '%s'\n", p); exit(1); }
+    for (line = text; line < text + n; ) {
+        char *e = memchr(line, '\n', (size_t)(text + n - line)); size_t l = e ? (size_t)(e - line) : (size_t)(text + n - line);
+        if (l >= 16 && !memcmp(line, "=predefres\tjson\t", 16)) { last = line + 16; lastn = l - 16; }
+        line += l + 1; ln++;
+    }
+    (void)ln;
+    if (!last) eb_fail("KeyError: 'predefres'");
+    i = 0;
+    while (i < lastn && last[i] == ' ') i++;
+    if (i >= lastn || last[i] != '{') eb_fail("json.decoder.JSONDecodeError: Expecting value");
+    i++;
+    for (;;) {
+        size_t kl, vl;
+        while (i < lastn && (last[i] == ' ' || last[i] == ',')) i++;
+        if (i < lastn && last[i] == '}') break;
+        if (i >= lastn || last[i] != '"') eb_fail("json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes");
+        i++;
+        if (NT == MAXT) eb_fail("AssertionError");
+        TNAME[NT] = jstring(last, lastn, &i, &kl);
+        while (i < lastn && (last[i] == ' ' || last[i] == ':')) i++;
+        if (i >= lastn || last[i] != '"') eb_fail("AttributeError: the predefine value is not a str");
+        i++;
+        TVAL[NT] = jstring(last, lastn, &i, &vl); TLEN[NT] = vl;
+        { int j; for (j = 0; j < NT; j++) if (!strcmp(TNAME[j], TNAME[NT])) { free(TVAL[j]); TVAL[j] = TVAL[NT]; TLEN[j] = vl; free(TNAME[NT]); NT--; break; } }
+        NT++;
+    }
+    free(text); free(p);
+}
+
+/* ---- a resource-only package for run --package (exec/c/run.c package_parse, version 2) -------------------------- */
+typedef struct { const char *key; size_t kn; const char *val; size_t vn; } Res;
+static void package(const char *path, const Res *res, int nres) {
+    size_t cap = 256, n, k; char *b; int i;
+    for (i = 0; i < nres; i++) cap += res[i].kn + res[i].vn + 64;
+    b = malloc(cap); if (!b) eb_fail("MemoryError");
+    n = (size_t)snprintf(b, cap, "P 2 1 1 %d\nD r e2 x y 0\nM 1\nN", nres);
+    for (i = 0; i < nres; i++) {
+        n += (size_t)snprintf(b + n, cap - n, "F %lu %lu\n", (unsigned long)res[i].kn, (unsigned long)res[i].vn);
+        for (k = 0; k < res[i].kn; k++) b[n++] = res[i].key[k];
+        for (k = 0; k < res[i].vn; k++) b[n++] = res[i].val[k];
+    }
+    eb_write(path, b, n);
+    free(b);
+}
+/* Inputs(extra=...) of the .py: the base keys absent unless set, then the extra keys (a later key replaces) */
+static int put(Res *res, int n, const char *key, size_t kn, const char *val, size_t vn) {
+    int i;
+    for (i = 0; i < n; i++) if (res[i].kn == kn && !memcmp(res[i].key, key, kn)) { res[i].val = val; res[i].vn = vn; return n; }
+    res[n].key = key; res[n].kn = kn; res[n].val = val; res[n].vn = vn;
+    return n + 1;
+}
+
+/* b' '.join(out.split()) */
+static size_t collapse(const char *s, size_t n, char *o) {
+    size_t i = 0, k = 0;
+    while (i < n) {
+        while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f')) i++;
+        if (i >= n) break;
+        if (k) o[k++] = ' ';
+        while (i < n && !(s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f')) o[k++] = s[i++];
+    }
+    return k;
+}
+static int has(const char *s, size_t n, const char *w) { return eb_has(s, n, w); }
+
+typedef struct { const char *text; const char *k1; size_t k1n; const char *v1; size_t v1n; const char *k2; size_t k2n; const char *v2; size_t v2n; const char *expected; } Std;
+#define K(s) s, sizeof s - 1
+static const Std STD[] = {
+    { "__STDC__ __STDC_VERSION__ __STDC_HOSTED__\n", 0, 0, 0, 0, 0, 0, 0, 0, "1 199901L 1" },
+    { "#if defined(__STDC__) && __STDC_VERSION__ == 199901L && __STDC_HOSTED__ == 1\nGOOD\n#else\nBAD\n#endif\n", 0, 0, 0, 0, 0, 0, 0, 0, "GOOD" },
+    { "__STDC__ __STDC_VERSION__ __STDC_HOSTED__\n", K("\0cli/defines"), K("__STDC__=2\0__STDC_VERSION__=42\0__STDC_HOSTED__=0\0"), 0, 0, 0, 0, "2 42 0" },
+    { "__STDC__ __STDC_VERSION__ __STDC_HOSTED__\n", K("\0cli/undefines"), K("__STDC__\0__STDC_VERSION__\0__STDC_HOSTED__\0"), 0, 0, 0, 0, "__STDC__ __STDC_VERSION__ __STDC_HOSTED__" },
+    { "#ifdef __STDC_VERSION__\nBAD\n#else\nGOOD\n#endif\n", K("\0cli/defines"), K("__STDC_VERSION__=42\0"), K("\0cli/undefines"), K("__STDC_VERSION__\0"), "GOOD" },
+};
+
+/* the .py's assertion lines.  HEAD is the tuple's leading items, already in repr form ("(), 'lnx/x86_64'" or
+   "('--locations',), 1, 0, 0"); the run's verdict is the simulator's: 'reject' with (reason, diagnostics) from
+   run's `reject: REASON` line and the bytes after it, 'timeout' with None, else the run's own error */
+static void fail_status(const char *head, const eb_res *r) {
+    fflush(stdout);
+    fprintf(stderr, "AssertionError: (%s, ", head);
+    if (r->rc == 1) {
+        const char *e = r->err, *nl; size_t n = r->errn;
+        fputs("'reject', ('", stderr);
+        if (n >= 8 && !memcmp(e, "reject: ", 8) && (nl = memchr(e, '\n', n))) {
+            fwrite(e + 8, 1, (size_t)(nl - e - 8), stderr); fputs("', ", stderr);
+            eb_repr(nl + 1, n - (size_t)(nl + 1 - e));
+        } else { fputs("', ", stderr); eb_repr(e, n); }
+        fputs("))\n", stderr);
+    } else if (r->rc == 3) fputs("'timeout', None)\n", stderr);
+    else { fprintf(stderr, "'error %d', ", r->rc); eb_repr(r->err, r->errn); fputs(")\n", stderr); }
+    exit(1);
+}
+static void fail_value(const char *head, const eb_res *r, const char *expected) {
+    fflush(stdout);
+    fprintf(stderr, "AssertionError: (%s, ", head);
+    eb_repr(r->out, r->outn);
+    if (expected) { fputs(", ", stderr); eb_repr(expected, strlen(expected)); }
+    fputs(")\n", stderr);
+    exit(1);
+}
+
+int main(int argc, char **argv) {
+    static const char *const MODES[3] = { 0, "--locations", "--shared-predefines" };
+    static const char *const MODEREPR[3] = { "", "'--locations',", "'--shared-predefines',"};
+    static const char SOURCE[] = "#ifdef __UNISA_OBJECT\nOBJECT\n#else\nORDINARY\n#endif\n";
+    char *run, *json, *tbl, *net, *pkg, *src, *inc, head[512]; int count = 0, standard_count = 0, m; eb_res r;
+    (void)argc; (void)argv;
+    eb_root(__FILE__, ROOT, sizeof ROOT);
+    eb_workdir("e2-object-predefine"); eb_style(55, 500, 1);   /* timeout=55; (args, rc, stderr[-500:]) */
+    run = eb_path("run"); json = eb_path("pp.json"); tbl = eb_path("pp.tbl"); net = eb_path("pp.net");
+    pkg = eb_path("resources.pkg"); src = eb_path("case.c"); inc = eb_rel("include");
+    { char *c = eb_rel("exec/c/run.c"); char *av[] = { "cc", "-O2", c, "-o", run, 0 }; eb_call(av, 0, &r); eb_free(&r); free(c); }
+    predefres();
+    for (m = 0; m < 3; m++) {
+        char *flags[2] = { (char *)MODES[m], 0 };
+        int located = m == 1, shared = m == 2, t;
+        eb_model(ROOT, run, json, tbl, net, flags);
+        for (t = 0; t < NT; t++) {
+            int s; char tkey[256];
+            size_t tkn;
+            if (!shared && strcmp(TNAME[t], "lnx/x86_64")) continue;
+            tkey[0] = 0; tkn = 1 + (size_t)snprintf(tkey + 1, sizeof tkey - 1, "predefines/%s", TNAME[t]);
+            for (s = 0; s < 5; s++) {
+                const Std *c = &STD[s]; Res res[8]; int nr = 0; eb_res out;
+                nr = put(res, nr, K("\0cli/target"), TNAME[t], strlen(TNAME[t]));
+                nr = put(res, nr, tkey, tkn, TVAL[t], TLEN[t]);
+                if (c->k1) nr = put(res, nr, c->k1, c->k1n, c->v1, c->v1n);
+                if (c->k2) nr = put(res, nr, c->k2, c->k2n, c->v2, c->v2n);
+                package(pkg, res, nr);
+                eb_write(src, c->text, strlen(c->text));
+                { char *av[] = { run, "--package", pkg, tbl, src, "/tmp/e2-standard.c", inc, 0 }; eb_run(av, 0, "UNISA_MAXSTEPS=2000000", 55, &out); }
+                snprintf(head, sizeof head, "(%s), '%s'", MODEREPR[m], TNAME[t]);
+                if (out.rc != 0) fail_status(head, &out);
+                if (!located) {
+                    char *o = malloc(out.outn + 1); size_t on;
+                    if (!o) eb_fail("MemoryError");
+                    on = collapse(out.out, out.outn, o);
+                    if (on != strlen(c->expected) || memcmp(o, c->expected, on)) fail_value(head, &out, c->expected);
+                    free(o);
+                } else {
+                    char w[64]; const char *p = c->expected, *e; int ok = !has(out.out, out.outn, "BAD");
+                    while (*p) {
+                        e = strchr(p, ' '); if (!e) e = p + strlen(p);
+                        snprintf(w, sizeof w, "%.*s", (int)(e - p), p);
+                        if (!has(out.out, out.outn, w)) ok = 0;
+                        p = *e ? e + 1 : e;
+                    }
+                    { snprintf(head, sizeof head, "(%s)", MODEREPR[m]); if (!ok) fail_value(head, &out, 0); }
+                }
+                eb_free(&out);
+                standard_count++;
+            }
+        }
+        if (shared) continue;
+        {
+            static const int COMBO[5][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 1, 0, 1 } };
+            int k;
+            for (k = 0; k < 5; k++) {
+                int obj = COMBO[k][0], unit = COMBO[k][1], undef = COMBO[k][2], object;
+                Res res[4]; int nr = 0; eb_res out;
+                if (obj) nr = put(res, nr, K("\0cli/object"), "\1", 1);
+                if (unit) nr = put(res, nr, K("\0cli/funit"), "\1", 1);
+                if (undef) nr = put(res, nr, K("\0cli/undefines"), K("__UNISA_OBJECT\0"));
+                package(pkg, res, nr);
+                eb_write(src, SOURCE, sizeof SOURCE - 1);
+                { char *av[] = { run, "--package", pkg, tbl, src, "/tmp/e2-object.c", inc, 0 }; eb_run(av, 0, "UNISA_MAXSTEPS=2000000", 55, &out); }
+                snprintf(head, sizeof head, "(%s), %d, %d, %d", MODEREPR[m], obj, unit, undef);
+                if (out.rc != 0) fail_status(head, &out);
+                object = (obj || unit) && !undef;
+                if (!has(out.out, out.outn, object ? "OBJECT" : "ORDINARY") || has(out.out, out.outn, object ? "ORDINARY" : "OBJECT"))
+                    fail_value(head, &out, 0);
+                eb_free(&out);
+                count++;
+            }
+        }
+    }
+    printf("E2 object predefine: %d resource/undef verdicts; three variants check-net\n", count);
+    printf("E2 standard predefines: %d value/condition/override/undef contracts\n", standard_count);
+    return 0;
+}

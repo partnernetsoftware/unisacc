@@ -1,0 +1,238 @@
+#!/usr/bin/env -S unisacc.com -run
+/* macrocheck.cx -- exec/pp/macrocheck.py in C (2026-10-23, the py->cx port wave; zero Python).  Macro expansion of
+   the E2 preprocessing stream-stage: full reference bytes, host tokens and the actual threshold-network execution,
+   in both preprocessing formats (plain and --locations).  The C99 6.10.3.5 examples 3, 4 and 7 are still taken from
+   tests/ccparity.sh (the extraction is checked: exactly ex3, ex4, ex7).
+   usage: sh ./unisacc.com -run exec/pp/macrocheck.cx      (arguments are ignored, as by the .py)
+   Steps, as the .py: tests/lib.sh ua_ready (UA, default /tmp/ua_ref, is the reference); $EXEC_CC (default cc) -O2
+   exec/c/run.c; then per format the E2 model chain (exec/pp/e2bench.cx eb_model: seed/gen.c, seed/tbl.c,
+   seed/net.c -- the C constructors byte-identical to exec/build/gen.py, exec/c/tbl.py, exec/c/net.py -- and
+   run --check-net), and per case (44: 17 macro forms, ex3/ex4/ex7, 5 GNU comma forms, 18 _Pragma forms, the #if
+   integer reductions): reference -E bytes; the reference's tokens equal the host's (cc -E -P) or the independent
+   expected tokens (comma_explicit and the _Pragma forms; the #if reductions also against their truth values); the
+   network's output (the UNIPP1 text in --locations) equals the reference bytes; and the delta executed as its flat
+   table (run on the .tbl, UNISA_MAXSTEPS=2000000) accepts with the network's very bytes.  Two unterminated
+   _Pragma inputs are named refusals of both.  stdout: one line per format and the summary line, rc 0.
+   Differences from the .py, by design: the delta's second executor is the flat table run by exec/c/run.c where the
+   .py ran its Python simulator (exec/pp/sim.py) on the delta JSON -- the table is the delta renumbered (seed/tbl.c),
+   so a disagreement of transition rows or of a threshold unit still shows, but both executors share exec/c/core.c's
+   actions; the work directory is reused under a lock instead of a fresh temporary one (e2bench.cx).  A failed
+   assertion, a child timeout or an OS error is the .py's uncaught exception: one `AssertionError: ...` (or similar)
+   line on stderr where Python printed a traceback (the repr of the assertion's tuple approximated), rc 1. */
+#pragma unisa use e2bench
+
+typedef struct { const char *name; const char *src; } Case;
+typedef struct { const char *name; const char *src; const char *want[12]; } Contract;
+
+static const Case BASE[] = {
+    { "zero", "#define F() 7\nF F() F( )\n" },
+    { "zeroempty", "#define F()\na F() b\n" },
+    { "va", "#define V(...) __VA_ARGS__\nV() V(1) V(1,2,(3,4))\n" },
+    { "va_named", "#define V(x,...) x+(__VA_ARGS__)\nV(1) V(1,) V(1,2,3)\n" },
+    { "va_string", "#define S(...) #__VA_ARGS__\nS() S(a, b, \"c\\\\d\")\n" },
+    { "cross", "#define A F(\n#define F(x) x+x\nA 3)\n" },
+    { "crossnested", "#define A F((\n#define F(x) x+x\nA 3))\n" },
+    { "objhash", "#define H # ## #\nH\n" },
+    { "arg_hash", "#define S(x) #x\nS(#) S(##)\n" },
+    { "hide", "#define A A+1\n#define F(x) x+x\nF(A)\n" },
+    { "pastehide", "#define A A\n#define AB 7\n#define CAT(x,y) x ## y\n#define OUT(x,y) CAT(x,y)\nOUT(A,B)\n" },
+    { "empty_paste", "#define T(x,y,z) x ## y ## z\nT(,,) T(a,,b) T(,a,)\n" },
+    { "arg_nested", "#define F(x,y) x+y\n#define G(x) x\nF(G(1),G(G(2)))\n" },
+    { "crosszero", "#define A F(\n#define F() 9\nA )\n" },
+    { "crosslines", "#define A F(\n#define F(x) x+x\nA\n 3)\n" },
+    { "multi-left", "#define A A+1\n#define B B\n#define BB 7\n#define CAT(x,y) x ## y\n#define OUT(x,y) CAT(x,y)\nOUT(A B,B)\n" },
+    { "multi-right", "#define A A+1\n#define B B\n#define BB 7\n#define CAT(x,y) x ## y\n#define OUT(x,y) CAT(x,y)\nOUT(B,B A)\n" },
+};
+static const Case COMMA[] = {
+    { "comma_empty", "#define P(x,...) f(x, ##__VA_ARGS__)\nP(1) P(1,2) P(1,2,3)\n" },
+    { "comma_nested", "#define P(x,...) f(x, ##__VA_ARGS__)\n#define V(...) P(__VA_ARGS__)\nV(1) V(1,2,3)\n" },
+    { "comma_raw", "#define E\n#define V(...) a, ##__VA_ARGS__\nV(E)\n" },
+    { "comma_space", "#define P(x,...) f(x , ## __VA_ARGS__)\nP(1) P(1, 2)\n" },
+};
+/* The reference also elides an explicitly supplied empty final argument; host compilers may distinguish it from an
+   omitted argument.  This reference contract is pinned with an independent token expectation instead; so are the
+   _Pragma forms (the reference ignores balanced contents, even forms outside C99's operand grammar). */
+static const Contract CONTRACT[] = {
+    { "comma_explicit", "#define P(x,...) f(x, ##__VA_ARGS__)\nP(1,) P(1, )\n", { "f", "(", "1", ")", "f", "(", "1", ")", 0 } },
+    { "pragma_hidden_call", "#define _Pragma _Pragma\n#define F(x) x\nF(_Pragma)(\"x\") z\n", { "z", 0 } },
+    { "pragma_hidden_arg", "#define _Pragma _Pragma\n#define F(x) x\nF(_Pragma(\"x\")) z\n", { "z", 0 } },
+    { "pragma_defined_arg", "#define _Pragma 4\n#define F(x) x\nF(_Pragma) z\n", { "4", "z", 0 } },
+    { "pragma_root", "a _Pragma(\"pack(1)\") b\n", { "a", "b", 0 } },
+    { "pragma_bare", "_Pragma\n", { "_Pragma", 0 } },
+    { "pragma_lines", "_Pragma\n(\"x\")\nb\n", { "b", 0 } },
+    { "pragma_object", "#define P _Pragma(\"x\")\na P b\n", { "a", "b", 0 } },
+    { "pragma_stringize", "#define P(x) _Pragma(#x)\na P(pack(1)) b\n", { "a", "b", 0 } },
+    { "pragma_nameframe", "#define P _Pragma\na P(\"x\") b\n", { "a", "b", 0 } },
+    { "pragma_callframe", "#define P _Pragma(\na P \"x\") b\n", { "a", "b", 0 } },
+    { "pragma_argument", "#define F(x) x\na F(_Pragma(\"x\")) b\n", { "a", "b", 0 } },
+    { "pragma_nocall", "#define P _Pragma\nP + 1\n", { "_Pragma", "+", "1", 0 } },
+    { "pragma_end", "#define P _Pragma\nP\n", { "_Pragma", 0 } },
+    { "pragma_framelines", "#define P _Pragma\nP\n(\"x\") z\n", { "z", 0 } },
+    { "pragma_balanced", "_Pragma((a),\"x)\",'q')z\n", { "z", 0 } },
+    { "pragma_unexpanded", "#define F(x) x\n_Pragma(F(a,b))z\n", { "z", 0 } },
+    { "pragma_defined", "#define _Pragma 4\n_Pragma\n", { "4", 0 } },
+    { "pragma_definedframe", "#define _Pragma 4\n#define P _Pragma\nP\n", { "4", 0 } },
+};
+/* Independent expected truth values, exercising every integer reduction family. */
+static const char *const EXPR[] = { "2+3*4==14", "17/5==3 && 17%5==2", "(1<<5)==32 && (32>>3)==4",
+    "(6&3)==2 && (4|1)==5 && (7^3)==4", "1<2 && 2<=2 && 3>2 && 3>=3 && 1!=2",
+    "!0 && !(!1) && (~0)==-1 && -3+ +4==1", "0 && (1/0)", "1 || (1/0)",
+    "(1 ? 7 : 1/0)==7", "(0 ? 1/0 : 9)==9", "(1 ? 0 : 1) ? 0 : 1",
+    "defined(ONE) && defined TWO && !defined(NOPE)", "TWO==2 && UNDECLARED==0" };
+static const int TRUTH[] = { 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1 };
+#define NEXPR 13
+
+enum { MAXCASE = 64 };
+enum { NAMEN = 64 };
+typedef struct { char name[NAMEN]; char *src; const char *const *want; } Item;
+static Item ITEMS[MAXCASE];
+static int NITEMS, NREF;
+
+static char ROOT[4096];
+
+static void add(const char *name, const char *src, const char *const *want) {
+    if (NITEMS == MAXCASE) eb_fail("AssertionError");
+    snprintf(ITEMS[NITEMS].name, NAMEN, "%s", name);
+    ITEMS[NITEMS].src = strdup(src); ITEMS[NITEMS].want = want;
+    if (want) NREF++;
+    NITEMS++;
+}
+
+/* examples=re.findall(r'ecase "(-E C99 6\.10\.3\.5 ex[347])" \'(.*?)\'', ccparity.sh, re.S) */
+static void examples(void) {
+    static const char lead[] = "ecase \"-E C99 6.10.3.5 ex";
+    char *p = 0, *text; size_t n, i = 0, ll = sizeof lead - 1; int k = 0; char names[3][4] = { "", "", "" };
+    p = eb_rel("tests/ccparity.sh");
+    text = cx_read(p, &n);
+    if (!text) { fflush(stdout); fprintf(stderr, "FileNotFoundError: [Errno 2] No such file or directory: '%s'\n", p); exit(1); }
+    while (i + ll + 4 <= n) {
+        char d; char *q;
+        if (memcmp(text + i, lead, ll)) { i++; continue; }
+        d = text[i + ll];
+        if ((d != '3' && d != '4' && d != '7') || text[i + ll + 1] != '"' || text[i + ll + 2] != ' ' || text[i + ll + 3] != '\'') { i++; continue; }
+        q = memchr(text + i + ll + 4, '\'', n - (i + ll + 4));
+        if (!q) { i++; continue; }
+        if (k < 3) { names[k][0] = 'e'; names[k][1] = 'x'; names[k][2] = d; names[k][3] = 0; }
+        if (k < 3) {
+            size_t sl = (size_t)(q - (text + i + ll + 4)); char *s = malloc(sl + 2);
+            if (!s) eb_fail("MemoryError");
+            memcpy(s, text + i + ll + 4, sl); s[sl] = '\n'; s[sl + 1] = 0;
+            ITEMS[NITEMS + k].src = s;
+        }
+        k++;
+        i = (size_t)(q - text) + 1;
+    }
+    if (k != 3 || strcmp(names[0], "ex3") || strcmp(names[1], "ex4") || strcmp(names[2], "ex7")) eb_fail("AssertionError");
+    for (k = 0; k < 3; k++) { snprintf(ITEMS[NITEMS].name, NAMEN, "%s", names[k]); ITEMS[NITEMS].want = 0; NITEMS++; }
+    free(text); free(p);
+}
+
+static void tokens_of(const char *b, size_t n, eb_toks *t) { eb_tokens(b, n, t); }
+static int toks_are(const eb_toks *t, const char *const *want) {
+    size_t i;
+    for (i = 0; want[i]; i++) if (i >= t->len || t->n[i] != strlen(want[i]) || memcmp(t->p[i], want[i], t->n[i])) return 0;
+    return i == t->len;
+}
+static void fail_case(const char *name, const char *q, const char *what, const char *a, size_t an, const char *b, size_t bn) {
+    fflush(stdout);
+    fprintf(stderr, "AssertionError: ('%s', ", name);
+    if (q) fprintf(stderr, "'%s', ", q);
+    if (what) fprintf(stderr, "'%s', ", what);
+    eb_repr(a, an);
+    if (b) { fputs(", ", stderr); eb_repr(b, bn); }
+    fputs(")\n", stderr);
+    exit(1);
+}
+
+int main(int argc, char **argv) {
+    char *run, *inc, ref[4096], *integer, *integer_want[NEXPR + 1], intbuf[NEXPR][8];
+    const char *env; int located, i; eb_res r;
+    (void)argc; (void)argv;
+    eb_root(__FILE__, ROOT, sizeof ROOT);
+
+    for (i = 0; i < (int)(sizeof BASE / sizeof BASE[0]); i++) add(BASE[i].name, BASE[i].src, 0);
+    examples();
+    for (i = 0; i < (int)(sizeof COMMA / sizeof COMMA[0]); i++) add(COMMA[i].name, COMMA[i].src, 0);
+    for (i = 0; i < (int)(sizeof CONTRACT / sizeof CONTRACT[0]); i++) add(CONTRACT[i].name, CONTRACT[i].src, CONTRACT[i].want);
+    if (NITEMS != 43) eb_fail("AssertionError");
+    {   /* '#define ONE 1\n#define TWO ONE+1\n' + one #if/#else/#endif per expression */
+        size_t cap = 64, n; for (i = 0; i < NEXPR; i++) cap += strlen(EXPR[i]) + 64;
+        integer = malloc(cap); if (!integer) eb_fail("MemoryError");
+        n = (size_t)snprintf(integer, cap, "#define ONE 1\n#define TWO ONE+1\n");
+        for (i = 0; i < NEXPR; i++) n += (size_t)snprintf(integer + n, cap - n, "#if %s\nYES%d\n#else\nNO%d\n#endif\n", EXPR[i], i, i);
+        for (i = 0; i < NEXPR; i++) { snprintf(intbuf[i], sizeof intbuf[i], "%s%d", TRUTH[i] ? "YES" : "NO", i); integer_want[i] = intbuf[i]; }
+        integer_want[NEXPR] = 0;
+        add("integer_reductions", integer, 0);
+        free(integer);
+    }
+
+    eb_workdir("pp-macros"); eb_style(60, 2000, 1);   /* checklib.run: 60 s; (args, rc, stderr[-2000:]) */
+    { char *av[] = { "sh", "-c", "R=$1; . \"$R/tests/lib.sh\"; ua_ready", "macrocheck", ROOT, 0 }; eb_call(av, 0, &r); eb_free(&r); }
+    env = getenv("UA"); snprintf(ref, sizeof ref, "%s", env ? env : "/tmp/ua_ref");
+    run = eb_path("run"); inc = eb_rel("include");
+    {
+        char *cc = getenv("EXEC_CC") ? getenv("EXEC_CC") : "cc", *src = eb_rel("exec/c/run.c");
+        char *av[] = { cc, "-O2", src, "-o", run, 0 };
+        eb_call(av, 0, &r); eb_free(&r); free(src);
+    }
+    for (located = 0; located < 2; located++) {
+        const char *q = located ? "loc" : "plain"; char nm[32], *json, *tbl, *net;
+        char *flags[] = { located ? "--locations" : 0, 0 };
+        snprintf(nm, sizeof nm, "%s.json", q); json = eb_path(nm);
+        snprintf(nm, sizeof nm, "%s.tbl", q); tbl = eb_path(nm);
+        snprintf(nm, sizeof nm, "%s.net", q); net = eb_path(nm);
+        eb_model(ROOT, run, json, tbl, net, flags);
+        for (i = 0; i < NITEMS; i++) {
+            Item *it = &ITEMS[i]; char fn[96], *f; eb_res want, got, sim; eb_toks tw;
+            snprintf(fn, sizeof fn, "%s.c", it->name); f = eb_path(fn);
+            eb_write(f, it->src, strlen(it->src));
+            { char *av[] = { ref, "-E", f, 0 }; eb_call(av, 0, &want); }
+            tokens_of(want.out, want.outn, &tw);
+            if (!strcmp(it->name, "integer_reductions") && !toks_are(&tw, (const char *const *)integer_want))
+                fail_case(it->name, 0, 0, want.out, want.outn, 0, 0);
+            if (it->want) {
+                if (!toks_are(&tw, it->want)) fail_case(it->name, 0, "reference contract", want.out, want.outn, 0, 0);
+            } else {
+                eb_res host; eb_toks th;
+                char *av[] = { "cc", "-E", "-P", f, 0 }; eb_call(av, 0, &host);
+                tokens_of(host.out, host.outn, &th);
+                if (!eb_toks_eq(&tw, &th)) fail_case(it->name, 0, "reference/host tokens", want.out, want.outn, host.out, host.outn);
+                eb_toks_free(&th); eb_free(&host);
+            }
+            eb_toks_free(&tw);
+            { char *av[] = { run, net, f, f, inc, 0 }; eb_call(av, 0, &got); }
+            {
+                size_t off = 0;
+                if (located && eb_unpack(got.out, got.outn, &off)) eb_fail("AssertionError");
+                if (got.outn - off != want.outn || memcmp(got.out + off, want.out, want.outn))
+                    fail_case(it->name, q, 0, got.out, got.outn, want.out, want.outn);
+            }
+            { char *av[] = { run, tbl, f, f, inc, 0 }; eb_run(av, 0, "UNISA_MAXSTEPS=2000000", 60, &sim); }
+            if (sim.rc != 0 || sim.outn != got.outn || memcmp(sim.out, got.out, got.outn))
+                fail_case(it->name, q, sim.rc ? "reject" : "accept", sim.out, sim.outn, sim.err, sim.errn);
+            eb_free(&sim); eb_free(&got); eb_free(&want); free(f);
+        }
+        {
+            static const Case REFUSE[] = { { "pragma_unclosed", "_Pragma(\"x\"\n" }, { "pragma_badliteral", "_Pragma(\"x\n" } };
+            int k;
+            for (k = 0; k < 2; k++) {
+                char fn[64], *f; eb_res res, sim;
+                snprintf(fn, sizeof fn, "%s.c", REFUSE[k].name); f = eb_path(fn);
+                eb_write(f, REFUSE[k].src, strlen(REFUSE[k].src));
+                { char *av[] = { run, net, f, f, inc, 0 }; eb_run(av, 0, 0, 60, &res); }
+                if (res.rc == 0 || !eb_has(res.err, res.errn, "not covered: unterminated _Pragma"))
+                    fail_case(REFUSE[k].name, q, 0, res.out, res.outn, res.err, res.errn);
+                { char *av[] = { run, tbl, f, f, inc, 0 }; eb_run(av, 0, "UNISA_MAXSTEPS=2000000", 60, &sim); }
+                if (sim.rc == 0 || !eb_has(sim.err, sim.errn, "unterminated _Pragma"))
+                    fail_case(REFUSE[k].name, q, sim.rc ? "reject" : "accept", sim.out, sim.outn, sim.err, sim.errn);
+                eb_free(&res); eb_free(&sim); free(f);
+            }
+        }
+        printf("%s %d full outputs; %d host-token cases; %d explicit reference contracts; 2 named refusals; simulator/network agree\n",
+               q, NITEMS, NITEMS - NREF, NREF);
+        fflush(stdout);
+        free(json); free(tbl); free(net);
+    }
+    printf("macro checks: %d full results and 4 refusals, both preprocessing formats\n", 2 * NITEMS);
+    return 0;
+}

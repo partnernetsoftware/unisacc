@@ -1,0 +1,126 @@
+#!/usr/bin/env -S unisacc.com -run
+/* directivecheck.cx -- exec/pp/directivecheck.py without Python (2026-10-23, the py->cx port wave): the actual E2
+   stream model against the scratch reference on directive diagnostics and limits.  #error (live and skipped),
+   #else/#endif without #if, string prefixes, __LINE__ in #if, and the 4000-splice #include limit: the first
+   diagnostic line must equal the reference's; constructs E2 does not cover must be refused by name.
+     sh ./unisacc.com -run exec/pp/directivecheck.cx
+   The shared helpers are tests/cxlib/e2stream.cx, reached as cxlib.e2stream through the exec/pp/cxlib/ symlinks
+   (a module resolves beside its user only; the tests/flownet precedent).  In a TemporaryDirectory pp-directives-XXXXXX: the
+   reference (tests/export_ref.sh + refshim.h + reffoot.h, cc -w -O1) and exec/c/run.c ($CC, default cc, -O2) are
+   built; then for each of the two model variants (`pp`, `pp --locations`) the model is constructed with the C99
+   seed constructors (seed/gen.c byte-identical to exec/build/gen.py, seed/tbl.c, seed/net.c -- where the .py ran
+   gen.py/tbl.py/net.py) and `run --check-net`ed, and every case runs through the reference (`ref NAME.c -E`) and
+   the model (`run pp.net NAME.c NAME.c ROOT/include`) with the scratch directory as the working directory.  Prints
+   `E2 directives: 38 verdicts (...)`, rc 0.  A failed assertion is `AssertionError: (...)` on stderr where Python
+   printed a traceback, rc 1; a child past 55 s or one that cannot start is the exception's line, rc 1.  ROOT is the
+   grandparent of this file's directory. */
+
+#pragma unisa use cxlib.e2stream
+
+typedef struct dc_case { const char *name, *text, *file, *body, *why; } dc_case;
+static const dc_case CASES[] = {
+    { "error-live", "int a;\n  #  error  bad thing  \t\nint b;\n", 0, 0, 0 },
+    { "error-empty", "#error\n", 0, 0, 0 },
+    { "error-linedir", "int q;\n#line 40\n # error  a   b /* c */ d\n", 0, 0, 0 },
+    { "error-skipped", "#if 0\n#error no\n#elif 0\n# error no\n#else\nyes\n#endif\n", 0, 0, 0 },
+    { "line-macro-if", "#undef  line\n#define line 1000\n\n#line line\n#if 1000 != __LINE__\n\t#error \"  # line line\" not work as expected\n#endif\nint main() { return 0; }\n", 0, 0, 0 },
+    { "line-num-if", "int a;\n#line 50\n#if __LINE__ != 50\n#error bad\n#endif\nint b = __LINE__;\n", 0, 0, 0 },
+    { "line-num-if-hit", "#line 50\n#if __LINE__ == 50\n#error hit\n#endif\n", 0, 0, 0 },
+    { "line-macro-elif", "#define N 7\n#line N\n#if 0\n#elif __LINE__ != 8\n#error bad\n#elif __LINE__ == 8\n#error eight\n#endif\n", 0, 0, 0 },
+    { "line-if-splice", "int a;\n#if 1 && \\\n __LINE__ == 3\n#error three\n#endif\nint b = __LINE__;\n", 0, 0, 0 },
+    { "line-if-macro", "#define L __LINE__\n#line 20\n#if L != 20\n#error bad\n#endif\n", 0, 0, 0 },
+    { "line-if-plain", "int a;\n\n#if __LINE__ != 3\n#error bad\n#endif\n", 0, 0, 0 },
+    { "endif-alone", "int a;\n#endif\n", 0, 0, 0 },
+    { "endif-extra", "#if 1\n#else\n#endif\n#endif\n", 0, 0, 0 },
+    { "else-alone", "#else\nint a;\n", 0, 0, 0 },
+    { "prefix", "#define LUA_POF \"p\"\n#define Lx \"m\"\n#define U8 \"n\"\n"
+                "char *s = LUA_POF\"%s\"; int v = Lx\"q\"; int y = U8\"z\";\n"
+                "int w = L\"r\"; int u = u8\"k\" u\"a\" U\"b\"; int c = L'c';\n", 0, 0, 0 },
+};
+static const dc_case REFUSED[] = {
+    { "endif-in-header", "#include \"eh.h\"\n", "eh.h", "#endif\n", "a preprocessing diagnostic inside an included header" },
+    { "error-in-header", "#include \"er.h\"\n", "er.h", "#error x\n", "a preprocessing diagnostic inside an included header" },
+    { "error-long", 0, 0, 0, "#error text longer than 283 bytes" },          /* '#error ' + 'x' * 300 + '\n' */
+    { "include-loop", "#include \"self.h\"\n", "self.h", "#include \"self.h\"\n", "more than 4000 #include splices" },
+};
+
+static int contains(const char *h, size_t hn, const char *nd, size_t nn) {
+    size_t i;
+    if (nn > hn) return 0;
+    for (i = 0; i + nn <= hn; i++) if (!memcmp(h + i, nd, nn)) return 1;
+    return 0;
+}
+/* repr of a tuple (NAME, item...): each item is a malloc'd repr */
+static void fail_tuple(const char *name, const char *a, const char *b, const char *c) {
+    size_t n = strlen(name) + (a ? strlen(a) : 0) + (b ? strlen(b) : 0) + (c ? strlen(c) : 0) + 16;
+    char *s = malloc(n), *r = e2s_repr_str(name);
+    size_t k = 0;
+    s[k++] = '(';
+    memcpy(s + k, r, strlen(r)); k += strlen(r);
+    if (a) { memcpy(s + k, ", ", 2); k += 2; memcpy(s + k, a, strlen(a)); k += strlen(a); }
+    if (b) { memcpy(s + k, ", ", 2); k += 2; memcpy(s + k, b, strlen(b)); k += strlen(b); }
+    if (c) { memcpy(s + k, ", ", 2); k += 2; memcpy(s + k, c, strlen(c)); k += strlen(c); }
+    s[k++] = ')'; s[k] = 0;
+    e2s_fail(s);
+}
+static void put_case(const char *td, const dc_case *c, char *src, size_t srccap) {
+    snprintf(src, srccap, "%s.c", c->name);
+    if (c->text) { char *p = e2s_join(td, src); e2s_write(p, c->text, strlen(c->text)); free(p); }
+    else {
+        char text[7 + 300 + 2]; char *p = e2s_join(td, src);
+        memcpy(text, "#error ", 7); memset(text + 7, 'x', 300); text[307] = '\n';
+        e2s_write(p, text, 308); free(p);
+    }
+    if (c->file) { char *p = e2s_join(td, c->file); e2s_write(p, c->body, strlen(c->body)); free(p); }
+}
+
+int main(void) {
+    char root[4096], td[4096], src[256];
+    char *ref, *run, *net, *inc, *text; size_t tn; int n = 0, variant;
+    const char *cc = getenv("CC");
+    e2s_start(__FILE__, "pp-directives-", root, sizeof root, td, sizeof td);
+    if (!cc) cc = "cc";
+    ref = e2s_join(td, "ref"); run = e2s_join(td, "run"); net = e2s_join(td, "pp.net"); inc = e2s_join(root, "include");
+    text = e2s_reference_source(root, td, &tn);
+    { char *p = e2s_join(td, "ref.c"); e2s_write(p, text, tn); e2s_reference_build(root, p, ref, 55, 2000, 0); free(p); }
+    e2s_executor_build(cc, root, run, 55, 2000, 0);
+    for (variant = 0; variant < 2; variant++) {
+        size_t i;
+        e2s_model(root, td, variant, 1, 55, 2000, 0);
+        for (i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+            const dc_case *c = &CASES[i];
+            char *ro, *re, *go, *ge; size_t ron, ren, gon, gen, wn; int rrc, grc;
+            put_case(td, c, src, sizeof src);
+            { char *a[4]; a[0] = ref; a[1] = src; a[2] = "-E"; a[3] = 0; rrc = e2s_run(a, td, 55, &ro, &ron, &re, &ren); }
+            { char *a[6]; a[0] = run; a[1] = net; a[2] = src; a[3] = src; a[4] = inc; a[5] = 0; grc = e2s_run(a, td, 55, &go, &gon, &ge, &gen); }
+            for (wn = 0; wn < ren && re[wn] != '\n'; wn++) ;          /* ref.stderr.split(b'\n')[0] */
+            if (wn) {
+                if (!(grc == 1 && gon == 0)) { char t[32]; snprintf(t, sizeof t, "%d", grc); fail_tuple(c->name, t, 0, 0); }
+                if (!(gen == wn + 1 && !memcmp(ge, re, wn) && ge[wn] == '\n'))
+                    fail_tuple(c->name, e2s_repr_bytes(ge, gen), e2s_repr_bytes(re, wn), 0);
+            } else {
+                if (!(grc == 0 && rrc == 0)) fail_tuple(c->name, e2s_repr_bytes(ge, gen), 0, 0);
+                if (!variant && !(gon == ron && !memcmp(go, ro, gon)))
+                    fail_tuple(c->name, e2s_repr_bytes(go, gon), e2s_repr_bytes(ro, ron), 0);
+            }
+            free(ro); free(re); free(go); free(ge);
+            n++;
+        }
+        for (i = 0; i < sizeof REFUSED / sizeof REFUSED[0]; i++) {
+            const dc_case *c = &REFUSED[i];
+            char *ro, *re, *go, *ge, *want; size_t ron, ren, gon, gen, wl; int grc;
+            put_case(td, c, src, sizeof src);
+            { char *a[4]; a[0] = ref; a[1] = src; a[2] = "-E"; a[3] = 0; (void)e2s_run(a, td, 55, &ro, &ron, &re, &ren); }
+            if (!contains(re, ren, "error", 5)) fail_tuple(c->name, e2s_repr_bytes(re, ren < 200 ? ren : 200), 0, 0);
+            { char *a[6]; a[0] = run; a[1] = net; a[2] = src; a[3] = src; a[4] = inc; a[5] = 0; grc = e2s_run(a, td, 55, &go, &gon, &ge, &gen); }
+            wl = 13 + strlen(c->why); want = malloc(wl + 1);
+            memcpy(want, "not covered: ", 13); memcpy(want + 13, c->why, strlen(c->why)); want[wl] = 0;
+            if (!(grc == 1 && contains(ge, gen, want, wl))) fail_tuple(c->name, e2s_repr_bytes(ge, gen), 0, 0);
+            free(ro); free(re); free(go); free(ge); free(want);
+            n++;
+        }
+    }
+    printf("E2 directives: %d verdicts (reference diagnostics or named refusals); two variants check-net\n", n);
+    e2s_exit(0);
+    return 0;
+}

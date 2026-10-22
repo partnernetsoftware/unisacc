@@ -363,13 +363,13 @@ job stages-3c env SHARD= ./tests/stages.sh $(printf '%s\n' "$STAGES_3" | awk -v 
 job oracle-cache bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 "$UA" --check-oracle'   # c43: the runtime ask funnel inf() (DENSE cache) answers every question of every stage identically to infer() over the weights, both directions (A-49); closes gold==weights (net-*-seal) == DENSE (this) for all 18 nets; 22694 questions, <1 s
 job stages-back ./tests/backstages.sh   # c43: A-33 extended to the full route -- the six back-end nets (opinfo/peep via opt, abi/regmap/reloc via lower, enc) that only a full build asks: every net the Python full route (compile_file + optimise -O2 + lower) asks, the C full build (-O2 -o BIN -v, askedline after bk_build) must also ask; presence not counts (memoisation differs; answer equality is oracle-cache + difftest)
 for k in 1 2 3 4 5; do job exec-chain-$k env CHAINSHARD=$k/5 CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt) examples/*.c tests/c/*.c; done   # S-17: all C probes, historical floor, named parity debt; five shards keep each job under 60 s with --jobs 4 (three hit 142 in the 0.0.23 queue)
-job exec-macros python3 ./exec/pp/macrocheck.py
-job exec-pp-literals python3 ./exec/pp/literalcheck.py
-job exec-pp-pragmas python3 ./exec/pp/pragmacheck.py
-job exec-pp-object python3 ./exec/pp/objectpredefinecheck.py
-job exec-pp-directives python3 ./exec/pp/directivecheck.py   # R21: live #error, #include limit, stray #endif/#else, string prefixes = reference or named refusal
+job exec-macros tests/bound 58 sh ./tests/cxbin exec/pp/macrocheck.cx   # (.cx port, 2026-10-23) macro expansion: reference -E bytes, host cc -E -P tokens, network output = flat-table output, plain and --locations; E2 models from seed/gen.c + seed/tbl.c + seed/net.c (zero Python)
+job exec-pp-literals tests/bound 58 sh ./unisacc.com -run exec/pp/literalcheck.cx   # (.cx port, 2026-10-23) literal/#if parity, plain and --locations (the pp-leaf seal and its reseal recipe still measure the .py, which stays)
+job exec-pp-pragmas tests/bound 58 sh ./tests/cxbin exec/pp/pragmacheck.cx   # (.cx port, 2026-10-23) push_macro/pop_macro stacks: network tokens = host cc -E -P -nostdinc tokens, 2 named refusals, both formats
+job exec-pp-object tests/bound 58 sh ./tests/cxbin exec/pp/objectpredefinecheck.cx   # (.cx port, 2026-10-23) object-mode and standard predefines, each case's resources handed to the flat table as a run --package; three variants check-net
+job exec-pp-directives tests/bound 58 sh ./unisacc.com -run exec/pp/directivecheck.cx   # (.cx port, 2026-10-23) R21: live #error, #include limit, stray #endif/#else, string prefixes = reference or named refusal
 job exec-r21-e3 python3 ./exec/parse2/r21check.py   # R21: E3 on this week's reference fixes = reference bytes or named refusal (never different bytes)
-job exec-pploc python3 ./exec/pp/locationcheck.py              # source-position metadata from actual preprocessing
+job exec-pploc tests/bound 58 sh ./unisacc.com -run exec/pp/locationcheck.cx   # (.cx port, 2026-10-23) source-position metadata from actual preprocessing
 job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets against reference tpos
 job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location envelope
 job exec-f1-sidecar python3 ./exec/lex/f1sidecarcheck.py         # constructor/destructor mark framing

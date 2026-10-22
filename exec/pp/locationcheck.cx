@@ -1,0 +1,151 @@
+#!/usr/bin/env -S unisacc.com -run
+/* locationcheck.cx -- exec/pp/locationcheck.py without Python (2026-10-23, the py->cx port wave): diagnostic
+   location envelopes of the E2 stream (`--locations` model) against a scratch-only instrumented reference.  Every
+   child is bounded (60 s); no product source or generated kernel is edited.
+     sh ./unisacc.com -run exec/pp/locationcheck.cx
+   The shared helpers are tests/cxlib/e2stream.cx, reached as cxlib.e2stream through the exec/pp/cxlib/ symlinks
+   (a module resolves beside its user only; the tests/flownet precedent).  In a TemporaryDirectory pp-locations-XXXXXX: the
+   current reference source (tests/export_ref.sh + refshim.h + reffoot.h) gets a dump of the preprocessed buffer and
+   its location map (UNIPP1) when UA_LOCATION_MAP is set, and is built with cc -w -O1; exec/c/run.c is built with
+   $EXEC_CC (default cc) -O2; the `pp --locations` model is constructed with the C99 seed constructors (seed/gen.c
+   byte-identical to exec/build/gen.py, seed/tbl.c, seed/net.c -- where the .py ran gen.py/tbl.py/net.py).  Per case
+   the model runs from a package (exec/c/pack.py's uncompressed P2 bytes, written here: route `map e2`, the cli/
+   resources and ROOT/include mounted) through `run --bundle PKG map`, and its envelope must be byte-identical to the
+   reference's (`env UA_LOCATION_MAP=1 ref SRC [-include H] -E`), with the text equal to the plain `-E` output; the
+   first five cases also run through exec/pp/sim.py's executor (ported in tests/cxlib/e2stream.cx: the delta JSON
+   with the generic primitives only, independent of run.c), which must accept with the same bytes.  The summary keeps
+   the .py's words (`5 Python oracle cases pass`: the oracle is sim.py's, now in C).  A failed assertion is
+   `AssertionError[: ...]` on stderr where Python printed a traceback, rc 1; a child past 60 s or one that cannot
+   start is the exception's line, rc 1.  ROOT is the grandparent of this file's directory. */
+
+#pragma unisa use cxlib.e2stream
+
+static const char *ANCHOR1 = "int fe_load(char *path, char *t) {";
+static const char *HELPER =
+    "static void probe_word(long n) { unsigned char b[4]; int i; for(i=0;i<4;i++) b[i]=(n>>(8*i))&255; __write(1,b,4); }\n"
+    "static void probe_map(void) { int i,n; char *s; __write(1,\"UNIPP1\\0\",7);\n"
+    "probe_word(nsrc);probe_word(prelines);probe_word(nautoinc);probe_word(nspl);probe_word(nireg);\n"
+    "for(i=0;i<nspl;i++)probe_word(spl_at[i]);\n"
+    "for(i=0;i<nireg;i++){probe_word(ireg_ln[i]);probe_word(ireg_nl[i]);s=fnpool+ireg_nm[i];n=blen(s);probe_word(n);__write(1,s,n);}\n"
+    "__write(1,src,nsrc); }\n";
+static const char *ANCHOR2 = "    if (pponly) {                       /* -E: the text, not a program */";
+static const char *HOOK2 = "    if (getenv(\"UA_LOCATION_MAP\")) { probe_map(); return 2; }\n";
+
+typedef struct lo_case { const char *name, *text; int forced; } lo_case;
+static const lo_case CASES[] = {
+    { "plain", "int x;\n", 0 }, { "macro", "#define V 12345\nint x=V;\n", 0 },
+    { "splice", "int x=1+\\\n2;\n", 0 }, { "crlf", "int x=1+\\\r\n2;\n", 0 },
+    { "comment", "/* a\nb */ int x;\n", 0 }, { "nested", "#include \"outer.h\"\nint x=V;\n", 0 },
+    { "repeated", "#include \"inner.h\"\n#include \"inner.h\"\nint x;\n", 0 },
+    { "forced", "int x;\n", 1 }, { "automatic", "int main(void){printf(\"ok\\n\");return 0;}\n", 0 },
+};
+
+typedef struct lo_buf { char *p; size_t n, cap; } lo_buf;
+static void put(lo_buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2; b->p = realloc(b->p, b->cap); if (!b->p) exit(1); }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+/* str.count / str.replace of an anchor that must occur once: INSERT goes before it */
+static void insert_before(lo_buf *src, const char *anchor, const char *insert) {
+    size_t an = strlen(anchor), i, at = 0; int count = 0; lo_buf r = { 0, 0, 0 };
+    for (i = 0; i + an <= src->n;) { if (!memcmp(src->p + i, anchor, an)) { if (!count) at = i; count++; i += an; } else i++; }
+    if (count != 1) e2s_fail(0);
+    put(&r, src->p, at); put(&r, insert, strlen(insert)); put(&r, src->p + at, src->n - at);
+    free(src->p); *src = r;
+}
+static unsigned word(const char *b, size_t n, size_t *i, int *ok) {
+    const unsigned char *u = (const unsigned char *)b; unsigned v;
+    if (!(*i + 4 <= n)) { *ok = 0; return 0; }
+    v = (unsigned)u[*i] | (unsigned)u[*i + 1] << 8 | (unsigned)u[*i + 2] << 16 | (unsigned)u[*i + 3] << 24;
+    *i += 4; return v;
+}
+/* decode(): the UNIPP1 envelope; 0 where one of its assertions fails, else 1 with *text = the offset of the text */
+static int decode(const char *b, size_t n, size_t *text) {
+    size_t i = 7; int ok = 1; unsigned length, nsp, ninc, k;
+    if (!(n >= 7 && !memcmp(b, "UNIPP1\0", 7))) return 0;
+    length = word(b, n, &i, &ok); (void)word(b, n, &i, &ok); (void)word(b, n, &i, &ok);
+    nsp = word(b, n, &i, &ok); ninc = word(b, n, &i, &ok);
+    if (!ok) return 0;
+    for (k = 0; k < nsp; k++) { (void)word(b, n, &i, &ok); if (!ok) return 0; }
+    for (k = 0; k < ninc; k++) {
+        unsigned nm;
+        (void)word(b, n, &i, &ok); (void)word(b, n, &i, &ok); nm = word(b, n, &i, &ok);
+        if (!ok || !(i + nm <= n)) return 0;
+        i += nm;
+    }
+    if (i + length != n) return 0;
+    *text = i;
+    return 1;
+}
+
+int main(void) {
+    char root[4096], td[4096]; char *ref, *run, *inc, *cli, *route, *pkg; lo_buf source = { 0, 0, 0 };
+    const char *cc = getenv("EXEC_CC"); void *delta; size_t i;
+    e2s_start(__FILE__, "pp-locations-", root, sizeof root, td, sizeof td);
+    if (!cc) cc = "cc";
+    ref = e2s_join(td, "ref"); run = e2s_join(td, "run"); inc = e2s_join(root, "include");
+    /* Assemble the current reference in scratch, just as build_ref.sh does, adding a dump at the actual
+       preprocessed-buffer boundary. */
+    source.p = e2s_reference_source(root, td, &source.n); source.cap = source.n + 1;
+    {   lo_buf h = { 0, 0, 0 }; put(&h, HELPER, strlen(HELPER)); put(&h, "", 0);
+        insert_before(&source, ANCHOR1, h.p); free(h.p); }
+    insert_before(&source, ANCHOR2, HOOK2);
+    { char *p = e2s_join(td, "ref.c"); e2s_write(p, source.p, source.n); e2s_reference_build(root, p, ref, 60, 1000, 1); free(p); }
+    e2s_executor_build(cc, root, run, 60, 1000, 1);
+    e2s_model(root, td, 1, 0, 60, 1000, 1);
+    delta = e2s_delta_load(e2s_join(td, "pp.json"));
+    { char *p = e2s_join(td, "outer.h"); e2s_write(p, "#include \"inner.h\"\n#define V 3\n", 31); free(p); }
+    { char *p = e2s_join(td, "inner.h"); e2s_write(p, "int in_header;\n", 15); free(p); }
+    cli = e2s_join(td, "cli"); route = e2s_join(td, "route.tsv"); pkg = e2s_join(td, "model.pkg");
+    for (i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+        const lo_case *c = &CASES[i];
+        char name[64], *src, *outer = e2s_join(td, "outer.h"), *got, *want, *plain; size_t gn, wn, pn, gt, wt;
+        snprintf(name, sizeof name, "%s.c", c->name); src = e2s_join(td, name);
+        e2s_write(src, c->text, strlen(c->text));
+        if (mkdir(cli, 0777) != 0 && errno != EEXIST) e2s_fail("cannot create cli/");
+        {   char *p = e2s_join(cli, "includes");
+            if (c->forced) { size_t on = strlen(outer); char *b = malloc(on + 1); memcpy(b, outer, on); b[on] = 0; e2s_write(p, b, on + 1); free(b); }
+            else e2s_write(p, "", 0);
+            free(p); }
+        e2s_write(route, "map\te2\tsrc.c\tpp.locations\tpp.net\n", 34);
+        {   const char *pre[2], *dir[2]; size_t kn; char *k;
+            pre[0] = "00636c692f"; dir[0] = cli; pre[1] = "006864722f"; dir[1] = inc;
+            k = e2s_package(route, 2, pre, dir, &kn); e2s_write(pkg, k, kn); free(k); }
+        {   char *a[8]; int k = 0;
+            a[k++] = "env"; a[k++] = "UA_LOCATION_MAP=1"; a[k++] = ref; a[k++] = src;
+            if (c->forced) { a[k++] = "-include"; a[k++] = outer; }
+            a[k++] = "-E"; a[k] = 0;
+            want = e2s_call(a, 0, 60, 1000, 1, &wn); }
+        {   char *a[8]; a[0] = run; a[1] = "--bundle"; a[2] = pkg; a[3] = "map"; a[4] = src; a[5] = src; a[6] = inc; a[7] = 0;
+            got = e2s_call(a, 0, 60, 1000, 1, &gn); }
+        if (!decode(got, gn, &gt) || !decode(want, wn, &wt)) e2s_fail(0);
+        if (!(gn == wn && !memcmp(got, want, gn))) {
+            lo_buf m = { 0, 0, 0 }; char *r = e2s_repr_str(c->name);
+            put(&m, "(", 1); put(&m, r, strlen(r)); put(&m, ", decode(got)[1:], decode(want)[1:])", 37);
+            e2s_fail(m.p);
+        }
+        {   char *a[7]; int k = 0;
+            a[k++] = ref; a[k++] = src;
+            if (c->forced) { a[k++] = "-include"; a[k++] = outer; }
+            a[k++] = "-E"; a[k] = 0;
+            plain = e2s_call(a, 0, 60, 1000, 1, &pn); }
+        if (!(gn - gt == pn && !memcmp(got + gt, plain, pn))) e2s_fail(e2s_repr_str(c->name));
+        if (i < 5) {                                       /* plain, macro, splice, crlf, comment */
+            size_t xn, on = 0; char *x = e2s_read(src, &xn), *o = 0;
+            int res = e2s_delta_run(delta, x, xn, src, inc, 2000000, &o, &on);
+            if (!(res == 0 && on == wn && !memcmp(o, want, wn))) {
+                lo_buf m = { 0, 0, 0 }; char *r = e2s_repr_str(c->name);
+                const char *rs = res == 0 ? "'accept'" : res == 1 ? "'reject'" : "'timeout'";
+                put(&m, "(", 1); put(&m, r, strlen(r)); put(&m, ", ", 2); put(&m, rs, strlen(rs)); put(&m, ")", 1);
+                e2s_fail(m.p);
+            }
+            free(x); free(o);
+        }
+        free(got); free(want); free(plain);
+        printf("location envelope %s matches reference\n", c->name);
+        fflush(stdout);
+    }
+    printf("location envelopes: 9 reference cases; 5 Python oracle cases pass\n");
+    e2s_exit(0);
+    return 0;
+}

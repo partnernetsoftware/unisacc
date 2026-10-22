@@ -1,0 +1,125 @@
+#!/usr/bin/env -S unisacc.com -run
+/* pragmacheck.cx -- exec/pp/pragmacheck.py in C (2026-10-23, the py->cx port wave; zero Python).  Declared pragma
+   stacks (#pragma push_macro / pop_macro): the actual threshold networks of the E2 preprocessing stream-stage
+   against host preprocessing tokens.  Only literal ASCII identifier names are covered; malformed or escaped names
+   are named refusals.
+   usage: sh ./unisacc.com -run exec/pp/pragmacheck.cx -- [FILE...]
+   Steps, as the .py: $EXEC_CC (default cc) -O2 exec/c/run.c; then per format (plain, --locations) the E2 model
+   chain for the host target (exec/pp/e2bench.cx eb_model: seed/gen.c pp [--osx] [--arm64] [--locations], seed/tbl.c,
+   seed/net.c -- byte-identical to exec/build/gen.py, exec/c/tbl.py, exec/c/net.py -- and run --check-net); the
+   seven pragma-stack sources, then every FILE argument (os.path-resolved, as Path.resolve()), go through the network
+   (the UNIPP1 text in --locations) and through `cc -E -P -nostdinc -I ROOT/include`, and the token lists must be
+   equal; the two malformed names (`push_macro("a-b")`, `pop_macro(X)`) must fail with `pragma macro stack requires`
+   on stderr.  stdout: `pragma plain|locations N host token matches; 2 named refusals` per format, rc 0.  Every
+   child has the .py's 15 s limit.  The host target is the compiler's own (__APPLE__ -> osx, __aarch64__ -> arm64),
+   as the .py's sys.platform / platform.machine().  Differences from the .py: the work directory is reused under a
+   lock instead of a fresh temporary one (e2bench.cx).  A failed assertion, a child timeout or an OS error is the
+   .py's uncaught exception: one `AssertionError: ...` (or similar) line on stderr where Python printed a traceback
+   (the repr of the assertion's tuple approximated), rc 1. */
+#pragma unisa use e2bench
+
+typedef struct { const char *name; const char *src; } Case;
+static const Case CASES[] = {
+    { "nested", "#define push_macro wrong\n#define pop_macro wrong\n#define X 1\nX\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\nX\n#pragma push_macro(\"X\")\n#define X 3\nX\n#pragma pop_macro(\"X\")\nX\n#pragma pop_macro(\"X\")\nX\n" },
+    { "undefined", "#pragma push_macro(\"X\")\n#define X 9\nX\n#pragma pop_macro(\"X\")\n#if defined(X)\nWRONG\n#else\nRIGHT\n#endif\nX\n" },
+    { "interleaved", "#define X 1\n#define Y 2\n#pragma push_macro(\"X\")\n#pragma push_macro(\"Y\")\n#define X 3\n#define Y 4\nX Y\n#pragma pop_macro(\"X\")\nX Y\n#pragma pop_macro(\"Y\")\nX Y\n#pragma pop_macro(\"Z\")\n" },
+    { "function", "#define F(x,...) x + __VA_ARGS__\n#pragma push_macro(\"F\")\n#undef F\n#define F 9\nF\n#pragma pop_macro(\"F\")\nF(1,2)\n" },
+    { "hash", "#define CAT(a,b) a ## b\n#pragma push_macro(\"CAT\")\n#undef CAT\n#pragma pop_macro(\"CAT\")\nCAT(he,llo)\n" },
+    { "inactive", "#if 0\n#pragma push_macro(\"X\")\n#endif\n#define X 7\n#pragma pop_macro(\"X\")\nX\n" },
+    { "restore-undefined", "#define X 8\n#pragma push_macro(\"X\")\n#undef X\n#pragma push_macro(\"X\")\n#define X 9\n#pragma pop_macro(\"X\")\nX\n#pragma pop_macro(\"X\")\nX\n" },
+};
+#define NCASES ((int)(sizeof CASES / sizeof CASES[0]))
+
+static char ROOT[4096];
+
+/* pathlib.Path(x).resolve() (strict=False): the longest existing prefix through realpath, the rest appended with
+   '.' and '..' folded lexically */
+static char *resolve(const char *x) {
+    char cwd[4096], buf[8192], out[8192], *parts[1024], *s; int n = 0, i; size_t k;
+    if (x[0] == '/') snprintf(buf, sizeof buf, "%s", x);
+    else { if (!getcwd(cwd, sizeof cwd)) eb_fail("OSError: getcwd failed"); snprintf(buf, sizeof buf, "%s/%s", cwd, x); }
+    for (s = strtok(buf, "/"); s && n < 1024; s = strtok(0, "/")) parts[n++] = s;
+    out[0] = 0; k = 0;
+    for (i = 0; i < n; i++) {
+        char next[8192], real[4096];
+        if (!strcmp(parts[i], ".")) continue;
+        if (!strcmp(parts[i], "..")) { char *sl = strrchr(out, '/'); if (sl) *sl = 0; k = strlen(out); continue; }
+        snprintf(next, sizeof next, "%s/%s", out, parts[i]);
+        if (realpath(next, real)) snprintf(out, sizeof out, "%s", strcmp(real, "/") ? real : "");
+        else snprintf(out, sizeof out, "%s", next);
+        k = strlen(out);
+    }
+    (void)k;
+    if (!out[0]) snprintf(out, sizeof out, "/");
+    return strdup(out);
+}
+
+int main(int argc, char **argv) {
+    char *run, *inc, incflag[4200], *json, *tbl, *net;
+    char *tflags[4]; int nt = 0, located, i, ninputs;
+    char **inputs = malloc(sizeof(char *) * (size_t)(NCASES + argc + 1));
+    eb_res r;
+    if (!inputs) eb_fail("MemoryError");
+    eb_root(__FILE__, ROOT, sizeof ROOT);
+#if defined(__APPLE__)
+    tflags[nt++] = "--osx";
+#endif
+#if defined(__aarch64__) || defined(__arm64__)
+    tflags[nt++] = "--arm64";
+#endif
+    eb_workdir("pp-pragma"); eb_style(15, 2000, 0);   /* timeout=15; (args, stderr[-2000:]) */
+    run = eb_path("run"); inc = eb_rel("include"); snprintf(incflag, sizeof incflag, "-I%s", inc);
+    json = eb_path("pp.json"); tbl = eb_path("pp.tbl"); net = eb_path("pp.net");
+    {
+        char *cc = getenv("EXEC_CC") ? getenv("EXEC_CC") : "cc", *src = eb_rel("exec/c/run.c");
+        char *av[] = { cc, "-O2", src, "-o", run, 0 };
+        eb_call(av, 0, &r); eb_free(&r); free(src);
+    }
+    for (located = 0; located < 2; located++) {
+        char *flags[6]; int nf = 0;
+        for (i = 0; i < nt; i++) flags[nf++] = tflags[i];
+        if (located) flags[nf++] = "--locations";
+        flags[nf] = 0;
+        eb_model(ROOT, run, json, tbl, net, flags);
+        ninputs = 0;
+        for (i = 0; i < NCASES; i++) {
+            char fn[64], *f; snprintf(fn, sizeof fn, "%s.c", CASES[i].name); f = eb_path(fn);
+            eb_write(f, CASES[i].src, strlen(CASES[i].src)); inputs[ninputs++] = f;
+        }
+        for (i = 1; i < argc; i++) inputs[ninputs++] = resolve(argv[i]);
+        for (i = 0; i < ninputs; i++) {
+            char *f = inputs[i]; eb_res got, host; eb_toks tg, th; size_t off = 0;
+            { char *av[] = { run, net, f, f, inc, 0 }; eb_call(av, 0, &got); }
+            if (located && eb_unpack(got.out, got.outn, &off)) eb_fail("AssertionError");
+            { char *av[] = { "cc", "-E", "-P", "-nostdinc", incflag, f, 0 }; eb_call(av, 0, &host); }
+            eb_tokens(got.out + off, got.outn - off, &tg); eb_tokens(host.out, host.outn, &th);
+            if (!eb_toks_eq(&tg, &th)) {
+                const char *base = strrchr(f, '/') ? strrchr(f, '/') + 1 : f;
+                size_t gn = got.outn - off, hn = host.outn;
+                fflush(stdout);
+                fprintf(stderr, "AssertionError: ('%s', %s, ", base, located ? "True" : "False");
+                eb_repr(got.out + off + (gn > 1500 ? gn - 1500 : 0), gn > 1500 ? 1500 : gn); fputs(", ", stderr);
+                eb_repr(host.out + (hn > 1500 ? hn - 1500 : 0), hn > 1500 ? 1500 : hn); fputs(")\n", stderr);
+                exit(1);
+            }
+            eb_toks_free(&tg); eb_toks_free(&th); eb_free(&got); eb_free(&host);
+        }
+        {
+            static const char *const BAD[] = { "#pragma push_macro(\"a-b\")\n", "#pragma pop_macro(X)\n" };
+            char *f = eb_path("invalid.c"); int k;
+            for (k = 0; k < 2; k++) {
+                eb_res p; char *av[] = { run, net, f, f, inc, 0 };
+                eb_write(f, BAD[k], strlen(BAD[k]));
+                eb_run(av, 0, 0, 15, &p);
+                if (!p.rc || !eb_has(p.err, p.errn, "pragma macro stack requires")) eb_fail("AssertionError");
+                eb_free(&p);
+            }
+            free(f);
+        }
+        printf("pragma %s %d host token matches; 2 named refusals\n", located ? "locations" : "plain", ninputs);
+        fflush(stdout);
+        for (i = 0; i < NCASES; i++) free(inputs[i]);
+        for (i = NCASES; i < ninputs; i++) free(inputs[i]);
+    }
+    return 0;
+}

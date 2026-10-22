@@ -1,0 +1,198 @@
+#!/usr/bin/env -S unisacc.com -run
+/* literalcheck.cx -- exec/pp/literalcheck.py without Python (2026-10-23, the py->cx port wave): the actual E2 stream
+   model against the host preprocessor on typed literals in #if, #if macro expansion, and explicit limits.
+     sh ./unisacc.com -run exec/pp/literalcheck.cx
+   The shared helpers are tests/cxlib/e2stream.cx, reached as cxlib.e2stream through the exec/pp/cxlib/ symlinks
+   (a module resolves beside its user only; the tests/flownet precedent).  The working directory becomes a TemporaryDirectory
+   pp-literals-XXXXXX (source names are relative: the seal records no host path); exec/c/run.c is built with $CC
+   (default cc) -O2.  For each model variant (`pp`, then `pp --locations`, whose UNIPP1 location envelope is
+   stripped from the output) the model is constructed with the C99 seed constructors (seed/gen.c byte-identical to
+   exec/build/gen.py, seed/tbl.c, seed/net.c -- where the .py ran gen.py/tbl.py/net.py) and `run --check-net`ed;
+   then: 67 #if selections must split into the words `$CC -E -P` gives, 18 literals must be refused, 14 macro
+   selections (plus `INC(4) SELF`) must give the host's tokens (unisa.front.pp._pieces, whitespace dropped), a
+   dead-arm arity error must be refused by both, and tests/c/b_ppif.c behind a macro-named #include must give the
+   tokens of `$CC -E -P -undef -nostdinc` with the repository headers and the lnx/x86_64 predefinitions of
+   exec/pp/predefines.tsv.  One line per variant, `plain ...` then `['--locations'] ...`, rc 0.  A failed assertion
+   is `AssertionError[: (...)]` on stderr where Python printed a traceback, rc 1; a child past 55 s or one that
+   cannot start is the exception's line, rc 1.  ROOT is the grandparent of this file's directory. */
+
+#pragma unisa use cxlib.e2stream
+
+static const char *EXPRESSIONS[] = {
+    "017 == 15", "0777777777777777777777 == 9223372036854775807", "9223372036854775807L > 0",
+    "0x7fffffffffffffffLL > 0", "1l + 2ll + 3L + 4LL == 10", "0L == 0", "017LL == 15", "'a' == 97", "'\\x41' == 65",
+    "'\\n' == 10", "'\\101' == 65", "'\\0' == 0", "'\\377' == -1", "'\\xff' == -1", "'\\?' == 63", "'\\\\' == 92",
+    "'\\a' == 7", "'\\b' == 8", "'\\f' == 12", "'\\v' == 11", "'\\r' == 13", "'\\t' == 9", "'\\'' == 39", "0 && 1/0",
+    "1 || 1/0", "(1 ? 7L : 1/0) == 7", "(0 ? 1/0 : 017) == 15", "-7 / 2 == -3 && -7 % 2 == -1", "-1 > 0u", "-1 < 0u",
+    "-1 == 18446744073709551615u", "18446744073709551615u / 2 == 9223372036854775807",
+    "18446744073709551615u % 7 == 1", "0xffffffffffffffff == -1", "0xffffffffffffffff > 0",
+    "(0x8000000000000000 >> 63) == 1", "01777777777777777777777 > 0", "01777777777777777777777 == -1",
+    "000000000000000000001u == 1", "1u + 2L == 3", "1Ul + 2lU + 3uLL + 4LLu == 10", "1uL + 2Lu + 3Ull + 4llU == 10",
+    "(~0u >> 63) == 1", "(-1 >> 1u) == -1", "(1 ? -1 : 0u) > 0", "(0 ? 0u : -1) > 0", "(1 ? -1 : 1u/0) > 0",
+    "(0 ? 1u/0 : -1) > 0", "0 && 1u/0", "1 || 1u/0", "(1 || 0u) < 0u", "(-1 < 0u) == 0", "(-1 <= 0u) == 0",
+    "(-1 >= 0u) == 1", "(0u - 1) > 0", "(0u - 1) / -1 == 1", "(0u - 1) % -1 == 0", "(-1 & 1u) == 1", "(-1 ^ 0u) > 0",
+    "(-1 | 0u) > 0", "(-1 * 1u) > 0", "(+1u - 2) > 0", "(-1u) > 0", "(!0u - 2) < 0", "((1u == 1) - 2) < 0",
+    "((1u && 1) - 2) < 0", "((0u || 1) - 2) < 0",
+};
+/* These remain outside this slice, including dead-arm literals: poison skips arithmetic faults, never turns
+   unsupported syntax into a value. */
+static const char *REJECTED[] = {
+    "18446744073709551615", "9223372036854775808L", "0x10000000000000000", "02000000000000000000000", "08", "1lL",
+    "184467440737095516160L", "18446744073709551616u", "1uu", "1lul", "1UlL", "1LLL", "'ab'", "'\\x100'", "'\\400'",
+    "0 && 18446744073709551616u", "1/0", "(0 ? 1 : 1u/0)",
+};
+static const char *MACRO_PREFIX =
+    "#define M(a,b) ((a)>(b)?(a):(b))\n"
+    "#define ID(x) x\n"
+    "#define INC(x) ((x)+1)\n"
+    "#define APPLY(f,x) f(x)\n"
+    "#define FN INC\n"
+    "#define OPEN M(\n"
+    "#define SELF SELF\n"
+    "#define A B\n"
+    "#define B A\n"
+    "#define X 41\n"
+    "#define EMPTY\n"
+    "#define DUP(x) x+x\n";
+static const char *MACRO_EXPRS[] = {
+    "M(3,7)==7", "M(9,M(2,4))==9", "M(M(1,8),2)==8", "defined(X) && defined M && !defined NOPE", "SELF==0 && A==0",
+    "M==0", "0 && ID(1/0)", "1 || ID(1/0)", "OPEN 1,2)==2", "APPLY(INC,M(1,2))==3", "FN(3)==4", "(EMPTY 1)==1",
+    "3*DUP(2)==8", "(1 ? M(1,2) : ID(1/0))==2",
+};
+#define COUNT(a) ((int)(sizeof a / sizeof a[0]))
+
+typedef struct lc_buf { char *p; size_t n, cap; } lc_buf;
+static void put(lc_buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2; b->p = realloc(b->p, b->cap); if (!b->p) exit(1); }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void puts_(lc_buf *b, const char *s) { put(b, s, strlen(s)); }
+/* '#if E\nYESi\n#else\nNOi\n#endif\n' for each expression */
+static void selections(lc_buf *b, const char *const *e, int n) {
+    int i; char t[64];
+    for (i = 0; i < n; i++) {
+        puts_(b, "#if "); puts_(b, e[i]);
+        snprintf(t, sizeof t, "\nYES%d\n#else\nNO%d\n#endif\n", i, i); puts_(b, t);
+    }
+}
+static char *pair(const char *a, const char *b) {   /* "(A, B)" */
+    lc_buf r = { 0, 0, 0 };
+    puts_(&r, "("); puts_(&r, a); puts_(&r, ", "); puts_(&r, b); puts_(&r, ")");
+    return r.p;
+}
+/* the model's output for SRC (call: rc 0 or the assertion), the UNIPP1 envelope stripped in the --locations variant */
+static char *model_text(char *run, char *net, const char *src, char *inc, int variant, size_t *n, size_t *off) {
+    char *a[6]; char *got;
+    a[0] = run; a[1] = net; a[2] = (char *)src; a[3] = (char *)src; a[4] = inc; a[5] = 0;
+    got = e2s_call(a, 0, 55, 2000, 0, n);
+    *off = variant ? e2s_envelope_skip(got, *n) : 0;
+    return got;
+}
+static char *host(const char *cc, char *const *extra, int nextra, const char *src, size_t *n) {
+    char **a = malloc((size_t)(nextra + 5) * sizeof *a); int k = 0, i; char *o;
+    a[k++] = (char *)cc; a[k++] = "-E"; a[k++] = "-P";
+    for (i = 0; i < nextra; i++) a[k++] = extra[i];
+    a[k++] = (char *)src; a[k] = 0;
+    o = e2s_call(a, 0, 55, 2000, 0, n); free(a);
+    return o;
+}
+
+int main(void) {
+    char root[4096], td[4096]; char *run, *net, *inc; int variant;
+    const char *cc = getenv("CC");
+    e2s_start(__FILE__, "pp-literals-", root, sizeof root, td, sizeof td);
+    if (!cc) cc = "cc";
+    if (chdir(td) != 0) e2s_raise("OSError: cannot enter the temporary directory");
+    run = e2s_join(td, "run"); net = e2s_join(td, "pp.net"); inc = e2s_join(root, "include");
+    e2s_executor_build(cc, root, run, 55, 2000, 0);
+    for (variant = 0; variant < 2; variant++) {
+        lc_buf src = { 0, 0, 0 }; char *got, *want; size_t gn, go, wn; int i;
+        e2s_model(root, td, variant, 1, 55, 2000, 0);
+        selections(&src, EXPRESSIONS, COUNT(EXPRESSIONS));
+        e2s_write("literal.c", src.p, src.n);
+        got = model_text(run, net, "literal.c", inc, variant, &gn, &go);
+        want = host(cc, 0, 0, "literal.c", &wn);
+        if (!e2s_split_equal(got + go, gn - go, want, wn)) e2s_fail(pair(e2s_repr_bytes(got + go, gn - go), e2s_repr_bytes(want, wn)));
+        free(got); free(want);
+        for (i = 0; i < COUNT(REJECTED); i++) {
+            lc_buf t = { 0, 0, 0 }; char *a[6], *o, *e; size_t on, en; int rc;
+            puts_(&t, "#if "); puts_(&t, REJECTED[i]); puts_(&t, "\na\n#endif\n");
+            e2s_write("literal.c", t.p, t.n); free(t.p);
+            a[0] = run; a[1] = net; a[2] = "literal.c"; a[3] = "literal.c"; a[4] = inc; a[5] = 0;
+            rc = e2s_run(a, 0, 55, &o, &on, &e, &en);
+            if (rc == 0) e2s_fail(pair(e2s_repr_str(REJECTED[i]), e2s_repr_bytes(o, on)));
+            free(o); free(e);
+        }
+        src.n = 0; puts_(&src, MACRO_PREFIX); selections(&src, MACRO_EXPRS, COUNT(MACRO_EXPRS)); puts_(&src, "INC(4) SELF\n");
+        e2s_write("ifmacro.c", src.p, src.n);
+        got = model_text(run, net, "ifmacro.c", inc, variant, &gn, &go);
+        want = host(cc, 0, 0, "ifmacro.c", &wn);
+        if (!e2s_tokens_equal(got + go, gn - go, want, wn)) e2s_fail(pair(e2s_repr_bytes(got + go, gn - go), e2s_repr_bytes(want, wn)));
+        free(got); free(want);
+        src.n = 0; puts_(&src, MACRO_PREFIX); puts_(&src, "#if 0 && ID(1,2)\na\n#endif\n");
+        e2s_write("ifmacro.c", src.p, src.n);
+        {   char *a[6], *o, *e; size_t on, en, k; int rc, has = 0;
+            a[0] = run; a[1] = net; a[2] = "ifmacro.c"; a[3] = "ifmacro.c"; a[4] = inc; a[5] = 0;
+            rc = e2s_run(a, 0, 55, &o, &on, &e, &en);
+            for (k = 0; k + 14 <= en && !has; k++) if (!memcmp(e + k, "argument count", 14)) has = 1;
+            if (!(rc != 0 && has)) e2s_fail(e2s_repr_bytes(e, en));
+            free(o); free(e);
+            a[0] = (char *)cc; a[1] = "-E"; a[2] = "-P"; a[3] = "ifmacro.c"; a[4] = 0;
+            if (e2s_run(a, 0, 55, &o, &on, &e, &en) == 0) e2s_fail(0);
+            free(o); free(e);
+        }
+        /* Library bodies on demand is E2's default (R11-3) and cc has no such notion: an #include named by a macro
+           switches the trimming off by rule, so both sides see every header body (0.0.31 F3: a plain quoted #include
+           no longer does -- quoted headers are scanned instead). */
+        e2s_write("nothing.h", "", 0);
+        {   size_t bn, k; char *b = e2s_read(e2s_join(root, "tests/c/b_ppif.c"), &bn);
+            src.n = 0; puts_(&src, "#define NOTHING \"nothing.h\"\n#include NOTHING\n");
+            for (k = 0; k < bn; k++) {                     /* read_text: universal newlines */
+                if (b[k] == '\r') { put(&src, "\n", 1); if (k + 1 < bn && b[k + 1] == '\n') k++; }
+                else put(&src, b + k, 1);
+            }
+            free(b);
+        }
+        e2s_write("b_ppif.c", src.p, src.n);
+        got = model_text(run, net, "b_ppif.c", inc, variant, &gn, &go);
+        /* Same repository headers and target predefinitions; compare the entire original source's preprocessing
+           output, including every header token. */
+        {   size_t pn, k = 0; char *p = e2s_read(e2s_join(root, "exec/pp/predefines.tsv"), &pn);
+            char **extra = 0; int nextra = 0, cap = 0;
+            lc_buf i1 = { 0, 0, 0 }, i2 = { 0, 0, 0 };
+            puts_(&i1, "-I"); puts_(&i1, inc); puts_(&i2, "-I"); puts_(&i2, td);
+            cap = 16; extra = malloc((size_t)cap * sizeof *extra);
+            extra[nextra++] = "-undef"; extra[nextra++] = "-nostdinc"; extra[nextra++] = i1.p; extra[nextra++] = i2.p;
+            while (k < pn) {                                   /* splitlines; kind, target, *names = split('\t') */
+                size_t s = k, e; char *line, *f[256]; int nf = 0;
+                while (k < pn && p[k] != '\n' && p[k] != '\r') k++;
+                e = k;
+                if (k < pn && p[k] == '\r' && k + 1 < pn && p[k + 1] == '\n') k++;
+                if (k < pn) k++;
+                if (e == s || p[s] == '#') continue;
+                line = malloc(e - s + 1); memcpy(line, p + s, e - s); line[e - s] = 0;
+                f[nf++] = line;
+                { char *q; for (q = line; *q; q++) if (*q == '\t') { *q = 0; if (nf < 256) f[nf++] = q + 1; } }
+                if (nf < 2) e2s_raise("ValueError: not enough values to unpack (expected at least 2, got 1)");
+                if ((!strcmp(f[0], "common") && !strcmp(f[1], "*")) || (!strcmp(f[0], "os") && !strcmp(f[1], "lnx")) ||
+                    (!strcmp(f[0], "arch") && !strcmp(f[1], "x86_64"))) {
+                    int j;
+                    for (j = 2; j < nf; j++) {
+                        char *d = malloc(strlen(f[j]) + 3); d[0] = '-'; d[1] = 'D'; strcpy(d + 2, f[j]);
+                        if (nextra == cap) { cap *= 2; extra = realloc(extra, (size_t)cap * sizeof *extra); }
+                        extra[nextra++] = d;
+                    }
+                }
+            }
+            free(p);
+            want = host(cc, extra, nextra, "b_ppif.c", &wn);
+        }
+        if (!e2s_tokens_equal(got + go, gn - go, want, wn)) e2s_fail("(tokens(got)[-180:], tokens(want)[-180:])");
+        free(got); free(want); free(src.p);
+        printf("%s %d host selections; %d literal refusals; 14 macro selections + dead-arm arity refusal; original b_ppif full header/source tokens match host\n",
+               variant ? "['--locations']" : "plain", COUNT(EXPRESSIONS), COUNT(REJECTED));
+        fflush(stdout);
+    }
+    e2s_exit(0);
+    return 0;
+}
