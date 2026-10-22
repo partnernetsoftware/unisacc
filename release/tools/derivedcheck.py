@@ -79,7 +79,9 @@ def suites_for(rows):
 def export(base, over, rows, tmp):
     """clean export of base, with the overlay applied; the root product is linked read-only.
     over: a commit, None (the index) or 'WORKTREE' (the working-tree bytes the commit would take)."""
-    archive = run_step(['git', 'archive', base], cwd=R, capture_output=True, check=True).stdout
+    # git's default archive umask is 002 (0664 files) and the reviewed-tree stamps hash st_mode: export with git's own
+    # checkout modes, as tests/refresh_gatedeps.py does, or reviewed-trees is red on any host without tar.umask set
+    archive = run_step(['git', '-c', 'tar.umask=022', 'archive', base], cwd=R, capture_output=True, check=True).stdout
     run_step(['tar', '-x', '-C', str(tmp)], input=archive, check=True)
     # the checks that call git (rev-parse HEAD) need a repository: a fresh one with one commit of this export
     env = dict(os.environ, GIT_AUTHOR_NAME='derived', GIT_AUTHOR_EMAIL='d@d', GIT_COMMITTER_NAME='derived', GIT_COMMITTER_EMAIL='d@d')
