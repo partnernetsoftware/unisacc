@@ -14,7 +14,7 @@
 
 ## Abstract
 
-We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; exactness on table stages is checked by full key-space enumeration (`acc`). **Paper B’s claim center** is the **constructed IntNet / table stages / (target) stream-derivation pipeline** for closed JS → **`\0asm`** (gold → IntNet → flow → bytes; provisional **m4** contract in `research/m4-flow-net-contract-draft.md`). **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel; it does **not** re-prove IntNet existence and does **not** claim that A’s discharges automatically transfer to every UJS walker.
+We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; exactness on table nets is checked by full key-space enumeration (`acc`). **Paper B’s claim center** is the **constructed IntNet / table nets / (target) stream-derivation pipeline** for closed JS → **`\0asm`** (gold → IntNet → flow → bytes; provisional **m4** contract in `research/m4-flow-net-contract-draft.md`). **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel; it does **not** re-prove IntNet existence and does **not** claim that A’s discharges automatically transfer to every UJS walker.
 
 Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline on the **construct / jtape spine** (lex…irsel [+ IC], wasm lower when tables ship). The **M3 spine** (`compiler.ujs` → `compiler_core.wasm`, twin-tests in §5.2) is **product scaffolding / 旁路** for Pages ship—Python-free delivery evidence, **not** Paper B’s main contribution and **not** a claim that the shipping compiler is an IntNet. **现状出货 ≠ 主张中心** (Appendix D). Claims are suite names already in the repository; we invent no throughput numbers.
 
@@ -35,7 +35,7 @@ Neural components in compilers and runtimes are usually *trained* heuristics wit
 
 ## 2. Contributions
 
-1. **Claim center (construct spine).** **Constructed IntNet / UJS table stages / (target) stream pipeline** for a closed JS subset → **`\0asm`**, with gold → IntNet → flow → bytes as the paper figure (provisional **4 × 10 → `\0asm`** mnemonic; `research/m4-flow-net-contract-draft.md`). Method transfer (not re-proof): same Shell proposition and P-discipline as [cite A], including **IC** and wasm `isel`/`enc`/`reloc` when tables ship; IntNet proofs stay in A.
+1. **Claim center (construct spine).** **Constructed IntNet / UJS table nets / (target) stream pipeline** for a closed JS subset → **`\0asm`**, with gold → IntNet → flow → bytes as the paper figure (provisional **4 × 10 → `\0asm`** mnemonic; `research/m4-flow-net-contract-draft.md`). Method transfer (not re-proof): same Shell proposition and P-discipline as [cite A], including **IC** and wasm `isel`/`enc`/`reloc` when tables ship; IntNet proofs stay in A.
 2. **M3 as scaffolding, not thesis.** **M3** (`compiler.ujs` → `compiler_core.wasm`; main-body twin-tests) documents **现状出货** and Python-free ship—it is **旁路 / historical scaffolding**, not the main Paper B contribution and not an IntNet instance. Construct path (**jtape / fold / acc / icfold**) carries method acceptance.
 3. **Web product surface**: `wasm_run` / UXE Pages; default compile path **`compiler_core.wasm`** (P0); Python construct is not a ship dependency (`web-build` remains a *dev / engine* path, not Pages emit).
 4. **Cross-host front parity** where dual fronts still exist; parity reduces drift, it does not replace [cite A].
@@ -53,7 +53,7 @@ We share adversarial positioning with [cite A] / `research/prior-art.md`; here o
 
 **Verification style.** Reluplex-style SMT on continuous nets is the wrong tool once keys are finite products: P-3 is a decision procedure by enumeration [cite A; Jia & Rinard 2021]. Boniol et al. (2026) compress exact decision procedures with BDDs; we explicitly **do not** sell size≪table as the thesis.
 
-**Learned compiler components.** MLGO / learned indexes keep classical fallbacks or optimize among legal choices. Our *table* stages are total functions on closed $K_s$ with P-1 (opaque `ask`). The M3 product compiler is classical structure code under twin-tests—closer to ordinary self-hosting than to MLGO.
+**Learned compiler components.** MLGO / learned indexes keep classical fallbacks or optimize among legal choices. Our *table* nets are total functions on closed $K_s$ with P-1 (opaque `ask`). The M3 product compiler is classical structure code under twin-tests—closer to ordinary self-hosting than to MLGO.
 
 **Self-hosting and Web runtimes.** Stage2 ≡ stage1 is the packaging discipline of self-hosting compilers applied to UJS→wasm *product* emit. It does **not** discharge A's L0–L3 for UJS walkers, and it does **not** mean the shipping compiler is an IntNet. Browser/Node surfaces (`wasm_run`, UXE Host) are product packaging around the same theory split as [cite A]'s shell vs Web non-goal for C.
 
@@ -93,17 +93,17 @@ src ──► iterate/compiler.ujs (M3) ──► compiler_core.wasm
 - **API:** `practice/core` `wasm_run` / `practice/uxe` Host; Pages load game wasm + host, not a Python emit at request time.
 - **Dev residual:** `python3 -m ujs web-build` still builds path-A `ujs_full` under `practice/core` when forced; it is **out of** the P0 ship path.
 
-Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships). M3 expands a **classical** AST→wasm subset independently of baking those golds.
+Nets that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships). M3 expands a **classical** AST→wasm subset independently of baking those golds.
 
-**Ten UJS stages vs eighteen UNISA fact networks.** UJS carries **ten** table stages (listed above; one gold table = one stage). Paper A’s C product is **two layers** [cite A]: a **seven-stage byte-stream pipeline** (`preprocess` → `lex` → `parse` → `opt` → `prune` → `lowering` → `encode`+image; `README.md`, `exec/pipeline/image-stages.tsv`) and, orthogonally, **eighteen** fact/decision networks in `unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`)—the eighteen are **ask nets**, not eighteen pipeline stages. Shared *names* across UJS, the byte-stream stages, and those nets (e.g. `type`, `irsel`, `isel`, `lex`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
+**Ten UJS nets vs eighteen UNISA fact networks.** UJS carries **ten** table nets (listed above; one gold table = one net). Paper A’s C product is **two layers** [cite A]: a **seven-stream-stage byte pipeline** (`preprocess` → `lex` → `parse` → `opt` → `prune` → `lowering` → `encode`+image; `README.md`, `exec/pipeline/image-stages.tsv`) and, orthogonally, **eighteen** fact/decision networks in `unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`)—the eighteen are **ask nets**, not eighteen stream-stages. Shared *names* across UJS, the stream-stages, and those nets (e.g. `type`, `irsel`, `isel`, `lex`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
 
-**Key-space scale (FULL gold; counts from `ujs/seed/construct/gold.py` and `unisa/gold.py`).** Illustrative |K|: UJS `irsel` 117, `type` 1863, `isel` 42; same-named UNISA stages are larger (`irsel` ≈ 420, `type` ≈ 4275, `isel` ≈ 174), before counting UNISA-only stages.
+**Key-space scale (FULL gold; counts from `ujs/seed/construct/gold.py` and `unisa/gold.py`).** Illustrative |K|: UJS `irsel` 117, `type` 1863, `isel` 42; same-named UNISA nets are larger (`irsel` ≈ 420, `type` ≈ 4275, `isel` ≈ 174), before counting UNISA-only nets.
 
-**Runtime `ask` vs enumeration (`acc`).** Do **not** claim that all ten stages drive compilation via `oracle.ask`. On the construct path, walkers call `ask` on `lex`, `parse`, `scope`, `type`, `shape`, and `ic` (`ujs/seed/construct/front/`, `vm.py`); wasm emit/lower call `isel`, `enc`, and `reloc` when enabled (`emit_wasm.py`, `lower_wasm.py`). **`irsel` is checked only by full-key `acc` against gold** — there is no runtime `ask("irsel", …)` in the UJS tree.
+**Runtime `ask` vs enumeration (`acc`).** Do **not** claim that all ten nets drive compilation via `oracle.ask`. On the construct path, walkers call `ask` on `lex`, `parse`, `scope`, `type`, `shape`, and `ic` (`ujs/seed/construct/front/`, `vm.py`); wasm emit/lower call `isel`, `enc`, and `reloc` when enabled (`emit_wasm.py`, `lower_wasm.py`). **`irsel` is checked only by full-key `acc` against gold** — there is no runtime `ask("irsel", …)` in the UJS tree.
 
 **Wasm ship surface (UJS vs UNISACC).** UJS **ships** WebAssembly today: **`compiler_core.wasm`** (M3 product compile) and **`sim.wasm`** (Pages step). Python **`ujs2wasm`** remains the **method / control factory** for full-table emit, fold probes, and path-B tooling — not the P0 ship bridge (`compile.mjs` defaults to core). **UNISACC** wasm (tape → wasm as a **seventh output target**; FX-3 in `archive/plans/ideas.md`) is a **roadmap** item for the C product; it currently has **no ship surface** — the public compiler still delivers native objects and `.tape`, not a browser-facing wasm artifact.
 
-**unisacc ↔ UJS (spine mnemonic, not identity).** [cite A]’s shipped C product is **seven byte-stream stages × eighteen fact/decision nets → native** (six platforms). **Paper B claim center (provisional m4 method arc):** **four stream segments × ten UJS table nets (`ujs.STAGES`) → `\0asm`**—stream count **N may differ from seven**; nets are the closed-JS table surface, not UNISA’s eighteen fact nets. **现状出货（≠ 主张中心）：** UJS’s current Web product remains **one M3 ship spine × ten table nets → `\0asm`** (`compiler_core`); cite it only as product scaffolding (footnote), not as the thesis numerator. Construct/jtape is the method arm feeding the m4 figure. Layered horizontal map (overview, pipeline *role* alignment, net surface, name lists): **Appendix D**.
+**unisacc ↔ UJS (spine mnemonic, not identity).** [cite A]’s shipped C product is **seven stream-stages × eighteen fact/decision nets → native** (six platforms). **Paper B claim center (provisional m4 method arc):** **four stream segments × ten UJS table nets (`ujs.STAGES`) → `\0asm`**—stream count **N may differ from seven**; nets are the closed-JS table surface, not UNISA’s eighteen fact nets. **现状出货（≠ 主张中心）：** UJS’s current Web product remains **one M3 ship spine × ten table nets → `\0asm`** (`compiler_core`); cite it only as product scaffolding (footnote), not as the thesis numerator. Construct/jtape is the method arm feeding the m4 figure. Layered horizontal map (overview, pipeline *role* alignment, net surface, name lists): **Appendix D**.
 
 ---
 
@@ -122,7 +122,7 @@ Weights from FULL gold via `build-weights`—not training. Discipline [cite A] �
 | **P-2** | Every ask key ∈ $K_s$ | Runtime assert; Lean L3 **sample** `asks_subset_K` (`reloc`); **full walker still open** |
 | **P-6** | gold ≡ language semantics | External referee—not claimed in A or B |
 
-UJS cites these by reference. **B’s extra P-2 obligation:** each new *table* stage (especially **IC** and wasm `isel`/`enc`/`reloc`) must eventually supply an A-style domain-closure sample or keep the runtime assert + suite pressure. **A’s reloc L3 sample is not a proof of any UJS walker.** **M3’s classical compiler does not inherit a Lean P-2 proof**; its honesty is mainBody twin-tests / fold suites.
+UJS cites these by reference. **B’s extra P-2 obligation:** each new *table* net (especially **IC** and wasm `isel`/`enc`/`reloc`) must eventually supply an A-style domain-closure sample or keep the runtime assert + suite pressure. **A’s reloc L3 sample is not a proof of any UJS walker.** **M3’s classical compiler does not inherit a Lean P-2 proof**; its honesty is mainBody twin-tests / fold suites.
 
 ### 5.2 UJS-1 language (closed) vs UJS-1_ship
 
@@ -140,7 +140,7 @@ Papers and release notes must say **which** face is meant.
 
 **M3** is the second spine: `compiler.ujs` compiled by stage0 yields `compiler_core.wasm`; recompilation yields stage2 ≡ stage1; game `sim.ujs` / `drone.ujs` bodies ≡ stage0. **Compare object in the gate:** the **main function body** from the wasm code section (`fi===1`, locals+ops). That equality does **not** by itself prove whole-module identity, `*.meta.json` identity, RT-stub identity, or source-level semantic equivalence—claim those only with separate checks. Twin-test for **Python-free product compile**, not a re-proof of IntNet, and not a claim that stage0 C and stage1 UJS are table-constructed.
 
-### 5.4 Inline cache stage
+### 5.4 Inline cache net
 
 Hot sites: `ask(ic, (shape, op, guard)) → stub_kind` from a finite stub catalog. Deopt is classical control flow. **icfold:** IC on/off agree. IC keys are another finite product—same P-2/P-3 shape as [cite A]; stub choice is not learned by SGD. Lives on the **construct** spine.
 
@@ -250,8 +250,8 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |
 | “`construct/` holds the reusable weights” | Generators are `seed/`; artifacts are `weights/` (A/C rule) |
 | “need a new UJS bytecode VM next” | Product path already emits `\0asm`; companion `tinyvm` validate is optional hygiene—not a third IR or finished execute twin |
-| “UJS and UNISA share the same ten tables” | UJS has 10 table stages; UNISA has 18 fact nets **and** a separate 7-stage byte-stream pipeline ([cite A] two layers); same *names* ≠ same K / vocab |
-| “UNISA / unisacc = 18 compile stages” | 18 = fact/decision nets at `ask` points; product byte-stream compile is 7 stages—not the same layer |
+| “UJS and UNISA share the same ten tables” | UJS has 10 table nets; UNISA has 18 fact nets **and** a separate 7-stream-stage byte pipeline ([cite A] two layers); same *names* ≠ same K / vocab |
+| “UNISA / unisacc = 18 compile stages” | 18 = fact/decision nets at `ask` points; product byte-stream compile is 7 stream-stages—not the same layer |
 | “all ten stages use oracle.ask at compile time” | `irsel` is `acc` only; runtime asks are lex/parse/scope/type/shape/ic plus isel/enc/reloc on wasm lower |
 | “UNISACC already ships wasm like UJS” | UJS ships `compiler_core` / `sim`; UNISACC wasm (FX-3 / target #7) is roadmap; product IR is still `.tape` |
 | “UJS ship = construct/jtape in the mnemonic” | Ship spine is M3 → `\0asm`; construct is method对照—do not fold it into the product numerator (Appendix D) |
@@ -269,7 +269,7 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | | unisacc ([cite A] C product) | UJS (this paper) |
 |---|---|---|
 | **Claim center (provisional m4)** | — | **4 stream × 10 table nets → `\0asm`** (method proof arc; `research/m4-flow-net-contract-draft.md`) |
-| **Compressed spine (现状出货 ≠ 主张中心)** | 7 byte-stream stages × 18 fact/decision nets → **native** (six platforms) | 1 **M3 ship** spine × 10 table nets → **`\0asm`** — **product footnote only** |
+| **Compressed spine (现状出货 ≠ 主张中心)** | 7 stream-stages × 18 fact/decision nets → **native** (six platforms) | 1 **M3 ship** spine × 10 table nets → **`\0asm`** — **product footnote only** |
 | **Method arm (not ship numerator)** | exec / table-driven reference (Paper C) | **construct / jtape** → emit / `ujs2wasm` (when tables ship); seeds **m4** figure |
 
 ### D.2 Overview
@@ -277,8 +277,8 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | Layer | unisacc | UJS |
 |---|---|---|
 | **Language** | C99 (closed subset) | UJS (UJS-1 spec; **UJS-1_ship** on M3 path) |
-| **Pipeline** | Seven byte-stream stages (generic executor + δ) | **M3** single product spine (`compiler.ujs` → `compiler_core.wasm`) |
-| **Nets (ask stages)** | 18 fact/decision nets | 10 `STAGES` in `ujs.STAGES` |
+| **Pipeline** | Seven stream-stages (generic executor + δ) | **M3** single product spine (`compiler.ujs` → `compiler_core.wasm`) |
+| **Nets (ask points)** | 18 fact/decision nets | 10 `STAGES` in `ujs.STAGES` |
 | **IR** | Compiler **tape** (byte-stream contract) | **jtape** / M3 wasm opcode lowering (classical on ship spine) |
 | **Ship** | Six-platform **native** object / image | **`\0asm`** (+ Host/Pages packaging) |
 | **Wasm** | **Not shipped** (roadmap / tape-side lower) | **Shipped** (`compiler_core`, sim/drone, construct `ujs2wasm` when enabled) |
@@ -286,7 +286,7 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 
 ### D.3 Pipeline (horizontal roles)
 
-**unisacc byte-stream (seven stages, [cite A]):**
+**unisacc byte-stream (seven stream-stages, [cite A]):**
 
 `preprocess (e2)` → `lex (e1)` → `parse (e3)` → `opt (e4)` → `prune` → `lower` → `elf/encode + image`
 
@@ -304,19 +304,19 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 
 | Topic | unisacc | UJS |
 |---|---|---|
-| **Shared stage names** (vocab / backends differ) | `lex`, `parse`, `type`, `scope`, `irsel`, `isel`, `enc`, `reloc` | same set where table-backed on construct path |
+| **Shared net names** (vocab / backends differ) | `lex`, `parse`, `type`, `scope`, `irsel`, `isel`, `enc`, `reloc` | same set where table-backed on construct path |
 | **UJS-only** | — | `shape`, `ic` |
 | **unisacc-only** | `pp`, `abi`, `combo`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, … | — |
 | **`irsel`** | Wired for real **`ask("irsel", …)`** on the C pipeline | Table / **`acc`** on construct path; **no** `ask("irsel")` on the shipping M3 spine |
 
-Eighteen ≠ seven: decision nets are **ask points**; byte-stream stages are the **compiler executor contract** (two-layer framing in [cite A]). UJS’s ten nets are the closed JS/wasm table surface for the construct spine; M3 may compile without baking every gold.
+Eighteen ≠ seven: decision nets are **ask points**; stream-stages are the **compiler executor contract** (two-layer framing in [cite A]). UJS’s ten nets are the closed JS/wasm table surface for the construct spine; M3 may compile without baking every gold.
 
 ### D.5 Name lists (stable checklist)
 
-**unisacc — 18 decision stages:**  
+**unisacc — 18 decision nets:**  
 `pp` · `lex` · `parse` · `type` · `scope` · `irsel` · `enc` · `reloc` · `regmap` · `tyinfo` · `pfconv` · `peep` · `opinfo` · `prec` · `binsel` · `isel` · `abi` · `combo`
 
-**UJS — 10 table stages (`ujs.STAGES`):**  
+**UJS — 10 table nets (`ujs.STAGES`):**  
 `lex` · `parse` · `type` · `scope` · `shape` · `irsel` · `ic` · `isel` · `enc` · `reloc`
 
 ---
