@@ -31,3 +31,4 @@ sh "$PRODUCT" -run tests/modelstreamextract.cx -- "$PRODUCT" "$OUT/models"
 ```
 
 先创建 OUT/accept 与 OUT/models；比较 accept 全文件后，封存模型取 models/lower.net 原件，pin 从该文件的 SHA256 自动生成。复核仍用 `tests/stagecontractcheck.cx --fixture tests/seals/stagecontract-e1-e3 --fixture tests/seals/stagecontract-tape-lower --product PRODUCT`，不放宽任何正负断言。
+- 2026-10-22 重捕：HEAD 59bf6258 的 lower 表刀（dff28ff6 CRLF B-lower、6f717a98 托管 .sys6 exit）之后冻结 lower.net 已陈旧（HEAD 干净导出包与工作树候选包抽出的 lower.net 同为 3f4c80e2500315ddf9db4086e7bd7bffab0ac6c5944186a1e391581d71ea3ad5，均≠旧冻结）；lower.net 经 modelstreamextract.cx 原样抽取，accept/ 以 middleflowrunner capture-lower 重捕，六个文件与旧捕获逐字节同。
