@@ -85,3 +85,11 @@
 **仍未修（登记）**：
 - 局部 `int (**fpp)(int) = &fp; (*fpp)(21)`：v0.0.42 产品与经典参考都编译通过、运行段错误（同一 `FPD.moreptr` 丢级）；形参形状碰巧正确，故未一刀拒绝，待单独定界。
 - 经典参考在多维指针到数组上静默错：`int (*mp)[3][2]` 的 `sizeof mp` 得 16、`*mp` 得 8；`int (**ipp)[3]` 上 `*ipp` 得 24、`(*ipp)[1][2]=7` 程序段错误；`&*(ip+1)` 得 12。探针 `tests/c/candidates/sizeof-rows-classic-gaps.c`（cc、Python 参考、候选同；经典异），修好经典后再移入 `tests/c/`。
+
+## (**p)(…) 与 (**p) 声明符补级（2026-10-22 22:xx HKT，实际跑过）
+
+同一 `FPD.moreptr` 丢级的函数指针面：`int (**fpp)(int)` 被记成普通函数指针（td=1、tb=签名），而对函数指针解引用是无操作，于是 `(*fpp)(21)` 直接把 `fpp` 的值（`&fp`）当代码调用——v0.0.42 产品与经典参考编译通过、运行段错误；`sizeof *fpp` 得 133。typedef 形 `F *pf` 一直正确（td=2、tb=函数指针类）。
+
+修法（不拒绝，补级）：`fp_more` 改为额外 `*` 计数；`PD.fptail` 改为调用 `FS.PARAMS` 后经 `PD.fpmore` 把 `fp_more` 加到 td（不改共用的 `FS.params.result`，其也服务普通函数声明符，`fp_more` 可能陈旧）；`PD.object`（形参 `int (**p)`）同样加 `fp_more`；`(**p)[N]` 拒绝改为 `fp_more≥1`。
+
+实测（Python E3 模拟）：局部/全局/形参 `(*p)(x)`、`(**p)(x)`、`sizeof *fpp`、`int (**q)(int) = arr; q[1](3)`、`(*(q+1))(4)`、形参 `*p = thrice` 全与 gcc 同；形参 `int (**p)` 由「not covered: dereference of a non-pointer」变为正确接受；局部 `int (*p) = &v;` 等括号对象声明符前后都具名拒绝（`not covered: declarator`，非本刀）；a_nested_fp_param、b_fptr_typedef_ptr 的 tape 逐字节不变。探针 `tests/c/candidates/fptr-ptr-declarators.c`：cc、Python 参考、候选同；经典参考段错误（`src/front_parse.c` `fpdecl()` 的 `while (eatstar()) { }` 同样丢级），修好经典后再移入 `tests/c/`。
