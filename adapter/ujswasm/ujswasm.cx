@@ -2,7 +2,8 @@
    (m4/flows.py, m4/emit.py over ujs/seed/construct/front + emit_wasm) ported to .cx, with every decision asked of the
    flownet nets through the fn_ API -- nothing here answers a net question itself, and nothing falls back to gold.
      flow lex      the ujs lexer: each step asks lex (char class, next char class)
-     flow front    the ujs compiler: parse decides every production; type/shape/ic/isel are asked as m4's side channel
+     flow front    the ujs compiler: parse decides every production; type/shape/ic/isel are asked as m4's side channel,
+                   and since W4 the type, shape and ic answers are consumed (BINOP_LOWER gates: legal/refuse)
      flow select   isel decides the form of every jtape op (eq/ne may take the contract's second form)
      flow encode   enc gates every instruction against its pinned template; the WAT goes through wat2wasm
    It is the boundary adapter: it may name ujs, flownet/ may not (D1).  Since W3 it only plugs ujs into flownet's two
@@ -15,7 +16,8 @@
    Commands:
      build SRC -o OUT [--tables DIR] [--wat FILE]   SRC -> OUT (\0asm); prints bytes, sha256 and the trace.  A refusal
                     (anything not covered) is rc 1, stdout empty, OUT absent, stderr "ujswasm: SRC:LINE: reason"
-     check ROOT     the W1 baseline (tests/flownet-baseline.tsv), no Python: acc per net and the wired/reserved lists;
+     check ROOT     the W1 baseline (tests/flownet-baseline.tsv), no Python: acc per net and the wired/reserved lists
+                    (W4: wired is m4's recorded list plus the promotions type, shape, ic, and nothing is observed);
                     every recorded program built through flownet -- output bytes + sha256 and the trace (phase, net,
                     hits, gold fallbacks) equal the recorded m4 values; the negative programs accepted/refused as
                     recorded; every refusal has the D5 shape
@@ -28,7 +30,11 @@
      d1 ROOT        D1/red line 3: no "ujs" and no "python" in flownet/*.cx
      accepts ROOT   the 5 negatives ujs accepts (no bytes recorded in the baseline) and 2 literal boundaries just inside
                     what wat2wasm takes (2^64-1, DBL_MAX by rounding): flownet's bytes == the m4 oracle's
-                    (`python3 -m m4 build`, a child process; the only Python step, and outside flownet/) */
+                    (`python3 -m m4 build`, a child process; the only Python step, and outside flownet/)
+     selftest ROOT [K/N|NET,...]   (W4) the decision measure, no Python: each net lying (m4's shift and trap, as an
+                    injected label source the nets are constructed from) over the 33 recorded programs; the kinds
+                    each net decides == EXPECT_W4 (m4's EXPECT plus the promotions type, shape, ic); share 1 checks
+                    the honest constructed nets give the record, the last share proves the isel eq/ne choice */
 
 #pragma unisa use flownet.api
 #pragma unisa use ujsgold
@@ -387,10 +393,10 @@ static const char *JOPS[] = { "nop", "const", "load_l", "store_l", "load_g", "st
 
 static const char *ask_type(Comp *c, const char *t1, const char *op, const char *t2) { return ask(c, "type", t1, op, t2); }
 static const char *ask_shape(Comp *c, const char *ty) { return ask(c, "shape", ty, "empty", 0); }
-static void ask_ic(Comp *c, const char *shape, const char *op) {
+static const char *ask_ic(Comp *c, const char *shape, const char *op) {
     if (!in_list(op, IC_OPS)) op = "add";
     if (!in_list(shape, SHAPES)) shape = "s_i64";
-    ask(c, "ic", shape, op, "type_ok");
+    return ask(c, "ic", shape, op, "type_ok");
 }
 static void ask_isel(Comp *c, const char *jop) { if (!in_list(jop, JOPS)) jop = "add"; ask(c, "isel", jop, 0, 0); }
 
@@ -404,11 +410,41 @@ static const char *ICOP_OF[] = { "+", "add", "-", "sub", "*", "mul", "/", "div",
 static const char *JOP_OF[] = { "+", "add", "-", "sub", "*", "mul", "/", "div", "%", "mod", "<", "lt", ">", "gt", "<=", "le",
     ">=", "ge", "==", "eq", "!=", "ne", "&&", "and", "||", "or", "in", "in", 0 };
 
-/* note_binop: the side-channel asks (type, shape, ic, isel); their answers do not reach the output (OBSERVED) */
+/* W4 (plans/m4-flownet-cx-module.md): the front end consumes the type, shape and ic answers -- they were m4's side
+   channel (asked, then dropped: OBSERVED).  The asks and their keys are m4's, unchanged (so the books and the bytes
+   stay those of the ujs record), and so is the chain between them: the type answer is the key of the shape ask, the
+   shape answer the key of the ic ask.  Each answer is then consumed as a gate (the paradigm of enc's LEGAL_ENC and
+   isel's LEGAL_FORM): the direct lowering of a binary operator realizes exactly one static result type of `i64 OP
+   i64`, one operand shape and one inline-cache stub, pinned below per operator; any other answer is a named refusal
+   at the operator's line.  So these are legal/refuse decisions, not choices: the bytes of every accepted program are
+   pinned by the ujs record (D2), and the asked keys are fixed per operator, so no answer can reach the bytes without
+   breaking parity.  The `add_i64` rows of <= > >= != && || are m4's: its ICOP map sends an operator with no IC op to
+   "add" (ujs front/compile.py note_binop), and the key is kept as asked.
+   BINOP_LOWER: operator, type(i64 OP i64), shape(that type), ic(shape, IC op, type_ok) */
+static const char *BINOP_LOWER[] = {
+    "+", "i64", "s_i64", "add_i64",     "-", "i64", "s_i64", "sub_i64",     "*", "i64", "s_i64", "mul_i64",
+    "/", "f64", "s_f64", "div_f64",     "%", "i64", "s_i64", "interp",
+    "<", "bool", "s_i64", "cmp_i64",    "<=", "bool", "s_i64", "add_i64",   ">", "bool", "s_i64", "add_i64",
+    ">=", "bool", "s_i64", "add_i64",   "==", "bool", "s_i64", "cmp_i64",   "!=", "bool", "s_i64", "add_i64",
+    "&&", "illegal", "s_i64", "add_i64", "||", "illegal", "s_i64", "add_i64", "in", "illegal", "s_i64", "interp", 0 };
+
+/* the one consumption point of the W4 gates: ANSWER of NET must be LEGAL, else a named refusal at the current line */
+static void consume(Comp *c, const char *net, const char *answer, const char *legal, const char *op) {
+    char *what = xf("operator %s: %s", op, net);
+    if (fn_gate(net, answer, legal, what)) cerr(c, fn_error(), 0);
+    free(what);
+}
+
+/* note_binop: m4's asks (type, shape, ic, isel); since W4 the type, shape and ic answers are consumed (above) */
 static void note_binop(Comp *c, const char *op) {
-    const char *ty = ask_type(c, "i64", in_list(op, BINOPS_T) ? op : "+", "i64"), *sh;
+    const char *ty = ask_type(c, "i64", in_list(op, BINOPS_T) ? op : "+", "i64"), *sh, *ic, **row;
+    for (row = BINOP_LOWER; *row && strcmp(*row, op); row += 4) ;
+    if (!*row) cerr(c, "no direct lowering for the operator ", op);
+    consume(c, "type", ty, row[1], op);
     sh = ask_shape(c, (!strcmp(ty, "i64") || !strcmp(ty, "bool") || !strcmp(ty, "illegal")) ? "i64" : ty);
-    ask_ic(c, sh, mapop(op, ICOP_OF, "add"));
+    consume(c, "shape", sh, row[2], op);
+    ic = ask_ic(c, sh, mapop(op, ICOP_OF, "add"));
+    consume(c, "ic", ic, row[3], op);
     ask_isel(c, mapop(op, JOP_OF, "add"));
 }
 
@@ -810,7 +846,9 @@ static void binary(Comp *c, int min_prec) {
             note_binop(c, "||"); emit(c, "or");
         } else if (!strcmp(op, "??")) {
             char *tr, *tl; int jz, jmp, s;
-            ask_type(c, "null", "==", "str");
+            /* the nullish lowering below is a typeof dispatch: it is what the front end emits when the type net
+               gives `null == str` no static type (illegal); W4 consumes that answer like the binary operators' */
+            consume(c, "type", ask_type(c, "null", "==", "str"), "illegal", "??");
             ask_isel(c, "typeof");
             tr = xf("__nr%d", c->nslot);
             tl = xf("__nl%d", c->nslot);
@@ -2062,6 +2100,7 @@ static char *read_source(const char *path, size_t *n) {
     return b;
 }
 
+static int g_keep_tables;                 /* a forked selftest child: build over the nets its parent constructed */
 static int cmd_build(int argc, char **argv) {
     const char *src = 0, *out = 0, *tables = DEFAULT_TABLES, *watout = 0, *drive = "built"; int k; size_t n; char *data;
     char hex[65];                             /* bounded: cx_sha256_hex writes 64 hex digits and a NUL */
@@ -2076,7 +2115,7 @@ static int cmd_build(int argc, char **argv) {
     if (!src || !out) { fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE]\n"); return 2; }
     g_src = src;
     unlink(out);                              /* OUT exists afterwards only if this build succeeded */
-    if (open_tables(tables)) refuse_at(0, fn_error());
+    if (!g_keep_tables && open_tables(tables)) refuse_at(0, fn_error());
     if (fn_drive(drive)) refuse_at(0, fn_error());
     data = read_source(src, &n);
     run_flows(data, n, watout);
@@ -2094,28 +2133,52 @@ static int cmd_build(int argc, char **argv) {
 
 typedef struct { int rc; char *out; size_t nout; char *err; size_t nerr; } Child;
 
-/* one build in a forked child (a refusal exits that child only): rc, stdout and stderr */
-static Child build_child(const char *src, const char *outpath, const char *tables, const char *drive) {
-    Child r; char so[] = "/tmp/ujswasmoXXXXXX", se[] = "/tmp/ujswasmeXXXXXX"; int fo = mkstemp(so), fe = mkstemp(se), st = 0; pid_t p;
-    memset(&r, 0, sizeof r);
+/* one build in a forked child (a refusal exits that child only): rc, stdout and stderr.  TABLES 0: the child builds
+   over the nets already in this process (the selftest's, constructed by fn_build) instead of opening a directory */
+typedef struct { pid_t pid; char *so, *se; int limited; } Pend;   /* a started child: its stdout/stderr files */
+static Pend child_start(const char *src, const char *outpath, const char *tables, const char *drive) {
+    Pend q; int fo, fe; pid_t p;
+    q.so = xf("/tmp/ujswasmoXXXXXX"); q.se = xf("/tmp/ujswasmeXXXXXX"); q.limited = !tables;
+    fo = mkstemp(q.so); fe = mkstemp(q.se);
     fflush(stdout); fflush(stderr);
     p = fork();
     if (p == 0) {
         char *av[8]; int k = 0;
         dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
-        av[k++] = (char *)src; av[k++] = "-o"; av[k++] = (char *)outpath; av[k++] = "--tables"; av[k++] = (char *)tables;
+        av[k++] = (char *)src; av[k++] = "-o"; av[k++] = (char *)outpath;
+        if (tables) { av[k++] = "--tables"; av[k++] = (char *)tables; }
+        else g_keep_tables = 1;
         av[k++] = "--drive"; av[k++] = (char *)drive; av[k] = 0;
         g_tmpdir[0] = 0;
         exit(cmd_build(k, av));
     }
     close(fo); close(fe);
-    waitpid(p, &st, 0);
+    q.pid = p;
+    return q;
+}
+/* wait for a started child: rc, stdout and stderr (its files removed) */
+static Child child_finish(Pend q) {
+    Child r; int st = 0;
+    memset(&r, 0, sizeof r);
+    if (!q.limited) waitpid(q.pid, &st, 0);
+    else {   /* a selftest child builds over lying nets: it must not hang the step (20 s, then rc 124 -- not a refusal) */
+        long ticks = 2000; pid_t w;
+        for (;;) {
+            w = waitpid(q.pid, &st, WNOHANG);
+            if (w == q.pid) break;
+            if (w < 0 || ticks-- <= 0) { kill(q.pid, SIGKILL); waitpid(q.pid, &st, 0); st = 124 << 8; break; }
+            usleep(10000);
+        }
+    }
     r.rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff;
-    r.out = cx_read(so, &r.nout); r.err = cx_read(se, &r.nerr);
+    r.out = cx_read(q.so, &r.nout); r.err = cx_read(q.se, &r.nerr);
     if (!r.out) { r.out = sdup(""); r.nout = 0; }
     if (!r.err) { r.err = sdup(""); r.nerr = 0; }
-    unlink(so); unlink(se);
+    unlink(q.so); unlink(q.se); free(q.so); free(q.se);
     return r;
+}
+static Child build_child(const char *src, const char *outpath, const char *tables, const char *drive) {
+    return child_finish(child_start(src, outpath, tables, drive));
 }
 
 static int fails;
@@ -2174,6 +2237,30 @@ static char *neg_path(const char *name) {
     return p;
 }
 
+/* W4: the nets m4 measured as side channel (OBSERVED: type, shape, ic) that this front end consumes; the adapter's
+   contract wires them into the front flow, so its wired list is m4's recorded one plus these, and none is observed */
+static const char *W4_PROMOTED[] = { "type", "shape", "ic", 0 };
+
+/* NAME is an element of the comma-separated LIST */
+static int in_commas(const char *name, const char *list) {
+    size_t k = strlen(name); const char *p = list;
+    while (*p) {
+        const char *e = strchr(p, ','); size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == k && !strncmp(p, name, k)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+static int n_commas(const char *list) { int n = *list ? 1 : 0; for (; *list; list++) n += *list == ','; return n; }
+
+/* the contract's list of ROLE, whole (fn_list grows until it fits) */
+static char *role_list(const char *role) {
+    int cap = 64; char *l = xrealloc(0, cap);
+    while (fn_list(role, l, cap) < 0 && cap < (1 << 20)) { cap *= 2; l = xrealloc(l, cap); fn_error_clear(); }
+    return l;
+}
+
 static int cmd_check(const char *root) {
     char *outp, tmp[] = "/tmp/ujswasmcXXXXXX"; int r, k, nprog = 0, same = 0, i, nacc = 0, accok = 0;
     const char *tables = DEFAULT_TABLES;
@@ -2190,11 +2277,31 @@ static int cmd_check(const char *root) {
             if (fn_acc(w->f[2], &e, &t)) { bad(fn_error(), 0); continue; }
             if (e != atoi(w->f[3]) || t != atoi(w->f[4]) || e != t) badf("acc %s: %d/%d, recorded %s/%s", w->f[2], e, t, w->f[3], w->f[4]);
             else accok++;
-        } else if (!strcmp(w->f[1], "wired") || !strcmp(w->f[1], "reserved")) {
-            int cap = 64; char *l = xrealloc(0, cap);
-            while (fn_list(w->f[1], l, cap) < 0 && cap < (1 << 20)) { cap *= 2; l = xrealloc(l, cap); fn_error_clear(); }
-            if (w->n != 3 || strcmp(l, w->f[2])) badf("acc %s: %s, recorded %s", w->f[1], l, w->n > 2 ? w->f[2] : "?");
+        } else if (!strcmp(w->f[1], "reserved")) {
+            char *l = role_list("reserved");
+            if (w->n != 3 || strcmp(l, w->f[2])) badf("acc reserved: %s, recorded %s", l, w->n > 2 ? w->f[2] : "?");
             free(l);
+        } else if (!strcmp(w->f[1], "wired")) {
+            /* W4: m4's recorded wired nets plus the promoted ones, as a set; no promoted net was wired or reserved in
+               the record, and the contract observes nothing */
+            char *l = role_list("wired"), *o = role_list("observed"); int q, np = 0, okset = w->n == 3;
+            for (q = 0; okset && W4_PROMOTED[q]; q++, np++)
+                if (!in_commas(W4_PROMOTED[q], l) || in_commas(W4_PROMOTED[q], w->f[2])) okset = 0;
+            if (okset && n_commas(l) != n_commas(w->f[2]) + np) okset = 0;
+            if (okset) {
+                const char *p = w->f[2];
+                while (*p) {
+                    const char *e = strchr(p, ','); size_t n = e ? (size_t)(e - p) : strlen(p); char *one = xrealloc(0, n + 1);
+                    memcpy(one, p, n); one[n] = 0;
+                    if (!in_commas(one, l)) okset = 0;
+                    free(one);
+                    if (!e) break;
+                    p = e + 1;
+                }
+            }
+            if (!okset) badf("acc wired: %s, want the recorded %s plus the W4 promotions type,shape,ic", l, w->n > 2 ? w->f[2] : "?");
+            if (*o) badf("acc observed: %s, want none (W4 promoted every observed net of m4)", o);
+            free(l); free(o);
         }
     }
     if (!mkdtemp(tmp)) { fprintf(stderr, "ujswasm-check: no scratch\n"); return 1; }
@@ -2756,6 +2863,244 @@ static int cmd_d1(const char *root) {
     return rc;
 }
 
+/* ======================================================================================================
+   selftest (W4): the decision measure -- m4/selftest.py ported onto flownet's injection surface
+   ======================================================================================================
+   The measure (pinned here; plans/m4-flownet-cx-module.md W4): a net DECIDES under a mutation iff, with that net lying
+   and every other net honest, some recorded program's output differs from the record (bytes or sha256) or the build
+   is refused by name (rc 1, the D5 one-line stderr).  The mutations are m4's: shift (every key's answer becomes the
+   next class of the net, m4 _Shift) and trap (every key answers trap, m4 _Trap; only a net with a trap class).  The
+   lie is a label source injected through the public API: lying_label wraps the ujs gold port, fn_label_source injects
+   it and fn_build constructs every integer net from it -- exact by construction, so acc cannot see the lie, and the
+   flows meet it only through fn_ask.  The 33 recorded programs (tests/flownet-baseline.tsv out1..4: 28 corpus + 5
+   probes, m4's order) are built in forked children over those nets, the first difference or refusal ending the net's
+   run.  The kinds measured per net must equal EXPECT_W4; EXPECT_W4 must equal m4's EXPECT (the baseline's expect
+   section, re-read from m4/selftest.py) except for the W4 promotions, which m4 records as deciding nothing.
+     selftest ROOT K/N   the K-th of N shares of the 10 nets (contract order); share 1 also builds the 33 programs over
+                         honest constructed nets (== the record: the reference of the measure), the last share also
+                         runs the isel choice proof (eq: i64_cmp | f64_cmp, different bytes, both run 100 under node)
+     selftest ROOT NET,NET...   just those nets (no honest pass, no choice proof) */
+static const char *EXPECT_W4[] = {
+    "lex", "shift", "parse", "shift", "type", "shift", "scope", "nothing", "shape", "shift",
+    "irsel", "nothing", "ic", "shift", "isel", "shift/trap", "enc", "shift/trap", "reloc", "nothing", 0 };
+
+static const char *SELF_NETS[] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc", 0 };
+enum { NSELF = 10 };
+
+enum { LIE_NONE, LIE_SHIFT, LIE_TRAP, LIE_FORCE };
+static int lie_kind; static const char *lie_net, *lie_key, *lie_answer;
+static int in_cls(const char *s, char **cls) { int i; for (i = 0; cls[i]; i++) if (!strcmp(cls[i], s)) return i; return -1; }
+
+/* the classes of NET in order (0-terminated): the "class" row of its domain text in the ujs gold port; kept per net */
+static char **net_classes(const char *net) {
+    static char **cls[NSELF]; int s, n = 0; const char *d, *p;
+    for (s = 0; SELF_NETS[s] && strcmp(SELF_NETS[s], net); s++) ;
+    if (!SELF_NETS[s]) { fprintf(stderr, "ujswasm-selftest: %s is not a ujs net
+", net); exit(1); }
+    if (cls[s]) return cls[s];
+    if (!(d = ujsgold_domain(0, net)) || !(p = strstr(d, "class\t")) || (p != d && p[-1] != '\n')) {
+        fprintf(stderr, "ujswasm-selftest: %s: no class row in its domain\n", net); exit(1);
+    }
+    for (p += 6;;) {
+        const char *e = p + strcspn(p, "\t\n"); char *one = xrealloc(0, (size_t)(e - p) + 1);
+        memcpy(one, p, (size_t)(e - p)); one[e - p] = 0;
+        cls[s] = xrealloc(cls[s], (n + 2) * sizeof(char *)); cls[s][n++] = one; cls[s][n] = 0;
+        if (*e != '\t') break;
+        p = e + 1;
+    }
+    return cls[s];
+}
+
+/* the ujs gold port, with LIE_NET lying as lie_kind says (LIE_FORCE: the one-field key lie_key answers lie_answer) */
+static const char *lying_label(void *ctx, const char *net, int nk, const char *const *key) {
+    const char *h = ujsgold_label(ctx, net, nk, key); char **cls; int i, n;
+    if (!h || lie_kind == LIE_NONE || strcmp(net, lie_net)) return h;
+    cls = net_classes(net);
+    for (n = 0; cls[n]; n++) ;
+    if (lie_kind == LIE_TRAP) return in_cls("trap", cls) >= 0 ? "trap" : cls[0];
+    if (lie_kind == LIE_FORCE) return nk == 1 && !strcmp(key[0], lie_key) ? lie_answer : h;
+    i = in_cls(h, cls);
+    return cls[(i + 1) % n];
+}
+
+/* fn_build over the lying source: every net constructed from it */
+static char *st_contract;
+static void st_build(int kind, const char *net) {
+    lie_kind = kind; lie_net = net;
+    if (fn_label_source(ujsgold_domain, lying_label, 0) || fn_build(st_contract)) {
+        fprintf(stderr, "ujswasm-selftest: cannot construct the nets (%s %s): %s\n", net ? net : "honest", kind == LIE_SHIFT ? "shift" : kind == LIE_TRAP ? "trap" : "", fn_error());
+        exit(1);
+    }
+}
+
+/* the recorded programs: path, bytes, sha256 (out rows of the baseline, in their order) */
+static Row **st_prog; static int st_nprog;
+
+/* judge program K's build C (over the nets in this process; its output at OUTP): 0 the record's bytes, 1 refused by
+   name, 2 accepted with other bytes; WHY gets a one-line account (the refusal, or the bytes) */
+static int st_judge(int k, Child c, const char *outp, char **why) {
+    int r; char hex[65];                      /* bounded: 64 hex digits and a NUL */
+    if (c.rc) {
+        char *nl;
+        d5(st_prog[k]->f[2], &c, outp, st_prog[k]->f[2]);
+        if ((nl = strchr(c.err, '\n'))) *nl = 0;
+        *why = xf("refused (rc %d): %s", c.rc, c.err);
+        r = 1;
+    } else {
+        size_t wl = 0; char *wb = cx_read(outp, &wl);
+        if (!wb) { *why = sdup("accepted, but no output file"); r = 2; }
+        else {
+            cx_sha256_hex(wb, wl, hex); free(wb);
+            if ((long)wl == atol(st_prog[k]->f[4]) && !strcmp(hex, st_prog[k]->f[5])) { *why = sdup("same bytes"); r = 0; }
+            else { *why = xf("accepted with other bytes: %ld bytes sha256 %s, recorded %s bytes %s", (long)wl, hex, st_prog[k]->f[4], st_prog[k]->f[5]); r = 2; }
+        }
+    }
+    free(c.out); free(c.err); unlink(outp);
+    return r;
+}
+
+/* programs FROM.. (at most ST_PAR) built at once, each in its own forked child with its own output file, judged in
+   program order: R[i], WHY[i] for program FROM+i (the same verdicts as one at a time, only sooner) */
+enum { ST_PAR = 6 };
+static int st_batch(int from, const char *outp, int *r, char **why) {
+    Pend q[ST_PAR]; char *op[ST_PAR]; int i, n = st_nprog - from < ST_PAR ? st_nprog - from : ST_PAR;
+    for (i = 0; i < n; i++) { op[i] = xf("%s.%d", outp, i); unlink(op[i]); q[i] = child_start(st_prog[from + i]->f[2], op[i], 0, "built"); }
+    for (i = 0; i < n; i++) { r[i] = st_judge(from + i, child_finish(q[i]), op[i], &why[i]); free(op[i]); }
+    return n;
+}
+
+/* does NET decide under KIND?  1 with the program and the account printed, 0 when all 33 kept the record's bytes */
+static int st_decides(const char *net, int kind, const char *outp) {
+    int k, i, n, r[ST_PAR], hit = -1; char *why[ST_PAR];
+    st_build(kind, net);
+    for (k = 0; k < st_nprog && hit < 0; k += n) {
+        n = st_batch(k, outp, r, why);
+        for (i = 0; i < n; i++) {
+            if (r[i] && hit < 0) {
+                hit = k + i;
+                printf("selftest\tlie\t%s\t%s\t%s\t%s\n", net, kind == LIE_SHIFT ? "shift" : "trap", st_prog[hit]->f[2], why[i]);
+            }
+            free(why[i]);
+        }
+    }
+    if (hit >= 0) return 1;
+    printf("selftest\tlie\t%s\t%s\tnone of %d programs changed or refused\n", net, kind == LIE_SHIFT ? "shift" : "trap", st_nprog);
+    return 0;
+}
+
+/* m4 _choose_proof: isel answers f64_cmp for eq (the contract's second form) on corpus/ternary.ujs -- the bytes
+   differ from the gold form's, the gold form's are the record's, and both modules run to 100 under node */
+static void st_choose(const char *dir) {
+    const char *src = "tests/ujs2wasm/corpus/ternary.ujs"; char *gp = xf("%s/gold.wasm", dir), *ap = xf("%s/alt.wasm", dir);
+    char *g, *a; size_t gn = 0, an = 0; int k, which; Child c;
+    for (k = 0; k < st_nprog && strcmp(st_prog[k]->f[2], src); k++) ;
+    if (k == st_nprog) { bad("choose: the record has no ", src); return; }
+    st_build(LIE_NONE, 0);
+    c = build_child(src, gp, 0, "built");
+    if (c.rc) { badf("choose: the gold form is refused: %s", c.err); return; }
+    lie_key = "eq"; lie_answer = "f64_cmp";
+    st_build(LIE_FORCE, "isel");
+    c = build_child(src, ap, 0, "built");
+    if (c.rc) { badf("choose: the f64_cmp form is refused: %s", c.err); return; }
+    g = cx_read(gp, &gn); a = cx_read(ap, &an);
+    if (!g || !a) { bad("choose: an output is missing", 0); return; }
+    {
+        char hex[65];                         /* bounded: 64 hex digits and a NUL */
+        cx_sha256_hex(g, gn, hex);
+        if ((long)gn != atol(st_prog[k]->f[4]) || strcmp(hex, st_prog[k]->f[5])) bad("choose: the gold form drifted from the record", 0);
+    }
+    if (gn == an && !memcmp(g, a, gn)) bad("choose: f64_cmp wrote the same bytes as i64_cmp", 0);
+    for (which = 0; which < 2; which++) {
+        char *av[4], *o = 0; size_t on = 0; int rc;
+        av[0] = "node"; av[1] = "tests/ujs2wasm/run_wasm.mjs"; av[2] = which ? ap : gp; av[3] = 0;
+        rc = cx_runv_timeout(av, 20, &o, &on);
+        while (o && on && (o[on - 1] == '\n' || o[on - 1] == '\r')) o[--on] = 0;
+        if (rc || !o || strcmp(o, "100")) badf("choose: %s ran as '%s' (rc %d), want 100", which ? "f64_cmp" : "i64_cmp", o ? o : "", rc);
+        free(o);
+    }
+    printf("selftest\tchoose\teq i64_cmp|f64_cmp bytes differ (%ld, %ld bytes), both run 100\n", (long)gn, (long)an);
+    unlink(gp); unlink(ap); free(g); free(a); free(gp); free(ap);
+}
+
+static int cmd_selftest(const char *root, const char *part) {
+    char tmp[] = "/tmp/ujswasmsXXXXXX", *outp, *ctp; size_t cn = 0; int r, i, nn = 0, K = 0, N = 0, changed = 0;
+    const char *names[NSELF];
+    load_baseline(root);
+    if (chdir(root)) { fprintf(stderr, "ujswasm-selftest: cannot enter %s\n", root); return 1; }
+    ctp = xf("%s/contract.tsv", DEFAULT_TABLES);
+    if (!(st_contract = cx_read(ctp, &cn))) { fprintf(stderr, "ujswasm-selftest: cannot read %s\n", ctp); return 1; }
+    for (r = 0; r < nrows; r++)
+        if (is_out(&rows[r]) && !strcmp(rows[r].f[1], "out") && rows[r].n == 6) {
+            st_prog = xrealloc(st_prog, (st_nprog + 1) * sizeof(Row *)); st_prog[st_nprog++] = &rows[r];
+        }
+    if (st_nprog != 33) { fprintf(stderr, "ujswasm-selftest: the baseline records %d programs, want 33\n", st_nprog); return 1; }
+    /* EXPECT_W4 == m4's EXPECT (recorded) except the promotions, which m4 records as nothing */
+    {
+        int ne = 0, q;
+        for (r = 0; r < nrows; r++) {
+            Row *w = &rows[r]; const char *want = 0, *e;
+            if (strcmp(w->f[0], "expect") || w->n != 3) continue;
+            ne++;
+            for (q = 0; EXPECT_W4[q] && strcmp(EXPECT_W4[q], w->f[1]); q += 2) ;
+            if (!EXPECT_W4[q]) { badf("expect: m4's %s is not in EXPECT_W4", w->f[1]); continue; }
+            e = EXPECT_W4[q + 1];
+            for (i = 0; W4_PROMOTED[i] && strcmp(W4_PROMOTED[i], w->f[1]); i++) ;
+            want = W4_PROMOTED[i] ? "nothing" : e;
+            if (strcmp(w->f[2], want)) badf("expect: m4 records %s %s, EXPECT_W4 %s (only type, shape, ic may differ, from nothing)", w->f[1], w->f[2], e);
+            else if (W4_PROMOTED[i] && !strcmp(e, "nothing")) badf("expect: %s is promoted by W4 but EXPECT_W4 says nothing", w->f[1]);
+        }
+        if (ne != NSELF) badf("expect: the baseline records %d nets, want %d", ne, NSELF);
+    }
+    if (strchr(part, '/')) {
+        K = atoi(part); N = atoi(strchr(part, '/') + 1);
+        if (K < 1 || N < 1 || K > N) { fprintf(stderr, "ujswasm-selftest: bad share %s (K/N)\n", part); return 2; }
+        for (i = 0; i < NSELF; i++)
+            if (i * N / NSELF == K - 1) names[nn++] = SELF_NETS[i];
+    } else {
+        const char *p = part;
+        while (*p) {
+            const char *e = strchr(p, ','); size_t n = e ? (size_t)(e - p) : strlen(p);
+            for (i = 0; i < NSELF && (strlen(SELF_NETS[i]) != n || strncmp(SELF_NETS[i], p, n)); i++) ;
+            if (i == NSELF || nn == NSELF) { fprintf(stderr, "ujswasm-selftest: %s: not a net (or a net named twice)\n", p); return 2; }
+            names[nn++] = SELF_NETS[i];
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    if (!mkdtemp(tmp)) { fprintf(stderr, "ujswasm-selftest: no scratch\n"); return 1; }
+    outp = xf("%s/o.wasm", tmp);
+    if (K == 1) {   /* the reference: honest constructed nets give the record's bytes */
+        int same = 0, n, q, v[ST_PAR]; char *why[ST_PAR];
+        st_build(LIE_NONE, 0);
+        for (r = 0; r < st_nprog; r += n) {
+            n = st_batch(r, outp, v, why);
+            for (q = 0; q < n; q++) {
+                if (v[q] == 0) same++;
+                else badf("honest: %s: %s", st_prog[r + q]->f[2], why[q]);
+                free(why[q]);
+            }
+        }
+        printf("selftest\thonest\t%d/%d programs byte-identical to the record over nets flownet constructed from the ujs gold port\n", same, st_nprog);
+    }
+    for (i = 0; i < nn; i++) {
+        const char *want; int q, sh, tr = 0; char *got;
+        sh = st_decides(names[i], LIE_SHIFT, outp);
+        if (in_cls("trap", net_classes(names[i])) >= 0) tr = st_decides(names[i], LIE_TRAP, outp);
+        got = xf("%s", sh && tr ? "shift/trap" : sh ? "shift" : tr ? "trap" : "nothing");
+        for (q = 0; EXPECT_W4[q] && strcmp(EXPECT_W4[q], names[i]); q += 2) ;
+        want = EXPECT_W4[q] ? EXPECT_W4[q + 1] : "?";
+        if (strcmp(got, want)) { changed++; printf("selftest\tdecides\t%s\t%s\tCHANGED (expected %s)\n", names[i], got, want); }
+        else printf("selftest\tdecides\t%s\t%s\tas expected\n", names[i], got);
+        free(got);
+    }
+    if (K && K == N) st_choose(tmp);
+    unlink(outp); rmdir(tmp); free(outp);
+    if (changed) badf("selftest: %d net(s) decide otherwise than EXPECT_W4", changed);
+    if (fails) { printf("selftest\tverdict\tFAIL\n"); fprintf(stderr, "ujswasm-selftest: %d failure(s)\n", fails); return 1; }
+    printf("selftest\tverdict\tPASS\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "";
     if (!strcmp(cmd, "build")) return cmd_build(argc - 2, argv + 2);
@@ -2764,6 +3109,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "negative")) return cmd_negative(argc > 2 ? argv[2] : ".");
     if (!strcmp(cmd, "d1")) return cmd_d1(argc > 2 ? argv[2] : ".");
     if (!strcmp(cmd, "accepts")) return cmd_accepts(argc > 2 ? argv[2] : ".");
-    fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE] | check ROOT | refuse ROOT | negative ROOT | d1 ROOT | accepts ROOT\n");
+    if (!strcmp(cmd, "selftest")) return cmd_selftest(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : "1/1");
+    fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE] | check ROOT | refuse ROOT | negative ROOT | d1 ROOT | accepts ROOT | selftest ROOT [K/N|NET,...]\n");
     return 2;
 }

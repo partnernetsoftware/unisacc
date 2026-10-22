@@ -1,0 +1,126 @@
+#!/usr/bin/env -S unisacc.com -run
+/* flownetw4.cx -- the W4 gate of plans/m4-flownet-cx-module.md: the decision measure is not decorative.
+     usage (repository root):
+       sh ./unisacc.com -run tests/flownetw4.cx -- unconsumed ROOT
+           W4 promotes type, shape and ic (m4's side channel: asked, then dropped) because the adapter's front end now
+           consumes their answers, and `ujswasm.cx selftest` measures it: each net lying (m4's shift) refuses a
+           recorded program.  This proves the measure tells consuming from asking: ROOT/adapter/ujswasm/ujswasm.cx is
+           copied to a scratch directory (beside copies of its module ujsgold.cx and of ROOT/flownet's top-level .cx
+           modules) with its one consumption point -- the fn_gate in consume(), which all four consuming asks go
+           through -- removed by an exact edit (the asks, their keys and the chain type -> shape -> ic stay: m4's side
+           channel exactly).  The copy's `selftest ROOT type,shape,ic` must be red, measuring each of the three as
+           deciding nothing over all 33 recorded programs (CHANGED, expected shift).  The edit must apply once and
+           consume() must be called from exactly four asks, so this check breaks loudly when ujswasm.cx changes under
+           it; the unedited adapter's selftest shares are the control (gate steps flownet-w4-selftest-1..3).
+   rc 0 PASS, 1 red (each failure named), 2 usage or I/O.  No #include: the prelude is built in.  Every file this
+   program writes is in its own mkdtemp directory and is removed by its name (no recursive delete). */
+
+static int fails;
+static void red(const char *what, const char *why) { fails++; printf("FAIL %s: %s\n", what, why); }
+
+/* formatted text at its exact length */
+static char *fmt(const char *f, ...) {
+    va_list ap; size_t cap = 256; int n; char *p = 0;
+    for (;;) {
+        char *g = realloc(p, cap);
+        if (!g) { free(p); fprintf(stderr, "flownetw4: out of memory\n"); exit(2); }
+        p = g; va_start(ap, f); n = vsnprintf(p, cap, f, ap); va_end(ap);
+        if (n < 0) { fprintf(stderr, "flownetw4: cannot format\n"); exit(2); }
+        if ((size_t)n < cap) return p;
+        cap = (size_t)n + 1;
+    }
+}
+static char *slurp(const char *path) { size_t n; char *b = cx_read(path, &n); return b ? b : fmt("%s", ""); }
+static int count(const char *s, const char *pat) { int n = 0; size_t k = strlen(pat); for (; (s = strstr(s, pat)); s += k) n++; return n; }
+
+/* S with FROM (which must occur exactly once) replaced by TO; 0 when it does not occur exactly once */
+static char *edit_once(const char *s, const char *from, const char *to) {
+    const char *at = strstr(s, from); size_t a, f = strlen(from), t = strlen(to), n = strlen(s); char *o;
+    if (!at || strstr(at + 1, from)) return 0;
+    a = (size_t)(at - s);
+    if (!(o = malloc(n - f + t + 1))) exit(2);
+    memcpy(o, s, a); memcpy(o + a, to, t); memcpy(o + a + t, at + f, n - a - f + 1);
+    return o;
+}
+
+/* the files this program wrote, removed by name at the end (then the two directories) */
+static char *made[64]; static int nmade;
+static void put(const char *path, const char *body) {
+    if (nmade == 64 || cx_write(path, body, strlen(body))) { fprintf(stderr, "flownetw4: cannot write %s\n", path); exit(2); }
+    made[nmade++] = fmt("%s", path);
+}
+
+#define GATE_LINE "    if (fn_gate(net, answer, legal, what)) cerr(c, fn_error(), 0);\n"
+#define DROP_LINE "    (void)answer; (void)legal; (void)c;   /* flownetw4 unconsumed: asked, then dropped (m4's side channel) */\n"
+
+static int cmd_unconsumed(const char *rootarg) {
+    char *root = realpath(rootarg, 0), *src, *copy, *d, *fd, *p, *op, *ep, *out, *err, *av[9];
+    const char *t = getenv("TMPDIR"); DIR *dir; struct dirent *e; int nmods = 0, k, st = 0; long ticks = 52 * 100; pid_t pid;
+    static const char *NETS[] = { "type", "shape", "ic", 0 };
+    if (!root || chdir(root)) { fprintf(stderr, "flownetw4: %s: no such directory\n", rootarg); return 2; }
+    src = slurp("adapter/ujswasm/ujswasm.cx");
+    if (!*src) { fprintf(stderr, "flownetw4: cannot read adapter/ujswasm/ujswasm.cx\n"); return 2; }
+    if (count(src, "static void consume(Comp *c, ") != 1 || count(src, "consume(c, ") != 4)
+        red("consumption point", fmt("ujswasm.cx defines consume() %d time(s) and calls it %d time(s), want 1 and 4 "
+            "(the type, shape, ic asks of note_binop and the type ask of ??) -- update this proof with the adapter",
+            count(src, "static void consume(Comp *c, "), count(src, "consume(c, ")));
+    if (!(copy = edit_once(src, GATE_LINE, DROP_LINE))) { red("edit", "the fn_gate line of consume() does not occur exactly once"); return 1; }
+    if (fails) return 1;
+    d = fmt("%s/flownetw4XXXXXX", t && *t ? t : "/tmp");
+    if (!mkdtemp(d)) { fprintf(stderr, "flownetw4: cannot make a scratch directory\n"); return 2; }
+    fd = fmt("%s/flownet", d);
+    if (mkdir(fd, 0755)) { fprintf(stderr, "flownetw4: cannot make %s\n", fd); return 2; }
+    put(p = fmt("%s/ujswasm.cx", d), copy); free(p);
+    put(p = fmt("%s/ujsgold.cx", d), slurp("adapter/ujswasm/ujsgold.cx")); free(p);
+    if (!(dir = opendir("flownet"))) { fprintf(stderr, "flownetw4: cannot read flownet/\n"); return 2; }
+    while ((e = readdir(dir))) {             /* flownet's top-level modules, copied (the adapter uses flownet.api) */
+        size_t L = strlen(e->d_name); char *in;
+        if (L < 4 || strcmp(e->d_name + L - 3, ".cx")) continue;
+        in = fmt("flownet/%s", e->d_name);
+        put(p = fmt("%s/%s", fd, e->d_name), slurp(in)); free(p); free(in); nmods++;
+    }
+    closedir(dir);
+    if (nmods < 5) red("flownet", fmt("only %d .cx modules under flownet/ (want fnx, contract, nets, flow, api)", nmods));
+    /* the copy's selftest of the three promoted nets, at most 52 s (compile and run) */
+    op = fmt("%s/run.out", d); ep = fmt("%s/run.err", d);
+    av[0] = "sh"; av[1] = fmt("%s/unisacc.com", root); av[2] = "-run"; av[3] = fmt("%s/ujswasm.cx", d); av[4] = "--";
+    av[5] = "selftest"; av[6] = root; av[7] = "type,shape,ic"; av[8] = 0;
+    fflush(stdout); fflush(stderr);
+    if ((pid = fork()) < 0) { fprintf(stderr, "flownetw4: fork failed\n"); return 2; }
+    if (pid == 0) {
+        if (!freopen(op, "wb", stdout) || !freopen(ep, "wb", stderr)) _exit(126);
+        setpgid(0, 0);
+        execvp(av[0], av); _exit(127);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { st = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0 || ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); st = 124; break; }
+        usleep(10000);
+    }
+    out = slurp(op); err = slurp(ep);
+    made[nmade++] = op; made[nmade++] = ep;
+    if (st == 124) red("selftest of the copy", "timed out (52 s)");
+    else if (st != 1) red("selftest of the copy", fmt("rc %d, want 1 (red); stderr: %s", st, err));
+    for (k = 0; NETS[k]; k++) {
+        char *lie = fmt("selftest\tlie\t%s\tshift\tnone of 33 programs changed or refused\n", NETS[k]);
+        char *dec = fmt("selftest\tdecides\t%s\tnothing\tCHANGED (expected shift)\n", NETS[k]);
+        if (!strstr(out, lie) || !strstr(out, dec))
+            red(NETS[k], "the copy without the consumption was not measured as deciding nothing (the measure cannot tell asking from consuming)");
+        else printf("red\t%s\tunconsumed: shift changed none of the 33 programs; EXPECT_W4 says shift -> CHANGED\n", NETS[k]);
+        free(lie); free(dec);
+    }
+    if (!strstr(out, "selftest\tverdict\tFAIL\n")) red("verdict", "the copy's selftest did not fail");
+    for (k = 0; k < nmade; k++) { unlink(made[k]); free(made[k]); }
+    rmdir(fd); rmdir(d);
+    if (fails) { fprintf(stderr, "flownetw4: %d failure(s)\n--- the copy's stdout\n%s--- its stderr\n%s", fails, out, err); return 1; }
+    printf("flownetw4-unconsumed: PASS (the adapter with its one consumption point removed -- type, shape, ic asked and "
+           "dropped, as m4's side channel -- is measured by its own selftest as deciding nothing, red; the edit applied once)\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "unconsumed")) return cmd_unconsumed(argc > 2 ? argv[2] : ".");
+    fprintf(stderr, "usage: flownetw4.cx unconsumed ROOT\n");
+    return 2;
+}
