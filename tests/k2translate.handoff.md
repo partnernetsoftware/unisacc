@@ -173,7 +173,7 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
    Group by gen2 function: types(), tytail(), optail(), ladder(), build() startup/statement sites, sizeof/address.
    Work one function at a time; check each with .archive/tests/k2gen/cmp.sh (one mode, bytes vs HEAD) then graphhash.
 2. Then gen2 build() itself -> exec/parse2/gen2-manifest.tsv run by the generic driver (exec/build/gen.py, as the
-   other stages do), so gen2.py shrinks to constants/facts export and finally disappears. Constants gen2 computes
+   other targets do), so gen2.py shrinks to constants/facts export and finally disappears. Constants gen2 computes
    (TYPERANK.., POSSPAN regions, TYINT, TWORDS, MAXTOK from src/front_pp.c) belong in facts (k2-control/k2-call
    already hold the ones those manifests use; MAXTOK is read from source at build time -> a facts exporter row).
 3. Boundary with cdx: truth.conversions (called in gen2 between callcontrol-begin and -finish), strings.rules/
@@ -359,8 +359,8 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Recipes: see rounds 23-30 (call return/update rows with all 8 update words as @str:; dict(b, k=v) = extra=$urb +
   extra2; chains via foreach + .let x=$$res:key; addr = call addr entry=..,pending=nil facts k2-call; int env via let
   literal; booleans via when fact:NAME after `.let NAME=it.col`). Tools (.k2tmp/, uncommitted, recreate): one.sh,
-  chk.sh (export + both modes + --check), genchk.sh STAGE (exec/build/gen.py stage sha). Changing exec/build/* -> run
-  graphhash for every gen.py stage locally (coordinator rule). Worktree guard: avoid heredocs mixing git; write
+  chk.sh (export + both modes + --check), genchk.sh STAGE (exec/build/gen.py target sha). Changing exec/build/* -> run
+  graphhash for every gen.py target locally (coordinator rule). Worktree guard: avoid heredocs mixing git; write
   Python edit scripts to .k2tmp/ and run them.
 - Round 32 (branch worktree-agent-aaa06feb4c0200862, rebased on origin/main, not pushed):
   Done (a): layoutprovenance.parser -> exec/layoutprovenance-manifest.tsv (call modelinput with
@@ -722,7 +722,7 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Commit 13602e3e (local). sha SAME (actually run, serial, bound 58): gen.py parse2 32fb8e3c, --errors 7ea0e979,
   --warnings --errors 3a7edf34, --locations a4c6fa73 (first run FAIL:142, rerun alone ok), parse2/units 6fc8d7f5,
   units.py --locations 0137a215.
-  NOT yet run: graphhash of every gen.py stage after the exec/build/gen.py change (pp/lex/opt/prune/nativeabi/lower/
+  NOT yet run: graphhash of every gen.py target after the exec/build/gen.py change (pp/lex/opt/prune/nativeabi/lower/
   enc) -- do it first next round, serially, per entry under bound 58.
   Next: step 4 callers (Round 52 list + exec/c/compilerpack.py:189,191 + exec/parse2/errorcheck/locationcheck/
   returnwarningcheck/r21check/unitlocationcheck (script 'parse2/gen2.py' -> 'build/gen.py' with 'parse2' first arg),
@@ -732,7 +732,7 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
 - Round 53b (coordinator ruling: keep twice, drop sizes). gen.py: a base module defining check(E) is called after the
   run (BASE kept before the executor() swap); parse2base.check(E) asserts twice() empty. sizes not printed (ruled).
   sha SAME after this change (actually run, serial, bound 58): 32fb8e3c / 7ea0e979 / 3a7edf34 / a4c6fa73 /
-  units 6fc8d7f5 / units --locations 0137a215. Still NOT run: graphhash of all gen.py stages -- first thing next
+  units 6fc8d7f5 / units --locations 0137a215. Still NOT run: graphhash of all gen.py targets -- first thing next
   round (serial), then B and C.
 - Round 54 (step 4 + task C). Callers -> `exec/build/gen.py parse2 OUT [flags]` (gen.py accepts `OUT parse2` order, so
   `script OUT ARGS` callers pass 'build/gen.py' with 'parse2' as first arg): compilerpack.py e3/errorparse, parse2

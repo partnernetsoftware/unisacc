@@ -6,14 +6,14 @@
 
 ## Abstract
 
-unisacc is a neural-network-based compiler: compilation stages run on integer threshold networks and one generic executor; weights are constructed from a TSV table DSL, not trained. T1 is key-by-key equality on the declared domain (Definition 2), not sample fit. The decision-network instance is 18 decision stages. The network-compiler instance is seven byte-stream stages: preprocess (pp), lex, parse, opt, prune, lowering, encode + image (enc). parse2 is an implementation name of the same contract, not a separate stage. An out-of-domain key fails; logits are not read; rejection does not fall back to the table. N1 = N2 = N3 is unsigned successive-generation byte identity on five named targets (osx/arm64, lnx/arm64, lnx/x86-64, win/arm64, win/x86-64), not a semantic self-host. Key identities: op-74 totals 8,509 keys; the op-87 label total is 8,769 keys; not interchangeable before a seal. Source `910f1e0a` / `0.0.42` is not a sealed release measurement. The referee ledger is `research/referee.tsv`. This paper's contribution is constructed exact integer decision networks checked by exhaustive T1. Learned training comparison is not in this paper; see preregistered study A2. Enumeration proves network = table, not table = C.
+unisacc is a neural-network-based compiler: the compiler's streams and nets run on integer threshold networks and one generic executor; weights are constructed from a TSV table DSL, not trained. T1 is key-by-key equality on the declared domain (Definition 2), not sample fit. The decision-network instance is 18 decision nets. The network-compiler instance is seven byte streams: preprocess (pp), lex, parse, opt, prune, lowering, encode + image (enc). parse2 is an implementation name of the same contract, not a separate stream. An out-of-domain key fails; logits are not read; rejection does not fall back to the table. N1 = N2 = N3 is unsigned successive-generation byte identity on five named targets (osx/arm64, lnx/arm64, lnx/x86-64, win/arm64, win/x86-64), not a semantic self-host. Key identities: op-74 totals 8,509 keys; the op-87 label total is 8,769 keys; not interchangeable before a seal. Source `910f1e0a` / `0.0.42` is not a sealed release measurement. The referee ledger is `research/referee.tsv`. This paper's contribution is constructed exact integer decision networks checked by exhaustive T1. Learned training comparison is not in this paper; see preregistered study A2. Enumeration proves network = table, not table = C.
 
 **Keywords:** neural-network-based compiler; constructed weights; T1; byte-for-byte self-hosting; N1=N2=N3
 
 ## 1 Contributions
 
 1. **Method.** TSV table DSL → constructed weights → exhaustion on the declared domain (T1). The weights are not trained.
-2. **Two layers.** The network-compiler contract is seven byte-stream stages: one generic executor E runs finite transitions δ. The decision-network instance is a separate set of 18 decision stages, queried at ask points (or via the DENSE table enumerated from those networks).
+2. **Two layers.** The network-compiler contract is seven byte streams: one generic executor E runs finite transitions δ. The decision-network instance is a separate set of 18 decision nets, queried at ask points (or via the DENSE table enumerated from those networks).
 3. **Implementation.** unisacc, a six-target C99 subset. The decision-network instance self-hosts byte-for-byte on five targets without Python. The six shipped targets include osx/x86-64; the five-name N1 list does not. Network-compiler driver self-host is not package self-construction. Source identity: Appendix A.
 
 This paper's contribution is constructed exact integer decision networks checked by exhaustive T1. Learned training comparison is not in this paper; see preregistered study A2.
@@ -22,7 +22,7 @@ Not claimed: table = C99, whole-compiler semantic preservation (T3), or a speed 
 
 ## 2 Definitions
 
-**Definition 1 (decision stage).** Stage $s$ has fields $(f_1{:}V_1,\ldots,f_m{:}V_m)$, output vocabulary $Y$, and total $G_s:K_s\to Y$ on the finite product $K_s$. These 18 stages are the decision-network instance, not the seven byte-stream stages.
+**Definition 1 (decision net).** Net $s$ has fields $(f_1{:}V_1,\ldots,f_m{:}V_m)$, output vocabulary $Y$, and total $G_s:K_s\to Y$ on the finite product $K_s$. These 18 nets are the decision-network instance, not the seven byte streams.
 
 **Definition 2 (exact / T1).** $N$ is exact for $s$ iff for every $k\in K_s$, $\operatorname{argmax} N(k)$ is unique and equals $G_s(k)$.
 
@@ -38,13 +38,13 @@ $$
 
 ## 3 Construction
 
-A one-hidden-unit-per-key one-hot construction yields an exact network of width at most $|K|$ (Lean `naive_exact`). Shipped decision stages use a cube cover: the hidden layer is a Boolean conjunction and the output layer an integer vote (cube cover; details in `research/paper-a-notes.md`). The parameter count 796,490→71,828 in the notes is not a new measurement on this tip. `decision_list_exact` covers only the globally monochrome first-hit case and does not prove the shipped networks. The release check is the integer network with strict argmax on the declared domain; a wrong answer or a tie rejects the build.
+A one-hidden-unit-per-key one-hot construction yields an exact network of width at most $|K|$ (Lean `naive_exact`). Shipped decision nets use a cube cover: the hidden layer is a Boolean conjunction and the output layer an integer vote (cube cover; details in `research/paper-a-notes.md`). The parameter count 796,490→71,828 in the notes is not a new measurement on this tip. `decision_list_exact` covers only the globally monochrome first-hit case and does not prove the shipped networks. The release check is the integer network with strict argmax on the declared domain; a wrong answer or a tie rejects the build.
 
-The op-74 total of 8,509 keys and the op-87 label total of 8,769 keys are two identities and are not interchangeable before a seal. On this tip the live `weights/gold` eighteen-stage `#field` domain product is 8,770 (against 8,769 in `research/seal-remeasure-20261009.md`; the difference is opinfo 72→73; the header of `weights/gold/opinfo.tsv` says 73 keys). Hidden units total 569, matching the README stages table and `weights/built.json`. 8,770 is not 8,509 and is not written as the label 8,769. combo is an isel∪abi control and is off the ship path; the census total below includes that row.
+The op-74 total of 8,509 keys and the op-87 label total of 8,769 keys are two identities and are not interchangeable before a seal. On this tip the live `weights/gold` eighteen-net `#field` domain product is 8,770 (against 8,769 in `research/seal-remeasure-20261009.md`; the difference is opinfo 72→73; the header of `weights/gold/opinfo.tsv` says 73 keys). Hidden units total 569, matching the README stages table and `weights/built.json`. 8,770 is not 8,509 and is not written as the label 8,769. combo is an isel∪abi control and is off the ship path; the census total below includes that row.
 
 The table is generated by `python3 -m unisa docs` from `unisa/gold.py` and the constructed weights (`tests/docs.sh` fails when it differs).
 
-| stage | key | out | keys | units |
+| net | key | out | keys | units |
 |---|---|---|---:|---:|
 | pp | dir(9) x defined(2) | 4 classes | 18 | 6 |
 | lex | c(12) x peek(12) | 10 classes | 144 | 11 |
@@ -66,15 +66,15 @@ The table is generated by `python3 -m unisa docs` from `unisa/gold.py` and the c
 | combo | op(87) x os(3) x arch(2) | 15 heads | 522 | 121 |
 | total | | | 8,770 | 569 |
 
-Exactness is constructed. The weights are derived from the gold tables (`weights/gold/*.tsv` is the tables as data): `W1` is in {0,1}, `b1` is recoverable from `W1`, and `W2` is a small power of two. The hidden activation is always 0 or 1, so inference has no multiply and no float. Verification is exhaustive. Each stage is a total function on a finite domain, so network = table is decided by enumerating every key (the total is the table above). That does not prove table = C. Whether the table is right about C is checked separately against the system compiler (`tests/gold_audit.py`, `difftest`).
+Exactness is constructed. The weights are derived from the gold tables (`weights/gold/*.tsv` is the tables as data): `W1` is in {0,1}, `b1` is recoverable from `W1`, and `W2` is a small power of two. The hidden activation is always 0 or 1, so inference has no multiply and no float. Verification is exhaustive. Each net is a total function on a finite domain, so network = table is decided by enumerating every key (the total is the table above). That does not prove table = C. Whether the table is right about C is checked separately against the system compiler (`tests/gold_audit.py`, `difftest`).
 
 The deployment kernel is integer: one-hot, integer affine, ReLU, integer affine, strict argmax. No softmax, floating point, multiplication, or libm. The same table constructs the same weights. This paper does not quote a weight-byte total.
 
-## 4 Seven byte-stream stages and two instances
+## 4 Seven byte streams and two instances
 
-The decision-network instance is 18 ask stages. The network-compiler instance is the seven stages below. They are not interchangeable. Each stage is a constructed integer threshold network run by one generic executor. parse2 is an implementation name of the same contract, not a separate stage.
+The decision-network instance is 18 ask nets. The network-compiler instance is the seven streams below. They are not interchangeable. Each stream is a constructed integer threshold network run by one generic executor. parse2 is an implementation name of the same contract, not a separate stream.
 
-| stage | input → output | role |
+| stream | input → output | role |
 |---|---|---|
 | preprocess (pp) | source bytes → preprocessed text | line continuation, comments, directives, macros, conditionals, includes |
 | lex | preprocessed text → typed token stream | keywords, identifiers, operators, literals, longest match |
@@ -84,11 +84,11 @@ The decision-network instance is 18 ask stages. The network-compiler instance is
 | lowering | tape → target ops + data | ABI, regmap, syscalls, layout, reloc |
 | encode + image (enc) | target ops → ELF / Mach-O / PE (or in-memory image) | encoding, branches, reloc, headers, Mach-O ad-hoc signature |
 
-The short names pp, lex, parse, and enc may match names of the 18 decision stages. They are the seven-stage byte-stream contract and are not interchangeable with the ask-domain tables.
+The short names pp, lex, parse, and enc may match names of the 18 decision nets. They are the seven-stream byte contract and are not interchangeable with the ask-domain tables.
 
 The tape has eight 64-bit registers and 71 operations in `SHAPE`. The executor has no primitive for C, the tape, an ISA, or an image format.
 
-**Decision-network instance.** Classic recursive descent, lowering, and image writing call `ask` at decision points; no fallback. **Network-compiler instance.** The executor runs the seven stages; a model rejection is an error. This tip has no same-identity size or speed measurement; this paper claims none.
+**Decision-network instance.** Classic recursive descent, lowering, and image writing call `ask` at decision points; no fallback. **Network-compiler instance.** The executor runs the seven streams; a model rejection is an error. This tip has no same-identity size or speed measurement; this paper claims none.
 
 Threshold-prefix evaluation and declared returns do not change network answers: same network, same sum; the network–table check still covers every observation, including returns. Host code still loads packages and retains `src/tapelink.c`, `src/asmtext.c`, and `src/fwdstub.c`. Build-time Python is in the trusted base.
 
@@ -140,13 +140,13 @@ Systematic construction-versus-training comparison is preregistered study A2. Th
 
 The verification discipline has exposed cross-table combination gaps under one identity. Details are in `archive/research/r20/design-review-2026-10-01.md` and `research/paper-a-notes.md` and are not restated here. T1 asserts only network = table on one table's declared domain.
 
-This tip has no same-identity census of the seven stages, no speed measurement, and no platform matrix. The corpus does not extend to arbitrary C99. Build-time Python is in the trusted base.
+This tip has no same-identity census of the seven streams, no speed measurement, and no platform matrix. The corpus does not extend to arbitrary C99. Build-time Python is in the trusted base.
 
 Related work, as pointers only: exact network encodings of finite-state machines (Omlin and Giles, 1996; Siegelmann and Sontag, 1995); weights constructed from programs (Weiss et al., 2021; Lindner et al., 2023); table-driven compilers (Johnson, 1975; Graham and Glanville, 1978; Fraser, Hanson, and Proebsting, 1992); trained controllers (Graves et al., 2014); proved semantic preservation (Leroy, 2009; Kumar et al., 2014); diverse double-compiling (Wheeler, 2009). Gradient-method failures are left to A2.
 
 ## 7 Conclusion
 
-On table-shaped decisions, exactness is decidable by exhaustion. unisacc runs constructed weights on two layers: 18 decision stages, and seven byte-stream stages. The decision-network instance meets N1 = N2 = N3 on the five targets in §5. Whether a table equals C is answered only by the named referees, inside their coverage.
+On table-shaped decisions, exactness is decidable by exhaustion. unisacc runs constructed weights on two layers: 18 decision nets, and seven byte streams. The decision-network instance meets N1 = N2 = N3 on the five targets in §5. Whether a table equals C is answered only by the named referees, inside their coverage.
 
 ## Appendix A
 
