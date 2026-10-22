@@ -20,6 +20,8 @@
 
 **追加（2026-10-22 03:4x，载体路由归属分叉）**：同一 extent 程序在两条路由上拒绝**归属不同**——文本路 `.tape` 归 lower 表（`not covered: tape data directive`），Tapebin 载体路在 ≥2^31 时被产品**解码器**先拒（驱动层 `invalid tapebin or origin target mismatch`），而参考 codec（LEB128 无界）与参考编译都接受该载体。可表示边界 2^31−1 两路同归 `tape data directive`（归属平价成立）。对照 hostaddr/bindings 两类 NEG：载体路归属、具名、行号与文本路完全一致——分叉只在 extent 的解码器界限上。prd 拒绝归属条（语言级拒绝归声明终态的阶段，不得改记）之下，裁向有二：(i) 产品解码器放行 LEB128 全域、让 lower 表以同一具名拒绝（归属两路合一，动 src/ 须另授）；(ii) 登记解码器 32 位界为载体格式承诺（参考 codec 向产品收紧，动 unisa/ 须另授）。现状已由 com-extent-neg 的 `neg-single-bin`/`neg-max-bin`/`neg-max-text` 三断言写死，com-hostaddr-neg 的 `neg-high-bin` 写死了归属平价的对照面。
 
+**已落（2026-10-22 09:2x，机房主任 09:1x「待裁清单自排」）——取向 (i)**：`docs/tapebin-v1.md` 只说 `.bss` 记 ULEB128 长度、无 32 位承诺，Python codec 无界，没有任何套件断言该界，故 2^31−1 是三处 C 实现（`exec/c/tapebin.h:170` 驱动解码器、`src/tapebin.c:154` 经典解码器、`src/tapebin_encode.inc:178` 编码器）的实现界。三处改为 **2^63−1（非负有符号 64 位字）**：经典解码器以 `long` 返回 ULEB 值，`count<0` 天然守住该界，驱动与编码器取同值——三处 C 实现平价由构造保证；解码后把长度以十进制写进 target.text，extent 的拒绝回到 lower 的 `not covered: tape data directive`，与文本路**同归属**。≥2^63 两 C 解码器仍 `invalid tapebin`（载体可表示长度之外；py codec 独宽），而文本路对 2^63−1/2^63/2^64−1 一律由 lower 具名拒绝——登记在 com-extent-neg 的新断言 `neg-2p63-bin`；`neg-single-bin` 翻为 `tape data directive`。
+
 ## 2. 缺 bindings 的 `.librarycall`（族 4）
 
 **实测**：

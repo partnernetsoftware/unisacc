@@ -167,7 +167,9 @@ static int tbc_decode(const unsigned char *data,size_t size,int expected,int for
                 tbc_put(text,".str ");tbc_name(text,names[id],namelen[id]);bput(text,' ',0);
                 tbc_quote(text,consts[ci],constlen[ci]);bput(text,'\n',0);
             }else{
-                uint64_t amount=tbc_u(&r);if(r.bad||amount>2147483647u)goto done;
+                /* .bss length: the carrier's ULEB128 is read as a non-negative signed-64 word (parity with the classic reader's long);
+   anything the tape domain accepts up to 2^63-1 decodes, and the extent verdict belongs to lower, as on the text route */
+                uint64_t amount=tbc_u(&r);if(r.bad||amount>9223372036854775807u)goto done;
                 tbc_put(text,".bss ");tbc_name(text,names[id],namelen[id]);bput(text,' ',0);
                 tbc_unum(text,amount);bput(text,'\n',0);
             }

@@ -175,7 +175,7 @@ int tb_text_pass(int pass, int textlen) {
             p = p + 5; q = tb_token_end(p, end); name = tb_name_index(p, q - p);
             p = tb_skip(q, end); q = tb_token_end(p, end);
             tb_number(p, q, &v, &nneg);
-            if (tb_bad || nneg || v > 2147483647 || tb_skip(q, end) != end) return tb_fail();
+            if (tb_bad || nneg || v > 9223372036854775807UL || tb_skip(q, end) != end) return tb_fail();
             if (pass) { tb_emit(2); tb_emit_u(name); tb_emit_u(v); }
         } else if (out[end - 1] == 58) {
             name = tb_name_index(p, end - p - 1);

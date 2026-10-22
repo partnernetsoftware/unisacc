@@ -151,7 +151,8 @@ int tb_records(int from, int to, int expected, int minor) {
                 tb_quote(tb_file + tb_const_at[ci], tb_const_len[ci]); tb_put(10);
             } else {
                 long count; count = tb_uint(tb_file, &p, to);
-                if (count < 0 || count > 2147483647) return tb_fail();
+                /* non-negative signed-64 .bss length; the extent verdict is lower's, not the reader's */
+                if (count < 0) return tb_fail();
                 tb_word(".bss "); tb_name(id); tb_put(32); tb_decimal(count); tb_put(10);
             }
         } else if (kind == 3) {
