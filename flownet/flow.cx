@@ -1,5 +1,5 @@
-/* flownet/flow.cx -- the flow layer of flownet (plans/m4-flownet-cx-module.md W2): a run of a consumer's flows asks
-   the nets questions; this unit answers them and keeps the books.
+/* flownet/flow.cx -- the flow layer of flownet (plans/m4-flownet-cx-module.md W2, a module since W3): a run of a
+   consumer's flows asks the nets questions; this module answers them, keeps the books, and (W3) owns the run.
      ask    key values -> the net's answer.  The key must fit the net's domain exactly (arity, every value in its field),
             otherwise the ask is refused by name -- never answered from anywhere else.  Drive "built" (the default)
             answers by the integer net and books a hit; drive "gold" answers from the gold table and books a gold
@@ -8,30 +8,43 @@
      gate   an answer outside the legal set the consumer pins for that point is a named refusal.
      trace  the (phase, net, hits, gold fallbacks) rows of the run; check: every hit net is a contract net and no net
             fell back to gold (m4 flows._check_trace).
-   Internal unit; the public face is flownet/api.cx. */
+     run    (W3, the emit hook) the books are reset, the consumer's flows run and write their output with fnf_out; the
+            trace is checked; only then is the consumer's emit hook called, once, with the whole output.  A refused
+            run or one that fell back to gold never reaches the hook (m4 flows.run: compile, check, then emit).
+     expect (W3) the consumer may pin the run's books: the exact (phase, net, hits) rows its flows must book, as text
+            "PHASE\tNET\tHITS\n" in trace-row order.  A pinned run whose books differ in any row (a net never asked,
+            asked more or less, or in another phase) is refused before the hook.  This proves the nets are asked,
+            not that their answers are used: a consumer that asks and then answers from its own copy of the labels
+            keeps every count.  That the answers reach the result is shown by the sweep.
+     sweep  (W3 fix 3, a test hook) with FLOWNET_SWEEP set in the environment ("all", or nets separated by commas),
+            fnf_run, after the unperturbed run passed and its emit hook accepted it, perturbs exactly one answer at a
+            time -- every key of every swept net, every class other than the net's own answer -- and reruns the
+            consumer's flows.  Each perturbed run must be refused by name: by flownet (an ask outside a domain, the
+            books, the trace, the flows' own refusal), or by the consumer's emit hook, which is handed the perturbed
+            output exactly as the real one and must reject it -- so the sweep needs a consumer whose emit hook judges
+            what it is given (tdescprobe's: its tables against cc or its baseline).  A key with any perturbation that
+            the emit hook accepts is decorative -- the consumer asked and did not use the answer (the output is
+            unchanged), or discarded it in the hook (the output changed and was accepted) -- and the run is refused,
+            naming every such key.  What the consumer does after its hook returns is beyond flownet's view.  The unperturbed run is repeated last and must reproduce its output and
+            be accepted again (the consumer's state is the real run's).  The summary goes to stderr: "flownet sweep:
+            NET k/K, ... = k/K keys; N perturbations: R refused by flownet (...), E refused by the emit hook, A
+            accepted (decorative); C changed the output".  Unset, nothing changes.
+   Internal module; the public face is flownet/api.cx. */
 
-void fnx_fail(const char *msg);
-int fnn_find(const char *name);
-int fnn_nfields(int i);
-const char *fnn_field(int i, int f);
-int fnn_encode(int i, int nk, const char *const *key, int *bad);
-int fnn_predict(int i, int key);
-int fnn_gold(int i, int key);
-const char *fnn_class(int i, int c);
-int fnc_nphases(void);
-const char *fnc_phase(int i);
-int fnc_phase_find(const char *s);
-int fnc_nnets(void);
-const char *fnc_net(int i);
-int fnc_find(const char *net);
+#pragma unisa use fnx
+#pragma unisa use contract
+#pragma unisa use nets
 
-#define FNF_MAXP 32
+#define FNF_MAXP 32                            /* = FNC_MAX of flownet/contract.cx: phases and nets are refused past it */
 #define FNF_MAXN 32
 
 static int drive_gold;                         /* 0 built, 1 gold */
 static int curphase = -1;
 static long hits[FNF_MAXP][FNF_MAXN], golds[FNF_MAXP][FNF_MAXN];
 static long nasks;
+static char *outb; static long outn, outcap; static int outoom, inrun;   /* the run's output (fnf_out) */
+static char *expect_books;                     /* the pinned books (fnf_expect), or 0 */
+static int fault_net = -1, fault_key, fault_cls;   /* the sweep's one perturbed answer (net index, key, class), or -1 */
 
 void fnf_reset(void) {
     int p, n;
@@ -40,42 +53,37 @@ void fnf_reset(void) {
 }
 
 int fnf_drive(const char *mode) {
-    char m[160];
     if (!strcmp(mode, "built")) { drive_gold = 0; return 0; }
     if (!strcmp(mode, "gold")) { drive_gold = 1; return 0; }
-    snprintf(m, sizeof m, "drive %.60s: want built or gold", mode);
-    fnx_fail(m);
+    fnx_failf("drive %s: want built or gold", mode);
     return -1;
 }
 
 int fnf_phase(const char *name) {
-    char m[200]; int p = fnc_phase_find(name);
-    if (p < 0) { snprintf(m, sizeof m, "phase %.80s is not one of the contract's phases", name); fnx_fail(m); return -1; }
+    int p = fnc_phase_find(name);
+    if (p < 0) { fnx_failf("phase %s is not one of the contract's phases", name); return -1; }
     curphase = p;
     return 0;
 }
 
 const char *fnf_ask(const char *net, int nk, const char *const *key) {
-    char m[512]; int i, c, k, bad, ci;
-    if (curphase < 0) { snprintf(m, sizeof m, "ask %.60s before any phase", net); fnx_fail(m); return 0; }
-    if ((ci = fnc_find(net)) < 0 || (i = fnn_find(net)) < 0) {
-        snprintf(m, sizeof m, "ask: %.60s is not a contract net", net); fnx_fail(m); return 0;
-    }
+    int i, c, k, bad, ci;
+    if (curphase < 0) { fnx_failf("ask %s before any phase", net); return 0; }
+    if ((ci = fnc_find(net)) < 0 || (i = fnn_find(net)) < 0) { fnx_failf("ask: %s is not a contract net", net); return 0; }
     if ((k = fnn_encode(i, nk, key, &bad)) < 0) {
-        if (bad < 0) snprintf(m, sizeof m, "ask %s: arity %d != %d", net, nk, fnn_nfields(i));
-        else snprintf(m, sizeof m, "ask %s: field %s got '%.80s', not in its domain", net, fnn_field(i, bad), key[bad] ? key[bad] : "(null)");
-        fnx_fail(m);
+        if (bad < 0) fnx_failf("ask %s: arity %d != %d", net, nk, fnn_nfields(i));
+        else fnx_failf("ask %s: field %s got '%s', not in its domain", net, fnn_field(i, bad), key[bad] ? key[bad] : "(null)");
         return 0;
     }
     nasks++;
     if (drive_gold) { golds[curphase][ci]++; c = fnn_gold(i, k); }
-    else { hits[curphase][ci]++; c = fnn_predict(i, k); }
+    else { hits[curphase][ci]++; c = fnn_predict(i, k); if (i == fault_net && k == fault_key) c = fault_cls; }
     return fnn_class(i, c);
 }
 
 /* ANSWER must be one of LEGAL (space-separated); WHAT names the point for the refusal */
 int fnf_gate(const char *net, const char *answer, const char *legal, const char *what) {
-    char m[512]; const char *p = legal; size_t k = strlen(answer);
+    const char *p = legal; size_t k = strlen(answer);
     while (*p) {
         const char *e = strchr(p, ' ');
         size_t n = e ? (size_t)(e - p) : strlen(p);
@@ -83,8 +91,7 @@ int fnf_gate(const char *net, const char *answer, const char *legal, const char 
         if (!e) break;
         p = e + 1;
     }
-    snprintf(m, sizeof m, "%s: net %s answered '%.60s', not a legal answer here (legal: %.200s)", what, net, answer, legal);
-    fnx_fail(m);
+    fnx_failf("%s: net %s answered '%s', not a legal answer here (legal: %s)", what, net, answer, legal);
     return -1;
 }
 
@@ -111,15 +118,177 @@ int fnf_trace_row(int want, const char **phase, const char **net, long *h, long 
 
 /* m4 flows._check_trace: hits only on contract nets (ask refuses any other), and no gold fallback anywhere */
 int fnf_trace_check(void) {
-    int p, n; char m[256];
+    int p, n;
     for (p = 0; p < fnc_nphases(); p++)
         for (n = 0; n < fnc_nnets(); n++)
             if (golds[p][n]) {
-                snprintf(m, sizeof m, "trace: net %s fell back to gold %ld time(s) in phase %s", fnc_net(n), golds[p][n], fnc_phase(p));
-                fnx_fail(m);
+                fnx_failf("trace: net %s fell back to gold %ld time(s) in phase %s", fnc_net(n), golds[p][n], fnc_phase(p));
                 return -1;
             }
     return 0;
 }
 
 long fnf_asks(void) { return nasks; }
+
+/* append N bytes to the output of the current run */
+int fnf_out(const char *bytes, long n) {
+    if (!inrun) { fnx_fail("out: no run (a flow writes its output inside fn_run)"); return -1; }
+    if (n < 0) { fnx_failf("out: negative length %ld", n); return -1; }
+    if (outn + n + 1 > outcap) {
+        long c = outcap ? outcap : 4096; char *g;
+        while (c < outn + n + 1) c *= 2;
+        if (!(g = realloc(outb, (size_t)c))) { outoom = 1; fnx_fail("out: out of memory"); return -1; }
+        outb = g; outcap = c;
+    }
+    memcpy(outb + outn, bytes, (size_t)n); outn += n; outb[outn] = 0;
+    return 0;
+}
+
+/* pin the books of every following run to BOOKS ("PHASE\tNET\tHITS\n" per nonzero row, trace-row order); 0 unpins */
+int fnf_expect(const char *books) {
+    char *d = 0;
+    if (books && !(d = fnx_dup(books))) { fnx_fail("expect: out of memory"); return -1; }
+    free(expect_books); expect_books = d;
+    return 0;
+}
+
+/* the run's books against the pinned ones, row by row; the first differing row is named */
+static int books_match(void) {
+    const char *ph, *net, *e = expect_books; long h, g; int k; char *row;
+    for (k = 0; fnf_trace_row(k, &ph, &net, &h, &g); k++) {
+        const char *nl = strchr(e, '\n'); size_t m;
+        if (!(row = fnx_fmt("%s\t%s\t%ld\n", ph, net, h))) { fnx_fail("expect: out of memory"); return -1; }
+        m = strlen(row);
+        if (!*e || !nl || (size_t)(nl + 1 - e) != m || memcmp(e, row, m)) {
+            fnx_failf("books: row %d is phase %s net %s hits %ld; the consumer pinned %.*s", k + 1, ph, net, h,
+                      *e ? (int)(nl ? nl - e : (long)strlen(e)) : 3, *e ? e : "end");
+            free(row); return -1;
+        }
+        free(row); e = nl + 1;
+    }
+    if (*e) {
+        const char *nl = strchr(e, '\n');
+        fnx_failf("books: the run booked %d row(s); the consumer pinned more, next %.*s", k, (int)(nl ? nl - e : (long)strlen(e)), e);
+        return -1;
+    }
+    return 0;
+}
+
+/* one run of FLOWS(FCTX): the books reset, the output collected, the trace and the pinned books checked */
+static int run_flows(fn_flows_fn flows, void *fctx) {
+    int rc;
+    fnf_reset();
+    outn = 0; outoom = 0; if (outb) outb[0] = 0;
+    inrun = 1;
+    rc = flows(fctx);
+    inrun = 0;
+    if (rc) { fnx_failf("run: the flows refused (rc %d)", rc); return -1; }
+    if (outoom) return -1;
+    if (fnf_trace_check()) return -1;
+    if (expect_books && books_match()) return -1;
+    return 0;
+}
+
+/* the text T appended to *ACC (", " between items); 0 when out of memory */
+static int cat(char **acc, const char *t) {
+    char *n = fnx_fmt("%s%s%s", *acc ? *acc : "", *acc && **acc ? ", " : "", t);
+    if (!n) return -1;
+    free(*acc); *acc = n;
+    return 0;
+}
+
+/* is net NAME named by the FLOWNET_SWEEP value SW ("all" or NAME,NAME...) */
+static int swept(const char *sw, const char *name) {
+    size_t k = strlen(name); const char *p = sw;
+    if (!strcmp(sw, "all")) return 1;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == k && !strncmp(p, name, k)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* the sweep (see the head of this file): the unperturbed output is in outb and EMIT accepted it; every single-answer
+   perturbation must be refused by flownet or by EMIT; the unperturbed run is repeated at the end */
+static int sweep(const char *sw, fn_flows_fn flows, void *fctx, fn_emit_fn emit, void *ectx) {
+    char *ref, *summary = 0, *dec = 0, *keys = 0, *t;
+    long refn = outn, total = 0, changed = 0, refused = 0, erefused = 0, accepted = 0, rask = 0, rbooks = 0, rother = 0;
+    int ni, k, c, nk, kok, allk = 0, allok = 0, nswept = 0, ndec = 0, rc;
+    if (!(ref = malloc((size_t)refn + 1))) { fnx_fail("sweep: out of memory"); return -1; }
+    memcpy(ref, outb ? outb : "", (size_t)refn); ref[refn] = 0;
+    for (ni = 0; ni < fnn_count(); ni++) {
+        if (fnc_find(fnn_name(ni)) < 0 || !swept(sw, fnn_name(ni))) continue;
+        nswept++; nk = fnn_keys(ni); kok = 0;
+        for (k = 0; k < nk; k++) {
+            int honest = fnn_predict(ni, k), keydec = 0;
+            for (c = 0; c < fnn_nclasses(ni); c++) {
+                if (c == honest) continue;
+                total++;
+                fnx_clear();
+                fault_net = ni; fault_key = k; fault_cls = c;
+                rc = run_flows(flows, fctx);
+                fault_net = -1;
+                if (rc) {
+                    const char *why = fnx_error();
+                    if (!why || !*why) { free(ref); fnx_failf("sweep: net %s key %d refused without a reason", fnn_name(ni), k); return -1; }
+                    refused++;
+                    if (!strncmp(why, "ask ", 4)) rask++; else if (!strncmp(why, "books:", 6)) rbooks++; else rother++;
+                    continue;
+                }
+                {   int diff = outn != refn || memcmp(outb ? outb : "", ref, (size_t)refn);
+                    if (diff) changed++;
+                    if (emit(ectx, outb ? outb : "", outn)) { erefused++; continue; }
+                    {   char *kt = fnn_key_text(ni, k);
+                        accepted++; keydec = 1;
+                        if (!kt || !(t = fnx_fmt("%s (%s) %s->%s %s", fnn_name(ni), kt, fnn_class(ni, honest), fnn_class(ni, c),
+                                                 diff ? "(output changed, accepted: discarded in the emit hook)" : "(output unchanged: not used)")) || cat(&dec, t)) {
+                            free(ref); fnx_clear(); fnx_fail("sweep: out of memory"); return -1;
+                        }
+                        free(kt); free(t); } }
+            }
+            if (!keydec) kok++;
+            else {
+                char *kt = fnn_key_text(ni, k);
+                ndec++;
+                if (!kt || !(t = fnx_fmt("%s (%s)", fnn_name(ni), kt)) || cat(&keys, t)) { free(ref); fnx_clear(); fnx_fail("sweep: out of memory"); return -1; }
+                free(kt); free(t);
+            }
+        }
+        allk += nk; allok += kok;
+        if (!(t = fnx_fmt("%s %d/%d", fnn_name(ni), kok, nk)) || cat(&summary, t)) { free(ref); fnx_clear(); fnx_fail("sweep: out of memory"); return -1; }
+        free(t);
+    }
+    fnx_clear();
+    if (!nswept) { free(ref); fnx_failf("sweep: FLOWNET_SWEEP=%s names no contract net", sw); return -1; }
+    fprintf(stderr, "flownet sweep: %s = %d/%d keys; %ld perturbations of one answer: %ld refused by flownet (ask %ld, books %ld, other %ld), "
+            "%ld refused by the emit hook, %ld accepted; %ld changed the output\n",
+            summary, allok, allk, total, refused, rask, rbooks, rother, erefused, accepted, changed);
+    free(summary);
+    if (run_flows(flows, fctx) || outn != refn || memcmp(outb ? outb : "", ref, (size_t)refn)) {
+        free(ref); free(dec); free(keys); fnx_clear(); fnx_fail("sweep: the unperturbed run, repeated, did not reproduce its output (the flows are not deterministic)"); return -1;
+    }
+    free(ref);
+    if (accepted) {
+        fnx_failf("sweep: %d of %d keys are decorative: %s -- these perturbations of one answer were accepted: %s", ndec, allk, keys, dec);
+        free(dec); free(keys); return -1;
+    }
+    return 0;
+}
+
+/* FLOWS(FCTX) with the books reset; the trace checked; then EMIT(ECTX, output, n); under FLOWNET_SWEEP then the
+   sweep and the unperturbed output emitted once more -- 0 when all passed */
+int fnf_run(fn_flows_fn flows, void *fctx, fn_emit_fn emit, void *ectx) {
+    int rc; const char *sw;
+    if (!flows || !emit) { fnx_fail("run: needs the consumer's flows and its emit hook"); return -1; }
+    if (inrun) { fnx_fail("run: a run is already in progress"); return -1; }
+    if (run_flows(flows, fctx)) return -1;
+    if ((rc = emit(ectx, outb ? outb : "", outn))) { fnx_failf("run: the emit hook refused (rc %d)", rc); return -1; }
+    if ((sw = getenv("FLOWNET_SWEEP")) && *sw) {
+        if (sweep(sw, flows, fctx, emit, ectx)) return -1;
+        if ((rc = emit(ectx, outb ? outb : "", outn))) { fnx_failf("run: the emit hook refused the repeated unperturbed run (rc %d)", rc); return -1; }
+    }
+    return 0;
+}

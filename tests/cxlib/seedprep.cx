@@ -1,0 +1,1469 @@
+/* seedprep.cx -- the prepared-cache toolkit of the seed *prepared.py checks, as a .cx module (2026-10-23, the py->cx
+   port wave; first users tests/seedppconsumerprepared.cx and tests/seedppchainprepared.cx).  Use it with
+   `#pragma unisa use cxlib.seedprep` from a .cx file in tests/.  The code is the C already measured byte for byte
+   against Python in tests/seedmatrixprepared.cx (extracted from it, renamed sp_*; that file keeps its own copy until
+   it is switched to this module), plus checklib.cc_read_set_identity and a generic argparse for the
+   --prepare | --require-cached --OPT CHOICE shape.
+     ports    exec/c/provenance.py      sp_source_digest, sp_verify (SystemExit text), sp_prov_write
+              tests/actorclosure.py     sp_actor_closure(seeds, &actors, &edges) (import scan by a tokenizer, not ast)
+              tests/checklib.py         sp_verify_cached_file, sp_cc_read_set (cc_read_set_identity with
+                                        parse_cc_make_dependencies)
+              json loads/dumps          sp_jloads, sp_jdump(buf, v, indent, sort_keys), sp_jeq (Python ==)
+              pathlib / tempfile / shutil.which / argparse / platform.uname / Python reprs
+   Exceptions are Python's: a failing call returns -1 (or 0 for pointers) with sp_exc() = the class and sp_emsg() =
+   str(e); sp_crash() re-raises it uncaught (the traceback's last line on stderr, rc 1, the sp_mkdtemp scratch removed
+   first).  sp_set_raise_hook(F) routes every uncaught raise to F(class, message) instead, for a caller's
+   `except (...)` around a block.  Process state lives here (no exported objects): sp_init(__FILE__) sets ROOT (the
+   parent of the caller's directory, resolved against the working directory) and the python3 sys.executable the
+   gate's PATH names; read them with sp_root() / sp_python().
+   Headers below are ones the cx prelude (edition 1) does not provide: time.h (clock_gettime), sys/file.h (flock);
+   fcntl.h (open, O_* flags, FD_CLOEXEC) comes with the prelude. */
+#pragma unisa module seedprep
+#include <time.h>
+#include <sys/file.h>
+
+#define PATHN 4096
+static char ROOT[PATHN], PY[PATHN], TD[PATHN];
+static void (*RAISE_HOOK)(const char *cls, const char *msg);
+
+/* ---------- growable buffer ---------- */
+typedef struct { char *s; size_t n, cap; } sp_buf;
+void sp_bput(sp_buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->s, c))) { fprintf(stderr, "MemoryError\n"); exit(1); }
+        b->s = t; b->cap = c;
+    }
+    memcpy(b->s + b->n, s, n); b->n += n; b->s[b->n] = 0;
+}
+void sp_bstr(sp_buf *b, const char *s) { sp_bput(b, s, strlen(s)); }
+void sp_bch(sp_buf *b, int c) { char ch = (char)c; sp_bput(b, &ch, 1); }
+const char *sp_bget(sp_buf *b) { return b->s ? b->s : ""; }
+void *sp_xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) { fprintf(stderr, "MemoryError\n"); exit(1); } return p; }
+char *sp_xstrndup(const char *s, size_t n) { char *d = sp_xmalloc(n + 1); memcpy(d, s, n); d[n] = 0; return d; }
+char *sp_xstrdup(const char *s) { return sp_xstrndup(s, strlen(s)); }
+char *sp_cat(const char *a, const char *b) { sp_buf x = {0, 0, 0}; sp_bstr(&x, a); sp_bstr(&x, b); return x.s ? x.s : sp_xstrdup(""); }
+
+/* ---------- scratch tree (tempfile.TemporaryDirectory) and uncaught exceptions ---------- */
+void sp_rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s)) return;
+    if (S_ISDIR(s.st_mode)) {
+        if ((d = opendir(p))) {
+            while ((e = readdir(d))) {
+                char *q;
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                q = sp_xmalloc(strlen(p) + strlen(e->d_name) + 2); sprintf(q, "%s/%s", p, e->d_name); sp_rmtree(q); free(q);
+            }
+            closedir(d);
+        }
+        rmdir(p);
+    } else unlink(p);
+}
+/* the scratch tree of sp_mkdtemp_py (a TemporaryDirectory): removed on every exit path that leaves the block */
+void sp_scratch_remove(void) { if (TD[0]) { sp_rmtree(TD); TD[0] = 0; } }
+void sp_scratch_forget(void) { TD[0] = 0; }          /* after it was renamed away */
+const char *sp_scratch(void) { return TD; }
+void sp_set_raise_hook(void (*hook)(const char *cls, const char *msg)) { RAISE_HOOK = hook; }
+/* an uncaught exception: the traceback's last line ("Class: message", or "Class") on stderr, rc 1; the
+   TemporaryDirectory is removed first.  With a hook set, the hook gets (class, message) instead. */
+void sp_raise_line(const char *line) {
+    if (RAISE_HOOK) {
+        const char *c = strstr(line, ": "); char cls[128];
+        if (c && (size_t)(c - line) < sizeof cls && !memchr(line, ' ', (size_t)(c - line))) {
+            memcpy(cls, line, (size_t)(c - line)); cls[c - line] = 0; RAISE_HOOK(cls, c + 2);
+        } else RAISE_HOOK(line, "");
+    }
+    fflush(stdout);
+    sp_scratch_remove();
+    fprintf(stderr, "%s\n", line); fflush(stderr); exit(1);
+}
+/* sys.exit(rc) after the with-blocks unwound: the scratch removed, buffers flushed */
+void sp_exit(int rc) { fflush(stdout); sp_scratch_remove(); fflush(stderr); exit(rc & 255); }
+
+/* ---------- Python reprs ---------- */
+/* repr(str) (bytes >= 0x80 kept: printable non-ASCII stays literal) and repr(bytes) (BYTES=1) */
+void sp_brepr(sp_buf *b, const char *s, size_t n, int bytes) {
+    size_t i; char q = '\'', t[8]; int sq = 0, dq = 0;
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; else if (s[i] == '"') dq = 1; }
+    if (sq && !dq) q = '"';
+    if (bytes) sp_bstr(b, "b");
+    sp_bput(b, &q, 1);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\' || c == (unsigned char)q) { t[0] = '\\'; t[1] = (char)c; sp_bput(b, t, 2); }
+        else if (c == '\t') sp_bstr(b, "\\t");
+        else if (c == '\n') sp_bstr(b, "\\n");
+        else if (c == '\r') sp_bstr(b, "\\r");
+        else if (c < 0x20 || c == 0x7f || (bytes && c >= 0x80)) { snprintf(t, sizeof t, "\\x%02x", c); sp_bstr(b, t); }
+        else sp_bput(b, (const char *)&c, 1);
+    }
+    sp_bput(b, &q, 1);
+}
+void sp_bargs(sp_buf *b, char **argv, int list) {   /* repr(tuple) / repr(list) of str */
+    int i; sp_bstr(b, list ? "[" : "(");
+    for (i = 0; argv[i]; i++) { if (i) sp_bstr(b, ", "); sp_brepr(b, argv[i], strlen(argv[i]), 0); }
+    if (i == 1 && !list) sp_bstr(b, ",");
+    sp_bstr(b, list ? "]" : ")");
+}
+void sp_bfloat(sp_buf *b, double x) {           /* repr(float): shortest round-trip, Python's notation */
+    char t[64], dig[32], out[96]; int p, e, nd, i, k = 0;
+    if (x != x) { sp_bstr(b, "NaN"); return; }
+    if (x > 1.7976931348623157e308 || x < -1.7976931348623157e308) { sp_bstr(b, x > 0 ? "Infinity" : "-Infinity"); return; }
+    for (p = 1; p <= 17; p++) { snprintf(t, sizeof t, "%.*e", p - 1, x); if (strtod(t, 0) == x) break; }
+    { char *m = t, *ep = strchr(t, 'e'); nd = 0;
+      if (*m == '-') { out[k++] = '-'; m++; }
+      for (; m < ep; m++) if (*m != '.') dig[nd++] = *m;
+      dig[nd] = 0; e = atoi(ep + 1); }
+    while (nd > 1 && dig[nd - 1] == '0') dig[--nd] = 0;
+    if (e >= -4 && e < 16) {
+        if (e < 0) { out[k++] = '0'; out[k++] = '.'; for (i = 0; i < -e - 1; i++) out[k++] = '0'; for (i = 0; i < nd; i++) out[k++] = dig[i]; }
+        else {
+            for (i = 0; i <= e; i++) out[k++] = i < nd ? dig[i] : '0';
+            out[k++] = '.';
+            if (nd > e + 1) for (i = e + 1; i < nd; i++) out[k++] = dig[i]; else out[k++] = '0';
+        }
+        out[k] = 0;
+    } else {
+        out[k++] = dig[0];
+        if (nd > 1) { out[k++] = '.'; for (i = 1; i < nd; i++) out[k++] = dig[i]; }
+        out[k] = 0; snprintf(out + k, sizeof out - k, "e%c%02d", e < 0 ? '-' : '+', e < 0 ? -e : e);
+    }
+    sp_bstr(b, out);
+}
+
+/* ---------- exceptions that valid() and sp_verify() catch: class + str(e) ---------- */
+static const char *EXC = 0; static sp_buf EMSG = {0, 0, 0};
+int sp_throw_(const char *cls, const char *msg) { EXC = cls; EMSG.n = 0; sp_bstr(&EMSG, msg); return -1; }
+static const char *oserr_class(int e) {
+    return e == ENOENT ? "FileNotFoundError" : e == EACCES || e == EPERM ? "PermissionError" : e == EISDIR ? "IsADirectoryError"
+         : e == ENOTDIR ? "NotADirectoryError" : e == EEXIST ? "FileExistsError" : "OSError";
+}
+int sp_throw_os(int e, const char *path) {     /* OSError(errno, strerror, filename) */
+    sp_buf m = {0, 0, 0}; char t[32];
+    snprintf(t, sizeof t, "[Errno %d] ", e); sp_bstr(&m, t); sp_bstr(&m, strerror(e)); sp_bstr(&m, ": "); sp_brepr(&m, path, strlen(path), 0);
+    sp_throw_(oserr_class(e), m.s); free(m.s); return -1;
+}
+void sp_crash(void) {                          /* re-raise the pending exception uncaught */
+    sp_buf m = {0, 0, 0}; sp_bstr(&m, EXC); if (EMSG.n) { sp_bstr(&m, ": "); sp_bstr(&m, sp_bget(&EMSG)); } sp_raise_line(m.s);
+}
+int sp_is_os(void) { return EXC && (strstr(EXC, "Error") && (!strcmp(EXC, "OSError") || !strcmp(EXC, "FileNotFoundError")
+    || !strcmp(EXC, "PermissionError") || !strcmp(EXC, "IsADirectoryError") || !strcmp(EXC, "NotADirectoryError") || !strcmp(EXC, "FileExistsError"))); }
+int sp_is_value(void) { return EXC && (!strcmp(EXC, "ValueError") || !strcmp(EXC, "json.decoder.JSONDecodeError") || !strcmp(EXC, "UnicodeDecodeError")); }
+const char *sp_exc(void) { return EXC ? EXC : ""; }
+const char *sp_emsg(void) { return sp_bget(&EMSG); }
+int sp_exc_is(const char *cls) { return EXC && !strcmp(EXC, cls); }
+
+/* ---------- files ---------- */
+char *sp_read_file(const char *path, size_t *len) {   /* open(path, 'rb').read(); NULL + exception on error */
+    struct stat s; int fd; sp_buf b = {0, 0, 0}; char tmp[65536]; ssize_t k;
+    if ((fd = open(path, O_RDONLY)) < 0) { sp_throw_os(errno, path); return 0; }
+    if (fstat(fd, &s) == 0 && S_ISDIR(s.st_mode)) { close(fd); sp_throw_os(EISDIR, path); return 0; }
+    for (;;) {
+        k = read(fd, tmp, sizeof tmp);
+        if (k < 0) { if (errno == EINTR) continue; { int e = errno; close(fd); free(b.s); sp_throw_os(e, path); return 0; } }
+        if (k == 0) break;
+        sp_bput(&b, tmp, (size_t)k);
+    }
+    close(fd);
+    if (!b.s) b.s = sp_xstrdup("");
+    *len = b.n; return b.s;
+}
+/* Speed: code from unisacc hashes at about 8 MB/s, and the basis hashes the python3 executable (often >100 MB)
+   and the source closure (~1800 files, 12 MB) three times.  So digests go through `openssl dgst -sha256 FILE...`
+   (as tests/cxbin does) when it is there, many files per call; any doubt (no openssl, rc != 0, a line count or
+   digest that does not parse) falls back to the in-process sha256 over read(), which raises the exact OSError. */
+int sp_spawn(char **argv, double limit, char **out, size_t *outn, char **err, size_t *errn);
+static int SPAWN_SOFT, NO_OPENSSL;
+static int hexv(int c);
+static int ossl_batch(char **paths, int n, unsigned char *md) {   /* 0 when every digest came from openssl */
+    char **argv, *o = 0, *e = 0, *p; size_t on = 0, en = 0; int i, k = 0, rc;
+    if (NO_OPENSSL || n <= 0) return -1;
+    argv = sp_xmalloc((size_t)(n + 4) * sizeof *argv);
+    argv[0] = "openssl"; argv[1] = "dgst"; argv[2] = "-sha256";
+    for (i = 0; i < n; i++) argv[3 + i] = paths[i];
+    argv[3 + n] = 0;
+    SPAWN_SOFT = 1; rc = sp_spawn(argv, 50, &o, &on, &e, &en); SPAWN_SOFT = 0;
+    free(argv); free(e);
+    if (rc == -2000) NO_OPENSSL = 1;
+    if (rc != 0) { free(o); return -1; }
+    for (p = o; *p && k <= n; ) {
+        char *nl = strchr(p, '\n'); size_t l = nl ? (size_t)(nl - p) : strlen(p); int j, ok = l >= 64;
+        if (l && p[l - 1] == '\r') l--;
+        ok = l >= 64;
+        for (j = 0; ok && j < 64; j++) if (hexv((unsigned char)p[l - 64 + j]) < 0) ok = 0;
+        if (!ok || (l > 64 && p[l - 65] != ' ' && p[l - 65] != '=')) { free(o); return -1; }
+        if (k < n) for (j = 0; j < 32; j++) md[k * 32 + j] = (unsigned char)(hexv((unsigned char)p[l - 64 + 2 * j]) * 16 + hexv((unsigned char)p[l - 63 + 2 * j]));
+        k++;
+        if (!nl) break;
+        p = nl + 1;
+    }
+    free(o);
+    return k == n ? 0 : -1;
+}
+int sp_sha_file(const char *path, char hex[65]) {    /* hashlib.sha256(read_bytes()).hexdigest() */
+    size_t n; char *d; struct stat s; unsigned char md[32]; int i;
+    if (stat(path, &s) == 0 && S_ISREG(s.st_mode) && s.st_size >= 1048576 && access(path, R_OK) == 0) {
+        char *one[1]; one[0] = (char *)path;
+        if (ossl_batch(one, 1, md) == 0) { for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", md[i]); hex[64] = 0; return 0; }
+    }
+    if (!(d = sp_read_file(path, &n))) return -1;
+    cx_sha256_hex(d, n, hex); free(d); return 0;
+}
+char *sp_must_read(const char *path, size_t *n) { char *d = sp_read_file(path, n); if (!d) sp_crash(); return d; }
+
+/* ---------- UTF-8 (str as Python sees it) ---------- */
+static int utf8_at(const unsigned char *s, size_t n, size_t i, unsigned *cp, int surr) {
+    unsigned c = s[i], lo = 0x80, hi = 0xBF; int nd, k;
+    if (c < 0x80) { *cp = c; return 1; }
+    if (c >= 0xC2 && c <= 0xDF) nd = 1;
+    else if (c >= 0xE0 && c <= 0xEF) { nd = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED && !surr) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { nd = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else return 0;
+    if (i + (size_t)nd >= n) return 0;
+    *cp = c & (0x3F >> nd);
+    for (k = 1; k <= nd; k++) {
+        unsigned b = s[i + k];
+        if (k == 1 ? (b < lo || b > hi) : (b < 0x80 || b > 0xBF)) return 0;
+        *cp = (*cp << 6) | (b & 0x3F);
+    }
+    return nd + 1;
+}
+/* bytes.decode('utf-8') strictness: 0, or -1 with UnicodeDecodeError's text (CPython's error ranges) */
+int sp_utf8_check(const char *s0, size_t n) {
+    const unsigned char *s = (const unsigned char *)s0; size_t i = 0; unsigned cp;
+    while (i < n) {
+        int l = utf8_at(s, n, i, &cp, 0), nd = 0, k; unsigned c = s[i], lo = 0x80, hi = 0xBF; const char *why; sp_buf m = {0, 0, 0}; char t[96];
+        if (l) { i += l; continue; }
+        if (c >= 0xC2 && c <= 0xDF) nd = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { nd = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { nd = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        if (!nd) { k = 0; why = "invalid start byte"; }
+        else {
+            for (k = 0; k < nd && i + 1 + k < n; k++) {
+                unsigned b = s[i + 1 + k];
+                if (k == 0 ? (b < lo || b > hi) : (b < 0x80 || b > 0xBF)) break;
+            }
+            why = (k < nd && i + 1 + k >= n) ? "unexpected end of data" : "invalid continuation byte";
+        }
+        if (k == 0) snprintf(t, sizeof t, "'utf-8' codec can't decode byte 0x%02x in position %lu: ", c, (unsigned long)i);
+        else snprintf(t, sizeof t, "'utf-8' codec can't decode bytes in position %lu-%lu: ", (unsigned long)i, (unsigned long)(i + k));
+        sp_bstr(&m, t); sp_bstr(&m, why); sp_throw_("UnicodeDecodeError", m.s); free(m.s); return -1;
+    }
+    return 0;
+}
+/* Path.sp_read_text(): strict UTF-8, universal newlines */
+char *sp_read_text(const char *path, size_t *len) {
+    size_t n, i, k = 0; char *d = sp_read_file(path, &n);
+    if (!d) return 0;
+    if (sp_utf8_check(d, n)) { free(d); return 0; }
+    for (i = 0; i < n; i++) {
+        if (d[i] == '\r') { d[k++] = '\n'; if (i + 1 < n && d[i + 1] == '\n') i++; }
+        else d[k++] = d[i];
+    }
+    d[k] = 0; *len = k; return d;
+}
+
+/* ---------- JSON value model (Python dict/list/str/int/float/bool/None) ---------- */
+enum { SP_JNULL, SP_JFALSE, SP_JTRUE, SP_JINT, SP_JFLOAT, SP_JSTR, SP_JARR, SP_JOBJ };
+typedef struct sp_json sp_json;
+struct sp_json { int t; char *s; size_t sn; double f; sp_json **v; char **k; size_t *kn; int n, cap; };
+sp_json *sp_jnew(int t) { sp_json *j = calloc(1, sizeof *j); if (!j) { fprintf(stderr, "MemoryError\n"); exit(1); } j->t = t; return j; }
+sp_json *sp_jstrn(const char *s, size_t n) { sp_json *j = sp_jnew(SP_JSTR); j->s = sp_xstrndup(s, n); j->sn = n; return j; }
+sp_json *sp_jstr(const char *s) { return sp_jstrn(s, strlen(s)); }
+static void jgrow(sp_json *a) {
+    if (a->n < a->cap) return;
+    a->cap = a->cap ? a->cap * 2 : 8;
+    a->v = realloc(a->v, a->cap * sizeof *a->v); a->k = realloc(a->k, a->cap * sizeof *a->k); a->kn = realloc(a->kn, a->cap * sizeof *a->kn);
+    if (!a->v || !a->k || !a->kn) { fprintf(stderr, "MemoryError\n"); exit(1); }
+}
+void sp_apush(sp_json *a, sp_json *v) { jgrow(a); a->v[a->n] = v; a->k[a->n] = 0; a->kn[a->n] = 0; a->n++; }
+static int ofind(sp_json *o, const char *k, size_t kn) {
+    int i; for (i = 0; i < o->n; i++) if (o->kn[i] == kn && !memcmp(o->k[i], k, kn)) return i;
+    return -1;
+}
+void sp_osetn(sp_json *o, const char *k, size_t kn, sp_json *v) {   /* d[k] = v: a repeated key keeps its first place */
+    int i = ofind(o, k, kn);
+    if (i >= 0) { o->v[i] = v; return; }
+    jgrow(o); o->v[o->n] = v; o->k[o->n] = sp_xstrndup(k, kn); o->kn[o->n] = kn; o->n++;
+}
+void sp_oset(sp_json *o, const char *k, sp_json *v) { sp_osetn(o, k, strlen(k), v); }
+const char *sp_pytype(sp_json *j) {
+    static const char *n[] = { "NoneType", "bool", "bool", "int", "float", "str", "list", "dict" };
+    return n[j->t];
+}
+/* j[key] for a str key: KeyError / TypeError as Python raises them */
+sp_json *sp_getitem(sp_json *j, const char *key) {
+    sp_buf m = {0, 0, 0}; int i;
+    if (j->t == SP_JOBJ) {
+        if ((i = ofind(j, key, strlen(key))) >= 0) return j->v[i];
+        sp_brepr(&m, key, strlen(key), 0); sp_throw_("KeyError", m.s); free(m.s); return 0;
+    }
+    if (j->t == SP_JARR) sp_throw_("TypeError", "list indices must be integers or slices, not str");
+    else if (j->t == SP_JSTR) sp_throw_("TypeError", "string indices must be integers, not 'str'");
+    else { sp_bstr(&m, "'"); sp_bstr(&m, sp_pytype(j)); sp_bstr(&m, "' object is not subscriptable"); sp_throw_("TypeError", m.s); free(m.s); }
+    return 0;
+}
+/* Python == between JSON-born values (1 == 1.0 == True) */
+int sp_numval(sp_json *j, double *d) {
+    if (j->t == SP_JTRUE) { *d = 1; return 1; } if (j->t == SP_JFALSE) { *d = 0; return 1; }
+    if (j->t == SP_JINT) { *d = strtod(j->s, 0); return 1; } if (j->t == SP_JFLOAT) { *d = j->f; return 1; }
+    return 0;
+}
+int sp_jeq(sp_json *a, sp_json *b) {
+    double x, y; int i, k;
+    if (a->t == SP_JINT && b->t == SP_JINT) return !strcmp(a->s, b->s);
+    if (sp_numval(a, &x) && sp_numval(b, &y)) return x == y;
+    if (a->t != b->t) return 0;
+    switch (a->t) {
+    case SP_JNULL: return 1;
+    case SP_JSTR: return a->sn == b->sn && !memcmp(a->s, b->s, a->sn);
+    case SP_JARR: if (a->n != b->n) return 0; for (i = 0; i < a->n; i++) if (!sp_jeq(a->v[i], b->v[i])) return 0; return 1;
+    case SP_JOBJ:
+        if (a->n != b->n) return 0;
+        for (i = 0; i < a->n; i++) { if ((k = ofind(b, a->k[i], a->kn[i])) < 0 || !sp_jeq(a->v[i], b->v[k])) return 0; }
+        return 1;
+    }
+    return 0;
+}
+
+/* json.dumps: ensure_ascii; a str's undecodable byte is its surrogateescape \udcXX */
+static void jescape(sp_buf *o, const char *s0, size_t n) {
+    const unsigned char *s = (const unsigned char *)s0; size_t i = 0; char t[16];
+    sp_bch(o, '"');
+    while (i < n) {
+        unsigned c; int l = utf8_at(s, n, i, &c, 1);
+        if (l) i += l; else { c = 0xDC00 + s[i]; i++; }
+        if (c == '"') sp_bstr(o, "\\\""); else if (c == '\\') sp_bstr(o, "\\\\");
+        else if (c == '\n') sp_bstr(o, "\\n"); else if (c == '\r') sp_bstr(o, "\\r"); else if (c == '\t') sp_bstr(o, "\\t");
+        else if (c == '\b') sp_bstr(o, "\\b"); else if (c == '\f') sp_bstr(o, "\\f");
+        else if (c >= ' ' && c <= '~') sp_bch(o, (int)c);
+        else if (c < 0x10000) { sprintf(t, "\\u%04x", c); sp_bstr(o, t); }
+        else { unsigned v = c - 0x10000; sprintf(t, "\\u%04x\\u%04x", 0xD800 | (v >> 10), 0xDC00 | (v & 0x3FF)); sp_bstr(o, t); }
+    }
+    sp_bch(o, '"');
+}
+static sp_json *kcmp_o;
+static int kcmp(const void *a, const void *b) {   /* sort_keys: str order of the keys (code point = UTF-8 byte order) */
+    int x = *(const int *)a, y = *(const int *)b; size_t lx = kcmp_o->kn[x], ly = kcmp_o->kn[y];
+    int r = memcmp(kcmp_o->k[x], kcmp_o->k[y], lx < ly ? lx : ly);
+    return r ? r : (lx < ly ? -1 : lx > ly);
+}
+static int *sorted_keys(sp_json *o, int sort) {
+    int *ix = sp_xmalloc((size_t)(o->n ? o->n : 1) * sizeof *ix), i;
+    for (i = 0; i < o->n; i++) ix[i] = i;
+    kcmp_o = o; if (sort && o->n) qsort(ix, (size_t)o->n, sizeof *ix, kcmp);
+    return ix;
+}
+static void indent_to(sp_buf *o, int level) { int i; sp_bch(o, '\n'); for (i = 0; i < level * 2; i++) sp_bch(o, ' '); }
+/* json.dumps(j[, indent=2 when INDENT][, sort_keys=True when SORT]) */
+static void jdump_(sp_buf *o, sp_json *j, int indent, int level, int sort) {
+    int i, *ix;
+    switch (j->t) {
+    case SP_JNULL: sp_bstr(o, "null"); break;
+    case SP_JTRUE: sp_bstr(o, "true"); break;
+    case SP_JFALSE: sp_bstr(o, "false"); break;
+    case SP_JINT: sp_bstr(o, j->s); break;
+    case SP_JFLOAT: sp_bfloat(o, j->f); break;
+    case SP_JSTR: jescape(o, j->s, j->sn); break;
+    case SP_JARR:
+        if (!j->n) { sp_bstr(o, "[]"); break; }
+        sp_bch(o, '[');
+        for (i = 0; i < j->n; i++) {
+            if (i) sp_bstr(o, indent ? "," : ", ");
+            if (indent) indent_to(o, level + 1);
+            jdump_(o, j->v[i], indent, level + 1, sort);
+        }
+        if (indent) indent_to(o, level);
+        sp_bch(o, ']'); break;
+    case SP_JOBJ:
+        if (!j->n) { sp_bstr(o, "{}"); break; }
+        ix = sorted_keys(j, sort); sp_bch(o, '{');
+        for (i = 0; i < j->n; i++) {
+            if (i) sp_bstr(o, indent ? "," : ", ");
+            if (indent) indent_to(o, level + 1);
+            jescape(o, j->k[ix[i]], j->kn[ix[i]]); sp_bstr(o, ": ");
+            jdump_(o, j->v[ix[i]], indent, level + 1, sort);
+        }
+        if (indent) indent_to(o, level);
+        sp_bch(o, '}'); free(ix); break;
+    }
+}
+void sp_jdump(sp_buf *o, sp_json *j, int indent, int sort) { jdump_(o, j, indent, 0, sort); }
+
+/* json.loads (CPython's C scanner, its JSONDecodeError texts and positions) */
+typedef struct { const char *s; size_t n; } sp_jp;
+static int jfail(sp_jp *p, const char *msg, size_t pos) {
+    size_t i, ch = 0, line = 1, lastnl_ch = 0; int seen = 0; sp_buf m = {0, 0, 0}; char t[96];
+    for (i = 0; i < pos && i < p->n; i++) {
+        unsigned char c = (unsigned char)p->s[i];
+        if ((c & 0xC0) == 0x80) continue;
+        if (c == '\n') { line++; lastnl_ch = ch; seen = 1; }
+        ch++;
+    }
+    snprintf(t, sizeof t, ": line %lu column %lu (char %lu)", (unsigned long)line,
+             (unsigned long)(seen ? ch - lastnl_ch : ch + 1), (unsigned long)ch);
+    sp_bstr(&m, msg); sp_bstr(&m, t); sp_throw_("json.decoder.JSONDecodeError", m.s); free(m.s); return -1;
+}
+static size_t jws(sp_jp *p, size_t i) { while (i < p->n && (p->s[i] == ' ' || p->s[i] == '\t' || p->s[i] == '\n' || p->s[i] == '\r')) i++; return i; }
+static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static int hex4(sp_jp *p, size_t i, unsigned *v) {
+    int k, h; *v = 0;
+    for (k = 0; k < 4; k++) { if (i + k >= p->n || (h = hexv((unsigned char)p->s[i + k])) < 0) return 0; *v = *v * 16 + (unsigned)h; }
+    return 1;
+}
+static void put_cp(sp_buf *b, unsigned c) {        /* \udcXX (XX >= 80) is kept as the raw byte (surrogateescape) */
+    char t[4];
+    if (c >= 0xDC80 && c <= 0xDCFF) { sp_bch(b, (int)(c - 0xDC00)); return; }
+    if (c < 0x80) { t[0] = (char)c; sp_bput(b, t, 1); }
+    else if (c < 0x800) { t[0] = (char)(0xC0 | c >> 6); t[1] = (char)(0x80 | (c & 0x3F)); sp_bput(b, t, 2); }
+    else if (c < 0x10000) { t[0] = (char)(0xE0 | c >> 12); t[1] = (char)(0x80 | (c >> 6 & 0x3F)); t[2] = (char)(0x80 | (c & 0x3F)); sp_bput(b, t, 3); }
+    else { t[0] = (char)(0xF0 | c >> 18); t[1] = (char)(0x80 | (c >> 12 & 0x3F)); t[2] = (char)(0x80 | (c >> 6 & 0x3F)); t[3] = (char)(0x80 | (c & 0x3F)); sp_bput(b, t, 4); }
+}
+static int jstring(sp_jp *p, size_t end, sp_json **out, size_t *next_out) {   /* END is just past the opening quote */
+    size_t begin = end - 1, next; sp_buf b = {0, 0, 0}; unsigned c = 0;
+    for (;;) {
+        c = 0;
+        for (next = end; next < p->n; next++) {
+            c = (unsigned char)p->s[next];
+            if (c == '"' || c == '\\') break;
+            if (c <= 0x1f) { free(b.s); return jfail(p, "Invalid control character at", next); }
+        }
+        if (!(c == '"' || c == '\\')) { free(b.s); return jfail(p, "Unterminated string starting at", begin); }
+        sp_bput(&b, p->s + end, next - end);
+        if (c == '"') { end = next + 1; break; }
+        next++;
+        if (next == p->n) { free(b.s); return jfail(p, "Unterminated string starting at", begin); }
+        c = (unsigned char)p->s[next];
+        if (c != 'u') {
+            end = next + 1;
+            switch (c) {
+            case '"': case '\\': case '/': break;
+            case 'b': c = '\b'; break; case 'f': c = '\f'; break; case 'n': c = '\n'; break;
+            case 'r': c = '\r'; break; case 't': c = '\t'; break;
+            default: free(b.s); return jfail(p, "Invalid \\escape", end - 2);
+            }
+            sp_bch(&b, (int)c);
+        } else {
+            unsigned v, v2;
+            next++; end = next + 4;
+            if (end >= p->n) { free(b.s); return jfail(p, "Invalid \\uXXXX escape", next - 1); }
+            if (!hex4(p, next, &v)) { free(b.s); return jfail(p, "Invalid \\uXXXX escape", end - 5); }
+            if (v >= 0xD800 && v <= 0xDBFF && end + 6 < p->n && p->s[end] == '\\' && p->s[end + 1] == 'u') {
+                if (!hex4(p, end + 2, &v2)) { free(b.s); return jfail(p, "Invalid \\uXXXX escape", end + 1); }
+                if (v2 >= 0xDC00 && v2 <= 0xDFFF) { v = 0x10000 + (((v - 0xD800) << 10) | (v2 - 0xDC00)); end += 6; }
+            }
+            put_cp(&b, v);
+        }
+    }
+    *out = sp_jstrn(b.s ? b.s : "", b.n); free(b.s); *next_out = end; return 0;
+}
+static int jvalue(sp_jp *p, size_t i, sp_json **out, size_t *next);
+static int jvalue(sp_jp *p, size_t i, sp_json **out, size_t *next) {
+    char c;
+    if (i >= p->n) return jfail(p, "Expecting value", i);
+    c = p->s[i];
+    if (c == '"') return jstring(p, i + 1, out, next);
+    if (c == '{') {
+        sp_json *o = sp_jnew(SP_JOBJ), *k, *v; size_t comma;
+        i = jws(p, i + 1);
+        if (i < p->n && p->s[i] == '}') { *out = o; *next = i + 1; return 0; }
+        for (;;) {
+            if (i >= p->n || p->s[i] != '"') return jfail(p, "Expecting property name enclosed in double quotes", i);
+            if (jstring(p, i + 1, &k, &i)) return -1;
+            i = jws(p, i);
+            if (i >= p->n || p->s[i] != ':') return jfail(p, "Expecting ':' delimiter", i);
+            i = jws(p, i + 1);
+            if (jvalue(p, i, &v, &i)) return -1;
+            sp_osetn(o, k->s, k->sn, v);
+            i = jws(p, i);
+            if (i < p->n && p->s[i] == '}') { *out = o; *next = i + 1; return 0; }
+            if (i >= p->n || p->s[i] != ',') return jfail(p, "Expecting ',' delimiter", i);
+            comma = i; i = jws(p, i + 1);
+            if (i < p->n && p->s[i] == '}') return jfail(p, "Illegal trailing comma before end of object", comma);
+        }
+    }
+    if (c == '[') {
+        sp_json *a = sp_jnew(SP_JARR), *v; size_t comma;
+        i = jws(p, i + 1);
+        if (i < p->n && p->s[i] == ']') { *out = a; *next = i + 1; return 0; }
+        for (;;) {
+            if (jvalue(p, i, &v, &i)) return -1;
+            sp_apush(a, v);
+            i = jws(p, i);
+            if (i < p->n && p->s[i] == ']') { *out = a; *next = i + 1; return 0; }
+            if (i >= p->n || p->s[i] != ',') return jfail(p, "Expecting ',' delimiter", i);
+            comma = i; i = jws(p, i + 1);
+            if (i < p->n && p->s[i] == ']') return jfail(p, "Illegal trailing comma before end of array", comma);
+        }
+    }
+#define KW(w, T) if (p->n - i >= sizeof w - 1 && !memcmp(p->s + i, w, sizeof w - 1)) { *out = sp_jnew(T); *next = i + sizeof w - 1; return 0; }
+    KW("null", SP_JNULL) KW("true", SP_JTRUE) KW("false", SP_JFALSE)
+#undef KW
+    if (p->n - i >= 3 && !memcmp(p->s + i, "NaN", 3)) { *out = sp_jnew(SP_JFLOAT); (*out)->f = 0.0 / 0.0; *next = i + 3; return 0; }
+    if (p->n - i >= 8 && !memcmp(p->s + i, "Infinity", 8)) { *out = sp_jnew(SP_JFLOAT); (*out)->f = 1e308 * 10; *next = i + 8; return 0; }
+    if (p->n - i >= 9 && !memcmp(p->s + i, "-Infinity", 9)) { *out = sp_jnew(SP_JFLOAT); (*out)->f = -1e308 * 10; *next = i + 9; return 0; }
+    {   /* number */
+        size_t s = i, j = i; int isf = 0; char *txt;
+        if (j < p->n && p->s[j] == '-') j++;
+        if (j < p->n && p->s[j] >= '1' && p->s[j] <= '9') { while (j < p->n && p->s[j] >= '0' && p->s[j] <= '9') j++; }
+        else if (j < p->n && p->s[j] == '0') j++;
+        else return jfail(p, "Expecting value", s);
+        if (j + 1 < p->n && p->s[j] == '.' && p->s[j + 1] >= '0' && p->s[j + 1] <= '9') {
+            j += 2; isf = 1; while (j < p->n && p->s[j] >= '0' && p->s[j] <= '9') j++;
+        }
+        if (j < p->n && (p->s[j] == 'e' || p->s[j] == 'E')) {
+            size_t e = j + 1;
+            if (e < p->n && (p->s[e] == '+' || p->s[e] == '-')) e++;
+            if (e < p->n && p->s[e] >= '0' && p->s[e] <= '9') { while (e < p->n && p->s[e] >= '0' && p->s[e] <= '9') e++; j = e; isf = 1; }
+        }
+        txt = sp_xstrndup(p->s + s, j - s);
+        if (isf) { *out = sp_jnew(SP_JFLOAT); (*out)->f = strtod(txt, 0); free(txt); }
+        else {
+            *out = sp_jnew(SP_JINT);
+            if (!strcmp(txt, "-0")) { free(txt); txt = sp_xstrdup("0"); }
+            (*out)->s = txt;
+        }
+        *next = j; return 0;
+    }
+}
+sp_json *sp_jloads(const char *s, size_t n) {          /* NULL + JSONDecodeError */
+    sp_jp p; sp_json *v; size_t i;
+    p.s = s; p.n = n;
+    if (n >= 3 && !memcmp(s, "\xEF\xBB\xBF", 3)) { jfail(&p, "Unexpected UTF-8 BOM (decode using utf-8-sig)", 0); return 0; }
+    if (jvalue(&p, jws(&p, 0), &v, &i)) return 0;
+    i = jws(&p, i);
+    if (i != n) { jfail(&p, "Extra data", i); return 0; }
+    return v;
+}
+
+/* ---------- pathlib/os.path spellings ---------- */
+char *sp_ppath(const char *s) {               /* str(Path(s)): drop empty and '.' parts */
+    sp_buf b = {0, 0, 0}; const char *p = s, *e; int parts = 0;
+    if (s[0] == '/') { if (s[1] == '/' && s[2] != '/') sp_bstr(&b, "//"); else sp_bstr(&b, "/"); }
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        e = p; while (*e && *e != '/') e++;
+        if (!(e - p == 1 && *p == '.')) {
+            if (parts++ || (b.n && b.s[b.n - 1] != '/')) sp_bch(&b, '/');
+            sp_bput(&b, p, (size_t)(e - p));
+        }
+        p = e;
+    }
+    if (!b.n) sp_bstr(&b, ".");
+    return b.s;
+}
+char *sp_pjoin(const char *a, const char *b) {  /* str(Path(a) / b) for a relative b */
+    if (!strcmp(a, ".")) return sp_ppath(b);
+    { sp_buf x = {0, 0, 0}; char *r; sp_bstr(&x, a); if (x.n && x.s[x.n - 1] != '/') sp_bch(&x, '/'); sp_bstr(&x, b); r = sp_ppath(x.s); free(x.s); return r; }
+}
+static char *normpath(const char *s) {             /* os.path.normpath */
+    char **st = sp_xmalloc((strlen(s) + 2) * sizeof *st); int n = 0, i, init = 0; const char *p = s, *e; sp_buf b = {0, 0, 0};
+    if (!*s) return sp_xstrdup(".");
+    if (s[0] == '/') init = (s[1] == '/' && s[2] != '/') ? 2 : 1;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        e = p; while (*e && *e != '/') e++;
+        if (e - p == 1 && *p == '.') { p = e; continue; }
+        if (e - p == 2 && p[0] == '.' && p[1] == '.') {
+            if ((!init && (!n || !strcmp(st[n - 1], ".."))) ) st[n++] = sp_xstrdup("..");
+            else if (n) n--;
+            p = e; continue;
+        }
+        st[n++] = sp_xstrndup(p, (size_t)(e - p)); p = e;
+    }
+    for (i = 0; i < init; i++) sp_bch(&b, '/');
+    for (i = 0; i < n; i++) { if (i) sp_bch(&b, '/'); sp_bstr(&b, st[i]); }
+    if (!b.n) sp_bstr(&b, ".");
+    free(st); return b.s;
+}
+char *sp_abspath(const char *s) {
+    char cwd[PATHN];
+    if (s[0] == '/') return normpath(s);
+    if (!getcwd(cwd, sizeof cwd)) sp_raise_line("OSError: getcwd failed");
+    { char *t = sp_cat(cwd, "/"), *u = sp_cat(t, s), *r = normpath(u); free(t); free(u); return r; }
+}
+/* os.path.realpath(p, strict=False): symlinks resolved part by part, a missing part kept as spelled */
+char *sp_realpath_ns(const char *p) {
+    char **rest = 0; int nr = 0, cap = 0, links = 0; sp_buf path = {0, 0, 0}; char cwd[PATHN];
+#define PUSHPARTS(str) do { const char *q_ = (str), *e_; int c_ = 0, k_; char **tmp_; \
+        for (e_ = q_; ; e_++) { if (*e_ == '/' || !*e_) c_++; if (!*e_) break; } \
+        if (nr + c_ > cap) { cap = (nr + c_) * 2 + 8; rest = realloc(rest, (size_t)cap * sizeof *rest); } \
+        tmp_ = sp_xmalloc((size_t)c_ * sizeof *tmp_); k_ = 0; \
+        for (;;) { e_ = q_; while (*e_ && *e_ != '/') e_++; tmp_[k_++] = sp_xstrndup(q_, (size_t)(e_ - q_)); if (!*e_) break; q_ = e_ + 1; } \
+        while (k_) rest[nr++] = tmp_[--k_]; free(tmp_); } while (0)
+    if (p[0] == '/') sp_bstr(&path, "/");
+    else { if (!getcwd(cwd, sizeof cwd)) sp_raise_line("OSError: getcwd failed"); sp_bstr(&path, cwd); }
+    PUSHPARTS(p);
+    while (nr) {
+        char *name = rest[--nr], *np, lk[PATHN]; struct stat s; ssize_t k;
+        if (!*name || !strcmp(name, ".")) { free(name); continue; }
+        if (!strcmp(name, "..")) {
+            char *sl = strrchr(path.s, '/');
+            path.n = sl ? (size_t)(sl - path.s) : 0; if (!path.n) path.n = 1; path.s[path.n] = 0;
+            free(name); continue;
+        }
+        np = path.n == 1 && path.s[0] == '/' ? sp_cat("/", name) : sp_cat(path.s, "/");
+        if (!(path.n == 1 && path.s[0] == '/')) { char *t = sp_cat(np, name); free(np); np = t; }
+        free(name);
+        if (lstat(np, &s) != 0 || !S_ISLNK(s.st_mode) || ++links > 40 || (k = readlink(np, lk, sizeof lk - 1)) < 0) {
+            path.n = 0; sp_bstr(&path, np); free(np); continue;
+        }
+        lk[k] = 0; free(np);
+        if (lk[0] == '/') { path.n = 0; sp_bstr(&path, "/"); }
+        PUSHPARTS(lk);
+    }
+#undef PUSHPARTS
+    free(rest); return path.s;
+}
+
+/* ---------- provenance.sp_source_digest() (exec/pipeline/models.py closure + exec/c/asm/*.S) ---------- */
+typedef struct { char **v; int n, cap; } sp_vec;
+static void vpush(sp_vec *v, char *s) { if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 64; v->v = realloc(v->v, (size_t)v->cap * sizeof *v->v); if (!v->v) exit(1); } v->v[v->n++] = s; }
+static int vhas(sp_vec *v, const char *s) { int i; for (i = 0; i < v->n; i++) if (!strcmp(v->v[i], s)) return 1; return 0; }
+static int partcmp(const void *a, const void *b) {   /* key=relative_to(ROOT).parts */
+    const unsigned char *x = *(const unsigned char *const *)a, *y = *(const unsigned char *const *)b;
+    for (;; x++, y++) {
+        unsigned cx = *x == '/' ? 0 : *x + 1u, cy = *y == '/' ? 0 : *y + 1u;
+        if (!*x && !*y) return 0;
+        if (!*x) return -1; if (!*y) return 1;
+        if (cx != cy) return cx < cy ? -1 : 1;
+    }
+}
+static int strpcmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void rglob(const char *rel, sp_vec *out) {    /* Path.rglob('*'): no descent into symlinked directories */
+    char *abs = sp_cat(ROOT, "/"), *a2 = sp_cat(abs, rel); DIR *d = opendir(a2); struct dirent *e;
+    free(abs);
+    if (!d) { free(a2); return; }
+    while ((e = readdir(d))) {
+        char *r; struct stat s;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        r = sp_xmalloc(strlen(rel) + strlen(e->d_name) + 2); sprintf(r, "%s/%s", rel, e->d_name);
+        { char *full = sp_cat(ROOT, "/"), *f2 = sp_cat(full, r); free(full);
+          if (lstat(f2, &s) == 0 && S_ISDIR(s.st_mode)) rglob(r, out);
+          free(f2); }
+        vpush(out, r);
+    }
+    closedir(d); free(a2);
+}
+static const char *suffix_of(const char *name) {   /* PurePath.suffix */
+    const char *dot = strrchr(name, '.'); size_t l = strlen(name);
+    if (!dot || dot == name || (size_t)(dot - name) == l - 1) return "";
+    return dot;
+}
+static int is_file_abs(const char *abs) { struct stat s; return stat(abs, &s) == 0 && S_ISREG(s.st_mode); }
+/* h.update(rel + b'\0'); h.update(bytes.fromhex(digest(path))) for every REL in order */
+static void add_digests(sp_buf *h, sp_vec *rels) {
+    int i, c, k; unsigned char *md = sp_xmalloc((size_t)(rels->n ? rels->n : 1) * 32); char **abs = sp_xmalloc((size_t)(rels->n ? rels->n : 1) * sizeof *abs);
+    for (i = 0; i < rels->n; i++) abs[i] = sp_pjoin(ROOT, rels->v[i]);
+    for (c = 0; c < rels->n; c += 256) {
+        int m = rels->n - c < 256 ? rels->n - c : 256;
+        if (ossl_batch(abs + c, m, md + (size_t)c * 32) == 0) continue;
+        for (k = c; k < c + m; k++) { size_t n; char *d = sp_must_read(abs[k], &n); cx_sha256(d, n, md + (size_t)k * 32); free(d); }
+    }
+    for (i = 0; i < rels->n; i++) { sp_bput(h, rels->v[i], strlen(rels->v[i]) + 1); sp_bput(h, (const char *)md + (size_t)i * 32, 32); free(abs[i]); }
+    free(abs); free(md);
+}
+char *sp_source_digest(void) {
+    static const char *dirs[] = { "exec", "unisa", "src", "kernel", "include", "weights", "seed", 0 };
+    static const char *seedkeep[] = { "tbl.c", "net.c", "json.h", "gen.c", "facts.h", "ident.c", "blob.c", "sha256.h", "pack.c",
+        "compilerpack.c", "ape.c", 0 };
+    static const char *sufs[] = { ".py", ".c", ".h", ".inc", ".tsv", ".json", ".sh", 0 };
+    sp_buf h = {0, 0, 0}; sp_vec todo = {0, 0, 0}; int di, i, k; char hex[65];
+    for (di = 0; dirs[di]; di++) {
+        sp_vec all = {0, 0, 0};
+        rglob(dirs[di], &all);
+        if (all.n) qsort(all.v, (size_t)all.n, sizeof *all.v, partcmp);
+        for (i = 0; i < all.n; i++) {
+            char *r = all.v[i], *name = strrchr(r, '/') + 1, *abs; const char *suf = suffix_of(name); int nparts = 1, keep, probes = 0;
+            const char *q; size_t stemlen = strlen(name) - strlen(suf);
+            for (q = r; *q; q++) if (*q == '/') nparts++;
+            if (!strcmp(dirs[di], "seed")) { keep = 0; for (k = 0; seedkeep[k]; k++) if (!strcmp(name, seedkeep[k])) keep = 1; if (!keep) continue; }
+            if (!strcmp(dirs[di], "exec") && (!strcmp(suf, ".sh") || !strcmp(suf, ".py")) && stemlen >= 5 && !memcmp(name + stemlen - 5, "check", 5)) continue;
+            {   /* 'probes' in rel[:-1] */
+                const char *p = r, *e;
+                while (p < name) { e = strchr(p, '/'); if ((size_t)(e - p) == 6 && !memcmp(p, "probes", 6)) probes = 1; p = e + 1; }
+            }
+            if (probes && (!strcmp(suf, ".c") || !strcmp(suf, ".h"))) continue;
+            if (!strncmp(r, "exec/build/", 11) && (nparts > 3 || strcmp(suf, ".py"))) continue;
+            keep = 0; for (k = 0; sufs[k]; k++) if (!strcmp(suf, sufs[k])) keep = 1;
+            if (!keep) continue;
+            abs = sp_pjoin(ROOT, r);
+            if (is_file_abs(abs)) vpush(&todo, sp_xstrdup(r));
+            free(abs);
+        }
+        for (i = 0; i < all.n; i++) free(all.v[i]);
+        free(all.v);
+    }
+    vpush(&todo, sp_xstrdup("iterate/kernel/typekw.tsv"));
+    {   /* sorted((ROOT / 'exec/c/asm').glob('*.S')) */
+        sp_vec v = {0, 0, 0}; char *dir = sp_pjoin(ROOT, "exec/c/asm"); DIR *d = opendir(dir); struct dirent *e;
+        if (d) {
+            while ((e = readdir(d))) {
+                size_t l = strlen(e->d_name);
+                if (l >= 2 && !strcmp(e->d_name + l - 2, ".S")) vpush(&v, sp_cat("exec/c/asm/", e->d_name));
+            }
+            closedir(d);
+        }
+        if (v.n) qsort(v.v, (size_t)v.n, sizeof *v.v, partcmp);
+        for (i = 0; i < v.n; i++) vpush(&todo, v.v[i]);
+        free(v.v); free(dir);
+    }
+    add_digests(&h, &todo);
+    for (i = 0; i < todo.n; i++) free(todo.v[i]);
+    free(todo.v);
+    cx_sha256_hex(h.s, h.n, hex); free(h.s);
+    return sp_xstrdup(hex);
+}
+
+/* ---------- tests/actorclosure.py sp_actor_closure(ROOT, seeds) ---------- */
+typedef struct { char *name, *digest; sp_vec kids; } sp_actor;
+static sp_actor *ACT; static int NACT, CAPACT;
+static sp_vec *KIDS;                                  /* children of the actor being scanned (a set) */
+static void local(const char *cand) {             /* local(candidate) */
+    char *r = sp_realpath_ns(cand); size_t rl = strlen(ROOT); struct stat s;
+    if (!(strncmp(r, ROOT, rl) == 0 && (r[rl] == '/' || r[rl] == 0))) {
+        sp_buf m = {0, 0, 0}; sp_bstr(&m, "ValueError: "); sp_brepr(&m, r, strlen(r), 0); sp_bstr(&m, " is not in the subpath of ");
+        sp_brepr(&m, ROOT, rl, 0); sp_raise_line(m.s);
+    }
+    if (stat(r, &s) != 0) {
+        if (errno == ENOENT) { free(r); return; }
+        sp_throw_os(errno, r); sp_crash();
+    }
+    if (S_ISREG(s.st_mode) && r[rl] == '/' && !vhas(KIDS, r + rl + 1)) vpush(KIDS, sp_xstrdup(r + rl + 1));
+    free(r);
+}
+static int isname(int c) { return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c >= 0x80; }
+static int isrunc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '/' || c == '-'; }
+static int ispyws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' || (c >= 0x1c && c <= 0x1f); }
+/* Python tokens for the import scan: N name, O operator char, L logical newline */
+typedef struct { char t; size_t a, b; } sp_tok;
+static size_t skip_string(const char *s, size_t n, size_t i, int fmt);
+static size_t skip_fexpr(const char *s, size_t n, size_t i) {   /* inside {...} of an f-string, I past '{' */
+    int depth = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\'' || c == '"') { i = skip_string(s, n, i, 0); continue; }
+        if (isname(c)) {
+            size_t j = i; while (j < n && isname((unsigned char)s[j])) j++;
+            if (j < n && (s[j] == '\'' || s[j] == '"') && j - i <= 2) {
+                size_t k; int f = 0, ok = 1;
+                for (k = i; k < j; k++) { if (!strchr("rRbBuUfFtT", s[k])) ok = 0; if (strchr("fFtT", s[k])) f = 1; }
+                if (ok) { i = skip_string(s, n, j, f); continue; }
+            }
+            i = j; continue;
+        }
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']') depth--;
+        else if (c == '}') { if (depth-- == 0) return i + 1; }
+        i++;
+    }
+    return i;
+}
+static size_t skip_string(const char *s, size_t n, size_t i, int fmt) {   /* I at the opening quote */
+    char q = s[i]; int triple = i + 2 < n && s[i + 1] == q && s[i + 2] == q;
+    i += triple ? 3 : 1;
+    while (i < n) {
+        char c = s[i];
+        if (c == '\\') { i += 2; continue; }
+        if (fmt && c == '{') { if (i + 1 < n && s[i + 1] == '{') { i += 2; continue; } i = skip_fexpr(s, n, i + 1); continue; }
+        if (c == q) {
+            if (!triple) return i + 1;
+            if (i + 2 < n && s[i + 1] == q && s[i + 2] == q) return i + 3;
+        }
+        if (c == '\n' && !triple) return i + 1;
+        i++;
+    }
+    return n;
+}
+static sp_tok *py_tokens(const char *s, size_t n, int *count) {
+    sp_tok *t = 0; int nt = 0, cap = 0, depth = 0; size_t i = 0;
+#define TPUSH(T, A, B) do { if (nt == cap) { cap = cap ? cap * 2 : 256; t = realloc(t, (size_t)cap * sizeof *t); } t[nt].t = (T); t[nt].a = (A); t[nt].b = (B); nt++; } while (0)
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '#') { while (i < n && s[i] != '\n') i++; continue; }
+        if (c == '\\' && i + 1 < n && (s[i + 1] == '\n' || s[i + 1] == '\r')) { i += 2; continue; }
+        if (c == '\n') { if (!depth) TPUSH('L', i, i + 1); i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\f') { i++; continue; }
+        if (c == '\'' || c == '"') { i = skip_string(s, n, i, 0); TPUSH('S', i, i); continue; }
+        if (isname(c)) {
+            size_t j = i; while (j < n && isname((unsigned char)s[j])) j++;
+            if (j < n && (s[j] == '\'' || s[j] == '"') && j - i <= 2 && !(c >= '0' && c <= '9')) {
+                size_t k; int f = 0, ok = 1;
+                for (k = i; k < j; k++) { if (!strchr("rRbBuUfFtT", s[k])) ok = 0; if (strchr("fFtT", s[k])) f = 1; }
+                if (ok) { i = skip_string(s, n, j, f); TPUSH('S', i, i); continue; }
+            }
+            TPUSH('N', i, j); i = j; continue;
+        }
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if ((c == ')' || c == ']' || c == '}') && depth) depth--;
+        TPUSH('O', i, i + 1); i++;
+    }
+#undef TPUSH
+    *count = nt; return t;
+}
+static int tok_is(const char *s, sp_tok *k, const char *w) { return k->t == 'N' && k->b - k->a == strlen(w) && !memcmp(s + k->a, w, k->b - k->a); }
+static int tok_op(const char *s, sp_tok *k, char c) { return k->t == 'O' && s[k->a] == c; }
+static void import_module(const char *dir, const char *module) {   /* local(base/target.py); local(base/target/__init__.py) */
+    static const char *searches[] = { "tests", "exec/c", "exec/pipeline", "", 0 };
+    char *target = sp_xstrdup(module), *p; int b;
+    for (p = target; *p; p++) if (*p == '.') *p = '/';
+    for (b = -1; b < 0 || searches[b]; b++) {
+        const char *base = b < 0 ? dir : searches[b]; char *bd = *base ? sp_pjoin(ROOT, base) : sp_xstrdup(ROOT), *x, *y;
+        x = sp_cat(target, ".py"); y = sp_pjoin(bd, x); local(y); free(x); free(y);
+        x = sp_cat(target, "/__init__.py"); y = sp_pjoin(bd, x); local(y); free(x); free(y);
+        free(bd);
+    }
+    free(target);
+}
+static void scan_python(const char *dir, const char *s, size_t n) {
+    int nt, i, j; sp_tok *t = py_tokens(s, n, &nt);
+    for (i = 0; i < nt; i++) {
+        if (!tok_is(s, &t[i], "import")) continue;
+        /* ImportFrom: 'from' [dots] [dotted name] 'import' */
+        j = i - 1;
+        while (j >= 0 && (tok_op(s, &t[j], '.') || (t[j].t == 'N' && !tok_is(s, &t[j], "from")))) j--;
+        if (j >= 0 && tok_is(s, &t[j], "from")) {
+            sp_buf m = {0, 0, 0}; int k;
+            for (k = j + 1; k < i; k++) if (t[k].t == 'N') { if (m.n) sp_bch(&m, '.'); sp_bput(&m, s + t[k].a, t[k].b - t[k].a); }
+            if (m.n) import_module(dir, m.s);
+            free(m.s); continue;
+        }
+        /* Import: dotted [as NAME] (, dotted [as NAME])* */
+        j = i + 1;
+        while (j < nt && t[j].t == 'N') {
+            sp_buf m = {0, 0, 0};
+            sp_bput(&m, s + t[j].a, t[j].b - t[j].a); j++;
+            while (j + 1 < nt && tok_op(s, &t[j], '.') && t[j + 1].t == 'N') { sp_bch(&m, '.'); sp_bput(&m, s + t[j + 1].a, t[j + 1].b - t[j + 1].a); j += 2; }
+            import_module(dir, m.s); free(m.s);
+            if (j + 1 < nt && tok_is(s, &t[j], "as") && t[j + 1].t == 'N') j += 2;
+            if (j < nt && tok_op(s, &t[j], ',')) j++; else break;
+        }
+    }
+    /* literal tests paths: ['"](tests/[A-Za-z0-9_./-]+)['"] */
+    { size_t p = 0;
+      while (p < n) {
+          if ((s[p] == '\'' || s[p] == '"') && p + 6 < n && !memcmp(s + p + 1, "tests/", 6)) {
+              size_t e = p + 7; while (e < n && isrunc((unsigned char)s[e])) e++;
+              if (e > p + 7 && e < n && (s[e] == '\'' || s[e] == '"')) {
+                  char *ref = sp_xstrndup(s + p + 1, e - p - 1), *c = sp_pjoin(ROOT, ref); local(c); free(c); free(ref); p = e + 1; continue;
+              }
+          }
+          p++;
+      } }
+    free(t);
+}
+static void scan_shell(const char *dir, const char *s, size_t n) {
+    /* \$(?:\{)?(R|ROOT|_LIB_R|here)(?:\})?(?:["'])?/([A-Za-z0-9_./-]+) */
+    static const char *vars[] = { "R", "ROOT", "_LIB_R", "here", 0 };
+    size_t p = 0;
+    while (p < n) {
+        int done = 0, br, v, cb, qt;
+        if (s[p] != '$') { p++; continue; }
+        for (br = 1; br >= 0 && !done; br--) {
+            size_t q = p + 1;
+            if (br) { if (q < n && s[q] == '{') q++; else continue; }
+            for (v = 0; vars[v] && !done; v++) {
+                size_t l = strlen(vars[v]), q2;
+                if (q + l > n || memcmp(s + q, vars[v], l)) continue;
+                for (cb = 1; cb >= 0 && !done; cb--) {
+                    q2 = q + l;
+                    if (cb) { if (q2 < n && s[q2] == '}') q2++; else continue; }
+                    for (qt = 1; qt >= 0 && !done; qt--) {
+                        size_t q3 = q2, e;
+                        if (qt) { if (q3 < n && (s[q3] == '"' || s[q3] == '\'')) q3++; else continue; }
+                        if (q3 >= n || s[q3] != '/') continue;
+                        e = q3 + 1; while (e < n && isrunc((unsigned char)s[e])) e++;
+                        if (e == q3 + 1) continue;
+                        { char *ref = sp_xstrndup(s + q3 + 1, e - q3 - 1), *base = !strcmp(vars[v], "here") ? sp_pjoin(ROOT, dir) : sp_xstrdup(ROOT), *c = sp_pjoin(base, ref);
+                          local(c); free(c); free(base); free(ref); }
+                        p = e; done = 1;
+                    }
+                }
+            }
+        }
+        if (!done) p++;
+    }
+}
+static void scan_c(const char *dir, const char *s, size_t n) {
+    /* ^\s*#\s*include\s*"([^"\n]+)"  (re.M) */
+    size_t p = 0;
+    while (p < n) {
+        size_t q = p, e;
+        if (!(p == 0 || s[p - 1] == '\n')) { p++; continue; }
+        while (q < n && ispyws((unsigned char)s[q])) q++;
+        if (q < n && s[q] == '#') {
+            q++; while (q < n && ispyws((unsigned char)s[q])) q++;
+            if (q + 7 <= n && !memcmp(s + q, "include", 7)) {
+                q += 7; while (q < n && ispyws((unsigned char)s[q])) q++;
+                if (q < n && s[q] == '"') {
+                    e = q + 1; while (e < n && s[e] != '"' && s[e] != '\n') e++;
+                    if (e > q + 1 && e < n && s[e] == '"') {
+                        char *ref = sp_xstrndup(s + q + 1, e - q - 1), *base = sp_pjoin(ROOT, dir), *c;
+                        if (ref[0] == '/') c = sp_ppath(ref); else c = sp_pjoin(base, ref);
+                        local(c); free(c); free(base); free(ref); p = e + 1; continue;
+                    }
+                }
+            }
+        }
+        p++;
+    }
+}
+static int actor_find(const char *name) { int i; for (i = 0; i < NACT; i++) if (!strcmp(ACT[i].name, name)) return i; return -1; }
+static int actcmp(const void *a, const void *b) { return strcmp(((const sp_actor *)a)->name, ((const sp_actor *)b)->name); }
+static void actor_closure_(const char *const *seeds) {
+    sp_vec pending = {0, 0, 0}; int i;
+    for (i = 0; i < NACT; i++) { int k; for (k = 0; k < ACT[i].kids.n; k++) free(ACT[i].kids.v[k]); free(ACT[i].kids.v); free(ACT[i].name); free(ACT[i].digest); }
+    NACT = 0;
+    for (i = 0; seeds[i]; i++) vpush(&pending, sp_xstrdup(seeds[i]));
+    while (pending.n) {
+        char *name = pending.v[--pending.n], *path, hex[65], *dir, *slash, *base; const char *suf; size_t n; char *data; sp_actor *a;
+        if (actor_find(name) >= 0) { free(name); continue; }
+        path = sp_pjoin(ROOT, name); data = sp_must_read(path, &n);
+        if (NACT == CAPACT) { CAPACT = CAPACT ? CAPACT * 2 : 32; ACT = realloc(ACT, (size_t)CAPACT * sizeof *ACT); }
+        a = &ACT[NACT++]; memset(a, 0, sizeof *a); a->name = name;
+        cx_sha256_hex(data, n, hex); a->digest = sp_xstrdup(hex);
+        KIDS = &a->kids;
+        if (sp_utf8_check(data, n)) sp_crash();          /* text=data.decode() */
+        dir = sp_xstrdup(name); slash = strrchr(dir, '/'); if (slash) *slash = 0; else { free(dir); dir = sp_xstrdup("."); }
+        base = strrchr(path, '/'); base = base ? base + 1 : path;
+        suf = suffix_of(base);
+        if (!strcmp(suf, ".py")) scan_python(strcmp(dir, ".") ? dir : "", data, n);
+        else if (!strcmp(suf, ".sh") || !strcmp(base, "bound")) scan_shell(dir, data, n);
+        else if (!strcmp(suf, ".c") || !strcmp(suf, ".h")) scan_c(dir, data, n);
+        a = &ACT[NACT - 1];
+        if (a->kids.n) qsort(a->kids.v, (size_t)a->kids.n, sizeof *a->kids.v, strpcmp);
+        for (i = 0; i < a->kids.n; i++) vpush(&pending, sp_xstrdup(a->kids.v[i]));
+        free(dir); free(path); free(data);
+    }
+    free(pending.v);
+    if (NACT) qsort(ACT, (size_t)NACT, sizeof *ACT, actcmp);
+}
+static sp_json *actors_json(void) { sp_json *o = sp_jnew(SP_JOBJ); int i; for (i = 0; i < NACT; i++) sp_oset(o, ACT[i].name, sp_jstr(ACT[i].digest)); return o; }
+static sp_json *edges_json(void) {
+    sp_json *o = sp_jnew(SP_JOBJ); int i, k;
+    for (i = 0; i < NACT; i++) { sp_json *l = sp_jnew(SP_JARR); for (k = 0; k < ACT[i].kids.n; k++) sp_apush(l, sp_jstr(ACT[i].kids.v[k])); sp_oset(o, ACT[i].name, l); }
+    return o;
+}
+/* actor_closure(ROOT, SEEDS) -> (actors, edges): two dicts, sorted by name; SEEDS ends with 0.  A read or decode
+   failure, or a reference that escapes ROOT, raises (sp_raise_line: the hook, if set, sees it). */
+void sp_actor_closure(const char *const *seeds, sp_json **actors, sp_json **edges) {
+    actor_closure_(seeds); *actors = actors_json(); *edges = edges_json();
+}
+
+/* ---------- provenance.sp_verify(path): 0 + record, or -1 with SystemExit('product freshness: PATH: E') ---------- */
+static char *SRC_NOW;                              /* the last sp_source_digest() */
+static int verify_inner(const char *path, sp_json **rec) {
+    size_t n; char *txt, *bj = sp_cat(path, ".build.json"), hex[65]; sp_json *r, *v; struct stat s; double d;
+    txt = sp_read_text(bj, &n); free(bj);
+    if (!txt) return -1;
+    r = sp_jloads(txt, n); free(txt);
+    if (!r) return -1;
+    if (!(v = sp_getitem(r, "schema"))) return -1;
+    if (!(sp_numval(v, &d) && d == 1)) return sp_throw_("ValueError", "product inputs changed; rebuild with make com");
+    if (!(v = sp_getitem(r, "sources_sha256"))) return -1;
+    free(SRC_NOW); SRC_NOW = sp_source_digest();
+    if (!(v->t == SP_JSTR && !strcmp(v->s, SRC_NOW) && v->sn == strlen(SRC_NOW))) return sp_throw_("ValueError", "product inputs changed; rebuild with make com");
+    if (!(v = sp_getitem(r, "artifact_sha256"))) return -1;
+    if (sp_sha_file(path, hex)) return -1;
+    if (!(v->t == SP_JSTR && v->sn == 64 && !strcmp(v->s, hex))) return sp_throw_("ValueError", "artifact differs from its build record");
+    if (!(v = sp_getitem(r, "bytes"))) return -1;
+    if (stat(path, &s)) return sp_throw_os(errno, path);
+    if (!(sp_numval(v, &d) && d == (double)s.st_size && (v->t != SP_JINT || strtod(v->s, 0) == (double)s.st_size))) return sp_throw_("ValueError", "artifact differs from its build record");
+    *rec = r; return 0;
+}
+int sp_verify(const char *path, sp_json **rec) {
+    if (verify_inner(path, rec) == 0) return 0;
+    if (sp_is_os() || sp_is_value() || !strcmp(EXC, "KeyError") || !strcmp(EXC, "TypeError")) {
+        sp_buf m = {0, 0, 0}; sp_bstr(&m, "product freshness: "); sp_bstr(&m, path); sp_bstr(&m, ": "); sp_bstr(&m, sp_bget(&EMSG));
+        sp_throw_("SystemExit", m.s); free(m.s);
+    }
+    return -1;
+}
+
+/* ---------- subprocesses (cwd=ROOT) ---------- */
+double sp_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static int tmpfd(void) {
+    const char *d = getenv("TMPDIR"); char *p; int fd;
+    if (!d || !*d) d = "/tmp";
+    p = sp_cat(d, "/seedprep-capXXXXXX"); fd = mkstemp(p);
+    if (fd < 0) { free(p); p = sp_xstrdup("/tmp/seedprep-capXXXXXX"); fd = mkstemp(p); }
+    if (fd < 0) sp_raise_line("OSError: cannot capture a child's output");
+    unlink(p); free(p); return fd;
+}
+/* spawn ARGV in ROOT; stdout captured into *OUT (when OUT), stderr captured into *ERR (when ERR) or inherited.
+   Returns the Popen returncode (negative N for signal N); -1000 on timeout; raises when it cannot start. */
+int sp_spawn(char **argv, double limit, char **out, size_t *outn, char **err, size_t *errn) {
+    int of = tmpfd(), ef = err ? tmpfd() : -1, pp[2], e = 0, st = 0, rc; pid_t pid, w; ssize_t k; double start;
+    fflush(stdout); fflush(stderr);
+    if (pipe(pp)) sp_raise_line("OSError: pipe failed");
+    fcntl(pp[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) sp_raise_line("OSError: fork failed");
+    if (pid == 0) {
+        setpgid(0, 0); close(pp[0]);
+        dup2(of, 1); if (ef >= 0) dup2(ef, 2); close(of); if (ef >= 0) close(ef);
+        if (chdir(ROOT)) { e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127); }
+        execvp(argv[0], argv);
+        e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127);
+    }
+    close(pp[1]);
+    k = read(pp[0], &e, sizeof e); close(pp[0]);
+    if (k == (ssize_t)sizeof e) {                  /* the child never ran: Popen raises */
+        waitpid(pid, &st, 0); close(of); if (ef >= 0) close(ef);
+        if (SPAWN_SOFT) return -2000;
+        sp_throw_os(e, argv[0]); sp_crash();
+    }
+    start = sp_now();
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st); break; }
+        if (w < 0) sp_raise_line("ChildProcessError: waitpid failed");
+        if (sp_now() - start >= limit) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = -1000; break; }
+        usleep(10000);
+    }
+    {   sp_buf b = {0, 0, 0}; char tmp[65536];
+        if (out) { lseek(of, 0, SEEK_SET); while ((k = read(of, tmp, sizeof tmp)) > 0) sp_bput(&b, tmp, (size_t)k); *out = b.s ? b.s : sp_xstrdup(""); *outn = b.n; }
+        close(of);
+        if (ef >= 0) { sp_buf c = {0, 0, 0}; lseek(ef, 0, SEEK_SET); while ((k = read(ef, tmp, sizeof tmp)) > 0) sp_bput(&c, tmp, (size_t)k); *err = c.s ? c.s : sp_xstrdup(""); *errn = c.n; close(ef); }
+    }
+    return rc;
+}
+/* execvpe(FILE, ARGV, ENVP): the cx runtime's setenv does not reach execvp's environment, so the search is here */
+static void exec_env(char **argv, char **envp) {
+    const char *path = getenv("PATH"), *p, *e; int err = ENOENT;
+    if (strchr(argv[0], '/')) { execve(argv[0], argv, envp); return; }
+    if (!path) path = "/bin:/usr/bin";
+    for (p = path; ; p = e + 1) {
+        sp_buf c = {0, 0, 0};
+        e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        if (e > p) { sp_bput(&c, p, (size_t)(e - p)); sp_bch(&c, '/'); }
+        sp_bstr(&c, argv[0]);
+        execve(c.s, argv, envp);
+        if (errno != ENOENT && errno != ENOTDIR) err = errno;
+        free(c.s);
+        if (!*e) break;
+    }
+    errno = err;
+}
+/* subprocess.run(ARGV, cwd=ROOT[, stdout=OUTFD][, stderr=ERRFD][, env=dict(os.environ, **SETVARS)]).returncode: no
+   timeout, no capture; OUTFD/ERRFD -1 inherit, ERRFD -2 is stderr=STDOUT; SETVARS 0 or {"K=V", ..., 0}.  The child
+   keeps the caller's process group.  A program that cannot start raises its OSError. */
+int sp_call(char **argv, int outfd, int errfd, char *const *setvars) {
+    int pp[2], e = 0, st = 0, n = 0, i, j; pid_t pid; ssize_t k; extern char **environ; char **envp;
+    for (i = 0; environ[i]; i++) n++;
+    for (j = 0; setvars && setvars[j]; j++) n++;
+    envp = sp_xmalloc((size_t)(n + 1) * sizeof *envp); n = 0;
+    for (i = 0; environ[i]; i++) {
+        int replaced = 0; const char *eq = strchr(environ[i], '=');
+        for (j = 0; eq && setvars && setvars[j]; j++)
+            if (!strncmp(setvars[j], environ[i], (size_t)(eq - environ[i]) + 1)) replaced = 1;
+        if (!replaced) envp[n++] = environ[i];
+    }
+    for (j = 0; setvars && setvars[j]; j++) envp[n++] = setvars[j];
+    envp[n] = 0;
+    fflush(stdout); fflush(stderr);
+    if (pipe(pp)) sp_raise_line("OSError: pipe failed");
+    fcntl(pp[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) sp_raise_line("OSError: fork failed");
+    if (pid == 0) {
+        close(pp[0]);
+        if (outfd >= 0) dup2(outfd, 1);
+        if (errfd == -2) dup2(1, 2); else if (errfd >= 0) dup2(errfd, 2);
+        if (chdir(ROOT)) { e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127); }
+        exec_env(argv, envp);
+        e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127);
+    }
+    close(pp[1]); free(envp);
+    k = read(pp[0], &e, sizeof e); close(pp[0]);
+    if (k == (ssize_t)sizeof e) { waitpid(pid, &st, 0); sp_throw_os(e, argv[0]); sp_crash(); }
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) sp_raise_line("ChildProcessError: waitpid failed");
+    return WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+}
+/* ---------- provenance.write(path, expected) ---------- */
+void sp_prov_write(const char *path, const char *expected) {
+    char *cur = sp_source_digest(), hex[65], *out = 0, *dest, *tmp; size_t on = 0; sp_json *rec, *set; struct stat s; int rc, i;
+    char *git[] = {"git", "rev-parse", "HEAD", 0}; sp_buf j = {0, 0, 0}; extern char **environ;
+    if (strcmp(cur, expected)) sp_raise_line("product inputs changed during packaging");   /* SystemExit(str): rc 1 */
+    rec = sp_jnew(SP_JOBJ);
+    sp_oset(rec, "schema", sp_jnew(SP_JINT)); rec->v[0]->s = sp_xstrdup("1");
+    sp_oset(rec, "sources_sha256", sp_jstr(cur));
+    if (sp_sha_file(path, hex)) sp_crash();
+    sp_oset(rec, "artifact_sha256", sp_jstr(hex));
+    if (stat(path, &s)) { sp_throw_os(errno, path); sp_crash(); }
+    { sp_json *b = sp_jnew(SP_JINT); char t[32]; snprintf(t, sizeof t, "%lld", (long long)s.st_size); b->s = sp_xstrdup(t); sp_oset(rec, "bytes", b); }
+    rc = sp_spawn(git, 5, &out, &on, 0, 0);
+    if (rc == -1000) sp_raise_line("subprocess.TimeoutExpired: Command '['git', 'rev-parse', 'HEAD']' timed out after 5 seconds");
+    if (rc) {
+        sp_buf m = {0, 0, 0}; char t[64];
+        if (rc < 0) snprintf(t, sizeof t, "died with <Signals.%s: %d>.", rc == -9 ? "SIGKILL" : rc == -15 ? "SIGTERM" : "SIG?", -rc);
+        else snprintf(t, sizeof t, "returned non-zero exit status %d.", rc);
+        sp_bstr(&m, "subprocess.CalledProcessError: Command '"); sp_bargs(&m, git, 1); sp_bstr(&m, "' "); sp_bstr(&m, t); sp_raise_line(m.s);
+    }
+    if (sp_utf8_check(out, on)) sp_crash();
+    { size_t a = 0, b = on; while (a < b && ispyws((unsigned char)out[a])) a++; while (b > a && ispyws((unsigned char)out[b - 1])) b--;
+      sp_oset(rec, "commit", sp_jstrn(out + a, b - a)); }
+    set = sp_jnew(SP_JOBJ);
+    for (i = 0; environ[i]; i++) {
+        char *eq = strchr(environ[i], '=');
+        if (!eq) continue;
+        if (!strncmp(environ[i], "E1", 2) || !strncmp(environ[i], "E2", 2) || !strncmp(environ[i], "E3", 2) || !strncmp(environ[i], "E4", 2)
+            || !strncmp(environ[i], "PYTHONHASHSEED", 14)) {
+            if ((size_t)(eq - environ[i]) < 2 || (!strncmp(environ[i], "PYTHONHASHSEED", 14) && eq - environ[i] < 14)) continue;
+            sp_osetn(set, environ[i], (size_t)(eq - environ[i]), sp_jstr(eq + 1));
+        }
+    }
+    sp_oset(rec, "settings", set);
+    sp_jdump(&j, rec, 1, 1); sp_bch(&j, '\n');
+    dest = sp_cat(path, ".build.json"); tmp = sp_cat(dest, ".tmp");
+    if (cx_write(tmp, j.s, j.n)) { sp_throw_os(errno ? errno : EIO, tmp); sp_crash(); }
+    if (rename(tmp, dest)) { sp_throw_os(errno, tmp); sp_crash(); }
+    free(j.s); free(dest); free(tmp); free(cur); free(out);
+}
+
+/* ---------- sp_verify_cached_file(path, expected, executable) ---------- */
+int sp_verify_cached_file(const char *path, sp_json *h, int executable) {
+    struct stat s; char hex[65]; sp_buf m = {0, 0, 0}; size_t i; int ok = 1;
+    if (lstat(path, &s)) return sp_throw_os(errno, path);
+    if (!S_ISREG(s.st_mode) || s.st_size == 0) { sp_bstr(&m, "cached artifact is not a nonempty regular file: "); sp_bstr(&m, path); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+    if (h->t != SP_JSTR || h->sn != 64) ok = 0;
+    else for (i = 0; i < 64; i++) if (!((h->s[i] >= '0' && h->s[i] <= '9') || (h->s[i] >= 'a' && h->s[i] <= 'f'))) ok = 0;
+    if (!ok) { sp_bstr(&m, "cached artifact has invalid digest: "); sp_bstr(&m, path); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+    if (executable && (!(s.st_mode & 0111) || access(path, X_OK) != 0)) { sp_bstr(&m, "cached artifact is not executable: "); sp_bstr(&m, path); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+    if (sp_sha_file(path, hex)) return -1;
+    if (strcmp(hex, h->s)) { sp_bstr(&m, "cached artifact SHA mismatch: "); sp_bstr(&m, path); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+    return 0;
+}
+
+/* ---------- tempfile ---------- */
+char *sp_gettempdir(void) {
+    static const char *envs[] = { "TMPDIR", "TEMP", "TMP", 0 }, *dflt[] = { "/tmp", "/var/tmp", "/usr/tmp", 0 };
+    int i; struct stat s;
+    for (i = 0; i < 7; i++) {
+        const char *d = i < 3 ? getenv(envs[i]) : i < 6 ? dflt[i - 3] : ".";
+        char *a;
+        if (!d || !*d) continue;
+        a = sp_abspath(d);
+        if (stat(a, &s) == 0 && S_ISDIR(s.st_mode) && access(a, W_OK | X_OK) == 0) return a;
+        free(a);
+    }
+    sp_raise_line("FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp']");
+    return 0;
+}
+const char *sp_mkdtemp_py(const char *dir, const char *prefix) {   /* tempfile.mkdtemp(prefix, dir): an absolute name, the scratch */
+    static const char al[] = "abcdefghijklmnopqrstuvwxyz0123456789_"; int tries, k; unsigned char r[8]; FILE *u = fopen("/dev/urandom", "rb");
+    char *base = sp_abspath(dir);
+    for (tries = 0; tries < 100; tries++) {
+        sp_buf p = {0, 0, 0};
+        if (!u || fread(r, 1, 8, u) != 8) for (k = 0; k < 8; k++) r[k] = (unsigned char)(rand() ^ (int)getpid() ^ tries);
+        sp_bstr(&p, base); if (strcmp(base, "/")) sp_bch(&p, '/'); sp_bstr(&p, prefix);
+        for (k = 0; k < 8; k++) sp_bch(&p, al[r[k] % 37]);
+        if (mkdir(p.s, 0700) == 0) { snprintf(TD, sizeof TD, "%s", p.s); free(p.s); if (u) fclose(u); free(base); return TD; }
+        if (errno != EEXIST) { sp_throw_os(errno, p.s); sp_crash(); }
+        free(p.s);
+    }
+    sp_raise_line("FileExistsError: [Errno 17] No usable temporary directory name found"); return 0;
+}
+void sp_mkdirs(const char *p) {                /* Path.mkdir(parents=True, exist_ok=True) */
+    struct stat s; char *c = sp_xstrdup(p), *q;
+    for (q = c + 1; *q; q++) if (*q == '/') { *q = 0; if (stat(c, &s) != 0) mkdir(c, 0777); *q = '/'; }
+    if (mkdir(c, 0777) != 0) {
+        int e = errno;
+        if (!(e == EEXIST && stat(c, &s) == 0 && S_ISDIR(s.st_mode))) { sp_throw_os(e, c); sp_crash(); }
+    }
+    free(c);
+}
+
+void sp_find_python(void) {                  /* sys.executable: the python3 the gate's PATH names */
+    const char *path = getenv("PATH"), *p, *e; char cand[PATHN];
+    snprintf(PY, sizeof PY, "python3");
+    for (p = path ? path : ""; *p; p = *e ? e + 1 : e) {
+        size_t l; e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        l = (size_t)(e - p);
+        snprintf(cand, sizeof cand, "%.*s/python3", (int)(l ? l : 1), l ? p : ".");
+        if (access(cand, X_OK) == 0 && is_file_abs(cand)) {
+            if (cand[0] != '/') { char *a = sp_abspath(cand); snprintf(PY, sizeof PY, "%s", a); free(a); return; }
+            snprintf(PY, sizeof PY, "%s", cand); return;
+        }
+    }
+}
+char *sp_uname_field(const char *flag) {
+    char *argv[] = {"uname", (char *)flag, 0}, *o = 0; size_t n = 0;
+    if (sp_spawn(argv, 5, &o, &n, 0, 0) != 0) sp_raise_line("OSError: uname failed");
+    while (n && (o[n - 1] == '\n' || o[n - 1] == '\r')) o[--n] = 0;
+    return o;
+}
+
+
+/* ---------- process state: ROOT, sys.executable, shutil.which, the cache lock ---------- */
+/* ROOT = Path(FILE).resolve().parents[1] for the caller's __FILE__ (relative to the working directory: every caller
+   runs from the repository root); sys.executable = the first python3 on PATH */
+void sp_init(const char *file) {
+    char here[PATHN], *slash;
+    snprintf(here, sizeof here, "%s", file);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char *t = sp_cat(here, "/.."), *r = sp_realpath_ns(t); snprintf(ROOT, sizeof ROOT, "%s", r); free(t); free(r); }
+    sp_find_python();
+}
+const char *sp_root(void) { return ROOT; }
+const char *sp_python(void) { return PY; }
+/* shutil.which(NAME) for a bare NAME: DIR/NAME of the first PATH entry that exists, is executable and is not a
+   directory (spelled as PATH spells it); 0 when none */
+char *sp_which(const char *name) {
+    const char *path = getenv("PATH"), *p, *e; struct stat s;
+    if (!path) path = "/bin:/usr/bin";
+    for (p = path; ; p = e + 1) {
+        sp_buf c = {0, 0, 0};
+        e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        if (e > p) { sp_bput(&c, p, (size_t)(e - p)); if (c.s[c.n - 1] != '/') sp_bch(&c, '/'); }
+        sp_bstr(&c, name);
+        if (stat(c.s, &s) == 0 && access(c.s, X_OK) == 0 && !S_ISDIR(s.st_mode)) return c.s;
+        free(c.s);
+        if (!*e) break;
+    }
+    return 0;
+}
+/* with Path(PATH).open('a') as lock: fcntl.flock(lock, LOCK_EX) -- held until exit */
+void sp_lock(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) { sp_throw_os(errno, path); sp_crash(); }
+    while (flock(fd, LOCK_EX) != 0) if (errno != EINTR) { sp_throw_os(errno, path); sp_crash(); }
+}
+
+/* ---------- checklib.cc_read_set_identity(compiler, [source], flags, cwd=ROOT, env=os.environ) ---------- */
+static int ccdeps_fail(const char *what) { sp_buf m = {0, 0, 0}; sp_bstr(&m, what); sp_bstr(&m, " in cc Make dependencies"); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+/* parse_cc_make_dependencies(text): the names, or -1 with its ValueError */
+static int ccdeps_parse(const char *s, size_t n, sp_vec *names) {
+    sp_buf w = {0, 0, 0}; size_t i = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\'') return ccdeps_fail("unsupported quote");
+        if (c == '\\') {
+            char f;
+            if (i + 1 == n) return ccdeps_fail("unpaired escape");
+            f = s[i + 1];
+            if (f == '\n') { if (w.n) { vpush(names, sp_xstrndup(w.s, w.n)); w.n = 0; } }
+            else if (f == ' ' || f == '\t' || f == '#') sp_bch(&w, f);
+            else return ccdeps_fail("unsupported escape");
+            i += 2; continue;
+        }
+        if (c == '$') {
+            if (i + 1 >= n || s[i + 1] != '$') return ccdeps_fail("unsupported dollar expression");
+            sp_bch(&w, '$'); i += 2; continue;
+        }
+        if (c == '#' || c == ':' || c == '\r' || c == 0) return ccdeps_fail("unsupported syntax");
+        if (ispyws(c)) { if (w.n) { vpush(names, sp_xstrndup(w.s, w.n)); w.n = 0; } }
+        else sp_bch(&w, c);
+        i++;
+    }
+    if (w.n) vpush(names, sp_xstrndup(w.s, w.n));
+    free(w.s); return 0;
+}
+static int resolve_strict(const char *p, char **out) {   /* str(Path(p).resolve(strict=True)) */
+    char buf[PATHN];
+    if (!realpath(p, buf)) return sp_throw_os(errno, p);
+    *out = sp_xstrdup(buf); return 0;
+}
+/* the read-set dict for one translation unit SOURCE (relative to ROOT) compiled with FLAGS (0-terminated); 0 with
+   OUT set, or -1 with ValueError / an OSError / subprocess.TimeoutExpired as Python raises them */
+int sp_cc_read_set(const char *compiler, const char *source, char *const *flags, sp_json **out) {
+    char *comp, **argv, *o = 0, *e = 0, hex[65], *rsrc, *src_abs; size_t on = 0, en = 0; int nf, k = 0, rc, i, seen = 0;
+    sp_json *cmd, *cmds, *files, *res; sp_vec names = {0, 0, 0}; const char *prefix = "__checklib_readset__:";
+    if (resolve_strict(compiler, &comp)) return -1;
+    for (nf = 0; flags[nf]; nf++) {}
+    argv = sp_xmalloc((size_t)(nf + 7) * sizeof *argv);
+    argv[k++] = comp; for (i = 0; i < nf; i++) argv[k++] = flags[i];
+    argv[k++] = "-M"; argv[k++] = "-MT"; argv[k++] = "__checklib_readset__"; argv[k++] = (char *)source; argv[k] = 0;
+    cmd = sp_jnew(SP_JARR); for (i = 0; argv[i]; i++) sp_apush(cmd, sp_jstr(argv[i]));
+    rc = sp_spawn(argv, 55, &o, &on, &e, &en);
+    if (rc == -1000) {
+        sp_buf m = {0, 0, 0}; sp_bstr(&m, "Command '"); sp_bargs(&m, argv, 1); sp_bstr(&m, "' timed out after 55 seconds");
+        sp_throw_("subprocess.TimeoutExpired", m.s); free(m.s); return -1;
+    }
+    {   /* text=True: universal newlines */
+        size_t a, b = 0;
+        for (a = 0; a < on; a++) { if (o[a] == '\r') { o[b++] = '\n'; if (a + 1 < on && o[a + 1] == '\n') a++; } else o[b++] = o[a]; }
+        on = b; o[on] = 0;
+        for (a = 0, b = 0; a < en; a++) { if (e[a] == '\r') { e[b++] = '\n'; if (a + 1 < en && e[a + 1] == '\n') a++; } else e[b++] = e[a]; }
+        en = b; e[en] = 0;
+    }
+    if (rc) {
+        sp_buf m = {0, 0, 0}; char t[48]; size_t from = 0, cps = 0, a;
+        for (a = en; a > 0; a--) if (((unsigned char)e[a - 1] & 0xC0) != 0x80 && ++cps == 1000) { from = a - 1; break; }
+        snprintf(t, sizeof t, "cc dependency scan failed rc=%d: ", rc); sp_bstr(&m, t); sp_bput(&m, e + from, en - from);
+        sp_throw_("ValueError", m.s); free(m.s); return -1;
+    }
+    if (strncmp(o, prefix, strlen(prefix))) return sp_throw_("ValueError", "cc dependency scan has no expected target");
+    if (ccdeps_parse(o + strlen(prefix), on - strlen(prefix), &names)) return -1;
+    if (!names.n) return sp_throw_("ValueError", "cc dependency scan returned an empty read set");
+    src_abs = source[0] == '/' ? sp_ppath(source) : sp_pjoin(ROOT, source);
+    if (resolve_strict(src_abs, &rsrc)) return -1;
+    files = sp_jnew(SP_JOBJ);
+    for (i = 0; i < names.n; i++) {
+        char *path = names.v[i][0] == '/' ? sp_ppath(names.v[i]) : sp_pjoin(ROOT, names.v[i]), *real; struct stat s; sp_json *f;
+        if (resolve_strict(path, &real)) return -1;
+        if (stat(real, &s)) return sp_throw_os(errno, real);
+        if (!S_ISREG(s.st_mode)) { sp_buf m = {0, 0, 0}; sp_bstr(&m, "cc dependency is not a regular file: "); sp_bstr(&m, real); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+        if (sp_sha_file(real, hex)) return -1;
+        f = sp_jnew(SP_JOBJ); sp_oset(f, "resolved", sp_jstr(real)); sp_oset(f, "sha256", sp_jstr(hex));
+        sp_oset(files, path, f);
+        if (!strcmp(real, rsrc)) seen = 1;
+        free(path); free(real);
+    }
+    if (!seen) { sp_buf m = {0, 0, 0}; sp_bstr(&m, "cc dependency scan omitted its source: "); sp_bstr(&m, source); sp_throw_("ValueError", m.s); free(m.s); return -1; }
+    if (sp_sha_file(comp, hex)) return -1;
+    res = sp_jnew(SP_JOBJ);
+    sp_oset(res, "schema", sp_jstr("cc-header-readset-v1"));
+    sp_oset(res, "compiler", sp_jstr(comp));
+    sp_oset(res, "compiler_sha256", sp_jstr(hex));
+    cmds = sp_jnew(SP_JARR); sp_apush(cmds, cmd); sp_oset(res, "commands", cmds);
+    sp_oset(res, "files", files);
+    free(o); free(e); free(argv); free(rsrc); free(src_abs);
+    *out = res; return 0;
+}
+
+/* ---------- valid()'s try body, shared ---------- */
+/* provenance.verify(CACHE/manifest.json); d = json.loads(read_text()); d['basis'] != BASIS or set(d['outputs']) !=
+   REQUIRED -> ValueError(MISMATCH); for n, h in d['outputs'].items(): verify_cached_file(CACHE/n, h, executable=n
+   in EXECS) (EXECS 0: every output).  0, or -1 with the exception. */
+int sp_valid_manifest(const char *cache, sp_json *basis, const char *const *required, const char *const *execs, const char *mismatch) {
+    char *m = sp_pjoin(cache, "manifest.json"), *txt; size_t n; sp_json *rec, *doc, *b, *outs; int i, k;
+    if (sp_verify(m, &rec)) { free(m); return -1; }
+    txt = sp_read_text(m, &n);
+    if (!txt) { free(m); return -1; }
+    free(m);
+    if (!(doc = sp_jloads(txt, n))) { free(txt); return -1; }
+    free(txt);
+    if (!(b = sp_getitem(doc, "basis"))) return -1;
+    if (!sp_jeq(b, basis)) return sp_throw_("ValueError", mismatch);
+    if (!(outs = sp_getitem(doc, "outputs"))) return -1;
+    {   /* set(doc['outputs']) != required */
+        int same = 1, cnt = 0;
+        if (outs->t == SP_JOBJ || outs->t == SP_JARR) {
+            if (outs->t == SP_JARR) for (i = 0; i < outs->n; i++) if (outs->v[i]->t == SP_JARR || outs->v[i]->t == SP_JOBJ) {
+                sp_buf e = {0, 0, 0}; sp_bstr(&e, "unhashable type: '"); sp_bstr(&e, sp_pytype(outs->v[i])); sp_bstr(&e, "'"); sp_throw_("TypeError", e.s); free(e.s); return -1; }
+            for (i = 0; i < outs->n; i++) {
+                const char *key = outs->t == SP_JOBJ ? outs->k[i] : outs->v[i]->s; size_t kl = outs->t == SP_JOBJ ? outs->kn[i] : outs->v[i]->sn; int hit = -1, dup = 0;
+                if (outs->t == SP_JARR && outs->v[i]->t != SP_JSTR) { same = 0; continue; }
+                for (k = 0; required[k]; k++) if (strlen(required[k]) == kl && !memcmp(required[k], key, kl)) hit = k;
+                if (hit < 0) { same = 0; continue; }
+                for (k = 0; k < i; k++) {
+                    const char *k2 = outs->t == SP_JOBJ ? outs->k[k] : outs->v[k]->s; size_t l2 = outs->t == SP_JOBJ ? outs->kn[k] : outs->v[k]->sn;
+                    if ((outs->t == SP_JOBJ || outs->v[k]->t == SP_JSTR) && l2 == kl && !memcmp(k2, key, kl)) dup = 1;
+                }
+                if (!dup) cnt++;
+            }
+            for (k = 0; required[k]; k++) {}   /* k = len(required) */
+            if (cnt != k) same = 0;
+        } else if (outs->t == SP_JSTR) same = 0;
+        else { sp_buf e = {0, 0, 0}; sp_bstr(&e, "'"); sp_bstr(&e, sp_pytype(outs)); sp_bstr(&e, "' object is not iterable"); sp_throw_("TypeError", e.s); free(e.s); return -1; }
+        if (!same) return sp_throw_("ValueError", mismatch);
+        if (outs->t == SP_JARR) { sp_throw_("AttributeError", "'list' object has no attribute 'items'"); sp_crash(); }
+    }
+    for (i = 0; i < outs->n; i++) {
+        char *nm = sp_xstrndup(outs->k[i], outs->kn[i]), *f = sp_pjoin(cache, nm); int ex = !execs;
+        if (execs) for (k = 0; execs[k]; k++) if (!strcmp(execs[k], nm)) ex = 1;
+        if (sp_verify_cached_file(f, outs->v[i], ex)) { free(nm); free(f); return -1; }
+        free(nm); free(f);
+    }
+    (void)rec; return 0;
+}
+
+/* ---------- argparse: [-h] [--prepare] [--require-cached] [OPT {CHOICE,...}] ---------- */
+typedef struct { const char *prog, *opt; const char *const *choices; } sp_args;
+static void usage(const sp_args *a, FILE *f) {
+    int i, w = (int)strlen("usage: ") + (int)strlen(a->prog) + 1;
+    fprintf(f, "usage: %s [-h] [--prepare] [--require-cached]\n%*s[%s {", a->prog, w, "", a->opt);
+    for (i = 0; a->choices[i]; i++) fprintf(f, "%s%s", i ? "," : "", a->choices[i]);
+    fprintf(f, "}]\n");
+}
+/* parser.error(MSG): usage and "PROG: error: MSG" on stderr, rc 2 */
+void sp_arg_error(const sp_args *a, const char *msg) { usage(a, stderr); fprintf(stderr, "%s: error: %s\n", a->prog, msg); exit(2); }
+static void help(const sp_args *a) {
+    int i;
+    usage(a, stdout);
+    printf("\noptions:\n  -h, --help            show this help message and exit\n  --prepare\n  --require-cached\n  %s {", a->opt);
+    for (i = 0; a->choices[i]; i++) printf("%s%s", i ? "," : "", a->choices[i]);
+    printf("}\n");
+    exit(0);
+}
+static int optional_like(const char *a) {          /* argparse classifies A as an option string ('O') */
+    if (a[0] != '-' || !a[1]) return 0;
+    if (!strcmp(a, "--")) return 0;
+    if (a[1] == '.' || (a[1] >= '0' && a[1] <= '9')) {   /* negative-number-like: positional (no such options here) */
+        const char *p = a + 1; int digits = 0, dot = 0;
+        for (; *p; p++) { if (*p >= '0' && *p <= '9') digits = 1; else if (*p == '.' && !dot) dot = 1; else break; }
+        if (!*p && digits) return 0;
+    }
+    if (strchr(a, ' ') && !strchr(a, '=')) return 0;
+    return 1;
+}
+/* parse_args(): PREP, REQ (0/1) and VAL (the choice, or 0) */
+void sp_parse_args(const sp_args *spec, int argc, char **argv, int *prep, int *req, const char **val) {
+    sp_buf extras = {0, 0, 0}; int i, only_pos = 0; const char *longs[5], *display[4];
+    longs[0] = "--help"; longs[1] = "--prepare"; longs[2] = "--require-cached"; longs[3] = spec->opt; longs[4] = 0;
+    display[0] = "-h/--help"; display[1] = "--prepare"; display[2] = "--require-cached"; display[3] = spec->opt;
+    *prep = *req = 0; *val = 0;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *eq, *explicit = 0; int opt = -1, k, matches = 0; char *head;
+        if (only_pos || !optional_like(a)) {
+            if (!strcmp(a, "--")) only_pos = 1;
+            if (extras.n) sp_bch(&extras, ' '); sp_bstr(&extras, a); continue;
+        }
+        eq = strchr(a, '=');
+        head = eq ? sp_xstrndup(a, (size_t)(eq - a)) : sp_xstrdup(a);
+        if (!strcmp(a, "-h")) opt = 0;
+        else for (k = 0; longs[k]; k++) if (!strcmp(a, longs[k])) opt = k;
+        if (opt < 0 && eq) {
+            if (!strcmp(head, "-h")) opt = 0;
+            else for (k = 0; longs[k]; k++) if (!strcmp(head, longs[k])) opt = k;
+            if (opt >= 0) explicit = eq + 1;
+        }
+        if (opt < 0 && a[1] == '-') {             /* unique prefix of a long option */
+            sp_buf m = {0, 0, 0};
+            for (k = 0; longs[k]; k++) if (!strncmp(longs[k], head, strlen(head))) { matches++; opt = k; }
+            if (matches > 1) {
+                sp_bstr(&m, "ambiguous option: "); sp_bstr(&m, a); sp_bstr(&m, " could match ");
+                for (k = 0, matches = 0; longs[k]; k++) if (!strncmp(longs[k], head, strlen(head))) { if (matches++) sp_bstr(&m, ", "); sp_bstr(&m, longs[k]); }
+                sp_arg_error(spec, m.s);
+            }
+            if (opt >= 0 && eq) explicit = eq + 1;
+        }
+        if (opt < 0 && a[1] != '-' && a[1] == 'h') {   /* -hX: short -h with attached text */
+            opt = 0;
+            if (a[2] == '-') explicit = a + 2;
+            else if (a[2] != '=') explicit = 0;    /* -hx, -hh: help */
+        }
+        free(head);
+        if (opt < 0) { if (extras.n) sp_bch(&extras, ' '); sp_bstr(&extras, a); continue; }
+        if (opt <= 2 && explicit) {
+            sp_buf m = {0, 0, 0}; sp_bstr(&m, "argument "); sp_bstr(&m, display[opt]); sp_bstr(&m, ": ignored explicit argument ");
+            sp_brepr(&m, explicit, strlen(explicit), 0); sp_arg_error(spec, m.s);
+        }
+        if (opt == 0) help(spec);
+        if (opt == 1) { *prep = 1; continue; }
+        if (opt == 2) { *req = 1; continue; }
+        {   const char *v = explicit; int s, ok = 0;
+            if (!v) {
+                if (i + 1 >= argc || optional_like(argv[i + 1]) || !strcmp(argv[i + 1], "--")) {
+                    sp_buf m = {0, 0, 0}; sp_bstr(&m, "argument "); sp_bstr(&m, spec->opt); sp_bstr(&m, ": expected one argument"); sp_arg_error(spec, m.s);
+                }
+                v = argv[++i];
+            }
+            for (s = 0; spec->choices[s]; s++) if (!strcmp(spec->choices[s], v)) ok = 1;
+            if (!ok) {
+                sp_buf m = {0, 0, 0};
+                sp_bstr(&m, "argument "); sp_bstr(&m, spec->opt); sp_bstr(&m, ": invalid choice: "); sp_brepr(&m, v, strlen(v), 0); sp_bstr(&m, " (choose from ");
+                for (s = 0; spec->choices[s]; s++) { if (s) sp_bstr(&m, ", "); sp_brepr(&m, spec->choices[s], strlen(spec->choices[s]), 0); }
+                sp_bstr(&m, ")"); sp_arg_error(spec, m.s);
+            }
+            *val = v;
+        }
+    }
+    if (extras.n) { sp_buf m = {0, 0, 0}; sp_bstr(&m, "unrecognized arguments: "); sp_bstr(&m, extras.s); sp_arg_error(spec, m.s); }
+}

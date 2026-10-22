@@ -1,0 +1,1282 @@
+#!/usr/bin/env -S unisacc.com -run
+/* check.cx -- bounded private qualification of the prune cell, no default compiler/cache/output directory.
+   Ported from exec/prune/check.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run exec/prune/check.cx -- [--output PRIVATE] [--probes PRIVATE_PROBES] [--calc CALC]
+                                                       [--ua PRIVATE_UA] [--start N] [--count N] [--build]
+          PRUNE_PART=0..3 PRUNE_UA=UA sh ./tests/cxbin exec/prune/check.cx          (the gate's four shards)
+   Without --probes, the fixed source/hand fixtures (exec/prune/fixtures.json) are compiled with UA -S -O0/1/2 into
+   OUTPUT/samples (plus examples/apps/calc.c -O0 as the calc sample).  PRUNE_PART selects one bounded group of ten
+   (start = 10*PART, count 10, --build); --ua or PRUNE_UA is required.  Arguments follow argparse (abbreviations,
+   `--opt=VAL`, -h; usage errors rc 2 with the .py's usage text, prog `check.py`).
+
+   What it does, step for step as the .py:
+     --build: exec/build/gen.py prune OUT/prune.json, exec/c/tbl.py, exec/c/net.py (the cell's own construction
+       tools, still Python: they are the subject under test, not this checker; run with the python3 on PATH, the
+       .py's sys.executable), cc -O2 exec/c/run.c -> executor, UA -O0 exec/c/run.c -> executor-unisacc, then both
+       executors --check-net TBL NET.  Every command runs with cwd ROOT, stdout/stderr captured, under its own limit
+       (10 s, 15 s for the two compiles, 5 s for samples) and inside one 53 s slice; rc 0 required.
+     samples: DIR/O[012].tape, then the other DIR/NAME.tape not starting with O, then calc; exactly 30, plus eight
+       common-domain controls (CR, underscores, wide, host-slot, bad-width, too-large, too-many-rows,
+       too-many-names), bss-leadingzeros and libraryfn written into OUTPUT; the missing-input fixture must be
+       refused by the executor with no stdout.
+     each sample of the slice: the referee prune_text(raw) (below) against executor+tbl, executor+net and
+       executor-unisacc+net, byte for byte; a control must come back unchanged.
+     OUTPUT/receipt-START.json: json.dumps(receipt, indent=2) + "\n" (same keys, order and formatting; `seconds` is
+       round(elapsed, 4), stderr decoded with errors='replace'); stdout: one line
+       {"receipt": PATH, "cases": N, "actual_runs": M}; rc 0.
+   A failure is the .py's uncaught exception: the last line of its traceback on stderr (`AssertionError: ...`,
+   `subprocess.TimeoutExpired: ...`, `FileNotFoundError: [Errno 2] ...`), nothing on stdout, rc 1; the stale table
+   schema is the .py's SystemExit text, rc 1.
+
+   The referee.  The .py imported unisa.prune.prune_text (and SHAPE/REGS, _strip_comment, _regroup from
+   unisa/tape.py); here it is ported to C (prune_text below, line for line with unisa/prune.py's
+   prune_text_with_receipt, output bytes only).  SHAPE and REGS are not copied: they are read from unisa/tape.py's
+   literal (and unisa/fp.py's OPS3/OPS2) at start, and the .py's schema check (sha256 of
+   json.dumps({'shape':SHAPE,'regs':REGS}, sort_keys=True, separators=(',',':'))) runs over what was read; a
+   SHAPE/REGS spelling this reader does not understand counts as stale.  Because the referee is a port, it is pinned
+   to the Python it was ported from: sha256 of unisa/prune.py and of the _strip_comment/_regroup bodies in
+   unisa/tape.py must equal REFEREE_PIN below, else `check.cx: referee port stale ...` rc 1 (the .py would simply
+   have run the changed referee) -- re-port prune_text, then update the pin.
+   ROOT: Path(__file__).resolve().parents[2] when run as `-run exec/prune/check.cx` (argv[0] is the source);
+   under tests/cxbin (a cached binary) it is the current directory, as for the other ports.
+   Prelude gap: time.h (clock_gettime for time.monotonic) is included explicitly until CX1 lands. */
+#include <time.h>
+
+#define SCHEMA_SHA "9a339c66dec4da07c6dcf9090fbf19b172cf62e795e41d025c600c63b5d8e5f5"
+/* sha256(unisa/prune.py) then sha256 of tape.py's `def _strip_comment` and `def _regroup` blocks, at the port */
+#define REFEREE_PIN_PRUNE "59b0e01bbbfce48c05be1376f82d242eecdbeeb6d86ff941b856818ddb9ec3f6"
+#define REFEREE_PIN_HELPERS "d0c67dd4d4dc8047fc83e7a9b3ca97d091ec8bf19f45315b84e9ff88f1647c8c"
+
+static char ROOT[4096];
+
+/* ---- byte buffers ---------------------------------------------------------------------------------------------- */
+typedef struct { char *p; size_t n, cap; } Buf;
+static void nomem(void) { fflush(stdout); fputs("MemoryError\n", stderr); exit(1); }
+static void bput(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *t;
+        while (b->n + n + 1 > c) c *= 2;
+        if (!(t = realloc(b->p, c))) nomem();
+        b->p = t; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bputc(Buf *b, int c) { char ch = (char)c; bput(b, &ch, 1); }
+static void bputi(Buf *b, long long v) { char t[32]; snprintf(t, sizeof t, "%lld", v); bputs(b, t); }
+static char *xstrdup(const char *s) { size_t n = strlen(s); char *p = malloc(n + 1); if (!p) nomem(); memcpy(p, s, n + 1); return p; }
+static char *xstrndup(const char *s, size_t n) { char *p = malloc(n + 1); if (!p) nomem(); memcpy(p, s, n); p[n] = 0; return p; }
+static void *xcalloc(size_t n, size_t s) { void *p = calloc(n ? n : 1, s ? s : 1); if (!p) nomem(); return p; }
+static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) nomem(); return p; }
+
+/* ---- Python's uncaught exception: the traceback's last line, rc 1 ---------------------------------------------- */
+static void raise_(const char *type, const char *msg) {
+    fflush(stdout);
+    if (msg && *msg) fprintf(stderr, "%s: %s\n", type, msg); else fprintf(stderr, "%s\n", type);
+    exit(1);
+}
+/* repr(str) for an ASCII/UTF-8 path or word (printable bytes kept, controls escaped as Python does) */
+static void repr_str(Buf *b, const char *s, size_t n) {
+    size_t i; int sq = 0, dq = 0; char q;
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = (sq && !dq) ? '"' : '\'';
+    bputc(b, q);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i]; char t[8];
+        if (c == '\\' || c == (unsigned char)q) { bputc(b, '\\'); bputc(b, c); }
+        else if (c == '\n') bputs(b, "\\n"); else if (c == '\t') bputs(b, "\\t"); else if (c == '\r') bputs(b, "\\r");
+        else if (c < 0x20 || c == 0x7f) { snprintf(t, sizeof t, "\\x%02x", c); bputs(b, t); }
+        else bputc(b, c);
+    }
+    bputc(b, q);
+}
+static void repr_bytes(Buf *b, const unsigned char *s, size_t n) {
+    size_t i; int sq = 0, dq = 0; char q;
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = (sq && !dq) ? '"' : '\'';
+    bputc(b, 'b'); bputc(b, q);
+    for (i = 0; i < n; i++) {
+        unsigned char c = s[i]; char t[8];
+        if (c == '\\' || c == (unsigned char)q) { bputc(b, '\\'); bputc(b, c); }
+        else if (c == '\n') bputs(b, "\\n"); else if (c == '\t') bputs(b, "\\t"); else if (c == '\r') bputs(b, "\\r");
+        else if (c < 0x20 || c >= 0x7f) { snprintf(t, sizeof t, "\\x%02x", c); bputs(b, t); }
+        else bputc(b, c);
+    }
+    bputc(b, q);
+}
+static void repr_path(Buf *b, const char *s) { bputs(b, "PosixPath("); repr_str(b, s, strlen(s)); bputc(b, ')'); }
+static void raise_os(int e, const char *path) {
+    Buf m = { 0 }; const char *type = "OSError"; char t[32];
+    if (e == ENOENT) type = "FileNotFoundError"; else if (e == EEXIST) type = "FileExistsError";
+    else if (e == EACCES || e == EPERM) type = "PermissionError"; else if (e == ENOTDIR) type = "NotADirectoryError";
+    else if (e == EISDIR) type = "IsADirectoryError";
+    snprintf(t, sizeof t, "[Errno %d] ", e); bputs(&m, t); bputs(&m, strerror(e));
+    if (path) { bputs(&m, ": "); repr_str(&m, path, strlen(path)); }
+    raise_(type, m.p);
+}
+static void assert_fail(const char *msg) { raise_("AssertionError", msg); }
+
+/* ---- files and paths (pathlib's normalisation) ----------------------------------------------------------------- */
+static unsigned char *read_bytes(const char *path, size_t *n) {
+    FILE *f = fopen(path, "rb"); Buf b = { 0 }; char t[65536]; size_t k; struct stat st;
+    if (!f) raise_os(errno, path);
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) { fclose(f); raise_os(EISDIR, path); }
+    while ((k = fread(t, 1, sizeof t, f)) > 0) bput(&b, t, k);
+    if (ferror(f)) { int e = errno; fclose(f); raise_os(e ? e : EIO, path); }
+    fclose(f);
+    if (!b.p) bput(&b, "", 0);
+    *n = b.n; return (unsigned char *)b.p;
+}
+static void write_bytes(const char *path, const void *s, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) raise_os(errno, path);
+    if ((n && fwrite(s, 1, n, f) != n) || fclose(f) != 0) raise_os(errno ? errno : EIO, path);
+}
+static void sha_hex(const void *s, size_t n, char hex[65]) { cx_sha256_hex(s, n, hex); }
+static void file_sha(const char *path, char hex[65]) { size_t n; unsigned char *p = read_bytes(path, &n); sha_hex(p, n, hex); free(p); }
+/* PurePosixPath(s) as str: '//' kept only as exactly two leading slashes, empty and '.' parts dropped, '.' for none */
+static char *pnorm(const char *s) {
+    Buf b = { 0 }; const char *p = s; int any = 0;
+    if (s[0] == '/') { if (s[1] == '/' && s[2] != '/') bputs(&b, "//"); else bputs(&b, "/"); }
+    while (*p) {
+        const char *q; while (*p == '/') p++;
+        q = p; while (*q && *q != '/') q++;
+        if (q > p && !(q - p == 1 && *p == '.')) {
+            if (any) bputc(&b, '/');
+            bput(&b, p, (size_t)(q - p)); any = 1;
+        }
+        p = q;
+    }
+    if (!b.n) bputs(&b, ".");
+    return b.p;
+}
+static char *pjoin(const char *base, const char *name) {
+    Buf b = { 0 };
+    if (!strcmp(base, ".")) { char *r = pnorm(name); return r; }
+    bputs(&b, base); if (b.n && b.p[b.n - 1] != '/') bputc(&b, '/'); bputs(&b, name);
+    { char *r = pnorm(b.p); free(b.p); return r; }
+}
+static const char *pname(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
+static int is_file(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISREG(st.st_mode); }
+static void mkdir_one(const char *p, int exist_ok) {   /* Path.mkdir(exist_ok=...) */
+    if (mkdir(p, 0777) == 0) return;
+    { int e = errno; if (e == EEXIST && exist_ok && is_dir(p)) return; raise_os(e, p); }
+}
+static void mkdir_parents(const char *p) {             /* Path.mkdir(parents=True, exist_ok=True) */
+    char *t = xstrdup(p), *s;
+    for (s = t + 1; *s; s++) if (*s == '/') { *s = 0; if (mkdir(t, 0777) != 0 && errno != EEXIST) { int e = errno; raise_os(e, t); } *s = '/'; }
+    mkdir_one(t, 1); free(t);
+}
+
+/* ---- JSON: a reader for fixtures.json and json.dumps for the receipt ----------------------------------------- */
+enum { J_NULL, J_BOOL, J_INT, J_FLT, J_STR, J_ARR, J_OBJ };
+typedef struct J { int t; long long i; double d; char *s; size_t n; int mode; struct J **v; char **k; size_t len, cap; } J;
+static J *jnew(int t) { J *j = xcalloc(1, sizeof *j); j->t = t; return j; }
+static J *jstr(const char *s, size_t n, int mode) { J *j = jnew(J_STR); j->s = xstrndup(s, n); j->n = n; j->mode = mode; return j; }
+static J *jstrz(const char *s) { return jstr(s, strlen(s), 0); }
+static J *jint(long long v) { J *j = jnew(J_INT); j->i = v; return j; }
+static J *jbool(int v) { J *j = jnew(J_BOOL); j->i = v; return j; }
+static J *jflt(double v) { J *j = jnew(J_FLT); j->d = v; return j; }
+static void jadd(J *c, const char *key, J *v) {
+    if (c->len == c->cap) { c->cap = c->cap ? 2 * c->cap : 8; c->v = xrealloc(c->v, c->cap * sizeof *c->v); c->k = xrealloc(c->k, c->cap * sizeof *c->k); }
+    c->k[c->len] = key ? xstrdup(key) : 0; c->v[c->len++] = v;
+}
+static J *jget(J *o, const char *key) {
+    size_t i;
+    if (!o || o->t != J_OBJ) raise_("TypeError", "list indices must be integers or slices, not str");
+    for (i = o->len; i-- > 0;) if (!strcmp(o->k[i], key)) return o->v[i];
+    { Buf m = { 0 }; repr_str(&m, key, strlen(key)); raise_("KeyError", m.p); }
+    return 0;
+}
+/* the reader: strict JSON as json.loads takes it (objects keep the last value of a repeated key, via jget) */
+typedef struct { const unsigned char *s; size_t n, at; } JR;
+static void jerr(JR *r, const char *what) {
+    Buf m = { 0 }; size_t i, line = 1, col = 1;
+    for (i = 0; i < r->at && i < r->n; i++) { if (r->s[i] == '\n') { line++; col = 1; } else col++; }
+    bputs(&m, what); bputs(&m, ": line "); bputi(&m, (long long)line); bputs(&m, " column "); bputi(&m, (long long)col);
+    bputs(&m, " (char "); bputi(&m, (long long)r->at); bputs(&m, ")");
+    raise_("json.decoder.JSONDecodeError", m.p);
+}
+static void jws(JR *r) { while (r->at < r->n && (r->s[r->at] == ' ' || r->s[r->at] == '\t' || r->s[r->at] == '\n' || r->s[r->at] == '\r')) r->at++; }
+static void utf8_put(Buf *b, unsigned long c) {
+    if (c < 0x80) bputc(b, (int)c);
+    else if (c < 0x800) { bputc(b, 0xc0 | (int)(c >> 6)); bputc(b, 0x80 | (int)(c & 63)); }
+    else if (c < 0x10000) { bputc(b, 0xe0 | (int)(c >> 12)); bputc(b, 0x80 | (int)((c >> 6) & 63)); bputc(b, 0x80 | (int)(c & 63)); }
+    else { bputc(b, 0xf0 | (int)(c >> 18)); bputc(b, 0x80 | (int)((c >> 12) & 63)); bputc(b, 0x80 | (int)((c >> 6) & 63)); bputc(b, 0x80 | (int)(c & 63)); }
+}
+static int hex4(JR *r, size_t at, unsigned long *v) {
+    size_t i; *v = 0;
+    if (at + 4 > r->n) return 0;
+    for (i = 0; i < 4; i++) {
+        int c = r->s[at + i], d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return 0;
+        *v = *v * 16 + (unsigned long)d;
+    }
+    return 1;
+}
+static J *jparse(JR *r);
+static char *jstring(JR *r, size_t *len) {
+    Buf b = { 0 }; size_t start = r->at;
+    r->at++;
+    for (;;) {
+        unsigned char c;
+        if (r->at >= r->n) { r->at = start; jerr(r, "Unterminated string starting at"); }
+        c = r->s[r->at];
+        if (c == '"') { r->at++; break; }
+        if (c < 0x20) jerr(r, "Invalid control character at");
+        if (c != '\\') { bputc(&b, c); r->at++; continue; }
+        if (r->at + 1 >= r->n) { r->at = start; jerr(r, "Unterminated string starting at"); }
+        c = r->s[r->at + 1];
+        switch (c) {
+        case '"': bputc(&b, '"'); break; case '\\': bputc(&b, '\\'); break; case '/': bputc(&b, '/'); break;
+        case 'b': bputc(&b, 8); break; case 'f': bputc(&b, 12); break; case 'n': bputc(&b, 10); break;
+        case 'r': bputc(&b, 13); break; case 't': bputc(&b, 9); break;
+        case 'u': {
+            unsigned long u, lo;
+            if (!hex4(r, r->at + 2, &u)) { r->at++; jerr(r, "Invalid \\uXXXX escape"); }
+            r->at += 4;
+            if (u >= 0xd800 && u < 0xdc00 && r->at + 2 + 6 <= r->n && r->s[r->at + 2] == '\\' && r->s[r->at + 3] == 'u' &&
+                hex4(r, r->at + 4, &lo) && lo >= 0xdc00 && lo < 0xe000) { u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00); r->at += 6; }
+            utf8_put(&b, u); break;
+        }
+        default: jerr(r, "Invalid \\escape");
+        }
+        r->at += 2;
+    }
+    if (!b.p) bput(&b, "", 0);
+    *len = b.n; return b.p;
+}
+static J *jparse(JR *r) {
+    J *j; unsigned char c;
+    jws(r);
+    if (r->at >= r->n) jerr(r, "Expecting value");
+    c = r->s[r->at];
+    if (c == '"') { size_t n; char *s = jstring(r, &n); j = jnew(J_STR); j->s = s; j->n = n; return j; }
+    if (c == '{') {
+        j = jnew(J_OBJ); r->at++; jws(r);
+        if (r->at < r->n && r->s[r->at] == '}') { r->at++; return j; }
+        for (;;) {
+            size_t n; char *key; J *v;
+            jws(r);
+            if (r->at >= r->n || r->s[r->at] != '"') jerr(r, "Expecting property name enclosed in double quotes");
+            key = jstring(r, &n); jws(r);
+            if (r->at >= r->n || r->s[r->at] != ':') jerr(r, "Expecting ':' delimiter");
+            r->at++; v = jparse(r); jadd(j, key, v); free(key); jws(r);
+            if (r->at < r->n && r->s[r->at] == ',') { r->at++; continue; }
+            if (r->at < r->n && r->s[r->at] == '}') { r->at++; return j; }
+            jerr(r, "Expecting ',' delimiter");
+        }
+    }
+    if (c == '[') {
+        j = jnew(J_ARR); r->at++; jws(r);
+        if (r->at < r->n && r->s[r->at] == ']') { r->at++; return j; }
+        for (;;) {
+            jadd(j, 0, jparse(r)); jws(r);
+            if (r->at < r->n && r->s[r->at] == ',') { r->at++; continue; }
+            if (r->at < r->n && r->s[r->at] == ']') { r->at++; return j; }
+            jerr(r, "Expecting ',' delimiter");
+        }
+    }
+    if (r->n - r->at >= 4 && !memcmp(r->s + r->at, "null", 4)) { r->at += 4; return jnew(J_NULL); }
+    if (r->n - r->at >= 4 && !memcmp(r->s + r->at, "true", 4)) { r->at += 4; return jbool(1); }
+    if (r->n - r->at >= 5 && !memcmp(r->s + r->at, "false", 5)) { r->at += 5; return jbool(0); }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        size_t s = r->at; int flt = 0; char *t;
+        if (r->s[r->at] == '-') r->at++;
+        while (r->at < r->n && r->s[r->at] >= '0' && r->s[r->at] <= '9') r->at++;
+        while (r->at < r->n && (r->s[r->at] == '.' || r->s[r->at] == 'e' || r->s[r->at] == 'E' || r->s[r->at] == '+' || r->s[r->at] == '-' || (r->s[r->at] >= '0' && r->s[r->at] <= '9'))) { flt = 1; r->at++; }
+        t = xstrndup((const char *)r->s + s, r->at - s);
+        if (flt) j = jflt(strtod(t, 0)); else j = jint(strtoll(t, 0, 10));
+        free(t); return j;
+    }
+    jerr(r, "Expecting value");
+    return 0;
+}
+static J *jloads(const unsigned char *s, size_t n) {
+    JR r; J *j;
+    r.s = s; r.n = n; r.at = 0;
+    j = jparse(&r); jws(&r);
+    if (r.at != r.n) jerr(&r, "Extra data");
+    return j;
+}
+/* json.dumps string: ensure_ascii over str(bytes) -- MODE 0 decodes as os.fsdecode (surrogateescape: an undecodable
+   byte X is \udcXX), MODE 1 as bytes.decode(errors='replace') (each maximal invalid subpart is \ufffd) */
+static void jesc_u(Buf *b, unsigned long u) { char t[16]; snprintf(t, sizeof t, "\\u%04lx", u); bputs(b, t); }
+static void jdump_str(Buf *b, const unsigned char *s, size_t n, int mode) {
+    size_t i = 0;
+    bputc(b, '"');
+    while (i < n) {
+        unsigned char c = s[i];
+        if (c < 0x80) {
+            if (c == '"') bputs(b, "\\\""); else if (c == '\\') bputs(b, "\\\\"); else if (c == '\n') bputs(b, "\\n");
+            else if (c == '\r') bputs(b, "\\r"); else if (c == '\t') bputs(b, "\\t"); else if (c == 8) bputs(b, "\\b");
+            else if (c == 12) bputs(b, "\\f"); else if (c < 0x20) jesc_u(b, c); else bputc(b, c);
+            i++; continue;
+        }
+        {   /* one UTF-8 sequence, or the maximal invalid subpart */
+            int need = 0; unsigned long u = 0, lo = 0x80, hi = 0xbf; size_t k;
+            if (c >= 0xc2 && c <= 0xdf) { need = 1; u = c & 0x1f; }
+            else if (c >= 0xe0 && c <= 0xef) { need = 2; u = c & 0x0f; if (c == 0xe0) lo = 0xa0; if (c == 0xed) hi = 0x9f; }
+            else if (c >= 0xf0 && c <= 0xf4) { need = 3; u = c & 0x07; if (c == 0xf0) lo = 0x90; if (c == 0xf4) hi = 0x8f; }
+            k = 1;
+            if (need) {
+                int ok = 1, got;
+                for (got = 0; got < need; got++) {
+                    unsigned char d;
+                    if (i + k >= n) { ok = 0; break; }
+                    d = s[i + k];
+                    if (got == 0 ? (d < lo || d > hi) : (d < 0x80 || d > 0xbf)) { ok = 0; break; }
+                    u = (u << 6) | (d & 0x3f); k++;
+                }
+                if (ok) {
+                    if (u >= 0x10000) { unsigned long v = u - 0x10000; jesc_u(b, 0xd800 + (v >> 10)); jesc_u(b, 0xdc00 + (v & 0x3ff)); }
+                    else jesc_u(b, u);
+                    i += k; continue;
+                }
+            }
+            if (mode == 1) jesc_u(b, 0xfffd);
+            else { size_t z; for (z = 0; z < k; z++) jesc_u(b, 0xdc00 + s[i + z]); }
+            i += k;
+        }
+    }
+    bputc(b, '"');
+}
+/* float.__repr__: the shortest repr that round-trips, exponent form outside 1e-4 <= |x| < 1e16 */
+static void jdump_float(Buf *b, double d) {
+    char t[64]; int p; char *e;
+    for (p = 1; p <= 17; p++) { snprintf(t, sizeof t, "%.*g", p, d); if (strtod(t, 0) == d) break; }
+    e = strchr(t, 'e');
+    if (e) {   /* Python: 1e-05, 1e+16 -> mantissa as is, exponent at least two digits */
+        char m[64], ex[16]; int x = atoi(e + 1);
+        memcpy(m, t, (size_t)(e - t)); m[e - t] = 0;
+        if (x >= -4 && x < 16) {   /* %g chose exponent form for precision reasons: print positional */
+            snprintf(t, sizeof t, "%.*f", (p - 1 - x) > 0 ? p - 1 - x : 0, d);
+            bputs(b, t); if (!strchr(t, '.')) bputs(b, ".0"); return;
+        }
+        snprintf(ex, sizeof ex, "e%c%02d", x < 0 ? '-' : '+', x < 0 ? -x : x);
+        bputs(b, m); bputs(b, ex); return;
+    }
+    bputs(b, t);
+    if (!strchr(t, '.') && !strchr(t, 'n') && !strchr(t, 'i')) bputs(b, ".0");
+}
+static void jindent(Buf *b, int indent, int level) { int i; bputc(b, '\n'); for (i = 0; i < indent * level; i++) bputc(b, ' '); }
+static void jdump(Buf *b, J *j, int indent, int level) {
+    size_t i;
+    switch (j->t) {
+    case J_NULL: bputs(b, "null"); break;
+    case J_BOOL: bputs(b, j->i ? "true" : "false"); break;
+    case J_INT: bputi(b, j->i); break;
+    case J_FLT: jdump_float(b, j->d); break;
+    case J_STR: jdump_str(b, (const unsigned char *)j->s, j->n, j->mode); break;
+    case J_ARR: case J_OBJ:
+        if (!j->len) { bputs(b, j->t == J_ARR ? "[]" : "{}"); break; }
+        bputc(b, j->t == J_ARR ? '[' : '{');
+        for (i = 0; i < j->len; i++) {
+            if (i) bputc(b, ',');
+            if (indent >= 0) jindent(b, indent, level + 1); else if (i) bputc(b, ' ');
+            if (j->t == J_OBJ) { jdump_str(b, (const unsigned char *)j->k[i], strlen(j->k[i]), 0); bputs(b, ": "); }
+            jdump(b, j->v[i], indent, level + 1);
+        }
+        if (indent >= 0) jindent(b, indent, level);
+        bputc(b, j->t == J_ARR ? ']' : '}');
+        break;
+    }
+}
+
+/* ---- the table schema: SHAPE and REGS as unisa/tape.py (and unisa/fp.py) spell them --------------------------- */
+typedef struct { char *op; char kinds[8]; int nk; } Shape;
+static Shape *SH; static size_t NSH, CAPSH;
+static void stale(void) { fflush(stdout); fputs("prune table schema stale: review opcode/register facts\n", stderr); exit(1); }
+static void shape_set(const char *op, size_t n, const char *kinds, int nk) {
+    size_t i;
+    for (i = 0; i < NSH; i++) if (strlen(SH[i].op) == n && !memcmp(SH[i].op, op, n)) break;
+    if (i == NSH) {
+        if (NSH == CAPSH) { CAPSH = CAPSH ? 2 * CAPSH : 64; SH = xrealloc(SH, CAPSH * sizeof *SH); }
+        SH[NSH].op = xstrndup(op, n); NSH++;
+    }
+    memcpy(SH[i].kinds, kinds, (size_t)nk); SH[i].nk = nk;
+}
+static int shape_find(const char *op, size_t n) {
+    size_t i;
+    for (i = 0; i < NSH; i++) if (strlen(SH[i].op) == n && !memcmp(SH[i].op, op, n)) return (int)i;
+    return -1;
+}
+/* the next line of TEXT from *AT (without its newline) */
+static int next_line(const char *text, size_t len, size_t *at, const char **ls, size_t *ln) {
+    size_t s = *at, e = s;
+    if (s >= len) return 0;
+    while (e < len && text[e] != '\n') e++;
+    *ls = text + s; *ln = e - s; *at = e < len ? e + 1 : e;
+    return 1;
+}
+static int line_is(const char *l, size_t n, const char *want) { return strlen(want) == n && !memcmp(l, want, n); }
+/* a tuple of double-quoted names in [S, E): the quoted words, in order */
+static int quoted_words(const char *s, const char *e, char ***out) {
+    int n = 0; char **v = 0;
+    while (s < e) {
+        if (*s == '"') {
+            const char *q = s + 1; while (q < e && *q != '"') q++;
+            if (q >= e) return -1;
+            v = xrealloc(v, (size_t)(n + 1) * sizeof *v); v[n++] = xstrndup(s + 1, (size_t)(q - s - 1)); s = q + 1;
+        } else if (*s == ' ' || *s == ',' || *s == '\n' || *s == '\t') s++;
+        else return -1;
+    }
+    *out = v; return n;
+}
+static int fp_ops(const char *fp, size_t fn, const char *name, char ***out) {
+    Buf head = { 0 }; const char *p, *s, *e;
+    bputs(&head, "\n"); bputs(&head, name); bputs(&head, " = (");
+    for (p = fp; p + head.n <= fp + fn; p++) if (!memcmp(p, head.p, head.n)) break;
+    if (p + head.n > fp + fn) return -1;
+    s = p + head.n; e = s; while (e < fp + fn && *e != ')') e++;
+    if (e >= fp + fn) return -1;
+    return quoted_words(s, e, out);
+}
+static int cmp_shape(const void *a, const void *b) { return strcmp(((const Shape *)a)->op, ((const Shape *)b)->op); }
+static void schema(void) {
+    char path[4200], hex[65]; size_t tn, fn, at = 0, ln; const char *l; int in = 0, done = 0, regs = 0, imp = 0, up3 = 0, up2 = 0;
+    char *tape, *fp, **o3 = 0, **o2 = 0; int n3, n2, i; Buf js = { 0 }; Shape *sorted;
+    FILE *f;
+    snprintf(path, sizeof path, "%s/unisa/tape.py", ROOT);
+    if (!(f = fopen(path, "rb"))) stale(); fclose(f);
+    tape = (char *)read_bytes(path, &tn);
+    snprintf(path, sizeof path, "%s/unisa/fp.py", ROOT);
+    if (!(f = fopen(path, "rb"))) stale(); fclose(f);
+    fp = (char *)read_bytes(path, &fn);
+    while (next_line(tape, tn, &at, &l, &ln)) {
+        if (in) {
+            const char *s = l, *e = l + ln, *q, *po, *pc; char **w = 0; int nw;
+            if (line_is(l, ln, "}")) { in = 0; done = 1; continue; }
+            while (s < e && *s == ' ') s++;
+            if (s == e || *s == '#') continue;
+            if (*s != '"') stale();
+            q = s + 1; while (q < e && *q != '"') q++;
+            if (q >= e || q + 1 >= e || q[1] != ':') stale();
+            po = q + 2; while (po < e && *po == ' ') po++;
+            if (po >= e || *po != '(') stale();
+            pc = po + 1; while (pc < e && *pc != ')') pc++;
+            if (pc >= e) stale();
+            nw = quoted_words(po + 1, pc, &w);
+            if (nw < 0 || nw > 8) stale();
+            {   const char *r = pc + 1; char k[8];
+                if (r < e && *r == ',') r++;
+                while (r < e && *r == ' ') r++;
+                if (r < e && *r != '#') stale();
+                for (i = 0; i < nw; i++) {
+                    if (strlen(w[i]) != 1 || !strchr("riLs", w[i][0])) stale();
+                    k[i] = w[i][0];
+                }
+                shape_set(s + 1, (size_t)(q - s - 1), k, nw);
+            }
+            continue;
+        }
+        if (!strncmp(l, "SHAPE", 5) && ln >= 5) {
+            if (line_is(l, ln, "SHAPE = {") && !done) { in = 1; continue; }
+            if (line_is(l, ln, "SHAPE.update({op: (\"r\", \"r\", \"r\") for op in _FOPS3})") && done && imp && !up3) { up3 = 1; continue; }
+            if (line_is(l, ln, "SHAPE.update({op: (\"r\", \"r\") for op in _FOPS2})") && up3 && !up2) { up2 = 1; continue; }
+            stale();   /* any other assignment or update of SHAPE: not the spelling this reader knows */
+        }
+        if (line_is(l, ln, "REGS = tuple(\"r%d\" % i for i in range(8))")) { regs++; continue; }
+        if (!strncmp(l, "REGS", 4) && ln >= 4) stale();
+        if (line_is(l, ln, "from .fp import OPS3 as _FOPS3, OPS2 as _FOPS2")) imp = 1;
+    }
+    if (in || !done || regs != 1 || !up3 || !up2) stale();
+    n3 = fp_ops(fp, fn, "OPS3", &o3); n2 = fp_ops(fp, fn, "OPS2", &o2);
+    if (n3 < 0 || n2 < 0) stale();
+    for (i = 0; i < n3; i++) shape_set(o3[i], strlen(o3[i]), "rrr", 3);
+    for (i = 0; i < n2; i++) shape_set(o2[i], strlen(o2[i]), "rr", 2);
+    sorted = xcalloc(NSH, sizeof *sorted); memcpy(sorted, SH, NSH * sizeof *SH);
+    qsort(sorted, NSH, sizeof *sorted, cmp_shape);
+    bputs(&js, "{\"regs\":[\"r0\",\"r1\",\"r2\",\"r3\",\"r4\",\"r5\",\"r6\",\"r7\"],\"shape\":{");
+    for (i = 0; i < (int)NSH; i++) {
+        int k;
+        if (i) bputc(&js, ',');
+        bputc(&js, '"'); bputs(&js, sorted[i].op); bputs(&js, "\":[");
+        for (k = 0; k < sorted[i].nk; k++) { if (k) bputc(&js, ','); bputc(&js, '"'); bputc(&js, sorted[i].kinds[k]); bputc(&js, '"'); }
+        bputc(&js, ']');
+    }
+    bputs(&js, "}}");
+    sha_hex(js.p, js.n, hex);
+    if (strcmp(hex, SCHEMA_SHA)) stale();
+    free(sorted); free(js.p); free(tape); free(fp);
+}
+/* the referee port's pin: unisa/prune.py and tape.py's _strip_comment/_regroup as they were at the port */
+static void def_block(Buf *out, const char *t, size_t n, const char *head) {
+    size_t hl = strlen(head), i, e;
+    for (i = 0; i + hl <= n; i++) if ((i == 0 || t[i - 1] == '\n') && !memcmp(t + i, head, hl)) break;
+    if (i + hl > n) return;
+    for (e = i + hl; e < n; e++) if (t[e] == '\n' && e + 1 < n && t[e + 1] != ' ' && t[e + 1] != '\t' && t[e + 1] != '\n') { e++; break; }
+    bput(out, t + i, e - i);
+}
+static void referee_pin(int show) {
+    char path[4200], hex[65], hex2[65]; size_t n; unsigned char *t; Buf b = { 0 };
+    snprintf(path, sizeof path, "%s/unisa/prune.py", ROOT); file_sha(path, hex);
+    snprintf(path, sizeof path, "%s/unisa/tape.py", ROOT); t = read_bytes(path, &n);
+    def_block(&b, (const char *)t, n, "def _strip_comment(raw):"); def_block(&b, (const char *)t, n, "def _regroup(op, toks):");
+    sha_hex(b.p ? b.p : "", b.n, hex2); free(t); free(b.p);
+    if (show) { printf("%s %s\n", hex, hex2); exit(0); }
+    if (strcmp(hex, REFEREE_PIN_PRUNE) || strcmp(hex2, REFEREE_PIN_HELPERS)) {
+        fflush(stdout);
+        fprintf(stderr, "check.cx: referee port stale: unisa/prune.py or tape.py _strip_comment/_regroup changed since the C port of prune_text (re-port, then update REFEREE_PIN_*)\n");
+        exit(1);
+    }
+}
+
+/* ---- the referee: unisa/prune.py prune_text (prune_text_with_receipt, output bytes only) ------------------------ */
+static int pyws(unsigned c) { return c == 9 || c == 10 || c == 11 || c == 12 || c == 13 || (c >= 28 && c <= 32) || c == 0x85 || c == 0xa0; }
+static int nstart(unsigned c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; }
+static int nchar(unsigned c) { return nstart(c) || (c >= '0' && c <= '9') || c == '.' || c == '$'; }
+static int isname(const char *s, size_t n) {   /* NAME.fullmatch: [A-Za-z_][A-Za-z0-9_.$]*\Z */
+    size_t i;
+    if (!n || !nstart((unsigned char)s[0])) return 0;
+    for (i = 1; i < n; i++) if (!nchar((unsigned char)s[i])) return 0;
+    return 1;
+}
+static int ishex(unsigned c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static int int_re(const char *s) {             /* [+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+) fullmatch */
+    const char *p = s;
+    if (*p == '+' || *p == '-') p++;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && ishex((unsigned char)p[2])) {
+        p += 2; while (ishex((unsigned char)*p)) p++;
+        if (!*p) return 1;
+        p = s; if (*p == '+' || *p == '-') p++;
+    }
+    if (!(*p >= '0' && *p <= '9')) return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    return !*p;
+}
+/* int(s, 0) for an int_re string: 0 on ValueError (a decimal with a leading zero); *inrange: -(1<<63) <= v < (1<<63) */
+static int int0(const char *s, long long *v, int *inrange) {
+    const char *p = s; int neg = 0, ovf = 0; unsigned long long m = 0, lim;
+    if (*p == '+' || *p == '-') { neg = *p == '-'; p++; }
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2; if (!*p) return 0;
+        for (; *p; p++) {
+            unsigned d; if (!ishex((unsigned char)*p)) return 0;
+            d = *p <= '9' ? (unsigned)(*p - '0') : (unsigned)((*p | 32) - 'a' + 10);
+            if (m > (~0ULL - d) / 16) ovf = 1; else m = m * 16 + d;
+        }
+    } else {
+        const char *q;
+        if (!*p) return 0;
+        if (*p == '0') for (q = p; *q; q++) if (*q != '0') return 0;
+        for (; *p; p++) {
+            unsigned d; if (*p < '0' || *p > '9') return 0;
+            d = (unsigned)(*p - '0');
+            if (m > (~0ULL - d) / 10) ovf = 1; else m = m * 10 + d;
+        }
+    }
+    lim = neg ? (1ULL << 63) : (1ULL << 63) - 1;
+    *inrange = !ovf && m <= lim;
+    if (*inrange) *v = neg ? (long long)(0ULL - m) : (long long)m; else *v = 0;
+    return 1;
+}
+/* string -> int map (open addressing; keys never contain NUL) */
+typedef struct { char **k; int *v; size_t cap, n; } Map;
+static unsigned long hstr(const char *s, size_t n) { unsigned long h = 2166136261UL; size_t i; for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619UL; return h; }
+static long map_slot(Map *m, const char *s, size_t n) {
+    size_t i;
+    if (!m->cap) return -1;
+    for (i = hstr(s, n) & (m->cap - 1);; i = (i + 1) & (m->cap - 1)) {
+        if (!m->k[i]) return -(long)i - 2;
+        if (strlen(m->k[i]) == n && !memcmp(m->k[i], s, n)) return (long)i;
+    }
+}
+static int map_get(Map *m, const char *s, size_t n) { long i = map_slot(m, s, n); return i >= 0 ? m->v[i] : -1; }
+static int map_has(Map *m, const char *s) { return map_get(m, s, strlen(s)) >= 0; }
+static int map_put(Map *m, const char *s, size_t n, int v) {   /* 1 when added, 0 when present (value kept) */
+    long i;
+    if ((m->n + 1) * 2 > m->cap) {
+        Map g; size_t j;
+        g.cap = m->cap ? 2 * m->cap : 64; g.n = 0; g.k = xcalloc(g.cap, sizeof *g.k); g.v = xcalloc(g.cap, sizeof *g.v);
+        for (j = 0; j < m->cap; j++) if (m->k[j]) { long t = map_slot(&g, m->k[j], strlen(m->k[j])); g.k[-t - 2] = m->k[j]; g.v[-t - 2] = m->v[j]; g.n++; }
+        free(m->k); free(m->v); *m = g;
+    }
+    i = map_slot(m, s, n);
+    if (i >= 0) return 0;
+    i = -i - 2; m->k[i] = xstrndup(s, n); m->v[i] = v; m->n++;
+    return 1;
+}
+static void map_free(Map *m) { size_t i; for (i = 0; i < m->cap; i++) free(m->k[i]); free(m->k); free(m->v); m->k = 0; m->v = 0; m->cap = m->n = 0; }
+
+enum { K_OTHER, K_DATA, K_LABEL, K_INS };
+typedef struct { int kind, pc, op, nargs; char *name; char **args; } Row;
+typedef struct { const char *s; size_t n; } Tok;
+static unsigned char *fallback(const unsigned char *raw, size_t n, size_t *outn) {
+    unsigned char *o = malloc(n ? n : 1); if (!o) nomem(); if (n) memcpy(o, raw, n); *outn = n; return o;
+}
+static int is_op(const Row *r, const char *op) { return r->kind == K_INS && !strcmp(SH[r->op].op, op); }
+static unsigned char *prune_text(const unsigned char *raw, size_t n, size_t *outn) {
+    size_t i, nlines = 0, *ls, *le, li; Row *rows; int pc = 0, bad = 0;
+    Map labels = { 0 }, data = { 0 }, refd = { 0 }; int nlab = 0, *lab_line = 0; char **lab_name = 0;
+    unsigned char *out; Buf ob = { 0 };
+    if (n > 2u * 1024 * 1024) return fallback(raw, n, outn);
+    for (i = 0; i < n; i++) if (raw[i] == '\r' || raw[i] == '\v' || raw[i] == '\f') return fallback(raw, n, outn);
+    /* original: every '\n'-terminated line, then the unterminated rest (an empty input is one empty line) */
+    for (i = 0; i < n; i++) if (raw[i] == '\n') nlines++;
+    if (!n || raw[n - 1] != '\n') nlines++;
+    ls = xcalloc(nlines, sizeof *ls); le = xcalloc(nlines, sizeof *le);
+    { size_t s = 0, k = 0; for (i = 0; i < n; i++) if (raw[i] == '\n') { ls[k] = s; le[k++] = i + 1; s = i + 1; } if (k < nlines) { ls[k] = s; le[k] = n; } }
+    rows = xcalloc(nlines, sizeof *rows);
+    for (li = 0; li < nlines; li++) {
+        const char *t = (const char *)raw + ls[li]; size_t tn = le[li] - ls[li], q = 0, k;
+        Row *row = &rows[li];
+        row->kind = K_OTHER; row->pc = pc;
+        /* _strip_comment: ';' outside a string literal */
+        for (k = 0; k < tn;) {
+            char c = t[k];
+            if (q) { if (c == '\\') { k += 2; continue; } if (c == '"') q = 0; }
+            else { if (c == '"') q = 1; else if (c == ';') { tn = k; break; } }
+            k++;
+        }
+        while (tn && pyws((unsigned char)t[0])) { t++; tn--; }
+        while (tn && pyws((unsigned char)t[tn - 1])) tn--;
+        if (!tn) continue;
+        if (tn >= 5 && !memcmp(t, ".bss", 4) && (t[4] == ' ' || t[4] == '\t')) {
+            Tok p[4]; int np = 0; size_t a = 0;
+            while (a < tn) {
+                size_t b;
+                while (a < tn && pyws((unsigned char)t[a])) a++;
+                if (a >= tn) break;
+                b = a; while (b < tn && !pyws((unsigned char)t[b])) b++;
+                if (np < 4) { p[np].s = t + a; p[np].n = b - a; } np++;
+                a = b;
+            }
+            if (np != 3 || !isname(p[1].s, p[1].n)) { bad = 1; continue; }
+            {   /* str.isdigit (latin-1: 0-9 and the superscripts 2 3 1), then int() */
+                size_t z; int dig = 1, sup = 0; unsigned long long v = 0;
+                for (z = 0; z < p[2].n; z++) {
+                    unsigned char c = (unsigned char)p[2].s[z];
+                    if (c == 0xb2 || c == 0xb3 || c == 0xb9) sup = 1; else if (c < '0' || c > '9') dig = 0;
+                }
+                if (!dig) { bad = 1; continue; }
+                if (sup) {   /* int('1\xb2') raises: ValueError: invalid literal for int() with base 10: '1²' */
+                    Buf m = { 0 };
+                    bputs(&m, "invalid literal for int() with base 10: '");
+                    for (z = 0; z < p[2].n; z++) utf8_put(&m, (unsigned char)p[2].s[z]);
+                    bputc(&m, '\''); raise_("ValueError", m.p);
+                }
+                for (z = 0; z < p[2].n; z++) { v = v * 10 + (unsigned)(p[2].s[z] - '0'); if (v > 32ULL * 1024 * 1024) break; }
+                if (v > 32ULL * 1024 * 1024) { bad = 1; continue; }
+            }
+            row->kind = K_DATA; row->name = xstrndup(p[1].s, p[1].n); map_put(&data, p[1].s, p[1].n, 1);
+            continue;
+        }
+        if (tn >= 5 && !memcmp(t, ".str", 4) && (t[4] == ' ' || t[4] == '\t')) {
+            /* \.str[ \t]+(NAME)[ \t]+"(?:\\.|[^"\\])*" fullmatch */
+            size_t a = 4, ns, ne; int ok = 0;
+            while (a < tn && (t[a] == ' ' || t[a] == '\t')) a++;
+            ns = a;
+            if (a < tn && nstart((unsigned char)t[a])) {
+                a++; while (a < tn && nchar((unsigned char)t[a])) a++;
+                ne = a;
+                if (a < tn && (t[a] == ' ' || t[a] == '\t')) {
+                    while (a < tn && (t[a] == ' ' || t[a] == '\t')) a++;
+                    if (a < tn && t[a] == '"') {
+                        a++;
+                        for (;;) {
+                            if (a >= tn) break;
+                            if (t[a] == '\\') { if (a + 1 >= tn) break; a += 2; continue; }
+                            if (t[a] == '"') { ok = a + 1 == tn; break; }
+                            a++;
+                        }
+                    }
+                }
+                if (ok) { row->kind = K_DATA; row->name = xstrndup(t + ns, ne - ns); map_put(&data, t + ns, ne - ns, 1); continue; }
+            }
+            bad = 1; continue;
+        }
+        if (t[tn - 1] == ':' && isname(t, tn - 1)) {
+            row->kind = K_LABEL; row->name = xstrndup(t, tn - 1);
+            if (map_put(&labels, t, tn - 1, nlab)) {
+                lab_line = xrealloc(lab_line, (size_t)(nlab + 1) * sizeof *lab_line); lab_name = xrealloc(lab_name, (size_t)(nlab + 1) * sizeof *lab_name);
+                lab_line[nlab] = (int)li; lab_name[nlab] = row->name; nlab++;
+            } else bad = 1;   /* duplicate label */
+            continue;
+        }
+        {   /* an instruction: '[', ']' and ',' are spaces */
+            Tok *tok = 0; int nt = 0, op, valid, k2, nk, nul = 0; char **args; size_t a = 0;
+#define SEP(c) (pyws((unsigned char)(c)) || (c) == '[' || (c) == ']' || (c) == ',')
+            while (a < tn) {
+                size_t b;
+                while (a < tn && SEP(t[a])) a++;
+                if (a >= tn) break;
+                b = a; while (b < tn && !SEP(t[b])) b++;
+                tok = xrealloc(tok, (size_t)(nt + 1) * sizeof *tok); tok[nt].s = t + a; tok[nt].n = b - a; nt++;
+                a = b;
+            }
+#undef SEP
+            if (!nt) raise_("IndexError", "list index out of range");
+            op = shape_find(tok[0].s, tok[0].n);
+            if (op < 0) { bad = 1; free(tok); continue; }
+            /* _regroup: [rb+K] was flattened to one token 'r1+8' */
+            args = xcalloc((size_t)(2 * nt + 1), sizeof *args); nk = 0;
+            {   const char *o = SH[op].op; int split = !strcmp(o, "load64") || !strcmp(o, "store64") || !strcmp(o, ".ld") || !strcmp(o, ".st") || !strcmp(o, ".zero") || !strcmp(o, "callm");
+                for (k2 = 1; k2 < nt; k2++) {
+                    const char *s = tok[k2].s; size_t m = tok[k2].n, z, cut = 0; int has = 0;
+                    for (z = 0; z < m; z++) if (!s[z]) nul = 1;
+                    if (split && m && s[0] == 'r') for (z = 1; z < m; z++) if (s[z] == '+' || s[z] == '-') { has = 1; cut = z; }
+                    if (has) { args[nk++] = xstrndup(s, cut); args[nk++] = xstrndup(s + cut, m - cut); }
+                    else args[nk++] = xstrndup(s, m);
+                }
+            }
+            free(tok);
+            valid = nk == SH[op].nk;
+            if (valid) {
+                for (k2 = 0; k2 < nk; k2++) {
+                    char kind = SH[op].kinds[k2]; const char *g = args[k2]; long long v; int inr = 0, re = int_re(g);
+                    if (kind == 'r') valid &= strlen(g) == 2 && g[0] == 'r' && g[1] >= '0' && g[1] <= '7';
+                    else if (kind == 'i') { valid &= re; if (!(re && int0(g, &v, &inr) && inr)) valid = 0; }
+                    else { valid &= isname(g, strlen(g)) || re; if (re && !(int0(g, &v, &inr) && inr)) valid = 0; }
+                }
+            }
+            if (nul) valid = 0;   /* an operand containing NUL is never a register, name or number (args are cut at NUL) */
+            if (valid && (!strcmp(SH[op].op, ".ld") || !strcmp(SH[op].op, ".st"))) {
+                long long v; int inr; int0(args[3], &v, &inr); valid &= v == 1 || v == 2 || v == 4 || v == 8;
+            }
+            if (valid && !strcmp(SH[op].op, ".hostaddr")) { long long v; int inr; int0(args[1], &v, &inr); valid &= v >= 0 && v < 4; }
+            if (!strcmp(SH[op].op, ".hostaddr") || !strcmp(SH[op].op, ".hostcall")) bad = 1;   /* host ABI requires target validation */
+            if (!valid) { bad = 1; for (k2 = 0; k2 < nk; k2++) free(args[k2]); free(args); continue; }
+            for (k2 = 0; k2 < nk; k2++) if (SH[op].kinds[k2] == 'i') {
+                long long v; int inr; char tt[32]; int0(args[k2], &v, &inr); snprintf(tt, sizeof tt, "%lld", v); free(args[k2]); args[k2] = xstrdup(tt);
+            }
+            row->kind = K_INS; row->op = op; row->nargs = nk; row->args = args; pc++;
+        }
+    }
+    /* referenced = labels | data names | NAME operands of kind L/s */
+    {
+        size_t z; int k2;
+        for (z = 0; z < labels.cap; z++) if (labels.k[z]) map_put(&refd, labels.k[z], strlen(labels.k[z]), 1);
+        for (z = 0; z < data.cap; z++) if (data.k[z]) map_put(&refd, data.k[z], strlen(data.k[z]), 1);
+        for (li = 0; li < nlines; li++) if (rows[li].kind == K_INS)
+            for (k2 = 0; k2 < rows[li].nargs; k2++) {
+                char kind = SH[rows[li].op].kinds[k2]; const char *g = rows[li].args[k2];
+                if ((kind == 'L' || kind == 's') && isname(g, strlen(g))) map_put(&refd, g, strlen(g), 1);
+            }
+    }
+    if (nlines > 32768 || pc >= 32768 || refd.n > 8192) {
+        out = fallback(raw, n, outn);
+        goto done;
+    }
+    {   size_t z; for (z = 0; z < data.cap; z++) if (data.k[z] && map_has(&labels, data.k[z])) bad = 1; }   /* code/data ambiguity */
+    {
+        int *minlab = xcalloc((size_t)pc + 1, sizeof *minlab), *prolog = xcalloc((size_t)nlab + 1, sizeof *prolog);
+        char *anchor = xcalloc((size_t)nlab + 1, 1), *isstart = xcalloc(nlines, 1), *alive, *root;
+        int *owner = xcalloc(nlines, sizeof *owner), nunits = 0, *ustart, *uend, *ucallr, *efrom = 0, *eto = 0, ne = 0, ecap = 0;
+        int k2, u;
+        static const char *special[4] = { "_start", "main", "__init", "__main_ret" };
+        for (k2 = 0; k2 <= pc; k2++) minlab[k2] = -1;
+        for (li = 0; li < nlines; li++) if (rows[li].kind == K_LABEL && minlab[rows[li].pc] < 0) minlab[rows[li].pc] = (int)li;
+        /* prologues: the four instructions after the label (labels skipped, data stops) */
+        for (k2 = 0; k2 < nlab; k2++) {
+            const Row *f[4]; int nf = 0;
+            for (li = (size_t)lab_line[k2] + 1; li < nlines; li++) {
+                if (rows[li].kind == K_LABEL) continue;
+                if (rows[li].kind == K_INS) f[nf++] = &rows[li];
+                else if (rows[li].kind == K_DATA) break;
+                if (nf == 4) break;
+            }
+            if (nf == 4 && is_op(f[0], ".frame") && !strcmp(f[0]->args[0], "8")
+                && is_op(f[1], "store64") && !strcmp(f[1]->args[0], "r7") && !strcmp(f[1]->args[1], "0") && !strcmp(f[1]->args[2], "r6")
+                && is_op(f[2], "mov") && !strcmp(f[2]->args[0], "r6") && !strcmp(f[2]->args[1], "r7")
+                && is_op(f[3], ".frame") && f[3]->args[0][0] != '-')
+                prolog[k2] = 1;
+        }
+        for (k2 = 0; k2 < nlab; k2++) if (prolog[k2]) anchor[k2] = 1;
+        for (k2 = 0; k2 < 4; k2++) { int id = map_get(&labels, special[k2], strlen(special[k2])); if (id >= 0) anchor[id] = 1; }
+        for (li = 0; li < nlines; li++) if (is_op(&rows[li], "call")) {
+            int id = map_get(&labels, rows[li].args[0], strlen(rows[li].args[0]));
+            if (id < 0) bad = 1; else anchor[id] = 1;
+        }
+        for (k2 = 0; k2 < nlab; k2++) if (anchor[k2]) isstart[minlab[rows[lab_line[k2]].pc]] = 1;
+        isstart[0] = 1;
+        for (li = 0; li < nlines; li++) nunits += isstart[li];
+        ustart = xcalloc((size_t)nunits, sizeof *ustart); uend = xcalloc((size_t)nunits, sizeof *uend); ucallr = xcalloc((size_t)nunits, sizeof *ucallr);
+        u = -1;
+        for (li = 0; li < nlines; li++) { if (isstart[li]) { u++; ustart[u] = (int)li; if (u) uend[u - 1] = (int)li; } owner[li] = u; }
+        uend[nunits - 1] = (int)nlines;
+        root = xcalloc((size_t)nunits, 1); alive = xcalloc((size_t)nunits, 1);
+        {
+            int st = map_get(&labels, "_start", 6);
+            if (st >= 0) root[owner[lab_line[st]]] = 1;
+            else for (li = 0; li < nlines; li++) if (rows[li].kind == K_INS) { root[owner[li]] = 1; break; }
+            for (k2 = 1; k2 < 4; k2++) { int id = map_get(&labels, special[k2], strlen(special[k2])); if (id >= 0) root[owner[lab_line[id]]] = 1; }
+        }
+#define EDGE(a, b) do { if (ne == ecap) { ecap = ecap ? 2 * ecap : 256; efrom = xrealloc(efrom, (size_t)ecap * sizeof *efrom); eto = xrealloc(eto, (size_t)ecap * sizeof *eto); } efrom[ne] = (a); eto[ne++] = (b); } while (0)
+        for (li = 0; li < nlines; li++) {
+            const Row *r = &rows[li]; const char *o;
+            if (r->kind != K_INS) continue;
+            o = SH[r->op].op;
+            if (!strcmp(o, "call") || !strcmp(o, "jump") || !strcmp(o, "jumpz")) {
+                const char *tg = r->args[r->nargs - 1]; int id = map_get(&labels, tg, strlen(tg));
+                if (id < 0) bad = 1; else EDGE(owner[li], owner[lab_line[id]]);
+            } else if (!strcmp(o, ".lea")) {
+                const char *tg = r->args[1]; int id = map_get(&labels, tg, strlen(tg));
+                if (id >= 0) root[owner[lab_line[id]]] = 1;
+                else if (!map_has(&data, tg)) { long long v; int inr; if (!int_re(tg) || !int0(tg, &v, &inr)) bad = 1; }
+            }
+            if (!strcmp(o, "callr") || !strcmp(o, "callm")) ucallr[owner[li]] = 1;
+        }
+        for (u = 0; u + 1 < nunits; u++) {   /* fall through unless the unit ends in ret/jump/.exit */
+            int last = -1; size_t z;
+            for (z = (size_t)ustart[u]; z < (size_t)uend[u]; z++) if (rows[z].kind == K_INS) last = (int)z;
+            if (last < 0 || !(is_op(&rows[last], "ret") || is_op(&rows[last], "jump") || is_op(&rows[last], ".exit"))) EDGE(u, u + 1);
+        }
+#undef EDGE
+        {   /* reachability from the roots; a reachable callr unit is a fallback reason */
+            int *queue = xcalloc((size_t)nunits, sizeof *queue), qh = 0, qt = 0, *estart = xcalloc((size_t)nunits + 1, sizeof *estart), *eadj = xcalloc((size_t)ne + 1, sizeof *eadj), *fill;
+            for (k2 = 0; k2 < ne; k2++) estart[efrom[k2] + 1]++;
+            for (u = 0; u < nunits; u++) estart[u + 1] += estart[u];
+            fill = xcalloc((size_t)nunits + 1, sizeof *fill); memcpy(fill, estart, (size_t)nunits * sizeof *fill);
+            for (k2 = 0; k2 < ne; k2++) eadj[fill[efrom[k2]]++] = eto[k2];
+            for (u = 0; u < nunits; u++) if (root[u]) { alive[u] = 1; queue[qt++] = u; }
+            while (qh < qt) {
+                int w = queue[qh++];
+                if (ucallr[w]) { bad = 1; break; }
+                for (k2 = estart[w]; k2 < estart[w + 1]; k2++) if (!alive[eadj[k2]]) { alive[eadj[k2]] = 1; queue[qt++] = eadj[k2]; }
+            }
+            free(queue); free(estart); free(eadj); free(fill);
+        }
+        if (bad) for (u = 0; u < nunits; u++) alive[u] = 1;
+        for (li = 0; li < nlines; li++) if (rows[li].kind == K_DATA || alive[owner[li]]) bput(&ob, raw + ls[li], le[li] - ls[li]);
+        if (!ob.p) bput(&ob, "", 0);
+        out = (unsigned char *)ob.p; *outn = ob.n;
+        free(minlab); free(prolog); free(anchor); free(isstart); free(alive); free(root); free(owner);
+        free(ustart); free(uend); free(ucallr); free(efrom); free(eto);
+    }
+done:
+    for (li = 0; li < nlines; li++) { int k2; free(rows[li].name); for (k2 = 0; k2 < rows[li].nargs; k2++) free(rows[li].args[k2]); free(rows[li].args); }
+    free(rows); free(ls); free(le); free(lab_line); free(lab_name);
+    map_free(&labels); map_free(&data); map_free(&refd);
+    return out;
+}
+
+/* ---- subprocess.run(cmd, cwd=..., capture_output=True, timeout=...) ------------------------------------------- */
+typedef struct { char *v[64]; int path[64]; int n; } Cmd;   /* path: the .py passed a Path (repr PosixPath(...)) */
+static void ca(Cmd *c, const char *s, int path) { c->v[c->n] = xstrdup(s); c->path[c->n++] = path; c->v[c->n] = 0; }
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static int tmpfile_fd(char *name) { strcpy(name, "/tmp/unisacc-prune-cxXXXXXX"); return mkstemp(name); }
+static void cmd_repr_str(Buf *b, const Cmd *c) {   /* str(list(map(str, cmd))) */
+    int i;
+    bputc(b, '[');
+    for (i = 0; i < c->n; i++) { if (i) bputs(b, ", "); repr_str(b, c->v[i], strlen(c->v[i])); }
+    bputc(b, ']');
+}
+static int spawn(const Cmd *c, int cwd_root, int limit, unsigned char **out, size_t *outn, unsigned char **err, size_t *errn) {
+    char on[64], en[64]; int ofd = tmpfile_fd(on), efd = tmpfile_fd(en), ep[2], st = 0, rc, e = 0; pid_t pid; double t0 = now();
+    long nap = 200;
+    if (ofd < 0 || efd < 0 || pipe(ep) != 0) raise_os(errno, 0);
+    fcntl(ep[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) raise_os(errno, 0);
+    if (pid == 0) {
+        int er;
+        close(ep[0]);
+        if (cwd_root && chdir(ROOT) != 0) { er = errno; if (write(ep[1], &er, sizeof er) < 0) {} _exit(255); }
+        dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
+        execvp(c->v[0], c->v);
+        er = errno; if (write(ep[1], &er, sizeof er) < 0) {} _exit(255);
+    }
+    close(ep[1]); close(ofd); close(efd);
+    if (read(ep[0], &e, sizeof e) != (ssize_t)sizeof e) e = 0;
+    close(ep[0]);
+    if (e) { waitpid(pid, &st, 0); unlink(on); unlink(en); raise_os(e, e == ENOENT && !cwd_root ? c->v[0] : c->v[0]); }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) { unlink(on); unlink(en); raise_os(errno, 0); }
+        if (now() - t0 > (double)limit) {
+            Buf m = { 0 }; char t[48];
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); unlink(on); unlink(en);
+            bputs(&m, "Command '"); cmd_repr_str(&m, c); snprintf(t, sizeof t, "' timed out after %d seconds", limit); bputs(&m, t);
+            raise_("subprocess.TimeoutExpired", m.p);
+        }
+        usleep((useconds_t)nap); if (nap < 5000) nap += nap / 2;
+    }
+    rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    *out = read_bytes(on, outn); *err = read_bytes(en, errn);
+    unlink(on); unlink(en);
+    return rc;
+}
+
+/* ---- the checker ------------------------------------------------------------------------------------------------ */
+static double DEADLINE; static J *COMMANDS;
+typedef struct { unsigned char *out, *err; size_t outn, errn; int rc; } Res;
+static Res run(const Cmd *c, int limit) {
+    Res r; double t0; char hex[65], rs[32]; J *rec;
+    if (!(now() + limit < DEADLINE)) assert_fail("bounded slice exhausted");
+    t0 = now();
+    r.rc = spawn(c, 1, limit, &r.out, &r.outn, &r.err, &r.errn);
+    rec = jnew(J_OBJ);
+    {   J *argv = jnew(J_ARR); int i; for (i = 0; i < c->n; i++) jadd(argv, 0, jstrz(c->v[i])); jadd(rec, "argv", argv); }
+    jadd(rec, "rc", jint(r.rc));
+    snprintf(rs, sizeof rs, "%.4f", now() - t0); jadd(rec, "seconds", jflt(strtod(rs, 0)));
+    sha_hex(r.out, r.outn, hex); jadd(rec, "stdout_sha256", jstrz(hex));
+    jadd(rec, "stderr", jstr((const char *)r.err, r.errn, 1));
+    jadd(COMMANDS, 0, rec);
+    if (r.rc != 0) {   /* assert r.returncode==0,(cmd,r.returncode,r.stderr) */
+        Buf m = { 0 }; int i;
+        bputs(&m, "(["); for (i = 0; i < c->n; i++) { if (i) bputs(&m, ", "); if (c->path[i]) repr_path(&m, c->v[i]); else repr_str(&m, c->v[i], strlen(c->v[i])); }
+        bputs(&m, "], "); bputi(&m, r.rc); bputs(&m, ", "); repr_bytes(&m, r.err, r.errn); bputc(&m, ')');
+        assert_fail(m.p);
+    }
+    return r;
+}
+static void res_free(Res *r) { free(r->out); free(r->err); }
+
+static const char *USAGE =
+    "usage: check.py [-h] [--output OUTPUT] [--probes PROBES] [--calc CALC]\n"
+    "                [--ua UA] [--start START] [--count COUNT] [--build]\n";
+static const char *HELP_REST =
+    "\n"
+    "Bounded private qualification, no default compiler/cache/output directory.\n"
+    "python3 exec/prune/check.py --output PRIVATE --probes PRIVATE_PROBES --calc\n"
+    "CALC --ua PRIVATE_UA Without --probes, fixed source/hand fixtures are sampled\n"
+    "into the private output. PRUNE_PART=0..3 selects bounded groups; --ua or\n"
+    "PRUNE_UA is required.\n"
+    "\n"
+    "options:\n"
+    "  -h, --help       show this help message and exit\n"
+    "  --output OUTPUT\n"
+    "  --probes PROBES\n"
+    "  --calc CALC\n"
+    "  --ua UA\n"
+    "  --start START\n"
+    "  --count COUNT\n"
+    "  --build\n";
+static void usage_error(const char *msg) { fflush(stdout); fprintf(stderr, "%scheck.py: error: %s\n", USAGE, msg); exit(2); }
+/* int(s) as argparse's type=int: surrounding whitespace, a sign, digits with single underscores between */
+static int py_int(const char *s, long long *v) {
+    const char *p = s, *e = s + strlen(s); int neg = 0, any = 0; unsigned long long m = 0, cap = 1ULL << 62;
+    while (p < e && pyws((unsigned char)*p)) p++;
+    while (e > p && pyws((unsigned char)e[-1])) e--;
+    if (p < e && (*p == '+' || *p == '-')) { neg = *p == '-'; p++; }
+    if (p >= e) return 0;
+    for (; p < e; p++) {
+        if (*p == '_') { if (!any || p + 1 >= e || p[1] < '0' || p[1] > '9') return 0; continue; }
+        if (*p < '0' || *p > '9') return 0;
+        if (*p != '0' || any) {}
+        any = 1; if (m < cap) m = m * 10 + (unsigned)(*p - '0');
+    }
+    if (m > cap) m = cap;
+    *v = neg ? -(long long)m : (long long)m;
+    return 1;
+}
+static int looks_negative_number(const char *s) {   /* argparse's '^-\d+$|^-\d*\.\d+$' */
+    const char *p = s + 1; int d = 0, dot = 0;
+    if (s[0] != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') d = 1; else if (*p == '.' && !dot) { dot = 1; d = 0; } else return 0; }
+    return d;
+}
+
+typedef struct { char *dir, *name, *path; } Ent;
+static int cmp_ent(const void *a, const void *b) {
+    const Ent *x = a, *y = b; int c = strcmp(x->dir, y->dir);
+    return c ? c : strcmp(x->name, y->name);
+}
+/* PROBES.glob('*' '/' PATTERN): every directory entry of PROBES (hidden ones too) that is a directory, then its
+   entries whose name matches (MODE 0: O[012].tape; MODE 1: *.tape not starting with O) */
+static Ent *glob2(const char *probes, int mode, int *count) {
+    DIR *d = opendir(probes); struct dirent *e; Ent *v = 0; int n = 0;
+    if (!d) { *count = 0; return 0; }
+    while ((e = readdir(d))) {
+        char *sub; DIR *d2; struct dirent *f;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        sub = pjoin(probes, e->d_name);
+        if (!is_dir(sub) || !(d2 = opendir(sub))) { free(sub); continue; }
+        while ((f = readdir(d2))) {
+            const char *nm = f->d_name; size_t l = strlen(nm); int ok;
+            if (!strcmp(nm, ".") || !strcmp(nm, "..")) continue;
+            if (mode == 0) ok = l == 7 && nm[0] == 'O' && nm[1] >= '0' && nm[1] <= '2' && !strcmp(nm + 2, ".tape");
+            else ok = l >= 5 && !strcmp(nm + l - 5, ".tape") && nm[0] != 'O';
+            if (!ok) continue;
+            v = xrealloc(v, (size_t)(n + 1) * sizeof *v);
+            v[n].dir = xstrdup(e->d_name); v[n].name = xstrdup(nm); v[n].path = pjoin(sub, nm); n++;
+        }
+        closedir(d2); free(sub);
+    }
+    closedir(d);
+    if (n) qsort(v, (size_t)n, sizeof *v, cmp_ent);
+    *count = n; return v;
+}
+static char *python_exe(void) {   /* sys.executable: python3 as PATH finds it */
+    const char *path = getenv("PATH"); char *dup, *s, *tok;
+    if (!path) return xstrdup("python3");
+    dup = xstrdup(path);
+    for (s = dup; ; s = 0) {
+        char cand[4200]; tok = strtok(s, ":");
+        if (!tok) break;
+        snprintf(cand, sizeof cand, "%s/python3", *tok ? tok : ".");
+        if (access(cand, X_OK) == 0 && is_file(cand)) { char *r = pnorm(cand); free(dup); return r; }
+    }
+    free(dup); return xstrdup("python3");
+}
+
+int main(int argc, char **argv) {
+    char *output = 0, *probes = 0, *calc = 0, *ua = 0, *ex; long long start = 0, count = 10; int build = 0, i;
+    char *d, *tbl, *net, *exe, *uexe, *missing, hex[65], *py;
+    Cmd compiler = { { 0 }, { 0 }, 0 };
+    char **samples = 0; int nsamples = 0, control_from;
+    static const char *const controls[8] = { "cr", "underscores", "wide", "host-slot", "bad-width", "too-large", "too-many-rows", "too-many-names" };
+    J *records, *receipt;
+    {   /* ROOT = Path(__file__).resolve().parents[2] (a cached binary: the current directory) */
+        char self[4096]; size_t l;
+        if (realpath(argv[0], self) && (l = strlen(self)) > 3 && !strcmp(self + l - 3, ".cx")) {
+            int k; for (k = 0; k < 3; k++) { char *sl = strrchr(self, '/'); if (sl && sl != self) *sl = 0; else { strcpy(self, "/"); break; } }
+            snprintf(ROOT, sizeof ROOT, "%s", self);
+        } else if (!getcwd(ROOT, sizeof ROOT)) return 1;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--referee-pin")) referee_pin(1);   /* maintenance: print the current pin */
+    referee_pin(0);
+    schema();
+    /* argparse */
+    {
+        static const char *const opts[8] = { "--help", "--output", "--probes", "--calc", "--ua", "--start", "--count", "--build" };
+        Buf extras = { 0 };
+        ex = getenv("PRUNE_UA");
+        if (ex) ua = pnorm(ex);
+        for (i = 1; i < argc; i++) {
+            const char *a = argv[i], *eq, *val = 0; char key[256]; int which = -1, k, nm = 0, m[8];
+            if (a[0] != '-' || !a[1] || (a[1] != '-' && looks_negative_number(a))) {
+                if (extras.n) bputc(&extras, ' '); bputs(&extras, a); continue;
+            }
+            if (!strcmp(a, "--")) { for (; i < argc; i++) { if (extras.n) bputc(&extras, ' '); bputs(&extras, argv[i]); } break; }
+            if (a[1] != '-') {   /* single dash: -h (alone or -hX is not ours) */
+                if (!strcmp(a, "-h")) { fputs(USAGE, stdout); fputs(HELP_REST, stdout); return 0; }
+                if (extras.n) bputc(&extras, ' '); bputs(&extras, a); continue;
+            }
+            eq = strchr(a, '=');
+            snprintf(key, sizeof key, "%.*s", eq ? (int)(eq - a) : (int)strlen(a), a);
+            if (eq) val = eq + 1;
+            for (k = 0; k < 8; k++) if (!strcmp(opts[k], key)) which = k;
+            if (which < 0) {
+                for (k = 0; k < 8; k++) if (!strncmp(opts[k], key, strlen(key))) m[nm++] = k;
+                if (nm == 1) which = m[0];
+                else if (nm > 1) {
+                    Buf msg = { 0 };
+                    bputs(&msg, "ambiguous option: "); bputs(&msg, a); bputs(&msg, " could match ");
+                    for (k = 0; k < nm; k++) { if (k) bputs(&msg, ", "); bputs(&msg, opts[m[k]]); }
+                    usage_error(msg.p);
+                }
+            }
+            if (which < 0) { if (extras.n) bputc(&extras, ' '); bputs(&extras, a); continue; }
+            if (which == 0) {
+                if (val) { Buf msg = { 0 }; bputs(&msg, "argument -h/--help: ignored explicit argument "); repr_str(&msg, val, strlen(val)); usage_error(msg.p); }
+                fputs(USAGE, stdout); fputs(HELP_REST, stdout); return 0;
+            }
+            if (which == 7) {
+                if (val) { Buf msg = { 0 }; bputs(&msg, "argument --build: ignored explicit argument "); repr_str(&msg, val, strlen(val)); usage_error(msg.p); }
+                build = 1; continue;
+            }
+            if (!val) {
+                if (i + 1 >= argc || (argv[i + 1][0] == '-' && argv[i + 1][1] && !looks_negative_number(argv[i + 1]))) {
+                    Buf msg = { 0 }; bputs(&msg, "argument "); bputs(&msg, opts[which]); bputs(&msg, ": expected one argument"); usage_error(msg.p);
+                }
+                val = argv[++i];
+            }
+            switch (which) {
+            case 1: free(output); output = pnorm(val); break;
+            case 2: free(probes); probes = pnorm(val); break;
+            case 3: free(calc); calc = pnorm(val); break;
+            case 4: free(ua); ua = pnorm(val); break;
+            case 5: case 6: {
+                long long v;
+                if (!py_int(val, &v)) { Buf msg = { 0 }; bputs(&msg, "argument "); bputs(&msg, opts[which]); bputs(&msg, ": invalid int value: "); repr_str(&msg, val, strlen(val)); usage_error(msg.p); }
+                if (which == 5) start = v; else count = v;
+                break;
+            }
+            }
+        }
+        if (extras.n) { Buf msg = { 0 }; bputs(&msg, "unrecognized arguments: "); bputs(&msg, extras.p); usage_error(msg.p); }
+    }
+    if (!output) {   /* tempfile.mkdtemp(prefix='unisacc-prune-check-', dir='/tmp') */
+        char t[] = "/tmp/unisacc-prune-check-XXXXXX";
+        if (!mkdtemp(t)) raise_os(errno, t);
+        output = xstrdup(t);
+    }
+    if (!ua) assert_fail("--ua or PRUNE_UA required; no default UA");
+    ex = getenv("PRUNE_PART");
+    if (ex) {
+        if (strlen(ex) != 1 || ex[0] < '0' || ex[0] > '3') assert_fail(0);
+        start = (ex[0] - '0') * 10; count = 10; build = 1;
+    }
+    if (!(output[0] == '/' && (!strncmp(output, "/tmp/", 5) || !strncmp(output, "/private/tmp/", 13)))) assert_fail(0);
+    if (ua[0] != '/') assert_fail("explicit absolute compiler path required");
+    if (!is_file(ua)) assert_fail("missing explicit compiler");
+    mkdir_parents(output);
+    DEADLINE = now() + 53; COMMANDS = jnew(J_ARR);
+    py = python_exe();
+    d = pjoin(output, "prune.json"); tbl = pjoin(output, "prune.tbl"); net = pjoin(output, "prune.net");
+    exe = pjoin(output, "executor"); uexe = pjoin(output, "executor-unisacc");
+    {   size_t l = strlen(pname(ua)); const char *nm = pname(ua);
+        if (l > 4 && !strcmp(nm + l - 4, ".com")) { ca(&compiler, "/bin/sh", 1); ca(&compiler, ua, 1); } else ca(&compiler, ua, 1); }
+    if (build) {
+        Cmd c; Res r; char p1[4200];
+#define CMD0() (c.n = 0, c.v[0] = 0)
+        CMD0(); ca(&c, py, 0); snprintf(p1, sizeof p1, "%s/exec/build/gen.py", ROOT); ca(&c, p1, 1); ca(&c, "prune", 0); ca(&c, d, 1); r = run(&c, 10); res_free(&r);
+        CMD0(); ca(&c, py, 0); snprintf(p1, sizeof p1, "%s/exec/c/tbl.py", ROOT); ca(&c, p1, 1); ca(&c, d, 1); ca(&c, tbl, 1); r = run(&c, 10); res_free(&r);
+        CMD0(); ca(&c, py, 0); snprintf(p1, sizeof p1, "%s/exec/c/net.py", ROOT); ca(&c, p1, 1); ca(&c, tbl, 1); ca(&c, net, 1); r = run(&c, 10); res_free(&r);
+        snprintf(p1, sizeof p1, "%s/exec/c/run.c", ROOT);
+        CMD0(); ca(&c, "cc", 0); ca(&c, "-O2", 0); ca(&c, p1, 1); ca(&c, "-o", 0); ca(&c, exe, 1); r = run(&c, 15); res_free(&r);
+        CMD0(); for (i = 0; i < compiler.n; i++) ca(&c, compiler.v[i], 1); ca(&c, "-O0", 0); ca(&c, p1, 1); ca(&c, "-o", 0); ca(&c, uexe, 1); r = run(&c, 15); res_free(&r);
+        CMD0(); ca(&c, exe, 1); ca(&c, "--check-net", 0); ca(&c, tbl, 1); ca(&c, net, 1); r = run(&c, 10); res_free(&r);
+        CMD0(); ca(&c, uexe, 1); ca(&c, "--check-net", 0); ca(&c, tbl, 1); ca(&c, net, 1); r = run(&c, 10); res_free(&r);
+    }
+    if (!probes) {
+        char p1[4200]; size_t fn; unsigned char *ft; J *fx; size_t ci, si;
+        probes = pjoin(output, "samples"); mkdir_one(probes, 1);
+        snprintf(p1, sizeof p1, "%s/exec/prune/fixtures.json", ROOT);
+        ft = read_bytes(p1, &fn); fx = jloads(ft, fn); free(ft);
+        if (fx->t != J_ARR) raise_("TypeError", "string indices must be integers, not 'str'");
+        for (ci = 0; ci < fx->len; ci++) {
+            J *cs = fx->v[ci], *group = jget(cs, "group"), *src = jget(cs, "sources"), *man; char *folder; char **srcs = 0; int level;
+            if (group->t != J_STR) raise_("TypeError", "unsupported operand type(s) for /: 'PosixPath' and 'int'");
+            folder = pjoin(probes, group->s); mkdir_one(folder, 1);
+            if (src->t != J_OBJ) raise_("AttributeError", "'list' object has no attribute 'items'");
+            srcs = xcalloc(src->len + 1, sizeof *srcs);
+            for (si = 0; si < src->len; si++) {
+                if (src->v[si]->t != J_STR) raise_("TypeError", "data must be str, not int");
+                srcs[si] = pjoin(folder, src->k[si]); write_bytes(srcs[si], src->v[si]->s, src->v[si]->n);
+            }
+            for (level = 0; level < 3; level++) {
+                Cmd c; Res r; char o[8], tp[4200]; int k;
+                c.n = 0; for (k = 0; k < compiler.n; k++) ca(&c, compiler.v[k], 1);
+                ca(&c, "-S", 0); snprintf(o, sizeof o, "-O%d", level); ca(&c, o, 0);
+                for (si = 0; si < src->len; si++) ca(&c, srcs[si], 1);
+                r = run(&c, 5);
+                if (!r.outn) assert_fail("empty source sample");
+                snprintf(tp, sizeof tp, "%s/O%d.tape", folder, level); write_bytes(tp, r.out, r.outn); res_free(&r);
+            }
+            man = jget(cs, "manual");
+            if (man->t != J_OBJ) raise_("AttributeError", "'list' object has no attribute 'items'");
+            for (si = 0; si < man->len; si++) {
+                char *mp = pjoin(folder, man->k[si]);
+                if (man->v[si]->t != J_STR) raise_("TypeError", "data must be str, not int");
+                write_bytes(mp, man->v[si]->s, man->v[si]->n); free(mp);
+            }
+            free(folder);
+        }
+        {   Cmd c; Res r; int k;
+            free(calc); calc = pjoin(output, "calc.tape");
+            c.n = 0; for (k = 0; k < compiler.n; k++) ca(&c, compiler.v[k], 1);
+            ca(&c, "-S", 0); ca(&c, "-O0", 0); snprintf(p1, sizeof p1, "%s/examples/apps/calc.c", ROOT); ca(&c, p1, 1);
+            r = run(&c, 5);
+            if (!r.outn) assert_fail("empty calc");
+            write_bytes(calc, r.out, r.outn); res_free(&r);
+        }
+    }
+    if (!(is_dir(probes) && calc && is_file(calc))) assert_fail("missing required qualification input");
+    {
+        int n0, n1, k; Ent *g0 = glob2(probes, 0, &n0), *g1 = glob2(probes, 1, &n1); char t[32];
+        samples = xcalloc((size_t)(n0 + n1 + 1 + 10), sizeof *samples);
+        for (k = 0; k < n0; k++) samples[nsamples++] = g0[k].path;
+        for (k = 0; k < n1; k++) samples[nsamples++] = g1[k].path;
+        samples[nsamples++] = calc;
+        if (nsamples != 30) { snprintf(t, sizeof t, "%d", nsamples); assert_fail(t); }
+    }
+    control_from = nsamples;
+    {   /* the common-domain controls: never execute fixture tape as a program */
+        static const char base[] = "_start:\n  call main\n  .exit r0\ndead:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  ret\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  ret\n";
+        int k;
+        for (k = 0; k < 10; k++) {
+            Buf b = { 0 }; char nm[64]; const char *s;
+            switch (k) {
+            case 0: for (s = base; *s; s++) bputc(&b, *s == '\n' ? '\r' : *s); break;
+            case 1: case 2: {   /* replace every '.frame 0' */
+                const char *rep = k == 1 ? ".frame 0_0" : ".frame 9223372036854775808";
+                for (s = base; *s;) { if (!strncmp(s, ".frame 0", 8)) { bputs(&b, rep); s += 8; } else bputc(&b, *s++); }
+                break;
+            }
+            case 3: case 4: case 9: {
+                const char *from = k == 9 ? "main:\n" : "  ret\nmain:";
+                const char *to = k == 3 ? "  .hostaddr r0, 4\n  ret\nmain:" : k == 4 ? "  .ld r0, r1, 3\n  ret\nmain:" : "main:\n  .libraryfn r0, 1\n";
+                size_t fl = strlen(from);
+                for (s = base; *s;) { if (!strncmp(s, from, fl)) { bputs(&b, to); s += fl; } else bputc(&b, *s++); }
+                break;
+            }
+            case 5: { size_t z; for (z = 0; z < 2097152 + 1; z++) bputc(&b, ';'); break; }
+            case 6: { int z; for (z = 0; z < 32769; z++) bputs(&b, ".bss z 0\n"); break; }
+            case 7: { int z; char t[32]; for (z = 0; z < 8193; z++) { snprintf(t, sizeof t, "name%d:\n", z); bputs(&b, t); } break; }
+            case 8: { const char *from = "dead:\n"; for (s = base; *s;) { if (!strncmp(s, from, 6)) { bputs(&b, ".bss data 001024\ndead:\n"); s += 6; } else bputc(&b, *s++); } break; }
+            }
+            snprintf(nm, sizeof nm, "%s.tape", k < 8 ? controls[k] : k == 8 ? "bss-leadingzeros" : "libraryfn");
+            samples[nsamples] = pjoin(output, nm); write_bytes(samples[nsamples], b.p ? b.p : "", b.n); nsamples++;
+            free(b.p);
+        }
+    }
+    (void)control_from;
+    records = jnew(J_ARR);
+    if (!(start >= 0 && count > 0 && start < nsamples)) assert_fail("empty qualification slice");
+    missing = pjoin(output, "missing-required.tape");
+    {   struct stat st;
+        if (stat(missing, &st) == 0) assert_fail("missing-input fixture unexpectedly present");
+        if (errno != ENOENT) raise_os(errno, missing);
+    }
+    {   Cmd c; unsigned char *o, *e; size_t on, en; int rc;
+        c.n = 0; ca(&c, exe, 0); ca(&c, net, 0); ca(&c, missing, 0);
+        rc = spawn(&c, 0, 5, &o, &on, &e, &en);
+        if (!(rc != 0 && !on)) assert_fail("missing input accepted");
+        free(o); free(e);
+    }
+    {
+        long long k, end = start + count < nsamples ? start + count : nsamples; long long runs_total = 0;
+        for (k = start; k < end; k++) {
+            const char *p = samples[k]; size_t rn, en; unsigned char *raw = read_bytes(p, &rn), *expected; J *rec, *runs; char h1[65]; int z, ctl = 0;
+            const char *runner[3] = { exe, exe, uexe }, *model[3] = { tbl, net, net };
+            if (!rn) { Buf m = { 0 }; bputs(&m, "('empty input sample', "); repr_path(&m, p); bputc(&m, ')'); assert_fail(m.p); }
+            expected = prune_text(raw, rn, &en);
+            rec = jnew(J_OBJ);
+            jadd(rec, "index", jint(k)); jadd(rec, "input", jstrz(p)); jadd(rec, "input_bytes", jint((long long)rn)); jadd(rec, "output_bytes", jint((long long)en));
+            sha_hex(raw, rn, h1); jadd(rec, "input_sha256", jstrz(h1)); sha_hex(expected, en, h1); jadd(rec, "output_sha256", jstrz(h1));
+            runs = jnew(J_ARR); jadd(rec, "runs", runs);
+            if (!en) { Buf m = { 0 }; bputs(&m, "('empty reference sample', "); repr_path(&m, p); bputc(&m, ')'); assert_fail(m.p); }
+            for (z = 0; z < 8; z++) { char nm[64]; snprintf(nm, sizeof nm, "%s.tape", controls[z]); if (!strcmp(pname(p), nm)) ctl = 1; }
+            if (ctl && !(en == rn && !memcmp(expected, raw, rn))) { Buf m = { 0 }; bputs(&m, "('control was pruned', "); repr_path(&m, p); bputc(&m, ')'); assert_fail(m.p); }
+            for (z = 0; z < 3; z++) {
+                Cmd c; Res r; J *one;
+                c.n = 0; ca(&c, runner[z], 1); ca(&c, model[z], 1); ca(&c, p, 1);
+                r = run(&c, 5);
+                if (!(r.outn == en && !memcmp(r.out, expected, en))) {
+                    Buf m = { 0 };
+                    bputc(&m, '('); repr_path(&m, p); bputs(&m, ", "); repr_path(&m, runner[z]); bputs(&m, ", "); repr_path(&m, model[z]);
+                    bputs(&m, ", "); bputi(&m, (long long)r.outn); bputs(&m, ", "); bputi(&m, (long long)en); bputc(&m, ')');
+                    assert_fail(m.p);
+                }
+                one = jnew(J_OBJ);
+                jadd(one, "executor", jstrz(runner[z])); jadd(one, "model", jstrz(model[z])); jadd(one, "rc", jint(r.rc));
+                jadd(one, "bytes_equal", jbool(1)); sha_hex(r.out, r.outn, h1); jadd(one, "sha256", jstrz(h1));
+                jadd(runs, 0, one); runs_total++;
+                res_free(&r);
+            }
+            jadd(records, 0, rec);
+            free(raw); free(expected);
+        }
+        receipt = jnew(J_OBJ);
+        jadd(receipt, "not_routed_or_shipped", jbool(1)); jadd(receipt, "missing_input_rejected", jbool(1));
+        {   char p1[4200]; size_t a1, a2, a3; unsigned char *b1, *b2, *b3; Buf g = { 0 }; J *models;
+            snprintf(p1, sizeof p1, "%s/unisa/prune.py", ROOT); file_sha(p1, hex); jadd(receipt, "reference_sha256", jstrz(hex));
+            snprintf(p1, sizeof p1, "%s/unisa/tape.py", ROOT); file_sha(p1, hex); jadd(receipt, "schema_sha256", jstrz(hex));
+            snprintf(p1, sizeof p1, "%s/exec/prune/gen-manifest.tsv", ROOT); b1 = read_bytes(p1, &a1);
+            snprintf(p1, sizeof p1, "%s/exec/prune/prune-result.tsv", ROOT); b2 = read_bytes(p1, &a2);
+            snprintf(p1, sizeof p1, "%s/exec/prune/prune-byte.tsv", ROOT); b3 = read_bytes(p1, &a3);
+            bput(&g, b1, a1); bput(&g, b2, a2); bput(&g, b3, a3); sha_hex(g.p, g.n, hex); jadd(receipt, "generator_sha256", jstrz(hex));
+            free(b1); free(b2); free(b3); free(g.p);
+            file_sha(ua, hex); jadd(receipt, "ua_sha256", jstrz(hex));
+            models = jnew(J_OBJ);
+            file_sha(d, hex); jadd(models, d, jstrz(hex)); file_sha(tbl, hex); jadd(models, tbl, jstrz(hex)); file_sha(net, hex); jadd(models, net, jstrz(hex));
+            jadd(receipt, "models", models);
+        }
+        jadd(receipt, "commands", COMMANDS); jadd(receipt, "cases", records);
+        {   Buf js = { 0 }, line = { 0 }; char nm[64], *outp; J *sum;
+            snprintf(nm, sizeof nm, "receipt-%lld.json", start); outp = pjoin(output, nm);
+            jdump(&js, receipt, 2, 0); bputc(&js, '\n'); write_bytes(outp, js.p, js.n);
+            sum = jnew(J_OBJ); jadd(sum, "receipt", jstrz(outp)); jadd(sum, "cases", jint((long long)records->len)); jadd(sum, "actual_runs", jint(runs_total));
+            jdump(&line, sum, -1, 0); bputc(&line, '\n');
+            fwrite(line.p, 1, line.n, stdout); fflush(stdout);
+        }
+    }
+    return 0;
+}

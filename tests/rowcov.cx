@@ -1,0 +1,930 @@
+#!/usr/bin/env -S unisacc.com -run
+/* rowcov.cx -- which transitions of the stage deltas the probe programs take, and which manifest rows they reach
+   (0.0.25 T2; research/t2-coverage-design.md).  Ported from tests/rowcov.py (2026-10-23, the owner's direction: the
+   toolchain moves off Python) -- the orchestration and every ratchet are here; the per-shard simulation stays Python.
+     usage (from the repository root): sh ./unisacc.com -run tests/rowcov.cx -- STAGE WHAT [N]
+       STAGE  pp | pp-locations | pp-shared | lex | parse2 | lower | enc
+       WHAT   build      the cached delta + side table ($X/rowcov/STAGE.{json,rows.tsv,key}, keyed by exec/ and weights/)
+              gateK/N    cached build + shard K of N + that shard's reached rows against tests/rowcov/STAGE.shards
+              unionN     cached build, wait (40 s) for the gate shards, rerun the stale ones, merge N (default 8)
+              all        fresh side table, 8 shards (4 at a time; parse2 8), merge 8
+              merge N    merge the N shard results: edge and row coverage, $X/rowcov/STAGE.cov.tsv, and the ratchet
+                         tests/rowcov/STAGE.union
+              K/N        one shard: run by tests/rowcov.py (see below)
+   Stdout, stderr, files written and exit status are the .py's (Python 3.14), including its print formats
+   (%.1f, %-34s) and the order of output between this process and the shard children it starts.
+   What remains Python: the shard itself (`STAGE K/N`) is the reference simulators exec/pp/sim.py, exec/lex/sim.py and
+   exec/assemble.py (~1000 lines of interpreter for the delta JSON); porting it is porting those simulators, so every
+   shard -- the ones this program starts and any `STAGE K/N` call -- is `python3 tests/rowcov.py STAGE K/N`, and the
+   delta builds are exec/build/gen.py and exec/pp/run.sh as in the .py.  An argument the .py would refuse with a
+   traceback (missing STAGE/WHAT, unknown stage, an unparsable K/N or N) is handed to the .py as well, so its message
+   and status are the .py's own.  Data the .py would crash on mid-run (a malformed shard JSON or side table, a bad
+   baseline line) is exit 1 with one `rowcov: error: ...` line on stderr instead of a Python traceback.
+   The root is the current directory (the gate runs from the repository root).  No #include: the prelude is built in;
+   union's 40 s wait reads the clock with date +%s (no time.h in the prelude until CX1). */
+
+/* ------------------------------------------------------------------ utilities */
+typedef struct { char *b; size_t n, cap; } Buf;
+static void *xmalloc(size_t n) {
+    void *p = malloc(n ? n : 1);
+    if (!p) { fflush(stdout); fprintf(stderr, "rowcov: error: out of memory\n"); exit(1); }
+    return p;
+}
+static void *xrealloc(void *o, size_t n) {
+    void *p = realloc(o, n ? n : 1);
+    if (!p) { fflush(stdout); fprintf(stderr, "rowcov: error: out of memory\n"); exit(1); }
+    return p;
+}
+static void bput(Buf *b, const void *s, size_t n) {
+    if (!b->b || b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64;
+        while (c < b->n + n + 1) c *= 2;
+        b->b = xrealloc(b->b, c); b->cap = c;
+    }
+    if (n) memcpy(b->b + b->n, s, n);
+    b->n += n; b->b[b->n] = 0;
+}
+static void bstr(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static char *cat(const char *a, const char *b, const char *c) {
+    size_t la = strlen(a), lb = strlen(b), lc = c ? strlen(c) : 0; char *r = xmalloc(la + lb + lc + 1);
+    memcpy(r, a, la); memcpy(r + la, b, lb); if (lc) memcpy(r + la + lb, c, lc); r[la + lb + lc] = 0; return r;
+}
+
+/* sys.exit(MSG): MSG on stderr, status 1 */
+static void die(const char *msg) { fflush(stdout); fprintf(stderr, "%s\n", msg); exit(1); }
+/* where the .py would raise (a traceback, status 1) */
+static void crash(const char *what, const char *arg) {
+    fflush(stdout); fprintf(stderr, "rowcov: error: %s%s%s\n", what, arg ? ": " : "", arg ? arg : ""); exit(1);
+}
+
+static int ARGC; static char **ARGV;
+/* hand the whole command line to the .py (its shard mode, or an argument it refuses with its own traceback) */
+static void delegate(void) {
+    char **a = xmalloc((size_t)(ARGC + 3) * sizeof *a); int i;
+    a[0] = "python3"; a[1] = "tests/rowcov.py";
+    for (i = 1; i < ARGC; i++) a[i + 1] = ARGV[i];
+    a[ARGC + 1] = 0;
+    fflush(stdout); fflush(stderr);
+    execvp(a[0], a);
+    crash("cannot run python3 tests/rowcov.py", 0);
+}
+
+/* int(S) for the ASCII forms: surrounding whitespace, a sign, digits with single underscores between them */
+static int isws(unsigned char c) { return c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x1f); }
+static int pyint(const char *s, size_t n, long long *v) {
+    size_t i = 0; int neg = 0, digits = 0, under = 0; unsigned long long x = 0;
+    while (n && isws((unsigned char)s[n - 1])) n--;
+    while (i < n && isws((unsigned char)s[i])) i++;
+    if (i < n && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
+    for (; i < n; i++) {
+        if (s[i] == '_') { if (!digits || under) return 0; under = 1; continue; }
+        if (s[i] < '0' || s[i] > '9') return 0;
+        if (x > 922337203685477579ULL) return 0;
+        x = x * 10 + (unsigned)(s[i] - '0'); digits++; under = 0;
+    }
+    if (!digits || under || x > 9223372036854775807ULL) return 0;
+    *v = neg ? -(long long)x : (long long)x; return 1;
+}
+
+/* pathlib's spelling of a path: no empty or "." parts, no trailing slash, "." for nothing */
+static char *pnorm(const char *s) {
+    Buf b = {0}; const char *p = s; int first = 1;
+    if (s[0] == '/') bstr(&b, (s[1] == '/' && s[2] != '/') ? "//" : "/");
+    else bput(&b, "", 0);
+    while (*p) {
+        const char *q;
+        while (*p == '/') p++;
+        q = p; while (*q && *q != '/') q++;
+        if (q > p && !(q - p == 1 && *p == '.')) {
+            if (!first) bstr(&b, "/");
+            bput(&b, p, (size_t)(q - p)); first = 0;
+        }
+        p = q;
+    }
+    if (!b.n) bstr(&b, ".");
+    return b.b;
+}
+/* Path(A) / B */
+static char *pjoin(const char *a, const char *b) {
+    size_t l = strlen(a);
+    if (!strcmp(a, ".")) return cat(b, "", 0);
+    if (l && a[l - 1] == '/') return cat(a, b, 0);
+    return cat(a, "/", b);
+}
+/* Path(P).name */
+static void pname(const char *p, size_t n, const char **s, size_t *l) {
+    size_t i = 0; *s = p; *l = 0;
+    while (i < n) {
+        size_t j;
+        while (i < n && p[i] == '/') i++;
+        j = i; while (j < n && p[j] != '/') j++;
+        if (j > i && !(j - i == 1 && p[i] == '.')) { *s = p + i; *l = j - i; }
+        i = j;
+    }
+}
+static int exists(const char *p) { struct stat s; return stat(p, &s) == 0; }
+
+/* str.splitlines() over text read in universal-newline mode: the length of the line break at P, 0 for none */
+static size_t lbreak(const char *p, const char *end) {
+    unsigned char c = (unsigned char)*p;
+    if (c == '\n' || c == '\v' || c == '\f' || c == 0x1c || c == 0x1d || c == 0x1e) return 1;
+    if (c == '\r') return (p + 1 < end && p[1] == '\n') ? 2 : 1;
+    if (c == 0xc2 && p + 1 < end && (unsigned char)p[1] == 0x85) return 2;
+    if (c == 0xe2 && p + 2 < end && (unsigned char)p[1] == 0x80 && ((unsigned char)p[2] == 0xa8 || (unsigned char)p[2] == 0xa9)) return 3;
+    return 0;
+}
+static int nextline(const char **pp, const char *end, const char **ls, size_t *ll) {
+    const char *p = *pp, *s = p; size_t b;
+    if (p >= end) return 0;
+    for (; p < end; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c > 0x1e && c != 0xc2 && c != 0xe2) continue;
+        if ((b = lbreak(p, end)) != 0) { *ls = s; *ll = (size_t)(p - s); *pp = p + b; return 1; }
+    }
+    *ls = s; *ll = (size_t)(p - s); *pp = end; return 1;
+}
+/* the next line split on tabs in one pass: up to 4 fields in F/FL, the field count in *NF */
+static int tsvline(const char **pp, const char *end, const char **f, size_t *fl, int *nf) {
+    const char *p = *pp, *s = p; int k = 0; size_t b = 0;
+    if (p >= end) return 0;
+    for (; p < end; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c > 0x1e && c != 0xc2 && c != 0xe2) continue;
+        if (c == '\t') { if (k < 4) { f[k] = s; fl[k] = (size_t)(p - s); } k++; s = p + 1; continue; }
+        if ((b = lbreak(p, end)) != 0) break;
+    }
+    if (k < 4) { f[k] = s; fl[k] = (size_t)(p - s); }
+    *nf = k + 1; *pp = p < end ? p + b : end;
+    return 1;
+}
+/* str.split() (ASCII whitespace): up to MAX fields, the count of all fields */
+static int wsplit(const char *s, size_t n, const char **f, size_t *fl, int max) {
+    size_t i = 0; int k = 0;
+    while (i < n) {
+        size_t j;
+        while (i < n && isws((unsigned char)s[i])) i++;
+        if (i >= n) break;
+        j = i; while (j < n && !isws((unsigned char)s[j])) j++;
+        if (k < max) { f[k] = s + i; fl[k] = j - i; }
+        k++; i = j;
+    }
+    return k;
+}
+
+/* ------------------------------------------------------------------ string sets and maps */
+static char *AR; static size_t ARN, ARCAP;
+static char *acopy(const char *s, size_t n) {
+    char *p;
+    if (!AR || ARN + n + 1 > ARCAP) { ARCAP = n + 1 > (1u << 20) ? n + 1 : (1u << 20); AR = xmalloc(ARCAP); ARN = 0; }
+    p = AR + ARN; if (n) memcpy(p, s, n); p[n] = 0; ARN += n + 1; return p;
+}
+typedef struct { char **k; size_t *l; void **v; size_t cap, n; } Set;
+static unsigned long long hsh(const char *s, size_t n) {
+    unsigned long long h = 1469598103934665603ULL; size_t i;
+    for (i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    return h;
+}
+static long sfind(const Set *s, const char *k, size_t n) {
+    size_t i;
+    if (!s->cap) return -1;
+    for (i = (size_t)hsh(k, n) & (s->cap - 1); s->k[i]; i = (i + 1) & (s->cap - 1))
+        if (s->l[i] == n && !memcmp(s->k[i], k, n)) return (long)i;
+    return -1;
+}
+static size_t sadd(Set *s, const char *k, size_t n, int *isnew) {
+    size_t i;
+    if ((s->n + 1) * 2 > s->cap) {
+        Set t; size_t j;
+        t.cap = s->cap ? s->cap * 2 : 1024; t.n = s->n;
+        t.k = xmalloc(t.cap * sizeof *t.k); t.l = xmalloc(t.cap * sizeof *t.l); t.v = xmalloc(t.cap * sizeof *t.v);
+        memset(t.k, 0, t.cap * sizeof *t.k);
+        for (j = 0; j < s->cap; j++) if (s->k[j]) {
+            for (i = (size_t)hsh(s->k[j], s->l[j]) & (t.cap - 1); t.k[i]; i = (i + 1) & (t.cap - 1)) ;
+            t.k[i] = s->k[j]; t.l[i] = s->l[j]; t.v[i] = s->v[j];
+        }
+        free(s->k); free(s->l); free(s->v); *s = t;
+    }
+    for (i = (size_t)hsh(k, n) & (s->cap - 1); s->k[i]; i = (i + 1) & (s->cap - 1))
+        if (s->l[i] == n && !memcmp(s->k[i], k, n)) { if (isnew) *isnew = 0; return i; }
+    s->k[i] = acopy(k, n); s->l[i] = n; s->v[i] = 0; s->n++;
+    if (isnew) *isnew = 1;
+    return i;
+}
+/* a side-table path as a small id (consecutive lines mostly repeat it) */
+static Set PATHS; static const char *LASTP; static size_t LASTL, LASTID;
+static size_t pathid(const char *p, size_t n) {
+    int isnew; size_t i;
+    if (LASTP && n == LASTL && !memcmp(p, LASTP, n)) return LASTID;
+    i = sadd(&PATHS, p, n, &isnew);
+    if (isnew) PATHS.v[i] = (void *)(PATHS.n);
+    LASTP = p; LASTL = n; LASTID = (size_t)PATHS.v[i];
+    return LASTID;
+}
+/* a 2-tuple of strings as one key: 4-byte length of the first, the first, the second */
+static void pairkey(Buf *b, const char *a, size_t an, const char *c, size_t cn) {
+    unsigned char L[4]; L[0] = (unsigned char)(an >> 24); L[1] = (unsigned char)(an >> 16); L[2] = (unsigned char)(an >> 8); L[3] = (unsigned char)an;
+    b->n = 0; bput(b, L, 4); bput(b, a, an); bput(b, c, cn);
+}
+
+/* ------------------------------------------------------------------ JSON (json.loads, read in place) */
+static const char *jws(const char *p) { while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++; return p; }
+static void utf8(Buf *b, unsigned long c) {
+    char t[4];
+    if (c < 0x80) { t[0] = (char)c; bput(b, t, 1); }
+    else if (c < 0x800) { t[0] = (char)(0xc0 | (c >> 6)); t[1] = (char)(0x80 | (c & 63)); bput(b, t, 2); }
+    else if (c < 0x10000) { t[0] = (char)(0xe0 | (c >> 12)); t[1] = (char)(0x80 | ((c >> 6) & 63)); t[2] = (char)(0x80 | (c & 63)); bput(b, t, 3); }
+    else { t[0] = (char)(0xf0 | (c >> 18)); t[1] = (char)(0x80 | ((c >> 12) & 63)); t[2] = (char)(0x80 | ((c >> 6) & 63)); t[3] = (char)(0x80 | (c & 63)); bput(b, t, 4); }
+}
+static int hex4(const char *p, unsigned long *v) {
+    int i; *v = 0;
+    for (i = 0; i < 4; i++) {
+        char c = p[i]; *v <<= 4;
+        if (c >= '0' && c <= '9') *v |= (unsigned long)(c - '0');
+        else if (c >= 'a' && c <= 'f') *v |= (unsigned long)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') *v |= (unsigned long)(c - 'A' + 10);
+        else return 0;
+    }
+    return 1;
+}
+/* a string at P ('"'): decoded into OUT (when given); the position after it, NULL when malformed */
+static const char *jstr(const char *p, Buf *out) {
+    if (*p != '"') return 0;
+    p++;
+    if (out) { out->n = 0; bput(out, "", 0); }
+    for (;;) {
+        const char *s = p;
+        while (*p && *p != '"' && *p != '\\' && (unsigned char)*p >= 0x20) p++;
+        if (out && p > s) bput(out, s, (size_t)(p - s));
+        if (*p == '"') return p + 1;
+        if (*p != '\\') return 0;
+        p++;
+        if (!out) { if (!*p) return 0; if (*p == 'u') { unsigned long u; if (!hex4(p + 1, &u)) return 0; p += 5; } else p++; continue; }
+        switch (*p) {
+        case '"': bput(out, "\"", 1); break;
+        case '\\': bput(out, "\\", 1); break;
+        case '/': bput(out, "/", 1); break;
+        case 'b': bput(out, "\b", 1); break;
+        case 'f': bput(out, "\f", 1); break;
+        case 'n': bput(out, "\n", 1); break;
+        case 'r': bput(out, "\r", 1); break;
+        case 't': bput(out, "\t", 1); break;
+        case 'u': {
+            unsigned long u, w;
+            if (!hex4(p + 1, &u)) return 0;
+            p += 4;
+            if (u >= 0xd800 && u < 0xdc00 && p[1] == '\\' && p[2] == 'u' && hex4(p + 3, &w) && w >= 0xdc00 && w < 0xe000) {
+                u = 0x10000 + ((u - 0xd800) << 10) + (w - 0xdc00); p += 6;
+            }
+            utf8(out, u); break;
+        }
+        default: return 0;
+        }
+        p++;
+    }
+}
+typedef const char *(*MemFn)(void *ctx, const char *k, size_t kl, const char *v);
+typedef const char *(*ElFn)(void *ctx, size_t i, const char *v);
+static const char *jobj(const char *p, MemFn fn, void *ctx);
+static const char *jarr(const char *p, ElFn fn, void *ctx);
+static const char *jlit(const char *p, const char *w) { size_t l = strlen(w); return strncmp(p, w, l) ? 0 : p + l; }
+static const char *jskip(const char *p) {
+    switch (*p) {
+    case '"': return jstr(p, 0);
+    case '{': return jobj(p, 0, 0);
+    case '[': return jarr(p, 0, 0);
+    case 't': return jlit(p, "true");
+    case 'f': return jlit(p, "false");
+    case 'n': return jlit(p, "null");
+    case 'N': return jlit(p, "NaN");
+    case 'I': return jlit(p, "Infinity");
+    default: break;
+    }
+    if (*p == '-' && p[1] == 'I') return jlit(p, "-Infinity");
+    if (*p == '-') p++;
+    if (*p < '0' || *p > '9') return 0;
+    if (*p == '0') p++; else while (*p >= '0' && *p <= '9') p++;
+    if (*p == '.') { p++; if (*p < '0' || *p > '9') return 0; while (*p >= '0' && *p <= '9') p++; }
+    if (*p == 'e' || *p == 'E') { p++; if (*p == '+' || *p == '-') p++; if (*p < '0' || *p > '9') return 0; while (*p >= '0' && *p <= '9') p++; }
+    return p;
+}
+static const char *jobj(const char *p, MemFn fn, void *ctx) {
+    Buf key = {0};
+    if (*p != '{') return 0;
+    p = jws(p + 1);
+    if (*p == '}') return p + 1;
+    for (;;) {
+        p = jstr(p, fn ? &key : 0);
+        if (!p) break;
+        p = jws(p);
+        if (*p != ':') { p = 0; break; }
+        p = jws(p + 1);
+        p = fn ? fn(ctx, key.b, key.n, p) : jskip(p);
+        if (!p) break;
+        p = jws(p);
+        if (*p == ',') { p = jws(p + 1); continue; }
+        p = *p == '}' ? p + 1 : 0;
+        break;
+    }
+    free(key.b);
+    return p;
+}
+static const char *jarr(const char *p, ElFn fn, void *ctx) {
+    size_t i = 0;
+    if (*p != '[') return 0;
+    p = jws(p + 1);
+    if (*p == ']') return p + 1;
+    for (;;) {
+        p = fn ? fn(ctx, i++, p) : jskip(p);
+        if (!p) return 0;
+        p = jws(p);
+        if (*p == ',') { p = jws(p + 1); continue; }
+        return *p == ']' ? p + 1 : 0;
+    }
+}
+/* the members of a top-level object: the value position of each NAMES[i] (the last one, as dict() keeps), or NULL */
+typedef struct { const char *const *names; const char **vals; int n; } Top;
+static const char *top_cb(void *c, const char *k, size_t kl, const char *v) {
+    Top *t = c; int i;
+    for (i = 0; i < t->n; i++) if (strlen(t->names[i]) == kl && !memcmp(t->names[i], k, kl)) t->vals[i] = v;
+    return jskip(v);
+}
+static int jtop(const char *text, const char *const *names, const char **vals, int n) {
+    Top t; const char *p; int i;
+    for (i = 0; i < n; i++) vals[i] = 0;
+    t.names = names; t.vals = vals; t.n = n;
+    p = jws(text);
+    if (*p != '{') return *p == '[' || *p == '"' ? -1 : 0;   /* -1: valid JSON is possible but not an object */
+    p = jobj(p, top_cb, &t);
+    return p && !*jws(p);
+}
+
+/* ------------------------------------------------------------------ the run's places */
+static const char *STAGE, *GSTAGE;
+static char *X, *OUT, *PPJ, *DJ, *LEXJ, *LOWERJ;
+static char *outf(const char *suffix) { char *n = cat(STAGE, suffix, 0), *r = pjoin(OUT, n); free(n); return r; }
+static char *shardjson(long long k) { char n[64]; snprintf(n, sizeof n, "-%lld.json", k); return outf(n); }
+
+/* run ARGV in the current directory; QUIET: stdout and stderr discarded (capture_output); ROWLOG: UNISACC_ROW_LOG
+   in its environment.  The returncode as subprocess gives it (-N for signal N); WAIT 0 starts it and gives the pid. */
+static long spawn(char *const argv[], const char *rowlog, int quiet, int wait) {
+    long pid; int st = 0;
+    fflush(stdout); fflush(stderr);
+    pid = (long)fork();
+    if (pid < 0) crash("cannot fork", argv[0]);
+    if (pid == 0) {
+        if (rowlog) {   /* the carried libc's setenv does not reach exec: a new environ */
+            char **e, **env; int n = 0, k = 0;
+            for (e = environ; e && *e; e++) n++;
+            env = xmalloc((size_t)(n + 2) * sizeof *env);
+            for (e = environ; e && *e; e++) if (strncmp(*e, "UNISACC_ROW_LOG=", 16)) env[k++] = *e;
+            env[k++] = cat("UNISACC_ROW_LOG=", rowlog, 0); env[k] = 0;
+            environ = env;
+        }
+        if (quiet) {   /* capture_output, discarded: sh does the redirection (no fcntl in the prelude yet) */
+            int n = 0; char **q;
+            while (argv[n]) n++;
+            q = xmalloc((size_t)(n + 5) * sizeof *q);
+            q[0] = "sh"; q[1] = "-c"; q[2] = "exec \"$@\" >/dev/null 2>&1"; q[3] = "sh";
+            memcpy(q + 4, argv, (size_t)(n + 1) * sizeof *q);
+            execvp(q[0], q);
+        } else execvp(argv[0], argv);
+        _exit(127);
+    }
+    if (!wait) return pid;
+    if (waitpid((int)pid, &st, 0) < 0) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -WTERMSIG(st);
+}
+static long waitrc(long pid) {
+    int st = 0;
+    if (waitpid((int)pid, &st, 0) < 0) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -WTERMSIG(st);
+}
+/* sys.exit(returncode) */
+static int pyrc(long rc) { return (int)(rc & 0xff); }
+
+static char *sh_out(const char *cmd) {
+    char *o = 0; size_t n = 0;
+    cx_run(cmd, &o, &n);
+    if (!o) { o = xmalloc(1); o[0] = 0; }
+    return o;
+}
+
+/* build(log): the pp delta, then this stage's delta (log NULL) or its side table (UNISACC_ROW_LOG=log) */
+static char *build(const char *log) {
+    char *gen[] = {"sh", "exec/pp/run.sh", "gen", 0};
+    if (spawn(gen, 0, 1, 1)) die("rowcov: building the pp delta failed (exec/pp/run.sh gen)");
+    if (!strcmp(STAGE, "parse2") && !log) {
+        char *a[] = {"python3", "exec/build/gen.py", "lex", LEXJ, "--typed", 0};
+        if (spawn(a, 0, 1, 1)) die("rowcov: gen.py lex failed");
+    }
+    if (!strcmp(STAGE, "enc") && !log) {
+        char *a[] = {"python3", "exec/build/gen.py", "lower", LOWERJ, "--full", 0};
+        if (spawn(a, 0, 1, 1)) die("rowcov: gen.py lower failed");
+    }
+    if (strcmp(STAGE, "pp") || log) {
+        char *target = outf(log ? ".sidecar.json" : ".json"), *flag = 0, *a[6]; int k = 0;
+        if (!strcmp(STAGE, "lex")) flag = "--typed";
+        else if (!strcmp(STAGE, "lower")) flag = "--full";
+        else if (!strcmp(STAGE, "enc")) flag = "--elf";
+        else if (!strcmp(STAGE, "pp-locations")) flag = "--locations";
+        else if (!strcmp(STAGE, "pp-shared")) flag = "--shared-predefines";
+        a[k++] = "python3"; a[k++] = "exec/build/gen.py"; a[k++] = (char *)GSTAGE; a[k++] = target;
+        if (flag) a[k++] = flag;
+        a[k] = 0;
+        if (spawn(a, log, 1, 1)) { char m[128]; snprintf(m, sizeof m, "rowcov: gen.py %s failed", STAGE); die(m); }
+        return target;
+    }
+    return 0;
+}
+static void same_as_delta(const char *sc) {
+    size_t a, b; char *x = cx_read(sc, &a), *y;
+    if (!x) crash("FileNotFoundError", sc);
+    y = cx_read(DJ, &b);
+    if (!y) crash("FileNotFoundError", DJ);
+    if (a != b || memcmp(x, y, a)) die("rowcov: the side-table build changed the delta");
+    free(x); free(y);
+}
+/* cached(): delta + side table, rebuilt only when exec/ or weights/ change; atomic for parallel shard jobs */
+static void cached(void) {
+    char *key = sh_out("sh -c 'git ls-files -s exec weights | git hash-object --stdin; git diff -- exec weights | git hash-object --stdin; "
+                       "git ls-files -o --exclude-standard -z -- exec weights | xargs -0 git hash-object --' 2>/dev/null");
+    char *stamp = outf(".key"), *rows = outf(".rows.tsv"), *old, *tmp, *sc, sfx[64];
+    size_t i, j = 0, n;
+    for (i = 0; key[i]; i++) if (key[i] != '\n') key[j++] = key[i];
+    key[j] = 0;
+    old = cx_read(stamp, &n);
+    if (old && n == j && !memcmp(old, key, n) && exists(DJ) && exists(rows)) { free(old); return; }
+    free(old);
+    snprintf(sfx, sizeof sfx, ".%ld.rows.tsv", (long)getpid());
+    tmp = outf(sfx);
+    if (strcmp(STAGE, "pp")) build(0);
+    sc = build(tmp);
+    same_as_delta(sc);
+    if (rename(tmp, rows)) crash("cannot replace", rows);
+    if (cx_write(stamp, key, j)) crash("cannot write", stamp);
+}
+
+/* ------------------------------------------------------------------ the probes and their shards */
+static char **FILES; static size_t NFILES;
+static int scmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void addglob(const char *dir) {
+    DIR *d = opendir(dir); struct dirent *e;
+    if (!d) return;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || l < 2 || strcmp(e->d_name + l - 2, ".c")) continue;
+        FILES = xrealloc(FILES, (NFILES + 1) * sizeof *FILES);
+        FILES[NFILES++] = cat(dir, "/", e->d_name);
+    }
+    closedir(d);
+}
+static void probes(void) {
+    if (FILES) return;
+    addglob("examples"); addglob("tests/c");
+    if (NFILES) qsort(FILES, NFILES, sizeof *FILES, scmp);
+}
+/* L[start::step] of a list of LEN (indices into IDX); 0 when step is 0 (ValueError) */
+static int pyslice(const size_t *idx, size_t len, long long start, long long step, size_t *out, size_t *nout) {
+    long long i, L = (long long)len;
+    *nout = 0;
+    if (step == 0) return 0;
+    if (step > 0) {
+        if (start < 0) { start += L; if (start < 0) start = 0; }
+        for (i = start; i < L; i += step) out[(*nout)++] = idx[i];
+    } else {
+        if (start < 0) { start += L; if (start < 0) return 1; }
+        if (start >= L) start = L - 1;
+        for (i = start; i >= 0; i += step) out[(*nout)++] = idx[i];
+    }
+    return 1;
+}
+static int hasmath(const char *f) {
+    size_t n; char *t = cx_read(f, &n); int r = 0; size_t i;
+    if (!t) crash("cannot read", f);
+    for (i = 0; i + 8 <= n; i++) if (t[i] == '<' && !memcmp(t + i, "<math.h>", 8)) { r = 1; break; }
+    free(t); return r;
+}
+/* shard(files, k, n, stage) into OUT (indices into FILES); 0 where the .py raises */
+static int shard(long long k, long long n, size_t *out, size_t *nout) {
+    size_t *all = xmalloc((NFILES + 1) * sizeof *all), *heavy, *light, nh = 0, nl = 0, i; int ok;
+    for (i = 0; i < NFILES; i++) all[i] = i;
+    if (strcmp(STAGE, "parse2")) { ok = pyslice(all, NFILES, k - 1, n, out, nout); free(all); return ok; }
+    heavy = xmalloc((NFILES + 1) * sizeof *heavy); light = xmalloc((NFILES + 1) * sizeof *light);
+    for (i = 0; i < NFILES; i++) { if (hasmath(FILES[i])) heavy[nh++] = i; else light[nl++] = i; }
+    if (k <= (long long)nh) {
+        long long j = k - 1;
+        if (j < 0) j += (long long)nh;
+        ok = j >= 0 && j < (long long)nh;
+        if (ok) { out[0] = heavy[j]; *nout = 1; }
+    } else ok = pyslice(light, nl, k - (long long)nh - 1, n - (long long)nh, out, nout);
+    free(all); free(heavy); free(light);
+    return ok;
+}
+static void shardnames(const size_t *s, size_t ns, Buf *b) {
+    size_t i; b->n = 0; bput(b, "", 0);
+    for (i = 0; i < ns; i++) { if (i) bstr(b, "\n"); bstr(b, FILES[s[i]]); }
+}
+/* probe_print(files): sha256 over each name, NUL, sha256(content) or '-', then sha256(UA) or 'no-ua' */
+static void probe_print(const size_t *s, size_t ns, char hex[65]) {
+    Buf h = {0}; size_t i, n; unsigned char md[32]; const char *ua = getenv("UA"); struct stat st; char *t;
+    bput(&h, "", 0);
+    for (i = 0; i < ns; i++) {
+        const char *f = FILES[s[i]];
+        bput(&h, f, strlen(f) + 1);
+        if (stat(f, &st) != 0) { bput(&h, "-", 1); continue; }
+        if (!(t = cx_read(f, &n)) || S_ISDIR(st.st_mode)) crash("cannot read", f);
+        cx_sha256(t, n, md); bput(&h, md, 32); free(t);
+    }
+    if (!ua) ua = "/tmp/ua_ref";
+    if (stat(ua, &st) != 0 || S_ISDIR(st.st_mode) || !(t = cx_read(ua, &n))) bput(&h, "no-ua", 5);
+    else { cx_sha256(t, n, md); bput(&h, md, 32); free(t); }
+    cx_sha256_hex(h.b, h.n, hex);
+    free(h.b);
+}
+
+/* ------------------------------------------------------------------ edges(delta) */
+static Set TOTAL;
+static unsigned char *UNR; static size_t NSEQ;
+static Buf JB, PK;
+static const char *act_el(void *c, size_t i, const char *v) {
+    int *st = c; const char *e;
+    if ((i == 0 || (i == 1 && *st == 1)) && *v == '"') {
+        e = jstr(v, &JB);
+        if (i == 0 && JB.n == 6 && !memcmp(JB.b, "REJECT", 6)) *st = 1;
+        if (i == 1 && JB.n == 11 && !memcmp(JB.b, "unreachable", 11)) *st = 3;
+        return e;
+    }
+    return jskip(v);
+}
+static const char *act_cb(void *c, size_t i, const char *v) {
+    int st = 0; const char *e;
+    (void)i;
+    if (*v != '[') return jskip(v);
+    e = jarr(v, act_el, &st);
+    if (st == 3) *(int *)c = 1;
+    return e;
+}
+static const char *seq_cb(void *c, size_t i, const char *v) {
+    int un = 0; const char *e = *v == '[' ? jarr(v, act_cb, &un) : jskip(v);
+    (void)c; (void)i;
+    UNR = xrealloc(UNR, NSEQ + 1); UNR[NSEQ++] = (unsigned char)un;
+    return e;
+}
+typedef struct { const char *name; size_t nl; long long sq; int has; } SCtx;
+static const char *edge_el(void *c, size_t i, const char *v) {
+    SCtx *s = c; const char *e = jskip(v);
+    if (i == 1 && e) { long long q; if (!pyint(v, (size_t)(e - v), &q)) crash("TypeError", "a non-integer sequence index in the delta"); s->sq = q; s->has = 1; }
+    return e;
+}
+static const char *edge_cb(void *c, const char *k, size_t kl, const char *v) {
+    SCtx *s = c; const char *e; long long q;
+    s->has = 0;
+    e = jarr(v, edge_el, s);
+    if (!e) return 0;
+    if (!s->has) crash("ValueError", "an edge of the delta is not [next, seq]");
+    q = s->sq; if (q < 0) q += (long long)NSEQ;
+    if (q < 0 || q >= (long long)NSEQ) crash("IndexError", "list index out of range");
+    if (!UNR[q]) { pairkey(&PK, s->name, s->nl, k, kl); sadd(&TOTAL, PK.b, PK.n, 0); }
+    return e;
+}
+static const char *state_el(void *c, size_t i, const char *v) { return i == 1 && *v == '{' ? jobj(v, edge_cb, c) : jskip(v); }
+static const char *state_cb(void *c, const char *k, size_t kl, const char *v) {
+    SCtx s;
+    (void)c;
+    if ((kl == 4 && !memcmp(k, "DEAD", 4)) || (kl == 4 && !memcmp(k, "HALT", 4))) return jskip(v);
+    s.name = k; s.nl = kl; s.sq = 0; s.has = 0;
+    return jarr(v, state_el, &s);
+}
+static void edges(void) {
+    static const char *const names[] = {"seqs", "states"};
+    const char *vals[2]; size_t n; char *t = cx_read(DJ, &n);
+    if (!t) crash("FileNotFoundError", DJ);
+    if (jtop(t, names, vals, 2) != 1) crash("JSONDecodeError", DJ);
+    if (!vals[0]) crash("KeyError", "'seqs'");
+    if (!vals[1]) crash("KeyError", "'states'");
+    if (*vals[0] != '[' || !jarr(vals[0], seq_cb, 0)) crash("TypeError", "seqs is not a list");
+    if (*vals[1] != '{' || !jobj(vals[1], state_cb, 0)) crash("AttributeError", "states is not a dict");
+    free(t);
+}
+
+/* ------------------------------------------------------------------ shard results ($X/rowcov/STAGE-K.json) */
+typedef struct { Buf a, b; int ok; size_t cnt; } SeenEl;
+static const char *seen_el(void *c, size_t i, const char *v) {
+    SeenEl *s = c; s->cnt = i + 1;
+    if (i < 2 && *v == '"') return jstr(v, i ? &s->b : &s->a);
+    s->ok = 0; return jskip(v);
+}
+static const char *seen_cb(void *c, size_t i, const char *v) {
+    SeenEl s; const char *e;
+    (void)i;
+    if (*v != '[') return jskip(v);
+    memset(&s, 0, sizeof s); s.ok = 1;
+    e = jarr(v, seen_el, &s);
+    if (e && s.ok && s.cnt == 2) { pairkey(&PK, s.a.b, s.a.n, s.b.b, s.b.n); sadd((Set *)c, PK.b, PK.n, 0); }
+    free(s.a.b); free(s.b.b);
+    return e;
+}
+static const char *wit_cb(void *c, const char *k, size_t kl, const char *v) {
+    Set *w = c; int isnew; size_t i; const char *e;
+    if (*v != '"') return jskip(v);
+    e = jstr(v, &JB);
+    if (!e) return 0;
+    i = sadd(w, k, kl, &isnew);
+    if (isnew) w->v[i] = acopy(JB.b, JB.n);
+    return e;
+}
+/* json.loads(STAGE-K.json)['seen'] into SEEN; WIT: .get('witness', {}) setdefault into WIT */
+static void readshard(long long k, Set *seen, Set *wit) {
+    static const char *const names[] = {"seen", "witness"};
+    const char *vals[2]; size_t n; char *f = shardjson(k), *t = cx_read(f, &n);
+    if (!t) crash("FileNotFoundError", f);
+    if (jtop(t, names, vals, 2) != 1) crash("JSONDecodeError", f);
+    if (seen) {
+        if (!vals[0]) crash("KeyError", "'seen'");
+        if (*vals[0] != '[' || !jarr(vals[0], seen_cb, seen)) crash("TypeError", "seen is not a list");
+    }
+    if (wit && vals[1] && (*vals[1] != '{' || !jobj(vals[1], wit_cb, wit))) crash("AttributeError", "witness is not a dict");
+    free(t); free(f);
+}
+
+/* ------------------------------------------------------------------ the modes */
+static int gate(long long k, long long n) {
+    char kn[64], *rowsf, *t, *bf, key[200], mine[13], hex[65]; char *a[5];
+    Set seen = {0}, rowsof = {0}; size_t len, ns; const char *p, *end, *ls; size_t ll;
+    long long floor = 0; char *names = 0; long rc; size_t *sel; Buf b = {0}; const char *f[4]; size_t fl[4]; int nf;
+    cached();
+    snprintf(kn, sizeof kn, "%lld/%lld", k, n);
+    a[0] = "python3"; a[1] = "tests/rowcov.py"; a[2] = (char *)STAGE; a[3] = kn; a[4] = 0;
+    rc = spawn(a, 0, 0, 1);
+    if (rc) return pyrc(rc);
+    readshard(k, &seen, 0);
+    edges();
+    rowsf = outf(".rows.tsv");
+    if (!(t = cx_read(rowsf, &len))) crash("FileNotFoundError", rowsf);
+    p = t; end = t + len;
+    while (tsvline(&p, end, f, fl, &nf)) {
+        if (nf != 4) crash("ValueError", "a side-table line is not 4 tab-separated fields");
+        if (fl[2] >= 9 && !memcmp(f[2], "synthetic", 9)) continue;
+        pairkey(&PK, f[0], fl[0], f[1], fl[1]);
+        if (sfind(&seen, PK.b, PK.n) >= 0 && sfind(&TOTAL, PK.b, PK.n) >= 0) {   /* rowsof[(path, line)] */
+            size_t id = pathid(f[2], fl[2]);
+            PK.n = 0; bput(&PK, &id, sizeof id); bput(&PK, f[3], fl[3]); sadd(&rowsof, PK.b, PK.n, 0);
+        }
+    }
+    snprintf(key, sizeof key, "%s/%lld/%lld", STAGE, k, n);
+    bf = cat("tests/rowcov/", STAGE, ".shards");
+    if ((t = cx_read(bf, &len))) {   /* STAGE.shards lines `STAGE/K/N ROWS [PROBES]` */
+        p = t; end = t + len;
+        while (nextline(&p, end, &ls, &ll)) {
+            const char *w[3]; size_t wl[3]; int nw; long long v;
+            if (!ll || ls[0] == '#') continue;
+            nw = wsplit(ls, ll, w, wl, 3);
+            if (nw < 2) crash("IndexError", "list index out of range (tests/rowcov/STAGE.shards)");
+            if (!pyint(w[1], wl[1], &v)) crash("ValueError", "invalid literal for int() in tests/rowcov/STAGE.shards");
+            if (wl[0] == strlen(key) && !memcmp(w[0], key, wl[0])) {
+                floor = v; free(names); names = 0;
+                if (nw > 2) { names = xmalloc(wl[2] + 1); memcpy(names, w[2], wl[2]); names[wl[2]] = 0; }
+            }
+        }
+    }
+    probes();
+    sel = xmalloc((NFILES + 1) * sizeof *sel);
+    if (!shard(k, n, sel, &ns)) crash("ValueError", "slice step cannot be zero");
+    shardnames(sel, ns, &b);
+    cx_sha256_hex(b.b, b.n, hex); memcpy(mine, hex, 12); mine[12] = 0;
+    printf("rowcov %s shard %lld/%lld  rows reached %ld (baseline %lld)\n", STAGE, k, n, (long)rowsof.n, floor);
+    if (names && strcmp(names, mine)) {
+        printf("rowcov  probe set of this shard changed since its baseline: the union decides; new line: %s %ld %s\n", key, (long)rowsof.n, mine);
+        return 0;
+    }
+    if ((long long)rowsof.n < floor) { printf("rowcov  FELL below the baseline\n"); return 1; }
+    if ((long long)rowsof.n > floor || !names) printf("rowcov  above the baseline: set \"%s %ld %s\" in tests/rowcov/%s.shards\n", key, (long)rowsof.n, mine, STAGE);
+    return 0;
+}
+
+typedef struct { const char *p; size_t pl; long long ln; long cnt, alive; const char *wit; } Row;
+static Row *ROWS;
+static int rowcmp(const void *a, const void *b) {
+    const Row *x = &ROWS[*(const size_t *)a], *y = &ROWS[*(const size_t *)b];
+    size_t m = x->pl < y->pl ? x->pl : y->pl; int c = memcmp(x->p, y->p, m);
+    if (c) return c;
+    if (x->pl != y->pl) return x->pl < y->pl ? -1 : 1;
+    return x->ln < y->ln ? -1 : x->ln > y->ln;
+}
+typedef struct { const char *name; size_t nl; long c[3]; } Table;
+static int tabcmp(const void *a, const void *b) {
+    const Table *x = a, *y = b; size_t m = x->nl < y->nl ? x->nl : y->nl; int c = memcmp(x->name, y->name, m);
+    if (c) return c;
+    return x->nl < y->nl ? -1 : x->nl > y->nl;
+}
+static size_t ulen(const char *s, size_t n) { size_t i, c = 0; for (i = 0; i < n; i++) if (((unsigned char)s[i] & 0xc0) != 0x80) c++; return c; }
+
+static int merge(long long n) {
+    Set seen = {0}, wit = {0}, rmap = {0}, tmap = {0}; size_t i, hit = 0, nrows = 0, orphan = 0, len, *ord, ntab = 0;
+    long long k; char *side, *t, *bf, *covf; const char *p, *end, *ls; size_t ll; long covered = 0, dead = 0;
+    Table *tabs = 0; Buf b = {0}, wk = {0}; long long floor = 0; const char *f[4]; size_t fl[4]; int nf;
+    for (k = 1; k <= n; k++) readshard(k, &seen, 0);
+    edges();
+    for (i = 0; i < seen.cap; i++) if (seen.k[i] && sfind(&TOTAL, seen.k[i], seen.l[i]) >= 0) hit++;
+    if (!TOTAL.n) crash("ZeroDivisionError", "division by zero");
+    printf("rowcov %s  edges %ld   taken %ld   (%.1f%%)   probes: examples/*.c tests/c/*.c\n", STAGE, (long)TOTAL.n, (long)hit, 100.0 * (double)hit / (double)TOTAL.n);
+    side = outf(".rows.tsv");
+    if (!(t = cx_read(side, &len))) { printf("rowcov %s  row level: no side table yet (%s)\n", STAGE, side); return 0; }
+    for (k = 1; k <= n; k++) readshard(k, 0, &wit);
+    p = t; end = t + len;
+    while (tsvline(&p, end, f, fl, &nf)) {
+        size_t ri, id; long long ln; int isnew, intotal; Row *r; long ti;
+        if (nf != 4) crash("ValueError", "a side-table line is not 4 tab-separated fields");
+        pairkey(&PK, f[0], fl[0], f[1], fl[1]);
+        ti = sfind(&TOTAL, PK.b, PK.n);
+        if (ti >= 0) TOTAL.v[ti] = (void *)1;   /* logged: the side table names this surviving edge */
+        if (fl[2] >= 9 && !memcmp(f[2], "synthetic", 9)) continue;
+        if (!pyint(f[3], fl[3], &ln)) { Buf m = {0}; bstr(&m, "invalid literal for int() with base 10: "); bput(&m, f[3], fl[3]); crash("ValueError", m.b); }
+        id = pathid(f[2], fl[2]);   /* rows[(path, int(line))] */
+        b.n = 0; bput(&b, &id, sizeof id); bput(&b, &ln, sizeof ln);
+        ri = sadd(&rmap, b.b, b.n, &isnew);
+        if (isnew) {
+            ROWS = xrealloc(ROWS, (nrows + 1) * sizeof *ROWS);
+            ROWS[nrows].p = f[2]; ROWS[nrows].pl = fl[2]; ROWS[nrows].ln = ln; ROWS[nrows].cnt = 0; ROWS[nrows].alive = 0; ROWS[nrows].wit = 0;
+            rmap.v[ri] = (void *)(nrows + 1); nrows++;
+        }
+        r = &ROWS[(size_t)rmap.v[ri] - 1];
+        intotal = ti >= 0;
+        if (intotal && !r->wit && sfind(&seen, PK.b, PK.n) >= 0) {
+            long wi;
+            wk.n = 0; bput(&wk, f[0], fl[0]); bput(&wk, "\t", 1); bput(&wk, f[1], fl[1]);
+            wi = sfind(&wit, wk.b, wk.n);
+            if (wi >= 0) r->wit = wit.v[wi];
+        }
+        r->cnt++;
+        if (intotal) r->alive++;
+    }
+    for (i = 0; i < nrows; i++) if (ROWS[i].wit && ROWS[i].wit[0]) covered++;
+    for (i = 0; i < TOTAL.cap; i++) if (TOTAL.k[i] && !TOTAL.v[i]) orphan++;
+    printf("rowcov %s  surviving edges without a source row %ld (0 = side table complete)\n", STAGE, (long)orphan);
+    for (i = 0; i < nrows; i++) if (!(ROWS[i].wit && ROWS[i].wit[0]) && ROWS[i].alive == 0) dead++;
+    printf("rowcov %s  uncovered %ld = dead %ld (no edge left in the delta) + live %ld (needs a probe)\n", STAGE, (long)nrows - covered, dead, (long)nrows - covered - dead);
+    for (i = 0; i < nrows; i++) {
+        const char *nm; size_t nl; int isnew; size_t ti; Table *tb;
+        pname(ROWS[i].p, ROWS[i].pl, &nm, &nl);
+        ti = sadd(&tmap, nm, nl, &isnew);
+        if (isnew) {
+            tabs = xrealloc(tabs, (ntab + 1) * sizeof *tabs);
+            tabs[ntab].name = tmap.k[ti]; tabs[ntab].nl = nl; tabs[ntab].c[0] = tabs[ntab].c[1] = tabs[ntab].c[2] = 0;
+            tmap.v[ti] = (void *)(ntab + 1); ntab++;
+        }
+        tb = &tabs[(size_t)tmap.v[ti] - 1];
+        tb->c[(ROWS[i].wit && ROWS[i].wit[0]) ? 0 : (ROWS[i].alive == 0 ? 1 : 2)]++;
+    }
+    if (ntab) qsort(tabs, ntab, sizeof *tabs, tabcmp);
+    for (i = 0; i < ntab; i++) {
+        size_t pad;
+        if (!tabs[i].c[1] && !tabs[i].c[2]) continue;
+        printf("rowcov %s  table ", STAGE);
+        fwrite(tabs[i].name, 1, tabs[i].nl, stdout);
+        for (pad = ulen(tabs[i].name, tabs[i].nl); pad < 34; pad++) putchar(' ');
+        printf(" covered %4ld  dead %3ld  live %3ld\n", tabs[i].c[0], tabs[i].c[1], tabs[i].c[2]);
+    }
+    ord = xmalloc((nrows + 1) * sizeof *ord);
+    for (i = 0; i < nrows; i++) ord[i] = i;
+    if (nrows) qsort(ord, nrows, sizeof *ord, rowcmp);
+    b.n = 0; bput(&b, "", 0);
+    for (i = 0; i < nrows; i++) {
+        Row *r = &ROWS[ord[i]]; char num[80];
+        bput(&b, r->p, r->pl);
+        snprintf(num, sizeof num, "\t%lld\t%ld\t", r->ln, r->cnt); bstr(&b, num);
+        bstr(&b, (r->wit && r->wit[0]) ? r->wit : (r->alive == 0 ? "dead" : "-"));
+        bstr(&b, "\n");
+    }
+    covf = outf(".cov.tsv");
+    if (cx_write(covf, b.b, b.n)) crash("cannot write", covf);
+    printf("rowcov %s  rows %ld   covered %ld   (%.1f%%)   report %s\n", STAGE, (long)nrows, covered,
+           100.0 * (double)covered / (double)(nrows > 1 ? nrows : 1), covf);
+    bf = cat("tests/rowcov/", STAGE, ".union");
+    if ((t = cx_read(bf, &len))) {   /* dict(l.split()[:2] ...): the last line naming STAGE */
+        const char *val = 0; size_t vl = 0;
+        p = t; end = t + len;
+        while (nextline(&p, end, &ls, &ll)) {
+            const char *w[2]; size_t wl[2];
+            if (!ll || ls[0] == '#') continue;
+            if (wsplit(ls, ll, w, wl, 2) < 2) crash("ValueError", "dictionary update sequence element has length 1; 2 is required");
+            if (wl[0] == strlen(STAGE) && !memcmp(w[0], STAGE, wl[0])) { val = w[1]; vl = wl[1]; }
+        }
+        if (val && !pyint(val, vl, &floor)) crash("ValueError", "invalid literal for int() in tests/rowcov/STAGE.union");
+    }
+    if (covered < floor) { printf("rowcov %s  FELL below the baseline %lld: a probe stopped reaching rows it used to\n", STAGE, floor); return 1; }
+    if (covered > floor) printf("rowcov %s  above the baseline %lld: raise it in tests/rowcov/%s.union\n", STAGE, floor, STAGE);
+    return 0;
+}
+
+/* union's fresh(k): the shard result names the probes and reference it would be run on now */
+static int fresh(long long k, long long n, size_t *sel) {
+    static const char *const names[] = {"probes"};
+    const char *vals[1], *e; char *f = shardjson(k), *t, hex[65]; size_t len, ns; int ok = 0;
+    t = cx_read(f, &len); free(f);
+    if (!t) return 0;
+    if (jtop(t, names, vals, 1) == 1) {
+        if (!shard(k, n, sel, &ns)) { free(t); return 0; }
+        if (vals[0] && *vals[0] == '"' && (e = jstr(vals[0], &JB)) != 0) {
+            probe_print(sel, ns, hex);
+            ok = JB.n == 64 && !memcmp(JB.b, hex, 64);
+        }
+    }
+    free(t); return ok;
+}
+/* time.time() to the second, from date(1): the prelude has no clock yet (time.h is CX1), and a new .cx has no #include */
+static double now(void) { char *o = sh_out("date +%s"); double t = strtod(o, 0); free(o); return t; }
+static int unionmode(long long n) {
+    size_t *sel; long long k; double deadline; char kn[64]; char *a[5];
+    cached();
+    probes();
+    sel = xmalloc((NFILES + 1) * sizeof *sel);
+    deadline = now() + 40;   /* in a queue the shard jobs may still be finishing: wait for them first */
+    for (;;) {
+        int all = 1;
+        if (now() >= deadline) break;
+        for (k = 1; k <= n; k++) if (!fresh(k, n, sel)) { all = 0; break; }
+        if (all) break;
+        sleep(2);
+    }
+    for (k = 1; k <= n; k++) {
+        if (!fresh(k, n, sel)) {
+            long rc;
+            snprintf(kn, sizeof kn, "%lld/%lld", k, n);
+            a[0] = "python3"; a[1] = "tests/rowcov.py"; a[2] = (char *)STAGE; a[3] = kn; a[4] = 0;
+            rc = spawn(a, 0, 0, 1);
+            if (rc) return pyrc(rc);
+        }
+    }
+    return merge(n);
+}
+static int allmode(void) {
+    char *side = outf(".rows.tsv"), *sc, kn[8][16], *a[8][5]; long pids[8]; int np = 0, k, i, batch = strcmp(STAGE, "parse2") ? 4 : 8;
+    unlink(side);
+    if (strcmp(STAGE, "pp")) build(0);
+    sc = build(side);
+    same_as_delta(sc);
+    for (k = 1; k <= 8; k++) {
+        snprintf(kn[k - 1], sizeof kn[k - 1], "%d/8", k);
+        a[k - 1][0] = "python3"; a[k - 1][1] = "tests/rowcov.py"; a[k - 1][2] = (char *)STAGE; a[k - 1][3] = kn[k - 1]; a[k - 1][4] = 0;
+        pids[np++] = spawn(a[k - 1], 0, 0, 0);
+        if (np == batch) { for (i = 0; i < np; i++) waitrc(pids[i]); np = 0; }
+    }
+    for (i = 0; i < np; i++) waitrc(pids[i]);
+    return merge(8);
+}
+
+int main(int argc, char **argv) {
+    static const char *const stages[] = {"pp", "pp-locations", "pp-shared", "lex", "parse2", "lower", "enc"};
+    const char *what; long long k = 0, n = 0; int mode = 0, i, ok = 0; char *x;
+    ARGC = argc; ARGV = argv;
+    if (argc < 3) delegate();
+    for (i = 0; i < 7; i++) if (!strcmp(argv[1], stages[i])) ok = 1;
+    if (!ok) delegate();
+    STAGE = argv[1]; what = argv[2];
+    GSTAGE = !strncmp(STAGE, "pp-", 3) ? "pp" : STAGE;
+    if (!strcmp(what, "build")) mode = 1;
+    else if (!strncmp(what, "gate", 4)) {
+        const char *s = what + 4, *sl;
+        while (*s == ':') s++;
+        sl = strchr(s, '/');
+        if (!sl || strchr(sl + 1, '/') || !pyint(s, (size_t)(sl - s), &k) || !pyint(sl + 1, strlen(sl + 1), &n)) delegate();
+        mode = 2;
+    } else if (!strncmp(what, "union", 5)) {
+        if (!what[5]) n = 8;
+        else if (!pyint(what + 5, strlen(what + 5), &n)) delegate();
+        mode = 3;
+    } else if (!strcmp(what, "all")) mode = 4;
+    else if (!strcmp(what, "merge")) {
+        if (argc < 4 || !pyint(argv[3], strlen(argv[3]), &n)) delegate();
+        mode = 5;
+    } else delegate();   /* K/N: the shard simulation, Python */
+
+    x = sh_out("sh -c '. exec/stamp.sh && printf %s \"$X\"' 2>/dev/null");
+    X = pnorm(x);
+    OUT = pjoin(X, "rowcov");
+    {   /* out.mkdir(parents=True, exist_ok=True) */
+        char *p = cat(OUT, "", 0), *q = p + 1; struct stat st;
+        for (;; q++) {
+            if (*q == '/' || !*q) {
+                char c = *q; *q = 0;
+                if (stat(p, &st) != 0) mkdir(p, 0777);
+                *q = c;
+                if (!c) break;
+            }
+        }
+        if (stat(p, &st) != 0 || !S_ISDIR(st.st_mode)) crash("cannot create", p);
+        free(p);
+    }
+    PPJ = pjoin(X, "e2/d.json");
+    DJ = !strcmp(STAGE, "pp") ? PPJ : outf(".json");
+    LEXJ = pjoin(OUT, "lex.json");
+    LOWERJ = pjoin(OUT, "lower.json");
+    switch (mode) {
+    case 1: cached(); printf("rowcov %s build: cached delta and side table ready\n", STAGE); return 0;
+    case 2: return gate(k, n);
+    case 3: return unionmode(n);
+    case 4: return allmode();
+    default: return merge(n);
+    }
+}

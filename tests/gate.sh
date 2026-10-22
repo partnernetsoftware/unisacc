@@ -141,12 +141,12 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           unisa-gold-irsel-label) req='native-posix|host|cc,python3|cdx|unisa-gold-irsel-label-point-sample';;
           unisa-gold-parse-label) req='native-posix|host|cc,python3|cdx|unisa-gold-parse-label-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
-          seedgen-ppconsumer-1|seedgen-ppconsumer-2|seedgen-ppconsumer-2-*) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
+          seedgen-ppconsumer-1-*|seedgen-ppconsumer-2-*) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-1-*|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
           seedgen-pprun) req='native-posix|host|cc,python3|cdx|seed-gen-pp-run';;
           seedgen-optconsumer-1|seedgen-optconsumer-2|seedgen-optconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-opt-consumer';;
           seedgen-pruneconsumer-1|seedgen-pruneconsumer-2|seedgen-pruneconsumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-prune-consumer';;
-          seedgen-parse2consumer-1|seedgen-parse2consumer-2|seedgen-parse2consumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-parse2-consumer';;
+          seedgen-parse2consumer-1|seedgen-parse2consumer-2|seedgen-parse2consumer-3-prepare|seedgen-parse2consumer-3) req='native-posix|host|cc,python3|cdx|seed-gen-parse2-consumer';;
           lib-windows-imports) req='native-posix|win-export-synthetic|cc|cdx|native-export-probe';;
           lib-lifecycle|lib-callable-catalog) req='native-posix|host|cc,libffi|cdx|native-ffi-probe';;
           seedgen-construct-prep) req='native-posix|host|python3|cdx|seed-gen-shared-build';;
@@ -190,7 +190,10 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
 T0=$(mono)
 # longest first, so the tail of the run is short
 job tools-1     env SHARD=1/3 ./tests/tools.sh   # 0.0.34 rc4: the single job ran 42.9-51.1 s against 51
-job tools-2     env SHARD=2/3 ./tests/tools.sh   # 0.0.35 P10: regex2 alone takes 29 s; 2/2 was 36 s against 49 (26%); 2/3 is 33 s
+job tools-2     env SHARD=2/3 TOOLS_STAGED=split ./tests/tools.sh   # 0.0.35 P10: 2/3 was 33 s; 0.0.43: 104.5 s at load 16 with regex2, which now runs staged (below)
+# 0.0.43 timeout debt: a staged entry (tools.sh --staged) is three jobs with a content-checked handoff:
+# cc reference (~20 s), build (~21 s), run (~39 s at load 8-10; exclusive in release.sh; after both, tests/gateorder.json)
+for e in $(./tests/tools.sh --staged); do for step in ref build run; do job tools-$e-$step ./tests/tools.sh --stage $step $e; done; done
 job tools-3     env SHARD=3/3 ./tests/tools.sh
 job bigclosure-lnx-x86_64 ./tests/bigclosure.sh --target lnx/x86_64
 job bigclosure-lnx-arm64 ./tests/bigclosure.sh --target lnx/arm64
@@ -212,17 +215,17 @@ for k in 1 2 3 4; do job difftest-py-$k env -u UA -u UA_RUN SHARD=$k/4 ./tests/d
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 python3 ./tests/declmatrix.py; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects)
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
 job decision-ledger python3 ./tests/decisionledger.py   # 0.0.23 I: build-time Python control (direct transition sites) may only fall
-job manifest-entries-pp python3 ./tests/manifestentries.py --stage pp
-job manifest-entries-lex python3 ./tests/manifestentries.py --stage lex
-job manifest-entries-parse2 python3 ./tests/manifestentries.py --stage parse2
-job manifest-entries-enc python3 ./tests/manifestentries.py --stage enc
-job manifest-entries-enc-arm python3 ./tests/manifestentries.py --stage enc/arm
-job manifest-entries-lower python3 ./tests/manifestentries.py --stage lower
+job manifest-entries-pp tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage pp   # (.cx port, 2026-10-23)
+job manifest-entries-lex tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage lex
+job manifest-entries-parse2 tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage parse2
+job manifest-entries-enc tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage enc
+job manifest-entries-enc-arm tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage enc/arm
+job manifest-entries-lower tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage lower
 job dsl-ops python3 ./tests/dslops.py   # T2: one independent contract and mutation for each manifest op
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
-job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'
+job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 sh ./tests/cxbin tests/volatilecomma.cx'   # (.cx port, 2026-10-23) V1 traced reads: six g_observed reads at -O0..-O2 in the reference tape VM (tests/cxlib/tapevm.cx) + system-cc load
 job hostcheck python3 ./tests/hostcheckcheck.py
-job seedmemory python3 ./tests/seedmemorycheck.py
+job seedmemory tests/bound 58 sh ./unisacc.com -run tests/seedmemory.cx -- --selftest   # (.cx port, 2026-10-23) resource admission negative cases (17 seedmemorycheck.py cases), never starts a generator; nested gate seedgen-3 must be rc=77
 job seedgen-let-exit tests/bound 58 sh ./unisacc.com -run tests/seedletexitcheck.cx   # (.cx port, 2026-10-23) generic constructor exit before write, C/P byte parity
 job copy-contract tests/bound 58 sh ./unisacc.com -run tests/copycontractcheck.cx   # (.cx port, 2026-10-23) copy/copy-state/rule:MODE C/P parity over tests/cpparity/cases.tsv families copy,mode (drop-edge live); P = exec/build/gen.py + exec/c/tbl.py, C = seed/gen.c
 job ri-snapshot-overlay sh ./tests/risnapshotcheck.sh   # RI snapshot overlay: sealed E3 accept hit + fall-through visible in capture
@@ -239,10 +242,10 @@ job attemptchain python3 ./tests/attemptchaincheck.py   # 0.0.39 WF5: offline at
 job c99precheck env LC_ALL=C python3 ./tests/c99precheckcheck.py   # 0.0.39 WF1: dynamic-route PRECHECK parsing and shard map (LC_ALL=C, H1: the bash glob order it compares against byte-sorted shards is the locale's collation)
 job rulingwait python3 ./tests/rulingwaitcheck.py   # 0.0.39 WF4: ruling request ledger and waits
 job namedrefuse ./tests/namedrefusecheck.sh   # 0.0.39 COV1: named refusals exact at every -O, REVIVED fails
-job identity-product-negative python3 ./tests/identitynegativecheck.py product --candidate "${MODEL_COM:-./unisacc.com}"
-job identity-include-negative python3 ./tests/identitynegativecheck.py include
+job identity-product-negative tests/bound 58 sh ./tests/cxbin tests/identitynegativecheck.cx product --candidate "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23)
+job identity-include-negative tests/bound 58 sh ./tests/cxbin tests/identitynegativecheck.cx include   # (.cx port, 2026-10-23)
 job identity-include-consumer-negative tests/bound 58 sh ./unisacc.com -run tests/identityincludeconsumercheck.cx -- --package "${MODEL_COM:-./unisacc.com}"
-job identity-prep-negative python3 ./tests/identitynegativecheck.py prep --ua "${UA:-/tmp/ua_ref}"
+job identity-prep-negative tests/bound 58 sh ./tests/cxbin tests/identitynegativecheck.cx prep --ua "${UA:-/tmp/ua_ref}"   # (.cx port, 2026-10-23)
 job checkrun ./tests/checkruncheck.sh   # 0.0.39: check status never taken from a pipe
 job commitgate ./tests/commitgatecheck.sh   # 0.0.39: red gate leaves no commit (scratch repo)
 job k2b K2B_UA=${UA:-/tmp/ua_ref} python3 ./tests/k2bcheck.py   # 0.0.40 K2b: narrow whitelist, whole-tree fallbacks, missed-run RED (scratch copy)
@@ -386,12 +389,15 @@ for part in 1 2 3; do
   job exec-errors-$part python3 ./exec/parse2/errorcheck.py --require-cached --part $part
   job exec-errors-warn-$part python3 ./exec/parse2/errorcheck.py --warnings --require-cached --part $part
 done
-job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py --require-cached  # first warning kind and FP conditions
-job exec-intwarn python3 ./exec/parse2/returnwarningcheck.py --int-conversion
-job exec-unusedwarn python3 ./exec/parse2/returnwarningcheck.py --unused
-job exec-formatwarn0 python3 ./exec/parse2/returnwarningcheck.py --format --shard 0/2
-job exec-formatwarn1 python3 ./exec/parse2/returnwarningcheck.py --format --shard 1/2
-job exec-e3self ./exec/parse2/selfcheck.sh                       # complete current compiler source -> tape
+job exec-returnwarn tests/bound 58 sh ./tests/cxbin exec/parse2/returnwarningcheck.cx --require-cached  # (.cx port, 2026-10-23) first warning kind and FP conditions
+job exec-intwarn tests/bound 58 sh ./tests/cxbin exec/parse2/returnwarningcheck.cx --int-conversion
+job exec-unusedwarn tests/bound 58 sh ./tests/cxbin exec/parse2/returnwarningcheck.cx --unused
+job exec-formatwarn0 tests/bound 58 sh ./tests/cxbin exec/parse2/returnwarningcheck.cx --format --shard 0/2
+job exec-formatwarn1 tests/bound 58 sh ./tests/cxbin exec/parse2/returnwarningcheck.cx --format --shard 1/2
+# 0.0.43: complete current compiler source -> tape, split at the tables (69 s whole: gen.py parse2 40 s);
+# -1 constructs with seed/gen.c (= gen.py bytes), -2 checks the .ready proof by content and runs E1..E3
+job exec-e3self-1 env E3_PART=construct ./exec/parse2/selfcheck.sh
+job exec-e3self-2 env E3_PART=run ./exec/parse2/selfcheck.sh
 job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal bits, table/net and host cc
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
 # S-17 E4: -O1 and -O2 as deltas, four shards (the single job ran 48.8-49.1 s against 49)
@@ -400,10 +406,10 @@ job exec-e4-2   env E4STRICT=1 ./exec/opt/check.sh tests/c/b_[a-l]*.c
 job exec-e4-4   env E4STRICT=1 ./exec/opt/check.sh tests/c/b_[!a-l]*.c
 job exec-e4-3   env E4STRICT=1 ./exec/opt/check.sh tests/c/[!ab]*.c
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
-job exec-prune-0 env PRUNE_PART=0 PRUNE_UA="$UA" python3 ./exec/prune/check.py
-job exec-prune-1 env PRUNE_PART=1 PRUNE_UA="$UA" python3 ./exec/prune/check.py
-job exec-prune-2 env PRUNE_PART=2 PRUNE_UA="$UA" python3 ./exec/prune/check.py
-job exec-prune-3 env PRUNE_PART=3 PRUNE_UA="$UA" python3 ./exec/prune/check.py
+job exec-prune-0 env PRUNE_PART=0 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx   # (.cx port, 2026-10-23)
+job exec-prune-1 env PRUNE_PART=1 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
+job exec-prune-2 env PRUNE_PART=2 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
+job exec-prune-3 env PRUNE_PART=3 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
 job exec-e5     ./exec/enc/check.sh                               # S-17 E5, first slice: x86 encoder on a fixture
 job exec-arm    ./exec/enc/armcheck.sh                            # ARM64 integer encoder on both runtimes
 job exec-elf    ./exec/enc/imagecheck.sh                          # S-17: complete Linux x86 ELF from lowering payload
@@ -434,11 +440,11 @@ job modelbenchcheck python3 ./tests/modelbenchcheck.py       # performance evide
 job bound python3 ./tests/boundcheck.py
 job boundreason sh -c './tests/bound 20 cc -std=c99 -O2 -Wall -Wextra -Itests tests/boundreason.c -o "${TMPDIR:-/tmp}/boundreason-$$" && ./tests/bound 20 "${TMPDIR:-/tmp}/boundreason-$$"'   # r7: pure composition matrix; each compile and each run is its own bound
 job boundstall-r7g python3 ./tests/boundstall_r7g.py . --gate   # r7g: clean stall cases S1-S3 plus setsid, ledger identity harness, C entry
-job boundnested-1 python3 ./tests/boundnested.py . --gate --only 1,2   # r7: cases 1-2, C and py longer child (~16 s)
-job boundnested-2 python3 ./tests/boundnested.py . --gate --only 3,4   # r7: cases 3-4, py parent and py longer child (~16 s)
-job boundnested-3 python3 ./tests/boundnested.py . --gate --only 5,6   # r7: shorter child (case 5), shorter parent (case 6); theoretical 14.5 s
-job boundnested-4 python3 ./tests/boundnested.py . --gate --only 7   # r7: grandchild reaped (case 7) plus its pgrep; theoretical 5.25 s
-job boundnested-5 python3 ./tests/boundnested.py . --gate --only 8   # r7: independent deadline propagation call; parent N 8, theoretical 10.25 s
+job boundnested-1 sh ./tests/cxbin tests/boundnested.cx . --gate --only 1,2   # (.cx port, 2026-10-23) r7: cases 1-2, C and py longer child (~16 s)
+job boundnested-2 sh ./tests/cxbin tests/boundnested.cx . --gate --only 3,4   # (.cx port, 2026-10-23) r7: cases 3-4, py parent and py longer child (~16 s)
+job boundnested-3 sh ./tests/cxbin tests/boundnested.cx . --gate --only 5,6   # (.cx port, 2026-10-23) r7: shorter child (case 5), shorter parent (case 6); theoretical 14.5 s
+job boundnested-4 sh ./tests/cxbin tests/boundnested.cx . --gate --only 7   # (.cx port, 2026-10-23) r7: grandchild reaped (case 7) plus its pgrep; theoretical 5.25 s
+job boundnested-5 sh ./tests/cxbin tests/boundnested.cx . --gate --only 8   # (.cx port, 2026-10-23) r7: independent deadline propagation call; parent N 8, theoretical 10.25 s
 job qprefix python3 ./exec/c/qprefixcheck.py --artifact "${MODEL_COM:-./unisacc.com}"
 if [ "$(uname -s)" = Darwin ]; then
     job ffi-bridge python3 ./exec/ffi/bridgecheck.py
@@ -614,8 +620,9 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 for part in build modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
-# S3 (0.0.43): core-modes preparation as four independent jobs (bindprep pattern): prep-0 = elf and o1 chain, prep-1..3 = parts 1..3 of PREP_PARTS; each <= 55 s cold
-for k in 0 1 2 3; do job exec-driver-core-prep-$k ./exec/c/compilercheck.sh prep-$k; done
+# S3 (0.0.43): driver model preparation as independent jobs (bindprep pattern): prep-0 = elf and o1 chain, prep-1..5 = parts K/5 of PREP_PARTS
+# after prep-0; every other exec-driver-* job runs after prep-0..5 and never constructs (timeout debt: prep-3 was 109 s, core-build 116 s cold)
+for k in 0 1 2 3 4 5; do job exec-driver-core-prep-$k ./exec/c/compilercheck.sh prep-$k; done
 job exec-driver-core-prep-f1json ./exec/c/compilercheck.sh prep-f1json
 job exec-driver-resources-macros ./exec/c/compilercheck.sh resources-macros
 job exec-driver-resources-headers ./exec/c/compilercheck.sh resources-headers
@@ -722,12 +729,12 @@ job lib-source-provenance ./tests/modelsourcelayoutprovenancecheck.sh plain
 job lib-source-provenance-located ./tests/modelsourcelayoutprovenancecheck.sh located
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-source-bitfield-native python3 ./tests/librarysourcebitfieldcheck.py
-    job lib-source-bitfield-import-native python3 ./tests/librarysourcebitfieldimportcheck.py
-    job lib-source-callable-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode callable
-    job lib-source-callback-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode callbacks
-    job lib-source-variadic-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode variadic
-    job lib-source-pointee-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode pointee
-    job lib-source-longdouble-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble
+    job lib-source-bitfield-import-native tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx   # (.cx port, 2026-10-23)
+    job lib-source-callable-import-native tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode callable
+    job lib-source-callback-import-native tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode callbacks
+    job lib-source-variadic-import-native tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode variadic
+    job lib-source-pointee-import-native tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode pointee
+    job lib-source-longdouble-import-native tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode longdouble
 fi
 job lib-carrier-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx   # (.cx port, 2026-10-23)
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
@@ -735,74 +742,74 @@ job lib-carrier-native-plan sh ./unisacc.com -run tests/librarycarriernativeplan
 job lib-carrier-callback tests/bound 58 sh ./unisacc.com -run tests/librarycarriercallbackcheck.cx   # (.cx port, 2026-10-23)
 case "$(uname -s)" in
     Linux|Darwin)
-        job lib-carrier-import-model-prepare python3 ./tests/carrierimportprepared.py --prepare
-        job lib-carrier-import-model-import python3 ./tests/carrierimportprepared.py --require-cached --part import
-        job lib-carrier-import-model-package python3 ./tests/carrierimportprepared.py --require-cached --part package
+        job lib-carrier-import-model-prepare sh ./tests/cxbin tests/carrierimportprepared.cx --prepare   # (.cx port, 2026-10-23)
+        job lib-carrier-import-model-import sh ./tests/cxbin tests/carrierimportprepared.cx --require-cached --part import
+        job lib-carrier-import-model-package sh ./tests/cxbin tests/carrierimportprepared.cx --require-cached --part package
         ;;
     *)
         job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
         ;;
 esac
-job lib-union-native python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
-job lib-carrier-factory python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
-job lib-carrier-relay python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
+job lib-union-native tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
+job lib-carrier-factory tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
+job lib-carrier-relay tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
 if [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ]; then
-job lib-union-scalar-prepare python3 ./tests/libraryunionscalarcheck.py --prepare --cases int8,float4,double8,mixed2,mixed3,mixed-reordered --pressures plain,gp9,fp9 --sanitize
-job lib-union-scalar-int8-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures plain --sanitize --require-cached
-job lib-union-scalar-int8-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures gp9 --sanitize --require-cached
-job lib-union-scalar-int8-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures fp9 --sanitize --require-cached
-job lib-union-scalar-float4-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures plain --sanitize --require-cached
-job lib-union-scalar-float4-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures gp9 --sanitize --require-cached
-job lib-union-scalar-float4-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures fp9 --sanitize --require-cached
-job lib-union-scalar-double8-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures plain --sanitize --require-cached
-job lib-union-scalar-double8-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures gp9 --sanitize --require-cached
-job lib-union-scalar-double8-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures fp9 --sanitize --require-cached
-job lib-union-scalar-mixed2-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures plain --sanitize --require-cached
-job lib-union-scalar-mixed2-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures gp9 --sanitize --require-cached
-job lib-union-scalar-mixed2-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures fp9 --sanitize --require-cached
-job lib-union-scalar-mixed3-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures plain --sanitize --require-cached
-job lib-union-scalar-mixed3-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures gp9 --sanitize --require-cached
-job lib-union-scalar-mixed3-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures fp9 --sanitize --require-cached
-job lib-union-scalar-mixed-reordered-plain python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures plain --sanitize --require-cached
-job lib-union-scalar-mixed-reordered-gp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures gp9 --sanitize --require-cached
-job lib-union-scalar-mixed-reordered-fp9 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-prepare sh ./tests/cxbin tests/libraryunionscalarcheck.cx --prepare --cases int8,float4,double8,mixed2,mixed3,mixed-reordered --pressures plain,gp9,fp9 --sanitize   # (.cx port, 2026-10-23)
+job lib-union-scalar-int8-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures plain --sanitize --require-cached
+job lib-union-scalar-int8-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-int8-fp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-float4-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures plain --sanitize --require-cached
+job lib-union-scalar-float4-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-float4-fp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases float4 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-double8-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures plain --sanitize --require-cached
+job lib-union-scalar-double8-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-double8-fp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases double8 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-mixed2-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures plain --sanitize --require-cached
+job lib-union-scalar-mixed2-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-mixed2-fp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed2 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-mixed3-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures plain --sanitize --require-cached
+job lib-union-scalar-mixed3-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-mixed3-fp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed3 --pressures fp9 --sanitize --require-cached
+job lib-union-scalar-mixed-reordered-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures plain --sanitize --require-cached
+job lib-union-scalar-mixed-reordered-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures gp9 --sanitize --require-cached
+job lib-union-scalar-mixed-reordered-fp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed-reordered --pressures fp9 --sanitize --require-cached
 else
-job lib-union-scalar-1 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8,float4 --sanitize
-job lib-union-scalar-2 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8,mixed2 --sanitize
-job lib-union-scalar-3 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3,mixed-reordered --sanitize
+job lib-union-scalar-1 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases int8,float4 --sanitize
+job lib-union-scalar-2 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases double8,mixed2 --sanitize
+job lib-union-scalar-3 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed3,mixed-reordered --sanitize
 fi
-job lib-union-composite-direct-1 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize
-job lib-union-composite-direct-2 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize
-job lib-union-composite-direct-3 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize
-job lib-union-composite-callback-1 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize --callback
-job lib-union-composite-callback-2 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize --callback
-job lib-union-composite-callback-3 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize --callback
+job lib-union-composite-direct-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize   # (.cx port, 2026-10-23)
+job lib-union-composite-direct-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize
+job lib-union-composite-direct-3 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize
+job lib-union-composite-callback-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize --callback
+job lib-union-composite-callback-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize --callback
+job lib-union-composite-callback-3 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize --callback
 # F3 (union-composite) split: one content-keyed runtime preparation, then require-cached variant shards by pressure; the original gates above stay
-job lib-union-composite-prepare python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
-job lib-union-composite-direct-1-a python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures plain,gp9
-job lib-union-composite-direct-1-b python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures fp9
-job lib-union-composite-callback-1-plain python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures plain
-job lib-union-composite-callback-1-gp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures gp9
-job lib-union-composite-callback-1-fp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures fp9
-job lib-union-composite-direct-2-a python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --pressures plain,gp9
-job lib-union-composite-direct-2-b python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --pressures fp9
-job lib-union-composite-callback-2-plain python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures plain
-job lib-union-composite-callback-2-gp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures gp9
-job lib-union-composite-callback-2-fp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures fp9
-job lib-union-composite-direct-3-req python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5
-job lib-union-composite-callback-3-plain python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures plain
-job lib-union-composite-callback-3-gp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures gp9
-job lib-union-composite-callback-3-fp9 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures fp9
-job lib-union16-direct-1 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize
-job lib-union16-callback-1 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback
-job lib-union16-direct-2 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize
-job lib-union16-callback-2 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback
-job lib-union16-direct-3 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize
-job lib-union16-callback-3 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --callback
-job lib-union16-direct-4 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize
-job lib-union16-callback-4 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback
-job lib-union16-direct-5 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize
-job lib-union16-callback-5 python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback
+job lib-union-composite-prepare sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
+job lib-union-composite-direct-1-a sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures plain,gp9
+job lib-union-composite-direct-1-b sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures fp9
+job lib-union-composite-callback-1-plain sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures plain
+job lib-union-composite-callback-1-gp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures gp9
+job lib-union-composite-callback-1-fp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --callback --pressures fp9
+job lib-union-composite-direct-2-a sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --pressures plain,gp9
+job lib-union-composite-direct-2-b sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --pressures fp9
+job lib-union-composite-callback-2-plain sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures plain
+job lib-union-composite-callback-2-gp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures gp9
+job lib-union-composite-callback-2-fp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array2,array4 --callback --pressures fp9
+job lib-union-composite-direct-3-req sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5
+job lib-union-composite-callback-3-plain sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures plain
+job lib-union-composite-callback-3-gp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures gp9
+job lib-union-composite-callback-3-fp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures fp9
+job lib-union16-direct-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize   # (.cx port, 2026-10-23)
+job lib-union16-callback-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback
+job lib-union16-direct-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize
+job lib-union16-callback-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback
+job lib-union16-direct-3 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize
+job lib-union16-callback-3 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --callback
+job lib-union16-direct-4 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize
+job lib-union16-callback-4 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback
+job lib-union16-direct-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize
+job lib-union16-callback-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback
 job lib-callable-variadic-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablevarcheck.cx   # (.cx port, 2026-10-23) concrete variadic callable ABI, normal + ASan/UBSan
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
@@ -827,39 +834,39 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-outcome-rosetta python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
-    job lib-source-longdouble-import-rosetta python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
+    job lib-source-longdouble-import-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
     job lib-carrier-mechanism-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx -- --arch x86_64
     job lib-carrier-native-plan-rosetta sh ./unisacc.com -run tests/librarycarriernativeplancheck.cx -- --arch x86_64
-    job lib-union-native-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
+    job lib-union-native-rosetta tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-carrier-callback-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercallbackcheck.cx -- --arch x86_64
-    job lib-carrier-factory-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --factory
-    job lib-carrier-relay-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --relay
-    job lib-union-scalar-1-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int8,float4 --sanitize
-    job lib-union-scalar-2-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases double8,mixed2 --sanitize
-    job lib-union-scalar-3-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed3,mixed-reordered --sanitize
-    job lib-union-scalar-narrow-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int1,int2,int4 --sanitize
-    job lib-union-composite-direct-1-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed16,fp16 --sanitize
-    job lib-union-composite-direct-2-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array2,array4 --sanitize
-    job lib-union-composite-direct-3-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array5 --sanitize
-    job lib-union-composite-callback-1-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed16,fp16 --sanitize --callback
-    job lib-union-composite-callback-2-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array2,array4 --sanitize --callback
-    job lib-union-composite-callback-3-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array5 --sanitize --callback
-    job lib-union16-direct-1-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --arch x86_64
-    job lib-union16-callback-1-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback --arch x86_64
-    job lib-union16-direct-2-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --arch x86_64
-    job lib-union16-callback-2-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback --arch x86_64
-    job lib-union16-direct-3-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --arch x86_64
-    job lib-union16-callback-3-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --callback --arch x86_64
-    job lib-union16-direct-4-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --arch x86_64
-    job lib-union16-callback-4-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback --arch x86_64
-    job lib-union16-direct-5-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --arch x86_64
-    job lib-union16-callback-5-rosetta python3 ./tests/libraryunion16check.py --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback --arch x86_64
+    job lib-carrier-factory-rosetta tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --factory
+    job lib-carrier-relay-rosetta tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --relay
+    job lib-union-scalar-1-rosetta sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int8,float4 --sanitize
+    job lib-union-scalar-2-rosetta sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases double8,mixed2 --sanitize
+    job lib-union-scalar-3-rosetta sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed3,mixed-reordered --sanitize
+    job lib-union-scalar-narrow-rosetta sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int1,int2,int4 --sanitize
+    job lib-union-composite-direct-1-rosetta sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed16,fp16 --sanitize
+    job lib-union-composite-direct-2-rosetta sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array2,array4 --sanitize
+    job lib-union-composite-direct-3-rosetta sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array5 --sanitize
+    job lib-union-composite-callback-1-rosetta sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed16,fp16 --sanitize --callback
+    job lib-union-composite-callback-2-rosetta sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array2,array4 --sanitize --callback
+    job lib-union-composite-callback-3-rosetta sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array5 --sanitize --callback
+    job lib-union16-direct-1-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --arch x86_64
+    job lib-union16-callback-1-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback --arch x86_64
+    job lib-union16-direct-2-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --arch x86_64
+    job lib-union16-callback-2-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback --arch x86_64
+    job lib-union16-direct-3-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --arch x86_64
+    job lib-union16-callback-3-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --callback --arch x86_64
+    job lib-union16-direct-4-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --arch x86_64
+    job lib-union16-callback-4-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback --arch x86_64
+    job lib-union16-direct-5-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --arch x86_64
+    job lib-union16-callback-5-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback --arch x86_64
     job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
 job lib-artifacts python3 ./tests/libraryartifactcheck.py --package "${MODEL_COM:-./unisacc.com}"
-job lib-native-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}"
-job lib-module-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}" --no-main
+job lib-native-exports tests/bound 58 sh ./tests/cxbin tests/libunisaccexportcheck.cx --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23)
+job lib-module-exports tests/bound 58 sh ./tests/cxbin tests/libunisaccexportcheck.cx --package "${MODEL_COM:-./unisacc.com}" --no-main
 job lib-bindings python3 ./tests/libunisaccbindingscheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-data python3 ./tests/libunisaccdatacheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_COM:-./unisacc.com}"
@@ -880,16 +887,16 @@ job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located
 job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
-job rowcov-pp python3 ./tests/rowcov.py pp all   # 0.0.25 T2: pp manifest rows reached by the probes; ratchet in tests/rowcov.baseline
-job rowcov-pp-locations python3 ./tests/rowcov.py pp-locations all   # 0.0.32 T3': the --locations variant graph
-job rowcov-pp-shared python3 ./tests/rowcov.py pp-shared all   # 0.0.32 T3': the --shared-predefines variant graph (predefines as resources)
-job rowcov-lex python3 ./tests/rowcov.py lex all   # 0.0.26 T2: lex manifest rows reached (on the preprocessor output); ratchet in tests/rowcov.baseline
-job rowcov-parse2-build python3 ./tests/rowcov.py parse2 build   # 0.0.31 R4: the shards reuse its cache
-for k in $(seq 1 24); do job rowcov-parse2-$k python3 ./tests/rowcov.py parse2 gate$k/24; done   # 0.0.30 R2: 24 shards (16/12 hit the 55 s window three times in 0.0.29)   # 0.0.26 T2: each shard ratchets its own reached rows
-for st in lower enc; do job rowcov-$st-build python3 ./tests/rowcov.py $st build; done   # rc3: the first enc shard paid the cold build and hit 49 s
-for st in lower enc; do for k in $(seq 1 8); do job rowcov-$st-$k python3 ./tests/rowcov.py $st gate$k/8; done; done   # 0.0.26 T2: lower (--full) and enc (--elf) rows, on tapes from the reference -S
-for st in lower enc; do job rowcov-$st-union python3 ./tests/rowcov.py $st union8; done   # 0.0.28 E22: the union may only rise, whatever the shards' redistribution
-job rowcov-parse2-union python3 ./tests/rowcov.py parse2 union24   # 0.0.29 T4
+job rowcov-pp sh ./tests/cxbin tests/rowcov.cx pp all   # 0.0.25 T2: pp manifest rows reached by the probes; ratchet in tests/rowcov.baseline   # (.cx port, 2026-10-23)
+job rowcov-pp-locations sh ./tests/cxbin tests/rowcov.cx pp-locations all   # 0.0.32 T3': the --locations variant graph
+job rowcov-pp-shared sh ./tests/cxbin tests/rowcov.cx pp-shared all   # 0.0.32 T3': the --shared-predefines variant graph (predefines as resources)
+job rowcov-lex sh ./tests/cxbin tests/rowcov.cx lex all   # 0.0.26 T2: lex manifest rows reached (on the preprocessor output); ratchet in tests/rowcov.baseline
+job rowcov-parse2-build sh ./tests/cxbin tests/rowcov.cx parse2 build   # 0.0.31 R4: the shards reuse its cache
+for k in $(seq 1 24); do job rowcov-parse2-$k sh ./tests/cxbin tests/rowcov.cx parse2 gate$k/24; done   # 0.0.30 R2: 24 shards (16/12 hit the 55 s window three times in 0.0.29)   # 0.0.26 T2: each shard ratchets its own reached rows
+for st in lower enc; do job rowcov-$st-build sh ./tests/cxbin tests/rowcov.cx $st build; done   # rc3: the first enc shard paid the cold build and hit 49 s
+for st in lower enc; do for k in $(seq 1 8); do job rowcov-$st-$k sh ./tests/cxbin tests/rowcov.cx $st gate$k/8; done; done   # 0.0.26 T2: lower (--full) and enc (--elf) rows, on tapes from the reference -S
+for st in lower enc; do job rowcov-$st-union sh ./tests/cxbin tests/rowcov.cx $st union8; done   # 0.0.28 E22: the union may only rise, whatever the shards' redistribution
+job rowcov-parse2-union sh ./tests/cxbin tests/rowcov.cx parse2 union24   # 0.0.29 T4
 job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
 job freezecheck tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx   # (.cx port, 2026-10-22) 0.0.25 P1: inside the freeze window only fix:/fix(<scope>): commits touch the product closure; the window starts at the explicit freeze commit in release/freeze.tsv (0.0.43 M1, R10)
@@ -899,9 +906,8 @@ job reviewed-trees tests/bound 58 sh ./unisacc.com -run tests/reviewedtreescheck
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
-job tapebin-roundtrip-structure-1 python3 ./tests/tapebin.py structure-1/2   # 0.0.34: one job hit 49 s (251 probes)
-job tapebin-roundtrip-structure-2 python3 ./tests/tapebin.py structure-2/2
-job tapebin-roundtrip-codec python3 ./tests/tapebin.py codec
+for k in 1 2 3 4 5 6; do job tapebin-roundtrip-structure-$k python3 ./tests/tapebin.py structure-$k/6; done   # 0.0.43 timeout debt: /2 halves took 85 s and 68 s at load 15-19 (/4 quarters 31-42 s); six slices of ~44 probes (0.0.34: one job hit 49 s); keep Python: tests the Python codec unisa/tapebin.py itself
+job tapebin-roundtrip-codec python3 ./tests/tapebin.py codec   # keep Python: C/Python byte-identical tapes from python -m unisa tape
 job tapebin-shape python3 -m unisa.tapebin_shape --check
 job tape-reader python3 ./tests/tapereadercheck.py
 job script-inventory tests/bound 58 sh ./unisacc.com -run tests/inventory.cx -- --check   # (.cx port, 2026-10-22) R15-1: no test/check script without a gate, a caller or a disposition
@@ -923,13 +929,19 @@ job flownet-baseline-out3 tests/bound 58 sh ./unisacc.com -run tests/flownetbase
 job flownet-baseline-out4 tests/bound 58 sh ./unisacc.com -run tests/flownetbaseline.cx -- --check out4 .   # flownet W1: shard 4/4 of corpus+probes through python3 -m m4 build (oracle): source sha256, output bytes + sha256, trace (phase, net, hits, gold) == recorded
 job flownet-baseline-check tests/bound 58 sh ./unisacc.com -run tests/flownetbaseline.cx -- --check check .   # flownet W1: python3 -m m4 check (oracle, m4 vs ujs gold path, negatives) == recorded
 job flownet-baseline-selftest tests/bound 58 sh ./unisacc.com -run tests/flownetbaseline.cx -- --check selftest .   # flownet W1: python3 -m m4 selftest (oracle, ~40 s: isel choose proof + per-net decision kinds) == recorded
-job flownet-w2-d1 tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- d1 .   # flownet W2 (plans/m4-flownet-cx-module.md): D1 -- flownet/*.cx (contract, nets, flow, api) name neither ujs nor Python
-job flownet-w2-parity tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- check .   # flownet W2: D2 without Python -- acc 10/10 exact as recorded; the 33 recorded programs built through flownet byte-identical (bytes + sha256) with identical traces (phase, net, hits, gold 0); the 9 negatives accepted/refused as recorded
-job flownet-w2-refuse tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- refuse .   # flownet W2: D5 -- 11 uncovered inputs (emit gaps, out-of-domain token, non-ASCII outside strings, bad UTF-8, nested fn, missing/dir source) each rc 1, stdout empty, no output file, reason + position
-job flownet-w2-negative tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- negative .   # flownet W2: not decorative -- gold drive (fallbacks), a missing table, mutated isel/lex nets and a flipped gold label are each red
-job flownet-w2-accepts tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- accepts .   # flownet W2: the 5 negatives ujs accepts, flownet bytes == python3 -m m4 build (oracle child, outside flownet/)
+job flownet-w2-d1 tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx -- d1 .   # flownet W2 (plans/m4-flownet-cx-module.md): D1 -- flownet/*.cx (fnx, contract, nets, flow, api) name neither ujs nor Python
+job flownet-w2-parity tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx -- check .   # flownet W2: D2 without Python -- acc 10/10 exact as recorded; the 33 recorded programs built through flownet byte-identical (bytes + sha256) with identical traces (phase, net, hits, gold 0); the 9 negatives accepted/refused as recorded
+job flownet-w2-refuse tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx -- refuse .   # flownet W2: D5 -- 22 uncovered inputs (emit gaps, out-of-domain token, non-ASCII outside strings, bad UTF-8, nested fn, missing/dir source, integer literals > 2^64-1, float literals rounding to inf, wat2wasm rejecting/missing) each rc 1, stdout empty, no output file, one stderr line with reason + position
+job flownet-w2-negative tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx -- negative .   # flownet W2: not decorative -- gold drive (fallbacks), a missing table, mutated isel/lex nets and a flipped gold label are each red
+job flownet-w2-accepts tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx -- accepts .   # flownet W2: the 5 negatives ujs accepts and 2 literal boundaries (2^64-1, DBL_MAX), flownet bytes == python3 -m m4 build (oracle child, outside flownet/)
 job flownet-w2-tables-gold tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/tables.cx -- --check-gold .   # flownet W2: adapter/ujswasm/tables contract + gold files == a fresh make from the .cx gold port (no Python)
 job flownet-w2-tables tests/bound 58 sh ./unisacc.com -run adapter/ujswasm/tables.cx -- --check .   # flownet W2: adapter/ujswasm/tables (contract, gold, net) == a fresh make; nets from python3 -m ujs build-weights (oracle child)
+job flownet-w3-d3-1 tests/bound 58 sh ./unisacc.com -run tests/flownetw3.cx -- d3 . 1/2   # flownet W3 (plans/m4-flownet-cx-module.md): D3 -- tests/tdescprobe.cx derives its rows through flownet (nets constructed from flownet/tdesc, rows handed over and judged by the emit hook); a scratch copy passes --oracle cc, and with the use of flownet.api removed, the fn_run removed or the fn_construct removed its gate is red, each by name
+job flownet-w3-d3-2 tests/bound 58 sh ./unisacc.com -run tests/flownetw3.cx -- d3 . 2/2   # flownet W3: D3 -- the copy driven from the gold table (the run's books refuse), with the adj answer discarded (the next ask leaves ap/sz's domain) and with the ap asks replaced by a constant (the books pinned by fn_expect refuse) is red
+job flownet-w3-flow-1 tests/bound 58 sh ./unisacc.com -run tests/flownetw3.cx -- flow . 1/2   # flownet W3 fix 3: D3 flow-through per key -- tdescprobe (no labels of its own; the algebra is flownet/tdesc) under FLOWNET_SWEEP=all: every one of the 46 keys of adj/ap/sz, each perturbation of one answer refused by flownet or by the emit hook's judge (--oracle cc and --check 1/106; books pinned and unpinned), 0 accepted
+job flownet-w3-flow-2 tests/bound 58 sh ./unisacc.com -run tests/flownetw3.cx -- flow . 2/2   # flownet W3 fix 3: the sweep proves itself -- four copies whose own --oracle cc is green but which answer from elsewhere after asking (all re-derived locally, all but 1 adj/1 ap/9 sz, one sz key, sizes from the baseline inside the emit hook) are each refused, naming exactly the keys they discarded
+job flownet-w3-d4-tdesc tests/bound 58 sh ./unisacc.com -run tests/flownetw3.cx -- d4 tdesc .   # flownet W3: D4 -- tdescprobe --oracle cc and --check 1/6 on the root m9 while /proc is listed every 2 ms: no python process under the run (the listing and the python rule prove themselves first)
+job flownet-w3-d4-adapter tests/bound 58 sh ./unisacc.com -run tests/flownetw3.cx -- d4 adapter .   # flownet W3: D4 -- the ujs adapter's check (label source = the .cx gold port, emit hook = wat2wasm) on the root m9: no python process under the run
 job realprog    ./tests/realprog.sh   # R16-12: pinned real programs (kilo, jsmn, cJSON, lua, sqlite) built by us and cc, same run, same bytes; ratchet list
 job hosthdr     ./tests/hosthdr.sh   # R18-10: sys/stat, fcntl, poll, termios, sys/ioctl, isatty, dirent on macOS = cc (and gcc on Lima arm64)
 job asmtext     ./tests/asmtext.sh   # R18-1/R18-2: -S -b lnx | unisacc as == -c on the corpus; system as accepts; hand-written .s
@@ -955,6 +967,7 @@ job front-bounds tests/bound 58 sh ./unisacc.com -run tests/frontboundscheck.cx 
 job seedfacts python3 ./tests/seedfactscheck.py   # 0.0.29 B4: seed/facts.h bindings and lets equal assemble.py on every manifest
 job seedparse2-1 ./tests/seedparse2check.sh x locations warnings errors   # 0.0.29 B4: seed/gen.c parse2 = gen.py, eight variants in two jobs
 job seedparse2-2 ./tests/seedparse2check.sh locations,warnings locations,errors warnings,errors locations,warnings,errors
+job seedparse2-key ./tests/seedparse2check.sh --key-selftest   # 0.0.43: the parse2 Python-reference cache key is the measured read-set key (tests/seedmemorykey.cx); an edit to exec/finite_rules.py, exec/facts/load.py, exec/parse/*, exec/model*.tsv or a parse2 manifest misses the cache (private copies, no admission needed)
 # 0.0.32 B5: seed/gen.c = gen.py on every delta the build constructs; three shards stay under the 60 s ceiling
 job seedgen ./tests/seedgencheck.sh e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe
 job seedgen-2 ./tests/seedgencheck.sh lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a
@@ -992,14 +1005,17 @@ job unisa-gold-irsel-label sh ./tests/unisagoldirsellabelcheck.sh   # 0.0.41 K6-
 job unisa-gold-parse-label sh ./tests/unisagoldparselabelcheck.sh   # 0.0.41 K6-29: unisa.gold parse_label stage domain NT x TOKS (5 x 68 = 340) + named points, C ref vs gold.py source (ast extraction; labels checked against PRODS; no build(); not front-end parse); keep Python
 job seedgen-pp-1 sh ./tests/seedppcheck.sh 1   # 0.0.40 K5-1b (机房主任 00:42): pp seed/gen.c = gen.py, none/--osx/--win + negatives + helper
 job seedgen-pp-2 sh ./tests/seedppcheck.sh 2   # K5-1b: --arm64/--osx --arm64/--win --arm64 + default-route cache
-job seedgen-ppconsumer-1 sh ./tests/seedppconsumercheck.sh 1   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled
-job seedgen-ppconsumer-2-prepare python3 ./tests/seedppconsumerprepared.py --prepare
-job seedgen-ppconsumer-2-osx-arm64 python3 ./tests/seedppconsumerprepared.py --require-cached --target osx/arm64
-job seedgen-ppconsumer-2-win-x86_64 python3 ./tests/seedppconsumerprepared.py --require-cached --target win/x86_64
-job seedgen-ppconsumer-2-win-arm64 python3 ./tests/seedppconsumerprepared.py --require-cached --target win/arm64
-job seedgen-ppchain-1-prepare python3 ./tests/seedppchainprepared.py --prepare
-job seedgen-ppchain-1-default python3 ./tests/seedppchainprepared.py --require-cached --part default
-job seedgen-ppchain-1-inherited python3 ./tests/seedppchainprepared.py --require-cached --part inherited   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled; K5-1i (07:53): + parse2 helper, three slices
+job seedgen-ppconsumer-1-lnx-x86_64 sh ./tests/seedppconsumercheck.sh 1 lnx/x86_64   # 0.0.40 K5-1c (机房主任 01:23): prepare.sh pp step through gen-delta, controlled; 0.0.43 timeout debt: shard 1 (78 s) as four parts, each its own cold prepare
+job seedgen-ppconsumer-1-lnx-arm64 sh ./tests/seedppconsumercheck.sh 1 lnx/arm64
+job seedgen-ppconsumer-1-osx-x86_64 sh ./tests/seedppconsumercheck.sh 1 osx/x86_64
+job seedgen-ppconsumer-1-negative sh ./tests/seedppconsumercheck.sh 1 negative
+job seedgen-ppconsumer-2-prepare sh ./tests/cxbin tests/seedppconsumerprepared.cx --prepare   # (.cx port, 2026-10-23)
+job seedgen-ppconsumer-2-osx-arm64 sh ./tests/cxbin tests/seedppconsumerprepared.cx --require-cached --target osx/arm64
+job seedgen-ppconsumer-2-win-x86_64 sh ./tests/cxbin tests/seedppconsumerprepared.cx --require-cached --target win/x86_64
+job seedgen-ppconsumer-2-win-arm64 sh ./tests/cxbin tests/seedppconsumerprepared.cx --require-cached --target win/arm64
+job seedgen-ppchain-1-prepare sh ./tests/cxbin tests/seedppchainprepared.cx --prepare   # (.cx port, 2026-10-23)
+job seedgen-ppchain-1-default sh ./tests/cxbin tests/seedppchainprepared.cx --require-cached --part default
+job seedgen-ppchain-1-inherited sh ./tests/cxbin tests/seedppchainprepared.cx --require-cached --part inherited   # 0.0.40 K5-1d (机房主任 02:35): chain.sh pp through gen-delta, controlled; K5-1i (07:53): + parse2 helper, three slices
 job seedgen-ppchain-2 sh ./tests/seedppchaincheck.sh 2
 job seedgen-ppchain-3 sh ./tests/seedppchaincheck.sh 3
 job seedgen-pprun sh ./tests/seedpprun.sh   # 0.0.40 K5-1e (机房主任 02:59): exec/pp/run.sh d.json through gen-delta, controlled
@@ -1011,33 +1027,34 @@ job seedgen-pruneconsumer-2 sh ./tests/seedpruneconsumercheck.sh 2
 job seedgen-pruneconsumer-3 sh ./tests/seedpruneconsumercheck.sh 3
 job seedgen-parse2consumer-1 sh ./tests/seedparse2consumercheck.sh 1   # 0.0.40 K5-1h (机房主任 06:01): prepare.sh parse2 step through exec/parse2gen/gen-delta.sh, controlled
 job seedgen-parse2consumer-2 sh ./tests/seedparse2consumercheck.sh 2
-job seedgen-parse2consumer-3 sh ./tests/seedparse2consumercheck.sh 3
+job seedgen-parse2consumer-3-prepare sh ./tests/seedparse2consumercheck.sh prepare   # 0.0.43 R11: the SEED_GEN=0 arm (python3 gen.py parse2, ~37-45 s) runs once per gen.py parse2 read-set key into a checked handoff (warm: ~2 s)
+job seedgen-parse2consumer-3 sh ./tests/seedparse2consumercheck.sh 3   # SEED_GEN=0 route against the keyed handoff (rc 75 without it) and the C parse2 built alongside, byte for byte (~20 s; was 65 s)
 job seedgen-3 ./tests/seedgencheck.sh tokenpp tokenlex warnlex
 job seedgen-4 ./tests/seedgencheck.sh warnparse warnunits errorparse warnpp   # seedgen-3 hit 49 s in the rc3 queue
 job com-memalign ./tests/memaligncheck.sh   # 0.0.32 D2: word-wise memcpy/memset only on shared alignment (UBSan + product)
 job com-seedgen ./tests/seedgencomcheck.sh   # 0.0.32 D2: .com -O2 seed/gen.c parse2 == cc build, <= 10 s
 job seedpack ./tests/seedpackcheck.sh   # 0.0.32 B5: seed/pack.c + compilerpack.c == pack.py + compilerpack.py
 job seedape ./tests/seedapecheck.sh     # 0.0.32 B5: UA -b + seed/ape.c == unisa ape (product container)
-scparts=$(python3 "$R/tests/seedconstructcheck.py" --list) || scparts=""
-[ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.py --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
-job seedgen-construct-prep python3 ./tests/seedconstructcheck.py --prep   # one content-keyed build of seed/gen.c for every seed-construct shard (3 shards compiling it at once exceeded the 20 s compile limit under load)
-for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done
-job seed-matrix-shared-prepare python3 ./tests/seedmatrixprepared.py --prepare
-job seed-matrix-shared-e2 python3 ./tests/seedmatrixprepared.py --require-cached --unit e2
-job seed-matrix-shared-e1 python3 ./tests/seedmatrixprepared.py --require-cached --unit e1
-job seed-matrix-shared-e3 python3 ./tests/seedmatrixprepared.py --require-cached --unit e3
-job seed-matrix-shared-e4 python3 ./tests/seedmatrixprepared.py --require-cached --unit e4
-job seed-matrix-shared-o1 python3 ./tests/seedmatrixprepared.py --require-cached --unit o1
-job seed-matrix-shared-prune python3 ./tests/seedmatrixprepared.py --require-cached --unit prune
-job seed-matrix-shared-nativeabi python3 ./tests/seedmatrixprepared.py --require-cached --unit nativeabi
-for k in 1 2 3; do job seed-matrix-features-$k python3 ./tests/seedconstructmatrix.py features-$k; done
-job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
-job seed-matrix-lnx-x86_64 python3 ./tests/seedconstructmatrix.py lnx/x86_64
-job seed-matrix-osx-arm64 python3 ./tests/seedconstructmatrix.py osx/arm64
-job seed-matrix-osx-x86_64 python3 ./tests/seedconstructmatrix.py osx/x86_64
-job seed-matrix-win-arm64 python3 ./tests/seedconstructmatrix.py win/arm64
-job seed-matrix-win-x86_64 python3 ./tests/seedconstructmatrix.py win/x86_64
-job seed-matrix-object python3 ./tests/seedconstructmatrix.py object
+scparts=$(sh "$R/tests/cxbin" "$R/tests/seedconstructcheck.cx" --list) || scparts=""   # (.cx port, 2026-10-23: --list and --prep; --part stays Python)
+[ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.cx --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
+job seedgen-construct-prep tests/bound 58 sh ./tests/cxbin tests/seedconstructcheck.cx --prep   # one content-keyed build of seed/gen.c for every seed-construct shard (3 shards compiling it at once exceeded the 20 s compile limit under load); same cache, manifest and flock as the .py
+for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done   # the in-process Python E3 oracle; not ported
+job seed-matrix-shared-prepare sh ./tests/cxbin tests/seedmatrixprepared.cx --prepare   # (.cx port, 2026-10-23)
+job seed-matrix-shared-e2 sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit e2
+job seed-matrix-shared-e1 sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit e1
+job seed-matrix-shared-e3 sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit e3
+job seed-matrix-shared-e4 sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit e4
+job seed-matrix-shared-o1 sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit o1
+job seed-matrix-shared-prune sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit prune
+job seed-matrix-shared-nativeabi sh ./tests/cxbin tests/seedmatrixprepared.cx --require-cached --unit nativeabi
+for k in 1 2 3; do job seed-matrix-features-$k sh ./tests/cxbin tests/seedconstructmatrix.cx features-$k; done   # (.cx port, 2026-10-23)
+job seed-matrix-lnx-arm64 sh ./tests/cxbin tests/seedconstructmatrix.cx lnx/arm64
+job seed-matrix-lnx-x86_64 sh ./tests/cxbin tests/seedconstructmatrix.cx lnx/x86_64
+job seed-matrix-osx-arm64 sh ./tests/cxbin tests/seedconstructmatrix.cx osx/arm64
+job seed-matrix-osx-x86_64 sh ./tests/cxbin tests/seedconstructmatrix.cx osx/x86_64
+job seed-matrix-win-arm64 sh ./tests/cxbin tests/seedconstructmatrix.cx win/arm64
+job seed-matrix-win-x86_64 sh ./tests/cxbin tests/seedconstructmatrix.cx win/x86_64
+job seed-matrix-object sh ./tests/cxbin tests/seedconstructmatrix.cx object
 job gate-infra python3 ./tests/queuecheck.py
 job gate-infra-38 python3 ./tests/queuecheck38.py   # 0.0.38 scheduler controls (split to keep both under 60 s)
 job gate-layers python3 ./tests/gatelayers.py --check
@@ -1049,7 +1066,7 @@ job gate-select python3 tests/gateselectcheck.py   # offline selector contracts;
 job exec-elfdata-bridge   python3 ./exec/enc/librarysymbolscheck.py
 job exec-lex-sourcefacts  python3 ./exec/lex/sourcefactscheck.py
 job exec-parse2-libimports python3 ./exec/parse2/libraryimportscheck.py
-for m in 0 1 2 3 4 5 6 7 8; do job fresh-order-$m python3 ./tests/freshordercheck.py $m; done   # T1d: global fresh order = tests/freshorder.tsv
+for m in 0 1 2 3 4 5 6 7 8; do job fresh-order-$m tests/bound 58 sh ./unisacc.com -run tests/freshordercheck.cx -- $m; done   # T1d: global fresh order = tests/freshorder.tsv; (.cx port, 0.0.43) seed/gen.c + tests/freshorderhook.h, not gen.py (--errors modes ran 63-76 s)
 job lib-bindings-registry python3 ./tests/librarybindingscheck.py
 job tsv-build-account     python3 ./tests/tsvbuild_check.py
 # The five exec/pipeline/check_*_text.py format checkers have no caller in any
@@ -1098,15 +1115,15 @@ if [ "$COM" = 1 ]; then
     job lib-latebind tests/bound 58 sh "$PRODUCT" -run tests/liblatebindcheck.cx -- "$PRODUCT"   # 0.0.43 LB-2a: the library declaration contract carries no host address
     job com-forceinclude tests/bound 58 sh "$PRODUCT" -run tests/forceincludecheck.cx -- "$PRODUCT"   # 0.0.43: __FILE__, diagnostics and nested includes inside -include headers, forwarded and not
     job com-iquote tests/bound 58 sh "$PRODUCT" -run tests/iquotecheck.cx -- "$PRODUCT"   # 0.0.43: -iquote searched by quoted includes only, before -I
-    job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py --com'
+    job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 sh "$MODEL_COM" -run tests/volatilecomma.cx -- --com'   # (.cx port, 2026-10-23)
     job com-full-signature tests/bound 58 sh "$PRODUCT" -run tests/fullsignaturecallcheck.cx -- --package "$PRODUCT"   # (.cx port, 2026-10-23) 21 actual product calls (fp9/mixed17/returned/pick/nested probe x -O0..-O2) exit 0 with empty stdout and stderr
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
     for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 python3 ./tests/declmatrix.py; done   # the same matrix on the product (found functions named r0..r7)
     job com-auditnet MODEL_COM="$PRODUCT" sh "$PRODUCT" -run tests/auditnet.cx   # (.cx port, 2026-10-22) 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
     job com-tapebin-ref python3 ./tests/tapebinref.py prepare   # 0.0.43 T-1: the reference compiler, built once per content key; the shards only locate it
-    job com-tapebin-six MODEL_COM="$PRODUCT" TAPEBIN_PART=six python3 ./tests/tapebinproduct.py   # fixed cost: calls, six-target images, host run, origin guard
-    for k in 1 2 3 4 5 6; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/6 python3 ./tests/tapebinproduct.py; done   # 0.0.43: six slices of ~43 files, ~24 s quiet against the 42 s window
-    job com-tapebin-cover MODEL_COM="$PRODUCT" TAPEBIN_PART=cover python3 ./tests/tapebinproduct.py   # slices partition the file set; known upstream tape diffs checked globally
+    job com-tapebin-six MODEL_COM="$PRODUCT" TAPEBIN_PART=six tests/bound 58 sh ./tests/cxbin tests/tapebinproduct.cx   # (.cx port, 2026-10-23) fixed cost: calls, six-target images, host run, origin guard
+    for k in 1 2 3 4 5 6; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/6 python3 ./tests/tapebinproduct.py; done   # 0.0.43: six slices of ~43 files, ~24 s quiet against the 42 s window; keep Python: compares against the Python tape codec
+    job com-tapebin-cover MODEL_COM="$PRODUCT" TAPEBIN_PART=cover tests/bound 58 sh ./tests/cxbin tests/tapebinproduct.cx   # (.cx port, 2026-10-23) slices partition the file set; known upstream tape diffs checked globally
     job com-elfobj OBJ_PRODUCT="$PRODUCT" ./tests/elfobj.sh   # R17-1: the product writes the reference's Linux object bytes
     job com-linkunits LINK_PRODUCT="$PRODUCT" ./tests/linkunits.sh   # R17-2: the product links reference-built unit objects
     job com-closure UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/closure.sh examples/*.c

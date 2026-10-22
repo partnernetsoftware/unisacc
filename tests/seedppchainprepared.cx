@@ -1,0 +1,239 @@
+#!/usr/bin/env -S unisacc.com -run
+/* seedppchainprepared.cx -- prepared independent references; real chain helper compilation stays under test.  The
+   include-free port of tests/seedppchainprepared.py (2026-10-23).  Same modes, same stdout/stderr lines, same rc:
+     sh ./unisacc.com -run tests/seedppchainprepared.cx -- --prepare                     (rc 0: HIT or PREPARED)
+     sh ./unisacc.com -run tests/seedppchainprepared.cx -- --require-cached --part PART  (PART default|inherited)
+   UA (default /tmp/ua_ref) must carry a valid provenance record (never attested here); CC, when set, must be cc.
+   --require-cached never builds: a missing/stale/corrupt preparation is NEED_PREPARE on stderr, rc 75, before any
+   subprocess.  --prepare runs each step under python3 tests/bound.py 55 with its output in WORK/LABEL.log, appends
+   the step row to WORK/steps.jsonl and prints it as SEED_PREP_STEP JSON (a failed step's log goes to stdout and its
+   status is the exit status): cc builds seed-gen, bound and run (RECIPES), then seed-gen pp, python3
+   exec/build/gen.py pp and seed-gen parse2 write the references (REFS).  All under an flock on CACHE.lock; then
+   manifest.json and its provenance record, and the work tree is renamed to
+   CACHE = ${UNISACC_MODEL_CACHE:-TMPDIR/unisacc-model-cache}/seed-ppchain-KEY.  The consumer runs python3
+   tests/bound.py 20 sh tests/seedppchaincheck.sh 1 PART with SEEDPPCH_PREPARED=CACHE SEEDPPCH_UA=UA and exits with
+   its status (the shell check is the system under test).
+   KEY = sha256(json.dumps(basis, sort_keys=True)); the basis is the .py's (actor closure, provenance source digest,
+   cc header read sets, recipes, cc / UA / python3 identities and UA record, host, environment, stage environment)
+   except that the actor seed naming this program is tests/seedppchainprepared.cx plus its module
+   tests/cxlib/seedprep.cx (the .cx and the .py are different producers and never share a preparation), and the
+   closure asserts {this file, the module, tests/bound.c} where the .py asserted {tests/bound.c,
+   tests/actorclosure.py, tests/checklib.py}.  Compile with -DPYPARITY for the .py's seeds and assertion: then the
+   key is the .py's byte for byte (that is how parity was measured).
+   The provenance / actor-closure / checklib / json / argparse ports live in tests/cxlib/seedprep.cx (shared with
+   tests/seedppconsumerprepared.cx).  "python3" is the first python3 on PATH (sys.executable).  Differences from the
+   .py: argparse texts name prog seedppchainprepared.cx (same width); an uncaught exception prints only the
+   traceback's last line, rc 1. */
+#pragma unisa use cxlib.seedprep
+
+#ifdef PYPARITY
+#define SELF "tests/seedppchainprepared.py"
+#else
+#define SELF "tests/seedppchainprepared.cx"
+#endif
+
+static const char *const PARTS[] = { "default", "inherited", 0 };
+static const sp_args ARGS = { "seedppchainprepared.cx", "--part", PARTS };
+static const char *const SEEDS[] = { SELF, "tests/seedppchaincheck.sh", "tests/bound", "tests/bound.py", "tests/lib.sh",
+    "tests/knownfail.py", "exec/c/provenance.py", "exec/c/chain.sh", "exec/pp/gen-delta.sh", "exec/parse2gen/gen-delta.sh",
+    "tests/c/a_char.c",
+#ifndef PYPARITY
+    "tests/cxlib/seedprep.cx",
+#endif
+    0 };
+static const char *const ENVKEYS[] = { "CC", "PATH", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
+    "GCC_EXEC_PREFIX", "SOURCE_DATE_EPOCH", "PYTHONPATH", "PYTHONHASHSEED", "LANG", "LC_ALL", "LD_LIBRARY_PATH",
+    "LD_PRELOAD", "LD_AUDIT", 0 };
+/* RECIPES: name -> (source, flags); '-I' + ROOT/seed is filled in by main */
+static const char *const RNAMES[] = { "seed-gen", "bound", "run", 0 };
+static const char *const RSRC[] = { "seed/gen.c", "tests/bound.c", "exec/c/run.c", 0 };
+static char *RFLAGS[3][6] = { { "-std=c99", "-O2", "-w", 0, 0 }, { "-std=c99", "-O2", "-Wall", "-Wextra", 0 },
+    { "-O2", "-std=c99", "-w", 0 } };
+static const char *const REQUIRED[] = { "bound", "e2-c-ref.json", "e2-py.json", "e3-c-ref.json", "run", "seed-gen", 0 };  /* sorted */
+
+static char *KEY, *CACHE, *WORK; static sp_json *BASIS; static int PREPARE;
+
+static void need(const char *reason) {
+    fflush(stdout); sp_scratch_remove();
+    fprintf(stderr, "NEED_PREPARE seed pp chain: %s\n", reason); fflush(stderr); exit(75);
+}
+static void assertion(int ok) { if (!ok) sp_raise_line("AssertionError"); }
+static char *sha_or_raise(const char *path) { char hex[65]; if (sp_sha_file(path, hex)) sp_crash(); return sp_xstrdup(hex); }
+static int caught(const char *cls) {   /* except (SystemExit, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) */
+    return !strcmp(cls, "SystemExit") || !strcmp(cls, "OSError") || strstr(cls, "Error") && (!strcmp(cls, "FileNotFoundError")
+        || !strcmp(cls, "PermissionError") || !strcmp(cls, "IsADirectoryError") || !strcmp(cls, "NotADirectoryError")
+        || !strcmp(cls, "FileExistsError") || !strcmp(cls, "ValueError") || !strcmp(cls, "UnicodeDecodeError")
+        || !strcmp(cls, "json.decoder.JSONDecodeError") || !strcmp(cls, "KeyError") || !strcmp(cls, "TypeError"))
+        || !strcmp(cls, "subprocess.TimeoutExpired");
+}
+static void try_hook(const char *cls, const char *msg) { if (caught(cls)) need(msg); }
+static void rethrow(void) { if (caught(sp_exc())) need(sp_emsg()); sp_crash(); }
+
+static int read_sets(const char *cc, sp_json **out) {
+    sp_json *o = sp_jnew(SP_JOBJ), *r; int n;
+    for (n = 0; RNAMES[n]; n++) { if (sp_cc_read_set(cc, RSRC[n], RFLAGS[n], &r)) return -1; sp_oset(o, RNAMES[n], r); }
+    *out = o; return 0;
+}
+static int valid(void) {
+    static const char *const execs[] = { "seed-gen", "bound", "run", 0 };
+    if (sp_valid_manifest(CACHE, BASIS, REQUIRED, execs, "role or required set mismatch") == 0) return 1;
+    if (caught(sp_exc())) {
+        if (!PREPARE) {
+            sp_buf m = {0, 0, 0};
+            sp_bstr(&m, "该 key 无有效准备（源或 actor 闭包变了，或产物缺坏）: "); sp_bstr(&m, KEY); sp_bstr(&m, "; "); sp_bstr(&m, sp_emsg());
+            need(m.s);
+        }
+        return 0;
+    }
+    sp_crash(); return 0;
+}
+/* step(label, cmd): python3 tests/bound.py 55 *cmd, stdout+stderr into WORK/LABEL.log; the row to steps.jsonl and
+   stdout; a failure prints the log and exits with its status */
+static void step(const char *label, char **cmd) {
+    char *a[24], *logp = sp_pjoin(WORK, sp_cat(label, ".log")), *rows = sp_pjoin(WORK, "steps.jsonl");
+    int k = 0, i, fd, rc; double start = sp_now(); sp_json *row, *argv; sp_buf line = {0, 0, 0}; char t[32];
+    a[k++] = (char *)sp_python(); a[k++] = sp_pjoin(sp_root(), "tests/bound.py"); a[k++] = "55";
+    for (i = 0; cmd[i]; i++) a[k++] = cmd[i];
+    a[k] = 0;
+    if ((fd = open(logp, O_WRONLY | O_CREAT | O_TRUNC, 0666)) < 0) { sp_throw_os(errno, logp); sp_crash(); }
+    rc = sp_call(a, fd, -2, 0);
+    close(fd);
+    row = sp_jnew(SP_JOBJ);
+    sp_oset(row, "label", sp_jstr(label));
+    argv = sp_jnew(SP_JARR); for (i = 0; cmd[i]; i++) sp_apush(argv, sp_jstr(cmd[i]));
+    sp_oset(row, "argv", argv);
+    { sp_json *r = sp_jnew(SP_JINT); snprintf(t, sizeof t, "%d", rc); r->s = sp_xstrdup(t); sp_oset(row, "rc", r); }
+    { sp_json *f = sp_jnew(SP_JFLOAT); f->f = start; sp_oset(row, "start_monotonic", f); }
+    { sp_json *f = sp_jnew(SP_JFLOAT); f->f = sp_now() - start; sp_oset(row, "seconds", f); }
+    sp_oset(row, "log_sha256", sp_jstr(sha_or_raise(logp)));
+    sp_jdump(&line, row, 0, 0); sp_bch(&line, '\n');
+    if ((fd = open(rows, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) { sp_throw_os(errno, rows); sp_crash(); }
+    if (write(fd, line.s, line.n) != (ssize_t)line.n) { sp_throw_os(errno, rows); sp_crash(); }
+    close(fd);
+    printf("SEED_PREP_STEP %s", line.s); fflush(stdout);
+    if (rc) {
+        size_t n; char *log = sp_read_file(logp, &n);
+        if (!log) sp_crash();
+        fwrite(log, 1, n, stdout);
+        sp_exit(rc);
+    }
+}
+
+int main(int argc, char **argv) {
+    int prep, req, i; const char *part, *uaenv; char *which, *cc, *ua, *sources, *py, *base, *seedinc; char hex[65];
+    sp_json *rec, *actors, *edges, *reads, *basis, *x; sp_buf canon = {0, 0, 0}; extern char **environ;
+    sp_parse_args(&ARGS, argc, argv, &prep, &req, &part);
+    if (prep == req || (prep && part) || (req && !part)) sp_arg_error(&ARGS, "choose --prepare or --require-cached --part NAME");
+    PREPARE = prep;
+    sp_init(__FILE__);
+    seedinc = sp_cat("-I", sp_pjoin(sp_root(), "seed")); RFLAGS[0][3] = seedinc;
+    which = sp_which("cc");
+    uaenv = getenv("UA"); ua = sp_realpath_ns(sp_ppath(uaenv ? uaenv : "/tmp/ua_ref"));
+    if (!which) need("system cc missing");
+    cc = sp_realpath_ns(which);
+    { const char *c = getenv("CC"); if (c && *c && strcmp(c, "cc")) need("unverified watchdog CC override; use the keyed system cc"); }
+    /* try: ... except (SystemExit, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e: need(e) */
+    sp_set_raise_hook(try_hook);
+    /* Never manufacture an attestation for an arbitrary old UA. */
+    if (sp_verify(ua, &rec)) rethrow();
+    { sp_json *h = sp_getitem(rec, "artifact_sha256"); if (!h || sp_verify_cached_file(ua, h, 1)) rethrow(); }
+    sp_actor_closure(SEEDS, &actors, &edges);
+    if (read_sets(cc, &reads)) rethrow();
+    sp_set_raise_hook(0);
+#ifdef PYPARITY
+    assertion(sp_getitem(actors, "tests/bound.c") && sp_getitem(actors, "tests/actorclosure.py") && sp_getitem(actors, "tests/checklib.py"));
+#else
+    assertion(sp_getitem(actors, SELF) && sp_getitem(actors, "tests/cxlib/seedprep.cx") && sp_getitem(actors, "tests/bound.c"));
+#endif
+    basis = sp_jnew(SP_JOBJ);
+    sp_oset(basis, "schema", sp_jstr("seed-ppchain-reference-v1"));
+    sources = sp_source_digest();
+    sp_oset(basis, "sources", sp_jstr(sources));
+    sp_oset(basis, "actors", actors);
+    sp_oset(basis, "actor_edges", edges);
+    sp_oset(basis, "cc_read_sets", reads);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; RNAMES[i]; i++) {
+        sp_json *r = sp_jnew(SP_JARR), *f = sp_jnew(SP_JARR); int k;
+        sp_apush(r, sp_jstr(RSRC[i])); for (k = 0; RFLAGS[i][k]; k++) sp_apush(f, sp_jstr(RFLAGS[i][k]));
+        sp_apush(r, f); sp_oset(x, RNAMES[i], r);
+    }
+    sp_oset(basis, "recipes", x);
+    sp_oset(basis, "compiler", sp_jstr(cc));
+    sp_oset(basis, "compiler_sha256", sp_jstr(sha_or_raise(cc)));
+    sp_oset(basis, "ua", sp_jstr(ua));
+    sp_oset(basis, "ua_sha256", sp_jstr(sha_or_raise(ua)));
+    sp_oset(basis, "ua_record", rec);
+    py = sp_realpath_ns(sp_python());
+    sp_oset(basis, "python", sp_jstr(py));
+    sp_oset(basis, "python_sha256", sp_jstr(sha_or_raise(py)));
+    x = sp_jnew(SP_JARR); sp_apush(x, sp_jstr(sp_uname_field("-s"))); sp_apush(x, sp_jstr(sp_uname_field("-m")));
+    sp_oset(basis, "host", x);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; ENVKEYS[i]; i++) { const char *v = getenv(ENVKEYS[i]); sp_oset(x, ENVKEYS[i], v ? sp_jstr(v) : sp_jnew(SP_JNULL)); }
+    sp_oset(basis, "environment", x);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; environ[i]; i++) {
+        static const char *const pre[] = { "E1", "E2", "E3", "E4", "UNISA_", "DYLD_", 0 }; const char *eq = strchr(environ[i], '='); int p;
+        if (!eq) continue;
+        for (p = 0; pre[p]; p++) if (!strncmp(environ[i], pre[p], strlen(pre[p])) && (size_t)(eq - environ[i]) >= strlen(pre[p])) {
+            sp_osetn(x, environ[i], (size_t)(eq - environ[i]), sp_jstr(eq + 1)); break; }
+    }
+    sp_oset(basis, "stage_environment", x);
+    BASIS = basis;   /* json.loads(json.dumps(basis, sort_keys=True)): already JSON values here */
+    sp_jdump(&canon, basis, 0, 1);
+    cx_sha256_hex(canon.s, canon.n, hex); KEY = sp_xstrdup(hex);
+    {   const char *mc = getenv("UNISACC_MODEL_CACHE");
+        if (mc) base = sp_ppath(mc); else { char *t = sp_gettempdir(), *u = sp_cat(t, "/unisacc-model-cache"); base = sp_ppath(u); }
+        CACHE = sp_pjoin(base, sp_cat("seed-ppchain-", KEY)); }
+    if (prep) {
+        char *m, *sg; sp_buf man = {0, 0, 0}; sp_json *doc, *outs, *a2, *e2, *r2; struct stat s; const char **seeds2;
+        sp_mkdirs(base);
+        sp_lock(sp_cat(CACHE, ".lock"));
+        if (valid()) { printf("seed pp chain reference HIT %s\n", KEY); return 0; }
+        WORK = sp_xstrdup(sp_mkdtemp_py(base, "seed-ppchain-prepare-"));
+        for (i = 0; RNAMES[i]; i++) {
+            char *c[12]; int k = 0, j;
+            c[k++] = cc; for (j = 0; RFLAGS[i][j]; j++) c[k++] = RFLAGS[i][j];
+            c[k++] = sp_pjoin(sp_root(), RSRC[i]); c[k++] = "-o"; c[k++] = sp_pjoin(WORK, RNAMES[i]); c[k] = 0;
+            step(sp_cat("build-", RNAMES[i]), c);
+        }
+        sg = sp_pjoin(WORK, "seed-gen");
+        { char *c[] = { sg, "pp", sp_pjoin(WORK, "e2-c-ref.json"), 0 }; step("reference-e2-c", c); }
+        { char *c[] = { (char *)sp_python(), "exec/build/gen.py", "pp", sp_pjoin(WORK, "e2-py.json"), 0 }; step("reference-e2-python", c); }
+        { char *c[] = { sg, "parse2", sp_pjoin(WORK, "e3-c-ref.json"), 0 }; step("reference-e3-c", c); }
+        seeds2 = sp_xmalloc((size_t)(actors->n + 1) * sizeof *seeds2);
+        for (i = 0; i < actors->n; i++) seeds2[i] = actors->k[i];
+        seeds2[actors->n] = 0;
+        { char *now = sp_source_digest(); int same = !strcmp(now, sources);
+          if (same) { sp_actor_closure(seeds2, &a2, &e2); same = sp_jeq(a2, actors) && sp_jeq(e2, edges); }
+          assertion(same); }
+        assertion(!strcmp(sha_or_raise(ua), sp_getitem(basis, "ua_sha256")->s));
+        if (read_sets(cc, &r2)) sp_crash();
+        assertion(sp_jeq(r2, reads));
+        m = sp_pjoin(WORK, "manifest.json");
+        doc = sp_jnew(SP_JOBJ); outs = sp_jnew(SP_JOBJ);
+        sp_oset(doc, "basis", basis);
+        for (i = 0; REQUIRED[i]; i++) sp_oset(outs, REQUIRED[i], sp_jstr(sha_or_raise(sp_pjoin(WORK, REQUIRED[i]))));
+        sp_oset(doc, "outputs", outs);
+        sp_jdump(&man, doc, 0, 1); sp_bch(&man, '\n');
+        if (cx_write(m, man.s, man.n)) { sp_throw_os(errno ? errno : EIO, m); sp_crash(); }
+        sp_prov_write(m, sources);
+        if (stat(CACHE, &s) == 0) sp_rmtree(CACHE);
+        else if (errno != ENOENT) { sp_throw_os(errno, CACHE); sp_crash(); }
+        if (rename(WORK, CACHE)) { sp_throw_os(errno, WORK); sp_crash(); }
+        sp_scratch_forget();
+        assertion(valid());
+        printf("seed pp chain reference PREPARED %s\n", KEY);
+        return 0;
+    }
+    valid();
+    {
+        char *a[8], *set[3];
+        set[0] = sp_cat("SEEDPPCH_PREPARED=", CACHE); set[1] = sp_cat("SEEDPPCH_UA=", ua); set[2] = 0;
+        a[0] = (char *)sp_python(); a[1] = sp_pjoin(sp_root(), "tests/bound.py"); a[2] = "20"; a[3] = "sh";
+        a[4] = sp_pjoin(sp_root(), "tests/seedppchaincheck.sh"); a[5] = "1"; a[6] = (char *)part; a[7] = 0;
+        sp_exit(sp_call(a, -1, -1, set));
+    }
+    return 0;
+}

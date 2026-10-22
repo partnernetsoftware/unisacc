@@ -33,7 +33,7 @@ boundreason boundstall-r7g boundnested-1 boundnested-2 boundnested-3 boundnested
 stage-contract-e1e3
 latebind-p6
 resourceflow
-include-key
+include-key seedparse2-key
 gatequeue-symlink
 """.split())   # 0.0.38 P1-P7 pipeline contracts
 CONTRACT_PREFIX = ("manifest-entries-", "fresh-order-", "tapebin-roundtrip-", "tools-")
@@ -55,6 +55,7 @@ linkunits staticinit tagforward parserbounds formatonce staticunits cli
 ccparity run multi hostile source target kernel source-layout oracle-cache
 flownet-baseline-acc flownet-baseline-out1 flownet-baseline-out2 flownet-baseline-out3 flownet-baseline-out4 flownet-baseline-check flownet-baseline-selftest
 flownet-w2-parity flownet-w2-refuse flownet-w2-negative flownet-w2-accepts flownet-w2-tables
+flownet-w3-d3-1 flownet-w3-d3-2 flownet-w3-flow-1 flownet-w3-flow-2 flownet-w3-d4-tdesc flownet-w3-d4-adapter
 """.split())
 PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff-",
                    "ccrun-", "opt-run-", "closure-", "declmatrix-", "com-",

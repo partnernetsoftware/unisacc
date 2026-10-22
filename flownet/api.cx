@@ -1,66 +1,115 @@
-/* flownet/api.cx -- the one public face of flownet (plans/m4-flownet-cx-module.md W2): the flow x net paradigm of m4
-   (gold -> integer net -> flows -> bytes) as a .cx module with no knowledge of any particular language or target.
-   A consumer compiles this unit with flownet/{contract,nets,flow}.cx and its own units into one program:
-       sh ./unisacc.com -run CONSUMER.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx -- ...
-   and declares the fn_ functions it calls.  The API is functions only (W0: a missing external object reads as zeros,
-   a missing function is refused by name), every name has the fn_ prefix, and every failure is a named refusal:
-   the call returns -1 / 0 and fn_error() says "PATH[:LINE]: reason" or what was asked and why it was refused.
+/* flownet/api.cx -- the one public face of flownet (plans/m4-flownet-cx-module.md W2; W3: a module with two injection
+   surfaces): the flow x net paradigm of m4 (gold -> integer net -> flows -> bytes) with no knowledge of any particular
+   language or target.  A consumer names it with `#pragma unisa use flownet.api` (the module resolves beside the
+   consumer, so a consumer elsewhere reaches it through links in its own directory, one per module, e.g.
+   tests/flownet/api.cx -> ../../flownet/api.cx) and gets these fn_ prototypes and the injection types of flownet/fnx.cx from the derived
+   interface; or names flownet/api.cx on its command line and declares what it calls.  The API is functions only (W0:
+   a missing external object reads as zeros, a missing function is refused by name), every name has the fn_ prefix,
+   and every failure is a named refusal: the call returns -1 / 0 and fn_error() says "PATH[:LINE]: reason" or what was
+   asked and why it was refused.
 
-   construct    fn_open(DIR)                 contract.tsv + every net's NET.gold.tsv and NET.net.tsv, all checked
+   inject       fn_label_source(DOMAIN, LABEL, CTX)   the consumer's gold (types in flownet/fnx.cx): the domain of each
+                                                      net and the label of each key, asked once per key at construction
+   construct    fn_open(DIR)                 contract.tsv; each net's gold from the injected label source (else the
+                                             stock DIR/NET.gold.tsv) and its integer net from DIR/NET.net.tsv
+                fn_build(CONTRACT)           the contract rows as text, the gold from the injected label source, and
+                                             every integer net constructed here from its gold -- no files at all
+                fn_construct(DIR)            (W3 fix 3) DIR/contract.tsv; each net's gold from the injected label
+                                             source, else the stock DIR/NET.gold.tsv; every integer net constructed
+                                             here from its gold (no NET.net.tsv).  flownet/tdesc is such a directory:
+                                             the TDESC algebra its second consumer (tests/tdescprobe.cx) asks
    derive       fn_drive("built"|"gold"), fn_phase(NAME), fn_ask(NET, N, KEY) / fn_ask1..3, fn_gate(...),
                 fn_choice(NET, INPUT)
+   run          fn_run(FLOWS, FCTX, EMIT, ECTX)   the books reset, the consumer's flows run (writing with fn_out), the
+                                                  trace checked, then the emit hook called once with the whole output
+                fn_expect(BOOKS)             pin every following run's books: exactly these "PHASE\tNET\tHITS\n" rows
+                                             (trace-row order), else the run is refused before the hook; 0 unpins
+                FLOWNET_SWEEP=all|NET,...    (test hook, environment) fn_run perturbs one answer at a time, reruns
+                                             the flows and hands the output to the emit hook: every perturbation
+                                             must be refused by name, by flownet or by the hook (which judges it),
+                                             else the run is refused naming the decorative keys (flow.cx)
    accept       fn_acc(NET, &exact, &total)  every key of the domain: integer net == gold
    books        fn_trace_reset(), fn_trace_row(K, ...), fn_trace_check(), fn_asks()
-   contract     fn_nets(), fn_net(I), fn_role(NET), fn_list(ROLE, BUF, CAP), fn_phases(), fn_phase_name(I) */
+   contract     fn_nets(), fn_net(I), fn_role(NET), fn_list(ROLE, BUF, CAP), fn_phases(), fn_phase_name(I)
+   Text is never cut short: every message and path is formatted by fnx_fmt (allocated to its exact length); the only
+   hard limits are counts (nets, flows, phases, choices, fields, columns), each a named refusal at PATH:LINE. */
 
-int fnc_load(const char *dir);
-int fnc_nnets(void);
-const char *fnc_net(int i);
-int fnc_find(const char *net);
-const char *fnc_role(int i);
-int fnc_list(const char *role, char *out, int cap);
-int fnc_nphases(void);
-const char *fnc_phase(int i);
-const char *fnc_choice(const char *net, const char *in);
-void fnn_reset(void);
-int fnn_load(const char *dir, const char *name);
-int fnn_find(const char *name);
-int fnn_keys(int i);
-int fnn_predict(int i, int key);
-int fnn_gold(int i, int key);
-void fnf_reset(void);
-int fnf_drive(const char *mode);
-int fnf_phase(const char *name);
-const char *fnf_ask(const char *net, int nk, const char *const *key);
-int fnf_gate(const char *net, const char *answer, const char *legal, const char *what);
-int fnf_trace_row(int want, const char **phase, const char **net, long *h, long *g);
-int fnf_trace_check(void);
-long fnf_asks(void);
+#pragma unisa use fnx
+#pragma unisa use contract
+#pragma unisa use nets
+#pragma unisa use flow
 
-static char errbuf[1024];
 static int opened;
+static fn_domain_fn src_domain;       /* the injected label source, or 0 (fn_open then reads DIR/NET.gold.tsv) */
+static fn_label_fn src_label;
+static void *src_ctx;
 
-/* every unit reports through here; the first failure since the last fn_open/fn_error_clear wins */
-void fnx_fail(const char *msg) {
-    if (!errbuf[0]) snprintf(errbuf, sizeof errbuf, "%s", msg);
+const char *fn_error(void) { return fnx_error() ? fnx_error() : "no error"; }
+void fn_error_clear(void) { fnx_clear(); }
+
+/* the consumer's gold for every net from now on; (0, 0, 0) goes back to the stock DIR/NET.gold.tsv of fn_open */
+int fn_label_source(fn_domain_fn domain, fn_label_fn label, void *ctx) {
+    if (!domain != !label) { fnx_fail("label source: give both the domain and the label function, or neither"); return -1; }
+    src_domain = domain; src_label = label; src_ctx = ctx;
+    return 0;
 }
-const char *fn_error(void) { return errbuf[0] ? errbuf : "no error"; }
-void fn_error_clear(void) { errbuf[0] = 0; }
 
 int fn_open(const char *dir) {
     int i;
-    errbuf[0] = 0; opened = 0;
+    fnx_clear(); opened = 0;
     fnn_reset(); fnf_reset();
     if (fnc_load(dir)) return -1;
     for (i = 0; i < fnc_nnets(); i++)
-        if (fnn_load(dir, fnc_net(i)) < 0) return -1;
+        if ((src_label ? fnn_load_with(dir, fnc_net(i), src_domain, src_label, src_ctx) : fnn_load(dir, fnc_net(i))) < 0) return -1;
+    fnf_drive("built");
+    opened = 1;
+    return 0;
+}
+
+/* every net constructed (fn_build, fn_construct) must be exact on every key -- it cannot fail, by construction */
+static int exact_all(void) {
+    int i, k;
+    for (i = 0; i < fnn_count(); i++)
+        for (k = 0; k < fnn_keys(i); k++)
+            if (fnn_predict(i, k) != fnn_gold(i, k)) { fnx_failf("build: constructed net %s is not exact at key %d", fnn_name(i), k); return -1; }
+    return 0;
+}
+
+/* DIR/contract.tsv; every net's gold from the injected label source, else DIR/NET.gold.tsv; its integer net
+   constructed here from that gold */
+int fn_construct(const char *dir) {
+    int i;
+    fnx_clear(); opened = 0;
+    fnn_reset(); fnf_reset();
+    if (fnc_load(dir)) return -1;
+    for (i = 0; i < fnc_nnets(); i++)
+        if ((src_label ? fnn_load_with(0, fnc_net(i), src_domain, src_label, src_ctx) : fnn_load_gold(dir, fnc_net(i))) < 0) return -1;
+    if (exact_all()) return -1;
+    fnf_drive("built");
+    opened = 1;
+    return 0;
+}
+
+/* CONTRACT: the rows of a contract.tsv as text.  Every net's gold from the injected label source, its integer net
+   constructed from that gold; a net that is not exact on every key is refused (it cannot be, by construction). */
+int fn_build(const char *contract) {
+    int i, k, n;
+    fnx_clear(); opened = 0;
+    fnn_reset(); fnf_reset();
+    if (!src_label) { fnx_fail("build: no label source injected (fn_label_source first)"); return -1; }
+    if (fnc_load_text("contract", contract)) return -1;
+    for (i = 0; i < fnc_nnets(); i++) {
+        if ((n = fnn_load_with(0, fnc_net(i), src_domain, src_label, src_ctx)) < 0) return -1;
+        for (k = 0; k < fnn_keys(n); k++)
+            if (fnn_predict(n, k) != fnn_gold(n, k)) { fnx_failf("build: constructed net %s is not exact at key %d", fnc_net(i), k); return -1; }
+    }
     fnf_drive("built");
     opened = 1;
     return 0;
 }
 
 static int need(void) {
-    if (!opened) { fnx_fail("flownet: no tables open (fn_open first)"); return -1; }
+    if (!opened) { fnx_fail("flownet: no tables open (fn_open, fn_build or fn_construct first)"); return -1; }
     return 0;
 }
 
@@ -76,7 +125,7 @@ int fn_acc(const char *net, int *exact, int *total) {
     int i, k, n;
     *exact = *total = 0;
     if (need()) return -1;
-    if ((i = fnn_find(net)) < 0) { char m[128]; snprintf(m, sizeof m, "acc: %.60s is not a contract net", net); fnx_fail(m); return -1; }
+    if ((i = fnn_find(net)) < 0) { fnx_failf("acc: %s is not a contract net", net); return -1; }
     n = fnn_keys(i);
     for (k = 0; k < n; k++) {
         (*total)++;
@@ -102,3 +151,6 @@ int fn_trace_row(int k, const char **phase, const char **net, long *hits, long *
 }
 int fn_trace_check(void) { return need() ? -1 : fnf_trace_check(); }
 long fn_asks(void) { return fnf_asks(); }
+int fn_out(const char *bytes, long n) { return fnf_out(bytes, n); }
+int fn_run(fn_flows_fn flows, void *fctx, fn_emit_fn emit, void *ectx) { return need() ? -1 : fnf_run(flows, fctx, emit, ectx); }
+int fn_expect(const char *books) { return fnf_expect(books); }

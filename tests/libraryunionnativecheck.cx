@@ -1,0 +1,1141 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libraryunionnativecheck.cx -- public union chain acceptance (native -> model script union -> typed native union).
+   Current rejection is a failure, never green.  Ported from tests/libraryunionnativecheck.py (2026-10-23, the
+   owner's direction: the toolchain moves off Python); checklib.copy_runtime and checklib.sha are carried here.
+   usage: sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- [-h] [--package PACKAGE] [--arch {arm64,x86_64}]
+                                     [--evidence EVIDENCE] [--export-only] [--sanitize] [--factory] [--relay]
+   Run from the repository root (ROOT is the real path of the working directory; PACKAGE defaults to
+   ROOT/unisacc.com).  At most one of --export-only, --factory, --relay (else `AssertionError`, rc 1).  ARCH (default
+   the host: arm64 for an arm64/aarch64 machine, else x86_64) other than the host off Darwin is `RuntimeError:
+   cross-native execution requires platform runner`, rc 1.  PACKAGE is resolved (realpath, non-strict) and hashed.
+   In a fresh temporary directory TD (tempfile.gettempdir() -- TMPDIR, TEMP, TMP, /tmp, /var/tmp, /usr/tmp, the
+   working directory -- prefix r10-union-native- and 8 random [a-z0-9_]):
+     - copy_runtime: every *.c *.h *.S under exec/c (recursively) and the closure of their quoted includes
+       (`^\s*#\s*include\s*"NAME"`, multiline as Python's re.M saw it, resolved against the including file, never
+       outside ROOT; a missing one is `FileNotFoundError: runtime include missing: PATH`) are copied to TD at the
+       same relative path; runtime_inputs maps each relative path (sorted) to its sha256, then
+       tests/libraryabi/union_native.c (copied to TD/probe.c);
+     - PACKAGE is copied to TD/models.pkg and must hash the same (`AssertionError: package changed while
+       snapshotting`);
+     - stages, each `tests/bound 20 ...` with stdout/stderr captured through pipes (25 s limit, decoded as UTF-8 with
+       U+FFFD for bad bytes) and recorded {stage, command, rc, stdout, stderr}: runtime_build (cc [-arch ARCH on
+       Darwin] [-fsanitize=address,undefined -fno-omit-frame-pointer with --sanitize] -std=c11 -O2 -shared -fPIC
+       -fvisibility=hidden TD/exec/c/libunisacc.c TD/exec/c/librarycall_ARCH.S -lffi -o TD/library.dylib),
+       probe_build (cc ... -std=c11 -O2 -Wall -Wextra -I TD/exec/c TD/probe.c TD/library.dylib -o TD/probe) and
+       public_probe (TD/probe TD/models.pkg TARGET TD/host_flip.sig [relay|factory|export-only], under
+       `arch -x86_64` for Rosetta), where host_flip.sig is the USLSIG2 signature built byte for byte as the
+       original did (host_flip, host_pick for --factory, host_echo for --relay);
+     - every probe stdout line (str.splitlines) that json.loads to an object with a "stage" key is an event; the
+       first event with a truthy rc is first_failure; a compile failure after a passing unused_binding_compile adds
+       the localization note; rc 0 without calls_100 rc 0 at opt [0, 1, 2] is rc 1 with acceptance_error.
+   Output: the record, json.dumps(indent=2) (ASCII, \uXXXX escapes, keys in the original's insertion order) plus a
+   newline, on stdout -- also written to EVIDENCE first when given; rc 0 iff the runner's rc is 0, else 1.  A build
+   stage that fails ends the record there (actual_runner_rc is that stage's rc).  What the original raised inside
+   its try (a missing output, the 25 s limit, a KeyError on an event, an integer over 4300 digits) is recorded as
+   `exception` (Python's repr) with rc 1.  What it raised outside (bad PACKAGE, copy errors, ...) is one line on
+   stderr -- the last line of Python's traceback; the frames above it are not reproduced -- rc 1.
+   Arguments follow argparse (unique prefixes, --opt=VALUE, -h combined forms, ambiguity and usage errors rc 2 on
+   stderr); the usage text keeps the original's prog name (libraryunionnativecheck.py) so help and error text are
+   byte-identical, at argparse's default 80 columns.  Limits of the port: a `--` right after a valueful option is
+   "expected one argument" (argparse would take the argument after it); JSON nested past Python's recursion limit
+   is parsed instead of becoming a RecursionError; copied files keep their mode but not their timestamps.
+   Includes beyond the prelude: errno.h, fcntl.h, poll.h, time.h. */
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <time.h>
+
+static const char *USAGE =
+    "usage: libraryunionnativecheck.py [-h] [--package PACKAGE]\n"
+    "                                  [--arch {arm64,x86_64}]\n"
+    "                                  [--evidence EVIDENCE] [--export-only]\n"
+    "                                  [--sanitize] [--factory] [--relay]\n";
+static const char *HELP =
+    "\noptions:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n"
+    "  --arch {arm64,x86_64}\n  --evidence EVIDENCE\n  --export-only\n  --sanitize\n  --factory\n  --relay\n";
+static char ROOT[4096], TD[4600];
+
+/* ---- byte buffers ---- */
+typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
+static void oom(void) { fflush(stdout); fputs("MemoryError\n", stderr); exit(1); }
+static void bput(Buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64;
+        while (c < b->n + n + 1) c *= 2;
+        b->p = realloc(b->p, c);
+        if (!b->p) oom();
+        b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bbyte(Buf *b, unsigned v) { unsigned char c = (unsigned char)v; bput(b, &c, 1); }
+static void bU(Buf *b, unsigned long long v) {   /* struct.pack('<Q', v) */
+    unsigned char q[8]; int i;
+    for (i = 0; i < 8; i++) q[i] = (unsigned char)(v >> (8 * i));
+    bput(b, q, 8);
+}
+static void bcat(Buf *b, const Buf *c) { bput(b, c->p, c->n); }
+static void bbytes(Buf *b, int n, const unsigned *v) { int i; for (i = 0; i < n; i++) bbyte(b, v[i]); }
+
+/* ---- code point strings (a Python str) ---- */
+typedef struct U { long *c; size_t n, cap; } U;
+static void upush(U *u, long c) {
+    if (u->n == u->cap) { u->cap = u->cap ? u->cap * 2 : 16; u->c = realloc(u->c, u->cap * sizeof *u->c); if (!u->c) oom(); }
+    u->c[u->n++] = c;
+}
+/* one strict UTF-8 code point at s[i]; length in *l; -1 if invalid, with *bad = the bytes of the maximal invalid
+   prefix (Python's error range) */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l, int *bad) {
+    unsigned c = s[i], lo = 0x80, hi = 0xBF; int need, k; long cp;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else { *bad = 1; return -1; }
+    for (k = 1; k <= need; k++) {
+        unsigned d;
+        if (i + k >= n) { *bad = k; return -1; }
+        d = s[i + k];
+        if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) { *bad = k; return -1; }
+        cp = (cp << 6) | (d & 0x3F);
+    }
+    *l = need + 1; return cp;
+}
+/* bytes.decode(errors='replace') */
+static U udecode(const unsigned char *s, size_t n) {
+    U u = {0, 0, 0}; size_t i = 0; int l, bad;
+    while (i < n) {
+        long c = cp_at(s, n, i, &l, &bad);
+        if (c < 0) { upush(&u, 0xFFFD); i += (size_t)bad; } else { upush(&u, c); i += (size_t)l; }
+    }
+    return u;
+}
+/* os.fsdecode: surrogateescape */
+static U ufs(const char *s) {
+    U u = {0, 0, 0}; size_t i = 0, n = strlen(s); int l, bad;
+    while (i < n) {
+        long c = cp_at((const unsigned char *)s, n, i, &l, &bad);
+        if (c < 0) { upush(&u, 0xDC00 + (unsigned char)s[i]); i++; } else { upush(&u, c); i += (size_t)l; }
+    }
+    return u;
+}
+static int ueqs(U a, const char *s) {
+    size_t i, n = strlen(s);
+    if (a.n != n) return 0;
+    for (i = 0; i < n; i++) if (a.c[i] != (unsigned char)s[i]) return 0;
+    return 1;
+}
+static int ueq(U a, U b) { return a.n == b.n && (!a.n || !memcmp(a.c, b.c, a.n * sizeof *a.c)); }
+/* str.isprintable for the code points a compiler or probe can plausibly emit */
+static int printable(long c) {
+    if (c < 0x20 || (c >= 0x7F && c <= 0xA0) || c == 0xAD) return 0;
+    if (c == 0x1680 || (c >= 0x2000 && c <= 0x200F) || (c >= 0x2028 && c <= 0x202F) || (c >= 0x205F && c <= 0x206F)) return 0;
+    if (c == 0x3000 || c == 0xFEFF || (c >= 0xD800 && c <= 0xF8FF) || c == 0xFFFE || c == 0xFFFF) return 0;
+    if (c >= 0xFFF9 && c <= 0xFFFB) return 0;
+    if (c >= 0xF0000) return 0;
+    return 1;
+}
+static void butf8(Buf *o, long c) {
+    if (c < 0x80) bbyte(o, (unsigned)c);
+    else if (c < 0x800) { bbyte(o, 0xC0 | (c >> 6)); bbyte(o, 0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) { bbyte(o, 0xE0 | (c >> 12)); bbyte(o, 0x80 | ((c >> 6) & 0x3F)); bbyte(o, 0x80 | (c & 0x3F)); }
+    else { bbyte(o, 0xF0 | (c >> 18)); bbyte(o, 0x80 | ((c >> 12) & 0x3F)); bbyte(o, 0x80 | ((c >> 6) & 0x3F)); bbyte(o, 0x80 | (c & 0x3F)); }
+}
+/* repr(str) */
+static void urepr(Buf *o, U s) {
+    int sq = 0, dq = 0; size_t i; char q, t[16];
+    for (i = 0; i < s.n; i++) { if (s.c[i] == '\'') sq = 1; if (s.c[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    bbyte(o, (unsigned char)q);
+    for (i = 0; i < s.n; i++) {
+        long c = s.c[i];
+        if (c == q || c == '\\') { bbyte(o, '\\'); bbyte(o, (unsigned)c); }
+        else if (c == '\n') bputs(o, "\\n");
+        else if (c == '\r') bputs(o, "\\r");
+        else if (c == '\t') bputs(o, "\\t");
+        else if (printable(c)) butf8(o, c);
+        else {
+            if (c < 0x100) snprintf(t, sizeof t, "\\x%02x", (unsigned)c);
+            else if (c < 0x10000) snprintf(t, sizeof t, "\\u%04lx", c);
+            else snprintf(t, sizeof t, "\\U%08lx", c);
+            bputs(o, t);
+        }
+    }
+    bbyte(o, (unsigned char)q);
+}
+static char *crepr(const char *s) { Buf o = {0, 0, 0}; urepr(&o, ufs(s)); return (char *)o.p; }
+
+/* ---- cleanup and the failures the original raised outside its try ---- */
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char c[8192];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+/* the last line of the traceback */
+static void fatal(const char *line) { fflush(stdout); fprintf(stderr, "%s\n", line); cleanup(); exit(1); }
+static const char *errcls(int e) {
+    return e == ENOENT ? "FileNotFoundError" : e == EISDIR ? "IsADirectoryError" : e == ENOTDIR ? "NotADirectoryError"
+         : (e == EACCES || e == EPERM) ? "PermissionError" : e == EEXIST ? "FileExistsError" : "OSError";
+}
+static const char *errmsg(int e) {   /* glibc's wording; the carried strerror lacks some */
+    return e == ENOENT ? "No such file or directory" : e == EISDIR ? "Is a directory" : e == ENOTDIR ? "Not a directory"
+         : e == EACCES ? "Permission denied" : e == EPERM ? "Operation not permitted" : e == EEXIST ? "File exists"
+         : e == ENOSPC ? "No space left on device" : e == EROFS ? "Read-only file system" : e == ENOEXEC ? "Exec format error"
+         : e == ENAMETOOLONG ? "File name too long" : e == ELOOP ? "Too many levels of symbolic links" : e == EIO ? "Input/output error"
+         : strerror(e);
+}
+/* Class: [Errno N] strerror: 'path' */
+static void os_error(int err, const char *path) {
+    char line[16384];
+    snprintf(line, sizeof line, "%s: [Errno %d] %s: %s", errcls(err), err, errmsg(err), crepr(path));
+    fatal(line);
+}
+/* repr(OSError(n, msg)) as the try block recorded it */
+static char *os_repr(int err) {
+    static char t[256];
+    snprintf(t, sizeof t, "%s(%d, '%s')", errcls(err), err, errmsg(err));
+    return t;
+}
+
+/* ---- files ---- */
+static char *slurp(const char *p, size_t *n, int *err) {   /* Path.read_bytes */
+    struct stat s; char *b;
+    errno = 0;
+    if (stat(p, &s) != 0) { *err = errno; return 0; }
+    if (S_ISDIR(s.st_mode)) { *err = EISDIR; return 0; }
+    b = cx_read(p, n);
+    if (!b) { *err = errno ? errno : EIO; return 0; }
+    return b;
+}
+static void sha_hex(const void *b, size_t n, char hex[65]) { cx_sha256_hex(b, n, hex); }
+static char *sha_or_die(const char *p) {
+    size_t n = 0; int err = 0; char *b = slurp(p, &n, &err), *h;
+    if (!b) os_error(err, p);
+    h = malloc(65); if (!h) oom();
+    sha_hex(b, n, h); free(b); return h;
+}
+/* Path.mkdir(parents=True, exist_ok=True) */
+static int mkdirs(const char *p) {
+    char t[8192]; size_t i, n = strlen(p); struct stat s;
+    if (n >= sizeof t) return ENAMETOOLONG;
+    memcpy(t, p, n + 1);
+    for (i = 1; i <= n; i++) {
+        if (t[i] == '/' || t[i] == 0) {
+            char c = t[i]; t[i] = 0;
+            if (mkdir(t, 0777) != 0) {
+                int e = errno;
+                if (!(e == EEXIST && stat(t, &s) == 0 && S_ISDIR(s.st_mode))) { if (c == 0 || e != EEXIST) return e; }
+            }
+            t[i] = c;
+        }
+    }
+    if (stat(p, &s) != 0) return errno;
+    if (!S_ISDIR(s.st_mode)) return EEXIST;
+    return 0;
+}
+/* shutil.copy2 without the timestamps: content, then permission bits */
+static void copy2(const char *src, const char *dst) {
+    size_t n = 0; int err = 0; char *b; struct stat s;
+    if (stat(src, &s) != 0) os_error(errno, src);
+    b = slurp(src, &n, &err);
+    if (!b) os_error(err, src);
+    errno = 0;
+    if (cx_write(dst, b, n) != 0) os_error(errno ? errno : EIO, dst);
+    free(b);
+    chmod(dst, s.st_mode & 07777);
+}
+
+/* ---- paths ---- */
+/* os.path.normpath of an absolute path */
+static void normpath(const char *p, char *o, size_t cap) {
+    size_t j = 0; const char *s = p;
+    o[j++] = '/';
+    if (p[0] == '/' && p[1] == '/' && p[2] != '/') o[j++] = '/';
+    while (*s) {
+        const char *e; size_t n;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = strchr(s, '/'); n = e ? (size_t)(e - s) : strlen(s);
+        if (n == 1 && s[0] == '.') { s += n; continue; }
+        if (n == 2 && s[0] == '.' && s[1] == '.') {
+            while (j > 1 && o[j - 1] != '/') j--;
+            if (j > 1) j--;
+            if (j == 1 && o[0] == '/' && j < 2 && p[1] == '/' && p[2] != '/') j = 2;
+            s += n; continue;
+        }
+        if (o[j - 1] != '/') o[j++] = '/';
+        if (j + n + 1 > cap) n = cap - j - 1;
+        memcpy(o + j, s, n); j += n; s += n;
+    }
+    o[j] = 0;
+}
+/* os.path.realpath(P, strict=False) */
+static void py_realpath(const char *p, char *o, size_t cap) {
+    char a[8192], cand[8192]; const char *s; size_t j;
+    if (p[0] == '/') snprintf(a, sizeof a, "%s", p);
+    else { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(a, sizeof a, "%s/%s", cwd, p); }
+    o[0] = 0; j = 0; s = a;
+    while (*s) {
+        const char *e; size_t n; struct stat st;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = strchr(s, '/'); n = e ? (size_t)(e - s) : strlen(s);
+        if (n == 1 && s[0] == '.') { s += n; continue; }
+        if (n == 2 && s[0] == '.' && s[1] == '.') {
+            while (j > 0 && o[j - 1] != '/') j--;
+            if (j > 0) j--;
+            o[j] = 0; s += n; continue;
+        }
+        snprintf(cand, sizeof cand, "%s/%.*s", o, (int)n, s);
+        if (lstat(cand, &st) == 0 && S_ISLNK(st.st_mode)) {
+            char r[8192];
+            if (realpath(cand, r)) snprintf(cand, sizeof cand, "%s", r);
+        }
+        snprintf(o, cap, "%s", cand); j = strlen(o);
+        s += n;
+    }
+    if (!o[0]) snprintf(o, cap, "/");
+}
+/* str(Path(P)): repeated slashes collapse, '.' components drop, a trailing slash goes; '' is '.' */
+static void pathnorm(const char *p, char *o, size_t cap) {
+    size_t j = 0; const char *s = p;
+    if (p[0] == '/') { o[j++] = '/'; if (p[1] == '/' && p[2] != '/') o[j++] = '/'; }
+    while (*s && j + 1 < cap) {
+        const char *e; size_t n;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = strchr(s, '/'); n = e ? (size_t)(e - s) : strlen(s);
+        if (!(n == 1 && s[0] == '.')) {
+            if (j && o[j - 1] != '/') o[j++] = '/';
+            if (j + n + 1 > cap) n = cap - j - 1;
+            memcpy(o + j, s, n); j += n;
+        }
+        s += n;
+    }
+    if (!j) o[j++] = '.';
+    o[j] = 0;
+}
+
+/* ---- JSON values ---- */
+enum { J_NULL, J_FALSE, J_TRUE, J_INT, J_FLOAT, J_STR, J_ARR, J_OBJ };
+typedef struct J J;
+struct J { int t; char *num; double d; U s; J **a; U *k; size_t cnt, cap; };
+static J *jnew(int t) { J *v = calloc(1, sizeof *v); if (!v) oom(); v->t = t; return v; }
+static J *jint(long n) { J *v = jnew(J_INT); v->num = malloc(32); if (!v->num) oom(); snprintf(v->num, 32, "%ld", n); return v; }
+static J *jstrU(U s) { J *v = jnew(J_STR); v->s = s; return v; }
+static J *jstr(const char *s) { return jstrU(ufs(s)); }
+static J *jbool(int b) { return jnew(b ? J_TRUE : J_FALSE); }
+/* list.append, or d[key] = x (an existing key keeps its place) */
+static void jadd(J *v, U *key, J *x) {
+    size_t i;
+    if (key) for (i = 0; i < v->cnt; i++) if (ueq(v->k[i], *key)) { v->a[i] = x; return; }
+    if (v->cnt == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 8;
+        v->a = realloc(v->a, v->cap * sizeof *v->a); v->k = realloc(v->k, v->cap * sizeof *v->k);
+        if (!v->a || !v->k) oom();
+    }
+    v->a[v->cnt] = x; if (key) v->k[v->cnt] = *key; v->cnt++;
+}
+static void jset(J *o, const char *key, J *x) { U k = ufs(key); jadd(o, &k, x); }
+static J *jget(J *o, const char *key) {
+    size_t i;
+    for (i = 0; i < o->cnt; i++) if (ueqs(o->k[i], key)) return o->a[i];
+    return 0;
+}
+static int jtruthy(J *v) {
+    switch (v->t) {
+    case J_NULL: case J_FALSE: return 0;
+    case J_TRUE: return 1;
+    case J_INT: return strcmp(v->num, "0") != 0;
+    case J_FLOAT: return v->d != 0;
+    case J_STR: return v->s.n != 0;
+    default: return v->cnt != 0;
+    }
+}
+static int jeqint(J *v, int k) {   /* v == k */
+    char t[16];
+    if (v->t == J_INT) { snprintf(t, sizeof t, "%d", k); return !strcmp(v->num, t); }
+    if (v->t == J_FLOAT) return v->d == (double)k;
+    if (v->t == J_TRUE) return k == 1;
+    if (v->t == J_FALSE) return k == 0;
+    return 0;
+}
+static int jeqstr(J *v, const char *s) { return v->t == J_STR && ueqs(v->s, s); }
+
+/* ---- json.loads over a decoded str (Python's C scanner, strict) ---- */
+static const long *JS; static size_t JN, JP; static int JERR; static size_t JDIG;   /* JERR 1 JSONDecodeError, 2 ValueError */
+static double INF;
+static void jws(void) { while (JP < JN && (JS[JP] == ' ' || JS[JP] == '\t' || JS[JP] == '\n' || JS[JP] == '\r')) JP++; }
+static int hexv(long c) { return c >= '0' && c <= '9' ? (int)(c - '0') : c >= 'a' && c <= 'f' ? (int)(c - 'a' + 10) : c >= 'A' && c <= 'F' ? (int)(c - 'A' + 10) : -1; }
+static long hex4(size_t at) {
+    long v = 0; int k, h;
+    if (at + 4 > JN) { JERR = 1; return 0; }
+    for (k = 0; k < 4; k++) { h = hexv(JS[at + k]); if (h < 0) { JERR = 1; return 0; } v = v * 16 + h; }
+    return v;
+}
+static U jstring(void) {   /* JP just past the opening quote */
+    U u = {0, 0, 0}; long c;
+    for (;;) {
+        if (JP >= JN) { JERR = 1; return u; }
+        c = JS[JP];
+        if (c == '"') { JP++; return u; }
+        if (c < 0x20) { JERR = 1; return u; }
+        if (c != '\\') { upush(&u, c); JP++; continue; }
+        JP++;
+        if (JP >= JN) { JERR = 1; return u; }
+        switch (JS[JP]) {
+        case '"': c = '"'; break; case '\\': c = '\\'; break; case '/': c = '/'; break;
+        case 'b': c = 8; break; case 'f': c = 12; break; case 'n': c = 10; break; case 'r': c = 13; break; case 't': c = 9; break;
+        case 'u':
+            c = hex4(JP + 1); if (JERR) return u;
+            JP += 4;
+            if (c >= 0xD800 && c <= 0xDBFF && JP + 2 < JN && JS[JP + 1] == '\\' && JS[JP + 2] == 'u') {
+                long c2 = hex4(JP + 3); if (JERR) return u;
+                if (c2 >= 0xDC00 && c2 <= 0xDFFF) { c = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00)); JP += 6; }
+            }
+            break;
+        default: JERR = 1; return u;
+        }
+        JP++; upush(&u, c);
+    }
+}
+static int lit(const char *w) {
+    size_t n = strlen(w), i;
+    if (JP + n > JN) return 0;
+    for (i = 0; i < n; i++) if (JS[JP + i] != w[i]) return 0;
+    JP += n; return 1;
+}
+static int isdig(long c) { return c >= '0' && c <= '9'; }
+static J *jvalue(void) {
+    J *v; long c;
+    if (JP >= JN) { JERR = 1; return 0; }
+    c = JS[JP];
+    if (c == '"') { JP++; v = jnew(J_STR); v->s = jstring(); return JERR ? 0 : v; }
+    if (c == '{') {
+        v = jnew(J_OBJ); JP++; jws();
+        if (JP < JN && JS[JP] == '}') { JP++; return v; }
+        for (;;) {
+            U key; J *x;
+            if (JP >= JN || JS[JP] != '"') { JERR = 1; return 0; }
+            JP++; key = jstring(); if (JERR) return 0;
+            jws();
+            if (JP >= JN || JS[JP] != ':') { JERR = 1; return 0; }
+            JP++; jws(); x = jvalue(); if (JERR) return 0;
+            jadd(v, &key, x); jws();
+            if (JP < JN && JS[JP] == '}') { JP++; return v; }
+            if (JP >= JN || JS[JP] != ',') { JERR = 1; return 0; }
+            JP++; jws();
+        }
+    }
+    if (c == '[') {
+        v = jnew(J_ARR); JP++; jws();
+        if (JP < JN && JS[JP] == ']') { JP++; return v; }
+        for (;;) {
+            J *x = jvalue(); if (JERR) return 0;
+            jadd(v, 0, x); jws();
+            if (JP < JN && JS[JP] == ']') { JP++; return v; }
+            if (JP >= JN || JS[JP] != ',') { JERR = 1; return 0; }
+            JP++; jws();
+        }
+    }
+    if (lit("null")) return jnew(J_NULL);
+    if (lit("true")) return jnew(J_TRUE);
+    if (lit("false")) return jnew(J_FALSE);
+    if (lit("NaN")) { v = jnew(J_FLOAT); v->d = INF - INF; return v; }
+    if (lit("Infinity")) { v = jnew(J_FLOAT); v->d = INF; return v; }
+    if (lit("-Infinity")) { v = jnew(J_FLOAT); v->d = -INF; return v; }
+    {   /* -?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)? */
+        size_t st = JP, i = JP, e, k; int fl = 0; char *t;
+        if (i < JN && JS[i] == '-') i++;
+        if (i < JN && JS[i] == '0') i++;
+        else if (i < JN && JS[i] >= '1' && JS[i] <= '9') { while (i < JN && isdig(JS[i])) i++; }
+        else { JERR = 1; return 0; }
+        if (i + 1 < JN && JS[i] == '.' && isdig(JS[i + 1])) { fl = 1; i += 2; while (i < JN && isdig(JS[i])) i++; }
+        if (i < JN && (JS[i] == 'e' || JS[i] == 'E')) {
+            e = i + 1;
+            if (e < JN && (JS[e] == '+' || JS[e] == '-')) e++;
+            if (e < JN && isdig(JS[e])) { fl = 1; while (e < JN && isdig(JS[e])) e++; i = e; }
+        }
+        t = malloc(i - st + 1); if (!t) oom();
+        for (k = st; k < i; k++) t[k - st] = (char)JS[k];
+        t[i - st] = 0; JP = i;
+        if (fl) { v = jnew(J_FLOAT); v->d = strtod(t, 0); free(t); return v; }
+        JDIG = strlen(t) - (t[0] == '-');
+        if (JDIG > 4300) { JERR = 2; return 0; }   /* int(): sys.int_info.default_max_str_digits */
+        v = jnew(J_INT); v->num = !strcmp(t, "-0") ? "0" : t; return v;
+    }
+}
+static J *json_loads(const long *s, size_t n) {
+    J *v;
+    JS = s; JN = n; JP = 0; JERR = 0;
+    jws(); v = jvalue(); if (JERR) return 0;
+    jws();
+    if (JP != JN) { JERR = 1; return 0; }
+    return v;
+}
+
+/* ---- json.dumps(indent=2), ensure_ascii ---- */
+static void float_repr(Buf *o, double d) {   /* float.__repr__, JSON's NaN/Infinity */
+    char t[64], dig[32]; int p, nd = 0, ex, k; char *e;
+    if (d != d) { bputs(o, "NaN"); return; }
+    if (d - d != d - d) { bputs(o, d > 0 ? "Infinity" : "-Infinity"); return; }
+    if (d == 0) { bputs(o, (1.0 / d < 0) ? "-0.0" : "0.0"); return; }
+    for (p = 1; p <= 17; p++) { snprintf(t, sizeof t, "%.*e", p - 1, d); if (strtod(t, 0) == d) break; }
+    for (k = (t[0] == '-'); t[k] && t[k] != 'e'; k++) if (isdig(t[k])) dig[nd++] = t[k];
+    e = strchr(t, 'e'); ex = e ? atoi(e + 1) : 0;
+    while (nd > 1 && dig[nd - 1] == '0') nd--;
+    dig[nd] = 0;
+    if (d < 0) bbyte(o, '-');
+    if (ex < -4 || ex >= 16) {
+        bbyte(o, (unsigned char)dig[0]);
+        if (nd > 1) { bbyte(o, '.'); bputs(o, dig + 1); }
+        snprintf(t, sizeof t, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex); bputs(o, t);
+    } else if (ex < 0) {
+        bputs(o, "0."); for (k = 0; k < -ex - 1; k++) bbyte(o, '0'); bputs(o, dig);
+    } else if (ex + 1 >= nd) {
+        bputs(o, dig); for (k = nd; k < ex + 1; k++) bbyte(o, '0'); bputs(o, ".0");
+    } else {
+        bput(o, dig, (size_t)ex + 1); bbyte(o, '.'); bputs(o, dig + ex + 1);
+    }
+}
+static void dump_str(Buf *o, U s) {
+    size_t i; char t[16]; long c;
+    bbyte(o, '"');
+    for (i = 0; i < s.n; i++) {
+        c = s.c[i];
+        if (c == '"') bputs(o, "\\\""); else if (c == '\\') bputs(o, "\\\\");
+        else if (c == '\n') bputs(o, "\\n"); else if (c == '\r') bputs(o, "\\r"); else if (c == '\t') bputs(o, "\\t");
+        else if (c == 8) bputs(o, "\\b"); else if (c == 12) bputs(o, "\\f");
+        else if (c >= 0x20 && c < 0x7F) bbyte(o, (unsigned)c);
+        else if (c > 0xFFFF) {
+            long v = c - 0x10000;
+            snprintf(t, sizeof t, "\\u%04lx\\u%04lx", 0xD800 | (v >> 10), 0xDC00 | (v & 0x3FF)); bputs(o, t);
+        } else { snprintf(t, sizeof t, "\\u%04lx", c); bputs(o, t); }
+    }
+    bbyte(o, '"');
+}
+static void indent(Buf *o, int lvl) { int i; bbyte(o, '\n'); for (i = 0; i < lvl; i++) bputs(o, "  "); }
+static void dumps(Buf *o, J *v, int lvl) {
+    size_t i;
+    switch (v->t) {
+    case J_NULL: bputs(o, "null"); break;
+    case J_FALSE: bputs(o, "false"); break;
+    case J_TRUE: bputs(o, "true"); break;
+    case J_INT: bputs(o, v->num); break;
+    case J_FLOAT: float_repr(o, v->d); break;
+    case J_STR: dump_str(o, v->s); break;
+    case J_ARR:
+        if (!v->cnt) { bputs(o, "[]"); break; }
+        bbyte(o, '[');
+        for (i = 0; i < v->cnt; i++) { if (i) bbyte(o, ','); indent(o, lvl + 1); dumps(o, v->a[i], lvl + 1); }
+        indent(o, lvl); bbyte(o, ']'); break;
+    default:
+        if (!v->cnt) { bputs(o, "{}"); break; }
+        bbyte(o, '{');
+        for (i = 0; i < v->cnt; i++) {
+            if (i) bbyte(o, ',');
+            indent(o, lvl + 1); dump_str(o, v->k[i]); bputs(o, ": "); dumps(o, v->a[i], lvl + 1);
+        }
+        indent(o, lvl); bbyte(o, '}');
+    }
+}
+
+/* ---- str.splitlines over code points ---- */
+static int linebreak(long c) { return c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029; }
+
+/* ---- argparse ---- */
+static const char *OPTS[] = { "-h", "--help", "--package", "--arch", "--evidence", "--export-only", "--sanitize", "--factory", "--relay" };
+static const int ACT[] = { 0, 0, 1, 2, 3, 4, 5, 6, 7 };   /* option string -> action */
+static const char *ANAME[] = { "-h/--help", "--package", "--arch", "--evidence", "--export-only", "--sanitize", "--factory", "--relay" };
+#define NOPTS 9
+static void usage_error(const char *msg) {
+    fflush(stdout); fputs(USAGE, stderr); fprintf(stderr, "libraryunionnativecheck.py: error: %s\n", msg);
+    exit(2);
+}
+typedef struct Opt { int act, hasx, sep; const char *x; const char *str; char *amb; } Opt;
+static int looks_negnum(const char *s) {   /* ^-\d+$|^-\d*\.\d+$ */
+    const char *p = s + 1; int before = 0, after = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) {
+        if (*p >= '0' && *p <= '9') { if (dot) after = 1; else before = 1; }
+        else if (*p == '.' && !dot) dot = 1;
+        else return 0;
+    }
+    return dot ? after : before;
+}
+/* _parse_optional: 0 positional; 1 an option (o->act -1 when no action matches) */
+static int classify(const char *s, Opt *o) {
+    const char *eq; int i, hits = 0;
+    o->act = -1; o->hasx = 0; o->sep = 0; o->x = 0; o->str = s; o->amb = 0;
+    if (!s[0] || s[0] != '-') return 0;
+    for (i = 0; i < NOPTS; i++) if (!strcmp(s, OPTS[i])) { o->act = ACT[i]; o->str = OPTS[i]; return 1; }
+    if (!s[1]) return 0;
+    if ((eq = strchr(s, '='))) {
+        size_t n = (size_t)(eq - s);
+        for (i = 0; i < NOPTS; i++)
+            if (strlen(OPTS[i]) == n && !strncmp(s, OPTS[i], n)) { o->act = ACT[i]; o->str = OPTS[i]; o->hasx = 1; o->sep = 1; o->x = eq + 1; return 1; }
+    }
+    if (s[1] == '-') {
+        size_t n = eq ? (size_t)(eq - s) : strlen(s); char matches[512]; size_t ml = 0;
+        matches[0] = 0;
+        for (i = 0; i < NOPTS; i++)
+            if (strlen(OPTS[i]) >= n && !strncmp(OPTS[i], s, n)) {
+                hits++; o->act = ACT[i]; o->str = OPTS[i];
+                if (eq) { o->hasx = 1; o->sep = 1; o->x = eq + 1; }
+                ml += (size_t)snprintf(matches + ml, sizeof matches - ml, "%s%s", ml ? ", " : "", OPTS[i]);
+            }
+        if (hits > 1) {   /* an option; consuming it is the error */
+            static char msg[8192];
+            snprintf(msg, sizeof msg, "ambiguous option: %s could match %s", s, matches);
+            o->amb = msg; return 1;
+        }
+        if (hits == 1) return 1;
+        o->act = -1; o->hasx = 0; o->sep = 0; o->x = 0; o->str = s;
+    } else if (s[1] == 'h') {   /* the only short option: -hREST */
+        o->act = 0; o->str = "-h"; o->hasx = 1; o->sep = 0; o->x = s + 2; return 1;
+    }
+    if (looks_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+typedef struct Args { const char *package, *arch, *evidence; int export_only, sanitize, factory, relay; } Args;
+static void parse(int argc, char **argv, Args *a) {
+    static char extras[16384]; size_t xl = 0; int i, past = 0; Opt o;
+    extras[0] = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i]; int act; const char *x; int hasx, sep, help = 0;
+        const char *val[4] = {0, 0, 0, 0}; int acts[64], nact = 0, k;
+        if (past || !strcmp(s, "--")) { past = 1; goto extra; }
+        if (!classify(s, &o)) goto extra;
+        if (o.amb) usage_error(o.amb);
+        if (o.act < 0) goto extra;
+        act = o.act; x = o.x; hasx = o.hasx; sep = o.sep;
+        for (;;) {
+            int takes = act >= 1 && act <= 3;
+            if (hasx) {
+                if (!takes && o.str[1] != '-' && x[0]) {
+                    if (sep || x[0] == '-') { char m[8192]; snprintf(m, sizeof m, "argument %s: ignored explicit argument %s", ANAME[act], crepr(x)); usage_error(m); }
+                    if (nact < 64) acts[nact++] = act;
+                    if (x[0] == 'h') {
+                        act = 0; x++;
+                        if (!x[0]) { hasx = 0; sep = 0; }
+                        else if (x[0] == '=') { sep = 1; x++; }
+                        else sep = 0;
+                        continue;
+                    }
+                    xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s-%s", xl ? " " : "", x);
+                    break;
+                } else if (takes) {
+                    if (nact < 64) { acts[nact] = act; val[act] = x; nact++; }
+                    break;
+                } else { char m[8192]; snprintf(m, sizeof m, "argument %s: ignored explicit argument %s", ANAME[act], crepr(x)); usage_error(m); }
+            } else {
+                if (takes) {
+                    Opt n;
+                    if (i + 1 >= argc || !strcmp(argv[i + 1], "--") || classify(argv[i + 1], &n)) {
+                        char m[256]; snprintf(m, sizeof m, "argument %s: expected one argument", ANAME[act]); usage_error(m);
+                    }
+                    val[act] = argv[++i];
+                }
+                if (nact < 64) acts[nact++] = act;
+                break;
+            }
+        }
+        for (k = 0; k < nact; k++) {
+            switch (acts[k]) {
+            case 0: help = 1; break;
+            case 1: a->package = val[1]; break;
+            case 2:
+                if (strcmp(val[2], "arm64") && strcmp(val[2], "x86_64")) {
+                    char m[8192]; snprintf(m, sizeof m, "argument --arch: invalid choice: %s (choose from 'arm64', 'x86_64')", crepr(val[2]));
+                    usage_error(m);
+                }
+                a->arch = val[2]; break;
+            case 3: a->evidence = val[3]; break;
+            case 4: a->export_only = 1; break;
+            case 5: a->sanitize = 1; break;
+            case 6: a->factory = 1; break;
+            case 7: a->relay = 1; break;
+            }
+            if (help) { fflush(stderr); printf("%s%s", USAGE, HELP); exit(0); }
+        }
+        continue;
+    extra:
+        xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", s);
+    }
+    if (xl) { char m[16500]; snprintf(m, sizeof m, "unrecognized arguments: %s", extras); usage_error(m); }
+}
+
+/* ---- checklib.copy_runtime ---- */
+typedef struct SL { char **v; size_t n, cap; } SL;
+static void slpush(SL *l, char *s) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 64; l->v = realloc(l->v, l->cap * sizeof *l->v); if (!l->v) oom(); }
+    l->v[l->n++] = s;
+}
+static char *dupstr(const char *s) { char *p = malloc(strlen(s) + 1); if (!p) oom(); strcpy(p, s); return p; }
+static int partcmp(const void *pa, const void *pb) {   /* PurePath ordering: part by part */
+    const char *a = *(char *const *)pa, *b = *(char *const *)pb;
+    for (;;) {
+        size_t la = strcspn(a, "/"), lb = strcspn(b, "/"), m = la < lb ? la : lb; int c = memcmp(a, b, m);
+        if (c) return c;
+        if (la != lb) return la < lb ? -1 : 1;
+        a += la; b += lb;
+        if (!*a || !*b) return (*a != 0) - (*b != 0);
+        a++; b++;
+    }
+}
+static int strcmpv(const void *pa, const void *pb) { return strcmp(*(char *const *)pa, *(char *const *)pb); }
+static void rglob(const char *dir, SL *out) {   /* rglob('*') if is_file() and suffix in .c .h .S */
+    DIR *d = opendir(dir); struct dirent *e;
+    if (!d) return;
+    while ((e = readdir(d))) {
+        char p[8192]; struct stat ls, s; size_t n = strlen(e->d_name);
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (lstat(p, &ls) != 0) continue;
+        if (S_ISDIR(ls.st_mode)) { rglob(p, out); continue; }
+        if (stat(p, &s) != 0 || !S_ISREG(s.st_mode)) continue;
+        if (n > 2 && e->d_name[n - 2] == '.' && (e->d_name[n - 1] == 'c' || e->d_name[n - 1] == 'h' || e->d_name[n - 1] == 'S')) slpush(out, dupstr(p));
+    }
+    closedir(d);
+}
+static int ws(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+/* returns the input map: relative path -> sha256, sorted */
+static J *copy_runtime(const char *dest) {
+    SL pending = {0, 0, 0}, rel = {0, 0, 0}, hex = {0, 0, 0}; char cdir[8192]; size_t rl = strlen(ROOT), i; J *m = jnew(J_OBJ);
+    snprintf(cdir, sizeof cdir, "%s/exec/c", ROOT);
+    rglob(cdir, &pending);
+    if (pending.n) qsort(pending.v, pending.n, sizeof *pending.v, partcmp);
+    while (pending.n) {
+        char *source = pending.v[--pending.n], *r, target[8192], parent[8192], *slash, h[65];
+        size_t n = 0, p, last = 0; int err = 0, seen = 0; unsigned char *data;
+        if (strncmp(source, ROOT, rl) || (source[rl] != '/' && source[rl] != 0)) {
+            char line[16384]; snprintf(line, sizeof line, "ValueError: %s is not in the subpath of %s", crepr(source), crepr(ROOT)); fatal(line);
+        }
+        r = source[rl] ? source + rl + 1 : ".";
+        for (i = 0; i < rel.n; i++) if (!strcmp(rel.v[i], r)) { seen = 1; break; }
+        if (seen) continue;
+        data = (unsigned char *)slurp(source, &n, &err);
+        if (!data) os_error(err, source);
+        snprintf(target, sizeof target, "%s/%s", dest, r);
+        snprintf(parent, sizeof parent, "%s", target);
+        if ((slash = strrchr(parent, '/'))) { *slash = 0; if ((err = mkdirs(parent))) os_error(err, parent); }
+        copy2(source, target);
+        sha_hex(data, n, h);
+        slpush(&rel, dupstr(r)); slpush(&hex, dupstr(h));
+        for (p = 0; p <= n; p++) {   /* rb'^\s*#\s*include\s*"([^"\n]+)"', re.M */
+            size_t q, st;
+            if (p && data[p - 1] != '\n') continue;
+            if (p < last) continue;
+            q = p;
+            while (q < n && ws(data[q])) q++;
+            if (q >= n || data[q] != '#') continue;
+            q++;
+            while (q < n && ws(data[q])) q++;
+            if (n - q < 7 || memcmp(data + q, "include", 7)) continue;
+            q += 7;
+            while (q < n && ws(data[q])) q++;
+            if (q >= n || data[q] != '"') continue;
+            st = ++q;
+            while (q < n && data[q] != '"' && data[q] != '\n') q++;
+            if (q == st || q >= n || data[q] != '"') continue;
+            last = q + 1;
+            {
+                char name[4096], joined[16384], inc[8192]; struct stat s; size_t nl = q - st; int l, bad; size_t k;
+                for (k = 0; k < nl; k += (size_t)l)
+                    if (cp_at(data + st, nl, k, &l, &bad) < 0) fatal("UnicodeDecodeError: 'utf-8' codec can't decode an include name");
+                if (nl >= sizeof name) nl = sizeof name - 1;
+                memcpy(name, data + st, nl); name[nl] = 0;
+                if (name[0] == '/') snprintf(joined, sizeof joined, "%s", name);
+                else {
+                    char dir[8192]; snprintf(dir, sizeof dir, "%s", source);
+                    if ((slash = strrchr(dir, '/'))) *slash = 0;
+                    snprintf(joined, sizeof joined, "%s/%s", dir, name);
+                }
+                py_realpath(joined, inc, sizeof inc);
+                if (strncmp(inc, ROOT, rl) || (inc[rl] != '/' && inc[rl] != 0)) {
+                    char line[16384]; snprintf(line, sizeof line, "ValueError: %s is not in the subpath of %s", crepr(inc), crepr(ROOT)); fatal(line);
+                }
+                if (stat(inc, &s) != 0) {
+                    char line[16384];
+                    if (errno != ENOENT) os_error(errno, inc);
+                    snprintf(line, sizeof line, "FileNotFoundError: runtime include missing: %s", inc); fatal(line);
+                }
+                slpush(&pending, dupstr(inc));
+            }
+        }
+        free(data);
+    }
+    {   /* dict(sorted(copied.items())) */
+        size_t *ord = malloc((rel.n + 1) * sizeof *ord); char **keys = malloc((rel.n + 1) * sizeof *keys); size_t a, b;
+        if (!ord || !keys) oom();
+        for (i = 0; i < rel.n; i++) keys[i] = rel.v[i];
+        if (rel.n) qsort(keys, rel.n, sizeof *keys, strcmpv);
+        for (a = 0; a < rel.n; a++)
+            for (b = 0; b < rel.n; b++) if (rel.v[b] == keys[a]) { jset(m, keys[a], jstr(hex.v[b])); break; }
+        free(ord); free(keys);
+    }
+    return m;
+}
+
+/* ---- the stages: subprocess.run([ROOT/tests/bound, '20', *ARGS], capture_output=True, timeout=25) ---- */
+static J *REC, *COMMANDS, *EVENTS;
+static const char *EVIDENCE;
+static int finish(int rc);
+static char EXC[65536];   /* repr of what the try block raised, or "" */
+static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+static J *run(const char *stage, char **args) {
+    char bound[4200], *a[64]; int k = 0, i, op[2], ep[2], xp[2], st = 0, rc, open_n = 2, timed_out = 0, xerr = 0;
+    pid_t pid; Buf ob = {0, 0, 0}, eb = {0, 0, 0}; long long deadline; J *item, *cmd;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    a[k++] = bound; a[k++] = "20";
+    for (i = 0; args[i] && k < 63; i++) a[k++] = args[i];
+    a[k] = 0;
+    cmd = jnew(J_ARR);
+    for (i = 0; i < k; i++) jadd(cmd, 0, jstr(a[i]));
+    fflush(stdout); fflush(stderr);
+    if (pipe(op) || pipe(ep) || pipe(xp)) { snprintf(EXC, sizeof EXC, "%s", os_repr(errno)); return 0; }
+    fcntl(xp[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) { snprintf(EXC, sizeof EXC, "%s", os_repr(errno)); return 0; }
+    if (pid == 0) {
+        int e;
+        dup2(op[1], 1); dup2(ep[1], 2);
+        close(op[0]); close(op[1]); close(ep[0]); close(ep[1]); close(xp[0]);
+        execv(a[0], a);
+        e = errno; if (write(xp[1], &e, sizeof e) < 0) _exit(127);
+        _exit(127);
+    }
+    close(op[1]); close(ep[1]); close(xp[1]);
+    if (read(xp[0], &xerr, sizeof xerr) == (ssize_t)sizeof xerr) {   /* the exec failed: Popen raised */
+        close(xp[0]); close(op[0]); close(ep[0]);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        snprintf(EXC, sizeof EXC, "%s", os_repr(xerr));
+        return 0;
+    }
+    close(xp[0]);
+    deadline = now_ms() + 25000;
+    {
+        int fds[2]; fds[0] = op[0]; fds[1] = ep[0];
+        while (open_n > 0) {
+            struct pollfd pf[2]; int np = 0, j; long long left = deadline - now_ms();
+            if (left <= 0) { timed_out = 1; break; }
+            for (j = 0; j < 2; j++) if (fds[j] >= 0) { pf[np].fd = fds[j]; pf[np].events = POLLIN; pf[np].revents = 0; np++; }
+            if (poll(pf, (nfds_t)np, (int)(left > 1000 ? 1000 : left)) < 0) { if (errno == EINTR) continue; break; }
+            for (j = 0; j < np; j++) {
+                if (pf[j].revents & (POLLIN | POLLHUP | POLLERR)) {
+                    unsigned char buf[32768]; ssize_t r = read(pf[j].fd, buf, sizeof buf); int w = pf[j].fd == fds[0] ? 0 : 1;
+                    if (r > 0) bput(w ? &eb : &ob, buf, (size_t)r);
+                    else if (r == 0 || errno != EINTR) { close(fds[w]); fds[w] = -1; open_n--; }
+                }
+            }
+        }
+        if (fds[0] >= 0) close(fds[0]);
+        if (fds[1] >= 0) close(fds[1]);
+    }
+    if (!timed_out) {
+        for (;;) {   /* communicate() has its EOFs; wait() under what is left of the limit */
+            pid_t w = waitpid(pid, &st, WNOHANG);
+            if (w == pid) break;
+            if (w < 0 && errno != EINTR) break;
+            if (now_ms() >= deadline) { timed_out = 1; break; }
+            usleep(10000);
+        }
+    }
+    if (timed_out) {
+        Buf r = {0, 0, 0};
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        bputs(&r, "TimeoutExpired([");
+        for (i = 0; i < k; i++) { if (i) bputs(&r, ", "); urepr(&r, ufs(a[i])); }
+        bputs(&r, "], 25)");
+        snprintf(EXC, sizeof EXC, "%s", (char *)r.p);
+        return 0;
+    }
+    rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
+    item = jnew(J_OBJ);
+    jset(item, "stage", jstr(stage));
+    jset(item, "command", cmd);
+    jset(item, "rc", jint(rc));
+    jset(item, "stdout", jstrU(udecode(ob.p, ob.n)));
+    jset(item, "stderr", jstrU(udecode(eb.p, eb.n)));
+    jadd(COMMANDS, 0, item);
+    return item;
+}
+static int irc(J *item) { return atoi(jget(item, "rc")->num); }
+
+/* the record is printed (and written to EVIDENCE first) */
+static int finish(int rc) {
+    Buf o = {0, 0, 0};
+    jset(REC, "actual_runner_rc", jint(rc));
+    dumps(&o, REC, 0); bbyte(&o, '\n');
+    if (EVIDENCE) {
+        char p[8192], parent[8192], *slash; int err; FILE *f;
+        pathnorm(EVIDENCE, p, sizeof p);
+        snprintf(parent, sizeof parent, "%s", p);
+        slash = strrchr(parent, '/');
+        if (!slash) snprintf(parent, sizeof parent, ".");
+        else if (slash == parent) parent[1] = 0;
+        else *slash = 0;
+        if ((err = mkdirs(parent))) os_error(err, parent);
+        errno = 0;
+        if (!(f = fopen(p, "w"))) os_error(errno ? errno : EIO, p);
+        if (fwrite(o.p, 1, o.n, f) != o.n || fclose(f) != 0) os_error(errno ? errno : EIO, p);
+    }
+    fwrite(o.p, 1, o.n, stdout); fflush(stdout);
+    cleanup();
+    return rc == 0 ? 0 : 1;
+}
+static int raised(void) { jset(REC, "exception", jstr(EXC)); return finish(1); }
+static int key_error(const char *k) { snprintf(EXC, sizeof EXC, "KeyError('%s')", k); return raised(); }
+
+/* ---- the signature fixtures ---- */
+static Buf desc(unsigned kind, unsigned width, unsigned align, unsigned uns, unsigned tag, const Buf *payload) {
+    Buf o = {0, 0, 0};
+    bU(&o, 0); bU(&o, 0); bU(&o, 0); bU(&o, kind); bU(&o, width); bU(&o, uns); bU(&o, align);
+    bbyte(&o, tag); bU(&o, payload ? payload->n : 0);
+    if (payload) bcat(&o, payload);
+    return o;
+}
+static Buf pointer_to(const Buf *child) {   /* u(1,0,0,4,8,0,8) + [4] + u(len) + child */
+    Buf o = {0, 0, 0};
+    bU(&o, 1); bU(&o, 0); bU(&o, 0); bU(&o, 4); bU(&o, 8); bU(&o, 0); bU(&o, 8);
+    bbyte(&o, 4); bU(&o, child->n); bcat(&o, child);
+    return o;
+}
+static Buf sig2(const char *nm, unsigned nres, const Buf *res, unsigned nparam, const Buf *param) {
+    static const unsigned flags[4] = {0, 1, 0, 0};
+    Buf o = {0, 0, 0};
+    bputs(&o, "USLSIG2\n"); bU(&o, 1); bU(&o, strlen(nm)); bputs(&o, nm); bbytes(&o, 4, flags);
+    bU(&o, nres); bcat(&o, res); bU(&o, nparam); bcat(&o, param); bbyte(&o, 0);
+    return o;
+}
+
+static char *uname_field(char *flag) {
+    char *a[] = { "uname", flag, 0 }, *out = 0; size_t n = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+/* tempfile.mkdtemp(prefix='r10-union-native-') */
+static void make_td(void) {
+    const char *envs[] = { "TMPDIR", "TEMP", "TMP" }, *cands[8]; int nc = 0, i, tries;
+    char cwd[4096], dir[8192]; const char *chars = "abcdefghijklmnopqrstuvwxyz0123456789_";
+    unsigned char rnd[8]; int fd;
+    for (i = 0; i < 3; i++) { const char *v = getenv(envs[i]); if (v && *v) cands[nc++] = v; }
+    cands[nc++] = "/tmp"; cands[nc++] = "/var/tmp"; cands[nc++] = "/usr/tmp";
+    if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+    cands[nc++] = cwd;
+    dir[0] = 0;
+    for (i = 0; i < nc; i++) {
+        char abs[8192]; struct stat s;
+        if (cands[i][0] == '/') snprintf(abs, sizeof abs, "%s", cands[i]); else snprintf(abs, sizeof abs, "%s/%s", cwd, cands[i]);
+        normpath(abs, dir, sizeof dir);
+        if (stat(dir, &s) == 0 && S_ISDIR(s.st_mode) && access(dir, W_OK | X_OK) == 0) break;
+        dir[0] = 0;
+    }
+    if (!dir[0]) fatal("FileNotFoundError: [Errno 2] No usable temporary directory found");
+    for (tries = 0; tries < 100; tries++) {
+        fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0 || read(fd, rnd, sizeof rnd) != (ssize_t)sizeof rnd) { for (i = 0; i < 8; i++) rnd[i] = (unsigned char)(rand() ^ getpid() ^ tries); }
+        if (fd >= 0) close(fd);
+        snprintf(TD, sizeof TD, "%s%sr10-union-native-", dir, strcmp(dir, "/") ? "/" : "");
+        for (i = 0; i < 8; i++) { size_t l = strlen(TD); TD[l] = chars[rnd[i] % 37]; TD[l + 1] = 0; }
+        if (mkdir(TD, 0700) == 0) return;
+        if (errno != EEXIST) { int e = errno; char t[4600]; snprintf(t, sizeof t, "%s", TD); TD[0] = 0; os_error(e, t); }
+    }
+    { char t[4600]; snprintf(t, sizeof t, "%s", TD); TD[0] = 0; os_error(EEXIST, t); }
+}
+
+int main(int argc, char **argv) {
+    Args A = {0, 0, 0, 0, 0, 0, 0};
+    const char *host, *arch, *mode; char *mach, *sys; int darwin, i;
+    char cwd[4096], defpkg[4200], package[8192], target[64], runtime[4700], tmp[4800], probe_c[4700], frozen[4700];
+    char lib[4700], exe[4700], signature[4700], *pkgsha; J *inputs, *item;
+    INF = strtod("1e400", 0);
+    if (!getcwd(cwd, sizeof cwd) || !realpath(cwd, ROOT)) return 2;
+    snprintf(defpkg, sizeof defpkg, "%s/unisacc.com", ROOT);
+    A.package = defpkg;
+    parse(argc, argv, &A);
+    if (A.factory + A.export_only + A.relay > 1) fatal("AssertionError");
+    mach = uname_field("-m"); sys = uname_field("-s");   /* platform.machine(), platform.system() */
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    arch = A.arch ? A.arch : host;
+    darwin = !strcmp(sys, "Darwin");
+    if (strcmp(arch, host) && !darwin) fatal("RuntimeError: cross-native execution requires platform runner");
+    py_realpath(A.package, package, sizeof package);
+    snprintf(target, sizeof target, "%s/%s", darwin ? "osx" : "lnx", arch);
+    mode = A.relay ? "script-relay" : A.factory ? "native-factory" : A.export_only ? "export-only" : "bidirectional";
+    EVIDENCE = A.evidence;
+    REC = jnew(J_OBJ); COMMANDS = jnew(J_ARR); EVENTS = jnew(J_ARR);
+    jset(REC, "schema", jint(1));
+    jset(REC, "scope", jstr("actual public native->script union->typed native union; rejection is failure"));
+    jset(REC, "target", jstr(target));
+    jset(REC, "mode", jstr(mode));
+    jset(REC, "native_or_emulated", jstr(strcmp(host, arch) ? "Rosetta" : "native"));
+    jset(REC, "package_path", jstr(package));
+    pkgsha = sha_or_die(package);
+    jset(REC, "package_sha256", jstr(pkgsha));
+    jset(REC, "commands", COMMANDS);
+    jset(REC, "events", EVENTS);
+    jset(REC, "status", jstr("failed"));
+
+    make_td();
+    snprintf(runtime, sizeof runtime, "%s/exec/c", TD);
+    { int e = mkdirs(runtime); if (e) os_error(e, runtime); }
+    snprintf(tmp, sizeof tmp, "%s/src", TD);
+    if (mkdir(tmp, 0777) != 0) os_error(errno, tmp);
+    inputs = copy_runtime(TD);
+    snprintf(tmp, sizeof tmp, "%s/tests/libraryabi/union_native.c", ROOT);
+    snprintf(probe_c, sizeof probe_c, "%s/probe.c", TD);
+    copy2(tmp, probe_c);
+    jset(inputs, "tests/libraryabi/union_native.c", jstr(sha_or_die(probe_c)));
+    snprintf(frozen, sizeof frozen, "%s/models.pkg", TD);
+    copy2(package, frozen);
+    if (strcmp(sha_or_die(frozen), pkgsha)) fatal("AssertionError: package changed while snapshotting");
+    jset(REC, "runtime_inputs", inputs);
+    jset(REC, "sanitize", jbool(A.sanitize));
+
+    /* the try block */
+    {
+        char *b[40], lsname[64]; int k = 0;
+        snprintf(lib, sizeof lib, "%s/library.dylib", TD);
+        snprintf(lsname, sizeof lsname, "librarycall_%s.S", arch);
+        {
+            static char rt_c[4800], rt_s[4800];
+            snprintf(rt_c, sizeof rt_c, "%s/libunisacc.c", runtime);
+            snprintf(rt_s, sizeof rt_s, "%s/%s", runtime, lsname);
+            b[k++] = "cc";
+            if (darwin) { b[k++] = "-arch"; b[k++] = (char *)arch; }
+            if (A.sanitize) { b[k++] = "-fsanitize=address,undefined"; b[k++] = "-fno-omit-frame-pointer"; }
+            b[k++] = "-std=c11"; b[k++] = "-O2"; b[k++] = "-shared"; b[k++] = "-fPIC"; b[k++] = "-fvisibility=hidden";
+            b[k++] = rt_c; b[k++] = rt_s; b[k++] = "-lffi"; b[k++] = "-o"; b[k++] = lib; b[k] = 0;
+        }
+        if (!(item = run("runtime_build", b))) return raised();
+        if (irc(item)) return finish(irc(item));
+        {
+            size_t n = 0; int err = 0; char *d = slurp(lib, &n, &err), h[65];
+            if (!d) { snprintf(EXC, sizeof EXC, "%s", os_repr(err)); return raised(); }
+            sha_hex(d, n, h); free(d);
+            jset(REC, "runtime_sha256", jstr(h));
+        }
+        snprintf(exe, sizeof exe, "%s/probe", TD);
+        k = 0;
+        b[k++] = "cc";
+        if (darwin) { b[k++] = "-arch"; b[k++] = (char *)arch; }
+        if (A.sanitize) { b[k++] = "-fsanitize=address,undefined"; b[k++] = "-fno-omit-frame-pointer"; }
+        b[k++] = "-std=c11"; b[k++] = "-O2"; b[k++] = "-Wall"; b[k++] = "-Wextra"; b[k++] = "-I"; b[k++] = runtime;
+        b[k++] = probe_c; b[k++] = lib; b[k++] = "-o"; b[k++] = exe; b[k] = 0;
+        if (!(item = run("probe_build", b))) return raised();
+        if (irc(item)) return finish(irc(item));
+    }
+    {
+        Buf D, U64, pay = {0, 0, 0}, uni, sig, empty = {0, 0, 0}, hx = {0, 0, 0}; char h[65]; J *decl, *members; size_t x;
+        static const unsigned head[2] = {1, 0}, zz[2] = {0, 0};
+        D = desc(3, 8, 8, 0, 0, 0); U64 = desc(1, 8, 8, 1, 0, 0);
+        bU(&pay, 2); bU(&pay, 0); bU(&pay, 0); bU(&pay, 0); bU(&pay, 8); bcat(&pay, &D);
+        bU(&pay, 0); bU(&pay, 0); bU(&pay, 0); bU(&pay, 8); bcat(&pay, &U64);
+        uni = desc(5, 8, 8, 0, 2, &pay);
+        sig = sig2("host_flip", 1, &uni, 1, &uni);
+        snprintf(signature, sizeof signature, "%s/host_flip.sig", TD);
+        if (A.factory || A.relay) {
+            Buf child = {0, 0, 0}, ptr;
+            bbytes(&child, 2, head); bU(&child, 1); bbytes(&child, 2, zz); bU(&child, 1); bcat(&child, &uni);
+            bU(&child, 1); bcat(&child, &uni); bbyte(&child, 0);
+            ptr = pointer_to(&child);
+            if (A.factory) sig = sig2("host_pick", 0, &ptr, 0, &empty);
+            else {
+                Buf ref = {0, 0, 0}, param; static const unsigned rh[2] = {1, 1};
+                bbytes(&ref, 2, rh); bU(&ref, 1);
+                param = pointer_to(&ref);
+                sig = sig2("host_echo", 1, &ptr, 1, &param);
+            }
+        }
+        errno = 0;
+        if (cx_write(signature, sig.p, sig.n) != 0) { snprintf(EXC, sizeof EXC, "%s", os_repr(errno ? errno : EIO)); return raised(); }
+        {
+            size_t n = 0; int err = 0; char *d = slurp(signature, &n, &err);
+            if (!d) { snprintf(EXC, sizeof EXC, "%s", os_repr(err)); return raised(); }
+            sha_hex(d, n, h); free(d);
+        }
+        jset(REC, "signature_sha256", jstr(h));
+        for (x = 0; x < sig.n; x++) { char t[3]; snprintf(t, sizeof t, "%02x", sig.p[x]); bputs(&hx, t); }
+        jset(REC, "signature_hex", jstr(hx.n ? (char *)hx.p : ""));
+        decl = jnew(J_OBJ);
+        jset(decl, "signature", jstr(A.relay ? "callback parameter and result" : A.factory ? "callback result" : "union parameter and result"));
+        jset(decl, "union_tag", jint(2)); jset(decl, "union_size", jint(8)); jset(decl, "union_alignment", jint(8));
+        members = jnew(J_ARR); jadd(members, 0, jstr("double")); jadd(members, 0, jstr("unsigned long long"));
+        jset(decl, "members", members);
+        jset(decl, "supported", jint(0));
+        jset(decl, "callback_support", A.factory || A.relay ? jint(0) : jnew(J_NULL));
+        jset(REC, "declaration", decl);
+    }
+    {
+        char *r[16]; int j = 0; J *out, *failed = 0, *e, *v; U s; size_t p, st, ev; int rc, ncomplete = 0; J *complete[4];
+        if (strcmp(host, arch) && darwin) { r[j++] = "arch"; r[j++] = "-x86_64"; }
+        r[j++] = exe; r[j++] = frozen; r[j++] = target; r[j++] = signature;
+        if (A.relay) r[j++] = "relay"; else if (A.factory) r[j++] = "factory"; else if (A.export_only) r[j++] = "export-only";
+        r[j] = 0;
+        if (!(item = run("public_probe", r))) return raised();
+        out = jget(item, "stdout"); s = out->s;
+        for (p = 0, st = 0; p <= s.n; p++) {   /* for line in stdout.splitlines() */
+            size_t end = p; J *event;
+            if (p < s.n && !linebreak(s.c[p])) continue;
+            if (p == s.n && st == s.n) break;
+            event = json_loads(s.c + st, end - st);
+            if (p < s.n && s.c[p] == '\r' && p + 1 < s.n && s.c[p + 1] == '\n') p++;
+            st = p + 1;
+            if (JERR == 2) {
+                snprintf(EXC, sizeof EXC, "ValueError('Exceeds the limit (4300 digits) for integer string conversion: value has %lu digits; use sys.set_int_max_str_digits() to increase the limit')", (unsigned long)JDIG);
+                return raised();
+            }
+            if (!event) continue;
+            if (event->t == J_OBJ && jget(event, "stage")) jadd(EVENTS, 0, event);
+        }
+        for (ev = 0; ev < EVENTS->cnt; ev++) {   /* next((e for e in events if e['rc']), None) */
+            e = EVENTS->a[ev];
+            if (!(v = jget(e, "rc"))) return key_error("rc");
+            if (jtruthy(v)) { failed = e; break; }
+        }
+        jset(REC, "first_failure", failed ? failed : jnew(J_NULL));
+        if (failed && jeqstr(jget(failed, "stage"), "compile")) {
+            int any = 0;
+            for (ev = 0; ev < EVENTS->cnt && !any; ev++) {
+                e = EVENTS->a[ev];
+                if (jeqstr(jget(e, "stage"), "unused_binding_compile")) {
+                    if (!(v = jget(e, "rc"))) return key_error("rc");
+                    if (jeqint(v, 0)) any = 1;
+                }
+            }
+            if (any) jset(REC, "localization", jstr("registration and unused-binding resolver freeze/compile passed; referenced union fails during model compilation; exact diagnostic retained"));
+        }
+        rc = irc(item);
+        for (ev = 0; ev < EVENTS->cnt; ev++) {   /* [e['opt'] for e in events if e['stage']=='calls_100' and e['rc']==0] */
+            e = EVENTS->a[ev];
+            if (!jeqstr(jget(e, "stage"), "calls_100")) continue;
+            if (!(v = jget(e, "rc"))) return key_error("rc");
+            if (!jeqint(v, 0)) continue;
+            if (!(v = jget(e, "opt"))) return key_error("opt");
+            if (ncomplete < 4) complete[ncomplete] = v;
+            ncomplete++;
+        }
+        if (rc == 0 && !(ncomplete == 3 && jeqint(complete[0], 0) && jeqint(complete[1], 1) && jeqint(complete[2], 2))) {
+            rc = 1; jset(REC, "acceptance_error", jstr("missing mandatory O0/O1/O2 actual calls"));
+        }
+        jset(REC, "status", jstr(rc == 0 ? "passed" : "failed"));
+        (void)i;
+        return finish(rc);
+    }
+}

@@ -1,0 +1,411 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libunisaccexportcheck.cx -- actual E3 declarations -> native callable exports, host-native scoped.
+   Ported from tests/libunisaccexportcheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/libunisaccexportcheck.cx -- [-h] --package PACKAGE [--no-main]
+   In a fresh temporary directory (TMPDIR, TEMP, TMP, then /tmp; prefix r10-native-exports-context-) the runtime
+   closure is copied (checklib.copy_runtime, here tests/cxlib/runtimecopy.cx) and built with the host compiler,
+   output not captured, 20 s:
+     cc -std=c11 -O2 -shared -fPIC -fvisibility=hidden exec/c/libunisacc.c exec/c/librarycall_ARCH.S -lffi -o library.dylib
+   then loaded with dlopen (the .py's ctypes.CDLL; every host function pointer is called through __hostcall, see H
+   below) and driven from four threads at once (the .py's ThreadPoolExecutor of 4, started together before any
+   library call, see GATE; index I compiles at -O(I%3)), each in its own context of the package
+   (Path(PACKAGE).resolve()): one source
+   with exports bump/mixed/store/echo/die/process_count/process_arg, a static, and (unless --no-main) a main; before
+   relocation no symbol resolves; after it every export is a stable pointer, the initialiser runs once, a
+   mixed-width call is exact, the static and an absent name do not resolve, exit(37) inside an export is recovered
+   (us_call_status 1/37, then 0), and us_run_main keeps the mapping: main sees the state, argc/argv slots update on
+   a second run, exports stay callable; with --no-main us_run_main is refused with "no main".
+   stdout is one json.dumps line {"platform", "contexts": 4, "E3_declared_native_exports", "initialisation_once",
+   "exit_recovery", "no_main_module", "main_preserves_export_pointers", "dynamic_process_slots"}, rc 0.
+   A failed check is rc 1 with the last line of the .py's traceback on stderr (`AssertionError`, `AssertionError: MSG`,
+   `AssertionError: b'US_ERROR'` or `AssertionError: ('NAME', b'US_ERROR')` as the .py's assert message is; the
+   lowest failing thread index wins, as ex.map raises); a failed or slow cc is subprocess.CalledProcessError /
+   TimeoutExpired, a load failure `OSError: DLERROR`, a missing export `AttributeError: DLERROR`.  argparse errors
+   are rc 2 with its usage text (prog name libunisaccexportcheck.py, so the text is byte-identical).
+   Prelude gaps: <dlfcn.h> (ctypes.CDLL) and <pthread.h> (the thread pool) are not in the cx prelude nor in CX1;
+   they are the two #includes. */
+#include <dlfcn.h>
+#include <pthread.h>
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pytempfile
+
+static const char *PROG = "libunisaccexportcheck.py";
+static const char *USAGE = "usage: libunisaccexportcheck.py [-h] --package PACKAGE [--no-main]\n";
+static const char *HELP =
+    "\noptions:\n"
+    "  -h, --help         show this help message and exit\n"
+    "  --package PACKAGE\n"
+    "  --no-main\n";
+
+static char ROOT[4096], TD[4600], PACKAGE[4600], TARGET[64];
+static int NO_MAIN;
+
+static void cleanup(void) { if (TD[0]) { ptf_rmtree(TD); TD[0] = 0; } }
+static void uncaught(const char *line) {
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    cleanup(); exit(1);
+}
+static void usage_error(const char *fmt, const char *a) {
+    fflush(stdout); fputs(USAGE, stderr); fprintf(stderr, "%s: error: ", PROG); fprintf(stderr, fmt, a); fputc('\n', stderr);
+    exit(2);
+}
+
+/* ---- argparse: [-h] --package PACKAGE [--no-main], long options by unique prefix ------------------------------ */
+static int prefix_of(const char *a, size_t n, const char *opt) { return n >= 3 && n <= strlen(opt) && !strncmp(a, opt, n); }
+static void parse(int argc, char **argv) {
+    char extra[8192] = ""; const char *package = 0; int i;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *eq; size_t n;
+        if (!strcmp(a, "--")) {   /* it and everything after are unrecognized (Python 3.14 keeps the '--') */
+            for (; i < argc; i++) { size_t l = strlen(extra); snprintf(extra + l, sizeof extra - l, "%s%s", l ? " " : "", argv[i]); }
+            break;
+        }
+        if (!strcmp(a, "-h")) { fputs(USAGE, stdout); fputs(HELP, stdout); exit(0); }
+        if (a[0] == '-' && a[1] == '-' && a[2]) {
+            eq = strchr(a, '='); n = eq ? (size_t)(eq - a) : strlen(a);
+            {   int ph = prefix_of(a, n, "--help"), pp = prefix_of(a, n, "--package"), pn = prefix_of(a, n, "--no-main");
+                if (ph + pp + pn > 1) {
+                    char m[8192], o[256] = ""; size_t l;
+                    if (ph) strcat(o, "--help");
+                    if (pp) { l = strlen(o); snprintf(o + l, sizeof o - l, "%s--package", l ? ", " : ""); }
+                    if (pn) { l = strlen(o); snprintf(o + l, sizeof o - l, "%s--no-main", l ? ", " : ""); }
+                    snprintf(m, sizeof m, "ambiguous option: %.*s could match %s", (int)n, a, o);
+                    usage_error("%s", m);
+                }
+                if (ph) {
+                    if (eq) { char m[8192]; snprintf(m, sizeof m, "argument -h/--help: ignored explicit argument '%s'", eq + 1); usage_error("%s", m); }
+                    fputs(USAGE, stdout); fputs(HELP, stdout); exit(0);
+                }
+                if (pn) {
+                    if (eq) { char m[8192]; snprintf(m, sizeof m, "argument --no-main: ignored explicit argument '%s'", eq + 1); usage_error("%s", m); }
+                    NO_MAIN = 1; continue;
+                }
+                if (pp) {
+                    if (eq) { package = eq + 1; continue; }
+                    if (i + 1 >= argc || (argv[i + 1][0] == '-' && argv[i + 1][1] && !(argv[i + 1][1] >= '0' && argv[i + 1][1] <= '9')))
+                        usage_error("%s", "argument --package: expected one argument");
+                    package = argv[++i]; continue;
+                }
+            }
+        }
+        {   size_t l = strlen(extra); snprintf(extra + l, sizeof extra - l, "%s%s", l ? " " : "", a); }
+    }
+    if (!package) usage_error("%s", "the following arguments are required: --package");
+    if (extra[0]) usage_error("unrecognized arguments: %s", extra);
+    {   char why[9000];
+        if (rtc_resolve(package, 0, PACKAGE, sizeof PACKAGE, why, sizeof why) != 0) uncaught(why);
+    }
+}
+
+/* ---- subprocess.run([...], check=True, timeout=20), output not captured --------------------------------------- */
+static void list_repr(char **argv, char *out, size_t cap) {
+    size_t j = 0; int i;
+    out[j++] = '[';
+    for (i = 0; argv[i] && j + 4 < cap; i++) {
+        char r[8300];
+        rtc_pyrepr(argv[i], strlen(argv[i]), r, sizeof r);
+        j += (size_t)snprintf(out + j, cap - j, "%s%s", i ? ", " : "", r);
+        if (j >= cap) j = cap - 1;
+    }
+    if (j + 2 < cap) out[j++] = ']';
+    out[j] = 0;
+}
+static int on_path(const char *name) {
+    const char *p = getenv("PATH"), *s; char cand[8300]; struct stat st;
+    if (strchr(name, '/')) return stat(name, &st) == 0;
+    if (!p) p = "/bin:/usr/bin";
+    for (s = p;; ) {
+        size_t n = strcspn(s, ":");
+        snprintf(cand, sizeof cand, "%.*s%s%s", (int)n, s, n ? "/" : "", name);
+        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode) && access(cand, X_OK) == 0) return 1;
+        if (!s[n]) break;
+        s += n + 1;
+    }
+    return 0;
+}
+static void check_call(char **argv, int timeout) {
+    char r[16384], line[17000]; int st = 0, rc = 0; pid_t pid; long ticks = (long)timeout * 100;
+    if (!on_path(argv[0])) { rtc_oserror(ENOENT, argv[0], line, sizeof line); uncaught(line); }
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) { rtc_oserror(errno, argv[0], line, sizeof line); uncaught(line); }
+    if (pid == 0) { execvp(argv[0], argv); _exit(127); }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0 && errno != EINTR) break;
+        if (ticks-- <= 0) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            list_repr(argv, r, sizeof r);
+            snprintf(line, sizeof line, "subprocess.TimeoutExpired: Command '%s' timed out after %d seconds", r, timeout);
+            uncaught(line);
+        }
+        usleep(10000);
+    }
+    if (WIFSIGNALED(st)) {
+        static const char *names[] = { 0, "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE",
+                                       "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM" };
+        int sig = WTERMSIG(st);
+        list_repr(argv, r, sizeof r);
+        if (sig > 0 && sig < 16) snprintf(line, sizeof line, "subprocess.CalledProcessError: Command '%s' died with <Signals.%s: %d>.", r, names[sig], sig);
+        else snprintf(line, sizeof line, "subprocess.CalledProcessError: Command '%s' died with unknown signal %d.", r, sig);
+        uncaught(line);
+    }
+    rc = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    if (rc) {
+        list_repr(argv, r, sizeof r);
+        snprintf(line, sizeof line, "subprocess.CalledProcessError: Command '%s' returned non-zero exit status %d.", r, rc);
+        uncaught(line);
+    }
+}
+
+/* ---- the library (ctypes.CDLL and its argtypes/restype declarations) ------------------------------------------- */
+/* A host function pointer (dlsym's, or one us_sym returns) is not a .cx function: the call goes through the host
+   channel, __hostcall(FN, int64 v[10]), which delivers up to six integer/pointer arguments in the host C ABI and
+   returns the integer result register -- every call here is integers and pointers only, as the .py's ctypes
+   prototypes are.  An int result is the low 32 bits of it, as ctypes' c_int restype reads it. */
+static long H(void *f, long a, long b, long c, long d, long e) {
+    long v[10] = { 0 };
+    v[0] = a; v[1] = b; v[2] = c; v[3] = d; v[4] = e;
+    return __hostcall(f, v);
+}
+static struct {
+    void *us_new, *us_add_source, *us_compile, *us_relocate, *us_free, *us_sym, *us_error, *us_call_status, *us_run_main;
+} L;
+static void *lib_new(const char *pkg) { return (void *)H(L.us_new, (long)pkg, 0, 0, 0, 0); }
+static int lib_add_source(void *c, const char *name, const char *text) { return (int)H(L.us_add_source, (long)c, (long)name, (long)text, 0, 0); }
+static int lib_compile(void *c, const char *target, int opt) { return (int)H(L.us_compile, (long)c, (long)target, opt, 0, 0); }
+static int lib_relocate(void *c) { return (int)H(L.us_relocate, (long)c, 0, 0, 0, 0); }
+static void lib_free(void *c) { H(L.us_free, (long)c, 0, 0, 0, 0); }
+static void *lib_sym2(void *c, const char *name) { return (void *)H(L.us_sym, (long)c, (long)name, 0, 0, 0); }
+static const char *lib_error(void *c) { return (const char *)H(L.us_error, (long)c, 0, 0, 0, 0); }
+static int lib_call_status(void *c, int *status) { return (int)H(L.us_call_status, (long)c, (long)status, 0, 0, 0); }
+static int lib_run_main(void *c, int argc, char **argv, int *status) { return (int)H(L.us_run_main, (long)c, argc, (long)argv, (long)status, 0); }
+static void *lib_sym(void *h, const char *name) {
+    void *p; const char *e; char line[9000];
+    dlerror();
+    p = dlsym(h, name);
+    if (!p) { e = dlerror(); snprintf(line, sizeof line, "AttributeError: %s", e ? e : name); uncaught(line); }
+    return p;
+}
+
+static const char *SOURCE_HEAD =
+    "#include <stdlib.h>\n"
+    "int state=5;\n"
+    "static int hidden(void){return 99;}\n"
+    "int bump(int n){state+=n;return state;}\n"
+    "long mixed(signed char a,unsigned short b,int c,unsigned long d,int *p){return a+b+c+d+*p;}\n"
+    "void store(int *p,int n){*p=n;}\n"
+    "int *echo(int *p){return p;}\n"
+    "int die(void){exit(37);return 9;}\n"
+    "int process_count(void){return __argc();}\n"
+    "char *process_arg(int n){return __argv(n);}\n";
+static const char *SOURCE_MAIN = "int main(int argc,char **argv){return state+argc+(argv[1][0]==97);}\n";
+
+/* ---- one probe(index): 0, or the AssertionError line (malloc'd) ----------------------------------------------- */
+/* repr(bytes) of a NUL-terminated C string; None for NULL */
+static void bytes_repr(const char *s, char *out, size_t cap) {
+    size_t j = 0; const unsigned char *p; int sq = 0, dq = 0; char q;
+    if (!s) { snprintf(out, cap, "None"); return; }
+    for (p = (const unsigned char *)s; *p; p++) { if (*p == '\'') sq = 1; if (*p == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+#define BR_PUT(str) do { const char *t_ = (str); size_t m_ = strlen(t_); if (j + m_ + 1 < cap) { memcpy(out + j, t_, m_); j += m_; } } while (0)
+    if (j + 2 < cap) { out[j++] = 'b'; out[j++] = q; }
+    for (p = (const unsigned char *)s; *p; p++) {
+        char t[8];
+        if (*p == (unsigned char)q || *p == '\\') { t[0] = '\\'; t[1] = (char)*p; t[2] = 0; }
+        else if (*p == '\n') strcpy(t, "\\n");
+        else if (*p == '\r') strcpy(t, "\\r");
+        else if (*p == '\t') strcpy(t, "\\t");
+        else if (*p < 0x20 || *p >= 0x7f) snprintf(t, sizeof t, "\\x%02x", *p);
+        else { t[0] = (char)*p; t[1] = 0; }
+        BR_PUT(t);
+    }
+    if (j + 1 < cap) out[j++] = q;
+#undef BR_PUT
+    out[j] = 0;
+}
+static char *msg(const char *text) {   /* AssertionError: TEXT, or the bare class for 0 */
+    size_t n = (text ? strlen(text) : 0) + 32; char *m = malloc(n);
+    if (m) { if (text) snprintf(m, n, "AssertionError: %s", text); else snprintf(m, n, "AssertionError"); }
+    return m;
+}
+static char *msg_bytes(const char *b) { char r[9000]; bytes_repr(b, r, sizeof r); return msg(r); }
+static char *typeerror_none(void) {   /* b'...' in None */
+    static const char t[] = "TypeError: argument of type 'NoneType' is not a container or iterable"; char *m = malloc(sizeof t);
+    if (m) memcpy(m, t, sizeof t);
+    return m;
+}
+
+typedef struct { void *c; char *fail; } Probe;
+/* fn(name, ...): us_sym, asserted non-null (name, us_error) and stable across two lookups */
+static void *fn(Probe *p, const char *name) {
+    void *a = lib_sym2(p->c, name), *b;
+    if (!a) {
+        char r[9000], t[9300], n[512];
+        bytes_repr(lib_error(p->c), r, sizeof r); rtc_pyrepr(name, strlen(name), n, sizeof n);
+        snprintf(t, sizeof t, "(%s, %s)", n, r);
+        p->fail = msg(t); return 0;
+    }
+    b = lib_sym2(p->c, name);
+    if (a != b) { p->fail = msg("unstable same-generation pointer"); return 0; }
+    return a;
+}
+#define FAIL(m) do { p->fail = (m); return; } while (0)
+#define NEED(cond, m) do { if (!(cond)) FAIL(m); } while (0)
+#define FN(var, name) void *var = fn(p, name); if (!var) return
+/* the exports' ctypes.CFUNCTYPE prototypes, called through the host channel */
+#define bump(n) ((int)H(bump, (n), 0, 0, 0, 0))
+#define count() ((int)H(count, 0, 0, 0, 0, 0))
+#define mixed(a, b, c_, d, e) H(mixed, (signed char)(a), (unsigned short)(b), (int)(c_), (long)(unsigned long)(d), (long)(e))
+#define store(q, n) ((void)H(store, (long)(q), (n), 0, 0, 0))
+#define echo(q) ((void *)H(echo, (long)(q), 0, 0, 0, 0))
+#define die() ((int)H(die, 0, 0, 0, 0, 0))
+#define arg(n) ((char *)H(arg, (n), 0, 0, 0, 0))
+
+static void probe_body(Probe *p, int index) {
+    char source[2048]; void *c = p->c; int status, rc; int cell;
+    snprintf(source, sizeof source, "%s%s", SOURCE_HEAD, NO_MAIN ? "\n" : SOURCE_MAIN);   /* the .py removes the main text, not its newline */
+    NEED(!lib_add_source(c, "exports.c", source), msg(0));
+    NEED(!lib_compile(c, TARGET, index % 3), msg_bytes(lib_error(c)));
+    NEED(!lib_sym2(c, "bump") && lib_error(c) && lib_error(c)[0], msg(0));
+    NEED(!lib_relocate(c), msg_bytes(lib_error(c)));
+    {
+        FN(bump, "bump");
+        FN(count, "process_count");
+        NEED(count() == 0, msg(0));
+        NEED(bump(2) == 7 && bump(2) == 9, msg("initialisation repeated or state lost"));
+        cell = 11;
+        {
+            FN(mixed, "mixed");
+            NEED(mixed(-3, 65000, -20, 100000, &cell) == 164988, msg(0));
+        }
+        {
+            FN(store, "store");
+            store(&cell, 43); NEED(cell == 43, msg(0));
+        }
+        {
+            FN(echo, "echo");
+            NEED(echo(&cell) == (void *)&cell, msg(0));
+        }
+        NEED(!lib_sym2(c, "hidden") && !lib_sym2(c, "absent"), msg(0));
+        {
+            FN(die, "die");
+            NEED(die() == 0, msg(0));
+        }
+        status = 0;
+        NEED(lib_call_status(c, &status) == 1 && status == 37, msg(0));
+        {   const char *e = lib_error(c);
+            if (!e) FAIL(typeerror_none());
+            NEED(strstr(e, "37"), msg(0));
+        }
+        NEED(bump(1) == 10 && lib_call_status(c, &status) == 0, msg("exit recovery failed"));
+        {
+            char *args[2]; args[0] = "hosted"; args[1] = "arg"; status = 0;
+            rc = lib_run_main(c, 2, args, &status);
+        }
+        if (NO_MAIN) {
+            const char *e;
+            NEED(rc, msg("missing main was not refused"));
+            e = lib_error(c);
+            if (!e) FAIL(typeerror_none());
+            NEED(strstr(e, "no main"), msg("missing main was not refused"));
+        } else {
+            char *nextargs[3]; char *a1;
+            NEED(!rc, msg_bytes(lib_error(c)));
+            NEED(status == 13, msg("main reinitialised the existing mapping"));
+            NEED(count() == 2, msg("dynamic argc remains at relocation-time value"));
+            {
+                FN(arg, "process_arg");
+                a1 = arg(1); NEED(a1 && !strcmp(a1, "arg"), msg(0));
+                nextargs[0] = "hosted"; nextargs[1] = "other"; nextargs[2] = "tail";
+                NEED(!lib_run_main(c, 3, nextargs, &status), msg_bytes(lib_error(c)));
+                NEED(count() == 3 && (a1 = arg(1)) && !strcmp(a1, "other"), msg("same mapping argv did not update"));
+                NEED(status == 13, msg("main reset state on second invocation"));
+            }
+        }
+        NEED(bump(1) == 11, msg("main invalidated a callable export"));
+    }
+}
+typedef struct { int index; char *fail; } Job;
+/* Every worker waits until all four exist before its first library call.  The library runs script code on a private
+   16 MiB mmap'd stack and leaves it with longjmp (exit recovery); under the cc default _FORTIFY_SOURCE that is
+   __longjmp_chk, which aborts ("longjmp causes uninitialized stack frame") when the private stack lies above the
+   thread's own stack.  A thread created after another worker's first malloc gets its stack below that worker's
+   64 MiB glibc arena, and the arena's alignment gap above it can then take the private stack (seen here 1 run in 3
+   with --no-main).  Creating the four stacks back to back first keeps every later mapping below all of them; the
+   check itself (four contexts used concurrently) is unchanged. */
+static pthread_mutex_t GATE;
+static int STARTED;
+static void *probe(void *arg) {
+    Job *j = arg; Probe p;
+    pthread_mutex_lock(&GATE); STARTED++; pthread_mutex_unlock(&GATE);
+    for (;;) { int k; pthread_mutex_lock(&GATE); k = STARTED; pthread_mutex_unlock(&GATE); if (k >= 4) break; usleep(200); }
+    p.fail = 0;
+    p.c = lib_new(PACKAGE);
+    if (!p.c) { j->fail = msg(0); return 0; }
+    probe_body(&p, j->index);
+    lib_free(p.c);   /* finally */
+    j->fail = p.fail;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char why[9000], lib[4800], runtime[4800], src[4800], asmf[4800], base[4200]; const char *arch; void *h; int i;
+    {   /* ROOT = Path(__file__).resolve().parents[1]; compiled (cxbin), the working directory */
+        size_t l = strlen(argv[0]); char self[4096];
+        if (l > 3 && !strcmp(argv[0] + l - 3, ".cx") && realpath(argv[0], self)) {
+            char *sl; int k;
+            for (k = 0; k < 2; k++) { sl = strrchr(self, '/'); if (sl && sl != self) *sl = 0; else { strcpy(self, "/"); break; } }
+            snprintf(ROOT, sizeof ROOT, "%s", self);
+        } else if (!getcwd(ROOT, sizeof ROOT)) return 1;
+    }
+    parse(argc, argv);
+    {   char *m[] = { "uname", "-m", 0 }, *s[] = { "uname", "-s", 0 }, *mo = 0, *so = 0; size_t n = 0;
+        if (cx_runv_timeout(m, 10, &mo, &n) != 0 || !mo) mo = calloc(1, 1);
+        if (cx_runv_timeout(s, 10, &so, &n) != 0 || !so) so = calloc(1, 1);
+        mo[strcspn(mo, "\r\n")] = 0; so[strcspn(so, "\r\n")] = 0;
+        arch = (!strcmp(mo, "arm64") || !strcmp(mo, "aarch64")) ? "arm64" : "x86_64";
+        snprintf(TARGET, sizeof TARGET, "%s%s", !strcmp(so, "Darwin") ? "osx/" : "lnx/", arch);
+        free(mo); free(so);
+    }
+    ptf_gettempdir(base, sizeof base);
+    if (ptf_mkdtemp(base, "r10-native-exports-context-", TD, sizeof TD) != 0) { char t[4800]; snprintf(t, sizeof t, "%s", TD); TD[0] = 0; rtc_oserror(errno, t, why, sizeof why); uncaught(why); }
+    snprintf(runtime, sizeof runtime, "%s/exec", TD); mkdir(runtime, 0777);
+    snprintf(runtime, sizeof runtime, "%s/exec/c", TD); mkdir(runtime, 0777);
+    snprintf(src, sizeof src, "%s/src", TD); mkdir(src, 0777);
+    {   rtc_file *files; size_t nf;
+        if (rtc_copy_runtime(ROOT, TD, &files, &nf, why, sizeof why) != 0) uncaught(why);
+    }
+    snprintf(lib, sizeof lib, "%s/library.dylib", TD);
+    snprintf(src, sizeof src, "%s/libunisacc.c", runtime);
+    snprintf(asmf, sizeof asmf, "%s/librarycall_%s.S", runtime, arch);
+    {   char *cc[] = { "cc", "-std=c11", "-O2", "-shared", "-fPIC", "-fvisibility=hidden", src, asmf, "-lffi", "-o", lib, 0 };
+        check_call(cc, 20);
+    }
+    if (!(h = dlopen(lib, RTLD_NOW | RTLD_LOCAL))) { const char *e = dlerror(); snprintf(why, sizeof why, "OSError: %s", e ? e : lib); uncaught(why); }
+    L.us_new = lib_sym(h, "us_new");
+    L.us_add_source = lib_sym(h, "us_add_source");
+    L.us_compile = lib_sym(h, "us_compile");
+    L.us_relocate = lib_sym(h, "us_relocate");
+    L.us_free = lib_sym(h, "us_free");
+    L.us_sym = lib_sym(h, "us_sym");
+    L.us_error = lib_sym(h, "us_error");
+    L.us_call_status = lib_sym(h, "us_call_status");
+    L.us_run_main = lib_sym(h, "us_run_main");
+    {   pthread_t t[4]; Job jobs[4];
+        pthread_mutex_init(&GATE, 0);
+        for (i = 0; i < 4; i++) {
+            jobs[i].index = i; jobs[i].fail = 0;
+            if (pthread_create(&t[i], 0, probe, &jobs[i]) != 0) uncaught("RuntimeError: can't start new thread");
+        }
+        for (i = 0; i < 4; i++) pthread_join(t[i], 0);
+        for (i = 0; i < 4; i++) if (jobs[i].fail) uncaught(jobs[i].fail);
+    }
+    printf("{\"platform\": \"%s\", \"contexts\": 4, \"E3_declared_native_exports\": true, \"initialisation_once\": true, "
+           "\"exit_recovery\": true, \"no_main_module\": %s, \"main_preserves_export_pointers\": %s, \"dynamic_process_slots\": true}\n",
+           TARGET, NO_MAIN ? "true" : "false", NO_MAIN ? "false" : "true");
+    fflush(stdout);
+    cleanup();
+    return 0;
+}

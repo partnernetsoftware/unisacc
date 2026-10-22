@@ -1,0 +1,505 @@
+#!/usr/bin/env -S unisacc.com -run
+/* flownetw3.cx -- the W3 gate of plans/m4-flownet-cx-module.md: flownet's second consumer is real (D3) and everything
+   runs on the root m9 with no Python process (D4).
+     usage (repository root):
+       sh ./unisacc.com -run tests/flownetw3.cx -- d3 ROOT K/2
+           D3 (in two halves for the 60 s step: 1/2 the control and the first three mutations, 2/2 the other three):
+           tests/tdescprobe.cx (the ruled second consumer) is copied to a scratch directory beside a link to
+           ROOT/flownet, as it sits in the tree; the copy as it is must pass (the control), and each mutation that
+           takes flownet out of its derivation must turn its gate red, by name: the use of flownet.api removed (the
+           calls are named), the fn_run that derives the rows removed, the fn_construct that builds the nets from
+           flownet/tdesc removed, the nets driven from the gold table (the run's books refuse), the adj answer
+           discarded (every declarator taken as C: the next ask is outside ap's domain), and the ap asks replaced
+           by a constant (the books pinned with fn_expect refuse).  Every mutation is an exact edit that must apply
+           once, so this check breaks loudly when tdescprobe.cx changes under it.
+       sh ./unisacc.com -run tests/flownetw3.cx -- flow ROOT K/2
+           D3, flow-through per key (W3 fix 3: the verifier refuted the per-net faults of attempt 3 with copies that
+           keep a few answers and answer the rest from their own labels).  tdescprobe.cx holds no labels any more
+           (the algebra is flownet/tdesc), and flownet has a test hook: FLOWNET_SWEEP=all perturbs one answer at a
+           time, every key of every net and every other class, reruns the flows, hands each perturbed output to the
+           consumer's emit hook (tdescprobe's judges its tables there), and refuses the run naming every key with a
+           perturbation that neither flownet nor the emit hook refused.  1/2: tdescprobe compiled once (beside a
+           link to ROOT/flownet) passes --oracle cc, and under the sweep every key of flownet/tdesc (counted from
+           its gold tables) is used -- K/K, 0 accepted -- with --oracle cc and with --check (one probe); a copy
+           with the books unpinned is K/K too under --oracle (the sweep does not lean on the books there).  2/2:
+           the sweep proves itself on four copies whose own gate (--oracle cc) is green because they answer from
+           elsewhere after asking: every answer re-derived locally (probe A2), all but 1 adj, 1 ap and 9 sz answers
+           (probe A6), the one sz answer for A3:36, and the sizes taken from the baseline file inside the emit hook
+           (the rows change, the tables do not) -- each is refused by the sweep, naming exactly the keys it
+           discarded.
+       sh ./unisacc.com -run tests/flownetw3.cx -- d4 tdesc ROOT
+       sh ./unisacc.com -run tests/flownetw3.cx -- d4 adapter ROOT
+           D4: the consumer's gate commands run on ROOT/unisacc.com while this program lists /proc every 2 ms and
+           collects every process descended from the run; any whose name or argv[0] starts with "python" is red.  The
+           listing proves itself first: a `sleep` started the same way must be seen.  tdesc: tdescprobe --oracle cc and
+           --check ./unisacc.com shard 1/6 (flownet compiled as modules through `#pragma unisa use flownet.api`, its
+           nets constructed in .cx); adapter: the ujs adapter's check (33 programs byte-identical, acc 10/10) and d1.
+   rc 0 PASS, 1 red (each failure named), 2 usage or I/O.  No #include: the prelude is built in. */
+
+static int fails;
+static void red(const char *what, const char *why) { fails++; printf("FAIL %s: %s\n", what, why); }
+
+/* formatted text at its exact length */
+static char *fmt(const char *f, ...) {
+    va_list ap; size_t cap = 256; int n; char *p = 0;
+    for (;;) {
+        char *g = realloc(p, cap);
+        if (!g) { free(p); fprintf(stderr, "flownetw3: out of memory\n"); exit(2); }
+        p = g; va_start(ap, f); n = vsnprintf(p, cap, f, ap); va_end(ap);
+        if (n < 0) { fprintf(stderr, "flownetw3: cannot format\n"); exit(2); }
+        if ((size_t)n < cap) return p;
+        cap = (size_t)n + 1;
+    }
+}
+static char *slurp(const char *path) { size_t n; char *b = cx_read(path, &n); return b ? b : fmt("%s", ""); }
+/* the whole line of S that holds AT (AT inside S) */
+static char *line_at(const char *s, const char *at) {
+    while (at > s && at[-1] != '\n') at--;
+    return first_line_(at);
+}
+static char *first_line_(const char *s);
+static char *first_line(const char *s) { return first_line_(s); }
+static char *first_line_(const char *s) {
+    const char *e = strchr(s, '\n'); size_t k = e ? (size_t)(e - s) : strlen(s); char *t = malloc(k + 1);
+    if (!t) exit(2);
+    memcpy(t, s, k); t[k] = 0; return t;
+}
+
+/* ---------- running a command: stdout and stderr to files in SCRATCH, and the process tree listed while it runs ---------- */
+typedef struct { int rc; char *out, *err; int seen_python, nproc; char *names; } Run;
+#define MAXSEEN 4096
+
+/* /proc/PID/stat: the name between the first '(' and the last ')', and the parent pid after it */
+static int proc_stat(int pid, char *name, int cap, int *ppid) {   /* bounded: cap is the caller's buffer size */
+    char *p = fmt("/proc/%d/stat", pid), *b, *o, *c; size_t n; int k;
+    b = cx_read(p, &n); free(p);
+    if (!b) return -1;
+    o = strchr(b, '('); c = strrchr(b, ')');
+    if (!o || !c || c < o || sscanf(c + 1, " %*c %d", ppid) != 1) { free(b); return -1; }
+    k = (int)(c - o - 1); if (k >= cap) k = cap - 1;          /* a name is at most 15 bytes in Linux; cap is 64 */
+    memcpy(name, o + 1, (size_t)k); name[k] = 0;
+    free(b); return 0;
+}
+static int argv0_python(int pid) {
+    char *p = fmt("/proc/%d/cmdline", pid), *b, *base; size_t n; int r;
+    b = cx_read(p, &n); free(p);
+    if (!b || !n) { free(b); return 0; }
+    base = strrchr(b, '/'); base = base ? base + 1 : b;
+    r = !strncmp(base, "python", 6);
+    free(b); return r;
+}
+
+/* one sweep of /proc: every live process whose parent chain reaches ROOT is added to SEEN (pid, name) */
+static int seen_pid[MAXSEEN]; static char seen_name[MAXSEEN][64]; static int nseen;   /* bounded: proc_stat caps at 64 */
+static int all_pid[32768], all_ppid[32768]; static char all_name[32768][64]; static int nall;   /* bounded: proc_stat caps at 64 */
+static void sweep(int root, Run *r) {
+    DIR *d = opendir("/proc"); struct dirent *e; int i, j, changed;
+    static int mark[32768];
+    if (!d) return;
+    nall = 0;
+    while ((e = readdir(d)) && nall < 32768) {
+        int pid = atoi(e->d_name), pp;
+        if (pid <= 0) continue;
+        if (proc_stat(pid, all_name[nall], 64, &pp)) continue;
+        all_pid[nall] = pid; all_ppid[nall] = pp; mark[nall] = pid == root; nall++;
+    }
+    closedir(d);
+    do {                                      /* descendants: the closure of the parent links from ROOT */
+        changed = 0;
+        for (i = 0; i < nall; i++) if (!mark[i])
+            for (j = 0; j < nall; j++) if (mark[j] && all_ppid[i] == all_pid[j]) { mark[i] = 1; changed = 1; break; }
+    } while (changed);
+    for (i = 0; i < nall; i++) if (mark[i]) {
+        int k, have = 0;
+        for (k = 0; k < nseen; k++) if (seen_pid[k] == all_pid[i] && !strcmp(seen_name[k], all_name[i])) { have = 1; break; }
+        if (!have && nseen < MAXSEEN) { seen_pid[nseen] = all_pid[i]; memcpy(seen_name[nseen], all_name[i], 64); nseen++; }
+        if (!strncmp(all_name[i], "python", 6) || argv0_python(all_pid[i])) r->seen_python++;
+    }
+}
+
+/* ARGV (cwd ROOT) with its stdout/stderr in SCRATCH/TAG.{out,err}, at most SECS seconds; WATCH: list /proc meanwhile */
+static Run run(const char *root, const char *scratch, const char *tag, char *const *argv, int secs, int watch) {
+    Run r; pid_t pid; int st = 0, ticks = secs * 500, i; char *t = fmt("%s", tag), *op, *ep;
+    for (i = 0; t[i]; i++) if (!isalnum((unsigned char)t[i])) t[i] = '_';      /* a tag names files: no '/' or ' ' */
+    op = fmt("%s/%s.out", scratch, t); ep = fmt("%s/%s.err", scratch, t); free(t);
+    memset(&r, 0, sizeof r); nseen = 0;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) { fprintf(stderr, "flownetw3: fork failed\n"); exit(2); }
+    if (pid == 0) {
+        if (!freopen(op, "wb", stdout) || !freopen(ep, "wb", stderr) || chdir(root)) _exit(126);   /* fd 1 and 2 reopened */
+        setpgid(0, 0);
+        execvp(argv[0], argv); _exit(127);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { r.rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0) { r.rc = -1; break; }
+        if (ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); r.rc = 124; break; }
+        if (watch) sweep(pid, &r);
+        usleep(2000);
+    }
+    r.out = slurp(op); r.err = slurp(ep);
+    r.nproc = nseen;
+    {   size_t L = 1; char *p;
+        for (i = 0; i < nseen; i++) L += strlen(seen_name[i]) + 1;
+        r.names = p = malloc(L); if (!p) exit(2); p[0] = 0;
+        for (i = 0; i < nseen; i++) {             /* distinct names, in first-seen order */
+            int k, dup = 0; size_t q;
+            for (k = 0; k < i; k++) if (!strcmp(seen_name[k], seen_name[i])) { dup = 1; break; }
+            if (dup) continue;
+            if (p[0]) { q = strlen(p); p[q] = ','; p[q + 1] = 0; }
+            q = strlen(p); memcpy(p + q, seen_name[i], strlen(seen_name[i]) + 1);
+        } }
+    unlink(op); unlink(ep); free(op); free(ep);
+    return r;
+}
+static void run_free(Run *r) { free(r->out); free(r->err); free(r->names); }
+
+static char *scratch_dir(void) {
+    const char *t = getenv("TMPDIR"); char *d = fmt("%s/flownetw3XXXXXX", t && *t ? t : "/tmp");
+    if (!mkdtemp(d)) { fprintf(stderr, "flownetw3: cannot make a scratch directory under %s\n", t && *t ? t : "/tmp"); exit(2); }
+    return d;
+}
+static void rm_rf(const char *d) {
+    char *a[4]; a[0] = "rm"; a[1] = "-rf"; a[2] = (char *)d; a[3] = 0;
+    cx_runv_timeout(a, 20, 0, 0);
+}
+static char *absroot(const char *root) {
+    char *r = realpath(root, 0);
+    if (!r) { fprintf(stderr, "flownetw3: %s: no such directory\n", root); exit(2); }
+    return r;
+}
+
+/* each BODY[k] (k < N) written to SD/dK/tdescprobe.cx beside a link SD/dK/flownet -> ROOT/flownet and compiled to
+   SD/dK.bin, all N at once (one compile is ~9 s; in parallel a step keeps its 60 s); BIN[k] the binary, or 0 with
+   LOG[k] the compiler's output.  A body of 0 (an edit that did not apply) is skipped (BIN 0, LOG 0). */
+static void compile_all(const char *root, const char *sd, int n, char **body, char **bin, char **log) {
+    char *cmd = fmt("%s", ""), *t, *a[4]; int k; Run r;
+    for (k = 0; k < n; k++) {
+        char *dir = fmt("%s/d%d", sd, k), *lk = fmt("%s/flownet", dir), *target = fmt("%s/flownet", root), *src = fmt("%s/tdescprobe.cx", dir);
+        bin[k] = 0; log[k] = 0;
+        if (body[k]) {
+            if (mkdir(dir, 0755) || symlink(target, lk) || cx_write(src, body[k], strlen(body[k]))) { fprintf(stderr, "flownetw3: cannot prepare %s\n", dir); exit(2); }
+            t = fmt("%ssh '%s/unisacc.com' -o '%s.bin' '%s' > '%s.log' 2>&1 & ", cmd, root, dir, src, dir); free(cmd); cmd = t;
+        }
+        free(dir); free(lk); free(target); free(src);
+    }
+    t = fmt("%swait", cmd); free(cmd); cmd = t;
+    a[0] = "sh"; a[1] = "-c"; a[2] = cmd; a[3] = 0;
+    r = run(root, sd, "compile", a, 55, 0); run_free(&r); free(cmd);
+    for (k = 0; k < n; k++) {
+        char *b = fmt("%s/d%d.bin", sd, k), *lp = fmt("%s/d%d.log", sd, k); struct stat st;
+        if (body[k]) { if (stat(b, &st) == 0 && st.st_size > 0) bin[k] = b; else { log[k] = slurp(lp); free(b); } }
+        else free(b);
+        free(lp);
+    }
+}
+/* the copies compiled by compile_all that did not compile are red, by WHO */
+static void red_uncompiled(int n, char **body, char **bin, char **log, const char *const *who) {
+    int k;
+    for (k = 0; k < n; k++) if (body[k] && !bin[k]) { char *l = first_line(log[k]), *w = fmt("the copy does not compile: %s", l); red(who[k], w); free(w); free(l); }
+}
+
+/* ---------- D3 ---------- */
+typedef struct { const char *name, *from, *to, *mode, *want; } Mut;
+static const Mut MUTS[] = {
+    /* name                 the exact edit (once)                                       gate mode  stderr/stdout must name */
+    { "use removed",        "#pragma unisa use flownet.api\n", "\n",                       "check",  "undefined function 'fn_" },
+    { "run removed",        " || fn_run(derive, 0, collect, 0)", "",                       "check",  "flownet derived no probes" },
+    { "construct removed",  "fn_construct(TABLES) || ", "",                                "check",  "no tables open" },
+    { "gold drive",         " || fn_expect(BOOKS) ||", " || fn_drive(\"gold\") || fn_expect(BOOKS) ||", "check", "fell back to gold" },
+    { "adj answer discarded", "            valid = is(r, \"ok\");\n", "            valid = 1;\n", "oracle", "not in its domain" },
+    { "ap asks replaced by a constant", "const char *r = fn_ask2(\"ap\", at(o, n, s, pos), ops[j] == '*' ? \"deref\" : \"index\");",
+      "const char *r = \"next\";", "oracle", "the consumer pinned context" },
+    { 0, 0, 0, 0, 0 }
+};
+static char *apply(const char *src, const Mut *m) {
+    const char *p = strstr(src, m->from); size_t a, k = strlen(m->from), t = strlen(m->to); char *o;
+    if (!p || strstr(p + 1, m->from)) return 0;              /* exactly once */
+    a = (size_t)(p - src);
+    o = malloc(strlen(src) - k + t + 1); if (!o) exit(2);
+    memcpy(o, src, a); memcpy(o + a, m->to, t); memcpy(o + a + t, p + k, strlen(p + k) + 1);
+    return o;
+}
+/* BIN in the gate MODE: "check" = --check ROOT/unisacc.com tests/tdescprobe-product.tsv WORK 1/3, else --oracle cc WORK */
+static Run gate(const char *root, const char *sd, const char *bin, const char *mode) {
+    char *com = fmt("%s/unisacc.com", root), *base = fmt("%s/tests/tdescprobe-product.tsv", root), *work = fmt("%s/work-gate", sd), *a[8]; Run r;
+    a[0] = (char *)bin;
+    if (!strcmp(mode, "check")) { a[1] = "--check"; a[2] = com; a[3] = base; a[4] = work; a[5] = "1/3"; a[6] = 0; }
+    else { a[1] = "--oracle"; a[2] = "cc"; a[3] = work; a[4] = 0; }
+    r = run(root, sd, "gate", a, 45, 0);
+    free(com); free(base); free(work);
+    return r;
+}
+static int cmd_d3(const char *rootarg, const char *part) {
+    char *root = absroot(rootarg), *sd = scratch_dir(), *src, *srcpath = fmt("%s/tests/tdescprobe.cx", root), *body[4], *bin[4], *log[4];
+    const char *who[4]; const Mut *mm[4];
+    int k, nred = 0, n = 0, half, nb = 0; Run r;
+    size_t len;
+    if (!strcmp(part, "1/2")) half = 1; else if (!strcmp(part, "2/2")) half = 2;
+    else { fprintf(stderr, "flownetw3: d3 wants 1/2 or 2/2\n"); return 2; }
+    if (!(src = cx_read(srcpath, &len))) { fprintf(stderr, "flownetw3: cannot read %s\n", srcpath); return 2; }
+    if (half == 1) { who[nb] = "control (unmutated copy, --oracle cc)"; mm[nb] = 0; body[nb++] = fmt("%s", src); }   /* the control */
+    for (k = half == 1 ? 0 : 3; MUTS[k].name && k < (half == 1 ? 3 : 6); k++) {
+        who[nb] = MUTS[k].name; mm[nb] = &MUTS[k]; body[nb] = apply(src, &MUTS[k]);
+        if (!body[nb]) red(MUTS[k].name, "the edit does not apply exactly once (tdescprobe.cx changed: update the mutation)");
+        nb++;
+    }
+    compile_all(root, sd, nb, body, bin, log);           /* every copy beside its own link to ROOT/flownet, in parallel */
+    for (k = 0; k < nb; k++) {
+        const Mut *m = mm[k]; char *both, *l; int rc;
+        if (!body[k]) { n++; continue; }
+        if (!m) {                                         /* the control passes the oracle gate */
+            if (!bin[k]) { red_uncompiled(1, &body[k], &bin[k], &log[k], &who[k]); continue; }
+            r = gate(root, sd, bin[k], "oracle");
+            if (r.rc != 0 || !strstr(r.out, "106 probes, 0 mismatches")) { l = first_line(r.err[0] ? r.err : r.out); red(who[k], l); free(l); }
+            else printf("green\tcontrol\t--oracle cc\t%s", r.out);
+            run_free(&r);
+            continue;
+        }
+        n++;
+        if (bin[k]) { r = gate(root, sd, bin[k], m->mode); both = fmt("%s%s", r.err, r.out); rc = r.rc; run_free(&r); }
+        else { both = fmt("%s", log[k] ? log[k] : ""); rc = -1; }    /* refused at compile time */
+        l = strstr(both, m->want) ? line_at(both, strstr(both, m->want)) : first_line(both);
+        if (rc != 0 && strstr(both, m->want)) { nred++; printf("red\t%s\t%s\t%s\n", m->name, rc < 0 ? "compile refused" : fmt("--%s rc %d", m->mode, rc), l); }
+        else { char *why = fmt("still green or not named (--%s rc %d, want \"%s\"): %s", m->mode, rc, m->want, l); red(m->name, why); free(why); }
+        free(both); free(l);
+    }
+    rm_rf(sd);
+    if (fails) { printf("flownetw3 d3 %s: FAIL (%d/%d mutations red, %d failure(s))\n", part, nred, n, fails); return 1; }
+    printf("flownetw3 d3 %s: PASS (%s%d/%d mutations that take flownet out of tdescprobe's derivation are red)\n", part, half == 1 ? "control green; " : "", nred, n);
+    return 0;
+}
+
+/* ---------- flow-through, per key (W3 fix 3) ----------
+   Attempt 3 made a whole net answer wrong at once; a copy that keeps a few answers of each net and re-derives the
+   rest from its own labels (the verifier's probe A6) went red under those faults just as the honest one, so they
+   could not tell it apart.  The fix is in two parts: tdescprobe.cx holds no labels (the algebra is flownet/tdesc,
+   so discarding an answer leaves nothing to answer with), and flownet's sweep (FLOWNET_SWEEP, flownet/flow.cx)
+   perturbs one answer of one key at a time and requires every perturbation to be refused by name, by flownet or
+   by the consumer's emit hook (which judges what it is handed).  1/2 shows tdescprobe uses every key (K/K, K counted from flownet/tdesc's gold tables); 2/2 shows the sweep
+   catches the copies its own gate cannot: each re-derives some answers locally after asking (an exact edit that
+   reinserts the algebra as a function in the copy) and must be refused naming exactly those keys. */
+static const char *LOCAL =
+    "static const char *local_(const char *net, const char *a, const char *b) {   /* the algebra, re-derived in the copy */\n"
+    "    static char z_[8];\n"
+    "    if (is(net, \"adj\")) return (is(a, \"F\") && !is(b, \"P\") && !is(b, \"int\")) || (is(a, \"A3\") && is(b, \"F\")) ? \"bad\" : \"ok\";\n"
+    "    if (is(net, \"ap\")) {\n"
+    "        if (is(a, \"int\")) return \"none\";\n"
+    "        if (a[0] == 'F') return is(b, \"deref\") ? \"same\" : \"none\";\n"
+    "        return is(a, \"P.F\") && is(b, \"index\") ? \"none\" : \"next\";\n"
+    "    }\n"
+    "    if (is(a, \"int\")) return \"4\";\n"
+    "    if (a[0] == 'P') return \"8\";\n"
+    "    if (a[0] == 'F') return \"inc\";\n"
+    "    snprintf(z_, 8, \"%%d\", 3 * atoi(a + 3)); return z_;\n"
+    "}\n"
+    "static int keep_(const char *net, const char *a, const char *b) { (void)net; (void)a; (void)b; return %s; }\n"
+    "static const char *dask2_(const char *net, const char *a, const char *b) { const char *r = fn_ask2(net, a, b); return r && !keep_(net, a, b) ? local_(net, a, b) : r; }\n"
+    "static const char *dask1_(const char *net, const char *a) { const char *r = fn_ask1(net, a); return r && !keep_(net, a, \"\") ? local_(net, a, \"\") : r; }\n"
+    "static int derive(void *unused) {\n";
+typedef struct { const char *from, *to; } Edit;
+static const Edit ASKS[] = {      /* every ask of the copy goes through dask*_ (each edit applies once) */
+    { "fn_ask2(\"adj\"", "dask2_(\"adj\"" }, { "fn_ask2(\"ap\"", "dask2_(\"ap\"" },
+    { "fn_ask1(\"sz\", \"int\")", "dask1_(\"sz\", \"int\")" }, { "fn_ask1(\"sz\", key)", "dask1_(\"sz\", key)" }, { 0, 0 }
+};
+static const char *BASESIZE =        /* a copy that takes its sizes from the baseline inside the emit hook */
+    "static int base_size_(int i) {   /* the size tests/tdescprobe-product.tsv records for probe I */\n"
+    "    static char *b_; size_t n_; char key_[16]; const char *p_;\n"
+    "    if (!b_ && !(b_ = cx_read(\"tests/tdescprobe-product.tsv\", &n_))) return 0;\n"
+    "    snprintf(key_, sizeof key_, \"\\n%03d\\t\", i + 1);\n"
+    "    if (!(p_ = strstr(b_, key_))) return 0;\n"
+    "    p_ = strchr(p_ + 5, '\\t'); p_ = p_ ? strchr(p_ + 1, '\\t') : 0;\n"
+    "    return p_ ? atoi(p_ + 1) : 0;\n"
+    "}\n"
+    "static int bad_row(";
+typedef struct { const char *name, *keep, *decorative; } FMut;
+static const FMut FMUTS[] = {
+    /* KEEP: the asks whose answer the copy uses (C over net, a, b); DECORATIVE: the keys the sweep must name, in order */
+    { "every answer re-derived locally (probe A2)", "0",
+      "adj (P,P), adj (P,A3), adj (P,F), adj (P,int), adj (A3,P), adj (A3,A3), adj (A3,F), adj (A3,int), adj (F,P), adj (F,A3), adj (F,F), adj (F,int), "
+      "ap (P.P,deref), ap (P.P,index), ap (P.A3,deref), ap (P.A3,index), ap (P.F,deref), ap (P.F,index), ap (P.int,deref), ap (P.int,index), "
+      "ap (A3.P,deref), ap (A3.P,index), ap (A3.A3,deref), ap (A3.A3,index), ap (A3.int,deref), ap (A3.int,index), ap (F.P,deref), ap (F.P,index), "
+      "ap (F.int,deref), ap (F.int,index), ap (int,deref), ap (int,index), "
+      "sz (int), sz (P:inc), sz (P:4), sz (P:8), sz (P:12), sz (P:24), sz (P:36), sz (A3:4), sz (A3:8), sz (A3:12), sz (A3:24), sz (A3:36), sz (F:4), sz (F:8)" },
+    { "all but 1 adj, 1 ap, 9 sz answers re-derived locally (probe A6)",
+      "(is(net, \"adj\") && is(a, \"P\") && is(b, \"P\")) || (is(net, \"ap\") && is(a, \"P.P\") && is(b, \"deref\")) || "
+      "(is(net, \"sz\") && (is(a, \"int\") || a[0] == 'P' || is(a, \"A3:4\") || is(a, \"A3:8\")))",
+      "adj (P,A3), adj (P,F), adj (P,int), adj (A3,P), adj (A3,A3), adj (A3,F), adj (A3,int), adj (F,P), adj (F,A3), adj (F,F), adj (F,int), "
+      "ap (P.P,index), ap (P.A3,deref), ap (P.A3,index), ap (P.F,deref), ap (P.F,index), ap (P.int,deref), ap (P.int,index), "
+      "ap (A3.P,deref), ap (A3.P,index), ap (A3.A3,deref), ap (A3.A3,index), ap (A3.int,deref), ap (A3.int,index), ap (F.P,deref), ap (F.P,index), "
+      "ap (F.int,deref), ap (F.int,index), ap (int,deref), ap (int,index), "
+      "sz (A3:12), sz (A3:24), sz (A3:36), sz (F:4), sz (F:8)" },
+    { "the sz answer for A3:36 re-derived locally", "!(is(net, \"sz\") && is(a, \"A3:36\"))", "sz (A3:36)" },
+    { "sizes taken from the baseline inside the emit hook", 0,      /* KEEP 0: the BASESIZE edit, not LOCAL; the sz keys */
+      "sz (P:inc), sz (P:4), sz (P:8), sz (P:12), sz (P:24), sz (P:36), sz (A3:4), sz (A3:8), sz (A3:12), sz (A3:24), sz (A3:36)" },
+      /* whose every perturbation is refused anyway are not named: int (each wrong size leads an ask out of sz's domain)
+         and F:4, F:8 (a size where inc was moves a row between the unsized and the probe table) */
+    { 0, 0, 0 }
+};
+static char *edit_once(const char *src, const char *from, const char *to) {
+    Mut m; m.name = 0; m.from = from; m.to = to; m.mode = 0; m.want = 0;
+    return apply(src, &m);
+}
+/* the keys of ROOT/flownet/tdesc: the rows of its gold tables after the header (field/class rows, comments) */
+static int tdesc_keys(const char *root) {
+    static const char *G[] = { "adj", "ap", "sz", 0 };
+    int i, n = 0;
+    for (i = 0; G[i]; i++) {
+        char *path = fmt("%s/flownet/tdesc/%s.gold.tsv", root, G[i]), *b = slurp(path), *p = b;
+        while (*p) {
+            char *nl = strchr(p, '\n');
+            if (*p != '#' && *p != '\n' && strncmp(p, "net\t", 4) && strncmp(p, "field\t", 6) && strncmp(p, "class\t", 6)) n++;
+            if (!nl) break;
+            p = nl + 1;
+        }
+        free(path); free(b);
+    }
+    return n;
+}
+/* BIN --oracle cc (CHECK: --check ROOT/unisacc.com tests/tdescprobe-product.tsv WORK 1/106, one probe compiled),
+   under FLOWNET_SWEEP=all when SWEEP (through env(1): the m9 libc's exec keeps its own environ) */
+static Run mode_bin(const char *root, const char *sd, const char *bin, int sweep, int check, const char *tag) {
+    char *work = fmt("%s/work-flow", sd), *com = fmt("%s/unisacc.com", root), *a[12]; Run r; int k = 0;
+    a[k++] = "env"; a[k++] = "-u"; a[k++] = "FLOWNET_SWEEP";
+    if (sweep) a[k++] = "FLOWNET_SWEEP=all";
+    a[k++] = (char *)bin;
+    if (check) { a[k++] = "--check"; a[k++] = com; a[k++] = "tests/tdescprobe-product.tsv"; a[k++] = work; a[k++] = "1/106"; }
+    else { a[k++] = "--oracle"; a[k++] = "cc"; a[k++] = work; }
+    a[k] = 0;
+    r = run(root, sd, tag, a, 30, 0);
+    free(work); free(com);
+    return r;
+}
+static Run oracle_bin(const char *root, const char *sd, const char *bin, int sweep, const char *tag) { return mode_bin(root, sd, bin, sweep, 0, tag); }
+/* the copy's own gate (no sweep) must be green; 0 when it is, else named red */
+static int own_gate(const char *root, const char *sd, const char *bin, const char *who) {
+    Run r = oracle_bin(root, sd, bin, 0, "gate"); int ok = r.rc == 0 && strstr(r.out, "106 probes, 0 mismatches") && strstr(r.out, "valid), 78 contexts");
+    if (!ok) { char *l = first_line(r.err[0] ? r.err : r.out), *w = fmt("its own gate (--oracle cc) is not green: rc %d: %s", r.rc, l); red(who, w); free(w); free(l); }
+    else printf("green\t%s\t--oracle cc\t%s", who, r.out);
+    run_free(&r);
+    return ok ? 0 : -1;
+}
+/* the sweep line of R's stderr (allocated), or 0 */
+static char *sweep_line(const Run *r) { const char *p = strstr(r->err, "flownet sweep: "); return p ? line_at(r->err, p) : 0; }
+static int cmd_flow(const char *rootarg, const char *part) {
+    char *root = absroot(rootarg), *sd = scratch_dir(), *srcpath = fmt("%s/tests/tdescprobe.cx", root), *src, *want, *body[4], *bin[4], *log[4];
+    const char *who[4]; size_t len; int k, n = 0, caught = 0, K = tdesc_keys(root);
+    Run r;
+    if (strcmp(part, "1/2") && strcmp(part, "2/2")) { fprintf(stderr, "flownetw3: flow wants 1/2 or 2/2\n"); return 2; }
+    if (!(src = cx_read(srcpath, &len))) { fprintf(stderr, "flownetw3: cannot read %s\n", srcpath); return 2; }
+    if (K < 1) { red("keys", "flownet/tdesc has no gold rows"); goto done; }
+    want = fmt("= %d/%d keys;", K, K);
+    if (!strcmp(part, "1/2")) {      /* tdescprobe as it is, and with its books unpinned: every key's answer is used */
+        who[0] = "tdescprobe"; body[0] = fmt("%s", src);
+        who[1] = "tdescprobe, books unpinned"; body[1] = edit_once(src, " || fn_expect(BOOKS)", "");
+        n = 2;
+        for (k = 0; k < n; k++) if (!body[k]) red(who[k], "the edit does not apply exactly once (tdescprobe.cx changed: update it)");
+        compile_all(root, sd, n, body, bin, log); red_uncompiled(n, body, bin, log, who);
+        for (k = 0; k < n; k++) {
+            int check;
+            if (!bin[k] || own_gate(root, sd, bin[k], who[k])) continue;
+            for (check = 0; check <= (k == 0); check++) {     /* the as-is copy also in --check mode (judged by the baseline) */
+                char *l, *tag = fmt("%s, --%s", who[k], check ? "check 1/106" : "oracle cc");
+                r = mode_bin(root, sd, bin[k], 1, check, "sweep");
+                l = sweep_line(&r);
+                if (r.rc == 0 && l && strstr(l, want) && strstr(l, ", 0 accepted;")) printf("used\t%s\tFLOWNET_SWEEP=all rc 0\t%s\n", tag, l);
+                else {
+                    char *e = first_line(strstr(r.err, "tdescprobe: flownet:") ? strstr(r.err, "tdescprobe: flownet:") : r.err),
+                         *w = fmt("under FLOWNET_SWEEP=all rc %d, want every one of the %d keys used: %s | %s", r.rc, K, l ? l : "(no sweep line: the sweep did not run)", e);
+                    red(tag, w); free(w); free(e);
+                }
+                free(l); free(tag); run_free(&r);
+            }
+        }
+    } else {                         /* the sweep proves itself: each copy that re-derives answers is refused, by key */
+        for (k = 0; FMUTS[k].name; k++, n++) {
+            const FMut *m = &FMUTS[k]; char *mut, *t; int j;
+            if (m->keep) {
+                char *helper = fmt(LOCAL, m->keep);
+                mut = edit_once(src, "static int derive(void *unused) {\n", helper); free(helper);
+                for (j = 0; mut && ASKS[j].from; j++) { t = edit_once(mut, ASKS[j].from, ASKS[j].to); free(mut); mut = t; }
+            } else {
+                mut = edit_once(src, "static int bad_row(", BASESIZE);
+                if (mut) { t = edit_once(mut, "P[np].ctx = CTX[c]; P[np].size = size; np++;", "P[np].ctx = CTX[c]; P[np].size = base_size_(np); (void)size; np++;"); free(mut); mut = t; }
+            }
+            if (!mut) red(m->name, "the edit does not apply exactly once (tdescprobe.cx changed: update the mutation)");
+            who[k] = m->name; body[k] = mut;
+        }
+        compile_all(root, sd, n, body, bin, log); red_uncompiled(n, body, bin, log, who);
+        for (k = 0; k < n; k++) {
+            const FMut *m = &FMUTS[k]; char *l; const char *e, *got;
+            if (!bin[k] || own_gate(root, sd, bin[k], m->name)) continue;
+            r = oracle_bin(root, sd, bin[k], 1, "sweep");
+            l = sweep_line(&r);
+            got = strstr(r.err, "keys are decorative: "); e = got ? strstr(got, " -- ") : 0;
+            if (r.rc != 0 && got && e && (size_t)(e - got - 21) == strlen(m->decorative) && !strncmp(got + 21, m->decorative, strlen(m->decorative))) {
+                caught++; printf("caught\t%s\tits own gate green; FLOWNET_SWEEP=all rc %d\t%s\n", m->name, r.rc, l ? l : "");
+            } else {
+                char *w = fmt("under FLOWNET_SWEEP=all rc %d, want refused naming exactly \"%s\"; got: %.*s", r.rc, m->decorative,
+                              got && e ? (int)(e - got - 21) : 200, got && e ? got + 21 : r.err);
+                red(m->name, w); free(w);
+            }
+            free(l); run_free(&r);
+        }
+    }
+done:
+    rm_rf(sd);
+    if (fails) { printf("flownetw3 flow %s: FAIL (%d failure(s))\n", part, fails); return 1; }
+    if (!strcmp(part, "1/2")) printf("flownetw3 flow 1/2: PASS (tdescprobe uses the answer of every one of the %d keys of flownet/tdesc: each single-answer perturbation is refused by name, by flownet or by its emit hook's judge -- --oracle and --check, books pinned and unpinned)\n", K);
+    else printf("flownetw3 flow 2/2: PASS (%d/%d copies whose own gate is green but which answer from elsewhere after asking -- re-derived locally, or the sizes from the baseline -- are refused by the sweep, naming exactly the keys they discarded)\n", caught, n);
+    return 0;
+}
+
+/* ---------- D4 ---------- */
+static void d4_one(const char *root, const char *sd, const char *tag, char *const *argv, int secs, const char *want) {
+    Run r = run(root, sd, tag, argv, secs, 1); char *l;
+    if (r.rc != 0 || !strstr(r.out, want)) { l = first_line(r.err[0] ? r.err : r.out); { char *w = fmt("rc %d: %s", r.rc, l); red(tag, w); free(w); } free(l); }
+    else if (r.seen_python) { char *w = fmt("%d sample(s) of a python process under the run (%s)", r.seen_python, r.names); red(tag, w); free(w); }
+    else printf("green\t%s\trc 0, %d processes listed under the run, none python (%s)\n", tag, r.nproc, r.names);
+    run_free(&r);
+}
+static int cmd_d4(const char *which, const char *rootarg) {
+    char *root = absroot(rootarg), *sd = scratch_dir(), *com = fmt("%s/unisacc.com", root); Run r;
+    {   /* the listing proves itself: a sleep under the run is seen */
+        char *a[] = { "sh", "-c", "sleep 0.3; true", 0 };
+        int k, saw = 0;
+        r = run(root, sd, "selftest", a, 10, 1);
+        for (k = 0; k < nseen; k++) if (!strcmp(seen_name[k], "sleep")) saw = 1;
+        if (r.rc != 0 || !saw) red("listing self-test", "a sleep under the run was not seen in /proc");
+        else printf("green\tlisting self-test\tsleep seen under the run (%s)\n", r.names);
+        run_free(&r);
+    }
+    {   /* and the python rule fires: a copy of sleep named python3 under the run is counted (no Python is run) */
+        char *cmd = fmt("cp \"$(command -v sleep)\" '%s/python3' && '%s/python3' 0.3", sd, sd);
+        char *a[4]; a[0] = "sh"; a[1] = "-c"; a[2] = cmd; a[3] = 0;
+        r = run(root, sd, "selftest-python", a, 10, 1);
+        if (r.rc != 0 || !r.seen_python) red("python rule self-test", "a process named python3 under the run was not flagged");
+        else printf("green\tpython rule self-test\ta sleep copied to python3 is flagged (%d samples)\n", r.seen_python);
+        run_free(&r); free(cmd);
+    }
+    if (!strcmp(which, "tdesc")) {
+        char *w1 = fmt("%s/w1", sd), *w2 = fmt("%s/w2", sd);
+        char *ao[] = { "sh", com, "-run", "tests/tdescprobe.cx", "--", "--oracle", "cc", w1, 0 };
+        char *ac[] = { "sh", com, "-run", "tests/tdescprobe.cx", "--", "--check", com, "tests/tdescprobe-product.tsv", w2, "1/6", 0 };
+        d4_one(root, sd, "tdescprobe --oracle cc", ao, 25, "106 probes, 0 mismatches");
+        d4_one(root, sd, "tdescprobe --check 1/6", ac, 40, "changed 0");
+        free(w1); free(w2);
+    } else if (!strcmp(which, "adapter")) {
+        char *ac[] = { "sh", com, "-run", "adapter/ujswasm/ujswasm.cx", "--", "check", ".", 0 };
+        d4_one(root, sd, "ujs adapter check", ac, 45, "ujswasm-check: PASS");
+    } else { fprintf(stderr, "flownetw3: d4 wants tdesc or adapter\n"); return 2; }
+    rm_rf(sd);
+    if (fails) { printf("flownetw3 d4 %s: FAIL (%d failure(s))\n", which, fails); return 1; }
+    printf("flownetw3 d4 %s: PASS (on %s, every process under the runs listed every 2 ms: no python)\n", which, com);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "d3")) return cmd_d3(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "d4")) return cmd_d4(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "flow")) return cmd_flow(argv[2], argv[3]);
+    fprintf(stderr, "usage: flownetw3.cx d3 ROOT 1/2|2/2 | flow ROOT 1/2|2/2 | d4 tdesc|adapter ROOT\n");
+    return 2;
+}

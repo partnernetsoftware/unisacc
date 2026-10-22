@@ -1,0 +1,188 @@
+#!/usr/bin/env -S unisacc.com -run
+/* seedppconsumerprepared.cx -- content-bound tools for the controlled pp consumer check; no result cache.  The
+   include-free port of tests/seedppconsumerprepared.py (2026-10-23).  Same modes, same stdout/stderr lines, same rc:
+     sh ./unisacc.com -run tests/seedppconsumerprepared.cx -- --prepare                         (rc 0: HIT or PREPARED)
+     sh ./unisacc.com -run tests/seedppconsumerprepared.cx -- --require-cached --target TARGET  (TARGET in TARGETS)
+   --require-cached never builds: a missing/stale/corrupt preparation is NEED_PREPARE on stderr, rc 75, before any
+   subprocess.  --prepare builds seed/gen.c and tests/bound.c with the keyed system cc under python3 tests/bound.py 55,
+   under an flock on CACHE.lock, then writes manifest.json and its provenance record (manifest.json.build.json) and
+   renames the work tree to CACHE = ${UNISACC_MODEL_CACHE:-TMPDIR/unisacc-model-cache}/tools-seed-ppconsumer-KEY.
+   The consumer runs python3 tests/bound.py 20 sh tests/seedppconsumercheck.sh 2 TARGET with
+   SEEDPPC_PREPARED_TOOLS=CACHE and exits with its status (the shell check is the system under test).
+   KEY = sha256(json.dumps(basis, sort_keys=True)); the basis is the .py's (actor closure, provenance source digest,
+   cc and python3 identities, flags, seed/*.{c,h}, host, environment, cc header read sets) except that the actor seed
+   naming this program is tests/seedppconsumerprepared.cx plus its module tests/cxlib/seedprep.cx (so the .cx and the
+   .py never share a preparation: they are different producers), and the closure asserts {this file, the module,
+   tests/bound.c} where the .py asserted {tests/actorclosure.py, tests/bound.c}.  Compile with -DPYPARITY to use the
+   .py's seeds and assertion and reproduce its key byte for byte (that is how parity was measured).
+   The provenance / actor-closure / checklib / json / argparse ports live in tests/cxlib/seedprep.cx (shared with
+   tests/seedppchainprepared.cx).  "python3" is the first python3 on PATH (sys.executable; the basis records its
+   realpath and sha256).  Differences from the .py: argparse texts name prog seedppconsumerprepared.cx (same width);
+   an uncaught exception prints only the traceback's last line, rc 1. */
+#pragma unisa use cxlib.seedprep
+
+#ifdef PYPARITY
+#define SELF "tests/seedppconsumerprepared.py"
+#else
+#define SELF "tests/seedppconsumerprepared.cx"
+#endif
+
+static const char *const TARGETS[] = { "osx/arm64", "win/x86_64", "win/arm64", 0 };
+static const sp_args ARGS = { "seedppconsumerprepared.cx", "--target", TARGETS };
+static const char *const SEEDS[] = { SELF, "tests/seedppconsumercheck.sh", "tests/bound", "tests/bound.py",
+    "exec/c/provenance.py", "exec/pipeline/prepare.sh", "exec/pp/gen-delta.sh", "seed/gen.c",
+#ifndef PYPARITY
+    "tests/cxlib/seedprep.cx",
+#endif
+    0 };
+static const char *const ENVKEYS[] = { "PATH", "PYTHONPATH", "PYTHONHASHSEED", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH",
+    "COMPILER_PATH", "GCC_EXEC_PREFIX", "SOURCE_DATE_EPOCH", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", 0 };
+static const char *const NAMES[] = { "seed-gen", "bound", 0 };          /* FLAGS order */
+static const char *const SOURCES[] = { "seed/gen.c", "tests/bound.c", 0 };
+static const char *const FLAGS_GEN[] = { "-std=c99", "-O2", "-w", 0 };
+static const char *const FLAGS_BOUND[] = { "-std=c99", "-O2", "-Wall", "-Wextra", 0 };
+
+static char *KEY, *CACHE; static sp_json *BASIS; static int PREPARE;
+
+static void need(const char *reason) {
+    fflush(stdout); sp_scratch_remove();
+    fprintf(stderr, "NEED_PREPARE seed pp consumer tools: %s\n", reason); fflush(stderr); exit(75);
+}
+static void assertion(int ok) { if (!ok) sp_raise_line("AssertionError"); }
+static char *sha_or_raise(const char *path) { char hex[65]; if (sp_sha_file(path, hex)) sp_crash(); return sp_xstrdup(hex); }
+
+/* [*FLAGS[name], *(['-I'+ROOT/seed] if name == 'seed-gen' else [])] (0-terminated) */
+static char **flags_of(int n) {
+    const char *const *f = n ? FLAGS_BOUND : FLAGS_GEN; char **v = sp_xmalloc(8 * sizeof *v); int k = 0;
+    for (; *f; f++) v[k++] = (char *)*f;
+    if (n == 0) v[k++] = sp_cat("-I", sp_pjoin(sp_root(), "seed"));
+    v[k] = 0; return v;
+}
+/* {name: cc_read_set_identity(cc, [source], flags)}: 0, or -1 with the exception */
+static int read_sets(const char *cc, sp_json **out) {
+    sp_json *o = sp_jnew(SP_JOBJ), *r; int n;
+    for (n = 0; NAMES[n]; n++) { if (sp_cc_read_set(cc, SOURCES[n], flags_of(n), &r)) return -1; sp_oset(o, NAMES[n], r); }
+    *out = o; return 0;
+}
+static int valid(void) {
+    static const char *const required[] = { "seed-gen", "bound", 0 };
+    if (sp_valid_manifest(CACHE, BASIS, required, 0, "role or required set mismatch") == 0) return 1;
+    if (sp_exc_is("SystemExit") || sp_exc_is("FileNotFoundError") || sp_exc_is("KeyError") || sp_is_value() || sp_exc_is("TypeError")) {
+        if (!PREPARE) {
+            sp_buf m = {0, 0, 0};
+            sp_bstr(&m, "该 key 无有效准备（源或 actor 闭包变了，或产物缺坏）: "); sp_bstr(&m, KEY); sp_bstr(&m, "; "); sp_bstr(&m, sp_emsg());
+            need(m.s);
+        }
+        return 0;
+    }
+    sp_crash(); return 0;
+}
+
+int main(int argc, char **argv) {
+    int prep, req, i; const char *target; char *which, *cc, *sources, *py, *base; sp_json *actors, *edges, *basis, *x, *reads;
+    sp_buf canon = {0, 0, 0}; char hex[65];
+    sp_parse_args(&ARGS, argc, argv, &prep, &req, &target);
+    if (prep == req || (prep && target) || (req && !target)) sp_arg_error(&ARGS, "choose --prepare or --require-cached --target TARGET");
+    PREPARE = prep;
+    sp_init(__FILE__);
+    if (!(which = sp_which("cc"))) need("cc missing");
+    cc = sp_realpath_ns(which);
+    /* Identity contains the tool entity; no --version subprocess is needed on cache miss. */
+    sp_actor_closure(SEEDS, &actors, &edges);
+#ifdef PYPARITY
+    assertion(sp_getitem(actors, "tests/actorclosure.py") && sp_getitem(actors, "tests/bound.c"));
+#else
+    assertion(sp_getitem(actors, SELF) && sp_getitem(actors, "tests/cxlib/seedprep.cx") && sp_getitem(actors, "tests/bound.c"));
+#endif
+    basis = sp_jnew(SP_JOBJ);
+    sp_oset(basis, "schema", sp_jstr("seed-ppconsumer-tools-v1"));
+    sources = sp_source_digest();
+    sp_oset(basis, "sources", sp_jstr(sources));
+    sp_oset(basis, "actors", actors);
+    sp_oset(basis, "actor_edges", edges);
+    sp_oset(basis, "compiler", sp_jstr(cc));
+    sp_oset(basis, "compiler_sha256", sp_jstr(sha_or_raise(cc)));
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; NAMES[i]; i++) {
+        sp_json *l = sp_jnew(SP_JARR); const char *const *f = i ? FLAGS_BOUND : FLAGS_GEN;
+        for (; *f; f++) sp_apush(l, sp_jstr(*f));
+        sp_oset(x, NAMES[i], l);
+    }
+    sp_oset(basis, "flags", x);
+    py = sp_realpath_ns(sp_python());
+    sp_oset(basis, "python", sp_jstr(py));
+    sp_oset(basis, "python_sha256", sp_jstr(sha_or_raise(py)));
+    {   /* {rel: sha} for q in sorted((ROOT/'seed').glob('*')) if q.suffix in ('.c', '.h') */
+        char *dir = sp_pjoin(sp_root(), "seed"); DIR *d = opendir(dir); struct dirent *e;
+        x = sp_jnew(SP_JOBJ);
+        if (d) {
+            while ((e = readdir(d))) {
+                const char *nm = e->d_name, *dot = strrchr(nm, '.'); size_t l = strlen(nm);
+                if (!strcmp(nm, ".") || !strcmp(nm, "..") || !dot || dot == nm || (size_t)(dot - nm) == l - 1) continue;
+                if (strcmp(dot, ".c") && strcmp(dot, ".h")) continue;
+                { char *rel = sp_cat("seed/", nm), *abs = sp_pjoin(sp_root(), rel); sp_oset(x, rel, sp_jstr(sha_or_raise(abs))); free(abs); }
+            }
+            closedir(d);
+        }
+        free(dir);
+        sp_oset(basis, "seed_inputs", x);
+    }
+    x = sp_jnew(SP_JARR); sp_apush(x, sp_jstr(sp_uname_field("-s"))); sp_apush(x, sp_jstr(sp_uname_field("-m")));
+    sp_oset(basis, "host", x);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; ENVKEYS[i]; i++) { const char *v = getenv(ENVKEYS[i]); sp_oset(x, ENVKEYS[i], v ? sp_jstr(v) : sp_jnew(SP_JNULL)); }
+    sp_oset(basis, "environment", x);
+    if (read_sets(cc, &reads)) {
+        if (sp_is_os() || sp_exc_is("OSError") || sp_is_value() || sp_exc_is("subprocess.TimeoutExpired")) need(sp_emsg());
+        sp_crash();
+    }
+    sp_oset(basis, "cc_read_sets", reads);
+    BASIS = basis;
+    sp_jdump(&canon, basis, 0, 1);
+    cx_sha256_hex(canon.s, canon.n, hex); KEY = sp_xstrdup(hex);
+    {   const char *mc = getenv("UNISACC_MODEL_CACHE");
+        if (mc) base = sp_ppath(mc); else { char *t = sp_gettempdir(), *u = sp_cat(t, "/unisacc-model-cache"); base = sp_ppath(u); }
+        CACHE = sp_pjoin(base, sp_cat("tools-seed-ppconsumer-", KEY)); }
+    if (prep) {
+        char *work, *m; sp_buf man = {0, 0, 0}; sp_json *doc, *outs, *a2, *e2, *r2; struct stat s;
+        sp_mkdirs(base);
+        sp_lock(sp_cat(CACHE, ".lock"));
+        if (valid()) { printf("seed pp consumer tools HIT %s\n", KEY); return 0; }
+        work = sp_xstrdup(sp_mkdtemp_py(base, "seed-ppconsumer-tools-"));
+        for (i = 0; NAMES[i]; i++) {
+            char **f = flags_of(i), *a[16]; int k = 0, j, rc;
+            a[k++] = (char *)sp_python(); a[k++] = sp_pjoin(sp_root(), "tests/bound.py"); a[k++] = "55"; a[k++] = cc;
+            for (j = 0; f[j]; j++) a[k++] = f[j];
+            a[k++] = sp_pjoin(sp_root(), SOURCES[i]); a[k++] = "-o"; a[k++] = sp_pjoin(work, NAMES[i]); a[k] = 0;
+            if ((rc = sp_call(a, -1, -1, 0))) sp_exit(rc);
+        }
+        { char *now = sp_source_digest(); sp_actor_closure(SEEDS, &a2, &e2); assertion(!strcmp(now, sources) && sp_jeq(a2, actors) && sp_jeq(e2, edges)); }
+        assertion(!strcmp(sha_or_raise(cc), sp_getitem(basis, "compiler_sha256")->s));
+        if (read_sets(cc, &r2)) sp_crash();
+        assertion(sp_jeq(r2, reads));
+        m = sp_pjoin(work, "manifest.json");
+        doc = sp_jnew(SP_JOBJ); outs = sp_jnew(SP_JOBJ);
+        sp_oset(doc, "basis", basis);
+        for (i = 0; NAMES[i]; i++) sp_oset(outs, NAMES[i], sp_jstr(sha_or_raise(sp_pjoin(work, NAMES[i]))));
+        sp_oset(doc, "outputs", outs);
+        sp_jdump(&man, doc, 0, 1); sp_bch(&man, '\n');
+        if (cx_write(m, man.s, man.n)) { sp_throw_os(errno ? errno : EIO, m); sp_crash(); }
+        sp_prov_write(m, sources);
+        if (stat(CACHE, &s) == 0) sp_rmtree(CACHE);
+        else if (errno != ENOENT) { sp_throw_os(errno, CACHE); sp_crash(); }
+        if (rename(work, CACHE)) { sp_throw_os(errno, work); sp_crash(); }
+        sp_scratch_forget();
+        assertion(valid());
+        printf("seed pp consumer tools PREPARED %s\n", KEY);
+        return 0;
+    }
+    valid();   /* No subprocess/build before complete identity and artifact validation. */
+    {
+        char *a[8];
+        char *set[2]; set[0] = sp_cat("SEEDPPC_PREPARED_TOOLS=", CACHE); set[1] = 0;
+        a[0] = (char *)sp_python(); a[1] = sp_pjoin(sp_root(), "tests/bound.py"); a[2] = "20"; a[3] = "sh";
+        a[4] = sp_pjoin(sp_root(), "tests/seedppconsumercheck.sh"); a[5] = "2"; a[6] = (char *)target; a[7] = 0;
+        sp_exit(sp_call(a, -1, -1, set));
+    }
+    return 0;
+}

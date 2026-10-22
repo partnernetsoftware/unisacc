@@ -27,7 +27,7 @@ def main():
   spec=importlib.util.spec_from_file_location('gq',ROOT/'tests/gatequeue.py');gq=importlib.util.module_from_spec(spec);spec.loader.exec_module(gq)
   old=os.environ.get('UNISACC_FFI_X86_PROVIDER');os.environ['UNISACC_FFI_X86_PROVIDER']=str(d)
   try:
-   jobs={'provider-control':['python3','./tests/libraryunion16check.py']};before=gq.fingerprint(jobs);p=d/'lib/libffi.a';data=p.read_bytes();p.write_bytes(data+b'X');after=gq.fingerprint(jobs);assert before!=after;records.append('queue external archive change')
+   jobs={'provider-control':['sh','./unisacc.com','-run','tests/libraryunion16check.cx']};before=gq.fingerprint(jobs);p=d/'lib/libffi.a';data=p.read_bytes();p.write_bytes(data+b'X');after=gq.fingerprint(jobs);assert before!=after;records.append('queue external archive change')
   finally:
    if old is None:os.environ.pop('UNISACC_FFI_X86_PROVIDER',None)
    else:os.environ['UNISACC_FFI_X86_PROVIDER']=old

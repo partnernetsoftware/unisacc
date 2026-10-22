@@ -1,0 +1,1175 @@
+#!/usr/bin/env -S unisacc.com -run
+/* carrierimportprepared.cx -- prepared compiler/model inputs for the carrier import check; the protocol assertions
+   always execute in the consumer (tests/modelnativecarrierimportcheck.py).  Ported from
+   tests/carrierimportprepared.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/carrierimportprepared.cx -- [-h] [--prepare] [--require-cached]
+                                                                 [--part {import,package}]
+          (the gate runs it through tests/cxbin, the compile cache)
+   Run from the repository root (ROOT is the working directory).  Exactly one of --prepare or
+   --require-cached --part {import,package}; anything else is argparse's rc 2 (prog name carrierimportprepared.py,
+   so the usage and error text are byte-identical to the original's).
+   The cache key is the sha256 of json.dumps(BASIS, sort_keys=True), BASIS being, as the original built it:
+     schema carrier-import-prepared-v1; sources (exec/c/provenance.py identity); actors and actor_edges (the
+     conservative repository actor closure of SEEDS: tests/actorclosure.py's rules -- Python imports and quoted
+     'tests/...' literals of a .py, $R/$ROOT/$_LIB_R/$here references of a .sh or tests/bound, quoted #include of a
+     .c/.h -- plus, for a .cx, its quoted 'tests/...' literals and its `#pragma unisa use` modules; the first seed is
+     this file where the original named itself, so the key differs from the .py's and the two caches never mix);
+     compiler (cc on PATH, resolved; a CC other than cc is refused) and its sha256; python (python3 on PATH,
+     resolved -- the interpreter that runs tests/bound.py and the consumer, the original's sys.executable) and its
+     sha256; runtime_readset (cc -O2 -M of exec/c/run.c: every header with its sha256, checklib.cc_read_set_identity);
+     generated (tests/export_ref.sh output between tests/refshim.h and tests/reffoot.h, the dumper source made from
+     it, and its cc -w -std=c99 -O0 -M read set with the scratch path replaced by @generated/dump.c); environment
+     (CC CFLAGS PATH CPATH ... LD_AUDIT, null when unset); stage_environment (E1* E2* E3* E4* UNISA_* DYLD_*);
+     UA_TYPESPELL "1"; host [uname -s, uname -m]; outputs.
+   The cache is ${UNISACC_MODEL_CACHE:-TMP/unisacc-model-cache}/carrier-import-KEY (TMP as tempfile.gettempdir());
+   it is valid when exec/c/provenance.py check accepts its manifest.json, the manifest's basis equals BASIS, its
+   outputs are exactly dump e3.json e3.net e3.tbl nc.json nc.net nc.tbl run and each is a nonempty regular file with
+   the recorded sha256 (run and dump executable).
+   --prepare: under an exclusive lock on CACHE.lock, a valid cache prints `carrier import prepare HIT KEY`; otherwise
+     `python3 tests/bound.py 55 python3 tests/modelnativecarrierimportcheck.py --prepare WORK` (WORK a fresh
+     BASE/carrier-import-prepare-XXXXXX; its rc, when nonzero, is the result), BASIS is recomputed and must not have
+     changed, WORK/manifest.json is written (json.dumps({basis, outputs}, sort_keys=True)) and recorded with
+     exec/c/provenance.py write, WORK replaces CACHE, and `carrier import PREPARED KEY` is printed.
+   --require-cached --part P: an invalid cache is NEED_PREPARE (never a build); otherwise the result is that of
+     `python3 tests/bound.py 20 python3 tests/modelnativecarrierimportcheck.py --cached CACHE --part P`.
+   NEED_PREPARE: one stderr line `NEED_PREPARE carrier import: REASON`, rc 75, for a CC override, no cc, an
+   OSError/ValueError/timeout while computing BASIS, or (require-cached) a missing, changed or damaged cache.
+   Failures the original did not catch (an assertion, a damaged manifest shape it could not index) are rc 1 with the
+   last line of Python's traceback on stderr.  Python remains in: tests/bound.py (the watchdog the original used),
+   tests/modelnativecarrierimportcheck.py (the consumer) and exec/c/provenance.py (product freshness records; its
+   CLI identity / check / write, so the record format has one author).  The dumper source edit is the consumer's
+   dump_source(), repeated here byte for byte because the consumer is Python.  Files over 1 MiB, and each batch of
+   actor/read-set files, are hashed by `openssl dgst -sha256` (the in-process sha256 is too slow for the 100+ MiB
+   interpreter); the digests are the same.  Run every mode through one runner (the gate uses tests/cxbin for all
+   three): `unisacc.com -run` exports UNISA_CONTAINER to the program and its children, and UNISA_* is part of
+   stage_environment, so a -run prepare and a cxbin consumer key different caches.  With the first seed set to
+   tests/carrierimportprepared.py this computes the original's key byte for byte (checked: identical NEED_PREPARE
+   lines under several environments, and the original accepts a cache this code wrote).
+   No #include: the prelude (edition 1) provides everything; uname(2) is the uname command. */
+#pragma unisa use cxlib.pyjson
+
+static const char *PROG = "carrierimportprepared.py";
+static const char *USAGE = "usage: carrierimportprepared.py [-h] [--prepare] [--require-cached]\n"
+                           "                                [--part {import,package}]\n";
+static const char *SEEDS[] = { "tests/carrierimportprepared.cx", "tests/modelnativecarrierimportcheck.py", "tests/bound",
+                               "tests/bound.py", "tests/build_ref.sh", "tests/export_ref.sh", "exec/c/provenance.py" };
+static const char *OUTPUTS[] = { "dump", "e3.json", "e3.net", "e3.tbl", "nc.json", "nc.net", "nc.tbl", "run" };   /* sorted */
+static const char *ENV_KEYS[] = { "CC", "CFLAGS", "PATH", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
+                                  "GCC_EXEC_PREFIX", "SOURCE_DATE_EPOCH", "PYTHONPATH", "PYTHONHASHSEED", "LANG",
+                                  "LC_ALL", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" };
+#define NSEEDS (sizeof SEEDS / sizeof *SEEDS)
+#define NOUT 8
+static char *ROOT, *PY, *KEY;
+
+/* ---- buffers and strings ---- */
+typedef struct Buf { char *p; size_t n, cap; } Buf;
+static void oom(void) { fputs("MemoryError\n", stderr); exit(1); }
+static void bput(Buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) oom();
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bnum(Buf *b, long long v) { char t[32]; snprintf(t, sizeof t, "%lld", v); bputs(b, t); }
+static char *bstr(Buf *b) { if (!b->p) bput(b, "", 0); return b->p; }
+static char *sdupn(const char *s, size_t n) { char *r = malloc(n + 1); if (!r) oom(); memcpy(r, s, n); r[n] = 0; return r; }
+static char *sdup(const char *s) { return sdupn(s, strlen(s)); }
+static char *cat(const char *a, const char *b) { Buf o = {0}; bputs(&o, a); bputs(&o, b); return bstr(&o); }
+static char *cat3(const char *a, const char *b, const char *c) { Buf o = {0}; bputs(&o, a); bputs(&o, b); bputs(&o, c); return bstr(&o); }
+
+typedef struct SList { char **v; size_t n, cap; } SList;
+static void sl_push(SList *l, char *s) {
+    if (l->n == l->cap) { char **g = realloc(l->v, (l->cap = l->cap ? 2 * l->cap : 16) * sizeof *g); if (!g) oom(); l->v = g; }
+    l->v[l->n++] = s;
+}
+static int sl_has(const SList *l, const char *s) { size_t i; for (i = 0; i < l->n; i++) if (!strcmp(l->v[i], s)) return 1; return 0; }
+static void sl_add(SList *l, const char *s) { if (!sl_has(l, s)) sl_push(l, sdup(s)); }
+static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+/* ---- the pending Python exception: CAUGHT is 1 when main's `except (OSError, ValueError, TimeoutExpired)` takes it */
+static const char *ECLS; static char *EMSG; static int ECAUGHT;
+static int raise_(const char *cls, char *msg, int caught) { ECLS = cls; EMSG = msg; ECAUGHT = caught; return -1; }
+static int raise_value(char *msg) { return raise_("ValueError", msg, 1); }
+static int raise_assert(void) { return raise_("AssertionError", sdup(""), 0); }
+static void pyrepr(Buf *o, const char *s) {   /* repr(str) */
+    const unsigned char *p; char q = strchr(s, '\'') && !strchr(s, '"') ? '"' : '\'';
+    bput(o, &q, 1);
+    for (p = (const unsigned char *)s; *p; p++) {
+        char t[8];
+        if (*p == '\\' || *p == (unsigned char)q) { bput(o, "\\", 1); bput(o, p, 1); }
+        else if (*p == '\n') bputs(o, "\\n"); else if (*p == '\t') bputs(o, "\\t"); else if (*p == '\r') bputs(o, "\\r");
+        else if (*p < 0x20 || *p == 0x7f) { snprintf(t, sizeof t, "\\x%02x", *p); bputs(o, t); }
+        else bput(o, p, 1);
+    }
+    bput(o, &q, 1);
+}
+static const char *errtext(int e) {
+    switch (e) {
+    case ENOENT: return "No such file or directory"; case EACCES: return "Permission denied";
+    case EPERM: return "Operation not permitted"; case ENOTDIR: return "Not a directory";
+    case EISDIR: return "Is a directory"; case EEXIST: return "File exists";
+    case ELOOP: return "Too many levels of symbolic links"; case ENAMETOOLONG: return "File name too long";
+    case ENOSPC: return "No space left on device"; case EROFS: return "Read-only file system";
+    case ENOTEMPTY: return "Directory not empty"; case EXDEV: return "Invalid cross-device link";
+    default: return strerror(e);
+    }
+}
+static int raise_os(int e, const char *path) {   /* OSError: [Errno N] text: 'path' */
+    Buf o = {0};
+    const char *cls = e == ENOENT ? "FileNotFoundError" : e == EACCES || e == EPERM ? "PermissionError"
+                    : e == ENOTDIR ? "NotADirectoryError" : e == EISDIR ? "IsADirectoryError"
+                    : e == EEXIST ? "FileExistsError" : "OSError";
+    bputs(&o, "[Errno "); bnum(&o, e); bputs(&o, "] "); bputs(&o, errtext(e));
+    if (path) { bputs(&o, ": "); pyrepr(&o, path); }
+    return raise_(cls, bstr(&o), 1);
+}
+
+/* ---- scratch directories removed on every exit (TemporaryDirectory) ---- */
+static SList TEMPS;
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char *c;
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            c = cat3(p, "/", e->d_name); rmtree(c); free(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) { size_t i; for (i = 0; i < TEMPS.n; i++) if (TEMPS.v[i]) rmtree(TEMPS.v[i]); TEMPS.n = 0; }
+static void need(const char *reason) {
+    fflush(stdout); fprintf(stderr, "NEED_PREPARE carrier import: %s\n", reason); cleanup(); exit(75);
+}
+static void uncaught(void) {   /* the last line of the traceback */
+    fflush(stdout);
+    if (EMSG && *EMSG) fprintf(stderr, "%s: %s\n", ECLS, EMSG); else fprintf(stderr, "%s\n", ECLS);
+    cleanup(); exit(1);
+}
+static void usage_error(const char *msg, const char *a) {
+    fflush(stdout); fputs(USAGE, stderr); fprintf(stderr, "%s: error: ", PROG);
+    if (a) fprintf(stderr, msg, a); else fputs(msg, stderr);
+    fputc('\n', stderr); exit(2);
+}
+
+/* ---- paths (pathlib and posixpath semantics) ---- */
+static char *purenorm(const char *p) {   /* str(PurePosixPath(p)): '//' and '.' parts go, '..' stays; '' is '.' */
+    Buf o = {0}; const char *s = p, *e;
+    if (*p == '/') bput(&o, "/", 1);
+    while (*s) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = s; while (*e && *e != '/') e++;
+        if (!(e - s == 1 && *s == '.')) { if (o.n && o.p[o.n - 1] != '/') bput(&o, "/", 1); bput(&o, s, (size_t)(e - s)); }
+        s = e;
+    }
+    if (!o.n) bput(&o, ".", 1);
+    return bstr(&o);
+}
+static char *joinp(const char *a, const char *b) {   /* Path(a) / b */
+    char *t, *r;
+    if (*b == '/') return purenorm(b);
+    if (!strcmp(a, ".")) return purenorm(b);
+    t = cat3(a, "/", b); r = purenorm(t); free(t); return r;
+}
+static char *parentp(const char *p) {   /* str(Path(p).parent) for a normalized P */
+    const char *s = strrchr(p, '/');
+    if (!s) return sdup(".");
+    if (s == p) return sdup("/");
+    return sdupn(p, (size_t)(s - p));
+}
+static const char *basep(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+static const char *suffixp(const char *p) {   /* Path.suffix */
+    const char *n = basep(p), *d = strrchr(n, '.');
+    return d && d != n && d[1] ? d : "";
+}
+static char *normpath(const char *p) {   /* posixpath.normpath of an absolute path */
+    SList parts = {0}; Buf o = {0}; const char *s = p, *e; size_t i;
+    while (*s) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = s; while (*e && *e != '/') e++;
+        if (e - s == 2 && s[0] == '.' && s[1] == '.') { if (parts.n) parts.n--; }
+        else if (!(e - s == 1 && *s == '.')) sl_push(&parts, sdupn(s, (size_t)(e - s)));
+        s = e;
+    }
+    for (i = 0; i < parts.n; i++) { bput(&o, "/", 1); bputs(&o, parts.v[i]); }
+    if (!o.n) bput(&o, "/", 1);
+    return bstr(&o);
+}
+/* os.path.realpath(P, strict=False) for an absolute P: symlinks resolved where the path exists, the rest joined */
+static char *resolve_ns(const char *p, int depth) {
+    Buf o = {0}; const char *s = p, *e; struct stat st;
+    while (*s) {
+        char *comp, *np;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = s; while (*e && *e != '/') e++;
+        comp = sdupn(s, (size_t)(e - s)); s = e;
+        if (!strcmp(comp, ".")) { free(comp); continue; }
+        if (!strcmp(comp, "..")) {
+            char *q = o.n ? strrchr(o.p, '/') : 0;
+            if (q) { o.n = (size_t)(q - o.p); o.p[o.n] = 0; }
+            free(comp); continue;
+        }
+        np = cat3(o.n ? o.p : "", "/", comp); free(comp);
+        if (depth < 40 && lstat(np, &st) == 0 && S_ISLNK(st.st_mode)) {
+            char t[4096], *joined, *r; ssize_t k = readlink(np, t, sizeof t - 1);
+            if (k < 0) { o.n = 0; bputs(&o, np); free(np); continue; }
+            t[k] = 0;
+            joined = t[0] == '/' ? sdup(t) : cat3(o.n ? o.p : "", "/", t);
+            r = resolve_ns(joined, depth + 1); free(joined);
+            o.n = 0; if (strcmp(r, "/")) bputs(&o, r); free(r); free(np);
+            continue;
+        }
+        o.n = 0; bputs(&o, np); free(np);
+    }
+    if (!o.n) bput(&o, "/", 1);
+    return bstr(&o);
+}
+static char *resolve_strict(const char *p) {   /* Path.resolve(strict=True); 0 with the OSError raised */
+    char *r = realpath(p, 0);
+    if (!r) raise_os(errno, p);
+    return r;
+}
+static char *which(const char *name) {   /* shutil.which */
+    const char *path = getenv("PATH"), *s, *e;
+    if (!path) path = "/bin:/usr/bin";
+    for (s = path;; s = e + 1) {
+        char *c; struct stat st;
+        e = strchr(s, ':'); if (!e) e = s + strlen(s);
+        c = e == s ? sdup(name) : cat3(sdupn(s, (size_t)(e - s)), "/", name);
+        if (stat(c, &st) == 0 && !S_ISDIR(st.st_mode) && access(c, X_OK) == 0) return c;
+        free(c);
+        if (!*e) break;
+    }
+    return 0;
+}
+static char *TMPDIR_;
+static char *gettempdir(void) {   /* tempfile.gettempdir() */
+    const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" };
+    SList c = {0}; size_t i;
+    if (TMPDIR_) return TMPDIR_;
+    for (i = 0; i < 3; i++) { const char *v = getenv(env[i]); if (v && *v) sl_push(&c, sdup(v)); }
+    for (i = 0; i < 3; i++) sl_push(&c, sdup(fixed[i]));
+    sl_push(&c, sdup(ROOT));
+    for (i = 0; i < c.n; i++) {
+        char *d = c.v[i][0] == '/' ? normpath(c.v[i]) : normpath(cat3(ROOT, "/", c.v[i])), *t = cat(d, "/.cxtmpXXXXXX");
+        int fd = mkstemp(t);
+        if (fd >= 0) { close(fd); unlink(t); return TMPDIR_ = d; }
+    }
+    return TMPDIR_ = sdup("/tmp");
+}
+static char *mktempdir(const char *dir, const char *prefix) {   /* tempfile.mkdtemp(prefix, dir); registered for removal */
+    char *t = cat3(dir, "/", prefix), *u = cat(t, "XXXXXX");
+    if (!mkdtemp(u)) { int e = errno; raise_os(e, u); return 0; }
+    sl_push(&TEMPS, sdup(u));
+    return u;
+}
+static void forget_temp(const char *d) { size_t i; for (i = 0; i < TEMPS.n; i++) if (TEMPS.v[i] && !strcmp(TEMPS.v[i], d)) TEMPS.v[i] = 0; }
+
+/* ---- files ---- */
+static char *readfile(const char *path, size_t *len) {   /* Path.read_bytes(); 0 with the OSError raised */
+    int fd = open(path, O_RDONLY); struct stat st; Buf o = {0}; char t[65536]; ssize_t k;
+    if (fd < 0) { raise_os(errno, path); return 0; }
+    if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) { close(fd); raise_os(EISDIR, path); return 0; }
+    for (;;) {
+        k = read(fd, t, sizeof t);
+        if (k < 0) { int e = errno; close(fd); raise_os(e, path); return 0; }
+        if (!k) break;
+        bput(&o, t, (size_t)k);
+    }
+    close(fd); *len = o.n; return bstr(&o);
+}
+/* checklib.sha; 0 with the OSError raised.  A file over 1 MiB (the interpreter binary can be 100+ MiB) is hashed by
+   openssl dgst, as tests/bound and tests/cxbin hash: the in-process sha256 runs at about 8 MB/s here. */
+static char *sha_file(const char *path) {
+    size_t n; char *d, *h; struct stat st;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > (1 << 20)) {
+        char *argv[5], *o = 0; size_t on = 0; int rc;
+        argv[0] = access("/usr/bin/openssl", X_OK) == 0 ? "/usr/bin/openssl" : "openssl";
+        argv[1] = "dgst"; argv[2] = "-sha256"; argv[3] = "-r"; argv[4] = 0;
+        {   char *full[6]; full[0] = argv[0]; full[1] = argv[1]; full[2] = argv[2]; full[3] = argv[3]; full[4] = (char *)path; full[5] = 0;
+            rc = cx_runv_timeout(full, 55, &o, &on); }
+        if (rc == 0 && o && on >= 64) {
+            size_t i; int ok = 1;
+            for (i = 0; i < 64; i++) if (!((o[i] >= '0' && o[i] <= '9') || (o[i] >= 'a' && o[i] <= 'f'))) ok = 0;
+            if (ok) { h = sdupn(o, 64); free(o); return h; }
+        }
+        free(o);
+    }
+    d = readfile(path, &n);
+    if (!d) return 0;
+    h = malloc(65); if (!h) oom(); cx_sha256_hex(d, n, h); free(d); return h;
+}
+/* sha_file over many paths at once: one openssl dgst run for the lot (each output line `HEX *PATH`, checked against
+   the path asked for), the in-process hash for any file the batch did not answer. */
+static int sha_batch(const SList *paths, char **out) {
+    size_t i, k = 0, on = 0; char **argv = malloc((paths->n + 5) * sizeof *argv), *o = 0;
+    if (!argv) oom();
+    for (i = 0; i < paths->n; i++) out[i] = 0;
+    argv[k++] = access("/usr/bin/openssl", X_OK) == 0 ? "/usr/bin/openssl" : "openssl";
+    argv[k++] = "dgst"; argv[k++] = "-sha256"; argv[k++] = "-r";
+    for (i = 0; i < paths->n; i++) argv[k++] = paths->v[i];
+    argv[k] = 0;
+    if (paths->n > 1 && cx_runv_timeout(argv, 55, &o, &on) == 0 && o) {
+        char *line = o;
+        for (i = 0; i < paths->n && *line; i++) {
+            char *nl = strchr(line, '\n'); size_t j, pl = strlen(paths->v[i]); int ok = 1;
+            if (nl) *nl = 0;
+            for (j = 0; j < 64; j++) if (!((line[j] >= '0' && line[j] <= '9') || (line[j] >= 'a' && line[j] <= 'f'))) { ok = 0; break; }
+            if (ok && strlen(line) == 66 + pl && line[64] == ' ' && line[65] == '*' && !strcmp(line + 66, paths->v[i])) out[i] = sdupn(line, 64);
+            if (!nl) break;
+            line = nl + 1;
+        }
+    }
+    free(o); free(argv);
+    for (i = 0; i < paths->n; i++) if (!out[i] && !(out[i] = sha_file(paths->v[i]))) return -1;
+    return 0;
+}
+static int writefile(const char *path, const char *d, size_t n) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666); size_t w = 0;
+    if (fd < 0) return raise_os(errno, path);
+    while (w < n) { ssize_t k = write(fd, d + w, n - w); if (k < 0) { int e = errno; close(fd); return raise_os(e, path); } w += (size_t)k; }
+    close(fd); return 0;
+}
+static int utf8_check(const unsigned char *s, size_t n) {   /* bytes.decode() strictness: UnicodeDecodeError */
+    size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i]; size_t need_, k; unsigned lo = 0x80, hi = 0xBF; const char *why = 0;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need_ = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { need_ = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need_ = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        else { why = "invalid start byte"; need_ = 0; }
+        for (k = 1; !why && k <= need_; k++) {
+            if (i + k >= n) { why = "unexpected end of data"; break; }
+            if (s[i + k] < (k == 1 ? lo : 0x80) || s[i + k] > (k == 1 ? hi : 0xBF)) { why = "invalid continuation byte"; break; }
+        }
+        if (why) {
+            Buf o = {0}; char t[64];
+            if (!strcmp(why, "unexpected end of data") && n - i > 1)
+                snprintf(t, sizeof t, "bytes in position %lu-%lu", (unsigned long)i, (unsigned long)(n - 1));
+            else snprintf(t, sizeof t, "byte 0x%02x in position %lu", c, (unsigned long)i);
+            bputs(&o, "'utf-8' codec can't decode "); bputs(&o, t); bputs(&o, ": "); bputs(&o, why);
+            return raise_("UnicodeDecodeError", bstr(&o), 1);
+        }
+        i += need_ + 1;
+    }
+    return 0;
+}
+
+/* ---- processes (subprocess.run, cwd ROOT) ---- */
+typedef struct Proc { int rc, timedout; Buf out, err; } Proc;
+static int slurp_fd(int fd, Buf *b) {
+    char t[65536]; ssize_t k;
+    lseek(fd, 0, SEEK_SET);
+    while ((k = read(fd, t, sizeof t)) > 0) bput(b, t, (size_t)k);
+    bstr(b); return 0;
+}
+/* CAPTURE: stdout/stderr into P->out/err; else inherited.  TYPESPELL: the child gets UA_TYPESPELL=1 (the
+   original's env=dict(os.environ, UA_TYPESPELL='1')).  SECS > 0: SIGKILL past it, P->timedout.  rc is the exit
+   code, -N on signal N; -1 return with the OSError raised when the program cannot be executed. */
+static int run(char *const argv[], int typespell, int secs, int capture, Proc *p) {
+    int of = -1, ef = -1, pe[2], st = 0; pid_t pid; long ticks = (long)secs * 100; char *tmp = gettempdir();
+    memset(p, 0, sizeof *p);
+    if (capture) {
+        char *a = cat(tmp, "/cxcapXXXXXX"), *b = cat(tmp, "/cxcapXXXXXX");
+        of = mkstemp(a); ef = mkstemp(b);
+        if (of < 0 || ef < 0) return raise_os(errno, tmp);
+        unlink(a); unlink(b); free(a); free(b);
+    }
+    if (pipe(pe) != 0) return raise_os(errno, 0);
+    fcntl(pe[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) return raise_os(errno, 0);
+    if (pid == 0) {
+        int e;
+        close(pe[0]);
+        if (capture) { dup2(of, 1); dup2(ef, 2); close(of); close(ef); }
+        if (typespell) setenv("UA_TYPESPELL", "1", 1);
+        execvp(argv[0], argv);
+        e = errno; if (write(pe[1], &e, sizeof e) < 0) {} _exit(127);
+    }
+    close(pe[1]);
+    {   int e = 0; ssize_t k = read(pe[0], &e, sizeof e); close(pe[0]);
+        if (k == (ssize_t)sizeof e) {
+            waitpid(pid, &st, 0);
+            if (capture) { close(of); close(ef); }
+            return raise_os(e, argv[0]);
+        }
+    }
+    if (secs <= 0) { while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {} }
+    else for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0 && errno != EINTR) break;
+        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); p->timedout = 1; break; }
+        usleep(10000);
+    }
+    p->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    if (capture) { slurp_fd(of, &p->out); slurp_fd(ef, &p->err); close(of); close(ef); }
+    return 0;
+}
+static int exit_code(int rc) { return rc & 0xff; }   /* SystemExit(returncode) */
+static void unixnl(Buf *b) {   /* text=True: universal newlines */
+    size_t i, j = 0;
+    for (i = 0; i < b->n; i++) {
+        if (b->p[i] == '\r') { b->p[j++] = '\n'; if (i + 1 < b->n && b->p[i + 1] == '\n') i++; }
+        else b->p[j++] = b->p[i];
+    }
+    b->n = j; if (b->p) b->p[j] = 0;
+}
+static const char *tailchars(const char *s, size_t n, size_t k) {   /* s[-k:] in code points */
+    size_t i = n, c = 0;
+    while (i > 0 && c < k) { i--; if (((unsigned char)s[i] & 0xC0) != 0x80) c++; }
+    return s + i;
+}
+static void argv_repr(Buf *o, char *const argv[]) {
+    int i; bputs(o, "[");
+    for (i = 0; argv[i]; i++) { if (i) bputs(o, ", "); pyrepr(o, argv[i]); }
+    bputs(o, "]");
+}
+
+/* ---- json helpers (cxlib.pyjson) ---- */
+static int keycmp(const pj_value *a, const pj_value *b) {
+    size_t m = a->n < b->n ? a->n : b->n; int c = memcmp(a->s, b->s, m);
+    return c ? c : a->n < b->n ? -1 : a->n > b->n;
+}
+static void sortkeys(pj_value *v) {   /* sort_keys=True */
+    size_t i, j;
+    if (v->type == PJ_ARR) { for (i = 0; i < v->len; i++) sortkeys(v->items[i]); return; }
+    if (v->type != PJ_OBJ) return;
+    for (i = 1; i < v->len; i += 2) sortkeys(v->items[i]);
+    for (i = 2; i + 1 < v->len; i += 2)
+        for (j = i; j >= 2 && keycmp(v->items[j - 2], v->items[j]) > 0; j -= 2) {
+            pj_value *k = v->items[j], *x = v->items[j + 1];
+            v->items[j] = v->items[j - 2]; v->items[j + 1] = v->items[j - 1]; v->items[j - 2] = k; v->items[j - 1] = x;
+        }
+}
+static char *dumps_sorted(pj_value *v, size_t *n) { char *o; size_t k; sortkeys(v); pj_dumps(v, -1, &o, &k); if (n) *n = k; return o; }
+static double numval(const pj_value *v) { return v->type == PJ_BOOL ? (double)v->b : v->type == PJ_FLOAT ? v->d : strtod(v->s, 0); }
+static int pyeq(const pj_value *a, const pj_value *b) {   /* Python == on json.loads values */
+    size_t i;
+    if (pj_isnum(a) && pj_isnum(b)) {
+        if (a->type == PJ_FLOAT || b->type == PJ_FLOAT) return numval(a) == numval(b);
+        return !strcmp(a->type == PJ_BOOL ? (a->b ? "1" : "0") : a->s, b->type == PJ_BOOL ? (b->b ? "1" : "0") : b->s);
+    }
+    if (a->type != b->type) return 0;
+    switch (a->type) {
+    case PJ_NULL: return 1;
+    case PJ_STR: return a->n == b->n && !memcmp(a->s, b->s, a->n);
+    case PJ_ARR:
+        if (a->len != b->len) return 0;
+        for (i = 0; i < a->len; i++) if (!pyeq(a->items[i], b->items[i])) return 0;
+        return 1;
+    case PJ_OBJ:
+        if (a->len != b->len) return 0;
+        for (i = 0; i + 1 < a->len; i += 2) {
+            size_t j; int found = 0;
+            for (j = 0; j + 1 < b->len; j += 2)
+                if (!keycmp(a->items[i], b->items[j])) { found = 1; if (!pyeq(a->items[i + 1], b->items[j + 1])) return 0; break; }
+            if (!found) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+static const char *pytype(const pj_value *v) {
+    switch (v->type) { case PJ_NULL: return "NoneType"; case PJ_BOOL: return "bool"; case PJ_INT: return "int";
+    case PJ_FLOAT: return "float"; case PJ_STR: return "str"; case PJ_ARR: return "list"; default: return "dict"; }
+}
+/* DOC[KEY] as Python indexes a json.loads value; 0 with KeyError/TypeError raised (both caught by valid()) */
+static pj_value *subscript(const pj_value *doc, const char *key) {
+    pj_value *v; Buf o = {0};
+    if (doc->type == PJ_OBJ) {
+        if ((v = pj_get(doc, key))) return v;
+        pyrepr(&o, key); raise_("KeyError", bstr(&o), 1); return 0;
+    }
+    if (doc->type == PJ_ARR) { raise_("TypeError", sdup("list indices must be integers or slices, not str"), 1); return 0; }
+    if (doc->type == PJ_STR) { raise_("TypeError", sdup("string indices must be integers, not 'str'"), 1); return 0; }
+    bputs(&o, "'"); bputs(&o, pytype(doc)); bputs(&o, "' object is not subscriptable");
+    raise_("TypeError", bstr(&o), 1); return 0;
+}
+static pj_value *jstrz(const char *s) { return pj_strz(s); }
+static pj_value *jlist(char *const *v, size_t n) { pj_value *l = pj_list(); size_t i; for (i = 0; i < n; i++) pj_append(l, jstrz(v[i])); return l; }
+
+/* ---- argparse ---- */
+static int looks_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+static const char *LONGS[] = { "--help", "--prepare", "--require-cached", "--part" };
+/* which option a '--' token names: 1 help, 2 prepare, 3 require-cached, 4 part, 0 none, -1 ambiguous */
+static int long_opt(const char *s, const char **eq) {
+    const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s); int i, hit = 0, count = 0;
+    *eq = e ? e + 1 : 0;
+    for (i = 0; i < 4; i++) if (strlen(LONGS[i]) == n && !strncmp(s, LONGS[i], n)) return i + 1;
+    for (i = 0; i < 4; i++) if (n <= strlen(LONGS[i]) && !strncmp(s, LONGS[i], n)) { hit = i + 1; count++; }
+    return count > 1 ? -1 : hit;
+}
+static int is_option(const char *s) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && long_opt(s, &eq)) return 1;
+    if (s[1] == 'h') return 1;
+    if (looks_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+static void parse(int argc, char **argv, int *prepare, int *required, const char **part) {
+    Buf extras = {0}; int i, help = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int o = 0;
+        if (!strcmp(s, "--")) {
+            for (; i < argc; i++) { if (extras.n) bputs(&extras, " "); bputs(&extras, argv[i]); }
+            break;
+        }
+        if (s[0] == '-' && s[1] == '-') o = long_opt(s, &eq);
+        else if (s[0] == '-' && s[1] == 'h') o = 1;
+        if (o == -1) {
+            Buf m = {0}; const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s); int k, first = 1;
+            bputs(&m, "ambiguous option: "); bputs(&m, s); bputs(&m, " could match ");
+            for (k = 0; k < 4; k++) if (n <= strlen(LONGS[k]) && !strncmp(s, LONGS[k], n)) { if (!first) bputs(&m, ", "); bputs(&m, LONGS[k]); first = 0; }
+            usage_error(bstr(&m), 0);
+        }
+        if (o == 1) {
+            if (eq && s[1] == '-') usage_error("argument -h/--help: ignored explicit argument '%s'", eq);
+            if (s[1] == '-' || (s[2] != '=' && s[2] != '-')) { help = 1; break; }
+            usage_error("argument -h/--help: ignored explicit argument '%s'", s + 2 + (s[2] == '='));
+        } else if (o == 2 || o == 3) {
+            if (eq) usage_error(o == 2 ? "argument --prepare: ignored explicit argument '%s'"
+                                       : "argument --require-cached: ignored explicit argument '%s'", eq);
+            if (o == 2) *prepare = 1; else *required = 1;
+        } else if (o == 4) {
+            const char *v = eq;
+            if (!v) {
+                if (i + 1 >= argc || is_option(argv[i + 1])) usage_error("argument --part: expected one argument", 0);
+                v = argv[++i];
+            }
+            if (strcmp(v, "import") && strcmp(v, "package"))
+                usage_error("argument --part: invalid choice: '%s' (choose from 'import', 'package')", v);
+            *part = v;
+        } else { if (extras.n) bputs(&extras, " "); bputs(&extras, s); }
+    }
+    if (help) {
+        printf("%s\noptions:\n  -h, --help            show this help message and exit\n  --prepare\n"
+               "  --require-cached\n  --part {import,package}\n", USAGE);
+        exit(0);
+    }
+    if (extras.n) usage_error("unrecognized arguments: %s", bstr(&extras));
+}
+
+/* ---- tests/actorclosure.py actor_closure(ROOT, SEEDS) ---- */
+static int local_(const char *candidate, SList *children) {
+    char *r = resolve_ns(candidate, 0); size_t rl = strlen(ROOT); struct stat st;
+    if (!(strncmp(r, ROOT, rl) == 0 && (r[rl] == 0 || r[rl] == '/'))) {
+        Buf o = {0}; pyrepr(&o, r); bputs(&o, " is not in the subpath of "); pyrepr(&o, ROOT);
+        return raise_value(bstr(&o));
+    }
+    if (stat(r, &st) != 0) { if (errno == ENOENT) return 0; return raise_os(errno, r); }
+    if (S_ISREG(st.st_mode)) sl_add(children, r[rl] ? r + rl + 1 : ".");
+    return 0;
+}
+static int is_ws(unsigned char c) { return c == ' ' || (c >= '\t' && c <= '\r') || (c >= 0x1c && c <= 0x1f); }
+static int is_idc(unsigned char c) { return c == '_' || isalnum(c) || c >= 0x80; }
+static int is_q(char c) { return c == '\'' || c == '"'; }
+static int is_cls(char c) { return isalnum((unsigned char)c) || c == '_' || c == '.' || c == '/' || c == '-'; }   /* [A-Za-z0-9_./-] */
+/* re.findall(r"['\"](tests/[A-Za-z0-9_./-]+)['\"]", text) */
+static int literal_tests(const char *t, size_t n, SList *children) {
+    size_t i = 0;
+    while (i < n) {
+        if (is_q(t[i]) && i + 7 < n && !strncmp(t + i + 1, "tests/", 6)) {
+            size_t j = i + 1;
+            while (j < n && is_cls(t[j])) j++;
+            if (j - (i + 1) > 6 && j < n && is_q(t[j])) {
+                char *ref = sdupn(t + i + 1, j - i - 1), *c = joinp(ROOT, ref);
+                int rc = local_(c, children); free(ref); free(c);
+                if (rc) return rc;
+                i = j + 1; continue;
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+/* Python source: skip a string literal starting at I (the quote); F: an f/t-string (replacement fields scanned) */
+static size_t skip_string(const char *t, size_t n, size_t i, int f);
+static size_t skip_fexpr(const char *t, size_t n, size_t j) {   /* J just after '{'; returns past the matching '}' */
+    int depth = 0;
+    while (j < n) {
+        char c = t[j];
+        if (is_q(c)) { j = skip_string(t, n, j, 0); continue; }
+        if (is_idc((unsigned char)c) && !isdigit((unsigned char)c)) {
+            size_t k = j; while (k < n && is_idc((unsigned char)t[k])) k++;
+            if (k < n && is_q(t[k]) && k - j <= 2) {
+                int f = 0; size_t m; for (m = j; m < k; m++) if (t[m] == 'f' || t[m] == 'F' || t[m] == 't' || t[m] == 'T') f = 1;
+                j = skip_string(t, n, k, f); continue;
+            }
+            j = k; continue;
+        }
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']') depth--;
+        else if (c == '}') { if (depth == 0) return j + 1; depth--; }
+        else if (c == ':' && depth == 0 && !(j + 1 < n && t[j + 1] == '=')) {   /* format spec: literal text */
+            j++;
+            while (j < n && t[j] != '}') { if (t[j] == '{') j = skip_fexpr(t, n, j + 1); else j++; }
+            return j < n ? j + 1 : n;
+        }
+        j++;
+    }
+    return n;
+}
+static size_t skip_string(const char *t, size_t n, size_t i, int f) {
+    char q = t[i]; int triple = i + 2 < n && t[i + 1] == q && t[i + 2] == q; size_t j = i + (triple ? 3 : 1);
+    while (j < n) {
+        char c = t[j];
+        if (c == '\\') { j += 2; continue; }
+        if (f && c == '{') { if (j + 1 < n && t[j + 1] == '{') { j += 2; continue; } j = skip_fexpr(t, n, j + 1); continue; }
+        if (c == q) { if (!triple) return j + 1; if (j + 2 < n && t[j + 1] == q && t[j + 2] == q) return j + 3; }
+        if (c == '\n' && !triple) return j;
+        j++;
+    }
+    return n;
+}
+static int is_prefix(const char *s, size_t n) {   /* a string prefix: r u b f t br rb fr rf tr rt */
+    char a = (char)tolower((unsigned char)s[0]), b = n > 1 ? (char)tolower((unsigned char)s[1]) : 0;
+    if (n == 1) return a == 'r' || a == 'u' || a == 'b' || a == 'f' || a == 't';
+    if (n == 2) return (a == 'r' && (b == 'b' || b == 'f' || b == 't')) || ((a == 'b' || a == 'f' || a == 't') && b == 'r');
+    return 0;
+}
+typedef struct Tok { char kind; const char *s; size_t n; } Tok;   /* 'N' name, 'S' literal, else the punctuation */
+static int tokeq(const Tok *k, const char *w) { return k->kind == 'N' && k->n == strlen(w) && !strncmp(k->s, w, k->n); }
+/* every module an ast.Import / ast.ImportFrom (with a module) of the source names */
+static void py_imports(const char *t, size_t n, SList *mods) {
+    Tok *tk = 0; size_t nt = 0, cap = 0, i = 0, k;
+    while (i < n) {
+        char c = t[i]; Tok x; x.kind = 0; x.s = t + i; x.n = 1;
+        if (c == '#') { while (i < n && t[i] != '\n') i++; continue; }
+        if (is_ws((unsigned char)c) || c == '\\') { i++; continue; }
+        if (is_q(c)) { i = skip_string(t, n, i, 0); x.kind = 'S'; }
+        else if (is_idc((unsigned char)c) && !isdigit((unsigned char)c)) {
+            size_t j = i; while (j < n && is_idc((unsigned char)t[j])) j++;
+            if (j < n && is_q(t[j]) && is_prefix(t + i, j - i)) {
+                int f = 0; size_t m; for (m = i; m < j; m++) if (strchr("fFtT", t[m])) f = 1;
+                i = skip_string(t, n, j, f); x.kind = 'S';
+            } else { x.kind = 'N'; x.n = j - i; i = j; }
+        } else if (isdigit((unsigned char)c)) { while (i < n && (isalnum((unsigned char)t[i]) || t[i] == '_' || t[i] == '.')) i++; x.kind = 'S'; }
+        else { x.kind = c == '.' || c == ',' ? c : 'O'; i++; }
+        if (nt == cap) { Tok *g = realloc(tk, (cap = cap ? 2 * cap : 256) * sizeof *g); if (!g) oom(); tk = g; }
+        tk[nt++] = x;
+    }
+    for (k = 0; k < nt; k++) {
+        if (tokeq(&tk[k], "from")) {
+            size_t j = k + 1; Buf m = {0};
+            while (j < nt && tk[j].kind == '.') j++;
+            if (j < nt && tk[j].kind == 'N' && !tokeq(&tk[j], "import")) {
+                bput(&m, tk[j].s, tk[j].n); j++;
+                while (j + 1 < nt && tk[j].kind == '.' && tk[j + 1].kind == 'N') { bput(&m, ".", 1); bput(&m, tk[j + 1].s, tk[j + 1].n); j += 2; }
+            }
+            if (j < nt && tokeq(&tk[j], "import")) { if (m.n) sl_add(mods, bstr(&m)); k = j; }
+            free(m.p);
+        } else if (tokeq(&tk[k], "import")) {
+            size_t j = k + 1;
+            while (j < nt && tk[j].kind == 'N') {
+                Buf m = {0};
+                bput(&m, tk[j].s, tk[j].n); j++;
+                while (j + 1 < nt && tk[j].kind == '.' && tk[j + 1].kind == 'N') { bput(&m, ".", 1); bput(&m, tk[j + 1].s, tk[j + 1].n); j += 2; }
+                sl_add(mods, bstr(&m)); free(m.p);
+                if (j + 1 < nt && tokeq(&tk[j], "as") && tk[j + 1].kind == 'N') j += 2;
+                if (j < nt && tk[j].kind == ',') j++; else break;
+            }
+            k = j ? j - 1 : j;
+        }
+    }
+    free(tk);
+}
+/* re.findall(r"\$(?:\{)?(R|ROOT|_LIB_R|here)(?:\})?(?:[\"'])?/([A-Za-z0-9_./-]+)", text) */
+static int shell_refs(const char *t, size_t n, const char *parent, SList *children) {
+    static const char *vars[] = { "R", "ROOT", "_LIB_R", "here" };
+    size_t i = 0;
+    while (i < n) {
+        int matched = 0;
+        if (t[i] == '$') {
+            int b, v, cl, q;
+            for (b = (i + 1 < n && t[i + 1] == '{') ? 1 : 0; b >= 0 && !matched; b--)
+                for (v = 0; v < 4 && !matched; v++) {
+                    size_t j = i + 1 + (size_t)b, vl = strlen(vars[v]);
+                    if (j + vl > n || strncmp(t + j, vars[v], vl)) continue;
+                    j += vl;
+                    for (cl = (j < n && t[j] == '}') ? 1 : 0; cl >= 0 && !matched; cl--)
+                        for (q = (j + (size_t)cl < n && is_q(t[j + (size_t)cl])) ? 1 : 0; q >= 0 && !matched; q--) {
+                            size_t k = j + (size_t)cl + (size_t)q, e;
+                            if (k >= n || t[k] != '/') continue;
+                            e = k + 1; while (e < n && is_cls(t[e])) e++;
+                            if (e == k + 1) continue;
+                            {   char *ref = sdupn(t + k + 1, e - k - 1), *c = joinp(v == 3 ? parent : ROOT, ref);
+                                int rc = local_(c, children); free(ref); free(c);
+                                if (rc) return rc; }
+                            matched = 1; i = e;
+                        }
+                }
+        }
+        if (!matched) i++;
+    }
+    return 0;
+}
+/* a line-start directive: '#' preceded on its line (and any blank lines before) by whitespace only */
+static int at_line_start(const char *t, size_t p) {
+    size_t q = p;
+    while (q > 0 && is_ws((unsigned char)t[q - 1])) { if (t[q - 1] == '\n') return 1; q--; }
+    return q == 0;
+}
+static size_t skip_ws(const char *t, size_t n, size_t i) { while (i < n && is_ws((unsigned char)t[i])) i++; return i; }
+/* re.findall(r'^\s*#\s*include\s*"([^"\n]+)"', text, re.M) */
+static int c_includes(const char *t, size_t n, const char *parent, SList *children) {
+    size_t i = 0;
+    while (i < n) {
+        if (t[i] == '#' && at_line_start(t, i)) {
+            size_t j = skip_ws(t, n, i + 1);
+            if (j + 7 <= n && !strncmp(t + j, "include", 7)) {
+                j = skip_ws(t, n, j + 7);
+                if (j < n && t[j] == '"') {
+                    size_t e = j + 1; while (e < n && t[e] != '"' && t[e] != '\n') e++;
+                    if (e < n && t[e] == '"' && e > j + 1) {
+                        char *ref = sdupn(t + j + 1, e - j - 1), *c = joinp(parent, ref);
+                        int rc = local_(c, children); free(ref); free(c);
+                        if (rc) return rc;
+                        i = e + 1; continue;
+                    }
+                }
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+/* a .cx: `#pragma unisa use NAME` is the module NAME (dots are subdirectories) beside it */
+static int cx_uses(const char *t, size_t n, const char *parent, SList *children) {
+    size_t i = 0;
+    while (i < n) {
+        if (t[i] == '#' && at_line_start(t, i)) {
+            size_t j = skip_ws(t, n, i + 1), e;
+            if (j + 6 <= n && !strncmp(t + j, "pragma", 6) && (j = j + 6) < n && is_ws((unsigned char)t[j])) {
+                j = skip_ws(t, n, j);
+                if (j + 5 <= n && !strncmp(t + j, "unisa", 5) && (j = j + 5) < n && is_ws((unsigned char)t[j])) {
+                    j = skip_ws(t, n, j);
+                    if (j + 3 <= n && !strncmp(t + j, "use", 3) && (j = j + 3) < n && is_ws((unsigned char)t[j])) {
+                        j = skip_ws(t, n, j); e = j;
+                        while (e < n && (isalnum((unsigned char)t[e]) || t[e] == '_' || t[e] == '.')) e++;
+                        if (e > j) {
+                            char *name = sdupn(t + j, e - j), *rel, *c; size_t k; int rc;
+                            for (k = 0; name[k]; k++) if (name[k] == '.') name[k] = '/';
+                            rel = cat(name, ".cx"); c = joinp(parent, rel);
+                            rc = local_(c, children); free(name); free(rel); free(c);
+                            if (rc) return rc;
+                        }
+                    }
+                }
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+static int actor_closure(pj_value **actors, pj_value **edges) {
+    SList pending = {0}, names = {0}, digests = {0}; size_t i;
+    pj_value *a = pj_dict(), *e = pj_dict();
+    static const char *searches[] = { "tests", "exec/c", "exec/pipeline", "" };
+    for (i = 0; i < NSEEDS; i++) sl_push(&pending, sdup(SEEDS[i]));
+    while (pending.n) {
+        char *name = pending.v[--pending.n], *path, *data, *parent; size_t n, k; SList children = {0};
+        const char *suf;
+        if (sl_has(&names, name)) continue;
+        path = joinp(ROOT, name);
+        if (!(data = readfile(path, &n))) return -1;
+        sl_push(&names, name); sl_push(&digests, sdup(path));   /* hashed together below */
+        if (utf8_check((const unsigned char *)data, n)) return -1;
+        suf = suffixp(path); parent = parentp(path);
+        if (!strcmp(suf, ".py")) {
+            SList mods = {0};
+            py_imports(data, n, &mods);
+            for (k = 0; k < mods.n; k++) {
+                char *target = sdup(mods.v[k]); size_t m, b;
+                for (m = 0; target[m]; m++) if (target[m] == '.') target[m] = '/';
+                for (b = 0; b < 5; b++) {
+                    char *base = b == 0 ? sdup(parent) : *searches[b - 1] ? joinp(ROOT, searches[b - 1]) : sdup(ROOT);
+                    char *p1 = cat(target, ".py"), *p2 = cat(target, "/__init__.py"), *c1 = joinp(base, p1), *c2 = joinp(base, p2);
+                    if (local_(c1, &children) || local_(c2, &children)) return -1;
+                    free(base); free(p1); free(p2); free(c1); free(c2);
+                }
+                free(target);
+            }
+            if (literal_tests(data, n, &children)) return -1;
+        } else if (!strcmp(suf, ".sh") || !strcmp(basep(path), "bound")) {
+            if (shell_refs(data, n, parent, &children)) return -1;
+        } else if (!strcmp(suf, ".c") || !strcmp(suf, ".h")) {
+            if (c_includes(data, n, parent, &children)) return -1;
+        } else if (!strcmp(suf, ".cx")) {
+            if (literal_tests(data, n, &children) || cx_uses(data, n, parent, &children)) return -1;
+        }
+        if (children.n) qsort(children.v, children.n, sizeof *children.v, cmpstr);
+        pj_set(e, name, jlist(children.v, children.n));
+        for (k = 0; k < children.n; k++) sl_push(&pending, children.v[k]);
+        free(data); free(path); free(parent);
+    }
+    {   char **h = malloc((digests.n + 1) * sizeof *h);
+        if (!h) oom();
+        if (sha_batch(&digests, h)) return -1;
+        for (i = 0; i < names.n; i++) pj_set(a, names.v[i], jstrz(h[i]));
+    }
+    sortkeys(a); sortkeys(e);
+    *actors = a; *edges = e;
+    return 0;
+}
+
+/* ---- tests/checklib.py parse_cc_make_dependencies / cc_read_set_identity ---- */
+static int parse_deps(const char *t, size_t n, SList *names) {
+    Buf w = {0}; size_t i = 0; int has = 0;
+    while (i < n) {
+        char c = t[i];
+        if (c == '"' || c == '\'') return raise_value(sdup("unsupported quote in cc Make dependencies"));
+        if (c == '\\') {
+            char f;
+            if (i + 1 == n) return raise_value(sdup("unpaired escape in cc Make dependencies"));
+            f = t[i + 1];
+            if (f == '\n') { if (has) { sl_push(names, sdup(bstr(&w))); w.n = 0; has = 0; } }
+            else if (f == ' ' || f == '\t' || f == '#') { bput(&w, &f, 1); has = 1; }
+            else return raise_value(sdup("unsupported escape in cc Make dependencies"));
+            i += 2; continue;
+        }
+        if (c == '$') {
+            if (i + 1 >= n || t[i + 1] != '$') return raise_value(sdup("unsupported dollar expression in cc Make dependencies"));
+            bput(&w, "$", 1); has = 1; i += 2; continue;
+        }
+        if (c == '#' || c == ':' || c == '\r' || c == 0) return raise_value(sdup("unsupported syntax in cc Make dependencies"));
+        if (is_ws((unsigned char)c)) { if (has) { sl_push(names, sdup(bstr(&w))); w.n = 0; has = 0; } }
+        else { bput(&w, &c, 1); has = 1; }
+        i++;
+    }
+    if (has) sl_push(names, sdup(bstr(&w)));
+    return 0;
+}
+static pj_value *readset(const char *compiler, const char *source, const char *const *flags, int nf) {
+    pj_value *files = pj_dict(), *commands = pj_list(), *cmd = pj_list(), *r, *f; char *argv[16]; int i, k = 0;
+    Proc p; SList names = {0}, seen = {0}; char *rsrc, *h; size_t j; const char *prefix = "__checklib_readset__:";
+    argv[k++] = (char *)compiler;
+    for (i = 0; i < nf; i++) argv[k++] = (char *)flags[i];
+    argv[k++] = "-M"; argv[k++] = "-MT"; argv[k++] = "__checklib_readset__"; argv[k++] = (char *)source; argv[k] = 0;
+    if (run(argv, 1, 55, 1, &p)) return 0;
+    for (i = 0; i < k; i++) pj_append(cmd, jstrz(argv[i]));
+    pj_append(commands, cmd);
+    if (p.timedout) {
+        Buf o = {0}; bputs(&o, "Command "); { Buf l = {0}; argv_repr(&l, argv); pyrepr(&o, bstr(&l)); }
+        bputs(&o, " timed out after 55 seconds"); raise_("TimeoutExpired", bstr(&o), 1); return 0;
+    }
+    unixnl(&p.out); unixnl(&p.err);
+    if (p.rc) {
+        Buf o = {0}; bputs(&o, "cc dependency scan failed rc="); bnum(&o, p.rc); bputs(&o, ": ");
+        bputs(&o, tailchars(bstr(&p.err), p.err.n, 1000)); raise_value(bstr(&o)); return 0;
+    }
+    bstr(&p.out);
+    if (strncmp(p.out.p, prefix, strlen(prefix))) { raise_value(sdup("cc dependency scan has no expected target")); return 0; }
+    if (parse_deps(p.out.p + strlen(prefix), p.out.n - strlen(prefix), &names)) return 0;
+    if (!names.n) { raise_value(sdup("cc dependency scan returned an empty read set")); return 0; }
+    { char *s = joinp(ROOT, source); rsrc = resolve_strict(s); free(s); if (!rsrc) return 0; }
+    {   SList keys = {0}, reals = {0}; char **hs;
+        for (j = 0; j < names.n; j++) {
+            char *path = joinp(ROOT, names.v[j]), *real = resolve_strict(path); struct stat st;
+            if (!real) return 0;
+            if (stat(real, &st) != 0) { raise_os(errno, real); return 0; }
+            if (!S_ISREG(st.st_mode)) { raise_value(cat("cc dependency is not a regular file: ", real)); return 0; }
+            sl_push(&keys, path); sl_push(&reals, real); sl_add(&seen, real);
+        }
+        if (!(hs = malloc((reals.n + 1) * sizeof *hs))) oom();
+        if (sha_batch(&reals, hs)) return 0;
+        for (j = 0; j < keys.n; j++) {
+            pj_value *e = pj_dict(); pj_set(e, "resolved", jstrz(reals.v[j])); pj_set(e, "sha256", jstrz(hs[j]));
+            pj_set(files, keys.v[j], e);
+        }
+    }
+    if (!sl_has(&seen, rsrc)) { raise_value(cat("cc dependency scan omitted its source: ", source)); return 0; }
+    if (!(h = sha_file(compiler))) return 0;
+    r = pj_dict(); f = files;
+    pj_set(r, "schema", jstrz("cc-header-readset-v1")); pj_set(r, "compiler", jstrz(compiler));
+    pj_set(r, "compiler_sha256", jstrz(h)); pj_set(r, "commands", commands); pj_set(r, "files", f);
+    return r;
+}
+
+/* ---- tests/modelnativecarrierimportcheck.py dump_source(), byte for byte ---- */
+static size_t count_of(const char *s, size_t n, const char *a) {   /* bytes.count: non-overlapping */
+    size_t c = 0, i = 0, l = strlen(a);
+    while (i + l <= n) { if (!memcmp(s + i, a, l)) { c++; i += l; } else i++; }
+    return c;
+}
+static int replace_once(Buf *s, const char *a, const char *b) {
+    size_t l = strlen(a), i; Buf o = {0};
+    if (count_of(s->p, s->n, a) != 1) return raise_assert();
+    for (i = 0; i + l <= s->n; i++) if (!memcmp(s->p + i, a, l)) break;
+    bput(&o, s->p, i); bputs(&o, b); bput(&o, s->p + i + l, s->n - i - l);
+    free(s->p); *s = o; return 0;
+}
+static int dump_source(Buf *s) {
+    const char *a1 = "        if (tkind[i] == 2) { __write(1, \"=\", 1);";
+    const char *b1 = "        if (L == 4 && TOKV[p] == 116 && TOKV[p+1] == 121 && TOKV[p+2] == 112 && TOKV[p+3] == 101 && "
+                     "getenv(\"UA_TYPESPELL\")) { __write(1, \"=\", 1); __write(1, src + tpos[i], tlen[i]); }\n"
+                     "        if (tkind[i] == 2) { __write(1, \"=\", 1);";
+    const char *a2 = "    splice();\n    decomment();\n    preprocess();\n    expandsrc();\n    if (lex() < 0) return 1;\n    i = 0;";
+    const char *b2 = "    splice();\n    decomment();\n    autoinc();\n    preprocess();\n    expandsrc();\n    if (lex() < 0) return 1;\n    i = 0;";
+    if (replace_once(s, a1, b1)) return -1;
+    return replace_once(s, a2, b2);
+}
+
+/* ---- exec/c/provenance.py through its CLI ---- */
+static char *source_digest(void) {
+    char *argv[4]; Proc p; char *e;
+    argv[0] = PY; argv[1] = cat(ROOT, "/exec/c/provenance.py"); argv[2] = "identity"; argv[3] = 0;
+    if (run(argv, 0, 0, 1, &p)) return 0;
+    if (p.rc) {
+        bstr(&p.err); while (p.err.n && p.err.p[p.err.n - 1] == '\n') p.err.p[--p.err.n] = 0;
+        e = strrchr(p.err.p, '\n');
+        raise_("OSError", sdup(e ? e + 1 : p.err.p), 1); return 0;
+    }
+    bstr(&p.out); while (p.out.n && (p.out.p[p.out.n - 1] == '\n' || p.out.p[p.out.n - 1] == ' ')) p.out.p[--p.out.n] = 0;
+    return p.out.p;
+}
+static char *uname_(const char *flag) {
+    char *argv[3], *o = 0; size_t n = 0;
+    argv[0] = "uname"; argv[1] = (char *)flag; argv[2] = 0;
+    if (cx_runv_timeout(argv, 10, &o, &n) != 0 || !o) return sdup("");
+    while (n && (o[n - 1] == '\n' || o[n - 1] == '\r')) o[--n] = 0;
+    return o;
+}
+
+/* ---- identity(): the cache basis; 0 with the exception pending (need() exits directly) ---- */
+static pj_value *identity(void) {
+    const char *ccenv = getenv("CC"), *rf[] = { "-O2" }, *gf[] = { "-w", "-std=c99", "-O0" };
+    char *ccw, *cc, *d, *flat, *ref, *src, *srcres, *argv[8], *sources, *ccsha, *pyres, *pysha, *exp_sha, *dump_sha;
+    pj_value *actors, *edges, *runtime, *scan, *files, *source, *cmds, *last, *gen, *b, *env, *stage, *host, *outs;
+    Buf rb = {0}; Proc p; size_t n, i; char *part;
+    if (ccenv && *ccenv && strcmp(ccenv, "cc")) need("unverified CC override; this recipe uses system cc");
+    if (!(ccw = which("cc"))) need("system cc absent");
+    if (!PY && !(PY = which("python3"))) need("python3 absent");
+    if (!(cc = resolve_strict(ccw))) return 0;
+    if (actor_closure(&actors, &edges)) return 0;
+    if (!(runtime = readset(cc, "exec/c/run.c", rf, 1))) return 0;
+    if (!(d = mktempdir(gettempdir(), "carrier-import-readset-"))) return 0;
+    ref = cat(d, "/ref.c"); flat = cat(d, "/flat.c"); src = cat(d, "/dump.c");
+    argv[0] = PY; argv[1] = cat(ROOT, "/tests/bound.py"); argv[2] = "20"; argv[3] = "sh";
+    argv[4] = cat(ROOT, "/tests/export_ref.sh"); argv[5] = flat; argv[6] = 0;
+    if (run(argv, 1, 0, 1, &p)) return 0;
+    if (p.rc) {
+        Buf o = {0}; bputs(&o, "export metadata failed rc="); bnum(&o, p.rc); bputs(&o, ": ");
+        bputs(&o, tailchars(bstr(&p.err), p.err.n, 1000)); raise_value(bstr(&o)); return 0;
+    }
+    if (!(part = readfile(cat(ROOT, "/tests/refshim.h"), &n))) return 0;
+    bput(&rb, part, n); free(part);
+    if (!(part = readfile(flat, &n))) return 0;
+    bput(&rb, part, n); free(part);
+    if (!(part = readfile(cat(ROOT, "/tests/reffoot.h"), &n))) return 0;
+    bput(&rb, part, n); free(part);
+    if (writefile(ref, rb.p, rb.n)) return 0;
+    if (!(part = readfile(ref, &n))) return 0;
+    { Buf s = {0}; bput(&s, part, n); free(part);
+      if (dump_source(&s)) return 0;
+      if (writefile(src, s.p, s.n)) return 0;
+      free(s.p); }
+    if (!(scan = readset(cc, src, gf, 3))) return 0;
+    files = pj_get(scan, "files");
+    {   /* scan['files'].pop(str(src)) */
+        size_t k; source = 0;
+        for (k = 0; k + 1 < files->len; k += 2)
+            if (files->items[k]->n == strlen(src) && !memcmp(files->items[k]->s, src, files->items[k]->n)) {
+                source = files->items[k + 1];
+                memmove(files->items + k, files->items + k + 2, (files->len - k - 2) * sizeof *files->items); files->len -= 2;
+                break;
+            }
+        if (!source) { Buf o = {0}; pyrepr(&o, src); raise_("KeyError", bstr(&o), 0); return 0; }
+    }
+    if (!(dump_sha = sha_file(src))) return 0;
+    srcres = resolve_ns(src, 0);
+    if (strcmp(pj_get(source, "sha256")->s, dump_sha) || strcmp(pj_get(source, "resolved")->s, srcres)) { raise_assert(); return 0; }
+    for (i = 0; i + 1 < files->len; i += 2)
+        if (strstr(files->items[i]->s, d) || strstr(pj_get(files->items[i + 1], "resolved")->s, d)) { raise_assert(); return 0; }
+    cmds = pj_get(scan, "commands"); last = cmds->items[0]->items[cmds->items[0]->len - 1];
+    if (strcmp(last->s, src)) { raise_assert(); return 0; }
+    cmds->items[0]->items[cmds->items[0]->len - 1] = jstrz("@generated/dump.c");
+    { pj_value *g = pj_dict(); pj_set(g, "resolved", jstrz("@generated/dump.c")); pj_set(g, "sha256", jstrz(pj_get(source, "sha256")->s));
+      pj_set(files, "@generated/dump.c", g); }
+    if (!(exp_sha = sha_file(ref))) return 0;
+    gen = pj_dict(); pj_set(gen, "export_sha256", jstrz(exp_sha)); pj_set(gen, "dumper_sha256", jstrz(dump_sha)); pj_set(gen, "readset", scan);
+    rmtree(d); forget_temp(d);
+    if (!(sources = source_digest())) return 0;
+    if (!(ccsha = sha_file(cc))) return 0;
+    if (!(pyres = resolve_strict(PY))) return 0;
+    if (!(pysha = sha_file(pyres))) return 0;
+    env = pj_dict();
+    for (i = 0; i < sizeof ENV_KEYS / sizeof *ENV_KEYS; i++) { const char *v = getenv(ENV_KEYS[i]); pj_set(env, ENV_KEYS[i], v ? jstrz(v) : pj_null()); }
+    stage = pj_dict();
+    for (i = 0; environ[i]; i++) {
+        const char *kv = environ[i], *eq = strchr(kv, '=');
+        if (!eq) continue;
+        if (!strncmp(kv, "E1", 2) || !strncmp(kv, "E2", 2) || !strncmp(kv, "E3", 2) || !strncmp(kv, "E4", 2)
+            || !strncmp(kv, "UNISA_", 6) || !strncmp(kv, "DYLD_", 5)) {
+            char *k = sdupn(kv, (size_t)(eq - kv)); pj_set(stage, k, jstrz(eq + 1)); free(k);
+        }
+    }
+    host = pj_list(); pj_append(host, jstrz(uname_("-s"))); pj_append(host, jstrz(uname_("-m")));
+    outs = jlist((char *const *)OUTPUTS, NOUT);
+    b = pj_dict();
+    pj_set(b, "schema", jstrz("carrier-import-prepared-v1")); pj_set(b, "sources", jstrz(sources));
+    pj_set(b, "actors", actors); pj_set(b, "actor_edges", edges);
+    pj_set(b, "compiler", jstrz(cc)); pj_set(b, "compiler_sha256", jstrz(ccsha));
+    pj_set(b, "python", jstrz(pyres)); pj_set(b, "python_sha256", jstrz(pysha));
+    pj_set(b, "runtime_readset", runtime); pj_set(b, "generated", gen); pj_set(b, "environment", env);
+    pj_set(b, "stage_environment", stage); pj_set(b, "UA_TYPESPELL", jstrz("1")); pj_set(b, "host", host); pj_set(b, "outputs", outs);
+    sortkeys(b);
+    return b;
+}
+
+/* ---- the cache ---- */
+static char *CACHE;
+static int verify_cached_file(const char *path, const pj_value *h, int executable) {
+    struct stat st; size_t i; char *got;
+    if (lstat(path, &st) != 0) return raise_os(errno, path);
+    if (!S_ISREG(st.st_mode) || st.st_size == 0) return raise_value(cat("cached artifact is not a nonempty regular file: ", path));
+    if (h->type != PJ_STR || h->n != 64) return raise_value(cat("cached artifact has invalid digest: ", path));
+    for (i = 0; i < 64; i++) if (!((h->s[i] >= '0' && h->s[i] <= '9') || (h->s[i] >= 'a' && h->s[i] <= 'f')))
+        return raise_value(cat("cached artifact has invalid digest: ", path));
+    if (executable && (!(st.st_mode & 0111) || access(path, X_OK) != 0)) return raise_value(cat("cached artifact is not executable: ", path));
+    if (!(got = sha_file(path))) return -1;
+    if (strcmp(got, h->s)) return raise_value(cat("cached artifact SHA mismatch: ", path));
+    return 0;
+}
+static int valid_try(const pj_value *basis) {   /* 0 valid; -1 with the exception pending */
+    char *m = joinp(CACHE, "manifest.json"), *argv[5], *text, why[512]; Proc p; size_t n, i, k; pj_value *doc, *db, *outs;
+    argv[0] = PY; argv[1] = cat(ROOT, "/exec/c/provenance.py"); argv[2] = "check"; argv[3] = m; argv[4] = 0;
+    if (run(argv, 0, 0, 1, &p)) return -1;
+    if (p.rc) {
+        bstr(&p.err); while (p.err.n && p.err.p[p.err.n - 1] == '\n') p.err.p[--p.err.n] = 0;
+        return raise_("SystemExit", p.err.p, 1);
+    }
+    if (!(text = readfile(m, &n))) return -1;
+    if (utf8_check((const unsigned char *)text, n)) return -1;
+    if (!(doc = pj_loads(text, n, why, sizeof why))) {
+        const char *w = strstr(why, "JSONDecodeError: ");
+        return raise_("JSONDecodeError", sdup(w ? w + 17 : why), 1);
+    }
+    if (!(db = subscript(doc, "basis"))) return -1;
+    if (!pyeq(db, basis)) return raise_value(sdup("role/output set mismatch"));
+    if (!(outs = subscript(doc, "outputs"))) return -1;
+    {   /* set(doc['outputs']) != OUTPUTS */
+        int ok = 1; size_t step = outs->type == PJ_OBJ ? 2 : 1, cnt = outs->type == PJ_OBJ ? outs->len : outs->len;
+        if (outs->type == PJ_STR) ok = 0;
+        else if (outs->type != PJ_OBJ && outs->type != PJ_ARR) {
+            Buf o = {0}; bputs(&o, "'"); bputs(&o, pytype(outs)); bputs(&o, "' object is not iterable");
+            return raise_("TypeError", bstr(&o), 1);
+        } else {
+            int seen[NOUT] = {0};
+            for (i = 0; i < cnt; i += step) {
+                pj_value *x = outs->items[i]; int hit = 0;
+                if (x->type == PJ_ARR || x->type == PJ_OBJ) {
+                    Buf o = {0}; bputs(&o, "unhashable type: '"); bputs(&o, pytype(x)); bputs(&o, "'");
+                    return raise_("TypeError", bstr(&o), 1);
+                }
+                if (x->type == PJ_STR) for (k = 0; k < NOUT; k++) if (strlen(OUTPUTS[k]) == x->n && !memcmp(OUTPUTS[k], x->s, x->n)) { seen[k] = 1; hit = 1; }
+                if (!hit) ok = 0;
+            }
+            for (k = 0; k < NOUT; k++) if (!seen[k]) ok = 0;
+        }
+        if (!ok) return raise_value(sdup("role/output set mismatch"));
+        if (outs->type == PJ_ARR) { raise_("AttributeError", sdup("'list' object has no attribute 'items'"), 0); return -1; }
+    }
+    for (i = 0; i + 1 < outs->len; i += 2) {
+        const char *name = outs->items[i]->s; char *path = joinp(CACHE, name);
+        if (verify_cached_file(path, outs->items[i + 1], !strcmp(name, "run") || !strcmp(name, "dump"))) return -1;
+        free(path);
+    }
+    return 0;
+}
+static int valid(const pj_value *basis, int prepare) {
+    if (!valid_try(basis)) return 1;
+    if (!ECAUGHT) uncaught();
+    if (!prepare) { char *r = cat3("cache missing, changed or damaged ", KEY, ": "); need(cat(r, EMSG)); }
+    return 0;
+}
+static int mkdir_p(const char *p) {   /* Path.mkdir(parents=True, exist_ok=True) */
+    struct stat st; char *par;
+    if (mkdir(p, 0777) == 0) return 0;
+    if (errno == EEXIST) { if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) return 0; return raise_os(EEXIST, p); }
+    if (errno != ENOENT) return raise_os(errno, p);
+    par = parentp(p);
+    if (!strcmp(par, p) || mkdir_p(par)) return -1;
+    if (mkdir(p, 0777) != 0 && !(errno == EEXIST && stat(p, &st) == 0 && S_ISDIR(st.st_mode))) return raise_os(errno, p);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int prepare = 0, required = 0; const char *part = 0, *mc; char *base, *json; pj_value *basis; size_t jn; char cwd[4096];
+    parse(argc, argv, &prepare, &required, &part);
+    if (prepare == required || (prepare && part) || (required && !part)) usage_error("choose --prepare or --require-cached --part NAME", 0);
+    if (!getcwd(cwd, sizeof cwd)) { fputs("FileNotFoundError: [Errno 2] No such file or directory\n", stderr); return 1; }
+    ROOT = sdup(cwd);
+    atexit(cleanup);
+    /* PY (python3 on PATH, the original's sys.executable) is looked up in identity(), after the cc checks */
+    if (!(basis = identity())) { if (!ECAUGHT) uncaught(); need(EMSG); }
+    json = dumps_sorted(basis, &jn);
+    KEY = malloc(65); if (!KEY) oom(); cx_sha256_hex(json, jn, KEY);
+    mc = getenv("UNISACC_MODEL_CACHE");
+    base = mc ? purenorm(mc) : cat(gettempdir(), "/unisacc-model-cache");
+    { char *leaf = cat("carrier-import-", KEY); CACHE = joinp(base, leaf); free(leaf); }
+    if (prepare) {
+        char *lockp = cat(CACHE, ".lock"), *work, *argv2[8], *m, *mj; int fd; struct flock fl; Proc p; struct stat st;
+        pj_value *doc, *outs, *again; size_t i, mn;
+        if (mkdir_p(base)) uncaught();
+        if ((fd = open(lockp, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) { raise_os(errno, lockp); uncaught(); }
+        memset(&fl, 0, sizeof fl); fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET;
+        while (fcntl(fd, F_SETLKW, &fl) != 0) if (errno != EINTR) { raise_os(errno, 0); uncaught(); }
+        if (valid(basis, 1)) { printf("carrier import prepare HIT %s\n", KEY); return 0; }
+        if (!(work = mktempdir(base, "carrier-import-prepare-"))) uncaught();
+        argv2[0] = PY; argv2[1] = cat(ROOT, "/tests/bound.py"); argv2[2] = "55"; argv2[3] = PY;
+        argv2[4] = cat(ROOT, "/tests/modelnativecarrierimportcheck.py"); argv2[5] = "--prepare"; argv2[6] = work; argv2[7] = 0;
+        if (run(argv2, 0, 0, 0, &p)) uncaught();
+        if (p.rc) { fflush(stdout); cleanup(); return exit_code(p.rc); }
+        if (!(again = identity())) uncaught();
+        { size_t an; char *aj = dumps_sorted(again, &an); if (an != jn || memcmp(aj, json, jn)) { raise_assert(); uncaught(); } }
+        doc = pj_dict(); outs = pj_dict(); pj_set(doc, "basis", basis);
+        for (i = 0; i < NOUT; i++) { char *h, *op = joinp(work, OUTPUTS[i]); if (!(h = sha_file(op))) uncaught(); pj_set(outs, OUTPUTS[i], jstrz(h)); }
+        pj_set(doc, "outputs", outs);
+        m = joinp(work, "manifest.json"); mj = dumps_sorted(doc, &mn);
+        { Buf o = {0}; bput(&o, mj, mn); bputs(&o, "\n"); if (writefile(m, o.p, o.n)) uncaught(); }
+        {   char *argv3[6]; Proc w; char *srcs = pj_get(basis, "sources")->s;
+            argv3[0] = PY; argv3[1] = cat(ROOT, "/exec/c/provenance.py"); argv3[2] = "write"; argv3[3] = m; argv3[4] = srcs; argv3[5] = 0;
+            if (run(argv3, 0, 0, 1, &w)) uncaught();
+            if (w.rc) { fflush(stdout); fwrite(bstr(&w.err), 1, w.err.n, stderr); cleanup(); return exit_code(w.rc); }
+        }
+        if (stat(CACHE, &st) == 0) rmtree(CACHE);
+        if (rename(work, CACHE) != 0) { raise_os(errno, work); uncaught(); }
+        forget_temp(work);
+        if (!valid(basis, 1)) { raise_assert(); uncaught(); }
+        close(fd);
+        printf("carrier import PREPARED %s\n", KEY);
+        return 0;
+    }
+    valid(basis, 0);   /* metadata scan is allowed; no compiler build/model construction on miss */
+    {   char *argv2[10]; Proc p;
+        argv2[0] = PY; argv2[1] = cat(ROOT, "/tests/bound.py"); argv2[2] = "20"; argv2[3] = PY;
+        argv2[4] = cat(ROOT, "/tests/modelnativecarrierimportcheck.py"); argv2[5] = "--cached"; argv2[6] = CACHE;
+        argv2[7] = "--part"; argv2[8] = (char *)part; argv2[9] = 0;
+        if (run(argv2, 0, 0, 0, &p)) uncaught();
+        fflush(stdout);
+        return exit_code(p.rc);
+    }
+}

@@ -1,0 +1,255 @@
+/* runtimecopy.cx -- tests/checklib.py copy_runtime() and the pathlib/OSError behaviour the library checks rely on,
+   as a .cx module (2026-10-23, the py->cx port wave: tests/libraryunion16check.cx is the first user; the other
+   library checks that call copy_runtime use it the same way).  Use it with `#pragma unisa use cxlib.runtimecopy`
+   from a .cx file in tests/.
+     rtc_copy_runtime(ROOT, DEST, &files, &n, why, sizeof why)
+         copy every exec/c/ ** / *.{c,h,S} under ROOT, then the closure of their quoted includes
+         (`^\s*#\s*include\s*"NAME"`, resolved against the including file's directory), to the same relative paths
+         under DEST (directories created, permission bits kept); FILES gets the copied inputs sorted by relative
+         path with their sha256 hex (the dict copy_runtime returns).  0, or -1 with WHY set to the last line of the
+         Python traceback: `ValueError: 'P' is not in the subpath of 'ROOT'` for an include outside ROOT,
+         `FileNotFoundError: runtime include missing: P` for a missing one, an OSError line for an I/O failure.
+     rtc_resolve(PATH, STRICT, out, outlen, why, whylen)
+         str(Path(PATH).resolve(strict=STRICT)): relative to the working directory, symlinks followed component by
+         component; strict reports the first missing component (FileNotFoundError) or a non-directory followed by
+         more components (NotADirectoryError) as Python 3.14 does.  0, or -1 with WHY.
+     rtc_sha_file(PATH, hex65, why, whylen)       checklib.sha(PATH): 0, or -1 with WHY (an OSError line)
+     rtc_oserror(ERR, PATH, why, whylen)          `FileNotFoundError: [Errno 2] No such file or directory: 'PATH'`
+     rtc_pyrepr(S, N, out, outlen)                repr(str) of UTF-8 text S (quotes chosen as Python chooses)
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module runtimecopy
+
+typedef struct rtc_file { char *rel; char hex[65]; } rtc_file;
+
+/* ---- Python text: repr(str), OSError lines ------------------------------------------------------------------- */
+static int rtc_cp(const unsigned char *s, size_t n, size_t i, int *l) {   /* one UTF-8 code point, -1 if invalid */
+    unsigned c = s[i]; int need, k; long cp;
+    if (c < 0x80) { *l = 1; return (int)c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; }
+    else { *l = 1; return -1; }
+    for (k = 1; k <= need; k++) {
+        if (i + (size_t)k >= n || (s[i + k] & 0xC0) != 0x80) { *l = 1; return -1; }
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    *l = need + 1; return (int)cp;
+}
+static int rtc_printable(long c) {
+    if (c < 0x20 || (c >= 0x7F && c <= 0xA0) || c == 0xAD) return 0;
+    if (c == 0x1680 || (c >= 0x2000 && c <= 0x200F) || (c >= 0x2028 && c <= 0x202F) || (c >= 0x205F && c <= 0x206F)) return 0;
+    if (c == 0x3000 || c == 0xFEFF || (c >= 0xD800 && c <= 0xF8FF) || c == 0xFFFE || c == 0xFFFF) return 0;
+    if ((c >= 0xFFF9 && c <= 0xFFFB) || c >= 0xF0000) return 0;
+    return 1;
+}
+void rtc_pyrepr(const char *str, size_t n, char *out, size_t outlen) {
+    const unsigned char *s = (const unsigned char *)str; size_t i, j = 0; int sq = 0, dq = 0, l; char q, t[16];
+    if (!outlen) return;
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+#define RTC_PUT(p, m) do { size_t m_ = (m); if (j + m_ < outlen) { memcpy(out + j, (p), m_); j += m_; } } while (0)
+    RTC_PUT(&q, 1);
+    for (i = 0; i < n; i += (size_t)l) {
+        long c = rtc_cp(s, n, i, &l);
+        if (c < 0) c = s[i];
+        if (c == q || c == '\\') { t[0] = '\\'; t[1] = (char)c; RTC_PUT(t, 2); }
+        else if (c == '\n') RTC_PUT("\\n", 2);
+        else if (c == '\r') RTC_PUT("\\r", 2);
+        else if (c == '\t') RTC_PUT("\\t", 2);
+        else if (rtc_printable(c)) RTC_PUT(s + i, (size_t)l);
+        else {
+            if (c < 0x100) snprintf(t, sizeof t, "\\x%02x", (unsigned)c);
+            else if (c < 0x10000) snprintf(t, sizeof t, "\\u%04lx", c);
+            else snprintf(t, sizeof t, "\\U%08lx", c);
+            RTC_PUT(t, strlen(t));
+        }
+    }
+    RTC_PUT(&q, 1);
+#undef RTC_PUT
+    out[j] = 0;
+}
+void rtc_oserror(int err, const char *path, char *why, size_t whylen) {
+    const char *cls = err == ENOENT ? "FileNotFoundError" : err == EISDIR ? "IsADirectoryError"
+                    : err == ENOTDIR ? "NotADirectoryError" : (err == EACCES || err == EPERM) ? "PermissionError"
+                    : err == EEXIST ? "FileExistsError" : "OSError";
+    const char *what = err == ENOENT ? "No such file or directory" : err == EISDIR ? "Is a directory"   /* glibc wording */
+                     : err == ENOTDIR ? "Not a directory" : err == EACCES ? "Permission denied" : err == EPERM ? "Operation not permitted"
+                     : err == EEXIST ? "File exists" : err == ENOSPC ? "No space left on device" : err == EROFS ? "Read-only file system"
+                     : err == ENAMETOOLONG ? "File name too long" : err == ELOOP ? "Too many levels of symbolic links"
+                     : err == EIO ? "Input/output error" : strerror(err);
+    char r[8300];
+    rtc_pyrepr(path, strlen(path), r, sizeof r);
+    snprintf(why, whylen, "%s: [Errno %d] %s: %s", cls, err, what, r);
+}
+int rtc_sha_file(const char *path, char hex[65], char *why, size_t whylen) {
+    size_t n = 0; char *b; struct stat s;
+    errno = 0;
+    if (stat(path, &s) != 0) { rtc_oserror(errno, path, why, whylen); return -1; }
+    if (S_ISDIR(s.st_mode)) { rtc_oserror(EISDIR, path, why, whylen); return -1; }
+    if (!(b = cx_read(path, &n))) { rtc_oserror(errno ? errno : EIO, path, why, whylen); return -1; }
+    cx_sha256_hex(b, n, hex); free(b);
+    return 0;
+}
+
+/* ---- Path.resolve ------------------------------------------------------------------------------------------- */
+/* str(Path(P)) parts: '' and '.' components dropped; '..' kept (pathlib does not collapse it) */
+static int rtc_parts(char *buf, char **part, int max) {
+    int n = 0; char *s = buf, *e;
+    while (*s) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (*e) *e++ = 0; else e = e;
+        if (strcmp(s, ".") && n < max) part[n++] = s;
+        s = e;
+    }
+    return n;
+}
+static void rtc_parent(char *p) { char *sl = strrchr(p, '/'); if (sl && sl != p) *sl = 0; else strcpy(p, "/"); }
+int rtc_resolve(const char *path, int strict, char *out, size_t outlen, char *why, size_t whylen) {
+    char buf[8192], cur[8192], next[8192], *part[1024]; int n, i, depth = 0;
+    if (path[0] == '/') { snprintf(buf, sizeof buf, "%s", path); strcpy(cur, "/"); }
+    else {
+        if (!getcwd(cur, sizeof cur)) { rtc_oserror(errno, ".", why, whylen); return -1; }
+        snprintf(buf, sizeof buf, "%s", path);
+    }
+    n = rtc_parts(buf, part, 1024);
+    for (i = 0; i < n; i++) {
+        struct stat st;
+        if (!strcmp(part[i], "..")) { rtc_parent(cur); continue; }
+        snprintf(next, sizeof next, "%s%s%s", cur, strcmp(cur, "/") ? "/" : "", part[i]);
+        if (lstat(next, &st) != 0) {
+            int err = errno, k;
+            if (strict) { rtc_oserror(err, next, why, whylen); return -1; }
+            snprintf(cur, sizeof cur, "%s", next);   /* the rest is appended as written ('..' still pops) */
+            for (k = i + 1; k < n; k++) {
+                if (!strcmp(part[k], "..")) rtc_parent(cur);
+                else { size_t l = strlen(cur); snprintf(cur + l, sizeof cur - l, "%s%s", strcmp(cur, "/") ? "/" : "", part[k]); }
+            }
+            break;
+        }
+        if (S_ISLNK(st.st_mode)) {
+            char target[8192], joined[8192], sub[8192]; ssize_t m = readlink(next, target, sizeof target - 1);
+            if (m < 0 || ++depth > 40) { rtc_oserror(m < 0 ? errno : ELOOP, next, why, whylen); return -1; }
+            target[m] = 0;
+            if (target[0] == '/') snprintf(joined, sizeof joined, "%s", target);
+            else snprintf(joined, sizeof joined, "%s%s%s", cur, strcmp(cur, "/") ? "/" : "", target);
+            if (rtc_resolve(joined, strict, sub, sizeof sub, why, whylen) != 0) return -1;
+            snprintf(cur, sizeof cur, "%s", sub);
+            continue;
+        }
+        if (strict && i + 1 < n && !S_ISDIR(st.st_mode)) { rtc_oserror(ENOTDIR, next, why, whylen); return -1; }
+        snprintf(cur, sizeof cur, "%s", next);
+    }
+    snprintf(out, outlen, "%s", cur);
+    return 0;
+}
+
+/* ---- copy_runtime ------------------------------------------------------------------------------------------- */
+typedef struct rtc_list { char **v; size_t n, cap; } rtc_list;
+static int rtc_push(rtc_list *l, const char *s) {
+    if (l->n == l->cap) { char **g = realloc(l->v, (l->cap = l->cap ? 2 * l->cap : 64) * sizeof *g); if (!g) return -1; l->v = g; }
+    if (!(l->v[l->n] = malloc(strlen(s) + 1))) return -1;
+    strcpy(l->v[l->n++], s);
+    return 0;
+}
+static int rtc_scmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int rtc_fcmp(const void *a, const void *b) { return strcmp(((const rtc_file *)a)->rel, ((const rtc_file *)b)->rel); }
+/* (root/'exec/c').rglob('*') files with suffix .c .h .S (is_file follows a symlink; directories are not followed
+   through symlinks) */
+static void rtc_seed(const char *dir, rtc_list *out) {
+    DIR *d = opendir(dir); struct dirent *e;
+    if (!d) return;
+    while ((e = readdir(d))) {
+        char p[8192]; struct stat ls, st; const char *dot;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (lstat(p, &ls) != 0) continue;
+        if (S_ISDIR(ls.st_mode)) { rtc_seed(p, out); continue; }
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        dot = strrchr(e->d_name, '.');
+        if (!dot || dot == e->d_name || dot[1] == 0) continue;   /* Path.suffix: '.h' alone has none */
+        if (strcmp(dot, ".c") && strcmp(dot, ".h") && strcmp(dot, ".S")) continue;
+        rtc_push(out, p);
+    }
+    closedir(d);
+}
+static int rtc_mkdirs(char *p) {   /* mkdir -p of P's parent */
+    char *s;
+    for (s = p + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(p, 0777); *s = '/'; }
+    return 0;
+}
+static int rtc_isspace(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+
+int rtc_copy_runtime(const char *root_in, const char *dest, rtc_file **files, size_t *count, char *why, size_t whylen) {
+    char root[8192], seed[8300]; rtc_list pending = { 0 }; rtc_file *done = 0; size_t nd = 0, cap = 0, rl;
+    *files = 0; *count = 0;
+    if (rtc_resolve(root_in, 1, root, sizeof root, why, whylen) != 0) return -1;
+    rl = strlen(root);
+    snprintf(seed, sizeof seed, "%s/exec/c", root);
+    rtc_seed(seed, &pending);
+    if (pending.n) qsort(pending.v, pending.n, sizeof *pending.v, rtc_scmp);
+    while (pending.n) {
+        char *source = pending.v[--pending.n], *data, target[16384], *rel; size_t n = 0, i, k; struct stat st; int seen = 0;
+        rel = source + rl + (source[rl] == '/');
+        for (k = 0; k < nd; k++) if (!strcmp(done[k].rel, rel)) { seen = 1; break; }
+        if (seen) { free(source); continue; }
+        errno = 0;
+        if (stat(source, &st) != 0 || !(data = cx_read(source, &n))) { rtc_oserror(errno ? errno : EIO, source, why, whylen); return -1; }
+        snprintf(target, sizeof target, "%s/%s", dest, rel);
+        rtc_mkdirs(target);
+        errno = 0;
+        if (cx_write(target, data, n) != 0) { rtc_oserror(errno ? errno : EIO, target, why, whylen); return -1; }
+        chmod(target, st.st_mode & 07777);
+        if (nd == cap) { rtc_file *g = realloc(done, (cap = cap ? 2 * cap : 128) * sizeof *g); if (!g) { snprintf(why, whylen, "MemoryError"); return -1; } done = g; }
+        done[nd].rel = malloc(strlen(rel) + 1); strcpy(done[nd].rel, rel);
+        cx_sha256_hex(data, n, done[nd].hex); nd++;
+        /* re.findall(rb'^\s*#\s*include\s*"([^"\n]+)"', data, re.M): non-overlapping, left to right */
+        for (i = 0; i < n; ) {
+            size_t j = i, a, b; int hit = 0;
+            if (i == 0 || data[i - 1] == '\n') {
+                while (j < n && rtc_isspace((unsigned char)data[j])) j++;
+                if (j < n && data[j] == '#') {
+                    j++;
+                    while (j < n && rtc_isspace((unsigned char)data[j])) j++;
+                    if (j + 7 <= n && !memcmp(data + j, "include", 7)) {
+                        j += 7;
+                        while (j < n && rtc_isspace((unsigned char)data[j])) j++;
+                        if (j < n && data[j] == '"') {
+                            a = ++j;
+                            while (j < n && data[j] != '"' && data[j] != '\n') j++;
+                            b = j;
+                            if (j < n && data[j] == '"' && b > a) {
+                                char name[4096], dir[8192], joined[16384], inc[8192], rr[8300], ro[8300]; struct stat is;
+                                hit = 1; j++;
+                                snprintf(name, sizeof name, "%.*s", (int)(b - a), data + a);
+                                snprintf(dir, sizeof dir, "%s", source); rtc_parent(dir);
+                                if (name[0] == '/') snprintf(joined, sizeof joined, "%s", name);
+                                else snprintf(joined, sizeof joined, "%s/%s", dir, name);
+                                if (rtc_resolve(joined, 0, inc, sizeof inc, why, whylen) != 0) return -1;
+                                if (strncmp(inc, root, rl) || (inc[rl] != '/' && inc[rl] != 0)) {
+                                    rtc_pyrepr(inc, strlen(inc), rr, sizeof rr); rtc_pyrepr(root, rl, ro, sizeof ro);
+                                    snprintf(why, whylen, "ValueError: %s is not in the subpath of %s", rr, ro);
+                                    return -1;
+                                }
+                                if (stat(inc, &is) != 0) {
+                                    snprintf(why, whylen, "FileNotFoundError: runtime include missing: %s", inc);
+                                    return -1;
+                                }
+                                rtc_push(&pending, inc);
+                            }
+                        }
+                    }
+                }
+            }
+            if (hit) { i = j; continue; }
+            while (i < n && data[i] != '\n') i++;
+            if (i < n) i++;
+        }
+        free(data); free(source);
+    }
+    free(pending.v);
+    if (nd) qsort(done, nd, sizeof *done, rtc_fcmp);
+    *files = done; *count = nd;
+    return 0;
+}

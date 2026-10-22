@@ -1,0 +1,337 @@
+#!/usr/bin/env -S unisacc.com -run
+/* seedconstructcheck.cx -- the C99 seed constructors against the Python oracle: the gate's part list and the shared
+   seed/gen.c build.  Ported from tests/seedconstructcheck.py (2026-10-23, the owner's direction: the toolchain moves
+   off Python) -- the --list and --prep modes only; see "not ported" below.
+   usage: sh ./unisacc.com -run tests/seedconstructcheck.cx -- --list | --prep | --part PART
+     --list  every part of PARTS but the MANUAL ones (parse2-9: about 36 s), one per line; the gate makes one job per
+             line (a new part is one entry here and in the .py, nothing in gate.sh/gatedeps.json)
+     --prep  the content-keyed seed/gen.c build every seed-construct shard uses: the cache directory is
+             $UNISACC_SEED_CACHE, else $UNISACC_MODEL_CACHE, else TMPDIR/unisacc-seed-gen-cache (created as
+             Path.mkdir(parents=True, exist_ok=True)); the key is sha256("seed-gen-v1\0" "-fno-trim-libc" "\0" and,
+             for unisacc.com, seed/gen.c and every seed/ *.h in sorted order, "RELPATH\0" + the file's sha256 digest).
+             Under an exclusive flock(2) of CACHE/gen-KEY.lock (the same lock the .py takes, so the two interoperate):
+             CACHE/gen-KEY is reused when its manifest.json's "seed-gen" is the sha256 of its seed-gen; otherwise
+             `sh ROOT/unisacc.com -fno-trim-libc seed/gen.c -o STAGE/seed-gen` (cwd ROOT, output captured, 45 s) in
+             STAGE = mkdtemp(prefix gen-build-, dir CACHE), manifest.json = json.dumps({"seed-gen": SHA, "key": KEY})
+             + "\n" (byte-identical to the .py's, so either reads the other's entry), the old entry removed and STAGE
+             renamed onto it, then checked again.  stdout `seed-gen reused gen-KEY` or `seed-gen built gen-KEY`, rc 0.
+     Any other argv: stderr `usage: seedconstructcheck.py --list | --prep | --part base|parse2|...`, rc 1.
+   Failures the .py did not catch are rc 1 with the last line of Python's traceback on stderr: a failed compile is
+   `AssertionError: (('sh', ROOT/unisacc.com, '-fno-trim-libc', 'seed/gen.c', '-o', STAGE/seed-gen), RC, STDERR[:1500])`,
+   a compile past 45 s `subprocess.TimeoutExpired: Command '(...)' timed out after 45 seconds`, a bad entry after the
+   build `AssertionError: prepared seed-gen failed its digest check`, an I/O failure its OSError line.
+   Not ported (status PARTIAL): --part PART.  Every part, base included, compares seed/gen.c against the Python E3
+   constructor run in-process (exec/assemble.py Run/mapseq/load_facts, exec/finite_rules.py expand_template,
+   exec/build/parsebase.py and parse2base.py executors and their graphs), about 1900 lines of oracle calls over that
+   library; porting them means a second E3 implementation, so those shards stay `python3 tests/seedconstructcheck.py
+   --part PART`.  Here a valid PART is refused with one stderr line and rc 2; it never passes silently.
+   ROOT is the directory above this file's (the .py's Path(__file__).resolve().parents[1]); run as a compiled binary
+   (tests/cxbin) it is the working directory.
+   Prelude gap: <sys/file.h> for flock(2) (not in the cx prelude edition 1) is the one #include; open(2) and O_CLOEXEC
+   come with the prelude.  The lock is opened O_CLOEXEC as Python's open() is, so the compile never holds it. */
+#include <sys/file.h>
+#pragma unisa use cxlib.pyjson
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pytempfile
+
+static const char *PARTS[] = { "base", "parse2", "parse2-2", "parse2-3", "parse2-4", "parse2-5", "parse2-6", "parse2-7",
+    "parse2-8", "parse2-9", "parse2-10", "parse2-11", "parse2-12", "parse2-13", "parse2-14", "parse2-15", "parse2-16",
+    "parse2-17", "parse2-18", "parse2-19", "parse2-20", "parse2-21", "parse2-22", "parse2-23", "parse2-24", "parse2-25",
+    "parse2-26", "parse2-27", "parse2-28", "parse2-29", "parse2-30", "parse2-31", "parse2-32", "parse2-33", "parse2-34",
+    "parse2-35", "parse2-36", "parse2-37", "parse2-38", "parse2-39", "parse2-40", "parse2-41", "parse2-42", "parse2-43",
+    "parse2-44", 0 };
+static const char *MANUAL[] = { "parse2-9", 0 };
+static const char *GEN_FLAGS[] = { "-fno-trim-libc", 0 };
+
+static char ROOT[4096];
+static char STAGE[4600];
+
+static int member(const char *s, const char **v) { for (; *v; v++) if (!strcmp(s, *v)) return 1; return 0; }
+static void uncaught(const char *line) {
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    if (STAGE[0]) ptf_rmtree(STAGE);   /* the .py's finally: shutil.rmtree(stage, ignore_errors=True) */
+    exit(1);
+}
+static void oserr(int err, const char *path) { char why[9000]; rtc_oserror(err, path, why, sizeof why); uncaught(why); }
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) uncaught("MemoryError"); return p; }
+
+/* ---- small Python text helpers --------------------------------------------------------------------------------- */
+typedef struct { char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) uncaught("MemoryError");
+        b->p = g; b->cap = c;
+    }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void brepr(Buf *b, const char *s, size_t n) {   /* repr(str) */
+    size_t cap = n * 10 + 8; char *r = xmalloc(cap);
+    rtc_pyrepr(s, n, r, cap); bputs(b, r); free(r);
+}
+/* bytes.decode('utf-8') validity; on failure the UnicodeDecodeError traceback line */
+static int utf8_check(const unsigned char *s, size_t n, char *why, size_t whylen) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i]; size_t need, k; const char *r = "invalid start byte";
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c >= 0xE0 && c <= 0xEF) need = 2;
+        else if (c >= 0xF0 && c <= 0xF4) need = 3;
+        else { snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s", c, (unsigned long)i, r); return -1; }
+        for (k = 1; k <= need; k++) {
+            unsigned d = i + k < n ? s[i + k] : 0x100; unsigned lo = 0x80, hi = 0xBF;
+            if (k == 1) { if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+            if (i + k >= n) {
+                snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode %s in position %lu%s%lu: unexpected end of data",
+                         k == 1 ? "byte 0x" : "bytes", (unsigned long)i, k == 1 ? "" : "-", (unsigned long)(i + k - 1));
+                if (k == 1) snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: unexpected end of data", c, (unsigned long)i);
+                return -1;
+            }
+            if (d < lo || d > hi) {
+                if (k == 1) snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: invalid continuation byte", c, (unsigned long)i);
+                else snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: invalid continuation byte", (unsigned long)i, (unsigned long)(i + k - 1));
+                return -1;
+            }
+        }
+        i += need + 1;
+    }
+    return 0;
+}
+
+/* ---- the cache key --------------------------------------------------------------------------------------------- */
+static int scmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void add_file(Buf *h, const char *rel) {
+    char path[8300], hex[65], why[9000]; unsigned char md[32]; size_t n = 0; char *b; struct stat s;
+    snprintf(path, sizeof path, "%s/%s", ROOT, rel);
+    errno = 0;
+    if (stat(path, &s) != 0) oserr(errno, path);
+    if (S_ISDIR(s.st_mode)) oserr(EISDIR, path);
+    if (!(b = cx_read(path, &n))) oserr(errno ? errno : EIO, path);
+    cx_sha256(b, n, md); free(b); (void)hex; (void)why;
+    bput(h, rel, strlen(rel)); bput(h, "", 1); bput(h, md, 32);
+}
+static void gen_key(char key[65]) {
+    Buf h = { 0 }; char seed[4200], **names = 0; size_t nn = 0, cap = 0, i; DIR *d; struct dirent *e; int k;
+    bputs(&h, "seed-gen-v1"); bput(&h, "", 1);
+    for (k = 0; GEN_FLAGS[k]; k++) { if (k) bput(&h, "", 1); bputs(&h, GEN_FLAGS[k]); }
+    bput(&h, "", 1);
+    add_file(&h, "unisacc.com");
+    add_file(&h, "seed/gen.c");
+    snprintf(seed, sizeof seed, "%s/seed", ROOT);
+    if ((d = opendir(seed))) {   /* (ROOT/'seed').glob('*.h'): hidden names included, as pathlib's glob does */
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            if (l < 2 || strcmp(e->d_name + l - 2, ".h")) continue;
+            if (nn == cap) { char **g = realloc(names, (cap = cap ? 2 * cap : 64) * sizeof *g); if (!g) uncaught("MemoryError"); names = g; }
+            names[nn] = xmalloc(l + 6); snprintf(names[nn++], l + 6, "seed/%s", e->d_name);
+        }
+        closedir(d);
+    }
+    if (nn) qsort(names, nn, sizeof *names, scmp);
+    for (i = 0; i < nn; i++) { add_file(&h, names[i]); free(names[i]); }
+    free(names);
+    cx_sha256_hex(h.p, h.n, key);
+    free(h.p);
+}
+
+/* ---- gen_valid ------------------------------------------------------------------------------------------------- */
+static int is_file(const char *p) { struct stat s; return stat(p, &s) == 0 && S_ISREG(s.st_mode); }
+static int gen_valid(const char *entry) {
+    char mp[4700], gp[4700], why[9000], hex[65]; char *text; size_t n = 0; struct stat s; pj_value *v, *want;
+    snprintf(mp, sizeof mp, "%s/manifest.json", entry); snprintf(gp, sizeof gp, "%s/seed-gen", entry);
+    /* json.loads(read_text())["seed-gen"]: FileNotFoundError, KeyError, ValueError are False; others raise */
+    errno = 0;
+    if (stat(mp, &s) != 0) { if (errno == ENOENT) return 0; oserr(errno, mp); }
+    if (S_ISDIR(s.st_mode)) oserr(EISDIR, mp);
+    if (!(text = cx_read(mp, &n))) { if (errno == ENOENT) return 0; oserr(errno ? errno : EIO, mp); }
+    if (utf8_check((unsigned char *)text, n, why, sizeof why)) { free(text); return 0; }   /* UnicodeDecodeError */
+    {   /* read_text's universal newlines */
+        size_t i, j = 0;
+        for (i = 0; i < n; i++) {
+            if (text[i] == '\r') { text[j++] = '\n'; if (i + 1 < n && text[i + 1] == '\n') i++; }
+            else text[j++] = text[i];
+        }
+        n = j;
+    }
+    v = pj_loads(text, n, why, sizeof why);
+    free(text);
+    if (!v) return 0;                                                                   /* JSONDecodeError */
+    switch (v->type) {
+    case PJ_OBJ: break;
+    case PJ_ARR: uncaught("TypeError: list indices must be integers or slices, not str");
+    case PJ_STR: uncaught("TypeError: string indices must be integers, not 'str'");
+    case PJ_INT: uncaught("TypeError: 'int' object is not subscriptable");
+    case PJ_FLOAT: uncaught("TypeError: 'float' object is not subscriptable");
+    case PJ_BOOL: uncaught("TypeError: 'bool' object is not subscriptable");
+    default: uncaught("TypeError: 'NoneType' object is not subscriptable");
+    }
+    if (!(want = pj_get(v, "seed-gen"))) return 0;                                      /* KeyError */
+    if (!is_file(gp)) return 0;
+    if (rtc_sha_file(gp, hex, why, sizeof why) != 0) uncaught(why);
+    return want->type == PJ_STR && want->n == 64 && !memcmp(want->s, hex, 64);
+}
+
+/* ---- run(*args, timeout): subprocess.run(cwd=ROOT, capture_output=True, text=True); assert rc == 0 ------------- */
+static void run_checked(char **argv, int timeout) {
+    char op[4700], ep[4700], why[9000]; int ofd, efd, st = 0, rc = 0, timed = 0, i; pid_t pid; long ticks = (long)timeout * 100;
+    char *ob, *eb; size_t on = 0, en = 0; Buf r = { 0 };
+    snprintf(op, sizeof op, "%s/.stdout-XXXXXX", STAGE); snprintf(ep, sizeof ep, "%s/.stderr-XXXXXX", STAGE);
+    if ((ofd = mkstemp(op)) < 0) oserr(errno, op);
+    if ((efd = mkstemp(ep)) < 0) oserr(errno, ep);
+    unlink(op); unlink(ep);   /* the files live on as descriptors; nothing is left in STAGE */
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) oserr(errno, argv[0]);
+    if (pid == 0) {
+        if (chdir(ROOT) != 0) _exit(126);
+        dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
+        execvp(argv[0], argv); _exit(127);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
+        if (w < 0 && errno != EINTR) { rc = 1; break; }
+        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); timed = 1; break; }
+        usleep(10000);
+    }
+    /* the argv tuple's repr, as both the assertion and TimeoutExpired print it */
+    bputs(&r, "(");
+    for (i = 0; argv[i]; i++) { if (i) bputs(&r, ", "); brepr(&r, argv[i], strlen(argv[i])); }
+    bputs(&r, i == 1 ? ",)" : ")");
+    if (timed) {
+        Buf t = { 0 }; char tail[64];
+        bputs(&t, "subprocess.TimeoutExpired: Command '"); bputs(&t, r.p);
+        snprintf(tail, sizeof tail, "' timed out after %d seconds", timeout); bputs(&t, tail);
+        uncaught(t.p);
+    }
+    {   /* text=True: both streams decode as UTF-8 (strict), universal newlines */
+        int fds[2], s2; char **bufs[2]; size_t *lens[2];
+        fds[0] = ofd; fds[1] = efd; bufs[0] = &ob; bufs[1] = &eb; lens[0] = &on; lens[1] = &en;
+        for (s2 = 0; s2 < 2; s2++) {
+            off_t sz = lseek(fds[s2], 0, SEEK_END); size_t got = 0; ssize_t m;
+            if (sz < 0) sz = 0;
+            *bufs[s2] = xmalloc((size_t)sz + 1);
+            lseek(fds[s2], 0, SEEK_SET);
+            while (got < (size_t)sz && (m = read(fds[s2], *bufs[s2] + got, (size_t)sz - got)) > 0) got += (size_t)m;
+            (*bufs[s2])[got] = 0; *lens[s2] = got;
+            close(fds[s2]);
+        }
+        if (utf8_check((unsigned char *)ob, on, why, sizeof why) || utf8_check((unsigned char *)eb, en, why, sizeof why)) uncaught(why);
+    }
+    if (rc != 0) {
+        size_t i2, j = 0, cps = 0; Buf a = { 0 }; char num[32];
+        for (i2 = 0; i2 < en; i2++) {   /* universal newlines */
+            if (eb[i2] == '\r') { eb[j++] = '\n'; if (i2 + 1 < en && eb[i2 + 1] == '\n') i2++; }
+            else eb[j++] = eb[i2];
+        }
+        en = j;
+        for (j = 0; j < en && cps < 1500; cps++) {   /* stderr[:1500]: code points */
+            unsigned char c = (unsigned char)eb[j];
+            j += c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        }
+        if (j > en) j = en;
+        bputs(&a, "AssertionError: ("); bputs(&a, r.p);
+        snprintf(num, sizeof num, ", %d, ", rc); bputs(&a, num);
+        brepr(&a, eb, j); bputs(&a, ")");
+        uncaught(a.p);
+    }
+    free(ob); free(eb); free(r.p);
+}
+
+/* ---- prepared_gen ---------------------------------------------------------------------------------------------- */
+/* Path.mkdir(parents=True, exist_ok=True) */
+static void mkdirs(const char *p) {
+    struct stat s;
+    if (mkdir(p, 0777) == 0) return;
+    if (errno == ENOENT) {
+        char parent[4200], *sl; snprintf(parent, sizeof parent, "%s", p);
+        sl = strrchr(parent, '/');
+        if (sl && sl != parent) { *sl = 0; if (strcmp(parent, p)) mkdirs(parent); }
+        else if (!sl) { oserr(ENOENT, p); }
+        if (mkdir(p, 0777) == 0) return;
+    }
+    {   int err = errno;
+        if (stat(p, &s) == 0 && S_ISDIR(s.st_mode)) return;
+        oserr(err, p);
+    }
+}
+static int prepared_gen(char *entry, size_t cap) {
+    const char *e; char base[4200], key[65], lock[4700], gen[4800], mpath[4800], hex[65], why[9000]; int lf, hit = 0;
+    if ((e = getenv("UNISACC_SEED_CACHE")) && *e) snprintf(base, sizeof base, "%s", e);
+    else if ((e = getenv("UNISACC_MODEL_CACHE")) && *e) snprintf(base, sizeof base, "%s", e);
+    else { char t[4096]; ptf_gettempdir(t, sizeof t); snprintf(base, sizeof base, "%s/unisacc-seed-gen-cache", t); }
+    mkdirs(base);
+    gen_key(key);
+    snprintf(entry, cap, "%s/gen-%s", base, key);
+    snprintf(lock, sizeof lock, "%s/gen-%s.lock", base, key);
+    errno = 0;
+    if ((lf = open(lock, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666)) < 0) oserr(errno ? errno : EIO, lock);   /* open(lock, "a") */
+    while (flock(lf, LOCK_EX) != 0) if (errno != EINTR) oserr(errno, lock);
+    if (gen_valid(entry)) hit = 1;
+    else {
+        char *argv[16]; int k = 0, i; Buf m = { 0 };
+        if (ptf_mkdtemp(base, "gen-build-", STAGE, sizeof STAGE) != 0) { STAGE[0] = 0; oserr(errno, base); }
+        snprintf(gen, sizeof gen, "%s/seed-gen", STAGE);
+        {   static char sh[] = "sh", src[] = "seed/gen.c", o[] = "-o"; static char com[4200];
+            snprintf(com, sizeof com, "%s/unisacc.com", ROOT);
+            argv[k++] = sh; argv[k++] = com;
+            for (i = 0; GEN_FLAGS[i]; i++) argv[k++] = (char *)GEN_FLAGS[i];
+            argv[k++] = src; argv[k++] = o; argv[k++] = gen; argv[k] = 0;
+        }
+        run_checked(argv, 45);   /* the one compile, bounded by this step alone */
+        if (rtc_sha_file(gen, hex, why, sizeof why) != 0) uncaught(why);
+        bputs(&m, "{\"seed-gen\": \""); bputs(&m, hex); bputs(&m, "\", \"key\": \""); bputs(&m, key); bputs(&m, "\"}\n");
+        snprintf(mpath, sizeof mpath, "%s/manifest.json", STAGE);
+        errno = 0;
+        if (cx_write(mpath, m.p, m.n) != 0) oserr(errno ? errno : EIO, mpath);
+        free(m.p);
+        ptf_rmtree(entry);
+        if (rename(STAGE, entry) != 0) {
+            char line[9000], r[4400]; int err = errno;
+            rtc_oserror(err, STAGE, line, sizeof line); rtc_pyrepr(entry, strlen(entry), r, sizeof r);
+            snprintf(line + strlen(line), sizeof line - strlen(line), " -> %s", r);
+            uncaught(line);
+        }
+        STAGE[0] = 0;
+        if (!gen_valid(entry)) uncaught("AssertionError: prepared seed-gen failed its digest check");
+    }
+    close(lf);
+    return hit;
+}
+
+int main(int argc, char **argv) {
+    {   /* ROOT = Path(__file__).resolve().parents[1]; compiled (cxbin), the working directory */
+        size_t l = strlen(argv[0]); char self[4096];
+        if (l > 3 && !strcmp(argv[0] + l - 3, ".cx") && realpath(argv[0], self)) {
+            char *sl; int k;
+            for (k = 0; k < 2; k++) { sl = strrchr(self, '/'); if (sl && sl != self) *sl = 0; else { strcpy(self, "/"); break; } }
+            snprintf(ROOT, sizeof ROOT, "%s", self);
+        } else if (!getcwd(ROOT, sizeof ROOT)) return 1;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--list")) {
+        int i;
+        for (i = 0; PARTS[i]; i++) if (!member(PARTS[i], MANUAL)) printf("%s\n", PARTS[i]);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--prep")) {
+        char entry[4600]; int hit = prepared_gen(entry, sizeof entry);
+        printf("seed-gen %s %s\n", hit ? "reused" : "built", strrchr(entry, '/') + 1);
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--part") && member(argv[2], PARTS)) {
+        fprintf(stderr, "seedconstructcheck.cx: --part %s is not ported (its oracle is the in-process Python E3 constructor); "
+                        "run python3 tests/seedconstructcheck.py --part %s\n", argv[2], argv[2]);
+        return 2;
+    }
+    {
+        int i;
+        fputs("usage: seedconstructcheck.py --list | --prep | --part ", stderr);
+        for (i = 0; PARTS[i]; i++) fprintf(stderr, "%s%s", i ? "|" : "", PARTS[i]);
+        fputc('\n', stderr);
+        return 1;
+    }
+}

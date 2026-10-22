@@ -9,28 +9,40 @@
 #    tests/bound.c) to the real compiler.  Every call is logged with its class.
 #  * per target: prepare rc 0, e2.json made through the helper (one keyed seed-gen and its .sha256 in
 #    $OUT/.seed-gen-cache, no direct gen.py pp), byte-equal to that seed-gen run with the target's expected
-#    flags, and the next step (gen.py lower) reached.
+#    flags, and gen.py lower (the other prepare lane, 0.0.43) reached with the target's flags.
 #  * shard 1: lnx/x86_64 lnx/arm64 osx/x86_64; red seed-gen (rc 3 kept), missing SEED_GEN_BIN (rc 2), SEED_GEN=yes
-#    (rc 2) each stop prepare before lower with no e2.json; the old direct "gen.py pp" line (mutated copy in the
+#    (rc 2) each fail prepare with that rc and stop the seed-gen lane: no e2.json and no table of e3/e4/prune/e2
+#    (gen.py lower runs in the other lane since 0.0.43 and is no Python fallback); the old direct "gen.py pp" line (mutated copy in the
 #    scratch) is caught as not going through the helper.
 #  * shard 2: osx/arm64 win/x86_64 win/arm64; SEED_GEN=0 named reference route for win/arm64 goes through the
 #    helper to gen.py pp with --win --arm64 and is byte-equal to the C e2.
-# usage: tests/seedppconsumercheck.sh 1|2
+#  * 0.0.43 timeout debt (shard 1 took 78 s: four cold prepare.sh runs of ~17 s, each building its private seed-gen and
+#    running parse2/opt/prune/pp through it): PART runs one slice of a shard, each with its own scratch tree and its own
+#    cold prepare, so no slice hands anything to another.  Shard 1 parts: lnx/x86_64 (+ the shim refusals),
+#    lnx/arm64, osx/x86_64, negative (NEG-red/missing/badsg + the mutant); each builds seed-gen for real.  Shard 2
+#    parts are its targets and need SEEDPPC_PREPARED_TOOLS (tests/seedppconsumerprepared.py).  Without PART the
+#    whole shard runs as before.
+# usage: tests/seedppconsumercheck.sh 1|2 [PART]
 case "${1:-}" in
     1) TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64";;
     2) TARGETS="osx/arm64 win/x86_64 win/arm64";;
     *) echo "usage: tests/seedppconsumercheck.sh 1|2"; exit 2;;
 esac
 SHARD=$1
-# Only the new shard-2 target consumers use the content-verified prepared tools.
+# Only the shard-2 target consumers use the content-verified prepared tools; shard-1 parts build seed-gen for real.
 SPLIT_TARGET=${2:-}
-if [ -n "$SPLIT_TARGET" ]; then
-    [ "$SHARD" = 2 ] || { echo "seedppc: target selection is shard 2 only" >&2; exit 2; }
-    case "$SPLIT_TARGET" in osx/arm64|win/x86_64|win/arm64) TARGETS=$SPLIT_TARGET;; *) exit 2;; esac
-    [ -n "${SEEDPPC_PREPARED_TOOLS:-}" ] || { echo "NEED_PREPARE seedppc: tools absent" >&2; exit 75; }
-else
-    unset SEEDPPC_PREPARED_TOOLS
-fi
+case "$SHARD:$SPLIT_TARGET" in
+    1:|2:) unset SEEDPPC_PREPARED_TOOLS;;
+    1:lnx/x86_64|1:lnx/arm64|1:osx/x86_64) TARGETS=$SPLIT_TARGET; unset SEEDPPC_PREPARED_TOOLS;;
+    1:negative) TARGETS=; unset SEEDPPC_PREPARED_TOOLS;;
+    2:osx/arm64|2:win/x86_64|2:win/arm64) TARGETS=$SPLIT_TARGET
+        [ -n "${SEEDPPC_PREPARED_TOOLS:-}" ] || { echo "NEED_PREPARE seedppc: tools absent" >&2; exit 75; };;
+    *) echo "seedppc: parts are 1: lnx/x86_64 lnx/arm64 osx/x86_64 negative, 2: osx/arm64 win/x86_64 win/arm64" >&2; exit 2;;
+esac
+part() {   # part P...: the whole shard runs, or the selected part is one of P
+    [ -z "$SPLIT_TARGET" ] && return 0
+    for p in "$@"; do [ "$SPLIT_TARGET" = "$p" ] && return 0; done; return 1
+}
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 S=$(mktemp -d "${TMPDIR:-/tmp}/seedppc.XXXXXX") || exit 2
@@ -88,7 +100,7 @@ before=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"r
 W=$S/tree; mkdir "$W"
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "seedppc  shard $SHARD  tree $H"
-git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py || { echo "seedppc: git archive failed"; exit 2; }
+git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py tests/checklib.py || { echo "seedppc: git archive failed"; exit 2; }
 tar -x -C "$W" -f "$S/tree.tar" || { echo "seedppc: scratch tree failed"; exit 2; }
 cd "$W" || exit 2
 BOUND_CACHE=$S/boundcache; export BOUND_CACHE
@@ -163,7 +175,7 @@ ok() { echo "SAME $1"; evw "SAME $1"; same=$((same + 1)); }
 no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 # the shims refuse what they do not know (rc 97, recorded UNKNOWN)
 SHIMLOG=$S/shimneg; export SHIMLOG; : > "$SHIMLOG"
-if [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = osx/arm64 ]; then
+if part lnx/x86_64 osx/arm64; then
 for bad_argv in "-c foo.c" "-O2 -o x exec/c/run.c seed/gen.c" "-o x"; do   # not "bad": that is the failure count
     "$S/shim/cc" $bad_argv >/dev/null 2>&1; r=$?
     [ "$r" -eq 97 ] && ok "cc shim refuses '$bad_argv'" || no "cc shim did not refuse '$bad_argv' (rc=$r)"
@@ -211,15 +223,15 @@ for t in $TARGETS; do
     ! hasclass "$l" UNKNOWN && ok "$t no unknown tool call" || no "$t unknown tool call: $(grep '^UNKNOWN' "$l" | head -1)"
 done
 
-if [ "$SHARD" = 1 ]; then
+if [ "$SHARD" = 1 ] && part negative; then
 t=lnx/x86_64
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "red:3:SEED_GEN=1 SEED_GEN_BIN=$S/red-gen" "missing:2:SEED_GEN=1 SEED_GEN_BIN=/nonexistent/seed-gen" "badsg:2:SEED_GEN=yes"; do
     n=${case_%%:*}; rest=${case_#*:}; want=${rest%%:*}; envs=${rest#*:}
     o=$S/neg-$n; l=$S/neglog-$n
     r=$(prep "$t" "$o" "$l" "$PREP" $envs)
-    { [ "$r" -eq "$want" ] && [ ! -e "$o/e2.json" ] && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py lower / { f = 1 } END { exit !f }' "$l" && ! hasclass "$l" pass-gen-pp && [ -s "$l" ]; } \
-        && ok "NEG-$n prepare stops rc $r before lower, no e2.json, no Python fallback" || no "NEG-$n rc=$r (want $want) $(tail -1 "$l.out")"
+    { [ "$r" -eq "$want" ] && [ ! -e "$o/e2.json" ] && ! awk -F '\t' '$2 ~ /^python3 exec\/c\/tbl\.py [^ ]*\/(e3|e4|prune|e2)\.json / { f = 1 } END { exit !f }' "$l" && ! hasclass "$l" pass-gen-pp && [ -s "$l" ]; } \
+        && ok "NEG-$n prepare rc $r, seed-gen lane stopped (no e2.json, no e3/e4/prune/e2 table), no Python fallback" || no "NEG-$n rc=$r (want $want) $(tail -1 "$l.out")"
     evw "NEG-$n rc prepare=$r want=$want"
 done
 # mutation: the old direct line in a scratch copy of prepare.sh must be caught by via_helper
@@ -237,7 +249,7 @@ r=$(prep "$t" "$o" "$l" "$M")
 evw "MUTANT rc prepare=$r"
 fi
 
-if [ "$SHARD" = 2 ] && { [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = win/arm64 ]; }; then
+if [ "$SHARD" = 2 ] && part win/arm64; then
 t=win/arm64; s=$(slug "$t"); o=$S/py-$s; l=$S/pylog-$s
 r=$(prep "$t" "$o" "$l" "$PREP" SEED_GEN=0)
 { [ "$r" -eq 0 ] && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $o/e2.json --win --arm64" && cmp -s "$o/e2.json" "$S/out-$s/e2.json"; } \
@@ -247,13 +259,13 @@ fi
 
 cd "$R" || exit 2
 after=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PREP") || exit 2
-if [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = win/arm64 ]; then
+if [ "$SHARD" = 1 ] || part win/arm64; then
 [ "$before" = "$after" ] && ok "checkout $PREP untouched" || no "checkout $PREP changed"
 fi
 if [ -n "$EV" ]; then   # the shard's own logs, by name; a failed copy marks the export
-    logs="shimneg"; for t in $TARGETS; do logs="$logs log-$(slug "$t")"; done
-    if [ "$SHARD" = 1 ]; then logs="$logs neglog-red neglog-missing neglog-badsg mutlog"; elif [ -z "$SPLIT_TARGET" ] || [ "$SPLIT_TARGET" = win/arm64 ]; then logs="$logs pylog-win-arm64"; fi
-    if [ -n "$SPLIT_TARGET" ] && [ "$SPLIT_TARGET" != osx/arm64 ]; then logs=${logs#shimneg }; fi
+    logs=; ! part lnx/x86_64 osx/arm64 || logs=shimneg
+    for t in $TARGETS; do logs="$logs log-$(slug "$t")"; done
+    if [ "$SHARD" = 1 ]; then ! part negative || logs="$logs neglog-red neglog-missing neglog-badsg mutlog"; elif part win/arm64; then logs="$logs pylog-win-arm64"; fi
     for f in $logs; do cp "$S/$f" "$EV/$f" || { evfail=1; echo "seedppc: EVIDENCE copy of $f failed" >&2; }; done
 fi
 echo "seedppc  shard $SHARD  same $same  bad $bad"

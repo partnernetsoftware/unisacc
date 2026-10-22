@@ -15,15 +15,15 @@ _KEYBASE=None
 # pack-models with --require-cached: every model must already sit verified in
 # the cache (written by the pack-prep-K steps); constructing one here is an error.
 REQUIRE_CACHED=False
-# Prepare steps: buildcompiler.sh pack-prep-K builds part K of PREP_PARTS into
-# $T/model-cache, so that no single bounded step constructs all models.  Groups
-# are fixed (by name, measured to stay under ~45 s each); every model job must
-# appear in exactly one group (checked in prepare()).
+SEED_TOOLS=None   # --seed-tools DIR: gen, tbl, net built from seed/*.c (byte-identical to gen.py, tbl.py, net.py) construct, untraced
+# Prepare steps: part K of PREP_PARTS into the model cache, so that no bounded step constructs all models.  Groups are
+# fixed (by name, measured to stay under ~45 s each; every model job in exactly one, checked in prepare()).  --part K/5
+# is this split (gate exec-driver-core-prep-1..5); K/3 joins parts 3-5, same order (buildcompiler pack-prep-K, bindprep).
 PREP_PARTS=[
     ['warnparse'],
     ['errorparse'],
-    ['warnunits','warnlex','tokenlex','tokenpp','warnpp-shared','plainpp','nativeabi',
-     'object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64','tapecheck','hostsymbols','librarycontract','librarypartition'],
+    ['warnunits','warnlex','tokenlex','tokenpp','warnpp-shared'],['plainpp','nativeabi'],
+    ['object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64','tapecheck','hostsymbols','librarycontract','librarypartition'],
 ]
 
 def _digest(path):
@@ -57,11 +57,12 @@ def _valid(cache):
         return False
 
 def _construct(script,args,env,j,t,n,trace=None):
-    """TRACE: a directory; each tool then runs under readtrace.py and its read set lands there."""
+    """TRACE: a directory; each tool then runs under readtrace.py and its read set lands there (not with SEED_TOOLS)."""
     here=Path(__file__).resolve().parent;root=here.parents[1]
     for i,(tool,argv) in enumerate([(script,[j,*args]),(here/'tbl.py',[j,t]),(here/'net.py',[t,n])]):
         pre=[str(here/'readtrace.py'),str(Path(trace)/('read%d.json'%i)),str(root)] if trace else []
-        subprocess.run([sys.executable,*pre,str(tool),*map(str,argv)],check=True,timeout=60,env=env)
+        cmd=[str(Path(SEED_TOOLS)/('gen','tbl','net')[i]),*([args[0],j,*args[1:]] if i==0 else argv)] if SEED_TOOLS else [sys.executable,*pre,str(tool),*argv]
+        subprocess.run(list(map(str,cmd)),check=True,timeout=60,env=env,cwd=root if SEED_TOOLS else None)
 
 def _readset(root,trace):
     """The union read set of one traced construction, as {path: digest}; None if a tool spawned."""
@@ -117,8 +118,8 @@ def built_model(td,name,script,args,env=None,want_json=False):
                 # identity and lock; the table/network pair is never rebuilt.
                 with tempfile.TemporaryDirectory(prefix='json-',dir=base) as td:
                     pending=Path(td)/'m.json'
-                    subprocess.run([sys.executable,str(script),str(pending),*map(str,args)],
-                                   check=True,timeout=55,env=env)
+                    cmd=[Path(SEED_TOOLS)/'gen',args[0],pending,*args[1:]] if SEED_TOOLS else [sys.executable,script,pending,*args]   # seed gen: byte-identical JSON
+                    subprocess.run(list(map(str,cmd)),check=True,timeout=55,env=env,cwd=root if SEED_TOOLS else None)
                     manifest['m.json']=_digest(pending)
                     pending.replace(cache/'m.json')
                 temporary=cache/'manifest.json.tmp'
@@ -140,8 +141,8 @@ def built_model(td,name,script,args,env=None,want_json=False):
         work=Path(tempfile.mkdtemp(prefix='pack-'+job+'.build-',dir=base))
         try:
             _construct(script,args,env,work/'m.json',work/'m.tbl',work/'m.net',trace=work)
-            stamp=_readset(root,work)
-            for k in ('read0.json','read1.json','read2.json'): (work/k).unlink()
+            stamp=None if SEED_TOOLS else _readset(root,work)   # untraced C tools: the whole-closure key (it covers seed/)
+            for k in ('read0.json','read1.json','read2.json'): (work/k).unlink(missing_ok=True)
             artifacts=('m.tbl','m.net','m.json') if want_json else ('m.tbl','m.net')
             if not want_json: (work/'m.json').unlink()
             (work/'manifest.json').write_text(json.dumps({k:_digest(work/k) for k in artifacts},sort_keys=True))
@@ -227,8 +228,8 @@ def manifest_targets(manifests):
 def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None, librarytyped=False, librarycallsite=False, librarycallback=False, keep_json=False):
     """Construct part PART (1-based) of PARTS into the model cache; no package."""
     jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi,librarytyped,librarycallsite,librarycallback)}
-    groups=PREP_PARTS+[[n] for n in jobs if n.startswith('typed-')]
-    if parts!=len(groups) or not 1<=part<=parts: raise ValueError('--part must be K/%d'%len(groups))
+    typed=[[n] for n in jobs if n.startswith('typed-')]; groups=(PREP_PARTS[:2]+[sum(PREP_PARTS[2:],[])] if parts==3+len(typed) else PREP_PARTS)+typed
+    if parts!=len(groups) or not 1<=part<=parts: raise ValueError('--part must be K/%d or K/%d'%(3+len(typed),len(PREP_PARTS)+len(typed)))
     named=[n for g in groups for n in g]
     if len(named)!=len(set(named)) or not set(jobs)<=set(named): raise ValueError('PREP_PARTS does not cover the model jobs once each')
     with tempfile.TemporaryDirectory(prefix='compiler-prepare-') as td:
@@ -408,10 +409,11 @@ if __name__=='__main__':
     ap.add_argument('--keep-json',action='store_true',help='prepare optional verified JSON under the same model cache key')
     ap.add_argument('--part',help='K/N: which prepare group (with --prepare-only)')
     ap.add_argument('--require-cached',action='store_true',help='fail if any model is not already in the cache')
+    ap.add_argument('--seed-tools',help='directory with gen, tbl, net built from seed/*.c: construct with them, not gen.py/tbl.py/net.py')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
     MODEL_CACHE=not a.no_model_cache
-    REQUIRE_CACHED=a.require_cached
+    REQUIRE_CACHED=a.require_cached;SEED_TOOLS=a.seed_tools
     if a.keep_json and not a.prepare_only: ap.error('--keep-json requires --prepare-only')
     if a.prepare_only:
         try:

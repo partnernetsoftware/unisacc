@@ -1,6 +1,6 @@
 # 7000 三层重验计数旁核
 
-历史名称说明（2026-10-16）： `closure-c2/c3/c4` 与 `stages-1/2/3` 也保留为历史名，现各由 a/b/c 三片执行；下文 `closure-c1` 是冻结 722 项清单中的原名；现行执行门已改为 `closure-c1a`/`closure-c1b`/`closure-c1c`。不改历史计数或结果，不以该原名调度当前队列。
+历史名称说明（2026-10-16）： `closure-c2/c3/c4` 与 `stages-1/2/3` 也保留为历史名，现各由 a/b/c 三片执行；下文 `closure-c1` 是冻结 722 项清单中的原名；现行执行门已改为 `closure-c1a`/`closure-c1b`/`closure-c1c`。不改历史计数或结果，不以该原名调度当前队列。2026-10-23：`tapebin-roundtrip-structure-1/2` 亦为历史名（原为 structure-K/2 两半），现行执行门为 `tapebin-roundtrip-structure-1`…`-6`（structure-K/6 六片）；下文 722 项清单仍按原名计数。`seedgen-ppconsumer-1` 亦为历史名（0.0.43 超时债拆分），现行执行门为 `seedgen-ppconsumer-1-lnx-x86_64`/`-lnx-arm64`/`-osx-x86_64`/`-negative` 四片；下文仍按原名计数。
 
 只是设计；实际读取归档 jobs 与源码，未跑套件、未改指纹、未授任何摘钩资格。
 

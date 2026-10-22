@@ -1,0 +1,154 @@
+#!/usr/bin/env -S unisacc.com -run
+/* freshordercheck.cx -- fresh-order (0.0.24 T1d (c)): the global fresh-label order is a checked contract.
+   0.0.43 port of tests/freshordercheck.py, off Python: the constructor is seed/gen.c (byte-identical to
+   exec/build/gen.py; parse2 ~8 s against gen.py's 40-76 s, which put the --errors modes past the gate bound), built
+   here by the host cc with the recorder tests/freshorderhook.h (seed/gen.c itself unchanged).  The recorder writes
+   one row "n<TAB>owner<TAB>kind" per fresh label in allocation order -- the first three columns of procs.py's
+   UNISACC_FRESH_LOG (proven equal for modes 0-8 when the gate moved; the fourth, the Python caller file:line, moved
+   with every unrelated assemble.py edit and has no C counterpart).  sha256 and row count of that log are compared
+   with tests/freshorder.tsv.  Modes 0-7 are the 8 parse2 flag combinations (warnings x errors x locations, mode =
+   4w+2e+l), 8 is parse2/units.  One mode per run.
+     sh ./unisacc.com -run tests/freshordercheck.cx -- MODE            compare
+     sh ./unisacc.com -run tests/freshordercheck.cx -- MODE --write    record
+     sh ./unisacc.com -run tests/freshordercheck.cx -- --negative      swap two fresh bindings in
+           exec/parse2/scope-manifest.tsv, expect mode 0 to go red, restore (edits the tree: not a gate job)
+   The repository root is the parent of this file's directory; scratch is a freshorder-XXXXXX directory under
+   TMPDIR (or /tmp), removed on every exit.  Each child (cc, seed-gen) is limited to 55 s. */
+
+#define PATHN 4096
+static char ROOT[PATHN], TMP[PATHN], GEN[PATHN], LOG[PATHN], TSV[PATHN], NEG[PATHN];
+static const char *NEG_A = "array_test=fresh:U:DECL:b,after_dims=fresh:U:DC:r";
+static const char *NEG_B = "after_dims=fresh:U:DC:r,array_test=fresh:U:DECL:b";
+
+static void cleanup(void) {
+    char p[PATHN];
+    if (!TMP[0]) return;
+    unlink(GEN); unlink(LOG);
+    snprintf(p, sizeof p, "%s", TMP); TMP[0] = 0; rmdir(p);
+}
+static void die(const char *what, const char *detail) {
+    fflush(stdout);
+    fprintf(stderr, "fresh-order: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    fflush(stderr); cleanup(); exit(1);
+}
+
+/* argv in ROOT, stdout discarded, stderr passed through; the exit code (124 past 55 s, 127 cannot execute) */
+static int run(char **argv) {
+    char *out = 0; size_t n; int rc;
+    fflush(stdout); fflush(stderr);
+    rc = cx_runv_timeout(argv, 55, &out, &n);
+    free(out);
+    return rc;
+}
+
+static void key(int m, char *k, size_t kn) {
+    if (m == 8) { snprintf(k, kn, "parse2/units"); return; }
+    snprintf(k, kn, "parse2%s%s%s", m & 4 ? " --warnings" : "", m & 2 ? " --errors" : "", m & 1 ? " --locations" : "");
+}
+
+static void build(void) {
+    char inc[PATHN], hook[PATHN], src[PATHN];
+    snprintf(inc, sizeof inc, "%s/seed", ROOT); snprintf(hook, sizeof hook, "%s/tests/freshorderhook.h", ROOT);
+    snprintf(src, sizeof src, "%s/seed/gen.c", ROOT);
+    {
+        char *a[] = {"cc", "-std=c99", "-O2", "-w", "-I", inc, "-include", hook, src, "-o", GEN, 0};
+        int rc = run(a);
+        if (rc) { printf("fresh-order: build seed/gen.c FAIL rc=%d ", rc); printf("(stderr above)\n"); cleanup(); exit(1); }
+    }
+}
+
+/* the recorded order of mode M: "SHA256<TAB>ROWS" into got; 0, or 1 after printing the FAIL line */
+static int sequence(int m, char *got, size_t gn) {
+    char k[128], env[PATHN + 32], *data, hex[65], *a[8]; size_t n, i, rows = 0; int rc, na = 0;
+    key(m, k, sizeof k);
+    unlink(LOG);
+    snprintf(env, sizeof env, "UNISACC_FRESH_LOG=%s", LOG);
+    a[na++] = "env"; a[na++] = env; a[na++] = GEN; a[na++] = m == 8 ? "parse2/units" : "parse2"; a[na++] = "/dev/null";
+    if (m != 8) { if (m & 4) a[na++] = "--warnings"; if (m & 2) a[na++] = "--errors"; if (m & 1) a[na++] = "--locations"; }
+    a[na] = 0;
+    rc = run(a);
+    data = cx_read(LOG, &n);
+    if (rc || !data || !n) { printf("fresh-order: %s FAIL rc=%d ", k, rc); printf("(stderr above)\n"); free(data); return 1; }
+    for (i = 0; i < n; i++) if (data[i] == '\n') rows++;
+    cx_sha256_hex(data, n, hex); free(data);
+    snprintf(got, gn, "%s\t%lu", hex, (unsigned long)rows);
+    return 0;
+}
+
+/* tests/freshorder.tsv: KEY<TAB>SHA<TAB>ROWS rows (# comments, blank lines skipped) */
+#define MAXROW 64
+static char *bk[MAXROW], *bv[MAXROW]; static int nb;
+static void baseline(void) {
+    size_t n; char *t = cx_read(TSV, &n), *p, *e, *t1, *t2;
+    if (!t) return;
+    for (p = t; *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        if (!*p || *p == '#') continue;
+        t1 = strchr(p, '\t'); t2 = t1 ? strchr(t1 + 1, '\t') : 0;
+        if (!t2 || strchr(t2 + 1, '\t')) die("malformed row in tests/freshorder.tsv", p);
+        if (nb == MAXROW) die("too many rows in tests/freshorder.tsv", 0);
+        *t1 = 0; bk[nb] = p; bv[nb] = t1 + 1; nb++;
+    }
+}
+static const char *lookup(const char *k) { int i; for (i = 0; i < nb; i++) if (!strcmp(bk[i], k)) return bv[i]; return 0; }
+
+static int negative(void) {
+    size_t n; char *s = cx_read(NEG, &n), *at, *sw, got[128]; const char *old; int count = 0, bad;
+    if (!s) die("cannot read", NEG);
+    for (at = strstr(s, NEG_A); at; at = strstr(at + 1, NEG_A)) count++;
+    if (count != 2) die("negative anchor moved", NEG);   /* rows entry / entry-warnings; mode 0 reads the first */
+    sw = malloc(n + 1); if (!sw) die("out of memory", 0);
+    memcpy(sw, s, n + 1); memcpy(sw + (strstr(s, NEG_A) - s), NEG_B, strlen(NEG_B));   /* NEG_B is NEG_A's length */
+    build();
+    if (cx_write(NEG, sw, n)) { cx_write(NEG, s, n); die("cannot write", NEG); }
+    bad = sequence(0, got, sizeof got);
+    if (cx_write(NEG, s, n)) die("cannot restore", NEG);
+    free(sw); free(s);
+    if (bad) return 1;
+    baseline(); old = lookup("parse2");
+    if (old && !strcmp(got, old)) { printf("fresh-order negative: swap NOT detected\n"); return 1; }
+    printf("fresh-order negative: swap detected (red as expected), manifest restored\n"); return 0;
+}
+
+static int cmpk(const void *a, const void *b) { return strcmp(bk[*(const int *)a], bk[*(const int *)b]); }
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash, k[128], got[128]; const char *tmp = getenv("TMPDIR"), *old;
+    int m, write = 0, neg = 0, i, rc;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/..", here); if (!realpath(t, ROOT)) die("cannot resolve the repository root", t); }
+    snprintf(TSV, sizeof TSV, "%s/tests/freshorder.tsv", ROOT);
+    snprintf(NEG, sizeof NEG, "%s/exec/parse2/scope-manifest.tsv", ROOT);
+    for (i = 1; i < argc; i++) { if (!strcmp(argv[i], "--write")) write = 1; if (!strcmp(argv[i], "--negative")) neg = 1; }
+    if (!neg && (argc < 2 || !argv[1][0] || argv[1][1] || argv[1][0] < '0' || argv[1][0] > '8'))
+        die("usage: freshordercheck.cx MODE [--write] | --negative  (MODE 0-8)", 0);
+    if (chdir(ROOT)) die("cannot enter", ROOT);   /* seed-gen reads exec/... relative to the root */
+    if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(TMP, sizeof TMP, "%s/freshorder-XXXXXX", tmp);
+    if (!mkdtemp(TMP)) { TMP[0] = 0; die("mkdtemp failed", 0); }
+    snprintf(GEN, sizeof GEN, "%s/seed-gen", TMP); snprintf(LOG, sizeof LOG, "%s/log.tsv", TMP);
+    if (neg) { rc = negative(); fflush(stdout); cleanup(); return rc; }
+    m = argv[1][0] - '0';
+    key(m, k, sizeof k);
+    build();
+    if (sequence(m, got, sizeof got)) { fflush(stdout); cleanup(); return 1; }
+    baseline();
+    old = lookup(k);
+    if (write) {
+        int order[MAXROW]; FILE *f; char nk[128], *nv = got;
+        if (!old) { if (nb == MAXROW) die("too many rows", 0); snprintf(nk, sizeof nk, "%s", k); bk[nb] = nk; bv[nb] = nv; nb++; }
+        else for (i = 0; i < nb; i++) if (!strcmp(bk[i], k)) bv[i] = nv;
+        for (i = 0; i < nb; i++) order[i] = i;
+        qsort(order, nb, sizeof *order, cmpk);
+        f = fopen(TSV, "wb"); if (!f) die("cannot write", TSV);
+        fputs("# tests/freshordercheck.cx --write: sha256 and row count of the fresh-label log (n, owner, kind) of seed/gen.c"
+              " built with tests/freshorderhook.h\n", f);
+        for (i = 0; i < nb; i++) fprintf(f, "%s\t%s\n", bk[order[i]], bv[order[i]]);
+        if (fclose(f)) die("cannot write", TSV);
+        printf("fresh-order: %s written %s\n", k, got); fflush(stdout); cleanup(); return 0;
+    }
+    if (!old || strcmp(old, got)) { printf("fresh-order: %s DIFF %s -> %s\n", k, old ? old : "None", got); fflush(stdout); cleanup(); return 1; }
+    printf("fresh-order: %s ok %s\n", k, got); fflush(stdout); cleanup(); return 0;
+}

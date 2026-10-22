@@ -2,65 +2,320 @@
 /* tdescprobe.cx -- the "declarator loses a level / a dimension" bug class as an enumerated gate (refactor R3, research/c43-cx-paradigm-experiments.md).
    Every derivation of {P, A3, F(int)} of depth 1..3 over int is a canonical type descriptor (TDESC, e.g. P.A3.int for
    int (*x)[3]); for each valid one and each of eight contexts (x, *x, **x, ***x, x[0], x[0][0], (*x)[0], *x[0]) whose type
-   is complete, the size follows from the descriptor alone -- two pure functions, sz() and ap() below, nothing per path.
-   usage: sh ./unisacc.com -run tests/tdescprobe.cx -- --oracle CC WORK          the model equals CC on all probes (one program)
+   is complete, the size follows from the descriptor alone, nothing per path.
+   The derivation runs through flownet (plans/m4-flownet-cx-module.md W3: this file is flownet's second consumer, beside
+   the ujs adapter), and this file holds none of its knowledge (W3 fix 3): the descriptor algebra is flownet's tables
+   flownet/tdesc (contract.tsv and the gold of three finite nets -- adj: may this constructor hold that one; ap: apply *
+   or [ to the type at a position: the next position, the same, or not C; sz: a constructor's size from the size of
+   what it holds), flownet constructs the integer nets from them (fn_construct) and every validity, context step and
+   size below is asked of them.  This file only spells the declarators and contexts, asks, writes the answers as rows,
+   and judges.  The flows write one row per declarator (ok or bad) and one per context of a valid one (a size, inc for
+   incomplete, none for not C), with the run's books pinned (fn_expect, BOOKS: adj 77, ap 283, sz 326 asks in their
+   phases).  flownet's emit hook is this file's verdict path: it turns the rows into the declarator, probe and unsized
+   tables -- they have no other source -- and judges them against the mode's reference, taken before the run and
+   independent of it: --oracle, the system cc on every declarator and every context of every declarator cc accepts
+   (accepted or not, sizeof accepted or not, and the size; eight items to a cc run, each error attributed to its item);
+   --check, the model columns of BASELINE.  Every answer is used, up to that verdict: under FLOWNET_SWEEP=all
+   (tests/flownetw3.cx flow) flownet perturbs one answer at a time -- every key of adj, ap and sz, every other class --
+   and each perturbed run must be refused by name, by flownet or by this emit hook; a copy that re-derives an answer
+   in its flows or fills a table from elsewhere inside the hook is named key by key.  (Code that rewrites the tables
+   after the hook returns is beyond any in-process check; the --oracle verdict is computed inside the hook, and the
+   --check verdicts run on tables the hook has judged equal to the baseline's model columns.)
+   flownet is reached by `#pragma unisa use flownet.api` through the module links tests/flownet/*.cx -> ../../flownet/*.cx
+   (a module resolves beside its user only); its derived interface declares every fn_ call here.
+   usage: sh ./unisacc.com -run tests/tdescprobe.cx -- --oracle CC WORK          the model equals CC on every declarator and context
           sh ./unisacc.com -run tests/tdescprobe.cx -- --check COMPILER BASELINE WORK K/N   shard K of N against the baseline
           sh ./unisacc.com -run tests/tdescprobe.cx -- --baseline COMPILER WORK K/N        print this shard's verdicts
    A verdict is OK (the compiler's -run prints the model size), REFUSE (it refuses the probe), or WRONG (it prints another
    size: silent wrong code).  --check fails on any verdict that differs from BASELINE, in either direction: a new WRONG or a
    lost OK is red, and so is an improvement until the baseline records it (as chain.sh's "revived").  The measure of the
    refactor is OK rising and WRONG reaching zero by making the descriptor the only source of these sizes -- not by patches. */
-#include <cx.h>
 #include <fcntl.h>
 
-static const char *OPS[3] = { "P", "A3", "F(int)" };
-static const char *CTX[] = { "x", "*x", "**x", "***x", "x[0]", "x[0][0]", "(*x)[0]", "*x[0]", 0 };
+#pragma unisa use flownet.api
 
-static int sz(const int *o, int n, int i) {      /* size of the type o[i..n) then int; -1 = incomplete (a function) */
-    if (i == n) return 4;
-    if (o[i] == 0) return 8;
-    if (o[i] == 2) return -1;
-    { int e = sz(o, n, i + 1); return e < 0 ? -1 : 3 * e; }
-}
-static int valid(const int *o, int n) {          /* C: no arrays of functions, no functions returning arrays or functions */
-    int i; for (i = 0; i + 1 < n; i++) { if (o[i] == 2 && o[i + 1] != 0) return 0; if (o[i] == 1 && o[i + 1] == 2) return 0; } return 1;
-}
-static int ap(const int *o, int n, int i, char c) {   /* apply '*' or '[' to the type at o[i]; the new start, or -1 */
-    if (i == n) return -1;                         /* int: neither */
-    if (o[i] == 2) return c == '*' ? i : -1;       /* *f is f; f[0] is not C */
-    if (o[i] == 0 && i + 1 < n && o[i + 1] == 2 && c == '[') return -1;   /* arithmetic on a function pointer */
-    return i + 1;
-}
+static const char *OPS[3] = { "P", "A3", "F" };     /* the constructors, as net values (F is F(int)) */
+static const char *CTX[] = { "x", "*x", "**x", "***x", "x[0]", "x[0][0]", "(*x)[0]", "*x[0]", 0 };
+enum { NCTX = 8 };
+static const char *TABLES = "flownet/tdesc";   /* the TDESC algebra: flownet's tables (contract + gold of adj, ap, sz) */
+static const char *BOOKS =           /* the run's exact books: every validity, context step and size asked of a net */
+    "declare\tadj\t77\n"
+    "context\tap\t283\n"
+    "size\tsz\t326\n";
+static int is(const char *a, const char *b) { return !strcmp(a, b); }
 
 #define MAXP 128
-typedef struct { char decl[64]; const char *ctx; int size; } Probe;
+#define MAXD 64
+#define MAXU 256
+enum { DECLMAX = 64 };               /* a constant, not sizeof P[0].decl: m9 refuses sizeof of a member of a subscripted array */
+typedef struct { char decl[DECLMAX]; const char *ctx; int size; } Probe;
 static Probe P[MAXP]; static int np;
+typedef struct { char decl[DECLMAX]; int valid; } Decl;                 /* every declarator: C or not (adj) */
+static Decl D[MAXD]; static int nd;
+typedef struct { char decl[DECLMAX]; const char *ctx; int none; } Unsized;   /* a context with no size: inc or none */
+static Unsized U[MAXU]; static int nu;
 
-static void enumerate(void) {
+/* declarator K of depth N: the constructors O[0..N-1] (outermost first) and its spelling DC (64 bytes) */
+static void spell(int n, int k, int *o, char *dc) {
+    char t[64]; int i, v = k;
+    for (i = 0; i < n; i++) { o[i] = v % 3; v /= 3; }
+    strcpy(dc, "x");
+    for (i = 0; i < n; i++) {
+        if (o[i] == 0) snprintf(t, 64, "*%s", dc);
+        else if (dc[0] == '*') snprintf(t, 64, "(%s)%s", dc, o[i] == 1 ? "[3]" : "(int)");
+        else snprintf(t, 64, "%s%s", dc, o[i] == 1 ? "[3]" : "(int)");
+        strcpy(dc, t);
+    }
+}
+static int nkeys(int n) { return n == 1 ? 3 : n == 2 ? 9 : 27; }
+
+/* ---------- the flows: every declarator of depth 1..3, every context; one output row per declarator and per context ---------- */
+/* the row, through flownet's output; nonzero when it does not fit or flownet refuses it */
+static int row(const char *f, const char *a, int c, const char *v) {
+    char r[192]; int m = c < 0 ? snprintf(r, sizeof r, f, a, v) : snprintf(r, sizeof r, f, a, c, v);
+    return m < 0 || m >= (int)sizeof r || fn_out(r, m);
+}
+/* the descriptor at position S of the constructors O[0..N-1] over int, by its first two constructors ("int" past them) */
+static const char *at(const int *o, int n, int s, char *buf) {   /* buf: 16 bytes, the longest is "A3.A3" */
+    if (s >= n) return "int";
+    snprintf(buf, 16, "%s.%s", OPS[o[s]], s + 1 < n ? OPS[o[s + 1]] : "int");
+    return buf;
+}
+static int derive(void *unused) {
     int n, k, o[3];
-    for (n = 1; n <= 3; n++) for (k = 0; k < (n == 1 ? 3 : n == 2 ? 9 : 27); k++) {
-        char dc[64], t[64]; int i, c, v = k;
-        for (i = 0; i < n; i++) { o[i] = v % 3; v /= 3; }
-        strcpy(dc, "x");
-        for (i = 0; i < n; i++) {
-            if (o[i] == 0) snprintf(t, 64, "*%s", dc);
-            else if (dc[0] == '*') snprintf(t, 64, "(%s)%s", dc, o[i] == 1 ? "[3]" : "(int)");
-            else snprintf(t, 64, "%s%s", dc, o[i] == 1 ? "[3]" : "(int)");
-            strcpy(dc, t);
+    (void)unused;
+    for (n = 1; n <= 3; n++) for (k = 0; k < nkeys(n); k++) {
+        char dc[64]; int i, c, valid = 1;
+        spell(n, k, o, dc);
+        if (fn_phase("declare")) return 1;
+        for (i = 0; i < n && valid; i++) {
+            const char *r = fn_ask2("adj", OPS[o[i]], i + 1 < n ? OPS[o[i + 1]] : "int");
+            if (!r) return 1;
+            valid = is(r, "ok");
         }
-        if (!valid(o, n)) continue;
+        if (row("decl\t%s\t%s\n", dc, -1, valid ? "ok" : "bad")) return 1;
+        if (!valid) continue;
         for (c = 0; CTX[c]; c++) {
-            const char *q = CTX[c]; int s = 0, j, ok = 1, size; char ops[4]; int no = 0, nst = 0;
+            const char *q = CTX[c], *size = 0; int s = 0, j; char ops[4], pos[16], key[16]; int no = 0, nst = 0;
             for (j = 0; q[j] == '*'; j++) nst++;
             if (q[j] == '(') { ops[no++] = '*'; ops[no++] = '['; }            /* (*x)[0] */
             else { const char *b = q + j + 1; while ((b = strstr(b, "[0]")) != 0) { ops[no++] = '['; b += 3; } for (j = 0; j < nst; j++) ops[no++] = '*'; }
-            for (j = 0; j < no && ok; j++) { s = ap(o, n, s, ops[j]); if (s < 0) ok = 0; }
-            size = ok ? sz(o, n, s) : -1;
-            if (size < 0) continue;
-            if (np >= MAXP) { fprintf(stderr, "tdescprobe: too many probes\n"); exit(2); }
-            strcpy(P[np].decl, dc); P[np].ctx = q; P[np].size = size; np++;
+            if (fn_phase("context")) return 1;
+            for (j = 0; j < no && !size; j++) {
+                const char *r = fn_ask2("ap", at(o, n, s, pos), ops[j] == '*' ? "deref" : "index");
+                if (!r) return 1;
+                if (is(r, "none")) size = r; else if (is(r, "next")) s++; else if (!is(r, "same")) return 1;
+            }
+            if (!size) {                                                     /* the size, inside out: int, then each constructor */
+                if (fn_phase("size") || !(size = fn_ask1("sz", "int"))) return 1;
+                for (j = n - 1; j >= s; j--) {
+                    snprintf(key, sizeof key, "%s:%s", OPS[o[j]], size);
+                    if (!(size = fn_ask1("sz", key))) return 1;
+                }
+            }
+            if (row("ctx\t%s\t%d\t%s\n", dc, c, size)) return 1;
         }
     }
+    return 0;
+}
+
+/* ---------- the verdict: what the emit hook judges the tables by ---------- */
+static char *jlog; static size_t jlen, jcap;      /* the judge's lines for the last emit */
+static int jbad, jbad_sized, jbad_unsized;         /* its mismatches: all, those of a sized context, the rest */
+static void jsay(const char *f, ...) {
+    va_list ap; char *t; int m;
+    for (;;) {                       /* into the log's free space, grown and retried once it does not fit (the m9 libc's
+                                        vsnprintf hangs when asked to measure with a null buffer) */
+        if (jcap - jlen < 256) { jcap = jcap ? jcap * 2 : 4096; if (!(t = realloc(jlog, jcap))) exit(2); jlog = t; }
+        va_start(ap, f); m = vsnprintf(jlog + jlen, jcap - jlen, f, ap); va_end(ap);
+        if (m < 0) { jlog[jlen] = 0; return; }
+        if ((size_t)m < jcap - jlen) break;
+        jcap = (jlen + (size_t)m + 1) * 2; if (!(t = realloc(jlog, jcap))) exit(2); jlog = t;
+    }
+    jlen += (size_t)m;
+}
+static int (*judge)(void);                         /* the mode's judge, or 0 (--baseline: no reference) */
+
+/* --oracle: the system cc on every declarator, and on every context of every declarator it accepts */
+typedef struct { char decl[DECLMAX]; int valid; int v[NCTX]; } Truth;   /* v: a size, 0 incomplete, -1 not C */
+static Truth T[MAXD]; static int nt;
+static const char *CC, *WORK;
+
+/* the lines of CC's diagnostics on TEXT (one item per line of N, written to WORK/NAME.c, -std=c99 -pedantic-errors
+   -fsyntax-only) that carry an error: ERR[line] = 1 for line 1..N */
+static void cc_errors(const char *name, const char *text, int n, int *err) {
+    char src[4200], log[4200], *e, *p; size_t len; int i, rc;
+    snprintf(src, sizeof src, "%s/%s.c", WORK, name); snprintf(log, sizeof log, "%s/%s.err", WORK, name);
+    if (cx_write(src, text, strlen(text))) { fprintf(stderr, "tdescprobe: cannot write %s\n", src); exit(2); }
+    {   char *a[] = { (char *)CC, "-std=c99", "-pedantic-errors", "-fsyntax-only", src, 0 };
+        int saved, fd; fflush(stderr); saved = dup(2); fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (saved < 0 || fd < 0) { fprintf(stderr, "tdescprobe: cannot capture %s's diagnostics\n", CC); exit(2); }
+        dup2(fd, 2); close(fd);
+        rc = cx_runv_timeout(a, 20, 0, 0);
+        fflush(stderr); dup2(saved, 2); close(saved); }
+    for (i = 0; i <= n; i++) err[i] = 0;
+    if (!(e = cx_read(log, &len))) { fprintf(stderr, "tdescprobe: cannot read %s\n", log); exit(2); }
+    if (strstr(e, "too many errors")) { fprintf(stderr, "tdescprobe: %s stopped early on %s (too many errors)\n", CC, src); exit(2); }
+    for (p = e; *p; ) {                      /* "SRC:LINE:COL: error: ..." (gcc and clang) */
+        char *nl = strchr(p, '\n'); size_t k = strlen(src); int ln, col; char word[16];
+        if (!strncmp(p, src, k) && sscanf(p + k, ":%d:%d: %15s", &ln, &col, word) == 3 && ln >= 1 && ln <= n
+            && (!strncmp(word, "error", 5) || !strncmp(word, "fatal", 5))) err[ln] = 1;
+        if (!nl) break;
+        p = nl + 1;
+    }
+    {   int any = 0; for (i = 1; i <= n; i++) any |= err[i];
+        if ((rc != 0) != any) { fprintf(stderr, "tdescprobe: %s exited %d on %s but its errors name %s line\n", CC, rc, src, any ? "a" : "no"); exit(2); } }
+    free(e);
+}
+/* ITEM(i) for i < N, eight to a file (clang stops after 20 errors), each on its own line between "#define x xI" and
+   "#undef x" (a function declared at block scope has linkage: two items declaring x differently would conflict);
+   BAD[i] = 1 when cc errs on any of its three lines */
+static void cc_items(const char *name, int n, void (*item)(int, char *, int), int *bad) {
+    int lo, i, err[3 * 8 + 1];
+    for (lo = 0; lo < n; lo += 8) {
+        char text[8 * 320], tag[64]; size_t m = 0; int hi = lo + 8 < n ? lo + 8 : n;
+        for (i = lo; i < hi; i++) {
+            m += snprintf(text + m, sizeof text - m, "#define x x%d\n", i);
+            item(i, text + m, 256); m += strlen(text + m);
+            m += snprintf(text + m, sizeof text - m, "#undef x\n");
+        }
+        snprintf(tag, sizeof tag, "%s%d", name, lo / 8);
+        cc_errors(tag, text, 3 * (hi - lo), err);
+        for (i = lo; i < hi; i++) bad[i] = err[3 * (i - lo) + 1] | err[3 * (i - lo) + 2] | err[3 * (i - lo) + 3];   /* gcc may name x's
+                                                                                   spelling: the #define line of the item */
+    }
+}
+static int vi[MAXD * NCTX], vc[MAXD * NCTX], nv;     /* the (declarator, context) items of the valid declarators */
+static void item_decl(int i, char *t, int cap) { snprintf(t, cap, "void d%d(void) { int %s; }\n", i, T[i].decl); }
+static void item_sizeof(int i, char *t, int cap) { snprintf(t, cap, "void s%d(void) { int %s; (void)sizeof(%s); }\n", i, T[vi[i]].decl, CTX[vc[i]]); }
+static void item_expr(int i, char *t, int cap) { snprintf(t, cap, "void e%d(void) { int %s; (void)(%s); }\n", i, T[vi[i]].decl, CTX[vc[i]]); }
+static void cc_truth(void) {
+    static int bad[MAXD], bs[MAXD * NCTX], be[MAXD * NCTX];
+    int n, k, o[3], i, ns = 0;
+    nt = 0;
+    for (n = 1; n <= 3; n++) for (k = 0; k < nkeys(n); k++) spell(n, k, o, T[nt++].decl);
+    cc_items("decl", nt, item_decl, bad);
+    nv = 0;
+    for (i = 0; i < nt; i++) { T[i].valid = !bad[i]; if (T[i].valid) for (k = 0; k < NCTX; k++) { vi[nv] = i; vc[nv] = k; nv++; } }
+    cc_items("sizeof", nv, item_sizeof, bs);
+    cc_items("expr", nv, item_expr, be);
+    for (i = 0; i < nv; i++) {
+        if (!bs[i] && be[i]) { fprintf(stderr, "tdescprobe: %s accepts sizeof(%s) but not (%s) for int %s;\n", CC, CTX[vc[i]], CTX[vc[i]], T[vi[i]].decl); exit(2); }
+        T[vi[i]].v[vc[i]] = bs[i] ? (be[i] ? -1 : 0) : 1, ns += !bs[i];
+    }
+    {   /* the sizes: one program, as before */
+        char src[4200], bin[4200]; size_t cap = 65536, m = 0; char *text = malloc(cap), *out = 0, *p; size_t len = 0; int rc;
+        snprintf(src, sizeof src, "%s/oracle.c", WORK); snprintf(bin, sizeof bin, "%s/oracle", WORK);
+        m += snprintf(text + m, cap - m, "#include <stdio.h>\n");
+        for (i = 0; i < nv; i++) if (!bs[i]) m += snprintf(text + m, cap - m, "static void t%d(void) { int %s; printf(\"%%d\\n\", (int)sizeof(%s)); }\n", i, T[vi[i]].decl, CTX[vc[i]]);
+        m += snprintf(text + m, cap - m, "int main(void) {\n"); for (i = 0; i < nv; i++) if (!bs[i]) m += snprintf(text + m, cap - m, "  t%d();\n", i);
+        m += snprintf(text + m, cap - m, "  return 0;\n}\n");
+        if (cx_write(src, text, m)) exit(2);
+        {   char *a[] = { (char *)CC, "-std=c99", "-w", src, "-o", bin, 0 }; if (cx_runv_timeout(a, 55, 0, 0)) { printf("tdescprobe oracle: %s failed to compile\n", CC); exit(1); } }
+        {   char *a[] = { bin, 0 }; rc = cx_runv_timeout(a, 20, &out, &len); }
+        if (rc) { printf("tdescprobe oracle: program exited %d\n", rc); exit(1); }
+        for (p = out, i = 0; i < nv; i++) if (!bs[i]) {
+            int v; if (!p || sscanf(p, "%d", &v) != 1 || v <= 0) { printf("tdescprobe oracle: %s's program printed no size for int %s; sizeof(%s)\n", CC, T[vi[i]].decl, CTX[vc[i]]); exit(1); }
+            T[vi[i]].v[vc[i]] = v; p = strchr(p, '\n'); if (p) p++;
+        }
+        free(text); free(out);
+    }
+}
+static int ctx_index(const char *q) { int c; for (c = 0; c < NCTX; c++) if (CTX[c] == q) return c; return -1; }
+static int decl_index(const char *d) { int i; for (i = 0; i < nt; i++) if (is(T[i].decl, d)) return i; return -1; }
+static int judge_cc(void) {
+    static int model[MAXD][NCTX];                  /* the tables' verdict per (declarator, context): as Truth.v, -2 absent */
+    int i, c;
+    for (i = 0; i < nt; i++) for (c = 0; c < NCTX; c++) model[i][c] = -2;
+    if (nd != nt) { jsay("tdescprobe oracle: MISMATCH %d declarators derived, %d spelled for %s\n", nd, nt, CC); jbad++; }
+    for (i = 0; i < nd && i < nt; i++)
+        if (!is(D[i].decl, T[i].decl) || D[i].valid != T[i].valid) {
+            jsay("tdescprobe oracle: MISMATCH int %s; model %s, %s %s int %s;\n", D[i].decl, D[i].valid ? "C" : "not C", CC, T[i].valid ? "accepts" : "refuses", T[i].decl); jbad++;
+        }
+    for (i = 0; i < np; i++) {
+        int d = decl_index(P[i].decl), cx = ctx_index(P[i].ctx);
+        if (d < 0 || cx < 0 || model[d][cx] != -2) { jsay("tdescprobe oracle: MISMATCH int %s; sizeof(%s) model %d (no such context, or twice)\n", P[i].decl, P[i].ctx, P[i].size); jbad++; jbad_sized++; continue; }
+        model[d][cx] = P[i].size;
+    }
+    for (i = 0; i < nu; i++) {
+        int d = decl_index(U[i].decl), cx = ctx_index(U[i].ctx);
+        if (d < 0 || cx < 0 || model[d][cx] != -2) { jsay("tdescprobe oracle: MISMATCH int %s; (%s) model %s (no such context, or twice)\n", U[i].decl, U[i].ctx, U[i].none ? "not C" : "incomplete"); jbad++; jbad_unsized++; continue; }
+        model[d][cx] = U[i].none ? -1 : 0;
+    }
+    for (i = 0; i < nt; i++) for (c = 0; c < NCTX; c++) {
+        int m = model[i][c], t = T[i].valid ? T[i].v[c] : -2;
+        if (m == t) continue;
+        if (m == -2 && !T[i].valid) continue;      /* counted above: the declarator */
+        if (m > 0 || t > 0) { jsay("tdescprobe oracle: MISMATCH int %s; sizeof(%s) model %s%d, %s %d\n", T[i].decl, CTX[c], m > 0 ? "" : m == 0 ? "incomplete " : m == -1 ? "not C " : "absent ", m, CC, t); jbad_sized++; }
+        else { jsay("tdescprobe oracle: MISMATCH int %s; (%s) model %s, %s %s\n", T[i].decl, CTX[c], m == 0 ? "incomplete" : m == -1 ? "not C" : "absent", CC, t == 0 ? "incomplete" : t == -1 ? "not C" : "no such declarator"); jbad_unsized++; }
+        jbad++;
+    }
+    return jbad;
+}
+
+/* --check: the model columns (number, declarator, context, size) of BASELINE, row for row */
+static char *BASE;
+static int judge_base(void) {
+    int i, rows = 0; const char *q = BASE;
+    while (*q) { if (*q != '#' && *q != '\n') rows++; q = strchr(q, '\n'); if (!q) break; q++; }
+    if (rows != np) { jsay("tdescprobe: the baseline has %d probe rows, the derivation %d\n", rows, np); jbad++; }
+    for (i = 0; i < np; i++) {
+        char key[160]; snprintf(key, sizeof key, "%03d\tint %s\t%s\t%d\t", i + 1, P[i].decl, P[i].ctx, P[i].size);
+        if (!strstr(BASE, key)) { jsay("  DERIVED %03d int %s; sizeof(%s) = %d: not a baseline row\n", i + 1, P[i].decl, P[i].ctx, P[i].size); jbad++; }
+    }
+    return jbad;
+}
+
+/* ---------- the emit hook: the rows become the declarator, probe and unsized tables, then the mode's judge ---------- */
+static int bad_row(const char *why) { jsay("tdescprobe: bad row from the flows: %s\n", why); return ++jbad; }
+static int collect(void *unused, const char *bytes, long len) {
+    const char *p = bytes, *end = bytes + len;
+    (void)unused;
+    nd = np = nu = 0; jlen = 0; if (jlog) jlog[0] = 0; jbad = jbad_sized = jbad_unsized = 0;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p)), *t1, *t2, *t3; char verdict[16]; int c, vl;
+        if (!nl) return bad_row("no final newline");
+        t1 = memchr(p, '\t', (size_t)(nl - p));
+        t2 = t1 ? memchr(t1 + 1, '\t', (size_t)(nl - t1 - 1)) : 0;
+        if (!t1 || !t2 || t2 - t1 - 1 >= DECLMAX) return bad_row("want KIND, a declarator and more");
+        if (t1 - p == 4 && !memcmp(p, "decl", 4)) {
+            vl = (int)(nl - t2 - 1);
+            if (nd >= MAXD) return bad_row("too many declarators");
+            if (!(vl == 2 && !memcmp(t2 + 1, "ok", 2)) && !(vl == 3 && !memcmp(t2 + 1, "bad", 3))) return bad_row("a declarator is ok or bad");
+            memcpy(D[nd].decl, t1 + 1, (size_t)(t2 - t1 - 1)); D[nd].decl[t2 - t1 - 1] = 0;
+            D[nd].valid = vl == 2; nd++;
+        } else if (t1 - p == 3 && !memcmp(p, "ctx", 3)) {
+            t3 = memchr(t2 + 1, '\t', (size_t)(nl - t2 - 1));
+            if (!t3 || sscanf(t2 + 1, "%d", &c) != 1 || c < 0 || c >= NCTX) return bad_row("a context row is ctx, a declarator, 0..7 and a verdict");
+            vl = (int)(nl - t3 - 1);
+            if (vl < 1 || vl >= (int)sizeof verdict) return bad_row("verdict length");
+            memcpy(verdict, t3 + 1, (size_t)vl); verdict[vl] = 0;
+            if (is(verdict, "inc") || is(verdict, "none")) {
+                if (nu >= MAXU) return bad_row("too many unsized contexts");
+                memcpy(U[nu].decl, t1 + 1, (size_t)(t2 - t1 - 1)); U[nu].decl[t2 - t1 - 1] = 0;
+                U[nu].ctx = CTX[c]; U[nu].none = is(verdict, "none"); nu++;
+            } else {
+                int size; char *e;
+                size = (int)strtol(verdict, &e, 10);
+                if (*e || size <= 0) return bad_row("a size is a positive number, inc or none");
+                if (np >= MAXP) return bad_row("too many probes");
+                memcpy(P[np].decl, t1 + 1, (size_t)(t2 - t1 - 1)); P[np].decl[t2 - t1 - 1] = 0;
+                P[np].ctx = CTX[c]; P[np].size = size; np++;
+            }
+        } else return bad_row("unknown kind");
+        p = nl + 1;
+    }
+    return judge ? judge() : 0;
+}
+
+/* the derivation through flownet; 0, or 1 when the judge refused the tables (its lines printed), exit 2 otherwise */
+static int enumerate(void) {
+    if (fn_construct(TABLES) || fn_expect(BOOKS) || fn_run(derive, 0, collect, 0)) {
+        if (!strncmp(fn_error(), "run: the emit hook refused (rc", 30)) { if (jlog) fputs(jlog, stdout); return 1; }   /* the judge, on the real run */
+        fprintf(stderr, "tdescprobe: flownet: %s\n", fn_error()); exit(2);
+    }
+    if (!np) { fprintf(stderr, "tdescprobe: flownet derived no probes\n"); exit(2); }
+    return 0;
 }
 
 static int shard(const char *spec, int *lo, int *hi) {
@@ -86,24 +341,24 @@ static const char *verdict(const char *compiler, const char *work, int i) {
 
 int main(int argc, char **argv) {
     int i, lo, hi, bad = 0, ok = 0, ref = 0, wrong = 0;
-    enumerate();
-    if (argc == 4 && !strcmp(argv[1], "--oracle")) {        /* the model against a system C compiler, one program */
-        char src[4200], bin[4200]; size_t cap = 65536, m = 0; char *text = malloc(cap); char *out = 0; size_t len = 0; int rc;
-        mkdir(argv[3], 0755);
-        snprintf(src, sizeof src, "%s/oracle.c", argv[3]); snprintf(bin, sizeof bin, "%s/oracle", argv[3]);
-        m += snprintf(text + m, cap - m, "#include <stdio.h>\n");
-        for (i = 0; i < np; i++) m += snprintf(text + m, cap - m, "static void t%d(void) { int %s; printf(\"%%d\\n\", (int)sizeof(%s)); }\n", i, P[i].decl, P[i].ctx);
-        m += snprintf(text + m, cap - m, "int main(void) {\n"); for (i = 0; i < np; i++) m += snprintf(text + m, cap - m, "  t%d();\n", i);
-        m += snprintf(text + m, cap - m, "  return 0;\n}\n");
-        if (cx_write(src, text, m)) return 2;
-        {   char *a[] = { argv[2], "-std=c99", "-w", src, "-o", bin, 0 }; if (cx_runv_timeout(a, 55, 0, 0)) { printf("tdescprobe oracle: %s failed to compile\n", argv[2]); return 1; } }
-        {   char *a[] = { bin, 0 }; rc = cx_runv_timeout(a, 20, &out, &len); }
-        if (rc) { printf("tdescprobe oracle: program exited %d\n", rc); return 1; }
-        {   char *p = out; for (i = 0; i < np; i++) { int v; if (!p || sscanf(p, "%d", &v) != 1 || v != P[i].size) { printf("tdescprobe oracle: MISMATCH int %s; sizeof(%s) model %d\n", P[i].decl, P[i].ctx, P[i].size); bad++; } p = p ? strchr(p, '\n') : 0; if (p) p++; } }
-        printf("tdescprobe oracle: %d probes, %d mismatches against %s\n", np, bad, argv[2]); free(text); free(out);
-        return bad ? 1 : 0;
+    if (argc == 4 && !strcmp(argv[1], "--oracle")) {        /* the model against a system C compiler */
+        CC = argv[2]; WORK = argv[3]; mkdir(WORK, 0755);
+        cc_truth(); judge = judge_cc;
+        if (enumerate()) {
+            printf("tdescprobe oracle: %d probes, %d mismatches against %s\n", np, jbad_sized, CC);
+            printf("tdescprobe oracle: %d declarators, %d contexts with no size: %d mismatches against %s\n", nd, nu, jbad - jbad_sized, CC);
+            return 1;
+        }
+        {   int nvalid = 0, ninc = 0;
+            for (i = 0; i < nd; i++) nvalid += D[i].valid;
+            for (i = 0; i < nu; i++) ninc += !U[i].none;
+            printf("tdescprobe oracle: %d probes, %d mismatches against %s\n", np, jbad_sized, CC);
+            printf("tdescprobe oracle: %d declarators (%d valid), %d contexts with no size (%d incomplete, %d not C), %d mismatches against %s\n",
+                   nd, nvalid, nu, ninc, nu - ninc, jbad - jbad_sized, CC); }
+        return 0;
     }
     if (argc == 5 && !strcmp(argv[1], "--baseline")) {
+        enumerate();
         if (shard(argv[4], &lo, &hi)) return 2;
         mkdir(argv[3], 0755);
         for (i = lo; i < hi; i++) printf("%03d\tint %s\t%s\t%d\t%s\n", i + 1, P[i].decl, P[i].ctx, P[i].size, verdict(argv[2], argv[3], i));
@@ -112,6 +367,8 @@ int main(int argc, char **argv) {
     if (argc == 6 && !strcmp(argv[1], "--check")) {
         size_t n; char *base = cx_read(argv[3], &n);
         if (!base) { printf("tdescprobe: cannot read %s\n", argv[3]); return 2; }
+        BASE = base; judge = judge_base;               /* the derivation must give exactly the baseline's probes, not a subset */
+        if (enumerate()) { printf("tdescprobe: the derived probes differ from %s\n", argv[3]); free(base); return 1; }
         if (shard(argv[5], &lo, &hi)) return 2;
         mkdir(argv[4], 0755);
         for (i = lo; i < hi; i++) {

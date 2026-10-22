@@ -1,5 +1,6 @@
-/* flownet/contract.cx -- the contract layer of flownet (plans/m4-flownet-cx-module.md W2).
-   DIR/contract.tsv says which nets exist and what each one is for; it is data, so another consumer brings its own:
+/* flownet/contract.cx -- the contract layer of flownet (plans/m4-flownet-cx-module.md W2, a module since W3).
+   The contract says which nets exist and what each one is for; it is data, so another consumer brings its own,
+   as DIR/contract.tsv (fnc_load) or as the same rows in a string (fnc_load_text, W3):
      net       NAME...                  every net, in order (each has NAME.gold.tsv + NAME.net.tsv beside the contract)
      flow      FLOW NET...              a flow and the nets that decide it (wired: they decide output or refusal)
      reserved  NET...                   built and accepted, never on a decision path
@@ -8,28 +9,32 @@
                                         the consumer must write different output per form, not only accept/refuse
      phase     NAME...                  the bookkeeping phases a run may book its asks to, in order
    check_contract: every net falls in exactly one of wired / reserved / observed; a choice names a net and at least
-   two distinct forms.  Errors: fnx_fail("PATH[:LINE]: reason").  Internal unit; the public face is flownet/api.cx. */
+   two distinct forms.  Errors: fnx_fail("PATH[:LINE]: reason").  Internal module; the public face is flownet/api.cx.
+   Names are kept whole (copied at their length); the hard limits are the counts FNC_MAX / FNC_MAXCH and the fields
+   per row, each refused by name at PATH:LINE. */
 
-void fnx_fail(const char *msg);
+#pragma unisa use fnx
 
-#define FNC_MAX 32
-#define FNC_NAME 64
+#define FNC_MAX 32                    /* nets, flows, phases (flownet/flow.cx books FNF_MAXP x FNF_MAXN = this x this) */
 #define FNC_MAXCH 32
 
-static char cnet[FNC_MAX][FNC_NAME]; static int ncnet;
-static char cflow[FNC_MAX][FNC_NAME]; static int ncflow;
+static char *cnet[FNC_MAX]; static int ncnet;
+static char *cflow[FNC_MAX]; static int ncflow;
 static int crole[FNC_MAX];            /* per net: 0 unassigned, 1 wired, 2 reserved, 3 observed (more = overlap) */
 static int cnroles[FNC_MAX];
 static int cflowof[FNC_MAX];          /* per net: the flow that wires it, -1 */
 static int crank[FNC_MAX], nrank;     /* per net: the order in which a flow/reserved/observed row named it */
-static char cphase[FNC_MAX][FNC_NAME]; static int ncphase;
-static char chnet[FNC_MAXCH][FNC_NAME], chin[FNC_MAXCH][FNC_NAME], chforms[FNC_MAXCH][512]; static int nch;
+static char *cphase[FNC_MAX]; static int ncphase;
+static char *chnet[FNC_MAXCH], *chin[FNC_MAXCH], *chforms[FNC_MAXCH]; static int nch;
 
 static void cfail(const char *path, int line, const char *why) {
-    char m[512];
-    if (line > 0) snprintf(m, sizeof m, "%s:%d: %s", path, line, why);
-    else snprintf(m, sizeof m, "%s: %s", path, why);
-    fnx_fail(m);
+    if (line > 0) fnx_failf("%s:%d: %s", path, line, why);
+    else fnx_failf("%s: %s", path, why);
+}
+static char *cdup(const char *s) {          /* a whole copy; 0 only when out of memory */
+    size_t k = strlen(s); char *d = malloc(k + 1);
+    if (d) memcpy(d, s, k + 1);
+    return d;
 }
 
 static int cindex(const char *s) {
@@ -38,24 +43,41 @@ static int cindex(const char *s) {
     return -1;
 }
 
-static int okname(const char *s) { return *s && strlen(s) < FNC_NAME && !strchr(s, '/') && !strchr(s, ' '); }
+static int okname(const char *s) { return *s && !strchr(s, '/') && !strchr(s, ' '); }
+
+/* the tables are loaded once per fn_open and small: nothing of an earlier load is freed */
+static int parse(const char *path, char *b);
 
 int fnc_load(const char *dir) {
-    char path[1024], *b, *p; size_t n = 0; struct stat st; int line = 0, i, k;
-    ncnet = ncflow = ncphase = nch = nrank = 0;
-    for (i = 0; i < FNC_MAX; i++) { crole[i] = 0; cnroles[i] = 0; cflowof[i] = -1; }
-    snprintf(path, sizeof path, "%s/contract.tsv", dir);
+    char *path, *b; size_t n = 0; struct stat st;
+    if (!(path = fnx_fmt("%s/contract.tsv", dir))) { fnx_fail("flownet: out of memory"); return -1; }
     if (stat(path, &st) != 0) { cfail(path, 0, "cannot read (missing?)"); return -1; }
     if (!S_ISREG(st.st_mode)) { cfail(path, 0, "not a regular file"); return -1; }
     if (!(b = cx_read(path, &n))) { cfail(path, 0, "cannot read"); return -1; }
     if (memchr(b, 0, n)) { free(b); cfail(path, 0, "NUL byte in table"); return -1; }
     if (!n || b[n - 1] != '\n') { free(b); cfail(path, 0, "empty, or no final newline"); return -1; }
+    return parse(path, b);
+}
+
+/* the contract rows in TEXT (copied; the caller keeps it); NAME stands for the path in the failures */
+int fnc_load_text(const char *name, const char *text) {
+    size_t n = strlen(text); char *b;
+    if (!n || text[n - 1] != '\n') { cfail(name, 0, "empty, or no final newline"); return -1; }
+    if (!(b = fnx_dup(text))) { cfail(name, 0, "out of memory"); return -1; }
+    return parse(name, b);
+}
+
+/* parse the contract rows in B (taken over and freed); PATH names it in the failures */
+static int parse(const char *path, char *b) {
+    char *p; int line = 0, i, k;
+    ncnet = ncflow = ncphase = nch = nrank = 0;
+    for (i = 0; i < FNC_MAX; i++) { crole[i] = 0; cnroles[i] = 0; cflowof[i] = -1; }
     for (p = b; *p; ) {
         char *nl = strchr(p, '\n'), *f[FNC_MAX + 4], *s; int k2 = 0;
         line++; *nl = 0;
         if (!*p || *p == '#') { p = nl + 1; continue; }
         for (s = p;;) {
-            if (k2 == FNC_MAX + 4) { free(b); cfail(path, line, "too many fields"); return -1; }
+            if (k2 == FNC_MAX + 4) { free(b); fnx_failf("%s:%d: more than %d tab-separated fields (the limit)", path, line, FNC_MAX + 4); return -1; }
             f[k2++] = s;
             if (!(s = strchr(s, '\t'))) break;
             *s++ = 0;
@@ -64,9 +86,9 @@ int fnc_load(const char *dir) {
         if (!strcmp(f[0], "net")) {
             if (ncnet) { free(b); cfail(path, line, "a second net row"); return -1; }
             for (k = 1; k < k2; k++) {
-                if (k - 1 == FNC_MAX) { free(b); cfail(path, line, "too many nets"); return -1; }
+                if (k - 1 == FNC_MAX) { free(b); fnx_failf("%s:%d: more than %d nets (the limit)", path, line, FNC_MAX); return -1; }
                 for (i = 0; i < ncnet; i++) if (!strcmp(cnet[i], f[k])) { free(b); cfail(path, line, "net named twice"); return -1; }
-                strcpy(cnet[ncnet++], f[k]);
+                if (!(cnet[ncnet++] = cdup(f[k]))) { free(b); cfail(path, line, "out of memory"); return -1; }
             }
             if (!ncnet) { free(b); cfail(path, line, "no nets"); return -1; }
         } else if (!strcmp(f[0], "flow") || !strcmp(f[0], "reserved") || !strcmp(f[0], "observed")) {
@@ -74,9 +96,9 @@ int fnc_load(const char *dir) {
             if (!ncnet) { free(b); cfail(path, line, "the net row must come first"); return -1; }
             if (role == 1) {
                 if (k2 < 3) { free(b); cfail(path, line, "a flow needs a name and its nets"); return -1; }
-                if (ncflow == FNC_MAX) { free(b); cfail(path, line, "too many flows"); return -1; }
+                if (ncflow == FNC_MAX) { free(b); fnx_failf("%s:%d: more than %d flows (the limit)", path, line, FNC_MAX); return -1; }
                 for (i = 0; i < ncflow; i++) if (!strcmp(cflow[i], f[1])) { free(b); cfail(path, line, "flow named twice"); return -1; }
-                strcpy(cflow[ncflow++], f[1]);
+                if (!(cflow[ncflow++] = cdup(f[1]))) { free(b); cfail(path, line, "out of memory"); return -1; }
                 from = 2;
             }
             for (k = from; k < k2; k++) {
@@ -85,25 +107,26 @@ int fnc_load(const char *dir) {
                 if (role == 1) cflowof[i] = ncflow - 1;
             }
         } else if (!strcmp(f[0], "choice")) {
-            char *forms = chforms[nch];
+            char *forms; size_t L = 0;
             if (k2 < 5) { free(b); cfail(path, line, "a choice needs a net, an input and at least two forms"); return -1; }
-            if (nch == FNC_MAXCH) { free(b); cfail(path, line, "too many choices"); return -1; }
+            if (nch == FNC_MAXCH) { free(b); fnx_failf("%s:%d: more than %d choices (the limit)", path, line, FNC_MAXCH); return -1; }
             if (cindex(f[1]) < 0) { free(b); cfail(path, line, "choice names an unknown net"); return -1; }
             for (k = 1; k < k2; k++) if (!okname(f[k])) { free(b); cfail(path, line, "empty or bad name"); return -1; }
             for (k = 3; k < k2; k++)
                 for (i = 3; i < k; i++) if (!strcmp(f[i], f[k])) { free(b); cfail(path, line, "choice collapsed: a form named twice"); return -1; }
-            strcpy(chnet[nch], f[1]); strcpy(chin[nch], f[2]);
-            forms[0] = 0;
-            for (k = 3; k < k2; k++) {
-                if (strlen(forms) + strlen(f[k]) + 2 > 512) { free(b); cfail(path, line, "choice too long"); return -1; }
-                if (k > 3) strcat(forms, " ");
-                strcat(forms, f[k]);
+            for (k = 3; k < k2; k++) L += strlen(f[k]) + 1;           /* the forms joined by spaces, exactly */
+            if (!(chnet[nch] = cdup(f[1])) || !(chin[nch] = cdup(f[2])) || !(forms = malloc(L))) { free(b); cfail(path, line, "out of memory"); return -1; }
+            for (L = 0, k = 3; k < k2; k++) {
+                size_t q = strlen(f[k]);
+                if (k > 3) forms[L++] = ' ';
+                memcpy(forms + L, f[k], q); L += q;
             }
-            nch++;
+            forms[L] = 0;
+            chforms[nch++] = forms;
         } else if (!strcmp(f[0], "phase")) {
             for (k = 1; k < k2; k++) {
-                if (ncphase == FNC_MAX) { free(b); cfail(path, line, "too many phases"); return -1; }
-                strcpy(cphase[ncphase++], f[k]);
+                if (ncphase == FNC_MAX) { free(b); fnx_failf("%s:%d: more than %d phases (the limit)", path, line, FNC_MAX); return -1; }
+                if (!(cphase[ncphase++] = cdup(f[k]))) { free(b); cfail(path, line, "out of memory"); return -1; }
             }
         } else { free(b); cfail(path, line, "unknown row kind"); return -1; }
         p = nl + 1;
@@ -112,13 +135,11 @@ int fnc_load(const char *dir) {
     /* check_contract: an exact partition of the nets into wired / reserved / observed */
     if (!ncnet) { cfail(path, 0, "no net row"); return -1; }
     if (!ncphase) { cfail(path, 0, "no phase row"); return -1; }
-    for (i = 0; i < ncnet; i++) {
-        char m[160];
+    for (i = 0; i < ncnet; i++)
         if (cnroles[i] != 1) {
-            snprintf(m, sizeof m, "nets not partitioned exactly: %s is in %d of wired/reserved/observed", cnet[i], cnroles[i]);
-            cfail(path, 0, m); return -1;
+            fnx_failf("%s: nets not partitioned exactly: %s is in %d of wired/reserved/observed", path, cnet[i], cnroles[i]);
+            return -1;
         }
-    }
     return 0;
 }
 
@@ -131,18 +152,24 @@ const char *fnc_role(int i) {
     return crole[i] == 1 ? "wired" : crole[i] == 2 ? "reserved" : "observed";
 }
 const char *fnc_flowof(int i) { return i >= 0 && i < ncnet && cflowof[i] >= 0 ? cflow[cflowof[i]] : 0; }
-/* the nets of ROLE ("wired", "reserved", "observed") joined by commas, in the order the contract names them */
+/* the nets of ROLE ("wired", "reserved", "observed") joined by commas, in the order the contract names them, into
+   OUT (CAP bytes with the NUL).  Returns the count; -1 with a named failure for an unknown role, or when CAP is short
+   (then OUT is the empty string, never a cut list, and the failure says how many bytes the list needs). */
 int fnc_list(const char *role, char *out, int cap) {
     int r = !strcmp(role, "wired") ? 1 : !strcmp(role, "reserved") ? 2 : !strcmp(role, "observed") ? 3 : 0, k, i, n = 0;
-    out[0] = 0;
-    if (!r) return -1;
+    size_t need = 1, at = 0;
+    if (cap > 0) out[0] = 0;
+    if (!r) { fnx_failf("list: %s is not wired, reserved or observed", role); return -1; }
+    for (i = 0; i < ncnet; i++) if (crole[i] == r) need += strlen(cnet[i]) + 1;
+    if (cap < 1 || need > (size_t)cap) { fnx_failf("list %s: needs %ld bytes, the buffer has %d", role, (long)need, cap); return -1; }
     for (k = 0; k < nrank; k++)
         for (i = 0; i < ncnet; i++)
             if (crole[i] == r && crank[i] == k) {
-                if ((int)(strlen(out) + strlen(cnet[i]) + 2) > cap) return -1;
-                if (n++) strcat(out, ",");
-                strcat(out, cnet[i]);
+                size_t q = strlen(cnet[i]);
+                if (n++) out[at++] = ',';
+                memcpy(out + at, cnet[i], q); at += q;
             }
+    out[at] = 0;
     return n;
 }
 int fnc_nflows(void) { return ncflow; }

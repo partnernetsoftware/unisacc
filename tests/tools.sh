@@ -41,15 +41,37 @@ tiny-aes|tiny-AES-c|aes.c test.c
 regex1|tiny-regex-c|re.c tests/test1.c
 regex2|tiny-regex-c|re.c tests/test2.c"
 
+# Staged entries: reference, build and run do not fit one queue window together (0.0.43
+# timeout debt, regex2 at load 8-16: cc reference run 15-20 s, Python build 21 s, run 39 s).
+# With TOOLS_STAGED=split a shard leaves them out and gate.sh runs each as three jobs,
+# tools-NAME-ref / -build / -run (--stage STEP NAME).  ref and build publish into
+# content-keyed directories (sources, this script, cc / compiler identity); run recomputes
+# both keys, checks every handed-off byte, and refuses a missing or altered handoff (rc 75).
+# Every staged entry must be in the baseline: any failure of one is a regression.
+STAGED="regex2"
+usage() { echo 'usage: tools.sh [--list | --staged | --stage ref|build|run NAME]' >&2; exit 2; }
+MODE=shard; STAGE=; SNAME=
+case $# in
+    0) ;;
+    1) case $1 in --list) MODE=list;; --staged) MODE=staged;; *) usage;; esac;;
+    3) [ "$1" = --stage ] || usage; MODE=stage; STAGE=$2; SNAME=$3
+       case $STAGE in ref|build|run) ;; *) usage;; esac
+       case " $STAGED " in *" $SNAME "*) ;; *) echo "tools: $SNAME is not a staged entry ($STAGED)" >&2; exit 2;; esac;;
+    *) usage;;
+esac
+if [ "$MODE" = staged ]; then printf '%s\n' $STAGED; exit 0; fi
+case ${TOOLS_STAGED:-} in ''|split) ;; *) echo 'TOOLS_STAGED must be empty or split' >&2; exit 2;; esac
 # Deterministic, disjoint entry shards. --list has no fixture/build side effects.
-[ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --list ]; } || { echo 'usage: tools.sh [--list]' >&2; exit 2; }
 SHARD=${SHARD:-1/1}; SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
 case "$SHARD" in */*) ;; *) echo 'SHARD needs k/n' >&2; exit 2;; esac
 case $SH_K:$SH_N in *[!0-9:]*|:*|*:) echo 'invalid SHARD' >&2; exit 2;; esac
 [ "$SH_K" -ge 1 ] && [ "$SH_K" -le "$SH_N" ] && [ "$SH_N" -le 11 ] || { echo 'SHARD must be k/n with 1<=k<=n<=11' >&2; exit 2; }
 SELECTED=$(printf '%s\n' "$ENTRIES" | awk -F'|' -v k="$SH_K" -v n="$SH_N" '((NR-1)%n)+1==k')
+# split: the staged entries of this shard run as their own three jobs (above), not here
+[ "${TOOLS_STAGED:-}" != split ] || SELECTED=$(printf '%s\n' "$SELECTED" | awk -F'|' -v s=" $STAGED " 'index(s, " " $1 " ")==0')
+[ "$MODE" != stage ] || SELECTED=$(printf '%s\n' "$ENTRIES" | awk -F'|' -v n="$SNAME" '$1==n')
 [ -n "$SELECTED" ] || { echo 'empty tools shard' >&2; exit 2; }
-if [ "$#" -eq 1 ]; then printf '%s\n' "$SELECTED" | cut -d'|' -f1; exit 0; fi
+if [ "$MODE" = list ]; then printf '%s\n' "$SELECTED" | cut -d'|' -f1; exit 0; fi
 . "$R/tests/lib.sh"
 T=$(scratch)
 printf '%s\n' "$SELECTED" | cut -d'|' -f1 | sort > "$T/selected"
@@ -93,6 +115,64 @@ compile_tool() {
     fi
 }
 echo "tools driver: ${TOOLS_UA:-python3 -m unisa compile}"
+if [ "$MODE" = stage ]; then
+    [ -s "$T/required" ] || { echo "tools: staged entry $SNAME is not in $BASE.list" >&2; exit 2; }
+    SHA="shasum -a 256"; ! command -v sha256sum >/dev/null || SHA=sha256sum   # a command: find -exec runs it too
+    sha() { $SHA "$@"; }
+    repo=$(echo "$SELECTED" | cut -d'|' -f2); rel=$(echo "$SELECTED" | cut -d'|' -f3)
+    dir=$CACHE/$repo; src=""; for f in $rel; do src="$src $dir/$f"; done
+    # identity of what the step consumes; the clone is already pinned and clean (above)
+    srcid=$({ echo "$SELECTED $HOST $(git -C "$dir" rev-parse HEAD)"; sha "$R/tests/tools.sh" $src | cut -c1-64; } | sha | cut -c1-64)
+    ccbin=$(command -v cc)
+    refid=$({ echo "$srcid"; echo "cc $ccbin $(cc --version 2>&1 | head -1)"; sha "$ccbin" | cut -c1-64; } | sha | cut -c1-64)
+    buildid=$({ echo "$srcid"
+        if [ -n "${TOOLS_UA:-}" ]; then echo "ua $(sha "$TOOLS_UA" | cut -c1-64)"
+        else echo "py $(python3 -V 2>&1)"
+             (cd "$R" && find unisa include weights -name __pycache__ -prune -o -type f -exec $SHA {} + | LC_ALL=C sort -k2)
+        fi; } | sha | cut -c1-64)
+    SB=${UNISACC_MODEL_CACHE:-${TMPDIR:-/tmp}/unisacc-model-cache}; mkdir -p "$SB"
+    REFD=$SB/tools-ref-$SNAME-$refid; BLDD=$SB/tools-build-$SNAME-$buildid
+    publish() {   # publish DEST ID FILE...: manifest, then one atomic rename into place
+        tmp=$1.tmp.$$; rm -rf "$tmp"; mkdir -p "$tmp"; d=$1 id=$2; shift 2
+        cp -p "$@" "$tmp/"; echo "$id" > "$tmp/key"
+        (cd "$tmp" && for f in "$@"; do sha "$(basename "$f")"; done; sha key) > "$tmp/ready.tmp"
+        mv "$tmp/ready.tmp" "$tmp/ready"; rm -rf "$d"; mv "$tmp" "$d"
+    }
+    need() {      # need DIR ID STEP: the handoff exists for exactly this content, byte for byte
+        [ -s "$1/ready" ] && [ "$(cat "$1/key" 2>/dev/null)" = "$2" ] ||
+            { echo "NEED_PREPARE tools $SNAME: no $3 handoff for this content ($1); run tools-$SNAME-$3 first" >&2; exit 75; }
+        (cd "$1" && sha -c ready >/dev/null 2>&1) ||
+            { echo "NEED_PREPARE tools $SNAME: $3 handoff altered ($1); run tools-$SNAME-$3 again" >&2; exit 75; }
+    }
+    case $STAGE in
+    ref)
+        bound 60 cc -std=c99 -w -I"$dir" -o "$T/ref" $src 2>"$T/err" ||
+            { echo "  REGRESSION $SNAME the system compiler will not build it: $(head -1 "$T/err" | cut -c1-58)"; exit 1; }
+        bound 60 "$T/ref" > "$T/want" 2>&1; wrc=$?
+        [ "$wrc" -eq 0 ] || { echo "  WRONG $SNAME reference exited $wrc"; exit 1; }
+        publish "$REFD" "$refid" "$T/want"
+        echo "tools $SNAME ref: $(wc -c < "$T/want" | tr -d ' ') bytes expected, handoff $refid";;
+    build)
+        compile_tool $src -I "$dir" -o "$T/got" >/dev/null 2>"$T/err" ||
+            { echo "  REGRESSION $SNAME unsupported: $(head -1 "$T/err" | cut -c1-58)"; exit 1; }
+        chmod +x "$T/got"
+        if command -v codesign >/dev/null && ! bound 10 codesign -f -s - "$T/got" >/dev/null 2>&1; then
+            echo "  WRONG $SNAME signing failed"; exit 1; fi
+        publish "$BLDD" "$buildid" "$T/got"
+        echo "tools $SNAME build: image $(wc -c < "$T/got" | tr -d ' ') bytes, handoff $buildid";;
+    run)
+        need "$REFD" "$refid" ref; need "$BLDD" "$buildid" build
+        bound 60 "$BLDD/got" > "$T/out" 2>&1; grc=$?
+        if [ "$grc" -eq 0 ] && cmp -s "$T/out" "$REFD/want"; then
+            printf "  ok   %-9s %s\n" "$SNAME" "$(tail -1 "$T/out" | cut -c1-48)"
+            echo "tools $SNAME run: pass 1   wrong 0 (byte-identical to the cc reference)"; exit 0
+        fi
+        printf "  WRONG %-9s rc %s  got '%s'  want '%s'\n" "$SNAME" "$grc" \
+            "$(grep -v '^ *$' "$T/out" | tail -1 | cut -c1-40)" "$(grep -v '^ *$' "$REFD/want" | tail -1 | cut -c1-40)"
+        echo "tools $SNAME run: pass 0   wrong 1   REGRESSION missing baseline name $SNAME"; exit 1;;
+    esac
+    exit 0
+fi
 pass=0; wrong=0; unsup=0; skip=0
 : > "$T/passing"
 # a redirect, not a pipe: the loop must run in THIS shell or the
@@ -146,6 +226,6 @@ sort "$T/passing" > "$T/passing.sorted"
 comm -23 "$T/required" "$T/passing.sorted" > "$T/lost"
 if [ -s "$T/lost" ]; then echo '  REGRESSION missing baseline names:'; cat "$T/lost"; rc=1; fi
 [ "$pass" -gt 0 ] || rc=1
-# Whole-suite invocation retains the original ratchet update facility.
-if [ "$SH_N" -eq 1 ]; then ratchet "$BASE" "$pass" "$T/passing" || rc=1; fi
+# Whole-suite invocation retains the original ratchet update facility (never with staged entries left out).
+if [ "$SH_N" -eq 1 ] && [ "${TOOLS_STAGED:-}" != split ]; then ratchet "$BASE" "$pass" "$T/passing" || rc=1; fi
 exit $rc

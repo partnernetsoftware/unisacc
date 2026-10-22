@@ -4,6 +4,15 @@
  * .cx pilot runs on Linux and macOS; on Windows cx_run/cx_run_timeout return -1).  Every body sits alone in its own guard (tests/libneed.sh). */
 #ifndef _UNISA_CX_H
 #define _UNISA_CX_H
+/* Edition 1 (plans/cx-modules.md CX1; `#pragma unisa cx 1` is implied): edition 0's toolkit and headers, plus the
+   POSIX.1-2008 core headers listed at the end of this file.  The carried libc tests no feature macro, so the one below
+   only matters to the system cc oracle (cc -std=c99 -x c -include include/cx.h): strict C99 glibc hides popen, mkstemp,
+   kill, lstat and usleep; _DEFAULT_SOURCE is POSIX.1-2008 plus usleep there, and nothing on macOS or the BSDs, whose
+   headers show everything unless a POSIX level is asked for (a _POSIX_C_SOURCE here would hide usleep on FreeBSD). */
+#define __UNISA_CX_EDITION 1
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE) && !defined(_POSIX_C_SOURCE) && !defined(_XOPEN_SOURCE) && !defined(_GNU_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -192,5 +201,20 @@ static int cx_walk(const char *__u_dir, int (*__u_fn)(const char *__u_path, void
     return __u_rc;
 #endif
 }
+#endif
+
+/* Edition 1 headers, after the toolkit, where the .cx tools used to include them (so a tool that drops its own copy
+   keeps its order of library bodies), and environ, which glibc declares only under _GNU_SOURCE.  Still explicit in
+   a .cx, to revisit at edition 2: utime.h, sys/time.h, sys/ioctl.h (rare), math.h (libm semantics), and time.h,
+   whose static objects (the day and month names, the zone buffer) sit outside any -ftrim-libc guard and would add
+   143 bytes to every .cx program; guarding them would change the bytes of .c programs that include it. */
+#include <stdint.h>
+#include <limits.h>
+#include <errno.h>
+#include <ctype.h>
+#ifndef _WIN32
+#include <sys/types.h>
+#include <fcntl.h>
+extern char **environ;
 #endif
 #endif

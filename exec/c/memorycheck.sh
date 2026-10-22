@@ -27,7 +27,7 @@ TARGET=$OS/$ARCH; export TARGET
 # The package prep does not depend on DRIVER_KIND or MEMORY_SHARD: 18 gate jobs built it 18 times and
 # one hit the 60 s window under load.  On a clean tree it is cached by the tracked inputs' blob ids.
 prep() {
-# Same model set as prep-0..3 (gateorder.json): prepared models only, a cold cache fails by name and never constructs here
+# Same model set as prep-0..5 (gateorder.json): prepared models only, a cold cache fails by name and never constructs here
 REQ=--require-cached; export UNISACC_REQUIRE_PREPARED=1
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 b python3 exec/build/gen.py opt "$T/o1.json"

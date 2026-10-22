@@ -1,0 +1,831 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libraryunion16check.cx -- true public composite/array/callback union ABI; actual rejection is red.
+   Ported from tests/libraryunion16check.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/libraryunion16check.cx -- [-h] [--package PACKAGE] [--arch {arm64,x86_64}]
+            [--cases CASES] [--callback] [--pressures PRESSURES] [--sanitize] [--build-only] [--evidence EVIDENCE]
+            [--ffi-provider FFI_PROVIDER] [--ffi-cflags FFI_CFLAGS] [--ffi-ldflags FFI_LDFLAGS]
+   ROOT is the directory above this file's (the .py's Path(__file__).resolve().parents[1]); run as a compiled binary
+   (tests/cxbin) it is the working directory.  Defaults: --package ROOT/unisacc.com, every case
+   (is8,si8,ss8,ii8,is4,si4,ss4,ii4,fpmix) and pressure (plain,gp5fp7,gp6fp8,gp7fp7), --ffi-cflags
+   $UNISACC_FFI_CFLAGS, --ffi-ldflags $UNISACC_FFI_LDFLAGS or -lffi (both split as shlex.split does).  The FFI
+   provider is --ffi-provider or $UNISACC_FFI_X86_PROVIDER (x86_64) / $UNISACC_FFI_PROVIDER (arm64); a provider is
+   exec/c/buildlibrary.py provider_flags(): DIR/manifest.json must name schema 1, the target, libffi 3.5.2 and its
+   source tarball, and list lib/libffi.a, include/{,ffi/}ffi{,target}.h and LICENSE with their bytes and sha256;
+   then the flags are -IDIR/include and DIR/lib/libffi.a.
+   In a fresh temporary directory (TMPDIR, TEMP, TMP, then /tmp; prefix r10-union16-) the runtime closure is copied
+   (checklib.copy_runtime, here tests/cxlib/runtimecopy.cx), tests/libraryabi/union16.c becomes probe.c and the
+   package compiler.pkg; then, every step under `tests/bound 20` with output captured (25 s, then rc 142):
+     runtime_build  $CC [-arch A] [-fsanitize=address,undefined -fno-omit-frame-pointer] -std=c11 -O2 -shared -fPIC
+                    -fvisibility=hidden FFI_CFLAGS exec/c/libunisacc.c exec/c/librarycall_ARCH.S FFI_LDFLAGS -o library.so
+     and per case x pressure: the USLSIG2 declaration host_step.sig the .py packed with struct (the union composite,
+     the GP/FP pressure prefix, with --callback a callback parameter carrying it), probe_build ($CC -std=c99 -O2 -Wall
+     -Wextra -I exec/c -DUNION16_CASE= -DUNION16_PRESSURE= -DUNION16_CALLBACK= probe.c library.so -o probe) and,
+     unless --build-only, public_probe (probe compiler.pkg TARGET host_step.sig; `arch -x86_64` first for Rosetta).
+   The probe's JSON event lines must show calls_100 rc 0 for opt 0,1,2 with native calls 100/200/300 (and callback
+   calls the same with --callback, else 0) at extent 16 and the case's alignment.  stdout is one json.dumps line
+   {"target", "status", "actual_runner_rc", "variants": [{"case", "pressure", "rc", "calls_100"}]}; rc 0 passed (or
+   built_only), 142 a step cut by its time bound, 1 any other failure.  --evidence PATH gets the whole record as
+   json.dumps(indent=2); its source_closure names this file (tests/libraryunion16check.cx) where the .py named itself.
+   Failures the .py did not catch (bad arguments past argparse, a missing package or provider, a bad provider
+   manifest, a missing runtime include) are rc 1 with the last line of Python's traceback on stderr and no stdout;
+   argparse errors are rc 2 with its usage text (prog name libraryunion16check.py, so the text is byte-identical). */
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pyjson
+
+static const char *PROG = "libraryunion16check.py";
+static const char *USAGE =
+    "usage: libraryunion16check.py [-h] [--package PACKAGE] [--arch {arm64,x86_64}]\n"
+    "                              [--cases CASES] [--callback]\n"
+    "                              [--pressures PRESSURES] [--sanitize]\n"
+    "                              [--build-only] [--evidence EVIDENCE]\n"
+    "                              [--ffi-provider FFI_PROVIDER]\n"
+    "                              [--ffi-cflags FFI_CFLAGS]\n"
+    "                              [--ffi-ldflags FFI_LDFLAGS]\n";
+static const char *HELP =
+    "\noptions:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --package PACKAGE\n"
+    "  --arch {arm64,x86_64}\n"
+    "  --cases CASES\n"
+    "  --callback\n"
+    "  --pressures PRESSURES\n"
+    "  --sanitize\n"
+    "  --build-only\n"
+    "  --evidence EVIDENCE\n"
+    "  --ffi-provider FFI_PROVIDER\n"
+    "  --ffi-cflags FFI_CFLAGS\n"
+    "  --ffi-ldflags FFI_LDFLAGS\n";
+static const char *SRC_SHA = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc";
+
+static char ROOT[4096], SELF[4096], TD[4200];
+
+/* ---- small utilities ---------------------------------------------------------------------------------------- */
+typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
+static void oom(void) { fputs("MemoryError\n", stderr); exit(1); }
+static void bput(Buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) oom();
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bbyte(Buf *b, unsigned v) { unsigned char c = (unsigned char)v; bput(b, &c, 1); }
+static void bU(Buf *b, unsigned long long v) {   /* struct.pack('<Q', v) */
+    unsigned char q[8]; int i;
+    for (i = 0; i < 8; i++) q[i] = (unsigned char)(v >> (8 * i));
+    bput(b, q, 8);
+}
+static void bcat(Buf *b, const Buf *c) { bput(b, c->p, c->n); }
+static char *xstrdup(const char *s) { size_t n = strlen(s); char *d = malloc(n + 1); if (!d) oom(); memcpy(d, s, n + 1); return d; }
+static char *xfmt2(const char *a, const char *b) { size_t n = strlen(a) + strlen(b) + 2; char *d = malloc(n); if (!d) oom(); snprintf(d, n, "%s/%s", a, b); return d; }
+
+static void rmtree(const char *p) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) {
+        while ((e = readdir(d))) {
+            char c[8192];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+/* an exception the .py did not catch: the traceback's last line, the temporary directory removed, rc 1 */
+static void uncaught(const char *line) {
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    cleanup(); exit(1);
+}
+static void usage_error(const char *fmt, const char *a) {
+    fflush(stdout); fputs(USAGE, stderr); fprintf(stderr, "%s: error: ", PROG); fprintf(stderr, fmt, a); fputc('\n', stderr);
+    exit(2);
+}
+static void repr(const char *s, char *out, size_t cap) { rtc_pyrepr(s, strlen(s), out, cap); }
+
+/* str(Path(P)): repeated slashes collapse, '.' components drop, a trailing slash goes; '' is '.' */
+static void pathnorm(const char *p, char *o, size_t cap) {
+    size_t j = 0; const char *s = p;
+    if (p[0] == '/') { o[j++] = '/'; if (p[1] == '/' && p[2] != '/') o[j++] = '/'; }
+    while (*s && j + 1 < cap) {
+        const char *e; size_t n;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = strchr(s, '/'); n = e ? (size_t)(e - s) : strlen(s);
+        if (!(n == 1 && s[0] == '.')) {
+            if (j && o[j - 1] != '/') o[j++] = '/';
+            if (j + n + 1 > cap) n = cap - j - 1;
+            memcpy(o + j, s, n); j += n;
+        }
+        s += n;
+    }
+    if (!j) o[j++] = '.';
+    o[j] = 0;
+}
+
+/* ---- UTF-8 (bytes.decode), universal newlines, bytes repr ----------------------------------------------------- */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l, int *bad, int *eod) {
+    unsigned c = s[i], lo = 0x80, hi = 0xBF; int need, k; long cp;
+    *eod = 0;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    else { *bad = 1; return -1; }
+    for (k = 1; k <= need; k++) {
+        unsigned d;
+        if (i + k >= n) { *bad = k; *eod = 1; return -1; }
+        d = s[i + k];
+        if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) { *bad = k; return -1; }
+        cp = (cp << 6) | (d & 0x3F);
+    }
+    *l = need + 1; return cp;
+}
+/* 0 when S is valid UTF-8; else the error span [*st, *en) and Python's reason */
+static int utf8_bad(const unsigned char *s, size_t n, size_t *st, size_t *en, const char **why) {
+    size_t i = 0; int l, bad, eod;
+    while (i < n) {
+        if (cp_at(s, n, i, &l, &bad, &eod) < 0) {
+            *st = i; *en = eod ? n : i + (size_t)bad;
+            *why = eod ? "unexpected end of data" : bad == 1 && (s[i] < 0xC2 || s[i] > 0xF4) ? "invalid start byte" : "invalid continuation byte";
+            return 1;
+        }
+        i += (size_t)l;
+    }
+    return 0;
+}
+static void newlines(char *s, size_t *n) {   /* \r\n and a lone \r become \n */
+    size_t i, j = 0;
+    for (i = 0; i < *n; i++) {
+        if (s[i] == '\r') { s[j++] = '\n'; if (i + 1 < *n && s[i + 1] == '\n') i++; }
+        else s[j++] = s[i];
+    }
+    *n = j; s[j] = 0;
+}
+static void bytes_repr(Buf *o, const unsigned char *s, size_t n) {   /* repr(bytes) */
+    int sq = 0, dq = 0; size_t i; char q, t[8];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    bputs(o, "b"); bbyte(o, (unsigned char)q);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == (unsigned char)q || c == '\\') { bbyte(o, '\\'); bbyte(o, c); }
+        else if (c == '\t') bputs(o, "\\t");
+        else if (c == '\n') bputs(o, "\\n");
+        else if (c == '\r') bputs(o, "\\r");
+        else if (c < 0x20 || c >= 0x7F) { snprintf(t, sizeof t, "\\x%02x", c); bputs(o, t); }
+        else bbyte(o, c);
+    }
+    bbyte(o, (unsigned char)q);
+}
+
+/* ---- argparse ------------------------------------------------------------------------------------------------- */
+enum { O_HELP, O_PACKAGE, O_ARCH, O_CASES, O_CALLBACK, O_PRESSURES, O_SANITIZE, O_BUILD, O_EVIDENCE, O_PROVIDER, O_CFLAGS, O_LDFLAGS, O_N };
+static const char *OPTNAME[O_N] = { "--help", "--package", "--arch", "--cases", "--callback", "--pressures", "--sanitize",
+                                    "--build-only", "--evidence", "--ffi-provider", "--ffi-cflags", "--ffi-ldflags" };
+static const int OPTVAL[O_N] = { 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1 };
+static const char *ERRNAME(int o) { return o == O_HELP ? "-h/--help" : OPTNAME[o]; }
+typedef struct Cls { char kind; int opt; const char *explicit_arg; int sep, short_form; } Cls;
+/* _parse_optional: kind 'A' (a value), 'O' (an option; opt -1 when unknown), '-' (the '--') */
+static Cls classify(const char *s) {
+    Cls c; int i, hits = 0, hit = -1; const char *eq = strchr(s, '='); size_t pn = eq ? (size_t)(eq - s) : strlen(s);
+    c.kind = 'O'; c.opt = -1; c.explicit_arg = 0; c.sep = 0; c.short_form = 0;
+    if (!s[0] || s[0] != '-') { c.kind = 'A'; return c; }
+    if (!strcmp(s, "-h")) { c.opt = O_HELP; c.short_form = 1; return c; }
+    for (i = 0; i < O_N; i++) if (!strcmp(s, OPTNAME[i])) { c.opt = i; return c; }
+    if (!s[1]) { c.kind = 'A'; return c; }
+    if (eq) {
+        if (pn == 2 && !strncmp(s, "-h", 2)) { c.opt = O_HELP; c.short_form = 1; c.explicit_arg = eq + 1; c.sep = 1; return c; }
+        for (i = 0; i < O_N; i++) if (strlen(OPTNAME[i]) == pn && !strncmp(s, OPTNAME[i], pn)) { c.opt = i; c.explicit_arg = eq + 1; c.sep = 1; return c; }
+    }
+    if (s[1] == '-') {   /* abbreviations of the long options */
+        char list[512]; size_t ll = 0;
+        list[0] = 0;
+        for (i = 0; i < O_N; i++) if (!strncmp(OPTNAME[i], s, pn)) {
+            hits++; hit = i;
+            ll += (size_t)snprintf(list + ll, sizeof list - ll, "%s%s", ll ? ", " : "", OPTNAME[i]);
+        }
+        if (hits > 1) {
+            char msg[1200]; snprintf(msg, sizeof msg, "ambiguous option: %s could match %s", s, list);
+            usage_error("%s", msg);
+        }
+        if (hits == 1) { c.opt = hit; if (eq) { c.explicit_arg = eq + 1; c.sep = 1; } return c; }
+    } else if (s[1] == 'h') {   /* -hX: the short option with an attached argument */
+        c.opt = O_HELP; c.short_form = 1; c.explicit_arg = s + 2; return c;
+    }
+    if (s[1] >= '0' && s[1] <= '9') { c.kind = 'A'; return c; }
+    if (s[1] == '.' && s[2] >= '0' && s[2] <= '9') { c.kind = 'A'; return c; }
+    if (strchr(s, ' ')) { c.kind = 'A'; return c; }
+    return c;
+}
+typedef struct Args {
+    const char *package, *arch, *cases, *pressures, *evidence, *provider, *cflags, *ldflags;
+    int callback, sanitize, build_only;
+} Args;
+static void parse(int argc, char **argv, Args *a) {
+    Cls *cls = calloc((size_t)argc + 1, sizeof *cls); Buf extras = { 0 }; int i, dd = 0, nextra = 0;
+    if (!cls) oom();
+    for (i = 1; i < argc; i++) {
+        if (dd) { cls[i].kind = 'A'; continue; }
+        if (!strcmp(argv[i], "--")) { cls[i].kind = '-'; dd = 1; continue; }
+        cls[i] = classify(argv[i]);
+    }
+    for (i = 1; i < argc; i++) {
+        Cls c = cls[i]; const char *v;
+        if (c.kind != 'O' || c.opt < 0) {
+            if (nextra++) bputs(&extras, " ");
+            bputs(&extras, argv[i]);
+            continue;
+        }
+        if (!OPTVAL[c.opt]) {
+            if (c.explicit_arg) {
+                char r[4200];
+                if (!(c.short_form && !c.sep && c.explicit_arg[0] && c.explicit_arg[0] != '-')) {
+                    repr(c.explicit_arg, r, sizeof r);
+                    { char msg[4400]; snprintf(msg, sizeof msg, "argument %s: ignored explicit argument %s", ERRNAME(c.opt), r); usage_error("%s", msg); }
+                }
+            }
+            if (c.opt == O_HELP) { fputs(USAGE, stdout); fputs(HELP, stdout); fflush(stdout); exit(0); }
+            if (c.opt == O_CALLBACK) a->callback = 1;
+            else if (c.opt == O_SANITIZE) a->sanitize = 1;
+            else a->build_only = 1;
+            continue;
+        }
+        if (c.explicit_arg) v = c.explicit_arg;
+        else {
+            if (i + 1 >= argc || cls[i + 1].kind != 'A') {
+                char msg[256]; snprintf(msg, sizeof msg, "argument %s: expected one argument", ERRNAME(c.opt)); usage_error("%s", msg);
+            }
+            v = argv[++i];
+        }
+        switch (c.opt) {
+        case O_PACKAGE: a->package = v; break;
+        case O_ARCH:
+            if (strcmp(v, "arm64") && strcmp(v, "x86_64")) {
+                char r[4200], msg[4400]; repr(v, r, sizeof r);
+                snprintf(msg, sizeof msg, "argument --arch: invalid choice: %s (choose from 'arm64', 'x86_64')", r); usage_error("%s", msg);
+            }
+            a->arch = v; break;
+        case O_CASES: a->cases = v; break;
+        case O_PRESSURES: a->pressures = v; break;
+        case O_EVIDENCE: { static char ev[4200]; pathnorm(v, ev, sizeof ev); a->evidence = ev; break; }
+        case O_PROVIDER: { static char pv[4200]; pathnorm(v, pv, sizeof pv); a->provider = pv; break; }
+        case O_CFLAGS: a->cflags = v; break;
+        case O_LDFLAGS: a->ldflags = v; break;
+        }
+    }
+    if (nextra) usage_error("unrecognized arguments: %s", (const char *)extras.p);
+    free(cls);
+}
+
+/* shlex.split(S) (posix, whitespace_split, no comments): 0, or -1 with WHY */
+typedef struct List { char **v; int n, cap; } List;
+static void lpush(List *l, const char *s) {
+    if (l->n + 1 >= l->cap) { char **g = realloc(l->v, (size_t)(l->cap = l->cap ? 2 * l->cap : 16) * sizeof *g); if (!g) oom(); l->v = g; }
+    l->v[l->n++] = xstrdup(s); l->v[l->n] = 0;
+}
+static int shsplit(const char *s, List *out, const char **why) {
+    Buf tok = { 0 }; char state = ' ', esc = 'a'; int quoted = 0; size_t i;
+    bput(&tok, "", 0);
+    for (i = 0;; i++) {
+        char c = s[i];
+        if (state == ' ') {
+            if (!c) break;
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+            if (c == '\\') { esc = 'a'; state = '\\'; }
+            else if (c == '\'' || c == '"') state = c;
+            else { bput(&tok, &c, 1); state = 'a'; }
+        } else if (state == '\'' || state == '"') {
+            quoted = 1;
+            if (!c) { *why = "ValueError: No closing quotation"; return -1; }
+            if (c == state) state = 'a';
+            else if (state == '"' && c == '\\') { esc = state; state = '\\'; }
+            else bput(&tok, &c, 1);
+        } else if (state == '\\') {
+            if (!c) { *why = "ValueError: No escaped character"; return -1; }
+            if ((esc == '\'' || esc == '"') && c != esc && c != '\\') bput(&tok, "\\", 1);
+            bput(&tok, &c, 1); state = esc;
+        } else {   /* 'a' */
+            if (!c || c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                if (tok.n || quoted) lpush(out, (const char *)tok.p);
+                tok.n = 0; tok.p[0] = 0; quoted = 0; state = ' ';
+                if (!c) break;
+            } else if (c == '\'' || c == '"') state = c;
+            else if (c == '\\') { esc = 'a'; state = '\\'; }
+            else bput(&tok, &c, 1);
+        }
+    }
+    free(tok.p);
+    return 0;
+}
+
+/* ---- the probe's descriptors (the .py's descriptor/composite) ---------------------------------------------- */
+static Buf descriptor(unsigned k, unsigned w, unsigned a, unsigned uns, unsigned tag, const Buf *payload) {
+    Buf o = { 0 };
+    bU(&o, 0); bU(&o, 0); bU(&o, 0); bU(&o, k); bU(&o, w); bU(&o, uns); bU(&o, a);
+    bbyte(&o, tag); bU(&o, payload ? payload->n : 0);
+    if (payload) bcat(&o, payload);
+    return o;
+}
+static const char *CASENAME[9] = { "is8", "si8", "ss8", "ii8", "is4", "si4", "ss4", "ii4", "fpmix" };
+static int case_align(int i) { return i < 4 || i == 8 ? 8 : 4; }
+static const char *PRESSNAME[4] = { "plain", "gp5fp7", "gp6fp8", "gp7fp7" };
+static const int PRESS[4][3] = { { 0, 0, 0 }, { 1, 5, 7 }, { 2, 6, 8 }, { 3, 7, 7 } };
+static Buf Dd, Id, Fd, Jd;
+/* obj(types) of st(kinds): 8-byte members for D and I, 4-byte for F and J */
+static Buf st(const Buf *const *kinds, int n) {
+    Buf pay = { 0 }; unsigned long long offset = 0; unsigned alignment = 0; int i;
+    for (i = 0; i < n; i++) { unsigned a = (kinds[i] == &Dd || kinds[i] == &Id) ? 8 : 4; if (a > alignment) alignment = a; }
+    bU(&pay, (unsigned long long)n);
+    for (i = 0; i < n; i++) {
+        unsigned w = (kinds[i] == &Dd || kinds[i] == &Id) ? 8 : 4;
+        offset = (offset + w - 1) / w * w;
+        bU(&pay, offset); bU(&pay, 0); bU(&pay, 0); bU(&pay, w); bcat(&pay, kinds[i]);
+        offset += w;
+    }
+    offset = (offset + alignment - 1) / alignment * alignment;
+    return descriptor(5, (unsigned)offset, alignment, 0, 1, &pay);
+}
+static Buf array(const Buf *t, unsigned n, unsigned w, unsigned a) {
+    Buf pay = { 0 }; bU(&pay, n); bU(&pay, w); bcat(&pay, t);
+    return descriptor(5, n * w, a, 0, 3, &pay);
+}
+static Buf composite(int c) {
+    const Buf *k[4]; Buf pair[2], pay = { 0 }; int i;
+    switch (c) {
+    case 0: k[0] = &Id; k[1] = &Dd; pair[0] = st(k, 2); k[0] = &Id; k[1] = &Fd; k[2] = &Fd; pair[1] = st(k, 3); break;
+    case 1: k[0] = &Dd; k[1] = &Id; pair[0] = st(k, 2); k[0] = &Fd; k[1] = &Fd; k[2] = &Id; pair[1] = st(k, 3); break;
+    case 2: k[0] = &Dd; k[1] = &Dd; pair[0] = st(k, 2); pair[1] = array(&Dd, 2, 8, 8); break;
+    case 3: k[0] = &Id; k[1] = &Dd; pair[0] = st(k, 2); k[0] = &Dd; k[1] = &Id; pair[1] = st(k, 2); break;
+    case 4: k[0] = &Jd; k[1] = &Jd; k[2] = &Fd; k[3] = &Fd; pair[0] = st(k, 4); pair[1] = st(k, 4); break;
+    case 5: k[0] = &Fd; k[1] = &Fd; k[2] = &Jd; k[3] = &Jd; pair[0] = st(k, 4); pair[1] = st(k, 4); break;
+    case 6: k[0] = &Fd; k[1] = &Fd; k[2] = &Fd; k[3] = &Fd; pair[0] = st(k, 4); pair[1] = array(&Fd, 4, 4, 4); break;
+    case 7: k[0] = &Fd; k[1] = &Fd; k[2] = &Fd; k[3] = &Fd; pair[0] = st(k, 4); k[0] = &Jd; k[1] = &Jd; k[2] = &Jd; k[3] = &Jd; pair[1] = st(k, 4); break;
+    default: pair[0] = array(&Dd, 2, 8, 8); pair[1] = array(&Fd, 4, 4, 4); break;
+    }
+    bU(&pay, 2);
+    for (i = 0; i < 2; i++) { bU(&pay, 0); bU(&pay, 0); bU(&pay, 0); bU(&pay, 16); bcat(&pay, &pair[i]); }
+    return descriptor(5, 16, (unsigned)case_align(c), 0, 2, &pay);
+}
+
+/* ---- the record and its exceptions ---------------------------------------------------------------------------- */
+static pj_value *RECORD, *COMMANDS, *VARIANTS;
+static Args A;
+static const char *TARGET;
+static char EXC_REPR[8192], EXC_LINE[8192];   /* repr(exc) for the record; the traceback line when uncaught */
+static void exc_keyerror(const char *k) {
+    snprintf(EXC_REPR, sizeof EXC_REPR, "KeyError('%s')", k);
+    snprintf(EXC_LINE, sizeof EXC_LINE, "KeyError: '%s'", k);
+}
+static void exc_assert(void) { snprintf(EXC_REPR, sizeof EXC_REPR, "AssertionError()"); snprintf(EXC_LINE, sizeof EXC_LINE, "AssertionError"); }
+static void exc_oserror(int err, const char *path) {   /* repr(OSError(errno, strerror)) and its str with the filename */
+    char line[8192], *colon, *msg;
+    rtc_oserror(err, path, line, sizeof line);
+    snprintf(EXC_LINE, sizeof EXC_LINE, "%s", line);
+    colon = strchr(line, ':'); *colon = 0;                          /* "Class" */
+    msg = strchr(colon + 1, ']') + 2;                              /* "strerror: 'path'" */
+    { char *q = strstr(msg, ": '"); char *q2 = strstr(msg, ": \""); if (q2 && (!q || q2 < q)) q = q2; if (q) *q = 0; }
+    { char r[1024]; repr(msg, r, sizeof r); snprintf(EXC_REPR, sizeof EXC_REPR, "%s(%d, %s)", line, err, r); }
+}
+
+/* Path(P).mkdir(parents=True, exist_ok=True): 0, or -1 with EXC set */
+static int mkdirs(const char *p) {
+    struct stat s; char parent[4200], *sl;
+    if (mkdir(p, 0777) == 0) return 0;
+    if (errno == ENOENT) {
+        snprintf(parent, sizeof parent, "%s", p);
+        sl = strrchr(parent, '/');
+        if (!sl) strcpy(parent, "."); else if (sl == parent) strcpy(parent, "/"); else *sl = 0;
+        if (!strcmp(parent, p)) { exc_oserror(ENOENT, p); return -1; }
+        if (mkdirs(parent) != 0) return -1;
+        if (mkdir(p, 0777) == 0) return 0;
+    }
+    { int err = errno; if (stat(p, &s) == 0 && S_ISDIR(s.st_mode)) return 0; exc_oserror(err, p); return -1; }
+}
+static int write_evidence(void) {
+    char parent[4200], *sl, *text; size_t n; FILE *f;
+    snprintf(parent, sizeof parent, "%s", A.evidence);
+    sl = strrchr(parent, '/');
+    if (!sl) strcpy(parent, "."); else if (sl == parent) parent[1] = 0; else *sl = 0;
+    if (mkdirs(parent) != 0) return -1;
+    pj_dumps(RECORD, 2, &text, &n);
+    errno = 0;
+    if (!(f = fopen(A.evidence, "w"))) { exc_oserror(errno ? errno : EIO, A.evidence); free(text); return -1; }
+    if (fwrite(text, 1, n, f) != n || fputc('\n', f) == EOF) { fclose(f); exc_oserror(errno ? errno : EIO, A.evidence); free(text); return -1; }
+    fclose(f); free(text);
+    return 0;
+}
+/* finish(rc): the record's runner rc, the evidence, the stdout line.  rc, or -1 when it raised (EXC set) */
+static int finish(int rc) {
+    pj_value *sum, *vs; size_t i, k; char *text; size_t n;
+    pj_set(RECORD, "actual_runner_rc", pj_int(rc));
+    if (A.evidence && write_evidence() != 0) return -1;
+    sum = pj_dict(); vs = pj_list();
+    pj_set(sum, "target", pj_strz(TARGET));
+    pj_set(sum, "status", pj_get(RECORD, "status"));
+    pj_set(sum, "actual_runner_rc", pj_int(rc));
+    for (i = 0; i < VARIANTS->len; i++) {
+        pj_value *v = VARIANTS->items[i], *ev = pj_get(v, "events"), *row = pj_dict(), *calls = pj_list();
+        pj_set(row, "case", pj_get(v, "case")); pj_set(row, "pressure", pj_get(v, "pressure")); pj_set(row, "rc", pj_get(v, "rc"));
+        for (k = 0; k < ev->len; k++) {
+            pj_value *e = ev->items[k], *stg = pj_get(e, "stage"), *opt;
+            if (!(stg->type == PJ_STR && stg->n == 9 && !memcmp(stg->s, "calls_100", 9))) continue;
+            if (!(opt = pj_get(e, "opt"))) { exc_keyerror("opt"); return -1; }
+            pj_append(calls, opt);
+        }
+        pj_set(row, "calls_100", calls);
+        pj_append(vs, row);
+    }
+    pj_set(sum, "variants", vs);
+    pj_dumps(sum, -1, &text, &n);
+    printf("%s\n", text); fflush(stdout); free(text);
+    return rc;
+}
+
+/* ---- subprocesses ------------------------------------------------------------------------------------------- */
+/* subprocess.run([ROOT/tests/bound, '20', *COMMAND], capture_output=True, text=True, timeout=25); the record item
+   appended to commands.  0 with *RC, or -1 when it raised (EXC set; nothing appended) */
+static int run(const char *stage, List *command, int *rcp, pj_value **outp) {
+    char bound[4200], op[4300], ep[4300], **argv; int i, k = 0, st = 0, ofd, efd, rc; pid_t pid; long ticks = 2500;
+    char *ob, *eb; size_t on = 0, en = 0, s0, s1; const char *why; struct stat sb; pj_value *item, *cmd;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv = malloc((size_t)(command->n + 3) * sizeof *argv); if (!argv) oom();
+    argv[k++] = bound; argv[k++] = "20";
+    for (i = 0; i < command->n; i++) argv[k++] = command->v[i];
+    argv[k] = 0;
+    /* what the child's exec would report */
+    if (stat(bound, &sb) != 0) { exc_oserror(errno, bound); free(argv); return -1; }
+    if (S_ISDIR(sb.st_mode) || access(bound, X_OK) != 0) { exc_oserror(EACCES, bound); free(argv); return -1; }
+    snprintf(op, sizeof op, "%s/.stdout-XXXXXX", TD); snprintf(ep, sizeof ep, "%s/.stderr-XXXXXX", TD);
+    fflush(stdout); fflush(stderr);
+    if ((ofd = mkstemp(op)) < 0) { exc_oserror(errno, op); free(argv); return -1; }
+    if ((efd = mkstemp(ep)) < 0) { exc_oserror(errno, ep); close(ofd); unlink(op); free(argv); return -1; }
+    pid = fork();
+    if (pid < 0) { close(ofd); close(efd); unlink(op); unlink(ep); exc_oserror(errno, bound); free(argv); return -1; }
+    if (pid == 0) { dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd); execv(argv[0], argv); _exit(127); }
+    close(ofd); close(efd);
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
+        if (w < 0 && errno != EINTR) { rc = 1; break; }
+        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = -999; break; }
+        usleep(10000);
+    }
+    ob = cx_read(op, &on); eb = cx_read(ep, &en);
+    unlink(op); unlink(ep);
+    if (!ob) { ob = calloc(1, 1); on = 0; }
+    if (!eb) { eb = calloc(1, 1); en = 0; }
+    if (rc == -999) { rc = 142; on = 0; ob[0] = 0; free(eb); eb = xstrdup("timeout"); en = 7; }   /* TimeoutExpired */
+    else {
+        unsigned char *bad = 0; size_t bn = 0;
+        if (utf8_bad((unsigned char *)ob, on, &s0, &s1, &why)) { bad = (unsigned char *)ob; bn = on; }
+        else if (utf8_bad((unsigned char *)eb, en, &s0, &s1, &why)) { bad = (unsigned char *)eb; bn = en; }
+        if (bad) {
+            Buf r = { 0 };
+            bputs(&r, "UnicodeDecodeError('utf-8', "); bytes_repr(&r, bad, bn);
+            snprintf(EXC_LINE, sizeof EXC_LINE, ", %lu, %lu, '%s')", (unsigned long)s0, (unsigned long)s1, why); bputs(&r, EXC_LINE);
+            snprintf(EXC_REPR, sizeof EXC_REPR, "%s", (const char *)r.p);
+            snprintf(EXC_LINE, sizeof EXC_LINE, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s",
+                     bad[s0], (unsigned long)s0, why);
+            free(r.p); free(ob); free(eb); free(argv);
+            return -1;
+        }
+        newlines(ob, &on); newlines(eb, &en);
+    }
+    item = pj_dict(); cmd = pj_list();
+    for (i = 0; argv[i]; i++) pj_append(cmd, pj_strz(argv[i]));
+    pj_set(item, "stage", pj_strz(stage)); pj_set(item, "command", cmd); pj_set(item, "rc", pj_int(rc));
+    pj_set(item, "stdout", pj_str(ob, on)); pj_set(item, "stderr", pj_str(eb, en));
+    pj_append(COMMANDS, item);
+    free(argv); free(eb);
+    *rcp = rc;
+    if (outp) *outp = pj_get(item, "stdout");
+    free(ob);
+    return 0;
+}
+
+static char *uname_field(char *flag) {
+    char *a[] = { "uname", flag, 0 }, *out = 0; size_t n = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+/* tempfile.gettempdir() */
+static void gettempdir(char *base, size_t cap) {
+    const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" }; int i; struct stat s;
+    for (i = 0; i < 3; i++) {
+        const char *v = getenv(env[i]);
+        if (v && *v && stat(v, &s) == 0 && S_ISDIR(s.st_mode) && access(v, W_OK | X_OK) == 0) {
+            char o[4200]; if (rtc_resolve(v, 0, o, sizeof o, EXC_LINE, sizeof EXC_LINE) == 0) { snprintf(base, cap, "%s", o); return; }
+        }
+    }
+    for (i = 0; i < 3; i++) if (stat(fixed[i], &s) == 0 && S_ISDIR(s.st_mode) && access(fixed[i], W_OK | X_OK) == 0) { snprintf(base, cap, "%s", fixed[i]); return; }
+    if (!getcwd(base, cap)) snprintf(base, cap, ".");
+}
+static void hexstr(const Buf *b, Buf *o) {
+    static const char *H = "0123456789abcdef"; size_t i;
+    for (i = 0; i < b->n; i++) { bbyte(o, (unsigned char)H[b->p[i] >> 4]); bbyte(o, (unsigned char)H[b->p[i] & 15]); }
+}
+/* shutil.copy2 without timestamps: content, then permission bits.  0, or -1 with WHY */
+static int copy2(const char *src, const char *dst, char *why, size_t whylen) {
+    size_t n = 0; char *b; struct stat s;
+    errno = 0;
+    if (stat(src, &s) != 0) { rtc_oserror(errno, src, why, whylen); return -1; }
+    if (S_ISDIR(s.st_mode)) { rtc_oserror(EISDIR, src, why, whylen); return -1; }
+    if (!(b = cx_read(src, &n))) { rtc_oserror(errno ? errno : EIO, src, why, whylen); return -1; }
+    if (cx_write(dst, b, n) != 0) { free(b); rtc_oserror(errno ? errno : EIO, dst, why, whylen); return -1; }
+    free(b);
+    chmod(dst, s.st_mode & 07777);
+    return 0;
+}
+static int is_str(const pj_value *v, const char *s) { return v && v->type == PJ_STR && v->n == strlen(s) && !memcmp(v->s, s, v->n); }
+static pj_value *strlist(List *l) { pj_value *v = pj_list(); int i; for (i = 0; i < l->n; i++) pj_append(v, pj_strz(l->v[i])); return v; }
+
+/* buildlibrary.provider_flags(DIR, TARGET): the manifest, flags into CF/LF; uncaught failures exit */
+static pj_value *provider_flags(const char *provider, const char *target, List *cf, List *lf) {
+    static const char *REQ[6] = { "lib/libffi.a", "include/ffi.h", "include/ffitarget.h", "include/ffi/ffi.h", "include/ffi/ffitarget.h", "LICENSE" };
+    char dir[4200], mf[4400], why[8400]; char *text; size_t n = 0, s0, s1; const char *reason; pj_value *m, *arts; int i;
+    struct stat s;
+    if (rtc_resolve(provider, 1, dir, sizeof dir, why, sizeof why) != 0) uncaught(why);
+    snprintf(mf, sizeof mf, "%s/manifest.json", dir);
+    errno = 0;
+    if (stat(mf, &s) != 0) { rtc_oserror(errno, mf, why, sizeof why); uncaught(why); }
+    if (S_ISDIR(s.st_mode)) { rtc_oserror(EISDIR, mf, why, sizeof why); uncaught(why); }
+    if (!(text = cx_read(mf, &n))) { rtc_oserror(errno ? errno : EIO, mf, why, sizeof why); uncaught(why); }
+    if (utf8_bad((unsigned char *)text, n, &s0, &s1, &reason)) {
+        if (s1 - s0 == 1) snprintf(why, sizeof why, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s", (unsigned char)text[s0], (unsigned long)s0, reason);
+        else snprintf(why, sizeof why, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: %s", (unsigned long)s0, (unsigned long)(s1 - 1), reason);
+        uncaught(why);
+    }
+    newlines(text, &n);   /* read_text: universal newlines */
+    if (!(m = pj_loads(text, n, why, sizeof why))) uncaught(why);
+    if (m->type != PJ_OBJ) uncaught("ValueError: invalid FFI provider manifest");
+    if (!pj_eq_int(pj_get(m, "schema"), 1) || !is_str(pj_get(m, "target"), target) || !is_str(pj_get(m, "version"), "3.5.2")
+        || !is_str(pj_get(m, "source_tar_sha256"), SRC_SHA))
+        uncaught("ValueError: unqualified FFI provider identity");
+    arts = pj_get(m, "artifacts");
+    if (!arts) arts = pj_dict();
+    if (arts->type != PJ_OBJ) uncaught("ValueError: incomplete FFI provider");
+    for (i = 0; i < 6; i++) { pj_value *it = pj_get(arts, REQ[i]); if (!it || it->type != PJ_OBJ) uncaught("ValueError: incomplete FFI provider"); }
+    for (i = 0; i < 6; i++) {
+        pj_value *it = pj_get(arts, REQ[i]); char p[4400], hex[65]; pj_value *sh;
+        snprintf(p, sizeof p, "%s/%s", dir, REQ[i]);
+        errno = 0;
+        if (stat(p, &s) != 0) { rtc_oserror(errno, p, why, sizeof why); uncaught(why); }
+        if (!pj_eq_int(pj_get(it, "bytes"), (long long)s.st_size)) { snprintf(why, sizeof why, "ValueError: FFI provider content changed: %s", REQ[i]); uncaught(why); }
+        if (rtc_sha_file(p, hex, why, sizeof why) != 0) uncaught(why);
+        sh = pj_get(it, "sha256");
+        if (!is_str(sh, hex)) { snprintf(why, sizeof why, "ValueError: FFI provider content changed: %s", REQ[i]); uncaught(why); }
+    }
+    { char f[4400]; snprintf(f, sizeof f, "-I%s/include", dir); lpush(cf, f); snprintf(f, sizeof f, "%s/lib/libffi.a", dir); lpush(lf, f); }
+    return m;
+}
+
+/* the try: body of the .py's main.  finish()'s value, or -1 when an exception was raised (EXC set) */
+static int body(const char *cc, List *flags, List *san, List *cf, List *lf, const char *arch, const char *host,
+                List *cases, List *pressures, const char *frozen) {
+    char rt[4300], lib[4300], sf[4300], exe[4300], probe[4300], why[8400];
+    List cmd = { 0 }; int rc, i, ci, pi;
+    snprintf(rt, sizeof rt, "%s/exec/c", TD); snprintf(lib, sizeof lib, "%s/library.so", TD);
+    snprintf(sf, sizeof sf, "%s/host_step.sig", TD); snprintf(exe, sizeof exe, "%s/probe", TD); snprintf(probe, sizeof probe, "%s/probe.c", TD);
+    lpush(&cmd, cc);
+    for (i = 0; i < flags->n; i++) lpush(&cmd, flags->v[i]);
+    for (i = 0; i < san->n; i++) lpush(&cmd, san->v[i]);
+    lpush(&cmd, "-std=c11"); lpush(&cmd, "-O2"); lpush(&cmd, "-shared"); lpush(&cmd, "-fPIC"); lpush(&cmd, "-fvisibility=hidden");
+    for (i = 0; i < cf->n; i++) lpush(&cmd, cf->v[i]);
+    { char p[4400]; snprintf(p, sizeof p, "%s/libunisacc.c", rt); lpush(&cmd, p); snprintf(p, sizeof p, "%s/librarycall_%s.S", rt, arch); lpush(&cmd, p); }
+    for (i = 0; i < lf->n; i++) lpush(&cmd, lf->v[i]);
+    lpush(&cmd, "-o"); lpush(&cmd, lib);
+    if (run("runtime_build", &cmd, &rc, 0) != 0) return -1;
+    if (rc) return finish(rc == 142 ? 142 : 1);
+    {   char hex[65];
+        if (rtc_sha_file(lib, hex, why, sizeof why) != 0) { exc_oserror(errno ? errno : ENOENT, lib); return -1; }
+        pj_set(RECORD, "runtime_sha256", pj_strz(hex));
+        pj_set(RECORD, "callback", pj_bool(A.callback));
+    }
+    for (ci = 0; ci < cases->n; ci++) {
+        int c = 0, al; Buf un;
+        while (strcmp(CASENAME[c], cases->v[ci])) c++;
+        al = case_align(c); un = composite(c);
+        for (pi = 0; pi < pressures->n; pi++) {
+            int p = 0, gp, fp, np = 0, k; Buf params = { 0 }, sig = { 0 }, hx = { 0 }; pj_value *variant, *events, *tail, *stdoutv;
+            char hex[65], d[64];
+            while (strcmp(PRESSNAME[p], pressures->v[pi])) p++;
+            gp = PRESS[p][1]; fp = PRESS[p][2];
+            for (k = 0; k < gp; k++) { Buf x = descriptor(1, 8, 8, 1, 0, 0); bcat(&params, &x); np++; }
+            for (k = 0; k < fp; k++) { Buf x = descriptor(3, 8, 8, 0, 0, 0); bcat(&params, &x); np++; }
+            if (A.callback) {
+                Buf child = { 0 }, cb = { 0 };
+                bbyte(&child, 1); bbyte(&child, 0); bU(&child, 1); bbyte(&child, 0); bbyte(&child, 0);
+                bU(&child, 1); bcat(&child, &un); bU(&child, 1); bcat(&child, &un); bbyte(&child, 0);
+                bU(&cb, 1); bU(&cb, 0); bU(&cb, 0); bU(&cb, 4); bU(&cb, 8); bU(&cb, 0); bU(&cb, 8);
+                bbyte(&cb, 4); bU(&cb, child.n); bcat(&cb, &child);
+                bcat(&params, &cb); np++;
+            }
+            bcat(&params, &un); np++;
+            { Buf x = descriptor(1, 8, 8, 1, 0, 0); bcat(&params, &x); np++; }
+            { Buf x = descriptor(3, 8, 8, 0, 0, 0); bcat(&params, &x); np++; }
+            bputs(&sig, "USLSIG2\n"); bU(&sig, 1); bU(&sig, 9); bputs(&sig, "host_step");
+            bbyte(&sig, 0); bbyte(&sig, 1); bbyte(&sig, 0); bbyte(&sig, np > 6);
+            bU(&sig, (unsigned long long)np); bcat(&sig, &un); bU(&sig, (unsigned long long)np); bcat(&sig, &params); bbyte(&sig, 0);
+            errno = 0;
+            if (cx_write(sf, sig.p, sig.n) != 0) { exc_oserror(errno ? errno : EIO, sf); return -1; }
+            if (rtc_sha_file(sf, hex, why, sizeof why) != 0) { exc_oserror(errno ? errno : ENOENT, sf); return -1; }
+            hexstr(&sig, &hx); bput(&hx, "", 0);
+            variant = pj_dict(); events = pj_list(); tail = pj_list();
+            pj_append(tail, pj_strz("u64")); pj_append(tail, pj_strz("double"));
+            pj_set(variant, "case", pj_strz(cases->v[ci])); pj_set(variant, "pressure", pj_strz(pressures->v[pi]));
+            pj_set(variant, "union_extent", pj_int(16)); pj_set(variant, "union_alignment", pj_int(al));
+            pj_set(variant, "gp_prefix", pj_int(gp)); pj_set(variant, "fp_prefix", pj_int(fp));
+            pj_set(variant, "tail_types", tail); pj_set(variant, "signature_hex", pj_str((const char *)hx.p, hx.n));
+            pj_set(variant, "signature_sha256", pj_strz(hex)); pj_set(variant, "callback", pj_bool(A.callback));
+            pj_set(variant, "events", events); pj_set(variant, "rc", pj_int(1));
+            pj_append(VARIANTS, variant);
+            free(sig.p); free(params.p); free(hx.p);
+            cmd.n = 0;
+            lpush(&cmd, cc);
+            for (i = 0; i < flags->n; i++) lpush(&cmd, flags->v[i]);
+            for (i = 0; i < san->n; i++) lpush(&cmd, san->v[i]);
+            lpush(&cmd, "-std=c99"); lpush(&cmd, "-O2"); lpush(&cmd, "-Wall"); lpush(&cmd, "-Wextra"); lpush(&cmd, "-I"); lpush(&cmd, rt);
+            snprintf(d, sizeof d, "-DUNION16_CASE=%d", c); lpush(&cmd, d);
+            snprintf(d, sizeof d, "-DUNION16_PRESSURE=%d", PRESS[p][0]); lpush(&cmd, d);
+            snprintf(d, sizeof d, "-DUNION16_CALLBACK=%d", A.callback); lpush(&cmd, d);
+            lpush(&cmd, probe); lpush(&cmd, lib); lpush(&cmd, "-o"); lpush(&cmd, exe);
+            if (run("probe_build", &cmd, &rc, 0) != 0) return -1;
+            if (rc) return finish(rc == 142 ? 142 : 1);
+            if (A.build_only) { pj_set(variant, "rc", pj_int(0)); continue; }
+            cmd.n = 0;
+            if (strcmp(host, arch)) { lpush(&cmd, "arch"); lpush(&cmd, "-x86_64"); }
+            lpush(&cmd, exe); lpush(&cmd, frozen); lpush(&cmd, TARGET); lpush(&cmd, sf);
+            if (run("public_probe", &cmd, &rc, &stdoutv) != 0) return -1;
+            pj_set(variant, "rc", pj_int(rc));
+            {   /* for line in stdout.splitlines(): json.loads, keep dicts with a 'stage' */
+                const unsigned char *s = (const unsigned char *)stdoutv->s; size_t n = stdoutv->n, a = 0, j = 0;
+                while (a < n) {
+                    size_t e = a, skip = 0; pj_value *ev;
+                    while (e < n) {
+                        unsigned ch = s[e];
+                        if (ch == '\n' || ch == '\r' || ch == 0x0b || ch == 0x0c || ch == 0x1c || ch == 0x1d || ch == 0x1e) { skip = (ch == '\r' && e + 1 < n && s[e + 1] == '\n') ? 2 : 1; break; }
+                        if (ch == 0xC2 && e + 1 < n && s[e + 1] == 0x85) { skip = 2; break; }
+                        if (ch == 0xE2 && e + 2 < n && s[e + 1] == 0x80 && (s[e + 2] == 0xA8 || s[e + 2] == 0xA9)) { skip = 3; break; }
+                        e++;
+                    }
+                    ev = pj_loads((const char *)s + a, e - a, 0, 0);
+                    if (ev && ev->type == PJ_OBJ && pj_get(ev, "stage")) pj_append(events, ev);
+                    a = e + skip; j++;
+                    if (!skip) break;
+                }
+            }
+            {   pj_value *complete[4096]; size_t nc = 0, k2; int opts_ok;
+                for (k2 = 0; k2 < events->len; k2++) {
+                    pj_value *e = events->items[k2], *r;
+                    if (!is_str(pj_get(e, "stage"), "calls_100")) continue;
+                    if (!(r = pj_get(e, "rc"))) { exc_keyerror("rc"); return -1; }
+                    if (pj_eq_int(r, 0) && nc < 4096) complete[nc++] = e;
+                }
+                if (rc == 142) return finish(142);
+                if (rc) return finish(1);
+                for (k2 = 0; k2 < nc; k2++) if (!pj_get(complete[k2], "opt")) { exc_keyerror("opt"); return -1; }
+                opts_ok = nc == 3;
+                for (k2 = 0; opts_ok && k2 < nc; k2++) if (!pj_eq_int(pj_get(complete[k2], "opt"), (long long)k2)) opts_ok = 0;
+                if (!opts_ok) return finish(1);
+                for (k2 = 0; k2 < events->len; k2++) {
+                    pj_value *e = events->items[k2], *x = pj_get(e, "extent"), *y;
+                    if (!x) { exc_keyerror("extent"); return -1; }
+                    if (!pj_eq_int(x, 16)) { exc_assert(); return -1; }
+                    if (!(y = pj_get(e, "alignment"))) { exc_keyerror("alignment"); return -1; }
+                    if (!pj_eq_int(y, al)) { exc_assert(); return -1; }
+                }
+                for (k2 = 0; k2 < 3; k2++) if (!pj_get(complete[k2], "native_calls")) { exc_keyerror("native_calls"); return -1; }
+                for (k2 = 0; k2 < 3; k2++) if (!pj_eq_int(pj_get(complete[k2], "native_calls"), 100 * (long long)(k2 + 1))) { exc_assert(); return -1; }
+                for (k2 = 0; k2 < 3; k2++) if (!pj_get(complete[k2], "callback_calls")) { exc_keyerror("callback_calls"); return -1; }
+                for (k2 = 0; k2 < 3; k2++) if (!pj_eq_int(pj_get(complete[k2], "callback_calls"), A.callback ? 100 * (long long)(k2 + 1) : 0)) { exc_assert(); return -1; }
+            }
+        }
+    }
+    pj_set(RECORD, "status", pj_strz(A.build_only ? "built_only" : "passed"));
+    return finish(0);
+}
+
+int main(int argc, char **argv) {
+    char why[8400], package[4200], base[4200], *mach, *sys; const char *host, *arch, *cc, *provider; int darwin, i, rc;
+    List cases = { 0 }, pressures = { 0 }, cf = { 0 }, lf = { 0 }, flags = { 0 }, san = { 0 };
+    pj_value *manifest = 0, *files;
+    char pkghex[65];
+
+    /* ROOT = Path(__file__).resolve().parents[1]; compiled (cxbin), the working directory */
+    {   size_t l = strlen(argv[0]);
+        if (l > 3 && !strcmp(argv[0] + l - 3, ".cx") && realpath(argv[0], SELF)) {
+            char t[4096], *sl; int k;
+            snprintf(t, sizeof t, "%s", SELF);
+            for (k = 0; k < 2; k++) { sl = strrchr(t, '/'); if (sl && sl != t) *sl = 0; else { strcpy(t, "/"); break; } }
+            snprintf(ROOT, sizeof ROOT, "%s", t);
+        } else {
+            if (!getcwd(ROOT, sizeof ROOT)) return 1;
+            snprintf(SELF, sizeof SELF, "%s/tests/libraryunion16check.cx", ROOT);
+        }
+    }
+    {   const char *e;
+        A.cases = "is8,si8,ss8,ii8,is4,si4,ss4,ii4,fpmix"; A.pressures = "plain,gp5fp7,gp6fp8,gp7fp7";
+        A.cflags = (e = getenv("UNISACC_FFI_CFLAGS")) ? e : "";
+        A.ldflags = (e = getenv("UNISACC_FFI_LDFLAGS")) ? e : "-lffi";
+    }
+    parse(argc, argv, &A);
+    Dd = descriptor(3, 8, 8, 0, 0, 0); Id = descriptor(1, 8, 8, 1, 0, 0); Fd = descriptor(3, 4, 4, 0, 0, 0); Jd = descriptor(1, 4, 4, 1, 0, 0);
+    if (!A.package) { static char p[4200]; snprintf(p, sizeof p, "%s/unisacc.com", ROOT); A.package = p; }
+
+    /* cases=a.cases.split(','); pressures=...; assert all known */
+    {   const char *s; char tok[4200]; size_t n;
+        for (s = A.cases;; s += n + 1) { n = strcspn(s, ","); snprintf(tok, sizeof tok, "%.*s", (int)n, s); lpush(&cases, tok); if (!s[n]) break; }
+        for (s = A.pressures;; s += n + 1) { n = strcspn(s, ","); snprintf(tok, sizeof tok, "%.*s", (int)n, s); lpush(&pressures, tok); if (!s[n]) break; }
+        for (i = 0; i < cases.n; i++) { int k, ok = 0; for (k = 0; k < 9; k++) if (!strcmp(cases.v[i], CASENAME[k])) ok = 1; if (!ok) uncaught("AssertionError"); }
+        for (i = 0; i < pressures.n; i++) { int k, ok = 0; for (k = 0; k < 4; k++) if (!strcmp(pressures.v[i], PRESSNAME[k])) ok = 1; if (!ok) uncaught("AssertionError"); }
+    }
+    mach = uname_field("-m"); sys = uname_field("-s");
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    arch = A.arch ? A.arch : host;
+    darwin = !strcmp(sys, "Darwin");
+    if ((!darwin && strcmp(sys, "Linux")) || (strcmp(arch, host) && !darwin)) uncaught("RuntimeError: requires matching native platform runner");
+    {   static char t[64]; snprintf(t, sizeof t, "%s/%s", darwin ? "osx" : "lnx", arch); TARGET = t; }
+    if (darwin) { lpush(&flags, "-arch"); lpush(&flags, arch); }
+    {   char np[4200]; pathnorm(A.package, np, sizeof np);
+        if (rtc_resolve(np, 1, package, sizeof package, why, sizeof why) != 0) uncaught(why); }
+    {   const char *w;
+        if (shsplit(A.cflags, &cf, &w) != 0) uncaught(w);
+        if (shsplit(A.ldflags, &lf, &w) != 0) uncaught(w);
+    }
+    provider = A.provider;
+    if (!provider) { const char *e = getenv(!strcmp(arch, "x86_64") ? "UNISACC_FFI_X86_PROVIDER" : "UNISACC_FFI_PROVIDER"); if (e && *e) provider = e; }
+    if (provider) {
+        if (cf.n || lf.n != 1 || strcmp(lf.v[0], "-lffi")) uncaught("ValueError: provider cannot mix explicit FFI flags");
+        cf.n = 0; lf.n = 0;
+        manifest = provider_flags(provider, TARGET, &cf, &lf);
+    }
+    /* explicit_files(ffi_ldflags) */
+    files = pj_dict();
+    for (i = 0; i < lf.n; i++) {
+        char np[4200], hex[65]; struct stat s;
+        if (lf.v[i][0] == '-') continue;
+        pathnorm(lf.v[i], np, sizeof np);
+        errno = 0;
+        if (stat(np, &s) != 0) { if (errno == ENOENT) continue; rtc_oserror(errno, np, why, sizeof why); uncaught(why); }
+        if (rtc_sha_file(np, hex, why, sizeof why) != 0) uncaught(why);
+        if (!pj_get(files, lf.v[i])) pj_set(files, lf.v[i], pj_strz(hex)); else pj_set(files, lf.v[i], pj_strz(hex));
+    }
+    if (rtc_sha_file(package, pkghex, why, sizeof why) != 0) uncaught(why);
+    RECORD = pj_dict(); COMMANDS = pj_list(); VARIANTS = pj_list();
+    pj_set(RECORD, "ffi_provider_manifest", manifest ? manifest : pj_null());
+    pj_set(RECORD, "ffi_compile_flags", strlist(&cf));
+    pj_set(RECORD, "ffi_link_flags", strlist(&lf));
+    pj_set(RECORD, "ffi_explicit_files", files);
+    pj_set(RECORD, "schema", pj_int(1));
+    pj_set(RECORD, "target", pj_strz(TARGET));
+    pj_set(RECORD, "scope", pj_strz(A.build_only ? "build-only; no public calls" : "actual public natural union16 matrix; any rejection is failure"));
+    pj_set(RECORD, "package_path", pj_strz(package));
+    pj_set(RECORD, "package_sha256", pj_strz(pkghex));
+    pj_set(RECORD, "sanitize", pj_bool(A.sanitize));
+    pj_set(RECORD, "cases", strlist(&cases));
+    pj_set(RECORD, "pressures", strlist(&pressures));
+    pj_set(RECORD, "commands", COMMANDS);
+    pj_set(RECORD, "variants", VARIANTS);
+    pj_set(RECORD, "status", pj_strz("failed"));
+
+    /* with tempfile.TemporaryDirectory(prefix='r10-union16-') */
+    gettempdir(base, sizeof base);
+    snprintf(TD, sizeof TD, "%s/r10-union16-XXXXXX", base);
+    if (!mkdtemp(TD)) { char b2[4200]; snprintf(b2, sizeof b2, "%s", TD); TD[0] = 0; rtc_oserror(errno, b2, why, sizeof why); uncaught(why); }
+    {   char rt[4300], src[4300], ab[4300], pc[4300], fz[4300], hex[65]; rtc_file *rf; size_t nf, k; pj_value *inputs = pj_dict();
+        snprintf(rt, sizeof rt, "%s/exec", TD); mkdir(rt, 0777);
+        snprintf(rt, sizeof rt, "%s/exec/c", TD); mkdir(rt, 0777);
+        snprintf(src, sizeof src, "%s/src", TD); mkdir(src, 0777);
+        if (rtc_copy_runtime(ROOT, TD, &rf, &nf, why, sizeof why) != 0) uncaught(why);
+        for (k = 0; k < nf; k++) pj_set(inputs, rf[k].rel, pj_strz(rf[k].hex));
+        snprintf(ab, sizeof ab, "%s/tests/libraryabi/union16.c", ROOT); snprintf(pc, sizeof pc, "%s/probe.c", TD);
+        if (copy2(ab, pc, why, sizeof why) != 0) uncaught(why);
+        if (rtc_sha_file(SELF, hex, why, sizeof why) != 0) uncaught(why);
+        pj_set(inputs, "tests/libraryunion16check.cx", pj_strz(hex));
+        if (rtc_sha_file(pc, hex, why, sizeof why) != 0) uncaught(why);
+        pj_set(inputs, "tests/libraryabi/union16.c", pj_strz(hex));
+        pj_set(RECORD, "source_closure", inputs);
+        snprintf(fz, sizeof fz, "%s/compiler.pkg", TD);
+        if (copy2(package, fz, why, sizeof why) != 0) uncaught(why);
+        if (rtc_sha_file(fz, hex, why, sizeof why) != 0) uncaught(why);
+        if (strcmp(hex, pkghex)) uncaught("AssertionError");
+        if (A.sanitize) { lpush(&san, "-fsanitize=address,undefined"); lpush(&san, "-fno-omit-frame-pointer"); }
+        cc = getenv("CC"); if (!cc) cc = "cc";
+        rc = body(cc, &flags, &san, &cf, &lf, arch, host, &cases, &pressures, fz);
+        if (rc < 0) {   /* except Exception as exc: record['exception']=repr(exc); return finish(1) */
+            pj_set(RECORD, "exception", pj_strz(EXC_REPR));
+            rc = finish(1);
+            if (rc < 0) uncaught(EXC_LINE);
+        }
+    }
+    cleanup();
+    return rc;
+}

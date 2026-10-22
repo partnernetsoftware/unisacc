@@ -5,11 +5,13 @@
      flow front    the ujs compiler: parse decides every production; type/shape/ic/isel are asked as m4's side channel
      flow select   isel decides the form of every jtape op (eq/ne may take the contract's second form)
      flow encode   enc gates every instruction against its pinned template; the WAT goes through wat2wasm
-   It is the temporary boundary adapter of W2: it may name ujs, flownet/ may not (D1).  W3 turns its label source and
-   emit hook into flownet's injection surface.
+   It is the boundary adapter: it may name ujs, flownet/ may not (D1).  Since W3 it only plugs ujs into flownet's two
+   injection surfaces and runs: the label source is the ujs gold port (ujsgold.cx, fn_label_source), the integer nets
+   are the oracle's (tables/NET.net.tsv), the flows are the ujs front end and m4's select/encode (they write the WAT
+   with fn_out), and the emit hook is wat2wasm -> \0asm, which fn_run calls only once the run's books are clean.
+   flownet is reached by `#pragma unisa use flownet.api` through the module links adapter/ujswasm/flownet/*.cx.
    Build (repository root):
-     sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx flownet/api.cx flownet/contract.cx flownet/nets.cx flownet/flow.cx \
-        -- COMMAND ...
+     sh ./unisacc.com -run adapter/ujswasm/ujswasm.cx -- COMMAND ...
    Commands:
      build SRC -o OUT [--tables DIR] [--wat FILE]   SRC -> OUT (\0asm); prints bytes, sha256 and the trace.  A refusal
                     (anything not covered) is rc 1, stdout empty, OUT absent, stderr "ujswasm: SRC:LINE: reason"
@@ -18,29 +20,18 @@
                     hits, gold fallbacks) equal the recorded m4 values; the negative programs accepted/refused as
                     recorded; every refusal has the D5 shape
      refuse ROOT    D5 over uncovered inputs beyond the negatives (emit gaps, out-of-domain tokens, non-ASCII outside
-                    strings, bad UTF-8, a missing source): each one rc 1, stdout empty, no OUT, a reason and a position
-     negative ROOT  the checks are not decorative: a mutated net, gold drive (fallbacks), a missing table, each red
+                    strings, bad UTF-8, a missing source, integer literals above 2^64-1, float literals rounding to
+                    infinity, and wat2wasm itself rejecting the WAT or missing): each one rc 1, stdout empty, no OUT,
+                    one stderr line with the reason (and a position: SRC:LINE, function+instruction, or WAT line:col)
+     negative ROOT  the checks are not decorative: a mutated net, gold drive (fallbacks), a missing table, a flipped
+                    label in the gold file (stock source) and in the injected label source, each red
      d1 ROOT        D1/red line 3: no "ujs" and no "python" in flownet/*.cx
-     accepts ROOT   the 5 negatives ujs accepts (no bytes recorded in the baseline): flownet's bytes == the m4 oracle's
+     accepts ROOT   the 5 negatives ujs accepts (no bytes recorded in the baseline) and 2 literal boundaries just inside
+                    what wat2wasm takes (2^64-1, DBL_MAX by rounding): flownet's bytes == the m4 oracle's
                     (`python3 -m m4 build`, a child process; the only Python step, and outside flownet/) */
 
-int fn_open(const char *dir);
-const char *fn_error(void);
-void fn_error_clear(void);
-int fn_nets(void);
-const char *fn_net(int i);
-int fn_acc(const char *net, int *exact, int *total);
-int fn_list(const char *role, char *out, int cap);
-int fn_drive(const char *mode);
-int fn_phase(const char *name);
-const char *fn_ask1(const char *net, const char *a);
-const char *fn_ask2(const char *net, const char *a, const char *b);
-const char *fn_ask3(const char *net, const char *a, const char *b, const char *c);
-int fn_gate(const char *net, const char *answer, const char *legal, const char *what);
-const char *fn_choice(const char *net, const char *in);
-void fn_trace_reset(void);
-int fn_trace_row(int k, const char **phase, const char **net, long *hits, long *gold);
-int fn_trace_check(void);
+#pragma unisa use flownet.api
+#pragma unisa use ujsgold
 
 #define DEFAULT_TABLES "adapter/ujswasm/tables"
 #define PH_FRONT "front(lex+parse)"
@@ -59,18 +50,38 @@ static void badd(Buf *b, const char *s, size_t k) {
     memcpy(b->s + b->n, s, k); b->n += k; b->s[b->n] = 0;
 }
 static void bs(Buf *b, const char *s) { badd(b, s, strlen(s)); }
-static void bi(Buf *b, long v) { char t[32]; snprintf(t, sizeof t, "%ld", v); bs(b, t); }
 static char *sdup(const char *s) { size_t k = strlen(s); char *d = malloc(k + 1); if (!d) oom(); memcpy(d, s, k + 1); return d; }
 static void *xrealloc(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) oom(); return q; }
 
+/* ---------- formatted text: allocated to its exact length, never cut short ----------
+   Every formatted string of this adapter comes from XF (xf, ppf, refusef, erefusef, badf): no fixed-size buffer is fed
+   text whose length depends on the input, so a long literal, name or string reaches the WAT and the messages whole.
+   The length is learned by formatting into a heap buffer and retrying once at the size vsnprintf reports (the m9
+   libc's vsnprintf hangs when asked to measure with a null buffer and a %s of 255 bytes or more).  The `bounds` part
+   of the d1 step keeps it so: it refuses any other printf-to-buffer or string copy, any fixed char array without a
+   written bound, and any %.N precision in adapter/ujswasm and flownet. */
+#define XF(fmt, out) do { va_list ap_; size_t cap_ = 256; int n_; char *p_ = 0; \
+    for (;;) { \
+        p_ = xrealloc(p_, cap_); \
+        va_start(ap_, fmt); n_ = vsnprintf(p_, cap_, fmt, ap_); va_end(ap_); \
+        if (n_ < 0) { fprintf(stderr, "ujswasm: cannot format \"%s\"\n", fmt); exit(1); } \
+        if ((size_t)n_ < cap_) break; \
+        cap_ = (size_t)n_ + 1; } \
+    (out) = p_; } while (0)
+static char *xf(const char *fmt, ...) { char *s; XF(fmt, s); return s; }
+static void bi(Buf *b, long v) { char *t = xf("%ld", v); bs(b, t); free(t); }
+
 /* ---------- refusal: rc 1, stdout untouched, no output file, reason and position on stderr ---------- */
 static const char *g_src = "?";       /* the source being built, for positions */
-static char g_tmpdir[64];             /* scratch of this build; removed on any exit path through here */
+#define TMPL_BUILD "/tmp/ujswasmXXXXXX"
+static char g_tmpdir[19];             /* bounded: the 18-byte mkdtemp template and its NUL (checked where it is filled); the scratch of this build, removed on any exit path through here */
+static char *g_errpath;               /* wat2wasm's captured stderr, inside g_tmpdir, or 0 */
 static void cleanup(void) {
-    char p[160];
+    char *p;
     if (!g_tmpdir[0]) return;
-    snprintf(p, sizeof p, "%s/p.wat", g_tmpdir); unlink(p);
-    snprintf(p, sizeof p, "%s/p.wasm", g_tmpdir); unlink(p);
+    p = xf("%s/p.wat", g_tmpdir); unlink(p); free(p);
+    p = xf("%s/p.wasm", g_tmpdir); unlink(p); free(p);
+    if (g_errpath) { unlink(g_errpath); free(g_errpath); g_errpath = 0; }
     rmdir(g_tmpdir); g_tmpdir[0] = 0;
 }
 static void refuse_at(int line, const char *why) {
@@ -79,9 +90,8 @@ static void refuse_at(int line, const char *why) {
     else fprintf(stderr, "ujswasm: %s: %s\n", g_src, why);
     exit(1);
 }
-static void refuse2(int line, const char *a, const char *b) {
-    char m[600]; snprintf(m, sizeof m, "%s%s", a, b ? b : ""); refuse_at(line, m);
-}
+static void refusef(int line, const char *fmt, ...) { char *m; XF(fmt, m); refuse_at(line, m); }
+static void refuse2(int line, const char *a, const char *b) { refusef(line, "%s%s", a, b ? b : ""); }
 
 /* ======================================================================================================
    source: bytes -> code points, as Python's text-mode open() sees them (UTF-8, \r\n and \r become \n)
@@ -100,16 +110,15 @@ static void load_source(const char *data, size_t n) {
         if (c >= 0xC2 && c <= 0xDF) { k = 1; v = c & 0x1F; }
         else if (c >= 0xE0 && c <= 0xEF) { k = 2; v = c & 0x0F; }
         else if (c >= 0xF0 && c <= 0xF4) { k = 3; v = c & 0x07; }
-        else { char m[96]; snprintf(m, sizeof m, "not valid UTF-8 (byte 0x%02x at offset %ld)", c, (long)i); refuse_at(line, m); return; }
-        if (i + k >= n) { char m[80]; snprintf(m, sizeof m, "not valid UTF-8 (truncated at offset %ld)", (long)i); refuse_at(line, m); }
+        else { refusef(line, "not valid UTF-8 (byte 0x%02x at offset %ld)", c, (long)i); return; }
+        if (i + k >= n) refusef(line, "not valid UTF-8 (truncated at offset %ld)", (long)i);
         for (j = 1; j <= k; j++) {
             unsigned char d = (unsigned char)data[i + j];
-            if ((d & 0xC0) != 0x80) { char m[80]; snprintf(m, sizeof m, "not valid UTF-8 (offset %ld)", (long)(i + j)); refuse_at(line, m); }
+            if ((d & 0xC0) != 0x80) refusef(line, "not valid UTF-8 (offset %ld)", (long)(i + j));
             v = (v << 6) | (d & 0x3F);
         }
-        if ((k == 2 && v < 0x800) || (k == 3 && (v < 0x10000 || v > 0x10FFFF)) || (v >= 0xD800 && v <= 0xDFFF)) {
-            char m[80]; snprintf(m, sizeof m, "not valid UTF-8 (offset %ld)", (long)i); refuse_at(line, m);
-        }
+        if ((k == 2 && v < 0x800) || (k == 3 && (v < 0x10000 || v > 0x10FFFF)) || (v >= 0xD800 && v <= 0xDFFF))
+            refusef(line, "not valid UTF-8 (offset %ld)", (long)i);
         cp[ncp++] = v; i += k + 1;
     }
 }
@@ -118,7 +127,7 @@ static void load_source(const char *data, size_t n) {
 static char *utf8(int a, int b, int *len) {
     Buf o; int i; memset(&o, 0, sizeof o); bs(&o, "");
     for (i = a; i < b; i++) {
-        int v = cp[i]; char t[4]; int k;
+        int v = cp[i]; char t[4]; int k;     /* bounded: one code point is at most 4 UTF-8 bytes */
         if (v < 0x80) { t[0] = (char)v; k = 1; }
         else if (v < 0x800) { t[0] = (char)(0xC0 | (v >> 6)); t[1] = (char)(0x80 | (v & 0x3F)); k = 2; }
         else if (v < 0x10000) { t[0] = (char)(0xE0 | (v >> 12)); t[1] = (char)(0x80 | ((v >> 6) & 0x3F)); t[2] = (char)(0x80 | (v & 0x3F)); k = 3; }
@@ -146,8 +155,7 @@ static int uletter(int v) {
     return 0;
 }
 static void uncovered(int v) {
-    char m[120]; snprintf(m, sizeof m, "not covered: the lexer would have to classify U+%04X (outside the covered letter ranges)", v);
-    refuse_at(g_line, m);
+    refusef(g_line, "not covered: the lexer would have to classify U+%04X (outside the covered letter ranges)", v);
 }
 static int isalpha_cp(int v) {
     if (v < 0x80) return (v >= 'a' && v <= 'z') || (v >= 'A' && v <= 'Z');
@@ -235,7 +243,7 @@ static Tok *lex(int whole, int *ntok) {
                 }
             }
             (void)j;
-            if (PEEK(0) != quote) { char m[64]; snprintf(m, sizeof m, "unterminated string (opened at line %d)", g_line); refuse_at(line, m); }
+            if (PEEK(0) != quote) refusef(line, "unterminated string (opened at line %d)", g_line);
             i++;
             PUSH("str", v.s, (int)v.n);
             continue;
@@ -248,12 +256,12 @@ static Tok *lex(int whole, int *ntok) {
                 for (q = 0; q < L; q++) if (PEEK(q) != (unsigned char)PUNCT[k][q]) break;
                 if (q == L) { m2 = k; break; }
             }
-            if (m2 < 0) { char m[80]; snprintf(m, sizeof m, "bad punctuation U+%04X (lex answered %s)", PEEK(0) < 0 ? 0 : PEEK(0), act); refuse_at(line, m); }
+            if (m2 < 0) refusef(line, "bad punctuation U+%04X (lex answered %s)", PEEK(0) < 0 ? 0 : PEEK(0), act);
             i += (int)strlen(PUNCT[m2]);
             PUSH(!strcmp(PUNCT[m2], "===") ? "==" : !strcmp(PUNCT[m2], "!==") ? "!=" : PUNCT[m2], sdup(PUNCT[m2]), (int)strlen(PUNCT[m2]));
             continue;
         }
-        { char m[96]; snprintf(m, sizeof m, "lex bad: no token starts at U+%04X (lex answered %s)", PEEK(0) < 0 ? 0 : PEEK(0), act); refuse_at(line, m); }
+        refusef(line, "lex bad: no token starts at U+%04X (lex answered %s)", PEEK(0) < 0 ? 0 : PEEK(0), act);
         (void)start;
     }
 #undef PEEK
@@ -319,7 +327,7 @@ static int at(Comp *c, const char *k) { return !strcmp(cur(c)->kind, k); }
 static void cerr(Comp *c, const char *a, const char *b) { refuse2(cur(c)->line, a, b); }
 static Tok *eat(Comp *c, const char *kind) {
     Tok *t = cur(c);
-    if (kind && strcmp(t->kind, kind)) { char m[160]; snprintf(m, sizeof m, "expected %s got %s", kind, t->kind); refuse_at(t->line, m); }
+    if (kind && strcmp(t->kind, kind)) refusef(t->line, "expected %s got %s", kind, t->kind);
     c->i++;
     return t;
 }
@@ -492,13 +500,13 @@ static void stmt_for(Comp *c) {
     eat(c, "for"); eat(c, "(");
     push_scope(c);
     if (at(c, "let") && c->i + 2 < c->ntok && !strcmp(c->toks[c->i + 1].kind, "id") && !strcmp(c->toks[c->i + 2].kind, "of")) {
-        char *name, arr[32], ixn[32]; int incr;
+        char *name, *arr, *ixn; int incr;
         eat(c, "let");
         name = eat(c, "id")->text;
         eat(c, "of");
         bind(c, name);
-        snprintf(arr, sizeof arr, "__a%d", c->nslot);
-        snprintf(ixn, sizeof ixn, "__i%d", c->nslot);
+        arr = xf("__a%d", c->nslot);
+        ixn = xf("__i%d", c->nslot);
         bind(c, arr); bind(c, ixn);
         expr(c);
         emit_a(c, "store_l", arr);
@@ -515,6 +523,7 @@ static void stmt_for(Comp *c) {
         body = c->ncode;
         c->code[jmp_body].ai = body;
         emit_a(c, "load_l", arr); emit_a(c, "load_l", ixn); emit_a(c, "ic_enter", "idx"); emit(c, "idx"); emit_a(c, "store_l", name);
+        free(arr); free(ixn);                 /* bind and emit_a keep copies */
         push_loop(c, incr);
         statement(c);
         emit_i(c, "jump", incr);
@@ -567,6 +576,32 @@ static char *float_text(const char *t) {
     return o.s;
 }
 
+/* literals wat2wasm cannot take are refused here, at the token's line, before any WAT exists: i64.const holds at most
+   2^64-1 (wat2wasm 1.0.39 takes 0..2^64-1 and wraps above 2^63-1, as the m4 oracle's int() text does; 2^64 is
+   "invalid literal"), and a D+.D+ decimal at or above 2^1024 - 2^970 (DBL_MAX plus half an ulp; the tie rounds to even,
+   i.e. to infinity) is not a finite f64 -- the m4 oracle writes `f64.const inf` for it, flownet refuses it by name.
+   The comparisons are exact on the decimal digits (no strtod, no rounding of ours). */
+static const char *I64_CONST_MAX = "18446744073709551615";
+static const char *F64_INF_FROM =
+    "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792";
+static int digits_cmp(const char *a, size_t na, const char *b) {   /* the digit strings a[0..na) vs b, no leading zeros */
+    size_t nb = strlen(b); int r;
+    if (na != nb) return na > nb ? 1 : -1;
+    r = strncmp(a, b, na);
+    return r > 0 ? 1 : r < 0 ? -1 : 0;
+}
+static void literal_check(Tok *t) {
+    const char *w = t->text, *end = t->isfloat ? strchr(t->text, '.') : t->text + strlen(t->text);
+    size_t nd; int shown;
+    while (*w == '0' && w + 1 < end) w++;
+    nd = (size_t)(end - w);
+    shown = nd > 24 ? 24 : (int)nd;            /* a visible abbreviation: the first 24 digits, "...", and the count */
+    if (!t->isfloat && digits_cmp(w, nd, I64_CONST_MAX) > 0)
+        refusef(t->line, "integer literal %.*s%s (%ld digits) exceeds 2^64-1, the largest i64.const", shown, w, nd > 24 ? "..." : "", (long)nd);
+    if (t->isfloat && digits_cmp(w, nd, F64_INF_FROM) >= 0)
+        refusef(t->line, "float literal %.*s%s (%ld integer digits) rounds to infinity, not a finite f64.const", shown, w, nd > 24 ? "..." : "", (long)nd);
+}
+
 static void stmt_switch(Comp *c) {
     int *ends = 0, nend = 0, end, k;
     eat(c, "switch"); eat(c, "("); expr(c); eat(c, ")"); eat(c, "{");
@@ -581,6 +616,7 @@ static void stmt_switch(Comp *c) {
             if (!strcmp(t->kind, "num")) {
                 eat(c, "num"); eat(c, ":");
                 emit_a(c, "load_l", "__sw");
+                literal_check(t);
                 if (t->isfloat) { char *f = float_text(t->text); emit_const(c, "f64", f, 0); free(f); }
                 else { char *v = int_text(t->text); emit_const(c, "i64", v, 0); free(v); }
             } else if (!strcmp(t->kind, "str")) {
@@ -773,11 +809,11 @@ static void binary(Comp *c, int min_prec) {
         } else if (!strcmp(op, "||")) {
             note_binop(c, "||"); emit(c, "or");
         } else if (!strcmp(op, "??")) {
-            char tr[32], tl[32]; int jz, jmp, s;
+            char *tr, *tl; int jz, jmp, s;
             ask_type(c, "null", "==", "str");
             ask_isel(c, "typeof");
-            snprintf(tr, sizeof tr, "__nr%d", c->nslot);
-            snprintf(tl, sizeof tl, "__nl%d", c->nslot);
+            tr = xf("__nr%d", c->nslot);
+            tl = xf("__nl%d", c->nslot);
             bind(c, tr); bind(c, tl);
             emit_a(c, "store_l", tr); emit_a(c, "store_l", tl);
             emit_a(c, "load_l", tl); emit(c, "typeof");
@@ -789,6 +825,7 @@ static void binary(Comp *c, int min_prec) {
             c->code[jz].ai = c->ncode;
             emit_a(c, "load_l", tl);
             c->code[jmp].ai = c->ncode;
+            free(tr); free(tl);               /* bind and emit_a keep copies */
         }
     }
 }
@@ -857,6 +894,7 @@ static void primary(Comp *c) {
     }
     if (!strcmp(p, "number")) {
         Tok *t = eat(c, "num");
+        literal_check(t);
         if (t->isfloat) { char *f = float_text(t->text); emit_const(c, "f64", f, 0); free(f); }
         else { char *v = int_text(t->text); emit_const(c, "i64", v, 0); free(v); }
         return;
@@ -923,13 +961,13 @@ static void primary(Comp *c) {
         eat(c, ")");
         return;
     }
-    { char m[96]; snprintf(m, sizeof m, "primary near %s", cur(c)->kind); cerr(c, m, 0); }
+    refusef(cur(c)->line, "primary near %s", cur(c)->kind);
 }
 
 static void arrow_fn(Comp *c, char **params, int np, const char *rest) {
-    char name[32]; Comp n; FnMap *inner; Fn *f; int k;
+    char *name; Comp n; FnMap *inner; Fn *f; int k;
     eat(c, "=>");
-    snprintf(name, sizeof name, "__arrow%d", c->meta_fns.n);
+    name = xf("__arrow%d", c->meta_fns.n);
     comp_init(&n, 0);                        /* Compiler("", o): lexes "" (one lex ask) */
     n.toks = c->toks; n.ntok = c->ntok; n.i = c->i;
     for (k = 0; k < np; k++) bind(&n, params[k]);
@@ -948,6 +986,7 @@ static void arrow_fn(Comp *c, char **params, int np, const char *rest) {
     for (k = 0; k < n.nstr; k++) str_id(c, n.str[k].p, n.str[k].n);
     map_set(&c->meta_fns, name, f);
     emit_const(c, "fn", name, 0);
+    free(name);                               /* mkfn, map_set and emit_const keep copies */
 }
 
 static Fn *compile_src(void) {
@@ -990,10 +1029,8 @@ static const char *imm_of(Ins *x) {
 
 static int g_emit_ins;            /* the instruction index being emitted, for positions */
 static const char *g_emit_fn = "main";
-static void erefuse(const char *why) {
-    char m[700]; snprintf(m, sizeof m, "%s (function %s, instruction %d)", why, g_emit_fn, g_emit_ins);
-    refuse_at(0, m);
-}
+static void erefuse(const char *why) { refusef(0, "%s (function %s, instruction %d)", why, g_emit_fn, g_emit_ins); }
+static void erefusef(const char *fmt, ...) { char *m; XF(fmt, m); erefuse(m); }
 static const char *eask(const char *net, const char *a, const char *b) {
     const char *r = b ? fn_ask2(net, a, b) : fn_ask1(net, a);
     if (!r) erefuse(fn_error());
@@ -1005,27 +1042,27 @@ static void check_isel(Fn *f, const char *fname) {
     int k;
     g_emit_fn = fname;
     for (k = 0; k < f->ncode; k++) {
-        const char *form, *t; char m[160];
+        const char *form, *t;
         g_emit_ins = k;
         form = eask("isel", f->code[k].op, 0);
-        if (!strcmp(form, "trap")) { snprintf(m, sizeof m, "direct emit not covered: isel trap for op %s", f->code[k].op); erefuse(m); }
+        if (!strcmp(form, "trap")) erefusef("direct emit not covered: isel trap for op %s", f->code[k].op);
         t = eask("enc", form, imm_of(&f->code[k]));
-        if (!strcmp(t, "trap")) { snprintf(m, sizeof m, "direct emit not covered: enc trap form=%s imm=%s op=%s", form, imm_of(&f->code[k]), f->code[k].op); erefuse(m); }
+        if (!strcmp(t, "trap")) erefusef("direct emit not covered: enc trap form=%s imm=%s op=%s", form, imm_of(&f->code[k]), f->code[k].op);
     }
 }
 static const char *UNSUPPORTED[] = { "print", "spread", "restpack", "keys", "in", "shapeof", "switch", 0 };
 static void can_emit_direct(Fn *f) {
-    int k, j; char m[96];
+    int k, j;
     check_isel(f, "main");
     if (f->fns) for (j = 0; j < f->fns->n; j++) check_isel(f->fns->fn[j], f->fns->name[j]);
     g_emit_fn = "main";
     for (k = 0; k < f->ncode; k++)
-        if (in_list(f->code[k].op, UNSUPPORTED)) { g_emit_ins = k; snprintf(m, sizeof m, "direct emit not covered: emit gap %s", f->code[k].op); erefuse(m); }
+        if (in_list(f->code[k].op, UNSUPPORTED)) { g_emit_ins = k; erefusef("direct emit not covered: emit gap %s", f->code[k].op); }
     if (f->fns) for (j = 0; j < f->fns->n; j++) {
         Fn *n = f->fns->fn[j];
         g_emit_fn = f->fns->name[j];
         for (k = 0; k < n->ncode; k++)
-            if (in_list(n->code[k].op, UNSUPPORTED)) { g_emit_ins = k; snprintf(m, sizeof m, "direct emit not covered: emit gap %s", n->code[k].op); erefuse(m); }
+            if (in_list(n->code[k].op, UNSUPPORTED)) { g_emit_ins = k; erefusef("direct emit not covered: emit gap %s", n->code[k].op); }
     }
 }
 
@@ -1049,12 +1086,13 @@ static const char *LEGAL_FORM[] = {
 static const char *FAMILY_OPS[] = { "add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne", "and", "or", 0 };
 
 static void enc_gate(Ins *x) {
-    const char *legal = mapop(x->op, LEGAL_ENC, 0), *form, *t; char what[160];
-    if (!legal) { snprintf(what, sizeof what, "no pinned enc template for op %s", x->op); erefuse(what); }
+    const char *legal = mapop(x->op, LEGAL_ENC, 0), *form, *t; char *what;
+    if (!legal) erefusef("no pinned enc template for op %s", x->op);
     form = eask("isel", x->op, 0);
     t = eask("enc", form, imm_of(x));
-    snprintf(what, sizeof what, "enc for %s (form %s)", x->op, form);
+    what = xf("enc for %s (form %s)", x->op, form);
     if (fn_gate("enc", t, legal, what)) erefuse(fn_error());
+    free(what);
 }
 
 /* Python's dict {name: i for i, name in enumerate(list)}: the last index of NAME, -1 */
@@ -1110,28 +1148,26 @@ static Fn *normalize(Fn *f, Strings *S) {
 /* "\n".join(parts) */
 typedef struct { Buf b; int n; } Parts;
 static void pp(Parts *p, const char *s) { if (p->n++) bs(&p->b, "\n"); bs(&p->b, s); }
-static void ppf(Parts *p, const char *fmt, long a, long b) { char t[512]; snprintf(t, sizeof t, fmt, a, b); pp(p, t); }
+static void ppf(Parts *p, const char *fmt, ...) { char *t; XF(fmt, t); pp(p, t); free(t); }
 
 static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *name) {
-    Parts P; int k, n = f->ncode, nparams = f->nparams, rest_ix = -1; char t[512];
+    Parts P; int k, n = f->ncode, nparams = f->nparams, rest_ix = -1;
     memset(&P, 0, sizeof P);
     g_emit_fn = name;
-#define LA(nm) (snprintf(la, sizeof la, "(i32.add (i32.const %d) (i32.const %d))", LOCALS0, last_index(f->slot, f->nslot, nm) * 4), la)
+#define LA_FMT "(i32.add (i32.const %d) (i32.const %d))"
+#define LA_ARGS(nm) LOCALS0, last_index(f->slot, f->nslot, nm) * 4
     if (f->rest && last_index(f->slot, f->nslot, f->rest) >= 0) rest_ix = last_index(f->slot, f->nslot, f->rest);
-    snprintf(t, sizeof t, "(func $%s (result i32)", name); pp(&P, t);
+    ppf(&P, "(func $%s (result i32)", name);
     pp(&P, "(local $pc i32) (local $a i32) (local $b i32) (local $c i32)");
     pp(&P, "(local $i i32) (local $p i32) (local $t i32) (local $nn i32)");
     if (strcmp(name, "main_body")) {
         int pi;
         pp(&P, "(local.set $nn (global.get $call_argc))");
-        for (pi = 0; pi < nparams; pi++) {
-            snprintf(t, sizeof t, "(i32.store (i32.add (i32.const %d) (i32.const %d)) (i32.load (i32.add (i32.const %d) (i32.const %d))))",
-                     LOCALS0, pi * 4, SAVE0 + 256, pi * 4);
-            pp(&P, t);
-        }
-        if (rest_ix >= 0) {
-            char r[2000];
-            snprintf(r, sizeof r,
+        for (pi = 0; pi < nparams; pi++)
+            ppf(&P, "(i32.store (i32.add (i32.const %d) (i32.const %d)) (i32.load (i32.add (i32.const %d) (i32.const %d))))",
+                LOCALS0, pi * 4, SAVE0 + 256, pi * 4);
+        if (rest_ix >= 0)
+            ppf(&P,
                 "\n"
                 "          (local.set $i (i32.sub (local.get $nn) (i32.const %d)))\n"
                 "          (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.const 0))))\n"
@@ -1148,12 +1184,10 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "            (br $RL)))\n"
                 "          (i32.store (i32.add (i32.const %d) (i32.const %d)) (local.get $p))\n",
                 nparams, TAG_LIST, SAVE0 + 256, nparams, LOCALS0, rest_ix * 4);
-            pp(&P, r);
-        }
     }
     pp(&P, "(local.set $pc (i32.const 0))");
     pp(&P, "(loop $dispatch");
-    for (k = n - 1; k >= 0; k--) { snprintf(t, sizeof t, "(block $bb%d", k); pp(&P, t); }
+    for (k = n - 1; k >= 0; k--) ppf(&P, "(block $bb%d", k);
     pp(&P, "(block $trap");
     pp(&P, "(local.get $pc)");
     {
@@ -1164,74 +1198,72 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
     }
     pp(&P, ") (unreachable)");
     for (k = 0; k < n; k++) {
-        Ins *x = &f->code[k]; const char *op = x->op; char la[96], npc[96];
+        Ins *x = &f->code[k]; const char *op = x->op; char *npc;
         g_emit_ins = k;
-        snprintf(npc, sizeof npc, "(i32.const %d) (local.set $pc) (br $dispatch)", k + 1);
+        npc = xf("(i32.const %d) (local.set $pc) (br $dispatch)", k + 1);
         pp(&P, ")");
         enc_gate(x);
         if (!strcmp(op, "nop") || !strcmp(op, "ic_enter")) pp(&P, npc);
         else if (!strcmp(op, "const")) {
             const char *a = x->a;
             if (!strcmp(a, "null")) pp(&P, "(call $push (i32.const 0))");
-            else if (!strcmp(a, "bool")) ppf(&P, "(call $push (call $mk_bool (i32.const %ld)))", x->bi ? 1 : 0, 0);
-            else if (!strcmp(a, "i64")) { snprintf(t, sizeof t, "(call $push (call $mk_i64 (i64.const %s)))", x->b); pp(&P, t); }
-            else if (!strcmp(a, "f64")) { snprintf(t, sizeof t, "(call $push (call $mk_f64 (f64.const %s)))", x->b); pp(&P, t); }
-            else if (!strcmp(a, "str")) ppf(&P, "(call $push (call $mk_str (i32.const %ld) (i32.const %ld)))", so[x->bi].off, so[x->bi].len);
+            else if (!strcmp(a, "bool")) ppf(&P, "(call $push (call $mk_bool (i32.const %d)))", x->bi ? 1 : 0);
+            else if (!strcmp(a, "i64")) ppf(&P, "(call $push (call $mk_i64 (i64.const %s)))", x->b);
+            else if (!strcmp(a, "f64")) ppf(&P, "(call $push (call $mk_f64 (f64.const %s)))", x->b);
+            else if (!strcmp(a, "str")) ppf(&P, "(call $push (call $mk_str (i32.const %d) (i32.const %d)))", so[x->bi].off, so[x->bi].len);
             else if (!strcmp(a, "fn")) {
                 int q, ix = -1;
                 for (q = 0; q < nfn; q++) if (!strcmp(fnames[q], x->b)) ix = q;
-                if (ix < 0) { snprintf(t, sizeof t, "not covered: function %.60s is not a top-level function of the module (ujs drops nested ones)", x->b); erefuse(t); }
-                ppf(&P, "(call $push (call $mk_fn (i32.const %ld)))", ix, 0);
-            } else { snprintf(t, sizeof t, "const %.60s", a); erefuse(t); }
+                if (ix < 0) erefusef("not covered: function %s is not a top-level function of the module (ujs drops nested ones)", x->b);
+                ppf(&P, "(call $push (call $mk_fn (i32.const %d)))", ix);
+            } else erefusef("const %s", a);
             pp(&P, npc);
         } else if (!strcmp(op, "load_l") || !strcmp(op, "load_g")) {
-            snprintf(t, sizeof t, "(call $push (i32.load %s))", LA(x->a)); pp(&P, t); pp(&P, npc);
+            ppf(&P, "(call $push (i32.load " LA_FMT "))", LA_ARGS(x->a)); pp(&P, npc);
         } else if (!strcmp(op, "store_l") || !strcmp(op, "store_g")) {
-            snprintf(t, sizeof t, "(i32.store %s (call $pop))", LA(x->a)); pp(&P, t); pp(&P, npc);
+            ppf(&P, "(i32.store " LA_FMT " (call $pop))", LA_ARGS(x->a)); pp(&P, npc);
         } else if (!strcmp(op, "drop")) { pp(&P, "(drop (call $pop))"); pp(&P, npc); }
         else if (in_list(op, FAMILY_OPS)) {
             /* the form is the net's (isel); this only maps a legal form to its runtime helper */
-            const char *form = eask("isel", op, 0), *legal = fn_choice("isel", op); char what[96];
+            const char *form = eask("isel", op, 0), *legal = fn_choice("isel", op); char *what;
             if (!legal) legal = mapop(op, LEGAL_FORM, "");
-            snprintf(what, sizeof what, "isel form for %s", op);
+            what = xf("isel form for %s", op);
             if (fn_gate("isel", form, legal, what)) erefuse(fn_error());
+            free(what);
             pp(&P, "(local.set $b (call $pop)) (local.set $a (call $pop))");
             if (!strcmp(form, "poly_bin")) pp(&P, "(call $push (call $op_add (local.get $a) (local.get $b)))");
             else if (!strcmp(form, "i64_bin") || !strcmp(form, "f64_bin")) {
                 int code = !strcmp(op, "sub") ? 0 : !strcmp(op, "mul") ? 1 : !strcmp(op, "div") ? 2 : !strcmp(op, "mod") ? 3 : -1;
-                if (code < 0) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
-                ppf(&P, "(call $push (call $op_bin (i32.const %ld) (local.get $a) (local.get $b)))", code, 0);
+                if (code < 0) erefusef("form %s not handled for %s", form, op);
+                ppf(&P, "(call $push (call $op_bin (i32.const %d) (local.get $a) (local.get $b)))", code);
             } else if (!strcmp(form, "i64_cmp")) {
                 int code = !strcmp(op, "lt") ? 0 : !strcmp(op, "le") ? 1 : !strcmp(op, "gt") ? 2 : !strcmp(op, "ge") ? 3 : !strcmp(op, "eq") ? 4 : !strcmp(op, "ne") ? 5 : -1;
-                if (code < 0) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
-                ppf(&P, "(call $push (call $op_cmp (i32.const %ld) (local.get $a) (local.get $b)))", code, 0);
+                if (code < 0) erefusef("form %s not handled for %s", form, op);
+                ppf(&P, "(call $push (call $op_cmp (i32.const %d) (local.get $a) (local.get $b)))", code);
             } else if (!strcmp(form, "f64_cmp")) {
                 /* the contract's second form: different WAT (f64 compare, then box); gold never picks it */
                 const char *pred = !strcmp(op, "eq") ? "f64.eq" : !strcmp(op, "ne") ? "f64.ne" : 0;
-                if (!pred) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
-                snprintf(t, sizeof t, "(call $push (call $mk_bool (%s (call $as_f64 (local.get $a)) (call $as_f64 (local.get $b)))))", pred);
-                pp(&P, t);
+                if (!pred) erefusef("form %s not handled for %s", form, op);
+                ppf(&P, "(call $push (call $mk_bool (%s (call $as_f64 (local.get $a)) (call $as_f64 (local.get $b)))))", pred);
             } else if (!strcmp(form, "bool_logic")) {
                 const char *fnm = !strcmp(op, "and") ? "i32.and" : !strcmp(op, "or") ? "i32.or" : 0;
-                if (!fnm) { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
-                snprintf(t, sizeof t, "(call $push (call $mk_bool (%s (call $truthy (local.get $a)) (call $truthy (local.get $b)))))", fnm);
-                pp(&P, t);
-            } else { snprintf(t, sizeof t, "form %s not handled for %s", form, op); erefuse(t); }
+                if (!fnm) erefusef("form %s not handled for %s", form, op);
+                ppf(&P, "(call $push (call $mk_bool (%s (call $truthy (local.get $a)) (call $truthy (local.get $b)))))", fnm);
+            } else erefusef("form %s not handled for %s", form, op);
             pp(&P, npc);
         } else if (!strcmp(op, "not")) {
             pp(&P, "(local.set $a (call $pop))");
             pp(&P, "(call $push (call $mk_bool (i32.eqz (call $truthy (local.get $a)))))");
             pp(&P, npc);
-        } else if (!strcmp(op, "jump")) ppf(&P, "(i32.const %ld) (local.set $pc) (br $dispatch)", x->ai, 0);
+        } else if (!strcmp(op, "jump")) ppf(&P, "(i32.const %ld) (local.set $pc) (br $dispatch)", x->ai);
         else if (!strcmp(op, "jumpz") || !strcmp(op, "jumpnz")) {
             pp(&P, "(local.set $a (call $pop))");
-            if (!strcmp(op, "jumpz")) ppf(&P, "(if (i32.eqz (call $truthy (local.get $a))) (then (i32.const %ld) (local.set $pc) (br $dispatch)))", x->ai, 0);
-            else ppf(&P, "(if (call $truthy (local.get $a)) (then (i32.const %ld) (local.set $pc) (br $dispatch)))", x->ai, 0);
+            if (!strcmp(op, "jumpz")) ppf(&P, "(if (i32.eqz (call $truthy (local.get $a))) (then (i32.const %ld) (local.set $pc) (br $dispatch)))", x->ai);
+            else ppf(&P, "(if (call $truthy (local.get $a)) (then (i32.const %ld) (local.set $pc) (br $dispatch)))", x->ai);
             pp(&P, npc);
         } else if (!strcmp(op, "ret")) pp(&P, "(return (call $pop))");
         else if (!strcmp(op, "mklist") || !strcmp(op, "mktup")) {
-            char r[1200];
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $nn (i32.const %ld))\n"
                 "          (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 4)))))\n"
@@ -1245,10 +1277,9 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "            (br $L)))\n"
                 "          (call $push (local.get $p))\n",
                 x->ai, !strcmp(op, "mklist") ? TAG_LIST : TAG_TUP);
-            pp(&P, r); pp(&P, npc);
+            pp(&P, npc);
         } else if (!strcmp(op, "mkdict")) {
-            char r[1400];
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $nn (i32.const %ld))\n"
                 "          (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 8)))))\n"
@@ -1264,14 +1295,13 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "            (br $L)))\n"
                 "          (call $push (local.get $p))\n",
                 x->ai, TAG_DICT);
-            pp(&P, r); pp(&P, npc);
+            pp(&P, npc);
         } else if (!strcmp(op, "len")) {
             pp(&P, "(local.set $a (call $pop))");
             pp(&P, "(call $push (call $mk_i64 (i64.extend_i32_u (call $len_of (local.get $a)))))");
             pp(&P, npc);
         } else if (!strcmp(op, "idx")) {
-            char r[1200];
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $b (call $pop)) (local.set $a (call $pop))\n"
                 "          (local.set $t (call $tag_of (local.get $a)))\n"
@@ -1283,10 +1313,9 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "              (then (call $push (call $dict_get (local.get $a) (local.get $b))))\n"
                 "              (else (unreachable)))))\n",
                 TAG_LIST, TAG_TUP, TAG_DICT);
-            pp(&P, r); pp(&P, npc);
+            pp(&P, npc);
         } else if (!strcmp(op, "setidx")) {
-            char r[1400];
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $c (call $pop)) (local.set $b (call $pop)) (local.set $a (call $pop))\n"
                 "          (local.set $t (call $tag_of (local.get $a)))\n"
@@ -1299,27 +1328,26 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "              (else (unreachable)))))\n"
                 "          (call $push (local.get $c))\n",
                 TAG_LIST, TAG_TUP, TAG_DICT);
-            pp(&P, r); pp(&P, npc);
+            pp(&P, npc);
         } else if (!strcmp(op, "dot")) {
-            char r[600];
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $a (call $pop))\n"
                 "          (local.set $b (call $mk_str (i32.const %d) (i32.const %d)))\n"
                 "          (call $push (call $dict_get (local.get $a) (local.get $b)))\n",
                 so[x->ai].off, so[x->ai].len);
-            pp(&P, r); pp(&P, npc);
+            pp(&P, npc);
         } else if (!strcmp(op, "typeof")) {
             pp(&P, "(local.set $a (call $pop))");
             pp(&P, "(call $push (call $typeof_name (local.get $a)))");
             pp(&P, npc);
         } else if (!strcmp(op, "call")) {
-            long argc = x->ai, ai; char r[2400];
+            long argc = x->ai, ai;
             for (ai = 0; ai < argc; ai++) {
                 pp(&P, "(local.set $a (call $pop))");
-                ppf(&P, "(i32.store (i32.add (i32.const 590336) (i32.const %ld)) (local.get $a))", (argc - 1 - ai) * 4, 0);
+                ppf(&P, "(i32.store (i32.add (i32.const 590336) (i32.const %ld)) (local.get $a))", (argc - 1 - ai) * 4);
             }
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $a (call $pop))\n"
                 "          (if (i32.ne (call $tag_of (local.get $a)) (i32.const %d)) (then (unreachable)))\n"
@@ -1338,10 +1366,9 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
                 "            (br $Lc)))\n",
                 TAG_FN, SAVE0, LOCALS0, LOCALS0);
-            pp(&P, r);
-            ppf(&P, "(global.set $call_argc (i32.const %ld))", argc, 0);
+            ppf(&P, "(global.set $call_argc (i32.const %ld))", argc);
             pp(&P, "(call $push (call $dispatch_fn (local.get $t)))");
-            snprintf(r, sizeof r,
+            ppf(&P,
                 "\n"
                 "          (local.set $i (i32.const 0))\n"
                 "          (block $dr (loop $Lr\n"
@@ -1351,14 +1378,15 @@ static void body(Buf *out, Fn *f, Off *so, char **fnames, int nfn, const char *n
                 "            (local.set $i (i32.add (local.get $i) (i32.const 1)))\n"
                 "            (br $Lr)))\n",
                 LOCALS0, SAVE0);
-            pp(&P, r);
             pp(&P, npc);
-        } else { snprintf(t, sizeof t, "emit gap %s", op); erefuse(t); }
+        } else erefusef("emit gap %s", op);
+        free(npc);
     }
     pp(&P, "(unreachable)) (unreachable))");
     badd(out, P.b.s, P.b.n);
     free(P.b.s);
-#undef LA
+#undef LA_FMT
+#undef LA_ARGS
 }
 
 /* WAT texts carried verbatim from ujs/seed/construct/emit_wasm.py (_helpers, the _host_api_wat body) and m4/emit.py
@@ -1817,8 +1845,8 @@ static const char *EXPORTS =
     "";
 
 static void esc(Buf *b, const char *p, int n) {
-    int i; char t[4];
-    for (i = 0; i < n; i++) { snprintf(t, sizeof t, "\\%02x", (unsigned char)p[i]); bs(b, t); }
+    static const char *HEX = "0123456789abcdef"; int i; char t[3];   /* bounded: one escaped byte is \xx */
+    for (i = 0; i < n; i++) { unsigned char c = (unsigned char)p[i]; t[0] = '\\'; t[1] = HEX[c >> 4]; t[2] = HEX[c & 15]; badd(b, t, 3); }
 }
 static void map_data(Parts *P, int addr, int *v, int n) {
     Buf b; int i;
@@ -1826,7 +1854,7 @@ static void map_data(Parts *P, int addr, int *v, int n) {
     memset(&b, 0, sizeof b);
     bs(&b, "(data (i32.const "); bi(&b, addr); bs(&b, ") \"");
     for (i = 0; i < n; i++) {
-        char le[4]; le[0] = (char)(v[i] & 255); le[1] = (char)((v[i] >> 8) & 255); le[2] = (char)((v[i] >> 16) & 255); le[3] = (char)((v[i] >> 24) & 255);
+        char le[4]; /* bounded: one i32, little-endian */ le[0] = (char)(v[i] & 255); le[1] = (char)((v[i] >> 8) & 255); le[2] = (char)((v[i] >> 16) & 255); le[3] = (char)((v[i] >> 24) & 255);
         esc(&b, le, 4);
     }
     bs(&b, "\")");
@@ -1862,26 +1890,27 @@ static char *emit_wat(Fn *fn) {
         pp(&out, d.s); free(d.s);
     }
     for (k = 0; k < nfn; k++) {
-        Buf b; char nm[32]; Fn *nf = 0;
+        Buf b; char *nm; Fn *nf = 0;
         for (j = 0; j < fn->fns->n; j++) if (!strcmp(fn->fns->name[j], fnames[k])) nf = fn->fns->fn[j];
         memset(&b, 0, sizeof b);
-        snprintf(nm, sizeof nm, "fn_%d", k);
+        nm = xf("fn_%d", k);
         body(&b, normalize(nf, &S), so, fnames, nfn, nm);
         pp(&out, b.s); free(b.s);
+        g_emit_fn = "main"; free(nm);
     }
     if (!nfn) pp(&out, "(func $dispatch_fn (param $ix i32) (result i32) (unreachable))");
     else {
-        Parts d; char t[64]; Buf bt;
+        Parts d; Buf bt;
         memset(&d, 0, sizeof d); memset(&bt, 0, sizeof bt);
         pp(&d, "(func $dispatch_fn (param $ix i32) (result i32)");
         pp(&d, "(block $bad");
-        for (k = nfn - 1; k >= 0; k--) { snprintf(t, sizeof t, "(block $f%d", k); pp(&d, t); }
+        for (k = nfn - 1; k >= 0; k--) ppf(&d, "(block $f%d", k);
         pp(&d, "(local.get $ix)");
         bs(&bt, "(br_table ");
         for (k = 0; k < nfn; k++) { bi(&bt, k); bs(&bt, " "); }
         bi(&bt, nfn); bs(&bt, ")");
         pp(&d, bt.s); free(bt.s);
-        for (k = 0; k < nfn; k++) { pp(&d, ")"); snprintf(t, sizeof t, "(return (call $fn_%d))", k); pp(&d, t); }
+        for (k = 0; k < nfn; k++) { pp(&d, ")"); ppf(&d, "(return (call $fn_%d))", k); }
         pp(&d, ")");
         pp(&d, "(unreachable))");
         pp(&out, d.b.s); free(d.b.s);
@@ -1930,32 +1959,94 @@ static char *emit_wat(Fn *fn) {
    ====================================================================================================== */
 static int g_wasm_len; static char *g_wasm;
 
-static void run_flows(const char *src, size_t n, const char *watout) {
-    Fn *fn; char *wat, wp[128], op[128], *argv[6], *o = 0; size_t on = 0; int rc;
-    fn_trace_reset();
-    load_source(src, n);
+/* the last resort: wat2wasm refused WAT that the front end and the select/encode flows passed.  Its stderr (captured,
+   never passed through) becomes one line: no ANSI colour, no scratch path, the first "error:" with its WAT line:col */
+static void refuse_wat2wasm(int rc, const char *errpath) {
+    size_t n = 0, i, j = 0; char *e = cx_read(errpath, &n), *t, *ln, *er, *m, *where = 0;
+    if (rc == 124) refuse_at(0, "wat2wasm timed out (30 s) on the generated WAT");
+    if (rc == 127) refuse_at(0, "wat2wasm cannot be run (not on PATH?)");
+    t = malloc(n + 1); if (!t) oom();
+    for (i = 0; e && i < n; i++) {                       /* drop ESC [ ... final-byte sequences */
+        if (e[i] == 0x1b && i + 1 < n && e[i + 1] == '[') { i += 2; while (i < n && !(e[i] >= 0x40 && e[i] <= 0x7e)) i++; continue; }
+        t[j++] = e[i];
+    }
+    t[j] = 0; free(e);
+    if ((er = strstr(t, "error: "))) {
+        for (ln = er; ln > t && ln[-1] != '\n'; ln--) ;
+        char *c2 = er, *msg = er + 7, *nl = strchr(msg, '\n');
+        int l = 0, col = 0;
+        if (nl) *nl = 0;
+        /* "PATH:LINE:COL: error: " -- read LINE:COL back from the ": " before "error: " */
+        if (c2 - ln >= 2 && c2[-1] == ' ' && c2[-2] == ':') {
+            char *d = c2 - 2, *a;
+            while (d > ln && d[-1] >= '0' && d[-1] <= '9') d--;
+            col = atoi(d);
+            if (d > ln && d[-1] == ':') { a = d - 1; while (a > ln && a[-1] >= '0' && a[-1] <= '9') a--; if (a < d - 1) l = atoi(a); }
+        }
+        if (l > 0) where = xf(" at WAT %d:%d", l, col);
+        m = xf("wat2wasm refused the generated WAT (rc %d)%s: %s", rc, where ? where : "", msg);   /* its whole first error line */
+    } else m = xf("wat2wasm refused the generated WAT (rc %d) with no error line", rc);
+    for (i = 0; m[i]; i++) if ((unsigned char)m[i] < 0x20) m[i] = ' ';
+    free(t);
+    refuse_at(0, m);
+}
+
+/* the flows (fn_flows_fn): front, then select+encode; the WAT is the run's output */
+typedef struct { const char *src; size_t n; const char *watout; } Run;
+static int ujs_flows(void *ctx) {
+    Run *r = ctx; Fn *fn; char *wat;
+    load_source(r->src, r->n);
     if (fn_phase(PH_FRONT)) refuse_at(0, fn_error());
     fn = compile_src();
     if (fn_phase(PH_SELECT)) refuse_at(0, fn_error());
     can_emit_direct(fn);
     wat = emit_wat(fn);
-    if (watout && cx_write(watout, wat, strlen(wat))) refuse2(0, "cannot write ", watout);
-    if (fn_trace_check()) refuse_at(0, fn_error());
-    strcpy(g_tmpdir, "/tmp/ujswasmXXXXXX");
+    if (r->watout && cx_write(r->watout, wat, strlen(wat))) refuse2(0, "cannot write ", r->watout);
+    if (fn_out(wat, (long)strlen(wat))) refuse_at(0, fn_error());
+    free(wat);
+    return 0;
+}
+
+/* the emit hook (fn_emit_fn): the WAT through wat2wasm to \0asm, kept in g_wasm; fn_run calls it only after the books
+   are clean (no gold fallback), so a refused or gold-driven run never reaches wat2wasm */
+static int ujs_emit(void *ctx, const char *wat, long wn) {
+    char *wp, *op, *argv[6], *o = 0; size_t on = 0; int rc, saved, efd;
+    (void)ctx;
+    if (strlen(TMPL_BUILD) + 1 != sizeof g_tmpdir) refuse_at(0, "internal: the scratch template does not fit its buffer");
+    memcpy(g_tmpdir, TMPL_BUILD, sizeof g_tmpdir);
     if (!mkdtemp(g_tmpdir)) { g_tmpdir[0] = 0; refuse_at(0, "cannot make a scratch directory"); }
-    snprintf(wp, sizeof wp, "%s/p.wat", g_tmpdir); snprintf(op, sizeof op, "%s/p.wasm", g_tmpdir);
-    if (cx_write(wp, wat, strlen(wat))) refuse_at(0, "cannot write the WAT");
+    wp = xf("%s/p.wat", g_tmpdir); op = xf("%s/p.wasm", g_tmpdir);
+    if (cx_write(wp, wat, (size_t)wn)) refuse_at(0, "cannot write the WAT");
     argv[0] = "wat2wasm"; argv[1] = wp; argv[2] = "-o"; argv[3] = op; argv[4] = 0;
+    /* the child's stderr goes to p.err (cx_runv_timeout captures stdout only): fd 2 is swapped around the call */
+    g_errpath = xf("%s/errXXXXXX", g_tmpdir);
+    fflush(stderr);
+    if ((efd = mkstemp(g_errpath)) < 0) { free(g_errpath); g_errpath = 0; refuse_at(0, "cannot capture the wat2wasm diagnostics"); }
+    if ((saved = dup(2)) < 0 || dup2(efd, 2) < 0) refuse_at(0, "cannot capture the wat2wasm diagnostics");
     rc = cx_runv_timeout(argv, 30, &o, &on);
+    dup2(saved, 2); close(saved); close(efd);
     free(o);
-    if (rc) { char m[96]; snprintf(m, sizeof m, "wat2wasm failed (rc %d)", rc); refuse_at(0, m); }
+    if (rc) refuse_wat2wasm(rc, g_errpath);
     {
         size_t wl = 0; char *w = cx_read(op, &wl);
         if (!w || wl < 4 || memcmp(w, "\0asm", 4)) refuse_at(0, "output is not \\0asm");
         g_wasm = w; g_wasm_len = (int)wl;
     }
     cleanup();
-    free(wat);
+    free(wp); free(op);
+    return 0;
+}
+
+static void run_flows(const char *src, size_t n, const char *watout) {
+    Run r;
+    r.src = src; r.n = n; r.watout = watout;
+    if (fn_run(ujs_flows, &r, ujs_emit, 0)) refuse_at(0, fn_error());
+}
+
+/* the adapter's tables: the ujs gold port injected as the label source, the oracle's integer nets from DIR */
+static int open_tables(const char *dir) {
+    if (fn_label_source(ujsgold_domain, ujsgold_label, 0)) return -1;
+    return fn_open(dir);
 }
 
 static void print_trace(FILE *f) {
@@ -1972,7 +2063,8 @@ static char *read_source(const char *path, size_t *n) {
 }
 
 static int cmd_build(int argc, char **argv) {
-    const char *src = 0, *out = 0, *tables = DEFAULT_TABLES, *watout = 0, *drive = "built"; int k; size_t n; char *data, hex[65];
+    const char *src = 0, *out = 0, *tables = DEFAULT_TABLES, *watout = 0, *drive = "built"; int k; size_t n; char *data;
+    char hex[65];                             /* bounded: cx_sha256_hex writes 64 hex digits and a NUL */
     for (k = 0; k < argc; k++) {
         if (!strcmp(argv[k], "-o") && k + 1 < argc) out = argv[++k];
         else if (!strcmp(argv[k], "--tables") && k + 1 < argc) tables = argv[++k];
@@ -1984,7 +2076,7 @@ static int cmd_build(int argc, char **argv) {
     if (!src || !out) { fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE]\n"); return 2; }
     g_src = src;
     unlink(out);                              /* OUT exists afterwards only if this build succeeded */
-    if (fn_open(tables)) refuse_at(0, fn_error());
+    if (open_tables(tables)) refuse_at(0, fn_error());
     if (fn_drive(drive)) refuse_at(0, fn_error());
     data = read_source(src, &n);
     run_flows(data, n, watout);
@@ -1999,7 +2091,6 @@ static int cmd_build(int argc, char **argv) {
    check / refuse / negative / d1: the W2 gate steps
    ====================================================================================================== */
 #define BASE "tests/flownet-baseline.tsv"
-static char g_self_tables[2048];
 
 typedef struct { int rc; char *out; size_t nout; char *err; size_t nerr; } Child;
 
@@ -2029,13 +2120,13 @@ static Child build_child(const char *src, const char *outpath, const char *table
 
 static int fails;
 static void bad(const char *a, const char *b) { fprintf(stderr, "ujswasm-check: %s%s\n", a, b ? b : ""); fails++; }
+static void badf(const char *fmt, ...) { char *m; XF(fmt, m); bad(m, 0); free(m); }
 
 /* baseline rows: SECTION KIND fields... */
 typedef struct { char **f; int n; } Row;
 static Row *rows; static int nrows;
 static void load_baseline(const char *root) {
-    char path[2400], *b, *p; size_t n = 0;
-    snprintf(path, sizeof path, "%s/%s", root, BASE);
+    char *path = xf("%s/%s", root, BASE), *b, *p; size_t n = 0;
     if (!(b = cx_read(path, &n)) || !n || b[n - 1] != '\n') { fprintf(stderr, "ujswasm-check: %s: cannot read, or no final newline\n", path); exit(1); }
     for (p = b; *p; ) {
         char *nl = strchr(p, '\n'), *s; Row r;
@@ -2056,33 +2147,39 @@ static int is_out(Row *r) { return r->n >= 2 && !strncmp(r->f[0], "out", 3) && r
 
 /* D5: rc 1, stdout empty, no output file, stderr one line naming the source and a reason */
 static void d5(const char *what, Child *c, const char *outpath, const char *src) {
-    struct stat st; char m[600];
-    if (c->rc != 1) { snprintf(m, sizeof m, "%s: refusal rc %d, want 1", what, c->rc); bad(m, 0); }
-    if (c->nout) { snprintf(m, sizeof m, "%s: refusal wrote %ld bytes to stdout", what, (long)c->nout); bad(m, 0); }
-    if (stat(outpath, &st) == 0) { snprintf(m, sizeof m, "%s: refusal left an output file", what); bad(m, 0); }
+    struct stat st;
+    if (c->rc != 1) badf("%s: refusal rc %d, want 1", what, c->rc);
+    if (c->nout) badf("%s: refusal wrote %ld bytes to stdout", what, (long)c->nout);
+    if (stat(outpath, &st) == 0) badf("%s: refusal left an output file", what);
     if (strncmp(c->err, "ujswasm: ", 9) || strncmp(c->err + 9, src, strlen(src)) || c->nerr < 9 + strlen(src) + 4
-        || !strchr(c->err, '\n') || strchr(c->err, '\n')[1]) {
-        snprintf(m, sizeof m, "%s: refusal stderr is not one line naming the source and a reason: %.200s", what, c->err); bad(m, 0);
-    }
+        || !strchr(c->err, '\n') || strchr(c->err, '\n')[1])
+        badf("%s: refusal stderr is not one line naming the source and a reason: %s", what, c->err);
 }
 
 /* the position part of a refusal: "SRC:LINE:" or "(function F, instruction K)" or a table "PATH:LINE:" */
 static int has_position(const char *err, const char *src) {
-    char pat[1200]; const char *p;
-    snprintf(pat, sizeof pat, "%s:", src);
-    p = strstr(err, pat);
-    if (p && p[strlen(pat)] >= '1' && p[strlen(pat)] <= '9') return 1;
+    char *pat = xf("%s:", src); const char *p = strstr(err, pat); size_t L = strlen(pat);
+    free(pat);
+    if (p && p[L] >= '1' && p[L] <= '9') return 1;
     if (strstr(err, "(function ") && strstr(err, ", instruction ")) return 1;
     if (strstr(err, "(offset ") || strstr(err, " at offset ")) return 1;
+    if (strstr(err, " at WAT ")) return 1;      /* the wat2wasm last resort: the generated WAT's line:col */
     return 0;
 }
 
+/* a recorded negative program: tests/ujs2wasm/neg/NAME, else m4/neg/NAME */
+static char *neg_path(const char *name) {
+    struct stat st; char *p = xf("tests/ujs2wasm/neg/%s", name);
+    if (stat(p, &st)) { free(p); p = xf("m4/neg/%s", name); }
+    return p;
+}
+
 static int cmd_check(const char *root) {
-    char outp[2600], m[1200], tmp[] = "/tmp/ujswasmcXXXXXX"; int r, k, nprog = 0, same = 0, i, nacc = 0, accok = 0;
+    char *outp, tmp[] = "/tmp/ujswasmcXXXXXX"; int r, k, nprog = 0, same = 0, i, nacc = 0, accok = 0;
+    const char *tables = DEFAULT_TABLES;
     load_baseline(root);
     if (chdir(root)) { fprintf(stderr, "ujswasm-check: cannot enter %s\n", root); return 1; }
-    snprintf(g_self_tables, sizeof g_self_tables, "%s", DEFAULT_TABLES);
-    if (fn_open(g_self_tables)) { fprintf(stderr, "ujswasm-check: %s\n", fn_error()); return 1; }
+    if (open_tables(tables)) { fprintf(stderr, "ujswasm-check: %s\n", fn_error()); return 1; }
     /* acc: every net exact on every key, (exact, total) as recorded; the wired and reserved lists as recorded */
     for (r = 0; r < nrows; r++) {
         Row *w = &rows[r];
@@ -2091,31 +2188,34 @@ static int cmd_check(const char *root) {
             int e, t;
             nacc++;
             if (fn_acc(w->f[2], &e, &t)) { bad(fn_error(), 0); continue; }
-            if (e != atoi(w->f[3]) || t != atoi(w->f[4]) || e != t) { snprintf(m, sizeof m, "acc %s: %d/%d, recorded %s/%s", w->f[2], e, t, w->f[3], w->f[4]); bad(m, 0); }
+            if (e != atoi(w->f[3]) || t != atoi(w->f[4]) || e != t) badf("acc %s: %d/%d, recorded %s/%s", w->f[2], e, t, w->f[3], w->f[4]);
             else accok++;
         } else if (!strcmp(w->f[1], "wired") || !strcmp(w->f[1], "reserved")) {
-            char l[256]; fn_list(w->f[1], l, sizeof l);
-            if (w->n != 3 || strcmp(l, w->f[2])) { snprintf(m, sizeof m, "acc %s: %s, recorded %s", w->f[1], l, w->n > 2 ? w->f[2] : "?"); bad(m, 0); }
+            int cap = 64; char *l = xrealloc(0, cap);
+            while (fn_list(w->f[1], l, cap) < 0 && cap < (1 << 20)) { cap *= 2; l = xrealloc(l, cap); fn_error_clear(); }
+            if (w->n != 3 || strcmp(l, w->f[2])) badf("acc %s: %s, recorded %s", w->f[1], l, w->n > 2 ? w->f[2] : "?");
+            free(l);
         }
     }
     if (!mkdtemp(tmp)) { fprintf(stderr, "ujswasm-check: no scratch\n"); return 1; }
-    snprintf(outp, sizeof outp, "%s/o.wasm", tmp);
+    outp = xf("%s/o.wasm", tmp);
     /* every recorded program: bytes, sha256 and the whole trace equal the m4 record */
     for (r = 0; r < nrows; r++) {
-        Row *w = &rows[r]; Child c; char hex[65], *src; size_t sn = 0; Buf want, got; int t;
+        Row *w = &rows[r]; Child c; char *src; size_t sn = 0; Buf want, got; int t;
+        char hex[65];                         /* bounded: cx_sha256_hex writes 64 hex digits and a NUL */
         if (!is_out(w) || strcmp(w->f[1], "out") || w->n != 6) continue;
         nprog++;
         src = cx_read(w->f[2], &sn);
         if (!src) { bad("cannot read ", w->f[2]); continue; }
         cx_sha256_hex(src, sn, hex); free(src);
         if (strcmp(hex, w->f[3])) { bad("source changed since the baseline: ", w->f[2]); continue; }
-        c = build_child(w->f[2], outp, g_self_tables, "built");
-        if (c.rc) { snprintf(m, sizeof m, "%s: refused (rc %d): %.300s", w->f[2], c.rc, c.err); bad(m, 0); continue; }
+        c = build_child(w->f[2], outp, tables, "built");
+        if (c.rc) { badf("%s: refused (rc %d): %s", w->f[2], c.rc, c.err); continue; }
         {
             size_t wl = 0; char *wb = cx_read(outp, &wl);
             if (!wb) { bad("no output for ", w->f[2]); continue; }
             cx_sha256_hex(wb, wl, hex); free(wb);
-            if ((long)wl != atol(w->f[4]) || strcmp(hex, w->f[5])) { snprintf(m, sizeof m, "%s: output %ld bytes %.16s.., recorded %s bytes %.16s..", w->f[2], (long)wl, hex, w->f[4], w->f[5]); bad(m, 0); continue; }
+            if ((long)wl != atol(w->f[4]) || strcmp(hex, w->f[5])) { badf("%s: output %ld bytes sha256 %s, recorded %s bytes %s", w->f[2], (long)wl, hex, w->f[4], w->f[5]); continue; }
         }
         memset(&want, 0, sizeof want); memset(&got, 0, sizeof got); bs(&want, ""); bs(&got, "");
         for (t = r + 1; t < nrows && is_out(&rows[t]) && !strcmp(rows[t].f[1], "trace") && rows[t].n == 7 && !strcmp(rows[t].f[2], w->f[2]); t++) {
@@ -2126,7 +2226,7 @@ static int cmd_check(const char *root) {
             char *nl = strchr(c.out, '\n');
             if (nl) bs(&got, nl + 1);
         }
-        if (strcmp(want.s, got.s)) { snprintf(m, sizeof m, "%s: trace differs from the m4 record\n--- recorded\n%.400s--- flownet\n%.400s", w->f[2], want.s, got.s); bad(m, 0); continue; }
+        if (strcmp(want.s, got.s)) { badf("%s: trace differs from the m4 record\n--- recorded\n%s--- flownet\n%s", w->f[2], want.s, got.s); continue; }
         same++;
         free(want.s); free(got.s); free(c.out); free(c.err);
     }
@@ -2134,64 +2234,185 @@ static int cmd_check(const char *root) {
     {
         int neg = 0, rej = 0, acc = 0;
         for (r = 0; r < nrows; r++) {
-            Row *w = &rows[r]; char path[600]; Child c; struct stat st;
+            Row *w = &rows[r]; char *path; Child c;
             if (strcmp(w->f[0], "check") || (strcmp(w->f[1], "reject") && strcmp(w->f[1], "accept")) || w->n != 4) continue;
-            snprintf(path, sizeof path, "tests/ujs2wasm/neg/%s", w->f[2]);
-            if (stat(path, &st)) snprintf(path, sizeof path, "m4/neg/%s", w->f[2]);
+            path = neg_path(w->f[2]);
             neg++;
-            c = build_child(path, outp, g_self_tables, "built");
+            c = build_child(path, outp, tables, "built");
             if (!strcmp(w->f[1], "reject")) {
-                if (!c.rc) { snprintf(m, sizeof m, "%s: accepted, the record says refused (%s)", path, w->f[3]); bad(m, 0); unlink(outp); continue; }
+                if (!c.rc) { badf("%s: accepted, the record says refused (%s)", path, w->f[3]); unlink(outp); continue; }
                 d5(path, &c, outp, path);
-                if (!has_position(c.err, path)) { snprintf(m, sizeof m, "%s: refusal without a position: %.200s", path, c.err); bad(m, 0); }
+                if (!has_position(c.err, path)) badf("%s: refusal without a position: %s", path, c.err);
                 rej++;
             } else {
-                if (c.rc) { snprintf(m, sizeof m, "%s: refused, the record says accepted: %.300s", path, c.err); bad(m, 0); continue; }
+                if (c.rc) { badf("%s: refused, the record says accepted: %s", path, c.err); continue; }
                 acc++; unlink(outp);
             }
         }
         for (i = 0; i < nrows; i++) if (!strcmp(rows[i].f[0], "check") && !strcmp(rows[i].f[1], "summary")) break;
         printf("ujswasm-check: acc %d/%d nets exact as recorded; programs %d/%d byte-identical with identical traces; negatives %d (refused %d, accepted %d)\n",
                accok, nacc, same, nprog, neg, rej, acc);
-        if (nacc != 10 || !nprog || same != nprog || neg != 9) { snprintf(m, sizeof m, "want 10 acc rows (%d), every recorded program (%d) the same, 9 negatives (%d)", nacc, nprog, neg); bad(m, 0); }
+        if (nacc != 10 || !nprog || same != nprog || neg != 9) badf("want 10 acc rows (%d), every recorded program (%d) the same, 9 negatives (%d)", nacc, nprog, neg);
     }
-    rmdir(tmp);
+    rmdir(tmp); free(outp);
     (void)k;
     if (fails) { fprintf(stderr, "ujswasm-check: %d failure(s)\n", fails); return 1; }
     printf("ujswasm-check: PASS (D2: %d/%d programs byte-identical to the ujs gold record, acc %d/10, gold fallbacks 0)\n", same, nprog, accok);
     return 0;
 }
 
+/* generated sources, built in memory at their full length: the long-text probes of the accepts and refuse steps
+   (D5 / no truncation) and the literal boundaries.  R(c, k) is k copies of c. */
+typedef struct { const char *name; const char *what; } LongCase;
+static const LongCase LONGS[] = {
+    { "edge_i64max.ujs", "2^64-1 with leading zeros" },
+    { "edge_f64max.ujs", "2^1024-2^970-1 with a fraction (DBL_MAX by rounding)" },
+    { "long_frac500.ujs", "a float literal with 500 fraction digits" },
+    { "long_frac6000.ujs", "a float literal with 6000 fraction digits" },
+    { "long_ident700.ujs", "a 700-character identifier" },
+    { "long_str200k.ujs", "a 200000-byte string literal" } };
+#define NLONG ((int)(sizeof LONGS / sizeof LONGS[0]))
+static void R(Buf *b, int c, long k) { char ch = (char)c; long i; for (i = 0; i < k; i++) badd(b, &ch, 1); }
+static Buf long_source(int e) {
+    Buf b; memset(&b, 0, sizeof b); bs(&b, "");
+    switch (e) {
+    case 0: bs(&b, "let a = 018446744073709551615;\nreturn a + 1;\n"); break;
+    case 1: {
+        size_t L = strlen(F64_INF_FROM);
+        bs(&b, "return 00"); badd(&b, F64_INF_FROM, L - 1); bs(&b, "1.9999;\n");   /* ...792 -> ...791: no borrow */
+        break; }
+    case 2: bs(&b, "return 1."); R(&b, '3', 500); bs(&b, ";\n"); break;
+    case 3: bs(&b, "let x = 2;\nreturn x * 0.0"); R(&b, '7', 6000); bs(&b, ";\n"); break;
+    case 4: bs(&b, "let "); R(&b, 'q', 700); bs(&b, " = 40;\nreturn "); R(&b, 'q', 700); bs(&b, " + 2;\n"); break;
+    case 5: bs(&b, "let s = \""); R(&b, 'x', 200000); bs(&b, "\";\nreturn s;\n"); break;
+    }
+    return b;
+}
+
+/* SRC built through flownet and through the m4 oracle (`python3 -m m4 build SRC -o REF`, a child; nothing of it is
+   imported): both accept and the bytes are equal */
+static int same_as_oracle(const char *src, const char *label, const char *mine, const char *ref) {
+    Child c; char *av[8], *o = 0, *x, *y; size_t on = 0, a = 0, b = 0; int rc, ok;
+    unlink(mine);
+    c = build_child(src, mine, DEFAULT_TABLES, "built");
+    if (c.rc) { badf("%s: refused: %s", label, c.err); free(c.out); free(c.err); return 0; }
+    free(c.out); free(c.err);
+    av[0] = "python3"; av[1] = "-m"; av[2] = "m4"; av[3] = "build"; av[4] = (char *)src; av[5] = "-o"; av[6] = (char *)ref; av[7] = 0;
+    unlink(ref);
+    rc = cx_runv_timeout(av, 20, &o, &on); free(o);
+    if (rc) { badf("%s: the m4 oracle failed (rc %d)", label, rc); return 0; }
+    x = cx_read(mine, &a); y = cx_read(ref, &b);
+    ok = x && y && a == b && !memcmp(x, y, a);
+    if (!ok) badf("%s: flownet %ld bytes, m4 %ld bytes: differ", label, (long)a, (long)b);
+    else printf("same\t%s\t%ld bytes\n", label, (long)a);
+    free(x); free(y);
+    return ok;
+}
+
 /* the negatives that ujs (and m4) accept have no recorded bytes in the baseline: each one is built through flownet
    and through the m4 oracle (`python3 -m m4 build SRC -o OUT`, run as a child; nothing of it is imported) and the bytes
    must be equal.  This is the only Python step of the adapter's checks; flownet/ itself never runs it. */
 static int cmd_accepts(const char *root) {
-    char tmp[] = "/tmp/ujswasmaXXXXXX", mine[2600], ref[2600], path[600], m[900]; int r, n = 0, ok = 0;
+    char tmp[] = "/tmp/ujswasmaXXXXXX", *mine, *ref; int r, n = 0, ok = 0, nedge = 0, edgeok = 0, e;
     load_baseline(root);
     if (chdir(root)) { fprintf(stderr, "ujswasm-accepts: cannot enter %s\n", root); return 1; }
     if (!mkdtemp(tmp)) return 1;
-    snprintf(mine, sizeof mine, "%s/mine.wasm", tmp); snprintf(ref, sizeof ref, "%s/ref.wasm", tmp);
+    mine = xf("%s/mine.wasm", tmp); ref = xf("%s/ref.wasm", tmp);
     for (r = 0; r < nrows; r++) {
-        Row *w = &rows[r]; Child c; char *av[8], *o = 0; size_t on = 0, a = 0, b = 0; int rc; char *x, *y; struct stat st;
+        Row *w = &rows[r]; char *path;
         if (strcmp(w->f[0], "check") || strcmp(w->f[1], "accept") || w->n != 4) continue;
-        snprintf(path, sizeof path, "tests/ujs2wasm/neg/%s", w->f[2]);
-        if (stat(path, &st)) snprintf(path, sizeof path, "m4/neg/%s", w->f[2]);
+        path = neg_path(w->f[2]);
         n++;
-        c = build_child(path, mine, DEFAULT_TABLES, "built");
-        if (c.rc) { snprintf(m, sizeof m, "%s: refused: %.300s", path, c.err); bad(m, 0); continue; }
-        av[0] = "python3"; av[1] = "-m"; av[2] = "m4"; av[3] = "build"; av[4] = path; av[5] = "-o"; av[6] = ref; av[7] = 0;
-        unlink(ref);
-        rc = cx_runv_timeout(av, 20, &o, &on); free(o);
-        if (rc) { snprintf(m, sizeof m, "%s: the m4 oracle failed (rc %d)", path, rc); bad(m, 0); continue; }
-        x = cx_read(mine, &a); y = cx_read(ref, &b);
-        if (!x || !y || a != b || memcmp(x, y, a)) { snprintf(m, sizeof m, "%s: flownet %ld bytes, m4 %ld bytes: differ", path, (long)a, (long)b); bad(m, 0); }
-        else { ok++; printf("same\t%s\t%ld bytes\n", path, (long)a); }
-        free(x); free(y);
+        if (same_as_oracle(path, path, mine, ref)) ok++;
+        free(path);
     }
-    unlink(mine); unlink(ref); rmdir(tmp);
-    if (fails || n != 5) { fprintf(stderr, "ujswasm-accepts: %d failure(s), %d/%d the same (want the 5 recorded accepts)\n", fails, ok, n); return 1; }
-    printf("ujswasm-accepts: PASS (%d/%d known accepts byte-identical to python3 -m m4 build)\n", ok, n);
+    /* generated accepts: (1) the literal boundaries just inside what wat2wasm takes (the refuse step holds the ones
+       just outside): 2^64-1 as an i64.const (wraps to -1, as the oracle's int() text does), and 2^1024 - 2^970 - 1 with
+       a fraction and leading zeros (rounds to DBL_MAX; the oracle writes 1.7976931348623157e+308, flownet the decimal
+       text); (2) long texts, which must reach the WAT whole (no fixed buffer on the way): float literals with 500 and
+       6000 fraction digits, a 700-character identifier, a 200000-byte string literal */
+    for (e = 0; e < NLONG; e++) {
+        char *path = xf("%s/%s", tmp, LONGS[e].name); Buf body = long_source(e);
+        if (cx_write(path, body.s, body.n)) { bad("cannot write ", path); free(path); free(body.s); continue; }
+        free(body.s);
+        nedge++;
+        if (same_as_oracle(path, LONGS[e].name, mine, ref)) edgeok++;
+        unlink(path); free(path);
+    }
+    unlink(mine); unlink(ref); rmdir(tmp); free(mine); free(ref);
+    if (fails || n != 5 || nedge != NLONG) { fprintf(stderr, "ujswasm-accepts: %d failure(s), %d/%d the same (want the 5 recorded accepts), generated %d/%d\n", fails, ok, n, edgeok, nedge); return 1; }
+    printf("ujswasm-accepts: PASS (%d/%d known accepts and %d/%d generated accepts -- 2 literal boundaries, 4 long texts -- byte-identical to python3 -m m4 build)\n", ok, n, edgeok, nedge);
     return 0;
+}
+
+/* the wat2wasm last resort, reached on purpose: (1) a wrapper wat2wasm first on PATH rewrites one literal of the
+   generated WAT to one the real wat2wasm rejects (its real coloured diagnostic, with its scratch path), (2) no
+   wat2wasm on PATH.  Each must be one D5 line: no ANSI, no WAT/scratch path, the reason named.  PATH is set to the
+   stub directory alone (the carried setenv keeps at most 255 bytes; execvp searches what getenv sees), and the stub
+   restores the full PATH itself for sed and the real wat2wasm. */
+static int refuse_wat2wasm_cases(const char *tmp, const char *outp) {
+    char *bin, *stub, *real = 0, *src, *body, *path = getenv("PATH"), *pv, *seg, *save;
+    struct stat st; int n = 0, k;
+    pv = sdup(path ? path : "");
+    for (seg = pv; seg; seg = save) {
+        save = strchr(seg, ':'); if (save) *save++ = 0;
+        real = xf("%s/wat2wasm", *seg ? seg : ".");
+        if (!stat(real, &st) && S_ISREG(st.st_mode) && !access(real, X_OK)) break;
+        free(real); real = 0;
+    }
+    free(pv);
+    if (!real || strchr(real, '\'') || strchr(tmp, '\'') || !path || strchr(path, '\'')) { bad("wat2wasm cases: no wat2wasm on PATH (or a quote in its path)", 0); return 0; }
+    bin = xf("%s/bin", tmp);
+    if (mkdir(bin, 0755)) { bad("wat2wasm cases: cannot make ", bin); return 0; }
+    stub = xf("%s/wat2wasm", bin);
+    body = xf(
+        "#!/bin/sh\n"
+        "PATH='%s'; export PATH\n"
+        "sed 's/(i64.const 424242)/(i64.const 99999999999999999999)/' \"$1\" > '%s/x.wat' || exit 9\n"
+        "exec '%s' '%s/x.wat' \"$2\" \"$3\"\n", path, bin, real, bin);
+    if (cx_write(stub, body, strlen(body)) || chmod(stub, 0755)) { bad("wat2wasm cases: cannot write ", stub); return 0; }
+    free(body);
+    src = xf("%s/w2w.ujs", tmp);
+    { const char *w = "let k = 1;\nreturn k + 424242;\n"; if (cx_write(src, w, strlen(w))) { bad("wat2wasm cases: cannot write ", src); return 0; } }
+    for (k = 0; k < 2; k++) {
+        Child c; char *old = sdup(path), *np = k ? xf("%s/none", tmp) : xf("%s", bin);
+        const char *what = k ? "wat2wasm missing" : "wat2wasm rejects", *want = k ? "wat2wasm cannot be run" : "wat2wasm refused the generated WAT (rc 1) at WAT ";
+        if (setenv("PATH", np, 1)) { bad("wat2wasm cases: cannot set PATH to ", np); free(old); free(np); continue; }
+        cx_write(outp, "stale", 5);
+        c = build_child(src, outp, DEFAULT_TABLES, "built");
+        setenv("PATH", old, 1); free(old); free(np);
+        d5(what, &c, outp, src);
+        if (!strstr(c.err, want)) badf("%s: reason not named (want '%s'): %s", what, want, c.err);
+        if (!k && !strstr(c.err, "invalid literal")) badf("%s: wat2wasm's own error not carried: %s", what, c.err);
+        if (!k && !has_position(c.err, src)) badf("%s: no position: %s", what, c.err);
+        if (strchr(c.err, 0x1b) || strstr(c.err, ".wat") || strstr(c.err, bin)) badf("%s: ANSI or a scratch path leaked: %s", what, c.err);
+        printf("refused\t%s\t%s", what, c.err);
+        n++;
+    }
+    body = xf("%s/x.wat", bin); unlink(body); free(body);
+    unlink(stub); rmdir(bin); unlink(src);
+    free(stub); free(bin); free(src); free(real);
+    return n;
+}
+
+/* long-text refusals (generated): a nested function with a 700-character name, a 6000-digit integer literal above
+   2^64-1, a float literal with 6000 integer digits (infinity), an unterminated 200000-byte string */
+static const char *LONGREF[][2] = {
+    { "long_nested700.ujs", "not a top-level function" },
+    { "long_int6000.ujs", "(6000 digits) exceeds 2^64-1" },
+    { "long_finf6000.ujs", "(6000 integer digits) rounds to infinity" },
+    { "long_unterm200k.ujs", "unterminated string (opened at line 2)" } };
+#define NLONGREF ((int)(sizeof LONGREF / sizeof LONGREF[0]))
+static Buf long_refusal(int k) {
+    Buf b; memset(&b, 0, sizeof b); bs(&b, "");
+    switch (k) {
+    case 0: bs(&b, "function f() {\n  function "); R(&b, 'q', 700); bs(&b, "() { return 1; }\n  return "); R(&b, 'q', 700);
+            bs(&b, "();\n}\nreturn f();\n"); break;
+    case 1: bs(&b, "let a = 1;\nreturn a + 1"); R(&b, '0', 5999); bs(&b, ";\n"); break;
+    case 2: bs(&b, "let a = 1;\nreturn a * 1"); R(&b, '0', 5999); bs(&b, ".5;\n"); break;
+    case 3: bs(&b, "let a = 1;\nreturn \""); R(&b, 'x', 200000); bs(&b, ";\n"); break;
+    }
+    return b;
 }
 
 /* D5 over inputs no recorded program covers; each must be refused with a reason and a position */
@@ -2206,79 +2427,128 @@ static int cmd_refuse(const char *root) {
         { "unterminated.ujs", "return \"abc;\n", "unterminated string" },
         { "break.ujs", "break;\nreturn 1;\n", "break outside" },
         { "nested_fn.ujs", "function f() {\n  function g() { return 1; }\n  return g();\n}\nreturn f();\n", "not a top-level function" },
+        /* literals wat2wasm cannot take: refused at the literal's line before any WAT is written */
+        { "int_over.ujs", "let a = 007;\nreturn a + 99999999999999999999;\n", "exceeds 2^64-1" },
+        { "int_2p64.ujs", "let x = 1;\n\nreturn x + 18446744073709551616;\n", "exceeds 2^64-1" },
+        { "int_case.ujs", "let x = 3;\nswitch (x) {\n  case 000099999999999999999999: return 1;\n  default: return 0;\n}\n", "exceeds 2^64-1" },
         { 0, 0, 0 } };
-    char tmp[] = "/tmp/ujswasmrXXXXXX", src[2600], outp[2600], m[1200]; int k, n = 0;
+    /* f64 literals at the infinity boundary (2^1024 - 2^970, the tie rounds to infinity): the integer part is spelled
+       from F64_INF_FROM; F64_INF_FROM - 1 with any fraction stays finite (an accept, see the accepts step) */
+    static const char *FLOATS[][3] = {
+        { "float_inf.ujs", "return %s.0;\n", "rounds to infinity" },
+        { "float_tie.ujs", "let y = 2;\n\nreturn y * 000%s.000;\n", "rounds to infinity" },
+        { 0, 0, 0 } };
+    char tmp[] = "/tmp/ujswasmrXXXXXX", *src, *outp; int k, n = 0, npos = 0;
     if (chdir(root)) { fprintf(stderr, "ujswasm-refuse: cannot enter %s\n", root); return 1; }
     if (!mkdtemp(tmp)) return 1;
-    snprintf(outp, sizeof outp, "%s/o.wasm", tmp);
+    outp = xf("%s/o.wasm", tmp);
     for (k = 0; CASES[k][0]; k++) {
         Child c;
-        snprintf(src, sizeof src, "%s/%s", tmp, CASES[k][0]);
+        src = xf("%s/%s", tmp, CASES[k][0]);
         if (cx_write(src, CASES[k][1], strlen(CASES[k][1]))) return 1;
         cx_write(outp, "stale", 5);           /* a stale OUT must not survive a refusal */
         c = build_child(src, outp, DEFAULT_TABLES, "built");
         d5(CASES[k][0], &c, outp, src);
-        if (!strstr(c.err, CASES[k][2])) { snprintf(m, sizeof m, "%s: reason not named (want '%s'): %.300s", CASES[k][0], CASES[k][2], c.err); bad(m, 0); }
-        if (!has_position(c.err, src)) { snprintf(m, sizeof m, "%s: no position: %.300s", CASES[k][0], c.err); bad(m, 0); }
+        if (!strstr(c.err, CASES[k][2])) badf("%s: reason not named (want '%s'): %s", CASES[k][0], CASES[k][2], c.err);
+        if (!has_position(c.err, src)) badf("%s: no position: %s", CASES[k][0], c.err); else npos++;
         printf("refused\t%s\t%s", CASES[k][0], c.err);
-        unlink(src); n++;
+        unlink(src); free(src); n++;
     }
+    for (k = 0; FLOATS[k][0]; k++) {
+        Child c; char *body = xf(FLOATS[k][1], F64_INF_FROM);
+        src = xf("%s/%s", tmp, FLOATS[k][0]);
+        if (cx_write(src, body, strlen(body))) return 1;
+        free(body);
+        cx_write(outp, "stale", 5);
+        c = build_child(src, outp, DEFAULT_TABLES, "built");
+        d5(FLOATS[k][0], &c, outp, src);
+        if (!strstr(c.err, FLOATS[k][2])) badf("%s: reason not named (want '%s'): %s", FLOATS[k][0], FLOATS[k][2], c.err);
+        if (!has_position(c.err, src)) badf("%s: no position: %s", FLOATS[k][0], c.err); else npos++;
+        printf("refused\t%s\t%s", FLOATS[k][0], c.err);
+        unlink(src); free(src); n++;
+    }
+    /* long texts refused: the reason and the position survive whole, and a long name is named whole (no message
+       buffer cuts it); a 6000-digit integer or float literal is shown by an explicit abbreviation and its count */
+    for (k = 0; k < NLONGREF; k++) {
+        Child c; Buf body = long_refusal(k), name; size_t got;
+        src = xf("%s/%s", tmp, LONGREF[k][0]);
+        if (cx_write(src, body.s, body.n)) return 1;
+        free(body.s);
+        cx_write(outp, "stale", 5);
+        c = build_child(src, outp, DEFAULT_TABLES, "built");
+        d5(LONGREF[k][0], &c, outp, src);
+        if (!strstr(c.err, LONGREF[k][1])) badf("%s: reason not named (want '%s'): %s", LONGREF[k][0], LONGREF[k][1], c.err);
+        if (!has_position(c.err, src)) badf("%s: no position: %s", LONGREF[k][0], c.err); else npos++;
+        memset(&name, 0, sizeof name); bs(&name, " "); R(&name, 'q', 700); bs(&name, " ");
+        if (k == 0 && !strstr(c.err, name.s)) badf("%s: the 700-character name is not named whole: %s", LONGREF[k][0], c.err);
+        free(name.s);
+        got = strlen(c.err);
+        printf("refused\t%s\t", LONGREF[k][0]);
+        if (got > 200) printf("%.*s ... (%ld bytes)\n", 120, c.err, (long)got);   /* the gate log only; checked whole above */
+        else printf("%s", c.err);
+        unlink(src); free(src); n++;
+    }
+    n += refuse_wat2wasm_cases(tmp, outp); npos++;   /* the wat2wasm rejection names the WAT line:col */
     {   /* a missing source and a directory as the source */
         Child c;
-        snprintf(src, sizeof src, "%s/missing.ujs", tmp);
+        src = xf("%s/missing.ujs", tmp);
         c = build_child(src, outp, DEFAULT_TABLES, "built");
         d5("missing source", &c, outp, src);
         if (!strstr(c.err, "cannot read the source")) bad("missing source: reason not named: ", c.err);
         c = build_child(tmp, outp, DEFAULT_TABLES, "built");
         d5("directory as source", &c, outp, tmp);
         if (!strstr(c.err, "not a regular file")) bad("directory source: reason not named: ", c.err);
-        n += 2;
+        n += 2; free(src);
     }
-    unlink(outp); rmdir(tmp);
+    unlink(outp); rmdir(tmp); free(outp);
     if (fails) { fprintf(stderr, "ujswasm-refuse: %d failure(s)\n", fails); return 1; }
-    printf("ujswasm-refuse: PASS (%d uncovered inputs, each rc 1, stdout empty, no output file, reason + position named)\n", n);
+    printf("ujswasm-refuse: PASS (%d uncovered inputs, each rc 1, stdout empty, no output file, one stderr line naming the reason; "
+           "%d with a position -- the rest are a missing/directory source and a missing wat2wasm)\n", n, npos);
     return 0;
 }
 
 /* copy the tables to DIR (scratch), then apply one mutation */
 static void copy_tables(const char *dir) {
-    int i; char a[2600], b[2600]; size_t n; char *t;
-    static const char *F = "contract";
-    snprintf(a, sizeof a, "%s/%s.tsv", DEFAULT_TABLES, F); snprintf(b, sizeof b, "%s/%s.tsv", dir, F);
-    t = cx_read(a, &n); if (!t || cx_write(b, t, n)) { fprintf(stderr, "ujswasm-negative: cannot copy %s\n", a); exit(1); } free(t);
-    for (i = 0; i < 20; i++) {
+    int i; char *a, *b; size_t n; char *t;
+    for (i = -1; i < 20; i++) {
         static const char *N[10] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc" };
-        snprintf(a, sizeof a, "%s/%s.%s.tsv", DEFAULT_TABLES, N[i / 2], i % 2 ? "net" : "gold");
-        snprintf(b, sizeof b, "%s/%s.%s.tsv", dir, N[i / 2], i % 2 ? "net" : "gold");
-        t = cx_read(a, &n); if (!t || cx_write(b, t, n)) { fprintf(stderr, "ujswasm-negative: cannot copy %s\n", a); exit(1); } free(t);
+        if (i < 0) { a = xf("%s/contract.tsv", DEFAULT_TABLES); b = xf("%s/contract.tsv", dir); }
+        else { a = xf("%s/%s.%s.tsv", DEFAULT_TABLES, N[i / 2], i % 2 ? "net" : "gold"); b = xf("%s/%s.%s.tsv", dir, N[i / 2], i % 2 ? "net" : "gold"); }
+        t = cx_read(a, &n); if (!t || cx_write(b, t, n)) { fprintf(stderr, "ujswasm-negative: cannot copy %s\n", a); exit(1); }
+        free(t); free(a); free(b);
     }
 }
 
 /* every w2 entry of NET gets weight +W on CLASS: the net's answers move */
 static void mutate_w2(const char *dir, const char *net, int cls, int w) {
-    char p[2600]; size_t n; char *t, *q; Buf o; memset(&o, 0, sizeof o); bs(&o, "");
-    snprintf(p, sizeof p, "%s/%s.net.tsv", dir, net);
+    char *p = xf("%s/%s.net.tsv", dir, net); size_t n; char *t, *q; Buf o; memset(&o, 0, sizeof o); bs(&o, "");
     t = cx_read(p, &n);
     for (q = t; *q; ) {
         char *nl = strchr(q, '\n');
         *nl = 0;
         badd(&o, q, strlen(q));
-        if (!strncmp(q, "w2\t", 3)) { char e[32]; snprintf(e, sizeof e, "\t%d:%d", cls, w); bs(&o, e); }
+        if (!strncmp(q, "w2\t", 3)) { char *e = xf("\t%d:%d", cls, w); bs(&o, e); free(e); }
         bs(&o, "\n");
         q = nl + 1;
     }
-    cx_write(p, o.s, o.n); free(t); free(o.s);
+    cx_write(p, o.s, o.n); free(t); free(o.s); free(p);
+}
+
+/* the ujs gold port with one label flipped: enc (nop, none) answers trap instead of empty */
+static const char *flipped_label(void *ctx, const char *net, int nk, const char *const *key) {
+    if (!strcmp(net, "enc") && nk == 2 && !strcmp(key[0], "nop") && !strcmp(key[1], "none")) return "trap";
+    return ujsgold_label(ctx, net, nk, key);
 }
 
 static int cmd_negative(const char *root) {
-    char tmp[] = "/tmp/ujswasmnXXXXXX", outp[2600], m[600], p[2600]; int e, t, red = 0, total = 0; Child c;
+    char tmp[] = "/tmp/ujswasmnXXXXXX", *outp, *p; int e, t, red = 0, total = 0; Child c;
     const char *prog = "tests/ujs2wasm/corpus/arith.ujs";
     if (chdir(root)) { fprintf(stderr, "ujswasm-negative: cannot enter %s\n", root); return 1; }
     if (!mkdtemp(tmp)) return 1;
-    snprintf(outp, sizeof outp, "%s/o.wasm", tmp);
+    outp = xf("%s/o.wasm", tmp);
     /* 1. clean copy: acc exact and the program builds (the mutations below are what turn it red) */
     copy_tables(tmp);
-    if (fn_open(tmp) || fn_acc("isel", &e, &t) || e != t) { bad("negative: the clean copy is not exact: ", fn_error()); }
+    if (open_tables(tmp) || fn_acc("isel", &e, &t) || e != t) { bad("negative: the clean copy is not exact: ", fn_error()); }
     c = build_child(prog, outp, tmp, "built");
     if (c.rc) bad("negative: the clean copy does not build: ", c.err);
     /* 2. gold drive: every answer is a gold fallback -> the trace check refuses (red line 1) */
@@ -2287,16 +2557,16 @@ static int cmd_negative(const char *root) {
     if (c.rc == 1 && strstr(c.err, "fell back to gold")) { red++; printf("red\tgold drive\t%s", c.err); } else bad("negative: gold drive was not refused: ", c.err);
     /* 3. a missing net table: named, rc 1 */
     total++;
-    snprintf(p, sizeof p, "%s/enc.net.tsv", tmp);
+    p = xf("%s/enc.net.tsv", tmp);
     { size_t n; char *keep = cx_read(p, &n); unlink(p);
       c = build_child(prog, outp, tmp, "built");
       if (c.rc == 1 && strstr(c.err, "enc.net.tsv") && strstr(c.err, "cannot read")) { red++; printf("red\tmissing table\t%s", c.err); } else bad("negative: missing table not named: ", c.err);
-      cx_write(p, keep, n); free(keep); }
+      cx_write(p, keep, n); free(keep); free(p); }
     /* 4. isel net mutated (every unit +1000 on class 1 = i64_bin): acc red, and the build refused or different */
     total++;
     mutate_w2(tmp, "isel", 1, 1000);
     fn_error_clear();
-    if (fn_open(tmp) == 0 && fn_acc("isel", &e, &t) == 0 && e != t) { red++; snprintf(m, sizeof m, "red\tisel mutated\tacc %d/%d\n", e, t); printf("%s", m); }
+    if (open_tables(tmp) == 0 && fn_acc("isel", &e, &t) == 0 && e != t) { red++; printf("red\tisel mutated\tacc %d/%d\n", e, t); }
     else bad("negative: mutated isel still exact", 0);
     total++;
     c = build_child(prog, outp, tmp, "built");
@@ -2307,30 +2577,40 @@ static int cmd_negative(const char *root) {
     mutate_w2(tmp, "lex", 8, 1000);           /* class 8 = bad */
     c = build_child(prog, outp, tmp, "built");
     if (c.rc == 1 && strstr(c.err, "lex")) { red++; printf("red\tlex mutated\t%s", c.err); } else bad("negative: mutated lex was not refused: ", c.err);
-    /* 6. a gold label flipped: acc red (the label source is checked against the net) */
+    /* 6. a gold label flipped in the file, read by flownet's stock label source (no injection): acc red */
     copy_tables(tmp);
     total++;
     {
         size_t n; char *g; char *q;
-        snprintf(p, sizeof p, "%s/enc.gold.tsv", tmp);
+        p = xf("%s/enc.gold.tsv", tmp);
         g = cx_read(p, &n);
         q = strstr(g, "\nnop\tnone\tempty\n");
         if (q) { memcpy(q + 1 + 9, "trap\n", 5); memmove(q + 1 + 14, q + 1 + 15, strlen(q + 1 + 15) + 1); n--; }
         cx_write(p, g, n);
-        free(g);
+        free(g); free(p);
         fn_error_clear();
-        if (q && fn_open(tmp) == 0 && fn_acc("enc", &e, &t) == 0 && e == t - 1) { red++; snprintf(m, sizeof m, "red\tenc gold flipped\tacc %d/%d\n", e, t); printf("%s", m); }
+        fn_label_source(0, 0, 0);
+        if (q && fn_open(tmp) == 0 && fn_acc("enc", &e, &t) == 0 && e == t - 1) { red++; printf("red\tenc gold flipped\tacc %d/%d\n", e, t); }
         else bad("negative: flipped gold label not caught by acc", 0);
     }
+    /* 7. the same label flipped in the injected label source (the port, wrapped): acc red -- the injected source is
+          what the nets are checked against, and a build through it is refused (enc's gate no longer passes) */
+    copy_tables(tmp);
+    total++;
+    fn_error_clear();
+    if (fn_label_source(ujsgold_domain, flipped_label, 0) == 0 && fn_open(tmp) == 0 && fn_acc("enc", &e, &t) == 0 && e == t - 1) {
+        red++; printf("red\tinjected label flipped\tacc %d/%d\n", e, t);
+    } else bad("negative: flipped injected label not caught by acc: ", fn_error());
+    fn_label_source(0, 0, 0);
     copy_tables(tmp);
     {
         int i; static const char *N[10] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc" };
-        for (i = 0; i < 20; i++) { snprintf(p, sizeof p, "%s/%s.%s.tsv", tmp, N[i / 2], i % 2 ? "net" : "gold"); unlink(p); }
-        snprintf(p, sizeof p, "%s/contract.tsv", tmp); unlink(p);
+        for (i = 0; i < 20; i++) { p = xf("%s/%s.%s.tsv", tmp, N[i / 2], i % 2 ? "net" : "gold"); unlink(p); free(p); }
+        p = xf("%s/contract.tsv", tmp); unlink(p); free(p);
     }
-    unlink(outp); rmdir(tmp);
+    unlink(outp); rmdir(tmp); free(outp);
     if (fails || red != total) { fprintf(stderr, "ujswasm-negative: %d failure(s), %d/%d mutations red\n", fails, red, total); return 1; }
-    printf("ujswasm-negative: PASS (%d/%d mutations red: gold drive, missing table, isel acc + build, lex build, gold label)\n", red, total);
+    printf("ujswasm-negative: PASS (%d/%d mutations red: gold drive, missing table, isel acc + build, lex build, gold label in the file, label in the injected source)\n", red, total);
     return 0;
 }
 
@@ -2352,14 +2632,128 @@ static int d1_file(const char *path, void *ctx) {
     free(b);
     return 0;
 }
+
+/* bounds: no text is cut short by a fixed-size buffer anywhere in flownet/ or adapter/ujswasm/.  Over the code (comments
+   and literal contents blanked), each of these is a finding at FILE:LINE:
+     a call of the printf-to-buffer or string-copy family other than vsnprintf (which only the exact-size formatters
+     run): s-n-printf, s-printf, v-s-printf, str-cpy, str-n-cpy, str-cat, str-n-cat, gets;
+     a fixed-size char array (a non-pointer declarator NAME[N] in a char declaration) whose line does not state its
+     bound in a comment with the word "bounded:";
+   and, inside string literals, a %.N precision (a silent cut; an abbreviation is spelled %.*s with its "..." shown).
+   The scan proves itself first on samples of each kind (it must find every one), so it is not decorative. */
+static int bnd_hits, bnd_files;
+static int is_idc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+/* code: comments and the contents of string/char literals become spaces (newlines kept); lit: the reverse */
+static void bnd_split(const char *t, size_t n, char *code, char *lit) {
+    size_t i = 0; int st = 0;                 /* 0 code, 1 block comment, 2 line comment, 3 "..." 4 '...' */
+    for (i = 0; i < n; i++) {
+        char c = t[i], nx = i + 1 < n ? t[i + 1] : 0;
+        code[i] = lit[i] = c == '\n' ? '\n' : ' ';
+        if (st == 0) {
+            if (c == '/' && nx == '*') { st = 1; i++; code[i] = lit[i] = ' '; continue; }
+            if (c == '/' && nx == '/') { st = 2; continue; }
+            code[i] = c;
+            if (c == '"') st = 3; else if (c == '\'') st = 4;
+        } else if (st == 1) { if (c == '*' && nx == '/') { st = 0; i++; code[i] = lit[i] = ' '; } }
+        else if (st == 2) { if (c == '\n') st = 0; }
+        else {
+            if (c == '\\' && i + 1 < n) { lit[i] = c; i++; lit[i] = t[i] == '\n' ? ' ' : t[i]; code[i] = ' '; continue; }
+            if ((st == 3 && c == '"') || (st == 4 && c == '\'')) { code[i] = c; st = 0; continue; }
+            lit[i] = c == '\n' ? '\n' : c;
+        }
+    }
+    code[n] = lit[n] = 0;
+}
+static const char *BND_CALLS[] = { "s" "nprintf", "s" "printf", "vs" "printf", "str" "cpy", "str" "ncpy", "str" "cat", "str" "ncat", "ge" "ts", 0 };
+static int bnd_text(const char *label, const char *t, size_t n, int quiet) {
+    char *code = xrealloc(0, n + 1), *lit = xrealloc(0, n + 1); size_t i, ls = 0; int line = 1, hits = 0, k;
+    bnd_split(t, n, code, lit);
+    for (i = 0; i <= n; i++) {
+        if (i < n && code[i] != '\n') continue;
+        {   /* one line: [ls, i) */
+            const char *c = code + ls, *l = lit + ls, *o = t + ls; size_t L = i - ls, j;
+            int bounded = 0;
+            for (j = 0; j + 8 <= L; j++) if (!memcmp(o + j, "bounded:", 8)) bounded = 1;
+            for (j = 0; j < L; j++) {
+                if (!is_idc(c[j]) || (j && is_idc(c[j - 1]))) continue;
+                for (k = 0; BND_CALLS[k]; k++) {
+                    size_t q = strlen(BND_CALLS[k]), e = j + q;
+                    if (e > L || memcmp(c + j, BND_CALLS[k], q) || (e < L && is_idc(c[e]))) continue;
+                    while (e < L && c[e] == ' ') e++;
+                    if (e < L && c[e] == '(') { if (!quiet) fprintf(stderr, "ujswasm-bounds: %s:%d: %s(...) (a printf-to-buffer or string copy)\n", label, line, BND_CALLS[k]); hits++; }
+                }
+                if (L - j >= 4 && !memcmp(c + j, "char", 4) && (j + 4 == L || !is_idc(c[j + 4]))) {
+                    /* the declarators of this char declaration: depth-0 NAME[N] without a '*' before NAME */
+                    size_t e = j + 4; int depth = 0, star = 0, init = 0;
+                    for (; e < L; e++) {
+                        char ch = c[e];
+                        if (ch == '(' || ch == '{') depth++;
+                        else if (ch == ')' || ch == '}') { if (--depth < 0) break; }
+                        else if (depth == 0 && ch == ';') break;
+                        else if (depth == 0 && ch == ',') { star = 0; init = 0; }
+                        else if (depth == 0 && ch == '=') init = 1;
+                        else if (depth == 0 && !init && ch == '*') star = 1;
+                        else if (depth == 0 && !init && ch == '[' && !star) {
+                            size_t b2 = e; while (b2 > j + 4 && c[b2 - 1] == ' ') b2--;
+                            if (b2 > j + 4 && is_idc(c[b2 - 1])) {
+                                size_t f = e + 1; while (f < L && c[f] == ' ') f++;
+                                if (f < L && c[f] != ']' && !bounded) { if (!quiet) fprintf(stderr, "ujswasm-bounds: %s:%d: a fixed-size char array without a stated bound (\"bounded:\" comment)\n", label, line); hits++; }
+                            }
+                        }
+                    }
+                }
+            }
+            for (j = 0; j + 2 < L; j++)
+                if (l[j] == '%' && l[j + 1] == '.' && l[j + 2] >= '0' && l[j + 2] <= '9') { if (!quiet) fprintf(stderr, "ujswasm-bounds: %s:%d: a %%.N precision in a format (a silent cut)\n", label, line); hits++; }
+        }
+        ls = i + 1; line++;
+    }
+    free(code); free(lit);
+    return hits;
+}
+static int bnd_file(const char *path, void *ctx) {
+    size_t n, L = strlen(path); char *b; (void)ctx;
+    if (L < 3 || strcmp(path + L - 3, ".cx")) return 0;
+    bnd_files++;
+    if (!(b = cx_read(path, &n))) { fprintf(stderr, "ujswasm-bounds: %s: cannot read\n", path); bnd_hits++; return 0; }
+    bnd_hits += bnd_text(path, b, n, 0);
+    free(b);
+    return 0;
+}
+static int bnd_selftest(void) {
+    /* every line but the last two holds one finding (calls, arrays, precisions); the last two hold none */
+    static const char *S =
+        "  n = s" "nprintf(m, sizeof m, fmt, a);\n"
+        "  s" "printf (m, fmt, a);\n"
+        "  str" "cpy(d, s); \n"
+        "  str" "cat(d, s);\n"
+        "  str" "ncpy(d, s, 8);\n"
+        "  char m[80];\n"
+        "  static char *p, q[12];\n"
+        "  unsigned char md[32]; const char *x = y[3];\n"
+        "  printf(\"%" ".60s\", s);\n"
+        "  char t[4]; /* bounded" ": a code point */ x = v" "snprintf(p, c, f, ap); char *f[8]; char u[] = \"x\";\n"
+        "  /* char m[80]; s" "nprintf(m, 80, \"%" ".9s\"); */ x = \"s" "nprintf(m, 80) char z[9]\"; c = (unsigned char)d[i];\n";
+    int got = bnd_text("selftest", S, strlen(S), 1);
+    if (got != 9) { fprintf(stderr, "ujswasm-bounds: the scan found %d of the 9 sample findings (not trusted)\n", got); return 1; }
+    return 0;
+}
+
 static int cmd_d1(const char *root) {
-    char d[2400];
-    snprintf(d, sizeof d, "%s/flownet", root);
+    char *d = xf("%s/flownet", root), *a = xf("%s/adapter/ujswasm", root); int rc = 0;
     if (cx_walk(d, d1_file, 0) < 0) { fprintf(stderr, "ujswasm-d1: %s: cannot read\n", d); return 1; }
     if (d1_files < 4) { fprintf(stderr, "ujswasm-d1: only %d .cx files under %s (want contract, nets, flow, api)\n", d1_files, d); return 1; }
-    if (d1_hits) return 1;
-    printf("ujswasm-d1: PASS (%d .cx files under flownet/: no ujs, no Python)\n", d1_files);
-    return 0;
+    if (d1_hits) rc = 1;
+    else printf("ujswasm-d1: PASS (%d .cx files under flownet/: no ujs, no Python)\n", d1_files);
+    /* the class fix for silent truncation stays fixed: flownet/ and the adapter */
+    if (bnd_selftest()) return 1;
+    if (cx_walk(d, bnd_file, 0) < 0 || cx_walk(a, bnd_file, 0) < 0) { fprintf(stderr, "ujswasm-bounds: cannot walk %s or %s\n", d, a); return 1; }
+    if (bnd_files < 8) { fprintf(stderr, "ujswasm-bounds: only %d .cx files (want flownet's 5 and the adapter's 3)\n", bnd_files); return 1; }
+    if (bnd_hits) { fprintf(stderr, "ujswasm-bounds: %d finding(s)\n", bnd_hits); return 1; }
+    printf("ujswasm-bounds: PASS (%d .cx files under flownet/ and adapter/ujswasm/: no printf-to-buffer or string copy, "
+           "every fixed char array states its bound, no %%.N precision; self-test 9/9)\n", bnd_files);
+    free(d); free(a);
+    return rc;
 }
 
 int main(int argc, char **argv) {

@@ -1,0 +1,471 @@
+#!/usr/bin/env -S unisacc.com -run
+/* identitynegativecheck.cx -- tests/identitynegativecheck.py in C (2026-10-23, the owner's direction: the toolchain
+   moves off Python).  Three bounded identity refusal witnesses; no construction or product execution.
+     sh ./unisacc.com -run tests/identitynegativecheck.cx -- {product,include,prep} [--candidate C] [--ua UA]
+   product  CANDIDATE (default ROOT/unisacc.com) and its .build.json are fresh (exec/c/provenance.py check), equal
+            to ROOT's own pair (cmp), a copy in a temporary directory is equal and fresh, and a copy with its first
+            byte flipped differs (cmp rc 1) and is refused ("artifact differs from its build record", rc 1);
+   include  the runtime copy helper (tests/cxlib/runtimecopy.cx, the port of tests/checklib.py copy_runtime) copies
+            exactly exec/c/resourceledger.h and its quoted include include/unisa_sha256.h out of a temporary source
+            root, and refuses with "runtime include missing: <path>" once that header is removed there;
+   prep     exec/pipeline/models.py OUT <os>/<arch> 1 cc --native-ua UA --require-cached with an empty temporary
+            model cache is rc 75 "NEED_PREPARE native resources: run exec-native-resources-prep", leaves only *.lock
+            files in the cache and publishes no OUT.
+   Every step runs under the native watchdog `tests/bound 4` (in ROOT, 6 s limit) -- the .py ran tests/bound.py,
+   which execs the same verified bound binary; the tools under test (provenance.py, models.py) are still Python and
+   run as `python3 -B ...` with the first python3 on PATH, which is what the .py's sys.executable was under the gate.
+   The pinned inputs (sha256) must be unchanged at the end and the whole run takes at most 10 s.  Success: one JSON
+   line (keys sorted, json.dumps spelling) on stdout, rc 0 -- the .py's line byte for byte apart from the temporary
+   paths and the measured times; "sources" keeps tests/checklib.py, the helper the .py pinned.  An input that is
+   missing: `NEED_PREPARE identity smoke input: PATH` on stderr, rc 1.  Any failed expectation: the .py's exception
+   as its last traceback line on stderr, no stdout, rc 1.  Arguments follow the .py's argparse (prog
+   identitynegativecheck.cx: usage errors rc 2, -h prints help; the width is COLUMNS, else 80). */
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pyjson
+
+static char ROOT[4096], TMP[4096], PY[4096], PROG[256];
+static void cleanup(void) { if (TMP[0]) { pr_rmtree(TMP); TMP[0] = 0; } }
+static void fail(const char *line) {   /* the .py's uncaught exception (or SystemExit text): its last line, rc 1 */
+    fflush(stdout);
+    fprintf(stderr, "%s\n", line);
+    cleanup();
+    exit(1);
+}
+
+typedef struct { char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) fail("MemoryError");
+        b->p = g; b->cap = c;
+    }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
+static void pyrepr(Buf *b, const char *s) {
+    size_t l = strlen(s), cap = 4 * l + 8; char *r = malloc(cap);
+    if (!r) fail("MemoryError");
+    rtc_pyrepr(s, l, r, cap); puts_(b, r); free(r);
+}
+
+/* ---------- argparse ---------- */
+static const char *DESC = "Three bounded identity refusal witnesses; no construction or product execution.";
+static int columns(void) {
+    const char *c = getenv("COLUMNS"); long v; char *end;
+    if (c && *c) { v = strtol(c, &end, 10); if (!*end && v > 0) return (int)v; }
+    return 80;
+}
+/* HelpFormatter._format_usage for [-h] [--candidate CANDIDATE] [--ua UA] {product,include,prep}: get_lines() wraps
+   PARTS at TEXT_WIDTH, each continuation line indented by INDENT; with PREFIX the first line follows it */
+static void get_lines(Buf *o, const char **parts, int np, int indent, const char *prefix, int text_width, int *nlines) {
+    int line_len = prefix ? (int)strlen(prefix) - 1 : indent - 1, i, k, open_ = 0, first = 1;
+    for (i = 0; i < np; i++) {
+        int l = (int)strlen(parts[i]);
+        if (line_len + 1 + l > text_width && open_) { open_ = 0; line_len = indent - 1; }
+        if (!open_) {
+            if (*nlines) puts_(o, "\n");
+            if (!(prefix && first)) for (k = 0; k < indent; k++) puts_(o, " ");
+            (*nlines)++; open_ = 1; first = 0;
+        } else puts_(o, " ");
+        puts_(o, parts[i]); line_len += l + 1;
+    }
+}
+static void usage(Buf *o) {
+    int text_width = columns() - 2, plen = 7, prl = (int)strlen(PROG), nl = 0;
+    const char *opt[3] = { "[-h]", "[--candidate CANDIDATE]", "[--ua UA]" }, *pos[1] = { "{product,include,prep}" };
+    const char *withprog[4];
+    puts_(o, "usage: ");
+    if (plen + prl + 1 + 4 + 1 + 23 + 1 + 9 + 1 + 22 <= text_width) {
+        puts_(o, PROG); puts_(o, " [-h] [--candidate CANDIDATE] [--ua UA] {product,include,prep}"); return;
+    }
+    if (plen + prl <= 0.75 * text_width) {
+        int indent = plen + prl + 1;
+        withprog[0] = PROG; withprog[1] = opt[0]; withprog[2] = opt[1]; withprog[3] = opt[2];
+        get_lines(o, withprog, 4, indent, "usage: ", text_width, &nl);
+        get_lines(o, pos, 1, indent, 0, text_width, &nl);
+    } else {   /* [prog] + get_lines(opt + pos), or get_lines(opt) + get_lines(pos) when that takes more than one line */
+        const char *all[4]; Buf probe = { 0, 0, 0 }; int pn = 0;
+        all[0] = opt[0]; all[1] = opt[1]; all[2] = opt[2]; all[3] = pos[0];
+        get_lines(&probe, all, 4, plen, 0, text_width, &pn);
+        free(probe.p);
+        puts_(o, PROG); nl = 1;
+        if (pn <= 1) get_lines(o, all, 4, plen, 0, text_width, &nl);
+        else { get_lines(o, opt, 3, plen, 0, text_width, &nl); get_lines(o, pos, 1, plen, 0, text_width, &nl); }
+    }
+}
+static void wrap(Buf *o, const char *text, int width, int indent) {   /* textwrap.fill of single-spaced words */
+    const char *p = text; int len = 0, k, any = 0;
+    while (*p) {
+        const char *e = strchr(p, ' '); int l = e ? (int)(e - p) : (int)strlen(p);
+        if (any && len + 1 + l > width) { puts_(o, "\n"); for (k = 0; k < indent; k++) puts_(o, " "); len = 0; any = 0; }
+        if (any) { puts_(o, " "); len++; }
+        put(o, p, (size_t)l); len += l; any = 1;
+        p += l; while (*p == ' ') p++;
+    }
+}
+static void help(void) {
+    Buf o = { 0, 0, 0 }; int width = columns() - 2, mhp, hp, aw, k;
+    usage(&o); puts_(&o, "\n\n");
+    wrap(&o, DESC, width < 11 ? 11 : width, 0); puts_(&o, "\n\n");
+    mhp = width - 20 > 4 ? width - 20 : 4; if (mhp > 24) mhp = 24;
+    hp = 24 + 2 < mhp ? 26 : mhp;   /* min(action_max_length + 2, max_help_position): action_max_length is 24 */
+    aw = hp - 4;
+    puts_(&o, "positional arguments:\n  {product,include,prep}\n\noptions:\n");
+    puts_(&o, "  -h, --help");
+    if (10 <= aw) { for (k = 10; k < aw + 2; k++) puts_(&o, " "); }
+    else { puts_(&o, "\n"); for (k = 0; k < hp; k++) puts_(&o, " "); }
+    wrap(&o, "show this help message and exit", width - hp < 11 ? 11 : width - hp, hp);
+    puts_(&o, "\n  --candidate CANDIDATE\n  --ua UA\n");
+    fputs(o.p, stdout);
+    exit(0);
+}
+static void argerror(const char *msg) {
+    Buf o = { 0, 0, 0 };
+    usage(&o); puts_(&o, "\n"); puts_(&o, PROG); puts_(&o, ": error: "); puts_(&o, msg); puts_(&o, "\n");
+    fputs(o.p, stderr);
+    exit(2);
+}
+static int prefix_of(const char *a, size_t n, const char *full) { return n >= 3 && n <= strlen(full) && !strncmp(a, full, n); }
+static int numberlike(const char *s) {   /* argparse's negative-number test: ^-\d+$|^-\d*\.\d+$ */
+    const char *p = s + 1; int d = 0, dot = 0, after = 0;
+    if (s[0] != '-' || !*p) return 0;
+    for (; *p; p++) {
+        if (*p >= '0' && *p <= '9') { if (dot) after++; else d++; }
+        else if (*p == '.' && !dot) dot = 1;
+        else return 0;
+    }
+    return dot ? after > 0 : d > 0;
+}
+
+/* ---------- pins and steps ---------- */
+typedef struct { char *path; char hex[65]; } Pin;
+static Pin PINS[16]; static int NPIN;
+static pj_value *STEPS;
+
+/* protect(p): p.resolve(), present (NEED_PREPARE on FileNotFoundError), pins[str(p)] = sha(p) */
+static void protect(const char *in, char *out, size_t outlen) {
+    char why[16384]; struct stat st; int i;
+    if (rtc_resolve(in[0] ? in : ".", 0, out, outlen, why, sizeof why)) fail(why);
+    errno = 0;
+    if (stat(out, &st) != 0) {
+        if (errno == ENOENT) { char m[8300]; snprintf(m, sizeof m, "NEED_PREPARE identity smoke input: %s", out); fail(m); }
+        rtc_oserror(errno, out, why, sizeof why); fail(why);
+    }
+    for (i = 0; i < NPIN; i++) if (!strcmp(PINS[i].path, out)) break;
+    if (i == NPIN) { if (NPIN == 16) fail("MemoryError"); PINS[NPIN].path = malloc(strlen(out) + 1); strcpy(PINS[NPIN].path, out); NPIN++; }
+    if (rtc_sha_file(out, PINS[i].hex, why, sizeof why)) fail(why);
+}
+static const char *pin_of(const char *path) { int i; for (i = 0; i < NPIN; i++) if (!strcmp(PINS[i].path, path)) return PINS[i].hex; return 0; }
+
+static pj_value *strlist(char **v) { pj_value *l = pj_list(); int i; for (i = 0; v[i]; i++) pj_append(l, pj_strz(v[i])); return l; }
+static void bytes_tuple_fail(Buf *b, const char *out, size_t on, const char *err, size_t en) {
+    char *r = pr_repr_bytes(out, on); puts_(b, r); free(r); puts_(b, ", ");
+    r = pr_repr_bytes(err, en); puts_(b, r); free(r); puts_(b, ")");
+    fail(b->p);
+}
+/* call(name, args, rc, text): tests/bound 4 ARGS in ROOT (6 s); the step is recorded before it is checked */
+static void call(const char *name, char **args, int want, const char *text) {
+    char bound[4200], *argv[16], why[16384], hex[65]; int n = 0, i; pr_result r; double t, el; pj_value *step = pj_dict();
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv[n++] = "sh"; argv[n++] = bound; argv[n++] = "4";
+    for (i = 0; args[i]; i++) argv[n++] = args[i];
+    argv[n] = 0;
+    t = pr_monotonic();
+    if (pr_run(argv, ROOT, 0, 0, 6, &r, why, sizeof why)) fail(why);
+    el = pr_monotonic() - t;
+    pj_set(step, "argv", strlist(args));
+    pj_set(step, "monotonic", pj_float(el));
+    pj_set(step, "rc", pj_int(r.rc));
+    cx_sha256_hex(r.err, r.errn, hex); pj_set(step, "stderr_sha256", pj_strz(hex));
+    cx_sha256_hex(r.out, r.outn, hex); pj_set(step, "stdout_sha256", pj_strz(hex));
+    pj_set(step, "step", pj_strz(name));
+    pj_append(STEPS, step);
+    {
+        int found = 1;
+        if (text && *text) {
+            size_t tl = strlen(text), k; found = 0;
+            for (k = 0; !found && k + tl <= r.outn + r.errn; k++) {
+                size_t j;
+                for (j = 0; j < tl; j++) { size_t at = k + j; char c = at < r.outn ? r.out[at] : r.err[at - r.outn]; if (c != text[j]) break; }
+                found = j == tl;
+            }
+        }
+        if (r.rc != want || el > 5 || !found) {
+            Buf b = { 0, 0, 0 }; char tt[32];
+            puts_(&b, "AssertionError: ("); pyrepr(&b, name); snprintf(tt, sizeof tt, ", %d, ", r.rc); puts_(&b, tt);
+            bytes_tuple_fail(&b, r.out, r.outn, r.err, r.errn);
+        }
+    }
+    pr_free(&r);
+}
+static void mkdirs(const char *dir) {   /* Path(dir).mkdir(parents=True, exist_ok=True) */
+    char p[8192], *s;
+    snprintf(p, sizeof p, "%s", dir);
+    for (s = p + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(p, 0777); *s = '/'; }
+    mkdir(p, 0777);
+}
+static void copyfile(const char *src, const char *dst, int keep_stat) {   /* shutil.copyfile / copy2 */
+    size_t n = 0; char *b, why[16384]; struct stat st;
+    errno = 0;
+    if (stat(src, &st) != 0 || !(b = cx_read(src, &n))) { rtc_oserror(errno ? errno : EIO, src, why, sizeof why); fail(why); }
+    errno = 0;
+    if (cx_write(dst, b, n) != 0) { rtc_oserror(errno ? errno : EIO, dst, why, sizeof why); fail(why); }
+    free(b);
+    if (keep_stat) chmod(dst, st.st_mode & 07777);   /* copy2's mode bits; its timestamps are not observed by any step */
+}
+
+int main(int argc, char **argv) {
+    char here[4096], *slash, why[16384]; const char *part = 0, *candidate_arg = 0, *ua_arg = 0, *kind = "";
+    char *extras[64]; int nextra = 0, i, only_pos = 0; double start, elapsed; pj_value *doc;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    snprintf(PROG, sizeof PROG, "%s", slash ? slash + 1 : here);
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[4200]; snprintf(t, sizeof t, "%s/..", here); if (rtc_resolve(t, 0, ROOT, sizeof ROOT, why, sizeof why)) fail(why); }
+
+    /* argparse, left to right as parse_args consumes them */
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!only_pos && !strcmp(a, "--")) { only_pos = 1; continue; }
+        if (!only_pos && a[0] == '-' && a[1] && !numberlike(a)) {
+            const char *eq = a[1] == '-' ? strchr(a, '=') : 0; size_t n = eq ? (size_t)(eq - a) : strlen(a); const char **dest = 0; const char *opt = 0;
+            if (!strcmp(a, "-h") || (a[1] == '-' && !eq && prefix_of(a, n, "--help"))) help();
+            if (a[1] == '-' && prefix_of(a, n, "--candidate")) { dest = &candidate_arg; opt = "--candidate"; }
+            else if (a[1] == '-' && prefix_of(a, n, "--ua")) { dest = &ua_arg; opt = "--ua"; }
+            if (dest) {
+                if (eq) *dest = eq + 1;
+                else if (i + 1 < argc && !(argv[i + 1][0] == '-' && argv[i + 1][1] && !numberlike(argv[i + 1]))) *dest = argv[++i];
+                else { char m[128]; snprintf(m, sizeof m, "argument %s: expected one argument", opt); argerror(m); }
+                continue;
+            }
+            if (nextra < 64) extras[nextra++] = (char *)a;
+            continue;
+        }
+        if (!part) {
+            if (strcmp(a, "product") && strcmp(a, "include") && strcmp(a, "prep")) {
+                Buf m = { 0, 0, 0 };
+                puts_(&m, "argument part: invalid choice: "); pyrepr(&m, a); puts_(&m, " (choose from 'product', 'include', 'prep')");
+                argerror(m.p);
+            }
+            part = a;
+            continue;
+        }
+        if (nextra < 64) extras[nextra++] = (char *)a;
+    }
+    if (!part) argerror("the following arguments are required: part");
+    if (nextra) {
+        Buf m = { 0, 0, 0 };
+        puts_(&m, "unrecognized arguments:");
+        for (i = 0; i < nextra; i++) { puts_(&m, " "); puts_(&m, extras[i]); }
+        argerror(m.p);
+    }
+
+    pr_python(PY, sizeof PY);
+    start = pr_monotonic();
+    STEPS = pj_list();
+    if (pr_tempdir("identity-smoke-", TMP, sizeof TMP)) { rtc_oserror(errno, "/tmp", why, sizeof why); fail(why); }
+
+    if (!strcmp(part, "product")) {
+        char cin[8192], cand[8192], side[8300], sidein[8300], rp[8192], rpin[8192], rs[8300], prov[4300], good[8300], bad[8300], gs[8400], bs[8400];
+        char *data; size_t n = 0; struct stat st;
+        if (candidate_arg) snprintf(cin, sizeof cin, "%s", candidate_arg); else snprintf(cin, sizeof cin, "%s/unisacc.com", ROOT);
+        protect(cin, cand, sizeof cand);
+        snprintf(sidein, sizeof sidein, "%s.build.json", cand);
+        protect(sidein, side, sizeof side);
+        snprintf(prov, sizeof prov, "%s/exec/c/provenance.py", ROOT);
+        { char *a[] = { PY, "-B", prov, "check", cand, 0 }; call("candidate-fresh", a, 0, "product freshness: verified"); }
+        snprintf(rpin, sizeof rpin, "%s/unisacc.com", ROOT);
+        protect(rpin, rp, sizeof rp);
+        snprintf(sidein, sizeof sidein, "%s/unisacc.com.build.json", ROOT);
+        protect(sidein, rs, sizeof rs);
+        { char *a[] = { "cmp", "--", rp, cand, 0 }; call("actual-root-pair", a, 0, 0); }
+        { char *a[] = { "cmp", "--", sidein, side, 0 }; call("actual-root-sidecar", a, 0, 0); }
+        snprintf(good, sizeof good, "%s/positive", TMP); mkdir(good, 0777);
+        snprintf(bad, sizeof bad, "%s/negative", TMP); mkdir(bad, 0777);
+        snprintf(good, sizeof good, "%s/positive/unisacc.com", TMP);
+        snprintf(bad, sizeof bad, "%s/negative/unisacc.com", TMP);
+        snprintf(gs, sizeof gs, "%s.build.json", good); snprintf(bs, sizeof bs, "%s.build.json", bad);
+        copyfile(cand, good, 1); copyfile(side, gs, 1);
+        errno = 0;
+        if (stat(cand, &st) != 0 || !(data = cx_read(cand, &n))) { rtc_oserror(errno ? errno : EIO, cand, why, sizeof why); fail(why); }
+        if (!n) fail("AssertionError");
+        data[0] ^= 1;
+        errno = 0;
+        if (cx_write(bad, data, n) != 0) { rtc_oserror(errno ? errno : EIO, bad, why, sizeof why); fail(why); }
+        free(data);
+        copyfile(side, bs, 1);
+        kind = "ONE_BYTE_DIFFERENT_PRODUCT_CONTROL_NOT_HISTORICAL_RELEASE";
+        { char *a[] = { "cmp", "--", good, cand, 0 }; call("positive-pair", a, 0, 0); }
+        { char *a[] = { PY, "-B", prov, "check", good, 0 }; call("positive-fresh", a, 0, "product freshness: verified"); }
+        { char *a[] = { "cmp", "--", bad, cand, 0 }; call("different-pair", a, 1, 0); }
+        { char *a[] = { PY, "-B", prov, "check", bad, 0 }; call("artifact-refusal", a, 1, "artifact differs from its build record"); }
+    } else if (!strcmp(part, "include")) {
+        char in[8300], helper[8192], header[8192], dep[8192], source[8300], dst[16384], posd[8300], negd[8300], missing[8400];
+        const char *files[2]; int k; rtc_file *copied; size_t nc, rl = strlen(ROOT); double before; pj_value *step, *cp;
+        snprintf(in, sizeof in, "%s/tests/checklib.py", ROOT); protect(in, helper, sizeof helper);
+        snprintf(in, sizeof in, "%s/exec/c/resourceledger.h", ROOT); protect(in, header, sizeof header);
+        snprintf(in, sizeof in, "%s/include/unisa_sha256.h", ROOT); protect(in, dep, sizeof dep);
+        snprintf(source, sizeof source, "%s/source", TMP);
+        files[0] = header; files[1] = dep;
+        for (k = 0; k < 2; k++) {
+            char d[16384], *sl;
+            if (strncmp(files[k], ROOT, rl) || files[k][rl] != '/') {
+                Buf m = { 0, 0, 0 }; puts_(&m, "ValueError: "); pyrepr(&m, files[k]); puts_(&m, " is not in the subpath of "); pyrepr(&m, ROOT); fail(m.p);
+            }
+            snprintf(dst, sizeof dst, "%s/%s", source, files[k] + rl + 1);
+            snprintf(d, sizeof d, "%s", dst); sl = strrchr(d, '/'); *sl = 0; mkdirs(d);
+            copyfile(files[k], dst, 0);
+        }
+        snprintf(posd, sizeof posd, "%s/positive", TMP);
+        before = pr_monotonic();
+        if (rtc_copy_runtime(source, posd, &copied, &nc, why, sizeof why)) fail(why);
+        {   /* copied == expected and every copy hashes as pinned */
+            int ok = nc == 2;
+            for (k = 0; ok && k < 2; k++) {
+                const char *rel = files[k] + rl + 1; size_t j; int hit = 0;
+                for (j = 0; j < nc; j++) if (!strcmp(copied[j].rel, rel) && !strcmp(copied[j].hex, pin_of(files[k]))) hit = 1;
+                ok = hit;
+            }
+            for (k = 0; ok && k < 2; k++) {
+                char p[16384], hx[65];
+                snprintf(p, sizeof p, "%s/%s", posd, files[k] + rl + 1);
+                if (rtc_sha_file(p, hx, why, sizeof why)) fail(why);
+                ok = !strcmp(hx, pin_of(files[k]));
+            }
+            if (!ok) fail("AssertionError");
+        }
+        step = pj_dict(); cp = pj_dict();
+        for (k = 0; k < (int)nc; k++) pj_set(cp, copied[k].rel, pj_strz(copied[k].hex));
+        pj_set(step, "copied", cp);
+        pj_set(step, "monotonic", pj_float(pr_monotonic() - before));
+        pj_set(step, "rc", pj_int(0));
+        pj_set(step, "step", pj_strz("positive-closure"));
+        pj_append(STEPS, step);
+        snprintf(missing, sizeof missing, "%s/include/unisa_sha256.h", source);
+        if (unlink(missing) != 0) { rtc_oserror(errno, missing, why, sizeof why); fail(why); }
+        before = pr_monotonic();
+        snprintf(negd, sizeof negd, "%s/negative", TMP);
+        if (!rtc_copy_runtime(source, negd, &copied, &nc, why, sizeof why)) fail("AssertionError: missing runtime include accepted");
+        {
+            char want[8600];
+            snprintf(want, sizeof want, "FileNotFoundError: runtime include missing: %s", missing);
+            if (strncmp(why, "FileNotFoundError: ", 19)) fail(why);   /* any other exception propagates */
+            if (strcmp(why, want)) fail("AssertionError");
+        }
+        step = pj_dict();
+        pj_set(step, "exception", pj_strz("FileNotFoundError"));
+        pj_set(step, "monotonic", pj_float(pr_monotonic() - before));
+        pj_set(step, "reason", pj_strz(why + 19));
+        pj_set(step, "step", pj_strz("missing-header"));
+        pj_set(step, "successful_closure_returned", pj_bool(0));
+        pj_append(STEPS, step);
+        kind = "REAL_QUOTED_INCLUDE_REMOVED_ONLY_IN_TEMP_ROOT";
+    } else {
+        char uain[8192], ua[8192], cache[8300], output[8300], models[4300], bound[4300], hex[65], *target = 0, *arch = 0;
+        char *args[16], *argvv[20]; int n = 0, k; pr_result r; double before; pj_value *step; struct stat st;
+        if (ua_arg) snprintf(uain, sizeof uain, "%s", ua_arg);
+        else snprintf(uain, sizeof uain, "%s", getenv("UA") ? getenv("UA") : "/tmp/ua_ref");
+        protect(uain, ua, sizeof ua);
+#if defined(__linux__)
+        target = "lnx";
+#elif defined(__APPLE__)
+        target = "osx";
+#endif
+#if defined(__x86_64__)
+        arch = "x86_64";
+#elif defined(__aarch64__) || defined(__arm64__)
+        arch = "arm64";
+#endif
+        if (!target || !arch) fail("AssertionError: identity prep host not covered");
+        snprintf(cache, sizeof cache, "%s/cache", TMP);
+        if (mkdir(cache, 0777) != 0) { rtc_oserror(errno, cache, why, sizeof why); fail(why); }
+        snprintf(output, sizeof output, "%s/output", TMP);
+        snprintf(models, sizeof models, "%s/exec/pipeline/models.py", ROOT);
+        { char ta[32]; snprintf(ta, sizeof ta, "%s/%s", target, arch);
+          args[n++] = PY; args[n++] = "-B"; args[n++] = models; args[n++] = output; args[n++] = ta; args[n++] = "1"; args[n++] = "cc";
+          args[n++] = "--native-ua"; args[n++] = ua; args[n++] = "--require-cached"; args[n] = 0;
+          snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+          k = 0; argvv[k++] = "sh"; argvv[k++] = bound; argvv[k++] = "4";
+          for (i = 0; args[i]; i++) argvv[k++] = args[i];
+          argvv[k] = 0;
+          before = pr_monotonic();
+          if (pr_run(argvv, ROOT, "UNISACC_MODEL_CACHE", cache, 6, &r, why, sizeof why)) fail(why);
+          step = pj_dict();
+          pj_set(step, "argv", strlist(args));
+          pj_set(step, "monotonic", pj_float(pr_monotonic() - before));
+          pj_set(step, "rc", pj_int(r.rc));
+          { size_t m; char *d = pr_decode_replace(r.err, r.errn, &m); pj_set(step, "reason", pj_str(d, m)); free(d); }
+          cx_sha256_hex(r.err, r.errn, hex); pj_set(step, "stderr_sha256", pj_strz(hex));
+          cx_sha256_hex(r.out, r.outn, hex); pj_set(step, "stdout_sha256", pj_strz(hex));
+          pj_set(step, "step", pj_strz("missing-prep"));
+          pj_append(STEPS, step); }
+        {
+            const char *needle = "NEED_PREPARE native resources: run exec-native-resources-prep"; size_t nl = strlen(needle), j; int hit = 0;
+            for (j = 0; !hit && j + nl <= r.errn; j++) hit = !memcmp(r.err + j, needle, nl);
+            if (r.rc != 75 || !hit) {
+                Buf b = { 0, 0, 0 }; char tt[32];
+                snprintf(tt, sizeof tt, "AssertionError: (%d, ", r.rc); puts_(&b, tt);
+                bytes_tuple_fail(&b, r.out, r.outn, r.err, r.errn);
+            }
+        }
+        {   /* every entry under the cache (directories included) is a file named *.lock */
+            char *stack[256]; int sp = 0, badn = 0; Buf all = { 0, 0, 0 };
+            puts_(&all, "AssertionError: [");
+            stack[sp++] = strdup(cache);
+            while (sp) {
+                char *d = stack[--sp]; DIR *dp = opendir(d); struct dirent *e;
+                if (dp) {
+                    while ((e = readdir(dp))) {
+                        char p[8192]; size_t l = strlen(e->d_name); int isfile;
+                        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                        snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+                        isfile = stat(p, &st) == 0 && S_ISREG(st.st_mode);
+                        if (!(isfile && l >= 5 && !strcmp(e->d_name + l - 5, ".lock"))) badn++;
+                        if (all.n > 17) puts_(&all, ", ");
+                        puts_(&all, "PosixPath("); pyrepr(&all, p); puts_(&all, ")");
+                        if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode) && sp < 256) stack[sp++] = strdup(p);
+                    }
+                    closedir(dp);
+                }
+                free(d);
+            }
+            puts_(&all, "]");
+            if (badn) fail(all.p);
+        }
+        errno = 0;
+        if (stat(output, &st) == 0) fail("AssertionError: missing prep published output");
+        if (errno != ENOENT) { rtc_oserror(errno, output, why, sizeof why); fail(why); }
+        pr_free(&r);
+        kind = "EMPTY_TEMP_CACHE_EXISTING_REQUIRE_CACHED_REFUSAL_ONLY";
+    }
+    cleanup();
+    for (i = 0; i < NPIN; i++) {
+        char hx[65];
+        if (rtc_sha_file(PINS[i].path, hx, why, sizeof why)) fail(why);
+        if (strcmp(hx, PINS[i].hex)) fail("AssertionError: original input changed");
+    }
+    elapsed = pr_monotonic() - start;
+    if (elapsed > 10) { Buf b = { 0, 0, 0 }; char *s; size_t n; pj_value *f = pj_float(elapsed); pj_dumps(f, -1, &s, &n); puts_(&b, "AssertionError: "); puts_(&b, s); fail(b.p); }
+    {   /* json.dumps(..., sort_keys=True) */
+        pj_value *src = pj_dict(); int j; char *out; size_t on;
+        for (i = 1; i < NPIN; i++) for (j = i; j > 0 && strcmp(PINS[j - 1].path, PINS[j].path) > 0; j--) { Pin t = PINS[j]; PINS[j] = PINS[j - 1]; PINS[j - 1] = t; }
+        for (i = 0; i < NPIN; i++) pj_set(src, PINS[i].path, pj_strz(PINS[i].hex));
+        doc = pj_dict();
+        pj_set(doc, "actual_consumer_coverage", pj_strz(!strcmp(part, "include") ? "NOT_RUN_HELPER_ONLY_BYPASS_CONSUMERS_KEEP_ORIGINAL_ASSERTIONS" : "NOT_APPLICABLE"));
+        pj_set(doc, "kind", pj_strz(kind));
+        pj_set(doc, "meal", pj_strz("NOT_ASSESSED"));
+        pj_set(doc, "monotonic", pj_float(elapsed));
+        pj_set(doc, "no_product_execution_or_cold_build", pj_bool(1));
+        pj_set(doc, "part", pj_strz(part));
+        pj_set(doc, "sources", src);
+        pj_set(doc, "status", pj_strz("PASS_EXPECTED_REFUSAL"));
+        pj_set(doc, "steps", STEPS);
+        pj_set(doc, "temporary_only", pj_bool(1));
+        pj_set(doc, "warm_cache_positive", pj_strz(!strcmp(part, "prep") ? "REFERENCE_STOCK8640_IDENTITY_VALID_REFUSALS_ONLY_INDEX_e6a73b41cabbc86235e9d7fdeb46f4e4f271d419b2bd164b4e3f3d6255538bbf" : "NOT_APPLICABLE"));
+        pj_dumps(doc, -1, &out, &on);
+        fwrite(out, 1, on, stdout); fputs("\n", stdout);
+    }
+    return 0;
+}

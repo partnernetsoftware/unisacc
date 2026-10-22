@@ -8,7 +8,26 @@ OUT=$1; TARGET=$2; NETWORK=$3; EXEC_CC=$4
 R=$(pwd)
 b() { "$_BOUND" 60 "$@"; }
 b "${EXEC_CC:-cc}" -O2 -o "$OUT/run" exec/c/run.c
-b python3 exec/build/gen.py lex "$OUT/e1.json" --typed
+case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
+case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=enc/arm;; *) ARCHFLAG=; ENCODER=enc;; esac
+MODEL=tbl
+case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
+STAGES=$(awk '!/^#/ && NF {print $1}' exec/pipeline/image-stages.tsv)
+stage() {   # stage S: table, and with the network model its network checked against the table
+    b python3 exec/c/tbl.py "$OUT/$1.json" "$OUT/$1.tbl"
+    if [ "$MODEL" = net ]; then
+        b python3 exec/c/net.py "$OUT/$1.tbl" "$OUT/$1.net"
+        b "$OUT/run" --check-net "$OUT/$1.tbl" "$OUT/$1.net"
+    fi
+}
+# 0.0.43 timeout debt (driver-prep): two lanes, shell only.  The seed-gen lane keeps the K5 order (parse2, opt, prune,
+# pp: one private seed-gen build, reused) and then tables its four stages; the gen.py lane builds e1, lower and the
+# image encoder and tables those.  Each lane stops at its first failure (set -e in the subshell); prepare waits for
+# both and exits with the seed-gen lane's status first, so a δ failure is reported by its own rc and models.py keeps
+# nothing.  The commands and their outputs are unchanged: serial ~46-48 s cold, the longest lane now ~25 s.
+DELTA="e3 e4 prune e2"
+(
+set -e
 # 0.0.40 K5-1h (机房主任 06:01): parse2 δ through exec/parse2gen/gen-delta.sh (seed-gen first, fail-closed; builds private seed-gen cache cold)
 b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/parse2gen/gen-delta.sh" "$OUT/e3.json"
 # 0.0.40 K5-1f (机房主任 03:43): opt δ through exec/opt/gen-delta.sh, sharing the private seed-gen cache (K5-1h: the
@@ -17,23 +36,22 @@ b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/opt/gen-delta.sh" "$OUT/e4
 # 0.0.40 K5-1g (机房主任 04:09): prune δ through exec/prune/gen-delta.sh, sharing the private seed-gen cache (built by
 # the parse2 step above, used again by pp below)
 b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/prune/gen-delta.sh" "$OUT/prune.json"
-case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho;; *) OSFLAG=; IMAGE=elf;; esac
-case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=enc/arm;; *) ARCHFLAG=; ENCODER=enc;; esac
 # 0.0.40 K5-1c (机房主任 01:23): pp δ through exec/pp/gen-delta.sh (seed-gen first, no Python fallback), with a
 # private seed-gen cache inside this work directory (overrides an inherited SEED_GEN_DIR; rebuilt per cold prepare)
 b env SEED_GEN_DIR="$OUT/.seed-gen-cache" sh "$R/exec/pp/gen-delta.sh" "$OUT/e2.json" $OSFLAG $ARCHFLAG
+for s in $STAGES; do case " $DELTA " in *" $s "*) stage "$s";; esac; done
+) & SEEDLANE=$!
+(
+set -e
+b python3 exec/build/gen.py lex "$OUT/e1.json" --typed
 b python3 exec/build/gen.py lower "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
 b python3 exec/build/gen.py "$ENCODER" "$OUT/elf.json" "--$IMAGE"
-MODEL=tbl
-case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
-STAGES=$(awk '!/^#/ && NF {print $1}' exec/pipeline/image-stages.tsv)
-for s in $STAGES; do
-    b python3 exec/c/tbl.py "$OUT/$s.json" "$OUT/$s.tbl"
-    if [ "$MODEL" = net ]; then
-        b python3 exec/c/net.py "$OUT/$s.tbl" "$OUT/$s.net"
-        b "$OUT/run" --check-net "$OUT/$s.tbl" "$OUT/$s.net"
-    fi
-done
+for s in $STAGES; do case " $DELTA " in *" $s "*) ;; *) stage "$s";; esac; done
+) & GENLANE=$!
+rs=0; wait "$SEEDLANE" || rs=$?
+rg=0; wait "$GENLANE" || rg=$?
+[ "$rs" -eq 0 ] || exit "$rs"
+[ "$rg" -eq 0 ] || exit "$rg"
 if [ "$MODEL" = net ]; then
     awk -v route="$TARGET" '!/^#/ && NF {print route "\t" $0}' exec/pipeline/image-stages.tsv > "$OUT/route.tsv"
     b python3 exec/c/pack.py --mount 006864722f "$R/include" -o "$OUT/models.pkg" "$OUT/route.tsv"

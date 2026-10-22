@@ -1,21 +1,28 @@
-/* flownet/nets.cx -- the net layer of flownet (plans/m4-flownet-cx-module.md W2): finite tables -> integer nets.
-   For every net named by the contract it reads two external tables (the W0 ruling: .tsv read at run time):
-     NET.gold.tsv  the label source -- the domain (each field's values in order, the classes in order) and one row
-                   per key in mixed-radix (cartesian product) order: field values..., gold class
-     NET.net.tsv   the integer net constructed from that gold: H hidden units, per-field coordinate offsets, b1,
-                   the binary W1 as feed lists (coordinate -> units) and W2 as sparse (class:weight) rows per unit
+/* flownet/nets.cx -- the net layer of flownet (plans/m4-flownet-cx-module.md W2, a module since W3): finite tables ->
+   integer nets.  Every net named by the contract has a gold (its domain and the label of every key) and an integer net.
+   The gold comes from a label source:
+     injected      (W3) the consumer's fn_domain_fn + fn_label_fn (flownet/fnx.cx): the domain as the header rows of a
+                   gold table, then every key asked once, in mixed-radix (cartesian product) order
+     stock         DIR/NET.gold.tsv -- the domain (each field's values in order, the classes in order) and one row
+                   per key in that order: field values..., gold class
+   The integer net is either read or constructed:
+     read          DIR/NET.net.tsv: H hidden units, per-field coordinate offsets, b1, the binary W1 as feed lists
+                   (coordinate -> units) and W2 as sparse (class:weight) rows per unit
+     constructed   (W3) here, from the gold (construct below), written as the same rows and read by the same reader;
+                   the gold injected or (W3 fix 3, fnn_load_gold) the stock DIR/NET.gold.tsv
    and offers the integer forward pass (hit counts -> hit + b1 > 0 -> add W2 -> strict argmax) and the exhaustive
    acceptance (acc: predict == gold on every key).  Nothing here knows which language the nets serve.
-   Internal unit: consumers use the fn_ API in flownet/api.cx.  Errors go to fnx_fail as "PATH[:LINE]: reason". */
+   Internal module: consumers use the fn_ API in flownet/api.cx.  Errors go to fnx_fail as "PATH[:LINE]: reason".
+   Names and paths are kept whole; the hard limits are counts (nets, fields per key, columns per row, key space, H),
+   each refused by name at PATH[:LINE]. */
 
-void fnx_fail(const char *msg);
+#pragma unisa use fnx
 
 #define FNN_MAXNETS 32
-#define FNN_MAXF 4
-#define FNN_NAME 64
+enum { FNN_MAXF = 4 };              /* fields per key (an enum: the exported FnnNet uses it) */
 
 typedef struct {
-    char name[FNN_NAME];
+    char *name;
     int nf;                         /* fields per key */
     char *fname[FNN_MAXF];          /* field names */
     int vn[FNN_MAXF];               /* values per field (radix) */
@@ -32,10 +39,8 @@ static FnnNet nets[FNN_MAXNETS];
 static int nnets;
 
 static void fail2(const char *path, int line, const char *why) {
-    char m[512];
-    if (line > 0) snprintf(m, sizeof m, "%s:%d: %s", path, line, why);
-    else snprintf(m, sizeof m, "%s: %s", path, why);
-    fnx_fail(m);
+    if (line > 0) fnx_failf("%s:%d: %s", path, line, why);
+    else fnx_failf("%s: %s", path, why);
 }
 
 static char *dupn(const char *s) {
@@ -45,15 +50,12 @@ static char *dupn(const char *s) {
 }
 
 /* ---------- a table file: regular, no NUL, final newline; lines split on tabs ---------- */
-typedef struct { char *buf; char **line; int *lno; int n; const char *path; } Tab;
+typedef struct { char *buf; char **line; int *lno; int n; const char *path; } FnnTab;
 
-static int tab_open(Tab *t, const char *path) {
-    struct stat st; size_t n = 0; char *p; int cap = 0, ln = 0;
-    t->buf = 0; t->line = 0; t->lno = 0; t->n = 0; t->path = path;
-    /* cx_read gives a directory as an empty buffer (W0), so the kind is checked first */
-    if (stat(path, &st) != 0) { fail2(path, 0, "cannot read (missing?)"); return -1; }
-    if (!S_ISREG(st.st_mode)) { fail2(path, 0, "not a regular file"); return -1; }
-    if (!(t->buf = cx_read(path, &n))) { fail2(path, 0, "cannot read"); return -1; }
+/* the rows of B (N bytes, taken over; tab_close frees it); PATH names it in the failures */
+static int tab_text(FnnTab *t, const char *path, char *b, size_t n) {
+    char *p; int cap = 0, ln = 0;
+    t->buf = b; t->line = 0; t->lno = 0; t->n = 0; t->path = path;
     if (memchr(t->buf, 0, n)) { fail2(path, 0, "NUL byte in table"); return -1; }
     if (n == 0) { fail2(path, 0, "empty table"); return -1; }
     if (t->buf[n - 1] != '\n') {
@@ -78,13 +80,23 @@ static int tab_open(Tab *t, const char *path) {
     return 0;
 }
 
-static void tab_close(Tab *t) { free(t->buf); free(t->line); free(t->lno); t->buf = 0; t->line = 0; t->lno = 0; }
+static int tab_open(FnnTab *t, const char *path) {
+    struct stat st; size_t n = 0; char *b;
+    t->buf = 0; t->line = 0; t->lno = 0; t->n = 0; t->path = path;
+    /* cx_read gives a directory as an empty buffer (W0), so the kind is checked first */
+    if (stat(path, &st) != 0) { fail2(path, 0, "cannot read (missing?)"); return -1; }
+    if (!S_ISREG(st.st_mode)) { fail2(path, 0, "not a regular file"); return -1; }
+    if (!(b = cx_read(path, &n))) { fail2(path, 0, "cannot read"); return -1; }
+    return tab_text(t, path, b, n);
+}
 
-/* split in place on tabs; returns the field count, or -1 past max */
-static int tsplit(char *s, char **f, int max) {
-    int n = 0;
+static void tab_close(FnnTab *t) { free(t->buf); free(t->line); free(t->lno); t->buf = 0; t->line = 0; t->lno = 0; }
+
+/* split row R of T in place on tabs; returns the field count, or -1 (refused by name: more than MAX fields) */
+static int tsplit(FnnTab *t, int r, char **f, int max) {
+    char *s = t->line[r]; int n = 0;
     for (;;) {
-        if (n == max) return -1;
+        if (n == max) { fnx_failf("%s:%d: more than %d tab-separated fields (the limit)", t->path, t->lno[r], max); return -1; }
         f[n++] = s;
         s = strchr(s, '\t');
         if (!s) return n;
@@ -111,17 +123,17 @@ static int find(char **v, int n, const char *s) {
 
 /* the domain header: "net NAME", "field NAME v...", "class c..." -- shared by both files of a net.
    Returns the index of the first row after the header, or -1. */
-static int read_domain(Tab *t, FnnNet *N, int fill) {
+static int read_domain(FnnTab *t, FnnNet *N, int fill) {
     static char *f[MAXCOL];
     int r = 0, k, i, nf = 0;
     if (t->n < 1) return -1;
-    k = tsplit(t->line[0], f, MAXCOL);
+    k = tsplit(t, 0, f, MAXCOL);
     if (k != 2 || strcmp(f[0], "net")) { fail2(t->path, t->lno[0], "first row must be: net<TAB>NAME"); return -1; }
     if (strcmp(f[1], N->name)) { fail2(t->path, t->lno[0], "net name differs from the file name"); return -1; }
     for (r = 1; r < t->n; r++) {
         char *line = t->line[r];
         if (strncmp(line, "field\t", 6)) break;
-        k = tsplit(line, f, MAXCOL);
+        k = tsplit(t, r, f, MAXCOL);
         if (k < 3) { fail2(t->path, t->lno[r], "a field needs a name and at least one value"); return -1; }
         if (nf == FNN_MAXF) { fail2(t->path, t->lno[r], "too many fields"); return -1; }
         for (i = 2; i < k; i++)
@@ -139,7 +151,7 @@ static int read_domain(Tab *t, FnnNet *N, int fill) {
     if (!nf) { fail2(t->path, r < t->n ? t->lno[r] : t->lno[t->n - 1], "no field rows"); return -1; }
     if (!fill && nf != N->nf) { fail2(t->path, t->lno[r < t->n ? r : t->n - 1], "field count differs from the gold table's domain"); return -1; }
     if (r >= t->n || strncmp(t->line[r], "class\t", 6)) { fail2(t->path, t->lno[r < t->n ? r : t->n - 1], "want a class row after the fields"); return -1; }
-    k = tsplit(t->line[r], f, MAXCOL);
+    k = tsplit(t, r, f, MAXCOL);
     if (k < 2) { fail2(t->path, t->lno[r], "no classes"); return -1; }
     for (i = 1; i < k; i++)
         if (!*f[i] || find(f + 1, i - 1, f[i]) >= 0) { fail2(t->path, t->lno[r], "empty or repeated class"); return -1; }
@@ -155,7 +167,7 @@ static int read_domain(Tab *t, FnnNet *N, int fill) {
 }
 
 static int load_gold(FnnNet *N, const char *path) {
-    Tab t; char *f[FNN_MAXF + 2]; int r, i, k, key = 0, total = 1;
+    FnnTab t; char *f[FNN_MAXF + 2]; int r, i, k, key = 0, total = 1;
     if (tab_open(&t, path)) { tab_close(&t); return -1; }
     if ((r = read_domain(&t, N, 1)) < 0) { tab_close(&t); return -1; }
     for (i = 0; i < N->nf; i++) {
@@ -166,7 +178,7 @@ static int load_gold(FnnNet *N, const char *path) {
     N->gold = malloc(total * sizeof(int));
     for (; r < t.n; r++, key++) {
         int rem = key, d[FNN_MAXF], c;
-        k = tsplit(t.line[r], f, FNN_MAXF + 2);
+        k = tsplit(&t, r, f, FNN_MAXF + 2);
         if (k != N->nf + 1) { fail2(path, t.lno[r], "wrong field count (want the field values then the label)"); tab_close(&t); return -1; }
         if (key >= total) { fail2(path, t.lno[r], "more rows than the key space"); tab_close(&t); return -1; }
         for (i = N->nf - 1; i >= 0; i--) { d[i] = rem % N->vn[i]; rem /= N->vn[i]; }
@@ -180,23 +192,22 @@ static int load_gold(FnnNet *N, const char *path) {
     return 0;
 }
 
-static int intlist(Tab *t, int r, const char *tag, int want, int *out, int lo, int hi) {
+static int intlist(FnnTab *t, int r, const char *tag, int want, int *out, int lo, int hi) {
     static char *f[MAXCOL]; int k, i;
-    char m[96];
-    if (r >= t->n) { snprintf(m, sizeof m, "missing the %s row", tag); fail2(t->path, 0, m); return -1; }
-    k = tsplit(t->line[r], f, MAXCOL);
-    if (k < 1 || strcmp(f[0], tag)) { snprintf(m, sizeof m, "want the %s row here", tag); fail2(t->path, t->lno[r], m); return -1; }
-    if (k - 1 != want) { snprintf(m, sizeof m, "%s: want %d integers", tag, want); fail2(t->path, t->lno[r], m); return -1; }
+    if (r >= t->n) { fnx_failf("%s: missing the %s row", t->path, tag); return -1; }
+    k = tsplit(t, r, f, MAXCOL);
+    if (k < 1 || strcmp(f[0], tag)) { fnx_failf("%s:%d: want the %s row here", t->path, t->lno[r], tag); return -1; }
+    if (k - 1 != want) { fnx_failf("%s:%d: %s: want %d integers", t->path, t->lno[r], tag, want); return -1; }
     for (i = 1; i < k; i++)
-        if (toint(f[i], &out[i - 1]) || out[i - 1] < lo || out[i - 1] > hi) { snprintf(m, sizeof m, "%s: not an integer in range", tag); fail2(t->path, t->lno[r], m); return -1; }
+        if (toint(f[i], &out[i - 1]) || out[i - 1] < lo || out[i - 1] > hi) { fnx_failf("%s:%d: %s: not an integer in range", t->path, t->lno[r], tag); return -1; }
     return 0;
 }
 
-static int load_net(FnnNet *N, const char *path) {
-    Tab t; static char *f[MAXCOL]; int r, i, k, c, j, one;
-    if (tab_open(&t, path)) { tab_close(&t); return -1; }
+/* the integer net in the rows of T (closed here); PATH names them in the failures */
+static int load_net_tab(FnnNet *N, FnnTab *tp) {
+    FnnTab t = *tp; const char *path = t.path; static char *f[MAXCOL]; int r, i, k, c, j, one;
     if ((r = read_domain(&t, N, 0)) < 0) { tab_close(&t); return -1; }
-    if (r >= t.n || (k = tsplit(t.line[r], f, MAXCOL)) != 2 || strcmp(f[0], "H") || toint(f[1], &N->H) || N->H < 1 || N->H > 100000) {
+    if (r >= t.n || (k = tsplit(&t, r, f, MAXCOL)) != 2 || strcmp(f[0], "H") || toint(f[1], &N->H) || N->H < 1 || N->H > 100000) {
         fail2(path, r < t.n ? t.lno[r] : 0, "want: H<TAB>units"); tab_close(&t); return -1;
     }
     r++;
@@ -213,7 +224,7 @@ static int load_net(FnnNet *N, const char *path) {
     N->fptr[0] = 0;
     for (c = 0; c < N->h0; c++, r++) {
         if (r >= t.n) { fail2(path, 0, "missing feed rows"); tab_close(&t); return -1; }
-        k = tsplit(t.line[r], f, MAXCOL);
+        if ((k = tsplit(&t, r, f, MAXCOL)) < 0) { tab_close(&t); return -1; }
         if (strcmp(f[0], "feed") || k < 2 || toint(f[1], &one) || one != c) { fail2(path, t.lno[r], "want feed<TAB>COORD rows, coordinates in order"); tab_close(&t); return -1; }
         N->fptr[c + 1] = N->fptr[c];
         for (i = 2; i < k; i++) {
@@ -228,7 +239,7 @@ static int load_net(FnnNet *N, const char *path) {
     N->wptr[0] = 0;
     for (j = 0; j < N->H; j++, r++) {
         if (r >= t.n) { fail2(path, 0, "missing w2 rows"); tab_close(&t); return -1; }
-        k = tsplit(t.line[r], f, MAXCOL);
+        if ((k = tsplit(&t, r, f, MAXCOL)) < 0) { tab_close(&t); return -1; }
         if (strcmp(f[0], "w2") || k < 2 || toint(f[1], &one) || one != j) { fail2(path, t.lno[r], "want w2<TAB>UNIT rows, units in order"); tab_close(&t); return -1; }
         if (k - 2 > N->ncls) { fail2(path, t.lno[r], "w2: more entries than classes"); tab_close(&t); return -1; }
         N->wptr[j + 1] = N->wptr[j];
@@ -245,6 +256,123 @@ static int load_net(FnnNet *N, const char *path) {
     return 0;
 }
 
+static int load_net(FnnNet *N, const char *path) {
+    FnnTab t;
+    if (tab_open(&t, path)) { tab_close(&t); return -1; }
+    return load_net_tab(N, &t);
+}
+
+/* ---------- W3: the injected label source and the constructed net ---------- */
+typedef struct { char *s; size_t n, cap; int oom; } FnnText;
+static void tput(FnnText *b, const char *s) {
+    size_t k = strlen(s); char *g;
+    if (b->oom) return;
+    if (b->n + k + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 4096;
+        while (c < b->n + k + 1) c *= 2;
+        if (!(g = realloc(b->s, c))) { b->oom = 1; return; }
+        b->s = g; b->cap = c;
+    }
+    memcpy(b->s + b->n, s, k + 1); b->n += k;
+}
+static void tint(FnnText *b, long v) { char *t = fnx_fmt("%ld", v); if (!t) { b->oom = 1; return; } tput(b, t); free(t); }
+
+static void key_digits(const FnnNet *N, int key, int *d) {
+    int f;
+    for (f = N->nf - 1; f >= 0; f--) { d[f] = key % N->vn[f]; key /= N->vn[f]; }
+}
+/* the field values of key digits D joined by commas (allocated; 0 when out of memory) */
+static char *key_text(const FnnNet *N, const int *d) {
+    FnnText b = { 0, 0, 0, 0 }; int f;
+    for (f = 0; f < N->nf; f++) { if (f) tput(&b, ","); tput(&b, N->vocab[f][d[f]]); }
+    if (b.oom) { free(b.s); return 0; }
+    return b.s;
+}
+
+/* the domain from DOMAIN (the header rows of a gold table after its net row), then every key's label from LABEL, asked
+   once each in product order.  Failures name "label source NET" and the line (line 1 is the net row flownet adds). */
+static int load_source(FnnNet *N, fn_domain_fn domain, fn_label_fn label, void *ctx) {
+    FnnTab t; const char *dt; char *text, *where; int r, f, key, total = 1, d[FNN_MAXF];
+    const char *k[FNN_MAXF];
+    if (!(where = fnx_fmt("label source %s", N->name))) { fnx_fail("flownet: out of memory"); return -1; }
+    if (!domain || !label) { fail2(where, 0, "no label source injected (fn_label_source first)"); return -1; }
+    if (!(dt = domain(ctx, N->name))) { fail2(where, 0, "the label source gives no domain for this net"); return -1; }
+    if (!(text = fnx_fmt("net\t%s\n%s", N->name, dt))) { fail2(where, 0, "out of memory"); return -1; }
+    if (tab_text(&t, where, text, strlen(text))) { tab_close(&t); return -1; }
+    if ((r = read_domain(&t, N, 1)) < 0) { tab_close(&t); return -1; }
+    if (r != t.n) { fail2(where, t.lno[r], "a row after the class row (a domain is field rows, then one class row)"); tab_close(&t); return -1; }
+    tab_close(&t);
+    for (f = 0; f < N->nf; f++) {
+        if (total > 1000000 / N->vn[f]) { fail2(where, 0, "key space too large"); return -1; }
+        total *= N->vn[f];
+    }
+    N->nkeys = total;
+    if (!(N->gold = malloc(total * sizeof(int)))) { fail2(where, 0, "out of memory"); return -1; }
+    for (key = 0; key < total; key++) {
+        const char *lab; int c;
+        key_digits(N, key, d);
+        for (f = 0; f < N->nf; f++) k[f] = N->vocab[f][d[f]];
+        lab = label(ctx, N->name, N->nf, k);
+        if (!lab || (c = find(N->cls, N->ncls, lab)) < 0) {
+            char *kt = key_text(N, d);
+            if (!lab) fnx_failf("%s: key (%s): the label source gives no label", where, kt ? kt : "?");
+            else fnx_failf("%s: key (%s) labelled '%s', not one of the classes", where, kt ? kt : "?", lab);
+            free(kt);
+            return -1;
+        }
+        N->gold[key] = c;
+    }
+    return 0;
+}
+
+/* the integer net for N's gold, constructed here: unit 0 has no feeds and b1 = 1, so it always fires, and votes 1 for
+   the default class (the most frequent label, the first class on a tie); every key whose label is not the default has
+   one unit, fed by that key's coordinate in every field, with b1 = 1 - fields, so it fires on exactly that key, and
+   votes 2 for the key's label.  A key fires the default unit and at most its own: the argmax is its gold, so the net is
+   exact by construction (fn_acc still checks every key).  Not minimal: H = 1 + the keys off the default.  The rows go
+   through the reader of NET.net.tsv, so a constructed net passes the same checks as a read one. */
+static int construct(FnnNet *N) {
+    FnnText b = { 0, 0, 0, 0 }; FnnTab t; char *where; int *cnt, *unitkey, def = 0, H = 1, key, f, c, i, j, d[FNN_MAXF];
+    if (!(where = fnx_fmt("constructed net %s", N->name))) { fnx_fail("flownet: out of memory"); return -1; }
+    if (!(cnt = calloc(N->ncls, sizeof(int))) || !(unitkey = malloc((N->nkeys + 1) * sizeof(int)))) { fail2(where, 0, "out of memory"); return -1; }
+    for (key = 0; key < N->nkeys; key++) cnt[N->gold[key]]++;
+    for (c = 1; c < N->ncls; c++) if (cnt[c] > cnt[def]) def = c;
+    unitkey[0] = -1;
+    for (key = 0; key < N->nkeys; key++) if (N->gold[key] != def) unitkey[H++] = key;
+    if (H > 100000) { fail2(where, 0, "more than 100000 units (the reader's limit)"); return -1; }
+    tput(&b, "net\t"); tput(&b, N->name); tput(&b, "\n");
+    for (f = 0; f < N->nf; f++) {
+        tput(&b, "field\t"); tput(&b, N->fname[f]);
+        for (i = 0; i < N->vn[f]; i++) { tput(&b, "\t"); tput(&b, N->vocab[f][i]); }
+        tput(&b, "\n");
+    }
+    tput(&b, "class");
+    for (c = 0; c < N->ncls; c++) { tput(&b, "\t"); tput(&b, N->cls[c]); }
+    tput(&b, "\nH\t"); tint(&b, H);
+    tput(&b, "\noffs");
+    for (f = 0, c = 0; f < N->nf; c += N->vn[f], f++) { tput(&b, "\t"); tint(&b, c); }
+    tput(&b, "\nb1\t1");
+    for (j = 1; j < H; j++) { tput(&b, "\t"); tint(&b, 1 - N->nf); }
+    tput(&b, "\n");
+    for (f = 0, c = 0; f < N->nf; f++)
+        for (i = 0; i < N->vn[f]; i++, c++) {
+            tput(&b, "feed\t"); tint(&b, c);
+            for (j = 1; j < H; j++) {
+                key_digits(N, unitkey[j], d);
+                if (d[f] == i) { tput(&b, "\t"); tint(&b, j); }
+            }
+            tput(&b, "\n");
+        }
+    for (j = 0; j < H; j++) {
+        tput(&b, "w2\t"); tint(&b, j); tput(&b, "\t");
+        tint(&b, j ? N->gold[unitkey[j]] : def); tput(&b, j ? ":2\n" : ":1\n");
+    }
+    free(cnt); free(unitkey);
+    if (b.oom) { free(b.s); fail2(where, 0, "out of memory"); return -1; }
+    if (tab_text(&t, where, b.s, b.n)) { tab_close(&t); return -1; }
+    return load_net_tab(N, &t);
+}
+
 /* ---------- internal API (fnn_) ---------- */
 void fnn_reset(void) { nnets = 0; }      /* tables are small and loaded once; nothing is freed */
 int fnn_count(void) { return nnets; }
@@ -255,20 +383,27 @@ int fnn_find(const char *name) {
     return -1;
 }
 
-/* DIR/NAME.gold.tsv then DIR/NAME.net.tsv; returns the net index or -1 */
-int fnn_load(const char *dir, const char *name) {
-    FnnNet *N; char path[1024];
-    if (nnets == FNN_MAXNETS) { fail2(dir, 0, "too many nets"); return -1; }
-    if (strlen(name) >= FNN_NAME || !*name || strchr(name, '/')) { fail2(dir, 0, "bad net name"); return -1; }
+/* DIR/NAME.gold.tsv, then the integer net: read from DIR/NAME.net.tsv, or (BUILD, W3 fix 3) constructed here from that
+   gold; returns the net index or -1 */
+static int load_stock(const char *dir, const char *name, int build) {
+    FnnNet *N; char *path;
+    if (nnets == FNN_MAXNETS) { fnx_failf("%s: more than %d nets (the limit)", dir, FNN_MAXNETS); return -1; }
+    if (!*name || strchr(name, '/')) { fail2(dir, 0, "bad net name"); return -1; }
     N = &nets[nnets];
     memset(N, 0, sizeof *N);
-    strcpy(N->name, name);
-    snprintf(path, sizeof path, "%s/%s.gold.tsv", dir, name);
+    if (!(N->name = dupn(name)) || !(path = fnx_fmt("%s/%s.gold.tsv", dir, name))) { fail2(dir, 0, "out of memory"); return -1; }
     if (load_gold(N, path)) return -1;
-    snprintf(path, sizeof path, "%s/%s.net.tsv", dir, name);
+    free(path);
+    if (build) { if (construct(N)) return -1; return nnets++; }
+    if (!(path = fnx_fmt("%s/%s.net.tsv", dir, name))) { fail2(dir, 0, "out of memory"); return -1; }
     if (load_net(N, path)) return -1;
+    free(path);
     return nnets++;
 }
+int fnn_load(const char *dir, const char *name) { return load_stock(dir, name, 0); }
+int fnn_load_gold(const char *dir, const char *name) { return load_stock(dir, name, 1); }
+/* key K of net I as its field values joined by commas (allocated; 0 when out of memory) */
+char *fnn_key_text(int i, int k) { int d[FNN_MAXF]; key_digits(&nets[i], k, d); return key_text(&nets[i], d); }
 
 int fnn_nfields(int i) { return nets[i].nf; }
 int fnn_nclasses(int i) { return nets[i].ncls; }
@@ -308,4 +443,23 @@ int fnn_predict(int i, int key) {
 }
 
 int fnn_gold(int i, int key) { return nets[i].gold[key]; }
+
+/* W3: NAME's gold from the injected label source (DOMAIN, LABEL, CTX), its integer net read from DIR/NAME.net.tsv, or
+   constructed here from that gold when DIR is 0.  Returns the net index or -1. */
+int fnn_load_with(const char *dir, const char *name, fn_domain_fn domain, fn_label_fn label, void *ctx) {
+    FnnNet *N; char *path;
+    if (nnets == FNN_MAXNETS) { fnx_failf("more than %d nets (the limit)", FNN_MAXNETS); return -1; }
+    if (!*name || strchr(name, '/')) { fnx_failf("bad net name '%s'", name); return -1; }
+    N = &nets[nnets];
+    memset(N, 0, sizeof *N);
+    if (!(N->name = dupn(name))) { fnx_fail("flownet: out of memory"); return -1; }
+    if (load_source(N, domain, label, ctx)) return -1;
+    if (!dir) { if (construct(N)) return -1; }
+    else {
+        if (!(path = fnx_fmt("%s/%s.net.tsv", dir, name))) { fail2(dir, 0, "out of memory"); return -1; }
+        if (load_net(N, path)) return -1;
+        free(path);
+    }
+    return nnets++;
+}
 int fnn_keys(int i) { return nets[i].nkeys; }

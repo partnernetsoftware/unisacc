@@ -1,0 +1,364 @@
+/* adapter/ujswasm/ujsgold.cx -- the ujs gold as a .cx module (plans/m4-flownet-cx-module.md W3): the domains and label
+   functions of ujs/seed/construct/gold.py STAGES (with catalog.py's vocabularies), ported to .cx in W2 and moved here
+   from tables.cx so that two users share one port:
+     tables.cx    writes adapter/ujswasm/tables/NET.gold.tsv from it (the stock label source of fn_open, and the files
+                  the derived-consistency step compares)
+     ujswasm.cx   injects it into flownet as the adapter's label source (fn_label_source(ujsgold_domain, ujsgold_label,
+                  0)): flownet asks every key once when it opens the tables and takes the nets' gold from here
+   The port is proven by acceptance: the oracle's integer nets (python3 -m ujs build-weights, outside this file) are
+   exact against the Python gold on every key, so flownet's acc over this source is 10/10 exact only if the port agrees
+   with gold.py on all 3677 keys.  This module may name ujs; flownet/ may not (D1). */
+
+enum { UJSGOLD_NETS = 10 };
+
+/* ---------- the ujs domains (gold.py, catalog.py), in their order ---------- */
+static const char *CHARC[] = { "eof", "nl", "ws", "A", "D", "Q", "S", "P", "O", "other", 0 };
+static const char *LEXACT[] = { "eof", "ws", "nl", "id", "num", "str", "punct", "op", "bad", 0 };
+static const char *NT[] = { "top", "stmt", "unary", "postfix", "primary", "pswitch", 0 };
+static const char *TOKS[] = { "eof", "id", "num", "str", "null", "true", "false",
+    "let", "function", "if", "else", "while", "for", "return",
+    "break", "continue", "switch", "case", "default",
+    "typeof", "of", "in",
+    "{", "}", "(", ")", "[", "]", ";", ",", ":", ".", "?",
+    "=", "==", "!=", "<", ">", "<=", ">=",
+    "+", "-", "*", "/", "%", "&&", "||", "!", "??",
+    "=>", "+=", "-=", "*=", "/=",
+    "...", 0 };
+static const char *PRODS[] = { "end", "fn", "let", "if", "while", "for", "switch", "case", "default",
+    "return", "break", "continue", "block", "expr",
+    "neg", "not", "spread", "typeof", "prim",
+    "index", "call", "dot", "done",
+    "ident", "number", "string", "null", "true", "false",
+    "list", "dict", "paren", "arrow", "bad", 0 };
+static const char *TYS[] = { "null", "bool", "i64", "f64", "str", "list", "dict", "fn", "tup", 0 };
+static const char *TOPS[] = { "+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=",
+    "&&", "||", "!", "=", "[]", ".", "call", "len", "keys", "in", "spread", ",", 0 };
+static const char *TYOUT[] = { "null", "bool", "i64", "f64", "str", "list", "dict", "fn", "tup", "illegal", 0 };
+static const char *CTX[] = { "mod", "fn", "block", "switch", "for", "expr", 0 };
+static const char *KIND[] = { "bind", "load", "store", "param", "rest", "label", "break", "continue", 0 };
+static const char *ACTS[] = { "ok", "shadow", "unbound", "readonly", "illegal", 0 };
+static const char *KEYSIG[] = { "empty", "k1", "k2", "k3", "k4", "open", 0 };
+static const char *SHAPES[] = { "s_null", "s_bool", "s_i64", "s_f64", "s_str", "s_list", "s_tup", "s_fn",
+    "s_dict_empty", "s_dict_k1", "s_dict_k2", "s_dict_k3", "s_dict_k4", "s_dict_open", "s_unknown", 0 };
+static const char *FAMILY[] = { "arith", "cmp", "logic", "mem", "ctrl", "call", "data", "ic", "host", 0 };
+static const char *FLAVOR[] = { "i64", "f64", "bool", "str", "list", "dict", "any",
+    "br", "br_if", "ret", "switch", "enter", "print", 0 };
+static const char *RECIPE[] = { "op_add", "op_sub", "op_mul", "op_div", "op_mod",
+    "op_cmp", "op_logic", "op_load", "op_store", "op_idx",
+    "op_jump", "op_call", "op_ret", "op_mk", "op_ic", "op_host", "bad", 0 };
+static const char *IC_OPS[] = { "add", "sub", "mul", "div", "mod", "lt", "eq", "idx", "setidx", "dot", "call", "len", "in", 0 };
+static const char *GUARDS[] = { "none", "type_ok", "len_ok", "key_ok", "mono", 0 };
+static const char *STUBS[] = { "interp", "add_i64", "add_f64", "sub_i64", "mul_i64", "div_f64",
+    "cmp_i64", "cmp_f64", "idx_list", "idx_dict", "idx_str", "set_list", "set_dict",
+    "dot_dict", "call_fn", "len_list", "len_str", "in_dict", "bad", 0 };
+static const char *JOPS[] = { "nop", "const", "load_l", "store_l", "load_g", "store_g", "drop",
+    "add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne",
+    "and", "or", "not", "idx", "setidx", "dot", "len", "keys", "in",
+    "mklist", "mkdict", "mktup", "jump", "jumpz", "jumpnz",
+    "call", "ret", "spread", "restpack", "typeof", "shapeof", "switch", "ic_enter", "print", 0 };
+static const char *WASM_FORMS[] = { "nop", "i64_bin", "f64_bin", "i64_cmp", "f64_cmp",
+    "bool_logic", "local", "global", "const", "br", "br_if", "call", "ret",
+    "poly_bin", "heap", "typeof", "host", "trap", 0 };
+static const char *IMMCLASS[] = { "none", "i64", "f64", "bool", "str_ix", "slot", "label", "count", 0 };
+static const char *ENCTMPL[] = { "empty", "op", "op_imm", "op_slot", "op_label", "op_host", "trap", 0 };
+static const char *RELKIND[] = { "none", "br_target", "fn_ref", "str_ref", 0 };
+static const char *JMPKIND[] = { "br", "br_if", "call", "switch", 0 };
+
+static int eq(const char *a, const char *b) { return !strcmp(a, b); }
+static int in(const char *s, const char *list) {          /* list: space-separated */
+    size_t k = strlen(s); const char *p = list;
+    for (;;) {
+        const char *e = strchr(p, ' ');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == k && !strncmp(p, s, k)) return 1;
+        if (!e) return 0;
+        p = e + 1;
+    }
+}
+
+/* ---------- the gold label functions (gold.py, catalog.py), one per stage ---------- */
+static const char *lex_label(const char *c, const char *peek) {
+    (void)peek;                                  /* `/` vs `//`: peek decides nothing ("op" either way) */
+    if (eq(c, "eof")) return "eof";
+    if (eq(c, "ws")) return "ws";
+    if (eq(c, "nl")) return "nl";
+    if (eq(c, "A")) return "id";
+    if (eq(c, "D")) return "num";
+    if (eq(c, "Q") || eq(c, "S")) return "str";
+    if (eq(c, "P")) return "punct";
+    if (eq(c, "O")) return "op";
+    return "bad";
+}
+
+static const char *parse_label(const char *nt, const char *tok) {
+    if (eq(nt, "top")) {
+        if (eq(tok, "eof")) return "end";
+        if (eq(tok, "function")) return "fn";
+        if (eq(tok, "let")) return "let";
+    }
+    if (eq(nt, "stmt")) {
+        if (eq(tok, "{")) return "block";
+        if (eq(tok, "function")) return "fn";
+        if (in(tok, "if while for switch return break continue let")) return tok;
+        if (in(tok, "case default")) return tok;
+    }
+    if (eq(nt, "unary")) {
+        if (eq(tok, "-")) return "neg";
+        if (eq(tok, "!")) return "not";
+        if (eq(tok, "...")) return "spread";
+        if (eq(tok, "typeof")) return "typeof";
+        return "prim";
+    }
+    if (eq(nt, "postfix")) {
+        if (eq(tok, "[")) return "index";
+        if (eq(tok, "(")) return "call";
+        if (eq(tok, ".")) return "dot";
+        return "done";
+    }
+    if (eq(nt, "primary")) {
+        if (eq(tok, "id")) return "ident";
+        if (eq(tok, "num")) return "number";
+        if (eq(tok, "str")) return "string";
+        if (in(tok, "null true false")) return tok;
+        if (eq(tok, "[")) return "list";
+        if (eq(tok, "{")) return "dict";
+        if (eq(tok, "(")) return "paren";
+        return "bad";
+    }
+    if (eq(nt, "pswitch")) {
+        if (in(tok, "case default }")) return eq(tok, "}") ? "done" : tok;
+        return "bad";
+    }
+    /* PARSE_DEFAULT */
+    if (eq(nt, "top") || eq(nt, "stmt")) return "expr";
+    if (eq(nt, "unary")) return "prim";
+    if (eq(nt, "postfix")) return "done";
+    return "bad";
+}
+
+static int num(const char *t) { return eq(t, "i64") || eq(t, "f64"); }
+
+static const char *type_label(const char *t1, const char *op, const char *t2) {
+    if (eq(op, "!")) return !eq(t1, "fn") ? "bool" : "illegal";
+    if (eq(op, "len")) return in(t1, "str list dict tup") ? "i64" : "illegal";
+    if (eq(op, "keys")) return eq(t1, "dict") ? "list" : "illegal";
+    if (eq(op, "spread")) return in(t1, "list tup") ? t1 : "illegal";
+    if (eq(op, ",")) return "tup";
+    if (eq(op, "call")) return !eq(t1, "fn") ? "illegal" : "null";
+    if (eq(op, ".")) return eq(t1, "dict") ? "null" : "illegal";
+    if (eq(op, "[]")) {
+        if (eq(t1, "list") && eq(t2, "i64")) return "null";
+        if (eq(t1, "dict") && eq(t2, "str")) return "null";
+        if (eq(t1, "str") && eq(t2, "i64")) return "str";
+        return "illegal";
+    }
+    if (eq(op, "in")) return eq(t1, "str") && eq(t2, "dict") ? "bool" : "illegal";
+    if (eq(op, "=")) return eq(t1, t2) || eq(t1, "null") ? t2 : "illegal";
+    if (eq(op, "&&") || eq(op, "||")) return eq(t1, "bool") && eq(t2, "bool") ? "bool" : "illegal";
+    if (eq(op, "==") || eq(op, "!=")) {
+        if (eq(t1, t2)) return "bool";
+        if (num(t1) && num(t2)) return "bool";
+        return "illegal";
+    }
+    if (in(op, "< <= > >=")) {
+        if (num(t1) && num(t2)) return "bool";
+        if (eq(t1, "str") && eq(t2, "str")) return "bool";
+        return "illegal";
+    }
+    if (in(op, "+ - * / %")) {
+        if (eq(t1, "i64") && eq(t2, "i64")) return eq(op, "/") ? "f64" : "i64";
+        if (num(t1) && num(t2)) return "f64";
+        if (eq(op, "+") && eq(t1, "str") && eq(t2, "str")) return "str";
+        return "illegal";
+    }
+    return "illegal";
+}
+
+static const char *scope_label(const char *ctx, const char *kind) {
+    if (eq(kind, "bind")) return in(ctx, "mod fn block for") ? "ok" : "illegal";
+    if (eq(kind, "param") || eq(kind, "rest")) return eq(ctx, "fn") ? "ok" : "illegal";
+    if (eq(kind, "load")) return "ok";
+    if (eq(kind, "store")) return !eq(ctx, "expr") ? "ok" : "illegal";
+    if (eq(kind, "label")) return eq(ctx, "switch") ? "ok" : "illegal";
+    if (in(kind, "break continue")) return in(ctx, "for switch block") ? "ok" : "illegal";
+    return "illegal";
+}
+
+static const char *shape_label(const char *ty, const char *keysig) {
+    static char *buf;                         /* the last label made here; the caller copies it before the next call */
+    if (eq(keysig, "empty")) {
+        if (in(ty, "null bool i64 f64 str list tup fn")) { free(buf); return buf = xf("s_%s", ty); }
+        if (eq(ty, "dict")) return "s_dict_empty";
+    }
+    if (eq(ty, "dict")) { free(buf); return buf = xf("s_dict_%s", keysig); }
+    return "s_unknown";
+}
+
+static const char *irsel_label(const char *fam, const char *fl) {
+    static const char *IR[][3] = {
+        { "arith", "i64", "op_add" }, { "arith", "f64", "op_div" }, { "arith", "str", "op_add" }, { "arith", "any", "op_add" },
+        { "cmp", "i64", "op_cmp" }, { "cmp", "f64", "op_cmp" }, { "cmp", "str", "op_cmp" }, { "cmp", "bool", "op_cmp" },
+        { "cmp", "any", "op_cmp" }, { "logic", "bool", "op_logic" }, { "logic", "any", "op_logic" },
+        { "mem", "any", "op_load" }, { "mem", "list", "op_idx" }, { "mem", "dict", "op_idx" }, { "mem", "str", "op_idx" },
+        { "ctrl", "br", "op_jump" }, { "ctrl", "br_if", "op_jump" }, { "ctrl", "ret", "op_ret" }, { "ctrl", "switch", "op_jump" },
+        { "call", "any", "op_call" }, { "data", "list", "op_mk" }, { "data", "dict", "op_mk" }, { "data", "any", "op_mk" },
+        { "ic", "enter", "op_ic" }, { "host", "print", "op_host" }, { 0, 0, 0 } };
+    int i;
+    for (i = 0; IR[i][0]; i++) if (eq(IR[i][0], fam) && eq(IR[i][1], fl)) return IR[i][2];
+    return "bad";
+}
+
+static const char *ic_label(const char *shape, const char *op, const char *guard) {
+    int tm = in(guard, "type_ok mono"), dict = !strncmp(shape, "s_dict", 6);
+    if (eq(guard, "none") || eq(shape, "s_unknown")) return "interp";
+    if (eq(op, "add")) {
+        if (eq(shape, "s_i64") && tm) return "add_i64";
+        if (eq(shape, "s_f64") && tm) return "add_f64";
+        return "interp";
+    }
+    if (eq(op, "sub") && eq(shape, "s_i64") && tm) return "sub_i64";
+    if (eq(op, "mul") && eq(shape, "s_i64") && tm) return "mul_i64";
+    if (eq(op, "div") && eq(shape, "s_f64") && tm) return "div_f64";
+    if (eq(op, "lt") || eq(op, "eq")) {
+        if (eq(shape, "s_i64") && tm) return "cmp_i64";
+        if (eq(shape, "s_f64") && tm) return "cmp_f64";
+        return "interp";
+    }
+    if (eq(op, "idx")) {
+        if (eq(shape, "s_list") && in(guard, "type_ok len_ok mono")) return "idx_list";
+        if (dict && in(guard, "type_ok key_ok mono")) return "idx_dict";
+        if (eq(shape, "s_str") && in(guard, "type_ok len_ok mono")) return "idx_str";
+        return "interp";
+    }
+    if (eq(op, "setidx")) {
+        if (eq(shape, "s_list") && in(guard, "type_ok len_ok mono")) return "set_list";
+        if (dict && in(guard, "type_ok key_ok mono")) return "set_dict";
+        return "interp";
+    }
+    if (eq(op, "dot") && dict && in(guard, "type_ok key_ok mono")) return "dot_dict";
+    if (eq(op, "call") && eq(shape, "s_fn") && tm) return "call_fn";
+    if (eq(op, "len")) {
+        if (eq(shape, "s_list") && tm) return "len_list";
+        if (eq(shape, "s_str") && tm) return "len_str";
+        return "interp";
+    }
+    if (eq(op, "in") && dict && in(guard, "type_ok key_ok mono")) return "in_dict";
+    return "interp";
+}
+
+static const char *isel_label(const char *op) {
+    if (in(op, "nop drop ic_enter")) return "nop";
+    if (eq(op, "add")) return "poly_bin";
+    if (in(op, "sub mul mod")) return "i64_bin";
+    if (eq(op, "div")) return "f64_bin";
+    if (in(op, "lt le gt ge eq ne")) return "i64_cmp";
+    if (in(op, "and or not")) return "bool_logic";
+    if (in(op, "load_l store_l")) return "local";
+    if (in(op, "load_g store_g")) return "global";
+    if (eq(op, "const")) return "const";
+    if (eq(op, "jump")) return "br";
+    if (in(op, "jumpz jumpnz switch")) return "br_if";
+    if (eq(op, "call")) return "call";
+    if (eq(op, "ret")) return "ret";
+    if (in(op, "idx setidx dot len keys in mklist mkdict mktup spread restpack")) return "heap";
+    if (in(op, "typeof shapeof")) return "typeof";
+    if (eq(op, "print")) return "host";
+    return "trap";
+}
+
+static const char *enc_label(const char *form, const char *imm) {
+    if (eq(form, "nop")) return "empty";
+    if (eq(form, "trap")) return "trap";
+    if (eq(form, "host")) return "op_host";
+    if (in(form, "br br_if")) return "op_label";
+    if (in(form, "local global")) return "op_slot";
+    if (eq(form, "const")) return !eq(imm, "none") ? "op_imm" : "op";
+    if (in(form, "i64_bin f64_bin i64_cmp f64_cmp bool_logic poly_bin typeof call ret")) return "op";
+    if (eq(form, "heap")) {
+        if (in(imm, "count str_ix")) return "op_imm";
+        if (eq(imm, "slot")) return "op_slot";
+        return "op";
+    }
+    return "trap";
+}
+
+static const char *reloc_label(const char *kind) {
+    if (in(kind, "br br_if switch")) return "br_target";
+    if (eq(kind, "call")) return "fn_ref";
+    return "none";
+}
+
+/* stage registry: field names and domains, classes, label */
+typedef struct { const char *name; int nf; const char *fname[3]; const char **dom[3]; const char **cls; } UjsStage;
+static const UjsStage ST[UJSGOLD_NETS] = {
+    { "lex", 2, { "c", "peek", 0 }, { CHARC, CHARC, 0 }, LEXACT },
+    { "parse", 2, { "nt", "tok", 0 }, { NT, TOKS, 0 }, PRODS },
+    { "type", 3, { "t1", "op", "t2" }, { TYS, TOPS, TYS }, TYOUT },
+    { "scope", 2, { "ctx", "kind", 0 }, { CTX, KIND, 0 }, ACTS },
+    { "shape", 2, { "ty", "keysig", 0 }, { TYS, KEYSIG, 0 }, SHAPES },
+    { "irsel", 2, { "family", "flavor", 0 }, { FAMILY, FLAVOR, 0 }, RECIPE },
+    { "ic", 3, { "shape", "op", "guard" }, { SHAPES, IC_OPS, GUARDS }, STUBS },
+    { "isel", 1, { "op", 0, 0 }, { JOPS, 0, 0 }, WASM_FORMS },
+    { "enc", 2, { "form", "imm", 0 }, { WASM_FORMS, IMMCLASS, 0 }, ENCTMPL },
+    { "reloc", 1, { "kind", 0, 0 }, { JMPKIND, 0, 0 }, RELKIND },
+};
+
+static const char *label(int s, const char **k) {
+    switch (s) {
+    case 0: return lex_label(k[0], k[1]);
+    case 1: return parse_label(k[0], k[1]);
+    case 2: return type_label(k[0], k[1], k[2]);
+    case 3: return scope_label(k[0], k[1]);
+    case 4: return shape_label(k[0], k[1]);
+    case 5: return irsel_label(k[0], k[1]);
+    case 6: return ic_label(k[0], k[1], k[2]);
+    case 7: return isel_label(k[0]);
+    case 8: return enc_label(k[0], k[1]);
+    default: return reloc_label(k[0]);
+    }
+}
+
+static int dlen(const char **d) { int n = 0; while (d[n]) n++; return n; }
+static int dfind(const char **d, const char *s) { int i; for (i = 0; d[i]; i++) if (eq(d[i], s)) return i; return -1; }
+
+
+/* ---------- exports ---------- */
+const UjsStage *ujsgold_stage(int s) { return s >= 0 && s < UJSGOLD_NETS ? &ST[s] : 0; }
+const char *ujsgold_label_at(int s, const char **k) { return label(s, k); }
+int ujsgold_find(const char *net) {
+    int s;
+    for (s = 0; s < UJSGOLD_NETS; s++) if (eq(ST[s].name, net)) return s;
+    return -1;
+}
+
+/* the label source for flownet (the fn_domain_fn / fn_label_fn shapes of flownet/fnx.cx; CTX unused) */
+static void cat(char *t, size_t *at, const char *s) { size_t k = strlen(s); memcpy(t + *at, s, k); *at += k; t[*at] = 0; }
+const char *ujsgold_domain(void *ctx, const char *net) {
+    static char *text[UJSGOLD_NETS];       /* built once per net, kept for the process */
+    int s = ujsgold_find(net), f, i; size_t L = 1, at = 0; const UjsStage *S;
+    (void)ctx;
+    if (s < 0) return 0;
+    if (text[s]) return text[s];
+    S = &ST[s];
+    for (f = 0; f < S->nf; f++) { L += strlen("field\t") + strlen(S->fname[f]) + 1; for (i = 0; S->dom[f][i]; i++) L += strlen(S->dom[f][i]) + 1; }
+    L += strlen("class") + 1;
+    for (i = 0; S->cls[i]; i++) L += strlen(S->cls[i]) + 1;
+    if (!(text[s] = malloc(L))) return 0;
+    text[s][0] = 0;
+    for (f = 0; f < S->nf; f++) {
+        cat(text[s], &at, "field\t"); cat(text[s], &at, S->fname[f]);
+        for (i = 0; S->dom[f][i]; i++) { cat(text[s], &at, "\t"); cat(text[s], &at, S->dom[f][i]); }
+        cat(text[s], &at, "\n");
+    }
+    cat(text[s], &at, "class");
+    for (i = 0; S->cls[i]; i++) { cat(text[s], &at, "\t"); cat(text[s], &at, S->cls[i]); }
+    cat(text[s], &at, "\n");
+    return text[s];
+}
+const char *ujsgold_label(void *ctx, const char *net, int nk, const char *const *key) {
+    int s = ujsgold_find(net), f; const char *k[3];
+    (void)ctx;
+    if (s < 0 || nk != ST[s].nf) return 0;
+    for (f = 0; f < nk; f++) { if (!key[f] || dfind(ST[s].dom[f], key[f]) < 0) return 0; k[f] = key[f]; }
+    return label(s, k);
+}

@@ -1,0 +1,53 @@
+/* flownet/fnx.cx -- the base module of flownet (plans/m4-flownet-cx-module.md W3): the one formatter, the one failure
+   sink, and the types of the two injection surfaces.  Every other flownet module uses it (`#pragma unisa use fnx`);
+   a consumer uses flownet/api.cx and sees these types through it.
+     label source   fn_domain_fn + fn_label_fn: the consumer's gold.  For a net the contract names, the domain is the
+                    rows of a gold table's header (field NAME VALUE..., then class CLASS...), one row per line; the
+                    label of a key (its field values in field order) is one of the classes.  flownet asks every key of
+                    the domain once, at construction, and keeps the answers as the net's gold -- the label source is
+                    never asked again while flows run (an ask is answered by the integer net).
+     flows          fn_flows_fn: the consumer's run, which asks the nets and writes its result with fn_out.
+     emit hook      fn_emit_fn: what the consumer does with a run's output (write a file, run an assembler, print).
+                    fn_run calls it only after the run's books are clean (no gold fallback), with the whole output.
+   Text is never cut short: fnx_fmt allocates every message at its exact length. */
+
+typedef const char *(*fn_domain_fn)(void *ctx, const char *net);
+typedef const char *(*fn_label_fn)(void *ctx, const char *net, int nk, const char *const *key);
+typedef int (*fn_flows_fn)(void *ctx);
+typedef int (*fn_emit_fn)(void *ctx, const char *bytes, long n);
+
+static char *errmsg;                  /* the first failure, whole (allocated to its length), or 0 */
+
+/* formatted text allocated to its exact length (0 only when out of memory): the one formatter of flownet.  The
+   length comes from formatting into a heap buffer and retrying once at the size vsnprintf reports (the m9 libc's
+   vsnprintf hangs when asked to measure with a null buffer and a long %s). */
+#define FNX_FORMAT(fmt, out) do { va_list ap_; size_t cap_ = 256; int n_; char *p_ = 0, *g_; \
+    for (;;) { \
+        if (!(g_ = realloc(p_, cap_))) { free(p_); p_ = 0; break; } \
+        p_ = g_; va_start(ap_, fmt); n_ = vsnprintf(p_, cap_, fmt, ap_); va_end(ap_); \
+        if (n_ < 0) { free(p_); p_ = 0; break; } \
+        if ((size_t)n_ < cap_) break; \
+        cap_ = (size_t)n_ + 1; } \
+    (out) = p_; } while (0)
+char *fnx_fmt(const char *fmt, ...) { char *s; FNX_FORMAT(fmt, s); return s; }
+
+/* a whole copy of S (0 only when out of memory) */
+char *fnx_dup(const char *s) {
+    size_t k = strlen(s); char *d = malloc(k + 1);
+    if (d) memcpy(d, s, k + 1);
+    return d;
+}
+
+/* every module reports through here; the first failure since the last fnx_clear wins */
+void fnx_fail(const char *msg) {
+    if (errmsg) return;
+    if (!(errmsg = fnx_dup(msg))) errmsg = (char *)"flownet: out of memory (formatting a failure)";
+}
+void fnx_failf(const char *fmt, ...) {
+    char *s;
+    if (errmsg) return;
+    FNX_FORMAT(fmt, s);
+    errmsg = s ? s : (char *)"flownet: out of memory (formatting a failure)";
+}
+const char *fnx_error(void) { return errmsg; }
+void fnx_clear(void) { errmsg = 0; }  /* not freed: a caller may still hold the last message */

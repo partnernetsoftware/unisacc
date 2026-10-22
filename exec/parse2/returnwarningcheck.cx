@@ -1,0 +1,564 @@
+#!/usr/bin/env -S unisacc.com -run
+/* returnwarningcheck.cx -- exec/parse2/returnwarningcheck.py in C (2026-10-23, the owner's direction: the toolchain
+   moves off Python).  Reference return-type, --int-conversion, --unused or --format model warnings: single-unit model
+   rules, not compiler CLI -Wall parity.  Both tape and complete diagnostic bytes must agree; every child is bounded.
+   usage: sh ./unisacc.com -run exec/parse2/returnwarningcheck.cx -- [--require-cached] [--tools-dir DIR]
+          [--int-conversion] [--unused] [--format] [--shard INDEX/COUNT]
+   Options are parsed as the .py's argparse did (same usage/help/error text, rc 2, unique long-option prefixes,
+   --opt=value); as in the .py the case family and the shard come from the literal argv words '--int-conversion',
+   '--unused', '--format' and '--shard' (later families replace earlier ones), so an abbreviated spelling parses but
+   selects nothing.  What stays Python (status PARTIAL of the port): obtaining the four stage models -- the
+   content-keyed model cache of exec/c/compilerpack.built_model (key = Python version, generator closure, read-set
+   stamps) and, with --require-cached, exec/parse2/warnprep.cached_inputs (models plus provenance-verified run/ref
+   tools, NEED_PREPARE ... rc 75 on a miss) -- is one `python3 -c` call into those modules (they are invoked, not
+   reimplemented; a model cache miss constructs with exec/build/gen.py exactly as before, its progress on the shared
+   stdout).  Without --require-cached the reference source (tests/export_ref.sh + refshim.h + reffoot.h, as
+   exec/c/refsource.source_text), the reference compiler (cc -w -O1) and exec/c/run.c ($EXEC_CC, default cc) are
+   built here.  Then per case: source.c (body + a main, or the probe file verbatim) goes through the reference (-Wall
+   -S -o -, and plain -S -o -) and the pp/lex/parse(--warnings)/plain(--locations) networks via run; the warning tape,
+   the plain tape, and the diagnostic bytes must agree.  Each passing case prints
+   `CATEGORY warning NAME tape and diagnostics match`, then the summary line; rc 0.  Every child runs with stdout and
+   stderr captured and a 60 s limit (checklib.run).  A failed assertion, a child timeout or an OS error is the .py's
+   uncaught exception: one `AssertionError: ...` (or similar) line on stderr where Python printed a traceback, rc 1;
+   a bad --shard is `bad --shard: use index/count, zero based`, rc 1.  The scratch directory is TMPDIR (TEMP, TMP,
+   /tmp)/return-warnings-XXXXXX and is removed on exit.  ROOT is the grandparent of this file's directory. */
+
+#define PATHN 4096
+static char ROOT[PATHN], TD[PATHN];
+
+static void rmtree(const char *d) {
+    DIR *dp = opendir(d); struct dirent *e; char p[PATHN]; struct stat st;
+    if (dp) {
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
+            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
+        }
+        closedir(dp);
+    }
+    rmdir(d);
+}
+static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+static void quit(int rc) { fflush(stdout); fflush(stderr); cleanup(); exit(rc); }
+static void fail(const char *kind, const char *a, const char *b) {   /* an uncaught Python exception */
+    fflush(stdout);
+    fprintf(stderr, "%s: %s%s%s\n", kind, a ? a : "", b ? ", " : "", b ? b : "");
+    quit(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) fail("MemoryError", "out of memory", 0); return p; }
+static char *path2(const char *a, const char *b) {
+    size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p;
+}
+
+/* ---- argparse ---- */
+static const char *USAGE =
+    "usage: returnwarningcheck.py [-h] [--require-cached] [--tools-dir TOOLS_DIR]\n"
+    "                             [--int-conversion] [--unused] [--format]\n"
+    "                             [--shard SHARD]\n";
+static void argerror(const char *msg, const char *x) {
+    fputs(USAGE, stderr);
+    fprintf(stderr, "returnwarningcheck.py: error: %s%s\n", msg, x ? x : "");
+    exit(2);
+}
+static const char *LONGS[] = { "--help", "--require-cached", "--tools-dir", "--int-conversion", "--unused", "--format",
+                               "--shard", 0 };
+/* argparse's _parse_optional: is this word an option (1) or a positional (0)? */
+static int looks_option(const char *a) {
+    if (a[0] != '-' || !a[1]) return 0;
+    if (!strcmp(a, "--")) return 1;
+    if ((a[1] >= '0' && a[1] <= '9') || (a[1] == '.' && a[2] >= '0' && a[2] <= '9')) return 0;   /* negative-number-like */
+    if (a[1] != '-' && strcmp(a, "-h") && strncmp(a, "-h", 2)) return strchr(a, ' ') ? 0 : 1;
+    if (strchr(a, ' ') && !strchr(a, '=')) {
+        size_t i; for (i = 0; LONGS[i]; i++) if (!strncmp(LONGS[i], a, strlen(a))) return 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int REQUIRE_CACHED; static const char *TOOLS; static int HAVE_TOOLS;
+
+static void parse_args(int argc, char **argv) {
+    char *extra = 0; size_t en = 0;
+    int i, dashdash = 0;
+    const char *env = getenv("UNISACC_WARN_TOOLS");
+    if (env) { TOOLS = env; HAVE_TOOLS = 1; }
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *val = 0; char name[256]; int k, hit = -1, nhit = 0;
+        if (dashdash || !looks_option(a) || !strcmp(a, "--")) {
+            size_t l = strlen(a);
+            if (!strcmp(a, "--")) dashdash = 1;
+            extra = realloc(extra, en + l + 2); if (!extra) fail("MemoryError", "out of memory", 0);
+            if (en) extra[en++] = ' ';
+            memcpy(extra + en, a, l); en += l; extra[en] = 0;
+            continue;
+        }
+        if (a[1] != '-') {                       /* single dash: only -h exists; -hX is -h first (help, exit) */
+            if (!strncmp(a, "-h", 2)) { hit = 0; nhit = 1; }
+        } else {
+            const char *eq = strchr(a, '=');
+            size_t l = eq ? (size_t)(eq - a) : strlen(a);
+            if (l >= sizeof name) l = sizeof name - 1;
+            memcpy(name, a, l); name[l] = 0;
+            for (k = 0; LONGS[k]; k++) if (!strcmp(LONGS[k], name)) { hit = k; nhit = 1; break; }
+            if (hit < 0) {
+                char opts[512] = "";
+                for (k = 0; LONGS[k]; k++)
+                    if (!strncmp(LONGS[k], name, l)) {
+                        if (nhit) strcat(opts, ", ");
+                        strcat(opts, LONGS[k]); hit = k; nhit++;
+                    }
+                if (nhit > 1) {
+                    fputs(USAGE, stderr);
+                    fprintf(stderr, "returnwarningcheck.py: error: ambiguous option: %s could match %s\n", name, opts);
+                    exit(2);
+                }
+            }
+            if (nhit == 1 && eq) val = eq + 1;
+        }
+        if (nhit != 1) {                          /* unknown option: collected as unrecognized */
+            size_t l = strlen(a);
+            extra = realloc(extra, en + l + 2); if (!extra) fail("MemoryError", "out of memory", 0);
+            if (en) extra[en++] = ' ';
+            memcpy(extra + en, a, l); en += l; extra[en] = 0;
+            continue;
+        }
+        if (hit == 0) {
+            if (val) {
+                fputs(USAGE, stderr);
+                fprintf(stderr, "returnwarningcheck.py: error: argument -h/--help: ignored explicit argument '%s'\n", val);
+                exit(2);
+            }
+            fputs(USAGE, stdout);
+            fputs("\noptions:\n"
+                  "  -h, --help            show this help message and exit\n"
+                  "  --require-cached\n"
+                  "  --tools-dir TOOLS_DIR\n"
+                  "  --int-conversion\n"
+                  "  --unused\n"
+                  "  --format\n"
+                  "  --shard SHARD\n", stdout);
+            exit(0);
+        }
+        if (hit == 2 || hit == 6) {               /* --tools-dir / --shard take one argument */
+            if (!val) {
+                if (i + 1 >= argc || looks_option(argv[i + 1])) {
+                    char m[64]; snprintf(m, sizeof m, "argument %s: expected one argument", LONGS[hit]);
+                    argerror(m, 0);
+                }
+                val = argv[++i];
+            }
+            if (hit == 2) { TOOLS = val; HAVE_TOOLS = 1; }
+            continue;
+        }
+        if (val) {
+            fputs(USAGE, stderr);
+            fprintf(stderr, "returnwarningcheck.py: error: argument %s: ignored explicit argument '%s'\n", LONGS[hit], val);
+            exit(2);
+        }
+        if (hit == 1) REQUIRE_CACHED = 1;
+    }
+    if (en) argerror("unrecognized arguments: ", extra);
+    free(extra);
+}
+
+/* ---- children (checklib.run: capture_output, timeout=60) ---- */
+typedef struct { int rc; char *out, *err; size_t on, en; } Res;
+static void res_free(Res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+static void argv_text(char *const *av, char *buf, size_t n) {
+    size_t u = 0; int i;
+    buf[0] = 0;
+    for (i = 0; av[i] && u + 4 < n; i++) u += snprintf(buf + u, n - u, "%s'%s'", i ? ", " : "[", av[i]);
+    if (u + 2 < n) strcat(buf, "]");
+}
+static Res run(char *const *av) {
+    Res r; char of[PATHN], ef[PATHN]; int fo, fe, st = 0; pid_t pid, w; long ticks = 60L * 100;
+    memset(&r, 0, sizeof r);
+    snprintf(of, sizeof of, "%s/.capture-out", TD); snprintf(ef, sizeof ef, "%s/.capture-err", TD);
+    fo = open(of, O_WRONLY | O_CREAT | O_TRUNC, 0600); fe = open(ef, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fo < 0 || fe < 0) fail("OSError", "cannot create capture files", TD);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed", 0);
+    if (pid == 0) { dup2(fo, 1); dup2(fe, 2); close(fo); close(fe); execvp(av[0], av); _exit(127); }
+    close(fo); close(fe);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) fail("ChildProcessError", "waitpid failed", 0);
+        if (ticks-- <= 0) {
+            char t[2048]; kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            argv_text(av, t, sizeof t);
+            fflush(stdout); fprintf(stderr, "subprocess.TimeoutExpired: Command '%s' timed out after 60 seconds\n", t);
+            quit(1);
+        }
+        usleep(10000);
+    }
+    r.rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    r.out = cx_read(of, &r.on); r.err = cx_read(ef, &r.en);
+    if (!r.out || !r.err) fail("OSError", "cannot read capture files", TD);
+    return r;
+}
+static void tail1200(const Res *r, char *buf, size_t n) {
+    size_t s = r->en > 1200 ? r->en - 1200 : 0, k = r->en - s;
+    if (k >= n) k = n - 1;
+    memcpy(buf, r->err + s, k); buf[k] = 0;
+}
+/* call(args): rc 0 asserted, stdout returned */
+static Res call(char *const *av) {
+    Res r = run(av);
+    if (r.rc != 0) {
+        char a[2048], e[1300], m[4096];
+        argv_text(av, a, sizeof a); tail1200(&r, e, sizeof e);
+        snprintf(m, sizeof m, "(%s, %d, b'%s')", a, r.rc, e);
+        fail("AssertionError", m, 0);
+    }
+    return r;
+}
+/* a child with inherited stdio and no limit (subprocess.run(..., check=True) of the model helper) */
+static int spawn(char *const *av) {
+    int st = 0; pid_t pid;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed", 0);
+    if (pid == 0) { execvp(av[0], av); _exit(127); }
+    if (waitpid(pid, &st, 0) < 0) fail("ChildProcessError", "waitpid failed", 0);
+    return WIFSIGNALED(st) ? 128 + WTERMSIG(st) : WEXITSTATUS(st);
+}
+
+/* Path.read_text(): universal newlines (\r\n and \r become \n) */
+static char *read_text(const char *p, size_t *n) {
+    size_t k, u = 0, m; char *b = cx_read(p, &m);
+    if (!b) fail("FileNotFoundError", "[Errno 2] No such file or directory", p);
+    for (k = 0; k < m; k++) {
+        if (b[k] == '\r') { b[u++] = '\n'; if (k + 1 < m && b[k + 1] == '\n') k++; }
+        else b[u++] = b[k];
+    }
+    b[u] = 0; *n = u; return b;
+}
+static void write_bytes(const char *p, const char *b, size_t n) {
+    if (cx_write(p, b, n)) fail("OSError", "cannot write", p);
+}
+static int contains(const char *h, size_t hn, const char *needle) {
+    size_t nn = strlen(needle), i;
+    if (nn > hn) return 0;
+    for (i = 0; i + nn <= hn; i++) if (!memcmp(h + i, needle, nn)) return 1;
+    return 0;
+}
+static int same(const char *a, size_t an, const char *b, size_t bn) { return an == bn && !memcmp(a, b, an); }
+
+/* ---- the cases (verbatim from the .py) ---- */
+typedef struct { const char *name, *body; } Case;
+static const Case RETURN_CASES[] = {
+    {"empty", "int f(void){}"}, {"void", "void f(void){}"}, {"main", ""},
+    {"return", "int f(void){return 1;}"}, {"if-only", "int f(int x){if(x)return 1;}"},
+    {"if-else", "int f(int x){if(x)return 1;else return 2;}"},
+    {"else-falls", "int f(int x){if(x)return 1;else {}}"},
+    {"nested", "int f(int x){if(x){if(x==2)return 1;else return 3;}else return 2;}"},
+    {"after-return", "int f(void){return 1; ;}"},
+    {"block-return", "int f(void){{return 1;}}"},
+    {"static-ordinals", "int f(void){static int x=3;return x++;} int g(void){static int y=7;return f()+y;}"},
+    {"while-one", "int f(void){while(1){}}"}, {"while-zero", "int f(void){while(0){}}"},
+    {"while-variable", "int f(int x){while(x){}}"},
+    {"while-return", "int f(int x){while(x){return 3;}}"},
+    {"while-negative", "int f(void){while(-1){}}"},
+    {"while-char", "int f(void){while('x'){}}"},
+    {"while-float", "int f(void){while(1.0){}}"},
+    {"while-fraction", "int f(void){while(.5){}}"},
+    {"while-hex", "int f(void){while(0x10){}}"},
+    {"for-ever", "int f(void){for(;;){}}"}, {"for-break", "int f(void){for(;;){break;}}"},
+    {"for-zero", "int f(void){for(;0;){}}"},
+    {"do-return", "int f(void){do{return 1;}while(0);}"},
+    {"pointer", "int *f(void){}"}, {"void-pointer", "void *f(void){}"},
+    {"struct", "struct S{int x;}; struct S f(void){}"},
+    {"two", "int f(void){}\nint g(void){}"},
+    {"macro", "#define BODY {}\nint f(void)BODY"},
+    {"splice", "int f(void){\\\n;}"},
+    {"header", "#include \"quiet.h\"\nint f(void){}"},
+    {"exit", "void __exit(int x){} int f(void){__exit(0);}"},
+    {"float-truth", 0},                                   /* exec/parse2/probes/float_truth.c */
+    {0, 0}
+};
+static const Case INT_CASES[] = {
+    {"init-nonzero", "int f(void){int *p=7; return p!=0;}"},
+    {"init-zero", "int f(void){int *p=0; return p!=0;}"},
+    {"init-zerohex", "int f(void){int *p=0x0; return p!=0;}"},
+    {"init-zeroexpr", "int f(void){int *p=0+0; return p!=0;}"},
+    {"init-parenzero", "int f(void){int *p=(0); return p!=0;}"},
+    {"init-castzero", "int f(void){int *p=(int)0; return p!=0;}"},
+    {"init-pointercast", "int f(void){int *p=(int *)7; return p!=0;}"},
+    {"init-enum", "enum {Z=0}; int f(void){int *p=Z; return p!=0;}"},
+    {"init-macro", "#define Z 0\nint f(void){int *p=Z; return p!=0;}"},
+    {"init-address", "int f(void){int x=3; int *p=&x; return *p;}"},
+    {"init-string", "int f(void){char *p=\"ab\"; return p[0];}"},
+    {"init-call", "int g(void){return 7;} int f(void){int *p=g(); return p!=0;}"},
+    {"init-callplus", "int g(void){return 7;} int f(void){int *p=g()+1; return p!=0;}"},
+    {"init-fnvalue", "int g(void){return 7;} int f(void){int *p=g; return p!=0;}"},
+    {"init-fnptr", "int f(int (*g)(void)){int *p=g(); return p!=0;}"},
+    {"init-castcall", "int g(void){return 7;} int f(void){int *p=((int (*)(void))g)(); return p!=0;}"},
+    {"init-sizeof", "int f(void){int *p=sizeof(int); return p!=0;}"},
+    {"init-nested", "int f(int *q){int *p=(q=7); return p==q;}"},
+    {"assign", "int f(int *p){p=7; return p!=0;}"},
+    {"assign-zero", "int f(int *p){p=0; return p!=0;}"},
+    {"assign-parameter", "int f(int *p,int k){p=k; return p!=0;}"},
+    {"assign-nested", "int f(int *p,int *q){p=q=7; return p==q;}"},
+    {"assign-call", "int g(void){return 7;} int f(int *p){p=g(); return p!=0;}"},
+    {"assign-member", "struct S{int *p;}; int f(struct S *s){s->p=7; return s->p!=0;}"},
+    {"assign-index", "int f(int **a){a[0]=7; return a[0]!=0;}"},
+    {"assign-star", "int f(int **a){*a=7; return *a!=0;}"},
+    {"compound", "int f(int *p){p+=7; return p!=0;}"},
+    {"return-notchecked", "int *f(void){return 7;}"},
+    {"header-int", "#include \"quiet.h\"\nint f(int *p){p=8; return p!=0;}"},
+    {0, 0}
+};
+static const Case UNUSED_CASES[] = {
+    {"unused", "int f(void){int x;return 0;}"},
+    {"initialized", "int f(void){int x=3;return 0;}"},
+    {"written", "int f(void){int x;x=3;return 0;}"},
+    {"read", "int f(void){int x=3;return x;}"},
+    {"discarded", "int f(void){int x=3;x;return 0;}"},
+    {"increment", "int f(void){int x=3;x++;return 0;}"},
+    {"preincrement", "int f(void){int x=3;++x;return 0;}"},
+    {"compound", "int f(void){int x=3;x+=2;return 0;}"},
+    {"address", "int f(void){int x=3;int *p=&x;return *p;}"},
+    {"parameter", "int f(int x){return 0;}"},
+    {"static", "int f(void){static int x;return 0;}"},
+    {"global", "int x;int f(void){return 0;}"},
+    {"array", "int f(void){int x[3];return 0;}"},
+    {"arraywrite", "int f(void){int x[3];x[0]=3;return 0;}"},
+    {"sizeof", "int f(void){int x=3;return sizeof x;}"},
+    {"sizeof-paren", "int f(void){int x=3;return sizeof(x);}"},
+    {"multiple", "int f(void){int a,b=3,c;return b;}"},
+    {"shadow", "int f(void){int x=3;{int x=2;return x;}return 0;}"},
+    {"restore", "int f(void){int x=3;{int x=2;}return x;}"},
+    {"nested-order", "int f(void){int x=3;{int a,b;}{int c;}return 0;}"},
+    {"static-shadow", "int f(void){int x=3;{static int x=2;x++;}return 0;}"},
+    {"static-restore", "int f(void){int x=3;{static int x=2;x++;}return x;}"},
+    {"member-name", "struct S{int x;};int f(void){int x;struct S s;s.x=3;return s.x;}"},
+    {"initializer-use", "int f(void){int x=3;int y=x;return 0;}"},
+    {"enum-shadow", "enum {X=7};int f(void){int X=3;{int X=2;}return X;}"},
+    {"two-functions", "int f(void){int x;return 0;}int g(void){int y;return 0;}"},
+    {"for-decl", "int f(void){for(int x=0;0;){}return 0;}"},
+    {"for-body", "int f(void){for(int x=0;x<1;x++){int y;}return 0;}"},
+    {"assigned-in-argument", "int g(int n){return n;}int f(void){int x;return g(x=3);}"},
+    {"nested-assignment", "int f(void){int x,y;x=y=3;return 0;}"},
+    {"if-write", "int f(int k){int x;if(k)x=3;return 0;}"},
+    {"member", "struct S{int a;};int f(void){struct S s;s.a=3;return 0;}"},
+    {"pointercall", "int g(void){return 1;}int f(void){int (*p)(void)=g;return p();}"},
+    {"unused-fp", "int f(void){int (*p)(void);return 0;}"},
+    {"long-name", "int f(void){int abcdefghijklmnopqrstuvwxyz;return 0;}"},
+    {"macro", "#define DECL int x\nint f(void){DECL;return 0;}"},
+    {"header-unused", "#include \"quiet.h\"\nint f(void){int x;return 0;}"},
+    {"splice-unused", "int f(void){int \\\n x;return 0;}"},
+    {0, 0}
+};
+static const Case FORMAT_CASES[] = {
+    {"string-int", "int f(void){printf(\"%s\",7);return 0;}"},
+    {"address-int", "int f(void){printf(\"%p\",7);return 0;}"},
+    {"integer-pointer", "int f(void){printf(\"%d\",\"x\");return 0;}"},
+    {"integer-float", "int f(void){printf(\"%d\",1.0);return 0;}"},
+    {"integer-long", "int f(void){printf(\"%d\",1L);return 0;}"},
+    {"long-int", "int f(void){printf(\"%ld\",1);return 0;}"},
+    {"real-int", "int f(void){printf(\"%f\",1);return 0;}"},
+    {"okay", "int f(void){printf(\"%s %p %d %ld %f\",\"x\",\"x\",1,1L,1.0);return 0;}"},
+    {"int-float-cast", "int f(void){printf(\"%d\",(float)1);return 0;}"},
+    {"real-float-pointer", "int f(void){printf(\"%f\",(double*)0);return 0;}"},
+    {"small-width", "int f(void){char c=3;printf(\"%ld\",c);return 0;}"},
+    {"unsigned", "int f(void){printf(\"%u %lu\",1UL,1U);return 0;}"},
+    {"lengths", "int f(void){printf(\"%hd %lld %zd\",1L,1,1L);return 0;}"},
+    {"flags", "int f(void){printf(\"%+-#08.4ld\",1);return 0;}"},
+    {"stars", "int f(void){printf(\"%*.*ld\",3,2,1);return 0;}"},
+    {"percent", "int f(void){printf(\"%% %ld\",1);return 0;}"},
+    {"few", "int f(void){printf(\"%ld %s\",1);return 0;}"},
+    {"extra", "int f(void){printf(\"plain\",1);return 0;}"},
+    {"trailing", "int f(void){printf(\"%000.\",1);return 0;}"},
+    {"unknown", "int f(void){printf(\"%q %ld\",1,1);return 0;}"},
+    {"nonliteral", "int f(char *s){printf(s,1);return 0;}"},
+    {"call-exempt", "int g(void){return 1;}int f(void){printf(\"%s\",g());return 0;}"},
+    {"nested", "int f(void){printf(\"%d\",printf(\"%ld\",1));return 0;}"},
+    {"conditional", "int f(int k){printf(\"%ld\",k?1:2);return 0;}"},
+    {"conditional-marker", "int f(int k){printf(\"%d\",k>1?k*2:k+1);printf(\"marker\");return 0;}"},
+    {"nested-format-order", "int f(void){printf(\"%ld %d\",1,printf(\"%ld\",2));return 0;}"},
+    {"struct-temp", "struct S{int x;};struct S g(void){struct S s={3};return s;}int use(struct S s){return s.x;}int f(void){printf(\"%d\",use(g()));return 0;}"},
+    {"fnvalue", "int g(void){return 1;}int f(void){printf(\"%s %d\",g,g);return 0;}"},
+    {"fnptr", "int f(int (*p)(void)){printf(\"%d\",p);return 0;}"},
+    {"struct", "struct S{int x;};int f(void){struct S s;s.x=1;printf(\"%d\",s);return 0;}"},
+    {"adjacent", "int f(void){printf(\"%\" \"ld\",1);return 0;}"},
+    {"escaped", "int f(void){printf(\"\\x25ld\",1);return 0;}"},
+    {"two-calls", "int f(void){printf(\"%ld\",1);printf(\"%s\",3);return 0;}"},
+    {"all-four", "int f(void){int unused;int *p=7;printf(\"%ld\",1);}"},
+    {"star-assignment", "int f(int *p){printf(\"%*ld\",p=7,1);return p!=0;}"},
+    {"many-conversions", "int f(void){printf(\"%i %x %X %o %c\",1L,1L,1L,1L,1L);return 0;}"},
+    {"real-conversions", "int f(void){printf(\"%e %g %E %G %F\",1,1,1,1,1);return 0;}"},
+    {"header-format", "#include \"quiet.h\"\nint f(void){printf(\"%ld\",1);return 0;}"},
+    {"vararg-float", 0},                                  /* exec/parse2/probes/vararg_float.c */
+    {0, 0}
+};
+
+/* int(str) for an ASCII spelling: surrounding whitespace, one sign, digits with single '_' between digits */
+static int pyint(const char *s, const char *e, long long *v) {
+    int neg = 0, digits = 0; long long x = 0;
+    while (s < e && strchr(" \t\n\r\v\f\x1c\x1d\x1e\x1f", *s) && *s) s++;
+    while (e > s && strchr(" \t\n\r\v\f\x1c\x1d\x1e\x1f", e[-1]) && e[-1]) e--;
+    if (s < e && (*s == '+' || *s == '-')) { neg = *s == '-'; s++; }
+    if (s >= e) return 0;
+    for (; s < e; s++) {
+        if (*s == '_') { if (!digits || s + 1 >= e || s[1] < '0' || s[1] > '9') return 0; continue; }
+        if (*s < '0' || *s > '9') return 0;
+        if (x < 100000000000LL) x = x * 10 + (*s - '0');   /* large values only need to stay large */
+        digits = 1;
+    }
+    *v = neg ? -x : x; return 1;
+}
+
+static char *PY_SETUP =
+    "import sys,pathlib\n"
+    "R=pathlib.Path(sys.argv[1]);sys.path[0:1]=[str(R/'tests'),str(R/'exec/c'),str(R/'exec/parse2')]\n"
+    "t=pathlib.Path(sys.argv[2]);specs=[('pp',['pp','--locations']),('lex',['lex','--locations']),"
+    "('parse',['parse2','--warnings']),('plain',['parse2','--locations'])]\n"
+    "if sys.argv[3]=='cached':\n"
+    " from warnprep import cached_inputs\n"
+    " runner,reference=cached_inputs(t,specs,pathlib.Path(sys.argv[5]) if sys.argv[4]=='1' else None,'return warnings')\n"
+    " (t/'.tools').write_text(str(runner)+'\\0'+str(reference))\n"
+    "else:\n"
+    " from compilerpack import built_model\n"
+    " for name,flags in specs:built_model(t,name,R/'exec/build/gen.py',flags)\n";
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash, *runner, *reference, *f, *quiet;
+    const char *category = "return-type", *shard = "all", *qtext = "static int in_header(void){}\n", *tmp;
+    const Case *cases = RETURN_CASES; int i, total = 0, part = 0, parts = 1, positives = 0, count = 0, has_shard = -1;
+    int lit_int = 0, lit_unused = 0, lit_format = 0;
+
+    parse_args(argc, argv);
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--int-conversion")) lit_int = 1;
+        if (!strcmp(argv[i], "--unused")) lit_unused = 1;
+        if (!strcmp(argv[i], "--format")) lit_format = 1;
+        if (has_shard < 0 && !strcmp(argv[i], "--shard")) has_shard = i;
+    }
+
+    /* R = Path(__file__).resolve().parents[2] */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/../..", here); if (!realpath(t, ROOT)) fail("FileNotFoundError", "cannot resolve the repository root", t); }
+
+    /* tempfile.TemporaryDirectory(prefix='return-warnings-') */
+    tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TEMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = "/tmp";
+    snprintf(TD, sizeof TD, "%s/return-warnings-XXXXXX", tmp);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("FileNotFoundError", "No usable temporary directory found", 0); }
+    signal(SIGINT, SIG_DFL);
+
+    if (REQUIRE_CACHED) {
+        char *av[8]; size_t n; char *p, *tools;
+        av[0] = "python3"; av[1] = "-c"; av[2] = PY_SETUP; av[3] = ROOT; av[4] = TD; av[5] = "cached";
+        av[6] = HAVE_TOOLS ? "1" : "0"; av[7] = 0;
+        { char *bv[9]; memcpy(bv, av, sizeof av); bv[7] = HAVE_TOOLS ? (char *)TOOLS : (char *)""; bv[8] = 0;
+          int rc = spawn(bv); if (rc) quit(rc); }
+        p = path2(TD, ".tools"); tools = cx_read(p, &n);
+        if (!tools) fail("FileNotFoundError", "model helper wrote no tool paths", p);
+        unlink(p); free(p);
+        runner = tools; reference = tools + strlen(tools) + 1;
+        if ((size_t)(reference - tools) > n) fail("ValueError", "bad tool paths", 0);
+    } else {
+        /* refsource.source_text(R): tests/export_ref.sh FLAT (check=True, timeout 30, captured) */
+        char *sub = path2(TD, "refsource"), *flat, *sh, *a, *b, *c, *src, *refc, *cc;
+        size_t an, bn, cn;
+        if (mkdir(sub, 0700)) fail("OSError", "cannot create", sub);
+        flat = path2(sub, "ref.c"); sh = path2(ROOT, "tests/export_ref.sh");
+        { char *av[] = { sh, flat, 0 }; Res r = run(av);
+          if (r.rc) { char m[PATHN * 2]; snprintf(m, sizeof m, "Command '['%s', '%s']' returned non-zero exit status %d.", sh, flat, r.rc);
+                      fail("subprocess.CalledProcessError", m, 0); }
+          res_free(&r); }
+        a = read_text(path2(ROOT, "tests/refshim.h"), &an); b = read_text(flat, &bn); c = read_text(path2(ROOT, "tests/reffoot.h"), &cn);
+        src = xmalloc(an + bn + cn + 1); memcpy(src, a, an); memcpy(src + an, b, bn); memcpy(src + an + bn, c, cn);
+        rmtree(sub);
+        refc = path2(TD, "ref.c"); write_bytes(refc, src, an + bn + cn);
+        reference = path2(TD, "ref"); runner = path2(TD, "run");
+        { char *av[] = { "cc", "-w", "-O1", "-I", path2(ROOT, "kernel"), "-I", path2(ROOT, "src"), refc, "-o", reference, 0 };
+          Res r = call(av); res_free(&r); }
+        cc = getenv("EXEC_CC"); if (!cc) cc = "cc";
+        { char *av[] = { cc, "-O2", path2(ROOT, "exec/c/run.c"), "-o", runner, 0 }; Res r = call(av); res_free(&r); }
+        { char *av[] = { "python3", "-c", PY_SETUP, ROOT, TD, "build", "0", "", 0 }; int rc = spawn(av); if (rc) quit(rc); }
+    }
+
+    if (lit_int) { category = "int-conversion"; cases = INT_CASES; qtext = "static int in_header(int *p){p=7;return p!=0;}\n"; }
+    if (lit_unused) { category = "unused-variable"; cases = UNUSED_CASES; qtext = "static int in_header(void){int hidden;return 0;}\n"; }
+    if (lit_format) { category = "format"; cases = FORMAT_CASES; qtext = "static int header_format(void){printf(\"%ld\",1);return 0;}\n"; }
+    quiet = path2(TD, "quiet.h"); write_bytes(quiet, qtext, strlen(qtext));
+    while (cases[total].name) total++;
+
+    if (has_shard >= 0) {
+        const char *sl; long long p0, p1;
+        if (has_shard + 1 >= argc) goto bad;
+        shard = argv[has_shard + 1];
+        sl = strchr(shard, '/');
+        if (!sl || strchr(sl + 1, '/')) goto bad;
+        if (!pyint(shard, sl, &p0) || !pyint(sl + 1, sl + strlen(sl), &p1)) goto bad;
+        if (!(0 <= p0 && p0 < p1 && p1 <= total)) goto bad;
+        part = (int)p0; parts = (int)p1;
+        goto good;
+      bad:
+        fflush(stdout); fputs("bad --shard: use index/count, zero based\n", stderr); quit(1);
+      good:;
+    }
+
+    f = path2(TD, "source.c");
+    {
+        char *pp = path2(TD, "pp"), *tokens = path2(TD, "tokens"), *truth = path2(TD, "truth");
+        char *ppnet = path2(TD, "pp.net"), *lexnet = path2(TD, "lex.net"), *parsenet = path2(TD, "parse.net"),
+             *plainnet = path2(TD, "plain.net"), *inc = path2(ROOT, "include");
+        char needle[64]; snprintf(needle, sizeof needle, "[-W%s]", category);
+        for (i = part; i < total; i += parts) {
+            const char *name = cases[i].name; int probe = !cases[i].body;
+            count++;
+            if (probe) {
+                size_t n; char *b = read_text(path2(ROOT, !strcmp(name, "float-truth") ? "exec/parse2/probes/float_truth.c"
+                                                                                       : "exec/parse2/probes/vararg_float.c"), &n);
+                const char *expected = !strcmp(name, "float-truth") ? "" : "1.5 2.5\n";
+                write_bytes(f, b, n); free(b);
+                { char *av[] = { "cc", "-O0", f, "-o", truth, 0 }; Res r = call(av); res_free(&r); }
+                { char *av[] = { truth, 0 }; Res r = call(av);
+                  if (!same(r.out, r.on, expected, strlen(expected))) fail("AssertionError", "", 0); res_free(&r); }
+                { char *av[] = { reference, f, "-run", 0 }; Res r = call(av);
+                  if (!same(r.out, r.on, expected, strlen(expected))) fail("AssertionError", "", 0); res_free(&r); }
+            } else {
+                const char *tail = "\nint main(void){return 0;}\n";
+                size_t bl = strlen(cases[i].body), tl = strlen(tail); char *b = xmalloc(bl + tl);
+                memcpy(b, cases[i].body, bl); memcpy(b + bl, tail, tl); write_bytes(f, b, bl + tl); free(b);
+            }
+            {
+                Res ref, ppr, tok, got, base, q;
+                char m[4096];
+                { char *av[] = { reference, f, "-Wall", "-S", "-o", "-", 0 }; ref = run(av); }
+                if (ref.rc) { snprintf(m, sizeof m, "('%s', b'%.*s')", name, (int)(ref.en > 2000 ? 2000 : ref.en), ref.err); fail("AssertionError", m, 0); }
+                { char *av[] = { runner, ppnet, f, f, inc, 0 }; ppr = call(av); write_bytes(pp, ppr.out, ppr.on); }
+                { char *av[] = { runner, lexnet, pp, 0 }; tok = call(av); write_bytes(tokens, tok.out, tok.on); }
+                { char *av[] = { runner, parsenet, tokens, f, 0 }; got = run(av); }
+                if (got.rc) { snprintf(m, sizeof m, "('%s', b'%.*s')", name, (int)(got.en > 2000 ? 2000 : got.en), got.err); fail("AssertionError", m, 0); }
+                { char *av[] = { runner, plainnet, tokens, f, 0 }; base = run(av); }
+                { char *av[] = { reference, f, "-S", "-o", "-", 0 }; q = run(av); }
+                if (q.rc) { snprintf(m, sizeof m, "('%s', b'%.*s')", name, (int)(q.en > 2000 ? 2000 : q.en), q.err); fail("AssertionError", m, 0); }
+                if (!(base.rc == 0 && same(base.out, base.on, q.out, q.on) && base.en == 0)) {
+                    snprintf(m, sizeof m, "('%s', 'quiet tape')", name); fail("AssertionError", m, 0); }
+                if (!same(got.out, got.on, ref.out, ref.on)) { snprintf(m, sizeof m, "('%s', 'warning tape')", name); fail("AssertionError", m, 0); }
+                if (!same(ref.out, ref.on, q.out, q.on)) { snprintf(m, sizeof m, "('%s', '-Wall changed tape')", name); fail("AssertionError", m, 0); }
+                if (!same(got.err, got.en, ref.err, ref.en)) {
+                    snprintf(m, sizeof m, "('%s', b'%.*s', b'%.*s')", name, (int)(ref.en > 1500 ? 1500 : ref.en), ref.err,
+                             (int)(got.en > 1500 ? 1500 : got.en), got.err);
+                    fail("AssertionError", m, 0);
+                }
+                if (contains(ref.err, ref.en, needle)) positives++;
+                printf("%s warning %s tape and diagnostics match\n", category, name); fflush(stdout);
+                res_free(&ref); res_free(&ppr); res_free(&tok); res_free(&got); res_free(&base); res_free(&q);
+            }
+        }
+    }
+    if (!positives) fail("AssertionError", "", 0);
+    printf("%s warning: %d cases; %d with warnings; shard %s of %d cases; single-unit rule check\n", category, count, positives, shard, total);
+    quit(0);
+    return 0;
+}

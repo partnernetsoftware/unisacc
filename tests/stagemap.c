@@ -28,12 +28,12 @@ static char *rules[] = {
     "meta", "identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative c99-ledger decision-ledger ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
             " subtract-safety* cxinclude freezecheck freezecheck-selftest revivedscan facts-export publish-order gate-infra gate-layers"
             " tsv-build-account pipeline-cache docs kernel source-layout front-bounds bound boundreason boundstall-r7g boundnested-1 boundnested-2 boundnested-3 boundnested-4 boundnested-5 fresh-order*"
-            " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools"
-            " lib-bindings-registry flownet-w0-module* flownet-baseline* flownet-w2-*",
+            " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools tools-*-ref tools-*-build tools-*-run"
+            " lib-bindings-registry flownet-w0-module* flownet-baseline* flownet-w2-* flownet-w3-*",
     "E2", "exec-pp-* exec-pploc exec-macros pptruth shared-e2-* rowcov-pp* prevheaders",
     "E1", "exec-lex* exec-f1-sidecar strconvert-* rowcov-lex*",
     "E3", "exec-parse* exec-r21-e3 exec-unit* exec-diag exec-errors* exec-f1-attributes exec-*warn*"
-          " exec-neg exec-e3self exec-decimal tapebin* tape-reader rowcov-parse2* declmatrix declshape"
+          " exec-neg exec-e3self* exec-decimal tapebin* tape-reader rowcov-parse2* declmatrix declshape"
           " volatile-comma diag* c99 staticinit staticunits tagforward parserbounds hostile cli ccparity"
           " formatonce warn* seed-construct-parse2 seedparse2*",
     "E4", "opt-run exec-e4* exec-prune*",
@@ -495,7 +495,7 @@ static char *extra[] = {
 
 static char *also[] = {
     "build", "rowcov-*-build rowcov-*-union strconvert-seed seedparse2* seed-construct-parse2 closure-*"
-             " bigclosure exec-e3self exec-e4self",
+             " bigclosure exec-e3self* exec-e4self",
     "E6", "exec-bind* combo asmtext",
     "lib", "forward* ccinterop ffi-*",
     "meta", "tapebin*",

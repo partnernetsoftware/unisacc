@@ -10,7 +10,7 @@ b() { "$_BOUND" 60 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 TARGET=$OS/$ARCH; export TARGET
-# Same model set as prep-0..3 (gateorder.json): prepared models only, a cold cache fails by name and never constructs here
+# Same model set as prep-0..5 (gateorder.json): prepared models only, a cold cache fails by name and never constructs here
 REQ=--require-cached; export UNISACC_REQUIRE_PREPARED=1
 b ./exec/pipeline/elf.sh "$T" examples/hello.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 b python3 exec/build/gen.py opt "$T/o1.json"

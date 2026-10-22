@@ -1,0 +1,929 @@
+#!/usr/bin/env -S unisacc.com -run
+/* seedmemory.cx -- fresh seed-suite memory admission, the include-free port of tests/seedmemory.py.
+   UNKNOWN is rc 2, insufficient known memory rc 77, admitted rc 0 (silent).  Same stdout lines, same rc:
+     sh ./unisacc.com -run tests/seedmemory.cx -- FAMILY [NAME...]                      (gen, parse2, com)
+     sh ./unisacc.com -run tests/seedmemory.cx -- FAMILY [NAME...] --verify-binary GEN  (post-build recheck)
+   Callers on a hot path use tests/cxbin (compiled once, then ~30 ms): sh tests/cxbin tests/seedmemory.cx FAMILY ...
+   While tests/seedmemory.py still exists (tests/hostcheck.py imports it), REF_GEN/REF_PARSE2 here and its
+   REFERENCE_KEYS move together; the --selftest pinned-key case goes red on either side.
+   Evidence (see tests/seedmemory.py's docstring for the measurement history): gen RSS per route,
+   KiB floored to MiB plus one MiB guard per route; four-worker groups sum serial route peaks;
+   need = peak + max(25%, 512 MiB).  Cold Python references, unmeasured flags and COM stay UNKNOWN.
+   The reference key is tests/seedmemorykey.cx's key() (copied, not included): sha256 over each read
+   file's path, NUL and raw content sha256 in tests/seedmemory-reads.tsv order, first 16 hex digits.
+   Paths are relative to the working directory, which must be the repository root (every caller cds there).
+   Extra modes (first argument only):
+     --selftest                      the tests/seedmemorycheck.py cases, ported (hooks instead of mock.patch); rc 0/1
+     --assess FAMILY [NAME...]       one line RC<TAB>REQUIRED<TAB>OBSERVED<TAB>BASIS (- for None), rc as assess()
+     --selftest-inject=MEM,CG,MOUNT  test hook for the gate case: execution identity = evidence, memory read
+                                     from these fake /proc files; never use it as admission evidence.
+   Differences from the .py: argparse usage errors name prog seedmemory.cx (same layout, rc 2); -h prints a
+   short help; a Python traceback (unreadable seed/gen.c or read-set table, directory as binary) is one
+   "seedmemory.cx: error:" stderr line, rc 1. */
+
+#define MIB 1048576LL
+static const char *C_SHA = "c1be454cf86c7d4c01af985d437c21116e5f69b880bd763b370a1461ae426187";
+/* history of REFERENCE_KEYS moves: tests/seedmemory.py comments; keys from tests/seedmemorykey.cx */
+static const char *REF_GEN = "2038728cd6430a99", *REF_PARSE2 = "5b42b1f017337ff6";
+static const char *BINARY_SHA = "96cf5ebbc66e5f2092cc5b68c4bf29695c8c7fdb0d110c15c9e2f12a23ec7fc7";
+typedef struct { const char *host, *cc_sha256, *cc_version; long long parallelism; const char *cache_branch; } Evidence;
+static Evidence EV = { "Linux/x86_64", "a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
+                       "cc (Debian 14.2.0-19) 14.2.0", 4, "warm" };
+static const char *LAUNCHER_PATH = "/tmp/cdx37-host-tools/cc";
+static const char *LAUNCHER_SHA = "5c036d429e38725565e20f4f4989afad0e11284144616287e939eb42239ccdc3";
+static const char *LAUNCHER_TARGET = "/usr/bin/cc";
+static const char *ENV_KEYS[] = { "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "GCC_EXEC_PREFIX",
+    "COMPILER_PATH", "LIBRARY_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "GCC_SPECS", "CFLAGS", "CPPFLAGS", "LDFLAGS", 0 };
+static const char *EQUIVALENT_FLAGS[] = { "-std=c99 -O2 -w -Iseed", "-std=c99 -O2 -Iseed" };
+static const struct { const char *name; long long mib; } C_RSS[] = {
+    {"e2",186},{"e1",330},{"e3",1268},{"e4",40},{"o1",14},{"prune",32},{"nativeabi",298},{"enc-elf",142},{"enc-macho",208},
+    {"enc-pe",263},{"arm-elf",142},{"arm-macho",208},{"arm-pe",264},{"lower-lnx-x",242},{"lower-lnx-a",266},{"lower-osx-x",235},
+    {"lower-osx-a",262},{"lower-win-x",180},{"lower-win-a",207},{"obj-lower-x",245},{"obj-lower-a",270},{"obj-enc-x",156},
+    {"obj-enc-a",159},{"tokenpp",39},{"tokenlex",119},{"warnlex",741},{"warnparse",2148},{"warnunits",196},{"errorparse",2134},
+    {"warnpp",182},{"locations",1346},{"warnings",1360},{"locations,warnings",1360},{"locations,errors",2134},
+    {"warnings,errors",2148},{"locations,warnings,errors",2149},{0,0} };
+static const char *SUITE_SEEDGEN3[] = { "tokenpp", "tokenlex", "warnlex", 0 };
+static const char *DEF_PARSE2[] = { "x", "locations", "warnings", "errors", "locations,warnings", "locations,errors",
+    "warnings,errors", "locations,warnings,errors", 0 };
+static const char *DEF_GEN[] = { "e2","e1","e3","e4","o1","prune","nativeabi","enc-elf","enc-macho","enc-pe","arm-elf","arm-macho",
+    "arm-pe","lower-lnx-x","lower-lnx-a","lower-osx-x","lower-osx-a","lower-win-x","lower-win-a","obj-lower-x","obj-lower-a",
+    "obj-enc-x","obj-enc-a","tokenpp","tokenlex","warnlex","warnparse","warnunits","errorparse","warnpp",0 };
+
+static const char *g_root = "";            /* ROOT prefix ("" = cwd, the repository root) */
+static const char *g_which = 0;            /* selftest: shutil.which('cc') result */
+
+static void crash(const char *what, const char *arg) {
+    fflush(stdout); fprintf(stderr, "seedmemory.cx: error: %s%s\n", what, arg ? arg : ""); exit(1);
+}
+static char *cat3(const char *a, const char *b, const char *c) {
+    size_t la = strlen(a), lb = strlen(b), lc = strlen(c); char *s = malloc(la + lb + lc + 1);
+    if (!s) crash("out of memory", 0);
+    memcpy(s, a, la); memcpy(s + la, b, lb); memcpy(s + la + lb, c, lc); s[la + lb + lc] = 0; return s;
+}
+static char *rootpath(const char *rel) { return rel[0] == '/' ? cat3(rel, "", "") : cat3(g_root, rel, ""); }
+static int file_sha(const char *path, char hex[65]) {          /* 0 ok, -1 missing/unreadable */
+    size_t n; char *b = cx_read(path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex); free(b); return 0;
+}
+static long long c_rss(const char *route) {
+    int i; for (i = 0; C_RSS[i].name; i++) if (!strcmp(C_RSS[i].name, route)) return C_RSS[i].mib;
+    return -1;
+}
+static const char *ref_key(const char *family) { return !strcmp(family, "gen") ? REF_GEN : !strcmp(family, "parse2") ? REF_PARSE2 : ""; }
+
+/* Python int(): surrounding whitespace, optional sign, digits with single underscores between them. */
+static int py_int(const char *s, long long *v) {
+    const char *p = s; int neg = 0, nd = 0; long long x = 0;
+    while (*p == ' ' || (*p >= '\t' && *p <= '\r')) p++;
+    if (*p == '+' || *p == '-') neg = *p++ == '-';
+    for (; *p; p++) {
+        if (*p >= '0' && *p <= '9') { if (x > (9223372036854775807LL - 9) / 10) return -1; x = x * 10 + (*p - '0'); nd++; }
+        else if (*p == '_' && nd && p[1] >= '0' && p[1] <= '9') continue;
+        else break;
+    }
+    while (*p == ' ' || (*p >= '\t' && *p <= '\r')) p++;
+    if (!nd || *p) return -1;
+    *v = neg ? -x : x; return 0;
+}
+static char *strip(char *s) {
+    char *e; while (*s == ' ' || (*s >= '\t' && *s <= '\r')) s++;
+    e = s + strlen(s); while (e > s && (e[-1] == ' ' || (e[-1] >= '\t' && e[-1] <= '\r'))) *--e = 0;
+    return s;
+}
+
+/* ---- pathlib-like component paths: anchor ("", "/" or "//") plus components, '.' and empty dropped ---- */
+typedef struct { char anchor[3]; int n; char *c[256]; } PPath;
+static int ppath(const char *s, PPath *p, char *store) {
+    char *q; int lead = 0;
+    strcpy(store, s); p->n = 0;
+    while (store[lead] == '/') lead++;
+    strcpy(p->anchor, lead == 0 ? "" : lead == 2 ? "//" : "/");
+    for (q = strtok(store, "/"); q; q = strtok(0, "/")) {
+        if (!strcmp(q, ".")) continue;
+        if (p->n == 256) return -1;
+        p->c[p->n++] = q;
+    }
+    return 0;
+}
+static char *ppath_str(const PPath *p, int n, const char *leaf) {   /* first N components, then LEAF */
+    size_t len = 4 + strlen(leaf); int i; char *s;
+    for (i = 0; i < n; i++) len += strlen(p->c[i]) + 1;
+    s = malloc(len); if (!s) crash("out of memory", 0);
+    strcpy(s, p->anchor);
+    for (i = 0; i < n; i++) { if (i) strcat(s, "/"); strcat(s, p->c[i]); }
+    if (*leaf) { if (n || !*p->anchor) { if (n) strcat(s, "/"); } strcat(s, leaf); }
+    if (!*s) strcpy(s, ".");
+    return s;
+}
+
+/* ---- available(): MemAvailable bounded by every cgroup2 memory.max above this process ---- */
+enum { AV_OK = 0, AV_UNKNOWN = 1, AV_CRASH = 2 };
+static char *first_line(char *text, const char *prefix, int contains) {
+    char *l = text, *nl;
+    for (; l && *l; l = nl ? nl + 1 : 0) {
+        nl = strchr(l, '\n'); if (nl) *nl = 0;
+        if (nl && nl > l && nl[-1] == '\r') nl[-1] = 0;
+        if (contains ? strstr(l, prefix) != 0 : !strncmp(l, prefix, strlen(prefix))) return l;
+        if (!nl) break;
+    }
+    return 0;
+}
+static char *read_text(const char *path) { struct stat st; char *b; if (stat(path, &st)) return 0; b = cx_read(path, 0); return b; }
+static int available_paths(const char *meminfo, const char *cgroup, const char *mountinfo, long long *out) {
+    char *mt = read_text(meminfo), *ct, *mo, *l, *tok, *fields[8], *member, mstore[4096], rstore[4096], bstore[4096];
+    long long mem, observed; int nf = 0, i, depth; PPath pm, pr, pb, cur;
+    if (!mt) return AV_UNKNOWN;
+    l = first_line(mt, "MemAvailable:", 0);
+    if (!l) { free(mt); return AV_UNKNOWN; }                       /* StopIteration */
+    strtok(l, " \t"); tok = strtok(0, " \t\v\f");
+    if (!tok) { free(mt); return AV_CRASH; }                          /* IndexError */
+    if (py_int(tok, &mem)) { free(mt); return AV_UNKNOWN; }
+    free(mt); mem *= 1024;
+    if (!(ct = read_text(cgroup))) return AV_UNKNOWN;
+    if (!(l = first_line(ct, "0::", 0))) { free(ct); return AV_UNKNOWN; }
+    member = l + 3;
+    if (strlen(member) >= sizeof mstore || ppath(member, &pm, mstore)) { free(ct); return AV_CRASH; }
+    free(ct);
+    if (!(mo = read_text(mountinfo))) return AV_UNKNOWN;
+    if (!(l = first_line(mo, " - cgroup2 ", 1))) { free(mo); return AV_UNKNOWN; }
+    for (tok = strtok(l, " \t\v\f"); tok && nf < 8; tok = strtok(0, " \t\v\f")) fields[nf++] = tok;
+    if (nf < 5 || strlen(fields[3]) >= sizeof rstore || strlen(fields[4]) >= sizeof bstore) { free(mo); return AV_CRASH; }
+    if (ppath(fields[3], &pr, rstore) || ppath(fields[4], &pb, bstore)) { free(mo); return AV_CRASH; }
+    free(mo);
+    /* relative_to: the mount root must be the member path or one of its parents (ValueError otherwise) */
+    if (strcmp(pm.anchor, pr.anchor) || pr.n > pm.n) return AV_UNKNOWN;
+    for (i = 0; i < pr.n; i++) if (strcmp(pm.c[i], pr.c[i])) return AV_UNKNOWN;
+    cur = pb;
+    for (i = pr.n; i < pm.n; i++) { if (cur.n == 256) return AV_CRASH; cur.c[cur.n++] = pm.c[i]; }
+    observed = mem;
+    for (depth = cur.n;; depth--) {
+        char *pmax = ppath_str(&cur, depth, "memory.max"), *maximum, *mx; struct stat st; long long maxv, used;
+        int is_base = depth == pb.n;
+        if (stat(pmax, &st)) {
+            free(pmax);
+            if (!is_base) return AV_UNKNOWN;                          /* FileNotFoundError re-raised */
+            maximum = 0;                                              /* cgroup2 root has no memory.max */
+        } else {
+            maximum = cx_read(pmax, 0); free(pmax);
+            if (!maximum) return AV_CRASH;
+        }
+        mx = maximum ? strip(maximum) : "max";
+        if (strcmp(mx, "max")) {
+            char *pcur = ppath_str(&cur, depth, "memory.current"), *ut;
+            if (py_int(mx, &maxv)) { free(maximum); free(pcur); return AV_UNKNOWN; }
+            ut = read_text(pcur); free(pcur);
+            if (!ut) { free(maximum); return AV_UNKNOWN; }
+            if (py_int(strip(ut), &used)) { free(ut); free(maximum); return AV_UNKNOWN; }
+            free(ut);
+            if (maxv - used < observed) observed = maxv - used > 0 ? maxv - used : 0;
+            if (observed < 0) observed = 0;
+        }
+        free(maximum);
+        if (is_base) break;
+    }
+    *out = observed; return AV_OK;
+}
+static const char *g_fake_proc[3];          /* --selftest-inject */
+static int available_real(long long *out) {
+    if (g_fake_proc[0]) return available_paths(g_fake_proc[0], g_fake_proc[1], g_fake_proc[2], out);
+    return available_paths("/proc/meminfo", "/proc/self/cgroup", "/proc/self/mountinfo", out);
+}
+
+/* ---- reference key: tests/seedmemorykey.cx key(), copied (ROOT-prefixed); 1 key, 0 None ---- */
+static int reference_key_real(const char *family, char out[17]) {
+    size_t n, cap = 1 << 16, len = 0; char *tsv = rootpath("tests/seedmemory-reads.tsv"), *t = cx_read(tsv, &n), *line, *nl, *buf;
+    unsigned char md[32]; char hex[65];
+    if (!t) crash("cannot read ", tsv);
+    free(tsv);
+    buf = malloc(cap);
+    line = memchr(t, '\n', n); line = line ? line + 1 : t + n;        /* skip the header line */
+    for (; line < t + n; line = nl + 1) {
+        char *tab, rel[1024], *full; size_t fl, rl; char *data;
+        nl = memchr(line, '\n', t + n - line); if (!nl) nl = t + n;
+        tab = memchr(line, '\t', nl - line); if (!tab) continue;
+        if ((size_t)(tab - line) != strlen(family) || memcmp(line, family, tab - line)) continue;
+        rl = (size_t)(nl - tab - 1); if (rl && tab[rl] == '\r') rl--;
+        {   char *t2 = memchr(tab + 1, '\t', rl); if (t2) rl = (size_t)(t2 - tab - 1); }   /* the path is the second field */
+        if (rl >= sizeof rel) crash("read-set path too long", 0);
+        memcpy(rel, tab + 1, rl); rel[rl] = 0;
+        full = rootpath(rel); data = cx_read(full, &fl); free(full);
+        if (!data) { free(t); free(buf); return 0; }               /* a listed file is missing: no key */
+        cx_sha256(data, fl, md); free(data);
+        if (len + rl + 1 + 32 > cap) { cap = (len + rl + 33) * 2; buf = realloc(buf, cap); }
+        memcpy(buf + len, rel, rl); len += rl; buf[len++] = 0; memcpy(buf + len, md, 32); len += 32;
+    }
+    cx_sha256_hex(buf, len, hex); memcpy(out, hex, 16); out[16] = 0;
+    free(t); free(buf); return 1;
+}
+
+/* ---- execution identity ---- */
+typedef struct {
+    char host[64], cc_sha256[65], cc_version[512], flags[512]; long long parallelism;
+    int launcher; char l_path[1024], l_sha[65], l_target[1024]; int env_any;
+} Identity;
+static const char *host_name(void) {
+#if defined(__linux__) && defined(__x86_64__)
+    return "Linux/x86_64";
+#elif defined(__linux__) && defined(__aarch64__)
+    return "Linux/aarch64";
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "Darwin/arm64";
+#elif defined(__APPLE__) && defined(__x86_64__)
+    return "Darwin/x86_64";
+#else
+    return "unknown/unknown";
+#endif
+}
+static int line_value(const char *src, const char *prefix, int quoted, char *out, size_t cap) {
+    const char *l = src, *nl, *v, *e;                                  /* first line PREFIX'VALUE' or PREFIXdigits */
+    size_t pl = strlen(prefix);
+    for (; *l; l = nl + 1) {
+        nl = strchr(l, '\n'); if (!nl) nl = l + strlen(l);
+        if ((size_t)(nl - l) > pl && !strncmp(l, prefix, pl)) {
+            v = l + pl; e = nl;
+            if (quoted) {
+                if (*v == '\'' && e - v >= 3 && e[-1] == '\'') {
+                    const char *q = v + 1; while (q < e - 1 && *q != '\'') q++;
+                    if (q == e - 1 && (size_t)(e - v - 2) < cap) { memcpy(out, v + 1, e - v - 2); out[e - v - 2] = 0; return 0; }
+                }
+            } else {
+                const char *q = v; while (q < e && *q >= '0' && *q <= '9') q++;
+                if (q == e && e > v && (size_t)(e - v) < cap) { memcpy(out, v, e - v); out[e - v] = 0; return 0; }
+            }
+        }
+        if (!*nl) break;
+    }
+    return -1;
+}
+static int which_cc(char *out, size_t cap) {
+    const char *path = getenv("PATH"), *p, *e; struct stat st;
+    if (g_which) { if (strlen(g_which) >= cap) return 0; strcpy(out, g_which); return 1; }
+    if (!path) path = "/bin:/usr/bin";
+    if (!*path) return 0;
+    for (p = path;; p = e + 1) {
+        size_t dl; e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        dl = (size_t)(e - p);
+        if (dl + 4 < cap) {
+            memcpy(out, p, dl); out[dl] = 0;
+            if (dl && out[dl - 1] != '/') strcat(out, "/");
+            strcat(out, "cc");
+            if (stat(out, &st) == 0 && access(out, X_OK) == 0 && !S_ISDIR(st.st_mode)) return 1;
+        }
+        if (!*e) break;
+    }
+    return 0;
+}
+static void normpath_abs(const char *s, char *out, size_t cap) {      /* pathlib str(Path(s).absolute()) */
+    char cwd[4096], store[8192], *full; PPath p;
+    if (s[0] != '/' && getcwd(cwd, sizeof cwd)) full = cat3(cwd, "/", s); else full = cat3(s, "", "");
+    if (strlen(full) >= sizeof store || ppath(full, &p, store)) { free(full); *out = 0; return; }
+    free(full); full = ppath_str(&p, p.n, "");
+    if (strlen(full) < cap) strcpy(out, full); else *out = 0;
+    free(full);
+}
+static void rm_tree(const char *dir) {
+    DIR *d = opendir(dir); struct dirent *e;
+    if (!d) { unlink(dir); return; }
+    while ((e = readdir(d))) {
+        char *p; struct stat st;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        p = cat3(dir, "/", e->d_name);
+        if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rm_tree(p); else unlink(p);
+        free(p);
+    }
+    closedir(d); rmdir(dir);
+}
+static const char *temp_base(void) {                                 /* tempfile.gettempdir() candidates */
+    static const char *env[] = { "TMPDIR", "TEMP", "TMP", 0 }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp", 0 };
+    int i; struct stat st; const char *v;
+    for (i = 0; env[i]; i++) if ((v = getenv(env[i])) && *v && !stat(v, &st) && S_ISDIR(st.st_mode) && !access(v, W_OK)) return v;
+    for (i = 0; fixed[i]; i++) if (!stat(fixed[i], &st) && S_ISDIR(st.st_mode) && !access(fixed[i], W_OK)) return fixed[i];
+    return ".";
+}
+/* Run ARGV in CWD with stdout captured (stderr to /dev/null when QUIET), SECS limit (0 = none).
+   ENVSET: NAME=VALUE strings set in the child.  rc as cx_runv_timeout; *OUT malloc'd. */
+static int spawn(char *const argv[], const char *cwd, int secs, int quiet, char *const envset[], char **out, size_t *len) {
+    char *tmp = cat3(temp_base(), "/seed-memory-out-", "XXXXXX"); int fd = mkstemp(tmp), st = 0, rc; long ticks = (long)secs * 100;
+    pid_t pid, w;
+    *out = 0; if (len) *len = 0;
+    if (fd < 0) { free(tmp); return -1; }
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) { close(fd); unlink(tmp); free(tmp); return -1; }
+    if (pid == 0) {
+        int i, k, ne = 0, na = 0; char **v;
+        setpgid(0, 0); dup2(fd, 1); close(fd);
+        if (quiet && !freopen("/dev/null", "w", stderr)) _exit(127);
+        if (cwd && chdir(cwd)) _exit(127);
+        if (!envset) { execvp(argv[0], argv); _exit(127); }
+        /* the child environment goes through env(1): setenv() under -run does not reach execvp's environ */
+        while (envset[ne]) ne++;
+        while (argv[na]) na++;
+        v = malloc(sizeof *v * (size_t)(ne + na + 2)); if (!v) _exit(127);
+        v[0] = "env"; k = 1;
+        for (i = 0; i < ne; i++) v[k++] = envset[i];
+        for (i = 0; i < na; i++) v[k++] = argv[i];
+        v[k] = 0;
+        execvp("env", v); _exit(127);
+    }
+    close(fd);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0) { rc = -1; break; }
+        if (secs > 0 && ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = 124; break; }
+        usleep(10000);
+    }
+    *out = cx_read(tmp, len); unlink(tmp); free(tmp);
+    return rc;
+}
+static int execution_identity_real(const char *family, Identity *id) {
+    char *script = rootpath(!strcmp(family, "parse2") ? "tests/seedparse2check.sh" : "tests/seedgencheck.sh"), *src, *out;
+    char workers[64], cc[4096], entity[4096], sha[65], abs[4096], *td, *argv[3]; const char **k; int rc; size_t i, n;
+    memset(id, 0, sizeof *id);
+    src = cx_read(script, 0); free(script);
+    if (!src) return 0;
+    if (line_value(src, "GEN_CC_FLAGS=", 1, id->flags, sizeof id->flags) ||
+        line_value(src, "GEN_PARALLELISM=", 0, workers, sizeof workers)) { free(src); return 0; }
+    free(src);
+    if (!which_cc(cc, sizeof cc)) return 0;
+    if (!realpath(cc, entity)) return 0;
+    if (file_sha(entity, sha)) return 0;
+    if (strcmp(sha, EV.cc_sha256)) {
+        normpath_abs(cc, abs, sizeof abs);
+        if (strcmp(abs, LAUNCHER_PATH) || strcmp(sha, LAUNCHER_SHA)) return 0;
+        id->launcher = 1; strcpy(id->l_path, LAUNCHER_PATH); strcpy(id->l_sha, sha); strcpy(id->l_target, LAUNCHER_TARGET);
+        if (!realpath(LAUNCHER_TARGET, entity)) return 0;
+        if (file_sha(entity, sha) || strcmp(sha, EV.cc_sha256)) return 0;
+        strcpy(cc, LAUNCHER_TARGET);
+    }
+    for (k = ENV_KEYS; *k; k++) { const char *v = getenv(*k); if (v && *v) return 0; }
+    td = cat3(temp_base(), "/seed-memory-identity-", "XXXXXX");
+    if (!mkdtemp(td)) { free(td); return 0; }
+    argv[0] = cc; argv[1] = "--version"; argv[2] = 0;
+    rc = spawn(argv, td, 5, 1, 0, &out, &n);
+    rm_tree(td); free(td);
+    if (rc || !out) { free(out); return 0; }
+    for (i = 0; i < n; i++) if (strchr("\n\r\v\f\x1c\x1d\x1e", out[i]) && out[i]) break;
+    if (!n) { free(out); return 0; }                                 /* no stdout lines */
+    if (i >= sizeof id->cc_version) i = sizeof id->cc_version - 1;
+    memcpy(id->cc_version, out, i); id->cc_version[i] = 0; free(out);
+    strcpy(id->host, host_name());
+    if (file_sha(entity, id->cc_sha256)) return 0;
+    {   const char *p = workers; while (*p == '0' && p[1]) p++;
+        id->parallelism = strlen(p) > 18 ? -1 : atoll(p); }
+    return 1;
+}
+static const char *identity_reason(const Identity *id, const char *branch) {
+    static char buf[256];
+    if (!id) return "execution identity UNKNOWN";
+    if (id->launcher && (strcmp(id->l_path, LAUNCHER_PATH) || strcmp(id->l_sha, LAUNCHER_SHA) || strcmp(id->l_target, LAUNCHER_TARGET)))
+        return "launcher route differs from reviewed evidence";
+    if (id->env_any) return "unproved compiler/loader environment";
+    if (strcmp(id->host, EV.host)) return "memory evidence identity differs: host";
+    if (strcmp(id->cc_sha256, EV.cc_sha256)) return "memory evidence identity differs: cc_sha256";
+    if (strcmp(id->cc_version, EV.cc_version)) return "memory evidence identity differs: cc_version";
+    if (id->parallelism != EV.parallelism) return "memory evidence identity differs: parallelism";
+    if (strcmp(id->flags, EQUIVALENT_FLAGS[0]) && strcmp(id->flags, EQUIVALENT_FLAGS[1])) return "unproved compiler flags";
+    if (strcmp(branch, EV.cache_branch)) { snprintf(buf, sizeof buf, "unmeasured cache branch: %s", branch); return buf; }
+    return 0;
+}
+static void evidence_identity(Identity *id) {                       /* {**EVIDENCE_IDENTITY,'flags':EQUIVALENT_FLAGS[1]} */
+    memset(id, 0, sizeof *id);
+    strcpy(id->host, EV.host); strcpy(id->cc_sha256, EV.cc_sha256); strcpy(id->cc_version, EV.cc_version);
+    id->parallelism = EV.parallelism; strcpy(id->flags, EQUIVALENT_FLAGS[1]);
+}
+static int identity_injected(const char *family, Identity *id) { (void)family; evidence_identity(id); return 1; }
+
+static int verify_binary_real(const char *path) {                   /* 0 match, 2 missing/changed, crash otherwise */
+    struct stat st; char hex[65];
+    if (stat(*path ? path : ".", &st)) return 2;
+    if (S_ISDIR(st.st_mode)) crash("Is a directory: ", path);
+    if (file_sha(*path ? path : ".", hex)) crash("cannot read ", path);
+    return strcmp(hex, BINARY_SHA) ? 2 : 0;
+}
+
+/* hooks: the selftest swaps these the way seedmemorycheck.py patches module attributes.  Flags and direct calls,
+   not function pointers: -run rejected this file ("tape domain: unknown opcode") with the pointer form. */
+typedef struct { char **v; int n; } Names;
+static int hk_identity, hk_key, hk_available, hk_verify, hk_requirement, hk_assess;   /* 0 real, 1 fake; identity 2 injected */
+static int fake_identity(const char *, Identity *); static int fake_key(const char *, char[17]); static int fake_available(long long *);
+static int fake_verify(const char *); static long long fake_requirement(const char *, Names, const char *, char *);
+static int fake_assess(const char *, Names, long long *, long long *, char *);
+static long long requirement_real(const char *, Names, const char *, char *);
+static int assess_real(const char *, Names, long long *, long long *, char *);
+static int h_identity(const char *f, Identity *id) { return hk_identity == 1 ? fake_identity(f, id) : hk_identity == 2 ? identity_injected(f, id) : execution_identity_real(f, id); }
+static int h_reference_key(const char *f, char out[17]) { return hk_key ? fake_key(f, out) : reference_key_real(f, out); }
+static int h_available(long long *o) { return hk_available ? fake_available(o) : available_real(o); }
+static int h_verify_binary(const char *p) { return hk_verify ? fake_verify(p) : verify_binary_real(p); }
+static long long h_requirement(const char *f, Names n, const char *t, char *r) { return hk_requirement ? fake_requirement(f, n, t, r) : requirement_real(f, n, t, r); }
+static int h_assess(const char *f, Names n, long long *need, long long *obs, char *b) { return hk_assess ? fake_assess(f, n, need, obs, b) : assess_real(f, n, need, obs, b); }
+
+/* need in bytes, -1 = None; REASON gets the basis (cap 1024) */
+static long long requirement_real(const char *family, Names names, const char *tmpdir, char *reason) {
+    char hex[65], key[17], *gen = rootpath("seed/gen.c"), *cache; const char *r, *branch = "warm", *cold = 0, *base;
+    Identity id; int have, i, j; long long *peaks, peak = 0, par;
+    if (!strcmp(family, "com")) { strcpy(reason, "unmeasured COM construction/generator route"); return -1; }
+    if (file_sha(gen, hex)) crash("cannot read ", gen);
+    free(gen);
+    if (strcmp(hex, C_SHA)) { strcpy(reason, "C source differs from measured route"); return -1; }
+    have = h_identity(family, &id);
+    if ((r = identity_reason(have ? &id : 0, "warm"))) { strcpy(reason, r); return -1; }
+    if (!names.n) {
+        const char **d = !strcmp(family, "parse2") ? DEF_PARSE2 : DEF_GEN;
+        names.n = 0; names.v = (char **)d; while (d[names.n]) names.n++;
+    }
+    peaks = malloc(sizeof *peaks * (size_t)(names.n + 1));
+    for (i = 0; i < names.n; i++) {
+        const char *name = names.v[i], *route = name; long long mib;
+        if (!strcmp(family, "parse2")) {
+            if (!strcmp(name, "x")) route = "e3";
+            else if (!strcmp(name, "errors")) route = "errorparse";
+            else if (strcmp(name, "locations") && strcmp(name, "warnings") && strcmp(name, "locations,warnings") &&
+                     strcmp(name, "locations,errors") && strcmp(name, "warnings,errors") && strcmp(name, "locations,warnings,errors")) route = 0;
+        }
+        if (!route || (mib = c_rss(route)) < 0) { snprintf(reason, 1024, "unmeasured C flags: %s", name); free(peaks); return -1; }
+        peaks[i] = (mib + 1) * MIB;
+    }
+    if (tmpdir && *tmpdir) base = tmpdir; else { base = getenv("TMPDIR"); if (!base) base = "/tmp"; }
+    cache = cat3(base, *base ? "/" : "", !strcmp(family, "parse2") ? "unisacc-seedparse2" : "unisacc-seedgen");
+    if (!h_reference_key(family, key) || strcmp(key, ref_key(family))) {
+        strcpy(reason, "generator inputs differ from measured route"); free(peaks); free(cache); return -1;
+    }
+    for (i = 0; i < names.n; i++) {
+        char *f = cat3(cache, "/py-", key), *g = cat3(f, "-", names.v[i]), *h = cat3(g, ".json", ""); struct stat st; int bad;
+        bad = stat(h, &st) || !S_ISREG(st.st_mode) || st.st_size == 0;
+        free(f); free(g); free(h);
+        if (bad) { branch = "cold"; cold = names.v[i]; break; }
+    }
+    free(cache);
+    if ((r = identity_reason(&id, branch))) { snprintf(reason, 1024, "%s: %s", r, cold ? cold : "None"); free(peaks); return -1; }
+    par = id.parallelism;
+    for (i = 0; i < names.n; i += (int)par) {
+        long long s = 0; for (j = i; j < names.n && j < i + par; j++) s += peaks[j];
+        if (s > peak) peak = s;
+    }
+    free(peaks);
+    strcpy(reason, "generator execution RSS + max(25%,512MiB); warm Python references; compile_resources=UNKNOWN");
+    return peak + ((peak + 3) / 4 > 512 * MIB ? (peak + 3) / 4 : 512 * MIB);
+}
+/* rc 0/77/2, or -1 when available() raised something assess() does not catch */
+static int assess_real(const char *family, Names names, long long *need, long long *observed, char *basis) {
+    int av;
+    *need = h_requirement(family, names, 0, basis); *observed = -1;
+    if (*need < 0) return 2;
+    av = h_available(observed);
+    if (av == AV_UNKNOWN) { *observed = -1; strcpy(basis, "memory availability/cgroup UNKNOWN"); return 2; }
+    if (av == AV_CRASH) { *observed = -1; return -1; }
+    return *observed < *need ? 77 : 0;
+}
+
+/* ---- argparse emulation: prog FAMILY{parse2,gen,com} [names ...] [--verify-binary PATH] [-h] ---- */
+static void usage_error(const char *msg, const char *arg) {
+    fflush(stdout);
+    fprintf(stderr, "usage: seedmemory.cx [-h] [--verify-binary VERIFY_BINARY]\n"
+                    "                     {parse2,gen,com} [names ...]\n"
+                    "seedmemory.cx: error: %s%s\n", msg, arg ? arg : "");
+    exit(2);
+}
+static int is_prefix(const char *tok, size_t tl, const char *opt) { return tl >= 3 && tl <= strlen(opt) && !strncmp(tok, opt, tl); }
+static int negative_number(const char *s) {
+    const char *p = s + 1; int d = 0, dot = 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') d++; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return d > 0 && (!dot || p[-1] != '.');
+}
+typedef struct { const char *family; const char *verify; char **pos; int npos, family_done, names_done; char **extras; int nextras; } Parsed;
+static void flush_run(Parsed *a, char **run, int n) {
+    int i;
+    if (!n) return;
+    if (!a->family_done) {
+        a->family = run[0]; a->family_done = 1;
+        if (strcmp(a->family, "parse2") && strcmp(a->family, "gen") && strcmp(a->family, "com")) {
+            char m[1200]; snprintf(m, sizeof m, "'%.1000s' (choose from 'parse2', 'gen', 'com')", a->family);
+            usage_error("argument family: invalid choice: ", m);
+        }
+        run++; n--;
+        if (!n) return;                                               /* names (nargs='*') waits for a later run */
+    }
+    if (!a->names_done) { for (i = 0; i < n; i++) a->pos[a->npos++] = run[i]; a->names_done = 1; }
+    else for (i = 0; i < n; i++) a->extras[a->nextras++] = run[i];
+}
+static void parse_args(int argc, char **argv, Parsed *a, FILE *out) {
+    char **run = malloc(sizeof *run * (size_t)(argc + 1)); int nrun = 0, i, dashdash = 0;
+    memset(a, 0, sizeof *a);
+    a->pos = malloc(sizeof *a->pos * (size_t)(argc + 1)); a->extras = malloc(sizeof *a->extras * (size_t)(argc + 1));
+    for (i = 0; i < argc; i++) {
+        char *t = argv[i]; size_t tl; const char *eq;
+        if (dashdash || t[0] != '-' || !t[1] || negative_number(t)) { run[nrun++] = t; continue; }
+        if (!strcmp(t, "--")) { dashdash = 1; continue; }
+        eq = strchr(t, '='); tl = eq ? (size_t)(eq - t) : strlen(t);
+        if (!eq && (!strcmp(t, "-h") || is_prefix(t, tl, "--help"))) {
+            flush_run(a, run, nrun); nrun = 0;
+            fprintf(out, "usage: seedmemory.cx [-h] [--verify-binary VERIFY_BINARY]\n"
+                         "                     {parse2,gen,com} [names ...]\n\n"
+                         "Fresh seed-suite memory admission; UNKNOWN is rc2, insufficient known memory rc77.\n\n"
+                         "positional arguments:\n  {parse2,gen,com}\n  names\n\n"
+                         "options:\n  -h, --help            show this help message and exit\n"
+                         "  --verify-binary VERIFY_BINARY\n");
+            exit(0);
+        }
+        if (t[1] == '-' && is_prefix(t, tl, "--verify-binary")) {
+            flush_run(a, run, nrun); nrun = 0;
+            if (eq) a->verify = eq + 1;
+            else {
+                char *v = i + 1 < argc ? argv[i + 1] : 0;
+                if (!v || (v[0] == '-' && v[1] && !negative_number(v)) || (v[0] == '-' && v[1] == '-' && !v[2]))
+                    usage_error("argument --verify-binary: expected one argument", 0);
+                a->verify = v; i++;
+            }
+            continue;
+        }
+        if (strchr(t, ' ')) { run[nrun++] = t; continue; }
+        flush_run(a, run, nrun); nrun = 0;
+        a->extras[a->nextras++] = t;
+    }
+    flush_run(a, run, nrun); free(run);
+    if (!a->family_done) usage_error("the following arguments are required: family", 0);
+    if (a->nextras) {
+        size_t len = 1; char *m; for (i = 0; i < a->nextras; i++) len += strlen(a->extras[i]) + 1;
+        m = malloc(len); *m = 0;
+        for (i = 0; i < a->nextras; i++) { if (i) strcat(m, " "); strcat(m, a->extras[i]); }
+        usage_error("unrecognized arguments: ", m);
+    }
+}
+/* ' '.join(names).split() */
+static Names split_names(char **v, int n) {
+    Names r; int i; size_t len = 1; char *all, *tok;
+    for (i = 0; i < n; i++) len += strlen(v[i]) + 1;
+    all = malloc(len); *all = 0;
+    for (i = 0; i < n; i++) { if (i) strcat(all, " "); strcat(all, v[i]); }
+    r.v = malloc(sizeof *r.v * (len / 2 + 2)); r.n = 0;
+    for (tok = strtok(all, " \t\n\v\f\r\x1c\x1d\x1e\x1f"); tok; tok = strtok(0, " \t\n\v\f\r\x1c\x1d\x1e\x1f")) r.v[r.n++] = tok;
+    return r;
+}
+static int run_main(int argc, char **argv, FILE *out) {
+    Parsed a; Names names; long long need, observed; char basis[1024]; int rc;
+    parse_args(argc, argv, &a, out);
+    names = split_names(a.pos, a.npos);
+    if (a.verify) {
+        const char *reason = "generator-binary-identity";
+        rc = h_verify_binary(a.verify);
+        if (!rc) {
+            need = h_requirement(a.family, names, 0, basis); reason = basis;
+            if (need < 0) rc = 2;
+        }
+        if (rc) fprintf(out, "UNKNOWN: required=memory observed=unknown missing=memory-evidence reason=%s\n", reason);
+        return rc;
+    }
+    rc = h_assess(a.family, names, &need, &observed, basis);
+    if (rc < 0) crash("memory availability read failed", 0);
+    if (rc == 77) fprintf(out, "UNVERIFIED: required=mem>=%lldB observed=%lldB missing=memory\n", need, observed);
+    else if (rc == 2) fprintf(out, "UNKNOWN: required=memory observed=unknown missing=memory-evidence reason=%s\n", basis);
+    return rc;
+}
+
+/* ================= selftest: tests/seedmemorycheck.py, case for case ================= */
+static int st_fail, st_count, st_subfail;   /* st_subfail: failed subTests (unittest counts each one) */
+static const char *st_case;
+#define CHECK(c, msg) do { if (!(c)) { st_fail++; fprintf(stderr, "FAIL: %s: %s (line %d)\n", st_case, msg, __LINE__); } } while (0)
+static char *st_tmp(void) { char *d = cat3(temp_base(), "/seedmemorycheck-", "XXXXXX"); if (!mkdtemp(d)) crash("mkdtemp failed", 0); return d; }
+static void st_write(const char *path, const char *text) { if (cx_write(path, text, strlen(text))) crash("cannot write ", path); }
+static void st_mkdirs(const char *path) {
+    char *p = cat3(path, "", ""), *q;
+    for (q = p + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(p, 0755); *q = '/'; }
+    mkdir(p, 0755); free(p);
+}
+static char *st_join(const char *a, const char *b) { return cat3(a, "/", b); }
+static void st_fake(const char *root, const char *mem, const char *maxval, const char *used, const char *parent, char *paths[3]) {
+    char *cg = st_join(root, "cg"), *ab = st_join(cg, "a/b"), *a_ = st_join(cg, "a"), *t, *line; const char *dirs[2], *x[2], *u[2]; int i;
+    t = cat3("MemAvailable: ", mem, " kB\n"); paths[0] = st_join(root, "mem"); st_write(paths[0], t); free(t);
+    paths[1] = st_join(root, "member"); st_write(paths[1], "0::/a/b\n");
+    st_mkdirs(ab);
+    line = cat3("1 0 0:1 / ", cg, " rw - cgroup2 cgroup2 rw\n"); paths[2] = st_join(root, "mount"); st_write(paths[2], line); free(line);
+    dirs[0] = ab; dirs[1] = a_; x[0] = maxval; x[1] = parent; u[0] = used; u[1] = "10";
+    for (i = 0; i < 2; i++) {
+        char *pm = st_join(dirs[i], "memory.max"), *pc = st_join(dirs[i], "memory.current");
+        st_write(pm, x[i]); st_write(pc, u[i]); free(pm); free(pc);
+    }
+    free(cg); free(ab); free(a_);
+}
+/* hook doubles */
+static const char *N_E3[] = { "e3", 0 }, *N_TP[] = { "tokenpp", 0 }, *N_NONE[] = { 0 }, *N_BAD[] = { "unmeasured-test-flag", 0 };
+static long long fx_need; static const char *fx_reason; static long long fx_av[4]; static int fx_av_n, fx_av_i, fx_av_status, fx_av_called;
+static int fx_verify_rc; static const char *fx_key; static Identity fx_id; static int fx_assess_rc; static long long fx_assess_need, fx_assess_obs;
+static long long fake_requirement(const char *f, Names n, const char *t, char *reason) { (void)f; (void)n; (void)t; strcpy(reason, fx_reason); return fx_need; }
+static int fake_available(long long *o) { fx_av_called++; if (fx_av_status) return fx_av_status; *o = fx_av[fx_av_i < fx_av_n ? fx_av_i++ : fx_av_n - 1]; return AV_OK; }
+static int fake_verify(const char *p) { (void)p; return fx_verify_rc; }
+static int fake_key(const char *f, char out[17]) { (void)f; snprintf(out, 17, "%s", fx_key); return 1; }
+static int fake_identity(const char *f, Identity *id) { (void)f; *id = fx_id; return 1; }
+static int fake_assess(const char *f, Names n, long long *need, long long *obs, char *b) { (void)f; (void)n; *need = fx_assess_need; *obs = fx_assess_obs; strcpy(b, "measured"); return fx_assess_rc; }
+static void st_reset(void) {
+    hk_identity = hk_key = hk_available = hk_verify = hk_requirement = hk_assess = 0;
+    g_which = 0; g_root = ""; fx_av_n = fx_av_i = fx_av_status = fx_av_called = 0;
+}
+static Names st_names(const char **v) { Names n; n.v = (char **)v; n.n = 0; while (v[n.n]) n.n++; return n; }
+static void st_touch_json(const char *cache, const char *key, const char *name) {
+    char *a = cat3(cache, "/py-", key), *b = cat3(a, "-", name), *c = cat3(b, ".json", ""); st_write(c, "{}"); free(a); free(b); free(c);
+}
+static char *st_capture_main(int argc, char **argv, int *rc) {
+    char *d = st_tmp(), *p = st_join(d, "out"), *text; FILE *f = fopen(p, "w");
+    *rc = run_main(argc, argv, f); fclose(f);
+    text = cx_read(p, 0); rm_tree(d); free(d); free(p); return text;
+}
+static char *sh_quote(const char *s) {
+    size_t n = 3; const char *p; char *r, *q;
+    for (p = s; *p; p++) n += *p == '\'' ? 4 : 1;
+    r = q = malloc(n); *q++ = '\'';
+    for (p = s; *p; p++) { if (*p == '\'') { memcpy(q, "'\\''", 4); q += 4; } else *q++ = *p; }
+    *q++ = '\''; *q = 0; return r;
+}
+
+static void case_low_mem_and_cgroup_and_parent(void) {
+    static const struct { const char *mem, *x, *u, *parent; long long want; } t[] = {
+        {"1","max","0","max",1024}, {"100","2000","1500","max",500}, {"100","max","0","900",890}, {"100","2000","3000","max",0} };
+    int i;
+    for (i = 0; i < 4; i++) {
+        char *d = st_tmp(), *p[3]; long long got = -7;
+        st_fake(d, t[i].mem, t[i].x, t[i].u, t[i].parent, p);
+        CHECK(available_paths(p[0], p[1], p[2], &got) == AV_OK && got == t[i].want, "available() value");
+        rm_tree(d); free(d);
+    }
+}
+static void case_missing_membership_is_unknown_not_unlimited(void) {
+    char *d = st_tmp(), *p[3], *m; long long got;
+    st_fake(d, "100", "max", "0", "max", p);
+    m = st_join(d, "cg/a/b/memory.max"); unlink(m); free(m);
+    CHECK(available_paths(p[0], p[1], p[2], &got) == AV_UNKNOWN, "missing member memory.max must raise FileNotFoundError");
+    rm_tree(d); free(d);
+}
+static void case_unknown_never_becomes_77(void) {
+    long long need, obs; char b[1024];
+    hk_requirement = 1; fx_need = -1; fx_reason = "cold Python unknown"; hk_available = 1;
+    CHECK(assess_real("gen", st_names(N_E3), &need, &obs, b) == 2, "unknown requirement is rc 2");
+    CHECK(fx_av_called == 0, "must not admit unknown");
+}
+static void case_fresh_each_start_and_real_errors_not_swallowed(void) {
+    long long need, obs; char b[1024];
+    hk_requirement = 1; fx_need = 4096; fx_reason = "measured"; hk_available = 1;
+    fx_av[0] = 8192; fx_av[1] = 1024; fx_av_n = 2;
+    CHECK(assess_real("gen", st_names(N_E3), &need, &obs, b) == 0, "8192 >= 4096 admits");
+    CHECK(assess_real("gen", st_names(N_E3), &need, &obs, b) == 77, "1024 < 4096 is 77");
+    fx_av_status = AV_CRASH;
+    CHECK(assess_real("gen", st_names(N_E3), &need, &obs, b) == -1, "PermissionError is not swallowed");
+}
+static void case_known_group_with_warm_cache_and_cold_unknown(void) {
+    char *d = st_tmp(), *c, b[1024]; Names n = st_names(SUITE_SEEDGEN3); int i; long long peak = 0;
+    fx_key = REF_GEN; hk_key = 1; evidence_identity(&fx_id); hk_identity = 1;
+    CHECK(requirement_real("gen", n, d, b) < 0, "cold cache is UNKNOWN");
+    c = st_join(d, "unisacc-seedgen"); mkdir(c, 0755);
+    for (i = 0; i < n.n; i++) { st_touch_json(c, REF_GEN, n.v[i]); peak += (c_rss(n.v[i]) + 1) * MIB; }
+    CHECK(requirement_real("gen", n, d, b) == peak + 512 * MIB, "warm group requirement");
+    fx_key = "changed";
+    CHECK(requirement_real("gen", st_names(N_TP), d, b) < 0, "changed key is UNKNOWN");
+    rm_tree(d); free(d); free(c);
+}
+static void case_changed_gen_key_is_unknown_before_resource_admission(void) {
+    long long need, obs; char b[1024];
+    evidence_identity(&fx_id); hk_identity = 1; fx_key = "next-input-key"; hk_key = 1; hk_available = 1;
+    CHECK(assess_real("gen", st_names(N_TP), &need, &obs, b) == 2, "rc 2");
+    CHECK(need < 0, "required is None"); CHECK(fx_av_called == 0, "changed key must not admit resources");
+    CHECK(strstr(b, "generator inputs differ") != 0, "reason names generator inputs");
+}
+static void case_unknown_com_and_unmeasured_parse2_flags(void) {
+    char b[1024];
+    CHECK(requirement_real("com", st_names(N_NONE), 0, b) < 0, "com is UNKNOWN");
+    CHECK(requirement_real("parse2", st_names(N_BAD), 0, b) < 0, "unmeasured parse2 flag is UNKNOWN");
+}
+static void case_all_measured_parse2_flags_still_require_warm_reference(void) {
+    char *d = st_tmp(), *c, *f, b[1024]; Names n = st_names(DEF_PARSE2); int i;
+    evidence_identity(&fx_id); hk_identity = 1;
+    CHECK(requirement_real("parse2", n, d, b) < 0, "cold parse2 is UNKNOWN");
+    c = st_join(d, "unisacc-seedparse2"); mkdir(c, 0755);
+    for (i = 0; i < n.n; i++) st_touch_json(c, REF_PARSE2, n.v[i]);
+    CHECK(requirement_real("parse2", n, d, b) >= 0, "warm measured parse2 flags are known");
+    f = cat3(c, "/py-", REF_PARSE2); { char *g = cat3(f, "-locations.json", ""); unlink(g); free(g); } free(f);
+    CHECK(requirement_real("parse2", n, d, b) < 0, "one cold flag set is UNKNOWN");
+    rm_tree(d); free(d); free(c);
+}
+static void case_gate_low_memory_exits_before_generator(void) {
+    int low; char cwd[4096], py[4096], tr[4096];
+    if (!getcwd(cwd, sizeof cwd)) { CHECK(0, "getcwd"); return; }
+    {   char *o, *argv[4]; size_t n;                                 /* shutil.which('true') and the real python3 */
+        argv[0] = "/bin/sh"; argv[1] = "-c"; argv[2] = "command -v python3; command -v true"; argv[3] = 0;
+        if (spawn(argv, 0, 10, 1, 0, &o, &n) || !o || sscanf(o, "%4095s %4095s", py, tr) != 2) { CHECK(0, "python3/true not found"); free(o); return; }
+        free(o); }
+    for (low = 0; low <= 1; low++) {
+        char *d = st_tmp(), *p[3], *cache, *tools, *w, *body, *q[4], *out, *envset[9], *prov, *path, *argv[8]; size_t n; int rc, i, row = 0, sub_before;
+        const char *kib = low ? "33554432" : "1"; char inj[8192];
+        st_case = low ? "test_gate_low_memory_exits_before_generator(low_cgroup=True)" : "test_gate_low_memory_exits_before_generator(low_cgroup=False)";
+        st_fake(d, kib, low ? "100" : "max", "0", "max", p);
+        cache = st_join(d, "unisacc-seedgen"); mkdir(cache, 0755);
+        for (i = 0; SUITE_SEEDGEN3[i]; i++) st_touch_json(cache, REF_GEN, SUITE_SEEDGEN3[i]);
+        tools = st_join(d, "tools"); mkdir(tools, 0755);
+        snprintf(inj, sizeof inj, "--selftest-inject=%s,%s,%s", p[0], p[1], p[2]);
+        q[0] = sh_quote(cwd); q[1] = sh_quote(inj); q[2] = sh_quote(py);
+        /* python3 wrapper: the pre-port callers (python3 tests/seedmemory.py) run this .cx with the fakes,
+           through tests/cxbin (one compile, cached in the caller's CXBIN_CACHE) */
+        body = malloc(16384);
+        snprintf(body, 16384, "#!/bin/sh\ncase \"${1:-}\" in */tests/seedmemory.py) shift; exec /bin/sh %s/tests/cxbin %s/tests/seedmemory.cx %s \"$@\";; esac\nexec %s \"$@\"\n",
+                 q[0], q[0], q[1], q[2]);
+        w = st_join(tools, "python3"); st_write(w, body); chmod(w, 0755); free(w);
+        /* sh wrapper: the ported callers (sh unisacc.com -run tests/seedmemory.cx -- ...) get the same fakes */
+        /* sh wrapper: the ported callers (sh tests/cxbin tests/seedmemory.cx ..., or sh unisacc.com -run tests/seedmemory.cx -- ...) */
+        snprintf(body, 16384, "#!/bin/sh\n"
+                 "if [ $# -ge 2 ]; then case \"$1|$2\" in *tests/cxbin\\|*tests/seedmemory.cx) a=$1 b=$2; shift 2; exec /bin/sh \"$a\" \"$b\" %s \"$@\";; esac; fi\n"
+                 "if [ $# -ge 4 ] && [ \"$2\" = -run ] && [ \"$4\" = -- ]; then case \"$3\" in *tests/seedmemory.cx) a=$1 b=$2 c=$3; shift 4; exec /bin/sh \"$a\" \"$b\" \"$c\" -- %s \"$@\";; esac; fi\n"
+                 "exec /bin/sh \"$@\"\n", q[1], q[1]);
+        w = st_join(tools, "sh"); st_write(w, body); chmod(w, 0755); free(w); free(body);
+        prov = getenv("UNISACC_FFI_X86_PROVIDER");
+        envset[0] = cat3("UNISACC_FFI_X86_PROVIDER=", prov ? prov : "SEEDMEMORYCHECK-PLACEHOLDER", "");
+        envset[1] = cat3("TMPDIR=", d, ""); path = getenv("PATH"); envset[2] = cat3("PATH=", tools, ""); { char *t2 = cat3(envset[2], ":", path ? path : ""); free(envset[2]); envset[2] = t2; }
+        envset[3] = cat3("UA=", tr, ""); envset[4] = "JOBS=1"; envset[5] = "TERM_SH_INSIDE=1"; envset[6] = "GATE_BOUND=1";
+        {   const char *cc_ = getenv("CXBIN_CACHE"), *tb_ = getenv("TMPDIR"); char uid[32];   /* keep the outer compile cache */
+            snprintf(uid, sizeof uid, "%d", (int)getuid());
+            if (cc_ && *cc_) envset[7] = cat3("CXBIN_CACHE=", cc_, "");
+            else { char *t3 = cat3(tb_ && *tb_ ? tb_ : "/tmp", "/unisacc-cxbin-", uid); envset[7] = cat3("CXBIN_CACHE=", t3, ""); free(t3); } }
+        envset[8] = 0;
+        argv[0] = "/bin/sh"; argv[1] = "tests/bound"; argv[2] = "30"; argv[3] = "sh"; argv[4] = "tests/gate.sh"; argv[5] = "--suite"; argv[6] = "seedgen-3"; argv[7] = 0;
+        sub_before = st_fail;
+        rc = spawn(argv, cwd, 40, 1, envset, &out, &n);
+        CHECK(rc == 4, "gate rc must be 4");
+        for (i = 0; out && out[i]; ) {
+            char *l = out + i, *e = strchr(l, '\n'); size_t ll = e ? (size_t)(e - l) : strlen(l);
+            if (ll > 9 && !strncmp(l, "seedgen-3", 9) && (l[9] == ' ' || l[9] == '\t')) {
+                const char *s = l + 9; while (*s == ' ' || *s == '\t') s++;
+                if (!strncmp(s, "rc=77", 5) && (s[5] == ' ' || s[5] == '\t' || s[5] == '\n')) row = 1;
+            }
+            i += (int)ll + (e ? 1 : 0); if (!e) break;
+        }
+        CHECK(row, "row seedgen-3 rc=77");
+        CHECK(out && strstr(out, "missing=memory"), "missing=memory in gate output");
+        if (rc != 4 || !row) fprintf(stderr, "gate rc=%d output:\n%s\n", rc, out ? out : "(no output)");
+        {   DIR *dd = opendir(cache); struct dirent *e; int started = 0;
+            while (dd && (e = readdir(dd))) if (!strncmp(e->d_name, "gen.", 4)) started = 1;
+            if (dd) closedir(dd);
+            CHECK(!started, "generator must not start"); }
+        if (st_fail > sub_before) st_subfail++;
+        free(out); free(envset[0]); free(envset[1]); free(envset[2]); free(envset[3]); free(envset[7]);
+        for (i = 0; i < 3; i++) free(q[i]);
+        if (rc != 4 || !row) fprintf(stderr, "kept %s\n", d); else rm_tree(d);
+        free(d); free(cache); free(tools);
+    }
+}
+static void case_changed_identity_is_unknown_even_when_binary_matches(void) {
+    Identity good, v; long long need, obs; char b[1024]; int i;
+    evidence_identity(&good);
+    CHECK(identity_reason(&good, "warm") == 0, "evidence identity is good");
+    v = good; strcpy(v.flags, EQUIVALENT_FLAGS[0]); CHECK(identity_reason(&v, "warm") == 0, "-w flags are equivalent");
+    for (i = 0; i < 5; i++) {
+        v = good;
+        if (i == 0) strcpy(v.host, "Linux/arm64"); else if (i == 1) strcpy(v.cc_sha256, "other");
+        else if (i == 2) strcpy(v.cc_version, "other"); else if (i == 3) v.parallelism = 8; else strcpy(v.flags, "-std=c99 -O1 -Iseed");
+        fx_id = v; hk_identity = 1; hk_available = 1; fx_av_called = 0;
+        CHECK(assess_real("gen", st_names(N_TP), &need, &obs, b) == 2 && fx_av_called == 0, "must reject identity before admission");
+    }
+    CHECK(identity_reason(&good, "cold") != 0, "cold branch is not the evidence branch");
+}
+static void case_fake_cc_entity_with_same_version_is_rejected(void) {
+    char *d = st_tmp(), *cc = st_join(d, "cc"), *t = cat3("#!/bin/sh\necho \"", EV.cc_version, "\"\n"); Identity id;
+    st_write(cc, t); chmod(cc, 0755); free(t);
+    g_which = cc;
+    CHECK(execution_identity_real("gen", &id) == 0, "unreviewed wrappers are rejected before execution");
+    rm_tree(d); free(d); free(cc);
+}
+static void case_named_launcher_route_and_changed_launcher_target_flags_env(void) {
+    static const char *body = "#!/bin/sh\nfor arg do\n    case \"$arg\" in seed/compilerpack.c|*/seed/compilerpack.c) exec /usr/bin/cc -D_XOPEN_SOURCE=700 \"$@\";; esac\ndone\nexec /usr/bin/cc \"$@\"\n";
+    char hex[65], *d, *launcher, *target, *tb, *other, *chg; Identity good, v; Evidence saved = EV; const char *sp = LAUNCHER_PATH, *stt = LAUNCHER_TARGET;
+    char *savedenv[16]; const char **k; int i;
+    cx_sha256_hex(body, strlen(body), hex); CHECK(!strcmp(hex, LAUNCHER_SHA), "reviewed launcher body sha");
+    d = st_tmp(); launcher = st_join(d, "cc"); target = st_join(d, "backend"); other = st_join(d, "other");
+    { char rp[4096]; if (realpath(d, rp)) { free(launcher); free(target); free(other);
+        launcher = st_join(rp, "cc"); target = st_join(rp, "backend"); other = st_join(rp, "other"); } }
+    st_write(launcher, body); chmod(launcher, 0755);
+    tb = cat3("#!/bin/sh\necho \"", EV.cc_version, "\"\n"); st_write(target, tb); chmod(target, 0755);
+    file_sha(target, hex);
+    LAUNCHER_PATH = launcher; LAUNCHER_TARGET = target; EV.cc_sha256 = hex; g_which = launcher;
+    for (i = 0, k = ENV_KEYS; *k; k++, i++) { const char *x = getenv(*k); savedenv[i] = x ? cat3(x, "", "") : 0; unsetenv(*k); }
+    CHECK(execution_identity_real("gen", &good) == 1, "reviewed launcher route has an identity");
+    CHECK(identity_reason(&good, "warm") == 0, "launcher identity reason is None");
+    CHECK(good.launcher && !strcmp(good.l_sha, LAUNCHER_SHA), "launcher sha recorded");   /* compile_resources=UNKNOWN is constant */
+    v = good; strcpy(v.flags, "-O0"); CHECK(identity_reason(&v, "warm") != 0, "changed flags");
+    v = good; strcpy(v.l_sha, "changed"); CHECK(identity_reason(&v, "warm") != 0, "changed launcher sha");
+    setenv("CPATH", "/unproved", 1); CHECK(execution_identity_real("gen", &v) == 0, "CPATH set"); unsetenv("CPATH");
+    chg = cat3(body, "# changed\n", ""); st_write(launcher, chg); CHECK(execution_identity_real("gen", &v) == 0, "changed launcher"); st_write(launcher, body); free(chg);
+    chg = cat3(tb, "# changed\n", ""); st_write(target, chg); CHECK(execution_identity_real("gen", &v) == 0, "changed target"); st_write(target, tb); free(chg);
+    st_write(other, body); g_which = other; CHECK(execution_identity_real("gen", &v) == 0, "launcher bytes at another path");
+    for (i = 0, k = ENV_KEYS; *k; k++, i++) if (savedenv[i]) { setenv(*k, savedenv[i], 1); free(savedenv[i]); }
+    EV = saved; LAUNCHER_PATH = sp; LAUNCHER_TARGET = stt;
+    rm_tree(d); free(d); free(launcher); free(target); free(other); free(tb);
+}
+static void case_binary_gate_rejects_changed_or_missing_binary(void) {
+    char *d = st_tmp(), *p = st_join(d, "gen"), *m = st_join(d, "missing"), hex[65]; const char *saved = BINARY_SHA;
+    st_write(p, "measured fixture"); file_sha(p, hex); BINARY_SHA = hex;
+    CHECK(verify_binary_real(p) == 0, "measured binary matches");
+    st_write(p, "changed"); CHECK(verify_binary_real(p) == 2, "changed binary is rc 2");
+    BINARY_SHA = saved;
+    CHECK(verify_binary_real(m) == 2, "missing binary is rc 2");
+    rm_tree(d); free(d); free(p); free(m);
+}
+static void case_postbuild_identity_is_rechecked(void) {
+    char *argv[] = { "gen", "tokenpp", "--verify-binary", "fake", 0 }, *out; int rc;
+    hk_verify = 1; fx_verify_rc = 0; hk_requirement = 1; fx_need = -1; fx_reason = "cc changed after build";
+    out = st_capture_main(4, argv, &rc);
+    CHECK(rc == 2, "rc 2"); CHECK(out && strstr(out, "cc changed after build"), "reason printed"); free(out);
+}
+static void case_77_terminal_protocol(void) {
+    char *argv[] = { "gen", 0 }, *out; int rc;
+    hk_assess = 1; fx_assess_rc = 77; fx_assess_need = 4096; fx_assess_obs = 100;
+    out = st_capture_main(1, argv, &rc);
+    CHECK(rc == 77, "rc 77");
+    CHECK(out && !strcmp(out, "UNVERIFIED: required=mem>=4096B observed=100B missing=memory\n"), "terminal line"); free(out);
+}
+static void case_pinned_keys_match_read_files(void) {
+    /* real tree, not patched: a changed read file moves the key and this goes red, forcing an strace re-measure */
+    static const char *fam[] = { "gen", "parse2" }; int i;
+    for (i = 0; i < 2; i++) {
+        char k[17];
+        if (!reference_key_real(fam[i], k) || strcmp(k, ref_key(fam[i]))) {
+            st_fail++;
+            fprintf(stderr, "FAIL: %s: read-set key moved for %s: re-measure with strace (research/c43-seedmemory-readset.md), then update REFERENCE_KEYS\n", st_case, fam[i]);
+        }
+    }
+}
+static void case_reference_key_reads_only_listed_files(void) {
+    char *d = st_tmp(), *tsv, *rootslash, before[17], after[17], *t, *line, *nl; size_t n;
+    char *tdir = st_join(d, "tests"); mkdir(tdir, 0755); free(tdir);
+    t = cx_read("tests/seedmemory-reads.tsv", &n); if (!t) { CHECK(0, "read-set table"); return; }
+    tsv = st_join(d, "tests/seedmemory-reads.tsv"); if (cx_write(tsv, t, n)) crash("cannot write ", tsv); free(tsv);
+    line = memchr(t, '\n', n); line = line ? line + 1 : t + n;
+    for (; line < t + n; line = nl + 1) {
+        char *tab, *rel, *full, *slash;
+        nl = memchr(line, '\n', t + n - line); if (!nl) nl = t + n;
+        *nl = 0; if (nl > line && nl[-1] == '\r') nl[-1] = 0;
+        tab = strchr(line, '\t'); if (!tab || (size_t)(tab - line) != 3 || strncmp(line, "gen", 3)) continue;
+        rel = tab + 1; { char *t2 = strchr(rel, '\t'); if (t2) *t2 = 0; }
+        full = st_join(d, rel); slash = strrchr(full, '/'); *slash = 0; st_mkdirs(full); *slash = '/';
+        st_write(full, "x"); free(full);
+    }
+    free(t);
+    t = st_join(d, "exec/librarypartition"); st_mkdirs(t); free(t);
+    t = st_join(d, "exec/librarypartition/librarypartition-byte.tsv"); st_write(t, "x");
+    rootslash = cat3(d, "/", ""); g_root = rootslash;
+    CHECK(reference_key_real("gen", before), "key over the fixture");
+    st_write(t, "changed"); free(t);
+    CHECK(reference_key_real("gen", after) && !strcmp(before, after), "an unlisted file cannot move the key");
+    t = st_join(d, "exec/lower/armfuse-byte.tsv"); st_write(t, "changed"); free(t);
+    CHECK(reference_key_real("gen", after) && strcmp(before, after), "a listed file moves the key");
+    g_root = ""; free(rootslash);
+    rm_tree(d); free(d);
+}
+static int st_failed_cases;
+static void st_run(const char *name, int before) { if (st_subfail) st_failed_cases += st_subfail; else if (st_fail > before) st_failed_cases++; st_count++; (void)name; }
+#define RUN(name, fn) do { int before_ = st_fail; st_reset(); st_subfail = 0; st_case = name; fn(); st_run(name, before_); } while (0)
+static int selftest(void) {
+    RUN("test_low_mem_and_cgroup_and_parent", case_low_mem_and_cgroup_and_parent);
+    RUN("test_missing_membership_is_unknown_not_unlimited", case_missing_membership_is_unknown_not_unlimited);
+    RUN("test_unknown_never_becomes_77", case_unknown_never_becomes_77);
+    RUN("test_fresh_each_start_and_real_errors_not_swallowed", case_fresh_each_start_and_real_errors_not_swallowed);
+    RUN("test_known_group_with_warm_cache_and_cold_unknown", case_known_group_with_warm_cache_and_cold_unknown);
+    RUN("test_changed_gen_key_is_unknown_before_resource_admission", case_changed_gen_key_is_unknown_before_resource_admission);
+    RUN("test_unknown_com_and_unmeasured_parse2_flags", case_unknown_com_and_unmeasured_parse2_flags);
+    RUN("test_all_measured_parse2_flags_still_require_warm_reference", case_all_measured_parse2_flags_still_require_warm_reference);
+    RUN("test_gate_low_memory_exits_before_generator", case_gate_low_memory_exits_before_generator);
+    RUN("test_changed_identity_is_unknown_even_when_binary_matches", case_changed_identity_is_unknown_even_when_binary_matches);
+    RUN("test_fake_cc_entity_with_same_version_is_rejected", case_fake_cc_entity_with_same_version_is_rejected);
+    RUN("test_named_launcher_route_and_changed_launcher_target_flags_env", case_named_launcher_route_and_changed_launcher_target_flags_env);
+    RUN("test_binary_gate_rejects_changed_or_missing_binary", case_binary_gate_rejects_changed_or_missing_binary);
+    RUN("test_postbuild_identity_is_rechecked", case_postbuild_identity_is_rechecked);
+    RUN("test_77_terminal_protocol", case_77_terminal_protocol);
+    RUN("test_pinned_keys_match_read_files", case_pinned_keys_match_read_files);
+    RUN("test_reference_key_reads_only_listed_files", case_reference_key_reads_only_listed_files);
+    st_reset();
+    printf("seedmemory selftest: ran %d tests\n", st_count);
+    if (st_failed_cases) { printf("FAILED (failures=%d)\n", st_failed_cases); return 1; }
+    printf("OK\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--selftest")) return selftest();
+    if (argc > 1 && !strncmp(argv[1], "--selftest-inject=", 18)) {
+        char *s = argv[1] + 18, *c1 = strchr(s, ','), *c2 = c1 ? strchr(c1 + 1, ',') : 0;
+        if (!c2) usage_error("--selftest-inject=MEM,CGROUP,MOUNTINFO", 0);
+        *c1 = *c2 = 0; g_fake_proc[0] = s; g_fake_proc[1] = c1 + 1; g_fake_proc[2] = c2 + 1;
+        hk_identity = 2;
+        return run_main(argc - 2, argv + 2, stdout);
+    }
+    if (argc > 1 && !strcmp(argv[1], "--assess")) {
+        Parsed a; Names names; long long need, obs; char basis[1024]; int rc;
+        parse_args(argc - 2, argv + 2, &a, stdout);
+        names = split_names(a.pos, a.npos);
+        rc = assess_real(a.family, names, &need, &obs, basis);
+        if (rc < 0) crash("memory availability read failed", 0);
+        if (need >= 0) printf("%d\t%lld\t", rc, need); else printf("%d\t-\t", rc);
+        if (obs >= 0) printf("%lld\t%s\n", obs, basis); else printf("-\t%s\n", basis);
+        return rc;
+    }
+    return run_main(argc - 1, argv + 1, stdout);
+}

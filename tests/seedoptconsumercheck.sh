@@ -79,7 +79,7 @@ before=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"r
 W=$S/tree; mkdir "$W"
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "seedoptc  tree $H"
-git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py || { echo "seedoptc: git archive failed"; exit 2; }
+git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py tests/checklib.py || { echo "seedoptc: git archive failed"; exit 2; }
 tar -x -C "$W" -f "$S/tree.tar" || { echo "seedoptc: scratch tree failed"; exit 2; }
 cd "$W" || exit 2
 BOUND_CACHE=$S/boundcache; export BOUND_CACHE
@@ -228,14 +228,15 @@ evw "C_E4_SHA $(shaf "$o/e4.json")"
 fi
 
 if [ "$SLICE" = 2 ]; then
-# 2-3 negatives: only the opt helper fails (NEG_OPT_BIN; parse2 runs green first), prepare stops before prune and pp
+# 2-3 negatives: only the opt helper fails (NEG_OPT_BIN; parse2 runs green first), the seed-gen lane of prepare stops before prune and pp (no δ table)
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "red:3:NEG_OPT_BIN=$S/red-gen" "missing:2:NEG_OPT_BIN=/nonexistent/seed-gen"; do
     n=${case_%%:*}; rest=${case_#*:}; want=${rest%%:*}; e=${rest#*:}
     r=$(prep "$n" "$PREP" "$e")
     l=$S/log-$n
     { [ "$r" -eq "$want" ] && [ -s "$S/out-$n/e3.json" ] && [ ! -e "$S/out-$n/e4.json" ] && [ ! -e "$S/out-$n/e2.json" ] \
-        && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py (prune|lower) / { f = 1 } END { exit !f }' "$l" \
+        && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py prune / { f = 1 } END { exit !f }' "$l" \
+        && ! awk -F '\t' '$2 ~ /^python3 exec\/c\/tbl\.py [^ ]*\/(e3|e4|prune|e2)\.json / { f = 1 } END { exit !f }' "$l" \
         && ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp && [ -s "$l" ] \
         && [ "$(helpers "$l")" = "parse2 opt " ] && haslog "$l" helper-parse2-rc 0 && haslog "$l" helper-opt-rc "$want"; } \
         && ok "NEG-$n: parse2 rc 0 with e3.json, opt helper rc $want, prepare rc $r, prune and pp helpers never started, no e4.json, no Python fallback" \

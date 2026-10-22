@@ -1,0 +1,490 @@
+#!/usr/bin/env -S unisacc.com -run
+/* tapebinproduct.cx -- the shipped model product reads tapebin bytes itself on all six targets: the fixed-cost part
+   (TAPEBIN_PART=six) and the cover part (TAPEBIN_PART=cover).  Ported from tests/tapebinproduct.py (2026-10-23, the
+   owner's direction: the toolchain moves off Python); PARTIAL port, see "Not ported" below.
+   usage (from the repository root, which is ROOT):
+     MODEL_COM=PRODUCT TAPEBIN_PART=six   sh ./tests/cxbin tests/tapebinproduct.cx
+     MODEL_COM=PRODUCT TAPEBIN_PART=cover sh ./tests/cxbin tests/tapebinproduct.cx
+   PRODUCT defaults to unisacc.com and is resolved to its real path; its sha256 names the state directory
+   CACHE/KEY/observed/SHA16 (made if missing) where CACHE is $UNISACC_TAPEBIN_REF_CACHE or GETTEMPDIR/unisacc-tapebin-ref
+   (GETTEMPDIR: the first writable directory of $TMPDIR $TEMP $TMP /tmp /var/tmp /usr/tmp, as tempfile.gettempdir())
+   and KEY is tests/tapebinref.py's key(): sha256 of json.dumps(["tapebin-ref-v1", sha256(tests/export_ref.sh output),
+   sha256(tests/refshim.h), sha256(tests/reffoot.h), sha256(tests/build_ref.sh), $CFLAGS or "-O2", first line of
+   `cc --version`]).  export_ref.sh runs once per key computation with its stderr passed through, as the .py's did
+   (state_dir() and locate() each compute the key, so `six` runs it twice and `cover` once).
+   six: the reference is located as tapebinref.locate() does (CACHE/KEY/manifest.json whose ref_sha256 is the sha256 of
+     CACHE/KEY/ref and whose key is KEY; otherwise `tapebin reference not prepared (or stale) for key K16: run
+     com-tapebin-ref first` on stderr, rc 1; never built here).  In a fresh GETTEMPDIR/unisacc-tapebin-product-XXXXXX:
+     the calls package (entry: callr r5; callm [r5+0]; ret) decoded by the product with -t lnx/arm64 must equal the
+     canonical text; for each of the six targets the product's and the reference's hello.c --tapebin packages must be
+     byte-equal and the product's image from the package equal its image from source; on the host (osx/arm64 on
+     Darwin, else lnx/x86_64) -run of the package equals -run of the source; the package built for the host is refused
+     for the wrong target (rc != 0 and "origin" in its lowercased stderr) and accepted with --force-origin.  Then
+     STATE/six.json = json.dumps({"host", "part", "targets"}, indent=1, sort_keys=True) + "\n" and
+     `tapebin product six: 6 targets, host run, origin guard`.
+     The calls package and its canonical text are the bytes unisa.tapebin.encode("entry:\n  callr r5\n  callm
+     [r5+0]\n  ret\n") and decode(...).to_canonical_text() give (computed by unisa/tapebin.py on 2026-10-23 and fixed
+     here as CALLS_HEX / CALLS_TEXT; the record layout and opcodes 30/31/37 are stable tape format v1).
+   cover: examples/*.c + tests/c/*.c (each sorted, dot names too) must be nonempty with unique names; STATE/shard-K-of-6.json
+     for K = 1..6 must exist with n == 6 and k == K; STATE/six.json must exist; the shards' files must be exactly the
+     file set; exec/c/chain.knownfail (tests/knownfail.py's read(): blank and # lines skipped, NAME REASON, unique
+     names) must give REASON starting `R14-8 P1 ` for every NAME, all names inside the file set and equal to the union
+     of the shards' "known" lists.  Then `tapebin product cover: N files partitioned into 6 slices; {'matched': A,
+     'refused': B, 'known': C}; known upstream tape diffs D (global)`.
+   Failures: rc 1 with the exception's last traceback line on stderr (`AssertionError: ...`, `KeyError: 'n'`,
+   `json.decoder.JSONDecodeError: ...`; the frames above it name the .py's own lines and are not reproduced); a run
+   that times out (20 s) is `subprocess.TimeoutExpired: Command '[...]' timed out after 20 seconds`.  Return codes of
+   signalled children are negative, as Python reports them.  The temporary directory is removed either way.
+   Not ported (stays tests/tapebinproduct.py): TAPEBIN_PART=shard (the default) with TAPEBIN_SHARD=K/6 -- each probe
+   is compared against unisa.tapebin.encode(unisa.tape.parse(text)), the Python tape codec as the third independent
+   implementation; porting it means a fourth codec (tape parser + v1 encoder with the fp opcode table), so this
+   program refuses that part with rc 2.  TAPEBIN_PART values other than six/cover/shard follow the .py (state dir,
+   locate, then `AssertionError: bad TAPEBIN_PART X`). */
+#pragma unisa use cxlib.pyjson
+
+#define SHARDS 6
+static const char *TARGETS[6] = { "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" };
+static const char *CALLS_HEX =
+    "555441504542494e010000000100000000000000030000004000000057868176a4461072b1760ae7bae758f8722aa7f98389bddd25e9929c"
+    "e7a65bed000000000100010088000000000000000700000000000000010000000200010090000000000000000100000000000000000000000"
+    "300010098000000000000000d00000000000000040000000105656e747279000000000000000000040000031ef5031ff500000325";
+static const char *CALLS_TEXT = "entry:\n  callr   r5\n  callm   [r5+0]\n  ret\n";
+
+static char TMPD[4096];   /* the run's temporary directory, removed by die() and at the end */
+
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *x, const void *s, size_t n) {
+    if (x->n + n + 1 > x->cap) { x->cap = (x->n + n + 1) * 2 + 64; x->b = realloc(x->b, x->cap); if (!x->b) { fputs("MemoryError\n", stderr); exit(1); } }
+    if (n) memcpy(x->b + x->n, s, n);
+    x->n += n; x->b[x->n] = 0;
+}
+static void bputs(Buf *x, const char *s) { bput(x, s, strlen(s)); }
+static void bputc(Buf *x, int c) { char ch = (char)c; bput(x, &ch, 1); }
+static char *xstrdup(const char *s) { size_t n = strlen(s); char *d = malloc(n + 1); if (!d) exit(1); memcpy(d, s, n + 1); return d; }
+
+static void cleanup(void) {
+    if (TMPD[0]) { char cmd[4200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", TMPD); system(cmd); TMPD[0] = 0; }
+}
+/* the traceback's last line, rc 1 */
+static void fail(const char *line) { fflush(stdout); cleanup(); fprintf(stderr, "%s\n", line); exit(1); }
+static void assertion(const char *msg) { Buf b = {0}; bputs(&b, "AssertionError: "); bputs(&b, msg); fail(b.b); }
+
+/* ---- Python repr ---- */
+static void repr_text(Buf *o, const char *s, size_t n, int bytes) {
+    size_t i; int q = '\'';
+    if (memchr(s, '\'', n) && !memchr(s, '"', n)) q = '"';
+    if (bytes) bputc(o, 'b');
+    bputc(o, q);
+    for (i = 0; i < n; i++) {
+        unsigned c = (unsigned char)s[i]; char t[8];
+        if (c == '\\') bputs(o, "\\\\");
+        else if ((int)c == q) { bputc(o, '\\'); bputc(o, q); }
+        else if (c == '\n') bputs(o, "\\n");
+        else if (c == '\r') bputs(o, "\\r");
+        else if (c == '\t') bputs(o, "\\t");
+        else if (c < 0x20 || c == 0x7f || (bytes && c >= 0x80)) { snprintf(t, sizeof t, "\\x%02x", c); bputs(o, t); }
+        else bputc(o, (int)c);
+    }
+    bputc(o, q);
+}
+static void repr_str(Buf *o, const char *s) { repr_text(o, s, strlen(s), 0); }
+static void repr_strlist(Buf *o, char **v, size_t n) {
+    size_t i; bputc(o, '[');
+    for (i = 0; i < n; i++) { if (i) bputs(o, ", "); repr_str(o, v[i]); }
+    bputc(o, ']');
+}
+
+/* ---- argv: an argument starting with \1 was a pathlib.Path in the .py (repr PosixPath('...')) ---- */
+#define P "\1"
+static const char *plain(const char *a) { return a[0] == '\1' ? a + 1 : a; }
+static char *path_arg(const char *p) { Buf b = {0}; bputs(&b, P); bputs(&b, p); return b.b; }
+static void repr_argv(Buf *o, char **argv, int as_str) {
+    int i; bputc(o, '[');
+    for (i = 0; argv[i]; i++) {
+        if (i) bputs(o, ", ");
+        if (argv[i][0] == '\1' && !as_str) { bputs(o, "PosixPath("); repr_str(o, argv[i] + 1); bputc(o, ')'); }
+        else repr_str(o, plain(argv[i]));
+    }
+    bputc(o, ']');
+}
+
+/* ---- processes: subprocess.run(argv, capture_output=CAP, timeout=SECS) ---- */
+typedef struct { int rc; char *out, *err; size_t nout, nerr; } Res;
+static char *slurp_fd(int fd, size_t *n) {
+    Buf b = {0}; char t[65536]; ssize_t k;
+    lseek(fd, 0, SEEK_SET);
+    bput(&b, "", 0);
+    while ((k = read(fd, t, sizeof t)) > 0) bput(&b, t, (size_t)k);
+    *n = b.n; return b.b;
+}
+static int tmpfile_fd(void) {
+    char t[4200]; int fd;
+    snprintf(t, sizeof t, "%s/.capXXXXXX", TMPD[0] ? TMPD : "/tmp");
+    fd = mkstemp(t); if (fd >= 0) unlink(t);
+    return fd;
+}
+static Res prun(char **argv, int secs, int cap_out, int cap_err, int str_repr) {
+    Res r = {0}; int fo = -1, fe = -1, st = 0, i; long ticks = (long)secs * 100; pid_t pid, w; char *v[64];
+    for (i = 0; argv[i] && i < 63; i++) v[i] = (char *)plain(argv[i]);
+    v[i] = 0;
+    if (cap_out) fo = tmpfile_fd();
+    if (cap_err) fe = tmpfile_fd();
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError: fork failed");
+    if (pid == 0) {
+        if (fo >= 0) dup2(fo, 1);
+        if (fe >= 0) dup2(fe, 2);
+        execvp(v[0], v);
+        _exit(127);
+    }
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) fail("OSError: wait failed");
+        if (secs > 0 && ticks-- <= 0) {
+            Buf b = {0}; char t[64];
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            bputs(&b, "subprocess.TimeoutExpired: Command '"); repr_argv(&b, argv, str_repr);
+            snprintf(t, sizeof t, "' timed out after %d seconds", secs); bputs(&b, t);
+            fail(b.b);
+        }
+        usleep(10000);
+    }
+    r.rc = (st & 0x7f) ? -(st & 0x7f) : (st >> 8) & 0xff;
+    if (fo >= 0) { r.out = slurp_fd(fo, &r.nout); close(fo); }
+    if (fe >= 0) { r.err = slurp_fd(fe, &r.nerr); close(fe); }
+    return r;
+}
+/* run(argv) of the .py: capture, 20 s, rc != 0 is AssertionError((argv, rc, stderr[:500])); its stdout */
+static Res run(char **argv) {
+    Res r = prun(argv, 20, 1, 1, 1);
+    if (r.rc) {
+        Buf b = {0}; char t[32];
+        bputs(&b, "AssertionError: ("); repr_argv(&b, argv, 0);
+        snprintf(t, sizeof t, ", %d, ", r.rc); bputs(&b, t);
+        repr_text(&b, r.err, r.nerr > 500 ? 500 : r.nerr, 1); bputc(&b, ')');
+        fail(b.b);
+    }
+    return r;
+}
+/* subprocess.run(argv, check=True) with the caller's stdout/stderr, or stdout captured */
+static Res run_check(char **argv, int secs, int cap_out) {
+    Res r = prun(argv, secs, cap_out, 0, 1);
+    if (r.rc) {
+        Buf b = {0}; char t[64];
+        bputs(&b, "subprocess.CalledProcessError: Command '"); repr_argv(&b, argv, 1);
+        if (r.rc < 0) snprintf(t, sizeof t, "' died with <Signals.%d>.", -r.rc);
+        else snprintf(t, sizeof t, "' returned non-zero exit status %d.", r.rc);
+        bputs(&b, t); fail(b.b);
+    }
+    return r;
+}
+
+/* ---- files ---- */
+static int is_file(const char *p) { struct stat s; return stat(p, &s) == 0 && S_ISREG(s.st_mode); }
+static int is_dir(const char *p) { struct stat s; return stat(p, &s) == 0 && S_ISDIR(s.st_mode); }
+static char *read_or_fail(const char *p, size_t *n) {
+    char *d = cx_read(p, n);
+    if (!d) { Buf b = {0}; bputs(&b, "FileNotFoundError: [Errno 2] No such file or directory: "); repr_str(&b, p); fail(b.b); }
+    return d;
+}
+static void file_sha(const char *p, char hex[65]) { size_t n; char *d = read_or_fail(p, &n); cx_sha256_hex(d, n, hex); free(d); }
+static void mkdirs(const char *p) {
+    char t[4200]; size_t i, n = strlen(p);
+    if (n >= sizeof t) fail("OSError: path too long");
+    memcpy(t, p, n + 1);
+    for (i = 1; i <= n; i++) {
+        if (t[i] == '/' || t[i] == 0) {
+            char c = t[i]; t[i] = 0;
+            if (mkdir(t, 0777) != 0 && !is_dir(t)) { Buf b = {0}; bputs(&b, "OSError: cannot create directory "); repr_str(&b, t); fail(b.b); }
+            t[i] = c;
+        }
+    }
+}
+
+/* tempfile.gettempdir() */
+static const char *gettempdir(void) {
+    static char d[4096]; const char *envs[3] = { "TMPDIR", "TEMP", "TMP" }, *fixed[3] = { "/tmp", "/var/tmp", "/usr/tmp" };
+    const char *c = 0; int i; size_t n;
+    if (d[0]) return d;
+    for (i = 0; i < 3 && !c; i++) { const char *e = getenv(envs[i]); if (e && *e && is_dir(e) && access(e, W_OK | X_OK) == 0) c = e; }
+    for (i = 0; i < 3 && !c; i++) if (is_dir(fixed[i]) && access(fixed[i], W_OK | X_OK) == 0) c = fixed[i];
+    if (!c) c = ".";
+    if (c[0] != '/') { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) fail("OSError: getcwd"); snprintf(d, sizeof d, "%s/%s", cwd, c); }
+    else snprintf(d, sizeof d, "%s", c);
+    n = strlen(d); while (n > 1 && d[n - 1] == '/') d[--n] = 0;
+    return d;
+}
+static const char *cache_root(void) {
+    static char d[4200]; const char *e = getenv("UNISACC_TAPEBIN_REF_CACHE");
+    if (e) snprintf(d, sizeof d, "%s", e); else snprintf(d, sizeof d, "%s/unisacc-tapebin-ref", gettempdir());
+    return d;
+}
+
+/* ---- tests/tapebinref.py ---- */
+static void ref_key(char key[65]) {
+    char tmp[4200], flat[4300], h[5][65], *argv[4], *cc[3] = { "cc", "--version", 0 }, *cflags, *out; size_t n; int i;
+    pj_value *parts = pj_list(); Res r;
+    snprintf(tmp, sizeof tmp, "%s/tapebinref-key-XXXXXX", gettempdir());
+    if (!mkdtemp(tmp)) fail("OSError: mkdtemp failed");
+    snprintf(flat, sizeof flat, "%s/flat.c", tmp);
+    argv[0] = "tests/export_ref.sh"; argv[1] = flat; argv[2] = 0;
+    { char root[4096], ex[4200]; if (!getcwd(root, sizeof root)) fail("OSError: getcwd"); snprintf(ex, sizeof ex, "%s/tests/export_ref.sh", root); argv[0] = ex;
+      r = prun(argv, 30, 0, 0, 1);
+      if (r.rc) { char cmd[4400]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", tmp); system(cmd); argv[0] = ex; run_check(argv, 30, 0); } }
+    out = read_or_fail(flat, &n);
+    cx_sha256_hex(out, n, h[0]); free(out);
+    unlink(flat); rmdir(tmp);
+    file_sha("tests/refshim.h", h[1]); file_sha("tests/reffoot.h", h[2]); file_sha("tests/build_ref.sh", h[3]);
+    cflags = getenv("CFLAGS"); if (!cflags) cflags = "-O2";
+    r = run_check(cc, 10, 1);
+    for (i = 0; (size_t)i < r.nout && r.out[i] != '\n' && r.out[i] != '\r'; i++) ;
+    pj_append(parts, pj_strz("tapebin-ref-v1"));
+    for (i = 0; i < 4; i++) pj_append(parts, pj_strz(h[i]));
+    pj_append(parts, pj_strz(cflags));
+    { size_t k; for (k = 0; k < r.nout && r.out[k] != '\n' && r.out[k] != '\r'; k++) ; pj_append(parts, pj_str(r.out, k)); }
+    { char *js; size_t jn; pj_dumps(parts, -1, &js, &jn); cx_sha256_hex(js, jn, key); }
+}
+/* locate(): CACHE/KEY/ref, or SystemExit */
+static char *locate(void) {
+    char key[65], entry[4300], mpath[4400], ref[4400], hex[65], why[256]; size_t n, rn; char *m, *rb; pj_value *man, *v; int ok = 0;
+    ref_key(key);
+    snprintf(entry, sizeof entry, "%s/%s", cache_root(), key);
+    snprintf(mpath, sizeof mpath, "%s/manifest.json", entry);
+    snprintf(ref, sizeof ref, "%s/ref", entry);
+    m = cx_read(mpath, &n);
+    if (m && (man = pj_loads(m, n, why, sizeof why)) && man->type == PJ_OBJ && (rb = cx_read(ref, &rn))) {
+        cx_sha256_hex(rb, rn, hex); free(rb);
+        v = pj_get(man, "ref_sha256");
+        if (v && v->type == PJ_STR && !strcmp(v->s, hex)) {
+            v = pj_get(man, "key");
+            ok = v && v->type == PJ_STR && !strcmp(v->s, key);
+        }
+    }
+    if (!ok) {
+        char k16[17]; memcpy(k16, key, 16); k16[16] = 0;
+        fflush(stdout); cleanup();
+        fprintf(stderr, "tapebin reference not prepared (or stale) for key %s: run com-tapebin-ref first\n", k16);
+        exit(1);
+    }
+    return xstrdup(ref);
+}
+
+/* ---- six ---- */
+static int unhex(int c) { return c <= '9' ? c - '0' : c - 'a' + 10; }
+static int same_file(const char *path, const char *data, size_t n) {
+    size_t k; char *d = read_or_fail(path, &k); int same = k == n && !memcmp(d, data, n); free(d); return same;
+}
+static int same_files(const char *a, const char *b) {
+    size_t n; char *d = read_or_fail(b, &n); int same = same_file(a, d, n); free(d); return same;
+}
+static void six_part(const char *product, const char *ref, const char *host) {
+    char calls[4300], decoded[4300], binary[4300], classic[4300], output[4300];
+    unsigned char blob[512]; size_t i, nb = strlen(CALLS_HEX) / 2; int t;
+    char *pp = path_arg(product), *pr = path_arg(ref), *pcalls, *pdec, *pbin, *pcls, *pout;
+    snprintf(calls, sizeof calls, "%s/calls.tapebin", TMPD); snprintf(decoded, sizeof decoded, "%s/calls.tape", TMPD);
+    snprintf(binary, sizeof binary, "%s/hello.tapebin", TMPD); snprintf(classic, sizeof classic, "%s/classic.tapebin", TMPD);
+    snprintf(output, sizeof output, "%s/image", TMPD);
+    pcalls = path_arg(calls); pdec = path_arg(decoded); pbin = path_arg(binary); pcls = path_arg(classic); pout = path_arg(output);
+    for (i = 0; i < nb; i++) blob[i] = (unsigned char)(unhex(CALLS_HEX[2 * i]) << 4 | unhex(CALLS_HEX[2 * i + 1]));
+    if (cx_write(calls, blob, nb)) fail("OSError: cannot write calls.tapebin");
+    { char *a[] = { "sh", pp, pcalls, "-t", "lnx/arm64", "-o", pdec, 0 }; run(a); }
+    if (!same_file(decoded, CALLS_TEXT, strlen(CALLS_TEXT))) assertion("model tapebin reader confuses callr and callm");
+    for (t = 0; t < 6; t++) {
+        char *tg = (char *)TARGETS[t]; Res want;
+        { char *a[] = { "sh", pp, "examples/hello.c", "-t", tg, "--tapebin", "-o", pbin, 0 }; run(a); }
+        { char *a[] = { pr, "examples/hello.c", "-t", tg, "--tapebin", "-o", pcls, 0 }; run(a); }
+        if (!same_files(binary, classic)) { Buf b = {0}; bputs(&b, "product and reference tapebin differ for "); bputs(&b, tg); assertion(b.b); }
+        { char *a[] = { "sh", pp, pbin, "-b", tg, "-o", pout, 0 }; run(a); }
+        { char *a[] = { "sh", pp, "examples/hello.c", "-b", tg, "-o", "-", 0 }; want = run(a); }
+        if (!same_file(output, want.out, want.nout)) { Buf b = {0}; bputs(&b, "model image differs for "); bputs(&b, tg); assertion(b.b); }
+        free(want.out); free(want.err);
+    }
+    {
+        Res got, want, rej; const char *wrong = strcmp(host, "win/arm64") ? "win/arm64" : "lnx/x86_64"; size_t i2; int has = 0;
+        { char *a[] = { "sh", pp, "examples/hello.c", "-t", (char *)host, "--tapebin", "-o", pbin, 0 }; run(a); }
+        { char *a[] = { "sh", pp, "-run", pbin, 0 }; got = run(a); }
+        { char *a[] = { "sh", pp, "-run", "examples/hello.c", 0 }; want = run(a); }
+        if (got.nout != want.nout || memcmp(got.out, want.out, got.nout)) assertion("model run differs");
+        { char *a[] = { "sh", pp, pbin, "-b", (char *)wrong, "-o", pout, 0 }; rej = prun(a, 20, 1, 1, 1); }
+        for (i2 = 0; i2 + 6 <= rej.nerr && !has; i2++) {
+            int k; has = 1;
+            for (k = 0; k < 6; k++) { int c = (unsigned char)rej.err[i2 + k]; if (c >= 'A' && c <= 'Z') c += 32; if (c != "origin"[k]) { has = 0; break; } }
+        }
+        if (rej.rc == 0 || !has) assertion("origin mismatch was not rejected");
+        { char *a[] = { "sh", pp, "--force-origin", pbin, "-b", (char *)wrong, "-o", pout, 0 }; run(a); }
+    }
+}
+
+/* ---- tests/knownfail.py read() ---- */
+static int pyspace(int c) { return c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x1f); }
+typedef struct { char **name, **reason; size_t n; } Kf;
+static Kf knownfail_read(const char *path) {
+    Kf k = {0}; size_t n, i = 0, lineno = 0; char *d = read_or_fail(path, &n);
+    k.name = malloc((n + 1) * sizeof *k.name); k.reason = malloc((n + 1) * sizeof *k.reason);
+    while (i < n) {
+        size_t s = i, e, a, b, j; lineno++;
+        while (i < n && d[i] != '\n' && d[i] != '\r') i++;
+        e = i;
+        if (i < n) { if (d[i] == '\r' && i + 1 < n && d[i + 1] == '\n') i++; i++; }
+        a = s; b = e;
+        while (a < b && pyspace((unsigned char)d[a])) a++;
+        while (b > a && pyspace((unsigned char)d[b - 1])) b--;
+        if (a == b || d[a] == '#') continue;
+        for (j = a; j < b && !pyspace((unsigned char)d[j]); j++) ;
+        {
+            char *nm = malloc(j - a + 1), *rs; size_t r = j, q; int dup = 0;
+            memcpy(nm, d + a, j - a); nm[j - a] = 0;
+            while (r < b && pyspace((unsigned char)d[r])) r++;
+            for (q = 0; q < k.n; q++) if (!strcmp(k.name[q], nm)) dup = 1;
+            if (r == b || dup) {
+                Buf m = {0}; char t[32]; bputs(&m, "ValueError: "); bputs(&m, path);
+                snprintf(t, sizeof t, ":%lu: ", (unsigned long)lineno); bputs(&m, t);
+                bputs(&m, "malformed or duplicate knownfail entry"); fail(m.b);
+            }
+            rs = malloc(b - r + 1); memcpy(rs, d + r, b - r); rs[b - r] = 0;
+            k.name[k.n] = nm; k.reason[k.n] = rs; k.n++;
+        }
+    }
+    free(d);
+    return k;
+}
+
+/* ---- cover ---- */
+typedef struct { char **v; size_t n, cap; } Strs;
+static void spush(Strs *s, const char *x) {
+    if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 64; s->v = realloc(s->v, s->cap * sizeof *s->v); }
+    s->v[s->n++] = xstrdup(x);
+}
+static int scmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int shas(const Strs *s, const char *x) { size_t i; for (i = 0; i < s->n; i++) if (!strcmp(s->v[i], x)) return 1; return 0; }
+static void glob_c(const char *dir, Strs *names) {
+    DIR *d = opendir(dir); struct dirent *e; Strs here = {0}; size_t i;
+    if (d) {
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (l >= 2 && !strcmp(e->d_name + l - 2, ".c")) spush(&here, e->d_name);   /* pathlib's * matches dot names */
+        }
+        closedir(d);
+    }
+    if (here.n) qsort(here.v, here.n, sizeof *here.v, scmp);
+    for (i = 0; i < here.n; i++) spush(names, here.v[i]);
+}
+static void all_files(Strs *names) {
+    size_t i;
+    glob_c("examples", names); glob_c("tests/c", names);
+    if (!names->n) assertion("empty tape input set");
+    for (i = 0; i < names->n; i++) { size_t j; for (j = i + 1; j < names->n; j++) if (!strcmp(names->v[i], names->v[j])) assertion("duplicate probe names: verdicts are keyed by name"); }
+}
+static pj_value *key_or_fail(pj_value *data, const char *k) {
+    pj_value *v = data && data->type == PJ_OBJ ? pj_get(data, k) : 0;
+    if (!v) { Buf b = {0}; bputs(&b, "KeyError: "); repr_str(&b, k); fail(b.b); }
+    return v;
+}
+static void cover(const char *state) {
+    Strs names = {0}, seen = {0}, known_obs = {0}, vk = {0}, vv = {0}, known = {0}; Kf kf; size_t i, j; int k;
+    long counts[3] = { 0, 0, 0 }; const char *cn[3] = { "matched", "refused", "known" };
+    all_files(&names);
+    for (k = 1; k <= SHARDS; k++) {
+        char path[4400], base[64], why[256]; size_t n; char *text; pj_value *data, *v;
+        snprintf(base, sizeof base, "shard-%d-of-%d.json", k, SHARDS);
+        snprintf(path, sizeof path, "%s/%s", state, base);
+        if (!is_file(path)) { Buf b = {0}; bputs(&b, "cover: missing shard record "); bputs(&b, base); assertion(b.b); }
+        text = read_or_fail(path, &n);
+        if (!(data = pj_loads(text, n, why, sizeof why))) fail(why);
+        if (!pj_eq_int(key_or_fail(data, "n"), SHARDS) || !pj_eq_int(key_or_fail(data, "k"), k)) {
+            Buf b = {0}; bputs(&b, "cover: shard record does not match its slice: "); bputs(&b, base); assertion(b.b);
+        }
+        v = key_or_fail(data, "files");
+        for (i = 0; i < v->len; i++) spush(&seen, v->items[i]->type == PJ_STR ? v->items[i]->s : "\1");
+        v = key_or_fail(data, "verdicts");
+        for (i = 0; i + 1 < v->len; i += 2) {
+            const char *val = v->items[i + 1]->type == PJ_STR ? v->items[i + 1]->s : "\1";
+            for (j = 0; j < vk.n && strcmp(vk.v[j], v->items[i]->s); j++) ;
+            if (j < vk.n) { free(vv.v[j]); vv.v[j] = xstrdup(val); } else { spush(&vk, v->items[i]->s); spush(&vv, val); }
+        }
+        v = key_or_fail(data, "known");
+        for (i = 0; i < v->len; i++) { const char *x = v->items[i]->type == PJ_STR ? v->items[i]->s : "\1"; if (!shas(&known_obs, x)) spush(&known_obs, x); }
+    }
+    { char path[4400]; snprintf(path, sizeof path, "%s/six.json", state); if (!is_file(path)) assertion("cover: six-target part not recorded"); }
+    {
+        int same = seen.n == names.n; Strs a = {0};
+        for (i = 0; i < names.n; i++) spush(&a, names.v[i]);
+        if (same) {
+            qsort(seen.v, seen.n, sizeof *seen.v, scmp); qsort(a.v, a.n, sizeof *a.v, scmp);
+            for (i = 0; i < a.n && same; i++) if (strcmp(seen.v[i], a.v[i])) same = 0;
+        }
+        if (!same) {
+            char t[256];
+            snprintf(t, sizeof t, "cover: slices do not partition the file set (%lu recorded, %lu files)", (unsigned long)seen.n, (unsigned long)names.n);
+            assertion(t);
+        }
+    }
+    kf = knownfail_read("exec/c/chain.knownfail");
+    for (i = 0; i < kf.n; i++) {
+        if (strncmp(kf.reason[i], "R14-8 P1 ", 9)) { Buf b = {0}; bputs(&b, "bad tapebin knownfail line: "); bputs(&b, kf.name[i]); assertion(b.b); }
+        spush(&known, kf.name[i]);
+    }
+    if (known.n) qsort(known.v, known.n, sizeof *known.v, scmp);
+    {
+        Strs out = {0};
+        for (i = 0; i < known.n; i++) if (!shas(&names, known.v[i])) spush(&out, known.v[i]);
+        if (out.n) { Buf b = {0}; bputs(&b, "cover: known upstream tape diff names outside the file set: "); repr_strlist(&b, out.v, out.n); assertion(b.b); }
+    }
+    {
+        int same = known_obs.n == known.n;
+        for (i = 0; i < known_obs.n && same; i++) if (!shas(&known, known_obs.v[i])) same = 0;
+        if (!same) {
+            Buf b = {0};
+            if (known_obs.n) qsort(known_obs.v, known_obs.n, sizeof *known_obs.v, scmp);
+            bputs(&b, "('cover: upstream tape difference set changed', "); repr_strlist(&b, known_obs.v, known_obs.n);
+            bputs(&b, ", "); repr_strlist(&b, known.v, known.n); bputc(&b, ')');
+            assertion(b.b);
+        }
+    }
+    for (i = 0; i < vv.n; i++) for (k = 0; k < 3; k++) if (!strcmp(vv.v[i], cn[k])) counts[k]++;
+    printf("tapebin product cover: %lu files partitioned into %d slices; {'matched': %ld, 'refused': %ld, 'known': %ld}; known upstream tape diffs %lu (global)\n",
+           (unsigned long)seen.n, SHARDS, counts[0], counts[1], counts[2], (unsigned long)known.n);
+}
+
+int main(void) {
+    const char *part = getenv("TAPEBIN_PART"), *mc = getenv("MODEL_COM"), *host;
+    char product[4096], hex[65], key[65], state[4400], *ref, *sys = 0; size_t n; char *data;
+    if (!part) part = "shard";
+    if (!strcmp(part, "shard")) {
+        fprintf(stderr, "tapebinproduct.cx: TAPEBIN_PART=shard is not ported (it compares the product against the Python tape codec unisa/tapebin.py): run python3 ./tests/tapebinproduct.py\n");
+        return 2;
+    }
+    if (!mc) mc = "unisacc.com";
+    if (!realpath(mc, product)) {
+        char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) return 1;
+        if (mc[0] == '/') snprintf(product, sizeof product, "%s", mc); else snprintf(product, sizeof product, "%s/%s", cwd, mc);
+    }
+    if (!is_file(product)) assertion("missing model compiler");
+    cx_run("uname -s", &sys, &n);
+    host = sys && !strncmp(sys, "Darwin", 6) ? "osx/arm64" : "lnx/x86_64";
+    data = read_or_fail(product, &n); cx_sha256_hex(data, n, hex); free(data);
+    ref_key(key);
+    hex[16] = 0;
+    snprintf(state, sizeof state, "%s/%s/observed/%s", cache_root(), key, hex);
+    mkdirs(state);
+    if (!strcmp(part, "cover")) { cover(state); return 0; }
+    ref = locate();
+    snprintf(TMPD, sizeof TMPD, "%s/unisacc-tapebin-product-XXXXXX", gettempdir());
+    if (!mkdtemp(TMPD)) { TMPD[0] = 0; fail("OSError: mkdtemp failed"); }
+    if (!strcmp(part, "six")) {
+        char path[4500]; pj_value *rec = pj_dict(), *tl = pj_list(); char *js; size_t jn; int t; Buf b = {0};
+        six_part(product, ref, host);
+        for (t = 0; t < 6; t++) pj_append(tl, pj_strz(TARGETS[t]));
+        pj_set(rec, "host", pj_strz(host)); pj_set(rec, "part", pj_strz("six")); pj_set(rec, "targets", tl);
+        pj_dumps(rec, 1, &js, &jn); bput(&b, js, jn); bputc(&b, '\n');
+        snprintf(path, sizeof path, "%s/six.json", state);
+        if (cx_write(path, b.b, b.n)) fail("OSError: cannot write six.json");
+        printf("tapebin product six: %d targets, host run, origin guard\n", 6);
+        fflush(stdout); cleanup();
+        return 0;
+    }
+    { Buf b = {0}; bputs(&b, "bad TAPEBIN_PART "); bputs(&b, part); assertion(b.b); }
+    return 1;
+}

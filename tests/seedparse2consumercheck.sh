@@ -7,20 +7,31 @@
 #    (name, inode, mtime_ns, sha256; ABSENT only when the directory does not exist; rc kept).  NEG_PARSE2_BIN=<path>
 #    makes only the parse2 helper run with that SEED_GEN_BIN.  Every other sh call goes to the real shell unchanged.
 #  * python3: passes "-", "-c", tests/bound.py and gen.py opt / prune / pp (logged pass-gen-<stage>); gen.py parse2
-#    passes (pass-gen-parse2) only when the case sets PARSE2_PY=pass (the SEED_GEN=0 reference), is short-circuited
-#    when PARSE2_PY is unset and refused (97) for any other value; short-circuits gen.py lex/lower/enc/enc/arm and
+#    passes (pass-gen-parse2) only when the case sets PARSE2_PY=pass (slice prepare: the real SEED_GEN=0 run), with
+#    PARSE2_PY=ref (slice 3) gen.py parse2 OUT with exactly that argv is answered from the keyed Python reference
+#    (logged ref-gen-parse2: P2C_REF copied to OUT); short-circuited when PARSE2_PY is unset, refused (97) for any other
+#    value or argv; short-circuits gen.py lex/lower/enc/enc/arm and
 #    exec/c/tbl.py; refuses anything else, an unknown gen.py stage included.
 #  * cc: stubs exec/c/run.c; passes seed/gen.c (logged pass-gen-c), tests/bound.c and a lone --version; refuses else.
 # Slice 1: shim refusals; positive (helpers parse2 -> opt -> prune -> pp, exact argv, rc 0; four after-snapshots equal,
 #   exactly the binary and its sidecar; one compile, four key steps; e3.json = seed-gen parse2); the old direct
-#   gen.py parse2 line (mutant).  Slice 2: parse2-only red and missing BIN (prepare stops at parse2: no opt / prune /
-#   pp helper, no e3/e4/prune/e2 JSON, no Python); helper argument and SEED_GEN refusals.  Slice 3: SEED_GEN=0
-#   reference (four helpers -> Python, gen.py parse2 really run, no cache) byte-equal to a C parse2 built in the same
-#   slice by the helper itself; the C e3.json sha is printed in slices 1 and 3 so the two can be compared by name.
-# usage: tests/seedparse2consumercheck.sh 1|2|3
+#   gen.py parse2 line (mutant).  Slice 2: parse2-only red and missing BIN (prepare fails with that rc and its seed-gen lane
+#   stops at parse2: no opt / prune / pp helper, no e3/e4/prune/e2 JSON or table, no Python); helper argument and SEED_GEN refusals.  Slice 3: SEED_GEN=0
+#   reference (four helpers -> Python, no cache) byte-equal to a C parse2 built in the same slice by the helper itself;
+#   the C e3.json sha is printed in slices 1 and 3 so the two can be compared by name.
+# 0.0.43 timeout debt (R11): gen.py parse2 alone is ~37-45 s, so the SEED_GEN=0 arm and the rest of slice 3 (C build,
+#   C parse2, Python opt/prune/pp) did not fit one queue window (65 s).  Slice "prepare" (gate
+#   seedgen-parse2consumer-3-prepare) runs the SEED_GEN=0 parse2 arm for real -- the helper, real python3, PYTHONHASHSEED=0
+#   as prepare.sh sets it -- and publishes its e3.json in a handoff keyed by the gen.py parse2 read-set key
+#   (tests/seedmemorykey.cx parse2, the key tests/seedparse2check.sh and the seedmemory admission use), the helper's
+#   sha256, the recipe and the python3 identity; a warm key is not re-run.  Slice 3 recomputes the key, checks the
+#   handoff byte for byte (missing, stale or altered: rc 75 NEED_PREPARE, never green), and its SEED_GEN=0 prepare gets
+#   those bytes for exactly the gen.py parse2 OUT call; opt / prune / pp still run in Python and the C side is built
+#   alongside.  An edit to anything gen.py parse2 reads, to the helper or to the interpreter moves the key.
+# usage: tests/seedparse2consumercheck.sh 1|2|3|prepare
 set -u
-case "${1:-}" in 1|2|3) SLICE=$1;; *) echo "usage: tests/seedparse2consumercheck.sh 1|2|3"; exit 2;; esac
-case $SLICE in 1) JSONS="out-pos/e3.json";; 2) JSONS=;; 3) JSONS="out-sg0/e3.json c3/e3.json";; esac
+case "${1:-}" in 1|2|3|prepare) SLICE=$1;; *) echo "usage: tests/seedparse2consumercheck.sh 1|2|3|prepare"; exit 2;; esac
+case $SLICE in 1) JSONS="out-pos/e3.json";; 2|prepare) JSONS=;; 3) JSONS="out-sg0/e3.json c3/e3.json";; esac
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 _td=${TMPDIR:-/tmp}; S=$(mktemp -d "${_td%/}/seedp2c.XXXXXX") || exit 2   # TMPDIR=/tmp/ would leave // in $W and the trajectory
 # 0.0.40 (机房主任 00:04): SEEDP2C_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
@@ -76,7 +87,7 @@ before=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"r
 W=$S/tree; mkdir "$W"
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "seedp2c  tree $H"
-git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py || { echo "seedp2c: git archive failed"; exit 2; }
+git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py tests/checklib.py tests/seedmemory-reads.tsv tests/seedmemorykey.cx || { echo "seedp2c: git archive failed"; exit 2; }
 tar -x -C "$W" -f "$S/tree.tar" || { echo "seedp2c: scratch tree failed"; exit 2; }
 cd "$W" || exit 2
 BOUND_CACHE=$S/boundcache; export BOUND_CACHE
@@ -118,6 +129,8 @@ case "\${1:-}" in
             opt|prune|pp) log "pass-gen-\$2" "python3 \$*"; exec "$REALPY" "\$@";;
             parse2) case "\${PARSE2_PY:-}" in
                         pass) log pass-gen-parse2 "python3 \$*"; exec "$REALPY" "\$@";;
+                        ref) [ "\$#" -eq 3 ] && [ -n "\${P2C_REF:-}" ] || { log UNKNOWN "python3 \$* (PARSE2_PY=ref)"; exit 97; }
+                             log ref-gen-parse2 "python3 \$*"; exec cp "\$P2C_REF" "\$3";;
                         '') log short "python3 \$*"; : > "\$3"; exit 0;;
                         *) log UNKNOWN "python3 \$* (PARSE2_PY=\$PARSE2_PY)"; exit 97;;
                     esac;;
@@ -179,6 +192,54 @@ two() { [ "$(cat "$1.rc" 2>/dev/null)" = 0 ] && [ "$(wc -l < "$1")" -eq 2 ] \
     && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\} ' "$1")" -eq 1 ] && [ "$(grep -c '^seed-gen-[0-9a-f]\{16\}\.sha256 ' "$1")" -eq 1 ]; }
 nopy() { ! hasclass "$1" pass-gen-parse2 && ! hasclass "$1" pass-gen-opt && ! hasclass "$1" pass-gen-prune && ! hasclass "$1" pass-gen-pp; }
 shaf() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1" 2>/dev/null || echo none; }
+# 0.0.43 R11: the keyed SEED_GEN=0 parse2 reference (slice prepare publishes it, slice 3 consumes it; see the header)
+RECIPE='SEED_GEN=0 PYTHONHASHSEED=0 sh exec/parse2gen/gen-delta.sh OUT'
+refkey() {   # the handoff key of this tree's SEED_GEN=0 parse2 reference; rc 1 when any part cannot be computed
+    rs=$(cd "$W" && "$W/tests/bound" 30 "$REALSH" "$R/tests/cxbin" "$W/tests/seedmemorykey.cx" parse2) || return 1   # tests/cxbin: compiled once per (unisacc.com, source)
+    case $rs in "parse2 "[0-9a-f]*) ;; *) return 1;; esac
+    pyr=$("$REALPY" -c 'import os,sys;print(os.path.realpath(sys.executable))') && pyv=$("$REALPY" -V 2>&1) || return 1
+    hh=$(shaf "$W/exec/parse2gen/gen-delta.sh"); hp=$(shaf "$pyr"); [ "$hh" != none ] && [ "$hp" != none ] || return 1
+    printf 'seedp2c SEED_GEN=0 parse2 reference\nrecipe %s\nreadset %s\nhelper %s\npython %s %s %s\n' \
+        "$RECIPE" "${rs#parse2 }" "$hh" "$pyv" "$pyr" "$hp" > "$S/refkey.txt" || return 1
+    k=$(shaf "$S/refkey.txt"); [ "$k" != none ] || return 1; echo "$k" | cut -c1-32
+}
+if [ "$SLICE" = prepare ] || [ "$SLICE" = 3 ]; then
+    RK=$(refkey) || { echo "seedp2c: cannot key the SEED_GEN=0 parse2 reference (unisacc.com, tests/cxbin, a read-set file or python3)"; exit 2; }
+    SB=${UNISACC_MODEL_CACHE:-${_td%/}/unisacc-model-cache}; P2D=$SB/seedp2c-sg0-$RK
+    echo "seedp2c  SEED_GEN=0 parse2 reference key $RK ($(sed -n 's/^readset //p' "$S/refkey.txt") read set)"; evw "REFKEY $RK"
+fi
+refok() {    # the handoff exists for exactly this key, byte for byte
+    [ -s "$P2D/ready" ] && [ "$(cat "$P2D/key" 2>/dev/null)" = "$RK" ] && [ "$(shaf "$P2D/e3.json")" = "$(cat "$P2D/ready")" ]
+}
+
+if [ "$SLICE" = prepare ]; then
+if refok; then ok "SEED_GEN=0 parse2 reference warm for key $RK (not re-run)"
+else
+    mkdir -p "$SB" || exit 2
+    tmp=$P2D.tmp.$$; rm -rf "$tmp"; mkdir "$tmp" || exit 2
+    t0=$(mono)
+    # the helper itself under the python3 / cc shims: published only when it really ran gen.py parse2 OUT, once,
+    # with no compile and no other generator call
+    : > "$S/log-ref"
+    (cd "$W" && env -u SEED_GEN_BIN -u SEED_GEN_CC -u NEG_PARSE2_BIN -u P2C_REF SEED_GEN_DIR="$S/refcache" PATH="$S/shim:$PATH" SHIMLOG="$S/log-ref" \
+        SEED_GEN=0 PYTHONHASHSEED=0 PARSE2_PY=pass "$REALSH" exec/parse2gen/gen-delta.sh "$tmp/e3.json") 2>"$S/ref.err"; rr=$?
+    t1=$(mono)
+    evw "REF rc=$rr ms=$(( (t1 - t0) / 1000000 ))"
+    l=$S/log-ref
+    { haslog "$l" pass-gen-parse2 "python3 exec/build/gen.py parse2 $tmp/e3.json" && [ "$(count "$l" pass-gen-parse2 "")" -eq 1 ] \
+        && [ "$(awk -F '\t' '$1 != "pass" { n++ } END { print n + 0 }' "$l")" -eq 1 ]; } \
+        && ok "SEED_GEN=0 helper ran python3 gen.py parse2 OUT once; no compile, no other generator" \
+        || { no "SEED_GEN=0 helper did not run exactly python3 gen.py parse2 OUT ($(awk -F '\t' '$1 != "pass" { printf "%s; ", $0 }' "$l"))"; rr=${rr}-route; }
+    if [ "$rr" = 0 ] && [ -s "$tmp/e3.json" ] && echo "$RK" > "$tmp/key" && cp "$S/refkey.txt" "$tmp/refkey.txt" \
+        && h=$(shaf "$tmp/e3.json") && [ "$h" != none ] && echo "$h" > "$tmp/ready" && rm -rf "$P2D" && mv "$tmp" "$P2D"; then
+        ok "SEED_GEN=0 parse2 reference built (helper -> python3 gen.py parse2, rc 0, $(( (t1 - t0) / 1000000 )) ms) and published for key $RK"
+        find "$SB" -maxdepth 1 -name 'seedp2c-sg0-*' ! -name "seedp2c-sg0-$RK" -mmin +1440 -exec rm -rf {} + 2>/dev/null
+    else
+        rm -rf "$tmp"; no "SEED_GEN=0 parse2 reference (helper rc=$rr) $(tail -1 "$S/ref.err")"
+    fi
+fi
+evw "REF_E3_SHA $(cat "$P2D/ready" 2>/dev/null || echo none)"
+fi
 
 if [ "$SLICE" = 1 ]; then
 # 1 positive
@@ -230,7 +291,8 @@ evw "MUTANT rc=$r helpers=$hs"
 fi
 
 if [ "$SLICE" = 2 ]; then
-# 2 parse2-only failures: prepare stops at parse2, before opt
+# 2 parse2-only failures: the seed-gen lane of prepare stops at parse2, before opt (0.0.43: gen.py lex/lower/enc run
+# in the other lane and are no fallback; the stop is shown by the absent δ JSON and tables)
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "red:3:$S/red-gen" "missing:2:/nonexistent/seed-gen"; do
     n=${case_%%:*}; rest=${case_#*:}; want=${rest%%:*}; bin=${rest#*:}
@@ -239,8 +301,8 @@ for case_ in "red:3:$S/red-gen" "missing:2:/nonexistent/seed-gen"; do
     hs=$(helpers "$l")
     { [ "$r" = "$want" ] && [ "$hs" = "parse2 " ] && haslog "$l" helper-parse2-rc "$want" \
         && [ ! -e "$o/e3.json" ] && [ ! -e "$o/e4.json" ] && [ ! -e "$o/prune.json" ] && [ ! -e "$o/e2.json" ] \
-        && nopy "$l" && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py (lower|enc) / { f = 1 } END { exit !f }' "$l"; } \
-        && ok "parse2-only $n: parse2 helper rc $want, prepare rc $r before opt; no opt/prune/pp helper, no e3/e4/prune/e2, no Python" \
+        && nopy "$l" && ! awk -F '\t' '$2 ~ /^python3 exec\/c\/tbl\.py [^ ]*\/(e3|e4|prune|e2)\.json / { f = 1 } END { exit !f }' "$l"; } \
+        && ok "parse2-only $n: parse2 helper rc $want, prepare rc $r; no opt/prune/pp helper, no e3/e4/prune/e2 json or table, no Python" \
         || no "parse2-only $n (prepare rc=$r want $want, helpers '$hs') $(tail -1 "$l.out")"
     evw "NEG-parse2-$n prepare=$r helpers=$hs"
 done
@@ -261,18 +323,24 @@ rm -f "$S/sv.json"; env SEED_GEN= "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
 fi
 
 if [ "$SLICE" = 3 ]; then
-# 5 SEED_GEN=0 named reference: four helpers -> Python, gen.py parse2 really run
-r=$(prep sg0 "$PREP" SEED_GEN=0 PARSE2_PY=pass)
-l=$S/log-sg0; sd=$S/snap-sg0
-{ [ "$r" = 0 ] && [ "$(helpers "$l")" = "parse2 opt prune pp " ] && haslog "$l" pass-gen-parse2 "python3 exec/build/gen.py parse2 $S/out-sg0/e3.json" \
-    && haslog "$l" pass-gen-opt "python3 exec/build/gen.py opt $S/out-sg0/e4.json --o2" && haslog "$l" pass-gen-prune "python3 exec/build/gen.py prune $S/out-sg0/prune.json" \
-    && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $S/out-sg0/e2.json" && ! hasclass "$l" pass-gen-c \
-    && [ "$(cat "$sd/after-pp" 2>/dev/null)" = ABSENT ] && [ "$(cat "$sd/after-pp.rc" 2>/dev/null)" = 0 ]; } \
-    && ok "SEED_GEN=0 reference: four helpers -> Python (parse2 really run), no compile, no cache" || no "SEED_GEN=0 reference (rc=$r helpers '$(helpers "$l")')"
-evw "SEEDGEN0 rc=$r helpers=$(helpers "$l")"
-# the C side in this slice: the helper itself, default route, private cache in the scratch
+# 5 SEED_GEN=0 named reference: four helpers -> Python; gen.py parse2 OUT answered by the keyed reference (slice prepare)
+refok || { echo "NEED_PREPARE seedp2c: no SEED_GEN=0 parse2 reference for key $RK ($P2D missing, stale or altered); run tests/seedparse2consumercheck.sh prepare (gate seedgen-parse2consumer-3-prepare) first" >&2
+           evw "NEED_PREPARE $RK"; exit 75; }
+# the C side in this slice: the helper itself, default route, private cache in the scratch (alongside the reference run)
 mkdir -p "$S/c3"
-env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC SEED_GEN_DIR="$S/c3/cache" "$REALSH" "$W/exec/parse2gen/gen-delta.sh" "$S/c3/e3.json" 2>"$S/c3.err"; cr=$?
+(env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC SEED_GEN_DIR="$S/c3/cache" "$REALSH" "$W/exec/parse2gen/gen-delta.sh" "$S/c3/e3.json" 2>"$S/c3.err"
+ echo $? > "$S/c3.rc") & CPID=$!
+r=$(prep sg0 "$PREP" SEED_GEN=0 PARSE2_PY=ref P2C_REF="$P2D/e3.json")
+l=$S/log-sg0; sd=$S/snap-sg0
+{ [ "$r" = 0 ] && [ "$(helpers "$l")" = "parse2 opt prune pp " ] && haslog "$l" ref-gen-parse2 "python3 exec/build/gen.py parse2 $S/out-sg0/e3.json" \
+    && [ "$(count "$l" ref-gen-parse2 "")" -eq 1 ] && ! hasclass "$l" pass-gen-parse2 \
+    && haslog "$l" pass-gen-opt "python3 exec/build/gen.py opt $S/out-sg0/e4.json --o2" && haslog "$l" pass-gen-prune "python3 exec/build/gen.py prune $S/out-sg0/prune.json" \
+    && haslog "$l" pass-gen-pp "python3 exec/build/gen.py pp $S/out-sg0/e2.json" && ! hasclass "$l" pass-gen-c && ! hasclass "$l" UNKNOWN \
+    && [ "$(cat "$sd/after-pp" 2>/dev/null)" = ABSENT ] && [ "$(cat "$sd/after-pp.rc" 2>/dev/null)" = 0 ]; } \
+    && ok "SEED_GEN=0 reference: four helpers -> Python (gen.py parse2 OUT once, from the keyed reference), no compile, no cache" || no "SEED_GEN=0 reference (rc=$r helpers '$(helpers "$l")')"
+evw "SEEDGEN0 rc=$r helpers=$(helpers "$l")"
+{ cmp -s "$S/out-sg0/e3.json" "$P2D/e3.json" && refok; } && ok "SEED_GEN=0 e3.json is the keyed reference, which still checks" || no "SEED_GEN=0 e3.json vs the keyed reference"
+wait "$CPID"; cr=$(cat "$S/c3.rc" 2>/dev/null || echo none)
 evw "C3 rc=$cr"
 evw "C_E3_SHA $(shaf "$S/c3/e3.json")"
 { [ "$cr" = 0 ] && cmp -s "$S/out-sg0/e3.json" "$S/c3/e3.json"; } && ok "SEED_GEN=0 e3.json byte-equal to the C parse2 built in this slice (helper rc 0)" || no "SEED_GEN=0 e3.json vs C (helper rc=$cr)"
@@ -285,7 +353,8 @@ if [ -n "$EV" ]; then
     case $SLICE in
         1) files="shimneg log-pos log-pos.out snap-pos ref-e3.err log-mut log-mut.out snap-mut";;
         2) files="log-np2-red log-np2-red.out snap-np2-red log-np2-missing log-np2-missing.out snap-np2-missing";;
-        3) files="log-sg0 log-sg0.out snap-sg0 c3.err";;
+        3) files="refkey.txt log-sg0 log-sg0.out snap-sg0 c3.err";;
+        prepare) files="refkey.txt"; [ ! -e "$S/log-ref" ] || files="$files log-ref ref.err";;
     esac
     for f in $files; do
         cp -R "$S/$f" "$EV/$f" || { evfail=1; echo "seedp2c: EVIDENCE copy of $f failed" >&2; }

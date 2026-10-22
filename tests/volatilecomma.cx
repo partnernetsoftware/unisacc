@@ -1,0 +1,228 @@
+#!/usr/bin/env -S unisacc.com -run
+/* volatilecomma.cx -- tests/volatilecomma.py in C (2026-10-23, the owner's direction: the toolchain moves off Python).
+   V1: observable memory trace, not merely agreement of two tapes.
+     sh ./unisacc.com -run tests/volatilecomma.cx [-- [--com] [--e3-tape TAPE]]        (from the repository root)
+   The defined global object g_observed of tests/c/a_volatile_comma.c must be read six times (scalar and pointer
+   comma-left, bare scalar and pointer statements, for initialisation and step); address-of and sizeof must not read
+   it, and the function designator must not be read as data.  The system compiler's optimised assembly ($CC, default
+   cc: `CC -w -O2 -S SOURCE -o TMP/system.s`, 20 s) must contain a read of the object as well (a line naming
+   "observed" with an ldr..., ldur... or mov... mnemonic).  Then UA (and with --com also MODEL_COM; a *.com runs under sh)
+   compiles the source at -O0/-O1/-O2 (`-S -o -`, 20 s each) and each tape runs in the reference tape VM
+   (tests/cxlib/tapevm.cx: unisa/tape.py parse + unisa/vm.py run_reference, max_steps 10000) with every memory read
+   traced: exactly [(0, 4)] * 6 reads of the object, no read of the designator's code address, exit 0 and no
+   output.  --e3-tape TAPE runs that tape the same way (exit 0, six reads; output allowed).
+   Success: one line on stdout, rc 0.  Any failed expectation: the .py's exception as its last traceback line on stderr
+   (`AssertionError: ('/tmp/ua_ref', 0, [(0, 4)], (b'', 0, 517))`, `KeyError: 'UA'`, ...), no stdout, rc 1.
+   ROOT is this file's directory/.. resolved against the working directory (the .py's Path(__file__).parents[1]). */
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.tapevm
+#pragma unisa use cxlib.runtimecopy
+
+static char ROOT[4096], TMP[4096];
+static void cleanup(void) { if (TMP[0]) { pr_rmtree(TMP); TMP[0] = 0; } }
+static void fail(const char *line) {   /* the .py's uncaught exception: its last line, rc 1 */
+    fflush(stdout);
+    fprintf(stderr, "%s\n", line);
+    cleanup();
+    exit(1);
+}
+
+typedef struct { char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) fail("MemoryError");
+        b->p = g; b->cap = c;
+    }
+    memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
+static void pyrepr(Buf *b, const char *s) {
+    size_t l = strlen(s), cap = 4 * l + 8; char *r = malloc(cap);
+    if (!r) fail("MemoryError");
+    rtc_pyrepr(s, l, r, cap); puts_(b, r); free(r);
+}
+
+/* run(argv): subprocess.run(cwd=ROOT, capture_output, timeout=20); a non-zero rc is AssertionError((argv, rc, stderr)) */
+static void run(char **argv, char **out, size_t *outn) {
+    pr_result res; char why[16384];
+    if (pr_run(argv, ROOT, 0, 0, 20, &res, why, sizeof why)) fail(why);
+    if (res.rc) {
+        Buf b = { 0, 0, 0 }; size_t n = 0, m; char *list, *err, t[32];
+        while (argv[n]) n++;
+        list = pr_repr_strlist(argv, n);
+        err = pr_decode_replace(res.err, res.errn, &m);
+        puts_(&b, "AssertionError: ("); puts_(&b, list); snprintf(t, sizeof t, ", %d, ", res.rc); puts_(&b, t);
+        pyrepr(&b, err); puts_(&b, ")");
+        fail(b.p);
+    }
+    *out = res.out; *outn = res.outn; free(res.err);
+}
+
+/* TraceVM: reads overlapping g_observed (offset, width), reads at the designator's code address */
+typedef struct { long long off, w; } Read;
+typedef struct { unsigned long long observed, designator; int has_designator; Read *reads; size_t nreads, cap; Read *code; size_t ncode, ccap; } Trace;
+static void on_ld(void *ctx, unsigned long long addr, long long width) {
+    Trace *t = ctx;
+    if (t->has_designator && addr == t->designator) {
+        if (t->ncode == t->ccap) { t->ccap = t->ccap ? 2 * t->ccap : 16; t->code = realloc(t->code, t->ccap * sizeof *t->code); }
+        t->code[t->ncode].off = (long long)addr; t->code[t->ncode++].w = width;
+    }
+    /* addr < observed + 4 and observed < addr + width (Python integers: no wrap) */
+    if (addr < t->observed + 4 && (width > 0 ? (addr + (unsigned long long)width < addr || t->observed < addr + (unsigned long long)width)
+                                             : (addr >= (unsigned long long)(-width) && t->observed < addr - (unsigned long long)(-width)))) {
+        if (t->nreads == t->cap) { t->cap = t->cap ? 2 * t->cap : 16; t->reads = realloc(t->reads, t->cap * sizeof *t->reads); }
+        t->reads[t->nreads].off = (long long)(addr - t->observed); t->reads[t->nreads++].w = width;
+    }
+}
+static void reads_repr(Buf *b, const Read *r, size_t n, int unsigned_first) {
+    size_t i; char t[64];
+    puts_(b, "[");
+    for (i = 0; i < n; i++) {
+        if (unsigned_first) snprintf(t, sizeof t, "%s(%llu, %lld)", i ? ", " : "", (unsigned long long)r[i].off, r[i].w);
+        else snprintf(t, sizeof t, "%s(%lld, %lld)", i ? ", " : "", r[i].off, r[i].w);
+        puts_(b, t);
+    }
+    puts_(b, "]");
+}
+static int six_reads(const Trace *t) {
+    size_t i;
+    if (t->nreads != 6) return 0;
+    for (i = 0; i < 6; i++) if (t->reads[i].off != 0 || t->reads[i].w != 4) return 0;
+    return 1;
+}
+/* TraceVM(tape) then vm.run(); the result tuple's repr into RES */
+static void trace(tv_tape *tape, Trace *tr, int *code, unsigned char **out, size_t *outn, long long *steps) {
+    tv_vm vm; char why[16384]; unsigned long long v;
+    memset(tr, 0, sizeof *tr);
+    if (tv_vm_init(&vm, tape, 10000, 0, 0, why, sizeof why)) fail(why);
+    if (!tv_sym(tape, "g_observed", &tr->observed)) fail("KeyError: 'g_observed'");
+    tr->has_designator = tv_label(tape, "designator", &v);
+    tr->designator = v;
+    vm.on_ld = on_ld; vm.ctx = tr;
+    if (tv_vm_run(&vm, code, why, sizeof why)) fail(why);
+    *out = vm.out; *outn = vm.outn; *steps = vm.steps;
+}
+static void result_repr(Buf *b, const unsigned char *out, size_t outn, int code, long long steps) {
+    char *r = pr_repr_bytes((const char *)(out ? out : (const unsigned char *)""), outn), t[64];
+    puts_(b, "("); puts_(b, r); snprintf(t, sizeof t, ", %d, %lld)", code, steps); puts_(b, t); free(r);
+}
+
+/* str(Path(p)) */
+static void pathstr(const char *p, char *o, size_t ol) {
+    size_t j = 0; const char *s = p; int abs_ = p[0] == '/';
+    o[0] = 0;
+    if (abs_) { o[j++] = '/'; o[j] = 0; }
+    while (*s) {
+        const char *e; size_t l;
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        l = (size_t)(e - s);
+        if (!(l == 1 && s[0] == '.')) {
+            if (j && o[j - 1] != '/' && j + 1 < ol) o[j++] = '/';
+            if (j + l < ol) { memcpy(o + j, s, l); j += l; }
+            o[j] = 0;
+        }
+        s = e;
+    }
+    if (!j) snprintf(o, ol, ".");
+}
+
+static int has_arg(int argc, char **argv, const char *a) { int i; for (i = 0; i < argc; i++) if (!strcmp(argv[i], a)) return 1; return 0; }
+
+int main(int argc, char **argv) {
+    char here[4096], *slash, source[4300], asmp[4400], *cc, *text; size_t tn; int count = 0, k, level;
+    const char *compilers[2]; int ncomp = 1;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[4200], why[8400]; snprintf(t, sizeof t, "%s/..", here); if (rtc_resolve(t, 0, ROOT, sizeof ROOT, why, sizeof why)) fail(why); }
+    snprintf(source, sizeof source, "%s/tests/c/a_volatile_comma.c", ROOT);
+    cc = getenv("CC"); if (!cc) cc = "cc";
+
+    /* the system compiler's optimised assembly reads the object */
+    if (pr_tempdir("v1-reads-", TMP, sizeof TMP)) fail("OSError: cannot create a temporary directory");
+    snprintf(asmp, sizeof asmp, "%s/system.s", TMP);
+    {
+        char *av[] = { cc, "-w", "-O2", "-S", source, "-o", asmp, 0 }, *o; size_t on; int loads = 0; char *p, *line;
+        run(av, &o, &on); free(o);
+        text = cx_read(asmp, &tn);
+        if (!text) { char why[8400]; rtc_oserror(errno ? errno : ENOENT, asmp, why, sizeof why); fail(why); }
+        for (line = text; line && *line && !loads; ) {
+            char *e = line; while (*e && *e != '\n' && *e != '\r') e++;
+            {
+                char sv = *e; *e = 0;
+                if (strstr(line, "observed")) {
+                    for (p = line; *p && !loads; p++) {
+                        size_t m = !strncmp(p, "ldur", 4) ? 4 : !strncmp(p, "ldr", 3) ? 3 : !strncmp(p, "mov", 3) ? 3 : 0;
+                        if (m && (p == line || !(isalnum((unsigned char)p[-1]) || p[-1] == '_'))) {
+                            char *q = p + m;
+                            while (isalnum((unsigned char)*q) || *q == '_') q++;
+                            if (*q == ' ' || *q == '\t' || *q == '\v' || *q == '\f') loads = 1;
+                        }
+                    }
+                }
+                *e = sv;
+            }
+            line = *e ? e + 1 : e;
+        }
+        free(text);
+        cleanup();
+        if (!loads) fail("AssertionError: system compiler produced no observed-object load; unsupported assembly syntax");
+    }
+
+    compilers[0] = getenv("UA");
+    if (!compilers[0]) fail("KeyError: 'UA'");
+    if (has_arg(argc, argv, "--com")) {
+        compilers[1] = getenv("MODEL_COM");
+        if (!compilers[1]) fail("KeyError: 'MODEL_COM'");
+        ncomp = 2;
+    }
+    for (k = 0; k < ncomp; k++) {
+        for (level = 0; level <= 2; level++) {
+            const char *c = compilers[k]; size_t cl = strlen(c); char lv[8], *av[10], *o; size_t on; int i = 0, code;
+            tv_tape *tape; char why[16384]; Trace tr; unsigned char *out; size_t outn; long long steps;
+            snprintf(lv, sizeof lv, "-O%d", level);
+            if (cl >= 4 && !strcmp(c + cl - 4, ".com")) av[i++] = "sh";
+            av[i++] = (char *)c; av[i++] = source; av[i++] = "-S"; av[i++] = "-o"; av[i++] = "-"; av[i++] = lv; av[i] = 0;
+            run(av, &o, &on);
+            tape = tv_parse_latin1(o, on, why, sizeof why);
+            if (!tape) fail(why);
+            free(o);
+            trace(tape, &tr, &code, &out, &outn, &steps);
+            if (!(six_reads(&tr) && !tr.ncode && code == 0 && outn == 0)) {
+                Buf b = { 0, 0, 0 }; char t[32];
+                puts_(&b, "AssertionError: ("); pyrepr(&b, c); snprintf(t, sizeof t, ", %d, ", level); puts_(&b, t);
+                reads_repr(&b, tr.reads, tr.nreads, 0); puts_(&b, ", "); result_repr(&b, out, outn, code, steps); puts_(&b, ")");
+                fail(b.p);
+            }
+            count++;
+        }
+    }
+    for (k = 1; k < argc; k++) if (!strcmp(argv[k], "--e3-tape")) break;
+    if (k < argc) {
+        char path[4200], why[16384]; tv_tape *tape; Trace tr; unsigned char *out; size_t outn; long long steps; int code; struct stat st;
+        if (k + 1 >= argc) fail("IndexError: list index out of range");
+        pathstr(argv[k + 1], path, sizeof path);
+        errno = 0;
+        if (stat(path, &st) != 0) { rtc_oserror(errno, path, why, sizeof why); fail(why); }
+        if (S_ISDIR(st.st_mode)) { rtc_oserror(EISDIR, path, why, sizeof why); fail(why); }
+        text = cx_read(path, &tn);
+        if (!text) { rtc_oserror(errno ? errno : EIO, path, why, sizeof why); fail(why); }
+        tape = tv_parse_utf8(text, tn, why, sizeof why);
+        if (!tape) fail(why);
+        trace(tape, &tr, &code, &out, &outn, &steps);
+        if (!(six_reads(&tr) && !tr.ncode && code == 0)) {
+            Buf b = { 0, 0, 0 };
+            puts_(&b, "AssertionError: ("); pyrepr(&b, path); puts_(&b, ", ");
+            reads_repr(&b, tr.reads, tr.nreads, 0); puts_(&b, ", "); reads_repr(&b, tr.code, tr.ncode, 1); puts_(&b, ", ");
+            result_repr(&b, out, outn, code, steps); puts_(&b, ")");
+            fail(b.p);
+        }
+        count++;
+    }
+    printf("volatile comma: system-cc read; %d traces have exactly six reads (O0/O1/O2)\n", count);
+    return 0;
+}

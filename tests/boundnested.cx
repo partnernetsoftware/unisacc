@@ -1,0 +1,498 @@
+#!/usr/bin/env -S unisacc.com -run
+/* boundnested.cx -- nested bound, real parent/child processes: a bound runs sh -c, and that sh runs an inner bound;
+   C (tests/bound) and Python (tests/bound.py) entries mixed.  The include-free port of tests/boundnested.py.
+   Only real process nesting: the inner bound gets the outer hard deadline by inheriting the environment; no deadline
+   is injected.  Each case prints parent entry, child entry, rc and wall time.
+   usage, from the repo root (gate jobs boundnested-1..5 use the cached binary):
+     sh ./tests/cxbin tests/boundnested.cx REPO_ROOT [--gate] [--only 1,2,...]
+     sh ./unisacc.com -run tests/boundnested.cx -- REPO_ROOT [--gate] [--only 1,2,...]
+   --gate: parent N 5 for cases 1-4 (two cases x bound_max(5) = 14.5 s < 16 s) and no admission; hand runs use N 8
+   and call admit() (the port of tests/admission_r7p.py: load1 < 6 and the last dmesg VM fork > 30 s ago, re-checked
+   every 10 s up to 1800 s, one receipt line appended to $UNISACC_ADMISSION_RECEIPT or ./admission-receipt.txt).
+   Hard deadline = N + TOTAL_EXTRA_SECS, outer wall bound = hard + CLEANUP_EPSILON_SECS, both read from tests/bound.c.
+   rc 0 all pass, 1 any FAIL, 77 SKIP (not Linux).  Same stdout lines and rc as the .py.  Differences: a Python
+   traceback (missing REPO_ROOT, bad --only, unreadable bound.c or missing define, a command over its 60 s limit,
+   an unparsable deadline value, a missing executable) is one "boundnested.cx: error: ..." stderr line, rc 1.
+   No #include: the prelude lacks clock_gettime and poll (CX1 in flight), so their Linux prototypes and constants are
+   declared below (this program is Linux-only: anything else is the rc 77 SKIP). */
+
+struct pollfd { int fd; short events; short revents; };
+int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+int clock_gettime(int clock, struct timespec *ts);
+int pipe2(int fds[2], int flags);
+#define BN_CLOCK_MONOTONIC 1
+#define BN_POLLIN 0x001
+#define BN_O_CLOEXEC 02000000
+#define BN_SIGPIPE 13   /* Linux numbers; the prelude signal.h has no SIGPIPE/SIGXFSZ */
+#define BN_SIGXFSZ 25
+
+static const char *REPO;
+static int GATE;
+static int only_given;
+static long long ONLY[256];
+static int n_only;
+static int CASE_NO;
+static int PN;
+static double TOTAL_EXTRA, EPS;
+static char *RECEIPT;
+static int results_ok[64];
+static int n_results;
+
+static void die(const char *fmt, const char *a) {
+    fflush(stdout);
+    fprintf(stderr, "boundnested.cx: error: ");
+    fprintf(stderr, fmt, a);
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+static double mono(void) {
+    struct timespec ts;
+    clock_gettime(BN_CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Python str.strip()/split() whitespace (the ASCII part) and str.splitlines() line breaks */
+static int py_space(int c) { return c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x1f); }
+static int py_break(int c) { return c == '\n' || c == '\r' || c == '\v' || c == '\f' || (c >= 0x1c && c <= 0x1e); }
+
+/* w[0..m) equals the lowercase word, ignoring ASCII case */
+static int ieq(const char *w, size_t m, const char *word) {
+    size_t i;
+    if (strlen(word) != m) return 0;
+    for (i = 0; i < m; i++) { int c = (unsigned char)w[i]; if (c >= 'A' && c <= 'Z') c += 32; if (c != word[i]) return 0; }
+    return 1;
+}
+
+/* float(s) as Python accepts it; 0 when Python would raise ValueError */
+static int py_float(const char *s, double *v) {
+    size_t n = strlen(s), i = 0, j, k = 0; char *buf, *end; int digits = 0;
+    while (n && py_space((unsigned char)s[n - 1])) n--;
+    while (i < n && py_space((unsigned char)s[i])) i++;
+    buf = malloc(n - i + 2);
+    j = i;
+    if (j < n && (s[j] == '+' || s[j] == '-')) buf[k++] = s[j++];
+    {
+        size_t m = n - j; const char *w = s + j;
+        if (ieq(w, m, "inf") || ieq(w, m, "infinity") || ieq(w, m, "nan")) {
+            memcpy(buf + k, w, m); buf[k + m] = 0; *v = strtod(buf, 0); free(buf); return 1;
+        }
+    }
+    /* digits with single underscores between digits, optional fraction, optional exponent */
+#define BN_DIGITS(req) do { int got = 0; \
+        while (j < n && s[j] >= '0' && s[j] <= '9') { buf[k++] = s[j++]; got = 1; \
+            if (j + 1 < n && s[j] == '_' && s[j + 1] >= '0' && s[j + 1] <= '9') j++; } \
+        if (got) digits = 1; else if (req) { free(buf); return 0; } } while (0)
+    BN_DIGITS(0);
+    if (j < n && s[j] == '.') { buf[k++] = s[j++]; BN_DIGITS(0); }
+    if (!digits) { free(buf); return 0; }
+    if (j < n && (s[j] == 'e' || s[j] == 'E')) {
+        buf[k++] = s[j++];
+        if (j < n && (s[j] == '+' || s[j] == '-')) buf[k++] = s[j++];
+        BN_DIGITS(1);
+    }
+#undef BN_DIGITS
+    if (j != n) { free(buf); return 0; }
+    buf[k] = 0;
+    *v = strtod(buf, &end);
+    free(buf);
+    return 1;
+}
+
+/* int(s) base 10 as Python accepts it; huge values saturate (they only ever compare against 1..8) */
+static int py_int(const char *s, long long *v) {
+    size_t n = strlen(s), i = 0; int neg = 0, got = 0; long long x = 0;
+    while (n && py_space((unsigned char)s[n - 1])) n--;
+    while (i < n && py_space((unsigned char)s[i])) i++;
+    if (i < n && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
+    while (i < n && s[i] >= '0' && s[i] <= '9') {
+        if (x < 100000000000000LL) x = x * 10 + (s[i] - '0');
+        got = 1; i++;
+        if (i + 1 < n && s[i] == '_' && s[i + 1] >= '0' && s[i + 1] <= '9') i++;
+    }
+    if (!got || i != n) return 0;
+    *v = neg ? -x : x;
+    return 1;
+}
+
+static char *join(const char *a, const char *b) {
+    size_t n = strlen(a); char *r = malloc(n + strlen(b) + 2);
+    if (n == 0 || a[n - 1] == '/') sprintf(r, "%s%s", a, b); else sprintf(r, "%s/%s", a, b);
+    return r;
+}
+
+/* first match of `#define NAME ([0-9.]+)` in src, as float() of the group; 0 when absent */
+static int define_value(const char *src, const char *name, double *v, char **text) {
+    char key[128]; const char *p = src; size_t kl;
+    snprintf(key, sizeof key, "#define %s ", name);
+    kl = strlen(key);
+    while ((p = strstr(p, key))) {
+        const char *q = p + kl, *e = q;
+        while ((*e >= '0' && *e <= '9') || *e == '.') e++;
+        if (e > q) {
+            *text = malloc((size_t)(e - q) + 1);
+            memcpy(*text, q, (size_t)(e - q)); (*text)[e - q] = 0;
+            if (!py_float(*text, v)) die("could not convert string to float: '%s'", *text);
+            return 1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+/* growable string */
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *s, const char *d, size_t n) {
+    if (s->n + n + 1 > s->cap) {
+        s->cap = (s->n + n + 1) * 2 + 64;
+        s->b = realloc(s->b, s->cap);
+    }
+    memcpy(s->b + s->n, d, n); s->n += n; s->b[s->n] = 0;
+}
+static void bstr(Buf *s, const char *d) { bput(s, d, strlen(d)); }
+
+/* shlex.quote / shlex.join */
+static void shquote(Buf *s, const char *a) {
+    const char *p; int safe = *a != 0;
+    for (p = a; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strchr("_@%+=:,./-", c))) safe = 0;
+    }
+    if (safe) { bstr(s, a); return; }
+    bstr(s, "'");
+    for (p = a; *p; p++) { if (*p == '\'') bstr(s, "'\"'\"'"); else bput(s, p, 1); }
+    bstr(s, "'");
+}
+
+/* subprocess.run(argv, capture_output=True, text=True, timeout=T): exit status (-N on signal N), both streams.
+   Like Python it closes inherited fds above 2 and resets SIGPIPE/SIGXFSZ in the child, waits for EOF on both pipes
+   and then for the process; over the timeout (seconds, 0 = none) the child is killed and that is an error (rc 1, as
+   TimeoutExpired). */
+typedef struct { int rc; Buf out, err; } Proc;
+static void run(char **argv, double timeout, Proc *p) {
+    int po[2], pe[2], px[2], st = 0, open_n = 2; pid_t pid; double t0 = mono();
+    struct pollfd f[2]; char buf[65536]; ssize_t k;
+    memset(p, 0, sizeof *p);
+    bstr(&p->out, ""); bstr(&p->err, "");
+    if (pipe2(po, BN_O_CLOEXEC) || pipe2(pe, BN_O_CLOEXEC) || pipe2(px, BN_O_CLOEXEC)) die("%s: pipe failed", argv[0]);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("%s: fork failed", argv[0]);
+    if (pid == 0) {
+        DIR *d; struct dirent *e; int fds[1024], nf = 0, i, keep[6] = { po[1], pe[1], px[1], 0, 0, 0 }; char c;
+        signal(BN_SIGPIPE, SIG_DFL); signal(BN_SIGXFSZ, SIG_DFL);
+        dup2(po[1], 1); dup2(pe[1], 2);
+        if ((d = opendir("/proc/self/fd"))) {
+            int dfd = dirfd(d);
+            while ((e = readdir(d)) && nf < 1024) {
+                int fd = atoi(e->d_name);
+                if (fd > 2 && fd != dfd && fd != keep[2]) fds[nf++] = fd;
+            }
+            closedir(d);
+            for (i = 0; i < nf; i++) close(fds[i]);
+        }
+        execvp(argv[0], argv);
+        c = 1; if (write(keep[2], &c, 1) < 0) _exit(127);
+        _exit(127);
+    }
+    close(po[1]); close(pe[1]); close(px[1]);
+    f[0].fd = po[0]; f[1].fd = pe[0];
+    while (open_n) {
+        int i, ms = timeout > 0 ? (int)((timeout - (mono() - t0)) * 1000.0) + 1 : -1;
+        if (timeout > 0 && (ms <= 0 || mono() - t0 > timeout)) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            {
+                char m[64]; snprintf(m, sizeof m, "%g", timeout);
+                fprintf(stderr, "boundnested.cx: error: Command '%s' timed out after %s seconds\n", argv[0], m);
+            }
+            fflush(stdout); exit(1);
+        }
+        for (i = 0; i < 2; i++) { f[i].events = f[i].fd >= 0 ? BN_POLLIN : 0; f[i].revents = 0; }
+        if (poll(f, 2, ms) < 0) continue;
+        for (i = 0; i < 2; i++) {
+            if (f[i].fd < 0 || !f[i].revents) continue;
+            k = read(f[i].fd, buf, sizeof buf);
+            if (k > 0) bput(i ? &p->err : &p->out, buf, (size_t)k);
+            else if (k == 0 || (k < 0)) { close(f[i].fd); f[i].fd = -1; open_n--; }
+        }
+    }
+    waitpid(pid, &st, 0);
+    {
+        char c; ssize_t r = read(px[0], &c, 1);
+        close(px[0]);
+        if (r == 1) die("[Errno 2] No such file or directory: '%s'", argv[0]);
+    }
+    p->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+}
+
+/* tests/admission_r7p.py, ported */
+static double read_first_float(const char *path) {
+    char *b = cx_read(path, 0), *e; double v;
+    if (!b) die("cannot read %s", path);
+    e = b; while (*e && !py_space((unsigned char)*e)) e++;
+    *e = 0;
+    if (!py_float(b, &v)) die("could not convert string to float: '%s'", b);
+    free(b);
+    return v;
+}
+
+static int last_vm_fork_uptime(double *last, char *why, size_t whyn) {
+    char *argv[] = { "dmesg", 0 }; Proc p; char *line, *s; int have = 0;
+    run(argv, 10, &p);
+    if (p.rc != 0) { snprintf(why, whyn, "dmesg failed rc=%d: admission cannot be proven", p.rc); return -1; }
+    s = p.out.b;
+    while (*s) {
+        char *e = s; char save;
+        while (*e && !py_break((unsigned char)*e)) e++;
+        save = *e; *e = 0; line = s;
+        if (strstr(line, "virtual machine fork") && line[0] == '[') {
+            char *q = line + 1, *d;
+            while (py_space((unsigned char)*q)) q++;
+            d = q; while ((*d >= '0' && *d <= '9') || *d == '.') d++;
+            if (d > q && *d == ']') {
+                double v; *d = 0;
+                if (!py_float(q, &v)) die("could not convert string to float: '%s'", q);
+                *last = v; have = 1; *d = ']';
+            }
+        }
+        *e = save;
+        if (!*e) break;
+        s = e + ((e[0] == '\r' && e[1] == '\n') ? 2 : 1);
+    }
+    return have;
+}
+
+static void admit(const char *label) {
+    double t0 = mono(), load = 0, gap = 0, waited; char why[256]; FILE *f;
+    for (;;) {
+        double last = 0; int r;
+        why[0] = 0;
+        load = read_first_float("/proc/loadavg");
+        r = last_vm_fork_uptime(&last, why, sizeof why);
+        if (r == 0) snprintf(why, sizeof why, "no VM fork line in dmesg");
+        if (r == 1) {
+            gap = read_first_float("/proc/uptime") - last;
+            if (load >= 6.0) snprintf(why, sizeof why, "load1=%.2f >= %.1f", load, 6.0);
+            else if (gap <= 30.0) snprintf(why, sizeof why, "fork_gap=%.1f s <= %.1f s", gap, 30.0);
+            else break;
+        }
+        if (mono() - t0 > 1800.0) {
+            fflush(stdout);
+            fprintf(stderr, "admission not met for %s within %.0f s (%s)\n", label, 1800.0, why);
+            exit(1);
+        }
+        sleep(10);
+    }
+    waited = mono() - t0;
+    if (!(f = fopen(RECEIPT, "a"))) die("cannot open %s", RECEIPT);
+    fprintf(f, "%s load1=%.2f fork_gap_s=%.1f waited_s=%.0f\n", label, load, gap, waited);
+    fclose(f);
+}
+
+static int wanted(long long no) {
+    int i;
+    if (!only_given) return 1;
+    for (i = 0; i < n_only; i++) if (ONLY[i] == no) return 1;
+    return 0;
+}
+
+static double hard(double n) { return n + TOTAL_EXTRA; }
+static double bound_max(double n) { return hard(n) + EPS; }
+
+/* ENTRY[entry] + [N, sh, -c, command] appended to argv */
+static int entry_argv(char **av, const char *entry, int n, const char *command) {
+    int k = 0; char num[32];
+    snprintf(num, sizeof num, "%d", n);
+    if (!strcmp(entry, "c")) av[k++] = join(REPO, "tests/bound");
+    else { av[k++] = "python3"; av[k++] = "-I"; av[k++] = join(REPO, "tests/bound.py"); }
+    av[k++] = strdup(num); av[k++] = "sh"; av[k++] = "-c"; av[k++] = (char *)command; av[k] = 0;
+    return k;
+}
+
+/* inner(): the inner call, as one string of the outer sh -c */
+static char *inner(const char *entry, int seconds, const char *command) {
+    char *av[16]; int k = entry_argv(av, entry, seconds, command), i; Buf s = { 0, 0, 0 };
+    for (i = 0; i < k; i++) { if (i) bstr(&s, " "); shquote(&s, av[i]); }
+    return s.b;
+}
+
+static void result(int ok) { if (n_results < 64) results_ok[n_results] = ok; n_results++; }
+
+static int case_(const char *label, const char *parent, int parent_n, const char *child, int child_n,
+                 const char *child_cmd, int want_rc, double max_secs, double min_secs) {
+    char *script, *av[16], why[3][96]; int nw = 0, ok, i; Proc p; double t0, dt;
+    CASE_NO++;
+    if (!wanted(CASE_NO)) return 0;
+    script = inner(child, child_n, child_cmd);
+    entry_argv(av, parent, parent_n, script);
+    if (!GATE) admit(label);
+    t0 = mono();
+    run(av, 60, &p);
+    dt = mono() - t0;
+    if (p.rc != want_rc) snprintf(why[nw++], sizeof why[0], "rc=%d want %d", p.rc, want_rc);
+    if (dt > max_secs) snprintf(why[nw++], sizeof why[0], "took %.2fs > %.2f", dt, max_secs);
+    if (dt < min_secs) snprintf(why[nw++], sizeof why[0], "took %.2fs < %.2f", dt, min_secs);
+    ok = nw == 0;
+    result(ok);
+    printf("%s%s parent=%s(N=%d) child=%s(N=%d) rc=%d %.2fs", ok ? "PASS " : "FAIL ", label, parent, parent_n, child,
+           child_n, p.rc, dt);
+    if (nw) { printf(" | "); for (i = 0; i < nw; i++) printf("%s%s", i ? "; " : "", why[i]); }
+    printf("\n");
+    if (!ok && p.err.n) {
+        /* p.stderr.strip().splitlines()[-1] */
+        char *s = p.err.b, *e = s + p.err.n, *l;
+        while (s < e && py_space((unsigned char)*s)) s++;
+        while (e > s && py_space((unsigned char)e[-1])) e--;
+        if (e == s) die("%s", "list index out of range");
+        l = e; while (l > s && !py_break((unsigned char)l[-1])) l--;
+        printf("      stderr: %.*s\n", (int)(e - l), l);
+    }
+    return 1;
+}
+
+/* tempfile.mkdtemp(prefix='bound-nested-') under tempfile.gettempdir()'s candidates */
+static char *mkdtemp_bound(void) {
+    const char *cand[8]; int n = 0, i; char cwd[4096];
+    const char *envs[] = { "TMPDIR", "TEMP", "TMP" };
+    for (i = 0; i < 3; i++) { const char *v = getenv(envs[i]); if (v && *v) cand[n++] = v; }
+    cand[n++] = "/tmp"; cand[n++] = "/var/tmp"; cand[n++] = "/usr/tmp";
+    if (getcwd(cwd, sizeof cwd)) cand[n++] = cwd;
+    for (i = 0; i < n; i++) {
+        char *t = join(cand[i], "bound-nested-XXXXXX");
+        if (mkdtemp(t)) return t;
+        free(t);
+    }
+    die("%s", "[Errno 2] No usable temporary directory found");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i; char *src, *text; char *marker_cmd, marker[32];
+    if (argc < 2) die("%s", "list index out of range (usage: boundnested.cx REPO_ROOT [--gate] [--only 1,2,...])");
+    REPO = argv[1];
+    for (i = 2; i < argc; i++) if (!strcmp(argv[i], "--gate")) GATE = 1;
+#ifndef __linux__
+    fprintf(stderr, "SKIP %s: needs Linux /proc (subreaper, ledger identity, dmesg admission); host is %s\n",
+            "boundnested.cx", "not linux");
+    return 77;
+#endif
+    for (i = 2; i < argc; i++) if (!strcmp(argv[i], "--only")) {
+        char *list, *tok, *s;
+        if (i + 1 >= argc) die("%s", "list index out of range (--only needs a value)");
+        only_given = 1;
+        list = strdup(argv[i + 1]); s = list;
+        for (;;) {
+            char *c = strchr(s, ',');
+            if (c) *c = 0;
+            tok = s;
+            if (n_only >= 256) die("%s", "--only: too many values");
+            if (!py_int(tok, &ONLY[n_only])) die("invalid literal for int() with base 10: '%s'", tok);
+            n_only++;
+            if (!c) break;
+            s = c + 1;
+        }
+        break;
+    }
+    PN = GATE ? 5 : 8;
+    {
+        const char *r = getenv("UNISACC_ADMISSION_RECEIPT"); char cwd[4096];
+        if (r) RECEIPT = strdup(r);
+        else RECEIPT = join(getcwd(cwd, sizeof cwd) ? cwd : ".", "admission-receipt.txt");
+    }
+    {
+        char *path = join(REPO, "tests/bound.c");
+        if (!(src = cx_read(path, 0))) die("[Errno 2] No such file or directory: '%s'", path);
+    }
+    if (!define_value(src, "TOTAL_EXTRA_SECS", &TOTAL_EXTRA, &text)) die("%s", "TOTAL_EXTRA_SECS: no match in tests/bound.c");
+    if (!define_value(src, "CLEANUP_EPSILON_SECS", &EPS, &text)) die("%s", "CLEANUP_EPSILON_SECS: no match in tests/bound.c");
+    {
+        /* os.environ['BOUND_CACHE'] = ...: rebuilt in environ itself, because the runtime's setenv() does not reach
+           environ (execvp children would not see it; measured 2026-10-23) */
+        char *cache = join(mkdtemp_bound(), "cache"), **e, **ne, *kv; int n = 0, k = 0;
+        for (e = environ; *e; e++) n++;
+        ne = malloc((size_t)(n + 2) * sizeof *ne);
+        for (e = environ; *e; e++) if (strncmp(*e, "BOUND_CACHE=", 12)) ne[k++] = *e;
+        kv = malloc(strlen(cache) + 13);
+        sprintf(kv, "BOUND_CACHE=%s", cache);
+        ne[k++] = kv; ne[k] = 0;
+        environ = ne;
+    }
+
+    /* 1-4. child longer than parent: parent N clamps child N=30, rc 142 */
+    case_("C->C longer child", "c", PN, "c", 30, "sleep 30", 142, bound_max(PN), 0.0);
+    case_("C->py longer child", "c", PN, "py", 30, "sleep 30", 142, bound_max(PN), 0.0);
+    case_("py->C longer child", "py", PN, "c", 30, "sleep 30", 142, bound_max(PN), 0.0);
+    case_("py->py longer child", "py", PN, "py", 30, "sleep 30", 142, bound_max(PN), 0.0);
+    /* 5. child shorter than parent: parent N=8, child N=2 runs 1 s, rc 0 */
+    case_("py->C shorter child", "py", 8, "c", 2, "sleep 1", 0, bound_max(8), 0.9);
+    /* 6. parent shorter than child: parent N=2, child N=30, about 2 s, 142 */
+    case_("C->C shorter parent", "c", 2, "c", 30, "sleep 30", 142, bound_max(2), 0.0);
+
+    /* 8. the deadline really is passed down: the child sh reads the parent's value or an earlier one */
+    if (wanted(8)) {
+        char *av[16], *pv = 0, *cv = 0, *s, *script; Buf sc = { 0, 0, 0 }; Proc p; double p_val, c_val; int ok;
+        if (!GATE) admit("nested-deadline-propagates");
+        bstr(&sc, "echo P=$UNISACC_BOUND_DEADLINE_MONO; ");
+        script = inner("py", 5, "echo C=$UNISACC_BOUND_DEADLINE_MONO");
+        bstr(&sc, script);
+        entry_argv(av, "c", 8, sc.b);
+        run(av, 60, &p);
+        s = p.out.b;
+        for (;;) {   /* dict(x.split('=', 1) for x in stdout.split() if '=' in x) */
+            char *e, *eq;
+            while (*s && py_space((unsigned char)*s)) s++;
+            if (!*s) break;
+            e = s; while (*e && !py_space((unsigned char)*e)) e++;
+            if (*e) *e++ = 0;
+            if ((eq = strchr(s, '='))) {
+                *eq = 0;
+                if (!strcmp(s, "P")) pv = eq + 1;
+                else if (!strcmp(s, "C")) cv = eq + 1;
+            }
+            s = e;
+        }
+        if (!py_float(pv ? pv : "nan", &p_val)) die("could not convert string to float: '%s'", pv);
+        if (!py_float(cv ? cv : "nan", &c_val)) die("could not convert string to float: '%s'", cv);
+        ok = p.rc == 0 && p_val == p_val && c_val == c_val && c_val <= p_val + 1e-6;
+        result(ok);
+        printf("%sdeadline propagates: parent=%s child=%s rc=%d\n", ok ? "PASS " : "FAIL ", pv ? pv : "None",
+               cv ? cv : "None", p.rc);
+    }
+
+    /* 7. a real grandchild is cleaned up: outer N=3, the child sh starts a background grandchild, gone afterwards */
+    snprintf(marker, sizeof marker, "%d", (int)getpid());   /* sleep needs a number: 97.<pid> names the grandchild */
+    {
+        Buf c = { 0, 0, 0 };
+        bstr(&c, "sh -c \"sleep 97."); bstr(&c, marker); bstr(&c, " & sleep 98."); bstr(&c, marker); bstr(&c, "\"");
+        marker_cmd = c.b;
+    }
+    case_("C->C grandchild reaped at hard deadline", "c", 3, "c", 10, marker_cmd, 142, bound_max(3), 0.0);
+    if (wanted(7)) {
+        char pat[64], *av[] = { "pgrep", "-f", pat, 0 }, *s; Proc p; Buf left = { 0, 0, 0 }; int n = 0, ok;
+        snprintf(pat, sizeof pat, "sleep 97.%s", marker);
+        run(av, 0, &p);   /* no timeout, as the .py */
+        s = p.out.b;
+        bstr(&left, "[");
+        for (;;) {   /* repr(stdout.split()) */
+            char *e;
+            while (*s && py_space((unsigned char)*s)) s++;
+            if (!*s) break;
+            e = s; while (*e && !py_space((unsigned char)*e)) e++;
+            if (n++) bstr(&left, ", ");
+            bstr(&left, "'"); bput(&left, s, (size_t)(e - s)); bstr(&left, "'");
+            s = e;
+        }
+        bstr(&left, "]");
+        ok = n == 0;
+        result(ok);
+        printf("%sgrandchild left: %s\n", ok ? "PASS " : "FAIL ", n ? left.b : "none");
+    }
+
+    {
+        int failed = 0;
+        for (i = 0; i < n_results && i < 64; i++) if (!results_ok[i]) failed++;
+        printf("SUMMARY nested: %d/%d pass\n", n_results - failed, n_results);
+        fflush(stdout);
+        return failed ? 1 : 0;
+    }
+}

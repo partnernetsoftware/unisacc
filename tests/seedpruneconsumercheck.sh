@@ -76,7 +76,7 @@ before=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"r
 W=$S/tree; mkdir "$W"
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "seedprunec  tree $H"
-git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py || { echo "seedprunec: git archive failed"; exit 2; }
+git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py tests/checklib.py || { echo "seedprunec: git archive failed"; exit 2; }
 tar -x -C "$W" -f "$S/tree.tar" || { echo "seedprunec: scratch tree failed"; exit 2; }
 cd "$W" || exit 2
 BOUND_CACHE=$S/boundcache; export BOUND_CACHE
@@ -207,7 +207,7 @@ evw "C_PRUNE_SHA $(shaf "$o/prune.json")"
 fi
 
 if [ "$SLICE" = 2 ]; then
-# 2 prune-only failures: opt green, prune fails, prepare stops before pp
+# 2 prune-only failures: opt green, prune fails, the seed-gen lane of prepare stops before pp (no δ table)
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
 for case_ in "red:3:$S/red-gen" "missing:2:/nonexistent/seed-gen"; do
     n=${case_%%:*}; rest=${case_#*:}; want=${rest%%:*}; bin=${rest#*:}
@@ -216,9 +216,9 @@ for case_ in "red:3:$S/red-gen" "missing:2:/nonexistent/seed-gen"; do
     hs=$(helpers "$l")
     { [ "$r" = "$want" ] && [ "$hs" = "parse2 opt prune " ] && haslog "$l" helper-parse2-rc 0 && haslog "$l" helper-opt-rc 0 && [ -s "$o/e4.json" ] \
         && haslog "$l" helper-prune-rc "$want" && [ ! -e "$o/prune.json" ] && [ ! -e "$o/e2.json" ] \
-        && ! awk -F '\t' '$2 ~ /^python3 exec\/build\/gen.py (lower|enc) / { f = 1 } END { exit !f }' "$l" \
+        && ! awk -F '\t' '$2 ~ /^python3 exec\/c\/tbl\.py [^ ]*\/(e3|e4|prune|e2)\.json / { f = 1 } END { exit !f }' "$l" \
         && ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp; } \
-        && ok "prune-only $n: parse2 and opt rc 0 with e4.json, prune helper rc $want, prepare rc $r before pp, no prune.json/e2.json, no Python" \
+        && ok "prune-only $n: parse2 and opt rc 0 with e4.json, prune helper rc $want, prepare rc $r, pp never started, no prune.json/e2.json, no δ table, no Python" \
         || no "prune-only $n (prepare rc=$r want $want, helpers '$hs') $(tail -1 "$l.out")"
     evw "NEG-prune-$n prepare=$r helpers=$hs"
 done

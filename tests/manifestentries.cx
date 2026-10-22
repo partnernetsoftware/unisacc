@@ -1,0 +1,779 @@
+#!/usr/bin/env -S unisacc.com -run
+/* manifestentries.cx -- T2 pilot: assemble production manifest slices and check semantic contracts.
+   Include-free port of tests/manifestentries.py (2026-10-23).
+     sh ./unisacc.com -run tests/manifestentries.cx -- --stage {pp,lex,parse2,enc,enc/arm,lower}
+     sh tests/cxbin tests/manifestentries.cx --stage STAGE                    (compiled once, as the gate runs it)
+   Run from the repository root.  Same stdout line and rc as the .py:
+     manifest entries pp: 6 contracts, semantic mutation caught, 0.141s
+     manifest entries enc: 5 contracts, 5 semantic mutations caught, 0.293s
+   Recipe for another stage (the .py's): select production rows (never synthesize their rules), provide the same
+   flags/facts, assert state+ordered actions independently, then mutate one manifest operand privately (a temporary
+   copy of exec/STAGE/*.tsv) and require the same assertion to fail.  Subgraphs need not be closed pipelines: no
+   runtime or whole-graph hash oracle.
+
+   The assembler.  The .py imported exec/assemble.py (+ finite_rules, facts/load, build/graph, build/procs: about
+   1300 lines of Python).  This port does not re-implement it: the repository already has the C manifest assembler,
+   seed/gen.c, held byte-identical to exec/build/gen.py by the seedgen gate jobs.  Its generic entry
+       seed-gen inspect-manifest-graph MANIFEST FLAGS.json ENV.json OUT.json
+   runs exactly the selected rows (the same flags and environment the .py handed assemble.run) and writes the graph
+   as {"states": {name: [mode, {key: [target, seq]}]}, "seqs": [...]}; facts come from `seed-gen inspect-facts STEM`
+   (assemble.load_facts).  Two differences from the in-process Python graph, neither visible to these contracts:
+   inspect-manifest-graph runs G.finish (missing keys of b/r states become DEAD/unreachable, a RET pop table is
+   added), and the lexer slice is built in seed/gen.c's graph rather than build/graph.py's Delta.  So every contract
+   names an edge the selected rows define; a missing state is a KeyError (rc 1), as in the .py.
+   seed-gen is built once per (seed/gen.c, seed/json.h, uname -m) into tests/cxbin's cache directory
+   (${CXBIN_CACHE:-${TMPDIR:-/tmp}/unisacc-cxbin-UID}/seedgen-KEY) with the host cc (-std=c99 -O1 -w -Iseed: the
+   slices are small, so build time is what counts: 4 s cold), else ./unisacc.com; the build is not inside the timed
+   section (the .py's elapsed < 10 s covers assembly + checks).
+
+   Differences from the .py: argparse messages name prog manifestentries.cx; a failed contract or precondition is one
+   "manifestentries.cx: AssertionError: ..." stderr line, rc 1 (the .py: a traceback, rc 1); a failed seed-gen build
+   or run is one "manifestentries.cx: ..." stderr line, rc 1.
+   Prelude gap: <time.h> (clock_gettime/CLOCK_MONOTONIC) is included until CX1 adds it to the prelude. */
+#include <time.h>
+
+static const char *PROG = "manifestentries.cx";
+static char GEN[4300];          /* the seed-gen binary */
+static char TD[4300];           /* the live temporary directory (removed on exit paths) */
+
+/* ---------------------------------------------------------------- small utilities */
+typedef struct { char *s; size_t n, cap; } Buf;
+static void die(const char *fmt, const char *a, const char *b);
+static void bput(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *p;
+        while (c < b->n + n + 1) c *= 2;
+        p = realloc(b->s, c); if (!p) die("out of memory", 0, 0);
+        b->s = p; b->cap = c;
+    }
+    memcpy(b->s + b->n, s, n); b->n += n; b->s[b->n] = 0;
+}
+static void bstr(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bfmt(Buf *b, const char *fmt, const char *a) {
+    char t[512]; int k = snprintf(t, sizeof t, fmt, a); if (k < 0 || k >= (int)sizeof t) die("format overflow", 0, 0);
+    bput(b, t, (size_t)k);
+}
+static void bint(Buf *b, long long v) { char t[32]; snprintf(t, sizeof t, "%lld", v); bstr(b, t); }
+
+static void rmtree(const char *path) {
+    struct stat s; DIR *d; struct dirent *e;
+    if (lstat(path, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(path); return; }
+    if ((d = opendir(path))) {
+        while ((e = readdir(d))) {
+            char p[4400];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", path, e->d_name); rmtree(p);
+        }
+        closedir(d);
+    }
+    rmdir(path);
+}
+static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+static void die(const char *fmt, const char *a, const char *b) {
+    fflush(stdout); fprintf(stderr, "%s: ", PROG); fprintf(stderr, fmt, a ? a : "", b ? b : ""); fputc('\n', stderr);
+    cleanup(); exit(1);
+}
+/* an assertion outside a mutant check: the .py's uncaught AssertionError */
+static void assert_fail(const char *msg) { die("AssertionError: %s", msg, 0); }
+
+static char *xread(const char *path, size_t *n) {
+    char *b = cx_read(path, n); if (!b) die("cannot read %s", path, 0); return b;
+}
+static void xwrite(const char *path, const char *s, size_t n) { if (cx_write(path, s, n)) die("cannot write %s", path, 0); }
+
+/* text.splitlines() for \n / \r\n files */
+typedef struct { char **v; size_t n; } Lines;
+static Lines split_lines(char *text) {
+    Lines L = {0, 0}; size_t cap = 0; char *p = text;
+    while (*p) {
+        char *q = strchr(p, '\n'); size_t len = q ? (size_t)(q - p) : strlen(p);
+        char *l = malloc(len + 1); if (!l) die("out of memory", 0, 0);
+        memcpy(l, p, len); l[len] = 0; if (len && l[len - 1] == '\r') l[len - 1] = 0;
+        if (L.n == cap) { cap = cap ? cap * 2 : 64; L.v = realloc(L.v, cap * sizeof *L.v); if (!L.v) die("out of memory", 0, 0); }
+        L.v[L.n++] = l;
+        if (!q) break;
+        p = q + 1;
+    }
+    return L;
+}
+/* '\n'.join(lines) + '\n' */
+static void write_lines(const char *path, char **v, size_t n) {
+    Buf b = {0, 0, 0}; size_t i;
+    for (i = 0; i < n; i++) { if (i) bstr(&b, "\n"); bstr(&b, v[i]); }
+    bstr(&b, "\n"); xwrite(path, b.s, b.n); free(b.s);
+}
+static int count_of(const char *s, const char *sub) {
+    int k = 0; size_t m = strlen(sub); const char *p = s;
+    if (!m) return 0;
+    while ((p = strstr(p, sub))) { k++; p += m; }
+    return k;
+}
+/* s.replace(old, new, 1) */
+static char *replace1(const char *s, const char *old, const char *new_) {
+    const char *p = strstr(s, old); Buf b = {0, 0, 0};
+    if (!p) { bstr(&b, s); return b.s; }
+    bput(&b, s, (size_t)(p - s)); bstr(&b, new_); bstr(&b, p + strlen(old));
+    return b.s;
+}
+static int starts(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+
+/* ---------------------------------------------------------------- JSON (read-only tree over the text) */
+typedef struct { char kind; size_t s, e; int first, next, count; } JN;   /* kind: o a s n t f z */
+typedef struct { const char *t; JN *v; int n, cap; size_t p; } JDoc;
+static int jnew(JDoc *d, char kind, size_t s) {
+    if (d->n == d->cap) { d->cap = d->cap ? d->cap * 2 : 1024; d->v = realloc(d->v, (size_t)d->cap * sizeof *d->v); if (!d->v) die("out of memory", 0, 0); }
+    d->v[d->n].kind = kind; d->v[d->n].s = s; d->v[d->n].e = s; d->v[d->n].first = -1; d->v[d->n].next = -1; d->v[d->n].count = 0;
+    return d->n++;
+}
+static void jws(JDoc *d) { while (d->t[d->p] == ' ' || d->t[d->p] == '\t' || d->t[d->p] == '\n' || d->t[d->p] == '\r') d->p++; }
+static int jvalue(JDoc *d);
+static void jbad(JDoc *d) { char at[32]; snprintf(at, sizeof at, "%lu", (unsigned long)d->p); die("invalid JSON at offset %s", at, 0); }
+static int jstring(JDoc *d) {
+    int k = jnew(d, 's', d->p);
+    d->p++;
+    while (d->t[d->p] && d->t[d->p] != '"') { if (d->t[d->p] == '\\' && d->t[d->p + 1]) d->p++; d->p++; }
+    if (d->t[d->p] != '"') jbad(d);
+    d->p++; d->v[k].e = d->p; return k;
+}
+static int jvalue(JDoc *d) {
+    int k, last = -1; char c;
+    jws(d); c = d->t[d->p];
+    if (c == '"') return jstring(d);
+    if (c == '{' || c == '[') {
+        char close = c == '{' ? '}' : ']';
+        k = jnew(d, c == '{' ? 'o' : 'a', d->p); d->p++; jws(d);
+        if (d->t[d->p] == close) { d->p++; d->v[k].e = d->p; return k; }
+        for (;;) {
+            int child;
+            if (c == '{') {
+                int key; jws(d); if (d->t[d->p] != '"') jbad(d);
+                key = jstring(d); jws(d); if (d->t[d->p] != ':') jbad(d); d->p++;
+                if (last < 0) d->v[k].first = key; else d->v[last].next = key;
+                child = jvalue(d); d->v[key].next = child; last = child;
+            } else {
+                child = jvalue(d);
+                if (last < 0) d->v[k].first = child; else d->v[last].next = child;
+                last = child;
+            }
+            d->v[k].count++;
+            jws(d);
+            if (d->t[d->p] == ',') { d->p++; continue; }
+            if (d->t[d->p] == close) { d->p++; break; }
+            jbad(d);
+        }
+        d->v[k].e = d->p; return k;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        k = jnew(d, 'n', d->p);
+        while (strchr("+-0123456789.eE", d->t[d->p]) && d->t[d->p]) d->p++;
+        d->v[k].e = d->p; return k;
+    }
+    if (!strncmp(d->t + d->p, "true", 4)) { k = jnew(d, 't', d->p); d->p += 4; d->v[k].e = d->p; return k; }
+    if (!strncmp(d->t + d->p, "false", 5)) { k = jnew(d, 'f', d->p); d->p += 5; d->v[k].e = d->p; return k; }
+    if (!strncmp(d->t + d->p, "null", 4)) { k = jnew(d, 'z', d->p); d->p += 4; d->v[k].e = d->p; return k; }
+    jbad(d); return -1;
+}
+static int jparse(JDoc *d, const char *text) {
+    int root; d->t = text; d->v = 0; d->n = d->cap = 0; d->p = 0;
+    root = jvalue(d); jws(d); if (d->t[d->p]) jbad(d);
+    return root;
+}
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+/* decoded string value (UTF-8) */
+static void jdecode(JDoc *d, int k, Buf *b) {
+    size_t i = d->v[k].s + 1, e = d->v[k].e - 1;
+    while (i < e) {
+        char c = d->t[i++];
+        if (c != '\\') { bput(b, &c, 1); continue; }
+        c = d->t[i++];
+        if (c == 'u' && i + 4 <= e) {
+            unsigned u = 0; int j; char o[4]; size_t m;
+            for (j = 0; j < 4; j++) u = u * 16 + (unsigned)hexval(d->t[i + j]);
+            i += 4;
+            if (u < 0x80) { o[0] = (char)u; m = 1; }
+            else if (u < 0x800) { o[0] = (char)(0xc0 | (u >> 6)); o[1] = (char)(0x80 | (u & 63)); m = 2; }
+            else { o[0] = (char)(0xe0 | (u >> 12)); o[1] = (char)(0x80 | ((u >> 6) & 63)); o[2] = (char)(0x80 | (u & 63)); m = 3; }
+            bput(b, o, m); continue;
+        }
+        c = c == 'n' ? '\n' : c == 't' ? '\t' : c == 'r' ? '\r' : c == 'b' ? '\b' : c == 'f' ? '\f' : c;
+        bput(b, &c, 1);
+    }
+}
+static int jstr_is(JDoc *d, int k, const char *lit) {
+    Buf b = {0, 0, 0}; int eq;
+    if (k < 0 || d->v[k].kind != 's') return 0;
+    bstr(&b, ""); jdecode(d, k, &b); eq = !strcmp(b.s, lit); free(b.s); return eq;
+}
+static char *jstr_dup(JDoc *d, int k) { Buf b = {0, 0, 0}; bstr(&b, ""); jdecode(d, k, &b); return b.s; }
+static int jget(JDoc *d, int obj, const char *key) {
+    int k;
+    if (obj < 0 || d->v[obj].kind != 'o') return -1;
+    for (k = d->v[obj].first; k >= 0; k = d->v[d->v[k].next].next) if (jstr_is(d, k, key)) return d->v[k].next;
+    return -1;
+}
+static int jat(JDoc *d, int arr, int i) {
+    int k;
+    if (arr < 0 || d->v[arr].kind != 'a') return -1;
+    for (k = d->v[arr].first; k >= 0 && i > 0; k = d->v[k].next) i--;
+    return k;
+}
+/* canonical compact text: json.dumps(v, separators=(',', ':')) for the ASCII values these graphs hold */
+static void jcanon(JDoc *d, int k, Buf *b) {
+    JN *n = &d->v[k]; int c;
+    if (n->kind == 's') {
+        Buf s = {0, 0, 0}; size_t i; bstr(&s, ""); jdecode(d, k, &s); bstr(b, "\"");
+        for (i = 0; i < s.n; i++) {
+            unsigned char ch = (unsigned char)s.s[i];
+            if (ch == '"' || ch == '\\') { char e2[2]; e2[0] = '\\'; e2[1] = (char)ch; bput(b, e2, 2); }
+            else if (ch < 0x20) { char e6[8]; snprintf(e6, sizeof e6, "\\u%04x", ch); bstr(b, e6); }
+            else bput(b, (char *)&ch, 1);
+        }
+        bstr(b, "\""); free(s.s); return;
+    }
+    if (n->kind == 'a' || n->kind == 'o') {
+        int first = 1; bstr(b, n->kind == 'a' ? "[" : "{");
+        for (c = n->first; c >= 0; c = d->v[c].next) {
+            if (!first) bstr(b, ",");
+            first = 0;
+            jcanon(d, c, b);
+            if (n->kind == 'o') { bstr(b, ":"); c = d->v[c].next; jcanon(d, c, b); }
+        }
+        bstr(b, n->kind == 'a' ? "]" : "}"); return;
+    }
+    bput(b, d->t + n->s, n->e - n->s);
+}
+static int jcanon_is(JDoc *d, int k, const char *want) {
+    Buf b = {0, 0, 0}; int eq; bstr(&b, ""); jcanon(d, k, &b); eq = !strcmp(b.s, want); free(b.s); return eq;
+}
+static long long jint(JDoc *d, int k) {
+    if (k < 0 || d->v[k].kind != 'n') assert_fail("fact is not an integer");
+    return strtoll(d->t + d->v[k].s, 0, 10);
+}
+static char *jraw(JDoc *d, int k) {   /* the number's text (facts may exceed what a double keeps) */
+    Buf b = {0, 0, 0}; bput(&b, d->t + d->v[k].s, d->v[k].e - d->v[k].s); return b.s;
+}
+
+/* ---------------------------------------------------------------- seed-gen */
+static int run_quiet(char **argv, int secs, char **out) {   /* argv with stderr folded into the captured stdout */
+    char *a[40]; int i = 0, k; size_t n = 0;
+    a[i++] = "sh"; a[i++] = "-c"; a[i++] = "exec \"$@\" 2>&1"; a[i++] = "sh";
+    for (k = 0; argv[k] && i < 39; k++) a[i++] = argv[k];
+    a[i] = 0;
+    return cx_runv_timeout(a, secs, out, &n);
+}
+static void seed_gen_binary(void) {
+    char key[65], *src, *hdr, *mach = 0, cache[4200], tmp[4400]; size_t ns, nh, nm = 0; Buf k = {0, 0, 0};
+    const char *base = getenv("CXBIN_CACHE"); struct stat s;
+    char *um[] = {"uname", "-m", 0};
+    src = xread("seed/gen.c", &ns); hdr = xread("seed/json.h", &nh);
+    if (cx_runv_timeout(um, 10, &mach, &nm) != 0 || !mach) die("cannot run uname -m", 0, 0);
+    bput(&k, mach, nm); bput(&k, "", 1); bput(&k, src, ns); bput(&k, "", 1); bput(&k, hdr, nh);
+    cx_sha256_hex(k.s, k.n, key); free(k.s); free(src); free(hdr); free(mach);
+    if (base && *base) snprintf(cache, sizeof cache, "%s", base);
+    else { const char *t = getenv("TMPDIR"); snprintf(cache, sizeof cache, "%s/unisacc-cxbin-%lu", t && *t ? t : "/tmp", (unsigned long)getuid()); }
+    mkdir(cache, 0700);
+    if (lstat(cache, &s) != 0 || !S_ISDIR(s.st_mode) || s.st_uid != getuid())
+        die("%s is not a directory owned by this user (refused)", cache, 0);
+    snprintf(GEN, sizeof GEN, "%s/seedgen-%s", cache, key);
+    if (access(GEN, X_OK) == 0) return;
+    snprintf(tmp, sizeof tmp, "%s/.seedgen-%s.%ld", cache, key, (long)getpid());
+    {
+        char *c[] = {"cc", "-std=c99", "-O1", "-w", "-Iseed", "seed/gen.c", "-o", tmp, 0};
+        char *u[] = {"sh", "./unisacc.com", "-O2", "-fno-trim-libc", "-Iseed", "seed/gen.c", "-o", tmp, 0};
+        char *o1 = 0, *o2 = 0;
+        if (run_quiet(c, 55, &o1) != 0 && run_quiet(u, 55, &o2) != 0) {
+            unlink(tmp);
+            if (o2 && *o2) fputs(o2, stderr);
+            die("building seed/gen.c failed (cc and ./unisacc.com)", 0, 0);
+        }
+        free(o1); free(o2);
+    }
+    if (chmod(tmp, 0700) != 0 || rename(tmp, GEN) != 0) { unlink(tmp); die("cannot install %s", GEN, 0); }
+}
+/* assemble.load_facts(stem) */
+static JDoc FD; static int FROOT;
+static void load_facts(const char *stem) {
+    char out[4400], *text; size_t n; int rc;
+    char *a[] = {GEN, "inspect-facts", (char *)stem, out, 0};
+    snprintf(out, sizeof out, "%s/facts-%s.json", TD, stem);
+    rc = cx_runv_timeout(a, 58, 0, 0);
+    if (rc != 0) die("seed-gen inspect-facts %s failed", stem, 0);
+    text = xread(out, &n); unlink(out);
+    FROOT = jparse(&FD, text);
+}
+static int fact(const char *name) {
+    int k = jget(&FD, FROOT, name); if (k < 0) die("KeyError: '%s'", name, 0); return k;
+}
+
+/* ---------------------------------------------------------------- graphs */
+typedef struct { JDoc d; int states; int *seq; int nseq; } Graph;
+static Graph *graph_load(const char *path) {
+    size_t n; char *text = xread(path, &n); Graph *g = calloc(1, sizeof *g); int root, seqs, k, i = 0;
+    if (!g) die("out of memory", 0, 0);
+    root = jparse(&g->d, text);
+    g->states = jget(&g->d, root, "states"); seqs = jget(&g->d, root, "seqs");
+    if (g->states < 0 || seqs < 0) die("%s: no states/seqs", path, 0);
+    g->nseq = g->d.v[seqs].count; g->seq = malloc(((size_t)g->nseq + 1) * sizeof *g->seq);
+    for (k = g->d.v[seqs].first; k >= 0; k = g->d.v[k].next) g->seq[i++] = k;
+    return g;
+}
+static void graph_free(Graph *g) { free((char *)g->d.t); free(g->d.v); free(g->seq); free(g); }
+static int g_has(Graph *g, const char *state) { return jget(&g->d, g->states, state) >= 0; }
+static int g_mode_is(Graph *g, const char *state, const char *mode) {
+    return jstr_is(&g->d, jat(&g->d, jget(&g->d, g->states, state), 0), mode);
+}
+/* edge(machine, state, key): the target string node and the action-sequence node */
+static void edge(Graph *g, const char *state, int key, int *target, int *seq) {
+    int st = jget(&g->d, g->states, state), row, e, ix; char ks[16];
+    if (st < 0) die("KeyError: '%s'", state, 0);
+    snprintf(ks, sizeof ks, "%d", key);
+    row = jat(&g->d, st, 1); e = jget(&g->d, row, ks);
+    if (e < 0) die("KeyError: %s (state %s)", ks, state);
+    *target = jat(&g->d, e, 0); ix = (int)jint(&g->d, jat(&g->d, e, 1));
+    if (ix < 0 || ix >= g->nseq) die("sequence index out of range in state %s", state, 0);
+    *seq = g->seq[ix];
+}
+/* edge(machine, state, key) == (target, actions); actions as compact JSON */
+static int edge_is(Graph *g, const char *state, int key, const char *target, const char *actions) {
+    int t, s; edge(g, state, key, &t, &s);
+    return jstr_is(&g->d, t, target) && jcanon_is(&g->d, s, actions);
+}
+static char *edge_target(Graph *g, const char *state, int key) { int t, s; edge(g, state, key, &t, &s); return jstr_dup(&g->d, t); }
+static int edge_actions_is(Graph *g, const char *state, int key, const char *actions) {
+    int t, s; edge(g, state, key, &t, &s); return jcanon_is(&g->d, s, actions);
+}
+/* actions[:n] == prefix (prefix: compact JSON items, comma-separated, without brackets) */
+static int edge_prefix_is(Graph *g, const char *state, int key, int n, const char *prefix) {
+    int t, s, c, i = 0; Buf b = {0, 0, 0}, w = {0, 0, 0}; int eq;
+    edge(g, state, key, &t, &s);
+    bstr(&b, "["); bstr(&w, "["); bstr(&w, prefix); bstr(&w, "]");
+    for (c = g->d.v[s].first; c >= 0 && i < n; c = g->d.v[c].next, i++) { if (i) bstr(&b, ","); jcanon(&g->d, c, &b); }
+    bstr(&b, "]"); eq = !strcmp(b.s, w.s); free(b.s); free(w.s); return eq;
+}
+static void out_seq(Buf *b, const char *text) {   /* [('OUT', c) for c in text.encode()] items */
+    const unsigned char *p = (const unsigned char *)text; int first = 1;
+    for (; *p; p++) { if (!first) bstr(b, ","); first = 0; bstr(b, "[\"OUT\","); bint(b, *p); bstr(b, "]"); }
+}
+
+/* ---------------------------------------------------------------- building a slice */
+static void copy_tsvs(const char *from, const char *to) {
+    DIR *d = opendir(from); struct dirent *e;
+    if (!d) die("cannot list %s", from, 0);
+    while ((e = readdir(d))) {
+        char a[4400], b[4400], *x; size_t n, l = strlen(e->d_name); struct stat s;
+        if (e->d_name[0] == '.' || l < 4 || strcmp(e->d_name + l - 4, ".tsv")) continue;
+        snprintf(a, sizeof a, "%s/%s", from, e->d_name);
+        if (stat(a, &s) != 0 || !S_ISREG(s.st_mode)) continue;
+        snprintf(b, sizeof b, "%s/%s", to, e->d_name);
+        x = xread(a, &n); xwrite(b, x, n); free(x);
+    }
+    closedir(d);
+}
+static void make_td(char *dir, const char *folder) {
+    const char *t = getenv("TMPDIR");
+    snprintf(TD, sizeof TD, "%s/manifest-entry-XXXXXX", t && *t ? t : "/tmp");
+    if (!mkdtemp(TD)) { TD[0] = 0; die("cannot create a temporary directory", 0, 0); }
+    snprintf(dir, 4400, "%s/%s", TD, folder);
+    if (mkdir(dir, 0755) != 0) die("cannot create %s", dir, 0);
+}
+/* assemble.run(manifest, E, P, flags, env) on the selected rows, then the graph */
+static Graph *assemble_rows(const char *dir, char **rows, size_t n, const char *flags, const char *env) {
+    char man[4500], out[4500]; int rc; Graph *g;
+    snprintf(man, sizeof man, "%s/entry-test-manifest.tsv", dir);
+    snprintf(out, sizeof out, "%s/entry-test-graph.json", dir);
+    write_lines(man, rows, n);
+    {
+        char *a[] = {GEN, "inspect-manifest-graph", man, (char *)flags, (char *)env, out, 0};
+        rc = cx_runv_timeout(a, 58, 0, 0);
+    }
+    if (rc != 0) { char r[16]; snprintf(r, sizeof r, "%d", rc); die("seed-gen inspect-manifest-graph failed (rc %s) on %s", r, man); }
+    g = graph_load(out);
+    return g;
+}
+static const char *PPLEX_FLAGS = "{\"typed\":false,\"positions\":false,\"locations\":false,\"sourcefacts\":false}";
+
+/* the lex mutation: output-manifest.tsv's let row, options['mapseq']['scan.start'][0]['acts'] */
+static void mutate_lex_output(const char *dir) {
+    char path[4500], *text; size_t n, i; Lines L; int hits = 0; size_t at = 0;
+    snprintf(path, sizeof path, "%s/output-manifest.tsv", dir);
+    text = xread(path, &n); L = split_lines(text); free(text);
+    for (i = 0; i < L.n; i++)
+        if (starts(L.v[i], "let\t") && strstr(L.v[i], "!typed&!positions&!locations")) { hits++; at = i; }
+    if (hits != 1) assert_fail("lex output-manifest let row missing or duplicated");
+    {
+        char *line = L.v[at], *cell = line, *end; int c; JDoc d; int root, acts; Buf b = {0, 0, 0};
+        for (c = 0; c < 8; c++) { cell = strchr(cell, '\t'); if (!cell) die("IndexError: list index out of range", 0, 0); cell++; }
+        end = strchr(cell, '\t');
+        {
+            size_t len = end ? (size_t)(end - cell) : strlen(cell); char *json = malloc(len + 1);
+            memcpy(json, cell, len); json[len] = 0;
+            root = jparse(&d, json);
+            acts = jget(&d, jat(&d, jget(&d, jget(&d, root, "mapseq"), "scan.start"), 0), "acts");
+            if (acts < 0) die("KeyError: 'acts'", 0, 0);
+            if (!jcanon_is(&d, acts, "[[\"MARK\",\"S\"]]")) assert_fail("options['mapseq']['scan.start'][0]['acts']==[['MARK','S']]");
+            bput(&b, line, (size_t)(cell - line)); bput(&b, json, d.v[acts].s);
+            bstr(&b, "[[\"LDI\", \"S\", 0]]"); bstr(&b, json + d.v[acts].e);
+            if (end) bstr(&b, end);
+            free(json); free(d.v);
+        }
+        L.v[at] = b.s;
+    }
+    write_lines(path, L.v, L.n);
+}
+/* build(stage, mutation) for pp and lex */
+static Graph *build(const char *stage, int mutation) {
+    char dir[4400], src[4500], *text, **rows; size_t n, i, k = 0; Lines L; int pp = !strcmp(stage, "pp"); Graph *g;
+    make_td(dir, stage);
+    snprintf(src, sizeof src, "exec/%s", stage); copy_tsvs(src, dir);
+    snprintf(src, sizeof src, "%s/%s", dir, pp ? "body-manifest.tsv" : "gen-manifest.tsv");
+    text = xread(src, &n); L = split_lines(text); free(text);
+    rows = malloc((L.n + 1) * sizeof *rows);
+    for (i = 0; i < L.n; i++)
+        if (pp ? starts(L.v[i], "rows\tdirective-scan\t")
+               : (starts(L.v[i], "call\toutput\t") || starts(L.v[i], "template\tgen\tdispatch\t"))) rows[k++] = L.v[i];
+    if (pp) {
+        if (k != 1) assert_fail("pp manifest row missing or duplicated");
+        if (mutation) {
+            if (count_of(rows[0], "TAKEB=TAKEB") != 1) assert_fail("rows[0].count('TAKEB=TAKEB')==1");
+            rows[0] = replace1(rows[0], "TAKEB=TAKEB", "TAKEB=SEENB");
+        }
+    } else {
+        if (k != 2) assert_fail("lex manifest rows missing or duplicated");
+        if (mutation) mutate_lex_output(dir);
+    }
+    g = assemble_rows(dir, rows, k, PPLEX_FLAGS, "{}");
+    cleanup();
+    return g;
+}
+
+/* ---------------------------------------------------------------- pp / lex contracts */
+static char TAKEB[32], SEENB[32];
+static const char *check_pp(Graph *g, int *count) {
+    char want[512]; int key;
+    if (!strcmp(TAKEB, SEENB)) return "mutation must change a domain offset";
+    snprintf(want, sizeof want, "[[\"ALUI\",\"add\",\"a\",\"K\",%s],[\"LDX\",\"t\",\"a\",0],[\"RLD\",\"t\"]]", TAKEB);
+    if (!edge_is(g, "LIVEL", 0, "LIVE2", want)) return "pp live-depth uses TAKEB";
+    for (key = 1; key <= 2; key++) if (!edge_is(g, "LIVEL", key, "P3WS", "[]")) return "pp already resolved depth";
+    if (!edge_is(g, "D_ERROR", 0, "P3BLANK", "[[\"JUMP\",\"LS\"]]")) return "pp inactive #error is skipped";
+    for (key = 1; key < 257; key++)
+        if (!edge_is(g, "D_ERROR", key, "ERR.len", "[[\"ALU\",\"sub\",\"t\",\"LE\",\"NS\"],[\"CMPI\",\"t\",283]]"))
+            return "pp active #error reaches length guard";
+    if (!edge_is(g, "ERR.len", 2, "DEAD", "[[\"REJECT\",\"not covered: #error text longer than 283 bytes\"]]")) return "pp error text bound rejects";
+    if (!edge_is(g, "DIAG.w2", 1, "DEAD", "[[\"REJECT\",\"not covered: a preprocessing diagnostic inside an included header\"]]"))
+        return "pp included diagnostic boundary rejects";
+    *count = 6; return 0;
+}
+static const char *check_lex(Graph *g, int *count) {
+    int classes = fact("classes"), list, k; Buf eof = {0, 0, 0}; const char *why = 0;
+    list = jget(&FD, classes, "ws"); if (list < 0) die("KeyError: 'ws'", 0, 0);
+    for (k = FD.v[list].first; k >= 0; k = FD.v[k].next)
+        if (!edge_is(g, "DISPATCH", (int)jint(&FD, k), "DISPATCH", "[[\"ADV\"]]")) return "lex whitespace advances";
+    list = jget(&FD, classes, "A"); if (list < 0) die("KeyError: 'A'", 0, 0);
+    for (k = FD.v[list].first; k >= 0; k = FD.v[k].next) {
+        int key = (int)jint(&FD, k); char *t = edge_target(g, "DISPATCH", key); int ok = starts(t, "ID");
+        free(t);
+        if (!(ok && edge_actions_is(g, "DISPATCH", key, "[[\"MARK\",\"S\"],[\"ADV\"]]"))) return "lex identifier class begins identifier";
+    }
+    list = jget(&FD, classes, "d"); if (list < 0) die("KeyError: 'd'", 0, 0);
+    for (k = FD.v[list].first; k >= 0; k = FD.v[k].next) {
+        int key = (int)jint(&FD, k);
+        if (!edge_is(g, "DISPATCH", key, key == '0' ? "NZ" : "DEC", "[[\"MARK\",\"S\"],[\"ADV\"]]")) return "lex decimal class selects zero/decimal path";
+    }
+    list = jget(&FD, classes, "other"); if (list < 0) die("KeyError: 'other'", 0, 0);
+    for (k = FD.v[list].first; k >= 0; k = FD.v[k].next)
+        if (!edge_is(g, "DISPATCH", (int)jint(&FD, k), "HALT", "[[\"REJECT\",\"unexpected character\"]]")) return "lex invalid bytes reject";
+    bstr(&eof, "["); out_seq(&eof, "eof\n"); bstr(&eof, ",[\"INC\",\"NT\"]]");
+    if (!edge_is(g, "DISPATCH", 256, "CNT0", eof.s)) why = "lex EOF token spelling";
+    free(eof.s);
+    if (why) return why;
+    *count = 5; return 0;
+}
+
+/* ---------------------------------------------------------------- extended stages */
+typedef struct { const char *file, *section, *state, *observation, *column, *old, *new_; } Rule;
+/* change_rule(directory, specification): mutate a source row, never the assembled graph or shared checkout */
+static void change_rule(const char *dir, const Rule *r) {
+    char path[4500], *text; size_t n, i; Lines L; int hits = 0, unsectioned = !*r->section;
+    snprintf(path, sizeof path, "%s/%s", dir, r->file);
+    text = xread(path, &n); L = split_lines(text); free(text);
+    for (i = 0; i < L.n; i++) {
+        char *cells[8], *copy = malloc(strlen(L.v[i]) + 1), *p; int nc = 0;
+        strcpy(copy, L.v[i]);
+        if (unsectioned) cells[nc++] = "";
+        p = copy;
+        for (;;) {
+            char *t = strchr(p, '\t');
+            if (nc < 8) cells[nc] = p;
+            nc++;
+            if (!t) break;
+            *t = 0; p = t + 1;
+        }
+        if (nc != 5 || strcmp(cells[0], r->section) || strcmp(cells[1], r->state) || strcmp(cells[2], r->observation)) { free(copy); continue; }
+        hits++;
+        if (!strcmp(r->column, "target")) {
+            if (strcmp(cells[3], r->old)) assert_fail("cells[3]==old");
+            cells[3] = (char *)r->new_;
+        } else {
+            if (count_of(cells[4], r->old) != 1) die("AssertionError: (%s, %s)", r->state, r->old);
+            cells[4] = replace1(cells[4], r->old, r->new_);
+        }
+        {
+            Buf b = {0, 0, 0}; int c;
+            for (c = unsectioned ? 1 : 0; c < 5; c++) { if (c > (unsectioned ? 1 : 0)) bstr(&b, "\t"); bstr(&b, cells[c]); }
+            L.v[i] = b.s;
+        }
+    }
+    if (hits != 1) die("AssertionError: specification %s %s matched no single row", r->file, r->state);
+    write_lines(path, L.v, L.n);
+}
+
+typedef const char *(*XCheck)(Graph *g, int arg);
+typedef struct { const char *name; XCheck check; int arg; Rule rule; const char *old, *new_; } Contract;
+
+static char *TRUTH_TEXT[5];
+static const char *TRUTH_STATE[5] = {"FT.double", "FT.float", "FN.double", "FN.float", "FN.integer"};
+static const char *x_parse2(Graph *g, int i) {
+    Buf w = {0, 0, 0}; int ok;
+    bstr(&w, "["); out_seq(&w, TRUTH_TEXT[i]);
+    bstr(&w, i < 2 ? ",[\"LDI\",\"vb\",4]]" : ",[\"LDI\",\"vt\",0],[\"LDI\",\"vb\",4]]");
+    ok = edge_is(g, TRUTH_STATE[i], 0, "RET", w.s); free(w.s);
+    return ok ? 0 : TRUTH_STATE[i];
+}
+static const char *x_expect(Graph *g, int i);
+/* expect(machine, state, target, actions, key) rows */
+static const struct { const char *state, *target, *actions; int key; } EXPECT[] = {
+    /* 0 */ {"REX", "RET", "[[\"ALUI\",\"shl\",\"rx_t\",\"rx_w\",3],[\"ALUI\",\"or\",\"rx_t\",\"rx_t\",64],[\"ALUI\",\"sar\",\"rx_u\",\"rx_r\",3],[\"ALUI\",\"shl\",\"rx_u\",\"rx_u\",2],[\"ALU\",\"or\",\"rx_t\",\"rx_t\",\"rx_u\"],[\"ALUI\",\"sar\",\"rx_u\",\"rx_b\",3],[\"ALU\",\"or\",\"rx_t\",\"rx_t\",\"rx_u\"],[\"OUTW\",\"rx_t\"]]", 0},
+    /* 1 */ {"MODRM", "RET", "[[\"ALUI\",\"shl\",\"rx_t\",\"mr_m\",6],[\"ALUI\",\"and\",\"rx_u\",\"mr_r\",7],[\"ALUI\",\"shl\",\"rx_u\",\"rx_u\",3],[\"ALU\",\"or\",\"rx_t\",\"rx_t\",\"rx_u\"],[\"ALUI\",\"and\",\"rx_u\",\"mr_b\",7],[\"ALU\",\"or\",\"rx_t\",\"rx_t\",\"rx_u\"],[\"OUTW\",\"rx_t\"]]", 0},
+    /* 2 */ {"LB.o", "LB.l", "[[\"OUTW\",\"lb_v\"],[\"A64I\",\"shr\",\"lb_v\",\"lb_v\",8],[\"ALUI\",\"sub\",\"lb_n\",\"lb_n\",1]]", 0},
+    /* 3 */ {"ME.66", "ME.rex", "[[\"LDI\",\"ob\",102],[\"OUTW\",\"ob\"]]", 0},
+    /* 4 */ {"LINE", "HDR.key", "[[\"MARK\",\"hs\"],[\"ADV\"]]", 64},
+    /* 5 */ {"LINE", "FINISH", "[]", 256},
+    /* 6 */ {"NUM.first", "FAIL", "[]", 'x'},
+    /* 7 */ {"D.str", "D.ws", "[[\"LDI\",\"is_bss\",0]]", 0},
+    /* 8 */ {"D.bss", "D.ws", "[[\"LDI\",\"is_bss\",1]]", 0},
+    /* 9 */ {"COPYLINE", "CL", "[[\"JUMP\",\"line\"]]", 0},
+    /* 10 */ {"FAIL", "DEAD", "[[\"REJECT\",\"not covered: tape data directive\"]]", 0},
+};
+static const char *x_expect(Graph *g, int i) {
+    return edge_is(g, EXPECT[i].state, EXPECT[i].key, EXPECT[i].target, EXPECT[i].actions) ? 0 : EXPECT[i].state;
+}
+static const char *x_alu(Graph *g, int unused) {
+    int t, s, a3, nm; char *name; int ok;
+    (void)unused;
+    edge(g, "ALU", 0, &t, &s);
+    if (!(jstr_is(&g->d, t, "REX") && edge_prefix_is(g, "ALU", 0, 3, "[\"LDI\",\"rx_w\",1],[\"COPYW\",\"rx_r\",\"al_s\"],[\"COPYW\",\"rx_b\",\"al_d\"]")))
+        return "ALU";
+    if (g->d.v[s].count != 4) return "ALU continuation";
+    a3 = jat(&g->d, s, 3);
+    if (!jstr_is(&g->d, jat(&g->d, a3, 0), "PUSH")) return "ALU continuation";
+    nm = jat(&g->d, a3, 1);
+    if (nm < 0) die("IndexError: tuple index out of range", 0, 0);
+    if (g->d.v[nm].kind != 's') return "ALU continuation";
+    name = jstr_dup(&g->d, nm); ok = g_has(g, name); free(name);
+    return ok ? 0 : "ALU continuation";
+}
+static char ARM_REG[32], POSIX_LIMIT[32], DEFINED[32];
+static const char *x_reg(Graph *g, int unused) {
+    char *target, want[256]; int ok;
+    (void)unused;
+    target = edge_target(g, "REG.value", 0);
+    ok = g_has(g, target) && g_mode_is(g, target, "r");
+    free(target);
+    snprintf(want, sizeof want, "[[\"LDX\",\"v\",\"t\",%s],[\"CMPI\",\"v\",0]]", ARM_REG);
+    return ok && edge_actions_is(g, "REG.value", 0, want) ? 0 : "REG.value";
+}
+static const char *x_overflow(Graph *g, int unused) {
+    (void)unused;
+    return edge_actions_is(g, "NUM.digit", 0, "[[\"LDI\",\"limit\",1844674407370955161],[\"C64U\",\"v\",\"limit\"]]") ? 0 : "NUM.digit";
+}
+static const char *x_limit(Graph *g, int unused) {
+    char *target, want[256]; int ok;
+    (void)unused;
+    target = edge_target(g, "START", 0); ok = !strcmp(target, "LINE"); free(target);
+    snprintf(want, sizeof want, "[\"LDI\",\"dn\",0],[\"LDI\",\"ns\",0],[\"LDI\",\"rn\",0],[\"LDI\",\"data_limit\",%s]", POSIX_LIMIT);
+    return ok && edge_prefix_is(g, "START", 0, 4, want) ? 0 : "START limit";
+}
+static const char *x_definition(Graph *g, int unused) {
+    char want[256];
+    (void)unused;
+    /* 511802e1: D.ne interns then checks the thread-mode name; the DEFINED test moved to D.thread.check */
+    if (!edge_is(g, "D.ne", 0, "D.thread.check", "[[\"INTERN\",\"ni\",\"nstart\",\"nend\"],[\"CMP\",\"ni\",\"id_thread\"]]")) return "D.ne";
+    snprintf(want, sizeof want, "[[\"LDX\",\"t\",\"ni\",%s],[\"CMPI\",\"t\",0]]", DEFINED);
+    return edge_actions_is(g, "D.thread.check", 0, want) ? 0 : "D.thread.check";
+}
+
+/* Each contract has its own valid source mutation; expected values are not read from the production action
+   rows being checked.  parse2's mutation is (state, old, new) on the selected rows: kept in rule.state/old/new_. */
+static const Contract C_PARSE2[] = {
+    {"FT.double", x_parse2, 0, {0, 0, "FT.double", 0, 0, 0, 0}, "imm r1\\x2c 0", "imm r1\\x2c 1"},
+    {"FT.float", x_parse2, 1, {0, 0, "FT.float", 0, 0, 0, 0}, "imm r1\\x2c 0", "imm r1\\x2c 1"},
+    {"FN.double", x_parse2, 2, {0, 0, "FN.double", 0, 0, 0, 0}, "imm r1\\x2c 0", "imm r1\\x2c 1"},
+    {"FN.float", x_parse2, 3, {0, 0, "FN.float", 0, 0, 0, 0}, "imm r1\\x2c 0", "imm r1\\x2c 1"},
+    {"FN.integer", x_parse2, 4, {0, 0, "FN.integer", 0, 0, 0, 0}, "imm r1\\x2c 0", "imm r1\\x2c 1"},
+};
+static const Contract C_ENC[] = {
+    {"REX", x_expect, 0, {"x86-procs-result.tsv", "procs", "REX", "*", "actions", "\"rx_w\",3", "\"rx_w\",4"}, 0, 0},
+    {"MODRM", x_expect, 1, {"x86-procs-result.tsv", "procs", "MODRM", "*", "actions", "\"mr_m\",6", "\"mr_m\",5"}, 0, 0},
+    {"ALU", x_alu, 0, {"x86-procs-result.tsv", "procs", "ALU", "*", "actions", "\"rx_w\",1", "\"rx_w\",0"}, 0, 0},
+    {"LB.o", x_expect, 2, {"x86-procs-result.tsv", "procs", "LB.o", "*", "actions", "\"lb_v\",8", "\"lb_v\",7"}, 0, 0},
+    {"ME.66", x_expect, 3, {"x86-procs-result.tsv", "procs", "ME.66", "*", "target", "ME.rex", "RET"}, 0, 0},
+};
+static const Contract C_ARM[] = {
+    {"header", x_expect, 4, {"armcontract-byte.tsv", "scan", "LINE", "64", "actions", "\"ADV\"", "\"COPY\""}, 0, 0},
+    {"eof", x_expect, 5, {"armcontract-byte.tsv", "scan", "LINE", "256", "target", "FINISH", "FAIL"}, 0, 0},
+    {"bad-number", x_expect, 6, {"armcontract-byte.tsv", "scan", "NUM.first", "*", "target", "FAIL", "ENC"}, 0, 0},
+    {"REG.value", x_reg, 0, {"armcontract-result.tsv", "scan", "REG.value", "*", "actions", "\"constant\",\"REG\"", "\"constant\",\"OP\""}, 0, 0},
+    {"NUM.digit", x_overflow, 0, {"armcontract-result.tsv", "scan", "NUM.digit", "*", "actions", "1844674407370955161", "0"}, 0, 0},
+};
+/* lower: (filename, state, observation, column, old, new) -> section '' (unsectioned rows) */
+static const Contract C_LOWER[] = {
+    {"string-kind", x_expect, 7, {"data-result.tsv", "", "D.str", "*", "actions", "\"is_bss\",0", "\"is_bss\",1"}, 0, 0},
+    {"bss-kind", x_expect, 8, {"data-result.tsv", "", "D.bss", "*", "actions", "\"is_bss\",1", "\"is_bss\",0"}, 0, 0},
+    {"copy-line", x_expect, 9, {"data-result.tsv", "", "COPYLINE", "*", "target", "CL", "SKIP"}, 0, 0},
+    {"limit", x_limit, 0, {"data-result.tsv", "", "START", "*", "actions", "\"constant\",\"data_limit\"", "\"constant\",\"extra\""}, 0, 0},
+    {"definition", x_definition, 0, {"data-result.tsv", "", "D.thread.check", "*", "actions", "\"constant\",\"DEFINED\"", "\"constant\",\"RAW\""}, 0, 0},
+    {"reject", x_expect, 10, {"data-result.tsv", "", "FAIL", "*", "target", "DEAD", "RET"}, 0, 0},
+};
+
+static Graph *extended_build(const char *stage, const Contract *mutation) {
+    const char *folder = !strcmp(stage, "enc/arm") ? "enc" : stage, *source, *prefix = 0, *flags = "{}", *env = "{}";
+    char dir[4400], src[4500], *text, **rows; size_t n, i, k = 0; Lines L; Graph *g;
+    make_td(dir, folder);
+    snprintf(src, sizeof src, "exec/%s", folder); copy_tsvs(src, dir);
+    source = !strcmp(stage, "parse2") ? "truth-manifest.tsv" : !strcmp(stage, "enc") ? "gen-manifest.tsv"
+           : !strcmp(stage, "enc/arm") ? "arm-manifest.tsv" : "data-manifest.tsv";
+    snprintf(src, sizeof src, "%s/%s", dir, source);
+    text = xread(src, &n); L = split_lines(text); free(text);
+    rows = malloc((L.n + 1) * sizeof *rows);
+    if (!strcmp(stage, "parse2")) {
+        for (i = 0; i < L.n; i++) if (starts(L.v[i], "rows\tscalar\toutput-")) rows[k++] = L.v[i];
+        if (k != 5) assert_fail("len(rows)==5");
+        if (mutation) {
+            char entry[256]; int hits = 0;
+            snprintf(entry, sizeof entry, "entry=@str:%s\t", mutation->rule.state);
+            for (i = 0; i < k; i++)
+                if (strstr(rows[i], entry)) {
+                    if (count_of(rows[i], mutation->old) != 1) assert_fail("line.count(old)==1");
+                    rows[i] = replace1(rows[i], mutation->old, mutation->new_); hits++;
+                }
+            if (hits != 1) assert_fail("hits==1");
+        }
+    } else {
+        prefix = !strcmp(stage, "enc") ? "rows\tx86-procs\tprocs\t" : !strcmp(stage, "enc/arm") ? "rows\tarmcontract\tscan\t"
+               : "rows\tdata\t-\t!win\t";
+        for (i = 0; i < L.n; i++) if (starts(L.v[i], prefix)) rows[k++] = L.v[i];
+        if (k != 1) assert_fail("len(rows)==1");
+        if (mutation) change_rule(dir, &mutation->rule);
+        if (!strcmp(stage, "lower")) {
+            env = "{\"target\":\"lnx/x86_64\",\"os\":\"lnx\",\"done\":\"ACCEPTDATA\",\"code_start\":\"H.code\"}";
+            flags = "{\"win\":false}";
+        }
+    }
+    g = assemble_rows(dir, rows, k, flags, env);
+    cleanup();
+    return g;
+}
+
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + t.tv_nsec / 1e9; }
+static void fact_text(const char *name, char *out) { char *r = jraw(&FD, fact(name)); snprintf(out, 32, "%s", r); free(r); }
+
+/* facts are loaded into a private directory, so the temporary dir must exist first */
+static void facts_for(const char *stem) {
+    char dir[4400]; make_td(dir, "facts"); load_facts(stem); cleanup();
+}
+
+static int check_extended(const char *stage) {
+    const Contract *cs; int nc, i; double started = now(), elapsed; Graph *original;
+    if (!strcmp(stage, "parse2")) {
+        static const char *OPS[5] = {"TRUTH64_OP", "TRUTH32_OP", "NOT64_OP", "NOT32_OP", "NOTINT_OP"};
+        facts_for("k2-truth");
+        for (i = 0; i < 5; i++) {
+            Buf t = {0, 0, 0}; int k = fact(OPS[i]); char *op;
+            if (FD.v[k].kind != 's') assert_fail("k2-truth operation is not a string");
+            op = jstr_dup(&FD, k);
+            bstr(&t, "  imm r1, 0\n  "); bstr(&t, op); bstr(&t, " r0, r0, r1\n");
+            if (i < 2) bstr(&t, "  imm r1, 1\n  xor64 r0, r0, r1\n");
+            TRUTH_TEXT[i] = t.s; free(op);
+        }
+        cs = C_PARSE2; nc = 5;
+    } else if (!strcmp(stage, "enc")) { cs = C_ENC; nc = 5; }
+    else if (!strcmp(stage, "enc/arm")) { facts_for("enc-arm"); fact_text("REG", ARM_REG); cs = C_ARM; nc = 5; }
+    else { facts_for("lower-data"); fact_text("posix_limit", POSIX_LIMIT); fact_text("DEFINED", DEFINED); cs = C_LOWER; nc = 6; }
+    original = extended_build(stage, 0);
+    for (i = 0; i < nc; i++) {
+        const char *why = cs[i].check(original, cs[i].arg); Graph *mutant;
+        if (why) assert_fail(why);
+        mutant = extended_build(stage, &cs[i]);
+        why = cs[i].check(mutant, cs[i].arg);
+        graph_free(mutant);
+        if (!why) die("AssertionError: ('%s', '%s', 'semantic mutation survived')", stage, cs[i].name);
+    }
+    graph_free(original);
+    elapsed = now() - started;
+    if (!(elapsed < 10)) { char e[32]; snprintf(e, sizeof e, "%f", elapsed); die("AssertionError: ('%s', %s)", stage, e); }
+    printf("manifest entries %s: %d contracts, %d semantic mutations caught, %.3fs\n", stage, nc, nc, elapsed);
+    return 0;
+}
+
+static const char *CHOICES[] = {"pp", "lex", "parse2", "enc", "enc/arm", "lower", 0};
+static void usage_line(FILE *f) { fprintf(f, "usage: %s [-h] --stage {pp,lex,parse2,enc,enc/arm,lower}\n", PROG); }
+static void arg_error(const char *fmt, const char *a) {
+    usage_line(stderr); fprintf(stderr, "%s: error: ", PROG); fprintf(stderr, fmt, a); fputc('\n', stderr); exit(2);
+}
+
+int main(int argc, char **argv) {
+    const char *stage = 0; int i, count = 0; Buf extra = {0, 0, 0};
+    /* argparse: --stage VALUE, --stage=VALUE, unambiguous prefixes (--s ... --stage), -h/--help; the last --stage wins */
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *eq = strchr(a, '='); size_t len = eq ? (size_t)(eq - a) : strlen(a); const char *v;
+        if (!strcmp(a, "-h") || (len >= 3 && !strncmp(a, "--help", len) && !eq)) {
+            usage_line(stdout);
+            printf("\noptions:\n  -h, --help            show this help message and exit\n  --stage {pp,lex,parse2,enc,enc/arm,lower}\n");
+            return 0;
+        }
+        if (len >= 3 && !strncmp(a, "--stage", len) && strncmp(a, "--h", 3)) {
+            int c, ok = 0;
+            if (eq) v = eq + 1;
+            else if (i + 1 < argc && !(argv[i + 1][0] == '-' && argv[i + 1][1] && !(argv[i + 1][1] >= '0' && argv[i + 1][1] <= '9'))) v = argv[++i];
+            else { arg_error("argument --stage: expected one argument", ""); return 2; }
+            for (c = 0; CHOICES[c]; c++) if (!strcmp(CHOICES[c], v)) ok = 1;
+            if (!ok) {
+                char m[600]; snprintf(m, sizeof m, "argument --stage: invalid choice: '%s' (choose from 'pp', 'lex', 'parse2', 'enc', 'enc/arm', 'lower')", v);
+                arg_error("%s", m);
+            }
+            stage = v; continue;
+        }
+        if (extra.n) bstr(&extra, " ");
+        bstr(&extra, a);
+    }
+    if (!stage) arg_error("the following arguments are required: --stage", "");
+    if (extra.n) arg_error("unrecognized arguments: %s", extra.s);
+
+    seed_gen_binary();
+    if (strcmp(stage, "pp") && strcmp(stage, "lex")) return check_extended(stage);
+    {
+        double started, elapsed; Graph *g; const char *why;
+        int pp = !strcmp(stage, "pp");
+        facts_for(pp ? "pp-layout" : "lex-gen");
+        if (pp) { fact_text("TAKEB", TAKEB); fact_text("SEENB", SEENB); }
+        started = now();
+        g = build(stage, 0);
+        why = pp ? check_pp(g, &count) : check_lex(g, &count);
+        graph_free(g);
+        if (why) assert_fail(why);
+        /* Assembly must succeed for the mutant; only the semantic assertion may kill it.  A syntax error would not
+           demonstrate an independent oracle. */
+        g = build(stage, 1);
+        { int unused; why = pp ? check_pp(g, &unused) : check_lex(g, &unused); }
+        graph_free(g);
+        if (why) {
+            const char *expected = pp ? "pp live-depth uses TAKEB" : "lex identifier class begins identifier";
+            if (strcmp(why, expected)) die("AssertionError: ('%s', '%s')", stage, why);
+        } else assert_fail("manifest mutation survived");
+        elapsed = now() - started;
+        if (!(elapsed < 10)) { char e[32]; snprintf(e, sizeof e, "%f", elapsed); die("AssertionError: ('entry test exceeded 10 seconds', %s)", e, 0); }
+        printf("manifest entries %s: %d contracts, semantic mutation caught, %.3fs\n", stage, count, elapsed);
+    }
+    return 0;
+}
