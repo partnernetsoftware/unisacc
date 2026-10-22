@@ -12,21 +12,26 @@
            discarded (every declarator taken as C: the next ask is outside ap's domain), and the ap asks replaced
            by a constant (the books pinned with fn_expect refuse).  Every mutation is an exact edit that must apply
            once, so this check breaks loudly when tdescprobe.cx changes under it.
-       sh ./unisacc.com -run tests/flownetw3.cx -- flow ROOT K/2
+       sh ./unisacc.com -run tests/flownetw3.cx -- flow ROOT K/3 | record
            D3, flow-through per key (W3 fix 3: the verifier refuted the per-net faults of attempt 3 with copies that
            keep a few answers and answer the rest from their own labels).  tdescprobe.cx holds no labels any more
            (the algebra is flownet/tdesc), and flownet has a test hook: FLOWNET_SWEEP=all perturbs one answer at a
            time, every key of every net and every other class, reruns the flows, hands each perturbed output to the
            consumer's emit hook (tdescprobe's judges its tables there), and refuses the run naming every key with a
-           perturbation that neither flownet nor the emit hook refused.  1/2: tdescprobe compiled once (beside a
+           perturbation that neither flownet nor the emit hook refused.  1/3: tdescprobe compiled once (beside a
            link to ROOT/flownet) passes --oracle cc, and under the sweep every key of flownet/tdesc (counted from
            its gold tables) is used -- K/K, 0 accepted -- with --oracle cc and with --check (one probe); a copy
-           with the books unpinned is K/K too under --oracle (the sweep does not lean on the books there).  2/2:
+           with the books unpinned is K/K too under --oracle (the sweep does not lean on the books there); in both modes
+           the per-perturbation rows the sweep writes (fix 4) equal the record tests/flownet-tdesc-sweep.tsv.  2/3:
            the sweep proves itself on four copies whose own gate (--oracle cc) is green because they answer from
            elsewhere after asking: every answer re-derived locally (probe A2), all but 1 adj, 1 ap and 9 sz answers
            (probe A6), the one sz answer for A3:36, and the sizes taken from the baseline file inside the emit hook
            (the rows change, the tables do not) -- each is refused by the sweep, naming exactly the keys it
-           discarded.
+           discarded.  3/3 (fix 4: the verifier refuted fix 3 with a copy the sweep alone accepts): three copies
+           that answer from their own algebra and, on a disagreement with flownet, make flownet refuse (an ask
+           outside sz's domain), refuse in their flows, or write a stray row the emit hook rejects -- each passes
+           its own --oracle cc, the sweep alone reports 0 accepted, and the record names all K keys.  record: the
+           rows of tdescprobe as it is, on stdout, to regenerate the record.
        sh ./unisacc.com -run tests/flownetw3.cx -- d4 tdesc ROOT
        sh ./unisacc.com -run tests/flownetw3.cx -- d4 adapter ROOT
            D4: the consumer's gate commands run on ROOT/unisacc.com while this program lists /proc every 2 ms and
@@ -281,7 +286,7 @@ static int cmd_d3(const char *rootarg, const char *part) {
    by the consumer's emit hook (which judges what it is handed).  1/2 shows tdescprobe uses every key (K/K, K counted from flownet/tdesc's gold tables); 2/2 shows the sweep
    catches the copies its own gate cannot: each re-derives some answers locally after asking (an exact edit that
    reinserts the algebra as a function in the copy) and must be refused naming exactly those keys. */
-static const char *LOCAL =
+static const char *LOCALFN =       /* plain text, not a format */
     "static const char *local_(const char *net, const char *a, const char *b) {   /* the algebra, re-derived in the copy */\n"
     "    static char z_[8];\n"
     "    if (is(net, \"adj\")) return (is(a, \"F\") && !is(b, \"P\") && !is(b, \"int\")) || (is(a, \"A3\") && is(b, \"F\")) ? \"bad\" : \"ok\";\n"
@@ -293,11 +298,18 @@ static const char *LOCAL =
     "    if (is(a, \"int\")) return \"4\";\n"
     "    if (a[0] == 'P') return \"8\";\n"
     "    if (a[0] == 'F') return \"inc\";\n"
-    "    snprintf(z_, 8, \"%%d\", 3 * atoi(a + 3)); return z_;\n"
-    "}\n"
+    "    snprintf(z_, 8, \"%d\", 3 * atoi(a + 3)); return z_;\n"
+    "}\n";
+static const char *KEEPFN =        /* a format: %s = KEEP; the copy uses the answers of the keys KEEP admits */
     "static int keep_(const char *net, const char *a, const char *b) { (void)net; (void)a; (void)b; return %s; }\n"
     "static const char *dask2_(const char *net, const char *a, const char *b) { const char *r = fn_ask2(net, a, b); return r && !keep_(net, a, b) ? local_(net, a, b) : r; }\n"
     "static const char *dask1_(const char *net, const char *a) { const char *r = fn_ask1(net, a); return r && !keep_(net, a, \"\") ? local_(net, a, \"\") : r; }\n"
+    "static int derive(void *unused) {\n";
+static const char *XCHECKFN =      /* a format: %s (twice) = what the copy does when flownet's answer differs from its own */
+    "static const char *dask2_(const char *net, const char *a, const char *b) { const char *r = fn_ask2(net, a, b);\n"
+    "    if (r && !is(r, local_(net, a, b))) { %s } return r ? local_(net, a, b) : r; }\n"
+    "static const char *dask1_(const char *net, const char *a) { const char *r = fn_ask1(net, a);\n"
+    "    if (r && !is(r, local_(net, a, \"\"))) { %s } return r ? local_(net, a, \"\") : r; }\n"
     "static int derive(void *unused) {\n";
 typedef struct { const char *from, *to; } Edit;
 static const Edit ASKS[] = {      /* every ask of the copy goes through dask*_ (each edit applies once) */
@@ -314,29 +326,38 @@ static const char *BASESIZE =        /* a copy that takes its sizes from the bas
     "    return p_ ? atoi(p_ + 1) : 0;\n"
     "}\n"
     "static int bad_row(";
-typedef struct { const char *name, *keep, *decorative; } FMut;
+/* every key of flownet/tdesc, in the sweep's order */
+#define ALLKEYS \
+      "adj (P,P), adj (P,A3), adj (P,F), adj (P,int), adj (A3,P), adj (A3,A3), adj (A3,F), adj (A3,int), adj (F,P), adj (F,A3), adj (F,F), adj (F,int), " \
+      "ap (P.P,deref), ap (P.P,index), ap (P.A3,deref), ap (P.A3,index), ap (P.F,deref), ap (P.F,index), ap (P.int,deref), ap (P.int,index), " \
+      "ap (A3.P,deref), ap (A3.P,index), ap (A3.A3,deref), ap (A3.A3,index), ap (A3.int,deref), ap (A3.int,index), ap (F.P,deref), ap (F.P,index), " \
+      "ap (F.int,deref), ap (F.int,index), ap (int,deref), ap (int,index), " \
+      "sz (int), sz (P:inc), sz (P:4), sz (P:8), sz (P:12), sz (P:24), sz (P:36), sz (A3:4), sz (A3:8), sz (A3:12), sz (A3:24), sz (A3:36), sz (F:4), sz (F:8)"
+typedef struct { const char *name, *keep, *xcheck, *decorative; } FMut;
 static const FMut FMUTS[] = {
-    /* KEEP: the asks whose answer the copy uses (C over net, a, b); DECORATIVE: the keys the sweep must name, in order */
-    { "every answer re-derived locally (probe A2)", "0",
-      "adj (P,P), adj (P,A3), adj (P,F), adj (P,int), adj (A3,P), adj (A3,A3), adj (A3,F), adj (A3,int), adj (F,P), adj (F,A3), adj (F,F), adj (F,int), "
-      "ap (P.P,deref), ap (P.P,index), ap (P.A3,deref), ap (P.A3,index), ap (P.F,deref), ap (P.F,index), ap (P.int,deref), ap (P.int,index), "
-      "ap (A3.P,deref), ap (A3.P,index), ap (A3.A3,deref), ap (A3.A3,index), ap (A3.int,deref), ap (A3.int,index), ap (F.P,deref), ap (F.P,index), "
-      "ap (F.int,deref), ap (F.int,index), ap (int,deref), ap (int,index), "
-      "sz (int), sz (P:inc), sz (P:4), sz (P:8), sz (P:12), sz (P:24), sz (P:36), sz (A3:4), sz (A3:8), sz (A3:12), sz (A3:24), sz (A3:36), sz (F:4), sz (F:8)" },
+    /* KEEP: the asks whose answer the copy uses (C over net, a, b); XCHECK: a cross-checking copy -- every answer from its
+       own algebra, and this when flownet's differs (KEEP 0); DECORATIVE: the keys that must be named, in order: by the
+       sweep's refusal, or (XCHECK) by the record, the sweep itself accepting the copy */
+    { "every answer re-derived locally (probe A2)", "0", 0, ALLKEYS },
     { "all but 1 adj, 1 ap, 9 sz answers re-derived locally (probe A6)",
       "(is(net, \"adj\") && is(a, \"P\") && is(b, \"P\")) || (is(net, \"ap\") && is(a, \"P.P\") && is(b, \"deref\")) || "
-      "(is(net, \"sz\") && (is(a, \"int\") || a[0] == 'P' || is(a, \"A3:4\") || is(a, \"A3:8\")))",
+      "(is(net, \"sz\") && (is(a, \"int\") || a[0] == 'P' || is(a, \"A3:4\") || is(a, \"A3:8\")))", 0,
       "adj (P,A3), adj (P,F), adj (P,int), adj (A3,P), adj (A3,A3), adj (A3,F), adj (A3,int), adj (F,P), adj (F,A3), adj (F,F), adj (F,int), "
       "ap (P.P,index), ap (P.A3,deref), ap (P.A3,index), ap (P.F,deref), ap (P.F,index), ap (P.int,deref), ap (P.int,index), "
       "ap (A3.P,deref), ap (A3.P,index), ap (A3.A3,deref), ap (A3.A3,index), ap (A3.int,deref), ap (A3.int,index), ap (F.P,deref), ap (F.P,index), "
       "ap (F.int,deref), ap (F.int,index), ap (int,deref), ap (int,index), "
       "sz (A3:12), sz (A3:24), sz (A3:36), sz (F:4), sz (F:8)" },
-    { "the sz answer for A3:36 re-derived locally", "!(is(net, \"sz\") && is(a, \"A3:36\"))", "sz (A3:36)" },
-    { "sizes taken from the baseline inside the emit hook", 0,      /* KEEP 0: the BASESIZE edit, not LOCAL; the sz keys */
+    { "the sz answer for A3:36 re-derived locally", "!(is(net, \"sz\") && is(a, \"A3:36\"))", 0, "sz (A3:36)" },
+    { "sizes taken from the baseline inside the emit hook", 0, 0,      /* KEEP 0: the BASESIZE edit, not LOCAL; the sz keys */
       "sz (P:inc), sz (P:4), sz (P:8), sz (P:12), sz (P:24), sz (P:36), sz (A3:4), sz (A3:8), sz (A3:12), sz (A3:24), sz (A3:36)" },
       /* whose every perturbation is refused anyway are not named: int (each wrong size leads an ask out of sz's domain)
          and F:4, F:8 (a size where inc was moves a row between the unsized and the probe table) */
-    { 0, 0, 0 }
+    { "cross-checked: every answer from a local copy, a disagreement refused by an out-of-domain ask (the verifier's probe)", 0,
+      "fn_ask1(\"sz\", \"disagree\"); return 0;", ALLKEYS },
+    { "cross-checked: every answer from a local copy, a disagreement refused by the flows' own rc", 0, "return 0;", ALLKEYS },
+    { "cross-checked: every answer from a local copy, a disagreement marked by a stray row the emit hook rejects", 0,
+      "if (fn_out(\"disagree\\n\", 9)) return 0;", ALLKEYS },
+    { 0, 0, 0, 0 }
 };
 static char *edit_once(const char *src, const char *from, const char *to) {
     Mut m; m.name = 0; m.from = from; m.to = to; m.mode = 0; m.want = 0;
@@ -383,15 +404,107 @@ static int own_gate(const char *root, const char *sd, const char *bin, const cha
 }
 /* the sweep line of R's stderr (allocated), or 0 */
 static char *sweep_line(const Run *r) { const char *p = strstr(r->err, "flownet sweep: "); return p ? line_at(r->err, p) : 0; }
+
+/* ---------- the sweep's record (W3 fix 4) ----------
+   The verifier refuted fix 3 with a copy that cross-checks: it asks, answers from its own copy of the algebra, and
+   when flownet's answer differs it makes flownet refuse (an ask outside sz's domain).  Every perturbation is then
+   refused by flownet, so the sweep's "0 accepted" holds, yet no answer reaches the output: a refusal the consumer
+   triggers itself looks like a used answer.  No in-process rule tells such a refusal from one the answer causes
+   (an honest perturbed answer also leads to an ask outside a domain, or to other books).  What does tell them apart
+   is what each perturbation leads to: flownet writes one row per perturbation (net, key, honest>perturbed, and the
+   outcome -- flownet's refusal reason, or how the output changed and whether the emit hook refused it), and the
+   rows of tdescprobe as it is are recorded in RECORD.  A copy whose every row equals the record responds to every
+   single wrong answer exactly as tdescprobe does -- its refusals name the keys and the books the wrong answer
+   leads to, and its changed rows carry the wrong answer -- so its output is the same function of the answers.  A
+   cross-checking copy refuses with its own reasons and changes no row, and is named key by key. */
+static const char *RECORD = "tests/flownet-tdesc-sweep.tsv";
+#define ROWP "flownet sweep row\t"
+typedef struct { char **row; int n; } Rows;
+/* the rows in TEXT: the lines that start with ROWP (ERR, the prefix dropped), or every line that is not empty and
+   not a '#' comment (a record) */
+static Rows rows_of(const char *text, int err) {
+    Rows r; const char *p = text; int cap = 0;
+    r.row = 0; r.n = 0;
+    while (*p) {
+        const char *nl = strchr(p, '\n'); size_t k = nl ? (size_t)(nl - p) : strlen(p), pl = strlen(ROWP);
+        int take = err ? k >= pl && !strncmp(p, ROWP, pl) : k > 0 && *p != '#';
+        if (take) {
+            const char *b = err ? p + pl : p; size_t m = k - (size_t)(b - p); char *t = malloc(m + 1);
+            if (!t) exit(2);
+            memcpy(t, b, m); t[m] = 0;
+            if (r.n == cap) { cap = cap ? cap * 2 : 256; if (!(r.row = realloc(r.row, (size_t)cap * sizeof *r.row))) exit(2); }
+            r.row[r.n++] = t;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return r;
+}
+static void rows_free(Rows *r) { int i; for (i = 0; i < r->n; i++) free(r->row[i]); free(r->row); r->row = 0; r->n = 0; }
+/* "NET (KEY)" of a row (its first two fields) */
+static char *row_key(const char *row) {
+    const char *t1 = strchr(row, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : 0;
+    if (!t1 || !t2) return fmt("(%s)", row);
+    return fmt("%.*s (%.*s)", (int)(t1 - row), row, (int)(t2 - t1 - 1), t1 + 1);
+}
+/* GOT against the record WANT, row by row: the number of differing rows; *KEYS the keys they belong to (distinct, in
+   order, ", " between), *FIRST the first difference */
+static int rows_diff(const Rows *got, const Rows *want, char **keys, char **first) {
+    int i, nd = 0, n = got->n > want->n ? got->n : want->n;
+    *keys = fmt("%s", ""); *first = 0;
+    for (i = 0; i < n; i++) {
+        const char *g = i < got->n ? got->row[i] : 0, *w = i < want->n ? want->row[i] : 0; char *k, *t, *pat;
+        if (g && w && !strcmp(g, w)) continue;
+        nd++;
+        if (!*first) *first = fmt("row %d: recorded '%s', got '%s'", i + 1, w ? w : "(none)", g ? g : "(none)");
+        k = row_key(w ? w : g); pat = fmt(", %s, ", k); t = fmt(", %s, ", *keys);
+        if (!strstr(t, pat)) { free(t); t = fmt("%s%s%s", *keys, **keys ? ", " : "", k); free(*keys); *keys = t; } else free(t);
+        free(pat); free(k);
+    }
+    return nd;
+}
+/* the record, read from ROOT; red and an empty set when it is missing or empty */
+static Rows record_of(const char *root) {
+    char *path = fmt("%s/%s", root, RECORD), *b; size_t n; Rows r;
+    r.row = 0; r.n = 0;
+    if (!(b = cx_read(path, &n))) { red("record", "cannot read tests/flownet-tdesc-sweep.tsv"); free(path); return r; }
+    r = rows_of(b, 0); free(b); free(path);
+    if (!r.n) red("record", "tests/flownet-tdesc-sweep.tsv has no rows");
+    return r;
+}
+
 static int cmd_flow(const char *rootarg, const char *part) {
-    char *root = absroot(rootarg), *sd = scratch_dir(), *srcpath = fmt("%s/tests/tdescprobe.cx", root), *src, *want, *body[4], *bin[4], *log[4];
-    const char *who[4]; size_t len; int k, n = 0, caught = 0, K = tdesc_keys(root);
-    Run r;
-    if (strcmp(part, "1/2") && strcmp(part, "2/2")) { fprintf(stderr, "flownetw3: flow wants 1/2 or 2/2\n"); return 2; }
+    char *root = absroot(rootarg), *sd = scratch_dir(), *srcpath = fmt("%s/tests/tdescprobe.cx", root), *src, *want, *body[8], *bin[8], *log[8];
+    const char *who[8]; size_t len; int k, n = 0, caught = 0, K = tdesc_keys(root), lo = 0, hi = 0, recorded = 0;
+    Run r; Rows rec; rec.row = 0; rec.n = 0;
+    if (strcmp(part, "1/3") && strcmp(part, "2/3") && strcmp(part, "3/3") && strcmp(part, "record")) {
+        fprintf(stderr, "flownetw3: flow wants 1/3, 2/3, 3/3 or record\n"); return 2; }
     if (!(src = cx_read(srcpath, &len))) { fprintf(stderr, "flownetw3: cannot read %s\n", srcpath); return 2; }
     if (K < 1) { red("keys", "flownet/tdesc has no gold rows"); goto done; }
     want = fmt("= %d/%d keys;", K, K);
-    if (!strcmp(part, "1/2")) {      /* tdescprobe as it is, and with its books unpinned: every key's answer is used */
+    if (!strcmp(part, "record")) {   /* the record of tdescprobe as it is (--oracle cc), on stdout */
+        who[0] = "tdescprobe"; body[0] = fmt("%s", src); n = 1;
+        compile_all(root, sd, n, body, bin, log); red_uncompiled(n, body, bin, log, who);
+        if (bin[0]) {
+            Rows g; char *l;
+            r = mode_bin(root, sd, bin[0], 1, 0, "sweep"); g = rows_of(r.err, 1); l = sweep_line(&r);
+            if (r.rc != 0 || !g.n || !l || !strstr(l, want) || !strstr(l, ", 0 accepted;")) {
+                char *w = fmt("under FLOWNET_SWEEP=all rc %d, %d rows: %s", r.rc, g.n, l ? l : "(no sweep line)"); red("record", w); free(w); }
+            else {
+                int i;
+                printf("# tests/flownet-tdesc-sweep.tsv -- the sweep record of tests/tdescprobe.cx (plans/m4-flownet-cx-module.md W3 fix 4).\n"
+                       "# One row per perturbation of one answer under FLOWNET_SWEEP=all (flownet/flow.cx): NET, KEY, HONEST>PERTURBED, and what the\n"
+                       "# wrong answer led to -- flownet's refusal (the ask outside a domain or the books it led to), or how the output changed and\n"
+                       "# that the emit hook refused it.  tests/flownetw3.cx flow 1/3 requires tdescprobe's rows to equal these, in --oracle cc and\n"
+                       "# --check modes; a copy that cross-checks flownet against its own algebra differs here even when flownet refuses every\n"
+                       "# perturbation (flow 3/3).  Regenerate (and review every changed row): sh ./unisacc.com -run tests/flownetw3.cx -- flow . record\n"
+                       "# %s\n", l);
+                for (i = 0; i < g.n; i++) printf("%s\n", g.row[i]);
+            }
+            rows_free(&g); free(l); run_free(&r);
+        }
+    } else if (!strcmp(part, "1/3")) {      /* tdescprobe as it is, and with its books unpinned: every key's answer is used */
+        rec = record_of(root);
         who[0] = "tdescprobe"; body[0] = fmt("%s", src);
         who[1] = "tdescprobe, books unpinned"; body[1] = edit_once(src, " || fn_expect(BOOKS)", "");
         n = 2;
@@ -410,26 +523,33 @@ static int cmd_flow(const char *rootarg, const char *part) {
                          *w = fmt("under FLOWNET_SWEEP=all rc %d, want every one of the %d keys used: %s | %s", r.rc, K, l ? l : "(no sweep line: the sweep did not run)", e);
                     red(tag, w); free(w); free(e);
                 }
+                if (k == 0 && rec.n) {            /* every perturbation leads where the record says */
+                    Rows g = rows_of(r.err, 1); char *keys, *first; int nd = rows_diff(&g, &rec, &keys, &first);
+                    if (nd) { char *w = fmt("%d of %d sweep rows differ from %s, keys: %s; first: %s", nd, rec.n, RECORD, keys, first); red(tag, w); free(w); }
+                    else { printf("record\t%s\t%d rows == %s\n", tag, g.n, RECORD); recorded++; }
+                    free(keys); free(first); rows_free(&g);
+                }
                 free(l); free(tag); run_free(&r);
             }
         }
-    } else {                         /* the sweep proves itself: each copy that re-derives answers is refused, by key */
-        for (k = 0; FMUTS[k].name; k++, n++) {
+    } else if (!strcmp(part, "2/3")) {      /* the sweep proves itself: each copy that re-derives answers is refused, by key */
+        lo = 0; while (FMUTS[lo].name && FMUTS[lo].xcheck) lo++;
+        for (k = lo; FMUTS[k].name && !FMUTS[k].xcheck; k++, n++) {
             const FMut *m = &FMUTS[k]; char *mut, *t; int j;
             if (m->keep) {
-                char *helper = fmt(LOCAL, m->keep);
-                mut = edit_once(src, "static int derive(void *unused) {\n", helper); free(helper);
+                char *helper = fmt(KEEPFN, m->keep), *ins = fmt("%s%s", LOCALFN, helper);
+                mut = edit_once(src, "static int derive(void *unused) {\n", ins); free(helper); free(ins);
                 for (j = 0; mut && ASKS[j].from; j++) { t = edit_once(mut, ASKS[j].from, ASKS[j].to); free(mut); mut = t; }
             } else {
                 mut = edit_once(src, "static int bad_row(", BASESIZE);
                 if (mut) { t = edit_once(mut, "P[np].ctx = CTX[c]; P[np].size = size; np++;", "P[np].ctx = CTX[c]; P[np].size = base_size_(np); (void)size; np++;"); free(mut); mut = t; }
             }
             if (!mut) red(m->name, "the edit does not apply exactly once (tdescprobe.cx changed: update the mutation)");
-            who[k] = m->name; body[k] = mut;
+            who[n] = m->name; body[n] = mut;
         }
         compile_all(root, sd, n, body, bin, log); red_uncompiled(n, body, bin, log, who);
         for (k = 0; k < n; k++) {
-            const FMut *m = &FMUTS[k]; char *l; const char *e, *got;
+            const FMut *m = &FMUTS[lo + k]; char *l; const char *e, *got;
             if (!bin[k] || own_gate(root, sd, bin[k], m->name)) continue;
             r = oracle_bin(root, sd, bin[k], 1, "sweep");
             l = sweep_line(&r);
@@ -443,12 +563,45 @@ static int cmd_flow(const char *rootarg, const char *part) {
             }
             free(l); run_free(&r);
         }
+    } else {                                 /* 3/3: the record proves itself on copies the sweep alone accepts */
+        rec = record_of(root);
+        for (k = 0; FMUTS[k].name; k++) {
+            const FMut *m = &FMUTS[k]; char *mut, *t, *helper, *ins; int j;
+            if (!m->xcheck) continue;
+            helper = fmt(XCHECKFN, m->xcheck, m->xcheck); ins = fmt("%s%s", LOCALFN, helper);
+            mut = edit_once(src, "static int derive(void *unused) {\n", ins); free(helper); free(ins);
+            for (j = 0; mut && ASKS[j].from; j++) { t = edit_once(mut, ASKS[j].from, ASKS[j].to); free(mut); mut = t; }
+            if (!mut) red(m->name, "the edit does not apply exactly once (tdescprobe.cx changed: update the mutation)");
+            if (!hi) lo = k;
+            hi = k + 1; who[n] = m->name; body[n++] = mut;
+        }
+        compile_all(root, sd, n, body, bin, log); red_uncompiled(n, body, bin, log, who);
+        for (k = 0; k < n && rec.n; k++) {
+            const FMut *m = &FMUTS[lo + k]; char *l, *keys = 0, *first = 0; Rows g; int nd;
+            if (!bin[k]) continue;
+            r = oracle_bin(root, sd, bin[k], 1, "sweep");    /* one run: its own verdict (stdout) and the sweep (stderr) */
+            l = sweep_line(&r); g = rows_of(r.err, 1);
+            if (!strstr(r.out, "106 probes, 0 mismatches") || !strstr(r.out, "valid), 78 contexts")) {
+                char *e = first_line(r.err[0] ? r.err : r.out), *w = fmt("its own verdict (--oracle cc) is not green: rc %d: %s", r.rc, e); red(m->name, w); free(w); free(e); }
+            else if (!g.n) { char *w = fmt("under FLOWNET_SWEEP=all rc %d and no sweep rows: %s", r.rc, l ? l : "(no sweep line)"); red(m->name, w); free(w); }
+            else {
+                nd = rows_diff(&g, &rec, &keys, &first);
+                if (nd && !strcmp(keys, m->decorative)) {
+                    caught++; printf("caught\t%s\tits own verdict green; the sweep alone rc %d (%s); %d of %d rows differ from the record, naming exactly the %d keys\n",
+                                     m->name, r.rc, l ? l : "", nd, rec.n, K);
+                } else { char *w = fmt("want rows differing from %s naming exactly \"%s\"; %d rows differ, keys: %s", RECORD, m->decorative, nd, keys); red(m->name, w); free(w); }
+            }
+            free(keys); free(first); rows_free(&g); free(l); run_free(&r);
+        }
     }
 done:
     rm_rf(sd);
+    rows_free(&rec);
     if (fails) { printf("flownetw3 flow %s: FAIL (%d failure(s))\n", part, fails); return 1; }
-    if (!strcmp(part, "1/2")) printf("flownetw3 flow 1/2: PASS (tdescprobe uses the answer of every one of the %d keys of flownet/tdesc: each single-answer perturbation is refused by name, by flownet or by its emit hook's judge -- --oracle and --check, books pinned and unpinned)\n", K);
-    else printf("flownetw3 flow 2/2: PASS (%d/%d copies whose own gate is green but which answer from elsewhere after asking -- re-derived locally, or the sizes from the baseline -- are refused by the sweep, naming exactly the keys they discarded)\n", caught, n);
+    if (!strcmp(part, "record")) return 0;
+    if (!strcmp(part, "1/3")) printf("flownetw3 flow 1/3: PASS (tdescprobe uses the answer of every one of the %d keys of flownet/tdesc: each single-answer perturbation is refused by name, by flownet or by its emit hook's judge -- --oracle and --check, books pinned and unpinned -- and leads where %s records, %d/2 modes)\n", K, RECORD, recorded);
+    else if (!strcmp(part, "2/3")) printf("flownetw3 flow 2/3: PASS (%d/%d copies whose own gate is green but which answer from elsewhere after asking -- re-derived locally, or the sizes from the baseline -- are refused by the sweep, naming exactly the keys they discarded)\n", caught, n);
+    else printf("flownetw3 flow 3/3: PASS (%d/%d copies that cross-check flownet against their own algebra and refuse on a disagreement -- accepted by the sweep alone -- differ from %s on every key)\n", caught, n, RECORD);
     return 0;
 }
 
@@ -500,6 +653,6 @@ int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "d3")) return cmd_d3(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "d4")) return cmd_d4(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "flow")) return cmd_flow(argv[2], argv[3]);
-    fprintf(stderr, "usage: flownetw3.cx d3 ROOT 1/2|2/2 | flow ROOT 1/2|2/2 | d4 tdesc|adapter ROOT\n");
+    fprintf(stderr, "usage: flownetw3.cx d3 ROOT 1/2|2/2 | flow ROOT 1/3|2/3|3/3|record | d4 tdesc|adapter ROOT\n");
     return 2;
 }

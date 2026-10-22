@@ -29,6 +29,14 @@
             be accepted again (the consumer's state is the real run's).  The summary goes to stderr: "flownet sweep:
             NET k/K, ... = k/K keys; N perturbations: R refused by flownet (...), E refused by the emit hook, A
             accepted (decorative); C changed the output".  Unset, nothing changes.
+            A refusal is not by itself proof that the answer was used (W3 fix 4): a consumer that answers from its own
+            copy of the labels and, when flownet's answer differs, makes flownet refuse (an ask outside a domain, or its
+            flows' rc) or writes a stray row has every perturbation refused, and none reaches its output.  So the sweep
+            also writes one row per perturbation to stderr -- "flownet sweep row\tNET\tKEY\tHONEST>PERTURBED\tOUTCOME",
+            the outcome being flownet's refusal reason, or the output's first changed line and whether the emit hook
+            refused it -- and a consumer's gate compares the rows with a record of the honest consumer
+            (tests/flownet-tdesc-sweep.tsv, tests/flownetw3.cx flow): equal rows mean every wrong answer leads where the
+            honest consumer's leads (the same refused ask, the same books, the same changed row).
    Internal module; the public face is flownet/api.cx. */
 
 #pragma unisa use fnx
@@ -211,6 +219,40 @@ static int swept(const char *sw, const char *name) {
     return 0;
 }
 
+/* a copy of the N bytes at P on one line: tabs and newlines become spaces (0 when out of memory) */
+static char *oneline(const char *p, long n) {
+    char *d = malloc((size_t)n + 1); long i;
+    if (!d) return 0;
+    for (i = 0; i < n; i++) d[i] = p[i] == '\t' || p[i] == '\n' || p[i] == '\r' ? ' ' : p[i];
+    d[n] = 0;
+    return d;
+}
+/* the number of lines of the N bytes at P (a last line without a newline counts) */
+static long nlines(const char *p, long n) { long i, k = 0; for (i = 0; i < n; i++) if (p[i] == '\n') k++; return k + (n && p[n - 1] != '\n'); }
+/* how output B (BN bytes) differs from the reference A (AN bytes), as one line: "output unchanged", or the first
+   differing line (1-based) old and new, and the line counts (0 when out of memory) */
+static char *outdiff(const char *a, long an, const char *b, long bn) {
+    long i = 0, ls = 0, ln = 1, ea, eb; char *o, *nw, *t;
+    if (an == bn && !memcmp(a, b, (size_t)an)) return fnx_dup("output unchanged");
+    while (i < an && i < bn && a[i] == b[i]) { if (a[i] == '\n') { ls = i + 1; ln++; } i++; }
+    for (ea = ls; ea < an && a[ea] != '\n'; ea++) ;
+    for (eb = ls; eb < bn && b[eb] != '\n'; eb++) ;
+    o = ls < an ? oneline(a + ls, ea - ls) : fnx_dup("(end)"); nw = ls < bn ? oneline(b + ls, eb - ls) : fnx_dup("(end)");
+    t = o && nw ? fnx_fmt("output line %ld '%s' -> '%s', lines %ld -> %ld", ln, o, nw, nlines(a, an), nlines(b, bn)) : 0;
+    free(o); free(nw);
+    return t;
+}
+
+/* one row of the sweep's record on stderr: "flownet sweep row\tNET\tKEY\tHONEST>PERTURBED\tOUTCOME" (WHAT + WHY on
+   one line); nonzero when out of memory */
+static int sweep_row(int ni, int k, int honest, int c, const char *what, const char *why) {
+    char *kt = fnn_key_text(ni, k), *w = oneline(why, (long)strlen(why));
+    if (!kt || !w) { free(kt); free(w); return -1; }
+    fprintf(stderr, "flownet sweep row\t%s\t%s\t%s>%s\t%s%s\n", fnn_name(ni), kt, fnn_class(ni, honest), fnn_class(ni, c), what, w);
+    free(kt); free(w);
+    return 0;
+}
+
 /* the sweep (see the head of this file): the unperturbed output is in outb and EMIT accepted it; every single-answer
    perturbation must be refused by flownet or by EMIT; the unperturbed run is repeated at the end */
 static int sweep(const char *sw, fn_flows_fn flows, void *fctx, fn_emit_fn emit, void *ectx) {
@@ -236,11 +278,16 @@ static int sweep(const char *sw, fn_flows_fn flows, void *fctx, fn_emit_fn emit,
                     if (!why || !*why) { free(ref); fnx_failf("sweep: net %s key %d refused without a reason", fnn_name(ni), k); return -1; }
                     refused++;
                     if (!strncmp(why, "ask ", 4)) rask++; else if (!strncmp(why, "books:", 6)) rbooks++; else rother++;
+                    if (sweep_row(ni, k, honest, c, "refused by flownet: ", why)) { free(ref); fnx_clear(); fnx_fail("sweep: out of memory"); return -1; }
                     continue;
                 }
-                {   int diff = outn != refn || memcmp(outb ? outb : "", ref, (size_t)refn);
+                {   int diff = outn != refn || memcmp(outb ? outb : "", ref, (size_t)refn), hr;
+                    char *od = outdiff(ref, refn, outb ? outb : "", outn);
                     if (diff) changed++;
-                    if (emit(ectx, outb ? outb : "", outn)) { erefused++; continue; }
+                    hr = emit(ectx, outb ? outb : "", outn);
+                    if (!od || sweep_row(ni, k, honest, c, hr ? "refused by the emit hook: " : "accepted: ", od)) { free(od); free(ref); fnx_clear(); fnx_fail("sweep: out of memory"); return -1; }
+                    free(od);
+                    if (hr) { erefused++; continue; }
                     {   char *kt = fnn_key_text(ni, k);
                         accepted++; keydec = 1;
                         if (!kt || !(t = fnx_fmt("%s (%s) %s->%s %s", fnn_name(ni), kt, fnn_class(ni, honest), fnn_class(ni, c),
