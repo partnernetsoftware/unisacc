@@ -29,7 +29,7 @@ static char *rules[] = {
             " subtract-safety* cxinclude freezecheck revivedscan facts-export publish-order gate-infra gate-layers"
             " tsv-build-account pipeline-cache docs kernel source-layout front-bounds bound boundreason boundstall-r7g boundnested-1 boundnested-2 boundnested-3 boundnested-4 boundnested-5 fresh-order*"
             " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools"
-            " lib-bindings-registry flownet-w0-module*",
+            " lib-bindings-registry flownet-w0-module* flownet-baseline*",
     "E2", "exec-pp-* exec-pploc exec-macros pptruth shared-e2-* rowcov-pp* prevheaders",
     "E1", "exec-lex* exec-f1-sidecar strconvert-* rowcov-lex*",
     "E3", "exec-parse* exec-r21-e3 exec-unit* exec-diag exec-errors* exec-f1-attributes exec-*warn*"

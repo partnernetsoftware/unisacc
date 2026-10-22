@@ -1,6 +1,6 @@
 # 需求：把 m4 的「流×网」范式做成可复用 `.cx` 模块
 
-> 提出：2026-10-23（董事长要求）· 执行：cc（cc-unisacc）· 状态：W0 已裁定（三问皆是；W2 读外部 `.tsv`，生成 `.cx` 表为备选；API 只导出函数），待 W1
+> 提出：2026-10-23（董事长要求）· 执行：cc（cc-unisacc）· 状态：W0 已裁定（三问皆是；W2 读外部 `.tsv`，生成 `.cx` 表为备选；API 只导出函数）；W1 基线已落（`tests/flownet-baseline.tsv` 371 行，连跑两次逐字节相同，8 个闸步），待 W2
 > 依据：`m4/README.md` 实测、`research/m4-flow-net-contract-draft.md`、`m4/flows.py` / `nets.py` 现状
 
 ## 0. 一句话
@@ -60,6 +60,7 @@ m4 已经证明「gold → IntNet → 四流 → 字节」这条链能逐字节�
 - 固化当前 m4 行为：28 语料的输出 SHA256、acc 逐网 (exact,total)、trace 记账、selftest 的 EXPECT 表。
 - 落 `tests/flownet-baseline.tsv` + 一个 `--check` 步骤。
 - **闸**：基线自身稳定（连跑两次逐字节相同）。
+**W1 结论（2026-10-23 实测）**：`tests/flownet-baseline.tsv`（371 行，sha256 前缀 `c451375c083305bd`）由 `tests/flownetbaseline.cx` 经 m4 oracle（`python3 -m m4 …` 作子进程，m4 零改动）写出，8 节：`acc`（10 网 exact == total，合计 3677 键）、`out1`–`out4`（28 语料 + 5 探针，按 m4 次序连续四分片：源 sha256、输出字节数与 sha256、trace 逐阶段逐网 (hits, gold) 共 253 行，gold 回退全 0）、`check`（same 33/33、负例 9：拒 4、已知接受 5）、`selftest`（isel choose 证明 + 10 网决策种类，PASS）、`expect`（从 `m4/selftest.py` 源码直读 EXPECT，不跑 Python）。整份连写两次逐字节相同（`cmp` 通过）；`--check PART` 即逐节重算对拍。8 个闸步：`flownet-baseline-file`（无 Python，整文件形状 + 不变量：acc 全 exact、gold 回退 0、check same == 输出且字节数一致、selftest decides == EXPECT、语料源未变；contract 层）与 `flownet-baseline-{acc,out1..4,check,selftest}`（oracle 重算 == 记录；pipeline 层）。单步墙钟：file 约 3 s、acc 约 8 s、每个 out 片约 18 s、check 约 16 s、selftest 约 40 s（最紧，oracle 子进程限 50 s、外层 `tests/bound 58`）。变异即红：输出 sha 改一位、trace hits +1（`--check` 点名节与行）；gold 回退置 1、EXPECT 去掉 trap、acc 1862/1863、删一条 same（`--check-file` 各自点名）；缺表 rc 1 具名。未登记 `release/derived-map.tsv`：它要求套件先在 `tests/gatedeps.json` 声明，本波不碰 gatedeps，`flownet-baseline-file` 每次闸跑都会抓语料/EXPECT 漂移。
 
 ### W2 —— `.cx` 骨架 + parity（仍不接第二消费方）
 
