@@ -1,0 +1,188 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallbackoutcomecheck.cx -- private public-API sticky outcome proof; not callback parameter ABI proof.
+   Ported from tests/librarycallbackoutcomecheck.py (2026-10-23, the owner's direction: the toolchain moves off
+   Python).
+   usage: sh ./unisacc.com -run tests/librarycallbackoutcomecheck.cx -- [-h] --package PACKAGE
+                                                                       [--arch {arm64,x86_64}] [--baseline]
+   ROOT is the directory above this file's (the .py's Path(__file__).resolve().parents[1]); run as a compiled binary
+   (tests/cxbin) it is the working directory.  ARCH is --arch or the host's (arm64 for uname -m arm64/aarch64, else
+   x86_64), TARGET lnx/ARCH (osx/ARCH on Darwin); a foreign ARCH off Darwin is `native cross runner required` on
+   stderr, rc 1.  In a fresh temporary directory T (TMPDIR, TEMP, TMP or /tmp; prefix r10-outcome-) T/exec/c and T/src
+   are made, the runtime closure is copied (checklib.copy_runtime, here tests/cxlib/runtimecopy.cx), PACKAGE
+   (resolved) is copied to T/package.com and the USLSIG2 declaration the .py packed with struct to
+   T/host_drive.sig.  Then for the plain build and the -fsanitize=address,undefined -g one (only the plain one with
+   --baseline), every step under `tests/bound 20` with stdout and stderr captured ($CC defaults to cc; [-arch ARCH]
+   on Darwin; `arch -x86_64` before a probe run on an arm64 host for x86_64):
+     unless --baseline: $CC -std=c11 -O1 -DUS_OUTCOME_ARENA_PROBE -I T tests/librarycallbackoutcomecheck.c -lffi
+                        -o T/arena-probe, then T/arena-probe T/host_drive.sig, whose stdout is echoed
+     $CC -std=c11 -O1 -shared -fPIC -fvisibility=hidden T/exec/c/libunisacc.c T/exec/c/librarycall_ARCH.S -lffi
+         -o T/library.dylib
+     $CC -std=c11 -O1 -Wall -Wextra -I T/exec/c tests/librarycallbackoutcomecheck.c T/library.dylib -o T/probe
+     T/probe T/package.com TARGET T/host_drive.sig: rc 0 required and its stdout echoed; with --baseline rc 1 with
+         `sticky first exit23` on stderr required, and `actual red baseline: STDERR` printed (STDERR stripped)
+   and finally `outcome normal + ASan/UBSan passed on ARCH` (`outcome baseline rejected on ARCH`), rc 0.
+   A build step or arena run that exits nonzero is the .py's uncaught AssertionError: `AssertionError: (RC, 'OUT',
+   'ERR')` (the decoded output, Python's str repr), and a failed probe run `AssertionError: (RC, b'OUT', b'ERR')`; a
+   missing package is the OSError line (`FileNotFoundError: [Errno 2] No such file or directory: 'PATH'`), output
+   that is not UTF-8 the UnicodeDecodeError line -- each the last line of the .py's traceback, on stderr, rc 1 (the
+   frames above it name the .py's own source lines and are not reproduced).  As with Python's block-buffered stdout,
+   off a terminal the lines already printed reach stdout at exit, after that line.  argparse errors are rc 2 with its
+   usage text (prog name librarycallbackoutcomecheck.py, so the text is byte-identical).  Shared with
+   tests/librarycallbackplancheck.cx: tests/cxlib/callbackcheck.cx. */
+#pragma unisa use cxlib.callbackcheck
+
+static char ROOT[4096], TD[4200];
+static const char *ARCH; static int ROSETTA;
+
+static void fail(const char *line) {
+    if (TD[0]) { pr_rmtree(TD); TD[0] = 0; }
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    cc_out_flush();
+    exit(1);
+}
+/* run(*cmd): subprocess.run([tests/bound, '20', *cmd], capture_output=True) */
+static void run(char **cmd, pr_result *r) {
+    char bound[4300], why[8400], *argv[64]; int n = 0;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv[n++] = bound; argv[n++] = "20";
+    while (*cmd) argv[n++] = *cmd++;
+    argv[n] = 0;
+    if (pr_run(argv, 0, 0, 0, 1e9, r, why, sizeof why) != 0) fail(why);
+}
+static void decode(const char *s, size_t n) {   /* bytes.decode(): only its failure matters */
+    char why[512];
+    if (cc_utf8_error(s, n, why, sizeof why)) fail(why);
+}
+static char *strrepr(const char *s, size_t n) {
+    size_t cap = 4 * n + 16; char *o = malloc(cap);
+    if (!o) fail("MemoryError");
+    rtc_pyrepr(s, n, o, cap);
+    return o;
+}
+/* check(*cmd): the decoded stdout, or AssertionError((rc, stdout.decode(), stderr.decode())) */
+static void check(char **cmd, pr_result *r) {
+    run(cmd, r);
+    if (r->rc) {
+        cc_buf m = { 0, 0, 0 }; char t[64]; char *a, *b;
+        decode(r->out, r->outn); decode(r->err, r->errn);
+        a = strrepr(r->out, r->outn); b = strrepr(r->err, r->errn);
+        snprintf(t, sizeof t, "AssertionError: (%d, ", r->rc);
+        cc_str(&m, t); cc_str(&m, a); cc_str(&m, ", "); cc_str(&m, b); cc_str(&m, ")");
+        fail((const char *)m.p);
+    }
+    decode(r->out, r->outn);
+}
+static void assert_bytes(const pr_result *r) {   /* assert ..., (r.returncode, r.stdout, r.stderr) */
+    cc_buf m = { 0, 0, 0 }; char t[64]; char *a = pr_repr_bytes(r->out, r->outn), *b = pr_repr_bytes(r->err, r->errn);
+    snprintf(t, sizeof t, "AssertionError: (%d, ", r->rc);
+    cc_str(&m, t); cc_str(&m, a); cc_str(&m, ", "); cc_str(&m, b); cc_str(&m, ")");
+    fail((const char *)m.p);
+}
+static int contains(const char *s, size_t n, const char *w) {
+    size_t l = strlen(w), i;
+    for (i = 0; i + l <= n; i++) if (!memcmp(s + i, w, l)) return 1;
+    return 0;
+}
+static int pyspace(unsigned char c) { return c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x1f); }
+
+int main(int argc, char **argv) {
+    static const char *const archs[] = { "arm64", "x86_64", 0 };
+    cc_opt opts[3] = { { "--package", 1, 0, 1, 0 }, { "--arch", 1, archs, 0, 0 }, { "--baseline", 0, 0, 0, 0 } };
+    const char *host, *cc; char *mach, *sys; int darwin, baseline, san;
+    char why[8400], target[64], rt[4300], pkg[4300], package[4300], sig[4300], lib[4300], exe[4300], unit[4300], src[4300];
+    char rtc[4400], rts[4400], dir[4300];
+    cc_parse(argc, argv, "librarycallbackoutcomecheck.py",
+             "usage: librarycallbackoutcomecheck.py [-h] --package PACKAGE\n"
+             "                                      [--arch {arm64,x86_64}] [--baseline]\n",
+             "options:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n"
+             "  --arch {arm64,x86_64}\n  --baseline\n", opts, 3);
+    baseline = opts[2].val != 0;
+    if (cc_root(argv[0], ROOT, sizeof ROOT) != 0) return 1;
+    mach = cc_uname("-m"); sys = cc_uname("-s");
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    ARCH = opts[1].val ? opts[1].val : host;
+    darwin = !strcmp(sys, "Darwin");
+    snprintf(target, sizeof target, "%s/%s", darwin ? "osx" : "lnx", ARCH);
+    if (strcmp(ARCH, host) && !darwin) fail("native cross runner required");
+    ROSETTA = !strcmp(host, "arm64") && !strcmp(ARCH, "x86_64");
+
+    if (pr_tempdir("r10-outcome-", TD, sizeof TD) != 0) { TD[0] = 0; rtc_oserror(errno, "/tmp", why, sizeof why); fail(why); }
+    snprintf(rt, sizeof rt, "%s/exec/c", TD);
+    snprintf(dir, sizeof dir, "%s/exec", TD); mkdir(dir, 0777); mkdir(rt, 0777);
+    snprintf(dir, sizeof dir, "%s/src", TD); mkdir(dir, 0777);
+    {   rtc_file *files = 0; size_t nf = 0;
+        if (rtc_copy_runtime(ROOT, TD, &files, &nf, why, sizeof why) != 0) fail(why);
+    }
+    /* package=t/'package.com'; shutil.copy2(Path(o.package).resolve(), package) */
+    snprintf(package, sizeof package, "%s/package.com", TD);
+    {   size_t n = 0; char *b; struct stat st;
+        if (rtc_resolve(opts[0].val, 0, pkg, sizeof pkg, why, sizeof why) != 0) fail(why);
+        if (stat(pkg, &st) != 0) { rtc_oserror(errno, pkg, why, sizeof why); fail(why); }
+        if (S_ISDIR(st.st_mode)) { rtc_oserror(EISDIR, pkg, why, sizeof why); fail(why); }
+        if (!(b = cx_read(pkg, &n))) { rtc_oserror(errno ? errno : EIO, pkg, why, sizeof why); fail(why); }
+        if (cx_write(package, b, n) != 0) { rtc_oserror(errno ? errno : EIO, package, why, sizeof why); fail(why); }
+        chmod(package, st.st_mode & 07777);
+        free(b);
+    }
+    /* sig.write_bytes(b'USLSIG2\n'+u(1)+u(10)+b'host_drive'+bytes([0,1,0,0])+u(1)+PAIR+u(1)+I+bytes([1])) */
+    snprintf(sig, sizeof sig, "%s/host_drive.sig", TD);
+    {   cc_buf I = cc_desc(1, 4, 4, 0, 0, 0), D = cc_desc(3, 8, 8, 0, 0, 0), pl = { 0, 0, 0 }, PAIR, s = { 0, 0, 0 };
+        cc_u64(&pl, 2); cc_u64(&pl, 0); cc_u64(&pl, 0); cc_u64(&pl, 0); cc_u64(&pl, 8); cc_cat(&pl, &D);
+        cc_u64(&pl, 8); cc_u64(&pl, 0); cc_u64(&pl, 0); cc_u64(&pl, 4); cc_cat(&pl, &I);
+        PAIR = cc_desc(5, 16, 8, 0, 1, &pl);
+        cc_str(&s, "USLSIG2\n"); cc_u64(&s, 1); cc_u64(&s, 10); cc_str(&s, "host_drive");
+        cc_byte(&s, 0); cc_byte(&s, 1); cc_byte(&s, 0); cc_byte(&s, 0);
+        cc_u64(&s, 1); cc_cat(&s, &PAIR); cc_u64(&s, 1); cc_cat(&s, &I); cc_byte(&s, 1);
+        if (cx_write(sig, (const char *)s.p, s.n) != 0) { rtc_oserror(errno ? errno : EIO, sig, why, sizeof why); fail(why); }
+    }
+    cc = getenv("CC"); if (!cc) cc = "cc";
+    snprintf(lib, sizeof lib, "%s/library.dylib", TD); snprintf(exe, sizeof exe, "%s/probe", TD);
+    snprintf(unit, sizeof unit, "%s/arena-probe", TD);
+    snprintf(src, sizeof src, "%s/tests/librarycallbackoutcomecheck.c", ROOT);
+    snprintf(rtc, sizeof rtc, "%s/libunisacc.c", rt); snprintf(rts, sizeof rts, "%s/librarycall_%s.S", rt, ARCH);
+    for (san = 0; san < (baseline ? 1 : 2); san++) {
+        char *c[48]; int n; pr_result r;
+#define CC_HEAD() do { n = 0; c[n++] = (char *)cc; if (darwin) { c[n++] = "-arch"; c[n++] = (char *)ARCH; } \
+                       if (san) { c[n++] = "-fsanitize=address,undefined"; c[n++] = "-g"; } c[n++] = "-std=c11"; c[n++] = "-O1"; } while (0)
+        if (!baseline) {
+            CC_HEAD();
+            c[n++] = "-DUS_OUTCOME_ARENA_PROBE"; c[n++] = "-I"; c[n++] = TD; c[n++] = src; c[n++] = "-lffi"; c[n++] = "-o"; c[n++] = unit; c[n] = 0;
+            check(c, &r); pr_free(&r);
+            n = 0;
+            if (ROSETTA) { c[n++] = "arch"; c[n++] = "-x86_64"; }
+            c[n++] = unit; c[n++] = sig; c[n] = 0;
+            check(c, &r); cc_say(r.out, r.outn); pr_free(&r);
+        }
+        CC_HEAD();
+        c[n++] = "-shared"; c[n++] = "-fPIC"; c[n++] = "-fvisibility=hidden"; c[n++] = rtc; c[n++] = rts; c[n++] = "-lffi";
+        c[n++] = "-o"; c[n++] = lib; c[n] = 0;
+        check(c, &r); pr_free(&r);
+        CC_HEAD();
+        c[n++] = "-Wall"; c[n++] = "-Wextra"; c[n++] = "-I"; c[n++] = rt; c[n++] = src; c[n++] = lib; c[n++] = "-o"; c[n++] = exe; c[n] = 0;
+        check(c, &r); pr_free(&r);
+        n = 0;
+        if (ROSETTA) { c[n++] = "arch"; c[n++] = "-x86_64"; }
+        c[n++] = exe; c[n++] = package; c[n++] = target; c[n++] = sig; c[n] = 0;
+        run(c, &r);
+        if (baseline) {
+            size_t a = 0, b = r.errn;
+            if (!(r.rc == 1 && contains(r.err, r.errn, "sticky first exit23"))) assert_bytes(&r);
+            decode(r.err, r.errn);
+            while (a < b && pyspace((unsigned char)r.err[a])) a++;
+            while (b > a && pyspace((unsigned char)r.err[b - 1])) b--;
+            cc_say("actual red baseline: ", 21); cc_say(r.err + a, b - a); cc_say("\n", 1);
+        } else {
+            if (r.rc != 0) assert_bytes(&r);
+            decode(r.out, r.outn);
+            cc_say(r.out, r.outn);
+        }
+        pr_free(&r);
+    }
+    pr_rmtree(TD); TD[0] = 0;
+    {   char line[128];
+        snprintf(line, sizeof line, "outcome %s on %s\n", baseline ? "baseline rejected" : "normal + ASan/UBSan passed", ARCH);
+        cc_say(line, strlen(line));
+    }
+    cc_out_flush();
+    return 0;
+}

@@ -1,0 +1,240 @@
+/* callbackcheck.cx -- what tests/librarycallbackplancheck.cx and tests/librarycallbackoutcomecheck.cx share, as a
+   .cx module (2026-10-23, the py->cx port wave).  Use it with `#pragma unisa use cxlib.callbackcheck` from a .cx file
+   in tests/.  It brings cxlib.pyrun (and so cxlib.runtimecopy) with it.
+     cc_buf, cc_put/cc_str/cc_byte/cc_u64/cc_cat   a growing byte buffer; cc_u64 is struct.pack('<Q', V)
+     cc_desc(K, W, A, DEPTH, TAG, PAYLOAD)          the checks' desc(): seven <Q fields (DEPTH,0,0,K,W,0,A), the TAG byte,
+                                                    <Q len(PAYLOAD) and PAYLOAD (0: empty)
+     cc_parse(ARGC, ARGV, PROG, USAGE, HELP, OPTS, N)
+         argparse.ArgumentParser.parse_args for a parser whose options are -h/--help plus the N long options OPTS
+         (store_true flags or one-value options, optional choices, optional required): unique prefixes, --opt=VALUE,
+         last one wins, `--` and anything not an option is unrecognized.  -h prints USAGE, a blank line and HELP and
+         exits 0; a usage error prints USAGE and `PROG: error: ...` on stderr and exits 2 (Python 3.14 wording).
+     cc_uname(FLAG)                                 `uname FLAG`'s first line (platform.machine/system), "" on failure
+     cc_root(ARGV0, out, cap)                       Path(__file__).resolve().parents[1]: from ARGV0 when it names the
+                                                    .cx (the -run form), else the working directory (tests/cxbin)
+     cc_say(S, N)                                   print(..., end='') to Python's sys.stdout: immediate on a terminal,
+                                                    else held until cc_out_flush (Python's block-buffered stdout;
+                                                    flush before an uncaught exception's line, as Python does)
+     cc_out_flush()
+     cc_call(ARGV, why, whylen)                     subprocess.run(ARGV) with the caller's stdio: the returncode as
+                                                    Python reports it (-N for signal N), or -1000 with WHY set to the
+                                                    OSError line of a failed exec
+     cc_cpe(ARGV, RC, why, whylen)                  the last traceback line of subprocess.CalledProcessError
+     cc_utf8_error(S, N, why, whylen)               1 with WHY set to bytes.decode()'s UnicodeDecodeError line, else 0
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module callbackcheck
+#pragma unisa use pyrun
+
+typedef struct cc_buf { unsigned char *p; size_t n, cap; } cc_buf;
+typedef struct cc_opt {
+    const char *name;            /* "--arch" */
+    int takes;                   /* 1: one value; 0: store_true */
+    const char *const *choices;  /* 0-terminated, or 0 */
+    int required;
+    const char *val;             /* out: the value ("" for a flag given), 0 when absent */
+} cc_opt;
+
+void cc_put(cc_buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64; unsigned char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+void cc_str(cc_buf *b, const char *s) { cc_put(b, s, strlen(s)); }
+void cc_byte(cc_buf *b, unsigned v) { unsigned char c = (unsigned char)v; cc_put(b, &c, 1); }
+void cc_u64(cc_buf *b, unsigned long long v) {
+    unsigned char q[8]; int i;
+    for (i = 0; i < 8; i++) q[i] = (unsigned char)(v >> (8 * i));
+    cc_put(b, q, 8);
+}
+void cc_cat(cc_buf *b, const cc_buf *c) { cc_put(b, c->p, c->n); }
+cc_buf cc_desc(unsigned k, unsigned w, unsigned a, unsigned depth, unsigned tag, const cc_buf *payload) {
+    cc_buf o = { 0, 0, 0 };
+    cc_u64(&o, depth); cc_u64(&o, 0); cc_u64(&o, 0); cc_u64(&o, k); cc_u64(&o, w); cc_u64(&o, 0); cc_u64(&o, a);
+    cc_byte(&o, tag); cc_u64(&o, payload ? payload->n : 0);
+    if (payload && payload->n) cc_cat(&o, payload);
+    return o;
+}
+
+/* ---- argparse ------------------------------------------------------------------------------------------------- */
+static const char *CC_PROG, *CC_USAGE;
+static void cc_usage_error(const char *fmt, const char *a, const char *b) {
+    fflush(stdout);
+    fputs(CC_USAGE, stderr); fprintf(stderr, "%s: error: ", CC_PROG); fprintf(stderr, fmt, a, b); fputc('\n', stderr);
+    exit(2);
+}
+static int cc_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+/* which option a '--' token names: 0 help, 1+i OPTS[i], -1 none; EQ gets the explicit value after '=' */
+static int cc_long(const char *s, const char **eq, const cc_opt *o, int n) {
+    const char *e = strchr(s, '='); size_t l = e ? (size_t)(e - s) : strlen(s); int i;
+    *eq = e ? e + 1 : 0;
+    if (l < 3) return -1;
+    if (l <= 6 && !strncmp(s, "--help", l)) return 0;
+    for (i = 0; i < n; i++) if (l <= strlen(o[i].name) && !strncmp(s, o[i].name, l)) return 1 + i;
+    return -1;
+}
+static int cc_is_option(const char *s, const cc_opt *o, int n) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && cc_long(s, &eq, o, n) >= 0) return 1;
+    if (s[1] == 'h') return 1;
+    if (cc_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+void cc_parse(int argc, char **argv, const char *prog, const char *usage, const char *help, cc_opt *o, int n) {
+    static char extras[8192]; size_t xl = 0; int i;
+    CC_PROG = prog; CC_USAGE = usage; extras[0] = 0;
+    for (i = 0; i < n; i++) o[i].val = 0;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int k = -1;
+        if (!strcmp(s, "--")) {
+            for (; i < argc; i++) xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", argv[i]);
+            break;
+        }
+        if (s[0] == '-' && s[1] == '-') k = cc_long(s, &eq, o, n);
+        else if (s[0] == '-' && s[1] == 'h') k = 0;
+        if (k == 0) {
+            if (eq && s[1] == '-') cc_usage_error("argument -h/--help: ignored explicit argument '%s'%s", eq, "");
+            if (s[1] == '-' || (s[2] != '=' && s[2] != '-')) {
+                printf("%s\n%s", usage, help);
+                exit(0);
+            }
+            cc_usage_error("argument -h/--help: ignored explicit argument '%s'%s", s + 2 + (s[2] == '='), "");
+        } else if (k > 0) {
+            cc_opt *p = &o[k - 1]; const char *v = eq;
+            if (!p->takes) {
+                if (eq) cc_usage_error("argument %s: ignored explicit argument '%s'", p->name, eq);
+                p->val = "";
+                continue;
+            }
+            if (!v) {
+                if (i + 1 >= argc || cc_is_option(argv[i + 1], o, n)) cc_usage_error("argument %s: expected one argument%s", p->name, "");
+                v = argv[++i];
+            }
+            if (p->choices) {
+                int c, ok = 0; char list[512]; size_t ll = 0;
+                list[0] = 0;
+                for (c = 0; p->choices[c]; c++) {
+                    if (!strcmp(v, p->choices[c])) ok = 1;
+                    ll += (size_t)snprintf(list + ll, ll < sizeof list ? sizeof list - ll : 0, "%s'%s'", c ? ", " : "", p->choices[c]);
+                }
+                if (!ok) {
+                    char m[1024];
+                    snprintf(m, sizeof m, "argument %s: invalid choice: '%%s' (choose from %s)", p->name, list);
+                    cc_usage_error(m, v, "");
+                }
+            }
+            p->val = v;
+        } else xl += (size_t)snprintf(extras + xl, xl < sizeof extras ? sizeof extras - xl : 0, "%s%s", xl ? " " : "", s);
+    }
+    {   char req[1024]; size_t rl = 0;
+        req[0] = 0;
+        for (i = 0; i < n; i++)
+            if (o[i].required && !o[i].val) rl += (size_t)snprintf(req + rl, rl < sizeof req ? sizeof req - rl : 0, "%s%s", rl ? ", " : "", o[i].name);
+        if (rl) cc_usage_error("the following arguments are required: %s%s", req, "");
+    }
+    if (xl) cc_usage_error("unrecognized arguments: %s%s", extras, "");
+}
+
+/* ---- platform, ROOT, stdout ----------------------------------------------------------------------------------- */
+char *cc_uname(const char *flag) {
+    char *a[3], *out = 0; size_t n = 0;
+    a[0] = "uname"; a[1] = (char *)flag; a[2] = 0;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+int cc_root(const char *argv0, char *out, size_t cap) {
+    size_t l = strlen(argv0); char self[4096];
+    if (l > 3 && !strcmp(argv0 + l - 3, ".cx") && realpath(argv0, self)) {
+        char *sl; int k;
+        for (k = 0; k < 2; k++) { sl = strrchr(self, '/'); if (sl && sl != self) *sl = 0; else { strcpy(self, "/"); break; } }
+        snprintf(out, cap, "%s", self);
+        return 0;
+    }
+    return getcwd(out, cap) ? 0 : -1;
+}
+static cc_buf CC_OUT; static int CC_TTY = -1;
+void cc_out_flush(void) { if (CC_OUT.n) { fwrite(CC_OUT.p, 1, CC_OUT.n, stdout); CC_OUT.n = 0; } fflush(stdout); }
+void cc_say(const char *s, size_t n) {
+    if (CC_TTY < 0) CC_TTY = isatty(1);
+    if (CC_TTY) { fwrite(s, 1, n, stdout); fflush(stdout); return; }
+    cc_put(&CC_OUT, s, n);
+}
+
+/* ---- subprocess ------------------------------------------------------------------------------------------------ */
+int cc_call(char *const argv[], char *why, size_t whylen) {
+    int pfd[2], st = 0, err = 0; pid_t pid; ssize_t k;
+    fflush(stdout); fflush(stderr);
+    if (pipe(pfd) != 0) { snprintf(why, whylen, "OSError: pipe failed"); return -1000; }
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); snprintf(why, whylen, "OSError: fork failed"); return -1000; }
+    if (pid == 0) {
+        close(pfd[0]);
+        execvp(argv[0], argv);
+        err = errno; k = write(pfd[1], &err, sizeof err); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    k = read(pfd[0], &err, sizeof err);
+    close(pfd[0]);
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) ;
+    if (k == (ssize_t)sizeof err) { rtc_oserror(err, argv[0], why, whylen); return -1000; }
+    return WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+}
+void cc_cpe(char *const argv[], int rc, char *why, size_t whylen) {
+    size_t n; char *l;
+    for (n = 0; argv[n]; n++) ;
+    l = pr_repr_strlist(argv, n);
+    if (rc >= 0) snprintf(why, whylen, "subprocess.CalledProcessError: Command '%s' returned non-zero exit status %d.", l, rc);
+    else {
+        static const char *names[32] = { 0, "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE",
+            "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD", "SIGCONT",
+            "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH",
+            "SIGIO", "SIGPWR", "SIGSYS" };
+        int s = -rc;
+        if (s < 32 && names[s]) snprintf(why, whylen, "subprocess.CalledProcessError: Command '%s' died with <Signals.%s: %d>.", l, names[s], s);
+        else snprintf(why, whylen, "subprocess.CalledProcessError: Command '%s' died with unknown signal %d.", l, s);
+    }
+    free(l);
+}
+
+/* bytes.decode('utf-8') strictly: CPython's error positions and reasons */
+int cc_utf8_error(const char *str, size_t n, char *why, size_t whylen) {
+    const unsigned char *s = (const unsigned char *)str; size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i], lo = 0x80, hi = 0xBF; int need, k, bad = 0, eod = 0;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        else { need = 0; bad = 1; }
+        for (k = 1; !bad && k <= need; k++) {
+            unsigned d;
+            if (i + (size_t)k >= n) { bad = k; eod = 1; break; }
+            d = s[i + k];
+            if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) { bad = k; break; }
+        }
+        if (bad) {
+            size_t end = eod ? n : i + (size_t)bad;
+            const char *r = eod ? "unexpected end of data" : bad == 1 && (c < 0xC2 || c > 0xF4) ? "invalid start byte" : "invalid continuation byte";
+            if (end == i + 1) snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s", c, (unsigned long)i, r);
+            else snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: %s", (unsigned long)i, (unsigned long)(end - 1), r);
+            return 1;
+        }
+        i += (size_t)need + 1;
+    }
+    return 0;
+}

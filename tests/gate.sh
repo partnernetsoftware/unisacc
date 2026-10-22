@@ -212,7 +212,7 @@ for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
 # The queue sets UA, so difftest-N runs the C reference route; the Python reference
 # (python3 -m unisa) went ungated and a_externarr stayed red there from f265108e to 890546ab.
 for k in 1 2 3 4; do job difftest-py-$k env -u UA -u UA_RUN SHARD=$k/4 ./tests/difftest.sh; done
-for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 python3 ./tests/declmatrix.py; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects)
+for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 sh ./tests/cxbin tests/declmatrix.cx; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects) (.cx port, 2026-10-23)
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
 job decision-ledger python3 ./tests/decisionledger.py   # 0.0.23 I: build-time Python control (direct transition sites) may only fall
 job manifest-entries-pp tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage pp   # (.cx port, 2026-10-23)
@@ -813,26 +813,26 @@ job lib-union16-callback-5 sh ./unisacc.com -run tests/libraryunion16check.cx --
 job lib-callable-variadic-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablevarcheck.cx   # (.cx port, 2026-10-23) concrete variadic callable ABI, normal + ASan/UBSan
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
-job lib-callback-plan python3 ./tests/librarycallbackplancheck.py
+job lib-callback-plan sh ./tests/cxbin tests/librarycallbackplancheck.cx   # (.cx port, 2026-10-23) callback declaration/plan probe, normal + ASan/UBSan
 job lib-callable-model ./tests/modelcallablewirecheck.sh
 job lib-callback-native python3 ./tests/librarycallbacknativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-callback-forward python3 ./tests/librarycallbackforwardcheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
-job lib-callable-variadic-native python3 ./tests/librarycallablevariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
-job lib-callback-outcome python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-callable-variadic-native sh ./tests/cxbin tests/librarycallablevariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
+job lib-callback-outcome sh ./tests/cxbin tests/librarycallbackoutcomecheck.cx --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) public-API sticky outcome, normal + ASan/UBSan
 job lib-typed-native tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) native->script->typed native fixed FP/GP17/Pair9
-job lib-variadic-native python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
+job lib-variadic-native tests/bound 58 sh ./tests/cxbin tests/libraryvariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
 job lib-sig2-native tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) native->script fixed FP/GP17/Pair9
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-native-rosetta python3 ./tests/librarycallbacknativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-callback-forward-rosetta python3 ./tests/librarycallbackforwardcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
-    job lib-callable-variadic-native-rosetta python3 ./tests/librarycallablevariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
+    job lib-callable-variadic-native-rosetta sh ./tests/cxbin tests/librarycallablevariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-sig2-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-typed-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-variadic-rosetta tests/bound 58 sh ./tests/cxbin tests/librarynativevariadiccheck.cx --arch x86_64
     job lib-callplans-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycallplanscheck.cx -- --arch x86_64
     job lib-callback-graph-rosetta python3 ./tests/librarycallbackgraphcheck.py --arch x86_64
-    job lib-callback-outcome-rosetta python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
-    job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
+    job lib-callback-outcome-rosetta sh ./tests/cxbin tests/librarycallbackoutcomecheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
+    job lib-callback-plan-rosetta sh ./tests/cxbin tests/librarycallbackplancheck.cx --arch x86_64
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
     job lib-source-longdouble-import-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysourcebitfieldimportcheck.cx -- --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
     job lib-carrier-mechanism-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarycarriercheck.cx -- --arch x86_64
@@ -862,7 +862,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-union16-direct-5-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --arch x86_64
     job lib-union16-callback-5-rosetta sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback --arch x86_64
     job lib-variadic-resolver-rosetta tests/bound 58 sh ./unisacc.com -run tests/libraryvariadicresolvercheck.cx -- --arch x86_64
-    job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
+    job lib-variadic-native-rosetta tests/bound 58 sh ./tests/cxbin tests/libraryvariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
 job lib-artifacts python3 ./tests/libraryartifactcheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-native-exports tests/bound 58 sh ./tests/cxbin tests/libunisaccexportcheck.cx --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23)
@@ -1118,7 +1118,7 @@ if [ "$COM" = 1 ]; then
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 sh "$MODEL_COM" -run tests/volatilecomma.cx -- --com'   # (.cx port, 2026-10-23)
     job com-full-signature tests/bound 58 sh "$PRODUCT" -run tests/fullsignaturecallcheck.cx -- --package "$PRODUCT"   # (.cx port, 2026-10-23) 21 actual product calls (fp9/mixed17/returned/pick/nested probe x -O0..-O2) exit 0 with empty stdout and stderr
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
-    for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 python3 ./tests/declmatrix.py; done   # the same matrix on the product (found functions named r0..r7)
+    for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 sh ./tests/cxbin tests/declmatrix.cx; done   # the same matrix on the product (found functions named r0..r7) (.cx port, 2026-10-23)
     job com-auditnet MODEL_COM="$PRODUCT" sh "$PRODUCT" -run tests/auditnet.cx   # (.cx port, 2026-10-22) 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
     job com-tapebin-ref python3 ./tests/tapebinref.py prepare   # 0.0.43 T-1: the reference compiler, built once per content key; the shards only locate it
     job com-tapebin-six MODEL_COM="$PRODUCT" TAPEBIN_PART=six tests/bound 58 sh ./tests/cxbin tests/tapebinproduct.cx   # (.cx port, 2026-10-23) fixed cost: calls, six-target images, host run, origin guard

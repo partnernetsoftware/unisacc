@@ -1,0 +1,397 @@
+#!/usr/bin/env -S unisacc.com -run
+/* declmatrix.cx -- declarator forms x positions, three-way (0.0.22, TDD after the `T *v[]` defect).
+   Ported from tests/declmatrix.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+
+   The reference took a parameter `char *v[]` as `char *` and nothing caught it: no probe used that form.  This
+   suite generates the forms systematically instead of waiting for a program to hit them: element type x pointer
+   depth x (array / pointer / typedef) x position (global, local, parameter, struct member, return), each read
+   through sizeof, indexing and dereference.  Every generated program is compiled by the system cc (the expected
+   output), the reference UA, and, when MODEL_COM is set, the product; any difference is a failure.  Nothing checked
+   is red.
+
+   usage: SHARD=K/N [UA=REF] [MODEL_COM=PRODUCT] [CC=cc] sh ./tests/cxbin tests/declmatrix.cx
+          (or sh ./unisacc.com -run tests/declmatrix.cx); no arguments are read, as the .py read none.
+   Environment as the .py's: UA unset or empty runs `bash -c '. "$0" && ua_ready' ROOT/tests/lib.sh` in ROOT
+   (inherited stdio, 45 s, rc 0 required) and uses /tmp/ua_ref; MODEL_COM non-empty adds the product; SHARD (default
+   1/1) takes the element types ELEMS[K-1::N] (Python slice semantics) and the three edge programs when K is 1.
+   Each generated program is written to a fresh temporary directory (prefix unisacc-declmatrix-) and run through
+   ROOT/tests/bound (the native watchdog with tests/bound.py's contract: rc 142 on a deadline, 127 on an exec
+   failure): `CC -std=c99 -w -o D/ref SRC` (30 s) and D/ref (10 s) give the expected (rc, stdout); each compiler
+   runs `[sh] COMP -run SRC` (30 s; sh for a .com).  Output is decoded with errors='replace'; the lines printed
+   (refused / FAIL / `declmatrix FAIL cc` / the summary) are byte-identical to the .py's, including Python's
+   code-point slicing, str.strip(), str.splitlines() and repr(); rc 1 when anything is wrong or nothing is ok.
+   A failure the .py does not catch (an IndexError from a refusal with fewer than three stderr lines, a bad SHARD,
+   a failed ua_ready) is the last line of its traceback on stderr, rc 1.
+   Shared code: subprocess.run from tests/cxlib/pyrun.cx, repr(str) from tests/cxlib/runtimecopy.cx,
+   TemporaryDirectory from tests/cxlib/pytempfile.cx, ROOT/CalledProcessError/byte buffer from
+   tests/cxlib/callbackcheck.cx.
+   Include-free: everything used comes with the cx.h prelude and the modules. */
+#pragma unisa use cxlib.callbackcheck
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pytempfile
+
+static char ROOT[4096], D[4200], BOUND[4300];
+static void uncaught(const char *line) {   /* the traceback's last line, the directory removed, rc 1 */
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    if (D[0]) { ptf_rmtree(D); D[0] = 0; }
+    exit(1);
+}
+
+/* ---- Python str operations on UTF-8 text (already decoded with errors='replace', so valid) ------------------ */
+static long cp_at(const char *s, size_t n, size_t i, int *len) {
+    const unsigned char *u = (const unsigned char *)s; unsigned c = u[i]; int need = 0, k; long cp;
+    if (c < 0x80) { *len = 1; return c; }
+    if (c >= 0xF0) { need = 3; cp = c & 7; } else if (c >= 0xE0) { need = 2; cp = c & 15; } else { need = 1; cp = c & 31; }
+    for (k = 1; k <= need && i + (size_t)k < n; k++) cp = (cp << 6) | (u[i + k] & 63);
+    *len = k; return cp;
+}
+static int py_space(long c) {   /* str.isspace */
+    return (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x20) || c == 0x85 || c == 0xa0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200a) || c == 0x2028 || c == 0x2029 || c == 0x202f || c == 0x205f || c == 0x3000;
+}
+static int py_linebreak(long c) {   /* str.splitlines boundaries */
+    return c == 10 || c == 13 || c == 11 || c == 12 || c == 0x1c || c == 0x1d || c == 0x1e || c == 0x85 || c == 0x2028 || c == 0x2029;
+}
+/* s.strip(): [*b, *b + *m) */
+static void py_strip(const char *s, size_t n, size_t *b, size_t *m) {
+    size_t i = 0, e = n, last = 0; int l;
+    while (i < n) { long c = cp_at(s, n, i, &l); if (!py_space(c)) break; i += (size_t)l; }
+    {   size_t j = i;
+        e = i;
+        while (j < n) { long c = cp_at(s, n, j, &l); j += (size_t)l; if (!py_space(c)) e = j; }
+    }
+    (void)last;
+    *b = i; *m = e - i;
+}
+/* bytes of the first MAXCP code points: s[:MAXCP] */
+static size_t py_prefix(const char *s, size_t n, size_t maxcp) {
+    size_t i = 0, k = 0; int l;
+    while (i < n && k < maxcp) { cp_at(s, n, i, &l); i += (size_t)l; k++; }
+    return i;
+}
+/* s.splitlines(): the line starts/lengths into ST/LN (at most CAP); the count */
+static size_t py_splitlines(const char *s, size_t n, size_t *st, size_t *ln, size_t cap) {
+    size_t i = 0, start = 0, k = 0; int l;
+    while (i < n) {
+        long c = cp_at(s, n, i, &l);
+        if (py_linebreak(c)) {
+            size_t end = i;
+            i += (size_t)l;
+            if (c == 13 && i < n && s[i] == '\n') i++;
+            if (k < cap) { st[k] = start; ln[k] = end - start; } k++;
+            start = i;
+        } else i += (size_t)l;
+    }
+    if (start < n) { if (k < cap) { st[k] = start; ln[k] = n - start; } k++; }
+    return k;
+}
+static void put_repr(FILE *f, const char *s, size_t n) {   /* repr(str) */
+    size_t cap = 6 * n + 8; char *r = malloc(cap);
+    if (!r) uncaught("MemoryError");
+    rtc_pyrepr(s, n, r, cap); fputs(r, f); free(r);
+}
+
+/* ---- the matrix ----------------------------------------------------------------------------------------------- */
+typedef struct Elem { const char *t, *init, *fmt; } Elem;
+static const Elem ELEMS[5] = { { "char", "'a'+%d", "%d" }, { "short", "100+%d", "%d" }, { "int", "1000+%d", "%d" },
+                               { "long", "100000+%d", "%ld" }, { "double", "0.5+%d", "%g" } };
+typedef struct Probe { const char *name, *expr; int d; } Probe;
+static const Probe PROBES[31] = {
+    { "q1a", "q1a(a0)", 0 }, { "q1p", "q1p(b0)", 0 }, { "q1n", "q1n(l0)", 0 }, { "q1s", "q1s(s.m)", 0 },
+    { "q2a", "q2a(p1)", 0 }, { "q2c", "q2c(l1)", 0 }, { "q2p", "q2p(s.mp)", 0 }, { "q2t", "q2t(tp)", 0 },
+    { "q3a", "q3a(p2)", 0 }, { "q3p", "q3p(p2)", 0 }, { "q4a", "q4a(p3)", 0 }, { "qr", "qr(ta)", 0 }, { "qra", "qra(ta)", 0 },
+    { "r1", "r1(p1)[0]", 0 }, { "r2", "r2(p2)[0][1]", 0 }, { "g2", "p2[1][0][2]", 0 }, { "g3", "p3[0][1][0][0]", 0 },
+    { "m", "s.mpp[1][1]", 0 }, { "l", "l1[0][2]", 0 }, { "tb", "q1a(tb)", 0 }, { "tl", "tl[1]", 0 },
+    { "z1a", "z1a(a0)", 1 }, { "z2a", "z2a(p1)", 1 }, { "z3a", "z3a(p2)", 1 }, { "zp", "zp(p1)", 1 },
+    { "zg3", "(int)sizeof p3[0][0][0]", 1 }, { "zs", "(int)sizeof s", 1 }, { "zta", "(int)sizeof ta", 1 },
+    { "ztp", "(int)sizeof tp", 1 }, { "ztb", "(int)sizeof tb", 1 }, { "ztl", "(int)sizeof tl", 1 } };
+#define NPROBES 31
+/* Forms a compiler may refuse BY NAME ("not covered: ..."), but must never miscompile. */
+static const char *const EDGES[3][2] = {
+    { "tdarray", "typedef int EA3[3]; static EA3 ta[2]; int main(void) { ta[1][2] = 5; printf(\"%d %d\\n\", ta[1][2], (int)sizeof ta); return 0; }" },
+    { "tdarrayparam", "typedef int EA3[3]; static int f(EA3 v[]) { return v[1][2]; } static int m[2][3] = {{1,2,3},{4,5,6}}; int main(void) { printf(\"%d\\n\", f(m)); return 0; }" },
+    { "ptrarrayparam", "static int f(int (*v[])(int)) { return v[1](3); } static int g(int x) { return x + 1; } static int h(int x) { return x * 2; } static int (*fs[2])(int) = {g, h}; int main(void) { printf(\"%d\\n\", f(fs)); return 0; }" } };
+
+static void line(cc_buf *b, const char *s) { cc_str(b, s); cc_byte(b, '\n'); }
+static void linef(cc_buf *b, const char *fmt, const char *a) {
+    char t[512]; snprintf(t, sizeof t, fmt, a); line(b, t);
+}
+/* program(t, init, probes): all probes for one element type; a mismatch is then narrowed probe by probe */
+static char *program(const Elem *e, const int *pi, int np, size_t *len) {
+    cc_buf b = { 0, 0, 0 }; char t[512], v[3][64]; int k;
+    line(&b, "#include <stdio.h>"); linef(&b, "typedef %s E;", e->t); line(&b, "typedef E *EP;"); line(&b, "typedef E EA3[3];");
+    for (k = 0; k < 3; k++) snprintf(v[k], sizeof v[k], e->init, k);
+    snprintf(t, sizeof t, "static E a0[3] = {%s, %s, %s};", v[0], v[1], v[2]); line(&b, t);
+    for (k = 0; k < 3; k++) snprintf(v[k], sizeof v[k], e->init, k + 3);
+    snprintf(t, sizeof t, "static E b0[3] = {%s, %s, %s};", v[0], v[1], v[2]); line(&b, t);
+    line(&b, "static E *p1[2] = {a0, b0};"); line(&b, "static E **p2[2] = {p1, p1 + 1};"); line(&b, "static E ***p3[1] = {p2};");
+    line(&b, "static EP tp[2] = {a0, b0};"); line(&b, "static E ta[2][3];"); line(&b, "static EA3 tb;");
+    line(&b, "struct S { E m[3]; E *mp[2]; E **mpp; } s;");
+    /* parameters in every spelling: brackets, pointers, typedefs, qualifiers, sized/static brackets */
+    line(&b, "static E q1a(E v[]) { return v[2]; }"); line(&b, "static E q1p(E *v) { return v[2]; }");
+    line(&b, "static E q1n(E v[3]) { return v[1]; }"); line(&b, "static E q1s(E v[static 3]) { return v[0]; }");
+    line(&b, "static E q2a(E *v[]) { return v[1][2]; }"); line(&b, "static E q2c(E *const v[]) { return v[1][1]; }");
+    line(&b, "static E q2p(E **v) { return v[1][0]; }"); line(&b, "static E q2t(EP v[]) { return v[1][2]; }");
+    line(&b, "static E q3a(E **v[]) { return v[1][0][1]; }"); line(&b, "static E q3p(E ***v) { return v[0][1][2]; }");
+    line(&b, "static E q4a(E ***v[]) { return v[0][0][1][0]; }");
+    line(&b, "static E qr(E (*v)[3]) { return v[1][2]; }"); line(&b, "static E qra(E v[][3]) { return v[1][0]; }");
+    line(&b, "static int z1a(E v[]) { return (int)sizeof v[0]; }"); line(&b, "static int z2a(E *v[]) { return (int)sizeof v[0]; }");
+    line(&b, "static int z3a(E **v[]) { return (int)sizeof v[0] + (int)sizeof *v[0]; }"); line(&b, "static int zp(E *v[]) { return (int)sizeof v; }");
+    line(&b, "static E *r1(E *v[]) { return v[1]; }"); line(&b, "static E **r2(E **v[]) { return v[1]; }");
+    line(&b, "int main(void) {"); line(&b, "    E l0[3]; E *l1[2]; EA3 tl; int k;");
+    line(&b, "    for (k = 0; k < 3; k = k + 1) { l0[k] = a0[k]; ta[0][k] = a0[k]; ta[1][k] = b0[k]; s.m[k] = b0[k]; tb[k] = b0[k]; tl[k] = a0[k]; }");
+    line(&b, "    l1[0] = b0; l1[1] = a0; s.mp[0] = a0; s.mp[1] = b0; s.mpp = p1;");
+    for (k = 0; k < np; k++) {
+        const Probe *p = &PROBES[pi[k]];
+        snprintf(t, sizeof t, "    printf(\"%s %s\\n\", %s);", p->name, p->d ? "%d" : e->fmt, p->expr); line(&b, t);
+    }
+    line(&b, "    return 0;"); line(&b, "}");
+    *len = b.n;
+    return (char *)b.p;
+}
+
+/* ---- run(cmd, timeout): bound_cmd(timeout, *cmd) captured, decoded with errors='replace' ---------------------- */
+typedef struct Got { int rc; char *out; size_t outn; char *err; size_t errn; } Got;
+static Got run(char *const *cmd, int n, int secs) {
+    char *v[16], num[16], why[65536]; pr_result r; Got g; int i;
+    snprintf(num, sizeof num, "%d", secs);
+    v[0] = BOUND; v[1] = num;
+    for (i = 0; i < n; i++) v[2 + i] = cmd[i];
+    v[2 + n] = 0;
+    if (pr_run(v, 0, 0, 0, 86400.0, &r, why, sizeof why) != 0) uncaught(why);
+    g.rc = r.rc;
+    g.out = pr_decode_replace(r.out, r.outn, &g.outn);
+    g.err = pr_decode_replace(r.err, r.errn, &g.errn);
+    pr_free(&r);
+    return g;
+}
+static Got run_comp(const char *comp, const char *src) {   /* launch(comp) + ['-run', src] */
+    char *v[4]; int n = 0; size_t l = strlen(comp);
+    if (l >= 4 && !strcmp(comp + l - 4, ".com")) v[n++] = "sh";
+    v[n++] = (char *)comp; v[n++] = "-run"; v[n++] = (char *)src;
+    return run(v, n, 30);
+}
+static int cc_ref(const char *cc, const char *src, Got *fail) {   /* cc -std=c99 -w -o D/ref SRC; 0 when it built */
+    char ref[4300], *v[6];
+    snprintf(ref, sizeof ref, "%s/ref", D);
+    v[0] = (char *)cc; v[1] = "-std=c99"; v[2] = "-w"; v[3] = "-o"; v[4] = ref; v[5] = (char *)src;
+    *fail = run(v, 6, 30);
+    return fail->rc;
+}
+static Got run_ref(void) { char ref[4300], *v[1]; snprintf(ref, sizeof ref, "%s/ref", D); v[0] = ref; return run(v, 1, 10); }
+
+/* ---- WANT: expected (rc, out, err) by program text, and by (t, 'all') ----------------------------------------- */
+typedef struct Want { char *key; size_t keyn; Got g; } Want;
+static Want WANT[256]; static int NWANT;
+static Got *want_get(const char *key, size_t n) {
+    int i;
+    for (i = 0; i < NWANT; i++) if (WANT[i].keyn == n && !memcmp(WANT[i].key, key, n)) return &WANT[i].g;
+    return 0;
+}
+static void want_set(const char *key, size_t n, Got g) {
+    Got *o = want_get(key, n);
+    if (o) { *o = g; return; }
+    if (NWANT >= 256) uncaught("MemoryError");
+    WANT[NWANT].key = malloc(n + 1); memcpy(WANT[NWANT].key, key, n); WANT[NWANT].key[n] = 0;
+    WANT[NWANT].keyn = n; WANT[NWANT].g = g; NWANT++;
+}
+
+static int ok, bad, refused;
+static const char *CC;
+
+static void print_cut(const char *s, size_t n, size_t maxcp) { fwrite(s, 1, py_prefix(s, n, maxcp), stdout); }
+
+/* check(t, init, probes, label, comp, narrow): 1 ok / 0 wrong for this set; narrows to single probes when the
+   whole set disagrees */
+static void check(const Elem *e, const int *pi, int np, const char *label, const char *comp, int narrow) {
+    char tag[64], src[4400], allkey[64]; const char *second = np == 1 ? PROBES[pi[0]].name : "all";
+    char *text; size_t tn; Got *want, got;
+    snprintf(tag, sizeof tag, "%s.%s", e->t, second);
+    snprintf(src, sizeof src, "%s/dm_%s_%s.c", D, e->t, second);
+    text = program(e, pi, np, &tn);
+    {   char why[8800];
+        errno = 0;
+        if (cx_write(src, text, tn) != 0) { rtc_oserror(errno ? errno : EIO, src, why, sizeof why); uncaught(why); }
+    }
+    snprintf(allkey, sizeof allkey, "\001%s.all", e->t);   /* (t, 'all'): never a program text */
+    if (np == 1 && want_get(allkey, strlen(allkey))) {
+        /* the combined program printed one line per probe with the same prelude: its line is this program's output */
+        Got w0 = *want_get(allkey, strlen(allkey)), w; size_t st[256], ln[256], nl, i, pl = strlen(PROBES[pi[0]].name);
+        w = w0; w.out = ""; w.outn = 0;
+        nl = py_splitlines(w0.out, w0.outn, st, ln, 256);
+        for (i = 0; i < nl && i < 256; i++) {
+            const char *l = w0.out + st[i]; size_t f = 0;
+            while (f < ln[i] && l[f] != ' ') f++;
+            if (f == pl && !memcmp(l, PROBES[pi[0]].name, pl)) {
+                char *o = malloc(ln[i] + 2); memcpy(o, l, ln[i]); o[ln[i]] = '\n'; o[ln[i] + 1] = 0;
+                w.out = o; w.outn = ln[i] + 1; break;
+            }
+        }
+        want_set(text, tn, w);
+    }
+    if (!want_get(text, tn)) {
+        Got f;
+        if (cc_ref(CC, src, &f)) {
+            printf("declmatrix FAIL cc %s ", tag); print_cut(f.err, f.errn, 200); putchar('\n');
+            bad++; free(text); return;
+        }
+        want_set(text, tn, run_ref());
+        if (np > 1) want_set(allkey, strlen(allkey), *want_get(text, tn));
+    }
+    want = want_get(text, tn);
+    got = run_comp(comp, src);
+    if (got.rc == want->rc && got.outn == want->outn && !memcmp(got.out, want->out, got.outn)) { ok += np; free(text); return; }
+    if (narrow && np > 1) {
+        int i;
+        for (i = 0; i < np; i++) check(e, &pi[i], 1, label, comp, 0);
+        free(text); return;
+    }
+    if (got.rc != 0 && strstr(got.err, "not covered") && !got.outn) {
+        size_t b, m; const char *why = ""; size_t whyn = 0;
+        ok++; refused++;
+        py_strip(got.err, got.errn, &b, &m);
+        if (m) {   /* got[2].strip().splitlines()[-3][:90], evaluated before anything is printed */
+            static size_t st[65536], ln[65536]; size_t nl = py_splitlines(got.err + b, m, st, ln, 65536);
+            if (nl < 3) uncaught("IndexError: list index out of range");
+            why = got.err + b + st[nl - 3]; whyn = ln[nl - 3];
+        }
+        printf("  refused  %-14s %-9s ", tag, label);
+        print_cut(why, whyn, 90);
+        putchar('\n');
+    } else {
+        size_t wb, wm, gb, gm, eb, em;
+        bad++;
+        py_strip(want->out, want->outn, &wb, &wm); py_strip(got.out, got.outn, &gb, &gm); py_strip(got.err, got.errn, &eb, &em);
+        printf("  FAIL     %-14s %-9s rc %d want ", tag, label, got.rc);
+        put_repr(stdout, want->out + wb, wm); fputs(" got ", stdout); put_repr(stdout, got.out + gb, gm); putchar(' ');
+        print_cut(got.err + eb, em, 100); putchar('\n');
+    }
+    free(text);
+}
+
+/* subprocess.run(['bash', '-c', '. "$0" && ua_ready', ROOT/tests/lib.sh], cwd=ROOT, check=True, timeout=45) */
+static void ua_ready(void) {
+    char lib[4300], why[16384]; char *v[5]; pid_t pid; int st = 0, rc; double deadline;
+    snprintf(lib, sizeof lib, "%s/tests/lib.sh", ROOT);
+    v[0] = "bash"; v[1] = "-c"; v[2] = ". \"$0\" && ua_ready"; v[3] = lib; v[4] = 0;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) uncaught("OSError: fork failed");
+    if (pid == 0) {
+        if (chdir(ROOT) != 0) _exit(255);
+        execvp(v[0], v);
+        _exit(255);
+    }
+    deadline = pr_monotonic() + 45.0;
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0 && errno != EINTR) break;
+        if (pr_monotonic() >= deadline) {
+            char *l = pr_repr_strlist(v, 4);
+            kill(pid, SIGKILL); while (waitpid(pid, &st, 0) < 0 && errno == EINTR) ;
+            snprintf(why, sizeof why, "subprocess.TimeoutExpired: Command '%s' timed out after 45 seconds", l);
+            uncaught(why);
+        }
+        usleep(20000);
+    }
+    rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    if (rc) { cc_cpe(v, rc, why, sizeof why); uncaught(why); }
+}
+
+/* int(x) for SHARD's parts: Python's int() of a str (surrounding whitespace, a sign, digits with single '_') */
+static long py_int(const char *s, size_t n) {
+    size_t b = 0, e = n, i; long v = 0; int neg = 0, dig = 0; char why[512], *r;
+    while (b < e && py_space((unsigned char)s[b])) b++;
+    while (e > b && py_space((unsigned char)s[e - 1])) e--;
+    i = b;
+    if (i < e && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
+    for (; i < e; i++) {
+        if (s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); dig = 1; }
+        else if (s[i] == '_' && dig && i + 1 < e && s[i + 1] >= '0' && s[i + 1] <= '9') continue;
+        else { dig = 0; break; }
+    }
+    if (!dig) {
+        r = malloc(6 * n + 8); rtc_pyrepr(s, n, r, 6 * n + 8);
+        snprintf(why, sizeof why, "ValueError: invalid literal for int() with base 10: %s", r);
+        uncaught(why);
+    }
+    return neg ? -v : v;
+}
+
+int main(int argc, char **argv) {
+    const char *ua = getenv("UA"), *product = getenv("MODEL_COM"), *shard = getenv("SHARD"), *slash;
+    long k, n, start, i; int all[NPROBES], j; const char *labels[2], *comps[2]; int ncomp;
+    (void)argc;
+    if (cc_root(argv[0], ROOT, sizeof ROOT) != 0) uncaught("FileNotFoundError: [Errno 2] No such file or directory");
+    snprintf(BOUND, sizeof BOUND, "%s/tests/bound", ROOT);
+    if (!ua || !*ua) {   /* the gate's same-source reference, built and stamped by tests/lib.sh */
+        ua_ready();
+        ua = "/tmp/ua_ref";
+    }
+    if (product && !*product) product = 0;
+    CC = getenv("CC"); if (!CC) CC = "cc";
+    labels[0] = "reference"; comps[0] = ua; ncomp = 1;
+    if (product) { labels[1] = "product"; comps[1] = product; ncomp = 2; }
+    if (ptf_mkdtemp(0, "unisacc-declmatrix-", D, sizeof D) != 0) {
+        char p[4200], why[8800]; snprintf(p, sizeof p, "%s", D); D[0] = 0;
+        rtc_oserror(errno, p, why, sizeof why); uncaught(why);
+    }
+    /* k, n = (int(x) for x in os.environ.get('SHARD', '1/1').split('/')) */
+    if (!shard) shard = "1/1";
+    slash = strchr(shard, '/');
+    if (!slash) { py_int(shard, strlen(shard)); uncaught("ValueError: not enough values to unpack (expected 2, got 1)"); }
+    k = py_int(shard, (size_t)(slash - shard));
+    if (strchr(slash + 1, '/')) {
+        const char *s2 = strchr(slash + 1, '/');
+        py_int(slash + 1, (size_t)(s2 - slash - 1));
+        py_int(s2 + 1, strcspn(s2 + 1, "/"));
+        uncaught("ValueError: too many values to unpack (expected 2)");
+    }
+    n = py_int(slash + 1, strlen(slash + 1));
+    if (n == 0) uncaught("ValueError: slice step cannot be zero");
+    for (j = 0; j < NPROBES; j++) all[j] = j;
+    /* for t, init in ELEMS[k - 1::n]: Python slice semantics */
+    start = k - 1;
+    if (n > 0) {
+        if (start < 0) { start += 5; if (start < 0) start = 0; }
+        for (i = start; i < 5; i += n) for (j = 0; j < ncomp; j++) check(&ELEMS[i], all, NPROBES, labels[j], comps[j], 1);
+    } else {
+        if (start < 0) { start += 5; if (start < 0) start = -1; } else if (start > 4) start = 4;
+        for (i = start; i >= 0; i += n) for (j = 0; j < ncomp; j++) check(&ELEMS[i], all, NPROBES, labels[j], comps[j], 1);
+    }
+    if (k == 1) {
+        for (i = 0; i < 3; i++) {
+            char src[4400], why[8800]; cc_buf body = { 0, 0, 0 }; Got f, want;
+            const char *name = EDGES[i][0];
+            snprintf(src, sizeof src, "%s/edge_%s.c", D, name);
+            cc_str(&body, "#include <stdio.h>\n"); cc_str(&body, EDGES[i][1]); cc_str(&body, "\n");
+            errno = 0;
+            if (cx_write(src, body.p, body.n) != 0) { rtc_oserror(errno ? errno : EIO, src, why, sizeof why); uncaught(why); }
+            if (cc_ref(CC, src, &f)) {
+                printf("declmatrix FAIL cc %s ", name); print_cut(f.err, f.errn, 200); putchar('\n');
+                bad++; continue;
+            }
+            want = run_ref();
+            for (j = 0; j < ncomp; j++) {
+                Got got = run_comp(comps[j], src);
+                if (got.rc == want.rc && got.outn == want.outn && !memcmp(got.out, want.out, got.outn)) ok++;
+                else if (got.rc != 0 && strstr(got.err, "not covered") && !got.outn) {
+                    ok++; refused++; printf("  refused  edge.%s %s\n", name, labels[j]);
+                } else {
+                    size_t eb, em;
+                    bad++;
+                    printf("  FAIL declmatrix edge %s %s rc %d ", name, labels[j], got.rc);
+                    put_repr(stdout, got.out, py_prefix(got.out, got.outn, 80)); putchar(' ');
+                    py_strip(got.err, got.errn, &eb, &em); print_cut(got.err + eb, em, 120); putchar('\n');
+                }
+            }
+        }
+    }
+    ptf_rmtree(D); D[0] = 0;
+    printf("declmatrix  ok %d   wrong %d   refused-by-name %d   (types %d x probes %d + edges %d, compilers %d)\n",
+           ok, bad, refused, 5, NPROBES, 3, ncomp);
+    if (fflush(stdout)) return 1;
+    return bad || !ok ? 1 : 0;
+}

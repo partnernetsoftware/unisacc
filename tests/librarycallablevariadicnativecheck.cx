@@ -1,0 +1,239 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallablevariadicnativecheck.cx -- actual model-produced indirect concrete variadic callable sites.
+   Ported from tests/librarycallablevariadicnativecheck.py (2026-10-23, the owner's direction: the toolchain moves
+   off Python).
+   usage: sh ./unisacc.com -run tests/librarycallablevariadicnativecheck.cx -- [-h] --package PACKAGE [--sanitize]
+                                                   [--arch {arm64,x86_64}] [--evidence EVIDENCE]
+   argparse as the .py's (Python 3.14 wording, 80 columns, prog librarycallablevariadicnativecheck.py so help and
+   error text are byte-identical; usage errors rc 2 on stderr, -h on stdout rc 0).  host = arm64 when `uname -m` is
+   arm64/aarch64, else x86_64; an --arch other than the host off Darwin is the .py's SystemExit: `cross execution
+   requires native runner` on stderr, rc 1.  flags = -arch ARCH on Darwin; target = osx/ARCH or lnx/ARCH.
+   In a fresh temporary directory T (tempfile.TemporaryDirectory, prefix r10-callable-var-native-) with exec/c and
+   src made: checklib.copy_runtime(ROOT, T) (tests/cxlib/runtimecopy.cx); PACKAGE resolved strictly and copied to
+   T/compiler.pkg; T/host_exchange.sig (the USLSIG2 declaration `host_exchange` (Pair result; double, int)) and the
+   eleven concrete specialization declarations T/script-*.sig (one valid, one zero-tail, one aggregate tail, eight
+   invalid) written as the .py packed them with struct; then each command through ROOT/tests/bound 20 with output
+   captured and rc 0 required:
+     ${CC:-cc} FLAGS [-fsanitize=address,undefined -fno-omit-frame-pointer] -std=c11 -O2 -shared -fPIC
+        -fvisibility=hidden T/exec/c/libunisacc.c T/exec/c/librarycall_ARCH.S -lffi -o T/library.dylib
+     ${CC:-cc} FLAGS [SAN] -std=c11 -O2 -Wall -Wextra -I T/exec/c ROOT/tests/libraryabi/callable_variadic.c
+        T/library.dylib -o T/probe
+     [arch -x86_64 on an arm64 host for --arch x86_64] T/probe T/compiler.pkg TARGET T
+   The probe's stdout is printed as is, then the evidence record as one json.dumps line (target, sanitize,
+   package/runtime/host-fixture sha256, the fixed scope fields); --evidence PATH also writes it with indent=2 and a
+   newline.  rc 0.
+   A failure is the .py's uncaught exception: the last line of its traceback on stderr, the directory removed, rc 1
+   -- a failed command is `AssertionError: (RC, 'STDOUT', 'STDERR')` (a timeout is bound's rc 142), a missing
+   PACKAGE the FileNotFoundError of the strict resolve, child output that is not UTF-8 the UnicodeDecodeError of
+   the .py's strict decode, an unwritable --evidence path its OSError.
+   Shared code: argparse/uname/ROOT/strict-UTF-8/desc packing from tests/cxlib/callbackcheck.cx, subprocess.run
+   from tests/cxlib/pyrun.cx, copy_runtime/resolve/sha/OSError lines from tests/cxlib/runtimecopy.cx,
+   TemporaryDirectory from tests/cxlib/pytempfile.cx, json.dumps from tests/cxlib/pyjson.cx.
+   Include-free: everything used comes with the cx.h prelude and the modules. */
+#pragma unisa use cxlib.callbackcheck
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.pyjson
+
+static char ROOT[4096], T[4200];
+static void uncaught(const char *line) {   /* the traceback's last line, the directory removed, rc 1 */
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    if (T[0]) { ptf_rmtree(T); T[0] = 0; }
+    exit(1);
+}
+static void putrepr(cc_buf *b, const char *s, size_t n) {   /* repr(str) */
+    size_t cap = 4 * n + 8; char *r = malloc(cap);
+    if (!r) uncaught("MemoryError");
+    rtc_pyrepr(s, n, r, cap); cc_put(b, r, strlen(r)); free(r);
+}
+
+/* run(*cmd): [ROOT/tests/bound, '20', *cmd] captured; a nonzero rc raises AssertionError((rc, out, err));
+   returns r.stdout.decode() (strict) */
+typedef struct Cmd { char *v[48]; int n; } Cmd;
+static void add(Cmd *c, const char *s) { c->v[c->n] = (char *)s; c->v[++c->n] = 0; }
+static char BOUND[4300];
+static void start(Cmd *c) { c->n = 0; c->v[0] = 0; add(c, BOUND); add(c, "20"); }
+static char *run(const Cmd *c, size_t *outn) {
+    pr_result res; static char why[65536]; char *out;
+    if (pr_run(c->v, 0, 0, 0, 86400.0, &res, why, sizeof why) != 0) uncaught(why);
+    if (res.rc) {
+        cc_buf b = { 0, 0, 0 }; char num[32];
+        if (cc_utf8_error(res.out, res.outn, why, sizeof why)) uncaught(why);   /* r.stdout.decode() first */
+        if (cc_utf8_error(res.err, res.errn, why, sizeof why)) uncaught(why);
+        snprintf(num, sizeof num, "AssertionError: (%d, ", res.rc); cc_put(&b, num, strlen(num));
+        putrepr(&b, res.out, res.outn); cc_put(&b, ", ", 2); putrepr(&b, res.err, res.errn); cc_put(&b, ")", 1);
+        uncaught((char *)b.p);
+    }
+    if (cc_utf8_error(res.out, res.outn, why, sizeof why)) uncaught(why);
+    out = res.out; *outn = res.outn; res.out = 0;
+    pr_free(&res);
+    return out;
+}
+
+static cc_buf I, D, PAIR;
+/* concrete(name, args, result=pair, variadic=0) */
+static cc_buf concrete(const char *name, const cc_buf *const *args, int nargs, const cc_buf *result, int variadic) {
+    cc_buf o = { 0, 0, 0 }; int i;
+    cc_str(&o, "USLSIG2\n"); cc_u64(&o, 1); cc_u64(&o, strlen(name)); cc_str(&o, name);
+    cc_byte(&o, 0); cc_byte(&o, 1); cc_byte(&o, (unsigned)variadic); cc_byte(&o, 1);
+    cc_u64(&o, (unsigned long long)nargs); cc_cat(&o, result); cc_u64(&o, (unsigned long long)nargs);
+    for (i = 0; i < nargs; i++) cc_cat(&o, args[i]);
+    cc_byte(&o, 0);
+    return o;
+}
+static void write_bytes(const char *name, const cc_buf *b) {   /* (t/NAME).write_bytes(B) */
+    char path[4400], why[8800];
+    snprintf(path, sizeof path, "%s/%s", T, name);
+    errno = 0;
+    if (cx_write(path, b->p ? (const void *)b->p : (const void *)"", b->n) != 0) {
+        rtc_oserror(errno ? errno : EIO, path, why, sizeof why); uncaught(why);
+    }
+}
+static void sha_of(const char *path, char hex[65]) {
+    char why[8800];
+    if (rtc_sha_file(path, hex, why, sizeof why) != 0) uncaught(why);
+}
+
+int main(int argc, char **argv) {
+    static const char *const archs[] = { "arm64", "x86_64", 0 };
+    static char src_package[8192], why[16384];
+    cc_opt opts[4] = { { "--package", 1, 0, 1, 0 }, { "--sanitize", 0, 0, 0, 0 }, { "--arch", 1, archs, 0, 0 },
+                       { "--evidence", 1, 0, 0, 0 } };
+    char rt[4300], lib[4300], probe[4300], fixture[4300], libsrc[4300], asmsrc[4300], dir[4300], package[4300];
+    char target[32], pkghex[65], libhex[65], fixhex[65], *mach, *sys, *out, *js; const char *host, *arch, *cc;
+    int darwin, sanitize, k; size_t outn, nf, jn; rtc_file *files; Cmd c;
+    cc_buf pp = { 0, 0, 0 }, sig = { 0, 0, 0 }, lp = { 0, 0, 0 }, LEAF, F4, C1;
+    pj_value *ev, *lv;
+
+    cc_parse(argc, argv, "librarycallablevariadicnativecheck.py",
+             "usage: librarycallablevariadicnativecheck.py [-h] --package PACKAGE\n"
+             "                                             [--sanitize]\n"
+             "                                             [--arch {arm64,x86_64}]\n"
+             "                                             [--evidence EVIDENCE]\n",
+             "options:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n  --sanitize\n"
+             "  --arch {arm64,x86_64}\n  --evidence EVIDENCE\n", opts, 4);
+    if (cc_root(argv[0], ROOT, sizeof ROOT) != 0) uncaught("FileNotFoundError: [Errno 2] No such file or directory");
+    sanitize = opts[1].val != 0;
+    mach = cc_uname("-m"); sys = cc_uname("-s");   /* platform.machine(), platform.system() */
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    arch = opts[2].val ? opts[2].val : host;
+    darwin = !strcmp(sys, "Darwin");
+    if (strcmp(arch, host) && !darwin) {   /* raise SystemExit('cross execution requires native runner') */
+        fflush(stdout); fputs("cross execution requires native runner\n", stderr); return 1;
+    }
+    snprintf(target, sizeof target, "%s%s", darwin ? "osx/" : "lnx/", arch);
+    snprintf(BOUND, sizeof BOUND, "%s/tests/bound", ROOT);
+    cc = getenv("CC"); if (!cc) cc = "cc";   /* os.environ.get('CC', 'cc') */
+
+    if (ptf_mkdtemp(0, "r10-callable-var-native-", T, sizeof T) != 0) {
+        char p[4200]; snprintf(p, sizeof p, "%s", T); T[0] = 0;
+        rtc_oserror(errno, p, why, sizeof why); uncaught(why);
+    }
+    /* rt=t/'exec/c'; rt.mkdir(parents=True); (t/'src').mkdir() */
+    snprintf(rt, sizeof rt, "%s/exec/c", T);
+    snprintf(dir, sizeof dir, "%s/exec", T); mkdir(dir, 0777);
+    if (mkdir(rt, 0777) != 0) { rtc_oserror(errno, rt, why, sizeof why); uncaught(why); }
+    snprintf(dir, sizeof dir, "%s/src", T);
+    if (mkdir(dir, 0777) != 0) { rtc_oserror(errno, dir, why, sizeof why); uncaught(why); }
+    if (rtc_copy_runtime(ROOT, T, &files, &nf, why, sizeof why) != 0) uncaught(why);
+    /* package=t/'compiler.pkg'; shutil.copy2(Path(a.package).resolve(strict=True), package) */
+    if (rtc_resolve(opts[0].val, 1, src_package, sizeof src_package, why, sizeof why) != 0) uncaught(why);
+    snprintf(package, sizeof package, "%s/compiler.pkg", T);
+    {   struct stat st; size_t n; char *b;
+        if (stat(src_package, &st) == 0 && S_ISDIR(st.st_mode)) { rtc_oserror(EISDIR, src_package, why, sizeof why); uncaught(why); }
+        errno = 0;
+        if (!(b = cx_read(src_package, &n))) { rtc_oserror(errno ? errno : EIO, src_package, why, sizeof why); uncaught(why); }
+        errno = 0;
+        if (cx_write(package, b, n) != 0) { rtc_oserror(errno ? errno : EIO, package, why, sizeof why); uncaught(why); }
+        free(b);
+        chmod(package, st.st_mode & 07777);
+    }
+
+    /* I=desc(1,4,4); D=desc(3,8,8); pair=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I) */
+    I = cc_desc(1, 4, 4, 0, 0, 0); D = cc_desc(3, 8, 8, 0, 0, 0);
+    cc_u64(&pp, 2); cc_u64(&pp, 0); cc_u64(&pp, 0); cc_u64(&pp, 0); cc_u64(&pp, 8); cc_cat(&pp, &D);
+    cc_u64(&pp, 8); cc_u64(&pp, 0); cc_u64(&pp, 0); cc_u64(&pp, 4); cc_cat(&pp, &I);
+    PAIR = cc_desc(5, 16, 8, 0, 1, &pp);
+    /* b'USLSIG2\n'+u(1)+u(len(name))+name+bytes([0,1,1,1])+u(2)+pair+u(2)+D+I+bytes([0]) */
+    cc_str(&sig, "USLSIG2\n"); cc_u64(&sig, 1); cc_u64(&sig, 13); cc_str(&sig, "host_exchange");
+    cc_byte(&sig, 0); cc_byte(&sig, 1); cc_byte(&sig, 1); cc_byte(&sig, 1);
+    cc_u64(&sig, 2); cc_cat(&sig, &PAIR); cc_u64(&sig, 2); cc_cat(&sig, &D); cc_cat(&sig, &I); cc_byte(&sig, 0);
+    write_bytes("host_exchange.sig", &sig);
+    /* leaf_payload=bytes([1,0])+u(1)+bytes([0,0])+u(3)+pair+u(3)+D+I+pair+bytes([1]);
+       leaf=desc(4,8,8,depth=1,tag=4,payload=leaf_payload) */
+    cc_byte(&lp, 1); cc_byte(&lp, 0); cc_u64(&lp, 1); cc_byte(&lp, 0); cc_byte(&lp, 0);
+    cc_u64(&lp, 3); cc_cat(&lp, &PAIR); cc_u64(&lp, 3); cc_cat(&lp, &D); cc_cat(&lp, &I); cc_cat(&lp, &PAIR); cc_byte(&lp, 1);
+    LEAF = cc_desc(4, 8, 8, 1, 4, &lp);
+    F4 = cc_desc(3, 4, 4, 0, 0, 0); C1 = cc_desc(1, 1, 1, 0, 0, 0);
+    {   const cc_buf *full[4] = { &D, &I, &D, &I }, *zero[2] = { &D, &I }, *agg[4] = { &D, &I, &PAIR, &LEAF },
+                     *prefix[4] = { &I, &I, &D, &I }, *flt[4] = { &D, &I, &F4, &I }, *nar[4] = { &D, &I, &D, &C1 },
+                     *shrt[1] = { &D };
+        cc_buf good = concrete("scriptvar", full, 4, &PAIR, 0), x;
+        write_bytes("script-full.sig", &good);
+        x = concrete("scriptvar", zero, 2, &PAIR, 0); write_bytes("script-zero.sig", &x);
+        x = concrete("scriptvar", agg, 4, &PAIR, 0); write_bytes("script-aggregate.sig", &x);
+        x = concrete("other", full, 4, &PAIR, 0); write_bytes("script-wrongname.sig", &x);
+        x = concrete("scriptvar", full, 4, &D, 0); write_bytes("script-result.sig", &x);
+        x = concrete("scriptvar", prefix, 4, &PAIR, 0); write_bytes("script-prefix.sig", &x);
+        x = concrete("scriptvar", flt, 4, &PAIR, 0); write_bytes("script-float.sig", &x);
+        x = concrete("scriptvar", nar, 4, &PAIR, 0); write_bytes("script-narrow.sig", &x);
+        x = concrete("scriptvar", shrt, 1, &PAIR, 0); write_bytes("script-short.sig", &x);
+        x = concrete("scriptvar", zero, 2, &PAIR, 1); write_bytes("script-variable.sig", &x);
+        good.n--; write_bytes("script-truncated.sig", &good);   /* good[:-1] */
+    }
+
+    snprintf(lib, sizeof lib, "%s/library.dylib", T);
+    snprintf(probe, sizeof probe, "%s/probe", T);
+    snprintf(libsrc, sizeof libsrc, "%s/libunisacc.c", rt);
+    snprintf(asmsrc, sizeof asmsrc, "%s/librarycall_%s.S", rt, arch);
+    snprintf(fixture, sizeof fixture, "%s/tests/libraryabi/callable_variadic.c", ROOT);
+    for (k = 0; k < 2; k++) {
+        start(&c); add(&c, cc);
+        if (darwin) { add(&c, "-arch"); add(&c, arch); }
+        if (sanitize) { add(&c, "-fsanitize=address,undefined"); add(&c, "-fno-omit-frame-pointer"); }
+        add(&c, "-std=c11"); add(&c, "-O2");
+        if (!k) { add(&c, "-shared"); add(&c, "-fPIC"); add(&c, "-fvisibility=hidden"); add(&c, libsrc); add(&c, asmsrc);
+                  add(&c, "-lffi"); add(&c, "-o"); add(&c, lib); }
+        else { add(&c, "-Wall"); add(&c, "-Wextra"); add(&c, "-I"); add(&c, rt); add(&c, fixture); add(&c, lib);
+               add(&c, "-o"); add(&c, probe); }
+        free(run(&c, &outn));
+    }
+    start(&c);
+    if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { add(&c, "arch"); add(&c, "-x86_64"); }
+    add(&c, probe); add(&c, package); add(&c, target); add(&c, T);
+    out = run(&c, &outn);
+    fwrite(out, 1, outn, stdout); free(out);   /* print(output, end='') */
+
+    sha_of(package, pkghex); sha_of(lib, libhex); sha_of(fixture, fixhex);
+    ev = pj_dict();
+    pj_set(ev, "target", pj_strz(target));
+    pj_set(ev, "sanitize", pj_bool(sanitize));
+    pj_set(ev, "package_sha256", pj_strz(pkghex));
+    pj_set(ev, "runtime_sha256", pj_strz(libhex));
+    lv = pj_list(); pj_append(lv, pj_int(0)); pj_append(lv, pj_int(1)); pj_append(lv, pj_int(2));
+    pj_set(ev, "optimisation_levels", lv);
+    pj_set(ev, "repeats_per_level", pj_int(100));
+    pj_set(ev, "callback_exit_status", pj_int(23));
+    lv = pj_list(); pj_append(lv, pj_strz("promoted double/int tail")); pj_append(lv, pj_strz("zero-tail"));
+    pj_append(lv, pj_strz("Pair and fixed callable tail"));
+    pj_set(ev, "explicit_export_specializations", lv);
+    pj_set(ev, "invalid_specialization_declarations", pj_int(8));
+    pj_set(ev, "failure_checks", pj_strz("native normal return, outer ABI zero/canary, specialized SCRIPT closure tail "
+                                         "exit23, independent next-call recovery"));
+    pj_set(ev, "host_fixture_sha256", pj_strz(fixhex));
+    pj_set(ev, "scope", pj_strz("actual public native->script entry(Var) -> concrete indirect native varargs -> fixed "
+                                "script Leaf; frozen native template introduction; concrete script va_arg reads promoted "
+                                "double/int, Pair and fixed callback tails; native Leaf and SCRIPT closure conversion, "
+                                "zero-tail and nested site restoration; unknown-tail script closures not supported"));
+    pj_dumps(ev, -1, &js, &jn);
+    fwrite(js, 1, jn, stdout); fputc('\n', stdout); free(js);
+    if (opts[3].val) {   /* Path(a.evidence).write_text(json.dumps(evidence, indent=2) + '\n') */
+        cc_buf e = { 0, 0, 0 };
+        pj_dumps(ev, 2, &js, &jn); cc_put(&e, js, jn); cc_put(&e, "\n", 1); free(js);
+        errno = 0;
+        if (cx_write(opts[3].val, e.p, e.n) != 0) { rtc_oserror(errno ? errno : EIO, opts[3].val, why, sizeof why); uncaught(why); }
+    }
+    ptf_rmtree(T); T[0] = 0;
+    return fflush(stdout) ? 1 : 0;
+}

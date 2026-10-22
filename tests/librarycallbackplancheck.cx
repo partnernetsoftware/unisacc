@@ -1,0 +1,127 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallbackplancheck.cx -- private exact declarations exercising capability gates, not callback execution.
+   Ported from tests/librarycallbackplancheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarycallbackplancheck.cx -- [-h] [--arch {arm64,x86_64}]
+   ROOT is the directory above this file's (the .py's Path(__file__).resolve().parents[1]); run as a compiled binary
+   (tests/cxbin) it is the working directory.  ARCH is --arch or the host's (arm64 for uname -m arm64/aarch64, else
+   x86_64); a foreign ARCH off Darwin is `native runner required` on stderr, rc 1.  In a fresh temporary directory
+   (TMPDIR, TEMP, TMP or /tmp; prefix r10-callbackplan-) the five USLSIG2 declarations the .py packed with struct are
+   written to 0.sig .. 4.sig (the callback graph, its double-last and double-result variants, an unsupported callback
+   and a plain int one); then twice (plain, then -fsanitize=address,undefined -g)
+     tests/bound 20 $CC [-arch ARCH] -std=c11 -I ROOT -Wall -Wextra -Wno-unused-function
+                        ROOT/tests/librarycallbackplancheck.c -lffi [-ldl off Darwin] -o TMP/probe [sanitizer flags]
+     tests/bound 20 [arch -x86_64 on an arm64 host for x86_64] TMP/probe TMP/0.sig .. TMP/4.sig
+   with the caller's stdio ($CC defaults to cc).  Then `callback declaration/plan: normal + ASan/UBSan passed on ARCH`,
+   rc 0.  A step that exits nonzero is the .py's uncaught subprocess.CalledProcessError: its last traceback line
+   (`subprocess.CalledProcessError: Command '[...]' returned non-zero exit status N.`) on stderr, rc 1 (the frames
+   above it name the .py's own source lines and are not reproduced); a failed exec is the OSError line, rc 1.
+   argparse errors are rc 2 with its usage text (prog name librarycallbackplancheck.py, so the text is
+   byte-identical).  Shared with tests/librarycallbackoutcomecheck.cx: tests/cxlib/callbackcheck.cx. */
+#pragma unisa use cxlib.callbackcheck
+
+static char ROOT[4096], TD[4200];
+
+static void fail(const char *line) {
+    if (TD[0]) { pr_rmtree(TD); TD[0] = 0; }
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    cc_out_flush();
+    exit(1);
+}
+static void bounded(char **cmd) {   /* checklib.bounded(*cmd): tests/bound 20 CMD..., check=True */
+    char bound[4300], why[16384], *argv[64]; int n = 0, rc;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    argv[n++] = bound; argv[n++] = "20";
+    while (*cmd) argv[n++] = *cmd++;
+    argv[n] = 0;
+    rc = cc_call(argv, why, sizeof why);
+    if (rc == -1000) fail(why);
+    if (rc != 0) { cc_cpe(argv, rc, why, sizeof why); fail(why); }
+}
+
+/* the .py's helpers */
+static cc_buf I, D, F, P, PAIR;
+static cc_buf callback(const cc_buf *payload) { return cc_desc(4, 8, 8, 1, 4, payload); }
+static void args_into(cc_buf *b, const cc_buf *args, int n) {   /* u(len)+b''.join(args) */
+    int i;
+    cc_u64(b, (unsigned long long)n);
+    for (i = 0; i < n; i++) cc_cat(b, &args[i]);
+}
+static cc_buf define(unsigned i, const cc_buf *result, const cc_buf *args, int n) {
+    cc_buf p = { 0, 0, 0 };
+    cc_byte(&p, 1); cc_byte(&p, 0); cc_u64(&p, i); cc_byte(&p, 0); cc_byte(&p, n > 6);
+    cc_u64(&p, (unsigned long long)n); cc_cat(&p, result); args_into(&p, args, n); cc_byte(&p, 1);
+    return callback(&p);
+}
+static cc_buf ref(unsigned i) { cc_buf p = { 0, 0, 0 }; cc_byte(&p, 1); cc_byte(&p, 1); cc_u64(&p, i); return callback(&p); }
+static cc_buf pack(const cc_buf *result, const cc_buf *args, int n, unsigned support) {
+    cc_buf b = { 0, 0, 0 };
+    cc_str(&b, "USLSIG2\n"); cc_u64(&b, 1); cc_u64(&b, 10); cc_str(&b, "host_drive");
+    cc_byte(&b, 0); cc_byte(&b, 1); cc_byte(&b, 0); cc_byte(&b, n > 6);
+    cc_u64(&b, (unsigned long long)n); cc_cat(&b, result); args_into(&b, args, n); cc_byte(&b, support);
+    return b;
+}
+static cc_buf graph(const cc_buf *result, const cc_buf *last) {
+    cc_buf la[9], ra[1], pa[2];
+    la[0] = I; la[1] = D; la[2] = F; la[3] = P; la[4] = PAIR; la[5] = I; la[6] = D; la[7] = I; la[8] = *last;
+    ra[0] = define(2, result, la, 9);
+    pa[0] = define(1, &PAIR, ra, 1); pa[1] = ref(2);
+    return pack(&PAIR, pa, 2, 1);
+}
+
+int main(int argc, char **argv) {
+    static const char *const archs[] = { "arm64", "x86_64", 0 };
+    cc_opt opts[1] = { { "--arch", 1, archs, 0, 0 } };
+    const char *host, *arch, *cc; char *mach, *sys; int darwin, rosetta, i, san;
+    char files[5][4300], exe[4300], src[4300], why[8400];
+    cc_parse(argc, argv, "librarycallbackplancheck.py", "usage: librarycallbackplancheck.py [-h] [--arch {arm64,x86_64}]\n",
+             "options:\n  -h, --help            show this help message and exit\n  --arch {arm64,x86_64}\n", opts, 1);
+    if (cc_root(argv[0], ROOT, sizeof ROOT) != 0) return 1;
+    mach = cc_uname("-m"); sys = cc_uname("-s");
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    arch = opts[0].val ? opts[0].val : host;
+    darwin = !strcmp(sys, "Darwin");
+    if (strcmp(arch, host) && !darwin) fail("native runner required");
+    rosetta = !strcmp(host, "arm64") && !strcmp(arch, "x86_64");
+
+    I = cc_desc(1, 4, 4, 0, 0, 0); D = cc_desc(3, 8, 8, 0, 0, 0); F = cc_desc(3, 4, 4, 0, 0, 0); P = cc_desc(2, 8, 8, 1, 0, 0);
+    {   cc_buf pl = { 0, 0, 0 };
+        cc_u64(&pl, 2); cc_u64(&pl, 0); cc_u64(&pl, 0); cc_u64(&pl, 0); cc_u64(&pl, 8); cc_cat(&pl, &D);
+        cc_u64(&pl, 8); cc_u64(&pl, 0); cc_u64(&pl, 0); cc_u64(&pl, 4); cc_cat(&pl, &I);
+        PAIR = cc_desc(5, 16, 8, 0, 1, &pl);
+    }
+    if (pr_tempdir("r10-callbackplan-", TD, sizeof TD) != 0) { TD[0] = 0; rtc_oserror(errno, "/tmp", why, sizeof why); fail(why); }
+    {   cc_buf sigs[5], cb = callback(0), ia[1];
+        sigs[0] = graph(&PAIR, &I); sigs[1] = graph(&PAIR, &D); sigs[2] = graph(&D, &I);
+        sigs[3] = pack(&I, &cb, 1, 0);
+        ia[0] = I; sigs[4] = pack(&I, ia, 1, 1);
+        for (i = 0; i < 5; i++) {
+            snprintf(files[i], sizeof files[i], "%s/%d.sig", TD, i);
+            if (cx_write(files[i], (const char *)sigs[i].p, sigs[i].n) != 0) { rtc_oserror(errno ? errno : EIO, files[i], why, sizeof why); fail(why); }
+        }
+    }
+    cc = getenv("CC"); if (!cc) cc = "cc";
+    snprintf(exe, sizeof exe, "%s/probe", TD);
+    snprintf(src, sizeof src, "%s/tests/librarycallbackplancheck.c", ROOT);
+    for (san = 0; san < 2; san++) {
+        char *c[40]; int n = 0;
+        c[n++] = (char *)cc;
+        if (darwin) { c[n++] = "-arch"; c[n++] = (char *)arch; }
+        c[n++] = "-std=c11"; c[n++] = "-I"; c[n++] = ROOT; c[n++] = "-Wall"; c[n++] = "-Wextra"; c[n++] = "-Wno-unused-function";
+        c[n++] = src; c[n++] = "-lffi";
+        if (!darwin) c[n++] = "-ldl";
+        c[n++] = "-o"; c[n++] = exe;
+        if (san) { c[n++] = "-fsanitize=address,undefined"; c[n++] = "-g"; }
+        c[n] = 0;
+        bounded(c);
+        n = 0;
+        if (rosetta) { c[n++] = "arch"; c[n++] = "-x86_64"; }
+        c[n++] = exe;
+        for (i = 0; i < 5; i++) c[n++] = files[i];
+        c[n] = 0;
+        bounded(c);
+    }
+    pr_rmtree(TD); TD[0] = 0;
+    {   char line[128]; snprintf(line, sizeof line, "callback declaration/plan: normal + ASan/UBSan passed on %s\n", arch); cc_say(line, strlen(line)); }
+    cc_out_flush();
+    return 0;
+}

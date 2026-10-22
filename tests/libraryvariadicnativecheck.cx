@@ -1,0 +1,161 @@
+#!/usr/bin/env -S unisacc.com -run
+/* libraryvariadicnativecheck.cx -- actual public variadic native calls through the model parser.
+   This does not prove callback signature graphs or six-platform coverage.
+   Ported from tests/libraryvariadicnativecheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/libraryvariadicnativecheck.cx -- [-h] --package PACKAGE [--sanitize]
+                                                                      [--arch {arm64,x86_64}]
+   argparse as the .py's (Python 3.14 wording, 80 columns, prog libraryvariadicnativecheck.py so help and error text
+   are byte-identical; usage errors rc 2 on stderr, -h on stdout rc 0).  host = arm64 when `uname -m` is
+   arm64/aarch64, else x86_64; an --arch other than the host off Darwin is `AssertionError: cross-native execution
+   requires an explicit platform runner` (stderr, rc 1).  flags = -arch ARCH on Darwin; target = osx/ARCH or
+   lnx/ARCH; package = Path(PACKAGE).resolve() (non-strict).  In a fresh temporary directory TD
+   (tempfile.TemporaryDirectory, prefix r10-var-native-) with exec/c and src made, checklib.copy_runtime(ROOT, TD)
+   (tests/cxlib/runtimecopy.cx), then each command with output captured, a 20 s limit and rc 0 required:
+     cc FLAGS [-fsanitize=address,undefined -fno-omit-frame-pointer] -std=c11 -O2 -shared -fPIC -fvisibility=hidden
+        TD/exec/c/libunisacc.c TD/exec/c/librarycall_ARCH.S -lffi -o TD/library.dylib
+     cc FLAGS [SAN] -std=c11 -O2 -Wall -Wextra -I TD/exec/c ROOT/tests/libraryabi/variadic_bidirectional.c
+        TD/library.dylib -o TD/probe
+     (TD/host_exchange.sig written: the USLSIG2 declaration `host_exchange` (Pair result; double, int) the .py
+      packed with struct)
+     [arch -x86_64 on an arm64 host for --arch x86_64] TD/probe PACKAGE TARGET TD
+   The probe's stdout is printed as is, then one json.dumps line {"target", "package_sha256", "runtime_sha256",
+   "optimisation_levels": [0, 1, 2], "calls_per_level": 100, "scope"}; rc 0.
+   A failure is the .py's uncaught exception: the last line of its traceback on stderr, the directory removed, rc 1
+   -- a failed command is `AssertionError: (ARGS, RC, 'STDOUT', 'STDERR')` with ARGS repr'd as the .py built them
+   (Path arguments as PosixPath('...')), a timed-out one `subprocess.TimeoutExpired: Command '[...]' timed out after
+   20 seconds`, a missing cc `FileNotFoundError: [Errno 2] No such file or directory: 'cc'`, child output that is
+   not UTF-8 the UnicodeDecodeError of the .py's strict decode.
+   Shared code: argparse/uname/ROOT/strict-UTF-8 from tests/cxlib/callbackcheck.cx, subprocess.run from
+   tests/cxlib/pyrun.cx, copy_runtime/resolve/sha from tests/cxlib/runtimecopy.cx, TemporaryDirectory from
+   tests/cxlib/pytempfile.cx.  (tests/cxlib/libnative.cx runs the same flow for librarysig2/typed native checks but
+   has no --sanitize option or prefix parameter, so this file keeps its own short main.)
+   Include-free: everything used comes with the cx.h prelude and the modules. */
+#pragma unisa use cxlib.callbackcheck
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pytempfile
+
+static char ROOT[4096], TD[4200];
+static void uncaught(const char *line) {   /* the traceback's last line, the directory removed, rc 1 */
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    if (TD[0]) { ptf_rmtree(TD); TD[0] = 0; }
+    exit(1);
+}
+static void putrepr(cc_buf *b, const char *s, size_t n) {   /* repr(str) */
+    size_t cap = 4 * n + 8; char *r = malloc(cap);
+    if (!r) uncaught("MemoryError");
+    rtc_pyrepr(s, n, r, cap); cc_put(b, r, strlen(r)); free(r);
+}
+
+/* command(args): each argument with whether the .py passed it as a Path (repr PosixPath('...')) */
+typedef struct Cmd { char *v[40]; int path[40]; int n; } Cmd;
+static void add(Cmd *c, const char *s, int path) { c->v[c->n] = (char *)s; c->path[c->n] = path; c->v[++c->n] = 0; }
+/* subprocess.run(capture_output=True, timeout=20); a nonzero rc raises AssertionError((args, rc, out, err));
+   returns p.stdout.decode() (strict) */
+static char *command(const Cmd *c, size_t *outn) {
+    pr_result res; char why[65536]; char *out;
+    if (pr_run(c->v, 0, 0, 0, 20.0, &res, why, sizeof why) != 0) uncaught(why);
+    if (res.rc) {
+        cc_buf b = { 0, 0, 0 }; char num[32]; int i;
+        if (cc_utf8_error(res.out, res.outn, why, sizeof why)) uncaught(why);   /* p.stdout.decode() first */
+        if (cc_utf8_error(res.err, res.errn, why, sizeof why)) uncaught(why);
+        cc_put(&b, "AssertionError: ([", 18);
+        for (i = 0; i < c->n; i++) {
+            if (i) cc_put(&b, ", ", 2);
+            if (c->path[i]) cc_put(&b, "PosixPath(", 10);
+            putrepr(&b, c->v[i], strlen(c->v[i]));
+            if (c->path[i]) cc_put(&b, ")", 1);
+        }
+        snprintf(num, sizeof num, "], %d, ", res.rc); cc_put(&b, num, strlen(num));
+        putrepr(&b, res.out, res.outn); cc_put(&b, ", ", 2); putrepr(&b, res.err, res.errn); cc_put(&b, ")", 1);
+        uncaught((char *)b.p);
+    }
+    if (cc_utf8_error(res.out, res.outn, why, sizeof why)) uncaught(why);
+    out = res.out; *outn = res.outn; res.out = 0;
+    pr_free(&res);
+    return out;
+}
+
+static cc_buf I, D, PAIR;
+
+int main(int argc, char **argv) {
+    static const char *const archs[] = { "arm64", "x86_64", 0 };
+    static char package[8192], why[16384];
+    cc_opt opts[3] = { { "--package", 1, 0, 1, 0 }, { "--sanitize", 0, 0, 0, 0 }, { "--arch", 1, archs, 0, 0 } };
+    char runtime[4300], lib[4300], probe[4300], src[4300], libsrc[4300], asmsrc[4300], dir[4300], sigpath[4300];
+    char target[32], pkghex[65], libhex[65], *mach, *sys, *out; const char *host, *arch; int darwin, sanitize;
+    size_t outn, nf; rtc_file *files; Cmd c; cc_buf pp = { 0, 0, 0 }, sig = { 0, 0, 0 };
+
+    cc_parse(argc, argv, "libraryvariadicnativecheck.py",
+             "usage: libraryvariadicnativecheck.py [-h] --package PACKAGE [--sanitize]\n"
+             "                                     [--arch {arm64,x86_64}]\n",
+             "options:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n  --sanitize\n"
+             "  --arch {arm64,x86_64}\n", opts, 3);
+    if (cc_root(argv[0], ROOT, sizeof ROOT) != 0) uncaught("FileNotFoundError: [Errno 2] No such file or directory");
+    sanitize = opts[1].val != 0;
+    mach = cc_uname("-m"); sys = cc_uname("-s");   /* platform.machine(), platform.system() */
+    host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    arch = opts[2].val ? opts[2].val : host;
+    darwin = !strcmp(sys, "Darwin");
+    if (strcmp(arch, host) && !darwin) uncaught("AssertionError: cross-native execution requires an explicit platform runner");
+    snprintf(target, sizeof target, "%s%s", darwin ? "osx/" : "lnx/", arch);
+    if (rtc_resolve(opts[0].val, 0, package, sizeof package, why, sizeof why) != 0) uncaught(why);
+
+    if (ptf_mkdtemp(0, "r10-var-native-", TD, sizeof TD) != 0) {
+        char p[4200]; snprintf(p, sizeof p, "%s", TD); TD[0] = 0;
+        rtc_oserror(errno, p, why, sizeof why); uncaught(why);
+    }
+    /* runtime=td/'exec/c'; runtime.mkdir(parents=True); (td/'src').mkdir() */
+    snprintf(runtime, sizeof runtime, "%s/exec/c", TD);
+    snprintf(dir, sizeof dir, "%s/exec", TD); mkdir(dir, 0777);
+    if (mkdir(runtime, 0777) != 0) { rtc_oserror(errno, runtime, why, sizeof why); uncaught(why); }
+    snprintf(dir, sizeof dir, "%s/src", TD);
+    if (mkdir(dir, 0777) != 0) { rtc_oserror(errno, dir, why, sizeof why); uncaught(why); }
+    if (rtc_copy_runtime(ROOT, TD, &files, &nf, why, sizeof why) != 0) uncaught(why);
+
+    snprintf(lib, sizeof lib, "%s/library.dylib", TD);
+    snprintf(libsrc, sizeof libsrc, "%s/libunisacc.c", runtime);
+    snprintf(asmsrc, sizeof asmsrc, "%s/librarycall_%s.S", runtime, arch);
+    c.n = 0; c.v[0] = 0;
+    add(&c, "cc", 0); if (darwin) { add(&c, "-arch", 0); add(&c, arch, 0); }
+    if (sanitize) { add(&c, "-fsanitize=address,undefined", 0); add(&c, "-fno-omit-frame-pointer", 0); }
+    add(&c, "-std=c11", 0); add(&c, "-O2", 0); add(&c, "-shared", 0); add(&c, "-fPIC", 0);
+    add(&c, "-fvisibility=hidden", 0); add(&c, libsrc, 1); add(&c, asmsrc, 1); add(&c, "-lffi", 0);
+    add(&c, "-o", 0); add(&c, lib, 1);
+    free(command(&c, &outn));
+
+    snprintf(probe, sizeof probe, "%s/probe", TD);
+    snprintf(src, sizeof src, "%s/tests/libraryabi/variadic_bidirectional.c", ROOT);
+    c.n = 0; c.v[0] = 0;
+    add(&c, "cc", 0); if (darwin) { add(&c, "-arch", 0); add(&c, arch, 0); }
+    if (sanitize) { add(&c, "-fsanitize=address,undefined", 0); add(&c, "-fno-omit-frame-pointer", 0); }
+    add(&c, "-std=c11", 0); add(&c, "-O2", 0); add(&c, "-Wall", 0); add(&c, "-Wextra", 0);
+    add(&c, "-I", 0); add(&c, runtime, 1); add(&c, src, 1); add(&c, lib, 1); add(&c, "-o", 0); add(&c, probe, 1);
+    free(command(&c, &outn));
+
+    /* I=desc(1,4,4); D=desc(3,8,8); pair=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I) */
+    I = cc_desc(1, 4, 4, 0, 0, 0); D = cc_desc(3, 8, 8, 0, 0, 0);
+    cc_u64(&pp, 2); cc_u64(&pp, 0); cc_u64(&pp, 0); cc_u64(&pp, 0); cc_u64(&pp, 8); cc_cat(&pp, &D);
+    cc_u64(&pp, 8); cc_u64(&pp, 0); cc_u64(&pp, 0); cc_u64(&pp, 4); cc_cat(&pp, &I);
+    PAIR = cc_desc(5, 16, 8, 0, 1, &pp);
+    /* b'USLSIG2\n'+u(1)+u(len(name))+name+bytes([0,1,1,1])+u(len(args))+pair+u(len(args))+D+I+bytes([0]) */
+    cc_str(&sig, "USLSIG2\n"); cc_u64(&sig, 1); cc_u64(&sig, 13); cc_str(&sig, "host_exchange");
+    cc_byte(&sig, 0); cc_byte(&sig, 1); cc_byte(&sig, 1); cc_byte(&sig, 1);
+    cc_u64(&sig, 2); cc_cat(&sig, &PAIR); cc_u64(&sig, 2); cc_cat(&sig, &D); cc_cat(&sig, &I); cc_byte(&sig, 0);
+    snprintf(sigpath, sizeof sigpath, "%s/host_exchange.sig", TD);
+    errno = 0;
+    if (cx_write(sigpath, sig.p, sig.n) != 0) { rtc_oserror(errno ? errno : EIO, sigpath, why, sizeof why); uncaught(why); }
+
+    c.n = 0; c.v[0] = 0;
+    if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { add(&c, "arch", 0); add(&c, "-x86_64", 0); }
+    add(&c, probe, 1); add(&c, package, 1); add(&c, target, 0); add(&c, TD, 1);
+    out = command(&c, &outn);
+    fwrite(out, 1, outn, stdout); free(out);   /* print(output, end='') */
+    if (rtc_sha_file(package, pkghex, why, sizeof why) != 0) uncaught(why);
+    if (rtc_sha_file(lib, libhex, why, sizeof why) != 0) uncaught(why);
+    printf("{\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
+           "\"calls_per_level\": 100, \"scope\": \"actual public native->script->variadic native Pair return, promotion, "
+           "nested expression, two concrete graphs; not full callback ABI\"}\n", target, pkghex, libhex);
+    ptf_rmtree(TD); TD[0] = 0;
+    return fflush(stdout) ? 1 : 0;
+}
