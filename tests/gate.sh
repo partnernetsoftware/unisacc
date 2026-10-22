@@ -214,7 +214,7 @@ for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
 for k in 1 2 3 4; do job difftest-py-$k env -u UA -u UA_RUN SHARD=$k/4 ./tests/difftest.sh; done
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 sh ./tests/cxbin tests/declmatrix.cx; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects) (.cx port, 2026-10-23)
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
-job decision-ledger python3 ./tests/decisionledger.py   # 0.0.23 I: build-time Python control (direct transition sites) may only fall
+job decision-ledger tests/bound 58 sh ./tests/cxbin tests/decisionledger.cx   # (.cx port, 2026-10-23) 0.0.23 I: build-time Python control (direct transition sites) may only fall
 job manifest-entries-pp tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage pp   # (.cx port, 2026-10-23)
 job manifest-entries-lex tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage lex
 job manifest-entries-parse2 tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage parse2
@@ -265,7 +265,7 @@ job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fet
 job draftguard tests/bound 58 sh ./unisacc.com -run tests/draftguardcheck.cx   # (.cx port, 2026-10-23) 0.0.39 R3: workflow draft-input guard executed
 job warmup ./tests/warmupcheck.sh   # 0.0.38: warm-up markers only for a built cache; COLD named
 job installpair ./tests/installpaircheck.sh   # 0.0.38: queue root pair = comboot's reinstall when same origin
-for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done   # 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
+for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k/40 sh ./tests/cxbin tests/csmithdiff.cx; done   # (.cx port, 2026-10-23) 0.0.31: reference only; com-csmithdiff runs the product (both ran it: 677 s duplicated per queue)   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
 # R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
 # regressions found after 0.0.16's local queue was green came from here
 # (ccrun8: a Python-route bit-field value; opt-run1: c-testsuite 00204).
@@ -897,7 +897,7 @@ for st in lower enc; do job rowcov-$st-build sh ./tests/cxbin tests/rowcov.cx $s
 for st in lower enc; do for k in $(seq 1 8); do job rowcov-$st-$k sh ./tests/cxbin tests/rowcov.cx $st gate$k/8; done; done   # 0.0.26 T2: lower (--full) and enc (--elf) rows, on tapes from the reference -S
 for st in lower enc; do job rowcov-$st-union sh ./tests/cxbin tests/rowcov.cx $st union8; done   # 0.0.28 E22: the union may only rise, whatever the shards' redistribution
 job rowcov-parse2-union sh ./tests/cxbin tests/rowcov.cx parse2 union24   # 0.0.29 T4
-job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
+job seedpy tests/bound 58 sh ./tests/cxbin tests/decisionledger.cx --seedpy   # (.cx port, 2026-10-23) 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
 job freezecheck tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx   # (.cx port, 2026-10-22) 0.0.25 P1: inside the freeze window only fix:/fix(<scope>): commits touch the product closure; the window starts at the explicit freeze commit in release/freeze.tsv (0.0.43 M1, R10)
 job freezecheck-selftest tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx -- --selftest   # 0.0.43 M1: scratch repo -- no freeze row rc 0, feat: touching exec/ in the window rc 1, fix(cx): ok, waiver, tag
@@ -1118,7 +1118,7 @@ if [ "$COM" = 1 ]; then
     job com-iquote tests/bound 58 sh "$PRODUCT" -run tests/iquotecheck.cx -- "$PRODUCT"   # 0.0.43: -iquote searched by quoted includes only, before -I
     job com-volatile-comma MODEL_COM="$PRODUCT" bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 sh "$MODEL_COM" -run tests/volatilecomma.cx -- --com'   # (.cx port, 2026-10-23)
     job com-full-signature tests/bound 58 sh "$PRODUCT" -run tests/fullsignaturecallcheck.cx -- --package "$PRODUCT"   # (.cx port, 2026-10-23) 21 actual product calls (fp9/mixed17/returned/pick/nested probe x -O0..-O2) exit 0 with empty stdout and stderr
-    for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
+    for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 sh ./tests/cxbin tests/csmithdiff.cx; done   # (.cx port, 2026-10-23)
     for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 sh ./tests/cxbin tests/declmatrix.cx; done   # the same matrix on the product (found functions named r0..r7) (.cx port, 2026-10-23)
     job com-auditnet MODEL_COM="$PRODUCT" sh "$PRODUCT" -run tests/auditnet.cx   # (.cx port, 2026-10-22) 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
     job com-tapebin-ref python3 ./tests/tapebinref.py prepare   # 0.0.43 T-1: the reference compiler, built once per content key; the shards only locate it

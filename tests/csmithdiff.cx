@@ -1,0 +1,535 @@
+#!/usr/bin/env -S unisacc.com -run
+/* csmithdiff.cx -- tests/csmithdiff.py in C (2026-10-23, the py->cx port wave: the toolchain moves off Python).
+   csmithdiff: fixed-seed Csmith programs, reference / product / system cc (0.0.22 TDD, T2).
+   usage: [UA=REF] [MODEL_COM=PRODUCT] [SEEDS=a-b] [SHARD=k/n] sh ./tests/cxbin tests/csmithdiff.cx
+          (or sh ./unisacc.com -run tests/csmithdiff.cx; arguments are ignored, as by the .py)
+   Csmith writes UB-free C99 whose output is one checksum.  Each seed is compiled by cc (the expected checksum) and
+   run through the reference UA and, when MODEL_COM is set, the product.  A refusal by name ("not covered") is allowed
+   and listed; a different checksum, a crash or a hang where cc finished is a failure, unless the seed is listed in
+   tests/csmithdiff.knownwrong (one "seed compiler" per line, removed when fixed -- a listed seed that passes is red).
+   Seeds: SEEDS=a-b (default 1-40), split by SHARD=k/n (Python's range(a, b+1)[k-1::n]).  Needs csmith on PATH
+   (shutil.which); its headers from CSMITH_INCLUDE, else PREFIX/include/csmith-* (sorted), PREFIX/include/csmith or
+   /usr/include/csmith, PREFIX the parent of the resolved csmith's directory (tests/hostcheck.py csmith_include).
+   Every step runs under the watchdog with the .py's limits (csmith 20 s in the scratch directory, cc 30 s, the cc
+   binary 5 s, each compiler 20 s): the .py ran `python3 tests/bound.py N CMD...`, which execs the cached native
+   watchdog when it is ready; this runs `sh tests/bound N CMD...`, the same native watchdog (142 on a timeout,
+   128+N for signal N), without Python.  Output is decoded as bytes.decode(errors='replace').
+   cc's verdict per seed is cached in $TMPDIR/unisacc-csmith-want/KEY.json (json.dumps([rc, stdout, stderr])), KEY the
+   .py's sha256 of repr((csmith path, its sha256, include dir, header identity, `cc --version` bytes, cc's sha256,
+   CSMITH_OPTS, seed)), so the .py and this file share one cache (and csmithdiff-k / com-csmithdiff-k pay the 5 s
+   no-verdict seeds once).
+   Without UA the reference is built by `bash -c '. "$0" && ua_ready' tests/lib.sh` (45 s, its output passes through)
+   and is /tmp/ua_ref.  Output lines, summary and exit status are the .py's: rc 1 if anything is wrong or revived, or
+   nothing was ok/refused/known; `csmithdiff: csmith not found (brew install csmith)` (and the other sys.exit
+   messages) rc 1.  An uncaught Python exception (a refusal with fewer than three stderr lines, a bad SEEDS/SHARD, a
+   failed ua_ready) is rc 1 with only the traceback's last line on stderr, after stdout is flushed.
+   The repository root is the parent of this file's directory (the .py's Path(__file__).resolve().parents[1]); under
+   tests/cxbin that is the current directory, the repository root.  No #include: the prelude is built in. */
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.pyjson
+#pragma unisa use cxlib.runtimecopy
+
+#define PATHN 4096
+static char ROOT[PATHN], TD[PATHN];
+
+static void cleanup(void) { if (TD[0]) { pr_rmtree(TD); TD[0] = 0; } }
+/* an uncaught exception or sys.exit(msg): stdout flushed, the message on stderr, the scratch directory removed */
+static void die(const char *what) {
+    fflush(stdout);
+    fprintf(stderr, "%s\n", what);
+    cleanup();
+    exit(1);
+}
+static void *xrealloc(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) die("MemoryError"); return q; }
+
+/* ---- growable text ---- */
+typedef struct { char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) { size_t c = b->cap ? b->cap : 256; while (c < b->n + n + 1) c *= 2; b->p = xrealloc(b->p, c); b->cap = c; }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void brepr(Buf *b, const char *s) {   /* repr(str) */
+    size_t l = strlen(s), cap = 4 * l + 16; char *r = xrealloc(0, cap);
+    rtc_pyrepr(s, l, r, cap); bputs(b, r); free(r);
+}
+
+/* ---- Python str helpers over UTF-8 text ---- */
+static unsigned long cp_at(const char *str, size_t n, size_t i, size_t *len) {
+    const unsigned char *s = (const unsigned char *)str; unsigned long c = s[i]; int need = 0, k;
+    if (c >= 0xF0) { need = 3; c &= 0x07; } else if (c >= 0xE0) { need = 2; c &= 0x0F; } else if (c >= 0xC0) { need = 1; c &= 0x1F; }
+    for (k = 1; k <= need; k++) { if (i + (size_t)k >= n || (s[i + k] & 0xC0) != 0x80) { *len = 1; return s[i]; } c = (c << 6) | (s[i + k] & 0x3F); }
+    *len = (size_t)need + 1;
+    return c;
+}
+static int py_space(unsigned long c) {   /* str.isspace() */
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+static int py_linebreak(unsigned long c) {   /* str.splitlines() boundaries (\r\n is one) */
+    return c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029;
+}
+/* str.strip(): the stripped range [*a, *b) of s[0, n) */
+static void py_strip(const char *s, size_t n, size_t *a, size_t *b) {
+    size_t i = 0, l, last = 0;
+    *a = n; *b = n;
+    while (i < n) { unsigned long c = cp_at(s, n, i, &l); if (!py_space(c)) { *a = i; break; } i += l; }
+    if (*a == n) { *b = n; return; }
+    for (i = *a; i < n; ) { unsigned long c = cp_at(s, n, i, &l); if (!py_space(c)) last = i + l; i += l; }
+    *b = last;
+}
+/* bytes of the first k code points of s[0, n) (s[:k]) */
+static size_t cp_prefix(const char *s, size_t n, size_t k) {
+    size_t i = 0, l;
+    while (i < n && k) { cp_at(s, n, i, &l); i += l; k--; }
+    return i;
+}
+
+/* ---- pathlib ---- */
+/* str(Path(s)): repeated slashes collapsed (a leading pair kept), '.' parts dropped, no trailing slash, '' -> '.' */
+static void path_norm(const char *s, char *out, size_t cap) {
+    Buf b = { 0, 0, 0 }; const char *p = s; int abs = 0;
+    if (s[0] == '/') { abs = 1; if (s[1] == '/' && s[2] != '/') { bputs(&b, "//"); p = s + 2; } else bputs(&b, "/"); }
+    while (*p) {
+        size_t l;
+        while (*p == '/') p++;
+        l = strcspn(p, "/");
+        if (!l) break;
+        if (!(l == 1 && p[0] == '.')) {
+            if (b.n && b.p[b.n - 1] != '/') bputs(&b, "/");
+            bput(&b, p, l);
+        }
+        p += l;
+    }
+    (void)abs;
+    if (!b.n) bputs(&b, ".");
+    snprintf(out, cap, "%s", b.p);
+    free(b.p);
+}
+static void path_join(const char *a, const char *b, char *out, size_t cap) {
+    char t[PATHN];
+    if (!strcmp(a, ".")) snprintf(t, sizeof t, "%s", b);
+    else snprintf(t, sizeof t, "%s/%s", a, b);
+    path_norm(t, out, cap);
+}
+static int partcmp(const void *x, const void *y) {
+    const char *a = *(char *const *)x, *b = *(char *const *)y;
+    for (;;) {
+        size_t la = strcspn(a, "/"), lb = strcspn(b, "/"), m = la < lb ? la : lb; int c = memcmp(a, b, m);
+        if (c) return c;
+        if (la != lb) return la < lb ? -1 : 1;
+        a += la; b += lb;
+        if (!*a || !*b) return *a ? 1 : *b ? -1 : 0;
+        a++; b++;
+    }
+}
+typedef struct { char **v; int n, cap; } StrList;
+static void sl_push(StrList *l, const char *s) {
+    size_t n = strlen(s);
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 32; l->v = xrealloc(l->v, (size_t)l->cap * sizeof *l->v); }
+    l->v[l->n] = xrealloc(0, n + 1); memcpy(l->v[l->n], s, n + 1); l->n++;
+}
+/* rglob('*.h') relative names (3.14: symlinked directories not entered) */
+static void rglob_h(const char *base, const char *rel, StrList *out) {
+    char dir[PATHN], p[PATHN], r[PATHN]; DIR *d; struct dirent *e; struct stat st;
+    snprintf(dir, sizeof dir, "%s%s%s", base, *rel ? "/" : "", rel);
+    if (!(d = opendir(dir))) return;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        snprintf(r, sizeof r, "%s%s%s", rel, *rel ? "/" : "", e->d_name);
+        if (lstat(p, &st)) continue;
+        if (l >= 2 && !strcmp(e->d_name + l - 2, ".h")) sl_push(out, r);
+        if (S_ISDIR(st.st_mode)) rglob_h(base, r, out);
+    }
+    closedir(d);
+}
+/* hostcheck.regular: a regular file (stat follows links); only FileNotFoundError is False */
+static int regular(const char *p) {
+    struct stat st; char why[PATHN + 128];
+    if (stat(p, &st) == 0) return S_ISREG(st.st_mode);
+    if (errno == ENOENT) return 0;
+    rtc_oserror(errno, p, why, sizeof why); die(why);
+    return 0;
+}
+static void digest(const char *p, char hex[65]) {
+    char why[PATHN + 128];
+    if (rtc_sha_file(p, hex, why, sizeof why)) die(why);
+}
+static void resolve(const char *p, char *out, size_t cap) {
+    char why[PATHN + 128];
+    if (rtc_resolve(p, 0, out, cap, why, sizeof why)) die(why);
+}
+/* shutil.which(name): the first PATH entry (os.confstr CS_PATH when PATH is unset) holding an executable non-directory */
+static int which(const char *name, char *out, size_t cap) {
+    const char *path = getenv("PATH"), *p, *e; char cand[PATHN]; StrList seen = { 0, 0, 0 };
+    if (!path) path = "/bin:/usr/bin";
+    for (p = path; ; p = e + 1) {
+        size_t l; int k, dup = 0; struct stat st; char dir[PATHN];
+        e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        l = (size_t)(e - p);
+        snprintf(dir, sizeof dir, "%.*s", (int)l, p);
+        for (k = 0; k < seen.n; k++) if (!strcmp(seen.v[k], dir)) dup = 1;
+        if (!dup) {
+            sl_push(&seen, dir);
+            if (!l) snprintf(cand, sizeof cand, "%s", name);
+            else if (dir[l - 1] == '/') snprintf(cand, sizeof cand, "%s%s", dir, name);
+            else snprintf(cand, sizeof cand, "%s/%s", dir, name);
+            if (stat(cand, &st) == 0 && access(cand, X_OK) == 0 && !S_ISDIR(st.st_mode)) { snprintf(out, cap, "%s", cand); return 1; }
+        }
+        if (!*e) break;
+    }
+    return 0;
+}
+
+/* ---- run(cmd, timeout, cwd): the command under tests/bound, outputs decoded ---- */
+typedef struct { int rc; char *out; size_t outn; char *err; size_t errn; } Got;
+static Got run(char **cmd, int secs, const char *cwd) {
+    char *argv[64], bound[PATHN], s[16], why[8192]; int n = 0, i; pr_result r; Got g;
+    snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
+    snprintf(s, sizeof s, "%d", secs);
+    argv[n++] = "sh"; argv[n++] = bound; argv[n++] = s;
+    for (i = 0; cmd[i] && n < 63; i++) argv[n++] = cmd[i];
+    argv[n] = 0;
+    fflush(stdout);
+    if (pr_run(argv, cwd, 0, 0, (double)secs + 60, &r, why, sizeof why)) {
+        if (!strncmp(why, "subprocess.TimeoutExpired", 25)) { g.rc = 142; g.out = xrealloc(0, 1); g.out[0] = 0; g.outn = 0; g.err = xrealloc(0, 1); g.err[0] = 0; g.errn = 0; return g; }
+        die(why);
+    }
+    g.rc = r.rc;
+    g.out = pr_decode_replace(r.out, r.outn, &g.outn);
+    g.err = pr_decode_replace(r.err, r.errn, &g.errn);
+    pr_free(&r);
+    return g;
+}
+static void got_free(Got *g) { free(g->out); free(g->err); }
+
+/* subprocess.run([bash, -c, '. "$0" && ua_ready', ROOT/tests/lib.sh], cwd=ROOT, check=True, timeout=45) */
+static const char *signame(int s) {
+    /* the carried signal.h defines only the portable numbers; PIPE (13) and ALRM (14) agree on Linux and macOS, the
+       rest (BUS, USR1, USR2, ...) differ and are named `unknown signal N` here */
+    int v[10]; const char *nm[10] = { "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGABRT", "SIGFPE", "SIGKILL", "SIGSEGV",
+                                       "SIGPIPE", "SIGALRM" }; int i;
+    v[0] = SIGHUP; v[1] = SIGINT; v[2] = SIGQUIT; v[3] = SIGILL; v[4] = SIGABRT; v[5] = SIGFPE; v[6] = SIGKILL; v[7] = SIGSEGV;
+    v[8] = 13; v[9] = 14;
+    if (s == SIGTERM) return "SIGTERM";
+    for (i = 0; i < 10; i++) if (v[i] == s) return nm[i];
+    return 0;
+}
+static void ua_ready(void) {
+    char lib[PATHN], *argv[5], *l, msg[16384]; pid_t pid; int st = 0, ticks = 0;
+    snprintf(lib, sizeof lib, "%s/tests/lib.sh", ROOT);
+    argv[0] = "bash"; argv[1] = "-c"; argv[2] = ". \"$0\" && ua_ready"; argv[3] = lib; argv[4] = 0;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("OSError: fork failed");
+    if (pid == 0) {
+        if (chdir(ROOT) != 0) _exit(127);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    l = pr_repr_strlist(argv, 4);
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) die("ChildProcessError: wait failed");
+        if (ticks >= 45000) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            snprintf(msg, sizeof msg, "subprocess.TimeoutExpired: Command '%s' timed out after 45 seconds", l);
+            die(msg);
+        }
+        usleep(1000); ticks++;
+    }
+    if (WIFSIGNALED(st)) {
+        const char *nm = signame(WTERMSIG(st));
+        if (nm) snprintf(msg, sizeof msg, "subprocess.CalledProcessError: Command '%s' died with <Signals.%s: %d>.", l, nm, WTERMSIG(st));
+        else snprintf(msg, sizeof msg, "subprocess.CalledProcessError: Command '%s' died with unknown signal %d.", l, WTERMSIG(st));
+        die(msg);
+    }
+    if (WEXITSTATUS(st)) { snprintf(msg, sizeof msg, "subprocess.CalledProcessError: Command '%s' returned non-zero exit status %d.", l, WEXITSTATUS(st)); die(msg); }
+    free(l);
+}
+
+/* int(x) for a str: surrounding whitespace, an optional sign, digits with single underscores between them */
+static int py_int(const char *s, size_t n, long long *v) {
+    size_t a, b, i; int neg = 0, digit = 0; long long x = 0;
+    py_strip(s, n, &a, &b);
+    i = a;
+    if (i < b && (s[i] == '+' || s[i] == '-')) { neg = s[i] == '-'; i++; }
+    if (i >= b) return -1;
+    for (; i < b; i++) {
+        if (s[i] == '_') { if (!digit || i + 1 >= b || !isdigit((unsigned char)s[i + 1])) return -1; digit = 0; continue; }
+        if (!isdigit((unsigned char)s[i])) return -1;
+        x = x * 10 + (s[i] - '0'); digit = 1;
+    }
+    *v = neg ? -x : x;
+    return 0;
+}
+/* `a, b = (int(x) for x in S.split(SEP))` */
+static void two_ints(const char *s, char sep, long long *a, long long *b) {
+    const char *p = s, *e; int n = 0; long long v[3]; char msg[8192];
+    for (;;) {
+        size_t l;
+        e = strchr(p, sep); l = e ? (size_t)(e - p) : strlen(p);
+        if (n < 3) {
+            if (py_int(p, l, &v[n])) {
+                char t[4096], r[16400]; snprintf(t, sizeof t, "%.*s", (int)l, p); rtc_pyrepr(t, strlen(t), r, sizeof r);
+                snprintf(msg, sizeof msg, "ValueError: invalid literal for int() with base 10: %s", r); die(msg);
+            }
+            n++;
+        }
+        if (n == 3) die("ValueError: too many values to unpack (expected 2)");
+        if (!e) break;
+        p = e + 1;
+    }
+    if (n < 2) { snprintf(msg, sizeof msg, "ValueError: not enough values to unpack (expected 2, got %d)", n); die(msg); }
+    *a = v[0]; *b = v[1];
+}
+
+/* tempfile.TemporaryDirectory(prefix=P).name: gettempdir()'s candidates (TMPDIR, TEMP, TMP when non-empty, then
+   /tmp, /var/tmp, /usr/tmp, the working directory, each made absolute), the first where PREFIX + 8 characters of
+   [a-z0-9_] can be created (0700); the name has Python's length, so cc messages quoting the path truncate alike */
+static int mkdtemp_py(const char *prefix, char *out, size_t cap) {
+    static const char AL[] = "abcdefghijklmnopqrstuvwxyz0123456789_";
+    const char *cands[7]; int nc = 0, i, tries; char cwd[PATHN], dir[PATHN]; unsigned char rnd[8]; int fd;
+    const char *names[3]; names[0] = "TMPDIR"; names[1] = "TEMP"; names[2] = "TMP";
+    for (i = 0; i < 3; i++) { const char *v = getenv(names[i]); if (v && *v) cands[nc++] = v; }
+    cands[nc++] = "/tmp"; cands[nc++] = "/var/tmp"; cands[nc++] = "/usr/tmp";
+    if (!getcwd(cwd, sizeof cwd)) snprintf(cwd, sizeof cwd, ".");
+    cands[nc++] = cwd;
+    fd = open("/dev/urandom", O_RDONLY);
+    for (i = 0; i < nc; i++) {
+        if (cands[i][0] == '/') path_norm(cands[i], dir, sizeof dir);
+        else { char t[PATHN * 2]; snprintf(t, sizeof t, "%s/%s", cwd, cands[i]); path_norm(t, dir, sizeof dir); }
+        for (tries = 0; tries < 100; tries++) {
+            char name[16]; int j;
+            if (fd < 0 || read(fd, rnd, sizeof rnd) != (ssize_t)sizeof rnd) for (j = 0; j < 8; j++) rnd[j] = (unsigned char)(rand() ^ getpid());
+            for (j = 0; j < 8; j++) name[j] = AL[rnd[j] % 37];
+            name[8] = 0;
+            snprintf(out, cap, "%s/%s%s", strcmp(dir, "/") ? dir : "", prefix, name);
+            if (mkdir(out, 0700) == 0) { if (fd >= 0) close(fd); return 0; }
+            if (errno != EEXIST) break;
+        }
+    }
+    if (fd >= 0) close(fd);
+    return -1;
+}
+
+static const char *OPTS[] = { "--no-packed-struct", "--no-bitfields", "--no-volatiles", "--max-funcs", "4", "--max-block-depth", "3", 0 };
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash, t[PATHN], CSMITH[PATHN], CSMITH_R[PATHN], INC[PATHN], WANT[PATHN], ccpath[PATHN], ccres[PATHN];
+    char CSMITH_ID[65], HEADERS_ID[65], CC_BINARY_ID[65], why[8192], msg[8192], *keyprefix;
+    const char *ua, *product, *env; long long lo, hi, k, n, L, start, seed; Buf kp = { 0, 0, 0 };
+    StrList known = { 0, 0, 0 }; int ok = 0, bad = 0, refused = 0, skipped = 0, knownc = 0, revived = 0, i;
+    char *bytesrepr; pr_result cv;
+    (void)argc; (void)argv;
+    /* ROOT = Path(__file__).resolve().parents[1] */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/..", here);
+    if (!realpath(t, ROOT)) { snprintf(msg, sizeof msg, "cannot resolve the repository root %s", t); die(msg); }
+
+    if (!which("csmith", CSMITH, sizeof CSMITH)) die("csmithdiff: csmith not found (brew install csmith)");
+    /* INC = csmith_include(CSMITH) */
+    env = getenv("CSMITH_INCLUDE");
+    if (env && *env) {
+        path_norm(env, INC, sizeof INC);
+        path_join(INC, "csmith.h", t, sizeof t);
+        if (!regular(t)) die("csmithdiff: CSMITH_INCLUDE has no csmith.h");
+    } else {
+        char prefix[PATHN], inc[PATHN]; StrList cand = { 0, 0, 0 }; DIR *d; struct dirent *e; int found = 0;
+        resolve(CSMITH, prefix, sizeof prefix);
+        for (i = 0; i < 2; i++) { slash = strrchr(prefix, '/'); if (slash && slash != prefix) *slash = 0; else snprintf(prefix, sizeof prefix, "/"); }
+        path_join(prefix, "include", inc, sizeof inc);
+        if ((d = opendir(inc))) {
+            while ((e = readdir(d))) if (!strncmp(e->d_name, "csmith-", 7)) { path_join(inc, e->d_name, t, sizeof t); sl_push(&cand, t); }
+            closedir(d);
+        }
+        qsort(cand.v, (size_t)cand.n, sizeof *cand.v, partcmp);
+        path_join(inc, "csmith", t, sizeof t); sl_push(&cand, t);
+        sl_push(&cand, "/usr/include/csmith");
+        for (i = 0; i < cand.n && !found; i++) {
+            path_join(cand.v[i], "csmith.h", t, sizeof t);
+            if (regular(t)) { snprintf(INC, sizeof INC, "%s", cand.v[i]); found = 1; }
+        }
+        if (!found) die("csmithdiff: csmith headers not found");
+    }
+    env = getenv("TMPDIR");
+    { char base[PATHN]; path_norm(env ? env : "/tmp", base, sizeof base); path_join(base, "unisacc-csmith-want", WANT, sizeof WANT); }
+    {   /* CCID = subprocess.run(['cc', '--version'], capture_output=True).stdout */
+        char *cva[3]; cva[0] = "cc"; cva[1] = "--version"; cva[2] = 0;
+        if (pr_run(cva, 0, 0, 0, 600, &cv, why, sizeof why)) die(why);
+        bytesrepr = pr_repr_bytes(cv.out, cv.outn);
+    }
+    resolve(CSMITH, CSMITH_R, sizeof CSMITH_R);
+    digest(CSMITH_R, CSMITH_ID);
+    {   /* header_identity(INC) */
+        StrList hs = { 0, 0, 0 }; Buf h = { 0, 0, 0 }; unsigned char md[32];
+        rglob_h(INC, "", &hs);
+        if (!hs.n) die("FileNotFoundError: empty header directory");
+        qsort(hs.v, (size_t)hs.n, sizeof *hs.v, partcmp);
+        for (i = 0; i < hs.n; i++) {
+            char hex[65], p[PATHN]; int j;
+            path_join(INC, hs.v[i], p, sizeof p);
+            digest(p, hex);
+            bput(&h, hs.v[i], strlen(hs.v[i]) + 1);
+            for (j = 0; j < 32; j++) { unsigned v; sscanf(hex + 2 * j, "%2x", &v); md[j] = (unsigned char)v; }
+            bput(&h, (const char *)md, 32);
+        }
+        cx_sha256_hex(h.p ? h.p : "", h.n, HEADERS_ID);
+        free(h.p);
+    }
+    if (!which("cc", ccpath, sizeof ccpath)) die("TypeError: expected str, bytes or os.PathLike object, not NoneType");
+    resolve(ccpath, ccres, sizeof ccres);
+    digest(ccres, CC_BINARY_ID);
+    /* want_key(seed) = sha256(repr((csmith, CSMITH_ID, str(INC), HEADERS_ID, CCID, CC_BINARY_ID, OPTS, seed))) */
+    bputs(&kp, "("); brepr(&kp, CSMITH_R); bputs(&kp, ", "); brepr(&kp, CSMITH_ID); bputs(&kp, ", "); brepr(&kp, INC);
+    bputs(&kp, ", "); brepr(&kp, HEADERS_ID); bputs(&kp, ", "); bputs(&kp, bytesrepr); bputs(&kp, ", "); brepr(&kp, CC_BINARY_ID);
+    bputs(&kp, ", [");
+    for (i = 0; OPTS[i]; i++) { if (i) bputs(&kp, ", "); brepr(&kp, OPTS[i]); }
+    bputs(&kp, "], ");
+    keyprefix = kp.p;
+
+    ua = getenv("UA");
+    if (!ua || !*ua) { ua_ready(); ua = "/tmp/ua_ref"; }
+    product = getenv("MODEL_COM");
+    if (product && !*product) product = 0;
+    env = getenv("SEEDS"); two_ints(env ? env : "1-40", '-', &lo, &hi);
+    env = getenv("SHARD"); two_ints(env ? env : "1/1", '/', &k, &n);
+    {   /* tests/csmithdiff.knownwrong: {tuple(l.split()[:2])} */
+        char kw[PATHN], *text, *line, *next; size_t tn; struct stat st;
+        snprintf(kw, sizeof kw, "%s/tests/csmithdiff.knownwrong", ROOT);
+        if (stat(kw, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (!(text = cx_read(kw, &tn))) { rtc_oserror(errno ? errno : EIO, kw, why, sizeof why); die(why); }
+            for (line = text; line && *line; line = next) {
+                size_t l = strcspn(line, "\r\n\v\f\x1c\x1d\x1e"), a, b; char f1[1024], f2[1024], key[2100]; int nf;
+                next = line[l] ? line + l + 1 + (line[l] == '\r' && line[l + 1] == '\n') : 0;
+                line[l] = 0;
+                py_strip(line, l, &a, &b);
+                if (a == b || line[0] == '#') continue;
+                nf = sscanf(line, "%1023s %1023s", f1, f2);
+                if (nf == 2) { snprintf(key, sizeof key, "%s %s", f1, f2); sl_push(&known, key); }
+            }
+            free(text);
+        }
+    }
+    if (n == 0) die("ValueError: slice step cannot be zero");
+    if (mkdtemp_py("unisacc-csmith-", TD, sizeof TD)) die("FileNotFoundError: [Errno 2] No usable temporary directory found");
+    /* range(lo, hi + 1)[k - 1::n] */
+    L = hi + 1 > lo ? hi + 1 - lo : 0;
+    start = k - 1;
+    if (n > 0) { if (start < 0) { start += L; if (start < 0) start = 0; } else if (start > L) start = L; }
+    else { if (start < 0) { start += L; if (start < 0) start = -1; } else if (start >= L) start = L - 1; }
+    for (; n > 0 ? start < L : start > -1; start += n) {
+        char src[PATHN], sd[32], cache[PATHN], refp[PATHN], *cmd[32], key[65]; Got g; int c = 0, wrc_zero; pj_value *want = 0;
+        char *wout = 0; size_t woutn = 0; long long wrc = 0; int lab;
+        Buf kb = { 0, 0, 0 };
+        seed = lo + start;
+        snprintf(src, sizeof src, "%s/s%lld.c", TD, seed);
+        snprintf(sd, sizeof sd, "%lld", seed);
+        cmd[c++] = CSMITH; cmd[c++] = "--seed"; cmd[c++] = sd;
+        for (i = 0; OPTS[i]; i++) cmd[c++] = (char *)OPTS[i];
+        cmd[c] = 0;
+        g = run(cmd, 20, TD);
+        if (g.rc) { printf("csmithdiff FAIL generate %lld\n", seed); bad++; got_free(&g); continue; }
+        if (cx_write(src, g.out, g.outn)) { rtc_oserror(errno ? errno : EIO, src, why, sizeof why); die(why); }
+        got_free(&g);
+        bputs(&kb, keyprefix); bputs(&kb, sd); bputs(&kb, ")");
+        cx_sha256_hex(kb.p, kb.n, key); free(kb.p);
+        snprintf(t, sizeof t, "%s.json", key);
+        path_join(WANT, t, cache, sizeof cache);
+        {
+            size_t cn; char *text = cx_read(cache, &cn);
+            if (!text && errno != ENOENT) { rtc_oserror(errno ? errno : EIO, cache, why, sizeof why); die(why); }
+            if (text) {
+                if (!(want = pj_loads(text, cn, why, sizeof why))) die(why);
+                free(text);
+            } else {
+                Got w; pj_value *list; char *js, tmp[PATHN + 32]; size_t jn; char *ccmd[16]; char incf[PATHN + 4];
+                snprintf(incf, sizeof incf, "-I%s", INC);
+                snprintf(refp, sizeof refp, "%s/ref", TD);
+                c = 0; ccmd[c++] = "cc"; ccmd[c++] = "-std=c99"; ccmd[c++] = "-w"; ccmd[c++] = incf; ccmd[c++] = "-o"; ccmd[c++] = refp; ccmd[c++] = src; ccmd[c] = 0;
+                g = run(ccmd, 30, 0);
+                if (g.rc) {
+                    printf("csmithdiff FAIL cc %lld %.*s\n", seed, (int)cp_prefix(g.err, g.errn, 120), g.err);
+                    bad++; got_free(&g); continue;
+                }
+                got_free(&g);
+                ccmd[0] = refp; ccmd[1] = 0;
+                w = run(ccmd, 5, 0);
+                if (mkdir(WANT, 0777) != 0 && errno != EEXIST) { rtc_oserror(errno, WANT, why, sizeof why); die(why); }
+                { struct stat st; if (stat(WANT, &st) == 0 && !S_ISDIR(st.st_mode)) { rtc_oserror(EEXIST, WANT, why, sizeof why); die(why); } }
+                list = pj_list();
+                pj_append(list, pj_int(w.rc)); pj_append(list, pj_str(w.out, w.outn)); pj_append(list, pj_str(w.err, w.errn));
+                pj_dumps(list, -1, &js, &jn);
+                snprintf(t, sizeof t, "%s.%d", key, (int)getpid());
+                path_join(WANT, t, tmp, sizeof tmp);
+                if (cx_write(tmp, js, jn)) { rtc_oserror(errno ? errno : EIO, tmp, why, sizeof why); die(why); }
+                if (rename(tmp, cache)) { rtc_oserror(errno, tmp, why, sizeof why); die(why); }
+                free(js);
+                want = list;
+                got_free(&w);
+            }
+        }
+        if (want->type != PJ_ARR || want->len < 2) die("IndexError: tuple index out of range");
+        wrc_zero = pj_eq_int(want->items[0], 0);
+        if (!wrc_zero) { skipped++; continue; }                     /* cc's build did not finish in 5 s: no verdict */
+        wrc = 0;
+        if (want->items[1]->type == PJ_STR) { wout = want->items[1]->s; woutn = want->items[1]->n; }
+        for (lab = 0; lab < (product ? 2 : 1); lab++) {
+            const char *label = lab ? "product" : "reference", *comp = lab ? product : ua; char i1[PATHN + 16], i2[PATHN + 4], lk[64];
+            int listed = 0, j, same;
+            size_t cl = strlen(comp);
+            c = 0;
+            if (cl >= 4 && !strcmp(comp + cl - 4, ".com")) cmd[c++] = "sh";
+            cmd[c++] = (char *)comp;
+            snprintf(i1, sizeof i1, "-I%s/include", ROOT); snprintf(i2, sizeof i2, "-I%s", INC);
+            cmd[c++] = i1; cmd[c++] = i2; cmd[c++] = "-run"; cmd[c++] = src; cmd[c] = 0;
+            g = run(cmd, 20, 0);
+            snprintf(lk, sizeof lk, "%lld %s", seed, label);
+            for (j = 0; j < known.n; j++) if (!strcmp(known.v[j], lk)) listed = 1;
+            same = pj_eq_int(want->items[0], g.rc) && wout && woutn == g.outn && !memcmp(wout, g.out, g.outn);
+            if (same) {
+                if (listed) { revived++; printf("  REVIVED  seed %lld %s (remove it from csmithdiff.knownwrong)\n", seed, label); }
+                else ok++;
+            } else if (g.rc != 0 && strstr(g.err, "not covered") && g.outn == 0) {
+                size_t a, b, p, l, ls[3] = { 0, 0, 0 }, le[3] = { 0, 0, 0 }; int nl = 0;
+                py_strip(g.err, g.errn, &a, &b);
+                /* splitlines()[-3] */
+                p = a;
+                while (p < b) {
+                    size_t s0 = p, e0;
+                    for (;;) {
+                        unsigned long ch;
+                        if (p >= b) { e0 = p; break; }
+                        ch = cp_at(g.err, b, p, &l);
+                        if (py_linebreak(ch)) { e0 = p; p += l; if (ch == '\r' && p < b && g.err[p] == '\n') p++; break; }
+                        p += l;
+                    }
+                    ls[0] = ls[1]; le[0] = le[1]; ls[1] = ls[2]; le[1] = le[2]; ls[2] = s0; le[2] = e0; nl++;
+                }
+                if (nl < 3) die("IndexError: list index out of range");
+                refused++;
+                printf("  refused  seed %lld %-9s %.*s\n", seed, label, (int)cp_prefix(g.err + ls[0], le[0] - ls[0], 90), g.err + ls[0]);
+            } else if (listed) knownc++;
+            else {
+                size_t wa = 0, wb = 0, oa, ob, ea, eb;
+                bad++;
+                if (wout) py_strip(wout, woutn, &wa, &wb);
+                py_strip(g.out, g.outn, &oa, &ob); py_strip(g.err, g.errn, &ea, &eb);
+                printf("  FAIL     seed %lld %-9s rc %d want %.*s got %.*s %.*s\n", seed, label, g.rc, (int)(wb - wa), wout ? wout + wa : "",
+                       (int)cp_prefix(g.out + oa, ob - oa, 40), g.out + oa, (int)cp_prefix(g.err + ea, eb - ea, 100), g.err + ea);
+            }
+            got_free(&g);
+        }
+        (void)wrc;
+    }
+    cleanup();
+    printf("csmithdiff  ok %d   wrong %d   refused %d   known %d   revived %d   no-verdict %d   (seeds %lld-%lld shard %lld/%lld)\n",
+           ok, bad, refused, knownc, revived, skipped, lo, hi, k, n);
+    return bad || revived || !(ok + refused + knownc) ? 1 : 0;
+}

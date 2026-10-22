@@ -1,0 +1,731 @@
+#!/usr/bin/env -S unisacc.com -run
+/* decisionledger.cx -- tests/decisionledger.py in C (2026-10-23, the py->cx port wave: the toolchain moves off Python).
+   decision-ledger: build-time control written in Python instead of a table (0.0.23 I).
+   usage: sh ./unisacc.com -run tests/decisionledger.cx [-- --seedpy [--list] | --ops | --update]
+          sh ./tests/cxbin tests/decisionledger.cx [--seedpy [--list] | --ops | --update]     (gate form)
+   The modes, outputs and exit codes are the .py's (any argument may sit anywhere; --seedpy wins over --ops, which wins
+   over --update):
+     (none)    count, per stage of exec/ (the first path component; files directly in exec/ are `(top)`), what remains as
+               Python control in exec/ ** / *.py outside exec/build/, __pycache__ and every finite_rules.py: the call sites
+               that create transitions directly -- `X.on(`, `X.branch(`, `X.goto(`, `X.put(` -- plus the graph edits
+               (writes to an attribute named st, els, r, seqs, states or rows: `X.st.pop|setdefault|update|append|
+               extend|insert|clear(`, `X.st[k] = v`, `del X.st[k]`, `X.st[a][b] = v`, `X.st[k] op= v`) and, inside a
+               `for` loop whose iterable names such an attribute, every assignment to a subscript of anything else
+               (`row[key] = v`; nested qualifying loops count it once each).  The counts may only fall against
+               research/decision-ledger.json; a rise fails unless tests/decisionledger.allow has `rise STAGE reason`;
+               every counted file needs `keep FILE CATEGORY reason`.  Then the --ops check; rc 1 if anything is bad.
+     --update  rewrite research/decision-ledger.json (json.dumps(indent=1) + "\n", byte-identical to the .py's).
+     --seedpy  stage-specific .py under exec/ (outside the converter/executor whitelist and the check/sim tools) <= 1,
+               exec/assemble.py <= 420 lines (str.splitlines of the universal-newline text); --list lists the stage files.
+     --ops     K2 table boundary: distinct ops over exec/ *-manifest.tsv and exec/ * / *-manifest.tsv <= 12, no py or
+               retarget op, no `state:` predicate in column 4; `allowop OP MANIFEST STEM reason` excuses one row.
+   Python's ast is not available here: the .py's node patterns are matched on a Python 3.14 token stream (strings,
+   bytes, raw strings and f/t-strings, whose replacement fields are tokenized as code, as ast.parse does; comments;
+   implicit and backslash line joining; logical lines and their indentation), split into simple statements (`;`, the
+   inline suite after a compound header's colon), with assignment targets classified as Attribute / Subscript
+   (parentheses are transparent, as in the AST; a tuple or list target is neither).  A `for` loop's extent is its
+   inline suite or its more-indented block, plus a directly following `else:` block (ast.walk over the For node).
+   Known approximations (none occurs in exec/ today): a `match` class pattern `case X.on(...)` counts as a call, and a
+   file that is not valid Python is not refused with the SyntaxError ast.parse would raise.
+   The repository root is the parent of this file's directory (the .py's Path(__file__).resolve().parents[1]); under
+   tests/cxbin that is the current directory, the repository root.  Uncaught Python exceptions (a missing baseline,
+   an allow line too short to index) are rc 1 with the traceback's last line alone on stderr (`FileNotFoundError: [Errno
+   2] No such file or directory: 'PATH'`, `IndexError: list index out of range`), written before the buffered stdout as
+   Python writes it; the `Traceback (most recent call last):` frames are not reproduced.
+   No #include: the prelude is built in. */
+#pragma unisa use cxlib.pyjson
+
+#define PATHN 4096
+static char ROOT[PATHN];
+
+/* an uncaught exception: its last traceback line on stderr, then stdout is flushed by exit (Python's order) */
+static void die(const char *what) {
+    fprintf(stderr, "%s\n", what);
+    exit(1);
+}
+static void *xrealloc(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) die("MemoryError"); return q; }
+static char *xstrdup(const char *s) { size_t n = strlen(s); char *d = xrealloc(0, n + 1); memcpy(d, s, n + 1); return d; }
+
+/* ---- file listing: pathlib rglob('*.py') (3.14: symlinked directories are not entered), sorted as Paths ---- */
+typedef struct { char **v; int n, cap; } StrList;
+static void sl_push(StrList *l, const char *s) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 64; l->v = xrealloc(l->v, (size_t)l->cap * sizeof *l->v); }
+    l->v[l->n++] = xstrdup(s);
+}
+/* PurePath ordering: component by component */
+static int partcmp(const void *x, const void *y) {
+    const char *a = *(char *const *)x, *b = *(char *const *)y;
+    for (;;) {
+        size_t la = strcspn(a, "/"), lb = strcspn(b, "/"), m = la < lb ? la : lb; int c = memcmp(a, b, m);
+        if (c) return c;
+        if (la != lb) return la < lb ? -1 : 1;
+        a += la; b += lb;
+        if (!*a || !*b) return *a ? 1 : *b ? -1 : 0;
+        a++; b++;
+    }
+}
+static int endswith(const char *s, const char *suf) { size_t n = strlen(s), m = strlen(suf); return n >= m && !strcmp(s + n - m, suf); }
+static void rglob_py(const char *base, const char *rel, StrList *out) {
+    char dir[PATHN], p[PATHN], r[PATHN]; DIR *d; struct dirent *e; struct stat st;
+    snprintf(dir, sizeof dir, "%s%s%s", base, *rel ? "/" : "", rel);
+    if (!(d = opendir(dir))) return;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        snprintf(r, sizeof r, "%s%s%s", rel, *rel ? "/" : "", e->d_name);
+        if (lstat(p, &st)) continue;
+        if (S_ISDIR(st.st_mode)) rglob_py(base, r, out);
+        else if (endswith(e->d_name, ".py")) sl_push(out, r);
+    }
+    closedir(d);
+}
+/* Path.read_text(): universal newlines (\r\n and \r become \n), a leading BOM is kept out of the source */
+static char *read_text(const char *path, size_t *len) {
+    size_t n, i, j = 0; char *b = cx_read(path, &n), msg[PATHN + 128];
+    if (!b) {
+        int err = errno ? errno : ENOENT;
+        snprintf(msg, sizeof msg, "%s: [Errno %d] %s: '%s'", err == ENOENT ? "FileNotFoundError" : "OSError", err, strerror(err), path);
+        die(msg);
+    }
+    for (i = 0; i < n; i++) {
+        if (b[i] == '\r') { b[j++] = '\n'; if (i + 1 < n && b[i + 1] == '\n') i++; }
+        else b[j++] = b[i];
+    }
+    b[j] = 0; *len = j;
+    return b;
+}
+
+/* ---- a Python 3.14 tokenizer, enough for the ledger's node patterns ---- */
+typedef struct { const char *p; int n; char k; } Tok;    /* k: N name, D number, S string, O operator */
+typedef struct { int a, b, indent; } Line;                 /* a logical line: tokens [a, b) */
+static Tok *T; static int nT, capT;
+static Line *LN; static int nL, capL;
+static const char *S; static size_t N; static const char *FILEP;
+
+static void tok(char k, const char *p, int n) {
+    if (nT == capT) { capT = capT ? capT * 2 : 4096; T = xrealloc(T, (size_t)capT * sizeof *T); }
+    T[nT].k = k; T[nT].p = p; T[nT].n = n; nT++;
+}
+static void syntax(const char *what) {
+    char m[PATHN + 128];
+    snprintf(m, sizeof m, "SyntaxError: %s (%s)", what, FILEP);
+    die(m);
+}
+static int is_id(int c) { return c == '_' || isalnum(c) || c >= 0x80; }
+static int teq(int i, const char *s) { return i >= 0 && i < nT && (int)strlen(s) == T[i].n && !memcmp(T[i].p, s, (size_t)T[i].n); }
+static int tname(int i, const char *s) { return i >= 0 && i < nT && T[i].k == 'N' && teq(i, s); }
+static int top(int i, const char *s) { return i >= 0 && i < nT && T[i].k == 'O' && teq(i, s); }
+
+static const char *OPS[] = { "**=", "//=", ">>=", "<<=", "...", "->", ":=", "**", "//", "<<", ">>", "<=", ">=", "==", "!=",
+    "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "@=", 0 };
+static const char *AUG[] = { "+=", "-=", "*=", "/=", "//=", "%=", "**=", ">>=", "<<=", "&=", "|=", "^=", "@=", 0 };
+
+static size_t scan_code(size_t i, int *depth, int field, char *term);
+static size_t field(size_t i, int raw, int q, int triple);
+
+/* a string literal from its opening quote; f/t-strings have their replacement fields tokenized (one synthetic
+   parenthesis group per field, after the string token) */
+static size_t scan_string(size_t i, int ft, int raw) {
+    int q = (unsigned char)S[i], triple = i + 2 < N && S[i + 1] == q && S[i + 2] == q;
+    i += triple ? 3 : 1;
+    for (;;) {
+        if (i >= N) syntax("unterminated string literal");
+        if (S[i] == q && (!triple || (i + 2 < N && S[i + 1] == q && S[i + 2] == q))) return i + (triple ? 3 : 1);
+        if (S[i] == '\\') {
+            if (!ft || raw) { i += (raw && ft && i + 1 < N && S[i + 1] != q && S[i + 1] != '\\' && S[i + 1] != '\n') ? 1 : 2; continue; }
+            if (i + 2 < N && S[i + 1] == 'N' && S[i + 2] == '{') { while (i < N && S[i] != '}') i++; i++; continue; }
+            i += (i + 1 < N && (S[i + 1] == '{' || S[i + 1] == '}')) ? 1 : 2;
+            continue;
+        }
+        if (!triple && S[i] == '\n') syntax("unterminated string literal");
+        if (ft && S[i] == '{') {
+            if (i + 1 < N && S[i + 1] == '{') { i += 2; continue; }
+            i = field(i + 1, raw, q, triple);
+            continue;
+        }
+        if (ft && S[i] == '}') { i += (i + 1 < N && S[i + 1] == '}') ? 2 : 1; continue; }
+        i++;
+    }
+}
+/* one replacement field after its '{': expression, optional '=', '!conv', ':spec' (with nested fields), '}' */
+static size_t field(size_t i, int raw, int q, int triple) {
+    int d = 0; char term = 0;
+    (void)q; (void)triple;
+    tok('O', "(", 1);
+    i = scan_code(i, &d, 1, &term);
+    if (term == '=') { i++; while (i < N && (S[i] == ' ' || S[i] == '\t' || S[i] == '\n')) i++; term = i < N ? S[i] : 0; }
+    if (term == '!') { while (i < N && S[i] != ':' && S[i] != '}') i++; term = i < N ? S[i] : 0; }
+    if (term == ':') {
+        i++;
+        while (i < N && S[i] != '}') {
+            if (S[i] == '{') { i = field(i + 1, raw, q, triple); continue; }
+            if (S[i] == '\\' && !raw) { i += 2; continue; }
+            i++;
+        }
+    }
+    if (i >= N || S[i] != '}') syntax("f-string: expecting '}'");
+    tok('O', ")", 1);
+    return i + 1;
+}
+static int str_prefix(const char *p, size_t n) {
+    char a = 0, b = 0; size_t k;
+    if (n < 1 || n > 2) return -1;
+    for (k = 0; k < n; k++) { char c = (char)tolower((unsigned char)p[k]); if (!strchr("rubft", c)) return -1; if (k) b = c; else a = c; }
+    if (n == 1) return (a == 'f' || a == 't') ? 2 : (a == 'r') ? 1 : 0;
+    if (a == b || a == 'u' || b == 'u') return -1;
+    if ((a == 'b' || b == 'b') && (a == 'f' || b == 'f' || a == 't' || b == 't')) return -1;
+    if ((a == 'f' || b == 'f') && (a == 't' || b == 't')) return -1;
+    if (a != 'r' && b != 'r') return -1;
+    return (a == 'f' || b == 'f' || a == 't' || b == 't') ? 3 : 1;   /* bit 1: f/t, bit 0: raw */
+}
+/* one token at S[i] (not whitespace, not a comment); brackets move *depth */
+static size_t scan_one(size_t i, int *depth) {
+    unsigned char c = (unsigned char)S[i]; int k;
+    if (c == '"' || c == '\'') { size_t j = scan_string(i, 0, 0); tok('S', S + i, (int)(j - i)); return j; }
+    if (isdigit(c) || (c == '.' && i + 1 < N && isdigit((unsigned char)S[i + 1]))) {
+        size_t j = i; int hex = c == '0' && i + 1 < N && (S[i + 1] == 'x' || S[i + 1] == 'X');
+        while (j < N && (is_id((unsigned char)S[j]) || S[j] == '.' ||
+               (!hex && (S[j] == '+' || S[j] == '-') && j > i && (S[j - 1] == 'e' || S[j - 1] == 'E')))) j++;
+        tok('D', S + i, (int)(j - i));
+        return j;
+    }
+    if (is_id(c)) {
+        size_t j = i; int pre;
+        while (j < N && is_id((unsigned char)S[j])) j++;
+        if (j < N && (S[j] == '"' || S[j] == '\'') && (pre = str_prefix(S + i, j - i)) >= 0) {
+            size_t e;
+            int at = nT;
+            tok('S', S + i, 0);
+            e = scan_string(j, pre & 2, pre & 1);
+            T[at].n = (int)(e - i);
+            return e;
+        }
+        tok('N', S + i, (int)(j - i));
+        return j;
+    }
+    for (k = 0; OPS[k]; k++) {
+        size_t l = strlen(OPS[k]);
+        if (i + l <= N && !memcmp(S + i, OPS[k], l)) { tok('O', S + i, (int)l); return i + l; }
+    }
+    if (strchr("([{", c)) (*depth)++;
+    else if (strchr(")]}", c)) { if (*depth > 0) (*depth)--; }
+    tok('O', S + i, 1);
+    return i + 1;
+}
+/* code inside an f-string replacement field, up to its depth-0 terminator: '}', '!' (not '!='), ':' or '=' (not '==') */
+static size_t scan_code(size_t i, int *depth, int fieldmode, char *term) {
+    (void)fieldmode;
+    for (;;) {
+        unsigned char c;
+        if (i >= N) syntax("f-string: expecting '}'");
+        c = (unsigned char)S[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\f') { i++; continue; }
+        if (c == '\\' && i + 1 < N && S[i + 1] == '\n') { i += 2; continue; }
+        if (c == '#') { while (i < N && S[i] != '\n') i++; continue; }
+        if (*depth == 0) {
+            if (c == '}' || c == ':' || (c == '!' && !(i + 1 < N && S[i + 1] == '=')) || (c == '=' && !(i + 1 < N && S[i + 1] == '='))) {
+                *term = (char)c; return i;
+            }
+        }
+        i = scan_one(i, depth);
+    }
+}
+static void push_line(int a, int b, int indent) {
+    if (b <= a) return;
+    if (nL == capL) { capL = capL ? capL * 2 : 1024; LN = xrealloc(LN, (size_t)capL * sizeof *LN); }
+    LN[nL].a = a; LN[nL].b = b; LN[nL].indent = indent; nL++;
+}
+static void tokenize(void) {
+    size_t i = 0; int depth = 0, inl = 0, a = 0, indent = 0;
+    nT = 0; nL = 0;
+    if (N >= 3 && !memcmp(S, "\xEF\xBB\xBF", 3)) i = 3;
+    while (i < N) {
+        unsigned char c;
+        if (!inl) {
+            int col = 0;
+            while (i < N && (S[i] == ' ' || S[i] == '\t' || S[i] == '\f')) { col = S[i] == ' ' ? col + 1 : S[i] == '\t' ? (col / 8 + 1) * 8 : 0; i++; }
+            if (i >= N) break;
+            if (S[i] == '#') { while (i < N && S[i] != '\n') i++; continue; }
+            if (S[i] == '\n') { i++; continue; }
+            if (S[i] == '\\' && i + 1 < N && S[i + 1] == '\n') { i += 2; continue; }
+            inl = 1; a = nT; indent = col; depth = 0;
+        }
+        c = (unsigned char)S[i];
+        if (c == ' ' || c == '\t' || c == '\f') { i++; continue; }
+        if (c == '#') { while (i < N && S[i] != '\n') i++; continue; }
+        if (c == '\\' && i + 1 < N && S[i + 1] == '\n') { i += 2; continue; }
+        if (c == '\n') { i++; if (depth == 0) { push_line(a, nT, indent); inl = 0; } continue; }
+        i = scan_one(i, &depth);
+    }
+    if (inl) push_line(a, nT, indent);
+}
+
+/* ---- the node patterns ---- */
+static const char *CALLS[] = { "on", "branch", "goto", "put", 0 };
+static const char *GRAPH[] = { "st", "els", "r", "seqs", "states", "rows", 0 };
+static const char *METHODS[] = { "pop", "setdefault", "update", "append", "extend", "insert", "clear", 0 };
+static int tin(int i, const char *const *set) { int k; if (i < 0 || i >= nT || T[i].k != 'N') return 0; for (k = 0; set[k]; k++) if (teq(i, set[k])) return 1; return 0; }
+static int is_open(int i) { return T[i].k == 'O' && T[i].n == 1 && strchr("([{", T[i].p[0]); }
+static int is_close(int i) { return T[i].k == 'O' && T[i].n == 1 && strchr(")]}", T[i].p[0]); }
+/* the matching opener of the closer at e, scanning back no further than s; -1 if none */
+static int match_back(int s, int e) {
+    int d = 0, i;
+    for (i = e; i >= s; i--) {
+        if (is_close(i)) d++;
+        else if (is_open(i)) { if (--d == 0) return i; }
+    }
+    return -1;
+}
+static int match_fwd(int s, int e) {
+    int d = 0, i;
+    for (i = s; i < e; i++) {
+        if (is_open(i)) d++;
+        else if (is_close(i)) { if (--d == 0) return i; }
+    }
+    return -1;
+}
+static int has_top_comma(int s, int e) {
+    int d = 0, i;
+    for (i = s; i < e; i++) { if (is_open(i)) d++; else if (is_close(i)) d--; else if (d == 0 && top(i, ",")) return 1; }
+    return 0;
+}
+/* an expression [s, e): 'A' Attribute (attr at *name), 'S' Subscript (value [s, *ve)), 'O' anything else */
+static char classify(int s, int e, int *name, int *vs, int *ve) {
+    while (e - s >= 2 && top(s, "(") && match_fwd(s, e) == e - 1) {
+        if (e - s == 2 || has_top_comma(s + 1, e - 1)) return 'O';   /* () or a tuple */
+        s++; e--;
+    }
+    if (e <= s) return 'O';
+    if (has_top_comma(s, e)) return 'O';
+    if (top(e - 1, "]")) {
+        int j = match_back(s, e - 1);
+        if (j <= s) return 'O';                                       /* a list display */
+        *vs = s; *ve = j;
+        return 'S';
+    }
+    if (T[e - 1].k == 'N' && e - 2 > s && top(e - 2, ".")) { *name = e - 1; return 'A'; }
+    return 'O';
+}
+static int is_st(int s, int e) { int nm = 0, vs, ve; return classify(s, e, &nm, &vs, &ve) == 'A' && tin(nm, GRAPH); }
+static int sub_st(int s, int e) { int nm, vs = 0, ve = 0; return classify(s, e, &nm, &vs, &ve) == 'S' && is_st(vs, ve); }
+static int sub_sub_st(int s, int e) {
+    int nm, vs = 0, ve = 0, ws = 0, we = 0;
+    if (classify(s, e, &nm, &vs, &ve) != 'S') return 0;
+    return classify(vs, ve, &nm, &ws, &we) == 'S' && is_st(ws, we);
+}
+static int sub_not_st(int s, int e) { int nm, vs = 0, ve = 0; return classify(s, e, &nm, &vs, &ve) == 'S' && !is_st(vs, ve); }
+
+/* one simple statement [s, e): bit 0 counts for the graph-edit rule (Assign/Delete/AugAssign), bit 1 is an Assign
+   with a subscript target whose value is not a graph attribute (the loop rule) */
+static int simple(int s, int e) {
+    int d = 0, i, lam = 0, first = -1, r = 0, segs[512], ns = 0;
+    if (e <= s) return 0;
+    if (tname(s, "del")) {
+        int a = s + 1;
+        for (i = s + 1; i <= e; i++) {
+            if (i < e && is_open(i)) d++;
+            else if (i < e && is_close(i)) d--;
+            if (i == e || (d == 0 && top(i, ","))) { if (i > a && sub_st(a, i)) return 1; a = i + 1; }
+        }
+        return 0;
+    }
+    if (tname(s, "type") && s + 1 < e && T[s + 1].k == 'N') return 0;   /* a type alias */
+    for (i = s; i < e; i++) {
+        if (is_open(i)) { d++; continue; }
+        if (is_close(i)) { d--; continue; }
+        if (d) continue;
+        if (tname(i, "lambda")) { lam++; continue; }
+        if (top(i, ":")) { if (lam) { lam--; continue; } if (first < 0) { first = i; break; } }
+        if (lam) continue;
+        if (T[i].k == 'O') {
+            int k, aug = 0;
+            for (k = 0; AUG[k]; k++) if (teq(i, AUG[k])) aug = 1;
+            if (aug && first < 0) { first = i; break; }
+            if (teq(i, "=")) { if (first < 0) first = i; if (ns < 512) segs[ns++] = i; }
+        }
+    }
+    if (first < 0) return 0;
+    if (top(first, ":")) return 0;                                        /* an annotated assignment */
+    if (!teq(first, "=")) return sub_st(s, first) ? 1 : 0;               /* an augmented assignment */
+    {
+        int a = s, k;
+        for (k = 0; k < ns; k++) {
+            if (sub_st(a, segs[k]) || sub_sub_st(a, segs[k])) r |= 1;
+            if (sub_not_st(a, segs[k])) r |= 2;
+            a = segs[k] + 1;
+        }
+    }
+    return r;
+}
+static const char *KW[] = { "if", "elif", "else", "for", "while", "with", "def", "class", "try", "except", "finally", "async", 0 };
+/* the colon ending a compound header that starts at a; -1 if the line is not a compound statement */
+static int header_colon(int a, int b) {
+    int d = 0, i, lam = 0, kw = tin(a, KW);
+    if (T[a].k == 'O' && teq(a, "@")) return b;                          /* a decorator: no statement */
+    if (!kw && (tname(a, "match") || tname(a, "case")) && a + 1 < b) {
+        int k, aug = 0;
+        for (k = 0; AUG[k]; k++) if (teq(a + 1, AUG[k])) aug = 1;
+        if (!aug && !top(a + 1, "=") && !top(a + 1, ".") && !top(a + 1, ":") && !top(a + 1, ",") && !top(a + 1, ")")) kw = 2;
+    }
+    if (!kw) return -1;
+    for (i = a + 1; i < b; i++) {
+        if (is_open(i)) { d++; continue; }
+        if (is_close(i)) { d--; continue; }
+        if (d) continue;
+        if (tname(i, "lambda")) { lam++; continue; }
+        if (top(i, ":")) { if (lam) { lam--; continue; } if (kw == 2 && tname(a, "match") && i != b - 1) return -1; return i; }
+    }
+    return kw == 2 ? -1 : b - 1;
+}
+/* every simple statement of logical line l (a compound header's own tokens excluded): OR of their bits (bit 0
+   summed into *edits) and the number of loop-rule Assigns into *loopn */
+static void line_stmts(int l, int *edits, int *loopn) {
+    int a = LN[l].a, b = LN[l].b, c = header_colon(a, b), s, d = 0, i;
+    s = c >= 0 ? c + 1 : a;
+    for (i = s; i <= b; i++) {
+        if (i < b && is_open(i)) d++;
+        else if (i < b && is_close(i)) d--;
+        if (i == b || (d == 0 && top(i, ";"))) {
+            int r = simple(s, i);
+            if (r & 1) (*edits)++;
+            if (r & 2) (*loopn)++;
+            s = i + 1;
+        }
+    }
+}
+/* does the for header at line l iterate over something naming a graph attribute? */
+static int for_walks_graph(int l) {
+    int a = LN[l].a, b = LN[l].b, c = header_colon(a, b), d = 0, i, in = -1;
+    for (i = a + 1; i < c; i++) {
+        if (is_open(i)) d++; else if (is_close(i)) d--;
+        else if (d == 0 && tname(i, "in")) { in = i; break; }
+    }
+    if (in < 0) return 0;
+    for (i = in + 1; i + 1 < c; i++) if (top(i, ".") && tin(i + 1, GRAPH)) return 1;
+    return 0;
+}
+static int count_file(void) {
+    int n = 0, i, l;
+    for (i = 0; i + 2 < nT; i++) if (top(i, ".") && tin(i + 1, CALLS) && top(i + 2, "(")) n++;
+    for (i = 0; i + 4 < nT; i++) if (top(i, ".") && tin(i + 1, GRAPH) && top(i + 2, ".") && tin(i + 3, METHODS) && top(i + 4, "(")) n++;
+    for (l = 0; l < nL; l++) { int loopn = 0; line_stmts(l, &n, &loopn); }
+    for (l = 0; l < nL; l++) {
+        int j, ind = LN[l].indent, edits = 0, loopn = 0;
+        if (!tname(LN[l].a, "for") || !for_walks_graph(l)) continue;
+        line_stmts(l, &edits, &loopn);
+        for (j = l + 1; j < nL && LN[j].indent > ind; j++) line_stmts(j, &edits, &loopn);
+        if (j < nL && LN[j].indent == ind && tname(LN[j].a, "else") && top(LN[j].a + 1, ":")) {
+            line_stmts(j, &edits, &loopn);
+            for (j++; j < nL && LN[j].indent > ind; j++) line_stmts(j, &edits, &loopn);
+        }
+        n += loopn;
+    }
+    return n;
+}
+
+/* ---- count(): {stage: {files: {rel: n}, total}} with stages sorted, files in Path order ---- */
+typedef struct { char *stage; StrList files; int *counts; int total; } Stage;
+static Stage *ST; static int nST;
+static int stagecmp(const void *x, const void *y) { return strcmp(((const Stage *)x)->stage, ((const Stage *)y)->stage); }
+static void count(void) {
+    StrList all = { 0, 0, 0 }; char ex[PATHN], p[PATHN]; int i;
+    snprintf(ex, sizeof ex, "%s/exec", ROOT);
+    rglob_py(ex, "", &all);
+    qsort(all.v, (size_t)all.n, sizeof *all.v, partcmp);
+    for (i = 0; i < all.n; i++) {
+        const char *rel = all.v[i], *slash = strchr(rel, '/'), *base = strrchr(rel, '/'); char stage[PATHN]; int n, k;
+        base = base ? base + 1 : rel;
+        if (slash && ((size_t)(slash - rel) == 5 && !strncmp(rel, "build", 5))) continue;
+        if (slash && ((size_t)(slash - rel) == 11 && !strncmp(rel, "__pycache__", 11))) continue;
+        if (!strcmp(base, "finite_rules.py")) continue;
+        { const char *q = rel; int skip = 0; while (*q) { size_t l = strcspn(q, "/"); if (l == 11 && !strncmp(q, "__pycache__", 11)) skip = 1; q += l; if (*q) q++; } if (skip) continue; }
+        if (slash) snprintf(stage, sizeof stage, "%.*s", (int)(slash - rel), rel); else snprintf(stage, sizeof stage, "(top)");
+        snprintf(p, sizeof p, "%s/%s", ex, rel);
+        FILEP = p;
+        S = read_text(p, &N);
+        tokenize();
+        n = count_file();
+        free((char *)S);
+        if (!n) continue;
+        for (k = 0; k < nST && strcmp(ST[k].stage, stage); k++) ;
+        if (k == nST) { ST = xrealloc(ST, (size_t)(nST + 1) * sizeof *ST); memset(&ST[nST], 0, sizeof *ST); ST[nST].stage = xstrdup(stage); nST++; }
+        sl_push(&ST[k].files, rel);
+        ST[k].counts = xrealloc(ST[k].counts, (size_t)ST[k].files.n * sizeof(int));
+        ST[k].counts[ST[k].files.n - 1] = n;
+        ST[k].total += n;
+    }
+    qsort(ST, (size_t)nST, sizeof *ST, stagecmp);
+}
+
+/* ---- text helpers ---- */
+static size_t cplen(const char *s) { size_t n = 0; for (; *s; s++) if (((unsigned char)*s & 0xC0) != 0x80) n++; return n; }
+static void put_ljust(const char *s, int w) { size_t n = cplen(s); fputs(s, stdout); while ((int)n < w) { putchar(' '); n++; } }
+/* str.split(): whitespace-separated fields (ASCII whitespace; the allow file is ASCII) */
+static int split_ws(char *line, char **f, int maxf) {
+    int n = 0; char *p = line;
+    for (;;) {
+        while (*p && strchr(" \t\v\f\r\n\x1c\x1d\x1e\x1f", *p)) p++;
+        if (!*p) break;
+        if (n < maxf) f[n++] = p;
+        while (*p && !strchr(" \t\v\f\r\n\x1c\x1d\x1e\x1f", *p)) p++;
+        if (*p) *p++ = 0;
+    }
+    return n;
+}
+static int is_blank(const char *s) { for (; *s; s++) if (!strchr(" \t\v\f\r\n\x1c\x1d\x1e\x1f", *s)) return 0; return 1; }
+
+/* ---- --ops ---- */
+typedef struct { char *op; char *manifest; char *stem; } AllowOp;
+static AllowOp *AO; static int nAO = -1;
+static void load_allowops(void) {
+    char path[PATHN], *t, *line, *next; size_t n;
+    if (nAO >= 0) return;
+    snprintf(path, sizeof path, "%s/tests/decisionledger.allow", ROOT);
+    t = read_text(path, &n);
+    nAO = 0;
+    /* str.splitlines(): \n after the universal-newline read; \v \f \x1c-\x1e also break lines (ASCII file) */
+    for (line = t; line && *line; line = next) {
+        size_t l = strcspn(line, "\n\v\f\x1c\x1d\x1e"); char *f[4]; int k;
+        next = line[l] ? line + l + 1 : 0;
+        line[l] = 0;
+        if (strncmp(line, "allowop ", 8)) continue;
+        k = split_ws(line, f, 4);
+        if (k < 4) continue;                                           /* a short tuple never equals a 3-tuple */
+        AO = xrealloc(AO, (size_t)(nAO + 1) * sizeof *AO);
+        AO[nAO].op = f[1]; AO[nAO].manifest = f[2]; AO[nAO].stem = f[3]; nAO++;
+    }
+}
+static int allowed_op(const char *op, const char *manifest, const char *stem) {
+    int i; load_allowops();
+    for (i = 0; i < nAO; i++) if (!strcmp(AO[i].op, op) && !strcmp(AO[i].manifest, manifest) && !strcmp(AO[i].stem, stem)) return 1;
+    return 0;
+}
+static const char *FORBIDDEN[] = { "py", "retarget", 0 };
+typedef struct { char *op; StrList where; } Seen;
+static int seencmp(const void *x, const void *y) { return strcmp(((const Seen *)x)->op, ((const Seen *)y)->op); }
+static int glob_manifest(const char *name) { return endswith(name, "-manifest.tsv"); }
+static int ops(void) {
+    char ex[PATHN], p[PATHN], r[PATHN]; StrList ms = { 0, 0, 0 }, bad = { 0, 0, 0 }; DIR *d; struct dirent *e; struct stat st;
+    Seen *seen = 0; int nseen = 0, i, k;
+    snprintf(ex, sizeof ex, "%s/exec", ROOT);
+    if ((d = opendir(ex))) {   /* exec/ *-manifest.tsv and exec/ * / *-manifest.tsv (glob follows directory symlinks) */
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", ex, e->d_name);
+            if (glob_manifest(e->d_name)) sl_push(&ms, e->d_name);
+            if (!stat(p, &st) && S_ISDIR(st.st_mode)) {
+                DIR *d2 = opendir(p); struct dirent *e2;
+                if (!d2) continue;
+                while ((e2 = readdir(d2))) {
+                    if (!strcmp(e2->d_name, ".") || !strcmp(e2->d_name, "..")) continue;
+                    if (glob_manifest(e2->d_name)) { snprintf(r, sizeof r, "%s/%s", e->d_name, e2->d_name); sl_push(&ms, r); }
+                }
+                closedir(d2);
+            }
+        }
+        closedir(d);
+    }
+    qsort(ms.v, (size_t)ms.n, sizeof *ms.v, partcmp);
+    for (i = 0; i < ms.n; i++) {
+        char rel[PATHN], *t, *line, *next; size_t n; int ln = 0;
+        snprintf(rel, sizeof rel, "exec/%s", ms.v[i]);
+        snprintf(p, sizeof p, "%s/%s", ROOT, rel);
+        t = read_text(p, &n);
+        for (line = t; line; line = next) {
+            char *f[4] = { 0, 0, 0, 0 }, *q, *op, where[PATHN + 32]; int nf = 0;
+            size_t l = strcspn(line, "\n");
+            next = line[l] ? line + l + 1 : 0;
+            line[l] = 0; ln++;
+            if (!*line || line[0] == '#') continue;
+            /* ln.split('\t'): the first four fields */
+            for (q = line; nf < 4; ) { f[nf++] = q; q = strchr(q, '\t'); if (!q) break; *q++ = 0; }
+            op = f[0]; while (*op == '.') op++;
+            snprintf(where, sizeof where, "%s:%d", rel, ln);
+            if (allowed_op(op, rel, nf > 1 ? f[1] : "")) {
+                printf("  allowed  %s %s  %s (decisionledger.allow allowop)\n", op, f[1], where); continue;
+            }
+            for (k = 0; k < nseen && strcmp(seen[k].op, op); k++) ;
+            if (k == nseen) { seen = xrealloc(seen, (size_t)(nseen + 1) * sizeof *seen); seen[nseen].op = xstrdup(op); memset(&seen[nseen].where, 0, sizeof(StrList)); nseen++; }
+            sl_push(&seen[k].where, where);
+            if (nf > 3) {
+                char *a = f[3], *amp; int hit = 0;
+                for (;;) {
+                    char *t2 = a;
+                    amp = strchr(a, '&'); if (amp) *amp = 0;
+                    while (*t2 == '!') t2++;
+                    if (!strncmp(t2, "state:", 6)) hit = 1;
+                    if (!amp) break;
+                    a = amp + 1;
+                }
+                if (hit) { char b[PATHN + 64]; snprintf(b, sizeof b, "state: predicate  %s:%d", rel, ln); sl_push(&bad, b); }
+            }
+        }
+        free(t);
+    }
+    for (i = 0; FORBIDDEN[i]; i++)
+        for (k = 0; k < nseen; k++) if (!strcmp(seen[k].op, FORBIDDEN[i])) {
+            int w; for (w = 0; w < seen[k].where.n; w++) { char b[PATHN + 64]; snprintf(b, sizeof b, "forbidden op %s  %s", FORBIDDEN[i], seen[k].where.v[w]); sl_push(&bad, b); }
+        }
+    qsort(seen, (size_t)nseen, sizeof *seen, seencmp);
+    for (k = 0; k < nseen; k++) { fputs("  ", stdout); put_ljust(seen[k].op, 14); printf(" %4d\n", seen[k].where.n); }
+    if (nseen > 12) { char b[128]; snprintf(b, sizeof b, "%d distinct ops > cap %d", nseen, 12); sl_push(&bad, b); }
+    for (i = 0; i < bad.n; i++) printf("  BAD  %s\n", bad.v[i]);
+    printf("decision-ledger --ops  distinct %d (cap %d)   bad %d\n", nseen, 12, bad.n);
+    return bad.n ? 1 : 0;
+}
+
+/* ---- --seedpy ---- */
+static const char *SEED_WHITELIST[] = { "exec/finite_rules.py", "exec/assemble.py", "exec/facts/export.py", "exec/facts/load.py",
+    "exec/c/", "exec/pipeline/", "exec/build/", "exec/lex/tbl.py", "exec/lex/net.py", "exec/lex/stage.py", 0 };
+static const char *SEED_TOOLS[] = { "check.py", "sim.py", "compare.py", "roundtrip.py", "cut.py", "-oracle.py", "prep.py", 0 };
+static int seedpy(int list) {
+    StrList all = { 0, 0, 0 }, tools = { 0, 0, 0 }, dirs = { 0, 0, 0 }; int *cnt = 0, i, k, n = 0, asm_lines = 0, bad;
+    char ex[PATHN], p[PATHN]; size_t len, j;
+    snprintf(ex, sizeof ex, "%s/exec", ROOT);
+    rglob_py(ex, "", &all);
+    qsort(all.v, (size_t)all.n, sizeof *all.v, partcmp);
+    for (i = 0; i < all.n; i++) {
+        char rel[PATHN], dname[PATHN]; int skip = 0, slashes = 0; const char *q;
+        snprintf(rel, sizeof rel, "exec/%s", all.v[i]);
+        for (k = 0; SEED_WHITELIST[k]; k++) if (!strncmp(rel, SEED_WHITELIST[k], strlen(SEED_WHITELIST[k]))) skip = 1;
+        if (skip) continue;
+        for (k = 0; SEED_TOOLS[k]; k++) if (endswith(rel, SEED_TOOLS[k])) skip = 1;
+        if (skip) { sl_push(&tools, rel); continue; }
+        for (q = rel; *q; q++) if (*q == '/') slashes++;
+        if (slashes > 1) { q = strchr(rel, '/') + 1; snprintf(dname, sizeof dname, "%.*s", (int)strcspn(q, "/"), q); }
+        else snprintf(dname, sizeof dname, ".");
+        for (k = 0; k < dirs.n && strcmp(dirs.v[k], dname); k++) ;
+        if (k == dirs.n) { sl_push(&dirs, dname); cnt = xrealloc(cnt, (size_t)dirs.n * sizeof(int)); cnt[k] = 0; }
+        cnt[k]++;
+        if (list) printf("  stage    %s\n", rel);
+    }
+    for (i = 0; i < tools.n; i++) printf("  tool     %s\n", tools.v[i]);
+    /* sorted(counts.items()) */
+    for (i = 0; i < dirs.n; i++) for (k = i + 1; k < dirs.n; k++) if (strcmp(dirs.v[k], dirs.v[i]) < 0) {
+        char *t = dirs.v[i]; int c = cnt[i]; dirs.v[i] = dirs.v[k]; cnt[i] = cnt[k]; dirs.v[k] = t; cnt[k] = c;
+    }
+    for (i = 0; i < dirs.n; i++) { fputs("  ", stdout); put_ljust(dirs.v[i], 10); printf(" %4d\n", cnt[i]); n += cnt[i]; }
+    snprintf(p, sizeof p, "%s/exec/assemble.py", ROOT);
+    {   /* len(read_text().splitlines()) */
+        char *t = read_text(p, &len); int open_line = 0;
+        for (j = 0; j < len; j++) {
+            unsigned char c = (unsigned char)t[j]; int brk = 0;
+            if (c == '\n' || c == '\v' || c == '\f' || c == 0x1c || c == 0x1d || c == 0x1e) brk = 1;
+            else if (c == 0xC2 && j + 1 < len && (unsigned char)t[j + 1] == 0x85) { brk = 1; j++; }
+            else if (c == 0xE2 && j + 2 < len && (unsigned char)t[j + 1] == 0x80 && ((unsigned char)t[j + 2] == 0xA8 || (unsigned char)t[j + 2] == 0xA9)) { brk = 1; j += 2; }
+            if (brk) { asm_lines++; open_line = 0; } else open_line = 1;
+        }
+        if (open_line) asm_lines++;
+        free(t);
+    }
+    bad = n > 1 || asm_lines > 420;
+    printf("seedpy  stage-specific .py under exec/ %d (cap %d)   assemble.py %d lines (cap %d, P5 target 400)   (check/sim tools %d, not counted)%s\n",
+           n, 1, asm_lines, 420, tools.n, bad ? "   ROSE" : "");
+    return bad ? 1 : 0;
+}
+
+/* ---- main: the ledger ---- */
+static double num(const pj_value *v, const char *key) {
+    char m[256];
+    if (!v) { snprintf(m, sizeof m, "KeyError: '%s'", key); die(m); }
+    if (v->type == PJ_INT) return strtod(v->s, 0);
+    if (v->type == PJ_FLOAT) return v->d;
+    if (v->type == PJ_BOOL) return v->b;
+    snprintf(m, sizeof m, "TypeError: '%s' is not a number", key); die(m);
+    return 0;
+}
+static int ledger(int update) {
+    int i, k, total = 0, bad = 0, nmissing = 0, rc_ops; char path[PATHN];
+    count();
+    for (i = 0; i < nST; i++) total += ST[i].total;
+    if (update) {
+        pj_value *root = pj_dict(), *stages = pj_dict(); char *out; size_t on;
+        pj_set(root, "note", pj_strz("direct transition call sites in exec/*.py (outside finite_rules.py), per stage; may only fall"));
+        for (i = 0; i < nST; i++) {
+            pj_value *sv = pj_dict(), *fv = pj_dict();
+            pj_set(sv, "total", pj_int(ST[i].total));
+            for (k = 0; k < ST[i].files.n; k++) pj_set(fv, ST[i].files.v[k], pj_int(ST[i].counts[k]));
+            pj_set(sv, "files", fv);
+            pj_set(stages, ST[i].stage, sv);
+        }
+        pj_set(root, "stages", stages);
+        pj_set(root, "total", pj_int(total));
+        pj_dumps(root, 1, &out, &on);
+        out = xrealloc(out, on + 2); out[on++] = '\n'; out[on] = 0;
+        snprintf(path, sizeof path, "%s/research/decision-ledger.json", ROOT);
+        if (cx_write(path, out, on)) { char m[PATHN + 64]; snprintf(m, sizeof m, "OSError: cannot write '%s'", path); die(m); }
+        printf("decision-ledger: baseline written, total %d\n", total);
+        return 0;
+    }
+    {
+        char *text, why[512], m[700]; size_t n; pj_value *doc, *base; double basesum = 0;
+        char **allow = 0, **keep = 0; int nallow = 0, nkeep = 0;
+        snprintf(path, sizeof path, "%s/research/decision-ledger.json", ROOT);
+        text = read_text(path, &n);
+        if (!(doc = pj_loads(text, n, why, sizeof why))) { snprintf(m, sizeof m, "%s", why); die(m); }
+        if (!(base = pj_get(doc, "stages"))) die("KeyError: 'stages'");
+        snprintf(path, sizeof path, "%s/tests/decisionledger.allow", ROOT);
+        {
+            struct stat st; char *t = 0, *line, *next; size_t tn;
+            if (!stat(path, &st) && S_ISREG(st.st_mode)) t = read_text(path, &tn);
+            for (line = t; line && *line; line = next) {
+                size_t l = strcspn(line, "\n\v\f\x1c\x1d\x1e"); char *f[3], copy[8192];
+                next = line[l] ? line + l + 1 : 0;
+                line[l] = 0;
+                if (is_blank(line) || line[0] == '#') continue;
+                snprintf(copy, sizeof copy, "%s", line);
+                if (split_ws(copy, f, 3) < 1) continue;
+                if (!strcmp(f[0], "rise") || !strcmp(f[0], "keep")) {
+                    char c2[8192]; char *g[3]; int ng;
+                    snprintf(c2, sizeof c2, "%s", line);
+                    ng = split_ws(c2, g, 3);
+                    if (ng < 2) die("IndexError: list index out of range");
+                    if (!strcmp(f[0], "rise")) { allow = xrealloc(allow, (size_t)(nallow + 1) * sizeof *allow); allow[nallow++] = xstrdup(g[1]); }
+                    else { keep = xrealloc(keep, (size_t)(nkeep + 1) * sizeof *keep); keep[nkeep++] = xstrdup(g[1]); }
+                }
+            }
+        }
+        {   /* every file still counted needs a keep line: sorted, across stages */
+            StrList miss = { 0, 0, 0 };
+            for (i = 0; i < nST; i++) for (k = 0; k < ST[i].files.n; k++) {
+                int j, found = 0;
+                for (j = 0; j < nkeep; j++) if (!strcmp(keep[j], ST[i].files.v[k])) found = 1;
+                if (!found) sl_push(&miss, ST[i].files.v[k]);
+            }
+            for (i = 0; i < miss.n; i++) for (k = i + 1; k < miss.n; k++) if (strcmp(miss.v[k], miss.v[i]) < 0) { char *t = miss.v[i]; miss.v[i] = miss.v[k]; miss.v[k] = t; }
+            for (i = 0; i < miss.n; i++) printf("  NO REASON  %s (add `keep %s CATEGORY reason` to tests/decisionledger.allow)\n", miss.v[i], miss.v[i]);
+            nmissing = miss.n;
+        }
+        for (i = 0; i < nST; i++) {
+            pj_value *bs = base->type == PJ_OBJ ? pj_get(base, ST[i].stage) : 0, *bt = bs && bs->type == PJ_OBJ ? pj_get(bs, "total") : 0;
+            double was = 0; const char *mark; int j, allowed = 0;
+            if (bt) was = num(bt, "total");   /* (`double x = c ? f() : 0;` is not covered by the product yet) */
+            for (j = 0; j < nallow; j++) if (!strcmp(allow[j], ST[i].stage)) allowed = 1;
+            mark = ST[i].total <= was ? "ok" : allowed ? "allowed" : "ROSE";
+            if (!strcmp(mark, "ROSE")) bad++;
+            fputs("  ", stdout); put_ljust(ST[i].stage, 10); printf(" %4d  (baseline %4lld) %s\n", ST[i].total, (long long)was, mark);
+        }
+        if (base->type == PJ_OBJ) for (i = 0; i + 1 < (int)base->len; i += 2) basesum += num(base->items[i + 1]->type == PJ_OBJ ? pj_get(base->items[i + 1], "total") : 0, "total");
+        printf("decision-ledger  stages %d   direct transition sites %d   (baseline %lld)   rose %d\n", nST, total, (long long)basesum, bad);
+    }
+    rc_ops = ops();
+    return bad || nmissing || rc_ops ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash, t[PATHN]; int i, a_seedpy = 0, a_ops = 0, a_update = 0, a_list = 0;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/..", here);
+    if (!realpath(t, ROOT)) { char m[PATHN + 64]; snprintf(m, sizeof m, "cannot resolve the repository root %s", t); die(m); }
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--seedpy")) a_seedpy = 1;
+        else if (!strcmp(argv[i], "--ops")) a_ops = 1;
+        else if (!strcmp(argv[i], "--update")) a_update = 1;
+        else if (!strcmp(argv[i], "--list")) a_list = 1;
+    }
+    if (a_seedpy) return seedpy(a_list);
+    if (a_ops) return ops();
+    return ledger(a_update);
+}
