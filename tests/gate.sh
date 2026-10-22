@@ -466,6 +466,8 @@ job edge-e2-pp-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --
 job edge-e1-lex-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e1-lex .
 job edge-e3-parse-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-parse .
 job edge-e2-pp-ablate tests/bound 58 sh ./unisacc.com -run tests/edgeablate.cx -- --gate tests/seals/edge-e2-pp .   # c43: sampled ablation witness (verified e2->pp + e3->parse only)
+job regcheck tests/bound 58 sh ./unisacc.com -run tests/regcheck.cx -- --check .   # c43 R1: E3 save/restore frames pair up and partial saves of the value record are declared (tests/regs-e3.tsv)
+job regcheck-negative tests/bound 58 sh ./unisacc.com -run tests/regcheck.cx -- --negative .   # c43 R1: dropping szcomma from its save, or a partial-save declaration, must be caught
 job edge-e3-parse-ablate tests/bound 58 sh ./unisacc.com -run tests/edgeablate.cx -- --gate tests/seals/edge-e3-parse .
 job edge-e3-type-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-type .
 job edge-e3-scope-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-scope .

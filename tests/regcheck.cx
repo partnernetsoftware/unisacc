@@ -1,0 +1,196 @@
+#!/usr/bin/env -S unisacc.com -run
+/* regcheck.cx -- E3 register save/restore frames (refactor R1, research/c43-refactor-exploration.md).
+   usage: sh ./unisacc.com -run tests/regcheck.cx -- --list ROOT | --check ROOT [REGS]
+   E3 keeps a value in undeclared registers (exec/c/tbl.py gives any new name a zero slot), and a
+   sub-parse saves and restores them on the value stack: ["STX","vsp",VS,"r"] ... ["LDX","r","vsp",VS].
+   This reads the declarations themselves -- exec/parse2/*-result.tsv action lists, the recipes in
+   exec/parse2/gen2-actions-manifest.tsv and the vpush/vpop macros of exec/parse2/*-stack.tsv -- and checks
+   (1) every save frame has a restore frame of the same registers in reverse order, and back;
+   (2) a frame that saves part of the declared VALUE record (tests/regs-e3.tsv `value` row) is listed there as
+       `partial SIGNATURE REASON`: the 2026-10-22 sizeof-row bug was one such silent partial save.
+   --list prints every frame; --check exits 1 on an unpaired frame or an undeclared partial save. */
+#include <cx.h>
+
+#define MAXF 4096
+#define MAXR 40
+#define NAMEW 48
+typedef struct { char where[160]; int kind; int n; char r[MAXR][NAMEW]; } Frame;   /* kind 1 save, 2 restore */
+static Frame F[MAXF]; static int nf;
+static char value[MAXR][NAMEW]; static int nvalue;
+static char partial[512][512]; static int npartial;
+static char pairsave[256][512], pairrest[256][512]; static int npair;   /* declared renames: SAVE restored as RESTORE (or - : dropped) */
+static int bad;
+
+static void sig(Frame *f, int rev, char *out, int cap) {
+    int i, k = 0; out[0] = 0;
+    for (i = 0; i < f->n; i++) {
+        const char *s = f->r[rev ? f->n - 1 - i : i];
+        k += snprintf(out + k, cap - k, "%s%s", i ? "," : "", s);
+        if (k >= cap) { out[cap - 1] = 0; return; }
+    }
+}
+static Frame *open_frame(int kind, const char *where) {
+    if (nf >= MAXF) { fprintf(stderr, "regcheck: frame table full\n"); exit(2); }
+    F[nf].kind = kind; F[nf].n = 0; snprintf(F[nf].where, 160, "%s", where); return &F[nf++];
+}
+static void add_reg(Frame *f, const char *s, int len) {
+    if (f->n >= MAXR || len >= NAMEW) { fprintf(stderr, "regcheck: frame too wide at %s\n", f->where); exit(2); }
+    memcpy(f->r[f->n], s, len); f->r[f->n][len] = 0; f->n++;
+}
+/* the value-stack base is spelled 7000000, ["constant","VS"] or "$VS" */
+static int is_vs(const char *p) {
+    return !strncmp(p, "7000000", 7) || !strncmp(p, "[\"constant\",\"VS\"]", 17) || !strncmp(p, "\"$VS\"", 5);
+}
+/* one action list [ ... ]: consecutive saves form one frame, consecutive restores another */
+static void scan_list(const char *p, const char *end, const char *where) {
+    Frame *cur = 0; int curkind = 0;
+    while (p < end) {
+        const char *q;
+        if (!strncmp(p, "[\"STX\",\"vsp\",", 13) && is_vs(p + 13)) {
+            q = strchr(p + 13, ','); if (!q || q >= end || q[1] != '"') { p++; continue; }
+            q += 2; const char *e = strchr(q, '"'); if (!e || e >= end) break;
+            if (curkind != 1) { cur = open_frame(1, where); curkind = 1; }
+            add_reg(cur, q, (int)(e - q)); p = e; continue;
+        }
+        if (!strncmp(p, "[\"LDX\",\"", 8)) {
+            q = p + 8; const char *e = strchr(q, '"'); if (!e || e >= end) break;
+            if (!strncmp(e, "\",\"vsp\",", 8) && is_vs(e + 8)) {
+                if (curkind != 2) { cur = open_frame(2, where); curkind = 2; }
+                add_reg(cur, q, (int)(e - q)); p = e; continue;
+            }
+        }
+        /* any other action ends the run of saves/restores (ALUI vsp bookkeeping does not) */
+        if (*p == '[' && p[1] == '"' && strncmp(p, "[\"ALUI\",\"add\",\"vsp\"", 19) && strncmp(p, "[\"ALUI\",\"sub\",\"vsp\"", 19)
+            && strncmp(p, "[\"STX\",\"vsp\"", 12) && strncmp(p, "[\"LDX\"", 6)) curkind = 0;
+        p++;
+    }
+}
+static int ends(const char *s, const char *suf) { size_t a = strlen(s), b = strlen(suf); return a >= b && !strcmp(s + a - b, suf); }
+static int on_file(const char *path, void *ctx) {
+    size_t n; char *b, *line, *nl; int ln = 0; char where[160]; const char *base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    (void)ctx;
+    if (!(ends(path, "-result.tsv") || ends(path, "-stack.tsv") || ends(path, "gen2-actions-manifest.tsv"))) return 0;
+    b = cx_read(path, &n); if (!b) { fprintf(stderr, "regcheck: cannot read %s\n", path); exit(2); }
+    for (line = b; line < b + n; line = nl + 1) {
+        nl = memchr(line, '\n', b + n - line); if (!nl) nl = b + n;
+        ln++;
+        if (line[0] == '#') continue;
+        snprintf(where, sizeof where, "%s:%d", base, ln);
+        if (ends(path, "-stack.tsv")) {                    /* NAME vpush|vpop r1,r2,... */
+            char *t1 = memchr(line, '\t', nl - line); if (!t1) continue;
+            char *t2 = memchr(t1 + 1, '\t', nl - t1 - 1); if (!t2) continue;
+            int kind = !strncmp(t1 + 1, "vpush", 5) ? 1 : !strncmp(t1 + 1, "vpop", 4) ? 2 : 0; if (!kind) continue;
+            Frame *f = open_frame(kind, where); char *s = t2 + 1;
+            while (s < nl) { char *c = memchr(s, ',', nl - s); char *e = c ? c : nl; while (e > s && (e[-1] == '\r' || e[-1] == ' ')) e--; add_reg(f, s, (int)(e - s)); s = c ? c + 1 : nl; }
+            /* vpop names its registers in push order and restores them in reverse: store as restore order */
+            if (kind == 2) { int i; for (i = 0; i < f->n / 2; i++) { char t[NAMEW]; strcpy(t, f->r[i]); strcpy(f->r[i], f->r[f->n - 1 - i]); strcpy(f->r[f->n - 1 - i], t); } }
+            continue;
+        }
+        if (ends(path, "gen2-actions-manifest.tsv")) {     /* "recipe_NAME":[{"acts":[...]}] */
+            char *p = line;
+            while (p < nl) {
+                char *r = strstr(p, "\"recipe_"); if (!r || r >= nl) break;
+                char *e = strchr(r + 1, '"'); if (!e || e >= nl) break;
+                snprintf(where, sizeof where, "%s:%.*s", base, (int)(e - r - 1), r + 1);
+                char *nx = strstr(e, "\"recipe_"); if (!nx || nx > nl) nx = nl;
+                scan_list(e, nx, where); p = nx;
+            }
+            continue;
+        }
+        { char *t = line, *last = line; while ((t = memchr(t, '\t', nl - t))) { last = ++t; } scan_list(last, nl, where); }
+    }
+    free(b); return 0;
+}
+static void read_regs(const char *path) {
+    size_t n; char *b = cx_read(path, &n), *line, *nl;
+    if (!b) { fprintf(stderr, "regcheck: cannot read %s\n", path); exit(2); }
+    for (line = b; line < b + n; line = nl + 1) {
+        nl = memchr(line, '\n', b + n - line); if (!nl) nl = b + n;
+        if (line[0] == '#' || nl == line) continue;
+        if (!strncmp(line, "value\t", 6)) {
+            char *s = line + 6;
+            while (s < nl) { char *e = s; while (e < nl && *e != ' ' && *e != '\t') e++; if (e > s) { if (nvalue >= MAXR) exit(2); memcpy(value[nvalue], s, e - s); value[nvalue][e - s] = 0; nvalue++; } s = e + 1; }
+        } else if (!strncmp(line, "pair\t", 5)) {
+            char *s = line + 5, *e = memchr(s, '\t', nl - s), *e2;
+            if (!e || npair >= 256 || e - s >= 512) { fprintf(stderr, "regcheck: bad pair row\n"); exit(2); }
+            e2 = memchr(e + 1, '\t', nl - e - 1); if (!e2) e2 = nl;
+            if (e2 - e - 1 >= 512) exit(2);
+            memcpy(pairsave[npair], s, e - s); pairsave[npair][e - s] = 0;
+            memcpy(pairrest[npair], e + 1, e2 - e - 1); pairrest[npair][e2 - e - 1] = 0; npair++;
+        } else if (!strncmp(line, "partial\t", 8)) {
+            char *s = line + 8, *e = memchr(s, '\t', nl - s); if (!e) e = nl;
+            if (npartial >= 512 || e - s >= 512) exit(2);
+            memcpy(partial[npartial], s, e - s); partial[npartial][e - s] = 0; npartial++;
+        }
+    }
+    free(b);
+}
+static int in_value(const char *r) { int i; for (i = 0; i < nvalue; i++) if (!strcmp(value[i], r)) return 1; return 0; }
+
+static int nunpaired, nundeclared;
+static void analyze(int list, int quiet) {
+    int i, j, saves = 0, restores = 0, unpaired = 0, partials = 0, undeclared = 0;
+    static char a[4096], b[4096];
+    for (i = 0; i < nf; i++) {
+        int found = 0, nin = 0;
+        if (F[i].kind == 1) saves++; else restores++;
+        sig(&F[i], F[i].kind == 2, a, sizeof a);              /* compare in save order */
+        for (j = 0; j < nf && !found; j++) if (F[j].kind != F[i].kind) { sig(&F[j], F[j].kind == 2, b, sizeof b); found = !strcmp(a, b); }
+        /* a declared rename pairs it when the other side is a frame that exists (or is declared dropped: -) */
+        for (j = 0; j < npair && !found; j++) {
+            const char *mine = F[i].kind == 1 ? pairsave[j] : pairrest[j], *other = F[i].kind == 1 ? pairrest[j] : pairsave[j];
+            int k;
+            if (strcmp(mine, a)) continue;
+            if (!strcmp(other, "-") && F[i].kind == 1) { found = 1; break; }
+            for (k = 0; k < nf && !found; k++) if (F[k].kind != F[i].kind) { sig(&F[k], F[k].kind == 2, b, sizeof b); found = !strcmp(other, b); }
+        }
+        if (list) printf("%s\t%s\t%s\n", F[i].kind == 1 ? "save" : "restore", F[i].where, a);
+        if (!found) { unpaired++; if (!quiet) printf("UNPAIRED %s %s: %s\n", F[i].kind == 1 ? "save" : "restore", F[i].where, a); }
+        if (F[i].kind != 1) continue;
+        for (j = 0; j < F[i].n; j++) nin += in_value(F[i].r[j]);
+        if (nin > 0 && nin < nvalue) {
+            int k, ok = 0; partials++;
+            for (k = 0; k < npartial; k++) if (!strcmp(partial[k], a)) ok = 1;
+            if (!ok) { undeclared++; if (!quiet) printf("PARTIAL %s saves %d of %d value registers: %s\n", F[i].where, nin, nvalue, a); }
+        }
+    }
+    if (!quiet) printf("regcheck: %d frames (%d save, %d restore), %d unpaired, %d partial value saves (%d undeclared)\n", nf, saves, restores, unpaired, partials, undeclared);
+    nunpaired = unpaired; nundeclared = undeclared;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], dir[4200], regs[4200];
+    int mode, i, j;
+    if (argc < 3) { fprintf(stderr, "usage: regcheck.cx --list|--check|--negative ROOT [REGS]\n"); return 2; }
+    mode = !strcmp(argv[1], "--list") ? 1 : !strcmp(argv[1], "--check") ? 2 : !strcmp(argv[1], "--negative") ? 3 : 0;
+    if (!mode) { fprintf(stderr, "usage: regcheck.cx --list|--check|--negative ROOT [REGS]\n"); return 2; }
+    snprintf(root, sizeof root, "%s", argv[2]);
+    snprintf(dir, sizeof dir, "%s/exec/parse2", root);
+    snprintf(regs, sizeof regs, "%s", argc > 3 ? argv[3] : "");
+    if (!regs[0]) snprintf(regs, sizeof regs, "%s/tests/regs-e3.tsv", root);
+    read_regs(regs);
+    if (nvalue == 0) { fprintf(stderr, "regcheck: %s declares no value record\n", regs); return 2; }
+    if (cx_walk(dir, on_file, 0)) { fprintf(stderr, "regcheck: cannot walk %s\n", dir); return 2; }
+    if (nf == 0) { fprintf(stderr, "regcheck: no frames found under %s (nothing checked)\n", dir); return 2; }
+    if (mode != 3) { analyze(mode == 1, 0); return mode == 1 ? 0 : (nunpaired || nundeclared); }
+    /* --negative: the check must turn red on the two defects it exists for, on the real frames */
+    analyze(0, 1);
+    if (nunpaired || nundeclared) { printf("regcheck negative: the unmutated tables are already red\n"); return 1; }
+    for (i = 0; i < nf; i++) if (F[i].kind == 1) for (j = 0; j < F[i].n; j++) if (!strcmp(F[i].r[j], "szcomma")) {
+        int k; char keep[NAMEW]; strcpy(keep, F[i].r[j]);
+        for (k = j; k + 1 < F[i].n; k++) strcpy(F[i].r[k], F[i].r[k + 1]); F[i].n--;   /* a save that forgot szcomma */
+        analyze(0, 1);
+        if (!nunpaired) { printf("regcheck negative: FAIL dropping szcomma from %s was not caught\n", F[i].where); return 1; }
+        printf("regcheck negative: dropped szcomma from %s -> %d unpaired (caught)\n", F[i].where, nunpaired);
+        for (k = F[i].n; k > j; k--) strcpy(F[i].r[k], F[i].r[k - 1]); strcpy(F[i].r[j], keep); F[i].n++;
+        goto partial_case;
+    }
+    printf("regcheck negative: FAIL no save frame carries szcomma (the comma fix is gone?)\n"); return 1;
+partial_case:
+    if (npartial == 0) { printf("regcheck negative: FAIL no partial declarations to drop\n"); return 1; }
+    npartial--;                                                   /* an undeclared partial save */
+    analyze(0, 1);
+    if (!nundeclared) { printf("regcheck negative: FAIL an undeclared partial save was not caught\n"); return 1; }
+    printf("regcheck negative: dropped the declaration of a partial save -> %d undeclared (caught)\nregcheck negative: PASS\n", nundeclared);
+    return 0;
+}

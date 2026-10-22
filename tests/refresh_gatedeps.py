@@ -242,6 +242,15 @@ def main():
         'command': ['sh', './unisacc.com', '-run', 'tests/latebindcheck.cx', '--', './unisacc.com'],
         'files': ['tests/latebindcheck.cx', 'tests/bound', 'tests/bound.c'] + rootfiles, 'executable_inputs': True}
     changed.append(('step6-batch2', 'root product declared for gate-infra, com-tapedomain, com-latebind'))
+    # c43 R1 (research/c43-refactor-exploration.md): regcheck reads exec/parse2 (every *-result.tsv, *-stack.tsv and
+    # gen2-actions-manifest.tsv) and tests/regs-e3.tsv, run by the root product; release/derived-map.tsv routes
+    # exec/parse2/* and tests/regs-e3.tsv here, so a table cut that breaks a save/restore frame is caught at commit.
+    for name, mode in (('regcheck', '--check'), ('regcheck-negative', '--negative')):
+        d['suites'][name] = {
+            'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/regcheck.cx', '--', mode, '.'],
+            'files': ['tests/regcheck.cx', 'tests/regs-e3.tsv', 'tests/bound', 'tests/bound.c'] + rootfiles,
+            'trees': ['exec'], 'executable_inputs': True, 'tools': ['sh']}
+    changed.append(('c43-r1', 'declared regcheck, regcheck-negative'))
     # 0.0.43 derived-consistency step 1 (research/c43-derived-consistency.md): the two checks the commit gate
     # will append.  Declared from the measured reads (strace, read-only): facts-export opens exec/, include/ and
     # the unisa/, weights/gold/, src/front_pp.c files of its TABLES; gate-layers opens the exec/facts tables and
