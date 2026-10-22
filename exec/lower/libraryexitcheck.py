@@ -52,9 +52,13 @@ def main():
                         assert b'gate ' not in out,'library exit still emits process gate'
                         resultreg=b'x0' if target.endswith('/arm64') else b'rax'
                         complete=b'hostcall '+(b'x1' if target.endswith('/arm64') else b'rdi')+b', '+resultreg+b'\n'
+                        forms=[complete]
                         if op.startswith('.sys'):
-                            complete+=b'mov '+resultreg+b', '+resultreg+b'\n'
-                        assert complete in out,('library exit return register absent/incomplete',out)
+                            complete+=b'mov '+resultreg+b', '+resultreg
+                            # the private six-argument form (non-win .sys6) carries the physical
+                            # encoding form on its return move, like every line of that frame
+                            forms=[complete+b'\n',complete+b' form=']
+                        assert any(f in out for f in forms),('library exit return register absent/incomplete',out)
                         assert all(not line.endswith(b', ') for line in out.splitlines()),'empty operand in library exit output'
                     if value is None and 'exit_group' not in op:
                         assert command([runtime,str(tbl),str(source)])==out,'C table differs'
