@@ -1,0 +1,83 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarytypednativecheck.cx -- complete native signatures through the real public library, private sources.
+   This proves fixed scalar/Pair bidirectional calls, not full variadic/callback FFI.
+   Ported from tests/librarytypednativecheck.py (2026-10-23, the owner's direction: the toolchain moves off Python).
+   usage: sh ./unisacc.com -run tests/librarytypednativecheck.cx -- [-h] --package PACKAGE [--arch {arm64,x86_64}]
+   The whole flow (argparse, the runtime copy, the two cc builds, the probe run, the evidence line, the failure
+   contract) is tests/cxlib/libnative.cx, shared with tests/librarysig2nativecheck.cx; here the probe is
+   tests/libraryabi/nine_mixed_bidirectional.c, run as `probe PACKAGE TARGET TD`, and before it runs the four
+   USLSIG2 declarations the .py packed with struct are written to TD/{host_exchange9,host_double9,host_float9,
+   host_integers17}.sig:
+     desc(kind,width,align,depth=0,tag=0,payload) = <Q depth,0,0,kind,width,0,align; tag byte; <Q len; payload
+     I=desc(1,4,4) L=desc(1,8,8) D=desc(3,8,8) F=desc(3,4,4) P=desc(2,8,8,1)
+     pair=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I)
+     sig = b'USLSIG2\n'+u(1)+u(len(name))+name+bytes([0,1,0,1])+u(len(args))+result+u(len(args))+args+bytes([1])
+     host_exchange9 pair <- I,D,F,P,pair,I,D,I,I   host_double9 D <- D*9   host_float9 F <- F*9   host_integers17 L <- L*17
+   stdout is the probe's lines, then the evidence line (scope "actual public us_sym native->script->typed native
+   fixed FP/GP17/Pair9 return; ..."); rc 0; a failure is rc 1 with the last line of the .py's traceback on stderr;
+   argparse errors rc 2. */
+#pragma unisa use cxlib.libnative
+
+typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void u(Buf *b, unsigned long long v) {   /* struct.pack('<Q', v) */
+    unsigned char q[8]; int i;
+    for (i = 0; i < 8; i++) q[i] = (unsigned char)(v >> (8 * i));
+    put(b, q, 8);
+}
+static void byte(Buf *b, unsigned v) { unsigned char c = (unsigned char)v; put(b, &c, 1); }
+static void cat(Buf *b, const Buf *c) { put(b, c->p, c->n); }
+static Buf desc(int kind, int width, int align, int depth, int tag, const Buf *payload) {
+    Buf d = { 0, 0, 0 };
+    u(&d, (unsigned long long)depth); u(&d, 0); u(&d, 0); u(&d, (unsigned long long)kind);
+    u(&d, (unsigned long long)width); u(&d, 0); u(&d, (unsigned long long)align);
+    byte(&d, (unsigned)tag); u(&d, payload ? payload->n : 0);
+    if (payload) cat(&d, payload);
+    return d;
+}
+
+static int prepare(const char *td, char *why, size_t whylen) {
+    Buf I = desc(1, 4, 4, 0, 0, 0), L = desc(1, 8, 8, 0, 0, 0), D = desc(3, 8, 8, 0, 0, 0), F = desc(3, 4, 4, 0, 0, 0);
+    Buf P = desc(2, 8, 8, 1, 0, 0), pp = { 0, 0, 0 }, pair;
+    const Buf *ex[9]; const Buf *dd[17]; const Buf *ff[17]; const Buf *ll[17];
+    struct { const char *nm; const Buf *result; const Buf **args; size_t n; } sig[4];
+    int k; size_t i;
+    u(&pp, 2); u(&pp, 0); u(&pp, 0); u(&pp, 0); u(&pp, 8); cat(&pp, &D); u(&pp, 8); u(&pp, 0); u(&pp, 0); u(&pp, 4); cat(&pp, &I);
+    pair = desc(5, 16, 8, 0, 1, &pp);
+    ex[0] = &I; ex[1] = &D; ex[2] = &F; ex[3] = &P; ex[4] = &pair; ex[5] = &I; ex[6] = &D; ex[7] = &I; ex[8] = &I;
+    for (i = 0; i < 17; i++) { dd[i] = &D; ff[i] = &F; ll[i] = &L; }
+    sig[0].nm = "host_exchange9"; sig[0].result = &pair; sig[0].args = ex; sig[0].n = 9;
+    sig[1].nm = "host_double9"; sig[1].result = &D; sig[1].args = dd; sig[1].n = 9;
+    sig[2].nm = "host_float9"; sig[2].result = &F; sig[2].args = ff; sig[2].n = 9;
+    sig[3].nm = "host_integers17"; sig[3].result = &L; sig[3].args = ll; sig[3].n = 17;
+    for (k = 0; k < 4; k++) {
+        Buf s = { 0, 0, 0 }; size_t nl = strlen(sig[k].nm); char path[4400];
+        static const unsigned char flags[4] = { 0, 1, 0, 1 };
+        put(&s, "USLSIG2\n", 8); u(&s, 1); u(&s, nl); put(&s, sig[k].nm, nl); put(&s, flags, 4);
+        u(&s, sig[k].n); cat(&s, sig[k].result); u(&s, sig[k].n);
+        for (i = 0; i < sig[k].n; i++) cat(&s, sig[k].args[i]);
+        byte(&s, 1);
+        snprintf(path, sizeof path, "%s/%s.sig", td, sig[k].nm);
+        errno = 0;
+        if (cx_write(path, s.p, s.n) != 0) { rtc_oserror(errno ? errno : EIO, path, why, whylen); return -1; }
+        free(s.p);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    static const ln_spec spec = {
+        "librarytypednativecheck.py", "tests/libraryabi/nine_mixed_bidirectional.c",
+        "actual public us_sym native->script->typed native fixed FP/GP17/Pair9 return; not complete variadic/callback ABI",
+        prepare, 1 };
+    return ln_main(argc, argv, &spec);
+}

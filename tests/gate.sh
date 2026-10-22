@@ -819,15 +819,15 @@ job lib-callback-native python3 ./tests/librarycallbacknativecheck.py --package 
 job lib-callback-forward python3 ./tests/librarycallbackforwardcheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-callable-variadic-native python3 ./tests/librarycallablevariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-callback-outcome python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}"
-job lib-typed-native python3 ./tests/librarytypednativecheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-typed-native tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) native->script->typed native fixed FP/GP17/Pair9
 job lib-variadic-native python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
-job lib-sig2-native python3 ./tests/librarysig2nativecheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-sig2-native tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) native->script fixed FP/GP17/Pair9
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-native-rosetta python3 ./tests/librarycallbacknativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-callback-forward-rosetta python3 ./tests/librarycallbackforwardcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-callable-variadic-native-rosetta python3 ./tests/librarycallablevariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
-    job lib-sig2-rosetta python3 ./tests/librarysig2nativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
-    job lib-typed-rosetta python3 ./tests/librarytypednativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
+    job lib-sig2-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
+    job lib-typed-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-variadic-rosetta python3 ./tests/librarynativevariadiccheck.py --arch x86_64
     job lib-callplans-rosetta python3 ./tests/librarycallplanscheck.py --arch x86_64
     job lib-callback-graph-rosetta python3 ./tests/librarycallbackgraphcheck.py --arch x86_64

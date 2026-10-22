@@ -1,0 +1,285 @@
+/* libnative.cx -- the shared body of the two "complete native signatures through the real public library" checks,
+   as a .cx module (2026-10-23, the py->cx port wave: tests/librarysig2nativecheck.cx and
+   tests/librarytypednativecheck.cx, ported from the .py files of the same names, which were the same program but
+   for the probe source, the probe's extra declaration-directory argument and the scope string).  Use it with
+   `#pragma unisa use cxlib.libnative` from a .cx file in tests/.
+     ln_main(ARGC, ARGV, &spec)  the whole check; returns the exit status (exits itself on the paths Python exits on)
+   spec: prog (argparse's prog name, the .py's basename, so usage/errors are byte-identical), probe (the probe source
+         relative to ROOT), scope (the evidence record's scope string), prepare (0, or a hook run after the probe is
+         built that writes declaration files into the temporary directory: 0, or -1 with WHY set to the last line of
+         Python's traceback), pass_dir (non-zero: the probe gets the temporary directory as its third argument).
+   The flow, as the .py:
+     argparse: --package PACKAGE (required), --arch {arm64,x86_64}; -h/--help (Python 3.14 argparse, 80 columns:
+       prefix matching, --opt=value, '--' and what follows unrecognized, errors rc 2 with usage on stderr)
+     host = arm64 when uname -m is arm64/aarch64, else x86_64; an --arch other than the host off Darwin is
+       `AssertionError: cross-native execution requires an explicit platform runner`
+     flags = -arch ARCH on Darwin; target = osx/ARCH or lnx/ARCH; package = Path(PACKAGE).resolve()
+     in a fresh temporary directory (TMPDIR, TEMP, TMP, then /tmp; prefix r10-sig2-native-) with exec/c and src
+       made: copy_runtime(ROOT, TD) (tests/cxlib/runtimecopy.cx), then each command run with captured output and a
+       20 s limit, rc 0 required:
+         cc FLAGS -std=c11 -O2 -shared -fPIC -fvisibility=hidden TD/exec/c/libunisacc.c TD/exec/c/librarycall_ARCH.S
+            -lffi -o TD/library.dylib
+         cc FLAGS -std=c11 -O2 -Wall -Wextra -I TD/exec/c ROOT/PROBE TD/library.dylib -o TD/probe
+         [prepare]  [arch -x86_64]  TD/probe PACKAGE TARGET [TD]
+       the probe's stdout is printed as is, then one json.dumps line {"target", "package_sha256", "runtime_sha256",
+       "optimisation_levels": [0, 1, 2], "calls_per_level": 100, "scope"}; rc 0.
+   A failure is the .py's uncaught exception: the last line of its traceback on stderr, the temporary directory
+   removed, rc 1 -- for a failed command `AssertionError: (ARGS, RC, 'STDOUT', 'STDERR')` with ARGS repr'd as the
+   .py built them (Path arguments as PosixPath('...')), a timed-out one `subprocess.TimeoutExpired: Command [...]
+   timed out after 20 seconds`, a missing cc `FileNotFoundError: [Errno 2] No such file or directory: 'cc'`.
+   Child output is decoded with errors='replace' where the .py's strict decode would raise UnicodeDecodeError.
+   ROOT is the directory above this file's caller (argv[0] when it ends in .cx, as under -run); run as a compiled
+   binary (tests/cxbin) it is the working directory.
+   platform.machine()/platform.system() are `uname -m` / `uname -s` (the carried runtime has no <sys/utsname.h>).
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module libnative
+#pragma unisa use runtimecopy
+#pragma unisa use pyrun
+
+typedef struct ln_spec {
+    const char *prog, *probe, *scope;
+    int (*prepare)(const char *td, char *why, size_t whylen);
+    int pass_dir;
+} ln_spec;
+
+static char ln_TD[4200];
+static void ln_cleanup(void) { if (ln_TD[0]) { pr_rmtree(ln_TD); ln_TD[0] = 0; } }
+static void ln_uncaught(const char *line) {   /* the traceback's last line, the directory removed, rc 1 */
+    fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
+    ln_cleanup(); exit(1);
+}
+typedef struct ln_buf { char *p; size_t n, cap; } ln_buf;
+static void ln_put(ln_buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static char *ln_repr(const char *s, size_t n) {   /* repr(str), malloc'd */
+    size_t cap = 4 * n + 8; char *r = malloc(cap);
+    if (!r) ln_uncaught("MemoryError");
+    rtc_pyrepr(s, n, r, cap);
+    return r;
+}
+
+/* ---- argparse (Python 3.14, the .py's two options) ----------------------------------------------------------- */
+static const ln_spec *ln_S;
+static void ln_usage(FILE *f) {
+    size_t pad = strlen(ln_S->prog) + 8;
+    fprintf(f, "usage: %s [-h] --package PACKAGE\n%*s[--arch {arm64,x86_64}]\n", ln_S->prog, (int)pad, "");
+}
+static void ln_argerror(const char *msg) {
+    fflush(stdout); ln_usage(stderr); fprintf(stderr, "%s: error: %s\n", ln_S->prog, msg); exit(2);
+}
+static void ln_argerror2(const char *a, const char *b, const char *c) {
+    size_t n = strlen(a) + strlen(b) + strlen(c) + 1; char *m = malloc(n);
+    if (!m) ln_uncaught("MemoryError");
+    snprintf(m, n, "%s%s%s", a, b, c); ln_argerror(m);
+}
+static void ln_help(void) {
+    ln_usage(stdout);
+    printf("\noptions:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n  --arch {arm64,x86_64}\n");
+    fflush(stdout); exit(0);
+}
+enum { LN_HELP, LN_PACKAGE, LN_ARCH };
+static const char *ln_long[3] = { "--help", "--package", "--arch" };
+/* _parse_optional: 'A' a value, 'O' an option (opt -1: unknown; explicit: the text after '=' or after -h) */
+typedef struct ln_tok { char kind; int opt; const char *explicit_arg; int sep; } ln_tok;
+static int ln_negnum(const char *s) {   /* ^-\d+$|^-\d*\.\d+$ */
+    const char *p = s + 1; int d = 0;
+    while (*p >= '0' && *p <= '9') { p++; d = 1; }
+    if (!*p) return d;
+    if (*p != '.') return 0;
+    p++; d = 0;
+    while (*p >= '0' && *p <= '9') { p++; d = 1; }
+    return d && !*p;
+}
+static ln_tok ln_classify(const char *s) {
+    ln_tok t; int i, hits = 0, hit = -1; const char *eq; size_t pn;
+    t.kind = 'O'; t.opt = -1; t.explicit_arg = 0; t.sep = 0;
+    if (!s[0] || s[0] != '-' || !s[1]) { t.kind = 'A'; return t; }
+    if (!strcmp(s, "-h")) { t.opt = LN_HELP; return t; }
+    for (i = 0; i < 3; i++) if (!strcmp(s, ln_long[i])) { t.opt = i; return t; }
+    eq = strchr(s, '=');
+    if (eq) {
+        pn = (size_t)(eq - s);
+        if (pn == 2 && !strncmp(s, "-h", 2)) { t.opt = LN_HELP; t.explicit_arg = eq + 1; t.sep = 1; return t; }
+        for (i = 0; i < 3; i++) if (strlen(ln_long[i]) == pn && !strncmp(s, ln_long[i], pn)) { t.opt = i; t.explicit_arg = eq + 1; t.sep = 1; return t; }
+    }
+    if (s[1] == '-') {   /* _get_option_tuples, long form (more than one match: opt -2, refused when consumed) */
+        pn = eq ? (size_t)(eq - s) : strlen(s);
+        for (i = 0; i < 3; i++) if (strlen(ln_long[i]) >= pn && !strncmp(ln_long[i], s, pn)) { hits++; hit = i; }
+        if (hits > 1) { t.opt = -2; return t; }
+        if (hits == 1) {
+            if (eq) { t.explicit_arg = eq + 1; t.sep = 1; }
+            t.opt = hit; return t;
+        }
+    } else if (s[1] == 'h') {   /* -hX: -h with an explicit argument */
+        t.opt = LN_HELP; t.explicit_arg = s + 2; return t;
+    }
+    if (ln_negnum(s) || strchr(s, ' ')) t.kind = 'A';
+    return t;
+}
+typedef struct ln_args { const char *package, *arch; } ln_args;
+static void ln_parse(int argc, char **argv, ln_args *a) {
+    char **extras = calloc((size_t)argc + 1, sizeof *extras); ln_tok *tok = calloc((size_t)argc + 1, sizeof *tok);
+    int i, ne = 0, dd = argc;
+    if (!extras || !tok) ln_uncaught("MemoryError");
+    a->package = 0; a->arch = 0;
+    for (i = 1; i < argc; i++) {   /* the pattern pass: an option, a value, or '--' (after which all are values) */
+        if (!strcmp(argv[i], "--")) { dd = i; break; }
+        tok[i] = ln_classify(argv[i]);
+    }
+    for (i = 1; i < dd; i++) {
+        ln_tok t = tok[i]; const char *val; char *r; const char *name;
+        if (t.opt == -2) {   /* consume_optional: more than one option matched */
+            /* only "--=..." (the prefix "--") can match more than one, and then it matches all three */
+            ln_argerror2("ambiguous option: ", argv[i], " could match --help, --package, --arch");
+        }
+        if (t.kind == 'A' || t.opt < 0) { extras[ne++] = argv[i]; continue; }
+        name = t.opt == LN_HELP ? "-h/--help" : ln_long[t.opt];
+        if (t.opt == LN_HELP) {   /* -hhh...: more -h; anything else after -h is set aside, and help exits first */
+            const char *ex = t.explicit_arg; int sep = t.sep;
+            while (ex) {
+                if (!*ex || sep || *ex == '-') {
+                    r = ln_repr(ex, strlen(ex));
+                    ln_argerror2("argument -h/--help: ignored explicit argument ", r, "");
+                }
+                if (*ex != 'h') break;
+                ex++;
+                if (!*ex) ex = 0; else if (*ex == '=') { sep = 1; ex++; } else sep = 0;
+            }
+            ln_help();
+        }
+        if (t.explicit_arg) val = t.explicit_arg;
+        else if (i + 1 < dd && tok[i + 1].kind == 'A') val = argv[++i];
+        else ln_argerror2("argument ", name, ": expected one argument");
+        if (t.opt == LN_ARCH) {
+            if (strcmp(val, "arm64") && strcmp(val, "x86_64")) {
+                r = ln_repr(val, strlen(val));
+                ln_argerror2("argument --arch: invalid choice: ", r, " (choose from 'arm64', 'x86_64')");
+            }
+            a->arch = val;
+        } else a->package = val;
+    }
+    for (i = dd; i < argc; i++) extras[ne++] = argv[i];
+    if (!a->package) ln_argerror("the following arguments are required: --package");
+    if (ne) {
+        size_t n = 32; char *m;
+        for (i = 0; i < ne; i++) n += strlen(extras[i]) + 1;
+        if (!(m = malloc(n))) ln_uncaught("MemoryError");
+        strcpy(m, "unrecognized arguments:");
+        for (i = 0; i < ne; i++) { strcat(m, " "); strcat(m, extras[i]); }
+        ln_argerror(m);
+    }
+    free(tok);
+}
+
+/* ---- command(args) -------------------------------------------------------------------------------------------- */
+/* each argument with whether the .py passed it as a Path (repr PosixPath('...')) */
+typedef struct ln_cmd { char *v[40]; int path[40]; int n; } ln_cmd;
+static void ln_add(ln_cmd *c, const char *s, int path) { c->v[c->n] = (char *)s; c->path[c->n] = path; c->v[++c->n] = 0; }
+/* run ARGS (captured, 20 s); rc 0 required; the stdout text, malloc'd */
+static char *ln_command(const ln_cmd *c, size_t *outn) {
+    pr_result res; char why[65536]; char *out; size_t m;
+    if (pr_run(c->v, 0, 0, 0, 20.0, &res, why, sizeof why) != 0) ln_uncaught(why);
+    if (res.rc) {
+        ln_buf b = { 0, 0, 0 }; char *t, num[32]; size_t dn; int i;
+        ln_put(&b, "AssertionError: ([", 18);
+        for (i = 0; i < c->n; i++) {
+            if (i) ln_put(&b, ", ", 2);
+            t = ln_repr(c->v[i], strlen(c->v[i]));
+            if (c->path[i]) { ln_put(&b, "PosixPath(", 10); ln_put(&b, t, strlen(t)); ln_put(&b, ")", 1); }
+            else ln_put(&b, t, strlen(t));
+            free(t);
+        }
+        snprintf(num, sizeof num, "], %d, ", res.rc); ln_put(&b, num, strlen(num));
+        t = pr_decode_replace(res.out, res.outn, &dn); { char *r = ln_repr(t, dn); ln_put(&b, r, strlen(r)); free(r); } free(t);
+        ln_put(&b, ", ", 2);
+        t = pr_decode_replace(res.err, res.errn, &dn); { char *r = ln_repr(t, dn); ln_put(&b, r, strlen(r)); free(r); } free(t);
+        ln_put(&b, ")", 1);
+        ln_uncaught(b.p);
+    }
+    out = pr_decode_replace(res.out, res.outn, &m);
+    pr_free(&res);
+    *outn = m;
+    return out;
+}
+
+/* the first line of `uname FLAG` (os.uname() field), malloc'd */
+static char *ln_uname(char *flag) {
+    char *v[3]; pr_result r; char why[1024], *o; size_t m;
+    v[0] = "uname"; v[1] = flag; v[2] = 0;
+    if (pr_run(v, 0, 0, 0, 20.0, &r, why, sizeof why) != 0 || r.rc) ln_uncaught("OSError: uname failed");
+    o = pr_decode_replace(r.out, r.outn, &m); pr_free(&r);
+    o[strcspn(o, "\r\n")] = 0;
+    return o;
+}
+
+int ln_main(int argc, char **argv, const ln_spec *spec) {
+    static char ROOT[4096], self[4096], package[8192], why[16384];
+    char runtime[4300], lib[4300], probe[4300], src[4300], libsrc[4300], asmsrc[4300], dir[4300], target[32];
+    char pkghex[65], libhex[65], *out; const char *host, *arch, *sys; int darwin; size_t outn, nf; rtc_file *files;
+    char *mach; ln_args a; ln_cmd c;
+    ln_S = spec;
+    /* ROOT = Path(__file__).resolve().parents[1]; compiled (cxbin), the working directory */
+    {   size_t l = strlen(argv[0]);
+        if (l > 3 && !strcmp(argv[0] + l - 3, ".cx") && realpath(argv[0], self)) {
+            int k; char *sl;
+            for (k = 0; k < 2; k++) { sl = strrchr(self, '/'); if (sl && sl != self) *sl = 0; else { strcpy(self, "/"); break; } }
+            snprintf(ROOT, sizeof ROOT, "%s", self);
+        } else if (!getcwd(ROOT, sizeof ROOT)) ln_uncaught("FileNotFoundError: [Errno 2] No such file or directory");
+    }
+    ln_parse(argc, argv, &a);
+    mach = ln_uname("-m"); sys = ln_uname("-s");
+    host = !strcmp(mach, "arm64") || !strcmp(mach, "aarch64") ? "arm64" : "x86_64";
+    darwin = !strcmp(sys, "Darwin");
+    arch = a.arch ? a.arch : host;
+    if (strcmp(arch, host) && !darwin) ln_uncaught("AssertionError: cross-native execution requires an explicit platform runner");
+    snprintf(target, sizeof target, "%s%s", darwin ? "osx/" : "lnx/", arch);
+    if (rtc_resolve(a.package, 0, package, sizeof package, why, sizeof why) != 0) ln_uncaught(why);
+    if (pr_tempdir("r10-sig2-native-", ln_TD, sizeof ln_TD) != 0) {
+        char d[4096]; const char *e = getenv("TMPDIR");
+        snprintf(d, sizeof d, "%s", e && *e ? e : "/tmp");
+        snprintf(why, sizeof why, "FileNotFoundError: [Errno 2] No usable temporary directory found in ['%s']", d);
+        ln_TD[0] = 0; ln_uncaught(why);
+    }
+    snprintf(runtime, sizeof runtime, "%s/exec/c", ln_TD);
+    snprintf(dir, sizeof dir, "%s/exec", ln_TD); mkdir(dir, 0777); mkdir(runtime, 0777);
+    snprintf(dir, sizeof dir, "%s/src", ln_TD); mkdir(dir, 0777);
+    if (rtc_copy_runtime(ROOT, ln_TD, &files, &nf, why, sizeof why) != 0) ln_uncaught(why);
+    snprintf(lib, sizeof lib, "%s/library.dylib", ln_TD);
+    snprintf(libsrc, sizeof libsrc, "%s/libunisacc.c", runtime);
+    snprintf(asmsrc, sizeof asmsrc, "%s/librarycall_%s.S", runtime, arch);
+    c.n = 0; c.v[0] = 0;
+    ln_add(&c, "cc", 0); if (darwin) { ln_add(&c, "-arch", 0); ln_add(&c, arch, 0); }
+    ln_add(&c, "-std=c11", 0); ln_add(&c, "-O2", 0); ln_add(&c, "-shared", 0); ln_add(&c, "-fPIC", 0);
+    ln_add(&c, "-fvisibility=hidden", 0); ln_add(&c, libsrc, 1); ln_add(&c, asmsrc, 1); ln_add(&c, "-lffi", 0);
+    ln_add(&c, "-o", 0); ln_add(&c, lib, 1);
+    free(ln_command(&c, &outn));
+    snprintf(probe, sizeof probe, "%s/probe", ln_TD);
+    snprintf(src, sizeof src, "%s/%s", ROOT, spec->probe);
+    c.n = 0; c.v[0] = 0;
+    ln_add(&c, "cc", 0); if (darwin) { ln_add(&c, "-arch", 0); ln_add(&c, arch, 0); }
+    ln_add(&c, "-std=c11", 0); ln_add(&c, "-O2", 0); ln_add(&c, "-Wall", 0); ln_add(&c, "-Wextra", 0);
+    ln_add(&c, "-I", 0); ln_add(&c, runtime, 1); ln_add(&c, src, 1); ln_add(&c, lib, 1); ln_add(&c, "-o", 0); ln_add(&c, probe, 1);
+    free(ln_command(&c, &outn));
+    if (spec->prepare && spec->prepare(ln_TD, why, sizeof why) != 0) ln_uncaught(why);
+    c.n = 0; c.v[0] = 0;
+    if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { ln_add(&c, "arch", 0); ln_add(&c, "-x86_64", 0); }
+    ln_add(&c, probe, 1); ln_add(&c, package, 1); ln_add(&c, target, 0);
+    if (spec->pass_dir) ln_add(&c, ln_TD, 1);
+    out = ln_command(&c, &outn);
+    fwrite(out, 1, outn, stdout); free(out);   /* print(output, end='') */
+    if (rtc_sha_file(package, pkghex, why, sizeof why) != 0) ln_uncaught(why);
+    if (rtc_sha_file(lib, libhex, why, sizeof why) != 0) ln_uncaught(why);
+    printf("{\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
+           "\"calls_per_level\": 100, \"scope\": \"%s\"}\n", target, pkghex, libhex, spec->scope);
+    ln_cleanup();
+    fflush(stdout);
+    return ferror(stdout) ? 1 : 0;
+}
