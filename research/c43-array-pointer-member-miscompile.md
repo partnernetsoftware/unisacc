@@ -45,3 +45,8 @@
 自举驱动的 `-run` 与默认运行 return7 均恢复。这只是规避见证。
 后续语言修复应先按上述探针重现实测，再补成员数组指针读取、写入、下标/跨行步长的合同，
 由主人另钉文件域；本批未修改经典前端或核心模型。
+
+## 复核（2026-10-22 14:0x AWST，实际跑过）
+
+- `array-pointer-member-store.c`：经典参考 UA（HEAD 同源 build_ref）、根部产品 `unisacc.com`（32dd5156）、Python 参考三者 `-run` 均输出 `array member writes: pass`、退出 0——本案原缺陷在当前树上**已不复现**（修于何提交未追）。
+- **新缺陷（产品静默误编，接受即错）**：同目录 `array-pointer-arith.c` 在产品 `-run`/`-o` 下退出 **10**（cc、经典参考、Python 参考均 `pass`）。定位：`int (*ip)[3]` 下 `sizeof *(PTR±n)` 产品得 8（指针宽），应为 12；`sizeof(*(ip+2))`、`sizeof *(ip+2)`、`sizeof(*(2+ip))`、`sizeof(*(ip-0))`、`sizeof(*(ints+1))` 均错，`sizeof(*ip)`、`sizeof(ip[2])`、`sizeof(ints[1])`、`sizeof(*ints)` 正确；经 `*(ip+2)` 的读写本身正确。即产品 sizeof 对「指针算术结果再解引用」丢了数组指向类型。`unsigned char (*)[8]` 恰因 8==指针宽而被掩盖。修向：parse2 sizeof 段表刀（另派，验证中）；修前该探针仍不入闸。
