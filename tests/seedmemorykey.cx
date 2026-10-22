@@ -1,0 +1,42 @@
+#!/usr/bin/env -S unisacc.com -run
+/* seedmemorykey.cx -- the seedmemory reference key of a family, as tests/seedmemory.py reference_key() computes it:
+   sha256 over each read-set file's path, a NUL and the raw sha256 of its content, in tests/seedmemory-reads.tsv order
+   (header line skipped), first 16 hex digits.  A listed file that is missing gives no key (rc 1).
+   usage: sh ./unisacc.com -run tests/seedmemorykey.cx -- FAMILY...      (gen, parse2; prints FAMILY KEY per line)
+   The key moves whenever a table the measured route reads changes; tests/seedmemory.py's REFERENCE_KEYS follow it. */
+#include <cx.h>
+
+static int key(const char *family, char out[17]) {
+    size_t n, cap = 1 << 16, len = 0; char *t = cx_read("tests/seedmemory-reads.tsv", &n), *line, *nl, *buf;
+    unsigned char md[32]; char hex[65];
+    if (!t) { fprintf(stderr, "seedmemorykey: cannot read tests/seedmemory-reads.tsv\n"); return 2; }
+    buf = malloc(cap);
+    line = memchr(t, '\n', n); line = line ? line + 1 : t + n;        /* skip the header line */
+    for (; line < t + n; line = nl + 1) {
+        char *tab, rel[1024]; size_t fl, rl; char *data;
+        nl = memchr(line, '\n', t + n - line); if (!nl) nl = t + n;
+        tab = memchr(line, '\t', nl - line); if (!tab) continue;
+        if ((size_t)(tab - line) != strlen(family) || memcmp(line, family, tab - line)) continue;
+        rl = (size_t)(nl - tab - 1); if (rl && tab[rl] == '\r') rl--;
+        {   char *t2 = memchr(tab + 1, '\t', rl); if (t2) rl = (size_t)(t2 - tab - 1); }   /* the path is the second field */
+        if (rl >= sizeof rel) { free(t); free(buf); return 2; }
+        memcpy(rel, tab + 1, rl); rel[rl] = 0;
+        data = cx_read(rel, &fl);
+        if (!data) { free(t); free(buf); return 1; }               /* a listed file is missing: no key */
+        cx_sha256(data, fl, md); free(data);
+        if (len + rl + 1 + 32 > cap) { cap = (len + rl + 33) * 2; buf = realloc(buf, cap); }
+        memcpy(buf + len, rel, rl); len += rl; buf[len++] = 0; memcpy(buf + len, md, 32); len += 32;
+    }
+    cx_sha256_hex(buf, len, hex); memcpy(out, hex, 16); out[16] = 0;
+    free(t); free(buf); return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, rc = 0;
+    if (argc < 2) { fprintf(stderr, "usage: seedmemorykey.cx FAMILY...\n"); return 2; }
+    for (i = 1; i < argc; i++) {
+        char k[17]; int r = key(argv[i], k);
+        if (r) { printf("%s none\n", argv[i]); rc = r; } else printf("%s %s\n", argv[i], k);
+    }
+    return rc;
+}

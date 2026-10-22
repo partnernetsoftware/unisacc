@@ -7,3 +7,4 @@
 - 不含 e1 网络；e1 仅作为上游捕获来源。
 - 2026-10-22 重捕（sizeof 行 / (**p)[N] 表刀，exec/parse2）：e3.net 由工作树候选包（compiler.pkg）经 modelstreamextract.cx 原样抽取，sha256 39429de4881c47819e8188f76d4ffc45e6a22d29faf28f4248411de3f27390b7；accept/ 以 middleflowrunner capture 重捕，八个文件与旧捕获逐字节同。
 - 2026-10-22 再捕（(**p)(…) 声明符补级）：e3.net sha256 bf0c6998063f260b2a21067bb3f91616bdacb57d9c2cdad620fbb1464e4c4029；accept/ 与旧捕获逐字节同。
+- 2026-10-23 再捕（M3 `(*x[N])[M]` 具名拒绝 + .cx 内置前奏）：e3.net sha256 b7161ec4944030be12c2c8f9cb027b284cbba727572e564737d6c4e731e0471c；accept/ 与旧捕获逐字节同。

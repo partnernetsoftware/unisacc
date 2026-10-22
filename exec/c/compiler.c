@@ -393,6 +393,11 @@ static void argbytes(Buf *b, const char *s) {
     while (*s) { bput(b,(unsigned char)*s,0); s++; }
     bput(b,0,0);
 }
+/* the forced-include list one unit is compiled with: a .cx unit's starts with its built-in prelude cx.h */
+static void unit_includes(ResourceInput *r, const char *path, const Buf *plain, const Buf *withcx) {
+    size_t l=strlen(path); const Buf *b=(l>=3 && !strcmp(path+l-3,".cx")) ? withcx : plain;
+    r->data=b->b; r->len=b->n;
+}
 static char *process_environment(int argc,char **argv,int i) {
 #ifdef __UNISA__
     /* main's argv is a compiler-created copy; the intrinsic names the
@@ -697,7 +702,16 @@ int main(int argc, char **argv) {
     }
     ARGRESOURCE(0,"\0cli/defines",defs);
     ARGRESOURCE(1,"\0cli/undefines",undefs);
+    /* A .cx unit has its prelude built in: it is compiled with cx.h ahead of any -include, so a .cx module needs no
+       include line of its own (docs/cx-spec-draft.md; cx.h is guarded, so a file that still includes it is unchanged).
+       Per unit: other units -- a .c beside it, the host-forwarding stub unit -- keep exactly the -include list.
+       (No comment line here may begin with the include directive: -ftrim-libc's quotedinc() reads raw lines and a
+       non-<...> one turns library trimming off for the whole unit -- it cost 45 KB per slice once.) */
+    Buf forced_cx={0}; argbytes(&forced_cx,"cx.h"); for (int k=0;k<forced.n;k++) bput(&forced_cx,forced.b[k],0);
+    fwd_cx_prelude_list=forced_cx.b;            /* fwd_front drops the prelude for the forwarding unit */
+#define UNIT_INCLUDES(path) unit_includes(&cli[2],(path),&forced,&forced_cx)
     ARGRESOURCE(2,"\0cli/includes",forced);
+    if (src) UNIT_INCLUDES(src);                 /* the single-source routes; the per-unit loops set it per unit */
     ARGRESOURCE(3,"\0cli/include-dir",incdir);
     ARGRESOURCE(4,"\0cli/nostdinc",nostd);
     RI=cli; NRI=5;
@@ -805,6 +819,7 @@ int main(int argc, char **argv) {
                     if (pids[j]==0) {
                         if (!freopen("/dev/null","w",stderr)) _exit(1);   /* a failing unit is reported by the serial path, once */
                         Buf unit={0}; ATTR_UNIT=j; unit.b=source_read(sources[j],&unit.n);
+                        UNIT_INCLUDES(sources[j]);
                         int r=runroute(unitroute,&unit,sources[j]); if (r) _exit(1);
                         snprintf(pf,sizeof pf,"%s/ua-unit-%d-%d",td&&*td?td:"/tmp",me,j);
                         FILE *f=fopen(pf,"wb"); if (!f) _exit(1);
@@ -846,6 +861,7 @@ int main(int argc, char **argv) {
             } else {
                 long before = ATTRS.n ? ATTRS.n : 4;
                 unit.b=source_read(sources[j],&unit.n);
+                UNIT_INCLUDES(sources[j]);
                 rc=fwd_second&&!strcmp(sources[j],fwd_path) ? fwd_front(unitroute,0,&unit,sources[j]) : runroute(unitroute,&unit,sources[j]);
                 if (rc) { free(unit.b); break; }
                 if (cacheon && fwdwant && nucache < 256) {
@@ -942,7 +958,7 @@ int main(int argc, char **argv) {
     }
     unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
-    free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
+    free(forced.b); free(forced.at); free(forced_cx.b); free(forced_cx.at); free(incdir.b); free(incdir.at);
     free(quotedir.b); free(quotedir.at);
     free(srcres.b); free(srcres.at);
     free(werror.b); free(werror.at);

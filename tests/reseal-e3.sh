@@ -35,9 +35,14 @@ run build-ref "$W/ua_ref" tests/build_ref.sh $B sh tests/build_ref.sh "$W/ua_ref
 # 2. the cell under strace (the measured chain): executor, delta, table, network, net check.  cwd is ROOT.
 ST="strace -ff -yy -s 4096 -e trace=%file -o $W/trace/t"
 run cc-run "$W/run" exec/c/run.c $B $ST cc -O2 -w exec/c/run.c -o "$W/run" || exit 1
-run gen "$W/e3.json" exec/build/gen.py $B $ST python3 exec/build/gen.py parse2 "$W/e3.json" || exit 1
-run tbl "$W/e3.tbl" exec/c/tbl.py $B $ST python3 exec/c/tbl.py "$W/e3.json" "$W/e3.tbl" || exit 1
-run net "$W/e3.net" exec/c/net.py $B $ST python3 exec/c/net.py "$W/e3.tbl" "$W/e3.net" || exit 1
+# the C99 seed constructors (byte-identical to exec/build/gen.py, exec/c/tbl.py, net.py), built by the product: no Python
+# seed-gen by the host cc, as exec/c/buildcompiler.sh does: a product-built seed-gen runs parse2 in ~55 s, at the bound
+run seed-gen "$W/seed-gen" seed/gen.c $B ${SEED_GEN_CC:-cc} -std=c99 -O2 -w -Iseed seed/gen.c -o "$W/seed-gen" || exit 1
+run seed-tbl "$W/seed-tbl" seed/tbl.c $B sh "$P" -O2 -fno-trim-libc seed/tbl.c -o "$W/seed-tbl" || exit 1
+run seed-net "$W/seed-net" seed/net.c $B sh "$P" -O2 -fno-trim-libc seed/net.c -o "$W/seed-net" || exit 1
+run gen "$W/e3.json" seed/gen.c $B $ST "$W/seed-gen" parse2 "$W/e3.json" || exit 1
+run tbl "$W/e3.tbl" seed/tbl.c $B $ST "$W/seed-tbl" "$W/e3.json" "$W/e3.tbl" || exit 1
+run net "$W/e3.net" seed/net.c $B $ST "$W/seed-net" "$W/e3.tbl" "$W/e3.net" || exit 1
 run check-net "$W/e3.net" exec/c/run.c $B $ST "$W/run" --check-net "$W/e3.tbl" "$W/e3.net" || exit 1
 # 3. fixtures: tokens.typed = the sealed lex-e1 accept stdout (exec/pipeline/image-stages.tsv row e3 input)
 run fixtures "$O/fixtures" "$LEX" $B sh -c 'for s in $1; do n=$(basename "$s" .c); cp "$2/$n.stdout" "$3/$n.tokens.typed" || exit 1; done' fixtures "$SOURCES" "$ROOT/$LEX" "$O/fixtures" || exit 1

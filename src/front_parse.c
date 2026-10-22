@@ -6580,21 +6580,27 @@ int fe_load(char *path, char *t) {
        lines it adds sit BEFORE the user's, so err_at subtracts them.
        Skip when this unit is the synthetic forward stub (opti_skip_path). */
     prelines = 0;
-    if (nopti > 0 && (opti_skip_path == 0 || strsame(path, opti_skip_path) == 0)) {
-        int ni; int total; int q;
-        total = 0;
-        ni = 0; while (ni < nopti) { total = total + 12 + blen(opti[ni]); ni = ni + 1; }
+    /* A .cx unit has its prelude built in: cx.h comes first, ahead of any -include, so a .cx module needs no #include
+       (docs/cx-spec-draft.md; cx.h is guarded, so a file that still includes it is unchanged).  Per unit: a .c beside it
+       keeps exactly the -include list. */
+    {   int pl; int cxu; pl = blen(path); cxu = 0;
+        if (pl >= 3) { if (strsame(path + pl - 3, ".cx")) cxu = 1; }
+    if ((nopti > 0 || cxu) && (opti_skip_path == 0 || strsame(path, opti_skip_path) == 0)) {
+        int ni; int total; int q; int nall;
+        total = 0; nall = nopti + cxu;
+        ni = 0; while (ni < nall) { total = total + 12 + blen(cxu ? (ni == 0 ? "cx.h" : opti[ni - 1]) : opti[ni]); ni = ni + 1; }
         if (nsrc + total >= MAXSRC - 1) { printf("source too large\n"); return 1; }
         q = nsrc - 1; while (q >= 0) { src[q + total] = src[q]; q = q - 1; }
         q = 0; ni = 0;
-        while (ni < nopti) {
-            int k2; char *nm; nm = opti[ni];
+        while (ni < nall) {
+            int k2; char *nm; nm = cxu ? (ni == 0 ? "cx.h" : opti[ni - 1]) : opti[ni];
             k2 = 0; while ("#include \""[k2]) { src[q] = "#include \""[k2]; q = q + 1; k2 = k2 + 1; }
             k2 = 0; while (nm[k2]) { src[q] = nm[k2]; q = q + 1; k2 = k2 + 1; }
             src[q] = 34; src[q + 1] = 10; q = q + 2;
             prelines = prelines + 1; ni = ni + 1;
         }
         nsrc = nsrc + total;
+    }
     }
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
     /* a shebang line belongs to the shell, not to C: blank it, keeping the
