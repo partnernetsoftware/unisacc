@@ -1,6 +1,11 @@
 /* Host adaptation for the same product network routes. No parser or
    compilation rule lives here. One context may be used by one thread at a
    time; different contexts execute concurrently, without a global lock. */
+/* dlsym(RTLD_DEFAULT, ...) in librarylatebind.h/libraryresolver.h: glibc declares RTLD_DEFAULT only under _GNU_SOURCE,
+   so a host cc in strict -std=c11 mode refused this file on Linux (0.0.43 M5).  It must come before the first header. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
 #define LIBUNISACC_BUILD
 #include "libunisacc.h"
 #include <stdio.h>
