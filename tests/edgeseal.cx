@@ -1,0 +1,183 @@
+#!/usr/bin/env -S unisacc.com -run
+/* edgeseal.cx --gate LEAF ROOT  (frozen asks.tsv replay + pins + negatives) */
+#include <cx.h>
+
+#define MAX_KEYS 256
+#define LINE 8192
+
+typedef struct {
+    char flow[32], net[32], probe[512], target[64];
+    char probe_sha[65], table_sha[65], asks_sha[65];
+    int n_keys;
+} Manifest;
+
+typedef struct { char *b; size_t n, cap; } Text;
+
+static int fail(const char *s) { printf("edgeseal: FAIL %s\n", s); return 1; }
+
+static int fields(char *p, char **f, int max) {
+    int n = 1;
+    f[0] = p;
+    while (*p) {
+        if (*p == '\t') {
+            *p = 0;
+            if (n == max) return -1;
+            f[n++] = p + 1;
+        }
+        p++;
+    }
+    return n;
+}
+
+static int read_manifest(const char *leaf, Manifest *m) {
+    char path[4096], *b, *p, *end, *f[2];
+    size_t n;
+    snprintf(path, sizeof path, "%s/manifest.tsv", leaf);
+    b = cx_read(path, &n);
+    if (!b) return fail("missing manifest.tsv");
+    memset(m, 0, sizeof *m);
+    for (p = b; *p; p = end + 1) {
+        end = strchr(p, '\n');
+        if (!end) { free(b); return fail("manifest truncated"); }
+        *end = 0;
+        if (!*p || p[0] == '#') continue;
+        if (fields(p, f, 2) != 2) { free(b); return fail("manifest row"); }
+        if (!strcmp(f[0], "flow")) strncpy(m->flow, f[1], sizeof m->flow - 1);
+        else if (!strcmp(f[0], "net")) strncpy(m->net, f[1], sizeof m->net - 1);
+        else if (!strcmp(f[0], "probe")) strncpy(m->probe, f[1], sizeof m->probe - 1);
+        else if (!strcmp(f[0], "target")) strncpy(m->target, f[1], sizeof m->target - 1);
+        else if (!strcmp(f[0], "probe_sha256")) strncpy(m->probe_sha, f[1], sizeof m->probe_sha - 1);
+        else if (!strcmp(f[0], "table_sha256")) strncpy(m->table_sha, f[1], sizeof m->table_sha - 1);
+        else if (!strcmp(f[0], "asks_sha256")) strncpy(m->asks_sha, f[1], sizeof m->asks_sha - 1);
+        else if (!strcmp(f[0], "n_keys")) m->n_keys = atoi(f[1]);
+        if (!end[1]) break;
+    }
+    free(b);
+    if (!m->flow[0] || !m->net[0] || !m->probe[0] || !m->target[0] || strlen(m->probe_sha) != 64
+        || strlen(m->table_sha) != 64 || strlen(m->asks_sha) != 64 || m->n_keys <= 0)
+        return fail("manifest missing required pins");
+    return 0;
+}
+
+static int sha_path(const char *path, char hex[65]) {
+    size_t n;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex);
+    free(b);
+    return 0;
+}
+
+static int load_body_rows(const char *path, char **out, size_t *outn) {
+    char *b, *p, *end;
+    size_t n;
+    Text t = {0};
+    int rows = 0;
+    b = cx_read(path, &n);
+    if (!b) return -1;
+    for (p = b; *p; p = end + 1) {
+        end = strchr(p, '\n');
+        if (!end) { free(b); return -1; }
+        *end = 0;
+        if (!*p || p[0] == '#') { if (!end[1]) break; continue; }
+        {
+            size_t ln = (size_t)(end - p);
+            if (ln > 0 && p[ln - 1] == '\r') ln--;
+            if (t.n + ln + 2 > t.cap) {
+                t.cap = t.n + ln + 64;
+                t.b = realloc(t.b, t.cap);
+                if (!t.b) { free(b); return -1; }
+            }
+            memcpy(t.b + t.n, p, ln);
+            t.n += ln;
+            t.b[t.n++] = '\n';
+            rows++;
+        }
+        if (!end[1]) break;
+    }
+    free(b);
+    *out = t.b;
+    *outn = t.n;
+    return rows;
+}
+
+static int cmp_body(const char *a, size_t an, const char *b, size_t bn) {
+    return an == bn && !memcmp(a, b, an);
+}
+
+static int gate_neg(const char *body, size_t bn) {
+    char *dup, *p, *line, save;
+    if (bn < 4) return fail("negative setup");
+    dup = malloc(bn + 1);
+    if (!dup) return fail("neg alloc");
+    memcpy(dup, body, bn);
+    dup[bn] = 0;
+    line = dup;
+    while (*line == '#' || *line == '\n') {
+        p = strchr(line, '\n');
+        if (!p) { free(dup); return 0; }
+        line = p + 1;
+    }
+    p = strchr(line, '\t');
+    if (p) {
+        p = strchr(p + 1, '\t');
+        if (p) {
+            save = p[1];
+            p[1] = 'X';
+            if (cmp_body(body, bn, dup, bn)) { free(dup); return fail("negative flip-answer not caught"); }
+            p[1] = save;
+        }
+    }
+    free(dup);
+    return 0;
+}
+
+static int gate(const char *leaf, const char *root) {
+    Manifest m;
+    char probe_path[4096], gold_path[4096], asks_path[4096], sha[65], cmd[LINE];
+    char out[] = "/tmp/edgeseal-live-XXXXXX";
+    char *frozen = 0, *live = 0;
+    size_t fn = 0, ln = 0;
+    int nf, nl, rc, fd;
+    if (read_manifest(leaf, &m)) return 1;
+    snprintf(probe_path, sizeof probe_path, "%s/%s", root, m.probe);
+    snprintf(gold_path, sizeof gold_path, "%s/weights/gold/%s.tsv", root, m.net);
+    snprintf(asks_path, sizeof asks_path, "%s/asks.tsv", leaf);
+    if (sha_path(probe_path, sha) || strcmp(sha, m.probe_sha)) return fail("probe sha mismatch");
+    if (sha_path(gold_path, sha) || strcmp(sha, m.table_sha)) return fail("gold table sha mismatch");
+    nf = load_body_rows(asks_path, &frozen, &fn);
+    if (nf < 0) return fail("asks.tsv unreadable");
+    if (nf != m.n_keys) return fail("asks row count vs manifest n_keys");
+    cx_sha256_hex(frozen, fn, sha);
+    if (strcmp(sha, m.asks_sha)) { free(frozen); return fail("asks_sha256 mismatch"); }
+    fd = mkstemp(out);
+    if (fd < 0) { free(frozen); return fail("tmp"); }
+    close(fd);
+    snprintf(cmd, sizeof cmd,
+             "cd '%s' && python3 archive/tests/legacy/edgeseal.py --emit-live '%s' '%s' >'%s' 2>/dev/null", root,
+             leaf, root, out);
+    rc = cx_run_timeout(cmd, 45, 0, 0);
+    if (rc != 0) { unlink(out); free(frozen); return fail("reference route replay failed"); }
+    nl = load_body_rows(out, &live, &ln);
+    unlink(out);
+    if (nl < 0) { free(frozen); return fail("live unreadable"); }
+    if (nl == 0) { free(frozen); free(live); return fail("probe never crossed edge"); }
+    if (nl != nf || !cmp_body(frozen, fn, live, ln)) {
+        printf("edgeseal: FAIL edge %s->%s replay differs from frozen asks.tsv\n", m.flow, m.net);
+        free(frozen);
+        free(live);
+        return 1;
+    }
+    if (gate_neg(frozen, fn)) { free(frozen); free(live); return 1; }
+    printf("edgeseal: edge %s->%s PASS probe %s: %d keys replayed byte-equal; negatives flip-answer caught\n", m.flow,
+           m.net, m.probe, nf);
+    free(frozen);
+    free(live);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--gate")) return gate(argv[2], argv[3]);
+    fprintf(stderr, "usage: edgeseal.cx --gate LEAF ROOT\n");
+    return 2;
+}

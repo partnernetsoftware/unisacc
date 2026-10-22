@@ -461,21 +461,23 @@ job prune-seal tests/bound 58 sh ./unisacc.com -run tests/streamseal.cx -- --gat
 job seal-paradigm-audit tests/bound 58 sh ./unisacc.com -run tests/sealparadigm.cx -- --audit .   # c43: stream/net paradigm registry (manifest+xy+edges); .cx only
 job seal-paradigm-selftest tests/bound 58 sh ./unisacc.com -run tests/sealparadigm.cx -- --selftest
 job seal-modules tests/bound 58 ./tests/seal-modules.sh --check-only   # c43: same audit via sealparadigm.cx; seal replay stays on lex-e1-seal + net-*-seal (no nested 21× bound)
-job edge-e4-peep-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e4-peep .   # c43: first edge-level frozen original (e4->peep, probe fib.c): reference-route normalized ask surface replayed byte-equal, pinned to probe+gold shas, three negatives in-gate (tests/SEAL-MODULES.md 边级)
-job edge-e2-pp-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e2-pp .   # c43: edge-level frozen original (e2->pp, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e1-lex-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e1-lex .   # c43: edge-level frozen original (e1->lex, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-parse-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-parse .   # c43: edge-level frozen original (e3->parse, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-type-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-type .   # c43: edge-level frozen original (e3->type, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-scope-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-scope .   # c43: edge-level frozen original (e3->scope, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-irsel-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-irsel .   # c43: edge-level frozen original (e3->irsel, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-tyinfo-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-tyinfo .   # c43: edge-level frozen original (e3->tyinfo, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-binsel-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-binsel .   # c43: edge-level frozen original (e3->binsel, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e3-prec-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e3-prec .   # c43: edge-level frozen original (e3->prec, probe fib.c), same checker as edge-e4-peep-seal
-job edge-e4-opinfo-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-e4-opinfo .   # c43: edge-level frozen original (e4->opinfo, probe fib.c), same checker as edge-e4-peep-seal
-job edge-lower-abi-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-lower-abi .   # c43: edge-level frozen original (lower->abi, probe fib.c), same checker as edge-e4-peep-seal
-job edge-lower-regmap-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-lower-regmap .   # c43: edge-level frozen original (lower->regmap, probe fib.c), same checker as edge-e4-peep-seal
-job edge-lower-reloc-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-lower-reloc .   # c43: edge-level frozen original (lower->reloc, probe fib.c), same checker as edge-e4-peep-seal
-job edge-lower-enc-seal tests/bound 58 python3 tests/edgeseal.py --gate tests/seals/edge-lower-enc .   # c43: edge-level frozen original (lower->enc, probe fib.c), same checker as edge-e4-peep-seal
+job edge-e4-peep-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e4-peep .   # c43: edge key-map seal (edgeseal.cx); reference-route asks.tsv replay + pins
+job edge-e2-pp-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e2-pp .
+job edge-e1-lex-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e1-lex .
+job edge-e3-parse-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-parse .
+job edge-e2-pp-ablate tests/bound 58 sh ./unisacc.com -run tests/edgeablate.cx -- --gate tests/seals/edge-e2-pp .   # c43: sampled ablation witness (verified e2->pp + e3->parse only)
+job edge-e3-parse-ablate tests/bound 58 sh ./unisacc.com -run tests/edgeablate.cx -- --gate tests/seals/edge-e3-parse .
+job edge-e3-type-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-type .
+job edge-e3-scope-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-scope .
+job edge-e3-irsel-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-irsel .
+job edge-e3-tyinfo-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-tyinfo .
+job edge-e3-binsel-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-binsel .
+job edge-e3-prec-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e3-prec .
+job edge-e4-opinfo-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-e4-opinfo .
+job edge-lower-abi-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-lower-abi .
+job edge-lower-regmap-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-lower-regmap .
+job edge-lower-reloc-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-lower-reloc .
+job edge-lower-enc-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx -- --gate tests/seals/edge-lower-enc .
 job edge-e3-pfconv-witness tests/bound 58 sh tests/edgewitness.sh --gate tests/seals/edge-e3-pfconv .   # c43: product-side edge witness (reference never asks pfconv; -nostdinc builtin printf path, 9/9 keys exercised): frozen asked count + program output bytes + pins
 job edge-elf-enc-witness tests/bound 58 sh tests/edgewitness.sh --gate tests/seals/edge-elf-enc .   # c43: product-side edge witness (elf-flow enc asks are product-only; unisa/image never consults the oracle): frozen asked count + program output bytes + pins
 job net-prec-seal tests/bound 58 sh ./unisacc.com -run tests/netseal.cx -- --gate tests/seals/exec-net-prec .   # c43: per-net kernel cell leaf seal (net prec alone: kernel/unisa_core.c + kernel/weight.prec.inc beside a one-net shim, host cc, the whole gold domain of weights/gold/prec.tsv re-derived as the cases): frozen bytes + replay, then the negatives; kernel/unisa_model.inc (the self-test's route to weight.pp.inc) is never opened, no pp path or header in its closure
