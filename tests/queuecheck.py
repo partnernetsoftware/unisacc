@@ -67,14 +67,19 @@ with tempfile.TemporaryDirectory() as td:
     selectors=('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA')
     runtime_selectors=('UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL')
     environment={k:v for k,v in os.environ.items() if k not in (*selectors,*runtime_selectors)}
+    # the queue fingerprints the fixture tree: a helper's __pycache__ written mid-run reads as 'inputs changed during queue'
+    environment['PYTHONDONTWRITEBYTECODE']='1'
     candidate=t/'compiler with spaces';candidate.write_bytes(b'#!/bin/sh\nexit 0\n');candidate.chmod(0o755)
     marker=t/'candidate-ran'
     jobs={'candidate':[sys.executable,'-c','import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("ran")',str(marker)]}
     # Keep real content hashing independent of concurrent repository edits.
     fixture=t/'queue-source';(fixture/'tests').mkdir(parents=True)
-    (fixture/'tests/bound.py').write_bytes((ROOT/'tests/bound.py').read_bytes())
+    # the bounded helper's own declared deployment set (tests/bound.py --deployment-files): bound.py alone stopped
+    # being runnable when bound.c became an input (17d413dd), and the session job then failed for that reason
+    deploy=subprocess.run([sys.executable,str(ROOT/'tests/bound.py'),'--deployment-files'],capture_output=True,text=True,check=True,timeout=5).stdout.split()
+    for name in deploy: (fixture/'tests'/name).write_bytes((ROOT/'tests'/name).read_bytes())
     subprocess.run(['git','init','-q',str(fixture)],check=True,timeout=5)
-    subprocess.run(['git','-C',str(fixture),'add','tests/bound.py'],check=True,timeout=5)
+    subprocess.run(['git','-C',str(fixture),'add']+['tests/'+n for n in deploy],check=True,timeout=5)
     previous_cwd=pathlib.Path.cwd()
     with patch.object(q,'ROOT',fixture), patch.dict(os.environ,environment,clear=True):
         os.chdir(fixture)
