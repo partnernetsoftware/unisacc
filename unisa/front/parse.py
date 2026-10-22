@@ -1335,7 +1335,7 @@ class Walker:
             off = self.alloc(ty)
             sym = self.sc.declare(name, ty, lkind, off)
             if init:
-                self.local_init(ty, off)
+                self.local_init(ty, off, top=True)
             if not self.eat(","):
                 break
         self.expect(";")
@@ -1400,7 +1400,7 @@ class Walker:
         cur = (cur & ~m | (v << bo) & m) & ((1 << (unit * 8)) - 1)
         self.em.t.data[base:base + unit] = cur.to_bytes(unit, "little")
 
-    def local_init(self, ty, off):
+    def local_init(self, ty, off, top=False):
         """Same walk as const_init, but each element is a full expression and
         the result is stored rather than baked into the image."""
         if ty.kind == "arr" and self._braced_str(ty.to) is not None:
@@ -1454,6 +1454,10 @@ class Walker:
                 self.em.emit(self.em.recipe("alu", "sub"), LHS, FP, LHS)
                 self.em.blockcopy(LHS, ACC, ty.size(self.sc.structs))
                 return
+            if top:
+                # a bare scalar is not a struct initialiser (6.7.8p13; elision
+                # needs an enclosing brace): the product refuses it by name
+                raise CError("line %d: not covered: struct assignment" % self.peek().line)
             self.rewind(m)
             self.lval = None
         if ty.kind in ("arr", "struct"):
@@ -1952,6 +1956,10 @@ class Walker:
                 self.lval = None
                 self.em.push()
                 rt = self.rvalue()
+                if aty.kind == "struct" and (rt is None or rt.kind != "struct"):
+                    # 6.5.16.1p1: only a struct may be assigned to one; the
+                    # product refuses by name (it used to blockcopy from the scalar)
+                    raise CError("line %d: not covered: struct assignment" % self.peek().line)
                 self.convto(rt, aty)        # C99 6.5.16.1p2
                 if bits is not None:
                     bo, w, sg = bits

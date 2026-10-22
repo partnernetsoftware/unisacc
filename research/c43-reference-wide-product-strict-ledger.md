@@ -58,6 +58,10 @@
 
 2026-10-22 04:4x 采证 com-cerr-hygiene 时发现：`int *p = 1.5;`（double 初始化指针，C99 约束违例，gcc error）被**产品与 Python 参考双双接受**（两边 rc0）。产品与参考互相一致（对拍纪律无违例），但共同宽于 C99；`int *p = 3;` 的整数→指针则是常见扩展（gcc 仅警告），不算。该类不属「参考宽/产品严」，单列为 conformance 面待裁：是否照 R13 缺陷账或 difftest 负域另立登记、以及双实现同步收紧的授权归属。本文不代裁，未入任何叶（叶里语义负例改用 unknown identifier 规避未裁面）。
 
+**矩阵（2026-10-22 09:4x 实测；比较的是编译接受/拒绝，`unisa run` 的返回值是程序退出码、不作拒绝依据——首轮把 `int x=1.5` 的 rc=1 误读成参考拒绝，已纠）**：指针↔算术的相容检查在初始化、赋值、return、实参、指针→double 五处**双实现一律接受**（gcc 五处 error）——系统性缺失，归类型阶段设计面，非窄刀；`int *p = 3;` 同类。另一条真分歧：`struct s v = 1.5;` 参考**接受**、产品以 `not covered: struct assignment` 拒（诚实 not covered，非约束诊断）、gcc 拒——「参考宽」第五条，登记待裁，未入叶。
+
+**第五条已落（2026-10-22 12:3x，自点名窄刀，参考向产品对齐）**：`unisa/front/parse.py` 两处具名拒绝 `not covered: struct assignment`——声明顶层 `struct s v = <非结构表达式>`（`local_init(top=True)`；嵌套成员的大括号省略照旧，`{1,2,3}` 进 `struct{struct i;int}` 实测仍为 9，与产品同）与赋值 `v = <非结构>`（原先从标量地址 blockcopy，属参考误编译）。产品不动。叶 com-cerr-hygiene 增 sema-sinit/sema-sasgn 两负例（60 检 0 坏）；111 个含 struct 的 tests/c、tests/c99、examples 源经新参考无一新增该拒绝。指针↔算术五处双宽仍待裁。
+
 ## 附：hex-A′ 基线项的实测范围修正（2026-10-22 07:2x，只记不动）
 
 基线清单（v0.0.43-baseline-20261014.md）把该缺陷记为「十六进制立即数」。本次实测其真实范围是**全部非十进制拼写**：`0x…`、`0b…`、`0o…`、`-0x10` 在镜像路（`-b`/`-run`）一律 `not covered: an operand that is not a register or an integer`，十进制（含负）接受；而 tape 验域与 Python 参考对四种拼写全收（域拼写面已由 com-tapedomain 220 案例模锁定）。即缺口在镜像路的操作数分类面，不特属 hex。
