@@ -1,0 +1,83 @@
+/* flownetw0.cx -- flownet W0 probe 3 (plans/m4-flownet-cx-module.md §4 W0; research/flownet-w0-feasibility.md):
+   can one .cx use another?  This is the "A" unit; tests/flownetw0mod.cx is "B".  They are compiled as ONE program:
+     sh ./unisacc.com -run tests/flownetw0.cx tests/flownetw0mod.cx -- ROOT              (check, rc 0)
+     sh ./unisacc.com -run tests/flownetw0.cx tests/flownetw0mod.cx -- --negative ROOT   (removal must be red)
+   check: A calls B's functions (the API is functions only: an undefined external object is read as zeros, not
+   refused, so data is never exported); B's .tsv reader accepts a good table and names the
+   path, line and reason of a missing file, a directory, an empty table, an out-of-order key, a third field and a missing final newline.
+   --negative: compiles and runs A WITHOUT B (ROOT/unisacc.com -run ROOT/tests/flownetw0.cx) and requires that to
+   fail with the missing function named (stderr is captured) -- removing the module from the link is red, never a silent pass.
+   No Python; the .cx prelude (cx_read, cx_write, cx_run_timeout) is built into the root product. */
+
+int fw0_lookup(int a, int b);
+int fw0_tsv(const char *path, long *sum, char *why, int whylen);
+int fw0_radix(int i);
+
+static const int tab[2] = { 7, 7 };                        /* same name as B's static tab: must not clash */
+static int fails;
+static void check(int ok, const char *what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what); if (!ok) fails++; }
+
+/* write BODY to a fresh temp file, run B's reader on it; the reason (or "") goes to why */
+static int tsv_case(const char *body, long *sum, char *why, int whylen, char *path) {
+    const char *td = getenv("TMPDIR"); int fd, r;
+    snprintf(path, 256, "%s/flownetw0.XXXXXX", td && *td ? td : "/tmp");
+    fd = mkstemp(path);
+    if (fd < 0) { snprintf(why, whylen, "mkstemp failed"); return -2; }
+    close(fd);
+    if (cx_write(path, body, strlen(body)) != 0) { unlink(path); snprintf(why, whylen, "cx_write failed"); return -2; }
+    why[0] = 0;
+    r = fw0_tsv(path, sum, why, whylen);
+    unlink(path);
+    return r;
+}
+
+static int has_line_reason(const char *why, const char *path, const char *line_reason) {
+    size_t n = strlen(path);
+    return !strncmp(why, path, n) && !strcmp(why + n, line_reason);
+}
+
+static int run_check(void) {
+    char why[512], path[256]; long sum; int a, b, s = 0;
+    for (a = 0; a < fw0_radix(0); a++) for (b = 0; b < fw0_radix(1); b++) s += fw0_lookup(a, b);
+    check(s == 23 && tab[0] == 7, "A sums B's table over B's key space (3+1+4+1+5+9 = 23); statics stay per unit");
+    check(fw0_lookup(2, 0) == -1 && fw0_lookup(0, -1) == -1, "a key outside B's space is refused (-1), not read");
+    check(tsv_case("# gold\n0\t10\n1\t20\n2\t12\n", &sum, why, sizeof why, path) == 3 && sum == 42 && !why[0],
+          "B reads a good external .tsv: 3 rows, sum 42");
+    check(fw0_tsv("tests/flownetw0-no-such.tsv", &sum, why, sizeof why) == -1
+          && !strcmp(why, "tests/flownetw0-no-such.tsv: cannot read"), "missing file: path named");
+    check(fw0_tsv("tests", &sum, why, sizeof why) == -1 && !strcmp(why, "tests: not a regular file"),
+          "a directory is refused by name (cx_read alone would give it as empty)");
+    check(tsv_case("# only a comment\n", &sum, why, sizeof why, path) == -1 && has_line_reason(why, path, ": no rows"),
+          "a table with no rows is refused by name");
+    check(tsv_case("0\t1\n2\t1\n", &sum, why, sizeof why, path) == -1 && has_line_reason(why, path, ":2: key out of order"),
+          "key out of order: path and line 2 named");
+    check(tsv_case("0\t1\t9\n", &sum, why, sizeof why, path) == -1 && has_line_reason(why, path, ":1: want 2 fields"),
+          "third field: path and line 1 named");
+    check(tsv_case("0\t1\n1\t2", &sum, why, sizeof why, path) == -1 && has_line_reason(why, path, ":2: no final newline"),
+          "truncated last row: path and line 2 named");
+    printf("flownet-w0: %s (2 units, 9 checks)\n", fails ? "RED" : "module reference ok");
+    return fails ? 1 : 0;
+}
+
+/* A alone must not run: the product late-binds a missing function and refuses at its first call */
+static int run_negative(const char *root) {
+    char cmd[8192], *out = 0; size_t n = 0; int rc;
+    if (strchr(root, '\'') || strlen(root) > 4000) { fprintf(stderr, "flownet-w0: ROOT must not hold a quote\n"); return 2; }
+    snprintf(cmd, sizeof cmd, "sh '%s/unisacc.com' -run '%s/tests/flownetw0.cx' 2>&1", root, root);
+    rc = cx_run_timeout(cmd, 50, &out, &n);
+    check(rc != 0 && rc != 124 && rc != -1, "A compiled without B does not pass (rc != 0, not a timeout)");
+    check(out && strstr(out, "no host function fw0_"), "the refusal names the missing module function");
+    check(out && !strstr(out, "flownet-w0: module reference ok"), "A without B prints no verdict");
+    printf("flownet-w0 negative: rc=%d, said: %.*s", rc, out ? (int)strcspn(out, "\n") + 1 : 0, out ? out : "");
+    free(out);
+    printf("flownet-w0 negative: %s\n", fails ? "RED" : "removing the module is red");
+    return fails ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--negative")) return run_negative(argv[2]);
+    if (argc == 2 && strcmp(argv[1], "--negative")) return run_check();
+    if (argc == 1) return run_check();
+    fprintf(stderr, "usage: unisacc.com -run tests/flownetw0.cx tests/flownetw0mod.cx -- [--negative] ROOT\n");
+    return 2;
+}

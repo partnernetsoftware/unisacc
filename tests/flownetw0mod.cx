@@ -1,0 +1,49 @@
+/* flownetw0mod.cx -- the "B" unit of the flownet W0 module-reference probe (plans/m4-flownet-cx-module.md §4 W0,
+   research/flownet-w0-feasibility.md).  Not run alone: tests/flownetw0.cx (the "A" unit) is compiled together with
+   it as one program:  sh ./unisacc.com -run tests/flownetw0.cx tests/flownetw0mod.cx -- [--negative] ROOT
+   It exports, by external linkage and an fw0_ name prefix, what a table module has to offer a consumer: a constant
+   table (behind accessor functions), a lookup over it, and a reader for an external .tsv whose failures are named
+   (path, line, reason) instead of falling back to anything.  Its own statics (tab) may reuse names of the consumer's. */
+
+static const int tab[6] = { 3, 1, 4, 1, 5, 9 };          /* same name as a static in flownetw0.cx: no clash */
+static const int radix[2] = { 2, 3 };
+/* The API is functions only.  W0 measured that an undefined external OBJECT is not refused (the root product reads
+   it as zeros, at -run and -o alike), while an undefined FUNCTION is refused by name at its first call (rc 127):
+   so a module that exported data could be dropped from the link and its consumer would still run on zeros. */
+int fw0_radix(int i) { return i == 0 || i == 1 ? radix[i] : -1; }
+
+/* tab[] by mixed-radix key (a, b) in itertools.product order; -1 outside the key space (a named refusal, not 0) */
+int fw0_lookup(int a, int b) {
+    if (a < 0 || a >= radix[0] || b < 0 || b >= radix[1]) return -1;
+    return tab[a * radix[1] + b];
+}
+
+/* PATH: rows of "key<TAB>value", '#' comments; the keys must be 0, 1, 2, ... in order.  Returns the row count and
+   the sum of values, or -1 with why[] = "PATH[:LINE]: reason". */
+int fw0_tsv(const char *path, long *sum, char *why, int whylen) {
+    size_t n = 0; char *b, *p, *nl; int line = 0, rows = 0; struct stat st;
+    *sum = 0;
+    /* cx_read gives a directory as an empty buffer (measured in W0), so the kind is checked first */
+    if (stat(path, &st) != 0) { snprintf(why, whylen, "%s: cannot read", path); return -1; }
+    if (!S_ISREG(st.st_mode)) { snprintf(why, whylen, "%s: not a regular file", path); return -1; }
+    b = cx_read(path, &n);
+    if (!b) { snprintf(why, whylen, "%s: cannot read", path); return -1; }
+    if (memchr(b, 0, n)) { free(b); snprintf(why, whylen, "%s: NUL byte", path); return -1; }
+    for (p = b; *p; p = nl + 1) {
+        char *tabc, *end; long k, v;
+        nl = strchr(p, '\n'); line++;
+        if (!nl) { free(b); snprintf(why, whylen, "%s:%d: no final newline", path, line); return -1; }
+        *nl = 0;
+        if (!*p || *p == '#') continue;
+        tabc = strchr(p, '\t');
+        if (!tabc || strchr(tabc + 1, '\t')) { free(b); snprintf(why, whylen, "%s:%d: want 2 fields", path, line); return -1; }
+        k = strtol(p, &end, 10);
+        if (end != tabc || k != rows) { free(b); snprintf(why, whylen, "%s:%d: key out of order", path, line); return -1; }
+        v = strtol(tabc + 1, &end, 10);
+        if (end == tabc + 1 || *end) { free(b); snprintf(why, whylen, "%s:%d: value not an integer", path, line); return -1; }
+        *sum += v; rows++;
+    }
+    free(b);
+    if (!rows) { snprintf(why, whylen, "%s: no rows", path); return -1; }
+    return rows;
+}

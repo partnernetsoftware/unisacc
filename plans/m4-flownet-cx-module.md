@@ -1,6 +1,6 @@
 # 需求：把 m4 的「流×网」范式做成可复用 `.cx` 模块
 
-> 提出：2026-10-23（董事长要求）· 执行：cc（cc-unisacc）· 状态：待 W0 可行性裁定
+> 提出：2026-10-23（董事长要求）· 执行：cc（cc-unisacc）· 状态：W0 已裁定（三问皆是；W2 读外部 `.tsv`，生成 `.cx` 表为备选；API 只导出函数），待 W1
 > 依据：`m4/README.md` 实测、`research/m4-flow-net-contract-draft.md`、`m4/flows.py` / `nets.py` 现状
 
 ## 0. 一句话
@@ -53,6 +53,7 @@ m4 已经证明「gold → IntNet → 四流 → 字节」这条链能逐字节�
 
 **产物**：`research/flownet-w0-feasibility.md`（三个结论 + 探针路径 + 实测输出）。
 **闸**：探针各自可复现、≤60s。
+**W0 结论（2026-10-23 实测，详见产物）**：①是——生成的表驱动 `.cx` 在 m9 上编译 2.85 s，10 网 3677 键穷举 10/10 exact（acc 子集与全量皆过，变异即红）；②是——单文件 `.cx` 只读外部 `.tsv`（网参数 + gold）即 10/10 exact，缺文件/目录/坏行均「路径[:行]: 原因」rc 1；③是——多翻译单元即模块机制（`unisacc.com A.cx B.cx`），入树探针 `tests/flownetw0.cx`+`tests/flownetw0mod.cx` 两个闸步经 commitgate，去掉 B 即 rc 127 具名拒绝。实测约束：未定义的外部**对象**被当作 0 读出不拒绝，故 flownet API 只导出函数、`fn_` 前缀。按 §8-3：不降级，W2 输入选运行时读 `.tsv`。
 
 ### W1 —— 行为基线快照（纯测量，零改代码）
 
