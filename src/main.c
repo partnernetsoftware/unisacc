@@ -316,16 +316,12 @@ int main(void) {
     }
     if (dump) {
         int ofd; int r; int binlen;
-        /* the destination is opened FIRST: `-E -o x.i` writes from inside
-           the front end, before there is a tape to write */
-        /* ...but only for -E.  Anything else is opened after the front end
-           has succeeded: a failed compile must not leave an empty a.out
-           behind, newer than its sources, for make to trust. */
+        /* `-E -o x.i` writes from inside the front end, which opens x.i at that
+           write (ppoutpath): a failed -E leaves an existing x.i as it was.  Anything
+           else is opened after the front end has succeeded: a failed compile must
+           not leave an empty a.out behind, newer than its sources, for make to trust. */
         ofd = 1;
-        if (outpath && pponly && deponly == 0) {
-            ofd = wopen(outpath);
-            if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);
-        }
+        if (outpath && pponly && deponly == 0) ppoutpath = outpath;   /* opened by fe_unit at its write */
         bkfd = ofd;
         if (istapebin(__argv(fi))) { if (ninput != 1 || tb_read(__argv(fi), tb_target_id(t), force_origin)) return 1; }
         else { if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
@@ -344,7 +340,7 @@ int main(void) {
             } else r = fe_units(inputs, ninput, t);
             if (r == 2) {                                            /* -E is done */
                 if (deponly) return writedeps(deptarget(outpath, inputs[0]), inputs, ninput);
-                if (ofd != 1) __close(ofd); return 0; }
+                if (ppoutfd >= 0) __close(ppoutfd); return 0; }
             if (r) return 1;
             if (werror && nwarn > 0) return 1;       /* -Werror: nothing written */
         } } }

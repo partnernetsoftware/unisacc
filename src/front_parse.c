@@ -829,6 +829,7 @@ int ustat_is(int t) {
     return 0;
 }
 int pponly;                 /* -E: stop after the preprocessor */
+char *ppoutpath; int ppoutfd = 0 - 1;   /* -E -o FILE: opened at the first write, so a failed -E leaves FILE as it was */
 /* -funit (with -c -b): a translation unit for separate compilation
    (docs/toolchain.md §7).  Non-static functions and objects are `.global`,
    names only declared here are `.extern`, `_start` comes only with `main`,
@@ -6602,7 +6603,13 @@ int fe_load(char *path, char *t) {
     preprocess();
     expandsrc();
     if (pponly) {                       /* -E: the text, not a program */
-        if (deponly == 0) __write(bkfd, src, nsrc);   /* -M: only the .d line */
+        if (deponly == 0) {                       /* -M: only the .d line */
+            if (ppoutpath && ppoutfd < 0) {
+                ppoutfd = wopen(ppoutpath);
+                if (ppoutfd < 0) { __write(2, "unisacc: error: cannot write ", 29); __write(2, ppoutpath, blen(ppoutpath)); __write(2, "\n", 1); return 1; }
+            }
+            __write(ppoutpath ? ppoutfd : bkfd, src, nsrc);
+        }
         return 2;
     }
     if (lex() < 0) return 1;

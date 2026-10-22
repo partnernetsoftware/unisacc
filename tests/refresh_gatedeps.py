@@ -13,6 +13,12 @@ src/ change makes the stamp stale again.   usage: make gatedeps
 """
 import hashlib, io, json, os, pathlib, subprocess, sys, tarfile, tempfile, copy, shlex
 R = pathlib.Path(__file__).resolve().parents[1]
+# --index: stamp the tree the next commit would record (git write-tree of the index) instead of HEAD, so the
+# refreshed stamp can travel in the same commit as the change (commitgate's derived check wants exactly that).
+# The index is only read: write-tree stores a tree object and changes nothing in the checkout.
+REF = 'HEAD'
+if '--index' in sys.argv[1:]:
+    REF = subprocess.run(['git', 'write-tree'], cwd=R, capture_output=True, text=True, check=True).stdout.strip()
 
 def digest(path):
     h = hashlib.sha256()
@@ -25,7 +31,7 @@ def head_shas(paths):
     `git cat-file --batch` (0.0.28 R5: one `git show` per guard was 5,893 processes, 50 s)."""
     paths = sorted(set(paths)); out = {}
     if not paths: return out
-    r = subprocess.run(['git', 'cat-file', '--batch'], cwd=R, input=''.join('HEAD:%s\n' % q for q in paths).encode(),
+    r = subprocess.run(['git', 'cat-file', '--batch'], cwd=R, input=''.join('%s:%s\n' % (REF, q) for q in paths).encode(),
                        capture_output=True, timeout=60, check=True).stdout
     i = 0
     for q in paths:
@@ -40,7 +46,7 @@ def main():
     p = R / 'tests/gatedeps.json'; d = json.loads(p.read_text())
     trees = sorted({t for e in d['families'].values() for t in (e.get('reviewed_trees') or {})})
     with tempfile.TemporaryDirectory(prefix='unisacc-gatedeps-') as tmp:
-        blob = subprocess.run(['git', '-c', 'tar.umask=022', 'archive', '--format=tar', 'HEAD'] + trees,   # git's default archive umask is 002 (0664 files); a checkout has 0644/0755
+        blob = subprocess.run(['git', '-c', 'tar.umask=022', 'archive', '--format=tar', REF] + trees,   # git's default archive umask is 002 (0664 files); a checkout has 0644/0755
                            cwd=R, check=True, capture_output=True, timeout=60).stdout
         with tarfile.open(fileobj=io.BytesIO(blob)) as tf: tf.extractall(tmp, filter='fully_trusted')
         changed = []
@@ -363,8 +369,8 @@ def main():
             if f not in files: files.append(f)
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
-    print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))
-    if dirty: print('gatedeps: note -- uncommitted changes under reviewed trees are NOT in the stamp:\n' + dirty)
+    print('gatedeps: reviewed stamps from %s; changed %s' % ('the index' if REF != 'HEAD' else 'HEAD', changed or 'none'))
+    if dirty and REF == 'HEAD': print('gatedeps: note -- uncommitted changes under reviewed trees are NOT in the stamp:\n' + dirty)
     return 0
 
 if __name__ == '__main__':

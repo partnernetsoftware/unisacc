@@ -173,18 +173,20 @@ say "-run -b leaves no file" "none" "$([ -e "$T/runb" ] && echo left || echo non
 printf 'KEEP' > "$T/runkeep"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -o runkeep >/dev/null 2>&1)
 say "-run leaves an existing file" "KEEP" "$(cat "$T/runkeep" 2>/dev/null)"
+# A refusal is named with a position: the model says `not covered: ...`, the classic reference names the C99
+# constraint (`empty declaration`, `return with no value`); either way FILE:LINE:COL: error: on stderr.
 printf 'int ;\n' > "$T/nomain.c"
 printf 'KEEP' > "$T/nomain.out"
 nomain_out=$(cd "$T" && bound 20 "$UA_RUN" nomain.c -o nomain.out 2>"$T/nomain.err")
 say "refusal leaves an existing file" "KEEP" "$(cat "$T/nomain.out" 2>/dev/null)"
 say "refusal stdout is empty" "" "$nomain_out"
-say "refusal is named" "named" "$(grep -q 'not covered:' "$T/nomain.err" && echo named)"
+say "refusal is named" "named" "$(grep -qE '^[^:]+:[0-9]+:[0-9]+: error: ' "$T/nomain.err" && echo named)"
 printf 'int f(void){return;}\n' > "$T/bare.c"
 printf 'KEEP' > "$T/bare.s"
 bare_out=$(cd "$T" && bound 20 "$UA_RUN" -S bare.c -o bare.s 2>"$T/bare.err")
 say "assembly refusal leaves an existing file" "KEEP" "$(cat "$T/bare.s" 2>/dev/null)"
 say "assembly refusal stdout is empty" "" "$bare_out"
-say "assembly refusal is named" "named" "$(grep -q 'not covered:' "$T/bare.err" && echo named)"
+say "assembly refusal is named" "named" "$(grep -qE '^[^:]+:[0-9]+:[0-9]+: error: ' "$T/bare.err" && echo named)"
 printf 'KEEP' > "$T/bare.o"
 (cd "$T" && bound 20 "$UA_RUN" -c bare.c -o bare.o >/dev/null 2>&1)
 say "object refusal leaves an existing file" "KEEP" "$(cat "$T/bare.o" 2>/dev/null)"
