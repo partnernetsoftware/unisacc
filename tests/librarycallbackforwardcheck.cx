@@ -1,0 +1,193 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallbackforwardcheck.cx -- Actual incoming aggregate forwarding with declared callable scope ownership.
+   Ported from tests/librarycallbackforwardcheck.py (2026-10-23, the owner's direction: the toolchain moves off
+   Python).  The descriptor encoding, argparse and host detection are shared with tests/librarycallbacknativecheck.cx
+   through tests/cxlib/callbackgraph.cx; copy_runtime comes from tests/cxlib/runtimecopy.cx, subprocess.run from
+   tests/cxlib/pyrun.cx, TemporaryDirectory from tests/cxlib/pytempfile.cx.
+   usage: sh ./unisacc.com -run tests/librarycallbackforwardcheck.cx -- [-h] --package PACKAGE [--sanitize]
+            [--arch {arm64,x86_64}] [--evidence EVIDENCE]
+   ROOT is the directory above this file's (a compiled binary, tests/cxbin: the working directory).  ARCH defaults to
+   the host's; another ARCH off Darwin is SystemExit: `cross execution requires native runner` on stderr, rc 1.
+   TARGET is lnx/ARCH (osx/ARCH on Darwin, where -arch ARCH is passed to $CC).  In a fresh TemporaryDirectory T
+   (prefix r10-callback-forward-) the runtime closure is copied to T/exec/c (RT), PACKAGE (resolved strictly) is
+   copied to T/compiler.pkg, T/host_drive.sig and T/host_take.sig get the Relay/host_take signatures, then each step
+   runs as `ROOT/tests/bound 20 ...` with output captured (no other limit):
+     $CC [-arch ARCH] [-fsanitize=address,undefined -fno-omit-frame-pointer] -std=c11 -O2 -shared -fPIC
+         -fvisibility=hidden RT/libunisacc.c RT/librarycall_ARCH.S -lffi -o T/library.dylib        ($CC default cc)
+     $CC [...] -std=c11 -O2 -Wall -Wextra -I RT ROOT/tests/libraryabi/callback_graph_forward.c T/library.dylib -o T/probe
+     [arch -x86_64] T/probe T/compiler.pkg TARGET T
+   The probe's stdout is printed as is, then the evidence as one json.dumps line {target, sanitize, package_sha256,
+   runtime_sha256, runtime_source_sha256, host_source_sha256, optimisation_levels, repeats_per_level,
+   actual_leaf_calls_per_level, actual_host_take_calls_per_level, scope}; --evidence PATH (non-empty) also gets it as
+   json.dumps(indent=2) plus a newline; rc 0.  A failing step is the .py's uncaught exception: rc 1 and on stderr the
+   traceback's last line, `AssertionError: (RC, 'STDOUT', 'STDERR')`, or an OSError / UnicodeDecodeError line; the
+   frames above it are not reproduced.  The temporary directory is removed either way.  Argument errors are
+   argparse's (rc 2); the prog name stays librarycallbackforwardcheck.py.
+   No #include: the prelude has everything used here. */
+#pragma unisa use cxlib.callbackgraph
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.pytempfile
+
+static const char *USAGE =
+    "usage: librarycallbackforwardcheck.py [-h] --package PACKAGE [--sanitize]\n"
+    "                                      [--arch {arm64,x86_64}]\n"
+    "                                      [--evidence EVIDENCE]\n";
+static const char *HELP =
+    "\noptions:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n  --sanitize\n"
+    "  --arch {arm64,x86_64}\n  --evidence EVIDENCE\n";
+static const char *SCOPE = "actual public native->script entry with incoming Pair ->native host_drive->script Relay "
+                           "forwards incoming heap Pair->native host_take->retained Relay reentry->native Leaf; "
+                           "standalone retained call, two native targets, Pair returns/copy/canary; no full "
+                           "variadic/other platforms";
+static char ROOT[4096], TD[4400];
+static char *EXC;
+
+static int fail(const char *line) {
+    free(EXC); EXC = malloc(strlen(line) + 1);
+    if (!EXC) { fputs("MemoryError\n", stderr); exit(1); }
+    strcpy(EXC, line); return -1;
+}
+static char *join2(const char *a, const char *b) { char *d = malloc(strlen(a) + strlen(b) + 2); if (!d) { fputs("MemoryError\n", stderr); exit(1); } sprintf(d, "%s/%s", a, b); return d; }
+
+/* run(*cmd): subprocess.run([ROOT/tests/bound, '20', *cmd], capture_output=True); rc 0 required */
+typedef struct Cmd { char *argv[40]; int n; } Cmd;
+static void arg(Cmd *c, const char *s) { c->argv[c->n++] = (char *)s; c->argv[c->n] = 0; }
+static void start(Cmd *c) { static char bound[4200]; snprintf(bound, sizeof bound, "%s/tests/bound", ROOT); c->n = 0; arg(c, bound); arg(c, "20"); }
+static int run(Cmd *c, char **out) {
+    pr_result r; char why[16384];
+    if (pr_run(c->argv, 0, 0, 0, 1e9, &r, why, sizeof why)) return fail(why);
+    if (r.rc) {
+        cbg_buf m = { 0, 0, 0 }; char t[48];
+        if (cbg_decode(r.out, r.outn, why, sizeof why) || cbg_decode(r.err, r.errn, why, sizeof why)) return fail(why);
+        snprintf(t, sizeof t, "AssertionError: (%d, ", r.rc); cbg_puts(&m, t);
+        cbg_repr(&m, r.out, r.outn); cbg_puts(&m, ", "); cbg_repr(&m, r.err, r.errn); cbg_puts(&m, ")");
+        pr_free(&r); free(EXC); EXC = (char *)m.p; return -1;
+    }
+    if (cbg_decode(r.out, r.outn, why, sizeof why)) return fail(why);
+    free(r.err); *out = r.out;
+    return 0;
+}
+/* shutil.copy2 without the timestamps (nothing reads them): content, then permission bits */
+static int copy2(const char *src, const char *dst) {
+    size_t n = 0; char *b; struct stat s; char why[9000];
+    errno = 0;
+    if (stat(src, &s) != 0) { rtc_oserror(errno, src, why, sizeof why); return fail(why); }
+    if (S_ISDIR(s.st_mode)) { rtc_oserror(EISDIR, src, why, sizeof why); return fail(why); }
+    if (!(b = cx_read(src, &n))) { rtc_oserror(errno ? errno : EIO, src, why, sizeof why); return fail(why); }
+    errno = 0;
+    if (cx_write(dst, b, n) != 0) { free(b); rtc_oserror(errno ? errno : EIO, dst, why, sizeof why); return fail(why); }
+    free(b);
+    chmod(dst, s.st_mode & 07777);
+    return 0;
+}
+static int write_sig(const char *name, cbg_buf *const *args, size_t nargs, const cbg_buf *pair) {
+    cbg_buf s = { 0, 0, 0 }; char file[64], why[9000], *p; int rc = 0;
+    cbg_signature(&s, name, pair, args, nargs);
+    snprintf(file, sizeof file, "%s.sig", name); p = join2(TD, file);
+    errno = 0;
+    if (cx_write(p, s.p, s.n)) { rtc_oserror(errno ? errno : EIO, p, why, sizeof why); rc = fail(why); }
+    free(p); free(s.p);
+    return rc;
+}
+static void cc_head(Cmd *c, const cbg_args *a, const char *arch, int darwin) {
+    start(c);
+    arg(c, getenv("CC") ? getenv("CC") : "cc");
+    if (darwin) { arg(c, "-arch"); arg(c, arch); }
+    if (a->sanitize) { arg(c, "-fsanitize=address,undefined"); arg(c, "-fno-omit-frame-pointer"); }
+    arg(c, "-std=c11"); arg(c, "-O2");
+}
+
+typedef struct Ev { char package[65], runtime[65], source[65], host[65]; } Ev;
+static void evidence(cbg_buf *o, const char *target, int sanitize, const Ev *e, int indent) {
+    const char *nl = indent ? "\n  " : "", *sep = indent ? ",\n  " : ", ";
+    char t[512];
+    cbg_puts(o, "{"); cbg_puts(o, nl);
+    snprintf(t, sizeof t, "\"target\": \"%s\"%s\"sanitize\": %s%s", target, sep, sanitize ? "true" : "false", sep); cbg_puts(o, t);
+    snprintf(t, sizeof t, "\"package_sha256\": \"%s\"%s\"runtime_sha256\": \"%s\"%s", e->package, sep, e->runtime, sep); cbg_puts(o, t);
+    snprintf(t, sizeof t, "\"runtime_source_sha256\": \"%s\"%s\"host_source_sha256\": \"%s\"%s", e->source, sep, e->host, sep); cbg_puts(o, t);
+    cbg_puts(o, indent ? "\"optimisation_levels\": [\n    0,\n    1,\n    2\n  ]" : "\"optimisation_levels\": [0, 1, 2]"); cbg_puts(o, sep);
+    snprintf(t, sizeof t, "\"repeats_per_level\": 100%s\"actual_leaf_calls_per_level\": 200%s\"actual_host_take_calls_per_level\": 400%s", sep, sep, sep);
+    cbg_puts(o, t);
+    cbg_puts(o, "\"scope\": \""); cbg_puts(o, SCOPE); cbg_puts(o, "\""); cbg_puts(o, indent ? "\n}" : "}");
+}
+
+/* the .py's with-block body */
+static int check(const cbg_args *a, const char *host, const char *arch, int darwin, const char *target) {
+    char why[16384], *rt, *package, *lib, *probe, *out, resolved[8192], norm[8192], suffix[64];
+    rtc_file *files; size_t nfiles; Cmd c; Ev e;
+    cbg_buf pair = { 0, 0, 0 }, leaf = { 0, 0, 0 }, relay = { 0, 0, 0 }, r2 = { 0, 0, 0 },
+            take = { 0, 0, 0 };
+    cbg_buf *leafargs[1], *relayargs[2], *driveargs[3], *takeargs[2];
+    errno = 0;
+    if (ptf_mkdtemp(0, "r10-callback-forward-", TD, sizeof TD)) { int er = errno; rtc_oserror(er, TD, why, sizeof why); TD[0] = 0; return fail(why); }
+    rt = join2(TD, "exec/c");
+    { char *ex = join2(TD, "exec"); mkdir(ex, 0777); free(ex); }
+    errno = 0;
+    if (mkdir(rt, 0777)) { rtc_oserror(errno, rt, why, sizeof why); return fail(why); }
+    { char *src = join2(TD, "src"); if (mkdir(src, 0777)) { rtc_oserror(errno, src, why, sizeof why); return fail(why); } free(src); }
+    if (rtc_copy_runtime(ROOT, TD, &files, &nfiles, why, sizeof why)) return fail(why);
+    package = join2(TD, "compiler.pkg");
+    cbg_pathnorm(a->package, norm, sizeof norm);
+    if (rtc_resolve(norm, 1, resolved, sizeof resolved, why, sizeof why)) return fail(why);
+    if (copy2(resolved, package)) return -1;
+    /* host_drive(Relay(Leaf(Pair), Pair), ref 2, Pair) -> Pair; host_take(Relay(Pair), Pair) -> Pair */
+    cbg_pair(&pair);
+    leafargs[0] = &pair; cbg_definition(&leaf, 2, &pair, leafargs, 1, 0, 1);
+    relayargs[0] = &leaf; relayargs[1] = &pair; cbg_definition(&relay, 1, &pair, relayargs, 2, 0, 1);
+    cbg_ref(&r2, 2);
+    driveargs[0] = &relay; driveargs[1] = &r2; driveargs[2] = &pair;
+    if (write_sig("host_drive", driveargs, 3, &pair)) return -1;
+    takeargs[0] = &pair; cbg_definition(&take, 1, &pair, takeargs, 1, 0, 1);
+    takeargs[0] = &take; takeargs[1] = &pair;
+    if (write_sig("host_take", takeargs, 2, &pair)) return -1;
+    lib = join2(TD, "library.dylib"); probe = join2(TD, "probe");
+    cc_head(&c, a, arch, darwin);
+    arg(&c, "-shared"); arg(&c, "-fPIC"); arg(&c, "-fvisibility=hidden"); arg(&c, join2(rt, "libunisacc.c"));
+    snprintf(suffix, sizeof suffix, "librarycall_%s.S", arch); arg(&c, join2(rt, suffix));
+    arg(&c, "-lffi"); arg(&c, "-o"); arg(&c, lib);
+    if (run(&c, &out)) return -1;
+    free(out);
+    cc_head(&c, a, arch, darwin);
+    arg(&c, "-Wall"); arg(&c, "-Wextra"); arg(&c, "-I"); arg(&c, rt);
+    arg(&c, join2(ROOT, "tests/libraryabi/callback_graph_forward.c")); arg(&c, lib); arg(&c, "-o"); arg(&c, probe);
+    if (run(&c, &out)) return -1;
+    free(out);
+    start(&c);
+    if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { arg(&c, "arch"); arg(&c, "-x86_64"); }
+    arg(&c, probe); arg(&c, package); arg(&c, target); arg(&c, TD);
+    if (run(&c, &out)) return -1;
+    fputs(out, stdout); free(out);
+    if (rtc_sha_file(package, e.package, why, sizeof why) || rtc_sha_file(lib, e.runtime, why, sizeof why)) return fail(why);
+    { char *p = join2(rt, "libunisacc.c"); if (rtc_sha_file(p, e.source, why, sizeof why)) return fail(why); free(p); }
+    { char *p = join2(rt, "librarycallablehost.h"); if (rtc_sha_file(p, e.host, why, sizeof why)) return fail(why); free(p); }
+    {
+        cbg_buf o = { 0, 0, 0 };
+        evidence(&o, target, a->sanitize, &e, 0); puts((char *)o.p); free(o.p);
+    }
+    if (a->evidence && *a->evidence) {   /* Path(a.evidence).write_text(json.dumps(evidence, indent=2) + '\n') */
+        cbg_buf o = { 0, 0, 0 }; char ep[8192]; FILE *f; struct stat st;
+        evidence(&o, target, a->sanitize, &e, 1); cbg_puts(&o, "\n");
+        cbg_pathnorm(a->evidence, ep, sizeof ep);
+        errno = 0;
+        if (stat(ep, &st) == 0 && S_ISDIR(st.st_mode)) { rtc_oserror(EISDIR, ep, why, sizeof why); return fail(why); }
+        if (!(f = fopen(ep, "w"))) { rtc_oserror(errno ? errno : EIO, ep, why, sizeof why); return fail(why); }
+        if (fwrite(o.p, 1, o.n, f) != o.n || fclose(f) != 0) { rtc_oserror(errno ? errno : EIO, ep, why, sizeof why); return fail(why); }
+        free(o.p);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    cbg_args a = { 0, 0, 0, 0 }; const char *host, *arch; int darwin, rc; char target[64];
+    cbg_parse(argc, argv, "librarycallbackforwardcheck.py", USAGE, HELP, 1, &a);
+    cbg_root(argv[0], ROOT, sizeof ROOT);
+    cbg_host(&host, &darwin);
+    arch = a.arch ? a.arch : host;
+    if (strcmp(arch, host) && !darwin) cbg_die("cross execution requires native runner");
+    snprintf(target, sizeof target, "%s/%s", darwin ? "osx" : "lnx", arch);
+    rc = check(&a, host, arch, darwin, target);
+    if (TD[0]) { ptf_rmtree(TD); TD[0] = 0; }
+    if (rc) cbg_die(EXC);
+    return fflush(stdout) || ferror(stdout) ? 1 : 0;
+}

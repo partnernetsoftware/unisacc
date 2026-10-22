@@ -815,16 +815,16 @@ job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
 job lib-callback-plan sh ./tests/cxbin tests/librarycallbackplancheck.cx   # (.cx port, 2026-10-23) callback declaration/plan probe, normal + ASan/UBSan
 job lib-callable-model ./tests/modelcallablewirecheck.sh
-job lib-callback-native python3 ./tests/librarycallbacknativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
-job lib-callback-forward python3 ./tests/librarycallbackforwardcheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
+job lib-callback-native sh ./unisacc.com -run tests/librarycallbacknativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
+job lib-callback-forward sh ./unisacc.com -run tests/librarycallbackforwardcheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
 job lib-callable-variadic-native sh ./tests/cxbin tests/librarycallablevariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
 job lib-callback-outcome sh ./tests/cxbin tests/librarycallbackoutcomecheck.cx --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) public-API sticky outcome, normal + ASan/UBSan
 job lib-typed-native tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) native->script->typed native fixed FP/GP17/Pair9
 job lib-variadic-native tests/bound 58 sh ./tests/cxbin tests/libraryvariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
 job lib-sig2-native tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23) native->script fixed FP/GP17/Pair9
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
-    job lib-callback-native-rosetta python3 ./tests/librarycallbacknativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
-    job lib-callback-forward-rosetta python3 ./tests/librarycallbackforwardcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
+    job lib-callback-native-rosetta sh ./unisacc.com -run tests/librarycallbacknativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
+    job lib-callback-forward-rosetta sh ./unisacc.com -run tests/librarycallbackforwardcheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-callable-variadic-native-rosetta sh ./tests/cxbin tests/librarycallablevariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
     job lib-sig2-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarysig2nativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-typed-rosetta tests/bound 58 sh ./unisacc.com -run tests/librarytypednativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --arch x86_64

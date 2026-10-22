@@ -1,0 +1,247 @@
+/* callbackgraph.cx -- what tests/librarycallbacknativecheck.py and tests/librarycallbackforwardcheck.py share, as a
+   .cx module (2026-10-23, the py->cx port wave; users tests/librarycallbacknativecheck.cx and
+   tests/librarycallbackforwardcheck.cx).  Use it with `#pragma unisa use cxlib.callbackgraph` from a .cx file in
+   tests/.  Both checks build a callable signature (USLSIG2) out of the same type descriptors, parse the same argparse
+   options, find the host the same way and run the same runtime-closure + cc + probe pipeline in a
+   TemporaryDirectory; only their commands' wrappers and their error and evidence words differ.
+     cbg_buf, cbg_put(B, P, N), cbg_puts(B, S), cbg_byte(B, C), cbg_u64(B, N)      byte buffers; u64 is struct '<Q'
+     cbg_desc(B, KIND, WIDTH, ALIGN, DEPTH, TAG, PAYLOAD, N)   the .py's desc(): u(depth) u(0) u(0) u(kind) u(width)
+                                                     u(0) u(align), the tag byte, u(len(payload)), payload
+     cbg_int(B), cbg_double(B), cbg_float(B), cbg_ptr(B), cbg_pair(B)   I, D, F, P (depth 1) and the Pair aggregate
+     cbg_ref(B, N)                                    ref(n): a callable reference to definition N
+     cbg_definition(B, N, RESULT, ARGS, NARGS, MODE, SUPPORT)   definition(n, result, args, mode, support)
+     cbg_signature(B, NAME, RESULT, ARGS, NARGS)      b'USLSIG2\n' + one function NAME returning RESULT
+     cbg_repr(B, S, N), cbg_posixpath(B, S)           repr(str), repr(PosixPath(S)) appended
+     cbg_decode(S, N, why, whylen)                    bytes.decode(): 0, or 1 with WHY the UnicodeDecodeError line
+     cbg_parse(ARGC, ARGV, PROG, USAGE, HELP, EVIDENCE, &args)   argparse: --package (required), --sanitize,
+                                                     --arch {arm64,x86_64}, and --evidence when EVIDENCE; prefixes,
+                                                     --opt=value, last one wins; usage errors rc 2, -h rc 0
+     cbg_root(ARGV0, ROOT, CAP)                       Path(__file__).resolve().parents[1]; a compiled binary (tests/
+                                                     cxbin) has no source path: the working directory
+     cbg_host(&host, &darwin)                         platform.machine()/system(): host arm64 or x86_64
+     cbg_pathnorm(P, OUT, CAP)                        str(Path(P))
+     cbg_die(LINE)                                    the traceback's last line on stderr, rc 1
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module callbackgraph
+#pragma unisa use runtimecopy
+
+typedef struct cbg_buf { unsigned char *p; size_t n, cap; } cbg_buf;
+typedef struct cbg_args { const char *package, *arch, *evidence; int sanitize; } cbg_args;
+
+void cbg_put(cbg_buf *b, const void *d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 64; unsigned char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n; b->p[b->n] = 0;
+}
+void cbg_puts(cbg_buf *b, const char *s) { cbg_put(b, s, strlen(s)); }
+void cbg_byte(cbg_buf *b, int c) { unsigned char x = (unsigned char)c; cbg_put(b, &x, 1); }
+void cbg_u64(cbg_buf *b, unsigned long long v) {
+    unsigned char t[8]; int i;
+    for (i = 0; i < 8; i++) t[i] = (unsigned char)(v >> (8 * i));
+    cbg_put(b, t, 8);
+}
+
+/* ---- the descriptor encoding ------------------------------------------------------------------------------------ */
+void cbg_desc(cbg_buf *b, int kind, int width, int align, int depth, int tag, const void *payload, size_t n) {
+    cbg_u64(b, (unsigned long long)depth); cbg_u64(b, 0); cbg_u64(b, 0); cbg_u64(b, (unsigned long long)kind);
+    cbg_u64(b, (unsigned long long)width); cbg_u64(b, 0); cbg_u64(b, (unsigned long long)align);
+    cbg_byte(b, tag); cbg_u64(b, n); cbg_put(b, payload, n);
+}
+void cbg_int(cbg_buf *b) { cbg_desc(b, 1, 4, 4, 0, 0, "", 0); }
+void cbg_double(cbg_buf *b) { cbg_desc(b, 3, 8, 8, 0, 0, "", 0); }
+void cbg_float(cbg_buf *b) { cbg_desc(b, 3, 4, 4, 0, 0, "", 0); }
+void cbg_ptr(cbg_buf *b) { cbg_desc(b, 2, 8, 8, 1, 0, "", 0); }
+/* pair=desc(5,16,8,tag=1,payload=u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I) */
+void cbg_pair(cbg_buf *b) {
+    cbg_buf p = { 0, 0, 0 };
+    cbg_u64(&p, 2); cbg_u64(&p, 0); cbg_u64(&p, 0); cbg_u64(&p, 0); cbg_u64(&p, 8); cbg_double(&p);
+    cbg_u64(&p, 8); cbg_u64(&p, 0); cbg_u64(&p, 0); cbg_u64(&p, 4); cbg_int(&p);
+    cbg_desc(b, 5, 16, 8, 0, 1, p.p, p.n); free(p.p);
+}
+void cbg_ref(cbg_buf *b, unsigned long long n) {
+    cbg_buf p = { 0, 0, 0 };
+    cbg_byte(&p, 1); cbg_byte(&p, 1); cbg_u64(&p, n);
+    cbg_desc(b, 4, 8, 8, 1, 4, p.p, p.n); free(p.p);
+}
+static void cbg_fn(cbg_buf *p, const cbg_buf *result, cbg_buf *const *args, size_t nargs) {   /* u(n)+result+u(n)+args */
+    size_t i;
+    cbg_u64(p, nargs); cbg_put(p, result->p, result->n); cbg_u64(p, nargs);
+    for (i = 0; i < nargs; i++) cbg_put(p, args[i]->p, args[i]->n);
+}
+void cbg_definition(cbg_buf *b, unsigned long long n, const cbg_buf *result, cbg_buf *const *args, size_t nargs, int mode,
+                    int support) {
+    cbg_buf p = { 0, 0, 0 };
+    cbg_byte(&p, 1); cbg_byte(&p, 0); cbg_u64(&p, n); cbg_byte(&p, 0); cbg_byte(&p, mode);
+    cbg_fn(&p, result, args, nargs); cbg_byte(&p, support);
+    cbg_desc(b, 4, 8, 8, 1, 4, p.p, p.n); free(p.p);
+}
+void cbg_signature(cbg_buf *b, const char *name, const cbg_buf *result, cbg_buf *const *args, size_t nargs) {
+    cbg_puts(b, "USLSIG2\n"); cbg_u64(b, 1); cbg_u64(b, strlen(name)); cbg_puts(b, name);
+    cbg_byte(b, 0); cbg_byte(b, 1); cbg_byte(b, 0); cbg_byte(b, 0);
+    cbg_fn(b, result, args, nargs); cbg_byte(b, 1);
+}
+
+/* ---- Python text ------------------------------------------------------------------------------------------------ */
+void cbg_repr(cbg_buf *o, const char *s, size_t n) {
+    size_t cap = 4 * n + 8; char *t = malloc(cap);
+    if (!t) { fputs("MemoryError\n", stderr); exit(1); }
+    rtc_pyrepr(s, n, t, cap); cbg_puts(o, t); free(t);
+}
+void cbg_posixpath(cbg_buf *o, const char *s) { cbg_puts(o, "PosixPath("); cbg_repr(o, s, strlen(s)); cbg_puts(o, ")"); }
+/* bytes.decode('utf-8'): 1 with WHY the error line (CPython's positions and reasons) when S is not valid */
+int cbg_decode(const char *str, size_t n, char *why, size_t whylen) {
+    const unsigned char *s = (const unsigned char *)str; size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i], lo = 0x80, hi = 0xBF; int need = 0, k, eod = 0, bad = 0;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        if (!need) bad = 1;
+        else for (k = 1; k <= need; k++) {
+            unsigned d;
+            if (i + (size_t)k >= n) { bad = k; eod = 1; break; }
+            d = s[i + k];
+            if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) { bad = k; break; }
+        }
+        if (bad) {
+            size_t end = eod ? n : i + (size_t)bad;
+            const char *w = eod ? "unexpected end of data" : !need ? "invalid start byte" : "invalid continuation byte";
+            if (end == i + 1) snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: %s", c, (unsigned long)i, w);
+            else snprintf(why, whylen, "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position %lu-%lu: %s", (unsigned long)i, (unsigned long)(end - 1), w);
+            return 1;
+        }
+        i += (size_t)need + 1;
+    }
+    return 0;
+}
+/* str(Path(P)): repeated slashes collapse, '.' components drop, a trailing slash goes; '' is '.' */
+void cbg_pathnorm(const char *p, char *o, size_t cap) {
+    size_t j = 0; const char *s = p;
+    if (p[0] == '/') { o[j++] = '/'; if (p[1] == '/' && p[2] != '/') o[j++] = '/'; }
+    while (*s && j + 1 < cap) {
+        const char *e; size_t n;
+        while (*s == '/') s++;
+        if (!*s) break;
+        e = strchr(s, '/'); n = e ? (size_t)(e - s) : strlen(s);
+        if (!(n == 1 && s[0] == '.')) {
+            if (j && o[j - 1] != '/') o[j++] = '/';
+            if (j + n + 1 > cap) n = cap - j - 1;
+            memcpy(o + j, s, n); j += n;
+        }
+        s += n;
+    }
+    if (!j) o[j++] = '.';
+    o[j] = 0;
+}
+void cbg_die(const char *line) { fflush(stdout); fprintf(stderr, "%s\n", line); exit(1); }
+
+/* ---- argparse --------------------------------------------------------------------------------------------------- */
+static const char *CBG_PROG, *CBG_USAGE;
+static void cbg_usage_error(const char *msg) {
+    fflush(stdout); fputs(CBG_USAGE, stderr); fprintf(stderr, "%s: error: %s\n", CBG_PROG, msg);
+    exit(2);
+}
+static int cbg_negnum(const char *s) {
+    const char *p = s + 1; int dig = 0, dot = 0;
+    if (*s != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') dig = 1; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return dig;
+}
+static int cbg_prefix(const char *p, size_t n, const char *opt) { return n >= 3 && n <= strlen(opt) && !strncmp(p, opt, n); }
+enum { CBG_NONE, CBG_HELP, CBG_PACKAGE, CBG_SANITIZE, CBG_ARCH, CBG_EVIDENCE };
+static const char *CBG_ONAME[] = { "", "-h/--help", "--package", "--sanitize", "--arch", "--evidence" };
+static int cbg_long(const char *s, const char **eq, int evidence) {   /* every prefix of 3+ characters is unique */
+    const char *e = strchr(s, '='); size_t n = e ? (size_t)(e - s) : strlen(s);
+    *eq = e ? e + 1 : 0;
+    if (cbg_prefix(s, n, "--help")) return CBG_HELP;
+    if (cbg_prefix(s, n, "--package")) return CBG_PACKAGE;
+    if (cbg_prefix(s, n, "--sanitize")) return CBG_SANITIZE;
+    if (cbg_prefix(s, n, "--arch")) return CBG_ARCH;
+    if (evidence && cbg_prefix(s, n, "--evidence")) return CBG_EVIDENCE;
+    return CBG_NONE;
+}
+static int cbg_is_option(const char *s, int evidence) {
+    const char *eq;
+    if (s[0] != '-' || !s[1]) return 0;
+    if (!strcmp(s, "--")) return 1;
+    if (s[1] == '-' && cbg_long(s, &eq, evidence)) return 1;
+    if (s[1] == 'h') return 1;
+    if (cbg_negnum(s)) return 0;
+    if (strchr(s, ' ')) return 0;
+    return 1;
+}
+void cbg_parse(int argc, char **argv, const char *prog, const char *usage, const char *help, int evidence, cbg_args *a) {
+    cbg_buf extras = { 0, 0, 0 }; int i, sawhelp = 0;
+    CBG_PROG = prog; CBG_USAGE = usage;
+    for (i = 1; i < argc; i++) {
+        const char *s = argv[i], *eq = 0; int o = CBG_NONE;
+        if (!strcmp(s, "--")) {
+            for (; i < argc; i++) { if (extras.n) cbg_puts(&extras, " "); cbg_puts(&extras, argv[i]); }
+            break;
+        }
+        if (s[0] == '-' && s[1] == '-') o = cbg_long(s, &eq, evidence);
+        else if (s[0] == '-' && s[1] == 'h') o = CBG_HELP;
+        if (o == CBG_HELP || o == CBG_SANITIZE) {
+            const char *x = 0;
+            if (eq && s[1] == '-') x = eq;
+            else if (o == CBG_HELP && s[1] != '-' && (s[2] == '=' || s[2] == '-')) x = s + 2 + (s[2] == '=');
+            if (x) {
+                cbg_buf m = { 0, 0, 0 };
+                cbg_puts(&m, "argument "); cbg_puts(&m, CBG_ONAME[o]); cbg_puts(&m, ": ignored explicit argument ");
+                cbg_repr(&m, x, strlen(x));
+                cbg_usage_error((char *)m.p);
+            }
+            if (o == CBG_HELP) { sawhelp = 1; break; }
+            a->sanitize = 1;
+        } else if (o != CBG_NONE) {
+            const char *v = eq;
+            if (!v) {
+                if (i + 1 >= argc || cbg_is_option(argv[i + 1], evidence)) {
+                    char m[128]; snprintf(m, sizeof m, "argument %s: expected one argument", CBG_ONAME[o]); cbg_usage_error(m);
+                }
+                v = argv[++i];
+            }
+            if (o == CBG_ARCH) {
+                if (strcmp(v, "arm64") && strcmp(v, "x86_64")) {
+                    cbg_buf m = { 0, 0, 0 };
+                    cbg_puts(&m, "argument --arch: invalid choice: "); cbg_repr(&m, v, strlen(v));
+                    cbg_puts(&m, " (choose from 'arm64', 'x86_64')");
+                    cbg_usage_error((char *)m.p);
+                }
+                a->arch = v;
+            } else if (o == CBG_PACKAGE) a->package = v;
+            else a->evidence = v;
+        } else { if (extras.n) cbg_puts(&extras, " "); cbg_puts(&extras, s); }
+    }
+    if (sawhelp) { fputs(usage, stdout); fputs(help, stdout); exit(0); }
+    if (!a->package) cbg_usage_error("the following arguments are required: --package");
+    if (extras.n) { cbg_buf m = { 0, 0, 0 }; cbg_puts(&m, "unrecognized arguments: "); cbg_puts(&m, (char *)extras.p); cbg_usage_error((char *)m.p); }
+}
+
+/* ---- the host ----------------------------------------------------------------------------------------------------- */
+void cbg_root(const char *argv0, char *root, size_t cap) {
+    size_t al = strlen(argv0); char r[4096];
+    if (al > 3 && !strcmp(argv0 + al - 3, ".cx") && realpath(argv0, r)) {
+        int k; char *slash;
+        for (k = 0; k < 2; k++) { slash = strrchr(r, '/'); if (slash && slash != r) *slash = 0; else { strcpy(r, "/"); break; } }
+    } else if (!getcwd(r, sizeof r)) strcpy(r, ".");
+    snprintf(root, cap, "%s", r);
+}
+static char *cbg_uname(char *flag) {
+    char *a[] = { "uname", 0, 0 }, *out = 0; size_t n = 0;
+    a[1] = flag;
+    if (cx_runv_timeout(a, 10, &out, &n) != 0 || !out) { free(out); return ""; }
+    out[strcspn(out, "\r\n")] = 0;
+    return out;
+}
+void cbg_host(const char **host, int *darwin) {
+    char *mach = cbg_uname("-m"), *sys = cbg_uname("-s");
+    *host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
+    *darwin = !strcmp(sys, "Darwin");
+}

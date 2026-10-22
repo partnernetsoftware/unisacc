@@ -1,0 +1,148 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarycallbacknativecheck.cx -- Actual recursive callback values through the public model compiler; requires
+   callable-capable E3 and lower networks in the supplied package.  Ported from tests/librarycallbacknativecheck.py
+   (2026-10-23, the owner's direction: the toolchain moves off Python).  The descriptor encoding, argparse and host
+   detection are shared with tests/librarycallbackforwardcheck.cx through tests/cxlib/callbackgraph.cx; copy_runtime
+   comes from tests/cxlib/runtimecopy.cx, subprocess.run from tests/cxlib/pyrun.cx, TemporaryDirectory from
+   tests/cxlib/pytempfile.cx.
+   usage: sh ./unisacc.com -run tests/librarycallbacknativecheck.cx -- [-h] --package PACKAGE [--sanitize]
+            [--arch {arm64,x86_64}]
+   ROOT is the directory above this file's (a compiled binary, tests/cxbin: the working directory).  ARCH defaults to
+   the host's; another ARCH off Darwin is `AssertionError: cross-native execution requires an explicit platform
+   runner`.  TARGET is lnx/ARCH (osx/ARCH on Darwin, where -arch ARCH is passed to cc).  PACKAGE is resolved (not
+   strictly).  In a fresh TemporaryDirectory TD (prefix r10-callback-native-) the runtime closure is copied to
+   TD/exec/c (RT), then, each through subprocess.run(capture_output=True, timeout=20):
+     cc [-arch ARCH] [-fsanitize=address,undefined -fno-omit-frame-pointer] -std=c11 -O2 -shared -fPIC
+        -fvisibility=hidden RT/libunisacc.c RT/librarycall_ARCH.S -lffi -o TD/library.dylib
+     cc [...] -std=c11 -O2 -Wall -Wextra -I RT ROOT/tests/libraryabi/callback_graph_bidirectional.c TD/library.dylib
+        -o TD/probe
+   TD/host_drive.sig gets the Relay(Leaf9) signature, and [arch -x86_64] TD/probe PACKAGE TARGET TD runs; its stdout
+   is printed as is, then one json.dumps line {target, package_sha256, runtime_sha256, optimisation_levels,
+   calls_per_level, scope}; rc 0.  A failing step is the .py's uncaught exception: rc 1 and on stderr the traceback's
+   last line, `AssertionError: ([ARGS], RC, 'STDOUT', 'STDERR')` (ARGS as the .py's list: PosixPath(...) for the
+   paths), `subprocess.TimeoutExpired: Command '[...]' timed out after 20 seconds`, or an OSError /
+   UnicodeDecodeError line; the frames above it are not reproduced.  The temporary directory is removed either way.
+   Argument errors are argparse's (rc 2); the prog name stays librarycallbacknativecheck.py.
+   No #include: the prelude has everything used here. */
+#pragma unisa use cxlib.callbackgraph
+#pragma unisa use cxlib.runtimecopy
+#pragma unisa use cxlib.pyrun
+#pragma unisa use cxlib.pytempfile
+
+static const char *USAGE =
+    "usage: librarycallbacknativecheck.py [-h] --package PACKAGE [--sanitize]\n"
+    "                                     [--arch {arm64,x86_64}]\n";
+static const char *HELP =
+    "\noptions:\n  -h, --help            show this help message and exit\n  --package PACKAGE\n  --sanitize\n"
+    "  --arch {arm64,x86_64}\n";
+static const char *SCOPE = "actual native->script->native->script Relay->native Leaf9, two borrowed native targets, "
+                           "retained script callback; not complete callback varargs/layouts/platforms";
+static char ROOT[4096], TD[4400];
+static char *EXC;
+
+static int fail(const char *line) {
+    free(EXC); EXC = malloc(strlen(line) + 1);
+    if (!EXC) { fputs("MemoryError\n", stderr); exit(1); }
+    strcpy(EXC, line); return -1;
+}
+static char *join2(const char *a, const char *b) { char *d = malloc(strlen(a) + strlen(b) + 2); if (!d) { fputs("MemoryError\n", stderr); exit(1); } sprintf(d, "%s/%s", a, b); return d; }
+
+/* command(args): ARGV with PATHS[i] set where the .py passes a Path (its repr in the error is PosixPath('...')) */
+typedef struct Cmd { char *argv[40]; int path[40]; int n; } Cmd;
+static void arg(Cmd *c, const char *s, int path) { c->argv[c->n] = (char *)s; c->path[c->n++] = path; c->argv[c->n] = 0; }
+static int command(Cmd *c, char **out) {
+    pr_result r; char why[16384];
+    if (pr_run(c->argv, 0, 0, 0, 20.0, &r, why, sizeof why)) return fail(why);
+    if (r.rc) {
+        cbg_buf m = { 0, 0, 0 }; char t[32]; int i;
+        if (cbg_decode(r.out, r.outn, why, sizeof why) || cbg_decode(r.err, r.errn, why, sizeof why)) return fail(why);
+        cbg_puts(&m, "AssertionError: ([");
+        for (i = 0; i < c->n; i++) {
+            if (i) cbg_puts(&m, ", ");
+            if (c->path[i]) cbg_posixpath(&m, c->argv[i]); else cbg_repr(&m, c->argv[i], strlen(c->argv[i]));
+        }
+        snprintf(t, sizeof t, "], %d, ", r.rc); cbg_puts(&m, t);
+        cbg_repr(&m, r.out, r.outn); cbg_puts(&m, ", "); cbg_repr(&m, r.err, r.errn); cbg_puts(&m, ")");
+        pr_free(&r); free(EXC); EXC = (char *)m.p; return -1;
+    }
+    if (cbg_decode(r.out, r.outn, why, sizeof why)) return fail(why);
+    free(r.err); *out = r.out;
+    return 0;
+}
+
+/* the .py's with-block body */
+static int check(const cbg_args *a, const char *host, const char *arch, int darwin, const char *target, const char *package) {
+    char why[16384], *runtime, *lib, *probe, *sig, *out, pkghex[65], libhex[65], suffix[64];
+    rtc_file *files; size_t nfiles; Cmd c; cbg_buf pair = { 0, 0, 0 }, I = { 0, 0, 0 }, D = { 0, 0, 0 }, F = { 0, 0, 0 },
+    P = { 0, 0, 0 }, leaf = { 0, 0, 0 }, relay = { 0, 0, 0 }, r2 = { 0, 0, 0 }, s = { 0, 0, 0 };
+    cbg_buf *leafargs[9], *relayargs[1], *args[2];
+    errno = 0;
+    if (ptf_mkdtemp(0, "r10-callback-native-", TD, sizeof TD)) { int e = errno; rtc_oserror(e, TD, why, sizeof why); TD[0] = 0; return fail(why); }
+    runtime = join2(TD, "exec/c");
+    { char *ex = join2(TD, "exec"); mkdir(ex, 0777); free(ex); }
+    errno = 0;
+    if (mkdir(runtime, 0777)) { rtc_oserror(errno, runtime, why, sizeof why); return fail(why); }
+    { char *src = join2(TD, "src"); if (mkdir(src, 0777)) { rtc_oserror(errno, src, why, sizeof why); return fail(why); } free(src); }
+    if (rtc_copy_runtime(ROOT, TD, &files, &nfiles, why, sizeof why)) return fail(why);
+    lib = join2(TD, "library.dylib");
+    c.n = 0;
+    arg(&c, "cc", 0);
+    if (darwin) { arg(&c, "-arch", 0); arg(&c, arch, 0); }
+    if (a->sanitize) { arg(&c, "-fsanitize=address,undefined", 0); arg(&c, "-fno-omit-frame-pointer", 0); }
+    arg(&c, "-std=c11", 0); arg(&c, "-O2", 0); arg(&c, "-shared", 0); arg(&c, "-fPIC", 0); arg(&c, "-fvisibility=hidden", 0);
+    arg(&c, join2(runtime, "libunisacc.c"), 1);
+    snprintf(suffix, sizeof suffix, "librarycall_%s.S", arch); arg(&c, join2(runtime, suffix), 1);
+    arg(&c, "-lffi", 0); arg(&c, "-o", 0); arg(&c, lib, 1);
+    if (command(&c, &out)) return -1;
+    free(out);
+    probe = join2(TD, "probe");
+    c.n = 0;
+    arg(&c, "cc", 0);
+    if (darwin) { arg(&c, "-arch", 0); arg(&c, arch, 0); }
+    if (a->sanitize) { arg(&c, "-fsanitize=address,undefined", 0); arg(&c, "-fno-omit-frame-pointer", 0); }
+    arg(&c, "-std=c11", 0); arg(&c, "-O2", 0); arg(&c, "-Wall", 0); arg(&c, "-Wextra", 0);
+    arg(&c, "-I", 0); arg(&c, runtime, 1);
+    arg(&c, join2(ROOT, "tests/libraryabi/callback_graph_bidirectional.c"), 1);
+    arg(&c, lib, 1); arg(&c, "-o", 0); arg(&c, probe, 1);
+    if (command(&c, &out)) return -1;
+    free(out);
+    /* the signature: host_drive(Relay(Leaf(I,D,F,P,Pair,I,D,I,I)), ref 2) -> Pair */
+    cbg_int(&I); cbg_double(&D); cbg_float(&F); cbg_ptr(&P); cbg_pair(&pair);
+    leafargs[0] = &I; leafargs[1] = &D; leafargs[2] = &F; leafargs[3] = &P; leafargs[4] = &pair;
+    leafargs[5] = &I; leafargs[6] = &D; leafargs[7] = &I; leafargs[8] = &I;
+    cbg_definition(&leaf, 2, &pair, leafargs, 9, 1, 1);
+    relayargs[0] = &leaf;
+    cbg_definition(&relay, 1, &pair, relayargs, 1, 0, 1);
+    cbg_ref(&r2, 2);
+    args[0] = &relay; args[1] = &r2;
+    cbg_signature(&s, "host_drive", &pair, args, 2);
+    sig = join2(TD, "host_drive.sig");
+    errno = 0;
+    if (cx_write(sig, s.p, s.n)) { rtc_oserror(errno ? errno : EIO, sig, why, sizeof why); return fail(why); }
+    c.n = 0;
+    if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { arg(&c, "arch", 0); arg(&c, "-x86_64", 0); }
+    arg(&c, probe, 1); arg(&c, package, 1); arg(&c, target, 0); arg(&c, TD, 1);
+    if (command(&c, &out)) return -1;
+    fputs(out, stdout); free(out);
+    if (rtc_sha_file(package, pkghex, why, sizeof why)) return fail(why);
+    if (rtc_sha_file(lib, libhex, why, sizeof why)) return fail(why);
+    printf("{\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
+           "\"calls_per_level\": 100, \"scope\": \"%s\"}\n", target, pkghex, libhex, SCOPE);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    cbg_args a = { 0, 0, 0, 0 }; const char *host, *arch; int darwin, rc; char target[64], norm[8192], package[8192], why[16384];
+    cbg_parse(argc, argv, "librarycallbacknativecheck.py", USAGE, HELP, 0, &a);
+    cbg_root(argv[0], ROOT, sizeof ROOT);
+    cbg_host(&host, &darwin);
+    arch = a.arch ? a.arch : host;
+    if (strcmp(arch, host) && !darwin) cbg_die("AssertionError: cross-native execution requires an explicit platform runner");
+    snprintf(target, sizeof target, "%s/%s", darwin ? "osx" : "lnx", arch);
+    cbg_pathnorm(a.package, norm, sizeof norm);
+    if (rtc_resolve(norm, 0, package, sizeof package, why, sizeof why)) cbg_die(why);
+    rc = check(&a, host, arch, darwin, target, package);
+    if (TD[0]) { ptf_rmtree(TD); TD[0] = 0; }
+    if (rc) cbg_die(EXC);
+    return fflush(stdout) || ferror(stdout) ? 1 : 0;
+}
