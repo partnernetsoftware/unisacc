@@ -199,6 +199,11 @@ static char *extra[] = {
     /* regcheck: E3 register save/restore frames and the value record (tests/regs-e3.tsv) */
     "E3", "regcheck", "meta",
     "E3", "regcheck-negative", "meta",
+    /* statecheck: the same frames on the constructed parse2 delta (tests/statecheck.cx, R0c) */
+    "E3", "statecheck-tool", "meta",
+    "E3", "statecheck-e3", "meta",
+    "E3", "statecheck-e3-warn", "meta",
+    "E3", "statecheck-negative", "meta",
     /* edge-e3-type-seal: 边级冻结原件（e3->type），同 edge-e4-peep-seal; tests/edgeseal.py */
     "E3", "edge-e3-type-seal", "meta",
     /* edge-e3-scope-seal: 边级冻结原件（e3->scope），同 edge-e4-peep-seal; tests/edgeseal.py */

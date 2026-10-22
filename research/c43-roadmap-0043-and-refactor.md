@@ -195,7 +195,7 @@
 | R0c | **state S0：statecheck.cx 读构造出的 delta JSON**；声明 regcheck 漏掉的 5 个部分保存（M9）；挂成 stagechain 的构造后置条件 | 0 | 变异测试：从某个帧里删掉 `szcomma`，或从 membercontrol stack8 删掉 `rk`，必须变红 | regcheck 加每个变体一个 statecheck 叶。**先测 .cx 读 61–67 MB JSON 的时间和内存**（没测过，历史上有 5.25 GB OOM 的 waiver） | 0.5–1 天 |
 | R0d | **cellchain S0**：stagechain 泛化为读链表的运行器，拆成 `--construct` 和 `--run` | 0 | 在 308 个文件上，判定行和 stagechain 完全一致 | 新增 cellchain-e3 作业（contract 层），给 stagechain 冷跑 >60 s 的超时债销账 | 0.5–1 天 |
 | R1 | state S1–S2：寄存器普查（owner/lifetime/kind）加 312 个 bank 行；规则 1–4 生效 | 0 | 改错一个寄存器名，或删掉 `diag_multi` 的 init0 行，必须红；改一个基址立即数，必须红 | statecheck | 1.5 天 |
-| R2 | state S3：删除 5 个死 `-stack.tsv`（vla、callcontrol、constexpr、printfcontrol、unarycontrol） | 0（推断） | **8 个变体全部**做 delta cmp。目前只做了 2 个（M11） | 每个变体一个 ≤58 s 的 cmp 步；G | 0.5–1 天 |
+| R2 | state S3：删除 5 个死 `-stack.tsv`（vla、callcontrol、constexpr、printfcontrol、unarycontrol）。R0c 复核（2026-10-23，tests/statecheck.cx 读构造出的 delta）：`exec/parse2/control-stack.tsv` 与 `exec/parse2/callcontrol-stack.tsv` 都没有活的消费方（构造器与 export.py 均不读；regcheck 读 control-stack.tsv 只是文本），control-stack.tsv 一并列入候选 | 0（推断） | **8 个变体全部**做 delta cmp。目前只做了 2 个（M11） | 每个变体一个 ≤58 s 的 cmp 步；G | 0.5–1 天 |
 | R3a | **TDESC 可行性尖刺**（半天，决定后续能不能走）：(1) 用 `SBINTERN` 在单行动作表里做 hash-cons（这个操作码已存在，见 core.c:330，parse2 里有 12 个文件在用）；(2) 用 `JUMP fpback` 重扫是否会写 scope 或符号 | 仓外 | statecheck 证明重扫路径不写任何 scope 或符号寄存器 | 不行就改走方案 B：用 cell 实验里的声明符流在仓外从源码产出 TDESC 做对拍 | 0.5 天 |
 | R3 | TDESC S1：TY 区与 cons 行；在提交点把旧寄存器投影成 TDESC，写入 `STY`；只有显式资源 `e3/tdesc-trace` 才输出 trace，版本不认识就返回 rc 2，不做回退 | tape 不变，e3.net 改变 | 投影出的 TDESC 和生成器期望之间的不一致，必须**恰好等于**有损形状的集合 | G + 固定成本 | 1.5 天 |
 | R4 | TDESC S2：影子 DECL 只往 trace 里写 `dty2` | tape 不变 | 所有探针上 `dty2` 等于期望；650 个语料文件上 `dty == dty2` | G + statecheck（影子路径没有新增写入） | 2 天 |

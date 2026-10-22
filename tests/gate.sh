@@ -468,6 +468,10 @@ job edge-e3-parse-seal tests/bound 58 sh ./unisacc.com -run tests/edgeseal.cx --
 job edge-e2-pp-ablate tests/bound 58 sh ./unisacc.com -run tests/edgeablate.cx -- --gate tests/seals/edge-e2-pp .   # c43: sampled ablation witness (verified e2->pp + e3->parse only)
 job regcheck tests/bound 58 sh ./unisacc.com -run tests/regcheck.cx -- --check .   # c43 R1: E3 save/restore frames pair up and partial saves of the value record are declared (tests/regs-e3.tsv)
 job regcheck-negative tests/bound 58 sh ./unisacc.com -run tests/regcheck.cx -- --negative .   # c43 R1: dropping szcomma from its save, or a partial-save declaration, must be caught
+job statecheck-tool tests/bound 58 sh ./unisacc.com -run tests/statecheck.cx -- --tool "${TMPDIR:-/tmp}/statecheck"   # c43 R0c: builds the C seed constructor (seed/gen.c) once per source digest for the statecheck-* jobs (tests/gateorder.json)
+job statecheck-e3 tests/bound 58 sh ./unisacc.com -run tests/statecheck.cx -- --construct "${TMPDIR:-/tmp}/statecheck"   # c43 R0c: E3 frames pair up on the CONSTRUCTED parse2 delta (renames, partials and splits declared in tests/regs-e3.tsv)
+job statecheck-e3-warn tests/bound 58 sh ./unisacc.com -run tests/statecheck.cx -- --construct "${TMPDIR:-/tmp}/statecheck" --warnings --errors   # c43 R0c: the same on the --warnings --errors delta (format/printf/if-else warning frames)
+job statecheck-negative tests/bound 58 sh ./unisacc.com -run tests/statecheck.cx -- --construct "${TMPDIR:-/tmp}/statecheck" --negative --errors   # c43 R0c: dropped registers and removed declarations on the real frames must be caught
 job tdescprobe-oracle tests/bound 58 sh ./unisacc.com -run tests/tdescprobe.cx -- --oracle cc "${TMPDIR:-/tmp}/tdescprobe-oracle"   # 0.0.43 R3: the TDESC size model equals the system cc on every probe
 job tdescprobe-classic tests/bound 58 sh ./unisacc.com -run tests/tdescprobe.cx -- --check "$UA" tests/tdescprobe-classic.tsv "${TMPDIR:-/tmp}/tdescprobe-classic" 1/1   # 0.0.43 R3: the classic reference's verdicts, ratcheted (13 known WRONG)
 job edge-e3-parse-ablate tests/bound 58 sh ./unisacc.com -run tests/edgeablate.cx -- --gate tests/seals/edge-e3-parse .

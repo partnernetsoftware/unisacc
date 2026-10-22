@@ -1,0 +1,582 @@
+#!/usr/bin/env -S unisacc.com -run
+/* statecheck.cx -- E3 save/restore frames read from the CONSTRUCTED delta (refactor R0c, state S0;
+   research/c43-roadmap-0043-and-refactor.md D.3, research/c43-refactor-exploration.md R1).
+   usage: sh ./unisacc.com -run tests/statecheck.cx -- MODE DELTA.json [REGS]
+          sh ./unisacc.com -run tests/statecheck.cx -- --tool WORK | --construct WORK [PARSE2-FLAG...]
+     --check     exit 1 on an unpaired frame, an undeclared partial save of the value record or an undeclared split
+     --list      every distinct frame: kind, how many action sequences carry it, first edge using it, how it pairs
+     --regs      report only: registers read but never written (they live on their zero start value) and
+                 written but never read, over every action sequence an edge uses
+     --negative  mutate the loaded frames in memory; each mutation must add a finding (see negative())
+     --tool      build WORK/seed-gen from seed/gen.c with the host cc, else ./unisacc.com (kept while the source bytes
+                 are unchanged)
+     --construct with a current WORK/seed-gen, construct WORK/parse2[FLAGS].json afresh with the given parse2
+                 flags, then --check it with tests/regs-e3.tsv (--negative among the flags: --negative it)
+   DELTA is exec/build/gen.py parse2 output ({"start","states":{NAME:[MODE,{KEY:[TARGET,SEQ]}]},"seqs":[[ACT...]]}),
+   e.g. from the C seed constructor: seed-gen parse2 OUT.json [--locations] [--warnings] [--errors].
+   tests/regcheck.cx reads the source tables' text and sees only the spellings it parses (the JSON-form stack rows of
+   exec/facts/k2-control.tsv and of the -stack.tsv files are skipped; exec/parse2/control-stack.tsv, which it does
+   read, has no consumer); the delta is what the network executes, whatever wrote it.
+   Frames: in one action sequence consecutive ["STX","vsp",7000000,R] form a save frame and consecutive
+   ["LDX",R,"vsp",7000000] a restore frame, kept in save order (["ALUI","add"|"sub","vsp","vsp",1] does not break a run).
+   Only sequences some edge uses are judged.  A frame pairs when
+     direct    a frame of the other kind has the same registers, or
+     rename    a `pair SAVE RESTORE` row of REGS names it and its other side exists (RESTORE - : dropped), or
+     composed  it is the concatenation of two or more frames of the other kind (each direct or renamed): one sequence
+               pops what two sequences pushed, or
+     piece     it is one piece of such a concatenation inside a frame of the other kind;
+   a composed or piece frame must be a `split SIGNATURE REASON` row of REGS (its pushes and pops are cut differently:
+   legal, but a dropped register can hide behind a composition, so each one is reviewed).
+   A save holding some but not all of the REGS `value` row must be a `partial` row.  REGS rows are read in the
+   source spelling or the constructed one: each register in exec/facts/valueranks.tsv `rank` rows gets its rank
+   companion appended unless the row already has it -- exec/build/parse2base.py slots(), the rule the constructor
+   applies to vpush/vpop.  ["LDX",R,"vsp",6999999] reads the top of the stack without popping: a peek, listed only.
+   Every action is checked against the executor's opcode table (exec/c/tbl.py OPS): an unknown opcode, an operand
+   of the wrong type or a wrong arity exits 2, so a new action cannot be silently ignored. */
+
+/* ---- the opcode table: exec/c/tbl.py OPS (argument kinds) and exec/c/core.c (what each register operand does):
+        r read, w written, b both, - not a register (immediate i, alu op a, state g, string s) ---- */
+typedef struct { const char *name, *kinds, *role; } Op;
+static const Op OPS[] = {
+    {"ADV", "", ""}, {"MARK", "r", "w"}, {"JUMP", "r", "r"}, {"LDI", "ri", "w-"}, {"COPYW", "rr", "wr"},
+    {"ALU", "arrr", "-wrr"}, {"ALUI", "arri", "-wr-"}, {"CMP", "rr", "rr"}, {"CMPI", "ri", "r-"}, {"RLD", "r", "r"},
+    {"LDX", "rri", "wr-"}, {"STX", "rir", "r-r"}, {"OUT", "i", "-"}, {"OUTW", "r", "r"}, {"COPY", "", ""},
+    {"COPYT", "", ""}, {"SPAN", "r", "r"}, {"SPANT", "r", "r"}, {"SPAN2", "rr", "rr"}, {"OLAST", "", ""},
+    {"ODROP", "", ""}, {"OLEN", "r", "w"}, {"OCUT", "rr", "wr"}, {"ORES", "ri", "w-"}, {"OFILL", "rri", "rr-"},
+    {"OCLR", "", ""}, {"OSEL", "i", "-"}, {"SETOT", "r", "r"}, {"XATTR", "r", "w"}, {"PUSH", "g", "-"},
+    {"POP", "", ""}, {"INTERN", "rrr", "wrr"}, {"BLOBSAVE", "rrr", "wrr"}, {"INPUSH", "r", "r"},
+    {"INPUSHX", "r", "r"}, {"INPUSHXE", "rr", "rr"}, {"INPOP", "", ""}, {"SBCLR", "", ""}, {"SBOUT", "i", "-"},
+    {"SBSPAN", "rr", "rr"}, {"SBBLOB", "r", "r"}, {"SBINTERN", "r", "w"}, {"SBSAVE", "r", "w"}, {"SBFIND", "r", "w"},
+    {"BLEN", "rr", "wr"}, {"BYTE", "r", "w"}, {"XLEN", "r", "w"}, {"DIVMOD10", "r", "b"}, {"SWAP", "", ""},
+    {"ACCEPT", "", ""}, {"REJECT", "s", "-"}, {"A64", "arrr", "-wrr"}, {"A64I", "arri", "-wr-"}, {"C64", "rr", "rr"},
+    {"C64U", "rr", "rr"}, {"INC", "r", "b"}};
+#define NOPS ((int)(sizeof OPS / sizeof OPS[0]))
+enum { OP_ALUI = 6, OP_LDX = 10, OP_STX = 11 };
+#define VS 7000000
+
+/* ---- the delta, parsed in place (names are spans of the file buffer until copied) ---- */
+static char *B; static size_t N, P; static const char *DELTA;
+static void die_at(const char *what) {
+    size_t a = P > 40 ? P - 40 : 0; int n = (int)((P + 40 < N ? P + 40 : N) - a);
+    fprintf(stderr, "statecheck: %s: %s at byte %zu near `%.*s`\n", DELTA, what, P, n, B + a); exit(2);
+}
+static void *grow(void *p, size_t *cap, size_t need, size_t sz) {
+    if (need <= *cap) return p;
+    { size_t c = *cap ? *cap : 1024; while (c < need) c *= 2; p = realloc(p, c * sz); if (!p) { fprintf(stderr, "statecheck: out of memory\n"); exit(2); } *cap = c; }
+    return p;
+}
+static void ws(void) { while (P < N && (B[P] == ' ' || B[P] == '\n' || B[P] == '\t' || B[P] == '\r')) P++; }
+static int peekc(void) { ws(); return P < N ? (unsigned char)B[P] : -1; }
+static void expect(int c) { char m[32]; if (peekc() != c) { snprintf(m, sizeof m, "expected '%c'", c); die_at(m); } P++; }
+static int str(size_t *s, int *len) {      /* a string's raw span (escapes kept) */
+    if (peekc() != '"') return 0;
+    *s = ++P; while (P < N && B[P] != '"') { if (B[P] == '\\') P++; P++; }
+    if (P >= N) die_at("unterminated string");
+    *len = (int)(P - *s); P++; return 1;
+}
+static int num(long *v) {
+    int neg = 0, any = 0; long x = 0; ws();
+    if (P < N && B[P] == '-') { neg = 1; P++; }
+    while (P < N && B[P] >= '0' && B[P] <= '9') { x = x * 10 + (B[P] - '0'); P++; any = 1; }
+    if (!any) return 0;
+    *v = neg ? -x : x; return 1;
+}
+static void skip_value(void) {
+    int c = peekc(); size_t s; int l; long v;
+    if (c == '"') { str(&s, &l); return; }
+    if (c == '[' || c == '{') {
+        int close = c == '[' ? ']' : '}'; P++;
+        if (peekc() == close) { P++; return; }
+        for (;;) { if (close == '}') { if (!str(&s, &l)) die_at("expected a key"); expect(':'); } skip_value();
+                   if (peekc() == ',') { P++; continue; } expect(close); return; }
+    }
+    if (num(&v)) return;
+    if (P + 4 <= N && (!strncmp(B + P, "true", 4) || !strncmp(B + P, "null", 4))) { P += 4; return; }
+    if (P + 5 <= N && !strncmp(B + P, "false", 5)) { P += 5; return; }
+    die_at("expected a value");
+}
+
+/* registers: interned names */
+typedef struct { const char *s; int len, rank; long rd, wr, rdsave, wrrest; } Reg;
+static Reg *RG; static size_t nrg, caprg; static int *HT; static size_t hcap;
+static unsigned hashs(const char *s, int n) { unsigned h = 2166136261u; while (n--) h = (h ^ (unsigned char)*s++) * 16777619u; return h; }
+static int reg_id(const char *s, int len) {
+    size_t i;
+    if (!HT || nrg * 2 >= hcap) {
+        size_t k; free(HT); hcap = hcap ? hcap * 2 : 4096; HT = malloc(hcap * sizeof *HT); if (!HT) exit(2);
+        for (k = 0; k < hcap; k++) HT[k] = -1;
+        for (k = 0; k < nrg; k++) { i = hashs(RG[k].s, RG[k].len) & (hcap - 1); while (HT[i] >= 0) i = (i + 1) & (hcap - 1); HT[i] = (int)k; }
+    }
+    i = hashs(s, len) & (hcap - 1);
+    while (HT[i] >= 0) { Reg *r = &RG[HT[i]]; if (r->len == len && !memcmp(r->s, s, len)) return HT[i]; i = (i + 1) & (hcap - 1); }
+    RG = grow(RG, &caprg, nrg + 1, sizeof *RG); memset(&RG[nrg], 0, sizeof *RG);
+    { char *c = malloc(len + 1); memcpy(c, s, len); c[len] = 0; RG[nrg].s = c; }   /* own copy: B is freed later */
+    RG[nrg].len = len; RG[nrg].rank = -1; HT[i] = (int)nrg; return (int)nrg++;
+}
+
+/* actions: op and up to 4 operands (a register id or a number) */
+typedef struct { int op, n; long a[4]; } Act;
+static Act *AC; static size_t nac, capac;
+typedef struct { size_t first; int n; long refs; size_t st; int stl; size_t key; int keyl; } Seq;
+static Seq *SQ; static size_t nsq, capsq, nref;     /* nref: SQ entries known from edges (may exceed nsq if bad) */
+static long nstates, nedges; static int vsp = -1;
+
+static int op_id(const char *s, int len) {
+    int k; for (k = 0; k < NOPS; k++) if ((int)strlen(OPS[k].name) == len && !strncmp(OPS[k].name, s, len)) return k;
+    return -1;
+}
+static void parse_states(void) {
+    expect('{');
+    if (peekc() == '}') { P++; return; }
+    for (;;) {
+        size_t st, md, key; int stl, mdl, keyl;
+        if (!str(&st, &stl)) die_at("expected a state name"); expect(':'); expect('[');
+        if (!str(&md, &mdl) || mdl != 1) die_at("expected a state mode"); expect(','); expect('{');
+        nstates++;
+        if (peekc() != '}') for (;;) {
+            size_t tg; int tgl; long q;
+            if (!str(&key, &keyl)) die_at("expected an edge key"); expect(':'); expect('[');
+            if (!str(&tg, &tgl)) die_at("expected an edge target"); expect(',');
+            if (!num(&q) || q < 0) die_at("expected a sequence number"); expect(']');
+            nedges++;
+            if ((size_t)q >= nref) { size_t o = nref; SQ = grow(SQ, &capsq, (size_t)q + 1, sizeof *SQ); memset(SQ + o, 0, ((size_t)q + 1 - o) * sizeof *SQ); nref = (size_t)q + 1; }
+            if (!SQ[q].refs++) { SQ[q].st = st; SQ[q].stl = stl; SQ[q].key = key; SQ[q].keyl = keyl; }
+            if (peekc() == ',') { P++; continue; } expect('}'); break;
+        } else P++;
+        expect(']');
+        if (peekc() == ',') { P++; continue; } expect('}'); return;
+    }
+}
+static void parse_seqs(void) {
+    expect('[');
+    if (peekc() == ']') { P++; return; }
+    for (;;) {
+        if (nsq >= nref) { size_t o = nref; SQ = grow(SQ, &capsq, nsq + 1, sizeof *SQ); memset(SQ + o, 0, (nsq + 1 - o) * sizeof *SQ); nref = nsq + 1; }
+        SQ[nsq].first = nac; SQ[nsq].n = 0;
+        expect('[');
+        if (peekc() == ']') P++;
+        else for (;;) {
+            size_t s; int l, k, op; Act a;
+            expect('['); if (!str(&s, &l)) die_at("expected an opcode");
+            op = op_id(B + s, l); if (op < 0) die_at("opcode not in exec/c/tbl.py OPS");
+            a.op = op; a.n = (int)strlen(OPS[op].kinds);
+            for (k = 0; k < a.n; k++) {
+                char kind = OPS[op].kinds[k]; size_t vs; int vl; long v;
+                expect(',');
+                if (kind == 'r') { if (!str(&vs, &vl)) die_at("register operand is not a name"); a.a[k] = reg_id(B + vs, vl); }
+                else if (kind == 'i') { if (!num(&v)) die_at("immediate operand is not a number"); a.a[k] = v; }
+                else if (kind == 'a') { if (!str(&vs, &vl)) die_at("alu operand is not a name"); a.a[k] = (vl == 3 && !strncmp(B + vs, "add", 3)) ? 1 : (vl == 3 && !strncmp(B + vs, "sub", 3)) ? 2 : 0; }
+                else { skip_value(); a.a[k] = 0; }          /* g state, s string: not a register */
+            }
+            if (peekc() != ']') die_at("action has more operands than its opcode's arity");
+            P++;
+            AC = grow(AC, &capac, nac + 1, sizeof *AC); AC[nac++] = a; SQ[nsq].n++;
+            if (peekc() == ',') { P++; continue; } expect(']'); break;
+        }
+        nsq++;
+        if (peekc() == ',') { P++; continue; } expect(']'); return;
+    }
+}
+static void load(const char *path) {
+    int seen = 0;
+    DELTA = path; B = cx_read(path, &N);
+    if (!B) { fprintf(stderr, "statecheck: cannot read %s\n", path); exit(2); }
+    P = 0; expect('{');
+    for (;;) {
+        size_t k; int kl;
+        if (!str(&k, &kl)) die_at("expected a top-level key"); expect(':');
+        if (kl == 6 && !strncmp(B + k, "states", 6)) { parse_states(); seen |= 1; }
+        else if (kl == 4 && !strncmp(B + k, "seqs", 4)) { parse_seqs(); seen |= 2; }
+        else skip_value();
+        if (peekc() == ',') { P++; continue; } expect('}'); break;
+    }
+    if (seen != 3) die_at("no \"states\" or no \"seqs\"");
+    if (nref > nsq) { fprintf(stderr, "statecheck: %s: an edge names sequence %zu of %zu\n", path, nref - 1, nsq); exit(2); }
+    vsp = reg_id("vsp", 3);
+}
+/* edge provenance, copied before B is freed */
+static char **WHERE;
+static void keep_where(void) {
+    size_t i; WHERE = calloc(nsq ? nsq : 1, sizeof *WHERE); if (!WHERE) exit(2);
+    for (i = 0; i < nsq; i++) if (SQ[i].refs) {
+        /* memcpy, not "%.*s": a printf that measures its argument first would walk the whole buffer */
+        int a = SQ[i].stl, k = SQ[i].keyl; char *w = malloc(a + k + 3); WHERE[i] = w;
+        memcpy(w, B + SQ[i].st, a); w[a] = '['; memcpy(w + a + 1, B + SQ[i].key, k); w[a + 1 + k] = ']'; w[a + 2 + k] = 0;
+    }
+}
+static const char *where(int q) { return WHERE[q] ? WHERE[q] : "(no edge uses it)"; }
+
+/* ---- frame occurrences, one per run in a sequence ---- */
+typedef struct { int seq, kind, n, off; } Frame;          /* kind 1 save, 2 restore; registers in save order */
+static Frame *F; static size_t nf, capf; static int *FR; static size_t nfr, capfr;
+typedef struct { int seq; int reg; } Peek;
+static Peek *PK; static size_t npk, cappk;
+static int is_vsp_adjust(const Act *a) { return a->op == OP_ALUI && a->a[1] == vsp && a->a[2] == vsp && a->a[3] == 1 && (a->a[0] == 1 || a->a[0] == 2); }
+static void collect(void) {
+    size_t q, i;
+    for (q = 0; q < nsq; q++) {
+        int cur = -1, kind = 0;
+        for (i = SQ[q].first; i < SQ[q].first + SQ[q].n; i++) {
+            const Act *a = &AC[i]; int k = 0, r = -1;
+            if (a->op == OP_STX && a->a[0] == vsp && a->a[1] == VS) { k = 1; r = (int)a->a[2]; }
+            else if (a->op == OP_LDX && a->a[1] == vsp && a->a[2] == VS) { k = 2; r = (int)a->a[0]; }
+            else if (a->op == OP_LDX && a->a[1] == vsp && a->a[2] == VS - 1) { PK = grow(PK, &cappk, npk + 1, sizeof *PK); PK[npk].seq = (int)q; PK[npk].reg = (int)a->a[0]; npk++; kind = 0; continue; }
+            else if (is_vsp_adjust(a)) continue;
+            else if ((a->op == OP_STX && a->a[0] == vsp) || (a->op == OP_LDX && a->a[1] == vsp)) {
+                fprintf(stderr, "statecheck: sequence %zu reaches the value stack at an offset this checker does not know\n", q); exit(2);
+            }
+            if (!k) { kind = 0; continue; }
+            if (kind != k) {
+                F = grow(F, &capf, nf + 1, sizeof *F); F[nf].seq = (int)q; F[nf].kind = k; F[nf].n = 0; F[nf].off = (int)nfr;
+                cur = (int)nf++; kind = k;
+            }
+            FR = grow(FR, &capfr, nfr + 1, sizeof *FR); FR[nfr++] = r; F[cur].n++;
+        }
+    }
+    for (i = 0; i < nf; i++) if (F[i].kind == 2) {               /* restores pop in reverse: store save order */
+        int a = F[i].off, b = F[i].off + F[i].n - 1; while (a < b) { int t = FR[a]; FR[a++] = FR[b]; FR[b--] = t; }
+    }
+}
+
+/* ---- distinct frames: one per (kind, registers) over the sequences an edge uses ---- */
+#define MAXW 128
+typedef struct { int kind, n, seq, how; long count; int r[MAXW]; } Dist;   /* how: see HOW[] */
+static Dist *D; static size_t nd, capd;
+static const char *HOW[] = {"UNPAIRED", "direct", "rename", "composed", "piece"};
+static void distinct(void) {
+    size_t i, j;
+    for (i = 0; i < nf; i++) {
+        const Frame *f = &F[i];
+        if (!SQ[f->seq].refs) continue;                     /* a sequence no edge uses never runs */
+        if (f->n > MAXW) { fprintf(stderr, "statecheck: a frame of %d registers in sequence %d\n", f->n, f->seq); exit(2); }
+        for (j = 0; j < nd; j++) if (D[j].kind == f->kind && D[j].n == f->n && !memcmp(D[j].r, FR + f->off, f->n * sizeof(int))) break;
+        if (j == nd) { D = grow(D, &capd, nd + 1, sizeof *D); D[nd].kind = f->kind; D[nd].n = f->n; D[nd].seq = f->seq; D[nd].count = 0; memcpy(D[nd].r, FR + f->off, f->n * sizeof(int)); nd++; }
+        D[j].count++;
+    }
+}
+/* lookup: which kinds of distinct frame carry exactly these registers */
+static int *SH; static int *SM; static size_t shcap;
+static unsigned hashr(const int *r, int n) { return hashs((const char *)r, n * (int)sizeof(int)); }
+static void index_frames(void) {
+    size_t i;
+    if (shcap < nd * 4 + 16) { shcap = 16; while (shcap < nd * 4 + 16) shcap *= 2; free(SH); free(SM); SH = malloc(shcap * sizeof *SH); SM = malloc(shcap * sizeof *SM); }
+    for (i = 0; i < shcap; i++) SH[i] = -1;
+    for (i = 0; i < nd; i++) {
+        size_t h;
+        if (!D[i].n) continue;                              /* a mutation emptied it: the frame is gone */
+        h = hashr(D[i].r, D[i].n) & (shcap - 1);
+        while (SH[h] >= 0 && !(D[SH[h]].n == D[i].n && !memcmp(D[SH[h]].r, D[i].r, D[i].n * sizeof(int)))) h = (h + 1) & (shcap - 1);
+        if (SH[h] < 0) { SH[h] = (int)i; SM[h] = 0; }
+        SM[h] |= D[i].kind;
+    }
+}
+static int kinds_of(const int *r, int n) {
+    size_t h;
+    if (n <= 0) return 0;
+    h = hashr(r, n) & (shcap - 1);
+    while (SH[h] >= 0) { const Dist *d = &D[SH[h]]; if (d->n == n && !memcmp(d->r, r, n * sizeof(int))) return SM[h]; h = (h + 1) & (shcap - 1); }
+    return 0;
+}
+
+/* ---- REGS: value, pair, partial (tests/regs-e3.tsv), with rank companions ---- */
+typedef struct { int n; int r[MAXW]; } Sig;
+static Sig VALUE, PSAVE[256], PREST[256], PART[512], SPLIT[256]; static int pdrop[256], npair, npart, nsplit, nranks;
+static void read_ranks(const char *path) {      /* rank NAME COMPANION rows */
+    size_t n; char *b = cx_read(path, &n), *line, *nl;
+    if (!b) { fprintf(stderr, "statecheck: cannot read %s (the rank companions REGS rows are read with)\n", path); exit(2); }
+    for (line = b; line < b + n; line = nl + 1) {
+        char *t1, *t2, *e;
+        nl = memchr(line, '\n', b + n - line); if (!nl) nl = b + n;
+        if (strncmp(line, "rank\t", 5)) continue;
+        t1 = line + 4; t2 = memchr(t1 + 1, '\t', nl - t1 - 1); if (!t2) continue;
+        e = nl; while (e > t2 + 1 && (e[-1] == '\r' || e[-1] == ' ')) e--;
+        {   int slot = reg_id(t1 + 1, (int)(t2 - t1 - 1)), comp = reg_id(t2 + 1, (int)(e - t2 - 1));   /* RG may move */
+            RG[slot].rank = comp; nranks++; }
+    }
+    free(b);
+    if (!nranks) { fprintf(stderr, "statecheck: %s has no rank rows\n", path); exit(2); }
+}
+static void parse_sig(Sig *g, const char *s, const char *e, int commas) {
+    int raw[MAXW], n = 0, i, j;
+    while (s < e) {
+        const char *t = s; while (t < e && *t != (commas ? ',' : ' ') && *t != '\t' && *t != '\r') t++;
+        if (t > s) { if (n >= MAXW) { fprintf(stderr, "statecheck: REGS row too wide\n"); exit(2); } raw[n++] = reg_id(s, (int)(t - s)); }
+        if (t < e && *t == '\t') break;
+        s = t + 1;
+    }
+    g->n = 0;                                    /* exec/build/parse2base.py slots(): the companion follows its slot */
+    for (i = 0; i < n; i++) {
+        int c = RG[raw[i]].rank, have = 0;
+        g->r[g->n++] = raw[i];
+        if (c < 0) continue;
+        for (j = 0; j < n; j++) if (raw[j] == c) have = 1;
+        if (!have) { if (g->n >= MAXW) exit(2); g->r[g->n++] = c; }
+    }
+}
+static void read_regs(const char *path) {
+    size_t n; char *b = cx_read(path, &n), *line, *nl;
+    if (!b) { fprintf(stderr, "statecheck: cannot read %s\n", path); exit(2); }
+    for (line = b; line < b + n; line = nl + 1) {
+        char *t1, *t2;
+        nl = memchr(line, '\n', b + n - line); if (!nl) nl = b + n;
+        if (line == nl || line[0] == '#') continue;
+        t1 = memchr(line, '\t', nl - line); if (!t1) continue;
+        t2 = memchr(t1 + 1, '\t', nl - t1 - 1); if (!t2) t2 = nl;
+        if (!strncmp(line, "value\t", 6)) parse_sig(&VALUE, t1 + 1, nl, 0);
+        else if (!strncmp(line, "pair\t", 5)) {
+            char *t3 = t2 < nl ? memchr(t2 + 1, '\t', nl - t2 - 1) : 0; if (!t3) t3 = nl;
+            if (npair >= 256 || t2 == nl) { fprintf(stderr, "statecheck: bad pair row in %s\n", path); exit(2); }
+            parse_sig(&PSAVE[npair], t1 + 1, t2, 1);
+            pdrop[npair] = (t3 - t2 - 1 == 1 && t2[1] == '-');
+            parse_sig(&PREST[npair], t2 + 1, t3, 1); npair++;
+        } else if (!strncmp(line, "partial\t", 8)) {
+            if (npart >= 512) { fprintf(stderr, "statecheck: too many partial rows\n"); exit(2); }
+            parse_sig(&PART[npart++], t1 + 1, t2, 1);
+        } else if (!strncmp(line, "split\t", 6)) {
+            if (nsplit >= 256) { fprintf(stderr, "statecheck: too many split rows\n"); exit(2); }
+            parse_sig(&SPLIT[nsplit++], t1 + 1, t2, 1);
+        }
+    }
+    free(b);
+    if (!VALUE.n) { fprintf(stderr, "statecheck: %s declares no value record\n", path); exit(2); }
+}
+static int same_sig(const Sig *g, const int *r, int n) { return g->n == n && !memcmp(g->r, r, n * sizeof(int)); }
+
+/* ---- pairing ---- */
+/* a run of registers of kind `kind` pairs by itself: 1 direct, 2 rename, 0 no */
+static int piece_pairs(const int *r, int n, int kind) {
+    int j, other = 3 - kind;
+    if (kinds_of(r, n) & other) return 1;
+    for (j = 0; j < npair; j++) {
+        if (kind == 1 && same_sig(&PSAVE[j], r, n) && (pdrop[j] || (kinds_of(PREST[j].r, PREST[j].n) & 2))) return 2;
+        if (kind == 2 && !pdrop[j] && same_sig(&PREST[j], r, n) && (kinds_of(PSAVE[j].r, PSAVE[j].n) & 1)) return 2;
+    }
+    return 0;
+}
+/* can the run be cut into consecutive pieces that each pair by themselves (an empty run can) */
+static int splits(const int *r, int n, int kind) {
+    char can[MAXW + 1]; int e, s;
+    can[0] = 1;
+    for (e = 1; e <= n; e++) { can[e] = 0; for (s = 0; s < e && !can[e]; s++) if (can[s] && piece_pairs(r + s, e - s, kind)) can[e] = 1; }
+    return can[n];
+}
+/* is seg one piece of an other-kind frame that is cut, around it, into pieces pairing with frames of `kind` */
+static int piece_in(const int *seg, int n, int kind) {
+    size_t g; int s, other = 3 - kind;
+    for (g = 0; g < nd; g++) {
+        const Dist *o = &D[g];
+        if (o->kind != other || o->n <= n) continue;
+        for (s = 0; s + n <= o->n; s++)
+            if (!memcmp(o->r + s, seg, n * sizeof(int)) && splits(o->r, s, other) && splits(o->r + s + n, o->n - s - n, other)) return 1;
+    }
+    return 0;
+}
+static int pairs(const Dist *d) {
+    int m, j;
+    if ((m = piece_pairs(d->r, d->n, d->kind))) return m;
+    if (splits(d->r, d->n, d->kind)) return 3;
+    if (piece_in(d->r, d->n, d->kind)) return 4;
+    for (j = 0; j < npair; j++) {                       /* the piece may be the renamed side of a pair row */
+        if (pdrop[j]) continue;
+        if (d->kind == 1 && same_sig(&PSAVE[j], d->r, d->n) && piece_in(PREST[j].r, PREST[j].n, 1)) return 4;
+        if (d->kind == 2 && same_sig(&PREST[j], d->r, d->n) && piece_in(PSAVE[j].r, PSAVE[j].n, 2)) return 4;
+    }
+    return 0;
+}
+static int in_value(int r) { int i; for (i = 0; i < VALUE.n; i++) if (VALUE.r[i] == r) return 1; return 0; }
+static int nin_value(const Dist *d) { int j, k = 0; for (j = 0; j < d->n; j++) k += in_value(d->r[j]); return k; }
+static int partial_of(const Dist *d) { int k = d->kind == 1 ? nin_value(d) : 0; return k > 0 && k < VALUE.n; }
+static int declared(const Dist *d) { int k; for (k = 0; k < npart; k++) if (same_sig(&PART[k], d->r, d->n)) return 1; return 0; }
+static int split_declared(const Dist *d) { int k; for (k = 0; k < nsplit; k++) if (same_sig(&SPLIT[k], d->r, d->n)) return 1; return 0; }
+/* rows that are the same after rank companions (a source spelling and a constructed one of one frame) */
+static void duplicate_rows(void) {
+    int i, j, n = 0;
+    for (i = 0; i < npart; i++) for (j = 0; j < i; j++) if (same_sig(&PART[i], PART[j].r, PART[j].n)) { if (!n++) printf("statecheck: REGS rows equal once rank companions are added:\n"); printf("  partial %d = partial %d (%s,...)\n", i + 1, j + 1, RG[PART[i].r[0]].s); break; }
+    for (i = 0; i < npair; i++) for (j = 0; j < i; j++) if (same_sig(&PSAVE[i], PSAVE[j].r, PSAVE[j].n) && same_sig(&PREST[i], PREST[j].r, PREST[j].n)) { if (!n++) printf("statecheck: REGS rows equal once rank companions are added:\n"); printf("  pair %d = pair %d (%s,...)\n", i + 1, j + 1, RG[PSAVE[i].r[0]].s); break; }
+}
+static void print_regs(const Dist *d) { int i; for (i = 0; i < d->n; i++) printf("%s%s", i ? "," : "", RG[d->r[i]].s); }
+
+/* findings: unpaired frames, undeclared partial saves, undeclared splits (a frame that pairs only by composition:
+   its pushes and pops are cut differently -- legal, but a dropped register can hide behind it, so it is reviewed) */
+static int nunpaired, nundeclared, nsplitbad, npartials, ncomposed, ndk[3];
+static void analyze(int list, int quiet) {
+    size_t i;
+    index_frames(); nunpaired = nundeclared = nsplitbad = npartials = ncomposed = 0; ndk[1] = ndk[2] = 0;
+    for (i = 0; i < nd; i++) {
+        Dist *d = &D[i]; int part, undecl, splitbad;
+        if (!d->n) continue;
+        ndk[d->kind]++;
+        d->how = pairs(d); part = partial_of(d); undecl = part && !declared(d); splitbad = d->how >= 3 && !split_declared(d);
+        npartials += part; ncomposed += d->how >= 3;
+        if (list) { printf("%s\t%ld\t%s\t%s%s%s\t", d->kind == 1 ? "save" : "restore", d->count, where(d->seq), HOW[d->how], splitbad ? ",SPLIT" : "", part ? (undecl ? ",PARTIAL" : ",partial") : ""); print_regs(d); printf("\n"); }
+        if (!d->how) { nunpaired++; if (!quiet && !list) { printf("UNPAIRED %s seq %d %s (%ld seqs): ", d->kind == 1 ? "save" : "restore", d->seq, where(d->seq), d->count); print_regs(d); printf("\n"); } }
+        if (undecl) { nundeclared++; if (!quiet && !list) { printf("PARTIAL seq %d %s saves %d of %d value registers: ", d->seq, where(d->seq), nin_value(d), VALUE.n); print_regs(d); printf("\n"); } }
+        if (splitbad) { nsplitbad++; if (!quiet && !list) { printf("SPLIT %s seq %d %s pairs only as a %s, no split row: ", d->kind == 1 ? "save" : "restore", d->seq, where(d->seq), d->how == 3 ? "concatenation of other-kind frames" : "piece of an other-kind frame"); print_regs(d); printf("\n"); } }
+    }
+}
+static int findings(void) { return nunpaired + nundeclared + nsplitbad; }
+
+/* ---- registers: read/written over every sequence an edge uses ---- */
+static void regs_report(void) {
+    size_t q, i; long nrw = 0, nr = 0, nw = 0, so = 0, ro = 0; int k;
+    for (q = 0; q < nsq; q++) if (SQ[q].refs) for (i = SQ[q].first; i < SQ[q].first + SQ[q].n; i++) {
+        const Act *a = &AC[i]; int save = a->op == OP_STX && a->a[0] == vsp && a->a[1] == VS, rest = a->op == OP_LDX && a->a[1] == vsp;
+        for (k = 0; k < a->n; k++) {
+            char role = OPS[a->op].role[k];
+            if (role == 'r' || role == 'b') { RG[a->a[k]].rd++; if (save && k == 2) RG[a->a[k]].rdsave++; }
+            if (role == 'w' || role == 'b') { RG[a->a[k]].wr++; if (rest && k == 0) RG[a->a[k]].wrrest++; }
+        }
+    }
+    printf("read, never written (they live on their zero start value):\n");
+    for (i = 0; i < nrg; i++) if (RG[i].rd && !RG[i].wr) { printf("  %s (%ld reads%s)\n", RG[i].s, RG[i].rd, RG[i].rdsave == RG[i].rd ? ", all of them saves" : ""); nr++; }
+    printf("written, never read:\n");
+    for (i = 0; i < nrg; i++) if (RG[i].wr && !RG[i].rd) { printf("  %s (%ld writes%s)\n", RG[i].s, RG[i].wr, RG[i].wrrest == RG[i].wr ? ", all of them restores" : ""); nw++; }
+    printf("read only by value-stack saves (the saved value is never otherwise used):\n");
+    for (i = 0; i < nrg; i++) if (RG[i].rd && RG[i].rdsave == RG[i].rd && RG[i].wr) { printf("  %s (%ld saves, %ld writes, %ld of them restores)\n", RG[i].s, RG[i].rdsave, RG[i].wr, RG[i].wrrest); so++; }
+    printf("written only by value-stack restores:\n");
+    for (i = 0; i < nrg; i++) if (RG[i].wr && RG[i].wrrest == RG[i].wr && RG[i].rd > RG[i].rdsave) { printf("  %s (%ld restores, %ld reads)\n", RG[i].s, RG[i].wrrest, RG[i].rd); ro++; }
+    for (i = 0; i < nrg; i++) if (RG[i].rd && RG[i].wr) nrw++;
+    printf("statecheck regs: %ld registers in used sequences: %ld read and written, %ld read never written, %ld written never read, %ld read only by saves, %ld written only by restores\n",
+           nrw + nr + nw, nrw, nr, nw, so, ro);
+}
+static void stats(const char *what) {           /* peak resident set, where the system reports it */
+    size_t n; char *s = cx_read("/proc/self/status", &n), *h;
+    if (!s) return;
+    h = strstr(s, "VmHWM:");
+    if (h) printf("statecheck %s: peak resident %ld MB\n", what, strtol(h + 6, 0, 10) / 1024);
+    free(s);
+}
+
+/* ---- --negative: each mutation of the real frames must add a finding ---- */
+static int drop_reg(Dist *d, int j) { int k, r = d->r[j]; for (k = j; k + 1 < d->n; k++) d->r[k] = d->r[k + 1]; d->n--; return r; }
+static void put_reg(Dist *d, int j, int r) { int k; d->n++; for (k = d->n - 1; k > j; k--) d->r[k] = d->r[k - 1]; d->r[j] = r; }
+static int base_findings;
+static int caught(void) { analyze(0, 1); return findings() > base_findings; }
+static int drop_caught(Dist *d, int j) { int r = drop_reg(d, j), c = caught(); put_reg(d, j, r); return c; }
+/* The mutations change a distinct frame -- the template that writes it, in every sequence that carries it.
+   1-3 are required; 4 is a report of what the pairing rules can and cannot see. */
+static int negative(void) {
+    size_t i; int j, sz = reg_id("szcomma", 7), rk = reg_id("rk", 2), failed = 0, did = 0; long nrk = 0, nrkc = 0, sweep = 0, sweepc = 0, np = 0, npc = 0, red = 0;
+    char *wasred;
+    analyze(0, 1); base_findings = findings();
+    printf("statecheck negative: unmutated: %d unpaired, %d undeclared partial, %d undeclared split; a mutation is caught when it adds a finding\n", nunpaired, nundeclared, nsplitbad);
+    wasred = calloc(nd + 1, 1);
+    for (i = 0; i < nd; i++) wasred[i] = !D[i].how || (partial_of(&D[i]) && !declared(&D[i])) || (D[i].how >= 3 && !split_declared(&D[i]));
+    /* 1. a save that forgot szcomma (the comma fix), as the template that writes it */
+    for (i = 0; i < nd && !did; i++) if (D[i].kind == 1) for (j = 0; j < D[i].n; j++) if (D[i].r[j] == sz) {
+        int c = drop_caught(&D[i], j); did = 1;
+        printf("statecheck negative: dropped szcomma from the save at %s -> %s\n", where(D[i].seq), c ? "caught" : "NOT caught");
+        if (!c) failed = 1; break;
+    }
+    if (!did) { printf("statecheck negative: FAIL no save frame carries szcomma (the comma fix is gone?)\n"); failed = 1; }
+    /* 2. rk dropped from every save that carries it (membercontrol stack8 among them) */
+    for (i = 0; i < nd; i++) if (D[i].kind == 1) for (j = 0; j < D[i].n; j++) if (D[i].r[j] == rk) {
+        int c = drop_caught(&D[i], j); nrk++; nrkc += c;
+        printf("statecheck negative: dropped rk from the save at %s -> %s\n", where(D[i].seq), c ? "caught" : "NOT caught");
+        if (!c) failed = 1;
+    }
+    if (!nrk) { printf("statecheck negative: FAIL no save frame carries rk\n"); failed = 1; }
+    /* 3. the declaration of each declared partial save of the delta, removed (every row that names it) */
+    for (i = 0; i < nd; i++) if (partial_of(&D[i]) && declared(&D[i])) {
+        static Sig keep[512]; int k, c;
+        memcpy(keep, PART, npart * sizeof *PART);
+        for (k = 0; k < npart; k++) if (same_sig(&PART[k], D[i].r, D[i].n)) PART[k].n = 0;
+        c = caught(); memcpy(PART, keep, npart * sizeof *PART); np++; npc += c;
+        if (!c) { printf("statecheck negative: removing the partial declaration of the save at %s NOT caught\n", where(D[i].seq)); failed = 1; }
+    }
+    printf("statecheck negative: removed the declaration of each of %ld declared partial saves -> %ld caught\n", np, npc);
+    if (!np) { printf("statecheck negative: FAIL no partial declaration names a frame of this delta\n"); failed = 1; }
+    /* 4. sweep, reported: every register dropped from every distinct frame that is not already red, one at a time */
+    for (i = 0; i < nd; i++) {
+        if (wasred[i]) { red++; continue; }
+        for (j = 0; j < D[i].n; j++) {
+            int c = drop_caught(&D[i], j); sweep++; sweepc += c;
+            if (!c) { printf("statecheck negative: sweep: dropping %s from the %s at %s is not caught: ", RG[D[i].r[j]].s, D[i].kind == 1 ? "save" : "restore", where(D[i].seq)); print_regs(&D[i]); printf("\n"); }
+        }
+    }
+    printf("statecheck negative: sweep: %ld single-register drops from %ld frames (%ld frames already red, skipped), %ld caught (report only)\n",
+           sweep, (long)nd - red, red, sweepc);
+    printf("statecheck negative: %s\n", failed ? "FAIL" : "PASS");
+    free(wasred);
+    return failed;
+}
+
+/* ---- --construct ---- */
+static int run(char *const argv[], int secs) { char *out = 0; size_t n = 0; int rc = cx_runv_timeout(argv, secs, &out, &n); if (out && n) fwrite(out, 1, n, stdout); free(out); return rc; }
+/* WORK/seed-gen is current when WORK/seed-gen.sha holds seed/gen.c's digest.  Building it and constructing with it
+   are two bounded steps: --tool builds, --construct refuses a missing or stale tool.  The host cc builds it when there
+   is one (9 s, and the --warnings --errors construction then takes 9 s); ./unisacc.com otherwise (40 s build, 36 s
+   construction on this host under load -- too close to the 58 s job bound).  The constructed delta is the same bytes
+   either way (cmp, 2026-10-23); which compiler built the constructor is not what this check is about. */
+static int tool_current(const char *work, char *bin, int build) {
+    char stamp[4200], hex[65]; size_t n; char *b = cx_read("seed/gen.c", &n), *old; int ok;
+    if (!b) { printf("statecheck: cannot read seed/gen.c (run from the repository root)\n"); exit(2); }
+    mkdir(work, 0755);
+    cx_sha256_hex(b, n, hex); free(b);
+    snprintf(bin, 4200, "%s/seed-gen", work); snprintf(stamp, sizeof stamp, "%s.sha", bin);
+    old = cx_read(stamp, &n);
+    ok = old && n >= 64 && !strncmp(old, hex, 64) && access(bin, X_OK) == 0; free(old);
+    if (ok || !build) return ok;
+    unlink(stamp);
+    {   char *c[] = {"cc", "-O2", "-Iseed", "seed/gen.c", "-o", bin, 0};
+        char *a[] = {"sh", "./unisacc.com", "-O2", "-fno-trim-libc", "-Iseed", "seed/gen.c", "-o", bin, 0};
+        if (run(c, 55) && run(a, 55)) { printf("statecheck: building seed/gen.c failed (cc and ./unisacc.com)\n"); exit(2); } }
+    if (cx_write(stamp, hex, 64)) exit(2);
+    return 1;
+}
+/* WORK/parse2[FLAGS].json, constructed afresh: one WORK (one tool) serves every variant, even side by side.
+   A --negative among the flags is statecheck's own: it selects --negative instead of --check. */
+static int construct(const char *work, int nflag, char **flags, char *json) {
+    char bin[4200], *a[12]; int k = 0, i, neg = 0, len;
+    if (!tool_current(work, bin, 0)) { printf("statecheck: %s/seed-gen is missing or older than seed/gen.c: run --tool %s first\n", work, work); exit(2); }
+    len = snprintf(json, 4200, "%s/parse2", work);
+    a[k++] = bin; a[k++] = "parse2"; a[k++] = json;
+    for (i = 0; i < nflag; i++) {
+        if (!strcmp(flags[i], "--negative")) { neg = 1; continue; }
+        if (k >= 11 || strncmp(flags[i], "--", 2)) { printf("statecheck: bad parse2 flag %s\n", flags[i]); exit(2); }
+        a[k++] = flags[i]; len += snprintf(json + len, 4200 - len, "%s", flags[i] + 1);
+    }
+    a[k] = 0;
+    snprintf(json + len, 4200 - len, ".json"); unlink(json);
+    if (run(a, 55)) { printf("statecheck: seed-gen parse2 failed\n"); exit(2); }
+    return neg;
+}
+
+int main(int argc, char **argv) {
+    int mode; const char *regs; char json[4200];
+    if (argc < 3) goto usage;
+    mode = !strcmp(argv[1], "--check") ? 1 : !strcmp(argv[1], "--list") ? 2 : !strcmp(argv[1], "--regs") ? 3
+         : !strcmp(argv[1], "--negative") ? 4 : !strcmp(argv[1], "--construct") ? 5 : !strcmp(argv[1], "--tool") ? 6 : 0;
+    if (!mode) goto usage;
+    if (mode == 6) { char bin[4200]; tool_current(argv[2], bin, 1); printf("statecheck: %s is current\n", bin); return 0; }
+    regs = mode != 5 && argc > 3 ? argv[3] : "tests/regs-e3.tsv";
+    if (mode == 5) mode = construct(argv[2], argc - 3, argv + 3, json) ? 4 : 1;
+    else snprintf(json, sizeof json, "%s", argv[2]);
+    read_ranks("exec/facts/valueranks.tsv");
+    read_regs(regs);
+    load(json); keep_where(); free(B); B = 0;
+    collect(); distinct();
+    if (!nd) { fprintf(stderr, "statecheck: no value-stack frames in %s (nothing checked)\n", json); return 2; }
+    printf("statecheck: %s: %ld states, %ld edges, %zu action sequences (%zu actions), %zu registers\n", json, nstates, nedges, nsq, nac, nrg);
+    if (mode == 3) { regs_report(); stats("regs"); return 0; }
+    if (mode == 4) { int r = negative(); stats("negative"); return r; }
+    duplicate_rows();
+    analyze(mode == 2, 0);
+    if (mode == 2) {
+        size_t i; int k;
+        for (i = 0; i < nf; i++) if (!SQ[F[i].seq].refs) {
+            printf("unused-%s\tseq %d\t", F[i].kind == 1 ? "save" : "restore", F[i].seq);
+            for (k = 0; k < F[i].n; k++) printf("%s%s", k ? "," : "", RG[FR[F[i].off + k]].s);
+            printf("\n");
+        }
+        for (i = 0; i < npk; i++) if (SQ[PK[i].seq].refs) printf("peek\t%s\tseq %d %s\n", RG[PK[i].reg].s, PK[i].seq, where(PK[i].seq));
+    }
+    {   size_t i; long unused = 0; for (i = 0; i < nf; i++) if (!SQ[F[i].seq].refs) unused++;
+        printf("statecheck: %zu frame occurrences (%ld in sequences no edge uses), %d distinct saves, %d distinct restores, %d unpaired, %d partial value saves (%d undeclared), %d split (%d undeclared)\n",
+               nf, unused, ndk[1], ndk[2], nunpaired, npartials, nundeclared, ncomposed, nsplitbad); }
+    stats(mode == 2 ? "list" : "check");
+    return mode == 2 ? 0 : findings() != 0;
+usage:
+    fprintf(stderr, "usage: statecheck.cx --check|--list|--regs|--negative DELTA.json [REGS] | --tool WORK | --construct WORK [PARSE2-FLAG...]\n");
+    return 2;
+}
