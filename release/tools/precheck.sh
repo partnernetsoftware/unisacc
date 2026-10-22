@@ -20,7 +20,7 @@ V=$(sed -n 's/.*UNISACC_VERSION "\(.*\)".*/\1/p' src/version.h)
 python3 tests/bound.py 20 python3 tests/ledgercheck.py --final "plans/v$V.md" > /tmp/precheck-lg.$$ 2>&1 || { cat /tmp/precheck-lg.$$; echo "  FAIL: settle the deferral ledger in the plan first"; bad=1; }
 rm -f /tmp/precheck-lg.$$
 # 0.0.25 P1: after the version commit only `fix:` commits may touch the product closure.
-python3 tests/bound.py 20 python3 tests/freezecheck.py > /tmp/precheck-fz.$$ 2>&1 || { cat /tmp/precheck-fz.$$; echo "  FAIL: new work inside the freeze window (move it to the next version, or mark a red fix with fix:)"; bad=1; }
+tests/bound 20 sh ./unisacc.com -run tests/freezecheck.cx > /tmp/precheck-fz.$$ 2>&1 || { cat /tmp/precheck-fz.$$; echo "  FAIL: new work inside the freeze window (move it to the next version, or mark a red fix with fix:)"; bad=1; }
 rm -f /tmp/precheck-fz.$$
 # 0.0.24: a header change (kill, ttyname) left exec/facts/pp-autoinc-gen.tsv stale; the candidate
 # had to be rebuilt.  Exported fact tables must match their generators before freezing.

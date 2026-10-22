@@ -250,7 +250,7 @@ job gatesummary ./tests/gatesummarycheck.sh   # 0.0.40: the gate summary reads o
 job observation ./tests/observationcheck.sh   # 0.0.40: RELEASE_SUITES observation scope refused (66) before scheduling; never acceptance
 job gqalive ./tests/gqalivecheck.sh   # 0.0.40: queue.sh waits only on processes running gatequeue.py; unreadable table = refuse
 job queuetimer ./tests/queuetimercheck.sh   # 0.0.40: a real term.sh/bound.py alarm ends a queue window with 142 (fixture window body)
-job docedit python3 ./tests/doceditcheck.py   # 0.0.40: ledger appends keep the old text as an exact prefix; the 0586f01a truncating write is RED
+job docedit tests/bound 58 sh ./unisacc.com -run tests/doceditcheck.cx   # (.cx port, 2026-10-22) 0.0.40: ledger appends keep the old text as an exact prefix; the 0586f01a truncating write is RED
 job whyrerun python3 ./tests/whyreruncheck.py   # 0.0.39: invalidation explainer (reasons per suite)
 job draftfetch python3 ./tests/draftfetchcheck.py   # 0.0.39 R3: draft court fetch identity checks
 job draftguard python3 ./tests/draftguardcheck.py   # 0.0.39 R3: workflow draft-input guard executed
@@ -882,9 +882,9 @@ for st in lower enc; do job rowcov-$st-union python3 ./tests/rowcov.py $st union
 job rowcov-parse2-union python3 ./tests/rowcov.py parse2 union24   # 0.0.29 T4
 job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
-job freezecheck python3 ./tests/freezecheck.py   # 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
-job revivedscan python3 ./tests/revivedscan.py   # 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
-job reviewed-trees python3 ./tests/reviewedtreescheck.py   # 0.0.43: compilercheck reviewed_trees snapshots equal their trees (refreshed in the same commit)
+job freezecheck tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx   # (.cx port, 2026-10-22) 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
+job revivedscan tests/bound 58 sh ./unisacc.com -run tests/revivedscan.cx   # (.cx port, 2026-10-22) 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
+job reviewed-trees tests/bound 58 sh ./unisacc.com -run tests/reviewedtreescheck.cx   # (.cx port, 2026-10-22) 0.0.43: compilercheck reviewed_trees snapshots equal their trees (refreshed in the same commit)
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
@@ -893,7 +893,7 @@ job tapebin-roundtrip-structure-2 python3 ./tests/tapebin.py structure-2/2
 job tapebin-roundtrip-codec python3 ./tests/tapebin.py codec
 job tapebin-shape python3 -m unisa.tapebin_shape --check
 job tape-reader python3 ./tests/tapereadercheck.py
-job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
+job script-inventory tests/bound 58 sh ./unisacc.com -run tests/inventory.cx -- --check   # (.cx port, 2026-10-22) R15-1: no test/check script without a gate, a caller or a disposition
 job script-inventory-self python3 ./tests/inventorycheck.py   # matching and global reachability regressions
 job inventory-derived python3 ./tests/inventoryderivedcheck.py   # exact generated inventory bytes
 job subtract-safety tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve (.cx port of subtractsafety.py, 2026-10-22)
@@ -917,7 +917,7 @@ job linkunits   ./tests/linkunits.sh   # R17-2: units compiled alone (-c -b HOST
 job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sections, relocations, image invariant, GNU ld/lld link, Lima run
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
-job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
+job front-bounds tests/bound 58 sh ./unisacc.com -run tests/frontboundscheck.cx   # (.cx port, 2026-10-22) anonymous struct tags must not read token -1
 # 0.0.28 R4: one job per part that seedconstructcheck.py --list names (C99 seed tools vs Python, byte for byte);
 # a new part needs no edit here or in gatedeps.json (refresh_gatedeps.py declares it from seed-construct-parse2)
 job seedfacts python3 ./tests/seedfactscheck.py   # 0.0.29 B4: seed/facts.h bindings and lets equal assemble.py on every manifest
@@ -1070,7 +1070,7 @@ if [ "$COM" = 1 ]; then
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
     for k in $(seq 1 40); do job com-csmithdiff-$k MODEL_COM="$PRODUCT" SEEDS=1-500 SHARD=$k/40 python3 ./tests/csmithdiff.py; done
     for k in 1 2 3 4 5; do job com-declmatrix-$k MODEL_COM="$PRODUCT" SHARD=$k/5 python3 ./tests/declmatrix.py; done   # the same matrix on the product (found functions named r0..r7)
-    job com-auditnet MODEL_COM="$PRODUCT" python3 ./tests/auditnet.py   # 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
+    job com-auditnet MODEL_COM="$PRODUCT" sh "$PRODUCT" -run tests/auditnet.cx   # (.cx port, 2026-10-22) 0.0.22 P1-C1: every packed network re-enumerated; reads model-audit/ beside the product
     job com-tapebin-ref python3 ./tests/tapebinref.py prepare   # 0.0.43 T-1: the reference compiler, built once per content key; the shards only locate it
     job com-tapebin-six MODEL_COM="$PRODUCT" TAPEBIN_PART=six python3 ./tests/tapebinproduct.py   # fixed cost: calls, six-target images, host run, origin guard
     for k in 1 2 3 4 5 6; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/6 python3 ./tests/tapebinproduct.py; done   # 0.0.43: six slices of ~43 files, ~24 s quiet against the 42 s window

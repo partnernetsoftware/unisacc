@@ -1,0 +1,155 @@
+#!/usr/bin/env -S unisacc.com -run
+/* doceditcheck.cx -- tests/doceditcheck.py (0.0.40) in C (2026-10-22, the owner's direction: move the toolchain off
+   Python).  The tool under test is still release/tools/docedit.py, run as `python3 release/tools/docedit.py ...`
+   (the checker invokes it, it does not reimplement it): the 0586f01a truncating append is caught (rc 1); docedit
+   appends keep the old text as an exact prefix (UTF-8 and raw bytes), keep the file mode, leave no temp file, and
+   refuse a missing required heading.
+   usage: sh ./unisacc.com -run tests/doceditcheck.cx   (arguments are ignored, as by the Python checker)
+   The tool is found beside this file (__FILE__/../release/tools/docedit.py); its stderr is discarded and its stdout
+   captured, as subprocess.run(capture_output=True) did; each run is limited to 20 s. */
+#include <cx.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <errno.h>
+
+static char T[4096], TOOL[4096];
+
+static void cleanup(void) {   /* shutil.rmtree(T, ignore_errors=True): T holds only files */
+    DIR *d; struct dirent *e; char p[8192];
+    if (!T[0]) return;
+    d = opendir(T);
+    if (d) {
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(p, sizeof p, "%s/%s", T, e->d_name); unlink(p);
+        }
+        closedir(d);
+    }
+    rmdir(T); T[0] = 0;
+}
+static void fail(const char *m) { printf("docedit: %s\n", m); fflush(stdout); cleanup(); exit(1); }
+static void die(const char *m) {   /* the Python checker would raise: traceback on stderr, rc 1 */
+    fprintf(stderr, "doceditcheck: %s\n", m); fflush(stdout); cleanup(); exit(1);
+}
+static void path(char *out, const char *name) { snprintf(out, 4096, "%s/%s", T, name); }
+static char *readb(const char *p, size_t *n) { char *b = cx_read(p, n); if (!b) die("cannot read a scratch file"); return b; }
+static void writeb(const char *p, const void *b, size_t n) { if (cx_write(p, b, n)) die("cannot write a scratch file"); }
+static void copyf(const char *src, const char *dst) {   /* shutil.copy: content and permission bits */
+    size_t n; char *b = readb(src, &n); struct stat s;
+    writeb(dst, b, n); free(b);
+    if (stat(src, &s) || chmod(dst, s.st_mode & 07777)) die("cannot copy the mode");
+}
+/* python3 TOOL ARGS...: rc, stdout into *out (may be NULL); stderr discarded */
+static int run(char **args, char **out) {
+    char *argv[16]; int i = 0, rc, saved, null; size_t n;
+    argv[i++] = "python3"; argv[i++] = TOOL;
+    while (*args) argv[i++] = *args++;
+    argv[i] = 0;
+    fflush(stdout); fflush(stderr);
+    saved = dup(2); null = open("/dev/null", O_WRONLY);
+    if (saved < 0 || null < 0) die("cannot redirect stderr");
+    dup2(null, 2); close(null);
+    rc = cx_runv_timeout(argv, 20, out, &n);
+    dup2(saved, 2); close(saved);
+    if (rc == 124) die("TimeoutExpired: docedit.py ran past 20 s");
+    if (rc < 0 || rc == 127) die("cannot run python3 docedit.py");
+    if (out && !*out) *out = strdup("");
+    return rc;
+}
+static int starts(const char *a, size_t an, const char *b, size_t bn) { return an >= bn && !memcmp(a, b, bn); }
+static int ends(const char *a, size_t an, const char *b, size_t bn) { return an >= bn && !memcmp(a + an - bn, b, bn); }
+/* bytes.replace(old, new): every occurrence */
+static char *replace(const char *s, size_t n, const char *o, const char *w, size_t *outn) {
+    size_t on = strlen(o), wn = strlen(w), i = 0, k = 0; char *r = malloc(n * (wn > on ? wn : on) / (on ? on : 1) + n + 16);
+    if (!r) die("out of memory");
+    while (i < n) {
+        if (i + on <= n && !memcmp(s + i, o, on)) { memcpy(r + k, w, wn); k += wn; i += on; }
+        else r[k++] = s[i++];
+    }
+    *outn = k; return r;
+}
+
+int main(int argc, char **argv) {
+    char plan[4096], before[4096], note[4096], legacy[4096], legacy_before[4096], msg[16384], root[4096], *o, *slash;
+    const char *tmp = getenv("TMPDIR");
+    static const char plantext[] = "# v0.0.39\n\n## R9\n| K2a | \xe9\xa1\xba\xe5\xbb\xb6 0.0.40 |\nraw \xff byte\n";
+    static const char notetext[] = "## \xe8\xa3\x81\xe5\xae\x9a\xe2\x91\xa2\n- stamp reviewed\n";
+    size_t pn, bn, nn, sn; char *pb, *bb, *nb, *snap, *rep; struct stat st; DIR *d; struct dirent *e; int rc;
+    (void)argc; (void)argv;
+    /* TOOL = <dir of this file>/../release/tools/docedit.py */
+    snprintf(root, sizeof root, "%s", __FILE__);
+    slash = strrchr(root, '/');
+    if (slash) *slash = 0; else snprintf(root, sizeof root, ".");
+    snprintf(TOOL, sizeof TOOL, "%s/../release/tools/docedit.py", root);
+    /* T = tempfile.mkdtemp(prefix='unisacc-docedit.') */
+    if (!tmp || !*tmp) tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    if (tmp[0] != '/') { char cwd[2048]; if (!getcwd(cwd, sizeof cwd)) die("getcwd"); snprintf(T, sizeof T, "%s/%s/unisacc-docedit.XXXXXX", cwd, tmp); }
+    else snprintf(T, sizeof T, "%s/unisacc-docedit.XXXXXX", tmp);
+    if (!mkdtemp(T)) { T[0] = 0; die("mkdtemp failed"); }
+
+    path(plan, "plan.md"); writeb(plan, plantext, sizeof plantext - 1);
+    if (chmod(plan, 0640)) die("chmod");
+    path(before, "before.md"); copyf(plan, before);
+    path(note, "note.md"); writeb(note, notetext, sizeof notetext - 1);
+    /* 1. the 0586f01a pattern: write mode opens (truncates) before the read -> verify is RED */
+    path(legacy, "legacy.md"); copyf(plan, legacy);
+    path(legacy_before, "legacy-before.md"); copyf(legacy, legacy_before);
+    {   /* open(p,'wb').write(open(p,'rb').read()+n): the 'wb' open runs first */
+        FILE *w = fopen(legacy, "wb"); size_t ln; char *old, *buf;
+        if (!w) die("open legacy");
+        old = readb(legacy, &ln); nb = readb(note, &nn);
+        buf = malloc(ln + nn + 1); memcpy(buf, old, ln); memcpy(buf + ln, nb, nn);
+        if (fwrite(buf, 1, ln + nn, w) != ln + nn) die("write legacy");
+        fclose(w); free(old); free(buf); free(nb);
+    }
+    {
+        char *a[] = {"verify", legacy, legacy_before, "--require", "## R9", 0};
+        rc = run(a, &o);
+        if (rc != 1 || !strstr(o, "not an exact prefix")) { snprintf(msg, sizeof msg, "legacy truncating append not caught: %s", o); fail(msg); }
+        free(o);
+    }
+    /* 2. docedit append keeps the prefix byte-for-byte, the mode, and leaves no temp file */
+    {
+        char *a[] = {"append", plan, note, "--require", "## R9", "--require", "## \xe8\xa3\x81\xe5\xae\x9a\xe2\x91\xa2", 0};
+        rc = run(a, &o);
+        if (rc != 0) { snprintf(msg, sizeof msg, "append failed: %s", o); fail(msg); }
+        free(o);
+    }
+    pb = readb(plan, &pn); bb = readb(before, &bn); nb = readb(note, &nn);
+    if (!starts(pb, pn, bb, bn) || !ends(pb, pn, nb, nn)) fail("append did not keep prefix + new section");
+    free(pb); free(bb); free(nb);
+    if (stat(plan, &st)) die("stat plan");
+    if ((st.st_mode & 0777) != 0640) fail("append changed the file mode");
+    if (!(d = opendir(T))) die("opendir");
+    while ((e = readdir(d))) if (!strncmp(e->d_name, ".docedit.", 9)) { closedir(d); fail("temp file left behind"); }
+    closedir(d);
+    {
+        char *a[] = {"verify", plan, before, "--require", "## R9", 0};
+        if (run(a, 0) != 0) fail("verify of a good append not ok");
+    }
+    /* 3. a missing required heading refuses the append and leaves the file untouched */
+    snap = readb(plan, &sn);
+    {
+        char *a[] = {"append", plan, note, "--require", "## R10", 0};
+        rc = run(a, &o); free(o);
+        pb = readb(plan, &pn);
+        if (rc != 1 || pn != sn || memcmp(pb, snap, sn)) fail("missing required heading not refused / file changed");
+        free(pb);
+    }
+    /* 4. a rewritten middle (prefix changed) is RED even when the length grows */
+    rep = replace(snap, sn, "\xe9\xa1\xba\xe5\xbb\xb6", "\xe5\xb7\xb2\xe5\xae\x8c\xe6\x88\x90", &pn);
+    rep = realloc(rep, pn + 5); memcpy(rep + pn, "more\n", 5);
+    writeb(plan, rep, pn + 5); free(rep); free(snap);
+    {
+        char *a[] = {"verify", plan, before, 0};
+        if (run(a, 0) != 1) fail("rewritten middle not caught");
+    }
+    printf("docedit  0586f01a truncating append RED; append keeps exact byte prefix, mode, no temp file; missing heading refused with file untouched; rewritten middle RED\n");
+    fflush(stdout);
+    cleanup();
+    return 0;
+}

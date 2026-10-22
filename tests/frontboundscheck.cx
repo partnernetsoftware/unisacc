@@ -1,0 +1,124 @@
+#!/usr/bin/env -S unisacc.com -run
+/* frontboundscheck.cx -- keep anonymous aggregate tags inside the front end's token bounds (gate: front-bounds;
+   port of tests/frontboundscheck.py, same stdout and exit codes).
+   usage (from the repository root): sh ./unisacc.com -run tests/frontboundscheck.cx
+   Builds the private reference compiler (tests/build_ref.sh) with CFLAGS="-O1 -fsanitize=bounds" in a fresh
+   temporary directory, then compiles `struct { int x; } a; ...` with it under UBSAN_OPTIONS=halt_on_error=1:
+   the build and the compile must exit 0, the compile's stderr must not carry "runtime error:", and the tape
+   must be non-empty.  stnew(-1, ...) is the anonymous tag; reading tlen[-1] before the t >= 0 check was the bug.
+   Arguments are ignored (as the .py did).  Exit 0 and one line on stdout when it holds; exit 1 with the reason
+   on stderr otherwise.  ROOT is the current directory (the gate runs from the root); the .py took its own path. */
+#include <cx.h>
+#include <fcntl.h>
+
+static char WORK[4096];
+
+/* the child's environment: os.environ plus overrides.  Built by hand because setenv() in the carried libc does
+   not reach environ (a -run child launched after setenv("CFLAGS", ...) sees no CFLAGS), so children get execve. */
+static char **ENV; static int NENV;
+static void envinit(void) {
+    char **e; int n = 0;
+    for (e = environ; e && *e; e++) n++;
+    ENV = malloc((size_t)(n + 8) * sizeof *ENV);
+    for (e = environ; e && *e; e++) ENV[NENV++] = *e;
+    ENV[NENV] = 0;
+}
+static void envset(const char *name, const char *value) {
+    size_t l = strlen(name); int i; char *kv = malloc(l + strlen(value) + 2);
+    sprintf(kv, "%s=%s", name, value);
+    for (i = 0; i < NENV; i++) if (!strncmp(ENV[i], name, l) && ENV[i][l] == '=') { ENV[i] = kv; return; }
+    ENV[NENV++] = kv; ENV[NENV] = 0;
+}
+
+static void rmtree(const char *p) {              /* shutil.rmtree, quietly */
+    struct stat s; DIR *d; struct dirent *e; char c[4096];
+    if (lstat(p, &s) != 0) return;
+    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p)) != 0) {
+        while ((e = readdir(d)) != 0) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
+        }
+        closedir(d);
+    }
+    rmdir(p);
+}
+
+static int fail(const char *what, int rc, const char *err) {   /* the .py's AssertionError: rc 1, reason on stderr */
+    fprintf(stderr, "frontboundscheck: %s", what);
+    if (rc != -999) fprintf(stderr, " (rc %d)", rc);
+    fprintf(stderr, "\n");
+    if (err && *err) fprintf(stderr, "%s%s", err, err[strlen(err) - 1] == '\n' ? "" : "\n");
+    if (WORK[0]) rmtree(WORK);
+    return 1;
+}
+
+/* subprocess.run(argv, cwd=ROOT, env=ENV, capture_output=True, timeout=SECS) (argv[0] an absolute path): stdout discarded, stderr into *err.
+   Exit code, 128+N on signal N, 124 on timeout (process group killed), 127 when argv[0] cannot run, -1 on error. */
+static int runcap(char *const argv[], int secs, const char *errpath, char **err) {
+    long ticks = (long)secs * 100; int st = 0, rc, fd; pid_t pid, w; size_t n;
+    *err = 0;
+    fd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return -1;
+    pid = fork();
+    if (pid < 0) { close(fd); return -1; }
+    if (pid == 0) {
+        int nul = open("/dev/null", O_WRONLY);
+        setpgid(0, 0);
+        if (nul >= 0) { dup2(nul, 1); close(nul); }
+        dup2(fd, 2); close(fd);
+        execve(argv[0], argv, ENV); _exit(127);
+    }
+    close(fd);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0) { rc = -1; break; }
+        if (ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = 124; break; }
+        usleep(10000);
+    }
+    *err = cx_read(errpath, &n);
+    unlink(errpath);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], script[4300], source[4200], compiler[4200], probe[4200], tape[4200], errf[4200];
+    const char *tmp = getenv("TMPDIR"); char *err = 0; int rc; struct stat s;
+    static const char text[] = "struct { int x; } a; int main(void) { return a.x; }\n";
+    (void)argc; (void)argv;
+    if (!getcwd(root, sizeof root)) return fail("cannot read the current directory", -999, 0);
+    snprintf(script, sizeof script, "%s/tests/build_ref.sh", root);
+    if (stat(script, &s) != 0) return fail("run from the repository root: tests/build_ref.sh not found", -999, 0);
+    if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(WORK, sizeof WORK, "%s/unisacc-front-bounds-XXXXXX", tmp);
+    if (!mkdtemp(WORK)) { WORK[0] = 0; return fail("cannot make a temporary directory", -999, 0); }
+    snprintf(source, sizeof source, "%s/ref.c", WORK);
+    snprintf(compiler, sizeof compiler, "%s/ref", WORK);
+    snprintf(probe, sizeof probe, "%s/anon.c", WORK);
+    snprintf(tape, sizeof tape, "%s/anon.tape", WORK);
+    snprintf(errf, sizeof errf, "%s/.stderr", WORK);
+    if (cx_write(probe, text, sizeof text - 1) != 0) return fail("cannot write the probe", -999, 0);
+    envinit(); envset("CFLAGS", "-O1 -fsanitize=bounds");
+    {
+        char *av[4]; av[0] = script; av[1] = source; av[2] = compiler; av[3] = 0;
+        rc = runcap(av, 30, errf, &err);
+        if (rc == 124) return fail("tests/build_ref.sh timed out after 30 s", -999, err);
+        if (rc != 0) return fail("tests/build_ref.sh failed", rc, err);
+        free(err);
+    }
+    envset("UBSAN_OPTIONS", "halt_on_error=1");
+    {
+        char *av[6]; av[0] = compiler; av[1] = "-S"; av[2] = "-o"; av[3] = tape; av[4] = probe; av[5] = 0;
+        rc = runcap(av, 10, errf, &err);
+        if (rc == 124) return fail("the sanitized reference timed out after 10 s on the anonymous struct", -999, err);
+        if (rc != 0) return fail("the sanitized reference failed on the anonymous struct", rc, err);
+        if (err && strstr(err, "runtime error:")) return fail("UBSan runtime error on the anonymous struct", -999, err);
+        free(err);
+    }
+    if (stat(tape, &s) != 0) return fail("no tape written for the anonymous struct", -999, 0);
+    if (!(s.st_size > 0)) return fail("empty tape for the anonymous struct", -999, 0);
+    rmtree(WORK);
+    printf("front bounds: anonymous struct compiles without token underflow\n");
+    return 0;
+}

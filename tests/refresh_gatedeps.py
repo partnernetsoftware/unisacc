@@ -286,8 +286,8 @@ def main():
     # release/derived-map.tsv, so a commit that changes those trees carries the refreshed snapshot.  It reads the three
     # trees and the declaration only.
     d['suites']['reviewed-trees'] = {
-        'command': ['python3', './tests/reviewedtreescheck.py'],
-        'files': ['tests/reviewedtreescheck.py', 'tests/gatedeps.json'], 'trees': ['exec', 'src', 'unisa']}
+        'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/reviewedtreescheck.cx'],
+        'files': ['tests/reviewedtreescheck.cx', 'tests/gatedeps.json', 'tests/bound', 'tests/bound.c', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['exec', 'src', 'unisa']}
     changed.append(('reviewed-trees', 'declared the snapshot check'))
     # Persist the registered inventory matcher/global-reachability self-test.
     d['suites']['script-inventory-self'] = {

@@ -1,0 +1,216 @@
+#!/usr/bin/env -S unisacc.com -run
+/* freezecheck.cx -- after the version commit, only red fixes may touch the product closure (0.0.25 P1); ported from
+   tests/freezecheck.py (2026-10-22, the owner's direction: the toolchain moves off Python).
+   0.0.24 took kill(), ttyname() and a reference-side extern fix in the ten minutes before sealing; they forced three
+   seals, broke the first queue at 66/568 and voided the first Windows signing.  The rule since then: once
+   src/version.h carries the release number, a commit that changes the product closure (exec/ unisa/ src/ kernel/
+   include/ weights/ seed/, as exec/pipeline/models.py:closure hashes them) must say `fix:` at the start of its
+   subject.  Anything else is a new feature and waits for the next version.
+   usage: sh ./unisacc.com -run tests/freezecheck.cx -- [REPO]     exit 1 and name each offending commit
+   A red fix already pushed without the prefix (history is not rewritten once an rc tag points past it) is waived by
+   a line `SHA8<TAB>red suite it fixed` in release/freeze-waivers.tsv; the waiver is read from HEAD, so it is reviewed
+   like any commit.
+   Text follows the Python original: git output is UTF-8, lines break where str.splitlines breaks, file lists split
+   where str.split() does, and a subject is cut at 70 code points.  A git command that fails (other than reading the
+   waiver file) is fatal, rc 1, as CalledProcessError was; git's own stderr is swallowed, as capture_output did. */
+#include <cx.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+static const char *REPO = ".";
+
+/* one UTF-8 code point at s[i] (strict: no overlong, surrogate or > U+10FFFF); its length in *l, -1 if invalid */
+static long cp_at(const unsigned char *s, size_t n, size_t i, int *l) {
+    unsigned c = s[i]; int need, k; long cp, min;
+    if (c < 0x80) { *l = 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; min = 0x10000; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    *l = need + 1; return cp;
+}
+/* str.splitlines line boundaries and str.isspace (str.split()/strip()) on code points */
+static int linebreak(long c) { return c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029; }
+static int space(long c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+typedef struct { char **v; int n, cap; } List;
+static void push(List *l, const char *s, size_t n) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 64; l->v = realloc(l->v, l->cap * sizeof *l->v); if (!l->v) exit(1); }
+    l->v[l->n] = malloc(n + 1); if (!l->v[l->n]) exit(1);
+    memcpy(l->v[l->n], s, n); l->v[l->n][n] = 0; l->n++;
+}
+static void freelist(List *l) { int i; for (i = 0; i < l->n; i++) free(l->v[i]); free(l->v); l->v = 0; l->n = l->cap = 0; }
+
+/* git -C REPO ARGS...; stdout (NUL-terminated, valid UTF-8) or NULL when git fails -- *rc gets its exit code */
+static char *git(char **args, int *rc) {
+    char *argv[16], *out = 0; size_t n = 0, i; int k = 0, save, nul, l;
+    argv[k++] = "git"; argv[k++] = "-C"; argv[k++] = (char *)REPO;
+    while (*args && k < 15) argv[k++] = *args++;
+    argv[k] = 0;
+    fflush(stdout); fflush(stderr);
+    save = dup(2); nul = open("/dev/null", O_WRONLY);
+    if (nul >= 0) { dup2(nul, 2); close(nul); }
+    *rc = cx_runv_timeout(argv, 0, &out, &n);
+    if (save >= 0) { dup2(save, 2); close(save); }
+    if (*rc) { free(out); return 0; }
+    if (!out) { *rc = -1; return 0; }
+    for (i = 0; i < n; i += l)
+        if (!out[i] || cp_at((unsigned char *)out, n, i, &l) < 0) {
+            fprintf(stderr, "freezecheck: git %s: output is not UTF-8 text\n", argv[3]); exit(1);
+        }
+    return out;
+}
+static char *git_or_die(char **args) {
+    int rc; char *o = git(args, &rc);
+    if (!o) {
+        int i; fprintf(stderr, "freezecheck: command 'git -C %s", REPO);
+        for (i = 0; args[i]; i++) fprintf(stderr, " %s", args[i]);
+        fprintf(stderr, "' returned non-zero exit status %d\n", rc); exit(1);
+    }
+    return o;
+}
+/* str.splitlines() */
+static void splitlines(const char *s, List *out) {
+    size_t n = strlen(s), i = 0, st = 0; int l;
+    while (i < n) {
+        long c = cp_at((const unsigned char *)s, n, i, &l);
+        if (linebreak(c)) {
+            push(out, s + st, i - st);
+            i += l; if (c == '\r' && i < n && s[i] == '\n') i++;
+            st = i;
+        } else i += l;
+    }
+    if (st < n) push(out, s + st, n - st);
+}
+/* str.split() */
+static void splitws(const char *s, List *out) {
+    size_t n = strlen(s), i = 0, st = 0; int l, in = 0;
+    while (i < n) {
+        long c = cp_at((const unsigned char *)s, n, i, &l);
+        if (space(c)) { if (in) push(out, s + st, i - st); in = 0; }
+        else if (!in) { in = 1; st = i; }
+        i += l;
+    }
+    if (in) push(out, s + st, n - st);
+}
+/* str.strip() in place */
+static char *strip(char *s) {
+    size_t n = strlen(s), i = 0, e = 0; int l, any = 0;
+    size_t b = 0;
+    while (i < n) {
+        long c = cp_at((unsigned char *)s, n, i, &l);
+        if (!space(c)) { if (!any) { b = i; any = 1; } e = i + l; }
+        i += l;
+    }
+    if (!any) { s[0] = 0; return s; }
+    memmove(s, s + b, e - b); s[e - b] = 0; return s;
+}
+static int startswith(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+static int endswith(const char *s, const char *p) { size_t a = strlen(s), b = strlen(p); return a >= b && !strcmp(s + a - b, p); }
+
+static const char *CLOSURE[] = { "exec/", "unisa/", "src/", "kernel/", "include/", "weights/", "seed/", 0 };
+static const char *EXT[] = { ".py", ".c", ".h", ".inc", ".tsv", ".json", ".sh", 0 };
+static const char *SEED[] = { "tbl.c", "net.c", "json.h", "gen.c", "facts.h", "ident.c", "blob.c", "sha256.h", "pack.c", "compilerpack.c", "ape.c", 0 };
+
+static int product(const char *path) {
+    int i, c = 0, e = 0, nparts = 1; const char *p, *last, *slash1, *slash2;
+    for (i = 0; CLOSURE[i]; i++) if (startswith(path, CLOSURE[i])) c = 1;
+    for (i = 0; EXT[i]; i++) if (endswith(path, EXT[i])) e = 1;
+    if (!c || !e) return 0;
+    for (p = path; *p; p++) if (*p == '/') nparts++;
+    last = strrchr(path, '/'); last = last ? last + 1 : path;
+    slash1 = strchr(path, '/');                        /* parts[0] is path up to the first '/' */
+    if (slash1 && slash1 - path == 4 && !strncmp(path, "seed", 4)) {   /* the seed tools the build runs (0.0.32 B5: gen.c) */
+        int in = 0; for (i = 0; SEED[i]; i++) if (!strcmp(last, SEED[i])) in = 1;
+        if (!in) return 0;
+    }
+    if (slash1 && slash1 - path == 4 && !strncmp(path, "exec", 4) && (endswith(path, "check.sh") || endswith(path, "check.py"))) return 0;   /* 0.0.32 X31: verifiers, not inputs */
+    slash2 = slash1 ? strchr(slash1 + 1, '/') : 0;
+    {   /* parts[:2] == ['exec', 'build']: "exec/build" whole, or "exec/build/..." */
+        int eb = slash1 && slash1 - path == 4 && !strncmp(path, "exec", 4)
+                 && (slash2 ? (slash2 - slash1 - 1 == 5 && !strncmp(slash1 + 1, "build", 5)) : !strcmp(slash1 + 1, "build"));
+        return !(eb && (nparts > 3 || !endswith(path, ".py")));
+    }
+}
+
+/* the first "([0-9.]+)" in TEXT, as re.search */
+static int version_of(const char *t, char *ver, size_t cap) {
+    const char *q;
+    for (q = strchr(t, '"'); q; q = strchr(q + 1, '"')) {
+        const char *e = q + 1;
+        while ((*e >= '0' && *e <= '9') || *e == '.') e++;
+        if (e > q + 1 && *e == '"') { snprintf(ver, cap, "%.*s", (int)(e - q - 1), q + 1); return 1; }
+    }
+    return 0;
+}
+/* the first N code points of S */
+static void cut(const char *s, int n, char *out, size_t cap) {
+    size_t len = strlen(s), i = 0; int k = 0, l;
+    while (i < len && k < n) { cp_at((const unsigned char *)s, len, i, &l); i += l; k++; }
+    snprintf(out, cap, "%.*s", (int)i, s);
+}
+
+typedef struct { char sha[9]; char *subject; char *hit; } Bad;
+
+static int run(void) {
+    char *v, *t, ver[256], tagname[300], range[256]; int i, j, rc, nbad = 0, capbad = 0; Bad *bad = 0;
+    List waived = {0}, lines = {0};
+    {   char *a[] = { "log", "-1", "--format=%H", "--", "src/version.h", 0 }; v = strip(git_or_die(a)); }
+    if (!*v) { printf("freezecheck: no version commit\n"); return 0; }
+    {   char *a[] = { "show", "HEAD:src/version.h", 0 }; t = git_or_die(a); }
+    if (!version_of(t, ver, sizeof ver)) { fprintf(stderr, "freezecheck: no \"VERSION\" in HEAD:src/version.h\n"); exit(1); }
+    free(t);
+    snprintf(tagname, sizeof tagname, "v%s", ver);
+    {   char *a[] = { "tag", "-l", tagname, 0 }; t = strip(git_or_die(a)); }
+    if (*t) { printf("freezecheck: v%s is already released; not in a freeze window\n", ver); return 0; }
+    free(t);
+    {   char *a[] = { "show", "HEAD:release/freeze-waivers.tsv", 0 }; t = git(a, &rc); }
+    if (t) {
+        List wl = {0}; splitlines(t, &wl);
+        for (i = 0; i < wl.n; i++) {
+            char *l = wl.v[i], *tab;
+            if (!*l || l[0] == '#') continue;
+            tab = strchr(l, '\t'); push(&waived, l, tab ? (size_t)(tab - l) : strlen(l));
+        }
+        freelist(&wl); free(t);
+    }
+    snprintf(range, sizeof range, "%s..HEAD", v);
+    {   char *a[] = { "log", "--format=%H %s", range, 0 }; t = git_or_die(a); }
+    splitlines(t, &lines); free(t);
+    for (i = 0; i < lines.n; i++) {
+        char *line = lines.v[i], *sp = strchr(line, ' '), *sha, *subject, *out; List files = {0}, hit = {0}; int w = 0;
+        if (!sp) { fprintf(stderr, "freezecheck: log line without a subject: %s\n", line); exit(1); }
+        *sp = 0; sha = line; subject = sp + 1;
+        {   char *a[] = { "diff-tree", "--no-commit-id", "--name-only", "-r", sha, 0 }; out = git_or_die(a); }
+        splitws(out, &files); free(out);
+        for (j = 0; j < files.n; j++) if (product(files.v[j])) push(&hit, files.v[j], strlen(files.v[j]));
+        for (j = 0; j < waived.n; j++) if (strlen(waived.v[j]) == (strlen(sha) < 8 ? strlen(sha) : 8) && !strncmp(waived.v[j], sha, 8)) w = 1;
+        if (hit.n && !startswith(subject, "fix:") && !w) {
+            char sub[1024]; size_t hl = 0; int k;
+            if (nbad == capbad) { capbad = capbad ? capbad * 2 : 16; bad = realloc(bad, capbad * sizeof *bad); if (!bad) exit(1); }
+            snprintf(bad[nbad].sha, 9, "%.8s", sha);
+            cut(subject, 70, sub, sizeof sub); bad[nbad].subject = strdup(sub);
+            for (k = 0; k < hit.n && k < 3; k++) hl += strlen(hit.v[k]) + 2;
+            bad[nbad].hit = malloc(hl + 1); bad[nbad].hit[0] = 0;
+            for (k = 0; k < hit.n && k < 3; k++) { if (k) strcat(bad[nbad].hit, ", "); strcat(bad[nbad].hit, hit.v[k]); }
+            nbad++;
+        }
+        freelist(&files); freelist(&hit);
+    }
+    for (i = 0; i < nbad; i++) printf("  FREEZE %s %s  (touches %s)\n", bad[i].sha, bad[i].subject, bad[i].hit);
+    printf("freezecheck  version commit %.8s   closure commits without fix: %d\n", v, nbad);
+    return nbad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1) REPO = argv[1];
+    return run();
+}

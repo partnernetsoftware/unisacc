@@ -1,0 +1,417 @@
+#!/usr/bin/env -S unisacc.com -run
+/* inventory.cx -- script inventory (0.0.15 R15-1) in C, ported from tests/inventory.py (2026-10-22, the owner's
+   direction: the toolchain moves off Python).  Every test/check script and where it runs:
+     Gated   = named in a job of tests/gate.sh, or reached by path from tests/gate.sh, tests/all.sh, tests/release.sh
+               or .github/workflows/*.yml (transitive over the script sources);
+     Library = a .py module imported by a gated script;
+     Orphan  = neither; each must be deleted, gated, or listed in tests/ungated-checks.tsv with a disposition.
+   usage: sh ./unisacc.com -run tests/inventory.cx -- [--check] [--write]
+   --check exits 1 on an unlisted orphan; --write refreshes tests/INVENTORY.md.  The root is the parent of the
+   directory holding this file, as for the Python original.  Scripts are tests/*.sh|*.py|*.cx and
+   exec/(any depth)/*check*.py|*check*.sh|*.sh (regular files, no __pycache__ or build component, ** does not follow
+   directory symlinks), ordered by path components.  Sources are read as Python's read_text(errors='ignore'):
+   invalid UTF-8 dropped, \r\n and \r become \n.  The three regular expressions of the original are matched by
+   hand with the same backtracking outcome; \s is Python's Unicode whitespace and \w its alphanumerics (exact
+   for ASCII, Latin-1, CJK and common punctuation blocks; an approximation for rare scripts). */
+#include <cx.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <limits.h>
+
+typedef struct { char **v; int n, cap; } List;
+static void push(List *l, const char *s) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 256; l->v = realloc(l->v, l->cap * sizeof *l->v); }
+    l->v[l->n++] = strdup(s);
+}
+static char *dupn(const char *s, size_t n) { char *d = malloc(n + 1); memcpy(d, s, n); d[n] = 0; return d; }
+static int has(List *l, const char *s) { int i; for (i = 0; i < l->n; i++) if (!strcmp(l->v[i], s)) return 1; return 0; }
+
+static char R[PATH_MAX + 1];
+
+/* ---- text(p): UTF-8 with errors='ignore', universal newlines ---- */
+typedef struct { char *s; size_t n; } Text;
+static int cont(unsigned char c) { return (c & 0xC0) == 0x80; }
+static Text decode(const unsigned char *b, size_t n) {
+    Text t; size_t i = 0, k = 0; char *o = malloc(n + 1), *u;
+    while (i < n) {
+        unsigned char c = b[i]; int need, j; unsigned char lo = 0x80, hi = 0xBF;
+        if (c < 0x80) { o[k++] = (char)c; i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        else { i++; continue; }                        /* invalid start byte: dropped */
+        for (j = 1; j <= need; j++) {
+            unsigned char d = i + j < n ? b[i + j] : 0;
+            if (i + j >= n || (j == 1 ? (d < lo || d > hi) : !cont(d))) break;
+        }
+        if (j <= need) { i += j; continue; }           /* maximal invalid subpart dropped; resume at the failing byte */
+        memcpy(o + k, b + i, need + 1); k += need + 1; i += need + 1;
+    }
+    /* newline translation after decoding (TextIOWrapper order) */
+    u = malloc(k + 1); t.n = 0;
+    for (i = 0; i < k; i++) {
+        if (o[i] == '\r') { u[t.n++] = '\n'; if (i + 1 < k && o[i + 1] == '\n') i++; }
+        else u[t.n++] = o[i];
+    }
+    u[t.n] = 0; free(o); t.s = u; return t;
+}
+static Text text(const char *path) {
+    size_t n = 0; char *b = cx_read(path, &n); Text t;
+    if (!b) { t.s = calloc(1, 1); t.n = 0; return t; }
+    t = decode((const unsigned char *)b, n); free(b); return t;
+}
+
+/* ---- code points over valid UTF-8 ---- */
+static int cp_at(const char *s, size_t n, size_t i, int *l) {
+    unsigned char c = (unsigned char)s[i]; int k, cp, need;
+    if (c < 0x80) { *l = 1; return c; }
+    need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1; cp = c & (0x3F >> need);
+    for (k = 1; k <= need && i + k < n; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+    *l = k; return cp;
+}
+static int cp_before(const char *s, size_t n, size_t i) {
+    size_t j = i - 1; int l;
+    while (j > 0 && cont((unsigned char)s[j])) j--;
+    return cp_at(s, n, j, &l);
+}
+/* Python str \s (Py_UNICODE_ISSPACE) */
+static int isws(int c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680
+        || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+/* Python str \w: alphanumeric (alpha, decimal, digit, numeric) or '_' */
+static int isword(int c) {
+    if (c < 0x80) return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    if (c <= 0xBF) return c == 0xAA || c == 0xB2 || c == 0xB3 || c == 0xB5 || c == 0xB9 || c == 0xBA || c == 0xBC || c == 0xBD || c == 0xBE;
+    if (c <= 0x2FF) {
+        if (c == 0xD7 || c == 0xF7) return 0;
+        if ((c >= 0x2C2 && c <= 0x2C5) || (c >= 0x2D2 && c <= 0x2DF) || (c >= 0x2E5 && c <= 0x2EB) || c == 0x2ED || c >= 0x2EF) return 0;
+        return 1;
+    }
+    if (c <= 0x36F) return 0;                          /* combining marks */
+    if (c == 0x37E || c == 0x387 || c == 0x375 || c == 0x384 || c == 0x385 || c == 0x3F6) return 0;
+    if (c >= 0x482 && c <= 0x489) return 0;
+    if (c >= 0x591 && c <= 0x5C7) return 0;            /* Hebrew points */
+    if (c >= 0x55A && c <= 0x55F) return 0;
+    if (c >= 0x600 && c <= 0x60F) return 0;
+    if (c >= 0x64B && c <= 0x65F) return 0;
+    if (c < 0x2000) return 1;
+    if (c <= 0x206F) return 0;                         /* general punctuation */
+    if (c <= 0x209F) return c == 0x2070 || c == 0x2071 || (c >= 0x2074 && c <= 0x2079) || c == 0x207F || (c >= 0x2080 && c <= 0x2089) || (c >= 0x2090 && c <= 0x209C);
+    if (c <= 0x20FF) return 0;                         /* currency, combining for symbols */
+    if (c <= 0x214F) return c == 0x2102 || c == 0x2107 || (c >= 0x210A && c <= 0x2113) || c == 0x2115 || (c >= 0x2119 && c <= 0x211D)
+        || c == 0x2124 || c == 0x2126 || c == 0x2128 || (c >= 0x212A && c <= 0x212D) || (c >= 0x212F && c <= 0x2139)
+        || (c >= 0x213C && c <= 0x213F) || (c >= 0x2145 && c <= 0x2149) || c == 0x214E;
+    if (c <= 0x2189) return 1;                         /* number forms */
+    if (c <= 0x245F) return 0;                         /* arrows, math, technical */
+    if (c <= 0x249B) return 1;                         /* circled / parenthesized numbers */
+    if (c <= 0x24E9) return 0;                         /* parenthesized / circled letters (So) */
+    if (c <= 0x24FF) return 1;
+    if (c <= 0x2775) return 0;                         /* box drawing .. dingbats */
+    if (c <= 0x2793) return 1;                         /* dingbat numbers */
+    if (c <= 0x2BFF) return 0;
+    if (c <= 0x2DFF) return !(c >= 0x2CE5 && c <= 0x2CEA) && !(c >= 0x2CEF && c <= 0x2CFF) && !(c >= 0x2DE0);
+    if (c <= 0x2FFF) return 0;                         /* supplemental punctuation, CJK radicals */
+    if (c <= 0x303F) return c == 0x3005 || c == 0x3006 || c == 0x3007 || (c >= 0x3021 && c <= 0x3029) || (c >= 0x3031 && c <= 0x3035) || (c >= 0x3038 && c <= 0x303C);
+    if (c <= 0x30FF) return !(c >= 0x3099 && c <= 0x309C) && c != 0x30A0 && c != 0x30FB && c != 0x3040 && c != 0x3097 && c != 0x3098;
+    if (c <= 0x31FF) return !(c >= 0x3190 && c <= 0x3191) && !(c >= 0x31C0 && c <= 0x31EF);
+    if (c <= 0x33FF) return (c >= 0x3220 && c <= 0x3229) || (c >= 0x3248 && c <= 0x324F) || (c >= 0x3251 && c <= 0x325F)
+        || (c >= 0x3280 && c <= 0x3289) || (c >= 0x32B1 && c <= 0x32BF);
+    if (c >= 0x4DC0 && c <= 0x4DFF) return 0;          /* hexagrams */
+    if (c >= 0xA490 && c <= 0xA4CF) return 0;
+    if (c >= 0xD800 && c <= 0xF8FF) return 0;          /* surrogates, private use */
+    if (c >= 0xFD3E && c <= 0xFD3F) return 0;
+    if (c >= 0xFE00 && c <= 0xFE6F) return 0;          /* variation selectors, CJK compatibility and small forms */
+    if (c == 0xFEFF) return 0;
+    if (c >= 0xFF00 && c <= 0xFFEF) return (c >= 0xFF10 && c <= 0xFF19) || (c >= 0xFF21 && c <= 0xFF3A) || (c >= 0xFF41 && c <= 0xFF5A) || (c >= 0xFF66 && c <= 0xFFDC);
+    if (c >= 0xFFF0 && c <= 0xFFFF) return 0;
+    if (c >= 0x1F000 && c <= 0x1FAFF) return 0;        /* emoji and pictographs */
+    if (c >= 0xE0000) return 0;
+    return 1;
+}
+static size_t skip_ws(const char *s, size_t n, size_t i) { int l; while (i < n && isws(cp_at(s, n, i, &l))) i += l; return i; }
+static size_t skip_nonws(const char *s, size_t n, size_t i) { int l; while (i < n && !isws(cp_at(s, n, i, &l))) i += l; return i; }
+static size_t skip_word(const char *s, size_t n, size_t i) { int l; while (i < n && isword(cp_at(s, n, i, &l))) i += l; return i; }
+
+/* ---- the scripts ---- */
+typedef struct { char *rel; const char *base; int reached, imported; Text t; int have_t; } Script;
+static Script *S; static int ns, scap;
+static int bad_part(const char *abs) {               /* '__pycache__' or 'build' in p.parts */
+    const char *p = abs;
+    while (*p) {
+        const char *e = strchr(p, '/'); size_t l; if (!e) e = p + strlen(p); l = (size_t)(e - p);
+        if ((l == 11 && !strncmp(p, "__pycache__", 11)) || (l == 5 && !strncmp(p, "build", 5))) return 1;
+        p = *e ? e + 1 : e;
+    }
+    return 0;
+}
+static void candidate(const char *rel) {
+    char abs[PATH_MAX * 2]; struct stat st;
+    snprintf(abs, sizeof abs, "%s/%s", R, rel);
+    if (stat(abs, &st) || !S_ISREG(st.st_mode)) return;   /* p.is_file() follows symlinks */
+    if (bad_part(abs)) return;
+    if (ns == scap) { scap = scap ? 2 * scap : 512; S = realloc(S, scap * sizeof *S); }
+    memset(&S[ns], 0, sizeof *S); S[ns].rel = strdup(rel); ns++;
+}
+static int ends(const char *s, const char *suf) { size_t a = strlen(s), b = strlen(suf); return a >= b && !strcmp(s + a - b, suf); }
+static int check_glob(const char *name, const char *suf) {   /* *check*SUF */
+    size_t a = strlen(name), b = strlen(suf); char *h; int ok;
+    if (!ends(name, suf)) return 0;
+    h = strdup(name); h[a - b] = 0; ok = strstr(h, "check") != 0; free(h); return ok;
+}
+static void glob_tests(void) {
+    char d[PATH_MAX * 2]; DIR *dp; struct dirent *e;
+    snprintf(d, sizeof d, "%s/tests", R);
+    if (!(dp = opendir(d))) return;
+    while ((e = readdir(dp))) {
+        char rel[PATH_MAX * 2];
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!ends(e->d_name, ".sh") && !ends(e->d_name, ".py") && !ends(e->d_name, ".cx")) continue;
+        snprintf(rel, sizeof rel, "tests/%s", e->d_name); candidate(rel);
+    }
+    closedir(dp);
+}
+static void glob_exec(const char *reldir) {          /* exec/**: every directory, not through directory symlinks */
+    char d[PATH_MAX * 2]; DIR *dp; struct dirent *e; List sub = {0}; int i;
+    snprintf(d, sizeof d, "%s/%s", R, reldir);
+    if (!(dp = opendir(d))) return;
+    while ((e = readdir(dp))) {
+        char rel[PATH_MAX * 2], abs[PATH_MAX * 3]; struct stat st;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(rel, sizeof rel, "%s/%s", reldir, e->d_name);
+        if (check_glob(e->d_name, ".py") || check_glob(e->d_name, ".sh") || ends(e->d_name, ".sh")) candidate(rel);
+        snprintf(abs, sizeof abs, "%s/%s", R, rel);
+        if (!lstat(abs, &st) && S_ISDIR(st.st_mode)) push(&sub, rel);
+    }
+    closedir(dp);
+    for (i = 0; i < sub.n; i++) { glob_exec(sub.v[i]); free(sub.v[i]); }
+    free(sub.v);
+}
+/* sorted(Path): component lists compared, i.e. '/' below every other byte */
+static int pathcmp(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x == '/') x = 1;
+        if (y == '/') y = 1;
+        if (x != y) return x - y;
+        if (!x) return 0;
+    }
+}
+static int scmp(const void *a, const void *b) { return pathcmp(((const Script *)a)->rel, ((const Script *)b)->rel); }
+static int strpcmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+/* ---- basename table: every name with a given basename, and the distinct basename lengths ---- */
+typedef struct { const char *b; size_t len; int *idx; int n; int hit; } Base;
+static Base *B; static unsigned bcap; static int nlen; static size_t lens[256];
+static unsigned hashb(const char *s, size_t n) { unsigned h = 2166136261u; size_t i; for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u; return h; }
+static Base *bfind(const char *s, size_t n) {
+    unsigned i;
+    for (i = hashb(s, n) & (bcap - 1); B[i].b; i = (i + 1) & (bcap - 1)) if (B[i].len == n && !memcmp(B[i].b, s, n)) return &B[i];
+    return 0;
+}
+static void badd(int k) {
+    const char *s = S[k].base; size_t n = strlen(s); unsigned i; int j;
+    for (i = hashb(s, n) & (bcap - 1); B[i].b; i = (i + 1) & (bcap - 1)) if (B[i].len == n && !memcmp(B[i].b, s, n)) break;
+    if (!B[i].b) {
+        B[i].b = s; B[i].len = n;
+        for (j = 0; j < nlen; j++) if (lens[j] == n) break;
+        if (j == nlen && nlen < 256) lens[nlen++] = n;
+    }
+    B[i].idx = realloc(B[i].idx, (B[i].n + 1) * sizeof *B[i].idx); B[i].idx[B[i].n++] = k;
+}
+/* refs(src): name n is referenced when its basename b occurs in src and (n in src, or '/'+b in src, or
+   (^|[\s"'(=/])b\b matches).  Every name lives in a directory, so n in src implies '/'+b in src: one pass over
+   the occurrences of every basename (all end in .sh, .py or .cx) decides it. */
+static void refs(Text t, int *out) {
+    const char *s = t.s; size_t n = t.n, e; unsigned i;
+    for (i = 0; i < bcap; i++) B[i].hit = 0;
+    for (e = 3; e <= n; e++) {
+        int j;
+        if (s[e - 3] != '.' || !((s[e - 2] == 's' && s[e - 1] == 'h') || (s[e - 2] == 'p' && s[e - 1] == 'y') || (s[e - 2] == 'c' && s[e - 1] == 'x'))) continue;
+        for (j = 0; j < nlen; j++) {
+            size_t L = lens[j], st; Base *b; int ok = 0;
+            if (L > e) continue;
+            st = e - L;
+            if (!(b = bfind(s + st, L)) || b->hit) continue;
+            if (st > 0 && s[st - 1] == '/') ok = 1;
+            else {
+                int pc = st ? cp_before(s, n, st) : 0, l, lastw, nextw;
+                if (!st || isws(pc) || pc == '"' || pc == '\'' || pc == '(' || pc == '=') {
+                    lastw = isword(cp_before(b->b, L, L));
+                    nextw = e < n ? isword(cp_at(s, n, e, &l)) : 0;
+                    ok = lastw != nextw;
+                }
+            }
+            if (ok) { int k; b->hit = 1; for (k = 0; k < b->n; k++) out[b->idx[k]] = 1; }
+        }
+    }
+}
+
+/* ---- jobs: ^\s*(?:for [^;]*; do )?job\s+(\S+)\s+(.*)$, re.M, first name wins ---- */
+static List jobname, jobcmd;
+static int job_tail(const char *s, size_t n, size_t j, size_t *a, size_t *c, size_t *d, size_t *e) {
+    if (j + 3 > n || strncmp(s + j, "job", 3)) return 0;
+    *a = skip_ws(s, n, j + 3); if (*a == j + 3) return 0;
+    *c = skip_nonws(s, n, *a); if (*c == *a) return 0;
+    *d = skip_ws(s, n, *c); if (*d == *c) return 0;
+    { const char *nl = memchr(s + *d, '\n', n - *d); *e = nl ? (size_t)(nl - s) : n; }
+    return 1;
+}
+static void parse_jobs(Text t) {
+    const char *s = t.s; size_t n = t.n, p = 0;
+    while (p <= n) {
+        size_t w, a, c, d, e; int ok = 0;
+        if (p == 0 || s[p - 1] == '\n') {
+            w = skip_ws(s, n, p);
+            if (w + 4 <= n && !strncmp(s + w, "for ", 4)) {
+                const char *semi = memchr(s + w + 4, ';', n - (w + 4));
+                if (semi && (size_t)(semi - s) + 5 <= n && !strncmp(semi, "; do ", 5)) ok = job_tail(s, n, (size_t)(semi - s) + 5, &a, &c, &d, &e);
+            }
+            if (!ok) ok = job_tail(s, n, w, &a, &c, &d, &e);
+            if (ok) {
+                char *nm = dupn(s + a, c - a);
+                if (!has(&jobname, nm)) { char *cm = dupn(s + d, e - d); push(&jobname, nm); push(&jobcmd, cm); free(cm); }
+                free(nm); p = e; continue;
+            }
+        }
+        p++;
+    }
+}
+/* ---- imports: ^\s*(?:from|import)\s+([A-Za-z_][\w]*), re.M ---- */
+static int mod_index(const char *m, size_t len) {     /* mods = {stem: n for n in names if n.endswith('.py')}: last wins */
+    int k, found = -1;
+    for (k = 0; k < ns; k++) {
+        const char *b = S[k].base; size_t bl = strlen(b); const char *dot; size_t sl;
+        if (!ends(S[k].rel, ".py")) continue;
+        dot = strrchr(b, '.'); sl = dot && dot > b ? (size_t)(dot - b) : bl;
+        if (sl == len && !memcmp(b, m, len)) found = k;
+    }
+    return found;
+}
+static void scan_imports(Text t) {
+    const char *s = t.s; size_t n = t.n, p = 0;
+    while (p <= n) {
+        if (p == 0 || s[p - 1] == '\n') {
+            size_t w = skip_ws(s, n, p), x = 0, a, e;
+            if (w + 4 <= n && !strncmp(s + w, "from", 4)) x = w + 4;
+            else if (w + 6 <= n && !strncmp(s + w, "import", 6)) x = w + 6;
+            if (x) {
+                a = skip_ws(s, n, x);
+                if (a > x && a < n && (s[a] == '_' || (s[a] >= 'A' && s[a] <= 'Z') || (s[a] >= 'a' && s[a] <= 'z'))) {
+                    int k; e = skip_word(s, n, a + 1);
+                    if ((k = mod_index(s + a, e - a)) >= 0) S[k].imported = 1;
+                    p = e; continue;
+                }
+            }
+        }
+        p++;
+    }
+}
+static Text *script_text(int k) {
+    if (!S[k].have_t) { char abs[PATH_MAX * 2]; snprintf(abs, sizeof abs, "%s/%s", R, S[k].rel); S[k].t = text(abs); S[k].have_t = 1; }
+    return &S[k].t;
+}
+/* str.splitlines() boundaries (\r is already \n) */
+static int linebreak(const char *s, size_t n, size_t i, int *l) {
+    int c = cp_at(s, n, i, l);
+    return c == '\n' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029;
+}
+
+int main(int argc, char **argv) {
+    int i, k, check = 0, write = 0, *mark, *frontier, nf = 0, gated = 0, lib = 0, lst = 0;
+    List listed = {0}, kinds = {0}, orphans = {0}; char path[PATH_MAX * 2];
+    for (i = 1; i < argc; i++) { if (!strcmp(argv[i], "--check")) check = 1; if (!strcmp(argv[i], "--write")) write = 1; }
+    if (!realpath(argv[0], path)) { fprintf(stderr, "inventory: cannot resolve %s\n", argv[0]); return 2; }
+    for (k = 0; k < 2; k++) { char *sl = strrchr(path, '/'); if (sl && sl != path) *sl = 0; else if (sl) sl[1] = 0; }
+    snprintf(R, sizeof R, "%s", path);
+
+    glob_tests(); glob_exec("exec");
+    if (ns) qsort(S, ns, sizeof *S, scmp);
+    for (i = k = 0; i < ns; i++) { if (k && !strcmp(S[k - 1].rel, S[i].rel)) { free(S[i].rel); continue; } S[k++] = S[i]; }
+    ns = k;
+    for (i = 0; i < ns; i++) { const char *sl = strrchr(S[i].rel, '/'); S[i].base = sl ? sl + 1 : S[i].rel; }
+    for (bcap = 64; bcap < 4u * (unsigned)ns + 64; bcap *= 2) {}
+    B = calloc(bcap, sizeof *B);
+    for (i = 0; i < ns; i++) badd(i);
+
+    {   Text g; snprintf(path, sizeof path, "%s/tests/gate.sh", R); g = text(path); parse_jobs(g); free(g.s); }
+
+    /* reachability from the roots */
+    mark = calloc(ns + 1, sizeof *mark); frontier = malloc((ns + 1) * sizeof *frontier);
+    {   static const char *roots[] = { "tests/gate.sh", "tests/all.sh", "tests/release.sh", 0 };
+        List yml = {0}; DIR *dp; struct dirent *e; int *got = calloc(ns + 1, sizeof *got);
+        snprintf(path, sizeof path, "%s/.github/workflows", R);
+        if ((dp = opendir(path))) {
+            while ((e = readdir(dp))) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..") && ends(e->d_name, ".yml")) push(&yml, e->d_name);
+            closedir(dp);
+        }
+        if (yml.n) qsort(yml.v, yml.n, sizeof *yml.v, strpcmp);
+        for (i = 0; i < 3 + yml.n; i++) {
+            Text t;
+            if (i < 3) snprintf(path, sizeof path, "%s/%s", R, roots[i]);
+            else snprintf(path, sizeof path, "%s/.github/workflows/%s", R, yml.v[i - 3]);
+            t = text(path); refs(t, got); free(t.s);
+        }
+        for (k = 0; k < ns; k++) if (got[k] && !mark[k]) { mark[k] = 1; frontier[nf++] = k; }
+        while (nf) {
+            int n = frontier[--nf], j;
+            S[n].reached = 1;
+            memset(got, 0, (ns + 1) * sizeof *got);
+            refs(*script_text(n), got);
+            for (j = 0; j < ns; j++) if (got[j] && !mark[j]) { mark[j] = 1; frontier[nf++] = j; }
+        }
+        free(got);
+    }
+    for (k = 0; k < ns; k++) if (S[k].reached) scan_imports(*script_text(k));
+
+    {   Text t; size_t p = 0;
+        snprintf(path, sizeof path, "%s/tests/ungated-checks.tsv", R); t = text(path);
+        while (p < t.n) {                               /* l.split('\t')[0] for l in splitlines() if l and not l.startswith('#') */
+            size_t q = p, end; int l = 1; char *line, *tab;
+            while (q < t.n && !linebreak(t.s, t.n, q, &l)) q += l;
+            end = q;
+            if (end > p && t.s[p] != '#') { line = dupn(t.s + p, end - p); if ((tab = strchr(line, '\t'))) *tab = 0; push(&listed, line); free(line); }
+            p = q < t.n ? q + l : q;
+        }
+        free(t.s);
+    }
+
+    for (k = 0; k < ns; k++) {
+        List where = {0}; char kind[4096]; int j, o = 0;
+        for (j = 0; j < jobname.n; j++) if (strstr(jobcmd.v[j], S[k].base)) push(&where, jobname.v[j]);
+        if (where.n) {
+            qsort(where.v, where.n, sizeof *where.v, strpcmp);
+            o = snprintf(kind, sizeof kind, "gate: ");
+            for (j = 0; j < where.n && j < 4; j++) o += snprintf(kind + o, sizeof kind - o, "%s%s", j ? ", " : "", where.v[j]);
+            if (where.n > 4) snprintf(kind + o, sizeof kind - o, " ...");
+        } else if (S[k].reached) snprintf(kind, sizeof kind, "reached from a gate/CI script");
+        else if (S[k].imported) snprintf(kind, sizeof kind, "library (imported by a gated script)");
+        else if (has(&listed, S[k].rel)) snprintf(kind, sizeof kind, "listed in tests/ungated-checks.tsv");
+        else { snprintf(kind, sizeof kind, "ORPHAN"); push(&orphans, S[k].rel); }
+        push(&kinds, kind);
+        for (j = 0; j < where.n; j++) free(where.v[j]);
+        free(where.v);
+    }
+    if (write) {
+        size_t cap = 1 << 16, len = 0; char *out = malloc(cap);
+        static const char *head = "# Script inventory\n\nGenerated by `python3 tests/inventory.py --write` (0.0.15 R15-1). Every test or check script and where it runs; an ORPHAN must be deleted, gated, or given a disposition in `tests/ungated-checks.tsv`.\n\n| Script | Where it runs |\n|---|---|\n";
+        len = strlen(head); memcpy(out, head, len);
+        for (k = 0; k < ns; k++) {
+            size_t need = strlen(S[k].rel) + strlen(kinds.v[k]) + 16;
+            if (len + need >= cap) { while (len + need >= cap) cap *= 2; out = realloc(out, cap); }
+            len += (size_t)sprintf(out + len, "| `%s` | %s |\n", S[k].rel, kinds.v[k]);
+        }
+        snprintf(path, sizeof path, "%s/tests/INVENTORY.md", R);
+        if (cx_write(path, out, len)) { fprintf(stderr, "inventory: cannot write %s\n", path); return 1; }
+        free(out);
+    }
+    for (k = 0; k < ns; k++) {
+        const char *v = kinds.v[k];
+        if (!strncmp(v, "gate", 4) || !strncmp(v, "reached", 7)) gated++;
+        else if (!strncmp(v, "library", 7)) lib++;
+        else if (!strncmp(v, "listed", 6)) lst++;
+    }
+    printf("inventory  scripts %d   gated/reached %d   library %d   listed %d   orphan %d\n", ns, gated, lib, lst, orphans.n);
+    for (k = 0; k < orphans.n; k++) printf("  ORPHAN %s\n", orphans.v[k]);
+    return check && orphans.n ? 1 : 0;
+}
