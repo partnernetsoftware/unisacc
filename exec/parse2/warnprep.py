@@ -41,6 +41,11 @@ def prepare_tools(out):
     import subprocess,os,fcntl,shutil
     from provenance import source_digest,write,verify
     out=tool_directory() if out is None else pathlib.Path(out)
+    # 2026-10-23: `--tools=` gave Path('') == '.', and the shutil.rmtree(out) below emptied the whole checkout (.git included).
+    # OUT is replaced wholesale, so it must be a named directory that is neither the cwd, the repository, nor above either.
+    o=out.resolve()
+    if str(out) in ('','.') or any(o==p or o in p.parents for p in (pathlib.Path.cwd().resolve(),R.resolve())):
+        sys.exit('warnprep: --tools OUT must name a directory outside the repository and the current directory: %r' % str(out))
     out.parent.mkdir(parents=True,exist_ok=True)
     with pathlib.Path(str(out)+'.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
