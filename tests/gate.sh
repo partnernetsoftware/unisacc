@@ -882,7 +882,8 @@ for st in lower enc; do job rowcov-$st-union python3 ./tests/rowcov.py $st union
 job rowcov-parse2-union python3 ./tests/rowcov.py parse2 union24   # 0.0.29 T4
 job seedpy python3 ./tests/decisionledger.py --seedpy   # 0.0.25 X8: stage-specific seed .py and assemble.py size may only fall
 job ledgercheck python3 ./tests/ledgercheck.py   # 0.0.25 P8: every plan row settled (完成/顺延/跨版进行/砍掉)
-job freezecheck tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx   # (.cx port, 2026-10-22) 0.0.25 P1: inside the freeze window only fix: commits touch the product closure
+job freezecheck tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx   # (.cx port, 2026-10-22) 0.0.25 P1: inside the freeze window only fix:/fix(<scope>): commits touch the product closure; the window starts at the explicit freeze commit in release/freeze.tsv (0.0.43 M1, R10)
+job freezecheck-selftest tests/bound 58 sh ./unisacc.com -run tests/freezecheck.cx -- --selftest   # 0.0.43 M1: scratch repo -- no freeze row rc 0, feat: touching exec/ in the window rc 1, fix(cx): ok, waiver, tag
 job revivedscan tests/bound 58 sh ./unisacc.com -run tests/revivedscan.cx   # (.cx port, 2026-10-22) 0.0.25 P2: an excused probe that now agrees is reported in ~11 s, not at queue time
 job reviewed-trees tests/bound 58 sh ./unisacc.com -run tests/reviewedtreescheck.cx   # (.cx port, 2026-10-22) 0.0.43: compilercheck reviewed_trees snapshots equal their trees (refreshed in the same commit)
 job facts-export python3 ./exec/facts/export.py --check   # 0.0.25 P3: a header change without regenerated facts (0.0.24 first seal) is red here

@@ -30,7 +30,7 @@
 | # | 项 | 验收证据（缺一不结） | 依据 |
 |---|---|---|---|
 | M0 | **主人一次性裁定，把范围定死**：P1 boundary-r1 推迟；H1 是否接受 16 核宿主；freezecheck 怎么处置；A·P·A 拒绝要不要做（见 M3）；采纳 A.2 推迟表 | `release/ruling-requests.tsv` 中该行为 APPLIED，并附 ref；`plans/v0.0.43.md` 写入一行「收口范围裁定」 | `prd.md:71`（P1 只授了具名范围）；`plans/v0.0.43.md:64`（H1 写的是 8 核）；`plans/v0.0.43.md:5,60` |
-| M1 | **freezecheck 转绿** | `python3 tests/freezecheck.py .` rc=0 | 当前 rc=1，23 笔违规（实测）。`freezecheck.py:44` 只认字面前缀 `fix:`，版本提交 dbbc4fe7 把整个开发期都算成了冻结窗 |
+| M1 | **freezecheck 转绿** | `sh ./unisacc.com -run tests/freezecheck.cx` rc=0（门禁 job freezecheck；`freezecheck-selftest` 证新口径） | **已落（R10 选 (a)，2026-10-23）**：冻结窗起点改为 `release/freeze.tsv` 里显式的冻结提交（无本版本行 = 不在冻结窗，rc 0；该行在发布准备时加），并接受 `fix(<scope>):`；waiver 不变。实测 rc=0。原状：rc=1，23 笔违规；`freezecheck.py:44` 只认字面前缀 `fix:`，版本提交 dbbc4fe7 把整个开发期都算成了冻结窗。`tests/freezecheck.py` 的 main() 仍是旧口径，但没有任何调用方（只有 `product()` 被 commitgate/pre-commit 导入） |
 | M2 | **台账类红一次清掉**（只改 tests/、文档，不碰闭包） | 以下套件单跑全部 rc=0：fresh-order-0..8、revivedscan、subtract-safety | 见 B 节 B2 |
 | M3 | **声明符缺陷类有界**：tdescprobe 进闸，产品基线在重建后的产品上复核 | com-tdescprobe-1..3 rc=0（ratchet 不变）；tdescprobe-oracle rc=0 | 7ca340d5。理由：产品**仍有静默错码**（`int (*x[3])[3]; sizeof(*x[0])` 产品给 4，cc 给 12，实测；e05 运行时 SIGSEGV，实测）。见下方「M3 的裁定点」 |
 | M4 | **重建根产品**，在宿主修正后的环境里重跑 CONTRACT 层 | `ident . check unisacc.com` rc=0（verified）；CONTRACT 层 160 个套件中，除 B1 列明的宿主项外全绿 | 当前 ident rc=1（实测）；137/160 的绿是在旧产品上得到的 |

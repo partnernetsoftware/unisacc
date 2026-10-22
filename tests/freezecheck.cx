@@ -1,12 +1,19 @@
 #!/usr/bin/env -S unisacc.com -run
-/* freezecheck.cx -- after the version commit, only red fixes may touch the product closure (0.0.25 P1); ported from
+/* freezecheck.cx -- inside a freeze window, only red fixes may touch the product closure (0.0.25 P1); ported from
    tests/freezecheck.py (2026-10-22, the owner's direction: the toolchain moves off Python).
    0.0.24 took kill(), ttyname() and a reference-side extern fix in the ten minutes before sealing; they forced three
-   seals, broke the first queue at 66/568 and voided the first Windows signing.  The rule since then: once
-   src/version.h carries the release number, a commit that changes the product closure (exec/ unisa/ src/ kernel/
-   include/ weights/ seed/, as exec/pipeline/models.py:closure hashes them) must say `fix:` at the start of its
-   subject.  Anything else is a new feature and waits for the next version.
+   seals, broke the first queue at 66/568 and voided the first Windows signing.  The rule since then: inside the
+   freeze window, a commit that changes the product closure (exec/ unisa/ src/ kernel/ include/ weights/ seed/, as
+   exec/pipeline/models.py:closure hashes them) must start its subject with `fix:` or `fix(<scope>):` (scope: one or
+   more characters, none of them ')' or whitespace).  Anything else is a new feature and waits for the next version.
+   The window (0.0.43 M1, ruling R10; was: every commit after the src/version.h bump, which made the whole development
+   cycle one permanent freeze red) starts at an EXPLICIT freeze commit: the row `VERSION<TAB>FREEZE_COMMIT<TAB>note`
+   of HEAD:release/freeze.tsv whose VERSION is the one in HEAD:src/version.h.  The window is FREEZE_COMMIT..HEAD (the
+   freeze commit itself is the last open commit).  No row for the current version: not in a freeze window, rc 0.  A
+   version that already has its tag is released: not in a freeze window, rc 0.
    usage: sh ./unisacc.com -run tests/freezecheck.cx -- [REPO]     exit 1 and name each offending commit
+          sh ./unisacc.com -run tests/freezecheck.cx -- --selftest  scratch-repo cases: no row, feat:/fix:/fix(cx):,
+                                                                   waiver, released tag; prefix table
    A red fix already pushed without the prefix (history is not rewritten once an rc tag points past it) is waived by
    a line `SHA8<TAB>red suite it fixed` in release/freeze-waivers.tsv; the waiver is read from HEAD, so it is reviewed
    like any commit.
@@ -156,6 +163,20 @@ static void cut(const char *s, int n, char *out, size_t cap) {
     snprintf(out, cap, "%.*s", (int)i, s);
 }
 
+/* `fix:` or `fix(<scope>):`, scope one or more code points none of which is ')' or whitespace */
+static int fix_prefix(const char *s) {
+    size_t n = strlen(s), i; int l, k = 0;
+    if (startswith(s, "fix:")) return 1;
+    if (!startswith(s, "fix(")) return 0;
+    for (i = 4; i < n; i += l) {
+        long c = cp_at((const unsigned char *)s, n, i, &l);
+        if (c == ')') return k > 0 && i + 1 < n && s[i + 1] == ':';
+        if (space(c)) return 0;
+        k++;
+    }
+    return 0;
+}
+
 typedef struct { char sha[9]; char *subject; char *hit; } Bad;
 
 static int run(void) {
@@ -170,6 +191,29 @@ static int run(void) {
     {   char *a[] = { "tag", "-l", tagname, 0 }; t = strip(git_or_die(a)); }
     if (*t) { printf("freezecheck: v%s is already released; not in a freeze window\n", ver); return 0; }
     free(t);
+    {   /* the explicit freeze commit for VER (release/freeze.tsv, read from HEAD like the waivers) */
+        char *a[] = { "show", "HEAD:release/freeze.tsv", 0 }, *fz = git(a, &rc), *found = 0; List fl = {0};
+        if (fz) {
+            splitlines(fz, &fl);
+            for (i = 0; i < fl.n && !found; i++) {
+                char *l = fl.v[i], *tab, *c2, *e;
+                if (!*l || l[0] == '#') continue;
+                tab = strchr(l, '\t'); if (!tab) continue;
+                *tab = 0; if (strcmp(l, ver)) continue;
+                c2 = tab + 1; e = strchr(c2, '\t'); if (e) *e = 0;
+                found = strdup(strip(c2));
+            }
+            freelist(&fl); free(fz);
+        }
+        if (!found || !*found) { printf("freezecheck: v%s has no freeze commit in release/freeze.tsv; not in a freeze window\n", ver); return 0; }
+        {   char spec[512], *b[] = { "rev-parse", "--verify", "--quiet", spec, 0 };
+            snprintf(spec, sizeof spec, "%s^{commit}", found);
+            v = git(b, &rc);
+            if (!v) { fprintf(stderr, "freezecheck: freeze commit %s for v%s (release/freeze.tsv) is not a commit\n", found, ver); exit(1); }
+            v = strip(v);
+        }
+        free(found);
+    }
     {   char *a[] = { "show", "HEAD:release/freeze-waivers.tsv", 0 }; t = git(a, &rc); }
     if (t) {
         List wl = {0}; splitlines(t, &wl);
@@ -191,7 +235,7 @@ static int run(void) {
         splitws(out, &files); free(out);
         for (j = 0; j < files.n; j++) if (product(files.v[j])) push(&hit, files.v[j], strlen(files.v[j]));
         for (j = 0; j < waived.n; j++) if (strlen(waived.v[j]) == (strlen(sha) < 8 ? strlen(sha) : 8) && !strncmp(waived.v[j], sha, 8)) w = 1;
-        if (hit.n && !startswith(subject, "fix:") && !w) {
+        if (hit.n && !fix_prefix(subject) && !w) {
             char sub[1024]; size_t hl = 0; int k;
             if (nbad == capbad) { capbad = capbad ? capbad * 2 : 16; bad = realloc(bad, capbad * sizeof *bad); if (!bad) exit(1); }
             snprintf(bad[nbad].sha, 9, "%.8s", sha);
@@ -204,11 +248,88 @@ static int run(void) {
         freelist(&files); freelist(&hit);
     }
     for (i = 0; i < nbad; i++) printf("  FREEZE %s %s  (touches %s)\n", bad[i].sha, bad[i].subject, bad[i].hit);
-    printf("freezecheck  version commit %.8s   closure commits without fix: %d\n", v, nbad);
+    printf("freezecheck  freeze commit %.8s   closure commits without fix: %d\n", v, nbad);
     return nbad ? 1 : 0;
 }
 
+/* --selftest: run() in a child on a scratch repository; rc and (optionally) a line of its stdout are checked */
+static char ST_DIR[4096];
+static int st_sh(const char *fmt, const char *arg) {
+    char cmd[8192]; int rc;
+    snprintf(cmd, sizeof cmd, "cd '%s' && { ", ST_DIR);
+    snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), fmt, arg ? arg : "");
+    strncat(cmd, "; } >/dev/null 2>&1", sizeof cmd - strlen(cmd) - 1);
+    rc = cx_run_timeout(cmd, 20, 0, 0);
+    if (rc) fprintf(stderr, "freezecheck selftest: setup step failed (rc %d): %s\n", rc, cmd);
+    return rc;
+}
+static int st_case(const char *name, int want, const char *want_text) {
+    char out[4200], *b; size_t n; int st = 0, got; pid_t pid;
+    snprintf(out, sizeof out, "%s.out", ST_DIR);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) { printf("freezecheck selftest: FAIL %s: fork\n", name); return 1; }
+    if (pid == 0) {
+        if (!freopen(out, "w", stdout)) _exit(99);
+        REPO = ST_DIR; got = run(); fflush(stdout); _exit(got);
+    }
+    if (waitpid(pid, &st, 0) != pid || (st & 0x7f)) { printf("freezecheck selftest: FAIL %s: child died\n", name); return 1; }
+    got = (st >> 8) & 0xff;
+    b = cx_read(out, &n); unlink(out);
+    if (got != want || (want_text && (!b || !strstr(b, want_text)))) {
+        printf("freezecheck selftest: FAIL %s: rc %d (want %d)%s%s\n--- output\n%s", name, got, want,
+               want_text ? ", want text: " : "", want_text ? want_text : "", b ? b : "");
+        free(b); return 1;
+    }
+    free(b); return 0;
+}
+static int selftest(void) {
+    static const struct { const char *s; int ok; } P[] = {
+        {"fix: x", 1}, {"fix(cx): x", 1}, {"fix(e3/parse2): x", 1}, {"fix(a-b,c): x", 1},
+        {"fix(): x", 0}, {"fix(a b): x", 0}, {"fix(cx) : x", 0}, {"fix(cx)x", 0}, {"fix(cx", 0}, {"fix(a)b): x", 0},
+        {"feat: x", 0}, {"fixup: x", 0}, {"Fix: x", 0}, {" fix: x", 0}, {"fix x", 0}, {0, 0}
+    };
+    const char *tmp = getenv("TMPDIR"); char head[64], *h; int i, bad = 0;
+    for (i = 0; P[i].s; i++) if (fix_prefix(P[i].s) != P[i].ok) { printf("freezecheck selftest: FAIL prefix '%s' -> %d\n", P[i].s, !P[i].ok); bad++; }
+    snprintf(ST_DIR, sizeof ST_DIR, "%s/freezecheck-st.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    if (!mkdtemp(ST_DIR)) { printf("freezecheck selftest: FAIL mkdtemp\n"); return 1; }
+    setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1); setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+    setenv("GIT_AUTHOR_NAME", "t", 1); setenv("GIT_AUTHOR_EMAIL", "t@t", 1);
+    setenv("GIT_COMMITTER_NAME", "t", 1); setenv("GIT_COMMITTER_EMAIL", "t@t", 1);
+#define C(m) "git add -A && git commit -q -m '" m "'"
+    if (st_sh("git init -q . && mkdir -p src exec release && printf '#define UNISACC_VERSION \"0.0.99\"\\n' > src/version.h"
+              " && printf '# version\\tfreeze_commit\\tnote\\n0.0.98\\tdeadbeef\\tolder release\\n' > release/freeze.tsv"
+              " && echo 1 > exec/a.c && " C("base"), 0)
+        || st_sh("echo 2 > exec/a.c && " C("feat: new work during development"), 0)) { bad++; goto done; }
+    bad += st_case("no row for the current version", 0, "freezecheck: v0.0.99 has no freeze commit in release/freeze.tsv; not in a freeze window");
+    {   char *a[] = { "-C", ST_DIR, "rev-parse", "HEAD", 0 }, *argv[8]; int k;
+        argv[0] = "git"; for (k = 0; a[k]; k++) argv[k + 1] = a[k]; argv[k + 1] = 0;
+        h = 0; if (cx_runv_timeout(argv, 20, &h, 0) || !h) { printf("freezecheck selftest: FAIL rev-parse\n"); bad++; goto done; }
+        snprintf(head, sizeof head, "%s", strip(h)); free(h);
+    }
+    if (st_sh("printf '0.0.99\\t%s\\tfreeze for the test\\n' >> release/freeze.tsv && " C("release: freeze 0.0.99"), head)
+        || st_sh("echo 3 > exec/a.c && " C("fix(cx): scoped red fix"), 0)
+        || st_sh("echo 4 > src/b.c && " C("fix: plain red fix"), 0)
+        || st_sh("echo 5 > research.md && " C("docs: outside the closure"), 0)) { bad++; goto done; }
+    bad += st_case("freeze row, fix: and fix(cx): commits", 0, "closure commits without fix: 0");
+    if (st_sh("echo 6 > exec/a.c && " C("feat: new work inside the window"), 0)) { bad++; goto done; }
+    bad += st_case("feat: touching exec/ inside the window", 1, "  FREEZE ");
+    if (st_sh("printf '%%.8s\\tsome red suite\\n' \"$(git rev-parse HEAD)\" > release/freeze-waivers.tsv && " C("release: waive"), 0)) { bad++; goto done; }
+    bad += st_case("waived feat:", 0, "closure commits without fix: 0");
+    if (st_sh("echo 7 > exec/a.c && " C("fix (cx): not a fix prefix"), 0)) { bad++; goto done; }
+    bad += st_case("fix (cx): is not fix(<scope>):", 1, "closure commits without fix: 1");
+    if (st_sh("git tag v0.0.99", 0)) { bad++; goto done; }
+    bad += st_case("released version", 0, "v0.0.99 is already released; not in a freeze window");
+#undef C
+done:
+    {   char cmd[4200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", ST_DIR); cx_run_timeout(cmd, 20, 0, 0); }
+    if (bad) { printf("freezecheck selftest: %d problem(s)\n", bad); return 1; }
+    puts("freezecheck selftest: PASS (prefix table; no row -> rc 0; fix:/fix(cx): ok; feat: in window -> rc 1; waiver; fix (cx): refused; tag)");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--selftest")) return selftest();
     if (argc > 1) REPO = argv[1];
     return run();
 }
