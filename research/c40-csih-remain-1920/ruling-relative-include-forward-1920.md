@@ -30,7 +30,7 @@ csih.sh / suite 现用绝对 `"$ROOT/..."` 可规避；**去掉 -include 不是�
 | `tests/fwd_rel_include_forward.sh` | POS relative+forward；NEG missing |
 | `research/c40-csih-remain-1920/` | 本裁定 |
 
-禁：`src/version.h` bump、Latest、签、动 K6 主叶 / `plans/v0.0.41.md` 主题工作。
+禁：`src/version.h` bump、Latest、签、动 K6 主叶 / `archive/plans/v0.0.41.md` 主题工作。
 
 ## 复测 schema
 

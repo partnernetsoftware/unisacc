@@ -8,7 +8,7 @@
 
 **H1=INHERIT**——本版不新建 H1 行、不声明 EMPTY；显式沿用 `archive/plans/v0.0.38.md` 的 H1 行（跨版进行）。**残表/未端口模块书面顺延 → 0.0.42+**；**归档≠删除**（顺延/归档不删 py、不删 Stage 表、不删 seed 缺口模块）。**允许**开 candidate/queue **准备 Draft 材料**。**仍禁** Latest / 签 / 公开，除非另授。
 
-## H1 机读声明（写入 plans/v0.0.41.md）
+## H1 机读声明（写入 archive/plans/v0.0.41.md）
 
 ```
 H1-INHERIT: archive/plans/v0.0.38.md sha256=d1f05f7ddbec20556334630cc0b58bd16a05cad729b0d2661221158e60e35bc9 host=linux-x86_64-8core-xeon-cloud
@@ -29,7 +29,7 @@ H1-INHERIT: archive/plans/v0.0.38.md sha256=d1f05f7ddbec20556334630cc0b58bd16a05
 
 ## 本拍授执行
 
-1. 落本裁定 + paste 三窗；更新 `plans/v0.0.41.md`（H1-INHERIT + 卡点清 H1 OPEN）与收口页 H1 态。
+1. 落本裁定 + paste 三窗；更新 `archive/plans/v0.0.41.md`（H1-INHERIT + 卡点清 H1 OPEN）与收口页 H1 态。
 2. `python3 release/tools/h1source.py .` → 期望 `INHERIT archive/plans/v0.0.38.md (host linux-x86_64-8core-xeon-cloud)`。
 3. **允许** `build_ref` / `build_candidate` / comboot / **queue** 以准备 Draft 材料（不预填产品 PASS）。
 4. seal / rc_tag 可作为 Draft 材料链一步；**创建 Draft release / Latest / 签 / 公开仍另授**。
@@ -57,7 +57,7 @@ H1-INHERIT: archive/plans/v0.0.38.md sha256=d1f05f7ddbec20556334630cc0b58bd16a05
 ## 产出路径
 
 - 本裁定；`research/c41-h1-inherit-0843/paste-{cc,cdx,cdx2}-0843.txt`
-- `plans/v0.0.41.md`（H1-INHERIT 行）
+- `archive/plans/v0.0.41.md`（H1-INHERIT 行）
 - `research/c41-closeout-freeze-0805.md`（H1 态刷新）
 - `research/c41-h1-inherit-0843/receipt.md`（事实回执）
 

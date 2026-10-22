@@ -1,6 +1,6 @@
 # 代裁裁定：0.0.41「可进收口」（0749 SGT）— 不授下一窄叶；禁 bump/Latest
 
-**依据**：K6-29 限定 PASS 已纳（`ruling-k6-29-pass-accept-0744.md` ← `cdx-k6-29-ruling-0735.md`）；产品叶 `e36b5962`；tip `2c909b26`；`version.h`=**0.0.40**；Latest=**v0.0.40**；plans/v0.0.41.md；gold.py sha256 `25721a152d0d1e4ad7ebc7d314890223e312ef45bf40d97c497d63db021e7b91`；0744 observe 前瞻 paste（供参考，已独立核）。
+**依据**：K6-29 限定 PASS 已纳（`ruling-k6-29-pass-accept-0744.md` ← `cdx-k6-29-ruling-0735.md`）；产品叶 `e36b5962`；tip `2c909b26`；`version.h`=**0.0.40**；Latest=**v0.0.40**；archive/plans/v0.0.41.md；gold.py sha256 `25721a152d0d1e4ad7ebc7d314890223e312ef45bf40d97c497d63db021e7b91`；0744 observe 前瞻 paste（供参考，已独立核）。
 
 ## 结论（一句话）
 
@@ -55,7 +55,7 @@ K6-27/28 钉死的「金标标签余序 **irsel → parse**」在 K6-29 后**已
 | # | 前提 | 本拍态 |
 |---|---|---|
 | F1 | 收口清单入观察/research 且政委书面「收口可冻」 | **本拍起清单**；冻令**未**发 |
-| F2 | H1 INHERIT/新建已批（plans/v0.0.41.md 仍「待批」） | **缺** |
+| F2 | H1 INHERIT/新建已批（archive/plans/v0.0.41.md 仍「待批」） | **缺** |
 | F3 | 剩余 unisa 模块处置：顺延 0.0.42+ **或** 补战役 — 书面钉死 | **缺**（须裁） |
 | F4 | gold Stage 残表（B）处置：顺延 / 另授窄叶 / 明示非本版义务 | **缺**（本裁定建议默认：非本版义务、另授） |
 | F5 | 删 Python：**仍禁**（计划明文） | 保持禁 |

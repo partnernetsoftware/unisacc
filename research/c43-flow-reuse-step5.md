@@ -5,7 +5,7 @@
 ## 1. 声明内容（只写 strace 实测读到的）
 | 套件 | files | trees | 依据 |
 |---|---|---|---|
-| ledgercheck | `tests/ledgercheck.py`、`src/version.h`、`plans/roadmap-0.0.x.md`、`plans/v0.0.41.md`、`plans/v0.0.42.md` | 无 | 实际打开的 3 个 plans 文件（版本由 version.h 决定） |
+| ledgercheck | `tests/ledgercheck.py`、`src/version.h`、`archive/plans/roadmap-0.0.x.md`、`archive/plans/v0.0.41.md`、`archive/plans/v0.0.42.md` | 无 | 实际打开的 3 个 plans 文件（版本由 version.h 决定） |
 | docs | `tests/docs.sh`、`prd.md`、`spec.md`、`research/model-bytes.json`、`research/unisacc-paper.md` | 无 | 实际打开的文件 |
 | subtract-safety | `tests/subtractsafety.py`、`prd.md`、`spec.md`、`.gitignore`、`.gitattributes` | `apps`、`bench`、`docs`、`plans`、`research`、`release`、`scripts`、`.github` | 它检查“全部已跟踪文件”（脚本注释）；实测打开的顶层目录即上述集合（`archive/`、`ujs/` 未打开，故不声明） |
 
@@ -16,7 +16,7 @@
 
 | 探针 | 全局名单 | 通过声明影响的套件 |
 |---|---|---|
-| `plans/v0.0.42.md` | 否 | ledgercheck、subtract-safety，及既有的 script-inventory、publish-order、gate-infra |
+| `archive/plans/v0.0.42.md` | 否 | ledgercheck、subtract-safety，及既有的 script-inventory、publish-order、gate-infra |
 | `plans/v0.0.43.md` | 否 | subtract-safety，及既有的三个（**ledgercheck 不受影响**：实测读取只到 v0.0.42，见 §3） |
 | `prd.md` | 否 | docs、subtract-safety，及既有的 script-inventory 等 |
 | `spec.md` | 否 | docs、subtract-safety，及既有套件 |

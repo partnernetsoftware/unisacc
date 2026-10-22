@@ -22,7 +22,7 @@
 - 垫片采点恰 **1 行**，argv 含 `MODEL_STEP=shared`。
 - 候选目录：仅 mkdir + step-shared.log（垫片输出）；`find`+sha；无 model-cache/产物。
 - `tests/bound` 可能在树外冷编 helper 缓存：照记，不算构造产物。
-- 前后 sha：`version.h`、`plans/v0.0.40.md` H1-INHERIT、`archive/plans/v0.0.38.md`；status 0 行。
+- 前后 sha：`version.h`、`archive/plans/v0.0.40.md` H1-INHERIT、`archive/plans/v0.0.38.md`；status 0 行。
 
 ## 已知限制（grk）
 

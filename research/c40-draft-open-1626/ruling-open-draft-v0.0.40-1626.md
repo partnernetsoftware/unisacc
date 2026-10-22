@@ -34,4 +34,4 @@
 2. 未 `seal_candidate.sh` → `release/candidate.json` 仍钉 0.0.39
 3. 无 `rc/v0.0.40`
 4. 无 unsigned/signed 产品资产、无 dmg
-5. tip 相对绿证 tip 已前进（政策+guard：AGENTS.md / plans/v0.0.40.md / RELEASE-PIPELINE.md / gatedeps.json；无 src/exec/tests）；未在当前 tip 重跑 m4pro bootstrap
+5. tip 相对绿证 tip 已前进（政策+guard：AGENTS.md / archive/plans/v0.0.40.md / RELEASE-PIPELINE.md / gatedeps.json；无 src/exec/tests）；未在当前 tip 重跑 m4pro bootstrap

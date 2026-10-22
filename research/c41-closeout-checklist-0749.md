@@ -1,4 +1,4 @@
-# 0.0.41 收口清单（对照 plans/v0.0.41.md；0749 代裁材料）
+# 0.0.41 收口清单（对照 archive/plans/v0.0.41.md；0749 代裁材料）
 
 **状态**：材料 only；配套 `ruling-c41-closeout-ready-0749.md`。**不**预填 freeze PASS；**不** bump；**不**动 Latest。
 

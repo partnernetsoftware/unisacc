@@ -196,8 +196,9 @@ def main():
         # docs.sh opens these by fixed name (no directory listing); the English paper was missing from the first measure
         'files': ['tests/docs.sh', 'prd.md', 'spec.md', 'research/model-bytes.json', 'research/unisacc-paper.md', 'research/unisacc-paper.en.md']}
     d['suites']['subtract-safety'] = {
-        'command': ['python3', './tests/subtractsafety.py'],
-        'files': ['tests/subtractsafety.py', 'prd.md', 'spec.md', '.gitignore', '.gitattributes'],
+        'command': ['tests/bound', '58', 'sh', './unisacc.com', '-run', 'tests/subtractsafety.cx'],   # 2026-10-22: the .cx port
+        'files': ['tests/subtractsafety.cx', 'tests/bound', 'tests/bound.c', 'unisacc.com', 'unisacc.com.build.json',
+                  'prd.md', 'spec.md', '.gitignore', '.gitattributes'],
         'trees': ['apps', 'bench', 'docs', 'plans', 'research', 'release', 'scripts', '.github']}
     changed.append(('step4-readsets', 'declared ledgercheck, docs, subtract-safety'))
     # 0.0.43 step 6, batch 1 of the outside-the-name-list audit (research/c43-flow-reuse-step6.md).
@@ -208,7 +209,7 @@ def main():
         'command': ['python3', './tests/decisionledger.py'],
         'files': ['tests/decisionledger.py', 'research/decision-ledger.json', 'tests/decisionledger.allow'],
         'trees': ['exec']}
-    # exittable opens plans/v0.0.42.md (the version in src/version.h) and archive/plans/v0.0.38.md (measured);
+    # exittable opens archive/plans/v0.0.42.md (the version in src/version.h) and archive/plans/v0.0.38.md (measured);
     # the plan of a later version is read after a bump, so plans/ is declared as a whole tree (as ledgercheck).
     # c43 declaration gap (measured, batch B): exittable also reads the release ledgers and tools, the version
     # header and the gate-order/gate-layer/queue sources it prints from.

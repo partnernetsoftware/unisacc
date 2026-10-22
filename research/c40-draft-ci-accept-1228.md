@@ -8,7 +8,7 @@
 - 本刀**不** bump / 开 Draft / 公开发布 / seal。
 
 ## 仓内已改口文件
-- `plans/v0.0.40.md`、`plans/v0.0.39.md`（脚注）
+- `archive/plans/v0.0.40.md`、`archive/plans/v0.0.39.md`（脚注）
 - `release/RELEASE-PIPELINE.md`、`release/README.md`
 - `AGENTS.md`
 - `research/c40-freeze-receipt.md`、`research/c40-darwin-cc1-toolchain.md`、`research/c40-first-observe/ruling-first-observe-close-ingest-1159.md`、`research/c39-carry-settlement-proposal.md`、`research/c40-gqalive-python-app-case.md`

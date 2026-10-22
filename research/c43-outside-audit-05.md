@@ -10,7 +10,7 @@
 | tools-2 | 0 | 46.8 s | 28 | 12：`corpus/crypto-algorithms/*` | 未声明（全局输入） |
 | tools-3 | 0 | 8.5 s | 25 | 9：`corpus/crypto-algorithms/*` | 未声明（全局输入） |
 | decision-ledger | 0 | 1.7 s | 260 | 1：`research/decision-ledger.json` | 已声明 files |
-| exittable | 0 | 0.2 s | 11 | 2：`archive/plans/v0.0.38.md`、`plans/v0.0.42.md` | 已声明（files、trees: plans） |
+| exittable | 0 | 0.2 s | 11 | 2：`archive/plans/v0.0.38.md`、`archive/plans/v0.0.42.md` | 已声明（files、trees: plans） |
 | h1source | 0 | 1.4 s | 4 | 无 | — |
 | precommithook | 0 | 1.5 s | 10 | 2：`.gitattributes`、`.gitignore` | **未声明** |
 | seedpy | 0 | 0.1 s | 2 | 无 | — |

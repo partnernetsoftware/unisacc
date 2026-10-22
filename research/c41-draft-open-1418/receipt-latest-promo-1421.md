@@ -13,4 +13,4 @@
 | seal/rc | 缺口另记（candidate.json 仍 0.0.40 至补 seal） |
 | 1146 | **未 void** |
 
-下一步：`plans/v0.0.42.md` 入仓；bump/冻另刀。
+下一步：`archive/plans/v0.0.42.md` 入仓；bump/冻另刀。

@@ -12,7 +12,7 @@
 - **Paper A 正文漂移：** tip 四 blob **SAME**（相对本拍 tip before；本拍零正文 diff）
 - **明确主张：** **same7 点采样 ≠ Softguess／≠ 第四 seal-before／≠ 8509/8769 闭合**（本拍钉）——bits gate 绿／点采样 hygiene **不得**互借升格成理论或投稿闸门；穷举／更大随机对拍另排亦同。
 - **为何本拍选此点（相对优先候选／相对 1845／1759／1715）：** 1845（C）钉的是 **Latest-40 + c41 bits 入 tip 后 8509/8769 仍 seal-blocking**（产品 tip ≠ 身份闭合）；1759＝**Darwin Ctape/compare 中段红**；1715＝**Draft seal candidate 收据**。tip `2bc1d468` 已钉 same7＝**七断言组点采样（20 手写）非穷举**，且 `seed/unisa_bits.c` **不在产品闭包**、穷举／更大随机另排。新主张：把「须先 same7／bits 战役绿／或须先穷举对拍完稿才许投 A／bits 绿＝测量身份闭合」升成闸门——**不得**搭乘 A。与 1845 **DISTINCT**（本拍不重钉键数；对象是 bits／same7 **升格读法**，不是 8509/8769 本身）。
-- **搭乘风险源（本拍钉）：** tip c41／`research/c41-k6-1-bits.md`／`plans/v0.0.41.md` same7 点采样边界；`unisabits same 7 / diff 0` 读数；「须先穷举／更大随机对拍完稿才许封 A」话语；「bits gate 绿＝8509/8769 已闭／构造+T1 才成立」互借。——**诚实产品／bits 参考对点采样 hygiene** ≠ 「须先 same7 或穷举绿才许投 A，或主张缺之则构造+T1／实证封口不成立／须升 Softguess／＝测量身份闭合」闸门。
+- **搭乘风险源（本拍钉）：** tip c41／`research/c41-k6-1-bits.md`／`archive/plans/v0.0.41.md` same7 点采样边界；`unisabits same 7 / diff 0` 读数；「须先穷举／更大随机对拍完稿才许封 A」话语；「bits gate 绿＝8509/8769 已闭／构造+T1 才成立」互借。——**诚实产品／bits 参考对点采样 hygiene** ≠ 「须先 same7 或穷举绿才许投 A，或主张缺之则构造+T1／实证封口不成立／须升 Softguess／＝测量身份闭合」闸门。
 - **DISTINCT vs 相邻已切：**
   - pipeline-efficiency-1628＝分层折叠／efficiency 战役完稿；本拍＝**unisa.bits same7 点采样**
   - darwin-ctape-1759＝acceptance10 Ctape/compare 中段红；本拍＝**bits／unisabitscheck same7**，不是 Darwin acceptance
@@ -127,7 +127,7 @@
 - 本笔记：`research/notes/paper-a-derive-purify-unisabits-same7-point-sample-not-a-gate-20261011-1859.md`
 - 心跳短报：`research/notes/paper-a-heartbeat-report-20261011-1859.md`
 - tip before：`5ca3c09f6054bb32d1429b26fff20679ccb4a598`
-- same7 钉：`2bc1d4688b336b0cfca39e3351c106c22060c0fc`；材料 `research/c41-k6-1-bits.md`、`plans/v0.0.41.md`
+- same7 钉：`2bc1d4688b336b0cfca39e3351c106c22060c0fc`；材料 `research/c41-k6-1-bits.md`、`archive/plans/v0.0.41.md`
 - Softguess NONE×4：CN `c37b9291a6cc5fcd24beda00299fdf630da0c02c` · EN `fad7b3e0b51731f3615de9753aea0144dbee79b2` · TeX `5c880b0bafd86cbd10691a149212048a7b7d7279` · abs `43d7ea7e7297ed8be9a96e3950e014e359467973`
 - 仍开 C（Latest-40+c41）：[`paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-latest40-c41-20261011-1845.md`](paper-a-gap-nail-measurement-identity-8509-8769-tip-refresh-latest40-c41-20261011-1845.md)
 - 正交 E：[`…/pipeline-efficiency-folding-campaign-not-a-gate-20261011-1628.md`](paper-a-derive-purify-pipeline-efficiency-folding-campaign-not-a-gate-20261011-1628.md)、[`…/darwin-ctape-compare-acceptance10-not-a-gate-20261011-1759.md`](paper-a-derive-purify-darwin-ctape-compare-acceptance10-not-a-gate-20261011-1759.md)、[`…/draft-040-seal-candidate-receipt-not-a-gate-20261011-1715.md`](paper-a-derive-purify-draft-040-seal-candidate-receipt-not-a-gate-20261011-1715.md)、[`…/darwin-flaky-probe-campaign-not-a-gate-20261011-1611.md`](paper-a-derive-purify-darwin-flaky-probe-campaign-not-a-gate-20261011-1611.md)、[`…/darwin-host-target-acceptance-not-a-gate-20261011-1501.md`](paper-a-derive-purify-darwin-host-target-acceptance-not-a-gate-20261011-1501.md)、[`…/draft-release-acceptance-not-a-gate-20261011-1558.md`](paper-a-derive-purify-draft-release-acceptance-not-a-gate-20261011-1558.md)

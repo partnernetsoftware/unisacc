@@ -4,7 +4,7 @@
 |---|---|---|---|
 | tools-1..3 | rc0 | corpus/crypto-algorithms/* (gitignored, fetched at a pinned commit in tests/tools.sh) | external pinned input, no declaration |
 | decision-ledger | rc0 | research/decision-ledger.json | declared (files) |
-| exittable | rc0 | archive/plans/v0.0.38.md, plans/v0.0.42.md | declared (plans/ tree: version-keyed) |
+| exittable | rc0 | archive/plans/v0.0.38.md, archive/plans/v0.0.42.md | declared (plans/ tree: version-keyed) |
 | k2b | rc124 at 55 s (partial) | apps/*, archive/*, ujs/*, docs/*, plans/*, research/*, bench/*, .github/* | declared (trees: it walks every tracked file, tests/k2bcheck.py:10) |
 | h1source | rc0 | none | static false positive |
 | precommithook | rc0 | none | static false positive |

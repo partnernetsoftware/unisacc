@@ -3,7 +3,7 @@
 - **拍点：** 2026-10-11 ~22:07 Asia/Shanghai（UTC+8）
 - **切口：** **E. 衍生净化**
 - **仓库 tip（只读核对 / before）：** `b0660cf7743ff1e8917c8e38dd4baf2374d0139b`（= K6-10 unisa.tape；祖先含 CXIF 共构续页 N1–N3 `aa46a603`、CXIF cols boundary design+sample 旁注 `14c9a8a1`、Paper A #154 T1→K_s `bdec4bcb`、#155 K6-7/8/9 E `2779b4bd`）
-- **父节点 tip 链（相关）：** CXIF cols boundary design + sample 旁注 `14c9a8a1…`（research/cxif-cols-boundary/、csih-cx-modularity-2145.md、plans/v0.0.41.md；五轴共构；41样例 vs 42门闩分账；禁 bump/Latest/签；勿抢 K6-10）；检查器拒 N1–N3 `aa46a603…`（语法／接线／门闩分账；csih-cx-modularity-2145-checker-reject-N1N3.md；三轴共构续页 E2 include／公开集可见性／投影合法性；41样例 vs 42+门闩分账）；其后 tip 另含 K6-10 tape（工程并行，非本拍切对象）
+- **父节点 tip 链（相关）：** CXIF cols boundary design + sample 旁注 `14c9a8a1…`（research/cxif-cols-boundary/、csih-cx-modularity-2145.md、archive/plans/v0.0.41.md；五轴共构；41样例 vs 42门闩分账；禁 bump/Latest/签；勿抢 K6-10）；检查器拒 N1–N3 `aa46a603…`（语法／接线／门闩分账；csih-cx-modularity-2145-checker-reject-N1N3.md；三轴共构续页 E2 include／公开集可见性／投影合法性；41样例 vs 42+门闩分账）；其后 tip 另含 K6-10 tape（工程并行，非本拍切对象）
 - **Latest：** **v0.0.40**；Paper A 冻结重测身份仍 **v0.0.19**（本拍不改；禁 bump/Latest）
 - **父节点：** **Paper A**（基于神经网络的编译器；TSV 表构造网络与权重，非训练；T1＝网络≡表于声明域 \(K_s\)；unisacc 为 POSIX C99 子集跨架构实证载体／字节流管道）→ **cx-lab／CXIF include-free 模块化设计旁支**（cols-boundary 共构、检查器拒 N1–N3、41样例 vs 42+门闩分账／产品计划 hygiene）→ 仍回 **A**
 - **状态：** **note only**（登记「须先 CXIF cols-boundary／N1–N3 检查器／41-vs-42 门闩分账绿／完稿才许投 A／构造+T1 才成立／gate 绿＝测量身份闭合／缺之则实证封口不完整／须升 Softguess／第四 seal-before」升格 ≠ 理论闸门；**不起稿**；**不改** A 根主张、键数身份、CN/EN/TeX/abstract、product/kernel/weights/facts、投稿方向；**不代裁** Ο1/Ο2（仍荐 Ο1）；**不重钉** Softguess tip-refresh／8509·8769；**不重做** #155 K6-7/8/9 E、#151 linalg/libneed E、0139 cx-lab E 及更早 ZData/padded/peversion/hostabi/same7 E）

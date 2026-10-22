@@ -896,8 +896,8 @@ job tape-reader python3 ./tests/tapereadercheck.py
 job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
 job script-inventory-self python3 ./tests/inventorycheck.py   # matching and global reachability regressions
 job inventory-derived python3 ./tests/inventoryderivedcheck.py   # exact generated inventory bytes
-job subtract-safety python3 ./tests/subtractsafety.py   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve
-job subtract-safety-selftest python3 ./tests/subtractsafety.py --selftest   # R16-9: both 0.0.15 counterexamples are still caught
+job subtract-safety tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve (.cx port of subtractsafety.py, 2026-10-22)
+job subtract-safety-selftest tests/bound 58 sh ./unisacc.com -run tests/subtractsafety.cx -- --selftest   # R16-9: both 0.0.15 counterexamples are still caught; --fix repoints an archived path
 job realprog    ./tests/realprog.sh   # R16-12: pinned real programs (kilo, jsmn, cJSON, lua, sqlite) built by us and cc, same run, same bytes; ratchet list
 job hosthdr     ./tests/hosthdr.sh   # R18-10: sys/stat, fcntl, poll, termios, sys/ioctl, isatty, dirent on macOS = cc (and gcc on Lima arm64)
 job asmtext     ./tests/asmtext.sh   # R18-1/R18-2: -S -b lnx | unisacc as == -c on the corpus; system as accepts; hand-written .s

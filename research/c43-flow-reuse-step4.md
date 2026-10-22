@@ -6,7 +6,7 @@
 ## 1. 已声明套件的指纹确实包含声明的 trees [读源码 + 计算]
 - `tests/gatequeue.py:385–398`：`inputs` 由 `files` 与每个声明的 `trees` 展开而来；对名单外的 tree（如 `plans`、`seed`）单独做 `git ls-files`（`:391–396`）。
 - `tests/gatequeue.py:410`（非窄路径）：`identity = [common, command, settings, executables, global_inputs, {n: digest(n) for n in inputs}]`。所以声明的 trees 的内容摘要进入指纹。
-- **计算证明（ledgercheck，拟声明 files=`tests/ledgercheck.py`、`src/version.h`，trees=`plans`）**：展开得 11 个输入，其中 `plans/v0.0.43.md` 在内（`plans` 下 8 个已跟踪文件，含 `plans/roadmap-0.0.x.md`、`plans/v0.0.37..42.md`）。`plans/v0.0.43.md` **不在全局名单**（计算：`False`），因此它只通过声明进入指纹。
+- **计算证明（ledgercheck，拟声明 files=`tests/ledgercheck.py`、`src/version.h`，trees=`plans`）**：展开得 11 个输入，其中 `plans/v0.0.43.md` 在内（`plans` 下 8 个已跟踪文件，含 `archive/plans/roadmap-0.0.x.md`、`plans/v0.0.37..42.md`）。`plans/v0.0.43.md` **不在全局名单**（计算：`False`），因此它只通过声明进入指纹。
 - **副作用必须说明**：`plans/` 已经被另外三个套件声明（`script-inventory`、`publish-order`、`gate-infra`，见 `tests/gatedeps.json`，计算核对），改 `plans/v0.0.43.md` 会让它们**也**重跑；不是“只改 ledgercheck”。这三个是既有行为，本刀不改它们。
 
 ## 2. 名单外读取：静态扫描与抽样 strace [计算 + 实际跑过]
@@ -16,8 +16,8 @@
 
 | 作业 | 实际读取（名单外） | 结论 |
 |---|---|---|
-| ledgercheck（前一刀已测） | `plans/roadmap-0.0.x.md`、`plans/v0.0.41.md`、`plans/v0.0.42.md` | **真漏洞**，需单套件声明 |
-| subtract-safety | `plans/gate-overlaps.md`、`plans/ideas.md`、`plans/roadmap-0.0.x.md`、`plans/v0.0.37/39/40/41/42.md`，以及 `docs/*`（多个） | **真漏洞**；`docs/` 也在名单外 |
+| ledgercheck（前一刀已测） | `archive/plans/roadmap-0.0.x.md`、`archive/plans/v0.0.41.md`、`archive/plans/v0.0.42.md` | **真漏洞**，需单套件声明 |
+| subtract-safety | `archive/plans/gate-overlaps.md`、`archive/plans/ideas.md`、`archive/plans/roadmap-0.0.x.md`、`plans/v0.0.37/39/40/41/42.md`，以及 `docs/*`（多个） | **真漏洞**；`docs/` 也在名单外 |
 | docs | `prd.md`、`spec.md`、`research/model-bytes.json`、`research/unisacc-paper.md` | **真漏洞**：它改 prd/spec 的内容时，指纹不变 |
 | rowcov-pp | 无（静态提到 `research/`，运行时未读） | 静态误报 |
 

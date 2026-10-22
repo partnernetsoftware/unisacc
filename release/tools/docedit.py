@@ -7,7 +7,7 @@
                                                            before the edit) and contain every required heading
 
 0586f01a wrote `open(p,'w').write(open(p).read()+note)`: the write-mode open truncated the file before the read, and
-plans/v0.0.39.md went from 98 to 6 lines unnoticed.  Both subcommands fail closed (rc 1) when the old text is not
+archive/plans/v0.0.39.md went from 98 to 6 lines unnoticed.  Both subcommands fail closed (rc 1) when the old text is not
 an exact prefix of the new text or a required heading is missing; rc 2 for usage errors."""
 import argparse, os, sys, tempfile
 

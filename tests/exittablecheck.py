@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory() as m:
     rc, out, err = run('0.0.40', inherit, ('--h1', str(r / 'archive/plans/v0.0.38.md')))
     assert rc == 0 and json.loads(out)['rows'][0]['cls'] == 'HOST_TIMEOUT', (rc, out, err)
     # disagreeing --h1: old/decoy plan, or the version plan itself when H1 is inherited -> not a bypass
-    for h1 in (str(r / 'archive/plans/v0.0.37.md'), str(r / 'plans/v0.0.40.md')):
+    for h1 in (str(r / 'archive/plans/v0.0.37.md'), str(r / 'plans' / 'v0.0.40.md')):   # r is this check's fixture tree, not the repo
         rc, out, err = run('0.0.40', inherit, ('--h1', h1))
         assert rc == 2 and out == '' and 'not a bypass' in err, (h1, rc, out, err)
     # broken declaration cannot be rescued by --h1 pointing at a valid old table
@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory() as m:
     assert rc == 0 and json.loads(out)['rows'][0]['cls'] == 'NEEDS_RULING', (rc, out, err)
     # OWN row: --h1 must be the plan itself; pointing at the old inherit target is refused
     own = '| H1 | 超时：tools-2 | cc | x | 0 |\n'
-    rc, out, err = run('0.0.41', own, ('--h1', str(r / 'plans/v0.0.41.md')))
+    rc, out, err = run('0.0.41', own, ('--h1', str(r / 'plans' / 'v0.0.41.md')))
     assert rc == 0 and json.loads(out)['rows'][0]['cls'] == 'HOST_TIMEOUT', (rc, out, err)
     rc, out, err = run('0.0.41', own, ('--h1', str(r / 'archive/plans/v0.0.38.md')))
     assert rc == 2 and out == '' and 'not a bypass' in err, (rc, out, err)

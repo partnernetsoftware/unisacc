@@ -14,7 +14,7 @@
 |---|---|---|
 | exec-warnprep-0..3（4 个作业）、exec-driver-language-2 | `seed/ape.c`、`seed/blob.c` 等 12 个 `seed/` 文件（作为构造工具的源码，由 cc 现场编译） | `seed/ape.c` **不在** 名单（NO）；两者声明里也没有 seed（`files`/`trees` 为空） |
 | exec-multi-ua-n-reverse | 同上 | 名单外，但它声明了 `seed` trees，所以声明的输入里有它（已覆盖） |
-| ledgercheck | `plans/roadmap-0.0.x.md`、`plans/v0.0.41.md`、`plans/v0.0.42.md` | `plans/*` **不在** 名单（NO） |
+| ledgercheck | `archive/plans/roadmap-0.0.x.md`、`archive/plans/v0.0.41.md`、`archive/plans/v0.0.42.md` | `plans/*` **不在** 名单（NO） |
 | freezecheck | `.git/HEAD` | 不是文件内容，是分支元数据 |
 | 其它 | `/tmp`、`~/.local` 的 Python 包、系统 cc | 不在名单（外部，靠 env-pin 与 provenance 处理） |
 
@@ -31,7 +31,7 @@ other 组实际读集（strace，三个代表）与现声明（均无声明）�
 | 作业 | 实际读取（仓库内，去 pycache） | 草案 files | 草案 trees | 名单内？ |
 |---|---|---|---|---|
 | gate-layers | `tests/gatelayers.py`、`tests/bound.{py,c}`、`tests/lib.sh`、`tests/seedconstructcheck.py`、`exec/facts/parse-{constants,tokens,words}.tsv`、`parse2-extra.tsv`、`valueranks.tsv`，`exec/build`、`exec/facts` 目录 | 上述 `tests/*` 与 5 个 facts | `exec/build`、`exec/facts` | 是 |
-| ledgercheck | `tests/ledgercheck.py`、`src/version.h`、`plans/roadmap-0.0.x.md`、`plans/v0.0.41.md`、`plans/v0.0.42.md` | `tests/ledgercheck.py`、`src/version.h` | `plans` | **plans 否** |
+| ledgercheck | `tests/ledgercheck.py`、`src/version.h`、`archive/plans/roadmap-0.0.x.md`、`archive/plans/v0.0.41.md`、`archive/plans/v0.0.42.md` | `tests/ledgercheck.py`、`src/version.h` | `plans` | **plans 否** |
 | freezecheck | `tests/freezecheck.py`，`.git/HEAD` | `tests/freezecheck.py` | （无） | `.git/HEAD` 不可声明为文件，应以 `git rev-parse HEAD` 作为戳 |
 
 草案只放在 `research/`（见 `research/c43-undeclared-draft.tsv` 与本节），**没有写进 gatedeps**。它与现声明的比对结论是：other 组三个代表全部未声明；草案的 trees 与名单的关系说明，依赖漏洞集中在 `plans/`、`seed/`，而不在 `tests/`、`exec/`。

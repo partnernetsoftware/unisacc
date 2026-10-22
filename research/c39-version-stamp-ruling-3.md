@@ -1,7 +1,7 @@
 # 机房主任代裁 ③ — src 轻审盖戳 18ce7e3b（2026-10-10 ≈16:21 SGT）
 
 > 仓内落盘副本。源件仓外：`/tmp/unisacc-cdx2/observe-10m/version-stamp-ruling-3-20261010T082147Z.md`（latest-version-stamp-ruling-3.md）。
-> 盖戳台账短行见 `research/c38-open-rulings.md` / `plans/v0.0.39.md`（0586f01a）；本文件保留裁定③全文。
+> 盖戳台账短行见 `research/c38-open-rulings.md` / `archive/plans/v0.0.39.md`（0586f01a）；本文件保留裁定③全文。
 
 ## 裁
 **盖戳=YES**：`18ce7e3b` 记为 **已审 0.0.39 src 轻审**（版本行-only）。

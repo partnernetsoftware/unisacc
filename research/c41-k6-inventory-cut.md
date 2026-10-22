@@ -2,7 +2,7 @@
 
 **状态（2026-10-11 ≈18:35 SGT，政委并授 K6-0）**：盘点开工并落本页。**不**实现 C 参考；**不**删 Python；**不** bump；**不** Draft/publish/扩签/动 Latest。tip 基线 **510159e4**；`version.h`=0.0.40；Latest=v0.0.40。roadmap：0.0.41 = K6。
 
-## 并授钉（照录 plans/v0.0.41.md）
+## 并授钉（照录 archive/plans/v0.0.41.md）
 
 | 钉 | 值 |
 |---|---|
@@ -161,7 +161,7 @@
 | 夹具 | `tests/unisabitscheck.sh`；gate job `unisa-bits` |
 | 读数 | rc0；SAME×7 / DIFF×0（MASK64、round_up×20、det×2、NEG-a0、NEG-badint） |
 | 明确未做 | 不删 bits.py；不切下一叶子；不 bump；不 Draft/Latest/签 |
-| 点采样边界（≈18:54） | same7=断言组点采样（20 手写）；非穷举；`seed/unisa_bits.c` 不在产品闭包；穷举/更大随机另排（见 plans/v0.0.41.md + c41-k6-1-bits.md） |
+| 点采样边界（≈18:54） | same7=断言组点采样（20 手写）；非穷举；`seed/unisa_bits.c` 不在产品闭包；穷举/更大随机另排（见 archive/plans/v0.0.41.md + c41-k6-1-bits.md） |
 
 ---
 

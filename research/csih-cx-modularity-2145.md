@@ -12,7 +12,7 @@
 
 | 钉 | 值 |
 |---|---|
-| **文件域写** | `research/csih-cx-modularity-2145.md`；`research/cxif-cols-boundary/**`；`plans/v0.0.41.md`（仅追加「CXIF 旁注 / 41↔42 分账」小节，不改 K6 主表） |
+| **文件域写** | `research/csih-cx-modularity-2145.md`；`research/cxif-cols-boundary/**`；`archive/plans/v0.0.41.md`（仅追加「CXIF 旁注 / 41↔42 分账」小节，不改 K6 主表） |
 | **文件域只读** | `docs/cx-spec-draft.md`；`apps/csih/cols.cx`；`apps/csih/csih_cols.h`；`apps/csih/docs/module-decision.md`；`include/cx.h`；现 tip |
 | **禁写** | `src/`（含 `version.h`）、`exec/`、`kernel/`、`weights/`、`release/`、`seed/`、`tests/gate.sh`、既有 K6-1..9 闭包材料、tag、Latest、签、Draft、bump |
 | **预算** | 墙钟 **≤30 min**（设计短页 + 样例材料 + 计划旁注）；超则首红停或拆刀 |

@@ -48,7 +48,7 @@
 | 2 | elfobj | 1 | 同上 | 待裁；与 #1 同源 |
 | 3 | exec-native-stages | 1 | neg ok 4, fail 1 | 待裁；单个负例失败 |
 | 4 | freezecheck | 1 | closure commits without fix: 4 | 待裁；2000 时为 3，本拍为 4，需要看是哪一条 |
-| 5 | ledgercheck | 1 | carry into v0.0.42.md mismatches 1 | 待裁；与 `plans/v0.0.42.md` 账目有关 |
+| 5 | ledgercheck | 1 | carry into v0.0.42.md mismatches 1 | 待裁；与 `archive/plans/v0.0.42.md` 账目有关 |
 | 6 | observation | 1 | queue.sh on window rc 65: exit 2, launches | 元套件，观察面；非产品 |
 | 7 | queuestart-launch | 1 | another queue.sh running (pid 2411881) | 元套件，撞车；非产品 |
 | 8 | queuetimeout | 1 | `$2` unbound variable（`tests/queuetimeoutcheck.sh:35`） | 测试脚本缺陷；非产品 |

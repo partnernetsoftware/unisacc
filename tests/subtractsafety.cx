@@ -1,0 +1,310 @@
+#!/usr/bin/env -S unisacc.com -run
+/* subtractsafety.cx -- the subtract-safety gate (R16-9) in C, ported from tests/subtractsafety.py (2026-10-22, the
+   owner's direction: iterate with unisacc.com + .c/.cx, not Python).  Removing or archiving a file must not leave a
+   dangling user.  Over the tracked tree (git ls-files; ujs/ is another project and skipped):
+     1. no file outside archive/ imports a Python module whose only definition is under archive/;
+     2. no file outside archive/ names a path (dir/name.ext) whose basename is an archived file and which resolves to
+        nothing outside archive/ -- a path that says archive/... is fine, that is the point of archiving;
+     3. AGENTS.md and CLAUDE.md each resolve (at most 8 symlink hops, no cycle) to a non-empty file with a heading.
+   usage: sh ./unisacc.com -run tests/subtractsafety.cx -- [ROOT] [--fix] | --selftest
+   --fix rewrites a dangling path of kind 2 to archive/PATH when exactly that archived file exists (the reference was
+   left behind when its target was archived), then reports what is still dangling.  Text files are those of the
+   Python gate's suffix list; a byte >= 0x80 counts as a word character (UTF-8 text), as \w does for letters. */
+#include <cx.h>
+#include <sys/stat.h>
+
+typedef struct { char **v; int n, cap; } List;
+static void push(List *l, const char *s) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 1024; l->v = realloc(l->v, l->cap * sizeof *l->v); }
+    l->v[l->n++] = strdup(s);
+}
+/* open-addressing string set */
+typedef struct { char **slot; unsigned cap; } Set;
+static unsigned hash(const char *s, int n) { unsigned h = 2166136261u; int i; for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u; return h; }
+static void set_add(Set *t, const char *s) {
+    unsigned i;
+    if (!t->cap) { t->cap = 1 << 16; t->slot = calloc(t->cap, sizeof *t->slot); }
+    for (i = hash(s, (int)strlen(s)) & (t->cap - 1); t->slot[i]; i = (i + 1) & (t->cap - 1)) if (!strcmp(t->slot[i], s)) return;
+    t->slot[i] = strdup(s);
+}
+static int set_hasn(Set *t, const char *s, int n) {
+    unsigned i; if (!t->cap) return 0;
+    for (i = hash(s, n) & (t->cap - 1); t->slot[i]; i = (i + 1) & (t->cap - 1)) if ((int)strlen(t->slot[i]) == n && !memcmp(t->slot[i], s, n)) return 1;
+    return 0;
+}
+static int set_has(Set *t, const char *s) { return set_hasn(t, s, (int)strlen(s)); }
+
+static const char *TEXT[] = { ".py", ".sh", ".md", ".c", ".h", ".tsv", ".txt", ".json", ".yml", ".yaml", ".toml", ".cfg",
+                              ".ini", ".mk", ".S", ".s", ".html", ".css", ".js", ".in", ".knownfail", 0 };
+static const char *base(const char *p) { const char *b = strrchr(p, '/'); return b ? b + 1 : p; }
+static const char *suffix(const char *p) { const char *b = base(p), *d = strrchr(b, '.'); return d && d != b ? d : ""; }
+static int textfile(const char *p) {
+    const char *s = suffix(p); int i; size_t n = strlen(p);
+    if (!*s) return 1;
+    if (n >= 8 && !strcmp(p + n - 8, "Makefile")) return 1;
+    for (i = 0; TEXT[i]; i++) if (!strcmp(s, TEXT[i])) return 1;
+    return 0;
+}
+static int isw(int c) { return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80; }
+/* one UTF-8 code point at s[i] (its byte length in *l), and the code point that ends just before s[i] */
+static int cp_at(const char *s, size_t n, size_t i, int *l) {
+    unsigned char c = (unsigned char)s[i]; int k, cp, need;
+    if (c < 0x80) { *l = 1; return c; }
+    need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0; cp = c & (0x3F >> need);
+    for (k = 1; k <= need && i + k < n && ((unsigned char)s[i + k] & 0xC0) == 0x80; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+    *l = k; return cp;
+}
+static int cp_before(const char *s, size_t i) {
+    size_t j = i; int l;
+    if (!i) return ' ';
+    j--; while (j > 0 && ((unsigned char)s[j] & 0xC0) == 0x80 && i - j < 4) j--;
+    return cp_at(s, i, j, &l);
+}
+/* Python's \w on text: ASCII word characters and letters; punctuation and symbol blocks are not word characters */
+static int wordcp(int c) {
+    if (c < 0x80) return isw(c);
+    if (c <= 0xBF) return c == 0xAA || c == 0xB5 || c == 0xBA;
+    if (c == 0xD7 || c == 0xF7) return 0;
+    if (c >= 0x2000 && c <= 0x2BFF) return 0;          /* general punctuation .. misc symbols and arrows */
+    if (c >= 0x3000 && c <= 0x303F) return 0;          /* CJK symbols and punctuation */
+    if (c >= 0xFE30 && c <= 0xFE4F) return 0;          /* CJK compatibility forms */
+    if ((c >= 0xFF00 && c <= 0xFF0F) || (c >= 0xFF1A && c <= 0xFF20) || (c >= 0xFF3B && c <= 0xFF40) || (c >= 0xFF5B && c <= 0xFF65)) return 0;
+    if (c >= 0xFFF0) return 0;
+    return 1;
+}
+static int pathcp(int c) { return wordcp(c) || c == '.' || c == '-'; }
+
+static char ROOT[4096];
+static List names, outside;
+static Set outside_set, archived_set, archived_names, outside_stems, archived_stems;
+static int nfind;
+
+static void tracked(void) {
+    char *out = 0; size_t n = 0, i = 0; char *a[] = { "git", "-C", ROOT, "ls-files", "-z", "--cached", 0 };
+    if (cx_runv_timeout(a, 30, &out, &n) || !out) { fprintf(stderr, "subtract-safety: git ls-files failed in %s\n", ROOT); exit(2); }
+    while (i < n) {
+        char *s = out + i; size_t m = strlen(s); char path[8192]; struct stat st;
+        i += m + 1;
+        if (!m || !strncmp(s, "ujs/", 4) || !strncmp(s, ".git/", 5)) continue;
+        snprintf(path, sizeof path, "%s/%s", ROOT, s);
+        if (lstat(path, &st)) continue;                /* deleted in the working tree: nothing to read */
+        if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) continue;
+        push(&names, s);
+    }
+    free(out);
+}
+static int resolves(const char *tok, const char *referrer) {
+    char t[2048], rel[4096]; const char *p; int k;
+    snprintf(t, sizeof t, "%s", tok);
+    p = t; while (!strncmp(p, "./", 2)) p += 2;
+    if (!strncmp(p, "ujs/", 4) || !strncmp(p, ".git/", 5)) return 1;
+    for (;;) {                                         /* `$R/tests/lib.sh` arrives as `R/tests/lib.sh`: try every suffix */
+        if (set_has(&outside_set, p)) return 1;
+        {   /* os.path.normpath(join(dirname(referrer), suffix)) */
+            char parts[64][256]; int np = 0, i; char buf[4096]; const char *d = strrchr(referrer, '/');
+            snprintf(buf, sizeof buf, "%.*s%s%s", d ? (int)(d - referrer) : 0, referrer, d ? "/" : "", p);
+            {   char *s = buf, *e;
+                while (*s) { e = strchr(s, '/'); if (!e) e = s + strlen(s);
+                    if (e - s == 0 || (e - s == 1 && s[0] == '.')) {}
+                    else if (e - s == 2 && s[0] == '.' && s[1] == '.') { if (np) np--; }
+                    else if (np < 64 && e - s < 256) { memcpy(parts[np], s, e - s); parts[np][e - s] = 0; np++; }
+                    s = *e ? e + 1 : e; } }
+            rel[0] = 0; k = 0;
+            for (i = 0; i < np; i++) k += snprintf(rel + k, sizeof rel - k, "%s%s", i ? "/" : "", parts[i]);
+            if (set_has(&outside_set, rel)) return 1;
+        }
+        p = strchr(p, '/'); if (!p) return 0; p++;
+    }
+}
+/* the archived path to repoint a dangling token at: only the whole token (less a leading ./) with archive/TOKEN
+   tracked -- a token whose tail is archived but whose head is elsewhere (tmp/x/plans/v0.0.42.md) is left as found */
+static int archive_target(const char *tok, char *out, int cap) {
+    const char *p = tok; char a[4096];
+    while (!strncmp(p, "./", 2)) p += 2;
+    snprintf(a, sizeof a, "archive/%s", p);
+    if (!set_has(&archived_set, a)) return 0;
+    snprintf(out, cap, "%s", p); return 1;
+}
+
+static int fixes, unfixable;
+static void scan_file(const char *n, int fix) {
+    char path[8192]; size_t len; char *t, *s, *e; int line = 1, changed = 0;
+    List edits = {0};                                  /* "offset\tlen\treplacement" */
+    snprintf(path, sizeof path, "%s/%s", ROOT, n);
+    t = cx_read(path, &len); if (!t) return;
+    if (len > (4u << 20)) len = 4u << 20;
+    { size_t i, lim = len < 4096 ? len : 4096; for (i = 0; i < lim; i++) if (!t[i]) { free(t); return; } }
+    if (!strcmp(suffix(n), ".py")) {                   /* 1. imports */
+        for (s = t; s < t + len; s = e + 1) {
+            char *q; e = memchr(s, '\n', t + len - s); if (!e) e = t + len;
+            q = s; while (q < e && (*q == ' ' || *q == '\t')) q++;
+            if (e - q > 5 && !strncmp(q, "from", 4) && (q[4] == ' ' || q[4] == '\t')) {
+                char *m = q + 4; while (m < e && (*m == ' ' || *m == '\t')) m++;
+                {   char *me = m; while (me < e && (isw((unsigned char)*me) || *me == '.')) me++;
+                    char *h = m; while (h < me && *h != '.') h++;
+                    if (me > m && set_hasn(&archived_stems, m, (int)(h - m)) && !set_hasn(&outside_stems, m, (int)(h - m))) {
+                        printf("subtract-safety: %s:%d imports %.*s, which exists only under archive/\n", n, line, (int)(h - m), m); nfind++; } }
+            } else if (e - q > 7 && !strncmp(q, "import", 6) && (q[6] == ' ' || q[6] == '\t')) {
+                char *m = q + 6;
+                for (;;) {
+                    char *me, *h; while (m < e && (*m == ' ' || *m == '\t')) m++;
+                    me = m; while (me < e && (isw((unsigned char)*me) || *me == '.')) me++;
+                    if (me == m) break;
+                    h = m; while (h < me && *h != '.') h++;
+                    if (set_hasn(&archived_stems, m, (int)(h - m)) && !set_hasn(&outside_stems, m, (int)(h - m))) {
+                        printf("subtract-safety: %s:%d imports %.*s, which exists only under archive/\n", n, line, (int)(h - m), m); nfind++; }
+                    m = me; while (m < e && (*m == ' ' || *m == '\t')) m++;
+                    if (m < e && *m == ',') { m++; continue; }
+                    break;
+                }
+            }
+            line++;
+        }
+    }
+    line = 1;                                          /* 2. path tokens */
+    {   size_t i = 0;
+        while (i < len) {
+            int l, c = cp_at(t, len, i, &l), pc = cp_before(t, i), l2;
+            size_t j, k, segs = 0;
+            if (c == '\n') { line++; i++; continue; }
+            if (!wordcp(c) || wordcp(pc) || pc == '$' || pc == '@' || pc == '{' || pc == '%') { i += l; continue; }
+            j = i + l; while (j < len && pathcp(cp_at(t, len, j, &l2))) j += l2;
+            k = j;
+            while (k + 1 < len && t[k] == '/' && pathcp(cp_at(t, len, k + 1, &l2))) {
+                k += 1; while (k < len && pathcp(cp_at(t, len, k, &l2))) k += l2; segs++; }
+            if (!segs) { i += l; continue; }
+            {   char tok[2048]; size_t m = k - i; const char *b; int lineno = line;
+                if (m >= sizeof tok) { i = k; continue; }
+                memcpy(tok, t + i, m); tok[m] = 0;
+                while (m && tok[m - 1] == '.') tok[--m] = 0;      /* token.rstrip('.') */
+                b = base(tok);
+                if (strncmp(tok, "archive/", 8) && !strstr(tok, "/archive/") && strchr(b, '.') && set_has(&archived_names, b) && !resolves(tok, n)) {
+                    char target[2048];
+                    if (fix && archive_target(tok, target, sizeof target)) {
+                        char ed[4200]; size_t off = i + (strlen(tok) - strlen(target));
+                        snprintf(ed, sizeof ed, "%zu\t%zu\tarchive/%s", off, strlen(target), target); push(&edits, ed); fixes++;
+                    } else {
+                        if (fix) unfixable++;
+                        printf("subtract-safety: %s:%d names %s, but the only %s is under archive/\n", n, lineno, tok, b); nfind++;
+                    }
+                }
+            }
+            i = k;
+        }
+    }
+    if (fix && edits.n) {                              /* apply back to front, then write once */
+        int x; char *u = malloc(len + (size_t)edits.n * 16 + 1); size_t ulen = 0, pos = 0;
+        for (x = 0; x < edits.n; x++) {
+            size_t off, l; char *rep = strchr(strchr(edits.v[x], '\t') + 1, '\t') + 1;
+            sscanf(edits.v[x], "%zu\t%zu", &off, &l);
+            memcpy(u + ulen, t + pos, off - pos); ulen += off - pos;
+            memcpy(u + ulen, rep, strlen(rep)); ulen += strlen(rep); pos = off + l;
+        }
+        memcpy(u + ulen, t + pos, len - pos); ulen += len - pos;
+        if (cx_write(path, u, ulen)) { fprintf(stderr, "subtract-safety: cannot write %s\n", path); exit(2); }
+        changed = edits.n; free(u);
+    }
+    (void)changed;
+    { int x; for (x = 0; x < edits.n; x++) free(edits.v[x]); free(edits.v); }
+    free(t);
+}
+static int instructions(void) {                        /* 3. AGENTS.md and CLAUDE.md */
+    static const char *N[] = { "AGENTS.md", "CLAUDE.md" };
+    int i, bad = 0;
+    for (i = 0; i < 2; i++) {
+        char cur[8192], seen[9][8192]; int hops = 0, ok = 1, h;
+        snprintf(cur, sizeof cur, "%s/%s", ROOT, N[i]);
+        for (;;) {
+            struct stat st; char tgt[4096]; long r;
+            if (lstat(cur, &st)) { printf("subtract-safety: %s: missing\n", N[i]); ok = 0; break; }
+            if (!S_ISLNK(st.st_mode)) break;
+            if (hops == 8) { printf("subtract-safety: %s: more than 8 symlink hops\n", N[i]); ok = 0; break; }
+            snprintf(seen[hops++], 8192, "%s", cur);
+            r = readlink(cur, tgt, sizeof tgt - 1); if (r < 0) { ok = 0; break; } tgt[r] = 0;
+            if (tgt[0] == '/') snprintf(cur, sizeof cur, "%s", tgt);
+            else { char d[8192]; char *sl; snprintf(d, sizeof d, "%s", cur); sl = strrchr(d, '/'); if (sl) *sl = 0; snprintf(cur, sizeof cur, "%s/%s", d, tgt); }
+            for (h = 0; h < hops; h++) if (!strcmp(seen[h], cur)) { printf("subtract-safety: %s: symlink cycle\n", N[i]); ok = 0; break; }
+            if (!ok) break;
+        }
+        if (ok) {
+            size_t n; char *t = cx_read(cur, &n); size_t k; int head = 0, nonblank = 0;
+            for (k = 0; t && k < n; k++) { if (t[k] != ' ' && t[k] != '\n' && t[k] != '\t' && t[k] != '\r') nonblank = 1; if (t[k] == '#' && (k == 0 || t[k - 1] == '\n')) head = 1; }
+            if (!t || !nonblank) { printf("subtract-safety: %s: resolves to an empty file\n", N[i]); ok = 0; }
+            else if (!head) { printf("subtract-safety: %s: resolves to a file with no heading\n", N[i]); ok = 0; }
+            free(t);
+        }
+        bad += !ok;
+    }
+    nfind += bad;
+    return bad;
+}
+static int run(int fix) {
+    int i, archived = 0, bad_instr;
+    tracked();
+    for (i = 0; i < names.n; i++) {
+        const char *n = names.v[i];
+        if (!strncmp(n, "archive/", 8)) {
+            archived++; set_add(&archived_set, n); set_add(&archived_names, base(n));
+            if (!strcmp(suffix(n), ".py")) { char s[512]; snprintf(s, sizeof s, "%.*s", (int)(strlen(base(n)) - 3), base(n)); if (strcmp(s, "__init__") && strcmp(s, "__main__")) set_add(&archived_stems, s); }
+        } else {
+            push(&outside, n); set_add(&outside_set, n);
+            if (!strcmp(suffix(n), ".py")) { char s[512]; snprintf(s, sizeof s, "%.*s", (int)(strlen(base(n)) - 3), base(n)); set_add(&outside_stems, s);
+                if (!strcmp(base(n), "__init__.py")) { char d[512]; const char *e = strrchr(n, '/'); const char *b2; snprintf(d, sizeof d, "%.*s", e ? (int)(e - n) : 0, n); b2 = base(d); set_add(&outside_stems, b2); } }
+        }
+    }
+    for (i = 0; i < outside.n; i++) if (textfile(outside.v[i])) scan_file(outside.v[i], fix);
+    bad_instr = instructions();
+    if (fix) printf("subtract-safety --fix: %d references repointed to archive/, %d left (no unique archived target)\n", fixes, unfixable);
+    printf("subtract-safety  archived files %d   dangling users %d   instruction files ok %s\n", archived, nfind, bad_instr ? "no" : "yes");
+    return nfind ? 1 : 0;
+}
+
+static void put(const char *root, const char *rel, const char *text) {
+    char p[8192], d[8192], *s; snprintf(p, sizeof p, "%s/%s", root, rel); snprintf(d, sizeof d, "%s", p);
+    for (s = d + strlen(root) + 1; (s = strchr(s, '/')); s++) { *s = 0; mkdir(d, 0755); *s = '/'; }
+    if (cx_write(p, text, strlen(text))) exit(2);
+}
+static int selftest(void) {                            /* the two 0.0.15 incidents, in a temp git tree */
+    char d[] = "/tmp/subtract-safety-XXXXXX", cmd[8400]; char *out = 0; size_t n;
+    if (!mkdtemp(d)) return 2;
+    put(d, "AGENTS.md", "# rules\n");
+    {   char a[8192]; snprintf(a, sizeof a, "%s/CLAUDE.md", d); symlink("AGENTS.md", a); }
+    put(d, "tests/libcheck.py", "import os\nfrom modeltypedcandidatescheck import main\n");
+    put(d, "tests/run.sh", ". \"$R/tests/lib.sh\"\npython3 tests/old_check.py\n");
+    put(d, "tests/lib.sh", "x=1\n");
+    put(d, "docs.md", "see [old](archive/tests/old_check.py) and tests/lib.sh\n");
+    put(d, "archive/tests/modeltypedcandidatescheck.py", "def main(): pass\n");
+    put(d, "archive/tests/old_check.py", "print(1)\n");
+    {   char *a[] = { "git", "-C", d, "init", "-q", 0 }; if (cx_runv_timeout(a, 10, 0, 0)) return 2; }
+    {   char *a[] = { "git", "-C", d, "add", "-A", 0 }; if (cx_runv_timeout(a, 10, 0, 0)) return 2; }
+    snprintf(cmd, sizeof cmd, "%s", d);
+    {   char *a[] = { "sh", "./unisacc.com", "-run", "tests/subtractsafety.cx", "--", cmd, 0 }; cx_runv_timeout(a, 55, &out, &n); }
+    if (!out || !strstr(out, "tests/libcheck.py:2 imports modeltypedcandidatescheck") || !strstr(out, "tests/run.sh:2 names tests/old_check.py")
+        || strstr(out, "docs.md") || strstr(out, "lib.sh,") || strstr(out, "AGENTS.md:") || strstr(out, "CLAUDE.md:")) {
+        printf("subtract-safety selftest: FAIL (incident 1 not caught as expected)\n%s", out ? out : ""); return 1; }
+    free(out); out = 0;
+    /* --fix repoints the dangling path; the import stays a finding (only a path can be repointed) */
+    {   char *a[] = { "sh", "./unisacc.com", "-run", "tests/subtractsafety.cx", "--", cmd, "--fix", 0 }; cx_runv_timeout(a, 55, &out, &n); }
+    {   char p[8192]; size_t m; char *t; snprintf(p, sizeof p, "%s/tests/run.sh", d); t = cx_read(p, &m);
+        if (!t || !strstr(t, "python3 archive/tests/old_check.py")) { printf("subtract-safety selftest: FAIL (--fix did not repoint)\n"); return 1; } free(t); }
+    free(out); out = 0;
+    /* incident 2: AGENTS.md -> CLAUDE.md -> AGENTS.md */
+    {   char a[8192]; snprintf(a, sizeof a, "%s/AGENTS.md", d); unlink(a); symlink("CLAUDE.md", a); }
+    {   char *a[] = { "sh", "./unisacc.com", "-run", "tests/subtractsafety.cx", "--", cmd, 0 }; cx_runv_timeout(a, 55, &out, &n); }
+    if (!out || !strstr(out, "AGENTS.md: symlink cycle") || !strstr(out, "CLAUDE.md: symlink cycle")) { printf("subtract-safety selftest: FAIL (cycle not caught)\n%s", out ? out : ""); return 1; }
+    free(out);
+    {   char *a[] = { "rm", "-rf", d, 0 }; cx_runv_timeout(a, 10, 0, 0); }
+    printf("subtract-safety selftest: both 0.0.15 counterexamples caught; --fix repoints an archived path\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, fix = 0;
+    if (getcwd(ROOT, sizeof ROOT) == 0) return 2;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--selftest")) return selftest();
+        else if (!strcmp(argv[i], "--fix")) fix = 1;
+        else snprintf(ROOT, sizeof ROOT, "%s", argv[i]);
+    }
+    return run(fix);
+}
