@@ -1,6 +1,6 @@
 #!/bin/sh
 # RI snapshot core (writer and loader, resourceledger.h): positive load, wrong stage, existing target, no COMMIT, capacity
-# overflow (nothing published), read-only target (write failure). Each step is bounded by tests/bound.
+# overflow (nothing published), non-directory parent (write failure). Each step is bounded by tests/bound.
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 B() { "$R/tests/bound" 55 "$@"; }

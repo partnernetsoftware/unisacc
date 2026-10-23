@@ -31,10 +31,20 @@ int main(int argc, char **argv) {
         printf("capacity rc=%d err=%s\n", r, err); CHECK(r != 0 && strstr(err, "snapshot-capacity-exceeded") != NULL, "capacity overflow refused by name");
         { char p[1024]; snprintf(p, sizeof p, "%s/COMMIT", d2); FILE *f = fopen(p, "rb"); CHECK(f == NULL, "no COMMIT published on overflow"); if (f) fclose(f); }
         { FILE *f2; char p2[1024]; snprintf(p2, sizeof p2, "%s/resources.tsv", d2); f2 = fopen(p2, "rb"); CHECK(f2 == NULL, "no final snapshot files left on overflow"); if (f2) fclose(f2); } } }
-    /* write failure: the parent directory is read-only, so the staging directory cannot be created */
-    { char ro[512], d3[512]; snprintf(ro, sizeof ro, "%s/ro", root); mkdir(ro, 0500); snprintf(d3, sizeof d3, "%s/snap-x", ro);
-      { int r = rl_snapshot_write(d3, "lower:lnx/x86_64/run/O0", input, (int)strlen((char *)input), b, 2, err, sizeof err);
-        printf("readonly rc=%d err=%s\n", r, err); CHECK(r != 0 && strstr(err, "resource-snapshot-write-failed") != NULL, "read-only target refused by name (write failure)"); } }
+    /* write failure: a regular-file parent prevents staging mkdir for every uid. */
+    { char blocked[512], d3[1024]; FILE *f; int setup_ok = 0;
+      snprintf(blocked, sizeof blocked, "%s/write-blocker", root);
+      f = fopen(blocked, "wb");
+      if (f) { int wrote = fputs("fixture parent is a regular file\n", f) >= 0;
+        int closed = fclose(f) == 0; setup_ok = wrote && closed; }
+      CHECK(setup_ok, "write-failure regular-file parent created");
+      if (setup_ok) { struct stat st; int regular = stat(blocked, &st) == 0 && S_ISREG(st.st_mode);
+        CHECK(regular, "write-failure parent is a regular file");
+        if (regular) { int r; snprintf(d3, sizeof d3, "%s/snap-x", blocked); err[0] = 0;
+          r = rl_snapshot_write(d3, "lower:lnx/x86_64/run/O0", input, (int)strlen((char *)input), b, 2, err, sizeof err);
+          printf("write-failure rc=%d err=%s\n", r, err);
+          CHECK(r != 0 && strstr(err, "resource-snapshot-write-failed") != NULL,
+                "non-directory parent refused by name (write failure)"); } } }
     /* writer refusals and the callable-address rule */
     { RLBlob z[1]; unsigned char zb[2] = {1, 2}; char d5[512];
       snprintf(d5, sizeof d5, "%s/neg-emptykey", root); z[0].key = zb; z[0].kn = 0; z[0].data = zb; z[0].len = 1;

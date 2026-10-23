@@ -32,6 +32,22 @@ SK=${SHARD%/*}; SN=${SHARD#*/}; [ "$SK" -le "$SN" ] || exit 2
 pick() { index=$((index+1)); [ $(((index-1)%SN)) -eq $((SK-1)) ]; }
 ok=0; bad=0
 fail() { bad=$((bad+1)); echo "  FAIL $*"; }
+forward_refusal() {
+    local names
+    names=$(awk -v probe="$1" '$1 == probe { print $2 }' "$R/tests/opt.tape-refuse")
+    awk -F "'" -v names="$names" '
+        BEGIN { n = split(names, keys, ","); for (i = 1; i <= n; i++) allowed[keys[i]] = 1 }
+        /^unisacc: error: undefined function / {
+            if (NF != 3 || $1 != "unisacc: error: undefined function " || $3 != "" || !($2 in allowed)) bad = 1
+            seen[$2] = 1; errors++; next
+        }
+        /^[0-9]+ errors? generated[.]$/ { count = $0 + 0; summaries++; next }
+        { bad = 1 }
+        END {
+            for (i = 1; i <= n; i++) if (!(keys[i] in seen)) bad = 1
+            exit (bad || !errors || summaries != 1 || count != errors || !n)
+        }' "$2"
+}
 
 if [ "$OPT_PART" = all ] || [ "$OPT_PART" = run ]; then
 index=0
@@ -40,30 +56,41 @@ for f in examples/*.c tests/c/*.c tests/c99/*.c corpus/c-testsuite/tests/single-
     pick || continue
     d="$R/$(dirname "$f")"; valid=1
     for o in -O0 -O2; do
-        if ! bound 10 "$UA" "$o" -I "$d" "$R/$f" -c >"$T/tape$o" 2>"$T/compile$o.log" || [ ! -s "$T/tape$o" ]; then
-            # Known non-C99 corpus inputs remain explicit exclusions, never passes.
-            if [[ "$f" == corpus/* ]] && grep -Fxqs "$(basename "$f" .c)" "$CORPUS_KEYS"; then
-                echo "  KNOWN $f $o: non-C99 input refused"
-            elif grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
-                echo "  KNOWN $f $o: forward-only probe; tape mode refuses by design (opt.tape-refuse)"
+        tape_status="$T/tape-status-$index$o"
+        "$_BOUND" --status "$tape_status" 10 "$UA" "$o" -I "$d" "$R/$f" -c >"$T/tape$o" 2>"$T/compile$o.log"
+        tape_rc=$?
+        if [ "$tape_rc" -ne 0 ] || [ ! -s "$T/tape$o" ]; then
+            if grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
+                if [ "$tape_rc" -ne 1 ] || [ "$(cat "$tape_status" 2>/dev/null)" != 256 ] ||
+                   ! forward_refusal "$(basename "$f" .c)" "$T/compile$o.log"; then
+                    fail "$f $o: unexpected forward-only tape diagnostic/status"; cat "$T/compile$o.log"; valid=0; continue
+                fi
+                echo "  EXPECTED $f $o: forward-only tape refusal; checking execution"
+            elif [[ "$f" == corpus/* ]] && grep -Fxqs "$(basename "$f" .c)" "$CORPUS_KEYS"; then
+                echo "  KNOWN $f $o: non-C99 input refused"; valid=0; continue
             elif grep -Fxqs "$(basename "$f" .c)" "$DIFFTEST_KEYS"; then
-                echo "  KNOWN $f $o: the reference refuses this probe on purpose (difftest.knownfail)"
-            else fail "$f $o: tape build failed or empty"; cat "$T/compile$o.log"; fi
-            valid=0; continue
-        fi
-        # Inverted knownfail discipline: a listed probe whose tape build passes is a revived entry.
-        if grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
+                echo "  KNOWN $f $o: the reference refuses this probe on purpose (difftest.knownfail)"; valid=0; continue
+            else
+                fail "$f $o: tape build failed or empty"; cat "$T/compile$o.log"; valid=0; continue
+            fi
+        elif grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
             fail "$f $o: listed in opt.tape-refuse but the tape build passed (delete its line)"; valid=0; continue
         fi
-        sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/status$o"   # the one guard (commissar ruling 2026-10-23)
+        if ! sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/status$o"; then
+            fail "$f $o: status cleanup refused"; valid=0; continue
+        fi
         (cd "$T" && "$_BOUND" --status "$T/status$o" 5 "$UA" $o -I "$d" "$R/$f" -run > "$T/out$o" 2>&1 </dev/null
-         echo "rc=$?" >> "$T/out$o")
+         run_rc=$?; echo "$run_rc" > "$T/rc$o"; echo "rc=$run_rc" >> "$T/out$o")
     done
     [ "$valid" -eq 1 ] || continue
     normal=1
     for o in -O0 -O2; do
         status=$(cat "$T/status$o" 2>/dev/null)
         if [ -z "$status" ] || [ $((status & 127)) -ne 0 ]; then normal=0; fi
+        if grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS" &&
+           { [ "$status" != 0 ] || [ "$(cat "$T/rc$o" 2>/dev/null)" != 0 ]; }; then
+            fail "$f $o: forward-only execution did not return 0"; normal=0
+        fi
     done
     if [ "$normal" -ne 1 ]; then fail "$f: execution timeout/signal"; continue; fi
     if cmp -s "$T/out-O0" "$T/out-O2"; then ok=$((ok+1)); else fail "$f: -O2 runs differently"; fi
