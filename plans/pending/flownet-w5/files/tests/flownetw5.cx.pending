@@ -1,0 +1,557 @@
+#!/usr/bin/env -S unisacc.com -run
+/* flownetw5.cx -- the W5 gate of plans/m4-flownet-cx-module.md: coverage beyond the 28-program corpus, in three
+   states (red line 2: covered / refused / untested; the 28 are never reported as full coverage).
+     usage (repository root):
+       sh ./unisacc.com -run tests/flownetw5.cx -- cover ROOT     (gate, no Python)
+       sh ./unisacc.com -run tests/flownetw5.cx -- oracle ROOT    (gate, the m4 oracle as a child of the adapter)
+       sh ./unisacc.com -run tests/flownetw5.cx -- write ROOT     (re-record tests/flownet-coverage.tsv)
+       sh ./unisacc.com -run tests/flownetw5.cx -- selftest       (the classifier on seeded cases, in memory)
+   The set.  Every *.ujs file under ROOT (directories whose name starts with '.' are not entered, links are not
+   followed): the compilable ujs programs available in the repository -- the 28-program corpus, the 5 m4 probes, the
+   negatives, the step corpus, the web games and the self-hosted compiler.  A link named *.ujs is listed as an alias
+   of the program it names (built once, under its own path); a linked directory is not entered (its files are
+   reached under their own paths).  Besides them, the programs embedded as
+   "src" strings in the demo pages' *demos.json files are listed, not built: each is matched (after JSON unescaping,
+   all blanks dropped) to the file it is a copy of, and reported untested with that twin.
+   One run of the adapter.  adapter/ujswasm/ujswasm.cx is compiled once (sh ./unisacc.com ... -o, about 17 s) into a
+   scratch directory; every program goes through `build SRC -o OUT --wat WAT` (20 s each): either \0asm (bytes and
+   sha256 checked against what the adapter printed) or a named refusal (D5: rc 1, stdout empty, no OUT, one stderr
+   line `ujswasm: SRC...`).  Any other outcome is red.  The WAT the flows wrote is kept as sha256:nesting-depth.
+   The oracle's verdict.  For the programs of tests/flownet-baseline.tsv it is read from there (out rows: bytes and
+   sha256, re-measured by flownet-baseline-out1..4; check reject rows: the exception, re-measured by
+   flownet-baseline-check).  For every other program it is the adapter's `oracle` command (the m4 package run as a
+   child: wasm BYTES SHA256 WAT, or refused CLASS WAT, WAT being the WAT it handed to wat2wasm) -- measured by `write`,
+   kept in the record, and re-measured by `oracle` (cover reads it from the record, so cover runs no Python).
+   The states, per program (derive()):
+     covered    both build \0asm and the bytes are equal                                class byte-identical
+     refused    flownet refuses by name, and the oracle builds it                       class gap
+                both refuse, flownet at wat2wasm with the oracle's very WAT             class assembler
+                both refuse, flownet before any WAT, the oracle at wat2wasm             class earlier
+                both refuse before any WAT                                               class front
+     untested   no oracle verdict for it (not in the baseline, not in the record)       class no-oracle-verdict
+                an embedded copy in a demo page (listed, not built)                     class embedded
+     red        flownet builds bytes the oracle does not (different bytes, or the oracle refuses), or flownet refuses at
+                wat2wasm with a WAT other than the oracle's: never a state, always a failure
+   cover: the in-memory selftest first, then the record is regenerated (oracle verdicts of non-baseline programs
+     taken from the record) and must equal tests/flownet-coverage.tsv byte for byte; the first differing line is
+     named.  oracle: every record row whose verdict came from the oracle is re-measured and must be equal.
+   rc 0 PASS, 1 red (each failure named), 2 usage or I/O.  No #include: the prelude is built in.  Every file this
+   program writes is in its own mkdtemp directory and is removed by its name (no recursive delete). */
+
+#define RECORD "tests/flownet-coverage.tsv"
+#define BASELINE "tests/flownet-baseline.tsv"
+#define ADAPTER "adapter/ujswasm/ujswasm.cx"
+
+static int fails;
+static void red(const char *what, const char *why) { fails++; printf("FAIL %s: %s\n", what, why); }
+static void die(const char *why) { fprintf(stderr, "flownetw5: %s\n", why); exit(2); }
+
+/* formatted text at its exact length */
+static char *fmt(const char *f, ...) {
+    va_list ap; size_t cap = 256; int n; char *p = 0;
+    for (;;) {
+        char *g = realloc(p, cap);
+        if (!g) { free(p); die("out of memory"); }
+        p = g; va_start(ap, f); n = vsnprintf(p, cap, f, ap); va_end(ap);
+        if (n < 0) die("cannot format");
+        if ((size_t)n < cap) return p;
+        cap = (size_t)n + 1;
+    }
+}
+static char *dupn(const char *s, size_t n) { char *d = malloc(n + 1); if (!d) die("out of memory"); memcpy(d, s, n); d[n] = 0; return d; }
+static char *dup0(const char *s) { return dupn(s, strlen(s)); }
+static void *grow(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) die("out of memory"); return q; }
+
+/* ---------- growable text ---------- */
+typedef struct { char *p; size_t n, cap; } buf;
+static void bput(buf *b, const char *s, size_t k) {
+    if (b->n + k + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 4096;
+        while (c < b->n + k + 1) c *= 2;
+        b->p = grow(b->p, c); b->cap = c;
+    }
+    memcpy(b->p + b->n, s, k); b->n += k; b->p[b->n] = 0;
+}
+static void bput0(buf *b, const char *s) { bput(b, s, strlen(s)); }
+
+/* ---------- the programs ---------- */
+typedef struct {
+    char *path, *srcsha, *flat;          /* repo-relative path, sha256 of the source, the source with blanks dropped */
+    char *fn, *fnd, *fnw;                /* flownet: wasm|refused, BYTES:SHA256 or the refusal, WAT sha256:depth or - */
+    char *m4, *m4d, *m4w, *from;         /* the oracle: wasm|refused|-, BYTES:SHA256 or CLASS, WAT sha256 or -, where */
+    const char *state, *cls; char *bug;  /* derive(); bug: why it is red, or 0 */
+} Prog;
+static Prog *progs; static int nprogs;
+static char **demos; static int ndemos;          /* the *demos.json files */
+typedef struct { char *path, *target; } Alias;     /* a link named *.ujs: listed with the program it names */
+static Alias *aliases; static int naliases;
+static char *g_root;                               /* ROOT, resolved */
+
+static int is_blank(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+static char *flatten(const char *s, size_t n) {
+    char *o = grow(0, n + 1); size_t i, k = 0;
+    for (i = 0; i < n; i++) if (!is_blank((unsigned char)s[i])) o[k++] = s[i];
+    o[k] = 0;
+    return o;
+}
+static int ends(const char *s, const char *t) { size_t a = strlen(s), b = strlen(t); return a >= b && !strcmp(s + a - b, t); }
+
+/* the walk: DIR relative to the root ("" is the root); names starting with '.' are not entered; links not followed */
+static void walk(const char *dir) {
+    DIR *d = opendir(*dir ? dir : "."); struct dirent *e;
+    if (!d) die(fmt("cannot read the directory %s", *dir ? dir : "."));
+    while ((e = readdir(d))) {
+        struct stat st; char *p;
+        if (e->d_name[0] == '.') continue;
+        p = *dir ? fmt("%s/%s", dir, e->d_name) : dup0(e->d_name);
+        if (lstat(p, &st)) { free(p); continue; }
+        if (S_ISDIR(st.st_mode)) { walk(p); free(p); continue; }
+        if (S_ISLNK(st.st_mode) && ends(p, ".ujs")) {
+            char *t = realpath(p, 0); size_t L = strlen(g_root);
+            aliases = grow(aliases, (size_t)(naliases + 1) * sizeof *aliases);
+            aliases[naliases].path = p;
+            aliases[naliases++].target = t && !strncmp(t, g_root, L) && t[L] == '/' ? dup0(t + L + 1) : dup0("outside");
+            free(t);
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) { free(p); continue; }
+        if (ends(p, ".ujs")) {
+            progs = grow(progs, (size_t)(nprogs + 1) * sizeof *progs);
+            memset(&progs[nprogs], 0, sizeof *progs);
+            progs[nprogs++].path = p;
+        } else if (ends(p, "demos.json")) {
+            demos = grow(demos, (size_t)(ndemos + 1) * sizeof *demos);
+            demos[ndemos++] = p;
+        } else free(p);
+    }
+    closedir(d);
+}
+static int by_path(const void *a, const void *b) { return strcmp(((const Prog *)a)->path, ((const Prog *)b)->path); }
+static int by_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int by_alias(const void *a, const void *b) { return strcmp(((const Alias *)a)->path, ((const Alias *)b)->path); }
+
+/* ---------- running a child: rc (124 on its limit), stdout and stderr, through files in the scratch ---------- */
+static char *scratch;
+static int run(char *const av[], int secs, char **out, char **err) {
+    char *op = fmt("%s/run.out", scratch), *ep = fmt("%s/run.err", scratch); size_t n;
+    long ticks = (long)secs * 100; int st = 0; pid_t pid;
+    fflush(stdout); fflush(stderr);
+    if ((pid = fork()) < 0) die("fork failed");
+    if (pid == 0) {
+        if (!freopen(op, "wb", stdout) || !freopen(ep, "wb", stderr)) _exit(126);
+        setpgid(0, 0);
+        execvp(av[0], av); _exit(127);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { st = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0 || ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); st = 124; break; }
+        usleep(10000);
+    }
+    if (!(*out = cx_read(op, &n))) *out = dup0("");
+    if (!(*err = cx_read(ep, &n))) *err = dup0("");
+    unlink(op); unlink(ep); free(op); free(ep);
+    return st;
+}
+
+static char *bin;                        /* the adapter, compiled once */
+static void compile_adapter(const char *root) {
+    char *av[6], *o, *e; int rc;
+    bin = fmt("%s/ujswasm", scratch);
+    av[0] = "sh"; av[1] = fmt("%s/unisacc.com", root); av[2] = fmt("%s/%s", root, ADAPTER); av[3] = "-o"; av[4] = bin; av[5] = 0;
+    rc = run(av, 45, &o, &e);
+    if (rc) die(fmt("cannot compile %s (rc %d): %s", ADAPTER, rc, e));
+    free(o); free(e); free(av[1]); free(av[2]);
+}
+
+/* sha256 of a file and the nesting depth of its parentheses outside "..." (the WAT), as SHA:DEPTH; 0 if absent */
+static char *wat_mark(const char *path) {
+    size_t n = 0, i; char *b = cx_read(path, &n), hex[65];   /* bounded: cx_sha256_hex writes 64 hex digits and a NUL */
+    long d = 0, mx = 0; int instr = 0, esc = 0;
+    if (!b) return 0;
+    for (i = 0; i < n; i++) {
+        char c = b[i];
+        if (instr) { if (esc) esc = 0; else if (c == '\\') esc = 1; else if (c == '"') instr = 0; continue; }
+        if (c == '"') instr = 1; else if (c == '(') { if (++d > mx) mx = d; } else if (c == ')') d--;
+    }
+    cx_sha256_hex(b, n, hex); free(b);
+    return fmt("%s:%ld", hex, mx);
+}
+
+/* one program through flownet: P->fn, fnd, fnw; a malformed outcome is red */
+static void build_one(Prog *P) {
+    char *o = fmt("%s/o.wasm", scratch), *w = fmt("%s/o.wat", scratch), *av[8], *out, *err, *t; int rc; struct stat st;
+    unlink(o); unlink(w);
+    av[0] = bin; av[1] = "build"; av[2] = P->path; av[3] = "-o"; av[4] = o; av[5] = "--wat"; av[6] = w; av[7] = 0;
+    rc = run(av, 20, &out, &err);
+    P->fnw = wat_mark(w);
+    if (!P->fnw) P->fnw = dup0("-");
+    if (rc == 0) {
+        size_t n = 0; char *b = cx_read(o, &n), hex[65], *want;   /* bounded: cx_sha256_hex writes 64 hex digits and a NUL */
+        if (!b) { red(P->path, "built (rc 0) but wrote no output"); P->fn = dup0("broken"); P->fnd = dup0("-"); }
+        else {
+            cx_sha256_hex(b, n, hex); free(b);
+            want = fmt("out\t%s\t%ld\t%s\n", o, (long)n, hex);
+            if (strncmp(out, want, strlen(want))) red(P->path, fmt("the output file is not what the adapter printed: %s", out));
+            P->fn = dup0("wasm"); P->fnd = fmt("%ld:%s", (long)n, hex);
+            free(want);
+        }
+    } else if (rc == 1) {
+        size_t L = strlen(err), pl = strlen(P->path);
+        if (*out) red(P->path, "refused but wrote to stdout (D5)");
+        if (stat(o, &st) == 0) red(P->path, "refused but left an output file (D5)");
+        if (L < 10 || err[L - 1] != '\n' || strchr(err, '\n') != err + L - 1 || strncmp(err, "ujswasm: ", 9)
+            || strncmp(err + 9, P->path, pl) || (err[9 + pl] != ':'))
+            red(P->path, fmt("the refusal is not one stderr line naming the source and a reason (D5): %s", err));
+        if (L) err[L - 1] = 0;
+        for (t = err; *t; t++) if (*t == '\t') *t = ' ';
+        P->fn = dup0("refused"); P->fnd = dup0(err);
+    } else {
+        red(P->path, fmt("neither built nor refused by name (rc %d): %s", rc, err));
+        P->fn = dup0("broken"); P->fnd = fmt("rc %d", rc);
+    }
+    free(out); free(err); unlink(o); unlink(w); free(o); free(w);
+}
+
+/* ---------- the oracle's verdict ---------- */
+typedef struct { char **f; int n; } Row;
+static Row *split_rows(char *text, int *nrows) {     /* lines (not '#', not empty) into tab fields; TEXT is cut */
+    Row *r = 0; int n = 0; char *p = text;
+    while (p && *p) {
+        char *nl = strchr(p, '\n'), *s;
+        if (nl) *nl = 0;
+        if (*p && *p != '#') {
+            Row w; w.f = 0; w.n = 0;
+            for (s = p;;) {
+                char *tb = strchr(s, '\t');
+                w.f = grow(w.f, (size_t)(w.n + 1) * sizeof(char *)); w.f[w.n++] = s;
+                if (!tb) break;
+                *tb = 0; s = tb + 1;
+            }
+            r = grow(r, (size_t)(n + 1) * sizeof(Row)); r[n++] = w;
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    *nrows = n;
+    return r;
+}
+static Row *base_rows, *rec_rows; static int nbase, nrec;
+static char *base_text, *rec_text;
+static const char *basename_of(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+static int is_neg(const char *p) { return !strncmp(p, "tests/ujs2wasm/neg/", 19) || !strncmp(p, "m4/neg/", 7); }
+
+/* the verdict from the baseline (out row: same path and source sha256; check reject row: a negative of that name) */
+static int from_baseline(Prog *P) {
+    int r;
+    for (r = 0; r < nbase; r++) {
+        Row *w = &base_rows[r];
+        if (w->n == 6 && !strncmp(w->f[0], "out", 3) && !strcmp(w->f[1], "out") && !strcmp(w->f[2], P->path)) {
+            if (strcmp(w->f[3], P->srcsha)) return 0;       /* the source changed since the baseline: no verdict here */
+            P->m4 = dup0("wasm"); P->m4d = fmt("%s:%s", w->f[4], w->f[5]); P->m4w = dup0("-"); P->from = dup0("baseline");
+            return 1;
+        }
+        if (w->n == 4 && !strcmp(w->f[0], "check") && !strcmp(w->f[1], "reject") && is_neg(P->path) && !strcmp(w->f[2], basename_of(P->path))) {
+            P->m4 = dup0("refused"); P->m4d = dup0(w->f[3]); P->m4w = dup0("-"); P->from = dup0("baseline");
+            return 1;
+        }
+    }
+    return 0;
+}
+/* the verdict kept in the record (prog rows: PATH SRC STATE CLASS FN FND FNW M4 M4D M4W FROM) */
+static Row *rec_row(const char *path) {
+    int r;
+    for (r = 0; r < nrec; r++) if (rec_rows[r].n == 12 && !strcmp(rec_rows[r].f[0], "prog") && !strcmp(rec_rows[r].f[1], path)) return &rec_rows[r];
+    return 0;
+}
+static int from_record(Prog *P) {
+    Row *w = rec_row(P->path);
+    if (!w || strcmp(w->f[2], P->srcsha) || strcmp(w->f[11], "oracle") || !strcmp(w->f[8], "-")) return 0;
+    P->m4 = dup0(w->f[8]); P->m4d = dup0(w->f[9]); P->m4w = dup0(w->f[10]); P->from = dup0("oracle");
+    return 1;
+}
+/* the verdict measured now: the adapter's oracle command (the m4 package as its child) */
+static int from_oracle(Prog *P) {
+    char *o = fmt("%s/r.wasm", scratch), *av[6], *out, *err, *nl; int rc, n; Row *r;
+    av[0] = bin; av[1] = "oracle"; av[2] = P->path; av[3] = "-o"; av[4] = o; av[5] = 0;
+    rc = run(av, 40, &out, &err);
+    unlink(o); free(o);
+    if (rc || strncmp(out, "oracle\t", 7) || !(nl = strchr(out, '\n'))) { red(P->path, fmt("the oracle command failed (rc %d): %s%s", rc, out, err)); free(out); free(err); return 0; }
+    *nl = 0;
+    r = split_rows(out, &n);
+    if (n != 1 || r[0].n != 5) { red(P->path, "the oracle command printed an unexpected line"); return 0; }
+    P->m4 = dup0(r[0].f[1]);
+    P->m4d = strcmp(r[0].f[1], "wasm") ? dup0(r[0].f[2]) : fmt("%s:%s", r[0].f[2], r[0].f[3]);
+    P->m4w = dup0(r[0].f[4]); P->from = dup0("oracle");
+    free(r[0].f); free(r); free(out); free(err);
+    return 1;
+}
+
+/* ---------- the states ---------- */
+static int wat_same(const char *fnw, const char *m4w) {   /* fnw is SHA:DEPTH, m4w is SHA */
+    size_t k = strlen(m4w);
+    return strcmp(m4w, "-") && strlen(fnw) > k && !strncmp(fnw, m4w, k) && fnw[k] == ':';
+}
+static void derive(Prog *P) {
+    int fw = !strcmp(P->fn, "wasm"), fr = !strcmp(P->fn, "refused"), mw = !strcmp(P->m4, "wasm"), mr = !strcmp(P->m4, "refused");
+    P->bug = 0;
+    if (!fw && !fr) { P->state = "red"; P->cls = "broken"; P->bug = dup0("flownet neither built nor refused by name"); return; }
+    if (!mw && !mr) { P->state = "untested"; P->cls = "no-oracle-verdict"; return; }
+    if (fw && mw) {
+        if (!strcmp(P->fnd, P->m4d)) { P->state = "covered"; P->cls = "byte-identical"; return; }
+        P->state = "red"; P->cls = "differ"; P->bug = fmt("flownet %s, the oracle %s: different bytes", P->fnd, P->m4d); return;
+    }
+    if (fw) { P->state = "red"; P->cls = "accepts"; P->bug = fmt("flownet builds %s, the oracle refuses (%s)", P->fnd, P->m4d); return; }
+    if (mw) { P->state = "refused"; P->cls = "gap"; return; }
+    if (strstr(P->fnd, "wat2wasm")) {
+        if (wat_same(P->fnw, P->m4w)) { P->state = "refused"; P->cls = "assembler"; return; }
+        P->state = "red"; P->cls = "wat"; P->bug = fmt("flownet refuses at wat2wasm with WAT %s, the oracle's WAT is %s", P->fnw, P->m4w); return;
+    }
+    if (strcmp(P->m4w, "-")) { P->state = "refused"; P->cls = "earlier"; return; }
+    P->state = "refused"; P->cls = "front";
+}
+
+/* ---------- the embedded copies: "src": "..." in the demo pages ---------- */
+/* a JSON string body at S (after the opening quote) unescaped; 0 if it holds an escape other than \" \\ \/ \n \t \r */
+static char *json_body(const char *s, const char **end) {
+    buf b; memset(&b, 0, sizeof b); bput0(&b, "");
+    for (; *s && *s != '"'; s++) {
+        char c = *s;
+        if (c == '\\') {
+            s++;
+            switch (*s) {
+            case '"': c = '"'; break; case '\\': c = '\\'; break; case '/': c = '/'; break;
+            case 'n': c = '\n'; break; case 't': c = '\t'; break; case 'r': c = '\r'; break;
+            default: free(b.p); *end = s; return 0;
+            }
+        }
+        bput(&b, &c, 1);
+    }
+    *end = s;
+    return b.p;
+}
+typedef struct { char *where, *twin; const char *twinstate; } Emb;
+static Emb *embs; static int nembs;
+static void scan_demo(const char *path, const char *text) {
+    const char *p = text, *e; int line = 1; const char *ls = text;
+    static const char KEY[] = "\"src\": \"";
+    while ((p = strstr(p, KEY))) {
+        char *body; Emb E; int k;
+        for (; ls < p; ls++) if (*ls == '\n') line++;
+        body = json_body(p + sizeof KEY - 1, &e);
+        E.where = fmt("%s:%d", path, line); E.twin = dup0("none"); E.twinstate = "-";
+        if (body) {
+            char *flat = flatten(body, strlen(body));
+            for (k = 0; k < nprogs; k++) if (progs[k].flat && !strcmp(progs[k].flat, flat)) { free(E.twin); E.twin = dup0(progs[k].path); E.twinstate = progs[k].state; break; }
+            free(flat); free(body);
+        } else { free(E.twin); E.twin = dup0("undecoded"); }
+        embs = grow(embs, (size_t)(nembs + 1) * sizeof *embs); embs[nembs++] = E;
+        p = e;
+    }
+}
+
+/* ---------- the record text ---------- */
+static const char *STATES[] = { "covered", "refused", "untested", 0 };
+static char *render(int nbaseprogs) {
+    buf b; int k, s, n[3] = { 0, 0, 0 };
+    memset(&b, 0, sizeof b);
+    bput0(&b, "# flownet W5 coverage (plans/m4-flownet-cx-module.md section 4 W5, red line 2): every ujs program in the repository\n"
+              "# through flownet (adapter/ujswasm), in three states.  Generated by tests/flownetw5.cx write; checked by cover (no Python)\n"
+              "# and oracle (the oracle verdicts not in tests/flownet-baseline.tsv, re-measured).  Do not hand-edit.\n"
+              "# prog PATH SRC_SHA256 STATE CLASS FLOWNET FLOWNET_DETAIL FLOWNET_WAT(sha256:depth) ORACLE ORACLE_DETAIL ORACLE_WAT FROM\n"
+              "# embedded PATH:LINE untested embedded TWIN TWIN_STATE   (a copy in a demo page, listed, not built)\n"
+              "# alias PATH TARGET TARGET_STATE   (a link named *.ujs: the program it names, built under that path)\n"
+              "# class STATE CLASS COUNT; total programs N covered C refused R untested U embedded E aliases A baseline B\n");
+    for (k = 0; k < nprogs; k++) {
+        Prog *P = &progs[k]; char *l = fmt("prog\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", P->path, P->srcsha, P->state, P->cls,
+                                           P->fn, P->fnd, P->fnw, P->m4, P->m4d, P->m4w, P->from);
+        bput0(&b, l); free(l);
+        for (s = 0; STATES[s]; s++) if (!strcmp(P->state, STATES[s])) n[s]++;
+    }
+    for (k = 0; k < nembs; k++) {
+        char *l = fmt("embedded\t%s\tuntested\tembedded\t%s\t%s\n", embs[k].where, embs[k].twin, embs[k].twinstate);
+        bput0(&b, l); free(l);
+    }
+    for (k = 0; k < naliases; k++) {
+        const char *ts = "absent"; int q; char *l;
+        for (q = 0; q < nprogs; q++) if (!strcmp(progs[q].path, aliases[k].target)) ts = progs[q].state;
+        l = fmt("alias\t%s\t%s\t%s\n", aliases[k].path, aliases[k].target, ts); bput0(&b, l); free(l);
+    }
+    for (s = 0; STATES[s]; s++) {          /* per class, in order of first appearance */
+        const char *seen[16]; int ns = 0, j, q;
+        for (k = 0; k < nprogs; k++) {
+            if (strcmp(progs[k].state, STATES[s])) continue;
+            for (j = 0; j < ns && strcmp(seen[j], progs[k].cls); j++) ;
+            if (j == ns && ns < 16) seen[ns++] = progs[k].cls;
+        }
+        if (s == 2 && nembs) seen[ns++] = "embedded";
+        for (j = 0; j < ns; j++) {
+            char *l; int c = 0;
+            for (q = 0; q < nprogs; q++) if (!strcmp(progs[q].state, STATES[s]) && !strcmp(progs[q].cls, seen[j])) c++;
+            if (!strcmp(seen[j], "embedded")) c = nembs;
+            l = fmt("class\t%s\t%s\t%d\n", STATES[s], seen[j], c); bput0(&b, l); free(l);
+        }
+    }
+    {
+        char *l = fmt("total\tprograms\t%d\tcovered\t%d\trefused\t%d\tuntested\t%d\tembedded\t%d\taliases\t%d\tbaseline\t%d\n",
+                      nprogs, n[0], n[1], n[2] + nembs, nembs, naliases, nbaseprogs);
+        bput0(&b, l); free(l);
+    }
+    return b.p;
+}
+
+/* the first differing line of two texts, or 0 */
+static char *first_diff(const char *a, const char *b) {
+    int line = 1;
+    for (;;) {
+        const char *ea = strchr(a, '\n'), *eb = strchr(b, '\n');
+        size_t la = ea ? (size_t)(ea - a) : strlen(a), lb = eb ? (size_t)(eb - b) : strlen(b);
+        if (la != lb || memcmp(a, b, la) || !ea != !eb)
+            return fmt("line %d: recorded '%.*s', now '%.*s'", line, (int)lb, b, (int)la, a);
+        if (!ea) return 0;
+        a = ea + 1; b = eb + 1; line++;
+    }
+}
+
+/* ---------- the run ---------- */
+enum { M_COVER, M_ORACLE, M_WRITE };
+static int load(const char *root, int mode) {
+    size_t n; int k, nb = 0;
+    if (chdir(root)) die(fmt("%s: no such directory", root));
+    g_root = dup0(root);
+    if (!(base_text = cx_read(BASELINE, &n))) die("cannot read " BASELINE);
+    base_rows = split_rows(base_text, &nbase);
+    rec_text = cx_read(RECORD, &n);
+    if (!rec_text) { if (mode != M_WRITE) die("cannot read " RECORD " (write it first)"); rec_text = dup0(""); }
+    { char *c = dup0(rec_text); rec_rows = split_rows(c, &nrec); }
+    walk("");
+    qsort(progs, (size_t)nprogs, sizeof *progs, by_path);
+    if (ndemos) qsort(demos, (size_t)ndemos, sizeof *demos, by_str);
+    if (naliases) qsort(aliases, (size_t)naliases, sizeof *aliases, by_alias);
+    if (nprogs < 33) die(fmt("only %d .ujs programs found under %s (the baseline alone has 33)", nprogs, root));
+    for (k = 0; k < nprogs; k++) {
+        Prog *P = &progs[k]; char *b = cx_read(P->path, &n), hex[65];   /* bounded: cx_sha256_hex writes 64 hex digits and a NUL */
+        if (!b) die(fmt("cannot read %s", P->path));
+        cx_sha256_hex(b, n, hex); P->srcsha = dup0(hex); P->flat = flatten(b, n); free(b);
+    }
+    {   char *t = getenv("TMPDIR"); scratch = fmt("%s/flownetw5XXXXXX", t && *t ? t : "/tmp"); }
+    if (!mkdtemp(scratch)) die("cannot make a scratch directory");
+    compile_adapter(root);
+    for (k = 0; k < nprogs; k++) if (from_baseline(&progs[k])) nb++;
+    return nb;
+}
+static void finish(void) { unlink(bin); rmdir(scratch); }
+
+static int cmd_run(const char *rootarg, int mode) {
+    char *root = realpath(rootarg, 0), *text, *d; int k, nb, bugs = 0;
+    if (!root) die(fmt("%s: no such directory", rootarg));
+    nb = load(root, mode);
+    if (mode == M_ORACLE) {                  /* re-measure every verdict the record took from the oracle */
+        int checked = 0;
+        for (k = 0; k < nprogs; k++) {
+            Prog *P = &progs[k]; Row *w;
+            if (P->from) continue;                       /* the baseline's (re-measured by its own steps) */
+            if (!(w = rec_row(P->path)) || strcmp(w->f[11], "oracle")) { red(P->path, "no oracle verdict recorded (run write)"); continue; }
+            if (strcmp(w->f[2], P->srcsha)) { red(P->path, "the source changed since the record (run write)"); continue; }
+            if (!from_oracle(P)) continue;
+            checked++;
+            if (strcmp(P->m4, w->f[8]) || strcmp(P->m4d, w->f[9]) || strcmp(P->m4w, w->f[10]))
+                red(P->path, fmt("the oracle now says %s %s %s, recorded %s %s %s", P->m4, P->m4d, P->m4w, w->f[8], w->f[9], w->f[10]));
+            else printf("oracle\t%s\t%s\t%s\tas recorded\n", P->path, P->m4, P->m4d);
+        }
+        finish();
+        if (checked < 1) red("oracle", "no verdict re-measured");
+        if (fails) { fprintf(stderr, "flownetw5-oracle: %d failure(s)\n", fails); return 1; }
+        printf("flownetw5-oracle: PASS (%d oracle verdicts outside the baseline re-measured, equal to %s)\n", checked, RECORD);
+        return 0;
+    }
+    for (k = 0; k < nprogs; k++) {
+        Prog *P = &progs[k];
+        build_one(P);
+        if (!P->m4 && !(mode == M_WRITE ? from_oracle(P) : from_record(P))) {
+            P->m4 = dup0("-"); P->m4d = dup0("-"); P->m4w = dup0("-"); P->from = dup0("-");
+        }
+        derive(P);
+        if (P->bug) { red(P->path, P->bug); bugs++; }
+    }
+    for (k = 0; k < naliases; k++) {
+        int q; for (q = 0; q < nprogs && strcmp(progs[q].path, aliases[k].target); q++) ;
+        if (q == nprogs) red(aliases[k].path, fmt("a link to %s, which is not a program of the set", aliases[k].target));
+    }
+    for (k = 0; k < ndemos; k++) {
+        size_t n; char *t = cx_read(demos[k], &n);
+        if (!t) die(fmt("cannot read %s", demos[k]));
+        scan_demo(demos[k], t); free(t);
+    }
+    finish();
+    text = render(nb);
+    for (k = 0; k < nprogs; k++)
+        printf("%s\t%s\t%s\n", progs[k].state, progs[k].cls, progs[k].path);
+    { const char *t = strstr(text, "\ntotal\t"); if (t) printf("%s", t + 1); }
+    if (mode == M_WRITE) {
+        if (bugs || fails) { fprintf(stderr, "flownetw5-write: %d failure(s); %s not written\n", fails, RECORD); return 1; }
+        if (cx_write(RECORD, text, strlen(text))) die("cannot write " RECORD);
+        printf("flownetw5-write: %s written (%d programs, %d embedded copies)\n", RECORD, nprogs, nembs);
+        return 0;
+    }
+    if ((d = first_diff(text, rec_text))) red(RECORD, d);
+    if (fails) { fprintf(stderr, "flownetw5-cover: %d failure(s)\n", fails); return 1; }
+    printf("flownetw5-cover: PASS (%d programs through flownet == %s: the three states above; %d of them in the W1 "
+           "baseline, the rest beyond it)\n", nprogs, RECORD, nb);
+    return 0;
+}
+
+/* ---------- the classifier, on seeded cases (no repository) ---------- */
+static int selftest(void) {
+    static const char *C[][8] = {   /* fn fnd fnw m4 m4d m4w -> state cls */
+        { "wasm", "10:aa", "w1:3", "wasm", "10:aa", "-", "covered", "byte-identical" },
+        { "wasm", "10:aa", "w1:3", "wasm", "10:ab", "-", "red", "differ" },
+        { "wasm", "10:aa", "w1:3", "refused", "CompileError", "-", "red", "accepts" },
+        { "refused", "x: not covered", "-", "wasm", "10:aa", "-", "refused", "gap" },
+        { "refused", "x: wat2wasm refused the generated WAT (rc 1)", "w1:300", "refused", "CalledProcessError", "w1", "refused", "assembler" },
+        { "refused", "x: wat2wasm refused the generated WAT (rc 1)", "w1:300", "refused", "CalledProcessError", "w2", "red", "wat" },
+        { "refused", "x: wat2wasm refused the generated WAT (rc 1)", "w1:300", "refused", "CompileError", "-", "red", "wat" },
+        { "refused", "x:1: primary near ;", "-", "refused", "CalledProcessError", "w2", "refused", "earlier" },
+        { "refused", "x:1: primary near ;", "-", "refused", "CompileError", "-", "refused", "front" },
+        { "refused", "x:1: primary near ;", "-", "-", "-", "-", "untested", "no-oracle-verdict" },
+        { "wasm", "10:aa", "w1:3", "-", "-", "-", "untested", "no-oracle-verdict" },
+        { "broken", "rc 124", "-", "wasm", "10:aa", "-", "red", "broken" } };
+    int k, bad = 0; const char *e; char *s;
+    for (k = 0; k < (int)(sizeof C / sizeof C[0]); k++) {
+        Prog P; memset(&P, 0, sizeof P);
+        P.fn = (char *)C[k][0]; P.fnd = (char *)C[k][1]; P.fnw = (char *)C[k][2];
+        P.m4 = (char *)C[k][3]; P.m4d = (char *)C[k][4]; P.m4w = (char *)C[k][5];
+        derive(&P);
+        if (strcmp(P.state, C[k][6]) || strcmp(P.cls, C[k][7]) || (!strcmp(C[k][6], "red") != !!P.bug)) {
+            printf("FAIL selftest case %d: got %s/%s, want %s/%s\n", k + 1, P.state, P.cls, C[k][6], C[k][7]); bad++;
+        }
+        free(P.bug);
+    }
+    /* the record comparison names the first changed line, and only a change */
+    if (first_diff("a\nb\n", "a\nb\n")) { printf("FAIL selftest: equal texts differ\n"); bad++; }
+    if (!(s = first_diff("a\nb\n", "a\nc\n")) || !strstr(s, "line 2")) { printf("FAIL selftest: a changed line is not named\n"); bad++; }
+    free(s);
+    if (!(s = first_diff("a\nb\n", "a\nb\nc\n")) || !strstr(s, "line 3")) { printf("FAIL selftest: a dropped line is not named\n"); bad++; }
+    free(s);
+    /* the JSON unescape: the escapes of the demo pages, and a \u escape left undecoded */
+    s = json_body("return \\\"a\\\" + 1;\\n\" rest", &e);
+    if (!s || strcmp(s, "return \"a\" + 1;\n") || *e != '"') { printf("FAIL selftest: JSON unescape\n"); bad++; }
+    free(s);
+    if ((s = json_body("\\u0041\"", &e))) { printf("FAIL selftest: a \\u escape was decoded\n"); bad++; free(s); }
+    s = flatten(" let\tx = 1 ;\n", 13);
+    if (strcmp(s, "letx=1;")) { printf("FAIL selftest: flatten\n"); bad++; }
+    free(s);
+    if (bad) { fprintf(stderr, "flownetw5-selftest: %d failure(s)\n", bad); return 1; }
+    printf("flownetw5-selftest: PASS (%d seeded verdict pairs classified, the red ones red; the record diff names the "
+           "changed line; the JSON unescape)\n", (int)(sizeof C / sizeof C[0]));
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *cmd = argc > 1 ? argv[1] : "", *root = argc > 2 ? argv[2] : ".";
+    if (!strcmp(cmd, "selftest")) return selftest();
+    if (!strcmp(cmd, "cover")) { if (selftest()) return 1; return cmd_run(root, M_COVER); }
+    if (!strcmp(cmd, "oracle")) return cmd_run(root, M_ORACLE);
+    if (!strcmp(cmd, "write")) return cmd_run(root, M_WRITE);
+    fprintf(stderr, "usage: flownetw5.cx cover ROOT | oracle ROOT | write ROOT | selftest\n");
+    return 2;
+}

@@ -1,0 +1,108 @@
+diff --git a/tests/tapebinref.py b/tests/tapebinref.py
+index 8d702783..7e858d16 100644
+--- a/tests/tapebinref.py
++++ b/tests/tapebinref.py
+@@ -3,6 +3,8 @@
+ 
+ prepare  builds the reference from the current tree (export_ref + the shim and footer, as
+          build_ref.sh does) into <cache>/<key>/ref with a manifest, or reuses a complete entry.
++         It builds in a private directory next to the entry, verifies it, then renames it into place under flock on
++         <key>.lock; a present entry that does not verify is renamed to <key>.broken-<stamp> and rebuilt (self-healing).
+ locate   returns that binary only when the manifest's key equals the key of the current tree
+          and the binary's digest matches; a missing or stale entry is refused (rc 2), never
+          rebuilt here.  The shards call locate(); com-tapebin-ref is their gate prerequisite.
+@@ -11,7 +13,7 @@ key      prints the key.
+ The key covers the exported source, the shim and footer, build_ref.sh, CFLAGS and the first
+ line of `cc --version`, so an edit to any of them makes the old entry stale.
+ """
+-import hashlib, json, os, pathlib, subprocess, sys, tempfile
++import fcntl, hashlib, json, os, pathlib, subprocess, sys, tempfile, time
+ 
+ R = pathlib.Path(__file__).resolve().parents[1]
+ ENTRY = 'manifest.json'
+@@ -70,34 +72,60 @@ def _valid(entry):
+         return None
+ 
+ 
++def _verified(entry, k):
++    manifest = _valid(entry)
++    return bool(manifest) and manifest.get('key') == k
++
++
++def _aside(entry):   # a present entry that does not verify is renamed away (never deleted here)
++    dest = entry.with_name('%s.broken-%d-%d' % (entry.name, time.time_ns(), os.getpid()))
++    os.rename(entry, dest)
++    print('tapebin ref moved aside %s' % dest.name)
++
++
+ def prepare():
+     k = key()
+-    entry = cache_root() / k
+-    if _valid(entry):
+-        print('tapebin ref reuse key=%s' % k[:16])
+-        return 0
+-    cache_root().mkdir(parents=True, exist_ok=True)
+-    tmp = pathlib.Path(tempfile.mkdtemp(prefix='tapebinref-', dir=cache_root()))
++    root = cache_root()
++    entry = root / k
++    root.mkdir(parents=True, exist_ok=True)
++    lockfd = os.open(str(root / (k + '.lock')), os.O_CREAT | os.O_RDWR, 0o644)
+     try:
+-        flat = tmp / 'flat.c'
+-        flat.write_bytes(_exported(tmp))
+-        source = tmp / 'ref.c'
+-        source.write_bytes((R / 'tests/refshim.h').read_bytes() + flat.read_bytes() + (R / 'tests/reffoot.h').read_bytes())
+-        ref = tmp / 'ref'
+-        subprocess.run(['cc', '-w', '-std=c99', *_cflags().split(), '-o', str(ref), str(source)],
+-                       check=True, timeout=50)
+-        manifest = {'key': k, 'ref_sha256': _file_sha(ref), 'bytes': ref.stat().st_size, 'cc': _cc_version(),
+-                    'cflags': _cflags()}
+-        (tmp / ENTRY).write_text(json.dumps(manifest, indent=1, sort_keys=True) + '\n')
+-        _purge(flat, source)
+-        if not entry.exists():
+-            os.rename(tmp, entry)
+-        else:
+-            _purge(tmp)
+-    except BaseException:
+-        _purge(tmp)
+-        raise
+-    if not _valid(entry):
++        fcntl.flock(lockfd, fcntl.LOCK_EX)   # concurrent preparers of one key serialise here
++        if _verified(entry, k):
++            print('tapebin ref reuse key=%s' % k[:16])
++            return 0
++        tmp = pathlib.Path(tempfile.mkdtemp(prefix='tapebinref-', dir=root))
++        try:
++            flat = tmp / 'flat.c'
++            flat.write_bytes(_exported(tmp))
++            source = tmp / 'ref.c'
++            source.write_bytes((R / 'tests/refshim.h').read_bytes() + flat.read_bytes() + (R / 'tests/reffoot.h').read_bytes())
++            ref = tmp / 'ref'
++            subprocess.run(['cc', '-w', '-std=c99', *_cflags().split(), '-o', str(ref), str(source)],
++                           check=True, timeout=50)
++            manifest = {'key': k, 'ref_sha256': _file_sha(ref), 'bytes': ref.stat().st_size, 'cc': _cc_version(),
++                        'cflags': _cflags()}
++            (tmp / ENTRY).write_text(json.dumps(manifest, indent=1, sort_keys=True) + '\n')
++            _purge(flat, source)
++            if not _verified(tmp, k):
++                raise SystemExit('tapebinref: built reference does not verify')
++            for _ in range(2):   # build private, verify, then rename into place; a broken entry goes aside first
++                if os.path.lexists(entry):
++                    _aside(entry)
++                try:
++                    os.rename(tmp, entry)
++                    break
++                except OSError:   # someone recreated the path (state_dir) between aside and rename
++                    continue
++            else:
++                raise SystemExit('tapebinref: cannot rename the built entry into place')
++        except BaseException:
++            if tmp.exists():
++                _purge(tmp)
++            raise
++    finally:
++        os.close(lockfd)   # also releases the flock
++    if not _verified(entry, k):
+         raise SystemExit('tapebinref: prepared entry does not verify')
+     print('tapebin ref prepared key=%s bytes=%d' % (k[:16], (entry / 'ref').stat().st_size))
+     return 0

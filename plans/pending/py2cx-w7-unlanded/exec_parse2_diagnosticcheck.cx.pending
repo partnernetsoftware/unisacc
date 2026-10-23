@@ -1,0 +1,693 @@
+#!/usr/bin/env -S unisacc.com -run
+/* diagnosticcheck.cx -- exec/parse2/diagnosticcheck.py in C (2026-10-23, the py->cx port wave).  Model diagnostic
+   bytes against the actual reference diag_at/warn_at routines.  The reference is instrumented in scratch only (a
+   probe_diag helper before fe_load, called from the driver when UA_DIAG_POS is set); the model side is a test
+   continuation Net (DIAG.report of the production diagnostics manifest behind a PROBE request reader) run by
+   exec/c/run.c.  For 11 sources x {error, warning} the stdout and stderr of both must be identical, rc 0 each.
+   usage: sh ./unisacc.com -run exec/parse2/diagnosticcheck.cx   (no options; arguments are ignored, as by the .py)
+   Output: `diagnostic rendering NAME errors/warnings match reference` per case, then the summary line; rc 0.
+   Construction, Python-free except one call: the reference source is tests/export_ref.sh + tests/refshim.h +
+   tests/reffoot.h (exec/c/refsource.source_text) compiled with `cc -w -O1` (refsource.compile_command), run.c with
+   $EXEC_CC (default cc); the pp model Net (`pp --locations`) and both table/network steps use the C99 constructors
+   seed/gen.c, seed/tbl.c, seed/net.c (built here with `cc -std=c99 -O2 -w`; the gates hold them byte-identical to
+   exec/build/gen.py, exec/c/tbl.py, exec/c/net.py), and the package is exec/c/pack.build (the C of seed/pack.c).
+   What stays Python (status PARTIAL of the port): the probe Net's delta JSON, probe_model() of the .py moved
+   verbatim into PY_PROBE below and run as one interpreter call (-c; it drives exec/build/parsebase.py and exec/assemble.py,
+   the Python graph DSL).  Every captured child runs with a 60 s limit (the .py's run/call); a failed assertion, a
+   timeout or an OS error is the .py's uncaught exception: one `AssertionError: ...` (or similar) line on stderr
+   where Python printed a traceback, rc 1.  The scratch directory is TMPDIR (TEMP, TMP, /tmp)/model-diagnostics-XXXXXX
+   and is removed on every exit.  ROOT is the grandparent of this file's directory, resolved against the working
+   directory (the gate runs from the repository root).
+   Deletion: this file sits in exec/parse2/, where `#pragma unisa use` cannot reach tests/cxlib (modules resolve
+   beside the using file), so the scratch removal is the local scratch_rm below, limited to the directory this
+   process made with mkdtemp. */
+
+#include <time.h>   /* clock_gettime: the cx prelude (edition 1) leaves time.h explicit */
+
+#define PATHN 4096
+static char ROOT[PATHN], TD[PATHN];
+
+/* ---------- scratch (tempfile.TemporaryDirectory) and uncaught exceptions ---------- */
+static void scratch_rm(const char *p) {        /* only ever called with TD or a path below it */
+    struct stat st; DIR *d; struct dirent *e;
+    if (lstat(p, &st)) return;
+    if (S_ISDIR(st.st_mode)) {
+        if ((d = opendir(p))) {
+            while ((e = readdir(d))) {
+                char *q; size_t l;
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                l = strlen(p) + strlen(e->d_name) + 2; q = malloc(l);
+                if (!q) break;
+                snprintf(q, l, "%s/%s", p, e->d_name); scratch_rm(q); free(q);
+            }
+            closedir(d);
+        }
+        rmdir(p);
+    } else unlink(p);
+}
+static int MADE;                                   /* TD is the directory mkdtemp made for this process */
+static void cleanup(void) {
+    size_t n = strlen(TD);
+    if (MADE && n > 25 && !strncmp(TD + n - 25, "/model-diagnostics-", 19)) scratch_rm(TD);
+    TD[0] = 0; MADE = 0;
+}
+static void quit(int rc) { fflush(stdout); cleanup(); fflush(stderr); exit(rc); }
+static void fail(const char *kind, const char *a, const char *b) {
+    fflush(stdout);
+    fprintf(stderr, "%s: %s%s%s\n", kind, a ? a : "", b ? ", " : "", b ? b : "");
+    quit(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) fail("MemoryError", "out of memory", 0); return p; }
+static char *xstrdup(const char *s) { size_t n = strlen(s) + 1; return memcpy(xmalloc(n), s, n); }
+static char *path2(const char *a, const char *b) {
+    size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p;
+}
+typedef struct { char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) fail("MemoryError", "out of memory", 0);
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bstr(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+/* repr(bytes), for assertion messages */
+static void brepr(Buf *b, const char *s0, size_t n) {
+    const unsigned char *s = (const unsigned char *)s0; size_t i; int sq = 0, dq = 0; char q, t[8];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    bstr(b, "b"); bput(b, &q, 1);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == '\\' || c == (unsigned char)q) { t[0] = '\\'; t[1] = (char)c; bput(b, t, 2); }
+        else if (c == '\n') bstr(b, "\\n"); else if (c == '\r') bstr(b, "\\r"); else if (c == '\t') bstr(b, "\\t");
+        else if (c < 32 || c >= 127) { snprintf(t, sizeof t, "\\x%02x", c); bstr(b, t); }
+        else { t[0] = (char)c; bput(b, t, 1); }
+    }
+    bput(b, &q, 1);
+}
+
+
+/* ---------- children (subprocess.run(capture_output=True, timeout=60)) ---------- */
+typedef struct { int rc; char *out, *err; size_t on, en; } Res;
+typedef struct { pid_t pid; char *of, *ef; char *const *av; double t0; } Job;
+static void res_free(Res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+static void argv_text(Buf *b, char *const *av) {
+    int i;
+    bstr(b, "[");
+    for (i = 0; av[i]; i++) { if (i) bstr(b, ", "); bstr(b, "'"); bstr(b, av[i]); bstr(b, "'"); }
+    bstr(b, "]");
+}
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+/* execvpe: the cx runtime's setenv does not reach execvp's environment, so the PATH search is here */
+static void exec_env(char *const *argv, char **envp) {
+    const char *path = getenv("PATH"), *p, *e; int err = ENOENT;
+    if (strchr(argv[0], '/')) { execve(argv[0], argv, envp); return; }
+    if (!path) path = "/bin:/usr/bin";
+    for (p = path; ; p = e + 1) {
+        Buf c = { 0, 0, 0 };
+        e = strchr(p, ':'); if (!e) e = p + strlen(p);
+        if (e > p) { bput(&c, p, (size_t)(e - p)); bstr(&c, "/"); }
+        bstr(&c, argv[0]);
+        execve(c.p, argv, envp);
+        if (errno != ENOENT && errno != ENOTDIR) err = errno;
+        free(c.p);
+        if (!*e) break;
+    }
+    errno = err;
+}
+/* dict(os.environ, **SETVARS) as an envp; SETVARS 0 or {"K=V", ..., 0} */
+static char **env_with(char *const *setvars) {
+    extern char **environ; int n = 0, i, j; char **envp;
+    for (i = 0; environ[i]; i++) n++;
+    for (j = 0; setvars && setvars[j]; j++) n++;
+    envp = xmalloc((size_t)(n + 1) * sizeof *envp); n = 0;
+    for (i = 0; environ[i]; i++) {
+        int replaced = 0; const char *eq = strchr(environ[i], '=');
+        for (j = 0; eq && setvars && setvars[j]; j++)
+            if (!strncmp(setvars[j], environ[i], (size_t)(eq - environ[i]) + 1)) replaced = 1;
+        if (!replaced) envp[n++] = environ[i];
+    }
+    for (j = 0; setvars && setvars[j]; j++) envp[n++] = setvars[j];
+    envp[n] = 0;
+    return envp;
+}
+static int NJOB;
+/* start AV with stdout/stderr captured (into TD), optionally in DIR, with SETVARS added to the environment */
+static Job start(char *const *av, const char *dir, char *const *setvars) {
+    Job j; char nm[64]; int fo, fe, pp[2], e = 0, st; ssize_t k; char **envp = env_with(setvars);
+    snprintf(nm, sizeof nm, ".capture-%d-out", NJOB); j.of = path2(TD, nm);
+    snprintf(nm, sizeof nm, ".capture-%d-err", NJOB); j.ef = path2(TD, nm); NJOB++;
+    j.av = av;
+    fo = open(j.of, O_WRONLY | O_CREAT | O_TRUNC, 0600); fe = open(j.ef, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fo < 0 || fe < 0) fail("OSError", "cannot create capture files", TD);
+    if (pipe(pp)) fail("OSError", "pipe failed", 0);
+    fcntl(pp[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    j.pid = fork();
+    if (j.pid < 0) fail("OSError", "fork failed", 0);
+    if (j.pid == 0) {
+        close(pp[0]); dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        if (dir && chdir(dir)) { e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127); }
+        exec_env(av, envp);
+        e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127);
+    }
+    free(envp);
+    close(pp[1]); close(fo); close(fe);
+    k = read(pp[0], &e, sizeof e); close(pp[0]);
+    if (k == (ssize_t)sizeof e) {                 /* Popen raises when the program cannot start */
+        Buf m = { 0, 0, 0 }; char t[16];
+        waitpid(j.pid, &st, 0);
+        snprintf(t, sizeof t, "%d", e);
+        bstr(&m, "[Errno "); bstr(&m, t); bstr(&m, "] "); bstr(&m, strerror(e)); bstr(&m, ": '"); bstr(&m, av[0]); bstr(&m, "'");
+        fail(e == ENOENT ? "FileNotFoundError" : e == EACCES ? "PermissionError" : "OSError", m.p, 0);
+    }
+    j.t0 = now();
+    return j;
+}
+static Res finish(Job *j) {
+    Res r; int st = 0; pid_t w; long polls = 0;
+    memset(&r, 0, sizeof r);
+    for (;;) {                                    /* 1 ms polls first: most children here finish in milliseconds */
+        w = waitpid(j->pid, &st, WNOHANG);
+        if (w == j->pid) break;
+        if (w < 0) fail("ChildProcessError", "waitpid failed", 0);
+        if (now() - j->t0 >= 60.0) {
+            Buf m = { 0, 0, 0 };
+            kill(j->pid, SIGKILL); waitpid(j->pid, &st, 0);
+            bstr(&m, "Command '"); argv_text(&m, j->av); bstr(&m, "' timed out after 60 seconds");
+            fail("subprocess.TimeoutExpired", m.p, 0);
+        }
+        usleep(polls++ < 200 ? 1000u : 10000u);
+    }
+    r.rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    r.out = cx_read(j->of, &r.on); r.err = cx_read(j->ef, &r.en);
+    if (!r.out || !r.err) fail("OSError", "cannot read capture files", TD);
+    free(j->of); free(j->ef);
+    return r;
+}
+static Res run_in(char *const *av, const char *dir, char *const *setvars) { Job j = start(av, dir, setvars); return finish(&j); }
+static Res run(char *const *av) { return run_in(av, 0, 0); }
+/* call(args): assert p.returncode==0,(p.args,p.returncode,p.stderr[-1200:]) */
+static void must(const Res *r, char *const *av) {
+    if (r->rc != 0) {
+        Buf m = { 0, 0, 0 }; char t[32]; size_t from = r->en > 1200 ? r->en - 1200 : 0;
+        bstr(&m, "("); argv_text(&m, av); snprintf(t, sizeof t, ", %d, ", r->rc); bstr(&m, t);
+        brepr(&m, r->err + from, r->en - from); bstr(&m, ")");
+        fail("AssertionError", m.p, 0);
+    }
+}
+static Res call(char *const *av) { Res r = run(av); must(&r, av); return r; }
+/* a child with inherited stdio and no limit (the probe helper): its traceback, if any, is the .py's */
+static int spawn(char *const *av) {
+    int st = 0; pid_t pid;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed", 0);
+    if (pid == 0) { execvp(av[0], av); _exit(127); }
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) fail("ChildProcessError", "waitpid failed", 0);
+    return WIFSIGNALED(st) ? 128 + WTERMSIG(st) : WEXITSTATUS(st);
+}
+static void write_bytes(const char *p, const void *b, size_t n) {
+    if (cx_write(p, b, n)) fail("OSError", "cannot write", p);
+}
+static char *read_bytes(const char *p, size_t *n) {
+    char *b = cx_read(p, n);
+    if (!b) { Buf m = { 0, 0, 0 }; bstr(&m, "[Errno 2] No such file or directory: '"); bstr(&m, p); bstr(&m, "'"); fail("FileNotFoundError", m.p, 0); }
+    return b;
+}
+/* Path.read_text(): universal newlines (\r\n and \r become \n) */
+static char *read_text(const char *p, size_t *n) {
+    size_t k, u = 0, m; char *b = read_bytes(p, &m);
+    for (k = 0; k < m; k++) {
+        if (b[k] == '\r') { b[u++] = '\n'; if (k + 1 < m && b[k + 1] == '\n') k++; }
+        else b[u++] = b[k];
+    }
+    b[u] = 0; *n = u; return b;
+}
+static size_t count_of(const char *h, size_t hn, const char *needle, size_t *at) {
+    size_t nn = strlen(needle), i, c = 0;
+    for (i = 0; i + nn <= hn; i++) if (!memcmp(h + i, needle, nn)) { if (!c) *at = i; c++; i += nn - 1; }
+    return c;
+}
+
+/* ---------- exec/c/pack.build(manifests, mounts): the uncompressed package (P1/P2), as seed/pack.c ---------- */
+static const int ARITY[] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+#define NOPS ((int)(sizeof ARITY / sizeof ARITY[0]))
+static void pkerr(const char *m, const char *a) {      /* pack.build raises ValueError */
+    Buf b = { 0, 0, 0 }; bstr(&b, m); if (a) { bstr(&b, " "); bstr(&b, a); }
+    fail("ValueError", b.p, 0);
+}
+typedef struct { int64_t *v; int n; } Act;          /* opcode + operands */
+typedef struct { Act *a; int n; } Seq;
+static int act_eq(Act x, Act y) { return x.n == y.n && !memcmp(x.v, y.v, (size_t)x.n * sizeof *x.v); }
+static uint64_t act_hash(Act x, int parent) {
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)parent; int i;
+    for (i = 0; i < x.n; i++) { h ^= (uint64_t)x.v[i]; h *= 1099511628211ull; }
+    return h;
+}
+typedef struct { int parent, first; Act act; } Node;  /* trie node: first sequence through it */
+static Node *NODES; static int NNODES, NCAP; static int *SLOT; static size_t NSLOT;
+static int trie_find(int parent, Act a) {
+    size_t i;
+    if (!NSLOT) return -1;
+    for (i = act_hash(a, parent) & (NSLOT - 1); SLOT[i] >= 0; i = (i + 1) & (NSLOT - 1))
+        if (NODES[SLOT[i]].parent == parent && act_eq(NODES[SLOT[i]].act, a)) return SLOT[i];
+    return -1;
+}
+static int trie_add(int parent, Act a, int qi) {
+    int f = trie_find(parent, a), k; size_t i;
+    if (f >= 0) return f;
+    if (2 * (size_t)(NNODES + 1) > NSLOT) {          /* grow and rehash */
+        free(SLOT); NSLOT = NSLOT ? NSLOT * 2 : 1024; SLOT = xmalloc(NSLOT * sizeof *SLOT);
+        for (i = 0; i < NSLOT; i++) SLOT[i] = -1;
+        for (k = 0; k < NNODES; k++) {
+            i = act_hash(NODES[k].act, NODES[k].parent) & (NSLOT - 1);
+            while (SLOT[i] >= 0) i = (i + 1) & (NSLOT - 1);
+            SLOT[i] = k;
+        }
+    }
+    if (NNODES == NCAP) { NCAP = NCAP ? NCAP * 2 : 1024; NODES = realloc(NODES, (size_t)NCAP * sizeof *NODES); if (!NODES) fail("MemoryError", "out of memory", 0); }
+    NODES[NNODES].parent = parent; NODES[NNODES].first = qi; NODES[NNODES].act = a;
+    i = act_hash(a, parent) & (NSLOT - 1);
+    while (SLOT[i] >= 0) i = (i + 1) & (NSLOT - 1);
+    SLOT[i] = NNODES; return NNODES++;
+}
+static int isws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+static int split_words(const unsigned char *s, size_t n, const unsigned char **w, size_t *wl, int max) {
+    int k = 0; size_t i = 0, j;
+    while (i < n) {
+        while (i < n && isws(s[i])) i++;
+        if (i >= n) break;
+        j = i; while (j < n && !isws(s[j])) j++;
+        if (k == max) pkerr("too many fields", 0);
+        w[k] = s + i; wl[k] = j - i; k++; i = j;
+    }
+    return k;
+}
+static int64_t num(const unsigned char *s, size_t n) {
+    char t[32], *e; long long v;
+    if (n == 0 || n >= sizeof t) pkerr("bad integer", 0);
+    memcpy(t, s, n); t[n] = 0; v = strtoll(t, &e, 10);
+    if (*e) pkerr("bad integer", t);
+    return v;
+}
+static void acts(int64_t *flat, int nflat, int count, Seq *out) {
+    int at = 0, c, end;
+    if (count < 0 || count > nflat) pkerr("bad Q action count", 0);
+    for (c = 0; c < count; c++) {
+        if (at >= nflat || flat[at] < 0 || flat[at] >= NOPS) pkerr("bad Q opcode or truncated action", 0);
+        end = at + 1 + ARITY[flat[at]]; if (end > nflat) pkerr("truncated Q operands", 0);
+        out->a[out->n].v = flat + at; out->a[out->n].n = end - at; out->n++; at = end;
+    }
+    if (at != nflat) pkerr("extra Q operands", 0);
+}
+typedef struct { const unsigned char *p; size_t n; } Line;   /* includes its '\n' */
+static Line *lines_of(const unsigned char *d, size_t n, int *count) {
+    int k = 0, cap = 1024; Line *L = xmalloc((size_t)cap * sizeof *L); size_t i, j;
+    for (i = 0; i < n;) {
+        j = i; while (j < n && d[j] != '\n') j++;
+        if (j < n) j++;
+        if (k == cap) { cap *= 2; L = realloc(L, (size_t)cap * sizeof *L); if (!L) fail("MemoryError", "out of memory", 0); }
+        L[k].p = d + i; L[k].n = j - i; k++; i = j;
+    }
+    *count = k; return L;
+}
+static void compact_q(const unsigned char *d, size_t n, Buf *out) {
+    int nl, wcap = 0, k, i; Line *L = lines_of(d, n, &nl); const unsigned char *w[16]; size_t wl[16];
+    const unsigned char **ww = 0; size_t *wwl = 0; int64_t nq, nstr, start, qi; Seq *seqs; Buf cand = { 0, 0, 0 };
+    if (!nl || d[n - 1] != '\n') pkerr("truncated network", 0);
+    if (split_words(L[0].p, L[0].n - 1, w, wl, 16) != 7 || wl[0] != 1 || w[0][0] != 'N') pkerr("bad network header", 0);
+    nq = num(w[2], wl[2]); nstr = num(w[4], wl[4]); start = 1 + nstr;
+    if (nq <= 0 || nstr < 0 || start + nq > nl) pkerr("bad network Q extent", 0);
+    NNODES = 0; free(SLOT); SLOT = 0; NSLOT = 0;
+    seqs = calloc((size_t)nq, sizeof *seqs); if (!seqs) fail("MemoryError", "out of memory", 0);
+    for (qi = 0; qi < nq; qi++) {
+        Line ln = L[start + qi]; int maxw = (int)ln.n / 2 + 2; int64_t *flat; Seq s; s.a = 0; s.n = 0;
+        if (maxw > wcap) { wcap = maxw; ww = realloc(ww, (size_t)wcap * sizeof *ww); wwl = realloc(wwl, (size_t)wcap * sizeof *wwl); if (!ww || !wwl) fail("MemoryError", "out of memory", 0); }
+        k = split_words(ln.p, ln.n, ww, wwl, wcap);
+        if (k < 2) pkerr("truncated Q record", 0);
+        flat = xmalloc((size_t)(k + 1) * sizeof *flat);
+        if (wwl[0] == 1 && ww[0][0] == 'Q') {
+            for (i = 2; i < k; i++) flat[i - 2] = num(ww[i], wwl[i]);
+            s.a = xmalloc((size_t)(k + 1) * sizeof *s.a); acts(flat, k - 2, (int)num(ww[1], wwl[1]), &s);
+        } else if (wwl[0] == 1 && ww[0][0] == 'C') {
+            int64_t ref, pre;
+            if (k < 4) pkerr("truncated Q record", 0);
+            ref = num(ww[1], wwl[1]); pre = num(ww[2], wwl[2]);
+            if (ref < 0 || ref >= qi || pre <= 0 || pre > seqs[ref].n) pkerr("bad Q prefix reference", 0);
+            for (i = 4; i < k; i++) flat[i - 4] = num(ww[i], wwl[i]);
+            s.a = xmalloc((size_t)(pre + k + 1) * sizeof *s.a);
+            for (i = 0; i < pre; i++) s.a[s.n++] = seqs[ref].a[i];
+            acts(flat, k - 4, (int)num(ww[3], wwl[3]), &s);
+        } else pkerr("unknown Q tag", 0);
+        seqs[qi] = s;
+    }
+    for (qi = 0; qi < start; qi++) bput(out, L[qi].p, L[qi].n);
+    for (qi = 0; qi < nq; qi++) {
+        Seq s = seqs[qi]; int node = -1, ref = -1, pre = 0, ai, j, f; Line wire = L[start + qi];
+        for (ai = 0; ai < s.n; ai++) {
+            f = trie_find(node, s.a[ai]); if (f < 0) break;
+            node = f; ref = NODES[f].first; pre = ai + 1;
+        }
+        if (pre) {
+            char t[64]; cand.n = 0;
+            snprintf(t, sizeof t, "C %d %d %d", ref, pre, s.n - pre); bstr(&cand, t);
+            for (ai = pre; ai < s.n; ai++)
+                for (j = 0; j < s.a[ai].n; j++) { snprintf(t, sizeof t, " %lld", (long long)s.a[ai].v[j]); bstr(&cand, t); }
+            bput(&cand, "\n", 1);
+            if (cand.n < wire.n) { wire.p = (const unsigned char *)cand.p; wire.n = cand.n; }
+        }
+        bput(out, wire.p, wire.n);
+        node = -1; for (ai = 0; ai < s.n; ai++) node = trie_add(node, s.a[ai], (int)qi);
+    }
+    for (qi = start + nq; qi < nl; qi++) bput(out, L[qi].p, L[qi].n);
+    free(cand.p); free(L); free(ww); free(wwl);
+}
+/* resources: the files under a mount, sorted as sorted(root.rglob('*')) (path components), regular files only */
+typedef struct { char *rel, *full; } RFile;
+static RFile *RF; static int NRF, RFCAP;
+static void walk(const char *dir, const char *rel) {
+    DIR *d = opendir(dir); struct dirent *e;
+    if (!d) pkerr("cannot read directory", dir);
+    while ((e = readdir(d))) {
+        size_t a, b; char *full, *r; struct stat ls, st;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        a = strlen(dir) + strlen(e->d_name) + 2; b = strlen(rel) + strlen(e->d_name) + 2;
+        full = xmalloc(a); r = xmalloc(b);
+        snprintf(full, a, "%s/%s", dir, e->d_name); snprintf(r, b, "%s%s%s", rel, *rel ? "/" : "", e->d_name);
+        if (lstat(full, &ls)) pkerr("cannot stat", full);
+        if (S_ISDIR(ls.st_mode)) { walk(full, r); free(full); free(r); continue; }   /* rglob: no symlinked dirs */
+        if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (NRF == RFCAP) { RFCAP = RFCAP ? RFCAP * 2 : 256; RF = realloc(RF, (size_t)RFCAP * sizeof *RF); if (!RF) fail("MemoryError", "out of memory", 0); }
+            RF[NRF].rel = r; RF[NRF].full = full; NRF++;
+        } else { free(full); free(r); }
+    }
+    closedir(d);
+}
+static int partcmp(const void *x, const void *y) {   /* PurePath order: component lists */
+    const unsigned char *a = (const unsigned char *)((const RFile *)x)->rel, *b = (const unsigned char *)((const RFile *)y)->rel;
+    for (;;) {
+        int ea = !*a || *a == '/', eb = !*b || *b == '/';
+        if (ea && eb) { if (!*a && !*b) return 0; if (!*a) return -1; if (!*b) return 1; a++; b++; continue; }
+        if (ea) return -1;
+        if (eb) return 1;
+        if (*a != *b) return *a < *b ? -1 : 1;
+        a++; b++;
+    }
+}
+static int valid_name(const char *s) {
+    if (!*s) return 0;
+    for (; *s; s++) if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || strchr("_./-", *s))) return 0;
+    return 1;
+}
+static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+typedef struct { const char *prefix_hex, *dir; } Mount;
+/* pack.build([manifest], mounts) -> the package bytes in *out */
+static void pack_build(const char *manifest, const Mount *mounts, int nmounts, Buf *out) {
+    typedef struct { char *route, *stream, *in, *outf; int model; } Row;   /* stream: the stream-stage column */
+    Row *st = 0; int nst = 0, stcap = 0, nmod = 0, m, i, f; unsigned char **mod = 0; size_t *modn = 0, n;
+    typedef struct { unsigned char *k; size_t kn; char *v; size_t vn; } Res2;
+    Res2 *res = 0; int nres = 0, rcap = 0; char t[256], *text, *s, *dirend; size_t dl; int lineno = 0;
+    text = read_bytes(manifest, &n);
+    dirend = strrchr(manifest, '/'); dl = dirend ? (size_t)(dirend - manifest) : 0;
+    for (s = text; s < text + n;) {
+        char *e = memchr(s, '\n', (size_t)(text + n - s)), *ln, *c[6], *p, *path; int k = 0; const char *last = 0; size_t ll, dn, pl; unsigned char *data; int idx = -1;
+        if (!e) e = text + n;
+        *e = 0; lineno++; ln = s; s = e + 1;
+        ll = strlen(ln); if (ll && ln[ll - 1] == '\r') ln[--ll] = 0;
+        if (!*ln || *ln == '#') continue;
+        c[k++] = ln;
+        for (p = ln; *p; p++) if (*p == '\t') { *p = 0; if (k == 6) break; c[k++] = p + 1; }
+        snprintf(t, sizeof t, "%s:%d:", manifest, lineno);
+        if (k != 5 || !valid_name(c[0]) || !valid_name(c[1]) || !valid_name(c[2]) || !valid_name(c[3])) pkerr(t, "expected five columns and valid names");
+        for (i = 0; i < nst; i++) {
+            if (!strcmp(st[i].route, c[0]) && !strcmp(st[i].stream, c[1])) pkerr(t, "duplicate stream-stage");
+            if (!strcmp(st[i].route, c[0])) last = st[i].outf;
+        }
+        if (last && strcmp(last, c[2])) pkerr(t, "format mismatch");
+        pl = dl + strlen(c[4]) + 2; path = xmalloc(pl);
+        if (dirend && c[4][0] != '/') snprintf(path, pl, "%.*s/%s", (int)dl, manifest, c[4]); else snprintf(path, pl, "%s", c[4]);
+        data = (unsigned char *)read_bytes(path, &dn); free(path);
+        if (dn < 2 || memcmp(data, "N ", 2) || data[dn - 1] != '\n') pkerr(t, "expected canonical network text");
+        for (i = 0; i < nmod; i++) if (modn[i] == dn && !memcmp(mod[i], data, dn)) { idx = i; break; }
+        if (idx < 0) {
+            mod = realloc(mod, (size_t)(nmod + 1) * sizeof *mod); modn = realloc(modn, (size_t)(nmod + 1) * sizeof *modn);
+            if (!mod || !modn) fail("MemoryError", "out of memory", 0);
+            mod[nmod] = data; modn[nmod] = dn; idx = nmod++;
+        } else free(data);
+        if (nst == stcap) { stcap = stcap ? stcap * 2 : 64; st = realloc(st, (size_t)stcap * sizeof *st); if (!st) fail("MemoryError", "out of memory", 0); }
+        st[nst].route = c[0]; st[nst].stream = c[1]; st[nst].in = c[2]; st[nst].outf = c[3]; st[nst].model = idx; nst++;
+    }
+    if (!nst) pkerr("empty package", 0);
+    for (m = 0; m < nmounts; m++) {
+        size_t hl = strlen(mounts[m].prefix_hex), j; unsigned char kp[256]; struct stat sb;
+        if (hl % 2 || hl / 2 > sizeof kp) pkerr("bad mount prefix", mounts[m].prefix_hex);
+        for (j = 0; j < hl; j += 2) {
+            int a = hexv(mounts[m].prefix_hex[j]), b = hexv(mounts[m].prefix_hex[j + 1]);
+            if (a < 0 || b < 0) pkerr("bad mount prefix", mounts[m].prefix_hex);
+            kp[j / 2] = (unsigned char)(a * 16 + b);
+        }
+        if (stat(mounts[m].dir, &sb) || !S_ISDIR(sb.st_mode)) pkerr("resource mount is not a directory:", mounts[m].dir);
+        NRF = 0; walk(mounts[m].dir, "");
+        if (!NRF) pkerr("empty resource mount:", mounts[m].dir);
+        qsort(RF, (size_t)NRF, sizeof *RF, partcmp);
+        for (f = 0; f < NRF; f++) {
+            size_t rl = strlen(RF[f].rel), kn = hl / 2 + rl, vn; unsigned char *key = xmalloc(kn + 1); char *v; int dup = 0, r;
+            memcpy(key, kp, hl / 2); memcpy(key + hl / 2, RF[f].rel, rl);
+            v = read_bytes(RF[f].full, &vn);
+            for (r = 0; r < nres; r++) if (res[r].kn == kn && !memcmp(res[r].k, key, kn)) {
+                if (res[r].vn != vn || memcmp(res[r].v, v, vn)) pkerr("conflicting resource", RF[f].rel);
+                dup = 1; break;
+            }
+            free(RF[f].rel); free(RF[f].full);
+            if (dup) { free(key); free(v); continue; }
+            if (nres == rcap) { rcap = rcap ? rcap * 2 : 256; res = realloc(res, (size_t)rcap * sizeof *res); if (!res) fail("MemoryError", "out of memory", 0); }
+            res[nres].k = key; res[nres].kn = kn; res[nres].v = v; res[nres].vn = vn; nres++;
+        }
+    }
+    if (nres) snprintf(t, sizeof t, "P 2 %d %d %d\n", nmod, nst, nres);
+    else snprintf(t, sizeof t, "P 1 %d %d\n", nmod, nst);
+    out->n = 0; bstr(out, t);
+    for (i = 0; i < nst; i++) {
+        bstr(out, "D "); bstr(out, st[i].route); bstr(out, " "); bstr(out, st[i].stream); bstr(out, " ");
+        bstr(out, st[i].in); bstr(out, " "); bstr(out, st[i].outf); snprintf(t, sizeof t, " %d\n", st[i].model); bstr(out, t);
+    }
+    for (i = 0; i < nmod; i++) {                  /* compact_q once per distinct model Net text in this process */
+        static unsigned char **seen; static size_t *seenn; static Buf *done; static int nseen; int c;
+        for (c = 0; c < nseen; c++) if (seenn[c] == modn[i] && !memcmp(seen[c], mod[i], modn[i])) break;
+        if (c == nseen) {
+            seen = realloc(seen, (size_t)(nseen + 1) * sizeof *seen); seenn = realloc(seenn, (size_t)(nseen + 1) * sizeof *seenn);
+            done = realloc(done, (size_t)(nseen + 1) * sizeof *done);
+            if (!seen || !seenn || !done) fail("MemoryError", "out of memory", 0);
+            seen[c] = mod[i]; seenn[c] = modn[i]; done[c].p = 0; done[c].n = done[c].cap = 0;
+            compact_q(mod[i], modn[i], &done[c]); nseen++;
+        } else free(mod[i]);
+        snprintf(t, sizeof t, "M %lu\n", (unsigned long)done[c].n); bstr(out, t); bput(out, done[c].p, done[c].n);
+    }
+    for (i = 0; i < nres; i++) {
+        snprintf(t, sizeof t, "F %lu %lu\n", (unsigned long)res[i].kn, (unsigned long)res[i].vn); bstr(out, t);
+        bput(out, res[i].k, res[i].kn); bput(out, res[i].v, res[i].vn); free(res[i].k); free(res[i].v);
+    }
+    if (out->n >= (size_t)1 << 31) pkerr("package exceeds runtime byte extent", 0);
+    free(mod); free(modn); free(st); free(res); free(text);
+}
+
+
+/* ---------- the probe Net's delta JSON: probe_model() of the .py, verbatim -- the only Python left ---------- */
+static const char *PY_PROBE =
+    "import importlib.util,json,pathlib,sys\n"
+    "R=pathlib.Path(sys.argv[1]);sys.path[0:1]=[str(R/'exec/c'),str(R/'exec/parse2')]\n"
+    "def probe_model():\n"
+    "    spec=importlib.util.spec_from_file_location('diag_grammar',R/'exec/build/parsebase.py')\n"
+    "    E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)\n"
+    "    import assemble\n"
+    "    _tl=assemble.load_facts('tokenlocations')['tokenlocations!']  # exec/facts/tokenlocations.tsv\n"
+    "    locations=lambda E,P: assemble.run(R/'exec/parse2/tokenlocations-manifest.tsv',E,P,dict(multi=True,record=False,ordinal=False),\n"
+    "        dict(ready='START',token_record='RET',ordinal_table=0))['start']\n"
+    "    diagnostics=lambda E,P: assemble.run(R/'exec/parse2/diagnostics-manifest.tsv',E,P,{},\n"
+    "        {k:_tl[k] for k in ('SPLICES','INCLUDE_LINE','INCLUDE_LINES','INCLUDE_NAME')})\n"
+    "    P,g=E.P,E.g\n"
+    "    P('NEXT').goto('DEAD');P('NX').goto('DEAD')\n"
+    "    start=locations(E,P);diagnostics(E,P)\n"
+    "    P('START').a(('SBCLR',),*[('SBOUT',c) for c in b'probe [-Wtest]'],('SBSAVE','diag_message'),('LDI','probe_count',0)).goto('PROBE.mode')\n"
+    "    for c in (0,1):g.on('PROBE.mode',[c],'PROBE.0',[('LDI','diag_warning',c),('LDI','diag_pos',0),('ADV',)])\n"
+    "    g.on('PROBE.mode',[256],'PROBE.done',[])\n"
+    "    g.els('PROBE.mode','DEAD',E.rej('bad diagnostic test request'))\n"
+    "    for k in range(8):\n"
+    "        g.on('PROBE.'+str(k),range(256),'PROBE.'+str(k+1) if k<7 else 'PROBE.call',\n"
+    "             [('BYTE','probe_byte'),('A64I','shl','probe_byte','probe_byte',8*k),\n"
+    "              ('A64','or','diag_pos','diag_pos','probe_byte'),('ADV',)])\n"
+    "        g.els('PROBE.'+str(k),'DEAD',E.rej('bad diagnostic test request'))\n"
+    "    P('PROBE.call').call('DIAG.report').a(('ALU','add','probe_count','probe_count','diag_reported')).goto('PROBE.mode')\n"
+    "    p=P('PROBE.done')\n"
+    "    for k in range(4):p.a(('ALUI','sar','probe_byte','probe_count',8*k),('OUTW','probe_byte'))\n"
+    "    p.a(('ACCEPT',)).goto('DEAD')\n"
+    "    g.finish()\n"
+    "    return {'start':start,'states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':g.seqs}\n"
+    "pathlib.Path(sys.argv[2]).write_text(json.dumps(probe_model(),separators=(',',':')))\n";
+
+/* ---------- the reference instrumentation (scratch only) ---------- */
+static const char *HELPER =
+    "static void probe_diag(void) { char *s; long v; int neg; int mode; int count; unsigned char out[4]; int i;\n"
+    "s=getenv(\"UA_DIAG_POS\"); mode=getenv(\"UA_DIAG_WARN\")[0]==49; count=0; warnall=1; nwarn=0;\n"
+    "while(*s) { neg=0; v=0; if(*s==45){neg=1;s=s+1;} while(*s>=48 && *s<=57){v=v*10+*s-48;s=s+1;}\n"
+    "if(neg)v=0-v; if(mode)warn_at(v,\"probe [-Wtest]\");else err_at(v,\"probe [-Wtest]\");count=count+1;if(*s==44)s=s+1; }\n"
+    "if(mode)count=nwarn; for(i=0;i<4;i++)out[i]=(count>>(8*i))&255;__write(1,out,4); }\n";
+static const char *ANCHOR1 = "int fe_load(char *path, char *t) {";
+static const char *ANCHOR2 = "    if (pponly) {                       /* -E: the text, not a program */";
+static const char *HOOK = "    if (getenv(\"UA_DIAG_POS\")) { probe_diag(); return 2; }\n";
+
+/* source.replace(anchor, text + anchor) after assert source.count(anchor)==1 */
+static void insert_before(Buf *src, const char *anchor, const char *text) {
+    size_t at = 0; Buf o = { 0, 0, 0 };
+    if (count_of(src->p, src->n, anchor, &at) != 1) fail("AssertionError", 0, 0);
+    bput(&o, src->p, at); bstr(&o, text); bput(&o, src->p + at, src->n - at);
+    free(src->p); *src = o;
+}
+
+typedef struct { const char *name, *text; int forced; } Case;
+static const Case CASES[] = {
+    {"plain", "int\tprobe_here;\n", 0}, {"macro", "#define V 12345\nint probe_here=V;\n", 0},
+    {"splice", "int probe_here=1+\\\n2;\n", 0}, {"crlf", "int probe_here=1+\\\r\n2;\n", 0},
+    {"comment", "/* a\nb */ int probe_here;\n", 0},
+    {"nested", "#include \"outer.h\"\nint probe_here;\n", 0},
+    {"repeated", "#include \"inner.h\"\n#include \"inner.h\"\nint probe_here;\n", 0},
+    {"forced", "int probe_here;\n", 1},
+    {"automatic", "int main(void){printf(\"probe_here\\n\");return 0;}\n", 0},
+    {"no-newline", "int probe_here;", 0}, {"empty", "", 0}, {0, 0, 0}
+};
+static void put_le(Buf *b, uint64_t v, int n) { unsigned char c; int i; for (i = 0; i < n; i++) { c = (unsigned char)(v >> (8 * i)); bput(b, &c, 1); } }
+
+int main(void) {
+    char here[PATHN], *slash; const char *tmp, *ecc; int i, mode;
+    char *refc, *ref, *runner, *inc, *seed, *gen, *tbl, *net, *outer, *resources, *route, *pkg, *f, *req;
+    Buf src = { 0, 0, 0 };
+
+    /* R = Path(__file__).resolve().parents[2] */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/../..", here); if (!realpath(t, ROOT)) fail("FileNotFoundError", "cannot resolve the repository root", t); }
+
+    /* tempfile.TemporaryDirectory(prefix='model-diagnostics-') */
+    tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TEMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = "/tmp";
+    snprintf(TD, sizeof TD, "%s/model-diagnostics-XXXXXX", tmp);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("FileNotFoundError", "No usable temporary directory found", 0); }
+    MADE = 1;
+    signal(SIGINT, SIG_DFL);
+    inc = path2(ROOT, "include"); seed = path2(ROOT, "seed");
+
+    /* the constructors first, in parallel with the reference source export (they are independent) */
+    gen = path2(TD, "gen"); tbl = path2(TD, "tbl"); net = path2(TD, "net"); runner = path2(TD, "run");
+    ecc = getenv("EXEC_CC"); if (!ecc) ecc = "cc";
+    {
+        char *iseed = xmalloc(strlen(seed) + 3);
+        char *g_av[] = { "cc", "-std=c99", "-O2", "-w", iseed, path2(seed, "gen.c"), "-o", gen, 0 };
+        char *t_av[] = { "cc", "-std=c99", "-O2", "-w", iseed, path2(seed, "tbl.c"), "-o", tbl, 0 };
+        char *n_av[] = { "cc", "-std=c99", "-O2", "-w", iseed, path2(seed, "net.c"), "-o", net, 0 };
+        char *r_av[] = { (char *)ecc, "-O2", path2(ROOT, "exec/c/run.c"), "-o", runner, 0 };
+        char *sub = path2(TD, "refsource"), *flat, *a, *b, *c; size_t an, bn, cn;
+        Job jg, jt, jn, jr; Res r;
+        snprintf(iseed, strlen(seed) + 3, "-I%s", seed);
+        jg = start(g_av, 0, 0); jt = start(t_av, 0, 0); jn = start(n_av, 0, 0);
+
+        /* source=source_text(R): tests/export_ref.sh FLAT (check=True, capture_output, timeout=30) */
+        if (mkdir(sub, 0700)) fail("OSError", "cannot create", sub);
+        flat = path2(sub, "ref.c");
+        {   char *av[] = { path2(ROOT, "tests/export_ref.sh"), flat, 0 }; Job j = start(av, 0, 0);
+            r = finish(&j);
+            if (r.rc) {
+                Buf m = { 0, 0, 0 }; char t[64];
+                bstr(&m, "Command '"); argv_text(&m, av); snprintf(t, sizeof t, "' returned non-zero exit status %d.", r.rc); bstr(&m, t);
+                fail("subprocess.CalledProcessError", m.p, 0);
+            }
+            res_free(&r); }
+        a = read_text(path2(ROOT, "tests/refshim.h"), &an); b = read_text(flat, &bn); c = read_text(path2(ROOT, "tests/reffoot.h"), &cn);
+        bput(&src, a, an); bput(&src, b, bn); bput(&src, c, cn); free(a); free(b); free(c);
+        insert_before(&src, ANCHOR1, HELPER);
+        {   Buf h = { 0, 0, 0 }; bstr(&h, HOOK); insert_before(&src, ANCHOR2, h.p); free(h.p); }
+        refc = path2(TD, "ref.c"); ref = path2(TD, "ref");
+        write_bytes(refc, src.p, src.n);
+        {   char *av[] = { "cc", "-w", "-O1", "-I", path2(ROOT, "kernel"), "-I", path2(ROOT, "src"), refc, "-o", ref, 0 };
+            Job jref = start(av, 0, 0);
+            jr = start(r_av, 0, 0);
+            r = finish(&jref); must(&r, av); res_free(&r); }
+        r = finish(&jr); must(&r, r_av); res_free(&r);
+        r = finish(&jg); must(&r, g_av); res_free(&r);
+        r = finish(&jt); must(&r, t_av); res_free(&r);
+        r = finish(&jn); must(&r, n_av); res_free(&r);
+    }
+    /* pp.json: gen.py pp OUT --locations, as seed gen (cwd = the repository root, as compilerpack runs it) */
+    {   char *av[] = { gen, "pp", path2(TD, "pp.json"), "--locations", 0 }; Res r = run_in(av, ROOT, 0); must(&r, av); res_free(&r); }
+    /* diag.json: probe_model() -- the one Python call */
+    {   char *av[] = { "python3", "-c", (char *)PY_PROBE, ROOT, path2(TD, "diag.json"), 0 }; int rc = spawn(av); if (rc) quit(rc); }
+    {   static const char *names[] = { "pp", "diag", 0 };
+        for (i = 0; names[i]; i++) {
+            char a[64], b[64], c[64]; snprintf(a, sizeof a, "%s.json", names[i]); snprintf(b, sizeof b, "%s.tbl", names[i]); snprintf(c, sizeof c, "%s.net", names[i]);
+            { char *av[] = { tbl, path2(TD, a), path2(TD, b), 0 }; Res r = call(av); res_free(&r); }
+            { char *av[] = { net, path2(TD, b), path2(TD, c), 0 }; Res r = call(av); res_free(&r); }
+        }
+    }
+    write_bytes(path2(TD, "inner.h"), "int probe_here;\n", 16);
+    outer = path2(TD, "outer.h");
+    { const char *o = "#include \"inner.h\"\nint probe_here_outer;\n"; write_bytes(outer, o, strlen(o)); }
+    f = path2(TD, "source.c"); resources = path2(TD, "cli"); route = path2(TD, "route.tsv"); pkg = path2(TD, "pkg"); req = path2(TD, "request");
+    for (i = 0; CASES[i].name; i++) {
+        Mount mounts[2]; Buf pk = { 0, 0, 0 }; Res r; char *pp; size_t ppn, n, k, bodyn; const char *body;
+        long long offs[4096]; int noff = 0, j; struct stat sb;
+        write_bytes(f, CASES[i].text, strlen(CASES[i].text));
+        if (mkdir(resources, 0777) && !(errno == EEXIST && stat(resources, &sb) == 0 && S_ISDIR(sb.st_mode))) fail("OSError", "cannot create", resources);
+        if (CASES[i].forced) { Buf x = { 0, 0, 0 }; bstr(&x, outer); bput(&x, "", 1); write_bytes(path2(resources, "includes"), x.p, x.n); free(x.p); }
+        else write_bytes(path2(resources, "includes"), "", 0);
+        { const char *rt = "map\te2\tsrc.c\tpp.locations\tpp.net\n"; write_bytes(route, rt, strlen(rt)); }
+        mounts[0].prefix_hex = "00636c692f"; mounts[0].dir = resources;
+        mounts[1].prefix_hex = "006864722f"; mounts[1].dir = inc;
+        pack_build(route, mounts, 2, &pk); write_bytes(pkg, pk.p, pk.n); free(pk.p);
+        {   char *av[] = { runner, "--bundle", pkg, "map", f, f, inc, 0 }; r = call(av); }
+        pp = r.out; ppn = r.on; r.out = 0; res_free(&r);
+        if (ppn < 11) fail("struct.error", "unpack_from requires a buffer of at least 11 bytes for unpacking 4 bytes at offset 7 (actual buffer size is ", 0);
+        n = (size_t)(unsigned char)pp[7] | (size_t)(unsigned char)pp[8] << 8 | (size_t)(unsigned char)pp[9] << 16 | (size_t)(unsigned char)pp[10] << 24;
+        if (!n) { body = ""; bodyn = 0; } else if (n <= ppn) { body = pp + ppn - n; bodyn = n; } else { body = pp; bodyn = ppn; }
+        offs[noff++] = -7; offs[noff++] = 0; offs[noff++] = 1; offs[noff++] = n ? (long long)n - 1 : 0; offs[noff++] = (long long)n; offs[noff++] = (long long)n + 7;
+        for (k = 0; k + 10 <= bodyn; k++) if (!memcmp(body + k, "probe_here", 10)) { if (noff == 4096) fail("MemoryError", "too many offsets", 0); offs[noff++] = (long long)k; }
+        for (mode = 0; mode < 2; mode++) {
+            Buf data = { 0, 0, 0 }, pos = { 0, 0, 0 }; Res g; char t[32], *setv[3], wv[32];
+            bput(&data, "UNITOK1\0", 8); put_le(&data, (uint64_t)ppn, 4); bput(&data, pp, ppn);
+            for (j = 0; j < noff; j++) { unsigned char m = (unsigned char)mode; bput(&data, &m, 1); put_le(&data, (uint64_t)offs[j], 8); }
+            write_bytes(req, data.p, data.n); free(data.p);
+            bstr(&pos, "UA_DIAG_POS=");
+            for (j = 0; j < noff; j++) { snprintf(t, sizeof t, "%s%lld", j ? "," : "", offs[j]); bstr(&pos, t); }
+            snprintf(wv, sizeof wv, "UA_DIAG_WARN=%d", mode);
+            setv[0] = pos.p; setv[1] = wv; setv[2] = 0;
+            {   char *av[6]; int k2 = 0; av[k2++] = ref; av[k2++] = f; if (CASES[i].forced) { av[k2++] = "-include"; av[k2++] = outer; } av[k2++] = "-E"; av[k2] = 0;
+                r = run_in(av, 0, setv); }
+            {   char *av[] = { runner, path2(TD, "diag.net"), req, f, 0 }; g = run(av); }
+            if (!(r.rc == g.rc && g.rc == 0)) {
+                Buf m = { 0, 0, 0 }; size_t from = g.en > 1000 ? g.en - 1000 : 0;
+                snprintf(t, sizeof t, "', %d, %d, %d, ", mode, r.rc, g.rc);
+                bstr(&m, "('"); bstr(&m, CASES[i].name); bstr(&m, t); brepr(&m, g.err + from, g.en - from); bstr(&m, ")");
+                fail("AssertionError", m.p, 0);
+            }
+            if (!(r.on == g.on && !memcmp(r.out, g.out, r.on) && r.en == g.en && !memcmp(r.err, g.err, r.en))) {
+                Buf m = { 0, 0, 0 };
+                snprintf(t, sizeof t, "', %d, ", mode);
+                bstr(&m, "('"); bstr(&m, CASES[i].name); bstr(&m, t); brepr(&m, r.out, r.on); bstr(&m, ", "); brepr(&m, g.out, g.on);
+                bstr(&m, ", "); brepr(&m, r.err, r.en < 1500 ? r.en : 1500); bstr(&m, ", "); brepr(&m, g.err, g.en < 1500 ? g.en : 1500); bstr(&m, ")");
+                fail("AssertionError", m.p, 0);
+            }
+            res_free(&r); res_free(&g); free(pos.p);
+        }
+        free(pp);
+        printf("diagnostic rendering %s errors/warnings match reference\n", CASES[i].name); fflush(stdout);
+    }
+    printf("diagnostic rendering: 11 cases x 2 modes, including clamp and header suppression\n");
+    quit(0);
+    return 0;
+}

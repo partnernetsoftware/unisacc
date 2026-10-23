@@ -1,0 +1,39 @@
+#!/usr/bin/env -S unisacc.com -run
+/* librarystackcheck.cx -- exec/c/librarystackcheck.py's entry in C (2026-10-23, the py->cx port wave; owner's goal:
+   no Python in the toolchain).  Actual model-produced script ALL_STACK entries on a Darwin runner; not full native FFI
+   exports.  usage: sh ./unisacc.com -run exec/c/librarystackcheck.cx -- PRIVATE_MODEL_COM ARCH
+   - not exactly two arguments: `usage: librarystackcheck.py PRIVATE_MODEL_COM ARCH` on stderr, rc 1 (sys.exit(str));
+     ARCH not arm64/x86_64: `unsupported stack architecture` on stderr, rc 1.
+   - the execution host must be darwin-arm64 (arm64) or darwin-x86_64 (x86_64, Rosetta counts) -- tests/hostcheck.py's
+     require_host, here tests/cxlib/hostcheck.cx; on any other host one `UNVERIFIED: required=... observed=...
+     missing=execution-host target=osx/ARCH` line on stdout, rc 77.  This is the whole contract on Linux.
+   - on a matching Darwin host the check itself compares the Mach-O text the model emits with the Python reference
+     lowering (unisa.tape.parse, unisa.lower.lower) assembled by the independent Python assembler (unisa.assemble) and
+     runs the ALL_STACK harness on it.  That reference is the oracle and is not ported: this file then runs
+     `python3 ROOT/exec/c/librarystackcheck.py PRIVATE_MODEL_COM ARCH` in its place (exec, same argv, same stdio), so
+     the Darwin Book-phase evidence is unchanged.  REMAINING PYTHON: that one call.
+   ROOT is Path(__file__).resolve().parents[2].  tests/cxlib/hostcheck.cx is included as text: `#pragma unisa use`
+   resolves beside the using file only and this file lives in exec/c. */
+#include "../../tests/cxlib/hostcheck.cx"
+
+int main(int argc, char **argv) {
+    char root[4096], self[4096], script[4300], target[64]; int k, rc; const char *arch;
+    if (argc != 3) { fputs("usage: librarystackcheck.py PRIVATE_MODEL_COM ARCH\n", stderr); return 1; }
+    arch = argv[2];
+    if (strcmp(arch, "arm64") && strcmp(arch, "x86_64")) { fputs("unsupported stack architecture\n", stderr); return 1; }
+    if (!realpath(__FILE__, self)) { fprintf(stderr, "FileNotFoundError: %s\n", __FILE__); return 1; }
+    for (k = 0; k < 3; k++) { char *s = strrchr(self, '/'); if (s && s != self) *s = 0; else { strcpy(self, "/"); break; } }
+    snprintf(root, sizeof root, "%s", self);
+    snprintf(target, sizeof target, "osx/%s", arch);
+    rc = hc_require_host(!strcmp(arch, "arm64") ? "darwin-arm64" : "darwin-x86_64", target, root);
+    if (rc) return rc;
+    /* Darwin runner: the Python reference lowering + assembler is the oracle (see above) */
+    snprintf(script, sizeof script, "%s/exec/c/librarystackcheck.py", root);
+    {
+        char *av[5]; av[0] = "python3"; av[1] = script; av[2] = argv[1]; av[3] = argv[2]; av[4] = 0;
+        fflush(stdout); fflush(stderr);
+        execvp(av[0], av);
+        fprintf(stderr, "FileNotFoundError: [Errno 2] No such file or directory: 'python3'\n");
+        return 1;
+    }
+}

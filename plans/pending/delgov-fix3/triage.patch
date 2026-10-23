@@ -1,0 +1,92 @@
+diff --git a/tests/boundcheck.py b/tests/boundcheck.py
+index 821b53a9..58610067 100644
+--- a/tests/boundcheck.py
++++ b/tests/boundcheck.py
+@@ -132,6 +132,12 @@ with tempfile.TemporaryDirectory(prefix='linux-cleanup-') as td:
+     (fixture/'tests').mkdir(parents=True); (fixture/'corpus/c-testsuite/tests/single-exec').mkdir(parents=True)
+     guest.mkdir(); tools.mkdir()
+     (fixture/'tests/linux.sh').write_bytes((root/'linux.sh').read_bytes())
++    # c11b0799: the guest deletes only through the guard of the tree it unpacked (tests/cxbin builds tests/safedel.cx
++    # with the guest cc from include/), so the mock tree carries the guard as the real checkout does
++    (fixture/'include').mkdir()
++    # (copies of the guard's sources, not a call of it: deletecheck counts a code line naming the CLI as a call)
++    for src in [root/'cxbin',*root.glob('safedel*.cx'),*(root.parent/'include').glob('*.h')]:
++        (fixture/src.parent.name/src.name).write_bytes(src.read_bytes())
+     (fixture/'tests/probe.sh').write_text('#!/bin/sh\necho latest-failure\nexit 3\n');(fixture/'tests/probe.sh').chmod(0o755)
+     driver="""import os,subprocess,sys
+ if sys.argv[1]=='list':
+@@ -144,20 +150,25 @@ else:
+ """
+     (tools/'limactl').write_text('#!'+sys.executable+'\n'+driver);(tools/'limactl').chmod(0o755)
+     env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],LINUX_TEST_HOME=str(guest),STRICT='1')
+-    for name in ('unisa-linux','unisa-tmp'):
+-        (guest/name).mkdir();(guest/name/'old-tree').write_text('old')
++    # guest layout of c11b0799: scratch root ~/unisa-scratch, a run's tree linux.XXXXXX and TMPDIR tmp.XXXXXX, lock,
++    # current.log; a dead run's linux.* and tmp.* are purged by the next run, nothing else in the guest is touched
++    scratch=guest/'unisa-scratch'
++    for name in ('linux.dead00','tmp.dead00'):
++        (scratch/name).mkdir(parents=True);(scratch/name/'old-tree').write_text('old')
+     (guest/'unrelated').write_text('keep')
+-    result=subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=10)
++    def leftovers():   # the guard's own compile cache (TMPDIR=S for its calls) is the one entry that stays
++        return sorted(p.name for p in scratch.iterdir() if not p.name.startswith('unisacc-cxbin-'))
++    result=subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=30)
+     assert result.returncode==3,(result.returncode,result.stderr,result.stdout)
+     assert (guest/'unisa-linux-last-failure.log').read_text()=='latest-failure\n'
+     assert (guest/'unrelated').read_text()=='keep'
+-    for name in ('unisa-linux','unisa-tmp','.unisa-linux-lock','unisa-linux-current.log'):
+-        try: (guest/name).stat()
+-        except FileNotFoundError: pass
+-        else: raise AssertionError(name)
++    assert leftovers()==[],(leftovers(),result.stdout[-2000:])
+     (fixture/'tests/probe.sh').write_text('#!/bin/sh\necho success\n')
+-    assert subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=10).returncode==0
++    result=subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=30)
++    assert result.returncode==0,(result.returncode,result.stderr,result.stdout)
+     assert (guest/'unisa-linux-last-failure.log').read_text()=='latest-failure\n'
++    assert (guest/'unrelated').read_text()=='keep'
++    assert leftovers()==[],leftovers()
+     print('linux: old scratch cleared; failure tree removed; latest failure log retained (mock guest)')
+ if TERM_UNVERIFIED:
+     sys.exit(77)   # UNVERIFIED (not a pass): the Terminal ownership cases were not run on this host
+diff --git a/tests/forceincludecheck.cx b/tests/forceincludecheck.cx
+index 1d04a656..141d9580 100644
+--- a/tests/forceincludecheck.cx
++++ b/tests/forceincludecheck.cx
+@@ -36,7 +36,7 @@ static int probe(const char *name, const char *flags, const char *body,
+     return !ok;
+ }
+ int main(int argc, char **argv) {
+-    char own[4096], cwd[4096], path[8192]; int fail=0; const char *td=getenv("TMPDIR");
++    char own[]="/tmp/fiXXXXXX", cwd[4096], path[8192]; int fail=0;
+     const char *head=
+         "static int eq(const char *a,const char *b){if(a[0]=='.' && a[1]=='/')a+=2;while(*a && *a==*b){a++;b++;}return *a==*b;}\n";
+     char plain[8192],forward[8192],single[8192],normal[8192],mapped[8192],spliced[8192];
+@@ -44,8 +44,8 @@ int main(int argc, char **argv) {
+     const char *condition="eq(w1,\"sub/h.h\") && l1==2 && eq(w2,\"sub/h2.h\") && l2==3 && (eq(wn,\"nested.h\") || eq(wn,\"sub/nested.h\")) && ln==2 && eq(wmain,\"main.c\") && lmain==2";
+     if (argc<2 || argc>3 || (argc==3 && strcmp(argv[2],"--cc"))) return 2;
+     systemcc=argc==3;
+-    /* under the deletion guard's temp root; a short name: absolute -include paths past 64 bytes fail here (2026-10-23) */
+-    snprintf(own,sizeof own,"%s/fiXXXXXX",td&&*td?td:"/tmp");
++    /* /tmp (a guard root) and never $TMPDIR: absolute -include paths past 64 bytes fail here, and a long $TMPDIR
++       (macOS /var/folders/..., a scratch export's) made absolute/nested/plain red after c11b0799 (2026-10-23) */
+     if (!getcwd(cwd,sizeof cwd) || !mkdtemp(own)) return 2;
+     snprintf(D,sizeof D,"%s",own);
+     if (argv[1][0]=='/') snprintf(P,sizeof P,"%s",argv[1]);
+diff --git a/tests/pipelinecache.py b/tests/pipelinecache.py
+index 5c070d71..f6b1c3e0 100644
+--- a/tests/pipelinecache.py
++++ b/tests/pipelinecache.py
+@@ -20,10 +20,10 @@ with tempfile.TemporaryDirectory(prefix="t7-cache-") as directory:
+     root = Path(directory)
+     directories = ("exec/build", "exec/parse2", "exec/parse", "exec/lex", "exec/pp",
+                    "unisa", "src", "kernel", "include", "weights/gold",
+-                   "iterate/kernel", "cache/pipe")
++                   "iterate/kernel", "cache/pipe", "tests")
+     for name in directories:
+         (root / name).mkdir(parents=True, exist_ok=True)
+-    (root / "exec/stamp.sh").write_bytes((ROOT / "exec/stamp.sh").read_bytes())
++    for source in [ROOT / "exec/stamp.sh", ROOT / "tests/cxbin", *(ROOT / "tests").glob("safedel*.cx"), *(ROOT / "include").glob("*.h")]: (root / source.relative_to(ROOT)).write_bytes(source.read_bytes())   # c11b0799: exec/stamp.sh fresh deletes through the guard of its cwd's checkout, so the private tree carries it
+     (root / "iterate/kernel/typekw.tsv").write_text("type\n")
+     (root / "cache/ua_ref.stamp").write_text("reference\n")
+     for name in ("pp", "lex", "lexcls", "lexword", "parse"):

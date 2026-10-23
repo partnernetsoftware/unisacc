@@ -1,0 +1,414 @@
+#!/usr/bin/env -S unisacc.com -run
+/* netcheck.cx -- exec/c/netcheck.py in C (2026-10-23, the py->cx port wave; the owner's direction: the toolchain moves
+   off Python).  Exercise production inference, including holes and negative output weights.  Optional .tbl
+   arguments are exhaustively checked too; no generated model cache.  Each compiler/executor invocation has its own
+   60-second bound.
+   usage: sh ./unisacc.com -run exec/c/netcheck.cx [-- TABLE.tbl...]
+   env:   EXEC_CC (default cc) builds exec/c/run.c; CORE_EXTERNAL=1 adds -DUNISA_CORE_EXTERNAL exec/c/core.c.
+   The threshold Net text comes from cxlib.netpack (np_convert = exec/c/net.py convert) and the packages from
+   np_pack_build (= exec/c/pack.py build); neither constructor runs in Python any more.  What remains Python is the
+   subject of one check, not a generator: the diagnostic-stream case asks the Python delta oracle
+   `python3 exec/pp/sim.py TMP/diagnostic.json TMP/diagnostic-input` (twice) for the same generic actions, as the .py
+   did with sys.executable.
+   Output: run's --check-net stdout for the tiny table and each argument, then the two summary lines; rc 0.  A failed
+   assertion or exception is one `netcheck: ...` line on stderr where Python printed a traceback, rc 1 (the stdout
+   printed before it stays).  The scratch directory is a tempfile.mkdtemp(prefix='unisacc-net-') tree, removed on
+   every exit through cxlib.pytempfile (ptf_rmtree).
+   The repository root is two directories above this file (the .py's Path(__file__).resolve().parents[2]). */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.pytempfile
+
+static char ROOT[4096], D[4096];
+
+static void cleanup(void) { if (D[0]) { ptf_rmtree(D); D[0] = 0; } }
+static void fail(const char *what) {
+    fflush(stdout);
+    fprintf(stderr, "netcheck: %s\n", what);
+    cleanup(); exit(1);
+}
+static char *at(const char *name) {   /* d/NAME, malloc'd */
+    size_t n = strlen(D) + strlen(name) + 2; char *p = malloc(n);
+    if (!p) fail("MemoryError");
+    snprintf(p, n, "%s/%s", D, name);
+    return p;
+}
+static void put_file(const char *path, const char *s, size_t n) {
+    char why[4600]; int e = np_writefile(path, s, n);
+    if (e) { np_oserror(e, path, why, sizeof why); fail(why); }
+}
+static void put_text(const char *path, const char *s) { put_file(path, s, strlen(s)); }
+
+/* checklib.run(ARGV): capture_output, timeout 60; the exception of a failed exec/timeout is fatal */
+static np_result run_env(char **argv, char **envadd) {
+    np_result r; char why[8192];
+    if (np_run(argv, 0, envadd, 60, &r, why, sizeof why)) fail(why);
+    return r;
+}
+static np_result run(char **argv) { return run_env(argv, 0); }
+static np_result require(np_result r, char **argv) {
+    if (r.rc != 0) {
+        np_buf b = { 0, 0, 0 }; size_t i; char t[32];
+        np_puts(&b, "AssertionError: (");
+        for (i = 0; argv[i]; i++) { np_puts(&b, i ? ", '" : "['"); np_puts(&b, argv[i]); np_puts(&b, "'"); }
+        snprintf(t, sizeof t, "], %d, ", r.rc); np_puts(&b, t);
+        np_repr_bytes(&b, r.err, r.errn > 2000 ? 2000 : r.errn); np_puts(&b, ")");
+        fail(b.p);
+    }
+    return r;
+}
+static int same(const np_result *r, int rc, const char *out, size_t on, const char *err, size_t en) {
+    return r->rc == rc && r->outn == on && !memcmp(r->out, out, on) && r->errn == en && !memcmp(r->err, err, en);
+}
+static void check(int ok, const char *what) { if (!ok) { char t[512]; snprintf(t, sizeof t, "AssertionError%s%s", *what ? ": " : "", what); fail(t); } }
+
+static np_buf convert(const char *src, size_t n) {
+    np_buf out = { 0, 0, 0 }; long long rows, units; char why[512];
+    if (np_convert(src, n, &out, &rows, &units, why, sizeof why)) fail(why);
+    return out;
+}
+/* ' '.join(' '.join(map(str, (CODE[a[0]], *a[1:]))) for a in acts): ACTS is "NAME a b;NAME;..." */
+static void tokens(np_buf *b, const char *acts) {
+    const char *s = acts; int first = 1;
+    while (*s) {
+        char name[32]; size_t l = strcspn(s, " ;"); int op;
+        snprintf(name, sizeof name, "%.*s", (int)l, s);
+        op = np_code(name);
+        if (op < 0) fail("KeyError");
+        if (!first) np_put(b, " ", 1);
+        np_putll(b, op); first = 0; s += l;
+        while (*s == ' ') {
+            size_t m; s++; m = strcspn(s, " ;");
+            np_put(b, " ", 1); np_put(b, s, m); s += m;
+        }
+        if (*s == ';') s++;
+    }
+}
+/* model(name, acts, rows='R 0 0 0 0', strings=()): STRINGS are hex texts ("" for b'') */
+static char *model(const char *name, const char *acts, const char *rows, const char *const *strings, int ns) {
+    np_buf body = { 0, 0, 0 }, out; char t[64], file[256]; int i, n = 0; const char *s;
+    for (s = acts; *s; s++) if (*s == ';') n++;
+    n++;
+    snprintf(t, sizeof t, "T 1 1 8 %d 0\n", ns); np_puts(&body, t);
+    for (i = 0; i < ns; i++) { np_puts(&body, "S "); np_puts(&body, *strings[i] ? strings[i] : "-"); np_puts(&body, "\n"); }
+    snprintf(t, sizeof t, "Q %d ", n); np_puts(&body, t); tokens(&body, acts); np_puts(&body, "\n");
+    np_puts(&body, rows ? rows : "R 0 0 0 0"); np_puts(&body, "\n");
+    out = convert(body.p, body.n);
+    snprintf(file, sizeof file, "%s.net", name);
+    { char *p = at(file); put_file(p, out.p, out.n); free(out.p); free(body.p); return p; }
+}
+
+int main(int argc, char **argv) {
+    char here[4096], *slash, runc[4200], corec[4200], why[512]; int e0;
+    const char *cc = getenv("EXEC_CC"), *ext = getenv("CORE_EXTERNAL");
+    char *exe, *table, *inp, *bad, *rt, *rn, *wide, *warning, *silent, *never, *reset, *empty, *reject, *loop, *missing;
+    char *manifest, *pack, *resources, *other, *chain[32];
+    np_result r, a, b; np_buf out, src = { 0, 0, 0 }, data = { 0, 0, 0 }, tmp = { 0, 0, 0 }, rep = { 0, 0, 0 };
+    int i, k;
+
+    /* ROOT = Path(__file__).resolve().parents[2] */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[4200]; snprintf(t, sizeof t, "%s/../..", here); if (!realpath(t, ROOT)) fail("cannot resolve the repository root"); }
+    if (ptf_mkdtemp(0, "unisacc-net-", D, sizeof D)) { D[0] = 0; fail("FileNotFoundError: No usable temporary directory found"); }
+    exe = at("run");
+    snprintf(runc, sizeof runc, "%s/exec/c/run.c", ROOT); snprintf(corec, sizeof corec, "%s/exec/c/core.c", ROOT);
+    {
+        char *build[12]; int n = 0;
+        build[n++] = (char *)(cc ? cc : "cc"); build[n++] = "-O2"; build[n++] = "-Wall"; build[n++] = "-Wextra";
+        build[n++] = "-o"; build[n++] = exe; build[n++] = runc;
+        if (ext && !strcmp(ext, "1")) { build[n++] = "-DUNISA_CORE_EXTERNAL"; build[n++] = corec; }
+        build[n] = 0;
+        r = require(run(build), build); np_free(&r);
+    }
+    /* Byte -> non-state stack symbol -> register observation -> acceptance.
+       Unspecified byte keys stay missing, even between real transitions. */
+    {
+        char t[512];
+        snprintf(t, sizeof t, "T 4 4 1 0 0\nQ 1 %d 9\nQ 2 %d 0 2 %d 0\nQ 2 %d 89 %d\nQ 1 %d\n"
+                 "R 0 2 -1 0 65 1 0 256 3 3\nR 1 2 -1 0 -1 3 3 9 2 1\nR 2 1 -1 0 2 3 2\nR 0 0 -1 0\n",
+                 np_code("PUSH"), np_code("LDI"), np_code("RLD"), np_code("OUT"), np_code("ACCEPT"), np_code("ACCEPT"));
+        table = at("tiny.tbl"); put_text(table, t);
+    }
+    for (i = 0; i < argc; i++) {
+        char path[4096], name[32], *net, *cn[5];
+        if (i == 0) snprintf(path, sizeof path, "%s", table); else np_pathnorm(argv[i], path, sizeof path);
+        if ((e0 = np_readfile(path, &src))) { char m[4400]; np_oserror(e0, path, m, sizeof m); fail(m); }
+        out = convert(src.p, src.n);
+        snprintf(name, sizeof name, "%d.net", i); net = at(name); put_file(net, out.p, out.n);
+        cn[0] = exe; cn[1] = "--check-net"; cn[2] = path; cn[3] = net; cn[4] = 0;
+        r = require(run(cn), cn); fwrite(r.out, 1, r.outn, stdout); np_free(&r);
+        if (i) { free(out.p); free(net); continue; }
+        {
+            static const char *datas[3] = { "A", "B", "" }; static const int status[3] = { 0, 2, 0 }; static const char *outs[3] = { "Y", "", "" };
+            for (k = 0; k < 3; k++) {
+                char *va[4], *vb[4];
+                inp = at("input"); put_text(inp, datas[k]);
+                va[0] = exe; va[1] = table; va[2] = inp; va[3] = 0; vb[0] = exe; vb[1] = net; vb[2] = inp; vb[3] = 0;
+                a = run(va); b = run(vb);
+                check(same(&a, b.rc, b.out, b.outn, b.err, b.errn), "");
+                check(b.rc == status[k] && b.outn == strlen(outs[k]) && !memcmp(b.out, outs[k], b.outn), "");
+                np_free(&a); np_free(&b); free(inp);
+            }
+        }
+        {   /* the first H line's base next-state + 1: the mutated weight must be refused */
+            np_buf m = { 0, 0, 0 }; size_t p = 0, ln; int found = 0; char *bv[5];
+            np_put(&m, "", 0);
+            while (p < out.n) {
+                const char *s = out.p + p; const char *e = memchr(s, '\n', out.n - p);
+                ln = e ? (size_t)(e - s) : out.n - p;
+                if (!found && ln >= 2 && s[0] == 'H' && s[1] == ' ') {
+                    char *w[64], line[8192]; int nw = 0; char *q, num[32]; long long x;
+                    found = 1;
+                    snprintf(line, sizeof line, "%.*s", (int)ln, s);
+                    for (q = strtok(line, " \t"); q && nw < 64; q = strtok(0, " \t")) w[nw++] = q;
+                    if (nw < 6) fail("IndexError: list index out of range");
+                    x = strtoll(w[5], 0, 10) + 1; snprintf(num, sizeof num, "%lld", x); w[5] = num;
+                    for (k = 0; k < nw; k++) { if (k) np_put(&m, " ", 1); np_puts(&m, w[k]); }
+                } else np_put(&m, s, ln);
+                np_put(&m, "\n", 1);
+                p += ln + 1;
+            }
+            if (!found) fail("StopIteration");
+            bad = at("bad.net"); put_file(bad, m.p, m.n); free(m.p);
+            bv[0] = exe; bv[1] = "--check-net"; bv[2] = table; bv[3] = bad; bv[4] = 0;
+            r = run(bv); check(r.rc != 0, "mutated weight passed"); np_free(&r);
+        }
+        free(out.p); free(net);
+    }
+    /* A stack bank whose continuation rows return k -> k with one shared sequence compiles to a declared return set
+       (H 3); other rows keep units. */
+    {
+        np_buf rs = { 0, 0, 0 }; char t[64], *hline = 0, *w[256], hcopy[8192], *q, *rv[5]; int nw = 0, v; size_t p;
+        static const char *whys[4] = { "return sequence", "dropped continuation", "non-continuation added", "key outside states" };
+        np_puts(&rs, "T 6 3 1 0 0\n");
+        for (k = 0; k < 3; k++) { snprintf(t, sizeof t, "Q 1 %d\n", np_code("ACCEPT")); np_puts(&rs, t); }
+        for (k = 0; k < 5; k++) np_puts(&rs, "R 0 0 -1 0\n");
+        np_puts(&rs, "R 1 5 -1 0 -1 0 2 1 1 1 2 2 1 3 3 1 4 0 2\n");
+        rt = at("ret.tbl"); put_file(rt, rs.p, rs.n);
+        out = convert(rs.p, rs.n);
+        for (p = 0; p < out.n;) {
+            char *e = memchr(out.p + p, '\n', out.n - p); size_t ln = e ? (size_t)(e - (out.p + p)) : out.n - p;
+            if (ln >= 4 && !memcmp(out.p + p, "H 3 ", 4)) { hline = malloc(ln + 1); memcpy(hline, out.p + p, ln); hline[ln] = 0; break; }
+            p += ln + 1;
+        }
+        if (!hline) fail("StopIteration");
+        snprintf(hcopy, sizeof hcopy, "%s", hline);
+        for (q = strtok(hcopy, " \t"); q && nw < 256; q = strtok(0, " \t")) w[nw++] = q;
+        check(nw >= 12 && !strcmp(w[7], "1") && !strcmp(w[8], "3") && !strcmp(w[9], "1") && !strcmp(w[10], "2") && !strcmp(w[11], "3"), hline);
+        rn = at("ret.net"); put_file(rn, out.p, out.n);
+        rv[0] = exe; rv[1] = "--check-net"; rv[2] = rt; rv[3] = rn; rv[4] = 0;
+        r = require(run(rv), rv); np_free(&r);
+        for (v = 0; v < 4; v++) {
+            /* w[:7]+['2']+w[8:] | w[:8]+['2','1','2']+w[12:] | w[:8]+['4','1','2','3','4']+w[12:] | w[:8]+['3','1','2','9']+w[12:] */
+            static const char *mid[4] = { "2", "2 1 2", "4 1 2 3 4", "3 1 2 9" };
+            np_buf nb = { 0, 0, 0 }; int keep = v == 0 ? 7 : 8, from = v == 0 ? 8 : 12;
+            for (k = 0; k < keep; k++) { np_puts(&nb, w[k]); np_put(&nb, " ", 1); }
+            np_puts(&nb, mid[v]);
+            for (k = from; k < nw; k++) { np_put(&nb, " ", 1); np_puts(&nb, w[k]); }
+            np_replace(out.p, out.n, hline, strlen(hline), nb.p, nb.n, -1, &rep);
+            put_file(rn, rep.p, rep.n);
+            r = run(rv);
+            { char m[128]; snprintf(m, sizeof m, "tampered return passed: %s", whys[v]); check(r.rc != 0, m); }
+            np_free(&r); free(nb.p);
+        }
+        free(rs.p); free(out.p); free(hline);
+    }
+    /* Exact signed 64-bit decoding, observable through the production OFILL. */
+    {
+        static const char *acts = "LDI 0 -9223372036854775808;ORES 1 20;OFILL 1 0 20;OUT 10;LDI 0 9223372036854775807;"
+                                  "ORES 1 20;OFILL 1 0 20;OUT 10;ACCEPT";
+        static const char *olds[2] = { "-9223372036854775808", "9223372036854775807" };
+        static const char *news[2] = { "-9223372036854775809", "9223372036854775808" };
+        np_buf source = { 0, 0, 0 }; char *wv[4];
+        np_puts(&source, "T 1 1 2 0 0\nQ 9 "); tokens(&source, acts); np_puts(&source, "\nR 0 0 0 0\n");
+        wide = at("wide.net"); out = convert(source.p, source.n); put_file(wide, out.p, out.n); free(out.p);
+        inp = at("empty"); put_text(inp, "");
+        wv[0] = exe; wv[1] = wide; wv[2] = inp; wv[3] = 0;
+        r = require(run(wv), wv);
+        check(r.outn == 42 && !memcmp(r.out, "-9223372036854775808\n 9223372036854775807\n", 42), "");
+        np_free(&r);
+        for (k = 0; k < 2; k++) {
+            np_replace(source.p, source.n, olds[k], strlen(olds[k]), news[k], strlen(news[k]), -1, &rep);
+            out = convert(rep.p, rep.n); put_file(wide, out.p, out.n); free(out.p);
+            r = run(wv);
+            check(r.rc == 2 && np_count(r.err, r.errn, "overflow", 8) > 0, "");
+            np_free(&r);
+        }
+        free(source.p); free(inp);
+    }
+    /* A pipeline is a sequence of arbitrary byte-stream transducers.  No C stream-stage name is built into it.
+       Diagnostics are an independent byte stream even when the transducer accepts.  They survive chains in order
+       and never become stdout. */
+    {
+        static const char *warnacts = "OSEL 1;OUT 87;OUT 10;OSEL 0;OUT 65;ACCEPT";
+        static const char *const blank[1] = { "" };
+        char *v1[4], *v2[8], *v3[9];
+        warning = model("warning", warnacts, 0, 0, 0);
+        inp = at("diagnostic-input"); put_text(inp, "");
+        v1[0] = exe; v1[1] = warning; v1[2] = inp; v1[3] = 0;
+        r = run(v1); check(same(&r, 0, "A", 1, "W\n", 2), ""); np_free(&r);
+        v2[0] = exe; v2[1] = "--chain"; v2[2] = inp; v2[3] = inp; v2[4] = D; v2[5] = warning; v2[6] = warning; v2[7] = 0;
+        r = run(v2); check(same(&r, 0, "A", 1, "W\nW\n", 4), ""); np_free(&r);
+        silent = model("diagnostic-reject", "OSEL 1;OUT 87;OUT 10;OSEL 0;REJECT 0", 0, blank, 1);
+        never = at("never.net");
+        v3[0] = exe; v3[1] = "--chain"; v3[2] = inp; v3[3] = inp; v3[4] = D; v3[5] = warning; v3[6] = silent; v3[7] = never; v3[8] = 0;
+        r = run(v3); check(same(&r, 1, "", 0, "W\nW\n", 4), ""); np_free(&r);
+        /* Same generic actions on the Python oracle (exec/pp/sim.py, the subject here, not a generator) */
+        for (k = 0; k < 2; k++) {
+            np_buf j = { 0, 0, 0 }; int key; char t[64], simpy[4200], *fixture, *sv[5];
+            np_puts(&j, "{\"start\": \"s\", \"states\": {\"s\": [\"b\", {");
+            for (key = 0; key < 257; key++) { snprintf(t, sizeof t, "%s\"%d\": [\"s\", 0]", key ? ", " : "", key); np_puts(&j, t); }
+            np_puts(&j, "}]}, \"seqs\": [[[\"OSEL\", 1], [\"OUT\", 87], [\"OUT\", 10], [\"OSEL\", 0], [\"OUT\", 65], ");
+            np_puts(&j, k == 0 ? "[\"ACCEPT\"]]]}" : "[\"REJECT\", \"\"]]]}");
+            fixture = at("diagnostic.json"); put_file(fixture, j.p, j.n);
+            snprintf(simpy, sizeof simpy, "%s/exec/pp/sim.py", ROOT);
+            sv[0] = "python3"; sv[1] = simpy; sv[2] = fixture; sv[3] = inp; sv[4] = 0;
+            r = run(sv);
+            if (k == 0) check(same(&r, 0, "A", 1, "W\n", 2), ""); else check(same(&r, 1, "", 0, "W\n", 2), "");
+            np_free(&r); free(j.p); free(fixture);
+        }
+        free(inp);
+    }
+    puts("diagnostic stream: acceptance, chained order, named-byte rejection, Python oracle pass");
+    /* Leave nonzero registers, indexed memory, a stack entry, an intern and a blob behind.  Every subsequent
+       invocation must begin with fresh state. */
+    {
+        static const char *const stopped[1] = { "73746f70706564" };
+        char *v[40]; int n;
+        reset = model("reset", "ORES 2 1;OFILL 2 3 1;LDX 1 0 100;ORES 2 1;OFILL 2 1 1;LDI 3 7;STX 0 100 3;SBCLR;SBOUT 97;"
+                      "SBSAVE 4;SBINTERN 5;ORES 2 1;OFILL 2 4 1;ORES 2 1;OFILL 2 5 1;PUSH 9;ACCEPT", "R 1 1 -1 0 -1 0 0", 0, 0);
+        empty = model("empty-output", "ACCEPT", 0, 0, 0);
+        reject = model("reject", "OUT 88;REJECT 0", 0, stopped, 1);
+        loop = model("loop", "LDI 0 0", 0, 0, 0);
+        inp = at("input"); put_file(inp, "\0\200\377\n", 4);
+        chain[0] = exe; chain[1] = "--chain"; chain[2] = inp; chain[3] = inp; chain[4] = D;
+        for (k = 0; k < 3; k++) {
+            n = 5;
+            if (k == 0) { for (i = 0; i < 20; i++) chain[n++] = reset; }
+            else if (k == 1) { chain[n++] = empty; chain[n++] = reset; }
+            else { chain[n++] = reset; chain[n++] = empty; }
+            chain[n] = 0;
+            r = require(run(chain), chain);
+            check(k < 2 ? (r.outn == 4 && !memcmp(r.out, "0021", 4) && !r.errn) : (!r.outn && !r.errn), "");
+            np_free(&r);
+        }
+        /* A failed stream-stage does not publish an accepted prefix or run a later model. */
+        missing = at("must-not-be-opened.net");
+        chain[5] = reset; chain[6] = reject; chain[7] = missing; chain[8] = 0;
+        r = run(chain); check(same(&r, 1, "", 0, "reject: stopped\n", 16), ""); np_free(&r);
+        v[0] = "env"; v[1] = "UNISA_MAXSTEPS=2"; for (i = 0; i < 5; i++) v[2 + i] = chain[i];
+        v[7] = reset; v[8] = loop; v[9] = missing; v[10] = 0;
+        r = run(v); check(same(&r, 3, "", 0, "step budget exhausted (budget 2 steps)\n", 39), ""); np_free(&r);
+        chain[5] = 0;
+        r = run(chain); check(r.rc == 2 && !r.outn, ""); np_free(&r);
+    }
+    {
+        static const char *routes[3] = { "first", "second", "third" };
+        const char *ms[1]; char *bv[6]; np_buf rb = { 0, 0, 0 }; int rc;
+        manifest = at("routes.tsv");
+        put_text(manifest, "first\ta\tbytes\tbytes\treset.net\nfirst\tb\tbytes\tbytes\treset.net\nsecond\ta\tbytes\tbytes\tempty-output.net\nthird\ta\tbytes\tbytes\treset.net\n");
+        ms[0] = manifest;
+        if ((rc = np_pack_build(ms, 1, 0, 0, 0, &data, why, sizeof why))) {
+            char t[640]; snprintf(t, sizeof t, "%s%s", rc == -1 ? "ValueError: " : "", why); fail(t);
+        }
+        check(data.n >= 8 && !memcmp(data.p, "P 1 2 4\n", 8), "");
+        if (np_readfile(reset, &rb)) fail("FileNotFoundError");
+        check(np_count(data.p, data.n, rb.p, rb.n) == 1, "shared model duplicated");
+        pack = at("models.pkg"); put_file(pack, data.p, data.n);
+        bv[0] = exe; bv[1] = "--bundle"; bv[2] = pack; bv[4] = inp; bv[5] = 0;
+        for (k = 0; k < 3; k++) {
+            bv[3] = (char *)routes[k];
+            r = require(run(bv), bv);
+            check(k == 1 ? (!r.outn && !r.errn) : (r.outn == 4 && !memcmp(r.out, "0021", 4) && !r.errn), "");
+            np_free(&r);
+        }
+        bv[3] = "absent"; r = run(bv); check(r.rc == 2 && !r.outn, ""); np_free(&r);
+        /* Both construction and runtime enforce the declared format boundary. */
+        if (np_readfile(manifest, &tmp)) fail("FileNotFoundError");
+        np_replace(tmp.p, tmp.n, "first\tb\tbytes", 13, "first\tb\twrong", 13, -1, &rep);
+        put_file(manifest, rep.p, rep.n);
+        rc = np_pack_build(ms, 1, 0, 0, 0, &tmp, why, sizeof why);
+        if (rc == -2) fail(why);
+        if (rc == 0) fail("AssertionError: bad manifest accepted");
+        check(strstr(why, "format mismatch") != 0, "");
+        for (k = 0; k < 4; k++) {
+            if (k == 0) { rep.n = 0; np_put(&rep, data.p, data.n - 1); }
+            else if (k == 1) np_replace(data.p, data.n, "D first b bytes", 15, "D first b wrong", 15, -1, &rep);
+            else if (k == 2) np_replace(data.p, data.n, "D first b bytes", 15, "D first a bytes", 15, -1, &rep);
+            else np_replace(data.p, data.n, "bytes bytes 0", 13, "bytes bytes 9", 13, 1, &rep);
+            put_file(pack, rep.p, rep.n);
+            bv[3] = "first"; r = run(bv); check(r.rc == 2 && !r.outn, ""); np_free(&r);
+        }
+        free(rb.p);
+    }
+    {
+        np_buf acts = { 0, 0, 0 }; const char *ms[1], *pre[2], *dir[2]; char *bv[6], *ev[5], *envadd[2], envkv[4300];
+        char *dfile, *efile, *odata, *absent; const char *s; np_buf container = { 0, 0, 0 }; int rc;
+        static const char want[8] = { '2', '2', 0, (char)0x80, '\n', '3', '0', 0 };
+        resources = at("resources");
+        if (mkdir(resources, 0777)) fail("OSError: mkdir resources");
+        { size_t n = strlen(resources) + 8; dfile = malloc(n); efile = malloc(n); snprintf(dfile, n, "%s/data", resources); snprintf(efile, n, "%s/empty", resources); }
+        put_file(dfile, "\0\200\n", 3); put_file(efile, "", 0);
+        np_puts(&acts, "SBCLR;SBOUT 0");
+        for (s = "data"; *s; s++) { char t[32]; snprintf(t, sizeof t, ";SBOUT %d", *s); np_puts(&acts, t); }
+        np_puts(&acts, ";SBFIND 0;SBFIND 1;ORES 2 1;OFILL 2 0 1;ORES 2 1;OFILL 2 1 1;INPUSH 0;COPY;ADV;COPY;ADV;COPY;INPOP;SBCLR;SBOUT 0");
+        for (s = "empty"; *s; s++) { char t[32]; snprintf(t, sizeof t, ";SBOUT %d", *s); np_puts(&acts, t); }
+        np_puts(&acts, ";SBFIND 0;BLEN 1 0;ORES 2 1;OFILL 2 0 1;ORES 2 1;OFILL 2 1 1;ACCEPT");
+        free(model("resources", acts.p, 0, 0, 0)); free(acts.p);
+        put_text(manifest, "resource\ta\tbytes\tbytes\tresources.net\nresource\tb\tbytes\tbytes\tresources.net\n");
+        ms[0] = manifest; pre[0] = pre[1] = "00"; dir[0] = dir[1] = resources;
+        if ((rc = np_pack_build(ms, 1, pre, dir, 2, &data, why, sizeof why))) {
+            char t[640]; snprintf(t, sizeof t, "%s%s", rc == -1 ? "ValueError: " : "", why); fail(t);
+        }
+        check(data.n >= 10 && !memcmp(data.p, "P 2 1 2 2\n", 10), "identical mounted resources not shared");
+        put_file(pack, data.p, data.n);
+        bv[0] = exe; bv[1] = "--bundle"; bv[2] = pack; bv[3] = "resource"; bv[4] = inp; bv[5] = 0;
+        r = require(run(bv), bv); check(r.outn == 7 && !memcmp(r.out, want, 7), "resources output"); np_free(&r);
+        /* Packaged bytes take precedence over disk; missing mount/conflicts fail. */
+        other = at("other");
+        if (mkdir(other, 0777)) fail("OSError: mkdir other");
+        { size_t n = strlen(other) + 8; odata = malloc(n); snprintf(odata, n, "%s/data", other); }
+        put_text(odata, "wrong");
+        absent = at("absent");
+        for (k = 0; k < 2; k++) {
+            if (k == 0) { pre[0] = pre[1] = "00"; dir[0] = resources; dir[1] = other; rc = np_pack_build(ms, 1, pre, dir, 2, &tmp, why, sizeof why); }
+            else { pre[0] = "00"; dir[0] = absent; rc = np_pack_build(ms, 1, pre, dir, 1, &tmp, why, sizeof why); }
+            if (rc == -2) fail(why);
+            if (rc == 0) fail("AssertionError: invalid mount accepted");
+        }
+        for (k = 0; k < 2; k++) {
+            if (k == 0) { rep.n = 0; np_put(&rep, data.p, data.n - 1); }
+            else np_replace(data.p, data.n, "F 6 0\n", 6, "F 6 9\n", 6, -1, &rep);
+            put_file(pack, rep.p, rep.n);
+            r = run(bv); check(r.rc == 2 && !r.outn, ""); np_free(&r);
+        }
+        /* A container footer locates the same package without copying model bodies. */
+        {
+            unsigned char le[8]; size_t n = data.n;
+            for (k = 0; k < 8; k++) { le[k] = (unsigned char)(n & 255); n >>= 8; }
+            np_puts(&container, "legacy-container-prefix"); np_put(&container, data.p, data.n);
+            np_put(&container, "UNIPKG1\n", 8); np_put(&container, (const char *)le, 8);
+        }
+        put_file(pack, container.p, container.n);
+        r = require(run(bv), bv); check(r.outn == 7 && !memcmp(r.out, want, 7), ""); np_free(&r);
+        snprintf(envkv, sizeof envkv, "UNISA_CONTAINER=%s", pack); envadd[0] = envkv; envadd[1] = 0;
+        ev[0] = exe; ev[1] = "--embedded"; ev[2] = "resource"; ev[3] = inp; ev[4] = 0;
+        r = require(run_env(ev, envadd), ev); check(r.outn == 7 && !memcmp(r.out, want, 7), ""); np_free(&r);
+        /* MZ claims a PE header; arbitrary prefix text must not bypass PE validation. */
+        for (k = 0; k < 5; k++) {
+            rep.n = 0; np_put(&rep, "", 0);
+            if (k == 0) { np_puts(&rep, "MZ-container-prefix"); np_put(&rep, data.p, data.n); np_put(&rep, container.p + container.n - 16, 16); }
+            else if (k == 1) np_put(&rep, container.p, container.n - 1);
+            else if (k == 2) { np_put(&rep, container.p, container.n - 16); np_put(&rep, "BADMAGIC", 8); np_put(&rep, container.p + container.n - 8, 8); }
+            else { int x; np_put(&rep, container.p, container.n - 8); for (x = 0; x < 8; x++) np_put(&rep, k == 3 ? "\0" : "\377", 1); }
+            put_file(pack, rep.p, rep.n);
+            r = run(bv); check(r.rc == 2 && !r.outn, ""); np_free(&r);
+        }
+        free(container.p); free(dfile); free(efile); free(odata); free(absent);
+    }
+    puts("network check: ok (inference, stream reset/failures, package bounds, resources, container footer)");
+    fflush(stdout);
+    cleanup();
+    return 0;
+}

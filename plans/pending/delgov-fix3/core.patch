@@ -1,0 +1,1499 @@
+diff --git a/include/cx.h b/include/cx.h
+index 7acd1f2..6405f40 100644
+--- a/include/cx.h
++++ b/include/cx.h
+@@ -223,8 +223,10 @@ extern char **environ;
+ /* Deletion goes through the one guard, include/unisa_safedel.h (commissar ruling 2026-10-23): refused unless the
+    target lies strictly under $TMPDIR (or /tmp) or a repository's out/ or .trash/, is no home, cwd, repository or
+    ancestor of them, holds no .git and is within the entry ceiling.  0 on success (a missing path included), else the
+-   guard's code (3 refused, 1 failed) with one `cx_...: why` line on stderr.  cx_remove: a file, a link or an empty
+-   directory, for good; cx_rmtree: a tree, for good; cx_trash: a tree moved into the .trash of its root.  After the
++   guard's code (3 refused, 1 failed) with one `cx_...: why` line on stderr.  The guard works on descriptors after its
++   check (a tree swapped for links meanwhile is refused, never followed).  cx_remove: a file, a link or an empty
++   directory, for good; cx_rmtree: a tree, for good -- both only in the caller's own temp dirs and .trash entries; in a
++   repository's out/ they trash it (trash first); cx_trash: a tree moved into the .trash of its root.  After the
+    edition 1 headers, so a tool's library bodies keep their order. */
+ #include "unisa_safedel.h"
+ #if !__UNISA_FTRIM_LIBC || __UN__cx_del
+diff --git a/include/fcntl.h b/include/fcntl.h
+index d6b7378..50aa776 100644
+--- a/include/fcntl.h
++++ b/include/fcntl.h
+@@ -76,6 +76,67 @@ static int open(const char *__u_p, int __u_flags, int __u_mode) {
+ #endif
+ }
+ #endif
++/* *at() flags (0.0.35 M1, minicon's loader): each kernel's own values */
++#ifndef AT_FDCWD
++#ifdef __APPLE__
++#define AT_FDCWD (0 - 2)
++#define AT_SYMLINK_NOFOLLOW 0x20
++#define AT_REMOVEDIR 0x80
++#else
++#define AT_FDCWD (0 - 100)
++#define AT_SYMLINK_NOFOLLOW 0x100
++#define AT_REMOVEDIR 0x200
++#endif
++#endif
++/* openat (2026-10-23, the deletion guard's descriptor walk, include/unisa_safedel.h): open relative to the directory
++   DFD, each kernel's own call; MODE is always passed, as to open() here.  Windows: AT_FDCWD only (open), else ENOSYS */
++#if !__UNISA_FTRIM_LIBC || __UN_openat
++static int openat(int __u_dfd, const char *__u_p, int __u_flags, int __u_mode) {
++#ifdef _WIN32
++    if (__u_dfd != AT_FDCWD) { errno = ENOSYS; return -1; }
++    return open(__u_p, __u_flags, __u_mode);
++#else
++    long __u_r;
++#if defined(__APPLE__)
++#if defined(__x86_64__)
++    __u_r = __syscall6(0x2000000L + 463, (long)__u_dfd, (long)__u_p, (long)__u_flags, (long)__u_mode, 0);
++#else
++    __u_r = __syscall6(463, (long)__u_dfd, (long)__u_p, (long)__u_flags, (long)__u_mode, 0);
++#endif
++#elif defined(__x86_64__)
++    __u_r = __syscall6(257, (long)__u_dfd, (long)__u_p, (long)__u_flags, (long)__u_mode, 0);
++#else
++    __u_r = __syscall6(56, (long)__u_dfd, (long)__u_p, (long)__u_flags, (long)__u_mode, 0);
++#endif
++    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return (int)__u_r;
++#endif
++}
++#endif
++/* renameat (2026-10-23, the deletion guard's trash move, include/unisa_safedel.h): rename between two directory
++   descriptors, each kernel's own call (Linux arm64: renameat2 with no flags, which every arm64 kernel has).  POSIX
++   declares it in <stdio.h>; it sits here beside openat because a unit compiled without -ftrim-libc gets every body of
++   the headers it includes, and <stdio.h>'s must stay byte-identical (tests/c/t3_pp_conditionals.c).  Windows: ENOSYS */
++#if !__UNISA_FTRIM_LIBC || __UN_renameat
++static int renameat(int __u_ofd, const char *__u_from, int __u_nfd, const char *__u_to) {
++#ifdef _WIN32
++    (void)__u_ofd; (void)__u_from; (void)__u_nfd; (void)__u_to; errno = ENOSYS; return -1;
++#else
++    long __u_r;
++#if defined(__APPLE__)
++#if defined(__x86_64__)
++    __u_r = __syscall6(0x2000000L + 465, (long)__u_ofd, (long)__u_from, (long)__u_nfd, (long)__u_to, 0);
++#else
++    __u_r = __syscall6(465, (long)__u_ofd, (long)__u_from, (long)__u_nfd, (long)__u_to, 0);
++#endif
++#elif defined(__x86_64__)
++    __u_r = __syscall6(264, (long)__u_ofd, (long)__u_from, (long)__u_nfd, (long)__u_to, 0);
++#else
++    __u_r = __syscall6(276, (long)__u_ofd, (long)__u_from, (long)__u_nfd, (long)__u_to, 0);
++#endif
++    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
++#endif
++}
++#endif
+ #ifndef _WIN32
+ /* 0.0.28 H4 (SQLite's locks): struct flock and the record-lock commands, per OS */
+ #ifdef __APPLE__
+diff --git a/include/sys/stat.h b/include/sys/stat.h
+index 32e4139..da9bfa3 100644
+--- a/include/sys/stat.h
++++ b/include/sys/stat.h
+@@ -187,6 +187,30 @@ static int fstatat(int __u_dfd, const char *__u_p, struct stat *__u_b, int __u_f
+ #endif
+ }
+ #endif
++/* mkdirat (2026-10-23, the deletion guard's trash, include/unisa_safedel.h): mkdir relative to the directory DFD.
++   Windows: AT_FDCWD only (mkdir), else ENOSYS */
++#if !__UNISA_FTRIM_LIBC || __UN_mkdirat
++static int mkdirat(int __u_dfd, const char *__u_p, mode_t __u_m) {
++#ifdef _WIN32
++    if (__u_dfd != AT_FDCWD) { errno = ENOSYS; return -1; }
++    return mkdir(__u_p, __u_m);
++#else
++    long __u_r;
++#if defined(__APPLE__)
++#if defined(__x86_64__)
++    __u_r = __syscall6(0x2000000L + 475, (long)__u_dfd, (long)__u_p, (long)__u_m, 0, 0);
++#else
++    __u_r = __syscall6(475, (long)__u_dfd, (long)__u_p, (long)__u_m, 0, 0);
++#endif
++#elif defined(__x86_64__)
++    __u_r = __syscall6(258, (long)__u_dfd, (long)__u_p, (long)__u_m, 0, 0);
++#else
++    __u_r = __syscall6(34, (long)__u_dfd, (long)__u_p, (long)__u_m, 0, 0);
++#endif
++    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
++#endif
++}
++#endif
+ /* 0.0.28 H4: forwarded to the system C library on Linux and macOS */
+ #ifndef _WIN32
+ int fchmod(int __u_fd, mode_t __u_mode);
+diff --git a/include/unisa_safedel.h b/include/unisa_safedel.h
+index a2a04de..62cffcc 100644
+--- a/include/unisa_safedel.h
++++ b/include/unisa_safedel.h
+@@ -9,27 +9,45 @@
+    int unisa_safedel(const char *path, unsigned flags, long max_files, char *why, int whylen)
+      flags SAFEDEL_TRASH (0, the default) | SAFEDEL_PURGE | SAFEDEL_DRYRUN | SAFEDEL_RECURSIVE;
+      SAFEDEL_OK 0, SAFEDEL_FAILED 1 (an I/O error after every check passed), SAFEDEL_REFUSED 3; WHY gets one line.
+-   The checks, in this order, on the resolved target (realpath; a symlink resolves as realpath(its parent)/its name
++     MAX_FILES <= 0 is the default ceiling SAFEDEL_MAX_FILES; a positive value is the caller's explicit count (the
++     CLI lets only --force-count exceed the default).
++   The checks, in this order, on the resolved target T (realpath; a symlink resolves as realpath(its parent)/its name
+    and is removed as a link, never followed; a trailing slash on a symlink means its directory):
+      1. refusal list: NULL, "", a leading "~", "/" (or only slashes), a last component "." or "..", $HOME or an
+         ancestor of it, the cwd or an ancestor of it, the cwd's repository root or an ancestor of it, a path inside a
+         .git directory, a repository root (a directory with a .git entry); a top-level symlink whose destination is
+         refused by checks 1-2 (a link into a repository, to the cwd, ...);
+-     2. whitelist: inside a repository (nearest ancestor with a .git entry) the target must lie strictly under its
+-        out/ or .trash/; elsewhere strictly under a temp root: realpath($TMPDIR) and realpath(/tmp), both whitelisted
+-        (a relative TMPDIR, /, $HOME or an ancestor of $HOME is no temp root; with neither root everything outside
+-        repositories is refused); a temp root itself or an ancestor of one is refused;
+-     3. the walk (lstat only, links never followed) counts every entry, the target included, and refuses on an entry
+-        named .git, on a mount point, deeper than SAFEDEL_DEPTH; a non-empty directory needs SAFEDEL_RECURSIVE;
+-     4. more entries than max_files (<= 0: SAFEDEL_MAX_FILES) is refused.
+-   SAFEDEL_DRYRUN stops there.  Trash (the default): rename into HOME/.trash/<UTC stamp>-<pid>-<n>/<name>, HOME =
+-   the target's repository or its temp root (the deeper one when both hold it); .trash must be a real directory owned by the caller, closed to others.
+-   Purge: unlink and rmdir depth first, each directory re-checked (device and inode) when it is opened.  A missing
+-   target whose path passes the checks is success (rm -f).
++     2. whitelist: inside a repository (nearest ancestor with a .git entry) T must lie strictly under its out/ or
++        .trash/; elsewhere strictly under a temp root: realpath($TMPDIR) and realpath(/tmp), both whitelisted.  No
++        temp root is a relative TMPDIR, /, $HOME or an ancestor of it, and no $TMPDIR (other than /tmp itself) that
++        is the cwd, the cwd's repository root or an ancestor of either (TMPDIR=~/repos would whitelist every sibling
++        project); /tmp, the system's, keeps only the $HOME rule (a test's cwd in its own mkdtemp lies there).  With
++        neither root everything outside repositories is refused; a temp root itself or an ancestor of one is refused;
++     3. the walk counts every entry, the target included, and refuses on an entry named .git, on a mount point,
++        deeper than SAFEDEL_DEPTH; a non-empty directory needs SAFEDEL_RECURSIVE;
++     4. more entries than the ceiling is refused.
++   Descriptors only after the check (no path string is used again): the check records (st_dev, st_ino) of the trash
++   home H (the target's repository, or its temp root) and of every directory from H down to T.  H is then opened
++   from "/" one component at a time with openat(O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) and must be the H that was
++   checked; each component below it is opened the same way from its parent's descriptor and must be the directory
++   that was checked (and hold no .git); T is found in its parent with fstatat(AT_SYMLINK_NOFOLLOW) and must be what
++   was checked.  The walk, the purge and the trash move run on descriptors: fdopendir, fstatat, openat of each
++   subdirectory (its fstat equal to the fstatat that named it), unlinkat, mkdirat, renameat.  A component swapped
++   for a link or another directory is refused, never followed; at worst the guard removes entries that are, at that
++   moment, inside the checked tree, and never more than the ceiling (the purge counts again).  SAFEDEL_DRYRUN stops
++   after the walk.
++   Trash first.  The default moves T into H/.trash/<UTC stamp>-<pid>-<n>/<name> (renameat between descriptors): the
++   .trash of the root that whitelisted T, never $HOME's; .trash must be a real directory owned by the caller, closed
++   to others.  A permanent purge (SAFEDEL_PURGE) is only for the caller's own temp dirs (the entry right below the
++   temp root that holds T is owned by the caller) and for entries of a .trash; asked for a target in a repository's
++   out/ it is a trash (the WHY line says so).  A temp root's .trash itself is refused (purge_trash empties it).  A
++   missing target whose path passes the checks is success (rm -f).
+    int unisa_safedel_purge_trash(const char *home, long hours, long max_files, unsigned flags, char *why, int whylen)
+      purges the entries of HOME/.trash (HOME = a temp root or a repository root) older than HOURS, the ceiling over
+      their summed entries; SAFEDEL_DRYRUN only counts.  The clock is the file system's (the mtime of a directory
+-     made for the purpose), so no <time.h> statics land in every .cx program. */
++     made for the purpose), so no <time.h> statics land in every .cx program.
++   void unisa_safedel_sethook(unisa_safedel_hook h): tests/safedelrace.cx only -- H(step, name) runs at each step
++     where a race could strike (SAFEDEL_AT_*), so the race test swaps the tree there; no other caller sets it. */
+ #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE) && !defined(_POSIX_C_SOURCE) && !defined(_XOPEN_SOURCE) && !defined(_GNU_SOURCE)
+ #define _DEFAULT_SOURCE 1
+ #endif
+@@ -39,6 +57,7 @@
+ #include <errno.h>
+ #ifndef _WIN32
+ #include <unistd.h>
++#include <fcntl.h>
+ #include <dirent.h>
+ #include <sys/stat.h>
+ #endif
+@@ -53,11 +72,29 @@
+ #define SAFEDEL_MAX_FILES 1000L
+ #define SAFEDEL_DEPTH 128
+ #define SAFEDEL_PATHLEN 4096
++#define SAFEDEL_CHAIN 256   /* directories from the trash home down to the target */
++/* the race hook's steps: after the check, after each component of the descent, after the walk, before a purge
++   opens a subdirectory, before it unlinks an entry, before the trash move */
++#define SAFEDEL_AT_CHECKED 1
++#define SAFEDEL_AT_DESCENT 2
++#define SAFEDEL_AT_WALKED 3
++#define SAFEDEL_AT_PURGEDIR 4
++#define SAFEDEL_AT_UNLINK 5
++#define SAFEDEL_AT_TRASH 6
+ 
++typedef void (*unisa_safedel_hook)(int step, const char *name);
+ struct unisa_safedel_env { char home[SAFEDEL_PATHLEN], cwd[SAFEDEL_PATHLEN], cwdrepo[SAFEDEL_PATHLEN], tmp[2][SAFEDEL_PATHLEN]; const char *tmpwhy[2]; };
++/* what the check found: T, its trash home H, the kind (0 under a temp root, 1 in a repository's out/, 2 inside a
++   repository's .trash, 3 inside a temp root's .trash), and the identity of H (id 0) and of each component below it down to T (id N) */
++struct unisa_safedel_tgt {
++    char t[SAFEDEL_PATHLEN], home[SAFEDEL_PATHLEN];
++    int kind, islink, absent, n;
++    unsigned long long dev[SAFEDEL_CHAIN + 1], ino[SAFEDEL_CHAIN + 1]; unsigned mode[SAFEDEL_CHAIN + 1];
++};
+ 
+ static int unisa_safedel(const char *path, unsigned flags, long max_files, char *why, int whylen);
+ static int unisa_safedel_purge_trash(const char *home, long hours, long max_files, unsigned flags, char *why, int whylen);
++static void unisa_safedel_sethook(unisa_safedel_hook h);
+ 
+ /* RC, with "PATH: A B" in WHY */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_say
+@@ -66,6 +103,20 @@ static int _unisa_sd_say(char *why, int whylen, int rc, const char *path, const
+     return rc;
+ }
+ #endif
++/* the race hook: SET installs H; otherwise the installed one (0 when none) */
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_hookslot
++static unisa_safedel_hook _unisa_sd_hookslot(int set, unisa_safedel_hook h) {
++    static unisa_safedel_hook slot;
++    if (set) slot = h;
++    return slot;
++}
++#endif
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_hook
++static void _unisa_sd_hook(int step, const char *name) { unisa_safedel_hook h = _unisa_sd_hookslot(0, 0); if (h) h(step, name); }
++#endif
++#if !__UNISA_FTRIM_LIBC || __UN_unisa_safedel_sethook
++static void unisa_safedel_sethook(unisa_safedel_hook h) { _unisa_sd_hookslot(1, h); }
++#endif
+ /* 1 when P lies strictly below ROOT (both absolute and resolved) */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_below
+ static int _unisa_sd_below(const char *p, const char *root) {
+@@ -128,35 +179,42 @@ static int _unisa_sd_ingit(const char *p) {
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_seq
+ static unsigned long _unisa_sd_seq(void) { static unsigned long n; return n++; }
+ #endif
+-/* $HOME, the cwd, the cwd's repository and the temp root, resolved */
++/* $HOME, the cwd, the cwd's repository and the temp roots, resolved */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_env
+ static void _unisa_sd_env(struct unisa_safedel_env *e) {
+ #ifdef _WIN32
+     e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = "Windows";
+ #else
+-    const char *h = getenv("HOME"), *t = getenv("TMPDIR"); char c[SAFEDEL_PATHLEN]; int i;
++    const char *h = getenv("HOME"), *t = getenv("TMPDIR"); char c[SAFEDEL_PATHLEN], sys[SAFEDEL_PATHLEN]; int i;
+     e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = 0;
+     if (h && h[0] && _unisa_sd_real(h, e->home) != 0) e->home[0] = 0;
+     if (!getcwd(c, sizeof c) || _unisa_sd_real(c, e->cwd) != 0) e->cwd[0] = 0;
+     if (e->cwd[0] && !_unisa_sd_repo(e->cwd, e->cwdrepo)) e->cwdrepo[0] = 0;
++    if (_unisa_sd_real("/tmp", sys) != 0) sys[0] = 0;
+     if (!t || !t[0]) t = "/tmp";
+     for (i = 0; i < 2; i++) {   /* root 0: $TMPDIR (/tmp when unset or empty); root 1: /tmp */
+-        const char *r = i ? "/tmp" : t;
++        const char *r = i ? "/tmp" : t; char *m = e->tmp[i];
+         if (r[0] != '/') e->tmpwhy[i] = "TMPDIR is not absolute";
+-        else if (_unisa_sd_real(r, e->tmp[i]) != 0) e->tmpwhy[i] = "the temp root does not resolve";
+-        else if (!strcmp(e->tmp[i], "/")) e->tmpwhy[i] = "the temp root is /";
+-        else if (e->home[0] && _unisa_sd_within(e->home, e->tmp[i])) e->tmpwhy[i] = "the temp root is $HOME or an ancestor of it";
+-        if (e->tmpwhy[i]) e->tmp[i][0] = 0;
++        else if (_unisa_sd_real(r, m) != 0) e->tmpwhy[i] = "the temp root does not resolve";
++        else if (!strcmp(m, "/")) e->tmpwhy[i] = "the temp root is /";
++        else if (e->home[0] && _unisa_sd_within(e->home, m)) e->tmpwhy[i] = "the temp root is $HOME or an ancestor of it";
++        else if (i == 0 && strcmp(m, sys) != 0 && e->cwdrepo[0] && _unisa_sd_within(e->cwdrepo, m))
++            e->tmpwhy[i] = "TMPDIR is the cwd's repository root or an ancestor of it";
++        else if (i == 0 && strcmp(m, sys) != 0 && e->cwd[0] && _unisa_sd_within(e->cwd, m))
++            e->tmpwhy[i] = "TMPDIR is the cwd or an ancestor of it";
++        if (e->tmpwhy[i]) m[0] = 0;
+     }
+     if (e->tmp[1][0] && !strcmp(e->tmp[0], e->tmp[1])) e->tmp[1][0] = 0;   /* one root, once */
+ #endif
+ }
+ #endif
+-/* checks 1-2 on the resolved T; HOME gets the trash home (the repository or the temp root).  DEST: T is where a
+-   top-level symlink points, and only checks 1 and the repository rule apply (removing a link to /usr/bin/cc is fine) */
++/* checks 1-2 on the resolved T; HOME gets the trash home (the repository or the temp root), *KIND 0 (temp root), 1
++   (a repository's out/), 2 (inside the repository's .trash) or 3 (inside the temp root's .trash).  DEST: T is where a top-level symlink points, and only checks 1
++   and the repository rule apply (removing a link to /usr/bin/cc is fine) */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_policy
+-static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path, const char *t, int dest, char *home, char *why, int whylen) {
++static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path, const char *t, int dest, char *home, int *kind, char *why, int whylen) {
+     char r[SAFEDEL_PATHLEN], o[SAFEDEL_PATHLEN], x[SAFEDEL_PATHLEN];
++    *kind = 0;
+     if (t[0] != '/' || t[1] == 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "resolves to /", "");
+     if (e->home[0] && _unisa_sd_within(e->home, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is $HOME or an ancestor of it: ", t);
+     if (_unisa_sd_within(e->cwd, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the cwd or an ancestor of it: ", t);
+@@ -166,7 +224,7 @@ static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path,
+         if (!strcmp(r, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a repository root (it has a .git entry): ", t);
+         if (_unisa_sd_join(o, r, "out") || _unisa_sd_join(x, r, ".trash") || (!_unisa_sd_below(t, o) && !_unisa_sd_below(t, x)))
+             return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "lies in a repository outside its out/ and .trash/: ", t);
+-        memcpy(home, r, strlen(r) + 1);
++        memcpy(home, r, strlen(r) + 1); *kind = _unisa_sd_below(t, x) ? 2 : 1;
+         return SAFEDEL_OK;
+     }
+     if (dest) return SAFEDEL_OK;
+@@ -176,22 +234,29 @@ static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path,
+         int i, k = -1;
+         for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_within(e->tmp[i], t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a temp root or an ancestor of one: ", t);
+         for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_below(t, e->tmp[i]) && (k < 0 || strlen(e->tmp[i]) > strlen(e->tmp[k]))) k = i;
+-        if (k < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not strictly under a whitelisted root ($TMPDIR, /tmp, <repo>/out, <repo>/.trash): ", t);
++        if (k < 0) {
++            const char *w = e->tmpwhy[0] ? e->tmpwhy[0] : e->tmpwhy[1];
++            char m[SAFEDEL_PATHLEN + 160];
++            snprintf(m, sizeof m, "%s%s%s%s", t, w ? " (" : "", w ? w : "", w ? ")" : "");
++            return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not strictly under a whitelisted root ($TMPDIR, /tmp, <repo>/out, <repo>/.trash): ", m);
++        }
+         memcpy(home, e->tmp[k], strlen(e->tmp[k]) + 1);
++        if (_unisa_sd_join(x, home, ".trash") == 0 && _unisa_sd_below(t, x)) *kind = 3;
+     }
+     return SAFEDEL_OK;
+ }
+ #endif
+-/* the lexical refusals and the resolution of PATH into T; then the policy.  *ABSENT: nothing is there */
++/* the lexical refusals and the resolution of PATH into G->t; the policy; then the identity of every directory from the
++   trash home down to T (lstat, recorded for the descent to compare).  G->absent: nothing is there */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_check
+-static int _unisa_sd_check(const struct unisa_safedel_env *e, const char *path, char *t, char *home, int *islink, int *absent, char *why, int whylen) {
++static int _unisa_sd_check(const struct unisa_safedel_env *e, const char *path, struct unisa_safedel_tgt *g, char *why, int whylen) {
+ #ifdef _WIN32
+-    (void)e; (void)t; (void)home; (void)islink; (void)absent;
++    (void)e; (void)g;
+     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "deletion is not supported on Windows", "");
+ #else
+     char p[SAFEDEL_PATHLEN], dir[SAFEDEL_PATHLEN], rd[SAFEDEL_PATHLEN], dest[SAFEDEL_PATHLEN], dh[SAFEDEL_PATHLEN], dw[512];
+-    const char *base; char *s; size_t n; int slash = 0, rc; struct stat st;
+-    *islink = 0; *absent = 0; home[0] = 0;
++    const char *base; char *s; size_t n, hl, i; int slash = 0, rc, dk; struct stat st;
++    g->islink = 0; g->absent = 0; g->home[0] = 0; g->kind = 0; g->n = 0;
+     if (!path || !path[0]) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, "\"\"", "empty path", "");
+     if (path[0] == '~') return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "starts with ~ (an unexpanded home)", "");
+     n = strlen(path);
+@@ -207,33 +272,94 @@ static int _unisa_sd_check(const struct unisa_safedel_env *e, const char *path,
+     else { memcpy(dir, p, (size_t)(s - p)); dir[s - p] = 0; }
+     if (lstat(p, &st) != 0) {
+         if (errno != ENOENT && errno != ENOTDIR) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot lstat: ", strerror(errno));
+-        *absent = 1;
+-        if (_unisa_sd_real(dir, rd) != 0) { memcpy(t, p, n + 1); return SAFEDEL_OK; }   /* not even the parent exists */
+-        if (_unisa_sd_join(t, rd, base)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "path too long", "");
++        g->absent = 1;
++        if (_unisa_sd_real(dir, rd) != 0) { memcpy(g->t, p, n + 1); return SAFEDEL_OK; }   /* not even the parent exists */
++        if (_unisa_sd_join(g->t, rd, base)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "path too long", "");
++        return _unisa_sd_policy(e, path, g->t, 0, g->home, &g->kind, why, whylen);
+     } else if (S_ISLNK(st.st_mode) && !slash) {
+-        *islink = 1;
++        g->islink = 1;
+         if (_unisa_sd_real(dir, rd) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot resolve the parent: ", strerror(errno));
+-        if (_unisa_sd_join(t, rd, base)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "path too long", "");
+-        if (_unisa_sd_real(p, dest) == 0 && (rc = _unisa_sd_policy(e, path, dest, 1, dh, dw, (int)sizeof dw)) != 0)
++        if (_unisa_sd_join(g->t, rd, base)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "path too long", "");
++        if (_unisa_sd_real(p, dest) == 0 && (rc = _unisa_sd_policy(e, path, dest, 1, dh, &dk, dw, (int)sizeof dw)) != 0)
+             return _unisa_sd_say(why, whylen, rc, path, "is a symlink to a protected path; ", dw);
+-    } else if (_unisa_sd_real(p, t) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot resolve: ", strerror(errno));
+-    return _unisa_sd_policy(e, path, t, 0, home, why, whylen);
++    } else if (_unisa_sd_real(p, g->t) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot resolve: ", strerror(errno));
++    rc = _unisa_sd_policy(e, path, g->t, 0, g->home, &g->kind, why, whylen);
++    if (rc) return rc;
++    /* the chain: H, then each component below it; every one but T a directory */
++    hl = strlen(g->home);
++    if (!_unisa_sd_below(g->t, g->home)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not below its trash home", "");
++    memcpy(dir, g->t, strlen(g->t) + 1);
++    for (i = hl == 1 ? 0 : hl;; i++) {
++        if (dir[i] != '/' && dir[i] != 0) continue;
++        {   char c = dir[i]; int k = g->n;
++            if (k > SAFEDEL_CHAIN) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is nested too deep below its root", "");
++            dir[i] = 0;
++            if (lstat(i ? dir : "/", &st) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot lstat a component: ", strerror(errno));
++            g->dev[k] = (unsigned long long)st.st_dev; g->ino[k] = (unsigned long long)st.st_ino; g->mode[k] = (unsigned)st.st_mode;
++            if (c && !S_ISDIR(st.st_mode)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (a component is no directory)", "");
++            dir[i] = c;
++            if (!c) break;
++            g->n = k + 1;
++        }
++    }
++    return SAFEDEL_OK;
+ #endif
+ }
+ #endif
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_free
+ static void _unisa_sd_free(char **v, size_t n) { size_t i; for (i = 0; i < n; i++) free(v[i]); free(v); }
+ #endif
+-/* the names in directory P, which must still be the directory ST describes (device and inode); 0, or -1 */
+-#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_list
+-static int _unisa_sd_list(const char *p, const struct stat *st, char ***out, size_t *outn) {
++/* the directory P (absolute, resolved) opened from "/" one component at a time, each with O_NOFOLLOW|O_DIRECTORY:
++   a descriptor, or -1 with errno (ELOOP or ENOTDIR: a component is a link or no directory now) */
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_openpath
++static int _unisa_sd_openpath(const char *p) {
++#ifdef _WIN32
++    (void)p; errno = ENOSYS; return -1;
++#else
++    char c[SAFEDEL_PATHLEN]; const char *s = p, *x; size_t n; int fd, nfd;
++    if (p[0] != '/') { errno = EINVAL; return -1; }
++    fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
++    if (fd < 0) return -1;
++    for (;;) {
++        while (*s == '/') s++;
++        if (!*s) return fd;
++        x = strchr(s, '/'); n = x ? (size_t)(x - s) : strlen(s);
++        if (n >= sizeof c) { close(fd); errno = ENAMETOOLONG; return -1; }
++        memcpy(c, s, n); c[n] = 0;
++        if (!strcmp(c, ".") || !strcmp(c, "..")) { close(fd); errno = EINVAL; return -1; }
++        nfd = openat(fd, c, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
++        close(fd);
++        if (nfd < 0) return -1;
++        fd = nfd; s += n;
++    }
++#endif
++}
++#endif
++/* NAME (a directory found in DFD as ST by fstatat) opened without following a link; the descriptor must be the
++   directory ST describes (device and inode): a descriptor, or -1 */
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_openchild
++static int _unisa_sd_openchild(int dfd, const char *name, const struct stat *st) {
++#ifdef _WIN32
++    (void)dfd; (void)name; (void)st; return -1;
++#else
++    struct stat ds; int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
++    if (fd < 0) return -1;
++    if (fstat(fd, &ds) != 0 || ds.st_dev != st->st_dev || ds.st_ino != st->st_ino) { close(fd); errno = ESTALE; return -1; }
++    return fd;
++#endif
++}
++#endif
++/* the names in the directory open as DFD (read through a second descriptor of it); 0, or -1 */
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_names
++static int _unisa_sd_names(int dfd, char ***out, size_t *outn) {
+ #ifdef _WIN32
+-    (void)p; (void)st; *out = 0; *outn = 0; return -1;
++    (void)dfd; *out = 0; *outn = 0; return -1;
+ #else
+-    DIR *d = opendir(p); struct dirent *x; struct stat ds; char **v = 0, **g; size_t n = 0, cap = 0, l; int bad = 0;
++    DIR *d; struct dirent *x; char **v = 0, **g; size_t n = 0, cap = 0, l; int bad = 0, fd;
+     *out = 0; *outn = 0;
+-    if (!d) return -1;
+-    if (fstat(dirfd(d), &ds) != 0 || ds.st_dev != st->st_dev || ds.st_ino != st->st_ino) { closedir(d); return -1; }
++    fd = openat(dfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
++    if (fd < 0) return -1;
++    if (!(d = fdopendir(fd))) { close(fd); return -1; }
+     while (!bad && (x = readdir(d)) != 0) {
+         if (!strcmp(x->d_name, ".") || !strcmp(x->d_name, "..")) continue;
+         if (n == cap) {
+@@ -252,69 +378,158 @@ static int _unisa_sd_list(const char *p, const struct stat *st, char ***out, siz
+ #endif
+ }
+ #endif
+-/* check 3: count P (described by ST) and what lies below it into *CNT, stopping once it passes CAP; refuse a .git
+-   entry, another device than ROOT's, a depth past SAFEDEL_DEPTH */
++/* 1 when the directory open as DFD holds a .git entry (or cannot be asked) */
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_hasgit
++static int _unisa_sd_hasgit(int dfd) {
++#ifdef _WIN32
++    (void)dfd; return 1;
++#else
++    struct stat st;
++    if (fstatat(dfd, ".git", &st, AT_SYMLINK_NOFOLLOW) == 0) return 1;
++    return errno != ENOENT;
++#endif
++}
++#endif
++/* the descent: H opened from "/" without links and compared with the check, then each component below it from its
++   parent's descriptor, down to T's parent (*PFD) and T in it (*ST, as the check saw it).  *HFD: H; *UID1: the owner of
++   the entry right below H.  0, or a refusal (nothing is open then); *PFD -1 with rc 0: T is gone (absent) */
++#if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_descend
++static int _unisa_sd_descend(const struct unisa_safedel_tgt *g, const char *path, int *hfd, int *pfd, struct stat *st, unsigned *uid1, char *why, int whylen) {
++#ifdef _WIN32
++    (void)g; (void)hfd; (void)pfd; (void)st; (void)uid1;
++    return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "deletion is not supported on Windows", "");
++#else
++    char c[SAFEDEL_PATHLEN]; const char *s; size_t l; int k, fd, nfd, er; struct stat ds;
++    *hfd = *pfd = -1;
++    if ((fd = _unisa_sd_openpath(g->home)) < 0)
++        return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (its root cannot be opened without following a link): ", strerror(errno));
++    if (fstat(fd, &ds) != 0 || (unsigned long long)ds.st_dev != g->dev[0] || (unsigned long long)ds.st_ino != g->ino[0]) {
++        close(fd); return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (its root is another directory now)", ""); }
++    if ((g->kind == 0 || g->kind == 3) && _unisa_sd_hasgit(fd)) {   /* a temp root holds no .git (a repository's root does) */
++        close(fd); return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (its root holds a .git now)", ""); }
++    *hfd = fd;
++    s = g->t + strlen(g->home);
++    for (k = 1; k <= g->n; k++) {
++        while (*s == '/') s++;
++        l = strchr(s, '/') ? (size_t)(strchr(s, '/') - s) : strlen(s);
++        memcpy(c, s, l); c[l] = 0; s += l;
++        if (k == g->n) break;   /* C is T's name */
++        nfd = openat(fd, c, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
++        er = errno;
++        if (nfd < 0 || fstat(nfd, &ds) != 0 || (unsigned long long)ds.st_dev != g->dev[k] || (unsigned long long)ds.st_ino != g->ino[k]) {
++            if (nfd >= 0) close(nfd);
++            if (fd != *hfd) close(fd);
++            close(*hfd); *hfd = -1;
++            if (nfd < 0 && er == ENOENT) { *pfd = -1; return SAFEDEL_OK; }   /* gone meanwhile: nothing to delete */
++            return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (a component is a link or another directory now): ", c);
++        }
++        if (k == 1) *uid1 = (unsigned)ds.st_uid;
++        if (fd != *hfd) close(fd);
++        fd = nfd;
++        if (_unisa_sd_hasgit(fd)) {
++            if (fd != *hfd) close(fd);
++            close(*hfd); *hfd = -1;
++            return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (a component holds a .git now): ", c);
++        }
++        _unisa_sd_hook(SAFEDEL_AT_DESCENT, c);
++    }
++    if (fstatat(fd, c, st, AT_SYMLINK_NOFOLLOW) != 0) {
++        er = errno;
++        if (fd != *hfd) close(fd);
++        close(*hfd); *hfd = -1;
++        if (er == ENOENT) { *pfd = -1; return SAFEDEL_OK; }
++        return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot stat: ", strerror(er));
++    }
++    if ((unsigned long long)st->st_dev != g->dev[g->n] || (unsigned long long)st->st_ino != g->ino[g->n] || (st->st_mode & S_IFMT) != (g->mode[g->n] & S_IFMT)) {
++        if (fd != *hfd) close(fd);
++        close(*hfd); *hfd = -1;
++        return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (another file now)", "");
++    }
++    if (g->n == 1) *uid1 = (unsigned)st->st_uid;
++    *pfd = fd == *hfd ? dup(fd) : fd;
++    if (*pfd < 0) { er = errno; close(*hfd); *hfd = -1; return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot dup: ", strerror(er)); }
++    return SAFEDEL_OK;
++#endif
++}
++#endif
++/* check 3 below the directory open as DFD (shown as P): count its entries into *CNT (the directory itself counted by
++   the caller), stopping once it passes CAP; refuse a .git entry, another device than DEV, a depth past SAFEDEL_DEPTH */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_walk
+-static int _unisa_sd_walk(const char *p, const struct stat *st, const struct stat *root, int depth, long *cnt, long cap, char *why, int whylen) {
++static int _unisa_sd_walk(int dfd, const char *p, unsigned long long dev, int depth, long *cnt, long cap, char *why, int whylen) {
+ #ifdef _WIN32
+-    (void)p; (void)st; (void)root; (void)depth; (void)cnt; (void)cap;
++    (void)dfd; (void)p; (void)dev; (void)depth; (void)cnt; (void)cap;
+     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, "", "Windows", "");
+ #else
+-    char **v; size_t n, i; char c[SAFEDEL_PATHLEN]; struct stat cs; int rc = 0;
+-    *cnt += 1;
+-    if (*cnt > cap || !S_ISDIR(st->st_mode)) return SAFEDEL_OK;
++    char **v; size_t n, i; char c[SAFEDEL_PATHLEN]; struct stat cs; int rc = 0, cfd;
+     if (depth >= SAFEDEL_DEPTH) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "is nested deeper than SAFEDEL_DEPTH", "");
+-    if (_unisa_sd_list(p, st, &v, &n) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot read the directory (or it changed)", "");
++    if (_unisa_sd_names(dfd, &v, &n) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot read the directory", "");
+     for (i = 0; i < n && !rc && *cnt <= cap; i++) {
+-        if (!strcmp(v[i], ".git")) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "contains a .git entry", "");
+-        else if (_unisa_sd_join(c, p, v[i])) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "an entry's path is too long", "");
+-        else if (lstat(c, &cs) != 0) rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, c, "cannot lstat: ", strerror(errno));
+-        else if (cs.st_dev != root->st_dev) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, c, "is another file system (a mount point)", "");
+-        else rc = _unisa_sd_walk(c, &cs, root, depth + 1, cnt, cap, why, whylen);
++        if (_unisa_sd_join(c, p, v[i])) c[0] = 0;
++        if (!strcmp(v[i], ".git")) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "contains a .git entry", ""); break; }
++        if (fstatat(dfd, v[i], &cs, AT_SYMLINK_NOFOLLOW) != 0) {
++            if (errno == ENOENT) continue;   /* gone meanwhile */
++            rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, c, "cannot stat: ", strerror(errno)); break;
++        }
++        if ((unsigned long long)cs.st_dev != dev) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, c, "is another file system (a mount point)", ""); break; }
++        *cnt += 1;
++        if (*cnt > cap || !S_ISDIR(cs.st_mode)) continue;
++        if ((cfd = _unisa_sd_openchild(dfd, v[i], &cs)) < 0) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, c, "changed while it was checked (a link or another directory now)", ""); break; }
++        rc = _unisa_sd_walk(cfd, c, dev, depth + 1, cnt, cap, why, whylen);
++        close(cfd);
+     }
+     _unisa_sd_free(v, n);
+     return rc;
+ #endif
+ }
+ #endif
+-/* permanent removal of P, depth first; each directory is re-checked when it is opened */
++/* permanent removal of what lies below the directory open as DFD (shown as P), depth first, on descriptors only; each
++   directory is opened without following a link and must be what fstatat named; *LEFT entries may go (the ceiling,
++   counted again: a tree that grew under the guard is stopped) */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_purge
+-static int _unisa_sd_purge(const char *p, const struct stat *root, int depth, char *why, int whylen) {
++static int _unisa_sd_purge(int dfd, const char *p, unsigned long long dev, int depth, long *left, char *why, int whylen) {
+ #ifdef _WIN32
+-    (void)p; (void)root; (void)depth;
++    (void)dfd; (void)p; (void)dev; (void)depth; (void)left;
+     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, "", "Windows", "");
+ #else
+-    char **v; size_t n, i; char c[SAFEDEL_PATHLEN]; struct stat st; int rc = 0;
+-    if (lstat(p, &st) != 0) return errno == ENOENT ? SAFEDEL_OK : _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot lstat: ", strerror(errno));
+-    if (st.st_dev != root->st_dev) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "is another file system (a mount point)", "");
+-    if (!S_ISDIR(st.st_mode)) {
+-        if (unlink(p) != 0 && errno != ENOENT) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot unlink: ", strerror(errno));
+-        return SAFEDEL_OK;
+-    }
++    char **v; size_t n, i; char c[SAFEDEL_PATHLEN]; struct stat cs; int rc = 0, cfd;
+     if (depth >= SAFEDEL_DEPTH) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "is nested deeper than SAFEDEL_DEPTH", "");
+-    if (_unisa_sd_list(p, &st, &v, &n) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot read the directory (or it changed)", "");
++    if (_unisa_sd_names(dfd, &v, &n) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot read the directory", "");
+     for (i = 0; i < n && !rc; i++) {
+-        if (!strcmp(v[i], ".git")) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "contains a .git entry", "");
+-        else if (_unisa_sd_join(c, p, v[i])) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "an entry's path is too long", "");
+-        else rc = _unisa_sd_purge(c, root, depth + 1, why, whylen);
++        if (_unisa_sd_join(c, p, v[i])) c[0] = 0;
++        if (!strcmp(v[i], ".git")) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "contains a .git entry", ""); break; }
++        if (fstatat(dfd, v[i], &cs, AT_SYMLINK_NOFOLLOW) != 0) {
++            if (errno == ENOENT) continue;
++            rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, c, "cannot stat: ", strerror(errno)); break;
++        }
++        if ((unsigned long long)cs.st_dev != dev) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, c, "is another file system (a mount point)", ""); break; }
++        if (--*left < 0) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, p, "grew past the ceiling while it was deleted (stopped)", ""); break; }
++        if (S_ISDIR(cs.st_mode)) {
++            _unisa_sd_hook(SAFEDEL_AT_PURGEDIR, v[i]);
++            if ((cfd = _unisa_sd_openchild(dfd, v[i], &cs)) < 0) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, c, "changed while it was deleted (a link or another directory now)", ""); break; }
++            rc = _unisa_sd_purge(cfd, c, dev, depth + 1, left, why, whylen);
++            close(cfd);
++            if (!rc && unlinkat(dfd, v[i], AT_REMOVEDIR) != 0 && errno != ENOENT) rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, c, "cannot rmdir: ", strerror(errno));
++        } else {
++            _unisa_sd_hook(SAFEDEL_AT_UNLINK, v[i]);
++            if (unlinkat(dfd, v[i], 0) != 0 && errno != ENOENT) rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, c, "cannot unlink: ", strerror(errno));
++        }
+     }
+     _unisa_sd_free(v, n);
+-    if (!rc && rmdir(p) != 0) rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, p, "cannot rmdir: ", strerror(errno));
+     return rc;
+ #endif
+ }
+ #endif
+-/* the file system's clock: the mtime of a directory made (and removed) in DIR; -1 on error */
++/* the file system's clock: the mtime of a directory made (and removed) in the directory open as DFD; -1 on error */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_now
+-static long _unisa_sd_now(const char *dir) {
++static long _unisa_sd_now(int dfd) {
+ #ifdef _WIN32
+-    (void)dir; return -1;
++    (void)dfd; return -1;
+ #else
+-    char p[SAFEDEL_PATHLEN]; struct stat st; long t = -1; int k;
+-    k = snprintf(p, sizeof p, "%s/.now-%ld-%lu", dir, (long)getpid(), _unisa_sd_seq());
+-    if (k <= 0 || k >= (int)sizeof p || mkdir(p, 0700) != 0) return -1;
+-    if (lstat(p, &st) == 0) t = (long)st.st_mtime;
+-    rmdir(p);
++    char p[96]; struct stat st; long t = -1; int k;
++    k = snprintf(p, sizeof p, ".now-%ld-%lu", (long)getpid(), _unisa_sd_seq());
++    if (k <= 0 || k >= (int)sizeof p || mkdirat(dfd, p, 0700) != 0) return -1;
++    if (fstatat(dfd, p, &st, AT_SYMLINK_NOFOLLOW) == 0) t = (long)st.st_mtime;
++    unlinkat(dfd, p, AT_REMOVEDIR);
+     return t;
+ #endif
+ }
+@@ -347,19 +562,25 @@ static long _unisa_sd_unstamp(const char *nm) {
+     return (era * 146097 + doe - 719468) * 86400 + v[3] * 3600 + v[4] * 60 + v[5];
+ }
+ #endif
+-/* HOME/.trash: made 0700 when missing; it must be a real directory of this user, closed to others.  0, or a refusal */
++/* .trash in the trash home open as HFD (made 0700 when MAKE and missing), never through a link; it must be a real
++   directory of this user, closed to others.  *FD gets its descriptor; 0, or a refusal (0 with *FD -1: no trash) */
+ #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_trashdir
+-static int _unisa_sd_trashdir(const char *home, char *tr, int make, char *why, int whylen) {
++static int _unisa_sd_trashdir(int hfd, const char *home, int make, int *fd, char *why, int whylen) {
+ #ifdef _WIN32
+-    (void)home; (void)tr; (void)make;
++    (void)hfd; (void)home; (void)make; *fd = -1;
+     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, "", "Windows", "");
+ #else
+-    struct stat st;
++    struct stat st; char tr[SAFEDEL_PATHLEN];
++    *fd = -1;
+     if (_unisa_sd_join(tr, home, ".trash")) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "path too long", "");
+-    if (make && mkdir(tr, 0700) != 0 && errno != EEXIST) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot make: ", strerror(errno));
+-    if (lstat(tr, &st) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot lstat: ", strerror(errno));
++    if (make && mkdirat(hfd, ".trash", 0700) != 0 && errno != EEXIST) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot make: ", strerror(errno));
++    if (fstatat(hfd, ".trash", &st, AT_SYMLINK_NOFOLLOW) != 0) {
++        if (errno == ENOENT && !make) return SAFEDEL_OK;
++        return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot stat: ", strerror(errno));
++    }
+     if (!S_ISDIR(st.st_mode)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, "is not a directory (a symlink?)", "");
+     if (st.st_uid != geteuid() || (st.st_mode & 022)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, "is not this user's or is writable by others", "");
++    if ((*fd = _unisa_sd_openchild(hfd, ".trash", &st)) < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, "changed while it was opened", "");
+     return SAFEDEL_OK;
+ #endif
+ }
+@@ -371,61 +592,99 @@ static int _unisa_sd_run(const char *path, unsigned flags, long max_files, long
+     (void)flags; (void)max_files; *count = 0;
+     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "deletion is not supported on Windows", "");
+ #else
+-    struct unisa_safedel_env e; char t[SAFEDEL_PATHLEN], home[SAFEDEL_PATHLEN], tr[SAFEDEL_PATHLEN], sd[SAFEDEL_PATHLEN], dest[SAFEDEL_PATHLEN], stamp[20];
+-    int islink, absent, rc, k, er; struct stat st; long cnt = 0, now; unsigned long i;
++    struct unisa_safedel_env e; struct unisa_safedel_tgt *g; char tr[SAFEDEL_PATHLEN], sd[96], stamp[20], base[SAFEDEL_PATHLEN];
++    int rc, k, er, hfd = -1, pfd = -1, tfd = -1, trfd = -1, sfd = -1, conv = 0, isdir;
++    struct stat st, ps; long cnt = 1, now, left; unsigned long i; unsigned uid1 = 0;
+     *count = 0;
+     if (max_files <= 0) max_files = SAFEDEL_MAX_FILES;
++    if (!(g = (struct unisa_safedel_tgt *)malloc(sizeof *g))) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "out of memory", "");
+     _unisa_sd_env(&e);
+-    rc = _unisa_sd_check(&e, path, t, home, &islink, &absent, why, whylen);
+-    if (rc) return rc;
+-    if (absent) return _unisa_sd_say(why, whylen, SAFEDEL_OK, path, "absent (nothing to delete)", "");
+-    if (lstat(t, &st) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot lstat: ", strerror(errno));
+-    {   /* a mount point (a bind mount of $HOME under /tmp, say) is another file system than its parent: refused */
+-        struct stat ps; size_t l = (size_t)(strrchr(t, '/') - t);
+-        memcpy(sd, t, l ? l : 1); sd[l ? l : 1] = 0;
+-        if (lstat(sd, &ps) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot lstat the parent: ", strerror(errno));
+-        if (ps.st_dev != st.st_dev) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a mount point", "");
++    rc = _unisa_sd_check(&e, path, g, why, whylen);
++    if (rc) { free(g); return rc; }
++    if (g->absent) { free(g); return _unisa_sd_say(why, whylen, SAFEDEL_OK, path, "absent (nothing to delete)", ""); }
++    snprintf(base, sizeof base, "%s", strrchr(g->t, '/') + 1);
++    if (_unisa_sd_join(tr, g->home, ".trash")) { free(g); return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "path too long", ""); }
++    if (!strcmp(g->t, tr)) { free(g); return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the trash itself (use --purge-trash)", ""); }
++    if ((flags & SAFEDEL_PURGE) && g->kind == 1) { flags &= ~SAFEDEL_PURGE; conv = 1; }   /* trash first: a repository's out/ */
++    _unisa_sd_hook(SAFEDEL_AT_CHECKED, g->t);
++    /* descriptors only from here on */
++    rc = _unisa_sd_descend(g, path, &hfd, &pfd, &st, &uid1, why, whylen);
++    if (rc) { free(g); return rc; }
++    if (pfd < 0) { free(g); return _unisa_sd_say(why, whylen, SAFEDEL_OK, path, "absent (nothing to delete)", ""); }
++    isdir = !g->islink && S_ISDIR(st.st_mode);
++    /* a mount point (a bind mount of $HOME under /tmp, say) is another file system than its parent: refused */
++    if (fstat(pfd, &ps) != 0 || ps.st_dev != st.st_dev) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a mount point", ""); goto done; }
++    if ((flags & SAFEDEL_PURGE) && g->kind == 0 && uid1 != (unsigned)geteuid()) {
++        rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not in the caller's own temp dir (the entry below the temp root is another user's); not purged: ", g->t); goto done; }
++    if ((flags & SAFEDEL_PURGE) && (g->kind == 2 || g->kind == 3)) {   /* a trash entry: the trash must be the caller's */
++        rc = _unisa_sd_trashdir(hfd, g->home, 0, &trfd, why, whylen);
++        if (!rc && trfd < 0) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "its trash is gone", "");
++        if (rc) goto done;
+     }
+-    if (islink || !S_ISDIR(st.st_mode)) cnt = 1;
+-    else {
+-        rc = _unisa_sd_walk(t, &st, &st, 0, &cnt, max_files, why, whylen);
+-        if (rc) return rc;
+-        if (cnt > 1 && !(flags & SAFEDEL_RECURSIVE)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a non-empty directory (not recursive)", "");
++    if (isdir) {
++        if ((tfd = _unisa_sd_openchild(pfd, base, &st)) < 0) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "changed while it was checked (a link or another directory now)", ""); goto done; }
++        rc = _unisa_sd_walk(tfd, g->t, (unsigned long long)st.st_dev, 0, &cnt, max_files, why, whylen);
++        if (!rc && cnt > 1 && !(flags & SAFEDEL_RECURSIVE)) rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a non-empty directory (not recursive)", "");
++        if (rc) goto done;
+     }
+     if (cnt > max_files) {
+-        char m[96]; snprintf(m, sizeof m, "more than %ld entries, the ceiling (pass an explicit force count)", max_files);
+-        return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, m, "");
++        char m[128]; snprintf(m, sizeof m, "more than %ld entries, the ceiling (only an explicit --force-count raises it)", max_files);
++        rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, m, ""); goto done;
+     }
+     *count = cnt;
++    _unisa_sd_hook(SAFEDEL_AT_WALKED, g->t);
+     if (flags & SAFEDEL_DRYRUN) {
+-        char m[96]; snprintf(m, sizeof m, "would %s %ld entries: ", (flags & SAFEDEL_PURGE) ? "purge" : "trash", cnt);
+-        return _unisa_sd_say(why, whylen, SAFEDEL_OK, path, m, t);
++        char m[160]; snprintf(m, sizeof m, "would %s %ld entries%s: ", (flags & SAFEDEL_PURGE) ? "purge" : "trash", cnt, conv ? " (a purge in a repository's out/ is a trash)" : "");
++        rc = _unisa_sd_say(why, whylen, SAFEDEL_OK, path, m, g->t); goto done;
+     }
+     if (flags & SAFEDEL_PURGE) {
+-        rc = _unisa_sd_purge(t, &st, 0, why, whylen);
+-        if (!rc) { char m[64]; snprintf(m, sizeof m, "purged %ld entries: ", cnt); _unisa_sd_say(why, whylen, SAFEDEL_OK, path, m, t); }
+-        return rc;
++        left = max_files - 1;
++        if (tfd >= 0) rc = _unisa_sd_purge(tfd, g->t, (unsigned long long)st.st_dev, 0, &left, why, whylen);
++        if (!rc) {
++            if (!isdir) _unisa_sd_hook(SAFEDEL_AT_UNLINK, base);
++            if (unlinkat(pfd, base, isdir ? AT_REMOVEDIR : 0) != 0 && errno != ENOENT)
++                rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, isdir ? "cannot rmdir: " : "cannot unlink: ", strerror(errno));
++        }
++        if (!rc) { char m[64]; snprintf(m, sizeof m, "purged %ld entries: ", cnt); _unisa_sd_say(why, whylen, SAFEDEL_OK, path, m, g->t); }
++        goto done;
+     }
+-    rc = _unisa_sd_trashdir(home, tr, 1, why, whylen);
+-    if (rc) return rc;
+-    if (_unisa_sd_within(tr, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the trash or holds it (purge it instead)", "");
+-    now = _unisa_sd_now(tr);
+-    if (now < 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot read the clock: ", strerror(errno));
++    rc = _unisa_sd_trashdir(hfd, g->home, 1, &trfd, why, whylen);
++    if (rc) goto done;
++    now = _unisa_sd_now(trfd);
++    if (now < 0) { rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot read the clock: ", strerror(errno)); goto done; }
+     _unisa_sd_stamp(now, stamp);
+     for (i = 0;; i++) {
+-        k = snprintf(sd, sizeof sd, "%s/%s-%ld-%lu", tr, stamp, (long)getpid(), _unisa_sd_seq());
+-        if (k <= 0 || k >= (int)sizeof sd) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, "path too long", "");
+-        if (mkdir(sd, 0700) == 0) break;
+-        if (errno != EEXIST || i >= 1000) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, sd, "cannot make: ", strerror(errno));
++        k = snprintf(sd, sizeof sd, "%s-%ld-%lu", stamp, (long)getpid(), _unisa_sd_seq());
++        if (k <= 0 || k >= (int)sizeof sd) { rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, "name too long", ""); goto done; }
++        if (mkdirat(trfd, sd, 0700) == 0) break;
++        if (errno != EEXIST || i >= 1000) { rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot make a trash entry: ", strerror(errno)); goto done; }
+     }
+-    if (_unisa_sd_join(dest, sd, strrchr(t, '/') + 1)) { rmdir(sd); return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "path too long", ""); }
+-    if (rename(t, dest) != 0) {
+-        er = errno; rmdir(sd);
+-        if (er == EXDEV) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "lies on another file system than its trash; not moved (purge it instead)", "");
+-        return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot move into the trash: ", strerror(er));
++    {   struct stat ss;
++        if (fstatat(trfd, sd, &ss, AT_SYMLINK_NOFOLLOW) != 0 || (sfd = _unisa_sd_openchild(trfd, sd, &ss)) < 0) {
++            rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, "a trash entry changed while it was made", ""); goto done; }
+     }
+-    { char m[64]; snprintf(m, sizeof m, "trashed %ld entries to ", cnt); _unisa_sd_say(why, whylen, SAFEDEL_OK, path, m, dest); }
+-    return SAFEDEL_OK;
++    _unisa_sd_hook(SAFEDEL_AT_TRASH, base);
++    if (renameat(pfd, base, sfd, base) != 0) {
++        er = errno; unlinkat(trfd, sd, AT_REMOVEDIR);
++        if (er == EXDEV) rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "lies on another file system than its trash; not moved", "");
++        else rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "cannot move into the trash: ", strerror(er));
++        goto done;
++    }
++    {   struct stat ms; char m[SAFEDEL_PATHLEN + 200];
++        if (fstatat(sfd, base, &ms, AT_SYMLINK_NOFOLLOW) != 0 || ms.st_dev != st.st_dev || ms.st_ino != st.st_ino) {
++            snprintf(m, sizeof m, "%s/%s/%s (nothing deleted)", tr, sd, base);
++            rc = _unisa_sd_say(why, whylen, SAFEDEL_FAILED, path, "changed during the move: what was at its name now lies in ", m); goto done; }
++        snprintf(m, sizeof m, "trashed %ld entries%s to %s/%s/%s", cnt, conv ? " (a purge in a repository's out/ is a trash)" : "", tr, sd, base);
++        rc = _unisa_sd_say(why, whylen, SAFEDEL_OK, path, m, "");
++    }
++done:
++    if (sfd >= 0) close(sfd);
++    if (trfd >= 0) close(trfd);
++    if (tfd >= 0) close(tfd);
++    if (pfd >= 0) close(pfd);
++    if (hfd >= 0) close(hfd);
++    free(g);
++    return rc;
+ #endif
+ }
+ #endif
+@@ -441,7 +700,7 @@ static int unisa_safedel_purge_trash(const char *home, long hours, long max_file
+     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "deletion is not supported on Windows", "");
+ #else
+     struct unisa_safedel_env e; char r[SAFEDEL_PATHLEN], tr[SAFEDEL_PATHLEN], c[SAFEDEL_PATHLEN], m[128];
+-    struct stat st; char **v; char *pick; size_t n, i; long now, t0, total = 0, k, entries = 0; int rc = 0;
++    struct stat st; char **v; char *pick; size_t n, i; long now, t0, total = 0, k, entries = 0; int rc = 0, hfd, trfd = -1;
+     if (!home || !home[0]) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, "\"\"", "empty trash home", "");
+     if (hours < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "a negative age", "");
+     if (max_files <= 0) max_files = SAFEDEL_MAX_FILES;
+@@ -452,27 +711,27 @@ static int unisa_safedel_purge_trash(const char *home, long hours, long max_file
+             return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "is neither a temp root nor a repository root: ", r);
+     }
+     if (_unisa_sd_join(tr, r, ".trash")) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "path too long", "");
+-    if (lstat(tr, &st) != 0) {
+-        if (errno == ENOENT) return _unisa_sd_say(why, whylen, SAFEDEL_OK, tr, "no trash", "");
+-        return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot lstat: ", strerror(errno));
+-    }
+-    rc = _unisa_sd_trashdir(r, tr, 0, why, whylen);
++    if ((hfd = _unisa_sd_openpath(r)) < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "cannot be opened without following a link: ", strerror(errno));
++    rc = _unisa_sd_trashdir(hfd, r, 0, &trfd, why, whylen);
++    close(hfd);
+     if (rc) return rc;
+-    if (lstat(tr, &st) != 0 || (now = _unisa_sd_now(tr)) < 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot read the clock", "");
+-    if (_unisa_sd_list(tr, &st, &v, &n) != 0) return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot read the directory", "");
++    if (trfd < 0) return _unisa_sd_say(why, whylen, SAFEDEL_OK, tr, "no trash", "");
++    if ((now = _unisa_sd_now(trfd)) < 0) { close(trfd); return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot read the clock", ""); }
++    if (_unisa_sd_names(trfd, &v, &n) != 0) { close(trfd); return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "cannot read the directory", ""); }
+     pick = (char *)calloc(n ? n : 1, 1);
+-    if (!pick) { _unisa_sd_free(v, n); return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "out of memory", ""); }
+-    for (i = 0; i < n && !rc; i++) {
++    if (!pick) { _unisa_sd_free(v, n); close(trfd); return _unisa_sd_say(why, whylen, SAFEDEL_FAILED, tr, "out of memory", ""); }
++    for (i = 0; i < n && !rc; i++) {   /* each expired entry goes through the whole guard again, by its own path */
+         struct stat es;
+-        if (!strncmp(v[i], ".now-", 5) || _unisa_sd_join(c, tr, v[i]) || lstat(c, &es) != 0) continue;
++        if (!strncmp(v[i], ".now-", 5) || _unisa_sd_join(c, tr, v[i]) || fstatat(trfd, v[i], &es, AT_SYMLINK_NOFOLLOW) != 0) continue;
+         t0 = _unisa_sd_unstamp(v[i]);
+         if (t0 < 0) t0 = (long)es.st_mtime;
+         if (now - t0 < hours * 3600) continue;
+         rc = _unisa_sd_run(c, SAFEDEL_PURGE | SAFEDEL_RECURSIVE | SAFEDEL_DRYRUN, max_files, &k, why, whylen);
+         if (!rc) { pick[i] = 1; total += k; entries++; }
+     }
++    close(trfd);
+     if (!rc && total > max_files) {
+-        snprintf(m, sizeof m, "%ld expired entries hold more than %ld, the ceiling (pass an explicit force count)", entries, max_files);
++        snprintf(m, sizeof m, "%ld expired entries hold more than %ld, the ceiling (only an explicit --force-count raises it)", entries, max_files);
+         rc = _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, tr, m, "");
+     }
+     if (!rc && (flags & SAFEDEL_DRYRUN)) {
+diff --git a/tests/INVENTORY.md b/tests/INVENTORY.md
+index 8dca6a5..5bdd4d3 100644
+--- a/tests/INVENTORY.md
++++ b/tests/INVENTORY.md
+@@ -483,6 +483,7 @@ Generated by `python3 tests/inventory.py --write` (0.0.15 R15-1). Every test or
+ | `tests/runtimeiocheck.py` | gate: exec-binaryio |
+ | `tests/safedel.cx` | gate: safedel-selftest |
+ | `tests/safedelcheck.cx` | gate: safedel-selftest |
++| `tests/safedelrace.cx` | gate: safedel-race |
+ | `tests/scale.sh` | reached from a gate/CI script |
+ | `tests/seal-modules.sh` | gate: seal-modules |
+ | `tests/sealmodulescheck.py` | reached from a gate/CI script |
+diff --git a/tests/deletemut.tsv b/tests/deletemut.tsv
+index d9cf878..4ee0687 100644
+--- a/tests/deletemut.tsv
++++ b/tests/deletemut.tsv
+@@ -628,6 +628,10 @@ tests/safedelcheck.cx	246	cx_rmtree {X}	the site's own target: the guard form of
+ tests/safedelcheck.cx	247	unisa_safedel {X} PURGE|RECURSIVE 0	the site's own target: the guard form of this line replayed (generic row)	r5 = unisa_safedel(at("wl/victim3"), SAFEDEL_PURGE, 0, w, (int)sizeof w);   /* a tree without SAFEDEL_RECURSIVE */
+ tests/safedelcheck.cx	250	cx_remove {X}	the site's own target: the guard form of this line replayed (generic row)	r1 = cx_remove(at("wl/emptydir")); r2 = cx_trash(at("wl/victim3")); r3 = cx_remove(at("wl/no-such-file"));
+ tests/safedelcheck.cx	329	cx_rmtree {X}	the site's own target: the guard form of this line replayed (generic row)	rc = cx_rmtree(B);
++tests/safedelrace.cx	126	unisa_safedel {X} PURGE|RECURSIVE 0	own mkdtemp under $TMPDIR	rc = unisa_safedel(at(target), flags, 0, WHY, (int)sizeof WHY);
++tests/safedelrace.cx	166	unisa_safedel {X} PURGE|RECURSIVE 0	own mkdtemp under $TMPDIR	rc = unisa_safedel(target, (r & 1) ? (SAFEDEL_PURGE | SAFEDEL_RECURSIVE) : SAFEDEL_RECURSIVE, 0, WHY, (int)sizeof WHY);
++tests/safedelrace.cx	225	unisa_safedel {X} PURGE|RECURSIVE 0	own mkdtemp under $TMPDIR	rc = unisa_safedel(at("proj/out/x"), SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, WHY, (int)sizeof WHY);
++tests/safedelrace.cx	238	unisa_safedel {X} PURGE|RECURSIVE 100000	own mkdtemp under $TMPDIR	rc = unisa_safedel(B, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 100000, WHY, (int)sizeof WHY);
+ tests/seal-modules.sh	32	sh TMP	shell variable(s) TMP bound to the injection	sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${TMP:?}"
+ tests/seal-modules.sh	65	sh f	shell variable(s) f bound to the injection	sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${f:?}"
+ tests/seedapecheck.sh	8	safedel -- {X}	the site's own target: the guard form of this line replayed (generic row)	_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+diff --git a/tests/deletes.tsv b/tests/deletes.tsv
+index c74902a..3fbb34f 100644
+--- a/tests/deletes.tsv
++++ b/tests/deletes.tsv
+@@ -805,6 +805,10 @@ tests/safedelcheck.cx	246	c	cx_rmtree	own-mkdtemp	low	guarded	the site's own tar
+ tests/safedelcheck.cx	247	c	unisa_safedel PURGE|RECURSIVE	own-mkdtemp	low	guarded	the site's own target: the guard form of this line replayed (generic row)
+ tests/safedelcheck.cx	250	c	cx_remove	own-mkdtemp	low	guarded	the site's own target: the guard form of this line replayed (generic row)
+ tests/safedelcheck.cx	329	c	cx_rmtree	own-mkdtemp	low	guarded	the site's own target: the guard form of this line replayed (generic row)
++tests/safedelrace.cx	126	c	unisa_safedel PURGE|RECURSIVE	own-mkdtemp	low	guarded	the race cases' targets, in the test's own mkdtemp sandbox (flags per case)
++tests/safedelrace.cx	166	c	unisa_safedel PURGE|RECURSIVE	own-mkdtemp	low	guarded	the concurrent stress's target, in the test's own mkdtemp sandbox
++tests/safedelrace.cx	225	c	unisa_safedel PURGE|RECURSIVE	own-mkdtemp	low	guarded	a fake repository's out/ in the test's own mkdtemp sandbox
++tests/safedelrace.cx	238	c	unisa_safedel PURGE|RECURSIVE	own-mkdtemp	low	guarded	the test's own mkdtemp sandbox, at the end
+ tests/seal-modules.sh	32	sh	safedel via sh	own-mkdtemp	low	guarded	shell variable(s) TMP bound to the injection
+ tests/seal-modules.sh	65	sh	safedel via sh	other	low	guarded	shell variable(s) f bound to the injection
+ tests/seedapecheck.sh	8	sh	safedel	own-mkdtemp	low	guarded	the site's own target: the guard form of this line replayed (generic row)
+diff --git a/tests/gate.sh b/tests/gate.sh
+index cea5a23..c276fe1 100755
+--- a/tests/gate.sh
++++ b/tests/gate.sh
+@@ -895,6 +895,7 @@ job cxinclude tests/bound 58 sh ./unisacc.com -run tests/cxinclude.cx -- --check
+ job glossarycheck tests/bound 58 sh ./unisacc.com -run tests/glossarycheck.cx   # docs/glossary.md section 6: tracked .cx and new .md (not in tests/glossary-baseline.tsv) hold prd.md section 0 -- no bare stage, PHASES, STAGE_NETS, net name as flow, bare 4 streams; any new file: no Python invocation (G5); exceptions ratcheted in tests/glossary-whitelist.tsv
+ job glossarycheck-selftest tests/bound 58 sh ./unisacc.com -run tests/glossarycheck.cx -- --selftest   # seeded G1-G7 violations are caught, clean controls pass, whitelist above-count / no-reason / no-row are refused
+ job safedel-selftest tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/safedelcheck.cx -- --com "${MODEL_COM:-./unisacc.com}"   # commissar ruling 2026-10-23: the one deletion guard (include/unisa_safedel.h) and its argv CLI tests/safedel.cx -- "", ".", "..", "/", ~, $HOME, cwd, repo root/ancestors, .git, a temp root itself, symlink and .. escapes refused with zero damage; $TMPDIR and /tmp both whitelisted; trash, purge, dry run, ceiling, --purge-trash; argv kill switches
++job safedel-race tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/safedelrace.cx   # the deletion guard under races (findings 1, 8 of the 2026-10-23 verifier): the target, its temp root, a directory above it (after the check and during the descent), a subdirectory or file inside it (depth 1 and 5, during the purge and after the walk) and the target or its parent right before the trash move are swapped for links into a decoy repository or for other directories through the guard's race hook, then a second process swaps a directory back and forth while the guard purges and trashes -- refused or confined, the decoy repository, $HOME and a repository's src/ unchanged (zero damage)
+ job deletecheck tests/bound 58 sh ./unisacc.com -run tests/deletecheck.cx   # commissar ruling items 1, 6, 8: every raw deletion primitive in the tracked tree (rm/rmdir/unlink/find -delete/xargs rm; shutil.rmtree/os.remove/Path.unlink; unlink/rmdir/remove/unlinkat/nftw; shell-concatenated rm) is exempt with a reason in the ledger tests/deletes.tsv, every guard call has its guarded row and mutation row
+ job deletecheck-selftest tests/bound 58 sh ./unisacc.com -run tests/deletecheck.cx -- --selftest   # seeded raw rm/find -delete/xargs rm/shutil.rmtree/os.remove/Path.unlink/unlink/nftw/shell-concatenated rm, stale and reasonless exemptions, a guard call without its mutation row: all red; the clean tree green
+ for k in 1 2 3 4; do job deletemut-$k tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/deletemutcheck.cx -- --com "${MODEL_COM:-./unisacc.com}" --shard $k/4; done   # commissar ruling item 7: every guarded deletion site in tests/deletemut.tsv still stands (its anchor) and its guard form, run with the target "", "." and a sandbox repository root, is refused with zero files damaged (full-tree listing)
+diff --git a/tests/gatedeps.json b/tests/gatedeps.json
+index 7b175d6..e14bbd3 100644
+--- a/tests/gatedeps.json
++++ b/tests/gatedeps.json
+@@ -44482,6 +44482,8 @@
+         "tests/safedelcheck.cx",
+         "tests/safedel.cx",
+         "include/cx.h",
++        "include/fcntl.h",
++        "include/sys/stat.h",
+         "include/unisa_safedel.h",
+         "include/unisa_sha256.h",
+         "tests/bound",
+@@ -44489,6 +44491,27 @@
+       ],
+       "executable_inputs": true
+     },
++    "safedel-race": {
++      "command": [
++        "tests/bound",
++        "58",
++        "sh",
++        "{MODEL_COM}",
++        "-run",
++        "tests/safedelrace.cx"
++      ],
++      "files": [
++        "tests/safedelrace.cx",
++        "include/cx.h",
++        "include/unisa_safedel.h",
++        "include/unisa_sha256.h",
++        "include/fcntl.h",
++        "include/sys/stat.h",
++        "tests/bound",
++        "tests/bound.c"
++      ],
++      "executable_inputs": true
++    },
+     "deletecheck": {
+       "command": [
+         "tests/bound",
+@@ -45627,7 +45650,7 @@
+     "compilercheck": {
+       "reviewed_trees": {
+         "exec": "1e2bf5b36602f922f30fef7238e52a11180065f14cb53062fbf78e3c5b948eb3",
+-        "include": "652aebdee6f9723708b4b595c486102e4c1102cfcffff48473325e354a9fbcb4",
++        "include": "c961d53c2f835cf66abbd1da1c32e6a76b063ef3be349594fd70d303d59d7055",
+         "unisa": "908cc018b361c612a747063c4e669b45dd83e9bebd0d2affa086c8b2f2d9c537",
+         "weights": "10df8978e98fa3118634effed21f0daba07a7e8c7f84da33d4aa98dd484a8124",
+         "src": "48356028d7af3b7ebe04bec7866dec55fdc67efb934f66365c1b6358497cdd11",
+diff --git a/tests/gatelayers.py b/tests/gatelayers.py
+index 1587212..b5dabb3 100644
+--- a/tests/gatelayers.py
++++ b/tests/gatelayers.py
+@@ -23,7 +23,7 @@ identity-product-negative identity-include-negative identity-include-consumer-ne
+ reviewed-trees finite-template decision-ledger zeropython zeropython-selftest dsl-ops modelbenchcheck bound qprefix
+ pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck freezecheck-selftest
+ revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin staticimage staticimage-selftest abi-manifest abi-manifest-selftest early-stage-seal-selftest pp-leaf-seal pp-leaf-seal-negative pp-leaf-capture-selftest lex-e1-seal e3-seal opt-e4-seal elf-seal prune-seal lower-seal net-prec-seal net-binsel-seal net-tyinfo-seal net-pfconv-seal net-regmap-seal net-lex-seal net-parse-seal net-type-seal net-scope-seal net-irsel-seal net-isel-seal net-enc-seal net-reloc-seal net-abi-seal net-combo-seal net-opinfo-seal net-peep-seal middle-flow-e3 middle-flow-lower-accept middle-flow-ledger seal-paradigm-audit seal-paradigm-selftest seal-modules edge-e4-peep-seal edge-e2-pp-seal edge-e1-lex-seal edge-e3-parse-seal edge-e2-pp-ablate edge-e3-parse-ablate regcheck regcheck-negative statecheck-tool statecheck-e3 statecheck-e3-warn statecheck-negative edge-e3-type-seal edge-e3-scope-seal edge-e3-irsel-seal edge-e3-tyinfo-seal edge-e3-binsel-seal edge-e3-prec-seal edge-e4-opinfo-seal edge-lower-abi-seal edge-lower-regmap-seal edge-lower-reloc-seal edge-lower-enc-seal edge-e3-pfconv-witness edge-elf-enc-witness
+-script-inventory script-inventory-self inventory-derived subtract-safety subtract-safety-selftest c99-ledger cxinclude glossarycheck glossarycheck-selftest safedel-selftest deletecheck deletecheck-selftest deletemut-1 deletemut-2 deletemut-3 deletemut-4 progress
++script-inventory script-inventory-self inventory-derived subtract-safety subtract-safety-selftest c99-ledger cxinclude glossarycheck glossarycheck-selftest safedel-selftest safedel-race deletecheck deletecheck-selftest deletemut-1 deletemut-2 deletemut-3 deletemut-4 progress
+ flownet-w0-module flownet-w0-module-negative flownet-baseline-file flownet-w2-d1 flownet-w2-tables-gold flownet-w6-b1 flownet-w6-b1-pin
+ publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
+ lib-bindings-registry
+diff --git a/tests/safedel.cx b/tests/safedel.cx
+index 6c8e03a..1c0ec9b 100644
+--- a/tests/safedel.cx
++++ b/tests/safedel.cx
+@@ -4,11 +4,13 @@
+      sh tests/cxbin tests/safedel.cx --purge-trash HOME --older-than HOURS [--dry-run] [--max-files N] [--force-count N] [-v]
+    Options are read anywhere before `--`; a path that starts with `-` comes after `--`.  Every PATH is checked (a dry
+    run of the guard) before any is touched: one refusal and nothing is deleted.  Default: each PATH (a tree) moves into
+-   the .trash of its root; --purge deletes it for good.  The ceiling is --max-files entries per PATH (default
+-   SAFEDEL_MAX_FILES; for --purge-trash the summed expired entries); above it only an explicit --force-count N, N at
+-   least the count, proceeds.  --purge-trash HOME (the temp root or a repository root) purges HOME/.trash entries older
+-   than HOURS.  rc 0 done (a missing PATH included), 3 refused (nothing deleted), 2 usage, 1 an I/O error after the
+-   checks passed (the paths before it are done, the rest untouched). */
++   the .trash of its root; --purge deletes it for good, but only in the caller's own temp dirs and .trash entries (in a
++   repository's out/ the guard trashes it all the same: trash first).  The ceiling is SAFEDEL_MAX_FILES entries per PATH
++   (for --purge-trash the summed expired entries); --max-files N only lowers it (N above the default is the default);
++   only an explicit --force-count N, N at least the count, goes above it.  --purge-trash HOME (the temp root or a
++   repository root) purges HOME/.trash entries older than HOURS.  rc 0 done (a missing PATH included), 3 refused
++   (nothing deleted), 2 usage, 1 an I/O error after the checks passed (the paths before it are done, the rest
++   untouched). */
+ static int usage(const char *m) {
+     fprintf(stderr, "safedel: %s\nusage: safedel [--dry-run] [--purge] [--max-files N] [--force-count N] [-v] [--] PATH...\n"
+                     "       safedel --purge-trash HOME --older-than HOURS [--dry-run] [--max-files N] [--force-count N] [-v]\n", m);
+@@ -46,8 +48,8 @@ int main(int argc, char **argv) {
+         i++;
+     }
+     if (!maxf || !force) return usage("--max-files and --force-count take a count of at least 1");
+-    limit = maxf > 0 ? maxf : SAFEDEL_MAX_FILES;
+-    if (force > limit) limit = force;
++    limit = maxf > 0 && maxf < SAFEDEL_MAX_FILES ? maxf : SAFEDEL_MAX_FILES;   /* --max-files only lowers the ceiling */
++    if (force > limit) limit = force;                                          /* only --force-count raises it */
+     if (home) {
+         if (np) return usage("--purge-trash takes no PATH");
+         if (purge) return usage("--purge-trash always purges");
+diff --git a/tests/safedelcheck.cx b/tests/safedelcheck.cx
+index 6967706..59cf8a2 100644
+--- a/tests/safedelcheck.cx
++++ b/tests/safedelcheck.cx
+@@ -3,21 +3,23 @@
+      sh unisacc.com -run tests/safedelcheck.cx -- --com unisacc.com [--src tests/safedel.cx]   (compiles the CLI)
+      safedelcheck --bin BUILT_CLI                                                               (a CLI built elsewhere)
+    Everything happens in a sandbox B = mkdtemp($TMPDIR or /tmp); the CLI runs with TMPDIR=S/wl, HOME=S/home and its cwd
+-   in S (S = B/s).  Each refusal case runs three times (--dry-run, the default trash, --purge), the latter two only
+-   after the dry run refused, and the full-tree checksum of S (every path, type, mode, size, content and link target)
+-   must not change.  Refused: "", ".", "..", "/", "//", "~", "~/", $HOME, the cwd, a fake repository root, the same
+-   with the cwd inside it, its parent, a directory holding a nested .git, a path inside .git, a repository file outside
+-   out/, a symlink into the fake repository (with and without a trailing slash), a symlink to $HOME, an escape from the
+-   whitelist via .. and via a symlinked parent (landing in a second fake repository), a path ending in .., the temp
+-   root itself (and /tmp), a path outside both temp roots ($TMPDIR, /tmp) when TMPDIR is relative or an ancestor of
+-   $HOME (under /tmp the fake $HOME makes /tmp no temp root: refused all the same), the ceiling without --force-count,
+-   a list holding one bad path.  Works: a temp
+-   tree to the trash (default) and purged (--purge), a repository out/ tree to the repository's .trash, a dry run that
+-   changes nothing, a link removed as a link (its destination intact), a tree holding links out of it, the ceiling with
+-   --force-count, a missing path, names with shell metacharacters taken literally, --purge-trash by age and ceiling,
+-   a /tmp path purged while TMPDIR points elsewhere (both temp roots are whitelisted).
+-   Kill switches of the argv parsing: rc 2 and no change.  The sandbox goes through the guard too (its fake .git
+-   entries are renamed away first: the guard never deletes a .git). */
++   in S/cwd, outside the temp root (S = B/s).  Each refusal case runs three times (--dry-run, the default trash,
++   --purge), the latter two only after the dry run refused, and the full-tree checksum of S (every path, type, mode,
++   size, content and link target) must not change.  Refused: "", ".", "..", "/", "//", "~", "~/", $HOME, the cwd, a
++   fake repository root, the same with the cwd inside it, its parent, a directory holding a nested .git, a path inside
++   .git, a repository file outside out/, a symlink into the fake repository (with and without a trailing slash), a
++   symlink to $HOME, an escape from the whitelist via .. and via a symlinked parent (landing in a second fake
++   repository), a path ending in .., the temp root itself (and /tmp), the temp root's .trash itself, a path outside
++   both temp roots ($TMPDIR, /tmp) when TMPDIR is relative, an ancestor of $HOME, of the cwd or of the cwd's
++   repository root (under /tmp the fake $HOME makes /tmp no temp root: refused all the same), the ceiling without
++   --force-count and with a --max-files above the default (only --force-count raises it), a list holding one bad
++   path.  Works: a temp tree to the trash (default; never $HOME's .trash) and purged (--purge), a repository out/ tree
++   to the repository's .trash, a --purge in out/ trashed all the same, a dry run that changes nothing, a link removed
++   as a link (its destination intact), a tree holding links out of it, the ceiling with --force-count, a missing
++   path, names with shell metacharacters taken literally, --purge-trash by age and ceiling, a /tmp path purged while
++   TMPDIR points elsewhere (both temp roots are whitelisted).  Kill switches of the argv parsing: rc 2 and no change.
++   The races (a tree swapped for links while the guard works) are tests/safedelrace.cx.  The sandbox goes through the
++   guard too (its fake .git entries are renamed away first: the guard never deletes a .git). */
+ static char B[4096], S[4096], BIN[4096], ERRF[4096];
+ static int passes, fails, UNDERTMP;   /* UNDERTMP: the sandbox lies under realpath(/tmp), a temp root of its own */
+ static char *at(const char *rel) {   /* S/rel in one of 16 rotating buffers */
+@@ -120,11 +122,11 @@ static void refuse_in(const char *name, const char *cwd, const char *tmp, const
+     sum(S, after);
+     verdict(ok && !strcmp(before, after), "refuse", name);
+ }
+-static void refuse(const char *name, const char *a0, const char *expect) { refuse_in(name, at("wl/cwd"), at("wl"), at("home"), expect, a0, 0); }
++static void refuse(const char *name, const char *a0, const char *expect) { refuse_in(name, at("cwd"), at("wl"), at("home"), expect, a0, 0); }
+ /* an argv kill switch: rc 2, S unchanged */
+ static void usage_case(const char *name, const char **args) {
+     char before[65], after[65]; int rc;
+-    sum(S, before); rc = cli(at("wl/cwd"), at("wl"), at("home"), args); sum(S, after);
++    sum(S, before); rc = cli(at("cwd"), at("wl"), at("home"), args); sum(S, after);
+     verdict(rc == 2 && !strcmp(before, after), "usage", name);
+ }
+ static int trash_holds(const char *trash, const char *name) {   /* some TRASH/<stamp>/NAME exists */
+@@ -144,7 +146,7 @@ static void setup(void) {
+     put("outside/f", "outside\n");
+     put("xrepo/.git/HEAD", "ref: refs/heads/main\n"); put("xrepo/f", "a second repository, outside the temp root\n");
+     put("wl/cwd/~/x", "tilde dir\n");
+-    put("wl/cwd/-v", "dash file\n");
++    put("wl/proj/repo/out/meta/-v", "dash file\n"); put("cwd/.keep", "the cwd of the CLI, outside the temp root\n");
+     put("wl/proj/repo/.git/HEAD", "ref: refs/heads/main\n");
+     put("wl/proj/repo/src/a.c", "int a;\n");
+     put("wl/proj/repo/out/build/obj.o", "obj\n");
+@@ -155,10 +157,12 @@ static void setup(void) {
+     put("wl/victim2/x/y", "victim2\n");
+     put("wl/victim3/z", "victim3\n");
+     put("wl/keep/k", "keep\n");
+-    put("wl/meta/a b; touch PWNED", "1\n"); put("wl/meta/$(touch PWNED2)", "2\n"); put("wl/meta/*", "3\n");
++    put("wl/proj/repo/out/meta/a b; touch PWNED", "1\n"); put("wl/proj/repo/out/meta/$(touch PWNED2)", "2\n"); put("wl/proj/repo/out/meta/*", "3\n");
++    put("wl/proj/repo/out/build2/o", "o\n");
+     put("wl/withlinks/plain", "p\n");
+     mkdirs(at("wl/emptydir"));
+     for (i = 0; i < 30; i++) { snprintf(nm, sizeof nm, "wl/many/f%02d", i); put(nm, "m\n"); }
++    mkdirs(at("wl/big")); for (i = 0; i < 1005; i++) { int fd; snprintf(nm, sizeof nm, "wl/big/f%04d", i); fd = open(at(nm), O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) close(fd); else fails++; }
+     link_to(at("wl/proj/repo/src"), "wl/linkrepo");
+     link_to(at("home"), "wl/linkhome");
+     link_to(at("xrepo"), "wl/linkparent");
+@@ -209,7 +213,7 @@ int main(int argc, char **argv) {
+     refuse("tilde", "~", "~");
+     refuse("tilde-slash", "~/", "~");
+     refuse("home", at("home"), "$HOME");
+-    refuse("cwd", at("wl/cwd"), "cwd");
++    refuse("cwd", at("cwd"), "cwd");
+     refuse("cwd-slash", "./", "ends in . or ..");
+     refuse("fake-repo-root", at("wl/proj/repo"), "repository root");
+     refuse_in("repo-root-from-inside", at("wl/proj/repo/src"), at("wl"), at("home"), "ancestor", at("wl/proj/repo"), 0);
+@@ -219,7 +223,7 @@ int main(int argc, char **argv) {
+     refuse("inside-git", at("wl/proj/repo/.git/HEAD"), ".git");
+     refuse("repo-file", at("wl/proj/repo/src/a.c"), "outside its out/");
+     refuse("link-into-repo", at("wl/linkrepo"), "symlink");
+-    refuse("link-into-repo-slash", "../linkrepo/", "outside its out/");
++    refuse("link-into-repo-slash", "../wl/linkrepo/", "outside its out/");
+     refuse("link-to-home", at("wl/linkhome"), "symlink");
+     refuse("escape-dotdot", at("wl/victim/../../xrepo/f"), "outside its out/");
+     refuse("escape-symlinked-parent", at("wl/linkparent/f"), "outside its out/");
+@@ -229,14 +233,20 @@ int main(int argc, char **argv) {
+     /* under /tmp the sandbox's fake HOME lies below /tmp, so /tmp is no temp root there ($HOME's ancestor) */
+     refuse("slash-tmp-itself", "/tmp", UNDERTMP ? "$HOME" : "temp root");
+     refuse("outside-absent", at("outside/nothing-here"), "whitelisted");
+-    refuse_in("tmpdir-relative", at("wl/cwd"), "wl", at("home"), UNDERTMP ? "no temp root" : "whitelisted", at("wl/victim"), 0);
+-    refuse_in("tmpdir-above-home", at("wl/cwd"), S, at("home"), UNDERTMP ? "no temp root" : "whitelisted", at("wl/victim"), 0);
+-    refuse_in("one-bad-in-list", at("wl/cwd"), at("wl"), at("home"), "repository root", at("wl/victim"), at("wl/proj/repo"));
++    refuse_in("tmpdir-relative", at("cwd"), "wl", at("home"), UNDERTMP ? "no temp root" : "whitelisted", at("wl/victim"), 0);
++    refuse_in("tmpdir-above-home", at("cwd"), S, at("home"), UNDERTMP ? "no temp root" : "whitelisted", at("wl/victim"), 0);
++    /* finding 2: a TMPDIR that is the cwd's ancestor or its repository's is no temp root (TMPDIR=~/repos) */
++    refuse_in("tmpdir-above-cwd", at("wl/cwd"), at("wl"), at("home"), "TMPDIR is the cwd or an ancestor of it", at("wl/victim"), 0);
++    refuse_in("tmpdir-above-cwd-repo", at("wl/proj/repo/src"), at("wl"), at("home"), "TMPDIR is the cwd's repository root", at("wl/victim"), 0);
++    refuse_in("one-bad-in-list", at("cwd"), at("wl"), at("home"), "repository root", at("wl/victim"), at("wl/proj/repo"));
+     {   const char *a[] = {"--max-files", "10", at("wl/many"), 0}; char x[65], y[65]; int r;
+-        sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), a); sum(S, y);
++        sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), a); sum(S, y);
+         verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "ceiling");
+-        { const char *b[] = {"--max-files", "10", "--force-count", "20", at("wl/many"), 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+-        verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "force-count-too-small"); }
++        { const char *b[] = {"--max-files", "10", "--force-count", "20", at("wl/many"), 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
++        verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "force-count-too-small");
++        /* finding 3: --max-files cannot raise the ceiling, only --force-count can */
++        { const char *b[] = {"--purge", "--max-files", "5000", at("wl/big"), 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
++        verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "max-files-cannot-raise-the-ceiling"); }
+ 
+     /* 2. in process: the cx.h wrappers and the API */
+     {   char x[65], y[65], w[600]; int r1, r2, r3, r4, r5;
+@@ -244,6 +254,7 @@ int main(int argc, char **argv) {
+         setenv("TMPDIR", at("wl"), 1); setenv("HOME", at("home"), 1);
+         fflush(stdout); sum(S, x);
+         r1 = cx_rmtree(""); r2 = cx_rmtree("."); r3 = cx_trash(at("wl/proj/repo")); r4 = cx_remove(at("wl/proj/repo"));
++        if (chdir(at("cwd")) != 0) return 2;
+         r5 = unisa_safedel(at("wl/victim3"), SAFEDEL_PURGE, 0, w, (int)sizeof w);   /* a tree without SAFEDEL_RECURSIVE */
+         sum(S, y);
+         verdict(r1 == 3 && r2 == 3 && r3 == 3 && r4 == 3 && r5 == 3 && strstr(w, "not recursive") && !strcmp(x, y), "refuse", "in-process-wrappers");
+@@ -265,38 +276,47 @@ int main(int argc, char **argv) {
+ 
+     /* 4. what works */
+     {   const char *a[] = {"--dry-run", at("wl/victim"), 0}; char x[65], y[65], ox[65], oy[65], rx[65], ry[65]; int r;
+-        sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), a); sum(S, y);
++        sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), a); sum(S, y);
+         verdict(r == 0 && strstr(OUT, "would trash 5 entries") && !strcmp(x, y), "work", "dry-run-changes-nothing");
+         sum(at("outside"), ox); sum(at("wl/proj"), rx);
+-        { const char *b[] = {at("wl/victim"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {at("wl/victim"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         verdict(r == 0 && !exists(at("wl/victim")) && trash_holds(at("wl/.trash"), "victim/a/b/f"), "work", "trash-default");
+-        { const char *b[] = {"--purge", at("wl/victim2"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        /* finding 8: the trash is the whitelisted root's .trash, never $HOME's; the .trash itself is no target */
++        verdict(!exists(at("home/.trash")) && !exists(at("cwd/.trash")), "work", "trash-not-in-HOME");
++        refuse("temp-trash-itself", at("wl/.trash"), "trash itself");
++        { const char *b[] = {"--purge", at("wl/victim2"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         verdict(r == 0 && !exists(at("wl/victim2")) && !trash_holds(at("wl/.trash"), "victim2"), "work", "purge");
+-        { const char *b[] = {at("wl/proj/repo/out/build"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {at("wl/proj/repo/out/build"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         verdict(r == 0 && !exists(at("wl/proj/repo/out/build")) && trash_holds(at("wl/proj/repo/.trash"), "build/obj.o"), "work", "repo-out-to-repo-trash");
++        /* finding 8: a --purge in a repository's out/ is a trash (trash first) */
++        { const char *b[] = {"-v", "--purge", at("wl/proj/repo/out/build2"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
++        verdict(r == 0 && !exists(at("wl/proj/repo/out/build2")) && trash_holds(at("wl/proj/repo/.trash"), "build2/o") && strstr(OUT, "is a trash"), "work", "purge-in-out-is-a-trash");
+         sum(at("wl/keep"), x);
+-        { const char *b[] = {"--purge", at("wl/lnkkeep"), at("wl/lnkout"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {"--purge", at("wl/lnkkeep"), at("wl/lnkout"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         sum(at("wl/keep"), y); sum(at("outside"), oy);
+         verdict(r == 0 && !exists(at("wl/lnkkeep")) && !exists(at("wl/lnkout")) && !strcmp(x, y) && !strcmp(ox, oy), "work", "links-removed-as-links");
+         sum(at("wl/proj/repo/src"), x);
+-        { const char *b[] = {"--purge", at("wl/withlinks"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {"--purge", at("wl/withlinks"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         sum(at("wl/proj/repo/src"), y); sum(at("outside"), oy);
+         verdict(r == 0 && !exists(at("wl/withlinks")) && !strcmp(x, y) && !strcmp(ox, oy) && exists(at("wl/proj/repo/.git/HEAD")), "work", "tree-with-links-out");
+-        { const char *b[] = {"--max-files", "10", "--force-count", "31", "--purge", at("wl/many"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {"--max-files", "10", "--force-count", "31", "--purge", at("wl/many"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         verdict(r == 0 && !exists(at("wl/many")), "work", "ceiling-with-force-count");
+-        { const char *b[] = {at("wl/never-there"), at("wl/also/not/there"), 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
++        { const char *b[] = {"--force-count", "1006", "--purge", at("wl/big"), 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
++        verdict(r == 0 && !exists(at("wl/big")), "work", "above-the-default-with-force-count");
++        { const char *b[] = {at("wl/never-there"), at("wl/also/not/there"), 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
+         verdict(r == 0 && !strcmp(x, y), "work", "missing-paths");
+-        { const char *b[] = {"--purge", "--", "a b; touch PWNED", "$(touch PWNED2)", "*", 0}; r = cli(at("wl/meta"), at("wl"), at("home"), b); }
+-        verdict(r == 0 && exists(at("wl/meta")) && !exists(at("wl/meta/a b; touch PWNED")) && !exists(at("wl/meta/*")) && !exists(at("wl/meta/PWNED"))
+-                && !exists(at("wl/meta/PWNED2")) && !exists(at("wl/cwd/PWNED")), "work", "shell-metacharacters-literal");
+-        { const char *b[] = {"--purge", "--", "-v", 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+-        verdict(r == 0 && !exists(at("wl/cwd/-v")), "work", "dash-path-after-dashdash");
++        /* relative names from a cwd in the repository's out/ (TMPDIR, an ancestor of that cwd, is no temp root there) */
++        { const char *b[] = {"--purge", "--", "a b; touch PWNED", "$(touch PWNED2)", "*", 0}; r = cli(at("wl/proj/repo/out/meta"), at("wl"), at("home"), b); }
++        verdict(r == 0 && exists(at("wl/proj/repo/out/meta")) && !exists(at("wl/proj/repo/out/meta/a b; touch PWNED")) && !exists(at("wl/proj/repo/out/meta/*"))
++                && !exists(at("wl/proj/repo/out/meta/PWNED")) && !exists(at("wl/proj/repo/out/meta/PWNED2")) && !exists(at("cwd/PWNED")), "work", "shell-metacharacters-literal");
++        { const char *b[] = {"--purge", "--", "-v", 0}; r = cli(at("wl/proj/repo/out/meta"), at("wl"), at("home"), b); }
++        verdict(r == 0 && !exists(at("wl/proj/repo/out/meta/-v")), "work", "dash-path-after-dashdash");
+         sum(at("wl/proj"), ry); (void)rx; (void)ry;
+         if (!UNDERTMP) {   /* /tmp is whitelisted while TMPDIR points elsewhere (the gate's UA=/tmp/ua_ref with TMPDIR set) */
+             char tp[4096], tf[4200]; snprintf(tp, sizeof tp, "/tmp/safedelcheck-XXXXXX");
+             if (mkdtemp(tp)) {
+                 snprintf(tf, sizeof tf, "%s/f", tp); cx_write(tf, "t\n", 2);
+-                { const char *b[] = {"--purge", tp, 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++                { const char *b[] = {"--purge", tp, 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+                 verdict(r == 0 && !exists(tp), "work", "slash-tmp-whitelisted-with-tmpdir-elsewhere");
+             } else printf("skip work slash-tmp-whitelisted-with-tmpdir-elsewhere (no writable /tmp)\n");
+         } }
+@@ -305,17 +325,17 @@ int main(int argc, char **argv) {
+     {   char x[65], y[65]; int r, i2; char nm[128];
+         for (i2 = 0; i2 < 30; i2++) { snprintf(nm, sizeof nm, "wl/.trash/20200101T000000Z-1-0/old/f%02d", i2); put(nm, "o\n"); }
+         chmod(at("wl/.trash/20200101T000000Z-1-0"), 0700);
+-        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--max-files", "5", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
++        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--max-files", "5", 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
+         verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "purge-trash-ceiling");
+-        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--dry-run", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
++        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--dry-run", 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
+         verdict(r == 0 && strstr(OUT, "would purge 1 expired") && !strcmp(x, y), "work", "purge-trash-dry-run");
+-        { const char *b[] = {"--purge-trash", at("outside"), "--older-than", "0", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
++        { const char *b[] = {"--purge-trash", at("outside"), "--older-than", "0", 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
+         verdict(r == 3 && !strcmp(x, y), "refuse", "purge-trash-not-a-home");
+-        { const char *b[] = {"--purge-trash", "", "--older-than", "0", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
++        { const char *b[] = {"--purge-trash", "", "--older-than", "0", 0}; sum(S, x); r = cli(at("cwd"), at("wl"), at("home"), b); sum(S, y); }
+         verdict(r == 3 && !strcmp(x, y), "refuse", "purge-trash-empty-home");
+-        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--max-files", "5", "--force-count", "40", 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--max-files", "5", "--force-count", "40", 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         verdict(r == 0 && !exists(at("wl/.trash/20200101T000000Z-1-0")) && trash_holds(at("wl/.trash"), "victim"), "work", "purge-trash-by-age");
+-        { const char *b[] = {"--purge-trash", at("wl/proj/repo"), "--older-than", "0", 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
++        { const char *b[] = {"--purge-trash", at("wl/proj/repo"), "--older-than", "0", 0}; r = cli(at("cwd"), at("wl"), at("home"), b); }
+         verdict(r == 0 && !trash_holds(at("wl/proj/repo/.trash"), "build") && exists(at("wl/proj/repo/src/a.c")), "work", "purge-trash-repo-home"); }
+ 
+     /* the sandbox itself, through the guard: the fake .git entries are renamed away first */
+diff --git a/tests/safedelrace.cx b/tests/safedelrace.cx
+new file mode 100644
+index 0000000..47052f9
+--- /dev/null
++++ b/tests/safedelrace.cx
+@@ -0,0 +1,242 @@
++/* safedelrace: the one deletion guard (include/unisa_safedel.h) under races -- the tree it was asked to delete is
++   swapped for symlinks into a decoy repository, or for other directories, while the guard works.  Zero damage: the
++   decoy repository, the fake $HOME and a repository's src/ keep their full-tree checksum (every path, type, mode,
++   size, content and link target) through every case, and each case's swap must have struck.
++     sh unisacc.com -run tests/safedelrace.cx            (the gate job safedel-race)
++   Everything happens in a sandbox B = mkdtemp($TMPDIR or /tmp), S = B/s; the guard runs in process with HOME=S/home,
++   its cwd S/cwd and TMPDIR=S/t<k>, a fresh temp root per case.  Deterministic cases use the guard's race hook
++   (unisa_safedel_sethook): at the step and name a case names, the hook swaps the tree --
++     top          the target itself, after the check (a link; another real directory);
++     root         the temp root itself, after the check;
++     intermediate a directory above the target, after the check and during the descent (between two components);
++     leaf         a subdirectory or a file inside the target while the purge works (at depth 1 and 5), and a
++                  subdirectory after the walk;
++     trash        the target, and its parent, right before the move into the trash;
++     out/         a repository's out/ target, after the check;
++   then a concurrent stress: a child process renames a directory of the target back and forth with a link into the
++   decoy (renames only) while the parent purges and trashes, for a bounded number of rounds.  The sandbox goes through
++   the guard at the end (its fake .git entries renamed away first). */
++static char B[4096], S[4096];
++static int passes, fails;
++static char *at(const char *rel) {   /* S/rel in one of 16 rotating buffers */
++    static char buf[16][4096]; static int k; char *b = buf[k++ & 15];
++    if (!rel || !rel[0]) snprintf(b, 4096, "%s", S); else snprintf(b, 4096, "%s/%s", S, rel);
++    return b;
++}
++static void mkdirs(const char *p) {
++    char t[4096]; size_t i, n = strlen(p);
++    if (n >= sizeof t) return;
++    memcpy(t, p, n + 1);
++    for (i = 1; i <= n; i++) if (t[i] == '/' || t[i] == 0) { char c = t[i]; t[i] = 0; mkdir(t, 0755); t[i] = c; }
++}
++static void put(const char *rel, const char *text) {
++    char d[4096]; char *p = at(rel), *s;
++    snprintf(d, sizeof d, "%s", p); s = strrchr(d, '/'); if (s) { *s = 0; mkdirs(d); }
++    if (cx_write(p, text, strlen(text)) != 0) { printf("FAIL setup: cannot write %s\n", p); fails++; }
++}
++static int exists(const char *p) { struct stat st; return lstat(p, &st) == 0; }
++/* the tree checksum: sorted walk, lstat only */
++struct buf { char *p; size_t n, cap; };
++static void add(struct buf *b, const char *s) {
++    size_t l = strlen(s);
++    if (b->n + l + 1 > b->cap) { b->cap = (b->n + l + 1) * 2; b->p = realloc(b->p, b->cap); if (!b->p) exit(2); }
++    memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0;
++}
++static int cmpname(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
++static void tree(struct buf *b, const char *p, const char *rel) {
++    struct stat st; char line[9000];
++    if (lstat(p, &st) != 0) { snprintf(line, sizeof line, "? %s\n", rel); add(b, line); return; }
++    if (S_ISLNK(st.st_mode)) {
++        char t[4096]; long n = (long)readlink(p, t, sizeof t - 1); if (n < 0) n = 0; t[n] = 0;
++        snprintf(line, sizeof line, "L %s -> %s\n", rel, t); add(b, line);
++    } else if (S_ISDIR(st.st_mode)) {
++        DIR *d = opendir(p); struct dirent *e; char **v = 0; size_t n = 0, i;
++        snprintf(line, sizeof line, "D %s %o\n", rel, (unsigned)(st.st_mode & 07777)); add(b, line);
++        if (!d) { add(b, "unreadable\n"); return; }
++        while ((e = readdir(d))) {
++            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
++            v = realloc(v, (n + 1) * sizeof *v); if (!v) exit(2);
++            v[n] = malloc(strlen(e->d_name) + 1); if (!v[n]) exit(2); memcpy(v[n], e->d_name, strlen(e->d_name) + 1); n++;
++        }
++        closedir(d);
++        if (n) qsort(v, n, sizeof *v, cmpname);
++        for (i = 0; i < n; i++) {
++            char cp[4096], cr[4096];
++            snprintf(cp, sizeof cp, "%s/%s", p, v[i]); snprintf(cr, sizeof cr, "%s/%s", rel, v[i]);
++            tree(b, cp, cr); free(v[i]);
++        }
++        free(v);
++    } else {
++        size_t len = 0; char *c = cx_read(p, &len), hex[65];
++        cx_sha256_hex(c ? c : "", c ? len : 0, hex); free(c);
++        snprintf(line, sizeof line, "F %s %o %ld %s\n", rel, (unsigned)(st.st_mode & 07777), (long)st.st_size, hex); add(b, line);
++    }
++}
++static void sum(const char *p, char hex[65]) {
++    struct buf b = {0, 0, 0}; add(&b, ""); tree(&b, p, "."); cx_sha256_hex(b.p, b.n, hex); free(b.p);
++}
++/* the protected trees: the decoy repository, the fake $HOME, the src/ of the repository whose out/ is a target */
++static void guarded(char out[65]) {
++    char a[65], b[65], c[65], all[200];
++    sum(at("decoy"), a); sum(at("home"), b); sum(at("proj/src"), c);
++    snprintf(all, sizeof all, "%s%s%s", a, b, c); cx_sha256_hex(all, strlen(all), out);
++}
++/* the victim tree of case K: t<k>/A/B/victim with 20 files, sub/ (10 files) and sub/deep/d1/d2/d3 (5 files) */
++static void victim(int k) {
++    char r[256]; int i;
++    for (i = 0; i < 20; i++) { snprintf(r, sizeof r, "t%d/A/B/victim/f%02d", k, i); put(r, "victim\n"); }
++    for (i = 0; i < 10; i++) { snprintf(r, sizeof r, "t%d/A/B/victim/sub/g%02d", k, i); put(r, "sub\n"); }
++    for (i = 0; i < 5; i++) { snprintf(r, sizeof r, "t%d/A/B/victim/sub/deep/d1/d2/d3/h%d", k, i); put(r, "deep\n"); }
++}
++/* the case being run: at STEP (and NAME, when given) the hook renames K's REL aside and puts a link to DEST (a
++   path under S) there, or (DEST 0) a fresh real directory */
++static int H_STEP, H_FIRED; static const char *H_NAME; static char H_REL[512], H_DEST[512];
++static void swap_now(void) {
++    char real[4200];
++    snprintf(real, sizeof real, "%s.real", at(H_REL));
++    if (rename(at(H_REL), real) != 0) { printf("FAIL setup: cannot rename %s aside\n", H_REL); fails++; return; }
++    if (H_DEST[0]) { if (symlink(at(H_DEST), at(H_REL)) != 0) { printf("FAIL setup: symlink %s\n", H_REL); fails++; return; } }
++    else { mkdirs(at(H_REL)); { char f[4300]; snprintf(f, sizeof f, "%s/other", H_REL); put(f, "another directory\n"); } }
++    H_FIRED = 1;
++}
++static void hook(int step, const char *name) {
++    if (H_FIRED || step != H_STEP) return;
++    if (H_NAME && strcmp(H_NAME, name) != 0) return;
++    swap_now();
++}
++static char WHY[1400];
++/* WHY with the sandbox path shown as S (one buffer, for printing) */
++static const char *shown(void) {
++    static char o[1400]; const char *p = WHY, *h; size_t n = strlen(S), k = 0;
++    while ((h = strstr(p, S)) != 0 && k + (size_t)(h - p) + 2 < sizeof o) { memcpy(o + k, p, (size_t)(h - p)); k += (size_t)(h - p); o[k++] = 'S'; p = h + n; }
++    snprintf(o + k, sizeof o - k, "%s", p);
++    return o;
++}
++/* one case: a fresh temp root t<K> with its victim; the guard on REL (under S) with FLAGS; the swap of SWAPREL (under
++   t<K>) to DEST at STEP/NAME.  EXPECT_RC < 0: any outcome (zero damage alone); EXPECT_WHY, when given, must be in WHY */
++static void race_case(const char *label, int k, const char *rel, unsigned flags, int step, const char *name, const char *swaprel, const char *dest, int expect_rc, const char *expect_why) {
++    char before[65], after[65], tp[64], target[512]; int rc;
++    snprintf(tp, sizeof tp, "t%d", k); victim(k);
++    snprintf(target, sizeof target, "%s/%s", tp, rel);
++    H_STEP = step; H_NAME = name; H_FIRED = 0;
++    snprintf(H_REL, sizeof H_REL, "%s%s%s", swaprel[0] ? tp : "", swaprel[0] ? "/" : "", swaprel[0] ? swaprel : tp);
++    snprintf(H_DEST, sizeof H_DEST, "%s", dest ? dest : "");
++    setenv("TMPDIR", at(tp), 1);
++    guarded(before);
++    rc = unisa_safedel(at(target), flags, 0, WHY, (int)sizeof WHY);
++    guarded(after);
++    H_STEP = 0;
++    {   int ok = H_FIRED && !strcmp(before, after) && (expect_rc < 0 || rc == expect_rc) && (!expect_why || strstr(WHY, expect_why));
++        if (ok) { passes++; printf("ok   race %-34s rc %d: %s\n", label, rc, shown()); }
++        else { fails++; printf("FAIL race %-34s rc %d fired %d damage %s: %s\n", label, rc, H_FIRED, strcmp(before, after) ? "YES" : "no", shown()); }
++    }
++}
++/* the concurrent stress: a child renames t<K>/A back and forth with the link t<K>/L (into the decoy) for CYCLES rounds
++   while the parent runs the guard on t<K>/A/B/victim; renames only, so the child leaves the layout as it found it */
++static void spin(long n) { volatile long i; for (i = 0; i < n; i++) ; }
++static int stress(int k, int rounds) {
++    char tp[64], a[512], ar[512], l[512], target[512], before[65], after[65]; int r, out[4] = {0, 0, 0, 0};
++    snprintf(tp, sizeof tp, "t%d", k);
++    snprintf(a, sizeof a, "%s/A", at(tp)); snprintf(ar, sizeof ar, "%s/A.real", at(tp)); snprintf(l, sizeof l, "%s/L", at(tp));
++    snprintf(target, sizeof target, "%s/A/B/victim", at(tp));
++    mkdirs(a);
++    if (symlink(at("decoy"), l) != 0) { printf("FAIL setup: stress link\n"); return 1; }
++    setenv("TMPDIR", at(tp), 1);
++    guarded(before);
++    srand(7);
++    for (r = 0; r < rounds; r++) {
++        int pid, st, rc, cycles = 20 + rand() % 200; long delay = rand() % 20000;
++        victim(k);
++        fflush(stdout); fflush(stderr);
++        pid = fork();
++        if (pid < 0) { printf("FAIL stress: fork\n"); return 1; }
++        if (pid == 0) {
++            int c;
++            for (c = 0; c < cycles; c++) {
++                if (rename(a, ar) != 0) _exit(3);
++                if (rename(l, a) != 0) { rename(ar, a); _exit(4); }
++                spin(rand() % 3000);
++                if (rename(a, l) != 0) _exit(5);
++                if (rename(ar, a) != 0) _exit(6);
++                spin(rand() % 3000);
++            }
++            _exit(0);
++        }
++        spin(delay);
++        rc = unisa_safedel(target, (r & 1) ? (SAFEDEL_PURGE | SAFEDEL_RECURSIVE) : SAFEDEL_RECURSIVE, 0, WHY, (int)sizeof WHY);
++        if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) { printf("FAIL stress: the swapping child failed (round %d)\n", r); return 1; }
++        out[rc == 0 ? 0 : rc == 3 ? 1 : rc == 1 ? 2 : 3]++;
++        guarded(after);
++        if (strcmp(before, after)) { printf("FAIL stress round %d: DAMAGE (rc %d: %s)\n", r, rc, shown()); return 1; }
++    }
++    printf("ok   race %-34s %d rounds: %d done, %d refused, %d failed, %d other; zero damage\n", "stress-concurrent-swap", rounds, out[0], out[1], out[2], out[3]);
++    return 0;
++}
++int main(int argc, char **argv) {
++    const char *tmp0 = getenv("TMPDIR"), *home0 = getenv("HOME"); char cwd0[4096], base[4096], savetmp[4096], savehome[4096];
++    int hadtmp = tmp0 != 0, i, rounds = 300, rc;
++    for (i = 1; i < argc; i++) {
++        if (!strcmp(argv[i], "--rounds") && i + 1 < argc) rounds = atoi(argv[++i]);
++        else { fprintf(stderr, "usage: safedelrace [--rounds N]\n"); return 2; }
++    }
++    snprintf(savetmp, sizeof savetmp, "%s", tmp0 ? tmp0 : ""); snprintf(savehome, sizeof savehome, "%s", home0 ? home0 : "");
++    if (!getcwd(cwd0, sizeof cwd0)) return 2;
++    snprintf(base, sizeof base, "%s/safedelrace-XXXXXX", tmp0 && tmp0[0] ? tmp0 : "/tmp");
++    if (!mkdtemp(base) || !realpath(base, B)) { fprintf(stderr, "safedelrace: no sandbox\n"); return 2; }
++    snprintf(S, sizeof S, "%s/s", B);
++    /* the protected trees, and decoy copies of every shape a swapped link could land on */
++    put("home/notes", "home\n");
++    put("decoy/.git/HEAD", "ref: refs/heads/main\n");
++    for (i = 0; i < 10; i++) { char r[64]; snprintf(r, sizeof r, "decoy/src/c%02d", i); put(r, "canary\n"); }
++    for (i = 0; i < 10; i++) { char r[64]; snprintf(r, sizeof r, "decoy/victim/c%02d", i); put(r, "canary\n"); }
++    for (i = 0; i < 10; i++) { char r[64]; snprintf(r, sizeof r, "decoy/B/victim/c%02d", i); put(r, "canary\n"); }
++    for (i = 0; i < 10; i++) { char r[64]; snprintf(r, sizeof r, "decoy/A/B/victim/c%02d", i); put(r, "canary\n"); }
++    put("proj/.git/HEAD", "ref: refs/heads/main\n"); put("proj/src/a.c", "int a;\n"); put("proj/out/x/o", "o\n");
++    put("cwd/.keep", "the guard's cwd\n");
++    if (chdir(at("cwd")) != 0) return 2;
++    setenv("HOME", at("home"), 1);
++    unisa_safedel_sethook(hook);
++
++    /* top: the target itself */
++    race_case("top-checked-link", 1, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_CHECKED, 0, "A/B/victim", "decoy/victim", 3, "changed");
++    race_case("top-checked-other-dir", 2, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_CHECKED, 0, "A/B/victim", 0, 3, "changed");
++    race_case("top-checked-link-trash", 3, "A/B/victim", SAFEDEL_RECURSIVE, SAFEDEL_AT_CHECKED, 0, "A/B/victim", "decoy/victim", 3, "changed");
++    /* the temp root itself */
++    race_case("root-checked-link", 4, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_CHECKED, 0, "", "decoy", 3, "changed");
++    /* intermediate: above the target, after the check and between two components of the descent */
++    race_case("intermediate-checked-link", 5, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_CHECKED, 0, "A", "decoy", 3, "changed");
++    race_case("intermediate-checked-other-dir", 6, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_CHECKED, 0, "A/B", 0, 3, "changed");
++    race_case("intermediate-descent-link", 7, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_DESCENT, "A", "A/B", "decoy/B", 3, "changed");
++    race_case("intermediate-descent-parent-link", 8, "A/B/victim", SAFEDEL_RECURSIVE, SAFEDEL_AT_DESCENT, "B", "A/B/victim", "decoy/victim", 3, "changed");
++    /* leaf: inside the target while it is deleted (depth 1 and depth 5), and after the walk */
++    race_case("leaf-purge-depth1-link", 9, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_PURGEDIR, "sub", "A/B/victim/sub", "decoy/victim", 3, "changed");
++    race_case("leaf-purge-depth5-link", 10, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_PURGEDIR, "d3", "A/B/victim/sub/deep/d1/d2/d3", "decoy/src", 3, "changed");
++    race_case("leaf-purge-file-link", 11, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_UNLINK, "f05", "A/B/victim/f05", "decoy/src", -1, 0);
++    /* after the walk the purge lists each directory afresh: the swapped-in link is unlinked as a link, never followed */
++    race_case("leaf-walked-link", 12, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_WALKED, 0, "A/B/victim/sub", "decoy/victim", 0, "purged");
++    race_case("leaf-purge-parent-swapped", 13, "A/B/victim", SAFEDEL_PURGE | SAFEDEL_RECURSIVE, SAFEDEL_AT_PURGEDIR, "sub", "A/B", "decoy/B", -1, 0);
++    /* during the trash move */
++    race_case("trash-move-target-link", 14, "A/B/victim", SAFEDEL_RECURSIVE, SAFEDEL_AT_TRASH, 0, "A/B/victim", "decoy/victim", 1, "changed during the move");
++    race_case("trash-move-parent-link", 15, "A/B/victim", SAFEDEL_RECURSIVE, SAFEDEL_AT_TRASH, 0, "A/B", "decoy/B", -1, 0);
++    /* a repository's out/ target (trashed): out/x swapped for a link to its src/ after the check */
++    {   char before[65], after[65];
++        H_STEP = SAFEDEL_AT_CHECKED; H_NAME = 0; H_FIRED = 0; snprintf(H_REL, sizeof H_REL, "proj/out/x"); snprintf(H_DEST, sizeof H_DEST, "proj/src");
++        setenv("TMPDIR", at("t1"), 1);
++        guarded(before); rc = unisa_safedel(at("proj/out/x"), SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, WHY, (int)sizeof WHY); guarded(after); H_STEP = 0;
++        if (H_FIRED && rc == 3 && strstr(WHY, "changed") && !strcmp(before, after)) { passes++; printf("ok   race %-34s rc %d: %s\n", "repo-out-checked-link", rc, shown()); }
++        else { fails++; printf("FAIL race %-34s rc %d fired %d damage %s: %s\n", "repo-out-checked-link", rc, H_FIRED, strcmp(before, after) ? "YES" : "no", shown()); } }
++    unisa_safedel_sethook(0);
++
++    /* concurrent: a real second process */
++    if (rounds > 0 && stress(16, rounds) != 0) fails++; else if (rounds > 0) passes++;
++
++    /* the sandbox, through the guard: the fake .git entries renamed away first; links inside are removed as links */
++    if (chdir(cwd0) != 0) return 2;
++    if (hadtmp) setenv("TMPDIR", savetmp, 1); else unsetenv("TMPDIR");
++    if (savehome[0]) setenv("HOME", savehome, 1); else unsetenv("HOME");
++    rename(at("decoy/.git"), at("decoy/dotgit-fixture")); rename(at("proj/.git"), at("proj/dotgit-fixture"));
++    rc = unisa_safedel(B, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 100000, WHY, (int)sizeof WHY);
++    if (rc != 0 || exists(B)) { printf("FAIL cleanup: the sandbox %s stays (rc %d: %s)\n", B, rc, WHY); fails++; }
++    printf("safedelrace: %d passed, %d failed\n", passes, fails);
++    return fails ? 1 : 0;
++}
+diff --git a/tests/stagemap.c b/tests/stagemap.c
+index 2abe7d4..749de47 100644
+--- a/tests/stagemap.c
++++ b/tests/stagemap.c
+@@ -26,7 +26,7 @@
+ 
+ static char *rules[] = {
+     "meta", "identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative c99-ledger decision-ledger zeropython* ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
+-            " subtract-safety* cxinclude glossarycheck* safedel-selftest deletecheck* deletemut-* progress freezecheck freezecheck-selftest revivedscan facts-export publish-order gate-infra gate-layers"
++            " subtract-safety* cxinclude glossarycheck* safedel-selftest safedel-race deletecheck* deletemut-* progress freezecheck freezecheck-selftest revivedscan facts-export publish-order gate-infra gate-layers"
+             " tsv-build-account pipeline-cache docs kernel source-layout front-bounds bound boundreason boundstall-r7g boundnested-1 boundnested-2 boundnested-3 boundnested-4 boundnested-5 fresh-order*"
+             " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools tools-*-ref tools-*-build tools-*-run"
+             " lib-bindings-registry flownet-w0-module* flownet-baseline* flownet-w2-* flownet-w3-* flownet-w4-* flownet-w6-*",

@@ -1,0 +1,506 @@
+diff --git a/Makefile b/Makefile
+index d7df99d..c189846 100644
+--- a/Makefile
++++ b/Makefile
+@@ -92,7 +92,7 @@ com:
+ 	    out="$(if $(MODEL_DIR),$(MODEL_DIR),out/model-com)"; \
+ 	    dst="$(COM_OUT)"; \
+ 	    ./exec/c/buildcompiler.sh "$$out"; \
+-	    case "$$dst" in */*) tmp=$$(mktemp "$$dst".XXXXXX);; *) mkdir -p out; tmp=$$(mktemp out/."$$dst".XXXXXX);; esac; \
++	    mkdir -p out; tmp=$$(mktemp out/.com-next.XXXXXX); \
+ 	    trap "sh tests/cxbin tests/safedel.cx --purge -- \"$$tmp\" || :" EXIT HUP INT TERM; \
+ 	    cp "$$out/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
+ 	    mv -f "$$tmp" "$$dst"; trap - EXIT HUP INT TERM; \
+diff --git a/tests/deletecheck.cx b/tests/deletecheck.cx
+index a48f518..4dc166e 100644
+--- a/tests/deletecheck.cx
++++ b/tests/deletecheck.cx
+@@ -1,15 +1,19 @@
+ /* deletecheck: the deletion ledger's gate (commissar ruling 2026-10-23, items 1, 6, 7 and 8).
+      sh unisacc.com -run tests/deletecheck.cx [-- --list | --selftest]          (from the repository root)
+    Every tracked file (git ls-files) in a language that can delete -- C (.c .h .cx .cxif), Python (.py, a python
+-   shebang), shell (.sh .bash .mk, Makefile*, a sh shebang, .github/ *.yml) -- is scanned for the deletion
+-   primitives:
++   shebang), shell (.sh .bash .mk, Makefile*, a sh shebang, .github/ *.yml), JavaScript (.js .mjs .cjs, a node
++   shebang) -- is scanned for the deletion primitives:
+      C       unlink( rmdir( remove( unlinkat( nftw( in code (comments and literals blanked; not a member or a longer
+              name), and `shell-rm` -- an rm command inside a string literal (a shell string: system, cx_run, sh -c);
+      Python  shutil.rmtree, os.remove/unlink/rmdir/removedirs, Path.unlink/rmdir (.unlink( .rmdir(), an argv "rm",
+              and `shell-rm` (an rm command in the line's text);
+      shell   rm, rmdir, unlink as a command word (also inside quotes: trap '...', sh -c '...'), find ... -delete,
+-             xargs rm; whole-line and trailing comments are skipped.
+-   A line that calls the guard -- the CLI tests/safedel.cx, cx_remove/cx_rmtree/cx_trash, unisa_safedel() -- holds
++             xargs rm; whole-line and trailing comments are skipped;
++     JS      rmSync( unlinkSync( rmdirSync( (fs.* or a destructured name), the callback/promise fs.rm( fs.unlink(
++             fs.rmdir( (as members: .rm( .unlink( .rmdir(, any receiver) in code (comments and '' "" `` literals
++             blanked), an argv "rm" (a literal "rm" followed by , or ]), and `shell-rm` (an rm command in a literal).
++   A line that calls the guard -- the CLI tests/safedel.cx, cx_remove/cx_rmtree/cx_trash, unisa_safedel(), in JS
++   safedel( of tests/safedel.mjs -- holds
+    none of those (the guard's own names are longer identifiers).  Red when:
+      1. a file's raw hits of a primitive outnumber its `exempt` rows for that primitive in tests/deletes.tsv: a new
+         deletion that bypasses the guard (or fewer: a stale exemption -- the ledger is exact);
+@@ -27,8 +31,8 @@
+ 
+ /* a malloc'd copy (not strdup: the product forwards strdup to the host C library, whose block its own free must not get) */
+ static char *dupstr(const char *s) { size_t n = strlen(s) + 1; char *d = (char *)malloc(n); if (d) memcpy(d, s, n); return d; }
+-enum { L_NONE, L_C, L_PY, L_SH };
+-static const char *LANGN[] = { "-", "c", "py", "sh" };
++enum { L_NONE, L_C, L_PY, L_SH, L_JS };
++static const char *LANGN[] = { "-", "c", "py", "sh", "js" };
+ static const char PYNAME[] = { 'p', 'y', 't', 'h', 'o', 'n', 0 };   /* a #! line naming the interpreter */
+ static const char *SELF[] = { "include/unisa_safedel.h", "tests/deletecheck.cx", 0 };
+ 
+@@ -57,6 +61,7 @@ static int lang_of(const char *root, const char *f) {
+     if (x && (!strcmp(x, ".sh") || !strcmp(x, ".bash") || !strcmp(x, ".mk"))) return L_SH;
+     if (!strcmp(b, "Makefile") || !strcmp(b, "GNUmakefile") || !strncmp(b, "Makefile.", 9)) return L_SH;
+     if (x && (!strcmp(x, ".yml") || !strcmp(x, ".yaml")) && (!strncmp(f, ".github/", 8) || strstr(f, "/.github/"))) return L_SH;
++    if (x && (!strcmp(x, ".js") || !strcmp(x, ".mjs") || !strcmp(x, ".cjs"))) return L_JS;
+     if (!x) {
+         char p[4300], buf[200]; FILE *fp; size_t n;
+         snprintf(p, sizeof p, "%s/%s", root, f);
+@@ -65,6 +70,7 @@ static int lang_of(const char *root, const char *f) {
+         if (n > 2 && buf[0] == '#' && buf[1] == '!') {
+             char *e = strchr(buf, '\n'); if (e) *e = 0;
+             if (strstr(buf, PYNAME)) return L_PY;
++            if (strstr(buf, "node")) return L_JS;
+             if (strstr(buf, "sh")) return L_SH;
+         }
+     }
+@@ -163,6 +169,58 @@ static void scan_py(const char *file, char *t) {
+         if (!e) break;
+     }
+ }
++/* JS: blank comments and '' "" `` literals (a literal's text is checked for shell-rm and the argv word "rm"), then
++   look for the calls; a template literal spans lines, the others end at a newline */
++static void scan_js(const char *file, char *t) {
++    static const char *fn[] = { "rmSync", "unlinkSync", "rmdirSync", "rm", "unlink", "rmdir", 0 };
++    static const char *mem[] = { "rmSync", "unlinkSync", "rmdirSync", "fs.rm", "fs.unlink", "fs.rmdir", 0 };
++    size_t n = strlen(t), i; int st = 0, line = 1, sline = 0; char q = 0, *code = dupstr(t); const char *s0 = 0;
++    if (!code) exit(2);
++    for (i = 0; i < n; i++) {
++        char c = t[i];
++        if (st == 0) {
++            if (c == '/' && t[i + 1] == '*') { st = 1; code[i] = code[i + 1] = ' '; i++; continue; }
++            if (c == '/' && t[i + 1] == '/') { st = 2; code[i] = ' '; continue; }
++            if (c == '"' || c == '\'' || c == '`') { st = 3; q = c; s0 = t + i; sline = line; continue; }
++            if (c == '\n') line++;
++            continue;
++        }
++        if (st == 1) { if (c == '*' && t[i + 1] == '/') { st = 0; code[i] = code[i + 1] = ' '; i++; continue; } if (c == '\n') line++; else code[i] = ' '; continue; }
++        if (st == 2) { if (c == '\n') { st = 0; line++; } else code[i] = ' '; continue; }
++        if (c == '\\') { code[i] = ' '; if (i + 1 < n && t[i + 1] != '\n') code[i + 1] = ' '; i++; continue; }
++        if (c == '\n') { line++; if (q != '`') st = 0; continue; }
++        if (c == q) {   /* the literal's text (between the quotes) */
++            size_t k = (size_t)(t + i - s0 - 1), j = i + 1; char *lit = (char *)malloc(k + 1);
++            if (!lit) exit(2);
++            memcpy(lit, s0 + 1, k); lit[k] = 0;
++            if (has_shell_rm(lit)) addhit(file, sline, L_JS, "shell-rm");
++            while (j < n && sp(t[j])) j++;
++            if (!strcmp(lit, "rm") && j < n && (t[j] == ',' || t[j] == ']')) addhit(file, sline, L_JS, "argv rm");
++            free(lit); st = 0; continue;
++        }
++        code[i] = ' ';
++    }
++    {   char *p = code, *e; line = 0;
++        for (; *p; p = e ? e + 1 : p + strlen(p)) {
++            int k; e = strchr(p, '\n'); if (e) *e = 0; line++;
++            for (k = 0; fn[k]; k++) {
++                const char *s = p; size_t l = strlen(fn[k]);
++                while ((s = strstr(s, fn[k])) != 0) {
++                    const char *r = s + l; char b = s > p ? s[-1] : ' ';
++                    while (sp(*r)) r++;
++                    const char *w = s;   /* the word before: `function rm(` defines, it does not call */
++                    while (w > p && sp(w[-1])) w--;
++                    if (*r == '(' && !idch((unsigned char)b) && b != '$' && !idch((unsigned char)s[l]) && s[l] != '$'
++                        && !(w - p >= 8 && !strncmp(w - 8, "function", 8) && (w - p == 8 || !idch((unsigned char)w[-9]))))
++                        addhit(file, line, L_JS, mem[k]);
++                    s += l;
++                }
++            }
++            if (!e) break;
++        }
++    }
++    free(code);
++}
+ /* shell: the line without a trailing comment (a # after a blank, outside quotes) */
+ static void uncomment_sh(char *s) {
+     int sq = 0, dq = 0; char *p;
+@@ -209,11 +267,13 @@ static void scan_sh(const char *file, char *t) {
+ /* the guard calls of a file: lines (code only) */
+ static int guard_lines(const char *file, int lang, char *t, int *lines, int cap) {
+     static const char *g[] = { "cx_remove", "cx_rmtree", "cx_trash", "unisa_safedel", "unisa_safedel_purge_trash", 0 };
++    static const char *gjs[] = { "safedel", 0 };   /* tests/safedel.mjs: the JS face of the CLI */
++    const char **gl = lang == L_JS ? gjs : g;
+     char *p = t, *e; int line = 0, n = 0, inblock = 0; (void)file;
+     for (; *p; p = e ? e + 1 : p + strlen(p)) {
+         char *s = p; int hit = 0, k; e = strchr(p, '\n'); if (e) *e = 0; line++;
+         while (sp(*s)) s++;
+-        if (lang == L_C) {
++        if (lang == L_C || lang == L_JS) {
+             char *c = dupstr(s), *q; if (!c) exit(2);
+             /* drop comments on the line (block state carried across lines) */
+             for (q = c; *q; q++) {
+@@ -221,9 +281,9 @@ static int guard_lines(const char *file, int lang, char *t, int *lines, int cap)
+                 if (q[0] == '/' && q[1] == '*') { inblock = 1; q[0] = q[1] = ' '; q++; continue; }
+                 if (q[0] == '/' && q[1] == '/') { *q = 0; break; }
+             }
+-            for (k = 0; g[k] && !hit; k++) {
+-                const char *r = c; size_t l = strlen(g[k]);
+-                while ((r = strstr(r, g[k])) != 0) {
++            for (k = 0; gl[k] && !hit; k++) {
++                const char *r = c; size_t l = strlen(gl[k]);
++                while ((r = strstr(r, gl[k])) != 0) {
+                     const char *a = r + l;
+                     while (sp(*a)) a++;
+                     if (*a == '(' && (r == c || !idch((unsigned char)r[-1]))) { hit = 1; break; }
+@@ -263,7 +323,7 @@ static int check(const char *root, char **files, int nf, char *ledger, char *mut
+         if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+         if (!(lang = lang_of(root, files[i]))) continue;
+         if (!(t = cx_read(path, &n))) { red("%s: unreadable%s", files[i], "", 0); continue; }
+-        if (lang == L_C) scan_c(files[i], t); else if (lang == L_PY) scan_py(files[i], t); else scan_sh(files[i], t);
++        if (lang == L_C) scan_c(files[i], t); else if (lang == L_PY) scan_py(files[i], t); else if (lang == L_JS) scan_js(files[i], t); else scan_sh(files[i], t);
+         free(t);
+     }
+     /* the ledger */
+@@ -326,7 +386,7 @@ static int check(const char *root, char **files, int nf, char *ledger, char *mut
+         int lang, s, g, rows = 0, lines[4]; char path[4300], *t; size_t n; struct stat st;
+         for (s = 0; SELF[s] && strcmp(SELF[s], files[i]); s++) ;
+         if (SELF[s] || !strcmp(files[i], "include/cx.h") || !strcmp(files[i], "tests/safedel.cx") || !strcmp(files[i], "tests/safedelcheck.cx")
+-            || !strcmp(files[i], "tests/deletemutcheck.cx")) continue;   /* the guard, its CLI and its checkers */
++            || !strcmp(files[i], "tests/deletemutcheck.cx") || !strcmp(files[i], "tests/safedel.mjs")) continue;   /* the guard, its CLIs and its checkers */
+         snprintf(path, sizeof path, "%s/%s", root, files[i]);
+         if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || !(lang = lang_of(root, files[i]))) continue;
+         for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "guarded") && !strcmp(L[j].f[0], files[i])) rows++;
+@@ -428,6 +488,18 @@ static int selftest(void) {
+     bad += run_case("guarded-with-mutation", "h.cx", "int f(char *d) { return cx_remove(d); }\n", "h.cx\t1\tc\tcx_remove\town-mkdtemp\tlow\tguarded\tits own\n", "h.cx\t1\tcx_remove {X}\town\tcx_remove(d)\n", 0);
+     bad += run_case("mutation-without-guarded-row", 0, 0, 0, "g.cx\t9\tcx_rmtree {X}\town\tcx_rmtree(d)\n", 1);
+     bad += run_case("bad-status", 0, 0, "a.sh\t3\tsh\trm\town-mkdtemp\tlow\tmaybe\tx\n", 0, 1);
++    bad += run_case("js-rmsync", "t.mjs", "import fs from \"fs\";\nfs.rmSync(p, { recursive: true, force: true });\n", 0, 0, 1);
++    bad += run_case("js-destructured-unlinksync", "t.js", "const { unlinkSync } = require(\"fs\");\nunlinkSync(p);\n", 0, 0, 1);
++    bad += run_case("js-promises-rm", "t.mjs", "await fs.promises.rm(p, { recursive: true });\n", 0, 0, 1);
++    bad += run_case("js-callback-rmdir", "t.cjs", "fs.rmdir(p, () => {});\n", 0, 0, 1);
++    bad += run_case("js-argv-rm", "t.mjs", "spawnSync(\"rm\", [\"-rf\", p]);\n", 0, 0, 1);
++    bad += run_case("js-template-shell-rm", "t.mjs", "execSync(`rm -rf ${p}`);\n", 0, 0, 1);
++    bad += run_case("js-node-shebang", "tool", "#!/usr/bin/env node\nrequire(\"fs\").rmSync(p);\n", 0, 0, 1);
++    bad += run_case("js-comments-and-text", "t.mjs", "// fs.rmSync(p)\n/* unlinkSync(p) */\nconst s = \"fs.rmSync(p)\";\nfunction rm(x) { return x; }\nconsole.log('the rm command');\n", 0, 0, 0);
++    bad += run_case("js-exempted", "t.mjs", "fs.unlinkSync(p);\n", "t.mjs\t1\tjs\tunlinkSync\tfixed-repo-path\tlow\texempt\ta literal path\n", 0, 0);
++    bad += run_case("js-guard-call-without-row", "h.mjs", "safedel([d], { purge: true });\n", 0, 0, 1);
++    bad += run_case("js-guarded-with-mutation", "h.mjs", "import { safedel } from \"./tests/safedel.mjs\";\nsafedel([d], { purge: true });\n",
++                    "h.mjs\t2\tjs\tsafedel.mjs --purge\town-mkdtemp\tlow\tguarded\tits own\n", "h.mjs\t2\tsafedel.mjs --purge -- {X}\town\tsafedel([d]\n", 0);
+     if (cx_rmtree(SB)) { printf("FAIL selftest cleanup: %s stays\n", SB); bad++; }
+     printf("deletecheck selftest: %s\n", bad ? "FAIL" : "PASS");
+     return bad ? 1 : 0;
+diff --git a/tests/deletemut.tsv b/tests/deletemut.tsv
+index d9cf878..e829dac 100644
+--- a/tests/deletemut.tsv
++++ b/tests/deletemut.tsv
+@@ -782,5 +782,13 @@ tests/warmupcheck.sh	9	safedel --purge -- {X}	cli site	safedel.cx" --purge -- "$
+ tests/watchdogregression.sh	24	sh T	shell variable(s) T bound to the injection	sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"
+ tests/windowsresolverhostcheck.cx	250	cx_remove {X}	own mkstemp	cx_remove(t)
+ tests/winposix.sh	11	safedel --purge -- {X}	the site's own target: the guard form of this line replayed (generic row)	T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
++ujs/iterate/compile.mjs	158	safedel.mjs --purge -- {X}	its own mkdtemp td: the guard form of this line replayed through tests/safedel.mjs	try { safedel([td], { purge: true }); } catch (_) {}
++ujs/iterate/compile.mjs	162	safedel.mjs --purge -- {X}	its own mkdtemp td: the guard form of this line replayed through tests/safedel.mjs	try { safedel([td], { purge: true }); } catch (_) {}
++ujs/practice/uxe/_cdp.mjs	48	safedel.mjs --purge -- {X}	opts.profile (caller argument) replayed through tests/safedel.mjs	safedel([profile], { purge: true });
++ujs/practice/uxe/archive/_debug_probe.mjs	15	safedel.mjs --purge -- {X}	its fixed /tmp profile: the guard form of this line replayed through tests/safedel.mjs	safedel([PROFILE], { purge: true });
++ujs/practice/uxe/archive/demo-monopoly/_probe.mjs	15	safedel.mjs --purge -- {X}	its fixed /tmp profile: the guard form of this line replayed through tests/safedel.mjs	safedel([PROFILE], { purge: true });
++ujs/practice/uxe/archive/ship-monopoly/_probe.mjs	15	safedel.mjs --purge -- {X}	its fixed /tmp profile: the guard form of this line replayed through tests/safedel.mjs	safedel([PROFILE], { purge: true });
++ujs/practice/web/game/_browser_probe.mjs	20	safedel.mjs --purge -- {X}	its fixed /tmp profile: the guard form of this line replayed through tests/safedel.mjs	safedel([PROFILE], { purge: true });
++ujs/practice/web/game/exp/_probe.mjs	19	safedel.mjs --purge -- {X}	its fixed /tmp profile: the guard form of this line replayed through tests/safedel.mjs	safedel([PROFILE], { purge: true });
+ ujs/scripts/release-artifacts.sh	36	sh SCRATCH	shell variable(s) SCRATCH bound to the injection	sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge --force-count 20000 -- "${SCRATCH:?}"
+ ujs/seed/stage0/build-compiler-wasm.sh	16	safedel --purge --max-files 20000 -- {X}	own mktemp -d zig cache (trap)	--purge --max-files 20000 -- "$CACHE"
+diff --git a/tests/deletemutcheck.cx b/tests/deletemutcheck.cx
+index 27ed265..5481af3 100644
+--- a/tests/deletemutcheck.cx
++++ b/tests/deletemutcheck.cx
+@@ -6,6 +6,8 @@
+         deletion, or rewritten, goes red here; LINE is where the ledger tests/deletes.tsv saw it);
+      2. ARGV runs with its target {X} injected as "", "." and the sandbox repository root, the cwd being that root:
+         `safedel ...`           the argv CLI tests/safedel.cx (built once with PRODUCT, or --bin);
++        `safedel.mjs ...`       its JS face: node runs this checkout's tests/safedel.mjs with the words (safedel() ->
++                                tests/cxbin tests/safedel.cx, argv only); no node is red, as for any guard form;
+         `cx_remove|cx_rmtree|cx_trash T`, `unisa_safedel T FLAGS MAX`   in process;
+         `tool ...`              the real tool (env TMPDIR = the sandbox base, {ROOT} the checkout, {COM} PRODUCT);
+         `sh|shp|make VARS`      ANCHOR itself is the call, run by sh -c with each VARS name (comma separated; a digit:
+@@ -256,6 +258,12 @@ static int one(const char *argv0, const char *x, char *why, size_t wl) {
+         char *v[34]; int k = 0; v[k++] = BIN;
+         for (i = 1; i < n; i++) v[k++] = sub[i];
+         v[k] = 0; rc = run(v, 20);
++    } else if (!strcmp(w[0], "safedel.mjs")) {   /* the JS face: node runs this checkout's tests/safedel.mjs */
++        char js[4300], *v[36]; int k = 0;
++        snprintf(js, sizeof js, "%s/tests/safedel.mjs", ROOT);
++        v[k++] = "node"; v[k++] = js;
++        for (i = 1; i < n; i++) v[k++] = sub[i];
++        v[k] = 0; rc = run(v, 30);
+     } else if (!strcmp(w[0], "cx_remove")) rc = quiet(cx_remove, sub[1]);
+     else if (!strcmp(w[0], "cx_rmtree")) rc = quiet(cx_rmtree, sub[1]);
+     else if (!strcmp(w[0], "cx_trash")) rc = quiet(cx_trash, sub[1]);
+diff --git a/tests/deletes.tsv b/tests/deletes.tsv
+index c74902a..3bfdc30 100644
+--- a/tests/deletes.tsv
++++ b/tests/deletes.tsv
+@@ -960,6 +960,16 @@ tests/warmupcheck.sh	9	sh	safedel --purge	own-mkdtemp	low	guarded	cli site
+ tests/watchdogregression.sh	24	sh	safedel via sh	own-mkdtemp	low	guarded	shell variable(s) T bound to the injection
+ tests/windowsresolverhostcheck.cx	250	c	cx_remove	own-mkstemp	low	guarded	own mkstemp
+ tests/winposix.sh	11	sh	safedel --purge	own-mkdtemp	low	guarded	the site's own target: the guard form of this line replayed (generic row)
++ujs/iterate/compile.mjs	158	js	safedel.mjs --purge	own-mkdtemp	low	guarded	its own fs.mkdtempSync under $TMPDIR (or /tmp), the python3 compile scratch; a failed compile drops it through tests/safedel.mjs (best effort: a refusal is swallowed, nothing deleted)
++ujs/iterate/compile.mjs	162	js	safedel.mjs --purge	own-mkdtemp	low	guarded	its own fs.mkdtempSync under $TMPDIR (or /tmp), dropped after the wasm is read, through tests/safedel.mjs (best effort: a refusal is swallowed, nothing deleted)
++ujs/practice/uxe/_cdp.mjs	48	js	safedel.mjs --purge	arg-derived	medium	guarded	spawnChrome(opts): opts.profile, the caller's Chrome --user-data-dir (callers pass /tmp/uxe-*-PID), purged through tests/safedel.mjs before mkdir; a refusal throws before Chrome starts
++ujs/practice/uxe/archive/_debug_probe.mjs	15	js	safedel.mjs --purge	other	low	guarded	its fixed per-process Chrome profile /tmp/uxe-debug-PID, through tests/safedel.mjs; a refusal throws
++ujs/practice/uxe/archive/demo-monopoly/_probe.mjs	15	js	safedel.mjs --purge	other	low	guarded	its fixed per-process Chrome profile /tmp/uxe-mono-PID, through tests/safedel.mjs; a refusal throws
++ujs/practice/uxe/archive/ship-monopoly/_probe.mjs	15	js	safedel.mjs --purge	other	low	guarded	its fixed per-process Chrome profile /tmp/uxe-mono-ship-PID, through tests/safedel.mjs; a refusal throws
++ujs/practice/uxe/ship/build-asteroid-pages.mjs	210	js	unlinkSync	fixed-repo-path	low	exempt	fs.unlinkSync of five literal legacy outputs (asteroid.wasm, asteroid.embed.json, engine.wasm) beside this script and under docs/uxe/asteroid, untracked; every path is fixed from import.meta.url, no argument or env reaches it, unlink(2) never removes a directory; the guard refuses repository paths outside out/ by design
++ujs/practice/uxe/ship/build-drone-pages.mjs	260	js	unlinkSync	fixed-repo-path	low	exempt	fs.unlinkSync of five literal legacy outputs (drone.embed.json, uxe-host.js, engine.wasm) beside this script, in ship/drone and under docs/uxe/drone, untracked; every path is fixed from import.meta.url, no argument or env reaches it, unlink(2) never removes a directory; the guard refuses repository paths outside out/ by design
++ujs/practice/web/game/_browser_probe.mjs	20	js	safedel.mjs --purge	other	low	guarded	its fixed per-process Chrome profile /tmp/ujs-game-chrome-profile-PID, through tests/safedel.mjs; a refusal throws
++ujs/practice/web/game/exp/_probe.mjs	19	js	safedel.mjs --purge	other	low	guarded	its fixed per-process Chrome profile /tmp/ujs-exp-chrome-PID, through tests/safedel.mjs; a refusal throws
+ ujs/scripts/release-artifacts.sh	36	sh	safedel via sh	own-mkdtemp	low	guarded	shell variable(s) SCRATCH bound to the injection
+ ujs/scripts/ship-engine.sh	23	sh	rm	fixed-repo-path	medium	exempt	replaces the generated GitHub-pages subtree docs/uxe/monopoly ($ROOT/docs, a fixed child) before publishing; the guard refuses repository paths outside out/ by design
+ ujs/seed/stage0/build-compiler-wasm.sh	16	sh	safedel --purge --max-files	own-mkdtemp	low	guarded	own mktemp -d zig cache (trap)
+diff --git a/tests/gatedeps.json b/tests/gatedeps.json
+index eebd973..190b55d 100644
+--- a/tests/gatedeps.json
++++ b/tests/gatedeps.json
+@@ -44547,6 +44547,7 @@
+         "tests/deletemutcheck.cx",
+         "tests/deletemut.tsv",
+         "tests/safedel.cx",
++        "tests/safedel.mjs",
+         "tests/cxbin",
+         "include/cx.h",
+         "include/unisa_safedel.h",
+@@ -44574,6 +44575,7 @@
+         "tests/deletemutcheck.cx",
+         "tests/deletemut.tsv",
+         "tests/safedel.cx",
++        "tests/safedel.mjs",
+         "tests/cxbin",
+         "include/cx.h",
+         "include/unisa_safedel.h",
+@@ -44601,6 +44603,7 @@
+         "tests/deletemutcheck.cx",
+         "tests/deletemut.tsv",
+         "tests/safedel.cx",
++        "tests/safedel.mjs",
+         "tests/cxbin",
+         "include/cx.h",
+         "include/unisa_safedel.h",
+@@ -44628,6 +44631,7 @@
+         "tests/deletemutcheck.cx",
+         "tests/deletemut.tsv",
+         "tests/safedel.cx",
++        "tests/safedel.mjs",
+         "tests/cxbin",
+         "include/cx.h",
+         "include/unisa_safedel.h",
+diff --git a/tests/safedel.mjs b/tests/safedel.mjs
+new file mode 100644
+index 0000000..8b37bf1
+--- /dev/null
++++ b/tests/safedel.mjs
+@@ -0,0 +1,55 @@
++// safedel.mjs: the JavaScript face of the one deletion guard (include/unisa_safedel.h, commissar ruling 2026-10-23).
++// Every deletion in tracked .js/.mjs goes through safedel() here, which runs the argv-only CLI tests/safedel.cx
++// (through tests/cxbin) with child_process.spawnSync and an argv array: no shell, the paths after `--`.  The guard's
++// policy is the CLI's, never re-implemented here: "", ".", "~", the cwd, a repository root, a .git tree and anything
++// outside a temp root or a repository's out/ are refused.
++//   import { safedel } from "<relative>/tests/safedel.mjs";
++//   safedel([path, ...], { purge: true, dryRun: false, maxFiles: N })   // 0, or throws (err.status: 3 refused, 1 I/O, 2 usage)
++//   node tests/safedel.mjs [--dry-run] [--purge] [--max-files N] [--] PATH...   (exit status: the CLI's)
++// Fail closed: a path that is not a string, a missing CLI and every non-zero status throw; nothing is deleted on a
++// refusal (the CLI checks every path before it touches any).  tests/deletecheck.cx scans .js/.mjs for raw deletions
++// (fs.rmSync/unlinkSync/rmdirSync, fs.rm/unlink/rmdir, an argv or shell rm); tests/deletemutcheck.cx replays each
++// guarded site's form `safedel.mjs ... {X}` with "", "." and a sandbox repository root.
++import { spawnSync } from "node:child_process";
++import fs from "node:fs";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++
++const TESTS = path.dirname(fileURLToPath(import.meta.url));
++const CXBIN = path.join(TESTS, "cxbin");
++const CLI = path.join(TESTS, "safedel.cx");
++
++export function safedel(paths, opts = {}) {
++  if (!Array.isArray(paths) || paths.length === 0) throw Object.assign(new Error("safedel: no path"), { status: 2 });
++  for (const p of paths) {
++    if (typeof p !== "string") throw Object.assign(new Error("safedel: a path is not a string: " + String(p)), { status: 2 });
++  }
++  const argv = [CXBIN, CLI];
++  if (opts.dryRun) argv.push("--dry-run");
++  if (opts.purge) argv.push("--purge");
++  if (opts.maxFiles !== undefined) argv.push("--max-files", String(opts.maxFiles));
++  argv.push("--", ...paths);
++  const r = spawnSync("sh", argv, { stdio: ["ignore", "inherit", "inherit"], shell: false });
++  if (r.error) throw Object.assign(new Error("safedel: cannot run the guard CLI: " + r.error.message), { status: 2 });
++  if (r.status !== 0) {
++    const what = r.status === 3 ? "refused (nothing deleted)" : r.status === null ? "killed by " + r.signal : "status " + r.status;
++    throw Object.assign(new Error("safedel: " + what + ": " + paths.join(" ")), { status: r.status === null ? 1 : r.status });
++  }
++  return 0;
++}
++
++function self(p) { try { return fs.realpathSync(p); } catch { return ""; } }
++if (process.argv[1] && self(process.argv[1]) === self(fileURLToPath(import.meta.url))) {
++  const a = process.argv.slice(2), paths = [], opts = {};
++  let ends = false;
++  for (let i = 0; i < a.length; i++) {
++    const w = a[i];
++    if (ends || !w.startsWith("-") || w === "-") { paths.push(w); continue; }
++    if (w === "--") ends = true;
++    else if (w === "--dry-run") opts.dryRun = true;
++    else if (w === "--purge") opts.purge = true;
++    else if (w === "--max-files" && i + 1 < a.length) opts.maxFiles = a[++i];
++    else { console.error("usage: node tests/safedel.mjs [--dry-run] [--purge] [--max-files N] [--] PATH..."); process.exit(2); }
++  }
++  try { safedel(paths, opts); process.exit(0); } catch (e) { console.error(e.message); process.exit(e.status || 1); }
++}
+diff --git a/ujs/iterate/compile.mjs b/ujs/iterate/compile.mjs
+index dfec4ba..28542af 100755
+--- a/ujs/iterate/compile.mjs
++++ b/ujs/iterate/compile.mjs
+@@ -14,6 +14,7 @@ import fs from "node:fs";
+ import path from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { compileWithCore } from "./run-compiler-core.mjs";
++import { safedel } from "../../tests/safedel.mjs";
+ 
+ const __dirname = path.dirname(fileURLToPath(import.meta.url));
+ /** ujs/ root whether this file lives in iterate/ or is reached via ujs/compile.mjs symlink */
+@@ -154,11 +155,11 @@ function compileViaPython(text) {
+     { cwd: REPO, encoding: "utf8", env: process.env },
+   );
+   if (r.status !== 0) {
+-    try { fs.rmSync(td, { recursive: true, force: true }); } catch (_) {}
++    try { safedel([td], { purge: true }); } catch (_) {}
+     throw new Error((r.stderr || r.stdout || "compile failed").trim());
+   }
+   const wasm = new Uint8Array(fs.readFileSync(outPath));
+-  try { fs.rmSync(td, { recursive: true, force: true }); } catch (_) {}
++  try { safedel([td], { purge: true }); } catch (_) {}
+   if (wasm.length < 4 || wasm[0] !== 0 || wasm[1] !== 0x61 ||
+       wasm[2] !== 0x73 || wasm[3] !== 0x6d) {
+     throw new Error("not a wasm module");
+diff --git a/ujs/practice/uxe/_cdp.mjs b/ujs/practice/uxe/_cdp.mjs
+index e87ac6c..5184987 100644
+--- a/ujs/practice/uxe/_cdp.mjs
++++ b/ujs/practice/uxe/_cdp.mjs
+@@ -8,6 +8,7 @@ import fs from "fs";
+ import http from "http";
+ import path from "path";
+ import { fileURLToPath } from "url";
++import { safedel } from "../../../tests/safedel.mjs";
+ 
+ export const CHROME =
+   process.env.UXE_CHROME ||
+@@ -44,7 +45,7 @@ export function directEnv(extra = {}) {
+  */
+ export function spawnChrome(opts) {
+   const profile = opts.profile;
+-  fs.rmSync(profile, { recursive: true, force: true });
++  safedel([profile], { purge: true });
+   fs.mkdirSync(profile, { recursive: true });
+   const chrome = spawn(CHROME, [
+     `--remote-debugging-port=${opts.port}`,
+diff --git a/ujs/practice/uxe/archive/_debug_probe.mjs b/ujs/practice/uxe/archive/_debug_probe.mjs
+index 7d554c1..c95b350 100644
+--- a/ujs/practice/uxe/archive/_debug_probe.mjs
++++ b/ujs/practice/uxe/archive/_debug_probe.mjs
+@@ -2,6 +2,7 @@
+ import { spawn } from "child_process";
+ import { setTimeout as sleep } from "timers/promises";
+ import fs from "fs";
++import { safedel } from "../../../../tests/safedel.mjs";
+ 
+ const WALL_MS = 25_000;
+ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+@@ -11,7 +12,7 @@ const PROFILE = "/tmp/uxe-debug-" + process.pid;
+ const deadline = Date.now() + WALL_MS;
+ const left = () => Math.max(0, deadline - Date.now());
+ 
+-fs.rmSync(PROFILE, { recursive: true, force: true });
++safedel([PROFILE], { purge: true });
+ fs.mkdirSync(PROFILE, { recursive: true });
+ 
+ const chrome = spawn(CHROME, [
+diff --git a/ujs/practice/uxe/archive/demo-monopoly/_probe.mjs b/ujs/practice/uxe/archive/demo-monopoly/_probe.mjs
+index ce8f0a4..e62f638 100644
+--- a/ujs/practice/uxe/archive/demo-monopoly/_probe.mjs
++++ b/ujs/practice/uxe/archive/demo-monopoly/_probe.mjs
+@@ -2,6 +2,7 @@
+ import { spawn } from "child_process";
+ import { setTimeout as sleep } from "timers/promises";
+ import fs from "fs";
++import { safedel } from "../../../../../tests/safedel.mjs";
+ 
+ const WALL_MS = 45_000;
+ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+@@ -11,7 +12,7 @@ const PROFILE = "/tmp/uxe-mono-" + process.pid;
+ const deadline = Date.now() + WALL_MS;
+ const left = () => Math.max(0, deadline - Date.now());
+ 
+-fs.rmSync(PROFILE, { recursive: true, force: true });
++safedel([PROFILE], { purge: true });
+ fs.mkdirSync(PROFILE, { recursive: true });
+ const chrome = spawn(CHROME, [
+   `--remote-debugging-port=${PORT}`, "--headless=new", "--use-angle=swiftshader",
+diff --git a/ujs/practice/uxe/archive/ship-monopoly/_probe.mjs b/ujs/practice/uxe/archive/ship-monopoly/_probe.mjs
+index 4574d72..a78049c 100644
+--- a/ujs/practice/uxe/archive/ship-monopoly/_probe.mjs
++++ b/ujs/practice/uxe/archive/ship-monopoly/_probe.mjs
+@@ -2,6 +2,7 @@
+ import { spawn } from "child_process";
+ import { setTimeout as sleep } from "timers/promises";
+ import fs from "fs";
++import { safedel } from "../../../../../tests/safedel.mjs";
+ 
+ const WALL_MS = 50_000;
+ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+@@ -11,7 +12,7 @@ const PROFILE = "/tmp/uxe-mono-ship-" + process.pid;
+ const deadline = Date.now() + WALL_MS;
+ const left = () => Math.max(0, deadline - Date.now());
+ 
+-fs.rmSync(PROFILE, { recursive: true, force: true });
++safedel([PROFILE], { purge: true });
+ fs.mkdirSync(PROFILE, { recursive: true });
+ const chrome = spawn(CHROME, [
+   `--remote-debugging-port=${PORT}`, "--headless=new", "--use-angle=swiftshader",
+diff --git a/ujs/practice/web/game/_browser_probe.mjs b/ujs/practice/web/game/_browser_probe.mjs
+index ec88545..19331f4 100644
+--- a/ujs/practice/web/game/_browser_probe.mjs
++++ b/ujs/practice/web/game/_browser_probe.mjs
+@@ -2,6 +2,7 @@
+ import { spawn } from "child_process";
+ import { setTimeout as sleep } from "timers/promises";
+ import fs from "fs";
++import { safedel } from "../../../../tests/safedel.mjs";
+ 
+ const WALL_MS = 40_000;
+ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+@@ -16,7 +17,7 @@ function left() {
+   return ms;
+ }
+ 
+-fs.rmSync(PROFILE, { recursive: true, force: true });
++safedel([PROFILE], { purge: true });
+ fs.mkdirSync(PROFILE, { recursive: true });
+ 
+ const chrome = spawn(CHROME, [
+diff --git a/ujs/practice/web/game/exp/_probe.mjs b/ujs/practice/web/game/exp/_probe.mjs
+index 72b1d3b..ace89ab 100644
+--- a/ujs/practice/web/game/exp/_probe.mjs
++++ b/ujs/practice/web/game/exp/_probe.mjs
+@@ -2,6 +2,7 @@
+ import { spawn } from "child_process";
+ import { setTimeout as sleep } from "timers/promises";
+ import fs from "fs";
++import { safedel } from "../../../../../tests/safedel.mjs";
+ 
+ const WALL_MS = 40_000;
+ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+@@ -15,7 +16,7 @@ const left = () => {
+   return ms;
+ };
+ 
+-fs.rmSync(PROFILE, { recursive: true, force: true });
++safedel([PROFILE], { purge: true });
+ fs.mkdirSync(PROFILE, { recursive: true });
+ 
+ const chrome = spawn(CHROME, [

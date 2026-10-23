@@ -1,0 +1,788 @@
+#!/usr/bin/env -S unisacc.com -run
+/* errorcheck.cx -- exec/parse2/errorcheck.py in C (2026-10-23, the py->cx port wave).  Located parser error/recovery
+   results of the model route against the actual reference CLI: the `error` Stream route (e2 source->pp, e1
+   pp->tokens, e3 tokens->tape) is packed with the pp/lex/parse2 model Nets and run on each case; exit code, stdout
+   and stderr must equal the reference compiler's (-Wall with --warnings).
+   usage: sh ./unisacc.com -run exec/parse2/errorcheck.cx -- [--warnings] [--part {1,2,3}] [--require-cached]
+          [--tools-dir TOOLS_DIR]
+   Options parse as the .py's argparse did (same usage/help/error text, rc 2, unique long-option prefixes,
+   --opt=value; --tools-dir defaults to $UNISACC_WARN_TOOLS).  --part 1 runs the first seven cases, 2 the rest plus
+   struct-return, 3 the -ferror-limit series, the unsupported pointer-arithmetic refusal and the wide/utf16 string
+   prefixes; no --part runs everything.  Each passing unit prints the .py's line; the last line is
+   `COVERAGE {"part": N, "units": [...], "warnings": B}` (json.dumps sort_keys=True); rc 0.
+   What stays Python (status PARTIAL of the port): obtaining the three model Nets.  With --require-cached that is
+   exec/parse2/warnprep.cached_inputs (the content-keyed model cache of exec/c/compilerpack.built_model -- its key is
+   the Python version, the generator closure and read-set stamps -- plus the provenance-verified run/ref tools;
+   `NEED_PREPARE parser errors: ...` rc 75 on a miss); without it compilerpack.built_model constructs or reuses
+   them with exec/build/gen.py.  Either is one interpreter call (-c PY_MODELS below) into those modules: they are
+   invoked, not reimplemented.  Everything else is here: exec/c/run.c is built with $EXEC_CC (default cc) when not
+   cached, the reference is $UA (default /tmp/ua_ref), the package is exec/c/pack.build (uncompressed P2, Q prefixes
+   compacted; the C of seed/pack.c), and every child runs with stdout and stderr captured and a 60 s limit
+   (checklib.run).  A failed assertion, a child timeout or an OS error is the .py's uncaught exception: one
+   `AssertionError: ...` (or similar) line on stderr where Python printed a traceback, rc 1.  The scratch directory
+   is TMPDIR (TEMP, TMP, /tmp)/parser-errors-XXXXXXXX and is removed on every exit.  ROOT is the grandparent of this
+   file's directory, resolved against the working directory (the gate runs from the repository root).
+   Deletion: this file sits in exec/parse2/, where `#pragma unisa use` cannot reach tests/cxlib (modules resolve
+   beside the using file), so the scratch removal is the local scratch_rm below, limited to the directory this
+   process made with mkdtemp. */
+
+#define PATHN 4096
+static char ROOT[PATHN], TD[PATHN];
+
+/* ---------- scratch (tempfile.TemporaryDirectory) and uncaught exceptions ---------- */
+static void scratch_rm(const char *p) {        /* only ever called with TD or a path below it */
+    struct stat st; DIR *d; struct dirent *e;
+    if (lstat(p, &st)) return;
+    if (S_ISDIR(st.st_mode)) {
+        if ((d = opendir(p))) {
+            while ((e = readdir(d))) {
+                char *q; size_t l;
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                l = strlen(p) + strlen(e->d_name) + 2; q = malloc(l);
+                if (!q) break;
+                snprintf(q, l, "%s/%s", p, e->d_name); scratch_rm(q); free(q);
+            }
+            closedir(d);
+        }
+        rmdir(p);
+    } else unlink(p);
+}
+static int MADE;                                   /* TD is the directory mkdtemp made for this process */
+static void cleanup(void) {
+    size_t n = strlen(TD);
+    if (MADE && n > 21 && !strncmp(TD + n - 21, "/parser-errors-", 15)) scratch_rm(TD);
+    TD[0] = 0; MADE = 0;
+}
+static void quit(int rc) { fflush(stdout); cleanup(); fflush(stderr); exit(rc); }
+static void fail(const char *kind, const char *a, const char *b) {
+    fflush(stdout);
+    fprintf(stderr, "%s: %s%s%s\n", kind, a ? a : "", b ? ", " : "", b ? b : "");
+    quit(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) fail("MemoryError", "out of memory", 0); return p; }
+static char *xstrdup(const char *s) { size_t n = strlen(s) + 1; return memcpy(xmalloc(n), s, n); }
+static char *path2(const char *a, const char *b) {
+    size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p;
+}
+typedef struct { char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) fail("MemoryError", "out of memory", 0);
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bstr(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+/* repr(bytes), for assertion messages */
+static void brepr(Buf *b, const char *s0, size_t n) {
+    const unsigned char *s = (const unsigned char *)s0; size_t i; int sq = 0, dq = 0; char q, t[8];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    bstr(b, "b"); bput(b, &q, 1);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == '\\' || c == (unsigned char)q) { t[0] = '\\'; t[1] = (char)c; bput(b, t, 2); }
+        else if (c == '\n') bstr(b, "\\n"); else if (c == '\r') bstr(b, "\\r"); else if (c == '\t') bstr(b, "\\t");
+        else if (c < 32 || c >= 127) { snprintf(t, sizeof t, "\\x%02x", c); bstr(b, t); }
+        else { t[0] = (char)c; bput(b, t, 1); }
+    }
+    bput(b, &q, 1);
+}
+
+/* ---------- argparse ---------- */
+static const char *USAGE =
+    "usage: errorcheck.py [-h] [--warnings] [--part {1,2,3}] [--require-cached]\n"
+    "                     [--tools-dir TOOLS_DIR]\n";
+static void argerror(const char *msg, const char *x) {
+    fputs(USAGE, stderr);
+    fprintf(stderr, "errorcheck.py: error: %s%s\n", msg, x ? x : "");
+    exit(2);
+}
+static const char *LONGS[] = { "--help", "--warnings", "--part", "--require-cached", "--tools-dir", 0 };
+/* argparse's _parse_optional: is this word an option (1) or a positional (0)? */
+static int looks_option(const char *a) {
+    if (a[0] != '-' || !a[1]) return 0;
+    if (!strcmp(a, "--")) return 1;
+    if ((a[1] >= '0' && a[1] <= '9') || (a[1] == '.' && a[2] >= '0' && a[2] <= '9')) return 0;   /* re.match(r'-\.?\d') */
+    if (a[1] != '-' && strncmp(a, "-h", 2)) return strchr(a, ' ') ? 0 : 1;
+    if (strchr(a, ' ') && !strchr(a, '=')) {
+        size_t i; for (i = 0; LONGS[i]; i++) if (!strncmp(LONGS[i], a, strlen(a))) return 1;
+        return 0;
+    }
+    return 1;
+}
+/* int(str) for an ASCII spelling: surrounding whitespace, one sign, digits with single '_' between digits */
+static int pyint(const char *s, long long *v) {
+    const char *e = s + strlen(s); int neg = 0, digits = 0; long long x = 0;
+    while (s < e && strchr(" \t\n\r\v\f\x1c\x1d\x1e\x1f", *s)) s++;
+    while (e > s && strchr(" \t\n\r\v\f\x1c\x1d\x1e\x1f", e[-1])) e--;
+    if (s < e && (*s == '+' || *s == '-')) { neg = *s == '-'; s++; }
+    if (s >= e) return 0;
+    for (; s < e; s++) {
+        if (*s == '_') { if (!digits || s + 1 >= e || s[1] < '0' || s[1] > '9') return 0; continue; }
+        if (*s < '0' || *s > '9') return 0;
+        if (x < 100000000000LL) x = x * 10 + (*s - '0');
+        digits = 1;
+    }
+    *v = neg ? -x : x; return 1;
+}
+
+static int WARNINGS, PART, REQUIRE_CACHED, HAVE_TOOLS; static const char *TOOLS;
+
+static void parse_args(int argc, char **argv) {
+    Buf extra = { 0, 0, 0 }; int i, dashdash = 0;
+    const char *env = getenv("UNISACC_WARN_TOOLS");
+    if (env) { TOOLS = env; HAVE_TOOLS = 1; }
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *val = 0; char name[256]; int k, hit = -1, nhit = 0;
+        if (dashdash || !looks_option(a) || !strcmp(a, "--")) {
+            if (!strcmp(a, "--")) dashdash = 1;         /* kept: no positional consumes it */
+            if (extra.n) bstr(&extra, " ");
+            bstr(&extra, a);
+            continue;
+        }
+        if (a[1] != '-') {                       /* single dash: only -h exists; -hX is -h first (help, exit) */
+            if (!strncmp(a, "-h", 2)) { hit = 0; nhit = 1; }
+        } else {
+            const char *eq = strchr(a, '=');
+            size_t l = eq ? (size_t)(eq - a) : strlen(a);
+            if (l >= sizeof name) l = sizeof name - 1;
+            memcpy(name, a, l); name[l] = 0;
+            for (k = 0; LONGS[k]; k++) if (!strcmp(LONGS[k], name)) { hit = k; nhit = 1; break; }
+            if (hit < 0) {
+                char opts[512] = "";
+                for (k = 0; LONGS[k]; k++)
+                    if (!strncmp(LONGS[k], name, l)) {
+                        if (nhit) strcat(opts, ", ");
+                        strcat(opts, LONGS[k]); hit = k; nhit++;
+                    }
+                if (nhit > 1) {
+                    fputs(USAGE, stderr);
+                    fprintf(stderr, "errorcheck.py: error: ambiguous option: %s could match %s\n", name, opts);
+                    exit(2);
+                }
+            }
+            if (nhit == 1 && eq) val = eq + 1;
+        }
+        if (nhit != 1) {                          /* unknown option: collected as unrecognized */
+            if (extra.n) bstr(&extra, " ");
+            bstr(&extra, a);
+            continue;
+        }
+        if (hit == 0) {
+            if (val) {
+                fputs(USAGE, stderr);
+                fprintf(stderr, "errorcheck.py: error: argument -h/--help: ignored explicit argument '%s'\n", val);
+                exit(2);
+            }
+            fputs(USAGE, stdout);
+            fputs("\noptions:\n"
+                  "  -h, --help            show this help message and exit\n"
+                  "  --warnings\n"
+                  "  --part {1,2,3}\n"
+                  "  --require-cached\n"
+                  "  --tools-dir TOOLS_DIR\n", stdout);
+            exit(0);
+        }
+        if (hit == 2 || hit == 4) {               /* --part / --tools-dir take one argument */
+            if (!val) {
+                if (i + 1 >= argc || looks_option(argv[i + 1])) {
+                    char m[64]; snprintf(m, sizeof m, "argument %s: expected one argument", LONGS[hit]);
+                    argerror(m, 0);
+                }
+                val = argv[++i];
+            }
+            if (hit == 4) { TOOLS = val; HAVE_TOOLS = 1; continue; }
+            {   long long v; Buf m = { 0, 0, 0 };
+                if (!pyint(val, &v)) { bstr(&m, "argument --part: invalid int value: '"); bstr(&m, val); bstr(&m, "'"); argerror(m.p, 0); }
+                if (v < 1 || v > 3) {
+                    char t[64]; snprintf(t, sizeof t, "%lld", v);
+                    bstr(&m, "argument --part: invalid choice: '"); bstr(&m, t); bstr(&m, "' (choose from '1', '2', '3')");
+                    argerror(m.p, 0);
+                }
+                PART = (int)v;
+            }
+            continue;
+        }
+        if (val) {
+            fputs(USAGE, stderr);
+            fprintf(stderr, "errorcheck.py: error: argument %s: ignored explicit argument '%s'\n", LONGS[hit], val);
+            exit(2);
+        }
+        if (hit == 1) WARNINGS = 1; else REQUIRE_CACHED = 1;
+    }
+    if (extra.n) argerror("unrecognized arguments: ", extra.p);
+    free(extra.p);
+}
+
+/* ---------- children (checklib.run: capture_output, timeout=60) ---------- */
+typedef struct { int rc; char *out, *err; size_t on, en; } Res;
+static void res_free(Res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+static void argv_text(Buf *b, char *const *av) {
+    int i;
+    bstr(b, "[");
+    for (i = 0; av[i]; i++) { if (i) bstr(b, ", "); bstr(b, "'"); bstr(b, av[i]); bstr(b, "'"); }
+    bstr(b, "]");
+}
+static Res run(char *const *av) {
+    Res r; char *of = path2(TD, ".capture-out"), *ef = path2(TD, ".capture-err"); int fo, fe, st = 0, pp[2], e = 0;
+    pid_t pid, w; long waited = 0; ssize_t k;
+    memset(&r, 0, sizeof r);
+    fo = open(of, O_WRONLY | O_CREAT | O_TRUNC, 0600); fe = open(ef, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fo < 0 || fe < 0) fail("OSError", "cannot create capture files", TD);
+    if (pipe(pp)) fail("OSError", "pipe failed", 0);
+    fcntl(pp[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed", 0);
+    if (pid == 0) {
+        close(pp[0]); dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        execvp(av[0], av);
+        e = errno; if (write(pp[1], &e, sizeof e) < 0) {} _exit(127);
+    }
+    close(pp[1]); close(fo); close(fe);
+    k = read(pp[0], &e, sizeof e); close(pp[0]);
+    if (k == (ssize_t)sizeof e) {                 /* Popen raises when the program cannot start */
+        Buf m = { 0, 0, 0 };
+        waitpid(pid, &st, 0);
+        bstr(&m, "[Errno "); { char t[16]; snprintf(t, sizeof t, "%d", e); bstr(&m, t); }
+        bstr(&m, "] "); bstr(&m, strerror(e)); bstr(&m, ": '"); bstr(&m, av[0]); bstr(&m, "'");
+        fail(e == ENOENT ? "FileNotFoundError" : e == EACCES ? "PermissionError" : "OSError", m.p, 0);
+    }
+    for (;;) {                                    /* 1 ms polls first: most children here finish in milliseconds */
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) fail("ChildProcessError", "waitpid failed", 0);
+        if (waited >= 60000000L) {
+            Buf m = { 0, 0, 0 };
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            bstr(&m, "Command '"); argv_text(&m, av); bstr(&m, "' timed out after 60 seconds");
+            fail("subprocess.TimeoutExpired", m.p, 0);
+        }
+        { long step = waited < 200000L ? 1000L : 10000L; usleep((unsigned)step); waited += step; }
+    }
+    r.rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    r.out = cx_read(of, &r.on); r.err = cx_read(ef, &r.en);
+    if (!r.out || !r.err) fail("OSError", "cannot read capture files", TD);
+    free(of); free(ef);
+    return r;
+}
+/* call(args): run, then assert returncode == 0, (p.args, p.returncode, p.stderr[-2000:]) */
+static Res call(char *const *av) {
+    Res r = run(av);
+    if (r.rc != 0) {
+        Buf m = { 0, 0, 0 }; char t[32]; size_t from = r.en > 2000 ? r.en - 2000 : 0;
+        bstr(&m, "("); argv_text(&m, av); snprintf(t, sizeof t, ", %d, ", r.rc); bstr(&m, t);
+        brepr(&m, r.err + from, r.en - from); bstr(&m, ")");
+        fail("AssertionError", m.p, 0);
+    }
+    return r;
+}
+/* a child with inherited stdio and no limit (the model helper) */
+static int spawn(char *const *av) {
+    int st = 0; pid_t pid;
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) fail("OSError", "fork failed", 0);
+    if (pid == 0) { execvp(av[0], av); _exit(127); }
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) fail("ChildProcessError", "waitpid failed", 0);
+    return WIFSIGNALED(st) ? 128 + WTERMSIG(st) : WEXITSTATUS(st);
+}
+static void write_bytes(const char *p, const void *b, size_t n) {
+    if (cx_write(p, b, n)) fail("OSError", "cannot write", p);
+}
+static char *read_bytes(const char *p, size_t *n) {
+    char *b = cx_read(p, n);
+    if (!b) { Buf m = { 0, 0, 0 }; bstr(&m, "[Errno 2] No such file or directory: '"); bstr(&m, p); bstr(&m, "'"); fail("FileNotFoundError", m.p, 0); }
+    return b;
+}
+static int contains(const char *h, size_t hn, const char *needle) {
+    size_t nn = strlen(needle), i;
+    if (nn > hn) return 0;
+    for (i = 0; i + nn <= hn; i++) if (!memcmp(h + i, needle, nn)) return 1;
+    return 0;
+}
+
+/* ---------- exec/c/pack.build(manifests, mounts): the uncompressed package (P1/P2), as seed/pack.c ---------- */
+static const int ARITY[] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+#define NOPS ((int)(sizeof ARITY / sizeof ARITY[0]))
+static void pkerr(const char *m, const char *a) {      /* pack.build raises ValueError */
+    Buf b = { 0, 0, 0 }; bstr(&b, m); if (a) { bstr(&b, " "); bstr(&b, a); }
+    fail("ValueError", b.p, 0);
+}
+typedef struct { int64_t *v; int n; } Act;          /* opcode + operands */
+typedef struct { Act *a; int n; } Seq;
+static int act_eq(Act x, Act y) { return x.n == y.n && !memcmp(x.v, y.v, (size_t)x.n * sizeof *x.v); }
+static uint64_t act_hash(Act x, int parent) {
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)parent; int i;
+    for (i = 0; i < x.n; i++) { h ^= (uint64_t)x.v[i]; h *= 1099511628211ull; }
+    return h;
+}
+typedef struct { int parent, first; Act act; } Node;  /* trie node: first sequence through it */
+static Node *NODES; static int NNODES, NCAP; static int *SLOT; static size_t NSLOT;
+static int trie_find(int parent, Act a) {
+    size_t i;
+    if (!NSLOT) return -1;
+    for (i = act_hash(a, parent) & (NSLOT - 1); SLOT[i] >= 0; i = (i + 1) & (NSLOT - 1))
+        if (NODES[SLOT[i]].parent == parent && act_eq(NODES[SLOT[i]].act, a)) return SLOT[i];
+    return -1;
+}
+static int trie_add(int parent, Act a, int qi) {
+    int f = trie_find(parent, a), k; size_t i;
+    if (f >= 0) return f;
+    if (2 * (size_t)(NNODES + 1) > NSLOT) {          /* grow and rehash */
+        free(SLOT); NSLOT = NSLOT ? NSLOT * 2 : 1024; SLOT = xmalloc(NSLOT * sizeof *SLOT);
+        for (i = 0; i < NSLOT; i++) SLOT[i] = -1;
+        for (k = 0; k < NNODES; k++) {
+            i = act_hash(NODES[k].act, NODES[k].parent) & (NSLOT - 1);
+            while (SLOT[i] >= 0) i = (i + 1) & (NSLOT - 1);
+            SLOT[i] = k;
+        }
+    }
+    if (NNODES == NCAP) { NCAP = NCAP ? NCAP * 2 : 1024; NODES = realloc(NODES, (size_t)NCAP * sizeof *NODES); if (!NODES) fail("MemoryError", "out of memory", 0); }
+    NODES[NNODES].parent = parent; NODES[NNODES].first = qi; NODES[NNODES].act = a;
+    i = act_hash(a, parent) & (NSLOT - 1);
+    while (SLOT[i] >= 0) i = (i + 1) & (NSLOT - 1);
+    SLOT[i] = NNODES; return NNODES++;
+}
+static int isws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+static int split_words(const unsigned char *s, size_t n, const unsigned char **w, size_t *wl, int max) {
+    int k = 0; size_t i = 0, j;
+    while (i < n) {
+        while (i < n && isws(s[i])) i++;
+        if (i >= n) break;
+        j = i; while (j < n && !isws(s[j])) j++;
+        if (k == max) pkerr("too many fields", 0);
+        w[k] = s + i; wl[k] = j - i; k++; i = j;
+    }
+    return k;
+}
+static int64_t num(const unsigned char *s, size_t n) {
+    char t[32], *e; long long v;
+    if (n == 0 || n >= sizeof t) pkerr("bad integer", 0);
+    memcpy(t, s, n); t[n] = 0; v = strtoll(t, &e, 10);
+    if (*e) pkerr("bad integer", t);
+    return v;
+}
+static void acts(int64_t *flat, int nflat, int count, Seq *out) {
+    int at = 0, c, end;
+    if (count < 0 || count > nflat) pkerr("bad Q action count", 0);
+    for (c = 0; c < count; c++) {
+        if (at >= nflat || flat[at] < 0 || flat[at] >= NOPS) pkerr("bad Q opcode or truncated action", 0);
+        end = at + 1 + ARITY[flat[at]]; if (end > nflat) pkerr("truncated Q operands", 0);
+        out->a[out->n].v = flat + at; out->a[out->n].n = end - at; out->n++; at = end;
+    }
+    if (at != nflat) pkerr("extra Q operands", 0);
+}
+typedef struct { const unsigned char *p; size_t n; } Line;   /* includes its '\n' */
+static Line *lines_of(const unsigned char *d, size_t n, int *count) {
+    int k = 0, cap = 1024; Line *L = xmalloc((size_t)cap * sizeof *L); size_t i, j;
+    for (i = 0; i < n;) {
+        j = i; while (j < n && d[j] != '\n') j++;
+        if (j < n) j++;
+        if (k == cap) { cap *= 2; L = realloc(L, (size_t)cap * sizeof *L); if (!L) fail("MemoryError", "out of memory", 0); }
+        L[k].p = d + i; L[k].n = j - i; k++; i = j;
+    }
+    *count = k; return L;
+}
+static void compact_q(const unsigned char *d, size_t n, Buf *out) {
+    int nl, wcap = 0, k, i; Line *L = lines_of(d, n, &nl); const unsigned char *w[16]; size_t wl[16];
+    const unsigned char **ww = 0; size_t *wwl = 0; int64_t nq, nstr, start, qi; Seq *seqs; Buf cand = { 0, 0, 0 };
+    if (!nl || d[n - 1] != '\n') pkerr("truncated network", 0);
+    if (split_words(L[0].p, L[0].n - 1, w, wl, 16) != 7 || wl[0] != 1 || w[0][0] != 'N') pkerr("bad network header", 0);
+    nq = num(w[2], wl[2]); nstr = num(w[4], wl[4]); start = 1 + nstr;
+    if (nq <= 0 || nstr < 0 || start + nq > nl) pkerr("bad network Q extent", 0);
+    NNODES = 0; free(SLOT); SLOT = 0; NSLOT = 0;
+    seqs = calloc((size_t)nq, sizeof *seqs); if (!seqs) fail("MemoryError", "out of memory", 0);
+    for (qi = 0; qi < nq; qi++) {
+        Line ln = L[start + qi]; int maxw = (int)ln.n / 2 + 2; int64_t *flat; Seq s; s.a = 0; s.n = 0;
+        if (maxw > wcap) { wcap = maxw; ww = realloc(ww, (size_t)wcap * sizeof *ww); wwl = realloc(wwl, (size_t)wcap * sizeof *wwl); if (!ww || !wwl) fail("MemoryError", "out of memory", 0); }
+        k = split_words(ln.p, ln.n, ww, wwl, wcap);
+        if (k < 2) pkerr("truncated Q record", 0);
+        flat = xmalloc((size_t)(k + 1) * sizeof *flat);
+        if (wwl[0] == 1 && ww[0][0] == 'Q') {
+            for (i = 2; i < k; i++) flat[i - 2] = num(ww[i], wwl[i]);
+            s.a = xmalloc((size_t)(k + 1) * sizeof *s.a); acts(flat, k - 2, (int)num(ww[1], wwl[1]), &s);
+        } else if (wwl[0] == 1 && ww[0][0] == 'C') {
+            int64_t ref, pre;
+            if (k < 4) pkerr("truncated Q record", 0);
+            ref = num(ww[1], wwl[1]); pre = num(ww[2], wwl[2]);
+            if (ref < 0 || ref >= qi || pre <= 0 || pre > seqs[ref].n) pkerr("bad Q prefix reference", 0);
+            for (i = 4; i < k; i++) flat[i - 4] = num(ww[i], wwl[i]);
+            s.a = xmalloc((size_t)(pre + k + 1) * sizeof *s.a);
+            for (i = 0; i < pre; i++) s.a[s.n++] = seqs[ref].a[i];
+            acts(flat, k - 4, (int)num(ww[3], wwl[3]), &s);
+        } else pkerr("unknown Q tag", 0);
+        seqs[qi] = s;
+    }
+    for (qi = 0; qi < start; qi++) bput(out, L[qi].p, L[qi].n);
+    for (qi = 0; qi < nq; qi++) {
+        Seq s = seqs[qi]; int node = -1, ref = -1, pre = 0, ai, j, f; Line wire = L[start + qi];
+        for (ai = 0; ai < s.n; ai++) {
+            f = trie_find(node, s.a[ai]); if (f < 0) break;
+            node = f; ref = NODES[f].first; pre = ai + 1;
+        }
+        if (pre) {
+            char t[64]; cand.n = 0;
+            snprintf(t, sizeof t, "C %d %d %d", ref, pre, s.n - pre); bstr(&cand, t);
+            for (ai = pre; ai < s.n; ai++)
+                for (j = 0; j < s.a[ai].n; j++) { snprintf(t, sizeof t, " %lld", (long long)s.a[ai].v[j]); bstr(&cand, t); }
+            bput(&cand, "\n", 1);
+            if (cand.n < wire.n) { wire.p = (const unsigned char *)cand.p; wire.n = cand.n; }
+        }
+        bput(out, wire.p, wire.n);
+        node = -1; for (ai = 0; ai < s.n; ai++) node = trie_add(node, s.a[ai], (int)qi);
+    }
+    for (qi = start + nq; qi < nl; qi++) bput(out, L[qi].p, L[qi].n);
+    free(cand.p); free(L); free(ww); free(wwl);
+}
+/* resources: the files under a mount, sorted as sorted(root.rglob('*')) (path components), regular files only */
+typedef struct { char *rel, *full; } RFile;
+static RFile *RF; static int NRF, RFCAP;
+static void walk(const char *dir, const char *rel) {
+    DIR *d = opendir(dir); struct dirent *e;
+    if (!d) pkerr("cannot read directory", dir);
+    while ((e = readdir(d))) {
+        size_t a, b; char *full, *r; struct stat ls, st;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        a = strlen(dir) + strlen(e->d_name) + 2; b = strlen(rel) + strlen(e->d_name) + 2;
+        full = xmalloc(a); r = xmalloc(b);
+        snprintf(full, a, "%s/%s", dir, e->d_name); snprintf(r, b, "%s%s%s", rel, *rel ? "/" : "", e->d_name);
+        if (lstat(full, &ls)) pkerr("cannot stat", full);
+        if (S_ISDIR(ls.st_mode)) { walk(full, r); free(full); free(r); continue; }   /* rglob: no symlinked dirs */
+        if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (NRF == RFCAP) { RFCAP = RFCAP ? RFCAP * 2 : 256; RF = realloc(RF, (size_t)RFCAP * sizeof *RF); if (!RF) fail("MemoryError", "out of memory", 0); }
+            RF[NRF].rel = r; RF[NRF].full = full; NRF++;
+        } else { free(full); free(r); }
+    }
+    closedir(d);
+}
+static int partcmp(const void *x, const void *y) {   /* PurePath order: component lists */
+    const unsigned char *a = (const unsigned char *)((const RFile *)x)->rel, *b = (const unsigned char *)((const RFile *)y)->rel;
+    for (;;) {
+        int ea = !*a || *a == '/', eb = !*b || *b == '/';
+        if (ea && eb) { if (!*a && !*b) return 0; if (!*a) return -1; if (!*b) return 1; a++; b++; continue; }
+        if (ea) return -1;
+        if (eb) return 1;
+        if (*a != *b) return *a < *b ? -1 : 1;
+        a++; b++;
+    }
+}
+static int valid_name(const char *s) {
+    if (!*s) return 0;
+    for (; *s; s++) if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || strchr("_./-", *s))) return 0;
+    return 1;
+}
+static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+typedef struct { const char *prefix_hex, *dir; } Mount;
+/* pack.build([manifest], mounts) -> the package bytes in *out */
+static void pack_build(const char *manifest, const Mount *mounts, int nmounts, Buf *out) {
+    typedef struct { char *route, *stream, *in, *outf; int model; } Row;   /* stream: the stream-stage column */
+    Row *st = 0; int nst = 0, stcap = 0, nmod = 0, m, i, f; unsigned char **mod = 0; size_t *modn = 0, n;
+    typedef struct { unsigned char *k; size_t kn; char *v; size_t vn; } Res2;
+    Res2 *res = 0; int nres = 0, rcap = 0; char t[256], *text, *s, *dirend; size_t dl; int lineno = 0;
+    text = read_bytes(manifest, &n);
+    dirend = strrchr(manifest, '/'); dl = dirend ? (size_t)(dirend - manifest) : 0;
+    for (s = text; s < text + n;) {
+        char *e = memchr(s, '\n', (size_t)(text + n - s)), *ln, *c[6], *p, *path; int k = 0; const char *last = 0; size_t ll, dn, pl; unsigned char *data; int idx = -1;
+        if (!e) e = text + n;
+        *e = 0; lineno++; ln = s; s = e + 1;
+        ll = strlen(ln); if (ll && ln[ll - 1] == '\r') ln[--ll] = 0;
+        if (!*ln || *ln == '#') continue;
+        c[k++] = ln;
+        for (p = ln; *p; p++) if (*p == '\t') { *p = 0; if (k == 6) break; c[k++] = p + 1; }
+        snprintf(t, sizeof t, "%s:%d:", manifest, lineno);
+        if (k != 5 || !valid_name(c[0]) || !valid_name(c[1]) || !valid_name(c[2]) || !valid_name(c[3])) pkerr(t, "expected five columns and valid names");
+        for (i = 0; i < nst; i++) {
+            if (!strcmp(st[i].route, c[0]) && !strcmp(st[i].stream, c[1])) pkerr(t, "duplicate stream-stage");
+            if (!strcmp(st[i].route, c[0])) last = st[i].outf;
+        }
+        if (last && strcmp(last, c[2])) pkerr(t, "format mismatch");
+        pl = dl + strlen(c[4]) + 2; path = xmalloc(pl);
+        if (dirend && c[4][0] != '/') snprintf(path, pl, "%.*s/%s", (int)dl, manifest, c[4]); else snprintf(path, pl, "%s", c[4]);
+        data = (unsigned char *)read_bytes(path, &dn); free(path);
+        if (dn < 2 || memcmp(data, "N ", 2) || data[dn - 1] != '\n') pkerr(t, "expected canonical network text");
+        for (i = 0; i < nmod; i++) if (modn[i] == dn && !memcmp(mod[i], data, dn)) { idx = i; break; }
+        if (idx < 0) {
+            mod = realloc(mod, (size_t)(nmod + 1) * sizeof *mod); modn = realloc(modn, (size_t)(nmod + 1) * sizeof *modn);
+            if (!mod || !modn) fail("MemoryError", "out of memory", 0);
+            mod[nmod] = data; modn[nmod] = dn; idx = nmod++;
+        } else free(data);
+        if (nst == stcap) { stcap = stcap ? stcap * 2 : 64; st = realloc(st, (size_t)stcap * sizeof *st); if (!st) fail("MemoryError", "out of memory", 0); }
+        st[nst].route = c[0]; st[nst].stream = c[1]; st[nst].in = c[2]; st[nst].outf = c[3]; st[nst].model = idx; nst++;
+    }
+    if (!nst) pkerr("empty package", 0);
+    for (m = 0; m < nmounts; m++) {
+        size_t hl = strlen(mounts[m].prefix_hex), j; unsigned char kp[256]; struct stat sb;
+        if (hl % 2 || hl / 2 > sizeof kp) pkerr("bad mount prefix", mounts[m].prefix_hex);
+        for (j = 0; j < hl; j += 2) {
+            int a = hexv(mounts[m].prefix_hex[j]), b = hexv(mounts[m].prefix_hex[j + 1]);
+            if (a < 0 || b < 0) pkerr("bad mount prefix", mounts[m].prefix_hex);
+            kp[j / 2] = (unsigned char)(a * 16 + b);
+        }
+        if (stat(mounts[m].dir, &sb) || !S_ISDIR(sb.st_mode)) pkerr("resource mount is not a directory:", mounts[m].dir);
+        NRF = 0; walk(mounts[m].dir, "");
+        if (!NRF) pkerr("empty resource mount:", mounts[m].dir);
+        qsort(RF, (size_t)NRF, sizeof *RF, partcmp);
+        for (f = 0; f < NRF; f++) {
+            size_t rl = strlen(RF[f].rel), kn = hl / 2 + rl, vn; unsigned char *key = xmalloc(kn + 1); char *v; int dup = 0, r;
+            memcpy(key, kp, hl / 2); memcpy(key + hl / 2, RF[f].rel, rl);
+            v = read_bytes(RF[f].full, &vn);
+            for (r = 0; r < nres; r++) if (res[r].kn == kn && !memcmp(res[r].k, key, kn)) {
+                if (res[r].vn != vn || memcmp(res[r].v, v, vn)) pkerr("conflicting resource", RF[f].rel);
+                dup = 1; break;
+            }
+            free(RF[f].rel); free(RF[f].full);
+            if (dup) { free(key); free(v); continue; }
+            if (nres == rcap) { rcap = rcap ? rcap * 2 : 256; res = realloc(res, (size_t)rcap * sizeof *res); if (!res) fail("MemoryError", "out of memory", 0); }
+            res[nres].k = key; res[nres].kn = kn; res[nres].v = v; res[nres].vn = vn; nres++;
+        }
+    }
+    if (nres) snprintf(t, sizeof t, "P 2 %d %d %d\n", nmod, nst, nres);
+    else snprintf(t, sizeof t, "P 1 %d %d\n", nmod, nst);
+    out->n = 0; bstr(out, t);
+    for (i = 0; i < nst; i++) {
+        bstr(out, "D "); bstr(out, st[i].route); bstr(out, " "); bstr(out, st[i].stream); bstr(out, " ");
+        bstr(out, st[i].in); bstr(out, " "); bstr(out, st[i].outf); snprintf(t, sizeof t, " %d\n", st[i].model); bstr(out, t);
+    }
+    for (i = 0; i < nmod; i++) {                  /* compact_q once per distinct model Net text in this process */
+        static unsigned char **seen; static size_t *seenn; static Buf *done; static int nseen; int c;
+        for (c = 0; c < nseen; c++) if (seenn[c] == modn[i] && !memcmp(seen[c], mod[i], modn[i])) break;
+        if (c == nseen) {
+            seen = realloc(seen, (size_t)(nseen + 1) * sizeof *seen); seenn = realloc(seenn, (size_t)(nseen + 1) * sizeof *seenn);
+            done = realloc(done, (size_t)(nseen + 1) * sizeof *done);
+            if (!seen || !seenn || !done) fail("MemoryError", "out of memory", 0);
+            seen[c] = mod[i]; seenn[c] = modn[i]; done[c].p = 0; done[c].n = done[c].cap = 0;
+            compact_q(mod[i], modn[i], &done[c]); nseen++;
+        } else free(mod[i]);
+        snprintf(t, sizeof t, "M %lu\n", (unsigned long)done[c].n); bstr(out, t); bput(out, done[c].p, done[c].n);
+    }
+    for (i = 0; i < nres; i++) {
+        snprintf(t, sizeof t, "F %lu %lu\n", (unsigned long)res[i].kn, (unsigned long)res[i].vn); bstr(out, t);
+        bput(out, res[i].k, res[i].kn); bput(out, res[i].v, res[i].vn); free(res[i].k); free(res[i].v);
+    }
+    if (out->n >= (size_t)1 << 31) pkerr("package exceeds runtime byte extent", 0);
+    free(mod); free(modn); free(st); free(res); free(text);
+}
+
+/* ---------- the model helper: the only Python left (compilerpack's content-keyed model cache) ---------- */
+static char *PY_MODELS =
+    "import sys,pathlib\n"
+    "R=pathlib.Path(sys.argv[1]);sys.path[0:1]=[str(R/'exec/c'),str(R/'exec/parse2'),str(R/'tests')]\n"
+    "t=pathlib.Path(sys.argv[2]);w=sys.argv[4]=='1'\n"
+    "specs=[('pp',['pp','--locations']),('lex',['lex','--locations']),"
+    "('parse',(['parse2','--warnings','--errors'] if w else ['parse2','--errors']))]\n"
+    "if sys.argv[3]=='cached':\n"
+    " from warnprep import cached_inputs\n"
+    " runner,reference=cached_inputs(t,specs,pathlib.Path(sys.argv[6]) if sys.argv[5]=='1' else None,'parser errors')\n"
+    " (t/'.tools').write_bytes(bytes(runner)+b'\\0'+bytes(reference))\n"
+    "else:\n"
+    " from compilerpack import built_model\n"
+    " for name,flags in specs:built_model(t,name,R/'exec/build/gen.py',flags)\n";
+
+typedef struct { const char *name, *src; } Case;
+static const Case CASES[] = {
+    {"unknown", "int main(void){return missing;}\n"},
+    {"semi", "int main(void){int n=3\nreturn n;}\n"},
+    {"expression", "int main(void){int x = ;}\n"},
+    {"three", "int one(int a){return a+nope1;}\nint two(int b){int c=b\nreturn c;}\nint three(void){return nope3;}\nint main(void){return one(1)+two(2)+three();}\n"},
+    {"splice", "#define TWO(a,b) \\\n((a)+(b))\nint main(void){return TWO(1,2)+gone;}\n"},
+    {"header", "#include <stdio.h>\nint main(void){\nprintf(\"hi\");\nreturn missing;\n}\n"},
+    {"tab", "int main(void){\n\treturn unknown;\n}\n"},
+    {"shadow", "enum {A=7}; int f(void){int A=2;return missing;} int main(void){return A;}\n"},
+    {"eof", "int main(void){return (2+;}\n"},
+    {"warning-before-error", "int f(void){int *p=3;return missing;} int main(void){int unused;return 0;}\n"},
+    {"printf-error", "int main(void){printf(\"%d\",missing);return 0;}\n"},
+    {"clean", "int main(void){return 3;}\n"},
+    {"complex", "int main(void){_Complex double z=1.0; return (int)__real__ z - 1;}\n"},
+    {0, 0}
+};
+
+static char *RUNNER, *REFERENCE, *PKG, *ROUTE, *RESOURCES, *INC;
+static Buf UNITS;                                   /* the COVERAGE units, as JSON list items */
+static void covered(const char *u) { if (UNITS.n) bstr(&UNITS, ", "); bstr(&UNITS, "\""); bstr(&UNITS, u); bstr(&UNITS, "\""); }
+static char *PACKED_LIMIT;                          /* cli/error-limit of the package on disk (0: none yet) */
+static void repack(void) {                          /* pkg.write_bytes(build([route],[cli, hdr])) */
+    Mount mounts[2]; Buf b = { 0, 0, 0 }; size_t n; char *lim = read_bytes(path2(RESOURCES, "error-limit"), &n);
+    /* the .py rebuilds before every case; its inputs change only with cli/error-limit, so equal bytes are reused */
+    if (PACKED_LIMIT && !strcmp(PACKED_LIMIT, lim)) { free(lim); return; }
+    free(PACKED_LIMIT); PACKED_LIMIT = lim;
+    mounts[0].prefix_hex = "00636c692f"; mounts[0].dir = RESOURCES;
+    mounts[1].prefix_hex = "006864722f"; mounts[1].dir = INC;
+    pack_build(ROUTE, mounts, 2, &b); write_bytes(PKG, b.p, b.n); free(b.p);
+}
+static Res got_of(char *f) { char *av[] = { RUNNER, "--bundle", PKG, "error", f, f, INC, 0 }; return run(av); }
+static Res ref_of(char *f, const char *limit) {
+    char *av[12], lim[64]; int k = 0;
+    av[k++] = REFERENCE;
+    if (WARNINGS) av[k++] = "-Wall";
+    if (limit) { snprintf(lim, sizeof lim, "-ferror-limit=%s", limit); av[k++] = lim; }
+    av[k++] = "-t"; av[k++] = "lnx/x86_64"; av[k++] = f; av[k++] = "-o"; av[k++] = "-"; av[k] = 0;
+    return run(av);
+}
+static int same(const Res *g, const Res *r, const char *err, size_t en) {
+    return g->rc == r->rc && g->on == r->on && !memcmp(g->out, r->out, g->on) && g->en == en && !memcmp(g->err, err, en);
+}
+static void mismatch(const char *head, const Res *g, const Res *r, const char *err, size_t en) {
+    Buf m = { 0, 0, 0 }; char t[64];
+    bstr(&m, "("); bstr(&m, head); snprintf(t, sizeof t, ", %d, %d, ", g->rc, r->rc); bstr(&m, t);
+    brepr(&m, g->err, g->en); bstr(&m, ", "); brepr(&m, err, en); bstr(&m, ")");
+    fail("AssertionError", m.p, 0);
+}
+static void write_src(char *f, const char *src) { write_bytes(f, src, strlen(src)); }
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash; const char *tmp; int i;
+    parse_args(argc, argv);
+
+    /* R = Path(__file__).resolve().parents[2] */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/../..", here); if (!realpath(t, ROOT)) fail("FileNotFoundError", "cannot resolve the repository root", t); }
+
+    /* tempfile.TemporaryDirectory(prefix='parser-errors-') */
+    tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TEMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = "/tmp";
+    snprintf(TD, sizeof TD, "%s/parser-errors-XXXXXX", tmp);
+    if (!mkdtemp(TD)) { TD[0] = 0; fail("FileNotFoundError", "No usable temporary directory found", 0); }
+    MADE = 1;
+    signal(SIGINT, SIG_DFL);
+    INC = path2(ROOT, "include");
+
+    {   /* the model helper: cached_inputs (models + verified tools) or built_model */
+        char *av[] = { "python3", "-c", PY_MODELS, ROOT, TD, REQUIRE_CACHED ? "cached" : "build", WARNINGS ? "1" : "0",
+                       REQUIRE_CACHED && HAVE_TOOLS ? "1" : "0", REQUIRE_CACHED && HAVE_TOOLS ? (char *)TOOLS : "", 0 };
+        int rc;
+        if (!REQUIRE_CACHED) {                     /* the .py builds run.c before the models */
+            const char *cc = getenv("EXEC_CC");
+            char *cv[] = { (char *)(cc ? cc : "cc"), "-O2", path2(ROOT, "exec/c/run.c"), "-o", path2(TD, "run"), 0 };
+            Res r = call(cv); res_free(&r);
+        }
+        rc = spawn(av);
+        if (rc) quit(rc);
+    }
+    if (REQUIRE_CACHED) {
+        size_t n; char *p = path2(TD, ".tools"), *tools;
+        tools = read_bytes(p, &n);
+        RUNNER = tools; REFERENCE = tools + strlen(tools) + 1;
+        if ((size_t)(REFERENCE - tools) > n) fail("ValueError", "bad tool paths", 0);
+    } else {
+        const char *ua = getenv("UA");
+        RUNNER = path2(TD, "run");
+        REFERENCE = xstrdup(ua ? ua : "/tmp/ua_ref");
+    }
+    {   static const char *names[] = { "pp", "lex", "parse", 0 };
+        for (i = 0; names[i]; i++) {
+            char tb[64], nt[64]; snprintf(tb, sizeof tb, "%s.tbl", names[i]); snprintf(nt, sizeof nt, "%s.net", names[i]);
+            { char *av[] = { RUNNER, "--check-net", path2(TD, tb), path2(TD, nt), 0 }; Res r = call(av); res_free(&r); }
+        }
+    }
+    ROUTE = path2(TD, "route.tsv");
+    { const char *r = "error\te2\tsource\tpp\tpp.net\nerror\te1\tpp\ttokens\tlex.net\nerror\te3\ttokens\ttape\tparse.net\n"; write_bytes(ROUTE, r, strlen(r)); }
+    RESOURCES = path2(TD, "cli");
+    if (mkdir(RESOURCES, 0777)) fail("OSError", "cannot create", RESOURCES);
+    write_bytes(path2(RESOURCES, "error-limit"), "", 0);
+    PKG = path2(TD, "pkg");
+
+    for (i = 0; CASES[i].name; i++) {
+        char fn[128], *f; Res g, r; const char *err; size_t en; Buf fixed = { 0, 0, 0 };
+        if (PART && PART != (i < 7 ? 1 : 2)) continue;
+        snprintf(fn, sizeof fn, "%s.c", CASES[i].name); f = path2(TD, fn); write_src(f, CASES[i].src);
+        repack();
+        g = got_of(f); r = ref_of(f, 0);
+        err = r.err; en = r.en;
+        if (!strcmp(CASES[i].name, "complex")) {     /* ref.stderr.replace(b'UNCOVERED\tref.parse\t', b'UNCOVERED\te3\t', 1) */
+            const char *needle = "UNCOVERED\tref.parse\t"; size_t nl = strlen(needle), k;
+            for (k = 0; k + nl <= r.en; k++) if (!memcmp(r.err + k, needle, nl)) break;
+            if (k + nl <= r.en) {
+                bput(&fixed, r.err, k); bstr(&fixed, "UNCOVERED\te3\t"); bput(&fixed, r.err + k + nl, r.en - k - nl);
+                err = fixed.p; en = fixed.n;
+            }
+        }
+        if (!same(&g, &r, err, en)) { Buf h = { 0, 0, 0 }; bstr(&h, "'"); bstr(&h, CASES[i].name); bstr(&h, "'"); mismatch(h.p, &g, &r, err, en); }
+        { char u[128]; snprintf(u, sizeof u, "case:%s", CASES[i].name); covered(u); }
+        printf("parser errors %s full result identical\n", CASES[i].name); fflush(stdout);
+        res_free(&g); res_free(&r); free(fixed.p); free(f);
+    }
+    if (PART == 0 || PART == 2) {
+        char *f = path2(TD, "struct-return.c"); Res g, r;
+        write_src(f, "typedef struct { int a; int b; } T;\nstatic T mk(int n){T t;t.a=n;t.b=n;return t;}\nstatic T g(int n){return mk(n);}\nint main(void){return g(2).a-2;}\n");
+        g = got_of(f); r = ref_of(f, 0);
+        if (!(r.rc == 0 && same(&g, &r, r.err, r.en))) mismatch("", &g, &r, r.err, r.en);
+        covered("struct-return");
+        printf("parser errors struct-return call full result identical\n"); fflush(stdout);
+        res_free(&g); res_free(&r);
+    }
+    if (PART == 0 || PART == 3) {
+        static const char *limits[] = { "1", "2", "0", "3", "20", 0 };
+        static const struct { const char *name, *src; } WIDE[] = {
+            {"wide-size", "int main(void){return sizeof(L\"ab\");}\n"}, {"wide-global", "int *p=L\"ab\"; int main(void){return 0;}\n"} },
+          UTF16[] = {
+            {"utf16-size", "int main(void){return sizeof(u\"ab\");}\n"}, {"utf16-global", "int *p=u\"ab\"; int main(void){return 0;}\n"} };
+        char *el = path2(RESOURCES, "error-limit"), *f; Res g;
+        for (i = 0; limits[i]; i++) {
+            Res r; Buf h = { 0, 0, 0 };
+            f = path2(TD, "limit.c"); write_src(f, CASES[3].src);
+            write_bytes(el, limits[i], strlen(limits[i]));
+            repack();
+            g = got_of(f); r = ref_of(f, limits[i]);
+            bstr(&h, "'"); bstr(&h, limits[i]); bstr(&h, "'");
+            if (!same(&g, &r, r.err, r.en)) mismatch(h.p, &g, &r, r.err, r.en);
+            { char u[64]; snprintf(u, sizeof u, "limit:%s", limits[i]); covered(u); }
+            printf("error limit %s full result identical\n", limits[i]); fflush(stdout);
+            res_free(&g); res_free(&r); free(f); free(h.p);
+        }
+        f = path2(TD, "unsupported.c"); write_src(f, "int main(void){int arr[2];int *p; p=&arr[1]\n*p=0;return arr[1];}\n");
+        write_bytes(el, "", 0);
+        repack();
+        g = got_of(f);
+        {   const char *tail = "1 error generated.\n"; size_t tl = strlen(tail); Buf m = { 0, 0, 0 }; char t[64];
+            snprintf(t, sizeof t, "CompletedProcess(returncode=%d, stdout=", g.rc); bstr(&m, t); brepr(&m, g.out, g.on);
+            bstr(&m, ", stderr="); brepr(&m, g.err, g.en); bstr(&m, ")");
+            if (!(g.rc == 1 && !g.on && contains(g.err, g.en, ":2:3: error: not covered: pointer arithmetic"))) fail("AssertionError", m.p, 0);
+            if (!(g.en >= tl && !memcmp(g.err + g.en - tl, tail, tl))) fail("AssertionError", 0, 0);
+            free(m.p);
+        }
+        covered("unsupported");
+        printf("prototype limitation retains its reason and gains a location; not reference-equivalence evidence\n"); fflush(stdout);
+        res_free(&g);
+        for (i = 0; i < 2; i++) {
+            char fn[64]; snprintf(fn, sizeof fn, "%s.c", WIDE[i].name); f = path2(TD, fn); write_src(f, WIDE[i].src);
+            g = got_of(f);
+            if (!(g.rc == 0 && g.on && !g.en)) {
+                Buf m = { 0, 0, 0 }; char t[32];
+                bstr(&m, "('"); bstr(&m, WIDE[i].name); snprintf(t, sizeof t, "', %d, ", g.rc); bstr(&m, t); brepr(&m, g.err, g.en); bstr(&m, ")");
+                fail("AssertionError", m.p, 0);
+            }
+            { char u[64]; snprintf(u, sizeof u, "wide:%s", WIDE[i].name); covered(u); }
+            res_free(&g); free(f);
+        }
+        printf("supported wide prefixes: 2 accepted without diagnostics; semantics checked by language gate\n"); fflush(stdout);
+        for (i = 0; i < 2; i++) {
+            char fn[64], loc[PATHN + 64]; const char *tail = "1 error generated.\n"; size_t tl = strlen(tail);
+            Buf m = { 0, 0, 0 }; char t[32];
+            snprintf(fn, sizeof fn, "%s.c", UTF16[i].name); f = path2(TD, fn); write_src(f, UTF16[i].src);
+            g = got_of(f);
+            bstr(&m, "('"); bstr(&m, UTF16[i].name); snprintf(t, sizeof t, "', %d, ", g.rc); bstr(&m, t); brepr(&m, g.err, g.en); bstr(&m, ")");
+            if (!(g.rc == 1 && !g.on)) fail("AssertionError", m.p, 0);
+            m.n = 0; bstr(&m, "('"); bstr(&m, UTF16[i].name); bstr(&m, "', "); brepr(&m, g.err, g.en); bstr(&m, ")");
+            if (!contains(g.err, g.en, "error: not covered: string prefix")) fail("AssertionError", m.p, 0);
+            m.n = 0; brepr(&m, g.err, g.en);
+            snprintf(loc, sizeof loc, "%s:1:%d:", f, (int)(strstr(UTF16[i].src, "u\"") - UTF16[i].src) + 1);
+            if (!contains(g.err, g.en, loc)) fail("AssertionError", m.p, 0);
+            if (!(g.en >= tl && !memcmp(g.err + g.en - tl, tail, tl))) fail("AssertionError", m.p, 0);
+            { char u[64]; snprintf(u, sizeof u, "utf16:%s", UTF16[i].name); covered(u); }
+            res_free(&g); free(f); free(m.p);
+        }
+        printf("reader refusals: 2 located failures, no recursive token parsing\n"); fflush(stdout);
+    }
+    printf("COVERAGE {\"part\": %d, \"units\": [%s], \"warnings\": %s}\n", PART, UNITS.p ? UNITS.p : "", WARNINGS ? "true" : "false");
+    quit(0);
+    return 0;
+}
