@@ -1,0 +1,262 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Prepared default exec-chain inputs; test verdicts are never cached.
+   --prepare constructs run, seed-gen and exact E2/E1/E3 JSON/table/network inputs.
+   --require-cached --part default verifies the full identity and all eleven files.
+   --materialize DIR copies verified inputs into a fresh owned private directory.
+   Each step and its caller must be bounded; consumers still run all three network
+   checks, all source comparisons and the unchanged known/revived/keep assertions.
+   Nondefault configurations use the original exec/c/chain.sh construction route. */
+#pragma unisa use cxlib.seedprep
+
+#define SELF "tests/execchainprepared.cx"
+
+static const char *const PARTS[] = { "default", 0 };
+static const sp_args ARGS = { "execchainprepared.cx", "--part", PARTS };
+static const char *const SEEDS[] = { SELF, "tests/execchainconsumer.sh", "exec/build/gen.py", "exec/c/tbl.py", "exec/c/net.py", "tests/bound", "tests/bound.py", "tests/lib.sh",
+    "tests/knownfail.py", "tests/knownfail.sh", "exec/c/provenance.py", "exec/c/chain.sh", "exec/pp/gen-delta.sh", "exec/parse2gen/gen-delta.sh",
+    "tests/c/a_char.c",
+    "tests/cxlib/seedprep.cx",
+    0 };
+static const char *const ENVKEYS[] = { "CC", "PATH", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
+    "GCC_EXEC_PREFIX", "SOURCE_DATE_EPOCH", "PYTHONPATH", "PYTHONHASHSEED", "LANG", "LC_ALL", "LD_LIBRARY_PATH",
+    "LD_PRELOAD", "LD_AUDIT", "PYTHONHOME", "PYTHONPYCACHEPREFIX", "PYTHONUSERBASE",
+    "TMPDIR", "TMP", "TEMP", "TZ", "LC_CTYPE", 0 };
+/* RECIPES: name -> (source, flags); '-I' + ROOT/seed is filled in by main */
+static const char *const RNAMES[] = { "seed-gen", "run", 0 };
+static const char *const RSRC[] = { "seed/gen.c", "exec/c/run.c", 0 };
+static char *RFLAGS[2][6] = { { "-std=c99", "-O2", "-w", 0, 0 }, { "-O2", "-std=c99", "-w", 0 } };
+static const char *const REQUIRED[] = { "e1.json", "e1.net", "e1.tbl", "e2.json", "e2.net", "e2.tbl", "e3.json", "e3.net", "e3.tbl", "run", "seed-gen", 0 };
+
+static char *KEY, *CACHE, *WORK; static sp_json *BASIS; static int PREPARE;
+
+static void need(const char *reason) {
+    fflush(stdout); sp_scratch_remove();
+    fprintf(stderr, "NEED_PREPARE exec chain: %s\n", reason); fflush(stderr); exit(75);
+}
+static void assertion(int ok) { if (!ok) sp_raise_line("AssertionError"); }
+static char *sha_or_raise(const char *path) { char hex[65]; if (sp_sha_file(path, hex)) sp_crash(); return sp_xstrdup(hex); }
+static int caught(const char *cls) {   /* except (SystemExit, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) */
+    return !strcmp(cls, "SystemExit") || !strcmp(cls, "OSError") || strstr(cls, "Error") && (!strcmp(cls, "FileNotFoundError")
+        || !strcmp(cls, "PermissionError") || !strcmp(cls, "IsADirectoryError") || !strcmp(cls, "NotADirectoryError")
+        || !strcmp(cls, "FileExistsError") || !strcmp(cls, "ValueError") || !strcmp(cls, "UnicodeDecodeError")
+        || !strcmp(cls, "json.decoder.JSONDecodeError") || !strcmp(cls, "KeyError") || !strcmp(cls, "TypeError"))
+        || !strcmp(cls, "subprocess.TimeoutExpired");
+}
+static void try_hook(const char *cls, const char *msg) { if (caught(cls)) need(msg); }
+static void rethrow(void) { if (caught(sp_exc())) need(sp_emsg()); sp_crash(); }
+
+static int read_sets(const char *cc, sp_json **out) {
+    sp_json *o = sp_jnew(SP_JOBJ), *r; int n;
+    for (n = 0; RNAMES[n]; n++) { if (sp_cc_read_set(cc, RSRC[n], RFLAGS[n], &r)) return -1; sp_oset(o, RNAMES[n], r); }
+    *out = o; return 0;
+}
+static sp_json *cc_version(const char *cc) {
+    char *a[] = {(char *)cc, "--version", 0}, *o=0, *e=0; size_t on=0,en=0;
+    int rc=sp_spawn(a,5,&o,&on,&e,&en); sp_json *v=sp_jnew(SP_JOBJ);
+    if(rc) need("compiler --version failed");
+    sp_oset(v,"stdout",sp_jstrn(o,on)); sp_oset(v,"stderr",sp_jstrn(e,en));
+    free(o);free(e);return v;
+}
+static int valid(void) {
+    static const char *const execs[] = { "seed-gen", "run", 0 };
+    if (sp_valid_manifest(CACHE, BASIS, REQUIRED, execs, "role or required set mismatch") == 0) return 1;
+    if (caught(sp_exc())) {
+        if (!PREPARE) {
+            sp_buf m = {0, 0, 0};
+            sp_bstr(&m, "该 key 无有效准备（源或 actor 闭包变了，或产物缺坏）: "); sp_bstr(&m, KEY); sp_bstr(&m, "; "); sp_bstr(&m, sp_emsg());
+            need(m.s);
+        }
+        return 0;
+    }
+    sp_crash(); return 0;
+}
+/* step(label, cmd): native tests/bound 55 *cmd, stdout+stderr into WORK/LABEL.log; the row to steps.jsonl and
+   stdout; a failure prints the log and exits with its status */
+static void step(const char *label, char **cmd) {
+    char *a[24], *logp = sp_pjoin(WORK, sp_cat(label, ".log")), *rows = sp_pjoin(WORK, "steps.jsonl");
+    int k = 0, i, fd, rc; double start = sp_now(); sp_json *row, *argv; sp_buf line = {0, 0, 0}; char t[32];
+    a[k++] = sp_pjoin(sp_root(), "tests/bound"); a[k++] = "55";
+    for (i = 0; cmd[i]; i++) a[k++] = cmd[i];
+    a[k] = 0;
+    if ((fd = open(logp, O_WRONLY | O_CREAT | O_TRUNC, 0666)) < 0) { sp_throw_os(errno, logp); sp_crash(); }
+    rc = sp_call(a, fd, -2, 0);
+    close(fd);
+    row = sp_jnew(SP_JOBJ);
+    sp_oset(row, "label", sp_jstr(label));
+    argv = sp_jnew(SP_JARR); for (i = 0; cmd[i]; i++) sp_apush(argv, sp_jstr(cmd[i]));
+    sp_oset(row, "argv", argv);
+    { sp_json *r = sp_jnew(SP_JINT); snprintf(t, sizeof t, "%d", rc); r->s = sp_xstrdup(t); sp_oset(row, "rc", r); }
+    { sp_json *f = sp_jnew(SP_JFLOAT); f->f = start; sp_oset(row, "start_monotonic", f); }
+    { sp_json *f = sp_jnew(SP_JFLOAT); f->f = sp_now() - start; sp_oset(row, "seconds", f); }
+    sp_oset(row, "log_sha256", sp_jstr(sha_or_raise(logp)));
+    sp_jdump(&line, row, 0, 0); sp_bch(&line, '\n');
+    if ((fd = open(rows, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) { sp_throw_os(errno, rows); sp_crash(); }
+    if (write(fd, line.s, line.n) != (ssize_t)line.n) { sp_throw_os(errno, rows); sp_crash(); }
+    close(fd);
+    printf("SEED_PREP_STEP %s", line.s); fflush(stdout);
+    if (rc) {
+        size_t n; char *log = sp_read_file(logp, &n);
+        if (!log) sp_crash();
+        fwrite(log, 1, n, stdout);
+        sp_exit(rc);
+    }
+}
+
+static void materialize(const char *dir) {
+    struct stat st; int i; const char *home = getenv("HOME"), *tmp = getenv("TMPDIR");
+    if (!dir || dir[0] != '/' || !strcmp(dir, "/") || !strcmp(dir, sp_root()) ||
+        (home && !strcmp(dir, home)) || (tmp && !strcmp(dir, tmp))) need("materialize requires a private scratch directory");
+    if (lstat(dir, &st) || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 0077))
+        need("materialize destination must be an owned private directory");
+    valid();
+    for (i = 0; REQUIRED[i]; i++) {
+        char *src = sp_pjoin(CACHE, REQUIRED[i]), *dst = sp_pjoin(dir, REQUIRED[i]);
+        char before[65], after[65]; size_t n, pos = 0; char *data; int fd, executable;
+        if (sp_sha_file(src, before)) sp_crash();
+        data = sp_read_file(src, &n); if (!data) sp_crash();
+        executable = !strcmp(REQUIRED[i], "run") || !strcmp(REQUIRED[i], "seed-gen");
+        fd = open(dst, O_WRONLY | O_CREAT | O_EXCL, executable ? 0755 : 0644);
+        if (fd < 0) { sp_throw_os(errno, dst); sp_crash(); }
+        while (pos < n) {
+            ssize_t wrote = write(fd, data + pos, n - pos);
+            if (wrote < 0 && errno == EINTR) continue;
+            if (wrote <= 0) { sp_throw_os(errno ? errno : EIO, dst); close(fd); sp_crash(); }
+            pos += (size_t)wrote;
+        }
+        free(data);
+        if (close(fd)) { sp_throw_os(errno, dst); sp_crash(); }
+        if (sp_sha_file(dst, after)) sp_crash();
+        assertion(!strcmp(before, after));
+        if (executable && access(dst, X_OK)) need("materialized binary is not executable");
+        free(src); free(dst);
+    }
+    valid();
+}
+
+int main(int argc, char **argv) {
+    int prep, req, i; const char *dest = 0, *part; char *which, *cc, *sources, *py, *base, *seedinc; char hex[65];
+    sp_json *actors, *edges, *reads, *basis, *x; sp_buf canon = {0, 0, 0}; extern char **environ;
+    if (argc == 3 && !strcmp(argv[1], "--materialize")) { dest = argv[2]; prep = 0; req = 1; part = "default"; }
+    else sp_parse_args(&ARGS, argc, argv, &prep, &req, &part);
+    if (prep == req || (prep && part) || (req && !part)) sp_arg_error(&ARGS, "choose --prepare or --require-cached --part NAME");
+    PREPARE = prep;
+    /* Explicit unsupported requests refuse; ordinary chain configurations remain on its original path. */
+    { const char *v=getenv("SEED_GEN"); if(v&&strcmp(v,"1")) need("only SEED_GEN=1 is implemented");
+      v=getenv("SEED_GEN_BIN"); if(v&&*v) need("explicit SEED_GEN_BIN is not implemented");
+      v=getenv("SEED_GEN_CC"); if(v&&*v&&strcmp(v,"cc")) need("SEED_GEN_CC must be cc");
+      v=getenv("NETWORK"); if(v&&strcmp(v,"1")) need("only NETWORK=1 is implemented"); }
+    sp_init(__FILE__);
+    seedinc = sp_cat("-I", sp_pjoin(sp_root(), "seed")); RFLAGS[0][3] = seedinc;
+    which = sp_which("cc");
+    if (!which) need("system cc missing");
+    cc = sp_realpath_ns(which);
+    { const char *c = getenv("CC"); if (c && *c && strcmp(c, "cc")) need("unverified watchdog CC override; use the keyed system cc"); }
+    /* try: ... except (SystemExit, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e: need(e) */
+    sp_set_raise_hook(try_hook);
+    sp_actor_closure(SEEDS, &actors, &edges);
+    if (read_sets(cc, &reads)) rethrow();
+    sp_set_raise_hook(0);
+    assertion(sp_getitem(actors, SELF) && sp_getitem(actors, "tests/cxlib/seedprep.cx") && sp_getitem(actors, "tests/bound.c"));
+    basis = sp_jnew(SP_JOBJ);
+    sp_oset(basis, "schema", sp_jstr("exec-chain-default-models-v2"));
+    sources = sp_source_digest();
+    sp_oset(basis, "sources", sp_jstr(sources));
+    sp_oset(basis, "actors", actors);
+    sp_oset(basis, "actor_edges", edges);
+    sp_oset(basis, "cc_read_sets", reads);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; RNAMES[i]; i++) {
+        sp_json *r = sp_jnew(SP_JARR), *f = sp_jnew(SP_JARR); int k;
+        sp_apush(r, sp_jstr(RSRC[i])); for (k = 0; RFLAGS[i][k]; k++) sp_apush(f, sp_jstr(RFLAGS[i][k]));
+        sp_apush(r, f); sp_oset(x, RNAMES[i], r);
+    }
+    sp_oset(basis, "recipes", x);
+    sp_oset(basis, "compiler", sp_jstr(cc));
+    sp_oset(basis, "compiler_sha256", sp_jstr(sha_or_raise(cc)));
+    sp_oset(basis, "compiler_version", cc_version(cc));
+    /* Exact generators and conversion recipes, not merely similarly named nets. */
+    sp_oset(basis, "model_recipes", sp_jstr("seed-gen pp e2.json; interpreter exec/build/gen.py lex e1.json --typed; seed-gen parse2 e3.json; for s=e2,e1,e3: interpreter exec/c/tbl.py s.json s.tbl; interpreter exec/c/net.py s.tbl s.net"));
+    py = sp_realpath_ns(sp_python());
+    sp_oset(basis, "interpreter", sp_jstr(py));
+    sp_oset(basis, "interpreter_sha256", sp_jstr(sha_or_raise(py)));
+    x = sp_jnew(SP_JARR); sp_apush(x, sp_jstr(sp_uname_field("-s"))); sp_apush(x, sp_jstr(sp_uname_field("-m")));
+    sp_oset(basis, "host", x);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; ENVKEYS[i]; i++) { const char *v = getenv(ENVKEYS[i]); sp_oset(x, ENVKEYS[i], v ? sp_jstr(v) : sp_jnew(SP_JNULL)); }
+    sp_oset(basis, "environment", x);
+    x = sp_jnew(SP_JOBJ);
+    for (i = 0; environ[i]; i++) {
+        static const char *const pre[] = { "E1", "E2", "E3", "E4", "UNISA_", "UNISACC_", "SEED_", "DYLD_", 0 }; const char *eq = strchr(environ[i], '='); int p;
+        if (!eq) continue;
+        /* A watchdog deadline controls admission/time, not deterministic model bytes.
+           Keep passing it to subprocesses; exclude only this exact name from the model key. */
+        if ((size_t)(eq - environ[i]) == strlen("UNISACC_BOUND_DEADLINE_MONO") &&
+            !memcmp(environ[i], "UNISACC_BOUND_DEADLINE_MONO", strlen("UNISACC_BOUND_DEADLINE_MONO"))) continue;
+        for (p = 0; pre[p]; p++) if (!strncmp(environ[i], pre[p], strlen(pre[p])) && (size_t)(eq - environ[i]) >= strlen(pre[p])) {
+            sp_osetn(x, environ[i], (size_t)(eq - environ[i]), sp_jstr(eq + 1)); break; }
+    }
+    sp_oset(basis, "construction_environment", x);
+    BASIS = basis;   /* json.loads(json.dumps(basis, sort_keys=True)): already JSON values here */
+    sp_jdump(&canon, basis, 0, 1);
+    cx_sha256_hex(canon.s, canon.n, hex); KEY = sp_xstrdup(hex);
+    {   const char *mc = getenv("UNISACC_MODEL_CACHE");
+        if (mc) base = sp_ppath(mc); else { char *t = sp_gettempdir(), *u = sp_cat(t, "/unisacc-model-cache"); base = sp_ppath(u); }
+      CACHE = sp_pjoin(base, sp_cat("exec-chain-default-", KEY)); }
+    if (prep) {
+        char *m, *sg; sp_buf man = {0, 0, 0}; sp_json *doc, *outs, *a2, *e2, *r2; struct stat s; const char **seeds2;
+        sp_mkdirs(base);
+        sp_lock(sp_cat(CACHE, ".lock"));
+        if (valid()) { printf("exec chain model HIT %s\n", KEY); return 0; }
+        WORK = sp_xstrdup(sp_mkdtemp_py(base, "exec-chain-prepare-"));
+        for (i = 0; RNAMES[i]; i++) {
+            char *c[12]; int k = 0, j;
+            c[k++] = cc; for (j = 0; RFLAGS[i][j]; j++) c[k++] = RFLAGS[i][j];
+            c[k++] = i == 1 ? (char *)RSRC[i] : sp_pjoin(sp_root(), RSRC[i]); c[k++] = "-o"; c[k++] = sp_pjoin(WORK, RNAMES[i]); c[k] = 0;
+            step(sp_cat("build-", RNAMES[i]), c);
+        }
+        sg = sp_pjoin(WORK, "seed-gen");
+        { char *c[] = { sg, "pp", sp_pjoin(WORK, "e2.json"), 0 }; step("model-e2", c); }
+        { char *c[] = { (char *)sp_python(), "exec/build/gen.py", "lex", sp_pjoin(WORK, "e1.json"), "--typed", 0 }; step("model-e1-typed", c); }
+        { char *c[] = { sg, "parse2", sp_pjoin(WORK, "e3.json"), 0 }; step("model-e3", c); }
+        { static const char *nets[]={"e2","e1","e3",0}; int j;
+          for(j=0;nets[j];j++) {
+              const char *s=nets[j];
+              char *a[]={ (char *)sp_python(), "exec/c/tbl.py", sp_pjoin(WORK,sp_cat(s,".json")), sp_pjoin(WORK,sp_cat(s,".tbl")),0 };
+              char *b[]={ (char *)sp_python(), "exec/c/net.py", sp_pjoin(WORK,sp_cat(s,".tbl")), sp_pjoin(WORK,sp_cat(s,".net")),0 };
+              step(sp_cat("table-",s),a);step(sp_cat("network-",s),b);
+          } }
+        seeds2 = sp_xmalloc((size_t)(actors->n + 1) * sizeof *seeds2);
+        for (i = 0; i < actors->n; i++) seeds2[i] = actors->k[i];
+        seeds2[actors->n] = 0;
+        { char *now = sp_source_digest(); int same = !strcmp(now, sources);
+          if (same) { sp_actor_closure(seeds2, &a2, &e2); same = sp_jeq(a2, actors) && sp_jeq(e2, edges); }
+          assertion(same); }
+        assertion(!strcmp(sha_or_raise(cc),sp_getitem(basis,"compiler_sha256")->s));
+        assertion(!strcmp(sha_or_raise(py),sp_getitem(basis,"interpreter_sha256")->s));
+        assertion(!strcmp(sp_realpath_ns(sp_which("cc")),cc));
+        assertion(sp_jeq(cc_version(cc),sp_getitem(basis,"compiler_version")));
+        if (read_sets(cc, &r2)) sp_crash();
+        assertion(sp_jeq(r2, reads));
+        m = sp_pjoin(WORK, "manifest.json");
+        doc = sp_jnew(SP_JOBJ); outs = sp_jnew(SP_JOBJ);
+        sp_oset(doc, "basis", basis);
+        for (i = 0; REQUIRED[i]; i++) sp_oset(outs, REQUIRED[i], sp_jstr(sha_or_raise(sp_pjoin(WORK, REQUIRED[i]))));
+        sp_oset(doc, "outputs", outs);
+        sp_jdump(&man, doc, 0, 1); sp_bch(&man, '\n');
+        if (cx_write(m, man.s, man.n)) { sp_throw_os(errno ? errno : EIO, m); sp_crash(); }
+        sp_prov_write(m, sources);
+        /* the previous cache entry ($UNISACC_MODEL_CACHE) moves into its root's .trash through the one deletion guard
+           (include/unisa_safedel.h); a refusal is fatal */
+        if (stat(CACHE, &s) == 0) { if (cx_trash(CACHE)) { sp_throw_os(EPERM, CACHE); sp_crash(); } }
+        else if (errno != ENOENT) { sp_throw_os(errno, CACHE); sp_crash(); }
+        if (rename(WORK, CACHE)) { sp_throw_os(errno, WORK); sp_crash(); }
+        sp_scratch_forget();
+        assertion(valid());
+        printf("exec chain model PREPARED %s\n", KEY);
+        return 0;
+    }
+    if (dest) { materialize(dest); return 0; }
+    valid();
+    printf("%s\n",CACHE); /* consumer receives only an attested, SHA-checked model directory */
+    return 0;
+}
