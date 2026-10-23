@@ -13,11 +13,13 @@ import gatedecl
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Native stamp binding only; the canonical/Merkle algorithm and cache live in C.
-_native_path = subprocess.check_output(['sh', str(ROOT/'tests/gatecanon-native'),
-                                        sysconfig.get_path('include')], text=True, timeout=30).strip()
-_native_spec = importlib.util.spec_from_file_location('_gatecanon', _native_path)
-_native_stamp = importlib.util.module_from_spec(_native_spec)
-_native_spec.loader.exec_module(_native_stamp)
+# Pure result comparison exits before fingerprinting; it needs no stamp builder.
+if __name__ != '__main__' or '--k2b-compare' not in sys.argv[1:]:
+    _native_path = subprocess.check_output(['sh', str(ROOT/'tests/gatecanon-native'),
+                                            sysconfig.get_path('include')], text=True, timeout=30).strip()
+    _native_spec = importlib.util.spec_from_file_location('_gatecanon', _native_path)
+    _native_stamp = importlib.util.module_from_spec(_native_spec)
+    _native_spec.loader.exec_module(_native_stamp)
 # comboot records its stages in ROOT/out/comboot/stages.json: a seed result from another
 # checkout does not put stage 1 there (0.0.21: stage2/3 "recorded before stage 1")
 LOCATION_BOUND = ('com-comboot-',)
