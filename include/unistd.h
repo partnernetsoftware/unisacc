@@ -292,7 +292,7 @@ static int dup2(int __u_old, int __u_new) {
 #if defined(__APPLE__) || defined(__x86_64__)
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup2), __u_old, __u_new, 0, 0, 0));
 #else
-    if (__u_old == __u_new) { long __u_r; __u_r = __fcntl(__u_old, 1, 0); return __u_r < 0 ? (int)_unisa_ret(__u_r) : __u_new; }   /* F_GETFD: is it open */
+    if (__u_old == __u_new) { long __u_r; __u_r = __fcntl(__u_old, 1, 0); return __u_r < 0 ? (int)_unisa_ret(__u_r) : __u_new; }   /* F_GETFD: is OLD a valid descriptor */
     return (int)_unisa_ret(__syscall6(_UNISA_NR_dup3, __u_old, __u_new, 0, 0, 0));
 #endif
 }

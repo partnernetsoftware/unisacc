@@ -124,6 +124,10 @@ F1 落地执行口径：每刀在 archive 导出的独立 main 中经 landlock�
 
 F1 第1刀 vsnprintf/vprintf：scratch 已重生成 kernel/facts（30表无差异）、ABI manifest 523项；gen/parse2 键未变。正式 PP 重采四步全 rc0，最大30.66秒。根产品仍为旧根，仅作工具载体；本刀尚非最终产品验收。
 
+F1 第2刀 dup2/fopen 修剪：kernel/facts/ABI 已重生成，PP 四步重采全 rc0（最大31.76秒）；gen 键变为624c68f6d0891b83、parse2未变，同步两实现常量。旧根的内嵌修剪图仍旧，直接跑专项返回1，不能记该旧根为新刀产品；本刀重建经典参考后两项返回0，最终模型专项亦已0。根只在第7刀安装。
+
+第2刀首轮提交被声明覆盖检查正确拒绝：libneed 不覆盖 exec/facts/pp-autoinc-gen.tsv，facts-export/pp-leaf-seal 属合同检查，不能代替产品套件声明。补点 exec-pp-literals（其树声明覆盖 exec/include/seed），保留所有原有派生闸，不修改覆盖表。
+
 ### 版本状态与可核验进度
 
 | 项 | 当前口径 | 核验来源/限制 |

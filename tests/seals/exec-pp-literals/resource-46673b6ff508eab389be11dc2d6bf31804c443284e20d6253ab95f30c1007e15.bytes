@@ -281,7 +281,7 @@ static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
 static FILE *fopen(const char *__u_path, const char *__u_mode) {
     int __u_fd;
 #ifdef _WIN32
-    /* Windows has no open(2), and CreateFileA wants its own shapes.  They
+    /* Windows has no POSIX file-opening call, and CreateFileA wants its own shapes.  They
        are built HERE and not in the encoder, because this is the only place
        that knows whether the program is being compiled for Windows. */
     long __u_access;
@@ -320,7 +320,7 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
         /* The gate answers -errno on Linux and Darwin (see the __write audit
            above); Windows' CreateFileA gate answers -1.  Without this line
            errno stayed 0 and sbase said "fopen /nonexistent: Success"
-           [R13-0b #25].  A bare -1 is reported as ENOENT: an open that
+           [R13-0b #25].  A bare -1 is reported as ENOENT: an fopen that
            failed with no code is almost always a missing file. */
         errno = 0 - __u_fd;
 #ifdef _WIN32
