@@ -20,6 +20,9 @@
 
    - modelobject 原生消费者落地后：在同一冻结 scratch、与正式队列完全相同环境，分别为 `reference`、`runtime`、`x86_64-prune`、`x86_64-lower`、`x86_64-elf`、`arm64-prune`、`arm64-lower`、`arm64-elf` 独立执行 `tests/bound 55 sh tests/cxbin tests/modelobjectprepared.cx --prepare --part PART`，每份单独限时；再开 fresh `tests/release.sh --com` 全量上下文。具名 gate 的 `UNISA_JOBS=2` 是另一真实身份，须匹配预建，不混用键。八个 prepare 声明不构成调度依赖；消费者仍验所有输入并实际执行六次全域网络比较和22对象比较。原冷40超时/旧 Python 闸结果保留；预建和缓存命中均不算消费者通过。
 
+   - unitparse 原生消费者：在同一冻结scratch、与正式队列完全相同环境，原样取 `tests/unitparsecheck.sh` 中的原 `_BOUND`、`b` 与stamp定义，再按该wrapper第一/第二/第三个fresh声明分别预建reference、model、dumper；原命令argv和原b58不能改，因为stamp绑定命令文本。每份放在独立 `tests/bound 55 sh PREPARE_ONE_SCRIPT PART` 窗口，按reference→model→dumper顺序。历史构造重放脚本只留out，不新增跟踪解释器执行器。
+     无效参数 `tests/bound 55 sh tests/cxbin tests/unitparsecheck.cx --invalid-compile-probe` 的预期rc1仅预编译工具，不计消费者通过。新index路径产生独立fresh目录，不能复用另一导出的stamp；预建后仍实际运行原预算exec-unitparse及fresh完整发布队列，保留旧超时与原负控首红。
+
 3. 长期轨道（不阻塞 0.0.43）：零 Python（剥离 W2→W3→W4；「闸即数据」：5 个通用 .cx 执行器取代逐个移植）、删除守卫第 3 轮加固（TOCTOU 改 fd 遍历、TMPDIR 祖先、天花板旗标、扫描器漏项、豁免行内容哈希）、flownet W5→W6 B2…→W7、CX2b 模块根、0.0.44 分段产品入口 `unisacc-{stage}.com`。
 
 ## 3. 必守的运行纪律（今天付出了代价）

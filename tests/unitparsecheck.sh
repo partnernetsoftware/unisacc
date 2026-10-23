@@ -7,4 +7,4 @@ b() { "$_BOUND" 58 "$@"; }
 fresh "$X/unitparse-ref" b ./tests/build_ref.sh "$X/unitparse-ref.c" "$X/unitparse-ref" -- $REFSRC
 fresh "$X/unitparse.json" b python3 exec/build/gen.py parse2 "$X/unitparse.json" -- exec/parse2/*.py exec/parse2/*.tsv exec/parse/*.py $PYSRC
 fresh "$X/unitparse-dump" b ./exec/parse/mkdump.sh "$X/unitparse-ref.c" "$X/unitparse-dump" -- "$X/unitparse-ref.c" exec/parse/mkdump.sh
-b python3 tests/unitparsecheck.py "$X/unitparse.json" "$X/unitparse-ref" "$X/unitparse-dump"
+b sh ./tests/cxbin tests/unitparsecheck.cx "$X/unitparse.json" "$X/unitparse-ref" "$X/unitparse-dump"

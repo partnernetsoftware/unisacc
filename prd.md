@@ -693,3 +693,7 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - modelobject 首次14项索引闸13绿，消费者内命令30s红；同index随后直接bound40热跑22对象0。实际-cx-plan与cxbin trace证实：相对准备入口与消费者绝对入口的三单元路径/缓存键不同，导致消费者重复冷编译。sp_init只设ROOT不chdir；sp_spawn子进程会chdir ROOT。最小修复显式checked chdir(ROOT)，准备源统一相对tests/modelobjectprepared.cx，保持绝对wrapper、完整路径/文件SHA闭包及30s预算；不能仅用热0当修复，重新八份独立构造/21cmp和14项闸。
 
 - 2026-10-24 消费者监督清理补刀：modelobject cmd外sp_spawn原30会早于内bound30既有N+2清理截止杀父，挂起setsid后代存在漏清风险。本刀仅外监督32.25=命令30+既有清理2+.25调度余量，命令/整suite预算不变，通用bound/seedprep不动，须真实30秒父孙挂起负控与PID消失证明。exec-chain已有cd R，prepared源也统一相对以复用job同入口；保留完整路径和源SHA缓存键，原cxbin修复前340证据不能代替新树验收。
+
+- 2026-10-24 unitparse 消费者迁自有 .cx：原wrapper三个fresh及b58/三参数顺序不变；保留5个unit的reference/simulator/native三方逐字节比较与whole-fib原simulator/reference比较、原10/30预算和步限，不虚构whole native新增验收。候选已实际正控、ref末尾字节扰动与坏Net拒绝/恢复、原包字节等价；原Python仅原字节移动保留out后退出运行域。仍调用旧构造器，不能宣称整条链脱Python；索引独立预建和正式具名闸另采证。
+
+- unitparse 首索引六项5绿，消费者16s真0；唯一G5红是HANDOFF新增复制原生成器调用文本（该文档在冻结术语baseline外）。改为引用现有wrapper三个fresh原声明与次序，不再新复制解释器可执行声明；不改运行代码、扫描器或白名单，原红日志保留并重跑原六项。

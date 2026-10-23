@@ -1,0 +1,115 @@
+/* Native E3 unit-mode consumer; existing constructors and budgets retained. */
+#pragma unisa use cxlib.seedprep
+#pragma unisa use cxlib.lexdelta
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.pyrun
+
+static const char *up_names[]={"function","global","external","main","static"};
+static const char *up_sources[]={
+ "int twice(int x){return x*2;}\n",
+ "int count=3; static int hidden; int get(void){return count+hidden;}\n",
+ "extern int count; int twice(int); int get(void){return twice(count);}\n",
+ "int main(void){return 0;}\n",
+ "static int f(void){return 2;} int g(void){return f();}\n"
+};
+static char *up_ev,*up_tmp;
+static sp_buf up_rows={0};
+static void up_put(const char *p,const void *b,size_t n) {
+ FILE *f=fopen(p,"wb");int ok;
+ if(!f){sp_throw_os(errno,p);sp_crash();}
+ ok=fwrite(b,1,n,f)==n;if(fclose(f))ok=0;
+ if(!ok)sp_raise_line("OSError: unitparse write failed");
+}
+static void up_new(const char *p,const void *bytes,size_t n) {
+ int fd=open(p,O_WRONLY|O_CREAT|O_EXCL,0600);size_t at=0;ssize_t k;
+ if(fd<0){sp_throw_os(errno,p);sp_crash();}
+ while(at<n){k=write(fd,(const char *)bytes+at,n-at);if(k<0&&errno==EINTR)continue;
+  if(k<=0){close(fd);sp_raise_line("OSError: unitparse evidence write failed");}at+=(size_t)k;}
+ if(close(fd))sp_raise_line("OSError: unitparse evidence close failed");
+}
+static char *up_evidence(const char *p) {
+ char *r,*prefix;struct stat st;size_t n;
+ if(!p||p[0]!='/')sp_raise_line("ValueError: evidence requires an absolute owned out directory");
+ r=sp_realpath_ns(p);prefix=sp_cat(sp_root(),"/out/");n=strlen(prefix);
+ if(strcmp(r,p)||strncmp(r,prefix,n)||!r[n]||lstat(r,&st)||!S_ISDIR(st.st_mode)||st.st_uid!=geteuid())
+  sp_raise_line("ValueError: unsafe evidence directory");
+ free(prefix);return r;
+}
+/* Keep each original subprocess budget; bound also covers descendants. */
+static char *up_command(char **a,int seconds,int typespell,size_t *n) {
+ char *v[32],limit[16],why[2048];pr_result r;int i,k=0;
+ snprintf(limit,sizeof limit,"%d",seconds);
+ v[k++]=sp_pjoin(sp_root(),"tests/bound");v[k++]=limit;
+ for(i=0;a[i];i++){if(k>=31)sp_raise_line("AssertionError: unitparse argv overflow");v[k++]=a[i];}v[k]=0;
+ /* Command bound remains N; allow its existing N+2 cleanup and 0.25 final-action epsilon. */
+ if(pr_run(v,0,typespell?"UA_TYPESPELL":0,typespell?"1":0,seconds+2.25,&r,why,sizeof why)) {
+  fprintf(stderr,"%s\n",why);sp_raise_line("AssertionError: unitparse command launch or timeout failed");
+ }
+ if(r.rc){fprintf(stderr,"unitparse command rc=%d: %s\n",r.rc,a[0]);
+  if(r.err)fwrite(r.err+(r.errn>2000?r.errn-2000:0),1,r.errn>2000?2000:r.errn,stderr);
+  pr_free(&r);sp_raise_line("AssertionError: unitparse command failed");}
+ free(r.err);if(n)*n=r.outn;return r.out;
+}
+static int up_files(void *ctx,const unsigned char *key,size_t kn,const unsigned char **v,size_t *vn) {
+ int *unit=(int *)ctx;
+ if(*unit&&kn==10&&!memcmp(key,"\0cli/funit",10)){*v=(const unsigned char *)"1";*vn=1;return 1;}
+ return 0;
+}
+static void up_record(const char *name,const char *kind,const void *data,size_t n,int status) {
+ char *leaf,*p,h[65],num[40];
+ if(!up_ev)return;
+ leaf=sp_cat(name,sp_cat("-",sp_cat(kind,".bin")));p=sp_pjoin(up_ev,leaf);up_new(p,data,n);
+ if(sp_sha_file(p,h))sp_crash();
+ sp_bstr(&up_rows,name);sp_bch(&up_rows,'\t');sp_bstr(&up_rows,kind);sp_bch(&up_rows,'\t');
+ snprintf(num,sizeof num,"%d",status);sp_bstr(&up_rows,num);sp_bch(&up_rows,'\t');
+ snprintf(num,sizeof num,"%zu",n);sp_bstr(&up_rows,num);sp_bch(&up_rows,'\t');sp_bstr(&up_rows,h);sp_bch(&up_rows,'\n');
+}
+static void up_compare(const char *name,const char *kind,const unsigned char *got,size_t gn,const char *want,size_t wn,int status) {
+ size_t first=0;
+ if(status==0&&gn==wn&&!memcmp(got,want,gn))return;
+ while(first<gn&&first<wn&&got[first]==(unsigned char)want[first])first++;
+ if(up_ev)up_new(sp_pjoin(up_ev,"tapes.tsv"),up_rows.s,up_rows.n);
+ fprintf(stderr,"unitparse mismatch case=%s kind=%s status=%d actual=%zu expected=%zu first=%zu\n",name,kind,status,gn,wn,first);
+ sp_raise_line("AssertionError: unitparse tapes differ or simulator did not accept");
+}
+int main(int argc,char **argv) {
+ char *json,*ref,*dumper,*run,*table,*net,*manifest,*resources,*package;ld_delta *delta;int i,count=0;
+ sp_init(__FILE__);atexit(sp_scratch_remove);
+ if(argc!=4&&argc!=6)sp_raise_line("ValueError: usage unitparsecheck.cx JSON REF DUMPER [--evidence ABS_EXISTING_OUT_DIR]");
+ if(argc==6){if(strcmp(argv[4],"--evidence"))sp_raise_line("ValueError: expected --evidence");up_ev=up_evidence(argv[5]);}
+ json=argv[1];ref=argv[2];dumper=argv[3];delta=ld_load(json,0,0);
+ up_tmp=sp_xstrdup(sp_mkdtemp_py(sp_gettempdir(),"unisacc-unitparse-"));
+ run=sp_pjoin(up_tmp,"run");table=sp_pjoin(up_tmp,"model.tbl");net=sp_pjoin(up_tmp,"model.net");
+ {char *a[]={"cc","-O2","-o",run,sp_pjoin(sp_root(),"exec/c/run.c"),0};free(up_command(a,30,0,0));}
+ {char *a[]={(char *)sp_python(),sp_pjoin(sp_root(),"exec/c/tbl.py"),json,table,0};free(up_command(a,30,0,0));}
+ {char *a[]={(char *)sp_python(),sp_pjoin(sp_root(),"exec/c/net.py"),table,net,0};free(up_command(a,30,0,0));}
+ {char *a[]={run,"--check-net",table,net,0};size_t n;char *out=up_command(a,30,0,&n);
+  if(up_ev)up_new(sp_pjoin(up_ev,"netcheck.log"),out,n);free(out);}
+ manifest=sp_pjoin(up_tmp,"routes");
+ {const char *row="parse\tparse\ttokens\ttape\tmodel.net\n";up_put(manifest,row,strlen(row));}
+ resources=sp_pjoin(up_tmp,"resources");sp_mkdirs(resources);up_put(sp_pjoin(resources,"funit"),"1",1);
+ package=sp_pjoin(up_tmp,"package");
+ {const char *ms[]={manifest},*prefix[]={"00636c692f"},*dirs[]={resources};np_buf b={0};char why[2048];
+  if(np_pack_build(ms,1,prefix,dirs,1,&b,why,sizeof why)){fprintf(stderr,"%s\n",why);sp_raise_line("AssertionError: unitparse pack failed");}
+  up_put(package,b.p,b.n);if(up_ev)up_new(sp_pjoin(up_ev,"package"),b.p,b.n);free(b.p);}
+ sp_bstr(&up_rows,"case\tkind\tstatus\tbytes\tsha256\n");
+ for(i=0;i<6;i++) {
+  int unit=i<5,status;const char *name=unit?up_names[i]:"whole-fib";char *src,*tokens,*expected,*native=0;size_t tn,en,an=0,vn=0;unsigned char *val=0;
+  if(unit){src=sp_pjoin(up_tmp,sp_cat(name,".c"));up_put(src,up_sources[i],strlen(up_sources[i]));}
+  else src=sp_pjoin(sp_root(),"examples/fib.c");
+  {char *a[]={dumper,"-dump-tokens",src,0};tokens=up_command(a,10,1,&tn);}
+  {char *a[8];int k=0;a[k++]=ref;a[k++]=src;a[k++]="-S";if(unit)a[k++]="-funit";a[k++]="-o";a[k++]="-";a[k]=0;
+   expected=up_command(a,10,0,&en);}
+  status=ld_run(delta,(const unsigned char *)tokens,tn,src,up_files,&unit,unit?5000000:50000000,&val,&vn);
+  up_record(name,"tokens",tokens,tn,0);up_record(name,"reference",expected,en,0);up_record(name,"simulator",val,vn,status);
+  up_compare(name,"simulator",val,vn,expected,en,status);
+  if(unit){char *tokenfile=sp_pjoin(up_tmp,"tokens");char *a[]={run,"--bundle",package,"parse",tokenfile,0};
+   up_put(tokenfile,tokens,tn);native=up_command(a,30,0,&an);up_record(name,"native",native,an,0);
+   up_compare(name,"native",(const unsigned char *)native,an,expected,en,0);free(native);count++;}
+  free(tokens);free(expected);free(val);
+ }
+ if(count!=5)sp_raise_line("AssertionError: incomplete unitparse coverage");
+ if(up_ev)up_new(sp_pjoin(up_ev,"tapes.tsv"),up_rows.s,up_rows.n);free(up_rows.s);
+ printf("unit parse: %d simulator/network/reference tapes identical; whole program unchanged\n",count);
+ return 0;
+}
