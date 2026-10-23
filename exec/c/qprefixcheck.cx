@@ -1,0 +1,666 @@
+#!/usr/bin/env -S unisacc.com -run
+/* qprefixcheck.cx -- exec/c/qprefixcheck.py in C (2026-10-23, the py->cx port wave; owner's goal: no Python in the
+   toolchain).  Verify Q serialization and production C decoding without rebuilding models: a Net's Q records may be
+   stored as `C ref prefix tail ...` (an earlier Q sequence's action prefix plus a literal tail); the production
+   decoder (exec/c/run.c) must expand them to exactly the same QA as the flat form.  No generators are launched.
+   usage: sh ./unisacc.com -run exec/c/qprefixcheck.cx -- [--package PACKAGE] [--artifact ARTIFACT] [--sanitize]
+   - TD = tempfile.TemporaryDirectory(prefix='unisacc-qprefix-'), removed on every exit (ptf_rmtree).
+   - Two loaders `#define UNISA_RUNTIME_LIBRARY` + `#include "SRC"` (SRC = TD/old.c, a byte copy of ROOT/exec/c/run.c,
+     and ROOT/exec/c/run.c itself) print QLEN[NQ] and QA[NQA] as raw ints; each built `cc -O2 [-fsanitize=address,
+     undefined] -I ROOT/exec/c`; the runner is `cc -O2 [...] ROOT/exec/c/run.c`.  Every child runs with stdout and
+     stderr captured and a 30 s limit (subprocess.run(capture_output=True, timeout=30)).
+   - tiny Net (2 Q records sharing 20 LDI actions): flat-Q and its compact form load to equal QA and both run to `Y`;
+     8 malformed C records are rejected by the production decoder (rc 2) and by this file's own decoder; a chained
+     prefix with a zero tail is accepted.
+   - --package / --artifact (the Release-phase product: P package before a 16-byte `UNIPKG1\n` + u64le footer): every
+     Net of the package (P1/P2 text, P3 deflate + CRC32 + UNINETB1 binary records, as exec/c/packageformat.py and
+     exec/c/networkformat.py read them) is re-compacted (exec/c/pack.py compact_q) and both forms must load to equal
+     QA.  The stdout line counts the Nets and the bytes compaction would still save.
+   Failure is the .py's uncaught exception: its last traceback line (AssertionError/ValueError/...) on stderr, rc 1,
+   nothing on stdout.  Argument errors follow argparse (usage + `qprefixcheck.py: error: ...` on stderr, rc 2;
+   -h/--help prints the help, rc 0); long options may be abbreviated and take `--opt=value`.
+   ROOT is Path(__file__).resolve().parents[2].  The opcode table (name, operand kinds) is exec/c/tbl.py OPS, as
+   tests/statecheck.cx carries it.
+   Prelude gaps: exec/c/codec.h (the production puff inflate and CRC32, as tests/modelstreamextract.cx uses it) and
+   tests/cxlib/pytempfile.cx (mkdtemp + the guarded rmtree; deletions must go through that helper).  codec.h is
+   included as text; pytempfile is used through the exec/c/cxlib/ symlink (`#pragma unisa use` resolves beside the
+   using file only). */
+#include "codec.h"
+#pragma unisa use cxlib.pytempfile
+
+#define PATHN 4096
+static char ROOT[PATHN], TD[PATHN], CAPO[PATHN], CAPE[PATHN];
+static int capo = -1, cape = -1;
+
+static const char *OPN[] = { "ADV", "MARK", "JUMP", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "RLD", "LDX", "STX",
+    "OUT", "OUTW", "COPY", "COPYT", "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR",
+    "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "BLOBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR",
+    "SBOUT", "SBSPAN", "SBBLOB", "SBINTERN", "SBSAVE", "SBFIND", "BLEN", "BYTE", "XLEN", "DIVMOD10", "SWAP", "ACCEPT",
+    "REJECT", "A64", "A64I", "C64", "C64U", "INC" };
+static const char *OPK[] = { "", "r", "r", "ri", "rr", "arrr", "arri", "rr", "ri", "r", "rri", "rir", "i", "r", "", "",
+    "r", "r", "rr", "", "", "r", "rr", "ri", "rri", "", "i", "r", "r", "g", "", "rrr", "rrr", "r", "r", "rr", "", "", "i",
+    "rr", "r", "r", "r", "r", "rr", "r", "r", "r", "", "", "s", "arrr", "arri", "rr", "rr", "r" };
+#define NOPS ((int)(sizeof OPN / sizeof OPN[0]))
+static int code(const char *n) { int k; for (k = 0; k < NOPS; k++) if (!strcmp(OPN[k], n)) return k; return -1; }
+static int arity(int op) { return (int)strlen(OPK[op]); }
+
+/* ---- the .py's uncaught exception: last traceback line, TemporaryDirectory removed, rc 1 ---- */
+static void cleanup(void) { if (TD[0]) { ptf_rmtree(TD); TD[0] = 0; } }
+static void die(const char *kind, const char *msg) {
+    fflush(stdout);
+    if (msg && *msg) fprintf(stderr, "%s: %s\n", kind, msg); else fprintf(stderr, "%s\n", kind);
+    cleanup(); exit(1);
+}
+
+/* ---- byte buffers ---- */
+typedef struct { char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) die("MemoryError", 0);
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
+static void putll(Buf *b, long long v) { char t[32]; snprintf(t, sizeof t, "%lld", v); puts_(b, t); }
+
+/* ---- subprocess.run(list(map(str, argv)), capture_output=True, timeout=30) ---- */
+typedef struct { int rc; char *out; size_t outn; char *err; size_t errn; } Res;
+static void run(char *const *argv, Res *r) {
+    pid_t pid; int st = 0; long ticks = 3000;
+    if (capo < 0) {
+        snprintf(CAPO, sizeof CAPO, "%s/.stdoutXXXXXX", TD); snprintf(CAPE, sizeof CAPE, "%s/.stderrXXXXXX", TD);
+        if ((capo = mkstemp(CAPO)) < 0 || (cape = mkstemp(CAPE)) < 0) die("OSError", "cannot create capture files");
+    }
+    if (ftruncate(capo, 0) || ftruncate(cape, 0)) die("OSError", "cannot reset capture files");
+    lseek(capo, 0, SEEK_SET); lseek(cape, 0, SEEK_SET);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) die("OSError", "fork failed");
+    if (pid == 0) {
+        setpgid(0, 0); dup2(capo, 1); dup2(cape, 2); close(capo); close(cape);
+        execvp(argv[0], argv); _exit(127);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) die("OSError", "waitpid failed");
+        if (ticks-- <= 0) {
+            kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            { char m[PATHN + 64]; snprintf(m, sizeof m, "Command '%s' timed out after 30 seconds", argv[0]); die("subprocess.TimeoutExpired", m); }
+        }
+        usleep(10000);
+    }
+    r->rc = (st & 0x7f) ? -(st & 0x7f) : (st >> 8) & 0xff;
+    if (r->rc == 127 && !(st & 0x7f) && access(argv[0], X_OK) && !strchr(argv[0], '/')) {
+        char m[PATHN + 64]; snprintf(m, sizeof m, "[Errno 2] No such file or directory: '%s'", argv[0]); die("FileNotFoundError", m);
+    }
+    r->out = cx_read(CAPO, &r->outn); r->err = cx_read(CAPE, &r->errn);
+    if (!r->out || !r->err) die("OSError", "cannot read captured output");
+}
+static void freeres(Res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+/* require(argv): rc 0 or AssertionError((argv, rc, stderr)); stdout returned (malloc'd) */
+static char *require(char *const *argv, size_t *n) {
+    Res r; run(argv, &r);
+    if (r.rc) {
+        char m[8192]; size_t k = r.errn < 4000 ? r.errn : 4000;
+        snprintf(m, sizeof m, "(['%s', ...], %d, b'%.*s')", argv[0], r.rc, (int)k, r.err ? r.err : "");
+        die("AssertionError", m);
+    }
+    free(r.err); *n = r.outn; return r.out;
+}
+static int same_output(char *const *a, char *const *b) {
+    size_t n1, n2; char *o1 = require(a, &n1), *o2 = require(b, &n2); int eq = n1 == n2 && !memcmp(o1, o2, n1);
+    free(o1); free(o2); return eq;
+}
+
+/* ---- Q records: words, integers, decode_q (exec/c/pack.py) ---- */
+static int isws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+/* bytes.split(): word i of [s, s+n); returns the count, words in w/wl (cap max) */
+static int split(const char *s, size_t n, const char **w, size_t *wl, int max) {
+    size_t i = 0; int k = 0;
+    while (i < n) {
+        size_t j;
+        while (i < n && isws((unsigned char)s[i])) i++;
+        if (i >= n) break;
+        j = i; while (j < n && !isws((unsigned char)s[j])) j++;
+        if (k < max) { w[k] = s + i; wl[k] = j - i; }
+        k++; i = j;
+    }
+    return k;
+}
+/* int(word): [+-]?digits with single '_' between digits.  0 not an integer (ValueError), 1 in int64, 2 out of range
+   (value saturated, so every range check the .py makes on it fails the same way) */
+static int pyint(const char *s, size_t n, long long *v) {
+    size_t i = 0; int neg = 0, big = 0, digits = 0; unsigned long long u = 0;
+    if (i < n && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
+    if (i >= n) return 0;
+    for (; i < n; i++) {
+        if (s[i] == '_') { if (!digits || i + 1 >= n || s[i + 1] == '_' || s[i + 1] < '0' || s[i + 1] > '9') return 0; continue; }
+        if (s[i] < '0' || s[i] > '9') return 0;
+        digits = 1;
+        if (u > (ULLONG_MAX - 9) / 10) big = 1; else u = u * 10 + (unsigned)(s[i] - '0');
+    }
+    if (big || (!neg && u > 9223372036854775807ULL) || (neg && u > 9223372036854775808ULL)) {
+        *v = neg ? LLONG_MIN : LLONG_MAX; return 2;
+    }
+    *v = neg ? (long long)(0 - u) : (long long)u;
+    return 1;
+}
+typedef struct { long long *v; size_t nv; int *off; int na; } Seq;   /* action i = v[off[i] .. off[i+1]) */
+static const char *QERR;
+static int seq_add(Seq *q, const long long *a, int len) {
+    q->v = realloc(q->v, (q->nv + (size_t)len + 1) * sizeof *q->v);
+    q->off = realloc(q->off, ((size_t)q->na + 2) * sizeof *q->off);
+    if (!q->v || !q->off) die("MemoryError", 0);
+    if (!q->na) q->off[0] = 0;
+    memcpy(q->v + q->nv, a, (size_t)len * sizeof *a);
+    q->nv += (size_t)len; q->na++; q->off[q->na] = (int)q->nv;
+    return 0;
+}
+/* _actions(flat, count) appended to q; 0 or -1 with QERR */
+static int actions(const char **w, const size_t *wl, int nw, long long count, Seq *q) {
+    int at = 0, k; long long c;
+    long long tmp[16];
+    if (count < 0 || count > nw) { QERR = "bad Q action count"; return -1; }
+    for (c = 0; c < count; c++) {
+        long long op; int ok, end;
+        if (at >= nw) { QERR = "bad Q opcode or truncated action"; return -1; }
+        ok = pyint(w[at], wl[at], &op);
+        if (!ok) { QERR = "invalid literal for int()"; return -1; }
+        if (op < 0 || op >= NOPS) { QERR = "bad Q opcode or truncated action"; return -1; }
+        end = at + 1 + arity((int)op);
+        if (end > nw) { QERR = "truncated Q operands"; return -1; }
+        for (k = at; k < end; k++) {
+            int r = pyint(w[k], wl[k], &tmp[k - at]);
+            if (!r) { QERR = "invalid literal for int()"; return -1; }
+            if (r == 2) { QERR = "Q operand overflow"; return -1; }
+        }
+        seq_add(q, tmp, end - at); at = end;
+    }
+    if (at != nw) { QERR = "extra Q operands"; return -1; }
+    return 0;
+}
+#define MAXW 4096
+static void freeseqs(Seq *s, int n) { int i; for (i = 0; i < n; i++) { free(s[i].v); free(s[i].off); } free(s); }
+/* decode_q(lines): n Seq (calloc'd), or 0 with QERR */
+static Seq *decode_q(const char *const *ls, const size_t *ll, int n) {
+    Seq *d = calloc((size_t)(n ? n : 1), sizeof *d); int qi, wcap = MAXW;
+    const char **w = malloc((size_t)wcap * sizeof *w); size_t *wl = malloc((size_t)wcap * sizeof *wl);
+    if (!d || !w || !wl) die("MemoryError", 0);
+    for (qi = 0; qi < n; qi++) {
+        int nw = split(ls[qi], ll[qi], w, wl, wcap);
+        if (nw > wcap) {   /* a long record: grow the word table and split again */
+            wcap = nw; w = realloc(w, (size_t)wcap * sizeof *w); wl = realloc(wl, (size_t)wcap * sizeof *wl);
+            if (!w || !wl) die("MemoryError", 0);
+            nw = split(ls[qi], ll[qi], w, wl, wcap);
+        }
+        if (nw < 1) { QERR = "truncated Q record"; goto bad; }
+        if (wl[0] == 1 && w[0][0] == 'Q') {
+            long long cnt;
+            if (nw < 2) { QERR = "truncated Q record"; goto bad; }
+            if (!pyint(w[1], wl[1], &cnt)) { QERR = "invalid literal for int()"; goto bad; }
+            { int k; for (k = 2; k < nw; k++) { long long t; if (!pyint(w[k], wl[k], &t)) { QERR = "invalid literal for int()"; goto bad; } } }
+            if (actions(w + 2, wl + 2, nw - 2, cnt, &d[qi])) goto bad;
+        } else if (wl[0] == 1 && w[0][0] == 'C') {
+            long long ref, prefix, tail; int k;
+            if (nw < 4) { QERR = nw < 3 ? "not enough values to unpack" : "not enough values to unpack"; goto bad; }
+            if (!pyint(w[1], wl[1], &ref) || !pyint(w[2], wl[2], &prefix) || !pyint(w[3], wl[3], &tail)) { QERR = "invalid literal for int()"; goto bad; }
+            if (!(0 <= ref && ref < qi) || !(0 < prefix && prefix <= d[ref].na)) { QERR = "bad Q prefix reference"; goto bad; }
+            for (k = 4; k < nw; k++) { long long t; if (!pyint(w[k], wl[k], &t)) { QERR = "invalid literal for int()"; goto bad; } }
+            for (k = 0; k < (int)prefix; k++) seq_add(&d[qi], d[ref].v + d[ref].off[k], d[ref].off[k + 1] - d[ref].off[k]);
+            if (actions(w + 4, wl + 4, nw - 4, tail, &d[qi])) goto bad;
+        } else { QERR = "unknown Q tag"; goto bad; }
+    }
+    free(w); free(wl); return d;
+bad:
+    free(w); free(wl); freeseqs(d, n); return 0;
+}
+static int seq_eq(const Seq *a, const Seq *b) {
+    int i;
+    if (a->na != b->na || a->nv != b->nv) return 0;
+    if (!a->na) return 1;   /* an empty sequence never allocated off[] */
+    for (i = 0; i <= a->na; i++) if (a->off[i] != b->off[i]) return 0;
+    return !a->nv || !memcmp(a->v, b->v, a->nv * sizeof *a->v);
+}
+
+/* ---- the action trie of compact_q: (parent node, action) -> child, each node keeps the first sequence through it ---- */
+typedef struct { int parent; const long long *a; int len; int child; } Edge;
+static Edge *ET; static size_t ETN, ETC; static int *NODEQ; static int NNODE;
+static unsigned long long ehash(int parent, const long long *a, int len) {
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned)parent; int i;
+    for (i = 0; i < len; i++) { h ^= (unsigned long long)a[i]; h *= 1099511628211ULL; h ^= h >> 29; }
+    return h ^ (unsigned long long)len;
+}
+static int efind(int parent, const long long *a, int len, size_t *slot) {
+    size_t i = (size_t)(ehash(parent, a, len) & (ETC - 1));
+    while (ET[i].child) {
+        if (ET[i].parent == parent && ET[i].len == len && !memcmp(ET[i].a, a, (size_t)len * sizeof *a)) return ET[i].child;
+        i = (i + 1) & (ETC - 1);
+    }
+    *slot = i; return 0;
+}
+static void trie_reset(size_t want) {
+    free(ET); free(NODEQ);
+    for (ETC = 1024; ETC < 2 * want + 2; ETC *= 2) ;
+    ET = calloc(ETC, sizeof *ET); NODEQ = malloc((want + 2) * sizeof *NODEQ);
+    if (!ET || !NODEQ) die("MemoryError", 0);
+    ETN = 0; NNODE = 1; NODEQ[0] = -1;   /* node 0: the root; child ids start at 1 */
+}
+
+/* bytes.splitlines(keepends=True) */
+static int splitlines(const char *s, size_t n, const char ***ls, size_t **ll) {
+    size_t i = 0, cap = 64; int k = 0;
+    *ls = malloc(cap * sizeof **ls); *ll = malloc(cap * sizeof **ll);
+    if (!*ls || !*ll) die("MemoryError", 0);
+    while (i < n) {
+        size_t j = i;
+        while (j < n && s[j] != '\n' && s[j] != '\r') j++;
+        if (j < n) { if (s[j] == '\r' && j + 1 < n && s[j + 1] == '\n') j += 2; else j++; }
+        if ((size_t)k == cap) { cap *= 2; *ls = realloc(*ls, cap * sizeof **ls); *ll = realloc(*ll, cap * sizeof **ll); if (!*ls || !*ll) die("MemoryError", 0); }
+        (*ls)[k] = s + i; (*ll)[k] = j - i; k++; i = j;
+    }
+    return k;
+}
+/* compact_q(data) as exec/c/pack.py: H/S bytes and the expanded QA stay exact; malloc'd result in *out */
+static void compact_q(const char *data, size_t n, Buf *out) {
+    const char **ls, **wires; size_t *ll, *wl, total = 0; int nl, i, qi, nq, nstr, start; Seq *dec, *back;
+    const char *hw[8]; size_t hl[8]; long long v; Buf cand = { 0, 0, 0 }, pool = { 0, 0, 0 }; size_t *poolat;
+    nl = splitlines(data, n, &ls, &ll);
+    if (!nl || data[n - 1] != '\n') die("ValueError", "truncated network");
+    if (split(ls[0], ll[0], hw, hl, 8) != 7 || hl[0] != 1 || hw[0][0] != 'N') die("ValueError", "bad network header");
+    if (!pyint(hw[2], hl[2], &v)) die("ValueError", "invalid literal for int()");
+    nq = v > INT_MAX ? INT_MAX : v < INT_MIN ? INT_MIN : (int)v;
+    if (!pyint(hw[4], hl[4], &v)) die("ValueError", "invalid literal for int()");
+    nstr = v > INT_MAX - 1 ? INT_MAX - 1 : v < INT_MIN ? INT_MIN : (int)v;
+    start = 1 + nstr;
+    if (nq <= 0 || nstr < 0 || (long long)start + nq > nl) die("ValueError", "bad network Q extent");
+    dec = decode_q(ls + start, ll + start, nq);
+    if (!dec) die("ValueError", QERR);
+    for (qi = 0; qi < nq; qi++) total += (size_t)dec[qi].na;
+    trie_reset(total);
+    wires = malloc((size_t)nq * sizeof *wires); wl = malloc((size_t)nq * sizeof *wl); poolat = malloc((size_t)nq * sizeof *poolat);
+    if (!wires || !wl || !poolat) die("MemoryError", 0);
+    for (qi = 0; qi < nq; qi++) {
+        Seq *s = &dec[qi]; int node = 0, ref = -1, prefix = 0, ai; size_t slot;
+        for (ai = 0; ai < s->na; ai++) {
+            int c = efind(node, s->v + s->off[ai], s->off[ai + 1] - s->off[ai], &slot);
+            if (!c) break;
+            node = c; ref = NODEQ[c]; prefix = ai + 1;
+        }
+        poolat[qi] = (size_t)-1;
+        if (prefix) {
+            size_t k;
+            cand.n = 0;
+            puts_(&cand, "C "); putll(&cand, ref); puts_(&cand, " "); putll(&cand, prefix); puts_(&cand, " "); putll(&cand, s->na - prefix);
+            for (k = (size_t)s->off[prefix]; k < s->nv; k++) { puts_(&cand, " "); putll(&cand, s->v[k]); }
+            puts_(&cand, "\n");
+            if (cand.n < ll[start + qi]) { poolat[qi] = pool.n; wl[qi] = cand.n; put(&pool, cand.p, cand.n); }
+        }
+        if (poolat[qi] == (size_t)-1) { wires[qi] = ls[start + qi]; wl[qi] = ll[start + qi]; }
+        node = 0;
+        for (ai = 0; ai < s->na; ai++) {
+            const long long *a = s->v + s->off[ai]; int len = s->off[ai + 1] - s->off[ai];
+            int c = efind(node, a, len, &slot);
+            if (!c) {
+                c = NNODE++; ET[slot].parent = node; ET[slot].a = a; ET[slot].len = len; ET[slot].child = c; ETN++;
+                NODEQ[c] = qi;
+            }
+            node = c;
+        }
+    }
+    for (qi = 0; qi < nq; qi++) if (poolat[qi] != (size_t)-1) wires[qi] = pool.p + poolat[qi];
+    back = decode_q(wires, wl, nq);
+    if (!back) die("ValueError", QERR);
+    for (qi = 0; qi < nq; qi++) if (!seq_eq(&back[qi], &dec[qi])) die("ValueError", "Q prefix round trip differs");
+    out->n = 0;
+    for (i = 0; i < start; i++) put(out, ls[i], ll[i]);
+    for (qi = 0; qi < nq; qi++) put(out, wires[qi], wl[qi]);
+    for (i = start + nq; i < nl; i++) put(out, ls[i], ll[i]);
+    freeseqs(dec, nq); freeseqs(back, nq); free(wires); free(wl); free(poolat); free(cand.p); free(pool.p); free(ls); free(ll);
+}
+
+/* ---- UNINETB1 binary records -> canonical text (exec/c/networkformat.py decode) ---- */
+static const unsigned char *BR; static size_t BN, BP;
+static void breq(int ok) { if (!ok) die("ValueError", "invalid binary network"); }
+static long long bint(void) {
+    unsigned long long u = 0; int k;
+    for (k = 0; k < 10; k++) {
+        unsigned c;
+        breq(BP < BN); c = BR[BP++]; breq(k != 9 || c <= 1);
+        u |= (unsigned long long)(c & 127) << (7 * k);
+        if (c < 128) { breq(k == 0 || c != 0); return (long long)((u >> 1) ^ (0 - (u & 1))); }
+    }
+    die("ValueError", "long varint"); return 0;
+}
+static void btag(char t) { breq(BP < BN && BR[BP] == (unsigned char)t); BP++; }
+static void bline(Buf *o, char t, const long long *v, size_t n, int space) {
+    size_t i; char c[2] = { t, 0 };
+    puts_(o, c); puts_(o, " ");
+    for (i = 0; i < n; i++) { if (i) puts_(o, " "); putll(o, v[i]); }
+    if (space) puts_(o, " ");
+    puts_(o, "\n");
+}
+static void bdecode(const unsigned char *raw, size_t n, Buf *o) {
+    long long head[6], ns, nq, nstr, i, j; Buf v = { 0, 0, 0 }; long long *vv; size_t vn, vcap = 64;
+    BR = raw; BN = n; BP = 0; o->n = 0;
+    vv = malloc(vcap * sizeof *vv); if (!vv) die("MemoryError", 0);
+#define VPUSH(x) do { if (vn == vcap) { vcap *= 2; vv = realloc(vv, vcap * sizeof *vv); if (!vv) die("MemoryError", 0); } vv[vn++] = (x); } while (0)
+    breq(n >= 8 && !memcmp(raw, "UNINETB1", 8)); BP = 8;
+    btag('N'); for (i = 0; i < 6; i++) head[i] = bint();
+    ns = head[0]; nq = head[1]; nstr = head[3];
+    breq(0 < ns && ns <= (long long)n && 0 < nq && nq <= (long long)n && 0 <= nstr && nstr <= (long long)n);
+    bline(o, 'N', head, 6, 0);
+    for (i = 0; i < nstr; i++) {
+        long long len;
+        btag('S'); len = bint(); breq(0 <= len && len <= (long long)(BN - BP));
+        puts_(o, "S ");
+        if (len) { static const char hx[] = "0123456789abcdef"; for (j = 0; j < len; j++) { char h[2]; h[0] = hx[BR[BP + j] >> 4]; h[1] = hx[BR[BP + j] & 15]; put(o, h, 2); } }
+        else puts_(o, "-");
+        puts_(o, "\n"); BP += (size_t)len;
+    }
+    for (i = 0; i < nq; i++) {
+        char t; long long act;
+        breq(BP < BN); t = (char)BR[BP++]; breq(t == 'Q' || t == 'C');
+        vn = 0;
+        if (t == 'Q') VPUSH(bint()); else { VPUSH(bint()); VPUSH(bint()); VPUSH(bint()); }
+        act = vv[vn - 1];
+        for (j = 0; j < act; j++) {
+            long long op = bint(); int k;
+            breq(0 <= op && op < NOPS); VPUSH(op);
+            for (k = 0; k < arity((int)op); k++) VPUSH(bint());
+        }
+        bline(o, t, vv, vn, t == 'Q' && vv[0] == 0);
+    }
+    for (i = 0; i < ns; i++) {
+        long long cnt;
+        btag('H'); vn = 0;
+        for (j = 0; j < 6; j++) VPUSH(bint());
+        cnt = vv[3];
+        if (vv[0] == 3) { long long e1 = bint(), e2 = bint(); VPUSH(e1); VPUSH(e2); for (j = 0; j < e2; j++) VPUSH(bint()); }
+        for (j = 0; j < 3 * cnt; j++) VPUSH(bint());
+        bline(o, 'H', vv, vn, vv[3] == 0);
+    }
+    breq(BP == BN);
+    free(vv); free(v.p);
+#undef VPUSH
+}
+
+/* ---- read_package (exec/c/packageformat.py): the package's Nets as canonical text ---- */
+typedef struct { Buf *m; int n; } Models;
+static const unsigned char *PD; static size_t PN, PAT;
+static int pline(const char **w, size_t *wl, int max) {
+    const unsigned char *e = PAT < PN ? memchr(PD + PAT, '\n', PN - PAT) : 0; int k;
+    if (!e) die("ValueError", "subsection not found");
+    k = split((const char *)PD + PAT, (size_t)(e - (PD + PAT)), w, wl, max);
+    PAT = (size_t)(e - PD) + 1;
+    return k;
+}
+static const unsigned char *ptake(long long n) {
+    const unsigned char *b;
+    if (n < 0 || n > (long long)(PN - PAT)) die("ValueError", "package extent");
+    b = PD + PAT; PAT += (size_t)n; return b;
+}
+static long long pnum(const char *w, size_t l) {
+    long long v; if (!pyint(w, l, &v)) die("ValueError", "invalid literal for int() with base 10"); return v;
+}
+static int weq(const char *a, size_t al, const char *b, size_t bl) { return al == bl && !memcmp(a, b, al); }
+static void read_package(const unsigned char *data, size_t n, Models *ms) {
+    const char *w[8]; size_t wl[8]; int k, version; long long nm, nd, nr, i, j;
+    const char **rt; size_t *rl;   /* per stream-stage row: route, stream-stage, in, out */
+    PD = data; PN = n; PAT = 0;
+    k = pline(w, wl, 8);
+    if (k < 2 || !weq(w[0], wl[0], "P", 1) || !(weq(w[1], wl[1], "1", 1) || weq(w[1], wl[1], "2", 1) || weq(w[1], wl[1], "3", 1)))
+        die("ValueError", "unknown package version");
+    version = w[1][0] - '0';
+    if (k != (version == 1 ? 4 : 5)) die("ValueError", "package header");
+    nm = pnum(w[2], wl[2]); nd = pnum(w[3], wl[3]); nr = version == 1 ? 0 : pnum(w[4], wl[4]);
+    if (nm <= 0 || nd <= 0 || nr < 0 || nm > (long long)n || nd > (long long)n || nr > (long long)n) die("ValueError", "package count");
+    rt = malloc((size_t)nd * 4 * sizeof *rt); rl = malloc((size_t)nd * 4 * sizeof *rl);
+    if (!rt || !rl) die("MemoryError", 0);
+    for (i = 0; i < nd; i++) {
+        long long idx;
+        k = pline(w, wl, 8);
+        if (k != 6 || !weq(w[0], wl[0], "D", 1)) die("ValueError", "stage row");
+        idx = pnum(w[5], wl[5]);
+        if (!(0 <= idx && idx < nm)) die("ValueError", "stage row");
+        for (j = 0; j < 4; j++) { rt[i * 4 + j] = w[1 + j]; rl[i * 4 + j] = wl[1 + j]; }
+        for (j = 0; j < i; j++) {
+            if (weq(rt[j * 4], rl[j * 4], rt[i * 4], rl[i * 4]) && weq(rt[j * 4 + 1], rl[j * 4 + 1], rt[i * 4 + 1], rl[i * 4 + 1])) die("ValueError", "stage order");
+        }
+        for (j = i - 1; j >= 0; j--)   /* last[route] is the newest earlier row of the route */
+            if (weq(rt[j * 4], rl[j * 4], rt[i * 4], rl[i * 4])) {
+                if (!weq(rt[j * 4 + 3], rl[j * 4 + 3], rt[i * 4 + 2], rl[i * 4 + 2])) die("ValueError", "stage order");
+                break;
+            }
+    }
+    free(rt); free(rl);
+    ms->m = calloc((size_t)nm, sizeof *ms->m); ms->n = (int)nm;
+    if (!ms->m) die("MemoryError", 0);
+    for (i = 0; i < nm; i++) {
+        long long len; const unsigned char *wire; Buf *t = &ms->m[i];
+        k = pline(w, wl, 8);
+        if (k != (version == 3 ? 5 : 2) || !weq(w[0], wl[0], "M", 1)) die("ValueError", "model record");
+        len = pnum(w[1], wl[1]);
+        if (len <= 0) die("ValueError", "model length");
+        wire = ptake(len);
+        if (version == 3) {
+            long long rawlen = pnum(w[2], wl[2]), codec = pnum(w[3], wl[3]), sum = pnum(w[4], wl[4]); unsigned char *raw;
+            if (rawlen <= 0 || rawlen >= 2147483648LL || codec != 1 || !(0 <= sum && sum < 4294967296LL)) die("ValueError", "model metadata");
+            raw = malloc((size_t)rawlen);
+            if (!raw) die("MemoryError", 0);
+            if (unisa_inflate(raw, (unsigned long)rawlen, wire, (unsigned long)len) || crc((char *)raw, (int)rawlen) != (uint32_t)sum)
+                die("ValueError", "invalid compressed model extent/CRC");
+            if (rawlen < 9 || memcmp(raw, "UNINETB1N", 9)) die("ValueError", "binary network required");
+            bdecode(raw, (size_t)rawlen, t); free(raw);
+        } else put(t, (const char *)wire, (size_t)len);
+        if (t->n < 2 || memcmp(t->p, "N ", 2) || t->p[t->n - 1] != '\n') die("ValueError", "network required");
+    }
+    {
+        const unsigned char **keys = malloc((size_t)(nr ? nr : 1) * sizeof *keys); size_t *kl = malloc((size_t)(nr ? nr : 1) * sizeof *kl);
+        if (!keys || !kl) die("MemoryError", 0);
+        for (i = 0; i < nr; i++) {
+            long long a, b;
+            k = pline(w, wl, 8);
+            if (k != 3 || !weq(w[0], wl[0], "F", 1)) die("ValueError", "resource record");
+            a = pnum(w[1], wl[1]); b = pnum(w[2], wl[2]);
+            keys[i] = ptake(a); kl[i] = (size_t)a; ptake(b);
+            if (!a) die("ValueError", "resource key");
+            for (j = 0; j < i; j++) if (kl[j] == kl[i] && !memcmp(keys[j], keys[i], kl[i])) die("ValueError", "resource key");
+        }
+        free(keys); free(kl);
+    }
+    if (PAT != n) die("ValueError", "trailing package bytes");
+}
+
+/* ---- argparse: [-h] [--package PACKAGE] [--artifact ARTIFACT] [--sanitize] ---- */
+static const char USAGE[] = "usage: qprefixcheck.py [-h] [--package PACKAGE] [--artifact ARTIFACT]\n                       [--sanitize]\n";
+static void argerr(const char *m) { fputs(USAGE, stderr); fprintf(stderr, "qprefixcheck.py: error: %s\n", m); exit(2); }
+static int negnum(const char *s) {   /* argparse's '^-\d+$|^-\d*\.\d+$' */
+    const char *p = s + 1; int d = 0;
+    if (s[0] != '-') return 0;
+    while (*p >= '0' && *p <= '9') { p++; d = 1; }
+    if (!*p) return d;
+    if (*p != '.') return 0;
+    p++; if (!*p) return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    return !*p;
+}
+static void parse_args(int argc, char **argv, const char **package, const char **artifact, int *sanitize) {
+    static const char *LONG[] = { "--help", "--package", "--artifact", "--sanitize" };
+    Buf extra = { 0, 0, 0 }; int i, rest = 0;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *eq, *val = 0; int k, hit = -1, nhit = 0; size_t al;
+        if (rest || a[0] != '-' || !a[1] || negnum(a)) { if (extra.n) puts_(&extra, " "); puts_(&extra, a); continue; }
+        if (!strcmp(a, "--")) { rest = 1; if (extra.n) puts_(&extra, " "); puts_(&extra, a); continue; }   /* 3.12+: kept among the extras */
+        eq = a[1] == '-' ? strchr(a, '=') : 0; al = eq ? (size_t)(eq - a) : strlen(a);
+        if (!strcmp(a, "-h")) hit = 0, nhit = 1;
+        else if (a[1] == '-') {
+            for (k = 0; k < 4; k++) if (strlen(LONG[k]) == al && !strncmp(LONG[k], a, al)) { hit = k; nhit = 1; break; }
+            if (hit < 0) for (k = 0; k < 4; k++) if (!strncmp(LONG[k], a, al)) { hit = k; nhit++; }
+        }
+        if (nhit > 1) {
+            char m[600]; snprintf(m, sizeof m, "ambiguous option: %.*s could match --package, --artifact", (int)al, a); argerr(m);
+        }
+        if (hit < 0) { if (extra.n) puts_(&extra, " "); puts_(&extra, a); continue; }
+        if (eq) val = eq + 1;
+        if (hit == 0 || hit == 3) {
+            if (val) {
+                char m[600];
+                snprintf(m, sizeof m, "argument %s: ignored explicit argument '%s'", hit ? "--sanitize" : "-h/--help", val); argerr(m);
+            }
+            if (!hit) {
+                fputs(USAGE, stdout);
+                fputs("\nVerify Q serialization and production C decoding without rebuilding models.\n"
+                      "--package checks existing real networks too; no generators are launched.\n\n"
+                      "options:\n  -h, --help           show this help message and exit\n  --package PACKAGE\n"
+                      "  --artifact ARTIFACT\n  --sanitize\n", stdout);
+                exit(0);
+            }
+            *sanitize = 1; continue;
+        }
+        if (!val) {
+            if (i + 1 >= argc || rest || (argv[i + 1][0] == '-' && argv[i + 1][1] && !negnum(argv[i + 1]))) {
+                char m[200]; snprintf(m, sizeof m, "argument %s: expected one argument", LONG[hit]); argerr(m);
+            }
+            val = argv[++i];
+        }
+        if (hit == 1) *package = val; else *artifact = val;
+    }
+    if (extra.n) { Buf m = { 0, 0, 0 }; puts_(&m, "unrecognized arguments: "); puts_(&m, extra.p); argerr(m.p); }
+}
+
+/* ---- main ---- */
+static const char *find(const char *h, size_t hn, const char *nd, size_t nn) {   /* memmem */
+    size_t i;
+    for (i = 0; i + nn <= hn; i++) if (!memcmp(h + i, nd, nn)) return h + i;
+    return 0;
+}
+static void path(char *out, const char *a, const char *b) { snprintf(out, PATHN, "%s/%s", a, b); }
+static void writeb(const char *p, const void *b, size_t n) {
+    if (cx_write(p, b, n)) { char m[PATHN + 64]; snprintf(m, sizeof m, "cannot write '%s'", p); die("OSError", m); }
+}
+int main(int argc, char **argv) {
+    const char *package = 0, *artifact = 0; int sanitize = 0, i, k, count = 0; long long saved = 0;
+    char self[PATHN], OLDC[PATHN], NEWC[PATHN], EXE[2][PATHN], RUNNER[PATHN], INP[PATHN], OLDN[PATHN], NEWN[PATHN], INC[PATHN];
+    char *san = "-fsanitize=address,undefined";
+    Buf tiny = { 0, 0, 0 }, common = { 0, 0, 0 }, comp = { 0, 0, 0 }, src = { 0, 0, 0 };
+    parse_args(argc, argv, &package, &artifact, &sanitize);
+    if (!realpath(__FILE__, self)) die("FileNotFoundError", __FILE__);
+    for (k = 0; k < 3; k++) { char *s = strrchr(self, '/'); if (s && s != self) *s = 0; else { strcpy(self, "/"); break; } }
+    snprintf(ROOT, sizeof ROOT, "%s", self);
+    crc_init();
+    if (ptf_mkdtemp(0, "unisacc-qprefix-", TD, sizeof TD)) { TD[0] = 0; die("FileNotFoundError", "No usable temporary directory found"); }
+    /* Compare flat-Q and prefix-C inputs through the production decoder.  This also runs from exported source trees
+       without a git repository. */
+    path(OLDC, TD, "old.c"); path(NEWC, ROOT, "exec/c/run.c"); path(INC, ROOT, "exec/c");
+    {
+        size_t n; char *b = cx_read(NEWC, &n);
+        if (!b) { char m[PATHN + 64]; snprintf(m, sizeof m, "[Errno 2] No such file or directory: '%s'", NEWC); die("FileNotFoundError", m); }
+        writeb(OLDC, b, n); free(b);
+    }
+    for (i = 0; i < 2; i++) {
+        char loader[PATHN]; const char *source = i ? NEWC : OLDC, *label = i ? "new" : "old";
+        char name[64]; char *cc[12]; int c = 0;
+        snprintf(name, sizeof name, "%sload.c", label); path(loader, TD, name);
+        src.n = 0;
+        puts_(&src, "#define UNISA_RUNTIME_LIBRARY\n#include \""); puts_(&src, source); puts_(&src, "\"\n"
+              "int main(int argc,char **argv) { int n; if(argc!=2)return 9; "
+              "unsigned char *b=readfile(argv[1],&n,0); loadbytes(b,n); "
+              "if(fwrite(QLEN,sizeof(int),NQ,stdout)!=(size_t)NQ)return 8; "
+              "if(fwrite(QA,sizeof(I),NQA,stdout)!=(size_t)NQA)return 8; "
+              "unload();free(b);return 0;}\n");
+        writeb(loader, src.p, src.n);
+        snprintf(name, sizeof name, "%sload", label); path(EXE[i], TD, name);
+        cc[c++] = "cc"; cc[c++] = "-O2"; if (sanitize) cc[c++] = san;
+        cc[c++] = "-I"; cc[c++] = INC; cc[c++] = loader; cc[c++] = "-o"; cc[c++] = EXE[i]; cc[c] = 0;
+        { size_t n; free(require(cc, &n)); }
+    }
+    path(RUNNER, TD, "run");
+    { char *cc[8]; int c = 0; size_t n;
+      cc[c++] = "cc"; cc[c++] = "-O2"; if (sanitize) cc[c++] = san; cc[c++] = NEWC; cc[c++] = "-o"; cc[c++] = RUNNER; cc[c] = 0;
+      free(require(cc, &n)); }
+    for (i = 0; i < 20; i++) { if (i) puts_(&common, " "); putll(&common, code("LDI")); puts_(&common, " 0 "); putll(&common, i); }
+    puts_(&tiny, "N 2 2 1 0 0 1\nQ 20 "); puts_(&tiny, common.p); puts_(&tiny, "\nQ 22 "); puts_(&tiny, common.p);
+    puts_(&tiny, " "); putll(&tiny, code("OUT")); puts_(&tiny, " 89 "); putll(&tiny, code("ACCEPT"));
+    puts_(&tiny, "\nH 0 0 256 0 1 0\nH 0 0 256 0 1 1\n");
+    path(INP, TD, "input"); writeb(INP, "", 0);
+    path(OLDN, TD, "old.net"); path(NEWN, TD, "new.net");
+    writeb(OLDN, tiny.p, tiny.n); compact_q(tiny.p, tiny.n, &comp); writeb(NEWN, comp.p, comp.n);
+    if (!strstr(comp.p, "\nC ")) die("AssertionError", 0);
+    { char *a[] = { EXE[0], OLDN, 0 }, *b[] = { EXE[1], NEWN, 0 }; if (!same_output(a, b)) die("AssertionError", 0); }
+    { char *a[] = { RUNNER, OLDN, INP, 0 }, *b[] = { RUNNER, NEWN, INP, 0 }; size_t n1, n2; char *o1 = require(a, &n1), *o2 = require(b, &n2);
+      if (!(n1 == n2 && !memcmp(o1, o2, n1) && n2 == 1 && o2[0] == 'Y')) die("AssertionError", 0); free(o1); free(o2); }
+    {
+        const char **ls; size_t *ll; int nl = splitlines(comp.p, comp.n, &ls, &ll), b;
+        const char *q; size_t ql; const char **tl; size_t *tll; Buf bad = { 0, 0, 0 }, mut = { 0, 0, 0 };
+        char *BAD[8] = { "C 1 1 0", "C -1 1 0", "C 0 0 0", "C 0 21 0", "C 0 1 -1", "C 0 1 2147483647", "C 0 1 1", 0 };
+        char ldi[64]; snprintf(ldi, sizeof ldi, "C 0 1 1 %d 0", code("LDI")); BAD[7] = ldi;
+        if (nl < 3) die("IndexError", "list index out of range");
+        q = ls[2]; ql = ll[2]; while (ql && (q[ql - 1] == '\n' || q[ql - 1] == '\r')) ql--;
+        splitlines(tiny.p, tiny.n, &tl, &tll);
+        for (b = 0; b < 8; b++) {
+            size_t at = 0; Res r; const char *two[2]; size_t twol[2]; Seq *d;
+            /* compact_q(tiny).replace(q, bad) */
+            mut.n = 0;
+            while (at < comp.n) {
+                const char *hit = ql ? find(comp.p + at, comp.n - at, q, ql) : 0;
+                if (!hit) { put(&mut, comp.p + at, comp.n - at); break; }
+                put(&mut, comp.p + at, (size_t)(hit - (comp.p + at))); puts_(&mut, BAD[b]); at = (size_t)(hit - comp.p) + ql;
+            }
+            writeb(NEWN, mut.p, mut.n);
+            { char *a[] = { EXE[1], NEWN, 0 }; run(a, &r); }
+            if (r.rc != 2) { char m[512]; snprintf(m, sizeof m, "(b'%s', %d, ...)", BAD[b], r.rc); die("AssertionError", m); }
+            freeres(&r);
+            two[0] = tl[1]; twol[0] = tll[1]; while (twol[0] && (two[0][twol[0] - 1] == '\n' || two[0][twol[0] - 1] == '\r')) twol[0]--;
+            two[1] = BAD[b]; twol[1] = strlen(BAD[b]);
+            if ((d = decode_q(two, twol, 2))) { char m[512]; snprintf(m, sizeof m, "('Python decoder accepted', b'%s')", BAD[b]); die("AssertionError", m); }
+        }
+        free(ls); free(ll); free(tl); free(tll); free(bad.p); free(mut.p);
+    }
+    /* Old Q and chained C references remain supported, including a zero tail. */
+    {
+        char q0[64]; const char *qs[3]; size_t ql[3]; Buf chain = { 0, 0, 0 }; Seq *d; size_t n;
+        snprintf(q0, sizeof q0, "Q 1 %d 0 7", code("LDI")); qs[0] = q0; qs[1] = "C 0 1 0"; qs[2] = "C 1 1 0";
+        puts_(&chain, "N 1 3 1 0 0 0\n");
+        for (i = 0; i < 3; i++) { ql[i] = strlen(qs[i]); if (i) puts_(&chain, "\n"); puts_(&chain, qs[i]); }
+        puts_(&chain, "\nH 0 0 256 0 -1 0\n");
+        writeb(NEWN, chain.p, chain.n);
+        { char *a[] = { EXE[1], NEWN, 0 }; free(require(a, &n)); }
+        if (!(d = decode_q(qs, ql, 3))) die("ValueError", QERR);
+        freeseqs(d, 3); free(chain.p);
+    }
+    if (package || artifact) {
+        size_t n; unsigned char *pkg = (unsigned char *)cx_read(package ? package : artifact, &n), *body; Models ms;
+        if (!pkg) { char m[PATHN + 64]; snprintf(m, sizeof m, "[Errno 2] No such file or directory: '%s'", package ? package : artifact); die("FileNotFoundError", m); }
+        body = pkg;
+        if (artifact) {
+            unsigned long long len = 0; size_t s, e;
+            if (n < 16 || memcmp(pkg + n - 16, "UNIPKG1\n", 8)) die("AssertionError", 0);
+            for (k = 7; k >= 0; k--) len = (len << 8) | pkg[n - 8 + k];
+            /* package[-16-n:-16]: Python clamps an over-long slice to the start */
+            e = n - 16; s = len > (unsigned long long)e ? 0 : e - (size_t)len;
+            body = pkg + s; n = e - s;
+        }
+        read_package(body, n, &ms);
+        for (i = 0; i < ms.n; i++) {
+            Buf *model = &ms.m[i];
+            compact_q(model->p, model->n, &comp);
+            writeb(OLDN, model->p, model->n); writeb(NEWN, comp.p, comp.n);
+            { char *a[] = { EXE[0], OLDN, 0 }, *b[] = { EXE[1], NEWN, 0 }; if (!same_output(a, b)) die("AssertionError", "expanded C QA differs"); }
+            /* head/tail lines and the decoded Q sequences are equal by construction: compact_q keeps lines[:start] and
+               lines[start+nq:] verbatim and refuses a wire whose decode_q differs (the .py re-asserted both) */
+            saved += (long long)model->n - (long long)comp.n; count++;
+            free(model->p);
+        }
+        free(ms.m); free(pkg);
+    }
+    printf("qprefix: tiny execution equal; 8 malformed rejected; chained prefixes accepted; real models %d, saved %lld B; QA exact, runtime memory unchanged\n", count, saved);
+    fflush(stdout);
+    cleanup();
+    free(tiny.p); free(common.p); free(comp.p); free(src.p);
+    return 0;
+}

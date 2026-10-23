@@ -447,7 +447,7 @@ job boundnested-2 sh ./tests/cxbin tests/boundnested.cx . --gate --only 3,4   # 
 job boundnested-3 sh ./tests/cxbin tests/boundnested.cx . --gate --only 5,6   # (.cx port, 2026-10-23) r7: shorter child (case 5), shorter parent (case 6); theoretical 14.5 s
 job boundnested-4 sh ./tests/cxbin tests/boundnested.cx . --gate --only 7   # (.cx port, 2026-10-23) r7: grandchild reaped (case 7) plus its pgrep; theoretical 5.25 s
 job boundnested-5 sh ./tests/cxbin tests/boundnested.cx . --gate --only 8   # (.cx port, 2026-10-23) r7: independent deadline propagation call; parent N 8, theoretical 10.25 s
-job qprefix python3 ./exec/c/qprefixcheck.py --artifact "${MODEL_COM:-./unisacc.com}"
+job qprefix tests/bound 58 sh ./tests/cxbin exec/c/qprefixcheck.cx --artifact "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23)
 if [ "$(uname -s)" = Darwin ]; then
     job ffi-bridge python3 ./exec/ffi/bridgecheck.py
     job ffi-product python3 ./exec/ffi/productcheck.py
@@ -620,7 +620,7 @@ if [ "$(uname -s)" = Darwin ]; then
     # 60-second job budget before the assertions could start.
     job exec-container env MODEL_COM="${MODEL_COM:-$R/unisacc.com}" ./exec/c/containercheck.sh
 fi
-job exec-embedded python3 ./exec/c/embeddedcheck.py
+job exec-embedded tests/bound 58 sh ./tests/cxbin exec/c/embeddedcheck.cx   # (.cx port, 2026-10-23) UA -b slices + seed/ape.c container (no `unisa ape`)
 for part in build modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
 # S3 (0.0.43): driver model preparation as independent jobs (bindprep pattern): prep-0 = elf and o1 chain, prep-1..5 = parts K/5 of PREP_PARTS
 # after prep-0; every other exec-driver-* job runs after prep-0..5 and never constructs (timeout debt: prep-3 was 109 s, core-build 116 s cold)
@@ -882,8 +882,8 @@ job exec-binaryio python3 ./tests/runtimeiocheck.py
 for part in host unisacc sanitised; do job exec-crcllp64-$part python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only --part "$part"; done
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
 job lib-windows-imports tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/librarywinimportscheck.cx   # (.cx port, 2026-10-23)
-job lib-windows-gp python3 ./exec/enc/windowshostbridgecheck.py --part cross
-job lib-windows-gp-native python3 ./exec/enc/windowshostbridgecheck.py --part native
+job lib-windows-gp tests/bound 58 sh ./tests/cxbin exec/enc/windowshostbridgecheck.cx --part cross   # (.cx port, 2026-10-23)
+job lib-windows-gp-native tests/bound 58 sh ./tests/cxbin exec/enc/windowshostbridgecheck.cx --part native   # (.cx port, 2026-10-23)
 job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
 job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located
@@ -1092,7 +1092,7 @@ job pipeline-cache python3 ./tests/pipelinecache.py
 # librarycall_<arch>.S for a Linux target and an Apple target and requires the
 # same instruction stream.  It failed for a year of commits' worth of reasons
 # that were not drift -- see archive/research/r12/r12-linuxbridgecheck-diagnosis.md.
-job exec-bridge-linux python3 ./exec/c/linuxbridgecheck.py
+job exec-bridge-linux tests/bound 58 sh ./tests/cxbin exec/c/linuxbridgecheck.cx   # (.cx port, 2026-10-23)
 job windows-resolver-host sh ./unisacc.com -run tests/windowsresolverhostcheck.cx   # (.cx port, 2026-10-23; unbounded as before: a cold zig cache took 50 s)
 if [ "$COM" = 1 ]; then
     PRODUCT=${MODEL_COM-$R/unisacc.com}

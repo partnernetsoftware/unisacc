@@ -1,0 +1,138 @@
+#!/usr/bin/env -S unisacc.com -run
+/* embeddedcheck.cx -- exec/c/embeddedcheck.py in C (2026-10-23, the py->cx port wave; the owner's direction: the
+   toolchain moves off Python).  Bounded host execution of an APE with one generic network package: two containers
+   share executable slices, but each must select its own payload.  No compiler semantics in the fixture; neither the
+   packaging nor the execution uses Python now.
+   usage: sh ./unisacc.com -run exec/c/embeddedcheck.cx        (arguments are ignored, as by the .py)
+   env:   UA (default /tmp/ua_ref): the same-source reference compiler the .py passed to `unisa ape --via`.
+   Construction: the .py ran the seed's `unisa ape exec/c/run.c --via UA -O2 --payload PKG -o IMAGE`; this runs the
+   Python-free container path the product build uses (exec/c/buildcompiler.sh pack_driver, SEED_GEN=1): `UA -O2 -b T
+   exec/c/run.c` for the five slice targets (once: the slices do not depend on the payload), then seed/ape.c (built
+   with cc -std=c99 -O2 -w) `--payload PKG IMAGE SLICES...` per image -- byte-equal to `unisa ape` when ape.c has
+   zlib (tests/seedapecheck.sh); without zlib.h on the host its gzip members are stored blocks, which the launcher's
+   `gzip -dc` reads the same.  The Net text and the package come from cxlib.netpack (exec/c/net.py convert,
+   exec/c/pack.py build).
+   Checks, as the .py: the PE header offset is 8-aligned and names PE\0\0; the image ends with UNIPKG1 and the
+   payload length; the payload sits once, right before the trailer.  Then the model files are removed (here: the
+   construction directory, a mkdtemp tree, through cxlib.pytempfile's ptf_rmtree) and `sh IMAGE --embedded demo
+   INPUT` in the scratch directory must print exactly the byte of its own payload.
+   Output: one line, rc 0.  A failed step is one `embeddedcheck: ...` line on stderr where Python printed a
+   traceback, rc 1.  The scratch directory is tempfile.mkdtemp(prefix='embedded models '), removed on every exit.
+   The repository root is two directories above this file (the .py's Path(__file__).resolve().parents[2]). */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.pytempfile
+
+static char ROOT[4096], D[4096], C[4400];
+
+static void cleanup(void) { if (D[0]) { ptf_rmtree(D); D[0] = 0; } }
+static void fail(const char *what) {
+    fflush(stdout);
+    fprintf(stderr, "embeddedcheck: %s\n", what);
+    cleanup(); exit(1);
+}
+static void put_file(const char *path, const char *s, size_t n) {
+    char why[4600]; int e = np_writefile(path, s, n);
+    if (e) { np_oserror(e, path, why, sizeof why); fail(why); }
+}
+/* call(ARGV, cwd=CWD): capture_output, timeout 60, rc 0 required; its stdout */
+static np_result call(char **argv, const char *cwd) {
+    np_result r; char why[8192];
+    if (np_run(argv, cwd, 0, 60, &r, why, sizeof why)) fail(why);
+    if (r.rc != 0) {
+        np_buf b = { 0, 0, 0 }; size_t i; char t[32];
+        np_puts(&b, "AssertionError: (");
+        for (i = 0; argv[i]; i++) { np_puts(&b, i ? ", '" : "['"); np_puts(&b, argv[i]); np_puts(&b, "'"); }
+        snprintf(t, sizeof t, "], %d, ", r.rc); np_puts(&b, t);
+        np_repr_bytes(&b, r.err, r.errn > 2000 ? 2000 : r.errn); np_puts(&b, ")");
+        fail(b.p);
+    }
+    return r;
+}
+static void check(int ok, const char *what) { if (!ok) { char t[512]; snprintf(t, sizeof t, "AssertionError: %s", what); fail(t); } }
+
+int main(void) {
+    static const char *targets[5] = { "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64" };
+    char here[4096], *slash, runc[4200], apec[4200], ape[4600], slice[5][4600], net[4600], manifest[4600], pkg[4600];
+    char image[2][4600], inp[4600], why[512], mz[2] = { 0, 0 };
+    const char *ua = getenv("UA");
+    np_result r; np_buf body = { 0, 0, 0 }, payload = { 0, 0, 0 }, text = { 0, 0, 0 };
+    int i, k, ch;
+
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[4200]; snprintf(t, sizeof t, "%s/../..", here); if (!realpath(t, ROOT)) fail("cannot resolve the repository root"); }
+    if (!ua) ua = "/tmp/ua_ref";
+    if (ptf_mkdtemp(0, "embedded models ", D, sizeof D)) { D[0] = 0; fail("FileNotFoundError: No usable temporary directory found"); }
+    /* the construction directory: tools, slices and model files; removed before the images run */
+    if (ptf_mkdtemp(D, "construct-", C, sizeof C)) fail("OSError: cannot create the construction directory");
+    snprintf(runc, sizeof runc, "%s/exec/c/run.c", ROOT); snprintf(apec, sizeof apec, "%s/seed/ape.c", ROOT);
+    snprintf(ape, sizeof ape, "%s/ape", C);
+    {
+        char *v[9];
+        v[0] = "cc"; v[1] = "-std=c99"; v[2] = "-O2"; v[3] = "-w"; v[4] = "-o"; v[5] = ape; v[6] = apec; v[7] = 0;
+        r = call(v, ROOT); np_free(&r);
+    }
+    {   /* an APE (`MZqFpD=`) cannot be exec'd directly on POSIX: launch it through sh, as `unisa ape --via` does */
+        FILE *f = fopen(ua, "rb");
+        if (f) { if (fread(mz, 1, 2, f) != 2) mz[0] = 0; fclose(f); }
+    }
+    for (k = 0; k < 5; k++) {
+        char *v[10]; int n = 0; char tg[16]; size_t j;
+        snprintf(tg, sizeof tg, "%s", targets[k]);
+        for (j = 0; tg[j]; j++) if (tg[j] == '/') tg[j] = '-';
+        snprintf(slice[k], sizeof slice[k], "%s/slice-%s", C, tg);
+        if (mz[0] == 'M' && mz[1] == 'Z') v[n++] = "sh";
+        v[n++] = (char *)ua; v[n++] = "-O2"; v[n++] = "-b"; v[n++] = (char *)targets[k]; v[n++] = runc;
+        v[n++] = "-o"; v[n++] = slice[k]; v[n] = 0;
+        r = call(v, ROOT); np_free(&r);
+    }
+    snprintf(net, sizeof net, "%s/m.net", C); snprintf(manifest, sizeof manifest, "%s/route.tsv", C);
+    snprintf(pkg, sizeof pkg, "%s/models.pkg", C);
+    for (i = 0; i < 2; i++) {
+        char src[256]; np_buf out = { 0, 0, 0 }; long long rows, units; const char *ms[1]; int rc;
+        unsigned long peoff; unsigned long long n; char *v[12];
+        ch = 65 + i;
+        snprintf(src, sizeof src, "T 1 1 1 0 0\nQ 2 %d %d %d\nR 0 0 0 0\n", np_code("OUT"), ch, np_code("ACCEPT"));
+        if (np_convert(src, strlen(src), &out, &rows, &units, why, sizeof why)) fail(why);
+        put_file(net, out.p, out.n); free(out.p);
+        { const char *m = "demo\ta\tbytes\tbytes\tm.net\n"; put_file(manifest, m, strlen(m)); }
+        ms[0] = manifest;
+        if ((rc = np_pack_build(ms, 1, 0, 0, 0, &payload, why, sizeof why))) {
+            char t[640]; snprintf(t, sizeof t, "%s%s", rc == -1 ? "ValueError: " : "", why); fail(t);
+        }
+        put_file(pkg, payload.p, payload.n);
+        snprintf(image[i], sizeof image[i], "%s/model %d.com", D, ch);
+        v[0] = ape; v[1] = "--payload"; v[2] = pkg; v[3] = image[i];
+        for (k = 0; k < 5; k++) v[4 + k] = slice[k];
+        v[9] = 0;
+        r = call(v, ROOT); np_free(&r);
+        if (np_readfile(image[i], &body)) fail("FileNotFoundError: the image was not written");
+        check(body.n >= 0x40 + 4, "image too short");
+        peoff = (unsigned long)(unsigned char)body.p[0x3C] | (unsigned long)(unsigned char)body.p[0x3D] << 8 |
+                (unsigned long)(unsigned char)body.p[0x3E] << 16 | (unsigned long)(unsigned char)body.p[0x3F] << 24;
+        check(peoff % 8 == 0 && peoff + 4 <= body.n && !memcmp(body.p + peoff, "PE\0\0", 4), "PE header");
+        check(body.n >= 16 && !memcmp(body.p + body.n - 16, "UNIPKG1\n", 8), "UNIPKG1 trailer");
+        for (n = 0, k = 7; k >= 0; k--) n = n << 8 | (unsigned char)body.p[body.n - 8 + (size_t)k];
+        check(n == payload.n, "payload length");
+        check(body.n >= 16 + payload.n && !memcmp(body.p + body.n - 16 - payload.n, payload.p, payload.n) &&
+              np_count(body.p, body.n, payload.p, payload.n) == 1, "payload placement");
+    }
+    /* for p in (net, manifest, pkg): p.unlink() -- the whole construction directory goes */
+    ptf_rmtree(C);
+    snprintf(inp, sizeof inp, "%s/input", D); put_file(inp, "", 0);
+    /* Empty PATH is unsuitable for the shell launcher (uname/gzip); no Python or model files are consulted by the
+       executable after shell extraction. */
+    for (i = 0; i < 2; i++) {
+        char *v[6];
+        v[0] = "sh"; v[1] = image[i]; v[2] = "--embedded"; v[3] = "demo"; v[4] = inp; v[5] = 0;
+        r = call(v, D);
+        check(r.outn == 1 && (unsigned char)r.out[0] == 65 + i, "embedded output");
+        np_free(&r);
+    }
+    puts("embedded package: two containers, one payload each, isolated host execution ok");
+    fflush(stdout);
+    free(body.p); free(payload.p); free(text.p);
+    cleanup();
+    return 0;
+}

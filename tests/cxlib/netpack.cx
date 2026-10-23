@@ -1,0 +1,824 @@
+/* netpack.cx -- the construction side of the exec/c threshold Net runtime (exec/c/run.c), without Python
+   (2026-10-23, the py->cx port wave; first users exec/c/netcheck.cx, exec/c/embeddedcheck.cx and
+   exec/c/linuxbridgecheck.cx, which reach it through the exec/c/cxlib/netpack.cx symlink because a module resolves
+   beside its user only -- the tests/flownet/*.cx precedent).  Use it with `#pragma unisa use cxlib.netpack`.
+     np_code(NAME)                 exec/c/tbl.py CODE[NAME]: the action opcode (-1: no such action)
+     np_arity(OP)                  len(OPS[OP][1]), the operand count of opcode OP (-1: no such opcode)
+     np_convert(SRC, N, &out, &rows, &units, why, len)
+                                   exec/c/net.py convert(): a delta table (.tbl text) as the threshold Net text
+                                   (.net); OUT gets the text, ROWS the bank count, UNITS the hidden-unit count.
+                                   0, or -1 with WHY the exception Python raised (`AssertionError`, `IndexError: ...`,
+                                   `ValueError: ...`)
+     np_pack_build(MANIFESTS, M, PREFIXES, DIRS, K, &out, why, len)
+                                   exec/c/pack.py build(MANIFESTS, zip(PREFIXES, DIRS)) uncompressed (P 1 / P 2): the
+                                   stream-stage manifests (route TAB stream-stage TAB in TAB out TAB model) and the
+                                   resource mounts as one package, equal Net bytes stored once, every Net's Q prefixes
+                                   compacted (compact_q).  0; -1 with WHY the ValueError's text; -2 with WHY the OSError
+                                   line (`FileNotFoundError: [Errno 2] No such file or directory: 'P'`)
+     np_run(ARGV, CWD, ENVADD, SECS, &res, why, len)
+                                   subprocess.run(ARGV, capture_output=True, timeout=SECS, cwd=CWD,
+                                   env=dict(os.environ, K=V for each "K=V" of ENVADD)): stdin inherited, stdout and
+                                   stderr through two pipes read to their ends (as communicate() does), res.rc the
+                                   returncode (-N for signal N).  0, or -1 with WHY the exception's line (the exec's or
+                                   the cwd's OSError, or `subprocess.TimeoutExpired: ...`; the child is SIGKILLed).
+                                   SECS counts idle milliseconds polled (<time.h> is not in the prelude), so a child
+                                   that keeps writing is bounded by the caller's tests/bound instead
+     np_free(&res)
+     np_put / np_puts / np_putll   append bytes / a string / a decimal to an np_buf (grown on the heap; never a
+                                   vsnprintf of a string, see the runtime's long-%s bug)
+     np_count(H, HN, S, SN)        bytes.count(S) (non-overlapping; an empty S counts HN + 1)
+     np_replace(H, HN, OLD, ON, NEW, NN, MAX, &out)
+                                   bytes.replace(OLD, NEW[, MAX]) into OUT (MAX < 0: all)
+     np_readfile(P, &out) / np_writefile(P, S, N)
+                                   Path.read_bytes() / Path.write_bytes(): 0, or the errno value (errno is
+                                   per translation unit in the carried runtime, so it is returned, not left set)
+     np_oserror(E, NAME, why, len)  the OSError line Python prints for errno E on NAME
+     np_repr_bytes(&b, S, N)       append repr(bytes) of S (Python's quote choice and escapes)
+     np_pathnorm(P, out, cap)      str(pathlib.PurePosixPath(P)): '' and '.' parts dropped, slashes collapsed, '//'
+                                   kept as POSIX allows exactly two leading slashes
+   Deletions: none here (callers remove their mkdtemp trees through cxlib.pytempfile's ptf_rmtree).
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module netpack
+
+typedef struct np_buf { char *p; size_t n, cap; } np_buf;
+typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; } np_result;
+
+/* ---- byte buffers -------------------------------------------------------------------------------------------- */
+void np_put(np_buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        g = realloc(b->p, c);
+        if (!g) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+void np_puts(np_buf *b, const char *s) { np_put(b, s, strlen(s)); }
+void np_putll(np_buf *b, long long v) { char t[32]; snprintf(t, sizeof t, "%lld", v); np_puts(b, t); }
+
+size_t np_count(const char *h, size_t hn, const char *s, size_t sn) {
+    size_t i = 0, c = 0;
+    if (!sn) return hn + 1;
+    while (i + sn <= hn) {
+        if (!memcmp(h + i, s, sn)) { c++; i += sn; } else i++;
+    }
+    return c;
+}
+void np_replace(const char *h, size_t hn, const char *old, size_t on, const char *nw, size_t nn, long max, np_buf *out) {
+    size_t i = 0; long done = 0;
+    out->n = 0; np_put(out, "", 0);
+    if (!on) {   /* bytes.replace(b'', X): X before every byte and at the end, up to MAX insertions */
+        for (i = 0; i <= hn; i++) {
+            if (max < 0 || done < max) { np_put(out, nw, nn); done++; }
+            if (i < hn) np_put(out, h + i, 1);
+        }
+        return;
+    }
+    while (i < hn) {
+        if (i + on <= hn && (max < 0 || done < max) && !memcmp(h + i, old, on)) { np_put(out, nw, nn); i += on; done++; }
+        else { np_put(out, h + i, 1); i++; }
+    }
+}
+
+int np_readfile(const char *path, np_buf *out) {
+    FILE *f; char t[65536]; size_t k; struct stat st;
+    out->n = 0; np_put(out, "", 0);
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return EISDIR;
+    if (!(f = fopen(path, "rb"))) return errno ? errno : EIO;
+    while ((k = fread(t, 1, sizeof t, f)) > 0) np_put(out, t, k);
+    fclose(f);
+    return 0;
+}
+int np_writefile(const char *path, const char *s, size_t n) {
+    FILE *f; struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return EISDIR;
+    if (!(f = fopen(path, "wb"))) return errno ? errno : EIO;
+    if (n && fwrite(s, 1, n, f) != n) { fclose(f); return EIO; }
+    return fclose(f) == 0 ? 0 : EIO;
+}
+
+void np_pathnorm(const char *p, char *out, size_t cap) {
+    size_t j = 0; const char *s = p;
+    if (!cap) return;
+    if (p[0] == '/') { out[j++] = '/'; if (p[1] == '/' && p[2] != '/' && j < cap - 1) out[j++] = '/'; }
+    while (*s) {
+        const char *e; size_t l;
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        l = (size_t)(e - s);
+        if (!(l == 1 && s[0] == '.')) {
+            if (j && out[j - 1] != '/' && j < cap - 1) out[j++] = '/';
+            if (j + l >= cap) l = cap - 1 - j;
+            memcpy(out + j, s, l); j += l;
+        }
+        s = e;
+    }
+    if (!j) out[j++] = '.';
+    out[j] = 0;
+}
+
+/* OSError's line as Python prints it: `FileNotFoundError: [Errno 2] No such file or directory: 'P'` */
+void np_oserror(int e, const char *name, char *why, size_t wl) {
+    const char *cls = "OSError"; const char *msg = strerror(e);
+    if (e == ENOENT) cls = "FileNotFoundError";
+    else if (e == EACCES || e == EPERM) cls = "PermissionError";
+    else if (e == ENOTDIR) cls = "NotADirectoryError";
+    else if (e == EISDIR) cls = "IsADirectoryError";
+    else if (e == EEXIST) cls = "FileExistsError";
+    /* the C library text Python shows (the carried runtime lacks some of it) */
+    if (e == ENOENT) msg = "No such file or directory";
+    else if (e == EACCES) msg = "Permission denied";
+    else if (e == EPERM) msg = "Operation not permitted";
+    else if (e == ENOTDIR) msg = "Not a directory";
+    else if (e == EISDIR) msg = "Is a directory";
+    else if (e == EEXIST) msg = "File exists";
+    if (name) snprintf(why, wl, "%s: [Errno %d] %s: '%s'", cls, e, msg, name);
+    else snprintf(why, wl, "%s: [Errno %d] %s", cls, e, msg);
+}
+
+/* ---- the action table (exec/c/tbl.py OPS; core.h's enum is its other copy) --------------------------------------- */
+static const char *const NP_NAME[56] = {
+    "ADV", "MARK", "JUMP", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "RLD", "LDX", "STX",
+    "OUT", "OUTW", "COPY", "COPYT", "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES",
+    "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "BLOBSAVE", "INPUSH", "INPUSHX",
+    "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBINTERN", "SBSAVE", "SBFIND", "BLEN", "BYTE", "XLEN",
+    "DIVMOD10", "SWAP", "ACCEPT", "REJECT", "A64", "A64I", "C64", "C64U", "INC" };
+static const char *const NP_KINDS[56] = {
+    "", "r", "r", "ri", "rr", "arrr", "arri", "rr", "ri", "r", "rri", "rir",
+    "i", "r", "", "", "r", "r", "rr", "", "", "r", "rr", "ri",
+    "rri", "", "i", "r", "r", "g", "", "rrr", "rrr", "r", "r",
+    "rr", "", "", "i", "rr", "r", "r", "r", "r", "rr", "r", "r",
+    "r", "", "", "s", "arrr", "arri", "rr", "rr", "r" };
+int np_code(const char *name) {
+    int i;
+    for (i = 0; i < 56; i++) if (!strcmp(NP_NAME[i], name)) return i;
+    return -1;
+}
+int np_arity(long long op) { return op >= 0 && op < 56 ? (int)strlen(NP_KINDS[op]) : -1; }
+
+/* ---- text: lines and words --------------------------------------------------------------------------------- */
+typedef struct np_span { const char *s; size_t n; } np_span;
+typedef struct np_spans { np_span *v; size_t n, cap; } np_spans;
+static void np_span_add(np_spans *a, const char *s, size_t n) {
+    if (a->n == a->cap) {
+        size_t c = a->cap ? a->cap * 2 : 64; np_span *g = realloc(a->v, c * sizeof *g);
+        if (!g) { fputs("MemoryError\n", stderr); exit(1); }
+        a->v = g; a->cap = c;
+    }
+    a->v[a->n].s = s; a->v[a->n].n = n; a->n++;
+}
+/* str.splitlines() (TEXT 1: \n \r \r\n \v \f \x1c-\x1e) or bytes.splitlines() (TEXT 0: \n \r \r\n); KEEP keeps ends */
+static void np_lines(const char *s, size_t n, int text, int keep, np_spans *out) {
+    size_t i = 0, start = 0;
+    out->n = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\n' || c == '\r' || (text && (c == 11 || c == 12 || c == 0x1c || c == 0x1d || c == 0x1e))) {
+            size_t end = i, next = i + 1;
+            if (c == '\r' && i + 1 < n && s[i + 1] == '\n') next = i + 2;
+            np_span_add(out, s + start, (keep ? next : end) - start);
+            i = start = next;
+        } else i++;
+    }
+    if (start < n) np_span_add(out, s + start, n - start);
+}
+static int np_isspace(unsigned char c, int text) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12 || (text && c >= 0x1c && c <= 0x1f);
+}
+/* str.split() / bytes.split() */
+static void np_words(const char *s, size_t n, int text, np_spans *out) {
+    size_t i = 0;
+    out->n = 0;
+    while (i < n) {
+        size_t j;
+        while (i < n && np_isspace((unsigned char)s[i], text)) i++;
+        if (i >= n) break;
+        for (j = i; j < n && !np_isspace((unsigned char)s[j], text); j++) ;
+        np_span_add(out, s + i, j - i);
+        i = j;
+    }
+}
+static int np_eq(np_span w, const char *lit) { return w.n == strlen(lit) && !memcmp(w.s, lit, w.n); }
+static int np_starts(np_span w, const char *lit) { size_t l = strlen(lit); return w.n >= l && !memcmp(w.s, lit, l); }
+
+/* int(WORD): [+-]digits with single '_' between digits; 1 ok, 0 not an integer; *BIG set when outside int64 (the
+   value is then clamped, enough for every range test made on it) */
+static int np_int(np_span w, long long *v, int *big) {
+    size_t i = 0; int neg = 0, any = 0; unsigned long long a = 0, lim;
+    *big = 0; *v = 0;
+    if (i < w.n && (w.s[i] == '+' || w.s[i] == '-')) { neg = w.s[i] == '-'; i++; }
+    lim = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    for (; i < w.n; i++) {
+        char c = w.s[i];
+        if (c == '_' && any && i + 1 < w.n && w.s[i + 1] >= '0' && w.s[i + 1] <= '9') continue;
+        if (c < '0' || c > '9') return 0;
+        any = 1;
+        if (!*big) {
+            if (a > (lim - (unsigned long long)(c - '0')) / 10) *big = 1;
+            else a = a * 10 + (unsigned long long)(c - '0');
+        }
+    }
+    if (!any) return 0;
+    if (*big) *v = neg ? (-9223372036854775807LL - 1) : 9223372036854775807LL;
+    else if (neg) *v = a == 9223372036854775808ULL ? (-9223372036854775807LL - 1) : -(long long)a;
+    else *v = (long long)a;
+    return 1;
+}
+static int np_badint(np_span w, char *why, size_t wl, int bytes) {
+    snprintf(why, wl, "ValueError: invalid literal for int() with base 10: %s'%.*s'", bytes ? "b" : "", (int)(w.n > 200 ? 200 : w.n), w.s);
+    return -1;
+}
+
+/* ---- exec/c/net.py convert --------------------------------------------------------------------------------------- */
+/* Python's lines[a:b] bounds for a list of length L */
+static size_t np_sl(long long i, size_t L) {
+    if (i < 0) { i += (long long)L; return i < 0 ? 0 : (size_t)i; }
+    return (unsigned long long)i > L ? L : (size_t)i;
+}
+#define NP_ASSERT(c) do { if (!(c)) { snprintf(why, wl, "AssertionError"); goto fail; } } while (0)
+
+typedef struct np_row { int mode; size_t n; long long *key, *nx, *sq; long long dn, dq; } np_row;
+
+int np_convert(const char *src, size_t len, np_buf *out, long long *nrows, long long *nunits, char *why, size_t wl) {
+    np_spans lines = { 0, 0, 0 }, head = { 0, 0, 0 }, a = { 0, 0, 0 };
+    long long hv[5], ns, nq, nstr, start, top, units = 0, *v = 0; int big, rc = -1;
+    size_t i, p0, p1, q0, nrow = 0, vcap = 0, r;
+    np_row *rows = 0;
+    out->n = 0; np_put(out, "", 0);
+    np_lines(src, len, 1, 0, &lines);
+    if (!lines.n) { snprintf(why, wl, "IndexError: list index out of range"); goto fail; }
+    np_words(lines.v[0].s, lines.v[0].n, 1, &head);
+    NP_ASSERT(head.n && np_eq(head.v[0], "T") && head.n == 6);
+    for (i = 0; i < 5; i++) if (!np_int(head.v[i + 1], &hv[i], &big)) { np_badint(head.v[i + 1], why, wl, 0); goto fail; }
+    ns = hv[0]; nq = hv[1]; nstr = hv[3]; start = hv[4];
+    NP_ASSERT(ns > 0 && nq > 0 && 0 <= start && start < ns);
+    /* prefix = lines[1:1+nstr+nq]; rows = lines[1+nstr+nq:] */
+    p0 = np_sl(1, lines.n); p1 = np_sl(1 + nstr + nq, lines.n); if (p1 < p0) p1 = p0;
+    r = np_sl(1 + nstr + nq, lines.n);
+    NP_ASSERT((long long)(lines.n - r) == ns);
+    top = ns - 1;
+    q0 = p0 + np_sl(nstr, p1 - p0);
+    for (i = q0; i < p1; i++) {
+        long long count, k; size_t nv, j, at = 0;
+        np_words(lines.v[i].s, lines.v[i].n, 1, &a);
+        if (!a.n) { snprintf(why, wl, "IndexError: list index out of range"); goto fail; }
+        NP_ASSERT(np_eq(a.v[0], "Q"));
+        if (a.n < 2) { snprintf(why, wl, "IndexError: list index out of range"); goto fail; }
+        if (!np_int(a.v[1], &count, &big)) { np_badint(a.v[1], why, wl, 0); goto fail; }
+        nv = a.n - 2;
+        if (nv > vcap) { vcap = nv * 2; v = realloc(v, vcap * sizeof *v); if (!v) { fputs("MemoryError\n", stderr); exit(1); } }
+        { int *bigs = malloc((nv + 1) * sizeof *bigs);
+          if (!bigs) { fputs("MemoryError\n", stderr); exit(1); }
+          for (j = 0; j < nv; j++) if (!np_int(a.v[j + 2], &v[j], &bigs[j])) { free(bigs); np_badint(a.v[j + 2], why, wl, 0); goto fail; }
+          for (k = 0; k < count; k++) {
+              long long op; int n;
+              if (at >= nv) { free(bigs); snprintf(why, wl, "IndexError: list index out of range"); goto fail; }
+              op = v[at];
+              /* OPS[op]: Python indexes from the end for -56..-1 */
+              if (bigs[at] || op < -56 || op >= 56) { free(bigs); snprintf(why, wl, "IndexError: list index out of range"); goto fail; }
+              n = np_arity(op < 0 ? op + 56 : op);
+              if (!(at + 1 + (size_t)n <= nv)) { free(bigs); snprintf(why, wl, "AssertionError"); goto fail; }
+              if (op == 29 && v[at + 1] > top) {   /* PUSH */
+                  if (bigs[at + 1]) { free(bigs); snprintf(why, wl, "MemoryError: PUSH operand outside int64"); goto fail; }
+                  top = v[at + 1];
+              }
+              at += 1 + (size_t)n;
+          }
+          free(bigs);
+        }
+        NP_ASSERT(at == nv);
+    }
+    rows = calloc((size_t)ns, sizeof *rows);
+    if (!rows) { fputs("MemoryError\n", stderr); exit(1); }
+    for (i = r; i < lines.n; i++, nrow++) {
+        np_row *w = &rows[nrow]; long long mode, n, dn, dq; size_t nv, j, e;
+        np_words(lines.v[i].s, lines.v[i].n, 1, &a);
+        if (!a.n) { snprintf(why, wl, "IndexError: list index out of range"); goto fail; }
+        NP_ASSERT(np_eq(a.v[0], "R"));
+        nv = a.n - 1;
+        if (nv > vcap) { vcap = nv * 2; v = realloc(v, vcap * sizeof *v); if (!v) { fputs("MemoryError\n", stderr); exit(1); } }
+        for (j = 0; j < nv; j++) {
+            if (!np_int(a.v[j + 1], &v[j], &big)) { np_badint(a.v[j + 1], why, wl, 0); goto fail; }
+            if (big) { snprintf(why, wl, "MemoryError: R value outside int64"); goto fail; }
+        }
+        if (nv < 4) { snprintf(why, wl, "ValueError: not enough values to unpack (expected 4, got %d)", (int)nv); goto fail; }
+        mode = v[0]; n = v[1]; dn = v[2]; dq = v[3];
+        NP_ASSERT((mode == 0 || mode == 1 || mode == 2) && n >= 0 && (long long)nv == 4 + 3 * n);
+        w->mode = (int)mode; w->dn = dn; w->dq = dq; w->n = 0;
+        w->key = malloc(((size_t)n + 1) * sizeof(long long)); w->nx = malloc(((size_t)n + 1) * sizeof(long long));
+        w->sq = malloc(((size_t)n + 1) * sizeof(long long));
+        if (!w->key || !w->nx || !w->sq) { fputs("MemoryError\n", stderr); exit(1); }
+        for (j = 4; j < nv; j += 3) {   /* {key: (next, seq)}: a repeated key keeps its first place, takes the last value */
+            for (e = 0; e < w->n && w->key[e] != v[j]; e++) ;
+            if (e == w->n) { w->key[e] = v[j]; w->n++; }
+            w->nx[e] = v[j + 1]; w->sq[e] = v[j + 2];
+        }
+        NP_ASSERT((long long)w->n == n);
+        if (mode == 1) {
+            for (e = 0; e < w->n; e++) NP_ASSERT(w->key[e] >= -1);
+            for (e = 0; e < w->n; e++) if (w->key[e] > top) top = w->key[e];
+            NP_ASSERT(dn == -1 && dq == 0);
+        } else for (e = 0; e < w->n; e++) NP_ASSERT(0 <= w->key[e] && w->key[e] <= 256);
+        for (e = 0; e <= w->n; e++) {
+            long long x = e < w->n ? w->nx[e] : dn, y = e < w->n ? w->sq[e] : dq;
+            NP_ASSERT(-1 <= x && x < ns && 0 <= y && y < nq);
+        }
+    }
+    /* N header, the S/Q prefix unchanged, one H bank per row */
+    np_puts(out, "N");
+    for (i = 1; i < 6; i++) { np_put(out, " ", 1); np_put(out, head.v[i].s, head.v[i].n); }
+    np_put(out, " ", 1); np_putll(out, top);
+    for (i = p0; i < p1; i++) { np_put(out, "\n", 1); np_put(out, lines.v[i].s, lines.v[i].n); }
+    for (r = 0; r < nrow; r++) {
+        np_row *w = &rows[r]; long long lo = w->mode == 1 ? -1 : 0, hi = w->mode == 1 ? top : 256, x, span, rs = 0;
+        long long b0, b1, l0, l1, nhidden = 0; size_t e, nret = 0; long long *idx; unsigned char *skip; np_buf units_text = { 0, 0, 0 };
+        long long *retk = 0;
+        span = hi - lo + 1;
+        if (span > (1LL << 26)) { snprintf(why, wl, "MemoryError: bank of %lld keys", span); goto fail; }
+        idx = malloc((size_t)span * sizeof *idx); skip = calloc((size_t)span, 1);
+        if (!idx || !skip) { fputs("MemoryError\n", stderr); exit(1); }
+        for (x = 0; x < span; x++) idx[x] = -1;
+        for (e = 0; e < w->n; e++) if (w->key[e] >= lo && w->key[e] <= hi) idx[w->key[e] - lo] = (long long)e;
+        if (w->mode == 1) {
+            /* a return: continuation rows k -> k sharing one sequence; the most common sequence, the lowest on a tie */
+            long long best = 0; size_t f;
+            for (e = 0; e < w->n; e++) {
+                long long c = 0;
+                if (!(w->key[e] >= 0 && w->nx[e] == w->key[e])) continue;
+                for (f = 0; f < w->n; f++) if (w->key[f] >= 0 && w->nx[f] == w->key[f] && w->sq[f] == w->sq[e]) c++;
+                if (c > best || (c == best && w->sq[e] < rs)) { best = c; rs = w->sq[e]; }
+            }
+            if (best >= 2) {
+                retk = malloc((size_t)best * sizeof *retk);
+                if (!retk) { fputs("MemoryError\n", stderr); exit(1); }
+                for (e = 0; e < w->n; e++) if (w->key[e] >= 0 && w->nx[e] == w->key[e] && w->sq[e] == rs) {
+                    size_t g = nret;
+                    while (g && retk[g - 1] > w->key[e]) { retk[g] = retk[g - 1]; g--; }
+                    retk[g] = w->key[e]; nret++;
+                }
+                for (e = 0; e < nret; e++) skip[retk[e] - lo] = 1;
+            }
+        }
+        if (idx[0] >= 0) { b0 = w->nx[idx[0]]; b1 = w->sq[idx[0]]; } else { b0 = w->dn; b1 = w->dq; }
+        l0 = b0; l1 = b1;
+        for (x = lo + 1; x <= hi; x++) {
+            long long y0, y1;
+            if (skip[x - lo]) continue;
+            if (idx[x - lo] >= 0) { y0 = w->nx[idx[x - lo]]; y1 = w->sq[idx[x - lo]]; } else { y0 = w->dn; y1 = w->dq; }
+            if (y0 != l0 || y1 != l1) {
+                if (nhidden) np_put(&units_text, " ", 1);
+                np_putll(&units_text, x); np_put(&units_text, " ", 1); np_putll(&units_text, y0 - l0);
+                np_put(&units_text, " ", 1); np_putll(&units_text, y1 - l1);
+                nhidden++;
+            }
+            l0 = y0; l1 = y1;
+        }
+        np_put(&units_text, "", 0);
+        if (nret) {
+            np_puts(out, "\nH 3 "); np_putll(out, lo); np_put(out, " ", 1); np_putll(out, hi); np_put(out, " ", 1);
+            np_putll(out, nhidden); np_put(out, " ", 1); np_putll(out, b0); np_put(out, " ", 1); np_putll(out, b1);
+            np_put(out, " ", 1); np_putll(out, rs); np_put(out, " ", 1); np_putll(out, (long long)nret); np_put(out, " ", 1);
+            for (e = 0; e < nret; e++) { if (e) np_put(out, " ", 1); np_putll(out, retk[e]); }
+            np_put(out, " ", 1);
+        } else {
+            np_puts(out, "\nH "); np_putll(out, w->mode); np_put(out, " ", 1); np_putll(out, lo); np_put(out, " ", 1);
+            np_putll(out, hi); np_put(out, " ", 1); np_putll(out, nhidden); np_put(out, " ", 1); np_putll(out, b0);
+            np_put(out, " ", 1); np_putll(out, b1); np_put(out, " ", 1);
+        }
+        np_put(out, units_text.p, units_text.n);
+        units += nhidden;
+        free(units_text.p); free(idx); free(skip); free(retk);
+    }
+    np_put(out, "\n", 1);
+    *nrows = ns; *nunits = units; rc = 0;
+fail:
+    if (rows) { for (r = 0; r < (size_t)ns; r++) { free(rows[r].key); free(rows[r].nx); free(rows[r].sq); } free(rows); }
+    free(lines.v); free(head.v); free(a.v); free(v);
+    return rc;
+}
+
+/* ---- exec/c/pack.py: Q decoding and prefix compaction ----------------------------------------------------------- */
+/* one decoded sequence: its actions as integer runs (opcode then operands) */
+typedef struct np_seq { long long *v; size_t nv; size_t *at; size_t na; } np_seq;
+static void np_seq_free(np_seq *s, size_t n) { size_t i; for (i = 0; i < n; i++) { free(s[i].v); free(s[i].at); } free(s); }
+static void np_seq_action(np_seq *q, const long long *a, size_t n) {
+    q->v = realloc(q->v, (q->nv + n + 1) * sizeof *q->v); q->at = realloc(q->at, (q->na + 2) * sizeof *q->at);
+    if (!q->v || !q->at) { fputs("MemoryError\n", stderr); exit(1); }
+    q->at[q->na++] = q->nv; memcpy(q->v + q->nv, a, n * sizeof *a); q->nv += n;
+}
+static size_t np_alen(const np_seq *q, size_t k) { return (k + 1 < q->na ? q->at[k + 1] : q->nv) - q->at[k]; }
+static int np_aeq(const np_seq *a, size_t i, const np_seq *b, size_t j) {
+    size_t n = np_alen(a, i);
+    return n == np_alen(b, j) && !memcmp(a->v + a->at[i], b->v + b->at[j], n * sizeof(long long));
+}
+/* _actions(flat, count) appended to Q */
+static int np_actions(np_seq *q, const long long *flat, const int *bigs, size_t nf, long long count, char *why, size_t wl) {
+    size_t at = 0; long long k;
+    if (count < 0 || (unsigned long long)count > nf) { snprintf(why, wl, "bad Q action count"); return -1; }
+    for (k = 0; k < count; k++) {
+        size_t end, j;
+        if (at >= nf || bigs[at] || !(0 <= flat[at] && flat[at] < 56)) { snprintf(why, wl, "bad Q opcode or truncated action"); return -1; }
+        end = at + 1 + (size_t)np_arity(flat[at]);
+        if (end > nf) { snprintf(why, wl, "truncated Q operands"); return -1; }
+        for (j = at; j < end; j++) if (bigs[j]) { snprintf(why, wl, "Q operand overflow"); return -1; }
+        np_seq_action(q, flat + at, end - at); at = end;
+    }
+    if (at != nf) { snprintf(why, wl, "extra Q operands"); return -1; }
+    return 0;
+}
+/* decode_q(lines): -1 ValueError (WHY its text) */
+static int np_decode_q(const np_span *lines, size_t n, np_seq **outp, char *why, size_t wl) {
+    np_seq *d = calloc(n + 1, sizeof *d); np_spans w = { 0, 0, 0 }; size_t qi;
+    long long *flat = 0; int *bigs = 0; size_t cap = 0;
+    if (!d) { fputs("MemoryError\n", stderr); exit(1); }
+    for (qi = 0; qi < n; qi++) {
+        size_t j, from; long long x, ref = 0, prefix = 0, tail = 0; int big;
+        np_words(lines[qi].s, lines[qi].n, 0, &w);
+        if (!w.n) { snprintf(why, wl, "truncated Q record"); goto bad; }
+        if (np_eq(w.v[0], "Q")) from = 2;
+        else if (np_eq(w.v[0], "C")) from = 4;
+        else { snprintf(why, wl, "unknown Q tag"); goto bad; }
+        if (from == 4) {   /* ref, prefix, tail = map(int, words[1:4]) */
+            if (w.n < 4) {   /* map(int, words[1:4]) unpacked into three: a ValueError, not a truncation */
+                for (j = 1; j < w.n; j++) if (!np_int(w.v[j], &x, &big)) { np_badint(w.v[j], why, wl, 1); goto badv; }
+                snprintf(why, wl, "not enough values to unpack (expected 3, got %d)", (int)(w.n - 1)); goto bad;
+            }
+            for (j = 1; j < 4; j++) {
+                if (!np_int(w.v[j], &x, &big)) { np_badint(w.v[j], why, wl, 1); goto badv; }
+                if (j == 1) ref = x; else if (j == 2) prefix = x; else tail = x;
+            }
+            if (!(0 <= ref && (size_t)ref < qi) || !(0 < prefix && (size_t)prefix <= d[ref].na)) { snprintf(why, wl, "bad Q prefix reference"); goto bad; }
+        }
+        if (w.n > cap) { cap = w.n * 2; flat = realloc(flat, cap * sizeof *flat); bigs = realloc(bigs, cap * sizeof *bigs); if (!flat || !bigs) { fputs("MemoryError\n", stderr); exit(1); } }
+        for (j = from; j < w.n; j++) if (!np_int(w.v[j], &flat[j - from], &bigs[j - from])) { np_badint(w.v[j], why, wl, 1); goto badv; }
+        if (from == 2) {
+            if (w.n < 2) { snprintf(why, wl, "truncated Q record"); goto bad; }
+            if (!np_int(w.v[1], &x, &big)) { np_badint(w.v[1], why, wl, 1); goto badv; }
+            if (np_actions(&d[qi], flat, bigs, w.n - from, x, why, wl)) goto bad;
+        } else {
+            size_t k;
+            for (k = 0; k < (size_t)prefix; k++) np_seq_action(&d[qi], d[ref].v + d[ref].at[k], np_alen(&d[ref], k));
+            if (np_actions(&d[qi], flat, bigs, w.n - from, tail, why, wl)) goto bad;
+        }
+    }
+    free(w.v); free(flat); free(bigs);
+    *outp = d;
+    return 0;
+bad:
+    free(w.v); free(flat); free(bigs); np_seq_free(d, n);
+    return -1;
+badv:   /* an int() failure: Python's ValueError text, uncaught by build's callers as any other ValueError */
+    free(w.v); free(flat); free(bigs); np_seq_free(d, n);
+    return -1;
+}
+/* compact_q(data) into OUT: -1 ValueError */
+static int np_compact_q(const char *data, size_t len, np_buf *out, char *why, size_t wl) {
+    np_spans lines = { 0, 0, 0 }, head = { 0, 0, 0 }; np_seq *dec = 0, *chk = 0; np_span *wires = 0;
+    long long nq = 0, nstr; int big, rc = -1; size_t start = 0, qi, i; np_buf cand = { 0, 0, 0 }; unsigned char *owned = 0;
+    out->n = 0; np_put(out, "", 0);
+    np_lines(data, len, 0, 1, &lines);
+    if (!lines.n || !len || data[len - 1] != '\n') { snprintf(why, wl, "truncated network"); goto done; }
+    np_words(lines.v[0].s, lines.v[0].n, 0, &head);
+    if (head.n != 7 || !np_eq(head.v[0], "N")) { snprintf(why, wl, "bad network header"); goto done; }
+    if (!np_int(head.v[2], &nq, &big)) { np_badint(head.v[2], why, wl, 1); goto done; }
+    if (!np_int(head.v[4], &nstr, &big)) { np_badint(head.v[4], why, wl, 1); goto done; }
+    if (nq <= 0 || nstr < 0 || 1 + nstr + nq > (long long)lines.n) { snprintf(why, wl, "bad network Q extent"); goto done; }
+    start = 1 + (size_t)nstr;
+    if (np_decode_q(lines.v + start, (size_t)nq, &dec, why, wl)) goto done;
+    wires = calloc((size_t)nq + 1, sizeof *wires); owned = calloc((size_t)nq + 1, 1);
+    if (!wires || !owned) { fputs("MemoryError\n", stderr); exit(1); }
+    /* the trie walk: the deepest node on this sequence's path an earlier sequence made, and its first maker */
+    for (qi = 0; qi < (size_t)nq; qi++) {
+        size_t prefix = 0, ref = 0, j;
+        for (j = 0; j < qi; j++) {
+            size_t l = 0;
+            while (l < dec[qi].na && l < dec[j].na && np_aeq(&dec[qi], l, &dec[j], l)) l++;
+            if (l > prefix) { prefix = l; ref = j; }
+        }
+        wires[qi] = lines.v[start + qi];
+        if (prefix) {
+            size_t k;
+            cand.n = 0; np_puts(&cand, "C "); np_putll(&cand, (long long)ref); np_put(&cand, " ", 1);
+            np_putll(&cand, (long long)prefix); np_put(&cand, " ", 1); np_putll(&cand, (long long)(dec[qi].na - prefix));
+            for (k = prefix < dec[qi].na ? dec[qi].at[prefix] : dec[qi].nv; k < dec[qi].nv; k++) { np_put(&cand, " ", 1); np_putll(&cand, dec[qi].v[k]); }
+            np_put(&cand, "\n", 1);
+            if (cand.n < wires[qi].n) {
+                char *keep = malloc(cand.n);
+                if (!keep) { fputs("MemoryError\n", stderr); exit(1); }
+                memcpy(keep, cand.p, cand.n); wires[qi].s = keep; wires[qi].n = cand.n; owned[qi] = 1;
+            }
+        }
+    }
+    if (np_decode_q(wires, (size_t)nq, &chk, why, wl)) { snprintf(why, wl, "Q prefix round trip differs"); goto done; }
+    for (qi = 0; qi < (size_t)nq; qi++) {
+        if (chk[qi].na != dec[qi].na || chk[qi].nv != dec[qi].nv || memcmp(chk[qi].v, dec[qi].v, dec[qi].nv * sizeof(long long))) {
+            snprintf(why, wl, "Q prefix round trip differs"); goto done;
+        }
+        for (i = 0; i < dec[qi].na; i++) if (chk[qi].at[i] != dec[qi].at[i]) { snprintf(why, wl, "Q prefix round trip differs"); goto done; }
+    }
+    for (i = 0; i < start; i++) np_put(out, lines.v[i].s, lines.v[i].n);
+    for (qi = 0; qi < (size_t)nq; qi++) np_put(out, wires[qi].s, wires[qi].n);
+    for (i = start + (size_t)nq; i < lines.n; i++) np_put(out, lines.v[i].s, lines.v[i].n);
+    rc = 0;
+done:
+    if (wires) for (qi = 0; qi < (size_t)nq; qi++) if (owned[qi]) free((char *)wires[qi].s);
+    free(wires); free(owned); free(cand.p);
+    if (dec) np_seq_free(dec, (size_t)nq);
+    if (chk) np_seq_free(chk, (size_t)nq);
+    free(lines.v); free(head.v);
+    return rc;
+}
+
+/* ---- exec/c/pack.py build ---------------------------------------------------------------------------------------- */
+static int np_name(const char *s, size_t n) {   /* NAME.fullmatch: [A-Za-z0-9_./-]+ */
+    size_t i;
+    if (!n) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '/' || c == '-')) return 0;
+    }
+    return 1;
+}
+typedef struct np_kv { char *k; size_t kn; char *v; size_t vn; } np_kv;
+typedef struct np_rel { char *rel; } np_rel;
+static int np_relcmp(const void *x, const void *y) {   /* PurePath order: part by part */
+    const char *a = ((const np_rel *)x)->rel, *b = ((const np_rel *)y)->rel;
+    for (;;) {
+        size_t la = strcspn(a, "/"), lb = strcspn(b, "/"), m = la < lb ? la : lb; int c = memcmp(a, b, m);
+        if (c) return c;
+        if (la != lb) return la < lb ? -1 : 1;
+        if (!a[la] || !b[lb]) return a[la] ? 1 : b[lb] ? -1 : 0;
+        a += la + 1; b += lb + 1;
+    }
+}
+/* rglob('*') files under ROOT/REL (directories recursed, symlinked ones not), relative paths */
+static void np_files(const char *root, const char *rel, np_rel **v, size_t *n, size_t *cap) {
+    char dir[8192]; DIR *dp; struct dirent *e;
+    if (*rel) snprintf(dir, sizeof dir, "%s/%s", root, rel); else snprintf(dir, sizeof dir, "%s", root);
+    if (!(dp = opendir(dir))) return;
+    while ((e = readdir(dp))) {
+        char path[8192], sub[8192]; struct stat ls, st;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (*rel) snprintf(sub, sizeof sub, "%s/%s", rel, e->d_name); else snprintf(sub, sizeof sub, "%s", e->d_name);
+        snprintf(path, sizeof path, "%s/%s", root, sub);
+        if (lstat(path, &ls) != 0) continue;
+        if (S_ISDIR(ls.st_mode)) { np_files(root, sub, v, n, cap); continue; }
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (*n == *cap) { *cap = *cap ? *cap * 2 : 32; *v = realloc(*v, *cap * sizeof **v); if (!*v) { fputs("MemoryError\n", stderr); exit(1); } }
+            (*v)[*n].rel = malloc(strlen(sub) + 1);
+            if (!(*v)[*n].rel) { fputs("MemoryError\n", stderr); exit(1); }
+            memcpy((*v)[*n].rel, sub, strlen(sub) + 1); (*n)++;
+        }
+    }
+    closedir(dp);
+}
+void np_repr_bytes(np_buf *b, const char *str, size_t n) {
+    const unsigned char *s = (const unsigned char *)str; size_t i; int sq = 0, dq = 0; char q, t[8];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    np_put(b, "b", 1); np_put(b, &q, 1);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == (unsigned char)q || c == '\\') { t[0] = '\\'; t[1] = (char)c; np_put(b, t, 2); }
+        else if (c == '\t') np_put(b, "\\t", 2);
+        else if (c == '\n') np_put(b, "\\n", 2);
+        else if (c == '\r') np_put(b, "\\r", 2);
+        else if (c < 0x20 || c >= 0x7F) { snprintf(t, sizeof t, "\\x%02x", c); np_put(b, t, 4); }
+        else { t[0] = (char)c; np_put(b, t, 1); }
+    }
+    np_put(b, &q, 1);
+}
+static int np_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+typedef struct np_srow { char *route, *sname, *in, *out; size_t model; } np_srow;
+
+int np_pack_build(const char *const *manifests, int nman, const char *const *prefixes, const char *const *dirs, int nmount,
+                  np_buf *result, char *why, size_t wl) {
+    np_srow *st = 0; size_t nst = 0, cst = 0, nmod = 0, nres = 0, cres = 0, i, j;
+    np_buf *models = 0; np_kv *res = 0; int m, rc = -1, e0;
+    np_buf text = { 0, 0, 0 }, data = { 0, 0, 0 }, wire = { 0, 0, 0 };
+    np_spans lines = { 0, 0, 0 };
+    char t[64];
+    result->n = 0; np_put(result, "", 0);
+    for (m = 0; m < nman; m++) {
+        const char *man = manifests[m]; char shown[4096], parent[4096], *slash;
+        np_pathnorm(man, shown, sizeof shown);
+        snprintf(parent, sizeof parent, "%s", shown);
+        slash = strrchr(parent, '/');
+        if (!slash) snprintf(parent, sizeof parent, ".");
+        else if (slash == parent) parent[1] = 0;
+        else *slash = 0;
+        if ((e0 = np_readfile(man, &text))) { np_oserror(e0, shown, why, wl); rc = -2; goto done; }
+        np_lines(text.p, text.n, 1, 0, &lines);
+        for (i = 0; i < lines.n; i++) {
+            const char *s = lines.v[i].s; size_t n = lines.v[i].n, c[6], k = 0, p; char *col[5]; size_t cl[5];
+            char loc[4600], path[8192];
+            if (!n || s[0] == '#') continue;
+            c[k++] = 0;
+            for (p = 0; p < n; p++) if (s[p] == '\t') { if (k < 6) c[k] = p + 1; k++; }
+            snprintf(loc, sizeof loc, "%s:%d", shown, (int)(i + 1));
+            if (k != 5) { snprintf(why, wl, "%s: expected five columns and valid names", loc); goto done; }
+            for (p = 0; p < 5; p++) {
+                size_t e = p < 4 ? c[p + 1] - 1 : n;
+                cl[p] = e - c[p]; col[p] = malloc(cl[p] + 1);
+                if (!col[p]) { fputs("MemoryError\n", stderr); exit(1); }
+                memcpy(col[p], s + c[p], cl[p]); col[p][cl[p]] = 0;
+            }
+            for (p = 0; p < 4; p++) if (!np_name(col[p], cl[p])) {
+                snprintf(why, wl, "%s: expected five columns and valid names", loc);
+                for (p = 0; p < 5; p++) free(col[p]);
+                goto done;
+            }
+            for (j = 0; j < nst; j++) if (!strcmp(st[j].route, col[0]) && !strcmp(st[j].sname, col[1])) {
+                snprintf(why, wl, "%s: duplicate stage %s/%s", loc, col[0], col[1]);
+                for (p = 0; p < 5; p++) free(col[p]);
+                goto done;
+            }
+            /* last[route]: the out format of the route's latest row */
+            for (j = nst; j-- > 0;) if (!strcmp(st[j].route, col[0])) break;
+            if (j != (size_t)-1 && strcmp(st[j].out, col[2])) {
+                snprintf(why, wl, "%s: format mismatch %s -> %s", loc, st[j].out, col[2]);
+                for (p = 0; p < 5; p++) free(col[p]);
+                goto done;
+            }
+            if (col[4][0] == '/' || !strcmp(parent, ".")) np_pathnorm(col[4], path, sizeof path);
+            else { char joined[8192]; snprintf(joined, sizeof joined, "%s/%s", parent, col[4]); np_pathnorm(joined, path, sizeof path); }
+            if ((e0 = np_readfile(path, &data))) { np_oserror(e0, path, why, wl); rc = -2; for (p = 0; p < 5; p++) free(col[p]); goto done; }
+            if (data.n < 2 || memcmp(data.p, "N ", 2) || data.p[data.n - 1] != '\n') {
+                snprintf(why, wl, "%s: expected canonical network text", loc);
+                for (p = 0; p < 5; p++) free(col[p]);
+                goto done;
+            }
+            for (j = 0; j < nmod; j++) if (models[j].n == data.n && !memcmp(models[j].p, data.p, data.n)) break;
+            if (j == nmod) {
+                models = realloc(models, (nmod + 1) * sizeof *models);
+                if (!models) { fputs("MemoryError\n", stderr); exit(1); }
+                models[nmod].p = 0; models[nmod].n = models[nmod].cap = 0;
+                np_put(&models[nmod], data.p, data.n); nmod++;
+            }
+            if (nst == cst) { cst = cst ? cst * 2 : 16; st = realloc(st, cst * sizeof *st); if (!st) { fputs("MemoryError\n", stderr); exit(1); } }
+            st[nst].route = col[0]; st[nst].sname = col[1]; st[nst].in = col[2]; st[nst].out = col[3]; st[nst].model = j; nst++;
+            free(col[4]);
+        }
+    }
+    if (!nst) { snprintf(why, wl, "empty package"); goto done; }
+    for (m = 0; m < nmount; m++) {
+        np_buf key = { 0, 0, 0 }; const char *h = prefixes[m]; np_rel *files = 0; size_t nf = 0, cf = 0, k;
+        char root[4096]; struct stat sd;
+        /* bytes.fromhex: hex pairs, whitespace between pairs */
+        np_put(&key, "", 0);
+        for (k = 0; h[k];) {
+            int hi, lo;
+            if (h[k] == ' ' || h[k] == '\t' || h[k] == '\n' || h[k] == '\r' || h[k] == 11 || h[k] == 12) { k++; continue; }
+            hi = np_hexval(h[k]); lo = h[k + 1] ? np_hexval(h[k + 1]) : -1;
+            if (hi < 0 || lo < 0) {
+                snprintf(why, wl, "non-hexadecimal number found in fromhex() arg at position %d", (int)(hi < 0 ? k : k + 1));
+                free(key.p); goto done;
+            }
+            { char c = (char)(hi * 16 + lo); np_put(&key, &c, 1); }
+            k += 2;
+        }
+        np_pathnorm(dirs[m], root, sizeof root);
+        if (stat(dirs[m], &sd) != 0 || !S_ISDIR(sd.st_mode)) { snprintf(why, wl, "resource mount is not a directory: %s", root); free(key.p); goto done; }
+        np_files(dirs[m], "", &files, &nf, &cf);
+        if (!nf) { snprintf(why, wl, "empty resource mount: %s", root); free(key.p); goto done; }
+        qsort(files, nf, sizeof *files, np_relcmp);
+        for (k = 0; k < nf; k++) {
+            char path[8192]; np_buf full = { 0, 0, 0 };
+            snprintf(path, sizeof path, "%s/%s", dirs[m], files[k].rel);
+            np_put(&full, key.p, key.n); np_puts(&full, files[k].rel);
+            if ((e0 = np_readfile(path, &data))) {
+                char shown[8192]; snprintf(shown, sizeof shown, "%s/%s", root, files[k].rel);
+                np_oserror(e0, shown, why, wl); rc = -2; free(full.p); free(key.p); goto done;
+            }
+            for (j = 0; j < nres; j++) if (res[j].kn == full.n && !memcmp(res[j].k, full.p, full.n)) break;
+            if (j < nres) {
+                if (res[j].vn != data.n || memcmp(res[j].v, data.p, data.n)) {
+                    np_buf r = { 0, 0, 0 };
+                    np_repr_bytes(&r, full.p, full.n);
+                    snprintf(why, wl, "conflicting resource %s", r.p);
+                    free(r.p); free(full.p); free(key.p); goto done;
+                }
+                res[j].v = realloc(res[j].v, data.n + 1); if (!res[j].v) { fputs("MemoryError\n", stderr); exit(1); }
+                memcpy(res[j].v, data.p, data.n); res[j].vn = data.n;
+                free(full.p);
+            } else {
+                if (nres == cres) { cres = cres ? cres * 2 : 16; res = realloc(res, cres * sizeof *res); if (!res) { fputs("MemoryError\n", stderr); exit(1); } }
+                res[nres].k = full.p; res[nres].kn = full.n;
+                res[nres].v = malloc(data.n + 1); if (!res[nres].v) { fputs("MemoryError\n", stderr); exit(1); }
+                memcpy(res[nres].v, data.p, data.n); res[nres].vn = data.n; nres++;
+            }
+        }
+        for (k = 0; k < nf; k++) free(files[k].rel);
+        free(files); free(key.p);
+    }
+    if (nres) snprintf(t, sizeof t, "P 2 %d %d %d\n", (int)nmod, (int)nst, (int)nres);
+    else snprintf(t, sizeof t, "P 1 %d %d\n", (int)nmod, (int)nst);
+    np_puts(result, t);
+    for (i = 0; i < nst; i++) {
+        np_puts(result, "D "); np_puts(result, st[i].route); np_put(result, " ", 1); np_puts(result, st[i].sname);
+        np_put(result, " ", 1); np_puts(result, st[i].in); np_put(result, " ", 1); np_puts(result, st[i].out);
+        np_put(result, " ", 1); np_putll(result, (long long)st[i].model); np_put(result, "\n", 1);
+    }
+    for (i = 0; i < nmod; i++) {
+        if (np_compact_q(models[i].p, models[i].n, &wire, why, wl)) goto done;
+        np_puts(result, "M "); np_putll(result, (long long)wire.n); np_put(result, "\n", 1); np_put(result, wire.p, wire.n);
+    }
+    for (i = 0; i < nres; i++) {
+        np_puts(result, "F "); np_putll(result, (long long)res[i].kn); np_put(result, " ", 1); np_putll(result, (long long)res[i].vn);
+        np_put(result, "\n", 1); np_put(result, res[i].k, res[i].kn); np_put(result, res[i].v, res[i].vn);
+    }
+    if (result->n >= 2147483648UL) { snprintf(why, wl, "package exceeds runtime byte extent"); goto done; }
+    rc = 0;
+done:
+    for (i = 0; i < nst; i++) { free(st[i].route); free(st[i].sname); free(st[i].in); free(st[i].out); }
+    free(st);
+    for (i = 0; i < nmod; i++) free(models[i].p);
+    free(models);
+    for (i = 0; i < nres; i++) { free(res[i].k); free(res[i].v); }
+    free(res); free(text.p); free(data.p); free(wire.p); free(lines.v);
+    return rc;
+}
+
+/* ---- subprocess.run(capture_output=True) ---------------------------------------------------------------------- */
+void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; }
+int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
+    int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
+    pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
+    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0;
+    if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
+    fcntl(pf[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) { snprintf(why, wl, "OSError: fork failed"); return -1; }
+    if (pid == 0) {
+        close(po[0]); close(pe[0]); close(pf[0]);
+        dup2(po[1], 1); dup2(pe[1], 2); close(po[1]); close(pe[1]);
+        if (envadd && envadd[0]) {
+            /* dict(os.environ, K=V): rebuilt in environ itself (the runtime's setenv() does not reach execvp) */
+            size_t n = 0, a = 0, x, y; char **ne, **v;
+            for (v = environ; *v; v++) n++;
+            while (envadd[a]) a++;
+            ne = malloc((n + a + 1) * sizeof *ne);
+            if (!ne) _exit(255);
+            for (x = 0, v = environ; *v; v++) {
+                int keep = 1;
+                for (y = 0; y < a; y++) {
+                    size_t l = strcspn(envadd[y], "=");
+                    if (!strncmp(*v, envadd[y], l) && (*v)[l] == '=') keep = 0;
+                }
+                if (keep) ne[x++] = *v;
+            }
+            for (y = 0; y < a; y++) ne[x++] = envadd[y];
+            ne[x] = 0;
+            environ = ne;
+        }
+        if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pf[1], err, sizeof err); _exit(255); }
+        execvp(argv[0], argv);
+        err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
+        _exit(255);
+    }
+    close(po[1]); close(pe[1]); close(pf[1]);
+    k = read(pf[0], err, sizeof err);
+    close(pf[0]);
+    if (k == (ssize_t)sizeof err) {
+        waitpid(pid, &st, 0); close(po[0]); close(pe[0]);
+        np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
+        return -1;
+    }
+    fcntl(po[0], F_SETFL, O_NONBLOCK); fcntl(pe[0], F_SETFL, O_NONBLOCK);
+    np_put(&o, "", 0); np_put(&e, "", 0);
+    while (open_o || open_e || !reaped) {
+        int got = 0;
+        if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
+        if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
+        if (!open_o && !open_e && !reaped) { waitpid(pid, &st, 0); reaped = 1; break; }
+        if (got) continue;
+        if (idle >= (long)secs * 1000) {   /* the bound counts idle milliseconds (<time.h> is not in the prelude) */
+            size_t i;
+            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            if (open_o) close(po[0]);
+            if (open_e) close(pe[0]);
+            free(o.p); free(e.p);
+            {   np_buf l = { 0, 0, 0 };
+                np_puts(&l, "subprocess.TimeoutExpired: Command '[");
+                for (i = 0; argv[i]; i++) { if (i) np_puts(&l, ", "); np_puts(&l, "'"); np_puts(&l, argv[i]); np_puts(&l, "'"); }
+                np_puts(&l, "]' timed out after ");
+                snprintf(t, sizeof t, "%d seconds", secs); np_puts(&l, t);
+                snprintf(why, wl, "%s", l.p); free(l.p);
+            }
+            return -1;
+        }
+        usleep(1000); idle++;
+    }
+    res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;
+    return 0;
+}

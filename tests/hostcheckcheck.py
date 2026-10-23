@@ -67,7 +67,7 @@ class HostChecks(unittest.TestCase):
             [sys.executable,'exec/c/librarystackcheck.py','missing.com','arm64'],
             [sys.executable,'exec/c/librarystackcheck.py','missing.com','x86_64'],
             [sys.executable,'tests/r10stackx86check.py'],
-            [sys.executable,'exec/enc/windowshostbridgecheck.py','--part','native'],
+            ['sh','tests/cxbin','exec/enc/windowshostbridgecheck.cx','--part','native'],
             ['env','SELF_PART=bootstrap','TARGET=osx/arm64','UA=/nonexistent','sh','exec/pipeline/selfcheck.sh'],
             ['env','SELF_PART=bootstrap','TARGET=osx/x86_64','UA=/nonexistent','sh','exec/pipeline/selfcheck.sh']]
         for args in commands:
