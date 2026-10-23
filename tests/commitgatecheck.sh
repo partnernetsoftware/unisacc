@@ -127,4 +127,57 @@ echo 'int bad = 1;' > src/bad.c; git add src/bad.c
 before=$(git rev-parse HEAD)
 DERIVEDCHECK_BOUND=3 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m bad --suite difftest_o-1 -- src/bad.c > /dev/null 2>&1
 [ $? -eq 5 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "a suite over its own bound was committed"
-echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified in either naming order, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit"
+# 0.0.43 landing (research/c43-workflow-lessons.md section 2): --index commits exactly the index, checked in an export of
+# the index tree, never another lander's uncommitted or indexed lines; one landing lock (tests/landlock) serialises
+# commitgate runs, is re-entrant under tests/landlock, and stays out of the gate.  T2 is a second fixture repository
+# (kept under $TMPDIR like T); lander A and lander B share shared.txt with disjoint hunks.
+CG=$R/release/tools/commitgate.sh; LL=$R/tests/landlock
+T2=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-commitgate-index.XXXXXX"); G=$T2/.git
+cd "$T2" && git init -q . && seq 1 40 > shared.txt && echo own > own.txt && git add . && git commit -q -m base || fail "index fixture"
+mkpatch() { cat "$1" > "$G/save" && git show ":$1" > "$1" && sed -i "$2" "$1" && git diff -- "$1" > "$3"; cat "$G/save" > "$1"; }   # FILE SED OUT
+upto() { n=0; until [ -s "$1" ] || [ $n -ge 200 ]; do sleep 0.05; n=$((n + 1)); done; }   # wait (10 s at most) for a file
+mkpatch shared.txt 's/^2$/A2/' "$G/a2.patch"; sed -i 's/^30$/B30/' shared.txt   # A's hunk made against HEAD; B's uncommitted hunk
+git apply --cached "$G/a2.patch" && git apply "$G/a2.patch" || fail "--index: A's hunk did not apply beside B's"
+printf '#!/bin/sh\ngrep -qx A2 shared.txt && grep -qx 30 shared.txt && ! grep -q B30 shared.txt && [ ! -e /dev/fd/9 ]\n' > "$G/look"; chmod +x "$G/look"
+base=$(git rev-parse HEAD)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$G/look "$CG" --index -m A2 -- shared.txt > /dev/null 2>&1 || fail "--index: A's hunk was not committed (or its gate saw B's line or held the lock)"
+[ "$(git rev-parse HEAD^)" = "$base" ] && git show HEAD:shared.txt | grep -qx A2 && git show HEAD:shared.txt | grep -qx 30 || fail "--index: the commit is not exactly A's hunk"
+grep -qx A2 shared.txt && grep -qx B30 shared.txt && [ "$(git diff --name-only)" = shared.txt ] && git diff --cached --quiet \
+  && [ "$(git diff | grep -c '^[-+][0-9AB]')" = 2 ] || fail "--index: B's uncommitted hunk was touched or committed"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$CG" --index -m x -- shared.txt > /dev/null 2>&1; [ $? -eq 2 ] || fail "--index with an empty index was not refused"
+mkpatch shared.txt 's/^3$/A3/' "$G/a3.patch"; git apply --cached "$G/a3.patch" && git apply "$G/a3.patch" || fail "--index: A's second hunk did not apply"
+echo b > own.txt && git add own.txt   # B's indexed work, outside A's declared paths
+before=$(git rev-parse HEAD); idx=$(git write-tree)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$CG" --index -m x -- shared.txt > "$G/out" 2>&1; rc=$?
+[ $rc -eq 2 ] && [ "$(git rev-parse HEAD)" = "$before" ] && [ "$(git write-tree)" = "$idx" ] && grep -qx '  own.txt' "$G/out" \
+  || fail "--index: an indexed path outside the declared list was not refused by name (or HEAD/the index moved)"
+git reset -q -- own.txt
+printf '#!/bin/sh\ngit -C "%s" add own.txt\n' "$T2" > "$G/sneak"; chmod +x "$G/sneak"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$G/sneak "$CG" --index -m x -- shared.txt > /dev/null 2>&1
+[ $? -eq 4 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "--index: an index change during the gate was committed"
+git reset -q -- own.txt
+COMMITGATE_LOCK_WAIT=0 "$LL" env COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$CG" --index -m A3 -- shared.txt > /dev/null 2>&1 \
+  || fail "commitgate --index under tests/landlock did not commit (it waited for its own lock?)"
+git show HEAD:shared.txt | grep -qx A3 && ! git show HEAD:shared.txt | grep -q B30 && grep -qx B30 shared.txt || fail "--index under tests/landlock: wrong commit"
+X=$("$LL" --export) && [ "$(git -C "$X" rev-parse HEAD^{tree})" = "$(git write-tree)" ] && grep -qx 30 "$X/shared.txt" || fail "--export is not the index tree"
+sed -i 's/^5$/D5/' "$X/shared.txt" && "$LL" --add shared.txt || fail "--add refused"
+git show :shared.txt | grep -qx D5 && ! git show :shared.txt | grep -q B30 && grep -qx D5 shared.txt && grep -qx B30 shared.txt \
+  || fail "--add: the index is not the export's bytes, or the working-tree merge lost B's line"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$CG" --index -m D5 -- shared.txt > /dev/null 2>&1 && git show HEAD:shared.txt | grep -qx D5 || fail "--index after --add did not commit"
+# the lock: a holder makes COMMITGATE_LOCK_WAIT=0 give up (rc 6, holder named), and a default waiter run only after it
+printf '#!/bin/sh\necho gate >> "%s/order"\n' "$G" > "$G/mark"; printf '#!/bin/sh\necho start >> "%s/order"; sleep 0.5; echo end >> "%s/order"\n' "$G" "$G" > "$G/slow"; chmod +x "$G/mark" "$G/slow"
+: > "$G/order"; : > "$G/held"; echo x >> own.txt; before=$(git rev-parse HEAD)
+"$LL" sh -c 'echo held > "$1"; sleep 2; echo held-end >> "$2"' sh "$G/held" "$G/order" & holder=$!
+upto "$G/held"
+COMMITGATE_LOCK_WAIT=0 COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$CG" -m x -- own.txt > "$G/out" 2>&1; rc=$?
+[ $rc -eq 6 ] && [ "$(git rev-parse HEAD)" = "$before" ] && grep -q 'held by: pid' "$G/out" || fail "a held landing lock did not stop COMMITGATE_LOCK_WAIT=0 (rc $rc)"
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$G/mark "$CG" -m own -- own.txt > "$G/out" 2>&1 || fail "the waiter did not commit after the holder"
+wait $holder
+[ "$(tr '\n' ' ' < "$G/order")" = "held-end gate " ] && grep -q 'waiting for the landing lock' "$G/out" || fail "the waiter's gate ran while the lock was held"
+: > "$G/order"; echo 1 > f1; echo 2 > f2; git add f1 f2
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$G/slow "$CG" -m f1 -- f1 > /dev/null 2>&1 & p1=$!
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$G/slow "$CG" -m f2 -- f2 > /dev/null 2>&1 & p2=$!
+wait $p1; r1=$?; wait $p2; r2=$?
+[ $r1 -eq 0 ] && [ $r2 -eq 0 ] && [ "$(git log --format=%s -2 | sort | tr "\n" " ")" = "f1 f2 " ] || fail "two concurrent commitgate runs did not both commit (rc $r1 $r2)"
+[ "$(tr '\n' ' ' < "$G/order")" = "start end start end " ] || fail "two concurrent commitgate runs overlapped (no landing lock)"
+echo "commitgate  red gate with a green-looking tail leaves no commit; green commits only the given paths; override needs the self-test flag; killed gate leaves no commit; another repository refused; commit failure rc 3; missing paths refused; freezecheck product closure or unisacc.c needs a non-contract suite; weights and shipping seed guarded; seed README excluded; named suite must declare every shipping path (uncovered, unclassified in either naming order, directory refused); inputs changed during the gate (content, mode, index, member added/deleted) rc 4, no commit; --index commits exactly the index (another lander's uncommitted hunk in the same file untouched, an indexed path outside the list refused by name, empty index refused, index moved rc 4), checked in the index export; tests/landlock --export/--add; one landing lock: re-entrant under tests/landlock, out of the gate, rc 6 when not free in time, concurrent runs serialised"

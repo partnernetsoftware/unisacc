@@ -1,0 +1,94 @@
+#!/bin/sh
+# landlock -- the one landing lock of this repository (0.0.43, research/c43-workflow-lessons.md section 2).
+#
+#   tests/landlock CMD [ARG...]   run CMD holding the lock: flock on GIT_COMMON_DIR/unisacc-landing.lock
+#   tests/landlock --export       (under the lock) check the current INDEX tree out into the export worktree
+#                                 GIT_COMMON_DIR/unisacc-index-tree (detached at a commit of that tree whose parent
+#                                 is HEAD, the root unisacc.com linked read-only) and print its path
+#   tests/landlock --add FILE...  (under the lock) put FILE's bytes from the export into the index, and carry the same
+#                                 change into the working-tree copy by a three-way merge (others' uncommitted lines
+#                                 there stay); a conflicting working-tree copy is left as it is, with a warning
+#   tests/landlock --derive       (under the lock) regenerate tests/INVENTORY.md, tests/gatedeps.json and
+#                                 tests/zeropython.tsv in the export (from the index tree) and --add them
+#
+# release/tools/commitgate.sh (both modes) takes the same lock.  Re-entrant: the holder passes the locked descriptor
+# 9 and UNISACC_LANDLOCK_FD=9 to CMD, so a commitgate or landlock run under it takes the lock it already holds
+# instead of waiting for itself.  A waiter waits up to COMMITGATE_LOCK_WAIT minutes (default 30; 0 = do not wait),
+# then exits 6.  The holder is named in GIT_COMMON_DIR/unisacc-landing.holder.  No deletion anywhere here: the export
+# worktree is reused (git checkout -f moves it to the next index tree) and the merge scratch files are overwritten.
+#
+# Lander recipe (one landing, nobody waits on anyone's uncommitted lines):
+#   tests/landlock sh -c 'git apply --cached MY.patch && git apply MY.patch && git add NEW-FILE... &&
+#       tests/landlock --derive &&
+#       release/tools/commitgate.sh --index -m MSG --suite S... -- PATH... tests/INVENTORY.md tests/gatedeps.json tests/zeropython.tsv'
+set -u
+die() { echo "landlock: $*" >&2; exit 2; }
+gd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || die "not in a git repository"
+top=$(git rev-parse --show-toplevel 2>/dev/null) || die "no working tree"
+lock=$gd/unisacc-landing.lock; holder=$gd/unisacc-landing.holder; wt=$gd/unisacc-index-tree
+
+take() {   # take the lock on descriptor 9 (or find it already held there), export the marker
+    command -v flock > /dev/null 2>&1 || { echo "landlock: flock not found, the landing lock is NOT taken" >&2; return 0; }
+    if [ "${UNISACC_LANDLOCK_FD:-}" = 9 ] && [ /dev/fd/9 -ef "$lock" ] && flock -n 9; then return 0; fi
+    exec 9>> "$lock" || die "cannot open $lock"
+    if ! flock -n 9; then
+        w=${COMMITGATE_LOCK_WAIT:-30}
+        case $w in ''|*[!0-9]*) die "COMMITGATE_LOCK_WAIT must be whole minutes (got '$w')";; esac
+        echo "landlock: waiting for the landing lock $lock (held by: $(cat "$holder" 2> /dev/null || echo unknown)), up to $w min (COMMITGATE_LOCK_WAIT)" >&2
+        flock -w $((w * 60)) 9 || { echo "landlock: the landing lock was not free within $w min (held by: $(cat "$holder" 2> /dev/null || echo unknown))" >&2; exit 6; }
+    fi
+    printf 'pid %s since %s: %s\n' "$$" "$(date '+%F %T')" "$(printf '%s' "$*" | tr '\n' ' ' | cut -c1-160)" > "$holder"
+    UNISACC_LANDLOCK_FD=9; export UNISACC_LANDLOCK_FD
+}
+
+export_index() {   # the index tree, checked out in the export worktree with git's checkout modes
+    tree=$(git write-tree) || die "the index cannot be written as a tree (unmerged entries?)"
+    head=$(git rev-parse -q --verify HEAD) || die "no HEAD"
+    c=$(git -c user.name=landlock -c user.email=landlock@localhost commit-tree "$tree" -p "$head" -m "landlock: index export") \
+        || die "cannot make the export commit"
+    ( umask 022
+      if [ -e "$wt/.git" ]; then git -C "$wt" checkout -q -f --detach "$c"
+      else git worktree add -q -f --detach "$wt" "$c"; fi ) > /dev/null || die "cannot check out the export worktree $wt"
+    for f in unisacc.com unisacc.com.build.json; do
+        [ -f "$top/$f" ] && [ ! -e "$wt/$f" ] && [ ! -L "$wt/$f" ] && ln -s "$top/$f" "$wt/$f"
+    done
+    [ "$(git -C "$wt" rev-parse HEAD^{tree})" = "$tree" ] || die "the export worktree is not at the index tree"
+}
+
+add_from_export() {   # FILE... : export bytes -> index; the same change merged into the working-tree copy
+    [ -e "$wt/.git" ] || die "no export worktree (run --export first)"
+    cd "$top" || die "cannot enter $top"
+    for f in "$@"; do
+        new=$wt/$f; [ -f "$new" ] || die "$f: not a file in the export"
+        mode=100644; [ -x "$new" ] && mode=100755
+        oid=$(git hash-object -w -- "$new") || die "$f: cannot hash"
+        if old=$(git rev-parse -q --verify ":$f"); then
+            [ "$old" = "$oid" ] && continue
+            git cat-file blob "$old" > "$gd/unisacc-landlock.base" || die "$f: cannot read the index blob"
+            if [ -f "$f" ]; then
+                if git merge-file -p "$f" "$gd/unisacc-landlock.base" "$new" > "$gd/unisacc-landlock.merged"; then
+                    cat "$gd/unisacc-landlock.merged" > "$f" || die "$f: cannot write the working-tree copy"
+                else
+                    echo "landlock: $f: the working-tree copy conflicts with the regenerated bytes; the index has them, the working tree is left as it was" >&2
+                fi
+            fi
+        else
+            [ -e "$f" ] || { cat "$new" > "$f" && chmod "$( [ $mode = 100755 ] && echo 755 || echo 644)" "$f"; } || die "$f: cannot write"
+        fi
+        git update-index --add --cacheinfo "$mode,$oid,$f" || die "$f: cannot update the index"
+    done
+}
+
+case ${1:-} in
+    '') die "usage: landlock CMD [ARG...] | --export | --add FILE... | --derive";;
+    --export) take --export; export_index; printf '%s\n' "$wt";;
+    --add) shift; [ $# -gt 0 ] || die "--add needs FILE..."; take --add "$@"; add_from_export "$@";;
+    --derive)
+        take --derive; export_index
+        ( cd "$wt" && sh ./unisacc.com -run tests/inventory.cx -- --write && git add -- tests/INVENTORY.md \
+          && sh ./unisacc.com -run tests/refreshgatedeps.cx -- --index && git add -- tests/gatedeps.json \
+          && sh tests/cxbin tests/zeropython.cx --write ) || die "a derived file did not regenerate in $wt"
+        add_from_export tests/INVENTORY.md tests/gatedeps.json tests/zeropython.tsv;;
+    -*) die "unknown option $1";;
+    *) take "$@"; exec "$@";;
+esac
