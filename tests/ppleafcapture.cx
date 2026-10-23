@@ -7,7 +7,7 @@ static const char *root,*outdir;static FILE *streams,*observations,*resources,*q
 static void add(Buf *b,const char *p,size_t n){if(b->n+n+1>b->cap){b->cap=(b->n+n+1)*2+64;b->b=realloc(b->b,b->cap);if(!b->b)exit(2);}memcpy(b->b+b->n,p,n);b->n+=n;b->b[b->n]=0;}
 static char *capture_dup(const char *p,size_t n){char *r=malloc(n+1);memcpy(r,p,n);r[n]=0;return r;}
 static Buf quoted(const char *p,const char **next){Buf b={0};int x,i;if(*p!='"')exit(2);p++;while(*p&&*p!='"'){unsigned char c=*p++;if(c=='\\'){c=*p++;if(c>='0'&&c<='7'){x=c-'0';for(i=0;i<2&&*p>='0'&&*p<='7';i++)x=x*8+(*p++-'0');c=x;}else if(c=='n')c='\n';else if(c=='r')c='\r';else if(c=='t')c='\t';else if(c=='b')c='\b';else if(c=='f')c='\f';else if(c=='v')c='\v';else if(c=='a')c='\a';else if(c=='x'){x=0;for(i=0;i<2&&isxdigit(*p);i++){x=x*16+(*p<='9'?*p-'0':tolower(*p)-'a'+10);p++;}c=x;}}add(&b,(char *)&c,1);}if(*p!='"')exit(2);*next=p+1;return b;}
-static char *result_suffix(char *p){char *r=0,*q=p;while((q=strstr(q,") = "))){r=q;q+=4;}return r;}
+static char *result_suffix(char *p){char *r=0,*q=p;while((q=strchr(q,')'))){char *v=q+1;while(*v==' '||*v=='\t')v++;if(v>q+1&&*v=='='){v++;while(*v==' '||*v=='\t')v++;r=v;}q++;}return r;}
 static int cmp(const void*a,const void*b){return strcmp(((Dep*)a)->path,((Dep*)b)->path);}
 static void dependency(const char *absolute){const char *rel;char candidate[4096];int i;size_t n=strlen(root);struct stat st;
  if(strncmp(absolute,root,n)||absolute[n]!='/'){
@@ -30,7 +30,7 @@ static void scan(const char *trace,const char *name,int id){char path[4096],*b,*
  p=b;while(*p){end=strchr(p,'\n');if(!end)end=p+strlen(p);*end=0;
  if(!strncmp(p,"execve(",7)&&strstr(p," = 0")){Buf x=quoted(p+7,(const char**)&q);exec=x.b;dependency(exec);if(strstr(exec,"/pp-literals-")&&strlen(exec)>=4&&!strcmp(exec+strlen(exec)-4,"/run")&&!strstr(q,"--check-net")){int k=0;isrun=1;q=strchr(q,'[')+1;while(*q&&*q!=']'){if(*q=='"'){x=quoted(q,(const char**)&q);if(k++==2)inputpath=x.b;}else q++;}}}
  {char *suffix=result_suffix(p),*quote=strchr(p,'"'),*paren=strchr(p,'(');
-  if(suffix&&quote&&paren&&(!strncmp(p,"open",4)||!strncmp(p,"access(",7)||!strncmp(p,"newfstatat(",11)||!strncmp(p,"stat(",5)||!strncmp(p,"lstat(",6)||!strncmp(p,"readlink",8))){Buf value=quoted(quote,(const char**)&q);if(value.b&&strchr(value.b,'\t')==0&&strchr(value.b,'\n')==0)fprintf(queries,"query\t%s\t%.*s\t%s\t%ld\n",name,(int)(paren-p),p,value.b,atol(suffix+4));free(value.b);}
+  if(suffix&&quote&&paren&&(!strncmp(p,"open",4)||!strncmp(p,"access(",7)||!strncmp(p,"newfstatat(",11)||!strncmp(p,"stat(",5)||!strncmp(p,"lstat(",6)||!strncmp(p,"readlink",8))){Buf value=quoted(quote,(const char**)&q);if(value.b&&strchr(value.b,'\t')==0&&strchr(value.b,'\n')==0)fprintf(queries,"query\t%s\t%.*s\t%s\t%ld\n",name,(int)(paren-p),p,value.b,atol(suffix));free(value.b);}
  }
  if(!strncmp(p,"getdents64(",11)){
   char *start=strchr(p,'<'),*stop=start?strchr(start,'>'):0;
@@ -41,13 +41,13 @@ static void scan(const char *trace,const char *name,int id){char path[4096],*b,*
    }free(directory);
   }
  }
- if(!strncmp(p,"read(",5)){char *start=strchr(p,'<'),*stop=start?strchr(start,'>'):0;long got;char*res=result_suffix(p);if(res&&(got=atol(res+4))>=0&&start&&stop){char*file=capture_dup(start+1,stop-start-1);int header=-1,j;size_t rn=strlen(root);dependency(file);
+ if(!strncmp(p,"read(",5)){char *start=strchr(p,'<'),*stop=start?strchr(start,'>'):0;long got;char*res=result_suffix(p);if(res&&(got=atol(res))>=0&&start&&stop){char*file=capture_dup(start+1,stop-start-1);int header=-1,j;size_t rn=strlen(root);dependency(file);
   if(isrun&&!strncmp(file,root,rn)&&!strncmp(file+rn,"/include/",9)){for(j=0;j<nh;j++)if(!strcmp(headerkeys[j],file+rn+9))header=j;if(header<0){if(nh==64)exit(2);header=nh;headerkeys[nh++]=capture_dup(file+rn+9,strlen(file+rn+9));}}
   q=strchr(stop,'"');if(q&&isrun&&((inputpath&&same_input(file,inputpath))||(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))||header>=0)){Buf bytes=quoted(q,(const char**)&q);if(bytes.n!=(size_t)got){fprintf(stderr,"truncated capture %s decoded=%lu got=%ld\n",file,(unsigned long)bytes.n,got);exit(2);}if(inputpath&&same_input(file,inputpath))add(&in,bytes.b,bytes.n);if(strlen(file)>=7&&!strcmp(file+strlen(file)-7,"/pp.net"))add(&net,bytes.b,bytes.n);if(header>=0)add(&headers[header],bytes.b,bytes.n);free(bytes.b);}
   if(header>=0&&got==0&&headers[header].n){char hash[65],object[128];cx_sha256_hex(headers[header].b,headers[header].n,hash);snprintf(object,sizeof object,"resource-%s.bytes",hash);save(object,&headers[header],hash);fprintf(resources,"resource\t%02d\t%d\thdr/%s\t%s\t%lu\t%s\n",id,rh++,headerkeys[header],object,(unsigned long)headers[header].n,hash);headers[header].n=0;}
   free(file);
  }}
- if(isrun&&(!strncmp(p,"write(1",7)||!strncmp(p,"write(2",7))&&(p[7]=='<'||p[7]==',')){q=strchr(p,'"');if(q){Buf bytes=quoted(q,(const char**)&q);char *res=result_suffix(q);if(!res||atol(res+4)!=(long)bytes.n)exit(2);add(p[6]=='1'?&stdout_:&stderr_,bytes.b,bytes.n);free(bytes.b);}}
+ if(isrun&&(!strncmp(p,"write(1",7)||!strncmp(p,"write(2",7))&&(p[7]=='<'||p[7]==',')){q=strchr(p,'"');if(q){Buf bytes=quoted(q,(const char**)&q);char *res=result_suffix(q);if(!res||atol(res)!=(long)bytes.n)exit(2);add(p[6]=='1'?&stdout_:&stderr_,bytes.b,bytes.n);free(bytes.b);}}
  if(end==b+n)break;p=end+1;}
  if(isrun){rc=pidexit(trace,atol(name+6));if(rc<0||!in.n||!net.n)exit(2);snprintf(a,sizeof a,"case-%02d.input",id);snprintf(o,sizeof o,"case-%02d.stdout",id);snprintf(er,sizeof er,"case-%02d.stderr",id);save(a,&in,hi);save(o,&stdout_,ho);save(er,&stderr_,he);cx_sha256_hex(net.b,net.n,hm);snprintf(model,sizeof model,"model-%s.net",hm);save(model,&net,hm);
  fprintf(streams,"case\t%02d\t%s\t%d\t%s\t%lu\t%s\t%s\t%lu\t%s\t%s\t%lu\t%s\t%s\t%lu\t%s",id,rc?"refuse":"accept",rc,a,(unsigned long)in.n,hi,o,(unsigned long)stdout_.n,ho,er,(unsigned long)stderr_.n,he,model,(unsigned long)net.n,hm);
@@ -58,7 +58,7 @@ static void scan(const char *trace,const char *name,int id){char path[4096],*b,*
 }
 static int bypid(const void*a,const void*b){long x=atol(*(char*const*)a+6),y=atol(*(char*const*)b+6);return x<y?-1:x>y;}
 int main(int argc,char**argv){DIR*d;struct dirent*e;char *names[2048],path[4096],hex[65],*b;size_t n;int count=0,i;FILE*dep,*expected;
- if(argc==2&&!strcmp(argv[1],"--selftest")){const char *tail;Buf x=quoted("\"a\\n\\101\\0z\"",&tail);char sample[]="read(3<file>, \"x) = 0\", 6) = 6";int bad=x.n!=5||memcmp(x.b,"a\nA\0z",5)||strcmp(result_suffix(sample),") = 6");free(x.b);puts(bad?"ppcapture selftest FAIL":"ppcapture selftest PASS octal/NUL and syscall-like payload parsed exactly");return bad;}
+ if(argc==2&&!strcmp(argv[1],"--selftest")){const char *tail;Buf x=quoted("\"a\\n\\101\\0z\"",&tail);char sample[]="read(3<file>, \"x) = 0\", 6) = 6",padded[]="read(3<file>, \"\", 1)    = 0",tabbed[]="read(3<file>, \"x\", 1)\t=\t1";int bad=x.n!=5||memcmp(x.b,"a\nA\0z",5)||!result_suffix(sample)||strcmp(result_suffix(sample),"6")||!result_suffix(padded)||strcmp(result_suffix(padded),"0")||!result_suffix(tabbed)||strcmp(result_suffix(tabbed),"1");free(x.b);puts(bad?"ppcapture selftest FAIL":"ppcapture selftest PASS octal/NUL and syscall-like payload parsed exactly");return bad;}
  if(argc!=4){fprintf(stderr,"usage: ppcapture TRACE_DIR ROOT OUT_DIR\n");return 2;}root=argv[2];outdir=argv[3];mkdir(outdir,0700);
  snprintf(path,sizeof path,"%s/streams.tsv",outdir);streams=fopen(path,"w");snprintf(path,sizeof path,"%s/observation.tsv",outdir);observations=fopen(path,"w");if(!streams||!observations)return 2;
  snprintf(path,sizeof path,"%s/resources.tsv",outdir);resources=fopen(path,"w");if(!resources)return 2;snprintf(path,sizeof path,"%s/queries.tsv",outdir);queries=fopen(path,"w");if(!queries)return 2;
